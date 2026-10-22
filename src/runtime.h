@@ -62,6 +62,11 @@ class Runtime {
   // backend's surfaces). `clear`: clear to transparent first, else draw over
   // what the canvas holds. The next renderIncremental() repaints fully.
   void renderCanvas(SkCanvas* canvas, int width, int height, bool clear);
+  // Incremental repaint into a canvas that keeps its pixels between frames
+  // (the WebGPU backend's retained frame texture): `key` identifies that
+  // surface (like the pixel buffer of renderIncremental). Returns the
+  // repainted rect (empty when nothing changed).
+  SkIRect renderCanvasIncremental(SkCanvas* canvas, const void* key, int width, int height);
 
   JsuiConfig config;
   JsuiRuntime* handle;
@@ -110,6 +115,8 @@ class Runtime {
 
  private:
   SkIRect renderImpl(void* pixels, int width, int height, size_t rowBytes, bool incremental);
+  SkIRect paintTracked(SkCanvas* canvas, const void* key, int width, int height, size_t rowBytes,
+                       bool incremental);
   // The full frame: document (or the frozen last good frame) + dev overlay.
   void paintFrame(SkCanvas* canvas, bool frozen, bool overlay);
   void resetEngine();

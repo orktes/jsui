@@ -399,7 +399,7 @@ class ChromeLikePainter : public tl::ParagraphPainter {
     if (!transformed_) return unhinted(blob, false);
     const SkMatrix& m = layout_.back();
     if (m.isScaleTranslate() && m.getScaleY() > 0) {
-      float dy = m.mapXY(x, *y).fY;
+      float dy = m.mapPoint({x, *y}).fY;
       *y += (std::floor(dy + 0.5f) - dy) / m.getScaleY();
     }
     return unhinted(blob, true);
@@ -609,7 +609,11 @@ TextCache* ensureCache(Node* n) {
   ps.setTextAlign(isInput && !multiline ? tl::TextAlign::kLeft : toSkAlign(base.align));
   fresh->rtl = rtl;
 
+#if JSUI_SKUNICODE_REFCNT
+  auto builder = tl::ParagraphBuilder::make(ps, fm->collection(), fm->unicodeRef());
+#else
   auto builder = tl::ParagraphBuilder::make(ps, fm->collection());
+#endif
   if (!builder) {
     // No SkUnicode (e.g. ICU data missing): lay the text out as empty rather
     // than crash.

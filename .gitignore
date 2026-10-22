@@ -14,3 +14,9 @@ node_modules/
 /web/dist-webgl/
 /site/dist/
 /site/test/output/
+/third_party/skia-src-m157/
+/third_party/skia-wasm-gpu/
+/third_party/emsdk-*/
+/third_party/emdawnwebgpu/
+/web/dist-gpu/
+/web/test/output/

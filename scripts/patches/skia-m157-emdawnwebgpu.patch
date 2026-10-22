@@ -1,0 +1,348 @@
+diff --git a/gn/toolchain/BUILD.gn b/gn/toolchain/BUILD.gn
+index 5183b71..7d44ac3 100644
+--- a/gn/toolchain/BUILD.gn
++++ b/gn/toolchain/BUILD.gn
+@@ -452,7 +452,9 @@ if (is_wasm) {
+     }
+     link = cxx
+ 
+-    if (!is_canvaskit) {
++    # jsui: skia_emsdk_dir is set up by scripts/setup-emsdk.sh (another
++    # version than bin/activate-emsdk's).
++    if (false && !is_canvaskit) {
+       deps = [ "//gn/toolchain/emsdk:activate(//gn/toolchain:$host_toolchain)" ]
+     }
+   }
+diff --git a/gn/toolchain/wasm.gni b/gn/toolchain/wasm.gni
+index e2d2319..e79001f 100644
+--- a/gn/toolchain/wasm.gni
++++ b/gn/toolchain/wasm.gni
+@@ -42,10 +42,7 @@ template("skia_wasm_lib") {
+   }
+ }
+ 
+-wasm_defines = [
+-  "SKVX_DISABLE_SIMD",
+-  "SK_FORCE_8_BYTE_ALIGNMENT",
+-]
++wasm_defines = [ "SK_FORCE_8_BYTE_ALIGNMENT" ]  # jsui: SIMD128 build, see build-skia-wasm-graphite.sh
+ 
+ if (is_canvaskit) {
+   if (!is_debug && !skia_canvaskit_force_tracing) {
+diff --git a/modules/skcms/skcms.cc b/modules/skcms/skcms.cc
+index 79dbecf..932d150 100644
+--- a/modules/skcms/skcms.cc
++++ b/modules/skcms/skcms.cc
+@@ -26,10 +26,6 @@
+         // it'd be a lot slower.  But we want all those headers included so we
+         // can use their features after runtime checks later.
+         #include <smmintrin.h>
+-        #include <avxintrin.h>
+-        #include <avx2intrin.h>
+-        #include <avx512fintrin.h>
+-        #include <avx512dqintrin.h>
+     #endif
+ #endif
+ 
+diff --git a/modules/skcms/src/skcms_TransformHsw.cc b/modules/skcms/src/skcms_TransformHsw.cc
+index 7349f52..5089f41 100644
+--- a/modules/skcms/src/skcms_TransformHsw.cc
++++ b/modules/skcms/src/skcms_TransformHsw.cc
+@@ -26,10 +26,6 @@
+         // a lot slower. But we want all those headers included, so we can use
+         // their features (after making runtime checks).
+         #include <smmintrin.h>
+-        #include <avxintrin.h>
+-        #include <avx2intrin.h>
+-        #include <avx512fintrin.h>
+-        #include <avx512dqintrin.h>
+     #endif
+ #endif
+ 
+diff --git a/modules/skcms/src/skcms_TransformSkx.cc b/modules/skcms/src/skcms_TransformSkx.cc
+index 8ded464..26faa46 100644
+--- a/modules/skcms/src/skcms_TransformSkx.cc
++++ b/modules/skcms/src/skcms_TransformSkx.cc
+@@ -26,10 +26,6 @@
+         // a lot slower. But we want all those headers included, so we can use
+         // their features (after making runtime checks).
+         #include <smmintrin.h>
+-        #include <avxintrin.h>
+-        #include <avx2intrin.h>
+-        #include <avx512fintrin.h>
+-        #include <avx512dqintrin.h>
+     #endif
+ #endif
+ 
+diff --git a/src/gpu/graphite/dawn/DawnBuffer.cpp b/src/gpu/graphite/dawn/DawnBuffer.cpp
+index 40ae5ea..10fb0f1 100644
+--- a/src/gpu/graphite/dawn/DawnBuffer.cpp
++++ b/src/gpu/graphite/dawn/DawnBuffer.cpp
+@@ -15,7 +15,7 @@
+ 
+ namespace skgpu::graphite {
+ namespace {
+-#if defined(__EMSCRIPTEN__)
++#if defined(SK_DAWN_LEGACY_EMSCRIPTEN_API)  // jsui: was __EMSCRIPTEN__ (removed USE_WEBGPU API)
+ bool is_map_succeeded(WGPUBufferMapAsyncStatus status) {
+     return status == WGPUBufferMapAsyncStatus_Success;
+ }
+@@ -241,7 +241,7 @@ void DawnBuffer::onAsyncMap(GpuFinishedProc proc, GpuFinishedContext ctx) {
+     bool isWrite = fBuffer.GetUsage() & wgpu::BufferUsage::MapWrite;
+     auto buffer = sk_ref_sp(this);
+ 
+-#if defined(__EMSCRIPTEN__)
++#if defined(SK_DAWN_LEGACY_EMSCRIPTEN_API)  // jsui: was __EMSCRIPTEN__ (removed USE_WEBGPU API)
+     fBuffer.MapAsync(
+             isWrite ? wgpu::MapMode::Write : wgpu::MapMode::Read,
+             0,
+diff --git a/src/gpu/graphite/dawn/DawnCaps.cpp b/src/gpu/graphite/dawn/DawnCaps.cpp
+index e87ba05..350e457 100644
+--- a/src/gpu/graphite/dawn/DawnCaps.cpp
++++ b/src/gpu/graphite/dawn/DawnCaps.cpp
+@@ -294,11 +294,15 @@ void DawnCaps::initCaps(const DawnBackendContext& backendContext, const ContextO
+ #endif
+ #endif // defined(__EMSCRIPTEN__)
+ 
+-#if defined(__EMSCRIPTEN__)
++#if defined(SK_DAWN_LEGACY_EMSCRIPTEN_API)  // jsui: was __EMSCRIPTEN__ (removed USE_WEBGPU API)
+     wgpu::SupportedLimits supportedLimits;
+     [[maybe_unused]] wgpu::Status status = backendContext.fDevice.GetLimits(&supportedLimits);
+     SkASSERT(status == wgpu::Status::Success);
+     wgpu::Limits& limits = supportedLimits.limits;
++#elif defined(__EMSCRIPTEN__)
++    wgpu::Limits limits;
++    [[maybe_unused]] wgpu::Status status = backendContext.fDevice.GetLimits(&limits);
++    SkASSERT(status == wgpu::Status::Success);
+ #else
+     wgpu::CompatibilityModeLimits compatLimits;
+     wgpu::Limits limits{.nextInChain = &compatLimits};
+diff --git a/src/gpu/graphite/dawn/DawnCommandBuffer.cpp b/src/gpu/graphite/dawn/DawnCommandBuffer.cpp
+index 64edfc3..59d6500 100644
+--- a/src/gpu/graphite/dawn/DawnCommandBuffer.cpp
++++ b/src/gpu/graphite/dawn/DawnCommandBuffer.cpp
+@@ -27,7 +27,8 @@
+ 
+ #if defined(__EMSCRIPTEN__)
+ #include <emscripten/version.h>
+-
++#endif
++#if defined(SK_DAWN_LEGACY_EMSCRIPTEN_API)  // jsui: was __EMSCRIPTEN__ (removed USE_WEBGPU API)
+ namespace wgpu {
+ using TexelCopyBufferInfo = ImageCopyBuffer;
+ using TexelCopyTextureInfo = ImageCopyTexture;
+@@ -365,7 +366,7 @@ bool DawnCommandBuffer::beginRenderPass(const RenderPassDesc& renderPassDesc,
+ #endif
+ 
+ #if WGPU_TIMESTAMP_WRITES_DEFINED
+-#if defined(__EMSCRIPTEN__)
++#if defined(SK_DAWN_LEGACY_EMSCRIPTEN_API)  // jsui: was __EMSCRIPTEN__ (removed USE_WEBGPU API)
+     wgpu::RenderPassTimestampWrites wgpuTimestampWrites;
+ #else
+     wgpu::PassTimestampWrites wgpuTimestampWrites;
+@@ -1143,7 +1144,7 @@ void DawnCommandBuffer::beginComputePass() {
+     SkASSERT(!fActiveComputePassEncoder);
+     wgpu::ComputePassDescriptor wgpuComputePassDescriptor = {};
+ #if WGPU_TIMESTAMP_WRITES_DEFINED
+-#if defined(__EMSCRIPTEN__)
++#if defined(SK_DAWN_LEGACY_EMSCRIPTEN_API)  // jsui: was __EMSCRIPTEN__ (removed USE_WEBGPU API)
+     wgpu::ComputePassTimestampWrites wgpuTimestampWrites;
+ #else
+     wgpu::PassTimestampWrites wgpuTimestampWrites;
+diff --git a/src/gpu/graphite/dawn/DawnErrorChecker.cpp b/src/gpu/graphite/dawn/DawnErrorChecker.cpp
+index 9de520c..10fa839 100644
+--- a/src/gpu/graphite/dawn/DawnErrorChecker.cpp
++++ b/src/gpu/graphite/dawn/DawnErrorChecker.cpp
+@@ -54,12 +54,16 @@ SkEnumBitMask<DawnErrorType> DawnErrorChecker::popErrorScopes() {
+                 , fWait(sharedContext) {}
+     } errorState(fSharedContext);
+ 
+-    wgpu::ErrorCallback errorCallback = [](WGPUErrorType status, const char* msg, void* userData) {
+-        ErrorState* errorState = static_cast<ErrorState*>(userData);
+-        if (status != WGPUErrorType_NoError) {
++    // jsui: Emdawnwebgpu's PopErrorScope callback signature.
++    auto errorCallback = [](wgpu::PopErrorScopeStatus,
++                            wgpu::ErrorType type,
++                            wgpu::StringView msg,
++                            ErrorState* errorState) {
++        if (type != wgpu::ErrorType::NoError) {
+             SkASSERT(errorState->fScopeIdx >= 0);
+             const char* errorScopeName = kErrorScopeNames[errorState->fScopeIdx];
+-            SKIA_LOG_E("Failed in error scope (%s): %s", errorScopeName, msg);
++            SKIA_LOG_E("Failed in error scope (%s): %.*s", errorScopeName,
++                       static_cast<int>(msg.length), msg.data);
+             errorState->fError |= kErrorScopeTypes[errorState->fScopeIdx];
+         }
+         errorState->fScopeIdx--;
+@@ -68,17 +72,20 @@ SkEnumBitMask<DawnErrorType> DawnErrorChecker::popErrorScopes() {
+ 
+     // Pop all three error scopes:
+     // Internal
+-    fSharedContext->device().PopErrorScope(errorCallback, &errorState);
++    fSharedContext->device().PopErrorScope(
++            wgpu::CallbackMode::AllowSpontaneous, errorCallback, &errorState);
+     errorState.fWait.busyWait();
+     errorState.fWait.reset();
+ 
+     // OutOfMemory
+-    fSharedContext->device().PopErrorScope(errorCallback, &errorState);
++    fSharedContext->device().PopErrorScope(
++            wgpu::CallbackMode::AllowSpontaneous, errorCallback, &errorState);
+     errorState.fWait.busyWait();
+     errorState.fWait.reset();
+ 
+     // Validation
+-    fSharedContext->device().PopErrorScope(errorCallback, &errorState);
++    fSharedContext->device().PopErrorScope(
++            wgpu::CallbackMode::AllowSpontaneous, errorCallback, &errorState);
+     errorState.fWait.busyWait();
+ #else
+     struct ErrorState {
+diff --git a/src/gpu/graphite/dawn/DawnGraphicsPipeline.cpp b/src/gpu/graphite/dawn/DawnGraphicsPipeline.cpp
+index c0ac08a..a9de214 100644
+--- a/src/gpu/graphite/dawn/DawnGraphicsPipeline.cpp
++++ b/src/gpu/graphite/dawn/DawnGraphicsPipeline.cpp
+@@ -628,7 +628,7 @@ sk_sp<DawnGraphicsPipeline> DawnGraphicsPipeline::Make(
+             layout.attributes = staticDataAttributes.data();
+         } else {
+             layout.arrayStride = 0;
+-#if defined(__EMSCRIPTEN__)
++#if defined(SK_DAWN_LEGACY_EMSCRIPTEN_API)  // jsui: was __EMSCRIPTEN__ (removed USE_WEBGPU API)
+             layout.stepMode = wgpu::VertexStepMode::VertexBufferNotUsed;
+ #else
+             layout.stepMode = wgpu::VertexStepMode::Undefined;
+@@ -654,7 +654,7 @@ sk_sp<DawnGraphicsPipeline> DawnGraphicsPipeline::Make(
+             layout.attributes = appendDataAttributes.data();
+         } else {
+             layout.arrayStride = 0;
+-#if defined(__EMSCRIPTEN__)
++#if defined(SK_DAWN_LEGACY_EMSCRIPTEN_API)  // jsui: was __EMSCRIPTEN__ (removed USE_WEBGPU API)
+             layout.stepMode = wgpu::VertexStepMode::VertexBufferNotUsed;
+ #else
+             layout.stepMode = wgpu::VertexStepMode::Undefined;
+diff --git a/src/gpu/graphite/dawn/DawnGraphiteUtils.cpp b/src/gpu/graphite/dawn/DawnGraphiteUtils.cpp
+index 81d560e..6ffc571 100644
+--- a/src/gpu/graphite/dawn/DawnGraphiteUtils.cpp
++++ b/src/gpu/graphite/dawn/DawnGraphiteUtils.cpp
+@@ -425,7 +425,9 @@ static bool check_shader_module([[maybe_unused]] const DawnSharedContext* shared
+                                 const char* shaderText,
+                                 ShaderErrorHandler* errorHandler) {
+     // Prior to emsdk 3.1.51 wgpu::ShaderModule::GetCompilationInfo is unimplemented.
+-#if defined(__EMSCRIPTEN__)                                      &&  \
++#if defined(__EMSCRIPTEN__)  // jsui: Emdawnwebgpu (see above); was "emsdk < 3.1.51"
++    return true;
++#elif defined(__EMSCRIPTEN__)                                      &&  \
+         ((__EMSCRIPTEN_major__ <  3                               || \
+          (__EMSCRIPTEN_major__ == 3 && __EMSCRIPTEN_minor__ <  1) || \
+          (__EMSCRIPTEN_major__ == 3 && __EMSCRIPTEN_minor__ == 1 && __EMSCRIPTEN_tiny__ < 51)))
+@@ -500,7 +502,7 @@ bool DawnCompileWGSLShaderModule(const DawnSharedContext* sharedContext,
+                                  const SkSL::NativeShader& wgsl,
+                                  wgpu::ShaderModule* module,
+                                  ShaderErrorHandler* errorHandler) {
+-#if defined(__EMSCRIPTEN__)
++#if defined(SK_DAWN_LEGACY_EMSCRIPTEN_API)  // jsui: was __EMSCRIPTEN__ (removed USE_WEBGPU API)
+     wgpu::ShaderModuleWGSLDescriptor wgslDesc;
+ #else
+     wgpu::ShaderSourceWGSL wgslDesc;
+diff --git a/src/gpu/graphite/dawn/DawnQueueManager.cpp b/src/gpu/graphite/dawn/DawnQueueManager.cpp
+index a2a7ee2..ae769d8 100644
+--- a/src/gpu/graphite/dawn/DawnQueueManager.cpp
++++ b/src/gpu/graphite/dawn/DawnQueueManager.cpp
+@@ -36,9 +36,10 @@ DawnWorkSubmissionWithAsyncWait::DawnWorkSubmissionWithAsyncWait(
+         DawnQueueManager* queueManager,
+         const DawnSharedContext* sharedContext)
+         : GpuWorkSubmission(std::move(cmdBuffer), queueManager), fAsyncWait(sharedContext) {
++    // jsui: Emdawnwebgpu's OnSubmittedWorkDone (callback mode + lambda).
+     queueManager->dawnQueue().OnSubmittedWorkDone(
+-            [](WGPUQueueWorkDoneStatus, void* userData) {
+-                auto asyncWaitPtr = static_cast<DawnAsyncWait*>(userData);
++            wgpu::CallbackMode::AllowSpontaneous,
++            [](wgpu::QueueWorkDoneStatus, wgpu::StringView, DawnAsyncWait* asyncWaitPtr) {
+                 asyncWaitPtr->signal();
+             },
+             &fAsyncWait);
+diff --git a/src/gpu/graphite/dawn/DawnResourceProvider.cpp b/src/gpu/graphite/dawn/DawnResourceProvider.cpp
+index 1947eb4..a76e04d 100644
+--- a/src/gpu/graphite/dawn/DawnResourceProvider.cpp
++++ b/src/gpu/graphite/dawn/DawnResourceProvider.cpp
+@@ -33,7 +33,7 @@ namespace {
+ constexpr uint32_t kBufferBindingSizeAlignment = 16;
+ 
+ wgpu::ShaderModule create_shader_module(const wgpu::Device& device, const char* source) {
+-#if defined(__EMSCRIPTEN__)
++#if defined(SK_DAWN_LEGACY_EMSCRIPTEN_API)  // jsui: was __EMSCRIPTEN__ (removed USE_WEBGPU API)
+     wgpu::ShaderModuleWGSLDescriptor wgslDesc;
+ #else
+     wgpu::ShaderSourceWGSL wgslDesc;
+diff --git a/src/gpu/graphite/dawn/DawnSharedContext.cpp b/src/gpu/graphite/dawn/DawnSharedContext.cpp
+index 11c7967..f19aa36 100644
+--- a/src/gpu/graphite/dawn/DawnSharedContext.cpp
++++ b/src/gpu/graphite/dawn/DawnSharedContext.cpp
+@@ -21,7 +21,7 @@ namespace skgpu::graphite {
+ namespace {
+ 
+ wgpu::ShaderModule CreateNoopFragment(const wgpu::Device& device) {
+-#if defined(__EMSCRIPTEN__)
++#if defined(SK_DAWN_LEGACY_EMSCRIPTEN_API)  // jsui: was __EMSCRIPTEN__ (removed USE_WEBGPU API)
+     wgpu::ShaderModuleWGSLDescriptor wgslDesc;
+ #else
+     wgpu::ShaderSourceWGSL wgslDesc;
+diff --git a/src/opts/SkRasterPipeline_opts.h b/src/opts/SkRasterPipeline_opts.h
+index a17f917..09655d0 100644
+--- a/src/opts/SkRasterPipeline_opts.h
++++ b/src/opts/SkRasterPipeline_opts.h
+@@ -110,6 +110,10 @@ using NoCtx = const void*;
+     #include <lsxintrin.h>
+ #else
+     #include <immintrin.h>
++    #if defined(__EMSCRIPTEN__) && defined(__wasm_simd128__)  // jsui: see build-skia-wasm.sh
++        #include <wasm_simd128.h>
++        #define _mm_cvtps_epi32(v) ((__m128i)wasm_i32x4_trunc_sat_f32x4(wasm_f32x4_nearest((v128_t)(v))))
++    #endif
+ #endif
+ 
+ // Notes:
+diff --git a/third_party/dawn/BUILD.gn b/third_party/dawn/BUILD.gn
+index 187722e..3a09fad 100644
+--- a/third_party/dawn/BUILD.gn
++++ b/third_party/dawn/BUILD.gn
+@@ -32,7 +32,7 @@ if (is_win) {
+ }
+ 
+ config("tint_api_config") {
+-  if (!is_canvaskit) {
++  if (!is_canvaskit && !is_wasm) {  # wasm: headers from the Emdawnwebgpu port
+     include_dirs = [
+       "../externals/dawn",
+       "../externals/dawn/include",
+@@ -132,7 +132,7 @@ group("tint") {
+ }
+ 
+ config("dawn_api_config") {
+-  if (!is_canvaskit) {
++  if (!is_canvaskit && !is_wasm) {  # wasm: headers from the Emdawnwebgpu port
+     include_dirs = [
+       "../externals/dawn",
+       "../externals/dawn/include",
+@@ -154,7 +154,9 @@ config("dawn_api_config") {
+   } else {
+     libs = []
+   }
+-  libs += [ "$root_out_dir/$_dawn_lib_name" ]
++  if (!is_wasm) {  # wasm: the browser implements WebGPU
++    libs += [ "$root_out_dir/$_dawn_lib_name" ]
++  }
+ 
+   # https://dawn.googlesource.com/dawn/+/647c352f57aa8a4c2666258455158a36c0c385af/src/dawn/native/BUILD.gn#645
+   if (is_mac || is_ios) {
+@@ -318,7 +320,9 @@ config("dawn_defines") {
+ }
+ 
+ group("dawn") {
+-  public_deps = [ ":dawn_cmake" ]
++  if (!is_wasm) {  # wasm: nothing to build (Emdawnwebgpu)
++    public_deps = [ ":dawn_cmake" ]
++  }
+ 
+   public_configs = [ ":dawn_api_config" ]
+ 

@@ -8,15 +8,26 @@
 #include "include/core/SkCanvas.h"
 #include "include/core/SkColorSpace.h"
 #include "include/core/SkSurface.h"
-#include "include/gpu/GrBackendSurface.h"
-#include "include/gpu/GrContextOptions.h"
-#include "include/gpu/GrDirectContext.h"
 #include "include/gpu/ganesh/SkSurfaceGanesh.h"
 #include "include/gpu/ganesh/gl/GrGLBackendSurface.h"
 #include "include/gpu/ganesh/gl/GrGLDirectContext.h"
+// Skia moved the Ganesh headers under include/gpu/ganesh/ after m124 (the
+// native prebuilt); the WASM GPU build (m146) only has the new locations.
+#if __has_include("include/gpu/ganesh/GrDirectContext.h")
+#include "include/gpu/ganesh/GrBackendSurface.h"
+#include "include/gpu/ganesh/GrContextOptions.h"
+#include "include/gpu/ganesh/GrDirectContext.h"
+#include "include/gpu/ganesh/gl/GrGLAssembleInterface.h"
+#include "include/gpu/ganesh/gl/GrGLInterface.h"
+#include "include/gpu/ganesh/gl/GrGLTypes.h"
+#else
+#include "include/gpu/GrBackendSurface.h"
+#include "include/gpu/GrContextOptions.h"
+#include "include/gpu/GrDirectContext.h"
 #include "include/gpu/gl/GrGLAssembleInterface.h"
 #include "include/gpu/gl/GrGLInterface.h"
 #include "include/gpu/gl/GrGLTypes.h"
+#endif
 #include "render/painter.h"
 #include "runtime.h"
 
@@ -122,7 +133,10 @@ GrGLFuncPtr linuxGlxProc(void*, const char name[]) {
 
 }  // namespace
 
-struct JsuiGpuContext {
+namespace {
+
+struct GLGpu final : JsuiGpuContext {
+  GLGpu() : JsuiGpuContext(Kind::GL) {}
   JsuiGLGetProcFn getProc = nullptr;
   void* user = nullptr;
   sk_sp<GrDirectContext> ctx;
@@ -138,8 +152,8 @@ struct JsuiGpuContext {
 
   sk_sp<const GrGLInterface> makeInterface() const {
     if (getProc) {
-      return GrGLMakeAssembledInterface(const_cast<JsuiGpuContext*>(this), [](void* self, const char name[]) {
-        auto* g = static_cast<JsuiGpuContext*>(self);
+      return GrGLMakeAssembledInterface(const_cast<GLGpu*>(this), [](void* self, const char name[]) {
+        auto* g = static_cast<GLGpu*>(self);
 #if JSUI_GL_DLOPEN
         if (eglName(name)) return eglOnly(name);
 #endif
@@ -243,13 +257,17 @@ struct JsuiGpuContext {
   }
 };
 
+GLGpu* asGL(JsuiGpuContext* g) { return g && g->kind == JsuiGpuContext::Kind::GL ? static_cast<GLGpu*>(g) : nullptr; }
+
+}  // namespace
+
 namespace jsui {
 namespace gpu {
 
 bool available() { return true; }
 
 JsuiGpuContext* createGL(JsuiGLGetProcFn getProc, void* user) {
-  auto* g = new JsuiGpuContext;
+  auto* g = new GLGpu;
   g->getProc = getProc;
   g->user = user;
   if (!g->ensure()) {
@@ -259,7 +277,8 @@ JsuiGpuContext* createGL(JsuiGLGetProcFn getProc, void* user) {
   return g;
 }
 
-void destroy(JsuiGpuContext* g) {
+void destroy(JsuiGpuContext* gpu) {
+  GLGpu* g = asGL(gpu);
   if (!g) return;
   if (g->ctx) {
     if (g->lost) g->ctx->abandonContext();
@@ -270,18 +289,21 @@ void destroy(JsuiGpuContext* g) {
   delete g;
 }
 
-void reset(JsuiGpuContext* g) {
+void reset(JsuiGpuContext* gpu) {
+  GLGpu* g = asGL(gpu);
   if (g && g->ctx && !g->lost) g->ctx->resetContext();
 }
 
-void contextLost(JsuiGpuContext* g) {
+void contextLost(JsuiGpuContext* gpu) {
+  GLGpu* g = asGL(gpu);
   if (!g) return;
   g->lost = true;
   if (g->ctx) g->ctx->abandonContext();
   g->surfaces.clear();
 }
 
-void purge(JsuiGpuContext* g, size_t cacheBytes) {
+void purge(JsuiGpuContext* gpu, size_t cacheBytes) {
+  GLGpu* g = asGL(gpu);
   if (!g) return;
   if (cacheBytes) g->cacheBytes = cacheBytes;
   if (!g->ctx || g->lost) return;
@@ -290,7 +312,8 @@ void purge(JsuiGpuContext* g, size_t cacheBytes) {
   g->ctx->purgeUnlockedResources(GrPurgeResourceOptions::kAllResources);
 }
 
-int render(Runtime& rt, JsuiGpuContext* g, const JsuiGLTarget& t) {
+int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiGLTarget& t) {
+  GLGpu* g = asGL(gpu);
   if (!g || t.width <= 0 || t.height <= 0) return -1;
   if (!g->ensure()) return -1;
   // The host (or a previous frame) changed GL state Skia may have cached.

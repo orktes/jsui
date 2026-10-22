@@ -5,8 +5,24 @@
 //   jsui.on('message', (name, data) => ...);
 //   jsui.postMessage('hud', { hp: 42 });
 //
-// Renderers. The default ('auto') draws with Skia Ganesh straight into the
-// canvas' WebGL2 (or WebGL 1) context (jsui_render_gl): no CPU raster and no
+// Renderers, best first ('auto', the default):
+//
+//   'webgpu'  Skia Graphite straight into the canvas' WebGPU texture
+//             (jsui_render_webgpu, web/jsui-webgpu.js), with damage-only
+//             repaints into a retained frame texture. Needs the all-backends
+//             module (GPU=1 scripts/build-wasm.sh -> web/dist-gpu/jsui.js),
+//             which createJsui() loads first when navigator.gpu gives a device.
+//   'webgl'   Skia Ganesh straight into the canvas' WebGL2 / WebGL 1 context.
+//   'cpu'     CPU raster, blitted with WebGL (or Canvas2D, '2d').
+//
+// 'auto' tries them in that order and skips a GPU API the browser only offers
+// through a software implementation (a fallback WebGPU adapter / SwiftShader
+// WebGL): there Skia's GPU repaints cost more than the CPU raster's
+// incremental ones. 'gpu' is the best GPU renderer, software ones included;
+// 'webgpu' / 'webgl' ask for that one (falling down the chain if it fails).
+// The chosen renderer is logged and is `jsui.renderer`.
+//
+// Skia Ganesh on WebGL (jsui_render_gl): no CPU raster and no
 // upload. It needs the module built with the GPU backend (WEBGL=1
 // scripts/build-wasm.sh -> web/dist-webgl/jsui.js), which createJsui() loads
 // by default when the browser has WebGL, falling back to the CPU-only module
@@ -45,14 +61,20 @@
  *                                // https:// bundles; the runtime itself polls http:// origins
  *                                // (through this module's fetch loader) when devMode is set.
  *   pixelRatio?: number,         // default: window.devicePixelRatio (tracked live)
- *   moduleUrl?: string|URL,      // default: ./dist-webgl/jsui.js next to this file when WebGL is
- *                                // available and the renderer may use the GPU, else (or when
- *                                // that fails to load) ./dist/jsui.js
- *   renderer?: 'auto'|'gpu'|'cpu'|'webgl'|'2d',
- *                                // 'auto' (default): Skia on WebGL unless WebGL is software-only,
- *                                // falling back to the CPU raster. 'gpu': Skia on any WebGL. 'cpu': force the CPU raster, blitted with WebGL
- *                                // (or Canvas2D without WebGL). 'webgl' / '2d': CPU raster with
- *                                // that blitter only.
+ *   moduleUrl?: string|URL,      // the WASM module to use. Default: picked from moduleBase by
+ *                                // what the renderer may use: dist-gpu/ (WebGPU + WebGL + CPU)
+ *                                // when a WebGPU device is available, dist-webgl/ when WebGL is,
+ *                                // else dist/ (CPU), each falling back to the others when not
+ *                                // deployed
+ *   moduleBase?: string|URL,     // directory holding dist/, dist-webgl/, dist-gpu/ (default:
+ *                                // next to this file)
+ *   renderer?: 'auto'|'gpu'|'webgpu'|'webgl'|'cpu'|'2d',
+ *                                // 'auto' (default): Skia on WebGPU, else Skia on WebGL (hardware
+ *                                // implementations only), else the CPU raster. 'gpu': the same,
+ *                                // software GPUs included. 'webgpu' / 'webgl': Skia on that API
+ *                                // (any implementation), falling back down the chain. 'cpu': force
+ *                                // the CPU raster, blitted with WebGL (or Canvas2D without WebGL).
+ *                                // '2d': CPU raster blitted with Canvas2D.
  *   contextRestoreTimeout?: number, // ms to wait for a lost WebGL context to come back before
  *                                // falling back to the CPU on a fresh canvas (default 3000)
  *   autoFocus?: boolean,         // focus the keyboard sink on start (default true)
@@ -61,6 +83,10 @@
  *   trapTab?: boolean,           // keep Tab inside the UI even if unhandled (default true;
  *                                // false lets an unhandled Tab move page focus on)
  * }} JsuiOptions */
+
+import { WebGPURenderer, requestWebGPU } from './jsui-webgpu.js';
+
+export { requestWebGPU, webgpuSupported } from './jsui-webgpu.js';
 
 const modules = new Map();  // module URL -> Promise<Module>
 
@@ -95,25 +121,43 @@ const AXIS_EPSILON = 1 / 256;
 export async function createJsui(opts) {
   const canvas = opts.canvas;
   if (!canvas) throw new Error('createJsui: canvas is required');
-  return new JsuiHost(await loadModuleFor(opts), canvas, opts);
+  const webgpu = await webgpuFor(opts);
+  return new JsuiHost(await loadModuleFor(opts, webgpu), canvas, { ...opts, _webgpu: webgpu });
 }
 
 const CPU_MODULE = './dist/jsui.js';
 const GPU_MODULE = './dist-webgl/jsui.js';
+const ALL_MODULE = './dist-gpu/jsui.js';  // WebGPU + WebGL + CPU
+
+// The WebGPU device the renderer may use, or null (web/jsui-webgpu.js).
+function webgpuFor(opts) {
+  const mode = opts.renderer ?? 'auto';
+  if (mode !== 'auto' && mode !== 'gpu' && mode !== 'webgpu') return null;
+  return requestWebGPU({ allowSoftware: mode !== 'auto' });
+}
 
 // The GPU module when the renderer may use it and WebGL exists, else the
 // CPU-only one; each falls back to the other if it is not deployed (both can
 // run the CPU path).
-async function loadModuleFor(opts) {
+// With a WebGPU device the all-backends module comes first (it can also do
+// WebGL and CPU); the others are tried when it is not deployed.
+async function loadModuleFor(opts, webgpu) {
   if (opts.moduleUrl) return loadModule(opts.moduleUrl);
   const mode = opts.renderer ?? 'auto';
-  const gpu = mode === 'gpu' ? webglAvailable() : mode === 'auto' && webglAvailable(true);
-  const [first, second] = gpu ? [GPU_MODULE, CPU_MODULE] : [CPU_MODULE, GPU_MODULE];
-  try {
-    return await loadModule(new URL(first, import.meta.url));
-  } catch (e) {
-    try { return await loadModule(new URL(second, import.meta.url)); } catch { throw e; }
+  const gpu = mode === 'gpu' || mode === 'webgl' || mode === 'webgpu' ? webglAvailable()
+    : mode === 'auto' && webglAvailable(true);
+  const order = gpu ? [GPU_MODULE, CPU_MODULE] : [CPU_MODULE, GPU_MODULE];
+  if (webgpu) order.unshift(ALL_MODULE);
+  else order.push(ALL_MODULE);
+  let first;
+  for (const m of order) {
+    try {
+      return await loadModule(new URL(m, opts.moduleBase ?? import.meta.url));
+    } catch (e) {
+      first ??= e;
+    }
   }
+  throw first;
 }
 
 const webglProbe = {};
@@ -206,7 +250,10 @@ class JsuiHost {
       this._baseUrlPtr);
     if (!this.rt) throw new Error('jsui_web_create failed');
 
-    this._initBlitter(opts.renderer ?? 'auto');
+    this._mode = opts.renderer ?? 'auto';
+    this._webgpu = opts._webgpu ?? null;
+    this._initBlitter(this._mode);
+    this._log(1, `renderer: ${this.renderer}` + (this._wgpu ? ` (${this._webgpu.description})` : ''));
     this._installInput();
     this._installCanvasInput();
     this._installResize();
@@ -368,7 +415,12 @@ class JsuiHost {
       const resized = this._sizeChanged;
       this._sizeChanged = false;
       let t2, t3;
-      if (this._gpu) {
+      if (this._wgpu) {
+        // Skia Graphite into the canvas' WebGPU texture (damage-only repaint
+        // of its retained frame + one copy).
+        if (this._wgpu.render() === false) this._dropWebGPU('WebGPU frame failed');
+        t2 = t3 = performance.now();
+      } else if (this._gpu) {
         // Skia draws straight into the canvas' WebGL framebuffer (full repaint).
         if (this._renderGpu() === false) this._switchToCpu('GPU frame failed', false);
         t2 = t3 = performance.now();
@@ -400,10 +452,17 @@ class JsuiHost {
 
   /** The last rendered frame as premultiplied RGBA (copy), for tests and screenshots. */
   readPixels() {
+    if (this._wgpu) return null;  // asynchronous on WebGPU: readPixelsAsync()
     if (this._gpu) return this._readGpuPixels();
     if (!this._buf) return null;
     return { width: this.pixelWidth, height: this.pixelHeight,
       data: this.module.HEAPU8.slice(this._buf, this._buf + this._bufSize) };
+  }
+
+  /** readPixels() for every renderer (WebGPU reads back asynchronously). */
+  async readPixelsAsync() {
+    if (this._wgpu) return this._wgpu.readPixels();
+    return this.readPixels();
   }
 
   destroy() {
@@ -419,6 +478,8 @@ class JsuiHost {
     const M = this.module;
     M._jsui_destroy(this.rt);
     this.rt = 0;
+    this._wgpu?.destroy();
+    this._wgpu = null;
     if (this._gpu) {
       M.GL.makeContextCurrent(this._glHandle);
       M._jsui_gpu_destroy(this._gpu);
@@ -589,7 +650,17 @@ class JsuiHost {
   _initBlitter(mode) {
     this._blitAbort?.abort();
     this._blitAbort = new AbortController();
-    if (mode === 'auto' || mode === 'gpu') {
+    // WebGPU first (createJsui acquired the device only for the modes that
+    // may use it), then Skia on WebGL, then the CPU raster.
+    if (this._webgpu && (mode === 'auto' || mode === 'gpu' || mode === 'webgpu')) {
+      this._wgpu = WebGPURenderer.create(this, this._webgpu);
+      if (this._wgpu) {
+        this.renderer = 'webgpu';
+        return;
+      }
+      this._webgpu = null;
+    }
+    if (mode === 'auto' || mode === 'gpu' || mode === 'webgl' || mode === 'webgpu') {
       if (this._initGpu(mode === 'auto')) return;
       mode = 'cpu';  // CPU raster + blit on the same canvas
     }
@@ -617,7 +688,6 @@ class JsuiHost {
         return;
       }
       this._gl = null;
-      if (mode === 'webgl') throw new Error('createJsui: WebGL unavailable');
     }
     this._ctx2d = this.canvas.getContext('2d');
     if (!this._ctx2d) throw new Error('createJsui: no 2D context');
@@ -725,7 +795,35 @@ class JsuiHost {
     this._imageData = null;
     this._initBlitter(mode);
     this._sizeChanged = true;  // full repaint + upload on the next frame
-    this._log(2, `${reason}: continuing with the CPU renderer (${this.renderer})`);
+    this._log(2, `${reason}: continuing with the ${this.renderer} renderer`);
+    this._emit('renderer', this.renderer, reason);
+  }
+
+  // The WebGPU renderer failed for good: continue down the chain (Skia on
+  // WebGL, then CPU) on a fresh canvas, since this one has a 'webgpu' context.
+  _dropWebGPU(reason) {
+    this._wgpu?.destroy();
+    this._wgpu = null;
+    this._webgpu = null;
+    const mode = this._mode === 'cpu' || this._mode === '2d' ? this._mode : this._mode === 'auto' ? 'auto' : 'gpu';
+    this._switchToCpu(reason, true, mode);
+  }
+
+  // After a WebGPU device loss (web/jsui-webgpu.js): `next` is the renderer
+  // rebuilt on a new device, or null.
+  _webgpuRecovered(next, reason) {
+    if (this._destroyed) {
+      next?.destroy();
+      return;
+    }
+    if (!next) {
+      this._dropWebGPU(`${reason}, no new device`);
+      return;
+    }
+    this._wgpu = next;
+    this._webgpu = next.webgpu;
+    this._sizeChanged = true;  // full repaint on the next frame
+    this._log(2, `${reason}: WebGPU renderer recreated`);
     this._emit('renderer', this.renderer, reason);
   }
 

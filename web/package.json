@@ -8,9 +8,10 @@
   "exports": {
     ".": "./jsui-web.js",
     "./dist/*": "./dist/*",
-    "./dist-webgl/*": "./dist-webgl/*"
+    "./dist-webgl/*": "./dist-webgl/*",
+    "./dist-gpu/*": "./dist-gpu/*"
   },
-  "files": ["jsui-web.js", "dist/jsui.js", "dist/jsui.wasm", "index.html", "demo"],
+  "files": ["jsui-web.js", "jsui-webgpu.js", "dist/jsui.js", "dist/jsui.wasm", "index.html", "demo"],
   "scripts": {
     "test:web": "node test/node-smoke.mjs && node test/browser.test.mjs",
     "test:node": "node test/node-smoke.mjs",

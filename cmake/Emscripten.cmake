@@ -23,7 +23,7 @@ if(EXISTS "${JSUI_SKIA_LIB_DIR}/defines.txt")
 endif()
 # Libraries the native list in Deps.cmake does not know about (wasm-ld resolves
 # archives in any order, so appending is fine).
-foreach(_lib brotli)
+foreach(_lib brotli skunicode_core skunicode_icu jpeg12 jpeg16)
   if(EXISTS "${JSUI_SKIA_LIB_DIR}/lib${_lib}.a")
     target_link_libraries(jsui_skia INTERFACE "${JSUI_SKIA_LIB_DIR}/lib${_lib}.a")
   endif()
@@ -68,6 +68,9 @@ foreach(_d ${_jsui_decls})
   string(REGEX REPLACE ".*[ *](jsui_[a-z0-9_]+)[ ]*\\($" "_\\1" _name "${_d}")
   list(APPEND _jsui_exports ${_name})
 endforeach()
+if(JSUI_WEBGPU)
+  list(APPEND _jsui_exports _jsui_web_wgpu_create_instance _jsui_web_wgpu_release_instance _jsui_web_wgpu_release_texture _jsui_web_wgpu_release_device)
+endif()
 list(REMOVE_DUPLICATES _jsui_exports)
 string(REPLACE ";" "," _jsui_exports_csv "${_jsui_exports}")
 
@@ -94,6 +97,14 @@ target_link_options(jsui-wasm PRIVATE
   "-sEXPORTED_FUNCTIONS=${_jsui_exports_csv}"
   "$<$<CONFIG:Debug>:-sASSERTIONS=2>"
   "$<$<CONFIG:Debug>:-gsource-map>")
+# The heap views are not exported by default since emscripten 4.
+set(_jsui_runtime_methods UTF8ToString,stringToUTF8,lengthBytesUTF8,HEAPU8,HEAP32)
+if(JSUI_WEBGPU)
+  # Skia Graphite on WebGPU: the JS host imports its GPUDevice / the canvas
+  # texture through Emdawnwebgpu's WebGPU object (web/jsui-webgpu.js).
+  string(APPEND _jsui_runtime_methods ",WebGPU")
+  target_compile_definitions(jsui-wasm PRIVATE JSUI_WEBGPU=1)
+endif()
 if(JSUI_GPU)
   # Skia Ganesh on WebGL (third_party/skia-wasm-webgl, WEBGL=1
   # scripts/build-skia-wasm.sh), like canvaskit's WebGL link flags. The JS host
@@ -104,9 +115,9 @@ if(JSUI_GPU)
     "-sUSE_WEBGL2=1"
     "-sMAX_WEBGL_VERSION=2"
     "-sMIN_WEBGL_VERSION=1"
-    "-sEXPORTED_RUNTIME_METHODS=UTF8ToString,stringToUTF8,lengthBytesUTF8,GL")
+    "-sEXPORTED_RUNTIME_METHODS=${_jsui_runtime_methods},GL")
 else()
   target_link_options(jsui-wasm PRIVATE
-    "-sEXPORTED_RUNTIME_METHODS=UTF8ToString,stringToUTF8,lengthBytesUTF8")
+    "-sEXPORTED_RUNTIME_METHODS=${_jsui_runtime_methods}")
 endif()
-message(STATUS "jsui-wasm: ${JSUI_WEB_DIST}/jsui.{js,wasm} (GPU: ${JSUI_GPU}), exports: ${_jsui_exports_csv}")
+message(STATUS "jsui-wasm: ${JSUI_WEB_DIST}/jsui.{js,wasm} (GPU: ${JSUI_GPU}, WebGPU: ${JSUI_WEBGPU}), exports: ${_jsui_exports_csv}")

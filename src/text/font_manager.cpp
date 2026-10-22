@@ -8,6 +8,9 @@
 #include "modules/skparagraph/include/FontCollection.h"
 #include "modules/skparagraph/include/TypefaceFontProvider.h"
 #include "modules/skunicode/include/SkUnicode.h"
+#if JSUI_SKUNICODE_REFCNT
+#include "modules/skunicode/include/SkUnicode_icu.h"
+#endif
 #include "text/embedded_fonts.h"
 
 #if defined(__APPLE__)
@@ -28,7 +31,11 @@ struct FontManager::Impl {
   sk_sp<SkFontMgr> data;    // makes typefaces from memory
   sk_sp<skia::textlayout::TypefaceFontProvider> provider;
   sk_sp<skia::textlayout::FontCollection> collection;
+#if JSUI_SKUNICODE_REFCNT
+  sk_sp<SkUnicode> unicode;
+#else
   std::unique_ptr<SkUnicode> unicode;
+#endif
 };
 
 static sk_sp<SkFontMgr> makeSystemFontMgr() {
@@ -89,9 +96,20 @@ bool FontManager::hasFamily(const std::string& family) const {
 }
 
 SkUnicode* FontManager::unicode() {
+#if JSUI_SKUNICODE_REFCNT
+  if (!impl_->unicode) impl_->unicode = SkUnicodes::ICU::Make();
+#else
   if (!impl_->unicode) impl_->unicode = SkUnicode::MakeIcuBasedUnicode();
+#endif
   return impl_->unicode.get();
 }
+
+#if JSUI_SKUNICODE_REFCNT
+sk_sp<SkUnicode> FontManager::unicodeRef() {
+  unicode();
+  return impl_->unicode;
+}
+#endif
 
 sk_sp<skia::textlayout::FontCollection> FontManager::collection() { return impl_->collection; }
 sk_sp<SkFontMgr> FontManager::fontMgr() { return impl_->system; }

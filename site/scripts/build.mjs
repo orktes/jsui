@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 // Builds the showcase site into a static directory (GitHub Pages ready):
 //
-//   node site/scripts/build.mjs [--out site/dist] [--wasm web/dist] [--wasm-webgl web/dist-webgl] [--no-minify]
+//   node site/scripts/build.mjs [--out site/dist] [--wasm web/dist] [--wasm-webgl web/dist-webgl]
+//                               [--wasm-gpu web/dist-gpu] [--no-minify]
 //
 // Layout of the output:
-//   index.html, jsui-web.js         page + browser host (web/jsui-web.js)
+//   index.html, jsui-web.js         page + browser host (web/jsui-web.js,
+//   jsui-webgpu.js                  and its WebGPU renderer)
 //   jsui/dist/jsui.{js,wasm}        CPU module (required)
-//   jsui/dist-webgl/jsui.{js,wasm}  GPU module (optional; used when present)
+//   jsui/dist-webgl/jsui.{js,wasm}  WebGL module (optional; used when present)
+//   jsui/dist-gpu/jsui.{js,wasm}    WebGPU + WebGL + CPU module (optional; preferred when
+//                                   present and the browser has WebGPU)
 //   modules.json                    which modules were deployed
 //   app/bundle.js, app/assets/*     the site itself (site/app, built with @jsui/cli)
 import fs from 'node:fs';
@@ -25,6 +29,7 @@ const opt = (name, def) => {
 const out = path.resolve(opt('--out', path.join(SITE, 'dist')));
 const wasm = path.resolve(opt('--wasm', path.join(ROOT, 'web/dist')));
 const wasmGl = path.resolve(opt('--wasm-webgl', path.join(ROOT, 'web/dist-webgl')));
+const wasmGpu = path.resolve(opt('--wasm-gpu', path.join(ROOT, 'web/dist-gpu')));
 const minify = !args.includes('--no-minify');
 
 const has = (dir) => fs.existsSync(path.join(dir, 'jsui.wasm')) && fs.existsSync(path.join(dir, 'jsui.js'));
@@ -43,9 +48,12 @@ const copyModule = (from, to) => {
 copyModule(wasm, path.join(out, 'jsui/dist'));
 const gpu = has(wasmGl);
 if (gpu) copyModule(wasmGl, path.join(out, 'jsui/dist-webgl'));
-fs.writeFileSync(path.join(out, 'modules.json'), JSON.stringify({ cpu: true, gpu }) + '\n');
+const webgpu = has(wasmGpu);
+if (webgpu) copyModule(wasmGpu, path.join(out, 'jsui/dist-gpu'));
+fs.writeFileSync(path.join(out, 'modules.json'), JSON.stringify({ cpu: true, gpu, webgpu }) + '\n');
 
 fs.copyFileSync(path.join(ROOT, 'web/jsui-web.js'), path.join(out, 'jsui-web.js'));
+fs.copyFileSync(path.join(ROOT, 'web/jsui-webgpu.js'), path.join(out, 'jsui-webgpu.js'));
 fs.copyFileSync(path.join(SITE, 'index.html'), path.join(out, 'index.html'));
 fs.writeFileSync(path.join(out, '.nojekyll'), '');
 
@@ -53,4 +61,4 @@ const t0 = Date.now();
 const r = await build({ entry: path.join(SITE, 'app/index.jsx'), outfile: path.join(out, 'app/bundle.js'), minify });
 for (const w of r.warnings) console.warn('site: warning:', w.text);
 console.log(`site: bundle ${(r.bytes / 1024).toFixed(1)} KiB, ${r.assets.length} assets in ${Date.now() - t0} ms`);
-console.log(`site: wrote ${out} (modules: cpu${gpu ? ' + gpu' : ''})`);
+console.log(`site: wrote ${out} (modules: cpu${gpu ? ' + webgl' : ''}${webgpu ? ' + webgpu' : ''})`);

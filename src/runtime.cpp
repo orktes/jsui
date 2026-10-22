@@ -473,6 +473,15 @@ SkIRect Runtime::renderImpl(void* pixels, int width, int height, size_t rowBytes
   SkSurfaceProps props = surfaceProps();
   auto surface = SkSurfaces::WrapPixels(info, pixels, rowBytes, &props);
   if (!surface) return SkIRect::MakeEmpty();
+  return paintTracked(surface->getCanvas(), pixels, width, height, rowBytes, incremental);
+}
+
+SkIRect Runtime::renderCanvasIncremental(SkCanvas* canvas, const void* key, int width, int height) {
+  return paintTracked(canvas, key, width, height, 0, true);
+}
+
+SkIRect Runtime::paintTracked(SkCanvas* canvas, const void* pixels, int width, int height, size_t rowBytes,
+                              bool incremental) {
   doc.layout();
   // Nothing marked dirty and the buffer still holds our last frame: done,
   // without walking the tree.
@@ -498,7 +507,6 @@ SkIRect Runtime::renderImpl(void* pixels, int width, int height, size_t rowBytes
   lastTargetRowBytes_ = rowBytes;
   doc.clearPaintDirty();
   redraw_ = false;
-  SkCanvas* canvas = surface->getCanvas();
   if (partial) {
     if (damage.isEmpty()) return SkIRect::MakeEmpty();
     canvas->save();

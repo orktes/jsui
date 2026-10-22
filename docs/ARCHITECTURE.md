@@ -223,6 +223,57 @@ jsui_render_gl_target(rt, gpu, &t);
   runs the browser tests against the GPU module, including GPU-vs-CPU pixel
   comparisons.
 
+### WebGPU (Skia Graphite)
+
+`jsui_gpu_create_webgpu(instance, device, queue)` / `jsui_render_webgpu()` /
+`jsui_render_webgpu_target()` (`src/render/gpu_webgpu.cpp`, CMake option
+`JSUI_WEBGPU`) draw with Skia Graphite's Dawn backend into a `WGPUTexture`
+of the embedder's device: the browser's WebGPU in the WASM build (through
+Emdawnwebgpu's `webgpu.h`), and later Dawn native with an engine's device and
+texture (the API takes plain `webgpu.h` handles; a non-null `instance` is
+used to process Dawn events).
+
+* **Retained frame, damage-only repaint.** Unlike the GL path, the context
+  keeps the last frame in a Graphite render target of its own and repaints
+  only the damaged region into it (`Runtime::renderCanvasIncremental`, the
+  same damage tracking as the CPU path), then copies it into the target with
+  one draw (canvas textures start cleared every frame). The web host skips
+  frames where nothing changed altogether (no `getCurrentTexture()`, so the
+  canvas keeps its last frame). `JSUI_WEBGPU_NO_RETAIN` paints the whole
+  frame into the target instead; `JSUI_WEBGPU_NO_CLEAR` composites over it.
+* **No CPU waits.** In the browser Graphite runs without a tick function:
+  submits never wait, buffer maps are async and finished work is collected by
+  `checkAsyncWorkCompletion()` each frame. Raster images are uploaded once per
+  image through a caching `ImageProvider` (LRU, half of the GPU budget).
+* **Device loss.** Renders return -1 once the device is lost. The host asks
+  for a new device and rebuilds the context on the same canvas, or continues
+  with Skia on WebGL / the CPU raster on a fresh canvas.
+* **Build.** One module with every backend: `GPU=1 scripts/build-wasm.sh`
+  runs `scripts/build-skia-wasm-graphite.sh` (Skia chrome/m157, emsdk 6.0.13,
+  Emdawnwebgpu v20261021.191805; Graphite + Dawn/WebGPU, Ganesh + WebGL,
+  CPU; SIMD128) into `third_party/skia-wasm-gpu` and JSUI into
+  `web/dist-gpu/jsui.{js,wasm}`. Skia does not support Emdawnwebgpu upstream
+  yet (its emscripten code still targets the removed `-sUSE_WEBGPU`), so
+  `scripts/patches/skia-m157-emdawnwebgpu.patch` ports Graphite's Dawn
+  backend to it. The m124 builds (`web/dist`, `web/dist-webgl`) and native
+  Skia are unchanged; the JSUI sources build against both milestones
+  (`__has_include` checks for the APIs that changed).
+* **Browser host.** `renderer: 'auto'` (default) tries WebGPU on a hardware
+  adapter, then Skia on hardware WebGL, then the CPU raster (WebGL / 2D blit);
+  `'gpu'` takes the best GPU path even on a software adapter; `'webgpu'` /
+  `'webgl'` ask for one API (falling down the chain if it fails); `'cpu'` /
+  `'2d'` force the CPU raster. The chosen renderer is logged and in
+  `jsui.renderer` (`'webgpu'`, `'gpu-webgl2'`, `'webgl2'`, `'2d'`). The
+  WebGPU code lives in `web/jsui-webgpu.js` (one shared device per page);
+  the host loads `dist-gpu` first when it got a WebGPU device. WebGPU
+  readback is asynchronous: `jsui.readPixelsAsync()`.
+* **Tests.** `JSUI_WEB_DIST=dist-gpu node web/test/browser.test.mjs` adds the
+  `webgpu:` tests (WebGPU vs CPU pixel comparisons on the HUD and effects
+  fixtures, incremental repaints, DPR 2 / resize, device loss, several
+  runtimes, idle frames) on Chromium's SwiftShader WebGPU adapter
+  (`--enable-unsafe-webgpu`). `node web/test/frame-bench.mjs` times frames of
+  `examples/showcase/interactions.jsx` per renderer.
+
 ## Game data
 
 Three channels connect the game and the UI (`include/jsui/jsui.h`):
@@ -759,6 +810,8 @@ The default font is Inter (bundled); `fontFamily` falls back to it.
   `WEBGL=1 scripts/build-wasm.sh` builds the GPU variant into `web/dist-webgl/`
   (deploy it next to `web/dist/`: the host prefers it, see "GPU backend").
   Both use WASM SIMD (`SKIA_WASM_SIMD=0` builds without it).
+  `GPU=1 scripts/build-wasm.sh` builds the WebGPU + WebGL + CPU module into
+  `web/dist-gpu/` (emsdk 6.0.13 → Skia m157 with Graphite, see "WebGPU (Skia Graphite)").
   In the page: `const jsui = await createJsui({ canvas, bundleUrl })` from
   `web/jsui-web.js`; `jsui.on('message', (name, data) => …)`, `jsui.postMessage(name, data)`.
   The browser loader backend is `fetch()` (`src/platform/loader_emscripten.cpp`).
