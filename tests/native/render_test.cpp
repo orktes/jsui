@@ -389,3 +389,60 @@ TEST(render_incremental_matches_full) {
   SkIRect r = s.rt->renderIncremental(inc.data(), 320, 240, 320 * 4);
   CHECK(r.isEmpty());
 }
+
+// Damage cutting through rounded boxes at random places (a small box moving
+// over them, also translucent and under a scale) must still repaint exactly
+// like a full frame, while repainting little more than the probe's rects.
+TEST(render_incremental_rounded_boxes_cut_anywhere) {
+  for (float dpr : {1.f, 1.5f}) {
+    Scene s(400, 260, dpr);
+    s.add(R"J({"style":{"position":"absolute","left":10,"top":10,"width":130,"height":80,"borderRadius":18,"borderWidth":1.5,
+      "borderColor":"#8fa0ff","backgroundColor":"rgba(30,40,80,0.9)","overflow":"hidden"},"children":[
+      {"style":{"position":"absolute","left":-10,"top":40,"width":200,"height":30,"backgroundColor":"#f2c35b"}}]})J");
+    s.add(R"J({"style":{"position":"absolute","left":150,"top":12.5,"width":120,"height":70,"borderTopLeftRadius":30,
+      "borderBottomRightRadius":"40%","experimental_backgroundImage":"linear-gradient(90deg, #ff4d6a, #4fd1ff)"}})J");
+    s.add(R"J({"style":{"position":"absolute","left":20,"top":105,"width":110,"height":80,"borderRadius":40,"borderWidth":4,
+      "borderColor":"#4ade80","transform":[{"scale":1.035}]}})J");
+    s.add(R"J({"style":{"position":"absolute","left":160,"top":100,"width":120,"height":90,"borderRadius":12,"backgroundColor":"#222",
+      "boxShadow":"0 4px 10px rgba(0,0,0,0.6)"},"children":[{"style":{"margin":10,"height":50,"borderRadius":25,"backgroundColor":"#b26bff"}}]})J");
+    s.add(R"J({"style":{"position":"absolute","left":290,"top":20,"width":90,"height":60,"borderRadius":10,"borderWidth":3,
+      "borderStyle":"dashed","borderColor":"#fff","transform":[{"rotate":"12deg"}]}})J");
+    s.add(R"J({"style":{"position":"absolute","left":295,"top":110,"width":80,"height":50,"borderRadius":8,"backgroundColor":"#4fd1ff",
+      "outlineWidth":2,"outlineColor":"#f2c35b","outlineOffset":3,"boxShadow":"6px 6px 0 rgba(255,0,0,0.5)"}})J");
+    s.add(R"J({"style":{"position":"absolute","left":290,"top":180,"width":100,"height":70,"borderRadius":20,"overflow":"hidden",
+      "backgroundColor":"#333","opacity":0.85},"children":[{"style":{"position":"absolute","left":50,"top":30,"width":80,"height":60,
+      "borderRadius":30,"backgroundColor":"#ff4d6a"}},{"type":"Text","style":{"color":"#fff","fontSize":13,"margin":6},"text":"Clipped"}]})J");
+    Node* probe = s.add(R"J({"style":{"position":"absolute","left":0,"top":0,"width":9,"height":7,"backgroundColor":"rgba(255,255,255,0.5)"}})J");
+    int dw = s.dw(), dh = s.dh();
+    std::vector<uint32_t> inc(size_t(dw) * dh), full(inc.size());
+    s.doc().layout();
+    s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);
+    uint32_t seed = 12345;
+    auto rnd = [&](float lo, float hi) {
+      seed = seed * 1664525u + 1013904223u;
+      return lo + (hi - lo) * float(seed >> 8) / float(1u << 24);
+    };
+    size_t bad = 0;
+    double probeArea = 0, repainted = 0;
+    for (int i = 0; i < 200; i++) {
+      float pw = rnd(2, 40), ph = rnd(2, 30);
+      probeArea += 2 * pw * ph * dpr * dpr;  // old + new rect
+      patch(probe, "{\"left\":" + std::to_string(rnd(-5, 395)) + ",\"top\":" + std::to_string(rnd(-5, 255)) +
+                       ",\"width\":" + std::to_string(pw) + ",\"height\":" + std::to_string(ph) + "}");
+      s.doc().layout();
+      s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);
+      repainted += double(lastPaintStats(s.doc()).repaintedPixels);
+      s.rt->render(full.data(), dw, dh, size_t(dw) * 4);
+      size_t diff = 0;
+      for (size_t k = 0; k < inc.size(); k++) diff += inc[k] != full[k];
+      if (diff && !bad) std::fprintf(stderr, "  dpr %g step %d: %zu pixels differ\n", dpr, i, diff);
+      bad += diff;
+      s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);  // full again after render()
+    }
+    CHECK_EQ(bad, size_t(0));
+    // Perf guard: the damage stays close to the probe's old + new rects
+    // (growing to whole nodes repainted several times as much).
+    std::printf("  dpr %g: repainted %.0f px per step for %.0f px of probe rects\n", dpr, repainted / 200, probeArea / 200);
+    CHECK(repainted < probeArea * 1.6);
+  }
+}

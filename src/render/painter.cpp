@@ -1510,24 +1510,33 @@ SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight) {
   SkMatrix m = SkMatrix::Scale(doc.pixelRatio(), doc.pixelRatio());
   root->curved.clear();
   updateRecords(doc.root(), m, m, screen, imageGen, &damage, &root->curved);
-  // Grow the damage until it contains every curved node it touches, so no
-  // such outline is cut by the clip (pixels then match a full repaint).
+  // Skia's anti-aliased scan converter (paths, rrects, AA clips) clips the
+  // outline to the clip's *bounds* before rasterizing, which shifts edge
+  // coverage when those bounds cut through a curved or diagonal outline
+  // (pixels then differ from a full repaint by a few levels). Within the
+  // bounds, the region itself is applied per span and is exact. So every
+  // curved node the damage touches must lie inside the damage bounds: grow
+  // the bounds (by adding single pixels at its corners, which repaint like
+  // any damage) instead of the whole node, until that holds.
   if (!damage.isEmpty()) {
+    SkIRect need = damage.getBounds();
     for (int pass = 0; pass < 16; pass++) {
       bool grew = false;
       for (const CurvedNode& cn : root->curved) {
-        if (!damage.intersects(cn.bounds) || damage.contains(cn.bounds)) continue;
+        if (need.contains(cn.bounds) || !damage.intersects(cn.bounds)) continue;
         bool cuts = false;
         for (SkRegion::Iterator it(damage); !it.done() && !cuts; it.next()) {
           const SkIRect& d = it.rect();
           cuts = SkIRect::Intersects(d, cn.bounds) && !cn.safe.contains(SkRect::Make(d));
         }
         if (cuts) {
-          damage.op(cn.bounds, SkRegion::kUnion_Op);
+          need.join(cn.bounds);
           grew = true;
         }
       }
       if (!grew) break;
+      damage.op(SkIRect::MakeXYWH(need.fLeft, need.fTop, 1, 1), SkRegion::kUnion_Op);
+      damage.op(SkIRect::MakeXYWH(need.fRight - 1, need.fBottom - 1, 1, 1), SkRegion::kUnion_Op);
       if (pass == 15) damage.setRect(screen);
     }
   }
