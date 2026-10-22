@@ -133,8 +133,8 @@ test('build: RN alias, JSX in .js, assets, json, platform ext, shims; runs witho
   assert.match(text, /^Héllo ✓ native jsui prod assets\/font-[0-9a-f]{8}\.ttf$/);
   const logo = all.find((n) => n.props.nativeID === 'logo');
   assert.match(logo.props.source.uri, /^assets\/logo@2x-[0-9a-f]{8}\.png$/);
-  assert.equal(logo.props.style.width, 32, '@2x halves the intrinsic size');
-  assert.equal(logo.props.style.height, 16);
+  assert.equal(logo.props.source.width, 32, '@2x halves the intrinsic size');
+  assert.equal(logo.props.source.height, 16);
   const grad = all.find((n) => n.props.nativeID === 'grad');
   assert.equal(grad.props.style.experimental_backgroundImage, 'linear-gradient(180deg, red, blue)');
 });

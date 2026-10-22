@@ -80,10 +80,14 @@ function ImageImpl(props) {
   const { source, src, defaultSource, style, resizeMode, tintColor, onLoad, onLoadStart, onLoadEnd, onError, width, height, ...rest } = props;
   let resolved = resolveAssetSource(source != null ? source : src != null ? { uri: src } : defaultSource);
   const flat = flatten(style);
-  // Like RN: a static asset (or a source with dimensions) has an intrinsic size.
+  // Like react-native-web (the reference): only dimensions written by the app
+  // (width/height props or source.width/height) become style. Bundled asset
+  // sizes are passed to native as an intrinsic size that Yoga uses only when
+  // layout leaves the image unsized, so flex/stretch styles still win.
   let sized = flat;
-  const w = width != null ? width : resolved && resolved.width;
-  const hgt = height != null ? height : resolved && resolved.height;
+  const explicit = source && typeof source === 'object' && !Array.isArray(source) ? source : null;
+  const w = width != null ? width : explicit && explicit.width;
+  const hgt = height != null ? height : explicit && explicit.height;
   if ((w != null && (!flat || flat.width === undefined)) || (hgt != null && (!flat || flat.height === undefined))) {
     sized = Object.assign({}, w != null ? { width: w } : null, hgt != null ? { height: hgt } : null, flat);
   }
