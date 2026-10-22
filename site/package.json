@@ -1,0 +1,16 @@
+{
+  "name": "@jsui/site",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The JSUI showcase website, rendered entirely by the JSUI WebAssembly build",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "serve": "node scripts/serve.mjs",
+    "test": "node test/smoke.mjs"
+  },
+  "dependencies": {
+    "@jsui/cli": "0.1.0",
+    "@jsui/react": "0.1.0"
+  }
+}

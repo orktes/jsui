@@ -12,3 +12,5 @@ node_modules/
 /third_party/skia-src/
 /web/dist/
 /web/dist-webgl/
+/site/dist/
+/site/test/output/
