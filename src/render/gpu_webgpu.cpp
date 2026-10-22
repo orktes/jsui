@@ -8,11 +8,13 @@
 // browser specific except that the browser context cannot block on the GPU
 // (no tick function: Graphite then never waits, see DawnBackendContext.h).
 //
-// Frames: the runtime paints into a retained texture owned by the context,
-// repainting only the damaged region (Runtime::renderCanvasIncremental), and
-// that texture is drawn into the target with one draw. Raster images (decoded
-// images, shadow masks) are uploaded once and cached by image id
-// (CachingImageProvider), like Ganesh's resource cache does on the GL path.
+// Frames (Runtime::renderCanvasTracked): when most of the frame changed it is
+// painted straight into the target (one pass). When little changed, only the
+// damage bounds are repainted into a retained texture owned by the context,
+// which is then drawn into the target with one draw (targets such as canvas
+// textures start cleared every frame). Raster images (decoded images, shadow
+// masks) are uploaded once and cached by image id (CachingImageProvider),
+// like Ganesh's resource cache does on the GL path.
 #include "render/gpu.h"
 
 #if defined(JSUI_WEBGPU)
@@ -70,13 +72,14 @@ class CachingImageProvider final : public graphite::ImageProvider {
     return gpu;
   }
 
-  // Once per frame: evicts images unused for kMaxAge frames, and the least
-  // recently used ones while over budget.
+  // Once per frame: evicts images nobody else holds any more (they cannot be
+  // drawn again: shadow masks of shapes that animated away), images unused
+  // for kMaxAge frames, and the least recently used ones while over budget.
   void endFrame() {
     frame_++;
     constexpr uint64_t kMaxAge = 600;
     for (auto it = entries_.begin(); it != entries_.end();) {
-      if (frame_ - it->second.lastUsed > kMaxAge) {
+      if (it->second.raster->unique() || frame_ - it->second.lastUsed > kMaxAge) {
         bytes_ -= it->second.bytes;
         it = entries_.erase(it);
       } else {
@@ -120,6 +123,9 @@ struct WebGPUGpu final : JsuiGpuContext {
   std::unique_ptr<graphite::Recorder> recorder;
   sk_sp<CachingImageProvider> images;
   sk_sp<SkSurface> retained;  // the last frame, for damage-only repaints
+  uint64_t retainedGen = 0;   // bumped for every new retained surface (its key)
+  int smallFrames = 0;        // consecutive frames with small damage
+  int directFrames = 0;       // consecutive frames painted straight into the target
   bool lost = false;
   size_t cacheBytes = kDefaultCacheBytes;
 
@@ -134,6 +140,18 @@ struct WebGPUGpu final : JsuiGpuContext {
     backend.fTick = instance ? graphite::DawnNativeProcessEventsFunction : nullptr;
 #endif
     graphite::ContextOptions opts;
+#if defined(__EMSCRIPTEN__)
+    // No internal MSAA. Browser WebGPU has none of the features Graphite
+    // needs to make it cheap (ExpandResolveTexture load ops, transient /
+    // memoryless attachments, MSAA-render-to-single-sampled), so the first
+    // path or complex clip in a pass made Graphite render the whole pass into
+    // a 4x MSAA texture: a full-surface draw to load it from the target, the
+    // 4x samples stored to memory, and a second full-surface pass to resolve
+    // it back. On a tiler (Apple GPUs) that is most of the frame's GPU time.
+    // Paths are rasterised into Graphite's (cached) path atlas instead, with
+    // the CPU raster's anti-aliasing.
+    opts.fInternalMultisampleCount = graphite::SampleCount::k1;
+#endif
     ctx = graphite::ContextFactory::MakeDawn(backend, opts);
     if (!ctx) return false;
     ctx->setMaxBudgetedBytes(cacheBytes);
@@ -250,22 +268,52 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
   sk_sp<SkSurface> target = SkSurfaces::WrapBackendTexture(g->recorder.get(), backendTex, nullptr, &props);
   if (!target) return -1;
 
-  if (t.flags & JSUI_WEBGPU_NO_RETAIN) {
+  // Where the frame is painted (Runtime::renderCanvasTracked):
+  //   * Most of the frame changed (an animated full-screen UI): straight into
+  //     the target with a full repaint, one pass, no copy. The retained
+  //     texture misses that frame.
+  //   * Small damage (a spinner, a hover): only the damage bounds into the
+  //     retained texture, then one draw copies it into the target (canvas
+  //     textures start cleared every frame, so the target needs it all).
+  //   After direct frames the retained texture is repainted fully once the
+  //   damage stayed small for kRetainAfter frames (switching back costs a full
+  //   repaint plus the copy, more than another direct frame).
+  constexpr int kRetainAfter = 3, kFreeRetainedAfter = 300;
+  const bool noClear = (t.flags & JSUI_WEBGPU_NO_CLEAR) != 0;
+  SkImageInfo info = target->imageInfo();
+  if (g->retained && (g->retained->width() != w || g->retained->height() != h ||
+                      g->retained->imageInfo().colorType() != info.colorType()))
     g->retained.reset();
-    rt.renderCanvas(target->getCanvas(), w, h, (t.flags & JSUI_WEBGPU_NO_CLEAR) == 0);
-  } else {
-    SkImageInfo info = target->imageInfo();
-    if (!g->retained || g->retained->width() != w || g->retained->height() != h ||
-        g->retained->imageInfo().colorType() != info.colorType()) {
+  if (t.flags & JSUI_WEBGPU_NO_RETAIN) g->retained.reset();
+  const void* key = g->retained ? reinterpret_cast<const void*>(uintptr_t(g->retainedGen)) : nullptr;
+  bool viaRetained = false, failed = false;
+  rt.renderCanvasTracked(key, w, h, [&](const SkIRect& damage, bool keyValid) -> Runtime::CanvasChoice {
+    bool large = int64_t(damage.width()) * damage.height() * 2 >= int64_t(w) * h;
+    g->smallFrames = large ? 0 : g->smallFrames + 1;
+    bool retain = !(t.flags & JSUI_WEBGPU_NO_RETAIN) && (keyValid ? !large : g->smallFrames >= kRetainAfter);
+    if (!retain) {
+      // A retained texture unused for a while (a UI that animates all over)
+      // is freed: a full-size texture of memory.
+      if (++g->directFrames > kFreeRetainedAfter) g->retained.reset();
+      return {target->getCanvas(), nullptr, !noClear};
+    }
+    g->directFrames = 0;
+    if (!g->retained) {
       SkImageInfo ri = SkImageInfo::Make(w, h, info.colorType(), kPremul_SkAlphaType, info.refColorSpace());
       g->retained = SkSurfaces::RenderTarget(g->recorder.get(), ri, skgpu::Mipmapped::kNo, &props);
-      if (!g->retained) return -1;
+      if (!g->retained) {
+        failed = true;
+        return {};
+      }
+      g->retainedGen++;
     }
-    // Damage-only repaint of the retained frame (a new surface, size or an
-    // intervening full render makes it a full repaint).
-    rt.renderCanvasIncremental(g->retained->getCanvas(), g->retained.get(), w, h);
+    viaRetained = true;
+    return {g->retained->getCanvas(), reinterpret_cast<const void*>(uintptr_t(g->retainedGen)), true};
+  });
+  if (failed) return -1;
+  if (viaRetained) {
     SkPaint paint;
-    paint.setBlendMode((t.flags & JSUI_WEBGPU_NO_CLEAR) ? SkBlendMode::kSrcOver : SkBlendMode::kSrc);
+    paint.setBlendMode(noClear ? SkBlendMode::kSrcOver : SkBlendMode::kSrc);
     target->getCanvas()->drawImage(SkSurfaces::AsImage(g->retained), 0, 0, SkSamplingOptions(), &paint);
   }
   target.reset();

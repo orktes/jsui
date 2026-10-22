@@ -163,6 +163,7 @@ struct ShadowKey {
   float hole[4];              // border box cut out of the shadow (relative to the shape), or zeros
   float holeRadii[8];
   float color[4];             // pre-coloured: drawn as a sprite, the fastest CPU blit
+  float inset;                // 1: an inset shadow (w / h / radii: the padding box it is clipped to)
   bool operator==(const ShadowKey& o) const { return std::memcmp(this, &o, sizeof(ShadowKey)) == 0; }
 };
 struct ShadowKeyHash {
@@ -183,6 +184,22 @@ struct ShadowCache {
   size_t bytes = 0;
   uint32_t frame = 0;
   static constexpr size_t kMaxBytes = 24u << 20;
+  using Map = std::unordered_map<ShadowKey, ShadowMask, ShadowKeyHash>;
+  Map::iterator insert(const ShadowKey& key, ShadowMask&& m) {
+    bytes += size_t(m.image->width()) * m.image->height() * 4;
+    if (bytes > kMaxBytes) {
+      // Drop masks unused for a while (shapes that animated away).
+      for (auto e = masks.begin(); e != masks.end();) {
+        if (frame - e->second.lastUsed > 2) {
+          bytes -= size_t(e->second.image->width()) * e->second.image->height() * 4;
+          e = masks.erase(e);
+        } else {
+          ++e;
+        }
+      }
+    }
+    return masks.emplace(key, std::move(m)).first;
+  }
 };
 ShadowCache& shadowCache(RootRecord* root);
 
@@ -254,19 +271,7 @@ bool drawCachedShadow(SkCanvas* c, const SkRRect& shape, const SkRRect* hole, co
     ShadowMask sm;
     sm.image = surf->makeImageSnapshot();
     sm.margin = margin;
-    cache.bytes += size_t(iw) * ih * 4;
-    if (cache.bytes > ShadowCache::kMaxBytes) {
-      // Drop masks unused for a while (shapes that animated away).
-      for (auto e = cache.masks.begin(); e != cache.masks.end();) {
-        if (cache.frame - e->second.lastUsed > 2) {
-          cache.bytes -= size_t(e->second.image->width()) * e->second.image->height() * 4;
-          e = cache.masks.erase(e);
-        } else {
-          ++e;
-        }
-      }
-    }
-    it = cache.masks.emplace(key, std::move(sm)).first;
+    it = cache.insert(key, std::move(sm));
   }
   it->second.lastUsed = cache.frame;
   SkPaint p;  // colour is baked in; plain src-over sprite
@@ -314,6 +319,81 @@ bool drawCachedShadow(SkCanvas* c, const SkRRect& shape, const SkRRect* hole, co
   return true;
 }
 
+// Inset shadows the same way: the blurred frame-minus-hole, clipped to the
+// padding box `inner`, rendered once per distinct shape (device size,
+// sub-pixel phase, radii, hole, blur, colour) and then drawn as a sprite.
+// Drawn directly, a blurred DRRect has no analytic GPU path: Graphite renders
+// its coverage into an offscreen mask and blurs that in several more passes,
+// for every shadow in every repaint. False when the transform is not
+// axis-aligned (the caller blurs directly then).
+bool drawCachedInsetShadow(SkCanvas* c, const SkRRect& inner, const SkRRect& frame, const SkRRect& hole, float blur,
+                           const SkColor4f& col, ShadowCache& cache) {
+  const SkMatrix& m = c->getTotalMatrix();
+  if (!m.isScaleTranslate() || m.getScaleX() <= 0 || m.getScaleY() <= 0) return false;
+  SkRRect dev, devHole;
+  if (!inner.transform(m, &dev)) return false;
+  if (!hole.isEmpty() && !hole.transform(m, &devHole)) return false;
+  const SkRect& r = dev.rect();
+  float ox = std::floor(r.left()), oy = std::floor(r.top());
+  ShadowKey key{};
+  key.inset = 1;
+  key.w = r.width();
+  key.h = r.height();
+  key.sigma = blur / 2 * std::max(m.getScaleX(), m.getScaleY());
+  key.fx = r.left() - ox;
+  key.fy = r.top() - oy;
+  for (int i = 0; i < 4; i++) {
+    SkVector v = dev.radii(SkRRect::Corner(i));
+    key.radii[i * 2] = v.fX;
+    key.radii[i * 2 + 1] = v.fY;
+  }
+  if (!hole.isEmpty()) {
+    key.hole[0] = devHole.rect().left() - r.left();
+    key.hole[1] = devHole.rect().top() - r.top();
+    key.hole[2] = devHole.rect().width();
+    key.hole[3] = devHole.rect().height();
+    for (int i = 0; i < 4; i++) {
+      SkVector v = devHole.radii(SkRRect::Corner(i));
+      key.holeRadii[i * 2] = v.fX;
+      key.holeRadii[i * 2 + 1] = v.fY;
+    }
+  }
+  key.color[0] = col.fR;
+  key.color[1] = col.fG;
+  key.color[2] = col.fB;
+  key.color[3] = col.fA;
+  constexpr int kMargin = 1;  // anti-aliased clip edge
+  auto it = cache.masks.find(key);
+  if (it == cache.masks.end()) {
+    int iw = int(std::ceil(key.fx + key.w)) + kMargin * 2, ih = int(std::ceil(key.fy + key.h)) + kMargin * 2;
+    if (iw <= 0 || ih <= 0 || size_t(iw) * size_t(ih) > (4u << 20)) return false;  // huge: blur directly
+    sk_sp<SkSurface> surf = SkSurfaces::Raster(SkImageInfo::MakeN32Premul(iw, ih));
+    if (!surf) return false;
+    SkCanvas* sc = surf->getCanvas();
+    sc->clear(SK_ColorTRANSPARENT);
+    // The same device geometry as a direct draw, moved by whole pixels.
+    sc->translate(kMargin - ox, kMargin - oy);
+    sc->concat(m);
+    SkPaint p;
+    p.setAntiAlias(true);
+    p.setColor4f(col);
+    p.setMaskFilter(SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, blur / 2));
+    clipRRect(sc, inner);
+    if (hole.isEmpty()) sc->drawRRect(frame, p);
+    else sc->drawDRRect(frame, hole, p);
+    ShadowMask sm;
+    sm.image = surf->makeImageSnapshot();
+    sm.margin = kMargin;
+    it = cache.insert(key, std::move(sm));
+  }
+  it->second.lastUsed = cache.frame;
+  c->save();
+  c->setMatrix(SkMatrix::I());
+  c->drawImage(it->second.image.get(), ox - kMargin, oy - kMargin, SkSamplingOptions());
+  c->restore();
+  return true;
+}
+
 void paintOuterShadows(SkCanvas* c, const Box& b, const ComputedStyle& s, RootRecord* root) {
   bool opaqueBg = s.backgroundColor.a >= 1 && s.backgroundImages.empty();
   // The first shadow is on top, so paint in reverse.
@@ -353,6 +433,8 @@ void paintInsetShadows(SkCanvas* c, const Box& b, const ComputedStyle& s, RootRe
     hole.offset(sh.offsetX, sh.offsetY);
     float pad = sh.blur * 1.5f + std::fabs(sh.offsetX) + std::fabs(sh.offsetY) + std::fabs(sh.spread) + 2;
     SkRRect frame = SkRRect::MakeRect(b.inner.rect().makeOutset(pad, pad));
+    if (sh.blur > 0 && drawCachedInsetShadow(c, b.inner, frame, hole, sh.blur, sk(sh.color), shadowCache(root)))
+      continue;
     SkPaint p;
     p.setAntiAlias(true);
     p.setColor4f(sk(sh.color));

@@ -8,8 +8,8 @@
 // Renderers, best first ('auto', the default):
 //
 //   'webgpu'  Skia Graphite straight into the canvas' WebGPU texture
-//             (jsui_render_webgpu, web/jsui-webgpu.js), with damage-only
-//             repaints into a retained frame texture. Needs the all-backends
+//             (jsui_render_webgpu, web/jsui-webgpu.js); small changes are
+//             repainted into a retained frame texture. Needs the all-backends
 //             module (GPU=1 scripts/build-wasm.sh -> web/dist-gpu/jsui.js),
 //             which createJsui() loads first when navigator.gpu gives a device.
 //   'webgl'   Skia Ganesh straight into the canvas' WebGL2 / WebGL 1 context.
@@ -418,8 +418,9 @@ class JsuiHost {
       this._sizeChanged = false;
       let t2, t3;
       if (this._wgpu) {
-        // Skia Graphite into the canvas' WebGPU texture (damage-only repaint
-        // of its retained frame + one copy).
+        // Skia Graphite into the canvas' WebGPU texture (straight in when most
+        // of the frame changed, else a damage-only repaint of its retained
+        // frame + one copy).
         if (this._wgpu.render() === false) this._dropWebGPU('WebGPU frame failed');
         t2 = t3 = performance.now();
       } else if (this._gpu) {
