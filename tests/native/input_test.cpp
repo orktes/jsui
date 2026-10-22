@@ -138,6 +138,66 @@ TEST(input_hit_overflow_and_descendants) {
   CHECK_EQ(f.in().hitTest(55, 55), p);
 }
 
+// hitNode skips a subtree whose hittable area stays inside its box when the
+// pointer is outside that box; whatever moves a descendant out must undo it.
+TEST(input_hit_culling_follows_changes) {
+  Fixture f;
+  Node* root = f.doc().root();
+  auto abs = [](int x, int y, const char* extra = "") {
+    return std::string(R"({"style":{"position":"absolute","width":20,"height":20,"left":)") + std::to_string(x) +
+           ",\"top\":" + std::to_string(y) + extra + "}}";
+  };
+  Node* p = f.add(root, NodeType::View, R"({"style":{"position":"absolute","width":100,"height":100}})");
+  Node* c = f.add(p, NodeType::View, abs(10, 10).c_str());
+  f.layout();
+  CHECK_EQ(f.in().hitTest(20, 20), c);
+  CHECK_EQ(f.in().hitTest(170, 20), root);  // p's subtree is contained: culled
+  // Layout moves c out of p, then back.
+  c->setProps(Value::parseJson(abs(160, 10)));
+  f.doc().layout();
+  CHECK_EQ(f.in().hitTest(170, 20), c);
+  c->setProps(Value::parseJson(abs(10, 10)));
+  f.doc().layout();
+  CHECK_EQ(f.in().hitTest(170, 20), root);
+  // A paint-only transform change (no relayout) moves it out.
+  c->setProps(Value::parseJson(abs(10, 10, R"(,"transform":[{"translateX":150}])")));
+  CHECK(!f.doc().layout());
+  CHECK_EQ(f.in().hitTest(170, 20), c);
+  CHECK_EQ(f.in().hitTest(20, 20), p);
+  // ... and through patchStyle (the native Animated path).
+  Value::Object partial;
+  partial["transform"] = Value::parseJson(R"([{"translateX":0}])");
+  CHECK(c->patchStyle(partial));
+  CHECK_EQ(f.in().hitTest(170, 20), root);
+  partial["transform"] = Value::parseJson(R"([{"translateY":200}])");
+  CHECK(c->patchStyle(partial));
+  CHECK_EQ(f.in().hitTest(20, 220), c);
+  // A hidden or pointerEvents:none child outside the box does not count...
+  partial["display"] = Value("none");
+  c->patchStyle(partial);
+  f.doc().layout();
+  CHECK_EQ(f.in().hitTest(20, 220), root);
+  partial["display"] = Value("flex");
+  partial["pointerEvents"] = Value("none");
+  c->patchStyle(partial);
+  f.doc().layout();
+  CHECK_EQ(f.in().hitTest(20, 220), root);
+  // ... until it is hittable again.
+  partial["pointerEvents"] = Value("auto");
+  c->patchStyle(partial);
+  CHECK_EQ(f.in().hitTest(20, 220), c);
+  // A grandchild inserted outside the box.
+  partial["transform"] = Value::parseJson("[]");
+  c->patchStyle(partial);
+  CHECK_EQ(f.in().hitTest(20, 220), root);
+  Node* g = f.add(c, NodeType::View, abs(0, 250).c_str());
+  f.doc().layout();
+  CHECK_EQ(f.in().hitTest(20, 270), g);
+  f.doc().destroyNode(g);
+  f.doc().layout();
+  CHECK_EQ(f.in().hitTest(20, 270), root);
+}
+
 TEST(input_hit_rounded_corners) {
   Fixture f;
   Node* root = f.doc().root();

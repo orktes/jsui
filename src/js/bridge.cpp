@@ -12,6 +12,12 @@ namespace jsui {
 
 namespace {
 
+// Native side of a tree / prop mutation from the reconciler.
+#define JSUI_COMMIT_SCOPE                                    \
+  Document& commitDoc = runtimeOf(ctx).doc;                  \
+  commitDoc.perf.counters.bridgeCalls++;                     \
+  Perf::Scope commitScope(commitDoc.perf, Phase::Commit)
+
 Node* nodeArg(JSContext* ctx, JSValueConst v) {
   if (!JS_IsNumber(v)) return nullptr;
   uint32_t id = 0;
@@ -20,6 +26,7 @@ Node* nodeArg(JSContext* ctx, JSValueConst v) {
 }
 
 JSValue js_createNode(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  JSUI_COMMIT_SCOPE;
   NodeType t;
   std::string name = argc > 0 ? toStdString(ctx, argv[0]) : "";
   if (!nodeTypeFromName(name, &t)) return JS_ThrowTypeError(ctx, "unknown element type '%s'", name.c_str());
@@ -27,6 +34,7 @@ JSValue js_createNode(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
 }
 
 JSValue js_setProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  JSUI_COMMIT_SCOPE;
   if (argc < 2) return JS_UNDEFINED;
   if (Node* n = nodeArg(ctx, argv[0])) n->setProps(toValue(ctx, argv[1]));
   return JS_UNDEFINED;
@@ -36,38 +44,31 @@ JSValue js_setProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
 // removes a key. Meant for per-frame animation of paint keys (transform,
 // opacity, colors): Node::setProps can skip relayout when only those change.
 JSValue js_patchStyle(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  JSUI_COMMIT_SCOPE;
   if (argc < 2 || !JS_IsObject(argv[1])) return JS_UNDEFINED;
   Node* n = nodeArg(ctx, argv[0]);
   if (!n) return JS_UNDEFINED;
-  Value::Object props = n->props().asObject();
-  Value::Object style = n->props()["style"].asObject();
+  Value::Object partial;
   JSPropertyEnum* keys = nullptr;
   uint32_t count = 0;
   if (JS_GetOwnPropertyNames(ctx, &keys, &count, argv[1], JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) != 0) return JS_EXCEPTION;
-  bool changed = false;
   for (uint32_t i = 0; i < count; i++) {
     const std::string* k = implOf(ctx).atomName(keys[i].atom);
     JSValue v = JS_GetProperty(ctx, argv[1], keys[i].atom);
     if (k && !JS_IsException(v)) {
-      if (JS_IsUndefined(v) || JS_IsNull(v)) {
-        changed |= style.erase(*k) > 0;
-      } else {
-        style.insert_or_assign(*k, toValue(ctx, v));
-        changed = true;
-      }
+      // undefined / null remove the key (a null Value in the partial).
+      partial.insert_or_assign(*k, JS_IsUndefined(v) || JS_IsNull(v) ? Value() : toValue(ctx, v));
     }
     if (JS_IsException(v)) JS_FreeValue(ctx, JS_GetException(ctx));
     JS_FreeValue(ctx, v);
   }
   JS_FreePropertyEnum(ctx, keys, count);
-  if (changed) {
-    props.insert_or_assign("style", Value(std::move(style)));
-    n->setProps(Value(std::move(props)));
-  }
+  n->patchStyle(partial);
   return JS_UNDEFINED;
 }
 
 JSValue js_setText(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  JSUI_COMMIT_SCOPE;
   if (argc < 2) return JS_UNDEFINED;
   if (Node* n = nodeArg(ctx, argv[0])) n->setText(toStdString(ctx, argv[1]));
   return JS_UNDEFINED;
@@ -80,6 +81,7 @@ bool isAncestorOrSelf(Node* a, Node* n) {
 }
 
 JSValue js_appendChild(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  JSUI_COMMIT_SCOPE;
   if (argc < 2) return JS_UNDEFINED;
   Node* p = nodeArg(ctx, argv[0]);
   Node* c = nodeArg(ctx, argv[1]);
@@ -88,6 +90,7 @@ JSValue js_appendChild(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
 }
 
 JSValue js_insertBefore(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  JSUI_COMMIT_SCOPE;
   if (argc < 2) return JS_UNDEFINED;
   Node* p = nodeArg(ctx, argv[0]);
   Node* c = nodeArg(ctx, argv[1]);
@@ -98,6 +101,7 @@ JSValue js_insertBefore(JSContext* ctx, JSValueConst, int argc, JSValueConst* ar
 }
 
 JSValue js_removeChild(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  JSUI_COMMIT_SCOPE;
   if (argc < 2) return JS_UNDEFINED;
   Node* p = nodeArg(ctx, argv[0]);
   Node* c = nodeArg(ctx, argv[1]);
@@ -148,6 +152,7 @@ JSValue js_configureLayoutAnimation(JSContext* ctx, JSValueConst, int argc, JSVa
 }
 
 JSValue js_destroyNode(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  JSUI_COMMIT_SCOPE;
   if (argc < 1) return JS_UNDEFINED;
   if (Node* n = nodeArg(ctx, argv[0])) runtimeOf(ctx).doc.destroyNode(n);
   return JS_UNDEFINED;

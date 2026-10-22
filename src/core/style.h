@@ -175,6 +175,22 @@ extern const int kBlendModeCount;
 // Border / outline widths are snapped like Chrome (see snapBorderWidth).
 void applyStyle(const Value& style, ComputedStyle* out, YGNodeRef yoga, float pixelRatio = 1);
 
+// Incremental restyle: when every key that differs between `oldStyle` and
+// `newStyle` only affects painting (opacity, transform, colors, radii,
+// shadows, gradients, filters, text paint/metrics, ...), re-resolves just
+// those fields of `out` (which must hold the result for `oldStyle`) and
+// returns true; `changed` tells whether anything was re-resolved. Returns
+// false when a full applyStyle() is needed (a layout key or an unknown key
+// changed, or a style is not an object).
+bool applyPaintStyleChanges(const Value& oldStyle, const Value& newStyle, ComputedStyle* out, float pixelRatio,
+                            bool* changed);
+// The paint group a style key belongs to (0: a layout or unknown key), and
+// re-resolution of just those groups of `out` from `style`.
+uint32_t paintStyleGroup(const std::string& key);
+void applyStyleGroups(const Value& style, uint32_t groups, ComputedStyle* out, float pixelRatio);
+// Deep equality of style values (shared containers compare by identity first).
+bool styleValueEquals(const Value& a, const Value& b);
+
 // Chrome's border-width snapping: a width under one CSS px becomes one CSS px,
 // anything larger is floored to whole CSS px, at any device pixel ratio.
 float snapBorderWidth(float w, float pixelRatio);

@@ -63,6 +63,8 @@ void Document::destroyRecursive(Node* node) {
   }
   if (node->parent()) node->parent()->removeChild(node);
   if (onNodeDestroyed) onNodeDestroyed(node);
+  if (node->propFlags() & (Node::kAutoFocus | Node::kModal)) setFocusHint(node, false);
+  if (node->propFlags() & Node::kListensLayout) layoutListeners--;
   reportedLayout_.erase(node->id());
   nodes_.erase(node->id());
 }
@@ -76,6 +78,12 @@ void Document::destroyNode(Node* node) {
   }
   destroyRecursive(node);
   markLayoutDirty();
+}
+
+void Document::setFocusHint(Node* n, bool on) {
+  auto it = std::find(focusHints_.begin(), focusHints_.end(), n);
+  if (on && it == focusHints_.end()) focusHints_.push_back(n);
+  if (!on && it != focusHints_.end()) focusHints_.erase(it);
 }
 
 void Document::queueImageEvents(uint32_t node, bool cached) {
@@ -132,6 +140,8 @@ bool Document::layout() {
     layoutDirty_ = paintDirty_ = true;
   }
   if (!layoutDirty_) return false;
+  Perf::Scope scope(perf, Phase::Layout);
+  perf.counters.layoutPasses++;
   layoutDirty_ = false;
   // An armed LayoutAnimation compares the frames before and after this pass.
   std::vector<std::pair<Node*, Rect>> before;
@@ -144,27 +154,33 @@ bool Document::layout() {
     armedSet_ = false;
     startLayoutAnimations(before);
   }
-  if (onLayout) reportLayout(root_);
+  afterLayout(root_, onLayout && layoutListeners > 0);
   paintDirty_ = true;
   return true;
 }
 
-void Document::reportLayout(Node* node) {
-  if (node->yoga() && YGNodeGetHasNewLayout(node->yoga())) {
-    YGNodeSetHasNewLayout(node->yoga(), false);
-    for (auto& e : node->props()["__events"].asArray()) {
-      if (e.asString() == "layout") {
-        Rect r = node->layoutRect();
-        auto& prev = reportedLayout_[node->id()];
-        if (prev.x != r.x || prev.y != r.y || prev.width != r.width || prev.height != r.height) {
-          prev = r;
-          onLayout(node, r);
-        }
-        break;
-      }
+// Visits only what this pass laid out: Yoga flags every node it lays out
+// (hasNewLayout), and a node it did not reach (its parent's layout came from
+// the cache) cannot have a flagged descendant, so unflagged subtrees are
+// skipped (React Native does the same). A node whose frame moved dirties the
+// hit-test bounds of its ancestors; onLayout listeners are told about it.
+void Document::afterLayout(Node* node, bool report) {
+  if (!node->yoga() || !YGNodeGetHasNewLayout(node->yoga())) return;
+  YGNodeSetHasNewLayout(node->yoga(), false);
+  Rect r = node->layoutRect();
+  const Rect& b = node->boundsLayout;
+  if (b.x != r.x || b.y != r.y || b.width != r.width || b.height != r.height) {
+    node->boundsLayout = r;
+    node->markBoundsDirty();
+  }
+  if (report && (node->propFlags() & Node::kListensLayout)) {
+    auto& prev = reportedLayout_[node->id()];
+    if (prev.x != r.x || prev.y != r.y || prev.width != r.width || prev.height != r.height) {
+      prev = r;
+      onLayout(node, r);
     }
   }
-  for (Node* c : node->children()) reportLayout(c);
+  for (Node* c : node->children()) afterLayout(c, report);
 }
 
 }  // namespace jsui

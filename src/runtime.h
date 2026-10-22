@@ -165,4 +165,8 @@ class Runtime {
   std::unique_ptr<DevOverlay> overlay_;
 };
 
+// The Runtime behind a C handle (tools and tests that read internals such as
+// Document::perf).
+Runtime* internalRuntime(JsuiRuntime* handle);
+
 }  // namespace jsui

@@ -392,17 +392,11 @@ void NativeAnimated::applyProps(ANode& p) {
   Node* view = p.view ? doc_.get(p.view) : nullptr;
   if (!view) return;
   const Value& partial = evalOut(p.tag);
-  Value::Object props = view->props().asObject();
-  Value::Object style = view->props()["style"].asObject();
-  for (auto& [k, v] : partial.asObject()) {
-    if (v.isNull()) style.erase(k);
-    else style.insert_or_assign(k, v);
-  }
-  props.insert_or_assign("style", Value(std::move(style)));
-  // setProps skips identical props and only relayouts for layout keys (the
-  // JS side only lets paint keys through), so this repaints just the
-  // node's rects.
-  view->setProps(Value(std::move(props)));
+  // patchStyle skips unchanged values and, for the paint keys the JS side
+  // lets through, updates the style in place and re-resolves just those
+  // keys' style groups: no relayout, only the node's rects repaint.
+  doc_.perf.counters.animatedWrites++;
+  view->patchStyle(partial.asObject());
   p.viewPaintVersion = view->paintVersion;
   p.viewWritten = true;
 }
@@ -599,6 +593,7 @@ bool NativeAnimated::step(Anim& a, double t) {
 }
 
 void NativeAnimated::tick(double nowMs) {
+  Perf::Scope scope(doc_.perf, Phase::Animated);
   for (size_t i = 0; i < animations_.size();) {
     Anim& a = animations_[i];
     if (step(a, nowMs)) {

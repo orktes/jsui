@@ -58,6 +58,19 @@ class Node {
   // `props["__events"] = ["press", "pointerMove", ...]` used for hit testing.
   void setProps(const Value& props);
   const Value& props() const { return props_; }
+  // Merges `partial` into props().style (a null value removes the key), like
+  // setProps with the merged style but without copying the props: when only
+  // paint keys change, the style object is updated in place (copy-on-write)
+  // and just their style groups are re-resolved. Returns false if nothing
+  // changed. The animation path (patchStyle, native Animated).
+  bool patchStyle(const Value::Object& partial);
+  // Facts about props() that hot paths ask for (computed by setProps).
+  enum PropFlag : uint8_t {
+    kListensLayout = 1,  // __events has "layout" (onLayout)
+    kAutoFocus = 2,      // autoFocus / hasTVPreferredFocus
+    kModal = 4,          // accessibilityViewIsModal / aria-modal
+  };
+  uint8_t propFlags() const { return propFlags_; }
   // Re-applies the current props (e.g. after a pixel-ratio change, which
   // affects border-width snapping).
   void restyle();
@@ -131,7 +144,30 @@ class Node {
   // text, children list). The painter compares it against its cache.
   uint32_t paintVersion = 0;
 
+  // Hit-test culling (InputManager::hitNode). A clean node caches whether
+  // every hittable point of its subtree lies inside its own box, so a
+  // pointer outside the box can skip the subtree. Anything that can move a
+  // descendant's hittable area (layout, transform, display, pointerEvents,
+  // overflow, scroll, children, LayoutAnimation frames) calls
+  // markBoundsDirty(), which dirties this node and its ancestors. A clean
+  // node's children are always clean, so marking stops at the first dirty
+  // ancestor.
+  void markBoundsDirty() {
+    for (Node* n = this; n && !n->boundsDirty_; n = n->parent_) n->boundsDirty_ = true;
+  }
+  bool boundsDirty() const { return boundsDirty_; }
+  bool boundsContained() const { return boundsContained_; }
+  void setBoundsContained(bool c) {
+    boundsContained_ = c;
+    boundsDirty_ = false;
+  }
+  // layoutRect() as of the last post-layout pass (Document::afterLayout).
+  Rect boundsLayout{-1, -1, -1, -1};
+
  private:
+  void updatePropFlags();
+  // Text / TextInput: invalidates the paragraph after a style change.
+  void textStyleChanged(const TextStyle& oldText, bool propsMetrics, bool propsPaint, bool* relayout);
   void attachYoga(Node* child, size_t index);
   void detachYoga(Node* child);
 
@@ -142,6 +178,8 @@ class Node {
   std::vector<Node*> children_;
   YGNodeRef yoga_ = nullptr;
   Value props_;
+  uint8_t propFlags_ = 0;
+  bool boundsDirty_ = true, boundsContained_ = false;
   ComputedStyle style_;
   std::string text_;
 };

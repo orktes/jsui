@@ -249,13 +249,62 @@ Node* InputManager::hitTest(float x, float y, float* localX, float* localY) {
   return hitNode(rt_.doc.root(), x, y, localX, localY);
 }
 
+// Whether every point hitNode can return in n's subtree lies inside n's
+// border box (Node::markBoundsDirty documents the caching). Clipping nodes,
+// Text (a leaf here) and box-only nodes are contained by definition. Every
+// child is evaluated, even when the answer is already known, so a clean node
+// only ever has clean children.
+bool InputManager::subtreeContained(Node* n) {
+  if (!n->boundsDirty()) return n->boundsContained();
+  const ComputedStyle& s = n->style();
+  PointerEvents pe = pointerEventsOf(n);
+  bool trivial = s.overflow != Overflow::Visible || n->type() == NodeType::Text || pe == PointerEvents::BoxOnly ||
+                 pe == PointerEvents::None || !s.display;
+  bool contained = true;
+  Rect box = n->visualRect();
+  for (Node* c : n->children()) {
+    if (!c->yoga()) continue;
+    bool inner = subtreeContained(c);
+    if (trivial) continue;
+    if (!c->style().display || pointerEventsOf(c) == PointerEvents::None) continue;
+    Rect r = c->visualRect();
+    if (!finiteRect(r)) continue;  // not laid out: hitNode skips it
+    if (!inner) {
+      contained = false;
+      break;
+    }
+    // c's box in n's border-box space (n's content space minus its scroll).
+    float x0 = r.x, y0 = r.y, x1 = r.x + r.width, y1 = r.y + r.height;
+    bool strict = !c->style().transform.empty();
+    if (strict) {
+      Affine m = nodeLocalToParent(c);
+      float xs[4], ys[4];
+      m.apply(0, 0, &xs[0], &ys[0]);
+      m.apply(r.width, 0, &xs[1], &ys[1]);
+      m.apply(r.width, r.height, &xs[2], &ys[2]);
+      m.apply(0, r.height, &xs[3], &ys[3]);
+      x0 = *std::min_element(xs, xs + 4), x1 = *std::max_element(xs, xs + 4);
+      y0 = *std::min_element(ys, ys + 4), y1 = *std::max_element(ys, ys + 4);
+    }
+    x0 -= n->scrollX, x1 -= n->scrollX, y0 -= n->scrollY, y1 -= n->scrollY;
+    bool inside = x0 >= 0 && y0 >= 0 && (strict ? x1 < box.width && y1 < box.height : x1 <= box.width && y1 <= box.height);
+    if (!inside) contained = false;
+  }
+  if (!contained) {
+    // The loop may have stopped early: finish cleaning the children.
+    for (Node* c : n->children())
+      if (c->yoga()) subtreeContained(c);
+  }
+  n->setBoundsContained(contained);
+  return contained;
+}
+
 // (px, py) is in the parent's content space (parent-local + parent scroll).
 Node* InputManager::hitNode(Node* n, float px, float py, float* outX, float* outY) {
+  rt_.doc.perf.counters.hitNodes++;
   if (!n->yoga()) return nullptr;
   const ComputedStyle& s = n->style();
   if (!s.display) return nullptr;
-  PointerEvents pe = pointerEventsOf(n);
-  if (pe == PointerEvents::None) return nullptr;
   Rect r = n->visualRect();
   if (!finiteRect(r)) return nullptr;  // never laid out yet
 
@@ -268,6 +317,13 @@ Node* InputManager::hitNode(Node* n, float px, float py, float* outX, float* out
     if (!nodeLocalToParent(n).invert(&inv)) return nullptr;  // scale(0): nothing to hit
     inv.apply(px, py, &lx, &ly);
   }
+  // Outside the box of a subtree that stays inside it: nothing here to hit
+  // (the common case for most rows of a long list).
+  if (!(lx >= 0 && ly >= 0 && lx < r.width && ly < r.height) &&
+      (s.overflow != Overflow::Visible || subtreeContained(n)))
+    return nullptr;
+  PointerEvents pe = pointerEventsOf(n);
+  if (pe == PointerEvents::None) return nullptr;
   bool inside = insideBox(s, r.width, r.height, lx, ly);
   if (s.overflow != Overflow::Visible && !inside) return nullptr;
 
@@ -350,6 +406,7 @@ void InputManager::addModifiers(Value::Object& ev) const {
 
 bool InputManager::dispatch(Value::Object&& ev) {
   if (!rt_.js) return false;
+  rt_.doc.perf.counters.events++;
   Value event(std::move(ev));
   // Animated.event(..., {useNativeDriver: true}) mappings apply natively,
   // before (and independently of) JS.
@@ -696,20 +753,50 @@ void InputManager::nodeRemoved(Node* n) {
   scrolls_.erase(n->id());
 }
 
+namespace {
+
+// The path of child indices from the root, or false when `n` is not in the
+// tree or a tree walk from the root that skips undisplayed subtrees (and,
+// with `skipTextChildren`, the children of Text) would not reach it.
+bool displayedPath(const Node* root, const Node* n, bool skipTextChildren, std::vector<uint32_t>* path) {
+  path->clear();
+  for (const Node* c = n; c != root; c = c->parent()) {
+    const Node* p = c->parent();
+    if (!p || !c->yoga() || !c->style().display) return false;
+    if (skipTextChildren && p->type() == NodeType::Text) return false;
+    const auto& kids = p->children();
+    path->push_back(uint32_t(std::find(kids.begin(), kids.end(), c) - kids.begin()));
+  }
+  if (!root->yoga() || !root->style().display) return false;
+  std::reverse(path->begin(), path->end());
+  return true;
+}
+
+// Candidates (Document::focusHints with `flag`) that a displayed-tree walk
+// reaches, in tree (pre-)order.
+void hintsInTreeOrder(const Document& doc, uint8_t flag, bool skipTextChildren, std::vector<Node*>* out) {
+  out->clear();
+  std::vector<std::pair<std::vector<uint32_t>, Node*>> keyed;
+  std::vector<uint32_t> path;
+  for (Node* n : doc.focusHints()) {
+    if (!(n->propFlags() & flag)) continue;
+    if (displayedPath(doc.root(), n, skipTextChildren, &path)) keyed.emplace_back(path, n);
+  }
+  std::sort(keyed.begin(), keyed.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+  for (auto& k : keyed) out->push_back(k.second);
+}
+
+}  // namespace
+
 Node* InputManager::modalScope() const {
   // The last displayed modal subtree in tree order traps focus
   // (accessibilityViewIsModal / aria-modal), like a dialog.
   Node* scope = rt_.doc.root();
-  std::vector<Node*> stack{rt_.doc.root()};
-  while (!stack.empty()) {
-    Node* n = stack.back();
-    stack.pop_back();
-    if (!n->yoga() || !n->style().display) continue;
-    const Value& p = n->props();
-    if (n != rt_.doc.root() && (truthy(p["accessibilityViewIsModal"]) || truthy(p["aria-modal"]))) scope = n;
-    if (n->type() == NodeType::Text) continue;
-    for (size_t i = n->children().size(); i-- > 0;) stack.push_back(n->children()[i]);
-  }
+  if (rt_.doc.focusHints().empty()) return scope;
+  std::vector<Node*> modals;
+  hintsInTreeOrder(rt_.doc, Node::kModal, true, &modals);
+  for (Node* n : modals)
+    if (n != rt_.doc.root()) scope = n;
   return scope;
 }
 
@@ -837,16 +924,11 @@ void InputManager::tickFocusScopes() {
   // New autoFocus / hasTVPreferredFocus nodes take focus when nothing (or
   // nothing inside the active scope) is focused.
   uint32_t autoId = 0;
-  std::vector<Node*> stack{rt_.doc.root()};
-  while (!stack.empty()) {
-    Node* n = stack.back();
-    stack.pop_back();
-    if (!n->yoga() || !n->style().display) continue;
-    const Value& p = n->props();
-    if ((truthy(p["autoFocus"]) || truthy(p["hasTVPreferredFocus"])) && autoFocusSeen_.insert(n->id()).second &&
-        !autoId && inside(n, scope) && isFocusable(n))
-      autoId = n->id();
-    for (size_t i = n->children().size(); i-- > 0;) stack.push_back(n->children()[i]);
+  if (!rt_.doc.focusHints().empty()) {
+    std::vector<Node*> hints;
+    hintsInTreeOrder(rt_.doc, Node::kAutoFocus, false, &hints);
+    for (Node* n : hints)
+      if (autoFocusSeen_.insert(n->id()).second && !autoId && inside(n, scope) && isFocusable(n)) autoId = n->id();
   }
 
   if (sid != scopeId_) {
@@ -1052,6 +1134,7 @@ void InputManager::gamepadConnected(int pad, bool connected, const char* id) {
 // ------------------------------------------------------------------- tick
 
 void InputManager::tick(double nowMs) {
+  Perf::Scope perfScope(rt_.doc.perf, Phase::Input);
   double dt = lastTick_ < 0 ? 0 : std::clamp(nowMs - lastTick_, 0.0, 100.0);
   lastTick_ = nowMs;
   // Held D-pad / stick repeat: first after kRepeatDelayMs, then every

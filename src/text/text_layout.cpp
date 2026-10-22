@@ -636,7 +636,10 @@ TextCache* ensureCache(Node* n) {
   }
   builder->pop();
   fresh->empty = st.content.empty();
-  if (!fresh->empty) fresh->paragraph = builder->Build();
+  if (!fresh->empty) {
+    fresh->paragraph = builder->Build();
+    if (doc) doc->perf.counters.paragraphBuilds++;
+  }
   cache = fresh.get();
   n->textCache = std::move(fresh);
   return cache;
@@ -648,6 +651,7 @@ void layoutAt(TextCache* c, float width) {
     // First layout: unconstrained, to learn the intrinsic widths.
     c->paragraph->layout(kInf);
     c->laidOutWidth = kInf;
+    gParagraphLayouts++;
     c->blobs.clear();
     c->maxIntrinsic = c->paragraph->getMaxIntrinsicWidth();
   }
@@ -659,6 +663,7 @@ void layoutAt(TextCache* c, float width) {
   if (w != c->laidOutWidth) {
     c->paragraph->layout(w);
     c->laidOutWidth = w;
+    gParagraphLayouts++;
     c->blobs.clear();
   }
 }
@@ -667,6 +672,7 @@ YGSize measureText(YGNodeConstRef y, float width, YGMeasureMode wm, float height
   (void)height;
   (void)hm;
   Node* n = static_cast<Node*>(YGNodeGetContext(y));
+  if (n && n->document()) n->document()->perf.counters.textMeasures++;
   TextCache* c = n ? ensureCache(n) : nullptr;
   bool isInput = n && n->type() == NodeType::TextInput;
   if (!c || (c->empty && !isInput)) return {0, 0};
@@ -676,7 +682,9 @@ YGSize measureText(YGNodeConstRef y, float width, YGMeasureMode wm, float height
     float lh = n->style().text.lineHeight.value_or(std::ceil(fs * 1.21f));
     return {wm == YGMeasureModeExactly ? width : fs * 11, lh};
   }
-  layoutAt(c, kInf);
+  // The max-content width is known after the first layout; laying out at
+  // infinity again would cost a second Paragraph::layout per measure.
+  if (c->laidOutWidth < 0) layoutAt(c, kInf);
   float maxW = c->maxIntrinsic;
   float target = maxW;
   if (wm == YGMeasureModeExactly) target = width;

@@ -219,6 +219,7 @@ class InputManager {
   };
 
   Node* hitNode(Node* n, float px, float py, float* lx, float* ly);
+  bool subtreeContained(Node* n);
   bool attached(const Node* n) const;
   bool visible(const Node* n) const;  // attached and no display:none on the path
   Affine localToViewport(const Node* n) const;

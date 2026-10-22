@@ -301,3 +301,115 @@ TEST(style_paint_only_changes_skip_layout) {
   t->setProps(Value::parseJson(R"({"style":{"color":"blue","fontSize":30}})"));
   CHECK(doc.layout());
 }
+
+// ---------------------------------------------- incremental (paint-only) restyle
+namespace {
+bool sameLength(const Length& a, const Length& b) { return a.value == b.value && a.percent == b.percent; }
+bool sameStyle(const ComputedStyle& a, const ComputedStyle& b) {
+  bool ok = a.backgroundColor == b.backgroundColor && a.opacity == b.opacity && a.borderStyle == b.borderStyle &&
+            a.overflow == b.overflow && a.zIndex == b.zIndex && a.hasZIndex == b.hasZIndex &&
+            a.pointerEvents == b.pointerEvents && a.cursor == b.cursor && a.display == b.display &&
+            a.resizeMode == b.resizeMode && a.hasResizeMode == b.hasResizeMode &&
+            a.tintColor.has_value() == b.tintColor.has_value() && (!a.tintColor || *a.tintColor == *b.tintColor) &&
+            a.text == b.text && textMetricsEqual(a.text, b.text) && a.backfaceHidden == b.backfaceHidden &&
+            a.blendMode == b.blendMode && a.outlineWidth == b.outlineWidth && a.outlineOffset == b.outlineOffset &&
+            a.outlineColor == b.outlineColor && a.outlineStyle == b.outlineStyle && a.blur == b.blur &&
+            a.brightness == b.brightness && a.contrast == b.contrast && a.saturate == b.saturate &&
+            a.grayscale == b.grayscale && a.boxShadows == b.boxShadows &&
+            a.backgroundImages.size() == b.backgroundImages.size() && a.transform.size() == b.transform.size() &&
+            a.filters.size() == b.filters.size();
+  for (int i = 0; i < 4; i++)
+    ok = ok && a.borderWidth[i] == b.borderWidth[i] && a.borderColor[i] == b.borderColor[i] &&
+         sameLength(a.borderRadius[i], b.borderRadius[i]);
+  for (int i = 0; i < 2; i++) ok = ok && sameLength(a.transformOrigin[i], b.transformOrigin[i]);
+  for (size_t i = 0; ok && i < a.transform.size(); i++)
+    ok = a.transform[i].kind == b.transform[i].kind && a.transform[i].a == b.transform[i].a &&
+         a.transform[i].b == b.transform[i].b;
+  for (size_t i = 0; ok && i < a.backgroundImages.size(); i++)
+    ok = a.backgroundImages[i].stops.size() == b.backgroundImages[i].stops.size() &&
+         a.backgroundImages[i].angle == b.backgroundImages[i].angle;
+  for (size_t i = 0; ok && i < a.filters.size(); i++)
+    ok = a.filters[i].kind == b.filters[i].kind && a.filters[i].amount == b.filters[i].amount;
+  return ok;
+}
+}  // namespace
+
+TEST(style_incremental_paint_changes_match_full_restyle) {
+  const char* styles[] = {
+      R"j({})j",
+      R"j({"width":10,"opacity":0.5,"transform":[{"translateX":4},{"scale":1.2}],"backgroundColor":"red"})j",
+      R"j({"width":10,"opacity":0.25,"transform":[{"rotate":"45deg"}],"backgroundColor":"#123","borderRadius":6,
+          "borderTopLeftRadius":"50%","borderColor":"blue","borderLeftColor":"lime"})j",
+      R"j({"width":10,"boxShadow":"0 2px 4px rgba(0,0,0,.5)","shadowColor":"#000","shadowOpacity":0.3,
+          "shadowRadius":3,"shadowOffset":{"width":1,"height":2},
+          "experimental_backgroundImage":"linear-gradient(90deg, red, blue)","filter":"blur(2px) brightness(1.5)",
+          "zIndex":3})j",
+      R"j({"width":10,"color":"#eee","fontSize":18,"fontWeight":"700","textShadow":"0 1px 2px black",
+          "letterSpacing":1,"textAlign":"center","transformOrigin":"0 0","cursor":"pointer"})j",
+      R"j({"width":10,"pointerEvents":"box-none","tintColor":"red","resizeMode":"contain",
+          "backfaceVisibility":"hidden","mixBlendMode":"multiply","outlineWidth":2.5,"outlineColor":"red",
+          "outlineStyle":"dashed","outlineOffset":1,"borderStyle":"dotted",
+          "backgroundImage":"radial-gradient(circle, red, blue)"})j",
+      R"j({"width":10,"overflow":"hidden","opacity":0.5})j",
+      R"j({"width":20,"opacity":0.5})j",
+  };
+  YGNodeRef y = YGNodeNew();
+  int incremental = 0, full = 0;
+  for (const char* from : styles) {
+    for (const char* to : styles) {
+      Value a = Value::parseJson(from), b = Value::parseJson(to);
+      ComputedStyle s, expect;
+      applyStyle(a, &s, y);
+      bool changed = false;
+      if (applyPaintStyleChanges(a, b, &s, 1, &changed)) {
+        incremental++;
+        applyStyle(b, &expect, y);
+        if (!sameStyle(s, expect)) std::fprintf(stderr, "  incremental restyle differs: %s -> %s\n", from, to);
+        CHECK(sameStyle(s, expect));
+        CHECK_EQ(changed, !styleValueEquals(a, b));
+      } else {
+        full++;
+      }
+    }
+  }
+  // Layout keys (width, overflow) take the full path.
+  CHECK(incremental > 20);
+  CHECK(full > 10);
+  ComputedStyle s;
+  bool changed = false;
+  CHECK(!applyPaintStyleChanges(Value::parseJson(R"({"width":1})"), Value::parseJson(R"({"width":2})"), &s, 1, &changed));
+  CHECK(!applyPaintStyleChanges(Value::parseJson(R"({"opacity":1})"), Value::parseJson(R"({"margin":2})"), &s, 1, &changed));
+  CHECK(!applyPaintStyleChanges(Value(), Value::parseJson(R"({"opacity":1})"), &s, 1, &changed));
+  // Unknown keys are not assumed to be paint-only.
+  CHECK(!applyPaintStyleChanges(Value::parseJson("{}"), Value::parseJson(R"({"someFutureKey":1})"), &s, 1, &changed));
+  YGNodeFree(y);
+}
+
+TEST(style_incremental_restyle_never_dirties_layout) {
+  Document doc;
+  Node* n = doc.createNode(NodeType::View);
+  doc.root()->appendChild(n);
+  n->setProps(Value::parseJson(R"({"style":{"width":50,"height":20,"opacity":1,"backgroundColor":"red"}})"));
+  doc.layout();
+  uint64_t resolves = doc.perf.counters.styleResolves;
+  uint64_t passes = doc.perf.counters.layoutPasses;
+  const char* moved = R"({"style":{"width":50,"height":20,"opacity":0.5,"backgroundColor":"red","transform":[{"translateX":3}]}})";
+  n->setProps(Value::parseJson(moved));
+  CHECK(!doc.layout());  // paint-only: no layout pass
+  CHECK_NEAR(n->style().opacity, 0.5, 1e-6);
+  CHECK_EQ(n->style().transform.size(), size_t(1));
+  CHECK_EQ(doc.perf.counters.styleResolves, resolves + 1);
+  // The pointerEvents prop overrides the style and goes away with the prop.
+  n->setProps(Value::parseJson(
+      R"({"pointerEvents":"none","style":{"width":50,"height":20,"opacity":0.5,"backgroundColor":"red","transform":[{"translateX":3}]}})"));
+  CHECK(n->style().pointerEvents == PointerEvents::None);
+  n->setProps(Value::parseJson(moved));
+  CHECK(n->style().pointerEvents == PointerEvents::Auto);
+  CHECK(!doc.layout());
+  CHECK_EQ(doc.perf.counters.layoutPasses, passes);
+  n->setProps(Value::parseJson(R"({"style":{"width":60,"height":20}})"));
+  CHECK(doc.layout());
+  CHECK_NEAR(n->layoutRect().width, 60, 1e-6);
+  CHECK_NEAR(n->style().opacity, 1, 1e-6);
+  CHECK(n->style().transform.empty());
+}

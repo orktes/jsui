@@ -1483,7 +1483,279 @@ void parseBorderColors(const StyleMap& style, Color out[4]) {
   }
 }
 
+
+// ---- Paint groups. Each group's ComputedStyle fields depend only on the
+// style keys listed for it in kPaintKeys, so a change of those keys alone
+// re-resolves just that group (applyPaintStyleChanges): an Animated
+// transform or opacity frame does not re-parse gradients, shadows and the
+// Yoga properties of the node.
+enum PaintGroup : uint32_t {
+  kGroupBackground = 1u << 0,
+  kGroupOpacity = 1u << 1,
+  kGroupBorderColor = 1u << 2,
+  kGroupRadii = 1u << 3,
+  kGroupBorderStyle = 1u << 4,
+  kGroupShadow = 1u << 5,
+  kGroupBackgroundImage = 1u << 6,
+  kGroupTransform = 1u << 7,
+  kGroupTransformOrigin = 1u << 8,
+  kGroupFilter = 1u << 9,
+  kGroupZIndex = 1u << 10,
+  kGroupPointerEvents = 1u << 11,
+  kGroupCursor = 1u << 12,
+  kGroupResizeMode = 1u << 13,
+  kGroupTint = 1u << 14,
+  kGroupBackface = 1u << 15,
+  kGroupBlend = 1u << 16,
+  kGroupOutline = 1u << 17,
+  kGroupText = 1u << 18,
+};
+constexpr uint32_t kAllPaintGroups = (1u << 19) - 1;
+
+struct PaintKey {
+  const char* key;
+  uint32_t group;
+};
+// Sorted by key (binary search). Keys not listed (layout keys, unknown keys)
+// make applyPaintStyleChanges fall back to a full applyStyle.
+constexpr PaintKey kPaintKeys[] = {
+    {"backfaceVisibility", kGroupBackface},
+    {"backgroundColor", kGroupBackground},
+    {"backgroundImage", kGroupBackgroundImage},
+    {"borderBlockColor", kGroupBorderColor},
+    {"borderBlockEndColor", kGroupBorderColor},
+    {"borderBlockStartColor", kGroupBorderColor},
+    {"borderBottomColor", kGroupBorderColor},
+    {"borderBottomEndRadius", kGroupRadii},
+    {"borderBottomLeftRadius", kGroupRadii},
+    {"borderBottomRightRadius", kGroupRadii},
+    {"borderBottomStartRadius", kGroupRadii},
+    {"borderColor", kGroupBorderColor},
+    {"borderEndColor", kGroupBorderColor},
+    {"borderEndEndRadius", kGroupRadii},
+    {"borderEndStartRadius", kGroupRadii},
+    {"borderLeftColor", kGroupBorderColor},
+    {"borderRadius", kGroupRadii},
+    {"borderRightColor", kGroupBorderColor},
+    {"borderStartColor", kGroupBorderColor},
+    {"borderStartEndRadius", kGroupRadii},
+    {"borderStartStartRadius", kGroupRadii},
+    {"borderStyle", kGroupBorderStyle},
+    {"borderTopColor", kGroupBorderColor},
+    {"borderTopEndRadius", kGroupRadii},
+    {"borderTopLeftRadius", kGroupRadii},
+    {"borderTopRightRadius", kGroupRadii},
+    {"borderTopStartRadius", kGroupRadii},
+    {"boxShadow", kGroupShadow},
+    {"color", kGroupText},
+    {"cursor", kGroupCursor},
+    {"experimental_backgroundImage", kGroupBackgroundImage},
+    {"filter", kGroupFilter},
+    {"fontFamily", kGroupText},
+    {"fontSize", kGroupText},
+    {"fontStyle", kGroupText},
+    {"fontVariant", kGroupText},
+    {"fontWeight", kGroupText},
+    {"letterSpacing", kGroupText},
+    {"lineHeight", kGroupText},
+    {"mixBlendMode", kGroupBlend},
+    {"objectFit", kGroupResizeMode},
+    {"opacity", kGroupOpacity},
+    {"outlineColor", kGroupOutline},
+    {"outlineOffset", kGroupOutline},
+    {"outlineStyle", kGroupOutline},
+    {"outlineWidth", kGroupOutline},
+    {"pointerEvents", kGroupPointerEvents},
+    {"resizeMode", kGroupResizeMode},
+    {"shadowColor", kGroupShadow},
+    {"shadowOffset", kGroupShadow},
+    {"shadowOpacity", kGroupShadow},
+    {"shadowRadius", kGroupShadow},
+    {"textAlign", kGroupText},
+    {"textDecoration", kGroupText},
+    {"textDecorationColor", kGroupText},
+    {"textDecorationLine", kGroupText},
+    {"textDecorationStyle", kGroupText},
+    {"textShadow", kGroupText},
+    {"textShadowColor", kGroupText},
+    {"textShadowOffset", kGroupText},
+    {"textShadowRadius", kGroupText},
+    {"textTransform", kGroupText},
+    {"tintColor", kGroupTint},
+    {"transform", kGroupTransform},
+    {"transformOrigin", kGroupTransformOrigin},
+    {"writingDirection", kGroupText},
+    {"zIndex", kGroupZIndex},
+};
+
+uint32_t paintGroupOf(const std::string& key) {
+  size_t lo = 0, hi = sizeof(kPaintKeys) / sizeof(kPaintKeys[0]);
+  while (lo < hi) {
+    size_t mid = (lo + hi) / 2;
+    int c = std::strcmp(kPaintKeys[mid].key, key.c_str());
+    if (c == 0) return kPaintKeys[mid].group;
+    if (c < 0) lo = mid + 1;
+    else hi = mid;
+  }
+  return 0;
+}
+
+// Resets the fields of `groups` to their defaults and parses them from `s`.
+void applyPaintGroups(const StyleMap& s, uint32_t groups, ComputedStyle* out, float pixelRatio) {
+  static const ComputedStyle kDefault;
+  float f;
+  if (groups & kGroupBackground) {
+    out->backgroundColor = kDefault.backgroundColor;
+    parseColor(s["backgroundColor"], &out->backgroundColor);
+  }
+  if (groups & kGroupOpacity) {
+    out->opacity = 1;
+    if (numFromValue(s["opacity"], &f)) out->opacity = clamp01(f);
+  }
+  if (groups & kGroupBorderColor) parseBorderColors(s, out->borderColor);
+  if (groups & kGroupRadii) parseRadii(s, out->borderRadius);
+  if (groups & kGroupBorderStyle) {
+    out->borderStyle = BorderStyle::Solid;
+    parseBorderStyle(s["borderStyle"], &out->borderStyle);
+  }
+  if (groups & kGroupShadow) {
+    out->boxShadows.clear();
+    if (s.has("boxShadow")) parseBoxShadow(s["boxShadow"], &out->boxShadows);
+    // Legacy RN shadow props, mapped like react-native-web: one outer shadow
+    // with alpha multiplied by shadowOpacity, appended after boxShadow.
+    if (s.has("shadowColor") || s.has("shadowOffset") || s.has("shadowOpacity") || s.has("shadowRadius")) {
+      Shadow sh;
+      sh.color = {0, 0, 0, 1};
+      if (s.has("shadowColor")) parseColor(s["shadowColor"], &sh.color);
+      float op = 1;
+      if (numFromValue(s["shadowOpacity"], &op)) sh.color.a *= clamp01(op);
+      pxFromValue(s["shadowOffset"]["width"], &sh.offsetX);
+      pxFromValue(s["shadowOffset"]["height"], &sh.offsetY);
+      pxFromValue(s["shadowRadius"], &sh.blur);
+      sh.blur = std::max(0.f, sh.blur);
+      if (!sh.color.transparent()) out->boxShadows.push_back(sh);
+    }
+  }
+  if (groups & kGroupBackgroundImage) {
+    out->backgroundImages.clear();
+    if (s.has("experimental_backgroundImage")) parseBackgroundImage(s["experimental_backgroundImage"], &out->backgroundImages);
+    else if (s.has("backgroundImage")) parseBackgroundImage(s["backgroundImage"], &out->backgroundImages);
+  }
+  if (groups & kGroupTransform) {
+    out->transform.clear();
+    if (s.has("transform")) parseTransform(s["transform"], &out->transform);
+  }
+  if (groups & kGroupTransformOrigin) {
+    out->transformOrigin[0] = kDefault.transformOrigin[0];
+    out->transformOrigin[1] = kDefault.transformOrigin[1];
+    if (s.has("transformOrigin")) parseTransformOrigin(s["transformOrigin"], out->transformOrigin);
+  }
+  if (groups & kGroupFilter) {
+    out->filters.clear();
+    out->blur = kDefault.blur;
+    out->brightness = kDefault.brightness;
+    out->contrast = kDefault.contrast;
+    out->saturate = kDefault.saturate;
+    out->grayscale = kDefault.grayscale;
+    if (s.has("filter")) {
+      parseFilter(s["filter"], &out->filters);
+      for (auto& op : out->filters) {
+        switch (op.kind) {
+          case FilterOp::Kind::Blur: out->blur = op.amount; break;
+          case FilterOp::Kind::Brightness: out->brightness = op.amount; break;
+          case FilterOp::Kind::Contrast: out->contrast = op.amount; break;
+          case FilterOp::Kind::Saturate: out->saturate = op.amount; break;
+          case FilterOp::Kind::Grayscale: out->grayscale = op.amount; break;
+          default: break;
+        }
+      }
+    }
+  }
+  if (groups & kGroupZIndex) {
+    out->zIndex = 0;
+    out->hasZIndex = false;
+    const Value& z = s["zIndex"];
+    if (z.isNumber() && std::isfinite(z.asNumber())) {
+      out->zIndex = int(z.asNumber());
+      out->hasZIndex = true;
+    }
+  }
+  if (groups & kGroupPointerEvents) {
+    out->pointerEvents = PointerEvents::Auto;
+    if (s["pointerEvents"].isString()) {
+      const std::string& v = s["pointerEvents"].asString();
+      out->pointerEvents = v == "none"       ? PointerEvents::None
+                           : v == "box-none" ? PointerEvents::BoxNone
+                           : v == "box-only" ? PointerEvents::BoxOnly
+                                             : PointerEvents::Auto;
+    }
+  }
+  if (groups & kGroupCursor) {
+    out->cursor.clear();
+    if (s["cursor"].isString()) out->cursor = s["cursor"].asString();
+  }
+  if (groups & kGroupResizeMode) {
+    out->resizeMode = kDefault.resizeMode;
+    out->hasResizeMode = false;
+    if (parseResizeMode(s["resizeMode"], &out->resizeMode) || parseResizeMode(s["objectFit"], &out->resizeMode))
+      out->hasResizeMode = true;
+  }
+  if (groups & kGroupTint) {
+    out->tintColor.reset();
+    Color c;
+    if (parseColor(s["tintColor"], &c)) out->tintColor = c;
+  }
+  if (groups & kGroupBackface) out->backfaceHidden = s["backfaceVisibility"].asString() == "hidden";
+  if (groups & kGroupBlend) {
+    out->blendMode = 0;
+    if (s["mixBlendMode"].isString()) {
+      std::string m = lower(s["mixBlendMode"].asString());
+      for (int i = 0; i < kBlendModeCount; i++)
+        if (m == kBlendModeNames[i]) out->blendMode = uint8_t(i);
+    }
+  }
+  if (groups & kGroupOutline) {
+    out->outlineWidth = kDefault.outlineWidth;
+    out->outlineOffset = kDefault.outlineOffset;
+    out->outlineColor = kDefault.outlineColor;
+    out->outlineStyle = kDefault.outlineStyle;
+    pxFromValue(s["outlineWidth"], &out->outlineWidth);
+    out->outlineWidth = snapBorderWidth(std::max(0.f, out->outlineWidth), pixelRatio);
+    pxFromValue(s["outlineOffset"], &out->outlineOffset);
+    parseColor(s["outlineColor"], &out->outlineColor);
+    parseBorderStyle(s["outlineStyle"], &out->outlineStyle);
+  }
+  if (groups & kGroupText) {
+    out->text = TextStyle();
+    parseTextStyle(s, &out->text);
+  }
+}
+
 }  // namespace
+
+bool styleValueEquals(const Value& a, const Value& b) {
+  if (a.identity() && a.identity() == b.identity()) return true;
+  if (a.isNull() || b.isNull()) return a.isNull() && b.isNull();
+  if (a.isBool()) return b.isBool() && a.asBool() == b.asBool();
+  if (a.isNumber()) return b.isNumber() && a.asNumber() == b.asNumber();
+  if (a.isString()) return b.isString() && a.asString() == b.asString();
+  if (a.isArray()) {
+    if (!b.isArray() || a.asArray().size() != b.asArray().size()) return false;
+    for (size_t i = 0; i < a.asArray().size(); i++)
+      if (!styleValueEquals(a.asArray()[i], b.asArray()[i])) return false;
+    return true;
+  }
+  if (a.isObject()) {
+    if (!b.isObject() || a.asObject().size() != b.asObject().size()) return false;
+    auto ib = b.asObject().begin();
+    for (auto& [k, v] : a.asObject()) {
+      if (k != ib->first || !styleValueEquals(v, ib->second)) return false;
+      ++ib;
+    }
+    return true;
+  }
+  return false;
+}
 
 float snapBorderWidth(float w, float /*pixelRatio*/) {
   if (!(w > 0)) return w;
@@ -1670,79 +1942,50 @@ void applyStyle(const Value& style, ComputedStyle* out, YGNodeRef yoga, float pi
   out->borderWidth[3] = pick({YGEdgeStart, YGEdgeLeft, YGEdgeHorizontal, YGEdgeAll});
 
   if (s.isNull()) return;
+  applyPaintGroups(s, kAllPaintGroups, out, pixelRatio);
+}
 
-  // ---- Paint
-  parseColor(s["backgroundColor"], &out->backgroundColor);
-  if (numFromValue(s["opacity"], &f)) out->opacity = clamp01(f);
-  parseBorderColors(s, out->borderColor);
-  parseRadii(s, out->borderRadius);
-  parseBorderStyle(s["borderStyle"], &out->borderStyle);
+uint32_t paintStyleGroup(const std::string& key) { return paintGroupOf(key); }
 
-  if (s.has("boxShadow")) parseBoxShadow(s["boxShadow"], &out->boxShadows);
-  // Legacy RN shadow props, mapped like react-native-web: one outer shadow
-  // with alpha multiplied by shadowOpacity, appended after boxShadow.
-  if (s.has("shadowColor") || s.has("shadowOffset") || s.has("shadowOpacity") || s.has("shadowRadius")) {
-    Shadow sh;
-    sh.color = {0, 0, 0, 1};
-    if (s.has("shadowColor")) parseColor(s["shadowColor"], &sh.color);
-    float op = 1;
-    if (numFromValue(s["shadowOpacity"], &op)) sh.color.a *= clamp01(op);
-    pxFromValue(s["shadowOffset"]["width"], &sh.offsetX);
-    pxFromValue(s["shadowOffset"]["height"], &sh.offsetY);
-    pxFromValue(s["shadowRadius"], &sh.blur);
-    sh.blur = std::max(0.f, sh.blur);
-    if (!sh.color.transparent()) out->boxShadows.push_back(sh);
-  }
-  if (s.has("experimental_backgroundImage")) parseBackgroundImage(s["experimental_backgroundImage"], &out->backgroundImages);
-  else if (s.has("backgroundImage")) parseBackgroundImage(s["backgroundImage"], &out->backgroundImages);
+void applyStyleGroups(const Value& style, uint32_t groups, ComputedStyle* out, float pixelRatio) {
+  const StyleMap sm(style);
+  applyPaintGroups(sm, groups, out, pixelRatio);
+}
 
-  if (s.has("transform")) parseTransform(s["transform"], &out->transform);
-  if (s.has("transformOrigin")) parseTransformOrigin(s["transformOrigin"], out->transformOrigin);
-
-  if (s.has("filter")) {
-    parseFilter(s["filter"], &out->filters);
-    for (auto& op : out->filters) {
-      switch (op.kind) {
-        case FilterOp::Kind::Blur: out->blur = op.amount; break;
-        case FilterOp::Kind::Brightness: out->brightness = op.amount; break;
-        case FilterOp::Kind::Contrast: out->contrast = op.amount; break;
-        case FilterOp::Kind::Saturate: out->saturate = op.amount; break;
-        case FilterOp::Kind::Grayscale: out->grayscale = op.amount; break;
-        default: break;
-      }
+bool applyPaintStyleChanges(const Value& oldStyle, const Value& newStyle, ComputedStyle* out, float pixelRatio,
+                            bool* changed) {
+  *changed = false;
+  if (!oldStyle.isObject() || !newStyle.isObject()) return false;
+  if (oldStyle.identity() == newStyle.identity()) return true;
+  const Value::Object& a = oldStyle.asObject();
+  const Value::Object& b = newStyle.asObject();
+  uint32_t groups = 0;
+  auto mark = [&](const std::string& key) {
+    uint32_t g = paintGroupOf(key);
+    groups |= g;
+    return g != 0;
+  };
+  // Both maps are sorted: one merge walk finds the keys that differ.
+  auto ia = a.begin(), ib = b.begin();
+  while (ia != a.end() || ib != b.end()) {
+    int c = ia == a.end() ? 1 : ib == b.end() ? -1 : ia->first.compare(ib->first);
+    if (c < 0) {
+      if (!mark(ia->first)) return false;
+      ++ia;
+    } else if (c > 0) {
+      if (!mark(ib->first)) return false;
+      ++ib;
+    } else {
+      if (!styleValueEquals(ia->second, ib->second) && !mark(ia->first)) return false;
+      ++ia;
+      ++ib;
     }
   }
-
-  const Value& z = s["zIndex"];
-  if (z.isNumber() && std::isfinite(z.asNumber())) {
-    out->zIndex = int(z.asNumber());
-    out->hasZIndex = true;
-  }
-  if (s["pointerEvents"].isString()) {
-    std::string v = s["pointerEvents"].asString();
-    out->pointerEvents = v == "none"       ? PointerEvents::None
-                         : v == "box-none" ? PointerEvents::BoxNone
-                         : v == "box-only" ? PointerEvents::BoxOnly
-                                           : PointerEvents::Auto;
-  }
-  if (s["cursor"].isString()) out->cursor = s["cursor"].asString();
-  if (parseResizeMode(s["resizeMode"], &out->resizeMode) || parseResizeMode(s["objectFit"], &out->resizeMode))
-    out->hasResizeMode = true;
-  Color c;
-  if (parseColor(s["tintColor"], &c)) out->tintColor = c;
-  out->backfaceHidden = enumKey("backfaceVisibility") == "hidden";
-  if (s["mixBlendMode"].isString()) {
-    std::string m = lower(s["mixBlendMode"].asString());
-    for (int i = 0; i < kBlendModeCount; i++)
-      if (m == kBlendModeNames[i]) out->blendMode = uint8_t(i);
-  }
-  pxFromValue(s["outlineWidth"], &out->outlineWidth);
-  out->outlineWidth = snapBorderWidth(std::max(0.f, out->outlineWidth), pixelRatio);
-  pxFromValue(s["outlineOffset"], &out->outlineOffset);
-  parseColor(s["outlineColor"], &out->outlineColor);
-  parseBorderStyle(s["outlineStyle"], &out->outlineStyle);
-
-  parseTextStyle(s, &out->text);
+  if (!groups) return true;
+  const StyleMap sm(newStyle);
+  applyPaintGroups(sm, groups, out, pixelRatio);
+  *changed = true;
+  return true;
 }
 
 }  // namespace jsui

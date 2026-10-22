@@ -73,6 +73,7 @@ library with a C API, and the same core compiles to WebAssembly.
 | `tools/jsui-render` | Headless renderer: bundle → PNG (tests, CI) |
 | `tools/jsui-record` | Headless recorder: bundle + JSON input timeline → 60 fps frames / H.264 (ffmpeg), with cursor, caption and input-legend overlay |
 | `tools/jsui-viewer` | Windowed host with dev mode (live reload) |
+| `tools/jsui-bench` | Frame benchmark: per-phase time (JS, commit, Animated, style, layout, input, paint), work counters and allocations per frame (see "Performance") |
 | `integrations/godot` | Godot 4 GDExtension (`JsuiView` Control) + demo project |
 | `web/` | Browser host for the WASM build |
 | `packages/react` | `@jsui/react`: reconciler, components, StyleSheet, events |
@@ -410,7 +411,7 @@ Native globals (installed by `JsEngine`):
 | `__jsui_native.devMode` | `true` when the runtime runs with `cfg.dev_mode` |
 | `createNode(type) → id` | `type` ∈ `View`, `Text`, `RawText`, `Image`, `ScrollView`, `TextInput` |
 | `setProps(id, props)` | replaces all props; `props.style` is a **flattened** style object; functions are dropped; `props.__events` lists event names the element listens to (e.g. `["press","pointerMove","layout"]`) |
-| `patchStyle(id, partialStyle)` | animation fast path: merges keys into the node's current `props.style` (a `null`/`undefined` value removes the key), keeps all other props, and reapplies via `Node::setProps` (which skips relayout when only paint keys such as `transform`, `opacity`, colors changed). Use it per frame from `requestAnimationFrame` instead of re-rendering through React. |
+| `patchStyle(id, partialStyle)` | animation fast path: merges keys into the node's current `props.style` (a `null`/`undefined` value removes the key) and keeps all other props (`Node::patchStyle`). When only paint keys such as `transform`, `opacity`, colors changed, the style is updated in place and only those keys' style groups are re-resolved, with no relayout; a layout key takes the `setProps` path. Use it per frame from `requestAnimationFrame` instead of re-rendering through React. |
 | `setText(id, string)` | content of a `RawText` |
 | `appendChild(p, c)`, `insertBefore(p, c, before)`, `removeChild(p, c)` | tree edits (React semantics; unknown ids and cycles are ignored). While a LayoutAnimation with `delete` is armed, `removeChild` keeps the child as a fading ghost (see "LayoutAnimation") |
 | `animated.*` | the native Animated driver (React Native's NativeAnimatedModule): `createNode(tag, config)`, `connect` / `disconnect(parent, child)`, `connectToView` / `disconnectFromView(propsTag, id)`, `dropNode`, `setValue` / `setOffset` / `flattenOffset` / `extractOffset` / `getValue(tag)`, `startAnimation(id, tag, config)`, `stopAnimation(id) → {velocity} \| null`, `addEventMapping(id, eventType, path, tag)` / `removeEventMapping`, `startListening` / `stopListening(tag)`. See "Animated" |
@@ -422,6 +423,7 @@ Native globals (installed by `JsEngine`):
 | `flashScrollIndicators(id)` | shows a ScrollView's overlay indicators for ~1 s |
 | `postMessage(name, json)` | to the embedder's `on_message`. A string is passed through as the JSON text; any other value is `JSON.stringify`-ed |
 | `getState(key) → json \| undefined`, `stateVersion(key) → number`, `stateKeys() → [key]` | shared host state (see "Game data"); version 0 = unset |
+| `statePatches(key, sinceVersion) → [json] \| undefined` | the merge patches (JSON texts) that took `key` from `sinceVersion` to its current version, oldest first; `undefined` when the bounded log (64 patches / 64 KB since the last `set`) cannot cover the gap. `@jsui/react` applies them to its cached value instead of re-parsing the whole state after each `jsui_patch_state` |
 | `setState(key, json \| undefined) → version`, `patchState(key, json) → version` | UI-owned writes (`undefined` removes); report to `on_state`; invalid JSON throws `SyntaxError` |
 | `hostCall(name, json, settle) → id` | `on_call`; `settle(ok, payload)` runs on `jsui_resolve_call` (JSON text) / `jsui_reject_call` (message). Returns 0 without `on_call` |
 | `cancelCall(id) → bool`, `callResult(id, ok, payload)` | drop an unanswered call (`on_call_cancel`); the result of a `__jsui_onCall` |
@@ -818,6 +820,61 @@ The default font is Inter (bundled); `fontFamily` falls back to it.
   Tests: `node web/test/node-smoke.mjs`, `node web/test/browser.test.mjs` (Playwright).
 * JS: `npm install` at the repo root (npm workspaces), `npx jsui build app.jsx`
   or `npx jsui dev app.jsx` (serves `bundle.js` and a reload endpoint).
+
+## Performance
+
+What a frame costs before painting, and how it stays proportional to what
+changed rather than to the tree size:
+
+* **Style.** `setProps` diffs the old and new style objects; when every
+  changed key is a known paint key, only the paint groups those keys feed
+  (opacity, transform, colors, radii, shadows, gradients, filters, text, ...)
+  are re-resolved and Yoga is not touched (`applyPaintStyleChanges`,
+  `src/core/style.cpp`). `patchStyle` (bridge and native Animated) does the
+  same in place, without copying the props.
+* **Layout.** Yoga only reruns when something layout-affecting changed; the
+  post-layout walk (`Document::afterLayout`) visits only nodes Yoga flagged
+  (`hasNewLayout`). Text measurement reuses the paragraph's intrinsic layout.
+  Yoga's `PixelGrid.cpp` is patched at configure time (`cmake/Deps.cmake`) to
+  skip pixel rounding when the point scale factor is 0, and `CalculateLayout.cpp`
+  to check for baseline alignment once per node per pass, not once per flex line.
+* **Input.** Hit testing skips a subtree when the pointer is outside the
+  subtree's root box and every hittable descendant lies inside that box
+  (cached per node, invalidated bottom-up by `Node::markBoundsDirty` on frame,
+  transform, display, overflow, pointerEvents, children, scroll and
+  LayoutAnimation changes). Focus / modal scopes track `autoFocus` /
+  `hasTVPreferredFocus` / modal nodes in a list instead of walking the tree.
+* **Host state.** `statePatches` lets JS apply a `jsui_patch_state` as a
+  merge patch. React still reconciles every child of a component that reads
+  the whole key; for large collections, select the slice each child needs
+  (`useHostStateSelector`) so unchanged children bail out.
+
+`Document::perf` counts the work (`src/core/perf.h`: bridge calls, setProps,
+style resolves, layout passes, text measures / shaping, Animated writes,
+events, hit-test node visits) and, when `profiling` is set, the exclusive
+time per phase. `tests/native/perf_counters_test.cpp` asserts on these
+counters, so regressions fail deterministically, without timing.
+
+`tools/jsui-bench` runs a bundle on a simulated 60 Hz clock and prints
+mean / p50 / p95 per phase plus the counters, Yoga layouts / cache hits /
+measures (from Yoga's event hooks) and heap allocations per frame (malloc
+interposition on glibc, `operator new` elsewhere):
+
+```sh
+cmake --build build --target jsui-bench
+tools/jsui-bench/run.sh build                   # builds tools/jsui-bench/scenarios + examples/interactions.jsx, runs the suite
+tools/jsui-bench/run.sh build --json out.json   # save; later: --compare out.json
+build/jsui-bench app.js --frames 600 --paint none --mouse-sweep 200,100,600,240
+```
+
+Options: `--frames`, `--warmup`, `--width` / `--height`, `--paint
+incremental|full|none`, `--mouse-sweep X,Y0,Y1,FRAMES` (moves the mouse
+every frame), `--patch-state KEY,SLOTS` (one `jsui_patch_state` per frame).
+Scenarios: `interactions` (examples), `list` (2000 rows, one counter),
+`menu` (native spring on hover), `inventory` (500 slots through
+`useHostState` + `jsui_patch_state`), `idle`. Under valgrind, run with
+`--tool=callgrind --instr-atstart=no`: the tool switches instrumentation on
+for the measured frames only.
 
 ## Dev mode
 
