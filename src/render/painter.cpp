@@ -11,6 +11,8 @@
 #include "render/painter.h"
 
 #include <algorithm>
+#include <cstring>
+#include <unordered_map>
 #include <cmath>
 #include <vector>
 
@@ -26,6 +28,8 @@
 #include "include/core/SkPicture.h"
 #include "include/core/SkPictureRecorder.h"
 #include "include/core/SkRRect.h"
+#include "include/core/SkRegion.h"
+#include "include/core/SkSurface.h"
 #include "include/core/SkRect.h"
 #include "include/effects/SkDashPathEffect.h"
 #include "include/effects/SkGradientShader.h"
@@ -33,6 +37,7 @@
 #include "modules/skparagraph/include/Paragraph.h"
 #include "render/image_cache.h"
 #include "render/image_node.h"
+#include "text/font_manager.h"
 #include "text/text_layout.h"
 
 namespace jsui {
@@ -140,7 +145,170 @@ sk_sp<SkMaskFilter> blurFilter(float blur) {
   return blur > 0 ? SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, blur / 2) : nullptr;  // CSS: sigma = blur / 2
 }
 
-void paintOuterShadows(SkCanvas* c, const Box& b, const ComputedStyle& s) {
+struct RootRecord;
+sk_sp<SkMaskFilter> cachedBlur(RootRecord* root, float blur);
+
+// Blurred shadow masks, rendered once per distinct shape and reused while it
+// stays the same: blurring is the most expensive thing a game UI paints
+// (cards, panels and buttons all carry shadows). Keys are in device pixels.
+struct ShadowKey {
+  float w, h, sigma, fx, fy;  // device size, device sigma, sub-pixel phase
+  float radii[8];
+  float hole[4];              // border box cut out of the shadow (relative to the shape), or zeros
+  float holeRadii[8];
+  float color[4];             // pre-coloured: drawn as a sprite, the fastest CPU blit
+  bool operator==(const ShadowKey& o) const { return std::memcmp(this, &o, sizeof(ShadowKey)) == 0; }
+};
+struct ShadowKeyHash {
+  size_t operator()(const ShadowKey& k) const {
+    const auto* p = reinterpret_cast<const uint32_t*>(&k);
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < sizeof(ShadowKey) / 4; i++) h = (h ^ p[i]) * 1099511628211ull;
+    return size_t(h);
+  }
+};
+struct ShadowMask {
+  sk_sp<SkImage> image;  // premultiplied N32
+  int margin = 0;
+  uint32_t lastUsed = 0;
+};
+struct ShadowCache {
+  std::unordered_map<ShadowKey, ShadowMask, ShadowKeyHash> masks;
+  size_t bytes = 0;
+  uint32_t frame = 0;
+  static constexpr size_t kMaxBytes = 24u << 20;
+};
+ShadowCache& shadowCache(RootRecord* root);
+
+// Draws `shape` (local coords) blurred by CSS `blur` with `paint`'s color
+// from the cache, minus `hole` (the border box, when the background does not
+// hide the shadow; baking it into the mask avoids an anti-aliased clip, which
+// is slow on the CPU). False when the transform is not axis-aligned (the
+// caller blurs directly then).
+bool drawCachedShadow(SkCanvas* c, const SkRRect& shape, const SkRRect* hole, const SkRRect& box, float blur,
+                      const SkPaint& paint, ShadowCache& cache) {
+  const SkMatrix& m = c->getTotalMatrix();
+  if (!m.isScaleTranslate() || m.getScaleX() <= 0 || m.getScaleY() <= 0) return false;
+  SkRRect dev;
+  if (!shape.transform(m, &dev)) return false;
+  const SkRect& r = dev.rect();
+  float ox = std::floor(r.left()), oy = std::floor(r.top());
+  ShadowKey key{};
+  key.w = r.width();
+  key.h = r.height();
+  key.sigma = blur / 2 * std::max(m.getScaleX(), m.getScaleY());
+  key.fx = r.left() - ox;
+  key.fy = r.top() - oy;
+  for (int i = 0; i < 4; i++) {
+    SkVector v = dev.radii(SkRRect::Corner(i));
+    key.radii[i * 2] = v.fX;
+    key.radii[i * 2 + 1] = v.fY;
+  }
+  SkRRect devHole;
+  if (hole) {
+    if (!hole->transform(m, &devHole)) return false;
+    key.hole[0] = devHole.rect().left() - r.left();
+    key.hole[1] = devHole.rect().top() - r.top();
+    key.hole[2] = devHole.rect().width();
+    key.hole[3] = devHole.rect().height();
+    for (int i = 0; i < 4; i++) {
+      SkVector v = devHole.radii(SkRRect::Corner(i));
+      key.holeRadii[i * 2] = v.fX;
+      key.holeRadii[i * 2 + 1] = v.fY;
+    }
+  }
+  SkColor4f col = paint.getColor4f();
+  key.color[0] = col.fR;
+  key.color[1] = col.fG;
+  key.color[2] = col.fB;
+  key.color[3] = col.fA;
+  auto it = cache.masks.find(key);
+  if (it == cache.masks.end()) {
+    int margin = int(std::ceil(key.sigma * 3)) + 2;
+    int iw = int(std::ceil(key.fx + key.w)) + margin * 2, ih = int(std::ceil(key.fy + key.h)) + margin * 2;
+    if (iw <= 0 || ih <= 0 || size_t(iw) * size_t(ih) > (4u << 20)) return false;  // huge: blur directly
+    sk_sp<SkSurface> surf = SkSurfaces::Raster(SkImageInfo::MakeN32Premul(iw, ih));
+    if (!surf) return false;
+    surf->getCanvas()->clear(SK_ColorTRANSPARENT);
+    SkPaint mp;
+    mp.setAntiAlias(true);
+    mp.setColor4f(col);
+    mp.setMaskFilter(SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, key.sigma));
+    SkRRect local = dev;
+    local.offset(margin - ox, margin - oy);
+    surf->getCanvas()->drawRRect(local, mp);
+    if (hole) {
+      SkPaint hp;
+      hp.setAntiAlias(true);
+      hp.setBlendMode(SkBlendMode::kDstOut);
+      SkRRect h = devHole;
+      h.offset(margin - ox, margin - oy);
+      surf->getCanvas()->drawRRect(h, hp);
+    }
+    ShadowMask sm;
+    sm.image = surf->makeImageSnapshot();
+    sm.margin = margin;
+    cache.bytes += size_t(iw) * ih * 4;
+    if (cache.bytes > ShadowCache::kMaxBytes) {
+      // Drop masks unused for a while (shapes that animated away).
+      for (auto e = cache.masks.begin(); e != cache.masks.end();) {
+        if (cache.frame - e->second.lastUsed > 2) {
+          cache.bytes -= size_t(e->second.image->width()) * e->second.image->height() * 4;
+          e = cache.masks.erase(e);
+        } else {
+          ++e;
+        }
+      }
+    }
+    it = cache.masks.emplace(key, std::move(sm)).first;
+  }
+  it->second.lastUsed = cache.frame;
+  SkPaint p;  // colour is baked in; plain src-over sprite
+  const SkImage* img = it->second.image.get();
+  float x0 = ox - float(it->second.margin), y0 = oy - float(it->second.margin);
+  SkIRect all = SkIRect::MakeXYWH(int(x0), int(y0), img->width(), img->height());
+  // The box interior (inset by its corner radii) is either cut out of the
+  // mask or covered by an opaque background: draw only the ring around it.
+  SkRRect devBox;
+  SkIRect skip = SkIRect::MakeEmpty();
+  if (box.transform(m, &devBox)) {
+    float rx = 0, ry = 0;
+    for (int i = 0; i < 4; i++) {
+      SkVector v = devBox.radii(SkRRect::Corner(i));
+      rx = std::max(rx, v.fX);
+      ry = std::max(ry, v.fY);
+    }
+    SkRect in = devBox.rect().makeInset(rx + 1, ry + 1);
+    if (!in.isEmpty()) {
+      skip = SkIRect::MakeLTRB(int(std::ceil(in.left())), int(std::ceil(in.top())), int(std::floor(in.right())),
+                               int(std::floor(in.bottom())));
+      if (!skip.intersect(all)) skip.setEmpty();
+    }
+  }
+  c->save();
+  c->setMatrix(SkMatrix::I());
+  // Whole-image draws at integer offsets take Skia's sprite blitter; the
+  // ring parts are pixel-aligned clips of the same draw.
+  auto part = [&](const SkIRect& d) {
+    if (d.isEmpty()) return;
+    c->save();
+    c->clipIRect(d);
+    c->drawImage(img, x0, y0, SkSamplingOptions(), &p);
+    c->restore();
+  };
+  if (skip.isEmpty() || skip.width() < 16 || skip.height() < 16) {
+    part(all);
+  } else {
+    part(SkIRect::MakeLTRB(all.left(), all.top(), all.right(), skip.top()));
+    part(SkIRect::MakeLTRB(all.left(), skip.bottom(), all.right(), all.bottom()));
+    part(SkIRect::MakeLTRB(all.left(), skip.top(), skip.left(), skip.bottom()));
+    part(SkIRect::MakeLTRB(skip.right(), skip.top(), all.right(), skip.bottom()));
+  }
+  c->restore();
+  return true;
+}
+
+void paintOuterShadows(SkCanvas* c, const Box& b, const ComputedStyle& s, RootRecord* root) {
   bool opaqueBg = s.backgroundColor.a >= 1 && s.backgroundImages.empty();
   // The first shadow is on top, so paint in reverse.
   for (auto it = s.boxShadows.rbegin(); it != s.boxShadows.rend(); ++it) {
@@ -152,10 +320,12 @@ void paintOuterShadows(SkCanvas* c, const Box& b, const ComputedStyle& s) {
     SkPaint p;
     p.setAntiAlias(true);
     p.setColor4f(sk(sh.color));
-    p.setMaskFilter(blurFilter(sh.blur));
-    c->save();
-    // Shadows are clipped out of the border box (visible through translucent
+    p.setMaskFilter(cachedBlur(root, sh.blur));
+    // Shadows are cut out of the border box (visible through translucent
     // backgrounds otherwise). An opaque background hides it anyway.
+    if (sh.blur > 0 && drawCachedShadow(c, shape, opaqueBg ? nullptr : &b.outer, b.outer, sh.blur, p, shadowCache(root)))
+      continue;
+    c->save();
     if (!opaqueBg) {
       SkRect bounds = shape.rect().makeOutset(sh.blur * 1.5f + 1, sh.blur * 1.5f + 1);
       c->clipRect(bounds);  // keeps the anti-aliased clip mask small
@@ -166,7 +336,7 @@ void paintOuterShadows(SkCanvas* c, const Box& b, const ComputedStyle& s) {
   }
 }
 
-void paintInsetShadows(SkCanvas* c, const Box& b, const ComputedStyle& s) {
+void paintInsetShadows(SkCanvas* c, const Box& b, const ComputedStyle& s, RootRecord* root) {
   bool any = false;
   for (auto& sh : s.boxShadows) any |= sh.inset && !sh.color.transparent();
   if (!any || b.inner.isEmpty()) return;
@@ -180,7 +350,7 @@ void paintInsetShadows(SkCanvas* c, const Box& b, const ComputedStyle& s) {
     SkPaint p;
     p.setAntiAlias(true);
     p.setColor4f(sk(sh.color));
-    p.setMaskFilter(blurFilter(sh.blur));
+    p.setMaskFilter(cachedBlur(root, sh.blur));
     c->save();
     clipRRect(c, b.inner);
     if (hole.isEmpty()) c->drawRRect(frame, p);
@@ -607,33 +777,108 @@ bool paintsChildren(const Node* n) {
   return n->type() != NodeType::Text && n->type() != NodeType::RawText && n->type() != NodeType::TextInput;
 }
 
+bool backfaceFlipped(const ComputedStyle& s) {
+  bool flipped = false;
+  for (auto& op : s.transform) flipped ^= op.flipsBackface;
+  return flipped;
+}
+
+bool isPainted(const Node* n) {
+  const ComputedStyle& s = n->style();
+  return n->yoga() && s.display && s.opacity > 0 && !(s.backfaceHidden && backfaceFlipped(s));
+}
+
+// What the previous frame painted for a node, in device pixels. Comparing
+// it with the current frame gives the damaged region (incremental repaint).
+struct NodeRecord : Node::Cache {
+  SkIRect own = SkIRect::MakeEmpty();      // the node's own painting
+  SkIRect subtree = SkIRect::MakeEmpty();  // own + descendants (within overflow clips)
+  SkMatrix matrix;                         // device matrix of the (snapped) border box
+  uint64_t children = 0;                   // child list identity (insert / remove / reorder)
+  uint32_t version = 0;
+  uint32_t imageGen = 0;
+  float w = -1, h = -1;
+  bool painted = false;
+  bool valid = false;
+};
+
+// Per-document painter state, kept on the root node.
+struct RootRecord : NodeRecord {
+  PaintStats stats;
+  uint32_t fontGen = 0;
+  std::vector<std::pair<float, sk_sp<SkMaskFilter>>> blurs;  // shadow mask filters by blur radius
+  std::vector<Node*> order;                                  // zIndex sort scratch (reused)
+  std::vector<SkIRect> curved;                               // this frame's curved-edge node bounds
+  ShadowCache shadows;
+};
+
+ShadowCache& shadowCache(RootRecord* root) { return root->shadows; }
+
+NodeRecord* record(Node* n) {
+  if (!n->paintCache) n->paintCache = n->parent() ? std::make_unique<NodeRecord>() : std::make_unique<RootRecord>();
+  return static_cast<NodeRecord*>(n->paintCache.get());
+}
+
+RootRecord* rootRecord(Document& doc) { return static_cast<RootRecord*>(record(doc.root())); }
+
 struct Ctx {
   Document& doc;
+  RootRecord* root;
+  const SkRegion* damage;  // null: paint everything
   PaintStats stats;
 };
 
+sk_sp<SkMaskFilter> cachedBlur(RootRecord* root, float blur) {
+  if (blur <= 0) return nullptr;
+  for (auto& e : root->blurs)
+    if (e.first == blur) return e.second;
+  sk_sp<SkMaskFilter> f = blurFilter(blur);
+  if (root->blurs.size() < 64) root->blurs.emplace_back(blur, f);
+  return f;
+}
+
 void paintNode(Node* n, SkCanvas* c, Ctx& ctx);
 
-// Conservative visual bounds of a node's painting (incl. descendants) in its
-// own border-box coordinates; used to size opacity / filter layers.
-SkRect visualBounds(Node* n) {
+// The node's own painting bounds (shadows, outline, overflowing text) in its
+// border-box coordinates, without descendants.
+SkRect ownVisualBounds(Node* n, float w, float h) {
   const ComputedStyle& s = n->style();
-  float w = YGNodeLayoutGetWidth(n->yoga()), h = YGNodeLayoutGetHeight(n->yoga());
   SkRect r = SkRect::MakeWH(w, h);
   for (auto& sh : s.boxShadows) {
     if (sh.inset) continue;
     float e = sh.blur * 1.5f + std::max(0.f, sh.spread);
     r.join(SkRect::MakeWH(w, h).makeOffset(sh.offsetX, sh.offsetY).makeOutset(e, e));
   }
-  if (s.outlineWidth > 0) r.join(SkRect::MakeWH(w, h).makeOutset(s.outlineWidth + std::max(0.f, s.outlineOffset), s.outlineWidth + std::max(0.f, s.outlineOffset)));
+  if (s.outlineWidth > 0) {
+    float e = s.outlineWidth + std::max(0.f, s.outlineOffset);
+    r.join(SkRect::MakeWH(w, h).makeOutset(e, e));
+  }
   if (n->type() == NodeType::Text) {
     // Text may overflow its box (long words, shadows): be generous.
-    float fs = s.text.fontSize.value_or(14);
-    float e = fs;
+    float e = s.text.fontSize.value_or(14);
     for (auto& sh : s.text.textShadows) e = std::max(e, sh.blur * 1.5f + std::fabs(sh.offsetX) + std::fabs(sh.offsetY));
     r.join(SkRect::MakeWH(w, h).makeOutset(e, e));
     if (auto* p = text::layoutParagraph(n, std::max(0.f, w))) r.join(SkRect::MakeWH(p->getLongestLine(), p->getHeight()).makeOutset(e, e));
   }
+  return r;
+}
+
+// How far filters (blur, drop-shadow) spread painting beyond the content.
+float filterOutset(const ComputedStyle& s) {
+  float e = 0;
+  for (const FilterOp& op : s.filters) {
+    if (op.kind == FilterOp::Kind::Blur) e += op.amount * 3;
+    else if (op.kind == FilterOp::Kind::DropShadow)
+      e += op.shadow.blur * 1.5f + std::max(std::fabs(op.shadow.offsetX), std::fabs(op.shadow.offsetY));
+  }
+  return e;
+}
+
+// Conservative visual bounds of a node's painting (incl. descendants) in its
+// own border-box coordinates; used to size opacity / filter layers.
+SkRect visualBounds(Node* n) {
+  float w = YGNodeLayoutGetWidth(n->yoga()), h = YGNodeLayoutGetHeight(n->yoga());
+  SkRect r = ownVisualBounds(n, w, h);
   if (paintsChildren(n) && !clipsChildren(n)) {
     for (Node* ch : n->children()) {
       if (!ch->yoga() || !ch->style().display) continue;
@@ -644,7 +889,26 @@ SkRect visualBounds(Node* n) {
       r.join(m.mapRect(cb));
     }
   }
+  float e = filterOutset(n->style());
+  if (e > 0) r.outset(e, e);
   return r;
+}
+
+// Pixel-snaps the border box like Chrome: edges round to device pixels
+// (round(x), round(x + w)), so boxes stay crisp at fractional layout
+// positions. Only under axis-aligned transforms. `m` is the device matrix at
+// the unsnapped border-box origin; returns the snap offset (local units) and
+// the snapped size.
+SkVector snapBox(const SkMatrix& m, const Rect& r, float* w, float* h) {
+  *w = r.width;
+  *h = r.height;
+  if (!m.isScaleTranslate() || m.getScaleX() <= 0 || m.getScaleY() <= 0) return {0, 0};
+  float sx = m.getScaleX(), sy = m.getScaleY();
+  float dx = m.getTranslateX(), dy = m.getTranslateY();
+  float x0 = std::floor(dx + 0.5f), y0 = std::floor(dy + 0.5f);
+  *w = (std::floor(dx + r.width * sx + 0.5f) - x0) / sx;
+  *h = (std::floor(dy + r.height * sy + 0.5f) - y0) / sy;
+  return {(x0 - dx) / sx, (y0 - dy) / sy};
 }
 
 void paintChildren(Node* n, SkCanvas* c, Ctx& ctx) {
@@ -655,25 +919,29 @@ void paintChildren(Node* n, SkCanvas* c, Ctx& ctx) {
     for (Node* ch : kids) paintNode(ch, c, ctx);
     return;
   }
-  // Stable sort by zIndex (negative first), document order otherwise.
-  std::vector<Node*> order(kids.begin(), kids.end());
-  std::stable_sort(order.begin(), order.end(),
+  // Stable sort by zIndex (negative first), document order otherwise. The
+  // scratch vector is shared by nested sorts (each uses its own range) and
+  // keeps its capacity across frames.
+  std::vector<Node*>& order = ctx.root->order;
+  size_t begin = order.size();
+  order.insert(order.end(), kids.begin(), kids.end());
+  std::stable_sort(order.begin() + long(begin), order.end(),
                    [](Node* a, Node* b) { return a->style().zIndex < b->style().zIndex; });
-  for (Node* ch : order) paintNode(ch, c, ctx);
+  for (size_t i = begin; i < begin + kids.size(); i++) paintNode(order[i], c, ctx);
+  order.resize(begin);
 }
 
 // Draws the node's own decorations, content and children in its border-box
-// coordinate space.
-// `snap` is the offset from the layout position to the pixel-snapped one
-// (already applied to the canvas); `w`, `h` the snapped size.
+// coordinate space. `snap` is the offset from the layout position to the
+// pixel-snapped one (already applied to the canvas); `w`, `h` the snapped size.
 void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float h) {
   const ComputedStyle& s = n->style();
   Box b;
   computeBox(n, w, h, &b);
   ctx.stats.nodesPainted++;
-  if (!s.boxShadows.empty()) paintOuterShadows(c, b, s);
+  if (!s.boxShadows.empty()) paintOuterShadows(c, b, s, ctx.root);
   paintBackground(c, b, s);
-  if (!s.boxShadows.empty()) paintInsetShadows(c, b, s);
+  if (!s.boxShadows.empty()) paintInsetShadows(c, b, s, ctx.root);
   paintBorders(c, b, s);
 
   // Text uses the unsnapped layout box, like Chrome's text fragments: a
@@ -685,12 +953,7 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
     if (n->type() == NodeType::Text) text::paintText(n, c, x, y, cw, ch);
     else text::paintTextInput(n, c, x, y, cw, ch);
   }
-  switch (n->type()) {
-    case NodeType::Image:
-      image::paint(n, c, b.inner.rect(), b.inner);
-      break;
-    default: break;
-  }
+  if (n->type() == NodeType::Image) image::paint(n, c, b.inner.rect(), b.inner);
 
   if (paintsChildren(n) && !n->children().empty()) {
     bool clip = clipsChildren(n);
@@ -706,36 +969,25 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
   paintOutline(c, b, s);
 }
 
-bool backfaceFlipped(const ComputedStyle& s) {
-  bool flipped = false;
-  for (auto& op : s.transform) flipped ^= op.flipsBackface;
-  return flipped;
-}
-
 void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
-  if (!n->yoga()) return;
+  if (!isPainted(n)) return;
+  // Incremental repaint: skip subtrees entirely outside the damage. Their
+  // records were refreshed by updateDamage() this frame.
+  if (ctx.damage) {
+    auto* rec = static_cast<NodeRecord*>(n->paintCache.get());
+    if (rec && rec->valid && !ctx.damage->intersects(rec->subtree)) {
+      ctx.stats.nodesCulled++;
+      return;
+    }
+  }
   const ComputedStyle& s = n->style();
-  if (!s.display || s.opacity <= 0) return;
-  if (s.backfaceHidden && backfaceFlipped(s)) return;
   Rect r = n->layoutRect();
   int saveCount = c->save();
   c->translate(r.x, r.y);
   if (!s.transform.empty()) c->concat(localTransform(*n));
-  // Pixel-snap the border box like Chrome: edges round to device pixels
-  // (round(x), round(x + w)), so boxes stay crisp at fractional layout
-  // positions. Only for axis-aligned, unscaled-or-scaled transforms.
-  SkVector snap{0, 0};
-  float w = r.width, h = r.height;
-  const SkMatrix& m = c->getTotalMatrix();
-  if (m.isScaleTranslate() && m.getScaleX() > 0 && m.getScaleY() > 0) {
-    float sx = m.getScaleX(), sy = m.getScaleY();
-    float dx = m.getTranslateX(), dy = m.getTranslateY();
-    float x0 = std::floor(dx + 0.5f), y0 = std::floor(dy + 0.5f);
-    w = (std::floor(dx + r.width * sx + 0.5f) - x0) / sx;
-    h = (std::floor(dy + r.height * sy + 0.5f) - y0) / sy;
-    snap = {(x0 - dx) / sx, (y0 - dy) / sy};
-    c->translate(snap.fX, snap.fY);
-  }
+  float w, h;
+  SkVector snap = snapBox(c->getTotalMatrix(), r, &w, &h);
+  if (snap.fX != 0 || snap.fY != 0) c->translate(snap.fX, snap.fY);
   bool layer = s.opacity < 1 || !s.filters.empty() || s.blendMode != 0;
   if (layer) {
     SkPaint lp;
@@ -749,9 +1001,108 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   c->restoreToCount(saveCount);
 }
 
-struct RootStats : Node::Cache {
-  PaintStats stats;
-};
+SkIRect deviceBounds(const SkMatrix& m, const SkRect& local) {
+  // +1: anti-aliased edges and blur tails may touch the next pixel.
+  return m.mapRect(local).roundOut().makeOutset(1, 1);
+}
+
+uint64_t childListHash(const Node* n) {
+  uint64_t h = 1469598103934665603ull;
+  for (const Node* c : n->children()) h = (h ^ uint64_t(reinterpret_cast<uintptr_t>(c))) * 1099511628211ull;
+  return h ^ n->children().size();
+}
+
+// Walks the tree like paintNode (same matrices and snapping), refreshes each
+// node's record and adds what changed since the last frame to `damage`.
+// Returns the node's device subtree bounds.
+// Nodes with anti-aliased curved or diagonal outlines (radii, rotation,
+// dashes, sharp shadows). Skia chops such outlines at the clip, which shifts
+// edge coverage by a few levels; an incremental repaint therefore never cuts
+// through one (see updateDamage). Returns the outline's local bounds, empty
+// if the node has none. Blurred shadows are exempt: their masks are built
+// with a blur-sized margin beyond the clip.
+SkRect curvedOutline(const Node* n, const SkMatrix& m, float w, float h) {
+  const ComputedStyle& s = n->style();
+  bool curved = !m.isScaleTranslate() || s.borderStyle != BorderStyle::Solid;
+  for (const Length& r : s.borderRadius) curved |= r.value > 0;
+  SkRect r = SkRect::MakeWH(w, h);
+  if (s.outlineWidth > 0) {
+    curved |= s.outlineStyle != BorderStyle::Solid;
+    float e = s.outlineWidth + std::max(0.f, s.outlineOffset);
+    r.outset(e, e);
+  }
+  for (const Shadow& sh : s.boxShadows) {
+    if (sh.inset || sh.blur > 0) continue;
+    curved = true;
+    r.join(SkRect::MakeWH(w, h).makeOffset(sh.offsetX, sh.offsetY).makeOutset(std::max(0.f, sh.spread), std::max(0.f, sh.spread)));
+  }
+  return curved ? r : SkRect::MakeEmpty();
+}
+
+SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkIRect& clip, uint32_t imageGen, SkRegion* damage,
+                      std::vector<SkIRect>* curved) {
+  if (!n->yoga()) return SkIRect::MakeEmpty();  // raw text: painted by its paragraph
+  NodeRecord* rec = record(n);
+  SkIRect own = SkIRect::MakeEmpty(), sub = SkIRect::MakeEmpty();
+  SkMatrix m = parent;
+  float w = 0, h = 0;
+  bool painted = isPainted(n);
+  if (painted) {
+    const ComputedStyle& s = n->style();
+    Rect r = n->layoutRect();
+    m.preTranslate(r.x, r.y);
+    if (!s.transform.empty()) m.preConcat(localTransform(*n));
+    SkVector snap = snapBox(m, r, &w, &h);
+    m.preTranslate(snap.fX, snap.fY);
+    if (!own.intersect(deviceBounds(m, ownVisualBounds(n, w, h)), clip)) own.setEmpty();
+    if (!own.isEmpty()) {
+      SkRect co = curvedOutline(n, m, w, h);
+      SkIRect ci;
+      if (!co.isEmpty() && ci.intersect(deviceBounds(m, co), clip)) curved->push_back(ci);
+    }
+    sub = own;
+    if (paintsChildren(n) && !n->children().empty()) {
+      SkIRect childClip = clip;
+      if (clipsChildren(n) && !childClip.intersect(deviceBounds(m, SkRect::MakeWH(w, h)))) childClip.setEmpty();
+      SkMatrix cm = m;
+      cm.preTranslate(-snap.fX, -snap.fY);
+      if (n->type() == NodeType::ScrollView) cm.preTranslate(-n->scrollX, -n->scrollY);
+      for (Node* ch : n->children()) sub.join(updateRecords(ch, cm, childClip, imageGen, damage, curved));
+    }
+    float fe = filterOutset(s);
+    if (fe > 0 && !sub.isEmpty()) {
+      int e = int(std::ceil(fe * std::max(1.f, m.getMaxScale())));
+      SkIRect grown = sub.makeOutset(e, e);
+      if (!sub.intersect(grown, clip)) sub.setEmpty();
+    }
+  }
+  // A hidden node's descendants keep their old records; the check below
+  // repaints where the subtree was.
+  uint64_t kids = childListHash(n);
+  uint32_t gen = n->type() == NodeType::Image ? imageGen : 0;
+  bool contentChanged = !rec->valid || rec->version != n->paintVersion || rec->painted != painted || rec->w != w ||
+                        rec->h != h || rec->children != kids || rec->imageGen != gen;
+  if (contentChanged) {
+    // Paint state of the node itself changed: it may affect the whole
+    // subtree (opacity, clip, transform of a layer...).
+    damage->op(rec->subtree, SkRegion::kUnion_Op);
+    damage->op(sub, SkRegion::kUnion_Op);
+  } else if (rec->matrix != m) {
+    damage->op(rec->own, SkRegion::kUnion_Op);
+    damage->op(own, SkRegion::kUnion_Op);
+  }
+  rec->own = own;
+  rec->subtree = sub;
+  rec->matrix = m;
+  rec->children = kids;
+  rec->version = n->paintVersion;
+  rec->imageGen = gen;
+  rec->w = w;
+  rec->h = h;
+  rec->painted = painted;
+  rec->valid = true;
+  return sub;
+}
 
 }  // namespace
 
@@ -779,24 +1130,58 @@ SkMatrix localTransform(const Node& n) {
   return m;
 }
 
-void paintDocument(Document& doc, SkCanvas* canvas) {
-  Ctx ctx{doc, {}};
+SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight) {
+  RootRecord* root = rootRecord(doc);
+  SkRegion damage;
+  SkIRect screen = SkIRect::MakeWH(deviceWidth, deviceHeight);
+  // New fonts change glyphs without changing any node: repaint everything.
+  uint32_t fontGen = doc.fonts ? doc.fonts->generation : 0;
+  if (fontGen != root->fontGen) {
+    root->fontGen = fontGen;
+    damage.setRect(screen);
+  }
+  uint32_t imageGen = doc.images ? doc.images->generation : 0;
+  SkMatrix m = SkMatrix::Scale(doc.pixelRatio(), doc.pixelRatio());
+  root->curved.clear();
+  updateRecords(doc.root(), m, screen, imageGen, &damage, &root->curved);
+  // Grow the damage until it contains every curved node it touches, so no
+  // such outline is cut by the clip (pixels then match a full repaint).
+  if (!damage.isEmpty()) {
+    for (int pass = 0; pass < 16; pass++) {
+      bool grew = false;
+      for (const SkIRect& r : root->curved) {
+        if (damage.intersects(r) && !damage.contains(r)) {
+          damage.op(r, SkRegion::kUnion_Op);
+          grew = true;
+        }
+      }
+      if (!grew) break;
+      if (pass == 15) damage.setRect(screen);
+    }
+  }
+  damage.op(screen, SkRegion::kIntersect_Op);
+  return damage;
+}
+
+void paintDocument(Document& doc, SkCanvas* canvas, const SkRegion* damage) {
+  RootRecord* root = rootRecord(doc);
+  root->shadows.frame++;
+  Ctx ctx{doc, root, damage, {}};
   canvas->save();
   canvas->scale(doc.pixelRatio(), doc.pixelRatio());
   paintNode(doc.root(), canvas, ctx);
   canvas->restore();
-  auto* rs = static_cast<RootStats*>(doc.root()->paintCache.get());
-  if (!rs) {
-    doc.root()->paintCache = std::make_unique<RootStats>();
-    rs = static_cast<RootStats*>(doc.root()->paintCache.get());
+  if (damage) {
+    const SkIRect& b = damage->getBounds();
+    ctx.stats.damagedPixels = int64_t(b.width()) * b.height();
   }
-  rs->stats = ctx.stats;
+  root->stats = ctx.stats;
 }
 
 SkSurfaceProps surfaceProps() { return SkSurfaceProps(0, kUnknown_SkPixelGeometry, 0.2f, 1.2f); }
 
 PaintStats lastPaintStats(const Document& doc) {
-  auto* rs = static_cast<RootStats*>(doc.root()->paintCache.get());
+  auto* rs = static_cast<RootRecord*>(doc.root()->paintCache.get());
   return rs ? rs->stats : PaintStats{};
 }
 

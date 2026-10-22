@@ -1142,6 +1142,66 @@ bool operator==(const TextStyle& a, const TextStyle& b) {
 
 namespace {
 
+// Read-only view of a style object for lookups by literal key. applyStyle
+// asks for ~150 keys per call and Value::operator[] builds a std::string for
+// each; this indexes the object's (already sorted) entries once on the stack
+// and binary-searches them without allocating. patchStyle-driven animation
+// calls applyStyle for every animated node every frame.
+class StyleMap {
+ public:
+  explicit StyleMap(const Value& v) : value_(v) {
+    if (!v.isObject()) return;
+    const auto& o = v.asObject();
+    if (o.size() > kMax) {
+      big_ = true;
+      return;
+    }
+    for (auto& [k, val] : o) {
+      e_[n_++] = {k.c_str(), &val};
+      firstChars_ |= bit(k.c_str());
+    }
+  }
+  bool isNull() const { return !value_.isObject(); }
+  const Value& operator[](const char* key) const {
+    if (big_) return value_[key];
+    const Entry* e = find(key);
+    return e ? *e->v : null_;
+  }
+  const Value& operator[](const std::string& key) const { return (*this)[key.c_str()]; }
+  bool has(const char* key) const { return big_ ? value_.has(key) : find(key) != nullptr; }
+
+ private:
+  struct Entry {
+    const char* k;
+    const Value* v;
+  };
+  static constexpr size_t kMax = 96;
+  // Most lookups are for absent keys: a set of the keys' first letters
+  // answers those with one test.
+  static uint32_t bit(const char* k) {
+    unsigned c = unsigned(k[0]) - 'a';
+    return c < 26 ? 1u << c : 1u << 26;
+  }
+  const Entry* find(const char* key) const {
+    if (!(firstChars_ & bit(key))) return nullptr;
+    size_t lo = 0, hi = n_;
+    while (lo < hi) {
+      size_t mid = (lo + hi) / 2;
+      int c = std::strcmp(e_[mid].k, key);
+      if (c == 0) return &e_[mid];
+      if (c < 0) lo = mid + 1;
+      else hi = mid;
+    }
+    return nullptr;
+  }
+  const Value& value_;
+  Entry e_[kMax];
+  size_t n_ = 0;
+  uint32_t firstChars_ = 0;
+  bool big_ = false;
+  inline static const Value null_;
+};
+
 // Writes a length-valued Yoga property: number/"px" -> points, "%" -> percent,
 // "auto" -> auto (when supported), anything else -> `unset`.
 template <class Points, class Percent, class Unset>
@@ -1198,7 +1258,7 @@ constexpr YGEdge kAllEdges[] = {YGEdgeLeft,  YGEdgeTop,        YGEdgeRight,    Y
 constexpr int kEdgeCount = 9;
 
 template <size_t N>
-void collectEdges(const Value& style, const EdgeKey (&keys)[N], const Value* slots[kEdgeCount]) {
+void collectEdges(const StyleMap& style, const EdgeKey (&keys)[N], const Value* slots[kEdgeCount]) {
   for (int i = 0; i < kEdgeCount; i++) slots[i] = nullptr;
   for (auto& k : keys) {
     const Value& v = style[k.key];
@@ -1236,7 +1296,7 @@ bool parseFontWeight(const Value& v, int* out) {
   return true;
 }
 
-void parseTextStyle(const Value& style, TextStyle* t) {
+void parseTextStyle(const StyleMap& style, TextStyle* t) {
   Color c;
   if (parseColor(style["color"], &c)) t->color = c;
   if (style["fontFamily"].isString() && !style["fontFamily"].asString().empty()) t->fontFamily = style["fontFamily"].asString();
@@ -1372,7 +1432,7 @@ void parseTransformOrigin(const Value& v, Length out[2]) {
 }
 
 // Corner radius slots: 0 topLeft, 1 topRight, 2 bottomRight, 3 bottomLeft (LTR).
-void parseRadii(const Value& style, Length out[4]) {
+void parseRadii(const StyleMap& style, Length out[4]) {
   static const struct {
     const char* key;
     int corner;  // -1 = all
@@ -1404,7 +1464,7 @@ void parseRadii(const Value& style, Length out[4]) {
 }
 
 // Side slots: 0 top, 1 right, 2 bottom, 3 left (LTR: start = left).
-void parseBorderColors(const Value& style, Color out[4]) {
+void parseBorderColors(const StyleMap& style, Color out[4]) {
   static const struct {
     const char* key;
     int sides;  // bitmask of sides
@@ -1434,7 +1494,7 @@ float snapBorderWidth(float w, float pixelRatio) {
 
 void applyStyle(const Value& style, ComputedStyle* out, YGNodeRef yoga, float pixelRatio) {
   *out = ComputedStyle();
-  const Value& s = style;  // may be null: everything resets to defaults
+  const StyleMap s(style);  // may be null: everything resets to defaults
 
   // ---- Layout (Yoga). Every property is written; Yoga ignores no-op sets.
   auto enumKey = [&](const char* key) -> std::string { return s[key].isString() ? s[key].asString() : std::string(); };

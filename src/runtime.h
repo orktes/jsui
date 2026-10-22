@@ -5,6 +5,7 @@
 #include <string>
 
 #include "core/document.h"
+#include "include/core/SkRect.h"
 #include "include/core/SkRefCnt.h"
 #include "jsui/jsui.h"
 #include "platform/loader.h"
@@ -40,6 +41,11 @@ class Runtime {
   void tick(double nowMs);
   bool needsRedraw() const;
   void render(void* pixels, int width, int height, size_t rowBytes);
+  // Like render(), but `pixels` must still hold the frame this runtime last
+  // rendered into it: only the changed region is repainted. Returns the
+  // repainted device rect (empty when nothing changed). A different buffer,
+  // size or an intervening render() makes it a full repaint.
+  SkIRect renderIncremental(void* pixels, int width, int height, size_t rowBytes);
 
   JsuiConfig config;
   JsuiRuntime* handle;
@@ -57,7 +63,12 @@ class Runtime {
   std::unique_ptr<InputManager> input;
 
  private:
+  SkIRect renderImpl(void* pixels, int width, int height, size_t rowBytes, bool incremental);
   void resetEngine();
+  // The buffer the last frame was painted into (incremental repaint).
+  const void* lastTarget_ = nullptr;
+  int lastTargetW_ = 0, lastTargetH_ = 0;
+  size_t lastTargetRowBytes_ = 0;
   void devPoll();
   bool redraw_ = true;
 

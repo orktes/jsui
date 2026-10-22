@@ -320,3 +320,72 @@ TEST(render_hidpi_scale) {
   CHECK_EQ(s.a(39, 39), 255);
   CHECK_EQ(s.a(41, 41), 0);
 }
+
+namespace {
+// Applies a style patch like Animated / patchStyle does.
+void patch(Node* n, const std::string& json) {
+  std::string err;
+  Value p = Value::parseJson(json, &err);
+  Value::Object style = n->props()["style"].asObject();
+  for (auto& [k, v] : p.asObject()) style[k] = v;
+  Value::Object props = n->props().asObject();
+  props["style"] = Value(style);
+  n->setProps(Value(props));
+}
+}  // namespace
+
+// Incremental frames (only the damage repainted) must equal full repaints,
+// pixel for pixel, across the kinds of change a UI makes.
+TEST(render_incremental_matches_full) {
+  Scene s(320, 240);
+  Node* panel = s.add(R"J({"style":{"position":"absolute","left":20,"top":20,"width":200,"height":160,"borderRadius":16,"overflow":"hidden",
+    "backgroundColor":"#1d2442","boxShadow":"0 6px 18px rgba(0,0,0,0.6)"},"children":[
+    {"style":{"position":"absolute","left":30,"top":30,"width":12,"height":12,"borderRadius":6,"backgroundColor":"#f2c35b"}},
+    {"style":{"position":"absolute","left":96,"top":20,"width":4,"height":60,"borderRadius":2,"backgroundColor":"#ff4d6a","transformOrigin":"50% 100%"}},
+    {"type":"Text","style":{"position":"absolute","left":10,"top":120,"color":"#fff","fontSize":14},"text":"Score 100"},
+    {"type":"ScrollView","style":{"position":"absolute","left":120,"top":90,"width":70,"height":60,"backgroundColor":"#11162a"},"children":[
+      {"style":{"height":30,"margin":4,"borderRadius":5,"backgroundColor":"#4ade80"}},
+      {"style":{"height":30,"margin":4,"borderRadius":5,"backgroundColor":"#4fd1ff"}}]}]})J");
+  Node* other = s.add(R"J({"style":{"position":"absolute","left":240,"top":30,"width":60,"height":60,"borderRadius":30,"backgroundColor":"#b26bff","opacity":0.8}})J");
+  Node* needle = panel->children()[1];
+  Node* label = panel->children()[2];
+  Node* scroll = panel->children()[3];
+  std::vector<uint32_t> inc(320 * 240), full(320 * 240);
+  int step = 0;
+  auto check = [&](const char* what) {
+    s.doc().layout();
+    s.rt->renderIncremental(inc.data(), 320, 240, 320 * 4);
+    s.rt->render(full.data(), 320, 240, 320 * 4);
+    size_t diff = 0;
+    for (size_t i = 0; i < inc.size(); i++) diff += inc[i] != full[i];
+    if (diff) std::fprintf(stderr, "  step %d (%s): %zu pixels differ\n", step, what, diff);
+    CHECK_EQ(diff, size_t(0));
+    // render() painted elsewhere: bring `inc` back in step (a full repaint).
+    s.rt->renderIncremental(inc.data(), 320, 240, 320 * 4);
+    step++;
+  };
+  check("first frame");
+  for (int i = 0; i < 6; i++) {
+    patch(needle, R"J({"transform":[{"rotate":")J" + std::to_string(i * 23) + R"J(deg"}]})J");
+    check("rotate");
+  }
+  patch(panel->children()[0], R"J({"left":60,"top":50})J");
+  check("move (layout)");
+  patch(panel->children()[0], R"J({"backgroundColor":"#ff0000"})J");
+  check("color");
+  label->children()[0]->setText("Score 12345");
+  check("text");
+  scroll->scrollY = 12;
+  scroll->markPaintDirty();
+  check("scroll");
+  patch(other, R"J({"opacity":0.3})J");
+  check("opacity");
+  patch(other, R"J({"display":"none"})J");
+  check("hide");
+  panel->removeChild(scroll);
+  check("remove");
+  // Nothing changed: nothing repainted.
+  s.doc().layout();
+  SkIRect r = s.rt->renderIncremental(inc.data(), 320, 240, 320 * 4);
+  CHECK(r.isEmpty());
+}
