@@ -188,6 +188,22 @@ test('canvas resize updates the viewport without stretching', async ({ page }) =
   assert(near(px[2], [255, 255, 255, 255]) && near(px[3], [255, 255, 255, 255]), `outside bands: ${fmt(px[2])} ${fmt(px[3])}`);
 });
 
+test('WebGL context loss and restore repaints', async ({ page }) => {
+  await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
+  const ok = await page.evaluate(async () => {
+    const ext = window.hosts.ui._gl?.getExtension('WEBGL_lose_context');
+    if (!ext) return false;
+    ext.loseContext();
+    for (let i = 0; i < 3; i++) await new Promise(requestAnimationFrame);
+    ext.restoreContext();
+    for (let i = 0; i < 6; i++) await new Promise(requestAnimationFrame);
+    return true;
+  });
+  if (!ok) skip('WEBGL_lose_context unavailable');
+  const px = await screenPixels(page, '#ui', BANDS);
+  [RED, GREEN].forEach((want, i) => assert(near(px[i], want), `band ${i} after restore: ${fmt(px[i])}`));
+});
+
 test('timers drive repaints', async ({ page }) => {
   await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
   await page.waitForTimeout(400);

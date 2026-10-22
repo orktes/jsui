@@ -24,9 +24,10 @@
 #   EMSDK       activated emsdk (default third_party/emsdk, see setup-emsdk.sh)
 #   JOBS        ninja parallelism (default 2)
 #   SKIA_WASM_DEBUG=1  is_debug build (for diagnosing crashes)
-#   SKIA_WASM_SIMD=0   build without WebAssembly SIMD (-msimd128). SIMD is on by
-#                      default (all current browsers support it); CMake detects
-#                      it from out/args.gn and builds JSUI with SIMD too.
+#   SKIA_WASM_SIMD=1   build with WebAssembly SIMD (-msimd128); CMake detects it
+#                      from out/args.gn and builds JSUI with SIMD too. Off by
+#                      default: with Skia's wasm SKNX_NO_SIMD it measured no gain
+#                      on raster HUD workloads, and it narrows browser support.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,7 +37,7 @@ OUT_DIR="${SKIA_WASM_OUT:-$ROOT/third_party/skia-wasm}"
 EMSDK="${EMSDK:-$ROOT/third_party/emsdk}"
 JOBS="${JOBS:-2}"
 DEBUG="${SKIA_WASM_DEBUG:-0}"
-SIMD="${SKIA_WASM_SIMD:-1}"
+SIMD="${SKIA_WASM_SIMD:-0}"
 
 hash_inputs() { cat "$ROOT/scripts/build-skia-wasm.sh" "$ROOT/scripts/setup-emsdk.sh" | sha256sum | cut -d' ' -f1; }
 STAMP_VALUE="$(hash_inputs)-debug$DEBUG-simd$SIMD"
@@ -160,10 +161,7 @@ copy_headers() {  # copy_headers <src dir> (relative to SKIA_SRC)
 }
 copy_headers include
 copy_headers src
-for m in modules/*/; do
-  copy_headers "${m%/}/include"
-  copy_headers "${m%/}/src"
-done
+copy_headers modules  # incl. modules/skcms/skcms.h, which public headers include
 copy_headers third_party/externals/harfbuzz/src
 copy_headers third_party/externals/icu/source/common/unicode
 copy_headers third_party/externals/icu/source/i18n/unicode

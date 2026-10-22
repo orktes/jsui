@@ -29,6 +29,22 @@ foreach(_lib brotli)
   endif()
 endforeach()
 
+# WebAssembly SIMD: follow the Skia build (scripts/build-skia-wasm.sh enables
+# it by default); mixing is legal, but SIMD everywhere is the point.
+set(_jsui_simd_default OFF)
+if(EXISTS "${JSUI_SKIA_LIB_DIR}/args.gn")
+  file(READ "${JSUI_SKIA_LIB_DIR}/args.gn" _jsui_skia_args)
+  if(_jsui_skia_args MATCHES "msimd128")
+    set(_jsui_simd_default ON)
+  endif()
+endif()
+option(JSUI_WASM_SIMD "Compile JSUI with -msimd128 (needs a browser with WASM SIMD)" ${_jsui_simd_default})
+if(JSUI_WASM_SIMD)
+  foreach(_t jsui jsui_quickjs jsui_yoga)
+    target_compile_options(${_t} PRIVATE -msimd128)
+  endforeach()
+endif()
+
 # QuickJS-ng: no threads / atomics in the browser build.
 target_compile_definitions(jsui_quickjs PRIVATE EMSCRIPTEN=1)
 

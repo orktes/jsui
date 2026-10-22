@@ -165,7 +165,8 @@ class JsuiHost {
   /** Register a font from bytes (ArrayBuffer / typed array). */
   registerFont(family, bytes, weight = 400, italic = false) {
     const M = this.module;
-    const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes.buffer ?? bytes);
+    const data = ArrayBuffer.isView(bytes) ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+      : new Uint8Array(bytes);
     const p = M._malloc(data.length);
     M.HEAPU8.set(data, p);
     const r = this._withStrings([family], (f) => M._jsui_register_font(this.rt, f, p, data.length, weight, italic ? 1 : 0));
@@ -392,6 +393,14 @@ class JsuiHost {
       const gl = this.canvas.getContext('webgl2', attrs) || this.canvas.getContext('webgl', attrs);
       if (gl) {
         this._setupGL(gl);
+        const signal = this._abort.signal;
+        this.canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); this._glLost = true; }, { signal });
+        this.canvas.addEventListener('webglcontextrestored', () => {
+          this._glLost = false;
+          this._setupGL(gl);
+          this._texW = this._texH = 0;
+          this._sizeChanged = true;  // repaint into the new context
+        }, { signal });
         return;
       }
       if (mode === 'webgl') throw new Error('createJsui: WebGL unavailable');
@@ -441,14 +450,6 @@ class JsuiHost {
     this._tex = tex;
     this._vb = vb;
     this.renderer = typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext ? 'webgl2' : 'webgl';
-    this.canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); this._glLost = true; },
-      { signal: this._abort.signal });
-    this.canvas.addEventListener('webglcontextrestored', () => {
-      this._glLost = false;
-      this._setupGL(gl);
-      this._texW = this._texH = 0;
-      this._sizeChanged = true;  // repaint into the new context
-    }, { signal: this._abort.signal });
   }
 
   _blit() {
