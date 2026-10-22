@@ -55,6 +55,13 @@ class Value {
     auto it = o.find(key);
     return it == o.end() ? null : it->second;
   }
+  // The shared container of an array / object (nullptr otherwise): two
+  // Values with the same identity are equal without a deep comparison.
+  const void* identity() const {
+    if (isArray()) return std::get<4>(v_).get();
+    if (isObject()) return std::get<5>(v_).get();
+    return nullptr;
+  }
   bool has(const std::string& key) const { return isObject() && std::get<5>(v_)->count(key) > 0; }
 
   // Minimal JSON support (tests, host messages).

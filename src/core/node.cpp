@@ -1,6 +1,7 @@
 #include "core/node.h"
 
 #include <algorithm>
+#include <optional>
 
 #include "core/document.h"
 #include "render/image_node.h"
@@ -41,27 +42,14 @@ namespace {
 // Children of Text are laid out by the paragraph, not by Yoga.
 bool hasYogaChildren(const Node* n) { return n->type() != NodeType::Text && n->type() != NodeType::RawText; }
 
-bool valueEquals(const Value& a, const Value& b) {
-  if (a.isNull() || b.isNull()) return a.isNull() && b.isNull();
-  if (a.isBool()) return b.isBool() && a.asBool() == b.asBool();
-  if (a.isNumber()) return b.isNumber() && a.asNumber() == b.asNumber();
-  if (a.isString()) return b.isString() && a.asString() == b.asString();
-  if (a.isArray()) {
-    if (!b.isArray() || a.asArray().size() != b.asArray().size()) return false;
-    for (size_t i = 0; i < a.asArray().size(); i++)
-      if (!valueEquals(a.asArray()[i], b.asArray()[i])) return false;
-    return true;
-  }
-  if (a.isObject()) {
-    if (!b.isObject() || a.asObject().size() != b.asObject().size()) return false;
-    auto ib = b.asObject().begin();
-    for (auto& [k, v] : a.asObject()) {
-      if (k != ib->first || !valueEquals(v, ib->second)) return false;
-      ++ib;
-    }
-    return true;
-  }
-  return false;
+bool valueEquals(const Value& a, const Value& b) { return styleValueEquals(a, b); }
+
+PointerEvents parsePointerEvents(const Value& v) {
+  const std::string& pe = v.asString();
+  return pe == "none"       ? PointerEvents::None
+         : pe == "box-none" ? PointerEvents::BoxNone
+         : pe == "box-only" ? PointerEvents::BoxOnly
+                            : PointerEvents::Auto;
 }
 }  // namespace
 
@@ -139,23 +127,30 @@ void Node::setProps(const Value& props) {
   updatePropFlags();
   bool relayout = false;
   if (yoga_) {
-    TextStyle oldText = std::move(style_.text);
-    if (doc_) {
-      Perf::Scope scope(doc_->perf, Phase::Style);
-      doc_->perf.counters.styleResolves++;
-      applyStyle(props_["style"], &style_, yoga_, doc_->pixelRatio());
-    } else {
-      applyStyle(props_["style"], &style_, yoga_, 1);
+    bool isText = type_ == NodeType::Text || type_ == NodeType::TextInput;
+    TextStyle oldText;
+    if (isText) oldText = style_.text;
+    {
+      // Only the style groups whose keys changed are re-resolved when no
+      // layout key changed (Animated transform / opacity frames, color
+      // changes); otherwise the whole style, including Yoga, is re-applied.
+      Perf* perf = doc_ ? &doc_->perf : nullptr;
+      std::optional<Perf::Scope> scope;
+      if (perf) scope.emplace(*perf, Phase::Style);
+      float pr = doc_ ? doc_->pixelRatio() : 1;
+      bool styled = false;
+      if (!applyPaintStyleChanges(old["style"], props_["style"], &style_, pr, &styled)) {
+        applyStyle(props_["style"], &style_, yoga_, pr);
+        styled = true;
+      } else {
+        style_.pointerEvents = parsePointerEvents(props_["style"]["pointerEvents"]);
+      }
+      if (perf && styled) perf->counters.styleResolves++;
     }
-    if (props_["pointerEvents"].isString() && !props_["style"].has("pointerEvents")) {
-      const std::string& pe = props_["pointerEvents"].asString();
-      style_.pointerEvents = pe == "none"       ? PointerEvents::None
-                             : pe == "box-none" ? PointerEvents::BoxNone
-                             : pe == "box-only" ? PointerEvents::BoxOnly
-                                                : PointerEvents::Auto;
-    }
+    if (props_["pointerEvents"].isString() && !props_["style"].has("pointerEvents"))
+      style_.pointerEvents = parsePointerEvents(props_["pointerEvents"]);
     if (YGNodeIsDirty(yoga_) && !isInlineText()) relayout = true;
-    if (type_ == NodeType::Text || type_ == NodeType::TextInput) {
+    if (isText) {
       bool metrics = !textMetricsEqual(oldText, style_.text);
       static const char* const kMeasureProps[] = {"numberOfLines", "ellipsizeMode", "value",          "defaultValue",
                                                   "placeholder",   "multiline",     "secureTextEntry"};
