@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "core/json.h"
+#include "host_state.h"
 #include "jsui/jsui.h"
 #include "test.h"
 
@@ -159,6 +160,36 @@ TEST(json_merge_patch_rfc7386) {
   Json same;
   CHECK(Json::parse(R"({"k7":70})", &same));
   CHECK(!v.mergePatch(same));  // no change reported
+}
+
+// The patch log behind __jsui_native.statePatches: readers holding an older
+// version apply the patches instead of re-reading the whole document.
+TEST(host_state_patch_log) {
+  jsui::HostState s;
+  std::vector<const std::string*> out;
+  CHECK(!s.patchesSince("inv", 1, &out));  // unknown key
+  CHECK(s.set("inv", R"({"a":1,"b":{"c":2}})") == jsui::HostState::Result::Changed);
+  uint64_t v1 = s.version("inv");
+  CHECK(s.patchesSince("inv", v1, &out) && out.empty());  // up to date
+  CHECK(s.patch("inv", R"({"b":{"c":3}})") == jsui::HostState::Result::Changed);
+  CHECK(s.patch("inv", R"({"b":{"c":3}})") == jsui::HostState::Result::Unchanged);  // not logged
+  CHECK(s.set("other", "1") == jsui::HostState::Result::Changed);                   // versions are global
+  CHECK(s.patch("inv", R"({"a":null})") == jsui::HostState::Result::Changed);
+  CHECK(s.patchesSince("inv", v1, &out));
+  CHECK_EQ(out.size(), size_t(2));
+  CHECK_EQ(*out[0], std::string(R"({"b":{"c":3}})"));
+  CHECK_EQ(*out[1], std::string(R"({"a":null})"));
+  CHECK(!s.patchesSince("inv", v1 + 100, &out));  // a version the log does not know
+  // A set starts over: older versions must re-read.
+  CHECK(s.set("inv", R"({"x":1})") == jsui::HostState::Result::Changed);
+  CHECK(!s.patchesSince("inv", v1, &out));
+  // The log is bounded: the oldest versions fall out of it.
+  uint64_t first = s.version("inv");
+  for (int i = 0; i < 100; i++) s.patch("inv", "{\"n\":" + std::to_string(i) + "}");
+  CHECK(!s.patchesSince("inv", first, &out));
+  uint64_t recent = s.version("inv");
+  s.patch("inv", R"({"n":-1})");
+  CHECK(s.patchesSince("inv", recent, &out) && out.size() == 1);
 }
 
 TEST(host_state_before_mount_and_multiple_keys) {

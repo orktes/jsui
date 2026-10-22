@@ -3,7 +3,7 @@
 //
 //   getState(key) -> json string | undefined     stateVersion(key) -> number (0: unset)
 //   setState(key, json | undefined) -> version   patchState(key, json) -> version
-//   stateKeys() -> [key]
+//   stateKeys() -> [key]                         statePatches(key, since) -> [patch json] | undefined
 //   hostCall(name, json, settle(ok, payload)) -> id (0: the host takes no calls)
 //   cancelCall(id) -> bool                       callResult(id, ok, payload)
 #include <string>
@@ -29,6 +29,21 @@ JSValue js_getState(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
   if (argc < 1) return JS_UNDEFINED;
   const std::string* json = runtimeOf(ctx).state.json(toStdString(ctx, argv[0]));
   return json ? JS_NewStringLen(ctx, json->data(), json->size()) : JS_UNDEFINED;
+}
+
+// statePatches(key, sinceVersion) -> [patch json] | undefined: the merge
+// patches since a version the caller has parsed (see HostState::patchesSince).
+JSValue js_statePatches(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  if (argc < 2) return JS_UNDEFINED;
+  double since = 0;
+  if (JS_ToFloat64(ctx, &since, argv[1]) < 0) return JS_EXCEPTION;
+  if (!(since >= 1 && since < 9007199254740992.0)) return JS_UNDEFINED;
+  std::vector<const std::string*> patches;
+  if (!runtimeOf(ctx).state.patchesSince(toStdString(ctx, argv[0]), uint64_t(since), &patches)) return JS_UNDEFINED;
+  JSValue arr = JS_NewArray(ctx);
+  for (size_t i = 0; i < patches.size(); i++)
+    JS_SetPropertyUint32(ctx, arr, uint32_t(i), JS_NewStringLen(ctx, patches[i]->data(), patches[i]->size()));
+  return arr;
 }
 
 JSValue js_stateVersion(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
@@ -106,6 +121,7 @@ void installHostDataBridge(JsEngine::Impl& impl, JSValue native) {
     JSCFunction* fn;
     int len;
   } fns[] = {{"getState", js_getState, 1},   {"stateVersion", js_stateVersion, 1}, {"stateKeys", js_stateKeys, 0},
+             {"statePatches", js_statePatches, 2},
              {"hostCall", js_hostCall, 3},   {"cancelCall", js_cancelCall, 1},     {"callResult", js_callResult, 3}};
   for (auto& f : fns) JS_SetPropertyStr(ctx, native, f.name, JS_NewCFunction(ctx, f.fn, f.name, f.len));
   JS_SetPropertyStr(ctx, native, "setState",

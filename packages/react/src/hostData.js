@@ -25,6 +25,7 @@ const DEV = typeof process === 'undefined' || !process.env || process.env.NODE_E
 // --- storage: the native store, or a local fallback --------------------------
 
 const nativeState = typeof native.getState === 'function' && typeof native.stateVersion === 'function';
+const nativePatches = nativeState && typeof native.statePatches === 'function';
 const local = new Map(); // key -> { version, json }
 let localVersion = 1;
 
@@ -135,8 +136,18 @@ function getValue(key) {
     cache.delete(key);
     return undefined;
   }
-  const json = readJson(key);
-  let value = json === undefined ? undefined : parse(key, json);
+  let value;
+  // The runtime keeps the merge patches since recent versions: applying the
+  // few small patches to the cached value avoids serializing and re-parsing
+  // the whole document (a big inventory changing one slot per frame).
+  const patches = entry && entry.value !== undefined && nativePatches ? native.statePatches(key, entry.version) : undefined;
+  if (patches) {
+    value = entry.value;
+    for (let i = 0; i < patches.length; i++) value = mergePatch(value, parse(key, patches[i]));
+  } else {
+    const json = readJson(key);
+    value = json === undefined ? undefined : parse(key, json);
+  }
   if (entry) value = share(entry.value, value);
   if (DEV) freeze(value);
   cache.set(key, { version, value });

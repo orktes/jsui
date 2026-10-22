@@ -14,6 +14,8 @@ HostState::Result HostState::set(const std::string& key, std::string_view json, 
   }
   Entry& e = it->second;
   e.value = std::move(value);
+  e.patches.clear();
+  e.patchBytes = 0;
   e.json.assign(json);
   e.jsonValid = true;
   e.version = nextVersion_++;
@@ -33,7 +35,19 @@ HostState::Result HostState::patch(const std::string& key, std::string_view json
   if (!e.value.mergePatch(p) && !fresh) return Result::Unchanged;
   e.jsonValid = false;
   e.json.clear();
+  uint64_t from = e.version;
   e.version = nextVersion_++;
+  if (!fresh && json.size() <= kMaxPatchBytes) {
+    e.patches.push_back({from, e.version, std::string(json)});
+    e.patchBytes += json.size();
+    size_t drop = 0;
+    while (e.patches.size() - drop > kMaxPatches || e.patchBytes > kMaxPatchBytes)
+      e.patchBytes -= e.patches[drop++].json.size();
+    e.patches.erase(e.patches.begin(), e.patches.begin() + long(drop));
+  } else {
+    e.patches.clear();
+    e.patchBytes = 0;
+  }
   if (!fromUi) markDirty(key);
   return Result::Changed;
 }
@@ -42,6 +56,21 @@ bool HostState::remove(const std::string& key, bool fromUi) {
   if (!entries_.erase(key)) return false;
   if (!fromUi) markDirty(key);
   return true;
+}
+
+bool HostState::patchesSince(const std::string& key, uint64_t since, std::vector<const std::string*>* out) const {
+  out->clear();
+  auto it = entries_.find(key);
+  if (it == entries_.end() || since == 0) return false;
+  const Entry& e = it->second;
+  if (since == e.version) return true;
+  // The log is a chain (each patch starts where the previous ended).
+  for (size_t i = 0; i < e.patches.size(); i++) {
+    if (e.patches[i].from != since) continue;
+    for (size_t j = i; j < e.patches.size(); j++) out->push_back(&e.patches[j].json);
+    return true;
+  }
+  return false;
 }
 
 uint64_t HostState::version(const std::string& key) const {
