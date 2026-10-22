@@ -125,6 +125,9 @@ void Node::removeChild(Node* child) {
 // Paint-only updates (opacity, transform, colors, shadows, ...) - e.g. every
 // frame of an Animated transform - therefore never re-run Yoga.
 void Node::setProps(const Value& props) {
+  // React re-renders often send identical props: nothing to do (and nothing
+  // to repaint).
+  if (yoga_ && valueEquals(props_, props) && props_.isObject()) return;
   Value old = std::move(props_);
   props_ = props;
   bool relayout = false;
@@ -176,6 +179,12 @@ void Node::setProps(const Value& props) {
   if (!doc_) return;
   if (relayout) doc_->markLayoutDirty();
   else doc_->markPaintDirty();
+}
+
+void Node::restyle() {
+  Value p = std::move(props_);
+  props_ = Value();
+  setProps(p);
 }
 
 void Node::setText(std::string text) {

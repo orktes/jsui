@@ -204,6 +204,13 @@ SkIRect Runtime::renderImpl(void* pixels, int width, int height, size_t rowBytes
   auto surface = SkSurfaces::WrapPixels(info, pixels, rowBytes, &props);
   if (!surface) return SkIRect::MakeEmpty();
   doc.layout();
+  // Nothing marked dirty and the buffer still holds our last frame: done,
+  // without walking the tree.
+  if (incremental && !doc.paintDirty() && pixels == lastTarget_ && width == lastTargetW_ &&
+      height == lastTargetH_ && rowBytes == lastTargetRowBytes_ && lastError.empty()) {
+    redraw_ = false;
+    return SkIRect::MakeEmpty();
+  }
   // Always refresh the paint records so the next incremental frame compares
   // against what is in the buffer.
   SkRegion damage = updateDamage(doc, width, height);

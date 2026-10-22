@@ -58,6 +58,9 @@ class Node {
   // `props["__events"] = ["press", "pointerMove", ...]` used for hit testing.
   void setProps(const Value& props);
   const Value& props() const { return props_; }
+  // Re-applies the current props (e.g. after a pixel-ratio change, which
+  // affects border-width snapping).
+  void restyle();
 
   // RawText content (UTF-8).
   void setText(std::string text);

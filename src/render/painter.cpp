@@ -802,13 +802,21 @@ struct NodeRecord : Node::Cache {
   bool valid = false;
 };
 
+// A node with anti-aliased curved or diagonal outlines, in device pixels.
+// Damage strictly inside `safe` (the padding box inset by a pixel) never
+// crosses an outline; other damage touching `bounds` must include all of it.
+struct CurvedNode {
+  SkIRect bounds;
+  SkRRect safe;
+};
+
 // Per-document painter state, kept on the root node.
 struct RootRecord : NodeRecord {
   PaintStats stats;
   uint32_t fontGen = 0;
   std::vector<std::pair<float, sk_sp<SkMaskFilter>>> blurs;  // shadow mask filters by blur radius
   std::vector<Node*> order;                                  // zIndex sort scratch (reused)
-  std::vector<SkIRect> curved;                               // this frame's curved-edge node bounds
+  std::vector<CurvedNode> curved;                            // this frame's curved-outline nodes
   ShadowCache shadows;
 };
 
@@ -1012,9 +1020,6 @@ uint64_t childListHash(const Node* n) {
   return h ^ n->children().size();
 }
 
-// Walks the tree like paintNode (same matrices and snapping), refreshes each
-// node's record and adds what changed since the last frame to `damage`.
-// Returns the node's device subtree bounds.
 // Nodes with anti-aliased curved or diagonal outlines (radii, rotation,
 // dashes, sharp shadows). Skia chops such outlines at the clip, which shifts
 // edge coverage by a few levels; an incremental repaint therefore never cuts
@@ -1039,8 +1044,11 @@ SkRect curvedOutline(const Node* n, const SkMatrix& m, float w, float h) {
   return curved ? r : SkRect::MakeEmpty();
 }
 
+// Walks the tree like paintNode (same matrices and snapping), refreshes each
+// node's record and adds what changed since the last frame to `damage`.
+// Returns the node's device subtree bounds.
 SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkIRect& clip, uint32_t imageGen, SkRegion* damage,
-                      std::vector<SkIRect>* curved) {
+                      std::vector<CurvedNode>* curved) {
   if (!n->yoga()) return SkIRect::MakeEmpty();  // raw text: painted by its paragraph
   NodeRecord* rec = record(n);
   SkIRect own = SkIRect::MakeEmpty(), sub = SkIRect::MakeEmpty();
@@ -1058,7 +1066,22 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkIRect& clip, uint
     if (!own.isEmpty()) {
       SkRect co = curvedOutline(n, m, w, h);
       SkIRect ci;
-      if (!co.isEmpty() && ci.intersect(deviceBounds(m, co), clip)) curved->push_back(ci);
+      if (!co.isEmpty() && ci.intersect(deviceBounds(m, co), clip)) {
+        CurvedNode cn{ci, SkRRect::MakeEmpty()};
+        // Outlines and sharp shadows lie outside the box: no safe interior.
+        bool outside = s.outlineWidth > 0;
+        for (const Shadow& sh : s.boxShadows) outside |= !sh.inset && sh.blur <= 0;
+        if (!outside && s.borderStyle == BorderStyle::Solid && m.isScaleTranslate()) {
+          Box b;
+          computeBox(n, w, h, &b);
+          SkRRect dev;
+          if (b.inner.transform(m, &dev)) {
+            dev.inset(1, 1);
+            cn.safe = dev;
+          }
+        }
+        curved->push_back(cn);
+      }
     }
     sub = own;
     if (paintsChildren(n) && !n->children().empty()) {
@@ -1149,9 +1172,15 @@ SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight) {
   if (!damage.isEmpty()) {
     for (int pass = 0; pass < 16; pass++) {
       bool grew = false;
-      for (const SkIRect& r : root->curved) {
-        if (damage.intersects(r) && !damage.contains(r)) {
-          damage.op(r, SkRegion::kUnion_Op);
+      for (const CurvedNode& cn : root->curved) {
+        if (!damage.intersects(cn.bounds) || damage.contains(cn.bounds)) continue;
+        bool cuts = false;
+        for (SkRegion::Iterator it(damage); !it.done() && !cuts; it.next()) {
+          const SkIRect& d = it.rect();
+          cuts = SkIRect::Intersects(d, cn.bounds) && !cn.safe.contains(SkRect::Make(d));
+        }
+        if (cuts) {
+          damage.op(cn.bounds, SkRegion::kUnion_Op);
           grew = true;
         }
       }

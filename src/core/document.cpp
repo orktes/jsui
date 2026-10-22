@@ -70,7 +70,7 @@ void Document::clear() {
 namespace {
 // Border widths snap to device pixels, so a new pixel ratio restyles.
 void restyle(Node* n) {
-  n->setProps(Value(n->props()));
+  n->restyle();
   for (Node* c : n->children()) restyle(c);
 }
 }  // namespace
