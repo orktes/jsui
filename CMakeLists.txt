@@ -9,6 +9,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(JSUI_BUILD_TOOLS "Build jsui-render and the viewer" ON)
 option(JSUI_BUILD_TESTS "Build native tests" ON)
 option(JSUI_BUILD_VIEWER "Build tools/jsui-viewer (downloads and builds SDL2)" ON)
+option(JSUI_BUILD_GODOT "Build the Godot 4 GDExtension in integrations/godot (fetches godot-cpp, needs python3)" OFF)
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 include(Deps)
@@ -65,6 +66,10 @@ if(JSUI_BUILD_TESTS AND NOT EMSCRIPTEN)
   target_link_libraries(jsui-tests PRIVATE jsui)
   jsui_copy_icu_data(jsui-tests)
   add_test(NAME jsui-tests COMMAND jsui-tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+endif()
+
+if(JSUI_BUILD_GODOT AND NOT EMSCRIPTEN)
+  add_subdirectory(integrations/godot)
 endif()
 
 if(EMSCRIPTEN)

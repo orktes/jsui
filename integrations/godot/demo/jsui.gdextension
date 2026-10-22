@@ -1,0 +1,13 @@
+[configuration]
+
+entry_symbol = "jsui_godot_init"
+compatibility_minimum = "4.3"
+
+[libraries]
+
+; Built by CMake with -DJSUI_BUILD_GODOT=ON (see ../README.md). The same
+; library serves editor, debug and release runs.
+linux.x86_64 = "res://bin/libjsui_godot.linux.x86_64.so"
+linux.arm64 = "res://bin/libjsui_godot.linux.arm64.so"
+windows.x86_64 = "res://bin/libjsui_godot.windows.x86_64.dll"
+macos = "res://bin/libjsui_godot.macos.universal.dylib"

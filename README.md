@@ -27,3 +27,9 @@ cmake --build build
 
 WebAssembly: `scripts/build-wasm.sh` (CPU raster, `web/dist/`) or
 `WEBGL=1 scripts/build-wasm.sh` (adds Skia on WebGL, `web/dist-webgl/`).
+
+## Godot 4
+
+`integrations/godot` is a GDExtension with a `JsuiView` Control and a demo
+project. Build it with `-DJSUI_BUILD_GODOT=ON` (it is off by default). See
+[integrations/godot/README.md](integrations/godot/README.md).

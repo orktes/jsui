@@ -1,0 +1,6 @@
+# Godot editor cache / imports
+.godot/
+*.import
+# Build outputs
+bin/
+ui/dist/

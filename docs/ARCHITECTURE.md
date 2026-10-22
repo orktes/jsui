@@ -72,6 +72,7 @@ library with a C API, and the same core compiles to WebAssembly.
 | `src/runtime.*`, `src/capi.cpp` | Runtime object and C API wrappers |
 | `tools/jsui-render` | Headless renderer: bundle → PNG (tests, CI) |
 | `tools/jsui-viewer` | Windowed host with dev mode (live reload) |
+| `integrations/godot` | Godot 4 GDExtension (`JsuiView` Control) + demo project |
 | `web/` | Browser host for the WASM build |
 | `packages/react` | `@jsui/react`: reconciler, components, StyleSheet, events |
 | `packages/cli` | `@jsui/cli`: `jsui build` / `jsui dev` (esbuild + dev server) |
