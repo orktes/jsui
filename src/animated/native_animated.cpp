@@ -402,6 +402,7 @@ void NativeAnimated::applyProps(ANode& p) {
   // setProps skips identical props and only relayouts for layout keys (the
   // JS side only lets paint keys through), so this repaints just the
   // node's rects.
+  doc_.perf.counters.animatedWrites++;
   view->setProps(Value(std::move(props)));
   p.viewPaintVersion = view->paintVersion;
   p.viewWritten = true;
@@ -599,6 +600,7 @@ bool NativeAnimated::step(Anim& a, double t) {
 }
 
 void NativeAnimated::tick(double nowMs) {
+  Perf::Scope scope(doc_.perf, Phase::Animated);
   for (size_t i = 0; i < animations_.size();) {
     Anim& a = animations_[i];
     if (step(a, nowMs)) {

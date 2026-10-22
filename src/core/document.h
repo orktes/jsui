@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "core/node.h"
+#include "core/perf.h"
 
 namespace jsui {
 
@@ -101,6 +102,17 @@ class Document {
   };
   void queueImageEvents(uint32_t node, bool cached);
   std::vector<ImageEvent> imageEvents;
+  // Nodes with autoFocus / hasTVPreferredFocus / modal props (attached or
+  // not), so focus bookkeeping does not walk the whole tree.
+  const std::vector<Node*>& focusHints() const { return focusHints_; }
+  void setFocusHint(Node* n, bool on);
+  // Live nodes with an onLayout listener (Node::kListensLayout). Without
+  // any, layout passes skip the onLayout walk.
+  int layoutListeners = 0;
+
+  // Work counters and (when profiling) phase times; see core/perf.h.
+  Perf perf;
+
   // Ticks run so far (Runtime::tick); image events wait for a later tick
   // than the one that set the source, so they are always asynchronous.
   uint64_t frame = 0;
@@ -118,6 +130,7 @@ class Document {
   bool armedSet_ = false;
   std::vector<uint32_t> animating_;  // nodes with a running layout animation
 
+  std::vector<Node*> focusHints_;
   std::unordered_map<uint32_t, std::unique_ptr<Node>> nodes_;
   std::unordered_map<uint32_t, Rect> reportedLayout_;
   Node* root_ = nullptr;

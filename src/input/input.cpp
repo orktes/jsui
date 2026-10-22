@@ -350,6 +350,7 @@ void InputManager::addModifiers(Value::Object& ev) const {
 
 bool InputManager::dispatch(Value::Object&& ev) {
   if (!rt_.js) return false;
+  rt_.doc.perf.counters.events++;
   Value event(std::move(ev));
   // Animated.event(..., {useNativeDriver: true}) mappings apply natively,
   // before (and independently of) JS.
@@ -696,20 +697,50 @@ void InputManager::nodeRemoved(Node* n) {
   scrolls_.erase(n->id());
 }
 
+namespace {
+
+// The path of child indices from the root, or false when `n` is not in the
+// tree or a tree walk from the root that skips undisplayed subtrees (and,
+// with `skipTextChildren`, the children of Text) would not reach it.
+bool displayedPath(const Node* root, const Node* n, bool skipTextChildren, std::vector<uint32_t>* path) {
+  path->clear();
+  for (const Node* c = n; c != root; c = c->parent()) {
+    const Node* p = c->parent();
+    if (!p || !c->yoga() || !c->style().display) return false;
+    if (skipTextChildren && p->type() == NodeType::Text) return false;
+    const auto& kids = p->children();
+    path->push_back(uint32_t(std::find(kids.begin(), kids.end(), c) - kids.begin()));
+  }
+  if (!root->yoga() || !root->style().display) return false;
+  std::reverse(path->begin(), path->end());
+  return true;
+}
+
+// Candidates (Document::focusHints with `flag`) that a displayed-tree walk
+// reaches, in tree (pre-)order.
+void hintsInTreeOrder(const Document& doc, uint8_t flag, bool skipTextChildren, std::vector<Node*>* out) {
+  out->clear();
+  std::vector<std::pair<std::vector<uint32_t>, Node*>> keyed;
+  std::vector<uint32_t> path;
+  for (Node* n : doc.focusHints()) {
+    if (!(n->propFlags() & flag)) continue;
+    if (displayedPath(doc.root(), n, skipTextChildren, &path)) keyed.emplace_back(path, n);
+  }
+  std::sort(keyed.begin(), keyed.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+  for (auto& k : keyed) out->push_back(k.second);
+}
+
+}  // namespace
+
 Node* InputManager::modalScope() const {
   // The last displayed modal subtree in tree order traps focus
   // (accessibilityViewIsModal / aria-modal), like a dialog.
   Node* scope = rt_.doc.root();
-  std::vector<Node*> stack{rt_.doc.root()};
-  while (!stack.empty()) {
-    Node* n = stack.back();
-    stack.pop_back();
-    if (!n->yoga() || !n->style().display) continue;
-    const Value& p = n->props();
-    if (n != rt_.doc.root() && (truthy(p["accessibilityViewIsModal"]) || truthy(p["aria-modal"]))) scope = n;
-    if (n->type() == NodeType::Text) continue;
-    for (size_t i = n->children().size(); i-- > 0;) stack.push_back(n->children()[i]);
-  }
+  if (rt_.doc.focusHints().empty()) return scope;
+  std::vector<Node*> modals;
+  hintsInTreeOrder(rt_.doc, Node::kModal, true, &modals);
+  for (Node* n : modals)
+    if (n != rt_.doc.root()) scope = n;
   return scope;
 }
 
@@ -837,16 +868,11 @@ void InputManager::tickFocusScopes() {
   // New autoFocus / hasTVPreferredFocus nodes take focus when nothing (or
   // nothing inside the active scope) is focused.
   uint32_t autoId = 0;
-  std::vector<Node*> stack{rt_.doc.root()};
-  while (!stack.empty()) {
-    Node* n = stack.back();
-    stack.pop_back();
-    if (!n->yoga() || !n->style().display) continue;
-    const Value& p = n->props();
-    if ((truthy(p["autoFocus"]) || truthy(p["hasTVPreferredFocus"])) && autoFocusSeen_.insert(n->id()).second &&
-        !autoId && inside(n, scope) && isFocusable(n))
-      autoId = n->id();
-    for (size_t i = n->children().size(); i-- > 0;) stack.push_back(n->children()[i]);
+  if (!rt_.doc.focusHints().empty()) {
+    std::vector<Node*> hints;
+    hintsInTreeOrder(rt_.doc, Node::kAutoFocus, false, &hints);
+    for (Node* n : hints)
+      if (autoFocusSeen_.insert(n->id()).second && !autoId && inside(n, scope) && isFocusable(n)) autoId = n->id();
   }
 
   if (sid != scopeId_) {
@@ -1052,6 +1078,7 @@ void InputManager::gamepadConnected(int pad, bool connected, const char* id) {
 // ------------------------------------------------------------------- tick
 
 void InputManager::tick(double nowMs) {
+  Perf::Scope perfScope(rt_.doc.perf, Phase::Input);
   double dt = lastTick_ < 0 ? 0 : std::clamp(nowMs - lastTick_, 0.0, 100.0);
   lastTick_ = nowMs;
   // Held D-pad / stick repeat: first after kRepeatDelayMs, then every

@@ -177,6 +177,7 @@ void Document::finishAnim(Node* n) {
 
 void Document::tickLayoutAnimations(double nowMs) {
   if (animating_.empty()) return;
+  Perf::Scope scope(perf, Phase::Layout);
   std::vector<uint32_t> ids;
   ids.swap(animating_);
   for (uint32_t id : ids) {

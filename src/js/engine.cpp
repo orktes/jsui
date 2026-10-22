@@ -70,6 +70,7 @@ Value toValue(JSContext* ctx, JSValueConst v, int depth) {
   }
   if (JS_IsString(v)) return Value(toStdString(ctx, v));
   if (JS_IsArray(v)) {
+    runtimeOf(ctx).doc.perf.counters.valueConversions++;
     Value::Array arr;
     int64_t len = 0;
     if (JS_GetLength(ctx, v, &len)) {
@@ -85,6 +86,7 @@ Value toValue(JSContext* ctx, JSValueConst v, int depth) {
     return Value(std::move(arr));
   }
   if (JS_IsObject(v) && !JS_IsFunction(ctx, v)) {
+    runtimeOf(ctx).doc.perf.counters.valueConversions++;
     Value::Object obj;
     JSPropertyEnum* props = nullptr;
     uint32_t n = 0;
@@ -208,6 +210,7 @@ void JsEngine::Impl::leave() {
 }
 
 JSValue JsEngine::Impl::call(JSValueConst fn, JSValueConst thisVal, int argc, JSValueConst* argv) {
+  Perf::Scope scope(rt.doc.perf, Phase::Js);
   enter();
   JSValue r = JS_Call(ctx, fn, thisVal, argc, argv);
   if (JS_IsException(r)) {
@@ -228,6 +231,7 @@ void JsEngine::Impl::runJobsRaw() {
 }
 
 void JsEngine::Impl::drain() {
+  Perf::Scope scope(rt.doc.perf, Phase::Js);
   draining = true;
   depth++;
   // Microtasks get a fresh watchdog budget of their own.
@@ -499,6 +503,7 @@ JsEngine::~JsEngine() {
 
 bool JsEngine::eval(const std::string& source, const std::string& name) {
   Impl& impl = *impl_;
+  Perf::Scope scope(impl.rt.doc.perf, Phase::Js);
   impl.enter();
   // JS_Eval needs a NUL-terminated buffer; std::string guarantees one.
   JSValue r = JS_Eval(impl.ctx, source.c_str(), source.size(), name.c_str(), JS_EVAL_TYPE_GLOBAL);

@@ -19,6 +19,8 @@ struct JsuiRuntime {
   std::unique_ptr<jsui::Runtime> rt;
 };
 
+jsui::Runtime* jsui::internalRuntime(JsuiRuntime* h) { return h ? h->rt.get() : nullptr; }
+
 extern "C" {
 
 void jsui_config_init(JsuiConfig* cfg) {
@@ -193,24 +195,42 @@ int jsui_render_png(JsuiRuntime* rt, void** outData, size_t* outSize) {
 void jsui_free(void* p) { std::free(p); }
 
 void jsui_set_event_time(JsuiRuntime* rt, double time_ms) { rt->rt->input->setEventTime(time_ms); }
-int jsui_send_mouse_move(JsuiRuntime* rt, float x, float y) { return rt->rt->input->mouseMove(x, y); }
+#define JSUI_INPUT_SCOPE jsui::Perf::Scope perf_scope(rt->rt->doc.perf, jsui::Phase::Input)
+int jsui_send_mouse_move(JsuiRuntime* rt, float x, float y) {
+  JSUI_INPUT_SCOPE;
+  return rt->rt->input->mouseMove(x, y);
+}
 int jsui_send_mouse_button(JsuiRuntime* rt, float x, float y, JsuiMouseButton b, int down, int mods) {
+  JSUI_INPUT_SCOPE;
   return rt->rt->input->mouseButton(x, y, int(b), down != 0, mods);
 }
 int jsui_send_mouse_wheel(JsuiRuntime* rt, float x, float y, float dx, float dy) {
+  JSUI_INPUT_SCOPE;
   return rt->rt->input->mouseWheel(x, y, dx, dy);
 }
-int jsui_send_mouse_leave(JsuiRuntime* rt) { return rt->rt->input->mouseLeave(); }
-int jsui_send_touch(JsuiRuntime* rt, int id, int phase, float x, float y) { return rt->rt->input->touch(id, phase, x, y); }
+int jsui_send_mouse_leave(JsuiRuntime* rt) {
+  JSUI_INPUT_SCOPE;
+  return rt->rt->input->mouseLeave();
+}
+int jsui_send_touch(JsuiRuntime* rt, int id, int phase, float x, float y) {
+  JSUI_INPUT_SCOPE;
+  return rt->rt->input->touch(id, phase, x, y);
+}
 int jsui_send_key(JsuiRuntime* rt, const char* key, const char* code, int down, int repeat, int mods) {
+  JSUI_INPUT_SCOPE;
   if (rt->rt->devKey(key, down != 0)) return 1;  // dev overlay (Escape)
   return rt->rt->input->key(key, code, down != 0, repeat != 0, mods);
 }
-int jsui_send_text(JsuiRuntime* rt, const char* utf8) { return rt->rt->input->text(utf8); }
+int jsui_send_text(JsuiRuntime* rt, const char* utf8) {
+  JSUI_INPUT_SCOPE;
+  return rt->rt->input->text(utf8);
+}
 int jsui_send_gamepad_button(JsuiRuntime* rt, int pad, int button, int down, float value) {
+  JSUI_INPUT_SCOPE;
   return rt->rt->input->gamepadButton(pad, button, down != 0, value);
 }
 int jsui_send_gamepad_axis(JsuiRuntime* rt, int pad, int axis, float value) {
+  JSUI_INPUT_SCOPE;
   return rt->rt->input->gamepadAxis(pad, axis, value);
 }
 void jsui_set_gamepad_connected(JsuiRuntime* rt, int pad, int connected, const char* id) {

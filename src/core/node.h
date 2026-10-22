@@ -58,6 +58,13 @@ class Node {
   // `props["__events"] = ["press", "pointerMove", ...]` used for hit testing.
   void setProps(const Value& props);
   const Value& props() const { return props_; }
+  // Facts about props() that hot paths ask for (computed by setProps).
+  enum PropFlag : uint8_t {
+    kListensLayout = 1,  // __events has "layout" (onLayout)
+    kAutoFocus = 2,      // autoFocus / hasTVPreferredFocus
+    kModal = 4,          // accessibilityViewIsModal / aria-modal
+  };
+  uint8_t propFlags() const { return propFlags_; }
   // Re-applies the current props (e.g. after a pixel-ratio change, which
   // affects border-width snapping).
   void restyle();
@@ -132,6 +139,7 @@ class Node {
   uint32_t paintVersion = 0;
 
  private:
+  void updatePropFlags();
   void attachYoga(Node* child, size_t index);
   void detachYoga(Node* child);
 
@@ -142,6 +150,7 @@ class Node {
   std::vector<Node*> children_;
   YGNodeRef yoga_ = nullptr;
   Value props_;
+  uint8_t propFlags_ = 0;
   ComputedStyle style_;
   std::string text_;
 };

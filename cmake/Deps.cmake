@@ -45,6 +45,25 @@ if(NOT yoga_POPULATED)
   FetchContent_Populate(yoga)
 endif()
 file(GLOB_RECURSE JSUI_YOGA_SOURCES CONFIGURE_DEPENDS ${yoga_SOURCE_DIR}/yoga/*.cpp)
+# JSUI keeps layout fractional (point scale factor 0), but Yoga still walks
+# the whole tree after every layout pass to "round" it. Compile a copy of
+# PixelGrid.cpp that returns at once when there is nothing to round (the
+# fetched sources stay untouched).
+set(_yoga_pixel_grid ${yoga_SOURCE_DIR}/yoga/algorithm/PixelGrid.cpp)
+file(READ ${_yoga_pixel_grid} _yoga_pg)
+set(_yoga_pg_anchor "  const auto pointScaleFactor = node->getConfig()->getPointScaleFactor();\n")
+string(FIND "${_yoga_pg}" "${_yoga_pg_anchor}" _yoga_pg_at)
+if(_yoga_pg_at GREATER -1)
+  string(REPLACE "${_yoga_pg_anchor}"
+    "${_yoga_pg_anchor}  if (pointScaleFactor == 0.0f) return;  // jsui: fractional layout, nothing to round\n"
+    _yoga_pg "${_yoga_pg}")
+  set(_yoga_pg_out ${CMAKE_BINARY_DIR}/yoga-patched/PixelGrid.cpp)
+  file(CONFIGURE OUTPUT ${_yoga_pg_out} CONTENT "${_yoga_pg}" @ONLY)
+  list(REMOVE_ITEM JSUI_YOGA_SOURCES ${_yoga_pixel_grid})
+  list(APPEND JSUI_YOGA_SOURCES ${_yoga_pg_out})
+else()
+  message(WARNING "Yoga PixelGrid.cpp changed: skipping the no-rounding fast path")
+endif()
 add_library(jsui_yoga STATIC ${JSUI_YOGA_SOURCES})
 target_include_directories(jsui_yoga PUBLIC ${yoga_SOURCE_DIR})
 set_target_properties(jsui_yoga PROPERTIES CXX_STANDARD 20 POSITION_INDEPENDENT_CODE ON)

@@ -129,13 +129,24 @@ void Node::removeChild(Node* child) {
 void Node::setProps(const Value& props) {
   // React re-renders often send identical props: nothing to do (and nothing
   // to repaint).
-  if (yoga_ && valueEquals(props_, props) && props_.isObject()) return;
+  if (doc_) doc_->perf.counters.setProps++;
+  if (yoga_ && valueEquals(props_, props) && props_.isObject()) {
+    if (doc_) doc_->perf.counters.setPropsSkipped++;
+    return;
+  }
   Value old = std::move(props_);
   props_ = props;
+  updatePropFlags();
   bool relayout = false;
   if (yoga_) {
     TextStyle oldText = std::move(style_.text);
-    applyStyle(props_["style"], &style_, yoga_, doc_ ? doc_->pixelRatio() : 1);
+    if (doc_) {
+      Perf::Scope scope(doc_->perf, Phase::Style);
+      doc_->perf.counters.styleResolves++;
+      applyStyle(props_["style"], &style_, yoga_, doc_->pixelRatio());
+    } else {
+      applyStyle(props_["style"], &style_, yoga_, 1);
+    }
     if (props_["pointerEvents"].isString() && !props_["style"].has("pointerEvents")) {
       const std::string& pe = props_["pointerEvents"].asString();
       style_.pointerEvents = pe == "none"       ? PointerEvents::None
@@ -183,6 +194,25 @@ void Node::setProps(const Value& props) {
   if (relayout) doc_->markLayoutDirty();
   else doc_->markPaintDirty();
   if (type_ == NodeType::TextInput) edit::syncProps(this);
+}
+
+namespace {
+bool truthyProp(const Value& v) { return v.asBool(false) || (v.isNumber() && v.asNumber() != 0); }
+}  // namespace
+
+void Node::updatePropFlags() {
+  uint8_t f = 0;
+  if (props_.isObject()) {
+    for (const Value& e : props_["__events"].asArray())
+      if (e.asString() == "layout") f |= kListensLayout;
+    if (truthyProp(props_["autoFocus"]) || truthyProp(props_["hasTVPreferredFocus"])) f |= kAutoFocus;
+    if (truthyProp(props_["accessibilityViewIsModal"]) || truthyProp(props_["aria-modal"])) f |= kModal;
+  }
+  bool hint = f & (kAutoFocus | kModal), wasHint = propFlags_ & (kAutoFocus | kModal);
+  bool listens = f & kListensLayout, listened = propFlags_ & kListensLayout;
+  propFlags_ = f;
+  if (doc_ && hint != wasHint) doc_->setFocusHint(this, hint);
+  if (doc_ && listens != listened) doc_->layoutListeners += listens ? 1 : -1;
 }
 
 void Node::restyle() {
