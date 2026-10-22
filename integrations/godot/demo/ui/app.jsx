@@ -18,7 +18,20 @@
 // The strip (and the toast above it) sit in the empty left half of the
 // showcase's bottom bar, so they cover none of the showcase's controls.
 import React, { useEffect, useRef, useState } from 'react';
-import { Animated, AppRegistry, Easing, Host, Pressable, StyleSheet, Text, View, useHostHandler, useHostState } from 'react-native';
+import {
+  Animated,
+  AppRegistry,
+  Easing,
+  Host,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+  useHostHandler,
+  useHostState,
+  useWindowDimensions,
+} from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Showcase from '../../../../examples/showcase/interactions.jsx';
 import { colors, font } from '../../../../examples/theme.js';
 
@@ -91,18 +104,52 @@ function Bridge() {
   );
 }
 
+// The showcase is designed for a 1280 x 720 or larger stage (the Godot
+// viewport), which it fills. A smaller screen (a phone in landscape is ~874 x
+// 402) gets a 1280 x 720 stage scaled down to fit the safe area, centred in it.
+const STAGE_W = 1280;
+const STAGE_H = 720;
+
+function Stage({ children }) {
+  const { width, height } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const w = width - insets.left - insets.right;
+  const h = height - insets.top - insets.bottom;
+  if (w >= STAGE_W && h >= STAGE_H) {
+    return (
+      <View style={{ position: 'absolute', left: insets.left, top: insets.top, right: insets.right, bottom: insets.bottom }}>
+        {children}
+      </View>
+    );
+  }
+  const scale = Math.min(w / STAGE_W, h / STAGE_H);
+  const style = {
+    position: 'absolute',
+    left: insets.left + (w - STAGE_W) / 2,
+    top: insets.top + (h - STAGE_H) / 2,
+    width: STAGE_W,
+    height: STAGE_H,
+    transform: [{ scale }],
+  };
+  return <View style={style}>{children}</View>;
+}
+
 function App() {
   return (
+    // Insets are zero in Godot; on phones (the iOS host) the UI stays clear of
+    // the notch / Dynamic Island / home indicator.
     <View style={styles.root}>
-      <Showcase />
-      <Bridge />
-      <Toast />
+      <Stage>
+        <Showcase />
+        <Bridge />
+        <Toast />
+      </Stage>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1 },
+  root: { flex: 1, backgroundColor: colors.bg0 },
   bridge: {
     position: 'absolute',
     left: 24,

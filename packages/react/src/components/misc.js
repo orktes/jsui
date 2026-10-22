@@ -199,15 +199,7 @@ StatusBar.pushStackEntry = (p) => p;
 StatusBar.popStackEntry = () => {};
 StatusBar.replaceStackEntry = (_e, p) => p;
 
-function passthroughView(name) {
-  function C(props) {
-    return h('View', props);
-  }
-  C.displayName = name;
-  return C;
-}
-
-export const SafeAreaView = passthroughView('SafeAreaView');
+export { SafeAreaView } from '../safeArea.js';
 export const KeyboardAvoidingView = (props) => {
   const { behavior, keyboardVerticalOffset, contentContainerStyle, enabled, ...rest } = props;
   return h('View', rest);

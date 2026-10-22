@@ -13,6 +13,7 @@ import {
   useHostState,
   useHostStateSelector,
   useHostHandler,
+  SafeAreaView,
 } from '../src/index.js';
 
 const wait = (ms = 0) => new Promise((r) => setTimeout(r, ms));
@@ -254,4 +255,19 @@ test('Host.handle / useHostHandler answer jsui_call_ui', async () => {
   await wait();
   globalThis.__jsui_onCall(7, 'ui.confirm', '{}');
   assert.equal(mock.uiResults.at(-1)[1], false, 'unregistered on unmount');
+});
+
+test('SafeAreaView pads by the host safe-area insets, on top of its own padding', async () => {
+  render(h(SafeAreaView, { nativeID: 'safe', style: { flex: 1, padding: 10, paddingTop: 4 } }), 1);
+  await wait();
+  let n = mock.find((x) => x.props.nativeID === 'safe');
+  assert.equal(n.props.style.paddingLeft ?? n.props.style.padding, 10);  // unset: zero insets
+  mock.setHostState('jsui.safeAreaInsets', '{"top":0,"right":59,"bottom":21,"left":59}');
+  mock.tickState();
+  await wait();
+  n = mock.find((x) => x.props.nativeID === 'safe');
+  assert.equal(n.props.style.paddingLeft, 69);
+  assert.equal(n.props.style.paddingRight, 69);
+  assert.equal(n.props.style.paddingBottom, 31);
+  assert.equal(n.props.style.paddingTop, 4);
 });

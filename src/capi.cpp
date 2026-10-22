@@ -12,6 +12,7 @@
 #include "js/engine.h"
 #include "jsui/jsui.h"
 #include "render/gpu.h"
+#include "render/gpu_metal.h"
 #include "runtime.h"
 
 struct JsuiRuntime {
@@ -164,6 +165,14 @@ int jsui_render_gl(JsuiRuntime* rt, JsuiGpuContext* gpu, unsigned int fbo, int w
 
 int jsui_render_gl_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiGLTarget* target) {
   return target ? jsui::gpu::render(*rt->rt, gpu, *target) : -1;
+}
+
+JsuiMetalContext* jsui_metal_create(void* device, void* queue) { return jsui::metal::create(device, queue); }
+void jsui_metal_destroy(JsuiMetalContext* mtl) { jsui::metal::destroy(mtl); }
+void jsui_metal_purge(JsuiMetalContext* mtl, size_t cacheBytes) { jsui::metal::purge(mtl, cacheBytes); }
+int jsui_render_metal(JsuiRuntime* rt, JsuiMetalContext* mtl, void* texture, unsigned int format, int width,
+                      int height, int flags) {
+  return rt ? jsui::metal::render(*rt->rt, mtl, texture, format, width, height, flags) : -1;
 }
 
 int jsui_render_png(JsuiRuntime* rt, void** outData, size_t* outSize) {

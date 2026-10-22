@@ -428,6 +428,48 @@ JSUI_API JsuiGpuContext* jsui_gpu_create_webgpu(void* instance, void* device, vo
 JSUI_API int jsui_render_webgpu(JsuiRuntime* rt, JsuiGpuContext* gpu, void* texture, int width, int height, int flags);
 JSUI_API int jsui_render_webgpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget* target);
 
+/* ------------------------------------------------------------- GPU (Metal)
+ *
+ * Skia Ganesh on Metal: draws the frame straight into a Metal texture (a
+ * CAMetalLayer / MTKView drawable, or an engine's render target). Available
+ * when the library was built with JSUI_METAL (iOS builds by default);
+ * otherwise jsui_metal_create() returns NULL and the host falls back to
+ * jsui_render_rgba(). Handles are Objective-C objects passed as void*
+ * ((__bridge void*) under ARC); JSUI retains what it keeps.
+ *
+ *     JsuiMetalContext* mtl = jsui_metal_create((__bridge void*)device, (__bridge void*)queue);
+ *     // per frame:
+ *     jsui_tick(rt, now_ms);
+ *     id<CAMetalDrawable> d = [layer nextDrawable];
+ *     jsui_render_metal(rt, mtl, (__bridge void*)d.texture, MTLPixelFormatBGRA8Unorm, w, h, 0);
+ *     id<MTLCommandBuffer> cb = [queue commandBuffer];  // same queue: runs after JSUI's work
+ *     [cb presentDrawable:d]; [cb commit];
+ *
+ * - JSUI submits its work on `queue`; anything the host encodes on the same
+ *   queue afterwards (present, compositing the UI texture) is ordered after it.
+ * - The target is top-left origin and must be usable as a render target
+ *   (MTLTextureUsageRenderTarget). Formats: BGRA8Unorm (0 means this),
+ *   RGBA8Unorm, the _sRGB variants, RGB10A2Unorm, BGR10A2Unorm, RGBA16Float.
+ * - Like the GL path it always repaints the whole target; flags take
+ *   JSUI_GL_NO_CLEAR to draw over the texture's contents.
+ * - One context may serve any number of runtimes; all calls on one thread.
+ */
+typedef struct JsuiMetalContext JsuiMetalContext;
+
+/* `device`: id<MTLDevice>, `queue`: id<MTLCommandQueue> of that device.
+ * Returns NULL when the library was built without JSUI_METAL. */
+JSUI_API JsuiMetalContext* jsui_metal_create(void* device, void* queue);
+/* Waits for submitted work, then frees the context and its GPU resources. */
+JSUI_API void jsui_metal_destroy(JsuiMetalContext* mtl);
+/* Frees cached GPU resources not in use (memory warnings); `cache_bytes` > 0
+ * also sets the cache budget (default 256 MB). */
+JSUI_API void jsui_metal_purge(JsuiMetalContext* mtl, size_t cache_bytes);
+/* Paints the current frame into `texture` (id<MTLTexture>, `format` its
+ * MTLPixelFormat) at width x height device px. Lays out first and clears
+ * needs_redraw. Returns 0 on success, -1 on failure. */
+JSUI_API int jsui_render_metal(JsuiRuntime* rt, JsuiMetalContext* mtl, void* texture, unsigned int format, int width,
+                               int height, int flags);
+
 /* Encode the current frame as PNG (for tests / screenshots). Caller frees with jsui_free(). */
 JSUI_API int jsui_render_png(JsuiRuntime* rt, void** out_data, size_t* out_size);
 JSUI_API void jsui_free(void* p);
