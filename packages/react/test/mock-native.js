@@ -138,6 +138,9 @@ globalThis.__jsui_native = {
   scrollTo(id, x, y, animated) {
     calls.push(['scrollTo', id, x, y, animated]);
   },
+  flashScrollIndicators(id) {
+    calls.push(['flashScrollIndicators', id]);
+  },
   postMessage(name, json) {
     mock.messages.push([name, json]);
   },

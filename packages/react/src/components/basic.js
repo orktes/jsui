@@ -163,36 +163,8 @@ export function ImageBackground(props) {
 
 // --- ScrollView --------------------------------------------------------------
 
-const scrollBase = { flexGrow: 1, flexShrink: 1, flexDirection: 'column', overflow: 'scroll' };
-const scrollBaseH = { flexGrow: 1, flexShrink: 1, flexDirection: 'row', overflow: 'scroll' };
-const contentH = { flexDirection: 'row' };
-
-const SCROLL_IGNORED = [
-  'contentContainerStyle',
-  'onContentSizeChange',
-  'refreshControl',
-  'keyboardShouldPersistTaps',
-  'keyboardDismissMode',
-  'stickyHeaderIndices',
-  'StickyHeaderComponent',
-  'invertStickyHeaders',
-  'children',
-  'centerContent',
-];
-
-export function ScrollView(props) {
-  const { children, contentContainerStyle, horizontal, onContentSizeChange, refreshControl, centerContent } = props;
-  const rest = omit(props, SCROLL_IGNORED);
-  rest.horizontal = !!horizontal;
-  rest.style = [horizontal ? scrollBaseH : scrollBase, props.style];
-  const content = {
-    style: [horizontal && contentH, centerContent && { flexGrow: 1, justifyContent: 'center' }, contentContainerStyle],
-    collapsable: false,
-  };
-  if (onContentSizeChange) content.onLayout = (e) => onContentSizeChange(e.nativeEvent.layout.width, e.nativeEvent.layout.height);
-  return h('ScrollView', rest, refreshControl || null, h('View', content, children));
-}
-ScrollView.displayName = 'ScrollView';
+// Implemented in scrollview.js (props, events, sticky headers, throttling).
+export { ScrollView } from './scrollview.js';
 
 // --- TextInput -----------------------------------------------------------------
 //

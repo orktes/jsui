@@ -269,7 +269,9 @@ export class HostInstance {
     });
   }
 
-  flashScrollIndicators() {}
+  flashScrollIndicators() {
+    if (typeof native.flashScrollIndicators === 'function') native.flashScrollIndicators(this.id);
+  }
 
   getScrollResponder() {
     return this;
