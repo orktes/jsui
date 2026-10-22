@@ -481,11 +481,14 @@ bool NativeAnimated::startAnimation(int id, int tag, const Value& c, double nowM
   a.from = n->value;
   beginIteration(a, nowMs);
   animations_.push_back(std::move(a));
-  // A zero-length timing applies at once (still reported at the end of the tick).
+  // A zero-length timing applies at once; its end is still reported (with
+  // the other ends, after the tick), so a sequence or loop it is part of
+  // goes on: Animated.loop(sequence([timing, timing({duration: 0})])).
   Anim& back = animations_.back();
   if (back.kind == Anim::Kind::Frames && back.duration <= 0 && back.delay <= 0) {
     if (step(back, nowMs)) {
       animations_.pop_back();
+      ends.push_back({id, true, n->value});
       flush();
     }
   }

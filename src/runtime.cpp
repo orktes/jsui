@@ -339,19 +339,25 @@ void Runtime::tickNative(double nowMs) {
 }
 
 void Runtime::deliverAnimatedEvents() {
-  if (!js || (animated->ends.empty() && animated->updates.empty())) return;
-  // Value updates first (listeners see the final value), then end callbacks.
-  auto updates = std::move(animated->updates);
-  animated->updates.clear();
-  for (auto& u : updates) {
-    Value args[2] = {Value(u.tag), Value(u.value)};
-    js->callGlobal("__jsui_onAnimatedValueUpdate", args, 2);
-  }
-  auto ends = std::move(animated->ends);
-  animated->ends.clear();
-  for (auto& e : ends) {
-    Value args[3] = {Value(e.id), Value(e.finished), Value(e.value)};
-    js->callGlobal("__jsui_onAnimatedEnd", args, 3);
+  // End callbacks may start animations that end at once (a zero-duration
+  // timing in a sequence, an Animated.loop restarting it): those ends are
+  // delivered in this tick too, a few rounds deep, so a chain like
+  // loop(sequence([timing, timing({duration: 0})])) does not lose a frame
+  // per step (the JS driver runs such chains synchronously).
+  for (int round = 0; round < 8 && js && !(animated->ends.empty() && animated->updates.empty()); round++) {
+    // Value updates first (listeners see the final value), then end callbacks.
+    auto updates = std::move(animated->updates);
+    animated->updates.clear();
+    for (auto& u : updates) {
+      Value args[2] = {Value(u.tag), Value(u.value)};
+      js->callGlobal("__jsui_onAnimatedValueUpdate", args, 2);
+    }
+    auto ends = std::move(animated->ends);
+    animated->ends.clear();
+    for (auto& e : ends) {
+      Value args[3] = {Value(e.id), Value(e.finished), Value(e.value)};
+      js->callGlobal("__jsui_onAnimatedEnd", args, 3);
+    }
   }
 }
 
