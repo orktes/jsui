@@ -6,7 +6,7 @@
 import React from 'react';
 import { Image, StyleSheet, View } from 'react-native';
 
-export const meta = { width: 640, height: 360, maxMismatch: 0.5, title: 'Clipping & stacking' };
+export const meta = { width: 640, height: 360, maxMismatch: 0.5, maxTileMismatch: 3, title: 'Clipping & stacking' };
 
 const C = ['#ff4d6a', '#f2c35b', '#4ade80', '#4fd1ff', '#b26bff'];
 

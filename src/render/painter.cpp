@@ -585,18 +585,66 @@ void paintBorders(SkCanvas* c, const Box& b, const ComputedStyle& s) {
       else c->drawDRRect(b.outer, b.inner, p);
       return;
     }
-    // Mixed colors: each side is the ring clipped to its trapezoid, with the
-    // corner joins running from the outer to the inner box corners.
+    // Mixed colors: each side is the ring clipped to its region. Like Chrome,
+    // the corner joins run from each outer box corner through the matching
+    // inner (padding) box corner; the regions extend along those joins to the
+    // box's center lines so they also cover the rounded corner arcs, which
+    // reach well past the inner box edges when the radius exceeds the widths.
     const SkRect o = b.outer.rect(), in = b.inner.rect();
-    const SkPoint quads[4][4] = {
-        {{o.fLeft, o.fTop}, {o.fRight, o.fTop}, {in.fRight, in.fTop}, {in.fLeft, in.fTop}},
-        {{o.fRight, o.fTop}, {o.fRight, o.fBottom}, {in.fRight, in.fBottom}, {in.fRight, in.fTop}},
-        {{o.fRight, o.fBottom}, {o.fLeft, o.fBottom}, {in.fLeft, in.fBottom}, {in.fRight, in.fBottom}},
-        {{o.fLeft, o.fBottom}, {o.fLeft, o.fTop}, {in.fLeft, in.fTop}, {in.fLeft, in.fBottom}},
+    const SkPoint oc[4] = {{o.fLeft, o.fTop}, {o.fRight, o.fTop}, {o.fRight, o.fBottom}, {o.fLeft, o.fBottom}};
+    const SkPoint ic[4] = {{in.fLeft, in.fTop}, {in.fRight, in.fTop}, {in.fRight, in.fBottom}, {in.fLeft, in.fBottom}};
+    const float cx = o.centerX(), cy = o.centerY();
+    // Corner k's join, extended from the outer corner until it meets the
+    // center line of side `side` (top/bottom: y = cy, left/right: x = cx).
+    // Returns the end point and the ray parameter (in units of the join).
+    auto joinEnd = [&](int k, int side, float* tOut) {
+      SkVector d = ic[k] - oc[k];
+      bool horizontalSide = side == 0 || side == 2;
+      float dc = horizontalSide ? d.fY : d.fX;
+      float target = horizontalSide ? cy - oc[k].fY : cx - oc[k].fX;
+      float t = std::fabs(dc) > 1e-4f ? target / dc : -1;
+      if (t < 0) {
+        // The join runs parallel to the center line: extend straight across.
+        SkPoint q = oc[k];
+        if (horizontalSide) q.fY = cy;
+        else q.fX = cx;
+        *tOut = -1;
+        return q;
+      }
+      *tOut = t;
+      return oc[k] + d * t;
     };
+    // Side i is bounded by the joins of corners i and i+1. When the two joins
+    // cross before reaching the center line (narrow or very uneven borders),
+    // the region is the triangle up to the crossing so it never spills over
+    // the far side of a neighbour's join.
+    SkPoint quads[4][4];
+    int quadPoints[4];
+    for (int i = 0; i < 4; i++) {
+      int k0 = i, k1 = (i + 1) % 4;
+      float t0, t1;
+      SkPoint e0 = joinEnd(k0, i, &t0), e1 = joinEnd(k1, i, &t1);
+      quads[i][0] = oc[k0];
+      quads[i][1] = oc[k1];
+      quadPoints[i] = 4;
+      SkVector d0 = ic[k0] - oc[k0], d1 = ic[k1] - oc[k1];
+      float den = SkPoint::CrossProduct(d0, d1);
+      if (t0 > 0 && t1 > 0 && std::fabs(den) > 1e-6f) {
+        SkVector r = oc[k1] - oc[k0];
+        float s0 = SkPoint::CrossProduct(r, d1) / den;
+        float s1 = SkPoint::CrossProduct(r, d0) / den;
+        if (s0 > 0 && s1 > 0 && s0 < t0 && s1 < t1) {
+          quads[i][2] = oc[k0] + d0 * s0;
+          quadPoints[i] = 3;
+          continue;
+        }
+      }
+      quads[i][2] = e1;
+      quads[i][3] = e0;
+    }
     for (int i = 0; i < 4; i++) {
       if (w[i] <= 0 || s.borderColor[i].transparent()) continue;
-      SkPath clip = SkPath::Polygon(quads[i], 4, true);
+      SkPath clip = SkPath::Polygon(quads[i], quadPoints[i], true);
       c->save();
       c->clipPath(clip, true);
       p.setColor4f(sk(s.borderColor[i]));

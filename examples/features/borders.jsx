@@ -6,7 +6,7 @@
 import React from 'react';
 import { StyleSheet, View } from 'react-native';
 
-export const meta = { width: 640, height: 360, maxMismatch: 0.5, title: 'Borders' };
+export const meta = { width: 640, height: 360, maxMismatch: 0.5, maxTileMismatch: 3, title: 'Borders' };
 
 const sides = { borderTopColor: '#ff4d6a', borderRightColor: '#f2c35b', borderBottomColor: '#4ade80', borderLeftColor: '#4f8cff' };
 

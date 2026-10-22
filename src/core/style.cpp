@@ -1485,11 +1485,11 @@ void parseBorderColors(const StyleMap& style, Color out[4]) {
 
 }  // namespace
 
-float snapBorderWidth(float w, float pixelRatio) {
+float snapBorderWidth(float w, float /*pixelRatio*/) {
   if (!(w > 0)) return w;
-  float pr = pixelRatio > 0 ? pixelRatio : 1;
-  float d = w * pr;
-  return (d < 1 ? 1.f : std::floor(d)) / pr;
+  // Chrome (checked on 141 at device scale 1, 1.5, 2, 3 and 4) snaps in CSS
+  // px rather than device px: 0.25 -> 1, 1.5 -> 1, 2.5 -> 2, 3.3 -> 3.
+  return w < 1 ? 1.f : std::floor(w);
 }
 
 void applyStyle(const Value& style, ComputedStyle* out, YGNodeRef yoga, float pixelRatio) {
