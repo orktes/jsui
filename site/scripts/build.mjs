@@ -11,8 +11,20 @@
 //   jsui/dist-webgl/jsui.{js,wasm}  WebGL module (optional; used when present)
 //   jsui/dist-gpu/jsui.{js,wasm}    WebGPU + WebGL + CPU module (optional; preferred when
 //                                   present and the browser has WebGPU)
-//   modules.json                    which modules were deployed
+//   modules.json                    which modules were deployed, and their versions
 //   app/bundle.js, app/assets/*     the site itself (site/app, built with @jsui/cli)
+//
+// Cache consistency: GitHub Pages serves everything with max-age=600, so a
+// browser may hold some files of the previous deploy and fetch others fresh
+// (a new index.html with an old jsui-web.js, a jsui.js with the jsui.wasm of
+// another build: "Importing a module script failed"). Every URL the page
+// loads besides index.html itself is therefore versioned with a content
+// hash, ?v=<hash>: jsui-web.js (imported by index.html), jsui-webgpu.js
+// (imported by jsui-web.js, rewritten here), each module's jsui.js and its
+// jsui.wasm (one hash over both; the host passes the module URL's query on to
+// the wasm, see locateIn() in web/jsui-web.js) and app/bundle.js. index.html
+// gets the module versions inline (no modules.json fetch to go stale).
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,24 +53,55 @@ if (!has(wasm)) {
 fs.rmSync(out, { recursive: true, force: true });
 fs.mkdirSync(out, { recursive: true });
 
-const copyModule = (from, to) => {
-  fs.mkdirSync(to, { recursive: true });
-  for (const f of ['jsui.js', 'jsui.wasm']) fs.copyFileSync(path.join(from, f), path.join(to, f));
+const hash = (...bufs) => {
+  const h = crypto.createHash('sha256');
+  for (const b of bufs) h.update(b);
+  return h.digest('hex').slice(0, 16);
 };
-copyModule(wasm, path.join(out, 'jsui/dist'));
-const gpu = has(wasmGl);
-if (gpu) copyModule(wasmGl, path.join(out, 'jsui/dist-webgl'));
-const webgpu = has(wasmGpu);
-if (webgpu) copyModule(wasmGpu, path.join(out, 'jsui/dist-gpu'));
-fs.writeFileSync(path.join(out, 'modules.json'), JSON.stringify({ cpu: true, gpu, webgpu }) + '\n');
+// Replaces every `from` (there must be one) in `text`.
+const replaceAll = (text, from, to, file) => {
+  if (!text.includes(from)) {
+    console.error(`site: ${file} has no ${JSON.stringify(from)} to version`);
+    process.exit(1);
+  }
+  return text.split(from).join(to);
+};
 
-fs.copyFileSync(path.join(ROOT, 'web/jsui-web.js'), path.join(out, 'jsui-web.js'));
-fs.copyFileSync(path.join(ROOT, 'web/jsui-webgpu.js'), path.join(out, 'jsui-webgpu.js'));
-fs.copyFileSync(path.join(SITE, 'index.html'), path.join(out, 'index.html'));
-fs.writeFileSync(path.join(out, '.nojekyll'), '');
+// Modules: one version per directory, a hash over its jsui.js and jsui.wasm.
+const versions = {};
+const copyModule = (from, dir) => {
+  const to = path.join(out, 'jsui', dir);
+  fs.mkdirSync(to, { recursive: true });
+  const files = ['jsui.js', 'jsui.wasm'];
+  const data = files.map((f) => fs.readFileSync(path.join(from, f)));
+  files.forEach((f, i) => fs.writeFileSync(path.join(to, f), data[i]));
+  versions[dir] = hash(...data);
+};
+copyModule(wasm, 'dist');
+const gpu = has(wasmGl);
+if (gpu) copyModule(wasmGl, 'dist-webgl');
+const webgpu = has(wasmGpu);
+if (webgpu) copyModule(wasmGpu, 'dist-gpu');
+const modules = { cpu: true, gpu, webgpu, versions };
+fs.writeFileSync(path.join(out, 'modules.json'), JSON.stringify(modules) + '\n');
 
 const t0 = Date.now();
 const r = await build({ entry: path.join(SITE, 'app/index.jsx'), outfile: path.join(out, 'app/bundle.js'), minify });
 for (const w of r.warnings) console.warn('site: warning:', w.text);
+
+// The host scripts, each import pointing at the version deployed with it.
+const webgpuJs = fs.readFileSync(path.join(ROOT, 'web/jsui-webgpu.js'));
+fs.writeFileSync(path.join(out, 'jsui-webgpu.js'), webgpuJs);
+const webJs = replaceAll(fs.readFileSync(path.join(ROOT, 'web/jsui-web.js'), 'utf8'), "from './jsui-webgpu.js'",
+  `from './jsui-webgpu.js?v=${hash(webgpuJs)}'`, 'web/jsui-web.js');
+fs.writeFileSync(path.join(out, 'jsui-web.js'), webJs);
+let html = fs.readFileSync(path.join(SITE, 'index.html'), 'utf8');
+html = replaceAll(html, "from './jsui-web.js'", `from './jsui-web.js?v=${hash(webJs)}'`, 'site/index.html');
+html = replaceAll(html, "'./app/bundle.js'",
+  `'./app/bundle.js?v=${hash(fs.readFileSync(path.join(out, 'app/bundle.js')))}'`, 'site/index.html');
+html = replaceAll(html, 'const modules = null;  // set by site/scripts/build.mjs',
+  `const modules = ${JSON.stringify(modules)};`, 'site/index.html');
+fs.writeFileSync(path.join(out, 'index.html'), html);
+fs.writeFileSync(path.join(out, '.nojekyll'), '');
 console.log(`site: bundle ${(r.bytes / 1024).toFixed(1)} KiB, ${r.assets.length} assets in ${Date.now() - t0} ms`);
 console.log(`site: wrote ${out} (modules: cpu${gpu ? ' + webgl' : ''}${webgpu ? ' + webgpu' : ''})`);

@@ -58,8 +58,18 @@ for (const size of SIZES) {
   const logs = [];
   page.on('console', (m) => logs.push(m.text()));
   page.on('pageerror', (e) => logs.push('pageerror: ' + e.message));
+  const requests = [];
+  page.on('request', (r) => requests.push(r.url()));
   await page.goto(`${ORIGIN}/index.html`);
   await page.waitForFunction(() => window.jsui, null, { timeout: 60000 });
+  // Every script, module, wasm and JSON the page loads is versioned (?v=<hash>,
+  // site/scripts/build.mjs), so caches cannot mix files of two deploys.
+  const unversioned = requests.filter((u) => u.startsWith(ORIGIN) && /\.(m?js|wasm|json)$/.test(new URL(u).pathname) &&
+    !/^[0-9a-f]{16}$/.test(new URL(u).searchParams.get('v') ?? ''));
+  if (unversioned.length) {
+    failed++;
+    console.log(`  FAIL  ${size.name}: unversioned URLs: ${unversioned.map((u) => u.slice(ORIGIN.length)).join(' ')}`);
+  }
   // With a GPU module deployed the site must draw through Skia on the GPU:
   // the CPU raster is far too slow for full-page canvases. With the WebGPU
   // module and a browser that has WebGPU, on WebGPU (SITE_EXPECT_RENDERER

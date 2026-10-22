@@ -396,6 +396,17 @@ test('several runtimes on one page are independent', async ({ page }) => {
   assert(near(p2, [255, 255, 0, 255]), `a keeps running after b destroyed: ${fmt(p2)}`);
 });
 
+test('moduleVersions: only deployed modules are tried, jsui.js and jsui.wasm carry the version', async ({ page }) => {
+  const requests = [];
+  page.on('request', (r) => requests.push(new URL(r.url())));
+  const info = await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js', moduleUrl: null,
+    moduleBase: `${ORIGIN}/`, moduleVersions: { [DIST]: 'abc123' } } });
+  assert(info.renderer, 'no renderer');
+  const mods = requests.filter((u) => /\/jsui\.(js|wasm)$/.test(u.pathname)).map((u) => u.pathname + u.search);
+  const want = [`/${DIST}/jsui.js?v=abc123`, `/${DIST}/jsui.wasm?v=abc123`];
+  assert(JSON.stringify(mods) === JSON.stringify(want), `module requests ${mods.join(' ')}, want ${want.join(' ')}`);
+});
+
 test('bundleSource option and loadSource()', async ({ page }) => {
   const src = fs.readFileSync(path.join(WEB, 'test/fixtures/solid.js'), 'utf8');
   await mount(page, { jsui: { bundleSource: src } });

@@ -43,12 +43,13 @@
     const splash = document.getElementById('splash');
     const showError = (msg) => { err.textContent = msg; err.style.display = msg ? 'block' : 'none'; };
 
-    const modules = await fetch('./modules.json').then((r) => r.json()).catch(() => ({ cpu: true }));
+    // The deployed modules and their versions (content hashes). Every URL
+    // this page loads is versioned (?v=<hash>), so a browser that cached
+    // files of an earlier deploy still loads one consistent set.
+    const modules = null;  // set by site/scripts/build.mjs
     const renderer = q.get('renderer') || (modules.gpu || modules.webgpu ? 'gpu' : 'auto');
     // The host picks the module (jsui/dist-gpu, dist-webgl or dist) for the
-    // renderer and what the browser has; modules that are not deployed are
-    // skipped.
-    const moduleUrl = !modules.webgpu && !modules.gpu ? new URL('./jsui/dist/jsui.js', location.href) : undefined;
+    // renderer and what the browser has, among the deployed ones.
     const route = () => decodeURIComponent(location.hash.replace(/^#/, '')) || '/';
 
     try {
@@ -57,8 +58,8 @@
         bundleUrl: q.get('dev') || './app/bundle.js',
         devMode: !!q.get('dev'),
         renderer,
-        moduleUrl,
         moduleBase: new URL('./jsui/', location.href),
+        moduleVersions: modules.versions,
         // Big canvases at 3x cost a lot of fill for little gain.
         pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
       });
