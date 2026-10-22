@@ -42,9 +42,13 @@ const server = http.createServer((req, res) => {
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const ORIGIN = `http://127.0.0.1:${server.address().port}`;
+// SITE_WEBGPU=1: expose WebGPU to headless Chromium (a SwiftShader-backed
+// fallback adapter on machines without a GPU, such as CI runners).
+const WEBGPU_FLAGS = ['--enable-unsafe-webgpu'];
 
 const browser = await chromium.launch({
-  args: ['--enable-unsafe-swiftshader', '--use-angle=swiftshader', '--ignore-gpu-blocklist', '--force-color-profile=srgb'],
+  args: ['--enable-unsafe-swiftshader', '--use-angle=swiftshader', '--ignore-gpu-blocklist', '--force-color-profile=srgb',
+    ...(process.env.SITE_WEBGPU ? WEBGPU_FLAGS : [])],
 });
 let failed = 0;
 for (const size of SIZES) {
@@ -55,13 +59,17 @@ for (const size of SIZES) {
   page.on('pageerror', (e) => logs.push('pageerror: ' + e.message));
   await page.goto(`${ORIGIN}/index.html`);
   await page.waitForFunction(() => window.jsui, null, { timeout: 60000 });
-  // With the WebGL module deployed the site must draw through Skia on WebGL:
-  // the CPU raster is far too slow for full-page canvases.
-  const gpuDeployed = JSON.parse(fs.readFileSync(path.join(DIR, 'modules.json'), 'utf8')).gpu;
+  // With a GPU module deployed the site must draw through Skia on the GPU:
+  // the CPU raster is far too slow for full-page canvases. With the WebGPU
+  // module and a browser that has WebGPU, on WebGPU (SITE_EXPECT_RENDERER
+  // overrides the expectation, e.g. 'webgpu' in the wasm-webgpu CI job).
+  const modules = JSON.parse(fs.readFileSync(path.join(DIR, 'modules.json'), 'utf8'));
   const renderer = await page.evaluate(() => window.jsui.renderer);
-  if (gpuDeployed && !renderer.startsWith('gpu')) {
+  const want = process.env.SITE_EXPECT_RENDERER;
+  const ok = want ? renderer === want : !(modules.gpu || modules.webgpu) || renderer === 'webgpu' || renderer.startsWith('gpu');
+  if (!ok) {
     failed++;
-    console.log(`  FAIL  ${size.name}: renderer is ${renderer}, expected the GPU renderer`);
+    console.log(`  FAIL  ${size.name}: renderer is ${renderer}, expected ${want || 'a GPU renderer'}`);
   } else console.log(`  ${size.name}: renderer ${renderer}`);
   for (const route of ROUTES) {
     const name = `${size.name} ${route}`;

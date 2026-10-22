@@ -120,10 +120,38 @@ int jsui_render_rgba_incremental(JsuiRuntime* rt, void* pixels, int width, int h
 }
 
 JsuiGpuContext* jsui_gpu_create_gl(JsuiGLGetProcFn getProc, void* user) { return jsui::gpu::createGL(getProc, user); }
-void jsui_gpu_destroy(JsuiGpuContext* gpu) { jsui::gpu::destroy(gpu); }
-void jsui_gpu_reset(JsuiGpuContext* gpu) { jsui::gpu::reset(gpu); }
-void jsui_gpu_context_lost(JsuiGpuContext* gpu) { jsui::gpu::contextLost(gpu); }
-void jsui_gpu_purge(JsuiGpuContext* gpu, size_t cacheBytes) { jsui::gpu::purge(gpu, cacheBytes); }
+JsuiGpuContext* jsui_gpu_create_webgpu(void* instance, void* device, void* queue) {
+  return jsui::webgpu::create(instance, device, queue);
+}
+
+namespace {
+bool isWebGPU(JsuiGpuContext* gpu) { return gpu && gpu->kind == JsuiGpuContext::Kind::WebGPU; }
+}  // namespace
+
+void jsui_gpu_destroy(JsuiGpuContext* gpu) {
+  if (isWebGPU(gpu)) jsui::webgpu::destroy(gpu);
+  else jsui::gpu::destroy(gpu);
+}
+void jsui_gpu_reset(JsuiGpuContext* gpu) {
+  if (!isWebGPU(gpu)) jsui::gpu::reset(gpu);
+}
+void jsui_gpu_context_lost(JsuiGpuContext* gpu) {
+  if (isWebGPU(gpu)) jsui::webgpu::contextLost(gpu);
+  else jsui::gpu::contextLost(gpu);
+}
+void jsui_gpu_purge(JsuiGpuContext* gpu, size_t cacheBytes) {
+  if (isWebGPU(gpu)) jsui::webgpu::purge(gpu, cacheBytes);
+  else jsui::gpu::purge(gpu, cacheBytes);
+}
+
+int jsui_render_webgpu(JsuiRuntime* rt, JsuiGpuContext* gpu, void* texture, int width, int height, int flags) {
+  JsuiWebGPUTarget t{texture, width, height, flags};
+  return jsui::webgpu::render(*rt->rt, gpu, t);
+}
+
+int jsui_render_webgpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget* target) {
+  return target ? jsui::webgpu::render(*rt->rt, gpu, *target) : -1;
+}
 
 int jsui_render_gl(JsuiRuntime* rt, JsuiGpuContext* gpu, unsigned int fbo, int width, int height, int flags) {
   JsuiGLTarget t{};

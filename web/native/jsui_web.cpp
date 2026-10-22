@@ -10,6 +10,10 @@
 
 #include "jsui/jsui.h"
 
+#if defined(JSUI_WEBGPU)
+#include <webgpu/webgpu.h>
+#endif
+
 EM_JS(void, jsui_web_js_log, (int hostId, int level, const char* msg), {
   var h = Module.__jsuiHosts && Module.__jsuiHosts.get(hostId);
   var text = UTF8ToString(msg);
@@ -108,5 +112,13 @@ EMSCRIPTEN_KEEPALIVE int jsui_web_resolve_call(JsuiRuntime* rt, double id, const
 EMSCRIPTEN_KEEPALIVE int jsui_web_reject_call(JsuiRuntime* rt, double id, const char* message) {
   return jsui_reject_call(rt, uint64_t(id), message);
 }
+
+#if defined(JSUI_WEBGPU)
+// web/jsui-webgpu.js imports its GPUDevice and each frame's canvas texture
+// with Emdawnwebgpu's WebGPU.importJsDevice / importJsTexture, which return
+// owned references; it drops them through these.
+EMSCRIPTEN_KEEPALIVE void jsui_web_wgpu_release_texture(WGPUTexture texture) { wgpuTextureRelease(texture); }
+EMSCRIPTEN_KEEPALIVE void jsui_web_wgpu_release_device(WGPUDevice device) { wgpuDeviceRelease(device); }
+#endif
 
 }  // extern "C"

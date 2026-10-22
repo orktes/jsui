@@ -49,6 +49,33 @@ if(JSUI_GPU)
 endif()
 message(STATUS "JSUI_GPU: ${JSUI_GPU}")
 
+# WebGPU backend (Skia Graphite on Dawn / WebGPU, jsui_render_webgpu*). On
+# WASM the option follows the Skia build (scripts/build-skia-wasm-graphite.sh,
+# third_party/skia-wasm-gpu), whose webgpu.h comes from the Emdawnwebgpu port
+# (scripts/setup-emdawnwebgpu.sh); JSUI compiles and links with the same port.
+# Native builds need a Skia with Graphite + Dawn (not the m124 prebuilt yet).
+set(_jsui_webgpu_default OFF)
+if(EMSCRIPTEN AND EXISTS "${JSUI_SKIA_LIB_DIR}/args.gn")
+  file(READ "${JSUI_SKIA_LIB_DIR}/args.gn" _jsui_skia_gn)
+  if(_jsui_skia_gn MATCHES "skia_enable_graphite *= *true" AND _jsui_skia_gn MATCHES "skia_use_webgpu *= *true")
+    set(_jsui_webgpu_default ON)
+  endif()
+endif()
+option(JSUI_WEBGPU "Build the Skia Graphite WebGPU backend (jsui_render_webgpu)" ${_jsui_webgpu_default})
+set(JSUI_EMDAWNWEBGPU_PORT "${CMAKE_SOURCE_DIR}/third_party/emdawnwebgpu/emdawnwebgpu_pkg/emdawnwebgpu.port.py"
+    CACHE FILEPATH "Emdawnwebgpu port file (WASM + JSUI_WEBGPU)")
+if(JSUI_WEBGPU)
+  target_compile_definitions(jsui PUBLIC JSUI_WEBGPU=1)
+  if(EMSCRIPTEN)
+    if(NOT EXISTS "${JSUI_EMDAWNWEBGPU_PORT}")
+      message(FATAL_ERROR "Emdawnwebgpu not found at ${JSUI_EMDAWNWEBGPU_PORT}: run scripts/setup-emdawnwebgpu.sh")
+    endif()
+    target_compile_options(jsui PUBLIC "--use-port=${JSUI_EMDAWNWEBGPU_PORT}")
+    target_link_options(jsui PUBLIC "--use-port=${JSUI_EMDAWNWEBGPU_PORT}")
+  endif()
+endif()
+message(STATUS "JSUI_WEBGPU: ${JSUI_WEBGPU}")
+
 if(JSUI_BUILD_TOOLS AND NOT EMSCRIPTEN)
   add_executable(jsui-render tools/jsui-render/main.cpp)
   target_link_libraries(jsui-render PRIVATE jsui)

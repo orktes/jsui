@@ -207,7 +207,12 @@ copy_headers third_party/externals/icu/source/i18n/unicode
 copy_headers third_party/externals/freetype/include
 cp LICENSE "$OUT_DIR.tmp/"
 
-find "$BUILD_DIR" -maxdepth 1 -name 'lib*.a' -exec cp {} "$OUT_DIR.tmp/out/" \;
+# Recent Skia names wasm archives lib<name>.wasm.a; install them as lib<name>.a
+# like the m124 build so CMake finds them.
+for lib in "$BUILD_DIR"/lib*.a; do
+  name="$(basename "$lib")"
+  cp "$lib" "$OUT_DIR.tmp/out/${name%.wasm.a}.a"
+done
 cp "$BUILD_DIR/args.gn" "$OUT_DIR.tmp/out/args.gn"
 echo "$EMSDK_VERSION" > "$OUT_DIR.tmp/out/emsdk-version.txt"
 echo "$SKIA_BRANCH $SKIA_COMMIT" > "$OUT_DIR.tmp/out/skia-version.txt"

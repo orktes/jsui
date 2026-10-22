@@ -7,6 +7,12 @@
 
 #include "include/core/SkRefCnt.h"
 
+// Skia m157 (the WebGPU wasm build) made SkUnicode reference counted, moved
+// the ICU factory to SkUnicodes::ICU and passes it to ParagraphBuilder::make.
+#if __has_include("modules/skunicode/include/SkUnicode_icu.h")
+#define JSUI_SKUNICODE_REFCNT 1
+#endif
+
 class SkFontMgr;
 class SkUnicode;
 namespace skia::textlayout {
@@ -40,6 +46,9 @@ class FontManager {
 
   // ICU-backed Unicode helpers (case mapping), created on first use.
   SkUnicode* unicode();
+#if JSUI_SKUNICODE_REFCNT
+  sk_sp<SkUnicode> unicodeRef();
+#endif
 
  private:
   struct Impl;

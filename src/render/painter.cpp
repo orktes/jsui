@@ -33,7 +33,12 @@
 #include "include/core/SkSurface.h"
 #include "include/core/SkRect.h"
 #include "include/effects/SkDashPathEffect.h"
+#if __has_include("include/effects/SkGradient.h")
+#include "include/effects/SkGradient.h"  // Skia m157+ (the WebGPU wasm build)
+#define JSUI_SKGRADIENT 1
+#else
 #include "include/effects/SkGradientShader.h"
+#endif
 #include "include/effects/SkImageFilters.h"
 #include "modules/skparagraph/include/Paragraph.h"
 #include "render/image_cache.h"
@@ -397,12 +402,70 @@ void fixupStops(const Gradient& g, float lineLength, std::vector<SkColor4f>* col
   }
 }
 
+// Two-interval dash and closed polygon across Skia versions (m157 takes spans).
+static sk_sp<SkPathEffect> dashEffect(const SkScalar iv[2]) {
+#if JSUI_SKGRADIENT
+  return SkDashPathEffect::Make({iv, 2}, 0);
+#else
+  return SkDashPathEffect::Make(iv, 2, 0);
+#endif
+}
+static SkPath polygonPath(const SkPoint* pts, int count) {
+#if JSUI_SKGRADIENT
+  return SkPath::Polygon({pts, size_t(count)}, true);
+#else
+  return SkPath::Polygon(pts, count, true);
+#endif
+}
+
+// Gradient factories across Skia versions: m124 has SkGradientShader::Make*,
+// m157 SkShaders::*Gradient taking an SkGradient. CSS interpolates
+// premultiplied.
+#if JSUI_SKGRADIENT
+using GradColors = std::vector<SkColor4f>;
+static SkGradient skGradient(const GradColors& c, const std::vector<float>& p, SkTileMode tile) {
+  SkGradient::Interpolation interp;
+  interp.fInPremul = SkGradient::Interpolation::InPremul::kYes;
+  return SkGradient(SkGradient::Colors({c.data(), c.size()}, {p.data(), p.size()}, tile), interp);
+}
+static sk_sp<SkShader> linearGradient(const SkPoint pts[2], const GradColors& c, const std::vector<float>& p,
+                                      SkTileMode tile) {
+  return SkShaders::LinearGradient(pts, skGradient(c, p, tile));
+}
+static sk_sp<SkShader> radialGradient(SkPoint center, float r, const GradColors& c, const std::vector<float>& p,
+                                      SkTileMode tile, const SkMatrix* m) {
+  return SkShaders::RadialGradient(center, r, skGradient(c, p, tile), m);
+}
+static sk_sp<SkShader> conicalGradient(SkPoint a, float ra, SkPoint b, float rb, const GradColors& c,
+                                       const std::vector<float>& p, SkTileMode tile, const SkMatrix* m) {
+  return SkShaders::TwoPointConicalGradient(a, ra, b, rb, skGradient(c, p, tile), m);
+}
+#else
+using GradColors = std::vector<SkColor4f>;
+static SkGradientShader::Interpolation premulInterp() {
+  SkGradientShader::Interpolation interp;
+  interp.fInPremul = SkGradientShader::Interpolation::InPremul::kYes;
+  return interp;
+}
+static sk_sp<SkShader> linearGradient(const SkPoint pts[2], const GradColors& c, const std::vector<float>& p,
+                                      SkTileMode tile) {
+  return SkGradientShader::MakeLinear(pts, c.data(), nullptr, p.data(), int(c.size()), tile, premulInterp(), nullptr);
+}
+static sk_sp<SkShader> radialGradient(SkPoint center, float r, const GradColors& c, const std::vector<float>& p,
+                                      SkTileMode tile, const SkMatrix* m) {
+  return SkGradientShader::MakeRadial(center, r, c.data(), nullptr, p.data(), int(c.size()), tile, premulInterp(), m);
+}
+static sk_sp<SkShader> conicalGradient(SkPoint a, float ra, SkPoint b, float rb, const GradColors& c,
+                                       const std::vector<float>& p, SkTileMode tile, const SkMatrix* m) {
+  return SkGradientShader::MakeTwoPointConical(a, ra, b, rb, c.data(), nullptr, p.data(), int(c.size()), tile,
+                                               premulInterp(), m);
+}
+#endif
+
 sk_sp<SkShader> makeGradient(const Gradient& g, const SkRect& box) {
   if (g.stops.size() < 2 || box.isEmpty()) return nullptr;
-  std::vector<SkColor4f> colors;
+  GradColors colors;
   std::vector<float> pos;
-  SkGradientShader::Interpolation interp;
-  interp.fInPremul = SkGradientShader::Interpolation::InPremul::kYes;  // CSS interpolates premultiplied
   float w = box.width(), h = box.height();
   if (g.kind == Gradient::Kind::Linear) {
     float deg = g.angle;
@@ -431,8 +494,7 @@ sk_sp<SkShader> makeGradient(const Gradient& g, const SkRect& box) {
     SkPoint pts[2] = {{start.fX + sx * len * lo, start.fY + sy * len * lo},
                       {start.fX + sx * len * hi, start.fY + sy * len * hi}};
     if (len <= 0) return SkShaders::Color(colors.back(), nullptr);
-    return SkGradientShader::MakeLinear(pts, colors.data(), nullptr, pos.data(), int(colors.size()), tile, interp,
-                                        nullptr);
+    return linearGradient(pts, colors, pos, tile);
   }
   // Radial
   float cx = box.left() + g.centerX.resolve(w), cy = box.top() + g.centerY.resolve(h);
@@ -479,11 +541,9 @@ sk_sp<SkShader> makeGradient(const Gradient& g, const SkRect& box) {
   SkMatrix m = SkMatrix::Scale(1, ry / rx);
   m.postTranslate(cx, cy);
   if (lo > 0) {
-    return SkGradientShader::MakeTwoPointConical({0, 0}, rx * lo, {0, 0}, rx * hi, colors.data(), nullptr, pos.data(),
-                                                 int(colors.size()), tile, interp, &m);
+    return conicalGradient({0, 0}, rx * lo, {0, 0}, rx * hi, colors, pos, tile, &m);
   }
-  return SkGradientShader::MakeRadial({0, 0}, rx * hi, colors.data(), nullptr, pos.data(), int(colors.size()), tile,
-                                      interp, &m);
+  return radialGradient({0, 0}, rx * hi, colors, pos, tile, &m);
 }
 
 void paintBackground(SkCanvas* c, const Box& b, const ComputedStyle& s) {
@@ -561,7 +621,7 @@ void strokeSide(SkCanvas* c, SkPoint a, SkPoint b, float width, BorderStyle styl
   } else {
     fittedDash(len, width * 3, width * 3, iv);
   }
-  p.setPathEffect(SkDashPathEffect::Make(iv, 2, 0));
+  p.setPathEffect(dashEffect(iv));
   c->drawLine(a, b, p);
 }
 
@@ -645,7 +705,7 @@ void paintBorders(SkCanvas* c, const Box& b, const ComputedStyle& s) {
     }
     for (int i = 0; i < 4; i++) {
       if (w[i] <= 0 || s.borderColor[i].transparent()) continue;
-      SkPath clip = SkPath::Polygon(quads[i], quadPoints[i], true);
+      SkPath clip = polygonPath(quads[i], quadPoints[i]);
       c->save();
       c->clipPath(clip, true);
       p.setColor4f(sk(s.borderColor[i]));
@@ -669,7 +729,7 @@ void paintBorders(SkCanvas* c, const Box& b, const ComputedStyle& s) {
       iv[1] = w[0] * 2;
       sp.setStrokeCap(SkPaint::kRound_Cap);
     }
-    sp.setPathEffect(SkDashPathEffect::Make(iv, 2, 0));
+    sp.setPathEffect(dashEffect(iv));
     c->drawRRect(mid, sp);
     return;
   }
@@ -717,7 +777,7 @@ void paintOutline(SkCanvas* c, const Box& b, const ComputedStyle& s) {
     iv[1] = s.outlineWidth * 2;
     p.setStrokeCap(SkPaint::kRound_Cap);
   }
-  p.setPathEffect(SkDashPathEffect::Make(iv, 2, 0));
+  p.setPathEffect(dashEffect(iv));
   c->drawRRect(mid, p);
 }
 

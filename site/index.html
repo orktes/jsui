@@ -34,7 +34,8 @@
   <script type="module">
     import { createJsui } from './jsui-web.js';
 
-    // Query options: ?renderer=gpu|webgl|2d (default: gpu when the WebGL
+    // Query options: ?renderer=auto|gpu|webgpu|webgl|cpu|2d (default: gpu,
+    // i.e. Skia on WebGPU, else on WebGL, else the CPU raster, when a GPU
     // module is deployed), ?stats=1 logs frame timings, ?dev=<bundle url>
     // runs a `jsui dev` bundle with live reload inside this page.
     const q = new URLSearchParams(location.search);
@@ -43,7 +44,11 @@
     const showError = (msg) => { err.textContent = msg; err.style.display = msg ? 'block' : 'none'; };
 
     const modules = await fetch('./modules.json').then((r) => r.json()).catch(() => ({ cpu: true }));
-    const wantGpu = (q.get('renderer') || (modules.gpu ? 'gpu' : 'auto')) === 'gpu' && modules.gpu;
+    const renderer = q.get('renderer') || (modules.gpu || modules.webgpu ? 'gpu' : 'auto');
+    // The host picks the module (jsui/dist-gpu, dist-webgl or dist) for the
+    // renderer and what the browser has; modules that are not deployed are
+    // skipped.
+    const moduleUrl = !modules.webgpu && !modules.gpu ? new URL('./jsui/dist/jsui.js', location.href) : undefined;
     const route = () => decodeURIComponent(location.hash.replace(/^#/, '')) || '/';
 
     try {
@@ -51,8 +56,9 @@
         canvas: document.getElementById('ui'),
         bundleUrl: q.get('dev') || './app/bundle.js',
         devMode: !!q.get('dev'),
-        renderer: wantGpu ? 'gpu' : (q.get('renderer') || 'auto'),
-        moduleUrl: new URL(wantGpu ? './jsui/dist-webgl/jsui.js' : './jsui/dist/jsui.js', location.href),
+        renderer,
+        moduleUrl,
+        moduleBase: new URL('./jsui/', location.href),
         // Big canvases at 3x cost a lot of fill for little gain.
         pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
       });
