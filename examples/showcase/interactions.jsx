@@ -13,6 +13,8 @@
 // and reports what the user did as `showcase:event` messages ({type, ...}:
 // hover, pressIn with the page position, press, focus, scroll, text, ...)
 // so a host (the Godot demo's self-test) can check its input forwarding.
+// <App transparent /> leaves out the backdrop image and lightens the scrim,
+// so a host can draw its own scene behind the UI (the Godot demo's 3D world).
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
@@ -589,7 +591,7 @@ function Profile() {
   );
 }
 
-function App() {
+function App({ transparent = false }) {
   const enters = useMemo(() => MENU.map(() => new Animated.Value(0)), []);
   const panelsIn = useValue(0);
   const glow = useValue(0);
@@ -608,8 +610,8 @@ function App() {
   }, [enters, panelsIn, glow]);
 
   return (
-    <ImageBackground source={require('../assets/bg-menu.jpg')} style={styles.root} resizeMode="cover">
-      <View style={styles.scrim} />
+    <Backdrop transparent={transparent}>
+      <View style={transparent ? styles.scrimLight : styles.scrim} />
       <Animated.View
         pointerEvents="none"
         style={[styles.aurora, { opacity: glow.interpolate({ inputRange: [0, 1], outputRange: [0.35, 0.8] }), transform: [{ translateX: glow.interpolate({ inputRange: [0, 1], outputRange: [-60, 60] }) }] }]}
@@ -655,12 +657,29 @@ function App() {
       </View>
 
       <DeployPanel visible={deploy} onClose={() => setDeploy(false)} />
+    </Backdrop>
+  );
+}
+
+function Backdrop({ transparent, children }) {
+  if (transparent) return <View style={styles.rootClear}>{children}</View>;
+  return (
+    <ImageBackground source={require('../assets/bg-menu.jpg')} style={styles.root} resizeMode="cover">
+      {children}
     </ImageBackground>
   );
 }
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg0 },
+  rootClear: { flex: 1 },
+  // Darkens the edges behind the menu, armory and bottom bar, and leaves the
+  // middle open so the host's scene shows.
+  scrimLight: {
+    ...StyleSheet.absoluteFillObject,
+    experimental_backgroundImage:
+      'linear-gradient(90deg, rgba(5,7,16,0.45) 0%, rgba(5,7,16,0.15) 30%, rgba(5,7,16,0) 55%, rgba(5,7,16,0.25) 100%), linear-gradient(180deg, rgba(5,7,16,0.3) 0%, rgba(5,7,16,0) 18%, rgba(5,7,16,0) 80%, rgba(5,7,16,0.6) 100%)',
+  },
   scrim: {
     ...StyleSheet.absoluteFillObject,
     experimental_backgroundImage:

@@ -15,6 +15,11 @@
 //   * JS -> Godot messages: `ui:ready` on mount, and the showcase's
 //     `showcase:event` reports (hover, press, focus, scroll, text...) that
 //     main.gd's self-test checks.
+// Godot -> JS shared state `godot.scene` (true in main.gd) says the host
+// draws a live 3D scene behind the view: the showcase then runs `transparent`
+// (no backdrop image, lighter scrim) and the root has no background, so the
+// scene shows through (JsuiView composites with premultiplied alpha). Other
+// hosts (iOS) keep the opaque backdrop.
 // The strip (and the toast above it) sit in the empty left half of the
 // showcase's bottom bar, so they cover none of the showcase's controls.
 import React, { useEffect, useRef, useState } from 'react';
@@ -135,12 +140,13 @@ function Stage({ children }) {
 }
 
 function App() {
+  const scene = useHostState('godot.scene', false);
   return (
     // Insets are zero in Godot; on phones (the iOS host) the UI stays clear of
     // the notch / Dynamic Island / home indicator.
-    <View style={styles.root}>
+    <View style={scene ? styles.rootClear : styles.root}>
       <Stage>
-        <Showcase />
+        <Showcase transparent={scene} />
         <Bridge />
         <Toast />
       </Stage>
@@ -150,6 +156,7 @@ function App() {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg0 },
+  rootClear: { flex: 1 },
   bridge: {
     position: 'absolute',
     left: 24,
