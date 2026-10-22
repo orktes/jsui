@@ -358,3 +358,18 @@ test('gamepad-synthesized click right after a mouse press still activates', () =
   assert.equal(n, 2);
   render(null);
 });
+
+test('host message state updates commit in the same tick (microtask, no timer)', async () => {
+  function App() {
+    const [hp, setHp] = useState(100);
+    useHostMessage('hp', setHp);
+    return h(Text, { nativeID: 'hp' }, String(hp));
+  }
+  render(h(App));
+  await wait();
+  globalThis.__jsui_onHostMessage('hp', '42');
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(mock.text(byNativeID('hp').id), '42');
+  render(null);
+});

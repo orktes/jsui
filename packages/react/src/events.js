@@ -334,10 +334,17 @@ function deliverHostMessage(name, json) {
       data = json;
     }
   }
-  reconciler.batchedUpdates(() => {
-    if (set) for (const cb of Array.from(set)) cb(data, name);
-    if (any) for (const cb of Array.from(any)) cb(data, name);
-  }, null);
+  // Sync priority: state pushed by the game renders in the same tick
+  // (flushed in the microtask checkpoint after this call), not a frame later.
+  const prev = setUpdatePriority(DiscreteEventPriority);
+  try {
+    reconciler.batchedUpdates(() => {
+      if (set) for (const cb of Array.from(set)) cb(data, name);
+      if (any) for (const cb of Array.from(any)) cb(data, name);
+    }, null);
+  } finally {
+    setUpdatePriority(prev);
+  }
 }
 
 export function installGlobals() {
