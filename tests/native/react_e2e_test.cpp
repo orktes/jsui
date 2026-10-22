@@ -136,8 +136,17 @@ TEST(react_e2e) {
   t.tick(16);
   jsui_send_text(t.rt, "y");
   t.tick(16);
+  // Native editing: the caret moves, typing inserts at it, Ctrl+A + typing
+  // replaces everything; the controlled value follows.
+  t.key("ArrowLeft");
+  jsui_send_text(t.rt, "X");
+  t.tick(16);
+  jsui_send_key(t.rt, "a", "KeyA", 1, 0, JSUI_MOD_CTRL);
+  jsui_send_key(t.rt, "a", "KeyA", 0, 0, JSUI_MOD_CTRL);
+  jsui_send_text(t.rt, "z");
+  t.tick(16);
   t.key("Enter");
-  CHECK_EQ(t.take(), std::string("text=\"h\xC3\xA9\" text=\"h\" text=\"hy\" submit=\"hy\""));
+  CHECK_EQ(t.take(), std::string("text=\"h\xC3\xA9\" text=\"h\" text=\"hy\" text=\"hXy\" text=\"z\" submit=\"z\""));
 
   CHECK(jsui_last_error(t.rt) == nullptr);
 }

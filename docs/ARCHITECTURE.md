@@ -113,6 +113,9 @@ Native globals (installed by `JsEngine`):
 | `postMessage(name, json)` | to the embedder's `on_message`. A string is passed through as the JSON text; any other value is `JSON.stringify`-ed |
 | `loadFont(family, url, weight, italic) → Promise<true>` | load via the resource loader (URL relative to the bundle), register with the FontManager, relayout text; rejects with an `Error` on 404 / bad font data |
 | `reload()` | reload the bundle at the start of the next tick (safe from inside JS) |
+| `textEditing` | `true`: TextInput text is edited natively (see "TextInput editing") |
+| `setTextInputSelection(id, start, end)` | TextInput selection (UTF-16 indices, clamped; no event) |
+| `getClipboard() → string`, `setClipboard(text)` | the embedder's clipboard (`jsui_set_clipboard_callbacks`) or the runtime's in-process one |
 
 Standard globals (`src/js/prelude.cpp` + `host_api.cpp`):
 
@@ -170,7 +173,7 @@ React Native props (`onPress`, `onPressIn/Out`, `onLongPress`, `onHoverIn/Out`,
 ```
 { type: 'pointerdown'|'pointermove'|'pointerup'|'pointercancel'|'pointerenter'|'pointerleave'
         |'click'|'wheel'|'keydown'|'keyup'|'textinput'|'focus'|'blur'|'scroll'
-        |'gamepadbutton'|'gamepadaxis'|'gamepadconnected',
+        |'gamepadbutton'|'gamepadaxis'|'gamepadconnected'|'change'|'selectionchange',
   target: <node id>,              // hit node, focused node for keys
   timestamp: <ms>,
   // pointer
@@ -181,8 +184,8 @@ React Native props (`onPress`, `onPressIn/Out`, `onLongPress`, `onHoverIn/Out`,
   deltaX, deltaY,
   // keys
   key, code, repeat, shiftKey, ctrlKey, altKey, metaKey,
-  // text
-  text,
+  // text; TextInput edits ('change': text + eventCount, 'selectionchange')
+  text, eventCount, selection: {start, end},
   // gamepad
   gamepad, buttonIndex, value, axis,
   // scroll
@@ -229,6 +232,56 @@ was `preventDefault()`-ed.
 * Stick: deadzone 0.5 on the dominant axis; held D-pad / stick repeats after
   400 ms, then every 120 ms. Focus changes scroll the node into view in its
   ScrollView ancestors.
+
+## TextInput editing
+
+The runtime owns a TextInput's text like a native text field does in React
+Native (`src/text/text_edit.*`, `src/input/text_editing.cpp`). Keys and
+text reach JS first (`keydown`, `textinput`); unless JS calls
+`preventDefault()`, the focused TextInput applies them:
+
+* Typing / IME commits replace the selection (single-line inputs drop line
+  breaks; control characters are dropped), honoring `maxLength` (UTF-16
+  units, never splitting a surrogate pair) and `editable` / `readOnly`.
+* Arrows move by grapheme-ish clusters (code points + combining marks, ZWJ
+  sequences, flags); Ctrl/Alt+arrows by word, Cmd+arrows / Home / End to the
+  visual line edge, Ctrl+Home/End and PageUp/PageDown to the text edges;
+  Up/Down move a visual line keeping the goal column (single line: text
+  edges); Shift extends. ArrowLeft/Right are mirrored in RTL text.
+* Backspace / Delete delete the selection, or a cluster / word (Ctrl, Alt) /
+  to the line edge (Cmd). Enter inserts a newline in multiline inputs (the
+  `TextInput` component prevents Enter when it submits).
+* Ctrl/Cmd + A selects all, C / X / V copy, cut, paste through the clipboard
+  (`jsui_set_clipboard_callbacks`, else in-process; never for
+  `secureTextEntry`), Z / Shift+Z / Ctrl+Y undo / redo (typing coalesces).
+* Mouse: press places the caret (Shift extends), drag selects, double click
+  selects a word, triple click everything; touch taps place the caret. A
+  press that focuses a `selectTextOnFocus` input selects everything.
+
+Edits dispatch `change` (`text`, `eventCount`) and `selectionchange`
+(`selection: {start, end}`) to nodes listing the `change` /
+`selectionChange` tokens. Props: `value` is adopted when it differs from the
+native text and `mostRecentEventCount` >= the native edit count (renders that
+have not seen the latest edit are stale; without the prop a changed `value`
+is adopted), `defaultValue`, `placeholder`, `placeholderTextColor`,
+`secureTextEntry` (U+2022 per code point), `multiline`, `maxLength`,
+`editable`, `selectTextOnFocus`, `caretHidden`, `cursorColor`,
+`selectionColor` (highlight; opaque colors at 30 % alpha, default
+`rgba(0,122,255,0.3)`; also the caret color unless `cursorColor`).
+
+Geometry is skparagraph's: the caret is the trailing edge of the previous
+grapheme (`getGlyphInfoAtUTF16Offset`) on its line's ascent..descent,
+clicks use `getGlyphPositionAtCoordinate`, the highlight `getRectsForRange`.
+A value -> display index map keeps indices right under `textTransform` and
+bullets. Single-line inputs scroll horizontally to keep the caret visible
+(multiline: vertically) and show their start again on blur.
+
+The caret blinks (500 ms on / off, restarted by any edit or move). A blink
+or a caret-only move marks the document paint-dirty without bumping the
+node's paint version; `updateDamage()` then damages just the caret's old
+and new rects (`text::inputCaretDamage`), so `jsui_needs_redraw()` turns
+true twice a second while an input is focused and each such frame repaints
+a few pixels.
 
 ## Styles
 
@@ -326,7 +379,8 @@ Details of how the JS package uses the bridge, for native implementers:
   `click` (onClick — every Pressable/Touchable/Button host has it, so they are
   pressable), `pointerDown`, `pointerUp`, `pointerMove`, `pointerCancel`,
   `hoverIn`/`pointerEnter`, `hoverOut`/`pointerLeave`, `wheel`, `keyDown`,
-  `keyUp`, `focus`, `blur`, `scroll`, `textInput`, `gamepadButton`,
+  `keyUp`, `focus`, `blur`, `scroll`, `textInput`, `change`,
+  `selectionChange`, `gamepadButton`,
   `gamepadAxis`, `layout`, `load`, `error`, and `responder` (+`pointerMove`) for
   RN responder / PanResponder views. Plain `onPointerDown` does not make a node
   pressable.

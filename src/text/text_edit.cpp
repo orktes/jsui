@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "core/document.h"
+#include "text/text_layout.h"
 
 namespace jsui::edit {
 
@@ -268,6 +269,7 @@ void syncProps(Node* n) {
   s->coalesceTyping = false;
   s->hasGoalX = false;
   contentChanged(n);
+  if (s->focused) text::inputScrollToCaret(n);
 }
 
 }  // namespace jsui::edit

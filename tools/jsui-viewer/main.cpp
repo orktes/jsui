@@ -129,6 +129,17 @@ class Viewer {
       std::printf("[message] %s %s\n", name, json);
     };
     rt_ = jsui_create(&cfg);
+    // TextInput copy / paste use the system clipboard.
+    jsui_set_clipboard_callbacks(
+        rt_,
+        [](void* u) -> const char* {
+          auto* self = static_cast<Viewer*>(u);
+          char* t = SDL_GetClipboardText();
+          self->clipboard_ = t ? t : "";
+          SDL_free(t);
+          return self->clipboard_.c_str();
+        },
+        [](void*, const char* text) { SDL_SetClipboardText(text); }, this);
     updateViewport();
     jsui_load_bundle_url(rt_, opt_.bundle.c_str());
     SDL_StartTextInput();
@@ -351,6 +362,7 @@ class Viewer {
   SDL_Texture* texture_ = nullptr;
   SDL_BlendMode premul_ = SDL_BLENDMODE_BLEND;
   JsuiRuntime* rt_ = nullptr;
+  std::string clipboard_;
   std::vector<uint8_t> pixels_;
   int pixelW_ = 0, pixelH_ = 0, logicalW_ = 0, logicalH_ = 0;
   float ratio_ = 1;
