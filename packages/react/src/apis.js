@@ -447,9 +447,18 @@ export const DynamicColorIOS = (t) => (t && (t.dark || t.light)) || null;
 
 export { onHostMessage } from './events.js';
 import { onHostMessage } from './events.js';
+import { call as hostCall, handle as hostHandle } from './hostData.js';
+export { HostState, useHostState, useHostStateSelector, useHostHandler } from './hostData.js';
 
-/** Game <-> UI messages. Payloads are JSON-serialized. */
+/**
+ * Game <-> UI messages (postMessage / onMessage; payloads are JSON-serialized)
+ * and calls: `await Host.call(name, args, {timeout, signal})` asks the
+ * embedder; `Host.handle(name, fn)` answers jsui_call_ui from the embedder.
+ * Shared state is HostState / useHostState.
+ */
 export const Host = {
+  call: hostCall,
+  handle: hostHandle,
   postMessage(name, data) {
     if (typeof native.postMessage !== 'function') {
       warnOnce('postMessage', '[jsui] __jsui_native.postMessage is not available');

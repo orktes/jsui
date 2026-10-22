@@ -15,10 +15,16 @@
 //   globalThis.__jsui_dispatchEvent(event) -> number (1 handled | 2 defaultPrevented)
 //   globalThis.__jsui_onHostMessage(name, json)
 //   globalThis.__jsui_onLayout(id, {x,y,width,height})
+//   globalThis.__jsui_onHostState(keys)            shared state changed
+//   globalThis.__jsui_onCall(id, name, json)       jsui_call_ui -> Host.handle
+// Shared state / calls (bridge_host.cpp): __jsui_native.getState, stateVersion,
+//   setState, patchState, stateKeys, hostCall, cancelCall, callResult.
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "core/value.h"
 
@@ -46,7 +52,20 @@ class JsEngine {
   void hostMessage(const std::string& name, const std::string& json);
   void layoutEvent(uint32_t id, float x, float y, float w, float h);
   // Calls globalThis[name](...args) if it is a function (exceptions are reported).
-  void callGlobal(const char* name, const Value* args, int argc);
+  // Returns false when there is no such function.
+  bool callGlobal(const char* name, const Value* args, int argc);
+
+  // Shared state keys the embedder changed: __jsui_onHostState(keys).
+  void stateChanged(const std::vector<std::string>& keys);
+  // Host.call bookkeeping: each pending call holds the JS settle function
+  // the bundle passed to __jsui_native.hostCall.
+  bool hasCall(uint64_t id) const;
+  // Runs the call's settle(ok, payload) and forgets it. False if not pending.
+  bool settleCall(uint64_t id, bool ok, const std::string& payload);
+  // Forgets the call without settling it (JS cancelled it).
+  bool dropCall(uint64_t id);
+  // Ids of the pending calls (the engine is going away).
+  std::vector<uint64_t> pendingCalls() const;
 
   // True while JS is on the stack (native code called from JS). Destroying
   // the engine then is not allowed; Runtime defers reloads instead.

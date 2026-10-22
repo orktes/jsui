@@ -33,8 +33,10 @@ import { render, unmount, createPortal, flushSync, batchedUpdates, rootContainer
 import { bridgeStats } from './instances.js';
 import { registerAsset } from './components/basic.js';
 import { Host } from './apis.js';
+import { installHostData } from './hostData.js';
 
 installGlobals();
+installHostData();
 // include/jsui/jsui.h documents a `jsui` global for host messages.
 if (!globalThis.jsui) globalThis.jsui = Host;
 makeAnimated({ View, Text, Image, ScrollView, FlatList, SectionList });

@@ -899,6 +899,11 @@ struct Ctx {
   RootRecord* root;
   const SkRegion* damage;  // null: paint everything
   PaintStats stats;
+  // Snap space of the children being painted (see place()): the current
+  // parent's unsnapped border-box coordinates to device pixels, without any
+  // transform.
+  SkMatrix snapSpace;
+  bool transformed = false;  // a transform applies (node or ancestor)
 };
 
 sk_sp<SkMaskFilter> cachedBlur(RootRecord* root, float blur) {
@@ -969,11 +974,10 @@ SkRect visualBounds(Node* n) {
   return r;
 }
 
-// Pixel-snaps the border box like Chrome: edges round to device pixels
+// Pixel-snaps the border box like Chrome: edges round to pixels
 // (round(x), round(x + w)), so boxes stay crisp at fractional layout
-// positions. Only under axis-aligned transforms. `m` is the device matrix at
-// the unsnapped border-box origin; returns the snap offset (local units) and
-// the snapped size.
+// positions. `m` maps the unsnapped border-box origin to the snapping grid;
+// returns the snap offset (local units) and the snapped size.
 SkVector snapBox(const SkMatrix& m, const Rect& r, float* w, float* h) {
   *w = r.width;
   *h = r.height;
@@ -984,6 +988,48 @@ SkVector snapBox(const SkMatrix& m, const Rect& r, float* w, float* h) {
   *w = (std::floor(dx + r.width * sx + 0.5f) - x0) / sx;
   *h = (std::floor(dy + r.height * sy + 0.5f) - y0) / sy;
   return {(x0 - dx) / sx, (y0 - dy) / sy};
+}
+
+// Where a node paints, relative to its parent's unsnapped border box.
+//
+// Snapping happens in layout space, before the node's own transform and
+// LayoutAnimation scale, like Chrome (paint offsets snap in the transform's
+// local space; the transform then applies as is). `parentSnap` maps the
+// parent's border-box coordinates to device pixels without any transform,
+// so a translateX of 0.37 moves a box and its text together by 0.37 device
+// pixels. Snapping after the transform (in device space) made boxes step by
+// whole pixels while their subpixel-positioned text glided: text wiggled
+// inside its box during spring animations.
+struct Placement {
+  SkMatrix local;      // parent coords -> the node's snapped border-box coords
+  SkMatrix snapSpace;  // snap space of the node's children (unsnapped origin)
+  SkVector snap;       // offset to undo the snap, in the node's local units
+  float w, h;          // snapped border-box size
+  bool transformed;    // the node has its own transform (or LayoutAnimation scale)
+};
+
+Placement place(const Node* n, const SkMatrix& parentSnap) {
+  Placement p;
+  Rect r = n->visualRect();
+  p.snapSpace = parentSnap;
+  p.snapSpace.preTranslate(r.x, r.y);
+  SkVector pre = snapBox(p.snapSpace, r, &p.w, &p.h);
+  SkMatrix t;  // own transform: LayoutAnimation scale, then style transform
+  if (animScaled(n)) applyAnimScale(n, r, &t);
+  if (!n->style().transform.empty()) t.preConcat(localTransform(*n));
+  p.transformed = !t.isIdentity();
+  SkMatrix inv;
+  if (!t.invert(&inv)) {
+    pre = {0, 0};
+    p.w = r.width;
+    p.h = r.height;
+  }
+  // translate(pre) . t == t . translate(t^-1 pre): the snap expressed after
+  // the transform, which is what paintContent undoes for text and children.
+  p.snap = inv.mapVector(pre.fX, pre.fY);
+  p.local = SkMatrix::Translate(r.x + pre.fX, r.y + pre.fY);
+  p.local.preConcat(t);
+  return p;
 }
 
 void paintChildren(Node* n, SkCanvas* c, Ctx& ctx) {
@@ -1070,8 +1116,12 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
     float dw = YGNodeLayoutGetWidth(n->yoga()) - w, dh = YGNodeLayoutGetHeight(n->yoga()) - h;
     float x = b.content.left() - snap.fX, y = b.content.top() - snap.fY;
     float cw = std::max(0.f, b.content.width() + dw), ch = std::max(0.f, b.content.height() + dh);
-    if (n->type() == NodeType::Text) text::paintText(n, c, x, y, cw, ch);
-    else text::paintTextInput(n, c, x, y, cw, ch);
+    // Under a transform the text snaps where its box does: in layout space.
+    SkMatrix layoutSpace = ctx.snapSpace;
+    layoutSpace.preTranslate(snap.fX, snap.fY);
+    const SkMatrix* ls = ctx.transformed ? &layoutSpace : nullptr;
+    if (n->type() == NodeType::Text) text::paintText(n, c, x, y, cw, ch, ls);
+    else text::paintTextInput(n, c, x, y, cw, ch, ls);
   }
   if (n->type() == NodeType::Image) image::paint(n, c, b.inner.rect(), b.inner);
 
@@ -1082,8 +1132,13 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
     if (clip) clipRRect(c, b.inner);
     // Children snap from their own unsnapped positions.
     c->translate(-snap.fX, -snap.fY);
-    if (scroll) c->translate(-n->scrollX, -n->scrollY);
+    SkMatrix snapSpace = ctx.snapSpace;  // this node's (set by paintNode)
+    if (scroll) {
+      c->translate(-n->scrollX, -n->scrollY);
+      ctx.snapSpace.preTranslate(-n->scrollX, -n->scrollY);
+    }
     paintChildren(n, c, ctx);
+    ctx.snapSpace = snapSpace;
     c->restore();
   }
   if (n->type() == NodeType::ScrollView) paintScrollIndicators(n, c, b, w, h);
@@ -1102,18 +1157,9 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
     }
   }
   const ComputedStyle& s = n->style();
-  Rect r = n->visualRect();
+  Placement p = place(n, ctx.snapSpace);
   int saveCount = c->save();
-  c->translate(r.x, r.y);
-  if (animScaled(n)) {
-    SkMatrix am;
-    applyAnimScale(n, r, &am);
-    c->concat(am);
-  }
-  if (!s.transform.empty()) c->concat(localTransform(*n));
-  float w, h;
-  SkVector snap = snapBox(c->getTotalMatrix(), r, &w, &h);
-  if (snap.fX != 0 || snap.fY != 0) c->translate(snap.fX, snap.fY);
+  c->concat(p.local);
   float opacity = s.opacity * animOpacity(n);
   bool layer = opacity < 1 || !s.filters.empty() || s.blendMode != 0;
   if (layer) {
@@ -1124,7 +1170,13 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
     SkRect bounds = visualBounds(n);
     c->saveLayer(&bounds, &lp);
   }
-  paintContent(n, c, ctx, snap, w, h);
+  SkMatrix parentSnap = ctx.snapSpace;
+  bool parentTransformed = ctx.transformed;
+  ctx.snapSpace = p.snapSpace;
+  ctx.transformed |= p.transformed;
+  paintContent(n, c, ctx, p.snap, p.w, p.h);
+  ctx.snapSpace = parentSnap;
+  ctx.transformed = parentTransformed;
   c->restoreToCount(saveCount);
 }
 
@@ -1167,8 +1219,8 @@ SkRect curvedOutline(const Node* n, const SkMatrix& m, float w, float h) {
 // Walks the tree like paintNode (same matrices and snapping), refreshes each
 // node's record and adds what changed since the last frame to `damage`.
 // Returns the node's device subtree bounds.
-SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkIRect& clip, uint32_t imageGen, SkRegion* damage,
-                      std::vector<CurvedNode>* curved) {
+SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSnap, const SkIRect& clip,
+                      uint32_t imageGen, SkRegion* damage, std::vector<CurvedNode>* curved) {
   if (!n->yoga()) return SkIRect::MakeEmpty();  // raw text: painted by its paragraph
   NodeRecord* rec = record(n);
   SkIRect own = SkIRect::MakeEmpty(), sub = SkIRect::MakeEmpty(), bars = SkIRect::MakeEmpty();
@@ -1177,12 +1229,10 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkIRect& clip, uint
   bool painted = isPainted(n);
   if (painted) {
     const ComputedStyle& s = n->style();
-    Rect r = n->visualRect();
-    m.preTranslate(r.x, r.y);
-    if (animScaled(n)) applyAnimScale(n, r, &m);
-    if (!s.transform.empty()) m.preConcat(localTransform(*n));
-    SkVector snap = snapBox(m, r, &w, &h);
-    m.preTranslate(snap.fX, snap.fY);
+    Placement p = place(n, parentSnap);
+    m.preConcat(p.local);
+    w = p.w;
+    h = p.h;
     if (!own.intersect(deviceBounds(m, ownVisualBounds(n, w, h)), clip)) own.setEmpty();
     if (!own.isEmpty()) {
       SkRect co = curvedOutline(n, m, w, h);
@@ -1213,11 +1263,14 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkIRect& clip, uint
     if (paintsChildren(n) && (!n->children().empty() || !n->ghosts.empty())) {
       SkIRect childClip = clip;
       if (clipsChildren(n) && !childClip.intersect(deviceBounds(m, SkRect::MakeWH(w, h)))) childClip.setEmpty();
-      SkMatrix cm = m;
-      cm.preTranslate(-snap.fX, -snap.fY);
-      if (n->type() == NodeType::ScrollView) cm.preTranslate(-n->scrollX, -n->scrollY);
-      for (Node* ch : n->ghosts) sub.join(updateRecords(ch, cm, childClip, imageGen, damage, curved));
-      for (Node* ch : n->children()) sub.join(updateRecords(ch, cm, childClip, imageGen, damage, curved));
+      SkMatrix cm = m, cs = p.snapSpace;
+      cm.preTranslate(-p.snap.fX, -p.snap.fY);
+      if (n->type() == NodeType::ScrollView) {
+        cm.preTranslate(-n->scrollX, -n->scrollY);
+        cs.preTranslate(-n->scrollX, -n->scrollY);
+      }
+      for (Node* ch : n->ghosts) sub.join(updateRecords(ch, cm, cs, childClip, imageGen, damage, curved));
+      for (Node* ch : n->children()) sub.join(updateRecords(ch, cm, cs, childClip, imageGen, damage, curved));
     }
     float fe = filterOutset(s);
     if (fe > 0 && !sub.isEmpty()) {
@@ -1310,7 +1363,7 @@ SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight) {
   uint32_t imageGen = doc.images ? doc.images->generation : 0;
   SkMatrix m = SkMatrix::Scale(doc.pixelRatio(), doc.pixelRatio());
   root->curved.clear();
-  updateRecords(doc.root(), m, screen, imageGen, &damage, &root->curved);
+  updateRecords(doc.root(), m, m, screen, imageGen, &damage, &root->curved);
   // Grow the damage until it contains every curved node it touches, so no
   // such outline is cut by the clip (pixels then match a full repaint).
   if (!damage.isEmpty()) {
@@ -1339,9 +1392,10 @@ SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight) {
 void paintDocument(Document& doc, SkCanvas* canvas, const SkRegion* damage) {
   RootRecord* root = rootRecord(doc);
   root->shadows.frame++;
-  Ctx ctx{doc, root, damage, {}};
+  Ctx ctx{doc, root, damage, {}, {}};
   canvas->save();
   canvas->scale(doc.pixelRatio(), doc.pixelRatio());
+  ctx.snapSpace = canvas->getTotalMatrix();
   paintNode(doc.root(), canvas, ctx);
   canvas->restore();
   if (damage) {

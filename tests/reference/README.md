@@ -72,6 +72,30 @@ Shape-only feature cases use `maxTileMismatch: 3`. `features/corners` renders
 at 4× with 8 px tiles and named corner regions, so a wrong pixel on a rounded
 border shows up.
 
+## Animated cases
+
+`examples/animated/*.jsx` set `meta.frames`. The App reads its frame index
+from `globalThis.__FRAME` (JSUI: prepended to the bundle, one `jsui-render`
+run per frame) and exposes `globalThis.__setFrame` (Chrome: one page, set the
+frame, wait two animation frames, screenshot), and derives every animated
+value from the frame (e.g. an analytic spring), so both sides show exactly
+the same transforms. Every frame is pixel-compared (the worst sets the
+mismatch %), and `meta.motion` adds a motion check (`lib/motion.js`): the
+cases draw `#0000ff` boxes with white text on black, so the blue channel is
+the coverage of box + text and the red channel that of the text; per region
+and frame the centroids give subpixel positions, and
+
+| `meta.motion` key | Meaning |
+| --- | --- |
+| `regions` | `[{ name, x, y, w, h }]` in CSS px, one box with its text each |
+| `maxWiggle` | RMS of the frame-to-frame second difference of text − box (device px, default 0.3): ~0 for rigid motion, 0.35–0.7 when box or baseline snap to whole pixels |
+| `maxBoxError` | worst distance of a box centroid from Chrome's (device px, default 0.1) |
+
+To look at motion by eye, `node frames.js <fixture.jsx> --out <dir>` writes
+`<dir>/chrome/NNNN.png` and `<dir>/jsui/NNNN.png` for any such fixture
+(`examples/showcase/spring-wiggle.jsx` is a 864-frame menu hover + panel
+spring at 4x slow motion).
+
 ## Adding an example
 
 Create `examples/features/<name>.jsx` (one property family, ideally no text) or
@@ -96,6 +120,18 @@ by `npm --workspace tests/reference run assets`
 * Chromium runs with `--font-render-hinting=none --disable-lcd-text
   --disable-font-subpixel-positioning --force-color-profile=srgb --disable-gpu`
   and one raster thread; each case gets a fresh browser context.
+* Text rasterisation settings match JSUI's (unhinted outlines, grayscale
+  anti-aliasing, subpixel glyph positions) on every platform. Most flags above
+  only affect Linux / Windows Chrome; on macOS the page sets
+  `-webkit-font-smoothing: antialiased`, without which Chrome draws hinted
+  CoreText glyphs, i.e. CoreGraphics' dilated "font smoothing" outlines
+  (bolder than JSUI's, and dependent on the machine's AppleFontSmoothing
+  setting). Linux and Windows Chrome ignore the property.
+* Line boxes: Chrome on Linux borrows a pixel from the ascent when the
+  descent rounds down; on macOS / Windows it does not. JSUI follows the host
+  platform (`chromeLineMetrics` in `src/text/text_layout.cpp`), so each
+  platform is compared against its own Chrome. CI runs the suite on Linux
+  (required) and macOS (`reference-macos`, advisory).
 * Fonts: the same `assets/fonts/Inter-*.ttf` files are served to Chrome via
   `@font-face` (also aliased under the `System` / platform family names that
   react-native-web uses by default) and passed to `jsui-render --font`.

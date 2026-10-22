@@ -97,12 +97,33 @@ class JsuiHost {
     this._pads = [];
     this._fixedRatio = opts.pixelRatio > 0 ? opts.pixelRatio : 0;
     this._trapTab = opts.trapTab !== false;
+    this._handlers = new Map();  // Host.call name -> fn (handle())
+    this._uiCalls = new Map();   // callUi id -> {resolve, reject}
 
     (M.__jsuiHosts ??= new Map()).set(this.hostId, {
       onMessage: (name, json) => {
         let data;
         try { data = JSON.parse(json); } catch { data = json; }
         this._emit('message', name, data);
+      },
+      onState: (key, json) => {
+        let value;
+        try { value = json == null ? undefined : JSON.parse(json); } catch { value = json; }
+        this._emit('state', key, value);
+      },
+      onCall: (id, name, json) => this._onCall(id, name, json),
+      onCallCancel: (id) => this._emit('callCancel', id),
+      onCallResult: (id, ok, payload) => {
+        const p = this._uiCalls.get(id);
+        if (!p) return;
+        this._uiCalls.delete(id);
+        if (!ok) {
+          const e = new Error(payload);
+          e.name = 'UiCallError';
+          p.reject(e);
+          return;
+        }
+        try { p.resolve(JSON.parse(payload)); } catch (e) { p.reject(e); }
       },
       onLog: (level, text) => {
         if (!this._emit('log', level, text)) {
@@ -141,7 +162,9 @@ class JsuiHost {
 
   // ------------------------------------------------------------- public API
 
-  /** Subscribe: 'message' (name, data), 'error' (message), 'log' (level, text), 'frame' (stats). */
+  /** Subscribe: 'message' (name, data), 'state' (key, value: HostState.set in the UI),
+   * 'call' (id, name, args: Host.call without a handle() handler), 'callCancel' (id),
+   * 'error' (message), 'log' (level, text), 'frame' (stats). */
   on(type, cb) {
     let set = this.listeners.get(type);
     if (!set) this.listeners.set(type, (set = new Set()));
@@ -155,6 +178,70 @@ class JsuiHost {
   postMessage(name, data) {
     this._withStrings([String(name), JSON.stringify(data === undefined ? null : data)], (n, j) =>
       this.module._jsui_post_message(this.rt, n, j));
+  }
+
+  // ------------------------------------------------- game data (jsui.h)
+
+  /** Shared state: the UI reads it with useHostState(key) / HostState.get(key).
+   * `value` undefined removes the key. Returns true if the value changed. */
+  setState(key, value) {
+    const json = value === undefined ? null : JSON.stringify(value);
+    return this._withStrings([String(key), json], (k, j) => this.module._jsui_set_state(this.rt, k, j)) === 1;
+  }
+
+  /** RFC 7386 merge patch of a state key (null members delete). Returns true if the value changed. */
+  patchState(key, patch) {
+    return this._withStrings([String(key), JSON.stringify(patch === undefined ? null : patch)],
+      (k, j) => this.module._jsui_patch_state(this.rt, k, j)) === 1;
+  }
+
+  /** Current value of a state key (also keys the UI set with HostState.set), or undefined. */
+  getState(key) {
+    const p = this._withStrings([String(key)], (k) => this.module._jsui_get_state(this.rt, k));
+    return p ? JSON.parse(this.module.UTF8ToString(p)) : undefined;
+  }
+
+  /** Answers the UI's `Host.call(name, args)`: `fn(args)` returns a value or a
+   * promise (a throw / rejection rejects the call). Calls without a handler
+   * are emitted as 'call' (id, name, args) for resolveCall / rejectCall, or
+   * rejected when nobody listens. Returns an unregister function. */
+  handle(name, fn) {
+    this._handlers.set(String(name), fn);
+    return () => { if (this._handlers.get(String(name)) === fn) this._handlers.delete(String(name)); };
+  }
+
+  resolveCall(id, value) {
+    if (this._destroyed) return -1;
+    return this._withStrings([JSON.stringify(value === undefined ? null : value)],
+      (j) => this.module._jsui_web_resolve_call(this.rt, id, j));
+  }
+
+  rejectCall(id, message) {
+    if (this._destroyed) return -1;
+    return this._withStrings([String(message ?? 'rejected')], (m) => this.module._jsui_web_reject_call(this.rt, id, m));
+  }
+
+  /** Calls a handler the UI registered with Host.handle(name, fn); resolves with its result. */
+  callUi(name, args) {
+    return new Promise((resolve, reject) => {
+      const json = JSON.stringify(args === undefined ? null : args);
+      const id = this._withStrings([String(name), json], (n, j) => this.module._jsui_web_call_ui(this.rt, this.hostId, n, j));
+      this._uiCalls.set(id, { resolve, reject });
+    });
+  }
+
+  _onCall(id, name, json) {
+    let args;
+    try { args = JSON.parse(json); } catch { args = undefined; }
+    const fn = this._handlers.get(name);
+    if (!fn) {
+      if (!this._emit('call', id, name, args)) this.rejectCall(id, `no host handler for "${name}"`);
+      return;
+    }
+    // Settled asynchronously (never re-entering the runtime from inside on_call).
+    Promise.resolve().then(() => fn(args)).then(
+      (v) => this.resolveCall(id, v),
+      (e) => this.rejectCall(id, e && e.message !== undefined ? e.message : String(e)));
   }
 
   loadUrl(url) {

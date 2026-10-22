@@ -101,6 +101,33 @@ export function jsuiRenderAvailable() {
   return fs.existsSync(JSUI_RENDER);
 }
 
+/**
+ * Renders `frames` of an animated case (see examples/animated): each frame is
+ * a fresh jsui-render run of `bundle` with `globalThis.__FRAME = i` prepended,
+ * so frames are exact and independent. Writes <outDir>/NNNN.png; resolves
+ * the file paths in frame order.
+ */
+export async function renderJsuiFrames(bundle, outDir, meta, scale, frames, jobs = 4) {
+  await fs.promises.mkdir(outDir, { recursive: true });
+  const src = await fs.promises.readFile(bundle, 'utf8');
+  const files = frames.map((i) => path.join(outDir, frameName(i)));
+  let next = 0;
+  const worker = async () => {
+    while (next < frames.length) {
+      const k = next++;
+      const fb = path.join(path.dirname(bundle), `frame-${frames[k]}.js`);
+      await fs.promises.writeFile(fb, `globalThis.__FRAME = ${frames[k]};\n${src}`);
+      const run = await runJsuiRender(fb, files[k], { ...meta, waitMs: 50 }, scale);
+      await fs.promises.rm(fb, { force: true });
+      if (!run.ok) throw new Error(`jsui-render failed on frame ${frames[k]}\n${run.stderr}`);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(jobs, frames.length) }, worker));
+  return files;
+}
+
+export const frameName = (i) => String(i).padStart(4, '0') + '.png';
+
 /** Runs jsui-render; resolves { ok, stderr, ms }. */
 export function runJsuiRender(bundle, outPng, meta, scale) {
   const args = [

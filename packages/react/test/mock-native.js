@@ -148,7 +148,103 @@ globalThis.__jsui_native = {
     calls.push(['loadFont', family, url, weight, italic]);
     return Promise.resolve(true);
   },
+  // Shared state (src/host_state.cpp semantics: a runtime-wide version per change).
+  getState(key) {
+    const e = hostState.get(key);
+    return e ? e.json : undefined;
+  },
+  stateVersion(key) {
+    const e = hostState.get(key);
+    return e ? e.version : 0;
+  },
+  stateKeys() {
+    return Array.from(hostState.keys());
+  },
+  setState(key, json) {
+    if (json === undefined) {
+      if (hostState.delete(key)) mock.uiState.push([key, undefined]);
+      return 0;
+    }
+    JSON.parse(json); // SyntaxError like the native bridge
+    const prev = hostState.get(key);
+    if (!prev || prev.json !== json) {
+      hostState.set(key, { json, version: stateVersion++ });
+      mock.uiState.push([key, json]);
+    }
+    return hostState.get(key).version;
+  },
+  patchState(key, json) {
+    const prev = hostState.get(key);
+    const next = JSON.stringify(applyPatch(prev ? JSON.parse(prev.json) : null, JSON.parse(json)));
+    return __jsui_native.setState(key, next);
+  },
+  // Calls (Host.call -> on_call; the test answers with mock.resolveCall / rejectCall).
+  hostCall(name, json, settle) {
+    if (!mock.callsEnabled) return 0;
+    const id = nextCallId++;
+    mock.hostCalls.set(id, { name, json, settle });
+    if (mock.onCall) mock.onCall(id, name, json);
+    return id;
+  },
+  cancelCall(id) {
+    if (!mock.hostCalls.delete(id)) return false;
+    mock.cancelled.push(id);
+    return true;
+  },
+  callResult(id, ok, payload) {
+    mock.uiResults.push([id, ok, payload]);
+  },
 };
+
+const hostState = new Map();
+let stateVersion = 1;
+let nextCallId = 1;
+function applyPatch(target, patch) {
+  if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) return patch;
+  const out = target && typeof target === 'object' && !Array.isArray(target) ? Object.assign({}, target) : {};
+  for (const k of Object.keys(patch)) {
+    if (patch[k] === null) delete out[k];
+    else out[k] = applyPatch(out[k], patch[k]);
+  }
+  return out;
+}
+Object.assign(mock, {
+  uiState: [],
+  hostCalls: new Map(),
+  cancelled: [],
+  uiResults: [],
+  callsEnabled: true,
+  onCall: null,
+  /** Embedder side: jsui_set_state (json undefined removes). Delivered by mock.tickState(). */
+  setHostState(key, json) {
+    const prev = hostState.get(key);
+    if (json === undefined) hostState.delete(key);
+    else if (prev && prev.json === json) return;
+    else hostState.set(key, { json, version: stateVersion++ });
+    mock.dirtyState.add(key);
+  },
+  dirtyState: new Set(),
+  /** The start of jsui_tick: hands the changed keys to JS. */
+  tickState() {
+    const keys = Array.from(mock.dirtyState);
+    mock.dirtyState.clear();
+    if (keys.length) globalThis.__jsui_onHostState(keys);
+  },
+  resolveCall(id, json) {
+    const c = mock.hostCalls.get(id);
+    if (!c) return -1;
+    mock.hostCalls.delete(id);
+    c.settle(true, json);
+    return 0;
+  },
+  rejectCall(id, message) {
+    const c = mock.hostCalls.get(id);
+    if (!c) return -1;
+    mock.hostCalls.delete(id);
+    c.settle(false, message);
+    return 0;
+  },
+});
 
 // Simulated frame clock for Animated: requestAnimationFrame callbacks run
 // when the test calls mock.frame(ms).

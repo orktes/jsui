@@ -61,7 +61,7 @@ library with a C API, and the same core compiles to WebAssembly.
 
 | Path | What |
 | --- | --- |
-| `include/jsui/jsui.h` | Public C API (embedding, input, resources, messages) |
+| `include/jsui/jsui.h` | Public C API (embedding, input, resources, messages, shared state, calls) |
 | `src/core/` | `Value`, `Node`, `Document`, style parsing (`style.cpp`) |
 | `src/render/` | Skia painter, image cache, GPU backend (`gpu.cpp`) |
 | `src/text/` | Font manager, paragraph building and Yoga measure for `Text` |
@@ -177,17 +177,149 @@ jsui_render_gl_target(rt, gpu, &t);
   `web/dist-webgl/jsui.{js,wasm}`; the default WASM build stays CPU-only and
   its `jsui_gpu_*` entry points return failure.
 * **Viewer / web.** `jsui-viewer --gpu` renders into the SDL GL window's
-  default framebuffer (`--screenshot` reads it back). In the browser,
+  default framebuffer (`--screenshot` reads it back, and fails if the frame
+  is blank). On macOS it asks SDL for a 3.2 core, forward-compatible
+  profile (`--gl-core`, default there): the default legacy 2.1 context only
+  has GLSL 1.20, which Skia's shaders cannot use (`gl_VertexID`). Ganesh
+  detects core profiles (`GL_CONTEXT_PROFILE_MASK`) and binds its own vertex
+  array object, since core profiles have no default one. In the browser,
   `createJsui({ canvas, renderer: 'gpu', moduleUrl: '.../dist-webgl/jsui.js' })`
   registers the canvas' WebGL context with emscripten and draws through
   Skia; without a GPU module it falls back to the CPU raster + WebGL blit.
 * **Tests.** `tests/native/gpu_test.cpp` makes an EGL context (Mesa's
-  surfaceless platform / llvmpipe works headless), on desktop GL, GLES 3 and
-  GLES 2, renders scenes through the GPU path and compares with the CPU
-  output; without EGL it prints SKIP (`JSUI_GPU_TEST_REQUIRE=1`, set in CI,
+  surfaceless platform / llvmpipe works headless), on desktop GL, a 3.2 core
+  profile (as on macOS), GLES 3 and GLES 2, or on macOS a headless CGL 3.2
+  core context, renders scenes through the GPU path and compares with the
+  CPU output; without a context it prints SKIP (`JSUI_GPU_TEST_REQUIRE=1`, set in CI,
   makes that a failure). `JSUI_WEB_DIST=dist-webgl node web/test/browser.test.mjs`
   runs the browser tests against the GPU module, including GPU-vs-CPU pixel
   comparisons.
+
+## Game data
+
+Three channels connect the game and the UI (`include/jsui/jsui.h`):
+
+| | Game → UI | UI → game | Use for |
+| --- | --- | --- | --- |
+| **Shared state** | `jsui_set_state` / `jsui_patch_state` → `useHostState(key)` | `HostState.set` / `patch` → `on_state` | anything the UI shows: currency, inventory, quests, settings |
+| **Calls** | `jsui_call_ui` → `Host.handle(name, fn)` → `done` | `await Host.call(name, args)` → `on_call` → `jsui_resolve_call` / `jsui_reject_call` | requests with an answer: buy, equip, confirm dialogs |
+| **Messages** | `jsui_post_message` → `useHostMessage` | `Host.postMessage` → `on_message` | fire-and-forget events: "level up", "play sound" |
+
+An inventory screen:
+
+```c
+// Game side. Any time, even before the bundle loads; survives reloads.
+jsui_set_state(rt, "gold", "1250");
+jsui_set_state(rt, "inventory",
+    "{\"items\":{\"sword\":{\"name\":\"Iron Sword\",\"count\":1},"
+    "\"potion\":{\"name\":\"Potion\",\"count\":3}}}");
+// Later: only what changed (RFC 7386 merge patch; null deletes).
+jsui_patch_state(rt, "inventory", "{\"items\":{\"potion\":{\"count\":2},\"key\":null}}");
+
+// UI -> game requests (JsuiConfig.on_call), answered now or on a later frame.
+static void on_call(void* user, uint64_t id, const char* name, const char* args) {
+    Game* g = user;
+    if (strcmp(name, "shop.buy") == 0) game_queue_purchase(g, id, args);  // answers later
+    else jsui_reject_call(g->ui, id, "unknown call");
+}
+// ... when the purchase went through:
+jsui_resolve_call(rt, id, "{\"gold\":1100}");    // or jsui_reject_call(rt, id, "not enough gold")
+```
+
+```jsx
+import { Host, useHostState } from '@jsui/react';
+
+const Row = memo(({ item }) => <Text>{item.name} ×{item.count}</Text>);
+
+function Inventory() {
+  const gold = useHostState('gold', 0);
+  const { items } = useHostState('inventory', { items: {} });
+  const [error, setError] = useState(null);
+  const buy = (item) =>
+    Host.call('shop.buy', { item }, { timeout: 5000 }).catch((e) => setError(e.message));
+  return (
+    <View>
+      <Text>{gold} gold</Text>
+      {Object.entries(items).map(([id, item]) => <Row key={id} item={item} />)}
+      <Button title="Buy potion" onPress={() => buy('potion')} />
+      {error && <Text>{error}</Text>}
+    </View>
+  );
+}
+```
+
+**Shared state** (`src/host_state.*`, `src/js/bridge_host.cpp`,
+`packages/react/src/hostData.js`):
+
+* The runtime owns the store (one JSON value per key), not the JS context, so
+  values set before the bundle loads, or before a dev-mode / `jsui_reload`
+  reload, are there when the (new) bundle starts. Values are kept in an
+  order-preserving JSON document (`src/core/json.*`): members keep the
+  embedder's order, numbers their text, and a merge patch appends new members.
+* Every change bumps a runtime-wide version (0 = unset). Setting an equal
+  value (same text, or text that parses equal; a patch that changes nothing)
+  is a no-op: no version bump, no re-render.
+* Delivery: keys the embedder changed are handed to JS once per `jsui_tick`
+  (right after resource completions, before timers and rAF) in one
+  `__jsui_onHostState(keys)` call, which notifies the keys' subscribers in one
+  React batch at discrete priority, so they render in that same tick.
+  Reads are not delayed: `HostState.get` compares the key's version with
+  its cache, so a component that mounts between `jsui_set_state` and the next
+  tick (from an input event or a host message) already renders the new value.
+* JS parses a key's JSON once per version, however many components read it,
+  and only when something reads it. The new value is merged into the previous
+  one so that unchanged objects and arrays stay identical (`===`): rows behind
+  `React.memo`, `useMemo` deps and `useHostStateSelector` results survive
+  updates elsewhere in the value. Development builds deep-freeze values,
+  because mutating a shared value would silently diverge from the runtime's
+  copy.
+* `useHostState(key, fallback)` is `useSyncExternalStore` on that cache (only
+  the key's subscribers re-render; `fallback` while unset).
+  `useHostStateSelector(key, selector, fallback)` re-renders only when the
+  selected result changes (`Object.is`). `HostState.get(key)`,
+  `HostState.subscribe(key, cb)` (`'*'` for every key) and
+  `HostState.keys()` are the non-hook API.
+* UI-owned keys: `HostState.set(key, value)` / `HostState.patch(key, patch)`
+  write to the same store, notify JS subscribers synchronously and call
+  `JsuiConfig.on_state(key, json)` (full new value; NULL when removed). The
+  embedder's own writes are not echoed to `on_state`, and JS writes are not
+  re-delivered to JS. The embedder reads any key with `jsui_get_state`.
+* Granularity: one key per thing that changes independently ("gold",
+  "inventory", "quests"). Keep big collections as objects keyed by id so
+  merge patches can address single entries (an array is replaced whole).
+
+**Calls**:
+
+* `Host.call(name, args, {timeout, signal})` serializes `args`, registers the
+  call's settle function with the engine, then calls `on_call(id, name, json)`
+  (ids are unique for the runtime's lifetime, never 0). The embedder may
+  answer inside `on_call` or any number of frames later; the promise resolves
+  with the parsed JSON or rejects with an `Error` (`name` `HostCallError`,
+  `message` = the embedder's message, `call` = the name). Invalid result JSON
+  rejects the call (`jsui_resolve_call` returns -2) rather than leaving it
+  pending. Without `on_call` the promise rejects at once.
+* A call that ends unanswered is reported to `on_call_cancel(id)`: the JS
+  timeout or abort signal fired, or the JS context went away (`jsui_reload`,
+  a dev-mode reload, `jsui_destroy`). The engine frees the call's JS
+  function with its context; answering a cancelled id returns -1. Nothing
+  leaks on either side.
+* Reverse direction: `jsui_call_ui(rt, name, args, done, user)` calls
+  `__jsui_onCall(id, name, json)`; `@jsui/react` runs the `Host.handle(name, fn)`
+  / `useHostHandler(name, fn)` handler (inside a discrete batch, so its state
+  updates render in the same tick) and posts its value (or promise result) back
+  with `callResult`. `done(user, id, ok, result)` runs exactly once, at the end
+  of a `jsui_tick` (never inside `jsui_call_ui`, so the id is always known
+  first), with ok = 0 and a message when the handler threw or rejected, no
+  handler is registered, the result is not JSON-serializable, or the context
+  went away (from `jsui_reload` / `jsui_destroy`).
+
+Hosts: the WASM page API mirrors this (`jsui.setState` / `patchState` /
+`getState`, `jsui.handle(name, fn)` for `Host.call`, `jsui.callUi(name, args)
+→ Promise`, `'state'` / `'call'` / `'callCancel'` events), and the Godot
+`JsuiView` exposes `set_state(key, Variant)` / `patch_state` / `get_state`,
+`call_requested` + `resolve_call` / `reject_call` and `call_ui(name, args,
+Callable)` (see `integrations/godot/README.md`). `tools/jsui-record`
+timelines can set state with `{"state": key, "data": value}` steps.
 
 ## JS bridge contract
 
@@ -210,6 +342,10 @@ Native globals (installed by `JsEngine`):
 | `scrollTo(id, x, y, animated)` | `InputManager::scrollTo` (clamped, dispatches `scroll`). `animated`: eases there on the runtime clock; otherwise immediate (and stops a running fling) |
 | `flashScrollIndicators(id)` | shows a ScrollView's overlay indicators for ~1 s |
 | `postMessage(name, json)` | to the embedder's `on_message`. A string is passed through as the JSON text; any other value is `JSON.stringify`-ed |
+| `getState(key) → json \| undefined`, `stateVersion(key) → number`, `stateKeys() → [key]` | shared host state (see "Game data"); version 0 = unset |
+| `setState(key, json \| undefined) → version`, `patchState(key, json) → version` | UI-owned writes (`undefined` removes); report to `on_state`; invalid JSON throws `SyntaxError` |
+| `hostCall(name, json, settle) → id` | `on_call`; `settle(ok, payload)` runs on `jsui_resolve_call` (JSON text) / `jsui_reject_call` (message). Returns 0 without `on_call` |
+| `cancelCall(id) → bool`, `callResult(id, ok, payload)` | drop an unanswered call (`on_call_cancel`); the result of a `__jsui_onCall` |
 | `loadFont(family, url, weight, italic) → Promise<true>` | load via the resource loader (URL relative to the bundle), register with the FontManager, relayout text; rejects with an `Error` on 404 / bad font data |
 | `reload()` | reload the bundle at the start of the next tick (safe from inside JS) |
 | `textEditing` | `true`: TextInput text is edited natively (see "TextInput editing") |
@@ -259,6 +395,8 @@ Callbacks the bundle installs (all optional):
 * `__jsui_dispatchEvent(event) → number` — native → JS event. Bitmask: `1` a
   handler ran, `2` `preventDefault()` was called.
 * `__jsui_onHostMessage(name, json)` — from `jsui_post_message`.
+* `__jsui_onHostState(keys)` — shared-state keys the embedder changed, once per tick.
+* `__jsui_onCall(id, name, json)` — `jsui_call_ui`; answer with `callResult`.
 * `__jsui_onLayout(id, {x, y, width, height})` — for `onLayout` listeners.
 * `__jsui_onAnimatedEnd(id, finished, value)` / `__jsui_onAnimatedValueUpdate(tag, value)`
   — native Animated ends and value-listener updates, after each tick.
@@ -574,7 +712,7 @@ The default font is Inter (bundled); `fontFamily` falls back to it.
   `tools/jsui-viewer` downloads SDL 2.30.12 (SHA-256 checked) and links it
   statically; `-DJSUI_BUILD_VIEWER=OFF` skips it, `-DJSUI_SDL_DIR=` uses a
   local SDL2 source tree, and a failed download only skips the viewer.
-  `jsui-viewer [--dev] [--gpu] [--width W --height H] <bundle path or URL>`; F5
+  `jsui-viewer [--dev] [--gpu [--gl-core]] [--width W --height H] <bundle path or URL>`; F5
   reloads; `--frames N --screenshot out.png` runs headless
   (`SDL_VIDEODRIVER=dummy`; `--gpu` needs a GL-capable display, e.g. `xvfb-run`
   with Mesa). `-DJSUI_GPU=OFF` builds without the GPU backend.
@@ -628,7 +766,16 @@ a `JsuiLoadFn`). An embedder loader only sees the URL (GET semantics).
 `tests/reference` renders each example twice — with JSUI (`jsui-render`) and
 with react-native-web in headless Chromium (Playwright), same viewport, same
 Inter font files — and compares the PNGs with a per-pixel tolerance. A failing
-case writes `expected/actual/diff` images and an HTML report.
+case writes `expected/actual/diff` images and an HTML report. Cases in
+`examples/animated` are rendered frame by frame (the frame index drives the
+transform values) and also pass a motion check: text must move rigidly with
+its box, and boxes must land where Chrome puts them.
+
+Pixel snapping follows Chrome: border boxes snap to device pixels in layout
+space, before the node's own transform, and the transform then applies
+unsnapped. Under a fractional translate or scale (springs), a box and its
+text therefore move together; text under a transform snaps its baseline in
+the same layout space and uses subpixel glyph positions on both axes.
 
 ## @jsui/react bridge usage (JS side)
 

@@ -4,13 +4,15 @@
 JS) and draws it. It is the Godot counterpart of `tools/jsui-viewer`: it
 ticks the runtime every frame, paints with `jsui_render_rgba_incremental`
 into a CPU buffer and uploads an `ImageTexture` only when pixels changed. It
-forwards Godot input and bridges `postMessage` both ways.
+forwards Godot input and bridges game data both ways: shared state
+(`set_state` → `useHostState`), calls (`Host.call` → `call_requested` →
+`resolve_call`, and `call_ui` → `Host.handle`) and messages.
 
 ```
 integrations/godot/
   CMakeLists.txt        GDExtension target (jsui_godot), fetches godot-cpp
   src/                  JsuiView, key/gamepad mapping, entry point
-  demo/                 Godot 4.3 project: main.tscn + main.gd + jsui.gdextension
+  demo/                 Godot 4.7 project: main.tscn + main.gd + jsui.gdextension
   demo/ui/app.jsx       demo UI: examples/screens/main-menu.jsx + a bridge card
   smoke-test.sh         runs the demo headless and saves a frame (used by CI)
 ```
@@ -21,7 +23,7 @@ Requirements: CMake ≥ 3.20, Ninja, clang (or gcc / MSVC), python3 (godot-cpp
 generates its bindings with it), Node 22 for the bundle.
 
 ```sh
-# From the repository root. godot-cpp is fetched at godot-4.3-stable.
+# From the repository root. godot-cpp is fetched at 10.0.0-stable.
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
       -DJSUI_BUILD_GODOT=ON
@@ -38,15 +40,36 @@ CMake options:
 | Option | Default | |
 | --- | --- | --- |
 | `JSUI_BUILD_GODOT` | `OFF` | build the GDExtension (the default build is unaffected) |
-| `JSUI_GODOT_CPP_TAG` | `godot-4.3-stable` | godot-cpp tag to fetch |
+| `JSUI_GODOT_CPP_TAG` | `10.0.0-stable` | godot-cpp tag to fetch |
+| `JSUI_GODOT_API_VERSION` | `4.3` | Godot API to build against (4.3 … 4.7): the oldest Godot that loads the library. Keep `compatibility_minimum` in `demo/jsui.gdextension` equal to it |
 | `JSUI_GODOT_CPP_DIR` | | use an existing godot-cpp checkout instead |
 | `JSUI_GODOT_OUTPUT_DIR` | `integrations/godot/demo/bin` | where the library is written |
 
 The library statically links the JSUI runtime (QuickJS, Yoga, Skia) and only
-exports the GDExtension entry point (`jsui_godot_init`). It is built against
-the 4.3 extension API and loads in Godot 4.3 and later. One build serves the
+exports the GDExtension entry point (`jsui_godot_init`). One build serves the
 editor and debug/release runs. On Windows, copy `icudtl.dat` (CMake puts it
 next to the DLL) beside the game executable as for any JSUI host.
+
+### Godot versions
+
+The demo project is saved with Godot 4.7 (the current stable release,
+4.7.2, is what CI runs), and the library loads in **Godot 4.3 and later**
+(`compatibility_minimum = "4.3"`):
+
+* Since 10.x, godot-cpp is versioned independently of Godot. One godot-cpp
+  release builds against any Godot API from 4.3 to 4.7 (`GODOTCPP_API_VERSION`,
+  set here from `JSUI_GODOT_API_VERSION`).
+* GDExtensions are forward- but not backward-compatible: a library built
+  against the 4.3 API loads in 4.3 … 4.7, one built against 4.7 only in 4.7+.
+  So the API version is the real minimum, and `compatibility_minimum` states
+  it.
+* `JsuiView` uses nothing newer than the 4.3 API (`ImageTexture`, `Image`,
+  `RenderingServer` canvas items, `InputEvent*` with `KeyLocation`), so 4.3
+  is the default: one binary serves every supported Godot. Build with
+  `-DJSUI_GODOT_API_VERSION=4.7` (and raise `compatibility_minimum`) only to
+  use newer APIs.
+* CI runs the demo in 4.7.2 and in 4.3 (`GODOT_VERSION=4.3-stable
+  smoke-test.sh`) to keep both ends of the range honest.
 
 ## Run the demo
 
@@ -56,17 +79,21 @@ godot --path . --import   # once: registers the extension and imports assets
 godot --path .            # or open the project in the editor and press F5
 ```
 
-The window shows the main-menu screen with a "Godot bridge" card. Every
-second `main.gd` sends `godot:stats` (fps, frame, version) to the UI. The
-"Ping Godot" button (click it, or press Enter / gamepad A, since it has
-focus) posts `ui:ping`. `main.gd` prints it and answers with `godot:pong`.
-Clicks the UI does not handle fall through to `_unhandled_input`. F5 reloads
-the bundle.
+The window shows the main-menu screen with a "Godot bridge" card. `main.gd`
+keeps the shared state key `godot.stats` (fps, frame, version) up to date
+with `set_state` (the first value is set before the view starts); the card
+reads it with `useHostState`. The "Ping Godot" button (click it, or press
+Enter / gamepad A, since it has focus) awaits `Host.call('godot.ping')`,
+which `main.gd` answers in `call_requested` with `resolve_call`. The
+self-test also calls into the UI with `call_ui('ui.flash', ...)`. Clicks the
+UI does not handle fall through to `_unhandled_input`. F5 reloads the bundle
+(the state survives it).
 
 Headless check (no GPU needed). This is what CI runs:
 
 ```sh
-integrations/godot/smoke-test.sh build/godot-smoke.png        # downloads Godot 4.3 unless $GODOT is set
+integrations/godot/smoke-test.sh build/godot-smoke.png        # downloads Godot 4.7.2 unless $GODOT is set
+GODOT_VERSION=4.3-stable integrations/godot/smoke-test.sh     # the oldest supported Godot
 GODOT_DISPLAY=x11 xvfb-run -a integrations/godot/smoke-test.sh # real OpenGL renderer + window capture
 ```
 
@@ -100,6 +127,13 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | `reload()` | re-evaluate the bundle (same runtime) |
 | `post_message(name, data = null)` | send to JS: `data` is JSON-encoded. JS receives it with `useHostMessage(name, cb)` / `Host.onMessage` |
 | `post_message_json(name, json)` | same with a JSON string |
+| `set_state(key, value) -> int` | shared state (`jsui_set_state`): `value` (Dictionary, Array, number, String…) is JSON-encoded, `null` removes the key. JS reads it with `useHostState(key)` and re-renders on change. Returns 1 changed, 0 unchanged, -1 invalid |
+| `patch_state(key, patch) -> int` | RFC 7386 merge patch of a key (`jsui_patch_state`): Dictionaries merge, `null` members delete. Keep big collections as Dictionaries keyed by id |
+| `get_state(key) -> Variant` | current value (also keys the UI set with `HostState.set`) |
+| `set_state_json` / `patch_state_json` / `get_state_json` | the same with JSON strings |
+| `resolve_call(id, result = null) -> int` | answer a `call_requested` call; the UI's `await Host.call(...)` resolves with `result`. Any later frame is fine. -1: unknown or cancelled id |
+| `resolve_call_json(id, json)` / `reject_call(id, message)` | JSON result / reject (the promise rejects with `Error(message)`) |
+| `call_ui(name, args = null, callback = Callable()) -> int` | run the UI's `Host.handle(name, fn)` / `useHostHandler` handler; `callback(ok: bool, result)` (and `ui_call_completed`) runs once it settles: `result` is the handler's value, or the error message when `ok` is false |
 | `get_texture()` | the `ImageTexture` being drawn (premultiplied RGBA) |
 | `get_frame_image()` | CPU copy of the last frame, straight alpha, works with `--headless` |
 | `get_pending_loads()` | bundle/image/font/fetch loads in flight |
@@ -110,11 +144,38 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | Signal | |
 | --- | --- |
 | `message_received(name: String, data: Variant, json: String)` | JS called `Host.postMessage(name, data)`. `data` is the parsed payload |
+| `state_changed(key: String, value: Variant)` | JS changed a UI-owned key with `HostState.set` / `patch` (`value` null: removed) |
+| `call_requested(id: int, name: String, args: Variant)` | JS called `await Host.call(name, args)`. Answer with `resolve_call` / `reject_call`, now or later |
+| `call_cancelled(id: int)` | a call ended unanswered (JS timeout / abort, reload, `stop()`): drop its work |
+| `ui_call_completed(id: int, ok: bool, result: Variant)` | a `call_ui` call settled (also when the runtime stopped first) |
 | `js_error(message: String)` | a new uncaught JS error |
 | `frame_rendered(dirty_rect: Rect2i)` | the texture was updated. The rect is in device pixels |
 
 Signals are emitted after the runtime returns (after the tick or the input
 call), so handlers can call back into the view safely.
+
+State set with `set_state` / `patch_state` is kept by the view as well, so it
+is there before the bundle runs (even before `start()`) and is re-applied
+when the runtime is recreated (`stop()` / `start()`, a new `bundle_url`);
+`reload()` and dev-mode reloads keep it in the runtime anyway.
+
+```gdscript
+func _ready():
+    ui.set_state("player", {"gold": 1250, "hp": 80})
+    ui.set_state("inventory", {"items": {"sword": {"name": "Iron Sword", "count": 1}}})
+    ui.call_requested.connect(_on_ui_call)
+
+func _on_gold_changed(gold):
+    ui.patch_state("player", {"gold": gold})   # only "gold" changes; only its readers re-render
+
+func _on_ui_call(id, name, args):
+    match name:
+        "shop.buy":
+            if try_buy(args.item): ui.resolve_call(id, {"gold": gold})
+            else: ui.reject_call(id, "not enough gold")
+        _:
+            ui.reject_call(id, "unknown call " + name)
+```
 
 ### Rendering
 
@@ -172,7 +233,7 @@ imported copies.
 
 * IME composition (pre-edit text) is not forwarded, only committed
   characters. The C API has no composition entry point yet.
-* Godot 4.3 cannot upload part of a texture, so the dirty rect saves only
+* The Godot 4.3 API has no sub-rectangle texture upload, so the dirty rect saves only
   CPU paint work, not GPU upload bandwidth.
 * Built and tested on Linux x86_64 (CI). The CMake target also names the
   Windows and macOS libraries the `.gdextension` expects, but those builds

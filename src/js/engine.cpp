@@ -486,6 +486,8 @@ JsEngine::~JsEngine() {
     JS_FreeValue(ctx, r.reason);
   }
   impl.rejections.clear();
+  for (auto& [id, fn] : impl.hostCalls) JS_FreeValue(ctx, fn);
+  impl.hostCalls.clear();
   for (auto& [a, name] : impl.atomNames) JS_FreeAtom(ctx, a);
   impl.atomNames.clear();
   JS_FreeAtom(ctx, impl.atomDispatch);
@@ -598,12 +600,13 @@ int JsEngine::dispatchEvent(const Value& event) {
   return flags;
 }
 
-void JsEngine::callGlobal(const char* name, const Value* args, int argc) {
+bool JsEngine::callGlobal(const char* name, const Value* args, int argc) {
   Impl& impl = *impl_;
   JSContext* ctx = impl.ctx;
   JSValue global = JS_GetGlobalObject(ctx);
   JSValue fn = JS_GetPropertyStr(ctx, global, name);
-  if (JS_IsFunction(ctx, fn)) {
+  bool found = JS_IsFunction(ctx, fn);
+  if (found) {
     std::vector<JSValue> argv;
     for (int i = 0; i < argc; i++) argv.push_back(fromValue(ctx, args[i]));
     JSValue r = impl.call(fn, JS_UNDEFINED, argc, argv.data());
@@ -612,6 +615,48 @@ void JsEngine::callGlobal(const char* name, const Value* args, int argc) {
   }
   JS_FreeValue(ctx, fn);
   JS_FreeValue(ctx, global);
+  return found;
+}
+
+void JsEngine::stateChanged(const std::vector<std::string>& keys) {
+  if (keys.empty()) return;
+  Value::Array list;
+  list.reserve(keys.size());
+  for (auto& k : keys) list.emplace_back(k);
+  Value arg(std::move(list));
+  callGlobal("__jsui_onHostState", &arg, 1);
+}
+
+bool JsEngine::hasCall(uint64_t id) const { return impl_->hostCalls.count(id) > 0; }
+
+bool JsEngine::settleCall(uint64_t id, bool ok, const std::string& payload) {
+  Impl& impl = *impl_;
+  auto it = impl.hostCalls.find(id);
+  if (it == impl.hostCalls.end()) return false;
+  JSContext* ctx = impl.ctx;
+  JSValue fn = it->second;
+  impl.hostCalls.erase(it);
+  JSValue args[2] = {JS_NewBool(ctx, ok), JS_NewStringLen(ctx, payload.data(), payload.size())};
+  JS_FreeValue(ctx, impl.call(fn, JS_UNDEFINED, 2, args));
+  JS_FreeValue(ctx, args[1]);
+  JS_FreeValue(ctx, fn);
+  return true;
+}
+
+bool JsEngine::dropCall(uint64_t id) {
+  auto it = impl_->hostCalls.find(id);
+  if (it == impl_->hostCalls.end()) return false;
+  JS_FreeValue(impl_->ctx, it->second);
+  impl_->hostCalls.erase(it);
+  return true;
+}
+
+std::vector<uint64_t> JsEngine::pendingCalls() const {
+  std::vector<uint64_t> ids;
+  ids.reserve(impl_->hostCalls.size());
+  for (auto& [id, fn] : impl_->hostCalls) ids.push_back(id);
+  std::sort(ids.begin(), ids.end());
+  return ids;
 }
 
 void JsEngine::hostMessage(const std::string& name, const std::string& json) {

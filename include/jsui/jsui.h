@@ -77,14 +77,108 @@ JSUI_API void jsui_resource_complete(JsuiRuntime* rt, uint64_t request_id, int s
 
 /* ------------------------------------------------------- Host messaging
  *
- * Game <-> UI data flow. JS calls `jsui.postMessage(name, payload)`; the
- * runtime JSON-encodes payload and calls this callback. The embedder sends
- * data to JS with jsui_post_message(); JS receives it via
- * `jsui.onMessage(name, cb)` (or the useHostMessage() hook).
+ * Game <-> UI events. JS calls `Host.postMessage(name, payload)`; the
+ * runtime JSON-encodes payload and calls JsuiConfig.on_message. The embedder
+ * sends events to JS with jsui_post_message(); JS receives them via
+ * `Host.onMessage(name, cb)` (or the useHostMessage() hook). Messages are
+ * fire-and-forget: a component that mounts later does not see earlier ones.
+ * For data the UI shows (inventory, currency, settings) use shared state
+ * below; for requests that need an answer use calls.
  */
 typedef void (*JsuiMessageFn)(void* user, const char* name, const char* json);
 
 JSUI_API void jsui_post_message(JsuiRuntime* rt, const char* name, const char* json);
+
+/* ------------------------------------------------------- Shared state
+ *
+ * The runtime keeps the latest JSON value per key. It belongs to the runtime,
+ * not to the JS context: it can be set before a bundle loads and survives
+ * jsui_reload() and dev-mode reloads. In JS:
+ *
+ *     const inv = useHostState('inventory', { items: {} });  // re-renders on change
+ *     HostState.get('inventory');  HostState.subscribe('inventory', cb);
+ *
+ * Only components subscribed to a changed key re-render. Changes made by the
+ * embedder reach JS subscribers once per jsui_tick() (every key changed since
+ * the last tick, in one React batch); reads always see the latest value, so a
+ * component that mounts right after jsui_set_state() renders it immediately.
+ * JS parses a key's JSON once per change and keeps unchanged sub-objects and
+ * arrays identical (===) across updates, so memoized rows of a big list skip
+ * re-rendering.
+ *
+ * Keys are UTF-8 strings ("inventory", "player.gold", ...). Setting a value
+ * equal to the current one (same text, or text that parses to the same
+ * value) is a no-op.
+ */
+
+/* Replace the value of `key` with the JSON text `json` (NULL removes the key;
+ * JS then sees undefined, or the hook's fallback). Returns 1 if the value
+ * changed, 0 if it was already equal, -1 for invalid JSON or a NULL key
+ * (logged; the old value stays). */
+JSUI_API int jsui_set_state(JsuiRuntime* rt, const char* key, const char* json);
+/* Apply an RFC 7386 JSON Merge Patch to the value of `key`: objects merge
+ * recursively, a null member deletes that member, anything else replaces.
+ * E.g. {"gold": 120, "items": {"potion": {"count": 3}, "rusty_key": null}}.
+ * Keep big collections as objects keyed by id (an array can only be replaced
+ * as a whole). Member order is kept; new members are appended. A missing key
+ * starts as null. Same return values as jsui_set_state. */
+JSUI_API int jsui_patch_state(JsuiRuntime* rt, const char* key, const char* merge_patch_json);
+/* Current JSON text of `key` (values the UI set included), or NULL. Valid
+ * until the next call into the runtime. */
+JSUI_API const char* jsui_get_state(JsuiRuntime* rt, const char* key);
+
+/* JsuiConfig.on_state: JS changed a key (`HostState.set(key, value)` /
+ * `HostState.patch(key, patch)`, for UI-owned data such as settings). `json`
+ * is the key's full new JSON text, NULL when JS removed it. Not called for the
+ * embedder's own jsui_set_state / jsui_patch_state. Runs synchronously while
+ * JS is on the stack (jsui_get_state / jsui_set_state are fine inside). */
+typedef void (*JsuiStateFn)(void* user, const char* key, const char* json);
+
+/* ------------------------------------------------------- Calls
+ *
+ * UI -> game requests with an answer. In JS:
+ *
+ *     const res = await Host.call('shop.buy', { item: 'potion' }, { timeout: 5000 });
+ *
+ * calls JsuiConfig.on_call with a new call id (never 0, unique for the
+ * runtime's lifetime). The embedder answers exactly once, right away or on
+ * any later frame, with jsui_resolve_call (the promise resolves with the
+ * parsed JSON) or jsui_reject_call (it rejects with an Error carrying
+ * `message`). Without on_call, Host.call rejects at once.
+ *
+ * A call that ends unanswered (the JS timeout expired, or the JS context went
+ * away: jsui_reload, a dev-mode reload, jsui_destroy) is reported to
+ * on_call_cancel (optional) so the embedder can drop its work; answering it
+ * afterwards returns -1 and does nothing.
+ */
+typedef void (*JsuiCallFn)(void* user, uint64_t call_id, const char* name, const char* args_json);
+typedef void (*JsuiCallCancelFn)(void* user, uint64_t call_id);
+
+/* Resolve call `call_id` with the JSON text `json` (NULL: null). Returns 0;
+ * -1 if the call is unknown, already settled or cancelled; -2 if `json` is
+ * not valid JSON (the call is then rejected with the parse error, so the
+ * promise never hangs). May be called from inside on_call. */
+JSUI_API int jsui_resolve_call(JsuiRuntime* rt, uint64_t call_id, const char* json);
+/* Reject call `call_id`; `message` (UTF-8, NULL: "rejected") becomes the
+ * Error's message. Returns 0, or -1 if the call is unknown or settled. */
+JSUI_API int jsui_reject_call(JsuiRuntime* rt, uint64_t call_id, const char* message);
+
+/* Game -> UI requests. JS registers a handler:
+ *
+ *     Host.handle('ui.confirm', async ({ text }) => await showDialog(text));
+ *
+ * and jsui_call_ui(rt, "ui.confirm", "{\"text\":\"Quit?\"}", done, user)
+ * runs it. The handler may return a value or a promise. When it settles,
+ * `done(user, call_id, ok, result)` runs with ok = 1 and the result as JSON
+ * text, or ok = 0 and an error message: the handler threw or rejected, no
+ * handler is registered for `name`, the result is not JSON-serializable, or
+ * the JS context went away first. `done` runs exactly once: inside a later
+ * jsui_tick() (never inside jsui_call_ui), or from jsui_reload() /
+ * jsui_destroy(); it must not destroy the runtime. `done` may be NULL.
+ * Returns the call id (never 0). */
+typedef void (*JsuiCallResultFn)(void* user, uint64_t call_id, int ok, const char* result);
+JSUI_API uint64_t jsui_call_ui(JsuiRuntime* rt, const char* name, const char* args_json, JsuiCallResultFn done,
+                               void* user);
 
 /* ---------------------------------------------------------------- Config */
 
@@ -101,6 +195,11 @@ typedef struct JsuiConfig {
     void* load_user;
     JsuiMessageFn on_message;
     void* message_user;
+    JsuiStateFn on_state;             /* JS changed a shared-state key (optional) */
+    void* state_user;
+    JsuiCallFn on_call;               /* Host.call() from JS (optional) */
+    JsuiCallCancelFn on_call_cancel;  /* a call ended unanswered (optional) */
+    void* call_user;                  /* passed to on_call / on_call_cancel */
 
     /* JS engine limits (0: default). The watchdog interrupts any single
      * native->JS call (an event, a timer, a frame callback) that runs longer

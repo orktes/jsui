@@ -26,7 +26,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { Host } from '@jsui/react';
+import { Host, useHostState } from '@jsui/react';
 import { colors, font, rarity } from '../theme.js';
 
 const NATIVE = true;  // useNativeDriver wherever React Native allows it (transform / opacity)
@@ -524,6 +524,31 @@ function KeyHint({ glyph, label, color }) {
   );
 }
 
+// The player chip reads shared host state: a game sets it with
+// jsui_set_state(rt, "player", "{\"credits\":12480,...}") and patches it as
+// the numbers change (a jsui-record timeline with {"state": "player", ...}).
+// Without host state it shows the defaults.
+const PLAYER = { name: 'Valkyrie_07', level: 42, role: 'Vanguard', credits: 12480 };
+const thousands = (n) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+
+function Profile() {
+  const player = useHostState('player', PLAYER);
+  return (
+    <View style={styles.profile}>
+      <View style={styles.currency}>
+        <View style={styles.coin} />
+        <Text style={styles.currencyText}>{thousands(player.credits ?? PLAYER.credits)}</Text>
+      </View>
+      <View style={styles.divider} />
+      <Image source={require('../assets/crest-wolf.png')} style={styles.crest} />
+      <View>
+        <Text style={styles.profileName}>{player.name ?? PLAYER.name}</Text>
+        <Text style={styles.profileLevel}>{`Level ${player.level ?? PLAYER.level} · ${player.role ?? PLAYER.role}`}</Text>
+      </View>
+    </View>
+  );
+}
+
 function App() {
   const enters = useMemo(() => MENU.map(() => new Animated.Value(0)), []);
   const panelsIn = useValue(0);
@@ -554,18 +579,7 @@ function App() {
         <Text style={styles.logo}>AETHERFALL</Text>
         <Tabs />
         <View style={{ flex: 1 }} />
-        <View style={styles.profile}>
-          <View style={styles.currency}>
-            <View style={styles.coin} />
-            <Text style={styles.currencyText}>12,480</Text>
-          </View>
-          <View style={styles.divider} />
-          <Image source={require('../assets/crest-wolf.png')} style={styles.crest} />
-          <View>
-            <Text style={styles.profileName}>Valkyrie_07</Text>
-            <Text style={styles.profileLevel}>Level 42 · Vanguard</Text>
-          </View>
-        </View>
+        <Profile />
       </View>
 
       <View style={styles.left}>

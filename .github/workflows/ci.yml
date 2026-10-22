@@ -123,6 +123,12 @@ jobs:
             --frames 10 --screenshot bands-gpu.png web/test/fixtures/bands.js | tee viewer-gpu.log
           grep -q '^GPU: ' viewer-gpu.log  # not the CPU fallback
           test -s bands-gpu.png
+      - name: Viewer GPU smoke, 3.2 core profile (the macOS context setup)
+        run: |
+          xvfb-run -a -s "-screen 0 1280x1024x24" ./build/tools/jsui-viewer/jsui-viewer --gpu --gl-core --width 320 --height 200 \
+            --frames 10 --screenshot bands-gpu-core.png web/test/fixtures/bands.js | tee viewer-gpu-core.log
+          grep -q '^GPU: .*Core Profile' viewer-gpu-core.log
+          test -s bands-gpu-core.png
       - uses: actions/upload-artifact@v4
         with:
           name: jsui-render-linux
@@ -130,6 +136,7 @@ jobs:
             build/jsui-render
             bands.png
             bands-gpu.png
+            bands-gpu-core.png
 
   # ------------------------------------------------- Godot GDExtension (Linux)
   godot:
@@ -153,8 +160,8 @@ jobs:
             third_party/skia-prebuilt
             build/_deps/*-src
             build/_deps/godot
-          key: godot-deps-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'integrations/godot/CMakeLists.txt', 'integrations/godot/smoke-test.sh') }}
-          restore-keys: godot-deps-${{ runner.os }}-
+          key: godot-deps-4.7.2-cpp10-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'integrations/godot/CMakeLists.txt', 'integrations/godot/smoke-test.sh') }}
+          restore-keys: godot-deps-4.7.2-cpp10-${{ runner.os }}-
       - name: ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
@@ -172,8 +179,10 @@ jobs:
         run: |
           if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
           npx jsui build integrations/godot/demo/ui/app.jsx -o integrations/godot/demo/ui/dist/bundle.js
-      - name: Run the demo in Godot 4.3 (headless) and capture a frame
+      - name: Run the demo in Godot 4.7.2 (headless) and capture a frame
         run: integrations/godot/smoke-test.sh build/godot-smoke.png
+      - name: Run it in Godot 4.3 too (compatibility_minimum)
+        run: GODOT_VERSION=4.3-stable integrations/godot/smoke-test.sh build/godot-smoke-4.3.png
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -364,6 +373,59 @@ jobs:
           path: tests/reference/output
           if-no-files-found: warn
 
+  # --------------------------------------------------- reference (macOS), advisory
+  # Same suite against Chrome on macOS (CoreText text on both sides). Only
+  # jsui-render is built; Skia and FetchContent sources are cached.
+  reference-macos:
+    name: reference (macOS, jsui vs react-native-web)
+    runs-on: macos-14
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.reference == 'true'
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Cache prebuilt Skia
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-prebuilt
+          key: skia-prebuilt-macos-14-${{ hashFiles('cmake/Deps.cmake') }}
+      - name: Cache FetchContent sources
+        uses: actions/cache@v4
+        with:
+          path: build/_deps/*-src
+          key: reference-macos-deps-${{ hashFiles('cmake/*.cmake') }}
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: reference-${{ runner.os }}
+          max-size: 500M
+      - name: Build jsui-render
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DJSUI_BUILD_TESTS=OFF -DJSUI_BUILD_VIEWER=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --build build -j "$(sysctl -n hw.ncpu)" --target jsui-render
+      - name: Install
+        run: if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json', 'web/package.json') }}
+      - name: Chromium
+        run: npx playwright install chromium
+      - name: Reference tests
+        run: npm run test:reference
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reference-report-macos
+          path: tests/reference/output
+          if-no-files-found: warn
+
   # ------------------------------------------- native (macOS / Windows), advisory
   native-other:
     name: native (${{ matrix.os }})
@@ -392,7 +454,18 @@ jobs:
         run: cmake --build build --config Release -j 4
       - name: Native tests (macOS)
         if: runner.os == 'macOS'
+        # gpu_test makes a headless CGL 3.2 core context (Apple's software
+        # renderer if there is no GPU); require it so GPU cases cannot SKIP.
+        env:
+          JSUI_GPU_TEST_REQUIRE: 1
         run: ./build/jsui-tests
+      - name: Viewer GPU smoke (macOS, SDL + 3.2 core profile)
+        if: runner.os == 'macOS'
+        run: |
+          ./build/tools/jsui-viewer/jsui-viewer --gpu --width 320 --height 200 \
+            --frames 10 --screenshot bands-gpu.png web/test/fixtures/bands.js | tee viewer-gpu.log
+          grep -q '^GPU: ' viewer-gpu.log  # not the CPU fallback
+          test -s bands-gpu.png
       - name: Native tests (Windows)
         if: runner.os == 'Windows'
         run: ./build/Release/jsui-tests.exe

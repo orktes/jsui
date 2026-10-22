@@ -1,13 +1,16 @@
 // GPU backend tests: render scenes with Skia Ganesh into a real GL context
 // and compare with the CPU raster output.
 //
-// The GL context comes from EGL (loaded with dlopen, so the test binary has
-// no GL link dependency): Mesa's surfaceless platform (llvmpipe works
-// without a display or GPU), else the default display with a pbuffer. Both
-// desktop GL and GLES 3 / 2 contexts are tried. Without EGL or a usable
-// context (macOS, Windows, minimal containers) every case prints SKIP and
-// passes. JSUI_GPU_TEST_REQUIRE=1 turns the skip into a failure (CI jobs that
-// install Mesa set it, so a broken GL setup cannot silently skip).
+// Linux: the GL context comes from EGL (loaded with dlopen, so the test
+// binary has no GL link dependency): Mesa's surfaceless platform (llvmpipe
+// works without a display or GPU), else the default display with a pbuffer.
+// Desktop GL (default / compatibility), a 3.2 core profile (what macOS
+// gives, with no default vertex array object) and GLES 3 / 2 are tried.
+// macOS: a headless CGL 3.2 core profile context (hardware, else Apple's
+// software renderer). Without a usable context (Windows, minimal
+// containers) every case prints SKIP and passes. JSUI_GPU_TEST_REQUIRE=1
+// turns the skip into a failure (CI jobs with a known GL setup set it, so a
+// broken setup cannot silently skip).
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -22,6 +25,13 @@
 
 #if defined(__linux__) && defined(JSUI_GPU)
 #define JSUI_GPU_TESTS 1
+#define JSUI_GPU_EGL 1
+#include <dlfcn.h>
+#elif defined(__APPLE__) && defined(JSUI_GPU)
+#define JSUI_GPU_TESTS 1
+#define JSUI_GPU_CGL 1
+#define GL_SILENCE_DEPRECATION 1
+#include <OpenGL/OpenGL.h>  // CGL; jsui links the OpenGL framework on macOS
 #include <dlfcn.h>
 #endif
 
@@ -45,7 +55,16 @@ void skip(const char* test, const char* why) {
 
 #if JSUI_GPU_TESTS
 
-// ------------------------------------------------------------------ EGL / GL
+enum class Api { GL, GLCore, GLES3, GLES2 };
+const char* apiName(Api a) {
+  return a == Api::GL ? "GL" : a == Api::GLCore ? "GLCore" : a == Api::GLES3 ? "GLES3" : "GLES2";
+}
+
+#endif  // JSUI_GPU_TESTS
+
+#if JSUI_GPU_EGL
+
+// ---------------------------------------------------------------------- EGL
 
 using EGLDisplay = void*;
 using EGLConfig = void*;
@@ -57,7 +76,9 @@ constexpr EGLint EGL_NONE = 0x3038, EGL_RENDERABLE_TYPE = 0x3040, EGL_OPENGL_BIT
                  EGL_OPENGL_ES2_BIT = 0x0004, EGL_OPENGL_ES3_BIT = 0x0040, EGL_SURFACE_TYPE = 0x3033,
                  EGL_PBUFFER_BIT = 0x0001, EGL_WIDTH = 0x3057, EGL_HEIGHT = 0x3056,
                  EGL_CONTEXT_MAJOR_VERSION = 0x3098, EGL_RED_SIZE = 0x3024, EGL_GREEN_SIZE = 0x3023,
-                 EGL_BLUE_SIZE = 0x3022, EGL_ALPHA_SIZE = 0x3021;
+                 EGL_BLUE_SIZE = 0x3022, EGL_ALPHA_SIZE = 0x3021, EGL_CONTEXT_MINOR_VERSION = 0x30FB,
+                 EGL_CONTEXT_OPENGL_PROFILE_MASK = 0x30FD, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT = 0x0001,
+                 EGL_CONTEXT_OPENGL_FORWARD_COMPATIBLE = 0x31B1, EGL_TRUE = 1;
 constexpr EGLenum EGL_OPENGL_API = 0x30A2, EGL_OPENGL_ES_API = 0x30A0, EGL_PLATFORM_SURFACELESS_MESA = 0x31DD,
                   EGL_EXTENSIONS = 0x3055;
 
@@ -94,6 +115,12 @@ struct Egl {
     return ok;
   }
 };
+
+#endif  // JSUI_GPU_EGL
+
+#if JSUI_GPU_TESTS
+
+// ----------------------------------------------------------------------- GL
 
 // The few GL entry points the test itself needs (loaded per context).
 struct GL {
@@ -150,8 +177,9 @@ constexpr unsigned GL_TEXTURE_2D = 0x0DE1, GL_RGBA = 0x1908, GL_RGBA8 = 0x8058, 
                    GL_PACK_ALIGNMENT = 0x0D05, GL_COLOR_BUFFER_BIT = 0x4000, GL_SCISSOR_TEST = 0x0C11,
                    GL_VERSION = 0x1F02, GL_RENDERER = 0x1F01;
 
-enum class Api { GL, GLES3, GLES2 };
-const char* apiName(Api a) { return a == Api::GL ? "GL" : a == Api::GLES3 ? "GLES3" : "GLES2"; }
+#endif  // JSUI_GPU_TESTS
+
+#if JSUI_GPU_EGL
 
 // An EGL context made current on construction (ok() false if impossible).
 struct GLContext {
@@ -179,7 +207,8 @@ struct GLContext {
         return;
       }
     }
-    EGLint renderable = api == Api::GL ? EGL_OPENGL_BIT : api == Api::GLES3 ? EGL_OPENGL_ES3_BIT : EGL_OPENGL_ES2_BIT;
+    bool desktop = api == Api::GL || api == Api::GLCore;
+    EGLint renderable = desktop ? EGL_OPENGL_BIT : api == Api::GLES3 ? EGL_OPENGL_ES3_BIT : EGL_OPENGL_ES2_BIT;
     EGLint attrs[] = {EGL_RENDERABLE_TYPE, renderable, EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8,
                       EGL_ALPHA_SIZE, 8, EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_NONE};  // default is WINDOW_BIT
     EGLConfig cfg = nullptr;
@@ -188,12 +217,16 @@ struct GLContext {
       error = std::string("no EGL config for ") + apiName(api);
       return;
     }
-    if (!egl.bindAPI(api == Api::GL ? EGL_OPENGL_API : EGL_OPENGL_ES_API)) {
+    if (!egl.bindAPI(desktop ? EGL_OPENGL_API : EGL_OPENGL_ES_API)) {
       error = "eglBindAPI failed";
       return;
     }
-    EGLint ctxAttrs[] = {EGL_CONTEXT_MAJOR_VERSION, api == Api::GLES3 ? 3 : 2, EGL_NONE};
-    ctx = egl.createContext(dpy, cfg, nullptr, api == Api::GL ? nullptr : ctxAttrs);
+    EGLint esAttrs[] = {EGL_CONTEXT_MAJOR_VERSION, api == Api::GLES3 ? 3 : 2, EGL_NONE};
+    // Same request as jsui-viewer on macOS: 3.2 core, forward compatible.
+    EGLint coreAttrs[] = {EGL_CONTEXT_MAJOR_VERSION, 3, EGL_CONTEXT_MINOR_VERSION, 2,
+                          EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
+                          EGL_CONTEXT_OPENGL_FORWARD_COMPATIBLE, EGL_TRUE, EGL_NONE};
+    ctx = egl.createContext(dpy, cfg, nullptr, api == Api::GL ? nullptr : api == Api::GLCore ? coreAttrs : esAttrs);
     if (!ctx) {
       error = std::string("eglCreateContext failed for ") + apiName(api);
       return;
@@ -235,6 +268,74 @@ Egl* egl() {
 }
 
 void* eglProc(void*, const char* name) { return egl()->getProcAddress(name); }
+
+#endif  // JSUI_GPU_EGL
+
+#if JSUI_GPU_CGL
+
+// ---------------------------------------------------------------------- CGL
+
+void* cglGetProc(const char* name) { return dlsym(RTLD_DEFAULT, name); }
+void* cglProc(void*, const char* name) { return cglGetProc(name); }
+
+// A headless CGL context made current on construction. macOS only offers
+// legacy 2.1 (which Skia's shaders cannot use) or core profiles; ask for
+// 3.2 core like jsui-viewer does, on any renderer, else the software one.
+struct GLContext {
+  CGLContextObj ctx = nullptr;
+  GL gl{};
+  std::string error;
+  std::string renderer;
+
+  explicit GLContext(Api) {
+    for (bool software : {false, true}) {
+      std::vector<CGLPixelFormatAttribute> attrs = {
+          kCGLPFAOpenGLProfile, CGLPixelFormatAttribute(kCGLOGLPVersion_3_2_Core),
+          kCGLPFAColorSize,     CGLPixelFormatAttribute(24),
+          kCGLPFAAlphaSize,     CGLPixelFormatAttribute(8),
+          kCGLPFAAllowOfflineRenderers};
+      if (software) {
+        attrs.push_back(kCGLPFARendererID);
+        attrs.push_back(CGLPixelFormatAttribute(kCGLRendererGenericFloatID));
+      }
+      attrs.push_back(CGLPixelFormatAttribute(0));
+      CGLPixelFormatObj pix = nullptr;
+      GLint n = 0;
+      if (CGLChoosePixelFormat(attrs.data(), &pix, &n) != kCGLNoError || !pix) continue;
+      CGLError err = CGLCreateContext(pix, nullptr, &ctx);
+      CGLDestroyPixelFormat(pix);
+      if (err == kCGLNoError && ctx) break;
+      ctx = nullptr;
+    }
+    if (!ctx) {
+      error = "no CGL 3.2 core pixel format / context";
+      return;
+    }
+    if (CGLSetCurrentContext(ctx) != kCGLNoError) {
+      error = "CGLSetCurrentContext failed";
+      return;
+    }
+    if (!gl.load(cglGetProc)) {
+      error = "missing GL entry points";
+      return;
+    }
+    const unsigned char* r = gl.GetString(GL_RENDERER);
+    const unsigned char* v = gl.GetString(GL_VERSION);
+    renderer = std::string(r ? reinterpret_cast<const char*>(r) : "?") + " / " +
+               (v ? reinterpret_cast<const char*>(v) : "?");
+  }
+  ~GLContext() {
+    if (ctx) {
+      CGLSetCurrentContext(nullptr);
+      CGLDestroyContext(ctx);
+    }
+  }
+  bool ok() const { return ctx && error.empty(); }
+};
+
+#endif  // JSUI_GPU_CGL
+
+#if JSUI_GPU_TESTS
 
 // A texture-backed FBO the test reads back.
 struct RenderTexture {
@@ -391,24 +492,38 @@ void buildScene(Scene& s, const std::string& png) {
 }
 
 // Runs fn(ctx, api) once per GL API that works here; SKIP when none does.
+// A context that exists but that jsui cannot build a Ganesh context on is a
+// failure, not a skip.
 template <class F>
 void forEachContext(const char* test, F fn) {
+#if JSUI_GPU_EGL
   Egl* e = egl();
   if (!e) {
     skip(test, "libEGL.so.1 not found");
     return;
   }
+  const Api apis[] = {Api::GL, Api::GLCore, Api::GLES3, Api::GLES2};
+  JsuiGLGetProcFn proc = eglProc;
+#else
+  const Api apis[] = {Api::GLCore};
+  JsuiGLGetProcFn proc = cglProc;
+#endif
   int ran = 0;
   std::string why;
-  for (Api api : {Api::GL, Api::GLES3, Api::GLES2}) {
+  for (Api api : apis) {
+#if JSUI_GPU_EGL
     GLContext c(*e, api);
+#else
+    GLContext c(api);
+#endif
     if (!c.ok()) {
       why += (why.empty() ? "" : "; ") + c.error;
       continue;
     }
-    JsuiGpuContext* gpu = jsui_gpu_create_gl(eglProc, nullptr);
+    JsuiGpuContext* gpu = jsui_gpu_create_gl(proc, nullptr);
     if (!gpu) {
-      why += std::string(why.empty() ? "" : "; ") + apiName(api) + ": jsui_gpu_create_gl failed";
+      std::fprintf(stderr, "  %s [%s] %s: jsui_gpu_create_gl failed\n", test, apiName(api), c.renderer.c_str());
+      jsui_test::failures()++;
       continue;
     }
     std::printf("  [%s] %s\n", apiName(api), c.renderer.c_str());
@@ -445,6 +560,13 @@ TEST(gpu_backend_available) {
 
 #if JSUI_GPU_TESTS
 
+// Two GPU frames of the same content. Mesa reproduces them bit for bit;
+// Apple's software GL renderer (the macOS CI runner) rounds a few pixels by
+// one level from frame to frame, so allow +-1 per channel and nothing more.
+bool sameFrame(const std::vector<uint32_t>& a, const std::vector<uint32_t>& b) {
+  return a.size() == b.size() && compare(a, b, 1).maxDiff <= 1;
+}
+
 // The full scene, GPU (texture target, top-left origin) vs CPU, at 1x and 2x.
 TEST(gpu_matches_cpu_scene) {
   forEachContext("gpu_matches_cpu_scene", [](GLContext& c, JsuiGpuContext* gpu, Api api) {
@@ -479,7 +601,13 @@ TEST(gpu_matches_cpu_scene) {
       s.doc().markPaintDirty();
       CHECK_EQ(jsui::gpu::render(*s.rt, gpu, t), 0);
       std::vector<uint32_t> again = rtex.read(false);
-      CHECK(again == out);
+      if (again != out) {
+        Diff d2 = compare(again, out, 0);
+        std::printf("  [%s] second frame differs from first: max %d, mean %.4f, changed %.3f%%\n", apiName(api), d2.maxDiff,
+                    d2.mean, d2.over * 100);
+        savePng((name + "_again").c_str(), again, w, h);
+      }
+      CHECK(sameFrame(again, out));
     }
   });
 }
@@ -539,15 +667,15 @@ TEST(gpu_context_lost_and_recreated) {
     jsui_gpu_purge(gpu, 0);  // no-op while lost
     CHECK_EQ(jsui::gpu::render(*s.rt, gpu, t), 0);
     std::vector<uint32_t> after = rtex.read(false);
-    CHECK(after == before);
+    CHECK(sameFrame(after, before));
     jsui_gpu_purge(gpu, 64u << 20);
     CHECK_EQ(jsui::gpu::render(*s.rt, gpu, t), 0);
-    CHECK(rtex.read(false) == before);
+    CHECK(sameFrame(rtex.read(false), before));
   });
 }
 
 // The C API end to end: a bundle drawn with jsui_render_gl_target, and the
-// platform-default loader (NULL get_proc: EGL is current).
+// platform-default loader (NULL get_proc: EGL / CGL is current).
 TEST(gpu_capi_bundle) {
   forEachContext("gpu_capi_bundle", [](GLContext& c, JsuiGpuContext*, Api) {
     JsuiGpuContext* gpu = jsui_gpu_create_gl(nullptr, nullptr);

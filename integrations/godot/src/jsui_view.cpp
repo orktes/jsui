@@ -110,6 +110,17 @@ void JsuiView::_bind_methods() {
   ClassDB::bind_method(D_METHOD("is_running"), &JsuiView::is_running);
   ClassDB::bind_method(D_METHOD("post_message", "name", "data"), &JsuiView::post_message, DEFVAL(Variant()));
   ClassDB::bind_method(D_METHOD("post_message_json", "name", "json"), &JsuiView::post_message_json);
+  ClassDB::bind_method(D_METHOD("set_state", "key", "value"), &JsuiView::set_state);
+  ClassDB::bind_method(D_METHOD("set_state_json", "key", "json"), &JsuiView::set_state_json);
+  ClassDB::bind_method(D_METHOD("patch_state", "key", "patch"), &JsuiView::patch_state);
+  ClassDB::bind_method(D_METHOD("patch_state_json", "key", "json"), &JsuiView::patch_state_json);
+  ClassDB::bind_method(D_METHOD("get_state", "key"), &JsuiView::get_state);
+  ClassDB::bind_method(D_METHOD("get_state_json", "key"), &JsuiView::get_state_json);
+  ClassDB::bind_method(D_METHOD("resolve_call", "id", "result"), &JsuiView::resolve_call, DEFVAL(Variant()));
+  ClassDB::bind_method(D_METHOD("resolve_call_json", "id", "json"), &JsuiView::resolve_call_json);
+  ClassDB::bind_method(D_METHOD("reject_call", "id", "message"), &JsuiView::reject_call);
+  ClassDB::bind_method(D_METHOD("call_ui", "name", "args", "callback"), &JsuiView::call_ui, DEFVAL(Variant()),
+                       DEFVAL(Callable()));
   ClassDB::bind_method(D_METHOD("get_texture"), &JsuiView::get_texture);
   ClassDB::bind_method(D_METHOD("get_frame_image"), &JsuiView::get_frame_image);
   ClassDB::bind_method(D_METHOD("get_pending_loads"), &JsuiView::get_pending_loads);
@@ -129,6 +140,15 @@ void JsuiView::_bind_methods() {
   ADD_SIGNAL(MethodInfo("message_received", PropertyInfo(Variant::STRING, "name"),
                         PropertyInfo(Variant::NIL, "data", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NIL_IS_VARIANT),
                         PropertyInfo(Variant::STRING, "json")));
+  const PropertyInfo anyValue(Variant::NIL, "value", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NIL_IS_VARIANT);
+  ADD_SIGNAL(MethodInfo("state_changed", PropertyInfo(Variant::STRING, "key"), anyValue));
+  PropertyInfo args = anyValue;
+  args.name = "args";
+  ADD_SIGNAL(MethodInfo("call_requested", PropertyInfo(Variant::INT, "id"), PropertyInfo(Variant::STRING, "name"), args));
+  ADD_SIGNAL(MethodInfo("call_cancelled", PropertyInfo(Variant::INT, "id")));
+  PropertyInfo result = anyValue;
+  result.name = "result";
+  ADD_SIGNAL(MethodInfo("ui_call_completed", PropertyInfo(Variant::INT, "id"), PropertyInfo(Variant::BOOL, "ok"), result));
   ADD_SIGNAL(MethodInfo("js_error", PropertyInfo(Variant::STRING, "message")));
   ADD_SIGNAL(MethodInfo("frame_rendered", PropertyInfo(Variant::RECT2I, "dirty_rect")));
 }
@@ -221,6 +241,11 @@ void JsuiView::start() {
   cfg.dev_mode = dev_mode_ ? 1 : 0;
   cfg.on_message = &JsuiView::onMessage;
   cfg.message_user = this;
+  cfg.on_state = &JsuiView::onState;
+  cfg.state_user = this;
+  cfg.on_call = &JsuiView::onCall;
+  cfg.on_call_cancel = &JsuiView::onCallCancel;
+  cfg.call_user = this;
   cfg.log = &JsuiView::onLog;
   cfg.log_user = this;
   // res:// and user:// live in Godot's virtual file system (and in .pck
@@ -241,6 +266,8 @@ void JsuiView::start() {
   cursor_.clear();
   render_pending_ = true;
   updateViewport();
+  // Shared state set before (or across) restarts: there before the bundle runs.
+  for (auto& [key, json] : state_) jsui_set_state(rt_, key.c_str(), json.c_str());
 
   // Announce pads that are already connected.
   if (Input* in = Input::get_singleton()) {
@@ -253,11 +280,20 @@ void JsuiView::start() {
 
 void JsuiView::stop() {
   if (!rt_) return;
-  jsui_destroy(rt_);
+  JsuiRuntime* rt = rt_;
   rt_ = nullptr;
-  messages_.clear();
+  // Open Host.calls are cancelled and open call_ui calls fail here; their
+  // signals / callbacks still run (below), so the game can drop its work.
+  jsui_destroy(rt);
   held_keys_.clear();
   pads_.clear();
+  std::vector<Event> pending;
+  pending.swap(messages_);
+  for (auto& e : pending)
+    if (e.kind == Event::CallCancel || e.kind == Event::UiResult) messages_.push_back(std::move(e));
+  if (is_inside_tree()) flushMessages();
+  else messages_.clear();
+  ui_callbacks_.clear();
 }
 
 void JsuiView::reload() {
@@ -269,7 +305,40 @@ void JsuiView::reload() {
 void JsuiView::onMessage(void* user, const char* name, const char* json) {
   // Called from inside jsui_* calls: queue, emit once the runtime returned.
   auto* self = static_cast<JsuiView*>(user);
-  self->messages_.emplace_back(name ? name : "", json ? json : "");
+  Event e{Event::Message};
+  e.name = name ? name : "";
+  e.json = json ? json : "";
+  self->messages_.push_back(std::move(e));
+}
+
+void JsuiView::onState(void* user, const char* key, const char* json) {
+  Event e{Event::State};
+  e.name = key ? key : "";
+  e.null = json == nullptr;
+  e.json = json ? json : "";
+  static_cast<JsuiView*>(user)->messages_.push_back(std::move(e));
+}
+
+void JsuiView::onCall(void* user, uint64_t id, const char* name, const char* args) {
+  Event e{Event::Call};
+  e.id = id;
+  e.name = name ? name : "";
+  e.json = args ? args : "null";
+  static_cast<JsuiView*>(user)->messages_.push_back(std::move(e));
+}
+
+void JsuiView::onCallCancel(void* user, uint64_t id) {
+  Event e{Event::CallCancel};
+  e.id = id;
+  static_cast<JsuiView*>(user)->messages_.push_back(std::move(e));
+}
+
+void JsuiView::onCallResult(void* user, uint64_t id, int ok, const char* result) {
+  Event e{Event::UiResult};
+  e.id = id;
+  e.ok = ok != 0;
+  e.json = result ? result : "";
+  static_cast<JsuiView*>(user)->messages_.push_back(std::move(e));
 }
 
 void JsuiView::onLog(void*, JsuiLogLevel level, const char* message) {
@@ -445,11 +514,170 @@ void JsuiView::flushMessages() {
   if (messages_.empty()) return;
   auto batch = std::move(messages_);
   messages_.clear();
-  for (auto& [name, json] : batch) {
-    String j = String::utf8(json.c_str());
-    Variant data = j.is_empty() ? Variant() : JSON::parse_string(j);
-    emit_signal("message_received", String::utf8(name.c_str()), data, j);
+  for (auto& e : batch) {
+    String j = String::utf8(e.json.c_str());
+    switch (e.kind) {
+      case Event::Message: {
+        Variant data = j.is_empty() ? Variant() : JSON::parse_string(j);
+        emit_signal("message_received", String::utf8(e.name.c_str()), data, j);
+        break;
+      }
+      case Event::State:
+        if (rt_) rememberState(e.name);
+        emit_signal("state_changed", String::utf8(e.name.c_str()), e.null ? Variant() : JSON::parse_string(j));
+        break;
+      case Event::Call:
+        emit_signal("call_requested", int64_t(e.id), String::utf8(e.name.c_str()), JSON::parse_string(j));
+        break;
+      case Event::CallCancel: emit_signal("call_cancelled", int64_t(e.id)); break;
+      case Event::UiResult: {
+        Variant result = e.ok ? JSON::parse_string(j) : Variant(j);
+        auto it = ui_callbacks_.find(e.id);
+        if (it != ui_callbacks_.end()) {
+          Callable cb = it->second;
+          ui_callbacks_.erase(it);
+          if (cb.is_valid()) cb.call(e.ok, result);
+        }
+        emit_signal("ui_call_completed", int64_t(e.id), e.ok, result);
+        break;
+      }
+    }
   }
+}
+
+// ------------------------------------------------------------ game data
+
+namespace {
+
+// RFC 7386 on Variants, for patch_state while no runtime exists.
+Variant mergePatch(const Variant& target, const Variant& patch) {
+  if (patch.get_type() != Variant::DICTIONARY) return patch;
+  Dictionary out = target.get_type() == Variant::DICTIONARY ? Dictionary(target).duplicate() : Dictionary();
+  Dictionary p = patch;
+  Array keys = p.keys();
+  for (int64_t i = 0; i < keys.size(); i++) {
+    Variant k = keys[i];
+    Variant v = p[k];
+    if (v.get_type() == Variant::NIL) out.erase(k);
+    else out[k] = mergePatch(out.get(k, Variant()), v);
+  }
+  return out;
+}
+
+bool validJson(const String& json) {
+  Ref<JSON> parser;
+  parser.instantiate();
+  return parser->parse(json) == OK;
+}
+
+}  // namespace
+
+void JsuiView::rememberState(const std::string& key) {
+  const char* json = jsui_get_state(rt_, key.c_str());
+  auto it = std::find_if(state_.begin(), state_.end(), [&](auto& kv) { return kv.first == key; });
+  if (!json) {
+    if (it != state_.end()) state_.erase(it);
+  } else if (it != state_.end()) {
+    it->second = json;
+  } else {
+    state_.emplace_back(key, json);
+  }
+}
+
+int JsuiView::set_state(const String& key, const Variant& value) {
+  return set_state_json(key, value.get_type() == Variant::NIL ? String() : JSON::stringify(value, "", false));
+}
+
+int JsuiView::set_state_json(const String& key, const String& json) {
+  std::string k = toStd(key), j = toStd(json);
+  if (rt_) {
+    int r = jsui_set_state(rt_, k.c_str(), json.is_empty() ? nullptr : j.c_str());
+    if (r > 0) rememberState(k);
+    return r;
+  }
+  auto it = std::find_if(state_.begin(), state_.end(), [&](auto& kv) { return kv.first == k; });
+  if (json.is_empty()) {
+    if (it == state_.end()) return 0;
+    state_.erase(it);
+    return 1;
+  }
+  if (!validJson(json)) {
+    UtilityFunctions::push_error("JsuiView.set_state(\"" + key + "\"): invalid JSON");
+    return -1;
+  }
+  if (it != state_.end()) {
+    if (it->second == j) return 0;
+    it->second = j;
+  } else {
+    state_.emplace_back(k, j);
+  }
+  return 1;
+}
+
+int JsuiView::patch_state(const String& key, const Variant& patch) {
+  return patch_state_json(key, JSON::stringify(patch, "", false));
+}
+
+int JsuiView::patch_state_json(const String& key, const String& json) {
+  std::string k = toStd(key), j = toStd(json);
+  if (rt_) {
+    int r = jsui_patch_state(rt_, k.c_str(), j.c_str());
+    if (r > 0) rememberState(k);
+    return r;
+  }
+  if (!validJson(json)) {
+    UtilityFunctions::push_error("JsuiView.patch_state(\"" + key + "\"): invalid JSON");
+    return -1;
+  }
+  Variant merged = mergePatch(get_state(key), JSON::parse_string(json));
+  return set_state(key, merged);
+}
+
+Variant JsuiView::get_state(const String& key) const {
+  String json = get_state_json(key);
+  return json.is_empty() ? Variant() : JSON::parse_string(json);
+}
+
+String JsuiView::get_state_json(const String& key) const {
+  std::string k = toStd(key);
+  if (rt_) {
+    const char* json = jsui_get_state(rt_, k.c_str());
+    return json ? String::utf8(json) : String();
+  }
+  for (auto& [sk, sj] : state_)
+    if (sk == k) return String::utf8(sj.c_str());
+  return String();
+}
+
+int JsuiView::resolve_call(int64_t id, const Variant& result) {
+  return resolve_call_json(id, JSON::stringify(result, "", false));
+}
+
+int JsuiView::resolve_call_json(int64_t id, const String& json) {
+  if (!rt_ || id <= 0) return -1;
+  std::string j = toStd(json);
+  int r = jsui_resolve_call(rt_, uint64_t(id), json.is_empty() ? nullptr : j.c_str());
+  flushMessages();
+  return r;
+}
+
+int JsuiView::reject_call(int64_t id, const String& message) {
+  if (!rt_ || id <= 0) return -1;
+  std::string m = toStd(message);
+  int r = jsui_reject_call(rt_, uint64_t(id), m.c_str());
+  flushMessages();
+  return r;
+}
+
+int64_t JsuiView::call_ui(const String& name, const Variant& args, const Callable& callback) {
+  if (!rt_) {
+    UtilityFunctions::push_error("JsuiView.call_ui: the view is not running");
+    return 0;
+  }
+  std::string n = toStd(name), a = toStd(JSON::stringify(args, "", false));
+  uint64_t id = jsui_call_ui(rt_, n.c_str(), a.c_str(), &JsuiView::onCallResult, this);
+  if (callback.is_valid()) ui_callbacks_[id] = callback;
+  return int64_t(id);
 }
 
 void JsuiView::reportErrors() {

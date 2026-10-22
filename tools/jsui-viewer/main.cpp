@@ -1,7 +1,7 @@
 // jsui-viewer: run a JSUI bundle in a window.
 //
-//   jsui-viewer [--dev] [--gpu] [--width W] [--height H] <bundle path or URL>
-//               [--frames N] [--screenshot out.png]
+//   jsui-viewer [--dev] [--gpu [--gl-core]] [--width W] [--height H]
+//               <bundle path or URL> [--frames N] [--screenshot out.png]
 //
 // --dev polls the dev server (`jsui dev`) and reloads on change; JS errors
 // are shown in an overlay (Esc dismisses). F5 reloads. Mouse, wheel, touch,
@@ -12,6 +12,10 @@
 // straight into the window's default framebuffer (jsui_render_gl) instead of
 // rasterising on the CPU and uploading a texture; the screenshot is then read
 // back from the framebuffer. Falls back to the CPU path if GL is unavailable.
+// --gl-core asks for an OpenGL 3.2 core, forward-compatible context. It is
+// the default on macOS, where SDL otherwise gets a legacy 2.1 context whose
+// GLSL 1.20 Skia's shaders cannot use ("undeclared gl_VertexID"); elsewhere
+// the driver's default (compatibility) context is used unless it is given.
 #include <SDL.h>
 
 #include <algorithm>
@@ -35,6 +39,11 @@ struct Options {
   std::string bundle;
   bool dev = false;
   bool gpu = false;
+#if defined(__APPLE__)
+  bool glCore = true;
+#else
+  bool glCore = false;
+#endif
   int width = 1280, height = 720;
   long frames = -1;
   std::string screenshot;
@@ -42,9 +51,11 @@ struct Options {
 
 void usage() {
   std::printf(
-      "usage: jsui-viewer [--dev] [--gpu] [--width W] [--height H] [--frames N] [--screenshot out.png] <bundle.js|url>\n"
+      "usage: jsui-viewer [--dev] [--gpu [--gl-core]] [--width W] [--height H] [--frames N] [--screenshot out.png]\n"
+      "                   <bundle.js|url>\n"
       "  --dev        poll the dev server and reload on change, show errors on screen\n"
       "  --gpu        render with Skia Ganesh into an OpenGL context (default: CPU raster + texture)\n"
+      "  --gl-core    with --gpu: request an OpenGL 3.2 core profile context (always on macOS)\n"
       "  F5 reloads the bundle, Esc dismisses the error overlay (dev mode)\n");
 }
 
@@ -54,6 +65,7 @@ bool parseArgs(int argc, char** argv, Options* o) {
     auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
     if (a == "--dev") o->dev = true;
     else if (a == "--gpu") o->gpu = true;
+    else if (a == "--gl-core") o->glCore = true;
     else if (a == "--width" || a == "--height" || a == "--frames" || a == "--screenshot") {
       const char* v = next();
       if (!v) {
@@ -156,6 +168,15 @@ class Viewer {
       SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
       SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
       SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+      if (opt_.glCore) {
+        // Must be set before the window is created (SDL picks the pixel
+        // format / visual from these). Core profiles have no default vertex
+        // array object; Skia detects the core profile and binds its own.
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
+      }
       windowFlags |= SDL_WINDOW_OPENGL;
     }
     window_ = SDL_CreateWindow(title.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, opt_.width, opt_.height,

@@ -51,6 +51,23 @@ class JsuiView : public godot::Control {
   bool is_running() const { return rt_ != nullptr; }
   void post_message(const godot::String& name, const godot::Variant& data);
   void post_message_json(const godot::String& name, const godot::String& json);
+
+  // Shared state (jsui_set_state / jsui_patch_state / jsui_get_state). Values
+  // are JSON-encoded; null removes the key. Kept across start()/stop():
+  // the view re-applies them to every new runtime.
+  int set_state(const godot::String& key, const godot::Variant& value);
+  int set_state_json(const godot::String& key, const godot::String& json);
+  int patch_state(const godot::String& key, const godot::Variant& patch);
+  int patch_state_json(const godot::String& key, const godot::String& json);
+  godot::Variant get_state(const godot::String& key) const;
+  godot::String get_state_json(const godot::String& key) const;
+
+  // Calls: Host.call() -> call_requested signal -> resolve_call / reject_call;
+  // call_ui() -> Host.handle() handler -> callback(ok, result) + ui_call_completed.
+  int resolve_call(int64_t id, const godot::Variant& result);
+  int resolve_call_json(int64_t id, const godot::String& json);
+  int reject_call(int64_t id, const godot::String& message);
+  int64_t call_ui(const godot::String& name, const godot::Variant& args, const godot::Callable& callback);
   godot::Ref<godot::ImageTexture> get_texture() const { return texture_; }
   godot::Ref<godot::Image> get_frame_image() const;
   int get_pending_loads() const;
@@ -65,6 +82,10 @@ class JsuiView : public godot::Control {
 
  private:
   static void onMessage(void* user, const char* name, const char* json);
+  static void onState(void* user, const char* key, const char* json);
+  static void onCall(void* user, uint64_t id, const char* name, const char* args);
+  static void onCallCancel(void* user, uint64_t id);
+  static void onCallResult(void* user, uint64_t id, int ok, const char* result);
   static void onLog(void* user, JsuiLogLevel level, const char* message);
   static void onLoad(void* user, JsuiRuntime* rt, uint64_t id, const char* url);
 
@@ -98,7 +119,21 @@ class JsuiView : public godot::Control {
   godot::Ref<godot::CanvasItemMaterial> premul_;
   godot::RID canvas_item_;
 
-  std::vector<std::pair<std::string, std::string>> messages_;
+  // Runtime callbacks run while JS is on the stack: they are queued in order
+  // and emitted as signals once the runtime returned (flushMessages).
+  struct Event {
+    enum Kind { Message, State, Call, CallCancel, UiResult } kind;
+    uint64_t id = 0;
+    bool ok = false;
+    bool null = false;  // State: the key was removed
+    std::string name, json;
+  };
+  std::vector<Event> messages_;
+  // Shared state set from Godot, re-applied when the runtime is recreated
+  // (start() after stop(), bundle_url / dev_mode changes). Insertion order.
+  std::vector<std::pair<std::string, std::string>> state_;
+  void rememberState(const std::string& key);
+  std::map<uint64_t, godot::Callable> ui_callbacks_;  // call_ui id -> callback
   std::string last_error_;
   std::string cursor_;
   struct HeldKey {
