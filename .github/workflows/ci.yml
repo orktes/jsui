@@ -133,6 +133,14 @@ jobs:
             --frames 10 --screenshot bands-gpu-core.png web/test/fixtures/bands.js | tee viewer-gpu-core.log
           grep -q '^GPU: .*Core Profile' viewer-gpu-core.log
           test -s bands-gpu-core.png
+      - name: Viewer CPU smoke (--cpu; the GPU renderer is the default)
+        env:
+          SDL_VIDEODRIVER: dummy
+        run: |
+          ./build/tools/jsui-viewer/jsui-viewer --cpu --width 320 --height 200 \
+            --frames 10 --screenshot bands-cpu.png web/test/fixtures/bands.js | tee viewer-cpu.log
+          ! grep -q '^GPU: ' viewer-cpu.log
+          test -s bands-cpu.png
       - uses: actions/upload-artifact@v4
         with:
           name: jsui-render-linux
