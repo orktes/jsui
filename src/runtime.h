@@ -11,6 +11,7 @@
 #include "platform/loader.h"
 #include "text/font_manager.h"
 
+class SkCanvas;
 class SkPicture;
 
 namespace jsui {
@@ -46,6 +47,10 @@ class Runtime {
   // repainted device rect (empty when nothing changed). A different buffer,
   // size or an intervening render() makes it a full repaint.
   SkIRect renderIncremental(void* pixels, int width, int height, size_t rowBytes);
+  // Full repaint into any canvas of width x height device px (the GPU
+  // backend's surfaces). `clear`: clear to transparent first, else draw over
+  // what the canvas holds. The next renderIncremental() repaints fully.
+  void renderCanvas(SkCanvas* canvas, int width, int height, bool clear);
 
   JsuiConfig config;
   JsuiRuntime* handle;
@@ -73,6 +78,8 @@ class Runtime {
 
  private:
   SkIRect renderImpl(void* pixels, int width, int height, size_t rowBytes, bool incremental);
+  // The full frame: document (or the frozen last good frame) + dev overlay.
+  void paintFrame(SkCanvas* canvas, bool frozen, bool overlay);
   void resetEngine();
   // The buffer the last frame was painted into (incremental repaint).
   const void* lastTarget_ = nullptr;

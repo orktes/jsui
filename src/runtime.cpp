@@ -252,6 +252,11 @@ SkIRect Runtime::renderImpl(void* pixels, int width, int height, size_t rowBytes
     return damage.getBounds();
   }
   canvas->clear(SK_ColorTRANSPARENT);
+  paintFrame(canvas, frozen, overlay);
+  return SkIRect::MakeWH(width, height);
+}
+
+void Runtime::paintFrame(SkCanvas* canvas, bool frozen, bool overlay) {
   if (frozen) {
     canvas->drawPicture(lastGoodFrame_);
   } else {
@@ -262,7 +267,22 @@ SkIRect Runtime::renderImpl(void* pixels, int width, int height, size_t rowBytes
     if (!overlay_) overlay_ = std::make_unique<DevOverlay>(fonts);
     overlay_->paint(canvas, lastError, doc.width(), doc.height(), doc.pixelRatio());
   }
-  return SkIRect::MakeWH(width, height);
+}
+
+void Runtime::renderCanvas(SkCanvas* canvas, int width, int height, bool clear) {
+  doc.layout();
+  // Keep the paint records current (they are what the CPU incremental path
+  // compares against), but nothing here is tracked: a later incremental CPU
+  // render repaints fully.
+  updateDamage(doc, width, height);
+  bool dev = config.dev_mode != 0;
+  bool frozen = dev && lastGoodFrame_ && (!lastError.empty() || doc.root()->children().empty());
+  bool overlay = dev && !lastError.empty();
+  lastTarget_ = nullptr;
+  doc.clearPaintDirty();
+  redraw_ = false;
+  if (clear) canvas->clear(SK_ColorTRANSPARENT);
+  paintFrame(canvas, frozen, overlay);
 }
 
 }  // namespace jsui

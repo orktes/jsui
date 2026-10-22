@@ -11,6 +11,7 @@
 #include "input/input.h"
 #include "js/engine.h"
 #include "jsui/jsui.h"
+#include "render/gpu.h"
 #include "runtime.h"
 
 struct JsuiRuntime {
@@ -94,6 +95,25 @@ int jsui_render_rgba_incremental(JsuiRuntime* rt, void* pixels, int width, int h
   SkIRect r = rt->rt->renderIncremental(pixels, width, height, rowBytes);
   if (dirty) *dirty = JsuiRect{r.x(), r.y(), r.width(), r.height()};
   return r.isEmpty() ? 0 : 1;
+}
+
+JsuiGpuContext* jsui_gpu_create_gl(JsuiGLGetProcFn getProc, void* user) { return jsui::gpu::createGL(getProc, user); }
+void jsui_gpu_destroy(JsuiGpuContext* gpu) { jsui::gpu::destroy(gpu); }
+void jsui_gpu_reset(JsuiGpuContext* gpu) { jsui::gpu::reset(gpu); }
+void jsui_gpu_context_lost(JsuiGpuContext* gpu) { jsui::gpu::contextLost(gpu); }
+void jsui_gpu_purge(JsuiGpuContext* gpu, size_t cacheBytes) { jsui::gpu::purge(gpu, cacheBytes); }
+
+int jsui_render_gl(JsuiRuntime* rt, JsuiGpuContext* gpu, unsigned int fbo, int width, int height, int flags) {
+  JsuiGLTarget t{};
+  t.fbo = fbo;
+  t.width = width;
+  t.height = height;
+  t.flags = flags;
+  return jsui::gpu::render(*rt->rt, gpu, t);
+}
+
+int jsui_render_gl_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiGLTarget* target) {
+  return target ? jsui::gpu::render(*rt->rt, gpu, *target) : -1;
 }
 
 int jsui_render_png(JsuiRuntime* rt, void** outData, size_t* outSize) {
