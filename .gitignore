@@ -1,0 +1,9 @@
+/build*/
+/third_party/skia-prebuilt/
+/third_party/skia-wasm/
+/third_party/emsdk/
+node_modules/
+/out/
+*.png.actual
+/tests/reference/output/
+.DS_Store
