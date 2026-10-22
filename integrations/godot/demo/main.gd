@@ -9,7 +9,13 @@ extends Control
 ##   --frames <n>        frames to run before --capture (default 120)
 ##   --self-test         with --capture: press Enter on the focused "Ping Godot"
 ##                       button and click an empty spot through Godot's input
-##                       pipeline; fail unless the ping/pong round trip happened
+##                       pipeline, and call the UI's ui.flash handler; fail
+##                       unless the ping call, the UI call and the click
+##                       round-tripped
+##
+## Game data: `godot.stats` is shared state (set_state, also before the UI
+## starts), `godot.ping` a call from the UI (call_requested -> resolve_call),
+## `ui.flash` a call into the UI (call_ui).
 
 @onready var ui = $JsuiView
 
@@ -19,6 +25,7 @@ var _frame := 0
 var _stats_timer := 0.0
 var _self_test := false
 var _pongs := 0
+var _ui_answers := 0
 var _unhandled_clicks := 0
 
 
@@ -47,31 +54,45 @@ func _enter_tree() -> void:
 			"--self-test":
 				_self_test = true
 		i += 1
+	# Shared state can be set before the view starts: the UI renders it on
+	# its first frame.
+	view.set_state("godot.stats", _stats())
 
 
 func _ready() -> void:
 	ui.message_received.connect(_on_ui_message)
+	ui.call_requested.connect(_on_ui_call)
 	ui.js_error.connect(func(msg): printerr("[jsui error] ", msg))
 	ui.grab_focus()  # keyboard / gamepad go to the UI
 	print("JsuiView running=%s bundle=%s dev=%s" % [ui.is_running(), ui.bundle_url, ui.dev_mode])
 
 
-func _on_ui_message(name: String, data, json: String) -> void:
+func _on_ui_message(name: String, _data, json: String) -> void:
 	print("[ui -> godot] ", name, " ", json)
+
+
+func _on_ui_call(id: int, name: String, args) -> void:
+	print("[ui call] #%d %s %s" % [id, name, JSON.stringify(args)])
 	match name:
-		"ui:ready":
-			_send_stats()
-		"ui:ping":
+		"godot.ping":
 			_pongs += 1
-			ui.post_message("godot:pong", {"count": data.count, "time": Time.get_ticks_msec() / 1000.0})
+			# Could also answer on a later frame: keep the id, resolve then.
+			ui.resolve_call(id, {"count": args.count, "time": Time.get_ticks_msec() / 1000.0})
+		_:
+			ui.reject_call(id, "unknown call " + name)
+
+
+func _stats() -> Dictionary:
+	var v := Engine.get_version_info()
+	return {
+		"fps": Engine.get_frames_per_second(),
+		"frame": Engine.get_process_frames(),
+		"version": "%d.%d.%d" % [v.major, v.minor, v.patch],
+	}
 
 
 func _send_stats() -> void:
-	ui.post_message("godot:stats", {
-		"fps": Engine.get_frames_per_second(),
-		"frame": Engine.get_process_frames(),
-		"version": "%d.%d.%d" % [Engine.get_version_info().major, Engine.get_version_info().minor, Engine.get_version_info().patch],
-	})
+	ui.set_state("godot.stats", _stats())  # no-op when nothing changed
 
 
 func _process(delta: float) -> void:
@@ -83,8 +104,15 @@ func _process(delta: float) -> void:
 		_frame += 1
 		if _self_test and _frame == _frames / 2:
 			_inject_input()
+			ui.call_ui("ui.flash", {"text": "hello from Godot"}, _on_flash_answer)
 		if _frame >= _frames and ui.get_pending_loads() == 0:
 			_save_capture()
+
+
+func _on_flash_answer(ok: bool, result) -> void:
+	print("[godot -> ui call] ok=%s result=%s" % [ok, JSON.stringify(result)])
+	if ok and result.shown:
+		_ui_answers += 1
 
 
 func _inject_input() -> void:
@@ -125,8 +153,8 @@ func _save_capture() -> void:
 			print("capture: viewport %dx%d -> %s" % [shot.get_width(), shot.get_height(), vpath])
 	var ok: bool = ui.get_last_error() == ""
 	if _self_test:
-		print("self-test: pongs=%d unhandled_clicks=%d" % [_pongs, _unhandled_clicks])
-		if _pongs < 1 or _unhandled_clicks < 1:
+		print("self-test: pongs=%d ui_answers=%d unhandled_clicks=%d" % [_pongs, _ui_answers, _unhandled_clicks])
+		if _pongs < 1 or _ui_answers < 1 or _unhandled_clicks < 1:
 			printerr("self-test failed")
 			ok = false
 	get_tree().quit(0 if ok else 1)

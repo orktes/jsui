@@ -4,7 +4,9 @@
 JS) and draws it. It is the Godot counterpart of `tools/jsui-viewer`: it
 ticks the runtime every frame, paints with `jsui_render_rgba_incremental`
 into a CPU buffer and uploads an `ImageTexture` only when pixels changed. It
-forwards Godot input and bridges `postMessage` both ways.
+forwards Godot input and bridges game data both ways: shared state
+(`set_state` → `useHostState`), calls (`Host.call` → `call_requested` →
+`resolve_call`, and `call_ui` → `Host.handle`) and messages.
 
 ```
 integrations/godot/
@@ -77,12 +79,15 @@ godot --path . --import   # once: registers the extension and imports assets
 godot --path .            # or open the project in the editor and press F5
 ```
 
-The window shows the main-menu screen with a "Godot bridge" card. Every
-second `main.gd` sends `godot:stats` (fps, frame, version) to the UI. The
-"Ping Godot" button (click it, or press Enter / gamepad A, since it has
-focus) posts `ui:ping`. `main.gd` prints it and answers with `godot:pong`.
-Clicks the UI does not handle fall through to `_unhandled_input`. F5 reloads
-the bundle.
+The window shows the main-menu screen with a "Godot bridge" card. `main.gd`
+keeps the shared state key `godot.stats` (fps, frame, version) up to date
+with `set_state` (the first value is set before the view starts); the card
+reads it with `useHostState`. The "Ping Godot" button (click it, or press
+Enter / gamepad A, since it has focus) awaits `Host.call('godot.ping')`,
+which `main.gd` answers in `call_requested` with `resolve_call`. The
+self-test also calls into the UI with `call_ui('ui.flash', ...)`. Clicks the
+UI does not handle fall through to `_unhandled_input`. F5 reloads the bundle
+(the state survives it).
 
 Headless check (no GPU needed). This is what CI runs:
 
@@ -122,6 +127,13 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | `reload()` | re-evaluate the bundle (same runtime) |
 | `post_message(name, data = null)` | send to JS: `data` is JSON-encoded. JS receives it with `useHostMessage(name, cb)` / `Host.onMessage` |
 | `post_message_json(name, json)` | same with a JSON string |
+| `set_state(key, value) -> int` | shared state (`jsui_set_state`): `value` (Dictionary, Array, number, String…) is JSON-encoded, `null` removes the key. JS reads it with `useHostState(key)` and re-renders on change. Returns 1 changed, 0 unchanged, -1 invalid |
+| `patch_state(key, patch) -> int` | RFC 7386 merge patch of a key (`jsui_patch_state`): Dictionaries merge, `null` members delete. Keep big collections as Dictionaries keyed by id |
+| `get_state(key) -> Variant` | current value (also keys the UI set with `HostState.set`) |
+| `set_state_json` / `patch_state_json` / `get_state_json` | the same with JSON strings |
+| `resolve_call(id, result = null) -> int` | answer a `call_requested` call; the UI's `await Host.call(...)` resolves with `result`. Any later frame is fine. -1: unknown or cancelled id |
+| `resolve_call_json(id, json)` / `reject_call(id, message)` | JSON result / reject (the promise rejects with `Error(message)`) |
+| `call_ui(name, args = null, callback = Callable()) -> int` | run the UI's `Host.handle(name, fn)` / `useHostHandler` handler; `callback(ok: bool, result)` (and `ui_call_completed`) runs once it settles: `result` is the handler's value, or the error message when `ok` is false |
 | `get_texture()` | the `ImageTexture` being drawn (premultiplied RGBA) |
 | `get_frame_image()` | CPU copy of the last frame, straight alpha, works with `--headless` |
 | `get_pending_loads()` | bundle/image/font/fetch loads in flight |
@@ -132,11 +144,38 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | Signal | |
 | --- | --- |
 | `message_received(name: String, data: Variant, json: String)` | JS called `Host.postMessage(name, data)`. `data` is the parsed payload |
+| `state_changed(key: String, value: Variant)` | JS changed a UI-owned key with `HostState.set` / `patch` (`value` null: removed) |
+| `call_requested(id: int, name: String, args: Variant)` | JS called `await Host.call(name, args)`. Answer with `resolve_call` / `reject_call`, now or later |
+| `call_cancelled(id: int)` | a call ended unanswered (JS timeout / abort, reload, `stop()`): drop its work |
+| `ui_call_completed(id: int, ok: bool, result: Variant)` | a `call_ui` call settled (also when the runtime stopped first) |
 | `js_error(message: String)` | a new uncaught JS error |
 | `frame_rendered(dirty_rect: Rect2i)` | the texture was updated. The rect is in device pixels |
 
 Signals are emitted after the runtime returns (after the tick or the input
 call), so handlers can call back into the view safely.
+
+State set with `set_state` / `patch_state` is kept by the view as well, so it
+is there before the bundle runs (even before `start()`) and is re-applied
+when the runtime is recreated (`stop()` / `start()`, a new `bundle_url`);
+`reload()` and dev-mode reloads keep it in the runtime anyway.
+
+```gdscript
+func _ready():
+    ui.set_state("player", {"gold": 1250, "hp": 80})
+    ui.set_state("inventory", {"items": {"sword": {"name": "Iron Sword", "count": 1}}})
+    ui.call_requested.connect(_on_ui_call)
+
+func _on_gold_changed(gold):
+    ui.patch_state("player", {"gold": gold})   # only "gold" changes; only its readers re-render
+
+func _on_ui_call(id, name, args):
+    match name:
+        "shop.buy":
+            if try_buy(args.item): ui.resolve_call(id, {"gold": gold})
+            else: ui.reject_call(id, "not enough gold")
+        _:
+            ui.reject_call(id, "unknown call " + name)
+```
 
 ### Rendering
 

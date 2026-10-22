@@ -1,36 +1,45 @@
 // Godot demo UI: the main-menu example screen plus a small "bridge" card
 // that talks to the game through JsuiView:
-//   * JS -> Godot: `ui:ready` on mount
-//   * Godot -> JS: `godot:stats` on ready and every second (useHostMessage)
-//   * JS -> Godot: `ui:ping` when the button is pressed (Host.postMessage);
-//     main.gd answers with `godot:pong`.
+//   * Godot -> JS shared state: main.gd keeps `godot.stats` (version, fps,
+//     frame) up to date with set_state(); useHostState renders it, including
+//     the value set before the UI started.
+//   * JS -> Godot call: the button awaits Host.call('godot.ping', {count});
+//     main.gd answers through call_requested -> resolve_call.
+//   * Godot -> JS call: main.gd's call_ui('ui.flash', {text}, callback) runs
+//     the useHostHandler below, which shows the text and answers.
+//   * JS -> Godot message: `ui:ready` on mount (Host.postMessage).
 import React, { useEffect, useState } from 'react';
-import { AppRegistry, Host, Pressable, StyleSheet, Text, View, useHostMessage } from 'react-native';
+import { AppRegistry, Host, Pressable, StyleSheet, Text, View, useHostHandler, useHostState } from 'react-native';
 import MainMenu from '../../../../examples/screens/main-menu.jsx';
 import { colors, font } from '../../../../examples/theme.js';
 
 function Bridge() {
-  const [stats, setStats] = useState(null);
+  const stats = useHostState('godot.stats', null);
   const [pings, setPings] = useState(0);
   const [pong, setPong] = useState(null);
-  useHostMessage('godot:stats', setStats);
-  useHostMessage('godot:pong', setPong);
-  // Tell the game we are listening (messages sent before this are dropped).
+  const [flash, setFlash] = useState(null);
+  useHostHandler('ui.flash', ({ text }) => {
+    setFlash(text);
+    return { shown: true };
+  });
   useEffect(() => Host.postMessage('ui:ready', {}), []);
 
   return (
     <View style={styles.card}>
       <Text style={styles.label}>GODOT BRIDGE</Text>
       <Text style={styles.line}>
-        {stats ? `Godot ${stats.version} · ${stats.fps} fps · frame ${stats.frame}` : 'waiting for godot:stats…'}
+        {stats ? `Godot ${stats.version} · ${stats.fps} fps · frame ${stats.frame}` : 'waiting for godot.stats…'}
       </Text>
-      <Text style={styles.line}>{pong ? `pong #${pong.count} at ${pong.time.toFixed(1)} s` : 'no pong yet'}</Text>
+      <Text style={styles.line}>
+        {pong ? (pong.error ? `ping failed: ${pong.error}` : `pong #${pong.count} at ${pong.time.toFixed(1)} s`) : 'no pong yet'}
+      </Text>
+      {flash ? <Text style={styles.line}>{`Godot says: ${flash}`}</Text> : null}
       <Pressable
         autoFocus
         onPress={() => {
           const count = pings + 1;
           setPings(count);
-          Host.postMessage('ui:ping', { count });
+          Host.call('godot.ping', { count }, { timeout: 5000 }).then(setPong, (e) => setPong({ error: e.message }));
         }}
         style={({ pressed, focused, hovered }) => [
           styles.button,
