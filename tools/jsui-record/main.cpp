@@ -51,6 +51,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iterator>
@@ -847,6 +848,15 @@ int main(int argc, char** argv) {
     return 2;
   }
 
+  for (const std::string* dir : {&o.framesDir, &o.stillsDir}) {
+    std::error_code ec;
+    if (!dir->empty()) std::filesystem::create_directories(*dir, ec);
+    if (ec) {
+      std::fprintf(stderr, "cannot create %s: %s\n", dir->c_str(), ec.message().c_str());
+      return 1;
+    }
+  }
+
   Recorder r;
   r.opt = o;
   std::string tl;
@@ -950,10 +960,19 @@ int main(int argc, char** argv) {
     if (!o.framesDir.empty()) {
       char name[64];
       std::snprintf(name, sizeof name, "/frame-%05ld.png", f);
-      writePng(o.framesDir + name, pm);
+      if (!writePng(o.framesDir + name, pm)) {
+        std::fprintf(stderr, "cannot write %s%s\n", o.framesDir.c_str(), name);
+        status = 1;
+        break;
+      }
     }
     if (!r.stillRequest.empty()) {
-      if (!o.stillsDir.empty()) writePng(o.stillsDir + "/" + r.stillRequest + ".png", pm);
+      std::string still = o.stillsDir + "/" + r.stillRequest + ".png";
+      if (!o.stillsDir.empty() && !writePng(still, pm)) {
+        std::fprintf(stderr, "cannot write %s\n", still.c_str());
+        status = 1;
+        break;
+      }
       r.stillRequest.clear();
     }
     if (const char* e = jsui_last_error(r.rt)) {

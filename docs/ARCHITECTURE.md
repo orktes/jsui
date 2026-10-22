@@ -71,6 +71,7 @@ library with a C API, and the same core compiles to WebAssembly.
 | `src/net/` | Minimal HTTP/1.1 client for dev servers (native) |
 | `src/runtime.*`, `src/capi.cpp` | Runtime object and C API wrappers |
 | `tools/jsui-render` | Headless renderer: bundle → PNG (tests, CI) |
+| `tools/jsui-record` | Headless recorder: bundle + JSON input timeline → 60 fps frames / H.264 (ffmpeg), with cursor, caption and input-legend overlay |
 | `tools/jsui-viewer` | Windowed host with dev mode (live reload) |
 | `integrations/godot` | Godot 4 GDExtension (`JsuiView` Control) + demo project |
 | `web/` | Browser host for the WASM build |

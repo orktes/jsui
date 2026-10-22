@@ -23,6 +23,7 @@ cmake --build build
 ./build/jsui-tests
 ./build/jsui-render bundle.js -o frame.png --width 1280 --height 720
 ./build/tools/jsui-viewer/jsui-viewer --gpu bundle.js   # window, rendered on the GPU
+./build/jsui-record bundle.js --timeline examples/showcase/session.json --ffmpeg out.mp4  # scripted demo video
 ```
 
 WebAssembly: `scripts/build-wasm.sh` (CPU raster, `web/dist/`) or

@@ -107,6 +107,12 @@ jobs:
         run: ./build/jsui-tests
       - name: Render smoke
         run: ./build/jsui-render web/test/fixtures/bands.js -o bands.png --width 320 --height 200
+      - name: Recorder smoke (jsui-record, fixed-clock timeline)
+        run: |
+          ./build/jsui-record web/test/fixtures/bands.js --timeline tools/jsui-record/smoke.json \
+            --width 320 --height 200 --frames record-smoke/frames --stills record-smoke/stills
+          test "$(ls record-smoke/frames | wc -l)" -eq 84
+          test -s record-smoke/stills/click.png && test -s record-smoke/stills/pad.png
       - name: Viewer GPU smoke (Xvfb + Mesa GL)
         run: |
           xvfb-run -a -s "-screen 0 1280x1024x24" ./build/tools/jsui-viewer/jsui-viewer --gpu --width 320 --height 200 \

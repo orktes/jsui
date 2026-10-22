@@ -1,0 +1,13 @@
+{
+  "about": "CI smoke timeline for jsui-record: exercises every overlay element and the main input kinds on any bundle.",
+  "steps": [
+    {"caption": "Smoke", "sub": "jsui-record CI check", "tag": "01"},
+    {"move": [160, 100], "dur": 200},
+    {"click": true, "still": "click"},
+    {"wheel": [0, 120], "count": 2, "interval": 100},
+    {"touch": [200, 150], "to": [100, 60], "dur": 150},
+    {"key": "Tab", "label": "Key Tab"},
+    {"pad": 13, "still": "pad"},
+    {"wait": 200}
+  ]
+}
