@@ -163,38 +163,20 @@ export function ImageBackground(props) {
 
 // --- ScrollView --------------------------------------------------------------
 
-const scrollBase = { flexGrow: 1, flexShrink: 1, flexDirection: 'column', overflow: 'scroll' };
-const scrollBaseH = { flexGrow: 1, flexShrink: 1, flexDirection: 'row', overflow: 'scroll' };
-const contentH = { flexDirection: 'row' };
-
-const SCROLL_IGNORED = [
-  'contentContainerStyle',
-  'onContentSizeChange',
-  'refreshControl',
-  'keyboardShouldPersistTaps',
-  'keyboardDismissMode',
-  'stickyHeaderIndices',
-  'StickyHeaderComponent',
-  'invertStickyHeaders',
-  'children',
-  'centerContent',
-];
-
-export function ScrollView(props) {
-  const { children, contentContainerStyle, horizontal, onContentSizeChange, refreshControl, centerContent } = props;
-  const rest = omit(props, SCROLL_IGNORED);
-  rest.horizontal = !!horizontal;
-  rest.style = [horizontal ? scrollBaseH : scrollBase, props.style];
-  const content = {
-    style: [horizontal && contentH, centerContent && { flexGrow: 1, justifyContent: 'center' }, contentContainerStyle],
-    collapsable: false,
-  };
-  if (onContentSizeChange) content.onLayout = (e) => onContentSizeChange(e.nativeEvent.layout.width, e.nativeEvent.layout.height);
-  return h('ScrollView', rest, refreshControl || null, h('View', content, children));
-}
-ScrollView.displayName = 'ScrollView';
+// Implemented in scrollview.js (props, events, sticky headers, throttling).
+export { ScrollView } from './scrollview.js';
 
 // --- TextInput -----------------------------------------------------------------
+//
+// With the JSUI runtime (native.textEditing) the text is edited natively,
+// like a React Native text field: keys, text, clicks, drag / double-click
+// selection, clipboard and undo edit the native copy, which reports
+// 'change' ({text, eventCount}) and 'selectionchange' ({selection}). The
+// host `value` prop plus `mostRecentEventCount` reconcile it with React
+// (native ignores renders that have not seen its latest edit), so
+// controlled inputs can accept, transform or reject edits. The controlled
+// `selection` prop and ref.setSelection() use native.setTextInputSelection.
+// Without native editing (e.g. a test bridge) typing appends at the end.
 
 function deleteLastCodePoint(s) {
   if (!s) return s;
@@ -214,6 +196,7 @@ const TEXTINPUT_OMIT = [
   'submitBehavior',
   'clearTextOnFocus',
   'onSelectionChange',
+  'selection',
   'onFocus',
   'onBlur',
   'onKeyDown',
@@ -223,27 +206,57 @@ const TEXTINPUT_OMIT = [
 
 let focusedInput = null;
 
+function selectionOf(sel) {
+  if (!sel || typeof sel.start !== 'number') return null;
+  return { start: sel.start, end: typeof sel.end === 'number' ? sel.end : sel.start };
+}
+
+/** What Enter does: 'newline', 'submit' or 'blurAndSubmit' (RN submitBehavior). */
+function submitBehaviorOf(p) {
+  if (p.submitBehavior === 'submit' || p.submitBehavior === 'blurAndSubmit' || p.submitBehavior === 'newline') {
+    return p.multiline || p.submitBehavior !== 'newline' ? p.submitBehavior : 'blurAndSubmit';
+  }
+  if (p.multiline) return p.blurOnSubmit === true ? 'blurAndSubmit' : 'newline';
+  return p.blurOnSubmit === false ? 'submit' : 'blurAndSubmit';
+}
+
 export function TextInput(props) {
   const { value, defaultValue, editable = true, readOnly, multiline, maxLength, secureTextEntry } = props;
+  const nativeEditing = native.textEditing === true;
   const [inner, setInner] = useState(defaultValue != null ? String(defaultValue) : '');
+  const [, setRevision] = useState(0);
   const controlled = value !== undefined && value !== null;
   const current = controlled ? String(value) : inner;
   const hostRef = useRef(null);
   const focusedRef = useRef(false);
+  const eventCount = useRef(0);
+  const nativeSelection = useRef(null);
   const latest = useRef(null);
-  latest.current = { props, current };
+  latest.current = { props, current, controlled };
   const canEdit = editable && !readOnly;
 
-  const commit = (text) => {
+  const target = () => hostRef.current && hostRef.current.id;
+  const report = (text) => {
     const p = latest.current.props;
+    if (p.onChange) p.onChange({ nativeEvent: { text, eventCount: eventCount.current, target: target() }, target: target() });
+    if (p.onChangeText) p.onChangeText(text);
+  };
+  // A JS-side edit (clear(), clearTextOnFocus, the non-native fallback).
+  const commit = (text) => {
     if (maxLength != null && Array.from(text).length > maxLength) text = Array.from(text).slice(0, maxLength).join('');
     if (text === latest.current.current) return;
-    if (!controlled) setInner(text);
+    if (!latest.current.controlled) setInner(text);
     // Keep the displayed value in sync immediately, also for controlled
     // inputs whose owner re-renders asynchronously.
     latest.current.current = text;
-    if (p.onChange) p.onChange({ nativeEvent: { text, eventCount: 0, target: hostRef.current && hostRef.current.id }, target: hostRef.current && hostRef.current.id });
-    if (p.onChangeText) p.onChangeText(text);
+    report(text);
+  };
+  const setSelection = (start, end) => {
+    const inst = hostRef.current;
+    if (!inst || typeof native.setTextInputSelection !== 'function') return;
+    const sel = { start: +start || 0, end: end == null ? +start || 0 : +end || 0 };
+    nativeSelection.current = sel;
+    native.setTextInputSelection(inst.id, sel.start, sel.end);
   };
 
   useImperativeHandle(props.ref, () => {
@@ -255,8 +268,16 @@ export function TextInput(props) {
       isFocused: () => focusedRef.current,
       setNativeProps: (np) => inst && inst.setNativeProps(np),
       getNativeRef: () => inst,
-      setSelection() {},
+      setSelection,
     });
+  });
+
+  // Controlled selection: re-applied whenever native reports a different one.
+  const selection = selectionOf(props.selection);
+  useLayoutEffect(() => {
+    if (!nativeEditing || !selection) return;
+    const s = nativeSelection.current;
+    if (!s || s.start !== selection.start || s.end !== selection.end) setSelection(selection.start, selection.end);
   });
 
   const rest = omit(props, TEXTINPUT_OMIT);
@@ -265,9 +286,30 @@ export function TextInput(props) {
   rest.editable = canEdit;
   if (secureTextEntry) rest.secureTextEntry = true;
   if (rest.focusable === undefined) rest.focusable = canEdit;
+  if (nativeEditing) {
+    rest.mostRecentEventCount = eventCount.current;
+    rest.onChange = (e) => {
+      const ne = e.nativeEvent;
+      const text = ne.text != null ? String(ne.text) : '';
+      if (typeof ne.eventCount === 'number') eventCount.current = ne.eventCount;
+      latest.current.current = text;
+      if (!latest.current.controlled) setInner(text);
+      report(text);
+      // Re-render with the new event count: native then adopts the owner's
+      // value (which may differ from what was typed, or revert it).
+      setRevision((r) => r + 1);
+    };
+    rest.onSelectionChange = (e) => {
+      const sel = selectionOf(e.nativeEvent.selection) || { start: 0, end: 0 };
+      nativeSelection.current = sel;
+      const p = latest.current.props;
+      if (p.onSelectionChange) p.onSelectionChange({ nativeEvent: { selection: { start: sel.start, end: sel.end }, target: target() }, target: target() });
+      if (selectionOf(p.selection)) setRevision((r) => r + 1);
+    };
+  }
   rest.onPointerDown = (e) => {
     if (props.onPointerDown) props.onPointerDown(e);
-    if (canEdit && hostRef.current) hostRef.current.focus();
+    if (!nativeEditing && canEdit && hostRef.current) hostRef.current.focus();
   };
   rest.onFocus = (e) => {
     focusedRef.current = true;
@@ -280,13 +322,13 @@ export function TextInput(props) {
     focusedRef.current = false;
     if (focusedInput === hostRef.current) focusedInput = null;
     const p = latest.current.props;
-    if (p.onEndEditing) p.onEndEditing({ nativeEvent: { text: latest.current.current } });
+    if (p.onEndEditing) p.onEndEditing({ nativeEvent: { text: latest.current.current, target: target() } });
     if (p.onBlur) p.onBlur(e);
   };
   rest.onTextInput = (e) => {
     const p = latest.current.props;
     if (p.onTextInput) p.onTextInput(e);
-    if (!canEdit) return;
+    if (nativeEditing || !canEdit) return;
     let text = e.nativeEvent.text || '';
     if (!multiline) text = text.replace(/[\r\n]/g, '');
     if (!text) return;
@@ -296,26 +338,29 @@ export function TextInput(props) {
   rest.onKeyDown = (e) => {
     const p = latest.current.props;
     if (p.onKeyDown) p.onKeyDown(e);
-    if (p.onKeyPress) p.onKeyPress({ nativeEvent: { key: e.key }, key: e.key, preventDefault: () => e.preventDefault() });
-    if (!canEdit || e.isDefaultPrevented()) return;
+    if (p.onKeyPress) p.onKeyPress({ nativeEvent: { key: e.key, target: target() }, key: e.key, preventDefault: () => e.preventDefault() });
+    if (e.isDefaultPrevented()) return;
     const k = e.key;
-    if (k === 'Backspace') {
-      e.preventDefault();
+    if (k === 'Enter') {
+      const behavior = submitBehaviorOf(p);
       e.stopPropagation();
-      commit(deleteLastCodePoint(latest.current.current));
-    } else if (k === 'Enter') {
-      e.stopPropagation();
-      e.preventDefault();
-      if (multiline && p.submitBehavior !== 'submit' && p.submitBehavior !== 'blurAndSubmit') {
-        commit(latest.current.current + '\n');
-        return;
+      if (behavior === 'newline') {
+        if (!nativeEditing && canEdit) {
+          e.preventDefault();
+          commit(latest.current.current + '\n');
+        }
+        return;  // native inserts the newline
       }
-      if (p.onSubmitEditing) p.onSubmitEditing({ nativeEvent: { text: latest.current.current } });
-      const blur = p.submitBehavior ? p.submitBehavior === 'blurAndSubmit' : p.blurOnSubmit !== false && !multiline;
-      if (blur && hostRef.current) hostRef.current.blur();
+      e.preventDefault();
+      if (p.onSubmitEditing) p.onSubmitEditing({ nativeEvent: { text: latest.current.current, target: target() } });
+      if (behavior === 'blurAndSubmit' && hostRef.current) hostRef.current.blur();
     } else if (k === 'Escape') {
       e.stopPropagation();
       if (hostRef.current) hostRef.current.blur();
+    } else if (!nativeEditing && canEdit && k === 'Backspace') {
+      e.preventDefault();
+      e.stopPropagation();
+      commit(deleteLastCodePoint(latest.current.current));
     }
   };
   return h('TextInput', rest);

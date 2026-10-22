@@ -5,6 +5,9 @@
 //
 //   node web/test/browser.test.mjs            (needs web/dist from the wasm build)
 //   JSUI_WEB_STRICT=1 node web/test/browser.test.mjs
+//   JSUI_WEB_DIST=dist-webgl node web/test/browser.test.mjs   (the GPU module,
+//       WEBGL=1 scripts/build-wasm.sh: every test runs against it, and the
+//       'gpu' tests draw through Skia on WebGL instead of SKIPping)
 //
 // Tests that depend on other parts of the runtime (engine host messages,
 // input hit testing) report SKIP when that part is still a skeleton stub;
@@ -18,9 +21,10 @@ import { chromium } from 'playwright';
 const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STRICT = !!process.env.JSUI_WEB_STRICT;
 const ONLY = process.env.JSUI_WEB_ONLY;  // substring filter on test names
+const DIST = process.env.JSUI_WEB_DIST || 'dist';  // module directory under web/
 
-if (!fs.existsSync(path.join(WEB, 'dist', 'jsui.wasm'))) {
-  console.error('web/dist/jsui.wasm missing: build the wasm target first (see cmake/Emscripten.cmake)');
+if (!fs.existsSync(path.join(WEB, DIST, 'jsui.wasm'))) {
+  console.error(`web/${DIST}/jsui.wasm missing: build the wasm target first (see cmake/Emscripten.cmake)`);
   process.exit(1);
 }
 
@@ -69,7 +73,7 @@ const browser = await chromium.launch({
 });
 
 class Skip extends Error {}
-const skip = (why) => { throw new Skip(why); };
+const skip = (why, soft = false) => { const e = new Skip(why); e.soft = soft; throw e; };
 const tests = [];
 const test = (name, fn, ctxOpts = {}) => tests.push({ name, fn, ctxOpts });
 const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
@@ -92,7 +96,8 @@ async function newPage(ctxOpts) {
 
 // Creates a canvas + runtime in the page; resolves once the first frame was painted.
 async function mount(page, opts = {}) {
-  return page.evaluate(async ({ id, w, h, opts }) => {
+  return page.evaluate(async ({ id, w, h, opts, dist }) => {
+    if (dist !== 'dist' && !opts.moduleUrl) opts = { ...opts, moduleUrl: new URL(`../${dist}/jsui.js`, location.href) };
     const c = document.createElement('canvas');
     c.id = id;
     c.style.width = `${w}px`;
@@ -108,7 +113,16 @@ async function mount(page, opts = {}) {
       await Promise.race([jsui.whenIdle(), new Promise((r) => setTimeout(r, 5000))]);
     }
     return { renderer: jsui.renderer, pw: jsui.pixelWidth, ph: jsui.pixelHeight };
-  }, { id: opts.id ?? 'ui', w: opts.width ?? 320, h: opts.height ?? 200, opts: opts.jsui ?? {} });
+  }, { id: opts.id ?? 'ui', w: opts.width ?? 320, h: opts.height ?? 200, opts: opts.jsui ?? {}, dist: DIST });
+}
+
+// Mounts with renderer 'gpu'; SKIPs when the module has no GPU backend (the
+// host then fell back to the CPU path, which the other tests cover).
+async function mountGpu(page, opts = {}) {
+  const info = await mount(page, { ...opts, jsui: { ...opts.jsui, renderer: 'gpu' } });
+  // Expected to be missing from the default (CPU) module: not a STRICT failure there.
+  if (!info.renderer.startsWith('gpu')) skip(`module in web/${DIST} has no GPU backend (renderer ${info.renderer})`, DIST === 'dist');
+  return info;
 }
 
 const frames = (page, n = 3) => page.evaluate(async (n) => { for (let i = 0; i < n; i++) await new Promise(requestAnimationFrame); }, n);
@@ -351,14 +365,17 @@ test('bundleSource option and loadSource()', async ({ page }) => {
   assert(near(px, [0, 128, 128, 255]), `bundleSource: ${fmt(px)}`);
 });
 
-test('create/destroy cycles: no heap growth, destroy during load is safe', async ({ page }) => {
-  const result = await page.evaluate(async () => {
+for (const renderer of ['auto', 'gpu']) test(`create/destroy cycles: no heap growth, destroy during load is safe (${renderer})`, async ({ page }) => {
+  const result = await page.evaluate(async ({ dist, renderer }) => {
+    const moduleUrl = new URL(`../${dist}/jsui.js`, location.href);
     const c = document.createElement('canvas');
     c.style.width = '320px'; c.style.height = '200px';
     document.body.appendChild(c);
+    let used = null;
     const cycle = async (n, url, wait) => {
       for (let i = 0; i < n; i++) {
-        const j = await window.createJsui({ canvas: c, bundleUrl: url, autoFocus: false });
+        const j = await window.createJsui({ canvas: c, bundleUrl: url, autoFocus: false, moduleUrl, renderer });
+        used ??= j.renderer;
         if (wait) { for (let f = 0; f < 3; f++) { j.frame(); await new Promise(requestAnimationFrame); } }
         j.destroy();
       }
@@ -367,11 +384,12 @@ test('create/destroy cycles: no heap growth, destroy during load is safe', async
     await cycle(10, '/slow/solid.js', false);
     await new Promise((r) => setTimeout(r, 300));
     await cycle(5, 'fixtures/bands.js', true);  // warm up allocator
-    const M = (await window.createJsui({ canvas: document.createElement('canvas'), autoStart: false })).module;
+    const M = (await window.createJsui({ canvas: document.createElement('canvas'), autoStart: false, moduleUrl })).module;
     const before = M.HEAPU8.length;
     await cycle(40, 'fixtures/bands.js', true);
-    return { before, after: M.HEAPU8.length };
-  });
+    return { before, after: M.HEAPU8.length, used };
+  }, { dist: DIST, renderer });
+  if (renderer === 'gpu' && !result.used.startsWith('gpu')) skip(`module in web/${DIST} has no GPU backend`, DIST === 'dist');
   assert(result.after <= result.before, `heap grew from ${result.before} to ${result.after}`);
 });
 
@@ -387,6 +405,103 @@ test('dev mode reloads when /__jsui/version changes', async ({ page }) => {
   await frames(page, 3);
   [px] = await screenPixels(page, '#ui', [[10, 50]]);
   assert(near(px, [0, 136, 255, 255]), `after reload: ${fmt(px)}`);
+});
+
+// ---------------------------------------------------- GPU (Skia on WebGL)
+test('gpu: renders bands with correct premultiplied blending', async ({ page }) => {
+  const info = await mountGpu(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
+  assert(info.pw === 320 && info.ph === 200, `backing store ${info.pw}x${info.ph}`);
+  await page.waitForTimeout(300);  // band 2 turns yellow on a 200 ms timer: repaints follow
+  await frames(page, 3);
+  const px = await screenPixels(page, '#ui', BANDS);
+  [RED, GREEN, [255, 255, 0, 255], HALF_RED].forEach((want, i) => assert(near(px[i], want), `band ${i}: ${fmt(px[i])} want ${fmt(want)}`));
+  const raw = await page.evaluate(() => { const p = window.hosts.ui.readPixels(); const o = (175 * p.width + 10) * 4; return Array.from(p.data.slice(o, o + 4)); });
+  assert(near(raw, [128, 0, 0, 128], 1), `premultiplied frame ${fmt(raw)}`);
+});
+
+for (const fixture of ['hud', 'effects']) test(`gpu: matches the CPU raster (${fixture} fixture)`, async ({ page }) => {
+  await mountGpu(page, { id: 'gpu', width: 480, height: 320, jsui: { bundleUrl: `fixtures/${fixture}.js` } });
+  await mount(page, { id: 'cpu', width: 480, height: 320, jsui: { bundleUrl: `fixtures/${fixture}.js`, renderer: 'webgl' } });
+  const d = await page.evaluate(() => {
+    const a = window.hosts.gpu.readPixels(), b = window.hosts.cpu.readPixels();
+    if (a.data.length !== b.data.length) return { size: [a.width, a.height, b.width, b.height] };
+    let sum = 0, max = 0, over = 0;
+    for (let i = 0; i < a.data.length; i += 4) {
+      let m = 0;
+      for (let c = 0; c < 4; c++) { const v = Math.abs(a.data[i + c] - b.data[i + c]); sum += v; m = Math.max(m, v); }
+      max = Math.max(max, m);
+      if (m > 24) over++;
+    }
+    return { mean: sum / a.data.length, max, over: over / (a.data.length / 4) };
+  });
+  assert(!d.size, `size mismatch ${d.size}`);
+  console.log(`      gpu vs cpu: max ${d.max}, mean ${d.mean.toFixed(3)}, >24 ${(d.over * 100).toFixed(3)}%`);
+  assert(d.mean < 1 && d.over < 0.01, `GPU frame differs: mean ${d.mean}, >24 ${d.over}`);
+});
+
+test('gpu: devicePixelRatio 2 and resize', async ({ page }) => {
+  const info = await mountGpu(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
+  assert(info.pw === 640 && info.ph === 400, `backing store ${info.pw}x${info.ph}`);
+  let px = await screenPixels(page, '#ui', [[20, 99], [20, 100], [20, 199], [20, 200], [600, 50]]);
+  assert(near(px[0], RED) && near(px[1], GREEN), `edge at y=100: ${fmt(px[0])} ${fmt(px[1])}`);
+  // band 2 is blue, or yellow once its 200 ms timer fired
+  assert(near(px[2], GREEN) && (near(px[3], BLUE) || near(px[3], [255, 255, 0, 255])), `edge at y=200: ${fmt(px[2])} ${fmt(px[3])}`);
+  await page.evaluate(() => { document.getElementById('ui').style.height = '300px'; document.getElementById('ui').style.width = '400px'; });
+  await frames(page, 4);
+  px = await screenPixels(page, '#ui', [[20, 50], [20, 150], [700, 50], [20, 500]]);
+  assert(near(px[0], RED) && near(px[1], GREEN), `bands after resize: ${px.map(fmt)}`);
+  assert(near(px[2], [255, 255, 255, 255]) && near(px[3], [255, 255, 255, 255]), `outside bands: ${px.map(fmt)}`);
+}, { deviceScaleFactor: 2 });
+
+test('gpu: WebGL context loss and restore repaints', async ({ page }) => {
+  await mountGpu(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
+  const ok = await page.evaluate(async () => {
+    const ext = window.hosts.ui._gl?.getExtension('WEBGL_lose_context');
+    if (!ext) return false;
+    ext.loseContext();
+    for (let i = 0; i < 3; i++) await new Promise(requestAnimationFrame);
+    ext.restoreContext();
+    for (let i = 0; i < 6; i++) await new Promise(requestAnimationFrame);
+    return true;
+  });
+  if (!ok) skip('WEBGL_lose_context unavailable');
+  const px = await screenPixels(page, '#ui', BANDS);
+  // (band 2 turns yellow on a timer)
+  [RED, GREEN, null, HALF_RED].forEach((want, i) => want && assert(near(px[i], want), `band ${i} after restore: ${fmt(px[i])}`));
+});
+
+test('gpu: several runtimes on one page and destroy', async ({ page }) => {
+  await mountGpu(page, { id: 'a', jsui: { bundleUrl: 'fixtures/bands.js' } });
+  await mountGpu(page, { id: 'b', jsui: { bundleUrl: 'fixtures/solid.js' } });
+  const px = await screenPixels(page, '#a', BANDS);
+  [RED, GREEN, null, HALF_RED].forEach((want, i) => want && assert(near(px[i], want), `a band ${i}: ${fmt(px[i])}`));
+  await page.evaluate(() => window.hosts.b.destroy());
+  await frames(page, 3);
+  const after = await screenPixels(page, '#a', BANDS);
+  assert(near(after[0], RED), `a after destroying b: ${fmt(after[0])}`);
+});
+
+test('perf: 1080p HUD (~540 nodes), steady state (gpu)', async ({ page }) => {
+  await mountGpu(page, { width: 1920, height: 1080, jsui: { bundleUrl: 'fixtures/hud.js' } });
+  const r = await page.evaluate(async () => {
+    const j = window.hosts.ui;
+    j.stop();
+    const M = j.module, rt = j.rt;
+    const N = 60;
+    let tick = 0, paint = 0, t = performance.now();
+    for (let i = 0; i < N; i++) {
+      t += 16.67;
+      const a = performance.now();
+      M._jsui_tick(rt, t);
+      const b = performance.now();
+      j._renderGpu();
+      j._gl.finish();
+      const c = performance.now();
+      tick += b - a; paint += c - b;
+    }
+    return { tick: tick / N, paint: paint / N, renderer: j.renderer };
+  });
+  console.log(`      perf (${r.renderer}, 1920x1080, headless/swiftshader): tick ${r.tick.toFixed(2)} ms, Skia GL draw+finish ${r.paint.toFixed(2)} ms`);
 });
 
 for (const renderer of ['webgl', '2d']) test(`perf: 1080p HUD (~540 nodes), steady state (${renderer})`, async ({ page }) => {
@@ -427,7 +542,7 @@ for (const t of tests) {
     console.log(`  ok    ${t.name}`);
     passed++;
   } catch (e) {
-    if (e instanceof Skip && !STRICT) {
+    if (e instanceof Skip && (!STRICT || e.soft)) {
       console.log(`  SKIP  ${t.name}: ${e.message}`);
       skipped++;
     } else {

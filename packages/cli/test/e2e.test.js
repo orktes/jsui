@@ -22,14 +22,17 @@ for (const mode of ['production', 'development']) {
   test(`native runtime e2e (${mode} React)`, { skip: !existsSync(binary) && `no ${binary}` }, async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'jsui-e2e-'));
     const outfile = path.join(dir, 'bundle.js');
+    const scrollfile = path.join(dir, 'scroll.js');
     await build({ entry: path.join(here, 'e2e', 'app.jsx'), outfile, mode });
+    await build({ entry: path.join(here, 'e2e', 'scroll.jsx'), outfile: scrollfile, mode });
     const { stdout } = await promisify(execFile)(binary, ['react_e2e'], {
-      env: Object.assign({}, process.env, { JSUI_REACT_E2E_BUNDLE: outfile }),
+      env: Object.assign({}, process.env, { JSUI_REACT_E2E_BUNDLE: outfile, JSUI_REACT_E2E_SCROLL_BUNDLE: scrollfile }),
       cwd: repo,
     }).catch((e) => {
       throw new Error(`jsui-tests failed:\n${e.stdout}\n${e.stderr}`);
     });
-    assert.match(stdout, /PASS react_e2e/);
+    assert.match(stdout, /PASS react_e2e$/m);
+    assert.match(stdout, /PASS react_e2e_scroll/);
     assert.doesNotMatch(stdout, /skipped/);
   });
 

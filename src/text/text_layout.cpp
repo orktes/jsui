@@ -26,6 +26,7 @@
 #include "modules/skparagraph/include/TextStyle.h"
 #include "modules/skunicode/include/SkUnicode.h"
 #include "text/font_manager.h"
+#include "text/text_edit.h"
 
 namespace jsui::text {
 
@@ -323,6 +324,12 @@ struct TextCache : Node::Cache {
   // Unhinted copies of the paragraph's text blobs, keyed by blob id (see
   // ChromeLikePainter). Cleared whenever the paragraph is laid out again.
   std::unordered_map<uint32_t, sk_sp<SkTextBlob>> blobs;
+  // TextInput: the displayed text (value after textTransform / bullets, or
+  // the placeholder) and the value -> display index map (UTF-16 units,
+  // size value.size() + 1).
+  std::u16string display;
+  std::vector<int> v2d;
+  bool placeholder = false;
 };
 
 // skparagraph shapes with slight hinting; Chrome (Linux, headless) draws
@@ -437,24 +444,49 @@ tl::TextAlign toSkAlign(TextAlign a) {
   return tl::TextAlign::kStart;
 }
 
-std::string inputDisplayText(Node* n, bool* placeholder) {
+// What a TextInput shows: its (edit state) value with textTransform applied
+// per code point (so indices map back) or bullets for secureTextEntry, else
+// the placeholder.
+void inputDisplay(Node* n, TextTransform transform, FontManager* fm, std::string* out, TextCache* c) {
   const Value& p = n->props();
-  std::string v = p["value"].isString() ? p["value"].asString() : p["defaultValue"].asString();
-  *placeholder = false;
+  const std::u16string& v = edit::state(n)->value;
+  c->v2d.assign(v.size() + 1, 0);
+  out->clear();
   if (v.empty()) {
-    *placeholder = true;
-    return p["placeholder"].asString();
+    c->placeholder = true;
+    bool ws = true;
+    *out = applyTransform(p["placeholder"].asString(), transform, fm, &ws);
+    return;
   }
-  if (p["secureTextEntry"].asBool()) {
-    std::string dots;
-    size_t i = 0;
-    while (i < v.size()) {
-      nextUtf8(v, &i);
-      dots += "\xE2\x80\xA2";  // U+2022 bullet
+  c->placeholder = false;
+  bool secure = p["secureTextEntry"].asBool();
+  bool multiline = p["multiline"].asBool();
+  bool plain = !secure && transform == TextTransform::None &&
+               (multiline || v.find(u'\n') == std::u16string::npos);
+  if (plain) {
+    for (size_t i = 0; i <= v.size(); i++) c->v2d[i] = int(i);
+    *out = edit::toUtf8(v);
+    return;
+  }
+  bool wordStart = true;
+  size_t i = 0;
+  int d = 0;
+  while (i < v.size()) {
+    size_t len = (v[i] >= 0xD800 && v[i] <= 0xDBFF && i + 1 < v.size()) ? 2 : 1;
+    std::string piece;
+    if (secure) {
+      piece = "\xE2\x80\xA2";  // U+2022 bullet
+    } else if (!multiline && (v[i] == u'\n' || v[i] == u'\r')) {
+      piece = " ";
+    } else {
+      piece = applyTransform(edit::toUtf8(v.substr(i, len)), transform, fm, &wordStart);
     }
-    return dots;
+    for (size_t k = 0; k < len; k++) c->v2d[i + k] = d;
+    d += int(edit::toUtf16(piece).size());
+    *out += piece;
+    i += len;
   }
-  return v;
+  c->v2d[v.size()] = d;
 }
 
 TextCache* ensureCache(Node* n) {
@@ -502,10 +534,10 @@ TextCache* ensureCache(Node* n) {
   BuildState st{fm, nullptr, {}};
   st.rootShift = baseMetrics.baselineShift;
   std::string inputText;
-  bool placeholder = false;
   if (isInput) {
-    inputText = inputDisplayText(n, &placeholder);
-    if (placeholder) {
+    inputDisplay(n, base.transform, fm, &inputText, fresh.get());
+    fresh->display = edit::toUtf16(inputText);
+    if (fresh->placeholder) {
       Color pc = Color::rgba(117, 117, 117);  // Chrome's ::placeholder color
       parseColor(props["placeholderTextColor"], &pc);
       base.color = pc;
@@ -545,9 +577,8 @@ TextCache* ensureCache(Node* n) {
   st.content.clear();
   builder->pushStyle(baseSk);
   if (isInput) {
-    std::string t = applyTransform(inputText, base.transform, fm, &st.wordStart);
-    builder->addText(t.data(), t.size());
-    st.content = t;
+    builder->addText(inputText.data(), inputText.size());
+    st.content = inputText;
   } else {
     addChildren(n, base, st);
   }
@@ -626,6 +657,176 @@ float textBaseline(YGNodeConstRef y, float width, float height) {
   return top + std::floor(b + 0.5f) + c->paintDy;
 }
 
+// ------------------------------------------------------ TextInput geometry
+//
+// Content-box coordinates (origin at the content box's top-left) unless
+// noted. Indices are value indices (UTF-16 units of the edit state).
+
+constexpr float kCaretWidth = 1;
+
+struct InputGeom {
+  TextCache* c = nullptr;
+  tl::Paragraph* p = nullptr;  // null: nothing to show (empty, no placeholder)
+  edit::EditState* s = nullptr;
+  bool multiline = false;
+  bool alignRight = false, alignCenter = false;
+  float cw = 0, ch = 0;                // content box size
+  float ox = 0, oy = 0;                // paragraph origin, scroll applied
+  float minScroll = 0, maxScroll = 0;  // scroll range (x single line, y multiline)
+  float lineHeight = 0;                // empty input line height
+};
+
+float emptyLineHeight(Node* n) {
+  float fs = n->style().text.fontSize.value_or(kDefaultFontSize);
+  if (n->style().text.lineHeight) {
+    float lh = *n->style().text.lineHeight;
+    return n->style().text.lineHeightRelative ? lh * fs : lh;
+  }
+  return std::ceil(fs * 1.21f);
+}
+
+bool inputGeom(Node* n, float cw, float ch, InputGeom* g) {
+  TextCache* c = ensureCache(n);
+  if (!c) return false;
+  g->c = c;
+  g->s = edit::state(n);
+  g->multiline = n->props()["multiline"].asBool();
+  g->cw = cw;
+  g->ch = ch;
+  g->lineHeight = emptyLineHeight(n);
+  TextAlign a = n->style().text.textAlign.value_or(TextAlign::Auto);
+  g->alignCenter = a == TextAlign::Center;
+  g->alignRight = a == TextAlign::Right || (a == TextAlign::Auto && c->rtl) || (a == TextAlign::End && !c->rtl);
+  float ph = g->lineHeight, lw = 0;
+  if (c->paragraph && !c->empty) {
+    layoutAt(c, g->multiline ? cw : kInf);
+    g->p = c->paragraph.get();
+    ph = g->p->getHeight();
+    lw = g->p->getLongestLine();
+  }
+  if (g->multiline) {
+    g->ox = 0;
+    if (!g->p) g->ox = g->alignCenter ? cw / 2 : g->alignRight ? cw - kCaretWidth : 0;
+    g->maxScroll = std::max(0.f, ph - ch);
+    g->oy = -std::clamp(g->s->scrollY, 0.f, g->maxScroll);
+    return true;
+  }
+  g->oy = (ch - ph) / 2;  // inputs center one line vertically
+  float tx;
+  if (!g->p) tx = g->alignCenter ? cw / 2 : g->alignRight ? cw - kCaretWidth : 0;
+  else if (lw + kCaretWidth > cw) tx = c->rtl ? cw - lw - kCaretWidth : 0;  // overflow: start edge visible
+  else if (g->alignCenter) tx = (cw - lw) / 2;
+  else if (g->alignRight) tx = cw - lw;
+  else tx = 0;
+  g->minScroll = std::min(0.f, tx);
+  g->maxScroll = std::max(0.f, tx + lw + kCaretWidth - cw);
+  g->ox = tx - std::clamp(g->s->scrollX, g->minScroll, g->maxScroll);
+  return true;
+}
+
+int displayIndex(const InputGeom& g, int v) {
+  if (g.c->placeholder || g.c->v2d.empty()) return 0;
+  v = std::clamp(v, 0, int(g.c->v2d.size()) - 1);
+  return g.c->v2d[size_t(v)];
+}
+
+int valueIndex(const InputGeom& g, int d) {
+  if (g.c->placeholder || g.c->v2d.empty()) return 0;
+  auto it = std::lower_bound(g.c->v2d.begin(), g.c->v2d.end(), d);
+  int v = it == g.c->v2d.end() ? int(g.c->v2d.size()) - 1 : int(it - g.c->v2d.begin());
+  // Never inside a cluster (surrogate pair, combining sequence).
+  const std::u16string& val = g.s->value;
+  int b = edit::prevBoundary(val, v);
+  if (v > 0 && edit::nextBoundary(val, b) != v) v = b;
+  return v;
+}
+
+// Caret at display index d, paragraph coordinates.
+SkRect caretInParagraph(const InputGeom& g, int d) {
+  tl::Paragraph* p = g.p;
+  const std::u16string& t = g.c->display;
+  int len = int(t.size());
+  d = std::clamp(d, 0, len);
+  float x = 0;
+  int line = -1;
+  tl::Paragraph::GlyphInfo gi;
+  // At a soft line break the caret belongs to the start of the next line
+  // (downstream, like a click there in Chrome).
+  bool wrapped = d > 0 && d < len && t[size_t(d - 1)] != u'\n' && t[size_t(d)] != u'\n' &&
+                 p->getLineNumberAtUTF16Offset(size_t(d - 1)) != p->getLineNumberAtUTF16Offset(size_t(d));
+  if (d > 0 && !wrapped && t[size_t(d - 1)] != u'\n' && p->getGlyphInfoAtUTF16Offset(size_t(d - 1), &gi)) {
+    // After the previous cluster: its trailing edge.
+    x = gi.fDirection == tl::TextDirection::kRtl ? gi.fGraphemeLayoutBounds.fLeft : gi.fGraphemeLayoutBounds.fRight;
+    line = p->getLineNumberAtUTF16Offset(size_t(d - 1));
+  } else if (d < len && t[size_t(d)] != u'\n' && p->getGlyphInfoAtUTF16Offset(size_t(d), &gi)) {
+    // Line start: the next cluster's leading edge.
+    x = gi.fDirection == tl::TextDirection::kRtl ? gi.fGraphemeLayoutBounds.fRight : gi.fGraphemeLayoutBounds.fLeft;
+    line = p->getLineNumberAtUTF16Offset(size_t(d));
+  } else {
+    // Empty line (between / after hard breaks).
+    line = d < len ? p->getLineNumberAtUTF16Offset(size_t(d)) : int(p->lineNumber()) - 1;
+    tl::LineMetrics lm;
+    if (line >= 0 && p->getLineMetricsAt(line, &lm)) {
+      x = float(lm.fLeft);
+      if (g.c->rtl && x > 0) x -= kCaretWidth;
+    }
+  }
+  float top = 0, bottom = g.lineHeight;
+  tl::LineMetrics lm;
+  if (line >= 0 && p->getLineMetricsAt(line, &lm)) {
+    top = float(lm.fBaseline - lm.fAscent);
+    bottom = float(lm.fBaseline + lm.fDescent);
+  }
+  return SkRect::MakeLTRB(x, top, x + kCaretWidth, bottom);
+}
+
+SkRect caretContent(const InputGeom& g, int v) {
+  if (!g.p) return SkRect::MakeXYWH(g.ox, g.oy, kCaretWidth, g.lineHeight);
+  return caretInParagraph(g, displayIndex(g, v)).makeOffset(g.ox, g.oy);
+}
+
+int indexAtContent(const InputGeom& g, float x, float y) {
+  if (!g.p || g.c->placeholder) return 0;
+  auto pos = g.p->getGlyphPositionAtCoordinate(x - g.ox, y - g.oy);
+  return valueIndex(g, int(pos.position));
+}
+
+void contentOrigin(Node* n, float* x, float* y, float* w, float* h) {
+  YGNodeRef yn = n->yoga();
+  float l = YGNodeLayoutGetPadding(yn, YGEdgeLeft) + YGNodeLayoutGetBorder(yn, YGEdgeLeft);
+  float t = YGNodeLayoutGetPadding(yn, YGEdgeTop) + YGNodeLayoutGetBorder(yn, YGEdgeTop);
+  float r = YGNodeLayoutGetPadding(yn, YGEdgeRight) + YGNodeLayoutGetBorder(yn, YGEdgeRight);
+  float b = YGNodeLayoutGetPadding(yn, YGEdgeBottom) + YGNodeLayoutGetBorder(yn, YGEdgeBottom);
+  *x = l;
+  *y = t;
+  *w = std::max(0.f, YGNodeLayoutGetWidth(yn) - l - r);
+  *h = std::max(0.f, YGNodeLayoutGetHeight(yn) - t - b);
+}
+
+// Geometry of a laid-out TextInput from its Yoga box.
+bool nodeGeom(Node* n, InputGeom* g, float* x0, float* y0) {
+  if (!n || n->type() != NodeType::TextInput || !n->yoga()) return false;
+  float w, h;
+  contentOrigin(n, x0, y0, &w, &h);
+  return inputGeom(n, w, h, g);
+}
+
+SkColor selectionColorOf(Node* n) {
+  Color c;
+  if (parseColor(n->props()["selectionColor"], &c)) {
+    if (c.a >= 1) c.a = 0.3f;  // an opaque tint highlights translucently (iOS)
+    return toSk(c);
+  }
+  return SkColorSetARGB(77, 0, 122, 255);  // rgba(0, 122, 255, 0.3): #B3D7FF on white
+}
+
+SkColor caretColorOf(Node* n) {
+  Color c{0, 0, 0, 1};
+  if (parseColor(n->props()["cursorColor"], &c) || parseColor(n->props()["selectionColor"], &c)) return toSk(c);
+  if (n->style().text.color) return toSk(*n->style().text.color);
+  return SK_ColorBLACK;
+}
+
 }  // namespace
 
 void installMeasure(Node* node) {
@@ -654,27 +855,146 @@ void paintText(Node* node, SkCanvas* canvas, float x, float y, float width, floa
 }
 
 void paintTextInput(Node* node, SkCanvas* canvas, float x, float y, float width, float height) {
-  TextCache* c = ensureCache(node);
-  if (!c || !c->paragraph) return;
-  bool multiline = node->props()["multiline"].asBool();
-  layoutAt(c, multiline ? width : kInf);
-  tl::Paragraph* p = c->paragraph.get();
-  float ty = y;
-  if (!multiline) ty = y + (height - p->getHeight()) / 2;  // inputs center one line vertically
-  float tx = x;
-  if (!multiline) {
-    // Alignment inside the box (layout was unconstrained).
-    float lw = p->getLongestLine();
-    TextAlign a = node->style().text.textAlign.value_or(TextAlign::Auto);
-    if (a == TextAlign::Center) tx = x + (width - lw) / 2;
-    else if (a == TextAlign::Right || (a == TextAlign::Auto && c->rtl) || (a == TextAlign::End && !c->rtl))
-      tx = x + width - lw;
-  }
+  InputGeom g;
+  if (!inputGeom(node, width, height, &g)) return;
+  edit::EditState* s = g.s;
   canvas->save();
   canvas->clipRect(SkRect::MakeXYWH(x, y, width, height));
-  ChromeLikePainter painter(canvas, c);
-  p->paint(&painter, tx, ty + c->paintDy);
+  if (g.p && s->focused && !s->collapsed() && !g.c->placeholder) {
+    SkPaint sp;
+    sp.setColor(selectionColorOf(node));
+    for (const tl::TextBox& b :
+         g.p->getRectsForRange(unsigned(displayIndex(g, s->start())), unsigned(displayIndex(g, s->end())),
+                               tl::RectHeightStyle::kMax, tl::RectWidthStyle::kTight))
+      canvas->drawRect(b.rect.makeOffset(x + g.ox, y + g.oy), sp);
+  }
+  if (g.p) {
+    ChromeLikePainter painter(canvas, g.c);
+    g.p->paint(&painter, x + g.ox, y + g.oy + g.c->paintDy);
+  }
   canvas->restore();
+  if (inputCaretVisible(node)) {
+    // The caret may sit on the content edge (end of right-aligned text).
+    canvas->save();
+    canvas->clipRect(SkRect::MakeXYWH(x - kCaretWidth, y, width + 2 * kCaretWidth, height));
+    SkPaint cp;
+    cp.setColor(caretColorOf(node));
+    canvas->drawRect(caretContent(g, s->focus).makeOffset(x, y), cp);
+    canvas->restore();
+  }
+}
+
+bool inputCaretVisible(Node* n) {
+  edit::EditState* s = edit::peek(n);
+  if (!s || !s->focused || !s->caretOn || !s->collapsed()) return false;
+  const Value& p = n->props();
+  if (p["caretHidden"].asBool()) return false;
+  if (p["editable"].isBool() && !p["editable"].asBool()) return false;
+  if (p["readOnly"].asBool()) return false;
+  return true;
+}
+
+SkRect inputCaretRect(Node* n, int index) {
+  InputGeom g;
+  float x0, y0;
+  if (!nodeGeom(n, &g, &x0, &y0)) return SkRect::MakeEmpty();
+  return caretContent(g, index).makeOffset(x0, y0);
+}
+
+int inputIndexAt(Node* n, float x, float y) {
+  InputGeom g;
+  float x0, y0;
+  if (!nodeGeom(n, &g, &x0, &y0)) return 0;
+  return indexAtContent(g, x - x0, y - y0);
+}
+
+void inputSelectionRects(Node* n, int start, int end, std::vector<SkRect>* out) {
+  out->clear();
+  InputGeom g;
+  float x0, y0;
+  if (!nodeGeom(n, &g, &x0, &y0) || !g.p || g.c->placeholder || start >= end) return;
+  for (const tl::TextBox& b : g.p->getRectsForRange(unsigned(displayIndex(g, start)), unsigned(displayIndex(g, end)),
+                                                     tl::RectHeightStyle::kMax, tl::RectWidthStyle::kTight))
+    out->push_back(b.rect.makeOffset(x0 + g.ox, y0 + g.oy));
+}
+
+int inputVerticalMove(Node* n, int index, int dir, float* goalX, bool hasGoal) {
+  InputGeom g;
+  float x0, y0;
+  if (!nodeGeom(n, &g, &x0, &y0)) return index;
+  int len = int(g.s->value.size());
+  SkRect r = caretContent(g, index);
+  float gx = hasGoal ? *goalX : r.fLeft;
+  *goalX = gx;
+  if (!g.p || g.c->placeholder || !g.multiline) return dir < 0 ? 0 : len;
+  float lh = std::max(1.f, r.height());
+  float ty = dir < 0 ? r.fTop - lh / 2 : r.fBottom + lh / 2;
+  if (ty < g.oy) return 0;
+  if (ty >= g.oy + g.p->getHeight()) return len;
+  return indexAtContent(g, gx, ty);
+}
+
+int inputLineEdge(Node* n, int index, bool end) {
+  InputGeom g;
+  float x0, y0;
+  if (!nodeGeom(n, &g, &x0, &y0)) return index;
+  int len = int(g.s->value.size());
+  if (!g.multiline || !g.p || g.c->placeholder) return end ? len : 0;
+  SkRect r = caretContent(g, index);
+  bool right = end != g.c->rtl;
+  int i = indexAtContent(g, right ? 1e7f : -1e7f, r.centerY());
+  if (end && i > 0 && i < len) {
+    // A soft-wrapped line ends before its trailing space (the index after it
+    // is the next line's start).
+    int d = displayIndex(g, i);
+    const std::u16string& t = g.c->display;
+    if (d > 0 && d < int(t.size()) && t[size_t(d)] != u'\n' && t[size_t(d - 1)] != u'\n' &&
+        g.p->getLineNumberAtUTF16Offset(size_t(d - 1)) != g.p->getLineNumberAtUTF16Offset(size_t(d)))
+      i = edit::prevBoundary(g.s->value, i);
+  }
+  return i;
+}
+
+bool inputRtl(Node* n) {
+  TextCache* c = n ? ensureCache(n) : nullptr;
+  return c && c->rtl;
+}
+
+bool inputScrollToCaret(Node* n) {
+  InputGeom g;
+  float x0, y0;
+  if (!nodeGeom(n, &g, &x0, &y0)) return false;
+  edit::EditState* s = g.s;
+  SkRect r = caretContent(g, s->focus);
+  if (g.multiline) {
+    float sy = std::clamp(s->scrollY, g.minScroll, g.maxScroll);
+    if (r.fTop < 0) sy += r.fTop;
+    else if (r.fBottom > g.ch) sy += r.fBottom - g.ch;
+    sy = std::clamp(sy, g.minScroll, g.maxScroll);
+    bool changed = sy != s->scrollY;
+    s->scrollY = sy;
+    return changed;
+  }
+  float sx = std::clamp(s->scrollX, g.minScroll, g.maxScroll);
+  if (r.fLeft < 0) sx += r.fLeft;
+  else if (r.fRight > g.cw) sx += r.fRight - g.cw;
+  sx = std::clamp(sx, g.minScroll, g.maxScroll);
+  bool changed = sx != s->scrollX;
+  s->scrollX = sx;
+  return changed;
+}
+
+bool inputCaretDamage(Node* n, SkRect* before, SkRect* after) {
+  edit::EditState* s = edit::peek(n);
+  if (!s) return false;
+  bool vis = inputCaretVisible(n);
+  SkRect r = vis ? inputCaretRect(n, s->focus) : SkRect::MakeEmpty();
+  if (vis == s->recordedVisible && (!vis || r == s->recordedCaret)) return false;
+  *before = s->recordedVisible ? s->recordedCaret : SkRect::MakeEmpty();
+  *after = r;
+  s->recordedVisible = vis;
+  s->recordedCaret = r;
+  return true;
 }
 
 void invalidateAll(Node* root) {

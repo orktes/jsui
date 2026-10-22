@@ -34,8 +34,12 @@ no DOM, no Node APIs).
   footer / empty, `numColumns`, `inverted`, `onEndReached`, `scrollToIndex`),
   `Pressable`, `TouchableOpacity`, `TouchableHighlight`,
   `TouchableWithoutFeedback`, `TouchableNativeFeedback`, `Button`,
-  `TextInput` (controlled / uncontrolled, `onChangeText`, `onSubmitEditing`,
-  `maxLength`, `multiline`, `secureTextEntry`), `ActivityIndicator`, `Switch`,
+  `TextInput` (native editing: caret, selection, clipboard, undo; controlled /
+  uncontrolled `value`, controlled `selection`, `onChange`, `onChangeText`,
+  `onSelectionChange`, `onSubmitEditing`, `onKeyPress`, `submitBehavior`,
+  `maxLength`, `multiline`, `secureTextEntry`, `selectTextOnFocus`,
+  `caretHidden`, `cursorColor`, `selectionColor`; ref `focus` / `blur` /
+  `clear` / `isFocused` / `setSelection`), `ActivityIndicator`, `Switch`,
   `Modal` (portal to the root, focus scope, Escape / gamepad B →
   `onRequestClose`), `SafeAreaView`, `KeyboardAvoidingView`, `StatusBar`.
 * **APIs:** `StyleSheet` (`create`, `flatten`, `compose`, `absoluteFill`,

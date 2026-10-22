@@ -46,10 +46,11 @@ library with a C API, and the same core compiles to WebAssembly.
   skparagraph) and image codecs. Native builds use prebuilt static libraries
   (aseprite/skia m124); WASM uses the same milestone built with
   `scripts/build-skia-wasm.sh`.
-* **CPU raster first.** The runtime paints into an RGBA buffer the embedder
-  uploads as a texture. Deterministic (great for reference tests) and works
-  everywhere. A GPU (Ganesh GL / Graphite) backend can be added behind the
-  same `paintDocument()` call.
+* **CPU raster first, GPU optional.** By default the runtime paints into an
+  RGBA buffer the embedder uploads as a texture. Deterministic (great for
+  reference tests) and works everywhere. The optional GPU backend runs the
+  same `paintDocument()` on a Skia Ganesh surface wrapping the embedder's
+  OpenGL / GLES / WebGL framebuffer or texture (see [GPU backend](#gpu-backend)).
 * **React Native semantics, written as `react-native` imports.** App code
   imports from `'react-native'`; the JSUI bundler aliases that to
   `@jsui/react`, and the Chrome reference build aliases it to
@@ -62,7 +63,7 @@ library with a C API, and the same core compiles to WebAssembly.
 | --- | --- |
 | `include/jsui/jsui.h` | Public C API (embedding, input, resources, messages) |
 | `src/core/` | `Value`, `Node`, `Document`, style parsing (`style.cpp`) |
-| `src/render/` | Skia painter, image cache |
+| `src/render/` | Skia painter, image cache, GPU backend (`gpu.cpp`) |
 | `src/text/` | Font manager, paragraph building and Yoga measure for `Text` |
 | `src/js/` | QuickJS host (`JsEngine`) and bridge globals |
 | `src/input/` | Hit testing, event routing, focus and gamepad navigation |
@@ -71,6 +72,7 @@ library with a C API, and the same core compiles to WebAssembly.
 | `src/runtime.*`, `src/capi.cpp` | Runtime object and C API wrappers |
 | `tools/jsui-render` | Headless renderer: bundle → PNG (tests, CI) |
 | `tools/jsui-viewer` | Windowed host with dev mode (live reload) |
+| `integrations/godot` | Godot 4 GDExtension (`JsuiView` Control) + demo project |
 | `web/` | Browser host for the WASM build |
 | `packages/react` | `@jsui/react`: reconciler, components, StyleSheet, events |
 | `packages/cli` | `@jsui/cli`: `jsui build` / `jsui dev` (esbuild + dev server) |
@@ -88,10 +90,95 @@ The embedder owns the loop (see `jsui.h`):
 2. `jsui_tick(now)`: deliver finished resource loads, run due timers, run
    `requestAnimationFrame` callbacks, drain promise jobs, run Yoga if dirty,
    emit `onLayout` events.
-3. If `jsui_needs_redraw()`, `jsui_render_rgba()` paints the tree.
+3. If `jsui_needs_redraw()`, `jsui_render_rgba()` paints the tree (or
+   `jsui_render_gl()` with the GPU backend).
+
+Hosts that sleep when idle check `jsui_wants_frame()`: it stays set while
+something moves on its own (rAF callbacks, due timers, in-flight loads,
+scroll flings / smooth scrolling / snapping, scroll indicator fades, held
+gamepad sticks or D-pad) and the host should keep ticking at display rate.
 
 Everything is single-threaded except resource I/O, which completes onto a
 queue drained in `jsui_tick`.
+
+## GPU backend
+
+`jsui_gpu_create_gl()` / `jsui_render_gl()` / `jsui_render_gl_target()`
+(`include/jsui/jsui.h`, `src/render/gpu.cpp`) draw a frame with Skia Ganesh
+into the embedder's GL target while its GL context is current:
+
+```c
+JsuiGpuContext* gpu = jsui_gpu_create_gl(get_proc, user);  // or NULL: EGL/GLX/WGL/CGL/WebGL default
+...
+jsui_tick(rt, now);
+jsui_render_gl(rt, gpu, 0 /* default framebuffer */, w, h, JSUI_GL_NO_CLEAR);  // HUD over the scene
+// or a texture the engine samples:
+JsuiGLTarget t = { .texture = tex, .width = w, .height = h, .flags = JSUI_GL_TOP_LEFT_ORIGIN };
+jsui_render_gl_target(rt, gpu, &t);
+```
+
+* **Same painter.** `Runtime::renderCanvas()` lays out, refreshes the
+  incremental paint records and paints the full frame (dev overlay and frozen
+  frame included) into the Ganesh surface. The CPU path is untouched and stays
+  the default; a later `jsui_render_rgba_incremental()` repaints fully.
+* **Full repaints.** The GPU path does not clip to the damage region: GPU
+  targets (swapped default framebuffers in particular) are not guaranteed to
+  keep the previous frame, and a GPU redraw of a whole HUD costs less than
+  a CPU raster + upload. `jsui_needs_redraw()` still says when a frame is
+  needed.
+* **Effects.** Everything the painter uses is plain Skia: blurred shadows
+  (the painter's cached shadow masks are CPU images drawn as sprites; Ganesh
+  uploads each once), `saveLayer` with opacity / image filters (blur, drop
+  shadow, colour matrices) / blend modes, gradients, clips, text (Ganesh glyph
+  atlases from the same scaler) and images. Output matches the CPU raster to
+  anti-aliasing / blur rounding (see `tests/native/gpu_test.cpp`: mean channel
+  difference < 0.25 on the test scene, < 0.6 on the example screens).
+* **Images.** Decoded images stay raster `SkImage`s owned by the runtime's
+  `ImageCache`; Ganesh uploads each on first draw and keeps the texture in its
+  resource cache keyed by the image (freed when the image is). Nothing in a
+  runtime is tied to a GPU context, so one `JsuiGpuContext` can serve several
+  runtimes, and a runtime can move between contexts or back to the CPU.
+* **GL state.** Each render starts with `GrDirectContext::resetContext()`, so
+  the embedder may change any GL state between frames. Skia leaves its own
+  state bound afterwards (framebuffer, program, textures, blend, scissor,
+  viewport, VAO, pixel store); engines with a GL state cache re-apply theirs.
+* **Context loss.** `jsui_gpu_context_lost()` abandons all GPU objects
+  without GL calls; the next render rebuilds the Ganesh context through the
+  same loader from whichever context is current then (the web host does this
+  on `webglcontextrestored`).
+* **Loader.** `get_proc` (e.g. `SDL_GL_GetProcAddress`) or NULL for the
+  platform default. On Linux nothing GL-related is linked: libEGL / libGL are
+  dlopen'ed and whichever has a current context is used, and the prebuilt
+  Skia's GLX references resolve to hidden forwarders. `egl*` names are only
+  answered while an EGL context is current (GLX returns stubs for any name,
+  which Skia would call).
+* **Targets.** `JsuiGLTarget` takes an FBO (0 = default framebuffer) or a
+  `GL_TEXTURE_2D`, the sized format (`GL_RGBA8` default, `GL_BGRA8_EXT`,
+  `GL_RGB8`, `GL_SRGB8_ALPHA8` (blends in linear light), `GL_RGB10_A2`,
+  `GL_RGBA16F`), MSAA sample count and stencil bits of an FBO, the origin
+  (`JSUI_GL_TOP_LEFT_ORIGIN` for textures sampled with v=0 at the top) and
+  `JSUI_GL_NO_CLEAR` to composite over the current contents. Wrapped FBOs
+  are cached (up to four); textures are wrapped per render (a deleted and
+  recreated texture may reuse its name).
+* **Builds.** CMake option `JSUI_GPU` (default ON for native builds; the
+  aseprite prebuilt Skia includes Ganesh GL (checked for Linux x64); macOS
+  also links the OpenGL framework). WASM: `WEBGL=1 scripts/build-wasm.sh`
+  builds Skia with Ganesh + WebGL (`third_party/skia-wasm-webgl`, canvaskit's
+  WebGL args) and JSUI with `-sMAX_WEBGL_VERSION=2` into
+  `web/dist-webgl/jsui.{js,wasm}`; the default WASM build stays CPU-only and
+  its `jsui_gpu_*` entry points return failure.
+* **Viewer / web.** `jsui-viewer --gpu` renders into the SDL GL window's
+  default framebuffer (`--screenshot` reads it back). In the browser,
+  `createJsui({ canvas, renderer: 'gpu', moduleUrl: '.../dist-webgl/jsui.js' })`
+  registers the canvas' WebGL context with emscripten and draws through
+  Skia; without a GPU module it falls back to the CPU raster + WebGL blit.
+* **Tests.** `tests/native/gpu_test.cpp` makes an EGL context (Mesa's
+  surfaceless platform / llvmpipe works headless), on desktop GL, GLES 3 and
+  GLES 2, renders scenes through the GPU path and compares with the CPU
+  output; without EGL it prints SKIP (`JSUI_GPU_TEST_REQUIRE=1`, set in CI,
+  makes that a failure). `JSUI_WEB_DIST=dist-webgl node web/test/browser.test.mjs`
+  runs the browser tests against the GPU module, including GPU-vs-CPU pixel
+  comparisons.
 
 ## JS bridge contract
 
@@ -109,10 +196,14 @@ Native globals (installed by `JsEngine`):
 | `destroyNode(id)` | free a detached subtree |
 | `measure(id) → {x, y, width, height, pageX, pageY}` | layout of a node (synchronous; runs a pending layout first). `null` for unknown ids |
 | `focus(id)`, `blur(id)` | `InputManager::focus` / `blur` |
-| `scrollTo(id, x, y, animated)` | `InputManager::scrollTo` (clamped, dispatches `scroll`); `animated` is accepted but the jump is immediate |
+| `scrollTo(id, x, y, animated)` | `InputManager::scrollTo` (clamped, dispatches `scroll`). `animated`: eases there on the runtime clock; otherwise immediate (and stops a running fling) |
+| `flashScrollIndicators(id)` | shows a ScrollView's overlay indicators for ~1 s |
 | `postMessage(name, json)` | to the embedder's `on_message`. A string is passed through as the JSON text; any other value is `JSON.stringify`-ed |
 | `loadFont(family, url, weight, italic) → Promise<true>` | load via the resource loader (URL relative to the bundle), register with the FontManager, relayout text; rejects with an `Error` on 404 / bad font data |
 | `reload()` | reload the bundle at the start of the next tick (safe from inside JS) |
+| `textEditing` | `true`: TextInput text is edited natively (see "TextInput editing") |
+| `setTextInputSelection(id, start, end)` | TextInput selection (UTF-16 indices, clamped; no event) |
+| `getClipboard() → string`, `setClipboard(text)` | the embedder's clipboard (`jsui_set_clipboard_callbacks`) or the runtime's in-process one |
 
 Standard globals (`src/js/prelude.cpp` + `host_api.cpp`):
 
@@ -165,12 +256,14 @@ Native dispatches plain objects; `@jsui/react` turns them into React-style
 synthetic events, does capture/bubble along its instance tree and maps them to
 React Native props (`onPress`, `onPressIn/Out`, `onLongPress`, `onHoverIn/Out`,
 `onPointerDown/Move/Up/Enter/Leave`, `onKeyDown/Up`, `onFocus/onBlur`,
-`onScroll`, `onWheel`, `onChangeText`).
+`onScroll`, `onScrollBeginDrag/EndDrag`, `onMomentumScrollBegin/End`,
+`onWheel`, `onChangeText`).
 
 ```
 { type: 'pointerdown'|'pointermove'|'pointerup'|'pointercancel'|'pointerenter'|'pointerleave'
         |'click'|'wheel'|'keydown'|'keyup'|'textinput'|'focus'|'blur'|'scroll'
-        |'gamepadbutton'|'gamepadaxis'|'gamepadconnected',
+        |'scrollbegindrag'|'scrollenddrag'|'momentumscrollbegin'|'momentumscrollend'
+        |'gamepadbutton'|'gamepadaxis'|'gamepadconnected'|'change'|'selectionchange',
   target: <node id>,              // hit node, focused node for keys
   timestamp: <ms>,
   // pointer
@@ -181,12 +274,15 @@ React Native props (`onPress`, `onPressIn/Out`, `onLongPress`, `onHoverIn/Out`,
   deltaX, deltaY,
   // keys
   key, code, repeat, shiftKey, ctrlKey, altKey, metaKey,
-  // text
-  text,
+  // text; TextInput edits ('change': text + eventCount, 'selectionchange')
+  text, eventCount, selection: {start, end},
   // gamepad
   gamepad, buttonIndex, value, axis,
-  // scroll
-  contentOffset: {x, y}, contentSize: {width, height}, layoutMeasurement: {width, height} }
+  // scroll, scrollbegindrag, scrollenddrag, momentumscroll* (on the ScrollView)
+  contentOffset: {x, y}, contentSize: {width, height}, layoutMeasurement: {width, height},
+  contentInset: {top, left, bottom, right}, zoomScale: 1,
+  velocity: {x, y},               // px/ms, + = offset increasing (scrollenddrag)
+  targetContentOffset: {x, y} }   // where the fling / snap will end (scrollenddrag)
 ```
 
 `pointerenter`/`pointerleave` are dispatched per node (no bubbling), like the DOM.
@@ -214,6 +310,49 @@ was `preventDefault()`-ed.
   (DOM convention); over a `horizontal` ScrollView a vertical wheel scrolls
   sideways. A touch dragged > 8 px inside a scrollable ScrollView sends
   `pointercancel` and scrolls it.
+* **Scrolling** (`src/input/scroll.cpp`; geometry in `src/core/scroll.*`).
+  All animations are analytic curves on the runtime clock, advanced in
+  `jsui_tick`.
+  * Touch drag: `scrollbegindrag`, `scroll`…, `scrollenddrag` (release
+    velocity over the last 100 ms; a finger that rested has none), then a
+    fling (`momentumscrollbegin`, `scroll`…, `momentumscrollend`) decaying
+    by `decelerationRate` per ms (`'normal'` 0.998, `'fast'` 0.99, or a
+    number) until 0.02 px/ms or the content edge (no overscroll). A touch on
+    a moving ScrollView stops it (`momentumscrollend`), is not a press, and
+    drags without the slop.
+  * Snapping (flings, wheel notches, keys, stick release, trackpad settle):
+    `pagingEnabled` moves one page in the velocity direction (else nearest);
+    `snapToInterval` (+ `snapToAlignment`, `disableIntervalMomentum`) and
+    `snapToOffsets` (+ `snapToStart`/`snapToEnd`) pick the snap point on the
+    velocity side of the projected end, like React Native on iOS. The glide to
+    the snap point is momentum.
+  * Wheel: whole deltas ≥ 40 px (mouse notches) glide over 150 ms and
+    accumulate; other deltas (trackpads) apply pixel-precisely and snap after
+    150 ms idle. `InputManager::smoothWheel = false` disables gliding.
+  * Keyboard (no TextInput focused): PageUp/PageDown (87.5 % of the
+    viewport), Home/End, Space / Shift+Space when nothing pressable is
+    focused, arrows when spatial navigation finds nothing further. D-pad
+    likewise scrolls 40 px past the last focusable item. Target: the focused
+    node's ScrollView, else the hovered one, else the first scrollable one
+    in the focus scope.
+  * Gamepad sticks: the right stick scrolls that target continuously
+    (dead zone 0.2, quadratic response up to 1.6 px/ms); the left stick does
+    too when the focus scope has nothing focusable. `preventDefault()` on the
+    `gamepadaxis` event keeps the stick for the app.
+  * Focus moved by keys / gamepad (or by code after them) glides the node
+    into view keeping up to 32 px of context; focus from a press never
+    scrolls; programmatic focus after pointer input jumps edge-aligned.
+  * `scrollEnabled: false` stops user scrolling only (programmatic and focus
+    scrolling still work). Offsets are re-clamped when content shrinks.
+  * Overlay indicators (3 px thumbs, `indicatorStyle` `default`/`black`/
+    `white`, hidden by `showsVertical/HorizontalScrollIndicator: false`) show
+    while scrolling and fade out after 500 ms. Scrolling and fading repaint
+    only the ScrollView's rect / the thumbs' rects.
+  * `@jsui/react` adds `contentOffset` (applied on mount),
+    `scrollEventThrottle` (> 16 ms limits `onScroll`, with a trailing event;
+    otherwise every event), `stickyHeaderIndices` (vertical; headers wrapped
+    in a `zIndex: 10` View translated on scroll, the next header pushes the
+    previous one) and wraps paging children like react-native-web.
 * **Focusable:** `focusable: true`, pressable nodes (unless `focusable: false`),
   `TextInput`; never `disabled: true` or inside `display: none`. Extra event
   fields: `focus` has `focusVisible` (true when the last input was a key or
@@ -228,7 +367,57 @@ was `preventDefault()`-ed.
   `nextFocusUp/Down/Left/Right` (node ids) override spatial navigation.
 * Stick: deadzone 0.5 on the dominant axis; held D-pad / stick repeats after
   400 ms, then every 120 ms. Focus changes scroll the node into view in its
-  ScrollView ancestors.
+  ScrollView ancestors (see Scrolling).
+
+## TextInput editing
+
+The runtime owns a TextInput's text like a native text field does in React
+Native (`src/text/text_edit.*`, `src/input/text_editing.cpp`). Keys and
+text reach JS first (`keydown`, `textinput`); unless JS calls
+`preventDefault()`, the focused TextInput applies them:
+
+* Typing / IME commits replace the selection (single-line inputs drop line
+  breaks; control characters are dropped), honoring `maxLength` (UTF-16
+  units, never splitting a surrogate pair) and `editable` / `readOnly`.
+* Arrows move by grapheme-ish clusters (code points + combining marks, ZWJ
+  sequences, flags); Ctrl/Alt+arrows by word, Cmd+arrows / Home / End to the
+  visual line edge, Ctrl+Home/End and PageUp/PageDown to the text edges;
+  Up/Down move a visual line keeping the goal column (single line: text
+  edges); Shift extends. ArrowLeft/Right are mirrored in RTL text.
+* Backspace / Delete delete the selection, or a cluster / word (Ctrl, Alt) /
+  to the line edge (Cmd). Enter inserts a newline in multiline inputs (the
+  `TextInput` component prevents Enter when it submits).
+* Ctrl/Cmd + A selects all, C / X / V copy, cut, paste through the clipboard
+  (`jsui_set_clipboard_callbacks`, else in-process; never for
+  `secureTextEntry`), Z / Shift+Z / Ctrl+Y undo / redo (typing coalesces).
+* Mouse: press places the caret (Shift extends), drag selects, double click
+  selects a word, triple click everything; touch taps place the caret. A
+  press that focuses a `selectTextOnFocus` input selects everything.
+
+Edits dispatch `change` (`text`, `eventCount`) and `selectionchange`
+(`selection: {start, end}`) to nodes listing the `change` /
+`selectionChange` tokens. Props: `value` is adopted when it differs from the
+native text and `mostRecentEventCount` >= the native edit count (renders that
+have not seen the latest edit are stale; without the prop a changed `value`
+is adopted), `defaultValue`, `placeholder`, `placeholderTextColor`,
+`secureTextEntry` (U+2022 per code point), `multiline`, `maxLength`,
+`editable`, `selectTextOnFocus`, `caretHidden`, `cursorColor`,
+`selectionColor` (highlight; opaque colors at 30 % alpha, default
+`rgba(0,122,255,0.3)`; also the caret color unless `cursorColor`).
+
+Geometry is skparagraph's: the caret is the trailing edge of the previous
+grapheme (`getGlyphInfoAtUTF16Offset`) on its line's ascent..descent,
+clicks use `getGlyphPositionAtCoordinate`, the highlight `getRectsForRange`.
+A value -> display index map keeps indices right under `textTransform` and
+bullets. Single-line inputs scroll horizontally to keep the caret visible
+(multiline: vertically) and show their start again on blur.
+
+The caret blinks (500 ms on / off, restarted by any edit or move). A blink
+or a caret-only move marks the document paint-dirty without bumping the
+node's paint version; `updateDamage()` then damages just the caret's old
+and new rects (`text::inputCaretDamage`), so `jsui_needs_redraw()` turns
+true twice a second while an input is focused and each such frame repaints
+a few pixels.
 
 ## Styles
 
@@ -264,12 +453,14 @@ The default font is Inter (bundled); `fontFamily` falls back to it.
   `tools/jsui-viewer` downloads SDL 2.30.12 (SHA-256 checked) and links it
   statically; `-DJSUI_BUILD_VIEWER=OFF` skips it, `-DJSUI_SDL_DIR=` uses a
   local SDL2 source tree, and a failed download only skips the viewer.
-  `jsui-viewer [--dev] [--width W --height H] <bundle path or URL>`; F5
+  `jsui-viewer [--dev] [--gpu] [--width W --height H] <bundle path or URL>`; F5
   reloads; `--frames N --screenshot out.png` runs headless
-  (`SDL_VIDEODRIVER=dummy`).
+  (`SDL_VIDEODRIVER=dummy`; `--gpu` needs a GL-capable display, e.g. `xvfb-run`
+  with Mesa). `-DJSUI_GPU=OFF` builds without the GPU backend.
 * WASM: `scripts/build-skia-wasm.sh` (once), then `emcmake cmake -S . -B build-wasm`.
   The `web/` host loads `jsui.wasm`, forwards DOM input, blits frames to a canvas.
-  `scripts/build-wasm.sh` does all steps (emsdk 3.1.44 → Skia m124 → `web/dist/jsui.{js,wasm}`).
+  `scripts/build-wasm.sh` does all steps (emsdk 3.1.44 → Skia m124 → `web/dist/jsui.{js,wasm}`);
+  `WEBGL=1 scripts/build-wasm.sh` builds the GPU variant into `web/dist-webgl/`.
   In the page: `const jsui = await createJsui({ canvas, bundleUrl })` from
   `web/jsui-web.js`; `jsui.on('message', (name, data) => …)`, `jsui.postMessage(name, data)`.
   The browser loader backend is `fetch()` (`src/platform/loader_emscripten.cpp`).
@@ -326,7 +517,8 @@ Details of how the JS package uses the bridge, for native implementers:
   `click` (onClick — every Pressable/Touchable/Button host has it, so they are
   pressable), `pointerDown`, `pointerUp`, `pointerMove`, `pointerCancel`,
   `hoverIn`/`pointerEnter`, `hoverOut`/`pointerLeave`, `wheel`, `keyDown`,
-  `keyUp`, `focus`, `blur`, `scroll`, `textInput`, `gamepadButton`,
+  `keyUp`, `focus`, `blur`, `scroll`, `textInput`, `change`,
+  `selectionChange`, `gamepadButton`,
   `gamepadAxis`, `layout`, `load`, `error`, and `responder` (+`pointerMove`) for
   RN responder / PanResponder views. Plain `onPointerDown` does not make a node
   pressable.
@@ -337,7 +529,7 @@ Details of how the JS package uses the bridge, for native implementers:
 * Optional bridge members used when present: `patchStyle(id, partialStyle)`
   (Animated / `setNativeProps`; otherwise `setProps` with the merged style),
   `viewport()` (native: returns `{width, height, scale}`), `focus`, `blur`,
-  `scrollTo`, `measure`, `postMessage`, `loadFont`, `getImageSize(uri)`,
+  `scrollTo`, `flashScrollIndicators`, `measure`, `postMessage`, `loadFont`, `getImageSize(uri)`,
   `prefetchImage(uri)`, `reload`.
 * Events beyond input: `{type: 'resize', width, height, scale}` (sent by
   `jsui_set_viewport` when the size changes; drives Dimensions);

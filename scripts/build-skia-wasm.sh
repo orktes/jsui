@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Builds Skia m124 for WebAssembly (CPU raster) and installs headers + static
-# libraries into third_party/skia-wasm, the layout cmake/Deps.cmake expects:
+# Builds Skia m124 for WebAssembly and installs headers + static libraries
+# into third_party/skia-wasm (CPU raster, the default) or, with WEBGL=1, into
+# third_party/skia-wasm-webgl (CPU raster + Ganesh on WebGL 1/2), in the
+# layout cmake/Deps.cmake expects:
 #
 #   third_party/skia-wasm/include/...            public headers
 #   third_party/skia-wasm/modules/*/include/...  module headers (skparagraph, ...)
@@ -13,7 +15,11 @@
 # The gn args follow modules/canvaskit/compile.sh (CPU variant): FreeType
 # (bundled), HarfBuzz + ICU shaping (skshaper/skunicode/skparagraph), PNG/JPEG/
 # WebP/GIF decode, PNG encode, no fontconfig/expat/system libs, no PDF/SVG/
-# Skottie/GPU. Optimised with -O3 (frame time beats a few hundred KB of wasm).
+# Skottie. The default build has no GPU backend; WEBGL=1 adds Ganesh with the
+# WebGL GL standard like canvaskit's default (GPU) variant (skia_enable_ganesh,
+# skia_use_webgl, skia_gl_standard="webgl"; JSUI links it with
+# -sMAX_WEBGL_VERSION=2). Optimised with -O3 (frame time beats a few hundred KB
+# of wasm).
 #
 # Idempotent: when third_party/skia-wasm/.stamp matches the hash of this
 # script the build is skipped, so CI can cache third_party/skia-wasm keyed on
@@ -24,6 +30,11 @@
 #   EMSDK       activated emsdk (default third_party/emsdk, see setup-emsdk.sh)
 #   JOBS        ninja parallelism (default 2)
 #   SKIA_WASM_DEBUG=1  is_debug build (for diagnosing crashes)
+#   WEBGL=1 (or SKIA_WASM_WEBGL=1)  GPU variant: Ganesh + WebGL, installed into
+#                      third_party/skia-wasm-webgl (SKIA_WASM_OUT overrides), so
+#                      it can be cached separately from the CPU build. Configure
+#                      JSUI with -DJSUI_SKIA_DIR=<that dir> (scripts/build-wasm.sh
+#                      does this when WEBGL=1).
 #   SKIA_WASM_SIMD=1   build with WebAssembly SIMD (-msimd128); CMake detects it
 #                      from out/args.gn and builds JSUI with SIMD too. Off by
 #                      default: with Skia's wasm SKNX_NO_SIMD it measured no gain
@@ -33,14 +44,19 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SKIA_BRANCH="chrome/m124"
 SKIA_SRC="${SKIA_SRC:-$ROOT/third_party/skia-src}"
-OUT_DIR="${SKIA_WASM_OUT:-$ROOT/third_party/skia-wasm}"
+WEBGL="${SKIA_WASM_WEBGL:-${WEBGL:-0}}"
+if [ "$WEBGL" = "1" ]; then
+  OUT_DIR="${SKIA_WASM_OUT:-$ROOT/third_party/skia-wasm-webgl}"
+else
+  OUT_DIR="${SKIA_WASM_OUT:-$ROOT/third_party/skia-wasm}"
+fi
 EMSDK="${EMSDK:-$ROOT/third_party/emsdk}"
 JOBS="${JOBS:-2}"
 DEBUG="${SKIA_WASM_DEBUG:-0}"
 SIMD="${SKIA_WASM_SIMD:-0}"
 
 hash_inputs() { cat "$ROOT/scripts/build-skia-wasm.sh" "$ROOT/scripts/setup-emsdk.sh" | sha256sum | cut -d' ' -f1; }
-STAMP_VALUE="$(hash_inputs)-debug$DEBUG-simd$SIMD"
+STAMP_VALUE="$(hash_inputs)-debug$DEBUG-simd$SIMD-webgl$WEBGL"
 if [ -f "$OUT_DIR/.stamp" ] && [ "$(cat "$OUT_DIR/.stamp")" = "$STAMP_VALUE" ] && [ -f "$OUT_DIR/out/libskia.a" ]; then
   echo "skia-wasm is up to date ($OUT_DIR)"
   exit 0
@@ -84,6 +100,18 @@ else
   BUILD_DIR="out/jsui-wasm"; IS_DEBUG=false; IS_OFFICIAL=true
 fi
 
+if [ "$WEBGL" = "1" ]; then
+  # canvaskit/compile.sh (default = WebGL variant): Ganesh on WebGL.
+  GPU_ARGS='skia_enable_ganesh=true
+skia_use_gl=true
+skia_use_webgl=true
+skia_gl_standard="webgl"'
+else
+  GPU_ARGS='skia_enable_ganesh=false
+skia_use_gl=false
+skia_use_webgl=false'
+fi
+
 ARGS="
 is_debug=$IS_DEBUG
 is_official_build=$IS_OFFICIAL
@@ -93,14 +121,12 @@ $([ "$SIMD" = "1" ] && echo 'extra_cflags=["-msimd128"]' || true)
 target_cpu=\"wasm\"
 skia_emsdk_dir=\"$EMSDK\"
 
-skia_enable_ganesh=false
+$GPU_ARGS
 skia_enable_graphite=false
-skia_use_webgl=false
 skia_use_webgpu=false
 skia_use_dawn=false
 skia_use_angle=false
 skia_use_vulkan=false
-skia_use_gl=false
 
 skia_use_fontconfig=false
 skia_use_freetype=true
@@ -144,6 +170,7 @@ skia_enable_tools=false
 skia_enable_spirv_validation=false
 "
 [ "$SIMD" = "1" ] && BUILD_DIR="$BUILD_DIR-simd"
+[ "$WEBGL" = "1" ] && BUILD_DIR="$BUILD_DIR-webgl"
 ARGS="$(echo "$ARGS" | sed '/^$/d' | tr '\n' ' ')"
 echo "gn args: $ARGS"
 bin/gn gen "$BUILD_DIR" --args="$ARGS"

@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -95,12 +96,28 @@ class InputManager {
   // node when nothing is focused. Returns true if focus changed.
   bool navigate(NavDirection dir);
   // Sets a ScrollView's offset (clamped to its content) and dispatches
-  // 'scroll' when it changed. Returns true if the offset changed.
+  // 'scroll' when it changed. Stops a running scroll animation / fling.
+  // Returns true if the offset changed.
   bool scrollTo(Node* scrollView, float x, float y);
-  // Scrolls ScrollView ancestors so `n` is visible.
-  void scrollIntoView(Node* n);
+  // animated: eases to the (clamped) target, driven by tick(). Returns true
+  // if the target differs from the current offset.
+  bool scrollTo(Node* scrollView, float x, float y, bool animated);
+  // Scrolls ScrollView ancestors so `n` is visible, keeping `margin` px of
+  // context around it where the viewport allows.
+  void scrollIntoView(Node* n, bool animated = false, float margin = 0);
   // Content size of a ScrollView from its children's layout extents.
   void contentSize(const Node* scrollView, float* w, float* h) const;
+  // TextInput selection set from JS (ref.setSelection / the selection
+  // prop): clamped, scrolled into view, no selectionchange event.
+  void setInputSelection(Node* input, int start, int end);
+  // Shows the overlay scroll indicators briefly (RN flashScrollIndicators).
+  void flashScrollIndicators(Node* scrollView);
+  // True while scroll animations, flings, indicator fades or held gamepad
+  // input need further ticks (hosts that sleep when idle keep ticking).
+  bool animating() const;
+  // Animate mouse-wheel notches (whole deltas >= kSmoothWheelMinDelta);
+  // fractional / small deltas (trackpads) always scroll pixel-precisely.
+  bool smoothWheel = true;
 
   // Hit testing inside a paragraph (Text node): returns the inline span (or
   // the Text itself) under a Text-local point. Set by the text layout.
@@ -114,6 +131,26 @@ class InputManager {
   static constexpr float kTouchSlop = 8;
   static constexpr int kMousePointerId = 0;  // touches use id + 1
 
+  // Scrolling (src/input/scroll.cpp).
+  static constexpr float kDecelerationNormal = 0.998f;  // velocity factor per ms (iOS)
+  static constexpr float kDecelerationFast = 0.99f;
+  static constexpr float kMinFlingVelocity = 0.05f;     // px/ms
+  static constexpr float kStopVelocity = 0.02f;         // px/ms: a fling ends below this
+  static constexpr double kVelocityWindowMs = 100;
+  static constexpr float kSmoothWheelMinDelta = 40;
+  static constexpr double kWheelAnimMs = 150;
+  static constexpr double kKeyScrollAnimMs = 180;
+  static constexpr double kFocusScrollAnimMs = 220;
+  static constexpr double kSnapSettleMs = 150;          // idle time before a trackpad / stick scroll snaps
+  static constexpr float kLineStep = 40;                // arrow keys / D-pad past the last focusable
+  static constexpr float kPageFraction = 0.875f;        // PageUp / PageDown
+  static constexpr float kFocusMarginMax = 32;          // context kept around a focused item
+  static constexpr float kScrollStickDeadzone = 0.2f;
+  static constexpr float kScrollStickMaxSpeed = 1.6f;   // px/ms at full deflection
+  static constexpr double kIndicatorHoldMs = 500;
+  static constexpr double kIndicatorFadeMs = 300;
+  static constexpr double kIndicatorFlashMs = 1000;
+
  private:
   struct PointerState {
     int pointerId = 0;
@@ -125,6 +162,7 @@ class InputManager {
     uint32_t captureId = 0;   // implicit capture target while buttons are held
     uint32_t downId = 0;      // primary-button down target (click rule)
     uint32_t scrollingId = 0; // touch drag scrolling this ScrollView
+    bool dragStarted = false; // scrollbegindrag sent for scrollingId
     std::vector<uint32_t> chain;  // hovered path, root first
   };
   struct Repeat {
@@ -135,6 +173,36 @@ class InputManager {
     float axes[4] = {0, 0, 0, 0};
     uint32_t buttons = 0;
     Repeat stick, dpad;
+    bool leftScrolls = false;   // left stick scrolls (nothing focusable to navigate)
+    bool rightBlocked = false;  // JS preventDefault()-ed the right stick
+    uint32_t stickScrollId = 0; // ScrollView the sticks are scrolling
+    float stickScrollDir = 0;
+  };
+  // Per-ScrollView scroll physics (src/input/scroll.cpp).
+  struct ScrollState {
+    enum class Anim : uint8_t { None, Tween, Decay };
+    Anim anim = Anim::None;
+    bool momentum = false;   // user fling / release snap: ends with momentumscrollend
+    bool accumulate = false; // wheel / key tween: further input retargets from its end
+    bool easeInOut = false;
+    double t0 = 0, duration = 0;
+    float fromX = 0, fromY = 0, toX = 0, toY = 0;
+    // Decay along the main axis: offset(t) = from + v0 (rate^t - 1) / ln(rate).
+    float v0 = 0, rate = kDecelerationNormal;
+    bool horizontal = false;
+    // Touch drag velocity tracking (main-axis offset samples).
+    bool dragging = false;
+    float dragStart = 0;
+    struct Sample {
+      double t;
+      float pos;
+    };
+    std::array<Sample, 8> samples{};
+    int sampleCount = 0;
+    // Snap after a trackpad / stick scroll settles (-1: none).
+    double settleAt = -1;
+    float settleDir = 0;     // -1 / 1: snap in that direction, 0: nearest
+    double shownUntil = -1;  // indicators fully visible until, then fade
   };
 
   Node* hitNode(Node* n, float px, float py, float* lx, float* ly);
@@ -159,6 +227,56 @@ class InputManager {
   void setFocus(Node* n);
   Node* scrollableAncestor(Node* n, float dx, float dy) const;
   bool dispatchScroll(Node* sv);
+
+  // TextInput editing (text_editing.cpp). The focused TextInput gets keys
+  // and text after JS saw them (unless prevented); see text/text_edit.h.
+  bool editKey(Node* input, const std::string& key, int mods);
+  bool editText(Node* input, const char* utf8);
+  void editPointerDown(Node* input, const PointerState& p, int mods);
+  void editPointerDrag(const PointerState& p);
+  void editFocus(Node* input, bool focused);
+  void editTick();
+  enum class EditKind { Typing, Delete, Other };
+  bool editReplace(Node* input, int start, int end, std::u16string text, EditKind kind);
+  void editSelect(Node* input, int anchor, int focus, bool keepGoal = false);
+  bool editUndo(Node* input, bool redo);
+  void editNotify(uint32_t id, bool text, bool selection);
+  std::u16string editFilter(Node* input, const std::u16string& in) const;
+  bool editable(const Node* input) const;
+
+  // Scrolling internals (src/input/scroll.cpp).
+  bool dispatchScrollEvent(const char* type, Node* sv, float vx = 0, float vy = 0, const float* target = nullptr);
+  // Sets the clamped offset and dispatches 'scroll' (no animation change).
+  bool applyScroll(Node* sv, float x, float y, bool showIndicators);
+  ScrollState& scrollState(Node* sv);
+  // Ends a running animation; a fling / release snap gets momentumscrollend
+  // when `notify`. Returns false if the node died in a handler.
+  bool stopScrollAnimation(uint32_t svId, bool notify);
+  void startTween(Node* sv, float x, float y, double durationMs, bool momentum, bool accumulate, bool easeInOut);
+  // Where further input moves from: the running tween's end, else the offset.
+  void scrollBase(Node* sv, float* x, float* y);
+  // Snap point for a gesture ending at `projected` (main axis) with
+  // `velocity` (px/ms) from `current`; NaN when the ScrollView doesn't snap
+  // there (no snapping props, or a free zone of snapToOffsets).
+  float snapTarget(Node* sv, float projected, float velocity, float current);
+  bool snaps(const Node* sv) const;
+  void beginDrag(PointerState& p, Node* sv);
+  void dragTo(PointerState& p, Node* sv, float x, float y);
+  void endDrag(PointerState& p, bool cancelled);
+  Node* animatingScrollAncestor(Node* n);
+  bool wheelScroll(Node* hit, float dx, float dy);
+  // Keyboard / gamepad scroll target: focused, then hovered, then the first
+  // visible ScrollView that can scroll along the axis.
+  // `preferId` (still eligible) wins over the tree-order fallback.
+  Node* scrollTarget(bool horizontal, uint32_t preferId = 0);
+  // Moves by `amount` (sign = direction) along an axis, snapping when the
+  // ScrollView snaps. Returns true if it will move.
+  bool scrollBy(Node* sv, bool horizontal, float amount, double durationMs);
+  bool scrollStep(int dir);  // D-pad / arrows past the last focusable
+  bool keyboardScroll(const std::string& key, int mods);
+  bool hasFocusTargets() const;
+  void tickScrolling(double nowMs, double dtMs);
+  void tickSticks(double dtMs);
 
   Node* modalScope() const;
   void collectFocusable(Node* scope, std::vector<Node*>* out) const;
@@ -186,6 +304,22 @@ class InputManager {
   };
   std::vector<ScopeMemo> scopeStack_;
   uint32_t scopeId_ = 0;
+  std::unordered_map<uint32_t, ScrollState> scrolls_;
+  double lastTick_ = -1;
+  bool pointerFocus_ = false;  // focus change caused by a press: no scroll into view
+
+  // TextInput pointer selection: drag target, granularity (0 characters,
+  // 1 words, 2 everything) and the word the drag started on.
+  uint32_t dragInputId_ = 0;
+  int dragMode_ = 0, dragWordStart_ = 0, dragWordEnd_ = 0;
+  // Multi-click detection (double: word, triple: all).
+  uint32_t lastClickId_ = 0;
+  double lastClickTime_ = -1e9;
+  float lastClickX_ = 0, lastClickY_ = 0;
+  int clickCount_ = 0;
+  // selectTextOnFocus selected everything: the press that focused it does
+  // not place the caret.
+  uint32_t selectedOnFocusId_ = 0;
 
   // Reused buffers (no per-event allocation in the steady state).
   std::vector<Node*> zOrder_;

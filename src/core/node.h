@@ -82,6 +82,9 @@ class Node {
 
   // ScrollView content offset.
   float scrollX = 0, scrollY = 0;
+  // Opacity of the overlay scroll indicators (0: hidden). Driven by
+  // InputManager (shown while scrolling, then faded out); read by the painter.
+  float scrollIndicatorOpacity = 0;
 
   // Marks layout and paint dirty (text content or style changed).
   void markDirty();
@@ -96,6 +99,8 @@ class Node {
   std::unique_ptr<Cache> imageCache;
   // Renderer state (recorded picture of this subtree, see render/painter.cpp).
   std::unique_ptr<Cache> paintCache;
+  // TextInput editing state (text, selection, caret; see text/text_edit.h).
+  std::unique_ptr<Cache> editState;
   // Bumped on every change that affects how this node itself paints (props,
   // text, children list). The painter compares it against its cache.
   uint32_t paintVersion = 0;

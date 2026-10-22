@@ -33,6 +33,8 @@ const EVENT_TOKENS = {
   onBlur: ['blur'],
   onScroll: ['scroll'],
   onTextInput: ['textInput'],
+  onChange: ['change'],
+  onSelectionChange: ['selectionChange'],
   onGamepadButton: ['gamepadButton'],
   onGamepadAxis: ['gamepadAxis'],
   onLayout: ['layout'],
@@ -267,7 +269,9 @@ export class HostInstance {
     });
   }
 
-  flashScrollIndicators() {}
+  flashScrollIndicators() {
+    if (typeof native.flashScrollIndicators === 'function') native.flashScrollIndicators(this.id);
+  }
 
   getScrollResponder() {
     return this;

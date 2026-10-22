@@ -11,6 +11,7 @@
 #include "platform/loader.h"
 #include "text/font_manager.h"
 
+class SkCanvas;
 class SkPicture;
 
 namespace jsui {
@@ -40,12 +41,18 @@ class Runtime {
 
   void tick(double nowMs);
   bool needsRedraw() const;
+  // Animations / timers / held input want another tick soon (jsui_wants_frame).
+  bool wantsFrame() const;
   void render(void* pixels, int width, int height, size_t rowBytes);
   // Like render(), but `pixels` must still hold the frame this runtime last
   // rendered into it: only the changed region is repainted. Returns the
   // repainted device rect (empty when nothing changed). A different buffer,
   // size or an intervening render() makes it a full repaint.
   SkIRect renderIncremental(void* pixels, int width, int height, size_t rowBytes);
+  // Full repaint into any canvas of width x height device px (the GPU
+  // backend's surfaces). `clear`: clear to transparent first, else draw over
+  // what the canvas holds. The next renderIncremental() repaints fully.
+  void renderCanvas(SkCanvas* canvas, int width, int height, bool clear);
 
   JsuiConfig config;
   JsuiRuntime* handle;
@@ -53,6 +60,15 @@ class Runtime {
   std::string bundleUrl, bundleSource, bundleName;
   std::string lastError;
   std::string cursor = "default";
+
+  // Clipboard: the embedder's callbacks (jsui_set_clipboard_callbacks),
+  // else an in-process string.
+  std::string clipboardText();
+  void setClipboardText(const std::string& text);
+  JsuiClipboardGetFn clipboardGet = nullptr;
+  JsuiClipboardSetFn clipboardSet = nullptr;
+  void* clipboardUser = nullptr;
+  std::string clipboard;
   double now = 0;
 
   Document doc;
@@ -64,6 +80,8 @@ class Runtime {
 
  private:
   SkIRect renderImpl(void* pixels, int width, int height, size_t rowBytes, bool incremental);
+  // The full frame: document (or the frozen last good frame) + dev overlay.
+  void paintFrame(SkCanvas* canvas, bool frozen, bool overlay);
   void resetEngine();
   // The buffer the last frame was painted into (incremental repaint).
   const void* lastTarget_ = nullptr;

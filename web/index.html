@@ -23,7 +23,9 @@
     import { createJsui } from './jsui-web.js';
 
     // ?bundle=<url> (default: the hand-written demo), ?dev=1 for live reload,
-    // ?stats=0 hides the timing readout, ?renderer=2d forces the 2D blitter.
+    // ?stats=0 hides the timing readout, ?renderer=2d forces the 2D blitter,
+    // ?renderer=gpu draws with Skia on WebGL (needs the GPU module: by default
+    // ./dist-webgl/jsui.js from WEBGL=1 scripts/build-wasm.sh; ?module=<url>).
     const q = new URLSearchParams(location.search);
     const hud = document.getElementById('hud');
     const err = document.getElementById('err');
@@ -35,6 +37,8 @@
         bundleUrl: q.get('bundle') || './demo/bundle.js',
         devMode: q.get('dev') === '1',
         renderer: q.get('renderer') || 'auto',
+        moduleUrl: q.get('module') ? new URL(q.get('module'), location.href)
+          : q.get('renderer') === 'gpu' ? new URL('./dist-webgl/jsui.js', location.href) : undefined,
       });
       window.jsui = jsui;
       jsui.on('message', (name, data) => console.log('[ui → host]', name, data));

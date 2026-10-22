@@ -899,7 +899,10 @@ export class VirtualizedList extends Component {
     this._updateViewableItems();
   }
 
-  flashScrollIndicators() {}
+  flashScrollIndicators() {
+    const s = this._scrollRef;
+    if (s && typeof s.flashScrollIndicators === 'function') s.flashScrollIndicators();
+  }
 
   getScrollResponder() {
     return this._scrollRef;

@@ -9,7 +9,9 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const { default: createJsuiModule } = await import(pathToFileURL(path.join(WEB, 'dist/jsui.js')).href);
+// JSUI_WEB_DIST=dist-webgl: the GPU module (its CPU path must work the same).
+const DIST = process.env.JSUI_WEB_DIST || 'dist';
+const { default: createJsuiModule } = await import(pathToFileURL(path.join(WEB, DIST, 'jsui.js')).href);
 const M = await createJsuiModule();
 
 const str = (s) => { const n = M.lengthBytesUTF8(s) + 1; const p = M._malloc(n); M.stringToUTF8(s, p, n); return p; };

@@ -160,21 +160,9 @@ int domButtonBit(int button) {
   }
 }
 
-Value::Object rectObject(float x, float y, const char* kx, const char* ky) {
-  Value::Object o;
-  o[kx] = Value(double(x));
-  o[ky] = Value(double(y));
-  return o;
-}
-
 bool truthy(const Value& v) { return v.asBool(false) || (v.isNumber() && v.asNumber() != 0); }
 
 uint32_t idOf(const Node* n) { return n ? n->id() : 0; }
-
-bool scrollEnabled(const Node* n) {
-  const Value& v = n->props()["scrollEnabled"];
-  return !v.isBool() || v.asBool();
-}
 
 }  // namespace
 
@@ -440,6 +428,7 @@ bool InputManager::mouseMove(float x, float y) {
   updateCursor(alive(hitId));
   uint32_t targetId = mouse_.captureId && alive(mouse_.captureId) ? mouse_.captureId : hitId;
   bool handled = false;
+  if (moved && dragInputId_) editPointerDrag(mouse_);  // drag-selecting text
   // pointermove is the hottest event: only cross into JS when someone on the
   // propagation path listens to moves.
   if (moved && alive(targetId) && consumes(alive(targetId), kMove))
@@ -453,8 +442,12 @@ void InputManager::focusFromPointer(Node* hit) {
   keyboardModality_ = false;
   Node* f = hit;
   while (f && !(isFocusable(f) && visible(f))) f = f->parent();
+  // The pressed element is already under the pointer: no scroll into view
+  // (a tap on a half-visible row must not jump the list).
+  pointerFocus_ = true;
   if (f) setFocus(f);
   else if (focused_) setFocus(nullptr);
+  pointerFocus_ = false;
 }
 
 bool InputManager::pointerDown(PointerState& p, uint32_t hitId, int button) {
@@ -467,11 +460,18 @@ bool InputManager::pointerDown(PointerState& p, uint32_t hitId, int button) {
   }
   if (button == 0) p.downId = hitId;
   Node* target = alive(p.captureId) ? alive(p.captureId) : alive(hitId);
+  if (button == 0) selectedOnFocusId_ = 0;  // set again if this press focuses a selectTextOnFocus input
   bool handled = dispatchPointer("pointerdown", target, p, button, p.x, p.y);
   // Focus follows the press even when JS handled pointerdown: the bridge
   // reports "handled" and "preventDefault" alike, and a Pressable always
   // handles it.
-  if (button == 0) focusFromPointer(alive(hitId));
+  if (button == 0) {
+    focusFromPointer(alive(hitId));
+    // Pressing a focused TextInput places the caret / starts a selection.
+    Node* hit = alive(hitId);
+    if (hit && hit == focused_ && hit->type() == NodeType::TextInput) editPointerDown(hit, p, mods_);
+    selectedOnFocusId_ = 0;
+  }
   return handled || consumes(alive(hitId), kPointer);
 }
 
@@ -493,6 +493,7 @@ bool InputManager::pointerUp(PointerState& p, uint32_t hitId, int button, bool c
   }
   if (button == 0) p.downId = 0;
   if (p.buttons == 0 || cancel) {
+    if (!p.touch) dragInputId_ = 0;
     p.buttons = 0;
     p.captureId = 0;
     p.scrollingId = 0;
@@ -548,14 +549,7 @@ bool InputManager::mouseWheel(float x, float y, float dx, float dy) {
   if (dispatch(std::move(ev))) return true;
   Node* hit = hitTest(x, y);
   // Default action: scroll the nearest ScrollView that can move this way.
-  // A vertical wheel over a horizontal list scrolls it sideways (games UX).
-  for (Node* n = hit; n; n = n->parent()) {
-    if (n->type() != NodeType::ScrollView || !scrollEnabled(n)) continue;
-    bool horizontal = n->props()["horizontal"].asBool();
-    float d = horizontal ? (dx != 0 ? dx : dy) : dy;
-    if (d == 0) continue;
-    if (horizontal ? scrollTo(n, n->scrollX + d, n->scrollY) : scrollTo(n, n->scrollX, n->scrollY + d)) return true;
-  }
+  if (wheelScroll(hit, dx, dy)) return true;
   return consumes(alive(idOf(hit)), kWheel);
 }
 
@@ -576,6 +570,24 @@ bool InputManager::touch(int id, int phase, float x, float y) {
     uint32_t hitId = idOf(hitTest(x, y));
     updateHover(p, alive(hitId));
     if (p.buttons) return consumes(alive(hitId), kPointer);  // duplicate begin
+    // A touch on a flinging / animating ScrollView catches it (like iOS):
+    // the animation stops and the touch belongs to the scroll view, so it
+    // neither presses what is under the finger nor needs the slop to drag.
+    if (Node* sv = animatingScrollAncestor(alive(hitId))) {
+      uint32_t svId = sv->id();
+      if (!stopScrollAnimation(svId, true) || !alive(svId)) return true;
+      p.buttons = domButtonBit(0);
+      p.captureId = hitId;
+      p.startX = x;
+      p.startY = y;
+      p.downId = 0;
+      p.scrollingId = svId;
+      p.dragStarted = false;
+      ScrollState& st = scrollState(alive(svId));
+      st.dragging = true;
+      st.sampleCount = 0;
+      return true;
+    }
     return pointerDown(p, hitId, 0);
   }
   if (index == touches_.size()) return false;
@@ -585,9 +597,7 @@ bool InputManager::touch(int id, int phase, float x, float y) {
   uint32_t hitId = idOf(hitTest(x, y));
   if (phase == 1) {
     if (Node* sv = alive(p.scrollingId)) {
-      scrollTo(sv, sv->scrollX - (x - p.startX), sv->scrollY - (y - p.startY));
-      p.startX = x;
-      p.startY = y;
+      dragTo(p, sv, x, y);
       return true;
     }
     updateHover(p, alive(hitId));
@@ -604,9 +614,8 @@ bool InputManager::touch(int id, int phase, float x, float y) {
         dispatchPointer("pointercancel", alive(targetId), p, 0, x, y);
         p.scrollingId = svId;
         p.downId = 0;
-        if ((sv = alive(svId))) scrollTo(sv, sv->scrollX - ddx, sv->scrollY - ddy);
-        p.startX = x;
-        p.startY = y;
+        if ((sv = alive(svId))) beginDrag(p, sv);
+        if ((sv = alive(svId))) dragTo(p, sv, x, y);
         return true;
       }
     }
@@ -614,95 +623,12 @@ bool InputManager::touch(int id, int phase, float x, float y) {
   }
   // End / cancel.
   bool wasScrolling = p.scrollingId != 0;
-  bool r = pointerUp(p, hitId, 0, phase == 3);
+  // Release of a scrolling touch: scrollenddrag, then a fling or snap.
+  if (wasScrolling) endDrag(p, phase == 3);
+  bool r = pointerUp(p, hitId, 0, phase == 3 && !wasScrolling);
   leaveAll(p);
   touches_.erase(touches_.begin() + std::ptrdiff_t(index));
   return r || wasScrolling;
-}
-
-// --------------------------------------------------------------- scrolling
-
-void InputManager::contentSize(const Node* sv, float* w, float* h) const {
-  Rect r = sv->layoutRect();
-  float right = 0, bottom = 0;
-  for (Node* c : sv->children()) {
-    if (!c->yoga() || !c->style().display) continue;
-    Rect cr = c->layoutRect();
-    if (!finiteRect(cr)) continue;
-    right = std::max(right, cr.x + cr.width + YGNodeLayoutGetMargin(c->yoga(), YGEdgeRight));
-    bottom = std::max(bottom, cr.y + cr.height + YGNodeLayoutGetMargin(c->yoga(), YGEdgeBottom));
-  }
-  YGNodeRef y = sv->yoga();
-  right += YGNodeLayoutGetPadding(y, YGEdgeRight) + YGNodeLayoutGetBorder(y, YGEdgeRight);
-  bottom += YGNodeLayoutGetPadding(y, YGEdgeBottom) + YGNodeLayoutGetBorder(y, YGEdgeBottom);
-  *w = std::max(right, r.width);
-  *h = std::max(bottom, r.height);
-}
-
-Node* InputManager::scrollableAncestor(Node* n, float dx, float dy) const {
-  for (; n; n = n->parent()) {
-    if (n->type() != NodeType::ScrollView) continue;
-    if (!scrollEnabled(n)) continue;
-    float cw, ch;
-    contentSize(n, &cw, &ch);
-    Rect r = n->layoutRect();
-    bool horizontal = n->props()["horizontal"].asBool();
-    if (horizontal && std::fabs(dx) >= std::fabs(dy) && cw > r.width) return n;
-    if (!horizontal && std::fabs(dy) >= std::fabs(dx) && ch > r.height) return n;
-  }
-  return nullptr;
-}
-
-bool InputManager::dispatchScroll(Node* sv) {
-  float cw, ch;
-  contentSize(sv, &cw, &ch);
-  Rect r = sv->layoutRect();
-  Value::Object ev = baseEvent("scroll", sv);
-  ev["contentOffset"] = Value(rectObject(sv->scrollX, sv->scrollY, "x", "y"));
-  ev["contentSize"] = Value(rectObject(cw, ch, "width", "height"));
-  ev["layoutMeasurement"] = Value(rectObject(r.width, r.height, "width", "height"));
-  return dispatch(std::move(ev));
-}
-
-bool InputManager::scrollTo(Node* sv, float x, float y) {
-  if (!sv || !sv->yoga()) return false;
-  float cw, ch;
-  contentSize(sv, &cw, &ch);
-  Rect r = sv->layoutRect();
-  float maxX = std::max(0.f, cw - r.width), maxY = std::max(0.f, ch - r.height);
-  if (!std::isfinite(x)) x = sv->scrollX;
-  if (!std::isfinite(y)) y = sv->scrollY;
-  x = std::clamp(x, 0.f, maxX);
-  y = std::clamp(y, 0.f, maxY);
-  if (x == sv->scrollX && y == sv->scrollY) return false;
-  sv->scrollX = x;
-  sv->scrollY = y;
-  rt_.doc.markPaintDirty();
-  hoverDirty_ = true;
-  dispatchScroll(sv);
-  return true;
-}
-
-void InputManager::scrollIntoView(Node* n) {
-  if (!n || !n->yoga()) return;
-  uint32_t id = n->id();
-  for (Node* p = n->parent(); p; p = p->parent()) {
-    if (p->type() != NodeType::ScrollView) continue;
-    Node* cur = rt_.doc.get(id);
-    if (!cur) return;
-    Rect nr = cur->absoluteRect(), pr = p->absoluteRect();
-    float sx = p->scrollX, sy = p->scrollY;
-    // Align the near edge if the node is before the viewport (or larger than
-    // it), the far edge if it is after.
-    if (nr.x < pr.x || nr.width > pr.width) sx -= pr.x - nr.x;
-    else if (nr.x + nr.width > pr.x + pr.width) sx += (nr.x + nr.width) - (pr.x + pr.width);
-    if (nr.y < pr.y || nr.height > pr.height) sy -= pr.y - nr.y;
-    else if (nr.y + nr.height > pr.y + pr.height) sy += (nr.y + nr.height) - (pr.y + pr.height);
-    uint32_t pid = p->id();
-    scrollTo(p, sx, sy);
-    p = rt_.doc.get(pid);  // the scroll handler may have destroyed it
-    if (!p) return;
-  }
 }
 
 // ------------------------------------------------------------------ focus
@@ -728,6 +654,7 @@ void InputManager::setFocus(Node* n) {
   if (n == focused_) return;
   uint32_t oldId = idOf(focused_), newId = idOf(n);
   focused_ = nullptr;
+  editFocus(alive(oldId), false);
   if (Node* old = alive(oldId)) {
     // DOM order: blur the old element first (nothing is focused meanwhile).
     Value::Object ev = baseEvent("blur", old);
@@ -739,7 +666,10 @@ void InputManager::setFocus(Node* n) {
   n = alive(newId);
   if (!n || !attached(n)) return;
   focused_ = n;
-  scrollIntoView(n);
+  editFocus(n, true);
+  // Key / gamepad navigation glides the item into view with some context
+  // around it; programmatic focus after pointer input jumps, like the web.
+  if (!pointerFocus_) scrollIntoView(n, keyboardModality_, keyboardModality_ ? kFocusMarginMax : 0);
   n = alive(newId);
   if (!n || focused_ != n) return;
   Value::Object ev = baseEvent("focus", n);
@@ -752,6 +682,7 @@ void InputManager::nodeRemoved(Node* n) {
   if (focused_ == n) focused_ = nullptr;
   if (hovered_ == n) hovered_ = nullptr;
   autoFocusSeen_.erase(n->id());
+  scrolls_.erase(n->id());
 }
 
 Node* InputManager::modalScope() const {
@@ -952,6 +883,7 @@ bool InputManager::key(const char* keyName, const char* code, bool down, bool re
   if (k == "Tab") {
     return focusNext((mods & JSUI_MOD_SHIFT) != 0);
   }
+  if (inTextInput && editKey(focused_, k, mods)) return true;
   if ((k == "Enter" || k == " " || k == "Spacebar") && !repeat && focusedUsable() && !inTextInput) {
     Node* f = focused_;
     Rect r = visualRect(f);
@@ -966,9 +898,12 @@ bool InputManager::key(const char* keyName, const char* code, bool down, bool re
     dispatch(std::move(click));
     return true;
   }
-  if (arrowKeyNavigation && !inTextInput) {
+  if (!inTextInput) {
+    // PageUp/PageDown/Home/End/Space scroll; arrows navigate focus and
+    // scroll once there is nothing further to focus that way.
+    if (keyboardScroll(k, mods)) return true;
     int dir = k == "ArrowUp" ? 0 : k == "ArrowDown" ? 1 : k == "ArrowLeft" ? 2 : k == "ArrowRight" ? 3 : -1;
-    if (dir >= 0) return navigate(NavDirection(dir));
+    if (dir >= 0) return (arrowKeyNavigation && navigate(NavDirection(dir))) || scrollStep(dir);
   }
   return inTextInput;
 }
@@ -978,6 +913,7 @@ bool InputManager::text(const char* utf8) {
   Value::Object ev = baseEvent("textinput", focused_);
   ev["text"] = Value(utf8);
   bool handled = dispatch(std::move(ev));
+  if (!handled && focused_ && focused_->type() == NodeType::TextInput) return editText(focused_, utf8);
   return handled || (focused_ && focused_->type() == NodeType::TextInput);
 }
 
@@ -985,7 +921,8 @@ bool InputManager::text(const char* utf8) {
 
 bool InputManager::navStep(int dir) {
   if (dir < 0) return false;
-  return navigate(NavDirection(dir));
+  // Past the last focusable item a ScrollView keeps revealing its content.
+  return navigate(NavDirection(dir)) || scrollStep(dir);
 }
 
 void InputManager::padRepeat(Repeat& r, int dir) {
@@ -1053,6 +990,12 @@ bool InputManager::gamepadAxis(int pad, int axis, float value) {
   ev["axis"] = Value(axis);
   ev["value"] = Value(double(value));
   bool handled = dispatch(std::move(ev));
+  if (ps && (axis == 2 || axis == 3)) {
+    // Right stick: continuous scrolling of the focused / hovered ScrollView
+    // (tickSticks), unless JS took the stick.
+    ps->rightBlocked = handled;
+    return handled || std::hypot(ps->axes[2], ps->axes[3]) > kScrollStickDeadzone;
+  }
   if (!ps || (axis != 0 && axis != 1)) return handled;
   // Left stick -> direction of the dominant axis beyond the deadzone.
   float lx = ps->axes[0], ly = ps->axes[1];
@@ -1064,12 +1007,22 @@ bool InputManager::gamepadAxis(int pad, int axis, float value) {
   }
   if (handled) {
     ps->stick.dir = -1;
+    ps->leftScrolls = false;
     return true;
   }
   if (dir == ps->stick.dir) return dir >= 0;
   if (dir < 0) {
     ps->stick.dir = -1;
+    ps->leftScrolls = false;
     return false;
+  }
+  // Nothing to navigate between: the left stick scrolls continuously like
+  // the right one (tickSticks) instead of stepping focus.
+  ps->leftScrolls = !hasFocusTargets();
+  if (ps->leftScrolls) {
+    ps->stick.dir = dir;
+    ps->stick.next = std::numeric_limits<double>::infinity();
+    return true;
   }
   padRepeat(ps->stick, dir);
   navStep(dir);
@@ -1088,6 +1041,8 @@ void InputManager::gamepadConnected(int pad, bool connected, const char* id) {
 // ------------------------------------------------------------------- tick
 
 void InputManager::tick(double nowMs) {
+  double dt = lastTick_ < 0 ? 0 : std::clamp(nowMs - lastTick_, 0.0, 100.0);
+  lastTick_ = nowMs;
   // Held D-pad / stick repeat: first after kRepeatDelayMs, then every
   // kRepeatIntervalMs. A long frame fires once (no bursts).
   for (Pad& p : pads_) {
@@ -1098,8 +1053,11 @@ void InputManager::tick(double nowMs) {
       }
     }
   }
+  tickSticks(dt);
   bool laidOut = rt_.doc.layout();
   if (laidOut) tickFocusScopes();
+  editTick();
+  tickScrolling(nowMs, dt);
   // The UI may have moved under a still mouse: refresh enter/leave + cursor.
   if (mouseInside_ && (laidOut || hoverDirty_ || rt_.doc.paintDirty())) {
     hoverDirty_ = false;

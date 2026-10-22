@@ -11,6 +11,7 @@
 #include "input/input.h"
 #include "js/engine.h"
 #include "jsui/jsui.h"
+#include "render/gpu.h"
 #include "runtime.h"
 
 struct JsuiRuntime {
@@ -85,6 +86,7 @@ void jsui_set_viewport(JsuiRuntime* rt, int width, int height, float pixelRatio)
 void jsui_tick(JsuiRuntime* rt, double nowMs) { rt->rt->tick(nowMs); }
 int jsui_pending_loads(JsuiRuntime* rt) { return int(rt->rt->loader.pending()); }
 int jsui_needs_redraw(JsuiRuntime* rt) { return rt->rt->needsRedraw() ? 1 : 0; }
+int jsui_wants_frame(JsuiRuntime* rt) { return rt->rt->wantsFrame() ? 1 : 0; }
 
 void jsui_render_rgba(JsuiRuntime* rt, void* pixels, int width, int height, size_t rowBytes) {
   rt->rt->render(pixels, width, height, rowBytes);
@@ -94,6 +96,25 @@ int jsui_render_rgba_incremental(JsuiRuntime* rt, void* pixels, int width, int h
   SkIRect r = rt->rt->renderIncremental(pixels, width, height, rowBytes);
   if (dirty) *dirty = JsuiRect{r.x(), r.y(), r.width(), r.height()};
   return r.isEmpty() ? 0 : 1;
+}
+
+JsuiGpuContext* jsui_gpu_create_gl(JsuiGLGetProcFn getProc, void* user) { return jsui::gpu::createGL(getProc, user); }
+void jsui_gpu_destroy(JsuiGpuContext* gpu) { jsui::gpu::destroy(gpu); }
+void jsui_gpu_reset(JsuiGpuContext* gpu) { jsui::gpu::reset(gpu); }
+void jsui_gpu_context_lost(JsuiGpuContext* gpu) { jsui::gpu::contextLost(gpu); }
+void jsui_gpu_purge(JsuiGpuContext* gpu, size_t cacheBytes) { jsui::gpu::purge(gpu, cacheBytes); }
+
+int jsui_render_gl(JsuiRuntime* rt, JsuiGpuContext* gpu, unsigned int fbo, int width, int height, int flags) {
+  JsuiGLTarget t{};
+  t.fbo = fbo;
+  t.width = width;
+  t.height = height;
+  t.flags = flags;
+  return jsui::gpu::render(*rt->rt, gpu, t);
+}
+
+int jsui_render_gl_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiGLTarget* target) {
+  return target ? jsui::gpu::render(*rt->rt, gpu, *target) : -1;
 }
 
 int jsui_render_png(JsuiRuntime* rt, void** outData, size_t* outSize) {
@@ -137,6 +158,12 @@ void jsui_set_gamepad_connected(JsuiRuntime* rt, int pad, int connected, const c
   rt->rt->input->gamepadConnected(pad, connected != 0, id);
 }
 const char* jsui_get_cursor(JsuiRuntime* rt) { return rt->rt->cursor.c_str(); }
+void jsui_set_clipboard_callbacks(JsuiRuntime* rt, JsuiClipboardGetFn get, JsuiClipboardSetFn set, void* user) {
+  if (!rt) return;
+  rt->rt->clipboardGet = get;
+  rt->rt->clipboardSet = set;
+  rt->rt->clipboardUser = user;
+}
 const char* jsui_last_error(JsuiRuntime* rt) {
   return rt->rt->lastError.empty() ? nullptr : rt->rt->lastError.c_str();
 }

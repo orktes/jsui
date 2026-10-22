@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "core/document.h"
+#include "core/scroll.h"
 #include "include/core/SkCanvas.h"
 #include "include/core/SkColorFilter.h"
 #include "include/core/SkImageFilter.h"
@@ -846,6 +847,8 @@ struct NodeRecord : Node::Cache {
   uint32_t version = 0;
   uint32_t imageGen = 0;
   float w = -1, h = -1;
+  SkIRect bars = SkIRect::MakeEmpty();     // ScrollView overlay indicators (device)
+  float barAlpha = 0;
   bool painted = false;
   bool valid = false;
 };
@@ -987,6 +990,49 @@ void paintChildren(Node* n, SkCanvas* c, Ctx& ctx) {
   order.resize(begin);
 }
 
+// Overlay scroll indicators of a ScrollView, above its content, inside the
+// padding box. Fading is driven by Node::scrollIndicatorOpacity.
+void paintScrollIndicators(Node* n, SkCanvas* c, const Box& b, float w, float h) {
+  float alpha = std::clamp(n->scrollIndicatorOpacity, 0.f, 1.f);
+  if (alpha <= 0) return;
+  ScrollIndicators si = scrollIndicators(n, w, h);
+  if (!si.vertical && !si.horizontal) return;
+  c->save();
+  clipRRect(c, b.inner);
+  SkPaint fill, stroke;
+  fill.setAntiAlias(true);
+  fill.setColor(si.fill);
+  fill.setAlphaf(fill.getAlphaf() * alpha);
+  stroke.setAntiAlias(true);
+  stroke.setStyle(SkPaint::kStroke_Style);
+  stroke.setStrokeWidth(1);
+  stroke.setColor(si.stroke);
+  stroke.setAlphaf(stroke.getAlphaf() * alpha);
+  for (int i = 0; i < 2; i++) {
+    if (!(i == 0 ? si.vertical : si.horizontal)) continue;
+    const Rect& r = i == 0 ? si.v : si.h;
+    SkRRect rr = SkRRect::MakeRectXY(SkRect::MakeXYWH(r.x, r.y, r.width, r.height), si.radius, si.radius);
+    if (si.stroke) {
+      SkRRect rim = rr;
+      rim.outset(0.5f, 0.5f);
+      c->drawRRect(rim, stroke);
+    }
+    c->drawRRect(rr, fill);
+  }
+  c->restore();
+}
+
+// Device bounds of the visible scroll indicators (empty when hidden).
+SkIRect scrollIndicatorBounds(Node* n, const SkMatrix& m, float w, float h, const SkIRect& clip) {
+  if (n->type() != NodeType::ScrollView || n->scrollIndicatorOpacity <= 0) return SkIRect::MakeEmpty();
+  ScrollIndicators si = scrollIndicators(n, w, h);
+  SkIRect out = SkIRect::MakeEmpty();
+  if (si.vertical) out.join(m.mapRect(SkRect::MakeXYWH(si.v.x, si.v.y, si.v.width, si.v.height)).roundOut().makeOutset(2, 2));
+  if (si.horizontal) out.join(m.mapRect(SkRect::MakeXYWH(si.h.x, si.h.y, si.h.width, si.h.height)).roundOut().makeOutset(2, 2));
+  if (!out.intersect(clip)) out.setEmpty();
+  return out;
+}
+
 // Draws the node's own decorations, content and children in its border-box
 // coordinate space. `snap` is the offset from the layout position to the
 // pixel-snapped one (already applied to the canvas); `w`, `h` the snapped size.
@@ -1022,6 +1068,7 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
     paintChildren(n, c, ctx);
     c->restore();
   }
+  if (n->type() == NodeType::ScrollView) paintScrollIndicators(n, c, b, w, h);
   paintOutline(c, b, s);
 }
 
@@ -1099,7 +1146,7 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkIRect& clip, uint
                       std::vector<CurvedNode>* curved) {
   if (!n->yoga()) return SkIRect::MakeEmpty();  // raw text: painted by its paragraph
   NodeRecord* rec = record(n);
-  SkIRect own = SkIRect::MakeEmpty(), sub = SkIRect::MakeEmpty();
+  SkIRect own = SkIRect::MakeEmpty(), sub = SkIRect::MakeEmpty(), bars = SkIRect::MakeEmpty();
   SkMatrix m = parent;
   float w = 0, h = 0;
   bool painted = isPainted(n);
@@ -1131,6 +1178,11 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkIRect& clip, uint
         curved->push_back(cn);
       }
     }
+    bars = scrollIndicatorBounds(n, m, w, h, clip);
+    if (!bars.isEmpty()) {
+      own.join(bars);
+      curved->push_back({bars, SkRRect::MakeEmpty()});  // rounded thumbs: never cut
+    }
     sub = own;
     if (paintsChildren(n) && !n->children().empty()) {
       SkIRect childClip = clip;
@@ -1145,6 +1197,14 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkIRect& clip, uint
       int e = int(std::ceil(fe * std::max(1.f, m.getMaxScale())));
       SkIRect grown = sub.makeOutset(e, e);
       if (!sub.intersect(grown, clip)) sub.setEmpty();
+    }
+  }
+  // TextInput caret blink / move: only the caret's old and new rects.
+  SkRect caretA, caretB;
+  if (n->type() == NodeType::TextInput && text::inputCaretDamage(n, &caretA, &caretB) && painted) {
+    for (const SkRect& cr : {caretA, caretB}) {
+      SkIRect dr;
+      if (!cr.isEmpty() && dr.intersect(deviceBounds(m, cr.makeOutset(1, 1)), clip)) damage->op(dr, SkRegion::kUnion_Op);
     }
   }
   // A hidden node's descendants keep their old records; the check below
@@ -1162,6 +1222,14 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkIRect& clip, uint
     damage->op(rec->own, SkRegion::kUnion_Op);
     damage->op(own, SkRegion::kUnion_Op);
   }
+  float barAlpha = bars.isEmpty() ? 0 : n->scrollIndicatorOpacity;
+  if (rec->bars != bars || rec->barAlpha != barAlpha) {
+    // Scroll indicators moved or faded: only their rects repaint.
+    damage->op(rec->bars, SkRegion::kUnion_Op);
+    damage->op(bars, SkRegion::kUnion_Op);
+  }
+  rec->bars = bars;
+  rec->barAlpha = barAlpha;
   rec->own = own;
   rec->subtree = sub;
   rec->matrix = m;

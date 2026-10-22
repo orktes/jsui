@@ -24,7 +24,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ninja-build clang libfontconfig1-dev zlib1g-dev \
-            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libgl1-mesa-dev
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libgl1-mesa-dev \
+            libegl1 libegl-mesa0 libgl1-mesa-dri xvfb xauth
       - name: Cache prebuilt Skia + FetchContent sources
         uses: actions/cache@v4
         with:
@@ -38,15 +39,70 @@ jobs:
       - name: Build
         run: cmake --build build -j "$(nproc)"
       - name: Native tests
+        # Mesa's surfaceless EGL (llvmpipe) gives the GPU tests a real GL
+        # context; require it so a broken setup cannot silently SKIP them.
+        env:
+          JSUI_GPU_TEST_REQUIRE: 1
         run: ./build/jsui-tests
       - name: Render smoke
         run: ./build/jsui-render web/test/fixtures/bands.js -o bands.png --width 320 --height 200
+      - name: Viewer GPU smoke (Xvfb + Mesa GL)
+        run: |
+          xvfb-run -a -s "-screen 0 1280x1024x24" ./build/tools/jsui-viewer/jsui-viewer --gpu --width 320 --height 200 \
+            --frames 10 --screenshot bands-gpu.png web/test/fixtures/bands.js | tee viewer-gpu.log
+          grep -q '^GPU: ' viewer-gpu.log  # not the CPU fallback
+          test -s bands-gpu.png
       - uses: actions/upload-artifact@v4
         with:
           name: jsui-render-linux
           path: |
             build/jsui-render
             bands.png
+            bands-gpu.png
+
+  # ------------------------------------------------- Godot GDExtension (Linux)
+  godot:
+    name: godot (GDExtension, ubuntu)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build clang libfontconfig1-dev zlib1g-dev python3 unzip
+      - name: Cache prebuilt Skia + FetchContent sources + Godot
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/skia-prebuilt
+            build/_deps/*-src
+            build/_deps/godot
+          key: godot-deps-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'integrations/godot/CMakeLists.txt', 'integrations/godot/smoke-test.sh') }}
+          restore-keys: godot-deps-${{ runner.os }}-
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          -DJSUI_BUILD_TESTS=OFF -DJSUI_BUILD_VIEWER=OFF -DJSUI_BUILD_GODOT=ON
+      - name: Build GDExtension
+        run: cmake --build build -j "$(nproc)" --target jsui_godot
+      - name: Demo bundle
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
+          npx jsui build integrations/godot/demo/ui/app.jsx -o integrations/godot/demo/ui/dist/bundle.js
+      - name: Run the demo in Godot 4.3 (headless) and capture a frame
+        run: integrations/godot/smoke-test.sh build/godot-smoke.png
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jsui-godot-linux
+          path: |
+            integrations/godot/demo/bin/
+            build/godot-smoke.png
+          if-no-files-found: warn
 
   # --------------------------------------------------------------------- wasm
   wasm:
@@ -94,6 +150,58 @@ jobs:
         with:
           name: jsui-wasm
           path: web/dist
+
+  # ------------------------------------------- wasm, GPU variant (advisory)
+  # Skia with Ganesh + WebGL (WEBGL=1): its own Skia cache key and output dir
+  # (web/dist-webgl), so the CPU wasm job above is unaffected. The browser
+  # tests run against the GPU module (renderer 'gpu' tests draw through Skia
+  # on SwiftShader WebGL and compare with the CPU path).
+  wasm-webgl:
+    name: wasm webgl (emscripten + browser, GPU)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+      - name: Cache emsdk
+        uses: actions/cache@v4
+        with:
+          path: third_party/emsdk
+          key: emsdk-${{ runner.os }}-${{ hashFiles('scripts/setup-emsdk.sh') }}
+      - name: Cache Skia for WASM (WebGL)
+        id: skia-wasm-webgl-cache
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-wasm-webgl
+          key: skia-wasm-webgl-${{ runner.os }}-${{ hashFiles('scripts/build-skia-wasm.sh', 'scripts/setup-emsdk.sh') }}
+      - name: Cache FetchContent sources
+        uses: actions/cache@v4
+        with:
+          path: build-wasm-webgl/_deps/*-src
+          key: wasm-webgl-deps-${{ hashFiles('cmake/*.cmake') }}
+      - name: emsdk
+        run: scripts/setup-emsdk.sh
+      - name: Skia for WASM + WebGL (cache miss only, ~40 min)
+        if: steps.skia-wasm-webgl-cache.outputs.cache-hit != 'true'
+        run: WEBGL=1 JOBS=$(nproc) scripts/build-skia-wasm.sh
+      - name: Build jsui.wasm (GPU)
+        run: WEBGL=1 JOBS=$(nproc) scripts/build-wasm.sh Release
+      - name: Node smoke test (GPU module, CPU path)
+        run: JSUI_WEB_DIST=dist-webgl node web/test/node-smoke.mjs
+      - name: Browser tests against the GPU module (Playwright / Chromium)
+        working-directory: web
+        run: |
+          npm install --no-package-lock --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          JSUI_WEB_STRICT=1 JSUI_WEB_DIST=dist-webgl npm run test:browser
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-wasm-webgl
+          path: web/dist-webgl
 
   # ----------------------------------------------------------------------- js
   js:

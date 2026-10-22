@@ -77,7 +77,21 @@ target_link_options(jsui-wasm PRIVATE
   "-sWASM_BIGINT=1"
   "-sFILESYSTEM=0"
   "-sEXPORTED_FUNCTIONS=${_jsui_exports_csv}"
-  "-sEXPORTED_RUNTIME_METHODS=UTF8ToString,stringToUTF8,lengthBytesUTF8"
   "$<$<CONFIG:Debug>:-sASSERTIONS=2>"
   "$<$<CONFIG:Debug>:-gsource-map>")
-message(STATUS "jsui-wasm: ${JSUI_WEB_DIST}/jsui.{js,wasm}, exports: ${_jsui_exports_csv}")
+if(JSUI_GPU)
+  # Skia Ganesh on WebGL (third_party/skia-wasm-webgl, WEBGL=1
+  # scripts/build-skia-wasm.sh), like canvaskit's WebGL link flags. The JS host
+  # creates the WebGL context itself and hands it to emscripten through the
+  # exported GL object (GL.registerContext / makeContextCurrent).
+  target_link_options(jsui-wasm PRIVATE
+    "-lGL"
+    "-sUSE_WEBGL2=1"
+    "-sMAX_WEBGL_VERSION=2"
+    "-sMIN_WEBGL_VERSION=1"
+    "-sEXPORTED_RUNTIME_METHODS=UTF8ToString,stringToUTF8,lengthBytesUTF8,GL")
+else()
+  target_link_options(jsui-wasm PRIVATE
+    "-sEXPORTED_RUNTIME_METHODS=UTF8ToString,stringToUTF8,lengthBytesUTF8")
+endif()
+message(STATUS "jsui-wasm: ${JSUI_WEB_DIST}/jsui.{js,wasm} (GPU: ${JSUI_GPU}), exports: ${_jsui_exports_csv}")

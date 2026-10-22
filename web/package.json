@@ -7,7 +7,8 @@
   "main": "jsui-web.js",
   "exports": {
     ".": "./jsui-web.js",
-    "./dist/*": "./dist/*"
+    "./dist/*": "./dist/*",
+    "./dist-webgl/*": "./dist-webgl/*"
   },
   "files": ["jsui-web.js", "dist/jsui.js", "dist/jsui.wasm", "index.html", "demo"],
   "scripts": {

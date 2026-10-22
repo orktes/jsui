@@ -9,6 +9,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(JSUI_BUILD_TOOLS "Build jsui-render and the viewer" ON)
 option(JSUI_BUILD_TESTS "Build native tests" ON)
 option(JSUI_BUILD_VIEWER "Build tools/jsui-viewer (downloads and builds SDL2)" ON)
+option(JSUI_BUILD_GODOT "Build the Godot 4 GDExtension in integrations/godot (fetches godot-cpp, needs python3)" OFF)
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 include(Deps)
@@ -20,6 +21,33 @@ target_link_libraries(jsui PUBLIC jsui_quickjs jsui_yoga jsui_skia)
 target_compile_definitions(jsui PRIVATE JSUI_BUILDING)
 include(EmbedFonts)
 jsui_embed_fonts(jsui)
+
+# GPU backend (Skia Ganesh on OpenGL / GLES / WebGL, jsui_render_gl*). The
+# native prebuilt Skia always has Ganesh GL; GL itself is resolved at run
+# time (Linux: dlopen of libEGL / libGL, macOS / Windows: Skia's native
+# interface), so nothing extra is linked on Linux. The WASM default Skia is
+# CPU-only: the option follows its args.gn (WEBGL=1 scripts/build-skia-wasm.sh).
+set(_jsui_gpu_default ON)
+if(EMSCRIPTEN)
+  set(_jsui_gpu_default OFF)
+  if(EXISTS "${JSUI_SKIA_LIB_DIR}/args.gn")
+    file(READ "${JSUI_SKIA_LIB_DIR}/args.gn" _jsui_skia_gn)
+    if(_jsui_skia_gn MATCHES "skia_use_webgl *= *true" AND _jsui_skia_gn MATCHES "skia_enable_ganesh *= *true")
+      set(_jsui_gpu_default ON)
+    endif()
+  endif()
+endif()
+option(JSUI_GPU "Build the Skia Ganesh GL / WebGL backend (jsui_render_gl)" ${_jsui_gpu_default})
+if(JSUI_GPU)
+  target_compile_definitions(jsui PUBLIC JSUI_GPU=1)
+  if(NOT EMSCRIPTEN)
+    target_compile_definitions(jsui_skia INTERFACE SK_GANESH SK_GL)
+  endif()
+  if(APPLE)
+    target_link_libraries(jsui PUBLIC "-framework OpenGL")
+  endif()
+endif()
+message(STATUS "JSUI_GPU: ${JSUI_GPU}")
 
 if(JSUI_BUILD_TOOLS AND NOT EMSCRIPTEN)
   add_executable(jsui-render tools/jsui-render/main.cpp)
@@ -38,6 +66,10 @@ if(JSUI_BUILD_TESTS AND NOT EMSCRIPTEN)
   target_link_libraries(jsui-tests PRIVATE jsui)
   jsui_copy_icu_data(jsui-tests)
   add_test(NAME jsui-tests COMMAND jsui-tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+endif()
+
+if(JSUI_BUILD_GODOT AND NOT EMSCRIPTEN)
+  add_subdirectory(integrations/godot)
 endif()
 
 if(EMSCRIPTEN)

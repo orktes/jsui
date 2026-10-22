@@ -136,8 +136,17 @@ TEST(react_e2e) {
   t.tick(16);
   jsui_send_text(t.rt, "y");
   t.tick(16);
+  // Native editing: the caret moves, typing inserts at it, Ctrl+A + typing
+  // replaces everything; the controlled value follows.
+  t.key("ArrowLeft");
+  jsui_send_text(t.rt, "X");
+  t.tick(16);
+  jsui_send_key(t.rt, "a", "KeyA", 1, 0, JSUI_MOD_CTRL);
+  jsui_send_key(t.rt, "a", "KeyA", 0, 0, JSUI_MOD_CTRL);
+  jsui_send_text(t.rt, "z");
+  t.tick(16);
   t.key("Enter");
-  CHECK_EQ(t.take(), std::string("text=\"h\xC3\xA9\" text=\"h\" text=\"hy\" submit=\"hy\""));
+  CHECK_EQ(t.take(), std::string("text=\"h\xC3\xA9\" text=\"h\" text=\"hy\" text=\"hXy\" text=\"z\" submit=\"z\""));
 
   CHECK(jsui_last_error(t.rt) == nullptr);
 }
@@ -219,35 +228,38 @@ TEST(react_list_e2e) {
   CHECK(t.rowsMatch(0));
 
   // Gamepad: row 0 has hasTVPreferredFocus; D-pad down walks the list and
-  // focus changes scroll the focused row into view (bottom edge aligned).
+  // focus changes glide the focused row into view, keeping 32 px of
+  // context below it (src/input/scroll.cpp).
   for (int i = 0; i < 40; i++) t.pad(13);
   std::string msgs = t.take();
   CHECK(msgs.find("focus=40") != std::string::npos);
   CHECK(msgs.find("focus=41") == std::string::npos);
-  t.tick(200);
-  CHECK(t.rowsMatch(41 * 30 - 300));
+  t.tick(300);
+  const int focusOffset = 41 * 30 + 32 - 300;
+  CHECK(t.rowsMatch(focusOffset));
   s = t.stats();
-  CHECK_EQ(statInt(s, "first"), 31);
-  CHECK_EQ(statInt(s, "last"), 40);
+  CHECK_EQ(statInt(s, "first"), (focusOffset + 29) / 30);  // fully visible rows
+  CHECK_EQ(statInt(s, "last"), (focusOffset + 300) / 30 - 1);
   t.pad(0);
   CHECK(t.take().find("press=40") != std::string::npos);
 
-  // Mouse wheel far past the mounted window.
+  // Mouse wheel far past the mounted window (a notch glides for 150 ms).
   jsui_send_mouse_move(t.rt, 200, 150);
   jsui_send_mouse_wheel(t.rt, 200, 150, 0, 6000);
   t.tick(16);
-  t.tick(48);
-  CHECK(t.rowsMatch(41 * 30 - 300 + 6000));
+  t.tick(160);
+  CHECK(t.rowsMatch(focusOffset + 6000));
   t.tick(500);
   s = t.stats();
   CHECK(statInt(s, "mounted") <= 300);
-  CHECK_EQ(statInt(s, "first"), (41 * 30 - 300 + 6000) / 30);
+  CHECK_EQ(statInt(s, "first"), (focusOffset + 6000 + 29) / 30);
   // Focus is still on row 40 (kept mounted although off screen): D-pad down
-  // goes to row 41 and scrolls back to it (above the viewport: top aligned).
+  // goes to row 41 and scrolls back to it (above the viewport: top edge
+  // with 32 px of context).
   t.pad(13);
   CHECK(t.take().find("focus=41") != std::string::npos);
-  t.tick(100);
-  CHECK(t.rowsMatch(41 * 30));
+  t.tick(300);
+  CHECK(t.rowsMatch(41 * 30 - 32));
 
   // scrollToIndex / scrollToEnd through the ref (host messages).
   jsui_post_message(t.rt, "scrollToIndex", "{\"index\":5000}");
@@ -283,6 +295,7 @@ TEST(react_list_e2e) {
   }
   std::printf("  scroll breakdown per frame: wheel+onScroll %.2f ms, tick (timers, React, layout, onLayout) %.2f ms, paint %.2f ms\n",
               inputMs / 300, tickMs / 300, paintMs / 300);
+  t.tick(200);  // the last wheel glide
   CHECK(t.rowsMatch(300 * 40));
   double sum = 0;
   for (double f : frames) sum += f;
