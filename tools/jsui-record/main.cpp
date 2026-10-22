@@ -81,6 +81,12 @@
 #include "jsui/jsui.h"
 #include "text/embedded_fonts.h"
 
+#ifdef _WIN32
+// The ffmpeg pipe carries raw frames, so it must be opened in binary mode.
+#define popen(cmd, mode) _popen(cmd, "wb")
+#define pclose _pclose
+#endif
+
 using jsui::Value;
 
 namespace {
