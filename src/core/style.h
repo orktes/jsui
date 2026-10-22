@@ -184,6 +184,10 @@ void applyStyle(const Value& style, ComputedStyle* out, YGNodeRef yoga, float pi
 // changed, or a style is not an object).
 bool applyPaintStyleChanges(const Value& oldStyle, const Value& newStyle, ComputedStyle* out, float pixelRatio,
                             bool* changed);
+// The paint group a style key belongs to (0: a layout or unknown key), and
+// re-resolution of just those groups of `out` from `style`.
+uint32_t paintStyleGroup(const std::string& key);
+void applyStyleGroups(const Value& style, uint32_t groups, ComputedStyle* out, float pixelRatio);
 // Deep equality of style values (shared containers compare by identity first).
 bool styleValueEquals(const Value& a, const Value& b);
 

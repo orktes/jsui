@@ -682,7 +682,9 @@ YGSize measureText(YGNodeConstRef y, float width, YGMeasureMode wm, float height
     float lh = n->style().text.lineHeight.value_or(std::ceil(fs * 1.21f));
     return {wm == YGMeasureModeExactly ? width : fs * 11, lh};
   }
-  layoutAt(c, kInf);
+  // The max-content width is known after the first layout; laying out at
+  // infinity again would cost a second Paragraph::layout per measure.
+  if (c->laidOutWidth < 0) layoutAt(c, kInf);
   float maxW = c->maxIntrinsic;
   float target = maxW;
   if (wm == YGMeasureModeExactly) target = width;

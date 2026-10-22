@@ -151,25 +151,13 @@ void Node::setProps(const Value& props) {
       style_.pointerEvents = parsePointerEvents(props_["pointerEvents"]);
     if (YGNodeIsDirty(yoga_) && !isInlineText()) relayout = true;
     if (isText) {
-      bool metrics = !textMetricsEqual(oldText, style_.text);
+      bool metrics = false;
       static const char* const kMeasureProps[] = {"numberOfLines", "ellipsizeMode", "value",          "defaultValue",
                                                   "placeholder",   "multiline",     "secureTextEntry"};
       for (const char* k : kMeasureProps)
         if (!valueEquals(old[k], props_[k])) metrics = true;
-      bool paint = metrics || !(oldText == style_.text) ||
-                   !valueEquals(old["placeholderTextColor"], props_["placeholderTextColor"]);
-      if (paint) {
-        // The paragraph (owned by the paragraph root) bakes in colors too.
-        Node* root = type_ == NodeType::Text ? paragraphRoot() : this;
-        if (root) {
-          root->textCache.reset();
-          root->paintVersion++;
-          if (metrics && root->yoga_ && YGNodeHasMeasureFunc(root->yoga_)) {
-            YGNodeMarkDirty(root->yoga_);
-            relayout = true;
-          }
-        }
-      }
+      textStyleChanged(oldText, metrics, !valueEquals(old["placeholderTextColor"], props_["placeholderTextColor"]),
+                       &relayout);
     }
     if (type_ == NodeType::Image) {
       if (!valueEquals(old["source"], props_["source"]) || !valueEquals(old["src"], props_["src"]) ||
@@ -189,6 +177,70 @@ void Node::setProps(const Value& props) {
   if (relayout) doc_->markLayoutDirty();
   else doc_->markPaintDirty();
   if (type_ == NodeType::TextInput) edit::syncProps(this);
+}
+
+void Node::textStyleChanged(const TextStyle& oldText, bool propsMetrics, bool propsPaint, bool* relayout) {
+  bool metrics = propsMetrics || !textMetricsEqual(oldText, style_.text);
+  if (!(metrics || propsPaint || !(oldText == style_.text))) return;
+  // The paragraph (owned by the paragraph root) bakes in colors too.
+  Node* root = type_ == NodeType::Text ? paragraphRoot() : this;
+  if (!root) return;
+  root->textCache.reset();
+  root->paintVersion++;
+  if (metrics && root->yoga_ && YGNodeHasMeasureFunc(root->yoga_)) {
+    YGNodeMarkDirty(root->yoga_);
+    *relayout = true;
+  }
+}
+
+bool Node::patchStyle(const Value::Object& partial) {
+  const Value& cur = props_["style"];
+  uint32_t groups = 0;
+  bool layout = false, any = false;
+  for (auto& [k, v] : partial) {
+    bool has = cur.has(k);
+    if (v.isNull() ? !has : has && valueEquals(cur[k], v)) continue;
+    any = true;
+    uint32_t g = paintStyleGroup(k);
+    if (g) groups |= g;
+    else layout = true;
+  }
+  if (!any) return false;
+  if (layout || !yoga_ || !doc_) {
+    // A layout key changed: the general path (full restyle, relayout).
+    Value::Object props = props_.asObject();
+    Value::Object style = cur.asObject();
+    for (auto& [k, v] : partial) {
+      if (v.isNull()) style.erase(k);
+      else style.insert_or_assign(k, v);
+    }
+    props.insert_or_assign("style", Value(std::move(style)));
+    setProps(Value(std::move(props)));
+    return true;
+  }
+  doc_->perf.counters.setProps++;
+  Value::Object& style = props_.mutableObject()["style"].mutableObject();
+  for (auto& [k, v] : partial) {
+    if (v.isNull()) style.erase(k);
+    else style.insert_or_assign(k, v);
+  }
+  bool isText = type_ == NodeType::Text || type_ == NodeType::TextInput;
+  TextStyle oldText;
+  if (isText) oldText = style_.text;
+  {
+    Perf::Scope scope(doc_->perf, Phase::Style);
+    doc_->perf.counters.styleResolves++;
+    applyStyleGroups(props_["style"], groups, &style_, doc_->pixelRatio());
+  }
+  if (props_["pointerEvents"].isString() && !props_["style"].has("pointerEvents"))
+    style_.pointerEvents = parsePointerEvents(props_["pointerEvents"]);
+  bool relayout = false;
+  if (isText) textStyleChanged(oldText, false, false, &relayout);
+  paintVersion++;
+  if (relayout) doc_->markLayoutDirty();
+  else doc_->markPaintDirty();
+  if (type_ == NodeType::TextInput) edit::syncProps(this);
+  return true;
 }
 
 namespace {

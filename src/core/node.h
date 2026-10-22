@@ -58,6 +58,12 @@ class Node {
   // `props["__events"] = ["press", "pointerMove", ...]` used for hit testing.
   void setProps(const Value& props);
   const Value& props() const { return props_; }
+  // Merges `partial` into props().style (a null value removes the key), like
+  // setProps with the merged style but without copying the props: when only
+  // paint keys change, the style object is updated in place (copy-on-write)
+  // and just their style groups are re-resolved. Returns false if nothing
+  // changed. The animation path (patchStyle, native Animated).
+  bool patchStyle(const Value::Object& partial);
   // Facts about props() that hot paths ask for (computed by setProps).
   enum PropFlag : uint8_t {
     kListensLayout = 1,  // __events has "layout" (onLayout)
@@ -140,6 +146,8 @@ class Node {
 
  private:
   void updatePropFlags();
+  // Text / TextInput: invalidates the paragraph after a style change.
+  void textStyleChanged(const TextStyle& oldText, bool propsMetrics, bool propsPaint, bool* relayout);
   void attachYoga(Node* child, size_t index);
   void detachYoga(Node* child);
 

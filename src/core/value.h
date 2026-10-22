@@ -47,6 +47,13 @@ class Value {
     static const Object empty;
     return isObject() ? *std::get<5>(v_) : empty;
   }
+  // Copy-on-write access to the object (a non-object becomes an empty
+  // object). Other Values sharing the container keep the old contents.
+  Object& mutableObject() {
+    if (!isObject()) v_ = std::make_shared<Object>();
+    else if (std::get<5>(v_).use_count() > 1) v_ = std::make_shared<Object>(*std::get<5>(v_));
+    return *std::get<5>(v_);
+  }
   // Object member lookup; returns a null Value when missing.
   const Value& operator[](const std::string& key) const {
     static const Value null;
