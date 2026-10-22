@@ -14,10 +14,64 @@ env:
   NODE_VERSION: 22
 
 jobs:
+  # ------------------------------------------------------------------ changes
+  # Pull requests only run the jobs whose inputs changed (pushes to main and
+  # manual runs build everything). CI config changes run everything.
+  changes:
+    name: changes
+    runs-on: ubuntu-24.04
+    outputs:
+      native: ${{ steps.filter.outputs.native }}
+      wasm: ${{ steps.filter.outputs.wasm }}
+      godot: ${{ steps.filter.outputs.godot }}
+      js: ${{ steps.filter.outputs.js }}
+      reference: ${{ steps.filter.outputs.reference }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            core: &core
+              - 'src/**'
+              - 'include/**'
+              - 'cmake/**'
+              - 'CMakeLists.txt'
+              - 'assets/**'
+              - '.github/workflows/**'
+            native:
+              - *core
+              - 'tools/**'
+              - 'tests/native/**'
+              - 'web/test/fixtures/**'
+            wasm:
+              - *core
+              - 'scripts/**'
+              - 'web/**'
+            godot:
+              - *core
+              - 'integrations/godot/**'
+              - 'packages/**'
+            js:
+              - *core
+              - 'packages/**'
+              - 'tests/native/**'
+              - 'package.json'
+              - 'package-lock.json'
+            reference:
+              - *core
+              - 'tools/jsui-render/**'
+              - 'packages/**'
+              - 'examples/**'
+              - 'tests/reference/**'
+              - 'package-lock.json'
+
   # ------------------------------------------------------------ native (Linux)
   native:
     name: native (ubuntu, clang)
     runs-on: ubuntu-24.04
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.native == 'true'
     steps:
       - uses: actions/checkout@v4
       - name: System packages
@@ -34,8 +88,15 @@ jobs:
             build/_deps/*-src
           key: native-deps-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'tools/**/CMakeLists.txt') }}
           restore-keys: native-deps-${{ runner.os }}-
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: native-${{ runner.os }}
+          max-size: 500M
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Build
         run: cmake --build build -j "$(nproc)"
       - name: Native tests
@@ -64,6 +125,8 @@ jobs:
   godot:
     name: godot (GDExtension, ubuntu)
     runs-on: ubuntu-24.04
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.godot == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -82,11 +145,17 @@ jobs:
             build/_deps/godot
           key: godot-deps-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'integrations/godot/CMakeLists.txt', 'integrations/godot/smoke-test.sh') }}
           restore-keys: godot-deps-${{ runner.os }}-
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: godot-${{ runner.os }}
+          max-size: 500M
       - name: Configure
         run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
           -DJSUI_BUILD_TESTS=OFF -DJSUI_BUILD_VIEWER=OFF -DJSUI_BUILD_GODOT=ON
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Build GDExtension
         run: cmake --build build -j "$(nproc)" --target jsui_godot
       - name: Demo bundle
@@ -108,6 +177,8 @@ jobs:
   wasm:
     name: wasm (emscripten + browser)
     runs-on: ubuntu-24.04
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.wasm == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -140,11 +211,16 @@ jobs:
         run: JOBS=$(nproc) scripts/build-wasm.sh Release
       - name: Node smoke test
         run: node web/test/node-smoke.mjs
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json', 'web/package.json') }}
       - name: Browser tests (Playwright / Chromium)
         working-directory: web
         run: |
           npm install --no-package-lock --no-audit --no-fund
-          npx playwright install --with-deps chromium
+          npx playwright install chromium
           JSUI_WEB_STRICT=1 npm run test:browser
       - uses: actions/upload-artifact@v4
         with:
@@ -159,6 +235,8 @@ jobs:
   wasm-webgl:
     name: wasm webgl (emscripten + browser, GPU)
     runs-on: ubuntu-24.04
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.wasm == 'true'
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -192,11 +270,16 @@ jobs:
         run: WEBGL=1 JOBS=$(nproc) scripts/build-wasm.sh Release
       - name: Node smoke test (GPU module, CPU path)
         run: JSUI_WEB_DIST=dist-webgl node web/test/node-smoke.mjs
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json', 'web/package.json') }}
       - name: Browser tests against the GPU module (Playwright / Chromium)
         working-directory: web
         run: |
           npm install --no-package-lock --no-audit --no-fund
-          npx playwright install --with-deps chromium
+          npx playwright install chromium
           JSUI_WEB_STRICT=1 JSUI_WEB_DIST=dist-webgl npm run test:browser
       - uses: actions/upload-artifact@v4
         with:
@@ -207,6 +290,8 @@ jobs:
   js:
     name: js packages
     runs-on: ubuntu-24.04
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.js == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -221,7 +306,8 @@ jobs:
   reference:
     name: reference (jsui vs react-native-web)
     runs-on: ubuntu-24.04
-    needs: native
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.reference == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -239,12 +325,23 @@ jobs:
             build/_deps/*-src
           key: native-deps-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'tools/**/CMakeLists.txt') }}
           restore-keys: native-deps-${{ runner.os }}-
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: reference-${{ runner.os }}
+          max-size: 500M
       - name: Build jsui-render
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DJSUI_BUILD_TESTS=OFF
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DJSUI_BUILD_TESTS=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build build -j "$(nproc)" --target jsui-render
       - name: Install
         run: if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json', 'web/package.json') }}
       - name: Chromium
         run: npx playwright install --with-deps chromium
       - name: Reference tests
@@ -261,6 +358,8 @@ jobs:
   native-other:
     name: native (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.native == 'true'
     continue-on-error: true
     strategy:
       fail-fast: false
