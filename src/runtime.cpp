@@ -580,14 +580,16 @@ SkIRect Runtime::paintTracked(SkCanvas* canvas, const void* pixels, int width, i
     redraw_ = false;
     return SkIRect::MakeEmpty();
   }
-  // Always refresh the paint records so the next incremental frame compares
-  // against what is in the buffer.
-  SkRegion damage = updateDamage(doc, width, height);
   bool dev = config.dev_mode != 0;
   bool frozen = dev && lastGoodFrame_ && (!lastError.empty() || doc.root()->children().empty());
   bool overlay = dev && !lastError.empty();
   bool partial = incremental && !frozen && !overlay && pixels == lastTarget_ && width == lastTargetW_ &&
                  height == lastTargetH_ && rowBytes == lastTargetRowBytes_;
+  // Always refresh the paint records so the next incremental frame compares
+  // against what is in the buffer. A partial repaint of a pixel buffer can
+  // move scrolled content instead of repainting it.
+  ScrollBlit blit;
+  SkRegion damage = updateDamage(doc, width, height, partial && rowBytes ? &blit : nullptr);
   // Frames with the error overlay or a frozen picture are not tracked by the
   // records: the next frame repaints fully.
   bool tracked = !frozen && !overlay;
@@ -598,13 +600,19 @@ SkIRect Runtime::paintTracked(SkCanvas* canvas, const void* pixels, int width, i
   doc.clearPaintDirty();
   redraw_ = false;
   if (partial) {
-    if (damage.isEmpty()) return SkIRect::MakeEmpty();
+    if (damage.isEmpty() && blit.rect.isEmpty()) return SkIRect::MakeEmpty();
+    if (!blit.rect.isEmpty()) applyScrollBlit(const_cast<void*>(pixels), rowBytes, width, height, blit);
     canvas->save();
     canvas->clipRegion(damage);
     canvas->clear(SK_ColorTRANSPARENT);
     paintDocument(doc, canvas, &damage);
     canvas->restore();
-    return damage.getBounds();
+    SkIRect changed = damage.getBounds();
+    if (!blit.rect.isEmpty()) {
+      noteScrollBlit(doc, blit);
+      changed.join(blit.rect);
+    }
+    return changed;
   }
   canvas->clear(SK_ColorTRANSPARENT);
   paintFrame(canvas, frozen, overlay);

@@ -512,3 +512,97 @@ TEST(render_sprites_match_direct_and_are_reused) {
     CHECK_EQ(layers, 0);  // the 0.6 opacity is folded into its gradient
   }
 }
+
+// Scrolling by whole device pixels moves the viewport's pixels instead of
+// repainting them (scroll blit): every frame must still match a full
+// repaint, with rounded, bordered, shadowed and clipped cards, images, text
+// and gradients crossing the viewport's edges, a sidebar beside it and a
+// badge above it. At 1x pixel for pixel; at 2x Skia's anti-aliasing is not
+// exactly translation invariant, so a moved pixel may differ from a fresh
+// one by a level (a handful of pixels per frame). Perf guard: blitted frames
+// repaint a fraction of the viewport. Frames that cannot blit (a sub-pixel
+// scroll, content changing while it scrolls) repaint as before, exactly.
+TEST(render_scroll_blit_matches_full) {
+  for (float dpr : {1.f, 2.f}) {
+    Scene s(400, 300, dpr);
+    s.add(R"J({"style":{"position":"absolute","left":0,"top":0,"width":400,"height":300,"backgroundColor":"#0b1020"},"children":[
+      {"style":{"position":"absolute","left":0,"top":0,"width":100,"height":300,"backgroundColor":"#111830","borderRightWidth":1,
+        "borderRightColor":"rgba(255,255,255,0.1)"},"children":[{"type":"Text","style":{"color":"#fff","fontSize":20,"margin":10},
+        "text":"Collection"}]}]})J");
+    std::string cards;
+    for (int i = 0; i < 12; i++) {
+      if (i) cards += ",";
+      cards += R"J({"style":{"width":120,"height":140,"margin":8,"borderRadius":14,"overflow":"hidden","backgroundColor":"#182041",
+        "borderWidth":1,"borderColor":"rgba(255,255,255,0.15)","boxShadow":"0 8px 16px rgba(0,0,0,0.6)"},"children":[
+        {"type":"Image","props":{"resizeMode":"cover","source":{"uri":")J" + testPngUri(48, 32) + R"J("}},"style":{"width":"100%","height":70}},
+        {"type":"Text","style":{"color":"#fff","fontSize":14,"margin":6},"text":"Card )J" + std::to_string(i) + R"J("},
+        {"style":{"height":8,"marginHorizontal":6,"borderRadius":4,"overflow":"hidden","backgroundColor":"rgba(255,255,255,0.1)"},
+         "children":[{"style":{"width":"60%","height":"100%","experimental_backgroundImage":"linear-gradient(90deg, #ff4d6a, #f2c35b)"}}]}]})J";
+    }
+    Node* sv = s.add(R"J({"type":"ScrollView","style":{"position":"absolute","left":101,"top":0,"width":299,"height":300},
+      "children":[{"style":{"flexDirection":"row","flexWrap":"wrap","padding":6},"children":[)J" + cards + "]}]}");
+    Node* badge = s.add(R"J({"style":{"position":"absolute","left":330,"top":250,"width":60,"height":30,"borderRadius":15,
+      "backgroundColor":"rgba(242,195,91,0.9)"}})J");
+    s.render();
+    s.render();  // images decoded
+    int dw = s.dw(), dh = s.dh();
+    std::vector<uint32_t> inc(size_t(dw) * dh), full(inc.size());
+    s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);
+    int blits = 0, steps = 0;
+    double blitRepaint = 0;
+    size_t bad = 0, off = 0;
+    int worst = 0;
+    auto step = [&](float y, bool expectBlit, const char* what) {
+      sv->scrollY = y;  // like InputManager::applyScroll
+      sv->markBoundsDirty();
+      s.doc().markPaintDirty();
+      s.doc().layout();
+      s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);
+      PaintStats st = lastPaintStats(s.doc());
+      bool blitted = st.blitPixels > 0;
+      if (blitted != expectBlit) std::fprintf(stderr, "  dpr %g %s to %g: blit %d, expected %d\n", dpr, what, y, blitted, expectBlit);
+      CHECK_EQ(blitted, expectBlit);
+      if (blitted) {
+        blits++;
+        blitRepaint += double(st.repaintedPixels);
+      }
+      s.rt->render(full.data(), dw, dh, size_t(dw) * 4);
+      size_t diff = 0;
+      int md = 0;
+      for (size_t k = 0; k < inc.size(); k++) {
+        if (inc[k] == full[k]) continue;
+        diff++;
+        for (int ch = 0; ch < 4; ch++)
+          md = std::max(md, std::abs(int((inc[k] >> (ch * 8)) & 255) - int((full[k] >> (ch * 8)) & 255)));
+      }
+      if (diff && (!blitted || dpr == 1))
+        std::fprintf(stderr, "  dpr %g %s to %g: %zu pixels differ, max %d\n", dpr, what, y, diff, md);
+      if (!blitted || dpr == 1) bad += diff;
+      off = std::max(off, diff);
+      worst = std::max(worst, md);
+      s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);  // in step again (full)
+      steps++;
+    };
+    float y = 0;
+    for (int i = 0; i < 12; i++) step(y += 7, true, "down");
+    for (int i = 0; i < 6; i++) step(y -= 13, true, "up");
+    step(y += 0.25f, dpr * 0.25f == std::round(dpr * 0.25f), "sub-pixel");
+    y = std::round(y);
+    step(y, dpr * 0.25f == std::round(dpr * 0.25f), "back to whole");
+    // Content changing while scrolling: no blit, still exact.
+    patch(sv->children()[0]->children()[3], R"J({"backgroundColor":"#ff0000"})J");
+    step(y += 5, false, "scroll + change");
+    // The badge above the viewport moving while scrolling: blit, and the
+    // badge repaints where it was and is.
+    patch(badge, R"J({"left":300,"top":200})J");
+    step(y += 5, true, "scroll + overlay move");
+    CHECK_EQ(bad, size_t(0));
+    std::printf("  dpr %g: at most %zu pixels per frame differ from a full repaint, by at most %d\n", dpr, off, worst);
+    CHECK(off <= 32);
+    CHECK(worst <= 4);
+    double vpArea = 299.0 * 300 * dpr * dpr;
+    std::printf("  dpr %g: %d of %d frames blitted, repainting %.0f px of a %.0f px viewport\n", dpr, blits, steps,
+                blitRepaint / std::max(1, blits), vpArea);
+    CHECK(blitRepaint / std::max(1, blits) < vpArea * 0.6);
+  }
+}

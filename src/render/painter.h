@@ -25,7 +25,22 @@ void paintDocument(Document& doc, SkCanvas* canvas, const SkRegion* damage = nul
 // at the previous call and returns the device region whose pixels changed.
 // Must run once per frame before paintDocument(), also for full repaints,
 // so the records stay current.
-SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight);
+//
+// `blit` (callers that repaint into a CPU buffer holding the last frame):
+// when a ScrollView's content only scrolled, by whole device pixels, over a
+// uniform backdrop, the damage leaves out its viewport except what the
+// scroll exposes, and `blit` says how to move the viewport's pixels first:
+// what was at p goes to p + (dx, dy), within `rect`. The caller must do that
+// before painting the damage (or repaint fully). Empty rect: no blit.
+struct ScrollBlit {
+  SkIRect rect = SkIRect::MakeEmpty();
+  int dx = 0, dy = 0;
+};
+SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBlit* blit = nullptr);
+// Moves the pixels of `b.rect` by (dx, dy) in an RGBA8888 buffer.
+void applyScrollBlit(void* pixels, size_t rowBytes, int width, int height, const ScrollBlit& b);
+// Records a blit in the last paint's stats (PaintStats::blitPixels).
+void noteScrollBlit(Document& doc, const ScrollBlit& b);
 
 // Surface properties render targets should use: grayscale text with
 // Chrome's (Linux) text contrast and gamma, so glyph coverage matches.
@@ -59,6 +74,7 @@ struct PaintStats {
   // scaled images), and of those the ones rendered this paint (misses).
   int spriteDraws = 0;
   int spriteRenders = 0;
+  int64_t blitPixels = 0;  // pixels moved by a scroll blit instead of repainted
 };
 PaintStats lastPaintStats(const Document& doc);
 

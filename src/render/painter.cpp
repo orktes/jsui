@@ -1176,6 +1176,7 @@ struct NodeRecord : Node::Cache {
   float w = -1, h = -1;
   SkIRect bars = SkIRect::MakeEmpty();     // ScrollView overlay indicators (device)
   float barAlpha = 0;
+  float scrollX = 0, scrollY = 0;          // ScrollView offsets painted
   bool painted = false;
   bool valid = false;
 };
@@ -1236,6 +1237,21 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx);
 
 // The node's own painting bounds (shadows, outline, overflowing text) in its
 // border-box coordinates, without descendants.
+// A paragraph-root Text node's lines in its border-box coordinates, laid
+// out at the width paintContent lays the paragraph out at (the unsnapped
+// content width): the paragraph keeps one layout, so any other width would
+// re-lay it out here and again when painting. Empty without a paragraph.
+SkRect paragraphRect(Node* n) {
+  YGNodeRef y = n->yoga();
+  float left = YGNodeLayoutGetBorder(y, YGEdgeLeft) + YGNodeLayoutGetPadding(y, YGEdgeLeft);
+  float top = YGNodeLayoutGetBorder(y, YGEdgeTop) + YGNodeLayoutGetPadding(y, YGEdgeTop);
+  float cw = YGNodeLayoutGetWidth(y) - left - YGNodeLayoutGetBorder(y, YGEdgeRight) -
+             YGNodeLayoutGetPadding(y, YGEdgeRight);
+  if (auto* p = text::layoutParagraph(n, std::max(0.f, cw)))
+    return SkRect::MakeXYWH(left, top, p->getLongestLine(), p->getHeight());
+  return SkRect::MakeEmpty();
+}
+
 SkRect ownVisualBounds(Node* n, float w, float h) {
   const ComputedStyle& s = n->style();
   SkRect r = SkRect::MakeWH(w, h);
@@ -1253,16 +1269,8 @@ SkRect ownVisualBounds(Node* n, float w, float h) {
     float e = s.text.fontSize.value_or(14);
     for (auto& sh : s.text.textShadows) e = std::max(e, sh.blur * 1.5f + std::fabs(sh.offsetX) + std::fabs(sh.offsetY));
     r.join(SkRect::MakeWH(w, h).makeOutset(e, e));
-    // At the width paintContent lays the paragraph out at (the unsnapped
-    // content width): the paragraph keeps one layout, so any other width
-    // would re-lay it out here and again when painting.
-    YGNodeRef y = n->yoga();
-    float left = YGNodeLayoutGetBorder(y, YGEdgeLeft) + YGNodeLayoutGetPadding(y, YGEdgeLeft);
-    float top = YGNodeLayoutGetBorder(y, YGEdgeTop) + YGNodeLayoutGetPadding(y, YGEdgeTop);
-    float cw = YGNodeLayoutGetWidth(y) - left - YGNodeLayoutGetBorder(y, YGEdgeRight) -
-               YGNodeLayoutGetPadding(y, YGEdgeRight);
-    if (auto* p = text::layoutParagraph(n, std::max(0.f, cw)))
-      r.join(SkRect::MakeXYWH(left, top, p->getLongestLine(), p->getHeight()).makeOutset(e, e));
+    SkRect pr = paragraphRect(n);
+    if (!pr.isEmpty()) r.join(pr.makeOutset(e, e));
   }
   return r;
 }
@@ -1558,11 +1566,64 @@ SkRect curvedOutline(const Node* n, const SkMatrix& m, float w, float h) {
   return curved ? r : SkRect::MakeEmpty();
 }
 
+// Scroll blits (see updateDamage): the ScrollView whose content may move by
+// pixels this frame, and what updateRecords found inside it.
+struct BlitScan {
+  bool enabled = false;
+  Node* node = nullptr;   // the ScrollView
+  bool inside = false;    // updateRecords is in its content
+  bool pure = true;       // every content node moved by exactly (dx, dy), nothing else changed
+  float dx = 0, dy = 0;   // device pixels
+  SkIRect viewport;       // device padding box (whole pixels)
+  SkRegion sub;           // the damage found in the content
+  size_t curvedBegin = 0, curvedEnd = 0;
+};
+
+bool nearlyEqual(const SkMatrix& a, const SkMatrix& b) {
+  for (int i = 0; i < 9; i++)
+    if (std::fabs(a[i] - b[i]) > 1e-3f) return false;
+  return true;
+}
+
+bool wholePixels(const SkRect& r) {
+  auto whole = [](float v) { return std::fabs(v - std::round(v)) < 1e-3f; };
+  return whole(r.fLeft) && whole(r.fTop) && whole(r.fRight) && whole(r.fBottom);
+}
+
+// Whether the ScrollView `n` (its record unchanged but for the scroll
+// offset) can move its content by pixels; fills scan's viewport and delta.
+bool startBlitScan(Node* n, const NodeRecord* rec, const SkMatrix& m, float w, float h, const SkIRect& clip,
+                   BlitScan* scan) {
+  if (!rec->valid || !rec->painted || rec->version != n->paintVersion || rec->w != w || rec->h != h ||
+      rec->children != childListHash(n) || !n->ghosts.empty() || rec->matrix != m || !m.isScaleTranslate())
+    return false;
+  if (rec->scrollX == n->scrollX && rec->scrollY == n->scrollY) return false;
+  const ComputedStyle& s = n->style();
+  if (!s.backgroundImages.empty() || (s.outlineWidth > 0 && s.outlineOffset < 0)) return false;
+  for (const Shadow& sh : s.boxShadows)
+    if (sh.inset) return false;
+  float dx = (rec->scrollX - n->scrollX) * m.getScaleX(), dy = (rec->scrollY - n->scrollY) * m.getScaleY();
+  if (std::fabs(dx - std::round(dx)) > 1e-3f || std::fabs(dy - std::round(dy)) > 1e-3f) return false;
+  Box b;
+  computeBox(n, w, h, &b);
+  if (!b.inner.isRect()) return false;
+  SkRect vp = m.mapRect(b.inner.rect());
+  if (!wholePixels(vp)) return false;
+  SkIRect ivp = vp.round();
+  if (ivp.isEmpty() || !clip.contains(ivp) || std::fabs(dx) >= ivp.width() || std::fabs(dy) >= ivp.height())
+    return false;
+  scan->node = n;
+  scan->dx = std::round(dx);
+  scan->dy = std::round(dy);
+  scan->viewport = ivp;
+  return true;
+}
+
 // Walks the tree like paintNode (same matrices and snapping), refreshes each
 // node's record and adds what changed since the last frame to `damage`.
 // Returns the node's device subtree bounds.
 SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSnap, const SkIRect& clip,
-                      uint32_t imageGen, SkRegion* damage, std::vector<CurvedNode>* curved) {
+                      uint32_t imageGen, SkRegion* damage, std::vector<CurvedNode>* curved, BlitScan* scan) {
   if (!n->yoga()) return SkIRect::MakeEmpty();  // raw text: painted by its paragraph
   NodeRecord* rec = record(n);
   SkIRect own = SkIRect::MakeEmpty(), sub = SkIRect::MakeEmpty(), bars = SkIRect::MakeEmpty();
@@ -1607,12 +1668,24 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
       if (clipsChildren(n) && !childClip.intersect(deviceBounds(m, SkRect::MakeWH(w, h)))) childClip.setEmpty();
       SkMatrix cm = m, cs = p.snapSpace;
       cm.preTranslate(-p.snap.fX, -p.snap.fY);
+      SkRegion* childDamage = damage;
+      bool scanning = false;
       if (n->type() == NodeType::ScrollView) {
         cm.preTranslate(-n->scrollX, -n->scrollY);
         cs.preTranslate(-n->scrollX, -n->scrollY);
+        if (scan->enabled && !scan->node && startBlitScan(n, rec, m, w, h, clip, scan)) {
+          scanning = true;
+          scan->inside = true;
+          scan->curvedBegin = curved->size();
+          childDamage = &scan->sub;
+        }
       }
-      for (Node* ch : n->ghosts) sub.join(updateRecords(ch, cm, cs, childClip, imageGen, damage, curved));
-      for (Node* ch : n->children()) sub.join(updateRecords(ch, cm, cs, childClip, imageGen, damage, curved));
+      for (Node* ch : n->ghosts) sub.join(updateRecords(ch, cm, cs, childClip, imageGen, childDamage, curved, scan));
+      for (Node* ch : n->children()) sub.join(updateRecords(ch, cm, cs, childClip, imageGen, childDamage, curved, scan));
+      if (scanning) {
+        scan->inside = false;
+        scan->curvedEnd = curved->size();
+      }
     }
     float fe = filterOutset(s);
     if (fe > 0 && !sub.isEmpty()) {
@@ -1623,7 +1696,9 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
   }
   // TextInput caret blink / move: only the caret's old and new rects.
   SkRect caretA, caretB;
+  bool caret = false;
   if (n->type() == NodeType::TextInput && text::inputCaretDamage(n, &caretA, &caretB) && painted) {
+    caret = true;
     for (const SkRect& cr : {caretA, caretB}) {
       SkIRect dr;
       if (!cr.isEmpty() && dr.intersect(deviceBounds(m, cr.makeOutset(1, 1)), clip)) damage->op(dr, SkRegion::kUnion_Op);
@@ -1650,6 +1725,16 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
     damage->op(rec->bars, SkRegion::kUnion_Op);
     damage->op(bars, SkRegion::kUnion_Op);
   }
+  if (scan->inside) {
+    // Content of a scroll blit candidate: it must have moved by exactly the
+    // scroll delta, with nothing else changed.
+    SkMatrix moved = rec->matrix;
+    moved.postTranslate(scan->dx, scan->dy);
+    if (contentChanged || caret || rec->bars != bars || rec->barAlpha != barAlpha || !nearlyEqual(moved, m))
+      scan->pure = false;
+  }
+  rec->scrollX = n->scrollX;
+  rec->scrollY = n->scrollY;
   rec->bars = bars;
   rec->barAlpha = barAlpha;
   rec->own = own;
@@ -1692,9 +1777,140 @@ SkMatrix localTransform(const Node& n) {
   return m;
 }
 
-SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight) {
+namespace {
+
+// Whether `k`'s subtree paints into device rect `vp`. Records are outset by
+// a pixel beyond what can be painted (deviceBounds): a box ending at the
+// edge of `vp` does not paint into it. Text records are generous (a font
+// size around the box); here a text paints within its box and lines plus
+// a quarter em (overhangs) and its shadows.
+bool paintsInto(Node* k, const SkIRect& vp) {
+  const auto* kr = static_cast<const NodeRecord*>(k->paintCache.get());
+  if (!kr || !kr->valid || !kr->painted || !SkIRect::Intersects(kr->subtree.makeInset(1, 1), vp)) return false;
+  const ComputedStyle& s = k->style();
+  if (!s.filters.empty()) return true;  // spreads the children's painting
+  if (SkIRect::Intersects(kr->own.makeInset(1, 1), vp)) {
+    if (k->type() != NodeType::Text) return true;
+    float e = s.text.fontSize.value_or(14) * 0.25f;
+    for (auto& sh : s.text.textShadows) e = std::max(e, sh.blur * 1.5f + std::fabs(sh.offsetX) + std::fabs(sh.offsetY));
+    SkRect t = SkRect::MakeWH(kr->w, kr->h);
+    SkRect pr = paragraphRect(k);
+    if (!pr.isEmpty()) t.join(pr);
+    if (SkIRect::Intersects(kr->matrix.mapRect(t.makeOutset(e, e)).roundOut(), vp)) return true;
+  }
+  if (!paintsChildren(k)) return false;
+  for (Node* g : k->ghosts)
+    if (paintsInto(g, vp)) return true;
+  for (Node* ch : k->children())
+    if (paintsInto(ch, vp)) return true;
+  return false;
+}
+
+// Whether `k`'s subtree paints the same everywhere in device rect `vp`
+// (nothing, or colours that each cover all of it): a backdrop that a scroll
+// blit can move content over.
+bool uniformOver(Node* k, const SkIRect& vp) {
+  if (!paintsInto(k, vp)) return true;
+  const auto* kr = static_cast<const NodeRecord*>(k->paintCache.get());
+  const ComputedStyle& s = k->style();
+  if (k->type() != NodeType::View || !s.filters.empty() || s.blendMode || s.outlineWidth > 0 ||
+      !s.backgroundImages.empty() || !s.boxShadows.empty() || !kr->matrix.isScaleTranslate())
+    return false;
+  if (SkIRect::Intersects(kr->own.makeInset(1, 1), vp)) {
+    const SkRect vpf = SkRect::Make(vp);
+    Box b;
+    computeBox(k, kr->w, kr->h, &b);
+    SkRRect dev;
+    if (!s.backgroundColor.transparent() && (!b.outer.transform(kr->matrix, &dev) || !dev.contains(vpf))) return false;
+    bool border = b.border[0] > 0 || b.border[1] > 0 || b.border[2] > 0 || b.border[3] > 0;
+    if (border && (!b.inner.transform(kr->matrix, &dev) || !dev.contains(vpf))) return false;
+  }
+  for (Node* g : k->ghosts)
+    if (!uniformOver(g, vp)) return false;
+  for (Node* ch : k->children())
+    if (!uniformOver(ch, vp)) return false;
+  return true;
+}
+
+// A blit candidate's surroundings: true when every pixel of the viewport
+// is the content (moved by the blit) over a backdrop that is the same
+// everywhere in the viewport (each ancestor paints either nothing there or
+// one colour over all of it), with nothing painted between the backdrop and
+// the content. Nodes painted above the content are added to `extra`.
+bool blitSurroundings(const BlitScan& scan, SkRegion* extra) {
+  const SkIRect& vp = scan.viewport;
+  const SkRect vpf = SkRect::Make(vp);
+  Node* c = scan.node;
+  {
+    // The ScrollView's own indicators are drawn over its content.
+    const auto* rec = static_cast<const NodeRecord*>(c->paintCache.get());
+    SkIRect b;
+    if (b.intersect(rec->bars, vp)) extra->op(b, SkRegion::kUnion_Op);
+  }
+  for (Node* a = c->parent(); a; c = a, a = a->parent()) {
+    const auto* ar = static_cast<const NodeRecord*>(a->paintCache.get());
+    if (!ar || !ar->valid || !ar->painted) return false;
+    const ComputedStyle& s = a->style();
+    if (s.opacity * animOpacity(a) < 1 || !s.filters.empty() || s.blendMode) return false;
+    bool over = SkIRect::Intersects(ar->own, vp);
+    if (over && (!s.backgroundImages.empty() || !s.boxShadows.empty())) return false;
+    Box b;
+    computeBox(a, ar->w, ar->h, &b);
+    SkRRect dev;
+    if (!s.backgroundColor.transparent() && (!b.outer.transform(ar->matrix, &dev) || !dev.contains(vpf))) return false;
+    bool border = b.border[0] > 0 || b.border[1] > 0 || b.border[2] > 0 || b.border[3] > 0;
+    if ((border || clipsChildren(a)) && (!b.inner.transform(ar->matrix, &dev) || !dev.contains(vpf))) return false;
+    SkIRect r;
+    if (s.outlineWidth > 0 && r.intersect(ar->own, vp)) extra->op(r, SkRegion::kUnion_Op);
+    if (r.intersect(ar->bars, vp)) extra->op(r, SkRegion::kUnion_Op);
+    // Siblings: those painted before must not show in the viewport, those
+    // painted after repaint where they do.
+    for (Node* g : a->ghosts)
+      if (!uniformOver(g, vp)) return false;
+    bool after = false;
+    for (Node* k : a->children()) {
+      if (k->style().hasZIndex && k->style().zIndex != 0) return false;  // painted out of order
+      if (k == c) {
+        after = true;
+        continue;
+      }
+      const auto* kr = static_cast<const NodeRecord*>(k->paintCache.get());
+      if (!kr || !kr->valid || !kr->painted) continue;
+      if (!after && !uniformOver(k, vp)) return false;
+      if (after && r.intersect(kr->subtree, vp)) extra->op(r, SkRegion::kUnion_Op);
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
+void applyScrollBlit(void* pixels, size_t rowBytes, int width, int height, const ScrollBlit& b) {
+  SkIRect dst = b.rect;
+  if (!dst.intersect(SkIRect::MakeWH(width, height)) || !dst.intersect(b.rect.makeOffset(b.dx, b.dy))) return;
+  auto* base = static_cast<uint8_t*>(pixels);
+  size_t n = size_t(dst.width()) * 4;
+  auto row = [&](int y) {
+    std::memmove(base + size_t(y) * rowBytes + size_t(dst.left()) * 4,
+                 base + size_t(y - b.dy) * rowBytes + size_t(dst.left() - b.dx) * 4, n);
+  };
+  if (b.dy > 0) {
+    for (int y = dst.bottom() - 1; y >= dst.top(); y--) row(y);
+  } else {
+    for (int y = dst.top(); y < dst.bottom(); y++) row(y);
+  }
+}
+
+void noteScrollBlit(Document& doc, const ScrollBlit& b) {
+  SkIRect moved = b.rect;
+  rootRecord(doc)->stats.blitPixels =
+      moved.intersect(b.rect.makeOffset(b.dx, b.dy)) ? int64_t(moved.width()) * moved.height() : 0;
+}
+
+SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBlit* blit) {
   RootRecord* root = rootRecord(doc);
   SkRegion damage;
+  if (blit) *blit = ScrollBlit{};
   SkIRect screen = SkIRect::MakeWH(deviceWidth, deviceHeight);
   // New fonts change glyphs without changing any node: repaint everything.
   uint32_t fontGen = doc.fonts ? doc.fonts->generation : 0;
@@ -1705,7 +1921,44 @@ SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight) {
   uint32_t imageGen = doc.images ? doc.images->generation : 0;
   SkMatrix m = SkMatrix::Scale(doc.pixelRatio(), doc.pixelRatio());
   root->curved.clear();
-  updateRecords(doc.root(), m, m, screen, imageGen, &damage, &root->curved);
+  BlitScan scan;
+  scan.enabled = blit && damage.isEmpty();
+  updateRecords(doc.root(), m, m, screen, imageGen, &damage, &root->curved, &scan);
+  if (scan.node) {
+    // Scroll blit: the viewport's pixels move with the content, so only
+    // what the scroll exposes repaints, plus what is painted above the
+    // content and whatever else is damaged in the viewport, both where it
+    // is and where the blit moves its old pixels, plus curved outlines the
+    // viewport edge cuts (now or before the move: Skia chops them at the
+    // clip bounds).
+    SkRegion extra;
+    if (scan.pure && blitSurroundings(scan, &extra)) {
+      const SkIRect& vp = scan.viewport;
+      int dx = int(scan.dx), dy = int(scan.dy);
+      extra.op(damage, SkRegion::kUnion_Op);
+      extra.op(vp, SkRegion::kIntersect_Op);
+      SkRegion moved(extra);
+      moved.translate(dx, dy);
+      extra.op(moved, SkRegion::kUnion_Op);
+      SkRegion exposed(vp);
+      exposed.op(vp.makeOffset(dx, dy), SkRegion::kDifference_Op);
+      extra.op(exposed, SkRegion::kUnion_Op);
+      // Curved bounds are clipped to the viewport (plus a pixel): one that
+      // reaches its edge may be cut by it.
+      SkIRect in = vp.makeInset(1, 1);
+      for (size_t i = scan.curvedBegin; i < scan.curvedEnd; i++) {
+        const SkIRect& b = root->curved[i].bounds;
+        SkIRect r;
+        if ((!in.contains(b) || !in.contains(b.makeOffset(-dx, -dy))) && r.intersect(b, vp))
+          extra.op(r, SkRegion::kUnion_Op);
+      }
+      extra.op(vp, SkRegion::kIntersect_Op);
+      damage.op(extra, SkRegion::kUnion_Op);
+      *blit = ScrollBlit{vp, dx, dy};
+    } else {
+      damage.op(scan.sub, SkRegion::kUnion_Op);
+    }
+  }
   // Skia's anti-aliased scan converter (paths, rrects, AA clips) clips the
   // outline to the clip's *bounds* before rasterizing, which shifts edge
   // coverage when those bounds cut through a curved or diagonal outline
