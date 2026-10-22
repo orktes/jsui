@@ -1,5 +1,6 @@
 #include "core/document.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "text/font_manager.h"
@@ -42,6 +43,19 @@ Node* Document::get(uint32_t id) const {
 }
 
 void Document::destroyRecursive(Node* node) {
+  // Children still fading out (LayoutAnimation delete) go with their parent.
+  while (!node->ghosts.empty()) {
+    Node* g = node->ghosts.back();
+    node->ghosts.pop_back();
+    g->ghostOf = nullptr;
+    destroyRecursive(g);
+  }
+  if (node->ghostOf) {
+    auto& list = node->ghostOf->ghosts;
+    list.erase(std::remove(list.begin(), list.end(), node), list.end());
+    node->ghostOf->markPaintDirty();
+    node->ghostOf = nullptr;
+  }
   while (!node->children().empty()) {
     Node* c = node->children().back();
     node->removeChild(c);
@@ -55,6 +69,11 @@ void Document::destroyRecursive(Node* node) {
 
 void Document::destroyNode(Node* node) {
   if (!node || node == root_) return;
+  if (node->ghostOf) {
+    // Still fading out: freed when its delete animation ends.
+    node->destroyWhenDone = true;
+    return;
+  }
   destroyRecursive(node);
   markLayoutDirty();
 }
@@ -64,6 +83,15 @@ void Document::clear() {
     Node* c = root_->children().back();
     destroyNode(c);
   }
+  while (!root_->ghosts.empty()) {
+    Node* g = root_->ghosts.back();
+    root_->ghosts.pop_back();
+    g->ghostOf = nullptr;
+    destroyRecursive(g);
+  }
+  root_->layoutAnim.reset();
+  animating_.clear();
+  armedSet_ = false;
   root_->setProps(Value());
 }
 
@@ -94,9 +122,17 @@ bool Document::layout() {
   }
   if (!layoutDirty_) return false;
   layoutDirty_ = false;
+  // An armed LayoutAnimation compares the frames before and after this pass.
+  std::vector<std::pair<Node*, Rect>> before;
+  bool animate = armedSet_;
+  if (animate) snapshotLayout(root_, &before);
   YGNodeStyleSetWidth(root_->yoga(), width_);
   YGNodeStyleSetHeight(root_->yoga(), height_);
   YGNodeCalculateLayout(root_->yoga(), width_, height_, YGDirectionLTR);
+  if (animate) {
+    armedSet_ = false;
+    startLayoutAnimations(before);
+  }
   if (onLayout) reportLayout(root_);
   paintDirty_ = true;
   return true;

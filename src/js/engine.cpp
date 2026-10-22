@@ -447,16 +447,13 @@ JsEngine::JsEngine(Runtime& rt) : impl_(std::make_unique<Impl>(rt)) {
 
   // performance.now() is the runtime's clock (the embedder's tick time), the
   // same timeline as rAF timestamps and timers, so headless renders are
-  // deterministic.
-  JSValue perf = JS_GetPropertyStr(ctx, global, "performance");
-  if (!JS_IsObject(perf)) {
-    JS_FreeValue(ctx, perf);
-    perf = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, global, "performance", JS_DupValue(ctx, perf));
-  }
+  // deterministic. QuickJS-ng's own `performance` has a read-only,
+  // non-configurable wall-clock `now`, so the object is replaced, not patched.
+  JSValue perf = JS_NewObject(ctx);
   JS_SetPropertyStr(ctx, perf, "now", JS_NewCFunction(ctx, js_now, "now", 0));
   JS_SetPropertyStr(ctx, perf, "timeOrigin", JS_NewFloat64(ctx, 0));
-  JS_FreeValue(ctx, perf);
+  JS_DefinePropertyValueStr(ctx, global, "performance", perf,
+                            JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
 
   installBridge(impl, global);
   JSValue host = JS_NewObject(ctx);
@@ -599,6 +596,22 @@ int JsEngine::dispatchEvent(const Value& event) {
   JS_FreeValue(ctx, fn);
   JS_FreeValue(ctx, global);
   return flags;
+}
+
+void JsEngine::callGlobal(const char* name, const Value* args, int argc) {
+  Impl& impl = *impl_;
+  JSContext* ctx = impl.ctx;
+  JSValue global = JS_GetGlobalObject(ctx);
+  JSValue fn = JS_GetPropertyStr(ctx, global, name);
+  if (JS_IsFunction(ctx, fn)) {
+    std::vector<JSValue> argv;
+    for (int i = 0; i < argc; i++) argv.push_back(fromValue(ctx, args[i]));
+    JSValue r = impl.call(fn, JS_UNDEFINED, argc, argv.data());
+    JS_FreeValue(ctx, r);
+    for (JSValue v : argv) JS_FreeValue(ctx, v);
+  }
+  JS_FreeValue(ctx, fn);
+  JS_FreeValue(ctx, global);
 }
 
 void JsEngine::hostMessage(const std::string& name, const std::string& json) {

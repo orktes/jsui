@@ -84,6 +84,7 @@ void jsui_set_viewport(JsuiRuntime* rt, int width, int height, float pixelRatio)
 }
 
 void jsui_tick(JsuiRuntime* rt, double nowMs) { rt->rt->tick(nowMs); }
+void jsui_tick_native(JsuiRuntime* rt, double nowMs) { rt->rt->tickNative(nowMs); }
 int jsui_pending_loads(JsuiRuntime* rt) { return int(rt->rt->loader.pending()); }
 int jsui_needs_redraw(JsuiRuntime* rt) { return rt->rt->needsRedraw() ? 1 : 0; }
 int jsui_wants_frame(JsuiRuntime* rt) { return rt->rt->wantsFrame() ? 1 : 0; }

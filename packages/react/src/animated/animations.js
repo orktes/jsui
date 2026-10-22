@@ -3,9 +3,15 @@
 // are flushed once at the end of each frame.
 
 import { now, requestFrame } from '../native.js';
-import { parseColor } from '../color.js';
 import { Easing } from './Easing.js';
-import { AnimatedValue, AnimatedValueXY, AnimatedColor, AnimatedNode, batch } from './nodes.js';
+import { AnimatedValue, AnimatedValueXY, AnimatedColor, AnimatedNode, batch, colorChannels } from './nodes.js';
+import {
+  shouldUseNativeDriver,
+  generateNewAnimationId,
+  startAnimatingNode,
+  stopAnimation as stopNativeAnimation,
+  sampleCurve,
+} from './NativeAnimatedHelper.js';
 
 // --- frame loop --------------------------------------------------------------
 const active = new Set();
@@ -34,21 +40,53 @@ class Animation {
     this._value = value;
     this._done = false;
     this.__iterations = this.__iterations || 1;
+    if (this._useNativeDriver && value instanceof AnimatedValue) {
+      this._startNative(fromValue, previous, value);
+      return;
+    }
+    if (value && value.__isNative()) {
+      throw new Error(
+        'Attempting to run JS driven animation on animated node that has been moved to "native" earlier by starting an animation with `useNativeDriver: true`',
+      );
+    }
     this.begin(fromValue, previous);
+  }
+  // Native driver: the runtime runs the animation on its frame clock and
+  // reports the end ({finished, value}); see NativeAnimatedHelper.js.
+  _startNative(from, previous, value) {
+    this._from = from;
+    value.__makeNative();
+    const config = this.__getNativeAnimationConfig(previous);
+    config.iterations = this.__iterations;
+    const id = generateNewAnimationId();
+    this._nativeId = id;
+    startAnimatingNode(id, value.__getNativeTag(), config, (finished, raw) => {
+      this._nativeId = null;
+      value._value = raw;
+      this._finish(finished, raw + value._offset);
+    });
   }
   _run() {
     active.add(this);
     schedule();
   }
-  _finish(finished) {
+  _finish(finished, value) {
     if (this._done) return;
     this._done = true;
     active.delete(this);
     const cb = this._onEnd;
     this._onEnd = null;
-    if (cb) cb({ finished });
+    // Native ends carry the final value, like React Native's.
+    if (cb) cb(value === undefined ? { finished } : { finished, value });
   }
   stop() {
+    if (this._nativeId != null) {
+      const r = stopNativeAnimation(this._nativeId);
+      this._nativeId = null;
+      if (r) this._lastVelocity = r.velocity;
+      this._finish(false, this._value.__getValue());
+      return;
+    }
     this._finish(false);
   }
 }
@@ -77,6 +115,18 @@ class TimingAnimation extends Animation {
       return;
     }
     this._run();
+  }
+  __getNativeAnimationConfig() {
+    // The easing as a curve sampled every ~2 ms (linearly interpolated
+    // natively; React Native samples at 60 Hz).
+    const count = Math.max(2, Math.min(4097, Math.ceil(this._duration / 2) + 1));
+    return {
+      type: 'frames',
+      frames: sampleCurve(this._easing, count),
+      duration: this._duration,
+      toValue: +resolveTo(this._to),
+      delay: this._delay,
+    };
   }
   onFrame(t) {
     if (t < this._start) return;
@@ -136,13 +186,31 @@ class SpringAnimation extends Animation {
   begin(from, previous) {
     this._from = from;
     this._toNum = +resolveTo(this._to);
-    // Continue with the previous spring's velocity for seamless retargeting.
-    if (previous instanceof SpringAnimation && previous._lastVelocity !== undefined && this._initialVelocity === 0) {
+    // Continue with the previous spring's velocity for seamless retargeting
+    // (RN takes over the running spring's state the same way).
+    if (previous instanceof SpringAnimation && previous._lastVelocity !== undefined) {
       this._initialVelocity = previous._lastVelocity;
     }
     this._start = now() + this._delay;
     this._lastVelocity = this._initialVelocity;
     this._run();
+  }
+  __getNativeAnimationConfig(previous) {
+    let velocity = this._initialVelocity;
+    if (previous instanceof SpringAnimation && previous._lastVelocity !== undefined) velocity = previous._lastVelocity;
+    this._initialVelocity = velocity;
+    return {
+      type: 'spring',
+      stiffness: this._k,
+      damping: this._c,
+      mass: this._m,
+      initialVelocity: velocity,
+      toValue: +resolveTo(this._to),
+      overshootClamping: this._overshootClamping,
+      restDisplacementThreshold: this._restDisplacement,
+      restSpeedThreshold: this._restSpeed,
+      delay: this._delay,
+    };
   }
   onFrame(t) {
     if (t < this._start) return;
@@ -192,6 +260,9 @@ class DecayAnimation extends Animation {
     this._deceleration = config.deceleration !== undefined ? config.deceleration : 0.998;
     this._delay = config.delay || 0;
   }
+  __getNativeAnimationConfig() {
+    return { type: 'decay', velocity: this._velocity, deceleration: this._deceleration, delay: this._delay };
+  }
   begin(from) {
     this._from = from;
     this._last = from;
@@ -213,24 +284,61 @@ class DecayAnimation extends Animation {
 
 // --- public animation objects -------------------------------------------------
 
-function single(value, makeAnimation, config) {
+// Splits a ValueXY / Color config into per-channel configs: every key whose
+// value carries the channel keys ({x, y} toValue / velocity, {r, g, b, a})
+// is split, like RN's maybeVectorAnim.
+function splitConfig(config, keys, resolveTo) {
+  return keys.map((k, i) => {
+    const out = Object.assign({}, config);
+    for (const key in config) {
+      const v = config[key];
+      if (key === 'toValue' && resolveTo) out.toValue = resolveTo(v)[i];
+      else if (v instanceof AnimatedValueXY) out[key] = v[k];
+      else if (v && typeof v === 'object' && !(v instanceof AnimatedNode) && v[k] !== undefined) out[key] = v[k];
+    }
+    return out;
+  });
+}
+
+function single(value, makeAnimationDriver, config) {
+  const useNative = shouldUseNativeDriver(config);
+  const makeAnimation = (c) => {
+    const a = makeAnimationDriver(c);
+    a._useNativeDriver = useNative;
+    return a;
+  };
   if (value instanceof AnimatedValueXY) {
-    const to = config.toValue || {};
-    const xy = (k) => Object.assign({}, config, { toValue: to instanceof AnimatedValueXY ? to[k] : to[k] });
-    return parallel([single(value.x, makeAnimation, xy('x')), single(value.y, makeAnimation, xy('y'))], { stopTogether: false });
+    const [cx, cy] = splitConfig(config, ['x', 'y']);
+    return parallel([single(value.x, makeAnimation, cx), single(value.y, makeAnimation, cy)], { stopTogether: false });
   }
   if (value instanceof AnimatedColor) {
-    const parse = (c) => (c instanceof AnimatedColor ? [c.r, c.g, c.b, c.a].map((n) => n.__getValue()) : parseColorOrBlack(c));
-    const to = parse(config.toValue);
-    const chans = ['r', 'g', 'b', 'a'].map((k, i) => single(value[k], makeAnimation, Object.assign({}, config, { toValue: to[i] })));
-    return parallel(chans, { stopTogether: false });
+    const chans = splitConfig(config, ['r', 'g', 'b', 'a'], colorChannels);
+    return parallel(['r', 'g', 'b', 'a'].map((k, i) => single(value[k], makeAnimation, chans[i])), { stopTogether: false });
   }
   let current = null;
   const result = {
     start(callback) {
+      // toValue given as another Animated node: follow it (RN AnimatedTracking).
+      if (config.toValue instanceof AnimatedNode) {
+        const target = config.toValue;
+        const restart = () => {
+          current = makeAnimation(Object.assign({}, config, { toValue: target.__getValue() }));
+          value.animate(current, callback);
+        };
+        const id = target.addListener(restart);
+        value.track({ __detach: () => target.removeListener(id) });
+        restart();
+        return;
+      }
       const anim = makeAnimation(config);
       current = anim;
       const iterations = config.iterations !== undefined ? config.iterations : 1;
+      if (useNative) {
+        // Iterations run natively (restarting from the start value).
+        anim.__iterations = iterations === 0 ? 1 : iterations;
+        value.animate(anim, callback);
+        return;
+      }
       let done = 0;
       const run = () => {
         value.animate(current, (r) => {
@@ -245,19 +353,25 @@ function single(value, makeAnimation, config) {
       run();
     },
     stop() {
+      value.stopTracking();
       if (current) current.stop();
     },
     reset() {
+      value.stopTracking();
       if (current) current.stop();
       value.resetAnimation();
     },
-    _isUsingNativeDriver: () => false,
+    _isUsingNativeDriver: () => useNative,
+    // Animated.loop of a native animation: the runtime repeats it (RN).
+    _startNativeLoop(iterations, callback) {
+      value.stopTracking();
+      const anim = makeAnimation(config);
+      anim.__iterations = iterations;
+      current = anim;
+      value.animate(anim, callback);
+    },
   };
   return result;
-}
-
-function parseColorOrBlack(c) {
-  return parseColor(c) || [0, 0, 0, 1];
 }
 
 export const timing = (value, config) => single(value, (c) => new TimingAnimation(c), config || {});
@@ -367,6 +481,8 @@ export function loop(animation, config) {
       };
       if (!animation || iterations === 0) {
         if (callback) callback({ finished: true });
+      } else if (animation._isUsingNativeDriver() && typeof animation._startNativeLoop === 'function') {
+        animation._startNativeLoop(iterations, callback);
       } else restart();
     },
     stop() {

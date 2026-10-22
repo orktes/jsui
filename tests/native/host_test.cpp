@@ -131,6 +131,13 @@ TEST(host_raf_and_microtasks) {
   const std::string* m = h.message("raf");
   CHECK(m != nullptr);
   if (m) CHECK_EQ(*m, std::string("[16,32,48]"));
+  // performance.now() is the runtime clock (the embedder's tick time), not
+  // wall-clock time: deterministic animations in headless renders.
+  h.load("requestAnimationFrame((ts) => __jsui_native.postMessage('perf', [ts, performance.now()]));");
+  h.tick(1);
+  const std::string* p = h.message("perf");
+  CHECK(p != nullptr);
+  if (p) CHECK_EQ(*p, std::string("[96,96]"));
 }
 
 TEST(host_messages_both_ways) {

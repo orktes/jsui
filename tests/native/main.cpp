@@ -7,10 +7,12 @@ int main(int argc, char** argv) {
   // Unbuffered so CI logs show progress even if a test crashes the process.
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   std::setvbuf(stderr, nullptr, _IONBF, 0);
-  const char* filter = argc > 1 ? argv[1] : nullptr;
+  // Arguments are name filters (substring match; a test runs if any matches).
   int ran = 0, failed = 0;
   for (auto& c : jsui_test::registry()) {
-    if (filter && !std::strstr(c.name, filter)) continue;
+    bool selected = argc < 2;
+    for (int i = 1; i < argc && !selected; i++) selected = std::strstr(c.name, argv[i]) != nullptr;
+    if (!selected) continue;
     int before = jsui_test::failures();
     c.fn();
     ran++;

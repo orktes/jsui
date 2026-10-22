@@ -20,6 +20,7 @@ class JsEngine;
 class InputManager;
 class ImageCache;
 class DevOverlay;
+class NativeAnimated;
 
 class Runtime {
  public:
@@ -40,6 +41,10 @@ class Runtime {
   bool devKey(const char* key, bool down);
 
   void tick(double nowMs);
+  // Advances only what runs natively on the runtime clock (native-driven
+  // Animated animations, LayoutAnimations, layout) without running JS:
+  // timers, rAF, events and animation end callbacks wait for the next tick().
+  void tickNative(double nowMs);
   bool needsRedraw() const;
   // Animations / timers / held input want another tick soon (jsui_wants_frame).
   bool wantsFrame() const;
@@ -77,12 +82,16 @@ class Runtime {
   std::unique_ptr<ImageCache> images;
   std::unique_ptr<JsEngine> js;
   std::unique_ptr<InputManager> input;
+  // Animated graphs driven natively (useNativeDriver: true).
+  std::unique_ptr<NativeAnimated> animated;
 
  private:
   SkIRect renderImpl(void* pixels, int width, int height, size_t rowBytes, bool incremental);
   // The full frame: document (or the frozen last good frame) + dev overlay.
   void paintFrame(SkCanvas* canvas, bool frozen, bool overlay);
   void resetEngine();
+  // Hands native animation end events / value updates to JS.
+  void deliverAnimatedEvents();
   // The buffer the last frame was painted into (incremental repaint).
   const void* lastTarget_ = nullptr;
   int lastTargetW_ = 0, lastTargetH_ = 0;

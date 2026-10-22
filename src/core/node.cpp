@@ -102,6 +102,7 @@ void Node::detachYoga(Node* child) {
 void Node::appendChild(Node* child) { insertBefore(child, nullptr); }
 
 void Node::insertBefore(Node* child, Node* before) {
+  if (child->ghostOf && doc_) doc_->reviveGhost(child);  // re-inserted while fading out
   if (child->parent_) child->parent_->removeChild(child);
   auto it = before ? std::find(children_.begin(), children_.end(), before) : children_.end();
   size_t index = size_t(it - children_.begin());
@@ -208,6 +209,11 @@ Rect Node::layoutRect() const {
   if (!yoga_) return {};
   return {YGNodeLayoutGetLeft(yoga_), YGNodeLayoutGetTop(yoga_), YGNodeLayoutGetWidth(yoga_),
           YGNodeLayoutGetHeight(yoga_)};
+}
+
+Rect Node::visualRect() const {
+  if (layoutAnim && layoutAnim->kind == LayoutAnim::Kind::Update) return layoutAnim->current;
+  return layoutRect();
 }
 
 Rect Node::absoluteRect() const {

@@ -101,7 +101,49 @@ JSValue js_removeChild(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
   if (argc < 2) return JS_UNDEFINED;
   Node* p = nodeArg(ctx, argv[0]);
   Node* c = nodeArg(ctx, argv[1]);
-  if (p && c) p->removeChild(c);
+  if (p && c) runtimeOf(ctx).doc.removeChild(p, c);  // may keep it as a LayoutAnimation ghost
+  return JS_UNDEFINED;
+}
+
+// configureLayoutAnimation({duration, create, update, delete}): arms a
+// LayoutAnimation for the commit in progress (@jsui/react calls it from
+// prepareForCommit after LayoutAnimation.configureNext). Each of create /
+// update / delete: {type, property, duration, delay, springDamping}.
+LayoutAnimSpec layoutAnimSpec(const Value& v, double duration) {
+  LayoutAnimSpec s;
+  if (!v.isObject()) return s;
+  s.enabled = true;
+  s.duration = v["duration"].isNumber() ? v["duration"].asNumber() : duration;
+  s.delay = v["delay"].isNumber() ? v["delay"].asNumber() : 0;
+  if (v["springDamping"].isNumber()) s.springDamping = float(v["springDamping"].asNumber());
+  const std::string type = v["type"].isString() ? v["type"].asString() : "easeInEaseOut";
+  s.curve = type == "linear"    ? LayoutAnimCurve::Linear
+            : type == "easeIn"  ? LayoutAnimCurve::EaseIn
+            : type == "easeOut" ? LayoutAnimCurve::EaseOut
+            : type == "spring"  ? LayoutAnimCurve::Spring
+            : type == "keyboard" ? LayoutAnimCurve::Keyboard
+                                 : LayoutAnimCurve::EaseInEaseOut;
+  const std::string prop = v["property"].isString() ? v["property"].asString() : "opacity";
+  s.property = prop == "scaleX"    ? LayoutAnimProperty::ScaleX
+               : prop == "scaleY"  ? LayoutAnimProperty::ScaleY
+               : prop == "scaleXY" ? LayoutAnimProperty::ScaleXY
+                                   : LayoutAnimProperty::Opacity;
+  return s;
+}
+
+JSValue js_configureLayoutAnimation(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  Document& doc = runtimeOf(ctx).doc;
+  if (argc < 1 || !JS_IsObject(argv[0])) {
+    doc.disarmLayoutAnimation();
+    return JS_UNDEFINED;
+  }
+  Value cfg = toValue(ctx, argv[0]);
+  double duration = cfg["duration"].isNumber() ? cfg["duration"].asNumber() : 300;
+  LayoutAnimConfig c;
+  c.create = layoutAnimSpec(cfg["create"], duration);
+  c.update = layoutAnimSpec(cfg["update"], duration);
+  c.remove = layoutAnimSpec(cfg["delete"], duration);
+  doc.armLayoutAnimation(c);
   return JS_UNDEFINED;
 }
 
@@ -295,6 +337,8 @@ JSValue js_reload(JSContext* ctx, JSValueConst, int, JSValueConst*) {
 
 }  // namespace
 
+void installAnimatedBridge(JsEngine::Impl& impl, JSValue native);  // bridge_animated.cpp
+
 void installBridge(JsEngine::Impl& impl, JSValue global) {
   JSContext* ctx = impl.ctx;
   JSValue native = JS_NewObject(ctx);
@@ -312,12 +356,14 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
              {"reload", js_reload, 0},             {"viewport", js_viewport, 0},
              {"setTextInputSelection", js_setTextInputSelection, 3},
              {"getClipboard", js_getClipboard, 0}, {"setClipboard", js_setClipboard, 1},
-             {"flashScrollIndicators", js_flashScrollIndicators, 1}};
+             {"flashScrollIndicators", js_flashScrollIndicators, 1},
+             {"configureLayoutAnimation", js_configureLayoutAnimation, 1}};
   for (auto& f : fns) JS_SetPropertyStr(ctx, native, f.name, JS_NewCFunction(ctx, f.fn, f.name, f.len));
   JS_SetPropertyStr(ctx, native, "rootId", JS_NewUint32(ctx, impl.rt.doc.root()->id()));
   // TextInput text is edited natively (change / selectionchange events).
   JS_SetPropertyStr(ctx, native, "textEditing", JS_TRUE);
   JS_SetPropertyStr(ctx, native, "devMode", JS_NewBool(ctx, impl.rt.config.dev_mode != 0));
+  installAnimatedBridge(impl, native);
   JS_SetPropertyStr(ctx, global, "__jsui_native", native);
 }
 

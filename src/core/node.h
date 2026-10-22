@@ -79,6 +79,32 @@ class Node {
   // but including scroll offsets of ancestors.
   Rect layoutRect() const;
   Rect absoluteRect() const;
+  // Where the node is drawn and hit-tested: layoutRect(), or the in-between
+  // frame while a LayoutAnimation update moves / resizes it.
+  Rect visualRect() const;
+
+  // LayoutAnimation state (core/layout_animation.cpp). Update animations
+  // interpolate the frame; create / delete animations fade (`opacity`) or
+  // scale (`scaleX` / `scaleY`, about the center) the node.
+  struct LayoutAnim {
+    enum class Kind : uint8_t { Create, Update, Delete };
+    Kind kind = Kind::Update;
+    uint8_t curve = 0;         // LayoutAnimCurve
+    uint8_t property = 0;      // LayoutAnimProperty (create / delete)
+    float springDamping = 0.5f;
+    double start = 0, duration = 0;
+    Rect from;                 // update: parent-relative frame it starts from
+    Rect current;              // update: frame drawn this tick (heads for layoutRect())
+    float opacity = 1, scaleX = 1, scaleY = 1;
+  };
+  std::unique_ptr<LayoutAnim> layoutAnim;
+  // Children removed while a LayoutAnimation with a `delete` config was
+  // armed: detached from the tree (no layout, no hit testing) but painted
+  // below the children until their fade / scale-out ends. Owned by the
+  // Document; `ghostOf` is the parent painting this node.
+  std::vector<Node*> ghosts;
+  Node* ghostOf = nullptr;
+  bool destroyWhenDone = false;  // JS destroyed the ghost: free it at the end
 
   // ScrollView content offset.
   float scrollX = 0, scrollY = 0;

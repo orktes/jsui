@@ -2,6 +2,7 @@
 
 import { createElement as h, useEffect, useState, useSyncExternalStore, createContext } from 'react';
 import { native, readViewport, warnOnce } from './native.js';
+import { LayoutAnimation } from './layoutAnimation.js';
 import { addGlobalListener } from './events.js';
 import { render as renderRoot } from './renderer.js';
 import { modalHandlesBack } from './components/misc.js';
@@ -350,20 +351,7 @@ export const InteractionManager = {
   setDeadline() {},
 };
 
-export const LayoutAnimation = {
-  configureNext(_config, onEnd) {
-    if (onEnd) setTimeout(onEnd, 0);
-  },
-  create: (duration, type, property) => ({ duration, create: { type, property }, update: { type }, delete: { type, property } }),
-  Types: { spring: 'spring', linear: 'linear', easeInEaseOut: 'easeInEaseOut', easeIn: 'easeIn', easeOut: 'easeOut', keyboard: 'keyboard' },
-  Properties: { opacity: 'opacity', scaleX: 'scaleX', scaleY: 'scaleY', scaleXY: 'scaleXY' },
-  Presets: {},
-  easeInEaseOut() {},
-  linear() {},
-  spring() {},
-  setEnabled() {},
-};
-LayoutAnimation.Presets = { easeInEaseOut: {}, linear: {}, spring: {} };
+export { LayoutAnimation } from './layoutAnimation.js';
 
 // --- event emitters ------------------------------------------------------------------
 
@@ -426,7 +414,9 @@ export const UIManager = {
     if (m && cb) cb(m.pageX, m.pageY, m.width, m.height);
   },
   setLayoutAnimationEnabledExperimental() {},
-  configureNextLayoutAnimation() {},
+  configureNextLayoutAnimation(config, onEnd, onFail) {
+    LayoutAnimation.configureNext(config, onEnd, onFail);
+  },
   dispatchViewManagerCommand() {},
   focus: (id) => typeof native.focus === 'function' && native.focus(id),
   blur: (id) => typeof native.blur === 'function' && native.blur(id),

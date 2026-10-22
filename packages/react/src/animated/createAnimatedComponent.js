@@ -5,6 +5,13 @@
 import { createElement, useCallback, useLayoutEffect, useReducer, useRef } from 'react';
 import { flatten } from '../StyleSheet.js';
 import { AnimatedNode } from './nodes.js';
+import {
+  NativeAnimatedAPI,
+  generateNewNodeTag,
+  validateStyle,
+  validateTransform,
+  eventTypeOfProp,
+} from './NativeAnimatedHelper.js';
 
 function containsAnimated(v, depth) {
   if (v instanceof AnimatedNode) return true;
@@ -61,22 +68,110 @@ class Subscription {
     this.style = null;  // flattened style holding animated values
     this.animatedKeys = [];
     this.propsAnimated = false;
+    this.isNative = false;  // driven by the native animated module
+    this.native = null;     // {viewId, propsTag, tags, nodes, sig}
+    this.nativeEvents = []; // [[prop, handler, detach]]
+  }
+
+  // --- native driver: a props -> style -> (transform) graph connected to the view
+  __makeNative() {
+    if (this.isNative) return;
+    this.isNative = true;
+    this.syncNative();
+  }
+
+  syncNative() {
+    if (!this.isNative) return;
+    const host = this.host;
+    const viewId = host && typeof host.id === 'number' ? host.id : null;
+    const sig = viewId == null ? null : nativeSignature(viewId, this.style, this.animatedKeys);
+    const cur = this.native;
+    if (cur && sig === cur.sig && cur.nodes.length === this.nodes.length && cur.nodes.every((n, i) => n === this.nodes[i])) return;
+    this.disconnectNative();
+    if (sig == null) return;
+    if (this.propsAnimated) throw new Error('Animated: only style props can be driven by the native animated module (useNativeDriver)');
+    const api = NativeAnimatedAPI;
+    const tags = [];
+    const create = (config, inputs) => {
+      const tag = generateNewNodeTag();
+      api.createNode(tag, config);
+      for (const t of inputs) api.connect(t, tag);
+      tags.push(tag);
+      return tag;
+    };
+    const nativeTag = (n) => {
+      n.__makeNative();
+      return n.__getNativeTag();
+    };
+    const style = {};
+    for (const k of this.animatedKeys) {
+      validateStyle(k);
+      const v = this.style[k];
+      if (v instanceof AnimatedNode) {
+        style[k] = nativeTag(v);
+      } else if (k === 'transform' && Array.isArray(v)) {
+        const inputs = [];
+        const transforms = v.map((t) => {
+          const property = Object.keys(t)[0];
+          validateTransform(property);
+          const tv = t[property];
+          if (!(tv instanceof AnimatedNode)) return { property, value: tv };
+          const tag = nativeTag(tv);
+          inputs.push(tag);
+          return { property, nodeTag: tag };
+        });
+        style[k] = create({ type: 'transform', transforms }, inputs);
+      } else {
+        throw new Error(`Style property '${k}' is not supported by native animated module (nested animated value)`);
+      }
+    }
+    const styleTag = create({ type: 'style', style }, Object.values(style));
+    const propsTag = create({ type: 'props', props: { style: styleTag } }, [styleTag]);
+    api.connectToView(propsTag, viewId);
+    this.native = { viewId, propsTag, tags, nodes: this.nodes.slice(), sig };
+  }
+
+  disconnectNative() {
+    const cur = this.native;
+    if (!cur) return;
+    this.native = null;
+    NativeAnimatedAPI.disconnectFromView(cur.propsTag, cur.viewId);
+    for (const t of cur.tags) NativeAnimatedAPI.dropNode(t);
+  }
+
+  // Animated.event(..., {useNativeDriver: true}) props: mapped natively.
+  setNativeEvents(list) {
+    const viewId = this.host && typeof this.host.id === 'number' ? this.host.id : null;
+    const old = this.nativeEvents;
+    const same =
+      old.length === list.length && old.every((e, i) => e[0] === list[i][0] && e[1] === list[i][1] && e[3] === viewId);
+    if (same) return;
+    for (const e of old) if (e[2]) e[2]();
+    this.nativeEvents = list.map(([prop, handler]) => [
+      prop,
+      handler,
+      viewId == null ? null : handler.__attachNative(viewId, eventTypeOfProp(prop)),
+      viewId,
+    ]);
   }
 
   setNodes(nodes) {
     const old = this.nodes;
     if (old.length === nodes.length && old.every((n, i) => n === nodes[i])) return;
+    this.nodes = nodes;
     for (const n of old) if (nodes.indexOf(n) < 0) n.__removeChild(this);
     for (const n of nodes) if (old.indexOf(n) < 0) n.__addChild(this);
-    this.nodes = nodes;
   }
 
   detach() {
+    if (this.native) this.disconnectNative();
+    this.setNativeEvents([]);
     for (const n of this.nodes) n.__removeChild(this);
     this.nodes = [];
   }
 
   update() {
+    if (this.isNative) return;  // the runtime writes the styles
     const host = this.host;
     if (this.propsAnimated || !host || typeof host.patchStyle !== 'function') {
       this.forceUpdate();
@@ -90,6 +185,21 @@ class Subscription {
   }
 }
 
+function nativeSignature(viewId, style, keys) {
+  let sig = String(viewId);
+  for (const k of keys) {
+    const v = style[k];
+    sig += '|' + k;
+    if (k === 'transform' && Array.isArray(v)) {
+      for (const t of v) {
+        const p = Object.keys(t)[0];
+        sig += ',' + p + (t[p] instanceof AnimatedNode ? '*' : '=' + JSON.stringify(t[p]));
+      }
+    }
+  }
+  return sig;
+}
+
 export function createAnimatedComponent(Component) {
   function AnimatedComponent(props) {
     const userRef = props.ref;
@@ -100,11 +210,19 @@ export function createAnimatedComponent(Component) {
 
     const nodes = [];
     const next = {};
+    const nativeEvents = [];
     let propsAnimated = false;
     for (const k in props) {
       if (k === 'ref') continue;
       const v = props[k];
       if (k === 'style') continue;
+      if (typeof v === 'function' && v.__isNative) {
+        // Native Animated.event: the runtime applies the mapping; JS only
+        // runs the listener, if any.
+        nativeEvents.push([k, v]);
+        if (v.__hasListener) next[k] = v;
+        continue;
+      }
       if (typeof v === 'object' && v !== null && k !== 'children' && containsAnimated(v, 0)) {
         collectNodes(v, nodes, 0);
         next[k] = resolveAnimated(v);
@@ -144,6 +262,8 @@ export function createAnimatedComponent(Component) {
 
     useLayoutEffect(() => {
       sub.setNodes(nodes);
+      sub.syncNative();
+      sub.setNativeEvents(nativeEvents);
       // A value may have changed between render and commit.
       if (nodes.length && !propsAnimated) sub.update();
     });

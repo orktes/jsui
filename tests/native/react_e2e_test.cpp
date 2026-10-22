@@ -90,9 +90,10 @@ TEST(react_e2e) {
   if (err) std::fprintf(stderr, "  js error: %s\n", err);
   CHECK(err == nullptr);
 
-  // Animated.timing (100 ms) on mount, driven by requestAnimationFrame.
+  // Animated.timing (100 ms, useNativeDriver) on mount, run by the runtime;
+  // native ends carry the final value like React Native's.
   t.tick(300);
-  CHECK_EQ(t.take(), std::string("dims=[400,300,1] anim={\"finished\":true}"));
+  CHECK_EQ(t.take(), std::string("dims=[400,300,1] anim={\"finished\":true,\"value\":1}"));
 
   // Viewport changes reach Dimensions / useWindowDimensions.
   jsui_set_viewport(t.rt, 500, 350, 2);
