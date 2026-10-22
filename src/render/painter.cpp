@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
 #include <unordered_map>
 #include <cmath>
 #include <vector>
@@ -43,6 +44,7 @@
 #include "modules/skparagraph/include/Paragraph.h"
 #include "render/image_cache.h"
 #include "render/image_node.h"
+#include "render/paint_counter.h"
 #include "text/font_manager.h"
 #include "text/text_layout.h"
 
@@ -53,6 +55,7 @@ namespace {
 constexpr float kPi = 3.14159265358979323846f;
 
 SkColor4f sk(const Color& c) { return {c.r, c.g, c.b, c.a}; }
+
 
 // ------------------------------------------------------------- geometry
 
@@ -1025,6 +1028,7 @@ struct RootRecord : NodeRecord {
   std::vector<Node*> order;                                  // zIndex sort scratch (reused)
   std::vector<CurvedNode> curved;                            // this frame's curved-outline nodes
   ShadowCache shadows;
+  bool counting = false;                                     // setPaintCounting
 };
 
 ShadowCache& shadowCache(RootRecord* root) { return root->shadows; }
@@ -1535,17 +1539,43 @@ void paintDocument(Document& doc, SkCanvas* canvas, const SkRegion* damage) {
   RootRecord* root = rootRecord(doc);
   root->shadows.frame++;
   Ctx ctx{doc, root, damage, {}, {}};
+  std::unique_ptr<SkCanvas> counter;
+  if (root->counting && (counter = makeCountingCanvas(canvas, &ctx.stats))) {
+    // Same clip and matrix as the target, so quick rejects match (the
+    // target gets the same clip again, within a save).
+    counter->save();
+    SkM44 ctm = canvas->getLocalToDevice();
+    if (damage) counter->clipRegion(*damage);
+    else counter->clipRect(SkRect::Make(canvas->getDeviceClipBounds()));
+    counter->setMatrix(ctm);
+    ctx.stats.clips = 0;
+    canvas = counter.get();
+  }
   canvas->save();
   canvas->scale(doc.pixelRatio(), doc.pixelRatio());
   ctx.snapSpace = canvas->getTotalMatrix();
   paintNode(doc.root(), canvas, ctx);
   canvas->restore();
+  if (counter) counter->restore();
   if (damage) {
     const SkIRect& b = damage->getBounds();
     ctx.stats.damagedPixels = int64_t(b.width()) * b.height();
+    int64_t area = 0;
+    int rects = 0;
+    for (SkRegion::Iterator it(*damage); !it.done(); it.next()) {
+      area += int64_t(it.rect().width()) * it.rect().height();
+      rects++;
+    }
+    ctx.stats.repaintedPixels = area;
+    ctx.stats.damageRects = rects;
+  } else {
+    SkISize sz = canvas->getBaseLayerSize();
+    ctx.stats.repaintedPixels = int64_t(sz.width()) * sz.height();
   }
   root->stats = ctx.stats;
 }
+
+void setPaintCounting(Document& doc, bool on) { rootRecord(doc)->counting = on; }
 
 SkSurfaceProps surfaceProps() { return SkSurfaceProps(0, kUnknown_SkPixelGeometry, 0.2f, 1.2f); }
 

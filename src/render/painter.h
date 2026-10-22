@@ -40,7 +40,21 @@ struct PaintStats {
   int nodesPainted = 0;       // nodes drawn
   int nodesCulled = 0;        // subtrees skipped (outside the damage)
   int64_t damagedPixels = 0;  // area of the damage bounds (0: full repaint)
+  int64_t repaintedPixels = 0;  // area of the damage region (full repaint: the canvas)
+  int damageRects = 0;        // rects in the damage region (0: full repaint)
+  // Only counted while setPaintCounting() is on (0 otherwise): canvas calls
+  // the painter issued that survived Skia's quick reject against the clip.
+  int draws = 0;              // draw calls (rects, rrects, paths, images, text blobs, ...)
+  int textDraws = 0;          // of which text blobs
+  int imageDraws = 0;         // of which images
+  int saveLayers = 0;         // offscreen layers
+  int clips = 0;              // clip operations
 };
 PaintStats lastPaintStats(const Document& doc);
+
+// Benchmarks / perf tests: count the canvas calls of each paintDocument()
+// (see PaintStats). Off by default; it wraps the canvas, which costs a
+// little per call.
+void setPaintCounting(Document& doc, bool on);
 
 }  // namespace jsui
