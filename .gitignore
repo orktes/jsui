@@ -1,6 +1,7 @@
 /build*/
 /third_party/skia-prebuilt/
 /third_party/skia-wasm/
+/third_party/skia-wasm-webgl/
 /third_party/emsdk/
 node_modules/
 /out/
@@ -10,3 +11,4 @@ node_modules/
 /.claude/worktrees/
 /third_party/skia-src/
 /web/dist/
+/web/dist-webgl/

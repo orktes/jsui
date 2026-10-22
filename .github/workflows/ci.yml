@@ -107,6 +107,58 @@ jobs:
           name: jsui-wasm
           path: web/dist
 
+  # ------------------------------------------- wasm, GPU variant (advisory)
+  # Skia with Ganesh + WebGL (WEBGL=1): its own Skia cache key and output dir
+  # (web/dist-webgl), so the CPU wasm job above is unaffected. The browser
+  # tests run against the GPU module (renderer 'gpu' tests draw through Skia
+  # on SwiftShader WebGL and compare with the CPU path).
+  wasm-webgl:
+    name: wasm webgl (emscripten + browser, GPU)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+      - name: Cache emsdk
+        uses: actions/cache@v4
+        with:
+          path: third_party/emsdk
+          key: emsdk-${{ runner.os }}-${{ hashFiles('scripts/setup-emsdk.sh') }}
+      - name: Cache Skia for WASM (WebGL)
+        id: skia-wasm-webgl-cache
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-wasm-webgl
+          key: skia-wasm-webgl-${{ runner.os }}-${{ hashFiles('scripts/build-skia-wasm.sh', 'scripts/setup-emsdk.sh') }}
+      - name: Cache FetchContent sources
+        uses: actions/cache@v4
+        with:
+          path: build-wasm-webgl/_deps/*-src
+          key: wasm-webgl-deps-${{ hashFiles('cmake/*.cmake') }}
+      - name: emsdk
+        run: scripts/setup-emsdk.sh
+      - name: Skia for WASM + WebGL (cache miss only, ~40 min)
+        if: steps.skia-wasm-webgl-cache.outputs.cache-hit != 'true'
+        run: WEBGL=1 JOBS=$(nproc) scripts/build-skia-wasm.sh
+      - name: Build jsui.wasm (GPU)
+        run: WEBGL=1 JOBS=$(nproc) scripts/build-wasm.sh Release
+      - name: Node smoke test (GPU module, CPU path)
+        run: JSUI_WEB_DIST=dist-webgl node web/test/node-smoke.mjs
+      - name: Browser tests against the GPU module (Playwright / Chromium)
+        working-directory: web
+        run: |
+          npm install --no-package-lock --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          JSUI_WEB_STRICT=1 JSUI_WEB_DIST=dist-webgl npm run test:browser
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-wasm-webgl
+          path: web/dist-webgl
+
   # ----------------------------------------------------------------------- js
   js:
     name: js packages
