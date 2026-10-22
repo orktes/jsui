@@ -154,7 +154,10 @@ class PressController {
     // Native may synthesize a click after pointerup or Enter; those presses
     // already fired. A click with no press in flight is an activation from
     // the gamepad (A button) or the host.
-    if (this.bits & PRESSED || now() - this.lastEnd < CLICK_DEDUPE_MS) return;
+    if (this.bits & PRESSED) return;
+    const pt = e.nativeEvent && e.nativeEvent.pointerType;
+    const synthesized = pt === 'gamepad' || pt === 'keyboard';
+    if (!synthesized && now() - this.lastEnd < CLICK_DEDUPE_MS) return;
     this.pressIn(e, 'click');
     this.pressOut(e, true);
     if (this.setBits && this.mounted) {

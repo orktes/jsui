@@ -345,3 +345,16 @@ test('handler errors are rethrown after dispatch completes', () => {
   assert.deepEqual(log, ['outer'], 'propagation continued');
   render(null);
 });
+
+test('gamepad-synthesized click right after a mouse press still activates', () => {
+  let n = 0;
+  render(h(Pressable, { nativeID: 'g', onPress: () => n++ }));
+  const g = byNativeID('g');
+  mock.dispatch({ type: 'pointerdown', target: g.id, x: 0, y: 0, button: 0 });
+  mock.dispatch({ type: 'pointerup', target: g.id, x: 0, y: 0, button: 0 });
+  mock.dispatch({ type: 'click', target: g.id, pointerType: 'mouse' });
+  assert.equal(n, 1);
+  mock.dispatch({ type: 'click', target: g.id, pointerType: 'gamepad' });
+  assert.equal(n, 2);
+  render(null);
+});

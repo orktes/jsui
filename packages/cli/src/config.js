@@ -30,6 +30,8 @@ function aliasPlugin() {
       const reactDir = jsuiReactDir();
       const index = path.join(reactDir, 'src', 'index.js');
       build.onResolve({ filter: /^react-native(\/.*)?$/ }, () => ({ path: index }));
+      // The app may not depend on @jsui/react itself (only on the CLI).
+      build.onResolve({ filter: /^@jsui\/react$/ }, () => ({ path: index }));
       build.onResolve({ filter: /^[@a-z]/ }, async (args) => {
         if (args.pluginData && args.pluginData.jsuiAlias) return undefined;
         const shim = SHIMS[args.path];

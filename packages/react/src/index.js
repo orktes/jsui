@@ -32,8 +32,11 @@ import { PanResponder } from './PanResponder.js';
 import { render, unmount, createPortal, flushSync, batchedUpdates, rootContainer } from './renderer.js';
 import { bridgeStats } from './instances.js';
 import { registerAsset } from './components/basic.js';
+import { Host } from './apis.js';
 
 installGlobals();
+// include/jsui/jsui.h documents a `jsui` global for host messages.
+if (!globalThis.jsui) globalThis.jsui = Host;
 makeAnimated({ View, Text, Image, ScrollView, FlatList, SectionList });
 
 export * from './apis.js';

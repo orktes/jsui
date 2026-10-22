@@ -219,15 +219,26 @@ export const reconciler = Reconciler(hostConfig);
 
 // --- roots -------------------------------------------------------------------
 
+// QuickJS' error.stack has no "Name: message" header (V8's does).
+export function describeError(error) {
+  if (!error || typeof error !== 'object') return String(error);
+  const head = (error.name || 'Error') + ': ' + error.message;
+  const stack = error.stack ? String(error.stack) : '';
+  return stack.startsWith(head) ? stack : head + (stack ? '\n' + stack : '');
+}
+
 function reportUncaught(error, info) {
   const stack = info && info.componentStack ? '\nComponent stack:' + info.componentStack : '';
-  const msg = (error && error.stack) || String(error);
-  console.error('[jsui] Uncaught error in a React component: ' + msg + stack);
-  // Hand it to the runtime (jsui_last_error, dev overlay). Hosts may install
-  // __jsui_reportError; otherwise rethrow from a timer so the engine reports
-  // it like any other uncaught JS error.
+  console.error('[jsui] Uncaught error in a React component: ' + describeError(error) + stack);
+  // Hand it to the runtime (jsui_last_error, dev overlay): __jsui_reportError
+  // or the standard reportError global if the host has one, otherwise
+  // rethrow from a timer so the engine reports it like any uncaught error.
   if (typeof globalThis.__jsui_reportError === 'function') {
     globalThis.__jsui_reportError(error);
+    return;
+  }
+  if (typeof globalThis.reportError === 'function') {
+    globalThis.reportError(error);
     return;
   }
   setTimeout(() => {
@@ -237,7 +248,7 @@ function reportUncaught(error, info) {
 
 function reportCaught(error, info) {
   const stack = info && info.componentStack ? '\nComponent stack:' + info.componentStack : '';
-  console.error('[jsui] Error caught by an error boundary: ' + ((error && error.stack) || error) + stack);
+  console.error('[jsui] Error caught by an error boundary: ' + describeError(error) + stack);
 }
 
 function reportRecoverable(error) {

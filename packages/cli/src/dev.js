@@ -114,7 +114,9 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'text/plain', 'method not allowed');
     if (p === '/bundle.js') {
       if (!state.bundle) return send(res, 503, 'text/plain; charset=utf-8', 'no successful build yet\n' + state.error);
-      return send(res, 200, TYPES['.js'], state.bundle);
+      // The runtime compares this with /__jsui/version to detect changes
+      // that landed between loading the bundle and its first poll.
+      return send(res, 200, TYPES['.js'], state.bundle, { 'X-Jsui-Version': state.version });
     }
     if (p === '/bundle.js.map') return state.map ? send(res, 200, TYPES['.map'], state.map) : send(res, 404, 'text/plain', 'no map');
     if (p === '/__jsui/version') {

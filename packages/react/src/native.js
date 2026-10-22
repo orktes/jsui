@@ -60,5 +60,9 @@ export function readViewport() {
   if (v && typeof v === 'object' && v.width > 0) {
     return { width: +v.width, height: +v.height, scale: +(v.scale || v.pixelRatio || 1) };
   }
+  // Browser-style globals, if the host defines them.
+  if (g.innerWidth > 0 && g.innerHeight > 0) {
+    return { width: +g.innerWidth, height: +g.innerHeight, scale: +(g.devicePixelRatio || 1) };
+  }
   return { width: 1280, height: 720, scale: 1 };
 }

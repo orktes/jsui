@@ -174,9 +174,11 @@ test('dev server: bundle, version token, long-poll, keeps last good bundle on er
   const server = await dev({ entry: path.join(dir, 'App.js'), port: 0, log: (m) => logs.push(m) });
   const base = `http://127.0.0.1:${server.port}`;
   try {
-    const b1 = await (await fetch(base + '/bundle.js')).text();
+    const r1 = await fetch(base + '/bundle.js');
+    const b1 = await r1.text();
     assert.match(b1, /Héllo|H\\u00e9llo/);
     const v1 = await (await fetch(base + '/__jsui/version')).text();
+    assert.equal(r1.headers.get('x-jsui-version'), v1);
     assert.ok(v1.length > 0);
     const assetName = [...server.state.assets.keys()].find((k) => k.endsWith('.png'));
     const asset = await fetch(base + '/' + assetName);
