@@ -188,8 +188,14 @@ class Viewer {
 
   void present() {
     if (!texture_ || pixels_.empty()) return;
-    jsui_render_rgba(rt_, pixels_.data(), pixelW_, pixelH_, size_t(pixelW_) * 4);
-    SDL_UpdateTexture(texture_, nullptr, pixels_.data(), pixelW_ * 4);
+    // pixels_ keeps the previous frame, so only damaged pixels are repainted
+    // and uploaded.
+    JsuiRect dirty;
+    if (jsui_render_rgba_incremental(rt_, pixels_.data(), pixelW_, pixelH_, size_t(pixelW_) * 4, &dirty) &&
+        dirty.width > 0 && dirty.height > 0) {
+      SDL_Rect r{dirty.x, dirty.y, dirty.width, dirty.height};
+      SDL_UpdateTexture(texture_, &r, pixels_.data() + (size_t(dirty.y) * pixelW_ + dirty.x) * 4, pixelW_ * 4);
+    }
     SDL_SetRenderDrawColor(renderer_, 24, 24, 28, 255);
     SDL_RenderClear(renderer_);
     SDL_RenderCopy(renderer_, texture_, nullptr, nullptr);

@@ -106,6 +106,7 @@ class JsuiHost {
 
     // Small reusable scratch area for short strings (key names, codes).
     this._scratch = M._malloc(512);
+    this._dirty = M._malloc(16);  // JsuiRect filled by jsui_render_rgba_incremental
     this._buf = 0;
     this._bufSize = 0;
 
@@ -210,11 +211,14 @@ class JsuiHost {
     st.tickMs = ema(st.tickMs, t1 - t0);
     st.frames++;
     if ((M._jsui_needs_redraw(rt) || this._sizeChanged) && this.pixelWidth > 0 && this.pixelHeight > 0) {
+      const resized = this._sizeChanged;
       this._sizeChanged = false;
       this._ensureBuffer();
-      M._jsui_render_rgba(rt, this._buf, this.pixelWidth, this.pixelHeight, this.pixelWidth * 4);
+      // The buffer keeps the previous frame, so only damaged pixels are repainted.
+      const changed = M._jsui_render_rgba_incremental(rt, this._buf, this.pixelWidth, this.pixelHeight,
+        this.pixelWidth * 4, this._dirty);
       const t2 = performance.now();
-      this._blit();
+      if (changed || resized) this._blit();
       const t3 = performance.now();
       st.renderMs = ema(st.renderMs, t2 - t1);
       st.blitMs = ema(st.blitMs, t3 - t2);
@@ -251,7 +255,8 @@ class JsuiHost {
     if (this._buf) M._free(this._buf);
     if (this._baseUrlPtr) M._free(this._baseUrlPtr);
     M._free(this._scratch);
-    this._buf = this._scratch = this._baseUrlPtr = 0;
+    M._free(this._dirty);
+    this._buf = this._scratch = this._baseUrlPtr = this._dirty = 0;
     if (this._gl) {
       this._gl.deleteTexture(this._tex);
       this._gl.deleteBuffer(this._vb);
