@@ -566,7 +566,10 @@ void InputManager::tickScrolling(double now, double /*dt*/) {
     if (it == scrolls_.end()) continue;
     Node* sv = alive(id);
     if (!sv || !attached(sv)) {
-      if (!sv) scrolls_.erase(it);
+      // Destroyed or detached: drop its animation (a detached node keeps its
+      // offset; nothing is painted or dispatched for it).
+      if (sv && sv->scrollIndicatorOpacity != 0) sv->scrollIndicatorOpacity = 0;
+      scrolls_.erase(it);
       continue;
     }
     ScrollState st = it->second;  // copy: handlers below may rehash scrolls_

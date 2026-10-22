@@ -93,6 +93,11 @@ The embedder owns the loop (see `jsui.h`):
 3. If `jsui_needs_redraw()`, `jsui_render_rgba()` paints the tree (or
    `jsui_render_gl()` with the GPU backend).
 
+Hosts that sleep when idle check `jsui_wants_frame()`: it stays set while
+something moves on its own (rAF callbacks, due timers, in-flight loads,
+scroll flings / smooth scrolling / snapping, scroll indicator fades, held
+gamepad sticks or D-pad) and the host should keep ticking at display rate.
+
 Everything is single-threaded except resource I/O, which completes onto a
 queue drained in `jsui_tick`.
 
@@ -191,7 +196,8 @@ Native globals (installed by `JsEngine`):
 | `destroyNode(id)` | free a detached subtree |
 | `measure(id) → {x, y, width, height, pageX, pageY}` | layout of a node (synchronous; runs a pending layout first). `null` for unknown ids |
 | `focus(id)`, `blur(id)` | `InputManager::focus` / `blur` |
-| `scrollTo(id, x, y, animated)` | `InputManager::scrollTo` (clamped, dispatches `scroll`); `animated` is accepted but the jump is immediate |
+| `scrollTo(id, x, y, animated)` | `InputManager::scrollTo` (clamped, dispatches `scroll`). `animated`: eases there on the runtime clock; otherwise immediate (and stops a running fling) |
+| `flashScrollIndicators(id)` | shows a ScrollView's overlay indicators for ~1 s |
 | `postMessage(name, json)` | to the embedder's `on_message`. A string is passed through as the JSON text; any other value is `JSON.stringify`-ed |
 | `loadFont(family, url, weight, italic) → Promise<true>` | load via the resource loader (URL relative to the bundle), register with the FontManager, relayout text; rejects with an `Error` on 404 / bad font data |
 | `reload()` | reload the bundle at the start of the next tick (safe from inside JS) |
@@ -250,11 +256,13 @@ Native dispatches plain objects; `@jsui/react` turns them into React-style
 synthetic events, does capture/bubble along its instance tree and maps them to
 React Native props (`onPress`, `onPressIn/Out`, `onLongPress`, `onHoverIn/Out`,
 `onPointerDown/Move/Up/Enter/Leave`, `onKeyDown/Up`, `onFocus/onBlur`,
-`onScroll`, `onWheel`, `onChangeText`).
+`onScroll`, `onScrollBeginDrag/EndDrag`, `onMomentumScrollBegin/End`,
+`onWheel`, `onChangeText`).
 
 ```
 { type: 'pointerdown'|'pointermove'|'pointerup'|'pointercancel'|'pointerenter'|'pointerleave'
         |'click'|'wheel'|'keydown'|'keyup'|'textinput'|'focus'|'blur'|'scroll'
+        |'scrollbegindrag'|'scrollenddrag'|'momentumscrollbegin'|'momentumscrollend'
         |'gamepadbutton'|'gamepadaxis'|'gamepadconnected'|'change'|'selectionchange',
   target: <node id>,              // hit node, focused node for keys
   timestamp: <ms>,
@@ -270,8 +278,11 @@ React Native props (`onPress`, `onPressIn/Out`, `onLongPress`, `onHoverIn/Out`,
   text, eventCount, selection: {start, end},
   // gamepad
   gamepad, buttonIndex, value, axis,
-  // scroll
-  contentOffset: {x, y}, contentSize: {width, height}, layoutMeasurement: {width, height} }
+  // scroll, scrollbegindrag, scrollenddrag, momentumscroll* (on the ScrollView)
+  contentOffset: {x, y}, contentSize: {width, height}, layoutMeasurement: {width, height},
+  contentInset: {top, left, bottom, right}, zoomScale: 1,
+  velocity: {x, y},               // px/ms, + = offset increasing (scrollenddrag)
+  targetContentOffset: {x, y} }   // where the fling / snap will end (scrollenddrag)
 ```
 
 `pointerenter`/`pointerleave` are dispatched per node (no bubbling), like the DOM.
@@ -299,6 +310,49 @@ was `preventDefault()`-ed.
   (DOM convention); over a `horizontal` ScrollView a vertical wheel scrolls
   sideways. A touch dragged > 8 px inside a scrollable ScrollView sends
   `pointercancel` and scrolls it.
+* **Scrolling** (`src/input/scroll.cpp`; geometry in `src/core/scroll.*`).
+  All animations are analytic curves on the runtime clock, advanced in
+  `jsui_tick`.
+  * Touch drag: `scrollbegindrag`, `scroll`…, `scrollenddrag` (release
+    velocity over the last 100 ms; a finger that rested has none), then a
+    fling (`momentumscrollbegin`, `scroll`…, `momentumscrollend`) decaying
+    by `decelerationRate` per ms (`'normal'` 0.998, `'fast'` 0.99, or a
+    number) until 0.02 px/ms or the content edge (no overscroll). A touch on
+    a moving ScrollView stops it (`momentumscrollend`), is not a press, and
+    drags without the slop.
+  * Snapping (flings, wheel notches, keys, stick release, trackpad settle):
+    `pagingEnabled` moves one page in the velocity direction (else nearest);
+    `snapToInterval` (+ `snapToAlignment`, `disableIntervalMomentum`) and
+    `snapToOffsets` (+ `snapToStart`/`snapToEnd`) pick the snap point on the
+    velocity side of the projected end, like React Native on iOS. The glide to
+    the snap point is momentum.
+  * Wheel: whole deltas ≥ 40 px (mouse notches) glide over 150 ms and
+    accumulate; other deltas (trackpads) apply pixel-precisely and snap after
+    150 ms idle. `InputManager::smoothWheel = false` disables gliding.
+  * Keyboard (no TextInput focused): PageUp/PageDown (87.5 % of the
+    viewport), Home/End, Space / Shift+Space when nothing pressable is
+    focused, arrows when spatial navigation finds nothing further. D-pad
+    likewise scrolls 40 px past the last focusable item. Target: the focused
+    node's ScrollView, else the hovered one, else the first scrollable one
+    in the focus scope.
+  * Gamepad sticks: the right stick scrolls that target continuously
+    (dead zone 0.2, quadratic response up to 1.6 px/ms); the left stick does
+    too when the focus scope has nothing focusable. `preventDefault()` on the
+    `gamepadaxis` event keeps the stick for the app.
+  * Focus moved by keys / gamepad (or by code after them) glides the node
+    into view keeping up to 32 px of context; focus from a press never
+    scrolls; programmatic focus after pointer input jumps edge-aligned.
+  * `scrollEnabled: false` stops user scrolling only (programmatic and focus
+    scrolling still work). Offsets are re-clamped when content shrinks.
+  * Overlay indicators (3 px thumbs, `indicatorStyle` `default`/`black`/
+    `white`, hidden by `showsVertical/HorizontalScrollIndicator: false`) show
+    while scrolling and fade out after 500 ms. Scrolling and fading repaint
+    only the ScrollView's rect / the thumbs' rects.
+  * `@jsui/react` adds `contentOffset` (applied on mount),
+    `scrollEventThrottle` (> 16 ms limits `onScroll`, with a trailing event;
+    otherwise every event), `stickyHeaderIndices` (vertical; headers wrapped
+    in a `zIndex: 10` View translated on scroll, the next header pushes the
+    previous one) and wraps paging children like react-native-web.
 * **Focusable:** `focusable: true`, pressable nodes (unless `focusable: false`),
   `TextInput`; never `disabled: true` or inside `display: none`. Extra event
   fields: `focus` has `focusVisible` (true when the last input was a key or
@@ -313,7 +367,7 @@ was `preventDefault()`-ed.
   `nextFocusUp/Down/Left/Right` (node ids) override spatial navigation.
 * Stick: deadzone 0.5 on the dominant axis; held D-pad / stick repeats after
   400 ms, then every 120 ms. Focus changes scroll the node into view in its
-  ScrollView ancestors.
+  ScrollView ancestors (see Scrolling).
 
 ## TextInput editing
 
@@ -475,7 +529,7 @@ Details of how the JS package uses the bridge, for native implementers:
 * Optional bridge members used when present: `patchStyle(id, partialStyle)`
   (Animated / `setNativeProps`; otherwise `setProps` with the merged style),
   `viewport()` (native: returns `{width, height, scale}`), `focus`, `blur`,
-  `scrollTo`, `measure`, `postMessage`, `loadFont`, `getImageSize(uri)`,
+  `scrollTo`, `flashScrollIndicators`, `measure`, `postMessage`, `loadFont`, `getImageSize(uri)`,
   `prefetchImage(uri)`, `reload`.
 * Events beyond input: `{type: 'resize', width, height, scale}` (sent by
   `jsui_set_viewport` when the size changes; drives Dimensions);
