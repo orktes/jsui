@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 #include "include/core/SkMatrix.h"
 #include "include/core/SkRegion.h"
@@ -34,6 +35,11 @@ SkSurfaceProps surfaceProps();
 // border-box coordinates, excluding its layout position. Identity when the
 // node has no transform. Hit testing uses the same matrix as painting.
 SkMatrix localTransform(const Node& node);
+
+// Repaints the damage given as rects: each rect is cleared and painted in
+// its own pass, clipped to it (a scissor rect on the GPU). Rects may overlap.
+// The stats of the passes are summed.
+void paintDocumentRects(Document& doc, SkCanvas* canvas, const std::vector<SkIRect>& rects);
 
 // Painter statistics of the last paintDocument() call (for benchmarks).
 struct PaintStats {

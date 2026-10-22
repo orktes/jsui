@@ -645,8 +645,28 @@ void paintBackground(SkCanvas* c, const Box& b, const ComputedStyle& s) {
   SkRect tile = b.inner.rect();
   if (tile.isEmpty()) return;
   bool hasBorder = b.border[0] > 0 || b.border[1] > 0 || b.border[2] > 0 || b.border[3] > 0;
+  if (!hasBorder) {
+    // The tile is the border box: fill the (rounded) box with each layer
+    // directly, like the background color (no clip mask, which the raster
+    // blitter applies row by row, slowly). On a pixel-aligned box it is the
+    // same coverage as the tile under the box's clip; on a fractional one
+    // (under a transform) the straight edges are anti-aliased too.
+    for (auto it = s.backgroundImages.rbegin(); it != s.backgroundImages.rend(); ++it) {
+      sk_sp<SkShader> shader = makeGradient(*it, tile);
+      if (!shader) continue;
+      SkPaint p;
+      p.setShader(shader);
+      if (b.rounded) {
+        p.setAntiAlias(true);
+        c->drawRRect(b.outer, p);
+      } else {
+        c->drawRect(tile, p);
+      }
+    }
+    return;
+  }
   c->save();
-  if (hasBorder || b.rounded) clipRRect(c, b.outer);
+  clipRRect(c, b.outer);
   for (auto it = s.backgroundImages.rbegin(); it != s.backgroundImages.rend(); ++it) {
     sk_sp<SkShader> shader = makeGradient(*it, tile);
     if (!shader) continue;
@@ -1082,7 +1102,16 @@ SkRect ownVisualBounds(Node* n, float w, float h) {
     float e = s.text.fontSize.value_or(14);
     for (auto& sh : s.text.textShadows) e = std::max(e, sh.blur * 1.5f + std::fabs(sh.offsetX) + std::fabs(sh.offsetY));
     r.join(SkRect::MakeWH(w, h).makeOutset(e, e));
-    if (auto* p = text::layoutParagraph(n, std::max(0.f, w))) r.join(SkRect::MakeWH(p->getLongestLine(), p->getHeight()).makeOutset(e, e));
+    // At the width paintContent lays the paragraph out at (the unsnapped
+    // content width): the paragraph keeps one layout, so any other width
+    // would re-lay it out here and again when painting.
+    YGNodeRef y = n->yoga();
+    float left = YGNodeLayoutGetBorder(y, YGEdgeLeft) + YGNodeLayoutGetPadding(y, YGEdgeLeft);
+    float top = YGNodeLayoutGetBorder(y, YGEdgeTop) + YGNodeLayoutGetPadding(y, YGEdgeTop);
+    float cw = YGNodeLayoutGetWidth(y) - left - YGNodeLayoutGetBorder(y, YGEdgeRight) -
+               YGNodeLayoutGetPadding(y, YGEdgeRight);
+    if (auto* p = text::layoutParagraph(n, std::max(0.f, cw)))
+      r.join(SkRect::MakeXYWH(left, top, p->getLongestLine(), p->getHeight()).makeOutset(e, e));
   }
   return r;
 }
@@ -1582,6 +1611,30 @@ void paintDocument(Document& doc, SkCanvas* canvas, const SkRegion* damage) {
     ctx.stats.repaintedPixels = int64_t(sz.width()) * sz.height();
   }
   root->stats = ctx.stats;
+}
+
+void paintDocumentRects(Document& doc, SkCanvas* canvas, const std::vector<SkIRect>& rects) {
+  PaintStats sum;
+  for (const SkIRect& r : rects) {
+    SkRegion part(r);
+    canvas->save();
+    canvas->clipIRect(r);
+    canvas->clear(SK_ColorTRANSPARENT);
+    paintDocument(doc, canvas, &part);
+    canvas->restore();
+    const PaintStats& s = rootRecord(doc)->stats;
+    sum.nodesPainted += s.nodesPainted;
+    sum.nodesCulled += s.nodesCulled;
+    sum.damagedPixels += s.damagedPixels;
+    sum.repaintedPixels += s.repaintedPixels;
+    sum.damageRects += s.damageRects;
+    sum.draws += s.draws;
+    sum.textDraws += s.textDraws;
+    sum.imageDraws += s.imageDraws;
+    sum.saveLayers += s.saveLayers;
+    sum.clips += s.clips;
+  }
+  rootRecord(doc)->stats = sum;
 }
 
 void setPaintCounting(Document& doc, bool on) { rootRecord(doc)->counting = on; }

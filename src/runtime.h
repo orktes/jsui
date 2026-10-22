@@ -11,6 +11,7 @@
 #include "host_state.h"
 #include "include/core/SkRect.h"
 #include "include/core/SkRefCnt.h"
+#include "include/core/SkRegion.h"
 #include "jsui/jsui.h"
 #include "platform/loader.h"
 #include "text/font_manager.h"
@@ -81,7 +82,14 @@ class Runtime {
     SkCanvas* canvas = nullptr;
     const void* key = nullptr;  // the retained surface painted into, or nullptr
     bool clear = true;          // full repaints: clear first, else draw over the canvas
+    // Damage-only repaints: a few rects covering the damage, each painted
+    // in its own pass scissored to it (see paintDocumentRects), instead of
+    // the one bounding rect. Fewer pixels when the damage is scattered;
+    // a pass costs a tree walk and the draws it crosses again.
+    bool splitDamage = false;
   };
+  // While `choose` runs: the frame's exact damage region (device pixels).
+  const SkRegion& trackedDamage() const { return trackedDamage_; }
   template <typename Choose>
   SkIRect renderCanvasTracked(const void* key, int width, int height, Choose&& choose) {
     bool keyValid = false;
@@ -153,6 +161,7 @@ class Runtime {
   SkIRect finishCanvasTracked(const CanvasChoice& c, int width, int height, bool keyValid, const SkIRect& damage);
   bool trackedFrozen_ = false, trackedOverlay_ = false;
   const void* trackedKey_ = nullptr;
+  SkRegion trackedDamage_;
   // The buffer the last frame was painted into (incremental repaint).
   const void* lastTarget_ = nullptr;
   int lastTargetW_ = 0, lastTargetH_ = 0;

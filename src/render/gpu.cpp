@@ -2,6 +2,7 @@
 
 #if defined(JSUI_GPU)
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -149,6 +150,55 @@ struct GLGpu final : JsuiGpuContext {
   };
   std::vector<Cached> surfaces;  // wrapped framebuffers, most recently used kept
   uint64_t frame = 0;
+  // Retained frames, one per runtime drawn with this context (see render()).
+  struct Retained {
+    const jsui::Runtime* rt = nullptr;
+    sk_sp<SkSurface> surface;  // null until a frame is painted into it
+    uintptr_t key = 0;         // identifies the surface's contents to the runtime
+    uint64_t lastUsed = 0;
+    int smallFrames = 0, directFrames = 0;
+  };
+  std::vector<Retained> retained;
+  uintptr_t nextKey = 1;
+
+  Retained* retainedEntry(const jsui::Runtime* rt) {
+    for (auto& e : retained)
+      if (e.rt == rt) {
+        e.lastUsed = frame;
+        return &e;
+      }
+    // Runtimes that stopped drawing here: drop their frames.
+    constexpr uint64_t kMaxIdle = 600;
+    constexpr size_t kMaxRetained = 8;
+    retained.erase(std::remove_if(retained.begin(), retained.end(),
+                                  [&](const Retained& e) { return frame - e.lastUsed > kMaxIdle; }),
+                   retained.end());
+    if (retained.size() >= kMaxRetained) {
+      auto oldest = std::min_element(retained.begin(), retained.end(),
+                                     [](const Retained& a, const Retained& b) { return a.lastUsed < b.lastUsed; });
+      retained.erase(oldest);
+    }
+    retained.push_back({});
+    retained.back().rt = rt;
+    retained.back().lastUsed = frame;
+    return &retained.back();
+  }
+
+  static bool matches(const SkSurface* s, const SkImageInfo& info) {
+    return s && s->width() == info.width() && s->height() == info.height() &&
+           s->imageInfo().colorType() == info.colorType() &&
+           SkColorSpace::Equals(s->imageInfo().colorSpace(), info.colorSpace());
+  }
+
+  // (Re)creates the entry's surface like `targetInfo`; a new key each time.
+  bool makeRetainedSurface(Retained* r, const SkImageInfo& targetInfo) {
+    SkImageInfo info = SkImageInfo::Make(targetInfo.width(), targetInfo.height(), targetInfo.colorType(),
+                                         kPremul_SkAlphaType, targetInfo.refColorSpace());
+    SkSurfaceProps props = jsui::surfaceProps();
+    r->surface = SkSurfaces::RenderTarget(ctx.get(), skgpu::Budgeted::kNo, info, 1, kTopLeft_GrSurfaceOrigin, &props);
+    r->key = (nextKey += 2);  // odd: never the address of a CPU frame buffer
+    return r->surface != nullptr;
+  }
 
   sk_sp<const GrGLInterface> makeInterface() const {
     if (getProc) {
@@ -186,12 +236,17 @@ struct GLGpu final : JsuiGpuContext {
     if (ctx) {
       ctx->abandonContext();
       surfaces.clear();
+      retained.clear();
       ctx.reset();
     }
     lost = false;
     sk_sp<const GrGLInterface> iface = makeInterface();
     if (!iface) return false;
     GrContextOptions opts;
+    // Layers (opacity, filters, blend modes) otherwise split the frame's
+    // render pass in two at each one: reordering renders them first and
+    // keeps the frame one pass (fewer framebuffer switches).
+    opts.fReduceOpsTaskSplitting = GrContextOptions::Enable::kYes;
     ctx = GrDirectContexts::MakeGL(std::move(iface), opts);
     if (ctx && cacheBytes) ctx->setResourceCacheLimit(cacheBytes);
     return ctx != nullptr;
@@ -283,6 +338,7 @@ void destroy(JsuiGpuContext* gpu) {
   if (g->ctx) {
     if (g->lost) g->ctx->abandonContext();
     g->surfaces.clear();
+    g->retained.clear();
     if (!g->lost) g->ctx->flushAndSubmit(GrSyncCpu::kNo);
     g->ctx.reset();
   }
@@ -300,6 +356,7 @@ void contextLost(JsuiGpuContext* gpu) {
   g->lost = true;
   if (g->ctx) g->ctx->abandonContext();
   g->surfaces.clear();
+  g->retained.clear();
 }
 
 void purge(JsuiGpuContext* gpu, size_t cacheBytes) {
@@ -309,6 +366,7 @@ void purge(JsuiGpuContext* gpu, size_t cacheBytes) {
   if (!g->ctx || g->lost) return;
   if (cacheBytes) g->ctx->setResourceCacheLimit(cacheBytes);
   g->surfaces.clear();
+  g->retained.clear();  // the next frames repaint fully
   g->ctx->purgeUnlockedResources(GrPurgeResourceOptions::kAllResources);
 }
 
@@ -320,8 +378,58 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiGLTarget& t) {
   g->ctx->resetContext();
   sk_sp<SkSurface> surface = g->surfaceFor(t);
   if (!surface) return -1;
-  rt.renderCanvas(surface->getCanvas(), t.width, t.height, (t.flags & JSUI_GL_NO_CLEAR) == 0);
-  g->ctx->flushAndSubmit(surface.get(), GrSyncCpu::kNo);
+  bool clear = (t.flags & JSUI_GL_NO_CLEAR) == 0;
+  // Where the frame is painted (Runtime::renderCanvasTracked), like the
+  // WebGPU backend:
+  //   * Small damage (a spinner, a hover, a caret): only the damage, as a
+  //     few scissored rects, into a retained frame owned by the context,
+  //     then one draw copies it into the target (targets need not keep
+  //     their contents between frames).
+  //   * Most of the frame changed (an animated full-screen UI, a scrolling
+  //     list): a full repaint straight into the target, one pass, no copy.
+  //     The retained frame misses that frame and is repainted fully once
+  //     the damage stayed small for kRetainAfter frames.
+  // MSAA targets and JSUI_GL_NO_RETAIN always take the direct path (the
+  // retained frame is single-sampled).
+  constexpr int kRetainAfter = 3, kFreeRetainedAfter = 300;
+  const SkImageInfo info = surface->imageInfo();
+  bool allowRetain = !(t.flags & JSUI_GL_NO_RETAIN) && t.samples <= 1;
+  GLGpu::Retained* r = allowRetain ? g->retainedEntry(&rt) : nullptr;
+  if (r && !GLGpu::matches(r->surface.get(), info)) r->surface.reset();
+  const void* key = r && r->surface ? reinterpret_cast<const void*>(r->key) : nullptr;
+  bool viaRetained = false, failed = false;
+  const int64_t frameArea = int64_t(t.width) * t.height;
+  rt.renderCanvasTracked(key, t.width, t.height, [&](const SkIRect&, bool keyValid) -> Runtime::CanvasChoice {
+    int64_t area = 0;
+    for (SkRegion::Iterator it(rt.trackedDamage()); !it.done(); it.next())
+      area += int64_t(it.rect().width()) * it.rect().height();
+    bool large = area * 2 >= frameArea;
+    bool retain = false;
+    if (r) {
+      r->smallFrames = large ? 0 : r->smallFrames + 1;
+      retain = keyValid ? !large : r->smallFrames >= kRetainAfter;
+      if (!retain && ++r->directFrames > kFreeRetainedAfter) r->surface.reset();  // a frame's worth of memory
+    }
+    if (!retain) return {surface->getCanvas(), nullptr, clear};
+    r->directFrames = 0;
+    if (!r->surface && !g->makeRetainedSurface(r, info)) {
+      failed = true;
+      return {};
+    }
+    viaRetained = true;
+    Runtime::CanvasChoice c{r->surface->getCanvas(), reinterpret_cast<const void*>(r->key), true};
+    c.splitDamage = true;  // Ganesh: one scissor per pass, no stencil or mask
+    return c;
+  });
+  if (failed) return -1;
+  if (viaRetained) {
+    SkPaint paint;
+    paint.setBlendMode(clear ? SkBlendMode::kSrc : SkBlendMode::kSrcOver);
+    r->surface->draw(surface->getCanvas(), 0, 0, SkSamplingOptions(), &paint);
+  }
+  // One flush and submit per frame (with the retained frame's repaint, which
+  // the target's draw depends on), and no CPU wait.
+  g->ctx->flushAndSubmit(GrSyncCpu::kNo);
   return g->ctx->abandoned() ? -1 : 0;
 }
 

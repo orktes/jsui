@@ -2,7 +2,7 @@
 // native Ganesh GL, with deterministic simulated time.
 //
 //   jsui-paint-bench [--frames N] [--warmup N] [--settle-ms MS] [--width W]
-//                    [--height H] [--scale S] [--backends cpu,cpu-full,gl]
+//                    [--height H] [--scale S] [--backends cpu,cpu-full,gl,gl-direct]
 //                    [--json out.json] name=bundle.js[@hover] ...
 //
 // Per scenario and backend it loads the bundle, runs --settle-ms of simulated
@@ -16,6 +16,7 @@
 //             display; macOS: CGL). Frames where jsui_needs_redraw() is false
 //             are skipped like a host would. "paint" is the CPU time of the
 //             render call (issuing GL), "gpu" adds glFinish().
+//   gl-direct gl with JSUI_GL_NO_RETAIN: the whole frame into the target.
 // `@hover` sweeps the mouse over the left part of the screen every frame.
 //
 // Reported per frame: mean / p95 / max paint ms, painted frames, mean pixels
@@ -60,6 +61,7 @@ struct Options {
   float scale = 1;
   std::vector<std::string> backends = {"cpu", "gl"};
   std::string json;
+  bool count = true;  // --no-count skips the counting pass
 };
 
 struct Scenario {
@@ -83,7 +85,7 @@ std::vector<std::string> split(const std::string& s, char sep) {
 
 struct GLCounts {
   int64_t draws = 0, flushes = 0, finishes = 0, readPixels = 0, texUploads = 0, texUploadBytes = 0,
-          bufferBytes = 0, programs = 0, syncWaits = 0;
+          bufferBytes = 0, programs = 0, syncWaits = 0, links = 0, fboBinds = 0;
 };
 GLCounts g_gl;
 
@@ -115,6 +117,8 @@ REAL(glBufferData, void (*)(GLenum, GLsizeiptr, const void*, GLenum));
 REAL(glBufferSubData, void (*)(GLenum, GLintptr, GLsizeiptr, const void*));
 REAL(glUseProgram, void (*)(GLuint));
 REAL(glClientWaitSync, GLenum (*)(void*, unsigned, uint64_t));
+REAL(glLinkProgram, void (*)(GLuint));
+REAL(glBindFramebuffer, void (*)(GLenum, GLuint));
 #undef REAL
 
 void w_glDrawArrays(GLenum m, GLint f, GLsizei c) { g_gl.draws++; glDrawArrays_real(m, f, c); }
@@ -164,6 +168,8 @@ void w_glBufferSubData(GLenum t, GLintptr o, GLsizeiptr n, const void* p) {
   glBufferSubData_real(t, o, n, p);
 }
 void w_glUseProgram(GLuint p) { g_gl.programs++; glUseProgram_real(p); }
+void w_glLinkProgram(GLuint p) { g_gl.links++; glLinkProgram_real(p); }
+void w_glBindFramebuffer(GLenum t, GLuint f) { g_gl.fboBinds++; glBindFramebuffer_real(t, f); }
 GLenum w_glClientWaitSync(void* s, unsigned f, uint64_t t) {
   g_gl.syncWaits++;
   return glClientWaitSync_real(s, f, t);
@@ -203,6 +209,8 @@ void* countingProc(void*, const char* name) {
   WRAP(glBufferSubData)
   WRAP(glUseProgram)
   WRAP(glClientWaitSync)
+  WRAP(glLinkProgram)
+  WRAP(glBindFramebuffer)
 #undef WRAP
   return real;
 }
@@ -379,7 +387,7 @@ struct Result {
   double pixels = 0;  // mean repainted pixels per frame (all frames)
   double draws = 0, textDraws = 0, imageDraws = 0, saveLayers = 0, clips = 0, nodes = 0;
   double glDraws = 0, glFlushes = 0, glReadPixels = 0, glTexUploads = 0, glTexUploadBytes = 0, glBufferBytes = 0,
-         glPrograms = 0, glSyncWaits = 0, glFinishes = 0;
+         glPrograms = 0, glSyncWaits = 0, glFinishes = 0, glLinks = 0, glFboBinds = 0;
   bool ok = true;
   std::string note;
 };
@@ -439,7 +447,7 @@ std::vector<Sample> runPass(const Options& o, const Scenario& sc, const std::str
 #if BENCH_GL
   JsuiGpuContext* gpu = nullptr;
   unsigned tex = 0, fbo = 0;
-  if (backend == "gl") {
+  if (backend.rfind("gl", 0) == 0) {
     if (!headlessGL(nullptr)) {
       *error = "no GL context";
       return out;
@@ -463,7 +471,7 @@ std::vector<Sample> runPass(const Options& o, const Scenario& sc, const std::str
     }
   }
 #else
-  if (backend == "gl") {
+  if (backend.rfind("gl", 0) == 0) {
     *error = "built without JSUI_GPU";
     return out;
   }
@@ -488,13 +496,14 @@ std::vector<Sample> runPass(const Options& o, const Scenario& sc, const std::str
       s.painted = true;
     }
 #if BENCH_GL
-    else if (backend == "gl") {
+    else if (backend.rfind("gl", 0) == 0) {
       if (rt->needsRedraw()) {
         GLCounts before = g_gl;
         JsuiGLTarget target{};
         target.fbo = fbo;
         target.width = w;
         target.height = h;
+        if (backend == "gl-direct") target.flags = JSUI_GL_NO_RETAIN;
         auto a = Clock::now();
         int rc = jsui::gpu::render(*rt, gpu, target);
         auto b = Clock::now();
@@ -516,6 +525,8 @@ std::vector<Sample> runPass(const Options& o, const Scenario& sc, const std::str
         s.gl.bufferBytes = g_gl.bufferBytes - before.bufferBytes;
         s.gl.programs = g_gl.programs - before.programs;
         s.gl.syncWaits = g_gl.syncWaits - before.syncWaits;
+        s.gl.links = g_gl.links - before.links;
+        s.gl.fboBinds = g_gl.fboBinds - before.fboBinds;
       }
     }
 #endif
@@ -542,7 +553,7 @@ Result measure(const Options& o, const Scenario& sc, const std::string& backend)
   std::string err;
   std::vector<Sample> timed = runPass(o, sc, backend, false, &err);
   std::vector<Sample> counted;
-  if (err.empty()) counted = runPass(o, sc, backend, true, &err);
+  if (err.empty() && o.count) counted = runPass(o, sc, backend, true, &err);
   if (!err.empty() || timed.empty()) {
     r.ok = false;
     r.note = err.empty() ? "no frames" : err;
@@ -566,6 +577,8 @@ Result measure(const Options& o, const Scenario& sc, const std::string& backend)
     r.glBufferBytes += double(s.gl.bufferBytes);
     r.glPrograms += double(s.gl.programs);
     r.glSyncWaits += double(s.gl.syncWaits);
+    r.glLinks += double(s.gl.links);
+    r.glFboBinds += double(s.gl.fboBinds);
   }
   for (const Sample& s : counted) {
     if (!s.painted) continue;
@@ -586,7 +599,7 @@ Result measure(const Options& o, const Scenario& sc, const std::string& backend)
   r.pixels /= n;
   for (double* v : {&r.draws, &r.textDraws, &r.imageDraws, &r.saveLayers, &r.clips, &r.nodes}) *v /= n;
   for (double* v : {&r.glDraws, &r.glFlushes, &r.glFinishes, &r.glReadPixels, &r.glTexUploads, &r.glTexUploadBytes,
-                    &r.glBufferBytes, &r.glPrograms, &r.glSyncWaits})
+                    &r.glBufferBytes, &r.glPrograms, &r.glSyncWaits, &r.glLinks, &r.glFboBinds})
     *v /= n;
   return r;
 }
@@ -613,9 +626,10 @@ int main(int argc, char** argv) {
     else if (a == "--scale") o.scale = float(std::atof(next().c_str()));
     else if (a == "--backends") o.backends = split(next(), ',');
     else if (a == "--json") o.json = next();
+    else if (a == "--no-count") o.count = false;
     else if (a == "-h" || a == "--help") {
       std::printf("usage: jsui-paint-bench [--frames N] [--warmup N] [--settle-ms MS] [--width W] [--height H] "
-                  "[--scale S] [--backends cpu,cpu-full,gl] [--json out.json] name=bundle.js[@hover] ...\n");
+                  "[--scale S] [--backends cpu,cpu-full,gl,gl-direct] [--json out.json] name=bundle.js[@hover] ...\n");
       return 0;
     } else {
       Scenario sc;
@@ -635,13 +649,14 @@ int main(int argc, char** argv) {
   }
   std::string glName;
 #if BENCH_GL
-  if (std::find(o.backends.begin(), o.backends.end(), "gl") != o.backends.end()) headlessGL(&glName);
+  for (const std::string& b : o.backends)
+    if (b.rfind("gl", 0) == 0 && glName.empty()) headlessGL(&glName);
 #endif
   std::printf("jsui-paint-bench %dx%d @%gx, %d frames (+%d warmup) at 60 Hz%s%s\n", o.width, o.height, o.scale, o.frames,
               o.warmup, glName.empty() ? "" : ", GL: ", glName.c_str());
-  std::printf("%-20s %-8s %7s %7s %7s %7s %7s %10s %7s %6s %6s %6s %7s %7s %6s %6s\n", "scenario", "backend", "paint",
-              "p95", "max", "gpu", "gpuP95", "px/frame", "draws", "text", "image", "layer", "nodes", "glDraw",
-              "flush", "rdback");
+  std::printf("%-20s %-8s %7s %7s %7s %7s %7s %10s %7s %6s %6s %6s %7s %7s %6s %6s %6s %7s\n", "scenario", "backend",
+              "paint", "p95", "max", "gpu", "gpuP95", "px/frame", "draws", "text", "image", "layer", "nodes",
+              "glDraw", "fbo", "rdback", "links", "upKB");
   std::vector<Result> results;
   int failures = 0;
   for (const Scenario& sc : scenarios) {
@@ -653,14 +668,16 @@ int main(int argc, char** argv) {
         std::printf("%-20s %-8s FAILED: %s\n", r.scenario.c_str(), r.backend.c_str(), r.note.c_str());
         continue;
       }
-      std::printf("%-20s %-8s %7.3f %7.3f %7.3f %7.3f %7.3f %10.0f %7.1f %6.1f %6.1f %6.2f %7.1f %7.1f %6.2f %6.2f\n",
+      std::printf("%-20s %-8s %7.3f %7.3f %7.3f %7.3f %7.3f %10.0f %7.1f %6.1f %6.1f %6.2f %7.1f %7.1f %6.2f %6.2f %6.2f %7.1f\n",
                   r.scenario.c_str(), r.backend.c_str(), r.mean, r.p95, r.max, r.gpuMean, r.gpuP95, r.pixels, r.draws,
-                  r.textDraws, r.imageDraws, r.saveLayers, r.nodes, r.glDraws, r.glFlushes, r.glReadPixels);
+                  r.textDraws, r.imageDraws, r.saveLayers, r.nodes, r.glDraws, r.glFboBinds, r.glReadPixels, r.glLinks,
+                  r.glTexUploadBytes / 1024);
       std::fflush(stdout);
     }
   }
   std::printf("paint/p95/max: ms per frame of the paint call (all frames; idle ones cost ~0); gpu: with glFinish,\n"
-              "painted frames only; px/frame, draws, text, image, layer, nodes, glDraw, flush, rdback: means per frame.\n");
+              "painted frames only; px/frame, draws, text, image, layer, nodes, glDraw, fbo (glBindFramebuffer), rdback (glReadPixels), links\n"
+              "(glLinkProgram), upKB (texture uploads): means per frame.\n");
   if (!o.json.empty()) {
     FILE* f = std::fopen(o.json.c_str(), "w");
     if (f) {
@@ -674,11 +691,11 @@ int main(int argc, char** argv) {
                      "\"draws\":%.2f,\"textDraws\":%.2f,\"imageDraws\":%.2f,\"saveLayers\":%.2f,\"clips\":%.2f,"
                      "\"nodes\":%.2f,\"glDraws\":%.2f,\"glFlushes\":%.3f,\"glFinishes\":%.3f,\"glReadPixels\":%.3f,"
                      "\"glTexUploads\":%.3f,\"glTexUploadBytes\":%.0f,\"glBufferBytes\":%.0f,\"glPrograms\":%.2f,"
-                     "\"glSyncWaits\":%.3f}%s\n",
+                     "\"glSyncWaits\":%.3f,\"glLinks\":%.3f,\"glFboBinds\":%.2f}%s\n",
                      r.scenario.c_str(), r.backend.c_str(), r.ok ? "true" : "false", r.frames, r.painted, r.mean, r.p50,
                      r.p95, r.max, r.gpuMean, r.gpuP95, r.pixels, r.draws, r.textDraws, r.imageDraws, r.saveLayers,
                      r.clips, r.nodes, r.glDraws, r.glFlushes, r.glFinishes, r.glReadPixels, r.glTexUploads,
-                     r.glTexUploadBytes, r.glBufferBytes, r.glPrograms, r.glSyncWaits,
+                     r.glTexUploadBytes, r.glBufferBytes, r.glPrograms, r.glSyncWaits, r.glLinks, r.glFboBinds,
                      i + 1 < results.size() ? "," : "");
       }
       std::fprintf(f, "]}\n");

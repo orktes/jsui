@@ -612,6 +612,87 @@ TEST(gpu_matches_cpu_scene) {
   });
 }
 
+// Applies a style patch like Animated / patchStyle does.
+void patchStyle(jsui::Node* n, const std::string& json) {
+  using jsui::Value;
+  std::string err;
+  Value p = Value::parseJson(json, &err);
+  Value::Object style = n->props()["style"].asObject();
+  for (auto& [k, v] : p.asObject()) style[k] = v;
+  Value::Object props = n->props().asObject();
+  props["style"] = Value(style);
+  n->setProps(Value(props));
+}
+
+// The retained frame (damage-only repaints, one rect or a few scissored
+// passes, then one draw into the target) matches drawing the whole frame
+// into the target every frame. Perf guard: it repaints only the damage.
+TEST(gpu_retained_frame_matches_direct) {
+  forEachContext("gpu_retained_frame_matches_direct", [](GLContext& c, JsuiGpuContext* gpu, Api api) {
+    std::string png = quadPngUri();
+    Scene a(320, 240), b(320, 240);  // a: retained, b: direct
+    jsui::Node* probes[2][2];
+    for (int k = 0; k < 2; k++) {
+      Scene& s = k ? b : a;
+      buildScene(s, png);
+      probes[k][0] = s.add(R"J({"style":{"position":"absolute","left":0,"top":0,"width":12,"height":10,"borderRadius":4,
+        "backgroundColor":"rgba(255,255,255,0.6)","boxShadow":"0 2px 4px rgba(0,0,0,0.7)"}})J");
+      probes[k][1] = s.add(R"J({"style":{"position":"absolute","left":300,"top":220,"width":8,"height":8,
+        "backgroundColor":"#ff00ff"}})J");
+      s.render();  // loads the data: images
+    }
+    RenderTexture ta(c.gl, 320, 240), tb(c.gl, 320, 240);
+    JsuiGLTarget t{};
+    t.width = 320;
+    t.height = 240;
+    t.texture = ta.tex;
+    t.flags = JSUI_GL_TOP_LEFT_ORIGIN;
+    CHECK_EQ(jsui::gpu::render(*a.rt, gpu, t), 0);
+    uint32_t seed = 777;
+    auto rnd = [&](float lo, float hi) {
+      seed = seed * 1664525u + 1013904223u;
+      return lo + (hi - lo) * float(seed >> 8) / float(1u << 24);
+    };
+    int worst = 0;
+    double over = 0, repainted = 0, passes = 0;
+    const int steps = 40;
+    for (int i = 0; i < steps; i++) {
+      // Two probes far apart (two passes), a corner one only every 4th step.
+      std::string p0 = "{\"left\":" + std::to_string(rnd(0, 140)) + ",\"top\":" + std::to_string(rnd(0, 100)) + "}";
+      std::string p1 = "{\"left\":" + std::to_string(rnd(250, 310)) + ",\"top\":" + std::to_string(rnd(180, 230)) + "}";
+      for (int k = 0; k < 2; k++) {
+        patchStyle(probes[k][0], p0);
+        if (i % 4 == 0) patchStyle(probes[k][1], p1);
+      }
+      t.texture = ta.tex;
+      t.flags = JSUI_GL_TOP_LEFT_ORIGIN;
+      CHECK_EQ(jsui::gpu::render(*a.rt, gpu, t), 0);
+      jsui::PaintStats st = jsui::lastPaintStats(a.doc());
+      repainted += double(st.repaintedPixels);
+      passes += st.damageRects;
+      t.texture = tb.tex;
+      t.flags = JSUI_GL_TOP_LEFT_ORIGIN | JSUI_GL_NO_RETAIN;
+      b.doc().markPaintDirty();
+      CHECK_EQ(jsui::gpu::render(*b.rt, gpu, t), 0);
+      std::vector<uint32_t> ra = ta.read(false), rb = tb.read(false);
+      Diff d = compare(ra, rb, 2);
+      if (d.maxDiff > worst) {
+        worst = d.maxDiff;
+        savePng((std::string("gpu_retained_") + apiName(api)).c_str(), ra, 320, 240);
+        savePng((std::string("gpu_direct_") + apiName(api)).c_str(), rb, 320, 240);
+      }
+      over = std::max(over, d.over);
+    }
+    std::printf("  [%s] retained vs direct: max %d, >2: %.4f%%; repainted %.0f px per frame in %.2f passes\n",
+                apiName(api), worst, over * 100, repainted / steps, passes / steps);
+    CHECK(over < 0.0005);
+    // Perf guard: the probes' old + new rects with their shadow, in at
+    // most a few passes, never the whole frame.
+    CHECK(repainted / steps < 320 * 240 / 8);
+    CHECK(passes / steps <= 2.5);
+  });
+}
+
 // Default origin (bottom-left) into an FBO: GL row 0 is the bottom of the UI.
 TEST(gpu_fbo_bottom_left_and_no_clear) {
   forEachContext("gpu_fbo_bottom_left_and_no_clear", [](GLContext& c, JsuiGpuContext* gpu, Api) {
