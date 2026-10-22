@@ -144,6 +144,10 @@ class InputManager {
   static constexpr float kDecelerationFast = 0.99f;
   static constexpr float kMinFlingVelocity = 0.05f;     // px/ms
   static constexpr float kStopVelocity = 0.02f;         // px/ms: a fling ends below this
+  // A drag pushed past an edge banks up to this much overshoot: the finger
+  // comes back this far before the content moves again, so touch jitter
+  // while pulling against an edge does not shake the content.
+  static constexpr float kDragEdgeSlack = 12;
   static constexpr double kVelocityWindowMs = 100;
   static constexpr float kSmoothWheelMinDelta = 40;
   static constexpr double kWheelAnimMs = 150;
@@ -201,6 +205,7 @@ class InputManager {
     // Touch drag velocity tracking (main-axis offset samples).
     bool dragging = false;
     float dragStart = 0;
+    float dragOver = 0;  // overshoot banked past an edge (main axis, <= kDragEdgeSlack)
     struct Sample {
       double t;
       float pos;

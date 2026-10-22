@@ -983,6 +983,7 @@ class JsuiHost {
     const active = { signal, passive: false };
     const focusSink = () => this.focus();
     c.style.touchAction = 'none';
+    c.style.overscrollBehavior = 'none';
     c.style.userSelect = 'none';
     c.style.webkitUserSelect = 'none';
     c.style.outline = 'none';
@@ -1039,6 +1040,10 @@ class JsuiHost {
       if (M._jsui_send_mouse_wheel(this.rt, x, y, e.deltaX * k, e.deltaY * k)) e.preventDefault();
     }, active);
     c.addEventListener('contextmenu', (e) => e.preventDefault(), active);
+    // iOS Safari can still rubber-band the page under a touch-action: none
+    // canvas; the canvas then moves under the finger and its scroll views see
+    // phantom motion. A cancelled touchmove never pans or bounces the page.
+    c.addEventListener('touchmove', (e) => { if (e.cancelable) e.preventDefault(); }, active);
     // The compat mousedown would move focus to <body> (the canvas is not
     // focusable), stealing it from the keyboard sink focused in pointerdown.
     c.addEventListener('mousedown', (e) => e.preventDefault(), active);
