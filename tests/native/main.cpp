@@ -1,8 +1,12 @@
+#include <cstdio>
 #include <cstring>
 
 #include "test.h"
 
 int main(int argc, char** argv) {
+  // Unbuffered so CI logs show progress even if a test crashes the process.
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+  std::setvbuf(stderr, nullptr, _IONBF, 0);
   const char* filter = argc > 1 ? argv[1] : nullptr;
   int ran = 0, failed = 0;
   for (auto& c : jsui_test::registry()) {

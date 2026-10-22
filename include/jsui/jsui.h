@@ -106,7 +106,7 @@ typedef struct JsuiConfig {
      * native->JS call (an event, a timer, a frame callback) that runs longer
      * than js_timeout_ms and reports it as an error; negative disables it. */
     int js_memory_limit_mb; /* default 256 */
-    int js_stack_size_kb;   /* default 1024 */
+    int js_stack_size_kb;   /* default 1024 (512 on Windows, whose threads get 1 MB stacks) */
     int js_timeout_ms;      /* default 5000 */
 } JsuiConfig;
 
