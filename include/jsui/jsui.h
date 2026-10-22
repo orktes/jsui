@@ -206,6 +206,19 @@ JSUI_API int jsui_send_gamepad_button(JsuiRuntime* rt, int pad, int button, int 
 JSUI_API int jsui_send_gamepad_axis(JsuiRuntime* rt, int pad, int axis, float value);
 JSUI_API void jsui_set_gamepad_connected(JsuiRuntime* rt, int pad, int connected, const char* id);
 
+/* ------------------------------------------------------------- Clipboard
+ *
+ * TextInput copy / cut / paste (Ctrl or Cmd + C / X / V) and the JS
+ * Clipboard API use these callbacks. Without them (or with NULL ones) the
+ * runtime keeps an in-process clipboard. `get` returns UTF-8 text (NULL:
+ * empty) owned by the embedder that must stay valid until the next `get`
+ * call; the runtime copies it immediately.
+ */
+typedef const char* (*JsuiClipboardGetFn)(void* user);
+typedef void (*JsuiClipboardSetFn)(void* user, const char* utf8);
+JSUI_API void jsui_set_clipboard_callbacks(JsuiRuntime* rt, JsuiClipboardGetFn get, JsuiClipboardSetFn set,
+                                           void* user);
+
 /* The cursor the UI wants (CSS cursor name, e.g. "default", "pointer", "text"). */
 JSUI_API const char* jsui_get_cursor(JsuiRuntime* rt);
 

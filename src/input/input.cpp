@@ -440,6 +440,7 @@ bool InputManager::mouseMove(float x, float y) {
   updateCursor(alive(hitId));
   uint32_t targetId = mouse_.captureId && alive(mouse_.captureId) ? mouse_.captureId : hitId;
   bool handled = false;
+  if (moved && dragInputId_) editPointerDrag(mouse_);  // drag-selecting text
   // pointermove is the hottest event: only cross into JS when someone on the
   // propagation path listens to moves.
   if (moved && alive(targetId) && consumes(alive(targetId), kMove))
@@ -467,11 +468,18 @@ bool InputManager::pointerDown(PointerState& p, uint32_t hitId, int button) {
   }
   if (button == 0) p.downId = hitId;
   Node* target = alive(p.captureId) ? alive(p.captureId) : alive(hitId);
+  if (button == 0) selectedOnFocusId_ = 0;  // set again if this press focuses a selectTextOnFocus input
   bool handled = dispatchPointer("pointerdown", target, p, button, p.x, p.y);
   // Focus follows the press even when JS handled pointerdown: the bridge
   // reports "handled" and "preventDefault" alike, and a Pressable always
   // handles it.
-  if (button == 0) focusFromPointer(alive(hitId));
+  if (button == 0) {
+    focusFromPointer(alive(hitId));
+    // Pressing a focused TextInput places the caret / starts a selection.
+    Node* hit = alive(hitId);
+    if (hit && hit == focused_ && hit->type() == NodeType::TextInput) editPointerDown(hit, p, mods_);
+    selectedOnFocusId_ = 0;
+  }
   return handled || consumes(alive(hitId), kPointer);
 }
 
@@ -493,6 +501,7 @@ bool InputManager::pointerUp(PointerState& p, uint32_t hitId, int button, bool c
   }
   if (button == 0) p.downId = 0;
   if (p.buttons == 0 || cancel) {
+    if (!p.touch) dragInputId_ = 0;
     p.buttons = 0;
     p.captureId = 0;
     p.scrollingId = 0;
@@ -728,6 +737,7 @@ void InputManager::setFocus(Node* n) {
   if (n == focused_) return;
   uint32_t oldId = idOf(focused_), newId = idOf(n);
   focused_ = nullptr;
+  editFocus(alive(oldId), false);
   if (Node* old = alive(oldId)) {
     // DOM order: blur the old element first (nothing is focused meanwhile).
     Value::Object ev = baseEvent("blur", old);
@@ -739,6 +749,7 @@ void InputManager::setFocus(Node* n) {
   n = alive(newId);
   if (!n || !attached(n)) return;
   focused_ = n;
+  editFocus(n, true);
   scrollIntoView(n);
   n = alive(newId);
   if (!n || focused_ != n) return;
@@ -952,6 +963,7 @@ bool InputManager::key(const char* keyName, const char* code, bool down, bool re
   if (k == "Tab") {
     return focusNext((mods & JSUI_MOD_SHIFT) != 0);
   }
+  if (inTextInput && editKey(focused_, k, mods)) return true;
   if ((k == "Enter" || k == " " || k == "Spacebar") && !repeat && focusedUsable() && !inTextInput) {
     Node* f = focused_;
     Rect r = visualRect(f);
@@ -978,6 +990,7 @@ bool InputManager::text(const char* utf8) {
   Value::Object ev = baseEvent("textinput", focused_);
   ev["text"] = Value(utf8);
   bool handled = dispatch(std::move(ev));
+  if (!handled && focused_ && focused_->type() == NodeType::TextInput) return editText(focused_, utf8);
   return handled || (focused_ && focused_->type() == NodeType::TextInput);
 }
 
@@ -1100,6 +1113,7 @@ void InputManager::tick(double nowMs) {
   }
   bool laidOut = rt_.doc.layout();
   if (laidOut) tickFocusScopes();
+  editTick();
   // The UI may have moved under a still mouse: refresh enter/leave + cursor.
   if (mouseInside_ && (laidOut || hoverDirty_ || rt_.doc.paintDirty())) {
     hoverDirty_ = false;

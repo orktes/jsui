@@ -165,6 +165,32 @@ JSValue js_scrollTo(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
   return JS_UNDEFINED;
 }
 
+// setTextInputSelection(id, start, end): TextInput selection from JS
+// (ref.setSelection, the controlled `selection` prop). UTF-16 indices.
+JSValue js_setTextInputSelection(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
+  if (!n) return JS_UNDEFINED;
+  double start = 0, end = 0;
+  if (argc > 1) JS_ToFloat64(ctx, &start, argv[1]);
+  end = start;
+  if (argc > 2 && !JS_IsUndefined(argv[2]) && !JS_IsNull(argv[2])) JS_ToFloat64(ctx, &end, argv[2]);
+  auto toIndex = [](double v) { return v == v ? int(std::clamp(v, 0.0, 1e9)) : 0; };
+  runtimeOf(ctx).input->setInputSelection(n, toIndex(start), toIndex(end));
+  return JS_UNDEFINED;
+}
+
+// getClipboard() -> string, setClipboard(text): the embedder's clipboard
+// (jsui_set_clipboard_callbacks) or the runtime's in-process one.
+JSValue js_getClipboard(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+  std::string t = runtimeOf(ctx).clipboardText();
+  return JS_NewStringLen(ctx, t.data(), t.size());
+}
+
+JSValue js_setClipboard(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  runtimeOf(ctx).setClipboardText(argc > 0 ? toStdString(ctx, argv[0]) : std::string());
+  return JS_UNDEFINED;
+}
+
 JSValue js_postMessage(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   Runtime& rt = runtimeOf(ctx);
   std::string name = argc > 0 ? toStdString(ctx, argv[0]) : "";
@@ -272,9 +298,13 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
              {"measure", js_measure, 1},           {"focus", js_focus, 1},
              {"blur", js_blur, 1},                 {"scrollTo", js_scrollTo, 4},
              {"postMessage", js_postMessage, 2},   {"loadFont", js_loadFont, 4},
-             {"reload", js_reload, 0},             {"viewport", js_viewport, 0}};
+             {"reload", js_reload, 0},             {"viewport", js_viewport, 0},
+             {"setTextInputSelection", js_setTextInputSelection, 3},
+             {"getClipboard", js_getClipboard, 0}, {"setClipboard", js_setClipboard, 1}};
   for (auto& f : fns) JS_SetPropertyStr(ctx, native, f.name, JS_NewCFunction(ctx, f.fn, f.name, f.len));
   JS_SetPropertyStr(ctx, native, "rootId", JS_NewUint32(ctx, impl.rt.doc.root()->id()));
+  // TextInput text is edited natively (change / selectionchange events).
+  JS_SetPropertyStr(ctx, native, "textEditing", JS_TRUE);
   JS_SetPropertyStr(ctx, native, "devMode", JS_NewBool(ctx, impl.rt.config.dev_mode != 0));
   JS_SetPropertyStr(ctx, global, "__jsui_native", native);
 }

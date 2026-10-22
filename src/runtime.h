@@ -53,6 +53,15 @@ class Runtime {
   std::string bundleUrl, bundleSource, bundleName;
   std::string lastError;
   std::string cursor = "default";
+
+  // Clipboard: the embedder's callbacks (jsui_set_clipboard_callbacks),
+  // else an in-process string.
+  std::string clipboardText();
+  void setClipboardText(const std::string& text);
+  JsuiClipboardGetFn clipboardGet = nullptr;
+  JsuiClipboardSetFn clipboardSet = nullptr;
+  void* clipboardUser = nullptr;
+  std::string clipboard;
   double now = 0;
 
   Document doc;

@@ -101,6 +101,9 @@ class InputManager {
   void scrollIntoView(Node* n);
   // Content size of a ScrollView from its children's layout extents.
   void contentSize(const Node* scrollView, float* w, float* h) const;
+  // TextInput selection set from JS (ref.setSelection / the selection
+  // prop): clamped, scrolled into view, no selectionchange event.
+  void setInputSelection(Node* input, int start, int end);
 
   // Hit testing inside a paragraph (Text node): returns the inline span (or
   // the Text itself) under a Text-local point. Set by the text layout.
@@ -160,6 +163,22 @@ class InputManager {
   Node* scrollableAncestor(Node* n, float dx, float dy) const;
   bool dispatchScroll(Node* sv);
 
+  // TextInput editing (text_editing.cpp). The focused TextInput gets keys
+  // and text after JS saw them (unless prevented); see text/text_edit.h.
+  bool editKey(Node* input, const std::string& key, int mods);
+  bool editText(Node* input, const char* utf8);
+  void editPointerDown(Node* input, const PointerState& p, int mods);
+  void editPointerDrag(const PointerState& p);
+  void editFocus(Node* input, bool focused);
+  void editTick();
+  enum class EditKind { Typing, Delete, Other };
+  bool editReplace(Node* input, int start, int end, std::u16string text, EditKind kind);
+  void editSelect(Node* input, int anchor, int focus, bool keepGoal = false);
+  bool editUndo(Node* input, bool redo);
+  void editNotify(uint32_t id, bool text, bool selection);
+  std::u16string editFilter(Node* input, const std::u16string& in) const;
+  bool editable(const Node* input) const;
+
   Node* modalScope() const;
   void collectFocusable(Node* scope, std::vector<Node*>* out) const;
   Node* preferredFocus(Node* scope) const;
@@ -186,6 +205,19 @@ class InputManager {
   };
   std::vector<ScopeMemo> scopeStack_;
   uint32_t scopeId_ = 0;
+
+  // TextInput pointer selection: drag target, granularity (0 characters,
+  // 1 words, 2 everything) and the word the drag started on.
+  uint32_t dragInputId_ = 0;
+  int dragMode_ = 0, dragWordStart_ = 0, dragWordEnd_ = 0;
+  // Multi-click detection (double: word, triple: all).
+  uint32_t lastClickId_ = 0;
+  double lastClickTime_ = -1e9;
+  float lastClickX_ = 0, lastClickY_ = 0;
+  int clickCount_ = 0;
+  // selectTextOnFocus selected everything: the press that focused it does
+  // not place the caret.
+  uint32_t selectedOnFocusId_ = 0;
 
   // Reused buffers (no per-event allocation in the steady state).
   std::vector<Node*> zOrder_;

@@ -137,6 +137,12 @@ void jsui_set_gamepad_connected(JsuiRuntime* rt, int pad, int connected, const c
   rt->rt->input->gamepadConnected(pad, connected != 0, id);
 }
 const char* jsui_get_cursor(JsuiRuntime* rt) { return rt->rt->cursor.c_str(); }
+void jsui_set_clipboard_callbacks(JsuiRuntime* rt, JsuiClipboardGetFn get, JsuiClipboardSetFn set, void* user) {
+  if (!rt) return;
+  rt->rt->clipboardGet = get;
+  rt->rt->clipboardSet = set;
+  rt->rt->clipboardUser = user;
+}
 const char* jsui_last_error(JsuiRuntime* rt) {
   return rt->rt->lastError.empty() ? nullptr : rt->rt->lastError.c_str();
 }

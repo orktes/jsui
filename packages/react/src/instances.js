@@ -33,6 +33,8 @@ const EVENT_TOKENS = {
   onBlur: ['blur'],
   onScroll: ['scroll'],
   onTextInput: ['textInput'],
+  onChange: ['change'],
+  onSelectionChange: ['selectionChange'],
   onGamepadButton: ['gamepadButton'],
   onGamepadAxis: ['gamepadAxis'],
   onLayout: ['layout'],

@@ -1147,6 +1147,14 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkIRect& clip, uint
       if (!sub.intersect(grown, clip)) sub.setEmpty();
     }
   }
+  // TextInput caret blink / move: only the caret's old and new rects.
+  SkRect caretA, caretB;
+  if (n->type() == NodeType::TextInput && text::inputCaretDamage(n, &caretA, &caretB) && painted) {
+    for (const SkRect& cr : {caretA, caretB}) {
+      SkIRect dr;
+      if (!cr.isEmpty() && dr.intersect(deviceBounds(m, cr.makeOutset(1, 1)), clip)) damage->op(dr, SkRegion::kUnion_Op);
+    }
+  }
   // A hidden node's descendants keep their old records; the check below
   // repaints where the subtree was.
   uint64_t kids = childListHash(n);

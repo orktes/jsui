@@ -296,13 +296,17 @@ export const Share = {
   dismissedAction: 'dismissedAction',
 };
 
+// The runtime's clipboard (the embedder's, or in-process) when available;
+// TextInput copy / paste uses the same one.
 let clip = '';
+const readClip = () => (typeof native.getClipboard === 'function' ? String(native.getClipboard()) : clip);
 export const Clipboard = {
-  getString: () => Promise.resolve(clip),
+  getString: () => Promise.resolve(readClip()),
   setString(s) {
-    clip = String(s);
+    if (typeof native.setClipboard === 'function') native.setClipboard(String(s));
+    else clip = String(s);
   },
-  hasString: () => Promise.resolve(clip.length > 0),
+  hasString: () => Promise.resolve(readClip().length > 0),
 };
 
 export const ToastAndroid = { SHORT: 0, LONG: 1, TOP: 0, BOTTOM: 1, CENTER: 2, show: (m) => console.log('[Toast] ' + m), showWithGravity: (m) => console.log('[Toast] ' + m), showWithGravityAndOffset: (m) => console.log('[Toast] ' + m) };

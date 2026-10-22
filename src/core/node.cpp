@@ -4,6 +4,7 @@
 
 #include "core/document.h"
 #include "render/image_node.h"
+#include "text/text_edit.h"
 #include "text/text_layout.h"
 
 namespace jsui {
@@ -179,6 +180,7 @@ void Node::setProps(const Value& props) {
   if (!doc_) return;
   if (relayout) doc_->markLayoutDirty();
   else doc_->markPaintDirty();
+  if (type_ == NodeType::TextInput) edit::syncProps(this);
 }
 
 void Node::restyle() {

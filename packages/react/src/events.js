@@ -25,6 +25,8 @@ const TYPES = {
   keydown: ['onKeyDown', true, true],
   keyup: ['onKeyUp', true, true],
   textinput: ['onTextInput', true, true],
+  change: ['onChange', false, true],
+  selectionchange: ['onSelectionChange', false, true],
   focus: ['onFocus', false, true],
   blur: ['onBlur', false, true],
   scroll: ['onScroll', false, false],

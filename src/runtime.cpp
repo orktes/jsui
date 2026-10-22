@@ -188,6 +188,19 @@ void Runtime::tick(double nowMs) {
   if (doc.paintDirty()) redraw_ = true;
 }
 
+std::string Runtime::clipboardText() {
+  if (clipboardGet) {
+    const char* t = clipboardGet(clipboardUser);
+    return t ? std::string(t) : std::string();
+  }
+  return clipboard;
+}
+
+void Runtime::setClipboardText(const std::string& text) {
+  if (clipboardSet) clipboardSet(clipboardUser, text.c_str());
+  else clipboard = text;
+}
+
 bool Runtime::needsRedraw() const { return redraw_ || doc.paintDirty(); }
 
 void Runtime::render(void* pixels, int width, int height, size_t rowBytes) {
