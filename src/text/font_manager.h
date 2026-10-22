@@ -1,12 +1,14 @@
 // Font registry shared by text measurement and painting.
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
 #include "include/core/SkRefCnt.h"
 
 class SkFontMgr;
+class SkUnicode;
 namespace skia::textlayout {
 class FontCollection;
 }
@@ -29,6 +31,15 @@ class FontManager {
 
   // Family used when a style names none (default: "Inter").
   std::string defaultFamily = "Inter";
+
+  // True if `family` was registered (embedded or via registerFont).
+  bool hasFamily(const std::string& family) const;
+  // Bumped whenever a font is registered; text caches built with an older
+  // generation are rebuilt (a late-loading font changes shaping).
+  uint32_t generation = 0;
+
+  // ICU-backed Unicode helpers (case mapping), created on first use.
+  SkUnicode* unicode();
 
  private:
   struct Impl;

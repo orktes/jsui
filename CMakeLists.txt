@@ -18,6 +18,8 @@ add_library(jsui STATIC ${JSUI_SOURCES})
 target_include_directories(jsui PUBLIC include PRIVATE src)
 target_link_libraries(jsui PUBLIC jsui_quickjs jsui_yoga jsui_skia)
 target_compile_definitions(jsui PRIVATE JSUI_BUILDING)
+include(EmbedFonts)
+jsui_embed_fonts(jsui)
 
 if(JSUI_BUILD_TOOLS AND NOT EMSCRIPTEN)
   add_executable(jsui-render tools/jsui-render/main.cpp)

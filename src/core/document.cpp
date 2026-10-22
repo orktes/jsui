@@ -2,6 +2,9 @@
 
 #include <cmath>
 
+#include "text/font_manager.h"
+#include "text/text_layout.h"
+
 namespace jsui {
 
 Document::Document() {
@@ -61,6 +64,12 @@ void Document::setViewport(float width, float height, float pixelRatio) {
 }
 
 bool Document::layout() {
+  // A newly registered font changes text metrics everywhere.
+  if (fonts && fonts->generation != fontGeneration_) {
+    fontGeneration_ = fonts->generation;
+    text::invalidateAll(root_);
+    layoutDirty_ = paintDirty_ = true;
+  }
   if (!layoutDirty_) return false;
   layoutDirty_ = false;
   YGNodeStyleSetWidth(root_->yoga(), width_);

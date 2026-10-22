@@ -59,6 +59,7 @@ class Document {
   uint32_t nextId_ = 1;
   float width_ = 0, height_ = 0, pixelRatio_ = 1;
   bool layoutDirty_ = true, paintDirty_ = true;
+  uint32_t fontGeneration_ = 0;  // FontManager::generation the text caches were built with
 };
 
 }  // namespace jsui
