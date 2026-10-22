@@ -1,4 +1,5 @@
 #include "platform/loader.h"
+#include "platform/loader_emscripten.h"
 
 #include <algorithm>
 #include <condition_variable>
@@ -241,6 +242,9 @@ ResourceLoader::ResourceLoader(JsuiRuntime* rt, JsuiLoadFn custom, void* customU
 ResourceLoader::~ResourceLoader() {
   // Join workers before the queues they complete into go away.
   worker_.reset();
+#ifdef __EMSCRIPTEN__
+  emscriptenLoaderDestroyed(this);
+#endif
 }
 
 std::string ResourceLoader::resolve(const std::string& base, const std::string& url) {
@@ -364,11 +368,12 @@ uint64_t ResourceLoader::load(LoadRequest req, Callback cb) {
 }
 
 #if defined(__EMSCRIPTEN__)
-// Emscripten backend hook: the wasm build implements browser fetch here.
+// Browser fetch() backend (src/platform/loader_emscripten.cpp).
 void ResourceLoader::builtinLoad(uint64_t id, LoadRequest req) {
+  if (emscriptenLoad(this, id, req)) return;
   Resource res;
   res.url = req.url;
-  res.error = "no browser loader backend compiled in";
+  res.error = "unsupported request in the browser loader: " + req.url;
   complete(id, std::move(res));
 }
 #else

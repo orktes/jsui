@@ -8,3 +8,5 @@ node_modules/
 /tests/reference/output/
 .DS_Store
 /.claude/worktrees/
+/third_party/skia-src/
+/web/dist/

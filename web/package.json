@@ -1,0 +1,22 @@
+{
+  "name": "@jsui/web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser host for the JSUI WebAssembly build",
+  "type": "module",
+  "main": "jsui-web.js",
+  "exports": {
+    ".": "./jsui-web.js",
+    "./dist/*": "./dist/*"
+  },
+  "files": ["jsui-web.js", "dist/jsui.js", "dist/jsui.wasm", "index.html", "demo"],
+  "scripts": {
+    "test:web": "node test/node-smoke.mjs && node test/browser.test.mjs",
+    "test:node": "node test/node-smoke.mjs",
+    "test:browser": "node test/browser.test.mjs",
+    "serve": "node test/serve.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.56.1"
+  }
+}
