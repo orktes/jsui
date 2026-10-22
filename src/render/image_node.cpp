@@ -105,6 +105,14 @@ void request(Node* node) {
   if (c && !c->url.empty() && doc && doc->images) doc->images->get(c->url);
 }
 
+bool settled(Node* node) {
+  NodeCache* c = ensure(node);
+  Document* doc = node->document();
+  if (!c || c->url.empty() || !doc || !doc->images) return true;
+  ImageCache::Info info;
+  return doc->images->peek(c->url, &info) && info.state != ImageCache::State::Loading;
+}
+
 void paint(Node* node, SkCanvas* canvas, const SkRect& box, const SkRRect& clip) {
   NodeCache* c = ensure(node);
   Document* doc = node->document();

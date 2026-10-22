@@ -31,13 +31,17 @@ for (const mode of ['production', 'development']) {
     await build({ entry: path.join(here, 'e2e', 'native_animated.jsx'), outfile: nativeAnimatedFile, mode });
     const hostDataFile = path.join(dir, 'host_data.js');
     await build({ entry: path.join(here, 'e2e', 'host_data.jsx'), outfile: hostDataFile, mode });
-    const { stdout } = await promisify(execFile)(binary, ['react_e2e', 'react_interactions_e2e', 'react_native_animated_e2e', 'react_host_data_e2e'], {
+    const imagesFile = path.join(dir, 'images.js');
+    await build({ entry: path.join(here, 'e2e', 'images.jsx'), outfile: imagesFile, mode });
+    const tests = ['react_e2e', 'react_interactions_e2e', 'react_native_animated_e2e', 'react_host_data_e2e', 'react_images_e2e'];
+    const { stdout } = await promisify(execFile)(binary, tests, {
       env: Object.assign({}, process.env, {
         JSUI_REACT_E2E_BUNDLE: outfile,
         JSUI_REACT_E2E_SCROLL_BUNDLE: scrollfile,
         JSUI_REACT_INTERACTIONS_BUNDLE: interactionsfile,
         JSUI_REACT_NATIVE_ANIMATED_BUNDLE: nativeAnimatedFile,
         JSUI_REACT_HOST_DATA_BUNDLE: hostDataFile,
+        JSUI_REACT_IMAGES_BUNDLE: imagesFile,
       }),
       cwd: repo,
     }).catch((e) => {
@@ -48,6 +52,7 @@ for (const mode of ['production', 'development']) {
     assert.match(stdout, /PASS react_interactions_e2e/);
     assert.match(stdout, /PASS react_native_animated_e2e/);
     assert.match(stdout, /PASS react_host_data_e2e/);
+    assert.match(stdout, /PASS react_images_e2e/);
     if (process.env.JSUI_E2E_VERBOSE) console.log(stdout);
     assert.doesNotMatch(stdout, /skipped/);
   });

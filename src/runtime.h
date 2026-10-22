@@ -115,6 +115,11 @@ class Runtime {
   void resetEngine();
   // Hands native animation end events / value updates to JS.
   void deliverAnimatedEvents();
+  // Image onLoad / onError / onProgress for images that settled (React
+  // Native: always asynchronous, also for cached images and data URIs).
+  void deliverImageEvents();
+  // An image event can be delivered on the next tick.
+  bool imageEventsReady() const;
   // The buffer the last frame was painted into (incremental repaint).
   const void* lastTarget_ = nullptr;
   int lastTargetW_ = 0, lastTargetH_ = 0;

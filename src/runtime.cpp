@@ -15,6 +15,7 @@
 #include "input/input.h"
 #include "js/engine.h"
 #include "render/image_cache.h"
+#include "render/image_node.h"
 #include "render/painter.h"
 
 namespace jsui {
@@ -308,6 +309,7 @@ void Runtime::tick(double nowMs) {
   now = nowMs;
   doc.now = nowMs;
   if (reloadRequested_) reload();
+  doc.frame++;
   input->setEventTime(std::numeric_limits<double>::quiet_NaN());  // jsui_set_event_time lasts until a tick
   loader.pump();
   // Shared state the embedder changed since the last tick: subscribers
@@ -317,6 +319,9 @@ void Runtime::tick(double nowMs) {
   js->runAnimationFrame(nowMs);
   js->runJobs();
   input->tick(nowMs);
+  // After this tick's timers and jobs (React's passive effects of the commit
+  // that mounted an image have run when its onLoad arrives).
+  deliverImageEvents();
   // Native-driven Animated: evaluated on the frame clock after JS and
   // scroll physics of this tick (Animated.event mappings saw the offsets).
   animated->tick(nowMs);
@@ -363,6 +368,75 @@ void Runtime::deliverAnimatedEvents() {
   }
 }
 
+namespace {
+bool listensFor(const Node* n, const char* token) {
+  for (const Value& e : n->props()["__events"].asArray())
+    if (e.asString() == token) return true;
+  return false;
+}
+}  // namespace
+
+bool Runtime::imageEventsReady() const {
+  for (const auto& e : doc.imageEvents) {
+    if (e.frame >= doc.frame) return true;  // waits for the next tick at most
+    Node* n = doc.get(e.node);
+    if (!n || n->type() != NodeType::Image || image::settled(n)) return true;
+  }
+  return false;
+}
+
+void Runtime::deliverImageEvents() {
+  if (!js || doc.imageEvents.empty()) return;
+  std::vector<Document::ImageEvent> pending = std::move(doc.imageEvents);
+  doc.imageEvents.clear();
+  std::vector<Document::ImageEvent> keep;
+  for (size_t i = 0; i < pending.size(); i++) {
+    const Document::ImageEvent e = pending[i];
+    // Handlers below may change sources: a newer entry for the node wins.
+    bool superseded = false;
+    for (const auto& q : doc.imageEvents) superseded = superseded || q.node == e.node;
+    if (superseded) continue;
+    Node* n = doc.get(e.node);
+    if (!n || n->type() != NodeType::Image) continue;
+    if (e.frame >= doc.frame) {  // source set during this tick
+      keep.push_back(e);
+      continue;
+    }
+    image::NodeCache* c = image::ensure(n);
+    if (c->url.empty()) continue;
+    ImageCache::Info info;
+    if (!images->peek(c->url, &info) || info.state == ImageCache::State::Loading) {
+      // Still loading (or its request was dropped: ask again).
+      if (!images->peek(c->url, &info)) images->get(c->url);
+      keep.push_back(e);
+      continue;
+    }
+    double id = double(e.node);
+    if (info.state == ImageCache::State::Ready && info.image) {
+      if (!e.cached && info.bytes > 0 && listensFor(n, "progress")) {
+        Value::Object ev{{"type", Value("progress")},
+                         {"target", Value(id)},
+                         {"loaded", Value(double(info.bytes))},
+                         {"total", Value(double(info.bytes))}};
+        js->dispatchEvent(Value(std::move(ev)));
+      }
+      if (listensFor(n, "load")) {
+        Value::Object source{{"uri", Value(c->url)},
+                             {"width", Value(double(info.image->width()))},
+                             {"height", Value(double(info.image->height()))}};
+        Value::Object ev{{"type", Value("load")}, {"target", Value(id)}, {"source", Value(std::move(source))}};
+        js->dispatchEvent(Value(std::move(ev)));
+      }
+    } else if (listensFor(n, "error")) {
+      Value::Object ev{{"type", Value("error")}, {"target", Value(id)}, {"error", Value(info.error)}};
+      js->dispatchEvent(Value(std::move(ev)));
+    }
+  }
+  // Entries queued by the handlers stay behind the ones still waiting.
+  for (auto& q : doc.imageEvents) keep.push_back(q);
+  doc.imageEvents = std::move(keep);
+}
+
 std::string Runtime::clipboardText() {
   if (clipboardGet) {
     const char* t = clipboardGet(clipboardUser);
@@ -383,7 +457,7 @@ bool Runtime::wantsFrame() const {
   // the tick it already ran.
   return reloadRequested_ || loader.pending() > 0 || (js && js->hasPendingWork(now + 17)) || input->animating() ||
          doc.layoutAnimating() || animated->animating() || !animated->ends.empty() || state.hasDirty() ||
-         !uiResults_.empty();
+         !uiResults_.empty() || imageEventsReady();
 }
 
 void Runtime::render(void* pixels, int width, int height, size_t rowBytes) {

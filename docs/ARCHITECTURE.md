@@ -841,8 +841,14 @@ Details of how the JS package uses the bridge, for native implementers:
   `prefetchImage(uri)`, `reload`.
 * Events beyond input: `{type: 'resize', width, height, scale}` (sent by
   `jsui_set_viewport` when the size changes; drives Dimensions);
-  `{type: 'load', target, source: {width, height}}` / `{type: 'error', target,
-  error}` on `Image` nodes (`onLoad` / `onError`).
+  `{type: 'load', target, source: {uri, width, height}}` (resolved URL, image
+  pixels) / `{type: 'error', target, error}` / `{type: 'progress', target,
+  loaded, total}` on `Image` nodes (`onLoad` / `onError` / `onProgress`;
+  `@jsui/react` adds `onLoadStart` when the source changes and `onLoadEnd`
+  after load or error). Sent once per source, always asynchronously like
+  React Native: on a tick after the one that set the source (after its
+  timers and passive effects), also for data URIs and images already cached
+  at mount; `progress` only for images that had to be loaded.
 * `globalThis.__jsui_reportError(error)` (else the standard `reportError`): uncaught
   React render errors are passed to it; otherwise they are rethrown from a
   `setTimeout` so the engine reports them.

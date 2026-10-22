@@ -101,7 +101,7 @@ function ImageImpl(props) {
     const uri = resolved && resolved.uri;
     if (started.current !== uri) {
       started.current = uri;
-      if (onLoadStart) onLoadStart(createSyntheticEvent('loadstart', {}, null));
+      if (uri && onLoadStart) onLoadStart(createSyntheticEvent('loadstart', {}, null));
     }
   });
   if (onLoad || onLoadEnd) {

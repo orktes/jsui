@@ -91,6 +91,20 @@ class Document {
   // Called for every node right before it is destroyed.
   std::function<void(Node*)> onNodeDestroyed;
 
+  // Image nodes whose source changed, waiting for their load / error (and
+  // progress) events (Runtime::deliverImageEvents). One entry per node: a
+  // newer source replaces the older entry.
+  struct ImageEvent {
+    uint32_t node = 0;
+    uint64_t frame = 0;    // Document::frame when the source was set
+    bool cached = false;   // decoded (or failed) already when requested
+  };
+  void queueImageEvents(uint32_t node, bool cached);
+  std::vector<ImageEvent> imageEvents;
+  // Ticks run so far (Runtime::tick); image events wait for a later tick
+  // than the one that set the source, so they are always asynchronous.
+  uint64_t frame = 0;
+
  private:
   void destroyRecursive(Node* node);
   void reportLayout(Node* node);
