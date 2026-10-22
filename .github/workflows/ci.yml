@@ -19,7 +19,7 @@ jobs:
   # manual runs build everything). CI config changes run everything.
   changes:
     name: changes
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
     # paths-filter lists the PR's files through the API.
     permissions:
       contents: read
@@ -77,7 +77,7 @@ jobs:
   # ------------------------------------------------------------ native (Linux)
   native:
     name: native (ubuntu, clang)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.native == 'true'
     steps:
@@ -153,7 +153,7 @@ jobs:
   # ------------------------------------------------- Godot GDExtension (Linux)
   godot:
     name: godot (GDExtension, ubuntu)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.godot == 'true'
     steps:
@@ -207,7 +207,7 @@ jobs:
   # --------------------------------------------------------------------- wasm
   wasm:
     name: wasm (emscripten + browser)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.wasm == 'true'
     steps:
@@ -265,7 +265,7 @@ jobs:
   # on SwiftShader WebGL and compare with the CPU path).
   wasm-webgl:
     name: wasm webgl (emscripten + browser, GPU)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.wasm == 'true'
     steps:
@@ -333,7 +333,7 @@ jobs:
   # ----------------------------------------------------------------------- js
   js:
     name: js packages
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.js == 'true'
     steps:
@@ -349,7 +349,7 @@ jobs:
   # ---------------------------------------------------------------- reference
   reference:
     name: reference (jsui vs react-native-web)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.reference == 'true'
     steps:
