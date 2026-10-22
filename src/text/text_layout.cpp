@@ -750,7 +750,11 @@ SkRect caretInParagraph(const InputGeom& g, int d) {
   float x = 0;
   int line = -1;
   tl::Paragraph::GlyphInfo gi;
-  if (d > 0 && t[size_t(d - 1)] != u'\n' && p->getGlyphInfoAtUTF16Offset(size_t(d - 1), &gi)) {
+  // At a soft line break the caret belongs to the start of the next line
+  // (downstream, like a click there in Chrome).
+  bool wrapped = d > 0 && d < len && t[size_t(d - 1)] != u'\n' && t[size_t(d)] != u'\n' &&
+                 p->getLineNumberAtUTF16Offset(size_t(d - 1)) != p->getLineNumberAtUTF16Offset(size_t(d));
+  if (d > 0 && !wrapped && t[size_t(d - 1)] != u'\n' && p->getGlyphInfoAtUTF16Offset(size_t(d - 1), &gi)) {
     // After the previous cluster: its trailing edge.
     x = gi.fDirection == tl::TextDirection::kRtl ? gi.fGraphemeLayoutBounds.fLeft : gi.fGraphemeLayoutBounds.fRight;
     line = p->getLineNumberAtUTF16Offset(size_t(d - 1));
@@ -938,7 +942,17 @@ int inputLineEdge(Node* n, int index, bool end) {
   if (!g.multiline || !g.p || g.c->placeholder) return end ? len : 0;
   SkRect r = caretContent(g, index);
   bool right = end != g.c->rtl;
-  return indexAtContent(g, right ? 1e7f : -1e7f, r.centerY());
+  int i = indexAtContent(g, right ? 1e7f : -1e7f, r.centerY());
+  if (end && i > 0 && i < len) {
+    // A soft-wrapped line ends before its trailing space (the index after it
+    // is the next line's start).
+    int d = displayIndex(g, i);
+    const std::u16string& t = g.c->display;
+    if (d > 0 && d < int(t.size()) && t[size_t(d)] != u'\n' && t[size_t(d - 1)] != u'\n' &&
+        g.p->getLineNumberAtUTF16Offset(size_t(d - 1)) != g.p->getLineNumberAtUTF16Offset(size_t(d)))
+      i = edit::prevBoundary(g.s->value, i);
+  }
+  return i;
 }
 
 bool inputRtl(Node* n) {

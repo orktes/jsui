@@ -175,6 +175,17 @@ TEST(text_input_multiline_caret_and_vertical_moves) {
   // Wrapping: a long line breaks inside the box.
   t.setProps(n, R"({"value":"one two three four five six seven eight nine ten"})");
   CHECK(text::inputCaretRect(n, 49).fTop > text::inputCaretRect(n, 0).fTop + 10);
+  // At a soft wrap the caret shows at the next line's start; End stops
+  // before the wrapping space.
+  int wrap = -1;
+  for (int i = 1; i < 49 && wrap < 0; i++)
+    if (text::inputCaretRect(n, i + 1).fTop > text::inputCaretRect(n, 0).fTop + 10) wrap = i + 1;
+  CHECK(wrap > 0);
+  CHECK_NEAR(text::inputCaretRect(n, wrap).fLeft, text::inputCaretRect(n, 0).fLeft, 0.5);
+  CHECK_EQ(text::inputIndexAt(n, 1, text::inputCaretRect(n, wrap).centerY()), wrap);
+  t.in().setInputSelection(n, 0, 0);
+  t.key("End");
+  CHECK_EQ(t.sel(n), std::to_string(wrap - 1) + "," + std::to_string(wrap - 1));
 }
 
 TEST(text_input_keyboard_editing) {
