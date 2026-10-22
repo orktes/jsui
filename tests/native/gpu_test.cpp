@@ -594,6 +594,12 @@ TEST(gpu_matches_cpu_scene) {
       s.doc().markPaintDirty();
       CHECK_EQ(jsui::gpu::render(*s.rt, gpu, t), 0);
       std::vector<uint32_t> again = rtex.read(false);
+      if (again != out) {
+        Diff d2 = compare(again, out, 0);
+        std::printf("  [%s] second frame differs from first: max %d, mean %.4f, changed %.3f%%\n", apiName(api), d2.maxDiff,
+                    d2.mean, d2.over * 100);
+        savePng((name + "_again").c_str(), again, w, h);
+      }
       CHECK(again == out);
     }
   });
