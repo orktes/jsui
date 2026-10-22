@@ -151,8 +151,9 @@ jsui_render_gl_target(rt, gpu, &t);
   `GL_RGB8`, `GL_SRGB8_ALPHA8` (blends in linear light), `GL_RGB10_A2`,
   `GL_RGBA16F`), MSAA sample count and stencil bits of an FBO, the origin
   (`JSUI_GL_TOP_LEFT_ORIGIN` for textures sampled with v=0 at the top) and
-  `JSUI_GL_NO_CLEAR` to composite over the current contents. Wrapped surfaces
-  are cached per target (up to four).
+  `JSUI_GL_NO_CLEAR` to composite over the current contents. Wrapped FBOs
+  are cached (up to four); textures are wrapped per render (a deleted and
+  recreated texture may reuse its name).
 * **Builds.** CMake option `JSUI_GPU` (default ON for native builds; the
   aseprite prebuilt Skia includes Ganesh GL (checked for Linux x64); macOS
   also links the OpenGL framework). WASM: `WEBGL=1 scripts/build-wasm.sh`

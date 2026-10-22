@@ -133,7 +133,7 @@ struct JsuiGpuContext {
     sk_sp<SkSurface> surface;
     uint64_t lastUsed;
   };
-  std::vector<Cached> surfaces;  // wrapped targets, most recently used kept
+  std::vector<Cached> surfaces;  // wrapped framebuffers, most recently used kept
   uint64_t frame = 0;
 
   sk_sp<const GrGLInterface> makeInterface() const {
@@ -226,7 +226,11 @@ struct JsuiGpuContext {
       GrBackendRenderTarget rt = GrBackendRenderTargets::MakeGL(key.width, key.height, key.samples, key.stencil, info);
       surface = SkSurfaces::WrapBackendRenderTarget(ctx.get(), rt, origin, ct, cs, &props);
     }
-    if (!surface) return nullptr;
+    // Texture targets are wrapped per frame: Skia attaches the texture to an
+    // FBO of its own, which would keep drawing into the old storage if the
+    // host deleted the texture and reused its name. Framebuffers are looked
+    // up by name on every bind, so their wrappers are safe to keep.
+    if (!surface || key.texture) return surface;
     constexpr size_t kMaxSurfaces = 4;
     if (surfaces.size() >= kMaxSurfaces) {
       size_t oldest = 0;
