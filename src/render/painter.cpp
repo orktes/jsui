@@ -55,10 +55,11 @@ struct Box {
   bool rounded = false;
 };
 
-void computeBox(const Node* n, Box* b) {
+// `w`, `h`: the (pixel-snapped) border-box size.
+void computeBox(const Node* n, float w, float h, Box* b) {
   YGNodeRef y = n->yoga();
-  b->w = YGNodeLayoutGetWidth(y);
-  b->h = YGNodeLayoutGetHeight(y);
+  b->w = w;
+  b->h = h;
   const YGEdge edges[4] = {YGEdgeTop, YGEdgeRight, YGEdgeBottom, YGEdgeLeft};
   for (int i = 0; i < 4; i++) {
     b->border[i] = YGNodeLayoutGetBorder(y, edges[i]);
@@ -663,22 +664,28 @@ void paintChildren(Node* n, SkCanvas* c, Ctx& ctx) {
 
 // Draws the node's own decorations, content and children in its border-box
 // coordinate space.
-void paintContent(Node* n, SkCanvas* c, Ctx& ctx) {
+// `snap` is the offset from the layout position to the pixel-snapped one
+// (already applied to the canvas); `w`, `h` the snapped size.
+void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float h) {
   const ComputedStyle& s = n->style();
   Box b;
-  computeBox(n, &b);
+  computeBox(n, w, h, &b);
   ctx.stats.nodesPainted++;
   if (!s.boxShadows.empty()) paintOuterShadows(c, b, s);
   paintBackground(c, b, s);
   if (!s.boxShadows.empty()) paintInsetShadows(c, b, s);
   paintBorders(c, b, s);
 
+  // Text is positioned from the unsnapped layout box, like Chrome's text
+  // fragments (glyphs are then snapped individually).
   switch (n->type()) {
     case NodeType::Text:
-      text::paintText(n, c, b.content.left(), b.content.top(), b.content.width(), b.content.height());
+      text::paintText(n, c, b.content.left() - snap.fX, b.content.top() - snap.fY, b.content.width(),
+                      b.content.height());
       break;
     case NodeType::TextInput:
-      text::paintTextInput(n, c, b.content.left(), b.content.top(), b.content.width(), b.content.height());
+      text::paintTextInput(n, c, b.content.left() - snap.fX, b.content.top() - snap.fY, b.content.width(),
+                           b.content.height());
       break;
     case NodeType::Image:
       image::paint(n, c, b.inner.rect(), b.inner);
@@ -689,11 +696,13 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx) {
   if (paintsChildren(n) && !n->children().empty()) {
     bool clip = clipsChildren(n);
     bool scroll = n->type() == NodeType::ScrollView && (n->scrollX != 0 || n->scrollY != 0);
-    if (clip || scroll) c->save();
+    c->save();
     if (clip) clipRRect(c, b.inner);
+    // Children snap from their own unsnapped positions.
+    c->translate(-snap.fX, -snap.fY);
     if (scroll) c->translate(-n->scrollX, -n->scrollY);
     paintChildren(n, c, ctx);
-    if (clip || scroll) c->restore();
+    c->restore();
   }
   paintOutline(c, b, s);
 }
@@ -713,6 +722,21 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   int saveCount = c->save();
   c->translate(r.x, r.y);
   if (!s.transform.empty()) c->concat(localTransform(*n));
+  // Pixel-snap the border box like Chrome: edges round to device pixels
+  // (round(x), round(x + w)), so boxes stay crisp at fractional layout
+  // positions. Only for axis-aligned, unscaled-or-scaled transforms.
+  SkVector snap{0, 0};
+  float w = r.width, h = r.height;
+  const SkMatrix& m = c->getTotalMatrix();
+  if (m.isScaleTranslate() && m.getScaleX() > 0 && m.getScaleY() > 0) {
+    float sx = m.getScaleX(), sy = m.getScaleY();
+    float dx = m.getTranslateX(), dy = m.getTranslateY();
+    float x0 = std::floor(dx + 0.5f), y0 = std::floor(dy + 0.5f);
+    w = (std::floor(dx + r.width * sx + 0.5f) - x0) / sx;
+    h = (std::floor(dy + r.height * sy + 0.5f) - y0) / sy;
+    snap = {(x0 - dx) / sx, (y0 - dy) / sy};
+    c->translate(snap.fX, snap.fY);
+  }
   bool layer = s.opacity < 1 || !s.filters.empty() || s.blendMode != 0;
   if (layer) {
     SkPaint lp;
@@ -722,7 +746,7 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
     SkRect bounds = visualBounds(n);
     c->saveLayer(&bounds, &lp);
   }
-  paintContent(n, c, ctx);
+  paintContent(n, c, ctx, snap, w, h);
   c->restoreToCount(saveCount);
 }
 

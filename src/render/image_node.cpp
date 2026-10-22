@@ -99,6 +99,12 @@ NodeCache* ensure(Node* node) {
   return raw;
 }
 
+void request(Node* node) {
+  NodeCache* c = ensure(node);
+  Document* doc = node->document();
+  if (c && !c->url.empty() && doc && doc->images) doc->images->get(c->url);
+}
+
 void paint(Node* node, SkCanvas* canvas, const SkRect& box, const SkRRect& clip) {
   NodeCache* c = ensure(node);
   Document* doc = node->document();
@@ -132,7 +138,8 @@ void paint(Node* node, SkCanvas* canvas, const SkRect& box, const SkRRect& clip)
   if (clip.isRect()) canvas->clipRect(clip.rect(), true);
   else canvas->clipRRect(clip, true);
   if (mode == ResizeMode::Repeat) {
-    SkMatrix m = SkMatrix::Translate(box.left(), box.top());
+    // react-native-web: background-position "0" = left edge, centered vertically.
+    SkMatrix m = SkMatrix::Translate(box.left(), box.top() + (box.height() - ih) / 2);
     m.preScale(1 / c->scale, 1 / c->scale);
     paint.setShader(img->makeShader(SkTileMode::kRepeat, SkTileMode::kRepeat, sampling, &m));
     canvas->drawRect(box, paint);

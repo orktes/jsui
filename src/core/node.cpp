@@ -164,6 +164,7 @@ void Node::setProps(const Value& props) {
       if (!valueEquals(old["source"], props_["source"]) || !valueEquals(old["src"], props_["src"]) ||
           !valueEquals(old["defaultSource"], props_["defaultSource"])) {
         imageCache.reset();
+        image::request(this);
         if (YGNodeHasMeasureFunc(yoga_)) {
           YGNodeMarkDirty(yoga_);
           relayout = true;
