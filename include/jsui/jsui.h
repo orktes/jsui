@@ -365,6 +365,69 @@ JSUI_API int jsui_render_gl(JsuiRuntime* rt, JsuiGpuContext* gpu, unsigned int f
 /* Same with every target parameter (textures, MSAA, stencil, formats). */
 JSUI_API int jsui_render_gl_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiGLTarget* target);
 
+/* ------------------------------------------------------------ GPU (WebGPU)
+ *
+ * Optional GPU backend: Skia Graphite draws the frame into a WebGPU texture
+ * of the embedder's device (the browser's WebGPU in the WASM build, or Dawn
+ * native, e.g. a game engine's WebGPU renderer). Available when the library
+ * was built with JSUI_WEBGPU (scripts/build-wasm.sh GPU=1); otherwise
+ * jsui_gpu_create_webgpu() returns NULL. The handles are webgpu.h objects
+ * passed as void* so this header does not depend on webgpu.h.
+ *
+ *     // once:
+ *     JsuiGpuContext* gpu = jsui_gpu_create_webgpu(instance, device, NULL);
+ *     // per frame (e.g. into the swapchain / canvas texture):
+ *     jsui_tick(rt, now_ms);
+ *     if (jsui_needs_redraw(rt))
+ *         jsui_render_webgpu(rt, gpu, texture, width, height, 0);
+ *     jsui_gpu_destroy(gpu);
+ *
+ * - The context keeps its own references to instance / device / queue; the
+ *   target texture is only used during the call (Skia's recording is
+ *   submitted to the queue before it returns).
+ * - The target needs WGPUTextureUsage_RenderAttachment (TextureBinding or
+ *   CopySrc as well lets Skia read back the destination for some blend
+ *   modes) and an 8-bit RGBA / BGRA (optionally sRGB) or RGBA16Float format.
+ * - Incremental repaint: by default the frame is kept in a texture owned by
+ *   the context, only the damaged region is repainted into it, and it is then
+ *   copied to the target with one draw. So the target's previous contents do
+ *   not matter (canvas / swapchain textures start cleared), and a frame where
+ *   only a spinner moved repaints just the spinner. JSUI_WEBGPU_NO_RETAIN
+ *   paints the whole frame straight into the target instead (one texture
+ *   less of memory).
+ * - Device loss: renders fail (-1) once the device is lost. Call
+ *   jsui_gpu_context_lost() / jsui_gpu_destroy() and create a new context on
+ *   a new device; runtimes keep no GPU objects, so nothing else changes.
+ * - Not thread safe: use a context from one thread at a time. On Dawn native
+ *   the context calls wgpuInstanceProcessEvents on `instance` while it waits
+ *   for GPU work (pass the instance the device came from).
+ */
+enum {
+    /* Draw over the target's current contents (premultiplied source-over).
+     * Default: replace them (the UI's transparent pixels stay transparent). */
+    JSUI_WEBGPU_NO_CLEAR = 1 << 1,
+    /* Paint straight into the target (full repaint every frame) instead of
+     * through the context's retained frame texture. */
+    JSUI_WEBGPU_NO_RETAIN = 1 << 2
+};
+
+typedef struct JsuiWebGPUTarget {
+    void* texture;   /* WGPUTexture to draw into */
+    int width, height; /* device px; 0: the texture's size */
+    int flags;       /* JSUI_WEBGPU_* */
+} JsuiWebGPUTarget;
+
+/* Creates a Graphite context on `device` (WGPUDevice, required). `instance`
+ * (WGPUInstance) may be NULL in the browser; Dawn native needs it. `queue`
+ * NULL uses the device's queue. Returns NULL when the library was built
+ * without JSUI_WEBGPU or Graphite rejects the device. */
+JSUI_API JsuiGpuContext* jsui_gpu_create_webgpu(void* instance, void* device, void* queue);
+/* Paints the current frame into `texture` (WGPUTexture). Like
+ * jsui_render_rgba it lays out first and clears needs_redraw. Returns 0 on
+ * success, -1 without a usable context / target (or after device loss). */
+JSUI_API int jsui_render_webgpu(JsuiRuntime* rt, JsuiGpuContext* gpu, void* texture, int width, int height, int flags);
+JSUI_API int jsui_render_webgpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget* target);
+
 /* Encode the current frame as PNG (for tests / screenshots). Caller frees with jsui_free(). */
 JSUI_API int jsui_render_png(JsuiRuntime* rt, void** out_data, size_t* out_size);
 JSUI_API void jsui_free(void* p);
