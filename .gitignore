@@ -20,3 +20,5 @@ node_modules/
 /third_party/emdawnwebgpu/
 /web/dist-gpu/
 /web/test/output/
+/third_party/skia-ios/
+/third_party/skia-src-ios/
