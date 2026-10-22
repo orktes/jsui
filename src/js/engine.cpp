@@ -1,34 +1,21 @@
-// QuickJS host. SKELETON: node bridge, console and timers. fetch, rAF,
-// fonts, host messages and events are layered on top.
+// QuickJS host: context lifetime, native->JS entry bookkeeping (watchdog,
+// microtask drain, unhandled rejections), timers and requestAnimationFrame.
+// The bridge (__jsui_native) lives in bridge.cpp, the helpers behind the web
+// globals in host_api.cpp and their JS half in prelude.cpp.
 #include "js/engine.h"
 
-#include <quickjs.h>
-
-#include <map>
-#include <vector>
+#include <algorithm>
+#include <cmath>
 
 #include "core/document.h"
+#include "js/engine_impl.h"
 #include "runtime.h"
 
 namespace jsui {
 
-struct JsEngine::Impl {
-  Runtime& rt;
-  JSRuntime* jrt = nullptr;
-  JSContext* ctx = nullptr;
+using Clock = std::chrono::steady_clock;
 
-  struct Timer {
-    double due;
-    double interval;  // < 0: one-shot
-    JSValue fn;
-  };
-  std::map<int, Timer> timers;
-  int nextTimer = 1;
-
-  explicit Impl(Runtime& r) : rt(r) {}
-};
-
-namespace {
+// ------------------------------------------------------------- helpers
 
 Runtime& runtimeOf(JSContext* ctx) { return static_cast<JsEngine::Impl*>(JS_GetContextOpaque(ctx))->rt; }
 JsEngine::Impl& implOf(JSContext* ctx) { return *static_cast<JsEngine::Impl*>(JS_GetContextOpaque(ctx)); }
@@ -36,14 +23,44 @@ JsEngine::Impl& implOf(JSContext* ctx) { return *static_cast<JsEngine::Impl*>(JS
 std::string toStdString(JSContext* ctx, JSValueConst v) {
   size_t len = 0;
   const char* s = JS_ToCStringLen(ctx, &len, v);
-  if (!s) return {};
+  if (!s) {
+    // ToString itself threw (e.g. a Symbol or a throwing toString): swallow.
+    JS_FreeValue(ctx, JS_GetException(ctx));
+    return {};
+  }
   std::string out(s, len);
   JS_FreeCString(ctx, s);
   return out;
 }
 
-// JSValue -> Value. Functions and undefined become null; depth-limited.
-Value toValue(JSContext* ctx, JSValueConst v, int depth = 0) {
+std::string formatError(JSContext* ctx, JSValueConst exc) {
+  std::string msg;
+  if (JS_IsError(exc)) {
+    msg = toStdString(ctx, exc);  // "TypeError: message"
+    JSValue stack = JS_GetPropertyStr(ctx, exc, "stack");
+    if (JS_IsString(stack)) {
+      std::string st = toStdString(ctx, stack);
+      while (!st.empty() && (st.back() == '\n' || st.back() == ' ')) st.pop_back();
+      if (!st.empty()) msg += "\n" + st;
+    }
+    JS_FreeValue(ctx, stack);
+    if (JS_IsException(stack)) JS_FreeValue(ctx, JS_GetException(ctx));
+  } else if (JS_IsObject(exc) && !JS_IsFunction(ctx, exc)) {
+    JSValue j = JS_JSONStringify(ctx, exc, JS_UNDEFINED, JS_UNDEFINED);
+    if (JS_IsException(j)) {
+      JS_FreeValue(ctx, JS_GetException(ctx));
+      msg = toStdString(ctx, exc);
+    } else {
+      msg = toStdString(ctx, j);
+    }
+    JS_FreeValue(ctx, j);
+  } else {
+    msg = toStdString(ctx, exc);
+  }
+  return msg;
+}
+
+Value toValue(JSContext* ctx, JSValueConst v, int depth) {
   if (depth > 32) return Value();
   if (JS_IsBool(v)) return Value(bool(JS_ToBool(ctx, v)));
   if (JS_IsNumber(v)) {
@@ -55,9 +72,12 @@ Value toValue(JSContext* ctx, JSValueConst v, int depth = 0) {
   if (JS_IsArray(v)) {
     Value::Array arr;
     int64_t len = 0;
-    JS_GetLength(ctx, v, &len);
-    arr.reserve(size_t(len));
-    for (int64_t i = 0; i < len; i++) {
+    if (JS_GetLength(ctx, v, &len)) {
+      JS_FreeValue(ctx, JS_GetException(ctx));
+      return Value();
+    }
+    arr.reserve(size_t(std::min<int64_t>(len, 1 << 20)));
+    for (int64_t i = 0; i < len && i < (1 << 20); i++) {
       JSValue e = JS_GetPropertyInt64(ctx, v, i);
       arr.push_back(toValue(ctx, e, depth + 1));
       JS_FreeValue(ctx, e);
@@ -71,14 +91,23 @@ Value toValue(JSContext* ctx, JSValueConst v, int depth = 0) {
     if (JS_GetOwnPropertyNames(ctx, &props, &n, v, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
       for (uint32_t i = 0; i < n; i++) {
         JSValue e = JS_GetProperty(ctx, v, props[i].atom);
-        if (!JS_IsUndefined(e) && !JS_IsFunction(ctx, e)) {
-          const char* k = JS_AtomToCString(ctx, props[i].atom);
-          obj[k] = toValue(ctx, e, depth + 1);
-          JS_FreeCString(ctx, k);
+        if (JS_IsException(e)) {
+          JS_FreeValue(ctx, JS_GetException(ctx));  // throwing getter: skip the key
+        } else if (!JS_IsUndefined(e) && !JS_IsFunction(ctx, e)) {
+          size_t klen = 0;
+          JSValue ks = JS_AtomToString(ctx, props[i].atom);
+          const char* k = JS_ToCStringLen(ctx, &klen, ks);
+          if (k) {
+            obj.insert_or_assign(std::string(k, klen), toValue(ctx, e, depth + 1));
+            JS_FreeCString(ctx, k);
+          }
+          JS_FreeValue(ctx, ks);
         }
         JS_FreeValue(ctx, e);
       }
       JS_FreePropertyEnum(ctx, props, n);
+    } else {
+      JS_FreeValue(ctx, JS_GetException(ctx));
     }
     return Value(std::move(obj));
   }
@@ -103,237 +132,485 @@ JSValue fromValue(JSContext* ctx, const Value& v) {
   return JS_NULL;
 }
 
-Node* nodeArg(JSContext* ctx, JSValueConst v) {
-  uint32_t id = 0;
-  if (JS_ToUint32(ctx, &id, v)) return nullptr;
-  return runtimeOf(ctx).doc.get(id);
-}
-
-JSValue js_createNode(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  NodeType t;
-  std::string name = argc > 0 ? toStdString(ctx, argv[0]) : "";
-  if (!nodeTypeFromName(name, &t)) return JS_ThrowTypeError(ctx, "unknown element type '%s'", name.c_str());
-  return JS_NewUint32(ctx, runtimeOf(ctx).doc.createNode(t)->id());
-}
-
-JSValue js_setProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  if (argc < 2) return JS_UNDEFINED;
-  if (Node* n = nodeArg(ctx, argv[0])) n->setProps(toValue(ctx, argv[1]));
-  return JS_UNDEFINED;
-}
-
-JSValue js_setText(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  if (argc < 2) return JS_UNDEFINED;
-  if (Node* n = nodeArg(ctx, argv[0])) n->setText(toStdString(ctx, argv[1]));
-  return JS_UNDEFINED;
-}
-
-JSValue js_appendChild(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  if (argc < 2) return JS_UNDEFINED;
-  Node* p = nodeArg(ctx, argv[0]);
-  Node* c = nodeArg(ctx, argv[1]);
-  if (p && c) p->appendChild(c);
-  return JS_UNDEFINED;
-}
-
-JSValue js_insertBefore(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  if (argc < 3) return JS_UNDEFINED;
-  Node* p = nodeArg(ctx, argv[0]);
-  Node* c = nodeArg(ctx, argv[1]);
-  Node* b = nodeArg(ctx, argv[2]);
-  if (p && c) p->insertBefore(c, b);
-  return JS_UNDEFINED;
-}
-
-JSValue js_removeChild(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  if (argc < 2) return JS_UNDEFINED;
-  Node* p = nodeArg(ctx, argv[0]);
-  Node* c = nodeArg(ctx, argv[1]);
-  if (p && c) p->removeChild(c);
-  return JS_UNDEFINED;
-}
-
-JSValue js_destroyNode(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  if (argc < 1) return JS_UNDEFINED;
-  if (Node* n = nodeArg(ctx, argv[0])) runtimeOf(ctx).doc.destroyNode(n);
-  return JS_UNDEFINED;
-}
-
-JSValue js_console(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv, int magic) {
-  std::string msg;
-  for (int i = 0; i < argc; i++) {
-    if (i) msg += ' ';
-    if (JS_IsObject(argv[i]) && !JS_IsFunction(ctx, argv[i]) && !JS_IsError(argv[i])) {
-      JSValue j = JS_JSONStringify(ctx, argv[i], JS_UNDEFINED, JS_UNDEFINED);
-      msg += toStdString(ctx, j);
-      JS_FreeValue(ctx, j);
-    } else {
-      msg += toStdString(ctx, argv[i]);
-    }
+bool bytesOf(JSContext* ctx, JSValueConst v, std::vector<uint8_t>* out) {
+  out->clear();
+  if (JS_IsUndefined(v) || JS_IsNull(v)) return true;
+  if (JS_IsString(v)) {
+    size_t len = 0;
+    const char* s = JS_ToCStringLen(ctx, &len, v);
+    if (!s) return false;
+    out->assign(s, s + len);
+    JS_FreeCString(ctx, s);
+    return true;
   }
-  runtimeOf(ctx).log(JsuiLogLevel(magic), msg);
-  return JS_UNDEFINED;
+  size_t size = 0;
+  if (JS_IsArrayBuffer(v)) {
+    uint8_t* p = JS_GetArrayBuffer(ctx, &size, v);
+    if (!p && size) return false;
+    if (p) out->assign(p, p + size);
+    return true;
+  }
+  size_t offset = 0, bytes = 0, per = 0;
+  JSValue buf = JS_GetTypedArrayBuffer(ctx, v, &offset, &bytes, &per);
+  if (JS_IsException(buf)) {
+    JS_FreeValue(ctx, JS_GetException(ctx));
+    // DataView: {buffer, byteOffset, byteLength}
+    JSValue b = JS_GetPropertyStr(ctx, v, "buffer");
+    bool ok = false;
+    if (JS_IsArrayBuffer(b)) {
+      uint8_t* p = JS_GetArrayBuffer(ctx, &size, b);
+      double off = 0, len = 0;
+      JSValue o = JS_GetPropertyStr(ctx, v, "byteOffset"), l = JS_GetPropertyStr(ctx, v, "byteLength");
+      JS_ToFloat64(ctx, &off, o);
+      JS_ToFloat64(ctx, &len, l);
+      JS_FreeValue(ctx, o);
+      JS_FreeValue(ctx, l);
+      if (p && off >= 0 && len >= 0 && off + len <= double(size)) {
+        out->assign(p + size_t(off), p + size_t(off + len));
+        ok = true;
+      }
+    }
+    JS_FreeValue(ctx, b);
+    return ok;
+  }
+  uint8_t* p = JS_GetArrayBuffer(ctx, &size, buf);
+  JS_FreeValue(ctx, buf);
+  if (!p || offset + bytes > size) return bytes == 0;
+  out->assign(p + offset, p + offset + bytes);
+  return true;
 }
+
+// ------------------------------------------------- entry bookkeeping
+
+void JsEngine::Impl::enter() {
+  if (depth++ == 0) {
+    JS_UpdateStackTop(jrt);  // the embedder may call us from different stack depths
+    deadline = Clock::now() + std::chrono::microseconds(int64_t(std::max(0.0, timeoutMs) * 1000));
+    interrupted = false;
+  }
+}
+
+void JsEngine::Impl::leave() {
+  if (--depth == 0 && !draining) drain();
+}
+
+JSValue JsEngine::Impl::call(JSValueConst fn, JSValueConst thisVal, int argc, JSValueConst* argv) {
+  enter();
+  JSValue r = JS_Call(ctx, fn, thisVal, argc, argv);
+  if (JS_IsException(r)) {
+    reportException();
+    r = JS_EXCEPTION;
+  }
+  leave();
+  return r;
+}
+
+void JsEngine::Impl::runJobsRaw() {
+  JSContext* pctx = nullptr;
+  for (int guard = 0; guard < 10000000; guard++) {
+    int r = JS_ExecutePendingJob(jrt, &pctx);
+    if (r == 0) break;
+    if (r < 0) reportException();
+  }
+}
+
+void JsEngine::Impl::drain() {
+  draining = true;
+  depth++;
+  // Microtasks get a fresh watchdog budget of their own.
+  deadline = Clock::now() + std::chrono::microseconds(int64_t(std::max(0.0, timeoutMs) * 1000));
+  interrupted = false;
+  for (int round = 0; round < 64; round++) {
+    runJobsRaw();
+    if (!rejections.empty()) {
+      auto list = std::move(rejections);
+      rejections.clear();
+      for (auto& r : list) {
+        reportValue(r.reason, "Unhandled promise rejection: ");
+        JS_FreeValue(ctx, r.promise);
+        JS_FreeValue(ctx, r.reason);
+      }
+    }
+    if (layoutQueue.empty()) break;
+    layoutScratch.swap(layoutQueue);
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue fn = JS_GetProperty(ctx, global, atomOnLayout);
+    for (auto& e : layoutScratch) {
+      if (!JS_IsFunction(ctx, fn)) break;
+      JSValue args[2] = {JS_NewUint32(ctx, e.id), JS_NewObject(ctx)};
+      JS_SetPropertyStr(ctx, args[1], "x", JS_NewFloat64(ctx, e.x));
+      JS_SetPropertyStr(ctx, args[1], "y", JS_NewFloat64(ctx, e.y));
+      JS_SetPropertyStr(ctx, args[1], "width", JS_NewFloat64(ctx, e.w));
+      JS_SetPropertyStr(ctx, args[1], "height", JS_NewFloat64(ctx, e.h));
+      JSValue r = JS_Call(ctx, fn, JS_UNDEFINED, 2, args);
+      if (JS_IsException(r)) reportException();
+      JS_FreeValue(ctx, r);
+      JS_FreeValue(ctx, args[1]);
+    }
+    layoutScratch.clear();
+    JS_FreeValue(ctx, fn);
+    JS_FreeValue(ctx, global);
+  }
+  depth--;
+  draining = false;
+}
+
+void JsEngine::Impl::reportValue(JSValueConst exc, const char* prefix) {
+  std::string msg = prefix + formatError(ctx, exc);
+  if (interrupted) {
+    msg = "Script timed out: a single JS call ran longer than " + std::to_string(int(timeoutMs)) +
+          " ms and was interrupted (js_timeout_ms).\n" + msg;
+    interrupted = false;
+  }
+  rt.reportError(msg);
+}
+
+void JsEngine::Impl::reportException() {
+  JSValue exc = JS_GetException(ctx);
+  reportValue(exc, "");
+  JS_FreeValue(ctx, exc);
+}
+
+void JsEngine::Impl::addTimer(int id, double due, double interval, JSValue fn, std::vector<JSValue> args) {
+  timers[id] = {due, interval, timerSeq++, fn, std::move(args)};
+  earliestDue = std::min(earliestDue, due);
+}
+
+uint64_t JsEngine::Impl::startLoad(LoadRequest req, std::function<void(uint64_t, Resource&)> onDone) {
+  std::weak_ptr<Impl*> weak = alive;
+  auto idBox = std::make_shared<uint64_t>(0);
+  uint64_t id = rt.loader.load(std::move(req), [weak, idBox, onDone = std::move(onDone)](Resource res) {
+    auto strong = weak.lock();
+    if (!strong) return;
+    onDone(*idBox, res);
+  });
+  *idBox = id;
+  return id;
+}
+
+void JsEngine::Impl::dropPending(uint64_t id) {
+  auto it = pending.find(id);
+  if (it == pending.end()) return;
+  JS_FreeValue(ctx, it->second.resolve);
+  JS_FreeValue(ctx, it->second.reject);
+  pending.erase(it);
+}
+
+namespace {
+
+// ------------------------------------------------------------- timers
 
 JSValue js_setTimer(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv, int repeat) {
-  if (argc < 1 || !JS_IsFunction(ctx, argv[0])) return JS_NewInt32(ctx, 0);
+  if (argc < 1 || !JS_IsFunction(ctx, argv[0])) return JS_NewInt32(ctx, 0);  // string code is not supported
   double ms = 0;
-  if (argc > 1) JS_ToFloat64(ctx, &ms, argv[1]);
-  if (!(ms >= 0)) ms = 0;
+  if (argc > 1 && JS_ToFloat64(ctx, &ms, argv[1])) return JS_EXCEPTION;
+  if (!(ms >= 0) || !std::isfinite(ms)) ms = 0;
+  ms = std::min(ms, 2147483647.0);
   auto& impl = implOf(ctx);
   int id = impl.nextTimer++;
-  impl.timers[id] = {impl.rt.now + ms, repeat ? ms : -1.0, JS_DupValue(ctx, argv[0])};
+  if (impl.nextTimer <= 0) impl.nextTimer = 1;
+  std::vector<JSValue> args;
+  for (int i = 2; i < argc; i++) args.push_back(JS_DupValue(ctx, argv[i]));
+  impl.addTimer(id, impl.rt.now + ms, repeat ? ms : -1.0, JS_DupValue(ctx, argv[0]), std::move(args));
   return JS_NewInt32(ctx, id);
+}
+
+void freeTimer(JSContext* ctx, JsEngine::Impl::Timer& t) {
+  JS_FreeValue(ctx, t.fn);
+  for (auto& a : t.args) JS_FreeValue(ctx, a);
+  t.args.clear();
 }
 
 JSValue js_clearTimer(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   int id = 0;
-  if (argc < 1 || JS_ToInt32(ctx, &id, argv[0])) return JS_UNDEFINED;
+  if (argc < 1 || !JS_IsNumber(argv[0]) || JS_ToInt32(ctx, &id, argv[0])) return JS_UNDEFINED;
   auto& impl = implOf(ctx);
   auto it = impl.timers.find(id);
   if (it != impl.timers.end()) {
-    JS_FreeValue(ctx, it->second.fn);
+    freeTimer(ctx, it->second);
     impl.timers.erase(it);
   }
   return JS_UNDEFINED;
 }
 
-JSValue js_now(JSContext* ctx, JSValueConst, int, JSValueConst*) {
-  return JS_NewFloat64(ctx, runtimeOf(ctx).now);
+JSValue js_requestAnimationFrame(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  if (argc < 1 || !JS_IsFunction(ctx, argv[0])) return JS_ThrowTypeError(ctx, "requestAnimationFrame: callback is not a function");
+  auto& impl = implOf(ctx);
+  int id = impl.nextRaf++;
+  if (impl.nextRaf <= 0) impl.nextRaf = 1;
+  impl.rafs.push_back({id, JS_DupValue(ctx, argv[0])});
+  return JS_NewInt32(ctx, id);
 }
 
-void reportException(JSContext* ctx) {
-  JSValue exc = JS_GetException(ctx);
-  std::string msg = toStdString(ctx, exc);
-  JSValue stack = JS_GetPropertyStr(ctx, exc, "stack");
-  if (JS_IsString(stack)) msg += "\n" + toStdString(ctx, stack);
-  JS_FreeValue(ctx, stack);
-  JS_FreeValue(ctx, exc);
-  runtimeOf(ctx).reportError(msg);
+JSValue js_cancelAnimationFrame(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  int id = 0;
+  if (argc < 1 || JS_ToInt32(ctx, &id, argv[0]) || id <= 0) return JS_UNDEFINED;
+  auto& impl = implOf(ctx);
+  for (auto* list : {&impl.rafs, &impl.rafsRunning}) {
+    for (auto& r : *list) {
+      if (r.id == id) {
+        JS_FreeValue(ctx, r.fn);
+        r.fn = JS_UNDEFINED;
+        r.id = 0;
+      }
+    }
+  }
+  return JS_UNDEFINED;
+}
+
+JSValue js_now(JSContext* ctx, JSValueConst, int, JSValueConst*) { return JS_NewFloat64(ctx, runtimeOf(ctx).now); }
+
+// ------------------------------------------------------- QuickJS hooks
+
+int interruptHandler(JSRuntime*, void* opaque) {
+  auto* impl = static_cast<JsEngine::Impl*>(opaque);
+  if (impl->depth == 0 || impl->timeoutMs <= 0) return 0;
+  if (Clock::now() < impl->deadline) return 0;
+  impl->interrupted = true;
+  return 1;
+}
+
+void rejectionTracker(JSContext* ctx, JSValueConst promise, JSValueConst reason, bool handled, void* opaque) {
+  auto* impl = static_cast<JsEngine::Impl*>(opaque);
+  if (!handled) {
+    impl->rejections.push_back({JS_DupValue(ctx, promise), JS_DupValue(ctx, reason)});
+    return;
+  }
+  auto& list = impl->rejections;
+  for (size_t i = 0; i < list.size(); i++) {
+    if (JS_VALUE_GET_PTR(list[i].promise) == JS_VALUE_GET_PTR(promise)) {
+      JS_FreeValue(ctx, list[i].promise);
+      JS_FreeValue(ctx, list[i].reason);
+      list.erase(list.begin() + long(i));
+      break;
+    }
+  }
+}
+
+void setFn(JSContext* ctx, JSValueConst obj, const char* name, JSCFunction* fn, int len) {
+  JS_SetPropertyStr(ctx, obj, name, JS_NewCFunction(ctx, fn, name, len));
 }
 
 }  // namespace
 
+// ------------------------------------------------------------- JsEngine
+
 JsEngine::JsEngine(Runtime& rt) : impl_(std::make_unique<Impl>(rt)) {
-  impl_->jrt = JS_NewRuntime();
-  impl_->ctx = JS_NewContext(impl_->jrt);
-  JSContext* ctx = impl_->ctx;
-  JS_SetContextOpaque(ctx, impl_.get());
+  Impl& impl = *impl_;
+  impl.alive = std::make_shared<Impl*>(&impl);
+  const JsuiConfig& cfg = rt.config;
+  impl.timeoutMs = cfg.js_timeout_ms == 0 ? 5000.0 : double(cfg.js_timeout_ms);
+
+  impl.jrt = JS_NewRuntime();
+  JS_SetRuntimeOpaque(impl.jrt, &impl);
+  JS_SetMemoryLimit(impl.jrt, size_t(cfg.js_memory_limit_mb > 0 ? cfg.js_memory_limit_mb : 256) << 20);
+  JS_SetMaxStackSize(impl.jrt, size_t(cfg.js_stack_size_kb > 0 ? cfg.js_stack_size_kb : 1024) << 10);
+  JS_SetInterruptHandler(impl.jrt, interruptHandler, &impl);
+  JS_SetHostPromiseRejectionTracker(impl.jrt, rejectionTracker, &impl);
+  impl.ctx = JS_NewContext(impl.jrt);
+  JSContext* ctx = impl.ctx;
+  JS_SetContextOpaque(ctx, &impl);
+  JS_AddIntrinsicDOMException(ctx);
+  impl.atomDispatch = JS_NewAtom(ctx, "__jsui_dispatchEvent");
+  impl.atomHostMessage = JS_NewAtom(ctx, "__jsui_onHostMessage");
+  impl.atomOnLayout = JS_NewAtom(ctx, "__jsui_onLayout");
 
   JSValue global = JS_GetGlobalObject(ctx);
-  JSValue native = JS_NewObject(ctx);
-  struct Fn {
-    const char* name;
-    JSCFunction* fn;
-    int len;
-  } fns[] = {{"createNode", js_createNode, 1},     {"setProps", js_setProps, 2},
-             {"setText", js_setText, 2},           {"appendChild", js_appendChild, 2},
-             {"insertBefore", js_insertBefore, 3}, {"removeChild", js_removeChild, 2},
-             {"destroyNode", js_destroyNode, 1}};
-  for (auto& f : fns) JS_SetPropertyStr(ctx, native, f.name, JS_NewCFunction(ctx, f.fn, f.name, f.len));
-  JS_SetPropertyStr(ctx, native, "rootId", JS_NewUint32(ctx, rt.doc.root()->id()));
-  JS_SetPropertyStr(ctx, global, "__jsui_native", native);
+  setFn(ctx, global, "requestAnimationFrame", js_requestAnimationFrame, 1);
+  setFn(ctx, global, "cancelAnimationFrame", js_cancelAnimationFrame, 1);
+  JS_SetPropertyStr(ctx, global, "setTimeout",
+                    JS_NewCFunctionMagic(ctx, js_setTimer, "setTimeout", 2, JS_CFUNC_generic_magic, 0));
+  JS_SetPropertyStr(ctx, global, "setInterval",
+                    JS_NewCFunctionMagic(ctx, js_setTimer, "setInterval", 2, JS_CFUNC_generic_magic, 1));
+  setFn(ctx, global, "clearTimeout", js_clearTimer, 1);
+  setFn(ctx, global, "clearInterval", js_clearTimer, 1);
 
-  JSValue console = JS_NewObject(ctx);
-  struct Level {
-    const char* name;
-    int level;
-  } levels[] = {{"log", JSUI_LOG_INFO},  {"info", JSUI_LOG_INFO},   {"debug", JSUI_LOG_DEBUG},
-                {"warn", JSUI_LOG_WARN}, {"error", JSUI_LOG_ERROR}};
-  for (auto& l : levels) {
-    JS_SetPropertyStr(ctx, console, l.name, JS_NewCFunctionMagic(ctx, js_console, l.name, 1, JS_CFUNC_generic_magic, l.level));
+  // performance.now() is the runtime's clock (the embedder's tick time), the
+  // same timeline as rAF timestamps and timers, so headless renders are
+  // deterministic.
+  JSValue perf = JS_GetPropertyStr(ctx, global, "performance");
+  if (!JS_IsObject(perf)) {
+    JS_FreeValue(ctx, perf);
+    perf = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, global, "performance", JS_DupValue(ctx, perf));
   }
-  JS_SetPropertyStr(ctx, global, "console", console);
-
-  JS_SetPropertyStr(ctx, global, "setTimeout", JS_NewCFunctionMagic(ctx, js_setTimer, "setTimeout", 2, JS_CFUNC_generic_magic, 0));
-  JS_SetPropertyStr(ctx, global, "setInterval", JS_NewCFunctionMagic(ctx, js_setTimer, "setInterval", 2, JS_CFUNC_generic_magic, 1));
-  JS_SetPropertyStr(ctx, global, "clearTimeout", JS_NewCFunction(ctx, js_clearTimer, "clearTimeout", 1));
-  JS_SetPropertyStr(ctx, global, "clearInterval", JS_NewCFunction(ctx, js_clearTimer, "clearInterval", 1));
-  JSValue perf = JS_NewObject(ctx);
   JS_SetPropertyStr(ctx, perf, "now", JS_NewCFunction(ctx, js_now, "now", 0));
-  JS_SetPropertyStr(ctx, global, "performance", perf);
-  JS_SetPropertyStr(ctx, global, "globalThis", JS_DupValue(ctx, global));
+  JS_SetPropertyStr(ctx, perf, "timeOrigin", JS_NewFloat64(ctx, 0));
+  JS_FreeValue(ctx, perf);
+
+  installBridge(impl, global);
+  JSValue host = JS_NewObject(ctx);
+  installHostApi(impl, global, host);
+  impl.enter();
+  runPrelude(impl, host);
+  impl.leave();
+  JS_FreeValue(ctx, host);
   JS_FreeValue(ctx, global);
 }
 
 JsEngine::~JsEngine() {
-  for (auto& [id, t] : impl_->timers) JS_FreeValue(impl_->ctx, t.fn);
-  impl_->timers.clear();
-  JS_FreeContext(impl_->ctx);
-  JS_FreeRuntime(impl_->jrt);
+  Impl& impl = *impl_;
+  JSContext* ctx = impl.ctx;
+  impl.alive.reset();  // loader callbacks still queued become no-ops
+  for (auto& [id, p] : impl.pending) {
+    impl.rt.loader.cancel(id);
+    JS_FreeValue(ctx, p.resolve);
+    JS_FreeValue(ctx, p.reject);
+  }
+  impl.pending.clear();
+  for (auto& [id, t] : impl.timers) freeTimer(ctx, t);
+  impl.timers.clear();
+  for (auto* list : {&impl.rafs, &impl.rafsRunning})
+    for (auto& r : *list) JS_FreeValue(ctx, r.fn);
+  impl.rafs.clear();
+  impl.rafsRunning.clear();
+  for (auto& r : impl.rejections) {
+    JS_FreeValue(ctx, r.promise);
+    JS_FreeValue(ctx, r.reason);
+  }
+  impl.rejections.clear();
+  JS_FreeAtom(ctx, impl.atomDispatch);
+  JS_FreeAtom(ctx, impl.atomHostMessage);
+  JS_FreeAtom(ctx, impl.atomOnLayout);
+  JS_FreeContext(ctx);
+  JS_FreeRuntime(impl.jrt);
 }
 
 bool JsEngine::eval(const std::string& source, const std::string& name) {
-  JSValue r = JS_Eval(impl_->ctx, source.c_str(), source.size(), name.c_str(), JS_EVAL_TYPE_GLOBAL);
+  Impl& impl = *impl_;
+  impl.enter();
+  // JS_Eval needs a NUL-terminated buffer; std::string guarantees one.
+  JSValue r = JS_Eval(impl.ctx, source.c_str(), source.size(), name.c_str(), JS_EVAL_TYPE_GLOBAL);
   bool ok = !JS_IsException(r);
-  if (!ok) reportException(impl_->ctx);
-  JS_FreeValue(impl_->ctx, r);
-  runJobs();
+  if (!ok) impl.reportException();
+  JS_FreeValue(impl.ctx, r);
+  impl.leave();
   return ok;
 }
 
 void JsEngine::runJobs() {
-  JSContext* pctx = nullptr;
-  for (;;) {
-    int r = JS_ExecutePendingJob(impl_->jrt, &pctx);
-    if (r == 0) break;
-    if (r < 0) reportException(pctx);
+  if (impl_->depth == 0) {
+    impl_->enter();
+    impl_->leave();  // drains
   }
 }
 
 void JsEngine::runTimers(double nowMs) {
-  JSContext* ctx = impl_->ctx;
-  // Collect due timers first: callbacks may add or clear timers.
-  std::vector<int> due;
-  for (auto& [id, t] : impl_->timers)
-    if (t.due <= nowMs) due.push_back(id);
-  for (int id : due) {
-    auto it = impl_->timers.find(id);
-    if (it == impl_->timers.end()) continue;
-    JSValue fn = JS_DupValue(ctx, it->second.fn);
-    if (it->second.interval >= 0) {
-      it->second.due = nowMs + std::max(1.0, it->second.interval);
-    } else {
-      JS_FreeValue(ctx, it->second.fn);
-      impl_->timers.erase(it);
+  Impl& impl = *impl_;
+  JSContext* ctx = impl.ctx;
+  // Zero-delay timers queued by callbacks (MessageChannel, setImmediate,
+  // promise-scheduled work) run in later passes of the same tick, bounded so
+  // a self-rescheduling timer cannot starve the frame.
+  constexpr int kMaxPasses = 8;
+  for (int pass = 0; pass < kMaxPasses && impl.earliestDue <= nowMs; pass++) {
+    impl.dueScratch.clear();
+    double later = 1e300;
+    for (auto& [id, t] : impl.timers) {
+      if (t.due <= nowMs) impl.dueScratch.push_back({t.due, t.seq, id});
+      else later = std::min(later, t.due);
     }
-    JSValue r = JS_Call(ctx, fn, JS_UNDEFINED, 0, nullptr);
-    if (JS_IsException(r)) reportException(ctx);
-    JS_FreeValue(ctx, r);
-    JS_FreeValue(ctx, fn);
-    runJobs();
+    impl.earliestDue = later;
+    std::sort(impl.dueScratch.begin(), impl.dueScratch.end(), [](const Impl::DueRef& a, const Impl::DueRef& b) {
+      return a.due != b.due ? a.due < b.due : a.seq < b.seq;
+    });
+    for (auto& d : impl.dueScratch) {
+      auto it = impl.timers.find(d.id);
+      if (it == impl.timers.end() || it->second.seq != d.seq) continue;  // cleared meanwhile
+      Impl::Timer& t = it->second;
+      JSValue fn = JS_DupValue(ctx, t.fn);
+      std::vector<JSValue> args;
+      if (t.interval >= 0) {
+        for (auto& a : t.args) args.push_back(JS_DupValue(ctx, a));
+        t.due = nowMs + std::max(1.0, t.interval);
+        t.seq = impl.timerSeq++;
+        impl.earliestDue = std::min(impl.earliestDue, t.due);
+      } else {
+        args = std::move(t.args);
+        JS_FreeValue(ctx, t.fn);
+        impl.timers.erase(it);
+      }
+      JSValue r = impl.call(fn, JS_UNDEFINED, int(args.size()), args.data());
+      JS_FreeValue(ctx, r);
+      JS_FreeValue(ctx, fn);
+      for (auto& a : args) JS_FreeValue(ctx, a);
+    }
   }
 }
 
-void JsEngine::runAnimationFrame(double) {}
+void JsEngine::runAnimationFrame(double nowMs) {
+  Impl& impl = *impl_;
+  if (impl.rafs.empty()) return;
+  JSContext* ctx = impl.ctx;
+  // Callbacks registered while running go to the next frame.
+  impl.rafsRunning.swap(impl.rafs);
+  JSValue ts = JS_NewFloat64(ctx, nowMs);
+  for (size_t i = 0; i < impl.rafsRunning.size(); i++) {
+    if (impl.rafsRunning[i].id == 0) continue;
+    JSValue fn = impl.rafsRunning[i].fn;
+    impl.rafsRunning[i].fn = JS_UNDEFINED;
+    impl.rafsRunning[i].id = 0;
+    JSValue r = impl.call(fn, JS_UNDEFINED, 1, &ts);
+    JS_FreeValue(ctx, r);
+    JS_FreeValue(ctx, fn);
+  }
+  impl.rafsRunning.clear();
+}
 
 bool JsEngine::hasPendingWork(double nowMs) const {
-  for (auto& [id, t] : impl_->timers)
-    if (t.due <= nowMs) return true;
-  return JS_IsJobPending(impl_->jrt);
+  return impl_->earliestDue <= nowMs || !impl_->rafs.empty() || JS_IsJobPending(impl_->jrt);
 }
 
 int JsEngine::dispatchEvent(const Value& event) {
-  JSContext* ctx = impl_->ctx;
+  Impl& impl = *impl_;
+  JSContext* ctx = impl.ctx;
   JSValue global = JS_GetGlobalObject(ctx);
-  JSValue fn = JS_GetPropertyStr(ctx, global, "__jsui_dispatchEvent");
+  JSValue fn = JS_GetProperty(ctx, global, impl.atomDispatch);
   int flags = 0;
   if (JS_IsFunction(ctx, fn)) {
     JSValue arg = fromValue(ctx, event);
-    JSValue r = JS_Call(ctx, fn, JS_UNDEFINED, 1, &arg);
-    if (JS_IsException(r)) reportException(ctx);
-    else if (JS_IsBool(r)) flags = JS_ToBool(ctx, r) ? (kHandled | kDefaultPrevented) : 0;
+    JSValue r = impl.call(fn, JS_UNDEFINED, 1, &arg);
+    if (JS_IsBool(r)) flags = JS_ToBool(ctx, r) ? (kHandled | kDefaultPrevented) : 0;
     else if (JS_IsNumber(r)) JS_ToInt32(ctx, &flags, r);
     JS_FreeValue(ctx, r);
     JS_FreeValue(ctx, arg);
   }
   JS_FreeValue(ctx, fn);
   JS_FreeValue(ctx, global);
-  runJobs();
   return flags;
 }
 
-void JsEngine::hostMessage(const std::string&, const std::string&) {}
-void JsEngine::layoutEvent(uint32_t, float, float, float, float) {}
+void JsEngine::hostMessage(const std::string& name, const std::string& json) {
+  Impl& impl = *impl_;
+  JSContext* ctx = impl.ctx;
+  JSValue global = JS_GetGlobalObject(ctx);
+  JSValue fn = JS_GetProperty(ctx, global, impl.atomHostMessage);
+  if (JS_IsFunction(ctx, fn)) {
+    JSValue args[2] = {JS_NewStringLen(ctx, name.data(), name.size()), JS_NewStringLen(ctx, json.data(), json.size())};
+    JSValue r = impl.call(fn, JS_UNDEFINED, 2, args);
+    JS_FreeValue(ctx, r);
+    JS_FreeValue(ctx, args[0]);
+    JS_FreeValue(ctx, args[1]);
+  }
+  JS_FreeValue(ctx, fn);
+  JS_FreeValue(ctx, global);
+}
+
+void JsEngine::layoutEvent(uint32_t id, float x, float y, float w, float h) {
+  Impl& impl = *impl_;
+  impl.layoutQueue.push_back({id, x, y, w, h});
+  // Outside JS, deliver right away; otherwise drain() delivers once JS unwinds.
+  if (impl.depth == 0) {
+    impl.enter();
+    impl.leave();
+  }
+}
+
+bool JsEngine::inCall() const { return impl_->depth > 0; }
+
+size_t JsEngine::memoryUsage() const {
+  JSMemoryUsage u;
+  JS_ComputeMemoryUsage(impl_->jrt, &u);
+  return size_t(u.malloc_size);
+}
 
 }  // namespace jsui

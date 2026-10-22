@@ -100,6 +100,13 @@ typedef struct JsuiConfig {
     void* load_user;
     JsuiMessageFn on_message;
     void* message_user;
+
+    /* JS engine limits (0: default). The watchdog interrupts any single
+     * native->JS call (an event, a timer, a frame callback) that runs longer
+     * than js_timeout_ms and reports it as an error; negative disables it. */
+    int js_memory_limit_mb; /* default 256 */
+    int js_stack_size_kb;   /* default 1024 */
+    int js_timeout_ms;      /* default 5000 */
 } JsuiConfig;
 
 JSUI_API void jsui_config_init(JsuiConfig* cfg);

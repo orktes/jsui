@@ -5,15 +5,19 @@
 #include <string>
 
 #include "core/document.h"
+#include "include/core/SkRefCnt.h"
 #include "jsui/jsui.h"
 #include "platform/loader.h"
 #include "text/font_manager.h"
+
+class SkPicture;
 
 namespace jsui {
 
 class JsEngine;
 class InputManager;
 class ImageCache;
+class DevOverlay;
 
 class Runtime {
  public:
@@ -27,6 +31,11 @@ class Runtime {
   bool loadSource(const std::string& source, const std::string& name);
   void loadUrl(const std::string& url);
   void reload();
+  // Reload at the start of the next tick (safe to call from JS / callbacks).
+  void requestReload();
+  // Dev-mode key handling (Escape dismisses the error overlay, F5 reloads).
+  // Returns true if the key was consumed.
+  bool devKey(const char* key, bool down);
 
   void tick(double nowMs);
   bool needsRedraw() const;
@@ -49,7 +58,17 @@ class Runtime {
 
  private:
   void resetEngine();
+  void devPoll();
   bool redraw_ = true;
+
+  // Dev mode: version polling of <origin>/__jsui/version and the frame shown
+  // while a reloaded bundle is broken.
+  std::string devOrigin_, devVersion_;
+  bool devPollInFlight_ = false;
+  double devNextPoll_ = 0;
+  bool reloadRequested_ = false;
+  sk_sp<SkPicture> lastGoodFrame_;
+  std::unique_ptr<DevOverlay> overlay_;
 };
 
 }  // namespace jsui

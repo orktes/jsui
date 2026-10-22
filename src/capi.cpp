@@ -105,6 +105,7 @@ int jsui_send_mouse_wheel(JsuiRuntime* rt, float x, float y, float dx, float dy)
 int jsui_send_mouse_leave(JsuiRuntime* rt) { return rt->rt->input->mouseLeave(); }
 int jsui_send_touch(JsuiRuntime* rt, int id, int phase, float x, float y) { return rt->rt->input->touch(id, phase, x, y); }
 int jsui_send_key(JsuiRuntime* rt, const char* key, const char* code, int down, int repeat, int mods) {
+  if (rt->rt->devKey(key, down != 0)) return 1;  // dev overlay (Escape)
   return rt->rt->input->key(key, code, down != 0, repeat != 0, mods);
 }
 int jsui_send_text(JsuiRuntime* rt, const char* utf8) { return rt->rt->input->text(utf8); }

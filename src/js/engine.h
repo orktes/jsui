@@ -7,7 +7,8 @@
 //   __jsui_native.destroyNode(id)             .rootId
 //   __jsui_native.measure(id) -> {x,y,width,height,pageX,pageY}
 //   __jsui_native.postMessage(name, json)     .loadFont(family, url, w, italic) -> Promise
-//   __jsui_native.focus(id) / blur(id)        .scrollTo(id, x, y)
+//   __jsui_native.focus(id) / blur(id)        .scrollTo(id, x, y, animated)
+//   __jsui_native.patchStyle(id, partialStyle) .reload()
 //   console, setTimeout/Interval, requestAnimationFrame, queueMicrotask,
 //   performance.now, fetch/Response/Headers, TextEncoder/TextDecoder, URL.
 // Callbacks the bundle installs:
@@ -44,6 +45,12 @@ class JsEngine {
   int dispatchEvent(const Value& event);
   void hostMessage(const std::string& name, const std::string& json);
   void layoutEvent(uint32_t id, float x, float y, float w, float h);
+
+  // True while JS is on the stack (native code called from JS). Destroying
+  // the engine then is not allowed; Runtime defers reloads instead.
+  bool inCall() const;
+  // Bytes allocated by the JS heap (for diagnostics / leak checks).
+  size_t memoryUsage() const;
 
   struct Impl;
 
