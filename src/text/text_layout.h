@@ -11,6 +11,7 @@
 #include "include/core/SkRect.h"
 
 class SkCanvas;
+class SkMatrix;
 namespace skia::textlayout {
 class Paragraph;
 }
@@ -29,9 +30,14 @@ void installMeasure(Node* node);
 skia::textlayout::Paragraph* layoutParagraph(Node* node, float width);
 
 // Paints a paragraph-root Text node whose content box starts at (x, y).
-void paintText(Node* node, SkCanvas* canvas, float x, float y, float width, float height);
+// `layoutSpace` is given when a transform applies to the canvas: it maps the
+// canvas coordinates to device pixels without the transforms (the space
+// boxes pixel-snap in), and the baseline then snaps there, not on the device.
+void paintText(Node* node, SkCanvas* canvas, float x, float y, float width, float height,
+               const SkMatrix* layoutSpace = nullptr);
 // Paints a TextInput's value (or placeholder) inside its content box.
-void paintTextInput(Node* node, SkCanvas* canvas, float x, float y, float width, float height);
+void paintTextInput(Node* node, SkCanvas* canvas, float x, float y, float width, float height,
+                    const SkMatrix* layoutSpace = nullptr);
 
 // --- TextInput editing geometry (see text/text_edit.h). Coordinates are
 // the node's border-box local px (after its last layout); indices are value

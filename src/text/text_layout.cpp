@@ -327,9 +327,10 @@ struct TextCache : Node::Cache {
   float maxIntrinsic = 0;
   bool rtl = false;
   float paintDy = 0;  // baseline correction of the root style (see chromeLineMetrics)
-  // Unhinted copies of the paragraph's text blobs, keyed by blob id (see
-  // ChromeLikePainter). Cleared whenever the paragraph is laid out again.
-  std::unordered_map<uint32_t, sk_sp<SkTextBlob>> blobs;
+  // Unhinted copies of the paragraph's text blobs, keyed by blob id << 1 |
+  // transformed variant (see ChromeLikePainter). Cleared whenever the
+  // paragraph is laid out again.
+  std::unordered_map<uint64_t, sk_sp<SkTextBlob>> blobs;
   // TextInput: the displayed text (value after textTransform / bullets, or
   // the placeholder) and the value -> display index map (UTF-16 units,
   // size value.size() + 1).
@@ -344,17 +345,22 @@ struct TextCache : Node::Cache {
 // the rebuilt blobs are cached so steady-state frames do not allocate.
 class ChromeLikePainter : public tl::ParagraphPainter {
  public:
-  ChromeLikePainter(SkCanvas* c, TextCache* cache) : c_(c), cache_(cache) {}
+  // `layoutSpace` (null when no transform applies) maps the canvas
+  // coordinates to device pixels without the transforms in effect.
+  ChromeLikePainter(SkCanvas* c, TextCache* cache, const SkMatrix* layoutSpace)
+      : c_(c), cache_(cache), transformed_(layoutSpace != nullptr) {
+    if (layoutSpace) layout_.push_back(*layoutSpace);
+  }
 
   void drawTextBlob(const sk_sp<SkTextBlob>& blob, SkScalar x, SkScalar y, const SkPaintOrID& paint) override {
-    if (const SkPaint* p = std::get_if<SkPaint>(&paint)) c_->drawTextBlob(unhinted(blob), x, y, *p);
+    if (const SkPaint* p = std::get_if<SkPaint>(&paint)) c_->drawTextBlob(prepared(blob, x, &y), x, y, *p);
   }
   void drawTextShadow(const sk_sp<SkTextBlob>& blob, SkScalar x, SkScalar y, SkColor color, SkScalar sigma) override {
     SkPaint p;
     p.setColor(color);
     p.setAntiAlias(true);
     if (sigma > 0) p.setMaskFilter(SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, sigma, false));
-    c_->drawTextBlob(unhinted(blob), x, y, p);
+    c_->drawTextBlob(prepared(blob, x, &y), x, y, p);
   }
   void drawRect(const SkRect& r, const SkPaintOrID& paint) override {
     if (const SkPaint* p = std::get_if<SkPaint>(&paint)) c_->drawRect(r, *p);
@@ -369,14 +375,40 @@ class ChromeLikePainter : public tl::ParagraphPainter {
     c_->drawLine(x0, y0, x1, y1, d.skPaint());
   }
   void clipRect(const SkRect& r) override { c_->clipRect(r); }
-  void translate(SkScalar dx, SkScalar dy) override { c_->translate(dx, dy); }
-  void save() override { c_->save(); }
-  void restore() override { c_->restore(); }
+  void translate(SkScalar dx, SkScalar dy) override {
+    c_->translate(dx, dy);
+    if (transformed_) layout_.back().preTranslate(dx, dy);
+  }
+  void save() override {
+    c_->save();
+    if (transformed_) layout_.push_back(layout_.back());
+  }
+  void restore() override {
+    c_->restore();
+    if (transformed_ && layout_.size() > 1) layout_.pop_back();
+  }
 
  private:
-  sk_sp<SkTextBlob> unhinted(const sk_sp<SkTextBlob>& blob) {
+  // The blob to draw at (x, *y). Under a transform the baseline snaps in
+  // layout space (where boxes snap, see place() in painter.cpp) and the
+  // glyphs are then placed with subpixel precision on both axes, so text
+  // moves with its box instead of jumping between device pixel rows while
+  // the box glides. Without a transform, Skia snaps the baseline on the
+  // device as before (the same thing, since both spaces coincide).
+  sk_sp<SkTextBlob> prepared(const sk_sp<SkTextBlob>& blob, SkScalar x, SkScalar* y) {
+    if (!transformed_) return unhinted(blob, false);
+    const SkMatrix& m = layout_.back();
+    if (m.isScaleTranslate() && m.getScaleY() > 0) {
+      float dy = m.mapXY(x, *y).fY;
+      *y += (std::floor(dy + 0.5f) - dy) / m.getScaleY();
+    }
+    return unhinted(blob, true);
+  }
+
+  sk_sp<SkTextBlob> unhinted(const sk_sp<SkTextBlob>& blob, bool transformed) {
     if (!blob) return blob;
-    auto it = cache_->blobs.find(blob->uniqueID());
+    uint64_t key = uint64_t(blob->uniqueID()) << 1 | uint64_t(transformed);
+    auto it = cache_->blobs.find(key);
     if (it != cache_->blobs.end()) return it->second;
     SkTextBlobBuilder b;
     SkTextBlob::Iter iter(*blob);
@@ -388,18 +420,27 @@ class ChromeLikePainter : public tl::ParagraphPainter {
       // -webkit-font-smoothing: antialiased, which the reference harness sets.
       f.setHinting(SkFontHinting::kNone);
       f.setSubpixel(true);
+      if (transformed) {
+        // Under a transform: no device-pixel snapping of glyph origins on
+        // either axis, whatever the static setting above is (prepared()
+        // already snapped the baseline in layout space).
+        f.setSubpixel(true);
+        f.setBaselineSnap(false);
+      }
       const auto& buf = b.allocRunPos(f, run.count);
       std::memcpy(buf.glyphs, run.glyphs, size_t(run.count) * sizeof(SkGlyphID));
       std::memcpy(buf.points(), run.positions, size_t(run.count) * sizeof(SkPoint));
     }
     sk_sp<SkTextBlob> out = b.make();
     if (!out) out = blob;
-    cache_->blobs.emplace(blob->uniqueID(), out);
+    cache_->blobs.emplace(key, out);
     return out;
   }
 
   SkCanvas* c_;
   TextCache* cache_;
+  bool transformed_;
+  std::vector<SkMatrix> layout_;  // canvas coords -> layout-space device px, per save level
 };
 
 struct BuildState {
@@ -852,16 +893,17 @@ tl::Paragraph* layoutParagraph(Node* node, float width) {
   return c->paragraph.get();
 }
 
-void paintText(Node* node, SkCanvas* canvas, float x, float y, float width, float height) {
+void paintText(Node* node, SkCanvas* canvas, float x, float y, float width, float height, const SkMatrix* layoutSpace) {
   (void)height;
   if (tl::Paragraph* p = layoutParagraph(node, width)) {
     auto* c = static_cast<TextCache*>(node->textCache.get());
-    ChromeLikePainter painter(canvas, c);
+    ChromeLikePainter painter(canvas, c, layoutSpace);
     p->paint(&painter, x, y + c->paintDy);
   }
 }
 
-void paintTextInput(Node* node, SkCanvas* canvas, float x, float y, float width, float height) {
+void paintTextInput(Node* node, SkCanvas* canvas, float x, float y, float width, float height,
+                    const SkMatrix* layoutSpace) {
   InputGeom g;
   if (!inputGeom(node, width, height, &g)) return;
   edit::EditState* s = g.s;
@@ -876,7 +918,7 @@ void paintTextInput(Node* node, SkCanvas* canvas, float x, float y, float width,
       canvas->drawRect(b.rect.makeOffset(x + g.ox, y + g.oy), sp);
   }
   if (g.p) {
-    ChromeLikePainter painter(canvas, g.c);
+    ChromeLikePainter painter(canvas, g.c, layoutSpace);
     g.p->paint(&painter, x + g.ox, y + g.oy + g.c->paintDy);
   }
   canvas->restore();
