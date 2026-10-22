@@ -146,6 +146,52 @@ TEST(scroll_fling_stops_at_edge_and_resting_finger_has_no_momentum) {
   CHECK_EQ(f.events(), std::string("scrollbegindrag scrollenddrag#v=0.00,t=870"));
 }
 
+// Regression: a finger held pulling against an edge jitters by a pixel or
+// two (iPhone touch digitizers). The clamp used to eat every move into the
+// edge and apply every move away from it, so the content shook a few pixels
+// until the finger scrolled away. The banked overshoot absorbs the jitter.
+TEST(scroll_drag_jitter_against_edge_does_not_shake) {
+  ScrollFixture f;
+  Node* sv = addList(f);
+  f.tick(16);
+  auto move = [&](float y) {
+    f.tick(16);
+    f.in().touch(0, 1, 50, y);
+  };
+  // Top: pull down 40 px past the edge, then jitter.
+  f.in().touch(0, 0, 50, 20);
+  move(60);
+  CHECK_EQ(sv->scrollY, 0.f);
+  for (float y : {58.f, 61.f, 57.f, 60.f, 59.f, 62.f, 58.f}) {
+    move(y);
+    CHECK_EQ(sv->scrollY, 0.f);
+  }
+  move(80);  // pulls further: the bank stays at kDragEdgeSlack
+  // Reversing moves the content once the slack is used up: 40 - 12 = 28.
+  move(40);
+  CHECK_EQ(sv->scrollY, 28.f);
+  // Inside the range the content follows the finger 1:1 again.
+  move(45);
+  CHECK_EQ(sv->scrollY, 23.f);
+  f.in().touch(0, 2, 50, 45);
+  f.settle();
+
+  // Bottom, same thing the other way.
+  f.in().scrollTo(sv, 0, 900);
+  f.tick(16);
+  f.in().touch(0, 0, 50, 80);
+  move(40);
+  CHECK_EQ(sv->scrollY, 900.f);
+  for (float y : {42.f, 38.f, 43.f, 40.f}) {
+    move(y);
+    CHECK_EQ(sv->scrollY, 900.f);
+  }
+  move(60);  // bank 10 after the jitter, then 20 px down: 900 + 10 - 20
+  CHECK_EQ(sv->scrollY, 890.f);
+  f.in().touch(0, 2, 50, 60);
+  f.settle();
+}
+
 TEST(scroll_touch_catches_fling) {
   ScrollFixture f;
   Node* sv = addList(f, "{}", R"({"style":{"height":1000},"props":{"__events":["press"]}})");

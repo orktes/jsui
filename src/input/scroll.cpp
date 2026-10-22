@@ -297,6 +297,7 @@ void InputManager::beginDrag(PointerState& p, Node* sv) {
   st.anim = ScrollState::Anim::None;
   st.settleAt = -1;
   st.dragStart = mainOffset(sv);
+  st.dragOver = 0;
   st.samples[0] = {eventTime(), st.dragStart};
   st.sampleCount = 1;
   dispatchScrollEvent("scrollbegindrag", sv);
@@ -308,15 +309,23 @@ void InputManager::dragTo(PointerState& p, Node* sv, float x, float y) {
     beginDrag(p, sv);
     if (!(sv = alive(id))) return;
   }
-  // Content follows the finger along the ScrollView's axis.
+  // Content follows the finger along the ScrollView's axis. Past an edge the
+  // offset clamps and the overshoot is banked (up to kDragEdgeSlack): without
+  // it, every jitter of a finger pulling against the edge would move the
+  // content one way and never back (the clamp eats the other half).
   bool h = isHorizontal(sv);
-  float nx = h ? sv->scrollX - (x - p.startX) : sv->scrollX;
-  float ny = h ? sv->scrollY : sv->scrollY - (y - p.startY);
+  ScrollMetrics m = scrollMetrics(sv);
+  float maxOff = h ? m.maxX() : m.maxY();
+  float over = scrollState(sv).dragOver;
+  float want = mainOffset(sv) + over - (h ? x - p.startX : y - p.startY);
+  float off = std::clamp(want, 0.f, maxOff);
+  over = std::clamp(want - off, -kDragEdgeSlack, kDragEdgeSlack);
   p.startX = x;
   p.startY = y;
-  applyScroll(sv, nx, ny, true);
+  applyScroll(sv, h ? off : sv->scrollX, h ? sv->scrollY : off, true);
   if (!(sv = alive(id))) return;
   ScrollState& st = scrollState(sv);
+  st.dragOver = over;
   ScrollState::Sample s{eventTime(), mainOffset(sv)};
   if (st.sampleCount > 0 && st.samples[size_t(st.sampleCount - 1)].t == s.t) {
     st.samples[size_t(st.sampleCount - 1)] = s;  // same frame: keep the latest position
