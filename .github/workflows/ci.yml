@@ -57,6 +57,9 @@ jobs:
               - *core
               - 'integrations/godot/**'
               - 'packages/**'
+              - 'examples/showcase/**'
+              - 'examples/theme.js'
+              - 'examples/assets/**'
             js:
               - *core
               - 'packages/**'
@@ -180,7 +183,7 @@ jobs:
         run: |
           if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
           npx jsui build integrations/godot/demo/ui/app.jsx -o integrations/godot/demo/ui/dist/bundle.js
-      - name: Run the demo in Godot 4.7.2 (headless) and capture a frame
+      - name: Run the demo in Godot 4.7.2 (headless, input self-test at 1x and 2x) and capture frames
         run: integrations/godot/smoke-test.sh build/godot-smoke.png
       - name: Run it in Godot 4.3 too (compatibility_minimum)
         run: GODOT_VERSION=4.3-stable integrations/godot/smoke-test.sh build/godot-smoke-4.3.png
@@ -190,7 +193,7 @@ jobs:
           name: jsui-godot-linux
           path: |
             integrations/godot/demo/bin/
-            build/godot-smoke.png
+            build/godot-smoke*.png
           if-no-files-found: warn
 
   # --------------------------------------------------------------------- wasm

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Runs the Godot demo for a number of frames and saves what JsuiView rendered.
+# Runs the Godot demo headless with its input self-test, at content scale 1
+# and 2, and saves what JsuiView rendered.
 #
-#   integrations/godot/smoke-test.sh [out.png]
+#   integrations/godot/smoke-test.sh [out.png]    # also writes <out>-2x.png
 #
 # Expects the GDExtension in integrations/godot/demo/bin (cmake
 # -DJSUI_BUILD_GODOT=ON) and the demo bundle in demo/ui/dist (npx jsui build).
@@ -72,26 +73,49 @@ if [[ ! -f "$demo/.godot/extension_list.cfg" ]]; then
 fi
 
 mkdir -p "$(dirname "$out")"
-rm -f "$out"
 display=(--headless)
 if [[ "${GODOT_DISPLAY:-headless}" != headless ]]; then
   display=(--display-driver "$GODOT_DISPLAY" --rendering-driver opengl3 --audio-driver Dummy)
 fi
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
-"$GODOT" "${display[@]}" --path "$demo" --resolution 1280x720 -- --capture "$out" --frames "$frames" --self-test 2>&1 | tee "$log"
-status=${PIPESTATUS[0]}
 
-if (( status != 0 )); then
-  echo "godot exited with $status" >&2
-  exit "$status"
-fi
-if grep -qE "SCRIPT ERROR|self-test failed|Cannot get class 'JsuiView'|GDExtension dynamic library not found|\[jsui error\]" "$log"; then
-  echo "errors in the Godot log" >&2
-  exit 1
-fi
-if [[ ! -s "$out" ]]; then
-  echo "no capture written to $out" >&2
-  exit 1
-fi
-echo "ok: $out"
+# One run per window size. main.gd's --self-test drives the UI through
+# Godot's input pipeline (Input.parse_input_event, as real devices do): hover,
+# click (checking the exact logical position JSUI saw), gamepad focus + A,
+# wheel and trackpad-pan scrolling, click-to-focus + typing + Enter in a
+# TextInput, the Ping call, call_ui and an unhandled click. It prints PASS /
+# FAIL for each.
+#   1280x720   content scale 1 (the project's base size)
+#   2560x1440  content scale 2, as on a Retina Mac: the canvas_items stretch
+#              doubles everything, JSUI renders at pixel ratio 2, and input
+#              maps back to the same logical px
+# --window goes to the script too: the headless display server ignores
+# --resolution (its window is 64x64).
+run() {
+  local size="$1" png="$2"
+  rm -f "$png"
+  echo "== Godot $GODOT_VERSION, window $size"
+  "$GODOT" "${display[@]}" --path "$demo" --resolution "$size" -- --capture "$png" --frames "$frames" --self-test --window "$size" 2>&1 | tee "$log"
+  local status=${PIPESTATUS[0]}
+  if (( status != 0 )); then
+    echo "godot exited with $status ($size)" >&2
+    exit "$status"
+  fi
+  if grep -qE "SCRIPT ERROR|^FAIL |self-test failed|Cannot get class 'JsuiView'|GDExtension dynamic library not found|\[jsui error\]" "$log"; then
+    echo "errors in the Godot log ($size)" >&2
+    exit 1
+  fi
+  if ! grep -q "^PASS mapping" "$log"; then
+    echo "the input self-test did not run ($size)" >&2
+    exit 1
+  fi
+  if [[ ! -s "$png" ]]; then
+    echo "no capture written to $png" >&2
+    exit 1
+  fi
+}
+
+run 1280x720 "$out"
+run 2560x1440 "${out%.png}-2x.png"
+echo "ok: $out ${out%.png}-2x.png"

@@ -9,7 +9,10 @@
 // It runs as written in React Native. Not part of the reference suite
 // (animated and interactive); tools/jsui-record renders scripted sessions of
 // it (examples/showcase/session.json). The app posts the page rectangles of
-// a few elements as `jsui-record:anchors` so the session can aim at them.
+// a few elements as `jsui-record:anchors` so the session can aim at them,
+// and reports what the user did as `showcase:event` messages ({type, ...}:
+// hover, pressIn with the page position, press, focus, scroll, text, ...)
+// so a host (the Godot demo's self-test) can check its input forwarding.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
@@ -54,6 +57,10 @@ function useAnchor(name) {
   return { ref, onLayout };
 }
 
+function track(type, data) {
+  Host.postMessage('showcase:event', Object.assign({ type }, data));
+}
+
 const spring = (value, toValue, cfg) =>
   Animated.spring(value, Object.assign({ toValue, stiffness: 340, damping: 20, mass: 0.9, useNativeDriver: NATIVE }, cfg));
 
@@ -73,13 +80,25 @@ function MenuButton({ label, hint, badge, enter, anchor, onPress, danger }) {
     <Pressable
       ref={a.ref}
       onLayout={a.onLayout}
-      onHoverIn={() => spring(hover, 1).start()}
+      onHoverIn={() => {
+        track('hover', { anchor });
+        spring(hover, 1).start();
+      }}
       onHoverOut={() => spring(hover, 0).start()}
-      onPressIn={() => spring(press, 1, { stiffness: 600, damping: 26 }).start()}
+      onPressIn={(e) => {
+        track('pressIn', { anchor, x: e.nativeEvent.pageX, y: e.nativeEvent.pageY });
+        spring(press, 1, { stiffness: 600, damping: 26 }).start();
+      }}
       onPressOut={() => spring(press, 0, { stiffness: 260, damping: 12 }).start()}
-      onFocus={(e) => e.nativeEvent.focusVisible && spring(focus, 1, { stiffness: 260, damping: 14 }).start()}
+      onFocus={(e) => {
+        track('focus', { anchor, visible: !!e.nativeEvent.focusVisible });
+        if (e.nativeEvent.focusVisible) spring(focus, 1, { stiffness: 260, damping: 14 }).start();
+      }}
       onBlur={() => spring(focus, 0).start()}
-      onPress={onPress}
+      onPress={() => {
+        track('press', { anchor });
+        if (onPress) onPress();
+      }}
       style={styles.menuHit}
     >
       <Animated.View style={[styles.menuBtn, { opacity: enter, transform: [{ translateX }, { scale }] }]}>
@@ -117,7 +136,15 @@ function Tabs() {
   return (
     <View style={styles.tabs} ref={a.ref} onLayout={a.onLayout}>
       {TABS.map((t, i) => (
-        <Pressable key={t} focusable={false} onPress={() => setTab(i)} style={styles.tab}>
+        <Pressable
+          key={t}
+          focusable={false}
+          onPress={() => {
+            track('tab', { index: i });
+            setTab(i);
+          }}
+          style={styles.tab}
+        >
           {({ hovered }) => <Text style={[styles.tabText, (hovered || tab === i) && styles.tabTextActive]}>{t}</Text>}
         </Pressable>
       ))}
@@ -260,6 +287,7 @@ function Squad() {
   const add = () => {
     const n = name.trim();
     if (!n) return;
+    track('recruit', { name: n });
     LayoutAnimation.configureNext(SQUAD_ANIM);
     setMembers((m) => [n, ...m].slice(0, 4));
     setName('');
@@ -279,9 +307,15 @@ function Squad() {
         <Animated.View pointerEvents="none" style={[styles.inputGlow, { opacity: ring }]} />
         <TextInput
           value={name}
-          onChangeText={setName}
+          onChangeText={(t) => {
+            track('text', { value: t });
+            setName(t);
+          }}
           onSubmitEditing={add}
-          onFocus={() => setFocused(true)}
+          onFocus={() => {
+            track('focus', { anchor: 'recruit' });
+            setFocused(true);
+          }}
           onBlur={() => setFocused(false)}
           placeholder="Type a callsign and press Enter…"
           placeholderTextColor={colors.textMute}
@@ -391,6 +425,8 @@ function Armory({ enter }) {
           renderItem={({ item }) => <ArmoryRow item={item} />}
           getItemLayout={(_, index) => ({ length: 60, offset: 60 * index, index })}
           indicatorStyle="white"
+          scrollEventThrottle={50}
+          onScroll={(e) => track('scroll', { list: 'armory', y: e.nativeEvent.contentOffset.y })}
           initialNumToRender={14}
           windowSize={7}
           contentContainerStyle={{ paddingBottom: 8 }}
@@ -406,6 +442,7 @@ function DeployPanel({ visible, onClose }) {
   const t = useValue(0);
   const a = useAnchor('panel');
   useEffect(() => {
+    track('panel', { visible });
     if (visible) {
       setMounted(true);
       spring(t, 1, { stiffness: 220, damping: 15, mass: 1 }).start();
@@ -458,7 +495,10 @@ function PanelButton({ label, primary, anchor, onPress }) {
       onPress={onPress}
       onHoverIn={() => spring(hover, 1).start()}
       onHoverOut={() => spring(hover, 0).start()}
-      onFocus={(e) => e.nativeEvent.focusVisible && spring(focus, 1).start()}
+      onFocus={(e) => {
+        track('focus', { anchor, visible: !!e.nativeEvent.focusVisible });
+        if (e.nativeEvent.focusVisible) spring(focus, 1).start();
+      }}
       onBlur={() => spring(focus, 0).start()}
     >
       {({ pressed }) => (
