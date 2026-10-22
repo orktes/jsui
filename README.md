@@ -15,6 +15,44 @@ Fast development of beautiful, responsive in-game UIs with React.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
 
+## Game data
+
+The game shares state with the UI by key; the UI asks the game with calls
+that return promises. Details: [docs/ARCHITECTURE.md#game-data](docs/ARCHITECTURE.md#game-data).
+
+```c
+jsui_set_state(rt, "gold", "1250");                       // any time, even before the bundle loads
+jsui_set_state(rt, "inventory", "{\"items\":{\"potion\":{\"name\":\"Potion\",\"count\":3}}}");
+jsui_patch_state(rt, "inventory", "{\"items\":{\"potion\":{\"count\":2}}}");  // RFC 7386 merge patch
+
+cfg.on_call = on_call;  // Host.call() from JS: answer now or on a later frame
+static void on_call(void* user, uint64_t id, const char* name, const char* args) {
+    if (strcmp(name, "shop.buy") == 0) jsui_resolve_call(rt, id, "{\"gold\":1100}");
+    else jsui_reject_call(rt, id, "unknown call");
+}
+```
+
+```jsx
+import { Host, useHostState } from '@jsui/react';
+
+function Inventory() {
+  const gold = useHostState('gold', 0);                    // re-renders only when "gold" changes
+  const { items } = useHostState('inventory', { items: {} });
+  const buy = () => Host.call('shop.buy', { item: 'potion' }).catch((e) => console.warn(e.message));
+  return (
+    <View>
+      <Text>{gold} gold</Text>
+      {Object.entries(items).map(([id, it]) => <Text key={id}>{it.name} ×{it.count}</Text>)}
+      <Button title="Buy potion" onPress={buy} />
+    </View>
+  );
+}
+```
+
+State lives in the runtime, so it survives hot reloads. The UI can own keys
+too (`HostState.set` → `JsuiConfig.on_state`), and the game can call handlers
+the UI registers with `Host.handle(name, fn)` (`jsui_call_ui`).
+
 ## Build (native)
 
 ```sh

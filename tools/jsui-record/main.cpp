@@ -29,6 +29,8 @@
 //   {"pad": 13, "hold": 90, "count": 1, "interval": 250}  gamepad button
 //   {"axis": 1, "value": 0.8, "dur": 600}              gamepad stick, then 0
 //   {"message": "name", "data": {...}}                 jsui_post_message
+//   {"state": "key", "data": value}                    jsui_set_state (no data: remove)
+//   {"state": "key", "patch": {...}}                   jsui_patch_state (merge patch)
 //   {"cursor": "show" | "hide"}  {"leave": true}       overlay cursor / mouse leave
 //   {"label": "..."}                                   legend text of the next input
 //
@@ -506,6 +508,12 @@ struct Recorder {
     if (s.has("message")) {
       std::string json = s.has("data") ? s["data"].toJson() : "null";
       jsui_post_message(rt, s["message"].asString().c_str(), json.c_str());
+      return true;
+    }
+    if (s.has("state")) {
+      std::string key = s["state"].asString();
+      if (s.has("patch")) jsui_patch_state(rt, key.c_str(), s["patch"].toJson().c_str());
+      else jsui_set_state(rt, key.c_str(), s.has("data") ? s["data"].toJson().c_str() : nullptr);
       return true;
     }
     if (s.has("leave")) {
