@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "text/text_layout.h"
 
 #include <algorithm>
@@ -529,6 +530,17 @@ TextCache* ensureCache(Node* n) {
   fresh->rtl = rtl;
 
   auto builder = tl::ParagraphBuilder::make(ps, fm->collection());
+  if (!builder) {
+    // No SkUnicode (e.g. ICU data missing): lay the text out as empty rather
+    // than crash.
+    static bool warned = false;
+    if (!warned) std::fprintf(stderr, "jsui: text shaping unavailable (ICU data missing?)\n");
+    warned = true;
+    fresh->empty = true;
+    cache = fresh.get();
+    n->textCache = std::move(fresh);
+    return cache;
+  }
   st.builder = builder.get();
   st.content.clear();
   builder->pushStyle(baseSk);

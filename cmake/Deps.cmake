@@ -126,6 +126,20 @@ elseif(WIN32)
   target_link_libraries(jsui_skia INTERFACE user32 gdi32 ole32 opengl32 usp10)
 endif()
 
+# On Windows the prebuilt Skia's ICU loads its data from icudtl.dat next to
+# the executable (SkLoadICU); without it SkUnicode is unavailable and text
+# shaping fails. Embedders ship the same file beside their game binary.
+set(JSUI_ICU_DATA "")
+if(WIN32 AND EXISTS ${JSUI_SKIA_DIR}/third_party/externals/icu/flutter/icudtl.dat)
+  set(JSUI_ICU_DATA ${JSUI_SKIA_DIR}/third_party/externals/icu/flutter/icudtl.dat)
+endif()
+function(jsui_copy_icu_data target)
+  if(JSUI_ICU_DATA)
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${JSUI_ICU_DATA} $<TARGET_FILE_DIR:${target}>/icudtl.dat)
+  endif()
+endfunction()
+
 # The prebuilt Skia's FreeType (ftgzip) needs zlib's unprefixed inflate*
 # symbols. Use the system zlib where there is one (Linux, macOS SDK) and
 # build it from source elsewhere (Windows).
