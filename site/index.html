@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>JSUI · React Native game UI, everywhere</title>
+  <meta name="description" content="JSUI is an embeddable game UI runtime: write React Native, ship it inside your engine. This whole site is rendered by JSUI compiled to WebAssembly.">
+  <meta name="theme-color" content="#05070f">
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #05070f; }
+    #ui { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; display: block; }
+    #splash { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+              gap: 18px; color: #a3aecb; font: 500 14px/1.4 system-ui, -apple-system, Segoe UI, sans-serif;
+              transition: opacity .45s ease; pointer-events: none; }
+    #splash.gone { opacity: 0; }
+    #splash .mark { width: 40px; height: 40px; border-radius: 11px; display: grid; place-items: center;
+                    background: linear-gradient(135deg, #ffe29a, #f2c35b 45%, #4fd1ff); animation: pulse 1.4s ease-in-out infinite; }
+    #splash .mark i { width: 16px; height: 16px; border-radius: 4px; background: #05070f; transform: rotate(45deg); }
+    #splash .bar { width: 180px; height: 3px; border-radius: 2px; background: #151d33; overflow: hidden; }
+    #splash .bar b { display: block; height: 100%; width: 30%; background: #f2c35b; animation: slide 1.1s ease-in-out infinite; }
+    @keyframes pulse { 50% { transform: scale(.92); opacity: .8; } }
+    @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(330%); } }
+    #err { position: fixed; left: 12px; right: 12px; bottom: 12px; max-height: 40vh; overflow: auto; padding: 10px 12px;
+           border-radius: 8px; background: #3d1214ee; color: #ffdcd7; font: 12px/1.4 ui-monospace, monospace;
+           white-space: pre-wrap; display: none; z-index: 2; }
+  </style>
+</head>
+<body>
+  <canvas id="ui" aria-label="JSUI showcase (rendered by the JSUI WebAssembly runtime)"></canvas>
+  <div id="splash"><div class="mark"><i></i></div><div>Booting the JSUI runtime…</div><div class="bar"><b></b></div></div>
+  <div id="err"></div>
+  <noscript><p style="color:#eef2ff;font:16px system-ui;padding:24px">This site is rendered by a WebAssembly UI runtime and needs JavaScript.</p></noscript>
+  <script type="module">
+    import { createJsui } from './jsui-web.js';
+
+    // Query options: ?renderer=gpu|webgl|2d (default: gpu when the WebGL
+    // module is deployed), ?stats=1 logs frame timings, ?dev=<bundle url>
+    // runs a `jsui dev` bundle with live reload inside this page.
+    const q = new URLSearchParams(location.search);
+    const err = document.getElementById('err');
+    const splash = document.getElementById('splash');
+    const showError = (msg) => { err.textContent = msg; err.style.display = msg ? 'block' : 'none'; };
+
+    const modules = await fetch('./modules.json').then((r) => r.json()).catch(() => ({ cpu: true }));
+    const wantGpu = (q.get('renderer') || (modules.gpu ? 'gpu' : 'auto')) === 'gpu' && modules.gpu;
+    const route = () => decodeURIComponent(location.hash.replace(/^#/, '')) || '/';
+
+    try {
+      const jsui = await createJsui({
+        canvas: document.getElementById('ui'),
+        bundleUrl: q.get('dev') || './app/bundle.js',
+        devMode: !!q.get('dev'),
+        renderer: wantGpu ? 'gpu' : (q.get('renderer') || 'auto'),
+        moduleUrl: new URL(wantGpu ? './jsui/dist-webgl/jsui.js' : './jsui/dist/jsui.js', location.href),
+        // Big canvases at 3x cost a lot of fill for little gain.
+        pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
+      });
+      window.jsui = jsui;
+      jsui.on('error', showError);
+      jsui.on('message', (name, data) => {
+        if (name === 'ready') jsui.postMessage('route', route());
+        else if (name === 'route') {
+          if (route() !== data) history.pushState(null, '', data === '/' ? location.pathname + location.search : '#' + data);
+          document.title = 'JSUI · ' + (data === '/' ? 'React Native game UI, everywhere' : data.split('/')[1].replace(/^\w/, (c) => c.toUpperCase()));
+        } else if (name === 'jsui:openURL') window.open(data.url, '_blank', 'noopener');
+        else if (name === 'title') document.title = data;
+      });
+      addEventListener('popstate', () => jsui.postMessage('route', route()));
+      addEventListener('hashchange', () => jsui.postMessage('route', route()));
+      if (q.get('stats') === '1') {
+        let last = 0;
+        jsui.on('frame', (s) => {
+          const now = performance.now();
+          if (now - last > 1000) { last = now; console.log(`[jsui ${jsui.renderer}] tick ${s.tickMs.toFixed(2)} ms, paint ${s.renderMs.toFixed(2)} ms, blit ${s.blitMs.toFixed(2)} ms`); }
+        });
+      }
+      await jsui.whenIdle();
+      splash.classList.add('gone');
+      setTimeout(() => splash.remove(), 600);
+    } catch (e) {
+      showError('Could not start the JSUI runtime: ' + (e && e.stack || e));
+    }
+  </script>
+</body>
+</html>

@@ -15,6 +15,12 @@ Fast development of beautiful, responsive in-game UIs with React.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
 
+**Showcase: [orktes.github.io/jsui](https://orktes.github.io/jsui/)**, a site
+rendered entirely by the JSUI WebAssembly build into one canvas: interactive
+game screens, input, motion, a live-code playground and embedding guides. Its
+source is ordinary React Native in [site/](site/) (`node site/scripts/build.mjs`,
+then `node site/scripts/serve.mjs`).
+
 ## Game data
 
 The game shares state with the UI by key; the UI asks the game with calls

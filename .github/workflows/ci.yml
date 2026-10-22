@@ -52,6 +52,7 @@ jobs:
               - *core
               - 'scripts/**'
               - 'web/**'
+              - 'site/**'
             godot:
               - *core
               - 'integrations/godot/**'
@@ -246,7 +247,7 @@ jobs:
           name: jsui-wasm
           path: web/dist
 
-  # ------------------------------------------- wasm, GPU variant (advisory)
+  # ------------------------------------------------------- wasm, GPU variant
   # Skia with Ganesh + WebGL (WEBGL=1): its own Skia cache key and output dir
   # (web/dist-webgl), so the CPU wasm job above is unaffected. The browser
   # tests run against the GPU module (renderer 'gpu' tests draw through Skia
@@ -256,7 +257,6 @@ jobs:
     runs-on: ubuntu-24.04
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.wasm == 'true'
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -304,6 +304,20 @@ jobs:
         with:
           name: jsui-wasm-webgl
           path: web/dist-webgl
+      # The showcase site (site/, deployed by pages.yml) runs on this module
+      # with the GPU renderer: build it and open every route in Chromium (no
+      # runtime errors, nothing blank).
+      - name: Site (build + smoke test, GPU module)
+        run: |
+          npm ci --no-audit --no-fund
+          node site/scripts/build.mjs --wasm web/dist-webgl --wasm-webgl web/dist-webgl
+          node site/test/smoke.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: site-screenshots
+          path: site/test/output
+          if-no-files-found: ignore
 
   # ----------------------------------------------------------------------- js
   js:
