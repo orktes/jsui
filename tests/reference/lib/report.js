@@ -35,7 +35,7 @@ function caseCard(r) {
     <span class="pct ${r.status}">${pct}</span>
     <span class="dim">max ${r.meta.maxMismatch}%</span>
   </header>
-  ${r.error ? `<pre class="error">${esc(r.error)}</pre>` : ''}
+  ${r.error ? `<pre class="error">${esc(r.error)}</pre>` : r.notes ? `<pre>${esc(r.notes.join('\n'))}</pre>` : ''}
   <div class="panels">
     ${panel('Expected · react-native-web / Chromium', r.expectedPng, 'expected')}
     ${r.chromeOnly ? '' : panel('Actual · jsui-render', r.actualPng, 'actual')}

@@ -4,13 +4,15 @@ import path from 'node:path';
 import { EXAMPLES_DIR } from './paths.js';
 
 // Example groups, in report order. Each *.jsx directly inside is one case.
-const GROUPS = ['features', 'screens'];
+// `animated` cases set meta.frames and are rendered frame by frame (see
+// run.js renderAnimated and lib/motion.js).
+const GROUPS = ['features', 'screens', 'animated'];
 
 export const DEFAULT_META = { width: 800, height: 600, maxMismatch: 1.5, waitMs: 300 };
 
 // `meta` must be a plain object literal (`export const meta = { ... };`). It is
 // read textually so no app code (or React) has to run in Node.
-function readMeta(file) {
+export function readMeta(file) {
   const src = fs.readFileSync(file, 'utf8');
   const m = /export\s+const\s+meta\s*=\s*\{/.exec(src);
   if (!m) return { ...DEFAULT_META };

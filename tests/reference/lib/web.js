@@ -99,7 +99,8 @@ AppRegistry.runApplication('App', { rootTag: document.getElementById('root') });
     alias: { 'react-native': 'react-native-web' },
     // Resolve shared deps from this package so examples need no node_modules.
     nodePaths: [path.join(PKG_DIR, 'node_modules'), path.resolve(PKG_DIR, '../../node_modules')],
-    define: { 'process.env.NODE_ENV': '"production"', __DEV__: 'false' },
+    // react-native-web's Animated reads the Node-style `global`.
+    define: { 'process.env.NODE_ENV': '"production"', __DEV__: 'false', global: 'globalThis' },
     loader: { '.png': 'file', '.jpg': 'file', '.jpeg': 'file', '.js': 'jsx' },
     plugins: [rnwShimPlugin],
     logLevel: 'silent',
@@ -136,19 +137,9 @@ export class ChromeRenderer {
     return this.browser.newContext({ deviceScaleFactor: scale, colorScheme: 'dark', reducedMotion: 'reduce' });
   }
 
-  /**
-   * Screenshot one built case. Returns { png: Buffer, cached: boolean, logs: string[] }.
-   */
-  async render(webDir, meta, scale, { useCache = true } = {}) {
-    const html = pageHtml(meta);
-    const h = crypto.createHash('sha256');
-    h.update(JSON.stringify({ HARNESS_VERSION, platform: process.platform, v: this.version, CHROME_ARGS, scale, w: meta.width, h: meta.height, waitMs: meta.waitMs }));
-    h.update(html);
-    hashDir(h, webDir);
-    const key = h.digest('hex').slice(0, 24);
-    const cacheFile = path.join(CACHE_DIR, `${key}.png`);
-    if (useCache && fs.existsSync(cacheFile)) return { png: fs.readFileSync(cacheFile), cached: true, logs: [] };
-
+  // A page showing the built case, with fonts and images ready. The caller
+  // closes `ctx`.
+  async openPage(webDir, html, meta, scale) {
     const ctx = await this.newContext(scale);
     const page = await ctx.newPage();
     const logs = [];
@@ -177,6 +168,53 @@ export class ChromeRenderer {
         await Promise.all(imgs.map((img) => (img.complete ? img.decode().catch(() => {}) : new Promise((r) => { img.onload = img.onerror = r; }))));
         await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
       }, INTER_FACES);
+    } catch (e) {
+      await ctx.close();
+      throw e;
+    }
+    return { ctx, page, logs };
+  }
+
+  /**
+   * Frame-by-frame screenshots of a case whose App takes its frame from
+   * globalThis.__setFrame (see examples/animated). Calls onFrame(i, png).
+   */
+  async renderFrames(webDir, meta, scale, frames, onFrame) {
+    const { ctx, page, logs } = await this.openPage(webDir, pageHtml(meta), meta, scale);
+    try {
+      for (const i of frames) {
+        await page.evaluate(
+          (f) =>
+            new Promise((r) => {
+              globalThis.__setFrame(f);
+              requestAnimationFrame(() => requestAnimationFrame(r));
+            }),
+          i,
+        );
+        const png = await page.screenshot({ omitBackground: true, animations: 'disabled', caret: 'hide', clip: { x: 0, y: 0, width: meta.width, height: meta.height } });
+        await onFrame(i, png);
+      }
+      return { logs };
+    } finally {
+      await ctx.close();
+    }
+  }
+
+  /**
+   * Screenshot one built case. Returns { png: Buffer, cached: boolean, logs: string[] }.
+   */
+  async render(webDir, meta, scale, { useCache = true } = {}) {
+    const html = pageHtml(meta);
+    const h = crypto.createHash('sha256');
+    h.update(JSON.stringify({ HARNESS_VERSION, platform: process.platform, v: this.version, CHROME_ARGS, scale, w: meta.width, h: meta.height, waitMs: meta.waitMs }));
+    h.update(html);
+    hashDir(h, webDir);
+    const key = h.digest('hex').slice(0, 24);
+    const cacheFile = path.join(CACHE_DIR, `${key}.png`);
+    if (useCache && fs.existsSync(cacheFile)) return { png: fs.readFileSync(cacheFile), cached: true, logs: [] };
+
+    const { ctx, page, logs } = await this.openPage(webDir, html, meta, scale);
+    try {
       if (meta.waitMs) await page.waitForTimeout(Math.min(meta.waitMs, 2000));
       // Chrome may first paint scaled images with a cheaper filter and
       // upgrade later, so wait until two consecutive frames are identical.

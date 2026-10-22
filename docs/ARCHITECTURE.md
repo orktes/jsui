@@ -634,7 +634,16 @@ a `JsuiLoadFn`). An embedder loader only sees the URL (GET semantics).
 `tests/reference` renders each example twice — with JSUI (`jsui-render`) and
 with react-native-web in headless Chromium (Playwright), same viewport, same
 Inter font files — and compares the PNGs with a per-pixel tolerance. A failing
-case writes `expected/actual/diff` images and an HTML report.
+case writes `expected/actual/diff` images and an HTML report. Cases in
+`examples/animated` are rendered frame by frame (the frame index drives the
+transform values) and also pass a motion check: text must move rigidly with
+its box, and boxes must land where Chrome puts them.
+
+Pixel snapping follows Chrome: border boxes snap to device pixels in layout
+space, before the node's own transform, and the transform then applies
+unsnapped. Under a fractional translate or scale (springs), a box and its
+text therefore move together; text under a transform snaps its baseline in
+the same layout space and uses subpixel glyph positions on both axes.
 
 ## @jsui/react bridge usage (JS side)
 

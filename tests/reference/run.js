@@ -9,7 +9,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { discoverCases } from './lib/discover.js';
 import { buildWebBundle, ChromeRenderer, rnwVersion } from './lib/web.js';
-import { buildJsuiBundle, jsuiBuilderKind, jsuiRenderAvailable, runJsuiRender } from './lib/jsui.js';
+import { buildJsuiBundle, frameName, jsuiBuilderKind, jsuiRenderAvailable, renderJsuiFrames, runJsuiRender } from './lib/jsui.js';
+import { motionChecks } from './lib/motion.js';
 import { comparePngs, regionMismatchPct, worstTile } from './lib/compare.js';
 import { writeReport } from './lib/report.js';
 import { JSUI_RENDER, OUTPUT_DIR } from './lib/paths.js';
@@ -87,6 +88,20 @@ async function main() {
       r.expectedPng = path.join(dir, 'expected.png');
       try {
         const webDir = await buildWebBundle(c.file, path.join(dir, 'web'));
+        if (c.meta.frames) {
+          // Animated case: every frame, uncached (cheap: one page).
+          r.expectedFrames = [];
+          await fs.promises.mkdir(path.join(dir, 'expected'), { recursive: true });
+          const { logs } = await chrome.renderFrames(webDir, c.meta, scale, frameList(c.meta), async (i, png) => {
+            const f = path.join(dir, 'expected', frameName(i));
+            await fs.promises.writeFile(f, png);
+            r.expectedFrames.push(f);
+          });
+          await fs.promises.copyFile(r.expectedFrames[keyFrame(c.meta)], r.expectedPng);
+          r.webLogs = logs;
+          results.push(r);
+          continue;
+        }
         const { png, cached, logs } = await chrome.render(webDir, c.meta, scale, { useCache: opts.cache });
         await fs.promises.writeFile(r.expectedPng, png);
         r.webLogs = logs;
@@ -112,6 +127,12 @@ async function main() {
       try {
         const bundle = path.join(dir, 'jsui', 'bundle.js');
         await buildJsuiBundle(c.file, bundle);
+        if (c.meta.frames) {
+          r.actualFrames = await renderJsuiFrames(bundle, path.join(dir, 'actual'), c.meta, r.scale, frameList(c.meta), 2);
+          await fs.promises.copyFile(r.actualFrames[keyFrame(c.meta)], r.actualPng);
+          if (r.expectedFrames) compareAnimated(r, c.meta, dir);
+          return;
+        }
         const run = await runJsuiRender(bundle, r.actualPng, c.meta, r.scale);
         r.jsuiMs = run.ms;
         r.jsuiLog = run.stderr.trim();
@@ -159,7 +180,8 @@ async function main() {
     const tag = { pass: color(32, 'PASS'), fail: color(31, 'FAIL'), error: color(33, 'ERR '), rendered: color(36, 'OK  ') }[r.status];
     console.log(`${tag} ${r.name.padEnd(w)} ${pct}${r.cached ? color(90, ' [chrome cached]') : ''}`);
     if (r.status === 'error' && r.error) console.log(color(90, '     ' + r.error.split('\n')[0]));
-    for (const l of r.localFailures || []) console.log(color(90, '     ' + l.text));
+    if (r.notes) for (const t of r.notes) console.log(color(90, '     ' + t));
+    else for (const l of r.localFailures || []) console.log(color(90, '     ' + l.text));
   }
   console.log(`\nreport: ${path.relative(process.cwd(), reportFile) || reportFile}`);
   const bad = results.filter((r) => r.status === 'fail' || r.status === 'error').length;
@@ -190,6 +212,44 @@ function localChecks(cmp, meta, scale) {
     out.push({ ok: pct <= g.maxMismatch, text: `region "${g.name}": ${pct.toFixed(1)}% (max ${g.maxMismatch}%)` });
   }
   return out;
+}
+
+// Animated cases (examples/animated, meta.frames): frames 0..frames-1; the
+// report shows the middle frame.
+const frameList = (meta) => Array.from({ length: meta.frames }, (_, i) => i);
+const keyFrame = (meta) => meta.frames >> 1;
+
+// Every frame is pixel-compared (the worst frame sets mismatchPct, and the
+// local checks run on it), then lib/motion.js checks that text moves
+// rigidly with its box and boxes sit where Chrome puts them.
+function compareAnimated(r, meta, dir) {
+  const exp = r.expectedFrames.map((f) => fs.readFileSync(f));
+  const act = r.actualFrames.map((f) => fs.readFileSync(f));
+  let worst = null;
+  let worstFrame = 0;
+  exp.forEach((e, i) => {
+    const cmp = comparePngs(e, act[i]);
+    if (!worst || cmp.mismatchPct > worst.mismatchPct || cmp.sizeMismatch) {
+      worst = cmp;
+      worstFrame = i;
+    }
+  });
+  r.diffPng = path.join(dir, 'diff.png');
+  fs.writeFileSync(r.diffPng, worst.diffPng);
+  fs.copyFileSync(r.expectedFrames[worstFrame], r.expectedPng);
+  fs.copyFileSync(r.actualFrames[worstFrame], r.actualPng);
+  r.mismatchPct = worst.mismatchPct;
+  r.sizeMismatch = worst.sizeMismatch;
+  const local = localChecks(worst, meta, r.scale);
+  if (meta.motion) local.push(...motionChecks(exp, act, meta, r.scale));
+  r.localFailures = local.filter((l) => !l.ok);
+  r.motion = local.filter((l) => l.stats).map((l) => l.text);
+  r.status = worst.mismatchPct <= meta.maxMismatch && !worst.sizeMismatch && !r.localFailures.length ? 'pass' : 'fail';
+  const notes = [`worst frame ${worstFrame} of ${exp.length}`, ...r.motion];
+  if (worst.sizeMismatch) notes.push('expected and actual sizes differ');
+  for (const l of r.localFailures) if (!r.motion.includes(l.text)) notes.push(l.text);
+  r.error = r.status === 'pass' ? undefined : notes.join('\n');
+  r.notes = notes;
 }
 
 main().catch((e) => {
