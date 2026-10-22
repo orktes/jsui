@@ -599,11 +599,27 @@ YGSize measureText(YGNodeConstRef y, float width, YGMeasureMode wm, float height
   return {w, h};
 }
 
+// First-line baseline (as painted) from the border-box top, for
+// alignItems: 'baseline'. Without it Yoga uses the box bottom.
+float textBaseline(YGNodeConstRef y, float width, float height) {
+  Node* n = static_cast<Node*>(YGNodeGetContext(y));
+  TextCache* c = n ? ensureCache(n) : nullptr;
+  YGNodeRef yn = const_cast<YGNodeRef>(y);
+  float top = YGNodeLayoutGetPadding(yn, YGEdgeTop) + YGNodeLayoutGetBorder(yn, YGEdgeTop);
+  if (!c || !c->paragraph || c->empty) return height;
+  float inner = width - YGNodeLayoutGetPadding(yn, YGEdgeLeft) - YGNodeLayoutGetPadding(yn, YGEdgeRight) -
+                YGNodeLayoutGetBorder(yn, YGEdgeLeft) - YGNodeLayoutGetBorder(yn, YGEdgeRight);
+  layoutAt(c, std::max(0.f, inner));
+  float b = c->paragraph->getAlphabeticBaseline();
+  return top + std::floor(b + 0.5f) + c->paintDy;
+}
+
 }  // namespace
 
 void installMeasure(Node* node) {
   if (!node->yoga()) return;
   if (node->type() == NodeType::Text || node->type() == NodeType::TextInput) {
+    YGNodeSetBaselineFunc(node->yoga(), textBaseline);
     if (YGNodeGetChildCount(node->yoga()) == 0) YGNodeSetMeasureFunc(node->yoga(), measureText);
     YGNodeSetNodeType(node->yoga(), YGNodeTypeText);
   }

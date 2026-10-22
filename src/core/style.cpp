@@ -1425,7 +1425,14 @@ void parseBorderColors(const Value& style, Color out[4]) {
 
 }  // namespace
 
-void applyStyle(const Value& style, ComputedStyle* out, YGNodeRef yoga) {
+float snapBorderWidth(float w, float pixelRatio) {
+  if (!(w > 0)) return w;
+  float pr = pixelRatio > 0 ? pixelRatio : 1;
+  float d = w * pr;
+  return (d < 1 ? 1.f : std::floor(d)) / pr;
+}
+
+void applyStyle(const Value& style, ComputedStyle* out, YGNodeRef yoga, float pixelRatio) {
   *out = ComputedStyle();
   const Value& s = style;  // may be null: everything resets to defaults
 
@@ -1585,7 +1592,7 @@ void applyStyle(const Value& style, ComputedStyle* out, YGNodeRef yoga) {
   float bw[kEdgeCount];
   for (YGEdge e : kAllEdges) {
     float w = YGUndefined;
-    if (slots[int(e)] && pxFromValue(*slots[int(e)], &w)) w = std::max(0.f, w);
+    if (slots[int(e)] && pxFromValue(*slots[int(e)], &w)) w = snapBorderWidth(std::max(0.f, w), pixelRatio);
     else w = YGUndefined;
     bw[int(e)] = w;
     YGNodeStyleSetBorder(yoga, e, w);
@@ -1670,7 +1677,7 @@ void applyStyle(const Value& style, ComputedStyle* out, YGNodeRef yoga) {
       if (m == kBlendModeNames[i]) out->blendMode = uint8_t(i);
   }
   pxFromValue(s["outlineWidth"], &out->outlineWidth);
-  out->outlineWidth = std::max(0.f, out->outlineWidth);
+  out->outlineWidth = snapBorderWidth(std::max(0.f, out->outlineWidth), pixelRatio);
   pxFromValue(s["outlineOffset"], &out->outlineOffset);
   parseColor(s["outlineColor"], &out->outlineColor);
   parseBorderStyle(s["outlineStyle"], &out->outlineStyle);

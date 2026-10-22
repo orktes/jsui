@@ -172,7 +172,12 @@ extern const int kBlendModeCount;
 
 // Parses a flattened style object into `out` and writes layout properties to
 // `yoga`. Unknown keys are ignored. Resets everything not present first.
-void applyStyle(const Value& style, ComputedStyle* out, YGNodeRef yoga);
+// `pixelRatio` snaps border / outline widths to device pixels like Chrome.
+void applyStyle(const Value& style, ComputedStyle* out, YGNodeRef yoga, float pixelRatio = 1);
+
+// Chrome's border-width snapping: a width under one device pixel becomes one
+// device pixel, anything larger is floored to whole device pixels.
+float snapBorderWidth(float w, float pixelRatio);
 
 // Parses a CSS box-shadow list ("0 4px 12px rgba(0,0,0,.3), inset 0 1px #fff")
 // or RN array-of-objects form.

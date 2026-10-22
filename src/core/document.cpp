@@ -67,11 +67,21 @@ void Document::clear() {
   root_->setProps(Value());
 }
 
+namespace {
+// Border widths snap to device pixels, so a new pixel ratio restyles.
+void restyle(Node* n) {
+  n->setProps(Value(n->props()));
+  for (Node* c : n->children()) restyle(c);
+}
+}  // namespace
+
 void Document::setViewport(float width, float height, float pixelRatio) {
   if (width == width_ && height == height_ && pixelRatio == pixelRatio_) return;
+  bool prChanged = pixelRatio != pixelRatio_;
   width_ = width;
   height_ = height;
   pixelRatio_ = pixelRatio;
+  if (prChanged && root_) restyle(root_);
   markLayoutDirty();
 }
 

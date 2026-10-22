@@ -130,7 +130,7 @@ void Node::setProps(const Value& props) {
   bool relayout = false;
   if (yoga_) {
     TextStyle oldText = std::move(style_.text);
-    applyStyle(props_["style"], &style_, yoga_);
+    applyStyle(props_["style"], &style_, yoga_, doc_ ? doc_->pixelRatio() : 1);
     if (props_["pointerEvents"].isString() && !props_["style"].has("pointerEvents")) {
       const std::string& pe = props_["pointerEvents"].asString();
       style_.pointerEvents = pe == "none"       ? PointerEvents::None
