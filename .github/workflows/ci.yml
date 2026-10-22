@@ -371,6 +371,59 @@ jobs:
           path: tests/reference/output
           if-no-files-found: warn
 
+  # --------------------------------------------------- reference (macOS), advisory
+  # Same suite against Chrome on macOS (CoreText text on both sides). Only
+  # jsui-render is built; Skia and FetchContent sources are cached.
+  reference-macos:
+    name: reference (macOS, jsui vs react-native-web)
+    runs-on: macos-14
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.reference == 'true'
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Cache prebuilt Skia
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-prebuilt
+          key: skia-prebuilt-macos-14-${{ hashFiles('cmake/Deps.cmake') }}
+      - name: Cache FetchContent sources
+        uses: actions/cache@v4
+        with:
+          path: build/_deps/*-src
+          key: reference-macos-deps-${{ hashFiles('cmake/*.cmake') }}
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: reference-${{ runner.os }}
+          max-size: 500M
+      - name: Build jsui-render
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DJSUI_BUILD_TESTS=OFF -DJSUI_BUILD_VIEWER=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --build build -j "$(sysctl -n hw.ncpu)" --target jsui-render
+      - name: Install
+        run: if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json', 'web/package.json') }}
+      - name: Chromium
+        run: npx playwright install chromium
+      - name: Reference tests
+        run: npm run test:reference
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reference-report-macos
+          path: tests/reference/output
+          if-no-files-found: warn
+
   # ------------------------------------------- native (macOS / Windows), advisory
   native-other:
     name: native (${{ matrix.os }})

@@ -96,6 +96,18 @@ by `npm --workspace tests/reference run assets`
 * Chromium runs with `--font-render-hinting=none --disable-lcd-text
   --disable-font-subpixel-positioning --force-color-profile=srgb --disable-gpu`
   and one raster thread; each case gets a fresh browser context.
+* Text rasterisation settings match JSUI's (unhinted outlines, grayscale
+  anti-aliasing, subpixel glyph positions) on every platform. Most flags above
+  only affect Linux / Windows Chrome; on macOS the page sets
+  `-webkit-font-smoothing: antialiased`, without which Chrome draws hinted
+  CoreText glyphs, i.e. CoreGraphics' dilated "font smoothing" outlines
+  (bolder than JSUI's, and dependent on the machine's AppleFontSmoothing
+  setting). Linux and Windows Chrome ignore the property.
+* Line boxes: Chrome on Linux borrows a pixel from the ascent when the
+  descent rounds down; on macOS / Windows it does not. JSUI follows the host
+  platform (`chromeLineMetrics` in `src/text/text_layout.cpp`), so each
+  platform is compared against its own Chrome. CI runs the suite on Linux
+  (required) and macOS (`reference-macos`, advisory).
 * Fonts: the same `assets/fonts/Inter-*.ttf` files are served to Chrome via
   `@font-face` (also aliased under the `System` / platform family names that
   react-native-web uses by default) and passed to `jsui-render --font`.
