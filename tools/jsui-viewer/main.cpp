@@ -1,6 +1,6 @@
 // jsui-viewer: run a JSUI bundle in a window.
 //
-//   jsui-viewer [--dev] [--gpu [--gl-core]] [--width W] [--height H]
+//   jsui-viewer [--dev] [--cpu | --gl-core] [--width W] [--height H]
 //               <bundle path or URL> [--frames N] [--screenshot out.png]
 //
 // --dev polls the dev server (`jsui dev`) and reloads on change; JS errors
@@ -8,10 +8,14 @@
 // keyboard, text input and game controllers are forwarded to the runtime.
 // --frames / --screenshot run a fixed number of frames and exit (CI, e.g.
 // with SDL_VIDEODRIVER=dummy).
-// --gpu creates an SDL OpenGL context and draws the UI with Skia Ganesh
-// straight into the window's default framebuffer (jsui_render_gl) instead of
-// rasterising on the CPU and uploading a texture; the screenshot is then read
-// back from the framebuffer. Falls back to the CPU path if GL is unavailable.
+// By default the viewer creates an SDL OpenGL context and draws the UI with
+// Skia Ganesh straight into the window's default framebuffer (jsui_render_gl)
+// instead of rasterising on the CPU and uploading a texture; the screenshot is
+// then read back from the framebuffer. If the GL window, the GL context or the
+// Skia GPU context cannot be created it warns on stderr and falls back to the
+// CPU path. --cpu forces the CPU raster + SDL texture path (deterministic
+// output; what CI's CPU steps use). --gpu is accepted as a no-op alias of the
+// default.
 // --gl-core asks for an OpenGL 3.2 core, forward-compatible context. It is
 // the default on macOS, where SDL otherwise gets a legacy 2.1 context whose
 // GLSL 1.20 Skia's shaders cannot use ("undeclared gl_VertexID"); elsewhere
@@ -38,7 +42,7 @@ namespace {
 struct Options {
   std::string bundle;
   bool dev = false;
-  bool gpu = false;
+  bool gpu = true;  // --cpu turns it off
 #if defined(__APPLE__)
   bool glCore = true;
 #else
@@ -51,11 +55,13 @@ struct Options {
 
 void usage() {
   std::printf(
-      "usage: jsui-viewer [--dev] [--gpu [--gl-core]] [--width W] [--height H] [--frames N] [--screenshot out.png]\n"
+      "usage: jsui-viewer [--dev] [--cpu | --gl-core] [--width W] [--height H] [--frames N] [--screenshot out.png]\n"
       "                   <bundle.js|url>\n"
       "  --dev        poll the dev server and reload on change, show errors on screen\n"
-      "  --gpu        render with Skia Ganesh into an OpenGL context (default: CPU raster + texture)\n"
-      "  --gl-core    with --gpu: request an OpenGL 3.2 core profile context (always on macOS)\n"
+      "  --cpu        render with the CPU rasteriser + an SDL texture (default: Skia Ganesh on OpenGL,\n"
+      "               falling back to the CPU path when GL is unavailable)\n"
+      "  --gpu        accepted for compatibility: the GPU renderer is the default\n"
+      "  --gl-core    request an OpenGL 3.2 core profile context (always on macOS)\n"
       "  F5 reloads the bundle, Esc dismisses the error overlay (dev mode)\n");
 }
 
@@ -64,7 +70,8 @@ bool parseArgs(int argc, char** argv, Options* o) {
     std::string a = argv[i];
     auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
     if (a == "--dev") o->dev = true;
-    else if (a == "--gpu") o->gpu = true;
+    else if (a == "--gpu") o->gpu = true;  // the default; kept as an alias
+    else if (a == "--cpu") o->gpu = false;
     else if (a == "--gl-core") o->glCore = true;
     else if (a == "--width" || a == "--height" || a == "--frames" || a == "--screenshot") {
       const char* v = next();
@@ -182,7 +189,7 @@ class Viewer {
     window_ = SDL_CreateWindow(title.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, opt_.width, opt_.height,
                                windowFlags);
     if (!window_ && opt_.gpu) {
-      std::fprintf(stderr, "OpenGL window failed (%s), using the CPU renderer\n", SDL_GetError());
+      std::fprintf(stderr, "warning: OpenGL window failed (%s), falling back to the CPU renderer\n", SDL_GetError());
       opt_.gpu = false;
       window_ = SDL_CreateWindow(title.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, opt_.width,
                                  opt_.height, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
@@ -192,7 +199,7 @@ class Viewer {
       return 1;
     }
     if (opt_.gpu && !initGpu()) {
-      std::fprintf(stderr, "GPU renderer unavailable, using the CPU renderer\n");
+      std::fprintf(stderr, "warning: GPU renderer unavailable, falling back to the CPU renderer (--cpu skips the attempt)\n");
       opt_.gpu = false;
     }
     if (!opt_.gpu) {
@@ -269,7 +276,7 @@ class Viewer {
   bool initGpu() {
     glContext_ = SDL_GL_CreateContext(window_);
     if (!glContext_) {
-      std::fprintf(stderr, "SDL_GL_CreateContext failed: %s\n", SDL_GetError());
+      std::fprintf(stderr, "warning: SDL_GL_CreateContext failed: %s\n", SDL_GetError());
       return false;
     }
     SDL_GL_MakeCurrent(window_, glContext_);
@@ -278,6 +285,7 @@ class Viewer {
       gpu_ = jsui_gpu_create_gl([](void*, const char* name) { return SDL_GL_GetProcAddress(name); }, nullptr);
     }
     if (!gpu_) {
+      std::fprintf(stderr, "warning: Skia GPU context creation failed (GL functions or Ganesh unavailable)\n");
       SDL_GL_DeleteContext(glContext_);
       glContext_ = nullptr;
       return false;

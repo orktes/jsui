@@ -255,6 +255,14 @@ TEST(native_animated_timing_spring_decay) {
   na.startAnimation(15, 1, json(R"({"type":"decay","velocity":-1})"), 60);
   CHECK(na.ends.size() == 1 && na.ends[0].id == 14 && !na.ends[0].finished);
   CHECK_EQ(na.animationCount(), size_t(1));
+  // A zero-duration timing applies at once and still reports its end (a
+  // sequence / loop it is part of must go on).
+  na.ends.clear();
+  na.startAnimation(17, 1, json(R"({"type":"frames","frames":[0,1],"duration":0,"toValue":3})"), 70);
+  CHECK_EQ(na.getValue(1), 3.0);
+  CHECK(na.ends.size() == 2 && na.ends[0].id == 15 && !na.ends[0].finished);
+  CHECK(na.ends.size() == 2 && na.ends[1].id == 17 && na.ends[1].finished && na.ends[1].value == 3.0);
+  CHECK(!na.animating());
   std::string error;
   CHECK(!na.startAnimation(16, 999, json(R"({"type":"decay"})"), 0, &error));
   CHECK(!na.startAnimation(16, 1, json(R"({"type":"bogus"})"), 0, &error));

@@ -331,8 +331,14 @@ Value::Object InputManager::baseEvent(const char* type, const Node* target) cons
   Value::Object ev;
   ev["type"] = Value(type);
   ev["target"] = Value(double(target ? target->id() : rt_.doc.root()->id()));
-  ev["timestamp"] = Value(rt_.now);
+  ev["timestamp"] = Value(eventTime());
   return ev;
+}
+
+double InputManager::eventTime() const {
+  double t = std::isfinite(eventTime_) ? eventTime_ : rt_.now;
+  lastEventTime_ = std::max(lastEventTime_, t);
+  return lastEventTime_;
 }
 
 void InputManager::addModifiers(Value::Object& ev) const {

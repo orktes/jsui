@@ -31,6 +31,9 @@ NodeCache* ensure(Node* node);
 // Starts loading the node's image now, so it is ready (and sized) by the
 // first paint instead of popping in a frame later.
 void request(Node* node);
+// True when the node's image has finished loading (decoded or failed), or
+// it has no source; never starts a load.
+bool settled(Node* node);
 // Paints the image into `box` (the padding box), clipped to `clip`.
 void paint(Node* node, SkCanvas* canvas, const SkRect& box, const SkRRect& clip);
 

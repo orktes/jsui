@@ -78,7 +78,18 @@ void Document::destroyNode(Node* node) {
   markLayoutDirty();
 }
 
+void Document::queueImageEvents(uint32_t node, bool cached) {
+  for (auto& e : imageEvents) {
+    if (e.node == node) {
+      e = {node, frame, cached};
+      return;
+    }
+  }
+  imageEvents.push_back({node, frame, cached});
+}
+
 void Document::clear() {
+  imageEvents.clear();
   while (!root_->children().empty()) {
     Node* c = root_->children().back();
     destroyNode(c);

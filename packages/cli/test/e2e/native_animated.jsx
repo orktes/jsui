@@ -90,6 +90,9 @@ function App() {
   const blockedNative = useRef(new Animated.Value(0)).current;
   const stopV = useRef(new Animated.Value(0)).current;
   const loopV = useRef(new Animated.Value(0)).current;
+  // Animated.loop(sequence([timing 0->1, zero-duration reset])) on each driver.
+  const seqNative = useRef(new Animated.Value(0)).current;
+  const seqJs = useRef(new Animated.Value(0)).current;
   const scrollY = useRef(new Animated.Value(0)).current;
   const widthV = useRef(new Animated.Value(10)).current;
   const extra = useRef({}).current;
@@ -138,6 +141,18 @@ function App() {
       iterations: 3,
     }).start((r) => post('loopEnd', { finished: r.finished }));
   });
+  useHostMessage('seqLoop', () => {
+    const make = (v, nd) =>
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(v, { toValue: 1, duration: 200, easing: Easing.linear, useNativeDriver: nd }),
+          Animated.timing(v, { toValue: 0, duration: 0, useNativeDriver: nd }),
+        ]),
+      );
+    extra.seq = [make(seqNative, true), make(seqJs, false)];
+    extra.seq.forEach((a) => a.start((r) => post('seqEnd', r.finished)));
+  });
+  useHostMessage('seqStop', () => extra.seq.forEach((a) => a.stop()));
   useHostMessage('layoutProp', () => {
     try {
       Animated.timing(widthV, { toValue: 100, duration: 100, useNativeDriver: true }).start();
@@ -165,6 +180,8 @@ function App() {
       <Animated.View ref={(r) => (refs.current.blockedNative = r)} style={[styles.big, { left: 260, opacity: blockedNative }]} />
       <Animated.View ref={(r) => (refs.current.stop = r)} style={[styles.small, { top: 70, transform: [{ translateX: stopV }] }]} />
       <Animated.View ref={(r) => (refs.current.loop = r)} style={[styles.small, { top: 100, opacity: loopV }]} />
+      <Animated.View ref={(r) => (refs.current.seqNative = r)} style={[styles.small, { top: 160, opacity: seqNative }]} />
+      <Animated.View ref={(r) => (refs.current.seqJs = r)} style={[styles.small, { top: 190, opacity: seqJs }]} />
       <Animated.View ref={(r) => (refs.current.width = r)} style={[styles.small, { top: 130, width: widthV }]} />
       <Animated.ScrollView ref={(r) => (refs.current.scroll = r)} style={styles.scroll} onScroll={onScroll} scrollEventThrottle={16}>
         <View style={{ height: 600, backgroundColor: '#202020' }} />

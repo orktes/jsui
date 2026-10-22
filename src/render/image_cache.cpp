@@ -100,9 +100,14 @@ sk_sp<SkImage> ImageCache::get(const std::string& url, State* state) {
     if (url.rfind("data:", 0) == 0) {
       std::string bytes;
       Entry e;
-      if (decodeDataUri(url, &bytes)) e.image = decodeImage(bytes.data(), bytes.size());
+      bool ok = decodeDataUri(url, &bytes);
+      if (ok) e.image = decodeImage(bytes.data(), bytes.size());
+      e.bytes = bytes.size();
       e.state = e.image ? State::Ready : State::Failed;
-      if (!e.image) rt_.log(JSUI_LOG_WARN, "image failed to decode: data URI");
+      if (!e.image) {
+        e.error = ok ? "failed to decode image data" : "malformed data URI";
+        rt_.log(JSUI_LOG_WARN, "image failed to decode: data URI");
+      }
       auto& slot = entries_[url] = std::move(e);
       if (state) *state = slot.state;
       return slot.image;
@@ -111,8 +116,14 @@ sk_sp<SkImage> ImageCache::get(const std::string& url, State* state) {
     rt_.loader.load(url, [this, url](Resource res) {
       auto& e = entries_[url];
       if (res.ok()) e.image = decodeImage(res.data.data(), res.data.size());
+      e.bytes = res.data.size();
       e.state = e.image ? State::Ready : State::Failed;
-      if (!e.image) rt_.log(JSUI_LOG_WARN, "image failed to load: " + url);
+      if (!e.image) {
+        e.error = res.ok() ? "failed to decode image: " + url
+                           : "failed to load image: " + url + " (status " + std::to_string(res.status) +
+                                 (res.error.empty() ? "" : ", " + res.error) + ")";
+        rt_.log(JSUI_LOG_WARN, "image failed to load: " + url);
+      }
       loaded(url);
     });
     if (state) *state = State::Loading;
@@ -123,8 +134,19 @@ sk_sp<SkImage> ImageCache::get(const std::string& url, State* state) {
 }
 
 void ImageCache::put(const std::string& url, sk_sp<SkImage> image) {
-  entries_[url] = Entry{image ? State::Ready : State::Failed, std::move(image)};
+  bool ok = image != nullptr;
+  entries_[url] = Entry{ok ? State::Ready : State::Failed, std::move(image), 0, ok ? "" : "no image"};
   loaded(url);
+}
+
+bool ImageCache::peek(const std::string& url, Info* info) const {
+  auto it = entries_.find(url);
+  if (it == entries_.end()) return false;
+  info->state = it->second.state;
+  info->image = it->second.image;
+  info->bytes = it->second.bytes;
+  info->error = it->second.error;
+  return true;
 }
 
 void ImageCache::clear() {

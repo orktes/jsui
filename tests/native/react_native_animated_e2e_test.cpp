@@ -305,6 +305,46 @@ TEST(react_native_animated_e2e) {
   CHECK_EQ(drops, 2);
   CHECK_EQ(t.style("loop")["opacity"].asNumber(), 1.0);
 
+  // ---- Animated.loop(sequence([timing 0 -> 1 (200 ms), timing -> 0 (0 ms)])):
+  // like React Native, both drivers animate 0 -> 1, snap back and repeat
+  // (the zero-duration native timing reports its end, so the sequence and
+  // the loop go on), and the native loop keeps jsui_wants_frame() set.
+  t.post("seqLoop");
+  {
+    struct Track {
+      double last = 0, peak = 0;
+      int snaps = 0, rising = 0;
+    } tn, tj;
+    bool idle = false;
+    auto sample = [](Track& k, double o) {
+      if (o < k.last - 0.5) k.snaps++;
+      else if (o > k.last) k.rising++;
+      k.peak = std::max(k.peak, o);
+      k.last = o;
+    };
+    for (int i = 0; i < 80; i++) {  // 1280 ms: six iterations of ~200 ms
+      t.tick(16);
+      sample(tn, t.style("seqNative")["opacity"].asNumber());
+      sample(tj, t.style("seqJs")["opacity"].asNumber());
+      if (!jsui_wants_frame(t.rt)) idle = true;
+    }
+    std::printf("    loop(sequence) native: %d snaps, %d rising frames, peak %.2f; js: %d snaps, %d rising, peak %.2f\n",
+                tn.snaps, tn.rising, tn.peak, tj.snaps, tj.rising, tj.peak);
+    CHECK(tn.snaps >= 4);
+    CHECK(tn.rising >= 40);
+    CHECK(tn.peak > 0.9);
+    CHECK(tj.snaps >= 4);
+    CHECK(tj.rising >= 40);
+    CHECK(tj.peak > 0.9);
+    CHECK(!idle);
+    CHECK(t.take("seqEnd").empty());
+    t.post("seqStop");
+    t.tick(32);
+    auto ends = t.take("seqEnd");
+    CHECK_EQ(ends.size(), size_t(2));
+    for (auto& e : ends) CHECK(!e.asBool());
+  }
+
   // ---- layout props are rejected like React Native.
   t.post("layoutProp");
   auto lp = t.take("layoutProp");

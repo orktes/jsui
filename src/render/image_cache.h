@@ -25,6 +25,14 @@ class ImageCache {
   sk_sp<SkImage> get(const std::string& url, State* state = nullptr);
   // Data: / inline sources and embedder-provided images.
   void put(const std::string& url, sk_sp<SkImage> image);
+  // What is known about `url` without starting a load (false: never requested).
+  struct Info {
+    State state = State::Loading;
+    sk_sp<SkImage> image;
+    size_t bytes = 0;       // encoded size (loaded images)
+    std::string error;      // why it failed
+  };
+  bool peek(const std::string& url, Info* info) const;
   void clear();
 
   // Resolves an image source URI against the runtime's base URL.
@@ -36,6 +44,8 @@ class ImageCache {
   struct Entry {
     State state = State::Loading;
     sk_sp<SkImage> image;
+    size_t bytes = 0;
+    std::string error;
   };
   void loaded(const std::string& url);
 

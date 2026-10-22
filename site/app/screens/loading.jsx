@@ -2,9 +2,8 @@
 // and image loading.
 //
 // Progress moves through loading phases. During "Streaming textures" the
-// bar counts real image assets as they stream in: each is prefetched, then
-// pops into a tile. (The runtime does not dispatch Image onLoad yet; the
-// tile counts it too once it does.) Tips rotate with a crossfade (◀ ▶ / left /
+// bar counts real image assets as they stream in: each tile's Image pops in
+// when its onLoad fires. Tips rotate with a crossfade (◀ ▶ / left /
 // right), and the spinner, embers, pulses and slow camera drift all loop on
 // the native Animated driver. When the zone is ready, any key travels to the
 // next zone, which loads again.
@@ -15,7 +14,7 @@ export const feature = {
   title: 'Native driver & image loading',
   points: [
     'The spinner, 18 drifting embers, pulses and the camera drift all loop with useNativeDriver: the runtime animates them without running JS',
-    'The "Streaming textures" phase streams 20 real image assets one by one (Image.prefetch, then an <Image> tile pops in); the bar counts them',
+    'The "Streaming textures" phase streams 20 real image assets one by one: each <Image> tile pops in on its onLoad and the bar counts them',
     'Tips crossfade between two layers; zones change behind a fade to black',
   ],
   keys: ['← → / D-pad: previous / next tip', 'Any key / A / click: continue when ready'],
@@ -48,28 +47,21 @@ const TEX = {
   'crest-flame': require('../../../examples/assets/crest-flame.png'),
 };
 
-/** One streamed texture: Image.prefetch, then it pops in (Image onLoad
- * counts too, where the runtime reports it). */
+/** One streamed texture: it pops in when its image has loaded (onLoadEnd:
+ * onLoad, or onError so a missing file does not stall the bar). */
 const Tile = memo(function Tile({ name, onLoad }) {
   const t = useRef(new Animated.Value(0)).current;
-  const done = useRef(false);
   const finish = () => {
-    if (done.current) return;
-    done.current = true;
     Animated.spring(t, { toValue: 1, stiffness: 300, damping: 14, useNativeDriver: true }).start();
     onLoad();
   };
-  useEffect(() => {
-    const src = Image.resolveAssetSource(TEX[name]);
-    Image.prefetch(src && src.uri).then(finish, finish);
-  }, []);
   return (
     <View style={styles.tile}>
       <Animated.View style={{ opacity: t, transform: [{ scale: t.interpolate({ inputRange: [0, 1], outputRange: [0.4, 1] }) }] }}>
         <Image
           source={TEX[name]}
           style={styles.tileImg}
-          onLoad={finish}
+          onLoadEnd={finish}
         />
       </Animated.View>
     </View>
@@ -253,7 +245,7 @@ function ProgressPanel({ active, paused, accent, onReady }) {
     }, 90);
     return () => clearTimeout(id);
   }, [active, progress, ready, paused, inTextures]);
-  // Real phase: request the next image every 160 ms; the bar follows onLoad.
+  // Real phase: mount the next image every 160 ms; the bar follows onLoad.
   useEffect(() => {
     if (!active || paused || !inTextures || mounted >= TEXTURES.length) return undefined;
     const id = setTimeout(() => setMounted((m) => m + 1), 160);

@@ -1,10 +1,10 @@
 // End-to-end fixture for tests/native/react_interactions_e2e_test.cpp:
 // hover (onHoverIn / onHoverOut, delayHoverIn, the hovered style state),
-// press timing, an endless Animated loop (jsui_wants_frame without input)
-// and LayoutAnimation create / update / delete, checked from host messages
-// and rendered pixels. 400 x 300.
-import React, { useEffect, useRef, useState } from 'react';
-import { AppRegistry, View, Pressable, Animated, Easing, LayoutAnimation, StyleSheet, findNodeHandle, UIManager } from 'react-native';
+// press timing, PanResponder release velocity, an endless Animated loop
+// (jsui_wants_frame without input) and LayoutAnimation create / update /
+// delete, checked from host messages and rendered pixels. 400 x 300.
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { AppRegistry, View, Pressable, PanResponder, Animated, Easing, LayoutAnimation, StyleSheet, findNodeHandle, UIManager } from 'react-native';
 import { Host, useHostMessage } from '@jsui/react';
 
 function App() {
@@ -14,6 +14,15 @@ function App() {
   const [extra, setExtra] = useState(false);
   const [gone, setGone] = useState(false);
   const growRef = useRef(null);
+  const pan = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onPanResponderRelease: (e, g) =>
+          Host.postMessage('release', { dx: g.dx, dy: g.dy, vx: +g.vx.toFixed(4), vy: +g.vy.toFixed(4) }),
+      }),
+    [],
+  );
 
   useHostMessage('loop', () => {
     loop.current = Animated.loop(Animated.timing(pulse, { toValue: 1, duration: 400, easing: Easing.linear, useNativeDriver: true }));
@@ -49,6 +58,7 @@ function App() {
       />
       <Pressable style={styles.delayed} delayHoverIn={100} delayHoverOut={50} onHoverIn={() => Host.postMessage('dhover', 'in')} onHoverOut={() => Host.postMessage('dhover', 'out')} />
       <Animated.View style={[styles.pulse, { opacity: pulse }]} />
+      <View style={styles.pan} {...pan.panHandlers} />
       <View ref={growRef} style={[styles.grow, { width: wide ? 150 : 50 }]} />
       {extra ? <View style={styles.extra} /> : null}
       {gone ? null : <View style={styles.doomed} />}
@@ -60,6 +70,7 @@ const styles = StyleSheet.create({
   root: { width: 400, height: 300, backgroundColor: '#000000' },
   hover: { position: 'absolute', left: 0, top: 0, width: 100, height: 50 },
   delayed: { position: 'absolute', left: 0, top: 60, width: 100, height: 40, backgroundColor: '#888888' },
+  pan: { position: 'absolute', left: 0, top: 160, width: 180, height: 130, backgroundColor: '#202020' },
   pulse: { position: 'absolute', left: 0, top: 120, width: 20, height: 20, backgroundColor: '#ffffff' },
   grow: { position: 'absolute', left: 200, top: 0, height: 50, backgroundColor: '#ffff00' },
   extra: { position: 'absolute', left: 200, top: 100, width: 50, height: 50, backgroundColor: '#00ffff' },

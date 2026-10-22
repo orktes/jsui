@@ -36,6 +36,7 @@ const TYPES = {
   momentumscrollend: ['onMomentumScrollEnd', false, true],
   load: ['onLoad', false, true],
   error: ['onError', false, true],
+  progress: ['onProgress', false, false],
   gamepadbutton: ['onGamepadButton', true, true],
   gamepadaxis: ['onGamepadAxis', true, false],
 };

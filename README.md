@@ -66,12 +66,16 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ./build/jsui-tests
 ./build/jsui-render bundle.js -o frame.png --width 1280 --height 720
-./build/tools/jsui-viewer/jsui-viewer --gpu bundle.js   # window, rendered on the GPU
+./build/tools/jsui-viewer/jsui-viewer bundle.js   # window, rendered on the GPU (--cpu: CPU raster)
 ./build/jsui-record bundle.js --timeline examples/showcase/session.json --ffmpeg out.mp4  # scripted demo video
 ```
 
-WebAssembly: `scripts/build-wasm.sh` (CPU raster, `web/dist/`) or
-`WEBGL=1 scripts/build-wasm.sh` (adds Skia on WebGL, `web/dist-webgl/`).
+WebAssembly: `WEBGL=1 scripts/build-wasm.sh` (Skia on WebGL2, `web/dist-webgl/`: what
+`web/jsui-web.js` loads and renders with by default) and `scripts/build-wasm.sh`
+(CPU raster only, `web/dist/`: the fallback module, and what CI's CPU browser tests use).
+GPU rendering is the default everywhere a GL / WebGL context is available; the CPU
+raster is the fallback (`jsui-viewer --cpu`, `createJsui({ renderer: 'cpu' })`) and
+what the deterministic tools (`jsui-render`, `jsui-record`) and reference tests use.
 
 ## Godot 4
 

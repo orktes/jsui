@@ -244,6 +244,8 @@ export class AnimatedValue extends AnimatedNode {
   resetAnimation(callback) {
     this.stopAnimation(callback);
     this._value = this._startingValue;
+    // React Native: a native value is reset natively too.
+    if (this._nativeTag != null) NativeAnimatedAPI.setValue(this._nativeTag, this._startingValue);
     this._updateValue(this._value, true);
   }
   animate(animation, callback) {

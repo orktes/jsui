@@ -174,18 +174,46 @@ jsui_render_gl_target(rt, gpu, &t);
   also links the OpenGL framework). WASM: `WEBGL=1 scripts/build-wasm.sh`
   builds Skia with Ganesh + WebGL (`third_party/skia-wasm-webgl`, canvaskit's
   WebGL args) and JSUI with `-sMAX_WEBGL_VERSION=2` into
-  `web/dist-webgl/jsui.{js,wasm}`; the default WASM build stays CPU-only and
-  its `jsui_gpu_*` entry points return failure.
-* **Viewer / web.** `jsui-viewer --gpu` renders into the SDL GL window's
-  default framebuffer (`--screenshot` reads it back, and fails if the frame
-  is blank). On macOS it asks SDL for a 3.2 core, forward-compatible
+  `web/dist-webgl/jsui.{js,wasm}` (the module the web host loads by
+  default); the plain WASM build (`web/dist/`) is CPU-only and its
+  `jsui_gpu_*` entry points return failure.
+* **Viewer / web: GPU by default.** `jsui-viewer` renders into the SDL GL
+  window's default framebuffer (`--screenshot` reads it back, and fails if
+  the frame is blank); if the GL window, GL context or Skia GPU context
+  cannot be created it prints a warning and uses the CPU raster + SDL
+  texture. `--cpu` forces the CPU path, `--gpu` is accepted as a no-op
+  alias. `jsui-render` / `jsui-record` stay CPU (deterministic output).
+  On macOS it asks SDL for a 3.2 core, forward-compatible
   profile (`--gl-core`, default there): the default legacy 2.1 context only
   has GLSL 1.20, which Skia's shaders cannot use (`gl_VertexID`). Ganesh
   detects core profiles (`GL_CONTEXT_PROFILE_MASK`) and binds its own vertex
   array object, since core profiles have no default one. In the browser,
-  `createJsui({ canvas, renderer: 'gpu', moduleUrl: '.../dist-webgl/jsui.js' })`
-  registers the canvas' WebGL context with emscripten and draws through
-  Skia; without a GPU module it falls back to the CPU raster + WebGL blit.
+  `createJsui({ canvas })` (renderer `'auto'`) loads `web/dist-webgl/jsui.js`
+  when WebGL is available (else, or when that is not deployed,
+  `web/dist/jsui.js`), registers the canvas' WebGL2 (or WebGL 1) context with
+  emscripten and draws through Skia, unless WebGL is only available through
+  a software rasteriser (`failIfMajorPerformanceCaveat`, e.g. Chrome's
+  SwiftShader fallback on a machine without a usable GPU: there Skia's full
+  GPU repaints cost more than the incremental CPU raster; `renderer: 'gpu'`
+  uses it anyway). It falls back to the CPU raster
+  (`jsui.renderer` `'webgl2'` / `'webgl'` / `'2d'`, a `'renderer'` event) when
+  the module has no GPU backend, the Skia GPU context cannot be created, a
+  GPU frame fails, or the WebGL context is lost and not restored within
+  `contextRestoreTimeout` (default 3000 ms; the canvas is then replaced by a
+  clone, as a canvas with a dead WebGL context cannot get another context).
+  `renderer: 'cpu'` forces the CPU raster. Measuring GPU frames, note that
+  `jsui.stats.renderMs` only covers issuing the GL commands; time a frame
+  with `gl.finish()` to include the GPU (or SwiftShader) work.
+* **CPU path in the browser.** `jsui_render_rgba_incremental()` repaints only
+  the damaged pixels of a buffer in the WASM heap, and the host uploads only
+  the damaged rect (WebGL2: `UNPACK_ROW_LENGTH`; WebGL 1: the rows it spans;
+  Canvas2D: un-premultiplies and puts just that rect); an unchanged frame
+  paints and uploads nothing (`jsui.stats.renders` / `blits` / `blitPixels`
+  / `lastBlit`, asserted by the browser tests' perf guards). Skia for WASM is
+  built with SIMD128 and `-msse4.1` (`scripts/build-skia-wasm.sh`): without
+  an SSE level Skia's raster pipeline runs its scalar fallback (one pixel per
+  stage call, no 16-bit lowp pipeline), ~10x slower than native on
+  gradients, image draws and blending.
 * **Tests.** `tests/native/gpu_test.cpp` makes an EGL context (Mesa's
   surfaceless platform / llvmpipe works headless), on desktop GL, a 3.2 core
   profile (as on macOS), GLES 3 and GLES 2, or on macOS a headless CGL 3.2
@@ -416,7 +444,7 @@ React Native props (`onPress`, `onPressIn/Out`, `onLongPress`, `onHoverIn/Out`,
         |'scrollbegindrag'|'scrollenddrag'|'momentumscrollbegin'|'momentumscrollend'
         |'gamepadbutton'|'gamepadaxis'|'gamepadconnected'|'change'|'selectionchange',
   target: <node id>,              // hit node, focused node for keys
-  timestamp: <ms>,
+  timestamp: <ms>,                // jsui_set_event_time, else the last tick time
   // pointer
   x, y,                           // viewport coords (pageX/pageY)
   localX, localY,                 // relative to target (locationX/Y)
@@ -435,6 +463,15 @@ React Native props (`onPress`, `onPressIn/Out`, `onLongPress`, `onHoverIn/Out`,
   velocity: {x, y},               // px/ms, + = offset increasing (scrollenddrag)
   targetContentOffset: {x, y} }   // where the fling / snap will end (scrollenddrag)
 ```
+
+`timestamp` is on the runtime clock. A host that knows when an event happened
+calls `jsui_set_event_time(rt, ms)` before sending it (the web host passes the
+DOM `event.timeStamp`); otherwise events carry the last tick's time, so all
+events between two frames share one. PanResponder's `vx` / `vy` (px/ms) are
+measured over the moves of the last ~100 ms; moves with the same timestamp
+count as one sample at their latest position, the release keeps the velocity
+of the moves before it (React Native), and a pointer that rested longer than
+that before letting go has none. ScrollView drag velocity uses the same clock.
 
 `pointerenter`/`pointerleave` are dispatched per node (no bubbling), like the DOM.
 Gamepad D-pad / stick moves focus spatially between `focusable` nodes and A
@@ -712,14 +749,16 @@ The default font is Inter (bundled); `fontFamily` falls back to it.
   `tools/jsui-viewer` downloads SDL 2.30.12 (SHA-256 checked) and links it
   statically; `-DJSUI_BUILD_VIEWER=OFF` skips it, `-DJSUI_SDL_DIR=` uses a
   local SDL2 source tree, and a failed download only skips the viewer.
-  `jsui-viewer [--dev] [--gpu [--gl-core]] [--width W --height H] <bundle path or URL>`; F5
-  reloads; `--frames N --screenshot out.png` runs headless
-  (`SDL_VIDEODRIVER=dummy`; `--gpu` needs a GL-capable display, e.g. `xvfb-run`
-  with Mesa). `-DJSUI_GPU=OFF` builds without the GPU backend.
+  `jsui-viewer [--dev] [--cpu | --gl-core] [--width W --height H] <bundle path or URL>`; F5
+  reloads; `--frames N --screenshot out.png` runs headless (GPU by default,
+  which needs a GL-capable display, e.g. `xvfb-run` with Mesa; `--cpu` with
+  `SDL_VIDEODRIVER=dummy`). `-DJSUI_GPU=OFF` builds without the GPU backend.
 * WASM: `scripts/build-skia-wasm.sh` (once), then `emcmake cmake -S . -B build-wasm`.
   The `web/` host loads `jsui.wasm`, forwards DOM input, blits frames to a canvas.
   `scripts/build-wasm.sh` does all steps (emsdk 3.1.44 → Skia m124 → `web/dist/jsui.{js,wasm}`);
-  `WEBGL=1 scripts/build-wasm.sh` builds the GPU variant into `web/dist-webgl/`.
+  `WEBGL=1 scripts/build-wasm.sh` builds the GPU variant into `web/dist-webgl/`
+  (deploy it next to `web/dist/`: the host prefers it, see "GPU backend").
+  Both use WASM SIMD (`SKIA_WASM_SIMD=0` builds without it).
   In the page: `const jsui = await createJsui({ canvas, bundleUrl })` from
   `web/jsui-web.js`; `jsui.on('message', (name, data) => …)`, `jsui.postMessage(name, data)`.
   The browser loader backend is `fetch()` (`src/platform/loader_emscripten.cpp`).
@@ -802,8 +841,14 @@ Details of how the JS package uses the bridge, for native implementers:
   `prefetchImage(uri)`, `reload`.
 * Events beyond input: `{type: 'resize', width, height, scale}` (sent by
   `jsui_set_viewport` when the size changes; drives Dimensions);
-  `{type: 'load', target, source: {width, height}}` / `{type: 'error', target,
-  error}` on `Image` nodes (`onLoad` / `onError`).
+  `{type: 'load', target, source: {uri, width, height}}` (resolved URL, image
+  pixels) / `{type: 'error', target, error}` / `{type: 'progress', target,
+  loaded, total}` on `Image` nodes (`onLoad` / `onError` / `onProgress`;
+  `@jsui/react` adds `onLoadStart` when the source changes and `onLoadEnd`
+  after load or error). Sent once per source, always asynchronously like
+  React Native: on a tick after the one that set the source (after its
+  timers and passive effects), also for data URIs and images already cached
+  at mount; `progress` only for images that had to be loaded.
 * `globalThis.__jsui_reportError(error)` (else the standard `reportError`): uncaught
   React render errors are passed to it; otherwise they are rethrown from a
   `setTimeout` so the engine reports them.

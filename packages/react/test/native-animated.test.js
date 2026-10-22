@@ -125,6 +125,39 @@ test('loops run natively (iterations); sequences chain native animations', () =>
   assert.deepEqual(seq, [true]);
 });
 
+test('loop(sequence([timing, zero-duration reset])) repeats; reset restores the native value (RN)', () => {
+  const v = new Animated.Value(0);
+  const l = Animated.loop(
+    Animated.sequence([
+      Animated.timing(v, { toValue: 1, duration: 800, useNativeDriver: true }),
+      Animated.timing(v, { toValue: 0, duration: 0, useNativeDriver: true }),
+    ]),
+  );
+  l.start();
+  for (let i = 0; i < 3; i++) {
+    const up = lastStart();
+    assert.equal(up[2].toValue, 1);
+    assert.equal(up[2].duration, 800);
+    animated.end(up[0], true, 1);
+    const reset = lastStart();
+    assert.equal(reset[2].toValue, 0);
+    assert.equal(reset[2].duration, 0);
+    animated.end(reset[0], true, 0);
+  }
+  assert.equal(lastStart()[2].toValue, 1, 'the loop keeps going');
+  l.stop();
+
+  // resetAnimation writes the starting value to the native node too.
+  const w = new Animated.Value(0.5);
+  Animated.timing(w, { toValue: 1, duration: 100, useNativeDriver: true }).start();
+  animated.end(lastStart()[0], true, 1);
+  assert.equal(w.__getValue(), 1);
+  animated.reset();
+  w.resetAnimation();
+  assert.deepEqual(animated.of('setValue'), [[w.__getNativeTag(), 0.5]]);
+  assert.equal(w.__getValue(), 0.5);
+});
+
 test('interpolations, math nodes, colors and transforms serialize for the native evaluator', () => {
   const v = new Animated.Value(0);
   const color = new Animated.Color('rgba(10, 20, 30, 0.5)');

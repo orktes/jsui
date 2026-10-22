@@ -24,7 +24,7 @@ export function Fling() {
   live.current.mode = mode;
 
   const pan = useMemo(() => {
-    const st = { x0: 0, y0: 0, samples: [] };
+    const st = { x0: 0, y0: 0 };
     const bounds = () => ({ maxX: Math.max(0, live.current.arena.w - PUCK), maxY: live.current.arena.h - PUCK });
     // Rubber band beyond the walls while dragging.
     const rubber = (v, max) => (v < 0 ? v / 3 : v > max ? max + (v - max) / 3 : v);
@@ -35,34 +35,20 @@ export function Fling() {
       onPanResponderGrant: (e) => {
         x.stopAnimation((vx) => (st.x0 = vx));
         y.stopAnimation((vy) => (st.y0 = vy));
-        st.samples = [{ t: Date.now(), x: 0, y: 0 }];
         Animated.spring(grab, { toValue: 1, stiffness: 500, damping: 20, useNativeDriver: true }).start();
       },
       onPanResponderMove: (e, g) => {
         const { maxX, maxY } = bounds();
         x.setValue(rubber(st.x0 + g.dx, maxX));
         y.setValue(rubber(st.y0 + g.dy, maxY));
-        st.samples.push({ t: Date.now(), x: g.dx, y: g.dy });
-        if (st.samples.length > 8) st.samples.shift();
       },
       onPanResponderRelease: (e, g) => {
         Animated.spring(grab, { toValue: 0, stiffness: 300, damping: 14, useNativeDriver: true }).start();
         const { maxX, maxY } = bounds();
-        // Velocity from the moves in the last ~120 ms before release; a
-        // finger that rested before letting go has none.
-        const s = st.samples;
-        const rel = Date.now();
-        const last = s[s.length - 1];
-        let first = s.length > 1 ? s[s.length - 2] : last;
-        for (const p of s) if (last.t - p.t <= 120) { first = p; break; }
-        if (first === last && s.length > 1) first = s[s.length - 2];
-        const dt = Math.max(1, last.t - first.t);
-        const rested = rel - last.t > 90;
-        let vx = rested ? 0 : (last.x - first.x) / dt;
-        let vy = rested ? 0 : (last.y - first.y) / dt;
+        // Release velocity (px/ms) from the gesture state, capped.
         const cap = 6;
-        vx = Math.max(-cap, Math.min(cap, vx));
-        vy = Math.max(-cap, Math.min(cap, vy));
+        const vx = Math.max(-cap, Math.min(cap, g.vx));
+        const vy = Math.max(-cap, Math.min(cap, g.vy));
         const px = st.x0 + g.dx;
         const py = st.y0 + g.dy;
         const speed = Math.hypot(vx, vy);

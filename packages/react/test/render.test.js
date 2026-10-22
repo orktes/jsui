@@ -95,6 +95,26 @@ test('Image normalizes sources; registered asset size is intrinsic, not style', 
   render(null);
 });
 
+test('Image events: tokens for native, RN order (loadStart, progress, load / error, loadEnd)', () => {
+  const log = [];
+  const handlers = {
+    onLoadStart: () => log.push('start'),
+    onProgress: (e) => log.push('progress ' + e.nativeEvent.loaded + '/' + e.nativeEvent.total),
+    onLoad: (e) => log.push('load ' + e.nativeEvent.source.width + 'x' + e.nativeEvent.source.height + ' ' + e.nativeEvent.source.uri),
+    onError: (e) => log.push('error ' + e.nativeEvent.error),
+    onLoadEnd: () => log.push('end'),
+  };
+  render(h(Fragment, null, h(Image, Object.assign({ nativeID: 'ok', source: { uri: 'a.png' } }, handlers)), h(Image, Object.assign({ nativeID: 'none', source: null }, handlers))));
+  const ok = mock.find((n) => n.props.nativeID === 'ok');
+  for (const t of ['load', 'error', 'progress']) assert.ok(ok.props.__events.includes(t), t);
+  assert.deepEqual(log, ['start'], 'no onLoadStart without a source');
+  mock.dispatch({ type: 'progress', target: ok.id, loaded: 10, total: 10 });
+  mock.dispatch({ type: 'load', target: ok.id, source: { uri: 'a.png', width: 4, height: 2 } });
+  mock.dispatch({ type: 'error', target: ok.id, error: 'nope' });
+  assert.deepEqual(log, ['start', 'progress 10/10', 'load 4x2 a.png', 'end', 'error nope', 'end']);
+  render(null);
+});
+
 test('ScrollView wraps content and exposes scrollTo through ref', () => {
   const ref = { current: null };
   render(h(ScrollView, { ref, horizontal: true, contentContainerStyle: { padding: 4 } }, h(View)));

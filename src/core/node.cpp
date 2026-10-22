@@ -170,6 +170,7 @@ void Node::setProps(const Value& props) {
           !valueEquals(old["defaultSource"], props_["defaultSource"])) {
         imageCache.reset();
         image::request(this);
+        if (doc_) doc_->queueImageEvents(id_, image::settled(this));
         if (YGNodeHasMeasureFunc(yoga_)) {
           YGNodeMarkDirty(yoga_);
           relayout = true;

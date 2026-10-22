@@ -155,6 +155,7 @@ int jsui_render_png(JsuiRuntime* rt, void** outData, size_t* outSize) {
 
 void jsui_free(void* p) { std::free(p); }
 
+void jsui_set_event_time(JsuiRuntime* rt, double time_ms) { rt->rt->input->setEventTime(time_ms); }
 int jsui_send_mouse_move(JsuiRuntime* rt, float x, float y) { return rt->rt->input->mouseMove(x, y); }
 int jsui_send_mouse_button(JsuiRuntime* rt, float x, float y, JsuiMouseButton b, int down, int mods) {
   return rt->rt->input->mouseButton(x, y, int(b), down != 0, mods);

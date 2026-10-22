@@ -30,12 +30,19 @@ foreach(_lib brotli)
 endforeach()
 
 # WebAssembly SIMD: follow the Skia build (scripts/build-skia-wasm.sh enables
-# it by default); mixing is legal, but SIMD everywhere is the point.
+# it by default, with -msse4.1 so Skia's raster pipeline uses its SSE4.1 stages
+# on SIMD128 instead of the one-pixel-at-a-time scalar fallback). JSUI gets the
+# same flags: SK_CPU_SSE_LEVEL (from __SSE4_1__) selects inline code in Skia
+# headers, which must match the libraries.
 set(_jsui_simd_default OFF)
+set(_jsui_sse41 OFF)
 if(EXISTS "${JSUI_SKIA_LIB_DIR}/args.gn")
   file(READ "${JSUI_SKIA_LIB_DIR}/args.gn" _jsui_skia_args)
   if(_jsui_skia_args MATCHES "msimd128")
     set(_jsui_simd_default ON)
+  endif()
+  if(_jsui_skia_args MATCHES "msse4\\.1")
+    set(_jsui_sse41 ON)
   endif()
 endif()
 option(JSUI_WASM_SIMD "Compile JSUI with -msimd128 (needs a browser with WASM SIMD)" ${_jsui_simd_default})
@@ -43,6 +50,9 @@ if(JSUI_WASM_SIMD)
   foreach(_t jsui jsui_quickjs jsui_yoga)
     target_compile_options(${_t} PRIVATE -msimd128)
   endforeach()
+  if(_jsui_sse41)
+    target_compile_options(jsui PRIVATE -msse4.1)
+  endif()
 endif()
 
 # QuickJS-ng: no threads / atomics in the browser build.
@@ -63,6 +73,10 @@ string(REPLACE ";" "," _jsui_exports_csv "${_jsui_exports}")
 
 add_executable(jsui-wasm web/native/jsui_web.cpp)
 target_link_libraries(jsui-wasm PRIVATE jsui)
+if(JSUI_WASM_SIMD)
+  target_compile_options(jsui-wasm PRIVATE -msimd128 $<$<BOOL:${_jsui_sse41}>:-msse4.1>)
+  target_link_options(jsui-wasm PRIVATE -msimd128)
+endif()
 set_target_properties(jsui-wasm PROPERTIES
   OUTPUT_NAME jsui
   SUFFIX ".js"

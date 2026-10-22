@@ -362,6 +362,70 @@ test('PanResponder drag gesture', () => {
   render(null);
 });
 
+test('PanResponder velocity (px/ms) from recent moves, kept on release (RN)', () => {
+  const seen = [];
+  let released = null;
+  const pan = PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onPanResponderMove: (e, gs) => seen.push([gs.vx, gs.vy]),
+    onPanResponderRelease: (e, gs) => (released = { vx: gs.vx, vy: gs.vy, dx: gs.dx }),
+  });
+  render(h(View, Object.assign({ nativeID: 'fling' }, pan.panHandlers)));
+  const id = byNativeID('fling').id;
+  const drag = (events) => {
+    released = null;
+    seen.length = 0;
+    for (const [type, x, y, t] of events) mock.dispatch({ type, target: id, x, y, buttons: type === 'pointerup' ? 0 : 1, timestamp: t });
+    return released;
+  };
+  const close = (a, b, eps = 1e-6) => assert.ok(Math.abs(a - b) < eps, `${a} != ${b}`);
+
+  // 2 px right, 1 px down per 16 ms frame; released a frame later without
+  // moving (the pointerup repeats the last position): 0.125 / 0.0625 px/ms.
+  const steady = [['pointerdown', 10, 10, 1000]];
+  for (let i = 1; i <= 10; i++) steady.push(['pointermove', 10 + 2 * i, 10 + i, 1000 + 16 * i]);
+  steady.push(['pointerup', 30, 20, 1000 + 16 * 11]);
+  let r = drag(steady);
+  close(r.vx, 0.125);
+  close(r.vy, 0.0625);
+  assert.equal(r.dx, 20);
+  close(seen.at(-1)[0], 0.125);
+
+  // Moves and the release delivered within one frame share a timestamp: the
+  // velocity comes from the frames' timestamps, not zero (or infinite).
+  r = drag([
+    ['pointerdown', 0, 0, 2000],
+    ['pointermove', 4, 0, 2016],
+    ['pointermove', 8, 0, 2016],
+    ['pointermove', 12, 0, 2032],
+    ['pointermove', 16, 0, 2032],
+    ['pointerup', 16, 0, 2032],
+  ]);
+  close(r.vx, 0.5);
+  close(r.vy, 0);
+  for (const [vx] of seen) assert.ok(Number.isFinite(vx));
+
+  // The velocity covers the last ~100 ms: a slow start does not drag a fast
+  // flick down.
+  const flick = [['pointerdown', 0, 0, 3000]];
+  for (let i = 1; i <= 20; i++) flick.push(['pointermove', i, 0, 3000 + 16 * i]); // 1/16 px/ms
+  for (let i = 1; i <= 8; i++) flick.push(['pointermove', 20 + 16 * i, 0, 3320 + 16 * i]); // 1 px/ms
+  flick.push(['pointerup', 148, 0, 3448]);
+  r = drag(flick);
+  close(r.vx, 1);
+
+  // A pointer that rested before letting go has no velocity.
+  r = drag([
+    ['pointerdown', 0, 0, 4000],
+    ['pointermove', 10, 0, 4016],
+    ['pointermove', 20, 0, 4032],
+    ['pointerup', 20, 0, 4400],
+  ]);
+  assert.equal(r.vx, 0);
+  assert.equal(r.vy, 0);
+  render(null);
+});
+
 test('onLayout, host messages, postMessage', async () => {
   const layouts = [];
   const got = [];

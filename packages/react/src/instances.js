@@ -40,6 +40,7 @@ const EVENT_TOKENS = {
   onLayout: ['layout'],
   onLoad: ['load'],
   onError: ['error'],
+  onProgress: ['progress'],
   onStartShouldSetResponder: RESPONDER,
   onMoveShouldSetResponder: RESPONDER,
   onStartShouldSetResponderCapture: RESPONDER,

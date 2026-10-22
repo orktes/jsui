@@ -220,7 +220,7 @@ if (!jsui_wants_frame(rt)) wait_for_input();
         ['Content', ['jsui_load_bundle_url', 'jsui_load_bundle_source', 'jsui_reload', 'jsui_register_font']],
         ['Frame loop', ['jsui_set_viewport', 'jsui_tick', 'jsui_tick_native', 'jsui_needs_redraw', 'jsui_wants_frame', 'jsui_pending_loads']],
         ['Paint', ['jsui_render_rgba', 'jsui_render_rgba_incremental', 'jsui_render_gl', 'jsui_render_gl_target', 'jsui_render_png', 'jsui_gpu_create_gl']],
-        ['Input', ['jsui_send_mouse_move', 'jsui_send_mouse_button', 'jsui_send_mouse_wheel', 'jsui_send_mouse_leave', 'jsui_send_touch', 'jsui_send_key', 'jsui_send_text', 'jsui_send_gamepad_button', 'jsui_send_gamepad_axis', 'jsui_set_gamepad_connected', 'jsui_get_cursor']],
+        ['Input', ['jsui_set_event_time', 'jsui_send_mouse_move', 'jsui_send_mouse_button', 'jsui_send_mouse_wheel', 'jsui_send_mouse_leave', 'jsui_send_touch', 'jsui_send_key', 'jsui_send_text', 'jsui_send_gamepad_button', 'jsui_send_gamepad_axis', 'jsui_set_gamepad_connected', 'jsui_get_cursor']],
         ['Data & resources', ['jsui_post_message', 'cfg.on_message', 'cfg.load', 'jsui_resource_complete', 'jsui_set_clipboard_callbacks']],
       ],
     },
@@ -413,11 +413,11 @@ const WEB = {
   eyebrow: 'Browser · web/jsui-web.js',
   color: colors.purple,
   title: 'A canvas and one import',
-  lead: 'The WebAssembly build runs the same runtime on a <canvas>. createJsui() forwards DOM input and the Gamepad API, ticks on requestAnimationFrame and blits frames with WebGL, or draws with Skia on WebGL directly. This website is exactly that.',
+  lead: 'The WebAssembly build runs the same runtime on a <canvas>. createJsui() forwards DOM input and the Gamepad API, ticks on requestAnimationFrame and draws with Skia on WebGL2 by default, falling back to the CPU raster (only damaged pixels repainted and uploaded) without hardware WebGL. This website is exactly that.',
   facts: [
-    ['Module', 'web/dist/jsui.{js,wasm}'],
-    ['GPU module', 'web/dist-webgl/'],
-    ['Renderers', "'auto' 'gpu' 'webgl' '2d'"],
+    ['GPU module (default)', 'web/dist-webgl/jsui.{js,wasm}'],
+    ['CPU module', 'web/dist/'],
+    ['Renderers', "'auto' 'gpu' 'cpu' 'webgl' '2d'"],
     ['Instances', 'one module, many runtimes'],
   ],
   blocks: [
@@ -433,7 +433,7 @@ const WEB = {
   const jsui = await createJsui({
     canvas: document.getElementById('ui'),
     bundleUrl: './bundle.js',
-    renderer: 'auto',                 // 'gpu' + moduleUrl: './dist-webgl/jsui.js'
+    renderer: 'auto',                 // Skia on WebGL2; 'cpu' forces the CPU raster
   });
 
   jsui.on('message', (name, data) => {  // Host.postMessage(name, data)
@@ -455,8 +455,8 @@ const WEB = {
             ['bundleUrl / bundleSource', 'Load a bundle by URL, or pass its source.'],
             ['devMode / devPoll', 'Error overlay + live reload (runtime polls http:// origins).'],
             ['pixelRatio', 'Fixed ratio; default tracks window.devicePixelRatio.'],
-            ['moduleUrl', 'Default ./dist/jsui.js next to jsui-web.js.'],
-            ['renderer', "'auto' | 'gpu' | 'webgl' | '2d'."],
+            ['moduleUrl', 'Default ./dist-webgl/jsui.js next to jsui-web.js (./dist/jsui.js without hardware WebGL or when not deployed).'],
+            ['renderer', "'auto' (GPU, CPU fallback) | 'gpu' | 'cpu' | 'webgl' | '2d'."],
             ['autoFocus · gamepads', 'Focus the keyboard sink · poll the Gamepad API (both default true).'],
             ['autoStart · trapTab', 'Start the frame loop · keep Tab inside the UI (both default true).'],
           ],
