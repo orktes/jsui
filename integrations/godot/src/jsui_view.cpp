@@ -16,6 +16,7 @@
 #include <godot_cpp/classes/json.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/time.hpp>
+#include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/callable_method_pointer.hpp>
 #include <godot_cpp/variant/typed_array.hpp>
@@ -392,9 +393,17 @@ double JsuiView::nowMs() const { return double(Time::get_singleton()->get_ticks_
 
 float JsuiView::computeRatio() const {
   if (pixel_ratio_ > 0.f) return pixel_ratio_;
-  // Canvas -> screen scale: stretch mode, Camera2D zoom, CanvasLayer and
-  // parent scales. Rasterising at that density keeps the UI sharp.
-  Vector2 s = get_screen_transform().get_scale();
+  // Control -> window pixels: parent / CanvasLayer / Camera2D transforms
+  // (get_global_transform_with_canvas) and the viewport's final transform,
+  // which holds the stretch (content scale) transform. On a HiDPI display
+  // (macOS Retina, screen_get_scale() == 2) the window is in physical
+  // pixels, so a 1280x720 canvas_items project in a 2560x1440 window
+  // rasterises at 2x while layout and input stay in the control's px.
+  // Not get_screen_transform(): for a root window that embeds subwindows
+  // (the default) it leaves out the stretch transform and reports 1.
+  Transform2D xf = get_global_transform_with_canvas();
+  if (Viewport* vp = get_viewport()) xf = vp->get_final_transform() * xf;
+  Vector2 s = xf.get_scale();
   float r = std::max(std::abs(s.x), std::abs(s.y));
   if (!std::isfinite(r) || r <= 0.f) r = 1.f;
   return std::clamp(r, 0.25f, 4.f);

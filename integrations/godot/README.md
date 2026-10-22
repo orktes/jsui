@@ -13,8 +13,9 @@ integrations/godot/
   CMakeLists.txt        GDExtension target (jsui_godot), fetches godot-cpp
   src/                  JsuiView, key/gamepad mapping, entry point
   demo/                 Godot 4.7 project: main.tscn + main.gd + jsui.gdextension
-  demo/ui/app.jsx       demo UI: examples/screens/main-menu.jsx + a bridge card
-  smoke-test.sh         runs the demo headless and saves a frame (used by CI)
+  demo/ui/app.jsx       demo UI: examples/showcase/interactions.jsx + a bridge strip
+  smoke-test.sh         runs the demo headless with an input self-test at 1x and
+                        2x content scale and saves the frames (used by CI)
 ```
 
 ## Build
@@ -79,17 +80,35 @@ godot --path . --import   # once: registers the extension and imports assets
 godot --path .            # or open the project in the editor and press F5
 ```
 
-The window shows the main-menu screen with a "Godot bridge" card. `main.gd`
-keeps the shared state key `godot.stats` (fps, frame, version) up to date
-with `set_state` (the first value is set before the view starts); the card
-reads it with `useHostState`. The "Ping Godot" button (click it, or press
-Enter / gamepad A, since it has focus) awaits `Host.call('godot.ping')`,
-which `main.gd` answers in `call_requested` with `resolve_call`. The
-self-test also calls into the UI with `call_ui('ui.flash', ...)`. Clicks the
-UI does not handle fall through to `_unhandled_input`. F5 reloads the bundle
-(the state survives it).
+The window shows the interactions showcase (`examples/showcase/interactions.jsx`,
+an AETHERFALL game hub): menu buttons with hover / press springs, tabs, a
+paging carousel (drag or Shift+wheel), a momentum armory list (wheel,
+trackpad, drag), a TextInput that recruits squad members on Enter
+(LayoutAnimation chips), a spring modal ("Continue" or "Deploy expedition")
+and gamepad / keyboard focus navigation (D-pad, arrows, Tab; A / Enter
+presses). Click into the view (or call `grab_focus()`) to give it the
+keyboard and gamepad.
 
-Headless check (no GPU needed). This is what CI runs:
+The "Godot" strip at the bottom left is the bridge. `main.gd` keeps the
+shared state key `godot.stats` (fps, frame, version) up to date with
+`set_state` (the first value is set before the view starts), and owns the
+`player` key that the showcase's profile chip reads. "Ping" awaits
+`Host.call('godot.ping')`, which `main.gd` answers in `call_requested` with
+`resolve_call`, paying out credits with `patch_state('player', ...)`; the
+chip updates. The self-test calls into the UI with `call_ui('ui.flash',
+...)`, which shows a toast. Clicks the UI does not handle fall through to
+`_unhandled_input`. F5 reloads the bundle (the state survives it).
+
+Headless check (no GPU needed). This is what CI runs. `main.gd --self-test`
+drives the UI through Godot's own input pipeline (`Input.parse_input_event`):
+hover, click (and checks that JSUI saw exactly the logical point it aimed
+at), gamepad D-pad focus + A, wheel and trackpad-pan scrolling, click to
+focus + typing + Enter in the TextInput, the Ping call, `call_ui` and an
+unhandled click. The UI reports what happened as `showcase:event` messages
+and the script prints `PASS` / `FAIL` per check. It runs at a 1280x720 window
+(content scale 1) and at 2560x1440 (content scale 2, like a Retina Mac).
+The headless display server ignores `--resolution`, so `main.gd` takes
+`--window WxH` too.
 
 ```sh
 integrations/godot/smoke-test.sh build/godot-smoke.png        # downloads Godot 4.7.2 unless $GODOT is set
@@ -115,7 +134,7 @@ node in the inspector.
 | --- | --- | --- | --- |
 | `bundle_url` | String | `""` | `res://…`, `user://…`, an absolute path, or `http://…` |
 | `dev_mode` | bool | `false` | poll the dev server, reload on change, error overlay |
-| `pixel_ratio` | float | `0` | device px per logical px; `0` follows the canvas→screen scale (stretch mode, Camera2D zoom, parent scale) |
+| `pixel_ratio` | float | `0` | device px per logical px; `0` follows the control→window-pixel scale (stretch / content scale, HiDPI windows, Camera2D zoom, parent scale) |
 | `autostart` | bool | `true` | start in `_ready` (otherwise call `start()`) |
 | `forward_gamepad` | bool | `true` | forward joypad events received while focused |
 
@@ -182,6 +201,16 @@ func _on_ui_call(id, name, args):
 * The view's logical size is the control's size. The runtime rasterises at
   `size * pixel_ratio` device pixels, and the texture is drawn scaled back to
   the control's rect.
+* With `pixel_ratio = 0` the ratio is the scale from the control to window
+  pixels: `get_viewport().get_final_transform()` (which holds the stretch
+  transform) times `get_global_transform_with_canvas()`. On a Retina Mac
+  (`DisplayServer.screen_get_scale()` = 2, `allow_hidpi` on) a 1280x720
+  `canvas_items` project runs in a 2560x1440-pixel window, so the UI lays
+  out at 1280x720 and renders at 2x. (`get_screen_transform()` is not used:
+  for a root window that embeds subwindows, the default, it omits the
+  stretch transform and would report 1x, so the UI would be upscaled and
+  blurry.) Input needs no scaling: `_gui_input` positions are already in
+  the control's local px, which are JSUI's logical px.
 * JSUI produces premultiplied RGBA. The texture is drawn by an internal
   canvas item with a `CanvasItemMaterial` in `BLEND_MODE_PREMULT_ALPHA`, so
   translucent UI composites correctly over the game and the node's own
@@ -197,7 +226,7 @@ func _on_ui_call(id, name, args):
 | Godot | JSUI |
 | --- | --- |
 | `InputEventMouseMotion` / `MouseButton` (left, right, middle) | `jsui_send_mouse_move` / `jsui_send_mouse_button` (+ modifiers) |
-| wheel buttons (with `factor`), `InputEventPanGesture` | `jsui_send_mouse_wheel`, 40 px per notch. Shift+wheel scrolls horizontally |
+| wheel buttons (with `factor`), `InputEventPanGesture` (macOS trackpad scrolling, including its momentum) | `jsui_send_mouse_wheel`, 40 px per notch. Shift+wheel scrolls horizontally. `InputEventMagnifyGesture` is not forwarded (it reaches the game) |
 | mouse exit | `jsui_send_mouse_leave` |
 | `InputEventScreenTouch` / `ScreenDrag` | `jsui_send_touch`. Mouse events emulated from touch are dropped |
 | `InputEventKey` | `jsui_send_key` with DOM `key` / `code` (left/right modifiers via `location`), then `jsui_send_text` with the UTF-8 character for printable presses (not with Ctrl/Cmd) |
