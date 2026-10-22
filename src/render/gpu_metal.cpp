@@ -5,16 +5,20 @@
 #include "include/core/SkCanvas.h"
 #include "include/core/SkColorSpace.h"
 #include "include/core/SkSurface.h"
-#include "include/gpu/GrBackendSurface.h"
-#include "include/gpu/GrContextOptions.h"
-#include "include/gpu/GrDirectContext.h"
 #include "include/gpu/ganesh/SkSurfaceGanesh.h"
-// Ganesh's Metal headers moved between milestones; the factories below are
-// the m124+ spellings (GrDirectContexts::MakeMetal, GrBackendRenderTargets::MakeMtl).
-#if __has_include("include/gpu/ganesh/mtl/GrMtlBackendContext.h")
+// Skia moved the Ganesh headers under include/gpu/ganesh/ after m124; the
+// factories below are the m124+ spellings (GrDirectContexts::MakeMetal,
+// GrBackendRenderTargets::MakeMtl).
+#if __has_include("include/gpu/ganesh/GrDirectContext.h")
+#include "include/gpu/ganesh/GrBackendSurface.h"
+#include "include/gpu/ganesh/GrContextOptions.h"
+#include "include/gpu/ganesh/GrDirectContext.h"
 #include "include/gpu/ganesh/mtl/GrMtlBackendContext.h"
 #include "include/gpu/ganesh/mtl/GrMtlTypes.h"
 #else
+#include "include/gpu/GrBackendSurface.h"
+#include "include/gpu/GrContextOptions.h"
+#include "include/gpu/GrDirectContext.h"
 #include "include/gpu/mtl/GrMtlBackendContext.h"
 #include "include/gpu/mtl/GrMtlTypes.h"
 #endif

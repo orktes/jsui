@@ -14,7 +14,7 @@ brew install ninja cmake
 RUN=1 scripts/build-ios.sh          # Skia slice, UI bundle, app, simulator, screenshot
 ```
 
-* `scripts/build-skia-ios.sh` builds Skia (m124, Ganesh + Metal, CoreText
+* `scripts/build-skia-ios.sh` builds Skia (m157, Ganesh + Metal, CoreText
   fonts, bundled ICU / HarfBuzz) into `third_party/skia-ios/out/<sdk>-<cpu>`
   (`iphoneos-arm64`, `iphonesimulator-arm64`, `iphonesimulator-x64`).
 * `scripts/build-ios.sh` bundles `APP` (default: the Godot demo UI) with

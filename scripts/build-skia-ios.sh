@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds Skia for iOS (Ganesh on Metal, CPU raster) and installs headers +
+# Builds Skia (chrome/m157, pinned) for iOS (Ganesh on Metal, CPU raster) and installs headers +
 # static libraries into third_party/skia-ios in the layout cmake/Deps.cmake
 # expects:
 #
@@ -33,7 +33,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SKIA_BRANCH="chrome/m124"
+SKIA_BRANCH="chrome/m157"
+SKIA_COMMIT="3c6589d4882124ecb315db04227eccd81fe0b435"  # same as build-skia-wasm-graphite.sh
 SKIA_SRC="${SKIA_SRC:-$ROOT/third_party/skia-src-ios}"
 OUT_DIR="${SKIA_IOS_OUT:-$ROOT/third_party/skia-ios}"
 SLICES="${SLICES:-iphoneos-arm64 iphonesimulator-arm64}"
@@ -63,6 +64,10 @@ if [ ! -d "$SKIA_SRC/.git" ]; then
   git clone --depth 1 --branch "$SKIA_BRANCH" https://skia.googlesource.com/skia "$SKIA_SRC"
 fi
 cd "$SKIA_SRC"
+if [ "$(git rev-parse HEAD)" != "$SKIA_COMMIT" ]; then
+  git fetch --depth 1 origin "$SKIA_COMMIT"
+  git checkout -q --force "$SKIA_COMMIT"
+fi
 
 # Only sync the third-party repos this configuration compiles.
 python3 - <<'PY'
