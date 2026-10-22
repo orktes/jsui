@@ -560,6 +560,13 @@ TEST(gpu_backend_available) {
 
 #if JSUI_GPU_TESTS
 
+// Two GPU frames of the same content. Mesa reproduces them bit for bit;
+// Apple's software GL renderer (the macOS CI runner) rounds a few pixels by
+// one level from frame to frame, so allow +-1 per channel and nothing more.
+bool sameFrame(const std::vector<uint32_t>& a, const std::vector<uint32_t>& b) {
+  return a.size() == b.size() && compare(a, b, 1).maxDiff <= 1;
+}
+
 // The full scene, GPU (texture target, top-left origin) vs CPU, at 1x and 2x.
 TEST(gpu_matches_cpu_scene) {
   forEachContext("gpu_matches_cpu_scene", [](GLContext& c, JsuiGpuContext* gpu, Api api) {
@@ -600,7 +607,7 @@ TEST(gpu_matches_cpu_scene) {
                     d2.mean, d2.over * 100);
         savePng((name + "_again").c_str(), again, w, h);
       }
-      CHECK(again == out);
+      CHECK(sameFrame(again, out));
     }
   });
 }
@@ -660,10 +667,10 @@ TEST(gpu_context_lost_and_recreated) {
     jsui_gpu_purge(gpu, 0);  // no-op while lost
     CHECK_EQ(jsui::gpu::render(*s.rt, gpu, t), 0);
     std::vector<uint32_t> after = rtex.read(false);
-    CHECK(after == before);
+    CHECK(sameFrame(after, before));
     jsui_gpu_purge(gpu, 64u << 20);
     CHECK_EQ(jsui::gpu::render(*s.rt, gpu, t), 0);
-    CHECK(rtex.read(false) == before);
+    CHECK(sameFrame(rtex.read(false), before));
   });
 }
 
