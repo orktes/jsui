@@ -249,13 +249,62 @@ Node* InputManager::hitTest(float x, float y, float* localX, float* localY) {
   return hitNode(rt_.doc.root(), x, y, localX, localY);
 }
 
+// Whether every point hitNode can return in n's subtree lies inside n's
+// border box (Node::markBoundsDirty documents the caching). Clipping nodes,
+// Text (a leaf here) and box-only nodes are contained by definition. Every
+// child is evaluated, even when the answer is already known, so a clean node
+// only ever has clean children.
+bool InputManager::subtreeContained(Node* n) {
+  if (!n->boundsDirty()) return n->boundsContained();
+  const ComputedStyle& s = n->style();
+  PointerEvents pe = pointerEventsOf(n);
+  bool trivial = s.overflow != Overflow::Visible || n->type() == NodeType::Text || pe == PointerEvents::BoxOnly ||
+                 pe == PointerEvents::None || !s.display;
+  bool contained = true;
+  Rect box = n->visualRect();
+  for (Node* c : n->children()) {
+    if (!c->yoga()) continue;
+    bool inner = subtreeContained(c);
+    if (trivial) continue;
+    if (!c->style().display || pointerEventsOf(c) == PointerEvents::None) continue;
+    Rect r = c->visualRect();
+    if (!finiteRect(r)) continue;  // not laid out: hitNode skips it
+    if (!inner) {
+      contained = false;
+      break;
+    }
+    // c's box in n's border-box space (n's content space minus its scroll).
+    float x0 = r.x, y0 = r.y, x1 = r.x + r.width, y1 = r.y + r.height;
+    bool strict = !c->style().transform.empty();
+    if (strict) {
+      Affine m = nodeLocalToParent(c);
+      float xs[4], ys[4];
+      m.apply(0, 0, &xs[0], &ys[0]);
+      m.apply(r.width, 0, &xs[1], &ys[1]);
+      m.apply(r.width, r.height, &xs[2], &ys[2]);
+      m.apply(0, r.height, &xs[3], &ys[3]);
+      x0 = *std::min_element(xs, xs + 4), x1 = *std::max_element(xs, xs + 4);
+      y0 = *std::min_element(ys, ys + 4), y1 = *std::max_element(ys, ys + 4);
+    }
+    x0 -= n->scrollX, x1 -= n->scrollX, y0 -= n->scrollY, y1 -= n->scrollY;
+    bool inside = x0 >= 0 && y0 >= 0 && (strict ? x1 < box.width && y1 < box.height : x1 <= box.width && y1 <= box.height);
+    if (!inside) contained = false;
+  }
+  if (!contained) {
+    // The loop may have stopped early: finish cleaning the children.
+    for (Node* c : n->children())
+      if (c->yoga()) subtreeContained(c);
+  }
+  n->setBoundsContained(contained);
+  return contained;
+}
+
 // (px, py) is in the parent's content space (parent-local + parent scroll).
 Node* InputManager::hitNode(Node* n, float px, float py, float* outX, float* outY) {
+  rt_.doc.perf.counters.hitNodes++;
   if (!n->yoga()) return nullptr;
   const ComputedStyle& s = n->style();
   if (!s.display) return nullptr;
-  PointerEvents pe = pointerEventsOf(n);
-  if (pe == PointerEvents::None) return nullptr;
   Rect r = n->visualRect();
   if (!finiteRect(r)) return nullptr;  // never laid out yet
 
@@ -268,6 +317,13 @@ Node* InputManager::hitNode(Node* n, float px, float py, float* outX, float* out
     if (!nodeLocalToParent(n).invert(&inv)) return nullptr;  // scale(0): nothing to hit
     inv.apply(px, py, &lx, &ly);
   }
+  // Outside the box of a subtree that stays inside it: nothing here to hit
+  // (the common case for most rows of a long list).
+  if (!(lx >= 0 && ly >= 0 && lx < r.width && ly < r.height) &&
+      (s.overflow != Overflow::Visible || subtreeContained(n)))
+    return nullptr;
+  PointerEvents pe = pointerEventsOf(n);
+  if (pe == PointerEvents::None) return nullptr;
   bool inside = insideBox(s, r.width, r.height, lx, ly);
   if (s.overflow != Overflow::Visible && !inside) return nullptr;
 

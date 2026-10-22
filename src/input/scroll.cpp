@@ -123,6 +123,7 @@ bool InputManager::applyScroll(Node* sv, float x, float y, bool showIndicators) 
   if (x == sv->scrollX && y == sv->scrollY) return false;
   sv->scrollX = x;
   sv->scrollY = y;
+  sv->markBoundsDirty();
   ScrollState& st = scrollState(sv);  // tracked: re-clamped when the content shrinks
   if (showIndicators) {
     st.shownUntil = std::max(st.shownUntil, rt_.now + kIndicatorHoldMs);

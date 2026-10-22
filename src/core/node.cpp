@@ -97,6 +97,7 @@ void Node::insertBefore(Node* child, Node* before) {
   children_.insert(it, child);
   child->parent_ = this;
   attachYoga(child, index);
+  markBoundsDirty();
   markDirty();
 }
 
@@ -106,8 +107,43 @@ void Node::removeChild(Node* child) {
   detachYoga(child);
   children_.erase(it);
   child->parent_ = nullptr;
+  markBoundsDirty();
   markDirty();
 }
+
+namespace {
+// What of a node's own style hit testing depends on (input.cpp hitNode):
+// captured before a restyle so bounds are only dirtied when it changed.
+// Transforms of up to four functions are compared exactly without
+// allocating; longer ones always count as changed.
+struct HitShape {
+  bool display;
+  Overflow overflow;
+  PointerEvents pe;
+  uint8_t ops;
+  Length origin[2];
+  TransformOp transform[4];
+  explicit HitShape(const ComputedStyle& s)
+      : display(s.display), overflow(s.overflow), pe(s.pointerEvents),
+        ops(uint8_t(std::min<size_t>(s.transform.size(), 5))), origin{s.transformOrigin[0], s.transformOrigin[1]} {
+    for (size_t i = 0; i < ops && i < 4; i++) transform[i] = s.transform[i];
+  }
+  bool same(const ComputedStyle& s) const {
+    if (display != s.display || overflow != s.overflow || pe != s.pointerEvents) return false;
+    if (ops > 4 || ops != s.transform.size()) return false;
+    if (ops == 0) return true;
+    auto lenEq = [](const Length& a, const Length& b) { return a.value == b.value && a.percent == b.percent; };
+    if (!lenEq(origin[0], s.transformOrigin[0]) || !lenEq(origin[1], s.transformOrigin[1])) return false;
+    for (size_t i = 0; i < ops; i++) {
+      const TransformOp &a = transform[i], &b = s.transform[i];
+      if (a.kind != b.kind || a.a != b.a || a.b != b.b || a.percentA != b.percentA || a.percentB != b.percentB)
+        return false;
+      if (a.kind == TransformOp::Kind::Matrix && !std::equal(a.m, a.m + 6, b.m)) return false;
+    }
+    return true;
+  }
+};
+}  // namespace
 
 // Layout is only invalidated when something layout-affecting changed: Yoga's
 // setters ignore no-op writes, so applyStyle() dirties the Yoga node only on
@@ -126,6 +162,7 @@ void Node::setProps(const Value& props) {
   props_ = props;
   updatePropFlags();
   bool relayout = false;
+  HitShape shape(style_);
   if (yoga_) {
     bool isText = type_ == NodeType::Text || type_ == NodeType::TextInput;
     TextStyle oldText;
@@ -150,6 +187,7 @@ void Node::setProps(const Value& props) {
     if (props_["pointerEvents"].isString() && !props_["style"].has("pointerEvents"))
       style_.pointerEvents = parsePointerEvents(props_["pointerEvents"]);
     if (YGNodeIsDirty(yoga_) && !isInlineText()) relayout = true;
+    if (!shape.same(style_)) markBoundsDirty();
     if (isText) {
       bool metrics = false;
       static const char* const kMeasureProps[] = {"numberOfLines", "ellipsizeMode", "value",          "defaultValue",
@@ -227,6 +265,7 @@ bool Node::patchStyle(const Value::Object& partial) {
   bool isText = type_ == NodeType::Text || type_ == NodeType::TextInput;
   TextStyle oldText;
   if (isText) oldText = style_.text;
+  HitShape shape(style_);
   {
     Perf::Scope scope(doc_->perf, Phase::Style);
     doc_->perf.counters.styleResolves++;
@@ -234,6 +273,7 @@ bool Node::patchStyle(const Value::Object& partial) {
   }
   if (props_["pointerEvents"].isString() && !props_["style"].has("pointerEvents"))
     style_.pointerEvents = parsePointerEvents(props_["pointerEvents"]);
+  if (!shape.same(style_)) markBoundsDirty();
   bool relayout = false;
   if (isText) textStyleChanged(oldText, false, false, &relayout);
   paintVersion++;

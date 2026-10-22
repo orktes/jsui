@@ -155,6 +155,7 @@ const CounterDef kCounters[] = {
     {"paragraphBuilds", [](const jsui::PerfCounters& c) { return c.paragraphBuilds; }},
     {"animatedWrites", [](const jsui::PerfCounters& c) { return c.animatedWrites; }},
     {"events", [](const jsui::PerfCounters& c) { return c.events; }},
+    {"hitNodes", [](const jsui::PerfCounters& c) { return c.hitNodes; }},
 };
 constexpr int kCounterCount = int(sizeof(kCounters) / sizeof(kCounters[0]));
 // Extra counters measured by the tool itself.

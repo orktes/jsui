@@ -143,6 +143,7 @@ void Document::applyAnim(Node* n, double nowMs, bool* done) {
       Rect to = n->layoutRect();
       a.current = {lerp(a.from.x, to.x, e), lerp(a.from.y, to.y, e), std::max(0.f, lerp(a.from.width, to.width, e)),
                    std::max(0.f, lerp(a.from.height, to.height, e))};
+      n->markBoundsDirty();
       break;
     }
     case Node::LayoutAnim::Kind::Create:
@@ -165,6 +166,7 @@ void Document::applyAnim(Node* n, double nowMs, bool* done) {
 void Document::finishAnim(Node* n) {
   bool ghost = n->layoutAnim && n->layoutAnim->kind == Node::LayoutAnim::Kind::Delete;
   n->layoutAnim.reset();
+  n->markBoundsDirty();
   n->markPaintDirty();
   if (!ghost || !n->ghostOf) return;
   Node* parent = n->ghostOf;

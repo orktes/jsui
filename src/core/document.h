@@ -119,7 +119,7 @@ class Document {
 
  private:
   void destroyRecursive(Node* node);
-  void reportLayout(Node* node);
+  void afterLayout(Node* node, bool report);
   void snapshotLayout(Node* node, std::vector<std::pair<Node*, Rect>>* out);
   void startLayoutAnimations(const std::vector<std::pair<Node*, Rect>>& before);
   void startAnim(Node* n, Node::LayoutAnim::Kind kind, const LayoutAnimSpec& spec, const Rect& from);

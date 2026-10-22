@@ -36,6 +36,7 @@ struct PerfCounters {
   uint64_t paragraphBuilds = 0;  // text shaping (ParagraphBuilder::Build)
   uint64_t animatedWrites = 0;   // views written by native Animated
   uint64_t events = 0;           // events dispatched to JS
+  uint64_t hitNodes = 0;         // nodes visited by hit testing
 };
 
 // Paragraph::layout runs (process-wide: the text cache has no document).
