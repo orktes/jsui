@@ -1,0 +1,33 @@
+cmake_minimum_required(VERSION 3.20)
+project(jsui C CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+option(JSUI_BUILD_TOOLS "Build jsui-render and the viewer" ON)
+option(JSUI_BUILD_TESTS "Build native tests" ON)
+
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
+include(Deps)
+
+file(GLOB_RECURSE JSUI_SOURCES CONFIGURE_DEPENDS src/*.cpp)
+add_library(jsui STATIC ${JSUI_SOURCES})
+target_include_directories(jsui PUBLIC include PRIVATE src)
+target_link_libraries(jsui PUBLIC jsui_quickjs jsui_yoga jsui_skia)
+target_compile_definitions(jsui PRIVATE JSUI_BUILDING)
+
+if(JSUI_BUILD_TOOLS AND NOT EMSCRIPTEN)
+  add_executable(jsui-render tools/jsui-render/main.cpp)
+  target_link_libraries(jsui-render PRIVATE jsui)
+endif()
+
+if(JSUI_BUILD_TESTS AND NOT EMSCRIPTEN)
+  enable_testing()
+  file(GLOB JSUI_TEST_SOURCES CONFIGURE_DEPENDS tests/native/*.cpp)
+  add_executable(jsui-tests ${JSUI_TEST_SOURCES})
+  target_include_directories(jsui-tests PRIVATE src)
+  target_link_libraries(jsui-tests PRIVATE jsui)
+  add_test(NAME jsui-tests COMMAND jsui-tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+endif()
