@@ -10,7 +10,7 @@ forwards Godot input and bridges `postMessage` both ways.
 integrations/godot/
   CMakeLists.txt        GDExtension target (jsui_godot), fetches godot-cpp
   src/                  JsuiView, key/gamepad mapping, entry point
-  demo/                 Godot 4.3 project: main.tscn + main.gd + jsui.gdextension
+  demo/                 Godot 4.7 project: main.tscn + main.gd + jsui.gdextension
   demo/ui/app.jsx       demo UI: examples/screens/main-menu.jsx + a bridge card
   smoke-test.sh         runs the demo headless and saves a frame (used by CI)
 ```
@@ -21,7 +21,7 @@ Requirements: CMake ≥ 3.20, Ninja, clang (or gcc / MSVC), python3 (godot-cpp
 generates its bindings with it), Node 22 for the bundle.
 
 ```sh
-# From the repository root. godot-cpp is fetched at godot-4.3-stable.
+# From the repository root. godot-cpp is fetched at 10.0.0-stable.
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
       -DJSUI_BUILD_GODOT=ON
@@ -38,15 +38,36 @@ CMake options:
 | Option | Default | |
 | --- | --- | --- |
 | `JSUI_BUILD_GODOT` | `OFF` | build the GDExtension (the default build is unaffected) |
-| `JSUI_GODOT_CPP_TAG` | `godot-4.3-stable` | godot-cpp tag to fetch |
+| `JSUI_GODOT_CPP_TAG` | `10.0.0-stable` | godot-cpp tag to fetch |
+| `JSUI_GODOT_API_VERSION` | `4.3` | Godot API to build against (4.3 … 4.7): the oldest Godot that loads the library. Keep `compatibility_minimum` in `demo/jsui.gdextension` equal to it |
 | `JSUI_GODOT_CPP_DIR` | | use an existing godot-cpp checkout instead |
 | `JSUI_GODOT_OUTPUT_DIR` | `integrations/godot/demo/bin` | where the library is written |
 
 The library statically links the JSUI runtime (QuickJS, Yoga, Skia) and only
-exports the GDExtension entry point (`jsui_godot_init`). It is built against
-the 4.3 extension API and loads in Godot 4.3 and later. One build serves the
+exports the GDExtension entry point (`jsui_godot_init`). One build serves the
 editor and debug/release runs. On Windows, copy `icudtl.dat` (CMake puts it
 next to the DLL) beside the game executable as for any JSUI host.
+
+### Godot versions
+
+The demo project is saved with Godot 4.7 (the current stable release,
+4.7.2, is what CI runs), and the library loads in **Godot 4.3 and later**
+(`compatibility_minimum = "4.3"`):
+
+* Since 10.x, godot-cpp is versioned independently of Godot. One godot-cpp
+  release builds against any Godot API from 4.3 to 4.7 (`GODOTCPP_API_VERSION`,
+  set here from `JSUI_GODOT_API_VERSION`).
+* GDExtensions are forward- but not backward-compatible: a library built
+  against the 4.3 API loads in 4.3 … 4.7, one built against 4.7 only in 4.7+.
+  So the API version is the real minimum, and `compatibility_minimum` states
+  it.
+* `JsuiView` uses nothing newer than the 4.3 API (`ImageTexture`, `Image`,
+  `RenderingServer` canvas items, `InputEvent*` with `KeyLocation`), so 4.3
+  is the default: one binary serves every supported Godot. Build with
+  `-DJSUI_GODOT_API_VERSION=4.7` (and raise `compatibility_minimum`) only to
+  use newer APIs.
+* CI runs the demo in 4.7.2 and in 4.3 (`GODOT_VERSION=4.3-stable
+  smoke-test.sh`) to keep both ends of the range honest.
 
 ## Run the demo
 
@@ -66,7 +87,8 @@ the bundle.
 Headless check (no GPU needed). This is what CI runs:
 
 ```sh
-integrations/godot/smoke-test.sh build/godot-smoke.png        # downloads Godot 4.3 unless $GODOT is set
+integrations/godot/smoke-test.sh build/godot-smoke.png        # downloads Godot 4.7.2 unless $GODOT is set
+GODOT_VERSION=4.3-stable integrations/godot/smoke-test.sh     # the oldest supported Godot
 GODOT_DISPLAY=x11 xvfb-run -a integrations/godot/smoke-test.sh # real OpenGL renderer + window capture
 ```
 
@@ -172,7 +194,7 @@ imported copies.
 
 * IME composition (pre-edit text) is not forwarded, only committed
   characters. The C API has no composition entry point yet.
-* Godot 4.3 cannot upload part of a texture, so the dirty rect saves only
+* The Godot 4.3 API has no sub-rectangle texture upload, so the dirty rect saves only
   CPU paint work, not GPU upload bandwidth.
 * Built and tested on Linux x86_64 (CI). The CMake target also names the
   Windows and macOS libraries the `.gdextension` expects, but those builds

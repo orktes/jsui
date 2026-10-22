@@ -5,7 +5,7 @@
 #
 # Expects the GDExtension in integrations/godot/demo/bin (cmake
 # -DJSUI_BUILD_GODOT=ON) and the demo bundle in demo/ui/dist (npx jsui build).
-# Uses $GODOT if set, otherwise downloads the official Godot 4.3 Linux build
+# Uses $GODOT if set, otherwise downloads the official Godot 4.7.2 Linux build
 # (SHA-256 checked) into $GODOT_CACHE (default: build/_deps/godot).
 #
 # GODOT_DISPLAY=x11 runs with a real (OpenGL) renderer, e.g. under xvfb-run,
@@ -18,10 +18,24 @@ demo="$here/demo"
 out="$(realpath -m "${1:-$repo/build/godot-smoke.png}")"
 frames="${FRAMES:-90}"
 
-GODOT_VERSION=4.3-stable
-GODOT_SHA256=7de56444b130b10af84d19c7e0cf63cf9e9937ee4ba94364c3b7dd114253ca21
+# GODOT_VERSION=4.3-stable runs the oldest Godot the extension supports
+# (compatibility_minimum in demo/jsui.gdextension). Other versions need
+# GODOT_SHA256 for their Linux x86_64 zip.
+GODOT_VERSION="${GODOT_VERSION:-4.7.2-stable}"
+# SHA-256 of Godot_v<version>_linux.x86_64.zip (their SHA-512 match the
+# releases' SHA512-SUMS.txt).
+case "$GODOT_VERSION" in
+  4.7.2-stable) known_sha256=cadd3204e728a35d3f13adb7fd0d7902636b79f6b95c40c265eb73b6c35329e4 ;;
+  4.3-stable) known_sha256=7de56444b130b10af84d19c7e0cf63cf9e9937ee4ba94364c3b7dd114253ca21 ;;
+  *) known_sha256= ;;
+esac
+GODOT_SHA256="${GODOT_SHA256:-$known_sha256}"
 
 if [[ -z "${GODOT:-}" ]]; then
+  if [[ -z "$GODOT_SHA256" ]]; then
+    echo "set GODOT_SHA256 (or GODOT) for Godot $GODOT_VERSION" >&2
+    exit 1
+  fi
   cache="${GODOT_CACHE:-$repo/build/_deps/godot}"
   GODOT="$cache/Godot_v${GODOT_VERSION}_linux.x86_64"
   if [[ ! -x "$GODOT" ]]; then
@@ -50,6 +64,9 @@ fi
 
 # The editor registers GDExtensions (.godot/extension_list.cfg) and imports
 # resources; a fresh checkout needs one pass before the game can run.
+# Godot 4.7.2 aborts while exiting the very first headless --import of a
+# project that has a GDExtension (reproduced with an empty godot-cpp 10
+# extension); the import itself is complete by then, hence `|| true`.
 if [[ ! -f "$demo/.godot/extension_list.cfg" ]]; then
   "$GODOT" --headless --path "$demo" --import || true
 fi

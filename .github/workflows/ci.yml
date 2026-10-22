@@ -160,8 +160,8 @@ jobs:
             third_party/skia-prebuilt
             build/_deps/*-src
             build/_deps/godot
-          key: godot-deps-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'integrations/godot/CMakeLists.txt', 'integrations/godot/smoke-test.sh') }}
-          restore-keys: godot-deps-${{ runner.os }}-
+          key: godot-deps-4.7.2-cpp10-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'integrations/godot/CMakeLists.txt', 'integrations/godot/smoke-test.sh') }}
+          restore-keys: godot-deps-4.7.2-cpp10-${{ runner.os }}-
       - name: ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
@@ -179,8 +179,10 @@ jobs:
         run: |
           if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
           npx jsui build integrations/godot/demo/ui/app.jsx -o integrations/godot/demo/ui/dist/bundle.js
-      - name: Run the demo in Godot 4.3 (headless) and capture a frame
+      - name: Run the demo in Godot 4.7.2 (headless) and capture a frame
         run: integrations/godot/smoke-test.sh build/godot-smoke.png
+      - name: Run it in Godot 4.3 too (compatibility_minimum)
+        run: GODOT_VERSION=4.3-stable integrations/godot/smoke-test.sh build/godot-smoke-4.3.png
       - uses: actions/upload-artifact@v4
         if: always()
         with:
