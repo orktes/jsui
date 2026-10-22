@@ -18,7 +18,19 @@
 // The strip (and the toast above it) sit in the empty left half of the
 // showcase's bottom bar, so they cover none of the showcase's controls.
 import React, { useEffect, useRef, useState } from 'react';
-import { Animated, AppRegistry, Easing, Host, Pressable, StyleSheet, Text, View, useHostHandler, useHostState } from 'react-native';
+import {
+  Animated,
+  AppRegistry,
+  Easing,
+  Host,
+  Pressable,
+  SafeAreaView,
+  StyleSheet,
+  Text,
+  View,
+  useHostHandler,
+  useHostState,
+} from 'react-native';
 import Showcase from '../../../../examples/showcase/interactions.jsx';
 import { colors, font } from '../../../../examples/theme.js';
 
@@ -93,16 +105,21 @@ function Bridge() {
 
 function App() {
   return (
+    // Insets are zero in Godot; on phones (the iOS host) the background runs
+    // edge to edge and the UI stays clear of the notch / home indicator.
     <View style={styles.root}>
-      <Showcase />
-      <Bridge />
-      <Toast />
+      <SafeAreaView style={styles.safe}>
+        <Showcase />
+        <Bridge />
+        <Toast />
+      </SafeAreaView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1 },
+  root: { flex: 1, backgroundColor: colors.bg0 },
+  safe: { flex: 1 },
   bridge: {
     position: 'absolute',
     left: 24,

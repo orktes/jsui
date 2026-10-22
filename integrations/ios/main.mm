@@ -19,6 +19,7 @@
 #import <UIKit/UIKit.h>
 
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -156,6 +157,7 @@ struct PadState {
   cfg.log = jsuiLog;
   cfg.dev_mode = url.length > 0;
   _rt = jsui_create(&cfg);
+  [self publishSafeArea];
   jsui_set_clipboard_callbacks(
       _rt,
       [](void*) -> const char* {
@@ -207,6 +209,22 @@ struct PadState {
 }
 - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures {
   return UIRectEdgeAll;
+}
+
+// Notch / Dynamic Island / home indicator: published as shared state, which
+// SafeAreaView and useSafeAreaInsets() read.
+- (void)publishSafeArea {
+  if (!_rt) return;
+  UIEdgeInsets i = _view.safeAreaInsets;
+  char json[160];
+  snprintf(json, sizeof json, "{\"top\":%g,\"right\":%g,\"bottom\":%g,\"left\":%g}", double(i.top),
+           double(i.right), double(i.bottom), double(i.left));
+  jsui_set_state(_rt, "jsui.safeAreaInsets", json);
+}
+
+- (void)viewSafeAreaInsetsDidChange {
+  [super viewSafeAreaInsetsDidChange];
+  [self publishSafeArea];
 }
 
 - (void)memoryWarning {
