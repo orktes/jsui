@@ -30,6 +30,7 @@ jobs:
       godot: ${{ steps.filter.outputs.godot }}
       js: ${{ steps.filter.outputs.js }}
       reference: ${{ steps.filter.outputs.reference }}
+      ios: ${{ steps.filter.outputs.ios }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -66,6 +67,11 @@ jobs:
               - 'tests/native/**'
               - 'package.json'
               - 'package-lock.json'
+            ios:
+              - *core
+              - 'integrations/ios/**'
+              - 'scripts/build-skia-ios.sh'
+              - 'scripts/build-ios.sh'
             reference:
               - *core
               - 'tools/jsui-render/**'
@@ -552,3 +558,39 @@ jobs:
       - name: Native tests (Windows)
         if: runner.os == 'Windows'
         run: ./build/Release/jsui-tests.exe
+
+  # ------------------------------------------------- iOS (simulator), advisory
+  # Compile-only: Skia for iOS (Ganesh on Metal) is built from source
+  # (scripts/build-skia-ios.sh, long on a hosted runner) and cached on the
+  # script's hash; then the JsuiDemo app is built for the arm64 simulator.
+  ios:
+    name: iOS (simulator build)
+    runs-on: macos-15
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.ios == 'true'
+    continue-on-error: true
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Cache iOS Skia
+        id: skia
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-ios
+          key: skia-ios-${{ hashFiles('scripts/build-skia-ios.sh') }}
+      - name: Tools
+        run: command -v ninja || brew install ninja
+      - name: Skia (iphonesimulator-arm64)
+        if: steps.skia.outputs.cache-hit != 'true'
+        run: SLICES=iphonesimulator-arm64 scripts/build-skia-ios.sh
+      - name: Install
+        run: npm ci
+      - name: Build JsuiDemo.app
+        run: scripts/build-ios.sh
+      - name: Check the app bundle
+        run: |
+          test -x build-ios-sim/integrations/ios/JsuiDemo.app/JsuiDemo
+          test -s build-ios-sim/integrations/ios/JsuiDemo.app/ui/bundle.js
