@@ -1,0 +1,183 @@
+// `jsui dev <entry> [--port 5173] [--host 127.0.0.1]`
+//
+// Rebuilds on change and serves (contract with the runtime's dev mode):
+//   GET /bundle.js            last good bundle (build errors keep it served)
+//   GET /bundle.js.map        its source map
+//   GET /assets/*             emitted images / fonts
+//   GET /__jsui/version       plain-text opaque token, changes on every
+//                             successful rebuild. `?since=<token>` long-polls:
+//                             the reply is held (up to ~25 s) until the token
+//                             differs from <token>.
+//   GET /__jsui/error         text of the current build error ('' when ok)
+//   GET /                     small index page (links the WASM web host if built)
+// Anything else is served from the entry's directory (for fetch('./data.json')).
+
+import * as esbuild from 'esbuild';
+import http from 'node:http';
+import { existsSync, statSync, createReadStream } from 'node:fs';
+import path from 'node:path';
+import { esbuildOptions } from './config.js';
+import { formatErrors } from './build.js';
+
+const TYPES = {
+  '.js': 'text/javascript; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.svg': 'image/svg+xml',
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.wasm': 'application/wasm',
+  '.txt': 'text/plain; charset=utf-8',
+};
+
+function findWebHost(start) {
+  let dir = path.resolve(start);
+  for (;;) {
+    const candidate = path.join(dir, 'web');
+    if (existsSync(path.join(candidate, 'index.html'))) return candidate;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+/** Resolves `rel` inside `root`, refusing traversal outside it. */
+function safeJoin(root, rel) {
+  const p = path.resolve(root, '.' + path.posix.normalize('/' + rel));
+  return p === root || p.startsWith(root + path.sep) ? p : null;
+}
+
+export async function dev({ entry, port = 5173, host = '127.0.0.1', log = console.log, minify = false }) {
+  const absEntry = path.resolve(entry);
+  const entryDir = path.dirname(absEntry);
+  const webDir = findWebHost(entryDir) || findWebHost(process.cwd());
+  const state = { bundle: null, map: null, assets: new Map(), version: '0', error: '', builds: 0 };
+  const waiters = new Set();
+  const outfile = path.join(entryDir, '.jsui-dev', 'bundle.js');
+
+  const notify = () => {
+    for (const w of waiters) w();
+    waiters.clear();
+  };
+
+  const reporter = {
+    name: 'jsui-dev-reporter',
+    setup(b) {
+      let t0 = 0;
+      b.onStart(() => {
+        t0 = Date.now();
+      });
+      b.onEnd(async (result) => {
+        if (result.errors.length) {
+          state.error = await formatErrors(result.errors);
+          log(`\n[jsui] build failed (serving the last good bundle):\n${state.error}`);
+          return;
+        }
+        for (const f of result.outputFiles || []) {
+          if (f.path.endsWith('.map')) state.map = Buffer.from(f.contents);
+          else if (f.path.endsWith('.js')) state.bundle = Buffer.from(f.contents);
+        }
+        state.error = '';
+        state.builds++;
+        state.version = Date.now().toString(36) + '-' + state.builds;
+        log(`[jsui] built ${path.relative(process.cwd(), absEntry)} in ${Date.now() - t0} ms (${(state.bundle.length / 1024).toFixed(0)} KiB) -> version ${state.version}`);
+        notify();
+      });
+    },
+  };
+
+  const opts = esbuildOptions({ entry: absEntry, outfile, mode: 'development', minify, sourcemap: true, assets: state.assets });
+  opts.plugins.push(reporter);
+  const ctx = await esbuild.context(opts);
+  await ctx.rebuild().catch(() => {});  // errors are reported by onEnd
+  await ctx.watch();
+
+  const send = (res, status, type, body, extra) => {
+    res.writeHead(status, Object.assign({ 'Content-Type': type, 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' }, extra));
+    res.end(body);
+  };
+
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://x');
+    const p = decodeURIComponent(url.pathname);
+    if (req.method === 'OPTIONS') return send(res, 204, 'text/plain', '', { 'Access-Control-Allow-Methods': 'GET', 'Access-Control-Allow-Headers': '*' });
+    if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'text/plain', 'method not allowed');
+    if (p === '/bundle.js') {
+      if (!state.bundle) return send(res, 503, 'text/plain; charset=utf-8', 'no successful build yet\n' + state.error);
+      return send(res, 200, TYPES['.js'], state.bundle);
+    }
+    if (p === '/bundle.js.map') return state.map ? send(res, 200, TYPES['.map'], state.map) : send(res, 404, 'text/plain', 'no map');
+    if (p === '/__jsui/version') {
+      const since = url.searchParams.get('since');
+      if (since == null || since !== state.version) return send(res, 200, 'text/plain; charset=utf-8', state.version);
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        waiters.delete(finish);
+        send(res, 200, 'text/plain; charset=utf-8', state.version);
+      };
+      const timer = setTimeout(finish, 25000);
+      waiters.add(finish);
+      req.on('close', () => {
+        done = true;
+        clearTimeout(timer);
+        waiters.delete(finish);
+      });
+      return undefined;
+    }
+    if (p === '/__jsui/error') return send(res, 200, 'text/plain; charset=utf-8', state.error);
+    if (p.startsWith('/assets/')) {
+      const buf = state.assets.get(p.slice(1));
+      if (buf) return send(res, 200, TYPES[path.extname(p).toLowerCase()] || 'application/octet-stream', buf);
+    }
+    if (p === '/' || p === '/index.html') {
+      const web = webDir ? `<p><a href="/web/index.html?bundle=/bundle.js">Open in the JSUI web (WASM) host</a></p>` : `<p>No WASM web host found (build <code>web/</code> to preview in the browser).</p>`;
+      const html = `<!doctype html><meta charset="utf-8"><title>jsui dev</title>
+<style>body{font:14px/1.5 system-ui,sans-serif;margin:2rem;color:#ddd;background:#111}a{color:#7cf}code{color:#fc6}</style>
+<h1>jsui dev server</h1>
+<p>Bundle: <a href="/bundle.js">/bundle.js</a> &middot; version: <code>${state.version}</code></p>
+<p>Native: <code>jsui-viewer --dev http://${host}:${port}/bundle.js</code></p>
+${web}
+${state.error ? `<pre style="color:#f88">${state.error.replace(/[<&]/g, (c) => (c === '<' ? '&lt;' : '&amp;'))}</pre>` : ''}`;
+      return send(res, 200, TYPES['.html'], html);
+    }
+    let file = null;
+    if (webDir && p.startsWith('/web/')) file = safeJoin(webDir, p.slice(5));
+    else file = safeJoin(entryDir, p.slice(1));
+    if (file && existsSync(file) && statSync(file).isFile()) {
+      res.writeHead(200, { 'Content-Type': TYPES[path.extname(file).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' });
+      createReadStream(file).pipe(res);
+      return undefined;
+    }
+    return send(res, 404, 'text/plain', 'not found');
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, host, resolve);
+  });
+  const actualPort = server.address().port;
+  log(`[jsui] dev server: http://${host}:${actualPort}/bundle.js  (version endpoint /__jsui/version)`);
+  return {
+    port: actualPort,
+    state,
+    async close() {
+      notify();
+      await ctx.dispose();
+      await new Promise((r) => server.close(r));
+      server.closeAllConnections?.();
+    },
+  };
+}

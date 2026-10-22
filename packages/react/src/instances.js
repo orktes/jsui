@@ -102,10 +102,27 @@ export function nativePropsChanged(a, b) {
   return n !== 0;
 }
 
+// Cheap pre-check on the React props: identical values (or a handler swapped
+// for another handler) cannot change what native sees, so most re-renders
+// skip building and diffing native props entirely.
+function mayDiffer(a, b) {
+  let n = 0;
+  for (const k in b) {
+    n++;
+    const x = b[k];
+    const y = a[k];
+    if (x === y || k === 'children') continue;
+    if (typeof x === 'function' && typeof y === 'function') continue;
+    return true;
+  }
+  for (const k in a) n--;
+  return n !== 0;
+}
+
 let bridgeCalls = 0;
-/** Number of setProps/patchStyle calls so far (benchmarks, tests). */
+/** Number of setProps + patchStyle bridge calls so far (benchmarks, tests). */
 export function bridgeStats() {
-  return { setProps: bridgeCalls };
+  return { calls: bridgeCalls };
 }
 
 export class HostInstance {
@@ -116,6 +133,7 @@ export class HostInstance {
     this.parent = null;
     this.hidden = false;
     this.nativeProps = toNativeProps(props, false);
+    this.styleOwned = false;  // nativeProps.style is a private copy we may mutate
     this.responderState = null;
     bridgeCalls++;
     native.setProps(id, this.nativeProps);
@@ -127,10 +145,13 @@ export class HostInstance {
 
   /** Re-sends props if anything the native side sees changed. */
   update(props) {
+    const old = this.props;
     this.props = props;
+    if (!mayDiffer(old, props)) return;
     const next = toNativeProps(props, this.hidden);
     if (nativePropsChanged(next, this.nativeProps)) {
       this.nativeProps = next;
+      this.styleOwned = false;
       bridgeCalls++;
       native.setProps(this.id, next);
     }
@@ -140,6 +161,7 @@ export class HostInstance {
     if (this.hidden === hidden) return;
     this.hidden = hidden;
     this.nativeProps = toNativeProps(this.props, hidden);
+    this.styleOwned = false;
     bridgeCalls++;
     native.setProps(this.id, this.nativeProps);
   }
@@ -159,7 +181,14 @@ export class HostInstance {
       }
     }
     if (!changed) return;
-    this.nativeProps = Object.assign({}, this.nativeProps, { style: Object.assign({}, cur, partial) });
+    // Copy the style once (it may be a frozen StyleSheet object), then
+    // mutate our own copy: no per-frame allocation for animations.
+    let style = cur;
+    if (!this.styleOwned || !style) {
+      style = this.nativeProps.style = Object.assign({}, cur);
+      this.styleOwned = true;
+    }
+    for (const k in partial) style[k] = partial[k];
     bridgeCalls++;
     if (typeof native.patchStyle === 'function') native.patchStyle(this.id, partial);
     else native.setProps(this.id, this.nativeProps);
@@ -178,6 +207,7 @@ export class HostInstance {
       this.props = Object.assign({}, this.props, rest);
       const next = toNativeProps(Object.assign({}, this.props, { style: this.nativeProps.style }), this.hidden);
       this.nativeProps = next;
+      this.styleOwned = false;
       bridgeCalls++;
       native.setProps(this.id, next);
     }

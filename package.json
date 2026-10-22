@@ -3,6 +3,7 @@
   "private": true,
   "workspaces": ["packages/*", "tests/reference", "web"],
   "scripts": {
+    "test:js": "npm --workspace @jsui/react --workspace @jsui/cli test",
     "test:reference": "npm --workspace tests/reference run test --",
     "test:web": "npm --workspace web run test:web"
   }

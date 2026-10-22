@@ -19,7 +19,11 @@ export function ActivityIndicator(props) {
   const { animating = true, color = '#1976D2', hidesWhenStopped = true, size = 'small', style, ...rest } = props;
   const px = typeof size === 'number' ? size : SIZES[size] || 20;
   const spin = useRef(null);
-  if (!spin.current) spin.current = new AnimatedValue(0);
+  if (!spin.current) {
+    const v = new AnimatedValue(0);
+    spin.current = v;
+    spin.rotate = v.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
+  }
   useEffect(() => {
     if (!animating) return undefined;
     // One shared rAF loop drives this; React does not re-render per frame.
@@ -29,7 +33,7 @@ export function ActivityIndicator(props) {
   }, [animating]);
   const stroke = Math.max(1, Math.round(px / 8));
   const ring = { position: 'absolute', left: 0, top: 0, width: px, height: px, borderRadius: px / 2, borderWidth: stroke };
-  const rotate = spin.current.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
+  const rotate = spin.rotate;
   return h(
     'View',
     Object.assign({ accessibilityRole: 'progressbar' }, rest, { style: [{ alignItems: 'center', justifyContent: 'center' }, style] }),
