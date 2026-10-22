@@ -3,15 +3,23 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <cstring>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "core/document.h"
 #include "core/node.h"
 #include "include/core/SkCanvas.h"
+#include "include/core/SkFont.h"
+#include "include/core/SkFontMetrics.h"
 #include "include/core/SkFontStyle.h"
 #include "modules/skparagraph/include/FontCollection.h"
+#include "include/core/SkMaskFilter.h"
+#include "include/core/SkBlurTypes.h"
+#include "include/core/SkTextBlob.h"
 #include "modules/skparagraph/include/Paragraph.h"
+#include "modules/skparagraph/include/ParagraphPainter.h"
 #include "modules/skparagraph/include/ParagraphBuilder.h"
 #include "modules/skparagraph/include/ParagraphStyle.h"
 #include "modules/skparagraph/include/TextStyle.h"
@@ -103,20 +111,69 @@ std::vector<SkString> families(const std::string& list, const std::string& def) 
   return out;
 }
 
-tl::TextStyle toSkStyle(const Resolved& r, const std::string& defFamily) {
+// Vertical metrics the way Chrome computes them: ascent and descent of the
+// primary font are rounded to whole pixels, "normal" line height is their sum
+// (+ line gap), and with an explicit line-height the half-leading above the
+// glyphs is floored. skparagraph uses unrounded metrics and splits leading
+// evenly, so we give every run the Chrome line height and shift the
+// baseline by the difference.
+struct LineMetrics {
+  float height = 0;         // line box height (px)
+  float baselineShift = 0;  // added to skparagraph's half-leading baseline
+  float paintDy = 0;        // root only: offset that puts skparagraph's (rounded) baseline at Chrome's
+};
+
+LineMetrics chromeLineMetrics(FontManager* fm, const tl::TextStyle& ts, float explicitLineHeight) {
+  LineMetrics out;
+  float size = ts.getFontSize();
+  if (size <= 0 || !fm) return out;
+  auto faces = fm->collection()->findTypefaces(ts.getFontFamilies(), ts.getFontStyle());
+  if (faces.empty() || !faces[0]) return out;
+  // Chrome rounds the outline (unhinted) metrics.
+  SkFont font(faces[0], size);
+  font.setHinting(SkFontHinting::kNone);
+  font.setSubpixel(true);
+  SkFontMetrics m;
+  font.getMetrics(&m);
+  float a = -m.fAscent, d = m.fDescent;
+  float ra = std::floor(a + 0.5f), rd = std::floor(d + 0.5f), rg = std::floor(std::max(0.f, m.fLeading) + 0.5f);
+  float h = explicitLineHeight > 0 ? explicitLineHeight : ra + rd + rg;
+  float chromeBaseline = ra + std::floor((h - ra - rd) / 2);
+  // skparagraph places the baseline using its shaping font's metrics, which
+  // has slight hinting (FreeType then reports rounded ascent / descent).
+  SkFont shaping(faces[0], size);
+  shaping.setHinting(SkFontHinting::kSlight);
+  shaping.setSubpixel(true);
+  shaping.setEdging(SkFont::Edging::kAntiAlias);
+  SkFontMetrics sm;
+  shaping.getMetrics(&sm);
+  float sa = -sm.fAscent, sd = sm.fDescent;
+  float skBaseline = sa + (h - sa - sd) / 2;
+  out.height = h;
+  out.baselineShift = chromeBaseline - skBaseline;
+  // skparagraph paints at floor(baseline + 0.5) within the line.
+  out.paintDy = chromeBaseline - std::floor(skBaseline + 0.5f);
+  return out;
+}
+
+// `rootShift`: the paragraph root's baseline shift, applied as a paint offset
+// instead (shifting runs relative to the strut would grow every line box).
+tl::TextStyle toSkStyle(const Resolved& r, FontManager* fm, float rootShift, LineMetrics* metricsOut = nullptr) {
+  const std::string& defFamily = fm->defaultFamily;
   tl::TextStyle ts;
   ts.setColor(toSk(r.color));
   ts.setFontFamilies(families(r.family, defFamily));
   ts.setFontSize(r.fontSize);
   ts.setFontStyle(SkFontStyle(r.weight, SkFontStyle::kNormal_Width,
                               r.italic ? SkFontStyle::kItalic_Slant : SkFontStyle::kUpright_Slant));
-  if (float lh = linePx(r); lh > 0 && r.fontSize > 0) {
-    // CSS line-height: the line box is exactly `lh`, extra space split evenly
-    // above and below the glyphs (half-leading), like Chrome.
-    ts.setHeight(lh / r.fontSize);
+  LineMetrics lm = chromeLineMetrics(fm, ts, linePx(r));
+  if (lm.height > 0) {
+    ts.setHeight(lm.height / r.fontSize);
     ts.setHeightOverride(true);
     ts.setHalfLeading(true);
+    if (!metricsOut && lm.baselineShift != rootShift) ts.setBaselineShift(lm.baselineShift - rootShift);
   }
+  if (metricsOut) *metricsOut = lm;
   if (r.letterSpacing != 0) ts.setLetterSpacing(r.letterSpacing);
   if (r.decoration) {
     int d = 0;
@@ -255,6 +312,70 @@ struct TextCache : Node::Cache {
   float laidOutWidth = -1;  // width passed to the last layout()
   float maxIntrinsic = 0;
   bool rtl = false;
+  float paintDy = 0;  // baseline correction of the root style (see chromeLineMetrics)
+  // Unhinted copies of the paragraph's text blobs, keyed by blob id (see
+  // ChromeLikePainter). Cleared whenever the paragraph is laid out again.
+  std::unordered_map<uint32_t, sk_sp<SkTextBlob>> blobs;
+};
+
+// skparagraph shapes with slight hinting; Chrome (Linux, headless) draws
+// glyph outlines unhinted, which changes every glyph's vertical edges. This
+// painter redraws each blob with hinting off (same glyphs and positions);
+// the rebuilt blobs are cached so steady-state frames do not allocate.
+class ChromeLikePainter : public tl::ParagraphPainter {
+ public:
+  ChromeLikePainter(SkCanvas* c, TextCache* cache) : c_(c), cache_(cache) {}
+
+  void drawTextBlob(const sk_sp<SkTextBlob>& blob, SkScalar x, SkScalar y, const SkPaintOrID& paint) override {
+    if (const SkPaint* p = std::get_if<SkPaint>(&paint)) c_->drawTextBlob(unhinted(blob), x, y, *p);
+  }
+  void drawTextShadow(const sk_sp<SkTextBlob>& blob, SkScalar x, SkScalar y, SkColor color, SkScalar sigma) override {
+    SkPaint p;
+    p.setColor(color);
+    p.setAntiAlias(true);
+    if (sigma > 0) p.setMaskFilter(SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, sigma, false));
+    c_->drawTextBlob(unhinted(blob), x, y, p);
+  }
+  void drawRect(const SkRect& r, const SkPaintOrID& paint) override {
+    if (const SkPaint* p = std::get_if<SkPaint>(&paint)) c_->drawRect(r, *p);
+  }
+  void drawFilledRect(const SkRect& r, const DecorationStyle& d) override {
+    SkPaint p(d.skPaint());
+    p.setStroke(false);
+    c_->drawRect(r, p);
+  }
+  void drawPath(const SkPath& path, const DecorationStyle& d) override { c_->drawPath(path, d.skPaint()); }
+  void drawLine(SkScalar x0, SkScalar y0, SkScalar x1, SkScalar y1, const DecorationStyle& d) override {
+    c_->drawLine(x0, y0, x1, y1, d.skPaint());
+  }
+  void clipRect(const SkRect& r) override { c_->clipRect(r); }
+  void translate(SkScalar dx, SkScalar dy) override { c_->translate(dx, dy); }
+  void save() override { c_->save(); }
+  void restore() override { c_->restore(); }
+
+ private:
+  sk_sp<SkTextBlob> unhinted(const sk_sp<SkTextBlob>& blob) {
+    if (!blob) return blob;
+    auto it = cache_->blobs.find(blob->uniqueID());
+    if (it != cache_->blobs.end()) return it->second;
+    SkTextBlobBuilder b;
+    SkTextBlob::Iter iter(*blob);
+    SkTextBlob::Iter::ExperimentalRun run;
+    while (iter.experimentalNext(&run)) {
+      SkFont f = run.font;
+      f.setHinting(SkFontHinting::kNone);
+      const auto& buf = b.allocRunPos(f, run.count);
+      std::memcpy(buf.glyphs, run.glyphs, size_t(run.count) * sizeof(SkGlyphID));
+      std::memcpy(buf.points(), run.positions, size_t(run.count) * sizeof(SkPoint));
+    }
+    sk_sp<SkTextBlob> out = b.make();
+    if (!out) out = blob;
+    cache_->blobs.emplace(blob->uniqueID(), out);
+    return out;
+  }
+
+  SkCanvas* c_;
+  TextCache* cache_;
 };
 
 struct BuildState {
@@ -262,6 +383,7 @@ struct BuildState {
   tl::ParagraphBuilder* builder;
   std::string content;  // for direction detection
   bool wordStart = true;
+  float rootShift = 0;
 };
 
 void addChildren(Node* n, const Resolved& style, BuildState& st) {
@@ -275,7 +397,7 @@ void addChildren(Node* n, const Resolved& style, BuildState& st) {
       if (!c->style().display) continue;
       Resolved r = style;
       merge(&r, c->style().text);
-      st.builder->pushStyle(toSkStyle(r, st.fm->defaultFamily));
+      st.builder->pushStyle(toSkStyle(r, st.fm, st.rootShift));
       addChildren(c, r, st);
       st.builder->pop();
     }
@@ -338,7 +460,9 @@ TextCache* ensureCache(Node* n) {
   merge(&base, n->style().text);
 
   tl::ParagraphStyle ps;
-  tl::TextStyle baseSk = toSkStyle(base, fm->defaultFamily);
+  LineMetrics baseMetrics;
+  tl::TextStyle baseSk = toSkStyle(base, fm, 0, &baseMetrics);
+  fresh->paintDy = baseMetrics.paintDy;
   ps.setTextStyle(baseSk);
   ps.setApplyRoundingHack(false);  // Chrome keeps fractional line widths
   ps.setReplaceTabCharacters(true);
@@ -358,14 +482,15 @@ TextCache* ensureCache(Node* n) {
   strut.setFontFamilies(baseSk.getFontFamilies());
   strut.setFontStyle(baseSk.getFontStyle());
   strut.setFontSize(base.fontSize);
-  if (float lh = linePx(base); lh > 0 && base.fontSize > 0) {
-    strut.setHeight(lh / base.fontSize);
+  if (baseMetrics.height > 0) {
+    strut.setHeight(baseMetrics.height / base.fontSize);
     strut.setHeightOverride(true);
     strut.setHalfLeading(true);
   }
   ps.setStrutStyle(strut);
 
   BuildState st{fm, nullptr, {}};
+  st.rootShift = baseMetrics.baselineShift;
   std::string inputText;
   bool placeholder = false;
   if (isInput) {
@@ -419,6 +544,7 @@ void layoutAt(TextCache* c, float width) {
     // First layout: unconstrained, to learn the intrinsic widths.
     c->paragraph->layout(kInf);
     c->laidOutWidth = kInf;
+    c->blobs.clear();
     c->maxIntrinsic = c->paragraph->getMaxIntrinsicWidth();
   }
   // A width equal to the measured max-content width must not wrap because of
@@ -429,6 +555,7 @@ void layoutAt(TextCache* c, float width) {
   if (w != c->laidOutWidth) {
     c->paragraph->layout(w);
     c->laidOutWidth = w;
+    c->blobs.clear();
   }
 }
 
@@ -482,7 +609,11 @@ tl::Paragraph* layoutParagraph(Node* node, float width) {
 
 void paintText(Node* node, SkCanvas* canvas, float x, float y, float width, float height) {
   (void)height;
-  if (tl::Paragraph* p = layoutParagraph(node, width)) p->paint(canvas, x, y);
+  if (tl::Paragraph* p = layoutParagraph(node, width)) {
+    auto* c = static_cast<TextCache*>(node->textCache.get());
+    ChromeLikePainter painter(canvas, c);
+    p->paint(&painter, x, y + c->paintDy);
+  }
 }
 
 void paintTextInput(Node* node, SkCanvas* canvas, float x, float y, float width, float height) {
@@ -504,7 +635,8 @@ void paintTextInput(Node* node, SkCanvas* canvas, float x, float y, float width,
   }
   canvas->save();
   canvas->clipRect(SkRect::MakeXYWH(x, y, width, height));
-  p->paint(canvas, tx, ty);
+  ChromeLikePainter painter(canvas, c);
+  p->paint(&painter, tx, ty + c->paintDy);
   canvas->restore();
 }
 

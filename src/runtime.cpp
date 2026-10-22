@@ -192,7 +192,8 @@ bool Runtime::needsRedraw() const { return redraw_ || doc.paintDirty(); }
 
 void Runtime::render(void* pixels, int width, int height, size_t rowBytes) {
   SkImageInfo info = SkImageInfo::Make(width, height, kRGBA_8888_SkColorType, kPremul_SkAlphaType);
-  auto surface = SkSurfaces::WrapPixels(info, pixels, rowBytes);
+  SkSurfaceProps props = surfaceProps();
+  auto surface = SkSurfaces::WrapPixels(info, pixels, rowBytes, &props);
   if (!surface) return;
   doc.layout();
   SkCanvas* canvas = surface->getCanvas();

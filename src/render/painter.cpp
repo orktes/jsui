@@ -770,6 +770,8 @@ void paintDocument(Document& doc, SkCanvas* canvas) {
   rs->stats = ctx.stats;
 }
 
+SkSurfaceProps surfaceProps() { return SkSurfaceProps(0, kUnknown_SkPixelGeometry, 0.2f, 1.2f); }
+
 PaintStats lastPaintStats(const Document& doc) {
   auto* rs = static_cast<RootStats*>(doc.root()->paintCache.get());
   return rs ? rs->stats : PaintStats{};

@@ -2,6 +2,7 @@
 #pragma once
 
 #include "include/core/SkMatrix.h"
+#include "include/core/SkSurfaceProps.h"
 
 class SkCanvas;
 
@@ -12,6 +13,10 @@ class Node;
 
 // `canvas` is in device pixels; the painter applies doc.pixelRatio().
 void paintDocument(Document& doc, SkCanvas* canvas);
+
+// Surface properties render targets should use: grayscale text with
+// Chrome's (Linux) text contrast and gamma, so glyph coverage matches.
+SkSurfaceProps surfaceProps();
 
 // The node's CSS transform (transform about transformOrigin) in its own
 // border-box coordinates, excluding its layout position. Identity when the

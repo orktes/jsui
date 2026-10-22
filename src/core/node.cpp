@@ -66,7 +66,7 @@ bool valueEquals(const Value& a, const Value& b) {
 
 Node::Node(Document* doc, uint32_t id, NodeType type) : doc_(doc), id_(id), type_(type) {
   if (type_ != NodeType::RawText) {
-    yoga_ = YGNodeNew();
+    yoga_ = doc_ && doc_->yogaConfig() ? YGNodeNewWithConfig(doc_->yogaConfig()) : YGNodeNew();
     YGNodeSetContext(yoga_, this);
     applyStyle(Value(), &style_, yoga_);
     text::installMeasure(this);

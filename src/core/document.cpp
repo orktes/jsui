@@ -8,12 +8,24 @@
 namespace jsui {
 
 Document::Document() {
+  // Layout stays fractional like CSS (no Yoga pixel rounding); the painter
+  // snaps box edges to device pixels the way Chrome does.
+  yogaConfig_ = YGConfigNew();
+  YGConfigSetPointScaleFactor(yogaConfig_, 0);
   root_ = createNode(NodeType::View);
 }
 
 Document::~Document() {
   // Free children before parents so Yoga ownership stays consistent.
   if (root_) destroyRecursive(root_);
+  // Detached subtrees the reconciler never destroyed: free them top-down too,
+  // before the Yoga config they reference.
+  while (!nodes_.empty()) {
+    Node* n = nodes_.begin()->second.get();
+    while (n->parent()) n = n->parent();
+    destroyRecursive(n);
+  }
+  YGConfigFree(yogaConfig_);
 }
 
 Node* Document::createNode(NodeType type) {
