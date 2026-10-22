@@ -116,8 +116,7 @@ target_compile_definitions(jsui_skia INTERFACE SK_RELEASE)
 if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
   find_package(Fontconfig QUIET)
   find_package(Threads REQUIRED)
-  find_package(ZLIB REQUIRED)
-  target_link_libraries(jsui_skia INTERFACE Threads::Threads ZLIB::ZLIB ${CMAKE_DL_LIBS})
+  target_link_libraries(jsui_skia INTERFACE Threads::Threads ${CMAKE_DL_LIBS})
   if(Fontconfig_FOUND)
     target_link_libraries(jsui_skia INTERFACE Fontconfig::Fontconfig)
   endif()
@@ -125,4 +124,32 @@ elseif(APPLE)
   target_link_libraries(jsui_skia INTERFACE "-framework CoreFoundation" "-framework CoreGraphics" "-framework CoreText" "-framework CoreServices")
 elseif(WIN32)
   target_link_libraries(jsui_skia INTERFACE user32 gdi32 ole32 opengl32 usp10)
+endif()
+
+# The prebuilt Skia's FreeType (ftgzip) needs zlib's unprefixed inflate*
+# symbols. Use the system zlib where there is one (Linux, macOS SDK) and
+# build it from source elsewhere (Windows).
+if(NOT EMSCRIPTEN)
+  find_package(ZLIB QUIET)
+  if(ZLIB_FOUND)
+    target_link_libraries(jsui_skia INTERFACE ZLIB::ZLIB)
+  else()
+    FetchContent_Declare(zlib
+      GIT_REPOSITORY https://github.com/madler/zlib.git
+      GIT_TAG v1.3.1
+      GIT_SHALLOW TRUE)
+    FetchContent_GetProperties(zlib)
+    if(NOT zlib_POPULATED)
+      FetchContent_Populate(zlib)
+    endif()
+    # Only the codec is needed; the gz* file API wants platform headers.
+    file(GLOB JSUI_ZLIB_SOURCES ${zlib_SOURCE_DIR}/*.c)
+    list(FILTER JSUI_ZLIB_SOURCES EXCLUDE REGEX "/gz[a-z]+\\.c$")
+    add_library(jsui_zlib STATIC ${JSUI_ZLIB_SOURCES})
+    target_include_directories(jsui_zlib PUBLIC ${zlib_SOURCE_DIR})
+    if(MSVC)
+      target_compile_definitions(jsui_zlib PRIVATE _CRT_SECURE_NO_DEPRECATE _CRT_NONSTDC_NO_DEPRECATE)
+    endif()
+    target_link_libraries(jsui_skia INTERFACE jsui_zlib)
+  endif()
 endif()

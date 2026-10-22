@@ -107,7 +107,7 @@ jobs:
       - name: Install
         run: if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
       - name: Tests (packages/*)
-        run: npm test --workspaces --if-present
+        run: npm run test:js
 
   # ---------------------------------------------------------------- reference
   reference:
