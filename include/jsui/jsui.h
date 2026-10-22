@@ -143,6 +143,20 @@ JSUI_API int jsui_needs_redraw(JsuiRuntime* rt);
 /* Paint into a caller-owned RGBA8888 premultiplied buffer of
  * width*height device pixels. The buffer is cleared to transparent first. */
 JSUI_API void jsui_render_rgba(JsuiRuntime* rt, void* pixels, int width, int height, size_t row_bytes);
+/* A rectangle in device pixels. */
+typedef struct JsuiRect {
+    int x, y, width, height;
+} JsuiRect;
+/* Incremental variant of jsui_render_rgba for hosts that keep the buffer
+ * between frames (e.g. a texture staging buffer): `pixels` must still hold
+ * the frame this runtime last rendered into it, and only pixels that changed
+ * since then are repainted. Rendering into a different buffer or size (or a
+ * jsui_render_rgba call in between) falls back to a full repaint.
+ * `dirty` (optional) receives the repainted rect, empty when nothing changed,
+ * so the host can upload just that region. Returns 1 if any pixel was
+ * repainted, 0 otherwise. */
+JSUI_API int jsui_render_rgba_incremental(JsuiRuntime* rt, void* pixels, int width, int height, size_t row_bytes,
+                                          JsuiRect* dirty);
 /* Encode the current frame as PNG (for tests / screenshots). Caller frees with jsui_free(). */
 JSUI_API int jsui_render_png(JsuiRuntime* rt, void** out_data, size_t* out_size);
 JSUI_API void jsui_free(void* p);

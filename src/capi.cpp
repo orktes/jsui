@@ -90,6 +90,12 @@ void jsui_render_rgba(JsuiRuntime* rt, void* pixels, int width, int height, size
   rt->rt->render(pixels, width, height, rowBytes);
 }
 
+int jsui_render_rgba_incremental(JsuiRuntime* rt, void* pixels, int width, int height, size_t rowBytes, JsuiRect* dirty) {
+  SkIRect r = rt->rt->renderIncremental(pixels, width, height, rowBytes);
+  if (dirty) *dirty = JsuiRect{r.x(), r.y(), r.width(), r.height()};
+  return r.isEmpty() ? 0 : 1;
+}
+
 int jsui_render_png(JsuiRuntime* rt, void** outData, size_t* outSize) {
   auto& doc = rt->rt->doc;
   int w = int(doc.width() * doc.pixelRatio() + 0.5f), h = int(doc.height() * doc.pixelRatio() + 0.5f);

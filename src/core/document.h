@@ -39,6 +39,10 @@ class Document {
   bool paintDirty() const { return paintDirty_; }
   void clearPaintDirty() { paintDirty_ = false; }
 
+  // Yoga configuration shared by this document's nodes (one per document:
+  // no global state).
+  YGConfigRef yogaConfig() const { return yogaConfig_; }
+
   // Services used by text measurement and painting. Set by the Runtime.
   FontManager* fonts = nullptr;
   ImageCache* images = nullptr;
@@ -59,6 +63,8 @@ class Document {
   uint32_t nextId_ = 1;
   float width_ = 0, height_ = 0, pixelRatio_ = 1;
   bool layoutDirty_ = true, paintDirty_ = true;
+  uint32_t fontGeneration_ = 0;  // FontManager::generation the text caches were built with
+  YGConfigRef yogaConfig_ = nullptr;
 };
 
 }  // namespace jsui

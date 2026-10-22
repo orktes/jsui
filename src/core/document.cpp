@@ -2,15 +2,30 @@
 
 #include <cmath>
 
+#include "text/font_manager.h"
+#include "text/text_layout.h"
+
 namespace jsui {
 
 Document::Document() {
+  // Layout stays fractional like CSS (no Yoga pixel rounding); the painter
+  // snaps box edges to device pixels the way Chrome does.
+  yogaConfig_ = YGConfigNew();
+  YGConfigSetPointScaleFactor(yogaConfig_, 0);
   root_ = createNode(NodeType::View);
 }
 
 Document::~Document() {
   // Free children before parents so Yoga ownership stays consistent.
   if (root_) destroyRecursive(root_);
+  // Detached subtrees the reconciler never destroyed: free them top-down too,
+  // before the Yoga config they reference.
+  while (!nodes_.empty()) {
+    Node* n = nodes_.begin()->second.get();
+    while (n->parent()) n = n->parent();
+    destroyRecursive(n);
+  }
+  YGConfigFree(yogaConfig_);
 }
 
 Node* Document::createNode(NodeType type) {
@@ -52,15 +67,31 @@ void Document::clear() {
   root_->setProps(Value());
 }
 
+namespace {
+// Border widths snap to device pixels, so a new pixel ratio restyles.
+void restyle(Node* n) {
+  n->restyle();
+  for (Node* c : n->children()) restyle(c);
+}
+}  // namespace
+
 void Document::setViewport(float width, float height, float pixelRatio) {
   if (width == width_ && height == height_ && pixelRatio == pixelRatio_) return;
+  bool prChanged = pixelRatio != pixelRatio_;
   width_ = width;
   height_ = height;
   pixelRatio_ = pixelRatio;
+  if (prChanged && root_) restyle(root_);
   markLayoutDirty();
 }
 
 bool Document::layout() {
+  // A newly registered font changes text metrics everywhere.
+  if (fonts && fonts->generation != fontGeneration_) {
+    fontGeneration_ = fonts->generation;
+    text::invalidateAll(root_);
+    layoutDirty_ = paintDirty_ = true;
+  }
   if (!layoutDirty_) return false;
   layoutDirty_ = false;
   YGNodeStyleSetWidth(root_->yoga(), width_);

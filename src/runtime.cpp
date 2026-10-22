@@ -191,25 +191,65 @@ void Runtime::tick(double nowMs) {
 bool Runtime::needsRedraw() const { return redraw_ || doc.paintDirty(); }
 
 void Runtime::render(void* pixels, int width, int height, size_t rowBytes) {
+  renderImpl(pixels, width, height, rowBytes, false);
+}
+
+SkIRect Runtime::renderIncremental(void* pixels, int width, int height, size_t rowBytes) {
+  return renderImpl(pixels, width, height, rowBytes, true);
+}
+
+SkIRect Runtime::renderImpl(void* pixels, int width, int height, size_t rowBytes, bool incremental) {
   SkImageInfo info = SkImageInfo::Make(width, height, kRGBA_8888_SkColorType, kPremul_SkAlphaType);
-  auto surface = SkSurfaces::WrapPixels(info, pixels, rowBytes);
-  if (!surface) return;
+  SkSurfaceProps props = surfaceProps();
+  auto surface = SkSurfaces::WrapPixels(info, pixels, rowBytes, &props);
+  if (!surface) return SkIRect::MakeEmpty();
   doc.layout();
-  SkCanvas* canvas = surface->getCanvas();
-  canvas->clear(SK_ColorTRANSPARENT);
+  // Nothing marked dirty and the buffer still holds our last frame: done,
+  // without walking the tree.
+  if (incremental && !doc.paintDirty() && pixels == lastTarget_ && width == lastTargetW_ &&
+      height == lastTargetH_ && rowBytes == lastTargetRowBytes_ && lastError.empty()) {
+    redraw_ = false;
+    return SkIRect::MakeEmpty();
+  }
+  // Always refresh the paint records so the next incremental frame compares
+  // against what is in the buffer.
+  SkRegion damage = updateDamage(doc, width, height);
   bool dev = config.dev_mode != 0;
-  if (dev && lastGoodFrame_ && (!lastError.empty() || doc.root()->children().empty())) {
+  bool frozen = dev && lastGoodFrame_ && (!lastError.empty() || doc.root()->children().empty());
+  bool overlay = dev && !lastError.empty();
+  bool partial = incremental && !frozen && !overlay && pixels == lastTarget_ && width == lastTargetW_ &&
+                 height == lastTargetH_ && rowBytes == lastTargetRowBytes_;
+  // Frames with the error overlay or a frozen picture are not tracked by the
+  // records: the next frame repaints fully.
+  bool tracked = !frozen && !overlay;
+  lastTarget_ = tracked ? pixels : nullptr;
+  lastTargetW_ = width;
+  lastTargetH_ = height;
+  lastTargetRowBytes_ = rowBytes;
+  doc.clearPaintDirty();
+  redraw_ = false;
+  SkCanvas* canvas = surface->getCanvas();
+  if (partial) {
+    if (damage.isEmpty()) return SkIRect::MakeEmpty();
+    canvas->save();
+    canvas->clipRegion(damage);
+    canvas->clear(SK_ColorTRANSPARENT);
+    paintDocument(doc, canvas, &damage);
+    canvas->restore();
+    return damage.getBounds();
+  }
+  canvas->clear(SK_ColorTRANSPARENT);
+  if (frozen) {
     canvas->drawPicture(lastGoodFrame_);
   } else {
     paintDocument(doc, canvas);
     if (lastGoodFrame_ && lastError.empty()) lastGoodFrame_.reset();
   }
-  if (dev && !lastError.empty()) {
+  if (overlay) {
     if (!overlay_) overlay_ = std::make_unique<DevOverlay>(fonts);
     overlay_->paint(canvas, lastError, doc.width(), doc.height(), doc.pixelRatio());
   }
-  doc.clearPaintDirty();
-  redraw_ = false;
+  return SkIRect::MakeWH(width, height);
 }
 
 }  // namespace jsui

@@ -58,6 +58,9 @@ class Node {
   // `props["__events"] = ["press", "pointerMove", ...]` used for hit testing.
   void setProps(const Value& props);
   const Value& props() const { return props_; }
+  // Re-applies the current props (e.g. after a pixel-ratio change, which
+  // affects border-width snapping).
+  void restyle();
 
   // RawText content (UTF-8).
   void setText(std::string text);
@@ -82,6 +85,8 @@ class Node {
 
   // Marks layout and paint dirty (text content or style changed).
   void markDirty();
+  // Marks only this node's painting dirty (no relayout).
+  void markPaintDirty();
 
   // Opaque per-node cache owned by the renderer / text layout.
   struct Cache {
@@ -89,6 +94,11 @@ class Node {
   };
   std::unique_ptr<Cache> textCache;
   std::unique_ptr<Cache> imageCache;
+  // Renderer state (recorded picture of this subtree, see render/painter.cpp).
+  std::unique_ptr<Cache> paintCache;
+  // Bumped on every change that affects how this node itself paints (props,
+  // text, children list). The painter compares it against its cache.
+  uint32_t paintVersion = 0;
 
  private:
   void attachYoga(Node* child, size_t index);

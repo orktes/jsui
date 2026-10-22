@@ -47,6 +47,7 @@ add_subdirectory(${_sdl_src} ${CMAKE_BINARY_DIR}/_deps/sdl2-build EXCLUDE_FROM_A
 add_executable(jsui-viewer main.cpp keymap.cpp)
 target_compile_definitions(jsui-viewer PRIVATE SDL_MAIN_HANDLED)
 target_link_libraries(jsui-viewer PRIVATE jsui SDL2::SDL2-static)
+jsui_copy_icu_data(jsui-viewer)
 if(WIN32)
   set_target_properties(jsui-viewer PROPERTIES WIN32_EXECUTABLE OFF)
 endif()
