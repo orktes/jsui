@@ -394,6 +394,7 @@ export class VirtualizedList extends Component {
     this._lastFocusedIndex = -1;
     this._layoutHandlers = new Map();
     this._scrollAnchor = null;
+    this._initialScroll = null;
     this._indexOfKey = new Map(); // cells of the last render
     this._mountedKeys = new Map(); // cells of the last commit: key -> index
     this._anchors = null;
@@ -560,6 +561,14 @@ export class VirtualizedList extends Component {
 
   _onContentSizeChange = (width, height) => {
     this._metrics.contentLength = this._horizontal() ? width : height;
+    const init = this._initialScroll;
+    if (init != null && this._metrics.contentLength > 0) {
+      this._initialScroll = null;
+      const s = this._scrollRef;
+      if (init > 0 && s && typeof s.scrollTo === 'function') {
+        s.scrollTo(this._horizontal() ? { x: init, y: 0, animated: false } : { x: 0, y: init, animated: false });
+      }
+    }
     this._scheduleCellsToRenderUpdate();
     this._maybeCallOnEdgesReached();
     if (this._pendingScroll && this._pendingScroll.end) this._retryPendingScroll(-1);
@@ -750,7 +759,12 @@ export class VirtualizedList extends Component {
     this._committed();
     this._unsubFocus = addGlobalListener('focus', this._onAnyFocus);
     const isi = this.props.initialScrollIndex;
-    if (isi > 0 && isi < this._count()) this.scrollToIndex({ index: isi, animated: false });
+    if (isi > 0 && isi < this._count()) {
+      this.scrollToIndex({ index: isi, animated: false });
+      // The host may clamp that scroll while nothing is laid out yet:
+      // apply it again once the content has a size.
+      this._initialScroll = this._metrics.offset;
+    }
   }
 
   componentWillUnmount() {

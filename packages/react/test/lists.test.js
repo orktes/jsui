@@ -274,6 +274,16 @@ test('scrollToIndex without getItemLayout estimates, then corrects once measured
   assert.equal(scrollState.get(sv.id).y, rects.get(cell.parent).y, 'scrolled exactly to the measured cell');
 });
 
+test('initialScrollIndex opens the list at that row (re-applied once laid out)', async () => {
+  const getItemLayout = (_d, index) => ({ length: 50, offset: 50 * index, index });
+  render(h(FlatList, { data: data10k, renderItem, getItemLayout, initialScrollIndex: 4000, updateCellsBatchingPeriod: 1 }));
+  assert.ok(renderedIndices().includes(4000) && !renderedIndices().includes(0), 'initial window is around the index');
+  await settle();
+  assert.equal(scrollState.get(scrollView().id).y, 200000);
+  const idx = renderedIndices();
+  assert.ok(idx.includes(4000) && !idx.includes(0), 'initialNumToRender cells are not pinned with initialScrollIndex');
+});
+
 test('onScrollToIndexFailed is called for unmeasured indices when provided', async () => {
   const ref = createRef();
   const failed = [];
