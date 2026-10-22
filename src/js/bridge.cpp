@@ -337,6 +337,8 @@ JSValue js_reload(JSContext* ctx, JSValueConst, int, JSValueConst*) {
 
 }  // namespace
 
+void installAnimatedBridge(JsEngine::Impl& impl, JSValue native);  // bridge_animated.cpp
+
 void installBridge(JsEngine::Impl& impl, JSValue global) {
   JSContext* ctx = impl.ctx;
   JSValue native = JS_NewObject(ctx);
@@ -361,6 +363,7 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
   // TextInput text is edited natively (change / selectionchange events).
   JS_SetPropertyStr(ctx, native, "textEditing", JS_TRUE);
   JS_SetPropertyStr(ctx, native, "devMode", JS_NewBool(ctx, impl.rt.config.dev_mode != 0));
+  installAnimatedBridge(impl, native);
   JS_SetPropertyStr(ctx, global, "__jsui_native", native);
 }
 

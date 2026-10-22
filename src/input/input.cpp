@@ -8,6 +8,7 @@
 #include <limits>
 #include <string_view>
 
+#include "animated/native_animated.h"
 #include "core/document.h"
 #include "js/engine.h"
 #include "runtime.h"
@@ -343,9 +344,13 @@ void InputManager::addModifiers(Value::Object& ev) const {
 
 bool InputManager::dispatch(Value::Object&& ev) {
   if (!rt_.js) return false;
+  Value event(std::move(ev));
+  // Animated.event(..., {useNativeDriver: true}) mappings apply natively,
+  // before (and independently of) JS.
+  rt_.animated->handleEvent(event);
   // Only preventDefault() suppresses the default action; a handler that
   // merely observes the event (flag 1) lets it proceed, like the DOM.
-  return (rt_.js->dispatchEvent(Value(std::move(ev))) & JsEngine::kDefaultPrevented) != 0;
+  return (rt_.js->dispatchEvent(event) & JsEngine::kDefaultPrevented) != 0;
 }
 
 bool InputManager::dispatchPointer(const char* type, Node* target, const PointerState& p, int button, float x,

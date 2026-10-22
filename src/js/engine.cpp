@@ -598,6 +598,22 @@ int JsEngine::dispatchEvent(const Value& event) {
   return flags;
 }
 
+void JsEngine::callGlobal(const char* name, const Value* args, int argc) {
+  Impl& impl = *impl_;
+  JSContext* ctx = impl.ctx;
+  JSValue global = JS_GetGlobalObject(ctx);
+  JSValue fn = JS_GetPropertyStr(ctx, global, name);
+  if (JS_IsFunction(ctx, fn)) {
+    std::vector<JSValue> argv;
+    for (int i = 0; i < argc; i++) argv.push_back(fromValue(ctx, args[i]));
+    JSValue r = impl.call(fn, JS_UNDEFINED, argc, argv.data());
+    JS_FreeValue(ctx, r);
+    for (JSValue v : argv) JS_FreeValue(ctx, v);
+  }
+  JS_FreeValue(ctx, fn);
+  JS_FreeValue(ctx, global);
+}
+
 void JsEngine::hostMessage(const std::string& name, const std::string& json) {
   Impl& impl = *impl_;
   JSContext* ctx = impl.ctx;

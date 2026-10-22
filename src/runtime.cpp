@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "animated/native_animated.h"
 #include "dev_overlay.h"
 #include "include/core/SkCanvas.h"
 #include "include/core/SkPicture.h"
@@ -44,7 +45,11 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
   images = std::make_unique<ImageCache>(*this);
   doc.images = images.get();
   input = std::make_unique<InputManager>(*this);
-  doc.onNodeDestroyed = [this](Node* n) { input->nodeRemoved(n); };
+  animated = std::make_unique<NativeAnimated>(doc);
+  doc.onNodeDestroyed = [this](Node* n) {
+    input->nodeRemoved(n);
+    animated->viewDestroyed(n->id());
+  };
   doc.onLayout = [this](Node* n, const Rect& r) {
     if (js) js->layoutEvent(n->id(), r.x, r.y, r.width, r.height);
   };
@@ -77,6 +82,7 @@ void Runtime::reportError(const std::string& msg) {
 
 void Runtime::resetEngine() {
   js.reset();
+  animated->clear();
   doc.clear();
   js = std::make_unique<JsEngine>(*this);
   redraw_ = true;
@@ -184,12 +190,42 @@ void Runtime::tick(double nowMs) {
   js->runAnimationFrame(nowMs);
   js->runJobs();
   input->tick(nowMs);
+  // Native-driven Animated: evaluated on the frame clock after JS and
+  // scroll physics of this tick (Animated.event mappings saw the offsets).
+  animated->tick(nowMs);
+  deliverAnimatedEvents();
   doc.layout();
   doc.tickLayoutAnimations(nowMs);
   // A LayoutAnimation applies to the commit that armed it only.
   doc.disarmLayoutAnimation();
   devPoll();
   if (doc.paintDirty()) redraw_ = true;
+}
+
+void Runtime::tickNative(double nowMs) {
+  now = nowMs;
+  doc.now = nowMs;
+  animated->tick(nowMs);  // end events stay queued until the next tick()
+  doc.layout();
+  doc.tickLayoutAnimations(nowMs);
+  if (doc.paintDirty()) redraw_ = true;
+}
+
+void Runtime::deliverAnimatedEvents() {
+  if (!js || (animated->ends.empty() && animated->updates.empty())) return;
+  // Value updates first (listeners see the final value), then end callbacks.
+  auto updates = std::move(animated->updates);
+  animated->updates.clear();
+  for (auto& u : updates) {
+    Value args[2] = {Value(u.tag), Value(u.value)};
+    js->callGlobal("__jsui_onAnimatedValueUpdate", args, 2);
+  }
+  auto ends = std::move(animated->ends);
+  animated->ends.clear();
+  for (auto& e : ends) {
+    Value args[3] = {Value(e.id), Value(e.finished), Value(e.value)};
+    js->callGlobal("__jsui_onAnimatedEnd", args, 3);
+  }
 }
 
 std::string Runtime::clipboardText() {
@@ -211,7 +247,7 @@ bool Runtime::wantsFrame() const {
   // A pending repaint alone is not a reason to tick: the host paints after
   // the tick it already ran.
   return reloadRequested_ || loader.pending() > 0 || (js && js->hasPendingWork(now + 17)) || input->animating() ||
-         doc.layoutAnimating();
+         doc.layoutAnimating() || animated->animating() || !animated->ends.empty();
 }
 
 void Runtime::render(void* pixels, int width, int height, size_t rowBytes) {

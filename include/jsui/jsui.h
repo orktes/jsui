@@ -135,6 +135,14 @@ JSUI_API void jsui_set_viewport(JsuiRuntime* rt, int width, int height, float pi
 /* Advance time to `now_ms` (monotonic). Runs due timers, resolves loaded
  * resources, runs requestAnimationFrame callbacks, microtasks and layout. */
 JSUI_API void jsui_tick(JsuiRuntime* rt, double now_ms);
+/* Advances only the work that runs natively on the runtime clock, without
+ * running any JS: Animated animations started with useNativeDriver: true
+ * (and the styles they drive), LayoutAnimations and layout. Timers,
+ * requestAnimationFrame, input events and animation end callbacks wait for
+ * the next jsui_tick(). For hosts that skip JS on a frame (a frame budget
+ * already spent, a hitch while loading) but keep native animations smooth.
+ * now_ms is on the same clock as jsui_tick(). */
+JSUI_API void jsui_tick_native(JsuiRuntime* rt, double now_ms);
 /* Number of resource loads (bundle, fetch, images, fonts) still in flight.
  * Headless hosts keep ticking until this reaches 0 before capturing. */
 JSUI_API int jsui_pending_loads(JsuiRuntime* rt);
@@ -143,7 +151,8 @@ JSUI_API int jsui_needs_redraw(JsuiRuntime* rt);
 /* Non-zero while something is in motion and the next frame should be ticked
  * soon even without input: requestAnimationFrame callbacks, due timers,
  * scroll animations (flings, smooth scrolling, snapping), scroll indicator
- * fades, held gamepad sticks / D-pad. Hosts that sleep when idle keep calling
+ * fades, held gamepad sticks / D-pad, native-driven Animated animations,
+ * LayoutAnimations. Hosts that sleep when idle keep calling
  * jsui_tick at display rate while this is set. */
 JSUI_API int jsui_wants_frame(JsuiRuntime* rt);
 /* Paint into a caller-owned RGBA8888 premultiplied buffer of

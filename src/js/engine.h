@@ -45,6 +45,8 @@ class JsEngine {
   int dispatchEvent(const Value& event);
   void hostMessage(const std::string& name, const std::string& json);
   void layoutEvent(uint32_t id, float x, float y, float w, float h);
+  // Calls globalThis[name](...args) if it is a function (exceptions are reported).
+  void callGlobal(const char* name, const Value* args, int argc);
 
   // True while JS is on the stack (native code called from JS). Destroying
   // the engine then is not allowed; Runtime defers reloads instead.
