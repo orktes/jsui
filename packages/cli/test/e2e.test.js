@@ -32,4 +32,21 @@ for (const mode of ['production', 'development']) {
     assert.match(stdout, /PASS react_e2e/);
     assert.doesNotMatch(stdout, /skipped/);
   });
+
+  // Virtualized FlatList (10,000 rows): windowing, focus navigation, wheel,
+  // scrollToIndex / scrollToEnd, checked from rendered pixels; prints timings.
+  test(`native runtime list e2e (${mode} React)`, { skip: !existsSync(binary) && `no ${binary}` }, async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'jsui-e2e-list-'));
+    const outfile = path.join(dir, 'bundle.js');
+    await build({ entry: path.join(here, 'e2e', 'list.jsx'), outfile, mode });
+    const { stdout } = await promisify(execFile)(binary, ['react_list_e2e'], {
+      env: Object.assign({}, process.env, { JSUI_REACT_LIST_BUNDLE: outfile }),
+      cwd: repo,
+    }).catch((e) => {
+      throw new Error(`jsui-tests failed:\n${e.stdout}\n${e.stderr}`);
+    });
+    if (process.env.JSUI_E2E_VERBOSE) console.log(stdout);
+    assert.match(stdout, /PASS react_list_e2e/);
+    assert.doesNotMatch(stdout, /skipped/);
+  });
 }

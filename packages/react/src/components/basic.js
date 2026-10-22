@@ -1,7 +1,7 @@
 // Core host-backed components: View, Text, Image, ImageBackground,
 // ScrollView, TextInput.
 
-import { createElement as h, cloneElement, isValidElement, Children, useImperativeHandle, useRef, useState, useLayoutEffect, createContext, useContext } from 'react';
+import { createElement as h, useImperativeHandle, useRef, useState, useLayoutEffect, createContext, useContext } from 'react';
 import { flatten } from '../StyleSheet.js';
 import { native, warnOnce } from '../native.js';
 import { usePress, PRESS_PROPS, omit } from './usePress.js';
@@ -180,80 +180,8 @@ const SCROLL_IGNORED = [
   'centerContent',
 ];
 
-// stickyHeaderIndices (RN ScrollViewStickyHeader): each sticky child is
-// wrapped in a View that is translated on scroll so it stays pinned to the
-// top (left when horizontal) until the next sticky header pushes it away.
-// The translation is patched natively per scroll event (no React render).
-class StickyState {
-  constructor() {
-    this.offset = 0;
-    this.horizontal = false;
-    this.ids = []; // keys of the sticky children, in child order
-    this.layouts = new Map(); // key -> {x, y, width, height}
-    this.insts = new Map(); // key -> host instance
-    this.shift = new Map(); // key -> current translation
-    this.userOnScroll = null;
-    this.onScroll = (e) => {
-      const o = (e && e.nativeEvent && e.nativeEvent.contentOffset) || {};
-      this.offset = this.horizontal ? +o.x || 0 : +o.y || 0;
-      this.update();
-      if (this.userOnScroll) this.userOnScroll(e);
-    };
-  }
-  update() {
-    const hz = this.horizontal;
-    const ids = this.ids;
-    for (let k = 0; k < ids.length; k++) {
-      const i = ids[k];
-      const l = this.layouts.get(i);
-      if (!l) continue;
-      const pos = hz ? l.x : l.y;
-      const size = hz ? l.width : l.height;
-      let t = this.offset > pos ? this.offset - pos : 0;
-      for (let n = k + 1; n < ids.length; n++) {
-        const nl = this.layouts.get(ids[n]);
-        if (!nl) continue;
-        t = Math.min(t, Math.max(0, (hz ? nl.x : nl.y) - pos - size));
-        break;
-      }
-      if (this.shift.get(i) === t) continue;
-      this.shift.set(i, t);
-      const inst = this.insts.get(i);
-      if (inst) inst.patchStyle({ transform: [hz ? { translateX: t } : { translateY: t }] });
-    }
-  }
-}
-
-const stickyHeaderStyle = { zIndex: 10, position: 'relative' };
-const stickyFill = { flex: 1 };
-
-function StickyHeader({ st, id, child }) {
-  const latest = useRef(null);
-  latest.current = { child, id };
-  const refs = useRef(null);
-  if (!refs.current) {
-    refs.current = {
-      ref: (inst) => {
-        const i = latest.current.id;
-        if (inst) st.insts.set(i, inst);
-        else if (st.insts.get(i)) st.insts.delete(i);
-      },
-      onLayout: (e) => {
-        const { child: c, id: i } = latest.current;
-        st.layouts.set(i, e.nativeEvent.layout);
-        st.update();
-        // Forward to the child (a list cell measures itself through this).
-        if (c && c.props && c.props.onLayout) c.props.onLayout(e);
-      },
-    };
-  }
-  const t = st.shift.get(id) || 0;
-  const style = [child.props && child.props.style, stickyHeaderStyle, { transform: [st.horizontal ? { translateX: t } : { translateY: t }] }];
-  return h('View', { ref: refs.current.ref, onLayout: refs.current.onLayout, style, collapsable: false }, cloneElement(child, { style: stickyFill, onLayout: undefined }));
-}
-
 export function ScrollView(props) {
-  const { children, contentContainerStyle, horizontal, onContentSizeChange, refreshControl, centerContent, stickyHeaderIndices } = props;
+  const { children, contentContainerStyle, horizontal, onContentSizeChange, refreshControl, centerContent } = props;
   const rest = omit(props, SCROLL_IGNORED);
   rest.horizontal = !!horizontal;
   rest.style = [horizontal ? scrollBaseH : scrollBase, props.style];
@@ -262,24 +190,7 @@ export function ScrollView(props) {
     collapsable: false,
   };
   if (onContentSizeChange) content.onLayout = (e) => onContentSizeChange(e.nativeEvent.layout.width, e.nativeEvent.layout.height);
-  const stickyRef = useRef(null);
-  let kids = children;
-  if (stickyHeaderIndices && stickyHeaderIndices.length) {
-    const st = stickyRef.current || (stickyRef.current = new StickyState());
-    st.horizontal = !!horizontal;
-    const wanted = new Set(stickyHeaderIndices);
-    st.userOnScroll = props.onScroll || null;
-    rest.onScroll = st.onScroll;
-    const ids = [];
-    kids = Children.toArray(children).map((child, i) => {
-      if (!isValidElement(child) || !wanted.has(i)) return child;
-      const id = child.key != null ? child.key : String(i);
-      ids.push(id);
-      return h(StickyHeader, { key: id, st, id, child });
-    });
-    st.ids = ids;
-  }
-  return h('ScrollView', rest, refreshControl || null, h('View', content, kids));
+  return h('ScrollView', rest, refreshControl || null, h('View', content, children));
 }
 ScrollView.displayName = 'ScrollView';
 

@@ -445,26 +445,6 @@ test('SectionList sticky headers pin and get pushed by the next header', async (
   assert.ok(Math.abs(cy - 520 * 15) < 520, 'near section 15');
 });
 
-test('ScrollView stickyHeaderIndices on plain children', async () => {
-  render(
-    h(
-      ScrollView,
-      { stickyHeaderIndices: [1] },
-      h(View, { style: { height: 100 } }),
-      h(View, { nativeID: 'sticky', style: { height: 40 } }),
-      h(View, { style: { height: 2000 } }),
-    ),
-  );
-  await settle();
-  scrollBy(300);
-  const s = mock.find((n) => n.props.nativeID === 'sticky');
-  const wrapper = mock.nodes.get(s.parent);
-  assert.equal(wrapper.props.style.zIndex, 10);
-  assert.deepEqual(wrapper.props.style.transform, [{ translateY: 200 }]);
-  // The child keeps its own style values on the wrapper (RN semantics).
-  assert.equal(wrapper.props.style.height, 40);
-});
-
 test('extraData re-renders mounted cells; unchanged rows are memoized', async () => {
   let renders = 0;
   const data = data10k.slice(0, 50);

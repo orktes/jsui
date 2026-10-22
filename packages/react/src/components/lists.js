@@ -15,7 +15,7 @@
 // next off-screen cell works; native `scrollIntoView` scrolls it in, the
 // scroll event moves the window and the following cells mount.
 
-import { createElement as h, Component, Fragment, isValidElement, cloneElement, memo, useState, useMemo, useCallback } from 'react';
+import { createElement as h, Component, Fragment, isValidElement, cloneElement, memo, useState, useMemo, useCallback, useRef } from 'react';
 import { ScrollView } from './basic.js';
 import { instances } from '../instances.js';
 import { addGlobalListener } from '../events.js';
@@ -297,6 +297,76 @@ const CellRenderer = memo(function CellRenderer(props) {
   return h('View', { style: cellStyle, onLayout, ref: setRef, collapsable: false }, element, sep);
 }, cellPropsEqual);
 
+// Sticky headers (RN ScrollViewStickyHeader semantics, done by the list on
+// top of the public ScrollView API): each sticky cell is wrapped in a View
+// that is translated on scroll so it stays pinned to the top (left when
+// horizontal) until the next sticky header pushes it away. The translation
+// is patched natively per scroll event (no React render).
+class StickyState {
+  constructor() {
+    this.offset = 0;
+    this.horizontal = false;
+    this.ids = []; // keys of the sticky children, in child order
+    this.layouts = new Map(); // key -> {x, y, width, height}
+    this.insts = new Map(); // key -> host instance
+    this.shift = new Map(); // key -> current translation
+  }
+  setOffset(offset) {
+    this.offset = offset;
+    this.update();
+  }
+  update() {
+    const hz = this.horizontal;
+    const ids = this.ids;
+    for (let k = 0; k < ids.length; k++) {
+      const i = ids[k];
+      const l = this.layouts.get(i);
+      if (!l) continue;
+      const pos = hz ? l.x : l.y;
+      const size = hz ? l.width : l.height;
+      let t = this.offset > pos ? this.offset - pos : 0;
+      for (let n = k + 1; n < ids.length; n++) {
+        const nl = this.layouts.get(ids[n]);
+        if (!nl) continue;
+        t = Math.min(t, Math.max(0, (hz ? nl.x : nl.y) - pos - size));
+        break;
+      }
+      if (this.shift.get(i) === t) continue;
+      this.shift.set(i, t);
+      const inst = this.insts.get(i);
+      if (inst) inst.patchStyle({ transform: [hz ? { translateX: t } : { translateY: t }] });
+    }
+  }
+}
+
+const stickyHeaderStyle = { zIndex: 10, position: 'relative' };
+const stickyFill = { flex: 1 };
+
+function StickyHeader({ st, id, child }) {
+  const latest = useRef(null);
+  latest.current = { child, id };
+  const refs = useRef(null);
+  if (!refs.current) {
+    refs.current = {
+      ref: (inst) => {
+        const i = latest.current.id;
+        if (inst) st.insts.set(i, inst);
+        else if (st.insts.get(i)) st.insts.delete(i);
+      },
+      onLayout: (e) => {
+        const { child: c, id: i } = latest.current;
+        st.layouts.set(i, e.nativeEvent.layout);
+        st.update();
+        // Forward to the child (a list cell measures itself through this).
+        if (c && c.props && c.props.onLayout) c.props.onLayout(e);
+      },
+    };
+  }
+  const t = st.shift.get(id) || 0;
+  const style = [child.props && child.props.style, stickyHeaderStyle, { transform: [st.horizontal ? { translateX: t } : { translateY: t }] }];
+  return h('View', { ref: refs.current.ref, onLayout: refs.current.onLayout, style, collapsable: false }, cloneElement(child, { style: stickyFill, onLayout: undefined }));
+}
+
 // --- VirtualizedList -------------------------------------------------------------
 
 const defaultGetItem = (data, i) => (data == null ? undefined : data[i]);
@@ -392,7 +462,7 @@ export class VirtualizedList extends Component {
     const key = this._keyAt(index);
     if (this._mountedKeys.get(key) !== index) return null;
     const f = this._frames.get(key);
-    return f && f.index === index ? f : null;
+    return f && !f.stale && f.index === index ? f : null;
   }
 
   /** Mounted, measured cells sorted by index: the anchors for estimates. */
@@ -401,7 +471,7 @@ export class VirtualizedList extends Component {
     const out = [];
     for (const [key, index] of this._mountedKeys) {
       const f = this._frames.get(key);
-      if (f && f.index === index) out.push(f);
+      if (f && !f.stale && f.index === index) out.push(f);
     }
     out.sort((a, b) => a.index - b.index);
     this._anchors = out;
@@ -446,12 +516,14 @@ export class VirtualizedList extends Component {
     const horizontal = this._horizontal();
     const offset = horizontal ? +l.x || 0 : +l.y || 0;
     const length = horizontal ? +l.width || 0 : +l.height || 0;
+    // A rect that is all zero is a node that has not been laid out yet.
+    if (!offset && !length && !(+l.width) && !(+l.height)) return;
     const prev = this._frames.get(cellKey);
-    if (prev && prev.offset === offset && prev.length === length && prev.index === index) return;
+    if (prev && !prev.stale && prev.offset === offset && prev.length === length && prev.index === index) return;
     if (prev) this._measuredSum -= prev.length;
     else this._measuredCount++;
     this._measuredSum += length;
-    this._frames.set(cellKey, { offset, length, index });
+    this._frames.set(cellKey, { key: cellKey, offset, length, index, stale: false });
     if (index > this._highestMeasured) this._highestMeasured = index;
     this._anchors = null;
     // Scroll anchoring (like Chrome's default overflow-anchor, which the
@@ -509,6 +581,7 @@ export class VirtualizedList extends Component {
     m.dt = dt;
     m.offset = offset;
     m.timestamp = ts;
+    if (this._sticky && this._sticky.ids.length) this._sticky.setOffset(offset);
     for (const t of this._viewabilityTuples) t.helper.recordInteraction();
     if (!this._anchoring) this._pickScrollAnchor();
     this._updateViewableItems();
@@ -642,6 +715,14 @@ export class VirtualizedList extends Component {
   // --- lifecycle
 
   _committed() {
+    // A cell mounting again keeps its measured length (for the average) but
+    // its old offset is stale until it reports a new layout.
+    const prev = this._mountedKeys;
+    for (const key of this._indexOfKey.keys()) {
+      if (prev.has(key)) continue;
+      const f = this._frames.get(key);
+      if (f) f.stale = true;
+    }
     this._mountedKeys = this._indexOfKey;
     this._anchors = null;
     this._pickScrollAnchor();
@@ -662,12 +743,7 @@ export class VirtualizedList extends Component {
     }
     const a = anchors[lo];
     if (!a || a.offset > top + this._metrics.visibleLength) return;
-    for (const [key, f] of this._frames) {
-      if (f === a) {
-        this._scrollAnchor = { key, offset: a.offset };
-        return;
-      }
-    }
+    this._scrollAnchor = { key: a.key, offset: a.offset };
   }
 
   componentDidMount() {
@@ -953,7 +1029,18 @@ export class VirtualizedList extends Component {
     scrollProps.onScroll = this._onScroll;
     scrollProps.onContentSizeChange = this._onContentSizeChange;
     scrollProps.style = inversionStyle ? [inversionStyle, p.style] : p.style;
-    if (stickyHeaderIndices.length) scrollProps.stickyHeaderIndices = stickyHeaderIndices;
+    if (stickyHeaderIndices.length) {
+      const st = this._sticky || (this._sticky = new StickyState());
+      st.horizontal = horizontal;
+      const ids = [];
+      for (const i of stickyHeaderIndices) {
+        const child = cells[i];
+        const id = String(child.key);
+        ids.push(id);
+        cells[i] = h(StickyHeader, { key: id, st, id, child });
+      }
+      st.ids = ids;
+    } else if (this._sticky) this._sticky.ids = [];
     if (p.renderScrollComponent) {
       const el = p.renderScrollComponent(scrollProps);
       return cloneElement(el, { ref: this._captureScrollRef }, cells);
