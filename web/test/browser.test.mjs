@@ -95,9 +95,12 @@ async function newPage(ctxOpts) {
 }
 
 // Creates a canvas + runtime in the page; resolves once the first frame was painted.
+// Tests pin the module (web/<DIST>) and default to the CPU renderer, so they
+// check the same path whichever module is under test; GPU tests pass
+// renderer 'gpu' / 'auto' explicitly.
 async function mount(page, opts = {}) {
   return page.evaluate(async ({ id, w, h, opts, dist }) => {
-    if (dist !== 'dist' && !opts.moduleUrl) opts = { ...opts, moduleUrl: new URL(`../${dist}/jsui.js`, location.href) };
+    opts = { renderer: 'cpu', moduleUrl: new URL(`../${dist}/jsui.js`, location.href), ...opts };
     const c = document.createElement('canvas');
     c.id = id;
     c.style.width = `${w}px`;
@@ -405,6 +408,83 @@ test('dev mode reloads when /__jsui/version changes', async ({ page }) => {
   await frames(page, 3);
   [px] = await screenPixels(page, '#ui', [[10, 50]]);
   assert(near(px, [0, 136, 255, 255]), `after reload: ${fmt(px)}`);
+});
+
+// --------------------------------------------- renderer selection / fallback
+test("default renderer 'auto' uses the GPU when the module has it", async ({ page }) => {
+  const info = await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js', renderer: undefined } });
+  // (The test browser runs SwiftShader with --ignore-gpu-blocklist, which
+  // Chrome reports as WebGL without a major performance caveat.)
+  const hasGpu = await page.evaluate(async () => {
+    const { webglAvailable } = await import('../jsui-web.js');
+    const M = window.hosts.ui.module;
+    return !!M._jsui_gpu_create_gl && !!M.GL && webglAvailable(true);
+  });
+  if (hasGpu) assert(info.renderer.startsWith('gpu-webgl'), `auto with the GPU module: ${info.renderer}`);
+  else assert(info.renderer.startsWith('webgl'), `auto with the CPU module: ${info.renderer}`);
+  const px = await screenPixels(page, '#ui', BANDS);
+  [RED, GREEN].forEach((want, i) => assert(near(px[i], want), `band ${i}: ${fmt(px[i])}`));
+});
+
+for (const renderer of ['gpu', 'cpu']) test(`WebGL context lost for good: CPU fallback on a fresh canvas (${renderer})`, async ({ page }) => {
+  const info = await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js', renderer, contextRestoreTimeout: 100 } });
+  if (renderer === 'gpu' && !info.renderer.startsWith('gpu')) skip(`module in web/${DIST} has no GPU backend`, DIST === 'dist');
+  const r = await page.evaluate(async () => {
+    const j = window.hosts.ui, old = j.canvas;
+    const ext = j._gl?.getExtension('WEBGL_lose_context');
+    if (!ext) return null;
+    let switched = null;
+    j.on('renderer', (name, reason) => { switched = [name, reason]; });
+    j.on('log', () => {});  // the fallback warning is expected
+    ext.loseContext();  // never restored
+    await new Promise((r) => setTimeout(r, 300));
+    for (let i = 0; i < 4; i++) await new Promise(requestAnimationFrame);
+    return { switched, renderer: j.renderer, replaced: j.canvas !== old && !old.isConnected && j.canvas.isConnected,
+      id: j.canvas.id };
+  });
+  if (!r) skip('WEBGL_lose_context unavailable');
+  assert(r.switched, 'no renderer event');
+  assert(r.replaced && r.id === 'ui', `canvas not replaced: ${JSON.stringify(r)}`);
+  assert(renderer === 'gpu' ? r.renderer.startsWith('webgl') : r.renderer === '2d', `fallback renderer ${r.renderer}`);
+  const px = await screenPixels(page, '#ui', BANDS);
+  [RED, GREEN, null, HALF_RED].forEach((want, i) => want && assert(near(px[i], want), `band ${i} after fallback: ${fmt(px[i])}`));
+});
+
+// ------------------------------------------------ perf regression guards
+// Cheap, deterministic proxies for frame cost: an unchanged UI must not
+// repaint or upload anything, and a small change must upload only the
+// damaged rows / rect, not the whole frame.
+for (const renderer of ['webgl', '2d', 'gpu']) test(`perf guard: idle frames do not repaint, a change uploads only its damage (${renderer})`, async ({ page }) => {
+  const info = await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js', renderer } });
+  if (renderer === 'gpu' && !info.renderer.startsWith('gpu')) skip(`module in web/${DIST} has no GPU backend`, DIST === 'dist');
+  await page.waitForTimeout(300);  // band 2's 200 ms timer
+  const r = await page.evaluate(async () => {
+    const j = window.hosts.ui, st = j.stats;
+    j.stop();
+    let t = performance.now();
+    const step = (n) => { for (let i = 0; i < n; i++) j.frame(t += 16.67); };
+    step(3);  // settle (timer repaint)
+    const r0 = st.renders, b0 = st.blits, p0 = st.blitPixels;
+    step(30);
+    const idle = { renders: st.renders - r0, blits: st.blits - b0 };
+    j.postMessage('paint', { color: '#ff00ff' });  // band 0: 320x50 of 320x200
+    step(1);
+    const change = { renders: st.renders - r0, blits: st.blits - b0, pixels: st.blitPixels - p0, last: st.lastBlit };
+    step(30);
+    const after = { renders: st.renders - r0 };
+    return { idle, change, after, w: j.pixelWidth, h: j.pixelHeight };
+  });
+  assert(r.idle.renders === 0 && r.idle.blits === 0, `idle frames repainted: ${JSON.stringify(r.idle)}`);
+  assert(r.change.renders === 1, `change: ${JSON.stringify(r.change)}`);
+  assert(r.after.renders === 1, `frames after the change repainted: ${JSON.stringify(r.after)}`);
+  if (renderer !== 'gpu') {
+    const l = r.change.last;
+    // Band 0 is rows 0-49 (the damage may include a row of anti-aliasing outset).
+    assert(r.change.blits === 1 && l && l.x === 0 && l.y === 0 && l.width === 320 && l.height >= 50 && l.height <= 52 &&
+      r.change.pixels === l.width * l.height, `upload was not just band 0: ${JSON.stringify(r.change)} of ${r.w}x${r.h}`);
+  }
+  const [px] = await screenPixels(page, '#ui', [BANDS[0]]);
+  assert(near(px, [255, 0, 255, 255]), `band 0 after the partial upload: ${fmt(px)}`);
 });
 
 // ---------------------------------------------------- GPU (Skia on WebGL)

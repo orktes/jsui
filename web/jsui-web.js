@@ -5,19 +5,33 @@
 //   jsui.on('message', (name, data) => ...);
 //   jsui.postMessage('hud', { hp: 42 });
 //
-// Per frame (requestAnimationFrame): poll gamepads -> jsui_tick -> if the UI
-// changed, jsui_render_rgba into a buffer in the WASM heap -> upload it as a
+// Renderers. The default ('auto') draws with Skia Ganesh straight into the
+// canvas' WebGL2 (or WebGL 1) context (jsui_render_gl): no CPU raster and no
+// upload. It needs the module built with the GPU backend (WEBGL=1
+// scripts/build-wasm.sh -> web/dist-webgl/jsui.js), which createJsui() loads
+// by default when the browser has WebGL, falling back to the CPU-only module
+// (web/dist/jsui.js) when that one is not deployed.
+//
+// 'auto' uses the CPU path instead when the browser only offers WebGL through
+// a software rasteriser (failIfMajorPerformanceCaveat, e.g. Chrome's SwiftShader
+// fallback without a usable GPU): there Skia's full GPU repaints cost more
+// than the CPU raster's incremental ones. renderer 'gpu' uses it anyway.
+//
+// It falls back to the CPU path when there is no WebGL, when the module has
+// no GPU backend, when the GL / Skia context cannot be created or a GPU frame
+// fails, and when the WebGL context is lost and not restored within
+// `contextRestoreTimeout` ms (the canvas element is then replaced by a fresh
+// clone, since a canvas with a dead WebGL context cannot get another context;
+// listen for 'renderer' to pick up the new `jsui.canvas`).
+//
+// CPU path (renderer 'cpu', or the fallback): per frame jsui_tick -> if the
+// UI changed, jsui_render_rgba_incremental repaints only the damaged pixels of
+// a buffer in the WASM heap -> only the damaged rows / rect are uploaded as a
 // WebGL texture straight from the heap (the runtime's premultiplied RGBA is
 // exactly what a premultipliedAlpha:true context composites, so there is no
-// CPU conversion and no copy besides the GPU upload). A Canvas2D fallback
-// un-premultiplies into an ImageData when WebGL is unavailable.
-//
-// renderer: 'gpu' draws with Skia Ganesh straight into the canvas' WebGL
-// context instead (jsui_render_gl): no CPU raster and no upload. It needs a
-// module built with the GPU backend (WEBGL=1 scripts/build-wasm.sh ->
-// web/dist-webgl/jsui.js, pass it as moduleUrl) and falls back to the CPU
-// path + WebGL / 2D blit when the module has no GPU backend or the context
-// cannot be created. The CPU path stays the default ('auto').
+// CPU conversion and no copy besides the GPU upload). A Canvas2D blitter
+// ('2d', or no WebGL) un-premultiplies just the damaged rect into an
+// ImageData and puts that rect.
 //
 // One WASM module instance is shared by all runtimes on the page (one per
 // module URL); each createJsui() call owns an independent JsuiRuntime.
@@ -31,9 +45,16 @@
  *                                // https:// bundles; the runtime itself polls http:// origins
  *                                // (through this module's fetch loader) when devMode is set.
  *   pixelRatio?: number,         // default: window.devicePixelRatio (tracked live)
- *   moduleUrl?: string|URL,      // default: ./dist/jsui.js next to this file
- *   renderer?: 'auto'|'gpu'|'webgl'|'2d', // 'gpu': Skia on WebGL (GPU module), else CPU raster
- *                                // blitted with WebGL ('auto' / 'webgl') or Canvas2D ('2d')
+ *   moduleUrl?: string|URL,      // default: ./dist-webgl/jsui.js next to this file when WebGL is
+ *                                // available and the renderer may use the GPU, else (or when
+ *                                // that fails to load) ./dist/jsui.js
+ *   renderer?: 'auto'|'gpu'|'cpu'|'webgl'|'2d',
+ *                                // 'auto' (default): Skia on WebGL unless WebGL is software-only,
+ *                                // falling back to the CPU raster. 'gpu': Skia on any WebGL. 'cpu': force the CPU raster, blitted with WebGL
+ *                                // (or Canvas2D without WebGL). 'webgl' / '2d': CPU raster with
+ *                                // that blitter only.
+ *   contextRestoreTimeout?: number, // ms to wait for a lost WebGL context to come back before
+ *                                // falling back to the CPU on a fresh canvas (default 3000)
  *   autoFocus?: boolean,         // focus the keyboard sink on start (default true)
  *   gamepads?: boolean,          // poll the Gamepad API (default true)
  *   autoStart?: boolean,         // start the frame loop immediately (default true)
@@ -74,9 +95,44 @@ const AXIS_EPSILON = 1 / 256;
 export async function createJsui(opts) {
   const canvas = opts.canvas;
   if (!canvas) throw new Error('createJsui: canvas is required');
-  const moduleUrl = opts.moduleUrl ?? new URL('./dist/jsui.js', import.meta.url);
-  const M = await loadModule(moduleUrl);
-  return new JsuiHost(M, canvas, opts);
+  return new JsuiHost(await loadModuleFor(opts), canvas, opts);
+}
+
+const CPU_MODULE = './dist/jsui.js';
+const GPU_MODULE = './dist-webgl/jsui.js';
+
+// The GPU module when the renderer may use it and WebGL exists, else the
+// CPU-only one; each falls back to the other if it is not deployed (both can
+// run the CPU path).
+async function loadModuleFor(opts) {
+  if (opts.moduleUrl) return loadModule(opts.moduleUrl);
+  const mode = opts.renderer ?? 'auto';
+  const gpu = mode === 'gpu' ? webglAvailable() : mode === 'auto' && webglAvailable(true);
+  const [first, second] = gpu ? [GPU_MODULE, CPU_MODULE] : [CPU_MODULE, GPU_MODULE];
+  try {
+    return await loadModule(new URL(first, import.meta.url));
+  } catch (e) {
+    try { return await loadModule(new URL(second, import.meta.url)); } catch { throw e; }
+  }
+}
+
+const webglProbe = {};
+/** True if this browser can create a WebGL (2 or 1) context; `hardware`: one without a major
+ * performance caveat, i.e. not a software rasteriser such as SwiftShader the browser fell back
+ * to (probed once each, on a throwaway canvas). */
+export function webglAvailable(hardware = false) {
+  const key = hardware ? 'hw' : 'any';
+  if (webglProbe[key] !== undefined) return webglProbe[key];
+  try {
+    const attrs = { failIfMajorPerformanceCaveat: hardware };
+    const c = document.createElement('canvas');
+    const gl = c.getContext('webgl2', attrs) || c.getContext('webgl', attrs);
+    webglProbe[key] = !!gl;
+    gl?.getExtension('WEBGL_lose_context')?.loseContext();  // free it now, not at GC
+  } catch {
+    webglProbe[key] = false;
+  }
+  return webglProbe[key];
 }
 
 class JsuiHost {
@@ -86,7 +142,9 @@ class JsuiHost {
     this.opts = opts;
     this.hostId = nextHostId++;
     this.listeners = new Map();
-    this.stats = { frames: 0, renders: 0, tickMs: 0, renderMs: 0, blitMs: 0 };
+    // renders: frames painted. blits / blitPixels: CPU path uploads and the
+    // pixels they covered (lastBlit: the last uploaded rect, device px).
+    this.stats = { frames: 0, renders: 0, tickMs: 0, renderMs: 0, blitMs: 0, blits: 0, blitPixels: 0, lastBlit: null };
     this._lastError = null;
     this._cursor = '';
     this._raf = 0;
@@ -150,6 +208,7 @@ class JsuiHost {
 
     this._initBlitter(opts.renderer ?? 'auto');
     this._installInput();
+    this._installCanvasInput();
     this._installResize();
     if (opts.gamepads !== false) this._installGamepads();
 
@@ -311,7 +370,7 @@ class JsuiHost {
       let t2, t3;
       if (this._gpu) {
         // Skia draws straight into the canvas' WebGL framebuffer (full repaint).
-        this._renderGpu();
+        if (this._renderGpu() === false) this._switchToCpu('GPU frame failed', false);
         t2 = t3 = performance.now();
       } else {
         this._ensureBuffer();
@@ -319,7 +378,10 @@ class JsuiHost {
         const changed = M._jsui_render_rgba_incremental(rt, this._buf, this.pixelWidth, this.pixelHeight,
           this.pixelWidth * 4, this._dirty);
         t2 = performance.now();
-        if (changed || resized) this._blit();
+        if (changed || resized) {
+          const d = this._dirty >> 2, H = M.HEAP32;
+          this._blit(resized ? null : { x: H[d], y: H[d + 1], width: H[d + 2], height: H[d + 3] });
+        }
         t3 = performance.now();
       }
       st.renderMs = ema(st.renderMs, t2 - t1);
@@ -349,6 +411,9 @@ class JsuiHost {
     this.stop();
     this._destroyed = true;
     this._abort.abort();
+    this._blitAbort?.abort();
+    this._canvasAbort?.abort();
+    clearTimeout(this._restoreTimer);
     this._resizeObserver?.disconnect();
     this._sink?.remove();
     const M = this.module;
@@ -484,11 +549,7 @@ class JsuiHost {
     };
     if (typeof ResizeObserver !== 'undefined') {
       this._resizeObserver = new ResizeObserver((entries) => apply(entries[entries.length - 1]));
-      try {
-        this._resizeObserver.observe(this.canvas, { box: 'device-pixel-content-box' });
-      } catch {
-        this._resizeObserver.observe(this.canvas);
-      }
+      this._observeCanvas();
     }
     // DPR changes (zoom, moving between monitors) without a CSS size change.
     if (!this._fixedRatio && typeof matchMedia === 'function') {
@@ -500,6 +561,16 @@ class JsuiHost {
     }
     addEventListener('scroll', () => { this._rect = null; }, { passive: true, capture: true, signal: this._abort.signal });
     addEventListener('resize', () => { this._rect = null; }, { passive: true, signal: this._abort.signal });
+  }
+
+  _observeCanvas() {
+    const ro = this._resizeObserver;
+    if (!ro) return;
+    try {
+      ro.observe(this.canvas, { box: 'device-pixel-content-box' });
+    } catch {
+      ro.observe(this.canvas);
+    }
   }
 
   _ensureBuffer() {
@@ -516,19 +587,28 @@ class JsuiHost {
   // ---------------------------------------------------------------- blitting
 
   _initBlitter(mode) {
-    if (mode === 'gpu') {
-      if (this._initGpu()) return;
-      mode = 'auto';  // CPU raster + blit on the same canvas
+    this._blitAbort?.abort();
+    this._blitAbort = new AbortController();
+    if (mode === 'auto' || mode === 'gpu') {
+      if (this._initGpu(mode === 'auto')) return;
+      mode = 'cpu';  // CPU raster + blit on the same canvas
     }
     if (mode !== '2d') {
+      // A context the GPU attempt created is reused (getContext returns it).
       const attrs = { alpha: true, premultipliedAlpha: true, antialias: false, depth: false, stencil: false,
         preserveDrawingBuffer: false, powerPreference: 'low-power' };
-      const gl = this.canvas.getContext('webgl2', attrs) || this.canvas.getContext('webgl', attrs);
-      if (gl) {
+      let gl = this._gl;
+      try { gl ??= this.canvas.getContext('webgl2', attrs) || this.canvas.getContext('webgl', attrs); } catch {}
+      if (gl && !gl.isContextLost()) {
         this._setupGL(gl);
-        const signal = this._abort.signal;
-        this.canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); this._glLost = true; }, { signal });
+        const signal = this._blitAbort.signal;
+        this.canvas.addEventListener('webglcontextlost', (e) => {
+          e.preventDefault();
+          this._glLost = true;
+          this._armRestoreTimer('2d');
+        }, { signal });
         this.canvas.addEventListener('webglcontextrestored', () => {
+          clearTimeout(this._restoreTimer);
           this._glLost = false;
           this._setupGL(gl);
           this._texW = this._texH = 0;
@@ -536,6 +616,7 @@ class JsuiHost {
         }, { signal });
         return;
       }
+      this._gl = null;
       if (mode === 'webgl') throw new Error('createJsui: WebGL unavailable');
     }
     this._ctx2d = this.canvas.getContext('2d');
@@ -545,16 +626,22 @@ class JsuiHost {
 
   // Skia Ganesh on the canvas' WebGL context. The context is created here and
   // registered with emscripten's GL layer, which the GPU module's Skia calls
-  // into. False when the module has no GPU backend or WebGL is unavailable.
-  _initGpu() {
+  // into. False when the module has no GPU backend, WebGL is unavailable or
+  // the Skia GPU context cannot be created. `hardwareOnly` ('auto'): also when
+  // the browser only offers WebGL with a major performance caveat (a software
+  // rasteriser such as SwiftShader, where Skia's full GPU repaints cost more
+  // than the CPU raster's incremental ones); the CPU path then gets a context
+  // on the same canvas (the failed request creates none).
+  _initGpu(hardwareOnly) {
     const M = this.module;
     if (!M.GL || !M._jsui_gpu_create_gl) return false;
     // Stencil: Ganesh uses it for some paths / clips. Premultiplied output
     // like the CPU blit.
     const attrs = { alpha: true, premultipliedAlpha: true, antialias: false, depth: false, stencil: true,
-      preserveDrawingBuffer: false, powerPreference: 'default' };
-    const gl = this.canvas.getContext('webgl2', attrs) || this.canvas.getContext('webgl', attrs);
-    if (!gl) return false;
+      preserveDrawingBuffer: false, powerPreference: 'high-performance', failIfMajorPerformanceCaveat: !!hardwareOnly };
+    let gl = null;
+    try { gl = this.canvas.getContext('webgl2', attrs) || this.canvas.getContext('webgl', attrs); } catch {}
+    if (!gl || gl.isContextLost()) return false;
     const version = typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext ? 2 : 1;
     this._glAttrs = { ...attrs, majorVersion: version, minorVersion: 0, enableExtensionsByDefault: true };
     this._gl = gl;  // a CPU fallback blits through the same context
@@ -565,19 +652,23 @@ class JsuiHost {
     if (!gpu) {
       M.GL.makeContextCurrent(0);
       M.GL.deleteContext(handle);
+      resetGLState(gl);
+      this._log(2, 'Skia GPU context creation failed: using the CPU renderer');
       return false;
     }
     this._gpu = gpu;
     this._glHandle = handle;
     this._stencilBits = gl.getContextAttributes()?.stencil ? 8 : 0;
     this.renderer = version === 2 ? 'gpu-webgl2' : 'gpu-webgl';
-    const signal = this._abort.signal;
+    const signal = this._blitAbort.signal;
     this.canvas.addEventListener('webglcontextlost', (e) => {
       e.preventDefault();
       this._glLost = true;
       if (this._gpu) M._jsui_gpu_context_lost(this._gpu);  // drop GPU objects without GL calls
+      this._armRestoreTimer('cpu');
     }, { signal });
     this.canvas.addEventListener('webglcontextrestored', () => {
+      clearTimeout(this._restoreTimer);
       // Extension objects of the lost context are dead: register afresh. The
       // GPU context rebuilds itself on the next render.
       M.GL.deleteContext(this._glHandle);
@@ -588,8 +679,64 @@ class JsuiHost {
     return true;
   }
 
+  // A lost context that does not come back within contextRestoreTimeout:
+  // continue on a fresh canvas with the CPU renderer ('cpu': WebGL blit if a
+  // new context works, '2d': Canvas2D).
+  _armRestoreTimer(mode) {
+    clearTimeout(this._restoreTimer);
+    const ms = this.opts.contextRestoreTimeout ?? 3000;
+    if (!(ms >= 0 && ms < Infinity)) return;
+    this._restoreTimer = setTimeout(() => {
+      if (this._glLost && !this._destroyed) this._switchToCpu('WebGL context lost and not restored', true, mode);
+    }, ms);
+  }
+
+  // Drops the GPU renderer (or a dead WebGL blitter) and continues with the
+  // CPU raster. `freshCanvas`: the canvas' context is gone for good, so the
+  // canvas is replaced by a clone (same id / class / style / place in the DOM).
+  _switchToCpu(reason, freshCanvas, mode = 'cpu') {
+    const M = this.module;
+    clearTimeout(this._restoreTimer);
+    if (this._gpu) {
+      if (this._glHandle) M.GL.makeContextCurrent(this._glHandle);
+      M._jsui_gpu_destroy(this._gpu);
+      M.GL.makeContextCurrent(0);
+      if (this._glHandle) M.GL.deleteContext(this._glHandle);
+      this._gpu = this._glHandle = 0;
+    }
+    if (freshCanvas) {
+      const old = this.canvas;
+      const c = old.cloneNode(false);
+      old.replaceWith(c);
+      this.canvas = c;
+      this._gl = null;
+      this._glLost = false;
+      this._tex = this._prog = this._vb = null;
+      this._resizeObserver?.unobserve(old);
+      this._observeCanvas();
+      this._installCanvasInput();
+      c.width = this.pixelWidth;
+      c.height = this.pixelHeight;
+      this._rect = null;
+    } else if (this._gl) {
+      resetGLState(this._gl);
+    }
+    this._texW = this._texH = 0;
+    this._imageData = null;
+    this._initBlitter(mode);
+    this._sizeChanged = true;  // full repaint + upload on the next frame
+    this._log(2, `${reason}: continuing with the CPU renderer (${this.renderer})`);
+    this._emit('renderer', this.renderer, reason);
+  }
+
+  _log(level, text) {
+    if (!this._emit('log', level, text)) (level >= 2 ? console.warn : console.log)('[jsui] ' + text);
+  }
+
+  // Draws a GPU frame: true when drawn, false when the GPU path failed (the
+  // caller falls back to the CPU), undefined while the context is lost.
   _renderGpu() {
-    if (this._glLost || !this._glHandle) return false;
+    if (this._glLost || !this._glHandle) return undefined;
     const M = this.module;
     M.GL.makeContextCurrent(this._glHandle);
     // JsuiGLTarget {fbo, texture, format, width, height, samples, stencil_bits, flags}
@@ -598,7 +745,8 @@ class JsuiHost {
     M.HEAP32[t + 3] = this.pixelWidth;
     M.HEAP32[t + 4] = this.pixelHeight;
     M.HEAP32[t + 6] = this._stencilBits;
-    return M._jsui_render_gl_target(this.rt, this._gpu, this._dirty) === 0;
+    if (M._jsui_render_gl_target(this.rt, this._gpu, this._dirty) === 0) return true;
+    return this._gl.isContextLost() ? undefined : false;
   }
 
   // Renders a frame and reads it back from the drawing buffer (in the same
@@ -659,36 +807,61 @@ class JsuiHost {
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
     gl.disable(gl.BLEND);
     this._gl = gl;
+    this._gl2 = typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext;
     this._prog = prog;
     this._tex = tex;
     this._vb = vb;
-    this.renderer = typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext ? 'webgl2' : 'webgl';
+    this.renderer = this._gl2 ? 'webgl2' : 'webgl';
   }
 
-  _blit() {
+  // Uploads the damaged part of the frame (`rect` in device px; null: all of
+  // it) and presents. WebGL2 uploads exactly the rect (UNPACK_ROW_LENGTH),
+  // WebGL 1 the full-width rows it spans, Canvas2D un-premultiplies and puts
+  // just the rect.
+  _blit(rect) {
     const w = this.pixelWidth, h = this.pixelHeight;
     // Re-read HEAPU8 every time: memory growth replaces the ArrayBuffer.
-    const px = new Uint8Array(this.module.HEAPU8.buffer, this._buf, w * h * 4);
+    const heap = this.module.HEAPU8.buffer;
     const gl = this._gl;
+    if (gl && this._glLost) return;
+    const full = !rect || (gl ? this._texW !== w || this._texH !== h
+      : !this._imageData || this._imageData.width !== w || this._imageData.height !== h);
+    let x = 0, y = 0, rw = w, rh = h;
+    if (!full) {  // clamp (the runtime reports rects inside the buffer; be defensive)
+      x = Math.max(0, rect.x);
+      y = Math.max(0, rect.y);
+      rw = Math.min(w, rect.x + rect.width) - x;
+      rh = Math.min(h, rect.y + rect.height) - y;
+      if (rw <= 0 || rh <= 0) return;
+    }
     if (gl) {
-      if (this._glLost) return;
-      if (this._texW !== w || this._texH !== h) {
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      if (full) {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(heap, this._buf, w * h * 4));
         this._texW = w;
         this._texH = h;
+      } else if (this._gl2) {
+        gl.pixelStorei(gl.UNPACK_ROW_LENGTH, w);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, rw, rh, gl.RGBA, gl.UNSIGNED_BYTE,
+          new Uint8Array(heap, this._buf + (y * w + x) * 4, ((rh - 1) * w + rw) * 4));
+        gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
       } else {
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        x = 0;
+        rw = w;
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, y, w, rh, gl.RGBA, gl.UNSIGNED_BYTE,
+          new Uint8Array(heap, this._buf + y * w * 4, rh * w * 4));
       }
       gl.viewport(0, 0, w, h);
-      gl.drawArrays(gl.TRIANGLES, 0, 3);
-      return;
+      gl.drawArrays(gl.TRIANGLES, 0, 3);  // the drawing buffer is not preserved: present all of it
+    } else {
+      // Canvas2D wants straight alpha.
+      if (full) this._imageData = new ImageData(w, h);
+      unpremultiply(new Uint8Array(heap, this._buf, w * h * 4), this._imageData.data, w, x, y, rw, rh);
+      this._ctx2d.putImageData(this._imageData, 0, 0, x, y, rw, rh);
     }
-    // Canvas2D wants straight alpha.
-    if (!this._imageData || this._imageData.width !== w || this._imageData.height !== h) {
-      this._imageData = new ImageData(w, h);
-    }
-    unpremultiply(px, this._imageData.data);
-    this._ctx2d.putImageData(this._imageData, 0, 0);
+    const st = this.stats;
+    st.blits++;
+    st.blitPixels += rw * rh;
+    st.lastBlit = { x, y, width: rw, height: rh };
   }
 
   // ------------------------------------------------------------------ input
@@ -700,36 +873,19 @@ class JsuiHost {
     return [(e.clientX - r.left) * sx, (e.clientY - r.top) * sy];
   }
 
-  _installInput() {
-    const M = this.module, c = this.canvas, signal = this._abort.signal;
+  // Pointer / wheel listeners on the canvas (again on a replacement canvas
+  // after a CPU fallback, see _switchToCpu).
+  _installCanvasInput() {
+    this._canvasAbort?.abort();
+    this._canvasAbort = new AbortController();
+    const M = this.module, c = this.canvas, signal = this._canvasAbort.signal;
     const opt = { signal };
     const active = { signal, passive: false };
+    const focusSink = () => this.focus();
     c.style.touchAction = 'none';
     c.style.userSelect = 'none';
     c.style.webkitUserSelect = 'none';
     c.style.outline = 'none';
-
-    // Keyboard sink: a transparent textarea over the canvas. It gives us real
-    // text input (IME composition, dead keys, emoji pickers, mobile keyboards)
-    // instead of guessing text from keydown.
-    const sink = document.createElement('textarea');
-    sink.setAttribute('aria-hidden', 'true');
-    sink.setAttribute('autocomplete', 'off');
-    sink.setAttribute('autocapitalize', 'off');
-    sink.setAttribute('spellcheck', 'false');
-    sink.tabIndex = 0;
-    Object.assign(sink.style, { position: 'fixed', left: '0px', top: '0px', width: '1px', height: '1px',
-      opacity: '0', padding: '0', border: '0', margin: '0', resize: 'none', overflow: 'hidden',
-      pointerEvents: 'none', zIndex: '-1', caretColor: 'transparent' });
-    document.body.appendChild(sink);
-    this._sink = sink;
-    const focusSink = () => {
-      const r = this._rect ??= c.getBoundingClientRect();
-      sink.style.left = `${Math.max(0, r.left)}px`;
-      sink.style.top = `${Math.max(0, r.top)}px`;
-      if (document.activeElement !== sink) sink.focus({ preventScroll: true });
-    };
-    this.focus = focusSink;
 
     c.addEventListener('pointerdown', (e) => {
       const [x, y] = this._point(e);
@@ -779,6 +935,34 @@ class JsuiHost {
     // The compat mousedown would move focus to <body> (the canvas is not
     // focusable), stealing it from the keyboard sink focused in pointerdown.
     c.addEventListener('mousedown', (e) => e.preventDefault(), active);
+  }
+
+  _installInput() {
+    const M = this.module, signal = this._abort.signal;
+    const opt = { signal };
+    const active = { signal, passive: false };
+
+    // Keyboard sink: a transparent textarea over the canvas. It gives us real
+    // text input (IME composition, dead keys, emoji pickers, mobile keyboards)
+    // instead of guessing text from keydown.
+    const sink = document.createElement('textarea');
+    sink.setAttribute('aria-hidden', 'true');
+    sink.setAttribute('autocomplete', 'off');
+    sink.setAttribute('autocapitalize', 'off');
+    sink.setAttribute('spellcheck', 'false');
+    sink.tabIndex = 0;
+    Object.assign(sink.style, { position: 'fixed', left: '0px', top: '0px', width: '1px', height: '1px',
+      opacity: '0', padding: '0', border: '0', margin: '0', resize: 'none', overflow: 'hidden',
+      pointerEvents: 'none', zIndex: '-1', caretColor: 'transparent' });
+    document.body.appendChild(sink);
+    this._sink = sink;
+    const focusSink = () => {
+      const r = this._rect ??= this.canvas.getBoundingClientRect();
+      sink.style.left = `${Math.max(0, r.left)}px`;
+      sink.style.top = `${Math.max(0, r.top)}px`;
+      if (document.activeElement !== sink) sink.focus({ preventScroll: true });
+    };
+    this.focus = focusSink;
 
     sink.addEventListener('keydown', (e) => {
       if (e.isComposing || e.keyCode === 229) return;  // IME owns this key
@@ -932,20 +1116,47 @@ function mouseButton(domButton) {
 
 function ema(prev, v) { return prev ? prev * 0.9 + v * 0.1 : v; }
 
-// Premultiplied -> straight alpha (Canvas2D fallback only).
-function unpremultiply(src, dst) {
-  const n = src.length;
-  for (let i = 0; i < n; i += 4) {
-    const a = src[i + 3];
-    if (a === 255) {
-      dst[i] = src[i]; dst[i + 1] = src[i + 1]; dst[i + 2] = src[i + 2]; dst[i + 3] = 255;
-    } else if (a === 0) {
-      dst[i] = dst[i + 1] = dst[i + 2] = dst[i + 3] = 0;
-    } else {
-      const k = 255 / a;
-      dst[i] = src[i] * k + 0.5; dst[i + 1] = src[i + 1] * k + 0.5; dst[i + 2] = src[i + 2] * k + 0.5; dst[i + 3] = a;
+// Premultiplied -> straight alpha for the rect (x, y, rw, rh) of a frame
+// `w` px wide (Canvas2D blitter only).
+function unpremultiply(src, dst, w, x, y, rw, rh) {
+  for (let row = y; row < y + rh; row++) {
+    const end = (row * w + x + rw) * 4;
+    for (let i = (row * w + x) * 4; i < end; i += 4) {
+      const a = src[i + 3];
+      if (a === 255) {
+        dst[i] = src[i]; dst[i + 1] = src[i + 1]; dst[i + 2] = src[i + 2]; dst[i + 3] = 255;
+      } else if (a === 0) {
+        dst[i] = dst[i + 1] = dst[i + 2] = dst[i + 3] = 0;
+      } else {
+        const k = 255 / a;
+        dst[i] = src[i] * k + 0.5; dst[i + 1] = src[i + 1] * k + 0.5; dst[i + 2] = src[i + 2] * k + 0.5; dst[i + 3] = a;
+      }
     }
   }
+}
+
+// GL state Skia may have left behind, before the CPU blitter takes over its context.
+function resetGLState(gl) {
+  if (gl.isContextLost()) return;
+  const gl2 = typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+  for (const cap of [gl.SCISSOR_TEST, gl.STENCIL_TEST, gl.DEPTH_TEST, gl.CULL_FACE, gl.BLEND, gl.DITHER]) gl.disable(cap);
+  gl.colorMask(true, true, true, true);
+  gl.activeTexture(gl.TEXTURE0);
+  if (gl2) {
+    gl.bindVertexArray(null);
+    gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, null);
+    gl.bindSampler(0, null);
+    gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
+    gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0);
+    gl.pixelStorei(gl.UNPACK_SKIP_ROWS, 0);
+  } else {
+    gl.getExtension('OES_vertex_array_object')?.bindVertexArrayOES(null);
+  }
+  const n = gl.getParameter(gl.MAX_VERTEX_ATTRIBS);
+  for (let i = 0; i < n; i++) gl.disableVertexAttribArray(i);
 }
 
 export default createJsui;
