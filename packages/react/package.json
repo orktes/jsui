@@ -1,0 +1,23 @@
+{
+  "name": "@jsui/react",
+  "version": "0.1.0",
+  "description": "React Native compatible renderer for the JSUI game UI runtime (QuickJS + Yoga + Skia).",
+  "type": "module",
+  "main": "src/index.js",
+  "module": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./shims/*": "./src/shims/*.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["src", "README.md"],
+  "sideEffects": true,
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "react": "19.3.1",
+    "react-reconciler": "0.34.0"
+  },
+  "license": "MIT"
+}

@@ -128,6 +128,16 @@ JSValue js_measure(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   return o;
 }
 
+// viewport() -> {width, height, scale}: logical viewport size (Dimensions).
+JSValue js_viewport(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+  const Document& doc = runtimeOf(ctx).doc;
+  JSValue o = JS_NewObject(ctx);
+  JS_SetPropertyStr(ctx, o, "width", JS_NewFloat64(ctx, doc.width()));
+  JS_SetPropertyStr(ctx, o, "height", JS_NewFloat64(ctx, doc.height()));
+  JS_SetPropertyStr(ctx, o, "scale", JS_NewFloat64(ctx, doc.pixelRatio()));
+  return o;
+}
+
 JSValue js_focus(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
   if (n) runtimeOf(ctx).input->focus(n);
@@ -262,7 +272,7 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
              {"measure", js_measure, 1},           {"focus", js_focus, 1},
              {"blur", js_blur, 1},                 {"scrollTo", js_scrollTo, 4},
              {"postMessage", js_postMessage, 2},   {"loadFont", js_loadFont, 4},
-             {"reload", js_reload, 0}};
+             {"reload", js_reload, 0},             {"viewport", js_viewport, 0}};
   for (auto& f : fns) JS_SetPropertyStr(ctx, native, f.name, JS_NewCFunction(ctx, f.fn, f.name, f.len));
   JS_SetPropertyStr(ctx, native, "rootId", JS_NewUint32(ctx, impl.rt.doc.root()->id()));
   JS_SetPropertyStr(ctx, native, "devMode", JS_NewBool(ctx, impl.rt.config.dev_mode != 0));

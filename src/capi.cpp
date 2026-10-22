@@ -68,7 +68,18 @@ int jsui_register_font(JsuiRuntime* rt, const char* family, const void* data, si
 }
 
 void jsui_set_viewport(JsuiRuntime* rt, int width, int height, float pixelRatio) {
-  rt->rt->doc.setViewport(float(width), float(height), pixelRatio > 0 ? pixelRatio : 1.f);
+  jsui::Document& doc = rt->rt->doc;
+  float scale = pixelRatio > 0 ? pixelRatio : 1.f;
+  bool changed = doc.width() != float(width) || doc.height() != float(height) || doc.pixelRatio() != scale;
+  doc.setViewport(float(width), float(height), scale);
+  // Dimensions / useWindowDimensions in @jsui/react listen for this.
+  if (changed && rt->rt->js) {
+    jsui::Value::Object ev{{"type", jsui::Value("resize")},
+                           {"width", jsui::Value(double(width))},
+                           {"height", jsui::Value(double(height))},
+                           {"scale", jsui::Value(double(scale))}};
+    rt->rt->js->dispatchEvent(jsui::Value(std::move(ev)));
+  }
 }
 
 void jsui_tick(JsuiRuntime* rt, double nowMs) { rt->rt->tick(nowMs); }

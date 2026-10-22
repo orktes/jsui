@@ -1,0 +1,21 @@
+{
+  "name": "@jsui/cli",
+  "version": "0.1.0",
+  "description": "Build and dev server for JSUI bundles (esbuild).",
+  "type": "module",
+  "bin": { "jsui": "bin/jsui.js" },
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["bin", "src", "README.md"],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@jsui/react": "0.1.0",
+    "esbuild": "0.28.2"
+  },
+  "license": "MIT"
+}

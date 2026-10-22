@@ -317,3 +317,44 @@ a `JsuiLoadFn`). An embedder loader only sees the URL (GET semantics).
 with react-native-web in headless Chromium (Playwright), same viewport, same
 Inter font files — and compares the PNGs with a per-pixel tolerance. A failing
 case writes `expected/actual/diff` images and an HTML report.
+
+## @jsui/react bridge usage (JS side)
+
+Details of how the JS package uses the bridge, for native implementers:
+
+* `__events` tokens sent by `@jsui/react` (matched by substring natively):
+  `click` (onClick — every Pressable/Touchable/Button host has it, so they are
+  pressable), `pointerDown`, `pointerUp`, `pointerMove`, `pointerCancel`,
+  `hoverIn`/`pointerEnter`, `hoverOut`/`pointerLeave`, `wheel`, `keyDown`,
+  `keyUp`, `focus`, `blur`, `scroll`, `textInput`, `gamepadButton`,
+  `gamepadAxis`, `layout`, `load`, `error`, and `responder` (+`pointerMove`) for
+  RN responder / PanResponder views. Plain `onPointerDown` does not make a node
+  pressable.
+* `__jsui_dispatchEvent` returns a number: bit 1 = a handler ran, bit 2 =
+  `preventDefault()` was called (suppresses native default actions).
+  Pressables handle Enter/Space themselves and return 3; the click a gamepad A
+  synthesizes is the press itself.
+* Optional bridge members used when present: `patchStyle(id, partialStyle)`
+  (Animated / `setNativeProps`; otherwise `setProps` with the merged style),
+  `viewport()` (native: returns `{width, height, scale}`), `focus`, `blur`,
+  `scrollTo`, `measure`, `postMessage`, `loadFont`, `getImageSize(uri)`,
+  `prefetchImage(uri)`, `reload`.
+* Events beyond input: `{type: 'resize', width, height, scale}` (sent by
+  `jsui_set_viewport` when the size changes; drives Dimensions);
+  `{type: 'load', target, source: {width, height}}` / `{type: 'error', target,
+  error}` on `Image` nodes (`onLoad` / `onError`).
+* `globalThis.__jsui_reportError(error)` (else the standard `reportError`): uncaught
+  React render errors are passed to it; otherwise they are rethrown from a
+  `setTimeout` so the engine reports them.
+* `globalThis.__jsui_assets[url] = {width, height, scale}` is filled by
+  bundled image modules (`@jsui/cli`); `Image` uses it for intrinsic size.
+* Host-only props sent with nodes: `Modal` content carries
+  `accessibilityViewIsModal: true` (focus scope); disabled pressables carry
+  `disabled: true` and `focusable: false`; `ScrollView` carries `horizontal`.
+* Dev server endpoints besides `/bundle.js` and `/__jsui/version`:
+  `/__jsui/version?since=<token>` long-polls until the token changes;
+  `/__jsui/error` returns the current build error text; `/bundle.js` carries
+  an `X-Jsui-Version` header.
+* `tests/native/react_e2e_test.cpp` drives a real `@jsui/react` bundle through
+  the C API (mouse, keys, text, gamepad, viewport, host messages, Animated);
+  `npm test -w @jsui/cli` builds the bundle and runs it.
