@@ -24,13 +24,14 @@ import {
   Easing,
   Host,
   Pressable,
-  SafeAreaView,
   StyleSheet,
   Text,
   View,
   useHostHandler,
   useHostState,
+  useWindowDimensions,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Showcase from '../../../../examples/showcase/interactions.jsx';
 import { colors, font } from '../../../../examples/theme.js';
 
@@ -103,23 +104,45 @@ function Bridge() {
   );
 }
 
+// The showcase is laid out for a 1280 x 720 stage (the Godot viewport). On a
+// smaller screen (a phone in landscape is ~874 x 402) the stage is scaled
+// down to fit the safe area and centred in it; in Godot the scale is 1.
+const STAGE_W = 1280;
+const STAGE_H = 720;
+
+function Stage({ children }) {
+  const { width, height } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const w = width - insets.left - insets.right;
+  const h = height - insets.top - insets.bottom;
+  const scale = Math.min(1, w / STAGE_W, h / STAGE_H);
+  const style = {
+    position: 'absolute',
+    left: insets.left + (w - STAGE_W) / 2,
+    top: insets.top + (h - STAGE_H) / 2,
+    width: STAGE_W,
+    height: STAGE_H,
+  };
+  if (scale < 1) style.transform = [{ scale }];
+  return <View style={style}>{children}</View>;
+}
+
 function App() {
   return (
     // Insets are zero in Godot; on phones (the iOS host) the background runs
     // edge to edge and the UI stays clear of the notch / home indicator.
     <View style={styles.root}>
-      <SafeAreaView style={styles.safe}>
+      <Stage>
         <Showcase />
         <Bridge />
         <Toast />
-      </SafeAreaView>
+      </Stage>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg0 },
-  safe: { flex: 1 },
   bridge: {
     position: 'absolute',
     left: 24,

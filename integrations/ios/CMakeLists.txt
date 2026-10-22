@@ -30,18 +30,27 @@ set_target_properties(JsuiDemo PROPERTIES
 
 get_filename_component(_jsui_ios_ui_dir "${JSUI_IOS_BUNDLE}" DIRECTORY)
 if(EXISTS "${JSUI_IOS_BUNDLE}")
-  add_custom_command(TARGET JsuiDemo POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${_jsui_ios_ui_dir}" "$<TARGET_BUNDLE_CONTENT_DIR:JsuiDemo>/ui"
-    COMMENT "Copying the UI bundle into JsuiDemo.app/ui")
+  set(_jsui_ios_copy_ui ${CMAKE_COMMAND} -E copy_directory "${_jsui_ios_ui_dir}" "$<TARGET_BUNDLE_CONTENT_DIR:JsuiDemo>/ui")
 else()
+  set(_jsui_ios_copy_ui "")
   message(WARNING "No UI bundle at ${JSUI_IOS_BUNDLE}: the app starts with -JsuiURL only "
                   "(npx jsui build <app.jsx> -o ${JSUI_IOS_BUNDLE})")
 endif()
 
-# Ninja / Makefile builds are not signed by Xcode: ad-hoc sign for the
-# simulator (devices need JSUI_IOS_TEAM with the Xcode generator).
-if(NOT CMAKE_GENERATOR STREQUAL "Xcode")
-  add_custom_command(TARGET JsuiDemo POST_BUILD
+if(CMAKE_GENERATOR STREQUAL "Xcode")
+  if(_jsui_ios_copy_ui)
+    add_custom_command(TARGET JsuiDemo POST_BUILD COMMAND ${_jsui_ios_copy_ui}
+      COMMENT "Copying the UI bundle into JsuiDemo.app/ui")
+  endif()
+else()
+  # Ninja / Makefile builds are not signed by Xcode: ad-hoc sign for the
+  # simulator (devices need JSUI_IOS_TEAM with the Xcode generator). Runs on
+  # every build, not as POST_BUILD: a rebuilt UI bundle alone does not relink
+  # JsuiDemo, and the app would keep the old one.
+  add_custom_target(JsuiDemoBundle ALL
+    ${_jsui_ios_copy_ui}
     COMMAND codesign --force --sign - --timestamp=none "$<TARGET_BUNDLE_DIR:JsuiDemo>"
-    COMMENT "Ad-hoc signing JsuiDemo.app")
+    COMMENT "Copying the UI bundle into JsuiDemo.app/ui and ad-hoc signing"
+    VERBATIM)
+  add_dependencies(JsuiDemoBundle JsuiDemo)
 endif()
