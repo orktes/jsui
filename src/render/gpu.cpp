@@ -99,7 +99,20 @@ GrGLFuncPtr linuxEglProc(void*, const char name[]) {
   if (void* p = LinuxGL::get().eglGetProcAddress(name)) return reinterpret_cast<GrGLFuncPtr>(p);
   return reinterpret_cast<GrGLFuncPtr>(dlsym(RTLD_DEFAULT, name));
 }
+// Skia asks for eglQueryString / eglGetCurrentDisplay to read EGL
+// extensions and calls them when non-null. GLX's glXGetProcAddress returns
+// a dispatch stub for *any* name (so does SDL_GL_GetProcAddress on X11), and
+// calling those crashes: answer egl* names only when an EGL context is current.
+bool eglName(const char* name) { return name[0] == 'e' && name[1] == 'g' && name[2] == 'l'; }
+GrGLFuncPtr eglOnly(const char* name) {
+  LinuxGL& gl = LinuxGL::get();
+  if (gl.eglGetCurrentContext && gl.eglGetProcAddress && gl.eglGetCurrentContext())
+    return reinterpret_cast<GrGLFuncPtr>(gl.eglGetProcAddress(name));
+  return nullptr;
+}
+
 GrGLFuncPtr linuxGlxProc(void*, const char name[]) {
+  if (eglName(name)) return eglOnly(name);
   if (void* p = LinuxGL::get().glXGetProcAddress(name)) return reinterpret_cast<GrGLFuncPtr>(p);
   return reinterpret_cast<GrGLFuncPtr>(dlsym(RTLD_DEFAULT, name));
 }
@@ -125,6 +138,9 @@ struct JsuiGpuContext {
     if (getProc) {
       return GrGLMakeAssembledInterface(const_cast<JsuiGpuContext*>(this), [](void* self, const char name[]) {
         auto* g = static_cast<JsuiGpuContext*>(self);
+#if JSUI_GL_DLOPEN
+        if (eglName(name)) return eglOnly(name);
+#endif
         return reinterpret_cast<GrGLFuncPtr>(g->getProc(g->user, name));
       });
     }
