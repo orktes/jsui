@@ -55,6 +55,14 @@ for (const size of SIZES) {
   page.on('pageerror', (e) => logs.push('pageerror: ' + e.message));
   await page.goto(`${ORIGIN}/index.html`);
   await page.waitForFunction(() => window.jsui, null, { timeout: 60000 });
+  // With the WebGL module deployed the site must draw through Skia on WebGL:
+  // the CPU raster is far too slow for full-page canvases.
+  const gpuDeployed = JSON.parse(fs.readFileSync(path.join(DIR, 'modules.json'), 'utf8')).gpu;
+  const renderer = await page.evaluate(() => window.jsui.renderer);
+  if (gpuDeployed && !renderer.startsWith('gpu')) {
+    failed++;
+    console.log(`  FAIL  ${size.name}: renderer is ${renderer}, expected the GPU renderer`);
+  } else console.log(`  ${size.name}: renderer ${renderer}`);
   for (const route of ROUTES) {
     const name = `${size.name} ${route}`;
     logs.length = 0;

@@ -1,9 +1,9 @@
 name: Pages
 
 # Deploys the showcase site (site/) to GitHub Pages. It reuses the WASM
-# modules the CI run on main just built and tested (artifacts 'jsui-wasm' and,
-# when the advisory WebGL job passed, 'jsui-wasm-webgl') instead of compiling
-# Skia and JSUI again, so a deploy takes about a minute.
+# modules the CI run on main just built and tested (artifacts 'jsui-wasm-webgl',
+# drawn with Skia on WebGL, and 'jsui-wasm' as the CPU fallback) instead of
+# compiling Skia and JSUI again, so a deploy takes about a minute.
 #
 # One-time setup: Settings -> Pages -> Build and deployment -> Source: GitHub Actions.
 
@@ -56,9 +56,8 @@ jobs:
           path: web/dist
           run-id: ${{ steps.run.outputs.id }}
           github-token: ${{ github.token }}
-      - name: WASM module (WebGL, optional)
+      - name: WASM module (WebGL)
         uses: actions/download-artifact@v4
-        continue-on-error: true
         with:
           name: jsui-wasm-webgl
           path: web/dist-webgl
