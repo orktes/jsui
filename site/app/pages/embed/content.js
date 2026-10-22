@@ -232,6 +232,181 @@ if (!jsui_wants_frame(rt)) wait_for_input();
   ],
 };
 
+const DATA = {
+  id: 'data',
+  label: 'Game data',
+  eyebrow: 'Game data · state, calls, messages',
+  color: colors.green,
+  title: 'Gold, inventory, quests',
+  lead: 'The game shares state with the UI by key, and the UI asks the game things with calls that return promises. The state lives in the runtime, not in the JS context, so it is there before the bundle loads and survives hot reloads.',
+  facts: [
+    ['Store', 'one JSON value per key'],
+    ['Updates', 'RFC 7386 merge patch'],
+    ['Delivery', 'once per jsui_tick'],
+    ['Re-renders', "only that key's readers"],
+  ],
+  blocks: [
+    {
+      kind: 'table',
+      title: 'Three channels',
+      head: ['CHANNEL', 'DIRECTION', 'API'],
+      rows: [
+        ['Shared state', 'game → UI', 'jsui_set_state / jsui_patch_state → useHostState(key). Currency, inventory, quests, settings.'],
+        ['UI-owned state', 'UI → game', 'HostState.set / patch → JsuiConfig.on_state; the game reads it with jsui_get_state.'],
+        ['Calls', 'UI → game', 'await Host.call(name, args) → on_call → jsui_resolve_call / jsui_reject_call. Buy, equip, confirm.'],
+        ['Calls', 'game → UI', 'jsui_call_ui(rt, name, args, done, user) → Host.handle(name, fn) / useHostHandler.'],
+        ['Messages', 'both', 'jsui_post_message → useHostMessage; Host.postMessage → on_message. Fire and forget.'],
+      ],
+    },
+    {
+      kind: 'pair',
+      items: [
+        {
+          kind: 'code',
+          lang: 'js',
+          title: 'Inventory.jsx',
+          code: `
+import { memo, useState } from 'react';
+import { Button, Host, Text, View, useHostState } from 'react-native';
+
+const Row = memo(({ item }) => (
+  <Text>{item.name} ×{item.count}</Text>
+));
+
+export function Inventory() {
+  // Re-renders only when "gold" changes
+  const gold = useHostState('gold', 0);
+  const { items } = useHostState('inventory', { items: {} });
+  const [error, setError] = useState(null);
+  const buy = (item) =>
+    Host.call('shop.buy', { item }, { timeout: 5000 })
+      .catch((e) => setError(e.message));   // HostCallError
+  return (
+    <View>
+      <Text>{gold} gold</Text>
+      {Object.entries(items).map(([id, item]) => (
+        <Row key={id} item={item} />
+      ))}
+      <Button title="Buy potion" onPress={() => buy('potion')} />
+      {error && <Text>{error}</Text>}
+    </View>
+  );
+}
+`,
+        },
+        {
+          kind: 'code',
+          lang: 'c',
+          title: 'game.c',
+          code: `
+/* Any time, even before the bundle loads. */
+jsui_set_state(rt, "gold", "1250");
+jsui_set_state(rt, "inventory",
+  "{\\"items\\":{\\"potion\\":{\\"name\\":\\"Potion\\",\\"count\\":3}}}");
+
+/* Later: only what changed (null deletes). Unchanged
+   objects stay === in JS, so memo rows don't re-render. */
+jsui_patch_state(rt, "inventory",
+  "{\\"items\\":{\\"potion\\":{\\"count\\":2}}}");
+
+/* Host.call() from JS: answer now or on a later frame. */
+static void on_call(void* user, uint64_t id,
+                    const char* name, const char* args) {
+  if (strcmp(name, "shop.buy") == 0)
+    game_queue_purchase(user, id, args);
+  else
+    jsui_reject_call(rt, id, "unknown call");
+}
+cfg.on_call = on_call;          /* + on_call_cancel, call_user */
+...
+jsui_resolve_call(rt, id, "{\\"gold\\":1100}");
+`,
+        },
+      ],
+    },
+    {
+      kind: 'pair',
+      items: [
+        {
+          kind: 'code',
+          lang: 'gd',
+          title: 'Godot · JsuiView',
+          code: `
+func _ready():
+    ui.set_state("gold", 1250)
+    ui.set_state("inventory", {"items": {
+        "potion": {"name": "Potion", "count": 3}}})
+    ui.call_requested.connect(_on_ui_call)
+
+func _on_gold_changed(gold):
+    ui.set_state("gold", gold)
+
+func _on_ui_call(id, name, args):
+    match name:
+        "shop.buy":
+            if try_buy(args.item): ui.resolve_call(id, {"gold": gold})
+            else: ui.reject_call(id, "not enough gold")
+        _:
+            ui.reject_call(id, "unknown call " + name)
+`,
+        },
+        {
+          kind: 'code',
+          lang: 'js',
+          title: 'Web · createJsui',
+          code: `
+jsui.setState('gold', 1250);
+jsui.patchState('inventory', { items: { potion: { count: 2 } } });
+jsui.getState('settings');       // keys the UI set with HostState.set
+
+// Answer Host.call('shop.buy', args): value, promise or throw
+jsui.handle('shop.buy', async ({ item }) => shop.buy(item));
+
+// Call the UI's Host.handle('ui.confirm', fn)
+const ok = await jsui.callUi('ui.confirm', { text: 'Quit?' });
+
+jsui.on('state', (key, value) => save(key, value));
+`,
+        },
+      ],
+    },
+    {
+      kind: 'pair',
+      items: [
+        {
+          kind: 'table',
+          title: 'UI side (react-native)',
+          rows: [
+            ['useHostState(key, fallback)', 'The value; only this key\'s subscribers re-render.'],
+            ['useHostStateSelector(key, fn, fallback)', 'Re-renders only when the selected result changes.'],
+            ['HostState.get / subscribe / keys', 'Non-hook reads; subscribe(\'*\', cb) for every key.'],
+            ['HostState.set / patch', 'UI-owned keys, reported to on_state.'],
+            ['Host.call(name, args, {timeout, signal})', 'Promise of the game\'s answer.'],
+            ['Host.handle / useHostHandler(name, fn)', 'Answer jsui_call_ui from the game.'],
+          ],
+        },
+        {
+          kind: 'table',
+          title: 'C API',
+          rows: [
+            ['jsui_set_state(rt, key, json)', '1 changed, 0 unchanged, -1 invalid.'],
+            ['jsui_patch_state(rt, key, patch)', 'Merge patch of a key.'],
+            ['jsui_get_state(rt, key)', 'Current JSON, including UI-owned keys.'],
+            ['jsui_resolve_call / jsui_reject_call', 'Answer a call id from on_call; -1 if unknown or cancelled.'],
+            ['jsui_call_ui(rt, name, args, done, user)', 'done(user, id, ok, result) runs once, in a later tick.'],
+            ['cfg.on_state / on_call / on_call_cancel', 'Callbacks with state_user / call_user.'],
+          ],
+        },
+      ],
+    },
+    {
+      kind: 'note',
+      color: colors.green,
+      text: 'One key per thing that changes on its own ("gold", "inventory", "quests"). Keep big collections as objects keyed by id, so a merge patch can address a single entry: arrays are replaced whole.',
+    },
+  ],
+};
+
 const WEB = {
   id: 'web',
   label: 'Web',
@@ -437,4 +612,4 @@ WEBGL=1 scripts/build-wasm.sh                         # -> web/dist-webgl/ (Skia
   ],
 };
 
-export const TARGETS = [GODOT, CAPI, WEB, DEV, BUILD];
+export const TARGETS = [GODOT, CAPI, DATA, WEB, DEV, BUILD];
