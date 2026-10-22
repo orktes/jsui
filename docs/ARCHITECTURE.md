@@ -88,17 +88,23 @@ The embedder owns the loop (see `jsui.h`):
 1. Forward input with `jsui_send_*`. The InputManager hit-tests against the
    last layout and calls `__jsui_dispatchEvent` synchronously.
 2. `jsui_tick(now)`: deliver finished resource loads, run due timers, run
-   `requestAnimationFrame` callbacks, drain promise jobs, run Yoga if dirty,
-   emit `onLayout` events.
+   `requestAnimationFrame` callbacks, drain promise jobs, advance scroll
+   physics, evaluate native-driven Animated animations (then deliver their
+   end callbacks / listener updates to JS), run Yoga if dirty, advance
+   LayoutAnimations, emit `onLayout` events.
+   `jsui_tick_native(now)` does only the native part (native-driven Animated,
+   LayoutAnimations, layout) without running any JS, for hosts that skip JS
+   on a frame (see "Animated").
 3. If `jsui_needs_redraw()`, `jsui_render_rgba()` paints the tree (or
    `jsui_render_gl()` with the GPU backend).
 
 Hosts that sleep when idle check `jsui_wants_frame()`: it stays set while
 something moves on its own (rAF callbacks, due timers, in-flight loads,
 scroll flings / smooth scrolling / snapping, scroll indicator fades,
-LayoutAnimations, held gamepad sticks or D-pad) and the host should keep
-ticking at display rate. Animated animations run on `requestAnimationFrame`,
-so an endless `Animated.loop` keeps it set without any input.
+LayoutAnimations, native-driven Animated animations and their pending end
+callbacks, held gamepad sticks or D-pad) and the host should keep ticking at
+display rate. JS-driven Animated animations run on `requestAnimationFrame`,
+so an endless `Animated.loop` keeps it set without any input either way.
 
 Everything is single-threaded except resource I/O, which completes onto a
 queue drained in `jsui_tick`.
@@ -195,6 +201,7 @@ Native globals (installed by `JsEngine`):
 | `patchStyle(id, partialStyle)` | animation fast path: merges keys into the node's current `props.style` (a `null`/`undefined` value removes the key), keeps all other props, and reapplies via `Node::setProps` (which skips relayout when only paint keys such as `transform`, `opacity`, colors changed). Use it per frame from `requestAnimationFrame` instead of re-rendering through React. |
 | `setText(id, string)` | content of a `RawText` |
 | `appendChild(p, c)`, `insertBefore(p, c, before)`, `removeChild(p, c)` | tree edits (React semantics; unknown ids and cycles are ignored). While a LayoutAnimation with `delete` is armed, `removeChild` keeps the child as a fading ghost (see "LayoutAnimation") |
+| `animated.*` | the native Animated driver (React Native's NativeAnimatedModule): `createNode(tag, config)`, `connect` / `disconnect(parent, child)`, `connectToView` / `disconnectFromView(propsTag, id)`, `dropNode`, `setValue` / `setOffset` / `flattenOffset` / `extractOffset` / `getValue(tag)`, `startAnimation(id, tag, config)`, `stopAnimation(id) → {velocity} \| null`, `addEventMapping(id, eventType, path, tag)` / `removeEventMapping`, `startListening` / `stopListening(tag)`. See "Animated" |
 | `configureLayoutAnimation(config)` | arms a LayoutAnimation (`{duration, create, update, delete}`) for the layout pass after the commit in progress; `@jsui/react` calls it from `prepareForCommit` after `LayoutAnimation.configureNext` |
 | `destroyNode(id)` | free a detached subtree |
 | `measure(id) → {x, y, width, height, pageX, pageY}` | layout of a node (synchronous; runs a pending layout first). `null` for unknown ids |
@@ -252,6 +259,8 @@ Callbacks the bundle installs (all optional):
   handler ran, `2` `preventDefault()` was called.
 * `__jsui_onHostMessage(name, json)` — from `jsui_post_message`.
 * `__jsui_onLayout(id, {x, y, width, height})` — for `onLayout` listeners.
+* `__jsui_onAnimatedEnd(id, finished, value)` / `__jsui_onAnimatedValueUpdate(tag, value)`
+  — native Animated ends and value-listener updates, after each tick.
 
 ### Event objects
 
@@ -422,6 +431,72 @@ and new rects (`text::inputCaretDamage`), so `jsui_needs_redraw()` turns
 true twice a second while an input is focused and each such frame repaints
 a few pixels.
 
+## Animated
+
+`@jsui/react`'s `Animated` (`packages/react/src/animated/`) has React
+Native's API and both of its drivers:
+
+* **JS driver** (default). Every running animation shares one
+  `requestAnimationFrame` loop; changed values patch the mounted components'
+  styles with `patchStyle` once per frame, without React renders.
+* **Native driver** (`useNativeDriver: true`), like React Native's
+  NativeAnimatedModule. Starting a native animation makes its value native
+  (`__makeNative`), which spreads to everything computed from it and to the
+  components using it. Each node is serialized once through
+  `__jsui_native.animated` (`NativeAnimatedHelper.js`) and evaluated by
+  `src/animated/native_animated.cpp` in `Runtime::tick()` on the runtime
+  clock, after JS and scroll physics: the runtime writes the connected
+  views' styles itself, and JS hears back only for end callbacks and value
+  listeners. Native animations therefore keep moving while JS is busy or
+  not ticked at all (`jsui_tick_native`).
+  * Nodes: `value` (+ offset), `interpolation` (numeric outputs; colors as
+    four channel ranges, rounded / clamped like the JS driver; strings with
+    numbers such as `'45deg'` as a template; `extrapolate*` extend / clamp /
+    identity; a custom `easing` as a 257-point sampled curve), `addition`,
+    `subtraction`, `multiplication`, `division`, `modulus`, `diffclamp`
+    (continuing the JS node's state), `color` (`Animated.Color`), and per
+    component a `transform` (animated and static entries), `style` and
+    `props` node connected to the host view.
+  * Animations: timing as `frames` (the easing sampled every ~2 ms over the
+    duration, linearly interpolated; RN samples at 60 Hz), `spring`
+    (tension / friction and bounciness / speed are converted to stiffness /
+    damping / mass in JS; a spring started on a value whose spring was just
+    stopped continues its velocity), `decay`; `delay`; `iterations`
+    (`Animated.loop` of a native animation repeats natively, restarting from
+    the start value). The formulas and frame times are the JS driver's:
+    springs and decay match it exactly, sampled easings within ~0.006 px of a
+    200 px move (`tests/native/react_native_animated_e2e_test.cpp`).
+  * Sync: animations start at the runtime time JS started them; ends reach JS
+    after the tick as `{finished, value}`. `__getValue()` reads the native
+    value synchronously; `setValue` / `setOffset` / `flattenOffset` /
+    `extractOffset` forward to it (`setValue` stops the node's animations and
+    writes the views at once); `stopAnimation(cb)` stops natively and passes
+    the native value; `addListener` on a native value gets per-frame updates.
+  * `Animated.event(mapping, {useNativeDriver: true})` on an animated
+    component prop (`onScroll`, `onMomentumScrollEnd`, ...): the paths under
+    `nativeEvent` map onto native values (`addEventMapping`), applied by
+    `InputManager::dispatch` before the event reaches JS (a JS `listener`
+    still runs). `Animated.attachNativeEvent` does the same for a ref.
+  * React Native's rules: a native value stays native and a JS-driven
+    animation on it throws; only paint-only style keys can be driven
+    (`opacity`, `transform`, colors, border radii, `shadowOpacity` /
+    `shadowRadius`, ...) and transforms; layout keys throw `Style property
+    'width' is not supported by native animated module`, animated non-style
+    props throw too. `Animated.ValueXY` is native through its channels.
+  * Writes go through `Node::setProps` with the merged style (paint-only, so
+    no relayout; the incremental renderer damages just the node's old and
+    new rects). When React re-props a connected view, the live values are
+    overlaid again in the same tick. Unchanged frames write nothing.
+  * Native nodes are freed when their derived JS node detaches, when the
+    component unmounts, and (values) when the JS object is garbage collected
+    (`FinalizationRegistry`). A reload clears the native graph.
+  * Without `__jsui_native.animated` (Node tests, other hosts)
+    `useNativeDriver` falls back to the JS driver.
+  * Not native (yet): `toValue` bound to another Animated node (RN's
+    `tracking` node) restarts native animations from JS when the target
+    changes; scroll physics (and so `Animated.event` from flings) only
+    advance in `jsui_tick`, not in `jsui_tick_native`.
+
 ## LayoutAnimation
 
 `LayoutAnimation.configureNext(config, onEnd)` (and the `easeInEaseOut` /
@@ -573,6 +648,7 @@ Details of how the JS package uses the bridge, for native implementers:
   synthesizes is the press itself.
 * Optional bridge members used when present: `patchStyle(id, partialStyle)`
   (Animated / `setNativeProps`; otherwise `setProps` with the merged style),
+  `animated` (native Animated driver; otherwise `useNativeDriver` uses the JS driver),
   `viewport()` (native: returns `{width, height, scale}`), `focus`, `blur`,
   `scrollTo`, `flashScrollIndicators`, `measure`, `postMessage`, `loadFont`, `getImageSize(uri)`,
   `prefetchImage(uri)`, `reload`.
