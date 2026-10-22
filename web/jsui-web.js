@@ -8,8 +8,8 @@
 // Renderers, best first ('auto', the default):
 //
 //   'webgpu'  Skia Graphite straight into the canvas' WebGPU texture
-//             (jsui_render_webgpu, web/jsui-webgpu.js), with damage-only
-//             repaints into a retained frame texture. Needs the all-backends
+//             (jsui_render_webgpu, web/jsui-webgpu.js); small changes are
+//             repainted into a retained frame texture. Needs the all-backends
 //             module (GPU=1 scripts/build-wasm.sh -> web/dist-gpu/jsui.js),
 //             which createJsui() loads first when navigator.gpu gives a device.
 //   'webgl'   Skia Ganesh straight into the canvas' WebGL2 / WebGL 1 context.
@@ -68,6 +68,12 @@
  *                                // deployed
  *   moduleBase?: string|URL,     // directory holding dist/, dist-webgl/, dist-gpu/ (default:
  *                                // next to this file)
+ *   moduleVersions?: { [dir: string]: string },
+ *                                // the modules deployed under moduleBase and their versions
+ *                                // (content hashes), e.g. { 'dist': 'a1b2', 'dist-gpu': 'c3d4' }:
+ *                                // others are not tried, and each URL is loaded as
+ *                                // jsui.js?v=<version> (its jsui.wasm too). A query on moduleUrl
+ *                                // is likewise passed on to its jsui.wasm.
  *   renderer?: 'auto'|'gpu'|'webgpu'|'webgl'|'cpu'|'2d',
  *                                // 'auto' (default): Skia on WebGPU, else Skia on WebGL (hardware
  *                                // implementations only), else the CPU raster. 'gpu': the same,
@@ -90,12 +96,23 @@ export { requestWebGPU, webgpuSupported } from './jsui-webgpu.js';
 
 const modules = new Map();  // module URL -> Promise<Module>
 
+// The module's own files (jsui.wasm) are fetched with the module URL's query:
+// a versioned URL (jsui.js?v=<hash>, see site/scripts/build.mjs) then names
+// one build of both, so a browser cache cannot pair this jsui.js with a
+// jsui.wasm of another deploy.
+function locateIn(moduleUrl) {
+  return (path) => {
+    const u = new URL(path, moduleUrl);
+    if (!u.search) u.search = new URL(moduleUrl).search;
+    return u.href;
+  };
+}
+
 function loadModule(moduleUrl) {
   const key = String(moduleUrl);
   let p = modules.get(key);
   if (!p) {
-    p = import(/* @vite-ignore */ key).then((ns) =>
-      ns.default({ locateFile: (path) => new URL(path, key).href }));
+    p = import(/* @vite-ignore */ key).then((ns) => ns.default({ locateFile: locateIn(key) }));
     p.catch(() => modules.delete(key));
     modules.set(key, p);
   }
@@ -149,17 +166,24 @@ async function loadModuleFor(opts, webgpu) {
   const order = gpu ? [GPU_MODULE, CPU_MODULE] : [CPU_MODULE, GPU_MODULE];
   if (webgpu) order.unshift(ALL_MODULE);
   else order.push(ALL_MODULE);
+  // moduleVersions: {dir: version} of the deployed modules; the others are
+  // skipped, and each URL gets ?v=<version>.
+  const versions = opts.moduleVersions;
   const errors = [];
   for (const m of order) {
+    const dir = m.split('/')[1];
+    if (versions && versions[dir] == null) continue;
+    const url = new URL(m, opts.moduleBase ?? import.meta.url);
+    if (versions) url.searchParams.set('v', versions[dir]);
     try {
-      return await loadModule(new URL(m, opts.moduleBase ?? import.meta.url));
+      return await loadModule(url);
     } catch (e) {
-      errors.push(`${m}: ${e?.message ?? e}`);
+      errors.push(`${url.href}: ${e?.message ?? e}`);
     }
   }
   // Name every module tried: browsers such as Safari report a failed import
   // as just "Importing a module script failed".
-  throw new Error('could not load a JSUI module (' + errors.join('; ') + ')');
+  throw new Error('could not load a JSUI module (' + (errors.join('; ') || 'none deployed (moduleVersions)') + ')');
 }
 
 const webglProbe = {};
@@ -418,8 +442,9 @@ class JsuiHost {
       this._sizeChanged = false;
       let t2, t3;
       if (this._wgpu) {
-        // Skia Graphite into the canvas' WebGPU texture (damage-only repaint
-        // of its retained frame + one copy).
+        // Skia Graphite into the canvas' WebGPU texture (straight in when most
+        // of the frame changed, else a damage-only repaint of its retained
+        // frame + one copy).
         if (this._wgpu.render() === false) this._dropWebGPU('WebGPU frame failed');
         t2 = t3 = performance.now();
       } else if (this._gpu) {

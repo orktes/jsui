@@ -396,6 +396,17 @@ test('several runtimes on one page are independent', async ({ page }) => {
   assert(near(p2, [255, 255, 0, 255]), `a keeps running after b destroyed: ${fmt(p2)}`);
 });
 
+test('moduleVersions: only deployed modules are tried, jsui.js and jsui.wasm carry the version', async ({ page }) => {
+  const requests = [];
+  page.on('request', (r) => requests.push(new URL(r.url())));
+  const info = await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js', moduleUrl: null,
+    moduleBase: `${ORIGIN}/`, moduleVersions: { [DIST]: 'abc123' } } });
+  assert(info.renderer, 'no renderer');
+  const mods = requests.filter((u) => /\/jsui\.(js|wasm)$/.test(u.pathname)).map((u) => u.pathname + u.search);
+  const want = [`/${DIST}/jsui.js?v=abc123`, `/${DIST}/jsui.wasm?v=abc123`];
+  assert(JSON.stringify(mods) === JSON.stringify(want), `module requests ${mods.join(' ')}, want ${want.join(' ')}`);
+});
+
 test('bundleSource option and loadSource()', async ({ page }) => {
   const src = fs.readFileSync(path.join(WEB, 'test/fixtures/solid.js'), 'utf8');
   await mount(page, { jsui: { bundleSource: src } });
@@ -681,6 +692,85 @@ test('webgpu: incremental repaints match a full repaint', async ({ page }) => {
   const [px] = await screenPixels(page, '#a', [BANDS[0]]);
   if (near(px, RED)) skip('engine hostMessage() is a skeleton stub');
   assert(near(px, [255, 0, 255, 255]), `band 0 after message: ${fmt(px)}`);
+});
+
+test('webgpu: full-frame changes paint straight into the canvas, small ones through the retained frame', async ({ page }) => {
+  // web/test/gpu-count.js records the render passes (size, load op).
+  await page.addInitScript({ path: path.join(WEB, 'test/gpu-count.js') });
+  await page.reload();
+  await page.waitForFunction(() => window.testReady);
+  const style = (s) => `{position:'absolute',${s}}`;
+  const bundleSource = `(function(){const N=__jsui_native;` +
+    `const bg=N.createNode('View');const box=N.createNode('View');` +
+    `const set=(id,s,c)=>N.setProps(id,{style:Object.assign(s,{backgroundColor:c})});` +
+    `const BG=()=>(${style('left:0,top:0,width:320,height:200')}),BOX=()=>(${style('left:10,top:10,width:20,height:20')});` +
+    `set(bg,BG(),'#203040');set(box,BOX(),'#ff0000');N.appendChild(N.rootId,bg);N.appendChild(N.rootId,box);` +
+    `globalThis.__jsui_onHostMessage=function(name,json){const c=JSON.parse(json).color;` +
+    `if(name==='bg')set(bg,BG(),c);if(name==='box')set(box,BOX(),c);};})();`;
+  await mountWebGPU(page, { id: 'a', jsui: { bundleSource } });
+  await mount(page, { id: 'b', jsui: { bundleSource, renderer: 'cpu' } });
+  const step = (name, color) => page.evaluate(async ({ name, color }) => {
+    const { a, b } = window.hosts;
+    a.stop();
+    b.stop();
+    window.__gpuCounts.clear();
+    window.t = (window.t ?? performance.now()) + 16.67;
+    for (const j of [a, b]) {
+      j.postMessage(name, { color });
+      j.frame(window.t);
+    }
+    await a._wgpu.device.queue.onSubmittedWorkDone();
+    const passes = [...window.__gpuCounts].filter(([k]) => k.startsWith('pass color ')).map(([k, n]) => `${k} x${n}`);
+    const canvas = passes.filter((p) => p.startsWith(`pass color ${a.pixelWidth}x${a.pixelHeight} `));
+    return { canvas, loads: canvas.filter((p) => p.includes('load=load')).length,
+      clears: canvas.filter((p) => p.includes('load=clear')).reduce((n, p) => n + Number(p.split(' x').pop()), 0) };
+  }, { name, color });
+  const same = async (what) => {
+    const d = await frameDiff(page, ['a', 'b']);
+    assert(!d.missing && !d.size && d.max <= 2, `${what}: WebGPU frame differs from the CPU frame: ${JSON.stringify(d)}`);
+  };
+  // Most of the frame changed: one pass on the canvas texture, nothing loaded.
+  let r = await step('bg', '#405060');
+  assert(r.loads === 0 && r.clears === 1, `full-frame change: ${r.canvas.join(' | ')}`);
+  await same('after a full-frame change');
+  // Small changes: after a few frames they go through the retained texture,
+  // whose damage-only pass loads its previous contents.
+  for (let i = 0; i < 5; i++) r = await step('box', i % 2 ? '#00ff00' : '#0000ff');
+  assert(r.loads === 1, `small change: no damage-only pass on the retained frame: ${r.canvas.join(' | ')}`);
+  await same('after small changes');
+  r = await step('bg', '#102030');
+  assert(r.loads === 0 && r.clears === 1, `full-frame change after small ones: ${r.canvas.join(' | ')}`);
+  await same('after the next full-frame change');
+  r = await step('box', '#ffffff');
+  await same('after a small change following a full-frame one');
+});
+
+test('webgpu: no multisampled targets, no per-frame blur passes for inset shadows', async ({ page }) => {
+  // Browser WebGPU cannot load / resolve MSAA cheaply: Graphite must not use
+  // MSAA for paths (the dashed rounded border), clips or the damage clip.
+  await page.addInitScript({ path: path.join(WEB, 'test/gpu-count.js') });
+  await page.reload();
+  await page.waitForFunction(() => window.testReady);
+  await mountWebGPU(page, { width: 480, height: 320, jsui: { bundleUrl: 'fixtures/effects.js' } });
+  const r = await page.evaluate(async () => {
+    const j = window.hosts.ui;
+    await j._wgpu.device.queue.onSubmittedWorkDone();
+    const keys = (re) => [...window.__gpuCounts.keys()].filter((k) => re.test(k));
+    const msaa = keys(/^(pass|new texture) .*\d+x\d+x\d/);
+    // Repaint the whole frame twice more (a resize of 1 px and back): the inset
+    // shadow's blurred mask is cached, so no new single-channel offscreen passes.
+    const passes = () => keys(/^pass color .* r8unorm/).reduce((n, k) => n + window.__gpuCounts.get(k), 0);
+    const c = j.canvas, before = passes(), renders = j.stats.renders;
+    for (const w of ['481px', '480px']) {
+      c.style.width = w;
+      for (let i = 0; i < 3; i++) await new Promise(requestAnimationFrame);
+    }
+    await j._wgpu.device.queue.onSubmittedWorkDone();
+    return { msaa, r8: passes() - before, renders: j.stats.renders - renders };
+  });
+  assert(r.msaa.length === 0, `multisampled targets: ${r.msaa.join(' | ')}`);
+  assert(r.renders >= 2, `${r.renders} repaints after the resizes`);
+  assert(r.r8 === 0, `${r.r8} single-channel (blur mask) passes in full repaints after the first frame`);
 });
 
 test('webgpu: devicePixelRatio 2 and resize', async ({ page }) => {

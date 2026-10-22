@@ -62,11 +62,32 @@ class Runtime {
   // backend's surfaces). `clear`: clear to transparent first, else draw over
   // what the canvas holds. The next renderIncremental() repaints fully.
   void renderCanvas(SkCanvas* canvas, int width, int height, bool clear);
-  // Incremental repaint into a canvas that keeps its pixels between frames
-  // (the WebGPU backend's retained frame texture): `key` identifies that
-  // surface (like the pixel buffer of renderIncremental). Returns the
-  // repainted rect (empty when nothing changed).
-  SkIRect renderCanvasIncremental(SkCanvas* canvas, const void* key, int width, int height);
+  // Damage-tracked repaint for a GPU backend that may keep the frame in a
+  // surface of its own (the WebGPU backend's retained frame texture; its
+  // targets, canvas textures, start cleared every frame). `key` names that
+  // retained surface (nullptr: none yet); it is valid when it holds the frame
+  // this runtime last painted. Once the frame's damage is known (the bounds
+  // of the changed device pixels), `choose` says where to paint:
+  //   * {canvas, key}: `canvas` is the retained surface `key`. When it was
+  //     valid only the damage bounds are repainted, clipped to that one rect
+  //     (a scissor: complex clips cost GPU backends extra passes); otherwise
+  //     the whole frame. The next frame can repaint incrementally again.
+  //   * {canvas, nullptr}: a full repaint into some other canvas (the target
+  //     itself, when most of the frame changed anyway); the retained surface
+  //     misses this frame, so its next use repaints fully.
+  //   * {nullptr}: nothing is painted (the backend failed).
+  // Returns the repainted device rect.
+  struct CanvasChoice {
+    SkCanvas* canvas = nullptr;
+    const void* key = nullptr;  // the retained surface painted into, or nullptr
+    bool clear = true;          // full repaints: clear first, else draw over the canvas
+  };
+  template <typename Choose>
+  SkIRect renderCanvasTracked(const void* key, int width, int height, Choose&& choose) {
+    bool keyValid = false;
+    SkIRect damage = beginCanvasTracked(key, width, height, &keyValid);
+    return finishCanvasTracked(choose(damage, keyValid), width, height, keyValid, damage);
+  }
 
   JsuiConfig config;
   JsuiRuntime* handle;
@@ -127,6 +148,11 @@ class Runtime {
   void deliverImageEvents();
   // An image event can be delivered on the next tick.
   bool imageEventsReady() const;
+  // renderCanvasTracked(): layout + damage (the bounds, or empty), then the paint.
+  SkIRect beginCanvasTracked(const void* key, int width, int height, bool* keyValid);
+  SkIRect finishCanvasTracked(const CanvasChoice& c, int width, int height, bool keyValid, const SkIRect& damage);
+  bool trackedFrozen_ = false, trackedOverlay_ = false;
+  const void* trackedKey_ = nullptr;
   // The buffer the last frame was painted into (incremental repaint).
   const void* lastTarget_ = nullptr;
   int lastTargetW_ = 0, lastTargetH_ = 0;

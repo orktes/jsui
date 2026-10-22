@@ -476,8 +476,56 @@ SkIRect Runtime::renderImpl(void* pixels, int width, int height, size_t rowBytes
   return paintTracked(surface->getCanvas(), pixels, width, height, rowBytes, incremental);
 }
 
-SkIRect Runtime::renderCanvasIncremental(SkCanvas* canvas, const void* key, int width, int height) {
-  return paintTracked(canvas, key, width, height, 0, true);
+SkIRect Runtime::beginCanvasTracked(const void* key, int width, int height, bool* keyValid) {
+  doc.layout();
+  bool sameTarget = key && key == lastTarget_ && width == lastTargetW_ && height == lastTargetH_ &&
+                    lastTargetRowBytes_ == 0;
+  trackedFrozen_ = trackedOverlay_ = false;
+  trackedKey_ = key;
+  // Nothing marked dirty and the retained surface holds our last frame:
+  // nothing to repaint, without walking the tree.
+  if (sameTarget && !doc.paintDirty() && lastError.empty()) {
+    *keyValid = true;
+    return SkIRect::MakeEmpty();
+  }
+  // Always refresh the paint records so the next frame compares against
+  // what was painted.
+  SkRegion damage = updateDamage(doc, width, height);
+  bool dev = config.dev_mode != 0;
+  trackedFrozen_ = dev && lastGoodFrame_ && (!lastError.empty() || doc.root()->children().empty());
+  trackedOverlay_ = dev && !lastError.empty();
+  *keyValid = sameTarget && !trackedFrozen_ && !trackedOverlay_;
+  return damage.getBounds();
+}
+
+SkIRect Runtime::finishCanvasTracked(const CanvasChoice& c, int width, int height, bool keyValid,
+                                     const SkIRect& damage) {
+  doc.clearPaintDirty();
+  redraw_ = false;
+  lastTargetW_ = width;
+  lastTargetH_ = height;
+  lastTargetRowBytes_ = 0;
+  // Frames with the error overlay or a frozen picture are not tracked by the
+  // records: the next frame repaints fully.
+  bool tracked = !trackedFrozen_ && !trackedOverlay_;
+  lastTarget_ = c.canvas && c.key && tracked ? c.key : nullptr;
+  if (!c.canvas) return SkIRect::MakeEmpty();
+  SkCanvas* canvas = c.canvas;
+  if (c.key && keyValid && c.key == trackedKey_) {
+    if (damage.isEmpty()) return SkIRect::MakeEmpty();
+    // One rect: GPU backends clip to it with a scissor, where a region
+    // (several rects) is a complex clip (a mask, or MSAA) on Graphite.
+    SkRegion rect(damage);
+    canvas->save();
+    canvas->clipIRect(damage);
+    canvas->clear(SK_ColorTRANSPARENT);
+    paintDocument(doc, canvas, &rect);
+    canvas->restore();
+    return damage;
+  }
+  if (c.clear || c.key) canvas->clear(SK_ColorTRANSPARENT);
+  paintFrame(canvas, trackedFrozen_, trackedOverlay_);
+  return SkIRect::MakeWH(width, height);
 }
 
 SkIRect Runtime::paintTracked(SkCanvas* canvas, const void* pixels, int width, int height, size_t rowBytes,

@@ -388,13 +388,14 @@ JSUI_API int jsui_render_gl_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const J
  * - The target needs WGPUTextureUsage_RenderAttachment (TextureBinding or
  *   CopySrc as well lets Skia read back the destination for some blend
  *   modes) and an 8-bit RGBA / BGRA (optionally sRGB) or RGBA16Float format.
- * - Incremental repaint: by default the frame is kept in a texture owned by
- *   the context, only the damaged region is repainted into it, and it is then
- *   copied to the target with one draw. So the target's previous contents do
- *   not matter (canvas / swapchain textures start cleared), and a frame where
- *   only a spinner moved repaints just the spinner. JSUI_WEBGPU_NO_RETAIN
- *   paints the whole frame straight into the target instead (one texture
- *   less of memory).
+ * - Incremental repaint: by default a frame where little changed repaints
+ *   only the damage bounds into a texture owned by the context, which is then
+ *   copied to the target with one draw; a frame where most of it changed is
+ *   painted straight into the target. Either way the target's previous
+ *   contents do not matter (canvas / swapchain textures start cleared), and a
+ *   frame where only a spinner moved repaints just the spinner.
+ *   JSUI_WEBGPU_NO_RETAIN always paints the whole frame straight into the
+ *   target (one texture less of memory).
  * - Device loss: renders fail (-1) once the device is lost. Call
  *   jsui_gpu_context_lost() / jsui_gpu_destroy() and create a new context on
  *   a new device; runtimes keep no GPU objects, so nothing else changes.

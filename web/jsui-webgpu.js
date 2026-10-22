@@ -9,11 +9,14 @@
 // JsuiHost.frame() calls render(). Everything else (the WebGL -> CPU chain)
 // is unchanged and is what we fall back to.
 //
-// Frames: the runtime keeps the last frame in a texture of its own and only
-// repaints the damaged region into it, then one draw copies it into the
-// canvas texture (canvas textures start cleared every frame). Frames where
-// nothing changed are skipped entirely: without getCurrentTexture() the
-// canvas keeps showing the previous frame.
+// Frames: when most of the frame changed (an animated full-screen UI) Skia
+// paints it straight into the canvas texture, one pass. When little changed
+// it repaints only the damage bounds into a texture of its own that keeps the
+// last frame, then one draw copies that into the canvas texture (canvas
+// textures start cleared every frame). Frames where nothing changed are
+// skipped entirely: without getCurrentTexture() the canvas keeps showing the
+// previous frame. Nothing here waits for the GPU (no onSubmittedWorkDone or
+// buffer map is awaited per frame; Skia's own maps complete asynchronously).
 //
 // Device loss: we ask for a new device (once per loss) and rebuild the Skia
 // context on the same canvas; if that fails the host continues on a fresh
@@ -53,7 +56,11 @@ async function acquire() {
     const info = adapter.info ?? {};
     const desc = [info.vendor, info.architecture, info.device, info.description].filter(Boolean).join(' ');
     const software = !!(info.isFallbackAdapter ?? adapter.isFallbackAdapter) || /swiftshader|llvmpipe|lavapipe|software/i.test(desc);
-    const device = await adapter.requestDevice({ label: 'jsui' });
+    // Dual-source blending lets Skia blend anti-aliased draws in Porter-Duff
+    // modes other than src-over (src, dst-out, clear, ...) in the blend unit
+    // instead of reading the destination through a texture copy.
+    const requiredFeatures = ['dual-source-blending'].filter((f) => adapter.features?.has(f));
+    const device = await adapter.requestDevice({ label: 'jsui', requiredFeatures });
     const w = { adapter, device, software, description: desc || 'unknown adapter' };
     // A lost device is never handed out again.
     device.lost.then(() => { if (sharedValue === w) shared = sharedValue = null; });

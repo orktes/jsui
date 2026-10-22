@@ -234,14 +234,36 @@ Emdawnwebgpu's `webgpu.h`), and later Dawn native with an engine's device and
 texture (the API takes plain `webgpu.h` handles; a non-null `instance` is
 used to process Dawn events).
 
-* **Retained frame, damage-only repaint.** Unlike the GL path, the context
-  keeps the last frame in a Graphite render target of its own and repaints
-  only the damaged region into it (`Runtime::renderCanvasIncremental`, the
-  same damage tracking as the CPU path), then copies it into the target with
-  one draw (canvas textures start cleared every frame). The web host skips
-  frames where nothing changed altogether (no `getCurrentTexture()`, so the
-  canvas keeps its last frame). `JSUI_WEBGPU_NO_RETAIN` paints the whole
-  frame into the target instead; `JSUI_WEBGPU_NO_CLEAR` composites over it.
+* **Direct or retained, per frame.** `Runtime::renderCanvasTracked` (the
+  same damage tracking as the CPU path) tells the context the bounds of the
+  changed pixels before anything is painted. When they cover half the frame
+  or more (an animated full-screen UI) the frame is painted straight into the
+  target: one pass, no copy. When less changed, only the damage bounds are
+  repainted into a Graphite render target the context keeps (clipped to
+  that one rect, a scissor: a region clip is a complex clip on Graphite),
+  then that is copied into the target with one draw (canvas textures start
+  cleared every frame). After direct frames the retained target is repainted
+  fully once the damage stayed small for 3 frames. The web host skips frames
+  where nothing changed altogether (no `getCurrentTexture()`, so the canvas
+  keeps its last frame). `JSUI_WEBGPU_NO_RETAIN` always paints the whole
+  frame into the target; `JSUI_WEBGPU_NO_CLEAR` composites over it.
+* **No MSAA, few passes.** Browser WebGPU has none of the features Graphite
+  needs to make its internal MSAA cheap (ExpandResolveTexture load ops,
+  transient attachments, MSAA-render-to-single-sampled), so a single path or
+  complex clip used to turn the whole pass into a 4x MSAA pass: a
+  full-surface draw to load it, 4x samples stored to memory and a second
+  full-surface pass to resolve it, which on a tiler (Apple GPUs) dominated
+  the frame. The context sets `fInternalMultisampleCount = 1` in the browser,
+  so paths go through Graphite's raster path atlas. Inset shadows (a blurred
+  DRRect, which Graphite has no analytic blur for: an offscreen mask plus
+  blur passes each) are pre-rendered once per shape and drawn as sprites,
+  like outer shadows (`drawCachedInsetShadow`, also on the CPU path). On
+  `examples/showcase/interactions.jsx` that took a frame from 53 render passes
+  (one MSAA 1536x1024 pass, two full-surface copies, ~45 blur-mask passes) to
+  8, and from ~225 draws to ~180 (`node web/test/frame-bench.mjs` prints the
+  WebGPU calls per frame). The device asks for `dual-source-blending` when
+  the adapter has it (anti-aliased non-src-over Porter-Duff draws then need
+  no destination copy).
 * **No CPU waits.** In the browser Graphite runs without a tick function:
   submits never wait, buffer maps are async and finished work is collected by
   `checkAsyncWorkCompletion()` each frame. Raster images are uploaded once per
@@ -271,9 +293,18 @@ used to process Dawn events).
 * **Tests.** `JSUI_WEB_DIST=dist-gpu node web/test/browser.test.mjs` adds the
   `webgpu:` tests (WebGPU vs CPU pixel comparisons on the HUD and effects
   fixtures, incremental repaints, DPR 2 / resize, device loss, several
-  runtimes, idle frames) on Chromium's SwiftShader WebGPU adapter
-  (`--enable-unsafe-webgpu`). `node web/test/frame-bench.mjs` times frames of
-  `examples/showcase/interactions.jsx` per renderer.
+  runtimes, idle frames, direct vs retained frames, no MSAA targets) on
+  Chromium's SwiftShader WebGPU adapter (`--enable-unsafe-webgpu`).
+* **Benchmark.** `node web/test/frame-bench.mjs` measures
+  `examples/showcase/interactions.jsx` per renderer: the rAF-to-rAF interval
+  of the host's own loop in the steady state (what the user feels) with the
+  main-thread time per frame and, on WebGPU, when the GPU finished each frame
+  (observed, never awaited); then the old "finish" metric (frames stepped by
+  hand, each awaited until the GPU is done, which adds the round trip to the
+  GPU process that the real loop never waits for); then the WebGPU calls per
+  frame (`web/test/gpu-count.js`). Headless it runs on SwiftShader; on a Mac
+  with Chrome installed, `node web/test/frame-bench.mjs --real-gpu
+  --renderers webgpu,webgl` uses the real GPU (Metal) in a visible window.
 
 ## Game data
 
