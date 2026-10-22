@@ -297,7 +297,7 @@ void InputManager::beginDrag(PointerState& p, Node* sv) {
   st.anim = ScrollState::Anim::None;
   st.settleAt = -1;
   st.dragStart = mainOffset(sv);
-  st.samples[0] = {rt_.now, st.dragStart};
+  st.samples[0] = {eventTime(), st.dragStart};
   st.sampleCount = 1;
   dispatchScrollEvent("scrollbegindrag", sv);
 }
@@ -317,7 +317,7 @@ void InputManager::dragTo(PointerState& p, Node* sv, float x, float y) {
   applyScroll(sv, nx, ny, true);
   if (!(sv = alive(id))) return;
   ScrollState& st = scrollState(sv);
-  ScrollState::Sample s{rt_.now, mainOffset(sv)};
+  ScrollState::Sample s{eventTime(), mainOffset(sv)};
   if (st.sampleCount > 0 && st.samples[size_t(st.sampleCount - 1)].t == s.t) {
     st.samples[size_t(st.sampleCount - 1)] = s;  // same frame: keep the latest position
   } else if (st.sampleCount < int(st.samples.size())) {
@@ -343,7 +343,7 @@ void InputManager::endDrag(PointerState& p, bool cancelled) {
   float v = 0;
   if (!cancelled && started && st.sampleCount >= 2) {
     const ScrollState::Sample& last = st.samples[size_t(st.sampleCount - 1)];
-    if (rt_.now - last.t <= kVelocityWindowMs * 0.8) {
+    if (eventTime() - last.t <= kVelocityWindowMs * 0.8) {
       int first = st.sampleCount - 1;
       while (first > 0 && last.t - st.samples[size_t(first - 1)].t <= kVelocityWindowMs) first--;
       double dt = last.t - st.samples[size_t(first)].t;

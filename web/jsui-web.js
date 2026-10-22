@@ -887,7 +887,12 @@ class JsuiHost {
     c.style.webkitUserSelect = 'none';
     c.style.outline = 'none';
 
+    // The DOM event time (same clock as the rAF timestamps given to
+    // jsui_tick) stamps the event: gesture velocities see the real spacing
+    // of the events that arrive between two frames.
+    const stamp = (e) => M._jsui_set_event_time?.(this.rt, e.timeStamp);
     c.addEventListener('pointerdown', (e) => {
+      stamp(e);
       const [x, y] = this._point(e);
       let used;
       if (e.pointerType === 'mouse') {
@@ -903,11 +908,13 @@ class JsuiHost {
       this._updateCursor();
     }, active);
     c.addEventListener('pointermove', (e) => {
+      stamp(e);
       const [x, y] = this._point(e);
       if (e.pointerType === 'mouse') M._jsui_send_mouse_move(this.rt, x, y);
       else M._jsui_send_touch(this.rt, e.pointerId, 1, x, y);
     }, opt);
     const up = (e, cancel) => {
+      stamp(e);
       const [x, y] = this._point(e);
       let used;
       if (e.pointerType === 'mouse') {

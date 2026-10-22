@@ -444,7 +444,7 @@ React Native props (`onPress`, `onPressIn/Out`, `onLongPress`, `onHoverIn/Out`,
         |'scrollbegindrag'|'scrollenddrag'|'momentumscrollbegin'|'momentumscrollend'
         |'gamepadbutton'|'gamepadaxis'|'gamepadconnected'|'change'|'selectionchange',
   target: <node id>,              // hit node, focused node for keys
-  timestamp: <ms>,
+  timestamp: <ms>,                // jsui_set_event_time, else the last tick time
   // pointer
   x, y,                           // viewport coords (pageX/pageY)
   localX, localY,                 // relative to target (locationX/Y)
@@ -463,6 +463,15 @@ React Native props (`onPress`, `onPressIn/Out`, `onLongPress`, `onHoverIn/Out`,
   velocity: {x, y},               // px/ms, + = offset increasing (scrollenddrag)
   targetContentOffset: {x, y} }   // where the fling / snap will end (scrollenddrag)
 ```
+
+`timestamp` is on the runtime clock. A host that knows when an event happened
+calls `jsui_set_event_time(rt, ms)` before sending it (the web host passes the
+DOM `event.timeStamp`); otherwise events carry the last tick's time, so all
+events between two frames share one. PanResponder's `vx` / `vy` (px/ms) are
+measured over the moves of the last ~100 ms; moves with the same timestamp
+count as one sample at their latest position, the release keeps the velocity
+of the moves before it (React Native), and a pointer that rested longer than
+that before letting go has none. ScrollView drag velocity uses the same clock.
 
 `pointerenter`/`pointerleave` are dispatched per node (no bubbling), like the DOM.
 Gamepad D-pad / stick moves focus spatially between `focusable` nodes and A

@@ -389,6 +389,15 @@ enum {
     JSUI_MOD_META = 1 << 3
 };
 
+/* When the input events sent next happened, in ms on the runtime clock (the
+ * clock of jsui_tick's now_ms; in a browser, DOM event.timeStamp next to
+ * requestAnimationFrame timestamps). It stamps the events (`timestamp`,
+ * e.timeStamp in JS) sent after this call until the next jsui_tick, so
+ * gesture velocities (PanResponder vx / vy, ScrollView flings) see the real
+ * spacing of events that arrive between two frames. Without it events carry
+ * the time of the last tick. Timestamps never go backwards. NaN clears it. */
+JSUI_API void jsui_set_event_time(JsuiRuntime* rt, double time_ms);
+
 JSUI_API int jsui_send_mouse_move(JsuiRuntime* rt, float x, float y);
 JSUI_API int jsui_send_mouse_button(JsuiRuntime* rt, float x, float y, JsuiMouseButton button, int down, int mods);
 JSUI_API int jsui_send_mouse_wheel(JsuiRuntime* rt, float x, float y, float dx, float dy);

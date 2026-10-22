@@ -220,7 +220,7 @@ if (!jsui_wants_frame(rt)) wait_for_input();
         ['Content', ['jsui_load_bundle_url', 'jsui_load_bundle_source', 'jsui_reload', 'jsui_register_font']],
         ['Frame loop', ['jsui_set_viewport', 'jsui_tick', 'jsui_tick_native', 'jsui_needs_redraw', 'jsui_wants_frame', 'jsui_pending_loads']],
         ['Paint', ['jsui_render_rgba', 'jsui_render_rgba_incremental', 'jsui_render_gl', 'jsui_render_gl_target', 'jsui_render_png', 'jsui_gpu_create_gl']],
-        ['Input', ['jsui_send_mouse_move', 'jsui_send_mouse_button', 'jsui_send_mouse_wheel', 'jsui_send_mouse_leave', 'jsui_send_touch', 'jsui_send_key', 'jsui_send_text', 'jsui_send_gamepad_button', 'jsui_send_gamepad_axis', 'jsui_set_gamepad_connected', 'jsui_get_cursor']],
+        ['Input', ['jsui_set_event_time', 'jsui_send_mouse_move', 'jsui_send_mouse_button', 'jsui_send_mouse_wheel', 'jsui_send_mouse_leave', 'jsui_send_touch', 'jsui_send_key', 'jsui_send_text', 'jsui_send_gamepad_button', 'jsui_send_gamepad_axis', 'jsui_set_gamepad_connected', 'jsui_get_cursor']],
         ['Data & resources', ['jsui_post_message', 'cfg.on_message', 'cfg.load', 'jsui_resource_complete', 'jsui_set_clipboard_callbacks']],
       ],
     },

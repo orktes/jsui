@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 #include "animated/native_animated.h"
 #include "dev_overlay.h"
@@ -307,6 +308,7 @@ void Runtime::tick(double nowMs) {
   now = nowMs;
   doc.now = nowMs;
   if (reloadRequested_) reload();
+  input->setEventTime(std::numeric_limits<double>::quiet_NaN());  // jsui_set_event_time lasts until a tick
   loader.pump();
   // Shared state the embedder changed since the last tick: subscribers
   // re-render in one batch before this tick's timers and frame callbacks.

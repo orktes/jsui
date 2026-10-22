@@ -123,6 +123,38 @@ TEST(react_interactions_e2e) {
   t.tick(64);
   CHECK_EQ(t.take(), std::string("dhover=\"out\""));
 
+  // PanResponder release velocity (px/ms, RN): one move per frame, then the
+  // button comes up a frame later without moving. The velocity of the moves
+  // survives the release.
+  jsui_send_mouse_move(t.rt, 20, 200);
+  jsui_send_mouse_button(t.rt, 20, 200, JSUI_MOUSE_LEFT, 1, 0);
+  t.tick(16);
+  for (int i = 1; i <= 10; i++) {
+    jsui_send_mouse_move(t.rt, 20 + 3.f * i, 200 + float(i));
+    t.tick(16);
+  }
+  jsui_send_mouse_button(t.rt, 50, 210, JSUI_MOUSE_LEFT, 0, 0);
+  t.tick(16);
+  CHECK_EQ(t.take(), std::string("release={\"dx\":30,\"dy\":10,\"vx\":0.1875,\"vy\":0.0625}"));
+  // A flick whose moves and release all arrive within one frame: the host's
+  // event times (jsui_set_event_time, e.g. DOM event.timeStamp) give the
+  // velocity. 2 px every 4 ms = 0.5 px/ms.
+  double t0 = t.now + 1;
+  jsui_set_event_time(t.rt, t0);
+  jsui_send_mouse_move(t.rt, 20, 200);
+  jsui_send_mouse_button(t.rt, 20, 200, JSUI_MOUSE_LEFT, 1, 0);
+  for (int i = 1; i <= 4; i++) {
+    jsui_set_event_time(t.rt, t0 + 4 * i);
+    jsui_send_mouse_move(t.rt, 20 + 2.f * i, 200);
+  }
+  jsui_set_event_time(t.rt, t0 + 17);
+  jsui_send_mouse_button(t.rt, 28, 200, JSUI_MOUSE_LEFT, 0, 0);
+  t.tick(16);
+  CHECK_EQ(t.take(), std::string("release={\"dx\":8,\"dy\":0,\"vx\":0.5,\"vy\":0}"));
+  jsui_send_mouse_leave(t.rt);
+  t.tick(16);
+  t.take();
+
   // An endless Animated.loop keeps the host ticking without any input.
   t.post("loop");
   t.tick(16);

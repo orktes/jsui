@@ -13,6 +13,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -79,6 +80,13 @@ class InputManager {
   void nodeRemoved(Node* n);
   // Per-tick work (stick repeat, hover refresh after layout changes).
   void tick(double nowMs);
+
+  // Event timestamps (jsui_set_event_time): `t` on the runtime clock stamps
+  // the input events sent after it until the next tick (NaN: back to the
+  // tick time). eventTime() is what the next event carries; it never goes
+  // backwards.
+  void setEventTime(double t) { eventTime_ = t; }
+  double eventTime() const;
 
   // --- Additional API (additive to the skeleton contract) ---
 
@@ -306,6 +314,8 @@ class InputManager {
   uint32_t scopeId_ = 0;
   std::unordered_map<uint32_t, ScrollState> scrolls_;
   double lastTick_ = -1;
+  double eventTime_ = std::numeric_limits<double>::quiet_NaN();
+  mutable double lastEventTime_ = -std::numeric_limits<double>::infinity();
   bool pointerFocus_ = false;  // focus change caused by a press: no scroll into view
 
   // TextInput pointer selection: drag target, granularity (0 characters,
