@@ -104,9 +104,9 @@ function Bridge() {
   );
 }
 
-// The showcase is laid out for a 1280 x 720 stage (the Godot viewport). On a
-// smaller screen (a phone in landscape is ~874 x 402) the stage is scaled
-// down to fit the safe area and centred in it; in Godot the scale is 1.
+// The showcase is designed for a 1280 x 720 or larger stage (the Godot
+// viewport), which it fills. A smaller screen (a phone in landscape is ~874 x
+// 402) gets a 1280 x 720 stage scaled down to fit the safe area, centred in it.
 const STAGE_W = 1280;
 const STAGE_H = 720;
 
@@ -115,22 +115,29 @@ function Stage({ children }) {
   const insets = useSafeAreaInsets();
   const w = width - insets.left - insets.right;
   const h = height - insets.top - insets.bottom;
-  const scale = Math.min(1, w / STAGE_W, h / STAGE_H);
+  if (w >= STAGE_W && h >= STAGE_H) {
+    return (
+      <View style={{ position: 'absolute', left: insets.left, top: insets.top, right: insets.right, bottom: insets.bottom }}>
+        {children}
+      </View>
+    );
+  }
+  const scale = Math.min(w / STAGE_W, h / STAGE_H);
   const style = {
     position: 'absolute',
     left: insets.left + (w - STAGE_W) / 2,
     top: insets.top + (h - STAGE_H) / 2,
     width: STAGE_W,
     height: STAGE_H,
+    transform: [{ scale }],
   };
-  if (scale < 1) style.transform = [{ scale }];
   return <View style={style}>{children}</View>;
 }
 
 function App() {
   return (
-    // Insets are zero in Godot; on phones (the iOS host) the background runs
-    // edge to edge and the UI stays clear of the notch / home indicator.
+    // Insets are zero in Godot; on phones (the iOS host) the UI stays clear of
+    // the notch / Dynamic Island / home indicator.
     <View style={styles.root}>
       <Stage>
         <Showcase />

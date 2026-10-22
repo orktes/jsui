@@ -49,4 +49,11 @@ if (jsui_needs_redraw(rt)) {
 }
 ```
 
+## Safe area
+
+The host publishes `UIView.safeAreaInsets` as shared state `jsui.safeAreaInsets`
+(`{top, right, bottom, left}` in points). `SafeAreaView` and `useSafeAreaInsets()`
+(react-native and react-native-safe-area-context) read it; other hosts leave it
+unset, so insets are zero there.
+
 Not yet: the on-screen keyboard for `TextInput` (hardware keyboards work).
