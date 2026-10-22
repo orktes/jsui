@@ -44,6 +44,15 @@ function frame(rt, w, h) {
 // 2. bundle over HTTP via the fetch() backend (+ 404 handling)
 {
   const server = http.createServer((req, res) => {
+    if (req.url === '/echo') {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        res.writeHead(201, { 'content-type': 'text/plain', 'x-reply': 'yes' });
+        res.end(`${req.method} ${req.headers['x-test']} ${body}`);
+      });
+      return;
+    }
     const f = path.join(WEB, 'test/fixtures', path.basename(req.url));
     if (!fs.existsSync(f)) { res.writeHead(404); return res.end(); }
     res.writeHead(200, { 'content-type': 'text/javascript' });
@@ -88,6 +97,26 @@ function frame(rt, w, h) {
   await new Promise((r) => setTimeout(r, 200));
   M._jsui_tick(rt, t + 16);
   check(true, 'destroy during fetch did not crash');
+
+  // fetch() from JS through the browser loader: method, request/response headers, body, status.
+  const got = [];
+  (M.__jsuiHosts ??= new Map()).set(7, { onMessage: (name, json) => got.push([name, JSON.parse(json)]) });
+  const rt4 = M._jsui_web_create(7, 100, 100, 1, 0, baseP);
+  const fsrc = `fetch('/echo', { method: 'POST', headers: { 'X-Test': 'abc' }, body: 'héllo' })
+    .then((r) => r.text().then((t) => __jsui_native.postMessage('echo', JSON.stringify(
+      { status: r.status, ok: r.ok, reply: r.headers.get('x-reply'), text: t }))))
+    .catch((e) => __jsui_native.postMessage('echo', JSON.stringify({ error: String(e) })));`;
+  const fp = str(fsrc), fname = str(base);
+  M._jsui_load_bundle_source(rt4, fp, M.lengthBytesUTF8(fsrc), fname);
+  M._free(fp); M._free(fname);
+  for (const deadline = Date.now() + 3000; Date.now() < deadline && !got.length; t += 16) {
+    M._jsui_tick(rt4, t);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  const echo = got[0]?.[1];
+  check(echo && echo.status === 201 && echo.ok && echo.reply === 'yes' && echo.text === 'POST abc héllo',
+    `fetch POST round trip ${JSON.stringify(got)}`);
+  M._jsui_destroy(rt4);
 
   M._jsui_destroy(rt);
   M._jsui_destroy(rt2);
