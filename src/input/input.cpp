@@ -47,7 +47,7 @@ Affine transformOpMatrix(const TransformOp& op, float w, float h) {
 }
 
 Affine nodeLocalToParent(const Node* n) {
-  Rect r = n->layoutRect();
+  Rect r = n->visualRect();
   const auto& s = n->style();
   if (s.transform.empty()) return Affine::translate(r.x, r.y);
   float ox = s.transformOrigin[0].resolve(r.width), oy = s.transformOrigin[1].resolve(r.height);
@@ -211,7 +211,7 @@ bool InputManager::toLocal(const Node* n, float x, float y, float* lx, float* ly
     py += p->scrollY;
   }
   if (n->style().transform.empty()) {
-    Rect r = n->layoutRect();
+    Rect r = n->visualRect();
     *lx = px - r.x;
     *ly = py - r.y;
     return true;
@@ -224,7 +224,7 @@ bool InputManager::toLocal(const Node* n, float x, float y, float* lx, float* ly
 
 Rect InputManager::visualRect(const Node* n) const {
   if (!n || !n->yoga()) return {};
-  Rect r = n->layoutRect();
+  Rect r = n->visualRect();
   Affine m = localToViewport(n);
   float xs[4], ys[4];
   m.apply(0, 0, &xs[0], &ys[0]);
@@ -255,7 +255,7 @@ Node* InputManager::hitNode(Node* n, float px, float py, float* outX, float* out
   if (!s.display) return nullptr;
   PointerEvents pe = pointerEventsOf(n);
   if (pe == PointerEvents::None) return nullptr;
-  Rect r = n->layoutRect();
+  Rect r = n->visualRect();
   if (!finiteRect(r)) return nullptr;  // never laid out yet
 
   float lx, ly;

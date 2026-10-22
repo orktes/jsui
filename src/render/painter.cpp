@@ -832,8 +832,22 @@ bool backfaceFlipped(const ComputedStyle& s) {
   return flipped;
 }
 
+// LayoutAnimation create / delete effects (1 when none).
+float animOpacity(const Node* n) { return n->layoutAnim ? n->layoutAnim->opacity : 1.f; }
+bool animScaled(const Node* n) {
+  return n->layoutAnim && (n->layoutAnim->scaleX != 1 || n->layoutAnim->scaleY != 1);
+}
+// Scale about the border box center, outside the node's own transform.
+void applyAnimScale(const Node* n, const Rect& r, SkMatrix* m) {
+  m->preTranslate(r.width / 2, r.height / 2);
+  m->preScale(n->layoutAnim->scaleX, n->layoutAnim->scaleY);
+  m->preTranslate(-r.width / 2, -r.height / 2);
+}
+
 bool isPainted(const Node* n) {
   const ComputedStyle& s = n->style();
+  if (n->layoutAnim && (n->layoutAnim->opacity <= 0 || n->layoutAnim->scaleX <= 0 || n->layoutAnim->scaleY <= 0))
+    return false;
   return n->yoga() && s.display && s.opacity > 0 && !(s.backfaceHidden && backfaceFlipped(s));
 }
 
@@ -936,14 +950,16 @@ float filterOutset(const ComputedStyle& s) {
 // Conservative visual bounds of a node's painting (incl. descendants) in its
 // own border-box coordinates; used to size opacity / filter layers.
 SkRect visualBounds(Node* n) {
-  float w = YGNodeLayoutGetWidth(n->yoga()), h = YGNodeLayoutGetHeight(n->yoga());
+  Rect vr = n->visualRect();
+  float w = vr.width, h = vr.height;
   SkRect r = ownVisualBounds(n, w, h);
   if (paintsChildren(n) && !clipsChildren(n)) {
     for (Node* ch : n->children()) {
       if (!ch->yoga() || !ch->style().display) continue;
       SkRect cb = visualBounds(ch);
-      Rect lr = ch->layoutRect();
+      Rect lr = ch->visualRect();
       SkMatrix m = SkMatrix::Translate(lr.x, lr.y);
+      if (animScaled(ch)) applyAnimScale(ch, lr, &m);
       m.preConcat(localTransform(*ch));
       r.join(m.mapRect(cb));
     }
@@ -971,6 +987,8 @@ SkVector snapBox(const SkMatrix& m, const Rect& r, float* w, float* h) {
 }
 
 void paintChildren(Node* n, SkCanvas* c, Ctx& ctx) {
+  // Children fading out (LayoutAnimation delete) under the live ones.
+  for (Node* g : n->ghosts) paintNode(g, c, ctx);
   const auto& kids = n->children();
   bool sort = false;
   for (Node* ch : kids) sort |= ch->style().hasZIndex && ch->style().zIndex != 0;
@@ -1057,7 +1075,7 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
   }
   if (n->type() == NodeType::Image) image::paint(n, c, b.inner.rect(), b.inner);
 
-  if (paintsChildren(n) && !n->children().empty()) {
+  if (paintsChildren(n) && (!n->children().empty() || !n->ghosts.empty())) {
     bool clip = clipsChildren(n);
     bool scroll = n->type() == NodeType::ScrollView && (n->scrollX != 0 || n->scrollY != 0);
     c->save();
@@ -1084,17 +1102,23 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
     }
   }
   const ComputedStyle& s = n->style();
-  Rect r = n->layoutRect();
+  Rect r = n->visualRect();
   int saveCount = c->save();
   c->translate(r.x, r.y);
+  if (animScaled(n)) {
+    SkMatrix am;
+    applyAnimScale(n, r, &am);
+    c->concat(am);
+  }
   if (!s.transform.empty()) c->concat(localTransform(*n));
   float w, h;
   SkVector snap = snapBox(c->getTotalMatrix(), r, &w, &h);
   if (snap.fX != 0 || snap.fY != 0) c->translate(snap.fX, snap.fY);
-  bool layer = s.opacity < 1 || !s.filters.empty() || s.blendMode != 0;
+  float opacity = s.opacity * animOpacity(n);
+  bool layer = opacity < 1 || !s.filters.empty() || s.blendMode != 0;
   if (layer) {
     SkPaint lp;
-    lp.setAlphaf(s.opacity);
+    lp.setAlphaf(opacity);
     if (!s.filters.empty()) lp.setImageFilter(buildFilter(s.filters));
     if (s.blendMode) lp.setBlendMode(blendMode(s.blendMode));
     SkRect bounds = visualBounds(n);
@@ -1112,7 +1136,8 @@ SkIRect deviceBounds(const SkMatrix& m, const SkRect& local) {
 uint64_t childListHash(const Node* n) {
   uint64_t h = 1469598103934665603ull;
   for (const Node* c : n->children()) h = (h ^ uint64_t(reinterpret_cast<uintptr_t>(c))) * 1099511628211ull;
-  return h ^ n->children().size();
+  for (const Node* c : n->ghosts) h = (h ^ uint64_t(reinterpret_cast<uintptr_t>(c)) ^ 0x9e37ull) * 1099511628211ull;
+  return h ^ (n->children().size() + (uint64_t(n->ghosts.size()) << 20));
 }
 
 // Nodes with anti-aliased curved or diagonal outlines (radii, rotation,
@@ -1152,8 +1177,9 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkIRect& clip, uint
   bool painted = isPainted(n);
   if (painted) {
     const ComputedStyle& s = n->style();
-    Rect r = n->layoutRect();
+    Rect r = n->visualRect();
     m.preTranslate(r.x, r.y);
+    if (animScaled(n)) applyAnimScale(n, r, &m);
     if (!s.transform.empty()) m.preConcat(localTransform(*n));
     SkVector snap = snapBox(m, r, &w, &h);
     m.preTranslate(snap.fX, snap.fY);
@@ -1184,12 +1210,13 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkIRect& clip, uint
       curved->push_back({bars, SkRRect::MakeEmpty()});  // rounded thumbs: never cut
     }
     sub = own;
-    if (paintsChildren(n) && !n->children().empty()) {
+    if (paintsChildren(n) && (!n->children().empty() || !n->ghosts.empty())) {
       SkIRect childClip = clip;
       if (clipsChildren(n) && !childClip.intersect(deviceBounds(m, SkRect::MakeWH(w, h)))) childClip.setEmpty();
       SkMatrix cm = m;
       cm.preTranslate(-snap.fX, -snap.fY);
       if (n->type() == NodeType::ScrollView) cm.preTranslate(-n->scrollX, -n->scrollY);
+      for (Node* ch : n->ghosts) sub.join(updateRecords(ch, cm, childClip, imageGen, damage, curved));
       for (Node* ch : n->children()) sub.join(updateRecords(ch, cm, childClip, imageGen, damage, curved));
     }
     float fe = filterOutset(s);
@@ -1248,7 +1275,8 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkIRect& clip, uint
 SkMatrix localTransform(const Node& n) {
   const ComputedStyle& s = n.style();
   if (s.transform.empty() || !n.yoga()) return SkMatrix::I();
-  float w = YGNodeLayoutGetWidth(n.yoga()), h = YGNodeLayoutGetHeight(n.yoga());
+  Rect vr = n.visualRect();
+  float w = vr.width, h = vr.height;
   float ox = s.transformOrigin[0].resolve(w), oy = s.transformOrigin[1].resolve(h);
   SkMatrix m = SkMatrix::Translate(ox, oy);
   for (const TransformOp& op : s.transform) {

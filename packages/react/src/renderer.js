@@ -5,6 +5,7 @@ import { createContext } from 'react';
 import Reconciler from 'react-reconciler';
 import { native, queueMicrotask } from './native.js';
 import { instances, HostInstance, TextInstance } from './instances.js';
+import { armPendingLayoutAnimation } from './layoutAnimation.js';
 
 export const DiscreteEventPriority = 2;
 export const ContinuousEventPriority = 8;
@@ -84,7 +85,10 @@ const hostConfig = {
     inst.focus();
   },
 
-  prepareForCommit: () => null,
+  prepareForCommit() {
+    armPendingLayoutAnimation();
+    return null;
+  },
   resetAfterCommit: noop,
   preparePortalMount: noop,
 

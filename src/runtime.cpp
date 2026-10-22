@@ -177,6 +177,7 @@ void Runtime::devPoll() {
 
 void Runtime::tick(double nowMs) {
   now = nowMs;
+  doc.now = nowMs;
   if (reloadRequested_) reload();
   loader.pump();
   js->runTimers(nowMs);
@@ -184,6 +185,9 @@ void Runtime::tick(double nowMs) {
   js->runJobs();
   input->tick(nowMs);
   doc.layout();
+  doc.tickLayoutAnimations(nowMs);
+  // A LayoutAnimation applies to the commit that armed it only.
+  doc.disarmLayoutAnimation();
   devPoll();
   if (doc.paintDirty()) redraw_ = true;
 }
@@ -206,7 +210,8 @@ bool Runtime::needsRedraw() const { return redraw_ || doc.paintDirty(); }
 bool Runtime::wantsFrame() const {
   // A pending repaint alone is not a reason to tick: the host paints after
   // the tick it already ran.
-  return reloadRequested_ || loader.pending() > 0 || (js && js->hasPendingWork(now + 17)) || input->animating();
+  return reloadRequested_ || loader.pending() > 0 || (js && js->hasPendingWork(now + 17)) || input->animating() ||
+         doc.layoutAnimating();
 }
 
 void Runtime::render(void* pixels, int width, int height, size_t rowBytes) {

@@ -4,6 +4,8 @@
 #include <functional>
 #include <memory>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "core/node.h"
 
@@ -11,6 +13,23 @@ namespace jsui {
 
 class FontManager;
 class ImageCache;
+
+// LayoutAnimation (React Native): animates the next layout pass.
+enum class LayoutAnimCurve : uint8_t { Linear, EaseInEaseOut, EaseIn, EaseOut, Spring, Keyboard };
+enum class LayoutAnimProperty : uint8_t { Opacity, ScaleX, ScaleY, ScaleXY };
+struct LayoutAnimSpec {
+  bool enabled = false;
+  LayoutAnimCurve curve = LayoutAnimCurve::EaseInEaseOut;
+  LayoutAnimProperty property = LayoutAnimProperty::Opacity;
+  double duration = 0, delay = 0;
+  float springDamping = 0.5f;
+};
+struct LayoutAnimConfig {
+  LayoutAnimSpec create, update, remove;
+};
+// Eased progress of a LayoutAnimation curve at linear time t in [0, 1]
+// (springs overshoot 1 before settling).
+float layoutAnimProgress(LayoutAnimCurve curve, float springDamping, float t);
 
 class Document {
  public:
@@ -39,6 +58,25 @@ class Document {
   bool paintDirty() const { return paintDirty_; }
   void clearPaintDirty() { paintDirty_ = false; }
 
+  // LayoutAnimation. arm(): the next layout pass animates the frames that
+  // change (`update`), fades / scales in nodes that appear (`create`), and
+  // children removed while armed fade / scale out as ghosts (`remove`; see
+  // removeChild()). The runtime disarms at the end of each tick, so a config
+  // only applies to the commit that armed it.
+  void armLayoutAnimation(const LayoutAnimConfig& config) { armed_ = config; armedSet_ = true; }
+  void disarmLayoutAnimation() { armedSet_ = false; }
+  bool layoutAnimationArmed() const { return armedSet_; }
+  // JS removeChild: detaches `child`, or turns it into a fading ghost of
+  // `parent` while a delete animation is armed.
+  void removeChild(Node* parent, Node* child);
+  // A ghost re-inserted into the tree stops fading and becomes a node again.
+  void reviveGhost(Node* ghost);
+  // Advances running layout animations to `nowMs` (marks paint dirty).
+  void tickLayoutAnimations(double nowMs);
+  bool layoutAnimating() const { return !animating_.empty(); }
+  // Runtime clock (set every tick): layout animations start at this time.
+  double now = 0;
+
   // Yoga configuration shared by this document's nodes (one per document:
   // no global state).
   YGConfigRef yogaConfig() const { return yogaConfig_; }
@@ -56,6 +94,15 @@ class Document {
  private:
   void destroyRecursive(Node* node);
   void reportLayout(Node* node);
+  void snapshotLayout(Node* node, std::vector<std::pair<Node*, Rect>>* out);
+  void startLayoutAnimations(const std::vector<std::pair<Node*, Rect>>& before);
+  void startAnim(Node* n, Node::LayoutAnim::Kind kind, const LayoutAnimSpec& spec, const Rect& from);
+  void finishAnim(Node* n);
+  void applyAnim(Node* n, double nowMs, bool* done);
+
+  LayoutAnimConfig armed_;
+  bool armedSet_ = false;
+  std::vector<uint32_t> animating_;  // nodes with a running layout animation
 
   std::unordered_map<uint32_t, std::unique_ptr<Node>> nodes_;
   std::unordered_map<uint32_t, Rect> reportedLayout_;

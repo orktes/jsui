@@ -23,16 +23,23 @@ for (const mode of ['production', 'development']) {
     const dir = await mkdtemp(path.join(tmpdir(), 'jsui-e2e-'));
     const outfile = path.join(dir, 'bundle.js');
     const scrollfile = path.join(dir, 'scroll.js');
+    const interactionsfile = path.join(dir, 'interactions.js');
     await build({ entry: path.join(here, 'e2e', 'app.jsx'), outfile, mode });
     await build({ entry: path.join(here, 'e2e', 'scroll.jsx'), outfile: scrollfile, mode });
-    const { stdout } = await promisify(execFile)(binary, ['react_e2e'], {
-      env: Object.assign({}, process.env, { JSUI_REACT_E2E_BUNDLE: outfile, JSUI_REACT_E2E_SCROLL_BUNDLE: scrollfile }),
+    await build({ entry: path.join(here, 'e2e', 'interactions.jsx'), outfile: interactionsfile, mode });
+    const { stdout } = await promisify(execFile)(binary, ['react_e2e', 'react_interactions_e2e'], {
+      env: Object.assign({}, process.env, {
+        JSUI_REACT_E2E_BUNDLE: outfile,
+        JSUI_REACT_E2E_SCROLL_BUNDLE: scrollfile,
+        JSUI_REACT_INTERACTIONS_BUNDLE: interactionsfile,
+      }),
       cwd: repo,
     }).catch((e) => {
       throw new Error(`jsui-tests failed:\n${e.stdout}\n${e.stderr}`);
     });
     assert.match(stdout, /PASS react_e2e$/m);
     assert.match(stdout, /PASS react_e2e_scroll/);
+    assert.match(stdout, /PASS react_interactions_e2e/);
     assert.doesNotMatch(stdout, /skipped/);
   });
 

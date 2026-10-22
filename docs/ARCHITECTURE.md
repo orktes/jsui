@@ -95,8 +95,10 @@ The embedder owns the loop (see `jsui.h`):
 
 Hosts that sleep when idle check `jsui_wants_frame()`: it stays set while
 something moves on its own (rAF callbacks, due timers, in-flight loads,
-scroll flings / smooth scrolling / snapping, scroll indicator fades, held
-gamepad sticks or D-pad) and the host should keep ticking at display rate.
+scroll flings / smooth scrolling / snapping, scroll indicator fades,
+LayoutAnimations, held gamepad sticks or D-pad) and the host should keep
+ticking at display rate. Animated animations run on `requestAnimationFrame`,
+so an endless `Animated.loop` keeps it set without any input.
 
 Everything is single-threaded except resource I/O, which completes onto a
 queue drained in `jsui_tick`.
@@ -192,7 +194,8 @@ Native globals (installed by `JsEngine`):
 | `setProps(id, props)` | replaces all props; `props.style` is a **flattened** style object; functions are dropped; `props.__events` lists event names the element listens to (e.g. `["press","pointerMove","layout"]`) |
 | `patchStyle(id, partialStyle)` | animation fast path: merges keys into the node's current `props.style` (a `null`/`undefined` value removes the key), keeps all other props, and reapplies via `Node::setProps` (which skips relayout when only paint keys such as `transform`, `opacity`, colors changed). Use it per frame from `requestAnimationFrame` instead of re-rendering through React. |
 | `setText(id, string)` | content of a `RawText` |
-| `appendChild(p, c)`, `insertBefore(p, c, before)`, `removeChild(p, c)` | tree edits (React semantics; unknown ids and cycles are ignored) |
+| `appendChild(p, c)`, `insertBefore(p, c, before)`, `removeChild(p, c)` | tree edits (React semantics; unknown ids and cycles are ignored). While a LayoutAnimation with `delete` is armed, `removeChild` keeps the child as a fading ghost (see "LayoutAnimation") |
+| `configureLayoutAnimation(config)` | arms a LayoutAnimation (`{duration, create, update, delete}`) for the layout pass after the commit in progress; `@jsui/react` calls it from `prepareForCommit` after `LayoutAnimation.configureNext` |
 | `destroyNode(id)` | free a detached subtree |
 | `measure(id) → {x, y, width, height, pageX, pageY}` | layout of a node (synchronous; runs a pending layout first). `null` for unknown ids |
 | `focus(id)`, `blur(id)` | `InputManager::focus` / `blur` |
@@ -418,6 +421,48 @@ node's paint version; `updateDamage()` then damages just the caret's old
 and new rects (`text::inputCaretDamage`), so `jsui_needs_redraw()` turns
 true twice a second while an input is focused and each such frame repaints
 a few pixels.
+
+## LayoutAnimation
+
+`LayoutAnimation.configureNext(config, onEnd)` (and the `easeInEaseOut` /
+`linear` / `spring` presets, `LayoutAnimation.create`) works like React
+Native: `@jsui/react` arms the config natively at the start of the next
+commit (`configureLayoutAnimation`), and the layout pass after that commit
+animates (`src/core/layout_animation.cpp`); the runtime disarms at the end of
+the tick, so the config never leaks into a later commit.
+
+* `update`: every node whose parent-relative frame changed moves / resizes
+  from the frame it was drawn at to its new layout. Painting and hit testing
+  use the in-between frame (`Node::visualRect()`); `measure()` and
+  `onLayout` report the final layout at once, like RN. The target is read
+  live, so a relayout during the animation retargets it.
+* `create`: the root of each inserted subtree fades in (`opacity`) or grows
+  from its center (`scaleX`, `scaleY`, `scaleXY`).
+* `delete`: a child removed while armed becomes a ghost of its old parent:
+  out of layout and hit testing (siblings reflow at once, animated by
+  `update`), painted below the live children at its last frame while it
+  fades / shrinks out, then freed (React's `destroyNode` is deferred until
+  then; re-inserting it revives it).
+* Types: `linear`, `easeInEaseOut`, `easeIn`, `easeOut` (CSS cubic-beziers),
+  `keyboard`, `spring` (`springDamping` is the damping ratio; it settles
+  within the duration). Per-type `duration` and `delay` override the
+  config's `duration`. `onEnd` runs after the longest duration.
+
+## Pressables
+
+`Pressable`, the Touchables and `Text` share one press state machine
+(`packages/react/src/components/usePress.js`) that follows RN's
+Pressability: `onPressIn` / `onPressOut` / `onPress` / `onLongPress`
+(`delayLongPress`), `delayPressIn` (`unstable_pressDelay`), `delayPressOut`
+and `minPressDuration` (130 ms: a quick tap or a gamepad A press fires
+`onPressIn`, `onPress`, and `onPressOut` once the press lasted 130 ms, so
+pressed feedback is always visible), `onHoverIn` / `onHoverOut` from native
+`pointerenter` / `pointerleave` with `delayHoverIn` / `delayHoverOut` (a
+visit shorter than `delayHoverIn` fires neither), and `onFocus` / `onBlur`.
+Style and children functions receive `{pressed, hovered, focused}` (the
+react-native-web shape; hover and focus update immediately). Keyboard
+Enter / Space and gamepad A activate the focused pressable; `disabled`
+pressables are neither focusable nor pressable and ignore hover.
 
 ## Styles
 
