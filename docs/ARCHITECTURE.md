@@ -100,21 +100,57 @@ Native globals (installed by `JsEngine`):
 | Global | Meaning |
 | --- | --- |
 | `__jsui_native.rootId` | id of the root container node |
+| `__jsui_native.devMode` | `true` when the runtime runs with `cfg.dev_mode` |
 | `createNode(type) → id` | `type` ∈ `View`, `Text`, `RawText`, `Image`, `ScrollView`, `TextInput` |
 | `setProps(id, props)` | replaces all props; `props.style` is a **flattened** style object; functions are dropped; `props.__events` lists event names the element listens to (e.g. `["press","pointerMove","layout"]`) |
+| `patchStyle(id, partialStyle)` | animation fast path: merges keys into the node's current `props.style` (a `null`/`undefined` value removes the key), keeps all other props, and reapplies via `Node::setProps` (which skips relayout when only paint keys such as `transform`, `opacity`, colors changed). Use it per frame from `requestAnimationFrame` instead of re-rendering through React. |
 | `setText(id, string)` | content of a `RawText` |
-| `appendChild(p, c)`, `insertBefore(p, c, before)`, `removeChild(p, c)` | tree edits (React semantics) |
+| `appendChild(p, c)`, `insertBefore(p, c, before)`, `removeChild(p, c)` | tree edits (React semantics; unknown ids and cycles are ignored) |
 | `destroyNode(id)` | free a detached subtree |
-| `measure(id) → {x, y, width, height, pageX, pageY}` | layout of a node |
-| `focus(id)`, `blur(id)`, `scrollTo(id, x, y, animated)` | imperative methods |
-| `postMessage(name, json)` | to the embedder's `on_message` |
-| `loadFont(family, url, weight, italic) → Promise` | register a font from a URL |
-| `reload()` | dev mode: reload the bundle |
+| `measure(id) → {x, y, width, height, pageX, pageY}` | layout of a node (synchronous; runs a pending layout first). `null` for unknown ids |
+| `focus(id)`, `blur(id)` | `InputManager::focus` / `blur` |
+| `scrollTo(id, x, y, animated)` | `InputManager::scrollTo` (clamped, dispatches `scroll`); `animated` is accepted but the jump is immediate |
+| `postMessage(name, json)` | to the embedder's `on_message`. A string is passed through as the JSON text; any other value is `JSON.stringify`-ed |
+| `loadFont(family, url, weight, italic) → Promise<true>` | load via the resource loader (URL relative to the bundle), register with the FontManager, relayout text; rejects with an `Error` on 404 / bad font data |
+| `reload()` | reload the bundle at the start of the next tick (safe from inside JS) |
 
-Standard globals: `console`, `setTimeout`/`setInterval` (+ clear),
-`requestAnimationFrame`/`cancelAnimationFrame`, `queueMicrotask`,
-`performance.now()`, `fetch` (`Response.text/json/arrayBuffer`, `Headers`),
-`TextEncoder`/`TextDecoder`, `URL` (basic), `globalThis.window = globalThis`.
+Standard globals (`src/js/prelude.cpp` + `host_api.cpp`):
+
+* `console.log/info/debug/warn/error/trace/assert/dir/table/group*/time*/count*`
+  with Node-style `%s %d %i %f %o %O %j %c` substitution and object
+  inspection (cycles, Map/Set, Errors with stack). Levels map to `JsuiLogFn`.
+* `setTimeout`/`setInterval` (+ extra args, clear), `setImmediate`,
+  `requestAnimationFrame(ts)`/`cancelAnimationFrame`, `queueMicrotask`,
+  `MessageChannel`/`MessagePort` (a posted message is a zero-delay timer, which
+  is what React's scheduler uses). Timers run in due-time then FIFO order;
+  zero-delay timers queued by callbacks run in later passes of the same tick
+  (at most 8 passes, so a self-rescheduling timer cannot starve a frame).
+* `performance.now()` is the **runtime clock** (the `now_ms` the embedder
+  passes to `jsui_tick`), the same timeline as rAF timestamps and timers, so
+  headless renders are deterministic. `Date.now()` stays wall-clock.
+* `fetch(input, {method, headers, body, signal, timeout})` → `Response`
+  (`ok/status/statusText/url/redirected/headers`, `text()/json()/arrayBuffer()/bytes()`,
+  `clone()`), `Headers`, `Request`, `Response.json/error/redirect`. Bodies:
+  string, `ArrayBuffer`/views, `URLSearchParams`. Network errors reject with
+  `TypeError`; HTTP errors resolve with `ok === false`; aborts reject with
+  `AbortError`. URLs resolve against the bundle URL.
+* `TextEncoder`/`TextDecoder` (UTF-8 only; `fatal`, `ignoreBOM`, `stream`),
+  `URL`/`URLSearchParams` (WHATWG subset), `AbortController`/`AbortSignal`
+  (`timeout`, `any`), `Event`/`CustomEvent`/`EventTarget`, `DOMException`,
+  `structuredClone`, `atob`/`btoa`, `reportError`, `crypto.getRandomValues`
+  / `randomUUID` (not cryptographically secure), `navigator`, `location`
+  (bundle URL), `process.env.NODE_ENV`, `globalThis.window = globalThis.self = globalThis`.
+  React 19 + react-reconciler run unmodified (dev and prod builds).
+
+Engine limits (`JsuiConfig`): `js_memory_limit_mb` (default 256),
+`js_stack_size_kb` (1024) and `js_timeout_ms` (5000; negative disables). The
+watchdog interrupts any single native→JS call (eval, a timer, a frame
+callback, an event, the microtask drain after it) that runs longer than the
+budget and reports "Script timed out"; the engine keeps working afterwards.
+Uncaught exceptions and unhandled promise rejections (checked once the
+microtask queue drains) are reported via `JsuiLogFn` and `jsui_last_error()`
+with the stack. `onLayout` events raised while JS is on the stack (e.g. by
+`measure`) are queued and delivered when it unwinds.
 
 Callbacks the bundle installs (all optional):
 
@@ -225,6 +261,12 @@ The default font is Inter (bundled); `fontFamily` falls back to it.
 
 * Native: `cmake -S . -B build -G Ninja && cmake --build build`. Dependencies
   are fetched at configure time (QuickJS-ng, Yoga via git; Skia prebuilt zip).
+  `tools/jsui-viewer` downloads SDL 2.30.12 (SHA-256 checked) and links it
+  statically; `-DJSUI_BUILD_VIEWER=OFF` skips it, `-DJSUI_SDL_DIR=` uses a
+  local SDL2 source tree, and a failed download only skips the viewer.
+  `jsui-viewer [--dev] [--width W --height H] <bundle path or URL>`; F5
+  reloads; `--frames N --screenshot out.png` runs headless
+  (`SDL_VIDEODRIVER=dummy`).
 * WASM: `scripts/build-skia-wasm.sh` (once), then `emcmake cmake -S . -B build-wasm`.
   The `web/` host loads `jsui.wasm`, forwards DOM input, blits frames to a canvas.
 * JS: `npm install` at the repo root (npm workspaces), `npx jsui build app.jsx`
@@ -234,9 +276,35 @@ The default font is Inter (bundled); `fontFamily` falls back to it.
 
 `jsui dev app.jsx` rebuilds on change and serves `http://localhost:5173/bundle.js`.
 Point any host at it (`jsui-viewer --dev http://localhost:5173/bundle.js`, or
-`cfg.dev_mode = 1` + `jsui_load_bundle_url`). In dev mode the runtime long-polls
-`/__jsui/version` on the bundle's origin and reloads when it changes; JS errors
-are shown in an on-screen overlay instead of a blank frame.
+`cfg.dev_mode = 1` + `jsui_load_bundle_url`).
+
+* **Version endpoint.** When the bundle came from `http://host:port/...`, the
+  runtime GETs `http://host:port/__jsui/version` every ~500 ms (2 s while the
+  server is unreachable). The response body is an opaque version token
+  (whitespace trimmed); any change means "the bundle changed" and triggers
+  `reload()`. The server should answer immediately (no long-poll needed); a
+  bundle response may carry `X-Jsui-Version: <token>` so a rebuild between
+  the bundle download and the first poll is not missed.
+* **Reload** tears down the JS context, the Document, in-flight loads and the
+  image cache, then reloads the bundle URL. The last good frame (recorded as
+  an `SkPicture` before teardown) stays on screen until the new bundle renders,
+  and keeps showing if the new bundle throws.
+* **Error overlay.** While `jsui_last_error()` is set, a red-tinted panel with
+  the message and stack (monospace) is painted over the frame. Escape
+  (`jsui_send_key`) dismisses it; the next successful load clears it.
+
+## Resource loading
+
+`ResourceLoader` (`src/platform/loader.*`) serves the bundle, `fetch`, images
+and fonts. `data:` URIs (base64 and percent-encoded) are decoded inline on
+every platform; files and `http://` go to an on-demand pool of up to 4 worker
+threads; completions are delivered on the runtime thread in `jsui_tick`.
+`src/net/http_client.*` is a minimal HTTP/1.1 client for dev / LAN asset
+servers: Content-Length, chunked and read-until-close bodies, up to 5
+redirects, a 30 s default timeout, cooperative cancellation, no TLS
+(`https://` fails with status 0 and a clear error unless the embedder installs
+a `JsuiLoadFn`). An embedder loader only sees the URL (GET semantics).
+`jsui_pending_loads()` lets headless hosts wait for in-flight loads.
 
 ## Reference tests
 

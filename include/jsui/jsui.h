@@ -134,6 +134,9 @@ JSUI_API void jsui_set_viewport(JsuiRuntime* rt, int width, int height, float pi
 /* Advance time to `now_ms` (monotonic). Runs due timers, resolves loaded
  * resources, runs requestAnimationFrame callbacks, microtasks and layout. */
 JSUI_API void jsui_tick(JsuiRuntime* rt, double now_ms);
+/* Number of resource loads (bundle, fetch, images, fonts) still in flight.
+ * Headless hosts keep ticking until this reaches 0 before capturing. */
+JSUI_API int jsui_pending_loads(JsuiRuntime* rt);
 /* Non-zero when the last tick changed what would be painted. */
 JSUI_API int jsui_needs_redraw(JsuiRuntime* rt);
 /* Paint into a caller-owned RGBA8888 premultiplied buffer of

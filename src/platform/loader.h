@@ -70,6 +70,7 @@ class ResourceLoader {
   // Drops callbacks of in-flight requests (on reload / destroy).
   void cancelAll();
   bool busy() const;
+  size_t pending() const { return pending_.size(); }
 
   // Decodes a data: URI (base64 or percent-encoded). Exposed for tests.
   static bool decodeDataUri(const std::string& uri, Resource* out);

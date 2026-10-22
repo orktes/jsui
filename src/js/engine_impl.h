@@ -85,6 +85,11 @@ struct JsEngine::Impl {
   };
   std::vector<LayoutEvt> layoutQueue, layoutScratch;
 
+  // Property-name cache for the props/style bridge (atom -> UTF-8 key).
+  // Atoms are dup'ed while cached; bounded so arbitrary keys cannot grow it.
+  std::unordered_map<JSAtom, std::string> atomNames;
+  const std::string* atomName(JSAtom atom);
+
   // Cached atoms for hot callbacks.
   JSAtom atomDispatch = 0, atomHostMessage = 0, atomOnLayout = 0;
 

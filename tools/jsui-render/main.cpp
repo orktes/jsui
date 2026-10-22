@@ -5,12 +5,14 @@
 //
 // Time is simulated: the runtime is ticked in 16ms steps until --wait-ms has
 // elapsed and there are no in-flight resource loads (images, fonts, fetch).
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "jsui/jsui.h"
@@ -77,8 +79,22 @@ int main(int argc, char** argv) {
   }
 
   jsui_load_bundle_url(rt, bundle.c_str());
+  // Loads complete on worker threads: wait (simulated time standing still)
+  // until they have landed, bounded by 10 s of real time.
   double t = 0;
-  for (int i = 0; t <= waitMs || i < 2; i++, t += 16) jsui_tick(rt, t);
+  auto settle = [&] {
+    for (int round = 0; round < 1000 && jsui_pending_loads(rt) > 0; round++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      jsui_tick(rt, t);
+    }
+  };
+  jsui_tick(rt, t);
+  settle();  // the bundle
+  for (int i = 0; t <= waitMs || i < 2; i++, t += 16) {
+    jsui_tick(rt, t);
+    if (jsui_pending_loads(rt) > 0) settle();  // images, fonts, fetch()
+  }
+  for (int i = 0; i < 2; i++, t += 16) jsui_tick(rt, t);
 
   int status = 0;
   if (const char* err = jsui_last_error(rt)) {

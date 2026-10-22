@@ -90,8 +90,10 @@ TEST(host_globals_smoke_bundle) {
   for (auto& f : r["failures"].asArray()) std::fprintf(stderr, "    smoke failure: %s\n", f.asString().c_str());
   CHECK_EQ(r["failures"].asArray().size(), size_t(0));
   CHECK(r["passed"].asNumber() > 60);
-  for (auto& e : h.errors) std::fprintf(stderr, "    unexpected error: %s\n", e.c_str());
-  CHECK(h.errors.size() == 1);  // the deliberate console.error in the bundle
+  // Only the deliberate console.error('Warning: %s%s', ...) of the bundle.
+  for (auto& e : h.errors)
+    if (e.rfind("Warning: Each child", 0) != 0) std::fprintf(stderr, "    unexpected error: %s\n", e.c_str());
+  CHECK(h.errors.size() == 1);
   bool formatted = false;
   for (auto& l : h.logs)
     if (l == "smoke: bob is 42.9 years and { a: [ 1, 2 ] } extra") formatted = true;
@@ -505,3 +507,68 @@ TEST(host_dev_reload_on_version_change) {
 }
 
 #endif  // _WIN32
+
+// Prints engine overhead numbers (not a pass/fail benchmark; sanity bounds only).
+TEST(perf_engine_overhead) {
+  using Clock = std::chrono::steady_clock;
+  Host h([](JsuiConfig& c) {
+    c.width = 1920;
+    c.height = 1080;
+  });
+  h.load(R"(
+    const n = __jsui_native;
+    globalThis.ids = [];
+    for (let i = 0; i < 200; i++) {
+      const v = n.createNode('View');
+      n.setProps(v, {style: {position: 'absolute', width: 40, height: 40, backgroundColor: '#336699',
+                              borderRadius: 4, opacity: 1, transform: [{translateX: 0}, {scale: 1}]}});
+      n.appendChild(n.rootId, v);
+      ids.push(v);
+    }
+    globalThis.animate = false;
+    function frame(ts) {
+      if (animate) for (let i = 0; i < ids.length; i++)
+        n.patchStyle(ids[i], {opacity: 0.5 + 0.5 * Math.sin(ts / 300 + i), transform: [{translateX: (ts + i) % 100}, {scale: 1}]});
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+    globalThis.bulk = () => {
+      for (let i = 0; i < ids.length; i++)
+        n.setProps(ids[i], {style: {position: 'absolute', left: i, top: 3, width: 40, height: 40, backgroundColor: '#336699',
+          borderRadius: 4, opacity: 1, borderWidth: 1, borderColor: '#fff', transform: [{translateX: i}]}, __events: ['press']});
+    };
+  )");
+  h.tick(5);
+  auto bench = [&](int frames) {
+    auto t0 = Clock::now();
+    for (int i = 0; i < frames; i++) h.tick();
+    return std::chrono::duration<double, std::micro>(Clock::now() - t0).count() / frames;
+  };
+  double idle = bench(2000);
+  h.load("animate = true;");
+  double anim = bench(500);
+  h.load("animate = false;");
+  auto t0 = Clock::now();
+  for (int i = 0; i < 100; i++)
+    h.load("for (let i = 0; i < ids.length; i++) __jsui_native.patchStyle(ids[i], {opacity: 0.5, transform: [{translateX: i}, {scale: 1}]});");
+  double patchOnly = std::chrono::duration<double, std::micro>(Clock::now() - t0).count() / 100;
+  t0 = Clock::now();
+  for (int i = 0; i < 100; i++) h.load("bulk();");
+  double bulk = std::chrono::duration<double, std::micro>(Clock::now() - t0).count() / 100;
+  std::printf("  perf: tick idle (rAF loop, 200 nodes) %.2f us; tick with 200 patchStyle/frame %.1f us; "
+              "200 patchStyle without tick %.1f us; 200 setProps (10 keys) %.1f us\n", idle, anim, patchOnly, bulk);
+  CHECK(idle < 2000);
+  CHECK(h.errors.empty());
+}
+
+TEST(host_multiple_runtimes_are_independent) {
+  Host a, b;
+  a.load("globalThis.x = 'a'; setTimeout(() => __jsui_native.postMessage('who', x), 10);");
+  b.load("globalThis.x = 'b'; setTimeout(() => __jsui_native.postMessage('who', x), 10);");
+  a.tick();
+  b.tick();
+  CHECK(a.message("who") && *a.message("who") == "a");
+  CHECK(b.message("who") && *b.message("who") == "b");
+  CHECK_EQ(a.messages.size(), size_t(1));
+  CHECK_EQ(b.messages.size(), size_t(1));
+}

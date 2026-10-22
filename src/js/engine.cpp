@@ -94,14 +94,8 @@ Value toValue(JSContext* ctx, JSValueConst v, int depth) {
         if (JS_IsException(e)) {
           JS_FreeValue(ctx, JS_GetException(ctx));  // throwing getter: skip the key
         } else if (!JS_IsUndefined(e) && !JS_IsFunction(ctx, e)) {
-          size_t klen = 0;
-          JSValue ks = JS_AtomToString(ctx, props[i].atom);
-          const char* k = JS_ToCStringLen(ctx, &klen, ks);
-          if (k) {
-            obj.insert_or_assign(std::string(k, klen), toValue(ctx, e, depth + 1));
-            JS_FreeCString(ctx, k);
-          }
-          JS_FreeValue(ctx, ks);
+          if (const std::string* k = implOf(ctx).atomName(props[i].atom))
+            obj.insert_or_assign(*k, toValue(ctx, e, depth + 1));
         }
         JS_FreeValue(ctx, e);
       }
@@ -178,6 +172,25 @@ bool bytesOf(JSContext* ctx, JSValueConst v, std::vector<uint8_t>* out) {
   if (!p || offset + bytes > size) return bytes == 0;
   out->assign(p + offset, p + offset + bytes);
   return true;
+}
+
+const std::string* JsEngine::Impl::atomName(JSAtom atom) {
+  auto it = atomNames.find(atom);
+  if (it != atomNames.end()) return &it->second;
+  size_t len = 0;
+  const char* k = JS_AtomToCStringLen(ctx, &len, atom);
+  if (!k) {
+    JS_FreeValue(ctx, JS_GetException(ctx));
+    return nullptr;
+  }
+  if (atomNames.size() >= 4096) {  // pathological key churn: start over
+    for (auto& [a, name] : atomNames) JS_FreeAtom(ctx, a);
+    atomNames.clear();
+  }
+  auto& slot = atomNames[JS_DupAtom(ctx, atom)];
+  slot.assign(k, len);
+  JS_FreeCString(ctx, k);
+  return &slot;
 }
 
 // ------------------------------------------------- entry bookkeeping
@@ -469,6 +482,8 @@ JsEngine::~JsEngine() {
     JS_FreeValue(ctx, r.reason);
   }
   impl.rejections.clear();
+  for (auto& [a, name] : impl.atomNames) JS_FreeAtom(ctx, a);
+  impl.atomNames.clear();
   JS_FreeAtom(ctx, impl.atomDispatch);
   JS_FreeAtom(ctx, impl.atomHostMessage);
   JS_FreeAtom(ctx, impl.atomOnLayout);

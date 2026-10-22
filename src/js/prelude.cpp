@@ -194,6 +194,8 @@ R"JSUI((function (host) {
     clear: () => {},
   };
   define(G, 'console', console);
+  // Deeper stacks in dev builds (React frames are deep); QuickJS defaults to 10.
+  if (host.devMode && typeof Error.stackTraceLimit === 'number') Error.stackTraceLimit = 50;
 
   // reportError(e): what React 19 calls for uncaught render errors.
   define(G, 'reportError', function reportError(e) { host.reportError(e, 'Uncaught '); });

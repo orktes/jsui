@@ -8,6 +8,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(JSUI_BUILD_TOOLS "Build jsui-render and the viewer" ON)
 option(JSUI_BUILD_TESTS "Build native tests" ON)
+option(JSUI_BUILD_VIEWER "Build tools/jsui-viewer (downloads and builds SDL2)" ON)
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 include(Deps)
@@ -21,6 +22,9 @@ target_compile_definitions(jsui PRIVATE JSUI_BUILDING)
 if(JSUI_BUILD_TOOLS AND NOT EMSCRIPTEN)
   add_executable(jsui-render tools/jsui-render/main.cpp)
   target_link_libraries(jsui-render PRIVATE jsui)
+  if(JSUI_BUILD_VIEWER)
+    add_subdirectory(tools/jsui-viewer)
+  endif()
 endif()
 
 if(JSUI_BUILD_TESTS AND NOT EMSCRIPTEN)

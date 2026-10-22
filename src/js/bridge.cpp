@@ -46,19 +46,18 @@ JSValue js_patchStyle(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
   if (JS_GetOwnPropertyNames(ctx, &keys, &count, argv[1], JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) != 0) return JS_EXCEPTION;
   bool changed = false;
   for (uint32_t i = 0; i < count; i++) {
-    const char* k = JS_AtomToCString(ctx, keys[i].atom);
+    const std::string* k = implOf(ctx).atomName(keys[i].atom);
     JSValue v = JS_GetProperty(ctx, argv[1], keys[i].atom);
     if (k && !JS_IsException(v)) {
       if (JS_IsUndefined(v) || JS_IsNull(v)) {
-        changed |= style.erase(k) > 0;
+        changed |= style.erase(*k) > 0;
       } else {
-        style.insert_or_assign(k, toValue(ctx, v));
+        style.insert_or_assign(*k, toValue(ctx, v));
         changed = true;
       }
     }
     if (JS_IsException(v)) JS_FreeValue(ctx, JS_GetException(ctx));
     JS_FreeValue(ctx, v);
-    if (k) JS_FreeCString(ctx, k);
   }
   JS_FreePropertyEnum(ctx, keys, count);
   if (changed) {
