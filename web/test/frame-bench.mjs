@@ -71,24 +71,30 @@ for (const renderer of RENDERERS) {
       else j._gl?.finish();
     };
     let t = performance.now();
-    const times = [];
+    const times = [], cpu = [];
     const r0 = j.stats.renders;
     for (let i = 0; i < n + 20; i++) {
       t += 16.67;
       const a = performance.now();
       j.frame(t);
+      const b = performance.now();
       await sync();
-      if (i >= 20) times.push(performance.now() - a);  // after warm-up
+      if (i >= 20) {  // after warm-up
+        times.push(performance.now() - a);
+        cpu.push(b - a);
+      }
     }
     const renders = j.stats.renders - r0;
     const name = j.renderer;
     j.destroy();
-    return { times, renders, name };
+    return { times, cpu, renders, name };
   }, { renderer, dist: DIST, w: W, h: H, n: N });
   const s = [...r.times].sort((a, b) => a - b);
-  const mean = r.times.reduce((a, b) => a + b, 0) / r.times.length;
+  const avg = (a) => a.reduce((x, y) => x + y, 0) / a.length;
+  const mean = avg(r.times);
   console.log(`  ${renderer.padEnd(7)} (${r.name.padEnd(10)}) mean ${mean.toFixed(2)} ms, p50 ${s[s.length >> 1].toFixed(2)}, ` +
-    `p95 ${s[Math.floor(s.length * 0.95)].toFixed(2)}, ${r.renders} repaints / ${N + 20} frames`);
+    `p95 ${s[Math.floor(s.length * 0.95)].toFixed(2)} (main thread ${avg(r.cpu).toFixed(2)}), ` +
+    `${r.renders} repaints / ${N + 20} frames`);
   await context.close();
 }
 await browser.close();
