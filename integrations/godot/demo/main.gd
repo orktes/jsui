@@ -16,6 +16,9 @@ extends Control
 ##                       unhandled click, plus a call_ui. Prints PASS / FAIL
 ##                       per check and fails the run on any FAIL
 ##
+## Scene: world/world.tscn renders live 3D behind the view; `godot.scene`
+## (shared state) tells the UI to leave its backdrop out so the scene shows.
+##
 ## Game data: `godot.stats` and `player` are shared state (set_state, also
 ## before the UI starts; the showcase's profile chip reads `player`),
 ## `godot.ping` a call from the UI (call_requested -> resolve_call, which pays
@@ -78,6 +81,7 @@ func _enter_tree() -> void:
 	# its first frame.
 	view.set_state("godot.stats", _stats())
 	view.set_state("player", _player)
+	view.set_state("godot.scene", true)
 
 
 func _ready() -> void:
