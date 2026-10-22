@@ -417,7 +417,14 @@ JsEngine::JsEngine(Runtime& rt) : impl_(std::make_unique<Impl>(rt)) {
   impl.jrt = JS_NewRuntime();
   JS_SetRuntimeOpaque(impl.jrt, &impl);
   JS_SetMemoryLimit(impl.jrt, size_t(cfg.js_memory_limit_mb > 0 ? cfg.js_memory_limit_mb : 256) << 20);
-  JS_SetMaxStackSize(impl.jrt, size_t(cfg.js_stack_size_kb > 0 ? cfg.js_stack_size_kb : 1024) << 10);
+  // Windows threads default to a 1 MB stack, so the JS limit must leave room
+  // for the native frames below and above it or recursion overflows for real.
+#ifdef _WIN32
+  constexpr int kDefaultStackKb = 512;
+#else
+  constexpr int kDefaultStackKb = 1024;
+#endif
+  JS_SetMaxStackSize(impl.jrt, size_t(cfg.js_stack_size_kb > 0 ? cfg.js_stack_size_kb : kDefaultStackKb) << 10);
   JS_SetInterruptHandler(impl.jrt, interruptHandler, &impl);
   JS_SetHostPromiseRejectionTracker(impl.jrt, rejectionTracker, &impl);
   impl.ctx = JS_NewContext(impl.jrt);
