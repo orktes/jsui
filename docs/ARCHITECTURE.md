@@ -177,14 +177,20 @@ jsui_render_gl_target(rt, gpu, &t);
   `web/dist-webgl/jsui.{js,wasm}`; the default WASM build stays CPU-only and
   its `jsui_gpu_*` entry points return failure.
 * **Viewer / web.** `jsui-viewer --gpu` renders into the SDL GL window's
-  default framebuffer (`--screenshot` reads it back). In the browser,
+  default framebuffer (`--screenshot` reads it back, and fails if the frame
+  is blank). On macOS it asks SDL for a 3.2 core, forward-compatible
+  profile (`--gl-core`, default there): the default legacy 2.1 context only
+  has GLSL 1.20, which Skia's shaders cannot use (`gl_VertexID`). Ganesh
+  detects core profiles (`GL_CONTEXT_PROFILE_MASK`) and binds its own vertex
+  array object, since core profiles have no default one. In the browser,
   `createJsui({ canvas, renderer: 'gpu', moduleUrl: '.../dist-webgl/jsui.js' })`
   registers the canvas' WebGL context with emscripten and draws through
   Skia; without a GPU module it falls back to the CPU raster + WebGL blit.
 * **Tests.** `tests/native/gpu_test.cpp` makes an EGL context (Mesa's
-  surfaceless platform / llvmpipe works headless), on desktop GL, GLES 3 and
-  GLES 2, renders scenes through the GPU path and compares with the CPU
-  output; without EGL it prints SKIP (`JSUI_GPU_TEST_REQUIRE=1`, set in CI,
+  surfaceless platform / llvmpipe works headless), on desktop GL, a 3.2 core
+  profile (as on macOS), GLES 3 and GLES 2, or on macOS a headless CGL 3.2
+  core context, renders scenes through the GPU path and compares with the
+  CPU output; without a context it prints SKIP (`JSUI_GPU_TEST_REQUIRE=1`, set in CI,
   makes that a failure). `JSUI_WEB_DIST=dist-webgl node web/test/browser.test.mjs`
   runs the browser tests against the GPU module, including GPU-vs-CPU pixel
   comparisons.
@@ -574,7 +580,7 @@ The default font is Inter (bundled); `fontFamily` falls back to it.
   `tools/jsui-viewer` downloads SDL 2.30.12 (SHA-256 checked) and links it
   statically; `-DJSUI_BUILD_VIEWER=OFF` skips it, `-DJSUI_SDL_DIR=` uses a
   local SDL2 source tree, and a failed download only skips the viewer.
-  `jsui-viewer [--dev] [--gpu] [--width W --height H] <bundle path or URL>`; F5
+  `jsui-viewer [--dev] [--gpu [--gl-core]] [--width W --height H] <bundle path or URL>`; F5
   reloads; `--frames N --screenshot out.png` runs headless
   (`SDL_VIDEODRIVER=dummy`; `--gpu` needs a GL-capable display, e.g. `xvfb-run`
   with Mesa). `-DJSUI_GPU=OFF` builds without the GPU backend.

@@ -123,6 +123,12 @@ jobs:
             --frames 10 --screenshot bands-gpu.png web/test/fixtures/bands.js | tee viewer-gpu.log
           grep -q '^GPU: ' viewer-gpu.log  # not the CPU fallback
           test -s bands-gpu.png
+      - name: Viewer GPU smoke, 3.2 core profile (the macOS context setup)
+        run: |
+          xvfb-run -a -s "-screen 0 1280x1024x24" ./build/tools/jsui-viewer/jsui-viewer --gpu --gl-core --width 320 --height 200 \
+            --frames 10 --screenshot bands-gpu-core.png web/test/fixtures/bands.js | tee viewer-gpu-core.log
+          grep -q '^GPU: .*Core Profile' viewer-gpu-core.log
+          test -s bands-gpu-core.png
       - uses: actions/upload-artifact@v4
         with:
           name: jsui-render-linux
@@ -130,6 +136,7 @@ jobs:
             build/jsui-render
             bands.png
             bands-gpu.png
+            bands-gpu-core.png
 
   # ------------------------------------------------- Godot GDExtension (Linux)
   godot:
@@ -392,7 +399,18 @@ jobs:
         run: cmake --build build --config Release -j 4
       - name: Native tests (macOS)
         if: runner.os == 'macOS'
+        # gpu_test makes a headless CGL 3.2 core context (Apple's software
+        # renderer if there is no GPU); require it so GPU cases cannot SKIP.
+        env:
+          JSUI_GPU_TEST_REQUIRE: 1
         run: ./build/jsui-tests
+      - name: Viewer GPU smoke (macOS, SDL + 3.2 core profile)
+        if: runner.os == 'macOS'
+        run: |
+          ./build/tools/jsui-viewer/jsui-viewer --gpu --width 320 --height 200 \
+            --frames 10 --screenshot bands-gpu.png web/test/fixtures/bands.js | tee viewer-gpu.log
+          grep -q '^GPU: ' viewer-gpu.log  # not the CPU fallback
+          test -s bands-gpu.png
       - name: Native tests (Windows)
         if: runner.os == 'Windows'
         run: ./build/Release/jsui-tests.exe
