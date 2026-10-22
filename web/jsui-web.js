@@ -149,15 +149,17 @@ async function loadModuleFor(opts, webgpu) {
   const order = gpu ? [GPU_MODULE, CPU_MODULE] : [CPU_MODULE, GPU_MODULE];
   if (webgpu) order.unshift(ALL_MODULE);
   else order.push(ALL_MODULE);
-  let first;
+  const errors = [];
   for (const m of order) {
     try {
       return await loadModule(new URL(m, opts.moduleBase ?? import.meta.url));
     } catch (e) {
-      first ??= e;
+      errors.push(`${m}: ${e?.message ?? e}`);
     }
   }
-  throw first;
+  // Name every module tried: browsers such as Safari report a failed import
+  // as just "Importing a module script failed".
+  throw new Error('could not load a JSUI module (' + errors.join('; ') + ')');
 }
 
 const webglProbe = {};
