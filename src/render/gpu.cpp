@@ -23,8 +23,10 @@
 #if defined(__linux__) && !defined(__ANDROID__)
 #define JSUI_GL_DLOPEN 1
 #include <dlfcn.h>
-#else
-#include "include/gpu/gl/GrGLInterface.h"  // GrGLMakeNativeInterface
+#elif defined(__APPLE__)
+#include <dlfcn.h>
+#elif defined(__EMSCRIPTEN__)
+#include <emscripten/html5.h>
 #endif
 
 namespace {
@@ -152,6 +154,15 @@ struct JsuiGpuContext {
       return GrGLMakeAssembledInterface(nullptr, linuxGlxProc);
     return nullptr;
 #else
+    // Skia's native interface queries GL right away: make sure a context is
+    // current (Windows' WGL interface checks this itself).
+#if defined(__APPLE__)
+    using CGLGetCurrent = void* (*)();
+    auto cglCurrent = reinterpret_cast<CGLGetCurrent>(dlsym(RTLD_DEFAULT, "CGLGetCurrentContext"));
+    if (!cglCurrent || !cglCurrent()) return nullptr;
+#elif defined(__EMSCRIPTEN__)
+    if (emscripten_webgl_get_current_context() == 0) return nullptr;
+#endif
     return GrGLMakeNativeInterface();
 #endif
   }

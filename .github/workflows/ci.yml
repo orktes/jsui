@@ -24,7 +24,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ninja-build clang libfontconfig1-dev zlib1g-dev \
-            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libgl1-mesa-dev
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libgl1-mesa-dev \
+            libegl1 libegl-mesa0 libgl1-mesa-dri xvfb xauth
       - name: Cache prebuilt Skia + FetchContent sources
         uses: actions/cache@v4
         with:
@@ -38,15 +39,26 @@ jobs:
       - name: Build
         run: cmake --build build -j "$(nproc)"
       - name: Native tests
+        # Mesa's surfaceless EGL (llvmpipe) gives the GPU tests a real GL
+        # context; require it so a broken setup cannot silently SKIP them.
+        env:
+          JSUI_GPU_TEST_REQUIRE: 1
         run: ./build/jsui-tests
       - name: Render smoke
         run: ./build/jsui-render web/test/fixtures/bands.js -o bands.png --width 320 --height 200
+      - name: Viewer GPU smoke (Xvfb + Mesa GL)
+        run: |
+          xvfb-run -a -s "-screen 0 1280x1024x24" ./build/tools/jsui-viewer/jsui-viewer --gpu --width 320 --height 200 \
+            --frames 10 --screenshot bands-gpu.png web/test/fixtures/bands.js | tee viewer-gpu.log
+          grep -q '^GPU: ' viewer-gpu.log  # not the CPU fallback
+          test -s bands-gpu.png
       - uses: actions/upload-artifact@v4
         with:
           name: jsui-render-linux
           path: |
             build/jsui-render
             bands.png
+            bands-gpu.png
 
   # --------------------------------------------------------------------- wasm
   wasm:
