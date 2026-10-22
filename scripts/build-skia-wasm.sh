@@ -35,10 +35,18 @@
 #                      it can be cached separately from the CPU build. Configure
 #                      JSUI with -DJSUI_SKIA_DIR=<that dir> (scripts/build-wasm.sh
 #                      does this when WEBGL=1).
-#   SKIA_WASM_SIMD=1   build with WebAssembly SIMD (-msimd128); CMake detects it
-#                      from out/args.gn and builds JSUI with SIMD too. Off by
-#                      default: with Skia's wasm SKNX_NO_SIMD it measured no gain
-#                      on raster HUD workloads, and it narrows browser support.
+#   SKIA_WASM_SIMD=0   build without WebAssembly SIMD. On by default: Skia is
+#                      compiled with -msimd128 -msse4.1, and SKNX_NO_SIMD (which
+#                      gn/toolchain/wasm.gni forces on every wasm build) is
+#                      dropped. Without an SSE level, Skia's raster pipeline is
+#                      JUMPER_IS_SCALAR: one pixel per stage call and no lowp
+#                      (16-bit) pipeline, ~10x slower than native SSE2 on
+#                      gradients, image draws and blending. With -msse4.1 it
+#                      uses its SSE4.1 stages (4 px highp, 8 px lowp per call),
+#                      which emscripten maps onto WASM SIMD128 (immintrin.h).
+#                      CMake detects it from out/args.gn and builds JSUI with the
+#                      same flags. Needs WASM SIMD in the browser (Chrome / Edge
+#                      91+, Firefox 89+, Safari 16.4+).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -53,7 +61,7 @@ fi
 EMSDK="${EMSDK:-$ROOT/third_party/emsdk}"
 JOBS="${JOBS:-2}"
 DEBUG="${SKIA_WASM_DEBUG:-0}"
-SIMD="${SKIA_WASM_SIMD:-0}"
+SIMD="${SKIA_WASM_SIMD:-1}"
 
 hash_inputs() { cat "$ROOT/scripts/build-skia-wasm.sh" "$ROOT/scripts/setup-emsdk.sh" | sha256sum | cut -d' ' -f1; }
 STAMP_VALUE="$(hash_inputs)-debug$DEBUG-simd$SIMD-webgl$WEBGL"
@@ -93,6 +101,38 @@ GIT_SYNC_DEPS_PATH="$SKIA_SRC/DEPS.jsui" GIT_SYNC_DEPS_SKIP_EMSDK=1 GIT_SYNC_DEP
   python3 tools/git-sync-deps
 [ -x bin/gn ] || python3 bin/fetch-gn
 
+# SIMD builds patch the checkout (restored first, so the same checkout can
+# build either variant):
+# * SKNX_NO_SIMD is a public define of every wasm build (gn/toolchain/wasm.gni);
+#   drop it.
+# * skcms includes the AVX / AVX-512 intrinsic headers whenever __SSE__ is
+#   defined (for runtime CPU checks that never run off x86-64); emscripten's
+#   SSE emulation only goes up to SSE4.1, so drop those includes.
+# * emscripten's _mm_cvtps_epi32 is scalarised (lrint per lane, "TODO:
+#   optimize" in its emmintrin.h); the raster pipeline rounds every pixel with
+#   it (round() / iround(), e.g. store_8888). Map it to the SIMD128
+#   nearest + saturating truncate (same ties-to-even rounding; only the
+#   out-of-range result differs, which the pipeline never relies on).
+SIMD_PATCHED="gn/toolchain/wasm.gni modules/skcms/skcms.cc modules/skcms/src/skcms_TransformHsw.cc
+  modules/skcms/src/skcms_TransformSkx.cc src/opts/SkRasterPipeline_opts.h"
+# shellcheck disable=SC2086
+git checkout -- $SIMD_PATCHED
+if [ "$SIMD" = "1" ]; then
+  sed -i '/^  "SKNX_NO_SIMD",$/d' gn/toolchain/wasm.gni
+  # shellcheck disable=SC2086
+  sed -i '/#include <avx[0-9a-z]*intrin\.h>/d' $SIMD_PATCHED
+  sed -i 's|^    #include <immintrin.h>$|&\
+    #if defined(__EMSCRIPTEN__) \&\& defined(__wasm_simd128__)  // jsui: see build-skia-wasm.sh\
+        #include <wasm_simd128.h>\
+        #define _mm_cvtps_epi32(v) ((__m128i)wasm_i32x4_trunc_sat_f32x4(wasm_f32x4_nearest((v128_t)(v))))\
+    #endif|' src/opts/SkRasterPipeline_opts.h
+  # shellcheck disable=SC2086
+  if grep -q 'SKNX_NO_SIMD\|#include <avx' $SIMD_PATCHED || ! grep -q wasm_f32x4_nearest src/opts/SkRasterPipeline_opts.h; then
+    echo "SIMD patch failed" >&2
+    exit 1
+  fi
+fi
+
 # ------------------------------------------------------------------ build
 if [ "$DEBUG" = "1" ]; then
   BUILD_DIR="out/jsui-wasm-debug"; IS_DEBUG=true; IS_OFFICIAL=false
@@ -117,7 +157,7 @@ is_debug=$IS_DEBUG
 is_official_build=$IS_OFFICIAL
 is_component_build=false
 werror=false
-$([ "$SIMD" = "1" ] && echo 'extra_cflags=["-msimd128"]' || true)
+$([ "$SIMD" = "1" ] && echo 'extra_cflags=["-msimd128","-msse4.1"]' || true)
 target_cpu=\"wasm\"
 skia_emsdk_dir=\"$EMSDK\"
 
