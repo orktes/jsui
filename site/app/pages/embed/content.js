@@ -413,11 +413,11 @@ const WEB = {
   eyebrow: 'Browser · web/jsui-web.js',
   color: colors.purple,
   title: 'A canvas and one import',
-  lead: 'The WebAssembly build runs the same runtime on a <canvas>. createJsui() forwards DOM input and the Gamepad API, ticks on requestAnimationFrame and blits frames with WebGL, or draws with Skia on WebGL directly. This website is exactly that.',
+  lead: 'The WebAssembly build runs the same runtime on a <canvas>. createJsui() forwards DOM input and the Gamepad API, ticks on requestAnimationFrame and draws with Skia on WebGL2 by default, falling back to the CPU raster (only damaged pixels repainted and uploaded) without hardware WebGL. This website is exactly that.',
   facts: [
-    ['Module', 'web/dist/jsui.{js,wasm}'],
-    ['GPU module', 'web/dist-webgl/'],
-    ['Renderers', "'auto' 'gpu' 'webgl' '2d'"],
+    ['GPU module (default)', 'web/dist-webgl/jsui.{js,wasm}'],
+    ['CPU module', 'web/dist/'],
+    ['Renderers', "'auto' 'gpu' 'cpu' 'webgl' '2d'"],
     ['Instances', 'one module, many runtimes'],
   ],
   blocks: [
@@ -433,7 +433,7 @@ const WEB = {
   const jsui = await createJsui({
     canvas: document.getElementById('ui'),
     bundleUrl: './bundle.js',
-    renderer: 'auto',                 // 'gpu' + moduleUrl: './dist-webgl/jsui.js'
+    renderer: 'auto',                 // Skia on WebGL2; 'cpu' forces the CPU raster
   });
 
   jsui.on('message', (name, data) => {  // Host.postMessage(name, data)
@@ -455,8 +455,8 @@ const WEB = {
             ['bundleUrl / bundleSource', 'Load a bundle by URL, or pass its source.'],
             ['devMode / devPoll', 'Error overlay + live reload (runtime polls http:// origins).'],
             ['pixelRatio', 'Fixed ratio; default tracks window.devicePixelRatio.'],
-            ['moduleUrl', 'Default ./dist/jsui.js next to jsui-web.js.'],
-            ['renderer', "'auto' | 'gpu' | 'webgl' | '2d'."],
+            ['moduleUrl', 'Default ./dist-webgl/jsui.js next to jsui-web.js (./dist/jsui.js without hardware WebGL or when not deployed).'],
+            ['renderer', "'auto' (GPU, CPU fallback) | 'gpu' | 'cpu' | 'webgl' | '2d'."],
             ['autoFocus · gamepads', 'Focus the keyboard sink · poll the Gamepad API (both default true).'],
             ['autoStart · trapTab', 'Start the frame loop · keep Tab inside the UI (both default true).'],
           ],
