@@ -1,0 +1,85 @@
+name: Pages
+
+# Deploys the showcase site (site/) to GitHub Pages. It reuses the WASM
+# modules the CI run on main just built and tested (artifacts 'jsui-wasm' and,
+# when the advisory WebGL job passed, 'jsui-wasm-webgl') instead of compiling
+# Skia and JSUI again, so a deploy takes about a minute.
+#
+# One-time setup: Settings -> Pages -> Build and deployment -> Source: GitHub Actions.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build site
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    steps:
+      - name: Pick the CI run
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "${{ github.event.workflow_run.id }}" ]; then
+            echo "id=${{ github.event.workflow_run.id }}" >> "$GITHUB_OUTPUT"
+            echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+          else
+            gh run list -R "$GITHUB_REPOSITORY" --workflow ci.yml --branch main --event push --status success \
+              --limit 1 --json databaseId,headSha --jq '.[0] | "id=\(.databaseId)\nsha=\(.headSha)"' >> "$GITHUB_OUTPUT"
+          fi
+          cat "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.run.outputs.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: WASM module (CPU)
+        uses: actions/download-artifact@v4
+        with:
+          name: jsui-wasm
+          path: web/dist
+          run-id: ${{ steps.run.outputs.id }}
+          github-token: ${{ github.token }}
+      - name: WASM module (WebGL, optional)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: jsui-wasm-webgl
+          path: web/dist-webgl
+          run-id: ${{ steps.run.outputs.id }}
+          github-token: ${{ github.token }}
+      - name: Build the site
+        run: |
+          npm ci --no-audit --no-fund
+          node site/scripts/build.mjs --out _site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: deploy
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -52,6 +52,7 @@ jobs:
               - *core
               - 'scripts/**'
               - 'web/**'
+              - 'site/**'
             godot:
               - *core
               - 'integrations/godot/**'
@@ -245,6 +246,19 @@ jobs:
         with:
           name: jsui-wasm
           path: web/dist
+      # The showcase site (site/) runs on this module: build it and open every
+      # route in Chromium (no runtime errors, nothing blank).
+      - name: Site (build + smoke test)
+        run: |
+          npm ci --no-audit --no-fund
+          node site/scripts/build.mjs
+          node site/test/smoke.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: site-screenshots
+          path: site/test/output
+          if-no-files-found: ignore
 
   # ------------------------------------------- wasm, GPU variant (advisory)
   # Skia with Ganesh + WebGL (WEBGL=1): its own Skia cache key and output dir
