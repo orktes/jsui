@@ -60,6 +60,50 @@ jobs:
             bands.png
             bands-gpu.png
 
+  # ------------------------------------------------- Godot GDExtension (Linux)
+  godot:
+    name: godot (GDExtension, ubuntu)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build clang libfontconfig1-dev zlib1g-dev python3 unzip
+      - name: Cache prebuilt Skia + FetchContent sources + Godot
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/skia-prebuilt
+            build/_deps/*-src
+            build/_deps/godot
+          key: godot-deps-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'integrations/godot/CMakeLists.txt', 'integrations/godot/smoke-test.sh') }}
+          restore-keys: godot-deps-${{ runner.os }}-
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          -DJSUI_BUILD_TESTS=OFF -DJSUI_BUILD_VIEWER=OFF -DJSUI_BUILD_GODOT=ON
+      - name: Build GDExtension
+        run: cmake --build build -j "$(nproc)" --target jsui_godot
+      - name: Demo bundle
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
+          npx jsui build integrations/godot/demo/ui/app.jsx -o integrations/godot/demo/ui/dist/bundle.js
+      - name: Run the demo in Godot 4.3 (headless) and capture a frame
+        run: integrations/godot/smoke-test.sh build/godot-smoke.png
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jsui-godot-linux
+          path: |
+            integrations/godot/demo/bin/
+            build/godot-smoke.png
+          if-no-files-found: warn
+
   # --------------------------------------------------------------------- wasm
   wasm:
     name: wasm (emscripten + browser)
