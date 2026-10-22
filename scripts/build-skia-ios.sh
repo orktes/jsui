@@ -131,7 +131,6 @@ skia_use_system_libjpeg_turbo=false
 skia_use_system_libpng=false
 skia_use_system_libwebp=false
 skia_use_system_zlib=false
-skia_use_libheif=false
 skia_use_dng_sdk=false
 skia_use_piex=false
 skia_use_lua=false
@@ -141,6 +140,7 @@ skia_enable_svg=false
 skia_enable_skottie=false
 skia_enable_tools=false
 skia_enable_spirv_validation=false
+skia_use_partition_alloc=false
 "
 
 TARGETS="skia skparagraph skshaper skunicode"
@@ -158,6 +158,10 @@ xcode_sysroot=\"$(xcrun --sdk "$sdk" --show-sdk-path)\"
   ARGS="$(echo "$ARGS" | sed '/^$/d' | tr '\n' ' ')"
   echo "[$slice] gn args: $ARGS"
   bin/gn gen "$BUILD_DIR" --args="$ARGS"
+  # Archives are copied by glob below: drop ones a previous Skia version left
+  # behind (m157 turned skunicode into a group; a stale libskunicode.a
+  # duplicates skunicode_icu). Ninja only re-archives the rest.
+  rm -f "$BUILD_DIR"/lib*.a
   # shellcheck disable=SC2086
   ninja -C "$BUILD_DIR" -j "$JOBS" $TARGETS
 
@@ -166,13 +170,16 @@ xcode_sysroot=\"$(xcrun --sdk "$sdk" --show-sdk-path)\"
   mkdir -p "$dest"
   find "$BUILD_DIR" -maxdepth 1 -name 'lib*.a' -exec cp {} "$dest/" \;
   cp "$BUILD_DIR/args.gn" "$dest/args.gn"
-  # Defines dependents get in gn (public configs: SK_GANESH, SK_METAL,
+  # Defines dependents get in gn (public + all-dependent configs: SK_GANESH, SK_METAL,
   # SK_SHAPER_HARFBUZZ_AVAILABLE, ...). They change public headers, so
   # consumers must compile with exactly these.
   : > "$dest/defines.txt"
   for target in //:skia //modules/skshaper:skshaper //modules/skunicode:skunicode //modules/skparagraph:skparagraph; do
-    for config in $(bin/gn desc "$BUILD_DIR" "$target" public_configs); do
-      bin/gn desc "$BUILD_DIR" "$config" defines >> "$dest/defines.txt"
+    for config in $(bin/gn desc "$BUILD_DIR" "$target" public_configs) \
+                  $(bin/gn desc "$BUILD_DIR" "$target" all_dependent_configs); do
+      # (a config without defines makes gn desc print a message and fail)
+      { bin/gn desc "$BUILD_DIR" "$config" defines 2>/dev/null || true; } \
+        | grep -E '^[A-Za-z_][A-Za-z0-9_]*(=.*)?$' >> "$dest/defines.txt" || true
     done
   done
   sort -u -o "$dest/defines.txt" "$dest/defines.txt"

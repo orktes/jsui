@@ -1,5 +1,7 @@
 # JSUI on iOS
 
+![JsuiDemo in the iOS Simulator](../../docs/images/ios-simulator.png)
+
 `JsuiDemo` is a minimal UIKit host: one `MTKView` that renders a JSUI bundle
 with Skia Ganesh on **Metal** (`jsui_render_metal`, straight into the
 drawable), falling back to the CPU rasteriser plus a blit. It forwards

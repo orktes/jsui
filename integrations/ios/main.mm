@@ -109,7 +109,9 @@ struct PadState {
   id<MTLCommandBuffer> _lastCpuFrame;
   int _pixelW, _pixelH;
   float _logicalW, _logicalH, _scale;
-  std::unordered_map<UITouch*, int> _touchIds;
+  // Keyed by address: std::hash can't take an ARC object pointer. UIKit
+  // keeps a UITouch alive (same object) for the whole touch sequence.
+  std::unordered_map<const void*, int> _touchIds;
   int _nextTouchId;
   NSMutableArray<GCController*>* _pads;
   std::vector<PadState> _padStates;
@@ -283,11 +285,12 @@ struct PadState {
 - (void)sendTouches:(NSSet<UITouch*>*)touches event:(UIEvent*)event phase:(int)phase {
   for (UITouch* t in touches) {
     int touchId;
-    auto it = _touchIds.find(t);
+    const void* key = (__bridge const void*)t;
+    auto it = _touchIds.find(key);
     if (it == _touchIds.end()) {
       if (phase != 0) continue;
       touchId = _nextTouchId++;
-      _touchIds[t] = touchId;
+      _touchIds[key] = touchId;
     } else {
       touchId = it->second;
     }
@@ -300,7 +303,7 @@ struct PadState {
       jsui_set_event_time(_rt, s.timestamp * 1000.0);  // same clock as CACurrentMediaTime
       jsui_send_touch(_rt, touchId, phase, float(p.x), float(p.y));
     }
-    if (phase >= 2) _touchIds.erase(t);
+    if (phase >= 2) _touchIds.erase(key);
   }
 }
 
