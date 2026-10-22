@@ -46,10 +46,11 @@ library with a C API, and the same core compiles to WebAssembly.
   skparagraph) and image codecs. Native builds use prebuilt static libraries
   (aseprite/skia m124); WASM uses the same milestone built with
   `scripts/build-skia-wasm.sh`.
-* **CPU raster first.** The runtime paints into an RGBA buffer the embedder
-  uploads as a texture. Deterministic (great for reference tests) and works
-  everywhere. A GPU (Ganesh GL / Graphite) backend can be added behind the
-  same `paintDocument()` call.
+* **CPU raster first, GPU optional.** By default the runtime paints into an
+  RGBA buffer the embedder uploads as a texture. Deterministic (great for
+  reference tests) and works everywhere. The optional GPU backend runs the
+  same `paintDocument()` on a Skia Ganesh surface wrapping the embedder's
+  OpenGL / GLES / WebGL framebuffer or texture (see [GPU backend](#gpu-backend)).
 * **React Native semantics, written as `react-native` imports.** App code
   imports from `'react-native'`; the JSUI bundler aliases that to
   `@jsui/react`, and the Chrome reference build aliases it to
@@ -62,7 +63,7 @@ library with a C API, and the same core compiles to WebAssembly.
 | --- | --- |
 | `include/jsui/jsui.h` | Public C API (embedding, input, resources, messages) |
 | `src/core/` | `Value`, `Node`, `Document`, style parsing (`style.cpp`) |
-| `src/render/` | Skia painter, image cache |
+| `src/render/` | Skia painter, image cache, GPU backend (`gpu.cpp`) |
 | `src/text/` | Font manager, paragraph building and Yoga measure for `Text` |
 | `src/js/` | QuickJS host (`JsEngine`) and bridge globals |
 | `src/input/` | Hit testing, event routing, focus and gamepad navigation |
@@ -88,10 +89,89 @@ The embedder owns the loop (see `jsui.h`):
 2. `jsui_tick(now)`: deliver finished resource loads, run due timers, run
    `requestAnimationFrame` callbacks, drain promise jobs, run Yoga if dirty,
    emit `onLayout` events.
-3. If `jsui_needs_redraw()`, `jsui_render_rgba()` paints the tree.
+3. If `jsui_needs_redraw()`, `jsui_render_rgba()` paints the tree (or
+   `jsui_render_gl()` with the GPU backend).
 
 Everything is single-threaded except resource I/O, which completes onto a
 queue drained in `jsui_tick`.
+
+## GPU backend
+
+`jsui_gpu_create_gl()` / `jsui_render_gl()` / `jsui_render_gl_target()`
+(`include/jsui/jsui.h`, `src/render/gpu.cpp`) draw a frame with Skia Ganesh
+into the embedder's GL target while its GL context is current:
+
+```c
+JsuiGpuContext* gpu = jsui_gpu_create_gl(get_proc, user);  // or NULL: EGL/GLX/WGL/CGL/WebGL default
+...
+jsui_tick(rt, now);
+jsui_render_gl(rt, gpu, 0 /* default framebuffer */, w, h, JSUI_GL_NO_CLEAR);  // HUD over the scene
+// or a texture the engine samples:
+JsuiGLTarget t = { .texture = tex, .width = w, .height = h, .flags = JSUI_GL_TOP_LEFT_ORIGIN };
+jsui_render_gl_target(rt, gpu, &t);
+```
+
+* **Same painter.** `Runtime::renderCanvas()` lays out, refreshes the
+  incremental paint records and paints the full frame (dev overlay and frozen
+  frame included) into the Ganesh surface. The CPU path is untouched and stays
+  the default; a later `jsui_render_rgba_incremental()` repaints fully.
+* **Full repaints.** The GPU path does not clip to the damage region: GPU
+  targets (swapped default framebuffers in particular) are not guaranteed to
+  keep the previous frame, and a GPU redraw of a whole HUD costs less than
+  a CPU raster + upload. `jsui_needs_redraw()` still says when a frame is
+  needed.
+* **Effects.** Everything the painter uses is plain Skia: blurred shadows
+  (the painter's cached shadow masks are CPU images drawn as sprites; Ganesh
+  uploads each once), `saveLayer` with opacity / image filters (blur, drop
+  shadow, colour matrices) / blend modes, gradients, clips, text (Ganesh glyph
+  atlases from the same scaler) and images. Output matches the CPU raster to
+  anti-aliasing / blur rounding (see `tests/native/gpu_test.cpp`: mean channel
+  difference < 0.25 on the test scene, < 0.6 on the example screens).
+* **Images.** Decoded images stay raster `SkImage`s owned by the runtime's
+  `ImageCache`; Ganesh uploads each on first draw and keeps the texture in its
+  resource cache keyed by the image (freed when the image is). Nothing in a
+  runtime is tied to a GPU context, so one `JsuiGpuContext` can serve several
+  runtimes, and a runtime can move between contexts or back to the CPU.
+* **GL state.** Each render starts with `GrDirectContext::resetContext()`, so
+  the embedder may change any GL state between frames. Skia leaves its own
+  state bound afterwards (framebuffer, program, textures, blend, scissor,
+  viewport, VAO, pixel store); engines with a GL state cache re-apply theirs.
+* **Context loss.** `jsui_gpu_context_lost()` abandons all GPU objects
+  without GL calls; the next render rebuilds the Ganesh context through the
+  same loader from whichever context is current then (the web host does this
+  on `webglcontextrestored`).
+* **Loader.** `get_proc` (e.g. `SDL_GL_GetProcAddress`) or NULL for the
+  platform default. On Linux nothing GL-related is linked: libEGL / libGL are
+  dlopen'ed and whichever has a current context is used, and the prebuilt
+  Skia's GLX references resolve to hidden forwarders. `egl*` names are only
+  answered while an EGL context is current (GLX returns stubs for any name,
+  which Skia would call).
+* **Targets.** `JsuiGLTarget` takes an FBO (0 = default framebuffer) or a
+  `GL_TEXTURE_2D`, the sized format (`GL_RGBA8` default, `GL_BGRA8_EXT`,
+  `GL_RGB8`, `GL_SRGB8_ALPHA8` (blends in linear light), `GL_RGB10_A2`,
+  `GL_RGBA16F`), MSAA sample count and stencil bits of an FBO, the origin
+  (`JSUI_GL_TOP_LEFT_ORIGIN` for textures sampled with v=0 at the top) and
+  `JSUI_GL_NO_CLEAR` to composite over the current contents. Wrapped surfaces
+  are cached per target (up to four).
+* **Builds.** CMake option `JSUI_GPU` (default ON for native builds; the
+  aseprite prebuilt Skia includes Ganesh GL (checked for Linux x64); macOS
+  also links the OpenGL framework). WASM: `WEBGL=1 scripts/build-wasm.sh`
+  builds Skia with Ganesh + WebGL (`third_party/skia-wasm-webgl`, canvaskit's
+  WebGL args) and JSUI with `-sMAX_WEBGL_VERSION=2` into
+  `web/dist-webgl/jsui.{js,wasm}`; the default WASM build stays CPU-only and
+  its `jsui_gpu_*` entry points return failure.
+* **Viewer / web.** `jsui-viewer --gpu` renders into the SDL GL window's
+  default framebuffer (`--screenshot` reads it back). In the browser,
+  `createJsui({ canvas, renderer: 'gpu', moduleUrl: '.../dist-webgl/jsui.js' })`
+  registers the canvas' WebGL context with emscripten and draws through
+  Skia; without a GPU module it falls back to the CPU raster + WebGL blit.
+* **Tests.** `tests/native/gpu_test.cpp` makes an EGL context (Mesa's
+  surfaceless platform / llvmpipe works headless), on desktop GL, GLES 3 and
+  GLES 2, renders scenes through the GPU path and compares with the CPU
+  output; without EGL it prints SKIP (`JSUI_GPU_TEST_REQUIRE=1`, set in CI,
+  makes that a failure). `JSUI_WEB_DIST=dist-webgl node web/test/browser.test.mjs`
+  runs the browser tests against the GPU module, including GPU-vs-CPU pixel
+  comparisons.
 
 ## JS bridge contract
 
@@ -317,12 +397,14 @@ The default font is Inter (bundled); `fontFamily` falls back to it.
   `tools/jsui-viewer` downloads SDL 2.30.12 (SHA-256 checked) and links it
   statically; `-DJSUI_BUILD_VIEWER=OFF` skips it, `-DJSUI_SDL_DIR=` uses a
   local SDL2 source tree, and a failed download only skips the viewer.
-  `jsui-viewer [--dev] [--width W --height H] <bundle path or URL>`; F5
+  `jsui-viewer [--dev] [--gpu] [--width W --height H] <bundle path or URL>`; F5
   reloads; `--frames N --screenshot out.png` runs headless
-  (`SDL_VIDEODRIVER=dummy`).
+  (`SDL_VIDEODRIVER=dummy`; `--gpu` needs a GL-capable display, e.g. `xvfb-run`
+  with Mesa). `-DJSUI_GPU=OFF` builds without the GPU backend.
 * WASM: `scripts/build-skia-wasm.sh` (once), then `emcmake cmake -S . -B build-wasm`.
   The `web/` host loads `jsui.wasm`, forwards DOM input, blits frames to a canvas.
-  `scripts/build-wasm.sh` does all steps (emsdk 3.1.44 → Skia m124 → `web/dist/jsui.{js,wasm}`).
+  `scripts/build-wasm.sh` does all steps (emsdk 3.1.44 → Skia m124 → `web/dist/jsui.{js,wasm}`);
+  `WEBGL=1 scripts/build-wasm.sh` builds the GPU variant into `web/dist-webgl/`.
   In the page: `const jsui = await createJsui({ canvas, bundleUrl })` from
   `web/jsui-web.js`; `jsui.on('message', (name, data) => …)`, `jsui.postMessage(name, data)`.
   The browser loader backend is `fetch()` (`src/platform/loader_emscripten.cpp`).
