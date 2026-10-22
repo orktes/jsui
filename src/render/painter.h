@@ -55,6 +55,10 @@ struct PaintStats {
   int imageDraws = 0;         // of which images
   int saveLayers = 0;         // offscreen layers
   int clips = 0;              // clip operations
+  // Always counted: draws blitted from cached raster sprites (gradients,
+  // scaled images), and of those the ones rendered this paint (misses).
+  int spriteDraws = 0;
+  int spriteRenders = 0;
 };
 PaintStats lastPaintStats(const Document& doc);
 

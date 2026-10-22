@@ -113,6 +113,39 @@ bool settled(Node* node) {
   return doc->images->peek(c->url, &info) && info.state != ImageCache::State::Loading;
 }
 
+namespace {
+ResizeMode resizeModeOf(Node* node) {
+  const ComputedStyle& s = node->style();
+  if (s.hasResizeMode) return s.resizeMode;
+  const std::string& m = node->props()["resizeMode"].asString();
+  if (m == "contain") return ResizeMode::Contain;
+  if (m == "stretch") return ResizeMode::Stretch;
+  if (m == "center") return ResizeMode::Center;
+  if (m == "repeat") return ResizeMode::Repeat;
+  return ResizeMode::Cover;
+}
+
+template <class T>
+void append(std::string* key, const T& v) {
+  key->append(reinterpret_cast<const char*>(&v), sizeof v);
+}
+}  // namespace
+
+bool paintKey(Node* node, std::string* key) {
+  NodeCache* c = ensure(node);
+  Document* doc = node->document();
+  if (!c || c->url.empty() || !doc || !doc->images) return false;
+  sk_sp<SkImage> img = doc->images->get(c->url);
+  if (!img) return false;
+  append(key, img->uniqueID());
+  append(key, int(resizeModeOf(node)));
+  append(key, c->scale);
+  const ComputedStyle& s = node->style();
+  Color tint = s.tintColor ? *s.tintColor : Color{0, 0, 0, -1};
+  append(key, tint);
+  return true;
+}
+
 void paint(Node* node, SkCanvas* canvas, const SkRect& box, const SkRRect& clip) {
   NodeCache* c = ensure(node);
   Document* doc = node->document();
@@ -120,15 +153,7 @@ void paint(Node* node, SkCanvas* canvas, const SkRect& box, const SkRRect& clip)
   sk_sp<SkImage> img = doc->images->get(c->url);
   if (!img) return;
   const ComputedStyle& s = node->style();
-  ResizeMode mode = s.resizeMode;
-  if (!s.hasResizeMode) {
-    const std::string& m = node->props()["resizeMode"].asString();
-    if (m == "contain") mode = ResizeMode::Contain;
-    else if (m == "stretch") mode = ResizeMode::Stretch;
-    else if (m == "center") mode = ResizeMode::Center;
-    else if (m == "repeat") mode = ResizeMode::Repeat;
-    else mode = ResizeMode::Cover;
-  }
+  ResizeMode mode = resizeModeOf(node);
   float iw = img->width() / c->scale, ih = img->height() / c->scale;
   if (iw <= 0 || ih <= 0) return;
 

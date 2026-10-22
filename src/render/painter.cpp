@@ -148,13 +148,125 @@ void drawRRect(SkCanvas* c, const SkRRect& rr, const SkPaint& p) {
   else c->drawRRect(rr, p);
 }
 
+// ------------------------------------------------------------- sprites
+
+// Raster sprites of expensive draws that stay the same from frame to frame
+// (gradient backgrounds, scaled images): the CPU raster pipeline evaluates a
+// multi-stop gradient or a bilinear, mipmapped image for every pixel, every
+// time a pixel is repainted, while blitting a sprite is a load and a blend.
+// A sprite holds what the draw paints at a device scale, with the canvas
+// translation factored out, so it is reused while the node moves by whole
+// pixels. Whether a draw goes through a sprite depends only on the draw and
+// the canvas (never on history), so a frame paints the same pixels whether
+// the draw was cached or not: incremental frames match full ones.
+struct SpriteKey {
+  std::string bytes;
+  SpriteKey& add(const void* p, size_t n) {
+    bytes.append(static_cast<const char*>(p), n);
+    return *this;
+  }
+  SpriteKey& f(float v) { return add(&v, sizeof v); }
+  SpriteKey& u(uint64_t v) { return add(&v, sizeof v); }
+  SpriteKey& rect(const SkRect& r) { return f(r.fLeft).f(r.fTop).f(r.fRight).f(r.fBottom); }
+  SpriteKey& rrect(const SkRRect& r) {
+    rect(r.rect());
+    for (int i = 0; i < 4; i++) {
+      SkVector v = r.radii(SkRRect::Corner(i));
+      f(v.fX).f(v.fY);
+    }
+    return *this;
+  }
+};
+struct Sprite {
+  sk_sp<SkImage> image;
+  SkIPoint origin;  // device offset of the image from the canvas translation
+  uint32_t lastUsed = 0;
+};
+struct SpriteCache {
+  std::unordered_map<std::string, Sprite> sprites;
+  size_t bytes = 0;
+  uint32_t frame = 0;
+  // The paintDocument target: sprites only for raster canvases of 8-bit
+  // colour (GPU backends evaluate gradients and images in shaders).
+  bool raster = false;
+  SkColorType colorType = kUnknown_SkColorType;
+  sk_sp<SkColorSpace> colorSpace;
+  int draws = 0, renders = 0;  // this paint's sprite draws / of which rendered
+  static constexpr size_t kMaxBytes = 48u << 20;
+  static constexpr int64_t kMinPixels = 128 * 128;  // smaller draws are cheap enough directly
+  static constexpr int64_t kMaxPixels = 2200000;    // per sprite (a full 1080p screen)
+};
+struct RootRecord;
+SpriteCache& spriteCache(RootRecord* root);
+
+// Paints `draw(canvas)` (local coordinates, painting nothing outside
+// `bounds`) through a sprite when the canvas allows it, at `alpha`; false
+// when it does not (the caller draws directly).
+template <class F>
+bool drawSprite(SkCanvas* c, RootRecord* root, const SkRect& bounds, SpriteKey& key, F&& draw, float alpha = 1) {
+  SpriteCache& sc = spriteCache(root);
+  if (!sc.raster) return false;
+  const SkMatrix& m = c->getTotalMatrix();
+  if (!m.isScaleTranslate() || m.getScaleX() <= 0 || m.getScaleY() <= 0) return false;
+  // Whole-pixel translations only: a sprite keyed by a sub-pixel phase would
+  // be re-rendered every frame for content that moves smoothly (measured:
+  // more expensive than drawing directly).
+  float tx = std::round(m.getTranslateX()), ty = std::round(m.getTranslateY());
+  if (std::fabs(m.getTranslateX() - tx) > 1e-3f || std::fabs(m.getTranslateY() - ty) > 1e-3f) return false;
+  SkMatrix scale = SkMatrix::Scale(m.getScaleX(), m.getScaleY());
+  SkIRect area = scale.mapRect(bounds).roundOut().makeOutset(1, 1);
+  int64_t px = int64_t(area.width()) * area.height();
+  if (px < SpriteCache::kMinPixels || px > SpriteCache::kMaxPixels) return false;
+  if (c->quickReject(bounds)) return true;
+  key.f(m.getScaleX()).f(m.getScaleY()).rect(bounds);
+  auto it = sc.sprites.find(key.bytes);
+  if (it == sc.sprites.end()) {
+    SkImageInfo info =
+        SkImageInfo::Make(area.width(), area.height(), sc.colorType, kPremul_SkAlphaType, sc.colorSpace);
+    SkSurfaceProps props = surfaceProps();
+    sk_sp<SkSurface> surf = SkSurfaces::Raster(info, &props);
+    if (!surf) return false;
+    SkCanvas* oc = surf->getCanvas();
+    oc->clear(SK_ColorTRANSPARENT);
+    oc->translate(float(-area.left()), float(-area.top()));
+    oc->concat(scale);
+    draw(oc);
+    Sprite sp;
+    sp.image = surf->makeImageSnapshot();
+    sp.origin = {area.left(), area.top()};
+    sc.bytes += size_t(px) * 4;
+    if (sc.bytes > SpriteCache::kMaxBytes) {
+      // Drop sprites unused for a while (content that changed or left).
+      for (auto e = sc.sprites.begin(); e != sc.sprites.end();) {
+        if (sc.frame - e->second.lastUsed > 2) {
+          sc.bytes -= size_t(e->second.image->width()) * e->second.image->height() * 4;
+          e = sc.sprites.erase(e);
+        } else {
+          ++e;
+        }
+      }
+    }
+    it = sc.sprites.emplace(std::move(key.bytes), std::move(sp)).first;
+    sc.renders++;
+  }
+  sc.draws++;
+  it->second.lastUsed = sc.frame;
+  c->save();
+  c->setMatrix(SkMatrix::I());
+  SkPaint p;
+  p.setAlphaf(alpha);
+  c->drawImage(it->second.image.get(), tx + float(it->second.origin.fX), ty + float(it->second.origin.fY),
+               SkSamplingOptions(), &p);
+  c->restore();
+  return true;
+}
+
 // ------------------------------------------------------------- shadows
 
 sk_sp<SkMaskFilter> blurFilter(float blur) {
   return blur > 0 ? SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, blur / 2) : nullptr;  // CSS: sigma = blur / 2
 }
 
-struct RootRecord;
 sk_sp<SkMaskFilter> cachedBlur(RootRecord* root, float blur);
 
 // Blurred shadow masks, rendered once per distinct shape and reused while it
@@ -631,19 +743,44 @@ sk_sp<SkShader> makeGradient(const Gradient& g, const SkRect& box) {
   return radialGradient({0, 0}, rx * hi, colors, pos, tile, &m);
 }
 
-void paintBackground(SkCanvas* c, const Box& b, const ComputedStyle& s) {
+// Everything a gradient layer's pixels depend on besides the box.
+void addGradientKey(SpriteKey& k, const Gradient& g) {
+  k.u(uint64_t(g.kind) | uint64_t(g.circle) << 8 | uint64_t(g.extent) << 16 | uint64_t(g.repeating) << 24 |
+      uint64_t(g.corner) << 32 | uint64_t(g.explicitSize) << 40 | uint64_t(g.centerX.percent) << 48 |
+      uint64_t(g.centerY.percent) << 49 | uint64_t(g.sizeX.percent) << 50 | uint64_t(g.sizeY.percent) << 51);
+  k.f(g.angle).f(g.centerX.value).f(g.centerY.value).f(g.sizeX.value).f(g.sizeY.value);
+  k.u(g.stops.size());
+  for (const GradientStop& st : g.stops) {
+    k.f(st.color.r).f(st.color.g).f(st.color.b).f(st.color.a);
+    k.f(st.position ? *st.position : -1e30f).u(st.px);
+  }
+}
+
+void paintGradients(SkCanvas* c, const Box& b, const ComputedStyle& s, float alpha = 1);
+
+// `alpha`: the node's opacity folded into the draw (see paintNode).
+void paintBackground(SkCanvas* c, const Box& b, const ComputedStyle& s, RootRecord* root, float alpha) {
   if (!s.backgroundColor.transparent()) {
     SkPaint p;
     p.setAntiAlias(true);
     p.setColor4f(sk(s.backgroundColor));
+    p.setAlphaf(p.getAlphaf() * alpha);
     drawRRect(c, b.outer, p);
   }
-  if (s.backgroundImages.empty()) return;
+  if (s.backgroundImages.empty() || b.inner.rect().isEmpty()) return;
+  SpriteKey key;
+  key.u('G').rrect(b.outer).rect(b.inner.rect());
+  for (const Gradient& g : s.backgroundImages) addGradientKey(key, g);
+  if (drawSprite(c, root, b.outer.rect(), key, [&](SkCanvas* oc) { paintGradients(oc, b, s); }, alpha)) return;
+  paintGradients(c, b, s, alpha);
+}
+
+// The background-image layers, painted within the border box.
+void paintGradients(SkCanvas* c, const Box& b, const ComputedStyle& s, float alpha) {
   // background-origin: padding-box (the gradient is sized to the padding box),
   // background-clip: border-box, background-repeat: repeat -> the tile repeats
   // under the borders.
   SkRect tile = b.inner.rect();
-  if (tile.isEmpty()) return;
   bool hasBorder = b.border[0] > 0 || b.border[1] > 0 || b.border[2] > 0 || b.border[3] > 0;
   if (!hasBorder) {
     // The tile is the border box: fill the (rounded) box with each layer
@@ -656,6 +793,7 @@ void paintBackground(SkCanvas* c, const Box& b, const ComputedStyle& s) {
       if (!shader) continue;
       SkPaint p;
       p.setShader(shader);
+      p.setAlphaf(alpha);
       if (b.rounded) {
         p.setAntiAlias(true);
         c->drawRRect(b.outer, p);
@@ -672,10 +810,7 @@ void paintBackground(SkCanvas* c, const Box& b, const ComputedStyle& s) {
     if (!shader) continue;
     SkPaint p;
     p.setShader(shader);
-    if (!hasBorder) {
-      c->drawRect(tile, p);
-      continue;
-    }
+    p.setAlphaf(alpha);
     SkRect area = b.outer.rect();
     for (int ty = -1; ty <= 1; ty++) {
       for (int tx = -1; tx <= 1; tx++) {
@@ -991,6 +1126,19 @@ bool paintsChildren(const Node* n) {
   return n->type() != NodeType::Text && n->type() != NodeType::RawText && n->type() != NodeType::TextInput;
 }
 
+// The node paints at most one draw: a background colour or a single
+// gradient layer, and nothing else (no children, text, image, border,
+// shadow, outline or scroll indicators).
+bool singleDraw(const Node* n) {
+  const ComputedStyle& s = n->style();
+  if (n->type() != NodeType::View || !n->children().empty() || !n->ghosts.empty()) return false;
+  if (!s.boxShadows.empty() || s.outlineWidth > 0) return false;
+  YGNodeRef y = n->yoga();
+  for (YGEdge e : {YGEdgeLeft, YGEdgeTop, YGEdgeRight, YGEdgeBottom})
+    if (YGNodeLayoutGetBorder(y, e) > 0) return false;
+  return int(!s.backgroundColor.transparent()) + int(s.backgroundImages.size()) <= 1;
+}
+
 bool backfaceFlipped(const ComputedStyle& s) {
   bool flipped = false;
   for (auto& op : s.transform) flipped ^= op.flipsBackface;
@@ -1048,10 +1196,12 @@ struct RootRecord : NodeRecord {
   std::vector<Node*> order;                                  // zIndex sort scratch (reused)
   std::vector<CurvedNode> curved;                            // this frame's curved-outline nodes
   ShadowCache shadows;
+  SpriteCache sprites;
   bool counting = false;                                     // setPaintCounting
 };
 
 ShadowCache& shadowCache(RootRecord* root) { return root->shadows; }
+SpriteCache& spriteCache(RootRecord* root) { return root->sprites; }
 
 NodeRecord* record(Node* n) {
   if (!n->paintCache) n->paintCache = n->parent() ? std::make_unique<NodeRecord>() : std::make_unique<RootRecord>();
@@ -1070,6 +1220,7 @@ struct Ctx {
   // transform.
   SkMatrix snapSpace;
   bool transformed = false;  // a transform applies (node or ancestor)
+  float alpha = 1;           // the painted node's opacity, when folded into its one draw
 };
 
 sk_sp<SkMaskFilter> cachedBlur(RootRecord* root, float blur) {
@@ -1281,7 +1432,7 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
   computeBox(n, w, h, &b);
   ctx.stats.nodesPainted++;
   if (!s.boxShadows.empty()) paintOuterShadows(c, b, s, ctx.root);
-  paintBackground(c, b, s);
+  paintBackground(c, b, s, ctx.root, ctx.alpha);
   if (!s.boxShadows.empty()) paintInsetShadows(c, b, s, ctx.root);
   paintBorders(c, b, s);
 
@@ -1298,7 +1449,13 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
     if (n->type() == NodeType::Text) text::paintText(n, c, x, y, cw, ch, ls);
     else text::paintTextInput(n, c, x, y, cw, ch, ls);
   }
-  if (n->type() == NodeType::Image) image::paint(n, c, b.inner.rect(), b.inner);
+  if (n->type() == NodeType::Image) {
+    SpriteKey key;
+    key.u('I').rrect(b.inner);
+    if (!image::paintKey(n, &key.bytes) ||
+        !drawSprite(c, ctx.root, b.inner.rect(), key, [&](SkCanvas* oc) { image::paint(n, oc, b.inner.rect(), b.inner); }))
+      image::paint(n, c, b.inner.rect(), b.inner);
+  }
 
   if (paintsChildren(n) && (!n->children().empty() || !n->ghosts.empty())) {
     bool clip = clipsChildren(n);
@@ -1337,6 +1494,14 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   c->concat(p.local);
   float opacity = s.opacity * animOpacity(n);
   bool layer = opacity < 1 || !s.filters.empty() || s.blendMode != 0;
+  // A node that paints one draw (a background colour or one gradient, no
+  // children) applies its opacity to that draw: the same pixels as a layer
+  // (up to rounding), without allocating, clearing and compositing one.
+  float alpha = 1;
+  if (layer && s.filters.empty() && !s.blendMode && singleDraw(n)) {
+    alpha = opacity;
+    layer = false;
+  }
   if (layer) {
     SkPaint lp;
     lp.setAlphaf(opacity);
@@ -1349,7 +1514,9 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   bool parentTransformed = ctx.transformed;
   ctx.snapSpace = p.snapSpace;
   ctx.transformed |= p.transformed;
+  ctx.alpha = alpha;
   paintContent(n, c, ctx, p.snap, p.w, p.h);
+  ctx.alpha = 1;
   ctx.snapSpace = parentSnap;
   ctx.transformed = parentTransformed;
   c->restoreToCount(saveCount);
@@ -1576,6 +1743,21 @@ SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight) {
 void paintDocument(Document& doc, SkCanvas* canvas, const SkRegion* damage) {
   RootRecord* root = rootRecord(doc);
   root->shadows.frame++;
+  SpriteCache& sprites = root->sprites;
+  sprites.frame++;
+  sprites.draws = sprites.renders = 0;
+  {
+    SkImageInfo info = canvas->imageInfo();
+    sprites.raster = !canvas->recordingContext() && !canvas->recorder() &&
+                     (info.colorType() == kRGBA_8888_SkColorType || info.colorType() == kBGRA_8888_SkColorType);
+    if (sprites.raster && (info.colorType() != sprites.colorType ||
+                           !SkColorSpace::Equals(info.colorSpace(), sprites.colorSpace.get()))) {
+      sprites.sprites.clear();
+      sprites.bytes = 0;
+      sprites.colorType = info.colorType();
+      sprites.colorSpace = info.refColorSpace();
+    }
+  }
   Ctx ctx{doc, root, damage, {}, {}};
   std::unique_ptr<SkCanvas> counter;
   if (root->counting && (counter = makeCountingCanvas(canvas, &ctx.stats))) {
@@ -1610,6 +1792,8 @@ void paintDocument(Document& doc, SkCanvas* canvas, const SkRegion* damage) {
     SkISize sz = canvas->getBaseLayerSize();
     ctx.stats.repaintedPixels = int64_t(sz.width()) * sz.height();
   }
+  ctx.stats.spriteDraws = sprites.draws;
+  ctx.stats.spriteRenders = sprites.renders;
   root->stats = ctx.stats;
 }
 
@@ -1633,6 +1817,8 @@ void paintDocumentRects(Document& doc, SkCanvas* canvas, const std::vector<SkIRe
     sum.imageDraws += s.imageDraws;
     sum.saveLayers += s.saveLayers;
     sum.clips += s.clips;
+    sum.spriteDraws += s.spriteDraws;
+    sum.spriteRenders += s.spriteRenders;
   }
   rootRecord(doc)->stats = sum;
 }

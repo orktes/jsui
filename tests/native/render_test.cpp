@@ -3,6 +3,8 @@
 #include "include/core/SkBitmap.h"
 #include "include/core/SkData.h"
 #include "include/core/SkImage.h"
+#include "include/core/SkPicture.h"
+#include "include/core/SkPictureRecorder.h"
 #include "modules/skparagraph/include/Paragraph.h"
 #include "render/image_cache.h"
 #include "render_util.h"
@@ -444,5 +446,69 @@ TEST(render_incremental_rounded_boxes_cut_anywhere) {
     // (growing to whole nodes repainted several times as much).
     std::printf("  dpr %g: repainted %.0f px per step for %.0f px of probe rects\n", dpr, repainted / 200, probeArea / 200);
     CHECK(repainted < probeArea * 1.6);
+  }
+}
+
+// Gradient backgrounds and scaled images are blitted from cached raster
+// sprites (and a one-draw node's opacity is folded into its draw): the
+// frame matches drawing everything directly (a picture canvas never uses
+// sprites) up to rounding, incremental frames match full ones exactly, and
+// later frames reuse the sprites. Perf guards: no sprite re-rendered while
+// only an unrelated probe moves; the folded opacity takes no layer.
+TEST(render_sprites_match_direct_and_are_reused) {
+  for (float dpr : {1.f, 1.5f}) {
+    Scene s(320, 240, dpr);
+    s.add(R"J({"style":{"position":"absolute","left":0,"top":0,"width":320,"height":240,
+      "experimental_backgroundImage":"linear-gradient(90deg, rgba(5,7,16,0.9) 0%, rgba(40,60,120,0.7) 40%, rgba(5,7,16,0.4) 75%, #203040 100%)"}})J");
+    s.add(R"J({"style":{"position":"absolute","left":10,"top":10,"width":160,"height":120,"borderRadius":40,"opacity":0.6,
+      "experimental_backgroundImage":"radial-gradient(circle at 50% 50%, rgba(242,195,91,0.9) 0%, rgba(79,140,255,0.5) 45%, rgba(5,7,16,0) 70%)"}})J");
+    s.add(R"J({"style":{"position":"absolute","left":165,"top":12,"width":150,"height":120,"borderWidth":4,"borderColor":"#fff",
+      "borderRadius":12,"experimental_backgroundImage":"linear-gradient(180deg, #ffe29a 0%, #f2c35b 50%, #c08a2a 100%)"}})J");
+    s.add(R"J({"type":"Image","props":{"resizeMode":"cover","source":{"uri":")J" + testPngUri(64, 48) +
+          R"J("}},"style":{"position":"absolute","left":20,"top":120,"width":170,"height":110,"borderRadius":18}})J");
+    s.add(R"J({"style":{"position":"absolute","left":210,"top":140,"width":100,"height":80,"transform":[{"rotate":"10deg"}],
+      "experimental_backgroundImage":"linear-gradient(45deg, red, blue)"}})J");
+    Node* probe = s.add(R"J({"style":{"position":"absolute","left":0,"top":0,"width":20,"height":14,"backgroundColor":"rgba(255,255,255,0.5)"}})J");
+    s.render();
+    s.render();  // the image is decoded by now
+    PaintStats first = lastPaintStats(s.doc());
+    CHECK(first.spriteDraws >= 4);  // page gradient, folded radial, bordered box, image
+    // Direct: the same document painted into a picture (no sprites), played
+    // into a raster frame.
+    int dw = s.dw(), dh = s.dh();
+    SkPictureRecorder rec;
+    paintDocument(s.doc(), rec.beginRecording(SkRect::MakeIWH(dw, dh)));
+    sk_sp<SkPicture> pic = rec.finishRecordingAsPicture();
+    std::vector<uint32_t> direct(size_t(dw) * dh, 0);
+    sk_sp<SkSurface> surf = SkSurfaces::WrapPixels(
+        SkImageInfo::Make(dw, dh, kRGBA_8888_SkColorType, kPremul_SkAlphaType), direct.data(), size_t(dw) * 4);
+    surf->getCanvas()->drawPicture(pic);
+    int worst = 0;
+    for (size_t i = 0; i < direct.size(); i++)
+      for (int ch = 0; ch < 4; ch++)
+        worst = std::max(worst, std::abs(int((direct[i] >> (ch * 8)) & 255) - int((s.px[i] >> (ch * 8)) & 255)));
+    std::printf("  dpr %g: sprites vs direct max diff %d, %d sprite draws\n", dpr, worst, first.spriteDraws);
+    CHECK(worst <= 4);  // anti-aliased edges: coverage applied before the blit, rounded once more
+    // A probe moves over everything: incremental == full, sprites reused.
+    setPaintCounting(s.doc(), true);
+    std::vector<uint32_t> inc(size_t(dw) * dh), full(inc.size());
+    s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);
+    size_t bad = 0;
+    int renders = 0, layers = 0;
+    for (int i = 0; i < 40; i++) {
+      patch(probe, "{\"left\":" + std::to_string(i * 7.3) + ",\"top\":" + std::to_string(i * 5.1) + "}");
+      s.doc().layout();
+      s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);
+      PaintStats st = lastPaintStats(s.doc());
+      renders += st.spriteRenders;
+      layers += st.saveLayers;
+      s.rt->render(full.data(), dw, dh, size_t(dw) * 4);
+      renders += lastPaintStats(s.doc()).spriteRenders;
+      for (size_t k = 0; k < inc.size(); k++) bad += inc[k] != full[k];
+      s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);
+    }
+    CHECK_EQ(bad, size_t(0));
+    CHECK_EQ(renders, 0);
+    CHECK_EQ(layers, 0);  // the 0.6 opacity is folded into its gradient
   }
 }
