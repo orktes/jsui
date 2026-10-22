@@ -81,13 +81,13 @@ test('keyed reorder uses insertBefore and removal destroys native nodes', () => 
   assert.equal(mock.nodes.size, 1, 'only the root remains');
 });
 
-test('Image normalizes sources and applies registered asset size', () => {
+test('Image normalizes sources; registered asset size is intrinsic, not style', () => {
   globalThis.__jsui_assets = { 'assets/logo-abc.png': { width: 64, height: 32 } };
   render(h(Fragment, null, h(Image, { source: 'assets/logo-abc.png' }), h(Image, { source: { uri: 'http://x/y.png' }, style: { width: 5, height: 6 }, resizeMode: 'cover' })));
   const [a, b] = mock.root().children.map((id) => mock.nodes.get(id).props);
   assert.deepEqual(a.source, { uri: 'assets/logo-abc.png', width: 64, height: 32 });
-  assert.equal(a.style.width, 64);
-  assert.equal(a.style.height, 32);
+  assert.equal(a.style && a.style.width, undefined);
+  assert.equal(a.style && a.style.height, undefined);
   assert.equal(b.source.uri, 'http://x/y.png');
   assert.equal(b.style.width, 5);
   assert.equal(b.resizeMode, 'cover');
