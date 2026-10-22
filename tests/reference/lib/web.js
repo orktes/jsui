@@ -25,7 +25,7 @@ export const CHROME_ARGS = [
 
 // Bump to invalidate cached screenshots when the page harness changes in a
 // way the content hash cannot see.
-const HARNESS_VERSION = 5;
+const HARNESS_VERSION = 6;
 
 // RN code may rely on the platform default font. JSUI's default is Inter, so
 // every family react-native-web's "System" stack names is aliased to Inter.
@@ -44,12 +44,19 @@ function fontFaceCss() {
   return rules.join('\n');
 }
 
+// -webkit-font-smoothing:antialiased only changes anything on macOS, where
+// Chrome's default text uses hinted (kNormal) CoreText glyphs; with
+// --disable-lcd-text those come from CoreGraphics' dilated "font smoothing"
+// outlines, bolder than JSUI's unhinted, undilated ones and dependent on the
+// machine's AppleFontSmoothing setting. "antialiased" makes Chrome use
+// SkFontHinting::kNone + kAntiAlias edging, i.e. exactly JSUI's text settings.
+// Linux and Windows Chrome ignore the property.
 function pageHtml(meta) {
   return `<!doctype html>
 <html><head><meta charset="utf-8">
 <style>
 ${fontFaceCss()}
-html,body{margin:0;padding:0;overflow:hidden;background:transparent}
+html,body{margin:0;padding:0;overflow:hidden;background:transparent;-webkit-font-smoothing:antialiased}
 #root{position:relative;display:flex;flex-direction:column;width:${meta.width}px;height:${meta.height}px;overflow:hidden;font-family:Inter}
 </style></head>
 <body><div id="root"></div><script src="/bundle.js"></script></body></html>`;
@@ -135,7 +142,7 @@ export class ChromeRenderer {
   async render(webDir, meta, scale, { useCache = true } = {}) {
     const html = pageHtml(meta);
     const h = crypto.createHash('sha256');
-    h.update(JSON.stringify({ HARNESS_VERSION, v: this.version, CHROME_ARGS, scale, w: meta.width, h: meta.height, waitMs: meta.waitMs }));
+    h.update(JSON.stringify({ HARNESS_VERSION, platform: process.platform, v: this.version, CHROME_ARGS, scale, w: meta.width, h: meta.height, waitMs: meta.waitMs }));
     h.update(html);
     hashDir(h, webDir);
     const key = h.digest('hex').slice(0, 24);

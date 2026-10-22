@@ -139,12 +139,18 @@ LineMetrics chromeLineMetrics(FontManager* fm, const tl::TextStyle& ts, float ex
   font.getMetrics(&m);
   float a = -m.fAscent, d = m.fDescent;
   float ra = std::floor(a + 0.5f), rd = std::floor(d + 0.5f), rg = std::floor(std::max(0.f, m.fLeading) + 0.5f);
-  // Chrome (Linux): when the descent rounds down it borrows a pixel from the
-  // ascent so descenders are not cut off by overflow clips.
+  // Chrome on Linux / ChromeOS / Android: when the descent rounds down it
+  // borrows a pixel from the ascent so descenders are not cut off by overflow
+  // clips (blink FontMetrics::AscentDescentWithHacks). Chrome on macOS and
+  // Windows does not, so neither do we there: applying it moved every such
+  // line's baseline 1px off Chrome's on macOS. The WASM build keeps the Linux
+  // rule so its output does not depend on the host OS.
+#if !defined(__APPLE__) && !defined(_WIN32)
   if (rd < d && ra >= 1) {
     rd += 1;
     ra -= 1;
   }
+#endif
   float h = explicitLineHeight > 0 ? explicitLineHeight : ra + rd + rg;
   float chromeBaseline = ra + std::floor((h - ra - rd) / 2);
   // skparagraph places the baseline using its shaping font's metrics, which
@@ -377,9 +383,10 @@ class ChromeLikePainter : public tl::ParagraphPainter {
     SkTextBlob::Iter::ExperimentalRun run;
     while (iter.experimentalNext(&run)) {
       SkFont f = run.font;
+      // Unhinted outlines at subpixel glyph origins. On macOS, kNone also
+      // means no CoreGraphics outline dilation ("font smoothing"): Chrome's
+      // -webkit-font-smoothing: antialiased, which the reference harness sets.
       f.setHinting(SkFontHinting::kNone);
-      // Whole-pixel glyph origins, like Chrome with subpixel positioning off
-      // (the reference harness and most Linux/Windows configs).
       f.setSubpixel(true);
       const auto& buf = b.allocRunPos(f, run.count);
       std::memcpy(buf.glyphs, run.glyphs, size_t(run.count) * sizeof(SkGlyphID));
