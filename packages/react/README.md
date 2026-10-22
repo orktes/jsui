@@ -93,15 +93,22 @@ by default; Enter / Space and gamepad A press the focused one.
 
 ## Performance (QuickJS, `jsui-render`, Release, shared 4-core box)
 
-`bench/commit-bench.jsx`, 500 host Views, ms per synchronous commit:
+`bench/commit-bench.jsx`, 500 host Views, ms per synchronous commit (ranges
+over 3 runs on a loaded machine):
 
 | Scenario | ms | bridge calls |
 | --- | --- | --- |
-| mount 500 views | ~18 | 501 |
-| re-render 500 plain components, nothing changed | ~11 | 0 |
-| re-render 500 `memo` components, nothing changed (parent only) | ~3.7 | 0 |
-| 50 of 500 `memo` components changed | ~5 | 50 |
-| `Animated` – 500 values set (patchStyle path, no React) | ~6 | 500 |
+| mount 500 views | 20–25 | 501 |
+| re-render 500 plain components, nothing changed | 10–17 | 0 |
+| re-render 500 `memo` components, nothing changed (parent only) | 2.9–4.0 | 0 |
+| 50 of 500 `memo` components changed | 4.3–5.8 | 50 |
+| 500 of 500 changed | 14–17 | 500 |
+| `Animated`: 500 values set, opacity only (no React) | ~1.7 | 500 |
+| `Animated`: 500 values set, opacity + transform | 5–8 | 500 |
+| raw `__jsui_native.patchStyle` × 500 (opacity) | ~0.4 | 500 |
+
+QuickJS is an interpreter, so React's own reconciliation dominates; keep
+large lists/grids `memo`ized.
 
 The steady state of a HUD costs nothing in React: animations go through
 `patchStyle`, and state changes re-render only the components that changed

@@ -336,13 +336,14 @@ Details of how the JS package uses the bridge, for native implementers:
   synthesizes is the press itself.
 * Optional bridge members used when present: `patchStyle(id, partialStyle)`
   (Animated / `setNativeProps`; otherwise `setProps` with the merged style),
-  `viewport` (`{width, height, scale}` object or function), `focus`, `blur`,
+  `viewport()` (native: returns `{width, height, scale}`), `focus`, `blur`,
   `scrollTo`, `measure`, `postMessage`, `loadFont`, `getImageSize(uri)`,
   `prefetchImage(uri)`, `reload`.
-* Optional events: `{type: 'resize', width, height, scale}` (Dimensions);
+* Events beyond input: `{type: 'resize', width, height, scale}` (sent by
+  `jsui_set_viewport` when the size changes; drives Dimensions);
   `{type: 'load', target, source: {width, height}}` / `{type: 'error', target,
   error}` on `Image` nodes (`onLoad` / `onError`).
-* `globalThis.__jsui_reportError(error)`: if the host installs it, uncaught
+* `globalThis.__jsui_reportError(error)` (else the standard `reportError`): uncaught
   React render errors are passed to it; otherwise they are rethrown from a
   `setTimeout` so the engine reports them.
 * `globalThis.__jsui_assets[url] = {width, height, scale}` is filled by
@@ -352,4 +353,8 @@ Details of how the JS package uses the bridge, for native implementers:
   `disabled: true` and `focusable: false`; `ScrollView` carries `horizontal`.
 * Dev server endpoints besides `/bundle.js` and `/__jsui/version`:
   `/__jsui/version?since=<token>` long-polls until the token changes;
-  `/__jsui/error` returns the current build error text.
+  `/__jsui/error` returns the current build error text; `/bundle.js` carries
+  an `X-Jsui-Version` header.
+* `tests/native/react_e2e_test.cpp` drives a real `@jsui/react` bundle through
+  the C API (mouse, keys, text, gamepad, viewport, host messages, Animated);
+  `npm test -w @jsui/cli` builds the bundle and runs it.
