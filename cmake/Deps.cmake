@@ -150,6 +150,10 @@ elseif(IOS)
     file(STRINGS "${JSUI_SKIA_LIB_DIR}/defines.txt" _jsui_skia_defs)
     target_compile_definitions(jsui_skia INTERFACE ${_jsui_skia_defs})
   endif()
+  # Every library of the slice (m157 adds skunicode_core / _icu, jpeg12 /
+  # 16, ...); ld64 resolves archives regardless of order.
+  file(GLOB _jsui_skia_libs "${JSUI_SKIA_LIB_DIR}/lib*.a")
+  target_link_libraries(jsui_skia INTERFACE ${_jsui_skia_libs})
   target_link_libraries(jsui_skia INTERFACE "-framework CoreFoundation" "-framework CoreGraphics" "-framework CoreText"
     "-framework Foundation" "-framework UIKit" "-framework Metal")
 elseif(APPLE)
