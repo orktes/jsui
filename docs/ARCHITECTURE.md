@@ -118,8 +118,8 @@ Standard globals: `console`, `setTimeout`/`setInterval` (+ clear),
 
 Callbacks the bundle installs (all optional):
 
-* `__jsui_dispatchEvent(event) → boolean` — native → JS event. Returns true if
-  any handler ran or `preventDefault()` was called.
+* `__jsui_dispatchEvent(event) → number` — native → JS event. Bitmask: `1` a
+  handler ran, `2` `preventDefault()` was called.
 * `__jsui_onHostMessage(name, json)` — from `jsui_post_message`.
 * `__jsui_onLayout(id, {x, y, width, height})` — for `onLayout` listeners.
 
@@ -157,6 +157,42 @@ React Native props (`onPress`, `onPressIn/Out`, `onLongPress`, `onHoverIn/Out`,
 Gamepad D-pad / stick moves focus spatially between `focusable` nodes and A
 activates the focused node (dispatched as `click`), unless the gamepad event
 was `preventDefault()`-ed.
+
+### Input routing details (`src/input/`)
+
+* **Default actions** (Tab focus moves, Enter/Space/A → `click`, D-pad/stick/arrow
+  navigation, wheel scrolling) are skipped when JS calls `preventDefault()`.
+  `__jsui_dispatchEvent` returns a bitmask: `1` = a handler ran, `2` =
+  default prevented (a boolean `true` is treated as `3` for compatibility).
+  A JS Pressable that handles Enter/Space/A itself prevents the default so no
+  extra `click` follows. Exception: focus-on-press always happens.
+* **`__events` drives native decisions.** Names are matched case-insensitively
+  by substring: `press`/`click` = pressable (focusable by default, `pointer`
+  cursor); `move`/`responder`/`pan`/`drag` = wants `pointermove` (moves are not
+  sent to JS unless a node on the path lists one); `hover`/`enter`/`leave`/`over`
+  = wants `pointerenter`/`pointerleave` (sent only to such nodes); `wheel`;
+  `"*"` = everything. Any pointer-ish name makes `jsui_send_*` report "consumed".
+* **Pointer:** mouse `pointerId` 0, touch `id + 1`. Implicit capture while a
+  button / touch is down; `click` (primary button only) targets the nearest
+  common ancestor of the down and up nodes. Wheel `deltaY > 0` scrolls down
+  (DOM convention); over a `horizontal` ScrollView a vertical wheel scrolls
+  sideways. A touch dragged > 8 px inside a scrollable ScrollView sends
+  `pointercancel` and scrolls it.
+* **Focusable:** `focusable: true`, pressable nodes (unless `focusable: false`),
+  `TextInput`; never `disabled: true` or inside `display: none`. Extra event
+  fields: `focus` has `focusVisible` (true when the last input was a key or
+  gamepad, like `:focus-visible`) and `relatedTarget`; `blur` has
+  `relatedTarget`; synthesized clicks have `pointerType: 'keyboard'|'gamepad'`;
+  `gamepadbutton` has `pressed` and `repeat`; `gamepadconnected` has
+  `connected` and `id`.
+* **Focus scopes:** the last displayed node with `accessibilityViewIsModal` or
+  `aria-modal` traps Tab and spatial navigation; focus moves into it when it
+  appears (its `autoFocus`/`hasTVPreferredFocus` child or first focusable) and
+  is restored to the previously focused node when it is removed or hidden.
+  `nextFocusUp/Down/Left/Right` (node ids) override spatial navigation.
+* Stick: deadzone 0.5 on the dominant axis; held D-pad / stick repeats after
+  400 ms, then every 120 ms. Focus changes scroll the node into view in its
+  ScrollView ancestors.
 
 ## Styles
 

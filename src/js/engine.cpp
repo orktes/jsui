@@ -313,23 +313,24 @@ bool JsEngine::hasPendingWork(double nowMs) const {
   return JS_IsJobPending(impl_->jrt);
 }
 
-bool JsEngine::dispatchEvent(const Value& event) {
+int JsEngine::dispatchEvent(const Value& event) {
   JSContext* ctx = impl_->ctx;
   JSValue global = JS_GetGlobalObject(ctx);
   JSValue fn = JS_GetPropertyStr(ctx, global, "__jsui_dispatchEvent");
-  bool handled = false;
+  int flags = 0;
   if (JS_IsFunction(ctx, fn)) {
     JSValue arg = fromValue(ctx, event);
     JSValue r = JS_Call(ctx, fn, JS_UNDEFINED, 1, &arg);
     if (JS_IsException(r)) reportException(ctx);
-    else handled = JS_ToBool(ctx, r);
+    else if (JS_IsBool(r)) flags = JS_ToBool(ctx, r) ? (kHandled | kDefaultPrevented) : 0;
+    else if (JS_IsNumber(r)) JS_ToInt32(ctx, &flags, r);
     JS_FreeValue(ctx, r);
     JS_FreeValue(ctx, arg);
   }
   JS_FreeValue(ctx, fn);
   JS_FreeValue(ctx, global);
   runJobs();
-  return handled;
+  return flags;
 }
 
 void JsEngine::hostMessage(const std::string&, const std::string&) {}
