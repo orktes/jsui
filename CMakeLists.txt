@@ -28,7 +28,9 @@ jsui_embed_fonts(jsui)
 # interface), so nothing extra is linked on Linux. The WASM default Skia is
 # CPU-only: the option follows its args.gn (WEBGL=1 scripts/build-skia-wasm.sh).
 set(_jsui_gpu_default ON)
-if(EMSCRIPTEN)
+if(IOS)
+  set(_jsui_gpu_default OFF)  # GLES is deprecated on iOS: Metal below
+elseif(EMSCRIPTEN)
   set(_jsui_gpu_default OFF)
   if(EXISTS "${JSUI_SKIA_LIB_DIR}/args.gn")
     file(READ "${JSUI_SKIA_LIB_DIR}/args.gn" _jsui_skia_gn)
@@ -75,6 +77,32 @@ if(JSUI_WEBGPU)
   endif()
 endif()
 message(STATUS "JSUI_WEBGPU: ${JSUI_WEBGPU}")
+
+# Metal backend (Skia Ganesh on Metal, jsui_render_metal). On by default on
+# iOS, whose Skia is built from source with Metal (scripts/build-skia-ios.sh);
+# elsewhere it needs a Skia built with skia_use_metal=true.
+set(_jsui_metal_default OFF)
+if(IOS)
+  set(_jsui_metal_default ON)
+endif()
+option(JSUI_METAL "Build the Skia Ganesh Metal backend (jsui_render_metal)" ${_jsui_metal_default})
+if(JSUI_METAL)
+  target_compile_definitions(jsui PUBLIC JSUI_METAL=1)
+  target_compile_definitions(jsui_skia INTERFACE SK_GANESH SK_METAL)
+  target_link_libraries(jsui PUBLIC "-framework Metal" "-framework Foundation")
+endif()
+message(STATUS "JSUI_METAL: ${JSUI_METAL}")
+
+# iOS: the library plus the example host app (integrations/ios); the
+# desktop tools and native tests are not built.
+if(IOS)
+  set(JSUI_BUILD_TOOLS OFF)
+  set(JSUI_BUILD_TESTS OFF)
+  option(JSUI_BUILD_IOS_APP "Build the iOS example app (integrations/ios)" ON)
+  if(JSUI_BUILD_IOS_APP)
+    add_subdirectory(integrations/ios)
+  endif()
+endif()
 
 if(JSUI_BUILD_TOOLS AND NOT EMSCRIPTEN)
   add_executable(jsui-render tools/jsui-render/main.cpp)

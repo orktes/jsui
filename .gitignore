@@ -22,3 +22,4 @@ node_modules/
 /web/test/output/
 /third_party/skia-ios/
 /third_party/skia-src-ios/
+/integrations/ios/build-ui/
