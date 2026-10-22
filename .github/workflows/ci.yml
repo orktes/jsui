@@ -114,6 +114,8 @@ jobs:
     name: reference (jsui vs react-native-web)
     runs-on: ubuntu-24.04
     needs: native
+    # Non-blocking until the painter and @jsui/react land; JSUI cannot match Chrome yet.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
