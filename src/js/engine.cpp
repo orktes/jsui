@@ -447,16 +447,13 @@ JsEngine::JsEngine(Runtime& rt) : impl_(std::make_unique<Impl>(rt)) {
 
   // performance.now() is the runtime's clock (the embedder's tick time), the
   // same timeline as rAF timestamps and timers, so headless renders are
-  // deterministic.
-  JSValue perf = JS_GetPropertyStr(ctx, global, "performance");
-  if (!JS_IsObject(perf)) {
-    JS_FreeValue(ctx, perf);
-    perf = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, global, "performance", JS_DupValue(ctx, perf));
-  }
+  // deterministic. QuickJS-ng's own `performance` has a read-only,
+  // non-configurable wall-clock `now`, so the object is replaced, not patched.
+  JSValue perf = JS_NewObject(ctx);
   JS_SetPropertyStr(ctx, perf, "now", JS_NewCFunction(ctx, js_now, "now", 0));
   JS_SetPropertyStr(ctx, perf, "timeOrigin", JS_NewFloat64(ctx, 0));
-  JS_FreeValue(ctx, perf);
+  JS_DefinePropertyValueStr(ctx, global, "performance", perf,
+                            JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
 
   installBridge(impl, global);
   JSValue host = JS_NewObject(ctx);
