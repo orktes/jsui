@@ -269,6 +269,11 @@ The default font is Inter (bundled); `fontFamily` falls back to it.
   (`SDL_VIDEODRIVER=dummy`).
 * WASM: `scripts/build-skia-wasm.sh` (once), then `emcmake cmake -S . -B build-wasm`.
   The `web/` host loads `jsui.wasm`, forwards DOM input, blits frames to a canvas.
+  `scripts/build-wasm.sh` does all steps (emsdk 3.1.44 → Skia m124 → `web/dist/jsui.{js,wasm}`).
+  In the page: `const jsui = await createJsui({ canvas, bundleUrl })` from
+  `web/jsui-web.js`; `jsui.on('message', (name, data) => …)`, `jsui.postMessage(name, data)`.
+  The browser loader backend is `fetch()` (`src/platform/loader_emscripten.cpp`).
+  Tests: `node web/test/node-smoke.mjs`, `node web/test/browser.test.mjs` (Playwright).
 * JS: `npm install` at the repo root (npm workspaces), `npx jsui build app.jsx`
   or `npx jsui dev app.jsx` (serves `bundle.js` and a reload endpoint).
 

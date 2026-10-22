@@ -38,8 +38,9 @@ extern "C" {
 #    define JSUI_API __declspec(dllimport)
 #  endif
 #elif defined(__EMSCRIPTEN__)
-#  include <emscripten/emscripten.h>
-#  define JSUI_API EMSCRIPTEN_KEEPALIVE
+/* Same as EMSCRIPTEN_KEEPALIVE; spelled out because <emscripten.h> must not
+ * be included inside this header's extern "C" block. */
+#  define JSUI_API __attribute__((used, visibility("default")))
 #else
 #  define JSUI_API __attribute__((visibility("default")))
 #endif

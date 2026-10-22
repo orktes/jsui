@@ -1,8 +1,9 @@
 {
   "name": "jsui-monorepo",
   "private": true,
-  "workspaces": ["packages/*", "tests/reference"],
+  "workspaces": ["packages/*", "tests/reference", "web"],
   "scripts": {
-    "test:reference": "npm --workspace tests/reference run test --"
+    "test:reference": "npm --workspace tests/reference run test --",
+    "test:web": "npm --workspace web run test:web"
   }
 }

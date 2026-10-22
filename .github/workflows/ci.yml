@@ -1,0 +1,183 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: 22
+
+jobs:
+  # ------------------------------------------------------------ native (Linux)
+  native:
+    name: native (ubuntu, clang)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build clang libfontconfig1-dev zlib1g-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libgl1-mesa-dev
+      - name: Cache prebuilt Skia + FetchContent sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/skia-prebuilt
+            build/_deps/*-src
+          key: native-deps-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'tools/**/CMakeLists.txt') }}
+          restore-keys: native-deps-${{ runner.os }}-
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+      - name: Build
+        run: cmake --build build -j "$(nproc)"
+      - name: Native tests
+        run: ./build/jsui-tests
+      - name: Render smoke
+        run: ./build/jsui-render web/test/fixtures/bands.js -o bands.png --width 320 --height 200
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-render-linux
+          path: |
+            build/jsui-render
+            bands.png
+
+  # --------------------------------------------------------------------- wasm
+  wasm:
+    name: wasm (emscripten + browser)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+      - name: Cache emsdk
+        uses: actions/cache@v4
+        with:
+          path: third_party/emsdk
+          key: emsdk-${{ runner.os }}-${{ hashFiles('scripts/setup-emsdk.sh') }}
+      - name: Cache Skia for WASM
+        id: skia-wasm-cache
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-wasm
+          key: skia-wasm-${{ runner.os }}-${{ hashFiles('scripts/build-skia-wasm.sh', 'scripts/setup-emsdk.sh') }}
+      - name: Cache FetchContent sources
+        uses: actions/cache@v4
+        with:
+          path: build-wasm/_deps/*-src
+          key: wasm-deps-${{ hashFiles('cmake/*.cmake') }}
+      - name: emsdk
+        run: scripts/setup-emsdk.sh
+      - name: Skia for WASM (cache miss only, ~30 min)
+        if: steps.skia-wasm-cache.outputs.cache-hit != 'true'
+        run: JOBS=$(nproc) scripts/build-skia-wasm.sh
+      - name: Build jsui.wasm
+        run: JOBS=$(nproc) scripts/build-wasm.sh Release
+      - name: Node smoke test
+        run: node web/test/node-smoke.mjs
+      - name: Browser tests (Playwright / Chromium)
+        working-directory: web
+        run: |
+          npm install --no-package-lock --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          JSUI_WEB_STRICT=1 npm run test:browser
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-wasm
+          path: web/dist
+
+  # ----------------------------------------------------------------------- js
+  js:
+    name: js packages
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install
+        run: if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
+      - name: Tests (packages/*)
+        run: npm test --workspaces --if-present
+
+  # ---------------------------------------------------------------- reference
+  reference:
+    name: reference (jsui vs react-native-web)
+    runs-on: ubuntu-24.04
+    needs: native
+    # Non-blocking until the painter and @jsui/react land; JSUI cannot match Chrome yet.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build clang libfontconfig1-dev zlib1g-dev
+      - name: Cache prebuilt Skia + FetchContent sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/skia-prebuilt
+            build/_deps/*-src
+          key: native-deps-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'tools/**/CMakeLists.txt') }}
+          restore-keys: native-deps-${{ runner.os }}-
+      - name: Build jsui-render
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DJSUI_BUILD_TESTS=OFF
+          cmake --build build -j "$(nproc)" --target jsui-render
+      - name: Install
+        run: if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
+      - name: Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Reference tests
+        run: npm run test:reference
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reference-report
+          path: tests/reference/output
+          if-no-files-found: warn
+
+  # ------------------------------------------- native (macOS / Windows), advisory
+  native-other:
+    name: native (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache prebuilt Skia
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-prebuilt
+          key: skia-prebuilt-${{ matrix.os }}-${{ hashFiles('cmake/Deps.cmake') }}
+      - name: Configure (macOS)
+        if: runner.os == 'macOS'
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -T ClangCL -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+      - name: Build
+        run: cmake --build build --config Release -j 4
+      - name: Native tests (macOS)
+        if: runner.os == 'macOS'
+        run: ./build/jsui-tests
+      - name: Native tests (Windows)
+        if: runner.os == 'Windows'
+        run: ./build/Release/jsui-tests.exe

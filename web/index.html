@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>JSUI Web Host</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; background: #0d1117; color: #c9d1d9; font: 13px/1.4 system-ui, sans-serif; }
+    #ui { display: block; width: 100vw; height: 100vh; }
+    #hud { position: fixed; right: 8px; top: 8px; padding: 6px 8px; border-radius: 6px; background: #161b22cc;
+           font: 12px/1.4 ui-monospace, monospace; pointer-events: none; white-space: pre; }
+    #err { position: fixed; left: 8px; right: 8px; bottom: 8px; max-height: 40vh; overflow: auto; padding: 8px;
+           border-radius: 6px; background: #3d1214ee; color: #ffdcd7; font: 12px/1.4 ui-monospace, monospace;
+           white-space: pre-wrap; display: none; }
+  </style>
+</head>
+<body>
+  <canvas id="ui"></canvas>
+  <div id="hud"></div>
+  <div id="err"></div>
+  <script type="module">
+    import { createJsui } from './jsui-web.js';
+
+    // ?bundle=<url> (default: the hand-written demo), ?dev=1 for live reload,
+    // ?stats=0 hides the timing readout, ?renderer=2d forces the 2D blitter.
+    const q = new URLSearchParams(location.search);
+    const hud = document.getElementById('hud');
+    const err = document.getElementById('err');
+    if (q.get('stats') === '0') hud.style.display = 'none';
+
+    try {
+      const jsui = await createJsui({
+        canvas: document.getElementById('ui'),
+        bundleUrl: q.get('bundle') || './demo/bundle.js',
+        devMode: q.get('dev') === '1',
+        renderer: q.get('renderer') || 'auto',
+      });
+      window.jsui = jsui;
+      jsui.on('message', (name, data) => console.log('[ui → host]', name, data));
+      jsui.on('error', (msg) => { err.textContent = msg; err.style.display = 'block'; });
+      let last = 0;
+      jsui.on('frame', (s) => {
+        if (!jsui.lastError) err.style.display = 'none';
+        const now = performance.now();
+        if (now - last < 250) return;
+        last = now;
+        hud.textContent = `${jsui.renderer} ${jsui.pixelWidth}×${jsui.pixelHeight} @${jsui.pixelRatio.toFixed(2)}\n` +
+          `tick ${s.tickMs.toFixed(2)} ms  paint ${s.renderMs.toFixed(2)} ms  blit ${s.blitMs.toFixed(2)} ms\n` +
+          `frames ${s.frames}  paints ${s.renders}`;
+      });
+    } catch (e) {
+      err.textContent = String(e && e.stack || e);
+      err.style.display = 'block';
+    }
+  </script>
+</body>
+</html>

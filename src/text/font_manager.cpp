@@ -12,7 +12,9 @@
 #include "include/ports/SkFontMgr_mac_ct.h"
 #elif defined(_WIN32)
 #include "include/ports/SkTypeface_win.h"
-#elif !defined(__EMSCRIPTEN__)
+#elif defined(__EMSCRIPTEN__)
+#include "include/ports/SkFontMgr_empty.h"
+#else
 #include "include/ports/SkFontMgr_fontconfig.h"
 #endif
 
@@ -30,7 +32,8 @@ static sk_sp<SkFontMgr> makeSystemFontMgr() {
 #elif defined(_WIN32)
   return SkFontMgr_New_DirectWrite();
 #elif defined(__EMSCRIPTEN__)
-  return nullptr;
+  // No system fonts in the browser; FreeType-backed manager so makeFromData works.
+  return SkFontMgr_New_Custom_Empty();
 #else
   return SkFontMgr_New_FontConfig(nullptr);
 #endif

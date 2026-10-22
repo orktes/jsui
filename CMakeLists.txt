@@ -35,3 +35,7 @@ if(JSUI_BUILD_TESTS AND NOT EMSCRIPTEN)
   target_link_libraries(jsui-tests PRIVATE jsui)
   add_test(NAME jsui-tests COMMAND jsui-tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
+
+if(EMSCRIPTEN)
+  include(Emscripten)
+endif()
