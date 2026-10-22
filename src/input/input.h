@@ -142,6 +142,7 @@ class InputManager {
   bool visible(const Node* n) const;  // attached and no display:none on the path
   Affine localToViewport(const Node* n) const;
 
+  // Returns true when JS called preventDefault().
   bool dispatch(Value::Object&& ev);
   Value::Object baseEvent(const char* type, const Node* target) const;
   bool dispatchPointer(const char* type, Node* target, const PointerState& p, int button, float x, float y);

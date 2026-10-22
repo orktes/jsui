@@ -118,8 +118,8 @@ Standard globals: `console`, `setTimeout`/`setInterval` (+ clear),
 
 Callbacks the bundle installs (all optional):
 
-* `__jsui_dispatchEvent(event) → boolean` — native → JS event. Returns true if
-  any handler ran or `preventDefault()` was called.
+* `__jsui_dispatchEvent(event) → number` — native → JS event. Bitmask: `1` a
+  handler ran, `2` `preventDefault()` was called.
 * `__jsui_onHostMessage(name, json)` — from `jsui_post_message`.
 * `__jsui_onLayout(id, {x, y, width, height})` — for `onLayout` listeners.
 
@@ -161,9 +161,10 @@ was `preventDefault()`-ed.
 ### Input routing details (`src/input/`)
 
 * **Default actions** (Tab focus moves, Enter/Space/A → `click`, D-pad/stick/arrow
-  navigation, wheel scrolling) run only when `__jsui_dispatchEvent` returned
-  false. The bridge has a single boolean, so "a handler ran" also suppresses
-  them: a JS Pressable that handles Enter itself should return true so no
+  navigation, wheel scrolling) are skipped when JS calls `preventDefault()`.
+  `__jsui_dispatchEvent` returns a bitmask: `1` = a handler ran, `2` =
+  default prevented (a boolean `true` is treated as `3` for compatibility).
+  A JS Pressable that handles Enter/Space/A itself prevents the default so no
   extra `click` follows. Exception: focus-on-press always happens.
 * **`__events` drives native decisions.** Names are matched case-insensitively
   by substring: `press`/`click` = pressable (focusable by default, `pointer`

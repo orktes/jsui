@@ -11,7 +11,7 @@
 //   console, setTimeout/Interval, requestAnimationFrame, queueMicrotask,
 //   performance.now, fetch/Response/Headers, TextEncoder/TextDecoder, URL.
 // Callbacks the bundle installs:
-//   globalThis.__jsui_dispatchEvent(event) -> bool (handled / defaultPrevented)
+//   globalThis.__jsui_dispatchEvent(event) -> number (1 handled | 2 defaultPrevented)
 //   globalThis.__jsui_onHostMessage(name, json)
 //   globalThis.__jsui_onLayout(id, {x,y,width,height})
 #pragma once
@@ -39,8 +39,9 @@ class JsEngine {
   void runJobs();
   bool hasPendingWork(double nowMs) const;
 
-  // Native -> JS
-  bool dispatchEvent(const Value& event);
+  // Native -> JS. Returns the bitmask from __jsui_dispatchEvent.
+  enum DispatchFlags { kHandled = 1, kDefaultPrevented = 2 };
+  int dispatchEvent(const Value& event);
   void hostMessage(const std::string& name, const std::string& json);
   void layoutEvent(uint32_t id, float x, float y, float w, float h);
 

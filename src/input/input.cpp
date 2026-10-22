@@ -355,7 +355,9 @@ void InputManager::addModifiers(Value::Object& ev) const {
 
 bool InputManager::dispatch(Value::Object&& ev) {
   if (!rt_.js) return false;
-  return rt_.js->dispatchEvent(Value(std::move(ev)));
+  // Only preventDefault() suppresses the default action; a handler that
+  // merely observes the event (flag 1) lets it proceed, like the DOM.
+  return (rt_.js->dispatchEvent(Value(std::move(ev))) & JsEngine::kDefaultPrevented) != 0;
 }
 
 bool InputManager::dispatchPointer(const char* type, Node* target, const PointerState& p, int button, float x,
