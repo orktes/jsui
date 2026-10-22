@@ -5,7 +5,7 @@
 import React from 'react';
 import { StyleSheet, View } from 'react-native';
 
-export const meta = { width: 640, height: 380, maxMismatch: 0.5, title: 'Transforms & opacity' };
+export const meta = { width: 640, height: 380, maxMismatch: 0.5, maxTileMismatch: 3, title: 'Transforms & opacity' };
 
 function Cell({ children }) {
   return <View style={styles.cell}>{children}</View>;

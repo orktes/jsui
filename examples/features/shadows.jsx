@@ -6,7 +6,7 @@
 import React from 'react';
 import { StyleSheet, View } from 'react-native';
 
-export const meta = { width: 680, height: 380, maxMismatch: 0.5, title: 'Shadows' };
+export const meta = { width: 680, height: 380, maxMismatch: 0.5, maxTileMismatch: 3, title: 'Shadows' };
 
 export default function App() {
   return (

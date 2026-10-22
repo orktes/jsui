@@ -355,6 +355,23 @@ Details of how the JS package uses the bridge, for native implementers:
   `/__jsui/version?since=<token>` long-polls until the token changes;
   `/__jsui/error` returns the current build error text; `/bundle.js` carries
   an `X-Jsui-Version` header.
+* Lists (`packages/react/src/components/lists.js`): `FlatList`,
+  `SectionList` and `VirtualizedList` are virtualized like React Native and
+  use only the public ScrollView API (`onScroll`, `onLayout`,
+  `onContentSizeChange`, `scrollTo`). A window of `windowSize` viewports is
+  mounted, grown by `maxToRenderPerBatch` every `updateCellsBatchingPeriod`
+  ms (RN's `computeWindowedRenderLimits`). Unmounted ranges become spacer
+  Views sized from `getItemLayout` or measured cell `onLayout`s; unmeasured
+  cells between two mounted ones share the gap evenly, so spacers never move
+  mounted cells, and the first visible cell is kept in place when cells
+  above it mount (Chrome's scroll anchoring, which the react-native-web
+  reference has). The first `initialNumToRender` cells, the last focused
+  cell and its neighbours (a global `focus` listener, since focus does not
+  bubble) and the closest sticky header stay mounted, so gamepad / keyboard
+  navigation reaches the next off-screen cell and native `scrollIntoView`
+  moves the window. Sticky headers are wrapper Views translated with
+  `patchStyle` per scroll event. `bridgeStats().nodes` is the live host node
+  count.
 * `tests/native/react_e2e_test.cpp` drives a real `@jsui/react` bundle through
   the C API (mouse, keys, text, gamepad, viewport, host messages, Animated);
   `npm test -w @jsui/cli` builds the bundle and runs it.

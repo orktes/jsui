@@ -5,7 +5,7 @@
 import React from 'react';
 import { StyleSheet, View } from 'react-native';
 
-export const meta = { width: 640, height: 360, maxMismatch: 0.5, title: 'Gradients' };
+export const meta = { width: 640, height: 360, maxMismatch: 0.5, maxTileMismatch: 3, title: 'Gradients' };
 
 export default function App() {
   return (

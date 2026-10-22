@@ -10,7 +10,7 @@ import path from 'node:path';
 import { discoverCases } from './lib/discover.js';
 import { buildWebBundle, ChromeRenderer, rnwVersion } from './lib/web.js';
 import { buildJsuiBundle, jsuiBuilderKind, jsuiRenderAvailable, runJsuiRender } from './lib/jsui.js';
-import { comparePngs } from './lib/compare.js';
+import { comparePngs, regionMismatchPct, worstTile } from './lib/compare.js';
 import { writeReport } from './lib/report.js';
 import { JSUI_RENDER, OUTPUT_DIR } from './lib/paths.js';
 
@@ -82,11 +82,12 @@ async function main() {
     for (const c of cases) {
       const dir = caseDir(c);
       await fs.promises.mkdir(dir, { recursive: true });
-      const r = { name: c.name, meta: c.meta, scale: opts.scale, chromeOnly: opts.chromeOnly, status: 'rendered', webLogs: [] };
+      const scale = opts.scale * (c.meta.scale || 1);
+      const r = { name: c.name, meta: c.meta, scale, chromeOnly: opts.chromeOnly, status: 'rendered', webLogs: [] };
       r.expectedPng = path.join(dir, 'expected.png');
       try {
         const webDir = await buildWebBundle(c.file, path.join(dir, 'web'));
-        const { png, cached, logs } = await chrome.render(webDir, c.meta, opts.scale, { useCache: opts.cache });
+        const { png, cached, logs } = await chrome.render(webDir, c.meta, scale, { useCache: opts.cache });
         await fs.promises.writeFile(r.expectedPng, png);
         r.webLogs = logs;
         r.cached = cached;
@@ -111,7 +112,7 @@ async function main() {
       try {
         const bundle = path.join(dir, 'jsui', 'bundle.js');
         await buildJsuiBundle(c.file, bundle);
-        const run = await runJsuiRender(bundle, r.actualPng, c.meta, opts.scale);
+        const run = await runJsuiRender(bundle, r.actualPng, c.meta, r.scale);
         r.jsuiMs = run.ms;
         r.jsuiLog = run.stderr.trim();
         if (!run.hasImage) throw new Error(`jsui-render produced no image\n${run.stderr}`);
@@ -128,8 +129,11 @@ async function main() {
       fs.writeFileSync(r.diffPng, cmp.diffPng);
       r.mismatchPct = cmp.mismatchPct;
       r.sizeMismatch = cmp.sizeMismatch;
-      r.status = cmp.mismatchPct <= c.meta.maxMismatch && !cmp.sizeMismatch ? 'pass' : 'fail';
+      const local = localChecks(cmp, c.meta, r.scale);
+      r.localFailures = local.filter((l) => !l.ok);
+      r.status = cmp.mismatchPct <= c.meta.maxMismatch && !cmp.sizeMismatch && !r.localFailures.length ? 'pass' : 'fail';
       if (cmp.sizeMismatch) r.error = 'expected and actual sizes differ';
+      if (r.localFailures.length) r.error = (r.error ? r.error + '\n' : '') + r.localFailures.map((l) => l.text).join('\n');
       if (r.renderWarning) r.error = (r.error ? r.error + '\n' : '') + 'jsui-render reported an error (see logs)';
     });
   }
@@ -155,6 +159,7 @@ async function main() {
     const tag = { pass: color(32, 'PASS'), fail: color(31, 'FAIL'), error: color(33, 'ERR '), rendered: color(36, 'OK  ') }[r.status];
     console.log(`${tag} ${r.name.padEnd(w)} ${pct}${r.cached ? color(90, ' [chrome cached]') : ''}`);
     if (r.status === 'error' && r.error) console.log(color(90, '     ' + r.error.split('\n')[0]));
+    for (const l of r.localFailures || []) console.log(color(90, '     ' + l.text));
   }
   console.log(`\nreport: ${path.relative(process.cwd(), reportFile) || reportFile}`);
   const bad = results.filter((r) => r.status === 'fail' || r.status === 'error').length;
@@ -164,6 +169,27 @@ async function main() {
   } else {
     console.log(color(32, opts.chromeOnly ? `${results.length} cases rendered in Chrome` : `all ${results.length} cases passed`));
   }
+}
+
+// Local checks that a whole-image percentage can hide:
+//   meta.maxTileMismatch  worst share (%) of mismatched pixels in any
+//                         meta.tileSize (default 16) CSS-px tile
+//   meta.regions          [{ name, x, y, w, h, maxMismatch }] in CSS px
+function localChecks(cmp, meta, scale) {
+  const out = [];
+  if (meta.maxTileMismatch != null) {
+    const size = Math.round((meta.tileSize || 16) * scale);
+    const t = worstTile(cmp, size);
+    out.push({
+      ok: t.pct <= meta.maxTileMismatch,
+      text: `worst ${meta.tileSize || 16}px tile at (${Math.round(t.x / scale)}, ${Math.round(t.y / scale)}): ${t.pct.toFixed(1)}% (max ${meta.maxTileMismatch}%)`,
+    });
+  }
+  for (const g of meta.regions || []) {
+    const pct = regionMismatchPct(cmp, g.x * scale, g.y * scale, g.w * scale, g.h * scale);
+    out.push({ ok: pct <= g.maxMismatch, text: `region "${g.name}": ${pct.toFixed(1)}% (max ${g.maxMismatch}%)` });
+  }
+  return out;
 }
 
 main().catch((e) => {

@@ -59,6 +59,19 @@ when the mismatched-pixel percentage is at most its `meta.maxMismatch`
 both images have the same size. A JSUI render error, a missing image or a size
 mismatch fails the case.
 
+A whole-image percentage can hide a local defect (a missing corner arc is a
+few dozen pixels out of 230,000), so cases can also set local checks:
+
+| `meta` key | Meaning |
+| --- | --- |
+| `maxTileMismatch` | worst mismatched share (%) of any `tileSize`×`tileSize` tile (CSS px, default 16, scanned at half-tile steps) |
+| `regions` | `[{ name, x, y, w, h, maxMismatch }]` in CSS px, each with its own budget |
+| `scale` | per-case device pixel ratio multiplier, e.g. `4` for a zoomed-in case |
+
+Shape-only feature cases use `maxTileMismatch: 3`. `features/corners` renders
+at 4× with 8 px tiles and named corner regions, so a wrong pixel on a rounded
+border shows up.
+
 ## Adding an example
 
 Create `examples/features/<name>.jsx` (one property family, ideally no text) or

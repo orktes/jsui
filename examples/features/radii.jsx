@@ -5,7 +5,7 @@
 import React from 'react';
 import { StyleSheet, View } from 'react-native';
 
-export const meta = { width: 640, height: 360, maxMismatch: 0.5, title: 'Border radius' };
+export const meta = { width: 640, height: 360, maxMismatch: 0.5, maxTileMismatch: 3, title: 'Border radius' };
 
 export default function App() {
   return (

@@ -120,9 +120,12 @@ function mayDiffer(a, b) {
 }
 
 let bridgeCalls = 0;
-/** Number of setProps + patchStyle bridge calls so far (benchmarks, tests). */
+/**
+ * Number of setProps + patchStyle bridge calls so far, and of live host
+ * nodes (each one a native node), for benchmarks and tests.
+ */
 export function bridgeStats() {
-  return { calls: bridgeCalls };
+  return { calls: bridgeCalls, nodes: instances.size };
 }
 
 export class HostInstance {

@@ -4,6 +4,9 @@
 // test suite, which then runs `jsui-tests react_e2e` with
 // JSUI_REACT_E2E_BUNDLE=<path>. Without the variable the test is skipped,
 // so the native suite does not depend on Node.
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -136,5 +139,156 @@ TEST(react_e2e) {
   t.key("Enter");
   CHECK_EQ(t.take(), std::string("text=\"h\xC3\xA9\" text=\"h\" text=\"hy\" submit=\"hy\""));
 
+  CHECK(jsui_last_error(t.rt) == nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// Virtualized FlatList end to end: packages/cli/test/e2e/list.jsx (10,000
+// rows of 30 px, blue even / red odd) in a 400x300 viewport, built by the
+// @jsui/cli suite and passed as JSUI_REACT_LIST_BUNDLE. Checks that only a
+// window of rows is mounted, that every on-screen row is painted after
+// gamepad focus navigation, wheel scrolling, scrollToIndex and scrollToEnd,
+// and prints creation / scrolling timings.
+
+namespace {
+
+int statInt(const std::string& s, const char* key) {
+  std::string k = std::string("\"") + key + "\":";
+  size_t p = s.rfind(k);
+  return p == std::string::npos ? -999999 : std::atoi(s.c_str() + p + k.size());
+}
+
+struct ListE2E : E2E {
+  std::vector<uint8_t> px = std::vector<uint8_t>(400 * 300 * 4);
+  std::string stats() {
+    take();
+    jsui_post_message(rt, "stats", "null");
+    tick(16);
+    return take();
+  }
+  void frame() { jsui_render_rgba(rt, px.data(), 400, 300, 400 * 4); }
+  // Every row band on screen has its row's colour (no blank spacer showing).
+  bool rowsMatch(int offset) {
+    frame();
+    for (int y = 0; y < 300; y += 7) {
+      int within = (y + offset) % 30;
+      if (within < 2 || within > 27) continue;  // skip anti-aliased edges
+      int row = (y + offset) / 30;
+      const uint8_t* p = &px[(size_t(y) * 400 + 10) * 4];
+      bool odd = row % 2;
+      bool ok = odd ? (p[0] > 200 && p[2] < 50) : (p[2] > 200 && p[0] < 50);
+      if (!ok) {
+        std::fprintf(stderr, "  row %d at y=%d (offset %d): rgb %d,%d,%d\n", row, y, offset, p[0], p[1], p[2]);
+        return false;
+      }
+    }
+    return true;
+  }
+};
+
+double msSince(std::chrono::steady_clock::time_point t0) {
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
+
+}  // namespace
+
+TEST(react_list_e2e) {
+  const char* path = std::getenv("JSUI_REACT_LIST_BUNDLE");
+  if (!path) {
+    std::printf("  (skipped: set JSUI_REACT_LIST_BUNDLE, see packages/cli/test)\n");
+    return;
+  }
+  ListE2E t;
+  auto t0 = std::chrono::steady_clock::now();
+  CHECK(t.load(path));
+  double firstFrameMs = msSince(t0);
+  if (const char* err = jsui_last_error(t.rt)) std::fprintf(stderr, "  js error: %s\n", err);
+  CHECK(jsui_last_error(t.rt) == nullptr);
+  // Let the render window grow batch by batch (50 ms each) until stable.
+  auto t1 = std::chrono::steady_clock::now();
+  t.tick(1500);
+  double settleMs = msSince(t1);
+  std::string s = t.stats();
+  int mounted = statInt(s, "mounted"), nodes = statInt(s, "nodes");
+  std::printf("  10k rows: load + first frames %.1f ms, window filled in %.1f ms (wall); %d rows mounted, %d host nodes\n",
+              firstFrameMs, settleMs, mounted, nodes);
+  CHECK(mounted >= 20 && mounted <= 200);
+  CHECK(nodes > 0 && nodes < 1000);
+  CHECK_EQ(statInt(s, "first"), 0);
+  CHECK_EQ(statInt(s, "last"), 9);
+  CHECK(t.rowsMatch(0));
+
+  // Gamepad: row 0 has hasTVPreferredFocus; D-pad down walks the list and
+  // focus changes scroll the focused row into view (bottom edge aligned).
+  for (int i = 0; i < 40; i++) t.pad(13);
+  std::string msgs = t.take();
+  CHECK(msgs.find("focus=40") != std::string::npos);
+  CHECK(msgs.find("focus=41") == std::string::npos);
+  t.tick(200);
+  CHECK(t.rowsMatch(41 * 30 - 300));
+  s = t.stats();
+  CHECK_EQ(statInt(s, "first"), 31);
+  CHECK_EQ(statInt(s, "last"), 40);
+  t.pad(0);
+  CHECK(t.take().find("press=40") != std::string::npos);
+
+  // Mouse wheel far past the mounted window.
+  jsui_send_mouse_move(t.rt, 200, 150);
+  jsui_send_mouse_wheel(t.rt, 200, 150, 0, 6000);
+  t.tick(16);
+  t.tick(48);
+  CHECK(t.rowsMatch(41 * 30 - 300 + 6000));
+  t.tick(500);
+  s = t.stats();
+  CHECK(statInt(s, "mounted") <= 300);
+  CHECK_EQ(statInt(s, "first"), (41 * 30 - 300 + 6000) / 30);
+  // Focus is still on row 40 (kept mounted although off screen): D-pad down
+  // goes to row 41 and scrolls back to it (above the viewport: top aligned).
+  t.pad(13);
+  CHECK(t.take().find("focus=41") != std::string::npos);
+  t.tick(100);
+  CHECK(t.rowsMatch(41 * 30));
+
+  // scrollToIndex / scrollToEnd through the ref (host messages).
+  jsui_post_message(t.rt, "scrollToIndex", "{\"index\":5000}");
+  t.tick(48);
+  CHECK(t.rowsMatch(5000 * 30));
+  t.tick(100);
+  s = t.stats();
+  CHECK_EQ(statInt(s, "first"), 5000);
+  jsui_post_message(t.rt, "scrollToEnd", "null");
+  t.tick(200);
+  CHECK(t.take().find("end=10000") != std::string::npos);
+  CHECK(t.rowsMatch(10000 * 30 - 300));
+  s = t.stats();
+  CHECK_EQ(statInt(s, "last"), 9999);
+  CHECK(statInt(s, "nodes") < 1500);
+
+  // Scrolling cost: 300 frames of 40 px wheel steps from the top, each a
+  // tick + full repaint, as a game host would do per frame.
+  jsui_post_message(t.rt, "scrollToIndex", "{\"index\":0}");
+  t.tick(500);
+  std::vector<double> frames;
+  double inputMs = 0, tickMs = 0, paintMs = 0;
+  for (int i = 0; i < 300; i++) {
+    auto f0 = std::chrono::steady_clock::now();
+    jsui_send_mouse_wheel(t.rt, 200, 150, 0, 40);
+    double a = msSince(f0);
+    t.now += 16;
+    jsui_tick(t.rt, t.now);
+    double b = msSince(f0);
+    t.frame();
+    frames.push_back(msSince(f0));
+    inputMs += a, tickMs += b - a, paintMs += frames.back() - b;
+  }
+  std::printf("  scroll breakdown per frame: wheel+onScroll %.2f ms, tick (timers, React, layout, onLayout) %.2f ms, paint %.2f ms\n",
+              inputMs / 300, tickMs / 300, paintMs / 300);
+  CHECK(t.rowsMatch(300 * 40));
+  double sum = 0;
+  for (double f : frames) sum += f;
+  std::vector<double> sorted = frames;
+  std::sort(sorted.begin(), sorted.end());
+  std::printf("  scroll 300 frames x 40 px: avg %.2f ms, p95 %.2f ms, max %.2f ms per frame (wheel + tick + paint 400x300)\n",
+              sum / frames.size(), sorted[size_t(frames.size() * 95 / 100)], sorted.back());
   CHECK(jsui_last_error(t.rt) == nullptr);
 }
