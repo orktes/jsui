@@ -1,5 +1,6 @@
 #include "runtime.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -59,7 +60,10 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
 
 Runtime::~Runtime() {
   loader.cancelAll();
+  std::vector<uint64_t> calls = js ? js->pendingCalls() : std::vector<uint64_t>();
   js.reset();
+  endCalls(calls, "runtime destroyed");
+  deliverUiCallResults();
   doc.clear();
   doc.onNodeDestroyed = nullptr;
   doc.onLayout = nullptr;
@@ -81,11 +85,126 @@ void Runtime::reportError(const std::string& msg) {
 }
 
 void Runtime::resetEngine() {
+  std::vector<uint64_t> calls = js ? js->pendingCalls() : std::vector<uint64_t>();
   js.reset();
   animated->clear();
   doc.clear();
+  // Shared state outlives the context (the new bundle reads it as it starts).
   js = std::make_unique<JsEngine>(*this);
   redraw_ = true;
+  endCalls(calls, "the UI was reloaded");
+}
+
+// ------------------------------------------------------------ game data
+
+int Runtime::setState(const char* key, const char* json, bool patch) {
+  if (!key) {
+    log(JSUI_LOG_ERROR, patch ? "jsui_patch_state: key is NULL" : "jsui_set_state: key is NULL");
+    return -1;
+  }
+  if (!json) return state.remove(key) ? 1 : 0;
+  std::string error;
+  HostState::Result r = patch ? state.patch(key, json, &error) : state.set(key, json, &error);
+  if (r == HostState::Result::Invalid) {
+    log(JSUI_LOG_ERROR, std::string(patch ? "jsui_patch_state" : "jsui_set_state") + "(\"" + key +
+                            "\"): invalid JSON (" + error + ")");
+    return -1;
+  }
+  return r == HostState::Result::Changed ? 1 : 0;
+}
+
+void Runtime::uiStateChanged(const std::string& key) {
+  if (!config.on_state) return;
+  const std::string* json = state.json(key);
+  config.on_state(config.state_user, key.c_str(), json ? json->c_str() : nullptr);
+}
+
+void Runtime::deliverStateChanges() {
+  if (!state.hasDirty()) return;
+  std::vector<std::string> keys = state.takeDirty();
+  js->stateChanged(keys);
+}
+
+int Runtime::resolveCall(uint64_t id, const char* json) {
+  if (!js || !js->hasCall(id)) return -1;
+  std::string text = json ? json : "null";
+  std::string error;
+  if (!Json::parse(text, nullptr, &error)) {
+    std::string msg = "jsui_resolve_call: invalid JSON result (" + error + ")";
+    log(JSUI_LOG_ERROR, msg);
+    js->settleCall(id, false, msg);
+    return -2;
+  }
+  js->settleCall(id, true, text);
+  return 0;
+}
+
+int Runtime::rejectCall(uint64_t id, const char* message) {
+  if (!js || !js->hasCall(id)) return -1;
+  js->settleCall(id, false, message ? message : "rejected");
+  return 0;
+}
+
+void Runtime::hostCallCancelled(uint64_t id) {
+  if (config.on_call_cancel) config.on_call_cancel(config.call_user, id);
+}
+
+uint64_t Runtime::callUi(const char* name, const char* argsJson, JsuiCallResultFn done, void* user) {
+  uint64_t id = newCallId();
+  uiCalls_[id] = {done, user};
+  std::string n = name ? name : "";
+  if (!js) {  // a done callback started a call while the runtime is destroyed
+    uiCallSettled(id, false, "runtime destroyed");
+    return id;
+  }
+  std::string args = argsJson ? argsJson : "null";
+  std::string error;
+  if (!Json::parse(args, nullptr, &error)) {
+    uiCallSettled(id, false, "jsui_call_ui(\"" + n + "\"): invalid JSON arguments (" + error + ")");
+    return id;
+  }
+  Value argv[3] = {Value(double(id)), Value(n), Value(args)};
+  if (!js->callGlobal("__jsui_onCall", argv, 3))
+    uiCallSettled(id, false, "no UI handler for \"" + n + "\" (the bundle has not registered Host.handle)");
+  return id;
+}
+
+void Runtime::uiCallSettled(uint64_t id, bool ok, std::string payload) {
+  // Ignores ids that are not pending (settled twice, or from an old context).
+  auto it = uiCalls_.find(id);
+  if (it == uiCalls_.end()) return;
+  for (auto& r : uiResults_)
+    if (r.id == id) return;
+  uiResults_.push_back({id, ok, std::move(payload)});
+}
+
+void Runtime::deliverUiCallResults() {
+  // Callbacks may start new calls; those settle into a fresh list.
+  for (int round = 0; round < 8 && !uiResults_.empty(); round++) {
+    auto results = std::move(uiResults_);
+    uiResults_.clear();
+    for (auto& r : results) {
+      auto it = uiCalls_.find(r.id);
+      if (it == uiCalls_.end()) continue;
+      UiCall c = it->second;
+      uiCalls_.erase(it);
+      if (c.done) c.done(c.user, r.id, r.ok ? 1 : 0, r.payload.c_str());
+    }
+  }
+}
+
+void Runtime::endCalls(const std::vector<uint64_t>& hostCalls, const char* reason) {
+  for (uint64_t id : hostCalls) hostCallCancelled(id);
+  // Results that already settled keep their outcome; the rest fail.
+  std::vector<uint64_t> open;
+  for (auto& [id, c] : uiCalls_) {
+    bool settled = false;
+    for (auto& r : uiResults_) settled = settled || r.id == id;
+    if (!settled) open.push_back(id);
+  }
+  std::sort(open.begin(), open.end());
+  for (uint64_t id : open) uiResults_.push_back({id, false, reason});
+  deliverUiCallResults();
 }
 
 bool Runtime::loadSource(const std::string& source, const std::string& name) {
@@ -94,6 +213,9 @@ bool Runtime::loadSource(const std::string& source, const std::string& name) {
   if (baseUrl.empty()) baseUrl = name;
   lastError.clear();
   redraw_ = true;
+  // The bundle reads the current shared state as it starts; earlier changes
+  // need no delivery.
+  state.takeDirty();
   return js->eval(source, name);
 }
 
@@ -186,6 +308,9 @@ void Runtime::tick(double nowMs) {
   doc.now = nowMs;
   if (reloadRequested_) reload();
   loader.pump();
+  // Shared state the embedder changed since the last tick: subscribers
+  // re-render in one batch before this tick's timers and frame callbacks.
+  deliverStateChanges();
   js->runTimers(nowMs);
   js->runAnimationFrame(nowMs);
   js->runJobs();
@@ -199,6 +324,8 @@ void Runtime::tick(double nowMs) {
   // A LayoutAnimation applies to the commit that armed it only.
   doc.disarmLayoutAnimation();
   devPoll();
+  // jsui_call_ui results settled during this tick (or since the last one).
+  deliverUiCallResults();
   if (doc.paintDirty()) redraw_ = true;
 }
 
@@ -247,7 +374,8 @@ bool Runtime::wantsFrame() const {
   // A pending repaint alone is not a reason to tick: the host paints after
   // the tick it already ran.
   return reloadRequested_ || loader.pending() > 0 || (js && js->hasPendingWork(now + 17)) || input->animating() ||
-         doc.layoutAnimating() || animated->animating() || !animated->ends.empty();
+         doc.layoutAnimating() || animated->animating() || !animated->ends.empty() || state.hasDirty() ||
+         !uiResults_.empty();
 }
 
 void Runtime::render(void* pixels, int width, int height, size_t rowBytes) {

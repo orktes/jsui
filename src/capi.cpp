@@ -51,6 +51,26 @@ void jsui_post_message(JsuiRuntime* rt, const char* name, const char* json) {
   rt->rt->js->hostMessage(name ? name : "", json ? json : "null");
 }
 
+int jsui_set_state(JsuiRuntime* rt, const char* key, const char* json) { return rt->rt->setState(key, json, false); }
+
+int jsui_patch_state(JsuiRuntime* rt, const char* key, const char* json) {
+  if (!json) return rt->rt->setState(key, nullptr, false);
+  return rt->rt->setState(key, json, true);
+}
+
+const char* jsui_get_state(JsuiRuntime* rt, const char* key) {
+  if (!key) return nullptr;
+  const std::string* json = rt->rt->state.json(key);
+  return json ? json->c_str() : nullptr;
+}
+
+int jsui_resolve_call(JsuiRuntime* rt, uint64_t id, const char* json) { return rt->rt->resolveCall(id, json); }
+int jsui_reject_call(JsuiRuntime* rt, uint64_t id, const char* message) { return rt->rt->rejectCall(id, message); }
+
+uint64_t jsui_call_ui(JsuiRuntime* rt, const char* name, const char* argsJson, JsuiCallResultFn done, void* user) {
+  return rt->rt->callUi(name, argsJson, done, user);
+}
+
 int jsui_load_bundle_source(JsuiRuntime* rt, const char* source, size_t size, const char* name) {
   return rt->rt->loadSource(std::string(source, size), name ? name : "bundle.js") ? 0 : -1;
 }

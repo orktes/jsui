@@ -1,10 +1,14 @@
 // The object behind the JsuiRuntime C handle.
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "core/document.h"
+#include "host_state.h"
 #include "include/core/SkRect.h"
 #include "include/core/SkRefCnt.h"
 #include "jsui/jsui.h"
@@ -76,6 +80,25 @@ class Runtime {
   std::string clipboard;
   double now = 0;
 
+  // Shared host state (jsui_set_state / HostState in JS). Lives as long as
+  // the runtime, across JS contexts.
+  HostState state;
+  // jsui_set_state / jsui_patch_state (json NULL removes). Logs invalid JSON.
+  int setState(const char* key, const char* json, bool patch);
+  // A JS-originated change of `key`: tells the embedder (on_state).
+  void uiStateChanged(const std::string& key);
+
+  // Calls: Host.call <-> on_call / jsui_resolve_call, and
+  // jsui_call_ui <-> Host.handle.
+  uint64_t newCallId() { return nextCallId_++; }
+  int resolveCall(uint64_t id, const char* json);
+  int rejectCall(uint64_t id, const char* message);
+  // A Host.call ended unanswered on the JS side (timeout): tells the embedder.
+  void hostCallCancelled(uint64_t id);
+  uint64_t callUi(const char* name, const char* argsJson, JsuiCallResultFn done, void* user);
+  // A Host.handle handler settled (or could not run); delivered at the end of the tick.
+  void uiCallSettled(uint64_t id, bool ok, std::string payload);
+
   Document doc;
   FontManager fonts;
   ResourceLoader loader;
@@ -98,6 +121,27 @@ class Runtime {
   size_t lastTargetRowBytes_ = 0;
   void devPoll();
   bool redraw_ = true;
+
+  // Hands the state keys the embedder changed since the last tick to JS.
+  void deliverStateChanges();
+  // Runs the done callbacks of settled jsui_call_ui calls.
+  void deliverUiCallResults();
+  // The JS context is going away: cancels its unanswered Host.calls (ids
+  // taken from the engine before it is destroyed) and fails the unsettled
+  // jsui_call_ui calls with `reason`.
+  void endCalls(const std::vector<uint64_t>& hostCalls, const char* reason);
+  uint64_t nextCallId_ = 1;
+  struct UiCall {
+    JsuiCallResultFn done;
+    void* user;
+  };
+  std::unordered_map<uint64_t, UiCall> uiCalls_;  // jsui_call_ui calls not yet settled
+  struct UiResult {
+    uint64_t id;
+    bool ok;
+    std::string payload;
+  };
+  std::vector<UiResult> uiResults_;  // settled, waiting for delivery
 
   // Dev mode: version polling of <origin>/__jsui/version and the frame shown
   // while a reloaded bundle is broken.

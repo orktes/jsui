@@ -364,6 +364,7 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
   JS_SetPropertyStr(ctx, native, "textEditing", JS_TRUE);
   JS_SetPropertyStr(ctx, native, "devMode", JS_NewBool(ctx, impl.rt.config.dev_mode != 0));
   installAnimatedBridge(impl, native);
+  installHostDataBridge(impl, native);
   JS_SetPropertyStr(ctx, global, "__jsui_native", native);
 }
 

@@ -90,6 +90,9 @@ struct JsEngine::Impl {
   std::unordered_map<JSAtom, std::string> atomNames;
   const std::string* atomName(JSAtom atom);
 
+  // Pending Host.calls: call id -> the settle(ok, payload) function JS passed.
+  std::unordered_map<uint64_t, JSValue> hostCalls;
+
   // Cached atoms for hot callbacks.
   JSAtom atomDispatch = 0, atomHostMessage = 0, atomOnLayout = 0;
 
@@ -128,6 +131,8 @@ JSValue fromValue(JSContext* ctx, const Value& v);
 bool bytesOf(JSContext* ctx, JSValueConst v, std::vector<uint8_t>* out);
 
 void installBridge(JsEngine::Impl& impl, JSValue global);
+// Shared state and calls on __jsui_native (bridge_host.cpp).
+void installHostDataBridge(JsEngine::Impl& impl, JSValue native);
 void installHostApi(JsEngine::Impl& impl, JSValue global, JSValue host);
 // Evaluates the JS prelude; each piece is a function expression called with `host`.
 bool runPrelude(JsEngine::Impl& impl, JSValue host);
