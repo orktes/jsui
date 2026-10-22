@@ -247,28 +247,55 @@ export class AnimatedValueXY extends AnimatedNode {
   }
 }
 
-// Color value: four channels animated together, outputs rgba().
+// Color value: four channels animated together, outputs rgba(). Accepts a
+// color string, {r, g, b, a} numbers or {r, g, b, a} Animated.Values (RN).
+export function colorChannels(value) {
+  if (value instanceof AnimatedColor) return [value.r, value.g, value.b, value.a].map((n) => n.__getValue());
+  if (value && typeof value === 'object' && !(value instanceof AnimatedNode) && 'r' in value) {
+    const ch = (v, d) => (v instanceof AnimatedNode ? v.__getValue() : v === undefined ? d : +v);
+    return [ch(value.r, 0), ch(value.g, 0), ch(value.b, 0), ch(value.a, 1)];
+  }
+  return parseColor(value == null ? 'black' : value) || [0, 0, 0, 1];
+}
+
+const CHANNELS = ['r', 'g', 'b', 'a'];
+
 export class AnimatedColor extends AnimatedNode {
   constructor(value) {
     super();
-    const c = parseColor(value || 'black') || [0, 0, 0, 1];
-    this.r = new AnimatedValue(c[0]);
-    this.g = new AnimatedValue(c[1]);
-    this.b = new AnimatedValue(c[2]);
-    this.a = new AnimatedValue(c[3]);
-    for (const ch of [this.r, this.g, this.b, this.a]) ch.__addChild(this);
+    const given = value && typeof value === 'object' && !(value instanceof AnimatedNode) && 'r' in value ? value : null;
+    const c = colorChannels(value);
+    CHANNELS.forEach((k, i) => {
+      this[k] = given && given[k] instanceof AnimatedValue ? given[k] : new AnimatedValue(c[i]);
+    });
+    for (const k of CHANNELS) this[k].__addChild(this);
   }
   __getValue() {
     return `rgba(${Math.round(this.r.__getValue())}, ${Math.round(this.g.__getValue())}, ${Math.round(this.b.__getValue())}, ${this.a.__getValue()})`;
   }
   setValue(value) {
-    const c = parseColor(value) || [0, 0, 0, 1];
+    const c = colorChannels(value);
+    batch(() => CHANNELS.forEach((k, i) => this[k].setValue(c[i])));
+  }
+  setOffset(value) {
+    const c = colorChannels(value);
+    batch(() => CHANNELS.forEach((k, i) => this[k].setOffset(c[i])));
+  }
+  flattenOffset() {
+    for (const k of CHANNELS) this[k].flattenOffset();
+  }
+  extractOffset() {
+    for (const k of CHANNELS) this[k].extractOffset();
+  }
+  stopAnimation(cb) {
+    for (const k of CHANNELS) this[k].stopAnimation();
+    if (cb) cb(this.__getValue());
+  }
+  resetAnimation(cb) {
     batch(() => {
-      this.r.setValue(c[0]);
-      this.g.setValue(c[1]);
-      this.b.setValue(c[2]);
-      this.a.setValue(c[3]);
+      for (const k of CHANNELS) this[k].resetAnimation();
     });
+    if (cb) cb(this.__getValue());
   }
 }
 
@@ -392,11 +419,14 @@ export const divide = (a, b) =>
   });
 export const modulo = (a, m) => new AnimatedOp([a], (v) => ((v[0] % m) + m) % m);
 export function diffClamp(a, min, max) {
-  let last = null;
-  let value = 0;
-  return new AnimatedOp([a], (v) => {
+  // Like RN's AnimatedDiffClamp: starts at the input's current value and
+  // then follows its changes, clamped to [min, max].
+  const input = a instanceof AnimatedNode ? a : new AnimatedValue(+a);
+  let last = input.__getValue();
+  let value = last;
+  return new AnimatedOp([input], (v) => {
     const cur = v[0];
-    const diff = last === null ? 0 : cur - last;
+    const diff = cur - last;
     last = cur;
     value = Math.min(Math.max(value + diff, min), max);
     return value;

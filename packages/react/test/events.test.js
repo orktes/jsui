@@ -79,6 +79,7 @@ test('Pressable: press, long press, cancel on leave, function style', async () =
   await wait();
   assert.equal(p().props.style.backgroundColor, 'red');
   assert.equal(mock.text(p().id), 'down');
+  mock.advance(150);  // held longer than minPressDuration: pressOut is immediate
   ev('pointerup');
   ev('click');  // native click after pointerup must not double-fire
   await wait();
@@ -88,6 +89,7 @@ test('Pressable: press, long press, cancel on leave, function style', async () =
   log.length = 0;
   ev('pointerdown');
   await wait(60);
+  mock.advance(150);
   ev('pointerup');
   assert.deepEqual(log, ['in', 'long', 'out'], 'long press suppresses onPress');
 
@@ -125,6 +127,86 @@ test('Pressable: keyboard Enter and gamepad click activate; disabled ignores', a
   mock.dispatch({ type: 'pointerdown', target: k().id, x: 0, y: 0, button: 0 });
   mock.dispatch({ type: 'pointerup', target: k().id, x: 0, y: 0, button: 0 });
   assert.deepEqual(log, []);
+  render(null);
+});
+
+test('Pressable: RN timing (minPressDuration, delayPressIn/Out, delayHoverIn/Out)', async () => {
+  const log = [];
+  const t0 = () => mock.now();
+  render(
+    h(
+      Pressable,
+      {
+        nativeID: 'd',
+        onPress: () => log.push('press'),
+        onPressIn: () => log.push('in'),
+        onPressOut: () => log.push('out'),
+        onHoverIn: () => log.push('hoverIn'),
+        onHoverOut: () => log.push('hoverOut'),
+        delayHoverIn: 40,
+        delayHoverOut: 20,
+        style: ({ pressed, hovered }) => ({ backgroundColor: pressed ? 'red' : hovered ? 'green' : 'blue' }),
+      },
+    ),
+  );
+  const d = () => byNativeID('d');
+  const ev = (type, extra) => mock.dispatch(Object.assign({ type, target: d().id, x: 1, y: 1, button: 0 }, extra));
+  // Quick tap: onPress before the delayed onPressOut; pressed stays >= 130 ms.
+  ev('pointerdown');
+  ev('pointerup');
+  assert.deepEqual(log, ['in', 'press']);
+  await wait();
+  assert.equal(d().props.style.backgroundColor, 'red', 'pressed state held after a quick tap');
+  await wait(170);
+  assert.deepEqual(log, ['in', 'press', 'out']);
+  assert.equal(d().props.style.backgroundColor, 'blue');
+  t0();
+
+  // Hover: state is immediate, callbacks honor the delays; a short visit
+  // (leave before delayHoverIn) fires neither callback.
+  log.length = 0;
+  ev('pointerenter');
+  await wait();
+  assert.equal(d().props.style.backgroundColor, 'green');
+  assert.deepEqual(log, []);
+  await wait(70);
+  assert.deepEqual(log, ['hoverIn']);
+  ev('pointerleave');
+  assert.deepEqual(log, ['hoverIn']);
+  await wait(50);
+  assert.deepEqual(log, ['hoverIn', 'hoverOut']);
+  log.length = 0;
+  ev('pointerenter');
+  await wait(10);
+  ev('pointerleave');
+  await wait(80);
+  assert.deepEqual(log, [], 'leave before delayHoverIn cancels both');
+  render(null);
+
+  // delayPressIn: released before it elapses -> in, press, out still fire.
+  log.length = 0;
+  render(h(Pressable, { nativeID: 'd', delayPressIn: 50, delayPressOut: 30, onPressIn: () => log.push('in'), onPressOut: () => log.push('out'), onPress: () => log.push('press') }));
+  ev('pointerdown');
+  assert.deepEqual(log, []);
+  await wait(80);
+  assert.deepEqual(log, ['in']);
+  mock.advance(300);
+  ev('pointerup');
+  assert.deepEqual(log, ['in', 'press'], 'delayPressOut defers onPressOut');
+  await wait(60);
+  assert.deepEqual(log, ['in', 'press', 'out']);
+  log.length = 0;
+  ev('pointerdown');
+  ev('pointerup');
+  assert.deepEqual(log, ['in', 'press'], 'released before delayPressIn: activates at once');
+  await wait(200);
+  assert.deepEqual(log, ['in', 'press', 'out']);
+  // Gamepad activation: in, press, then out after minPressDuration.
+  log.length = 0;
+  ev('click', { pointerType: 'gamepad' });
+  assert.deepEqual(log, ['in', 'press']);
+  await wait(200);
+  assert.deepEqual(log, ['in', 'press', 'out']);
   render(null);
 });
 

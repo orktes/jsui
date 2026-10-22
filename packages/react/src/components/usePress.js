@@ -1,10 +1,19 @@
-// Press state machine shared by Pressable, the Touchables and Text.
+// Press state machine shared by Pressable, the Touchables and Text, following
+// React Native's Pressability:
 //
-//   pointer: pointerdown -> pressIn (+ long-press timer) -> pointerup -> pressOut, press
+//   pointer: pointerdown -> pressIn (after delayPressIn; + long-press timer)
+//            pointerup -> pressOut, press
 //            pointerleave / pointercancel while pressed -> pressOut (cancel)
 //   keyboard (focused): Enter / Space keydown -> pressIn, keyup -> pressOut, press
 //   gamepad A / native activation: `click` without a preceding pointer or key
-//            press -> pressIn, pressOut, press (pressed state flashes briefly)
+//            press -> pressIn, press, pressOut
+//
+// Like RN, onPressOut (and the pressed state) is held until the press has
+// lasted minPressDuration (130 ms) or delayPressOut, so a quick tap or a
+// gamepad activation still shows its pressed feedback; onPress then fires
+// before the delayed onPressOut. onHoverIn / onHoverOut honor delayHoverIn /
+// delayHoverOut (the `hovered` state itself changes immediately, like
+// react-native-web).
 //
 // Handlers are created once per component and read the latest props through
 // a ref, so re-renders do not change host props (no bridge traffic).
@@ -13,8 +22,8 @@ import { useEffect, useRef, useState } from 'react';
 import { now } from '../native.js';
 
 const DEFAULT_LONG_PRESS_MS = 500;
+const DEFAULT_MIN_PRESS_MS = 130;
 const CLICK_DEDUPE_MS = 400;
-const FLASH_MS = 90;
 
 // Interaction states as bit flags -> shared frozen objects (no allocations).
 const PRESSED = 1;
@@ -29,13 +38,24 @@ function isActivationKey(e) {
   return k === 'Enter' || k === ' ' || k === 'Spacebar' || k === 'NumpadEnter';
 }
 
+function delayOf(v, fallback = 0) {
+  const n = v == null ? fallback : +v;
+  return n > 0 ? n : 0;
+}
+
 class PressController {
   constructor() {
     this.props = null;
     this.bits = 0;
-    this.source = null;  // 'pointer' | 'key' while pressed
+    this.source = null;  // 'pointer' | 'key' | 'click' while a press is in flight
+    this.active = false;  // onPressIn delivered (delayPressIn elapsed)
+    this.activatedAt = 0;
     this.longTimer = null;
-    this.flashTimer = null;
+    this.pressInTimer = null;
+    this.pressOutTimer = null;
+    this.pressOutFire = null;
+    this.hoverTimer = null;
+    this.hoverPending = null;
     this.longFired = false;
     this.lastEnd = -1e9;
     this.setBits = null;  // React state setter, or null when not tracked
@@ -86,32 +106,86 @@ class PressController {
     return !!this.props.disabled;
   }
 
-  pressIn(e, source) {
+  // Delivers a pending (delayed) onPressOut right away.
+  flushPressOut() {
+    if (!this.pressOutTimer) return;
+    clearTimeout(this.pressOutTimer);
+    const fire = this.pressOutFire;
+    this.pressOutTimer = null;
+    this.pressOutFire = null;
+    if (fire) fire();
+  }
+
+  // A press starts (pointer down, activation key, click): onPressIn now or
+  // after delayPressIn, and the long-press timer.
+  begin(e, source) {
+    this.flushPressOut();
     this.source = source;
     this.longFired = false;
-    this.set(PRESSED, true);
+    this.active = false;
     const p = this.props;
-    if (p.onPressIn) p.onPressIn(e);
-    if (p.onLongPress) {
-      const ms = p.delayLongPress != null ? +p.delayLongPress : DEFAULT_LONG_PRESS_MS;
+    const delayIn = source === 'pointer' ? delayOf(p.delayPressIn != null ? p.delayPressIn : p.unstable_pressDelay) : 0;
+    if (delayIn > 0) {
+      clearTimeout(this.pressInTimer);
+      this.pressInTimer = setTimeout(() => {
+        this.pressInTimer = null;
+        if (this.source === source && this.mounted) this.activate(e);
+      }, delayIn);
+    } else {
+      this.activate(e);
+    }
+    if (p.onLongPress && source !== 'click') {
+      const ms = delayOf(p.delayLongPress, DEFAULT_LONG_PRESS_MS) + delayIn;
       clearTimeout(this.longTimer);
       this.longTimer = setTimeout(() => {
         this.longTimer = null;
-        if (!(this.bits & PRESSED) || !this.mounted) return;
+        if (!this.source || !this.mounted) return;
+        if (!this.active) this.activate(e);
         this.longFired = true;
         if (this.props.onLongPress) this.props.onLongPress(e);
       }, ms);
     }
   }
 
-  pressOut(e, activate) {
+  activate(e) {
+    this.active = true;
+    this.activatedAt = now();
+    this.set(PRESSED, true);
+    if (this.props.onPressIn) this.props.onPressIn(e);
+  }
+
+  // The press ends; `activate`: released inside (fires onPress).
+  end(e, activate) {
     clearTimeout(this.longTimer);
+    clearTimeout(this.pressInTimer);
     this.longTimer = null;
+    this.pressInTimer = null;
+    const wasSource = this.source;
     this.source = null;
-    this.set(PRESSED, false);
+    if (!wasSource) return;
+    if (!this.active) {
+      if (!activate) return;  // cancelled before onPressIn: nothing to undo
+      this.activate(e);       // released before delayPressIn: press in, then out
+    }
+    this.active = false;
     this.lastEnd = now();
     const p = this.props;
-    if (p.onPressOut) p.onPressOut(e);
+    const held = now() - this.activatedAt;
+    const delayOut = Math.max(delayOf(p.minPressDuration, DEFAULT_MIN_PRESS_MS) - held, delayOf(p.delayPressOut));
+    const out = () => {
+      this.set(PRESSED, false);
+      if (this.props.onPressOut) this.props.onPressOut(e);
+    };
+    if (delayOut > 0 && activate) {
+      this.pressOutFire = out;
+      this.pressOutTimer = setTimeout(() => {
+        this.pressOutTimer = null;
+        this.pressOutFire = null;
+        if (this.mounted) out();
+      }, delayOut);
+    } else {
+      out();
+    }
     if (activate && !this.longFired && p.onPress) p.onPress(e);
   }
 
@@ -120,20 +194,20 @@ class PressController {
     if (p.onPointerDown) p.onPointerDown(e);
     if (this.disabled() || (e.button !== undefined && e.button !== 0)) return;
     e.stopPropagation();
-    if (this.bits & PRESSED) return;
-    this.pressIn(e, 'pointer');
+    if (this.source) return;
+    this.begin(e, 'pointer');
   }
 
   pointerUp(e) {
     const p = this.props;
     if (p.onPointerUp) p.onPointerUp(e);
-    if (!(this.bits & PRESSED) || this.source !== 'pointer') return;
+    if (this.source !== 'pointer') return;
     e.stopPropagation();
-    this.pressOut(e, true);
+    this.end(e, true);
   }
 
   cancel(e) {
-    if (this.bits & PRESSED) this.pressOut(e, false);
+    if (this.source) this.end(e, false);
   }
 
   hover(on, e) {
@@ -142,8 +216,26 @@ class PressController {
     if (this.disabled()) return;
     if (!!(this.bits & HOVERED) === on) return;
     this.set(HOVERED, on);
+    const pending = this.hoverPending;
+    clearTimeout(this.hoverTimer);
+    this.hoverTimer = null;
+    this.hoverPending = null;
+    // Leaving before a delayed onHoverIn fired cancels both (and vice versa),
+    // like RN's Pressability.
+    if (pending !== null && pending !== on) return;
     const f = on ? p.onHoverIn || p.onMouseEnter : p.onHoverOut || p.onMouseLeave;
-    if (f) f(e);
+    if (!f) return;
+    const delay = delayOf(on ? p.delayHoverIn : p.delayHoverOut);
+    if (delay > 0) {
+      this.hoverPending = on;
+      this.hoverTimer = setTimeout(() => {
+        this.hoverTimer = null;
+        this.hoverPending = null;
+        if (this.mounted) f(e);
+      }, delay);
+    } else {
+      f(e);
+    }
   }
 
   click(e) {
@@ -154,24 +246,14 @@ class PressController {
     // Native may synthesize a click after pointerup or Enter; those presses
     // already fired. A click with no press in flight is an activation from
     // the gamepad (A button) or the host.
-    if (this.bits & PRESSED) return;
+    if (this.source) return;
     const pt = e.nativeEvent && e.nativeEvent.pointerType;
     const synthesized = pt === 'gamepad' || pt === 'keyboard';
     if (!synthesized && now() - this.lastEnd < CLICK_DEDUPE_MS) return;
-    this.pressIn(e, 'click');
-    this.pressOut(e, true);
-    if (this.setBits && this.mounted) {
-      // Brief pressed flash so gamepad activation gets visual feedback.
-      this.bits |= PRESSED;
-      this.setBits(this.bits);
-      clearTimeout(this.flashTimer);
-      this.flashTimer = setTimeout(() => {
-        this.flashTimer = null;
-        if (!this.mounted) return;
-        this.bits &= ~PRESSED;
-        this.setBits(this.bits);
-      }, FLASH_MS);
-    }
+    // pressIn, press, then pressOut after minPressDuration: the pressed
+    // state stays visible briefly, like a tap.
+    this.begin(e, 'click');
+    this.end(e, true);
   }
 
   keyDown(e) {
@@ -180,8 +262,8 @@ class PressController {
     if (e.isDefaultPrevented() || this.disabled() || !isActivationKey(e)) return;
     e.preventDefault();  // we handle activation; native must not click as well
     e.stopPropagation();
-    if (e.repeat || this.bits & PRESSED) return;
-    this.pressIn(e, 'key');
+    if (e.repeat || this.source) return;
+    this.begin(e, 'key');
   }
 
   keyUp(e) {
@@ -190,13 +272,13 @@ class PressController {
     if (this.source !== 'key' || !isActivationKey(e)) return;
     e.preventDefault();
     e.stopPropagation();
-    this.pressOut(e, true);
+    this.end(e, true);
   }
 
   focus(on, e) {
     const p = this.props;
     this.set(FOCUSED, on);
-    if (!on && this.source === 'key') this.pressOut(e, false);
+    if (!on && this.source === 'key') this.end(e, false);
     const f = on ? p.onFocus : p.onBlur;
     if (f) f(e);
   }
@@ -204,7 +286,9 @@ class PressController {
   dispose() {
     this.mounted = false;
     clearTimeout(this.longTimer);
-    clearTimeout(this.flashTimer);
+    clearTimeout(this.pressInTimer);
+    clearTimeout(this.pressOutTimer);
+    clearTimeout(this.hoverTimer);
   }
 }
 
@@ -250,6 +334,7 @@ export const PRESS_PROPS = [
   'disabled',
   'delayPressIn',
   'delayPressOut',
+  'minPressDuration',
   'delayHoverIn',
   'delayHoverOut',
   'unstable_pressDelay',

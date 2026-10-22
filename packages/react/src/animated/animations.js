@@ -3,9 +3,8 @@
 // are flushed once at the end of each frame.
 
 import { now, requestFrame } from '../native.js';
-import { parseColor } from '../color.js';
 import { Easing } from './Easing.js';
-import { AnimatedValue, AnimatedValueXY, AnimatedColor, AnimatedNode, batch } from './nodes.js';
+import { AnimatedValue, AnimatedValueXY, AnimatedColor, AnimatedNode, batch, colorChannels } from './nodes.js';
 
 // --- frame loop --------------------------------------------------------------
 const active = new Set();
@@ -136,8 +135,9 @@ class SpringAnimation extends Animation {
   begin(from, previous) {
     this._from = from;
     this._toNum = +resolveTo(this._to);
-    // Continue with the previous spring's velocity for seamless retargeting.
-    if (previous instanceof SpringAnimation && previous._lastVelocity !== undefined && this._initialVelocity === 0) {
+    // Continue with the previous spring's velocity for seamless retargeting
+    // (RN takes over the running spring's state the same way).
+    if (previous instanceof SpringAnimation && previous._lastVelocity !== undefined) {
       this._initialVelocity = previous._lastVelocity;
     }
     this._start = now() + this._delay;
@@ -213,21 +213,46 @@ class DecayAnimation extends Animation {
 
 // --- public animation objects -------------------------------------------------
 
+// Splits a ValueXY / Color config into per-channel configs: every key whose
+// value carries the channel keys ({x, y} toValue / velocity, {r, g, b, a})
+// is split, like RN's maybeVectorAnim.
+function splitConfig(config, keys, resolveTo) {
+  return keys.map((k, i) => {
+    const out = Object.assign({}, config);
+    for (const key in config) {
+      const v = config[key];
+      if (key === 'toValue' && resolveTo) out.toValue = resolveTo(v)[i];
+      else if (v instanceof AnimatedValueXY) out[key] = v[k];
+      else if (v && typeof v === 'object' && !(v instanceof AnimatedNode) && v[k] !== undefined) out[key] = v[k];
+    }
+    return out;
+  });
+}
+
 function single(value, makeAnimation, config) {
   if (value instanceof AnimatedValueXY) {
-    const to = config.toValue || {};
-    const xy = (k) => Object.assign({}, config, { toValue: to instanceof AnimatedValueXY ? to[k] : to[k] });
-    return parallel([single(value.x, makeAnimation, xy('x')), single(value.y, makeAnimation, xy('y'))], { stopTogether: false });
+    const [cx, cy] = splitConfig(config, ['x', 'y']);
+    return parallel([single(value.x, makeAnimation, cx), single(value.y, makeAnimation, cy)], { stopTogether: false });
   }
   if (value instanceof AnimatedColor) {
-    const parse = (c) => (c instanceof AnimatedColor ? [c.r, c.g, c.b, c.a].map((n) => n.__getValue()) : parseColorOrBlack(c));
-    const to = parse(config.toValue);
-    const chans = ['r', 'g', 'b', 'a'].map((k, i) => single(value[k], makeAnimation, Object.assign({}, config, { toValue: to[i] })));
-    return parallel(chans, { stopTogether: false });
+    const chans = splitConfig(config, ['r', 'g', 'b', 'a'], colorChannels);
+    return parallel(['r', 'g', 'b', 'a'].map((k, i) => single(value[k], makeAnimation, chans[i])), { stopTogether: false });
   }
   let current = null;
   const result = {
     start(callback) {
+      // toValue given as another Animated node: follow it (RN AnimatedTracking).
+      if (config.toValue instanceof AnimatedNode) {
+        const target = config.toValue;
+        const restart = () => {
+          current = makeAnimation(Object.assign({}, config, { toValue: target.__getValue() }));
+          value.animate(current, callback);
+        };
+        const id = target.addListener(restart);
+        value.track({ __detach: () => target.removeListener(id) });
+        restart();
+        return;
+      }
       const anim = makeAnimation(config);
       current = anim;
       const iterations = config.iterations !== undefined ? config.iterations : 1;
@@ -245,19 +270,17 @@ function single(value, makeAnimation, config) {
       run();
     },
     stop() {
+      value.stopTracking();
       if (current) current.stop();
     },
     reset() {
+      value.stopTracking();
       if (current) current.stop();
       value.resetAnimation();
     },
     _isUsingNativeDriver: () => false,
   };
   return result;
-}
-
-function parseColorOrBlack(c) {
-  return parseColor(c) || [0, 0, 0, 1];
 }
 
 export const timing = (value, config) => single(value, (c) => new TimingAnimation(c), config || {});
