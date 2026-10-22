@@ -203,6 +203,12 @@ void Runtime::setClipboardText(const std::string& text) {
 
 bool Runtime::needsRedraw() const { return redraw_ || doc.paintDirty(); }
 
+bool Runtime::wantsFrame() const {
+  // A pending repaint alone is not a reason to tick: the host paints after
+  // the tick it already ran.
+  return reloadRequested_ || loader.pending() > 0 || (js && js->hasPendingWork(now + 17)) || input->animating();
+}
+
 void Runtime::render(void* pixels, int width, int height, size_t rowBytes) {
   renderImpl(pixels, width, height, rowBytes, false);
 }

@@ -151,17 +151,28 @@ JSValue js_blur(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
 }
 
 // scrollTo(id, x, y, animated): InputManager clamps to the content extent and
-// dispatches the scroll event. `animated` is accepted for RN compatibility;
-// the jump is immediate (JS can animate by calling this per frame).
+// dispatches scroll events. animated: eases there on the runtime clock;
+// otherwise the jump is immediate (and stops a running fling).
 JSValue js_scrollTo(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
   if (!n) return JS_UNDEFINED;
   double x = 0, y = 0;
   if (argc > 1) JS_ToFloat64(ctx, &x, argv[1]);
   if (argc > 2) JS_ToFloat64(ctx, &y, argv[2]);
+  bool animated = argc > 3 && JS_ToBool(ctx, argv[3]) > 0;
   Runtime& rt = runtimeOf(ctx);
   rt.doc.layout();
-  rt.input->scrollTo(n, float(x == x ? x : 0), float(y == y ? y : 0));
+  rt.input->scrollTo(n, float(x == x ? x : 0), float(y == y ? y : 0), animated);
+  return JS_UNDEFINED;
+}
+
+// flashScrollIndicators(id): shows the overlay scroll indicators briefly.
+JSValue js_flashScrollIndicators(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
+  if (!n) return JS_UNDEFINED;
+  Runtime& rt = runtimeOf(ctx);
+  rt.doc.layout();
+  rt.input->flashScrollIndicators(n);
   return JS_UNDEFINED;
 }
 
@@ -300,7 +311,8 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
              {"postMessage", js_postMessage, 2},   {"loadFont", js_loadFont, 4},
              {"reload", js_reload, 0},             {"viewport", js_viewport, 0},
              {"setTextInputSelection", js_setTextInputSelection, 3},
-             {"getClipboard", js_getClipboard, 0}, {"setClipboard", js_setClipboard, 1}};
+             {"getClipboard", js_getClipboard, 0}, {"setClipboard", js_setClipboard, 1},
+             {"flashScrollIndicators", js_flashScrollIndicators, 1}};
   for (auto& f : fns) JS_SetPropertyStr(ctx, native, f.name, JS_NewCFunction(ctx, f.fn, f.name, f.len));
   JS_SetPropertyStr(ctx, native, "rootId", JS_NewUint32(ctx, impl.rt.doc.root()->id()));
   // TextInput text is edited natively (change / selectionchange events).

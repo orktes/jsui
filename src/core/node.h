@@ -82,6 +82,9 @@ class Node {
 
   // ScrollView content offset.
   float scrollX = 0, scrollY = 0;
+  // Opacity of the overlay scroll indicators (0: hidden). Driven by
+  // InputManager (shown while scrolling, then faded out); read by the painter.
+  float scrollIndicatorOpacity = 0;
 
   // Marks layout and paint dirty (text content or style changed).
   void markDirty();

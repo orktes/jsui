@@ -41,6 +41,8 @@ class Runtime {
 
   void tick(double nowMs);
   bool needsRedraw() const;
+  // Animations / timers / held input want another tick soon (jsui_wants_frame).
+  bool wantsFrame() const;
   void render(void* pixels, int width, int height, size_t rowBytes);
   // Like render(), but `pixels` must still hold the frame this runtime last
   // rendered into it: only the changed region is repainted. Returns the

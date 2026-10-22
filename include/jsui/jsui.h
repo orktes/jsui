@@ -140,6 +140,12 @@ JSUI_API void jsui_tick(JsuiRuntime* rt, double now_ms);
 JSUI_API int jsui_pending_loads(JsuiRuntime* rt);
 /* Non-zero when the last tick changed what would be painted. */
 JSUI_API int jsui_needs_redraw(JsuiRuntime* rt);
+/* Non-zero while something is in motion and the next frame should be ticked
+ * soon even without input: requestAnimationFrame callbacks, due timers,
+ * scroll animations (flings, smooth scrolling, snapping), scroll indicator
+ * fades, held gamepad sticks / D-pad. Hosts that sleep when idle keep calling
+ * jsui_tick at display rate while this is set. */
+JSUI_API int jsui_wants_frame(JsuiRuntime* rt);
 /* Paint into a caller-owned RGBA8888 premultiplied buffer of
  * width*height device pixels. The buffer is cleared to transparent first. */
 JSUI_API void jsui_render_rgba(JsuiRuntime* rt, void* pixels, int width, int height, size_t row_bytes);

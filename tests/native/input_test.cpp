@@ -396,6 +396,7 @@ TEST(input_wheel_scrolls_scrollview) {
   Fixture::style(sv).overflow = Overflow::Scroll;
   Node* content = f.box(sv, 0, 0, 100, 300);
   f.layout();
+  f.in().smoothWheel = false;  // notches jump (smooth wheel: scroll_test.cpp)
   f.js("extra = e => e.type === 'scroll' ? '@' + e.contentOffset.y + '/' + e.contentSize.height + '/' +"
        " e.layoutMeasurement.height : '';");
   CHECK(f.in().mouseWheel(50, 50, 0, 50));
@@ -448,7 +449,8 @@ TEST(input_touch) {
   f.in().touch(0, 2, 10, 10);
   CHECK_NEAR(sv->scrollY, 30, 1e-4);
   CHECK_EQ(f.events(), ev("pointerenter", btn) + " " + ev("pointerdown", btn) + " " + ev("pointercancel", btn) +
-                           " " + ev("scroll", sv) + " " + ev("scroll", sv) + " " + ev("pointerleave", btn));
+                           " " + ev("scrollbegindrag", sv) + " " + ev("scroll", sv) + " " + ev("scroll", sv) + " " +
+                           ev("scrollenddrag", sv) + " " + ev("pointerleave", btn));
 }
 
 // ------------------------------------------------------------------ focus
@@ -633,16 +635,19 @@ TEST(input_scroll_focus_into_view) {
   for (int i = 0; i < 10; i++) rows.push_back(f.box(content, 0, i * 50.f, 100, 50, R"({"__events":["press"]})"));
   f.layout();
   InputManager& in = f.in();
-  in.focus(rows[0]);
-  for (int i = 0; i < 3; i++) in.navigate(NavDirection::Down);
-  CHECK_EQ(in.focused(), rows[3]);
+  // Programmatic focus (no key / gamepad input yet) jumps, edge-aligned.
+  in.focus(rows[3]);
   CHECK_NEAR(sv->scrollY, 100, 1e-4);  // row 3 (150..200) bottom-aligned
-  in.navigate(NavDirection::Up);
-  in.navigate(NavDirection::Up);
-  CHECK_EQ(in.focused(), rows[1]);
+  in.focus(rows[1]);
   CHECK_NEAR(sv->scrollY, 50, 1e-4);  // top-aligned
   in.focus(rows[9]);
   CHECK_NEAR(sv->scrollY, 400, 1e-4);
+  // Navigation glides with context around the item.
+  in.navigate(NavDirection::Up);
+  CHECK_EQ(in.focused(), rows[8]);
+  CHECK_NEAR(sv->scrollY, 400, 1e-4);
+  for (double t = 16; t <= 400; t += 16) f.rt->tick(t);
+  CHECK_NEAR(sv->scrollY, 375, 1e-4);  // row 8 (400..450) with 25 px above
 }
 
 TEST(input_gamepad_dpad_and_a) {
