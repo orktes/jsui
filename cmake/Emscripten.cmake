@@ -69,7 +69,7 @@ foreach(_d ${_jsui_decls})
   list(APPEND _jsui_exports ${_name})
 endforeach()
 if(JSUI_WEBGPU)
-  list(APPEND _jsui_exports _jsui_web_wgpu_release_texture _jsui_web_wgpu_release_device)
+  list(APPEND _jsui_exports _jsui_web_wgpu_create_instance _jsui_web_wgpu_release_instance _jsui_web_wgpu_release_texture _jsui_web_wgpu_release_device)
 endif()
 list(REMOVE_DUPLICATES _jsui_exports)
 string(REPLACE ";" "," _jsui_exports_csv "${_jsui_exports}")
@@ -97,7 +97,8 @@ target_link_options(jsui-wasm PRIVATE
   "-sEXPORTED_FUNCTIONS=${_jsui_exports_csv}"
   "$<$<CONFIG:Debug>:-sASSERTIONS=2>"
   "$<$<CONFIG:Debug>:-gsource-map>")
-set(_jsui_runtime_methods UTF8ToString,stringToUTF8,lengthBytesUTF8)
+# The heap views are not exported by default since emscripten 4.
+set(_jsui_runtime_methods UTF8ToString,stringToUTF8,lengthBytesUTF8,HEAPU8,HEAP32)
 if(JSUI_WEBGPU)
   # Skia Graphite on WebGPU: the JS host imports its GPUDevice / the canvas
   # texture through Emdawnwebgpu's WebGPU object (web/jsui-webgpu.js).

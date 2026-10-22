@@ -13,6 +13,22 @@ index 5183b71..7d44ac3 100644
        deps = [ "//gn/toolchain/emsdk:activate(//gn/toolchain:$host_toolchain)" ]
      }
    }
+diff --git a/gn/toolchain/wasm.gni b/gn/toolchain/wasm.gni
+index e2d2319..e79001f 100644
+--- a/gn/toolchain/wasm.gni
++++ b/gn/toolchain/wasm.gni
+@@ -42,10 +42,7 @@ template("skia_wasm_lib") {
+   }
+ }
+ 
+-wasm_defines = [
+-  "SKVX_DISABLE_SIMD",
+-  "SK_FORCE_8_BYTE_ALIGNMENT",
+-]
++wasm_defines = [ "SK_FORCE_8_BYTE_ALIGNMENT" ]  # jsui: SIMD128 build, see build-skia-wasm-graphite.sh
+ 
+ if (is_canvaskit) {
+   if (!is_debug && !skia_canvaskit_force_tracing) {
 diff --git a/modules/skcms/skcms.cc b/modules/skcms/skcms.cc
 index 79dbecf..932d150 100644
 --- a/modules/skcms/skcms.cc

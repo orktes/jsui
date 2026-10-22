@@ -70,9 +70,11 @@ cmake --build build
 ./build/jsui-record bundle.js --timeline examples/showcase/session.json --ffmpeg out.mp4  # scripted demo video
 ```
 
-WebAssembly: `WEBGL=1 scripts/build-wasm.sh` (Skia on WebGL2, `web/dist-webgl/`: what
-`web/jsui-web.js` loads and renders with by default) and `scripts/build-wasm.sh`
-(CPU raster only, `web/dist/`: the fallback module, and what CI's CPU browser tests use).
+WebAssembly: `GPU=1 scripts/build-wasm.sh` (Skia m157 with Graphite on WebGPU, Ganesh on
+WebGL2 and the CPU raster in one module, `web/dist-gpu/`: preferred when the browser has
+WebGPU), `WEBGL=1 scripts/build-wasm.sh` (Skia on WebGL2, `web/dist-webgl/`) and
+`scripts/build-wasm.sh` (CPU raster only, `web/dist/`: the fallback module, and what CI's
+CPU browser tests use). `web/jsui-web.js` picks WebGPU, then WebGL, then the CPU raster.
 GPU rendering is the default everywhere a GL / WebGL context is available; the CPU
 raster is the fallback (`jsui-viewer --cpu`, `createJsui({ renderer: 'cpu' })`) and
 what the deterministic tools (`jsui-render`, `jsui-record`) and reference tests use.

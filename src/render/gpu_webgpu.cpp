@@ -150,10 +150,20 @@ struct WebGPUGpu final : JsuiGpuContext {
     retained.reset();
     if (images) images->clear();
     recorder.reset();
-    // A non-yielding context cannot wait for in-flight GPU work in its
-    // destructor: submitted work keeps its own references to Dawn objects, so
-    // dropping ours is safe (Dawn / the browser free them when done).
-    if (ctx) ctx->submit();
+    if (!ctx) return;
+    // Without a tick function Graphite cannot wait for in-flight GPU work in
+    // its destructor (it aborts if some is outstanding). The web host destroys
+    // a context only once the queue reported its work done; collect that here.
+    ctx->checkAsyncWorkCompletion();
+#if defined(__EMSCRIPTEN__)
+    if (ctx->hasUnfinishedGpuWork() && !ctx->isDeviceLost()) {
+      // Still busy (an embedder that did not wait): leak the context rather
+      // than abort. Its GPU objects are freed with the device.
+      SkDebugf("jsui: WebGPU context destroyed with GPU work in flight; leaking it\n");
+      (void)ctx.release();
+      return;
+    }
+#endif
     ctx.reset();
   }
 

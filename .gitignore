@@ -19,3 +19,4 @@ node_modules/
 /third_party/emsdk-*/
 /third_party/emdawnwebgpu/
 /web/dist-gpu/
+/web/test/output/

@@ -44,7 +44,8 @@ await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const ORIGIN = `http://127.0.0.1:${server.address().port}`;
 // SITE_WEBGPU=1: expose WebGPU to headless Chromium (a SwiftShader-backed
 // fallback adapter on machines without a GPU, such as CI runners).
-const WEBGPU_FLAGS = ['--enable-unsafe-webgpu'];
+// Vulkan-backed so canvas presentation works headless.
+const WEBGPU_FLAGS = ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-vulkan=swiftshader'];
 
 const browser = await chromium.launch({
   args: ['--enable-unsafe-swiftshader', '--use-angle=swiftshader', '--ignore-gpu-blocklist', '--force-color-profile=srgb',

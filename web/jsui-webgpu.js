@@ -76,16 +76,19 @@ export class WebGPURenderer {
   static create(host, webgpu, canvasContext = null) {
     const M = host.module;
     if (!webgpu || !M.WebGPU || !M._jsui_gpu_create_webgpu) return null;
-    let gpu = 0;
+    let gpu = 0, instance = 0;
     try {
-      const dev = M.WebGPU.importJsDevice(webgpu.device);
-      gpu = M._jsui_gpu_create_webgpu(0, dev, 0);
+      // Imported objects hang off an instance, which delivers the device's
+      // async callbacks (buffer maps, queue work done) to Skia.
+      instance = M._jsui_web_wgpu_create_instance();
+      const dev = M.WebGPU.importJsDevice(webgpu.device, instance);
+      gpu = M._jsui_gpu_create_webgpu(instance, dev, 0);
       M._jsui_web_wgpu_release_device(dev);  // the context holds its own reference
     } catch (e) {
       host._log(2, `WebGPU: Skia context creation threw: ${e?.message ?? e}`);
-      return null;
     }
     if (!gpu) {
+      if (instance) M._jsui_web_wgpu_release_instance(instance);
       host._log(2, 'WebGPU: Skia Graphite context creation failed');
       return null;
     }
@@ -93,6 +96,7 @@ export class WebGPURenderer {
     try { ctx ??= host.canvas.getContext('webgpu'); } catch {}
     if (!ctx) {
       M._jsui_gpu_destroy(gpu);
+      M._jsui_web_wgpu_release_instance(instance);
       return null;
     }
     const format = navigator.gpu.getPreferredCanvasFormat();
@@ -102,16 +106,19 @@ export class WebGPURenderer {
     } catch (e) {
       host._log(2, `WebGPU: canvas configure failed: ${e?.message ?? e}`);
       M._jsui_gpu_destroy(gpu);
+      M._jsui_web_wgpu_release_instance(instance);
       return null;
     }
-    return new WebGPURenderer(host, webgpu, gpu, ctx, format);
+    return new WebGPURenderer(host, webgpu, gpu, instance, ctx, format);
   }
 
-  constructor(host, webgpu, gpu, ctx, format) {
+  constructor(host, webgpu, gpu, instance, ctx, format) {
     this.host = host;
+    this.module = host.module;
     this.webgpu = webgpu;
     this.device = webgpu.device;
     this.gpu = gpu;
+    this.instance = instance;
     this.ctx = ctx;
     this.format = format;
     this.lost = false;
@@ -131,7 +138,7 @@ export class WebGPURenderer {
 
   _renderInto(texture) {
     const M = this.host.module;
-    const ptr = M.WebGPU.importJsTexture(texture);
+    const ptr = M.WebGPU.importJsTexture(texture, this.instance);
     let r;
     try {
       r = M._jsui_render_webgpu(this.host.rt, this.gpu, ptr, this.host.pixelWidth, this.host.pixelHeight, 0);
@@ -175,17 +182,33 @@ export class WebGPURenderer {
 
   destroy() {
     this._destroyed = true;
-    if (this.gpu) this.host.module._jsui_gpu_destroy(this.gpu);
-    this.gpu = 0;
+    this._release();
     try { this.ctx.unconfigure(); } catch {}
+  }
+
+  // Graphite in the browser never waits for the GPU, so its context may only
+  // be destroyed once the work it submitted is done: wait for the queue, then
+  // destroy (a lost device finishes everything at once).
+  _release() {
+    const M = this.module, gpu = this.gpu, instance = this.instance;
+    this.gpu = this.instance = 0;
+    if (!gpu) return;
+    const done = () => setTimeout(() => {
+      M._jsui_gpu_destroy(gpu);
+      M._jsui_web_wgpu_release_instance(instance);
+    }, 0);
+    try {
+      this.device.queue.onSubmittedWorkDone().then(done, done);
+    } catch {
+      done();
+    }
   }
 
   async _onLost(info) {
     const host = this.host, M = host.module;
     this.lost = true;
     M._jsui_gpu_context_lost(this.gpu);
-    M._jsui_gpu_destroy(this.gpu);
-    this.gpu = 0;
+    this._release();
     host._log(2, `WebGPU device lost (${info?.reason ?? 'unknown'}: ${info?.message ?? ''}), recreating`);
     const webgpu = await requestWebGPU({ allowSoftware: true, fresh: true });
     if (this._destroyed || host._destroyed) return;

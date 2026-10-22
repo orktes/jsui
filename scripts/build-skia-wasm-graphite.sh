@@ -32,6 +32,13 @@
 # Dawn *native* with CMake, which is meaningless where the browser is the
 # WebGPU implementation.
 #
+# SIMD: as build-skia-wasm.sh (SKIA_WASM_SIMD=1, its default), Skia is built
+# with -msimd128 -msse4.1 so the raster pipeline runs its SSE4.1 stages on
+# WASM SIMD128; the patch also drops SKVX_DISABLE_SIMD (m157's name for
+# m124's SKNX_NO_SIMD) from gn/toolchain/wasm.gni, removes skcms' AVX
+# includes and maps _mm_cvtps_epi32 onto SIMD128 in SkRasterPipeline_opts.h.
+# JSUI is compiled with the same flags (cmake/Emscripten.cmake).
+#
 # The m124 builds (build-skia-wasm.sh: CPU and WebGL, emsdk 3.1.44) are
 # untouched. This build has its own emsdk because the Skia libraries and JSUI
 # must be built with the same compiler / libc++.
@@ -122,7 +129,6 @@ ARGS="
 is_debug=$IS_DEBUG
 is_official_build=$IS_OFFICIAL
 is_component_build=false
-is_trivial_abi=true
 werror=false
 target_cpu=\"wasm\"
 skia_emsdk_dir=\"$EMSDK\"
