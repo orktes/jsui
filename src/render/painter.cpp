@@ -676,17 +676,16 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
   if (!s.boxShadows.empty()) paintInsetShadows(c, b, s);
   paintBorders(c, b, s);
 
-  // Text is positioned from the unsnapped layout box, like Chrome's text
-  // fragments (glyphs are then snapped individually).
+  // Text uses the unsnapped layout box, like Chrome's text fragments: a
+  // snapped (narrower) width would re-wrap a max-content paragraph.
+  if (n->type() == NodeType::Text || n->type() == NodeType::TextInput) {
+    float dw = YGNodeLayoutGetWidth(n->yoga()) - w, dh = YGNodeLayoutGetHeight(n->yoga()) - h;
+    float x = b.content.left() - snap.fX, y = b.content.top() - snap.fY;
+    float cw = std::max(0.f, b.content.width() + dw), ch = std::max(0.f, b.content.height() + dh);
+    if (n->type() == NodeType::Text) text::paintText(n, c, x, y, cw, ch);
+    else text::paintTextInput(n, c, x, y, cw, ch);
+  }
   switch (n->type()) {
-    case NodeType::Text:
-      text::paintText(n, c, b.content.left() - snap.fX, b.content.top() - snap.fY, b.content.width(),
-                      b.content.height());
-      break;
-    case NodeType::TextInput:
-      text::paintTextInput(n, c, b.content.left() - snap.fX, b.content.top() - snap.fY, b.content.width(),
-                           b.content.height());
-      break;
     case NodeType::Image:
       image::paint(n, c, b.inner.rect(), b.inner);
       break;
