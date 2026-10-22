@@ -1,0 +1,272 @@
+// __jsui_native: the node-tree bridge used by @jsui/react's host config,
+// plus imperative methods (measure, focus, scrollTo), the animation fast
+// path (patchStyle), host messages, fonts and reload.
+#include <algorithm>
+
+#include "core/document.h"
+#include "input/input.h"
+#include "js/engine_impl.h"
+#include "runtime.h"
+
+namespace jsui {
+
+namespace {
+
+Node* nodeArg(JSContext* ctx, JSValueConst v) {
+  if (!JS_IsNumber(v)) return nullptr;
+  uint32_t id = 0;
+  if (JS_ToUint32(ctx, &id, v)) return nullptr;
+  return runtimeOf(ctx).doc.get(id);
+}
+
+JSValue js_createNode(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  NodeType t;
+  std::string name = argc > 0 ? toStdString(ctx, argv[0]) : "";
+  if (!nodeTypeFromName(name, &t)) return JS_ThrowTypeError(ctx, "unknown element type '%s'", name.c_str());
+  return JS_NewUint32(ctx, runtimeOf(ctx).doc.createNode(t)->id());
+}
+
+JSValue js_setProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  if (argc < 2) return JS_UNDEFINED;
+  if (Node* n = nodeArg(ctx, argv[0])) n->setProps(toValue(ctx, argv[1]));
+  return JS_UNDEFINED;
+}
+
+// patchStyle(id, partial): merges keys into props.style; null/undefined
+// removes a key. Meant for per-frame animation of paint keys (transform,
+// opacity, colors): Node::setProps can skip relayout when only those change.
+JSValue js_patchStyle(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  if (argc < 2 || !JS_IsObject(argv[1])) return JS_UNDEFINED;
+  Node* n = nodeArg(ctx, argv[0]);
+  if (!n) return JS_UNDEFINED;
+  Value::Object props = n->props().asObject();
+  Value::Object style = n->props()["style"].asObject();
+  JSPropertyEnum* keys = nullptr;
+  uint32_t count = 0;
+  if (JS_GetOwnPropertyNames(ctx, &keys, &count, argv[1], JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) != 0) return JS_EXCEPTION;
+  bool changed = false;
+  for (uint32_t i = 0; i < count; i++) {
+    const std::string* k = implOf(ctx).atomName(keys[i].atom);
+    JSValue v = JS_GetProperty(ctx, argv[1], keys[i].atom);
+    if (k && !JS_IsException(v)) {
+      if (JS_IsUndefined(v) || JS_IsNull(v)) {
+        changed |= style.erase(*k) > 0;
+      } else {
+        style.insert_or_assign(*k, toValue(ctx, v));
+        changed = true;
+      }
+    }
+    if (JS_IsException(v)) JS_FreeValue(ctx, JS_GetException(ctx));
+    JS_FreeValue(ctx, v);
+  }
+  JS_FreePropertyEnum(ctx, keys, count);
+  if (changed) {
+    props.insert_or_assign("style", Value(std::move(style)));
+    n->setProps(Value(std::move(props)));
+  }
+  return JS_UNDEFINED;
+}
+
+JSValue js_setText(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  if (argc < 2) return JS_UNDEFINED;
+  if (Node* n = nodeArg(ctx, argv[0])) n->setText(toStdString(ctx, argv[1]));
+  return JS_UNDEFINED;
+}
+
+bool isAncestorOrSelf(Node* a, Node* n) {
+  for (Node* p = n; p; p = p->parent())
+    if (p == a) return true;
+  return false;
+}
+
+JSValue js_appendChild(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  if (argc < 2) return JS_UNDEFINED;
+  Node* p = nodeArg(ctx, argv[0]);
+  Node* c = nodeArg(ctx, argv[1]);
+  if (p && c && !isAncestorOrSelf(c, p)) p->appendChild(c);
+  return JS_UNDEFINED;
+}
+
+JSValue js_insertBefore(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  if (argc < 2) return JS_UNDEFINED;
+  Node* p = nodeArg(ctx, argv[0]);
+  Node* c = nodeArg(ctx, argv[1]);
+  Node* b = argc > 2 ? nodeArg(ctx, argv[2]) : nullptr;
+  if (b && b->parent() != p) b = nullptr;
+  if (p && c && c != b && !isAncestorOrSelf(c, p)) p->insertBefore(c, b);
+  return JS_UNDEFINED;
+}
+
+JSValue js_removeChild(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  if (argc < 2) return JS_UNDEFINED;
+  Node* p = nodeArg(ctx, argv[0]);
+  Node* c = nodeArg(ctx, argv[1]);
+  if (p && c) p->removeChild(c);
+  return JS_UNDEFINED;
+}
+
+JSValue js_destroyNode(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  if (argc < 1) return JS_UNDEFINED;
+  if (Node* n = nodeArg(ctx, argv[0])) runtimeOf(ctx).doc.destroyNode(n);
+  return JS_UNDEFINED;
+}
+
+JSValue js_measure(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
+  if (!n) return JS_NULL;
+  // Layout may be stale mid-commit; onLayout events it raises are queued
+  // until JS unwinds (see JsEngine::layoutEvent).
+  runtimeOf(ctx).doc.layout();
+  Rect r = n->layoutRect(), a = n->absoluteRect();
+  JSValue o = JS_NewObject(ctx);
+  JS_SetPropertyStr(ctx, o, "x", JS_NewFloat64(ctx, r.x));
+  JS_SetPropertyStr(ctx, o, "y", JS_NewFloat64(ctx, r.y));
+  JS_SetPropertyStr(ctx, o, "width", JS_NewFloat64(ctx, r.width));
+  JS_SetPropertyStr(ctx, o, "height", JS_NewFloat64(ctx, r.height));
+  JS_SetPropertyStr(ctx, o, "pageX", JS_NewFloat64(ctx, a.x));
+  JS_SetPropertyStr(ctx, o, "pageY", JS_NewFloat64(ctx, a.y));
+  return o;
+}
+
+JSValue js_focus(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
+  if (n) runtimeOf(ctx).input->focus(n);
+  return JS_UNDEFINED;
+}
+
+JSValue js_blur(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
+  if (n) runtimeOf(ctx).input->blur(n);
+  return JS_UNDEFINED;
+}
+
+// scrollTo(id, x, y, animated): InputManager clamps to the content extent and
+// dispatches the scroll event. `animated` is accepted for RN compatibility;
+// the jump is immediate (JS can animate by calling this per frame).
+JSValue js_scrollTo(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
+  if (!n) return JS_UNDEFINED;
+  double x = 0, y = 0;
+  if (argc > 1) JS_ToFloat64(ctx, &x, argv[1]);
+  if (argc > 2) JS_ToFloat64(ctx, &y, argv[2]);
+  Runtime& rt = runtimeOf(ctx);
+  rt.doc.layout();
+  rt.input->scrollTo(n, float(x == x ? x : 0), float(y == y ? y : 0));
+  return JS_UNDEFINED;
+}
+
+JSValue js_postMessage(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  Runtime& rt = runtimeOf(ctx);
+  std::string name = argc > 0 ? toStdString(ctx, argv[0]) : "";
+  std::string json = "null";
+  if (argc > 1) {
+    if (JS_IsString(argv[1])) {
+      json = toStdString(ctx, argv[1]);
+    } else if (!JS_IsUndefined(argv[1])) {
+      JSValue j = JS_JSONStringify(ctx, argv[1], JS_UNDEFINED, JS_UNDEFINED);
+      if (JS_IsException(j)) return j;
+      if (JS_IsString(j)) json = toStdString(ctx, j);
+      JS_FreeValue(ctx, j);
+    }
+  }
+  if (rt.config.on_message) rt.config.on_message(rt.config.message_user, name.c_str(), json.c_str());
+  return JS_UNDEFINED;
+}
+
+// Text measurement caches depend on the font set: dirty every Text node.
+void invalidateText(Node* n) {
+  if (n->type() == NodeType::Text) n->markDirty();
+  for (Node* c : n->children()) invalidateText(c);
+}
+
+void fontLoaded(JsEngine::Impl& impl, uint64_t id, Resource& res, const std::string& family, int weight,
+                bool italic) {
+  auto it = impl.pending.find(id);
+  if (it == impl.pending.end()) return;
+  JSContext* ctx = impl.ctx;
+  Runtime& rt = impl.rt;
+  JSValue resolve = it->second.resolve, reject = it->second.reject;
+  impl.pending.erase(it);
+  std::string error;
+  if (!res.ok()) {
+    error = "loadFont: failed to load " + res.url + " (status " + std::to_string(res.status) +
+            (res.error.empty() ? "" : ", " + res.error) + ")";
+  } else if (!rt.fonts.registerFont(family, res.data.data(), res.data.size(), weight, italic)) {
+    error = "loadFont: " + res.url + " is not a supported font file";
+  }
+  if (error.empty()) {
+    invalidateText(rt.doc.root());
+    rt.doc.markLayoutDirty();
+    JSValue ok = JS_TRUE;
+    JS_FreeValue(ctx, impl.call(resolve, JS_UNDEFINED, 1, &ok));
+  } else {
+    rt.log(JSUI_LOG_WARN, error);
+    JSValue err = JS_NewError(ctx);
+    JS_SetPropertyStr(ctx, err, "message", JS_NewStringLen(ctx, error.data(), error.size()));
+    JS_FreeValue(ctx, impl.call(reject, JS_UNDEFINED, 1, &err));
+    JS_FreeValue(ctx, err);
+  }
+  JS_FreeValue(ctx, resolve);
+  JS_FreeValue(ctx, reject);
+}
+
+// loadFont(family, url, weight, italic) -> Promise<true>
+JSValue js_loadFont(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  auto& impl = implOf(ctx);
+  Runtime& rt = impl.rt;
+  std::string family = argc > 0 ? toStdString(ctx, argv[0]) : "";
+  std::string url = argc > 1 ? toStdString(ctx, argv[1]) : "";
+  int weight = 400;
+  if (argc > 2 && JS_IsNumber(argv[2])) JS_ToInt32(ctx, &weight, argv[2]);
+  bool italic = argc > 3 && JS_ToBool(ctx, argv[3]);
+  JSValue funcs[2];
+  JSValue promise = JS_NewPromiseCapability(ctx, funcs);
+  if (JS_IsException(promise)) return promise;
+  if (family.empty() || url.empty()) {
+    JSValue err = JS_NewError(ctx);
+    JS_SetPropertyStr(ctx, err, "message", JS_NewString(ctx, "loadFont(family, url): family and url are required"));
+    JS_FreeValue(ctx, JS_Call(ctx, funcs[1], JS_UNDEFINED, 1, &err));
+    JS_FreeValue(ctx, err);
+    JS_FreeValue(ctx, funcs[0]);
+    JS_FreeValue(ctx, funcs[1]);
+    return promise;
+  }
+  LoadRequest req;
+  req.url = ResourceLoader::resolve(rt.baseUrl, url);
+  JsEngine::Impl* ip = &impl;
+  uint64_t id = impl.startLoad(std::move(req), [ip, family, weight, italic](uint64_t id, Resource& res) {
+    fontLoaded(*ip, id, res, family, weight, italic);
+  });
+  impl.pending[id] = {funcs[0], funcs[1]};
+  return promise;
+}
+
+JSValue js_reload(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+  runtimeOf(ctx).requestReload();
+  return JS_UNDEFINED;
+}
+
+}  // namespace
+
+void installBridge(JsEngine::Impl& impl, JSValue global) {
+  JSContext* ctx = impl.ctx;
+  JSValue native = JS_NewObject(ctx);
+  struct Fn {
+    const char* name;
+    JSCFunction* fn;
+    int len;
+  } fns[] = {{"createNode", js_createNode, 1},     {"setProps", js_setProps, 2},
+             {"patchStyle", js_patchStyle, 2},     {"setText", js_setText, 2},
+             {"appendChild", js_appendChild, 2},   {"insertBefore", js_insertBefore, 3},
+             {"removeChild", js_removeChild, 2},   {"destroyNode", js_destroyNode, 1},
+             {"measure", js_measure, 1},           {"focus", js_focus, 1},
+             {"blur", js_blur, 1},                 {"scrollTo", js_scrollTo, 4},
+             {"postMessage", js_postMessage, 2},   {"loadFont", js_loadFont, 4},
+             {"reload", js_reload, 0}};
+  for (auto& f : fns) JS_SetPropertyStr(ctx, native, f.name, JS_NewCFunction(ctx, f.fn, f.name, f.len));
+  JS_SetPropertyStr(ctx, native, "rootId", JS_NewUint32(ctx, impl.rt.doc.root()->id()));
+  JS_SetPropertyStr(ctx, native, "devMode", JS_NewBool(ctx, impl.rt.config.dev_mode != 0));
+  JS_SetPropertyStr(ctx, global, "__jsui_native", native);
+}
+
+}  // namespace jsui
