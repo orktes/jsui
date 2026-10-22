@@ -836,7 +836,8 @@ changed rather than to the tree size:
   post-layout walk (`Document::afterLayout`) visits only nodes Yoga flagged
   (`hasNewLayout`). Text measurement reuses the paragraph's intrinsic layout.
   Yoga's `PixelGrid.cpp` is patched at configure time (`cmake/Deps.cmake`) to
-  skip pixel rounding when the point scale factor is 0.
+  skip pixel rounding when the point scale factor is 0, and `CalculateLayout.cpp`
+  to check for baseline alignment once per node per pass, not once per flex line.
 * **Input.** Hit testing skips a subtree when the pointer is outside the
   subtree's root box and every hittable descendant lies inside that box
   (cached per node, invalidated bottom-up by `Node::markBoundsDirty` on frame,

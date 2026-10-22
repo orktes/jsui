@@ -64,6 +64,34 @@ if(_yoga_pg_at GREATER -1)
 else()
   message(WARNING "Yoga PixelGrid.cpp changed: skipping the no-rounding fast path")
 endif()
+# justifyMainAxis asks isBaselineLayout(node) once per flex line, and that
+# scans every child: O(lines x children) for a wrapping grid. Remember the
+# answer for the node within one layout pass (styles cannot change during
+# a pass; the generation count changes with every YGNodeCalculateLayout).
+set(_yoga_calc ${yoga_SOURCE_DIR}/yoga/algorithm/CalculateLayout.cpp)
+file(READ ${_yoga_calc} _yoga_cl)
+set(_yoga_cl_anchor "  bool isNodeBaselineLayout = isBaselineLayout(node);\n")
+string(FIND "${_yoga_cl}" "${_yoga_cl_anchor}" _yoga_cl_at)
+if(_yoga_cl_at GREATER -1)
+  string(REPLACE "${_yoga_cl_anchor}" "\
+  // jsui: once per node and layout pass instead of once per flex line.\n\
+  static thread_local const yoga::Node* jsuiBaselineNode = nullptr;\n\
+  static thread_local uint32_t jsuiBaselineGen = 0;\n\
+  static thread_local bool jsuiBaselineValue = false;\n\
+  const uint32_t jsuiGen = gCurrentGenerationCount.load(std::memory_order_relaxed);\n\
+  if (node != jsuiBaselineNode || jsuiGen != jsuiBaselineGen) {\n\
+    jsuiBaselineNode = node;\n\
+    jsuiBaselineGen = jsuiGen;\n\
+    jsuiBaselineValue = isBaselineLayout(node);\n\
+  }\n\
+  bool isNodeBaselineLayout = jsuiBaselineValue;\n" _yoga_cl "${_yoga_cl}")
+  set(_yoga_cl_out ${CMAKE_BINARY_DIR}/yoga-patched/CalculateLayout.cpp)
+  file(CONFIGURE OUTPUT ${_yoga_cl_out} CONTENT "${_yoga_cl}" @ONLY)
+  list(REMOVE_ITEM JSUI_YOGA_SOURCES ${_yoga_calc})
+  list(APPEND JSUI_YOGA_SOURCES ${_yoga_cl_out})
+else()
+  message(WARNING "Yoga CalculateLayout.cpp changed: skipping the baseline-layout memo")
+endif()
 add_library(jsui_yoga STATIC ${JSUI_YOGA_SOURCES})
 target_include_directories(jsui_yoga PUBLIC ${yoga_SOURCE_DIR})
 set_target_properties(jsui_yoga PROPERTIES CXX_STANDARD 20 POSITION_INDEPENDENT_CODE ON)

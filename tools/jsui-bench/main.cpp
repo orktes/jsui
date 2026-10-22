@@ -350,7 +350,11 @@ void compare(const std::vector<Result>& results, const std::string& path) {
     auto& b = it->second;
     std::printf("  %s\n", r.name.c_str());
     auto line = [&](const char* k, double now) {
-      double was = b.count(k) ? b[k] : NAN;
+      if (!b.count(k)) {  // not in the baseline (an older jsui-bench)
+        std::printf("    %-18s %10s -> %10.1f\n", k, "-", now);
+        return;
+      }
+      double was = b[k];
       char delta[32] = "";
       if (was > 0) std::snprintf(delta, sizeof delta, "%+.0f%%", (now / was - 1) * 100);
       std::printf("    %-18s %10.1f -> %10.1f  %s\n", k, was, now, delta);
