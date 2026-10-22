@@ -20,7 +20,9 @@
  *   bundleUrl?: string,          // URL of the JS bundle (resolved against the page)
  *   bundleSource?: string,       // or the bundle source itself
  *   devMode?: boolean,           // dev overlay + live reload
- *   devPoll?: boolean,           // host-side polling of /__jsui/version (default: devMode)
+ *   devPoll?: boolean,           // host-side polling of /__jsui/version. Default: only for
+ *                                // https:// bundles; the runtime itself polls http:// origins
+ *                                // (through this module's fetch loader) when devMode is set.
  *   pixelRatio?: number,         // default: window.devicePixelRatio (tracked live)
  *   moduleUrl?: string|URL,      // default: ./dist/jsui.js next to this file
  *   renderer?: 'auto'|'webgl'|'2d',
@@ -123,7 +125,8 @@ class JsuiHost {
 
     if (opts.bundleSource != null) this.loadSource(opts.bundleSource, this._bundleUrl ?? 'bundle.js');
     else if (this._bundleUrl) this.loadUrl(this._bundleUrl);
-    if (opts.devMode && (opts.devPoll ?? true) && this._bundleUrl) this._startDevPoll();
+    const runtimePolls = this._bundleUrl?.startsWith('http://');
+    if (opts.devMode && (opts.devPoll ?? !runtimePolls) && this._bundleUrl) this._startDevPoll();
     if (opts.autoStart !== false) this.start();
   }
 
@@ -176,6 +179,12 @@ class JsuiHost {
 
   get lastError() { return this._lastError; }
 
+  /** Resolves after a frame with no resource loads in flight (bundle, images,
+   * fonts, fetch) and nothing left to paint: the UI is on screen. */
+  whenIdle() {
+    return new Promise((resolve) => (this._idleWaiters ??= []).push(resolve));
+  }
+
   start() {
     if (this._raf || this._destroyed) return;
     const loop = (t) => {
@@ -214,6 +223,11 @@ class JsuiHost {
     this._checkError();
     this._updateCursor();
     if (this.listeners.get('frame')?.size) this._emit('frame', st);
+    if (this._idleWaiters?.length && !M._jsui_pending_loads(rt) && !M._jsui_needs_redraw(rt)) {
+      const w = this._idleWaiters;
+      this._idleWaiters = [];
+      w.forEach((r) => r());
+    }
   }
 
   /** The last rendered frame as premultiplied RGBA (copy), for tests and screenshots. */

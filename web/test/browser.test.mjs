@@ -104,9 +104,8 @@ async function mount(page, opts = {}) {
     jsui.errors = [];
     jsui.on('message', (name, data) => jsui.messages.push([name, data]));
     jsui.on('error', (msg) => jsui.errors.push(msg));
-    if (opts.bundleUrl && !opts.expectError) {
-      const t0 = performance.now();
-      while (jsui.stats.renders === 0 && performance.now() - t0 < 5000) await new Promise(requestAnimationFrame);
+    if (!opts.expectError) {
+      await Promise.race([jsui.whenIdle(), new Promise((r) => setTimeout(r, 5000))]);
     }
     return { renderer: jsui.renderer, pw: jsui.pixelWidth, ph: jsui.pixelHeight };
   }, { id: opts.id ?? 'ui', w: opts.width ?? 320, h: opts.height ?? 200, opts: opts.jsui ?? {} });

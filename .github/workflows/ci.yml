@@ -89,7 +89,7 @@ jobs:
         run: |
           npm install --no-package-lock --no-audit --no-fund
           npx playwright install --with-deps chromium
-          npm run test:browser
+          JSUI_WEB_STRICT=1 npm run test:browser
       - uses: actions/upload-artifact@v4
         with:
           name: jsui-wasm
