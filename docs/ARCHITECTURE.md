@@ -367,11 +367,11 @@ used to process Dawn events).
   scale or size animates is drawn from the mask of the nearest of 8 sizes
   per octave, stretched to it, and repainted exactly once it stops
   (`quantizedScale`, `shadowInexact` in `painter.cpp`). Such approximate
-  draws ask for an exact repaint (`Document::markExactRepaint`), which
-  `jsui_needs_redraw()` reports once nothing animates any more: while
-  animations, scroll physics or JS frame callbacks drive frames the next
-  one repaints it anyway, and the runtime still goes idle after each frame
-  (`whenIdle`, a perpetually scaling loading screen). A steady showcase
+  draws ask for an exact repaint (`Document::markExactRepaint`, per
+  surface), which `jsui_needs_redraw()` reports once nothing animates any
+  more: while animations, scroll physics or JS frame callbacks drive frames
+  the next one repaints it anyway, and the surface still goes idle after
+  each frame (`whenIdle`, a perpetually scaling loading screen). A steady showcase
   frame creates no textures and uploads nothing (before: ~1 new texture a
   frame for the deploy button's moving shadow, the tab underline, the
   pulsing live dot and the progress bar's glow); the entrance and
@@ -395,8 +395,9 @@ used to process Dawn events).
   exactly (`layerInexact`). A subtree that changed in the last frame (a
   progress bar inside a fading panel) takes a plain layer clipped to the
   damage, as before, with its static parts drawn from raster textures (see
-  Raster cache). Textures are freed after 120 unused frames or over
-  96 MB (LRU); `JSUI_WEBGPU_NO_LAYER_CACHE` turns it off. On
+  Raster cache). Each surface drawing through the context has its own
+  cache; textures are freed after 120 of its frames unused or over 96 MB
+  (LRU); `JSUI_WEBGPU_NO_LAYER_CACHE` turns it off. On
   `interactions.jsx` the entrance (staggered menu buttons and panels fading
   and sliding in) went from ~5.9 render passes and ~140 draws per frame to
   ~3.4 and ~90 at 1280x720; what is left are two panels whose content
@@ -1270,8 +1271,9 @@ the expensive per-pixel work is done once:
   its records keep the old placement until it comes back. A steady
   showcase frame walks the 19 nodes on the paths to what animates instead
   of the whole tree. `PaintStats::nodesUpdated` counts the walked nodes;
-  `setRecordSkipping(false)` walks them all, which the tests compare with.
-  Skia does not
+  `setRecordSkipping(false)` walks them all, which the tests compare with
+  (also for two surfaces of one runtime: each document has its own
+  records and passes). Skia does not
   rasterize an anti-aliased outline cut by the clip exactly like the whole
   outline, so damage crossing a curved node's edge grows to the whole node
   (damage inside its padding box does not), and the repaint stays exact.

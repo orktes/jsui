@@ -1343,7 +1343,9 @@ struct NodeRecord : Node::Cache {
   // entries in that pass' curved-outline and raster-candidate lists. `quiet`:
   // nothing in the subtree is changing (visiting it again with the same
   // arguments, nodes unchanged, would find the same records and no damage).
-  uint32_t pass = 0;
+  // Pass ids are unique across documents (a node moved to another surface's
+  // tree carries none its new root just ran).
+  uint64_t pass = 0;
   bool quiet = false;
   SkMatrix inMatrix, inSnap;
   SkIRect inClip = SkIRect::MakeEmpty();
@@ -1376,7 +1378,7 @@ struct RootRecord : NodeRecord {
   // The previous pass' lists, for skipped subtrees (NodeRecord::pass).
   std::vector<CurvedNode> curvedPrev;
   std::vector<NodeRecord*> rasterPrev;
-  uint32_t passes = 0;
+  uint64_t lastPass = 0;  // the id of its last updateDamage pass
   uint32_t passImageGen = 0;
   bool passRaster = false;
   int nodesUpdated = 0;  // PaintStats::nodesUpdated
@@ -2084,7 +2086,7 @@ void updateRasterCache(RootRecord* root, SkRegion* damage, const SkIRect& screen
 // candidate's content (each node is checked for the blit).
 struct SkipState {
   bool enabled = false;
-  uint32_t pass = 0;
+  uint64_t pass = 0, prev = 0;  // this pass' id, and the root's previous one
   int visited = 0;
   const std::vector<CurvedNode>* curvedPrev = nullptr;
   const std::vector<NodeRecord*>* rasterPrev = nullptr;
@@ -2218,8 +2220,8 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
         SkipState* sk = tSkip;
         bool skip = false, hidden = false;
         SkIRect childFull;
-        if (sk && sk->enabled && !scan->inside && !ch->ghostOf && cr && cr->valid && cr->pass + 1 == sk->pass &&
-            !ch->paintTreeDirty()) {
+        if (sk && sk->enabled && !scan->inside && !ch->ghostOf && cr && cr->valid && sk->prev &&
+            cr->pass == sk->prev && !ch->paintTreeDirty()) {
           childFull = cr->subtreeFull;
           skip = cr->quiet && cr->inClip == childClip && cr->inMatrix == cm && cr->inSnap == cs;
           if (!skip && cr->subtree.isEmpty() && cm.getScaleX() == cr->inMatrix.getScaleX() &&
@@ -2571,7 +2573,9 @@ SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBl
   root->curved.clear();
   root->rasterCandidates.clear();
   SkipState skip;
-  skip.pass = ++root->passes;
+  static std::atomic<uint64_t> passes{0};
+  skip.prev = root->lastPass;
+  skip.pass = root->lastPass = ++passes;
   skip.enabled = gRecordSkip && damage.isEmpty() && imageGen == root->passImageGen && raster == root->passRaster;
   skip.curvedPrev = &root->curvedPrev;
   skip.rasterPrev = &root->rasterPrev;

@@ -867,8 +867,9 @@ TEST(gpu_capi_bundle) {
 
 // A shadow drawn approximately while its node scales (from the mask of a
 // nearby size, painter.cpp quantizedScale) is repainted exactly in the
-// frame after the animation stops, and while it runs the runtime still goes
+// frame after the animation stops, and while it runs the surface still goes
 // idle after each frame (jsui_needs_redraw), as with any other animation.
+// Another surface of the runtime, with a static shadow, is not repainted.
 TEST(gpu_scaling_shadow_exact_after_animation) {
   forEachContext("gpu_scaling_shadow_exact_after_animation", [](GLContext& c, JsuiGpuContext* gpu, Api api) {
     JsuiConfig cfg;
@@ -876,8 +877,15 @@ TEST(gpu_scaling_shadow_exact_after_animation) {
     cfg.width = 160;
     cfg.height = 120;
     JsuiRuntime* rt = jsui_create(&cfg);
+    JsuiRuntime* other = jsui_surface_create(rt, "Static", nullptr, 160, 120, 1);
     const char* src = R"JS(
       const N = __jsui_native, A = N.animated;
+      globalThis.__jsui_runSurface = (tag) => {
+        const v = N.createNode('View', tag);
+        N.setProps(v, { style: { margin: 30, flex: 1, borderRadius: 8, backgroundColor: '#36a',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.8)' } });
+        N.appendChild(tag, v);
+      };
       const box = N.createNode('View');
       N.setProps(box, { style: { position: 'absolute', left: 50, top: 40, width: 60, height: 40, borderRadius: 8,
         backgroundColor: '#3a6', boxShadow: '0 4px 12px rgba(0,0,0,0.8)' } });
@@ -901,22 +909,33 @@ TEST(gpu_scaling_shadow_exact_after_animation) {
     t.width = 160;
     t.height = 120;
     t.flags = JSUI_GL_TOP_LEFT_ORIGIN;
+    RenderTexture otex(c.gl, 160, 120);
+    JsuiGLTarget ot = t;
+    ot.texture = otex.tex;
     double now = 0;
     jsui_tick(rt, now += 16);
     CHECK_EQ(jsui_render_gl_target(rt, gpu, &t), 0);
+    CHECK(jsui_needs_redraw(other));
+    CHECK_EQ(jsui_render_gl_target(other, gpu, &ot), 0);
     jsui_post_message(rt, "start", "null");
-    int frames = 0, approximate = 0, busy = 0;
+    int frames = 0, approximate = 0, busy = 0, otherRenders = 0;
     while (frames < 30 && (jsui_wants_frame(rt) || jsui_needs_redraw(rt))) {
       frames++;
       jsui_tick(rt, now += 16);
       if (jsui_needs_redraw(rt)) CHECK_EQ(jsui_render_gl_target(rt, gpu, &t), 0);
+      if (jsui_needs_redraw(other)) {
+        otherRenders++;
+        CHECK_EQ(jsui_render_gl_target(other, gpu, &ot), 0);
+      }
       if (r.doc.exactRepaintPending()) approximate++;
       if (r.animatingFrames(r.main()) && jsui_needs_redraw(rt)) busy++;
     }
-    std::printf("  [%s] %d frames, %d approximate, %d busy while animating\n", apiName(api), frames, approximate, busy);
+    std::printf("  [%s] %d frames, %d approximate, %d busy while animating, other surface repainted %d\n",
+                apiName(api), frames, approximate, busy, otherRenders);
     CHECK(approximate > 0);
     CHECK_EQ(busy, 0);
-    CHECK(frames < 30 && !jsui_needs_redraw(rt));
+    CHECK_EQ(otherRenders, 0);
+    CHECK(frames < 30 && !jsui_needs_redraw(rt) && !jsui_needs_redraw(other));
     // The retained frame equals a full repaint (another target) of the end state.
     std::vector<uint32_t> retained = rtex.read(false);
     RenderTexture full(c.gl, 160, 120);

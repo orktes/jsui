@@ -61,7 +61,6 @@ struct WebGPUGpu final : JsuiGpuContext {
   std::unique_ptr<graphite::Context> ctx;
   std::unique_ptr<graphite::Recorder> recorder;
   sk_sp<CachingImageProvider> images;
-  jsui::LayerCache layers;    // composited opacity layers (painter.h)
   // What render() keeps between frames of one surface. Several surfaces of
   // a runtime (several canvases) can share this context: one entry each.
   struct Frames {
@@ -73,6 +72,9 @@ struct WebGPUGpu final : JsuiGpuContext {
     int smallFrames = 0;        // consecutive frames with small damage
     int directFrames = 0;       // consecutive frames painted straight into the target
     uint64_t lastUsed = 0;
+    // Composited opacity layers and raster-cached subtrees (painter.h), per
+    // surface: entries age with the frames of the surface they belong to.
+    std::unique_ptr<jsui::LayerCache> layers = std::make_unique<jsui::LayerCache>();
     void drop() {
       retained.reset();
       backImage.reset();
@@ -145,7 +147,6 @@ struct WebGPUGpu final : JsuiGpuContext {
 
   void release() {
     dropRetained();
-    layers.clear();
     if (images) images->clear();
     recorder.reset();
     if (!ctx) return;
@@ -219,7 +220,6 @@ void contextLost(JsuiGpuContext* gpu) {
   if (!g) return;
   g->lost = true;
   g->dropRetained();
-  g->layers.clear();
   if (g->images) g->images->clear();
 }
 
@@ -232,7 +232,7 @@ void purge(JsuiGpuContext* gpu, size_t cacheBytes) {
     g->images->setBudget(cacheBytes / 2);
   }
   g->images->clear();
-  g->layers.clear();
+  for (auto& e : g->frames) e.second.layers->clear();
   g->recorder->freeGpuResources();
   g->ctx->freeGpuResources();
 }
@@ -296,8 +296,8 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
   bool viaRetained = false, failed = false;
   bool copyAll = false;  // copy-back: the whole target into `back` after the frame
   const bool opacityLayers = !(t.flags & JSUI_WEBGPU_NO_LAYER_CACHE), raster = !(t.flags & JSUI_WEBGPU_NO_RASTER_CACHE);
-  g->layers.setModes(opacityLayers, raster);
-  jsui::LayerCacheScope layerScope(opacityLayers || raster ? &g->layers : nullptr);
+  f.layers->setModes(opacityLayers, raster);
+  jsui::LayerCacheScope layerScope(opacityLayers || raster ? f.layers.get() : nullptr);
   rt.renderCanvasTracked(key, w, h, [&](const SkIRect&, bool keyValid) -> Surface::CanvasChoice {
     int64_t area = 0;
     for (SkRegion::Iterator it(rt.trackedDamage()); !it.done(); it.next())
@@ -357,7 +357,7 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
     c.splitDamage = true;
     return c;
   }, /*growCurves=*/false);
-  g->layers.endFrame();
+  f.layers->endFrame();
   if (failed) return -1;
   if (viaRetained && !copyBack) {
     SkPaint paint;
