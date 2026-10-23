@@ -2,6 +2,12 @@
 
 Fast development of beautiful, responsive in-game UIs with React.
 
+**Using a coding agent?** Add the JSUI skill to your project with one command:
+
+```sh
+npx @orktes/jsui-cli skill install            # -> .claude/skills/jsui/ (--global: ~/.claude/skills/)
+```
+
 * Write components exactly like React Native (`import { View, Text } from 'react-native'`).
 * Runs in **QuickJS**, lays out with **Yoga**, paints with **Skia**.
 * Embeds through a small C API (`include/jsui/jsui.h`): feed it input
@@ -122,11 +128,12 @@ headless `jsui screenshot` / `inspect` / `run`, and the agent skill) and `@orkte
 
 ## Coding agents and headless checks
 
-`npx jsui skill install` adds the JSUI [agent skill](packages/cli/skills/jsui/SKILL.md) to a
-project (`.claude/skills/jsui/`), or install it in Claude Code as a plugin with
+`npx @orktes/jsui-cli skill install` adds the JSUI [agent skill](packages/cli/skills/jsui/SKILL.md)
+to a project (`.claude/skills/jsui/`; nothing else to install first), or install it in Claude Code as a plugin with
 `/plugin marketplace add orktes/jsui` and `/plugin install jsui@jsui`. It teaches the
 supported React Native subset, gamepad focus, animation, game data, Lottie, shaders, host
-textures and embedding, and how to verify a UI without a browser:
+textures and embedding, and how to verify a UI without a browser (with
+`@orktes/jsui-cli` in the project's devDependencies):
 
 ```sh
 npx jsui screenshot app.jsx -o shot.png       # the CPU WASM runtime in Node, deterministic

@@ -104,3 +104,16 @@ jobs:
             fi
             npm publish --workspace "$ws" --access public --tag "$DIST_TAG"
           done
+      # The one-liner in the READMEs, from the registry with nothing installed.
+      - name: Smoke test (npx @orktes/jsui-cli skill install)
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          dir="$RUNNER_TEMP/npx-smoke"
+          mkdir -p "$dir" && cd "$dir"
+          for i in $(seq 60); do  # new versions take minutes to show up
+            npm view "@orktes/jsui-cli@$VERSION" version >/dev/null 2>&1 && break
+            sleep 10
+          done
+          npx --yes "@orktes/jsui-cli@$VERSION" skill install
+          test -s .claude/skills/jsui/SKILL.md

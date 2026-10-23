@@ -55,6 +55,7 @@ Packages: `@orktes/jsui-cli` (bundler, dev server, headless tools, this skill),
 
 ```sh
 npm install --save-dev @orktes/jsui-cli          # brings @orktes/jsui-react and the headless runtime
+                                                 # (install it first: the unscoped `jsui` npm package is not ours)
 npx jsui build src/app.jsx -o dist/bundle.js     # one IIFE script + dist/assets/*
 npx jsui dev src/app.jsx                         # http://127.0.0.1:5173/bundle.js, live reload
 ```
@@ -157,5 +158,6 @@ Read the reference that matches the task:
 | `jsui screenshot` / `inspect` / `run`, `launch()` API, selectors, all steps | [references/testing-tools.md](references/testing-tools.md) |
 | Game UI patterns: layout for 16:9, focus visuals, HUD, menus, lists | [references/game-ui-patterns.md](references/game-ui-patterns.md) |
 
-`npx jsui skill print --all` prints this skill with every reference;
-`npx jsui skill install` copies it into `.claude/skills/jsui/`.
+`npx @orktes/jsui-cli skill print --all` prints this skill with every reference;
+`npx @orktes/jsui-cli skill install` copies it into `.claude/skills/jsui/`
+(`--global`: `~/.claude/skills/jsui/`).
