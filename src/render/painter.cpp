@@ -1827,6 +1827,8 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
     sk_sp<SkImage> image = surf->makeImageSnapshot();
 #endif
     if (!image) return false;
+    // Raster-cached subtrees inside may have added entries (a rehash).
+    it = lc.entries.find(n);
     if (it != lc.entries.end()) lc.erase(it);
     LayerCache::Impl::Entry e;
     e.stamp = rec->layerStamp;
