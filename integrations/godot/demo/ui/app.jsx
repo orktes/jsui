@@ -42,6 +42,7 @@ import Showcase from '../../../../examples/showcase/interactions.jsx';
 import { colors, font } from '../../../../examples/theme.js';
 import { Cinema, TextureProbe } from './cinema.jsx';
 import { LottieProbe } from './lottie-probe.jsx';
+import { ShaderProbe } from './shader-probe.jsx';
 
 function Toast() {
   const [text, setText] = useState(null);
@@ -237,6 +238,8 @@ AppRegistry.registerComponent('Cinema', () => Cinema);
 AppRegistry.registerComponent('TextureProbe', () => TextureProbe);
 // Lottie (lottie-probe.jsx): main.gd's self-test probe.
 AppRegistry.registerComponent('LottieProbe', () => LottieProbe);
+// ShaderView (shader-probe.jsx): main.gd's self-test probe.
+AppRegistry.registerComponent('ShaderProbe', () => ShaderProbe);
 // Explicitly: the showcase's import registered 'Showcase' first. A view that
 // picks another component (JsuiView.component, e.g. cinema/cinema.tscn's
 // 'Cinema') still replaces it once the bundle has loaded.

@@ -496,7 +496,7 @@ class HeadlessApp {
     try {
       return await this.callUi('__jsui.inspect');
     } catch (e) {
-      if (/no handler/i.test(e.message)) throw new Error('jsui: this bundle has no inspector (build it with @orktes/jsui-react >= 0.3)');
+      if (/no handler/i.test(e.message)) throw new Error('jsui: this bundle has no inspector (build it with @orktes/jsui-react >= 0.4)');
       throw e;
     }
   }

@@ -1,6 +1,6 @@
 {
   "name": "@orktes/jsui-web",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Browser host for the JSUI WebAssembly build",
   "author": "Jaakko Lukkari",
   "license": "MIT",

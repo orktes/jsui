@@ -171,4 +171,4 @@ matches with theirs. Records: `messages`, `calls`, `stateWrites`,
   renderers are compared in JSUI's CI).
 * Element order among siblings follows creation order; positions are
   layout positions (transforms are not applied to `rect`).
-* `jsui inspect` needs a bundle built with `@orktes/jsui-react` 0.3+.
+* `jsui inspect` needs a bundle built with `@orktes/jsui-react` 0.4+.

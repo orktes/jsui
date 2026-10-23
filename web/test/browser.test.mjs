@@ -743,7 +743,9 @@ test('webgpu: full-frame changes paint straight into the canvas, small ones thro
     const canvas = passes.filter((p) => p.startsWith(`pass color ${a.pixelWidth}x${a.pixelHeight} `));
     return { canvas, passes: passes.length, loads: canvas.filter((p) => p.includes('load=load')).length,
       clears: canvas.filter((p) => p.includes('load=clear')).reduce((n, p) => n + Number(p.split(' x').pop()), 0),
-      copies: window.__gpuCounts.get('GPUCommandEncoder.copyTextureToTexture') ?? 0 };
+      copies: window.__gpuCounts.get('GPUCommandEncoder.copyTextureToTexture') ?? 0,
+      submits: window.__gpuCounts.get('GPUQueue.submit') ?? 0,
+      encoders: window.__gpuCounts.get('GPUDevice.createCommandEncoder') ?? 0 };
   }, { name, color });
   const same = async (what) => {
     const d = await frameDiff(page, ['a', 'b']);
@@ -758,8 +760,9 @@ test('webgpu: full-frame changes paint straight into the canvas, small ones thro
   // (a copy of the canvas) and only the damage over it, and the damage is
   // copied back for the next frame. Still one pass: no retained render
   // target to load and store (two extra full-frame passes on a 4K canvas).
+  // The copy is recorded with the pass: one command encoder and one submit.
   for (let i = 0; i < 5; i++) r = await step('box', i % 2 ? '#00ff00' : '#0000ff');
-  assert(r.passes === 1 && r.clears === 1 && r.copies === 1,
+  assert(r.passes === 1 && r.clears === 1 && r.copies === 1 && r.submits === 1 && r.encoders === 1,
     `small change: not one pass plus a damage copy-back: ${JSON.stringify(r)}`);
   await same('after small changes');
   r = await step('bg', '#102030');
@@ -1137,6 +1140,65 @@ test('webgpu: fading and moving layers are composited from cached textures, exac
     d = await frameDiff(page, ['a', 'b']);
     assert(d.max <= 1, `child change ${JSON.stringify(cm)}: stale composited layer: ${JSON.stringify(d)}`);
   }
+}, { viewport: { width: 900, height: 400 } });
+
+test('webgpu: static backdrop: damage repainted over a texture of it, exact', async ({ page }) => {
+  // The layers fixture's background and gradient strip are what it paints
+  // first and they do not change: each damage rect of the fading panel is
+  // repainted over a texture of them (one draw instead of a clear and their
+  // draws), the same pixels as painting them ('b', JSUI_WEBGPU_NO_BACKDROP),
+  // and a change to the strip renders the texture again.
+  await page.addInitScript({ path: path.join(WEB, 'test/gpu-count.js') });
+  await page.reload();
+  await page.waitForFunction(() => window.testReady);
+  const renderers = await page.evaluate(async (dist) => {
+    const make = () => {
+      const c = document.createElement('canvas');
+      c.style.width = '400px';
+      c.style.height = '300px';
+      document.body.appendChild(c);
+      return window.createJsui({ canvas: c, bundleUrl: 'fixtures/layers.js', renderer: 'webgpu', autoStart: false,
+        moduleUrl: new URL(`../${dist}/jsui.js`, location.href) });
+    };
+    const [a, b] = await Promise.all([make(), make()]);
+    window.hosts = { a, b };
+    return [a.renderer, b.renderer];
+  }, DIST);
+  if (renderers.some((n) => n !== 'webgpu')) skip(`no WebGPU renderer with web/${DIST} (${renderers})`, DIST !== 'dist-gpu');
+  // Fades the panel (over the strip) in both for `n` frames; returns the
+  // draws of each.
+  const fade = (n, msg) => page.evaluate(async ({ n, msg }) => {
+    const { a, b } = window.hosts;
+    b._wgpu.flags = 32;  // JSUI_WEBGPU_NO_BACKDROP
+    if (msg) for (const h of [a, b]) h.postMessage('backdrop', msg);
+    window.t ??= performance.now();
+    const draws = { a: 0, b: 0 };
+    for (let i = 0; i < n; i++) {
+      window.t += 16.67;
+      for (const k of ['a', 'b']) {
+        window.hosts[k].postMessage('move', { opacity: 0.4 + 0.03 * (i % 10), x: 0, y: 40 });
+        window.__gpuCounts.clear();
+        window.hosts[k].frame(window.t);
+        draws[k] += [...window.__gpuCounts].filter(([key]) => /\.draw(Indexed)?$/.test(key)).reduce((s, [, v]) => s + v, 0);
+      }
+      await a._wgpu.device.queue.onSubmittedWorkDone();
+    }
+    return draws;
+  }, { n, msg });
+  await fade(4);
+  let draws = await fade(8);
+  let d = await frameDiff(page, ['a', 'b']);
+  assert(!d.missing && !d.size && d.max === 0, `over the backdrop texture: differs from painting it: ${JSON.stringify(d)}`);
+  assert(draws.a < draws.b, `damage not repainted over the backdrop texture: ${JSON.stringify(draws)}`);
+  // The strip changes: painted directly until it is still again, then over
+  // a new texture of it.
+  await fade(1, { backgroundImage: 'linear-gradient(90deg, #00c8ff, #ffe600)', left: 24 });
+  d = await frameDiff(page, ['a', 'b']);
+  assert(d.max === 0, `backdrop changing: ${JSON.stringify(d)}`);
+  draws = await fade(8);
+  d = await frameDiff(page, ['a', 'b']);
+  assert(d.max === 0, `stale backdrop texture: ${JSON.stringify(d)}`);
+  assert(draws.a < draws.b, `no new backdrop texture: ${JSON.stringify(draws)}`);
 }, { viewport: { width: 900, height: 400 } });
 
 test('webgpu: devicePixelRatio 2 and resize', async ({ page }) => {
