@@ -264,6 +264,25 @@ test('timers drive repaints', async ({ page }) => {
   assert(near(px, [255, 255, 0, 255]), `band 2 after timer: ${fmt(px)}`);
 });
 
+test('profiling: getPerf() reports phase times and counters', async ({ page }) => {
+  await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
+  await frames(page, 2);
+  const perf = await page.evaluate(async () => {
+    const h = window.hosts.ui;
+    h.setProfiling(true);
+    h.getPerf();  // reset
+    h.postMessage('paint', { color: '#ff00ff' });
+    for (let i = 0; i < 3; i++) await new Promise((r) => requestAnimationFrame(r));
+    const p = h.getPerf();
+    h.setProfiling(false);
+    return p;
+  });
+  assert(perf && typeof perf.paint_us === 'number' && typeof perf.bridge_calls === 'number', `getPerf: ${JSON.stringify(perf)}`);
+  const total = perf.js_us + perf.commit_us + perf.style_us + perf.layout_us + perf.paint_us + perf.gpu_submit_us +
+    perf.other_us;
+  assert(total > 0, `no time measured: ${JSON.stringify(perf)}`);
+});
+
 test('host -> UI messages (jsui.postMessage)', async ({ page }) => {
   await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
   await page.evaluate(() => window.hosts.ui.postMessage('paint', { color: '#ff00ff' }));
