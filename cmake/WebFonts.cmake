@@ -12,6 +12,12 @@
 
 option(JSUI_WOFF2 "Decode WOFF2 fonts (google/woff2 + brotli)" ON)
 
+if(TARGET jsui_zlib)
+  # Deps.cmake already builds this zlib for Skia (no system zlib, e.g. Windows):
+  # a second copy would clash on its unprefixed internals (z_errmsg).
+  add_library(jsui_zinflate INTERFACE)
+  target_link_libraries(jsui_zinflate INTERFACE jsui_zlib)
+else()
 FetchContent_Declare(zlib
   GIT_REPOSITORY https://github.com/madler/zlib.git
   GIT_TAG v1.3.1
@@ -33,6 +39,7 @@ elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
 endif()
 if(NOT WIN32)
   target_compile_definitions(jsui_zinflate PRIVATE HAVE_UNISTD_H)
+endif()
 endif()
 
 if(JSUI_WOFF2)

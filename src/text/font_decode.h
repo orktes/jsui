@@ -20,4 +20,9 @@ bool decodeWebFont(const void* data, size_t size, std::vector<uint8_t>* out, std
 // Number of faces in a TrueType / OpenType collection ('ttcf'), else 1.
 int collectionFaceCount(const void* data, size_t size);
 
+// Face `index` of a collection as a standalone sfnt in `out` (CoreText only
+// loads the first face of collection data). False if the data is not a
+// collection or the face's tables run past the end.
+bool extractCollectionFace(const void* data, size_t size, int index, std::vector<uint8_t>* out);
+
 }  // namespace jsui

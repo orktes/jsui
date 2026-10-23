@@ -5,6 +5,7 @@
 #include <iterator>
 
 #include "render_util.h"
+#include "text/font_decode.h"
 #include "test.h"
 
 using namespace jsui;
@@ -64,6 +65,14 @@ TEST(fonts_collection_registers_every_face_and_file_family_names) {
   float regular = textWidth(s, R"("fontSize":40,"fontFamily":"Coll")", "ABC");
   float bold = textWidth(s, R"("fontSize":40,"fontFamily":"Coll","fontWeight":"bold")", "ABC");
   CHECK(bold > regular + 1);
+  // A face split out of the collection is the same font (the CoreText path).
+  std::vector<uint8_t> face;
+  CHECK(extractCollectionFace(ttc.data(), ttc.size(), 1, &face));
+  CHECK(!extractCollectionFace(ttc.data(), ttc.size(), 2, &face));
+  CHECK(extractCollectionFace(ttc.data(), ttc.size(), 1, &face));
+  CHECK_EQ(fm.registerFont("Split", face.data(), face.size(), 0, -1), 1);
+  s.rt->fontsChanged();
+  CHECK_NEAR(textWidth(s, R"("fontSize":40,"fontFamily":"Split","fontWeight":"bold")", "ABC"), bold, 0.01);
   // No family: the name inside the file.
   auto var = testFont("jsui-var.ttf");
   CHECK(fm.registerFont("", var.data(), var.size(), 0, -1) > 0);

@@ -490,6 +490,7 @@ test('fonts: registerFont, loadFont, unregisterFont, fallbacks, default family',
   const want = { load: true, loadOpts: true, missing: false, bytes: true, fromFile: true, bad: false, unregister: true,
     unregisterAgain: false };
   assert(JSON.stringify(r) === JSON.stringify(want), `fonts: ${JSON.stringify(r)}, want ${JSON.stringify(want)}`);
+  return { allowErrors: true };  // the missing font's 404 and the refused bytes are logged
 }, {}, { worker: true });
 
 for (const renderer of ['auto', 'webgl', 'webgpu']) test(`create/destroy cycles: no heap growth, destroy during load is safe (${renderer})`, async ({ page }) => {

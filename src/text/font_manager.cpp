@@ -275,6 +275,9 @@ int FontManager::registerFont(const std::string& family, const void* data, size_
   int registered = 0;
   for (int index = 0; index < faces; index++) {
     sk_sp<SkTypeface> tf = mgr->makeFromData(bytes, index);
+    std::vector<uint8_t> face;
+    if (!tf && index > 0 && extractCollectionFace(bytes->data(), bytes->size(), index, &face))
+      tf = mgr->makeFromData(SkData::MakeWithCopy(face.data(), face.size()), 0);
     if (!tf) continue;
     std::string name = family;
     if (name.empty()) {

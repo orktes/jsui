@@ -122,4 +122,38 @@ int collectionFaceCount(const void* data, size_t size) {
   return int(std::clamp<uint32_t>(n, 1, std::min<uint32_t>(256, uint32_t((size - 12) / 4))));
 }
 
+bool extractCollectionFace(const void* data, size_t size, int index, std::vector<uint8_t>* out) {
+  const uint8_t* d = static_cast<const uint8_t*>(data);
+  if (index < 0 || index >= collectionFaceCount(data, size) || sniffFont(data, size) != FontContainer::Collection)
+    return false;
+  size_t dirAt = 12 + size_t(index) * 4;
+  if (dirAt + 4 > size) return false;
+  size_t dir = be32(d + dirAt);
+  if (dir + 12 > size) return false;
+  uint16_t numTables = be16(d + dir + 4);
+  size_t headerSize = 12 + size_t(numTables) * 16;
+  if (dir + headerSize > size) return false;
+  // Same table directory, tables copied after it (4-byte aligned) with the
+  // offsets rewritten; the checksums carry over unchanged.
+  size_t total = headerSize;
+  for (uint16_t i = 0; i < numTables; i++) {
+    const uint8_t* e = d + dir + 12 + i * 16;
+    size_t offset = be32(e + 8), length = be32(e + 12);
+    if (offset > size || length > size - offset) return false;
+    total += (length + 3) & ~size_t(3);
+  }
+  out->assign(total, 0);
+  uint8_t* o = out->data();
+  std::memcpy(o, d + dir, headerSize);
+  size_t at = headerSize;
+  for (uint16_t i = 0; i < numTables; i++) {
+    const uint8_t* e = d + dir + 12 + i * 16;
+    size_t offset = be32(e + 8), length = be32(e + 12);
+    std::memcpy(o + at, d + offset, length);
+    put32(o + 12 + i * 16 + 8, uint32_t(at));
+    at += (length + 3) & ~size_t(3);
+  }
+  return true;
+}
+
 }  // namespace jsui
