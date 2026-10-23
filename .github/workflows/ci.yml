@@ -315,7 +315,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: System packages
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build rsync
       - name: Cache emsdk
         uses: actions/cache@v4
         with:
@@ -373,7 +373,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: System packages
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build rsync
       - name: Cache emsdk
         uses: actions/cache@v4
         with:
@@ -447,7 +447,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: System packages
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build rsync
       - name: Cache Skia for WASM (Graphite) + its emsdk and Emdawnwebgpu
         uses: actions/cache@v4
         with:
