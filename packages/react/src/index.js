@@ -24,7 +24,7 @@ import {
   DrawerLayoutAndroid,
   ProgressBarAndroid,
 } from './components/misc.js';
-import { Animated, makeAnimated, useAnimatedValue } from './animated/index.js';
+import { Animated, makeAnimated, useAnimatedValue, useHostBufferValue } from './animated/index.js';
 import { Easing } from './animated/Easing.js';
 import { StyleSheet } from './StyleSheet.js';
 import { processColor } from './color.js';
@@ -34,9 +34,11 @@ import { bridgeStats } from './instances.js';
 import { registerAsset } from './components/basic.js';
 import { Host } from './apis.js';
 import { installHostData } from './hostData.js';
+import { installHostBuffer } from './hostBuffer.js';
 
 installGlobals();
 installHostData();
+installHostBuffer();
 // include/jsui/jsui.h documents a `jsui` global for host messages.
 if (!globalThis.jsui) globalThis.jsui = Host;
 makeAnimated({ View, Text, Image, ScrollView, FlatList, SectionList });
@@ -74,6 +76,7 @@ export {
   PanResponder,
   processColor,
   useAnimatedValue,
+  useHostBufferValue,
   // jsui renderer API
   render,
   unmount,

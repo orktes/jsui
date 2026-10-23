@@ -93,6 +93,16 @@ struct JsEngine::Impl {
   // Pending Host.calls: call id -> the settle(ok, payload) function JS passed.
   std::unordered_map<uint64_t, JSValue> hostCalls;
 
+  // Frame data: one ArrayBuffer per host buffer, over the runtime's storage
+  // (not owned by QuickJS), reused while the storage stays where it is.
+  struct BufferView {
+    JSValue buffer = JS_UNDEFINED;
+    const void* data = nullptr;
+    size_t bytes = 0;
+  };
+  std::unordered_map<std::string, BufferView> bufferViews;
+  void releaseBuffer(const std::string& key);
+
   // Cached atoms for hot callbacks.
   JSAtom atomDispatch = 0, atomHostMessage = 0, atomOnLayout = 0;
 

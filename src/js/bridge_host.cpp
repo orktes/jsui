@@ -6,6 +6,8 @@
 //   stateKeys() -> [key]                         statePatches(key, since) -> [patch json] | undefined
 //   hostCall(name, json, settle(ok, payload)) -> id (0: the host takes no calls)
 //   cancelCall(id) -> bool                       callResult(id, ok, payload)
+//   buffer(key) -> [ArrayBuffer, type, count, version] | undefined
+//   bufferVersion(key) -> number (0: unset)      bufferKeys() -> [key]
 #include <string>
 
 #include "js/engine_impl.h"
@@ -81,6 +83,43 @@ JSValue js_writeState(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
   return JS_NewFloat64(ctx, double(rt.state.version(key)));
 }
 
+// Frame data. The ArrayBuffer spans the buffer's storage (its capacity: JS
+// views the first `count` elements); the same object comes back while the
+// storage stays put, and it is detached before the storage is freed.
+JSValue js_buffer(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  if (argc < 1) return JS_UNDEFINED;
+  auto& impl = implOf(ctx);
+  std::string key = toStdString(ctx, argv[0]);
+  const HostBuffers::Entry* e = impl.rt.buffers.find(key);
+  if (!e) return JS_UNDEFINED;
+  auto it = impl.bufferViews.find(key);
+  if (it == impl.bufferViews.end() || it->second.data != e->data() || it->second.bytes != e->capacity) {
+    if (it != impl.bufferViews.end()) impl.releaseBuffer(key);
+    JSValue ab = JS_NewArrayBuffer(ctx, e->data(), e->capacity, 0, nullptr, nullptr, false);
+    if (JS_IsException(ab)) return ab;
+    it = impl.bufferViews.emplace(key, JsEngine::Impl::BufferView{ab, e->data(), e->capacity}).first;
+  }
+  JSValue arr = JS_NewArray(ctx);
+  JS_SetPropertyUint32(ctx, arr, 0, JS_DupValue(ctx, it->second.buffer));
+  JS_SetPropertyUint32(ctx, arr, 1, JS_NewInt32(ctx, int32_t(e->type)));
+  JS_SetPropertyUint32(ctx, arr, 2, JS_NewFloat64(ctx, double(e->count)));
+  JS_SetPropertyUint32(ctx, arr, 3, JS_NewFloat64(ctx, double(e->version)));
+  return arr;
+}
+
+JSValue js_bufferVersion(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  if (argc < 1) return JS_NewInt32(ctx, 0);
+  return JS_NewFloat64(ctx, double(runtimeOf(ctx).buffers.version(toStdString(ctx, argv[0]))));
+}
+
+JSValue js_bufferKeys(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+  auto keys = runtimeOf(ctx).buffers.keys();
+  JSValue arr = JS_NewArray(ctx);
+  for (size_t i = 0; i < keys.size(); i++)
+    JS_SetPropertyUint32(ctx, arr, uint32_t(i), JS_NewStringLen(ctx, keys[i].data(), keys[i].size()));
+  return arr;
+}
+
 JSValue js_hostCall(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   auto& impl = implOf(ctx);
   Runtime& rt = impl.rt;
@@ -122,6 +161,7 @@ void installHostDataBridge(JsEngine::Impl& impl, JSValue native) {
     int len;
   } fns[] = {{"getState", js_getState, 1},   {"stateVersion", js_stateVersion, 1}, {"stateKeys", js_stateKeys, 0},
              {"statePatches", js_statePatches, 2},
+             {"buffer", js_buffer, 1},       {"bufferVersion", js_bufferVersion, 1}, {"bufferKeys", js_bufferKeys, 0},
              {"hostCall", js_hostCall, 3},   {"cancelCall", js_cancelCall, 1},     {"callResult", js_callResult, 3}};
   for (auto& f : fns) JS_SetPropertyStr(ctx, native, f.name, JS_NewCFunction(ctx, f.fn, f.name, f.len));
   JS_SetPropertyStr(ctx, native, "setState",

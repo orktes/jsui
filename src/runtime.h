@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "core/document.h"
+#include "host_buffers.h"
 #include "host_state.h"
 #include "include/core/SkRect.h"
 #include "include/core/SkRefCnt.h"
@@ -110,6 +111,10 @@ class Runtime {
   // A JS-originated change of `key`: tells the embedder (on_state).
   void uiStateChanged(const std::string& key);
 
+  // Frame data (jsui_set_buffer / jsui_map_buffer; HostBuffer in JS). Lives
+  // as long as the runtime; JS views point into it (declared before js).
+  HostBuffers buffers;
+
   // Calls: Host.call <-> on_call / jsui_resolve_call, and
   // jsui_call_ui <-> Host.handle.
   uint64_t newCallId() { return nextCallId_++; }
@@ -162,6 +167,8 @@ class Runtime {
 
   // Hands the state keys the embedder changed since the last tick to JS.
   void deliverStateChanges();
+  // Same for frame data buffers.
+  void deliverBufferChanges();
   // Runs the done callbacks of settled jsui_call_ui calls.
   void deliverUiCallResults();
   // The JS context is going away: cancels its unanswered Host.calls (ids

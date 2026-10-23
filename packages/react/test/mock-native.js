@@ -178,6 +178,19 @@ globalThis.__jsui_native = {
     const next = JSON.stringify(applyPatch(prev ? JSON.parse(prev.json) : null, JSON.parse(json)));
     return __jsui_native.setState(key, next);
   },
+  // Frame data (src/host_buffers.cpp): an ArrayBuffer over the storage,
+  // the same object while the storage stays put.
+  buffer(key) {
+    const e = hostBuffers.get(key);
+    return e ? [e.storage, e.type, e.count, e.version] : undefined;
+  },
+  bufferVersion(key) {
+    const e = hostBuffers.get(key);
+    return e ? e.version : 0;
+  },
+  bufferKeys() {
+    return Array.from(hostBuffers.keys());
+  },
   // Calls (Host.call -> on_call; the test answers with mock.resolveCall / rejectCall).
   hostCall(name, json, settle) {
     if (!mock.callsEnabled) return 0;
@@ -198,6 +211,8 @@ globalThis.__jsui_native = {
 
 const hostState = new Map();
 let stateVersion = 1;
+const hostBuffers = new Map(); // key -> {storage, type, count, version}
+const BUFFER_TYPES = [Float32Array, Float64Array, Int32Array, Uint32Array, Int16Array, Uint16Array, Int8Array, Uint8Array];
 let nextCallId = 1;
 function applyPatch(target, patch) {
   if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) return patch;
@@ -224,6 +239,29 @@ Object.assign(mock, {
     mock.dirtyState.add(key);
   },
   dirtyState: new Set(),
+  /** Embedder side: jsui_set_buffer (a typed array; undefined removes). Delivered by mock.tickBuffers(). */
+  setHostBuffer(key, data) {
+    const prev = hostBuffers.get(key);
+    if (data === undefined) {
+      hostBuffers.delete(key);
+    } else {
+      const type = BUFFER_TYPES.findIndex((T) => data instanceof T);
+      let storage = prev && prev.storage.byteLength >= data.byteLength ? prev.storage : null;
+      if (!storage) {
+        if (prev) structuredClone(prev.storage, { transfer: [prev.storage] }); // detached, like the runtime
+        storage = new ArrayBuffer(Math.max(64, data.byteLength * 2));
+      }
+      new Uint8Array(storage).set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+      hostBuffers.set(key, { storage, type, count: data.length, version: stateVersion++ });
+    }
+    mock.dirtyBuffers.add(key);
+  },
+  dirtyBuffers: new Set(),
+  tickBuffers() {
+    const keys = Array.from(mock.dirtyBuffers);
+    mock.dirtyBuffers.clear();
+    if (keys.length) globalThis.__jsui_onHostBuffer(keys);
+  },
   /** The start of jsui_tick: hands the changed keys to JS. */
   tickState() {
     const keys = Array.from(mock.dirtyState);
