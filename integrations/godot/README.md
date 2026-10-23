@@ -185,7 +185,7 @@ springs, then of list scrolling, with vsync off; prints frame and render
 times) and `--no-world` (no 3D scene). For the pipeline cache:
 `--pipeline-cache P` (sets `pipeline_cache_path`; a path outside `user://`
 leaves the shipped list out), `--tour` (with `--self-test`: also clicks
-through the tabs, the carousel and the deploy panel),
+through the tabs, the carousel and the deploy panel and scrolls the list),
 `--first-scroll` (waits for the precompile, then prints the worst frame, the
 worst JsuiView render and the pipelines compiled during the list's first
 scroll), `--expect-warm-pipelines` (fails unless the cache was loaded and the
@@ -430,8 +430,10 @@ func spawn_nameplate(enemy):
   `user://` path the same file under `res://`
   (`res://jsui-pipelines.vulkan.bin`) is precompiled too, so a player's
   first session is warm as well: the demo ships one, recorded with
-  `record-pipelines.sh` (keys are fitted to the GPU that loads them; record
-  again after updating JSUI's Skia). A cache of another Skia build or
+  `record-pipelines.sh` (the self-test and tour, and the list's first scroll
+  on 30 to 144 fps UI clocks, since what a frame draws depends on the frame
+  rate; keys are fitted to the GPU that loads them; record again after
+  updating JSUI's Skia). A cache of another Skia build or
   renderer is started afresh and a damaged one repaired, with one log line
   each. `get_render_stats().pipelines` shows what it did.
 * CPU renderer: a changed frame uploads the whole texture (Godot 4 has no

@@ -52,8 +52,9 @@ extends Control
 ##                       meanwhile; waits for the pipeline cache to finish
 ##                       precompiling first. Prints them and quits
 ##   --tour              with --self-test: afterwards also click the tabs,
-##                       page the carousel and open / close the deploy panel
-##                       (more of the UI's draws, e.g. to record a pipeline list)
+##                       page the carousel, open / close the deploy panel and
+##                       scroll the armory list as --first-scroll does (more of
+##                       the UI's draws, e.g. to record a pipeline list)
 ##   --ui-fixed-fps N    JsuiView.fixed_fps: the UI's clock advances 1/N s per
 ##                       frame, so it draws the same frames on any machine
 ##                       (with --first-scroll: the scroll starts 2 s of UI
@@ -750,9 +751,10 @@ func _test_runtime_freed_first() -> void:
 
 
 ## --tour: the parts of the UI the self-test leaves out (tabs, carousel
-## paging, the deploy panel), so a recorded pipeline list covers their draws.
+## paging, the deploy panel, the armory list's long scroll), so a recorded
+## pipeline list covers their draws.
 func _run_tour() -> void:
-	var need := ["tabs", "carousel", "deploy"]
+	var need := ["tabs", "carousel", "deploy", "armory"]
 	if not await _wait_for(func(): return need.all(func(a): return _anchors.has(a)), 3.0):
 		_check("tour anchors", false, "missing: %s" % [need.filter(func(a): return not _anchors.has(a))])
 		return
@@ -780,6 +782,18 @@ func _run_tour() -> void:
 		await _key(KEY_ESCAPE)
 	var closed := await _wait_for(func(): return _find_event("panel", {"visible": false}, mark) != null)
 	_check("tour: deploy panel closes", closed, "")
+	await _wait(0.6)
+	# The armory list as --first-scroll scrolls it: a burst of wheel notches
+	# every other frame, the momentum running out; then back up.
+	var list := _center("armory")
+	_mouse_move(list)
+	for button in [MOUSE_BUTTON_WHEEL_DOWN, MOUSE_BUTTON_WHEEL_UP]:
+		for f in 24:
+			if f % 2 == 0:
+				_mouse_button(list, button, true)
+				_mouse_button(list, button, false)
+			await get_tree().process_frame
+		await _wait(1.2)
 	_mouse_move(Vector2(-100, -100))
 	await _wait(0.6)
 
