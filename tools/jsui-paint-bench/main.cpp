@@ -402,6 +402,7 @@ double pct(std::vector<double> v, double p) {
 std::unique_ptr<jsui::Runtime> makeRuntime(const Options& o, const Scenario& sc, double* t) {
   JsuiConfig cfg;
   jsui_config_init(&cfg);
+  cfg.audio_disabled = 1;  // headless: no sound device
   cfg.width = o.width;
   cfg.height = o.height;
   cfg.pixel_ratio = o.scale;
