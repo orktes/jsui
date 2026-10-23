@@ -230,7 +230,10 @@ TEST(surfaces_incremental_frames_with_record_skipping) {
   const char* src = R"JS(
 const n = __jsui_native;
 const dots = {};
-globalThis.__jsui_runSurface = (tag, appKey) => {
+globalThis.__jsui_runSurfaces = (list) => {
+  for (const [tag, appKey] of list) run(tag, appKey);
+};
+const run = (tag, appKey) => {
   const root = n.createNode('View', tag);
   n.setProps(root, { style: { flex: 1, padding: 4, backgroundColor: '#102030' } });
   n.appendChild(tag, root);

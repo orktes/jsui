@@ -345,10 +345,10 @@ JSUI_API int jsui_render_rgba_incremental(JsuiRuntime* rt, void* pixels, int wid
  * pauses it (a React commit's style update is js -> commit -> style), so the
  * *_us phase fields add up to the time since the reset.
  *
- * Every surface handle (jsui_surface_create) has its own totals and switch:
- * its commits, style, layout, input and renders. JS runs once for the whole
- * runtime and is booked to the runtime handle, whose js_us therefore also
- * covers its surfaces' commits.
+ * A runtime's surfaces (jsui_surface_create) share its totals and switch:
+ * a surface handle reports and toggles the same numbers as the runtime
+ * handle, which cover every surface's commits, style, layout, input and
+ * renders.
  *
  *     jsui_set_profiling(rt, 1);
  *     ... frames ...

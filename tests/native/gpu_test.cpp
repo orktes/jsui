@@ -880,11 +880,13 @@ TEST(gpu_scaling_shadow_exact_after_animation) {
     JsuiRuntime* other = jsui_surface_create(rt, "Static", nullptr, 160, 120, 1);
     const char* src = R"JS(
       const N = __jsui_native, A = N.animated;
-      globalThis.__jsui_runSurface = (tag) => {
-        const v = N.createNode('View', tag);
-        N.setProps(v, { style: { margin: 30, flex: 1, borderRadius: 8, backgroundColor: '#36a',
-          boxShadow: '0 4px 12px rgba(0,0,0,0.8)' } });
-        N.appendChild(tag, v);
+      globalThis.__jsui_runSurfaces = (list) => {
+        for (const [tag] of list) {
+          const v = N.createNode('View', tag);
+          N.setProps(v, { style: { margin: 30, flex: 1, borderRadius: 8, backgroundColor: '#36a',
+            boxShadow: '0 4px 12px rgba(0,0,0,0.8)' } });
+          N.appendChild(tag, v);
+        }
       };
       const box = N.createNode('View');
       N.setProps(box, { style: { position: 'absolute', left: 50, top: 40, width: 60, height: 40, borderRadius: 8,
