@@ -69,6 +69,7 @@ void paintDocumentRects(Document& doc, SkCanvas* canvas, const std::vector<SkIRe
 struct PaintStats {
   int nodesPainted = 0;       // nodes drawn
   int nodesCulled = 0;        // subtrees skipped (outside the damage)
+  int nodesUpdated = 0;       // nodes the last updateDamage() walked (not in skipped, unchanged subtrees)
   int64_t damagedPixels = 0;  // area of the damage bounds (0: full repaint)
   int64_t repaintedPixels = 0;  // area of the damage region (full repaint: the canvas)
   int damageRects = 0;        // rects in the damage region (0: full repaint)
@@ -140,5 +141,9 @@ class LayerCacheScope {
 // (see PaintStats). Off by default; it wraps the canvas, which costs a
 // little per call.
 void setPaintCounting(Document& doc, bool on);
+
+// Tests: updateDamage skips subtrees in which nothing changed (on by
+// default); off, it walks every node, which must give the same damage.
+void setRecordSkipping(bool on);
 
 }  // namespace jsui

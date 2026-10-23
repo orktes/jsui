@@ -1338,6 +1338,16 @@ struct NodeRecord : Node::Cache {
   // visualBounds() for layerStamp `vbStamp`.
   mutable uint64_t vbStamp = 0;
   mutable SkRect vb = SkRect::MakeEmpty();
+  // Clean-subtree skip (see updateRecords): the pass that last brought the
+  // record up to date, the arguments it was visited with, and its subtree's
+  // entries in that pass' curved-outline and raster-candidate lists. `quiet`:
+  // nothing in the subtree is changing (visiting it again with the same
+  // arguments, nodes unchanged, would find the same records and no damage).
+  uint32_t pass = 0;
+  bool quiet = false;
+  SkMatrix inMatrix, inSnap;
+  SkIRect inClip = SkIRect::MakeEmpty();
+  uint32_t curvedBegin = 0, curvedEnd = 0, rasterBegin = 0, rasterEnd = 0;
 };
 
 // A node with anti-aliased curved or diagonal outlines, in device pixels.
@@ -1363,6 +1373,13 @@ struct RootRecord : NodeRecord {
   bool counting = false;                                     // setPaintCounting
   std::vector<NodeRecord*> rasterCandidates;                 // this frame's (see updateRasterCache)
   uint32_t damagedFrames = 0;                                // updates that found damage
+  // The previous pass' lists, for skipped subtrees (NodeRecord::pass).
+  std::vector<CurvedNode> curvedPrev;
+  std::vector<NodeRecord*> rasterPrev;
+  uint32_t passes = 0;
+  uint32_t passImageGen = 0;
+  bool passRaster = false;
+  int nodesUpdated = 0;  // PaintStats::nodesUpdated
 };
 
 ShadowCache& shadowCache(RootRecord* root) { return root->shadows; }
@@ -1611,6 +1628,7 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
     paintOuterShadows(c, b, s, ctx.root, ctx.alpha, rec && rec->scaling, rec && rec->resizing, &inexact);
     if (inexact) {
       rec->shadowInexact = true;
+      n->markPaintTree();
       ctx.doc.markPaintDirty();  // a frame after it stops, to repaint it exactly
     }
   }
@@ -1820,7 +1838,10 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
   }
   rec->layerInexact = inexact;
   // Another frame even if nothing changes: the one that repaints it exactly.
-  if (inexact) ctx.doc.markPaintDirty();
+  if (inexact) {
+    n->markPaintTree();
+    ctx.doc.markPaintDirty();
+  }
   it->second.lastUsed = lc.frame;
   ctx.stats.layerDraws++;
   SkPaint lp;
@@ -2044,13 +2065,48 @@ void updateRasterCache(RootRecord* root, SkRegion* damage, const SkIRect& screen
   }
 }
 
+// Clean-subtree skip. Most of a frame's tree is unchanged: a child that is
+// clean (Node::paintTreeDirty), was quiet when last brought up to date in
+// the previous pass and is visited with the same matrices and clip would
+// get the same records and add no damage, so updateRecords keeps its
+// records as they are and only carries its curved outlines and raster
+// candidates over from the previous pass' lists. Not across a change of
+// fonts or images (generations the records compare against) or of the
+// raster cache mode, inside a ghost (laid out on its own) or a scroll blit
+// candidate's content (each node is checked for the blit).
+struct SkipState {
+  bool enabled = false;
+  uint32_t pass = 0;
+  int visited = 0;
+  const std::vector<CurvedNode>* curvedPrev = nullptr;
+  const std::vector<NodeRecord*>* rasterPrev = nullptr;
+};
+thread_local SkipState* tSkip = nullptr;
+bool gRecordSkip = true;  // setRecordSkipping
+
+// Clears the dirty flags of a subtree updateRecords does not walk (hidden,
+// or painted by its paragraph), so that a later change marks up to the root.
+void clearPaintTree(Node* n) {
+  if (!n->paintTreeDirty()) return;
+  n->clearPaintTree();
+  for (Node* g : n->ghosts) clearPaintTree(g);
+  for (Node* ch : n->children()) clearPaintTree(ch);
+}
+
 // Walks the tree like paintNode (same matrices and snapping), refreshes each
 // node's record and adds what changed since the last frame to `damage`.
 // Returns the node's device subtree bounds.
 SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSnap, const SkIRect& clip,
                       uint32_t imageGen, SkRegion* damage, std::vector<CurvedNode>* curved, BlitScan* scan) {
-  if (!n->yoga()) return SkIRect::MakeEmpty();  // raw text: painted by its paragraph
+  if (!n->yoga()) {
+    clearPaintTree(n);
+    return SkIRect::MakeEmpty();  // raw text: painted by its paragraph
+  }
+  n->clearPaintTree();
+  if (tSkip) tSkip->visited++;
   NodeRecord* rec = record(n);
+  const size_t curvedStart = curved->size(), rasterStart = tRasterCandidates ? tRasterCandidates->size() : 0;
+  bool quietKids = true;
   SkIRect own = SkIRect::MakeEmpty(), sub = SkIRect::MakeEmpty(), bars = SkIRect::MakeEmpty();
   SkMatrix m = parent;
   float w = 0, h = 0;
@@ -2129,9 +2185,34 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
         }
       }
       auto visit = [&](Node* ch) {
-        sub.join(updateRecords(ch, cm, cs, childClip, imageGen, childDamage, curved, scan));
-        auto* cr = static_cast<const NodeRecord*>(ch->paintCache.get());
+        auto* cr = static_cast<NodeRecord*>(ch->paintCache.get());
+        SkipState* sk = tSkip;
+        if (sk && sk->enabled && !scan->inside && !ch->ghostOf && cr && cr->valid && cr->quiet && cr->pass + 1 == sk->pass &&
+            !ch->paintTreeDirty() && cr->inClip == childClip && cr->inMatrix == cm && cr->inSnap == cs) {
+          sub.join(cr->subtree);
+          size_t b = curved->size();
+          curved->insert(curved->end(), sk->curvedPrev->begin() + cr->curvedBegin,
+                         sk->curvedPrev->begin() + cr->curvedEnd);
+          cr->curvedBegin = uint32_t(b);
+          cr->curvedEnd = uint32_t(curved->size());
+          if (tRasterCandidates) {
+            b = tRasterCandidates->size();
+            tRasterCandidates->insert(tRasterCandidates->end(), sk->rasterPrev->begin() + cr->rasterBegin,
+                                      sk->rasterPrev->begin() + cr->rasterEnd);
+            cr->rasterBegin = uint32_t(b);
+            cr->rasterEnd = uint32_t(tRasterCandidates->size());
+          }
+          cr->pass = sk->pass;
+        } else if (ch->ghostOf && sk && sk->enabled) {
+          sk->enabled = false;
+          sub.join(updateRecords(ch, cm, cs, childClip, imageGen, childDamage, curved, scan));
+          sk->enabled = true;
+        } else {
+          sub.join(updateRecords(ch, cm, cs, childClip, imageGen, childDamage, curved, scan));
+        }
+        cr = static_cast<NodeRecord*>(ch->paintCache.get());
         below |= !cr || cr->relChanged;
+        quietKids &= cr && cr->quiet;
         if (cr) {
           subtreeNodes += cr->subtreeNodes;
           isolatable &= cr->isolatable;
@@ -2145,6 +2226,9 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
         scan->inside = false;
         scan->curvedEnd = curved->size();
       }
+    } else {
+      for (Node* ch : n->ghosts) clearPaintTree(ch);
+      for (Node* ch : n->children()) clearPaintTree(ch);
     }
     float fe = filterOutset(s);
     if (fe > 0 && !sub.isEmpty()) {
@@ -2156,6 +2240,9 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
       int e = int(std::ceil(fe * std::max(1.f, m.getMaxScale())));
       full.outset(e, e);
     }
+  } else {
+    for (Node* ch : n->ghosts) clearPaintTree(ch);
+    for (Node* ch : n->children()) clearPaintTree(ch);
   }
   // TextInput caret blink / move: only the caret's old and new rects.
   SkRect caretA, caretB;
@@ -2246,6 +2333,18 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
   rec->isolatable = isolatable;
   rec->subtreeFull = full;
   if (tRasterCandidates && painted && isolatable && subtreeNodes >= kRasterMinNodes) tRasterCandidates->push_back(rec);
+  // A focused input's caret blinks and moves without changing the node.
+  rec->quiet = quietKids && !rec->relChanged && !rec->moved && !rec->scaling && !rec->resizing &&
+               rec->stableFrames >= 1 && !caret && !n->layoutAnim && !rec->shadowInexact && !rec->layerInexact &&
+               !(n->type() == NodeType::TextInput && n->editState);
+  rec->pass = tSkip ? tSkip->pass : 0;
+  rec->inMatrix = parent;
+  rec->inSnap = parentSnap;
+  rec->inClip = clip;
+  rec->curvedBegin = uint32_t(curvedStart);
+  rec->curvedEnd = uint32_t(curved->size());
+  rec->rasterBegin = uint32_t(rasterStart);
+  rec->rasterEnd = uint32_t(tRasterCandidates ? tRasterCandidates->size() : 0);
   return sub;
 }
 
@@ -2419,14 +2518,26 @@ SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBl
   }
   uint32_t imageGen = doc.images ? doc.images->generation : 0;
   SkMatrix m = SkMatrix::Scale(doc.pixelRatio(), doc.pixelRatio());
-  root->curved.clear();
   BlitScan scan;
   scan.enabled = blit && damage.isEmpty();
   const bool raster = tLayerCache && tLayerCache->impl->raster;
+  std::swap(root->curved, root->curvedPrev);
+  std::swap(root->rasterCandidates, root->rasterPrev);
+  root->curved.clear();
   root->rasterCandidates.clear();
+  SkipState skip;
+  skip.pass = ++root->passes;
+  skip.enabled = gRecordSkip && damage.isEmpty() && imageGen == root->passImageGen && raster == root->passRaster;
+  skip.curvedPrev = &root->curvedPrev;
+  skip.rasterPrev = &root->rasterPrev;
+  root->passImageGen = imageGen;
+  root->passRaster = raster;
+  tSkip = &skip;
   tRasterCandidates = raster ? &root->rasterCandidates : nullptr;
   updateRecords(doc.root(), m, m, screen, imageGen, &damage, &root->curved, &scan);
   tRasterCandidates = nullptr;
+  tSkip = nullptr;
+  root->nodesUpdated = root->stats.nodesUpdated = skip.visited;
   // Frames without damage leave the raster cache as it is (a host may
   // update the records of an unchanged frame or not).
   if (raster && !damage.isEmpty()) updateRasterCache(root, &damage, screen);
@@ -2556,6 +2667,7 @@ void paintDocument(Document& doc, SkCanvas* canvas, const SkRegion* damage) {
   }
   ctx.stats.spriteDraws = sprites.draws;
   ctx.stats.spriteRenders = sprites.renders;
+  ctx.stats.nodesUpdated = root->nodesUpdated;
   root->stats = ctx.stats;
 }
 
@@ -2584,10 +2696,13 @@ void paintDocumentRects(Document& doc, SkCanvas* canvas, const std::vector<SkIRe
     sum.layerDraws += s.layerDraws;
     sum.layerRenders += s.layerRenders;
   }
+  sum.nodesUpdated = rootRecord(doc)->nodesUpdated;
   rootRecord(doc)->stats = sum;
 }
 
 void setPaintCounting(Document& doc, bool on) { rootRecord(doc)->counting = on; }
+
+void setRecordSkipping(bool on) { gRecordSkip = on; }
 
 SkSurfaceProps surfaceProps() { return SkSurfaceProps(0, kUnknown_SkPixelGeometry, 0.2f, 1.2f); }
 

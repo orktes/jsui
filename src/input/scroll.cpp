@@ -128,6 +128,7 @@ bool InputManager::applyScroll(Node* sv, float x, float y, bool showIndicators) 
   if (showIndicators) {
     st.shownUntil = std::max(st.shownUntil, rt_.now + kIndicatorHoldMs);
     sv->scrollIndicatorOpacity = 1;
+    sv->markPaintTree();
   }
   // Children move: the painter damages only what changed inside the
   // ScrollView's clip.
@@ -166,6 +167,7 @@ void InputManager::flashScrollIndicators(Node* sv) {
   st.shownUntil = std::max(st.shownUntil, rt_.now + kIndicatorFlashMs);
   if (sv->scrollIndicatorOpacity != 1) {
     sv->scrollIndicatorOpacity = 1;
+    sv->markPaintTree();
     rt_.doc.markPaintDirty();
   }
 }
@@ -578,7 +580,10 @@ void InputManager::tickScrolling(double now, double /*dt*/) {
     if (!sv || !attached(sv)) {
       // Destroyed or detached: drop its animation (a detached node keeps its
       // offset; nothing is painted or dispatched for it).
-      if (sv && sv->scrollIndicatorOpacity != 0) sv->scrollIndicatorOpacity = 0;
+      if (sv && sv->scrollIndicatorOpacity != 0) {
+        sv->scrollIndicatorOpacity = 0;
+        sv->markPaintTree();
+      }
       scrolls_.erase(it);
       continue;
     }
@@ -645,6 +650,7 @@ void InputManager::tickScrolling(double now, double /*dt*/) {
                       : float(std::max(0.0, 1.0 - (now - s.shownUntil) / kIndicatorFadeMs));
     if (alpha != sv->scrollIndicatorOpacity) {
       sv->scrollIndicatorOpacity = alpha;
+      sv->markPaintTree();
       rt_.doc.markPaintDirty();
     }
     if (alpha == 0) s.shownUntil = -1;
