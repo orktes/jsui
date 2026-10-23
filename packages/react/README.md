@@ -20,6 +20,24 @@ function App() {
 AppRegistry.registerComponent('main', () => App); // starts rendering automatically
 ```
 
+### Several root views
+
+One bundle can show several independent UIs, like React Native root views:
+register each component and let the host instantiate them by name
+(`jsui_surface_create(rt, "Nameplate", "{\"name\":\"Orc\"}", 160, 40, 1)` in
+C; the Godot and web integrations expose the same). Each surface gets its
+initial props, its own size (`useWindowDimensions()`), input and focus, and
+shares state, fonts, images and the JS context with the others.
+
+```jsx
+AppRegistry.registerComponent('Hud', () => Hud);
+AppRegistry.registerComponent('Nameplate', () => Nameplate); // ({ name }) => ...
+```
+
+`RootTagContext` gives a component its surface's root tag. The first
+registered component auto-starts on the main surface unless the host picks
+one.
+
 React 19.3.1 with `react-reconciler` 0.34.0 (pinned; both run on QuickJS:
 no DOM, no Node APIs).
 

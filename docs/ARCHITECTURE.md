@@ -112,6 +112,52 @@ so an endless `Animated.loop` keeps it set without any input either way.
 Everything is single-threaded except resource I/O, which completes onto a
 queue drained in `jsui_tick`.
 
+## Surfaces (several root views)
+
+One runtime can show several independent root views, like React Native's
+`RCTRootView` / `ReactSurface`: a HUD, a nameplate per character, a widget
+dropped into an existing (non-JSUI) UI, all from one bundle and one JS
+context. The bundle registers components with
+`AppRegistry.registerComponent(key, () => Component)`; the host calls
+`jsui_surface_create(rt, key, propsJson, w, h, pixelRatio)` for each place it
+wants one.
+
+* `Surface` (`src/surface.h`) owns what is per view: a `Document` (root
+  container, viewport, layout, paint records, focus hints), an
+  `InputManager` (hover, capture, focus, scrolling, gamepad repeat), the
+  cursor and the render-target bookkeeping (incremental / damage-tracked
+  repaints, dev-mode frozen frame and overlay). The `Runtime` keeps what is
+  shared: the JS engine, resource loader, image cache, fonts, host state and
+  calls, native Animated. `Runtime::main()` is the surface of the runtime
+  handle (root tag 1).
+* The C handle of a surface is a `JsuiRuntime*`: per-surface calls
+  (viewport, `jsui_render_*`, `jsui_send_*`, `jsui_needs_redraw`, cursor)
+  act on the handle's surface, runtime-wide calls on the shared runtime. A
+  host ticks once per frame and renders each surface that needs it.
+* Node ids are unique across the surfaces (one counter), so JS addresses any
+  node by id alone. The root tag of a surface is its root container's id.
+  `createNode(type, rootTag)` creates the node in that surface's document;
+  `appendChild` / `insertBefore` across documents are refused with a
+  warning (a portal into another surface).
+* JS protocol: after the bundle evaluates (and whenever a surface is created
+  or gets new props) the runtime calls `__jsui_runSurface(rootTag, appKey,
+  propsJson)`; `jsui_surface_destroy` calls `__jsui_stopSurface(rootTag)`
+  first, then frees the surface (at the start of the next tick when JS is on
+  the stack). `@orktes/jsui-react`'s AppRegistry renders each app into its
+  own React root; a key registered later starts the surfaces waiting for it.
+  `__jsui_native.surfaceApp(rootTag)` tells AppRegistry whether the host
+  picked the main surface's app (`jsui_surface_run` on the runtime handle),
+  in which case the first registered component does not auto-start.
+* `RootTagContext` gives a component its surface; `useWindowDimensions()`
+  is the surface's size (`viewport(rootTag)`), `Dimensions.get('window')`
+  the main surface's; `resize` events carry `rootTag`. `Modal` portals into
+  the root of the surface it is rendered in.
+* A viewport width or height <= 0 sizes that axis to the content: the root
+  is laid out unconstrained (Yoga ignores the app wrapper's 0 flex basis
+  without a definite size) and `jsui_surface_get_size` reports the result.
+* Surfaces survive `jsui_reload` and start their apps again with the new
+  bundle. Their roots render on transparent.
+
 ## GPU backend
 
 `jsui_gpu_create_gl()` / `jsui_render_gl()` / `jsui_render_gl_target()`
@@ -651,7 +697,9 @@ Native globals (installed by `JsEngine`):
 | --- | --- |
 | `__jsui_native.rootId` | id of the root container node |
 | `__jsui_native.devMode` | `true` when the runtime runs with `cfg.dev_mode` |
-| `createNode(type) → id` | `type` ∈ `View`, `Text`, `RawText`, `Image`, `ScrollView`, `TextInput` |
+| `createNode(type, rootTag?) → id` | `type` ∈ `View`, `Text`, `RawText`, `Image`, `ScrollView`, `TextInput`; created in the document of surface `rootTag` (default: the main one; see "Surfaces") |
+| `viewport(rootTag?) → {width, height, scale}` | logical size of a surface (default: the main one) |
+| `surfaceApp(rootTag) → {appKey, initialProps} \| null` | the app the host picked for a surface |
 | `setProps(id, props)` | replaces all props; `props.style` is a **flattened** style object; functions are dropped; `props.__events` lists event names the element listens to (e.g. `["press","pointerMove","layout"]`) |
 | `patchStyle(id, partialStyle)` | animation fast path: merges keys into the node's current `props.style` (a `null`/`undefined` value removes the key) and keeps all other props (`Node::patchStyle`). When only paint keys such as `transform`, `opacity`, colors changed, the style is updated in place and only those keys' style groups are re-resolved, with no relayout; a layout key takes the `setProps` path. Use it per frame from `requestAnimationFrame` instead of re-rendering through React. |
 | `setText(id, string)` | content of a `RawText` |
