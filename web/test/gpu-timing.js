@@ -3,15 +3,18 @@
 //
 // requestDevice() gets the 'timestamp-query' feature when the adapter has it.
 // Every render pass Skia begins gets timestampWrites (begin / end of pass),
-// and every texture / buffer copy is bracketed by two empty compute passes
-// whose timestamps mark the copy's start and end (WebGPU only writes
-// timestamps at pass boundaries). Each command encoder resolves its queries
-// at finish() into a buffer that is read back after the submit.
+// and every run of texture / buffer copies recorded back to back is
+// bracketed by two empty compute passes whose timestamps mark its start and
+// end (WebGPU only writes timestamps at pass boundaries). Each command
+// encoder resolves its queries at finish() into a buffer that is read back
+// after the submit.
 //
 // window.__gpuTiming:
 //   supported   true when the device has timestamps
 //   frame       the frame number tagged onto entries (the bench sets it)
-//   entries     [{ frame, kind, label, ms }], kind 'pass' | 'copy'
+//   entries     [{ frame, kind, label, ms, copies, px }], kind 'pass' | 'copy';
+//               a copy run's label names its kinds ("copyBufferToBuffer"),
+//               `copies` counts them and `px` sums the texels of texture copies
 //   pending()   resolves when every read-back has landed
 //   clear()
 // Labels name the attachment ("pass 3840x2160 bgra8unorm load=clear") or the
@@ -109,27 +112,52 @@
     beginComputePass.call(enc, { timestampWrites: tw }).end();
     enc.__timingMarker = false;
   };
+  // Copies recorded back to back are timed as one run: the GPU (Dawn) runs
+  // them in one blit encoder, and marks around each copy would add a compute
+  // pass and two encoder switches per copy (on Apple GPUs most of what such
+  // a span measures). The run's entry counts its copies and their texels.
+  const closeRun = (enc) => {
+    const run = enc.__timing?.run;
+    if (!run) return;
+    enc.__timing.run = null;
+    mark(enc, run.item.i + 1, false);
+  };
   const copyBufferToBuffer = GPUCommandEncoder.prototype.copyBufferToBuffer;
   for (const name of ['copyTextureToTexture', 'copyBufferToTexture', 'copyTextureToBuffer', 'copyBufferToBuffer', 'clearBuffer']) {
     const f = GPUCommandEncoder.prototype[name];
     GPUCommandEncoder.prototype[name] = function (...a) {
-      if (!this.__timing) return f.apply(this, a);
-      const sz = name === 'copyBufferToBuffer' ? `${a[4] ?? a[2] ?? '?'} B` : name === 'clearBuffer' ? '' : (() => {
-        const e = a[2];
-        if (!e) return '';
+      const s = this.__timing;
+      if (!s) return f.apply(this, a);
+      let run = s.run;
+      if (!run) {
+        const i = slot(this, 'copy', '');
+        if (i < 0) return f.apply(this, a);
+        mark(this, i, true);
+        run = s.run = { item: s.items[s.items.length - 1], names: new Set() };
+        run.item.copies = 0;
+        run.item.px = 0;
+      }
+      run.names.add(name);
+      run.item.label = [...run.names].join('+');
+      run.item.copies++;
+      const e = name === 'copyBufferToBuffer' || name === 'clearBuffer' ? null : a[2];
+      if (e) {
         const [w, h] = Array.isArray(e) ? e : [e.width, e.height ?? 1];
-        return `${w}x${h ?? 1}`;
-      })();
-      const i = slot(this, 'copy', `${name} ${sz}`.trim());
-      if (i < 0) return f.apply(this, a);
-      mark(this, i, true);
-      const r = f.apply(this, a);
-      mark(this, i + 1, false);
-      return r;
+        run.item.px += (w ?? 0) * (h ?? 1);
+      }
+      return f.apply(this, a);
+    };
+  }
+  for (const name of ['beginRenderPass', 'beginComputePass']) {
+    const f = GPUCommandEncoder.prototype[name];
+    GPUCommandEncoder.prototype[name] = function (...a) {
+      if (!this.__timingMarker) closeRun(this);
+      return f.apply(this, a);
     };
   }
   const finish = GPUCommandEncoder.prototype.finish;
   GPUCommandEncoder.prototype.finish = function (...a) {
+    closeRun(this);
     const s = this.__timing;
     if (s?.set && s.n) {
       this.resolveQuerySet(s.set.qs, 0, s.n, s.set.resolve, 0);
@@ -155,7 +183,9 @@
         for (const it of s.items) {
           const ns = Number(ts[it.i + 1] - ts[it.i]);
           // Unwritten or reset queries read as 0; a negative span is invalid.
-          if (ts[it.i] > 0n && ns >= 0) T.entries.push({ frame: s.frame, kind: it.kind, label: it.label, ms: ns / 1e6 });
+          if (ts[it.i] > 0n && ns >= 0) {
+            T.entries.push({ frame: s.frame, kind: it.kind, label: it.label, ms: ns / 1e6, copies: it.copies, px: it.px });
+          }
         }
       }, () => { T.errors++; }).finally(() => {
         poolFor(s.device).push(s.set);
