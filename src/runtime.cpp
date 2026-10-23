@@ -723,7 +723,7 @@ bool Runtime::wantsFrame() const {
   // A pending repaint alone is not a reason to tick: the host paints after
   // the tick it already ran.
   if (reloadRequested_ || loader.pending() > 0 || (js && js->hasPendingWork(now + 17)) || animated->animating() ||
-      !animated->ends.empty() || lotties->animating() || shaders->animating() || state.hasDirty() || buffers.hasDirty() || textures.hasDirty() || audio->hasEvents() || !uiResults_.empty() || !doomed_.empty())
+      !animated->ends.empty() || lotties->animating() || shaders->animating() || state.hasDirty() || buffers.hasDirty() || textures.hasDirty() || audio->hasEvents() || audio->busy() || !uiResults_.empty() || !doomed_.empty())
     return true;
   for (const auto& s : surfaces_)
     if (s->input->animating() || s->doc.layoutAnimating() || imageEventsReady(s->doc) ||
