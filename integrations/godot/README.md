@@ -147,13 +147,29 @@ GODOT_DISPLAY=x11 xvfb-run -a integrations/godot/smoke-test.sh # real OpenGL ren
 # channel difference, default 1.5) and saves both as <out>-gpu.png / -cpu.png.
 GODOT_RENDERING=vulkan SIZES=1280x720 xvfb-run -a -s "-screen 0 1920x1080x24" \
   integrations/godot/smoke-test.sh build/godot-vulkan.png
+# The same with Godot's RenderingServer on its own thread (--render-thread
+# separate, as some games run it; GODOT_RENDER_THREAD takes any of Godot's
+# modes).
+GODOT_RENDERING=vulkan GODOT_RENDER_THREAD=separate SIZES=1280x720 xvfb-run -a -s "-screen 0 1920x1080x24" \
+  integrations/godot/smoke-test.sh build/godot-vulkan-separate.png
 ```
+
+Runs with a display (Vulkan, or `GODOT_DISPLAY=x11`) also check what Godot
+actually drew: `get_frame_image()` reads JsuiView's own texture, which can be
+right while the canvas item shows something else (Godot's magenta / black
+placeholder texture, say). The view is frozen over an opaque backdrop of a
+known colour, the viewport texture is read back, and the run fails when the
+view's rect differs from the frame blended over that colour by a mean channel
+difference above `VIEWPORT_MAX_DIFF` (default 2); both are saved as
+`<out>-shown.png` / `<out>-expected.png`.
 
 `main.gd` takes a few more arguments for checking the renderer by hand:
 `--force-cpu` (sets `force_cpu`), `--expect-renderer vulkan|metal|cpu`,
 `--max-gpu-diff D` (with `--capture`: compare the GPU frame with the CPU
-raster), `--bench N` (N frames of hover springs, then of list scrolling, with
-vsync off; prints frame and render times) and `--no-world` (no 3D scene).
+raster), `--max-viewport-diff D` (with `--capture` and a display: compare
+what the viewport shows with the frame), `--bench N` (N frames of hover
+springs, then of list scrolling, with vsync off; prints frame and render
+times) and `--no-world` (no 3D scene).
 The project uses the Compatibility renderer by default (it runs everywhere);
 pass `--rendering-method forward_plus` (or `mobile`) for the GPU renderer.
 
@@ -287,7 +303,11 @@ func _on_ui_call(id, name, args):
   Godot's render graph tracks for a copy source. Godot then copies the
   damaged rect into the second texture (`RenderingDevice.texture_copy`),
   which the canvas item samples through a `Texture2DRD`, so Godot does that
-  texture's barriers itself. Nothing is read back or uploaded. New textures
+  texture's barriers itself. The `Texture2DRD` makes its RenderingServer
+  texture on the render thread: with a separate one (`--render-thread
+  separate`) JsuiView waits for that before it hands the texture to its
+  canvas item, which would otherwise keep Godot's placeholder (a magenta /
+  black checkerboard). Nothing is read back or uploaded. New textures
   (first frame, resize) are used from the next drawn frame; the old ones stay
   on screen until then.
 * CPU renderer: a changed frame uploads the whole texture (Godot 4 has no

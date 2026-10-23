@@ -334,7 +334,23 @@ bool JsuiView::renderGpu() {
   if (promoted) {
     if (gpu_texture_.is_null()) gpu_texture_.instantiate();
     gpu_texture_->set_texture_rd_rid(gpu_cur_.dst);
-    showTexture(gpu_texture_->get_rid());
+    // Texture2DRD::set_texture_rd_rid only queues the RenderingServer texture's
+    // creation on the render thread. With a separate render thread, get_rid()
+    // right away would race it: it makes a placeholder (drawn as a magenta /
+    // black checkerboard) that the queued call may never replace. Wait for the
+    // queue (render-thread calls run in order) before taking the RID.
+    runOnRenderThread([] {});
+    // The queued call has run, so the Texture2DRD holds dst now. If Godot
+    // refused dst, get_rid() would be the placeholder all the same: use the
+    // CPU renderer rather than show it. (Without the wait above, a separate
+    // render thread would land here every time.)
+    const bool adopted = gpu_texture_->get_texture_rd_rid() == gpu_cur_.dst;
+    if (adopted) {
+      showTexture(gpu_texture_->get_rid());
+    } else {
+      UtilityFunctions::push_error("JsuiView: Texture2DRD did not take the GPU texture (set_texture_rd_rid has not run "
+                                   "on the render thread or was refused)");
+    }
     if (retired.valid()) {
       runOnRenderThread([&]() {
         if (RenderingDevice* rd = rs->get_rendering_device()) {
@@ -343,6 +359,7 @@ bool JsuiView::renderGpu() {
         }
       });
     }
+    if (!adopted) return false;
   }
   if (dirty.width > 0 && dirty.height > 0) {
     renders_++;

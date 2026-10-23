@@ -19,6 +19,16 @@
 # the same frame by more than GPU_MAX_DIFF (mean channel difference, 0..255;
 # default 1.5) and writes <out>-gpu.png / <out>-cpu.png. Without it every run
 # must use the CPU raster (headless, OpenGL Compatibility).
+# Runs with a display (GODOT_RENDERING=vulkan or GODOT_DISPLAY) also read
+# back what Godot drew for JsuiView (the viewport texture) and fail when it
+# differs from JsuiView's own frame by more than VIEWPORT_MAX_DIFF (mean
+# channel difference; default 2), writing <out>-shown.png / <out>-expected.png:
+# the other checks read JsuiView's texture, which can be right while the
+# screen shows another (e.g. Godot's magenta / black placeholder).
+# GODOT_RENDER_THREAD=unsafe|safe|separate passes --render-thread to Godot
+# (default: the project's thread model, "safe": it renders on the main
+# thread; "separate" gives the RenderingServer its own thread, as some games
+# run it).
 # SIZES (default "1280x720 2560x1440") picks the window sizes.
 #
 # FAKE_WEBGPU_INTEROP=<rev> registers a stand-in for the godot-aw3 fork's
@@ -102,6 +112,12 @@ fi
 if [[ -n "${FAKE_WEBGPU_INTEROP:-}" ]]; then
   checks=(--expect-renderer cpu --fake-webgpu-interop "$FAKE_WEBGPU_INTEROP")
 fi
+if [[ "${display[0]}" != --headless ]]; then
+  checks+=(--max-viewport-diff "${VIEWPORT_MAX_DIFF:-2}")
+fi
+if [[ -n "${GODOT_RENDER_THREAD:-}" ]]; then
+  display+=(--render-thread "$GODOT_RENDER_THREAD")
+fi
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 
@@ -120,14 +136,14 @@ trap 'rm -f "$log"' EXIT
 run() {
   local size="$1" png="$2"
   rm -f "$png"
-  echo "== Godot $GODOT_VERSION, window $size"
+  echo "== Godot $GODOT_VERSION, window $size${GODOT_RENDER_THREAD:+, render thread $GODOT_RENDER_THREAD}"
   "$GODOT" "${display[@]}" --path "$demo" --resolution "$size" -- --capture "$png" --frames "$frames" --self-test --window "$size" "${checks[@]}" 2>&1 | tee "$log"
   local status=${PIPESTATUS[0]}
   if (( status != 0 )); then
     echo "godot exited with $status ($size)" >&2
     exit "$status"
   fi
-  if grep -qE "SCRIPT ERROR|^FAIL |self-test failed|Cannot get class 'JsuiView'|GDExtension dynamic library not found|\[jsui error\]|^renderer: |gpu-vs-cpu: .*FAIL" "$log"; then
+  if grep -qE "SCRIPT ERROR|^FAIL |self-test failed|Cannot get class 'JsuiView'|GDExtension dynamic library not found|\[jsui error\]|^renderer: |gpu-vs-cpu: .*FAIL|viewport-vs-frame: .*FAIL" "$log"; then
     echo "errors in the Godot log ($size)" >&2
     exit 1
   fi
