@@ -58,6 +58,8 @@ jobs:
               - *core
               - 'integrations/godot/**'
               - 'scripts/build-skia-desktop.sh'
+              - 'scripts/patches/skia-m157-dawn-header-only.patch'
+              - 'tools/dawn-shim/**'
               - 'tests/native/**'
               - 'packages/**'
               - 'examples/showcase/**'
@@ -160,7 +162,8 @@ jobs:
 
   # ------------------------------------------------- Godot GDExtension (Linux)
   # Built against Skia m157 from source (scripts/build-skia-desktop.sh,
-  # Graphite + Vulkan; cached on the script's hash) so JsuiView can render
+  # Graphite + Vulkan + header-only Dawn; cached on the hash of the script and
+  # its Dawn patch) so JsuiView can render
   # straight into Godot's RenderingDevice textures. Godot runs headless
   # (CPU raster) and on Vulkan through Mesa's lavapipe under Xvfb (Skia
   # Graphite, checked against the CPU raster of the same frame).
@@ -181,12 +184,12 @@ jobs:
           sudo apt-get install -y --no-install-recommends ninja-build clang libfontconfig1-dev zlib1g-dev python3 unzip rsync \
             libvulkan1 mesa-vulkan-drivers xvfb xauth libegl1 libegl-mesa0 libgl1-mesa-dri \
             libgl-dev libegl-dev libgles-dev libx11-dev libvulkan-dev
-      - name: Cache desktop Skia (m157, Graphite + Vulkan)
+      - name: Cache desktop Skia (m157, Graphite + Vulkan + Dawn headers)
         id: skia-desktop
         uses: actions/cache@v4
         with:
           path: third_party/skia-desktop
-          key: skia-desktop-${{ runner.os }}-x64-${{ hashFiles('scripts/build-skia-desktop.sh') }}
+          key: skia-desktop-${{ runner.os }}-x64-${{ hashFiles('scripts/build-skia-desktop.sh', 'scripts/patches/skia-m157-dawn-header-only.patch') }}
       - name: Skia m157 for desktop (cache miss only, ~25 min on 4 cores)
         if: steps.skia-desktop.outputs.cache-hit != 'true'
         run: JOBS=$(nproc) scripts/build-skia-desktop.sh
@@ -207,7 +210,7 @@ jobs:
         run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
-          -DJSUI_SKIA_DIR=third_party/skia-desktop -DJSUI_VULKAN=ON
+          -DJSUI_SKIA_DIR=third_party/skia-desktop -DJSUI_VULKAN=ON -DJSUI_GRAPHITE_DAWN=ON
           -DJSUI_BUILD_TESTS=ON -DJSUI_BUILD_VIEWER=OFF -DJSUI_BUILD_GODOT=ON
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Build GDExtension + native tests
@@ -226,6 +229,10 @@ jobs:
         run: integrations/godot/smoke-test.sh build/godot-smoke.png
       - name: Run it in Godot 4.3 too (compatibility_minimum)
         run: GODOT_VERSION=4.3-stable integrations/godot/smoke-test.sh build/godot-smoke-4.3.png
+      - name: Backend choice with a stand-in godot-aw3 WebGPUInterop of another Dawn revision (one warning, CPU)
+        run: |
+          FAKE_WEBGPU_INTEROP=0000000000000000000000000000000000000000 EXPECT_LOG="Dawn revision mismatch" SIZES=1280x720 \
+            integrations/godot/smoke-test.sh build/godot-interop-mismatch.png
       - name: Run it on Vulkan (Forward+, lavapipe) - Skia Graphite into the RenderingDevice texture, compared with the CPU raster
         run: |
           GODOT_RENDERING=vulkan SIZES=1280x720 xvfb-run -a -s "-screen 0 1920x1080x24" \
@@ -245,7 +252,7 @@ jobs:
           if-no-files-found: warn
 
   # --------------------------------------- Godot GDExtension (macOS), advisory
-  # Compile check of the Metal path: Skia m157 for macOS (Graphite + Metal,
+  # Compile check of the Metal path: Skia m157 for macOS (Graphite + Metal + Dawn,
   # cached on the script's hash), then the GDExtension and the native tests.
   # Godot itself is not run here (no Metal RenderingDevice on hosted
   # runners): the Metal renderer needs a run on a real Mac.
@@ -258,12 +265,12 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
-      - name: Cache desktop Skia (m157, Graphite + Metal)
+      - name: Cache desktop Skia (m157, Graphite + Metal + Dawn headers)
         id: skia-desktop
         uses: actions/cache@v4
         with:
           path: third_party/skia-desktop
-          key: skia-desktop-${{ runner.os }}-arm64-${{ hashFiles('scripts/build-skia-desktop.sh') }}
+          key: skia-desktop-${{ runner.os }}-arm64-${{ hashFiles('scripts/build-skia-desktop.sh', 'scripts/patches/skia-m157-dawn-header-only.patch') }}
       - name: Tools
         run: command -v ninja || brew install ninja
       - name: Skia m157 for macOS (cache miss only)
@@ -272,7 +279,7 @@ jobs:
       - name: Configure
         run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          -DJSUI_SKIA_DIR=third_party/skia-desktop -DJSUI_GRAPHITE_METAL=ON
+          -DJSUI_SKIA_DIR=third_party/skia-desktop -DJSUI_GRAPHITE_METAL=ON -DJSUI_GRAPHITE_DAWN=ON
           -DJSUI_BUILD_TESTS=ON -DJSUI_BUILD_VIEWER=OFF -DJSUI_BUILD_GODOT=ON
       - name: Build GDExtension + native tests
         run: cmake --build build -j "$(sysctl -n hw.ncpu)" --target jsui_godot jsui-tests

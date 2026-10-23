@@ -1,0 +1,52 @@
+diff --git a/third_party/dawn/BUILD.gn b/third_party/dawn/BUILD.gn
+index 187722e..7d12431 100644
+--- a/third_party/dawn/BUILD.gn
++++ b/third_party/dawn/BUILD.gn
+@@ -132,7 +132,9 @@ group("tint") {
+ }
+ 
+ config("dawn_api_config") {
+-  if (!is_canvaskit) {
++  if (skia_dawn_header_only_include_dir != "") {
++    include_dirs = [ skia_dawn_header_only_include_dir ]
++  } else if (!is_canvaskit) {
+     include_dirs = [
+       "../externals/dawn",
+       "../externals/dawn/include",
+@@ -154,7 +156,9 @@ config("dawn_api_config") {
+   } else {
+     libs = []
+   }
+-  libs += [ "$root_out_dir/$_dawn_lib_name" ]
++  if (skia_dawn_header_only_include_dir == "") {
++    libs += [ "$root_out_dir/$_dawn_lib_name" ]
++  }
+ 
+   # https://dawn.googlesource.com/dawn/+/647c352f57aa8a4c2666258455158a36c0c385af/src/dawn/native/BUILD.gn#645
+   if (is_mac || is_ios) {
+@@ -318,7 +322,9 @@ config("dawn_defines") {
+ }
+ 
+ group("dawn") {
+-  public_deps = [ ":dawn_cmake" ]
++  if (skia_dawn_header_only_include_dir == "") {
++    public_deps = [ ":dawn_cmake" ]
++  }
+ 
+   public_configs = [ ":dawn_api_config" ]
+ 
+diff --git a/third_party/dawn/args.gni b/third_party/dawn/args.gni
+index 755562f..bc8ce6f 100644
+--- a/third_party/dawn/args.gni
++++ b/third_party/dawn/args.gni
+@@ -10,4 +10,10 @@ declare_args() {
+   dawn_enable_metal = is_mac || is_ios
+   dawn_enable_vulkan = is_linux || is_android
+   dawn_use_agility_sdk = false
++
++  # JSUI: compile Graphite against the Dawn headers in this include dir (Dawn's
++  # generated include/: dawn/webgpu.h, webgpu/webgpu_cpp.h, ...) instead of
++  # building and linking Dawn. The wgpu* entry points stay undefined for the
++  # final binary to provide (JSUI resolves them from the host at run time).
++  skia_dawn_header_only_include_dir = ""
+ }

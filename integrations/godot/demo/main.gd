@@ -18,7 +18,7 @@ extends Control
 ##   --force-cpu         JsuiView.force_cpu: CPU raster + texture upload even
 ##                       when Godot runs on Vulkan / Metal
 ##   --expect-renderer R fail the run unless JsuiView rendered with R
-##                       ("vulkan", "metal" or "cpu")
+##                       ("vulkan", "metal", "webgpu" or "cpu")
 ##   --max-gpu-diff D    with --capture on a GPU renderer: also paint the same
 ##                       frame with the CPU raster, save it as <png>-cpu.png and
 ##                       fail if the mean channel difference exceeds D
@@ -26,6 +26,12 @@ extends Control
 ##                       list scrolling (JsuiView.get_render_stats, frame
 ##                       times), print them and quit
 ##   --no-world          leave the 3D scene out (benchmarks: the UI only)
+##   --fake-webgpu-interop REV
+##                       register a stand-in WebGPUInterop singleton (as the
+##                       godot-aw3 fork's WebGPU driver does) that reports Dawn
+##                       revision REV and null handles: tests JsuiView's
+##                       backend choice on stock Godot (another revision: one
+##                       warning, CPU renderer; the same one: no device, CPU)
 ##
 ## Scene: world/world.tscn renders live 3D behind the view; `godot.scene`
 ## (shared state) tells the UI to leave its backdrop out so the scene shows.
@@ -59,6 +65,27 @@ var _events: Array = []
 var _anchors := {}
 var _failures := 0
 var _testing := false
+var _fake_interop: Object = null
+
+
+## The WebGPUInterop contract (integrations/godot/README.md) with null handles.
+class FakeWebGPUInterop extends Object:
+	var revision := ""
+
+	func get_proc_address() -> int:
+		return 0
+
+	func get_instance() -> int:
+		return 0
+
+	func get_device() -> int:
+		return 0
+
+	func get_queue() -> int:
+		return 0
+
+	func get_dawn_revision() -> String:
+		return revision
 
 
 func _enter_tree() -> void:
@@ -101,6 +128,12 @@ func _enter_tree() -> void:
 				if world:
 					remove_child(world)
 					world.free()
+			"--fake-webgpu-interop":
+				if not Engine.has_singleton("WebGPUInterop"):
+					_fake_interop = FakeWebGPUInterop.new()
+					_fake_interop.revision = v
+					Engine.register_singleton("WebGPUInterop", _fake_interop)
+				i += 1
 			"--window":
 				var wh := v.split("x")
 				if wh.size() == 2:
@@ -112,6 +145,13 @@ func _enter_tree() -> void:
 	view.set_state("godot.stats", _stats())
 	view.set_state("player", _player)
 	view.set_state("godot.scene", true)
+
+
+func _exit_tree() -> void:
+	if _fake_interop:
+		Engine.unregister_singleton("WebGPUInterop")
+		_fake_interop.free()
+		_fake_interop = null
 
 
 func _ready() -> void:

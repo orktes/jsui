@@ -20,6 +20,12 @@
 # default 1.5) and writes <out>-gpu.png / <out>-cpu.png. Without it every run
 # must use the CPU raster (headless, OpenGL Compatibility).
 # SIZES (default "1280x720 2560x1440") picks the window sizes.
+#
+# FAKE_WEBGPU_INTEROP=<rev> registers a stand-in for the godot-aw3 fork's
+# WebGPUInterop singleton (main.gd --fake-webgpu-interop) that reports Dawn
+# revision <rev> and null handles. Whatever the driver, JsuiView must then
+# fall back to the CPU raster; EXPECT_LOG=<regex> also requires a log line
+# (e.g. the revision-mismatch warning).
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -90,6 +96,9 @@ if [[ "${GODOT_RENDERING:-}" == vulkan ]]; then
 elif [[ "${GODOT_DISPLAY:-headless}" != headless ]]; then
   display=(--display-driver "$GODOT_DISPLAY" --rendering-driver opengl3 --audio-driver Dummy)
 fi
+if [[ -n "${FAKE_WEBGPU_INTEROP:-}" ]]; then
+  checks=(--expect-renderer cpu --fake-webgpu-interop "$FAKE_WEBGPU_INTEROP")
+fi
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 
@@ -117,6 +126,10 @@ run() {
   fi
   if grep -qE "SCRIPT ERROR|^FAIL |self-test failed|Cannot get class 'JsuiView'|GDExtension dynamic library not found|\[jsui error\]|^renderer: |gpu-vs-cpu: .*FAIL" "$log"; then
     echo "errors in the Godot log ($size)" >&2
+    exit 1
+  fi
+  if [[ -n "${EXPECT_LOG:-}" ]] && ! grep -qE "$EXPECT_LOG" "$log"; then
+    echo "no log line matching '$EXPECT_LOG' ($size)" >&2
     exit 1
   fi
   if ! grep -q "^PASS mapping" "$log"; then

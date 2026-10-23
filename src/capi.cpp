@@ -165,6 +165,10 @@ JsuiGpuContext* jsui_gpu_create_metal(void* device, void* queue) { return jsui::
 JsuiGpuContext* jsui_gpu_create_dawn(void* instance, void* device, void* queue) {
   return jsui::graphite_gpu::createDawn(instance, device, queue);
 }
+JsuiGpuContext* jsui_gpu_create_dawn_procs(void* wgpu_get_proc_address, void* instance, void* device, void* queue) {
+  return jsui::graphite_gpu::createDawnProcs(wgpu_get_proc_address, instance, device, queue);
+}
+const char* jsui_dawn_revision(void) { return jsui::graphite_gpu::dawnRevision(); }
 
 int jsui_render_gpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiGpuTarget* target, JsuiRect* dirty) {
   if (!rt || !target) {

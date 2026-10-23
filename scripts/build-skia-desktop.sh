@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # Builds Skia (chrome/m157, pinned) for desktop Linux / macOS with Graphite on
-# Vulkan (Linux) or Metal (macOS), plus Ganesh (GL; Metal on macOS) and the
-# CPU raster, and installs headers + static libraries into
-# third_party/skia-desktop in the layout cmake/Deps.cmake expects:
+# Vulkan (Linux) or Metal (macOS) and on Dawn (WebGPU, header-only, see
+# below), plus Ganesh (GL; Metal on macOS) and the CPU raster, and installs
+# headers + static libraries into third_party/skia-desktop in the layout
+# cmake/Deps.cmake expects:
 #
 #   third_party/skia-desktop/include/...                  public headers (incl. include/third_party/vulkan)
 #   third_party/skia-desktop/modules/*/include/...        module headers
 #   third_party/skia-desktop/src/**/*.h                   private headers (VulkanMemoryAllocators, ...)
 #   third_party/skia-desktop/third_party/externals/...    harfbuzz / icu headers
+#   third_party/skia-desktop/dawn/include/...             Dawn's webgpu.h / webgpu_cpp.h (generated)
+#   third_party/skia-desktop/dawn/REVISION                the Dawn commit those headers are from
 #   third_party/skia-desktop/out/<os>-<cpu>/lib*.a        static libraries
 #   third_party/skia-desktop/out/<os>-<cpu>/args.gn       the gn args used
 #   third_party/skia-desktop/out/<os>-<cpu>/defines.txt   defines consumers must compile with
@@ -20,14 +23,25 @@
 #   Linux: Graphite + Vulkan, Ganesh + GL (+ Vulkan), fontconfig + bundled
 #          FreeType (as the prebuilt), bundled ICU + HarfBuzz.
 #   macOS: Graphite + Metal, Ganesh + GL + Metal, CoreText fonts.
-#   Both:  PNG / JPEG / WebP / GIF decode, PNG encode; no PDF / SVG / Skottie.
+#   Both:  Graphite + Dawn (header-only). PNG / JPEG / WebP / GIF decode, PNG
+#          encode; no PDF / SVG / Skottie.
 #   Vulkan headers are Skia's own (include/third_party/vulkan) and memory is
 #   managed by the bundled VulkanMemoryAllocator; nothing Vulkan is linked
 #   (the GDExtension gets vkGetInstanceProcAddr from the loader at run time).
 #
-# Idempotent: an output whose .stamp matches the hash of this script is
-# skipped, so CI caches third_party/skia-desktop keyed on
-# hashFiles('scripts/build-skia-desktop.sh').
+# Dawn: Skia's own Dawn checkout (third_party/externals/dawn, at the revision
+# m157's DEPS pins: DAWN_REVISION below) only provides the webgpu.h /
+# webgpu_cpp.h headers, generated with Dawn's code generator. Dawn itself is
+# neither built nor linked (scripts/patches/skia-m157-dawn-header-only.patch):
+# whatever links these archives must provide the wgpu* entry points. JSUI
+# resolves them at run time through the host's wgpuGetProcAddress
+# (tools/dawn-shim, jsui_gpu_create_dawn_procs), e.g. from the godot-aw3
+# Godot fork's WebGPU driver, which must link Dawn at exactly DAWN_REVISION
+# (the webgpu.h ABI changes between revisions).
+#
+# Idempotent: an output whose .stamp matches the hash of this script and the
+# Dawn patch is skipped, so CI caches third_party/skia-desktop keyed on
+# hashFiles of both.
 #
 # Environment:
 #   SKIA_SRC   Skia checkout (default third_party/skia-src-m157, shared with
@@ -35,35 +49,17 @@
 #              reset to pristine first)
 #   JOBS       ninja parallelism (default: all cores)
 #   CC / CXX   compilers (Linux default clang / clang++)
-#   SKIA_DESKTOP_OUT  install dir (default third_party/skia-desktop, or
-#              third_party/skia-desktop-dawn with SKIA_DAWN_SDK)
-#   SKIA_DAWN_SDK  also build Graphite's Dawn (WebGPU) backend, compiled
-#              against this installed Dawn SDK's headers (<sdk>/include with
-#              webgpu/webgpu_cpp.h), e.g. the Dawn a game engine links (the
-#              godot-aw3 fork's WebGPU driver). Dawn is not built or linked:
-#              whatever links these libraries must provide the wgpu* entry
-#              points (the Godot GDExtension resolves them from the engine
-#              binary). scripts/patches/skia-m157-dawn-sdk.patch makes
-#              //third_party/dawn header-only and, with SKIA_DAWN_LEGACY=1
-#              (default), adapts Graphite's Dawn backend to the older webgpu.h
-#              of Dawn a082d8e7 (2026-01; m157 pins 2026-10's ada56770).
+#   SKIA_DESKTOP_OUT  install dir (default third_party/skia-desktop)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SKIA_BRANCH="chrome/m157"
 SKIA_COMMIT="3c6589d4882124ecb315db04227eccd81fe0b435"  # same as build-skia-wasm-graphite.sh / build-skia-ios.sh
 SKIA_SRC="${SKIA_SRC:-$ROOT/third_party/skia-src-m157}"
-SKIA_DAWN_SDK="${SKIA_DAWN_SDK:-}"
-SKIA_DAWN_LEGACY="${SKIA_DAWN_LEGACY:-1}"
-DAWN_PATCH="$ROOT/scripts/patches/skia-m157-dawn-sdk.patch"
-if [ -n "$SKIA_DAWN_SDK" ]; then
-  SKIA_DAWN_SDK="$(cd "$SKIA_DAWN_SDK" && pwd)"
-  [ -f "$SKIA_DAWN_SDK/include/webgpu/webgpu_cpp.h" ] || {
-    echo "SKIA_DAWN_SDK=$SKIA_DAWN_SDK has no include/webgpu/webgpu_cpp.h" >&2; exit 1; }
-  OUT_DIR="${SKIA_DESKTOP_OUT:-$ROOT/third_party/skia-desktop-dawn}"
-else
-  OUT_DIR="${SKIA_DESKTOP_OUT:-$ROOT/third_party/skia-desktop}"
-fi
+# What SKIA_COMMIT's DEPS pins (checked below): the Dawn a host must link.
+DAWN_REVISION="ada567700e13aecf7989d78b21f7d330b522ea80"
+DAWN_PATCH="$ROOT/scripts/patches/skia-m157-dawn-header-only.patch"
+OUT_DIR="${SKIA_DESKTOP_OUT:-$ROOT/third_party/skia-desktop}"
 
 case "$(uname -s)" in
   Linux) os=linux; JOBS="${JOBS:-$(nproc)}" ;;
@@ -80,10 +76,9 @@ slice="$os-$CPU"
 dest="$OUT_DIR/out/$slice"
 
 hash_cmd() { if command -v sha256sum >/dev/null; then sha256sum; else shasum -a 256; fi; }
-STAMP_VALUE="$({ cat "$ROOT/scripts/build-skia-desktop.sh"; [ -z "$SKIA_DAWN_SDK" ] || {
-  cat "$DAWN_PATCH" "$SKIA_DAWN_SDK/include/webgpu/webgpu.h" "$SKIA_DAWN_SDK/include/dawn/webgpu.h";
-  echo "$SKIA_DAWN_LEGACY"; }; } | hash_cmd | cut -d' ' -f1)"
-if [ -f "$dest/.stamp" ] && [ "$(cat "$dest/.stamp")" = "$STAMP_VALUE" ] && [ -f "$dest/libskia.a" ] && [ -d "$OUT_DIR/include" ]; then
+STAMP_VALUE="$(cat "$ROOT/scripts/build-skia-desktop.sh" "$DAWN_PATCH" | hash_cmd | cut -d' ' -f1)"
+if [ -f "$dest/.stamp" ] && [ "$(cat "$dest/.stamp")" = "$STAMP_VALUE" ] && [ -f "$dest/libskia.a" ] && [ -d "$OUT_DIR/include" ] \
+   && [ -f "$OUT_DIR/dawn/include/dawn/webgpu.h" ]; then
   echo "skia-desktop $slice is up to date"
   exit 0
 fi
@@ -100,12 +95,15 @@ if [ "$(git rev-parse HEAD)" != "$SKIA_COMMIT" ]; then
 fi
 # The wasm Graphite build patches these in the same checkout: build pristine.
 git checkout -q -- src include third_party/dawn modules/skcms gn
-[ -z "$SKIA_DAWN_SDK" ] || git apply "$DAWN_PATCH"
+git apply "$DAWN_PATCH"
+grep -q "third_party/externals/dawn\".*dawn.git@$DAWN_REVISION\"" DEPS || {
+  echo "Skia's DEPS does not pin Dawn $DAWN_REVISION: update DAWN_REVISION (and the host's Dawn)" >&2; exit 1; }
 
-# Only the third-party repos this configuration compiles.
+# Only the third-party repos this configuration compiles (Dawn and its code
+# generator's jinja2 / markupsafe for the headers).
 python3 - <<'PY'
 keep = {"brotli", "freetype", "harfbuzz", "icu", "libjpeg-turbo", "libpng", "libwebp", "wuffs", "zlib",
-        "vulkanmemoryallocator"}
+        "vulkanmemoryallocator", "dawn", "jinja2", "markupsafe"}
 d = {}
 with open("DEPS") as f:
     exec("def Var(x): return vars[x]\n" + f.read(), d)
@@ -121,6 +119,27 @@ GIT_SYNC_DEPS_PATH="$SKIA_SRC/DEPS.jsui-desktop" GIT_SYNC_DEPS_SKIP_EMSDK=1 GIT_
 [ -x bin/gn ] || python3 bin/fetch-gn
 command -v ninja >/dev/null || { echo "ninja not found" >&2; exit 1; }
 
+# ------------------------------------------------------------ Dawn headers
+# webgpu.h / webgpu_cpp.h, generated from dawn.json as Dawn's own build does
+# (its CMake / GN headers targets), for Graphite's Dawn backend and JSUI's
+# entry-point shim.
+DAWN_SRC="$SKIA_SRC/third_party/externals/dawn"
+DAWN_GEN="$SKIA_SRC/out/jsui-dawn-headers-$slice"
+rm -rf "$DAWN_GEN"
+python3 "$DAWN_SRC/generator/dawn_json_generator.py" \
+  --template-dir "$DAWN_SRC/generator/templates" \
+  --root-dir "$DAWN_SRC" \
+  --dawn-json "$DAWN_SRC/src/dawn/dawn.json" \
+  --wire-json "$DAWN_SRC/src/dawn/dawn_wire.json" \
+  --jinja2-path "$SKIA_SRC/third_party/externals/jinja2" \
+  --markupsafe-path "$SKIA_SRC/third_party/externals/markupsafe" \
+  --targets headers,cpp_headers \
+  --output-dir "$DAWN_GEN"
+[ -f "$DAWN_GEN/include/dawn/webgpu.h" ] && [ -f "$DAWN_GEN/include/dawn/webgpu_cpp.h" ] || {
+  echo "Dawn header generation failed (no include/dawn/webgpu.h in $DAWN_GEN)" >&2; exit 1; }
+# The hand-written headers (webgpu/webgpu_cpp.h, ... include the generated ones).
+cp -R "$DAWN_SRC/include/." "$DAWN_GEN/include/"
+
 # ------------------------------------------------------------------ build
 COMMON_ARGS="
 is_debug=false
@@ -133,6 +152,8 @@ skia_enable_ganesh=true
 skia_use_gl=true
 skia_use_angle=false
 skia_enable_graphite=true
+skia_use_dawn=true
+skia_dawn_header_only_include_dir=\"$DAWN_GEN/include\"
 
 skia_use_icu=true
 skia_use_client_icu=false
@@ -191,16 +212,8 @@ skia_use_fontconfig=false
 skia_use_freetype=false
 "
 fi
-DAWN_ARGS="skia_use_dawn=false"
-if [ -n "$SKIA_DAWN_SDK" ]; then
-  DAWN_ARGS="skia_use_dawn=true skia_dawn_sdk_include_dir=\"$SKIA_DAWN_SDK/include\""
-  [ "$SKIA_DAWN_LEGACY" = 0 ] || DAWN_ARGS="$DAWN_ARGS extra_cflags=[\"-DSK_DAWN_LEGACY_SDK\"]"
-  slice_dir="$slice-dawn"
-else
-  slice_dir="$slice"
-fi
-BUILD_DIR="out/jsui-desktop-$slice_dir"
-ARGS="$(printf '%s\n%s\n%s\n' "$COMMON_ARGS" "$OS_ARGS" "$DAWN_ARGS" | sed '/^$/d' | tr '\n' ' ')"
+BUILD_DIR="out/jsui-desktop-$slice"
+ARGS="$(printf '%s\n%s\n' "$COMMON_ARGS" "$OS_ARGS" | sed '/^$/d' | tr '\n' ' ')"
 echo "[$slice] gn args: $ARGS"
 bin/gn gen "$BUILD_DIR" --args="$ARGS"
 # Archives are copied by glob below: drop stale ones (ninja re-archives).
@@ -214,9 +227,9 @@ mkdir -p "$dest"
 find "$BUILD_DIR" -maxdepth 1 -name 'lib*.a' -exec cp {} "$dest/" \;
 cp "$BUILD_DIR/args.gn" "$dest/args.gn"
 # Defines dependents get in gn (public + all-dependent configs: SK_GANESH,
-# SK_GRAPHITE, SK_VULKAN, SK_METAL, SK_GL, SK_SHAPER_HARFBUZZ_AVAILABLE,
-# SK_USE_INTERNAL_VULKAN_HEADERS, ...). They change public headers, so
-# consumers must compile with exactly these.
+# SK_GRAPHITE, SK_VULKAN, SK_METAL, SK_DAWN, SK_GL,
+# SK_SHAPER_HARFBUZZ_AVAILABLE, SK_USE_INTERNAL_VULKAN_HEADERS, ...). They
+# change public headers, so consumers must compile with exactly these.
 : > "$dest/defines.txt"
 for target in //:skia //modules/skshaper:skshaper //modules/skunicode:skunicode //modules/skparagraph:skparagraph; do
   for config in $(bin/gn desc "$BUILD_DIR" "$target" public_configs) \
@@ -227,9 +240,15 @@ for target in //:skia //modules/skshaper:skshaper //modules/skunicode:skunicode 
 done
 sort -u -o "$dest/defines.txt" "$dest/defines.txt"
 echo "[$slice] public defines:"; cat "$dest/defines.txt"
+# No Dawn library may be linked: the archives must not define wgpu* entry points.
+wgpu_defs="$(nm -g --defined-only "$dest"/lib*.a 2>/dev/null | grep -E ' T _?wgpu[A-Z]' || true)"
+if [ -n "$wgpu_defs" ]; then
+  echo "$wgpu_defs" | head -5 >&2
+  echo "[$slice] a Skia archive defines wgpu* entry points (Dawn implementation linked in)" >&2; exit 1
+fi
 
 # ---------------------------------------------------------------- headers
-rm -rf "$OUT_DIR/include" "$OUT_DIR/src" "$OUT_DIR/modules" "$OUT_DIR/third_party"
+rm -rf "$OUT_DIR/include" "$OUT_DIR/src" "$OUT_DIR/modules" "$OUT_DIR/third_party" "$OUT_DIR/dawn"
 copy_headers() {  # copy_headers <src dir> (relative to SKIA_SRC)
   [ -d "$1" ] || return 0
   mkdir -p "$OUT_DIR/$1"
@@ -243,6 +262,10 @@ copy_headers third_party/externals/harfbuzz/src
 copy_headers third_party/externals/icu/source/common/unicode
 copy_headers third_party/externals/icu/source/i18n/unicode
 cp LICENSE "$OUT_DIR/"
+mkdir -p "$OUT_DIR/dawn"
+cp -R "$DAWN_GEN/include" "$OUT_DIR/dawn/include"
+cp "$DAWN_SRC/LICENSE" "$OUT_DIR/dawn/LICENSE"
+echo "$DAWN_REVISION" > "$OUT_DIR/dawn/REVISION"
 echo "$STAMP_VALUE" > "$dest/.stamp"
 ls -la "$dest"
 echo "skia-desktop installed into $OUT_DIR ($slice)"

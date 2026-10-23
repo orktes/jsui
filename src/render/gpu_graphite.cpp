@@ -75,7 +75,13 @@
 
 #include "include/gpu/graphite/dawn/DawnBackendContext.h"
 #include "include/gpu/graphite/dawn/DawnGraphiteTypes.h"
-extern "C" int jsui_dawn_available(void);  // tools/dawn-shim (generated)
+// tools/dawn-shim (generated): the table behind the wgpu* trampolines.
+extern "C" {
+int jsui_dawn_proc_count(void);
+int jsui_dawn_fill_from_get_proc(void* get_proc);
+int jsui_dawn_fill_from_process(void);
+const char* jsui_dawn_header_revision(void);
+}
 #endif
 
 namespace graphite = skgpu::graphite;
@@ -394,10 +400,10 @@ JsuiGpuContext* createMetal(void* device, void* queue) {
 #endif
 }
 
-JsuiGpuContext* createDawn(void* instance, void* device, void* queue) {
 #if defined(JSUI_GRAPHITE_DAWN)
-  // Only where the host process provides Dawn's entry points.
-  if (!instance || !device || !jsui_dawn_available()) return nullptr;
+namespace {
+// Graphite on the host's Dawn objects; the shim's table must be complete.
+JsuiGpuContext* makeDawn(void* instance, void* device, void* queue) {
   auto g = std::make_unique<GraphiteGpu>(Api::Dawn);
   // The C++ wrappers add a reference to handles they are constructed from.
   g->dawnInstance = wgpu::Instance(static_cast<WGPUInstance>(instance));
@@ -412,10 +418,46 @@ JsuiGpuContext* createDawn(void* instance, void* device, void* queue) {
   g->ctx = graphite::ContextFactory::MakeDawn(backend, opts);
   if (!g->finishInit(opts)) return nullptr;
   return g.release();
+}
+}  // namespace
+#endif
+
+JsuiGpuContext* createDawn(void* instance, void* device, void* queue) {
+#if defined(JSUI_GRAPHITE_DAWN)
+  // Only where the host process exports every Dawn entry point.
+  if (!instance || !device || jsui_dawn_fill_from_process() != jsui_dawn_proc_count()) return nullptr;
+  return makeDawn(instance, device, queue);
 #else
   (void)instance;
   (void)device;
   (void)queue;
+  return nullptr;
+#endif
+}
+
+JsuiGpuContext* createDawnProcs(void* getProcAddress, void* instance, void* device, void* queue) {
+#if defined(JSUI_GRAPHITE_DAWN)
+  if (!getProcAddress || !instance || !device) return nullptr;
+  const int resolved = jsui_dawn_fill_from_get_proc(getProcAddress);
+  if (resolved != jsui_dawn_proc_count()) {
+    SkDebugf("jsui: the host's wgpuGetProcAddress resolved %d of %d Dawn entry points (JSUI is built against Dawn %s)\n",
+             resolved, jsui_dawn_proc_count(), jsui_dawn_header_revision());
+    return nullptr;
+  }
+  return makeDawn(instance, device, queue);
+#else
+  (void)getProcAddress;
+  (void)instance;
+  (void)device;
+  (void)queue;
+  return nullptr;
+#endif
+}
+
+const char* dawnRevision() {
+#if defined(JSUI_GRAPHITE_DAWN)
+  return jsui_dawn_header_revision();
+#else
   return nullptr;
 #endif
 }
@@ -556,6 +598,8 @@ bool available() { return false; }
 JsuiGpuContext* createVulkan(const JsuiVulkanDevice&) { return nullptr; }
 JsuiGpuContext* createMetal(void*, void*) { return nullptr; }
 JsuiGpuContext* createDawn(void*, void*, void*) { return nullptr; }
+JsuiGpuContext* createDawnProcs(void*, void*, void*, void*) { return nullptr; }
+const char* dawnRevision() { return nullptr; }
 bool owns(JsuiGpuContext* gpu) { return gpu && gpu->kind == JsuiGpuContext::Kind::Graphite; }
 void destroy(JsuiGpuContext*) {}
 void purge(JsuiGpuContext*, size_t) {}

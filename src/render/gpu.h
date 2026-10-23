@@ -68,7 +68,9 @@ namespace graphite_gpu {
 bool available();
 JsuiGpuContext* createVulkan(const JsuiVulkanDevice& device);
 JsuiGpuContext* createMetal(void* device, void* queue);
-JsuiGpuContext* createDawn(void* instance, void* device, void* queue);
+JsuiGpuContext* createDawn(void* instance, void* device, void* queue);  // entry points: dlsym
+JsuiGpuContext* createDawnProcs(void* getProcAddress, void* instance, void* device, void* queue);
+const char* dawnRevision();  // the Dawn the build's headers are from; nullptr without Dawn
 bool owns(JsuiGpuContext* gpu);  // a Graphite (Vulkan / Metal / Dawn) context
 void destroy(JsuiGpuContext* gpu);
 void purge(JsuiGpuContext* gpu, size_t cacheBytes);

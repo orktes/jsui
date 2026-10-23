@@ -24,10 +24,20 @@
 // which also order it after the previous frame that may still be copying from
 // src. On Metal both use the same MTLCommandQueue and tracked resources. On
 // WebGPU (godot-aw3) both use Godot's WGPUQueue, whose submissions run in
-// order, and Dawn tracks the textures' usage. The fork's
-// get_driver_resource returns webgpu.h handles (instance, device, queue,
-// WGPUTexture) and its binary exports Dawn's wgpu* entry points, which JSUI
-// calls (it links no Dawn of its own).
+// order, and Dawn tracks the textures' usage.
+//
+// Backend choice (chooseRenderer), at run time, so one binary serves stock
+// Godot and the fork:
+//   1. The fork's WebGPU driver registers the Engine singleton
+//      "WebGPUInterop" (see kWebGPUInterop below and the README for the
+//      contract). If it is there and its get_dawn_revision() is the Dawn
+//      jsui_dawn_revision() was built against, JSUI resolves every wgpu*
+//      entry point through its get_proc_address() (jsui_gpu_create_dawn_procs;
+//      JSUI links no Dawn of its own) and renders into the WGPUTexture
+//      get_driver_resource(DRIVER_RESOURCE_TEXTURE) returns. A different
+//      revision has a different webgpu.h ABI: one warning, CPU renderer.
+//   2. Otherwise Vulkan or Metal through get_driver_resource, as above.
+//   3. Otherwise (Compatibility, headless, D3D12, ...) the CPU renderer.
 //
 // New textures (first frame, resize) are created with zeroed initial data and
 // primed with one copy, and first rendered into on the next frame: by then
@@ -76,6 +86,47 @@ String renderingDriver(RenderingServer* rs) {
 #endif
 }
 
+// The godot-aw3 fork's interop singleton (a plain Object, registered while its
+// WebGPU driver is active). Methods, all without arguments:
+//   get_proc_address() -> int   address of Dawn's wgpuGetProcAddress
+//   get_instance()     -> int   WGPUInstance
+//   get_device()       -> int   WGPUDevice
+//   get_queue()        -> int   WGPUQueue
+//   get_dawn_revision() -> String  the Dawn commit the engine links
+const char* const kWebGPUInterop = "WebGPUInterop";
+
+void* interopPointer(Object* interop, const char* method) {
+  if (!interop->has_method(method)) return nullptr;
+  return reinterpret_cast<void*>(uintptr_t(int64_t(interop->call(method))));
+}
+
+// The interop object when it is usable with this build, else nullptr (and
+// `why` says why; a revision mismatch also warns, once per process).
+Object* webgpuInterop(String* why) {
+  Engine* engine = Engine::get_singleton();
+  if (!engine || !engine->has_singleton(kWebGPUInterop)) return nullptr;
+  Object* interop = engine->get_singleton(kWebGPUInterop);
+  if (!interop) return nullptr;
+  const char* ours = jsui_dawn_revision();
+  if (!ours) {
+    *why = "this jsui_godot is built without JSUI_GRAPHITE_DAWN";
+    return nullptr;
+  }
+  String theirs = interop->has_method("get_dawn_revision") ? String(interop->call("get_dawn_revision")) : String();
+  if (theirs.strip_edges() != String(ours)) {
+    *why = "Godot's Dawn is " + (theirs.is_empty() ? String("unknown") : theirs) + ", jsui_godot is built against " +
+           String(ours);
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      UtilityFunctions::push_warning("JsuiView: Dawn revision mismatch (" + *why +
+                                     "): the WebGPU path needs the same revision; using the CPU renderer");
+    }
+    return nullptr;
+  }
+  return interop;
+}
+
 }  // namespace
 
 void JsuiView::runRenderJob() {
@@ -112,14 +163,25 @@ void JsuiView::chooseRenderer() {
   RenderingServer* rs = RenderingServer::get_singleton();
   if (force_cpu_ || !rs) return;
   String driver = renderingDriver(rs);
-  Renderer want = driver == "vulkan" ? Renderer::Vulkan
+  String why;
+  Object* interop = webgpuInterop(&why);
+  Renderer want = interop               ? Renderer::WebGPU
+                  : !why.is_empty()    ? Renderer::Cpu  // WebGPUInterop is there but unusable
+                  : driver == "vulkan" ? Renderer::Vulkan
                   : driver == "metal"  ? Renderer::Metal
-                  : driver == "webgpu" ? Renderer::WebGPU
                                        : Renderer::Cpu;
   if (want == Renderer::Cpu) {
-    UtilityFunctions::print_verbose("JsuiView: CPU renderer (rendering driver '" + driver + "')");
+    if (!why.is_empty()) {
+      UtilityFunctions::print("JsuiView: CPU renderer (" + why + ")");
+    } else if (driver == "webgpu") {
+      UtilityFunctions::print("JsuiView: CPU renderer (rendering driver 'webgpu' without the " + String(kWebGPUInterop) +
+                              " singleton)");
+    } else {
+      UtilityFunctions::print_verbose("JsuiView: CPU renderer (rendering driver '" + driver + "')");
+    }
     return;
   }
+  if (want == Renderer::WebGPU) driver = "webgpu (Dawn " + String(jsui_dawn_revision()).substr(0, 12) + ")";
   runOnRenderThread([&]() {
     RenderingDevice* rd = rs->get_rendering_device();
     if (!rd) return;
@@ -134,9 +196,11 @@ void JsuiView::chooseRenderer() {
       // none (core Vulkan 1.1), which is always valid on Godot's device.
       gpu_ = jsui_gpu_create_vulkan(&d);
     } else if (want == Renderer::WebGPU) {
-      gpu_ = jsui_gpu_create_dawn(driverResource(rd, RenderingDevice::DRIVER_RESOURCE_TOPMOST_OBJECT),
-                                  driverResource(rd, RenderingDevice::DRIVER_RESOURCE_LOGICAL_DEVICE),
-                                  driverResource(rd, RenderingDevice::DRIVER_RESOURCE_COMMAND_QUEUE));
+      // Entry points and handles from the interop singleton: nothing has to
+      // be exported by the engine binary.
+      gpu_ = jsui_gpu_create_dawn_procs(interopPointer(interop, "get_proc_address"),
+                                        interopPointer(interop, "get_instance"), interopPointer(interop, "get_device"),
+                                        interopPointer(interop, "get_queue"));
     } else {
       gpu_ = jsui_gpu_create_metal(driverResource(rd, RenderingDevice::DRIVER_RESOURCE_LOGICAL_DEVICE),
                                    driverResource(rd, RenderingDevice::DRIVER_RESOURCE_COMMAND_QUEUE));
@@ -145,8 +209,9 @@ void JsuiView::chooseRenderer() {
   if (!gpu_) {
     UtilityFunctions::print("JsuiView: no Skia GPU context on '" + driver + "' (" +
                             String(want == Renderer::Vulkan   ? "built without JSUI_VULKAN or Skia rejected the device"
-                                   : want == Renderer::WebGPU ? "built without JSUI_GRAPHITE_DAWN, no Dawn in this Godot "
-                                                                "(needs godot-aw3's WebGPU driver) or Skia rejected the device"
+                                   : want == Renderer::WebGPU ? String(kWebGPUInterop) +
+                                                                    " did not resolve every Dawn entry point, returned "
+                                                                    "no device or Skia rejected the device"
                                                               : "built without JSUI_GRAPHITE_METAL or Skia rejected the device") +
                             "); using the CPU renderer");
     return;
