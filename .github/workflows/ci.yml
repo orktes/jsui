@@ -179,7 +179,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ninja-build clang libfontconfig1-dev zlib1g-dev python3 unzip rsync \
-            libvulkan1 mesa-vulkan-drivers xvfb xauth libegl1 libegl-mesa0 libgl1-mesa-dri
+            libvulkan1 mesa-vulkan-drivers xvfb xauth libegl1 libegl-mesa0 libgl1-mesa-dri \
+            libgl-dev libegl-dev libgles-dev libx11-dev libvulkan-dev
       - name: Cache desktop Skia (m157, Graphite + Vulkan)
         id: skia-desktop
         uses: actions/cache@v4
