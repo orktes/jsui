@@ -290,7 +290,20 @@ becomes `new VideoFrame(video)`, and `<img>` / canvases become an
 missing (or after the WebKit context loss above; the worker tells the page
 about its losses). Each presented frame goes to the worker as a transferred `VideoFrame`,
 with at most two in flight, so a busy worker skips frames rather than queueing
-them. The worker closes each frame after the upload. The same CORS rules apply.
+them. The worker closes each frame after the upload. The same CORS rules apply,
+with the same warning and the same rule: a refused source is not tried again
+until its URL changes.
+
+After a GPU loss (a restored WebGL context, a CPU fallback, a new WebGPU
+device), the worker uploads its copies again and then tells the page, which
+captures its `<img>`, canvas and `<video>` sources again and sends them, plus
+the current frame of each bound video. WebKit needs this: an `ImageBitmap`
+made before its GPU process was lost uploads blank after the restore,
+without an error. `ImageData` and raw pixels stay in the worker's memory and
+come back by themselves. An `ImageBitmap` you passed yourself cannot be made
+again by the page, so a reset logs once (info) that you should set it again.
+As in main mode, a texture set while the context is lost is kept and shown
+after the restore.
 
 **Input and pass-through.** The page's listeners post pointer, wheel, touch,
 key, IME and focus events with their timestamps. Moves and wheels are

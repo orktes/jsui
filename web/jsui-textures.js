@@ -48,6 +48,10 @@ const has = (name) => typeof globalThis[name] !== 'undefined';
 // A source whose upload threw SecurityError (cross-origin, not CORS-enabled)
 // is not tried again until its URL changes.
 export const taintKey = (s) => String(s.currentSrc ?? s.src ?? '');
+/** The warning for such a source (main and worker mode). */
+export const corsWarning = (name) => `host texture "${name}": the source is cross-origin and not CORS-enabled (set ` +
+  'crossOrigin = \'anonymous\' on the <video> / <img> and serve it with Access-Control-Allow-Origin); ' +
+  'not uploaded until its URL changes';
 
 // ------------------------------------------------------ video frames
 // bindVideo takes a video's frames from requestVideoFrameCallback, and polls
@@ -204,7 +208,9 @@ export function sameTarget(a, b) {
 
 /**
  * The host textures of one runtime. `host`: { module, rt, _views() (the
- * shown views), _withStrings(strs, fn), _log(level, text) }.
+ * shown views), _withStrings(strs, fn), _log(level, text) }, optionally
+ * _checkContexts() (before an upload) and _texturesReset() (the textures
+ * were placed again after a GPU loss).
  */
 export class HostTextureSet {
   constructor(host) {
@@ -213,6 +219,7 @@ export class HostTextureSet {
     this.entries = new Map();   // name -> entry (see _upload)
     this.bindings = new Map();  // name -> unbind function (bindVideo)
     this.target = null;         // the textureTarget() textures were last placed for
+    this._reset = false;        // a loss seen since (see sync)
     this._desc = 0;             // JsuiTexture scratch (WASM heap)
     this._stage = 0;            // CPU pixels staging (WASM heap)
     this._stageSize = 0;
@@ -247,7 +254,7 @@ export class HostTextureSet {
     if (target.kind === 'lost') {
       // Uploaded when the context is back (sync), if we may keep the source.
       const e = this.entries.get(name);
-      if (e) e.source = isVideoFrame(source) ? null : source;
+      if (e) Object.assign(e, { source: isVideoFrame(source) ? null : source, options });
       else if (!isVideoFrame(source)) this.entries.set(name, { name, kind: null, source, options, width: 0, height: 0 });
       return false;
     }
@@ -294,7 +301,16 @@ export class HostTextureSet {
    * textures when the views changed. Returns where textures go now. */
   sync() {
     const t = textureTarget(this.host._views());
-    if (t.kind === 'lost' || sameTarget(t, this.target)) return t;
+    if (t.kind === 'lost') {
+      this._reset = true;
+      return t;
+    }
+    if (sameTarget(t, this.target)) return t;
+    // Back after a loss (a restored context, a new device, a fresh canvas):
+    // the host is told once the textures are placed (_texturesReset; the
+    // worker's ImageBitmaps may have lost their pixels with the GPU process).
+    const reset = this._reset || staleIn(this.target, t);
+    this._reset = false;
     this.target = t;
     for (const e of [...this.entries.values()]) {
       if (e.kind && sameTarget(e.target, t)) continue;
@@ -302,7 +318,10 @@ export class HostTextureSet {
       const size = e.source && sourceSize(e.source);
       if (size) {
         const old = this._detach(e);
-        if (!this._upload(e.name, e.source, e.options, size, t)) this._drop(e);
+        // Lost again during the upload: kept for the next restore.
+        if (!this._upload(e.name, e.source, e.options, size, t) && !(t.kind === 'gl' && t.gl.isContextLost())) {
+          this._drop(e);
+        }
         this._free(old, stale);
       } else {
         // A VideoFrame (or a source with no picture now): nothing to upload
@@ -311,6 +330,7 @@ export class HostTextureSet {
         this._free(e, stale);
       }
     }
+    if (reset) this.host._texturesReset?.();
     return t;
   }
 
@@ -362,9 +382,7 @@ export class HostTextureSet {
       if (err?.name === 'SecurityError') {
         this._tainted.set(source, taintKey(source));
         // A texture shown before (a poster) stays.
-        this._warnOnce(name, `host texture "${name}": the source is cross-origin and not CORS-enabled (set ` +
-          'crossOrigin = \'anonymous\' on the <video> / <img> and serve it with Access-Control-Allow-Origin); ' +
-          'not uploaded until its URL changes');
+        this._warnOnce(name, corsWarning(name));
       } else {
         this._warnOnce(name, `host texture "${name}": upload failed: ${err?.message ?? err}`);
       }

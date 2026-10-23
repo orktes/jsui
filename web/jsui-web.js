@@ -153,8 +153,8 @@
  * }} JsuiOptions */
 
 import { SharedWebGPU, WebGPURenderer, requestWebGPU } from './jsui-webgpu.js';
-import { HostTextureSet, defaultOpaque, isVideoFrame, sourceSize, taintKey, videoFramesContextLost, watchVideoFrames }
-  from './jsui-textures.js';
+import { HostTextureSet, corsWarning, defaultOpaque, isVideoFrame, sourceSize, taintKey, videoFramesContextLost,
+  watchVideoFrames } from './jsui-textures.js';
 
 export { requestWebGPU, webgpuSupported } from './jsui-webgpu.js';
 
@@ -275,7 +275,7 @@ function replaceCanvas(old) {
 function internals() {
   return { DomView, CanvasView, JsuiHost, JsuiSurface, HIT_POINTER, HIT_SCROLL, NAV_KEYS, webgpuFor, loadModuleFor,
     bufferType, BUFFER_TYPES, sourceSize, defaultOpaque, isVideoFrame, transferred, replaceCanvas, fontArgs, fontList,
-    taintKey, videoFramesContextLost, watchVideoFrames, hostUrl: import.meta.url, workerName: WORKER_NAME };
+    corsWarning, taintKey, videoFramesContextLost, watchVideoFrames, hostUrl: import.meta.url, workerName: WORKER_NAME };
 }
 const WORKER_NAME = 'jsui-host';
 
