@@ -29,6 +29,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
 import { HeadlessApp, loadModule } from './headless.js';
+import { RemoteRuntime } from './remote-runtime.js';
 import { answerOf, runSteps } from './script.js';
 
 const VIEWER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'shared-viewer.html');
@@ -55,6 +56,14 @@ export class LiveApp extends HeadlessApp {
     this.onActivity = null;  // (event) for every activity entry
     this.onPointer = null;   // ({action, x, y, to?}) where the agent points
     this._timer = setInterval(() => this._loop(), this.frameMs);
+    this.id = 'headless';
+    this.kind = 'headless';
+    this.label = 'headless';
+    this.record = null;      // (who, kind, data) => event: set by the session
+  }
+
+  describe() {
+    return { id: this.id, name: 'headless', platform: 'node', label: this.label, kind: this.kind, width: this.width, height: this.height, scale: this.scale };
   }
 
   _now() {
@@ -223,6 +232,7 @@ export class LiveApp extends HeadlessApp {
   }
 
   _log(who, kind, data) {
+    if (this.record) return this.record(who, kind, data);  // the session's feed
     const ev = { seq: ++this._seq, time: Math.round(this.time), who, kind, ...data };
     this.activityLog.push(ev);
     if (this.activityLog.length > MAX_ACTIVITY) this.activityLog.splice(0, this.activityLog.length - MAX_ACTIVITY);
@@ -408,85 +418,202 @@ const union = (a, b) => {
 
 // ------------------------------------------------------------------ server
 
+const POLL_HOLD_MS = 20000;   // a runtime's poll is held this long without commands
+const GONE_AFTER_MS = 10000;  // a runtime not polling for this long has left
+const LOST_AFTER_MS = 2000;   // ... or this long after its poll's connection dropped (a reload re-polls at once)
+const WAIT_FOR_CLIENT_MS = 30000;
+
 /**
- * Starts the shared runtime for a dev server.
+ * Starts the shared session of a dev server.
  * @param {object} o
  * @param {string} o.bundleUrl  the dev server's /bundle.js (http)
  * @param {string} o.entry      shown in the viewer
- * @param {string[]} o.hosts    Host header names allowed to POST (DNS rebinding guard)
+ * @param {string[]} o.hosts    Host header names allowed to POST from browsers (DNS rebinding guard)
+ * @param {boolean} [o.headless]  also run a headless runtime in this process
+ * @param {string} [o.webHost]  URL path of the web host page (/shared runs it when nothing is connected)
+ * @param {number} [o.waitMs]   how long agent commands wait for a runtime to join
  */
 export async function createShared(o) {
-  const M = await loadModule(o.wasmDir);
   const log = o.log || console.log;
-  const app = new LiveApp(M, o.bundleUrl, {
-    width: o.width || 1280,
-    height: o.height || 720,
-    scale: o.scale || 1,
-    fps: o.fps || 60,
-    component: o.component,
-    props: o.props,
-    state: o.state,
-    onLog: (level, text) => {
-      if (level >= 2) log(`[jsui shared] ${level >= 3 ? 'error' : 'warn'}: ${text}`);
-    },
-  });
+  const waitMs = o.waitMs ?? WAIT_FOR_CLIENT_MS;
+  const t0 = performance.now();
+  const clock = () => Math.round(performance.now() - t0);
   const allowedHosts = new Set(['localhost', '127.0.0.1', '[::1]', ...(o.hosts || [])]);
   const viewers = new Set();  // {res, pending}
-  const frames = new FrameSource(app);
-  let cursor = 'default';
+  const activity = [];
+  let seq = 0;
   let agentBusy = 0;
   let queue = Promise.resolve();
+  let closed = false;
 
   const broadcast = (buf) => {
     for (const v of viewers) v.res.write(buf);
   };
-  const info = () => ({
+
+  /** One feed for the session: {seq, time, who: 'agent' | 'user' | 'ui', kind, client, ...}. */
+  const record = (client, who, kind, data) => {
+    const ev = { seq: ++seq, time: clock(), who, kind, ...(client ? { client } : {}), ...data };
+    activity.push(ev);
+    if (activity.length > MAX_ACTIVITY) activity.splice(0, activity.length - MAX_ACTIVITY);
+    if (viewers.size) broadcast(jsonMessage({ type: 'activity', event: ev }));
+    return ev;
+  };
+  const activitySince = (since = 0) => activity.filter((e) => e.seq > since);
+
+  // ------------------------------------------------------------ clients
+
+  // Runtimes in the session, in the order they joined; the last one is live.
+  const clients = [];
+  let joinWaiters = [];
+  let headless = null;
+  let frames = null;
+  let cursor = 'default';
+
+  const describeClients = () => clients.map((c) => ({ ...c.describe(), live: c === liveClient() }));
+  const announce = () => {
+    if (viewers.size) broadcast(jsonMessage({ type: 'clients', clients: describeClients(), live: liveClient()?.id ?? null }));
+  };
+
+  const addClient = (c) => {
+    clients.push(c);
+    record(c.label, 'ui', 'join', { platform: c.platform });
+    log(`[jsui] ${c.label} joined the shared session`);
+    const w = joinWaiters;
+    joinWaiters = [];
+    for (const f of w) f();
+    announce();
+  };
+
+  const removeClient = (c, reason) => {
+    const i = clients.indexOf(c);
+    if (i < 0) return;
+    clients.splice(i, 1);
+    c.close(reason);
+    record(c.label, 'ui', 'leave', {});
+    log(`[jsui] ${c.label} left the shared session`);
+    announce();
+  };
+
+  // The live runtime: the last one to join (the headless one when it is alone).
+  function liveClient() {
+    return clients[clients.length - 1] || null;
+  }
+
+  // A runtime by --client: its id (or a prefix), 'headless', or part of its name.
+  const findClient = (sel) => {
+    const q = String(sel).toLowerCase();
+    return (
+      clients.find((c) => c.id === sel) ||
+      clients.find((c) => c.id.startsWith(q)) ||
+      [...clients].reverse().find((c) => c.label.toLowerCase().includes(q) || c.platform.toLowerCase() === q)
+    );
+  };
+
+  const howToConnect = () => {
+    const origin = o.origin || '';
+    return [
+      'no JSUI runtime is connected to this dev server. Open one:',
+      `  browser:   ${origin}/shared`,
+      `  native:    jsui-viewer --dev ${origin}/bundle.js`,
+      `  Godot:     a JsuiView with bundle_url = "${origin}/bundle.js" and dev_mode on`,
+      '  or start the dev server with --headless (a runtime inside it).',
+    ].join('\n');
+  };
+
+  /** The runtime agent commands go to; waits for one to join. */
+  async function pick(sel) {
+    const end = Date.now() + waitMs;
+    for (;;) {
+      if (closed) throw new Error('the dev server is shutting down');
+      if (sel != null && sel !== '') {
+        const c = findClient(sel);
+        if (c) return c;
+        if (Date.now() >= end) {
+          const names = clients.map((x) => `${x.id.slice(0, 8)} ${x.label}`).join(', ') || 'none';
+          throw new Error(`no runtime matches --client ${JSON.stringify(sel)} (connected: ${names})`);
+        }
+      } else if (clients.length) return liveClient();
+      if (Date.now() >= end) throw new Error(howToConnect());
+      await new Promise((r) => {
+        const t = setTimeout(r, Math.max(10, end - Date.now()));
+        joinWaiters.push(() => {
+          clearTimeout(t);
+          r();
+        });
+      });
+    }
+  }
+
+  const sweep = setInterval(() => {
+    for (const c of [...clients]) if (c.kind === 'remote' && c.gone(GONE_AFTER_MS, LOST_AFTER_MS)) removeClient(c, `${c.label} stopped polling (closed, or no longer ticking)`);
+  }, 500);
+
+  if (o.headless) {
+    const M = await loadModule(o.wasmDir);
+    headless = new LiveApp(M, o.bundleUrl, {
+      width: o.width || 1280,
+      height: o.height || 720,
+      scale: o.scale || 1,
+      fps: o.fps || 60,
+      component: o.component,
+      props: o.props,
+      state: o.state,
+      onLog: (level, text) => {
+        if (level >= 2) log(`[jsui headless] ${level >= 3 ? 'error' : 'warn'}: ${text}`);
+      },
+    });
+    headless.record = (who, kind, data) => record(headless.label, who, kind, data);
+    frames = new FrameSource(headless);
+    headless.onPointer = (p) => {
+      if (viewers.size) broadcast(jsonMessage({ type: 'pointer', ...p }));
+    };
+    headless.onTick = () => {
+      if (!viewers.size) return;
+      const resized = frames.size();
+      const r = frames.render();
+      if (resized) {
+        broadcast(jsonMessage({ type: 'hello', ...info() }));
+        for (const v of viewers) v.pending = { x: 0, y: 0, w: frames.w, h: frames.h };
+      } else if (r) {
+        for (const v of viewers) v.pending = union(v.pending, r);
+      }
+      // A slow viewer gets the union of what changed once it has caught up.
+      for (const v of viewers) {
+        if (!v.pending || v.res.writableLength > (2 << 20)) continue;
+        v.res.write(frames.encode(v.pending));
+        v.pending = null;
+      }
+      const p = headless.M._jsui_get_cursor(headless.rt);
+      const c = p ? headless.M.UTF8ToString(p) : 'default';
+      if (c !== cursor) {
+        cursor = c;
+        broadcast(jsonMessage({ type: 'cursor', cursor }));
+      }
+    };
+    addClient(headless);
+  }
+
+  const info = (c = liveClient()) => ({
     entry: o.entry,
-    width: app.width,
-    height: app.height,
-    scale: app.scale,
-    pixelWidth: frames.w || Math.round(app.width * app.scale),
-    pixelHeight: frames.h || Math.round(app.height * app.scale),
+    width: c?.width,
+    height: c?.height,
+    scale: c?.scale,
+    pixelWidth: frames ? frames.w || Math.round(headless.width * headless.scale) : undefined,
+    pixelHeight: frames ? frames.h || Math.round(headless.height * headless.scale) : undefined,
+    headless: !!headless,
+    webHost: o.webHost || null,
+    clients: describeClients(),
+    live: c?.id ?? null,
     viewers: viewers.size,
     agentBusy: agentBusy > 0,
-    seq: app._seq,
+    seq,
   });
 
-  app.onActivity = (ev) => {
-    if (viewers.size) broadcast(jsonMessage({ type: 'activity', event: ev }));
-  };
-  app.onPointer = (p) => {
-    if (viewers.size) broadcast(jsonMessage({ type: 'pointer', ...p }));
-  };
-  app.onTick = () => {
-    if (!viewers.size) return;
-    const resized = frames.size();
-    const r = frames.render();
-    if (resized) {
-      broadcast(jsonMessage({ type: 'hello', ...info() }));
-      for (const v of viewers) v.pending = { x: 0, y: 0, w: frames.w, h: frames.h };
-    } else if (r) {
-      for (const v of viewers) v.pending = union(v.pending, r);
-    }
-    // A slow viewer gets the union of what changed once it has caught up.
-    for (const v of viewers) {
-      if (!v.pending || v.res.writableLength > (2 << 20)) continue;
-      v.res.write(frames.encode(v.pending));
-      v.pending = null;
-    }
-    const p = M._jsui_get_cursor(app.rt);
-    const c = p ? M.UTF8ToString(p) : 'default';
-    if (c !== cursor) {
-      cursor = c;
-      broadcast(jsonMessage({ type: 'cursor', cursor }));
-    }
-  };
-
   // Agent requests run one at a time, in order.
-  const agent = (label, fn) => {
+  const agent = (label, client, fn) => {
     const run = queue.then(async () => {
       agentBusy++;
-      if (label) app._log('agent', 'command', { text: label });
+      if (label) record(client.label, 'agent', 'command', { text: label });
       if (viewers.size) broadcast(jsonMessage({ type: 'agent', busy: true }));
       try {
         return await fn();
@@ -525,9 +652,20 @@ export async function createShared(o) {
       req.on('error', reject);
     });
 
+  // Browsers send Origin with every POST: only pages of this server may
+  // drive the session (other sites, DNS rebinding). Runtimes and agents
+  // outside a browser (native, Godot, Node) send none.
   const hostOk = (req) => {
-    const h = String(req.headers.host || '').replace(/:\d+$/, '');
-    return allowedHosts.has(h);
+    const host = String(req.headers.host || '');
+    const origin = req.headers.origin;
+    if (origin == null) return true;
+    let o2;
+    try {
+      o2 = new URL(origin);
+    } catch {
+      return false;
+    }
+    return o2.host === host && allowedHosts.has(host.replace(/:\d+$/, ''));
   };
 
   // {"click": "#play", "hold": 50} -> 'click #play hold=50'
@@ -540,20 +678,46 @@ export async function createShared(o) {
     return text.length > 160 ? text.slice(0, 157) + '...' : text;
   };
 
-  const encodeValue = (v) => (Buffer.isBuffer(v) ? { base64: v.toString('base64') } : v instanceof LiveApp ? null : v);
+  const encodeValue = (v) => (Buffer.isBuffer(v) ? { base64: v.toString('base64') } : v instanceof LiveApp || v instanceof RemoteRuntime ? null : v);
 
-  const snapshot = (since) => ({
+  const snapshot = (app, since) => ({
     time: Math.round(app.time),
+    client: app.describe(),
     errors: app.errors.slice(-50),
     messages: app.messages.slice(-200),
     calls: app.calls.slice(-200),
     stateWrites: app.stateWrites.slice(-200),
-    seq: app._seq,
-    ...(since != null ? { activity: app.activity(since) } : {}),
+    seq,
+    ...(since != null ? { activity: activitySince(since) } : {}),
   });
 
+  // ------------------------------------------------------------ runtimes' side
+
+  async function session(req, res, p, body) {
+    const id = String(body.runtime || '');
+    if (!/^[\w-]{4,64}$/.test(id)) return sendJson(res, 400, { error: 'expected {"runtime": "<id>"}' });
+    let c = clients.find((x) => x.id === id);
+    if (p === '/__jsui/session/poll') {
+      if (closed) return sendJson(res, 200, { commands: [], leave: true });
+      if (!c) {
+        c = new RemoteRuntime(id, body.info || {}, { record: (who, kind, data) => record(c.label, who, kind, data) });
+        addClient(c);
+      } else c.update(body.info || {});
+      const held = c.poll((answer) => sendJson(res, 200, answer), POLL_HOLD_MS);
+      // The runtime went away mid-poll (tab closed, game quit).
+      if (held) res.on('close', () => c.lostPoll(held));
+      return undefined;
+    }
+    // push
+    if (c) c.pushed(body.results, body.events);
+    res.writeHead(204, { 'Cache-Control': 'no-store' });
+    return res.end();
+  }
+
+  // ------------------------------------------------------------ agents' side
+
   async function post(req, res, p) {
-    if (!hostOk(req)) return sendJson(res, 403, { error: 'forbidden host' });
+    if (!hostOk(req)) return sendJson(res, 403, { error: 'forbidden origin' });
     if (!/^application\/json\b/i.test(String(req.headers['content-type'] || ''))) return sendJson(res, 415, { error: 'Content-Type must be application/json' });
     let body;
     try {
@@ -561,43 +725,58 @@ export async function createShared(o) {
     } catch (e) {
       return sendJson(res, 400, { error: e.message });
     }
-    if (!app.rt) return sendJson(res, 410, { error: 'the shared app is closed' });
+    if (p.startsWith('/__jsui/session/')) return session(req, res, p, body);
     if (p === '/__jsui/shared/input') {
-      for (const e of [].concat(body)) applyInput(app, e);
+      // The streamed viewer of the headless runtime.
+      if (headless && headless.rt) for (const e of [].concat(body)) applyInput(headless, e);
       res.writeHead(204, { 'Cache-Control': 'no-store' });
       return res.end();
+    }
+    if (p === '/__jsui/shared/call' && body.method === 'activity') {
+      const args = Array.isArray(body.args) ? body.args : [];
+      return sendJson(res, 200, { value: activitySince(Number(args[0]) || 0), seq });
+    }
+    let app;
+    try {
+      app = await pick(body.client);
+    } catch (e) {
+      return sendJson(res, 503, { error: e.message });
     }
     if (p === '/__jsui/shared/run') {
       const steps = Array.isArray(body) ? body : body.steps;
       if (!Array.isArray(steps)) return sendJson(res, 400, { error: 'expected {"steps": [...]}' });
       const results = [];
-      const r = await agent(null, async () => {
+      const r = await agent(null, app, async () => {
         if (body.calls) for (const [name, answer] of Object.entries(body.calls)) app.handle(name, answerOf(answer));
         await app.ready();
         return runSteps(app, steps, {
           keepGoing: !!body.keepGoing,
           onResult: (out) => {
             results.push(out);
-            app._log('agent', 'step', { text: describeStep(steps[out.step]), ok: out.ok, ...(out.ok ? {} : { error: out.error }) });
+            record(app.label, 'agent', 'step', { text: describeStep(steps[out.step]), ok: out.ok, ...(out.ok ? {} : { error: out.error }) });
           },
         });
-      });
-      return sendJson(res, 200, { ok: r.ok, failed: r.failed, results, ...snapshot() });
+      }).catch((e) => ({ ok: false, failed: 1, error: e.message }));
+      if (r.error) return sendJson(res, 200, { error: r.error, ...snapshot(app) });
+      return sendJson(res, 200, { ok: r.ok, failed: r.failed, results, ...snapshot(app) });
     }
     if (p === '/__jsui/shared/call') {
       const method = String(body.method || '');
       const args = Array.isArray(body.args) ? body.args : [];
       if (!RPC.has(method)) return sendJson(res, 400, { error: `unknown method ${JSON.stringify(method)}` });
       try {
-        const value = await agent(method === 'activity' || method === 'getState' ? null : `${method}(${args.map((a) => JSON.stringify(a)).join(', ').slice(0, 140)})`, async () => {
+        // Reads and the CLI's settle frame stay out of the feed.
+        const quiet = ['getState', 'find', 'findAll', 'get', 'point', 'frame', 'idle'].includes(method) || (method === 'wait' && !(args[0] > 0));
+        const label = method === 'tree' ? 'inspect' : method === 'screenshot' ? 'screenshot' : `${method}(${args.map((a) => JSON.stringify(a)).join(', ').slice(0, 140)})`;
+        const value = await agent(quiet ? null : label, app, async () => {
           await app.ready();
           if (method === 'handle') return void app.handle(String(args[0]), answerOf(args[1] && typeof args[1] === 'object' && ('value' in args[1] || 'error' in args[1]) ? args[1] : { value: args[1] }));
           if (method === 'screenshot') return app.screenshot();  // the client writes the file
           return app[method](...args);
         });
-        return sendJson(res, 200, { value: encodeValue(value) ?? null, ...snapshot() });
+        return sendJson(res, 200, { value: encodeValue(value) ?? null, ...snapshot(app) });
       } catch (e) {
-        return sendJson(res, 200, { error: e && e.message ? e.message : String(e), ...snapshot() });
+        return sendJson(res, 200, { error: e && e.message ? e.message : String(e), ...snapshot(app) });
       }
     }
     return sendJson(res, 404, { error: 'not found' });
@@ -607,16 +786,33 @@ export async function createShared(o) {
     res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
     const v = { res, pending: null };
     viewers.add(v);
-    frames.size();
-    frames.fresh = true;  // a full frame for everyone (cheap; joins are rare)
-    res.write(jsonMessage({ type: 'hello', ...info(), activity: app.activity(Math.max(0, app._seq - 200)), cursor }));
+    if (frames) {
+      frames.size();
+      frames.fresh = true;  // a full frame for everyone (cheap; joins are rare)
+    }
+    res.write(jsonMessage({ type: 'hello', ...info(), activity: activitySince(Math.max(0, seq - 200)), cursor }));
     if (agentBusy) res.write(jsonMessage({ type: 'agent', busy: true }));
     const done = () => viewers.delete(v);
     req.on('close', done);
     res.on('error', done);
   }
 
-  /** Handles a shared-mode request; returns false for other URLs. */
+  // GETs for agents: ?client= picks the runtime.
+  function get(res, url, fn) {
+    pick(url.searchParams.get('client'))
+      .then((app) => agent(null, app, () => fn(app)))
+      .then(
+        (out) => {
+          if (Buffer.isBuffer(out)) {
+            res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' });
+            res.end(out);
+          } else sendJson(res, 200, out);
+        },
+        (e) => sendJson(res, /no JSUI runtime|no runtime matches/.test(e.message) ? 503 : 500, { error: e.message }),
+      );
+  }
+
+  /** Handles a shared-session request; returns false for other URLs. */
   function handle(req, res, url) {
     const p = decodeURIComponent(url.pathname);
     if (p === '/shared' || p === '/shared/') {
@@ -625,7 +821,7 @@ export async function createShared(o) {
       res.end(readFileSync(VIEWER));
       return true;
     }
-    if (!p.startsWith('/__jsui/shared/')) return false;
+    if (!p.startsWith('/__jsui/shared/') && !p.startsWith('/__jsui/session/')) return false;
     if (req.method === 'POST') {
       post(req, res, p).catch((e) => {
         if (!res.headersSent) sendJson(res, 500, { error: String((e && e.message) || e) });
@@ -638,40 +834,45 @@ export async function createShared(o) {
       return true;
     }
     if (p === '/__jsui/shared/info') {
-      sendJson(res, 200, info());
+      const sel = url.searchParams.get('client');
+      sendJson(res, 200, info(sel ? findClient(sel) || null : undefined));
       return true;
     }
     if (p === '/__jsui/shared/activity') {
       const since = Number(url.searchParams.get('since') || 0) || 0;
-      sendJson(res, 200, { events: app.activity(since), seq: app._seq });
+      sendJson(res, 200, { events: activitySince(since), seq });
       return true;
     }
     if (p === '/__jsui/shared/screenshot.png') {
-      agent(null, () => app.screenshot()).then(
-        (png) => {
-          res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' });
-          res.end(png);
-        },
-        (e) => sendJson(res, 500, { error: e.message }),
-      );
+      get(res, url, (app) => app.screenshot());
       return true;
     }
     if (p === '/__jsui/shared/tree') {
-      agent(null, () => app.tree()).then((t) => sendJson(res, 200, t), (e) => sendJson(res, 500, { error: e.message }));
+      get(res, url, (app) => app.tree());
       return true;
     }
     return false;
   }
 
   return {
-    app,
+    get app() {
+      return headless;
+    },
+    clients,
     handle,
     info,
     async close() {
+      closed = true;
+      clearInterval(sweep);
+      for (const c of [...clients]) if (c.kind === 'remote') removeClient(c, 'the dev server is shutting down');
+      for (const f of joinWaiters) f();
+      joinWaiters = [];
       for (const v of viewers) v.res.end();
       viewers.clear();
-      app.close();
-      frames.dispose();
+      if (headless) {
+        headless.close();
+        frames.dispose();
+      }
     },
   };
 }

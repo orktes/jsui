@@ -16,10 +16,14 @@
 //                             current one (see hmr.js / hmr-runtime.js)
 //   GET /__jsui/error         text of the current build error ('' when ok)
 //   GET /                     small index page (links the WASM web host if built)
-//   /shared, /__jsui/shared/* with `shared`: one live runtime in this process
-//                             that a person (the /shared viewer page) and
-//                             agents (jsui run --attach) drive together; see
-//                             shared.js
+//   /shared, /__jsui/shared/*, /__jsui/session/*
+//                             the shared session (shared.js): every runtime
+//                             loading /bundle.js in dev mode (native viewer,
+//                             Godot, the web host, ...) joins it, and agents
+//                             (jsui run --attach) drive the live one. With
+//                             `headless`, one more runtime runs in this process.
+//   /web/*                    the WASM web host (the repo's web/ or the
+//                             installed @orktes/jsui-web)
 // Anything else is served from the entry's directory (for fetch('./data.json')).
 
 import * as esbuild from 'esbuild';
@@ -30,6 +34,9 @@ import { esbuildOptions } from './config.js';
 import { formatErrors } from './build.js';
 import { createHmr } from './hmr.js';
 import { createShared } from './shared.js';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
 
 const TYPES = {
   '.js': 'text/javascript; charset=utf-8',
@@ -52,6 +59,15 @@ const TYPES = {
   '.txt': 'text/plain; charset=utf-8',
 };
 
+function webPackageDir() {
+  try {
+    const dir = path.dirname(require.resolve('@orktes/jsui-web/package.json'));
+    return existsSync(path.join(dir, 'index.html')) ? dir : null;
+  } catch {
+    return null;
+  }
+}
+
 function findWebHost(start) {
   let dir = path.resolve(start);
   for (;;) {
@@ -69,10 +85,15 @@ function safeJoin(root, rel) {
   return p === root || p.startsWith(root + path.sep) ? p : null;
 }
 
-export async function dev({ entry, port = 5173, host = '127.0.0.1', log = console.log, minify = false, hmr = true, shared = null }) {
+/**
+ * `headless`: null, or the options of the in-process runtime ({width, height,
+ * scale, fps, component, props, state}). `waitMs`: how long agent commands
+ * wait for a runtime to join the session.
+ */
+export async function dev({ entry, port = 5173, host = '127.0.0.1', log = console.log, minify = false, hmr = true, headless = null, waitMs }) {
   const absEntry = path.resolve(entry);
   const entryDir = path.dirname(absEntry);
-  const webDir = findWebHost(entryDir) || findWebHost(process.cwd());
+  const webDir = findWebHost(entryDir) || findWebHost(process.cwd()) || webPackageDir();
   const state = { bundle: null, map: null, assets: new Map(), version: '0', error: '', builds: 0, failures: 0 };
   const hot = hmr ? createHmr({ entry: absEntry, mode: 'development', assets: state.assets, log }) : null;
   // The token runtimes poll with hmr=1: a failed build changes it too.
@@ -188,7 +209,7 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
 <h1>jsui dev server</h1>
 <p>Bundle: <a href="/bundle.js">/bundle.js</a> &middot; version: <code>${state.version}</code></p>
 <p>Native: <code>jsui-viewer --dev http://${host}:${port}/bundle.js</code></p>
-${sharedView ? `<p><a href="/shared">Shared view</a> (agents: <code>jsui run --attach http://${host}:${port} steps.json</code>)</p>` : ''}
+<p><a href="/shared">Shared session</a> (agents: <code>jsui run --attach http://${host}:${port} steps.json</code>)</p>
 ${web}
 ${state.error ? `<pre style="color:#f88">${state.error.replace(/[<&]/g, (c) => (c === '<' ? '&lt;' : '&amp;'))}</pre>` : ''}`;
       return send(res, 200, TYPES['.html'], html);
@@ -210,18 +231,27 @@ ${state.error ? `<pre style="color:#f88">${state.error.replace(/[<&]/g, (c) => (
   });
   const actualPort = server.address().port;
   log(`[jsui] dev server: http://${host}:${actualPort}/bundle.js  (version endpoint /__jsui/version)`);
-  if (shared) {
-    // The runtime fetches the bundle (and hot updates) from this server.
-    const local = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host.includes(':') ? `[${host}]` : host;
-    try {
-      sharedView = await createShared({ ...shared, entry: path.relative(process.cwd(), absEntry), bundleUrl: `http://${local}:${actualPort}/bundle.js`, hosts: [host, local], log });
-    } catch (e) {
-      await ctx.dispose();
-      await new Promise((r) => server.close(r));
-      throw e;
-    }
-    log(`[jsui] shared view: http://${local}:${actualPort}/shared  (agents: jsui run --attach http://${local}:${actualPort} steps.json)`);
+  // The runtimes fetch the bundle (and hot updates) from this server.
+  const local = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host.includes(':') ? `[${host}]` : host;
+  const origin = `http://${local}:${actualPort}`;
+  try {
+    sharedView = await createShared({
+      ...(headless || {}),
+      headless: !!headless,
+      waitMs,
+      entry: path.relative(process.cwd(), absEntry),
+      bundleUrl: `${origin}/bundle.js`,
+      origin,
+      webHost: webDir ? '/web/index.html' : null,
+      hosts: [host, local],
+      log,
+    });
+  } catch (e) {
+    await ctx.dispose();
+    await new Promise((r) => server.close(r));
+    throw e;
   }
+  log(`[jsui] shared session: ${origin}/shared  (agents: jsui run --attach ${origin} steps.json)`);
   return {
     port: actualPort,
     state,

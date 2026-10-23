@@ -1,11 +1,11 @@
-# Checking your work: the shared view and the headless tools
+# Checking your work: the shared session and the headless tools
 
 Two ways to run the same commands:
 
-* **Shared view** (`jsui dev --shared` + `--attach <url>`): one live app in
-  the dev server that a person watches and plays at `/shared`, hot-updating
-  on every save. The fastest loop while building; real clock. See the end of
-  this file.
+* **Shared session** (`jsui dev` + `--attach <url>`): the live runtime that
+  joined the dev server (the game, the native viewer, a browser at `/shared`,
+  or `--headless` inside the server), hot-updating on every save. The fastest
+  loop while building; real clock. See the end of this file.
 * **Standalone** (`jsui screenshot|inspect|run <entry>`): a fresh app per
   command, simulated clock, deterministic. For tests and exact checks.
 
@@ -184,41 +184,62 @@ children: [element]}], focused}` with elements shaped as in `inspect
 matches with theirs. Records: `messages`, `calls`, `stateWrites`,
 `logs`, `errors`, `time` (UI clock, ms).
 
-## Shared view: `jsui dev --shared` and `--attach`
+## Shared session: `jsui dev` and `--attach`
 
 ```sh
-npx jsui dev src/app.jsx --shared [--width 1280 --height 720 --scale 1 --fps 60]
-                                   [--component Name --props '{...}' --state key=json]
+npx jsui dev src/app.jsx [--headless [--width 1280 --height 720 --scale 1 --fps 60]
+                                     [--component Name --props '{...}' --state key=json]]
 ```
 
-prints the viewer link (`http://127.0.0.1:5173/shared`). The app runs in the
-dev server on the CPU WebAssembly runtime and loads the dev bundle like any
-dev-mode host, so saves hot-update it (React Fast Refresh) and build or JS
-errors show on its error overlay. The viewer streams its frames (about 60 fps
-on localhost), sends the person's mouse, wheel, touch, keyboard, text and
-gamepads to it, and shows an activity feed of who did what. Its Reload button
-restarts the bundle.
+Every runtime that loads `http://<server>/bundle.js` in dev mode joins the
+server's session: it long-polls `POST /__jsui/session/poll` for commands and
+pushes their results and its events (the person's input, UI messages, calls,
+state writes, warnings, errors) to `/__jsui/session/push`. That is the
+runtime's own code (`src/dev_session.cpp`), so it works the same in every
+host:
+
+| Runtime | How it joins | Shown as |
+| --- | --- | --- |
+| Godot | a `JsuiView` with `bundle_url` = `<server>/bundle.js`, `dev_mode` on | `Godot: <node name> (macOS)` |
+| Native viewer | `jsui-viewer --dev <server>/bundle.js` | `jsui-viewer (macOS)` |
+| Browser | `<server>/shared` (runs the app in the web host when nothing else is connected; "Run here" otherwise), or any page using `createJsui({devMode: true, bundleUrl: '<server>/bundle.js', devName})` | `browser (web)` |
+| Headless | `jsui dev --headless`: the CPU WebAssembly runtime inside the dev server, streamed to `/shared` | `headless` |
+| Any embedder | dev mode + http bundle URL; `jsui_set_dev_session(rt, name, enabled)` names it or opts out | its name |
 
 Agents attach with the same commands, without an entry:
 
 ```sh
-npx jsui screenshot --attach http://127.0.0.1:5173 [-o shot.png] [--wait ms]
-npx jsui inspect --attach http://127.0.0.1:5173 [--find sel] [--json]
-npx jsui run --attach http://127.0.0.1:5173 steps.json|script.mjs|<steps as words> [--keep-going]
+npx jsui clients --attach http://127.0.0.1:5173 [--json]
+npx jsui screenshot --attach http://127.0.0.1:5173 [-o shot.png] [--wait ms] [--client sel]
+npx jsui inspect --attach http://127.0.0.1:5173 [--find sel] [--json] [--client sel]
+npx jsui run --attach http://127.0.0.1:5173 steps.json|script.mjs|<steps as words> [--keep-going] [--client sel]
 npx jsui log --attach http://127.0.0.1:5173 [--since <seq>] [--follow]
 ```
 
+* Commands go to the live runtime: the last one to join. `--client` picks
+  another by id (prefix), `headless`, or part of its name (`godot`,
+  `viewer`, `browser`). With none connected, a command waits up to 30 s for
+  one to join, then fails listing how to open one.
 * Steps are the same as above, plus `{"activity": <seq>}` (the log as a
-  step) and `{"reload": true}`. Screenshot paths are written on this
-  machine. `calls` / `answer` steps keep answering for the rest of the
-  session. Unanswered Host.calls are rejected at once, as headless.
-* The clock is real: `wait` sleeps, `idle` waits until nothing loads or
-  animates, `drag` takes its duration.
+  step) and `{"reload": true}`. Screenshot paths are written on this machine.
+  A screenshot is the runtime's current frame, rendered once more on the CPU
+  raster: the same pixels, except GPU host textures (a game's render
+  targets, video frames), which come out empty.
+* Headless only: `calls` / `answer` steps (they keep answering for the rest
+  of the session; unanswered Host.calls are rejected at once), and `resize`.
+  Games and pages answer their own Host.calls and own their window size.
+* The clock is the runtime's own, in real time: `wait` sleeps, `idle` waits
+  until nothing loads or animates, `drag` takes its duration. Each command
+  runs at the end of one of the runtime's frames, so a runtime that stops
+  ticking (paused game, background browser tab) times commands out after
+  15 s. A runtime leaves the session about 2 s after it quits, or 10 s after
+  it stops ticking.
 * `jsui log` prints one JSON line per event:
-  `{"seq", "time", "who": "agent"|"user"|"ui", "kind", ...}`. Kinds: user
-  `click` / `tap` / `key` / `type` / `press` / `reload`; agent `step` /
-  `command`; ui `message` / `call` / `state` / `log` / `error`. Pass the
-  last `seq` as `--since` to get only newer events.
+  `{"seq", "time", "who": "agent"|"user"|"ui", "kind", "client", ...}`.
+  Kinds: user `click` / `tap` / `key` / `type` / `press` / `reload`; agent
+  `step` / `command`; ui `message` / `call` / `state` / `log` (warnings and
+  errors) / `error`, and `join` / `leave` of runtimes. `client` names the
+  runtime. Pass the last `seq` as `--since` to get only newer events.
 * Agent requests run one at a time; the person's input is applied as it
   arrives, between your steps.
 * `inspect --attach` / `screenshot --attach` don't wait by default (the app
@@ -229,18 +250,18 @@ JS scripts get a remote app with the same methods as `launch()`'s, all async
 `{value}` / `{error}`, not a function:
 
 ```js
-import { attach } from '@orktes/jsui-cli';
-const app = await attach('http://127.0.0.1:5173');
+import { attach, sessionClients } from '@orktes/jsui-cli';
+const app = await attach('http://127.0.0.1:5173');          // or attach(url, { client: 'godot' })
 await app.press('Down');
 await app.screenshot('shot.png');
 const events = await app.activity(0);
 await app.runSteps([{ click: '#play' }, { expectMessage: 'menu.play' }]);
 ```
 
-Without a person: `GET /__jsui/shared/screenshot.png`, `/tree`,
-`/activity?since=N` and `/info` answer plain HTTP too. The POST endpoints
-only take `application/json` from localhost, so other web pages can't drive
-the app.
+Without a person: `GET /__jsui/shared/screenshot.png`, `/tree` (both take
+`?client=`), `/activity?since=N` and `/info` (the connected runtimes) answer
+plain HTTP too. Browsers may only POST from pages of the dev server itself,
+so other web pages can't join or drive the session.
 
 ## Limits
 
