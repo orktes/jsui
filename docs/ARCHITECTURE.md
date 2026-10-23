@@ -1139,7 +1139,8 @@ was `preventDefault()`-ed.
   * `@orktes/jsui-react` adds `contentOffset` (applied on mount),
     `scrollEventThrottle` (passed to native, which throttles as above, so
     held-back offsets never reach JS; with sticky headers, which follow every
-    offset, `onScroll` is throttled in JS the same way), `stickyHeaderIndices` (vertical; headers wrapped
+    offset, `onScroll` is throttled in JS the same way; `VirtualizedList` /
+    `FlatList` / `SectionList` default it to 50 like RN), `stickyHeaderIndices` (vertical; headers wrapped
     in a `zIndex: 10` View translated on scroll, the next header pushes the
     previous one) and wraps paging children like react-native-web.
 * **Focusable:** `focusable: true`, pressable nodes (unless `focusable: false`),

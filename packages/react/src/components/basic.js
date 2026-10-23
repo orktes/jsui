@@ -2,6 +2,8 @@
 // ScrollView, TextInput.
 
 import { createElement as h, useImperativeHandle, useRef, useState, useLayoutEffect, createContext, useContext } from 'react';
+// jsx() takes the props object as is; createElement copies it key by key.
+import { jsx } from 'react/jsx-runtime';
 import { flatten } from '../StyleSheet.js';
 import { native, warnOnce } from '../native.js';
 import { usePress, PRESS_PROPS, omit } from './usePress.js';
@@ -23,14 +25,14 @@ function PressableText(props) {
   const rest = omit(props, PRESS_PROPS);
   Object.assign(rest, handlers);
   if (rest.focusable === undefined) rest.focusable = !props.disabled;
-  return h('Text', rest);
+  return jsx('Text', rest);
 }
 
 export function Text(props) {
   for (let i = 0; i < TEXT_PRESS.length; i++) {
-    if (props[TEXT_PRESS[i]]) return h(PressableText, props);
+    if (props[TEXT_PRESS[i]]) return jsx(PressableText, props);
   }
-  return h('Text', props);
+  return jsx('Text', props);
 }
 Text.displayName = 'Text';
 
@@ -116,7 +118,7 @@ function ImageImpl(props) {
       if (onLoadEnd) onLoadEnd(e);
     };
   }
-  return h('Image', rest);
+  return jsx('Image', rest);
 }
 
 export const Image = ImageImpl;
