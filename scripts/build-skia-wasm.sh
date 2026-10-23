@@ -223,8 +223,10 @@ rm -rf "$OUT_DIR.tmp"
 mkdir -p "$OUT_DIR.tmp/out"
 copy_headers() {  # copy_headers <src dir> (relative to SKIA_SRC)
   [ -d "$1" ] || return 0
-  (find "$1" -type f \( -name '*.h' -o -name '*.hpp' -o -name '*.inc' \) -print0 |
-    xargs -0 -I{} cp --parents {} "$OUT_DIR.tmp/")
+  # rsync, not GNU `cp --parents` (macOS cp has no --parents).
+  mkdir -p "$OUT_DIR.tmp/$1"
+  rsync -a --prune-empty-dirs --include='*/' --include='*.h' --include='*.hpp' --include='*.inc' --exclude='*' \
+    "$1/" "$OUT_DIR.tmp/$1/"
 }
 copy_headers include
 copy_headers src
