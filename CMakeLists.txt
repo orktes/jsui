@@ -31,15 +31,22 @@ jsui_embed_fonts(jsui)
 # interface), so nothing extra is linked on Linux. The WASM default Skia is
 # CPU-only: the option follows its args.gn (WEBGL=1 scripts/build-skia-wasm.sh).
 set(_jsui_gpu_default ON)
+# A source-built Skia says what it has in its args.gn.
+set(_jsui_skia_gn "")
+if(EXISTS "${JSUI_SKIA_LIB_DIR}/args.gn")
+  file(READ "${JSUI_SKIA_LIB_DIR}/args.gn" _jsui_skia_gn)
+endif()
 if(IOS)
   set(_jsui_gpu_default OFF)  # GLES is deprecated on iOS: Metal below
 elseif(EMSCRIPTEN)
   set(_jsui_gpu_default OFF)
-  if(EXISTS "${JSUI_SKIA_LIB_DIR}/args.gn")
-    file(READ "${JSUI_SKIA_LIB_DIR}/args.gn" _jsui_skia_gn)
-    if(_jsui_skia_gn MATCHES "skia_use_webgl *= *true" AND _jsui_skia_gn MATCHES "skia_enable_ganesh *= *true")
-      set(_jsui_gpu_default ON)
-    endif()
+  if(_jsui_skia_gn MATCHES "skia_use_webgl *= *true" AND _jsui_skia_gn MATCHES "skia_enable_ganesh *= *true")
+    set(_jsui_gpu_default ON)
+  endif()
+elseif(JSUI_SKIA_SOURCE_BUILT)
+  # scripts/build-skia-desktop.sh: Ganesh GL unless its args turn it off.
+  if(_jsui_skia_gn MATCHES "skia_use_gl *= *false" OR _jsui_skia_gn MATCHES "skia_enable_ganesh *= *false")
+    set(_jsui_gpu_default OFF)
   endif()
 endif()
 option(JSUI_GPU "Build the Skia Ganesh GL / WebGL backend (jsui_render_gl)" ${_jsui_gpu_default})
@@ -81,11 +88,40 @@ if(JSUI_WEBGPU)
 endif()
 message(STATUS "JSUI_WEBGPU: ${JSUI_WEBGPU}")
 
+# Graphite on an embedder's Vulkan / Metal device (jsui_gpu_create_vulkan /
+# _metal, jsui_render_gpu_target): on when the Skia has Graphite with that API
+# (scripts/build-skia-desktop.sh; the m124 prebuilt has neither). Vulkan is
+# loaded at run time (the embedder's loader), so nothing is linked for it.
+set(_jsui_vulkan_default OFF)
+set(_jsui_graphite_metal_default OFF)
+if(NOT EMSCRIPTEN AND _jsui_skia_gn MATCHES "skia_enable_graphite *= *true")
+  if(_jsui_skia_gn MATCHES "skia_use_vulkan *= *true")
+    set(_jsui_vulkan_default ON)
+  endif()
+  if(APPLE AND _jsui_skia_gn MATCHES "skia_use_metal *= *true")
+    set(_jsui_graphite_metal_default ON)
+  endif()
+endif()
+option(JSUI_VULKAN "Build the Skia Graphite Vulkan backend (jsui_gpu_create_vulkan)" ${_jsui_vulkan_default})
+option(JSUI_GRAPHITE_METAL "Build the Skia Graphite Metal backend (jsui_gpu_create_metal)" ${_jsui_graphite_metal_default})
+if(JSUI_VULKAN)
+  target_compile_definitions(jsui PUBLIC JSUI_VULKAN=1)
+  # Skia's own Vulkan headers (include/third_party/vulkan), as Skia was built.
+  target_compile_definitions(jsui PRIVATE SK_USE_INTERNAL_VULKAN_HEADERS)
+endif()
+if(JSUI_GRAPHITE_METAL)
+  target_compile_definitions(jsui PUBLIC JSUI_GRAPHITE_METAL=1)
+  target_link_libraries(jsui PUBLIC "-framework Metal" "-framework Foundation")
+endif()
+message(STATUS "JSUI_VULKAN: ${JSUI_VULKAN}, JSUI_GRAPHITE_METAL: ${JSUI_GRAPHITE_METAL}")
+
 # Metal backend (Skia Ganesh on Metal, jsui_render_metal). On by default on
 # iOS, whose Skia is built from source with Metal (scripts/build-skia-ios.sh);
 # elsewhere it needs a Skia built with skia_use_metal=true.
 set(_jsui_metal_default OFF)
 if(IOS)
+  set(_jsui_metal_default ON)
+elseif(APPLE AND _jsui_skia_gn MATCHES "skia_use_metal *= *true" AND _jsui_skia_gn MATCHES "skia_enable_ganesh *= *true")
   set(_jsui_metal_default ON)
 endif()
 option(JSUI_METAL "Build the Skia Ganesh Metal backend (jsui_render_metal)" ${_jsui_metal_default})

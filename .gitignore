@@ -23,3 +23,4 @@ node_modules/
 /third_party/skia-ios/
 /third_party/skia-src-ios/
 /integrations/ios/build-ui/
+/third_party/skia-desktop/

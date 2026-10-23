@@ -21,6 +21,11 @@
 #include "include/ports/SkFontMgr_empty.h"
 #if !defined(__EMSCRIPTEN__)
 #include "include/ports/SkFontMgr_fontconfig.h"
+// Since ~m130 the FontConfig manager takes the font scanner explicitly.
+#if __has_include("include/ports/SkFontScanner_FreeType.h")
+#include "include/ports/SkFontScanner_FreeType.h"
+#define JSUI_FONTCONFIG_SCANNER 1
+#endif
 #endif
 #endif
 
@@ -47,7 +52,11 @@ static sk_sp<SkFontMgr> makeSystemFontMgr() {
   // No system fonts in the browser; FreeType-backed manager so makeFromData works.
   return SkFontMgr_New_Custom_Empty();
 #else
+#if JSUI_FONTCONFIG_SCANNER
+  return SkFontMgr_New_FontConfig(nullptr, SkFontScanner_Make_FreeType());
+#else
   return SkFontMgr_New_FontConfig(nullptr);
+#endif
 #endif
 }
 

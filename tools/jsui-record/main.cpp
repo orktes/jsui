@@ -72,12 +72,15 @@
 #include "include/core/SkMaskFilter.h"
 #include "include/core/SkPaint.h"
 #include "include/core/SkPath.h"
+#include "include/core/SkPathBuilder.h"
 #include "include/core/SkPixmap.h"
 #include "include/core/SkRRect.h"
 #include "include/core/SkStream.h"
 #include "include/core/SkSurface.h"
 #include "include/core/SkTypeface.h"
+#if __has_include("include/effects/SkGradientShader.h")  // gone in Skia m157
 #include "include/effects/SkGradientShader.h"
+#endif
 #include "include/encode/SkPngEncoder.h"
 #include "include/ports/SkFontMgr_empty.h"
 #include "jsui/jsui.h"
@@ -162,11 +165,13 @@ struct Overlay {
   // Classic arrow pointer with its tip at (x, y).
   void cursor(SkCanvas* c, float x, float y, float alpha, bool pressed) const {
     if (alpha <= 0) return;
-    SkPath p;
+    // SkPathBuilder: SkPath is immutable from Skia m157 on.
+    SkPathBuilder b;
     const float pts[][2] = {{0, 0}, {0, 18.5f}, {4.4f, 14.4f}, {7.4f, 21.2f}, {10.6f, 19.8f}, {7.7f, 13.2f}, {13.4f, 13.2f}};
-    p.moveTo(pts[0][0], pts[0][1]);
-    for (int i = 1; i < 7; i++) p.lineTo(pts[i][0], pts[i][1]);
-    p.close();
+    b.moveTo(pts[0][0], pts[0][1]);
+    for (int i = 1; i < 7; i++) b.lineTo(pts[i][0], pts[i][1]);
+    b.close();
+    SkPath p = b.detach();
     c->save();
     c->translate(x, y);
     float s = pressed ? 1.12f : 1.25f;
@@ -226,9 +231,7 @@ struct Overlay {
         break;
       }
       case Icon::Gamepad: {
-        SkPath p;
-        p.addRRect(SkRRect::MakeRectXY(SkRect::MakeXYWH(x, y + 5, 22, 13), 6.5f, 6.5f));
-        c->drawPath(p, s);
+        c->drawRRect(SkRRect::MakeRectXY(SkRect::MakeXYWH(x, y + 5, 22, 13), 6.5f, 6.5f), s);
         c->drawLine(x + 5, y + 11.5f, x + 9, y + 11.5f, s);
         c->drawLine(x + 7, y + 9.5f, x + 7, y + 13.5f, s);
         c->drawCircle(x + 15, y + 10, 1.3f, f);
