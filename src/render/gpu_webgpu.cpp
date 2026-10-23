@@ -51,6 +51,13 @@
 #include "render/painter.h"
 #include "render/pipeline_cache.h"
 #include "runtime.h"
+// Copy-back's copies as tasks of Graphite's recording (see render()).
+#include "src/gpu/graphite/RecorderPriv.h"
+#include "src/gpu/graphite/Surface_Graphite.h"
+#include "src/gpu/graphite/TextureProxy.h"
+#include "src/gpu/graphite/TextureProxyView.h"
+#include "src/gpu/graphite/TextureUtils.h"
+#include "src/gpu/graphite/task/CopyTask.h"
 
 namespace graphite = skgpu::graphite;
 
@@ -413,22 +420,21 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
     paint.setBlendMode(noClear ? SkBlendMode::kSrcOver : SkBlendMode::kSrc);
     target->getCanvas()->drawImage(SkSurfaces::AsImage(f.retained), 0, 0, SkSamplingOptions(), &paint);
   }
-  target.reset();
-  {
-    Perf::Scope gpuScope(rt.doc.perf, Phase::Gpu);
-    if (!g->flush()) return -1;
-  }
-  rt.doc.perf.counters.pipelineCompiles += g->precompiler->takeCompiles();
   if (viaRetained && copyBack) {
-    // After Graphite's submit (same queue): `back` becomes this frame.
-    wgpu::CommandEncoder enc = g->device.CreateCommandEncoder();
-    wgpu::TexelCopyTextureInfo src, dst;
-    src.texture = texture;
-    dst.texture = f.back;
+    // `back` becomes this frame: copies from the target, recorded after the
+    // frame's pass in the same recording (one command encoder and one
+    // submit a frame). The surface going flushes its draws into the
+    // recorder; so does flushTrackedDevices, whatever else holds it.
+    sk_sp<graphite::TextureProxy> src = static_cast<graphite::Surface*>(target.get())->target().refProxy();
+    sk_sp<graphite::TextureProxy> dst = graphite::AsView(f.backImage.get()).refProxy();
+    target.reset();
+    graphite::RecorderPriv recorder = g->recorder->priv();
+    recorder.flushTrackedDevices(SK_DUMP_TASKS_CODE("jsui copy-back"));
+    bool ok = true;
     auto copy = [&](const SkIRect& r) {
-      src.origin = dst.origin = {uint32_t(r.x()), uint32_t(r.y()), 0};
-      wgpu::Extent3D size = {uint32_t(r.width()), uint32_t(r.height()), 1};
-      enc.CopyTextureToTexture(&src, &dst, &size);
+      sk_sp<graphite::Task> task = graphite::CopyTextureToTextureTask::Make(src, r, dst, r.topLeft());
+      if (task) recorder.add(std::move(task));
+      else ok = false;
     };
     SkIRect all = SkIRect::MakeWH(w, h);
     if (copyAll) {
@@ -439,9 +445,14 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
       for (SkIRect r : rt.trackedRects())
         if (r.intersect(all)) copy(r);
     }
-    wgpu::CommandBuffer cb = enc.Finish();
-    g->queue.Submit(1, &cb);
+    if (!ok) f.drop();  // not a copy of this frame: the next one repaints fully
   }
+  target.reset();
+  {
+    Perf::Scope gpuScope(rt.doc.perf, Phase::Gpu);
+    if (!g->flush()) return -1;
+  }
+  rt.doc.perf.counters.pipelineCompiles += g->precompiler->takeCompiles();
   if (g->isLost()) return -1;
   g->precompiler->afterFrame();
   return 0;

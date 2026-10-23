@@ -315,8 +315,9 @@ used to process Dawn events).
   `CopySrc` usage such as the web canvas): the frame's single pass first
   draws that copy into the target, then the damage over it, and afterwards
   the damage rects are copied (`copyTextureToTexture`) from the target into
-  the copy. That is one pass, like a direct frame, plus a full-frame read of
-  the copy. Targets without `CopySrc`, and `JSUI_WEBGPU_NO_CLEAR`, use a
+  the copy, as tasks of the same Graphite recording (one command encoder and
+  one submit a frame). That is one pass, like a direct frame, plus a
+  full-frame read of the copy. Targets without `CopySrc`, and `JSUI_WEBGPU_NO_CLEAR`, use a
   retained Graphite render target instead: the damage pass loads and stores
   all of it and a second pass draws it into the target. On a 4K canvas on
   an Apple GPU those two full-frame passes cost more than a full repaint
@@ -525,8 +526,8 @@ used to process Dawn events).
   take ~0.3 ms, the damage walk ~0.13 ms and native Animated ~0.09 ms;
   Graphite's snap, command encoding and submit and the canvas texture take
   ~0.85 ms (Graphite's `queue.submit` ~0.2 ms of it), and the copy-back's
-  own submit, which carries one copy, ~0.13 ms (one submit for both would
-  be the next cut), with the JS / wasm crossings most of the rest.
+  own encoder and submit, which carried one copy, ~0.13 ms (since folded
+  into Graphite's recording), with the JS / wasm crossings most of the rest.
 * **No CPU waits.** In the browser Graphite runs without a tick function:
   submits never wait, buffer maps are async and finished work is collected by
   `checkAsyncWorkCompletion()` each frame. Raster images are uploaded once per

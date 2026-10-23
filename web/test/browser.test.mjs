@@ -743,7 +743,9 @@ test('webgpu: full-frame changes paint straight into the canvas, small ones thro
     const canvas = passes.filter((p) => p.startsWith(`pass color ${a.pixelWidth}x${a.pixelHeight} `));
     return { canvas, passes: passes.length, loads: canvas.filter((p) => p.includes('load=load')).length,
       clears: canvas.filter((p) => p.includes('load=clear')).reduce((n, p) => n + Number(p.split(' x').pop()), 0),
-      copies: window.__gpuCounts.get('GPUCommandEncoder.copyTextureToTexture') ?? 0 };
+      copies: window.__gpuCounts.get('GPUCommandEncoder.copyTextureToTexture') ?? 0,
+      submits: window.__gpuCounts.get('GPUQueue.submit') ?? 0,
+      encoders: window.__gpuCounts.get('GPUDevice.createCommandEncoder') ?? 0 };
   }, { name, color });
   const same = async (what) => {
     const d = await frameDiff(page, ['a', 'b']);
@@ -758,8 +760,9 @@ test('webgpu: full-frame changes paint straight into the canvas, small ones thro
   // (a copy of the canvas) and only the damage over it, and the damage is
   // copied back for the next frame. Still one pass: no retained render
   // target to load and store (two extra full-frame passes on a 4K canvas).
+  // The copy is recorded with the pass: one command encoder and one submit.
   for (let i = 0; i < 5; i++) r = await step('box', i % 2 ? '#00ff00' : '#0000ff');
-  assert(r.passes === 1 && r.clears === 1 && r.copies === 1,
+  assert(r.passes === 1 && r.clears === 1 && r.copies === 1 && r.submits === 1 && r.encoders === 1,
     `small change: not one pass plus a damage copy-back: ${JSON.stringify(r)}`);
   await same('after small changes');
   r = await step('bg', '#102030');
