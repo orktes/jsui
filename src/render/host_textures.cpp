@@ -180,9 +180,12 @@ sk_sp<SkImage> TextureWrapper::wrap(const HostTextures::Entry& e) {
 
 void TextureWrapper::endFrame() {
   frame_++;
-  constexpr uint64_t kMaxAge = 120;
+  // Only wraps the frame just drawn used are kept: the host may free a
+  // texture once it is replaced or removed, and a wrap (a Vulkan image view,
+  // a retained MTLTexture) must not outlive it by more than the frame that
+  // drew it. Rewrapping a texture that is repainted later is cheap.
   for (auto it = cache_.begin(); it != cache_.end();) {
-    if (frame_ - it->second.lastUsed > kMaxAge) it = cache_.erase(it);
+    if (it->second.lastUsed + 1 < frame_) it = cache_.erase(it);
     else ++it;
   }
 }

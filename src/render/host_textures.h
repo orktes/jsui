@@ -87,7 +87,8 @@ class HostTextures {
 // A GPU backend's way to sample host textures in its frames. `make` wraps a
 // description as an SkImage of the backend's device (nullptr: this backend
 // cannot sample that kind / format). Wraps are kept while the texture's
-// contents stay the same, and dropped a few frames after their last use.
+// contents stay the same and only until the end of the next frame that
+// does not use them (endFrame).
 class TextureWrapper {
  public:
   using Make = std::function<sk_sp<SkImage>(const JsuiTexture&)>;
