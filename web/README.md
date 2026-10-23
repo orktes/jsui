@@ -159,6 +159,44 @@ hud.gamepadConsumed(0, 0);                           // the UI took pad 0's A pr
   wheel and key events the UI didn't consume are not `preventDefault()`ed and
   bubble on as usual.
 
+## Fonts
+
+The runtime ships Inter. Fonts the page registers are shared by every surface
+of the runtime, and text already on screen relayouts with them:
+
+```js
+await jsui.loadFont('Display', './fonts/display.woff2');        // fetch + register (URL relative to the page)
+await jsui.loadFont(null, './fonts/NotoSansJP.otf');            // family name from the file
+jsui.registerFont('Display', bytes, { weight: 700, style: 'italic' }); // ArrayBuffer / typed array
+jsui.setFontFallbacks(['Noto Sans JP', 'Noto Color Emoji']);    // for glyphs the styled font lacks
+jsui.setDefaultFontFamily('Display');                           // text whose style names no fontFamily
+jsui.unregisterFont('Display');
+```
+
+- `registerFont(family, bytes, weight?, italic?)` and
+  `loadFont(family, url, weight?, italic?)` take TTF, OTF, TTC / OTC (every
+  face), WOFF and WOFF2. `family` `''` / `null` uses the family name in the
+  file. Weight (1..1000) and italic (`true` / `false`, or `'italic'` /
+  `'normal'`) override what the file says; omitted, both come from the file
+  (a variable font with a `wght` axis registers its whole weight range).
+  The third argument can instead be `{ weight, style }`, and
+  `registerFont(bytes, options?)` leaves out the family. Older calls such as
+  `registerFont('Inter', bytes, 700, false)` work unchanged.
+- `registerFont` returns `true`, or `false` for data that is not a font. The
+  bytes are copied. `loadFont` returns a `Promise<boolean>`: `false` (and a
+  `'log'` warning) when the fetch fails or the data is not a font. URLs
+  resolve against the page, as `bundleUrl` and `loadUrl` do; cross-origin
+  fonts need CORS.
+- `unregisterFont(family)` removes every face of the family and returns `true`
+  if it was registered.
+- `setFontFallbacks(families)` takes an array or a comma-separated string,
+  tried in order; `null` / `[]` clears it. After the list, every registered
+  font is searched for a missing glyph anyway.
+- `setDefaultFontFamily(family)` sets the family for text whose style names
+  none (`'Inter'` until you change it).
+- The UI can also load fonts itself (`Fonts.load(family, url)` in the bundle,
+  URLs relative to the bundle); both kinds end up in the same registry.
+
 ## Worker mode
 
 `createJsui({ worker: true, ... })` runs the runtime, its frame loop and its
@@ -205,13 +243,15 @@ value it returns in main-thread mode:
 | `setTexture` | `true` once uploaded | the upload happens in the worker (and `<img>` / canvases are snapshotted with `createImageBitmap`, which is async) |
 | `run`, `setProps` (main surface and surfaces) | `false` for invalid props | the runtime parses them |
 | `loadSource`, `registerFont` | `true` on success | the runtime evaluates / parses them |
+| `unregisterFont` | `true` if the family was registered | the font registry is in the runtime |
 | `resolveCall`, `rejectCall` | `0`, or `-1` for an unknown call | the call table is in the runtime |
 | `getPerf(reset)` | the perf object | the counters are in the worker |
 | `readPixels()` | the pixels | the frame is in the worker (`readPixelsAsync` is the same) |
 | `surface.ready` (new) | the surface, once the worker made it | `surface.rootTag` is `undefined` until then |
 
-Already asynchronous in both modes: `callUi`, `whenIdle`, `readPixelsAsync`.
+Already asynchronous in both modes: `callUi`, `whenIdle`, `readPixelsAsync`, `loadFont` (the worker fetches it).
 Fire-and-forget calls keep their shape: `postMessage`, `loadUrl`, `reload`, `devUpdate`,
+`setFontFallbacks`, `setDefaultFontFamily`,
 `start`, `stop`, `frame`, `setProfiling`, `destroy`, `surface.destroy`.
 
 These stay synchronous because the page keeps a copy: `renderer`,

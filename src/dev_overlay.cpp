@@ -29,7 +29,7 @@ void DevOverlay::resolveFonts() {
   }
   auto collection = fonts_.collection();
   if (collection) {
-    auto found = collection->findTypefaces({SkString(fonts_.defaultFamily.c_str())}, SkFontStyle::Bold());
+    auto found = collection->findTypefaces({SkString(fonts_.defaultFamily().c_str())}, SkFontStyle::Bold());
     if (!found.empty()) sans_ = found.front();
     if (!sans_) sans_ = collection->defaultFallback();
   }

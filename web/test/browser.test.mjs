@@ -26,6 +26,7 @@ const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STRICT = !!process.env.JSUI_WEB_STRICT;
 const ONLY = process.env.JSUI_WEB_ONLY;  // substring filter on test names
 const DIST = process.env.JSUI_WEB_DIST || 'dist';  // module directory under web/
+const FONTS = path.join(WEB, '../assets/fonts');
 
 if (!fs.existsSync(path.join(WEB, DIST, 'jsui.wasm'))) {
   console.error(`web/${DIST}/jsui.wasm missing: build the wasm target first (see cmake/Emscripten.cmake)`);
@@ -57,6 +58,15 @@ const server = http.createServer((req, res) => {
       res.writeHead(200, { 'content-type': 'text/javascript' });
       res.end(fs.readFileSync(path.join(WEB, 'test/fixtures/solid.js')));
     }, 150);
+  }
+  if (url.pathname.startsWith('/__fonts/')) {  // the repo's fonts (assets/fonts), for the font tests
+    const font = path.join(FONTS, path.basename(decodeURIComponent(url.pathname)));
+    if (!fs.existsSync(font)) {
+      res.writeHead(404);
+      return res.end('not found');
+    }
+    res.writeHead(200, { 'content-type': 'font/ttf' });
+    return fs.createReadStream(font).pipe(res);
   }
   const file = path.normalize(path.join(WEB, decodeURIComponent(url.pathname)));
   if (!file.startsWith(WEB) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
@@ -453,6 +463,34 @@ test('bundleSource option and loadSource()', async ({ page }) => {
   await frames(page, 3);
   const [px] = await screenPixels(page, '#ui', [[10, 50]]);
   assert(near(px, [0, 128, 128, 255]), `bundleSource: ${fmt(px)}`);
+}, {}, { worker: true });
+
+test('fonts: registerFont, loadFont, unregisterFont, fallbacks, default family', async ({ page }) => {
+  await mount(page, { jsui: { bundleUrl: 'fixtures/solid.js' } });
+  const r = await page.evaluate(async () => {
+    const h = window.hosts.ui;
+    const italic = await (await fetch('/__fonts/Inter-Italic.ttf')).arrayBuffer();
+    const out = {
+      load: await h.loadFont('Test Display', '/__fonts/Inter-Bold.ttf'),
+      loadOpts: await h.loadFont('Test Display', '/__fonts/Inter-Regular.ttf', { weight: 400, style: 'normal' }),
+      missing: await h.loadFont('Missing', '/__fonts/missing.ttf'),
+      bytes: await h.registerFont('Test Italic', new Uint8Array(italic), 400, true),
+      fromFile: await h.registerFont(null, italic),  // family, weight and style from the file
+      bad: await h.registerFont('Bad', new Uint8Array([1, 2, 3, 4])),
+    };
+    h.setFontFallbacks(['Test Italic', 'Test Display']);
+    h.setFontFallbacks(null);
+    h.setDefaultFontFamily('Test Display');
+    h.setDefaultFontFamily('Inter');
+    out.unregister = await h.unregisterFont('Test Display');
+    out.unregisterAgain = await h.unregisterFont('Test Display');
+    await h.whenIdle();
+    return out;
+  });
+  const want = { load: true, loadOpts: true, missing: false, bytes: true, fromFile: true, bad: false, unregister: true,
+    unregisterAgain: false };
+  assert(JSON.stringify(r) === JSON.stringify(want), `fonts: ${JSON.stringify(r)}, want ${JSON.stringify(want)}`);
+  return { allowErrors: true };  // the missing font's 404 and the refused bytes are logged
 }, {}, { worker: true });
 
 for (const renderer of ['auto', 'webgl', 'webgpu']) test(`create/destroy cycles: no heap growth, destroy during load is safe (${renderer})`, async ({ page }) => {

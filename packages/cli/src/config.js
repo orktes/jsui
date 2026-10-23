@@ -18,6 +18,7 @@ const SHIMS = {
   'expo-linear-gradient': 'linear-gradient',
   'react-native-linear-gradient': 'linear-gradient',
   'lottie-react-native': 'lottie-react-native',
+  'expo-font': 'expo-font',
 };
 
 // These must resolve to the single copy @orktes/jsui-react was built against, or

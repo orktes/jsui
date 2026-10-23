@@ -22,12 +22,14 @@ target_compile_definitions(jsui PRIVATE JSUI_BUILDING)
 if(JSUI_LOTTIE)
   target_compile_definitions(jsui PRIVATE JSUI_LOTTIE=1)
 endif()
-# Subclass Skia classes (a canvas, Skottie observers): Skia is built
+# Subclass Skia classes (a canvas, Skottie observers, the font manager): Skia is built
 # without RTTI, so are these files.
-set_source_files_properties(src/render/paint_counter.cpp src/render/lottie.cpp PROPERTIES COMPILE_OPTIONS
+set_source_files_properties(src/render/paint_counter.cpp src/render/lottie.cpp src/text/font_manager.cpp PROPERTIES COMPILE_OPTIONS
   "$<IF:$<CXX_COMPILER_ID:MSVC>,/GR-,-fno-rtti>")
 include(EmbedFonts)
 jsui_embed_fonts(jsui)
+include(WebFonts)
+jsui_webfonts(jsui)
 
 # GPU backend (Skia Ganesh on OpenGL / GLES / WebGL, jsui_render_gl*). The
 # native prebuilt Skia always has Ganesh GL; GL itself is resolved at run
