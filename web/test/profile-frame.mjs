@@ -27,7 +27,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import { build } from '@jsui/cli';
+import { build } from '@orktes/jsui-cli';
 
 const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ROOT = path.resolve(WEB, '..');

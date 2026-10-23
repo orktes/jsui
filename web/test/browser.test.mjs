@@ -863,9 +863,9 @@ test('webgpu: raster cache: subtrees repainted unchanged are drawn from textures
   // stale texture would differ by far more (text and box edges).
   let build;
   try {
-    ({ build } = await import('@jsui/cli'));
+    ({ build } = await import('@orktes/jsui-cli'));
   } catch (e) {
-    skip(`@jsui/cli unavailable: ${e.message}`, true);
+    skip(`@orktes/jsui-cli unavailable: ${e.message}`, true);
   }
   const outfile = path.join(WEB, 'test/output/interactions.js');
   fs.mkdirSync(path.dirname(outfile), { recursive: true });
