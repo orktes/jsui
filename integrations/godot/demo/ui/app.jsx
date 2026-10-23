@@ -40,6 +40,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Showcase from '../../../../examples/showcase/interactions.jsx';
 import { colors, font } from '../../../../examples/theme.js';
+import { Cinema, TextureProbe } from './cinema.jsx';
 
 function Toast() {
   const [text, setText] = useState(null);
@@ -228,6 +229,10 @@ function Badge({ label }) {
   );
 }
 
+// The first registered component runs on the main surface unless the host
+// picks another (JsuiView.component): cinema/cinema.tscn shows 'Cinema'.
 AppRegistry.registerComponent('App', () => App);
 AppRegistry.registerComponent('Badge', () => Badge);
-AppRegistry.runApplication('App', {});
+// Host textures (cinema.jsx): the cinema scene, and main.gd's self-test probe.
+AppRegistry.registerComponent('Cinema', () => Cinema);
+AppRegistry.registerComponent('TextureProbe', () => TextureProbe);

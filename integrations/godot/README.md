@@ -10,7 +10,9 @@ queue); on the Compatibility (OpenGL) renderer and headless it paints with
 `ImageTexture` (see [Rendering](#rendering)). It forwards Godot input and
 bridges game data both ways: shared state
 (`set_state` → `useHostState`), calls (`Host.call` → `call_requested` →
-`resolve_call`, and `call_ui` → `Host.handle`) and messages.
+`resolve_call`, and `call_ui` → `Host.handle`) and messages, and shows
+Godot's own textures in the UI (`set_texture` → `<HostTexture>`: a video, a
+SubViewport, any `Texture2D`; see [Host textures](#host-textures)).
 
 ```
 integrations/godot/
@@ -18,6 +20,9 @@ integrations/godot/
   src/                  JsuiView, key/gamepad mapping, entry point
   demo/                 Godot 4.7 project: main.tscn + main.gd + jsui.gdextension
   demo/ui/app.jsx       demo UI: examples/showcase/interactions.jsx + a bridge strip
+  demo/cinema/          host textures demo: a VideoStreamPlayer TV and a
+                        SubViewport preview inside a JSUI UI (ui/cinema.jsx);
+                        fetch-video.sh downloads the clip
   smoke-test.sh         runs the demo headless with an input self-test at 1x and
                         2x content scale and saves the frames (used by CI);
                         GODOT_RENDERING=vulkan runs it on Vulkan (GPU renderer)
@@ -132,7 +137,10 @@ Headless check (no GPU needed). This is what CI runs. `main.gd --self-test`
 drives the UI through Godot's own input pipeline (`Input.parse_input_event`):
 hover, click (and checks that JSUI saw exactly the logical point it aimed
 at), gamepad D-pad focus + A, wheel and trackpad-pan scrolling, click to
-focus + typing + Enter in the TextInput, the Ping call, `call_ui` and an
+focus + typing + Enter in the TextInput, the Ping call, `call_ui`, host
+textures (`set_texture` in a probe view of its own: set before start,
+replaced, kept across a restart, removed; with a renderer also updated in
+place and a live SubViewport; on Vulkan this is the GPU copy path) and an
 unhandled click. The UI reports what happened as `showcase:event` messages
 and the script prints `PASS` / `FAIL` per check. It runs at a 1280x720 window
 (content scale 1) and at 2560x1440 (content scale 2, like a Retina Mac).
@@ -210,6 +218,30 @@ JSUI_LOG_PIPELINES=compiled GODOT_RENDERING=vulkan SIZES=1280x720 PIPELINE_CACHE
 The project uses the Compatibility renderer by default (it runs everywhere);
 pass `--rendering-method forward_plus` (or `mobile`) for the GPU renderer.
 
+### Host textures demo
+
+```sh
+integrations/godot/demo/cinema/fetch-video.sh   # once: the Big Buck Bunny trailer, 4.4 MB
+godot --path integrations/godot/demo res://cinema/cinema.tscn
+godot --path integrations/godot/demo --rendering-method forward_plus res://cinema/cinema.tscn   # GPU path
+```
+
+`cinema/cinema.tscn` is an in-game TV and a character preview, both drawn by
+Godot and framed by a JSUI UI (`ui/cinema.jsx`, component `Cinema`). A
+`VideoStreamPlayer` plays the trailer (Ogg Theora, what Godot decodes) and
+`cinema.gd` hands its texture to the view with
+`set_texture("tv", video.get_video_texture(), true)`; the play / pause,
+restart and mute buttons are JSUI `Pressable`s that post messages, and the
+progress bar follows `set_buffer("cinema.progress", ...)` without JS per
+frame. A `SubViewport` renders a spinning 3D figure every frame
+(`set_texture("preview", viewport.get_texture(), true)`), shown in a round
+frame with colour swatches. The video is not in the repository:
+`fetch-video.sh` downloads it from Wikimedia Commons (falling back to the
+Internet Archive's copy of the film; `--full` gets the whole film). Without
+it the TV shows "NO SIGNAL" and the rest runs. *Big Buck Bunny* is
+© 2008 Blender Foundation (www.bigbuckbunny.org), licensed CC BY 3.0; the
+scene shows the credit under the TV.
+
 ### Dev mode (live reload)
 
 ```sh
@@ -254,6 +286,9 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | `set_state_json` / `patch_state_json` / `get_state_json` | the same with JSON strings |
 | `set_buffer(key, data) -> int` | frame data (`jsui_set_buffer`): numbers pushed every frame without JSON, e.g. enemy positions for nameplates. `data` is a `PackedFloat32Array`, `PackedFloat64Array`, `PackedInt32Array`, `PackedByteArray`, or a `PackedVector2Array` / `PackedVector3Array` / `PackedColorArray` (their components in order). JS reads it with `useHostBuffer` / `useHostBufferSelector`, and `useHostBufferValue(key, index)` moves `Animated` views natively, without JS per frame. Returns 1 changed, 0 unchanged, -1 unsupported type. Set before `start()`: applied when it starts |
 | `remove_buffer(key) -> int` | removes a buffer (1 if it existed) |
+| `set_texture(name, texture, live = false) -> int` | shows a Godot `Texture2D` in the UI as host texture `name` (`<HostTexture name=...>`, `useHostTexture(name)`): an `ImageTexture`, a `ViewportTexture`, a `VideoStreamPlayer`'s texture, a `Texture2DRD`… `live`: its contents change every frame (a video, a viewport), so they are copied every frame; otherwise only when the texture emits `changed` or on `update_texture`. Calling it again with another texture replaces it. Kept by the view across `stop()` / `start()`; set before `start()` it is there for the first frame. Returns 1. See [Host textures](#host-textures) |
+| `remove_texture(name) -> int` | stops showing it (`<HostTexture>` draws nothing, `useHostTexture` returns null); 1 if it existed |
+| `update_texture(name) -> int` | the texture's contents changed (for a non-live texture that does not emit `changed`, e.g. a `Texture2DRD` the game draws into); -1: unknown name |
 | `resolve_call(id, result = null) -> int` | answer a `call_requested` call; the UI's `await Host.call(...)` resolves with `result`. Any later frame is fine. -1: unknown or cancelled id |
 | `resolve_call_json(id, json)` / `reject_call(id, message)` | JSON result / reject (the promise rejects with `Error(message)`) |
 | `call_ui(name, args = null, callback = Callable()) -> int` | run the UI's `Host.handle(name, fn)` / `useHostHandler` handler; `callback(ok: bool, result)` (and `ui_call_completed`) runs once it settles: `result` is the handler's value, or the error message when `ok` is false |
@@ -360,6 +395,73 @@ func spawn_nameplate(enemy):
 * `auto_size` makes a surface view take its component's laid-out size (a
   component with a fixed or content size, like a badge or a button inside a
   Godot `Container`).
+
+### Host textures
+
+`set_texture(name, texture, live)` shows any Godot `Texture2D` inside the
+UI. JSUI plays or renders nothing itself: the game decodes the video, renders
+the viewport or draws the texture, and the UI lays it out with
+`<HostTexture name="tv" resizeMode="contain" />` (clipped by rounded
+corners, transformed, composited like an image). `useHostTexture(name)`
+returns `{width, height}` (or null) for layout. When only a texture changes,
+no JS runs: the runtime repaints the views that show it.
+
+```gdscript
+ui.set_texture("tv", $VideoStreamPlayer.get_video_texture(), true)   # live: copied every frame
+ui.set_texture("preview", $SubViewport.get_texture(), true)
+ui.set_texture("portrait", load("res://hero.png"))                   # static: copied once
+ui.remove_texture("portrait")
+```
+
+How the pixels reach Skia depends on the view's renderer:
+
+* GPU renderer (Vulkan, Metal, WebGPU): the view keeps a *mirror* texture of
+  its own per host texture, in the format Skia samples (RGBA8 / BGRA8 UNORM),
+  and copies the Godot texture into it on Godot's render thread with
+  `RenderingDevice.texture_copy` (recorded in Godot's frame, so Godot orders
+  it after whatever drew the source). Skia samples the mirror, never Godot's
+  texture: Godot may free or replace its texture at any time (a
+  `texture_replace`, a resized viewport) and its layout is Godot's business.
+  The copy of frame N is shown from frame N+1, so a host texture lags one
+  frame behind the game. A live texture costs one GPU copy per frame; a
+  static one is copied when it changes. A mirror is reused while the source's
+  size and format stay; a new one (and its native handle, resolved with
+  `get_driver_resource` on the render thread) is made when they change, and
+  the old one is freed once no frame in flight uses it.
+  * Vulkan: Skia assumes a sampled texture is in
+    `VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL` (`JsuiTexture` has no layout
+    field). After the copy Godot leaves the mirror in `TRANSFER_DST`, so the
+    view then samples each copied mirror in a one-texel compute dispatch
+    (a tiny "layout pass" in Godot's frame); Godot's render graph transitions
+    it to `SHADER_READ_ONLY_OPTIMAL` and orders the copy before JSUI's work.
+    The cost is one dispatch per frame for all copied textures. CI runs this
+    under synchronization validation.
+  * Metal: the mirror is an `MTLTexture` the view makes itself (tracked,
+    so Metal orders the copy and Skia's sampling) and gives to Godot with
+    `texture_create_from_extension`.
+  * WebGPU (godot-aw3): the mirror's `WGPUTexture`; Skia reads its format.
+  * Formats: the source must be a 2D, single-layer, single-sample
+    `RGBA8` / `BGRA8` UNORM or SRGB texture created with
+    `TEXTURE_USAGE_CAN_COPY_FROM_BIT` (`ImageTexture`, viewports,
+    `VideoStreamPlayer` textures are; a `Texture2DRD` must be created with
+    it). SRGB sources are copied into UNORM mirrors (the bytes, no
+    conversion), like JSUI's other images. Anything else (HDR viewports'
+    `RGBA16F`, compressed textures, a missing usage bit) falls back to the
+    CPU path below for that texture, with one warning.
+* CPU renderer (Compatibility / OpenGL, headless, `force_cpu`), and any view
+  of a runtime that has a CPU view: `get_image()`, converted to RGBA8, is
+  passed to `jsui_set_texture_pixels`. On a renderer this reads the texture
+  back from the GPU (a stall), every frame for a live texture: fine for a
+  small preview, costly for a 1080p video. Static textures are read once and
+  again on `changed` / `update_texture`.
+
+Alpha: host textures are treated as straight (unpremultiplied) alpha, like
+Godot's textures; a `ViewportTexture` as premultiplied (viewport render
+targets with a transparent background hold premultiplied colour).
+
+Host textures belong to the runtime: on a surface view (`runtime_view`) they
+are set on the runtime view and every surface can show them. The view keeps
+the `Texture2D` referenced until `remove_texture` or until the view is freed.
 
 ### Rendering
 
@@ -520,6 +622,13 @@ imported copies. A shipped pipeline list needs the filter too
 * GPU renderer, Metal: compiles in CI (macOS job) but has not been run yet;
   see [Verifying Metal on a Mac](#verifying-metal-on-a-mac). Intel Macs that
   run Forward+ on MoltenVK go through the Vulkan path, untested.
+* Host textures, GPU renderer: one frame of latency (the copy is shown the
+  next frame) and one GPU copy per live texture per frame. Only RGBA8 /
+  BGRA8 sources take the GPU path. The Vulkan path is exercised on lavapipe
+  in CI; Metal and WebGPU have not been run yet. Headless, Godot's dummy
+  renderer keeps no image updates and renders no viewports, so there only
+  static `ImageTexture`s show (the self-test checks the rest with a
+  renderer).
 * The macOS library is named `.universal` but a source-built Skia is for the
   host architecture only.
 * Built and tested on Linux x86_64 (CI: headless, OpenGL and Vulkan via

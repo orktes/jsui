@@ -14,7 +14,8 @@ extends Control
 ##                       hover, click, wheel, trackpad pan, keyboard into a
 ##                       TextInput, gamepad focus, the Ping button, clicks
 ##                       that pass through the UI to the game and to a
-##                       control behind it, plus a call_ui. Prints PASS / FAIL
+##                       control behind it, a call_ui and host textures
+##                       (set_texture: an ImageTexture and a live SubViewport). Prints PASS / FAIL
 ##                       per check and fails the run on any FAIL
 ##   --force-cpu         JsuiView.force_cpu: CPU raster + texture upload even
 ##                       when Godot runs on Vulkan / Metal
@@ -91,6 +92,7 @@ extends Control
 const PING_REWARD := 120
 const VIEWPORT_BACKDROP := Color8(40, 150, 110)  # --max-viewport-diff
 const HAND_OFF_SURFACES := 4  # --max-render-waits: surface views of ui's runtime
+const PROBE_SIZE := Vector2i(64, 32)  # the host texture probe's frame (pixel ratio 1)
 
 var _capture := ""
 var _frames := 120
@@ -538,6 +540,7 @@ func _run_self_test() -> void:
 
 	await _test_surface()  # with the render hand-off check (--max-render-waits)
 	await _test_runtime_freed_first()
+	await _test_host_textures()
 
 	if _tour:
 		await _run_tour()
@@ -791,6 +794,116 @@ func _test_runtime_freed_first() -> void:
 		g.free()
 	_check("runtime freed first", up and detached and reattached and orphaned,
 		"surface left and re-entered the tree, then its runtime view was freed (%d of 2 with a frame on the render thread)" % in_flight)
+
+
+## Host textures (JsuiView.set_texture): Godot textures of known colours in a
+## TextureProbe (ui/cinema.jsx: one HostTexture stretched over 64x32 px) of a
+## runtime of its own. On Vulkan they reach Skia as GPU copies (so this also
+## runs under the CI's synchronization validation), headless and on OpenGL as
+## CPU pixels (get_image()). The texture is set before the view starts, then
+## replaced, kept across stop() / start() and removed; with a renderer (not
+## headless: the dummy server keeps no image updates and renders no
+## viewports) also updated in place (ImageTexture.update -> `changed`) and
+## swapped for a live SubViewport whose colour changes.
+func _test_host_textures() -> void:
+	var probe := JsuiView.new()
+	probe.bundle_url = ui.bundle_url
+	probe.component = "TextureProbe"
+	probe.initial_props = {"name": "probe", "width": PROBE_SIZE.x, "height": PROBE_SIZE.y}
+	probe.auto_size = true
+	probe.pixel_ratio = 1.0  # the frame is the probe's 64x32 px exactly
+	probe.pipeline_cache_path = ""
+	probe.position = Vector2(16, 112)
+	var sizes := []  # what useHostTexture reported
+	probe.message_received.connect(func(name: String, data, _json):
+		if name == "probe:size":
+			sizes.append(data["size"]))
+	var red := Color8(220, 40, 60)
+	var green := Color8(30, 200, 90)
+	var blue := Color8(40, 90, 230)
+	var gold := Color8(240, 190, 80)
+	# Set before the view starts (it starts in _ready, when added).
+	probe.set_texture("probe", _two_colour_texture(red, green))
+	add_child(probe)
+	var shown := await _wait_for(func(): return _probe_shows(probe, red, green), 10.0)
+	var renderer: String = probe.get_renderer()
+	_check("host texture", shown and (_expect_renderer == "" or renderer == _expect_renderer),
+		"an ImageTexture set before start() shows in the frame (%s renderer%s; %s)" % [renderer,
+			", expected " + _expect_renderer if _expect_renderer != "" else "", _probe_line(probe)])
+	_check("useHostTexture", await _wait_for(func(): return sizes.size() > 0 and sizes[-1] is Dictionary \
+			and sizes[-1].width == 8 and sizes[-1].height == 4), "JS saw %s" % [sizes])
+	probe.set_texture("probe", _two_colour_texture(green, red))
+	_check("host texture replaced", await _wait_for(func(): return _probe_shows(probe, green, red)), _probe_line(probe))
+	probe.stop()
+	probe.start()
+	_check("host texture across restart", await _wait_for(func(): return _probe_shows(probe, green, red), 10.0),
+		"kept by the view and given to the new runtime (%s)" % _probe_line(probe))
+	var viewport: SubViewport = null
+	if DisplayServer.get_name() != "headless":
+		# In place: ImageTexture.update() emits `changed`, which the view takes
+		# as new contents (no update_texture() needed).
+		var tex := _two_colour_texture(red, green)
+		probe.set_texture("probe", tex)
+		await _wait_for(func(): return _probe_shows(probe, red, green))
+		tex.update(_two_colour_image(blue, gold))
+		_check("host texture update", await _wait_for(func(): return _probe_shows(probe, blue, gold)), _probe_line(probe))
+		# Live: a SubViewport that renders every frame, its colour changed from
+		# here (Godot renders it, the probe shows its texture a frame later).
+		viewport = SubViewport.new()
+		viewport.size = Vector2i(16, 16)
+		viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+		var rect := ColorRect.new()
+		rect.color = gold
+		rect.size = Vector2(16, 16)
+		viewport.add_child(rect)
+		add_child(viewport)
+		probe.set_texture("probe", viewport.get_texture(), true)
+		_check("host texture viewport", await _wait_for(func(): return _probe_shows(probe, gold, gold)), _probe_line(probe))
+		rect.color = blue
+		_check("host texture live", await _wait_for(func(): return _probe_shows(probe, blue, blue)),
+			"the viewport's next frames show (%s)" % _probe_line(probe))
+	probe.remove_texture("probe")
+	_check("host texture removed", await _wait_for(func():
+		var img: Image = probe.get_frame_image()
+		return img != null and img.get_pixel(PROBE_SIZE.x / 4, PROBE_SIZE.y / 2).a8 < 8 \
+			and sizes.size() > 0 and sizes[-1] == null), "nothing drawn, useHostTexture null (%s)" % _probe_line(probe))
+	probe.queue_free()
+	if viewport:
+		viewport.queue_free()
+	await get_tree().process_frame
+
+
+## An 8x4 image: `left` in its left half, `right` in its right half.
+func _two_colour_image(left: Color, right: Color) -> Image:
+	var img := Image.create_empty(8, 4, false, Image.FORMAT_RGBA8)
+	img.fill_rect(Rect2i(0, 0, 4, 4), left)
+	img.fill_rect(Rect2i(4, 0, 4, 4), right)
+	return img
+
+
+func _two_colour_texture(left: Color, right: Color) -> ImageTexture:
+	return ImageTexture.create_from_image(_two_colour_image(left, right))
+
+
+## The probe's frame shows `left` / `right` at the middle of each half.
+func _probe_shows(probe: JsuiView, left: Color, right: Color) -> bool:
+	var img: Image = probe.get_frame_image()
+	if img == null or img.get_size() != PROBE_SIZE:
+		return false
+	for side in [[PROBE_SIZE.x / 4, left], [PROBE_SIZE.x * 3 / 4, right]]:
+		var c := img.get_pixel(side[0], PROBE_SIZE.y / 2)
+		var want: Color = side[1]
+		if absi(c.r8 - want.r8) > 4 or absi(c.g8 - want.g8) > 4 or absi(c.b8 - want.b8) > 4 or c.a8 < 250:
+			return false
+	return true
+
+
+func _probe_line(probe: JsuiView) -> String:
+	var img: Image = probe.get_frame_image()
+	if img == null:
+		return "no frame"
+	return "frame %s, left %s, right %s" % [img.get_size(), img.get_pixel(PROBE_SIZE.x / 4, PROBE_SIZE.y / 2).to_html(),
+		img.get_pixel(PROBE_SIZE.x * 3 / 4, PROBE_SIZE.y / 2).to_html()]
 
 
 ## --tour: the parts of the UI the self-test leaves out (tabs, carousel
