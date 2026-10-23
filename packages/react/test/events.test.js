@@ -362,6 +362,59 @@ test('PanResponder drag gesture', () => {
   render(null);
 });
 
+test('responder blocks native gestures and answers termination requests (RN)', () => {
+  const log = [];
+  let refuse = false;
+  const blocking = PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onPanResponderTerminate: () => log.push('pan-terminate'),
+  });
+  const polite = PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onShouldBlockNativeResponder: () => false,
+    onPanResponderTerminationRequest: () => !refuse,
+    onPanResponderTerminate: () => log.push('polite-terminate'),
+  });
+  render(
+    h(
+      View,
+      null,
+      h(View, Object.assign({ nativeID: 'block' }, blocking.panHandlers)),
+      h(View, Object.assign({ nativeID: 'polite' }, polite.panHandlers)),
+      h(View, { nativeID: 'plain', onResponderGrant: () => log.push('plain-grant'), onStartShouldSetResponder: () => true }),
+    ),
+  );
+  const req = (target) => mock.dispatch({ type: 'responderterminationrequest', target, x: 0, y: 30, buttons: 1 });
+  const block = byNativeID('block').id;
+  const politeId = byNativeID('polite').id;
+  const plain = byNativeID('plain').id;
+
+  // No responder: native may take the gesture.
+  assert.equal(req(block), 0);
+
+  // PanResponder blocks native by default (onShouldBlockNativeResponder).
+  assert.equal(mock.dispatch({ type: 'pointerdown', target: block, x: 0, y: 0, buttons: 1, pointerType: 'touch' }) & 12, 12);
+  assert.equal(mock.dispatch({ type: 'pointermove', target: block, x: 0, y: 30, buttons: 1, pointerType: 'touch' }) & 12, 12);
+  assert.equal(req(block), 3, 'refused');
+  mock.dispatch({ type: 'pointerup', target: block, x: 0, y: 30, pointerType: 'touch' });
+  assert.equal(mock.dispatch({ type: 'pointermove', target: block, x: 0, y: 0, pointerType: 'mouse' }) & 12, 0, 'released');
+
+  // Non-blocking responder: asked, agrees, then terminated by pointercancel.
+  assert.equal(mock.dispatch({ type: 'pointerdown', target: politeId, x: 0, y: 0, buttons: 1, pointerType: 'touch' }) & 12, 8, 'responder, not blocking');
+  refuse = true;
+  assert.equal(req(politeId), 3, 'onPanResponderTerminationRequest -> false refuses');
+  refuse = false;
+  assert.equal(req(politeId), 0);
+  mock.dispatch({ type: 'pointercancel', target: politeId, x: 0, y: 30, pointerType: 'touch' });
+  assert.deepEqual(log, ['polite-terminate']);
+
+  // A plain onResponderGrant returning undefined does not block.
+  assert.equal(mock.dispatch({ type: 'pointerdown', target: plain, x: 0, y: 0, buttons: 1, pointerType: 'touch' }) & 12, 8);
+  assert.equal(req(plain), 0);
+  mock.dispatch({ type: 'pointercancel', target: plain, x: 0, y: 0, pointerType: 'touch' });
+  render(null);
+});
+
 test('PanResponder velocity (px/ms) from recent moves, kept on release (RN)', () => {
   const seen = [];
   let released = null;

@@ -413,7 +413,19 @@ bool InputManager::dispatch(Value::Object&& ev) {
   rt_.animated->handleEvent(event);
   // Only preventDefault() suppresses the default action; a handler that
   // merely observes the event (flag 1) lets it proceed, like the DOM.
-  return (rt_.js->dispatchEvent(event) & JsEngine::kDefaultPrevented) != 0;
+  lastFlags_ = rt_.js->dispatchEvent(event);
+  return (lastFlags_ & JsEngine::kDefaultPrevented) != 0;
+}
+
+bool InputManager::jsReleasesGesture(const PointerState& p, Node* target) {
+  if (!rt_.js) return true;
+  Value::Object ev = baseEvent("responderterminationrequest", target);
+  ev["x"] = Value(double(p.x));
+  ev["y"] = Value(double(p.y));
+  ev["pointerId"] = Value(p.pointerId);
+  ev["pointerType"] = Value(p.touch ? "touch" : "mouse");
+  ev["buttons"] = Value(p.buttons);
+  return !dispatch(std::move(ev));
 }
 
 bool InputManager::dispatchPointer(const char* type, Node* target, const PointerState& p, int button, float x,
@@ -525,11 +537,15 @@ bool InputManager::pointerDown(PointerState& p, uint32_t hitId, int button) {
     p.captureId = hitId;
     p.startX = p.x;
     p.startY = p.y;
+    p.jsOwns = false;
   }
   if (button == 0) p.downId = hitId;
   Node* target = alive(p.captureId) ? alive(p.captureId) : alive(hitId);
   if (button == 0) selectedOnFocusId_ = 0;  // set again if this press focuses a selectTextOnFocus input
+  lastFlags_ = 0;
   bool handled = dispatchPointer("pointerdown", target, p, button, p.x, p.y);
+  p.jsOwns |= (lastFlags_ & JsEngine::kBlocksNative) != 0;
+  p.jsResponder = (lastFlags_ & JsEngine::kResponder) != 0;
   // Focus follows the press even when JS handled pointerdown: the bridge
   // reports "handled" and "preventDefault" alike, and a Pressable always
   // handles it.
@@ -671,14 +687,25 @@ bool InputManager::touch(int id, int phase, float x, float y) {
     updateHover(p, alive(hitId));
     uint32_t targetId = alive(p.captureId) ? p.captureId : hitId;
     bool handled = false;
-    if (Node* t = alive(targetId); t && consumes(t, kMove)) handled = dispatchPointer("pointermove", t, p, -1, x, y);
+    if (Node* t = alive(targetId); t && consumes(t, kMove)) {
+      lastFlags_ = 0;
+      handled = dispatchPointer("pointermove", t, p, -1, x, y);
+      p.jsOwns |= (lastFlags_ & JsEngine::kBlocksNative) != 0;
+      p.jsResponder = (lastFlags_ & JsEngine::kResponder) != 0;
+    }
     // Drag past the slop inside a ScrollView turns into scrolling (the
     // pressable under the finger gets pointercancel), like touch-action:auto.
+    // A JS responder that blocks native gestures (PanResponder's default) or
+    // refuses the termination request keeps the touch, like React Native.
     float ddx = x - p.startX, ddy = y - p.startY;
-    if (!handled && p.buttons && (std::fabs(ddx) > kTouchSlop || std::fabs(ddy) > kTouchSlop)) {
+    if (!handled && !p.jsOwns && p.buttons && (std::fabs(ddx) > kTouchSlop || std::fabs(ddy) > kTouchSlop)) {
       Node* from = alive(targetId) ? alive(targetId) : alive(hitId);
       if (Node* sv = scrollableAncestor(from, -ddx, -ddy)) {
         uint32_t svId = sv->id();
+        if (p.jsResponder && (!jsReleasesGesture(p, sv) || !alive(svId))) {
+          p.jsOwns = true;
+          return true;
+        }
         dispatchPointer("pointercancel", alive(targetId), p, 0, x, y);
         p.scrollingId = svId;
         p.downId = 0;
