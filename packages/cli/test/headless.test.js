@@ -11,7 +11,7 @@ import zlib from 'node:zlib';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { attach, dev, launch, findWasmDir, parseSelector, SKILL_DIR } from '../src/index.js';
+import { attach, dev, launch, findWasmDir, parseInlineSteps, parseSelector, SKILL_DIR } from '../src/index.js';
 
 const exec = promisify(execFile);
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'jsui.js');
@@ -90,6 +90,18 @@ test('selectors', () => {
   assert.deepEqual(parseSelector('Pla >> 1'), { textContains: 'Pla', index: 1 });
   assert.deepEqual(parseSelector('type=TextInput'), { type: 'TextInput' });
   assert.deepEqual(parseSelector({ label: 'x' }), { label: 'x' });
+});
+
+test('run: steps as command-line words', () => {
+  assert.deepEqual(parseInlineSteps(['press', 'Down', 'click', '#play', 'type', '42', 'key', 'Enter', 'wait', '200']),
+    [{ press: 'Down' }, { click: '#play' }, { type: '42' }, { key: 'Enter' }, { wait: 200 }]);
+  assert.deepEqual(parseInlineSteps(['expect', '#gold', 'text=99 gold', 'state', 'gold', 'value=99', 'press', 'A', 'count=3']),
+    [{ expect: '#gold', text: '99 gold' }, { state: 'gold', value: 99 }, { press: 'A', count: 3 }]);
+  assert.deepEqual(parseInlineSteps(['tree', 'reload', 'idle', 'idle', '1000', 'activity', 'click', '[10,20]', 'drag', '#k', 'to=[4,5]']),
+    [{ tree: true }, { reload: true }, { idle: 5000 }, { idle: 1000 }, { activity: 0 }, { click: [10, 20] }, { drag: '#k', to: [4, 5] }]);
+  assert.deepEqual(parseInlineSteps(['{"answer":"x","value":1}', '[{"wait":1},{"wait":2}]']), [{ answer: 'x', value: 1 }, { wait: 1 }, { wait: 2 }]);
+  assert.throws(() => parseInlineSteps(['bogus']), /unknown step word/);
+  assert.throws(() => parseInlineSteps(['click']), /needs a value/);
 });
 
 test('launch: render, inspect, focus, input, state, buffers, calls', { skip }, async () => {
@@ -333,6 +345,8 @@ export default function Title({ text }) { return <Text testID="title" style={{ c
     const lines = r.stdout.trim().split('\n').map((l) => JSON.parse(l));
     assert.ok(lines.at(-1).ok, r.stdout);
     assert.equal(pngSize(await readFile(path.join(dir, 'shot.png'))).width, 640);
+    const words = await exec(process.execPath, [BIN, 'run', '--attach', origin, 'patch', 'settings', 'value={"volume":0.25}', 'expectState', 'settings', 'match={"volume":0.25}']);
+    assert.ok(JSON.parse(words.stdout.trim().split('\n').at(-1)).ok, words.stdout);
     const shot = await exec(process.execPath, [BIN, 'screenshot', '--attach', origin, '-o', path.join(dir, 's2.png')]);
     assert.match(shot.stdout, /wrote/);
     const tree = await exec(process.execPath, [BIN, 'inspect', '--attach', origin, '--find', '#gold']);

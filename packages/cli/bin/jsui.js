@@ -9,7 +9,7 @@ import { build } from '../src/build.js';
 import { dev } from '../src/dev.js';
 import { elementSummary, formatTree, launch } from '../src/headless.js';
 import { attach } from '../src/attach.js';
-import { answerOf, runSteps, STEP_HELP } from '../src/script.js';
+import { answerOf, parseInlineSteps, runSteps, STEP_HELP } from '../src/script.js';
 import { skillCommand, SKILL_USAGE } from '../src/skill.js';
 
 const USAGE = `usage:
@@ -21,6 +21,7 @@ const USAGE = `usage:
   jsui screenshot <entry> [-o screenshot.png] [--wait 1000] [view options]
   jsui inspect <entry> [--wait 1000] [--find <selector>] [--json] [view options]
   jsui run <entry> <script.json|script.mjs> [--keep-going] [view options]
+  jsui run <entry> <steps as words: press Down click '#play' type Bob ...>
      view options: [--width 1280] [--height 720] [--scale 1] [--fps 60]
        [--component Name] [--props '{"json":1}'] [--state key='json' ...]
        [--bundle] (entry is a built bundle.js) [--dev] (development React)
@@ -115,6 +116,19 @@ async function headless(cmd, values, positionals) {
   // Attached, there is no <entry>: run's script is the first positional.
   if (attached) positionals = [null, ...positionals];
   const entry = positionals[0];
+  // run: a script file, or the steps as words (`press Down click '#play'`).
+  let inline = null;
+  if (cmd === 'run') {
+    const words = positionals.slice(1);
+    if (!words.length) throw new UsageError('jsui run: missing <script.json|script.mjs> or steps (see jsui run --help)');
+    if (!(words.length === 1 && /\.(json|mjs|js|cjs)$/.test(words[0]))) {
+      try {
+        inline = parseInlineSteps(words);
+      } catch (e) {
+        throw new UsageError('run: ' + e.message);
+      }
+    }
+  }
   const app = attached ? await attach(values.attach) : await launch(viewOptions(values, entry));
   try {
     await app.ready();
@@ -138,8 +152,7 @@ async function headless(cmd, values, positionals) {
     }
     // run
     const scriptPath = positionals[1];
-    if (!scriptPath) throw new UsageError('jsui run: missing <script.json|script.mjs>');
-    if (/\.(mjs|js|cjs)$/.test(scriptPath)) {
+    if (!inline && /\.(mjs|js|cjs)$/.test(scriptPath)) {
       const mod = await import(pathToFileURL(path.resolve(scriptPath)).href);
       const fn = mod.default || mod.run;
       if (typeof fn !== 'function') throw new UsageError(`${scriptPath} must export default async function (app) {...}`);
@@ -148,7 +161,7 @@ async function headless(cmd, values, positionals) {
       // Attached, errors from before this script are the session's, not ours.
       return attached ? 0 : reportErrors(app);
     }
-    const parsed = JSON.parse(await readFile(scriptPath, 'utf8'));
+    const parsed = inline || JSON.parse(await readFile(scriptPath, 'utf8'));
     const steps = Array.isArray(parsed) ? parsed : parsed.steps;
     if (!Array.isArray(steps)) throw new UsageError(`${scriptPath}: expected an array of steps or {"steps": [...]}`);
     if (attached) {

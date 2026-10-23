@@ -84,7 +84,8 @@ npx jsui dev src/app.jsx --shared [--width 1920 --height 1080 --scale 2]
 U=http://127.0.0.1:5173
 npx jsui screenshot --attach $U -o shot.png    # exactly what the person sees now
 npx jsui inspect --attach $U                   # live view tree (--find '#play' --json)
-npx jsui run --attach $U steps.json            # the same steps as jsui run, on the live app
+npx jsui run --attach $U press Down click '#play' screenshot shot.png   # steps as words, no file
+npx jsui run --attach $U steps.json            # or a steps file, as jsui run
 npx jsui log --attach $U --since 0             # what the person clicked / pressed, UI messages, calls, errors
 ```
 
@@ -156,6 +157,7 @@ npx jsui screenshot src/app.jsx --state gold=1250 --state 'player={"name":"Ada"}
 npx jsui inspect src/app.jsx                             # the view tree: type, #testID, text, [pressable focused], x,y wxh
 npx jsui inspect src/app.jsx --find '#play' --json
 npx jsui run src/app.jsx steps.json                      # scripted input; one JSON result per step
+npx jsui run src/app.jsx press Down expect '#quit' focused=true   # the same steps as words
 ```
 
 ```json
@@ -169,6 +171,12 @@ npx jsui run src/app.jsx steps.json                      # scripted input; one J
   {"screenshot": "after.png"}
 ]
 ```
+
+Steps as words: an action word takes the next word as its value (JSON when
+it parses: `wait 500`, `click [640,360]`), `name=value` words add options to
+that step (`press A count=2`, `state gold value=99`, `expect '#gold'
+text='99 gold'`), and a JSON word is a step. Quote `'#testID'` in the
+shell (a bare `#` starts a comment).
 
 Selectors: `#testID`, `text=Exact text`, `Contains text`, `label=...`,
 `type=TextInput`, a trailing ` >> 1` for the 2nd match, or `[x, y]`.

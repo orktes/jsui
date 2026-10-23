@@ -25,7 +25,16 @@ npx jsui screenshot app.jsx -o shot.png [--wait 1000] [--width 1280 --height 720
 npx jsui inspect app.jsx [--find '<selector>'] [--json] [--wait 1000]
 npx jsui run app.jsx steps.json [--keep-going]
 npx jsui run app.jsx script.mjs
+npx jsui run app.jsx press Down expect '#quit' focused=true click '#play' screenshot after.png
 ```
+
+Steps can be given as words instead of a file: an action word takes the
+next word as its value (JSON when it parses, except for names and text:
+`type 42` types "42"), `name=value` words add options to that step
+(`press A count=2`, `state gold value=99`, `drag '#knob' to=[400,300]`),
+`tree` and `reload` take no value, `idle` / `activity` an optional number,
+and a JSON word is a step or an array of steps. Quote selectors starting
+with `#` in the shell.
 
 Common options: `--component Name` (AppRegistry key), `--props '{"json":1}'`,
 `--state key=json` (repeatable; set before the bundle runs), `--fps 60`,
@@ -195,7 +204,7 @@ Agents attach with the same commands, without an entry:
 ```sh
 npx jsui screenshot --attach http://127.0.0.1:5173 [-o shot.png] [--wait ms]
 npx jsui inspect --attach http://127.0.0.1:5173 [--find sel] [--json]
-npx jsui run --attach http://127.0.0.1:5173 steps.json|script.mjs [--keep-going]
+npx jsui run --attach http://127.0.0.1:5173 steps.json|script.mjs|<steps as words> [--keep-going]
 npx jsui log --attach http://127.0.0.1:5173 [--since <seq>] [--follow]
 ```
 

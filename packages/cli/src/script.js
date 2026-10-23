@@ -3,7 +3,13 @@
 
 import { elementSummary, textsOf } from './headless.js';
 
-export const STEP_HELP = `steps (a JSON array, or {"steps": [...]}); targets are selectors ("#testID",
+export const STEP_HELP = `jsui run <entry> <script.json|script.mjs>, or the steps as words:
+  jsui run <entry> press Down click '#play' type Bob key Enter screenshot out.png
+  jsui run --attach <url> expect '#gold' text='99 gold' state gold value=99 press A count=2
+(an action word takes the next word as its value; name=value words add options; a
+JSON word is a step or an array of steps)
+
+steps (a JSON array, or {"steps": [...]}); targets are selectors ("#testID",
 "text=Exact", "Contains", "label=...", "type=TextInput", "... >> 1") or [x, y]:
   {"wait": 500}                         advance the UI clock (ms)
   {"idle": 3000}                        run until nothing loads or animates (max ms)
@@ -151,6 +157,69 @@ async function runStep(app, s) {
     }
   }
   return { action };
+}
+
+// Actions without a value (`tree`, `reload`) or with an optional number (`idle 3000`, `activity 12`).
+const NO_VALUE = new Set(['tree', 'reload']);
+const OPTIONAL_NUMBER = { idle: 5000, activity: 0 };
+// Actions whose value is a name or text, never JSON (`type 42` types "42").
+const STRING_VALUE = new Set(['type', 'key', 'screenshot', 'state', 'patch', 'buffer', 'message', 'callUi', 'run', 'answer',
+  'expectState', 'expectMessage', 'getState']);
+
+// A token's value: JSON when it parses (numbers, true, [x, y], {...}), else the string.
+function tokenValue(t) {
+  try {
+    return JSON.parse(t);
+  } catch {
+    return t;
+  }
+}
+
+/**
+ * Steps from command-line words, so `jsui run` needs no file:
+ *   press Down  click '#play'  type Bob  key Enter  wait 200  screenshot out.png
+ *   expect '#gold' text='99 gold'   state gold value=99   press A count=3   tree
+ * An action word takes the next word as its value (JSON if it parses, except
+ * for names and text); `name=value` words add options to the step before
+ * them. A word that is a JSON object or array is a step (or steps), as in
+ * script files.
+ */
+export function parseInlineSteps(words) {
+  const steps = [];
+  let cur = null;
+  for (let i = 0; i < words.length; i++) {
+    const w = String(words[i]);
+    if (/^\s*[[{]/.test(w)) {
+      const v = tokenValue(w);
+      if (typeof v !== 'object' || v === null) throw new Error(`not a JSON step: ${w}`);
+      for (const s of [].concat(v)) steps.push(s);
+      cur = null;
+      continue;
+    }
+    if (ACTIONS.includes(w)) {
+      const next = words[i + 1];
+      if (NO_VALUE.has(w)) {
+        cur = { [w]: true };
+      } else if (w in OPTIONAL_NUMBER) {
+        const n = next !== undefined && next !== '' ? Number(next) : NaN;
+        cur = { [w]: Number.isFinite(n) ? n : OPTIONAL_NUMBER[w] };
+        if (Number.isFinite(n)) i++;
+      } else {
+        if (next === undefined) throw new Error(`"${w}" needs a value`);
+        cur = { [w]: STRING_VALUE.has(w) ? String(next) : tokenValue(next) };
+        i++;
+      }
+      steps.push(cur);
+      continue;
+    }
+    const m = /^([a-zA-Z]\w*)=(.*)$/s.exec(w);
+    if (m && cur) {
+      cur[m[1]] = tokenValue(m[2]);
+      continue;
+    }
+    throw new Error(`unknown step word ${JSON.stringify(w)} (actions: ${ACTIONS.join(', ')})`);
+  }
+  return steps;
 }
 
 /**

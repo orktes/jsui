@@ -18,6 +18,7 @@ npx jsui dev app.jsx [--port 5173] [--host 127.0.0.1] [--no-hmr]
 npx jsui screenshot app.jsx -o shot.png [--width 1280 --height 720 --scale 2 --wait 1000]
 npx jsui inspect app.jsx [--find '#play'] [--json]
 npx jsui run app.jsx steps.json|script.mjs
+npx jsui run app.jsx press Down click '#play' screenshot after.png   # steps as words
 npx jsui skill [print --all | install [dir] [--global] | path]
 
 npx jsui dev app.jsx --shared                  # one live app you and agents use together
