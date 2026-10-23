@@ -2,9 +2,13 @@
 
 `JsuiView` is a Godot `Control` that runs a JSUI bundle (React Native–style
 JS) and draws it. It is the Godot counterpart of `tools/jsui-viewer`: it
-ticks the runtime every frame, paints with `jsui_render_rgba_incremental`
-into a CPU buffer and uploads an `ImageTexture` only when pixels changed. It
-forwards Godot input and bridges game data both ways: shared state
+ticks the runtime every frame and repaints only what changed. On Godot's
+Forward+ / Mobile renderers Skia draws on the GPU straight into a texture of
+Godot's RenderingDevice (Skia Graphite on Godot's own Vulkan device or Metal
+queue); on the Compatibility (OpenGL) renderer and headless it paints with
+`jsui_render_rgba_incremental` into a CPU buffer and uploads an
+`ImageTexture` (see [Rendering](#rendering)). It forwards Godot input and
+bridges game data both ways: shared state
 (`set_state` → `useHostState`), calls (`Host.call` → `call_requested` →
 `resolve_call`, and `call_ui` → `Host.handle`) and messages.
 
@@ -15,7 +19,8 @@ integrations/godot/
   demo/                 Godot 4.7 project: main.tscn + main.gd + jsui.gdextension
   demo/ui/app.jsx       demo UI: examples/showcase/interactions.jsx + a bridge strip
   smoke-test.sh         runs the demo headless with an input self-test at 1x and
-                        2x content scale and saves the frames (used by CI)
+                        2x content scale and saves the frames (used by CI);
+                        GODOT_RENDERING=vulkan runs it on Vulkan (GPU renderer)
 ```
 
 ## Build
@@ -36,6 +41,21 @@ npm ci
 npx jsui build integrations/godot/demo/ui/app.jsx -o integrations/godot/demo/ui/dist/bundle.js
 ```
 
+That build uses the prebuilt Skia m124, which has no Vulkan, Metal or
+Graphite: the view then always uses the CPU renderer. For the GPU renderer,
+build Skia m157 from source first (Linux: Graphite + Vulkan; macOS:
+Graphite + Metal; about 25 minutes on 4 cores, done once) and point CMake at
+it:
+
+```sh
+scripts/build-skia-desktop.sh            # -> third_party/skia-desktop
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+      -DJSUI_BUILD_GODOT=ON -DJSUI_SKIA_DIR=third_party/skia-desktop
+cmake --build build --target jsui_godot
+# configure prints "JSUI_VULKAN: ON" (Linux) / "JSUI_GRAPHITE_METAL: ON" (macOS)
+```
+
 CMake options:
 
 | Option | Default | |
@@ -45,6 +65,8 @@ CMake options:
 | `JSUI_GODOT_API_VERSION` | `4.3` | Godot API to build against (4.3 … 4.7): the oldest Godot that loads the library. Keep `compatibility_minimum` in `demo/jsui.gdextension` equal to it |
 | `JSUI_GODOT_CPP_DIR` | | use an existing godot-cpp checkout instead |
 | `JSUI_GODOT_OUTPUT_DIR` | `integrations/godot/demo/bin` | where the library is written |
+| `JSUI_SKIA_DIR` | prebuilt m124 | `third_party/skia-desktop` (from `scripts/build-skia-desktop.sh`) enables the GPU renderer |
+| `JSUI_VULKAN` / `JSUI_GRAPHITE_METAL` | on when that Skia has them | the Vulkan / Metal Graphite backends |
 
 The library statically links the JSUI runtime (QuickJS, Yoga, Skia) and only
 exports the GDExtension entry point (`jsui_godot_init`). One build serves the
@@ -65,8 +87,11 @@ The demo project is saved with Godot 4.7 (the current stable release,
   So the API version is the real minimum, and `compatibility_minimum` states
   it.
 * `JsuiView` uses nothing newer than the 4.3 API (`ImageTexture`, `Image`,
-  `RenderingServer` canvas items, `InputEvent*` with `KeyLocation`), so 4.3
-  is the default: one binary serves every supported Godot. Build with
+  `Texture2DRD`, `RenderingDevice`, `RenderingServer` canvas items,
+  `InputEvent*` with `KeyLocation`), so 4.3 is the default: one binary
+  serves every supported Godot. (It calls the 4.4+
+  `RenderingServer.get_current_rendering_driver_name` by name when it
+  exists.) Build with
   `-DJSUI_GODOT_API_VERSION=4.7` (and raise `compatibility_minimum`) only to
   use newer APIs.
 * CI runs the demo in 4.7.2 and in 4.3 (`GODOT_VERSION=4.3-stable
@@ -114,7 +139,21 @@ The headless display server ignores `--resolution`, so `main.gd` takes
 integrations/godot/smoke-test.sh build/godot-smoke.png        # downloads Godot 4.7.2 unless $GODOT is set
 GODOT_VERSION=4.3-stable integrations/godot/smoke-test.sh     # the oldest supported Godot
 GODOT_DISPLAY=x11 xvfb-run -a integrations/godot/smoke-test.sh # real OpenGL renderer + window capture
+# Vulkan (Forward+) with the GPU renderer; Mesa's lavapipe is enough
+# (apt install mesa-vulkan-drivers). Fails on the CPU fallback or when the GPU
+# frame differs from the CPU raster of the same frame (GPU_MAX_DIFF, mean
+# channel difference, default 1.5) and saves both as <out>-gpu.png / -cpu.png.
+GODOT_RENDERING=vulkan SIZES=1280x720 xvfb-run -a -s "-screen 0 1920x1080x24" \
+  integrations/godot/smoke-test.sh build/godot-vulkan.png
 ```
+
+`main.gd` takes a few more arguments for checking the renderer by hand:
+`--force-cpu` (sets `force_cpu`), `--expect-renderer vulkan|metal|cpu`,
+`--max-gpu-diff D` (with `--capture`: compare the GPU frame with the CPU
+raster), `--bench N` (N frames of hover springs, then of list scrolling, with
+vsync off; prints frame and render times) and `--no-world` (no 3D scene).
+The project uses the Compatibility renderer by default (it runs everywhere);
+pass `--rendering-method forward_plus` (or `mobile`) for the GPU renderer.
 
 ### Dev mode (live reload)
 
@@ -137,6 +176,7 @@ node in the inspector.
 | `pixel_ratio` | float | `0` | device px per logical px; `0` follows the control→window-pixel scale (stretch / content scale, HiDPI windows, Camera2D zoom, parent scale) |
 | `autostart` | bool | `true` | start in `_ready` (otherwise call `start()`) |
 | `forward_gamepad` | bool | `true` | forward joypad events received while focused |
+| `force_cpu` | bool | `false` | always use the CPU renderer, also on Vulkan / Metal |
 
 Changing `bundle_url` or `dev_mode` on a running view restarts it.
 
@@ -153,8 +193,11 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | `resolve_call(id, result = null) -> int` | answer a `call_requested` call; the UI's `await Host.call(...)` resolves with `result`. Any later frame is fine. -1: unknown or cancelled id |
 | `resolve_call_json(id, json)` / `reject_call(id, message)` | JSON result / reject (the promise rejects with `Error(message)`) |
 | `call_ui(name, args = null, callback = Callable()) -> int` | run the UI's `Host.handle(name, fn)` / `useHostHandler` handler; `callback(ok: bool, result)` (and `ui_call_completed`) runs once it settles: `result` is the handler's value, or the error message when `ok` is false |
-| `get_texture()` | the `ImageTexture` being drawn (premultiplied RGBA) |
-| `get_frame_image()` | CPU copy of the last frame, straight alpha, works with `--headless` |
+| `get_texture()` | the `Texture2D` being drawn (premultiplied RGBA): a `Texture2DRD` with the GPU renderer, an `ImageTexture` with the CPU one |
+| `get_frame_image()` | CPU copy of the last frame, straight alpha, works with `--headless` (with the GPU renderer it reads the texture back: slow, for tests and screenshots) |
+| `get_cpu_frame_image()` | the current frame painted by the CPU raster, straight alpha, whatever the renderer (to compare with `get_frame_image()`) |
+| `get_renderer()` | `"vulkan"`, `"metal"` or `"cpu"` (`""` before the first frame) |
+| `get_render_stats()` | Dictionary: `renderer`, `renders`, `render_usec_total` / `_last` / `_max` (time in the view's render call, CPU side), `dirty_pixels_total` |
 | `get_pending_loads()` | bundle/image/font/fetch loads in flight |
 | `get_last_error()` | last uncaught JS error, or `""` |
 | `get_effective_pixel_ratio()` | the ratio actually used |
@@ -216,8 +259,35 @@ func _on_ui_call(id, name, args):
   translucent UI composites correctly over the game and the node's own
   `material` stays free.
 * Rendering happens only when `jsui_needs_redraw` says so, and repaints only
-  the damaged region. Godot 4 has no sub-rectangle texture upload, so a
-  changed frame uploads the whole texture. Idle frames upload nothing.
+  the damaged region. Idle frames do no work at all.
+* Renderer, chosen on the first frame from the RenderingServer's driver:
+
+  | Godot renderer / driver | JsuiView renderer |
+  | --- | --- |
+  | Forward+ / Mobile on Vulkan (Linux, Windows) | `vulkan`: Skia Graphite on Godot's `VkDevice` and main queue |
+  | Forward+ / Mobile on Metal (macOS, Apple Silicon) | `metal`: Skia Graphite on Godot's `MTLDevice` and command queue |
+  | Compatibility (OpenGL), headless, D3D12, `force_cpu` | `cpu`: CPU raster + `ImageTexture` upload |
+
+  It also falls back to `cpu` (with a warning) when the library was built
+  against a Skia without that backend, when Skia rejects the device or when
+  a GPU frame fails. Godot 4.3 cannot name its driver: there, Linux is taken
+  as Vulkan and other platforms use `cpu`.
+* GPU renderer: per view there are two RenderingDevice textures of the
+  view's pixel size. Skia renders into the first (colour + input attachment;
+  it keeps the last frame, so a frame repaints only its damage, split into
+  up to four scissored rects when changes are far apart), all on Godot's render
+  thread (`RenderingServer.call_on_render_thread` when Godot renders on a
+  separate thread). JSUI submits its work to Godot's queue during `_process`,
+  before Godot submits its frame; on Vulkan it is bracketed by full pipeline
+  barriers and leaves the image in `TRANSFER_SRC_OPTIMAL`, the layout
+  Godot's render graph tracks for a copy source. Godot then copies the
+  damaged rect into the second texture (`RenderingDevice.texture_copy`),
+  which the canvas item samples through a `Texture2DRD`, so Godot does that
+  texture's barriers itself. Nothing is read back or uploaded. New textures
+  (first frame, resize) are used from the next drawn frame; the old ones stay
+  on screen until then.
+* CPU renderer: a changed frame uploads the whole texture (Godot 4 has no
+  sub-rectangle texture upload).
 * The runtime does not run inside the editor. The node draws a placeholder
   there.
 
@@ -262,8 +332,51 @@ imported copies.
 
 * IME composition (pre-edit text) is not forwarded, only committed
   characters. The C API has no composition entry point yet.
-* The Godot 4.3 API has no sub-rectangle texture upload, so the dirty rect saves only
-  CPU paint work, not GPU upload bandwidth.
-* Built and tested on Linux x86_64 (CI). The CMake target also names the
-  Windows and macOS libraries the `.gdextension` expects, but those builds
-  are untested.
+* CPU renderer: the Godot 4.3 API has no sub-rectangle texture upload, so
+  the dirty rect saves only CPU paint work, not GPU upload bandwidth.
+* GPU renderer, Vulkan: Vulkan queues need external synchronisation. JSUI
+  submits to Godot's main queue from the render thread, which is safe
+  against Godot's own frame submission, but Godot's background transfer
+  worker can share that queue (when the device has no separate transfer
+  queue) and submits under a lock the extension cannot take. Loading
+  textures on a worker thread while a view renders could, in theory, race.
+  Godot does not expose its enabled device extensions, so Skia assumes core
+  Vulkan 1.1 only (it logs a `VK_KHR_driver_properties` warning once).
+* GPU renderer, Metal: compiles in CI (macOS job) but has not been run yet;
+  see [Verifying Metal on a Mac](#verifying-metal-on-a-mac). Intel Macs that
+  run Forward+ on MoltenVK go through the Vulkan path, untested.
+* The macOS library is named `.universal` but a source-built Skia is for the
+  host architecture only.
+* Built and tested on Linux x86_64 (CI: headless, OpenGL and Vulkan via
+  lavapipe). Windows (Vulkan / D3D12) is not built or tested.
+
+## Verifying Metal on a Mac
+
+On an Apple Silicon Mac with Xcode command line tools, Ninja, Node 22 and
+Godot 4.7.2:
+
+```sh
+scripts/build-skia-desktop.sh            # Skia m157, Graphite + Metal (~30 min)
+cmake -S . -B build-mac -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DJSUI_BUILD_GODOT=ON -DJSUI_BUILD_TESTS=ON -DJSUI_SKIA_DIR=third_party/skia-desktop
+#   configure must print "JSUI_GRAPHITE_METAL: ON"
+cmake --build build-mac --target jsui_godot jsui-tests
+./build-mac/jsui-tests                    # all PASS (vulkan_* SKIP)
+npm ci && npx jsui build integrations/godot/demo/ui/app.jsx -o integrations/godot/demo/ui/dist/bundle.js
+
+GODOT=/Applications/Godot.app/Contents/MacOS/Godot
+cd integrations/godot/demo
+$GODOT --headless --path . --import
+# 1. Self-test + GPU-vs-CPU comparison on Metal (Forward+):
+$GODOT --path . --rendering-method forward_plus --rendering-driver metal -- \
+  --capture /tmp/metal.png --self-test --expect-renderer metal --max-gpu-diff 1.5
+#   expect "JsuiView: rendering with Skia Graphite on metal", every check PASS,
+#   "gpu-vs-cpu: metal ... ok", and /tmp/metal-gpu.png looking like /tmp/metal-cpu.png
+# 2. The same at 2x (Retina): add --resolution 2560x1440 and -- --window 2560x1440
+# 3. Frame cost, GPU vs CPU:
+$GODOT --path . --rendering-method forward_plus --rendering-driver metal -- --bench 240 --no-world
+$GODOT --path . --rendering-method forward_plus --rendering-driver metal -- --bench 240 --no-world --force-cpu
+# 4. Interactive: run it, hover / scroll / type, resize the window; with the
+#    Metal API validation layer on, nothing should be reported:
+MTL_DEBUG_LAYER=1 $GODOT --path . --rendering-method forward_plus --rendering-driver metal
+```

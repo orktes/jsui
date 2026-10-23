@@ -315,6 +315,57 @@ used to process Dawn events).
   with Chrome installed, `node web/test/frame-bench.mjs --real-gpu
   --renderers webgpu,webgl` uses the real GPU (Metal) in a visible window.
 
+### Vulkan and Metal (Skia Graphite, native)
+
+`jsui_gpu_create_vulkan(&JsuiVulkanDevice)` / `jsui_gpu_create_metal(device,
+queue)` and `jsui_render_gpu_target(rt, gpu, &JsuiGpuTarget, &dirty)` (or
+the `jsui_render_vulkan(rt, gpu, image, w, h, flags)` shorthand)
+(`src/render/gpu_graphite.cpp`, CMake options `JSUI_VULKAN` /
+`JSUI_GRAPHITE_METAL`) draw with Skia Graphite on an engine's own device
+into a `VkImage` / `id<MTLTexture>` it owns. The Godot GDExtension uses it
+to render into RenderingDevice textures (integrations/godot/README.md,
+"Rendering").
+
+* **The engine's device and queue.** The context wraps the host's
+  `VkInstance` / `VkPhysicalDevice` / `VkDevice` / `VkQueue` (Vulkan 1.1
+  core; optional extension and feature lists) or `MTLDevice` /
+  `MTLCommandQueue`. Vulkan functions come from the host's
+  `vkGetInstanceProcAddr` or the loader (`dlopen`, nothing is linked);
+  memory goes through Skia's bundled VulkanMemoryAllocator.
+* **Synchronous submit, explicit layouts.** Each render records one
+  Graphite recording and submits it to the host's queue before returning,
+  bracketed (Vulkan) by two full pipeline barriers, so it is ordered after
+  host work submitted before the call and before host work submitted after
+  it, without semaphores. The target is in `layout` on entry (`UNDEFINED`
+  discards it) and Graphite leaves it in `final_layout`
+  (`InsertRecordingInfo::fTargetTextureState`). The host must not use the
+  queue from another thread during the call.
+* **Retained target, damage only.** With `JSUI_GPU_INCREMENTAL` the target
+  still holds the last frame (keyed by the texture handle), so only the
+  damage is repainted, as in the GL retained frame: `CanvasChoice::splitDamage`
+  paints scattered damage as up to four scissored rect passes
+  (`paintDocumentRects`) instead of their bounding box. A frame with no
+  damage does no GPU work at all. `dirty` returns the damage bounds.
+* **Targets.** RGBA8 / BGRA8 (and sRGB) images; Graphite's Vulkan backend
+  only renders into images that have `COLOR_ATTACHMENT` *and*
+  `INPUT_ATTACHMENT` usage (it reads the destination through an input
+  attachment for some blends). Raster images are uploaded once through the
+  same caching `ImageProvider` as the WebGPU context (`graphite_images.h`).
+* **Build.** Needs Skia m157 built by `scripts/build-skia-desktop.sh`
+  (pinned commit, shared checkout with the wasm Graphite build; Linux:
+  Graphite + Vulkan, Ganesh + GL; macOS: Graphite + Metal, Ganesh + GL +
+  Metal) into `third_party/skia-desktop`; `-DJSUI_SKIA_DIR=third_party/skia-desktop`
+  then turns the options on from its `args.gn`, and `cmake/Deps.cmake`
+  compiles with the defines the build recorded (`defines.txt`) and links
+  all its libraries. The prebuilt m124 has neither backend: the functions
+  return NULL / -1 and hosts fall back to the CPU raster.
+* **Tests.** `tests/native/vulkan_test.cpp` makes its own Vulkan device
+  (Mesa lavapipe in CI), renders a bundle with moving, far-apart boxes over
+  several incremental frames and compares each with the CPU raster;
+  `JSUI_VULKAN_TEST_REQUIRE=1` turns its skip into a failure. The Godot job
+  also runs the demo on Vulkan (lavapipe) and compares the GPU frame with
+  the CPU raster. Metal compiles in the macOS CI job but is not run there.
+
 ## Game data
 
 Three channels connect the game and the UI (`include/jsui/jsui.h`):
@@ -858,6 +909,11 @@ The default font is Inter (bundled); `fontFamily` falls back to it.
   `web/jsui-web.js`; `jsui.on('message', (name, data) => …)`, `jsui.postMessage(name, data)`.
   The browser loader backend is `fetch()` (`src/platform/loader_emscripten.cpp`).
   Tests: `node web/test/node-smoke.mjs`, `node web/test/browser.test.mjs` (Playwright).
+* Desktop Skia m157 (Graphite on Vulkan / Metal, for the Godot GPU renderer):
+  `scripts/build-skia-desktop.sh` (Linux / macOS, about 25 min on 4 cores,
+  cached in CI on the script's hash) into `third_party/skia-desktop`, then
+  configure with `-DJSUI_SKIA_DIR=third_party/skia-desktop`. See
+  "Vulkan and Metal (Skia Graphite, native)".
 * JS: `npm install` at the repo root (npm workspaces), `npx jsui build app.jsx`
   or `npx jsui dev app.jsx` (serves `bundle.js` and a reload endpoint).
 
