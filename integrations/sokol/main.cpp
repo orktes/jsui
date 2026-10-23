@@ -4,7 +4,7 @@
 //   jsui-sokol [--dev] [bundle.js | http://127.0.0.1:5173/bundle.js]
 //
 // Rendering. After the scene's sokol pass, Skia (Ganesh) draws the UI over
-// it straight into sokol_app's framebuffer (sapp_gl_get_framebuffer()) with
+// it straight into sokol_app's framebuffer (the swapchain's gl.framebuffer) with
 // JSUI_GL_NO_CLEAR, on sokol's GL context; sg_reset_state_cache() then tells
 // sokol_gfx that GL state changed behind its back. The runtime keeps its last
 // frame in a texture of its own and repaints only what changed, so a frame
@@ -205,7 +205,9 @@ class Game {
     sg_pass pass{};
     pass.action.colors[0].load_action = SG_LOADACTION_CLEAR;
     pass.action.colors[0].clear_value = {9 / 255.f, 12 / 255.f, 22 / 255.f, 1};
-    pass.swapchain = sglue_swapchain();
+    pass.swapchain = sglue_swapchain();  // acquires the swapchain: once per frame
+    if (pass.swapchain.invalid) return;
+    fbo_ = pass.swapchain.gl.framebuffer;
     sg_begin_pass(&pass);
     drawScene();
     if (opt.cpu) drawUiQuad();
@@ -215,7 +217,7 @@ class Game {
     // The UI, by Skia, over the scene in the same framebuffer.
     if (!opt.cpu) {
       JsuiGLTarget t{};
-      t.fbo = sapp_gl_get_framebuffer();
+      t.fbo = fbo_;
       t.width = pixelW_;
       t.height = pixelH_;
       t.stencil_bits = 8;  // sokol_app's default framebuffer is DEPTH_STENCIL
@@ -380,7 +382,7 @@ class Game {
   void screenshot(const std::string& path) {
     std::vector<uint8_t> px(size_t(pixelW_) * pixelH_ * 4);
     glFinish();
-    glBindFramebuffer(GL_FRAMEBUFFER, sapp_gl_get_framebuffer());
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(0, 0, pixelW_, pixelH_, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
     sg_reset_state_cache();
@@ -546,6 +548,7 @@ class Game {
   std::vector<uint8_t> pixels_;
   bool uiFresh_ = true;
   int pixelW_ = 0, pixelH_ = 0;
+  uint32_t fbo_ = 0;  // sokol_app's GL framebuffer for this frame
   float logicalW_ = 0, logicalH_ = 0;
   Mat4 view_{}, proj_{};
   jsui_example::HudState hud_;

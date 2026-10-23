@@ -6,7 +6,7 @@ include(${CMAKE_SOURCE_DIR}/integrations/shared/fetch.cmake)
 set(JSUI_RAYLIB_VERSION 6.2)
 jsui_fetch_archive(_raylib_src NAME raylib
   URL https://github.com/raysan5/raylib/archive/refs/tags/${JSUI_RAYLIB_VERSION}.tar.gz
-  SHA256 RAYLIB_SHA256_TBD
+  SHA256 df7a13129b1bec9e73a6962efff170beba310ee6eab8f94cd000b7316b4db5ee
   DIR raylib-${JSUI_RAYLIB_VERSION})
 if(NOT _raylib_src OR NOT EXISTS ${_raylib_src}/CMakeLists.txt)
   message(WARNING "raylib not available: skipping jsui-raylib (set JSUI_RAYLIB_DIR or -DJSUI_BUILD_RAYLIB=OFF)")

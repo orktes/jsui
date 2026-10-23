@@ -7,7 +7,7 @@ include(${CMAKE_SOURCE_DIR}/integrations/shared/fetch.cmake)
 set(JSUI_SOKOL_COMMIT ba938930bd77e7ebcbe3871740a3e0c9d00c96c0)
 jsui_fetch_archive(_sokol_src NAME sokol
   URL https://github.com/floooh/sokol/archive/${JSUI_SOKOL_COMMIT}.tar.gz
-  SHA256 SOKOL_SHA256_TBD
+  SHA256 91e2b5b806a70e0c19671d60de7e693b6e5c50c7ba26af2442417466df237ba7
   DIR sokol-${JSUI_SOKOL_COMMIT})
 if(NOT _sokol_src OR NOT EXISTS ${_sokol_src}/sokol_gfx.h)
   message(WARNING "sokol not available: skipping jsui-sokol (set JSUI_SOKOL_DIR or -DJSUI_BUILD_SOKOL=OFF)")
