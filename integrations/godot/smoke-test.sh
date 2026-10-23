@@ -36,6 +36,12 @@
 # run it).
 # SIZES (default "1280x720 2560x1440") picks the window sizes.
 #
+# VK_VALIDATION=sync (with GODOT_RENDERING=vulkan) runs Godot under the
+# Khronos validation layer (apt install vulkan-validationlayers) with
+# synchronization validation and fails the run on any validation error: a
+# hazard between JSUI's Graphite work and Godot's frame on the textures they
+# share, an invalid view of them, and so on. The errors are printed.
+#
 # FAKE_WEBGPU_INTEROP=<rev> registers a stand-in for the godot-aw3 fork's
 # WebGPUInterop singleton (main.gd --fake-webgpu-interop) that reports Dawn
 # revision <rev> and null handles. Whatever the driver, JsuiView must then
@@ -124,7 +130,34 @@ if [[ -n "${GODOT_RENDER_THREAD:-}" ]]; then
   display+=(--render-thread "$GODOT_RENDER_THREAD")
 fi
 log="$(mktemp)"
-trap 'rm -f "$log"' EXIT
+vkdir=""
+trap 'rm -f "$log"; if [[ -n "$vkdir" ]]; then rm -rf "$vkdir"; fi' EXIT
+if [[ -n "${VK_VALIDATION:-}" ]]; then
+  if [[ "$VK_VALIDATION" != sync || "${GODOT_RENDERING:-}" != vulkan ]]; then
+    echo "VK_VALIDATION=sync needs GODOT_RENDERING=vulkan" >&2
+    exit 1
+  fi
+  vkdir="$(mktemp -d)"
+  # Errors only, into a log checked after each run. Skia probes a few formats
+  # the Vulkan 1.1 device it is given does not know (the 4:4:4 two-plane
+  # YCbCr ones): harmless, filtered.
+  filter=VUID-vkGetPhysicalDeviceFormatProperties-format-parameter
+  # With a separate render thread Godot 4.7 does not finalize its
+  # RenderingDevice when quitting ("This function (finalize) can only be
+  # called from the render thread", also without JSUI on the GPU), so its
+  # VkDevice and everything on it outlive the instance: filtered there.
+  if [[ "${GODOT_RENDER_THREAD:-}" == separate ]]; then
+    filter+=",VUID-vkDestroyDevice-device-05137,VUID-vkDestroyInstance-instance-00629"
+  fi
+  cat > "$vkdir/vk_layer_settings.txt" <<EOF
+khronos_validation.enables = VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
+khronos_validation.report_flags = error
+khronos_validation.debug_action = VK_DBG_LAYER_ACTION_LOG_MSG
+khronos_validation.log_filename = $vkdir/validation.log
+khronos_validation.message_id_filter = $filter
+EOF
+  export VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation VK_LAYER_SETTINGS_PATH="$vkdir"
+fi
 
 # One run per window size. main.gd's --self-test drives the UI through
 # Godot's input pipeline (Input.parse_input_event, as real devices do): hover,
@@ -141,7 +174,8 @@ trap 'rm -f "$log"' EXIT
 run() {
   local size="$1" png="$2"
   rm -f "$png"
-  echo "== Godot $GODOT_VERSION, window $size${GODOT_RENDER_THREAD:+, render thread $GODOT_RENDER_THREAD}"
+  if [[ -n "$vkdir" ]]; then rm -f "$vkdir/validation.log"; fi
+  echo "== Godot $GODOT_VERSION, window $size${GODOT_RENDER_THREAD:+, render thread $GODOT_RENDER_THREAD}${VK_VALIDATION:+, Vulkan $VK_VALIDATION validation}"
   "$GODOT" "${display[@]}" --path "$demo" --resolution "$size" -- --capture "$png" --frames "$frames" --self-test --window "$size" "${checks[@]}" 2>&1 | tee "$log"
   local status=${PIPESTATUS[0]}
   if (( status != 0 )); then
@@ -163,6 +197,18 @@ run() {
   if [[ ! -s "$png" ]]; then
     echo "no capture written to $png" >&2
     exit 1
+  fi
+  if [[ -n "$vkdir" ]]; then
+    if [[ ! -f "$vkdir/validation.log" ]]; then
+      echo "VK_VALIDATION: the validation layer did not run (no VK_LAYER_KHRONOS_validation?)" >&2
+      exit 1
+    fi
+    if grep -q "Validation Error" "$vkdir/validation.log"; then
+      echo "Vulkan validation errors ($size):" >&2
+      grep -A 3 "Validation Error" "$vkdir/validation.log" | cut -c1-1000 | head -n 40 >&2
+      exit 1
+    fi
+    echo "Vulkan $VK_VALIDATION validation: no errors"
   fi
 }
 
