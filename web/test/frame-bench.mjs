@@ -24,8 +24,11 @@
 //             in a separate page (web/test/gpu-count.js) so the timings above
 //             carry no instrumentation.
 //   gpu time  WebGPU only (--no-gpu-timing to skip): GPU timestamps around
-//             every render pass and copy (web/test/gpu-timing.js, in a page of
-//             its own), summed per frame and listed by pass target and kind.
+//             every render pass and run of back-to-back copies
+//             (web/test/gpu-timing.js, in a page of its own), summed per frame
+//             and listed by pass target and kind. The marks around a copy run
+//             are empty compute passes: on Apple GPUs a run's time includes
+//             switching encoders, so it overstates short copies.
 //             Needs the adapter's 'timestamp-query' feature (real GPUs; the
 //             SwiftShader adapter may not have it, then it says so).
 //
@@ -506,16 +509,17 @@ for (const renderer of RENDERERS) {
     const by = new Map();
     for (const e of timing.entries) {
       perFrame[e.frame] += e.ms;
-      // Copies by kind (their sizes vary frame to frame), with the area copied.
-      const m = e.kind === 'copy' && /^(\S+) (\d+)x(\d+)$/.exec(e.label);
-      const label = e.kind === 'copy' ? e.label.split(' ')[0] : e.label;
-      const b = by.get(label) ?? by.set(label, { kind: e.kind, n: 0, ms: 0, px: 0 }).get(label);
+      // Copy runs by the kinds of copy in them, with the copies and texels.
+      const b = by.get(e.label) ?? by.set(e.label, { kind: e.kind, n: 0, ms: 0, copies: 0, px: 0 }).get(e.label);
       b.n++;
       b.ms += e.ms;
-      if (m) b.px += m[2] * m[3];
+      b.copies += e.copies ?? 0;
+      b.px += e.px ?? 0;
     }
     const tot = stats(perFrame);
-    const rows = [...by].map(([label, b]) => ({ label: b.px ? `${label} (${(b.px / b.n / 1000).toFixed(1)}k px each)` : label,
+    const rows = [...by].map(([label, b]) => ({
+      label: b.kind === 'copy' ? `${label}: ${(b.copies / timing.frames).toFixed(2)} copies in runs` +
+        (b.px ? `, ${(b.px / b.copies / 1000).toFixed(1)}k px each` : '') : label,
       kind: b.kind, perFrame: b.n / timing.frames, ms: b.ms / timing.frames }))
       .sort((a, b) => b.ms - a.ms);
     gpuTime = { total: tot, rows };

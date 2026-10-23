@@ -65,7 +65,10 @@
   wrap('GPURenderPassEncoder', ['draw', 'drawIndexed', 'drawIndirect', 'drawIndexedIndirect', 'setPipeline',
     'setBindGroup', 'setVertexBuffer', 'setIndexBuffer', 'setScissorRect', 'setViewport', 'setStencilReference',
     'setBlendConstant']);
-  wrap('GPUBuffer', ['mapAsync', 'unmap', 'getMappedRange', 'destroy']);
+  wrap('GPUBuffer', ['mapAsync', 'unmap', 'getMappedRange', 'destroy'], (name, a, buf) => {
+    // Staging memory mapped (emdawnwebgpu copies all of it from the wasm heap on unmap).
+    if (name === 'getMappedRange') bump('bytes.getMappedRange', a[1] ?? buf.size - (a[0] ?? 0));
+  });
   wrap('GPUTexture', ['destroy']);
   wrap('GPUCanvasContext', ['getCurrentTexture']);
   let seq = 0;
