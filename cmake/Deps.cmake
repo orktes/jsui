@@ -92,6 +92,108 @@ if(_yoga_cl_at GREATER -1)
 else()
   message(WARNING "Yoga CalculateLayout.cpp changed: skipping the baseline-layout memo")
 endif()
+# Browser parity for `flex: N` items in containers sized by their content.
+# react-native-web turns `flex: 1` into `flex: 1 1 0%`, and a 0% basis has
+# nothing definite to resolve against while its container is being sized to
+# fit its content, so browsers size the item by its content. Yoga used a 0
+# basis there and never grew it: `flex: 1` text in a row inside an
+# alignItems: 'flex-start' column was measured at zero width, one character
+# per line (thousands of pixels tall). Patched into the same CalculateLayout.cpp
+# copy; these are correctness fixes, so a missing anchor (a Yoga update) is an
+# error, not a warning. See tests/native/style_test.cpp and examples/layout/.
+if(NOT DEFINED _yoga_cl_out)
+  set(_yoga_cl_out ${CMAKE_BINARY_DIR}/yoga-patched/CalculateLayout.cpp)
+  list(REMOVE_ITEM JSUI_YOGA_SOURCES ${_yoga_calc})
+  list(APPEND JSUI_YOGA_SOURCES ${_yoga_cl_out})
+endif()
+function(jsui_yoga_patch anchor replacement)
+  string(FIND "${_yoga_cl}" "${anchor}" _at)
+  if(_at EQUAL -1)
+    message(FATAL_ERROR "Yoga CalculateLayout.cpp changed: flex-basis patch anchor not found:\n${anchor}")
+  endif()
+  string(REPLACE "${anchor}" "${replacement}" _yoga_cl "${_yoga_cl}")
+  set(_yoga_cl "${_yoga_cl}" PARENT_SCOPE)
+endfunction()
+# 1. While the container's main axis is sized by content, a basis from the
+#    `flex` shorthand is content-based (and recomputed on every pass, since an
+#    earlier pass may have cached a content basis).
+jsui_yoga_patch("\
+  const FloatOptional resolvedFlexBasis = child->resolveFlexBasis(
+      direction, mainAxis, mainAxisOwnerSize, ownerWidth);
+" "\
+  FloatOptional resolvedFlexBasis = child->resolveFlexBasis(
+      direction, mainAxis, mainAxisOwnerSize, ownerWidth);
+  // jsui: browser parity, see cmake/Deps.cmake.
+  const auto jsuiBasisUnit = child->style().flexBasis().unit();
+  const bool jsuiShorthandBasis =
+      (jsuiBasisUnit == Unit::Auto || jsuiBasisUnit == Unit::Undefined) &&
+      child->style().flex().isDefined() && child->style().flex().unwrap() > 0.0f;
+  if (jsuiShorthandBasis &&
+      (isMainAxisRow ? widthMode : heightMode) != SizingMode::StretchFit) {
+    resolvedFlexBasis = FloatOptional{};
+  }
+")
+jsui_yoga_patch("\
+    if (child->getLayout().computedFlexBasis.isUndefined() ||
+        (child->getConfig()->isExperimentalFeatureEnabled(" "\
+    if (child->getLayout().computedFlexBasis.isUndefined() ||
+        jsuiShorthandBasis ||
+        (child->getConfig()->isExperimentalFeatureEnabled(")
+# 2. A fit-content row is min(max-content, available): when its content
+#    overflows the available width and something can shrink, lay it out at
+#    that width instead of at its content size. Rows only: CSS heights are
+#    never fit-content. The flex step then cannot be skipped, since the shrunk
+#    sizes are the measurement, so justifyMainAxis takes the caller's decision.
+jsui_yoga_patch("\
+    const bool canSkipFlex =
+        !performLayout && sizingModeCrossDim == SizingMode::StretchFit;
+" "\
+    bool canSkipFlex =
+        !performLayout && sizingModeCrossDim == SizingMode::StretchFit;
+    const float jsuiAvailableInnerMainDim = availableInnerMainDim;
+")
+jsui_yoga_patch("\
+        sizeBasedOnContent = !useLegacyStretchBehaviour;
+" "\
+        sizeBasedOnContent = !useLegacyStretchBehaviour;
+        // jsui: browser parity, see cmake/Deps.cmake.
+        if (isMainAxisRow && sizingModeMainDim == SizingMode::FitContent &&
+            yoga::isDefined(jsuiAvailableInnerMainDim) &&
+            flexLine.sizeConsumed > jsuiAvailableInnerMainDim &&
+            flexLine.layout.totalFlexShrinkScaledFactors != 0) {
+          availableInnerMainDim = jsuiAvailableInnerMainDim;
+          sizeBasedOnContent = false;
+          canSkipFlex = false;
+        }
+")
+jsui_yoga_patch("\
+    const float availableInnerWidth,
+    const bool performLayout) {
+  const auto& style = node->style();
+" "\
+    const float availableInnerWidth,
+    const bool performLayout,
+    const bool canSkipFlex) {
+  const auto& style = node->style();
+")
+jsui_yoga_patch("\
+    bool canSkipFlex =
+        !performLayout && sizingModeCrossDim == SizingMode::StretchFit;
+    if (canSkipFlex) {" "\
+    (void)sizingModeCrossDim;  // jsui: canSkipFlex comes from the caller
+    if (canSkipFlex) {")
+jsui_yoga_patch("\
+        availableInnerWidth,
+        performLayout);
+
+    float containerCrossAxis" "\
+        availableInnerWidth,
+        performLayout,
+        canSkipFlex);
+
+    float containerCrossAxis")
+file(CONFIGURE OUTPUT ${_yoga_cl_out} CONTENT "${_yoga_cl}" @ONLY)
+
 add_library(jsui_yoga STATIC ${JSUI_YOGA_SOURCES})
 target_include_directories(jsui_yoga PUBLIC ${yoga_SOURCE_DIR})
 set_target_properties(jsui_yoga PROPERTIES CXX_STANDARD 20 POSITION_INDEPENDENT_CODE ON)
