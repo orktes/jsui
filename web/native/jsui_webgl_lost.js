@@ -8,9 +8,12 @@
 // a failed query writes zeros. The frame then fails without a throw and the
 // host sees the lost context after it (web/jsui-web.js, CanvasView._checkGL).
 // libwebgl.js defines each glX as emscripten_glX (glX is an alias of it), so
-// the emscripten_ names are the ones replaced.
-addToLibrary({
-  emscripten_glCreateProgram: () => {
+// the emscripten_ names are the ones replaced (Emscripten 3.1 has it the other
+// way round, but Skia's WebGL interface calls the emscripten_ names in both).
+// addToLibrary is Emscripten >= 3.1.50; the WebGL-only build is on 3.1.44,
+// which has mergeInto only. Plain functions for the same reason.
+(typeof addToLibrary === 'function' ? addToLibrary : (lib) => mergeInto(LibraryManager.library, lib))({
+  emscripten_glCreateProgram: function() {
     var program = GLctx.createProgram();
     if (!program) return 0;
     var id = GL.getNewId(GL.programs);
@@ -22,7 +25,7 @@ addToLibrary({
     return id;
   },
 
-  emscripten_glCreateShader: (shaderType) => {
+  emscripten_glCreateShader: function(shaderType) {
     var shader = GLctx.createShader(shaderType);
     if (!shader) return 0;
     var id = GL.getNewId(GL.shaders);
@@ -30,7 +33,7 @@ addToLibrary({
     return id;
   },
 
-  emscripten_glGetShaderPrecisionFormat: (shaderType, precisionType, range, precision) => {
+  emscripten_glGetShaderPrecisionFormat: function(shaderType, precisionType, range, precision) {
     var result = GLctx.getShaderPrecisionFormat(shaderType, precisionType);
     {{{ makeSetValue('range', '0', 'result ? result.rangeMin : 0', 'i32') }}};
     {{{ makeSetValue('range', '4', 'result ? result.rangeMax : 0', 'i32') }}};
