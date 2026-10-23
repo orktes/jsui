@@ -78,6 +78,9 @@ screen you already navigated to, without rebuilding or replaying steps.
 Keep screens and components in their own modules: an edit to the entry file
 (the one calling `AppRegistry.registerComponent`) reloads the whole app.
 
+In a project with `@orktes/jsui-cli` installed (see Project setup; outside
+one, use `npx @orktes/jsui-cli` instead of `npx jsui`):
+
 ```sh
 npx jsui dev src/app.jsx --shared [--width 1920 --height 1080 --scale 2]
 #   -> shared view: http://127.0.0.1:5173/shared   (give the person this link)
