@@ -852,6 +852,71 @@ test('webgpu: steady animation frames (interactions showcase): retained, few pas
   assert(d.max <= 1, `retained frame differs from a full repaint: ${JSON.stringify(d)}`);
 }, { viewport: { width: 1300, height: 1500 } });
 
+test('webgpu: raster cache: subtrees repainted unchanged are drawn from textures', async ({ page }) => {
+  // In the showcase's steady frames a glow drifts behind the top bar, the
+  // menu, the carousel and the armory panel, which nothing else changes:
+  // each is drawn from a texture of it ('a') instead of node by node ('b',
+  // JSUI_WEBGPU_NO_RASTER_CACHE). The texture is the same draws composited
+  // as a group: equal up to rounding where the subtree is translucent (a
+  // level), and a few levels on some anti-aliased edges (the scaled carousel
+  // card's border is a little closer to the CPU raster from the texture). A
+  // stale texture would differ by far more (text and box edges).
+  let build;
+  try {
+    ({ build } = await import('@orktes/jsui-cli'));
+  } catch (e) {
+    skip(`@orktes/jsui-cli unavailable: ${e.message}`, true);
+  }
+  const outfile = path.join(WEB, 'test/output/interactions.js');
+  fs.mkdirSync(path.dirname(outfile), { recursive: true });
+  await build({ entry: path.join(WEB, '../examples/showcase/interactions.jsx'), outfile, minify: true });
+  await page.addInitScript({ path: path.join(WEB, 'test/gpu-count.js') });
+  await page.reload();
+  await page.waitForFunction(() => window.testReady);
+  const renderers = await page.evaluate(async (dist) => {
+    const bundleSource = await (await fetch('output/interactions.js')).text();
+    const make = () => {
+      const c = document.createElement('canvas');
+      c.style.width = '1280px';
+      c.style.height = '720px';
+      document.body.appendChild(c);
+      return window.createJsui({ canvas: c, bundleSource, bundleUrl: 'output/interactions.js', renderer: 'webgpu', autoStart: false,
+        moduleUrl: new URL(`../${dist}/jsui.js`, location.href) });
+    };
+    const [a, b] = await Promise.all([make(), make()]);
+    window.hosts = { a, b };
+    return [a.renderer, b.renderer];
+  }, DIST);
+  if (renderers.some((n) => n !== 'webgpu')) skip(`no WebGPU renderer with web/${DIST} (${renderers})`, DIST !== 'dist-gpu');
+  const r = await page.evaluate(async () => {
+    const { a, b } = window.hosts;
+    b._wgpu.flags = 16;  // JSUI_WEBGPU_NO_RASTER_CACHE
+    let t = performance.now();
+    const sum = (re) => [...window.__gpuCounts].filter(([k]) => re.test(k)).reduce((n, [, v]) => n + v, 0);
+    const draws = { a: 0, b: 0 }, offscreen = { a: 0, b: 0 };
+    for (let i = 0; i < 240; i++) {
+      t += 16.67;
+      for (const k of ['a', 'b']) {
+        window.__gpuCounts.clear();
+        window.hosts[k].frame(t);
+        if (i >= 180) {  // after the entrance animations
+          draws[k] += sum(/\.draw(Indexed)?(Indirect)?$/) / 60;
+          offscreen[k] += sum(/^pass color /) - sum(/^pass color 1280x720 /);
+        }
+      }
+      await a._wgpu.device.queue.onSubmittedWorkDone();
+    }
+    return { draws, offscreen };
+  });
+  const d = await frameDiff(page, ['a', 'b']);
+  console.log(`      steady draws per frame: raster cache ${r.draws.a.toFixed(1)}, without ${r.draws.b.toFixed(1)}; ` +
+    `diff max ${d.max}, mean ${d.mean.toFixed(4)}`);
+  assert(r.draws.a * 1.5 < r.draws.b, `raster cache does not cut the draws: ${JSON.stringify(r)}`);
+  assert(r.offscreen.a === 0, `textures rendered again in steady frames: ${JSON.stringify(r)}`);
+  assert(!d.missing && !d.size, `readback ${JSON.stringify(d)}`);
+  assert(d.over === 0 && d.max <= 12 && d.mean < 0.1, `raster-cached subtrees differ from direct painting: ${JSON.stringify(d)}`);
+}, { viewport: { width: 1300, height: 1500 } });
+
 test('webgpu: entrance of the interactions showcase: composited layers equal plain layers', async ({ page }) => {
   // The entrance fades and slides panels and menu buttons (layers over
   // children) while some of their content animates too: every frame of 'a'

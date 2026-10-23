@@ -14,6 +14,7 @@
 #include "jsui/jsui.h"
 #include "render/gpu.h"
 #include "render/gpu_metal.h"
+#include "render/pipeline_cache.h"
 #include "runtime.h"
 
 // A runtime handle (jsui_create: owns the runtime, shows its main surface)
@@ -166,11 +167,17 @@ int jsui_pending_loads(JsuiRuntime* rt) { return int(rt->rt->loader.pending()); 
 int jsui_needs_redraw(JsuiRuntime* rt) { return rt->surface->needsRedraw() ? 1 : 0; }
 int jsui_wants_frame(JsuiRuntime* rt) { return rt->rt->wantsFrame() ? 1 : 0; }
 
+// Every render is the Paint phase (jsui_set_profiling); layout and image
+// decodes inside it book to their own phases, Graphite's submit to Gpu.
+#define JSUI_PAINT_SCOPE(rt) jsui::Perf::Scope paint_scope((rt)->surface->doc.perf, jsui::Phase::Paint)
+
 void jsui_render_rgba(JsuiRuntime* rt, void* pixels, int width, int height, size_t rowBytes) {
+  JSUI_PAINT_SCOPE(rt);
   rt->surface->render(pixels, width, height, rowBytes);
 }
 
 int jsui_render_rgba_incremental(JsuiRuntime* rt, void* pixels, int width, int height, size_t rowBytes, JsuiRect* dirty) {
+  JSUI_PAINT_SCOPE(rt);
   SkIRect r = rt->surface->renderIncremental(pixels, width, height, rowBytes);
   if (dirty) *dirty = JsuiRect{r.x(), r.y(), r.width(), r.height()};
   return r.isEmpty() ? 0 : 1;
@@ -204,11 +211,13 @@ void jsui_gpu_purge(JsuiGpuContext* gpu, size_t cacheBytes) {
 }
 
 int jsui_render_webgpu(JsuiRuntime* rt, JsuiGpuContext* gpu, void* texture, int width, int height, int flags) {
+  JSUI_PAINT_SCOPE(rt);
   JsuiWebGPUTarget t{texture, width, height, flags};
   return jsui::webgpu::render(*rt->surface, gpu, t);
 }
 
 int jsui_render_webgpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget* target) {
+  JSUI_PAINT_SCOPE(rt);
   return target ? jsui::webgpu::render(*rt->surface, gpu, *target) : -1;
 }
 
@@ -229,6 +238,7 @@ int jsui_render_gpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiGpuTa
     if (dirty) *dirty = JsuiRect{0, 0, 0, 0};
     return -1;
   }
+  JSUI_PAINT_SCOPE(rt);
   return jsui::graphite_gpu::render(*rt->surface, gpu, *target, dirty);
 }
 
@@ -242,16 +252,61 @@ int jsui_render_vulkan(JsuiRuntime* rt, JsuiGpuContext* gpu, void* image, int wi
   return jsui_render_gpu_target(rt, gpu, &t, nullptr);
 }
 
+int jsui_gpu_set_pipeline_cache(JsuiGpuContext* gpu, const char* path) {
+  if (!gpu || !gpu->pipelines) return -1;
+  return gpu->pipelines->setFile(path ? path : "");
+}
+
+int jsui_gpu_precompile_pipelines(JsuiGpuContext* gpu, const void* data, size_t size) {
+  if (!gpu || !gpu->pipelines) return -1;
+  return gpu->pipelines->addList(data, size);
+}
+
+int jsui_gpu_save_pipelines(JsuiGpuContext* gpu, void** outData, size_t* outSize) {
+  if (!outData || !outSize) return -1;
+  *outData = nullptr;
+  *outSize = 0;
+  if (!gpu || !gpu->pipelines) return -1;
+  std::string list = gpu->pipelines->save();
+  void* p = std::malloc(list.size());
+  if (!p) return -1;
+  std::memcpy(p, list.data(), list.size());
+  *outData = p;
+  *outSize = list.size();
+  return 0;
+}
+
+int jsui_gpu_precompile_step(JsuiGpuContext* gpu, double budgetMs) {
+  return gpu && gpu->pipelines ? gpu->pipelines->step(budgetMs) : 0;
+}
+
+void jsui_gpu_get_pipeline_stats(JsuiGpuContext* gpu, JsuiPipelineStats* out) {
+  if (!out) return;
+  *out = JsuiPipelineStats{};
+  if (!gpu || !gpu->pipelines) return;
+  jsui::pipeline_cache::Stats s = gpu->pipelines->stats();
+  out->mode = s.mode;
+  out->queued = s.queued;
+  out->precompiled = s.precompiled;
+  out->failed = s.failed;
+  out->compiled = s.compiled;
+  out->added = s.added;
+  out->unserializable = s.unserializable;
+  out->known = s.known;
+}
+
 int jsui_render_gl(JsuiRuntime* rt, JsuiGpuContext* gpu, unsigned int fbo, int width, int height, int flags) {
   JsuiGLTarget t{};
   t.fbo = fbo;
   t.width = width;
   t.height = height;
   t.flags = flags;
+  JSUI_PAINT_SCOPE(rt);
   return jsui::gpu::render(*rt->surface, gpu, t);
 }
 
 int jsui_render_gl_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiGLTarget* target) {
+  JSUI_PAINT_SCOPE(rt);
   return target ? jsui::gpu::render(*rt->surface, gpu, *target) : -1;
 }
 
@@ -260,7 +315,9 @@ void jsui_metal_destroy(JsuiMetalContext* mtl) { jsui::metal::destroy(mtl); }
 void jsui_metal_purge(JsuiMetalContext* mtl, size_t cacheBytes) { jsui::metal::purge(mtl, cacheBytes); }
 int jsui_render_metal(JsuiRuntime* rt, JsuiMetalContext* mtl, void* texture, unsigned int format, int width,
                       int height, int flags) {
-  return rt ? jsui::metal::render(*rt->surface, mtl, texture, format, width, height, flags) : -1;
+  if (!rt) return -1;
+  JSUI_PAINT_SCOPE(rt);
+  return jsui::metal::render(*rt->surface, mtl, texture, format, width, height, flags);
 }
 
 int jsui_render_png(JsuiRuntime* rt, void** outData, size_t* outSize) {
@@ -281,6 +338,32 @@ int jsui_render_png(JsuiRuntime* rt, void** outData, size_t* outSize) {
 }
 
 void jsui_free(void* p) { std::free(p); }
+
+void jsui_set_profiling(JsuiRuntime* rt, int on) { rt->surface->doc.perf.setProfiling(on != 0); }
+
+void jsui_get_perf(JsuiRuntime* rt, JsuiPerf* out, int reset) {
+  jsui::Perf& p = rt->surface->doc.perf;
+  auto us = [&](jsui::Phase ph) { return p.us[size_t(ph)]; };
+  const jsui::PerfCounters& c = p.counters;
+  *out = JsuiPerf{};
+  out->js_us = us(jsui::Phase::Js);
+  out->commit_us = us(jsui::Phase::Commit);
+  out->animated_us = us(jsui::Phase::Animated);
+  out->style_us = us(jsui::Phase::Style);
+  out->layout_us = us(jsui::Phase::Layout);
+  out->input_us = us(jsui::Phase::Input);
+  out->paint_us = us(jsui::Phase::Paint);
+  out->other_us = us(jsui::Phase::Other);
+  out->gpu_submit_us = us(jsui::Phase::Gpu);
+  out->image_decode_us = c.imageDecodeUs;
+  out->image_decodes = c.imageDecodes;
+  out->pipeline_compiles = c.pipelineCompiles;
+  out->paragraph_builds = c.paragraphBuilds;
+  out->text_measures = c.textMeasures;
+  out->layout_passes = c.layoutPasses;
+  out->bridge_calls = c.bridgeCalls;
+  if (reset) p.reset();
+}
 
 void jsui_set_event_time(JsuiRuntime* rt, double time_ms) { rt->surface->input->setEventTime(time_ms); }
 #define JSUI_INPUT_SCOPE jsui::Perf::Scope perf_scope(rt->surface->doc.perf, jsui::Phase::Input)

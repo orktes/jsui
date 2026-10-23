@@ -31,6 +31,13 @@
 // the main surface's component (empty: the bundle's first registered one).
 // `auto_size` sizes the view to its component's content (its minimum size),
 // for small widgets inside existing Godot UIs.
+//
+// GPU pipeline cache (jsui_gpu_set_pipeline_cache): the runtime's Skia
+// context records every GPU pipeline it creates in the runtime view's
+// `pipeline_cache_path`, with the renderer's name before the extension
+// (user://jsui-pipelines.bin -> user://jsui-pipelines.vulkan.bin), and the
+// next start precompiles them, plus a list shipped at the same path under
+// res:// (res://jsui-pipelines.vulkan.bin), off the frame.
 #pragma once
 
 #include <godot_cpp/classes/control.hpp>
@@ -88,6 +95,16 @@ class JsuiView : public godot::Control {
   godot::Dictionary get_initial_props() const { return initial_props_; }
   void set_auto_size(bool on);
   bool get_auto_size() const { return auto_size_; }
+  // Applies when the runtime's Skia context is created (the first GPU
+  // frame); "" for none. Surface views use their runtime view's.
+  void set_pipeline_cache_path(const godot::String& path) { pipeline_cache_path_ = path; }
+  godot::String get_pipeline_cache_path() const { return pipeline_cache_path_; }
+  // 0: the runtime's clock (animations, timers, scrolling) is the wall
+  // clock. N > 0: each frame advances it by 1/N s however long frames take,
+  // so the UI draws the frames of a machine running at N fps, the same on
+  // any machine (tests, recording a pipeline list). The runtime view's applies.
+  void set_fixed_fps(int fps) { fixed_fps_ = fps > 0 ? fps : 0; }
+  int get_fixed_fps() const { return fixed_fps_; }
 
   // Methods.
   void start();   // (re)creates the runtime and loads bundle_url (surface views: the surface)
@@ -120,6 +137,11 @@ class JsuiView : public godot::Control {
   godot::Ref<godot::Image> get_cpu_frame_image();
   godot::String get_renderer() const;  // "vulkan", "metal", "cpu" or "" before the first frame
   godot::Dictionary get_render_stats() const;
+  // Profiling (jsui_set_profiling / jsui_get_perf): time per frame phase and
+  // work counters since the last reset (`reset` starts new totals).
+  void set_profiling(bool on);
+  bool get_profiling() const { return profiling_; }
+  godot::Dictionary get_perf(bool reset);
   int get_pending_loads() const;
   godot::String get_last_error() const;
   float get_effective_pixel_ratio() const { return ratio_; }
@@ -175,6 +197,9 @@ class JsuiView : public godot::Control {
   // On the runtime view: its Skia context, which its surface views share
   // (created on first use; false when there is none).
   bool createGpuContext(Renderer want, const godot::String& driver, godot::Object* interop);
+  // The new context's pipeline cache (jsui_view.cpp): the shipped list and
+  // the file for `renderer` ("vulkan", ...).
+  void setupPipelineCache(const godot::String& renderer);
   JsuiView* runtimeView() { return host_ ? host_ : this; }
   bool renderGpu();
   void releaseGpu();
@@ -211,6 +236,7 @@ class JsuiView : public godot::Control {
   bool handleGamepad(const godot::Ref<godot::InputEvent>& event);
   float computeRatio() const;
   double nowMs() const;
+  double clockMs();
 
   godot::String bundle_url_;
   bool dev_mode_ = false;
@@ -224,6 +250,10 @@ class JsuiView : public godot::Control {
   godot::String component_;
   godot::Dictionary initial_props_;
   bool auto_size_ = false;
+  bool profiling_ = false;
+  godot::String pipeline_cache_path_ = "user://jsui-pipelines.bin";
+  int fixed_fps_ = 0;
+  godot::String pipeline_file_;  // the runtime view's cache file in use (an OS path), "" for none
 
   // The runtime handle this view renders and sends input to: the runtime it
   // owns (its main surface), or a surface of host_'s runtime. A GPU render
@@ -260,6 +290,7 @@ class JsuiView : public godot::Control {
   bool attach_wanted_ = false;           // a surface view that should show its surface
   bool viewport_auto_ = false;           // jsui_set_viewport(0, 0) applied
   uint64_t start_usec_ = 0;
+  double clock_ms_ = 0, clock_wall_ms_ = 0;  // the runtime's clock (clockMs), and nowMs() then
   int logical_w_ = 0, logical_h_ = 0, pixel_w_ = 0, pixel_h_ = 0;
   float ratio_ = 1.f;
   bool render_pending_ = true;
@@ -331,7 +362,8 @@ class JsuiView : public godot::Control {
   // the time the frames and jsui_render_gpu_target in them take.
   uint64_t blocking_waits_ = 0, main_wait_usec_total_ = 0, gpu_jobs_ = 0, render_thread_jobs_ = 0;
   std::atomic<uint64_t> gpu_job_usec_total_{0}, jsui_render_usec_total_{0};
-  // Stats (get_render_stats): CPU time of the render calls.
+  // Stats (get_render_stats): CPU time of the render calls and of the last tick.
+  uint64_t tick_usec_last_ = 0;
   uint64_t renders_ = 0, render_usec_total_ = 0, render_usec_last_ = 0, render_usec_max_ = 0;
   int64_t dirty_px_total_ = 0;
   godot::Ref<godot::CanvasItemMaterial> premul_;

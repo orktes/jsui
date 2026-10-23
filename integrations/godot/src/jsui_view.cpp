@@ -1,5 +1,6 @@
 #include "jsui_view.h"
 
+#include <godot_cpp/classes/dir_access.hpp>
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/font.hpp>
@@ -14,6 +15,7 @@
 #include <godot_cpp/classes/input_event_screen_drag.hpp>
 #include <godot_cpp/classes/input_event_screen_touch.hpp>
 #include <godot_cpp/classes/json.hpp>
+#include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/time.hpp>
 #include <godot_cpp/classes/viewport.hpp>
@@ -119,6 +121,10 @@ void JsuiView::_bind_methods() {
   ClassDB::bind_method(D_METHOD("get_initial_props"), &JsuiView::get_initial_props);
   ClassDB::bind_method(D_METHOD("set_auto_size", "enabled"), &JsuiView::set_auto_size);
   ClassDB::bind_method(D_METHOD("get_auto_size"), &JsuiView::get_auto_size);
+  ClassDB::bind_method(D_METHOD("set_pipeline_cache_path", "path"), &JsuiView::set_pipeline_cache_path);
+  ClassDB::bind_method(D_METHOD("get_pipeline_cache_path"), &JsuiView::get_pipeline_cache_path);
+  ClassDB::bind_method(D_METHOD("set_fixed_fps", "fps"), &JsuiView::set_fixed_fps);
+  ClassDB::bind_method(D_METHOD("get_fixed_fps"), &JsuiView::get_fixed_fps);
   ClassDB::bind_method(D_METHOD("get_root_tag"), &JsuiView::get_root_tag);
 
   ClassDB::bind_method(D_METHOD("start"), &JsuiView::start);
@@ -143,6 +149,9 @@ void JsuiView::_bind_methods() {
   ClassDB::bind_method(D_METHOD("get_cpu_frame_image"), &JsuiView::get_cpu_frame_image);
   ClassDB::bind_method(D_METHOD("get_renderer"), &JsuiView::get_renderer);
   ClassDB::bind_method(D_METHOD("get_render_stats"), &JsuiView::get_render_stats);
+  ClassDB::bind_method(D_METHOD("set_profiling", "enabled"), &JsuiView::set_profiling);
+  ClassDB::bind_method(D_METHOD("get_profiling"), &JsuiView::get_profiling);
+  ClassDB::bind_method(D_METHOD("get_perf", "reset"), &JsuiView::get_perf, DEFVAL(true));
   ClassDB::bind_method(D_METHOD("get_pending_loads"), &JsuiView::get_pending_loads);
   ClassDB::bind_method(D_METHOD("get_last_error"), &JsuiView::get_last_error);
   ClassDB::bind_method(D_METHOD("get_effective_pixel_ratio"), &JsuiView::get_effective_pixel_ratio);
@@ -163,6 +172,11 @@ void JsuiView::_bind_methods() {
   ADD_PROPERTY(PropertyInfo(Variant::STRING, "component"), "set_component", "get_component");
   ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "initial_props"), "set_initial_props", "get_initial_props");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "auto_size"), "set_auto_size", "get_auto_size");
+  ADD_PROPERTY(PropertyInfo(Variant::BOOL, "profiling"), "set_profiling", "get_profiling");
+  ADD_PROPERTY(PropertyInfo(Variant::STRING, "pipeline_cache_path", PROPERTY_HINT_SAVE_FILE, "*.bin"),
+               "set_pipeline_cache_path", "get_pipeline_cache_path");
+  ADD_PROPERTY(PropertyInfo(Variant::INT, "fixed_fps", PROPERTY_HINT_RANGE, "0,240"), "set_fixed_fps",
+               "get_fixed_fps");
 
   ADD_SIGNAL(MethodInfo("message_received", PropertyInfo(Variant::STRING, "name"),
                         PropertyInfo(Variant::NIL, "data", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NIL_IS_VARIANT),
@@ -362,6 +376,7 @@ void JsuiView::createSurface() {
   std::string k = toStd(component_), props = propsJson();
   rt_ = jsui_surface_create(host_->rt_, k.c_str(), props.c_str(), w, h, computeRatio());
   if (!rt_) return;
+  if (profiling_) jsui_set_profiling(rt_, 1);
   start_usec_ = host_->start_usec_;
   logical_w_ = logical_h_ = pixel_w_ = pixel_h_ = 0;
   viewport_auto_ = false;
@@ -434,7 +449,9 @@ void JsuiView::start() {
     UtilityFunctions::push_error("JsuiView: jsui_create failed");
     return;
   }
+  if (profiling_) jsui_set_profiling(rt_, 1);
   start_usec_ = Time::get_singleton()->get_ticks_usec();
+  clock_ms_ = clock_wall_ms_ = 0;
   logical_w_ = logical_h_ = pixel_w_ = pixel_h_ = 0;
   last_error_.clear();
   cursor_.clear();
@@ -581,6 +598,15 @@ void JsuiView::onJoyConnectionChanged(int64_t device, bool connected) {
 
 double JsuiView::nowMs() const { return double(Time::get_singleton()->get_ticks_usec() - start_usec_) / 1000.0; }
 
+// The runtime's clock: the wall clock since start(), or with fixed_fps one
+// frame's time per tick (switching keeps it monotonic).
+double JsuiView::clockMs() {
+  const double wall = nowMs();
+  clock_ms_ += fixed_fps_ > 0 ? 1000.0 / fixed_fps_ : wall - clock_wall_ms_;
+  clock_wall_ms_ = wall;
+  return clock_ms_;
+}
+
 float JsuiView::computeRatio() const {
   if (pixel_ratio_ > 0.f) return pixel_ratio_;
   // Control -> window pixels: parent / CanvasLayer / Camera2D transforms
@@ -655,8 +681,10 @@ void JsuiView::process() {
   if (!rt_) return;
   updateViewport();
   for (JsuiView* v : surfaces_) v->updateViewport();
+  const uint64_t tick0 = Time::get_singleton()->get_ticks_usec();
   // One tick for every surface of the runtime, then each paints.
-  jsui_tick(rt_, nowMs());
+  jsui_tick(rt_, clockMs());
+  tick_usec_last_ = Time::get_singleton()->get_ticks_usec() - tick0;
   flushMessages();
   if (!rt_) return;  // a message handler stopped the view
   reportErrors();
@@ -699,6 +727,27 @@ void JsuiView::afterTick() {
   updateAutoSize();
   updateCursor();
   if (jsui_needs_redraw(rt_)) render_pending_ = true;
+}
+
+void JsuiView::setupPipelineCache(const String& renderer) {
+  pipeline_file_ = "";
+  String path = pipeline_cache_path_;
+  if (!gpu_ || path.is_empty()) return;
+  // One file per backend: the renderer's name before the extension.
+  String ext = path.get_extension();
+  path = ext.is_empty() ? path + "." + renderer : path.get_basename() + "." + renderer + "." + ext;
+  // A list shipped with the game at the same path under res://.
+  if (path.begins_with("user://")) {
+    String shipped = "res://" + path.substr(7);
+    if (FileAccess::file_exists(shipped)) {
+      PackedByteArray list = FileAccess::get_file_as_bytes(shipped);
+      if (jsui_gpu_precompile_pipelines(gpu_, list.ptr(), size_t(list.size())) < 0)
+        UtilityFunctions::push_warning("JsuiView: " + shipped + " is not a pipeline list of this JSUI build and renderer");
+    }
+  }
+  String file = isGodotPath(path) ? ProjectSettings::get_singleton()->globalize_path(path) : path;
+  DirAccess::make_dir_recursive_absolute(file.get_base_dir());
+  if (jsui_gpu_set_pipeline_cache(gpu_, file.utf8().get_data()) >= 0) pipeline_file_ = file;
 }
 
 void JsuiView::render() {
@@ -871,6 +920,53 @@ Dictionary JsuiView::get_render_stats() const {
   d["main_wait_usec_total"] = int64_t(main_wait_usec_total_);
   d["gpu_job_usec_total"] = int64_t(gpu_job_usec_total_.load(std::memory_order_relaxed));
   d["jsui_render_usec_total"] = int64_t(jsui_render_usec_total_.load(std::memory_order_relaxed));
+  d["tick_usec_last"] = int64_t(tick_usec_last_);
+  // The runtime's pipeline cache (its Skia context is the runtime view's).
+  const JsuiView* rv = host_ ? host_ : this;
+  if (renderer_ != Renderer::Cpu && renderer_ != Renderer::Unknown && rv->gpu_) {
+    JsuiPipelineStats s;
+    jsui_gpu_get_pipeline_stats(rv->gpu_, &s);
+    Dictionary p;
+    p["mode"] = s.mode == JSUI_PRECOMPILE_THREAD ? "thread" : s.mode == JSUI_PRECOMPILE_SLICED ? "sliced" : "none";
+    p["queued"] = s.queued;
+    p["precompiled"] = int64_t(s.precompiled);
+    p["failed"] = int64_t(s.failed);
+    p["compiled"] = int64_t(s.compiled);
+    p["added"] = int64_t(s.added);
+    p["unserializable"] = int64_t(s.unserializable);
+    p["known"] = int64_t(s.known);
+    p["file"] = rv->pipeline_file_;
+    d["pipelines"] = p;
+  }
+  return d;
+}
+
+void JsuiView::set_profiling(bool on) {
+  profiling_ = on;
+  if (rt_) jsui_set_profiling(rt_, on ? 1 : 0);
+}
+
+Dictionary JsuiView::get_perf(bool reset) {
+  Dictionary d;
+  if (!rt_) return d;
+  JsuiPerf p;
+  jsui_get_perf(rt_, &p, reset ? 1 : 0);
+  d["js_us"] = p.js_us;
+  d["commit_us"] = p.commit_us;
+  d["animated_us"] = p.animated_us;
+  d["style_us"] = p.style_us;
+  d["layout_us"] = p.layout_us;
+  d["input_us"] = p.input_us;
+  d["paint_us"] = p.paint_us;
+  d["other_us"] = p.other_us;
+  d["gpu_submit_us"] = p.gpu_submit_us;
+  d["image_decode_us"] = p.image_decode_us;
+  d["image_decodes"] = int64_t(p.image_decodes);
+  d["pipeline_compiles"] = int64_t(p.pipeline_compiles);
+  d["paragraph_builds"] = int64_t(p.paragraph_builds);
+  d["text_measures"] = int64_t(p.text_measures);
+  d["layout_passes"] = int64_t(p.layout_passes);
+  d["bridge_calls"] = int64_t(p.bridge_calls);
   return d;
 }
 

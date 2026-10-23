@@ -334,6 +334,57 @@ typedef struct JsuiRect {
  * repainted, 0 otherwise. */
 JSUI_API int jsui_render_rgba_incremental(JsuiRuntime* rt, void* pixels, int width, int height, size_t row_bytes,
                                           JsuiRect* dirty);
+
+/* ------------------------------------------------------------- Profiling
+ *
+ * Where a runtime's frames spend their time, e.g. for an in-game stats
+ * overlay or to find what makes a frame hitch. The work counters are always
+ * on (a few increments per operation). With profiling on, every tick, input
+ * call and render also accumulates wall time per phase (two clock reads per
+ * phase change). Phases nest and are exclusive: a phase entered from another
+ * pauses it (a React commit's style update is js -> commit -> style), so the
+ * *_us phase fields add up to the time since the reset.
+ *
+ * A runtime's surfaces (jsui_surface_create) share its totals and switch:
+ * a surface handle reports and toggles the same numbers as the runtime
+ * handle, which cover every surface's commits, style, layout, input and
+ * renders.
+ *
+ *     jsui_set_profiling(rt, 1);
+ *     ... frames ...
+ *     JsuiPerf p;
+ *     jsui_get_perf(rt, &p, 1);  // since the last reset, and reset
+ */
+typedef struct JsuiPerf {
+    /* Exclusive time per phase in microseconds (0 while profiling is off). */
+    double js_us;         /* QuickJS: timers, requestAnimationFrame, events, microtasks */
+    double commit_us;     /* the native side of React's tree and prop mutations */
+    double animated_us;   /* native-driven Animated */
+    double style_us;      /* style resolution */
+    double layout_us;     /* Yoga layout and text measurement */
+    double input_us;      /* hit testing and event routing (JS handlers count as js_us) */
+    double paint_us;      /* renders: recording the frame (the CPU raster also rasterises it) */
+    double other_us;      /* everything else, including the time between JSUI calls */
+    double gpu_submit_us; /* Graphite renders (jsui_render_gpu_target / _webgpu): submitting the
+                             recorded frame, which includes compiling new GPU pipelines and
+                             uploading textures */
+    /* Always measured. */
+    double image_decode_us;               /* decoding images (also inside the phase that needed them) */
+    unsigned long long image_decodes;
+    unsigned long long pipeline_compiles; /* GPU pipelines compiled on demand by this runtime's renders:
+                                             each is a possible hitch (see the pipeline cache) */
+    unsigned long long paragraph_builds;  /* text shaping */
+    unsigned long long text_measures;     /* text measured for layout */
+    unsigned long long layout_passes;
+    unsigned long long bridge_calls;      /* React -> native mutation calls */
+} JsuiPerf;
+
+/* Turns the per-phase timing on (non-zero) or off. Off by default. */
+JSUI_API void jsui_set_profiling(JsuiRuntime* rt, int on);
+/* The totals since the runtime was created or last reset; `reset` non-zero
+ * starts new totals. */
+JSUI_API void jsui_get_perf(JsuiRuntime* rt, JsuiPerf* out, int reset);
+
 /* ------------------------------------------------------------ GPU (OpenGL)
  *
  * Optional GPU backend: Skia Ganesh draws the frame straight into the
@@ -485,7 +536,11 @@ enum {
     /* Render opacity layers offscreen every time they are painted instead of
      * compositing their cached textures (see "Composited layers" in
      * docs/ARCHITECTURE.md; for comparisons). */
-    JSUI_WEBGPU_NO_LAYER_CACHE = 1 << 3
+    JSUI_WEBGPU_NO_LAYER_CACHE = 1 << 3,
+    /* Paint subtrees that keep being repainted unchanged draw by draw
+     * instead of from cached textures of them (see "Raster cache" in
+     * docs/ARCHITECTURE.md; for comparisons). */
+    JSUI_WEBGPU_NO_RASTER_CACHE = 1 << 4
 };
 
 typedef struct JsuiWebGPUTarget {
@@ -647,6 +702,86 @@ JSUI_API int jsui_render_gpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const 
  * input attachment, sampled, transfer src / dst) that is in
  * VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL before and after the call. */
 JSUI_API int jsui_render_vulkan(JsuiRuntime* rt, JsuiGpuContext* gpu, void* image, int width, int height, int flags);
+
+/* ---------------------------------------------- GPU pipeline cache (Graphite)
+ *
+ * Skia Graphite (every context above but GL: Vulkan, Metal, Dawn and
+ * jsui_gpu_create_webgpu) creates a GPU pipeline (compiled shaders + render
+ * state) the first time a kind of draw is needed, inside that frame: a list's
+ * first scroll over images with rounded corners or a panel's first entrance
+ * can stall its frame for tens of milliseconds on a cold driver. The
+ * pipeline cache records every pipeline a context creates and has the next
+ * session create them again up front, off the frame:
+ *
+ *     JsuiGpuContext* gpu = jsui_gpu_create_vulkan(&d);
+ *     jsui_gpu_precompile_pipelines(gpu, shipped, shipped_size);  // optional: a list shipped with the app
+ *     jsui_gpu_set_pipeline_cache(gpu, "<app data>/jsui-pipelines.vulkan.bin");
+ *     ... render as usual: new pipelines are appended to the file as they appear
+ *
+ * - Precompiling never blocks a frame. Vulkan and Metal precompile on a
+ *   worker thread of the context, as does Dawn when the device was created
+ *   with WGPUFeatureName_ImplicitDeviceSynchronization (Dawn then locks the
+ *   device itself). Other Dawn devices and the browser are not thread safe:
+ *   there the context precompiles for ~2 ms after a render (once per frame
+ *   however many surfaces it renders), on the render thread, unless the host
+ *   schedules it with jsui_gpu_precompile_step (e.g. while idle). A frame
+ *   that needs a pipeline before its turn compiles it as it would without
+ *   the cache.
+ * - Files and lists hold Skia's serialized pipeline keys behind a header
+ *   naming the Skia build and the backend. A file of another Skia build or
+ *   backend is started afresh, a damaged tail (a crash while appending) is
+ *   dropped, a file that is not a pipeline cache is left alone (the call
+ *   fails); each with one log line and nothing else. Use one file per
+ *   backend. Keys are fitted to the device before they are precompiled: a
+ *   list recorded on another GPU (one shipped with the app) gets this
+ *   device's depth/stencil formats, and a key the device cannot build is
+ *   skipped (counted as failed).
+ * - These calls are thread safe (they do not use the device), except
+ *   jsui_gpu_precompile_step: call it on the thread that renders.
+ * - Development: the environment variable JSUI_PIPELINE_CACHE names a file
+ *   that every Graphite context uses in place of the host's;
+ *   JSUI_LOG_PIPELINES=1 logs every pipeline a context creates,
+ *   JSUI_LOG_PIPELINES=compiled only those a frame compiled (new: not in
+ *   the cache yet; known: still queued for the precompile).
+ */
+enum {
+    JSUI_PRECOMPILE_NONE = 0,   /* no pipeline cache (GL contexts) */
+    JSUI_PRECOMPILE_THREAD = 1, /* on a worker thread */
+    JSUI_PRECOMPILE_SLICED = 2  /* in slices on the render thread */
+};
+
+typedef struct JsuiPipelineStats {
+    int mode;                         /* JSUI_PRECOMPILE_* */
+    int queued;                       /* keys waiting to be precompiled, the one compiling included */
+    unsigned long long precompiled;   /* keys precompiled from files / lists (also those a frame
+                                         created first: then a cache hit) */
+    unsigned long long failed;        /* keys this Skia cannot decode or this device cannot build */
+    unsigned long long compiled;      /* pipelines compiled on demand inside a frame (cache misses) */
+    unsigned long long added;         /* ... of them new: recorded (appended to the file) */
+    unsigned long long unserializable; /* ... of them that Skia cannot record */
+    unsigned long long known;         /* distinct pipelines recorded and queued */
+} JsuiPipelineStats;
+
+/* Loads the cache file at `path` (UTF-8; created when missing), queues its
+ * pipelines for precompiling, and from now on appends every new pipeline to
+ * it, including those the context created before the call. NULL / "" stops
+ * recording. Returns the number of pipelines queued, -1 when the file cannot
+ * be created / read or is not a pipeline cache, or `gpu` has no pipeline
+ * cache (GL, a WASM build: no file system). */
+JSUI_API int jsui_gpu_set_pipeline_cache(JsuiGpuContext* gpu, const char* path);
+/* Queues the pipelines of a list (the bytes of a cache file, or of
+ * jsui_gpu_save_pipelines) that the context does not know yet. Returns the
+ * number queued, -1 when the list is not one for this Skia build and backend. */
+JSUI_API int jsui_gpu_precompile_pipelines(JsuiGpuContext* gpu, const void* data, size_t size);
+/* Every pipeline the context knows (recorded or queued) as a list; free
+ * *out_data with jsui_free(). 0 on success, -1 without a pipeline cache. */
+JSUI_API int jsui_gpu_save_pipelines(JsuiGpuContext* gpu, void** out_data, size_t* out_size);
+/* JSUI_PRECOMPILE_SLICED: precompiles queued pipelines for about `budget_ms`
+ * (at least one) and leaves the scheduling to the host from now on (no more
+ * slices after renders). Returns the number still queued (also in the other
+ * modes, where it does nothing else). */
+JSUI_API int jsui_gpu_precompile_step(JsuiGpuContext* gpu, double budget_ms);
+JSUI_API void jsui_gpu_get_pipeline_stats(JsuiGpuContext* gpu, JsuiPipelineStats* out);
 
 /* ------------------------------------------------------------- GPU (Metal)
  *

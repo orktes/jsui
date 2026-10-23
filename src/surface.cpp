@@ -56,6 +56,10 @@ std::vector<SkIRect> coverRects(const SkRegion& damage) {
 
 Surface::Surface(Runtime& r, uint32_t* nextNodeId, Perf* perf) : rt(r), doc(nextNodeId, perf) {}
 
+bool Surface::needsRedraw() const {
+  return redraw_ || doc.paintDirty() || (doc.exactRepaintPending() && !rt.animatingFrames(*this));
+}
+
 Surface::~Surface() {
   doc.clear();
   doc.onNodeDestroyed = nullptr;
@@ -127,7 +131,7 @@ SkIRect Surface::beginCanvasTracked(const void* key, int width, int height, bool
   trackedRects_.clear();
   // Nothing marked dirty and the retained surface holds our last frame:
   // nothing to repaint, without walking the tree.
-  if (sameTarget && !doc.paintDirty() && rt.lastError.empty()) {
+  if (sameTarget && !doc.paintDirty() && !doc.exactRepaintPending() && rt.lastError.empty()) {
     *keyValid = true;
     return SkIRect::MakeEmpty();
   }
@@ -182,8 +186,8 @@ SkIRect Surface::paintTracked(SkCanvas* canvas, const void* pixels, int width, i
   doc.layout();
   // Nothing marked dirty and the buffer still holds our last frame: done,
   // without walking the tree.
-  if (incremental && !doc.paintDirty() && pixels == lastTarget_ && width == lastTargetW_ &&
-      height == lastTargetH_ && rowBytes == lastTargetRowBytes_ && rt.lastError.empty()) {
+  if (incremental && !doc.paintDirty() && !doc.exactRepaintPending() && pixels == lastTarget_ &&
+      width == lastTargetW_ && height == lastTargetH_ && rowBytes == lastTargetRowBytes_ && rt.lastError.empty()) {
     redraw_ = false;
     return SkIRect::MakeEmpty();
   }

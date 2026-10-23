@@ -50,6 +50,13 @@ add_library(jsui_godot SHARED
   src/jsui_gpu_render.cpp
   src/keymap.cpp)
 target_link_libraries(jsui_godot PRIVATE jsui godot::cpp)
+if(APPLE)
+  # Tracked Metal texture for JsuiView's src (src/metal_texture.mm).
+  enable_language(OBJCXX)
+  target_sources(jsui_godot PRIVATE src/metal_texture.mm)
+  set_source_files_properties(src/metal_texture.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_link_libraries(jsui_godot PRIVATE "-framework Metal" "-framework Foundation")
+endif()
 
 # File name follows the godot-cpp convention used by demo/jsui.gdextension:
 #   libjsui_godot.<platform>.<arch>.<so|dll|dylib>

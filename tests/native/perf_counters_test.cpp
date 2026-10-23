@@ -158,3 +158,50 @@ TEST(perf_hit_test_skips_rows_away_from_the_pointer) {
   CHECK(f.in().hitTest(20, 300) != nullptr);
   CHECK(f.counters().hitNodes <= uint64_t(kRows) + 17);
 }
+
+// jsui_get_perf: counters without profiling, phase times with it, reset.
+TEST(perf_capi_counters_and_phases) {
+  JsuiConfig cfg;
+  jsui_config_init(&cfg);
+  cfg.width = 64;
+  cfg.height = 64;
+  JsuiRuntime* rt = jsui_create(&cfg);
+  // A 1x1 PNG data: URI, decoded when the image is first needed.
+  const char* bundle =
+      "const n = __jsui_native; const img = n.createNode('Image');"
+      "n.setProps(img, {source: {uri: 'data:image/png;base64,"
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='},"
+      "  style: {width: 32, height: 32}});"
+      "n.appendChild(n.rootId, img);";
+  CHECK_EQ(jsui_load_bundle_source(rt, bundle, std::strlen(bundle), "perf.js"), 0);
+  std::vector<uint8_t> px(64 * 64 * 4);
+  jsui_tick(rt, 16);
+  jsui_render_rgba(rt, px.data(), 64, 64, 64 * 4);
+  JsuiPerf p;
+  jsui_get_perf(rt, &p, 1);
+  CHECK_EQ(p.image_decodes, 1ull);
+  CHECK(p.image_decode_us > 0);
+  CHECK(p.bridge_calls >= 3);
+  CHECK_EQ(p.paint_us, 0.0);  // profiling is off: no phase times
+  CHECK_EQ(p.pipeline_compiles, 0ull);
+  // The reset started new totals.
+  jsui_get_perf(rt, &p, 0);
+  CHECK_EQ(p.image_decodes, 0ull);
+  CHECK_EQ(p.bridge_calls, 0ull);
+
+  jsui_set_profiling(rt, 1);
+  const char* more =
+      "const v = __jsui_native.createNode('View');"
+      "__jsui_native.setProps(v, {style: {width: 10, height: 10, backgroundColor: 'red'}});"
+      "__jsui_native.appendChild(__jsui_native.rootId, v);";
+  CHECK_EQ(jsui_load_bundle_source(rt, more, std::strlen(more), "more.js"), 0);
+  jsui_tick(rt, 32);
+  jsui_render_rgba(rt, px.data(), 64, 64, 64 * 4);
+  jsui_get_perf(rt, &p, 1);
+  CHECK(p.js_us > 0);
+  CHECK(p.commit_us > 0);
+  CHECK(p.paint_us > 0);
+  CHECK(p.layout_us > 0);
+  CHECK_EQ(p.gpu_submit_us, 0.0);  // a CPU render
+  jsui_destroy(rt);
+}
