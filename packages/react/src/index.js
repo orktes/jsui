@@ -35,10 +35,12 @@ import { registerAsset } from './components/basic.js';
 import { Host } from './apis.js';
 import { installHostData } from './hostData.js';
 import { installHostBuffer } from './hostBuffer.js';
+import { installHostTexture, HostTexture } from './hostTexture.js';
 
 installGlobals();
 installHostData();
 installHostBuffer();
+installHostTexture();
 // include/jsui/jsui.h documents a `jsui` global for host messages.
 if (!globalThis.jsui) globalThis.jsui = Host;
 makeAnimated({ View, Text, Image, ScrollView, FlatList, SectionList });
@@ -49,6 +51,7 @@ export {
   Text,
   Image,
   ImageBackground,
+  HostTexture,
   ScrollView,
   TextInput,
   Pressable,

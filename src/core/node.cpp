@@ -199,7 +199,8 @@ void Node::setProps(const Value& props) {
     }
     if (type_ == NodeType::Image) {
       if (!valueEquals(old["source"], props_["source"]) || !valueEquals(old["src"], props_["src"]) ||
-          !valueEquals(old["defaultSource"], props_["defaultSource"])) {
+          !valueEquals(old["defaultSource"], props_["defaultSource"]) ||
+          !valueEquals(old["texture"], props_["texture"])) {
         imageCache.reset();
         image::request(this);
         if (doc_) doc_->queueImageEvents(id_, image::settled(this));

@@ -191,6 +191,14 @@ globalThis.__jsui_native = {
   bufferKeys() {
     return Array.from(hostBuffers.keys());
   },
+  // Host textures (src/render/host_textures.cpp): [width, height, version].
+  texture(key) {
+    const e = hostTextures.get(key);
+    return e ? [e.width, e.height, e.version] : undefined;
+  },
+  textureKeys() {
+    return Array.from(hostTextures.keys());
+  },
   // Calls (Host.call -> on_call; the test answers with mock.resolveCall / rejectCall).
   hostCall(name, json, settle) {
     if (!mock.callsEnabled) return 0;
@@ -212,6 +220,7 @@ globalThis.__jsui_native = {
 const hostState = new Map();
 let stateVersion = 1;
 const hostBuffers = new Map(); // key -> {storage, type, count, version}
+const hostTextures = new Map(); // key -> {width, height, version}
 const BUFFER_TYPES = [Float32Array, Float64Array, Int32Array, Uint32Array, Int16Array, Uint16Array, Int8Array, Uint8Array];
 let nextCallId = 1;
 function applyPatch(target, patch) {
@@ -257,6 +266,18 @@ Object.assign(mock, {
     mock.dirtyBuffers.add(key);
   },
   dirtyBuffers: new Set(),
+  /** Embedder side: jsui_set_texture ({width, height}; undefined removes). Delivered by mock.tickTextures(). */
+  setHostTexture(key, size) {
+    if (size === undefined) hostTextures.delete(key);
+    else hostTextures.set(key, { width: size.width, height: size.height, version: stateVersion++ });
+    mock.dirtyTextures.add(key);
+  },
+  dirtyTextures: new Set(),
+  tickTextures() {
+    const keys = Array.from(mock.dirtyTextures);
+    mock.dirtyTextures.clear();
+    if (keys.length) globalThis.__jsui_onHostTexture(keys);
+  },
   tickBuffers() {
     const keys = Array.from(mock.dirtyBuffers);
     mock.dirtyBuffers.clear();

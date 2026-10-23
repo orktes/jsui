@@ -174,7 +174,7 @@ struct GL {
 constexpr unsigned GL_TEXTURE_2D = 0x0DE1, GL_RGBA = 0x1908, GL_RGBA8 = 0x8058, GL_UNSIGNED_BYTE = 0x1401,
                    GL_FRAMEBUFFER = 0x8D40, GL_COLOR_ATTACHMENT0 = 0x8CE0, GL_FRAMEBUFFER_COMPLETE = 0x8CD5,
                    GL_TEXTURE_MIN_FILTER = 0x2801, GL_TEXTURE_MAG_FILTER = 0x2800, GL_NEAREST = 0x2600,
-                   GL_PACK_ALIGNMENT = 0x0D05, GL_COLOR_BUFFER_BIT = 0x4000, GL_SCISSOR_TEST = 0x0C11,
+                   GL_PACK_ALIGNMENT = 0x0D05, GL_UNPACK_ALIGNMENT = 0x0CF5, GL_COLOR_BUFFER_BIT = 0x4000, GL_SCISSOR_TEST = 0x0C11,
                    GL_VERSION = 0x1F02, GL_RENDERER = 0x1F01;
 
 #endif  // JSUI_GPU_TESTS
@@ -787,6 +787,78 @@ TEST(gpu_fbo_bottom_left_and_no_clear) {
     CHECK_NEAR(double((blend >> 8) & 255), 128, 3);
     CHECK_NEAR(double((blend >> 16) & 255), 128, 3);
     CHECK_EQ(int(blend >> 24), 255);
+  });
+}
+
+// Host textures (jsui_set_texture, JSUI_TEXTURE_GL): a texture of the GL
+// context drawn in place, matching the same pixels given as CPU pixels;
+// new contents (jsui_texture_updated) show in the next frame; a
+// bottom-left origin is flipped.
+TEST(gpu_host_texture_gl) {
+  forEachContext("gpu_host_texture_gl", [](GLContext& c, JsuiGpuContext* gpu, Api api) {
+    // 4x2, row 0 (the top as uploaded) red, row 1 blue.
+    std::vector<uint32_t> rows(8);
+    for (int x = 0; x < 4; x++) {
+      rows[x] = 0xff0000ffu;
+      rows[4 + x] = 0xffff0000u;
+    }
+    unsigned src = 0;
+    c.gl.GenTextures(1, &src);
+    c.gl.BindTexture(GL_TEXTURE_2D, src);
+    c.gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    c.gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    c.gl.PixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    c.gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, rows.data());
+    jsui_gpu_reset(gpu);
+    Scene s(64, 48);
+    jsui::Node* v = s.add(R"J({"type":"Image","props":{"texture":"gl","resizeMode":"stretch"},
+                               "style":{"position":"absolute","left":8,"top":8,"width":40,"height":32}})J");
+    (void)v;
+    // The CPU reference: the same pixels as CPU pixels.
+    s.rt->textures.setPixels("gl", rows.data(), 4, 2, 0, 0);
+    s.render();
+    JsuiTexture t{};
+    t.kind = JSUI_TEXTURE_GL;
+    t.handle = reinterpret_cast<void*>(uintptr_t(src));
+    t.width = 4;
+    t.height = 2;
+    CHECK_EQ(s.rt->textures.set("gl", &t), 1);
+    RenderTexture rtex(c.gl, 64, 48);
+    JsuiGLTarget target{};
+    target.texture = rtex.tex;
+    target.width = 64;
+    target.height = 48;
+    target.flags = JSUI_GL_TOP_LEFT_ORIGIN | JSUI_GL_NO_RETAIN;
+    CHECK_EQ(jsui::gpu::render(s.rt->main(), gpu, target), 0);
+    std::vector<uint32_t> out = rtex.read(false);
+    savePng((std::string("gpu_host_texture_") + apiName(api)).c_str(), out, 64, 48);
+    auto px = [&](int x, int y) { return out[size_t(y) * 64 + x]; };
+    CHECK_EQ(px(28, 12), 0xff0000ffu);  // top half red
+    CHECK_EQ(px(28, 36), 0xffff0000u);  // bottom half blue
+    CHECK_EQ(px(2, 2), 0u);
+    Diff d = compare(out, s.px, 8);
+    CHECK(d.over < 0.02);  // the red/blue edge is filtered the same way up to rounding
+    // New contents in the same texture: green.
+    std::vector<uint32_t> green(8, 0xff00ff00u);
+    c.gl.BindTexture(GL_TEXTURE_2D, src);
+    c.gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, green.data());
+    CHECK(!s.rt->needsRedraw());
+    CHECK(s.rt->textures.updated("gl"));
+    CHECK(s.rt->needsRedraw());
+    CHECK_EQ(jsui::gpu::render(s.rt->main(), gpu, target), 0);
+    out = rtex.read(false);
+    CHECK_EQ(px(28, 12), 0xff00ff00u);
+    // A bottom-left texture (rows bottom first) is shown upright.
+    c.gl.BindTexture(GL_TEXTURE_2D, src);
+    c.gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, rows.data());
+    t.flags = JSUI_TEXTURE_BOTTOM_LEFT_ORIGIN;
+    CHECK_EQ(s.rt->textures.set("gl", &t), 1);
+    CHECK_EQ(jsui::gpu::render(s.rt->main(), gpu, target), 0);
+    out = rtex.read(false);
+    CHECK_EQ(px(28, 12), 0xffff0000u);
+    CHECK_EQ(px(28, 36), 0xff0000ffu);
+    s.rt->textures.remove("gl");
+    c.gl.DeleteTextures(1, &src);
   });
 }
 
