@@ -185,20 +185,27 @@ springs, then of list scrolling, with vsync off; prints frame and render
 times) and `--no-world` (no 3D scene). For the pipeline cache:
 `--pipeline-cache P` (sets `pipeline_cache_path`; a path outside `user://`
 leaves the shipped list out), `--tour` (with `--self-test`: also clicks
-through the tabs, the carousel and the deploy panel), `--first-scroll`
-(waits for the precompile, then prints the worst frame, the worst JsuiView
-render and the pipelines compiled during the list's first scroll) and
-`--expect-warm-pipelines` (fails unless the cache was loaded and the
-self-test / scroll compiled no pipeline). In `smoke-test.sh` they are
-`PIPELINE_CACHE=<file>`, `TOUR=1`, `FIRST_SCROLL=1` and
-`EXPECT_WARM_PIPELINES=1`; CI records a cache in its Vulkan run and checks
-the first scroll over it:
+through the tabs, the carousel and the deploy panel),
+`--first-scroll` (waits for the precompile, then prints the worst frame, the
+worst JsuiView render and the pipelines compiled during the list's first
+scroll), `--expect-warm-pipelines` (fails unless the cache was loaded and the
+self-test / scroll compiled no pipeline) and `--ui-fixed-fps N` (sets
+`fixed_fps`; with `--first-scroll` the scroll starts at 2 s of UI time). In
+`smoke-test.sh` they are `PIPELINE_CACHE=<file>`, `TOUR=1`, `FIRST_SCROLL=1`,
+`EXPECT_WARM_PIPELINES=1` and `FIXED_FPS=N` (and `NO_WORLD=1`). Which
+pipelines a frame needs depends on the frame rate (the raster cache and
+opacity layers keep a subtree's texture, or not, by frames), so CI records
+a cache in its Vulkan run, adds the first scroll on a 60 fps UI clock, and
+checks that the same scroll then compiles nothing
+(`JSUI_LOG_PIPELINES=compiled` names what the frames compiled):
 
 ```sh
 GODOT_RENDERING=vulkan SIZES=1280x720 PIPELINE_CACHE=build/godot-pipelines.bin xvfb-run -a -s "-screen 0 1920x1080x24" \
   integrations/godot/smoke-test.sh build/godot-vulkan.png
-GODOT_RENDERING=vulkan SIZES=1280x720 PIPELINE_CACHE=build/godot-pipelines.bin FIRST_SCROLL=1 EXPECT_WARM_PIPELINES=1 \
+GODOT_RENDERING=vulkan SIZES=1280x720 PIPELINE_CACHE=build/godot-pipelines.bin FIRST_SCROLL=1 FIXED_FPS=60 \
   xvfb-run -a -s "-screen 0 1920x1080x24" integrations/godot/smoke-test.sh
+JSUI_LOG_PIPELINES=compiled GODOT_RENDERING=vulkan SIZES=1280x720 PIPELINE_CACHE=build/godot-pipelines.bin FIRST_SCROLL=1 FIXED_FPS=60 \
+  EXPECT_WARM_PIPELINES=1 xvfb-run -a -s "-screen 0 1920x1080x24" integrations/godot/smoke-test.sh
 ```
 The project uses the Compatibility renderer by default (it runs everywhere);
 pass `--rendering-method forward_plus` (or `mobile`) for the GPU renderer.
@@ -231,6 +238,7 @@ node in the inspector.
 | `auto_size` | bool | `false` | size the view to the component's content: the view's minimum size follows the laid-out size |
 | `profiling` | bool | `false` | time every frame phase (`jsui_set_profiling`), read with `get_perf()` |
 | `pipeline_cache_path` | String | `"user://jsui-pipelines.bin"` | the GPU pipeline cache of the runtime's Skia context (the renderer's name goes before the extension); empty: none. Applies when the context is created; a surface view uses its runtime view's. See [Rendering](#rendering) |
+| `fixed_fps` | int | `0` | `0`: the runtime's clock (animations, timers, scrolling) is the wall clock. `N`: every frame advances it by 1/N s however long frames take, so the UI draws the frames of a machine running at N fps on any machine (tests, recording a pipeline list). The runtime view's applies |
 
 Changing `bundle_url` or `dev_mode` on a running view restarts it.
 

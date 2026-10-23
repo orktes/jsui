@@ -97,6 +97,12 @@ class JsuiView : public godot::Control {
   // frame); "" for none. Surface views use their runtime view's.
   void set_pipeline_cache_path(const godot::String& path) { pipeline_cache_path_ = path; }
   godot::String get_pipeline_cache_path() const { return pipeline_cache_path_; }
+  // 0: the runtime's clock (animations, timers, scrolling) is the wall
+  // clock. N > 0: each frame advances it by 1/N s however long frames take,
+  // so the UI draws the frames of a machine running at N fps, the same on
+  // any machine (tests, recording a pipeline list). The runtime view's applies.
+  void set_fixed_fps(int fps) { fixed_fps_ = fps > 0 ? fps : 0; }
+  int get_fixed_fps() const { return fixed_fps_; }
 
   // Methods.
   void start();   // (re)creates the runtime and loads bundle_url (surface views: the surface)
@@ -219,6 +225,7 @@ class JsuiView : public godot::Control {
   bool handleGamepad(const godot::Ref<godot::InputEvent>& event);
   float computeRatio() const;
   double nowMs() const;
+  double clockMs();
 
   godot::String bundle_url_;
   bool dev_mode_ = false;
@@ -232,6 +239,7 @@ class JsuiView : public godot::Control {
   bool auto_size_ = false;
   bool profiling_ = false;
   godot::String pipeline_cache_path_ = "user://jsui-pipelines.bin";
+  int fixed_fps_ = 0;
   godot::String pipeline_file_;  // the runtime view's cache file in use (an OS path), "" for none
 
   // The runtime handle this view renders and sends input to: the runtime it
@@ -269,6 +277,7 @@ class JsuiView : public godot::Control {
   bool attach_wanted_ = false;           // a surface view that should show its surface
   bool viewport_auto_ = false;           // jsui_set_viewport(0, 0) applied
   uint64_t start_usec_ = 0;
+  double clock_ms_ = 0, clock_wall_ms_ = 0;  // the runtime's clock (clockMs), and nowMs() then
   int logical_w_ = 0, logical_h_ = 0, pixel_w_ = 0, pixel_h_ = 0;
   float ratio_ = 1.f;
   bool render_pending_ = true;

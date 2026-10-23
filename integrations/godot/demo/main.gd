@@ -54,6 +54,11 @@ extends Control
 ##   --tour              with --self-test: afterwards also click the tabs,
 ##                       page the carousel and open / close the deploy panel
 ##                       (more of the UI's draws, e.g. to record a pipeline list)
+##   --ui-fixed-fps N    JsuiView.fixed_fps: the UI's clock advances 1/N s per
+##                       frame, so it draws the same frames on any machine
+##                       (with --first-scroll: the scroll starts 2 s of UI
+##                       time after the start; for recording pipeline lists
+##                       and checking them)
 ##   --pipeline-cache P  JsuiView.pipeline_cache_path (the renderer's name goes
 ##                       before the extension: P = /tmp/a.bin -> /tmp/a.vulkan.bin).
 ##                       A path outside user:// also leaves the demo's shipped
@@ -99,6 +104,8 @@ var _bench := 0
 var _first_scroll := false
 var _tour := false
 var _expect_warm := false
+var _fixed_fps := 0
+var _start_frame := 0  # Engine.get_process_frames() as the UI started
 var _pongs := 0
 var _ui_answers := 0
 var _unhandled_clicks := 0
@@ -135,6 +142,7 @@ class FakeWebGPUInterop extends Object:
 
 
 func _enter_tree() -> void:
+	_start_frame = Engine.get_process_frames()
 	# Runs before JsuiView's _ready, so the view starts with these settings.
 	var view = get_node("JsuiView")
 	var args := OS.get_cmdline_user_args()
@@ -184,6 +192,10 @@ func _enter_tree() -> void:
 				i += 1
 			"--expect-warm-pipelines":
 				_expect_warm = true
+			"--ui-fixed-fps":
+				_fixed_fps = int(v)
+				view.fixed_fps = _fixed_fps
+				i += 1
 			"--no-world":
 				var world := get_node_or_null("World")
 				if world:
@@ -265,7 +277,7 @@ func _on_ui_call(id: int, name: String, args) -> void:
 func _stats() -> Dictionary:
 	var v := Engine.get_version_info()
 	return {
-		"fps": Engine.get_frames_per_second(),
+		"fps": Engine.get_frames_per_second() if _fixed_fps == 0 else _fixed_fps,
 		"frame": Engine.get_process_frames(),
 		"version": "%d.%d.%d" % [v.major, v.minor, v.patch],
 	}
@@ -276,7 +288,8 @@ func _send_stats() -> void:
 
 
 func _process(delta: float) -> void:
-	_stats_timer -= delta
+	# Once a second; of UI time with --ui-fixed-fps (the same frames each run).
+	_stats_timer -= delta if _fixed_fps == 0 else 1.0 / _fixed_fps
 	if _stats_timer <= 0.0:
 		_stats_timer = 1.0
 		_send_stats()
@@ -1017,7 +1030,10 @@ func _run_bench() -> void:
 ## --first-scroll: the armory list's first scroll, frame by frame. On a GPU
 ## renderer the first frames that draw something new compile Skia pipelines
 ## (shaders + pipeline state) in the frame; the pipeline cache moves that to
-## startup, off the frame.
+## startup, off the frame. Which pipelines depends on the frame rate (what
+## the raster cache and opacity layers hold in which frame): with
+## --ui-fixed-fps every run draws the same frames, from the start to the
+## scroll at 2 s of UI time.
 func _run_first_scroll() -> void:
 	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
 	Engine.max_fps = 0
@@ -1025,14 +1041,23 @@ func _run_first_scroll() -> void:
 		printerr("first-scroll: the UI did not report its anchors")
 		get_tree().quit(1)
 		return
-	await _wait(1.5)  # the staggered entrance settles
+	if _fixed_fps == 0:
+		await _wait(1.5)  # the staggered entrance settles
 	var t_wait := Time.get_ticks_usec()
 	if _expect_warm:
 		await _check_precompiled()
 	else:
 		await _wait_for(func(): return _pipeline_stats().get("queued", 0) == 0, 120.0)
 	var waited_ms := (Time.get_ticks_usec() - t_wait) / 1000.0
-	await _wait(0.3)
+	if _fixed_fps == 0:
+		await _wait(0.3)
+	else:
+		var start := _start_frame + 2 * _fixed_fps
+		if Engine.get_process_frames() > start:
+			print("first-scroll: started %d frames late (the precompile took longer): this run's frames differ" % [
+				Engine.get_process_frames() - start])
+		while Engine.get_process_frames() < start:
+			await get_tree().process_frame
 	ui.set_profiling(true)
 	ui.get_perf(true)
 	var p0 := _pipeline_stats()

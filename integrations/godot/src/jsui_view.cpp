@@ -118,6 +118,8 @@ void JsuiView::_bind_methods() {
   ClassDB::bind_method(D_METHOD("get_auto_size"), &JsuiView::get_auto_size);
   ClassDB::bind_method(D_METHOD("set_pipeline_cache_path", "path"), &JsuiView::set_pipeline_cache_path);
   ClassDB::bind_method(D_METHOD("get_pipeline_cache_path"), &JsuiView::get_pipeline_cache_path);
+  ClassDB::bind_method(D_METHOD("set_fixed_fps", "fps"), &JsuiView::set_fixed_fps);
+  ClassDB::bind_method(D_METHOD("get_fixed_fps"), &JsuiView::get_fixed_fps);
   ClassDB::bind_method(D_METHOD("get_root_tag"), &JsuiView::get_root_tag);
 
   ClassDB::bind_method(D_METHOD("start"), &JsuiView::start);
@@ -167,6 +169,8 @@ void JsuiView::_bind_methods() {
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "profiling"), "set_profiling", "get_profiling");
   ADD_PROPERTY(PropertyInfo(Variant::STRING, "pipeline_cache_path", PROPERTY_HINT_SAVE_FILE, "*.bin"),
                "set_pipeline_cache_path", "get_pipeline_cache_path");
+  ADD_PROPERTY(PropertyInfo(Variant::INT, "fixed_fps", PROPERTY_HINT_RANGE, "0,240"), "set_fixed_fps",
+               "get_fixed_fps");
 
   ADD_SIGNAL(MethodInfo("message_received", PropertyInfo(Variant::STRING, "name"),
                         PropertyInfo(Variant::NIL, "data", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NIL_IS_VARIANT),
@@ -438,6 +442,7 @@ void JsuiView::start() {
   }
   if (profiling_) jsui_set_profiling(rt_, 1);
   start_usec_ = Time::get_singleton()->get_ticks_usec();
+  clock_ms_ = clock_wall_ms_ = 0;
   logical_w_ = logical_h_ = pixel_w_ = pixel_h_ = 0;
   last_error_.clear();
   cursor_.clear();
@@ -583,6 +588,15 @@ void JsuiView::onJoyConnectionChanged(int64_t device, bool connected) {
 
 double JsuiView::nowMs() const { return double(Time::get_singleton()->get_ticks_usec() - start_usec_) / 1000.0; }
 
+// The runtime's clock: the wall clock since start(), or with fixed_fps one
+// frame's time per tick (switching keeps it monotonic).
+double JsuiView::clockMs() {
+  const double wall = nowMs();
+  clock_ms_ += fixed_fps_ > 0 ? 1000.0 / fixed_fps_ : wall - clock_wall_ms_;
+  clock_wall_ms_ = wall;
+  return clock_ms_;
+}
+
 float JsuiView::computeRatio() const {
   if (pixel_ratio_ > 0.f) return pixel_ratio_;
   // Control -> window pixels: parent / CanvasLayer / Camera2D transforms
@@ -659,7 +673,7 @@ void JsuiView::process() {
   for (JsuiView* v : surfaces_) v->updateViewport();
   const uint64_t tick0 = Time::get_singleton()->get_ticks_usec();
   // One tick for every surface of the runtime, then each paints.
-  jsui_tick(rt_, nowMs());
+  jsui_tick(rt_, clockMs());
   tick_usec_last_ = Time::get_singleton()->get_ticks_usec() - tick0;
   flushMessages();
   if (!rt_) return;  // a message handler stopped the view

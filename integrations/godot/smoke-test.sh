@@ -48,9 +48,16 @@
 # FIRST_SCROLL=1 measures the first scroll of the demo's list instead of the
 # self-test (main.gd --first-scroll; one run per size, no capture), and
 # EXPECT_WARM_PIPELINES=1 fails it unless the cache loaded and precompiled
-# pipelines and the scroll compiled none (CI: a second run over the file the
-# smoke test recorded). TOUR=1 also clicks through the rest of the UI after
-# the self-test (main.gd --tour; record-pipelines.sh).
+# pipelines and the scroll compiled none (CI: over the file the smoke test
+# and a first scroll with the same FIXED_FPS recorded). TOUR=1 also clicks
+# through the rest of the UI after the self-test (main.gd --tour;
+# record-pipelines.sh). Which pipelines the frames need depends on the frame
+# rate (what the raster cache and opacity layers hold in which frame):
+# FIXED_FPS=<n> runs the UI's clock at n frames a second whatever the
+# machine's frame rate (JsuiView.fixed_fps, main.gd --ui-fixed-fps), so
+# every run draws the same frames; the first scroll then starts at 2 s of UI
+# time. NO_WORLD=1 leaves the demo's 3D scene out (main.gd --no-world): the
+# same UI in faster frames.
 #
 # FAKE_WEBGPU_INTEROP=<rev> registers a stand-in for the godot-aw3 fork's
 # WebGPUInterop singleton (main.gd --fake-webgpu-interop) that reports Dawn
@@ -145,6 +152,8 @@ if [[ -n "${PIPELINE_CACHE:-}" ]]; then
 fi
 [[ -n "${EXPECT_WARM_PIPELINES:-}" ]] && checks+=(--expect-warm-pipelines)
 [[ -n "${TOUR:-}" ]] && checks+=(--tour)
+[[ -n "${NO_WORLD:-}" ]] && checks+=(--no-world)
+[[ -n "${FIXED_FPS:-}" ]] && checks+=(--ui-fixed-fps "$FIXED_FPS")
 log="$(mktemp)"
 vkdir=""
 trap 'rm -f "$log"; if [[ -n "$vkdir" ]]; then rm -rf "$vkdir"; fi' EXIT

@@ -670,13 +670,26 @@ first entrance stalls for tens of milliseconds. Every Graphite context
   That is what makes a list shipped with an app (the Godot demo's,
   recorded on lavapipe by `integrations/godot/record-pipelines.sh`) safe on
   other GPUs.
+* **Which pipelines depends on the frame rate.** The raster cache and
+  opacity layers keep a subtree's texture, or not, by frames (painter.cpp,
+  updateRasterCache), so the same UI draws other things at another frame
+  rate: at 60 fps the Godot demo's entrance and first scroll render a
+  subtree that holds a path into an MSAA texture of its own (a fresh render
+  pass, where at lavapipe's ~8 fps it is drawn into the retained frame) and
+  draw a raster-cached row under the list's rounded clip: nine pipelines
+  that the slower run never needs. A list is therefore recorded on fixed UI
+  clocks (JsuiView `fixed_fps`: each frame advances the runtime's clock by
+  1/N s, the frames a machine at N fps draws, on any machine), at several
+  rates. `JSUI_LOG_PIPELINES=compiled` logs each pipeline a frame compiles,
+  `new` (not in the cache) or `known` (still queued for the precompile).
 * **Tests.** `tests/native/pipeline_cache_test.cpp` covers the format and
   file repair. `vulkan_test.cpp` records a context's pipelines, then checks
   that the next context precompiles them (worker thread, and sliced) and
   that the same frames compile nothing, also from a list whose depth formats
   were swapped as another vendor's would be. The Godot job's Vulkan run
-  records a cache and a second run checks that the list's first scroll
-  compiles no pipeline.
+  records a cache, a run of the list's first scroll on a 60 fps UI clock
+  adds to it, and the same run again must compile no pipeline while
+  scrolling.
 
 ## Game data
 
