@@ -382,7 +382,13 @@ class Game {
   void screenshot(const std::string& path) {
     std::vector<uint8_t> px(size_t(pixelW_) * pixelH_ * 4);
     glFinish();
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+#if defined(_WIN32)
+    // Windows' gl.h is GL 1.1: glBindFramebuffer comes from the driver.
+    using BindFramebufferFn = void(APIENTRY*)(GLenum, GLuint);
+    auto glBindFramebuffer = reinterpret_cast<BindFramebufferFn>(wglGetProcAddress("glBindFramebuffer"));
+    if (glBindFramebuffer)
+#endif
+    glBindFramebuffer(0x8D40 /* GL_FRAMEBUFFER */, fbo_);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(0, 0, pixelW_, pixelH_, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
     sg_reset_state_cache();

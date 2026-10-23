@@ -171,3 +171,14 @@ what the deterministic tools (`jsui-render`, `jsui-record`) and reference tests 
 `integrations/godot` is a GDExtension with a `JsuiView` Control and a demo
 project. Build it with `-DJSUI_BUILD_GODOT=ON` (it is off by default). See
 [integrations/godot/README.md](integrations/godot/README.md).
+
+## raylib, SDL3 and sokol
+
+`integrations/raylib`, `integrations/sdl3` and `integrations/sokol` run one
+shared game HUD in three game loops through the C API: input pass-through
+(what the UI does not consume moves the camera), per-frame unit positions
+driving nameplates with no JS per frame, and three ways to get the UI on
+screen (Skia GL into a raylib `RenderTexture2D`, a dirty-rect CPU upload on any
+`SDL_Renderer` backend, Skia GL straight into sokol's swapchain framebuffer).
+Build them with `-DJSUI_BUILD_RAYLIB=ON -DJSUI_BUILD_SDL3=ON
+-DJSUI_BUILD_SOKOL=ON`. See [integrations/README.md](integrations/README.md).

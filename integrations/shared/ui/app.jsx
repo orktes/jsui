@@ -116,7 +116,7 @@ function ActionButton({ label, hint, onPress, accent, innerRef, onLayout, autoFo
       autoFocus={autoFocus}
       style={({ pressed, focused, hovered }) => [
         styles.action,
-        (focused || hovered) && { borderColor: accent, backgroundColor: 'rgba(242, 195, 91, 0.14)' },
+        (focused || hovered) && { borderColor: accent, backgroundColor: 'rgba(255, 255, 255, 0.1)' },
         pressed && styles.actionPressed,
       ]}
     >

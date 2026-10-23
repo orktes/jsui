@@ -121,8 +121,9 @@ class Game {
   explicit Game(const Options& o) : opt_(o) {}
 
   int run() {
-    unsigned flags = FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI | FLAG_VSYNC_HINT;
-    if (opt_.frames >= 0 || opt_.selftest) flags &= ~FLAG_VSYNC_HINT;
+    unsigned flags = FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI | FLAG_VSYNC_HINT | FLAG_MSAA_4X_HINT;
+    // Fixed-frame runs (CI under Xvfb) go as fast as they can, on any visual.
+    if (opt_.frames >= 0 || opt_.selftest) flags &= ~(FLAG_VSYNC_HINT | FLAG_MSAA_4X_HINT);
     SetConfigFlags(flags);
     SetTraceLogLevel(LOG_WARNING);
     InitWindow(opt_.width, opt_.height, "JSUI + raylib");
