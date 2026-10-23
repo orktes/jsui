@@ -115,9 +115,24 @@ view's own children:
 
 ## npm packages
 
-`@orktes/jsui-react` (the React Native API), `@orktes/jsui-cli` (`jsui build` / `jsui dev`)
-and `@orktes/jsui-web` (the browser host with the WASM modules) are published to npm
-as 0.x releases. See [docs/RELEASING.md](docs/RELEASING.md).
+`@orktes/jsui-react` (the React Native API), `@orktes/jsui-cli` (`jsui build` / `jsui dev`,
+headless `jsui screenshot` / `inspect` / `run`, and the agent skill) and `@orktes/jsui-web`
+(the browser host with the WASM modules) are published to npm as 0.x releases. See
+[docs/RELEASING.md](docs/RELEASING.md).
+
+## Coding agents and headless checks
+
+`npx jsui skill install` adds the JSUI [agent skill](packages/cli/skills/jsui/SKILL.md) to a
+project (`.claude/skills/jsui/`), or install it in Claude Code as a plugin with
+`/plugin marketplace add orktes/jsui` and `/plugin install jsui@jsui`. It teaches the
+supported React Native subset, gamepad focus, animation, game data, Lottie, shaders, host
+textures and embedding, and how to verify a UI without a browser:
+
+```sh
+npx jsui screenshot app.jsx -o shot.png       # the CPU WASM runtime in Node, deterministic
+npx jsui inspect app.jsx                      # view tree: types, testIDs, text, focus, layout
+npx jsui run app.jsx steps.json               # scripted clicks / keys / gamepad / state + expectations
+```
 
 ## Build (native)
 

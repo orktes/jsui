@@ -1,11 +1,16 @@
 # @orktes/jsui-cli
 
-Bundles React Native–style apps for the JSUI runtime (esbuild 0.28.2) and
-serves them to a dev host with hot updates (React Fast Refresh).
+Bundles React Native–style apps for the JSUI runtime (esbuild 0.28.2), serves
+them to a dev host with hot updates (React Fast Refresh), renders and scripts
+them headlessly, and ships the JSUI agent skill for coding agents.
 
 ```sh
 npx jsui build app.jsx -o dist/bundle.js [--minify] [--sourcemap] [--dev]
 npx jsui dev app.jsx [--port 5173] [--host 127.0.0.1] [--no-hmr]
+npx jsui screenshot app.jsx -o shot.png [--width 1280 --height 720 --scale 2 --wait 1000]
+npx jsui inspect app.jsx [--find '#play'] [--json]
+npx jsui run app.jsx steps.json|script.mjs
+npx jsui skill [print --all | install [dir] [--global] | path]
 ```
 
 ## Build output
@@ -65,6 +70,57 @@ Saving a file updates the running UI without losing its state:
   and `invalidate()` for modules with side effects to clean up.
 
 `--no-hmr` serves the plain bundle and reloads it on every change.
+
+## Headless: screenshot, inspect, run
+
+`screenshot`, `inspect` and `run` run the app in Node on JSUI's CPU
+WebAssembly runtime (`dist/` of `@orktes/jsui-web`, a dependency; or
+`JSUI_WASM_DIR`): no browser, GPU or native build, the same pixels on every
+OS. The UI clock is simulated (`--fps`, default 60), so animations and timers
+advance exactly as asked and runs are deterministic. A file that only
+`export default`s a component is registered as `main`.
+
+* `screenshot` waits for images and fonts, advances `--wait` ms (default
+  1000) and writes a PNG (`--scale` for HiDPI).
+* `inspect` prints the view tree, one element per line (`Text #gold "1250
+  gold" [pressable focused] 64,120 180x24`), or `--json`; `--find <selector>`
+  prints the matches. The tree comes from `@orktes/jsui-react`'s inspector
+  (`jsui_call_ui('__jsui.inspect')`).
+* `run` executes steps (clicks, taps, drags, wheel, keys, typing, gamepad
+  buttons and sticks, shared state, buffers, messages, `Host.handle` calls,
+  screenshots and `expect*` checks) and prints one JSON result per step;
+  `jsui run --help` lists them. A `.mjs` script gets the app object instead.
+  Exit code 1 on a failed step or an uncaught JS error.
+
+Selectors: `#testID`, `text=Exact`, `Contains`, `label=...`, `type=TextInput`,
+`... >> n`, or `[x, y]`.
+
+Options for all three: `--width`, `--height`, `--scale`, `--fps`,
+`--component`, `--props <json>`, `--state key=<json>` (repeatable),
+`--bundle` (the entry is a built bundle), `--dev`.
+
+```js
+import { launch } from '@orktes/jsui-cli';
+const app = await launch({ entry: 'app.jsx', width: 1280, height: 720, state: { gold: 10 }, calls: { 'shop.buy': { ok: true } } });
+await app.press('Down');                    // gamepad
+await app.click('#buy');
+await app.screenshot('after.png');
+console.log(await app.find('#gold'), app.messages, app.errors);
+app.close();
+```
+
+## Agent skill
+
+`skills/jsui/` is an [Agent Skill](https://docs.claude.com/en/docs/agents-and-tools/agent-skills)
+that teaches coding agents (Claude Code and others) to write JSUI UIs and to
+check them with the headless tools. It is versioned with this package:
+
+* `npx jsui skill install` copies it to `./.claude/skills/jsui/`
+  (`--global`: `~/.claude/skills/jsui/`); rerun after upgrading.
+* `npx jsui skill print --all` prints it (for agents that take instructions
+  as text).
+* Claude Code plugin: `/plugin marketplace add orktes/jsui`, then
+  `/plugin install jsui@jsui`.
 
 ## Programmatic use
 

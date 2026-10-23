@@ -841,7 +841,7 @@ test('webgpu: steady animation frames (interactions showcase): retained, few pas
   if (renderers.some((n) => n !== 'webgpu')) skip(`no WebGPU renderer with web/${DIST} (${renderers})`, DIST !== 'dist-gpu');
   const r = await page.evaluate(async () => {
     const { a, b } = window.hosts;
-    b._wgpu.flags = 4;  // JSUI_WEBGPU_NO_RETAIN: 'b' repaints every frame fully
+    if (b._wgpu) b._wgpu.flags = 4;  // JSUI_WEBGPU_NO_RETAIN: 'b' repaints every frame fully
     let t = performance.now();
     const sum = (re) => [...window.__gpuCounts].filter(([k]) => re.test(k)).reduce((n, [, v]) => n + v, 0);
     const rows = [];
@@ -912,7 +912,7 @@ test('webgpu: raster cache: subtrees repainted unchanged are drawn from textures
   if (renderers.some((n) => n !== 'webgpu')) skip(`no WebGPU renderer with web/${DIST} (${renderers})`, DIST !== 'dist-gpu');
   const r = await page.evaluate(async () => {
     const { a, b } = window.hosts;
-    b._wgpu.flags = 16;  // JSUI_WEBGPU_NO_RASTER_CACHE
+    if (b._wgpu) b._wgpu.flags = 16;  // JSUI_WEBGPU_NO_RASTER_CACHE
     let t = performance.now();
     const sum = (re) => [...window.__gpuCounts].filter(([k]) => re.test(k)).reduce((n, [, v]) => n + v, 0);
     const draws = { a: 0, b: 0 }, offscreen = { a: 0, b: 0 };
@@ -976,7 +976,7 @@ test('webgpu: raster cache: a list scrolled at 2x draws its rows from textures',
   if (renderers.some((n) => n !== 'webgpu')) skip(`no WebGPU renderer with web/${DIST} (${renderers})`, DIST !== 'dist-gpu');
   const r = await page.evaluate(async () => {
     const { a, b } = window.hosts;
-    b._wgpu.flags = 16;  // JSUI_WEBGPU_NO_RASTER_CACHE
+    if (b._wgpu) b._wgpu.flags = 16;  // JSUI_WEBGPU_NO_RASTER_CACHE
     let t = performance.now();
     const sum = (re) => [...window.__gpuCounts].filter(([k]) => re.test(k)).reduce((n, [, v]) => n + v, 0);
     // Texels of the offscreen passes (textures rendered), not the canvas'.
@@ -1043,7 +1043,7 @@ test('webgpu: entrance of the interactions showcase: composited layers equal pla
     window.t0 = performance.now();
     const [a, b] = await Promise.all([make(), make()]);
     window.hosts = { a, b };
-    b._wgpu.flags = 8;  // JSUI_WEBGPU_NO_LAYER_CACHE
+    if (b._wgpu) b._wgpu.flags = 8;  // JSUI_WEBGPU_NO_LAYER_CACHE
     return [a.renderer, b.renderer];
   }, DIST);
   if (renderers.some((n) => n !== 'webgpu')) skip(`no WebGPU renderer with web/${DIST} (${renderers})`, DIST !== 'dist-gpu');
@@ -1095,7 +1095,7 @@ test('webgpu: fading and moving layers are composited from cached textures, exac
   }, DIST);
   if (renderers.some((n) => n !== 'webgpu')) skip(`no WebGPU renderer with web/${DIST} (${renderers})`, DIST !== 'dist-gpu');
   await page.evaluate(() => {
-    window.hosts.b._wgpu.flags = 8;  // JSUI_WEBGPU_NO_LAYER_CACHE: a plain layer every frame
+    if (window.hosts.b._wgpu) window.hosts.b._wgpu.flags = 8;  // JSUI_WEBGPU_NO_LAYER_CACHE: a plain layer every frame
     window.t = performance.now();
   });
   // Steps both runtimes through `moves`; returns the offscreen passes of 'a'
@@ -1169,7 +1169,7 @@ test('webgpu: static backdrop: damage repainted over a texture of it, exact', as
   // draws of each.
   const fade = (n, msg) => page.evaluate(async ({ n, msg }) => {
     const { a, b } = window.hosts;
-    b._wgpu.flags = 32;  // JSUI_WEBGPU_NO_BACKDROP
+    if (b._wgpu) b._wgpu.flags = 32;  // JSUI_WEBGPU_NO_BACKDROP
     if (msg) for (const h of [a, b]) h.postMessage('backdrop', msg);
     window.t ??= performance.now();
     const draws = { a: 0, b: 0 };
