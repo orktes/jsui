@@ -4,6 +4,14 @@ Bundles React Native–style apps for the JSUI runtime (esbuild 0.28.2), serves
 them to a dev host with hot updates (React Fast Refresh), renders and scripts
 them headlessly, and ships the JSUI agent skill for coding agents.
 
+Add the agent skill to a project with one command (no install needed first):
+
+```sh
+npx @orktes/jsui-cli skill install            # -> .claude/skills/jsui/ (--global: ~/.claude/skills/)
+```
+
+In a project with `npm install --save-dev @orktes/jsui-cli`:
+
 ```sh
 npx jsui build app.jsx -o dist/bundle.js [--minify] [--sourcemap] [--dev]
 npx jsui dev app.jsx [--port 5173] [--host 127.0.0.1] [--no-hmr]
@@ -115,9 +123,12 @@ app.close();
 that teaches coding agents (Claude Code and others) to write JSUI UIs and to
 check them with the headless tools. It is versioned with this package:
 
-* `npx jsui skill install` copies it to `./.claude/skills/jsui/`
-  (`--global`: `~/.claude/skills/jsui/`); rerun after upgrading.
-* `npx jsui skill print --all` prints it (for agents that take instructions
+* `npx @orktes/jsui-cli skill install` copies it to `./.claude/skills/jsui/`
+  (`--global`: `~/.claude/skills/jsui/`); rerun after upgrading. Inside a
+  project that has the CLI installed, `npx jsui skill install` does the same
+  with that version. (Use the scoped name otherwise: the unscoped `jsui` npm
+  package is not ours.)
+* `npx @orktes/jsui-cli skill print --all` prints it (for agents that take instructions
   as text).
 * Claude Code plugin: `/plugin marketplace add orktes/jsui`, then
   `/plugin install jsui@jsui`.
