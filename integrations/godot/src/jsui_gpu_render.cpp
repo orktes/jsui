@@ -103,10 +103,14 @@
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include <chrono>
+#include <cstdlib>
 #include <condition_variable>
 #include <mutex>
 
 #include "jsui_view.h"
+#if defined(__APPLE__)
+#include "metal_texture.h"
+#endif
 
 using namespace godot;
 
@@ -116,6 +120,17 @@ namespace {
 
 constexpr int kVkImageLayoutTransferSrcOptimal = 6;  // VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
 constexpr unsigned kMTLPixelFormatRGBA8Unorm = 70;
+
+#if defined(__APPLE__)
+// JSUI_METAL_UNTRACKED_SRC=1 keeps src a Godot-created texture (for A/B).
+bool metalTrackedSrc() {
+  static const bool tracked = [] {
+    const char* v = std::getenv("JSUI_METAL_UNTRACKED_SRC");
+    return !(v && *v && *v != '0');
+  }();
+  return tracked;
+}
+#endif
 
 uint64_t usecNow() {
   return uint64_t(
@@ -444,12 +459,30 @@ bool JsuiView::renderGpu() {
       t.w = w;
       t.h = h;
       t.created_frame = frame;
-      t.src = createTexture(rd, w, h,
-                            RenderingDevice::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RenderingDevice::TEXTURE_USAGE_INPUT_ATTACHMENT_BIT |
-                                RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT |
-                                RenderingDevice::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RenderingDevice::TEXTURE_USAGE_CAN_COPY_TO_BIT |
-                                RenderingDevice::TEXTURE_USAGE_CAN_UPDATE_BIT,
-                            zeros);
+      const int64_t srcUsage =
+          RenderingDevice::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RenderingDevice::TEXTURE_USAGE_INPUT_ATTACHMENT_BIT |
+          RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice::TEXTURE_USAGE_CAN_COPY_FROM_BIT |
+          RenderingDevice::TEXTURE_USAGE_CAN_COPY_TO_BIT | RenderingDevice::TEXTURE_USAGE_CAN_UPDATE_BIT;
+#if defined(__APPLE__)
+      if (kind == TargetKind::Metal && metalTrackedSrc()) {
+        // Our own tracked MTLTexture (metal_texture.mm): Godot's driver may
+        // create its textures untracked (godot-aw3: explicit barriers), and
+        // nothing would then order Graphite's render into src before Godot's
+        // copy. Godot retains the texture it imports; ours is released now.
+        void* tex = newTrackedMetalTexture(driverResource(rd, RenderingDevice::DRIVER_RESOURCE_LOGICAL_DEVICE), w, h);
+        if (tex) {
+          t.src = rd->texture_create_from_extension(RenderingDevice::TEXTURE_TYPE_2D,
+                                                    RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM,
+                                                    RenderingDevice::TEXTURE_SAMPLES_1,
+                                                    BitField<RenderingDevice::TextureUsageBits>(srcUsage),
+                                                    uint64_t(uintptr_t(tex)), uint64_t(w), uint64_t(h), 1, 1);
+          releaseMetalTexture(tex);
+          if (t.src.is_valid()) rd->texture_clear(t.src, Color(0, 0, 0, 0), 0, 1, 0, 1);
+        }
+      }
+      if (!t.src.is_valid())
+#endif
+        t.src = createTexture(rd, w, h, srcUsage, zeros);
       t.dst = createTexture(rd, w, h,
                             RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice::TEXTURE_USAGE_CAN_COPY_TO_BIT |
                                 RenderingDevice::TEXTURE_USAGE_CAN_UPDATE_BIT | RenderingDevice::TEXTURE_USAGE_CAN_COPY_FROM_BIT,
