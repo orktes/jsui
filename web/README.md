@@ -322,7 +322,9 @@ page's clock in both cases.
 the worker, then Skia on WebGL on the OffscreenCanvas, then the CPU raster.
 GPU-loss handling also stays the same. A lost WebGL context is restored, or
 the view falls back to the CPU on a fresh canvas, which the page clones and
-transfers. A lost WebGPU device is replaced. The no-GPU warning is logged as
+transfers. In both modes, no GL work runs once the context reports itself
+lost, even before its `webglcontextlost` event arrives (WebKit lets a frame
+run in between). A lost WebGPU device is replaced. The no-GPU warning is logged as
 before. Text is measured and drawn by Skia in the WASM module, so it works
 the same in the worker.
 

@@ -1764,6 +1764,62 @@ test('scroll: the wheel scrolls a ScrollView, clicks land on the scrolled rows',
   }
 }, {}, { worker: true });
 
+// A lost WebGL context can be noticed before its webglcontextlost event (a
+// later task): WebKit, switching the showcase to its video, lost the context
+// and a frame and a texture upload ran on it first (in worker mode: a failed
+// shader compile, then emscripten's glCreateProgram threw on the null program,
+// then the upload's createTexture). Same here with WEBGL_lose_context: GL
+// work in the task that lost it, then the restore. Nothing may throw or log,
+// and the restored frame equals one that was never lost.
+test('WebGL context lost: no GL work before the event, everything back after the restore', async ({ page }) => {
+  const info = await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js', renderer: 'webgl' } });
+  skipNoBackend('webgl', info.renderer);
+  await mount(page, { id: 'ref', width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js', renderer: 'webgl' } });
+  const r = await page.evaluate(async (worker) => {
+    const j = window.hosts.ui, ref = window.hosts.ref;
+    const logs = [], renderers = [];
+    j.on('log', (level, text) => { if (level >= 2) logs.push(text); });
+    j.on('renderer', (name, reason) => renderers.push([name, reason]));
+    let res;
+    if (worker) {
+      res = await j._debug('loseGL', { work: true });
+    } else {
+      const ext = j._gl?.getExtension('WEBGL_lose_context');
+      if (!ext) return null;
+      ext.loseContext();
+      res = { error: null };
+      try {
+        j.postMessage('fx', null);
+        const img = new ImageData(8, 8);
+        img.data.fill(255);
+        j.setTexture('tex', img);
+        j.frame();
+      } catch (e) {
+        res.error = String(e?.stack ?? e);
+      }
+      setTimeout(() => ext.restoreContext(), 50);
+    }
+    if (!res) return null;
+    // The reference gets the same, without a loss.
+    ref.postMessage('fx', null);
+    const img = new ImageData(8, 8);
+    img.data.fill(255);
+    await ref.setTexture('tex', img);
+    for (let i = 0; i < 40; i++) await new Promise((r) => setTimeout(r, 20));
+    await Promise.all([j.whenIdle(), ref.whenIdle()]);
+    return { ...res, logs, renderers, renderer: j.renderer };
+  }, WORKER);
+  if (!r) skip('WEBGL_lose_context unavailable');
+  assert(!r.error, `GL work on the lost context threw: ${r.error}`);
+  assert(!r.logs.length, `logged: ${JSON.stringify(r.logs)}`);
+  assert(!r.renderers.length && r.renderer === info.renderer, `renderer changed: ${JSON.stringify(r)}`);
+  const d = await frameDiff(page, ['ui', 'ref']);
+  assert(!d.missing && !d.size && d.max === 0, `restored frame vs never lost: ${JSON.stringify(d)}`);
+  const [tex, fx] = await screenPixels(page, '#ui', [[50, 50], [85, 145]]);
+  assert(near(tex, [255, 255, 255, 255]), `texture after the restore ${fmt(tex)}`);
+  assert(!near(fx, [255, 255, 255, 255]) && fx[3] > 200, `'fx' after the restore ${fmt(fx)}`);
+}, {}, { worker: true });
+
 // -------------------------------------------------------------- worker mode
 // The same frame as main mode, pixel for pixel (text included: measured and
 // shaped in the worker).

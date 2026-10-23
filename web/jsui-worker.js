@@ -1539,7 +1539,7 @@ export function serve(I, early) {
 
   // Test hooks (ProxyView._debug).
   let spyCalls = null;
-  const debug = (view, what) => {
+  const debug = (view, what, arg) => {
     const M = host.module;
     switch (what) {
       case 'spy': {
@@ -1566,8 +1566,23 @@ export function serve(I, early) {
         const ext = gl?.getExtension('WEBGL_lose_context');
         if (!ext) return false;
         ext.loseContext();
+        // arg.work: GL work in the same task, before the webglcontextlost
+        // event (as when a lost GPU process is noticed first, as WebKit
+        // does): new shaders, a texture upload, a frame.
+        let error = null;
+        if (arg?.work) {
+          try {
+            host.postMessage('fx', null);
+            const img = new ImageData(8, 8);
+            img.data.fill(255);
+            host.setTexture('tex', img);
+            host.frame(now());
+          } catch (e) {
+            error = String(e?.stack ?? e);
+          }
+        }
         if (what === 'loseGL') setTimeout(() => ext.restoreContext(), 50);
-        return true;
+        return arg?.work ? { error } : true;
       }
       case 'destroyDevice':
         if (!view?._wgpu) return false;

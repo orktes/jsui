@@ -2,8 +2,9 @@
 // React (main and worker mode): a 100x100 Image showing host texture 'tex'
 // in the top-left corner, a 200px ScrollView of 40 pressable rows to its
 // right (a click posts 'row' with the row's index), Host.handle('ui.add')
-// for callUi, Host.call('host.greet') on the host message 'greet', and the
-// host message 'buf' answering 'buf' with frame data buffer 'b'.
+// for callUi, Host.call('host.greet') on the host message 'greet', the host
+// message 'buf' answering 'buf' with frame data buffer 'b', and the host
+// message 'fx' adding a shadowed gradient at (60, 120) (new shaders on a GPU).
 (function () {
   const N = globalThis.__jsui_native;
   const img = N.createNode('Image');
@@ -35,6 +36,13 @@
   globalThis.__jsui_onHostMessage = (name, json) => {
     if (name === 'greet') {
       N.hostCall('host.greet', json, (ok, payload) => N.postMessage('greeted', JSON.stringify({ ok, payload })));
+    } else if (name === 'fx') {
+      // Something Skia has not drawn yet (new shader programs): a rounded,
+      // shadowed gradient over the texture's corner.
+      const fx = N.createNode('View');
+      N.setProps(fx, { style: { position: 'absolute', left: 60, top: 120, width: 50, height: 50, borderRadius: 14,
+        boxShadow: '0 4px 10px rgba(0,0,0,0.7)', backgroundImage: 'linear-gradient(90deg, #ff00ff, #ffff00)' } });
+      N.appendChild(N.rootId, fx);
     } else if (name === 'buf') {
       const b = N.buffer('b');
       N.postMessage('buf', JSON.stringify(b ? Array.from(new Float32Array(b[0], 0, b[2])) : null));
