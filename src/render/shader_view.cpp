@@ -6,6 +6,7 @@
 
 #include "core/document.h"
 #include "core/style.h"
+#include "include/core/SkBitmap.h"
 #include "include/core/SkCanvas.h"
 #include "include/core/SkData.h"
 #include "include/core/SkImage.h"
@@ -16,11 +17,20 @@
 #include "include/core/SkRect.h"
 #include "include/core/SkShader.h"
 #include "include/core/SkString.h"
+#include "include/core/SkSurface.h"
 #include "include/effects/SkImageFilters.h"
 #include "include/effects/SkRuntimeEffect.h"
 #include "render/host_textures.h"
 #include "render/image_cache.h"
 #include "runtime.h"
+
+#if defined(JSUI_GPU)
+#if __has_include("include/gpu/ganesh/GrDirectContext.h")
+#include "include/gpu/ganesh/GrDirectContext.h"
+#else
+#include "include/gpu/GrDirectContext.h"
+#endif
+#endif
 
 namespace jsui {
 
@@ -50,6 +60,15 @@ std::shared_ptr<const ShaderEffects::Program> ShaderEffects::get(const std::stri
     p->content = c && c->type == SkRuntimeEffect::ChildType::kShader;
   }
   programs_.emplace(sksl, p);
+  return p;
+}
+
+std::shared_ptr<const ShaderEffects::Program> ShaderEffects::preload(const std::string& sksl, const Value& images) {
+  std::shared_ptr<const Program> p = get(sksl);
+  if (!p->effect) return p;
+  for (const Warm& w : warm_)
+    if (w.program == p && styleValueEquals(w.images, images)) return p;
+  warm_.push_back({p, images});
   return p;
 }
 
@@ -156,23 +175,10 @@ SkTileMode tileOf(const std::string& t) {
   return SkTileMode::kClamp;
 }
 
-// A child image fitted to a w x h view (in the view's coordinates).
-sk_sp<SkShader> childImage(Node* node, const Value& spec, float w, float h) {
-  Document* doc = node->document();
-  if (!doc) return nullptr;
-  std::string uri = spec.isString() ? spec.asString() : spec["uri"].asString();
-  const std::string& texture = spec["texture"].asString();
-  sk_sp<SkImage> img;
-  bool flip = false;
-  if (!texture.empty()) {
-    if (!doc->textures) return nullptr;
-    img = doc->textures->image(texture);
-    const HostTextures::Entry* e = doc->textures->find(texture);
-    flip = e && !e->pixels && (e->desc.flags & JSUI_TEXTURE_BOTTOM_LEFT_ORIGIN);
-  } else if (!uri.empty() && doc->images) {
-    img = doc->images->get(doc->images->resolve(uri));
-  }
-  if (!img) return nullptr;
+// `img` as a child shader fitted to a w x h view (in the view's coordinates)
+// as `spec` says. `texture`: a host texture (no mipmaps), `flip`: one with
+// its origin at the bottom-left.
+sk_sp<SkShader> fitImage(const sk_sp<SkImage>& img, const Value& spec, float w, float h, bool texture, bool flip) {
   float scale = std::max(0.01f, float(spec["scale"].asNumber(1)));
   float iw = img->width() / scale, ih = img->height() / scale;
   if (iw <= 0 || ih <= 0) return nullptr;
@@ -192,8 +198,28 @@ sk_sp<SkShader> childImage(Node* node, const Value& spec, float w, float h) {
   std::string tile = spec["tile"].asString();
   if (tile.empty() && fit == "repeat") tile = "repeat";
   SkTileMode tm = tileOf(tile);
-  SkSamplingOptions sampling(SkFilterMode::kLinear, texture.empty() ? SkMipmapMode::kLinear : SkMipmapMode::kNone);
+  SkSamplingOptions sampling(SkFilterMode::kLinear, texture ? SkMipmapMode::kNone : SkMipmapMode::kLinear);
   return img->makeShader(tm, tm, sampling, &m);
+}
+
+// A child image fitted to a w x h view (in the view's coordinates).
+sk_sp<SkShader> childImage(Node* node, const Value& spec, float w, float h) {
+  Document* doc = node->document();
+  if (!doc) return nullptr;
+  std::string uri = spec.isString() ? spec.asString() : spec["uri"].asString();
+  const std::string& texture = spec["texture"].asString();
+  sk_sp<SkImage> img;
+  bool flip = false;
+  if (!texture.empty()) {
+    if (!doc->textures) return nullptr;
+    img = doc->textures->image(texture);
+    const HostTextures::Entry* e = doc->textures->find(texture);
+    flip = e && !e->pixels && (e->desc.flags & JSUI_TEXTURE_BOTTOM_LEFT_ORIGIN);
+  } else if (!uri.empty() && doc->images) {
+    img = doc->images->get(doc->images->resolve(uri));
+  }
+  if (!img) return nullptr;
+  return fitImage(img, spec, w, h, !texture.empty(), flip);
 }
 
 void fillChildren(Node* node, NodeState* st, SkRuntimeEffectBuilder& b, float w, float h, bool content) {
@@ -318,4 +344,98 @@ sk_sp<SkImageFilter> contentFilter(Node* node, const SkRect& box) {
 }
 
 }  // namespace shader
+
+namespace {
+
+// The off-screen surface the warm-up draws into (device px).
+constexpr int kWarmSize = 64;
+
+// What image children sample during the warm-up: a small opaque image,
+// uploaded like any loaded image.
+sk_sp<SkImage> warmImage() {
+  static sk_sp<SkImage> image = [] {
+    SkBitmap bm;
+    bm.allocN32Pixels(4, 4);
+    bm.eraseColor(SK_ColorWHITE);
+    bm.setImmutable();
+    return bm.asImage();
+  }();
+  return image;
+}
+
+// One draw of each kind a ShaderView makes with `program` (see paint() and
+// painter.cpp's `content` layer): clipped to a rect (a scissor) and to a
+// rounded rect (an analytic clip), pixel-aligned and not. `loaded`: image
+// children as images, else transparent (not loaded yet).
+void warmDraws(SkCanvas* c, const ShaderEffects::Program& program, const Value& images, bool loaded) {
+  SkRuntimeShaderBuilder b(program.effect);  // uniforms: zeros (the values do not change the pipelines)
+  const float size = kWarmSize / 2;
+  for (const SkRuntimeEffect::Child& ch : program.effect->children()) {
+    if (ch.type != SkRuntimeEffect::ChildType::kShader) continue;
+    std::string name(ch.name);
+    if (program.content && name == "content" && !images.has(name)) continue;
+    sk_sp<SkShader> s;
+    if (loaded && images.has(name)) {
+      const Value& spec = images[name];
+      s = shader::fitImage(warmImage(), spec, size, size, !spec["texture"].asString().empty(), false);
+    }
+    b.child(ch.name) = s ? s : SkShaders::Color(SK_ColorTRANSPARENT);
+  }
+  const SkRect rects[] = {SkRect::MakeWH(size, size), SkRect::MakeXYWH(size + 0.5f, 0.5f, size - 1, size - 1)};
+  for (const SkRect& r : rects) {
+    for (bool round : {false, true}) {
+      c->save();
+      if (round) c->clipRRect(SkRRect::MakeRectXY(r, 6, 6), true);
+      else c->clipRect(r, true);
+      if (program.content && !images.has("content")) {
+        float radius = std::max(r.width(), r.height());
+        SkPaint lp;
+        lp.setImageFilter(SkImageFilters::RuntimeShader(b, radius, "content", nullptr));
+        c->saveLayer(&r, &lp);
+        SkPaint fill;
+        fill.setColor(SK_ColorWHITE);
+        fill.setAntiAlias(true);
+        c->drawRRect(SkRRect::MakeRectXY(r.makeInset(4, 4), 4, 4), fill);
+        c->restore();
+      } else if (sk_sp<SkShader> shader = b.makeShader()) {
+        SkPaint p;
+        p.setShader(std::move(shader));
+        p.setAntiAlias(true);
+        c->drawRect(r, p);
+      }
+      c->restore();
+    }
+  }
+}
+
+}  // namespace
+
+bool ShaderEffects::warm(SkCanvas* canvas) {
+  if (warm_.empty() || !canvas) return false;
+  std::vector<Warm> queue;
+  queue.swap(warm_);
+  if (!canvas->recorder() && !canvas->recordingContext()) return false;  // raster: compiled is all there is
+  SkImageInfo info = canvas->imageInfo().makeWH(kWarmSize, kWarmSize);
+  if (info.colorType() == kUnknown_SkColorType) return false;
+  SkSurfaceProps props = canvas->getBaseProps();
+  sk_sp<SkSurface> surface = canvas->makeSurface(info, &props);
+  if (!surface) return false;
+  SkCanvas* c = surface->getCanvas();
+  for (const Warm& w : queue) {
+    bool hasImages = false;
+    for (const SkRuntimeEffect::Child& ch : w.program->effect->children())
+      hasImages |= ch.type == SkRuntimeEffect::ChildType::kShader && w.images.has(std::string(ch.name));
+    // Images load after the view shows: its first frames draw without them.
+    warmDraws(c, *w.program, w.images, false);
+    if (hasImages) warmDraws(c, *w.program, w.images, true);
+  }
+#if defined(JSUI_GPU)
+  // Ganesh: into the frame's flush. (Graphite records the surface's draws
+  // when it goes.)
+  if (GrDirectContext* d = canvas->recordingContext() ? canvas->recordingContext()->asDirectContext() : nullptr)
+    d->flush(surface.get());
+#endif
+  return true;
+}
+
 }  // namespace jsui

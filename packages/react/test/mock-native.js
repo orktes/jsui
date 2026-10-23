@@ -32,6 +32,7 @@ export const mock = {
   layouts: new Map(),
   messages: [],
   lottieData: new Map(), // key -> JSON
+  warming: 0, // preloaded shaders waiting for their warm-up frame (tests set it to 0)
   reset() {
     calls.length = 0;
   },
@@ -172,6 +173,15 @@ globalThis.__jsui_native = {
       else uniforms.push({ name: m[3], type: m[2], count: 1, color: !!m[1] });
     }
     return { uniforms, children };
+  },
+  shaderPreload(sksl, images) {
+    calls.push(images === undefined ? ['shaderPreload', sksl] : ['shaderPreload', sksl, images]);
+    const info = globalThis.__jsui_native.shaderInfo(sksl);
+    if (!info.error) mock.warming++;
+    return info;
+  },
+  shadersWarming() {
+    return mock.warming;
   },
   postMessage(name, json) {
     mock.messages.push([name, json]);

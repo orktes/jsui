@@ -1,7 +1,7 @@
 // The JSUI showcase site. Every pixel of the page is drawn by the JSUI
 // runtime compiled to WebAssembly; this file is ordinary React Native code.
 import React, { useEffect, useRef } from 'react';
-import { Animated, AppRegistry, Easing, Fonts, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Animated, AppRegistry, Easing, Fonts, ScrollView, StyleSheet, Text, View, precompileShaders } from 'react-native';
 import { RouterProvider, segments, useRouterState } from './router.js';
 import { mono, site } from './theme.js';
 import { NavBar, NAV_HEIGHT } from './components/NavBar.jsx';
@@ -13,6 +13,7 @@ import { InputPage } from './pages/Input.jsx';
 import { MotionPage } from './pages/Motion.jsx';
 import { PlaygroundPage } from './pages/Playground.jsx';
 import { EmbedPage } from './pages/Embed.jsx';
+import { SCREEN_SHADERS } from './screens/index.js';
 
 Fonts.load(mono, require('./assets/fonts/JetBrainsMonoNL-Regular.ttf'), { weight: 400 });
 Fonts.load(mono, require('./assets/fonts/JetBrainsMonoNL-Bold.ttf'), { weight: 700 });
@@ -54,8 +55,30 @@ function NotFound() {
   );
 }
 
+// The screens' shaders, compiled and warmed on the GPU once the first page
+// has settled, one at a time a few frames apart, so opening a screen later
+// does not stall on the GPU building their pipelines.
+function usePreloadedShaders() {
+  useEffect(() => {
+    let stopped = false;
+    let timer = 0;
+    const next = (i) => {
+      if (stopped || i >= SCREEN_SHADERS.length) return;
+      precompileShaders(SCREEN_SHADERS[i]).then(() => {
+        timer = setTimeout(() => next(i + 1), 60);
+      });
+    };
+    timer = setTimeout(() => next(0), 1500);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, []);
+}
+
 function App() {
   const router = useRouterState();
+  usePreloadedShaders();
   return (
     <RouterProvider value={router}>
       <View style={styles.root}>

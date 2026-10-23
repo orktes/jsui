@@ -470,6 +470,71 @@ bool waitPrecompiled(JsuiGpuContext* gpu) {
   return false;
 }
 
+// ShaderViews (a fill with an image child, and one post-processing its
+// content) mounted in the second frame over a page drawn in the first, which
+// preloads their shaders when `preload`. Returns the pipelines the second
+// frame compiled.
+unsigned long long shaderFrames(Vk& vk, JsuiGpuContext* gpu, bool preload) {
+  static const char* kShaders =
+      "const FILL = 'uniform shader img; uniform float glow; half4 main(float2 p) {"
+      "  return half4(half(fract(p.x * 0.05)), half(glow), 0.5, 1) + img.eval(p); }';"
+      "const CONTENT = 'uniform shader content; uniform float2 resolution; half4 main(float2 p) {"
+      "  return content.eval(float2(resolution.x - p.x, p.y)).bgra; }';"
+      "const IMAGES = {img: {uri: 'missing.png', fit: 'cover'}};";
+  std::string bundle = std::string(kShaders) +
+                       "const n = __jsui_native;"
+                       "function view(type, parent, style, props) {"
+                       "  const v = n.createNode(type); n.setProps(v, Object.assign({style}, props || {}));"
+                       "  n.appendChild(parent, v); return v; }"
+                       "view('View', n.rootId, {position: 'absolute', left: 0, top: 0, width: 240, height: 160,"
+                       "  backgroundColor: '#203040'});"
+                       "view('View', n.rootId, {position: 'absolute', left: 4, top: 120, width: 20, height: 20,"
+                       "  backgroundColor: '#ff0000'});" +
+                       (preload ? "if (n.shaderPreload(FILL, IMAGES).error || n.shaderPreload(CONTENT).error) throw new Error('compile');"
+                                  "if (n.shadersWarming() !== 2) throw new Error('queued ' + n.shadersWarming());"
+                                : "") +
+                       "setTimeout(() => {"
+                       "  view('ShaderView', n.rootId, {position: 'absolute', left: 30, top: 10, width: 60, height: 40},"
+                       "    {source: FILL, uniforms: {glow: 0.5}, images: IMAGES});"
+                       "  const c = view('ShaderView', n.rootId, {position: 'absolute', left: 100, top: 10, width: 60,"
+                       "    height: 40}, {source: CONTENT});"
+                       "  view('View', c, {position: 'absolute', left: 4, top: 4, width: 20, height: 20,"
+                       "    backgroundColor: '#ff0000'});"
+                       "}, 10);";
+  JsuiConfig cfg;
+  jsui_config_init(&cfg);
+  cfg.width = vk.w;
+  cfg.height = vk.h;
+  JsuiRuntime* rt = jsui_create(&cfg);
+  CHECK_EQ(jsui_load_bundle_source(rt, bundle.data(), bundle.size(), "shaders.js"), 0);
+  int layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  unsigned long long compiles[2] = {0, 0};
+  for (int frame = 0; frame < 2; frame++) {
+    jsui_tick(rt, frame * 16.0 + 1);
+    if (frame == 0) CHECK(jsui_needs_redraw(rt));
+    JsuiGpuTarget t{};
+    t.texture = vk.image;
+    t.width = vk.w;
+    t.height = vk.h;
+    t.layout = layout;
+    t.final_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    t.flags = frame > 0 ? JSUI_GPU_INCREMENTAL : 0;
+    CHECK_EQ(jsui_render_gpu_target(rt, gpu, &t, nullptr), 0);
+    layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    JsuiPerf p;
+    jsui_get_perf(rt, &p, 1);
+    compiles[frame] = p.pipeline_compiles;
+  }
+  std::vector<uint32_t> out = vk.read();
+  // The views drew: the fill's blue, the mirrored red box (bgra: blue).
+  CHECK_EQ(out[size_t(30) * vk.w + 60] >> 16 & 255, 128u);
+  CHECK_EQ(out[size_t(20) * vk.w + 100 + 60 - 14], 0xffff0000u);
+  std::printf("  %s: frame 0 compiled %llu pipelines, frame 1 (the ShaderViews) %llu\n",
+              preload ? "preloaded" : "cold", compiles[0], compiles[1]);
+  jsui_destroy(rt);
+  return compiles[1];
+}
+
 #endif  // JSUI_VULKAN_TESTS
 
 }  // namespace
@@ -640,6 +705,30 @@ TEST(vulkan_pipeline_cache_warms_the_next_context) {
 // Host textures (JSUI_TEXTURE_VULKAN): an engine's sampled image drawn in
 // place by Graphite, new contents shown after jsui_texture_updated, the
 // image still usable by the host (SHADER_READ_ONLY_OPTIMAL) afterwards.
+// Preloaded shaders (shaderPreload / precompileShaders): the frame that
+// mounts the views compiles no pipeline; without the preload it does.
+TEST(vulkan_shader_preload_warms_pipelines) {
+#if !JSUI_VULKAN_TESTS
+  skip("vulkan_shader_preload_warms_pipelines", "built without JSUI_VULKAN");
+#else
+  Vk vk;
+  std::string why = vk.init(240, 160);
+  if (!why.empty()) {
+    skip("vulkan_shader_preload_warms_pipelines", why.c_str());
+    return;
+  }
+  JsuiVulkanDevice d = vk.desc();
+  JsuiGpuContext* gpu = jsui_gpu_create_vulkan(&d);
+  CHECK(gpu != nullptr);
+  if (!gpu) return;
+  CHECK(shaderFrames(vk, gpu, false) > 0);
+  jsui_gpu_destroy(gpu);
+  gpu = jsui_gpu_create_vulkan(&d);
+  CHECK_EQ(shaderFrames(vk, gpu, true), 0ull);
+  jsui_gpu_destroy(gpu);
+#endif
+}
+
 TEST(vulkan_host_texture) {
 #if !JSUI_VULKAN_TESTS
   skip("vulkan_host_texture", "built without JSUI_VULKAN");
