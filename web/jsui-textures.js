@@ -84,11 +84,12 @@ export function watchVideoFrames(video, onFrame) {
   };
   // Polling uploads only when the decoded frame count or the playback
   // position moved. The position moves every display frame while playing.
-  // The count ticks once per video frame in Chrome, but WebKit's (H.264)
-  // jumps ~45 frames about every 1.5 s. So the count decides alone while
-  // playing (one upload per video frame, not per display frame) only after
-  // COUNT_TICKS ticks of one or two frames in a row, and only until the
-  // position moves COUNT_STALL_S without a tick. Paused, a seek uploads.
+  // The count ticks once per video frame in Chrome for a visible video, but
+  // in jumps of up to ~7 for a tiny hidden one (the showcase's), and WebKit's
+  // (H.264) jumps ~45 frames about every 1.5 s. So the count decides alone
+  // while playing (one upload per video frame, not per display frame) only
+  // after COUNT_TICKS ticks of one or two frames in a row, and only until
+  // the position moves COUNT_STALL_S without a tick. Paused, a seek uploads.
   const poll = () => {
     if (w.stopped) return;
     w.raf = requestAnimationFrame(poll);
