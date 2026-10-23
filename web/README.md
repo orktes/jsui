@@ -111,13 +111,17 @@ const size = useHostTexture('trailer');            // { width, height } once set
 - `bindVideo(name, video, options)` keeps a texture current from a video
   element (`requestVideoFrameCallback`, else polled per display frame,
   paused frames and seeks included) and returns a function that stops it.
-  Polling uploads only when `currentTime` or the decoded frame count moved.
+  Polling uploads when the decoded frame count moved (once it is seen
+  moving, only then while playing: one upload per video frame, not per
+  display frame), or when `currentTime` moved.
   Playback (`play()`, `pause()`, `muted`, `currentTime`) stays on the element.
   Playwright WebKit 26 on macOS loses every WebGL context of the page right
-  after a frame callback on a playing video. So if one of the runtime's WebGL
-  contexts is lost within a second of a bound video starting to play, every
-  bound video of the page switches to polling, and later binds start there
-  (logged once).
+  after a frame callback on a playing video (with the runtime in a worker it
+  can first present nothing for about 6 s), so WebKit (`navigator.vendor`:
+  Safari and every iOS browser) always polls. Elsewhere, if one of the
+  runtime's WebGL contexts is lost within a second of a bound video starting
+  to play, every bound video of the page switches to polling, and later binds
+  start there (logged once).
 - `removeTexture(name)`; `textureBackend` says where textures go now.
 - Textures belong to the runtime: every surface can show them, and they
   survive bundle reloads.
@@ -286,8 +290,8 @@ Raw pixels are copied. With `{ transfer: true }` the source itself is
 transferred, and the caller's object is unusable afterwards. A `<video>`
 becomes `new VideoFrame(video)`, and `<img>` / canvases become an
 `ImageBitmap`. `bindVideo` captures on the page's thread: it uses
-`requestVideoFrameCallback`, or polls every display frame where that is
-missing (or after the WebKit context loss above; the worker tells the page
+`requestVideoFrameCallback`, or polls every display frame on WebKit, where
+that is missing, or after the context loss above (the worker tells the page
 about its losses). Each presented frame goes to the worker as a transferred `VideoFrame`,
 with at most two in flight, so a busy worker skips frames rather than queueing
 them. The worker closes each frame after the upload. The same CORS rules apply,

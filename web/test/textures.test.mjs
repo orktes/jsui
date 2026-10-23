@@ -325,6 +325,55 @@ test('bindVideo: one upload per presented frame, stops on unbind / remove', () =
   assert.ok(M.calls.some((c) => c[0] === 'remove'));
 });
 
+test('bindVideo: WebKit polls from the start, one upload per decoded frame while playing', () => {
+  const dev = mockDevice();
+  const { M, set } = setup([webgpuView(dev)]);
+  const rafs = new Map();
+  let nextRaf = 1;
+  const nav = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { value: { vendor: 'Apple Computer, Inc.' }, configurable: true });
+  globalThis.requestAnimationFrame = (cb) => { rafs.set(nextRaf, cb); return nextRaf++; };
+  globalThis.cancelAnimationFrame = (id) => rafs.delete(id);
+  const displayFrame = () => { const cbs = [...rafs.values()]; rafs.clear(); cbs.forEach((cb) => cb()); };
+  try {
+    let callbacks = 0;
+    const v = {
+      videoWidth: 16, videoHeight: 9, readyState: 4, currentTime: 0, paused: false, decoded: 0,
+      getVideoPlaybackQuality() { return { totalVideoFrames: this.decoded }; },
+      requestVideoFrameCallback() { return ++callbacks; },
+      addEventListener() {},
+    };
+    set.bindVideo('v', v);
+    assert.equal(callbacks, 0);
+    const uploads = () => M.calls.filter((c) => c[0] === 'updated' && c[1] === 'v').length;
+    // Before the count moves, the position decides.
+    v.currentTime = 0.016;
+    displayFrame();
+    assert.equal(uploads(), 1);
+    // A 30 fps video on a 60 Hz display: the position moves every display
+    // frame, the count every other one.
+    for (let i = 1; i <= 8; i++) {
+      v.currentTime += 0.016;
+      if (i % 2) v.decoded++;
+      displayFrame();
+    }
+    assert.equal(uploads(), 1 + 4);
+    // Paused, a seek uploads.
+    v.paused = true;
+    displayFrame();
+    assert.equal(uploads(), 5);
+    v.currentTime = 3;
+    displayFrame();
+    assert.equal(uploads(), 6);
+    set.destroy();
+  } finally {
+    if (nav) Object.defineProperty(globalThis, 'navigator', nav);
+    else delete globalThis.navigator;
+    delete globalThis.requestAnimationFrame;
+    delete globalThis.cancelAnimationFrame;
+  }
+});
+
 // Last: the switch to polling is for the rest of the page (module state).
 test('bindVideo: a WebGL context lost right after a frame callback switches every video to polling', () => {
   const dev = mockDevice();
