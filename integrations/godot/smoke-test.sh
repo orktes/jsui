@@ -31,7 +31,10 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 demo="$here/demo"
-out="$(realpath -m "${1:-$repo/build/godot-smoke.png}")"
+out="${1:-$repo/build/godot-smoke.png}"
+# Absolute, without GNU realpath -m (macOS realpath has no -m).
+mkdir -p "$(dirname "$out")"
+out="$(cd "$(dirname "$out")" && pwd)/$(basename "$out")"
 frames="${FRAMES:-90}"
 
 # GODOT_VERSION=4.3-stable runs the oldest Godot the extension supports
