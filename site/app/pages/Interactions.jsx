@@ -155,7 +155,7 @@ export function InteractionsPage() {
         </Reveal>
       </View>
 
-      <View style={[styles.split, tablet && { flexDirection: 'column' }, { marginTop: phone ? 48 : 80 }]}>
+      <View style={[styles.split, tablet && { flexDirection: 'column', alignItems: 'stretch' }, { marginTop: phone ? 48 : 80 }]}>
         <View style={{ flex: tablet ? 0 : 1, gap: 16 }}>
           <SectionHead eyebrow="Under the hood" title="Springs that never touch JS per frame" />
           <Text style={text.body}>
