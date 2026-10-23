@@ -178,7 +178,7 @@ export function HomePage() {
         <SectionHead
           eyebrow="How it works"
           title="From JSX to a texture in your engine"
-          lead="@jsui/cli bundles your app with esbuild, aliasing react-native to @jsui/react. Inside the runtime QuickJS runs React, the reconciler drives a native node tree, Yoga lays it out and Skia paints it into pixels you own."
+          lead="@orktes/jsui-cli bundles your app with esbuild, aliasing react-native to @orktes/jsui-react. Inside the runtime QuickJS runs React, the reconciler drives a native node tree, Yoga lays it out and Skia paints it into pixels you own."
         />
         <Reveal>
           <Pipeline />

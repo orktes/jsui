@@ -39,7 +39,7 @@ static void on_call(void* user, uint64_t id, const char* name, const char* args)
 ```
 
 ```jsx
-import { Host, useHostState } from '@jsui/react';
+import { Host, useHostState } from '@orktes/jsui-react';
 
 function Inventory() {
   const gold = useHostState('gold', 0);                    // re-renders only when "gold" changes
@@ -61,8 +61,8 @@ the UI registers with `Host.handle(name, fn)` (`jsui_call_ui`).
 
 ## npm packages
 
-`@jsui/react` (the React Native API), `@jsui/cli` (`jsui build` / `jsui dev`)
-and `@jsui/web` (the browser host with the WASM modules) are published to npm
+`@orktes/jsui-react` (the React Native API), `@orktes/jsui-cli` (`jsui build` / `jsui dev`)
+and `@orktes/jsui-web` (the browser host with the WASM modules) are published to npm
 as 0.x releases. See [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Build (native)

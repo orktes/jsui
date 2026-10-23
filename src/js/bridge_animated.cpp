@@ -1,5 +1,5 @@
 // __jsui_native.animated: the native Animated driver's bridge (React
-// Native's NativeAnimatedModule surface), used by @jsui/react when an
+// Native's NativeAnimatedModule surface), used by @orktes/jsui-react when an
 // animation runs with useNativeDriver: true. See animated/native_animated.h.
 #include "animated/native_animated.h"
 #include "js/engine_impl.h"

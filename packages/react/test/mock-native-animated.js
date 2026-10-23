@@ -1,7 +1,7 @@
 // Adds a recording __jsui_native.animated (the native Animated driver's
 // bridge) to the mock bridge. Values are stored so getValue / setValue
 // round-trip; animations only run when the test ends them through
-// __jsui_onAnimatedEnd, like the runtime would. Import before @jsui/react.
+// __jsui_onAnimatedEnd, like the runtime would. Import before @orktes/jsui-react.
 import { mock } from './mock-native.js';
 
 const nodes = new Map();  // tag -> {config, value, offset, parents, view}

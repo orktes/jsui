@@ -1,8 +1,8 @@
 // End-to-end fixture for tests/native/react_e2e_test.cpp: real native input
-// -> @jsui/react events -> React state -> host messages back to C.
+// -> @orktes/jsui-react events -> React state -> host messages back to C.
 import React, { useEffect, useRef, useState } from 'react';
 import { AppRegistry, View, Text, Pressable, TextInput, Animated, StyleSheet, useWindowDimensions } from 'react-native';
-import { Host, useHostMessage } from '@jsui/react';
+import { Host, useHostMessage } from '@orktes/jsui-react';
 
 function App() {
   const [text, setText] = useState('');

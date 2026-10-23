@@ -31,7 +31,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { Host, useHostState } from '@jsui/react';
+import { Host, useHostState } from '@orktes/jsui-react';
 import { colors, font, rarity } from '../theme.js';
 
 const NATIVE = true;  // useNativeDriver wherever React Native allows it (transform / opacity)

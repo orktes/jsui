@@ -1,4 +1,4 @@
-// End-to-end Image events: a real @jsui/react bundle (packages/cli/test/e2e/
+// End-to-end Image events: a real @orktes/jsui-react bundle (packages/cli/test/e2e/
 // images.jsx) driven through the C API. React Native's onLoadStart,
 // onProgress, onLoad ({nativeEvent: {source: {uri, width, height}}}), onError
 // and onLoadEnd for data URIs, require()'d bundled assets, URLs answered by
@@ -6,7 +6,7 @@
 // failed loads, undecodable data and images already cached at mount (still
 // asynchronous: after jsui_post_message returns and after passive effects),
 // with the embedder loader and with the built-in one. Built and run by the
-// @jsui/cli test suite with JSUI_REACT_IMAGES_BUNDLE=<path>; skipped without.
+// @orktes/jsui-cli test suite with JSUI_REACT_IMAGES_BUNDLE=<path>; skipped without.
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>

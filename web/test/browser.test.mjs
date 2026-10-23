@@ -788,9 +788,9 @@ test('webgpu: steady animation frames (interactions showcase): retained, few pas
   // new bind groups per frame; then 2 passes (a retained render target).
   let build;
   try {
-    ({ build } = await import('@jsui/cli'));
+    ({ build } = await import('@orktes/jsui-cli'));
   } catch (e) {
-    skip(`@jsui/cli unavailable: ${e.message}`, true);
+    skip(`@orktes/jsui-cli unavailable: ${e.message}`, true);
   }
   const outfile = path.join(WEB, 'test/output/interactions.js');
   fs.mkdirSync(path.dirname(outfile), { recursive: true });
@@ -859,9 +859,9 @@ test('webgpu: entrance of the interactions showcase: composited layers equal pla
   // layer is never drawn with stale content.
   let build;
   try {
-    ({ build } = await import('@jsui/cli'));
+    ({ build } = await import('@orktes/jsui-cli'));
   } catch (e) {
-    skip(`@jsui/cli unavailable: ${e.message}`, true);
+    skip(`@orktes/jsui-cli unavailable: ${e.message}`, true);
   }
   const outfile = path.join(WEB, 'test/output/interactions.js');
   fs.mkdirSync(path.dirname(outfile), { recursive: true });

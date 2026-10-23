@@ -12,7 +12,7 @@ const LANES = [
     color: colors.cyan,
     nodes: [
       ['Your JSX', "import { View } from 'react-native'"],
-      ['@jsui/cli', 'esbuild · react-native → @jsui/react'],
+      ['@orktes/jsui-cli', 'esbuild · react-native → @orktes/jsui-react'],
       ['bundle.js', 'one file + assets'],
     ],
   },
@@ -22,7 +22,7 @@ const LANES = [
     color: colors.purple,
     nodes: [
       ['QuickJS', 'ES2023 interpreter, timers, fetch'],
-      ['React reconciler', 'react-reconciler + @jsui/react'],
+      ['React reconciler', 'react-reconciler + @orktes/jsui-react'],
     ],
   },
   {

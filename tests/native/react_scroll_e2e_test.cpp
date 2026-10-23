@@ -1,5 +1,5 @@
-// End-to-end ScrollView: a real @jsui/react bundle (packages/cli/test/e2e/
-// scroll.jsx) driven through the C API. Built and run by the @jsui/cli test
+// End-to-end ScrollView: a real @orktes/jsui-react bundle (packages/cli/test/e2e/
+// scroll.jsx) driven through the C API. Built and run by the @orktes/jsui-cli test
 // suite with JSUI_REACT_E2E_SCROLL_BUNDLE=<path>; skipped without it.
 #include <cstdio>
 #include <cstdlib>

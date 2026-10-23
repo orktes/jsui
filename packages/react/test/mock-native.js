@@ -1,5 +1,5 @@
 // Mock __jsui_native bridge for Node tests: records the node tree and every
-// bridge call. Import this before @jsui/react.
+// bridge call. Import this before @orktes/jsui-react.
 
 const nodes = new Map();
 const calls = [];

@@ -9,8 +9,8 @@ library with a C API, and the same core compiles to WebAssembly.
 ```
  ┌───────────────────────── app bundle (JS) ──────────────────────────┐
  │  import { View, Text, Image, StyleSheet } from 'react-native'       │
- │  react + react-reconciler + @jsui/react (host config, components,   │
- │  event system, StyleSheet)  — bundled by @jsui/cli (esbuild)        │
+ │  react + react-reconciler + @orktes/jsui-react (host config, components,   │
+ │  event system, StyleSheet)  — bundled by @orktes/jsui-cli (esbuild)        │
  └───────────────┬───────────────────────────────▲─────────────────────┘
    __jsui_native.* (create/setProps/append…)     │ __jsui_dispatchEvent(ev)
  ┌───────────────▼───────────────────────────────┴─────────────────────┐
@@ -53,7 +53,7 @@ library with a C API, and the same core compiles to WebAssembly.
   OpenGL / GLES / WebGL framebuffer or texture (see [GPU backend](#gpu-backend)).
 * **React Native semantics, written as `react-native` imports.** App code
   imports from `'react-native'`; the JSUI bundler aliases that to
-  `@jsui/react`, and the Chrome reference build aliases it to
+  `@orktes/jsui-react`, and the Chrome reference build aliases it to
   `react-native-web`. Code an LLM (or person) writes for RN therefore runs
   unchanged in JSUI and in the browser reference.
 
@@ -77,8 +77,8 @@ library with a C API, and the same core compiles to WebAssembly.
 | `tools/jsui-paint-bench` | Paint benchmark: paint time, pixels repainted, draw calls and GL calls per frame on the CPU raster and Ganesh GL (see "Paint performance") |
 | `integrations/godot` | Godot 4 GDExtension (`JsuiView` Control) + demo project |
 | `web/` | Browser host for the WASM build |
-| `packages/react` | `@jsui/react`: reconciler, components, StyleSheet, events |
-| `packages/cli` | `@jsui/cli`: `jsui build` / `jsui dev` (esbuild + dev server) |
+| `packages/react` | `@orktes/jsui-react`: reconciler, components, StyleSheet, events |
+| `packages/cli` | `@orktes/jsui-cli`: `jsui build` / `jsui dev` (esbuild + dev server) |
 | `examples/` | Realistic game UI examples (shared by reference tests) |
 | `tests/native/` | C++ unit tests (`jsui-tests`) |
 | `tests/reference/` | Pixel comparison against react-native-web in headless Chrome |
@@ -549,7 +549,7 @@ jsui_resolve_call(rt, id, "{\"gold\":1100}");    // or jsui_reject_call(rt, id, 
 ```
 
 ```jsx
-import { Host, useHostState } from '@jsui/react';
+import { Host, useHostState } from '@orktes/jsui-react';
 
 const Row = memo(({ item }) => <Text>{item.name} ×{item.count}</Text>);
 
@@ -626,7 +626,7 @@ function Inventory() {
   function with its context; answering a cancelled id returns -1. Nothing
   leaks on either side.
 * Reverse direction: `jsui_call_ui(rt, name, args, done, user)` calls
-  `__jsui_onCall(id, name, json)`; `@jsui/react` runs the `Host.handle(name, fn)`
+  `__jsui_onCall(id, name, json)`; `@orktes/jsui-react` runs the `Host.handle(name, fn)`
   / `useHostHandler(name, fn)` handler (inside a discrete batch, so its state
   updates render in the same tick) and posts its value (or promise result) back
   with `callResult`. `done(user, id, ok, result)` runs exactly once, at the end
@@ -657,7 +657,7 @@ Native globals (installed by `JsEngine`):
 | `setText(id, string)` | content of a `RawText` |
 | `appendChild(p, c)`, `insertBefore(p, c, before)`, `removeChild(p, c)` | tree edits (React semantics; unknown ids and cycles are ignored). While a LayoutAnimation with `delete` is armed, `removeChild` keeps the child as a fading ghost (see "LayoutAnimation") |
 | `animated.*` | the native Animated driver (React Native's NativeAnimatedModule): `createNode(tag, config)`, `connect` / `disconnect(parent, child)`, `connectToView` / `disconnectFromView(propsTag, id)`, `dropNode`, `setValue` / `setOffset` / `flattenOffset` / `extractOffset` / `getValue(tag)`, `startAnimation(id, tag, config)`, `stopAnimation(id) → {velocity} \| null`, `addEventMapping(id, eventType, path, tag)` / `removeEventMapping`, `startListening` / `stopListening(tag)`. See "Animated" |
-| `configureLayoutAnimation(config)` | arms a LayoutAnimation (`{duration, create, update, delete}`) for the layout pass after the commit in progress; `@jsui/react` calls it from `prepareForCommit` after `LayoutAnimation.configureNext` |
+| `configureLayoutAnimation(config)` | arms a LayoutAnimation (`{duration, create, update, delete}`) for the layout pass after the commit in progress; `@orktes/jsui-react` calls it from `prepareForCommit` after `LayoutAnimation.configureNext` |
 | `destroyNode(id)` | free a detached subtree |
 | `measure(id) → {x, y, width, height, pageX, pageY}` | layout of a node (synchronous; runs a pending layout first). `null` for unknown ids |
 | `focus(id)`, `blur(id)` | `InputManager::focus` / `blur` |
@@ -665,7 +665,7 @@ Native globals (installed by `JsEngine`):
 | `flashScrollIndicators(id)` | shows a ScrollView's overlay indicators for ~1 s |
 | `postMessage(name, json)` | to the embedder's `on_message`. A string is passed through as the JSON text; any other value is `JSON.stringify`-ed |
 | `getState(key) → json \| undefined`, `stateVersion(key) → number`, `stateKeys() → [key]` | shared host state (see "Game data"); version 0 = unset |
-| `statePatches(key, sinceVersion) → [json] \| undefined` | the merge patches (JSON texts) that took `key` from `sinceVersion` to its current version, oldest first; `undefined` when the bounded log (64 patches / 64 KB since the last `set`) cannot cover the gap. `@jsui/react` applies them to its cached value instead of re-parsing the whole state after each `jsui_patch_state` |
+| `statePatches(key, sinceVersion) → [json] \| undefined` | the merge patches (JSON texts) that took `key` from `sinceVersion` to its current version, oldest first; `undefined` when the bounded log (64 patches / 64 KB since the last `set`) cannot cover the gap. `@orktes/jsui-react` applies them to its cached value instead of re-parsing the whole state after each `jsui_patch_state` |
 | `setState(key, json \| undefined) → version`, `patchState(key, json) → version` | UI-owned writes (`undefined` removes); report to `on_state`; invalid JSON throws `SyntaxError` |
 | `hostCall(name, json, settle) → id` | `on_call`; `settle(ok, payload)` runs on `jsui_resolve_call` (JSON text) / `jsui_reject_call` (message). Returns 0 without `on_call` |
 | `cancelCall(id) → bool`, `callResult(id, ok, payload)` | drop an unanswered call (`on_call_cancel`); the result of a `__jsui_onCall` |
@@ -727,7 +727,7 @@ Callbacks the bundle installs (all optional):
 
 ### Event objects
 
-Native dispatches plain objects; `@jsui/react` turns them into React-style
+Native dispatches plain objects; `@orktes/jsui-react` turns them into React-style
 synthetic events, does capture/bubble along its instance tree and maps them to
 React Native props (`onPress`, `onPressIn/Out`, `onLongPress`, `onHoverIn/Out`,
 `onPointerDown/Move/Up/Enter/Leave`, `onKeyDown/Up`, `onFocus/onBlur`,
@@ -840,7 +840,7 @@ was `preventDefault()`-ed.
     `white`, hidden by `showsVertical/HorizontalScrollIndicator: false`) show
     while scrolling and fade out after 500 ms. Scrolling and fading repaint
     only the ScrollView's rect / the thumbs' rects.
-  * `@jsui/react` adds `contentOffset` (applied on mount),
+  * `@orktes/jsui-react` adds `contentOffset` (applied on mount),
     `scrollEventThrottle` (> 16 ms limits `onScroll`, with a trailing event;
     otherwise every event), `stickyHeaderIndices` (vertical; headers wrapped
     in a `zIndex: 10` View translated on scroll, the next header pushes the
@@ -913,7 +913,7 @@ a few pixels.
 
 ## Animated
 
-`@jsui/react`'s `Animated` (`packages/react/src/animated/`) has React
+`@orktes/jsui-react`'s `Animated` (`packages/react/src/animated/`) has React
 Native's API and both of its drivers:
 
 * **JS driver** (default). Every running animation shares one
@@ -981,7 +981,7 @@ Native's API and both of its drivers:
 
 `LayoutAnimation.configureNext(config, onEnd)` (and the `easeInEaseOut` /
 `linear` / `spring` presets, `LayoutAnimation.create`) works like React
-Native: `@jsui/react` arms the config natively at the start of the next
+Native: `@orktes/jsui-react` arms the config natively at the start of the next
 commit (`configureLayoutAnimation`), and the layout pass after that commit
 animates (`src/core/layout_animation.cpp`); the runtime disarms at the end of
 the tick, so the config never leaks into a later commit.
@@ -1261,11 +1261,11 @@ unsnapped. Under a fractional translate or scale (springs), a box and its
 text therefore move together; text under a transform snaps its baseline in
 the same layout space and uses subpixel glyph positions on both axes.
 
-## @jsui/react bridge usage (JS side)
+## @orktes/jsui-react bridge usage (JS side)
 
 Details of how the JS package uses the bridge, for native implementers:
 
-* `__events` tokens sent by `@jsui/react` (matched by substring natively):
+* `__events` tokens sent by `@orktes/jsui-react` (matched by substring natively):
   `click` (onClick — every Pressable/Touchable/Button host has it, so they are
   pressable), `pointerDown`, `pointerUp`, `pointerMove`, `pointerCancel`,
   `hoverIn`/`pointerEnter`, `hoverOut`/`pointerLeave`, `wheel`, `keyDown`,
@@ -1289,7 +1289,7 @@ Details of how the JS package uses the bridge, for native implementers:
   `{type: 'load', target, source: {uri, width, height}}` (resolved URL, image
   pixels) / `{type: 'error', target, error}` / `{type: 'progress', target,
   loaded, total}` on `Image` nodes (`onLoad` / `onError` / `onProgress`;
-  `@jsui/react` adds `onLoadStart` when the source changes and `onLoadEnd`
+  `@orktes/jsui-react` adds `onLoadStart` when the source changes and `onLoadEnd`
   after load or error). Sent once per source, always asynchronously like
   React Native: on a tick after the one that set the source (after its
   timers and passive effects), also for data URIs and images already cached
@@ -1298,7 +1298,7 @@ Details of how the JS package uses the bridge, for native implementers:
   React render errors are passed to it; otherwise they are rethrown from a
   `setTimeout` so the engine reports them.
 * `globalThis.__jsui_assets[url] = {width, height, scale}` is filled by
-  bundled image modules (`@jsui/cli`); `Image` uses it for intrinsic size.
+  bundled image modules (`@orktes/jsui-cli`); `Image` uses it for intrinsic size.
 * Host-only props sent with nodes: `Modal` content carries
   `accessibilityViewIsModal: true` (focus scope); disabled pressables carry
   `disabled: true` and `focusable: false`; `ScrollView` carries `horizontal`.
@@ -1323,6 +1323,6 @@ Details of how the JS package uses the bridge, for native implementers:
   moves the window. Sticky headers are wrapper Views translated with
   `patchStyle` per scroll event. `bridgeStats().nodes` is the live host node
   count.
-* `tests/native/react_e2e_test.cpp` drives a real `@jsui/react` bundle through
+* `tests/native/react_e2e_test.cpp` drives a real `@orktes/jsui-react` bundle through
   the C API (mouse, keys, text, gamepad, viewport, host messages, Animated);
-  `npm test -w @jsui/cli` builds the bundle and runs it.
+  `npm test -w @orktes/jsui-cli` builds the bundle and runs it.

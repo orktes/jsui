@@ -550,10 +550,10 @@ const jsui = await createJsui({
 const BUILD = {
   id: 'build',
   label: 'Build',
-  eyebrow: 'Production · @jsui/cli',
+  eyebrow: 'Production · @orktes/jsui-cli',
   color: colors.orange,
   title: 'One file for QuickJS',
-  lead: 'jsui build bundles your app with esbuild into a single IIFE script that QuickJS runs as is, with react-native aliased to @jsui/react and every asset emitted next to it.',
+  lead: 'jsui build bundles your app with esbuild into a single IIFE script that QuickJS runs as is, with react-native aliased to @orktes/jsui-react and every asset emitted next to it.',
   blocks: [
     {
       kind: 'code',
@@ -575,8 +575,8 @@ npx jsui build app.jsx -o dist/bundle.js --sourcemap --dev   # NODE_ENV=developm
           kind: 'table',
           title: 'What the bundle contains',
           rows: [
-            ['react-native', 'Aliased to @jsui/react, deep paths included.'],
-            ['react', 'The copy @jsui/react was built against: one React per bundle.'],
+            ['react-native', 'Aliased to @orktes/jsui-react, deep paths included.'],
+            ['react', 'The copy @orktes/jsui-react was built against: one React per bundle.'],
             ['JSX / TypeScript', 'Automatic JSX runtime; types stripped.'],
             ['.jsui.js / .native.js', 'Platform extensions resolve first.'],
             ['require(png | ttf | …)', 'Emitted to assets/ and evaluated to a URL relative to the bundle; images register their size.'],
@@ -588,7 +588,7 @@ npx jsui build app.jsx -o dist/bundle.js --sourcemap --dev   # NODE_ENV=developm
           lang: 'js',
           title: 'build.mjs',
           code: `
-import { build } from '@jsui/cli';
+import { build } from '@orktes/jsui-cli';
 
 await build({
   entry: 'app.jsx',

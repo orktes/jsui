@@ -1,6 +1,6 @@
 // Test bundle: four 50px horizontal bands (red, green, blue, 50% red) in a
 // 320px wide column, plus hooks the browser test drives. Uses only the bridge
-// and the most basic styles so it works without @jsui/react.
+// and the most basic styles so it works without @orktes/jsui-react.
 (function () {
   const N = globalThis.__jsui_native;
   const setBand = (id, color) =>

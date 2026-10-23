@@ -4,7 +4,7 @@
 // stop / setValue, props written into views) and through the runtime with a
 // plain-JS bundle using __jsui_native.animated (frame clock, JS not ticked,
 // end callbacks, damage == the animated node, incremental == full repaint).
-// The parity with @jsui/react's JS driver is checked end to end in
+// The parity with @orktes/jsui-react's JS driver is checked end to end in
 // react_native_animated_e2e_test.cpp.
 #include <cmath>
 #include <cstring>
@@ -32,7 +32,7 @@ Value json(const char* s) {
 
 double quad(double t) { return t * t; }
 
-// A sampled easing curve (what @jsui/react sends for timing animations).
+// A sampled easing curve (what @orktes/jsui-react sends for timing animations).
 Value frames(double (*fn)(double), int count) {
   Value::Array a;
   for (int i = 0; i < count; i++) a.emplace_back(fn(double(i) / (count - 1)));

@@ -38,7 +38,7 @@ function attach(parent, child) {
 const noop = () => {};
 
 const hostConfig = {
-  rendererPackageName: '@jsui/react',
+  rendererPackageName: '@orktes/jsui-react',
   rendererVersion: '0.1.0',
   extraDevToolsConfig: null,
   supportsMutation: true,

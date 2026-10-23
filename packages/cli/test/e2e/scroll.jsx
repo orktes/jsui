@@ -1,9 +1,9 @@
 // End-to-end fixture for tests/native/react_scroll_e2e_test.cpp: native
-// touch / wheel / gamepad scrolling -> @jsui/react ScrollView events -> host
+// touch / wheel / gamepad scrolling -> @orktes/jsui-react ScrollView events -> host
 // messages back to C.
 import React, { useRef } from 'react';
 import { AppRegistry, View, Text, ScrollView, PanResponder } from 'react-native';
-import { Host, useHostMessage } from '@jsui/react';
+import { Host, useHostMessage } from '@orktes/jsui-react';
 
 const rows = Array.from({ length: 20 }, (_, i) => i);
 

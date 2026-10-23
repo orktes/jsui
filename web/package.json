@@ -1,5 +1,5 @@
 {
-  "name": "@jsui/web",
+  "name": "@orktes/jsui-web",
   "version": "0.1.0",
   "description": "Browser host for the JSUI WebAssembly build",
   "author": "Jaakko Lukkari",

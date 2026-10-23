@@ -1,4 +1,4 @@
-// End-to-end native driver (useNativeDriver: true): a real @jsui/react bundle
+// End-to-end native driver (useNativeDriver: true): a real @orktes/jsui-react bundle
 // (packages/cli/test/e2e/native_animated.jsx) driven through the C API.
 // - parity: timing (several easings, delay), spring (origami, bounciness /
 //   speed, stiffness / damping / mass + velocity, overshoot clamping), decay,
@@ -13,7 +13,7 @@
 // - stop / setValue / listeners sync values back to JS; JS-driven animations
 //   on a native value throw; native loops; layout props throw like RN;
 // - Animated.event: ScrollView offsets drive a header natively.
-// Built and run by the @jsui/cli suite with JSUI_REACT_NATIVE_ANIMATED_BUNDLE.
+// Built and run by the @orktes/jsui-cli suite with JSUI_REACT_NATIVE_ANIMATED_BUNDLE.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>

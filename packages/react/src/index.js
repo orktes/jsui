@@ -1,4 +1,4 @@
-// @jsui/react: React Native's public API on the JSUI runtime.
+// @orktes/jsui-react: React Native's public API on the JSUI runtime.
 // The CLI aliases 'react-native' to this module.
 
 import { installGlobals } from './events.js';

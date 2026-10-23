@@ -5,7 +5,7 @@
 // delete, checked from host messages and rendered pixels. 400 x 300.
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AppRegistry, View, Pressable, PanResponder, Animated, Easing, LayoutAnimation, StyleSheet, findNodeHandle, UIManager } from 'react-native';
-import { Host, useHostMessage } from '@jsui/react';
+import { Host, useHostMessage } from '@orktes/jsui-react';
 
 function App() {
   const pulse = useRef(new Animated.Value(0)).current;

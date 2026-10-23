@@ -6,7 +6,7 @@
 // host messages; the host shows a list of probes with 'show'. 400 x 300.
 import React, { useEffect, useState } from 'react';
 import { AppRegistry, View, Image, ImageBackground, StyleSheet } from 'react-native';
-import { Host, useHostMessage } from '@jsui/react';
+import { Host, useHostMessage } from '@orktes/jsui-react';
 
 const DOT = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADklEQVR4nGP4z8AAQv8BD/kD/YURmXYAAAAASUVORK5CYII=';
 const SWORD = require('../../../../examples/assets/item-sword.png');

@@ -1,10 +1,10 @@
-// End-to-end interactions: a real @jsui/react bundle (packages/cli/test/e2e/
+// End-to-end interactions: a real @orktes/jsui-react bundle (packages/cli/test/e2e/
 // interactions.jsx) driven through the C API. Hover in / out from native
 // pointer enter / leave (with delayHoverIn / delayHoverOut and the hovered
 // style state), RN press timing (minPressDuration), an endless Animated loop
 // that keeps jsui_wants_frame() set without input, and LayoutAnimation
 // update / create / delete checked from rendered pixels. Built and run by the
-// @jsui/cli test suite with JSUI_REACT_INTERACTIONS_BUNDLE=<path>; skipped
+// @orktes/jsui-cli test suite with JSUI_REACT_INTERACTIONS_BUNDLE=<path>; skipped
 // without it.
 #include <algorithm>
 #include <cstdio>

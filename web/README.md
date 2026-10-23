@@ -1,16 +1,16 @@
-# @jsui/web
+# @orktes/jsui-web
 
 Runs the JSUI game-UI runtime (QuickJS + Yoga + Skia, compiled to
-WebAssembly) on a `<canvas>`. Pair it with `@jsui/cli`, which bundles your
+WebAssembly) on a `<canvas>`. Pair it with `@orktes/jsui-cli`, which bundles your
 React Native–style app into the single script this host loads.
 
 ```sh
-npm install @jsui/web
-npx @jsui/cli build app.jsx -o public/bundle.js
+npm install @orktes/jsui-web
+npx @orktes/jsui-cli build app.jsx -o public/bundle.js
 ```
 
 ```js
-import { createJsui } from '@jsui/web';
+import { createJsui } from '@orktes/jsui-web';
 
 const jsui = await createJsui({ canvas: document.querySelector('canvas'), bundleUrl: './bundle.js' });
 jsui.on('message', (name, data) => console.log(name, data)); // Host.postMessage(...) from the UI
@@ -31,7 +31,7 @@ with `moduleBase`, or pin one with `moduleUrl`):
 
 Each directory holds `jsui.js` (the Emscripten loader) and `jsui.wasm`.
 Bundlers must copy them as static files rather than inline them: serve
-`node_modules/@jsui/web/` (or copy `dist*/` next to your built
+`node_modules/@orktes/jsui-web/` (or copy `dist*/` next to your built
 `jsui-web.js`), or set `moduleBase` to wherever you host them. The `.wasm`
 files should be served as `application/wasm`.
 

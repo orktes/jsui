@@ -6,7 +6,7 @@
 // layout props. 400 x 300.
 import React, { useEffect, useRef } from 'react';
 import { AppRegistry, View, Animated, Easing, StyleSheet } from 'react-native';
-import { Host, useHostMessage } from '@jsui/react';
+import { Host, useHostMessage } from '@orktes/jsui-react';
 
 const post = (name, value) => Host.postMessage(name, value);
 

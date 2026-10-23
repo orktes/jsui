@@ -5,7 +5,7 @@
 // can check from pixels which rows are on screen.
 import React, { useEffect, useRef } from 'react';
 import { AppRegistry, View, Text, Pressable, FlatList, StyleSheet } from 'react-native';
-import { Host, useHostMessage, bridgeStats } from '@jsui/react';
+import { Host, useHostMessage, bridgeStats } from '@orktes/jsui-react';
 
 const DATA = Array.from({ length: 10000 }, (_, i) => ({ id: 'row' + i, n: i }));
 let mounted = 0;

@@ -2,7 +2,7 @@
 // jsui_patch_state / jsui_get_state, on_state), UI -> host calls (on_call,
 // jsui_resolve_call / jsui_reject_call, on_call_cancel) and host -> UI calls
 // (jsui_call_ui), with plain JS bundles on the raw __jsui_native bridge.
-// The @jsui/react layer is covered by packages/react/test/hostdata.test.js
+// The @orktes/jsui-react layer is covered by packages/react/test/hostdata.test.js
 // and the react_host_data_e2e test.
 #include <string>
 #include <utility>

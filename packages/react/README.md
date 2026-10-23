@@ -1,7 +1,7 @@
-# @jsui/react
+# @orktes/jsui-react
 
 React Native's API on the JSUI game-UI runtime (QuickJS + Yoga + Skia).
-Write ordinary React Native code; `@jsui/cli` aliases `react-native` to this
+Write ordinary React Native code; `@orktes/jsui-cli` aliases `react-native` to this
 package when bundling.
 
 ```jsx
@@ -59,7 +59,7 @@ no DOM, no Node APIs).
 ## JSUI extras
 
 ```js
-import { Host, useHostMessage, Fonts, useFonts, useGamepad, useFocus } from '@jsui/react';
+import { Host, useHostMessage, Fonts, useFonts, useGamepad, useFocus } from '@orktes/jsui-react';
 
 Host.postMessage('buy', { item: 'sword' });          // -> embedder on_message
 const off = Host.onMessage('hp', (hp) => ...);        // <- jsui_post_message
@@ -120,5 +120,5 @@ The steady state of a HUD costs nothing in React: animations go through
 
 ## Tests
 
-`npm test -w @jsui/react` (Node `node:test`, bridge mocked in
+`npm test -w @orktes/jsui-react` (Node `node:test`, bridge mocked in
 `test/mock-native.js`).

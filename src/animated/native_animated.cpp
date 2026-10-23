@@ -520,7 +520,7 @@ void NativeAnimated::stopAnimationsOf(int tag, bool report) {
   }
 }
 
-// Same formulas as @jsui/react's JS driver (packages/react/src/animated/
+// Same formulas as @orktes/jsui-react's JS driver (packages/react/src/animated/
 // animations.js), evaluated at the same frame times, so both drivers agree.
 bool NativeAnimated::step(Anim& a, double t) {
   ANode* n = node(a.tag);

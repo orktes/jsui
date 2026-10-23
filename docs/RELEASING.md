@@ -1,13 +1,13 @@
 # Releasing the npm packages
 
-Three packages are published under the `@jsui` npm scope, always with the
+Three packages are published under the `@orktes` npm scope, always with the
 same version:
 
 | Package       | Directory        | Contents                                         |
 | ------------- | ---------------- | ------------------------------------------------ |
-| `@jsui/react` | `packages/react` | React Native API on the JSUI runtime             |
-| `@jsui/cli`   | `packages/cli`   | `jsui build` / `jsui dev` (esbuild)              |
-| `@jsui/web`   | `web`            | browser host + the three WASM modules            |
+| `@orktes/jsui-react` | `packages/react` | React Native API on the JSUI runtime             |
+| `@orktes/jsui-cli`   | `packages/cli`   | `jsui build` / `jsui dev` (esbuild)              |
+| `@orktes/jsui-web`   | `web`            | browser host + the three WASM modules            |
 
 `.github/workflows/release.yml` publishes them with npm trusted publishing
 (GitHub OIDC, with provenance; there is no npm token in the repository). It
@@ -19,13 +19,13 @@ succeeded with all three, including the advisory WebGPU job.
 ## Cutting a release
 
 1. Bump the version in lockstep: `node scripts/set-version.mjs 0.2.0`
-   (updates the three `package.json`s and `@jsui/cli`'s dependency on
-   `@jsui/react`). Merge that to `main` and wait for CI to pass.
+   (updates the three `package.json`s and `@orktes/jsui-cli`'s dependency on
+   `@orktes/jsui-react`). Merge that to `main` and wait for CI to pass.
 2. Tag the merge commit and push the tag: `git tag v0.2.0 && git push origin v0.2.0`.
    (Or run the Release workflow by hand from the Actions tab on `main`.)
 3. The workflow checks the tag matches the package versions, downloads the
-   WASM modules, runs the JS tests, and publishes `@jsui/react`, then
-   `@jsui/cli`, then `@jsui/web`. Versions already on npm are skipped, so a
+   WASM modules, runs the JS tests, and publishes `@orktes/jsui-react`, then
+   `@orktes/jsui-cli`, then `@orktes/jsui-web`. Versions already on npm are skipped, so a
    failed run can simply be re-run.
 
 Prerelease versions (`0.2.0-rc.1`) are published under the `next` dist-tag;
