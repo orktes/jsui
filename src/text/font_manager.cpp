@@ -7,6 +7,7 @@
 #include "include/core/SkFontArguments.h"
 #include "include/core/SkFontMgr.h"
 #include "include/core/SkFontParameters.h"
+#include "include/core/SkSpan.h"
 #include "include/core/SkStream.h"
 #include "include/core/SkTypeface.h"
 #include "modules/skparagraph/include/FontCollection.h"
@@ -40,6 +41,25 @@ namespace {
 std::string lowerAscii(std::string s) {
   for (char& c : s) c = char(std::tolower((unsigned char)c));
   return s;
+}
+
+// A variable font's axes. Skia m157 takes an SkSpan, m124 a pointer + count.
+template <class T>
+std::vector<SkFontParameters::Variation::Axis> variationAxes(const T& tf) {
+  using Axis = SkFontParameters::Variation::Axis;
+  std::vector<Axis> axes;
+  if constexpr (requires { tf.getVariationDesignParameters(SkSpan<Axis>()); }) {
+    int n = tf.getVariationDesignParameters(SkSpan<Axis>());
+    if (n <= 0) return axes;
+    axes.resize(size_t(n));
+    if (tf.getVariationDesignParameters(SkSpan<Axis>(axes.data(), axes.size())) != n) axes.clear();
+  } else {
+    int n = tf.getVariationDesignParameters(nullptr, 0);
+    if (n <= 0) return axes;
+    axes.resize(size_t(n));
+    if (tf.getVariationDesignParameters(axes.data(), n) != n) axes.clear();
+  }
+  return axes;
 }
 
 bool sameStyle(const SkFontStyle& a, const SkFontStyle& b) {
@@ -268,12 +288,10 @@ int FontManager::registerFont(const std::string& family, const void* data, size_
 
     // Variable font: one named instance per weight step of its 'wght' axis.
     const SkFourByteTag wghtTag = SkSetFourByteTag('w', 'g', 'h', 't');
-    int axisCount = tf->getVariationDesignParameters(nullptr, 0);
     const SkFontParameters::Variation::Axis* wght = nullptr;
-    std::vector<SkFontParameters::Variation::Axis> axes(size_t(std::max(axisCount, 0)));
-    if (axisCount > 0 && tf->getVariationDesignParameters(axes.data(), axisCount) == axisCount)
-      for (auto& a : axes)
-        if (a.tag == wghtTag) wght = &a;
+    std::vector<SkFontParameters::Variation::Axis> axes = variationAxes(*tf);
+    for (auto& a : axes)
+      if (a.tag == wghtTag) wght = &a;
     auto instance = [&](float w) -> sk_sp<SkTypeface> {
       SkFontArguments::VariationPosition::Coordinate c{wghtTag, std::clamp(w, wght->min, wght->max)};
       SkFontArguments args;
