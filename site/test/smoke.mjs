@@ -25,6 +25,7 @@ if (!fs.existsSync(path.join(DIR, 'index.html'))) {
 
 const ROUTES = ['/', '/screens', '/screens/main-menu', '/screens/hud', '/screens/inventory', '/screens/battle-pass',
   '/screens/scoreboard', '/screens/dialogue', '/screens/settings', '/screens/loading', '/screens/notifications',
+  '/screens/cinematic',
   '/interactions', '/input', '/motion', '/playground', '/embed'].filter((r) => !filters.length || filters.some((f) => r.includes(f)));
 const SIZES = [{ name: 'desktop', width: 1440, height: 900, scale: 1 }, { name: 'phone', width: 390, height: 844, scale: 2 }];
 
@@ -60,7 +61,10 @@ for (const size of SIZES) {
   page.on('pageerror', (e) => logs.push('pageerror: ' + e.message));
   const requests = [];
   page.on('request', (r) => requests.push(r.url()));
-  await page.goto(`${ORIGIN}/index.html`);
+  // autoplay=0: the cinematic screen streams its trailer only once played
+  // (CI has no business fetching video, and a playing video never goes idle):
+  // it must look finished with its own poster art.
+  await page.goto(`${ORIGIN}/index.html?autoplay=0`);
   await page.waitForFunction(() => window.jsui, null, { timeout: 60000 });
   // Every script, module, wasm and JSON the page loads is versioned (?v=<hash>,
   // site/scripts/build.mjs), so caches cannot mix files of two deploys.

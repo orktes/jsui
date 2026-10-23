@@ -14,6 +14,7 @@ import * as Dialogue from './dialogue.jsx';
 import * as Settings from './settings.jsx';
 import * as Loading from './loading.jsx';
 import * as Notifications from './notifications.jsx';
+import * as Cinematic from './cinematic.jsx';
 
 const mod = (m) => ({ component: m.default, feature: m.feature || null });
 
@@ -80,6 +81,13 @@ export const SCREENS = [
     ...mod(Notifications),
     accent: '#ffb23f',
     blurb: 'Toasts, achievements, loot and party invites that stack, time out and animate.',
+  },
+  {
+    id: 'cinematic',
+    title: 'Cinematic',
+    ...mod(Cinematic),
+    accent: '#ff7a59',
+    blurb: 'A trailer player around a video the page streams: the picture is a host texture, everything around it is JSUI.',
   },
 ];
 
