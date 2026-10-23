@@ -48,6 +48,8 @@ class ImageCache {
     std::string error;
   };
   void loaded(const std::string& url);
+  // decodeImage, counted in the runtime's perf counters.
+  sk_sp<SkImage> decode(const void* data, size_t size);
 
   Runtime& rt_;
   std::unordered_map<std::string, Entry> entries_;

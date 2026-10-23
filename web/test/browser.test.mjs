@@ -852,6 +852,71 @@ test('webgpu: steady animation frames (interactions showcase): retained, few pas
   assert(d.max <= 1, `retained frame differs from a full repaint: ${JSON.stringify(d)}`);
 }, { viewport: { width: 1300, height: 1500 } });
 
+test('webgpu: raster cache: subtrees repainted unchanged are drawn from textures', async ({ page }) => {
+  // In the showcase's steady frames a glow drifts behind the top bar, the
+  // menu, the carousel and the armory panel, which nothing else changes:
+  // each is drawn from a texture of it ('a') instead of node by node ('b',
+  // JSUI_WEBGPU_NO_RASTER_CACHE). The texture is the same draws composited
+  // as a group: equal up to rounding where the subtree is translucent (a
+  // level), and a few levels on some anti-aliased edges (the scaled carousel
+  // card's border is a little closer to the CPU raster from the texture). A
+  // stale texture would differ by far more (text and box edges).
+  let build;
+  try {
+    ({ build } = await import('@orktes/jsui-cli'));
+  } catch (e) {
+    skip(`@orktes/jsui-cli unavailable: ${e.message}`, true);
+  }
+  const outfile = path.join(WEB, 'test/output/interactions.js');
+  fs.mkdirSync(path.dirname(outfile), { recursive: true });
+  await build({ entry: path.join(WEB, '../examples/showcase/interactions.jsx'), outfile, minify: true });
+  await page.addInitScript({ path: path.join(WEB, 'test/gpu-count.js') });
+  await page.reload();
+  await page.waitForFunction(() => window.testReady);
+  const renderers = await page.evaluate(async (dist) => {
+    const bundleSource = await (await fetch('output/interactions.js')).text();
+    const make = () => {
+      const c = document.createElement('canvas');
+      c.style.width = '1280px';
+      c.style.height = '720px';
+      document.body.appendChild(c);
+      return window.createJsui({ canvas: c, bundleSource, bundleUrl: 'output/interactions.js', renderer: 'webgpu', autoStart: false,
+        moduleUrl: new URL(`../${dist}/jsui.js`, location.href) });
+    };
+    const [a, b] = await Promise.all([make(), make()]);
+    window.hosts = { a, b };
+    return [a.renderer, b.renderer];
+  }, DIST);
+  if (renderers.some((n) => n !== 'webgpu')) skip(`no WebGPU renderer with web/${DIST} (${renderers})`, DIST !== 'dist-gpu');
+  const r = await page.evaluate(async () => {
+    const { a, b } = window.hosts;
+    b._wgpu.flags = 16;  // JSUI_WEBGPU_NO_RASTER_CACHE
+    let t = performance.now();
+    const sum = (re) => [...window.__gpuCounts].filter(([k]) => re.test(k)).reduce((n, [, v]) => n + v, 0);
+    const draws = { a: 0, b: 0 }, offscreen = { a: 0, b: 0 };
+    for (let i = 0; i < 240; i++) {
+      t += 16.67;
+      for (const k of ['a', 'b']) {
+        window.__gpuCounts.clear();
+        window.hosts[k].frame(t);
+        if (i >= 180) {  // after the entrance animations
+          draws[k] += sum(/\.draw(Indexed)?(Indirect)?$/) / 60;
+          offscreen[k] += sum(/^pass color /) - sum(/^pass color 1280x720 /);
+        }
+      }
+      await a._wgpu.device.queue.onSubmittedWorkDone();
+    }
+    return { draws, offscreen };
+  });
+  const d = await frameDiff(page, ['a', 'b']);
+  console.log(`      steady draws per frame: raster cache ${r.draws.a.toFixed(1)}, without ${r.draws.b.toFixed(1)}; ` +
+    `diff max ${d.max}, mean ${d.mean.toFixed(4)}`);
+  assert(r.draws.a * 1.5 < r.draws.b, `raster cache does not cut the draws: ${JSON.stringify(r)}`);
+  assert(r.offscreen.a === 0, `textures rendered again in steady frames: ${JSON.stringify(r)}`);
+  assert(!d.missing && !d.size, `readback ${JSON.stringify(d)}`);
+  assert(d.over === 0 && d.max <= 12 && d.mean < 0.1, `raster-cached subtrees differ from direct painting: ${JSON.stringify(d)}`);
+}, { viewport: { width: 1300, height: 1500 } });
+
 test('webgpu: entrance of the interactions showcase: composited layers equal plain layers', async ({ page }) => {
   // The entrance fades and slides panels and menu buttons (layers over
   // children) while some of their content animates too: every frame of 'a'
@@ -1057,6 +1122,63 @@ test('perf: 1080p HUD (~540 nodes), steady state (webgpu)', async ({ page }) => 
     return { tick: tick / N, paint: paint / N, renderer: j.renderer };
   });
   console.log(`      perf (${r.renderer}, 1920x1080, headless/swiftshader): tick ${r.tick.toFixed(2)} ms, Skia Graphite draw+GPU done ${r.paint.toFixed(2)} ms`);
+});
+
+// passThrough: the canvas is a layer over a "game" element; what the UI
+// doesn't capture reaches the game, what it consumes doesn't.
+test('passThrough: unhandled input reaches the page under the canvas', async ({ page }) => {
+  await page.evaluate(() => {
+    const g = document.createElement('div');
+    g.id = 'game';
+    Object.assign(g.style, { position: 'absolute', left: '0px', top: '0px', width: '320px', height: '200px' });
+    document.body.appendChild(g);
+    window.gameEvents = [];
+    for (const t of ['pointerdown', 'pointerup', 'click', 'wheel', 'contextmenu']) {
+      g.addEventListener(t, (e) => window.gameEvents.push(t), { passive: true });
+    }
+  });
+  await mount(page, { jsui: { bundleUrl: 'fixtures/passthrough.js', passThrough: true } });
+  await page.evaluate(() => Object.assign(document.getElementById('ui').style,
+    { position: 'absolute', left: '0px', top: '0px', zIndex: '1' }));
+  const take = () => page.evaluate(() => {
+    const r = { game: window.gameEvents.join(), press: window.hosts.ui.messages.filter(([n]) => n === 'press').length };
+    window.gameEvents = [];
+    window.hosts.ui.messages = [];
+    return r;
+  });
+  const hits = await page.evaluate(() => [window.hosts.ui.hitTest(50, 25), window.hosts.ui.hitTest(200, 150)]);
+  assert(hits.join() === '1,0', `hitTest ${hits}`);
+
+  await page.mouse.click(50, 25);  // the button
+  await frames(page);
+  let r = await take();
+  assert(r.press === 1 && r.game === '', `button click ${JSON.stringify(r)}`);
+  const hot = await page.evaluate(() => document.getElementById('ui').style.pointerEvents);
+  assert(hot === 'auto', `pointer-events over the button: ${hot}`);
+
+  await page.mouse.click(200, 150);  // painted panel, no handlers
+  await page.mouse.wheel(0, 100);
+  await page.mouse.click(200, 150, { button: 'right' });
+  await frames(page);
+  r = await take();
+  const sorted = r.game.split(',').sort().join();
+  assert(r.press === 0 && sorted === 'click,contextmenu,pointerdown,pointerdown,pointerup,pointerup,wheel',
+    `panel click ${JSON.stringify(r)}`);
+  const cold = await page.evaluate(() => document.getElementById('ui').style.pointerEvents);
+  assert(cold === 'none', `pointer-events over the panel: ${cold}`);
+
+  // A drag the game started stays the game's over the button.
+  await page.mouse.move(200, 150);
+  await page.mouse.down();
+  await page.mouse.move(50, 25, { steps: 4 });
+  await page.mouse.up();
+  await frames(page);
+  r = await take();
+  assert(r.press === 0 && r.game.startsWith('pointerdown') && r.game.includes('pointerup'), `game drag ${JSON.stringify(r)}`);
+
+  // Unconsumed keys reach the page; the keyboard isn't taken by unhandled clicks.
+  const focused = await page.evaluate(() => document.activeElement?.tagName);
+  assert(focused !== 'TEXTAREA', `focus after a pass-through click: ${focused}`);
 });
 
 // ---------------------------------------------------------------- surfaces

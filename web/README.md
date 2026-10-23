@@ -71,6 +71,38 @@ cart.destroy();
 - `renderer: 'webgl'` gives a surface a WebGL context of its own (which counts
   against the cap); `'cpu'` and `'2d'` use the CPU raster.
 
+## Input pass-through (HUD over a game)
+
+With `passThrough: true` (on `createJsui` or `createSurface`) the canvas is a
+layer over the page: input the UI doesn't capture reaches whatever is under it
+(the game's canvas or DOM), and input it consumes doesn't. "Captures" means
+something in the UI handles it (onPress, pointer / hover / responder handlers,
+TextInput, a ScrollView that can scroll), not that the point is painted, so a
+click on an inert panel goes through; give a blocking backdrop a handler
+(`onStartShouldSetResponder={() => true}`).
+
+```js
+const hud = await createJsui({ canvas: hudCanvas, bundleUrl: './hud.js', passThrough: true });
+gameCanvas.addEventListener('pointerdown', shoot);   // only presses the HUD didn't take
+hud.hitTest(x, y);                                   // HIT_POINTER | HIT_SCROLL, 0: passes through
+hud.gamepadConsumed(0, 0);                           // the UI took pad 0's A press
+```
+
+- The canvas gets `pointer-events: none` (`auto` while the mouse is over
+  something the UI captures, for its cursor). Window capture-phase listeners
+  give presses inside the canvas to the UI first; a consumed press, its
+  moves, release and click are stopped (`stopImmediatePropagation`) before the
+  page sees them, others continue to their target untouched. A drag the page
+  started stays the page's over UI. Touch events follow the hit test, keys the
+  UI consumed stop at its keyboard sink.
+- The keyboard sink is focused only by presses the UI consumed, and
+  `autoFocus` / `trapTab` default to false. Gamepads are polled by both: check
+  `gamepadConsumed(pad, button)` / `gamepadAxisConsumed(pad, axis)`.
+- Overlapping pass-through canvases: the one created first gets first pick.
+- Without `passThrough` the canvas receives events like any element; pointer,
+  wheel and key events the UI didn't consume are not `preventDefault()`ed and
+  bubble on as usual.
+
 ## WASM modules
 
 The package ships three builds of the runtime. `createJsui()` loads the best

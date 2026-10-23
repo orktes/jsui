@@ -159,6 +159,7 @@ class Node {
   // ancestor.
   void markBoundsDirty() {
     for (Node* n = this; n && !n->boundsDirty_; n = n->parent_) n->boundsDirty_ = true;
+    markPaintTree();
   }
   bool boundsDirty() const { return boundsDirty_; }
   bool boundsContained() const { return boundsContained_; }
@@ -168,6 +169,19 @@ class Node {
   }
   // layoutRect() as of the last post-layout pass (Document::afterLayout).
   Rect boundsLayout{-1, -1, -1, -1};
+
+  // Painter culling (render/painter.cpp, updateRecords): a node is dirty
+  // when anything that can change what its subtree paints changed since the
+  // painter last visited it (props, text, children, layout, scroll offset or
+  // indicators, LayoutAnimation frames, caret). The painter skips a clean
+  // subtree whose placement is unchanged. Like the bounds flag, a clean
+  // node's descendants are clean, so marking stops at the first dirty
+  // ancestor; a ghost's ancestor is the node painting it.
+  void markPaintTree() {
+    for (Node* n = this; n && !n->paintTreeDirty_; n = n->parent_ ? n->parent_ : n->ghostOf) n->paintTreeDirty_ = true;
+  }
+  bool paintTreeDirty() const { return paintTreeDirty_; }
+  void clearPaintTree() { paintTreeDirty_ = false; }
 
  private:
   void updatePropFlags();
@@ -185,6 +199,7 @@ class Node {
   Value props_;
   uint8_t propFlags_ = 0;
   bool boundsDirty_ = true, boundsContained_ = false;
+  bool paintTreeDirty_ = true;
   ComputedStyle style_;
   std::string text_;
 };

@@ -21,6 +21,8 @@ integrations/godot/
   smoke-test.sh         runs the demo headless with an input self-test at 1x and
                         2x content scale and saves the frames (used by CI);
                         GODOT_RENDERING=vulkan runs it on Vulkan (GPU renderer)
+  record-pipelines.sh   records demo/jsui-pipelines.vulkan.bin, the GPU pipeline
+                        list the demo ships (see Rendering)
 ```
 
 ## Build
@@ -180,7 +182,31 @@ main-thread waits on the render thread, and must queue exactly one
 render-thread job per frame; the Vulkan smoke runs pass 0),
 `--bench N` (N frames of hover
 springs, then of list scrolling, with vsync off; prints frame and render
-times) and `--no-world` (no 3D scene).
+times) and `--no-world` (no 3D scene). For the pipeline cache:
+`--pipeline-cache P` (sets `pipeline_cache_path`; a path outside `user://`
+leaves the shipped list out), `--tour` (with `--self-test`: also clicks
+through the tabs, the carousel and the deploy panel and scrolls the list),
+`--first-scroll` (waits for the precompile, then prints the worst frame, the
+worst JsuiView render and the pipelines compiled during the list's first
+scroll), `--expect-warm-pipelines` (fails unless the cache was loaded and the
+self-test / scroll compiled no pipeline) and `--ui-fixed-fps N` (sets
+`fixed_fps`; with `--first-scroll` the scroll starts at 2 s of UI time). In
+`smoke-test.sh` they are `PIPELINE_CACHE=<file>`, `TOUR=1`, `FIRST_SCROLL=1`,
+`EXPECT_WARM_PIPELINES=1` and `FIXED_FPS=N` (and `NO_WORLD=1`). Which
+pipelines a frame needs depends on the frame rate (the raster cache and
+opacity layers keep a subtree's texture, or not, by frames), so CI records
+a cache in its Vulkan run, adds the first scroll on a 60 fps UI clock, and
+checks that the same scroll then compiles nothing
+(`JSUI_LOG_PIPELINES=compiled` names what the frames compiled):
+
+```sh
+GODOT_RENDERING=vulkan SIZES=1280x720 PIPELINE_CACHE=build/godot-pipelines.bin xvfb-run -a -s "-screen 0 1920x1080x24" \
+  integrations/godot/smoke-test.sh build/godot-vulkan.png
+GODOT_RENDERING=vulkan SIZES=1280x720 PIPELINE_CACHE=build/godot-pipelines.bin FIRST_SCROLL=1 FIXED_FPS=60 \
+  xvfb-run -a -s "-screen 0 1920x1080x24" integrations/godot/smoke-test.sh
+JSUI_LOG_PIPELINES=compiled GODOT_RENDERING=vulkan SIZES=1280x720 PIPELINE_CACHE=build/godot-pipelines.bin FIRST_SCROLL=1 FIXED_FPS=60 \
+  EXPECT_WARM_PIPELINES=1 xvfb-run -a -s "-screen 0 1920x1080x24" integrations/godot/smoke-test.sh
+```
 The project uses the Compatibility renderer by default (it runs everywhere);
 pass `--rendering-method forward_plus` (or `mobile`) for the GPU renderer.
 
@@ -210,6 +236,9 @@ node in the inspector.
 | `component` | String | `""` | the `AppRegistry` key this view shows. On a runtime view: the main surface's component (empty: the bundle's first registered one) |
 | `initial_props` | Dictionary | `{}` | the component's props; changing them re-renders it with the new props (state kept) |
 | `auto_size` | bool | `false` | size the view to the component's content: the view's minimum size follows the laid-out size |
+| `profiling` | bool | `false` | time every frame phase (`jsui_set_profiling`), read with `get_perf()` |
+| `pipeline_cache_path` | String | `"user://jsui-pipelines.bin"` | the GPU pipeline cache of the runtime's Skia context (the renderer's name goes before the extension); empty: none. Applies when the context is created; a surface view uses its runtime view's. See [Rendering](#rendering) |
+| `fixed_fps` | int | `0` | `0`: the runtime's clock (animations, timers, scrolling) is the wall clock. `N`: every frame advances it by 1/N s however long frames take, so the UI draws the frames of a machine running at N fps on any machine (tests, recording a pipeline list). The runtime view's applies |
 
 Changing `bundle_url` or `dev_mode` on a running view restarts it.
 
@@ -232,7 +261,8 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | `get_frame_image()` | CPU copy of the last frame, straight alpha, works with `--headless` (with the GPU renderer it reads the texture back: slow, for tests and screenshots) |
 | `get_cpu_frame_image()` | the current frame painted by the CPU raster, straight alpha, whatever the renderer (to compare with `get_frame_image()`) |
 | `get_renderer()` | `"vulkan"`, `"metal"` or `"cpu"` (`""` before the first frame) |
-| `get_render_stats()` | Dictionary: `renderer`, `renders`, `render_usec_total` / `_last` / `_max` (time in the view's render call, CPU side), `dirty_pixels_total`; GPU renderer: `gpu_jobs` (the view's frames handed to the render thread without waiting), `render_thread_jobs` (the render-thread jobs those went in: one per frame for all the views of a runtime; the runtime view's count), `gpu_frame_in_flight` (the last frame handed over is not painted yet), `blocking_waits` / `main_wait_usec_total` (times the main thread waited for the render thread, and for how long), `gpu_job_usec_total` / `jsui_render_usec_total` (render-thread time of the view's GPU renders, and of `jsui_render_gpu_target` in them) |
+| `get_render_stats()` | Dictionary: `renderer`, `renders`, `render_usec_total` / `_last` / `_max` (time in the view's render call, CPU side), `dirty_pixels_total`, `tick_usec_last` (the last `jsui_tick`); GPU renderer: `gpu_jobs` (the view's frames handed to the render thread without waiting), `render_thread_jobs` (the render-thread jobs those went in: one per frame for all the views of a runtime; the runtime view's count), `gpu_frame_in_flight` (the last frame handed over is not painted yet), `blocking_waits` / `main_wait_usec_total` (times the main thread waited for the render thread, and for how long), `gpu_job_usec_total` / `jsui_render_usec_total` (render-thread time of the view's GPU renders, and of `jsui_render_gpu_target` in them); `pipelines` (the runtime's pipeline cache, `jsui_gpu_get_pipeline_stats`: `mode` `"thread"` / `"sliced"`, `queued`, `precompiled`, `failed`, `compiled` on demand, `added` to the file, `unserializable`, `known`, and the `file`) |
+| `get_perf(reset = true)` | Dictionary (`jsui_get_perf`) since the last reset: exclusive time per phase in µs (`js_us`, `commit_us`, `animated_us`, `style_us`, `layout_us`, `input_us`, `paint_us`, `gpu_submit_us`, `other_us`; with `profiling` on) and counters (`image_decodes`, `image_decode_us`, `pipeline_compiles`, `paragraph_builds`, `text_measures`, `layout_passes`, `bridge_calls`) |
 | `get_pending_loads()` | bundle/image/font/fetch loads in flight |
 | `get_last_error()` | last uncaught JS error, or `""` |
 | `get_effective_pixel_ratio()` | the ratio actually used |
@@ -396,6 +426,25 @@ func spawn_nameplate(enemy):
   black checkerboard). Nothing is read back or uploaded. New textures
   (first frame, resize) are used from the next drawn frame; the old ones stay
   on screen until then.
+* GPU pipeline cache: Skia compiles a GPU pipeline (shaders + render state)
+  the first time the UI draws something new, inside that frame: a list's
+  first scroll over rounded images, a panel's first entrance, by tens of
+  milliseconds on a cold driver. The runtime's Skia context records every
+  pipeline it creates in the runtime view's `pipeline_cache_path`, appended
+  as they appear (`user://jsui-pipelines.bin` becomes
+  `user://jsui-pipelines.vulkan.bin`: one file per renderer), and from the
+  next start on precompiles them off the frame: on a worker thread on Vulkan
+  and Metal, and on a Dawn device that is not thread safe in ~2 ms slices
+  after renders (at most one per frame), on the render thread. For a
+  `user://` path the same file under `res://`
+  (`res://jsui-pipelines.vulkan.bin`) is precompiled too, so a player's
+  first session is warm as well: the demo ships one, recorded with
+  `record-pipelines.sh` (the self-test and tour, and the list's first scroll
+  on 30 to 144 fps UI clocks, since what a frame draws depends on the frame
+  rate; keys are fitted to the GPU that loads them; record again after
+  updating JSUI's Skia). A cache of another Skia build or
+  renderer is started afresh and a damaged one repaired, with one log line
+  each. `get_render_stats().pipelines` shows what it did.
 * CPU renderer: a changed frame uploads the whole texture (Godot 4 has no
   sub-rectangle texture upload).
 * The runtime does not run inside the editor. The node draws a placeholder
@@ -423,6 +472,21 @@ func spawn_nameplate(enemy):
   continues through Godot (`mouse_filter` is `PASS`): parent controls, then
   `_unhandled_input`. For example, an unhandled Tab or arrow key can move
   Godot focus to another control.
+* Pass-through (`input_pass_through`, default on): only the points where the
+  UI captures input count as inside the view (`_has_point` asks
+  `jsui_hit_test`), so a click on an empty or decorative part of a full-screen
+  HUD goes to the Godot controls behind the view and to the game's
+  `_unhandled_input`, and doesn't take keyboard focus. "Captures" means
+  something in the UI handles it (onPress, pointer / hover / responder
+  handlers, TextInput, a ScrollView that can scroll), not that the point is
+  painted; views with `pointerEvents="box-none"` / `"none"` let input
+  through. A backdrop that should block the game (a pause menu) needs a
+  handler, e.g. `onStartShouldSetResponder={() => true}`. A drag the game
+  started keeps going to the game when it crosses UI, and a press the UI took
+  keeps its drag. Turn it off to make the whole rect a Control that receives
+  (and bubbles) every event. `hit_test(position)` returns `HIT_POINTER` /
+  `HIT_SCROLL` flags for any local point, e.g. for the game's own picking.
+  Each surface view hit-tests its own surface.
 
 ### Loading and exporting
 
@@ -436,7 +500,8 @@ paths) use JSUI's built-in loader.
 When exporting, add the bundle folder to the preset's non-resource filter
 (Export → Resources → "Filters to export non-resource files", e.g.
 `ui/dist/*`). This ships the raw `.js` and image files and not only Godot's
-imported copies.
+imported copies. A shipped pipeline list needs the filter too
+(`jsui-pipelines.*.bin`).
 
 ## Limitations
 

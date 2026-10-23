@@ -140,6 +140,7 @@ bool NativeAnimated::createNode(int tag, const Value& c, std::string* error) {
   }
   if (nodes_.count(tag)) dropNode(tag);
   if (n.type == Type::HostBuffer) bufferNodes_[n.bufferKey].push_back(tag);
+  if (n.type == Type::Props) propsNodes_.push_back(tag);
   nodes_.emplace(tag, std::move(n));
   return true;
 }
@@ -190,6 +191,7 @@ void NativeAnimated::dropNode(int tag) {
       if (it->second.empty()) bufferNodes_.erase(it);
     }
   }
+  if (n->type == Type::Props) propsNodes_.erase(std::remove(propsNodes_.begin(), propsNodes_.end(), tag), propsNodes_.end());
   nodes_.erase(tag);
 }
 
@@ -201,6 +203,7 @@ void NativeAnimated::bufferChanged(const std::string& key) {
 
 void NativeAnimated::clear() {
   nodes_.clear();
+  propsNodes_.clear();
   animations_.clear();
   mappings_.clear();
   listening_.clear();
@@ -212,8 +215,8 @@ void NativeAnimated::clear() {
 }
 
 void NativeAnimated::viewDestroyed(uint32_t viewId) {
-  for (auto& [tag, n] : nodes_)
-    if (n.type == Type::Props && n.view == viewId) n.view = 0;
+  for (int tag : propsNodes_)
+    if (ANode* n = node(tag); n && n->view == viewId) n->view = 0;
   mappings_.erase(std::remove_if(mappings_.begin(), mappings_.end(), [&](const Mapping& m) { return m.view == viewId; }),
                   mappings_.end());
 }
@@ -435,10 +438,13 @@ void NativeAnimated::flush() {
   if (nodes_.empty()) return;
   gen_++;
   // Props nodes downstream of changed values.
-  std::unordered_set<int> seen;
-  std::vector<int> stack(dirtyValues_.begin(), dirtyValues_.end());
+  std::unordered_set<int>& seen = seen_;
+  std::vector<int>& stack = stack_;
+  std::vector<ANode*>& props = props_;
+  seen.clear();
+  props.clear();
+  stack.assign(dirtyValues_.begin(), dirtyValues_.end());
   dirtyValues_.clear();
-  std::vector<ANode*> props;
   while (!stack.empty()) {
     int t = stack.back();
     stack.pop_back();
@@ -450,10 +456,11 @@ void NativeAnimated::flush() {
   }
   // ... and props whose view React re-propped since our last write (the
   // reconciler sends the value it rendered with; ours is the live one).
-  for (auto& [tag, n] : nodes_) {
-    if (n.type != Type::Props || !n.view || seen.count(tag)) continue;
-    Node* v = findView ? findView(n.view) : doc_.get(n.view);
-    if (v && (!n.viewWritten || v->paintVersion != n.viewPaintVersion)) props.push_back(&n);
+  for (int tag : propsNodes_) {
+    ANode* n = node(tag);
+    if (!n || !n->view || seen.count(tag)) continue;
+    Node* v = findView ? findView(n->view) : doc_.get(n->view);
+    if (v && (!n->viewWritten || v->paintVersion != n->viewPaintVersion)) props.push_back(n);
   }
   for (ANode* p : props) applyProps(*p);
 }

@@ -21,7 +21,9 @@ enum class Phase : uint8_t {
   Style,     // applyStyle (style objects -> ComputedStyle + Yoga)
   Layout,    // Yoga + text measurement + layout animations
   Input,     // hit testing / event routing (JS handlers count as Js)
-  Paint,     // rendering
+  Paint,     // rendering (recording the frame; the CPU raster rasterises it here)
+  Gpu,       // Graphite renders: submitting the recorded frame (Recorder::snap,
+             // insertRecording, submit), which compiles new pipelines and uploads textures
   Count
 };
 
@@ -37,6 +39,9 @@ struct PerfCounters {
   uint64_t animatedWrites = 0;   // views written by native Animated
   uint64_t events = 0;           // events dispatched to JS
   uint64_t hitNodes = 0;         // nodes visited by hit testing
+  uint64_t imageDecodes = 0;     // encoded images decoded (ImageCache)
+  double imageDecodeUs = 0;      // ... and the time that took (timed even without profiling)
+  uint64_t pipelineCompiles = 0; // GPU pipelines compiled on demand during this runtime's renders
 };
 
 // Paragraph::layout runs (process-wide: the text cache has no document).
@@ -53,6 +58,13 @@ class Perf {
   void reset() {
     counters = PerfCounters();
     for (double& v : us) v = 0;
+    t0_ = Clock::now();
+  }
+  // Turning profiling on restarts the clock of the current phase, so the
+  // time before (unprofiled) is not booked to it.
+  void setProfiling(bool on) {
+    if (on && !profiling) t0_ = Clock::now();
+    profiling = on;
   }
 
   // RAII phase scope; a no-op unless profiling.

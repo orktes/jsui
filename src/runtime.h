@@ -54,6 +54,9 @@ class Runtime {
   bool needsRedraw() const;
   // Animations / timers / held input want another tick soon (jsui_wants_frame).
   bool wantsFrame() const;
+  // Animations, scroll physics or JS frame callbacks drive the next frames
+  // of surface `s` (Surface::needsRedraw).
+  bool animatingFrames(const Surface& s) const;
   // The main surface (tests and tools that render a runtime directly).
   void render(void* pixels, int width, int height, size_t rowBytes) { main().render(pixels, width, height, rowBytes); }
   SkIRect renderIncremental(void* pixels, int width, int height, size_t rowBytes) {

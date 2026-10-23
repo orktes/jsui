@@ -24,6 +24,16 @@
 // before and before what it submits afterwards; Dawn tracks the texture's
 // usage itself. Graphite waits for its own work (context teardown) by
 // calling wgpuInstanceProcessEvents on the embedder's instance.
+//
+// Pipeline cache (pipeline_cache.h): Vulkan and Metal precompile on a worker
+// thread. Graphite creates pipelines through its thread-safe resource
+// provider (render passes, samplers; Metal's depth-stencil states exist up
+// front), into a VkPipelineCache created without external synchronisation /
+// on the MTLDevice, both safe to use from any thread. A Dawn device is
+// thread safe only with ImplicitDeviceSynchronization (Dawn then locks it
+// around every call); without it the cache precompiles in slices after
+// renders, on the render thread (Graphite creates precompiled pipelines
+// synchronously even where it creates the others asynchronously).
 #include "render/gpu.h"
 
 #if defined(JSUI_VULKAN) || defined(JSUI_GRAPHITE_METAL) || defined(JSUI_GRAPHITE_DAWN)
@@ -46,6 +56,7 @@
 #include "include/gpu/graphite/Surface.h"
 #include "render/graphite_images.h"
 #include "render/painter.h"
+#include "render/pipeline_cache.h"
 #include "runtime.h"
 
 #if defined(JSUI_VULKAN)
@@ -90,6 +101,7 @@ namespace {
 
 using jsui::graphite_support::CachingImageProvider;
 using jsui::graphite_support::kDefaultCacheBytes;
+using jsui::pipeline_cache::Precompiler;
 
 enum class Api { Vulkan, Metal, Dawn };
 
@@ -143,6 +155,11 @@ struct GraphiteGpu final : JsuiGpuContext {
   ~GraphiteGpu() override { release(); }
 
   const Api api;
+  // Outlives ctx (its pipeline callback).
+  std::unique_ptr<Precompiler> precompiler = std::make_unique<Precompiler>(
+      api == Api::Vulkan  ? jsui::pipeline_cache::Backend::Vulkan
+      : api == Api::Metal ? jsui::pipeline_cache::Backend::Metal
+                          : jsui::pipeline_cache::Backend::Dawn);
   std::unique_ptr<graphite::Context> ctx;
   std::unique_ptr<graphite::Recorder> recorder;
   sk_sp<CachingImageProvider> images;
@@ -166,6 +183,15 @@ struct GraphiteGpu final : JsuiGpuContext {
   wgpu::Queue dawnQueue;
 #endif
 
+  Precompiler::Mode precompileMode() {
+#if defined(JSUI_GRAPHITE_DAWN)
+    if (api == Api::Dawn)
+      return dawnDevice.HasFeature(wgpu::FeatureName::ImplicitDeviceSynchronization) ? Precompiler::Mode::Thread
+                                                                                     : Precompiler::Mode::Sliced;
+#endif
+    return Precompiler::Mode::Thread;
+  }
+
   bool finishInit(const graphite::ContextOptions& opts) {
     (void)opts;
     if (!ctx) return false;
@@ -175,11 +201,21 @@ struct GraphiteGpu final : JsuiGpuContext {
     graphite::RecorderOptions ropts;
     ropts.fImageProvider = images;
     ropts.fGpuBudgetInBytes = cacheBytes;
+    // Every Recording is inserted, in the order it was snapped. Without
+    // this Graphite assumes they may be played back in any order and evicts
+    // its text, path and clip atlases after every snap(): every glyph a frame
+    // draws was rasterised and uploaded again (134 glyphs per frame of the
+    // interactions showcase's steady animation, ~560 per full repaint).
+    ropts.fRequireOrderedRecordings = true;
     recorder = ctx->makeRecorder(ropts);
-    return recorder != nullptr;
+    if (!recorder) return false;
+    precompiler->attach(ctx.get(), precompileMode());
+    pipelines = precompiler.get();
+    return true;
   }
 
   void release() {
+    if (precompiler) precompiler->shutdown();  // its PrecompileContext holds the device
     if (images) images->clear();
     recorder.reset();
     if (ctx) {
@@ -396,6 +432,7 @@ JsuiGpuContext* createVulkan(const JsuiVulkanDevice& d) {
   if (!backend.fMemoryAllocator) return nullptr;
 
   graphite::ContextOptions opts;
+  g->precompiler->configure(opts);  // the pipeline cache's callback
   g->ctx = graphite::ContextFactory::MakeVulkan(backend, opts);
   if (!g->finishInit(opts)) return nullptr;
   if (!g->initBarrier()) return nullptr;
@@ -414,6 +451,7 @@ JsuiGpuContext* createMetal(void* device, void* queue) {
   backend.fDevice.retain(static_cast<CFTypeRef>(device));
   backend.fQueue.retain(static_cast<CFTypeRef>(queue));
   graphite::ContextOptions opts;
+  g->precompiler->configure(opts);  // the pipeline cache's callback
   g->ctx = graphite::ContextFactory::MakeMetal(backend, opts);
   if (!g->finishInit(opts)) return nullptr;
   return g.release();
@@ -439,6 +477,7 @@ JsuiGpuContext* makeDawn(void* instance, void* device, void* queue) {
   backend.fQueue = g->dawnQueue;
   backend.fTick = graphite::DawnNativeProcessEventsFunction;
   graphite::ContextOptions opts;
+  g->precompiler->configure(opts);  // the pipeline cache's callback
   g->ctx = graphite::ContextFactory::MakeDawn(backend, opts);
   if (!g->finishInit(opts)) return nullptr;
   return g.release();
@@ -601,12 +640,18 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* d
 #if defined(JSUI_VULKAN)
   if (g->api == Api::Vulkan && !g->submitBarrier()) return -1;
 #endif
-  bool ok = g->flush(surface.get(), finalState.get());
+  bool ok;
+  {
+    Perf::Scope gpuScope(rt.doc.perf, Phase::Gpu);
+    ok = g->flush(surface.get(), finalState.get());
+  }
   surface.reset();
 #if defined(JSUI_VULKAN)
   if (g->api == Api::Vulkan && !g->submitBarrier()) return -1;
 #endif
   if (!ok || g->ctx->isDeviceLost()) return -1;
+  rt.doc.perf.counters.pipelineCompiles += g->precompiler->takeCompiles();
+  g->precompiler->afterFrame();
   if (dirty) *dirty = JsuiRect{painted.x(), painted.y(), painted.width(), painted.height()};
   return 0;
 }

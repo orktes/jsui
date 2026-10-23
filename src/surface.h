@@ -58,7 +58,12 @@ class Surface {
   // Sets the viewport and tells JS (a "resize" event with this rootTag).
   void setViewport(float width, float height, float pixelRatio);
 
-  bool needsRedraw() const { return redraw_ || doc.paintDirty(); }
+  // Something new to paint. An approximate repaint (Document::
+  // markExactRepaint) is redone exactly in the next frame: right away once
+  // nothing drives frames any more (Runtime::animatingFrames), else in the
+  // frame the animation renders anyway (still approximately while it moves
+  // the node), so the surface still goes idle between animation frames.
+  bool needsRedraw() const;
   void requestRedraw() { redraw_ = true; }
 
   void render(void* pixels, int width, int height, size_t rowBytes);

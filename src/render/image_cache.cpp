@@ -1,6 +1,7 @@
 #include "render/image_cache.h"
 
 #include <cctype>
+#include <chrono>
 
 #include "core/document.h"
 #include "include/core/SkData.h"
@@ -65,6 +66,15 @@ bool decodeDataUri(const std::string& uri, std::string* bytes) {
 ImageCache::ImageCache(Runtime& rt) : rt_(rt) {}
 ImageCache::~ImageCache() = default;
 
+sk_sp<SkImage> ImageCache::decode(const void* data, size_t size) {
+  auto t0 = std::chrono::steady_clock::now();
+  sk_sp<SkImage> image = decodeImage(data, size);
+  PerfCounters& c = rt_.doc.perf.counters;
+  c.imageDecodes++;
+  c.imageDecodeUs += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+  return image;
+}
+
 std::string ImageCache::resolve(const std::string& uri) const {
   if (uri.empty() || uri.rfind("data:", 0) == 0) return uri;
   return ResourceLoader::resolve(rt_.baseUrl, uri);
@@ -103,7 +113,7 @@ sk_sp<SkImage> ImageCache::get(const std::string& url, State* state) {
       std::string bytes;
       Entry e;
       bool ok = decodeDataUri(url, &bytes);
-      if (ok) e.image = decodeImage(bytes.data(), bytes.size());
+      if (ok) e.image = decode(bytes.data(), bytes.size());
       e.bytes = bytes.size();
       e.state = e.image ? State::Ready : State::Failed;
       if (!e.image) {
@@ -117,7 +127,7 @@ sk_sp<SkImage> ImageCache::get(const std::string& url, State* state) {
     entries_[url] = Entry{};
     rt_.loader.load(url, [this, url](Resource res) {
       auto& e = entries_[url];
-      if (res.ok()) e.image = decodeImage(res.data.data(), res.data.size());
+      if (res.ok()) e.image = decode(res.data.data(), res.data.size());
       e.bytes = res.data.size();
       e.state = e.image ? State::Ready : State::Failed;
       if (!e.image) {

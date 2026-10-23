@@ -24,8 +24,11 @@
 //             in a separate page (web/test/gpu-count.js) so the timings above
 //             carry no instrumentation.
 //   gpu time  WebGPU only (--no-gpu-timing to skip): GPU timestamps around
-//             every render pass and copy (web/test/gpu-timing.js, in a page of
-//             its own), summed per frame and listed by pass target and kind.
+//             every render pass and run of back-to-back copies
+//             (web/test/gpu-timing.js, in a page of its own), summed per frame
+//             and listed by pass target and kind. The marks around a copy run
+//             are empty compute passes: on Apple GPUs a run's time includes
+//             switching encoders, so it overstates short copies.
 //             Needs the adapter's 'timestamp-query' feature (real GPUs; the
 //             SwiftShader adapter may not have it, then it says so).
 //
@@ -42,6 +45,7 @@
 //   node web/test/frame-bench.mjs [--dist dist-gpu] [--frames 120] [--renderers webgpu,webgl,cpu,chrome]
 //                                 [--width 1280 --height 720 --dpr 1] [--real-gpu] [--scenario steady]
 //                                 [--settle 3000] [--no-counts] [--no-gpu-timing] [--no-trace]
+//                                 [--webgl-sync readpixels|fence|finish]
 //                                 [--json out.json] [app.jsx]
 //
 // Default: headless Chromium from Playwright, where WebGL runs on SwiftShader
@@ -73,6 +77,12 @@ const COUNTS = !args.includes('--no-counts');
 const GPU_TIMING = !args.includes('--no-gpu-timing');
 const TRACE = !args.includes('--no-trace');
 const SCENARIO = opt('--scenario', 'steady');
+// How the finish metric waits for a WebGL frame: readpixels (default) a
+// 1-pixel read-back; fence a fenceSync polled from short tasks (no read-back,
+// but the polling competes for the CPU with SwiftShader: +35% there); finish
+// gl.finish(), which does not wait for the GPU on ANGLE (2.4 ms p50 for
+// frames whose timer queries say 45 ms on SwiftShader).
+const WEBGL_SYNC = opt('--webgl-sync', 'readpixels');
 if (!['steady', 'entrance', 'scroll'].includes(SCENARIO)) throw new Error(`unknown --scenario ${SCENARIO}`);
 // The entrance animations of interactions.jsx take ~2.5 s (staggered springs,
 // panels fading in, the progress bar). Before they finish a frame repaints
@@ -153,7 +163,10 @@ async function open(renderer, { init = [], stepped = false } = {}) {
   for (const f of init) await context.addInitScript({ path: path.join(WEB, 'test', f) });
   await context.addInitScript(DRIVE, { scenario: SCENARIO, at: SCROLL_AT });
   const page = await context.newPage();
-  if (process.env.JSUI_BENCH_CONSOLE) page.on('console', (m) => console.log(`[console] ${m.text()}`));
+  if (process.env.JSUI_BENCH_CONSOLE) {
+    console.log(`[page] ${renderer} ${init.join(",") || "plain"}${stepped ? " stepped" : ""}`);
+    page.on("console", (m) => console.log(`[console] ${m.text()}`));
+  }
   if (renderer === 'chrome') {
     await page.goto(`${ORIGIN}/rnw.html`);
     await page.evaluate(async () => {
@@ -320,58 +333,78 @@ for (const renderer of RENDERERS) {
   }
 
   // 2. The old metric: frames stepped by hand, each awaited until the GPU finished it.
-  const finish = isChrome ? null : await page.evaluate(async ({ n }) => {
+  const finish = isChrome ? null : await page.evaluate(async ({ n, gpuTiming, webglSync }) => {
     const j = window.j;
     j.stop();
-    // WebGL: a 1-pixel readPixels waits for the GPU for sure (gl.finish()
-    // returned in ~1 ms on SwiftShader for frames that take ~350 ms there).
     const px = new Uint8Array(4), gl = j._gl;
+    const isGl2 = typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext;
+    const mode = !isGl2 && webglSync === 'fence' ? 'readpixels' : webglSync;
+    const syncKind = j._wgpu ? 'onSubmittedWorkDone' : gl ? mode : 'none';
+    // A macrotask much shorter than setTimeout's clamp, to poll a fence.
+    const ch = new MessageChannel();
+    const yieldTask = () => new Promise((r) => { ch.port1.onmessage = r; ch.port2.postMessage(0); });
+    // WebGL: see --webgl-sync (fence needs WebGL 2).
     const sync = async () => {
-      if (j._wgpu) await j._wgpu.device.queue.onSubmittedWorkDone();
-      else if (gl) {
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-        gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      if (j._wgpu) return j._wgpu.device.queue.onSubmittedWorkDone();
+      if (!gl) return;
+      if (mode === 'finish') return gl.finish();
+      if (mode === 'fence') {
+        const f = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+        gl.flush();
+        while (gl.clientWaitSync(f, 0, 0) === gl.TIMEOUT_EXPIRED) await yieldTask();
+        gl.deleteSync(f);
+        return;
       }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
     };
     const r0 = j.stats.renders;
-    // WebGL GPU time per frame, where the browser has timer queries
-    // (EXT_disjoint_timer_query_webgl2): the WebGPU timestamps' counterpart.
-    const tq = gl?.getExtension('EXT_disjoint_timer_query_webgl2');
-    const queries = [];
-    let t = performance.now();
+    let t = performance.now(), i = 0;
     const times = [], cpu = [];
-    for (let i = 0; i < n + 20; i++) {
+    for (; i < n + 20; i++) {
       t += 16.67;
       window.__drive(i);
-      const q = tq && i >= 20 ? gl.createQuery() : null;
-      if (q) gl.beginQuery(tq.TIME_ELAPSED_EXT, q);
       const a = performance.now();
       j.frame(t);
       const b = performance.now();
-      if (q) {
-        gl.endQuery(tq.TIME_ELAPSED_EXT);
-        queries.push(q);
-      }
       await sync();
       if (i >= 20) {  // after warm-up
         times.push(performance.now() - a);
         cpu.push(b - a);
       }
     }
-    const gpuMs = [];
-    for (let k = 0; k < 50 && queries.length; k++) {
-      await new Promise((r) => setTimeout(r, 10));
-      if (!gl.getQueryParameter(queries[queries.length - 1], gl.QUERY_RESULT_AVAILABLE)) continue;
-      if (!gl.getParameter(tq.GPU_DISJOINT_EXT)) {
-        for (const q of queries) gpuMs.push(gl.getQueryParameter(q, gl.QUERY_RESULT) / 1e6);
-      }
-      break;
-    }
-    queries.forEach((q) => gl.deleteQuery(q));
     const renders = j.stats.renders - r0;
+    // WebGL GPU time per frame, where the browser has timer queries
+    // (EXT_disjoint_timer_query_webgl2): the WebGPU timestamps' counterpart.
+    // A run of its own after the timed frames (none with --no-gpu-timing),
+    // so the finish times above never include a TIME_ELAPSED query (which
+    // ANGLE may implement with extra flushes / command buffers).
+    const tq = gpuTiming ? gl?.getExtension('EXT_disjoint_timer_query_webgl2') : null;
+    const queries = [], gpuMs = [];
+    if (tq) {
+      for (let k = 0; k < n; k++, i++) {
+        t += 16.67;
+        window.__drive(i);
+        const q = gl.createQuery();
+        gl.beginQuery(tq.TIME_ELAPSED_EXT, q);
+        j.frame(t);
+        gl.endQuery(tq.TIME_ELAPSED_EXT);
+        queries.push(q);
+        await sync();
+      }
+      for (let k = 0; k < 50 && queries.length; k++) {
+        await new Promise((r) => setTimeout(r, 10));
+        if (!gl.getQueryParameter(queries[queries.length - 1], gl.QUERY_RESULT_AVAILABLE)) continue;
+        if (!gl.getParameter(tq.GPU_DISJOINT_EXT)) {
+          for (const q of queries) gpuMs.push(gl.getQueryParameter(q, gl.QUERY_RESULT) / 1e6);
+        }
+        break;
+      }
+      queries.forEach((q) => gl.deleteQuery(q));
+    }
     j.destroy();
-    return { times, cpu, renders, gpuMs, timerQuery: !!tq };
-  }, { n: N });
+    return { times, cpu, renders, gpuMs, timerQuery: !!tq, sync: syncKind };
+  }, { n: N, gpuTiming: GPU_TIMING, webglSync: WEBGL_SYNC });
   await context.close();
 
   // 3. WebGPU calls per frame (instrumented page).
@@ -398,7 +431,7 @@ for (const renderer of RENDERERS) {
       for (const [k, v] of window.__gpuCounts) if (k !== 'GPUQueue.onSubmittedWorkDone') out[k] = v / n;
       j.destroy();
       return out;
-    }, { n: Math.min(N, 30) });
+    }, { n: Number(process.env.JSUI_BENCH_COUNT_FRAMES ?? Math.min(N, 30)) });
     await c.context.close();
   }
 
@@ -449,7 +482,7 @@ for (const renderer of RENDERERS) {
   }
   if (fin) {
     console.log(`    finish    mean ${f2(fin.mean)} ms, p50 ${f2(fin.p50)}, p95 ${f2(fin.p95)} (main thread ${f2(finCpu.mean)}; ` +
-      `${finish.renders} repaints in ${finish.times.length + 20} frames)`);
+      `${finish.renders} repaints in ${finish.times.length + 20} frames; waited with ${finish.sync})`);
     if (info.name !== 'webgpu' && GPU_TIMING) {
       const g = finish.gpuMs.length ? stats(finish.gpuMs) : null;
       console.log(g ? `    gpu time  per frame (WebGL timer queries): mean ${f2(g.mean)} ms, p50 ${f2(g.p50)}, p95 ${f2(g.p95)}`
@@ -476,16 +509,17 @@ for (const renderer of RENDERERS) {
     const by = new Map();
     for (const e of timing.entries) {
       perFrame[e.frame] += e.ms;
-      // Copies by kind (their sizes vary frame to frame), with the area copied.
-      const m = e.kind === 'copy' && /^(\S+) (\d+)x(\d+)$/.exec(e.label);
-      const label = e.kind === 'copy' ? e.label.split(' ')[0] : e.label;
-      const b = by.get(label) ?? by.set(label, { kind: e.kind, n: 0, ms: 0, px: 0 }).get(label);
+      // Copy runs by the kinds of copy in them, with the copies and texels.
+      const b = by.get(e.label) ?? by.set(e.label, { kind: e.kind, n: 0, ms: 0, copies: 0, px: 0 }).get(e.label);
       b.n++;
       b.ms += e.ms;
-      if (m) b.px += m[2] * m[3];
+      b.copies += e.copies ?? 0;
+      b.px += e.px ?? 0;
     }
     const tot = stats(perFrame);
-    const rows = [...by].map(([label, b]) => ({ label: b.px ? `${label} (${(b.px / b.n / 1000).toFixed(1)}k px each)` : label,
+    const rows = [...by].map(([label, b]) => ({
+      label: b.kind === 'copy' ? `${label}: ${(b.copies / timing.frames).toFixed(2)} copies in runs` +
+        (b.px ? `, ${(b.px / b.copies / 1000).toFixed(1)}k px each` : '') : label,
       kind: b.kind, perFrame: b.n / timing.frames, ms: b.ms / timing.frames }))
       .sort((a, b) => b.ms - a.ms);
     gpuTime = { total: tot, rows };

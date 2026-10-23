@@ -1,5 +1,6 @@
 #include "jsui_view.h"
 
+#include <godot_cpp/classes/dir_access.hpp>
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/font.hpp>
@@ -14,6 +15,7 @@
 #include <godot_cpp/classes/input_event_screen_drag.hpp>
 #include <godot_cpp/classes/input_event_screen_touch.hpp>
 #include <godot_cpp/classes/json.hpp>
+#include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/time.hpp>
 #include <godot_cpp/classes/viewport.hpp>
@@ -104,6 +106,11 @@ void JsuiView::_bind_methods() {
   ClassDB::bind_method(D_METHOD("get_autostart"), &JsuiView::get_autostart);
   ClassDB::bind_method(D_METHOD("set_forward_gamepad", "enabled"), &JsuiView::set_forward_gamepad);
   ClassDB::bind_method(D_METHOD("get_forward_gamepad"), &JsuiView::get_forward_gamepad);
+  ClassDB::bind_method(D_METHOD("set_input_pass_through", "enabled"), &JsuiView::set_input_pass_through);
+  ClassDB::bind_method(D_METHOD("get_input_pass_through"), &JsuiView::get_input_pass_through);
+  ClassDB::bind_method(D_METHOD("hit_test", "position"), &JsuiView::hit_test);
+  BIND_CONSTANT(HIT_POINTER);
+  BIND_CONSTANT(HIT_SCROLL);
   ClassDB::bind_method(D_METHOD("set_force_cpu", "enabled"), &JsuiView::set_force_cpu);
   ClassDB::bind_method(D_METHOD("get_force_cpu"), &JsuiView::get_force_cpu);
   ClassDB::bind_method(D_METHOD("set_runtime_view", "path"), &JsuiView::set_runtime_view);
@@ -114,6 +121,10 @@ void JsuiView::_bind_methods() {
   ClassDB::bind_method(D_METHOD("get_initial_props"), &JsuiView::get_initial_props);
   ClassDB::bind_method(D_METHOD("set_auto_size", "enabled"), &JsuiView::set_auto_size);
   ClassDB::bind_method(D_METHOD("get_auto_size"), &JsuiView::get_auto_size);
+  ClassDB::bind_method(D_METHOD("set_pipeline_cache_path", "path"), &JsuiView::set_pipeline_cache_path);
+  ClassDB::bind_method(D_METHOD("get_pipeline_cache_path"), &JsuiView::get_pipeline_cache_path);
+  ClassDB::bind_method(D_METHOD("set_fixed_fps", "fps"), &JsuiView::set_fixed_fps);
+  ClassDB::bind_method(D_METHOD("get_fixed_fps"), &JsuiView::get_fixed_fps);
   ClassDB::bind_method(D_METHOD("get_root_tag"), &JsuiView::get_root_tag);
 
   ClassDB::bind_method(D_METHOD("start"), &JsuiView::start);
@@ -140,6 +151,9 @@ void JsuiView::_bind_methods() {
   ClassDB::bind_method(D_METHOD("get_cpu_frame_image"), &JsuiView::get_cpu_frame_image);
   ClassDB::bind_method(D_METHOD("get_renderer"), &JsuiView::get_renderer);
   ClassDB::bind_method(D_METHOD("get_render_stats"), &JsuiView::get_render_stats);
+  ClassDB::bind_method(D_METHOD("set_profiling", "enabled"), &JsuiView::set_profiling);
+  ClassDB::bind_method(D_METHOD("get_profiling"), &JsuiView::get_profiling);
+  ClassDB::bind_method(D_METHOD("get_perf", "reset"), &JsuiView::get_perf, DEFVAL(true));
   ClassDB::bind_method(D_METHOD("get_pending_loads"), &JsuiView::get_pending_loads);
   ClassDB::bind_method(D_METHOD("get_last_error"), &JsuiView::get_last_error);
   ClassDB::bind_method(D_METHOD("get_effective_pixel_ratio"), &JsuiView::get_effective_pixel_ratio);
@@ -153,12 +167,18 @@ void JsuiView::_bind_methods() {
                "get_pixel_ratio");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "autostart"), "set_autostart", "get_autostart");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "forward_gamepad"), "set_forward_gamepad", "get_forward_gamepad");
+  ADD_PROPERTY(PropertyInfo(Variant::BOOL, "input_pass_through"), "set_input_pass_through", "get_input_pass_through");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "force_cpu"), "set_force_cpu", "get_force_cpu");
   ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "runtime_view", PROPERTY_HINT_NODE_PATH_VALID_TYPES, "JsuiView"),
                "set_runtime_view", "get_runtime_view");
   ADD_PROPERTY(PropertyInfo(Variant::STRING, "component"), "set_component", "get_component");
   ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "initial_props"), "set_initial_props", "get_initial_props");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "auto_size"), "set_auto_size", "get_auto_size");
+  ADD_PROPERTY(PropertyInfo(Variant::BOOL, "profiling"), "set_profiling", "get_profiling");
+  ADD_PROPERTY(PropertyInfo(Variant::STRING, "pipeline_cache_path", PROPERTY_HINT_SAVE_FILE, "*.bin"),
+               "set_pipeline_cache_path", "get_pipeline_cache_path");
+  ADD_PROPERTY(PropertyInfo(Variant::INT, "fixed_fps", PROPERTY_HINT_RANGE, "0,240"), "set_fixed_fps",
+               "get_fixed_fps");
 
   ADD_SIGNAL(MethodInfo("message_received", PropertyInfo(Variant::STRING, "name"),
                         PropertyInfo(Variant::NIL, "data", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NIL_IS_VARIANT),
@@ -180,7 +200,9 @@ void JsuiView::_bind_methods() {
 
 JsuiView::JsuiView() {
   set_focus_mode(FOCUS_ALL);
-  // Unconsumed clicks bubble to parent controls and on to the game.
+  // Unconsumed events bubble to parent controls and on to the game; with
+  // input_pass_through, points the UI doesn't capture aren't even inside the
+  // view (_has_point), so controls behind it get them too.
   set_mouse_filter(MOUSE_FILTER_PASS);
   set_clip_contents(true);
 }
@@ -356,6 +378,7 @@ void JsuiView::createSurface() {
   std::string k = toStd(component_), props = propsJson();
   rt_ = jsui_surface_create(host_->rt_, k.c_str(), props.c_str(), w, h, computeRatio());
   if (!rt_) return;
+  if (profiling_) jsui_set_profiling(rt_, 1);
   start_usec_ = host_->start_usec_;
   logical_w_ = logical_h_ = pixel_w_ = pixel_h_ = 0;
   viewport_auto_ = false;
@@ -373,6 +396,7 @@ void JsuiView::destroySurface() {
   if (!rt_ || !host_) return;
   JsuiRuntime* s = rt_;
   surfaceGone();
+  mouse_buttons_ = 0;
   jsui_surface_destroy(s);
   if (host_->is_inside_tree()) host_->flushMessages();  // unmount effects may have posted messages
 }
@@ -427,7 +451,9 @@ void JsuiView::start() {
     UtilityFunctions::push_error("JsuiView: jsui_create failed");
     return;
   }
+  if (profiling_) jsui_set_profiling(rt_, 1);
   start_usec_ = Time::get_singleton()->get_ticks_usec();
+  clock_ms_ = clock_wall_ms_ = 0;
   logical_w_ = logical_h_ = pixel_w_ = pixel_h_ = 0;
   last_error_.clear();
   cursor_.clear();
@@ -468,6 +494,7 @@ void JsuiView::stop() {
   // signals / callbacks still run (below), so the game can drop its work.
   jsui_destroy(rt);
   held_keys_.clear();
+  mouse_buttons_ = 0;
   pads_.clear();
   std::vector<Event> pending;
   pending.swap(messages_);
@@ -575,6 +602,15 @@ void JsuiView::onJoyConnectionChanged(int64_t device, bool connected) {
 
 double JsuiView::nowMs() const { return double(Time::get_singleton()->get_ticks_usec() - start_usec_) / 1000.0; }
 
+// The runtime's clock: the wall clock since start(), or with fixed_fps one
+// frame's time per tick (switching keeps it monotonic).
+double JsuiView::clockMs() {
+  const double wall = nowMs();
+  clock_ms_ += fixed_fps_ > 0 ? 1000.0 / fixed_fps_ : wall - clock_wall_ms_;
+  clock_wall_ms_ = wall;
+  return clock_ms_;
+}
+
 float JsuiView::computeRatio() const {
   if (pixel_ratio_ > 0.f) return pixel_ratio_;
   // Control -> window pixels: parent / CanvasLayer / Camera2D transforms
@@ -649,8 +685,10 @@ void JsuiView::process() {
   if (!rt_) return;
   updateViewport();
   for (JsuiView* v : surfaces_) v->updateViewport();
+  const uint64_t tick0 = Time::get_singleton()->get_ticks_usec();
   // One tick for every surface of the runtime, then each paints.
-  jsui_tick(rt_, nowMs());
+  jsui_tick(rt_, clockMs());
+  tick_usec_last_ = Time::get_singleton()->get_ticks_usec() - tick0;
   flushMessages();
   if (!rt_) return;  // a message handler stopped the view
   reportErrors();
@@ -693,6 +731,27 @@ void JsuiView::afterTick() {
   updateAutoSize();
   updateCursor();
   if (jsui_needs_redraw(rt_)) render_pending_ = true;
+}
+
+void JsuiView::setupPipelineCache(const String& renderer) {
+  pipeline_file_ = "";
+  String path = pipeline_cache_path_;
+  if (!gpu_ || path.is_empty()) return;
+  // One file per backend: the renderer's name before the extension.
+  String ext = path.get_extension();
+  path = ext.is_empty() ? path + "." + renderer : path.get_basename() + "." + renderer + "." + ext;
+  // A list shipped with the game at the same path under res://.
+  if (path.begins_with("user://")) {
+    String shipped = "res://" + path.substr(7);
+    if (FileAccess::file_exists(shipped)) {
+      PackedByteArray list = FileAccess::get_file_as_bytes(shipped);
+      if (jsui_gpu_precompile_pipelines(gpu_, list.ptr(), size_t(list.size())) < 0)
+        UtilityFunctions::push_warning("JsuiView: " + shipped + " is not a pipeline list of this JSUI build and renderer");
+    }
+  }
+  String file = isGodotPath(path) ? ProjectSettings::get_singleton()->globalize_path(path) : path;
+  DirAccess::make_dir_recursive_absolute(file.get_base_dir());
+  if (jsui_gpu_set_pipeline_cache(gpu_, file.utf8().get_data()) >= 0) pipeline_file_ = file;
 }
 
 void JsuiView::render() {
@@ -865,6 +924,53 @@ Dictionary JsuiView::get_render_stats() const {
   d["main_wait_usec_total"] = int64_t(main_wait_usec_total_);
   d["gpu_job_usec_total"] = int64_t(gpu_job_usec_total_.load(std::memory_order_relaxed));
   d["jsui_render_usec_total"] = int64_t(jsui_render_usec_total_.load(std::memory_order_relaxed));
+  d["tick_usec_last"] = int64_t(tick_usec_last_);
+  // The runtime's pipeline cache (its Skia context is the runtime view's).
+  const JsuiView* rv = host_ ? host_ : this;
+  if (renderer_ != Renderer::Cpu && renderer_ != Renderer::Unknown && rv->gpu_) {
+    JsuiPipelineStats s;
+    jsui_gpu_get_pipeline_stats(rv->gpu_, &s);
+    Dictionary p;
+    p["mode"] = s.mode == JSUI_PRECOMPILE_THREAD ? "thread" : s.mode == JSUI_PRECOMPILE_SLICED ? "sliced" : "none";
+    p["queued"] = s.queued;
+    p["precompiled"] = int64_t(s.precompiled);
+    p["failed"] = int64_t(s.failed);
+    p["compiled"] = int64_t(s.compiled);
+    p["added"] = int64_t(s.added);
+    p["unserializable"] = int64_t(s.unserializable);
+    p["known"] = int64_t(s.known);
+    p["file"] = rv->pipeline_file_;
+    d["pipelines"] = p;
+  }
+  return d;
+}
+
+void JsuiView::set_profiling(bool on) {
+  profiling_ = on;
+  if (rt_) jsui_set_profiling(rt_, on ? 1 : 0);
+}
+
+Dictionary JsuiView::get_perf(bool reset) {
+  Dictionary d;
+  if (!rt_) return d;
+  JsuiPerf p;
+  jsui_get_perf(rt_, &p, reset ? 1 : 0);
+  d["js_us"] = p.js_us;
+  d["commit_us"] = p.commit_us;
+  d["animated_us"] = p.animated_us;
+  d["style_us"] = p.style_us;
+  d["layout_us"] = p.layout_us;
+  d["input_us"] = p.input_us;
+  d["paint_us"] = p.paint_us;
+  d["other_us"] = p.other_us;
+  d["gpu_submit_us"] = p.gpu_submit_us;
+  d["image_decode_us"] = p.image_decode_us;
+  d["image_decodes"] = int64_t(p.image_decodes);
+  d["pipeline_compiles"] = int64_t(p.pipeline_compiles);
+  d["paragraph_builds"] = int64_t(p.paragraph_builds);
+  d["text_measures"] = int64_t(p.text_measures);
+  d["layout_passes"] = int64_t(p.layout_passes);
+  d["bridge_calls"] = int64_t(p.bridge_calls);
   return d;
 }
 
@@ -1200,6 +1306,19 @@ bool JsuiView::handleGamepad(const Ref<InputEvent>& event) {
   return false;
 }
 
+int JsuiView::hit_test(const Vector2& position) const {
+  JsuiRuntime* rt = rt_;
+  return rt ? jsui_hit_test(rt, float(position.x), float(position.y)) : 0;
+}
+
+bool JsuiView::_has_point(const Vector2& point) const {
+  if (!input_pass_through_ || Engine::get_singleton()->is_editor_hint())
+    return Rect2(Vector2(), get_size()).has_point(point);
+  // A press that reached the UI keeps the pointer until it is released.
+  if (mouse_buttons_ && int64_t(Input::get_singleton()->get_mouse_button_mask()) != 0) return true;
+  return hit_test(point) != 0;
+}
+
 void JsuiView::_gui_input(const Ref<InputEvent>& event) {
   if (!rt_ || event.is_null()) return;
   bool consumed = false;
@@ -1208,6 +1327,9 @@ void JsuiView::_gui_input(const Ref<InputEvent>& event) {
     if (mm->get_device() == kEmulatedDevice) return;  // touch already forwarded as touch
     Vector2 p = mm->get_position();
     consumed = jsui_send_mouse_move(rt_, p.x, p.y) != 0;
+    // A drag whose press went to the game (or a control behind the view)
+    // stays theirs while it passes over the UI.
+    if (int64_t(mm->get_button_mask()) != 0 && !mouse_buttons_) consumed = false;
   } else if (const auto* mb = Object::cast_to<InputEventMouseButton>(event.ptr())) {
     if (mb->get_device() == kEmulatedDevice) return;
     Vector2 p = mb->get_position();
@@ -1225,8 +1347,17 @@ void JsuiView::_gui_input(const Ref<InputEvent>& event) {
     } else if (idx == MOUSE_BUTTON_LEFT || idx == MOUSE_BUTTON_RIGHT || idx == MOUSE_BUTTON_MIDDLE) {
       JsuiMouseButton b = idx == MOUSE_BUTTON_RIGHT ? JSUI_MOUSE_RIGHT : idx == MOUSE_BUTTON_MIDDLE ? JSUI_MOUSE_MIDDLE
                                                                                                     : JSUI_MOUSE_LEFT;
-      if (mb->is_pressed() && get_focus_mode() != FOCUS_NONE && !has_focus()) grab_focus();
+      int bit = 1 << int(b);
+      if (!mb->is_pressed() && !(mouse_buttons_ & bit)) {
+        // The press went elsewhere: the UI never saw it.
+        flushMessages();
+        return;
+      }
+      if (mb->is_pressed()) mouse_buttons_ |= bit;
+      else mouse_buttons_ &= ~bit;
       consumed = jsui_send_mouse_button(rt_, p.x, p.y, b, mb->is_pressed() ? 1 : 0, modsOf(mb)) != 0;
+      // Clicks the UI passes on don't take the keyboard away from the game.
+      if (consumed && mb->is_pressed() && get_focus_mode() != FOCUS_NONE && !has_focus()) grab_focus();
     }
   } else if (const auto* pg = Object::cast_to<InputEventPanGesture>(event.ptr())) {
     // Trackpad two-finger scroll (macOS): delta is in "wheel notches".

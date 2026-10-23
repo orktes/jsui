@@ -111,8 +111,11 @@
  *   autoFocus?: boolean,         // focus the keyboard sink on start (default true)
  *   gamepads?: boolean,          // poll the Gamepad API (default true)
  *   autoStart?: boolean,         // start the frame loop immediately (default true)
- *   trapTab?: boolean,           // keep Tab inside the UI even if unhandled (default true;
- *                                // false lets an unhandled Tab move page focus on)
+ *   trapTab?: boolean,           // keep Tab inside the UI even if unhandled (default true, false
+ *                                // with passThrough; false lets an unhandled Tab move page focus on)
+ *   passThrough?: boolean,       // the canvas is a layer over the page (a game's canvas): input the
+ *                                // UI doesn't capture reaches what is under it, consumed input
+ *                                // doesn't (default false). Turns autoFocus / trapTab off by default.
  * }} JsuiOptions */
 
 import { SharedWebGPU, WebGPURenderer, requestWebGPU } from './jsui-webgpu.js';
@@ -161,6 +164,9 @@ const NAV_KEYS = new Set(['Tab', 'Enter', 'Escape', 'Backspace', 'Delete', 'Arro
   'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10',
   'F11', 'F12']);
 const GAMEPAD_BUTTONS = 17;
+/** jsui_hit_test flags (view.hitTest()). */
+export const HIT_POINTER = 1;  // presses / pointer input there are captured
+export const HIT_SCROLL = 2;   // a ScrollView that can scroll (or a wheel handler) is there
 const GAMEPAD_AXES = 4;
 const AXIS_EPSILON = 1 / 256;
 
@@ -221,6 +227,7 @@ async function loadModuleFor(opts, webgpu) {
 }
 
 const webglProbe = {};
+let noGpuWarned = false;  // CanvasView._warnNoGpu
 /** True if this browser can create a WebGL (2 or 1) context; `hardware`: one without a major
  * performance caveat, i.e. not a software rasteriser such as SwiftShader the browser fell back
  * to (probed once each, on a throwaway canvas). */
@@ -260,7 +267,7 @@ class CanvasView {
     this._pressedKeys = new Map();  // code -> key, released on blur
     this._mouseButtons = 0;
     this._fixedRatio = opts.pixelRatio > 0 ? opts.pixelRatio : 0;
-    this._trapTab = opts.trapTab !== false;
+    this._trapTab = opts.trapTab ?? !opts.passThrough;
     // Auto-sized axes take the component's laid-out size (surfaces only).
     this._autoW = this._autoH = false;
     this._contentW = this._contentH = 0;
@@ -280,9 +287,22 @@ class CanvasView {
     this._webgpu = webgpu ?? null;
     this._initBlitter(mode);
     this._log(1, `renderer: ${this.renderer}` + (this._wgpu ? ` (${this._webgpu.description})` : ''));
+    this._warnNoGpu(mode);
     this._installInput();
     this._installCanvasInput();
     this._installResize();
+  }
+
+  // A mode that may use the GPU ended on the CPU raster because the browser
+  // has no hardware WebGPU or WebGL: say so once per page, since that is
+  // several times slower and usually a browser setting or state, not JSUI.
+  _warnNoGpu(mode) {
+    if (noGpuWarned || mode === 'cpu' || mode === '2d') return;
+    if (this.renderer === 'webgpu' || this.renderer.startsWith('gpu-') || webglAvailable(true)) return;
+    noGpuWarned = true;
+    this._log(2, 'no hardware GPU acceleration in this browser (WebGPU and WebGL are unavailable or software '
+      + 'only), so the UI renders on the CPU, which is much slower. In Chrome, chrome://gpu shows why: after '
+      + 'repeated GPU process crashes Chrome turns GPU access off until it is restarted.');
   }
 
   // The view that owns the runtime (gamepads, the frame loop).
@@ -422,6 +442,11 @@ class CanvasView {
     }
     try { return fn(...ptrs); } finally { for (const p of owned) M._free(p); }
   }
+
+  /** What the UI captures at (x, y), CSS px from the canvas' top-left
+   * (jsui_hit_test): HIT_POINTER / HIT_SCROLL flags, 0 where input passes
+   * through to the page. */
+  hitTest(x, y) { return this.rt ? this.module._jsui_hit_test(this.rt, x, y) : 0; }
 
   _updateCursor() {
     const p = this.module._jsui_get_cursor(this.rt);
@@ -872,6 +897,10 @@ class CanvasView {
     const opt = { signal };
     const active = { signal, passive: false };
     const focusSink = () => this.focus();
+    if (this.opts.passThrough) {
+      this._installPassThroughInput(signal);
+      return;
+    }
     c.style.touchAction = 'none';
     c.style.overscrollBehavior = 'none';
     c.style.userSelect = 'none';
@@ -939,6 +968,142 @@ class CanvasView {
     c.addEventListener('mousedown', (e) => e.preventDefault(), active);
   }
 
+  // passThrough: whatever the UI doesn't capture reaches the page under the
+  // canvas (a game's own canvas or DOM), like a click on an empty part of a
+  // HUD. The canvas has pointer-events: none ('auto' only while the mouse
+  // hovers something the UI captures, for its cursor), and window capture
+  // listeners route events: a press inside the canvas goes to the UI first.
+  // When the UI consumes it (jsui_send_* returns non-zero), the event, its
+  // gesture's moves and release and the click after it are stopped before the
+  // page sees them; otherwise they go on to their target untouched. Touch
+  // events (touchstart / touchmove / touchend) follow the hit test.
+  _installPassThroughInput(signal) {
+    const M = this.module, c = this.canvas;
+    const opt = { signal, capture: true, passive: false };
+    const stamp = (e) => M._jsui_set_event_time?.(this.rt, e.timeStamp);
+    const inside = (x, y) => x >= 0 && y >= 0 && x < this.width && y < this.height && c.isConnected;
+    const take = (e) => {
+      if (e.cancelable) e.preventDefault();
+      e.stopImmediatePropagation();
+    };
+    const gestures = new Map();  // pointerId -> whether the UI consumed its press
+    const touches = new Set();   // Touch.identifier of touches the UI captures
+    let hovering = false, swallowClick = false;
+    const setHot = (hot) => {
+      const v = hot ? 'auto' : 'none';
+      if (c.style.pointerEvents !== v) c.style.pointerEvents = v;
+    };
+    setHot(false);
+    addEventListener('pointerdown', (e) => {
+      const [x, y] = this._point(e);
+      if (!inside(x, y)) return;
+      stamp(e);
+      swallowClick = false;
+      let used;
+      if (e.pointerType === 'mouse') {
+        this._mouseButtons |= 1 << e.button;
+        used = M._jsui_send_mouse_button(this.rt, x, y, mouseButton(e.button), 1, modsOf(e));
+      } else {
+        used = M._jsui_send_touch(this.rt, e.pointerId, 0, x, y);
+      }
+      gestures.set(e.pointerId, !!used);
+      if (used) {
+        take(e);
+        if (e.pointerType !== 'touch') this.focus();
+      }
+      this._updateCursor();
+    }, opt);
+    addEventListener('pointermove', (e) => {
+      const [x, y] = this._point(e);
+      const owned = gestures.get(e.pointerId);
+      if (owned === undefined) {
+        // Hover. A drag whose press the page got stays the page's.
+        if (e.pointerType !== 'mouse') return;
+        if (!inside(x, y)) {
+          if (hovering) {
+            hovering = false;
+            M._jsui_send_mouse_leave(this.rt);
+            setHot(false);
+            this._updateCursor();
+          }
+          return;
+        }
+        hovering = true;
+        stamp(e);
+        const used = M._jsui_send_mouse_move(this.rt, x, y);
+        setHot(!e.buttons && (M._jsui_hit_test(this.rt, x, y) & HIT_POINTER) !== 0);
+        if (used && !e.buttons) e.stopImmediatePropagation();
+        this._updateCursor();
+        return;
+      }
+      stamp(e);
+      if (e.pointerType === 'mouse') M._jsui_send_mouse_move(this.rt, x, y);
+      else M._jsui_send_touch(this.rt, e.pointerId, 1, x, y);
+      if (owned) take(e);
+    }, opt);
+    const up = (e, cancel) => {
+      const owned = gestures.get(e.pointerId);
+      if (owned === undefined) return;
+      stamp(e);
+      const [x, y] = this._point(e);
+      if (e.pointerType === 'mouse') {
+        if (!(this._mouseButtons & (1 << e.button))) return;
+        this._mouseButtons &= ~(1 << e.button);
+        M._jsui_send_mouse_button(this.rt, x, y, mouseButton(e.button), 0, modsOf(e));
+        if (!this._mouseButtons) gestures.delete(e.pointerId);
+      } else {
+        M._jsui_send_touch(this.rt, e.pointerId, cancel ? 3 : 2, x, y);
+        gestures.delete(e.pointerId);
+      }
+      if (owned) {
+        take(e);
+        swallowClick = !cancel;
+      }
+      this._updateCursor();
+    };
+    addEventListener('pointerup', (e) => up(e, false), opt);
+    addEventListener('pointercancel', (e) => up(e, true), opt);
+    // The click (and auxclick) of a press the UI consumed; right-clicks and
+    // double clicks on what the UI captures.
+    const captures = (e) => {
+      const [x, y] = this._point(e);
+      return inside(x, y) && (M._jsui_hit_test(this.rt, x, y) & HIT_POINTER) !== 0;
+    };
+    for (const type of ['click', 'auxclick']) {
+      addEventListener(type, (e) => {
+        if (swallowClick) take(e);
+        swallowClick = false;
+      }, opt);
+    }
+    addEventListener('dblclick', (e) => { if (captures(e)) take(e); }, opt);
+    addEventListener('contextmenu', (e) => { if (captures(e)) take(e); }, opt);
+    addEventListener('wheel', (e) => {
+      const [x, y] = this._point(e);
+      if (!inside(x, y)) return;
+      const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.height : 1;
+      if (M._jsui_send_mouse_wheel(this.rt, x, y, e.deltaX * k, e.deltaY * k)) take(e);
+    }, opt);
+    const touch = (e) => {
+      let all = e.changedTouches.length > 0;
+      for (const t of e.changedTouches) {
+        if (e.type === 'touchstart') {
+          const [x, y] = this._point(t);
+          if (inside(x, y) && M._jsui_hit_test(this.rt, x, y) !== 0) touches.add(t.identifier);
+        }
+        if (!touches.has(t.identifier)) all = false;
+        if (e.type === 'touchend' || e.type === 'touchcancel') touches.delete(t.identifier);
+      }
+      if (all) take(e);
+    };
+    for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) addEventListener(type, touch, opt);
+    addEventListener('blur', () => {
+      gestures.clear();
+      touches.clear();
+      hovering = false;
+      setHot(false);
+    }, { signal });
+  }
+
   _installInput() {
     const M = this.module, signal = this._abort.signal;
     const opt = { signal };
@@ -974,12 +1139,15 @@ class CanvasView {
       if ((used && (NAV_KEYS.has(e.key) || e.ctrlKey || e.metaKey)) || (e.key === 'Tab' && this._trapTab)) {
         e.preventDefault();
       }
+      // passThrough: keys the UI consumed don't reach the page's listeners.
+      if (used && this.opts.passThrough) e.stopPropagation();
     }, active);
     sink.addEventListener('keyup', (e) => {
       this._pressedKeys.delete(e.code || e.key);
       const used = this._withStrings([e.key || null, e.code || null], (k, cd) =>
         M._jsui_send_key(this.rt, k, cd, 0, 0, modsOf(e)));
       if (used && NAV_KEYS.has(e.key)) e.preventDefault();
+      if (used && this.opts.passThrough) e.stopPropagation();
     }, active);
     const flushText = () => {
       const v = sink.value;
@@ -1014,7 +1182,7 @@ class CanvasView {
       M._jsui_send_mouse_leave(this.rt);
       this._hostOf()._releasePads();
     }, opt);
-    if (this.opts.autoFocus !== false) focusSink();
+    if (this.opts.autoFocus ?? !this.opts.passThrough) focusSink();
   }
 
 
@@ -1590,7 +1758,8 @@ class JsuiHost extends CanvasView {
       }
       any = true;
       if (!s) {
-        s = this._pads[i] = { pressed: new Uint8Array(GAMEPAD_BUTTONS), axes: new Float32Array(GAMEPAD_AXES) };
+        s = this._pads[i] = { pressed: new Uint8Array(GAMEPAD_BUTTONS), used: new Uint8Array(GAMEPAD_BUTTONS),
+          axes: new Float32Array(GAMEPAD_AXES), axisUsed: new Uint8Array(GAMEPAD_AXES) };
         this._withStrings([p.id], (id) => M._jsui_set_gamepad_connected(rt, i, 1, id));
       }
       const nb = Math.min(GAMEPAD_BUTTONS, p.buttons.length);
@@ -1599,7 +1768,8 @@ class JsuiHost extends CanvasView {
         const down = btn.pressed ? 1 : 0;
         if (down !== s.pressed[b]) {
           s.pressed[b] = down;
-          M._jsui_send_gamepad_button(rt, i, b, down, btn.value);
+          const used = M._jsui_send_gamepad_button(rt, i, b, down, btn.value);
+          s.used[b] = down && used ? 1 : 0;
         }
       }
       const na = Math.min(GAMEPAD_AXES, p.axes.length);
@@ -1608,7 +1778,7 @@ class JsuiHost extends CanvasView {
         const prev = s.axes[a];
         if (Math.abs(v - prev) > AXIS_EPSILON || (v === 0 && prev !== 0)) {
           s.axes[a] = v;
-          M._jsui_send_gamepad_axis(rt, i, a, v);
+          s.axisUsed[a] = M._jsui_send_gamepad_axis(rt, i, a, v) ? 1 : 0;
         }
       }
     }
@@ -1617,6 +1787,7 @@ class JsuiHost extends CanvasView {
 
   _releasePad(i, s) {
     for (let b = 0; b < GAMEPAD_BUTTONS; b++) {
+      s.used[b] = 0;
       if (s.pressed[b]) {
         s.pressed[b] = 0;
         this.module._jsui_send_gamepad_button((this._padView ?? this).rt, i, b, 0, 0);
@@ -1629,6 +1800,15 @@ class JsuiHost extends CanvasView {
       }
     }
   }
+
+  /** Whether the UI consumed the current press of gamepad `pad`'s `button`
+   * (W3C standard mapping): the game skips buttons the UI took, e.g. A on a
+   * focused menu item, and handles the rest itself. */
+  gamepadConsumed(pad, button) { return !!this._pads[pad]?.used[button]; }
+
+  /** Whether the UI consumed the last change of the stick axis (it moved
+   * focus or scrolls). */
+  gamepadAxisConsumed(pad, axis) { return !!this._pads[pad]?.axisUsed[axis]; }
 
   _releasePads() { this._pads.forEach((s, i) => s && this._releasePad(i, s)); }
 
@@ -1682,6 +1862,8 @@ class JsuiHost extends CanvasView {
  *   pixelRatio?: number,         // default: the runtime's option, else window.devicePixelRatio
  *   autoFocus?: boolean,         // focus its keyboard sink on creation (default false)
  *   trapTab?: boolean,           // keep an unhandled Tab inside (default false: focus moves on in the page)
+ *   passThrough?: boolean,       // input the surface doesn't capture reaches the page under it (see
+ *                                // JsuiOptions.passThrough)
  * }} JsuiSurfaceOptions */
 
 // A further root view of a runtime (JsuiHost.createSurface).
