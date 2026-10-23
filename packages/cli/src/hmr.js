@@ -20,7 +20,7 @@ import * as esbuild from 'esbuild';
 import { transformAsync } from '@babel/core';
 import { createHash } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,6 +31,16 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const RUNTIME = readFileSync(path.join(here, 'hmr-runtime.js'), 'utf8');
 const APP_EXT = /\.(jsx?|tsx?|mjs|cjs|json)$/i;
 const HISTORY = 64;
+
+// esbuild realpaths its inputs (macOS: /var -> /private/var), so paths are
+// compared after resolving symlinks.
+function real(p) {
+  try {
+    return realpathSync.native(p);
+  } catch {
+    return p;
+  }
+}
 
 let refreshPlugin = null;
 function babelRefresh() {
@@ -57,8 +67,8 @@ function loaderFor(file) {
 export function createHmr(o) {
   const mode = o.mode || 'development';
   const cwd = process.cwd();
-  const reactDir = jsuiReactDir() + path.sep;
-  const cliDir = path.dirname(here) + path.sep;
+  const reactDir = real(jsuiReactDir()) + path.sep;
+  const cliDir = real(path.dirname(here)) + path.sep;
   const compiled = new Map();  // key -> { hash, code }
   const history = new Map();  // version -> { vendor, entry, hashes: Map(key -> hash) }
   let vendor = { fingerprint: null, code: '' };
@@ -66,7 +76,7 @@ export function createHmr(o) {
 
   const isApp = (key) => {
     if (/^[a-z][\w-]*:/i.test(key) && !/^[a-z]:[\\/]/i.test(key)) return false;  // other esbuild namespaces
-    const abs = path.resolve(cwd, key);
+    const abs = real(path.resolve(cwd, key));
     return APP_EXT.test(abs) && !abs.includes(`${path.sep}node_modules${path.sep}`) &&
       !abs.startsWith(reactDir) && !abs.startsWith(cliDir);
   };
@@ -149,8 +159,8 @@ export function createHmr(o) {
    */
   async function commit(metafile, version) {
     const inputs = metafile.inputs;
-    const keyOf = new Map(Object.keys(inputs).map((k) => [path.resolve(cwd, k), k]));
-    const entryKey = keyOf.get(path.resolve(o.entry));
+    const keyOf = new Map(Object.keys(inputs).map((k) => [real(path.resolve(cwd, k)), k]));
+    const entryKey = keyOf.get(real(path.resolve(o.entry)));
     if (!entryKey || !isApp(entryKey)) throw new Error(`hmr: ${o.entry} is not an app module of the build`);
     const app = Object.keys(inputs).filter(isApp);
     const vendorKeys = new Set();
@@ -159,7 +169,7 @@ export function createHmr(o) {
       const deps = {};
       for (const r of inputs[key].imports) {
         if (r.external || r.original == null) continue;
-        const target = keyOf.get(path.resolve(cwd, r.path)) || r.path;
+        const target = keyOf.get(real(path.resolve(cwd, r.path))) || r.path;
         deps[r.original] = target;
         if (!isApp(target)) vendorKeys.add(target);
       }
