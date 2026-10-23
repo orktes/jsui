@@ -35,6 +35,15 @@ void purge(JsuiGpuContext* gpu, size_t cacheBytes);
 // Full repaint of `rt` into `target`. 0 on success, -1 on failure.
 int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiGLTarget& target);
 
+// Tests only (gpu_retained_frame_matches_direct): variations of the
+// retained-frame path, to tell which step misbehaves on a driver.
+enum RetainedDebug : unsigned {
+  kRetainedOneRect = 1,      // damage-only repaints in one bounding rect, not split passes
+  kRetainedFlushFirst = 2,   // flush the retained frame's repaint before copying it into the target
+  kRetainedFullRepaint = 4,  // repaint the whole retained frame every frame: only the copy remains
+};
+void setRetainedDebug(unsigned flags);
+
 }  // namespace gpu
 
 namespace webgpu {

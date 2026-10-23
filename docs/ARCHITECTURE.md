@@ -74,6 +74,7 @@ library with a C API, and the same core compiles to WebAssembly.
 | `tools/jsui-record` | Headless recorder: bundle + JSON input timeline → 60 fps frames / H.264 (ffmpeg), with cursor, caption and input-legend overlay |
 | `tools/jsui-viewer` | Windowed host with dev mode (live reload) |
 | `tools/jsui-bench` | Frame benchmark: per-phase time (JS, commit, Animated, style, layout, input, paint), work counters and allocations per frame (see "Performance") |
+| `tools/jsui-paint-bench` | Paint benchmark: paint time, pixels repainted, draw calls and GL calls per frame on the CPU raster and Ganesh GL (see "Paint performance") |
 | `integrations/godot` | Godot 4 GDExtension (`JsuiView` Control) + demo project |
 | `web/` | Browser host for the WASM build |
 | `packages/react` | `@jsui/react`: reconciler, components, StyleSheet, events |
@@ -127,15 +128,23 @@ JsuiGLTarget t = { .texture = tex, .width = w, .height = h, .flags = JSUI_GL_TOP
 jsui_render_gl_target(rt, gpu, &t);
 ```
 
-* **Same painter.** `Runtime::renderCanvas()` lays out, refreshes the
-  incremental paint records and paints the full frame (dev overlay and frozen
-  frame included) into the Ganesh surface. The CPU path is untouched and stays
-  the default; a later `jsui_render_rgba_incremental()` repaints fully.
-* **Full repaints.** The GPU path does not clip to the damage region: GPU
-  targets (swapped default framebuffers in particular) are not guaranteed to
-  keep the previous frame, and a GPU redraw of a whole HUD costs less than
-  a CPU raster + upload. `jsui_needs_redraw()` still says when a frame is
-  needed.
+* **Same painter, same damage tracking.** `Runtime::renderCanvasTracked()`
+  lays out, refreshes the incremental paint records and tells the backend
+  how much changed. GPU targets (swapped default framebuffers in particular)
+  are not assumed to keep the previous frame, so:
+  * when little changed (a spinner, a hover, a caret), only the damage is
+    repainted into a retained frame owned by the `JsuiGpuContext` (one per
+    runtime), as up to four scissored rect passes covering the damage
+    (`paintDocumentRects`; a region clip would cost Ganesh a stencil or mask
+    pass), and that frame is drawn into the target with one draw;
+  * when at least half the frame changed (a full-screen animation, a
+    scrolling list), the whole frame is painted straight into the target.
+    The retained frame is repainted fully once the damage stayed small for
+    3 frames, and freed after 300 direct frames.
+  `JSUI_GL_NO_RETAIN` and MSAA targets always paint the whole frame into the
+  target. Each frame ends with one `flushAndSubmit` and no CPU wait. A later
+  `jsui_render_rgba_incremental()` repaints fully. `jsui_needs_redraw()`
+  still says when a frame is needed.
 * **Effects.** Everything the painter uses is plain Skia: blurred shadows
   (the painter's cached shadow masks are CPU images drawn as sprites; Ganesh
   uploads each once), `saveLayer` with opacity / image filters (blur, drop
@@ -906,6 +915,74 @@ Scenarios: `interactions` (examples), `list` (2000 rows, one counter),
 `useHostState` + `jsui_patch_state`), `idle`. Under valgrind, run with
 `--tool=callgrind --instr-atstart=no`: the tool switches instrumentation on
 for the measured frames only.
+
+## Paint performance
+
+What painting costs is proportional to the damage, and within the damage
+the expensive per-pixel work is done once:
+
+* **Damage.** `updateDamage` (`src/render/painter.cpp`) compares each node's
+  paint record (version, size, device matrix, children, scroll indicators)
+  with the last frame and damages the old and new bounds of what changed;
+  unchanged subtrees outside the damage are culled. Skia does not
+  rasterize an anti-aliased outline cut by the clip exactly like the whole
+  outline, so damage crossing a curved node's edge grows to the whole node
+  (damage inside its padding box does not), and the repaint stays exact.
+* **Scroll blit.** When a ScrollView's content only scrolled by whole device
+  pixels over a uniform backdrop, the CPU path moves the viewport's pixels
+  and repaints only what the scroll exposed, what is painted above the
+  content and curved outlines at the viewport's edge (`ScrollBlit`).
+* **Sprites.** On the CPU raster, gradient backgrounds and Image nodes of
+  128x128 to 2.2M device pixels are rendered once per content and device
+  scale and blitted at whole-pixel offsets afterwards (`drawSprite`, 48 MB
+  per document); blurred shadows and inset shadows are cached masks drawn
+  the same way. Sub-pixel positions draw directly (a moving sprite would be
+  re-rendered every frame).
+* **Layers.** A node that paints one draw (a background colour or one
+  gradient, nothing else) applies its opacity to that draw instead of a
+  `saveLayer`.
+* **Text.** Paragraphs keep one layout: painting and the painter's overflow
+  bounds lay out at the same content width.
+
+`PaintStats` (`lastPaintStats()`) reports per paint the nodes painted and
+culled, the pixels and rects repainted, sprite draws and renders, blitted
+pixels and, with `setPaintCounting()`, the canvas draw calls, text / image
+draws, layers and clips. `tests/native/render_test.cpp` and `gpu_test.cpp`
+assert on these (incremental frames equal full ones; perf guards on
+pixels repainted, passes, sprite re-renders, layers).
+
+`tools/jsui-paint-bench` renders bundles headless on a simulated 60 Hz
+clock and times only the paint call, per backend: `cpu`
+(`jsui_render_rgba_incremental` into one retained buffer, what game hosts
+and the browser's CPU path do), `cpu-full` (`jsui_render_rgba`), `gl`
+(`jsui_render_gl` into a texture FBO with Ganesh) and `gl-direct` (the same
+with `JSUI_GL_NO_RETAIN`). It reports mean / p95 / max paint ms (`gpu`:
+including `glFinish`), pixels repainted, painter draw calls (counted in a
+second, untimed pass), text / image draws, layers, nodes, and GL draw calls,
+framebuffer binds, readbacks, program links and upload KB through a counting
+GL loader. The GL context is headless: EGL on Linux (Mesa's surfaceless
+platform, so llvmpipe works without a display or GPU) and CGL on macOS (no
+window or Xvfb needed).
+
+```sh
+cmake --build build --target jsui-paint-bench
+node tools/jsui-paint-bench/run.mjs                        # all scenarios, cpu + gl
+node tools/jsui-paint-bench/run.mjs --only cards,text --backends cpu,cpu-full,gl,gl-direct --frames 240 --json out.json
+build/jsui-paint-bench --frames 240 --backends cpu app=path/to/bundle.js[@hover]
+```
+
+Scenarios (`run.mjs` bundles them into `build/paint-bench/`):
+`interactions` (examples/showcase/interactions.jsx idling on its looping
+animations), `interactions-hover` (the same with a mouse sweep), `caret`
+(a static screen with a blinking caret), `cards` (a grid of shadowed,
+rounded, clipped cards scrolling 6 px per frame) and `text` (text-heavy
+panels with a ticking clock, a ticker and a pulsing badge). Options:
+`--frames`, `--warmup`, `--settle-ms`, `--width` / `--height` / `--scale`,
+`--backends`, `--json`, `--no-count`. Under valgrind (callgrind
+instruction counts are steadier than wall time on a shared machine), pass
+`--no-count` and `--toggle-collect='jsui::Runtime::renderIncremental(*'`.
+Wall times on llvmpipe say little about a hardware GPU (shader JIT and
+rasterization run on the CPU); the GL call counts carry over.
 
 ## Dev mode
 

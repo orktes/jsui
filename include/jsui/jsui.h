@@ -301,8 +301,12 @@ JSUI_API int jsui_render_rgba_incremental(JsuiRuntime* rt, void* pixels, int wid
  *   shadow masks stay in the runtime as CPU images; Ganesh uploads each once
  *   and keeps the texture cached in the context (keyed by image), so nothing
  *   in a runtime is tied to a GPU context.
- * - The GPU path always repaints the whole target (there is no incremental
- *   mode: the target's previous contents are not assumed to be preserved).
+ * - The target's previous contents are not assumed to be preserved. When
+ *   little changed, each runtime's last frame is kept in a texture of the
+ *   JsuiGpuContext (one per runtime), only the damage is repainted into it
+ *   and it is drawn into the target with one draw; when most of the frame
+ *   changed, the frame is painted straight into the target. JSUI_GL_NO_RETAIN
+ *   and MSAA targets always paint the whole frame into the target.
  */
 typedef struct JsuiGpuContext JsuiGpuContext;
 
@@ -343,7 +347,12 @@ enum {
     JSUI_GL_TOP_LEFT_ORIGIN = 1 << 0,
     /* Draw over the target's current contents (premultiplied source-over),
      * e.g. the HUD on top of the game frame. Default: clear to transparent. */
-    JSUI_GL_NO_CLEAR = 1 << 1
+    JSUI_GL_NO_CLEAR = 1 << 1,
+    /* Paint the whole frame straight into the target every render. Default:
+     * the runtime keeps its last frame in a texture of the JsuiGpuContext,
+     * repaints only what changed into it and draws it into the target with
+     * one draw (so the target's previous contents need not be kept). */
+    JSUI_GL_NO_RETAIN = 1 << 2
 };
 
 typedef struct JsuiGLTarget {

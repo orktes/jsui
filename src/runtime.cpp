@@ -39,6 +39,42 @@ std::string lower(std::string s) {
   return s;
 }
 
+int64_t area(const SkIRect& r) { return int64_t(r.width()) * r.height(); }
+
+// The damage as a few rects that cover it (each one scissor rect and one
+// paint pass on the GPU): greedily join the pair whose join adds the least
+// area while there are more than kMaxRects, or while a join adds little
+// (a pass costs a tree walk and the draws it crosses again).
+std::vector<SkIRect> coverRects(const SkRegion& damage) {
+  constexpr size_t kMaxRects = 4, kMaxInput = 48;
+  constexpr int64_t kCheapJoin = 64 * 64;
+  std::vector<SkIRect> rects;
+  for (SkRegion::Iterator it(damage); !it.done(); it.next()) {
+    if (rects.size() == kMaxInput) return {damage.getBounds()};
+    rects.push_back(it.rect());
+  }
+  while (rects.size() > 1) {
+    size_t bi = 0, bj = 1;
+    int64_t best = std::numeric_limits<int64_t>::max();
+    for (size_t i = 0; i < rects.size(); i++)
+      for (size_t j = i + 1; j < rects.size(); j++) {
+        SkIRect u = rects[i];
+        u.join(rects[j]);
+        int64_t cost = area(u) - area(rects[i]) - area(rects[j]);
+        if (cost < best) best = cost, bi = i, bj = j;
+      }
+    if (rects.size() <= kMaxRects && best > kCheapJoin) break;
+    rects[bi].join(rects[bj]);
+    rects.erase(rects.begin() + bj);
+  }
+  // Several passes only when they save a good part of the bounds' area
+  // (passes split the draws: more state changes, less batching).
+  int64_t sum = 0;
+  for (const SkIRect& r : rects) sum += area(r);
+  if (rects.size() > 1 && sum * 3 > area(damage.getBounds()) * 2) return {damage.getBounds()};
+  return rects;
+}
+
 }  // namespace
 
 Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
@@ -482,6 +518,7 @@ SkIRect Runtime::beginCanvasTracked(const void* key, int width, int height, bool
                     lastTargetRowBytes_ == 0;
   trackedFrozen_ = trackedOverlay_ = false;
   trackedKey_ = key;
+  trackedDamage_.setEmpty();
   // Nothing marked dirty and the retained surface holds our last frame:
   // nothing to repaint, without walking the tree.
   if (sameTarget && !doc.paintDirty() && lastError.empty()) {
@@ -490,7 +527,8 @@ SkIRect Runtime::beginCanvasTracked(const void* key, int width, int height, bool
   }
   // Always refresh the paint records so the next frame compares against
   // what was painted.
-  SkRegion damage = updateDamage(doc, width, height);
+  trackedDamage_ = updateDamage(doc, width, height);
+  const SkRegion& damage = trackedDamage_;
   bool dev = config.dev_mode != 0;
   trackedFrozen_ = dev && lastGoodFrame_ && (!lastError.empty() || doc.root()->children().empty());
   trackedOverlay_ = dev && !lastError.empty();
@@ -513,6 +551,10 @@ SkIRect Runtime::finishCanvasTracked(const CanvasChoice& c, int width, int heigh
   SkCanvas* canvas = c.canvas;
   if (c.key && keyValid && c.key == trackedKey_) {
     if (damage.isEmpty()) return SkIRect::MakeEmpty();
+    if (c.splitDamage) {
+      paintDocumentRects(doc, canvas, coverRects(trackedDamage_));
+      return damage;
+    }
     // One rect: GPU backends clip to it with a scissor, where a region
     // (several rects) is a complex clip (a mask, or MSAA) on Graphite.
     SkRegion rect(damage);
@@ -538,14 +580,16 @@ SkIRect Runtime::paintTracked(SkCanvas* canvas, const void* pixels, int width, i
     redraw_ = false;
     return SkIRect::MakeEmpty();
   }
-  // Always refresh the paint records so the next incremental frame compares
-  // against what is in the buffer.
-  SkRegion damage = updateDamage(doc, width, height);
   bool dev = config.dev_mode != 0;
   bool frozen = dev && lastGoodFrame_ && (!lastError.empty() || doc.root()->children().empty());
   bool overlay = dev && !lastError.empty();
   bool partial = incremental && !frozen && !overlay && pixels == lastTarget_ && width == lastTargetW_ &&
                  height == lastTargetH_ && rowBytes == lastTargetRowBytes_;
+  // Always refresh the paint records so the next incremental frame compares
+  // against what is in the buffer. A partial repaint of a pixel buffer can
+  // move scrolled content instead of repainting it.
+  ScrollBlit blit;
+  SkRegion damage = updateDamage(doc, width, height, partial && rowBytes ? &blit : nullptr);
   // Frames with the error overlay or a frozen picture are not tracked by the
   // records: the next frame repaints fully.
   bool tracked = !frozen && !overlay;
@@ -556,13 +600,19 @@ SkIRect Runtime::paintTracked(SkCanvas* canvas, const void* pixels, int width, i
   doc.clearPaintDirty();
   redraw_ = false;
   if (partial) {
-    if (damage.isEmpty()) return SkIRect::MakeEmpty();
+    if (damage.isEmpty() && blit.rect.isEmpty()) return SkIRect::MakeEmpty();
+    if (!blit.rect.isEmpty()) applyScrollBlit(const_cast<void*>(pixels), rowBytes, width, height, blit);
     canvas->save();
     canvas->clipRegion(damage);
     canvas->clear(SK_ColorTRANSPARENT);
     paintDocument(doc, canvas, &damage);
     canvas->restore();
-    return damage.getBounds();
+    SkIRect changed = damage.getBounds();
+    if (!blit.rect.isEmpty()) {
+      noteScrollBlit(doc, blit);
+      changed.join(blit.rect);
+    }
+    return changed;
   }
   canvas->clear(SK_ColorTRANSPARENT);
   paintFrame(canvas, frozen, overlay);

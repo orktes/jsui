@@ -34,6 +34,10 @@ void request(Node* node);
 // True when the node's image has finished loading (decoded or failed), or
 // it has no source; never starts a load.
 bool settled(Node* node);
+// Appends to `key` what paint() draws besides the box and clip: the decoded
+// image's identity, resize mode, density and tint. False when paint() would
+// draw nothing (no source, not loaded yet).
+bool paintKey(Node* node, std::string* key);
 // Paints the image into `box` (the padding box), clipped to `clip`.
 void paint(Node* node, SkCanvas* canvas, const SkRect& box, const SkRRect& clip);
 
