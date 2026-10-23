@@ -266,6 +266,32 @@ TEST(host_load_font_promise) {
   CHECK(h.message("fontBad") && h.message("fontBad")->find("not a supported font") != std::string::npos);
 }
 
+TEST(host_font_bindings) {
+  Host h;
+  h.load(R"(
+    const n = __jsui_native;
+    n.loadFont('', 'tests/native/fonts/inter-abc.woff2', 0, -1).then(() => {
+      // Family from the file (Inter), so nothing new is listed; a named load is.
+      return n.loadFont('Var', 'tests/native/fonts/jsui-var.ttf', 0, -1);
+    }).then(() => {
+      let threw = '';
+      try { n.loadFontData('Junk', new Uint8Array([1, 2, 3, 4]), 0, -1); } catch (e) { threw = e.message; }
+      const fams = n.getFontFamilies();
+      n.setFontFallbacks(['Var', 'Nope']);
+      n.setDefaultFontFamily('Inter');
+      const unloaded = n.unloadFont('var') + ',' + n.unloadFont('Var');
+      n.postMessage('fonts', JSON.stringify({ fams, threw, unloaded, after: n.getFontFamilies() }));
+    }).catch(e => n.postMessage('fonts', 'error: ' + e.message));
+  )");
+  CHECK(h.until([&] { return h.message("fonts") != nullptr; }));
+  const std::string& m = *h.message("fonts");
+  CHECK(m.find("\"fams\":[\"Inter\",\"Var\"]") != std::string::npos);
+  CHECK(m.find("not a supported font") != std::string::npos);
+  CHECK(m.find("\"unloaded\":\"true,false\"") != std::string::npos);
+  CHECK(m.find("\"after\":[\"Inter\"]") != std::string::npos);
+  if (m.find("error") == 0) std::fprintf(stderr, "  %s\n", m.c_str());
+}
+
 TEST(host_reload_from_js_and_leak_free_teardown) {
   int evals = 0;
   Host h([&](JsuiConfig& c) { (void)c; });

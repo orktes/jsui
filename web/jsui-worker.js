@@ -103,7 +103,8 @@ export async function startWorkerHost(I, opts) {
 }
 
 function definePage(I) {
-  const { DomView, HIT_POINTER, HIT_SCROLL, NAV_KEYS, bufferType, sourceSize, defaultOpaque, isVideoFrame } = I;
+  const { DomView, HIT_POINTER, HIT_SCROLL, NAV_KEYS, bufferType, sourceSize, defaultOpaque, isVideoFrame, fontArgs,
+    fontList } = I;
 
   // Options as the worker gets them: cloneable, URLs absolute (a worker
   // resolves relative URLs against its own script).
@@ -836,12 +837,33 @@ function definePage(I) {
 
     devUpdate() { this._send({ op: 'devUpdate' }); }
 
-    /** Copies the bytes to the worker; Promise<boolean>. */
-    registerFont(family, bytes, weight = 400, italic = false) {
+    /** Copies the bytes to the worker (the copy is transferred); Promise<boolean>. */
+    registerFont(family, bytes, weight, italic) {
+      if (this._destroyed) return Promise.resolve(false);
+      [family, bytes, weight, italic] = fontArgs(family, bytes, weight, italic);
       const data = (ArrayBuffer.isView(bytes) ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
         : new Uint8Array(bytes)).slice();
-      return this._request({ op: 'registerFont', family: String(family), bytes: data, weight, italic: !!italic },
-        [data.buffer], false);
+      return this._request({ op: 'registerFont', family, bytes: data, weight, italic }, [data.buffer], false);
+    }
+
+    /** The worker fetches the font (`url` resolved against the page); Promise<boolean>. */
+    loadFont(family, url, weight, italic) {
+      if (this._destroyed) return Promise.resolve(false);
+      [family, , weight, italic] = fontArgs(family ?? '', null, weight, italic);
+      return this._request({ op: 'loadFont', family, url: new URL(url, location.href).href, weight, italic },
+        null, false);
+    }
+
+    /** Promise<boolean>: whether the family was registered. */
+    unregisterFont(family) {
+      if (this._destroyed) return Promise.resolve(false);
+      return this._request({ op: 'unregisterFont', family: String(family) }, null, false);
+    }
+
+    setFontFallbacks(families) { this._send({ op: 'fontFallbacks', list: fontList(families) }); }
+
+    setDefaultFontFamily(family) {
+      this._send({ op: 'defaultFontFamily', family: family == null ? null : String(family) });
     }
 
     get lastError() { return this._lastError; }
@@ -1483,6 +1505,13 @@ export function serve(I, early) {
       case 'reload': host.reload(); return;
       case 'devUpdate': host.devUpdate(); return;
       case 'registerFont': reply(op.id, true, host.registerFont(op.family, op.bytes, op.weight, op.italic)); return;
+      case 'loadFont':
+        host.loadFont(op.family, op.url, op.weight, op.italic).then((ok) => reply(op.id, true, ok),
+          (e) => reply(op.id, false, e));
+        return;
+      case 'unregisterFont': reply(op.id, true, host.unregisterFont(op.family)); return;
+      case 'fontFallbacks': host.setFontFallbacks(op.list); return;
+      case 'defaultFontFamily': host.setDefaultFontFamily(op.family); return;
       case 'idle':
         host.whenIdle().then(() => {
           post({ ev: 'stats', stats: host._statsOf() });

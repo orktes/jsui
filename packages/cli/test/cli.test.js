@@ -71,7 +71,7 @@ AppRegistry.registerComponent('main', () => App);
 }
 
 /** Runs a bundle in a bare VM context with a recording bridge (no Node APIs). */
-function runBundle(code) {
+function runBundle(code, extra) {
   const nodes = new Map([[1, { type: 'Root', props: {}, children: [], text: '' }]]);
   let next = 2;
   const timers = [];
@@ -106,6 +106,7 @@ function runBundle(code) {
       destroyNode() {},
     },
   };
+  Object.assign(ctx.__jsui_native, extra);
   ctx.globalThis = ctx;
   vm.createContext(ctx);
   vm.runInContext(code, ctx);
@@ -150,6 +151,46 @@ test('build: minify + sourcemap + dev define', async () => {
   await new Promise((res) => setImmediate(res));
   const title = [...nodes.values()].find((n) => n.props.nativeID === 'title');
   assert.match(title.children.map((c) => nodes.get(c).text).join(''), / dev /);
+});
+
+test('build: expo-font alias; an @expo-google-fonts style package works unchanged', async () => {
+  const dir = await fixture();
+  const pkg = path.join(dir, 'node_modules', '@expo-google-fonts', 'lato');
+  await mkdir(path.join(pkg, '400Regular'), { recursive: true });
+  await writeFile(path.join(pkg, 'package.json'), JSON.stringify({ name: '@expo-google-fonts/lato', main: 'index.js' }));
+  await writeFile(path.join(pkg, '400Regular', 'Lato_400Regular.ttf'), Buffer.from('fake lato'));
+  await writeFile(path.join(pkg, 'useFonts.js'), `import { useFonts as useExpoFonts } from 'expo-font';\nexport function useFonts(map) { return useExpoFonts(map); }\n`);
+  await writeFile(path.join(pkg, 'index.js'), `export { useFonts } from './useFonts';\nexport const Lato_400Regular = require('./400Regular/Lato_400Regular.ttf');\n`);
+  await writeFile(
+    path.join(dir, 'Fonts.js'),
+    `import React from 'react';
+import { AppRegistry, Text } from 'react-native';
+import * as Font from 'expo-font';
+import { useFonts, Lato_400Regular } from '@expo-google-fonts/lato';
+function App() {
+  const [loaded, error] = useFonts({ Lato_400Regular });
+  return <Text nativeID="t">{String(loaded)} {String(error)} {String(Font.isLoaded('Lato_400Regular'))} {Font.FontDisplay.SWAP}</Text>;
+}
+AppRegistry.registerComponent('main', () => App);
+`,
+  );
+  const out = path.join(dir, 'fonts', 'bundle.js');
+  await build({ entry: path.join(dir, 'Fonts.js'), outfile: out });
+  const loads = [];
+  const { nodes, ctx, timers } = runBundle(await readFile(out, 'utf8'), {
+    loadFont: (family, url, weight, italic) => (loads.push([family, url, weight, italic]), Promise.resolve(true)),
+  });
+  for (let i = 0; i < 5; i++) {
+    await new Promise((res) => setImmediate(res));
+    timers.splice(0).forEach((fn) => fn()); // React's scheduler
+  }
+  assert.deepEqual(ctx.errors, []);
+  assert.equal(loads.length, 1);
+  assert.equal(loads[0][0], 'Lato_400Regular');
+  assert.match(loads[0][1], /^assets\/Lato_400Regular-[0-9a-f]{8}\.ttf$/);
+  assert.deepEqual(loads[0].slice(2), [0, -1]);
+  const t = [...nodes.values()].find((n) => n.props.nativeID === 't');
+  assert.equal(t.children.map((c) => nodes.get(c).text).join(''), 'true null true swap');
 });
 
 test('build errors are reported with file and line', async () => {

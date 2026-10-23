@@ -44,6 +44,9 @@ class Runtime {
   bool loadSource(const std::string& source, const std::string& name);
   void loadUrl(const std::string& url);
   void reload();
+  // The font set changed (register / unregister / fallbacks / default
+  // family): re-measure and repaint the text on every surface.
+  void fontsChanged();
   // Reload at the start of the next tick (safe to call from JS / callbacks).
   void requestReload();
   // Dev mode: the dev server has a new build (or a build error). A bundle

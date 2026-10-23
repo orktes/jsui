@@ -229,10 +229,42 @@ void jsui_set_dev_session(JsuiRuntime* rt, const char* name, int enabled) {
 }
 
 int jsui_register_font(JsuiRuntime* rt, const char* family, const void* data, size_t size, int weight, int italic) {
-  bool ok = rt->rt->fonts.registerFont(family, data, size, weight, italic != 0);
-  if (ok)
-    for (auto& s : rt->rt->surfaces()) s->doc.markLayoutDirty();
-  return ok ? 0 : -1;
+  std::string why;
+  if (!rt->rt->fonts.registerFont(family ? family : "", data, size, weight, italic, &why)) {
+    rt->rt->log(JSUI_LOG_WARN, "jsui_register_font(" + std::string(family ? family : "") + "): " + why);
+    return -1;
+  }
+  rt->rt->fontsChanged();
+  return 0;
+}
+
+int jsui_unregister_font(JsuiRuntime* rt, const char* family) {
+  if (!family || !rt->rt->fonts.unregisterFamily(family)) return -1;
+  rt->rt->fontsChanged();
+  return 0;
+}
+
+void jsui_set_font_fallbacks(JsuiRuntime* rt, const char* families) {
+  std::vector<std::string> list;
+  std::string csv = families ? families : "";
+  size_t i = 0;
+  while (i <= csv.size()) {
+    size_t c = csv.find(',', i);
+    if (c == std::string::npos) c = csv.size();
+    std::string f = csv.substr(i, c - i);
+    i = c + 1;
+    size_t a = f.find_first_not_of(" \t\"'"), b = f.find_last_not_of(" \t\"'");
+    if (a != std::string::npos) list.push_back(f.substr(a, b - a + 1));
+  }
+  uint32_t gen = rt->rt->fonts.generation;
+  rt->rt->fonts.setFallbackFamilies(std::move(list));
+  if (rt->rt->fonts.generation != gen) rt->rt->fontsChanged();
+}
+
+void jsui_set_default_font_family(JsuiRuntime* rt, const char* family) {
+  uint32_t gen = rt->rt->fonts.generation;
+  if (family) rt->rt->fonts.setDefaultFamily(family);
+  if (rt->rt->fonts.generation != gen) rt->rt->fontsChanged();
 }
 
 void jsui_set_viewport(JsuiRuntime* rt, int width, int height, float pixelRatio) {

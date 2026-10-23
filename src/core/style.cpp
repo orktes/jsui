@@ -1129,6 +1129,7 @@ bool textMetricsEqual(const TextStyle& a, const TextStyle& b) {
   return a.fontFamily == b.fontFamily && a.fontSize == b.fontSize && a.fontWeight == b.fontWeight &&
          a.italic == b.italic && a.lineHeight == b.lineHeight && a.lineHeightRelative == b.lineHeightRelative &&
          a.letterSpacing == b.letterSpacing && a.textTransform == b.textTransform && a.fontVariant == b.fontVariant &&
+         a.fontVariationSettings == b.fontVariationSettings && a.fontFeatureSettings == b.fontFeatureSettings &&
          a.writingDirection == b.writingDirection;
 }
 
@@ -1296,6 +1297,61 @@ bool parseFontWeight(const Value& v, int* out) {
   return true;
 }
 
+// CSS font-variation-settings / font-feature-settings: "'wght' 650, 'wdth' 80",
+// "'liga' 0, 'ss01'" (a bare feature = 1, "on"/"off"), or an object
+// {wght: 650}. "normal" or an empty list clears. `bare` is the value of a tag
+// given without one.
+static bool parseFontSettings(const Value& v, float bare, std::vector<FontSetting>* out) {
+  out->clear();
+  auto add = [&](std::string tag, float value) {
+    if (tag.size() != 4) return;
+    for (auto& e : *out)
+      if (e.tag == tag) return void(e.value = value);
+    out->push_back({std::move(tag), value});
+  };
+  if (v.isObject()) {
+    for (auto& [k, e] : v.asObject()) {
+      if (e.isNumber()) add(k, float(e.asNumber()));
+      else if (e.isBool()) add(k, e.asBool() ? 1.f : 0.f);
+    }
+    return true;
+  }
+  if (!v.isString()) return false;
+  std::string s(trim(v.asString()));
+  if (lower(s) == "normal") return true;
+  size_t i = 0;
+  while (i < s.size()) {
+    size_t comma = s.find(',', i);
+    if (comma == std::string::npos) comma = s.size();
+    std::string item(trim(std::string_view(s).substr(i, comma - i)));
+    i = comma + 1;
+    if (item.empty()) continue;
+    std::string tag, rest;
+    if (item[0] == '\'' || item[0] == '"') {
+      size_t close = item.find(item[0], 1);
+      if (close == std::string::npos) continue;
+      tag = item.substr(1, close - 1);
+      rest = std::string(trim(std::string_view(item).substr(close + 1)));
+    } else {
+      size_t sp = item.find_first_of(" \t");
+      tag = item.substr(0, sp);
+      rest = sp == std::string::npos ? "" : std::string(trim(std::string_view(item).substr(sp)));
+    }
+    float value = bare;
+    std::string lr = lower(rest);
+    if (lr == "on") value = 1;
+    else if (lr == "off") value = 0;
+    else if (!rest.empty()) {
+      float n;
+      std::string u;
+      if (!parseNumberUnit(rest, &n, &u) || !u.empty()) continue;
+      value = n;
+    }
+    add(tag, value);
+  }
+  return true;
+}
+
 void parseTextStyle(const StyleMap& style, TextStyle* t) {
   Color c;
   if (parseColor(style["color"], &c)) t->color = c;
@@ -1362,6 +1418,9 @@ void parseTextStyle(const StyleMap& style, TextStyle* t) {
     for (auto tok : tokens(style["fontVariant"].asString())) fv.emplace_back(tok);
     t->fontVariant = std::move(fv);
   }
+  std::vector<FontSetting> fs;
+  if (parseFontSettings(style["fontVariationSettings"], 0, &fs)) t->fontVariationSettings = std::move(fs);
+  if (parseFontSettings(style["fontFeatureSettings"], 1, &fs)) t->fontFeatureSettings = std::move(fs);
   if (style["writingDirection"].isString()) {
     std::string a = lower(style["writingDirection"].asString());
     t->writingDirection = a == "ltr" ? 1 : a == "rtl" ? 2 : 0;
@@ -1557,6 +1616,8 @@ constexpr PaintKey kPaintKeys[] = {
     {"fontSize", kGroupText},
     {"fontStyle", kGroupText},
     {"fontVariant", kGroupText},
+    {"fontVariationSettings", kGroupText},
+    {"fontFeatureSettings", kGroupText},
     {"fontWeight", kGroupText},
     {"letterSpacing", kGroupText},
     {"lineHeight", kGroupText},

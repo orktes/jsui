@@ -90,6 +90,12 @@ enum class TextAlign : uint8_t { Auto, Left, Right, Center, Justify, End };
 enum class TextTransform : uint8_t { None, Uppercase, Lowercase, Capitalize };
 enum TextDecoration : uint8_t { DecorNone = 0, DecorUnderline = 1, DecorLineThrough = 2 };
 
+struct FontSetting {
+  std::string tag;  // OpenType axis / feature tag, e.g. "wght", "ss01"
+  float value = 0;
+  bool operator==(const FontSetting&) const = default;
+};
+
 // Inherited text properties. Unset optionals inherit from the parent Text.
 struct TextStyle {
   std::optional<Color> color;
@@ -108,6 +114,9 @@ struct TextStyle {
   // Added by the render area:
   std::optional<uint8_t> decorationStyle;  // 0 solid, 1 double, 2 dotted, 3 dashed, 4 wavy
   std::optional<std::vector<std::string>> fontVariant;  // RN fontVariant ("tabular-nums", ...)
+  // CSS font-variation-settings / font-feature-settings: 4-letter tag + value.
+  std::optional<std::vector<FontSetting>> fontVariationSettings;
+  std::optional<std::vector<FontSetting>> fontFeatureSettings;
   std::optional<int8_t> writingDirection;  // 0 auto, 1 ltr, 2 rtl
   bool lineHeightRelative = false;         // lineHeight is a multiple of fontSize ("1.5")
 };

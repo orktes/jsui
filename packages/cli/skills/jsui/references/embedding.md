@@ -36,7 +36,8 @@ func _on_ui_call(id, name, args):
 * Methods: `post_message`, `set_state` / `patch_state` / `get_state`,
   `set_buffer` / `remove_buffer`, `set_texture(name, texture, live)` /
   `remove_texture` / `update_texture`, `resolve_call` / `reject_call`,
-  `call_ui(name, args, callback)`, `reload`, `hit_test(pos)`,
+  `call_ui(name, args, callback)`, `register_font(...)` (or the `fonts`
+  property), `reload`, `hit_test(pos)`,
   `get_frame_image()`, `get_perf()`.
 * Signals: `message_received`, `state_changed`, `call_requested`,
   `call_cancelled`, `ui_call_completed`, `js_error`, `frame_rendered`.
@@ -59,6 +60,7 @@ jsui.handle('shop.buy', async ({ item }) => ({ gold: 1100 }));          // answe
 await jsui.callUi('ui.flash', { text: 'Saved' });                       // Host.handle in the UI
 jsui.setBuffer('enemies', new Float32Array(positions));
 jsui.bindVideo('trailer', videoElement);                                // <HostTexture name="trailer" />
+await jsui.loadFont('Game', './fonts/Game.woff2');                      // or jsui.registerFont('Game', bytes): fontFamily 'Game'
 const hud = await createJsui({ canvas: hudCanvas, bundleUrl: './hud.js', passThrough: true });
 const w = jsui.createSurface(el, { component: 'Clock', initialProps: {}, autoSize: true });
 ```
@@ -90,7 +92,10 @@ Data: `jsui_set_state` / `jsui_patch_state` / `jsui_get_state`,
 `jsui_post_message`, `jsui_resolve_call` / `jsui_reject_call`,
 `jsui_call_ui`, `jsui_set_texture` / `jsui_texture_updated`. Surfaces:
 `jsui_surface_create(rt, "Hud", props_json, w, h, scale)`. Fonts:
-`jsui_register_font`. Errors: `jsui_last_error`. `cfg.dev_mode = 1` polls the
+`jsui_register_font(rt, family, data, size, weight, italic)` (TTF / OTF /
+TTC / WOFF / WOFF2; weight 0 and italic -1 read the file),
+`jsui_unregister_font`, `jsui_set_font_fallbacks(rt, "Noto Color Emoji,
+Noto Sans JP")`, `jsui_set_default_font_family`. Errors: `jsui_last_error`. `cfg.dev_mode = 1` polls the
 dev server and shows an error overlay.
 
 Native tools in the repo: `jsui-viewer bundle.js` (window, `--dev URL`),
