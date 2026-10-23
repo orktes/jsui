@@ -8,7 +8,7 @@
 
 namespace jsui {
 
-Document::Document(uint32_t* sharedNextId) {
+Document::Document(uint32_t* sharedNextId, Perf* sharedPerf) : perf(sharedPerf ? *sharedPerf : ownPerf_) {
   if (sharedNextId) idCounter_ = sharedNextId;
   // Layout stays fractional like CSS (no Yoga pixel rounding); the painter
   // snaps box edges to device pixels the way Chrome does.

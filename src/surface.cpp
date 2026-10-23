@@ -54,7 +54,7 @@ std::vector<SkIRect> coverRects(const SkRegion& damage) {
 
 }  // namespace
 
-Surface::Surface(Runtime& r, uint32_t* nextNodeId) : rt(r), doc(nextNodeId) {}
+Surface::Surface(Runtime& r, uint32_t* nextNodeId, Perf* perf) : rt(r), doc(nextNodeId, perf) {}
 
 Surface::~Surface() {
   doc.clear();
@@ -68,15 +68,22 @@ void Surface::setViewport(float width, float height, float pixelRatio) {
   bool changed = doc.autoWidth() != autoW || doc.autoHeight() != autoH || (!autoW && doc.width() != width) ||
                  (!autoH && doc.height() != height) || doc.pixelRatio() != scale;
   doc.setViewport(width, height, scale);
+  if (!changed) return;
+  // Hosts may resize many surfaces per frame: those resizes reach JS on the
+  // next tick, together (Runtime::flushSurfaces).
+  if (this != &rt.main()) resizePending = true;
+  else if (rt.js) dispatchResize();
+}
+
+void Surface::dispatchResize() {
+  resizePending = false;
   // Dimensions / useWindowDimensions in @orktes/jsui-react listen for this.
-  if (changed && rt.js) {
-    Value::Object ev{{"type", Value("resize")},
-                     {"width", Value(double(autoW ? 0 : width))},
-                     {"height", Value(double(autoH ? 0 : height))},
-                     {"scale", Value(double(scale))},
-                     {"rootTag", Value(double(tag()))}};
-    rt.js->dispatchEvent(Value(std::move(ev)));
-  }
+  Value::Object ev{{"type", Value("resize")},
+                   {"width", Value(double(doc.autoWidth() ? 0 : doc.width()))},
+                   {"height", Value(double(doc.autoHeight() ? 0 : doc.height()))},
+                   {"scale", Value(double(doc.pixelRatio()))},
+                   {"rootTag", Value(double(tag()))}};
+  rt.js->dispatchEvent(Value(std::move(ev)));
 }
 
 bool Surface::frozen() const {

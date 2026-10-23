@@ -10,7 +10,10 @@
   N.appendChild(N.rootId, main);
   const boxes = {};      // rootTag -> node id
   const tagOf = {};      // node id -> rootTag
-  globalThis.__jsui_runSurface = (tag, appKey, propsJson) => {
+  globalThis.__jsui_runSurfaces = (list) => {
+    for (const [tag, appKey, propsJson] of list) run(tag, appKey, propsJson);
+  };
+  const run = (tag, appKey, propsJson) => {
     const props = JSON.parse(propsJson);
     let box = boxes[tag];
     if (!box) {

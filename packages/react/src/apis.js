@@ -1,10 +1,20 @@
 // Non-component React Native APIs.
 
-import { createElement as h, useContext, useEffect, useState, useSyncExternalStore } from 'react';
+import { Component, createElement as h, useContext, useEffect, useState, useSyncExternalStore } from 'react';
 import { native, readViewport, warnOnce } from './native.js';
 import { LayoutAnimation } from './layoutAnimation.js';
 import { addGlobalListener } from './events.js';
-import { render as renderRoot, unmount as unmountRoot, RootTagContext } from './renderer.js';
+import {
+  createPortal,
+  flushSync,
+  forgetContainer,
+  render as renderRoot,
+  renderBatch,
+  reportToRuntime,
+  rootContainer,
+  unmount as unmountRoot,
+  RootTagContext,
+} from './renderer.js';
 import { modalHandlesBack } from './components/misc.js';
 
 // --- Platform ------------------------------------------------------------------
@@ -37,9 +47,10 @@ function dims() {
   return windowDims;
 }
 
-// Surfaces other than the main one (jsui_surface_create): their own sizes,
-// for useWindowDimensions() inside them.
+// Surfaces other than the main one (jsui_surface_create): their own sizes
+// and the useWindowDimensions() subscribers inside them.
 const surfaceDims = new Map();
+const surfaceDimListeners = new Map(); // rootTag -> Set
 
 function surfaceDimsOf(tag) {
   let d = surfaceDims.get(tag);
@@ -54,8 +65,8 @@ function surfaceDimsOf(tag) {
 function onResize(ev) {
   if (ev && ev.rootTag != null && ev.rootTag !== native.rootId) {
     surfaceDims.delete(ev.rootTag);
-    const d = surfaceDimsOf(ev.rootTag);
-    for (const fn of Array.from(dimListeners)) fn({ window: dims(), screen: dims(), rootTag: ev.rootTag, surface: d });
+    const set = surfaceDimListeners.get(ev.rootTag);
+    if (set) for (const fn of Array.from(set)) fn();
     return;
   }
   const fresh = ev && ev.width > 0 ? { width: +ev.width, height: +ev.height, scale: +(ev.scale || ev.pixelRatio || viewport.scale) } : readViewport();
@@ -94,8 +105,27 @@ function subscribeDims(cb) {
 /** The size of the surface the component renders in (the window for the main one). */
 export function useWindowDimensions() {
   const tag = useContext(RootTagContext);
-  const get = tag === native.rootId ? dims : () => surfaceDimsOf(tag);
-  return useSyncExternalStore(subscribeDims, get, get);
+  const [store] = useState(() => surfaceDimsStore(tag));
+  return useSyncExternalStore(store.subscribe, store.get, store.get);
+}
+
+const mainDimsStore = { subscribe: subscribeDims, get: dims };
+
+// Only the components of the resized surface hear about it.
+function surfaceDimsStore(tag) {
+  if (tag === native.rootId) return mainDimsStore;
+  return {
+    subscribe(cb) {
+      let set = surfaceDimListeners.get(tag);
+      if (!set) surfaceDimListeners.set(tag, (set = new Set()));
+      set.add(cb);
+      return () => {
+        set.delete(cb);
+        if (!set.size && surfaceDimListeners.get(tag) === set) surfaceDimListeners.delete(tag);
+      };
+    },
+    get: () => surfaceDimsOf(tag),
+  };
 }
 
 export const PixelRatio = {
@@ -109,10 +139,15 @@ export const PixelRatio = {
 // --- AppRegistry -------------------------------------------------------------------
 //
 // One bundle can show several root views (React Native's RCTRootView): the
-// host creates surfaces by app key (jsui_surface_create) and the runtime
-// calls __jsui_runSurface(rootTag, appKey, propsJson) for each; every surface
-// renders into its own React root. A key registered later (after an await)
-// starts the surfaces waiting for it.
+// host creates surfaces by app key (jsui_surface_create) and, once per tick,
+// the runtime calls __jsui_runSurfaces([[rootTag, appKey, propsJson], ...])
+// with the surfaces that started or got new props. A key registered later
+// (after an await) starts the surfaces waiting for it.
+//
+// The main surface's app has a React root of its own. The other surfaces'
+// apps all live in one more root, each portaled into its surface's root
+// container: a frame that updates the props of many surfaces is one React
+// render and commit, and surfaces whose props did not change are skipped.
 
 const registry = new Map();
 let started = false; // the main surface runs an app
@@ -136,6 +171,84 @@ function runSurface(rootTag, appKey, initialProps) {
   }
   waiting.delete(rootTag);
   AppRegistry.runApplication(appKey, { rootTag, initialProps });
+}
+
+// The surfaces' root: rootTag -> {appKey, App, props, gen, root} for every
+// surface but the main one, each rendered as a portal (SurfaceRoot).
+const SURFACES_ROOT = -1; // a container with no native node: it only holds portals
+const surfaceApps = new Map();
+let surfacesDirty = false; // a surface was added or removed
+let surfacesBatch = 0;
+const propsChanged = new Set(); // mounted SurfaceRoots with new props
+
+function renderSurfaces() {
+  if (surfacesBatch) {
+    surfacesDirty = true;
+    return;
+  }
+  surfacesDirty = false;
+  renderRoot(h(SurfaceApps, { tags: Array.from(surfaceApps.keys()) }), { container: SURFACES_ROOT });
+}
+
+// New props re-render just that surface, not the list of surfaces.
+function updateSurfaces() {
+  if (surfacesBatch || !propsChanged.size) return;
+  const list = Array.from(propsChanged);
+  propsChanged.clear();
+  flushSync(() => {
+    for (const root of list) root.forceUpdate();
+  });
+}
+
+function SurfaceApps({ tags }) {
+  return tags.map((rootTag) => {
+    const a = surfaceApps.get(rootTag);
+    return h(SurfaceRoot, { key: rootTag + ':' + a.gen, rootTag });
+  });
+}
+
+// One surface's app, portaled into its root container, with the surface's
+// current app and props (surfaceApps). An app that throws unmounts alone (as
+// with a root of its own) and the error goes to the runtime like an uncaught
+// one.
+class SurfaceRoot extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { failed: false };
+  }
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  shouldComponentUpdate(_next, state) {
+    return state !== this.state; // new props arrive through forceUpdate
+  }
+  componentDidMount() {
+    surfaceApps.get(this.props.rootTag).root = this;
+  }
+  componentWillUnmount() {
+    const a = surfaceApps.get(this.props.rootTag);
+    if (a && a.root === this) a.root = null;
+    propsChanged.delete(this);
+  }
+  componentDidCatch(error) {
+    reportToRuntime(error);
+  }
+  render() {
+    const { rootTag } = this.props;
+    const a = surfaceApps.get(rootTag);
+    if (this.state.failed || !a) return null;
+    return createPortal(
+      h(RootTagContext.Provider, { value: rootTag }, h('View', { style: appStyle }, h(a.App, a.props))),
+      rootContainer(rootTag),
+    );
+  }
+}
+
+function componentOf(entry) {
+  // Resolved once: a getComponent that returns a new function each call
+  // (() => () => <View />) must not remount the app on every props update.
+  if (!entry.component) entry.component = entry.getComponent();
+  return entry.component;
 }
 
 export const AppRegistry = {
@@ -171,7 +284,7 @@ export const AppRegistry = {
   _element(appKey, params) {
     const entry = registry.get(appKey);
     if (!entry || !entry.getComponent) throw new Error(`AppRegistry: no component registered as "${appKey}"`);
-    const App = entry.getComponent();
+    const App = componentOf(entry);
     const rootTag = rootTagOf(params);
     return h(RootTagContext.Provider, { value: rootTag }, h('View', { style: appStyle }, h(App, (params && params.initialProps) || {})));
   },
@@ -182,13 +295,33 @@ export const AppRegistry = {
     const rootTag = rootTagOf(params);
     if (rootTag === native.rootId) started = true;
     if (entry.run) return entry.run({ ...(params || {}), rootTag });
-    renderRoot(AppRegistry._element(appKey, params), { container: rootTag });
+    if (rootTag === native.rootId) {
+      renderRoot(AppRegistry._element(appKey, params), { container: rootTag });
+      return undefined;
+    }
+    if (!entry.getComponent) throw new Error(`AppRegistry: no component registered as "${appKey}"`);
+    const App = componentOf(entry);
+    const props = (params && params.initialProps) || {};
+    const prev = surfaceApps.get(rootTag);
+    if (prev && prev.appKey === appKey && prev.App === App) {
+      // New props keep the app's state.
+      prev.props = props;
+      if (prev.root) {
+        propsChanged.add(prev.root);
+        updateSurfaces();
+      }
+      return undefined;
+    }
+    // A new app on the surface mounts fresh.
+    surfaceApps.set(rootTag, { appKey, App, props, gen: prev ? prev.gen + 1 : 0, root: null });
+    renderSurfaces();
     return undefined;
   },
   unmountApplicationComponentAtRootTag(rootTag) {
     const tag = typeof rootTag === 'number' ? rootTag : native.rootId;
     waiting.delete(tag);
-    unmountRoot({ container: tag });
+    if (surfaceApps.delete(tag)) renderSurfaces();
+    else unmountRoot({ container: tag });
   },
   setWrapperComponentProvider() {},
   setComponentProviderInstrumentationHook() {},
@@ -202,19 +335,36 @@ function rootTagOf(params) {
   return typeof tag === 'number' ? tag : native.rootId;
 }
 
-// Called by the runtime (surfaces created / props changed, a bundle loaded).
-globalThis.__jsui_runSurface = (rootTag, appKey, propsJson) => {
-  let props = {};
-  try {
-    props = typeof propsJson === 'string' ? JSON.parse(propsJson) : propsJson || {};
-  } catch (e) {
-    console.error(`[jsui] surface "${appKey}": invalid props: ${e && e.message}`);
-  }
-  runSurface(rootTag, appKey, props);
-};
+// Called by the runtime once per tick with the surfaces that started or got
+// new props (all of them after a bundle loads): one React pass for all.
+globalThis.__jsui_runSurfaces = (list) =>
+  renderBatch(() => {
+    surfacesBatch++;
+    try {
+      for (const [rootTag, appKey, propsJson] of list) {
+        let props = {};
+        try {
+          props = typeof propsJson === 'string' ? JSON.parse(propsJson) : propsJson || {};
+        } catch (e) {
+          console.error(`[jsui] surface "${appKey}": invalid props: ${e && e.message}`);
+        }
+        try {
+          runSurface(rootTag, appKey, props);
+        } catch (e) {
+          console.error(`[jsui] surface "${appKey}": ${(e && e.stack) || e}`);
+        }
+      }
+    } finally {
+      surfacesBatch--;
+    }
+    if (surfacesDirty) renderSurfaces();
+    updateSurfaces();
+  });
 globalThis.__jsui_stopSurface = (rootTag) => {
   surfaceDims.delete(rootTag);
+  surfaceDimListeners.delete(rootTag);
   AppRegistry.unmountApplicationComponentAtRootTag(rootTag);
+  forgetContainer(rootTag);
 };
 
 // --- Appearance / color scheme --------------------------------------------------
