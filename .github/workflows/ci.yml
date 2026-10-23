@@ -489,6 +489,20 @@ jobs:
         run: if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
       - name: Tests (packages/*)
         run: npm run test:js
+      # The packed tarballs, installed outside the monorepo, must bundle an app
+      # (catches a file missing from "files" or a workspace-only resolution).
+      - name: Packed packages (install + build outside the workspace)
+        run: |
+          tgz="$RUNNER_TEMP/tgz" app="$RUNNER_TEMP/app"
+          mkdir -p "$tgz" "$app"
+          npm pack --workspace packages/react --workspace packages/cli --pack-destination "$tgz"
+          cd "$app"
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund "$tgz"/*.tgz
+          printf '%s\n' "import { AppRegistry, View, Text } from 'react-native';" \
+            "AppRegistry.registerComponent('main', () => () => <View><Text>Hello</Text></View>);" > app.jsx
+          npx jsui build app.jsx -o out/bundle.js
+          test -s out/bundle.js
 
   # ---------------------------------------------------------------- reference
   reference:

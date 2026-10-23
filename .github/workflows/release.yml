@@ -1,0 +1,104 @@
+name: Release
+
+# Publishes @jsui/react, @jsui/cli and @jsui/web to npm with trusted
+# publishing (GitHub OIDC; provenance is attached automatically and there is
+# no npm token anywhere). Nothing is compiled here: the WASM modules for
+# @jsui/web are the artifacts of the CI run on main for the released commit,
+# the same ones pages.yml deploys. See docs/RELEASING.md.
+#
+# Trigger: push a tag vX.Y.Z on a main commit whose CI run succeeded, or run
+# it by hand on main. Versions already on npm are skipped, so re-running a
+# partly failed release is safe.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read    # download the CI run's artifacts
+  id-token: write  # npm trusted publishing
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish to npm
+    # npm trusted publishing only accepts GitHub-hosted runners.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: npm with trusted publishing (>= 11.5.1)
+        run: npm install -g npm@11.12.1 && npm --version
+      - name: Check versions
+        id: version
+        run: |
+          v=$(node -p "require('./packages/react/package.json').version")
+          for p in packages/cli web; do
+            pv=$(node -p "require('./$p/package.json').version")
+            [ "$pv" = "$v" ] || { echo "::error::$p is $pv, packages/react is $v"; exit 1; }
+          done
+          dep=$(node -p "require('./packages/cli/package.json').dependencies['@jsui/react']")
+          [ "$dep" = "$v" ] || { echo "::error::@jsui/cli depends on @jsui/react $dep, not $v"; exit 1; }
+          if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME}" != "v$v" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package version $v"; exit 1
+          fi
+          case "$v" in *-*) tag=next ;; *) tag=latest ;; esac
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Releasing $v (dist-tag $tag)"
+      - name: Find the CI run for this commit
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id=$(gh run list -R "$GITHUB_REPOSITORY" --workflow ci.yml --branch main --event push --commit "$GITHUB_SHA" \
+            --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          [ -n "$id" ] || { echo "::error::no successful CI run on main for $GITHUB_SHA (merge to main and wait for CI first)"; exit 1; }
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+      - name: WASM module (CPU)
+        uses: actions/download-artifact@v4
+        with:
+          name: jsui-wasm
+          path: web/dist
+          run-id: ${{ steps.run.outputs.id }}
+          github-token: ${{ github.token }}
+      - name: WASM module (WebGL)
+        uses: actions/download-artifact@v4
+        with:
+          name: jsui-wasm-webgl
+          path: web/dist-webgl
+          run-id: ${{ steps.run.outputs.id }}
+          github-token: ${{ github.token }}
+      - name: WASM module (WebGPU + WebGL + CPU)
+        uses: actions/download-artifact@v4
+        with:
+          name: jsui-wasm-gpu
+          path: web/dist-gpu
+          run-id: ${{ steps.run.outputs.id }}
+          github-token: ${{ github.token }}
+      - name: Install
+        run: npm ci --no-audit --no-fund
+      - name: Tests
+        run: npm run test:js && node web/test/node-smoke.mjs
+      - name: Publish
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DIST_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          # Dependency order: @jsui/cli depends on @jsui/react.
+          for ws in packages/react packages/cli web; do
+            name=$(node -p "require('./$ws/package.json').name")
+            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+              echo "$name@$VERSION is already on npm, skipping"
+              continue
+            fi
+            npm publish --workspace "$ws" --access public --tag "$DIST_TAG"
+          done

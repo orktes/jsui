@@ -2,14 +2,43 @@
   "name": "@jsui/cli",
   "version": "0.1.0",
   "description": "Build and dev server for JSUI bundles (esbuild).",
+  "author": "Jaakko Lukkari",
+  "license": "MIT",
+  "homepage": "https://github.com/orktes/jsui/tree/main/packages/cli#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/orktes/jsui.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/orktes/jsui/issues"
+  },
+  "keywords": [
+    "jsui",
+    "react-native",
+    "game-ui",
+    "bundler",
+    "esbuild",
+    "cli"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
-  "bin": { "jsui": "bin/jsui.js" },
+  "bin": {
+    "jsui": "bin/jsui.js"
+  },
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
     "./package.json": "./package.json"
   },
-  "files": ["bin", "src", "README.md"],
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "node --test test/*.test.js"
   },
@@ -17,5 +46,7 @@
     "@jsui/react": "0.1.0",
     "esbuild": "0.28.2"
   },
-  "license": "MIT"
+  "engines": {
+    "node": ">=20"
+  }
 }

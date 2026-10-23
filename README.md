@@ -59,6 +59,12 @@ State lives in the runtime, so it survives hot reloads. The UI can own keys
 too (`HostState.set` → `JsuiConfig.on_state`), and the game can call handlers
 the UI registers with `Host.handle(name, fn)` (`jsui_call_ui`).
 
+## npm packages
+
+`@jsui/react` (the React Native API), `@jsui/cli` (`jsui build` / `jsui dev`)
+and `@jsui/web` (the browser host with the WASM modules) are published to npm
+as 0.x releases. See [docs/RELEASING.md](docs/RELEASING.md).
+
 ## Build (native)
 
 ```sh
