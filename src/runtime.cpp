@@ -486,7 +486,18 @@ void Runtime::setClipboardText(const std::string& text) {
   else clipboard = text;
 }
 
-bool Runtime::needsRedraw() const { return redraw_ || doc.paintDirty(); }
+bool Runtime::needsRedraw() const {
+  // An approximate repaint (Document::markExactRepaint) is redone exactly in
+  // the next frame: right away once nothing drives frames any more, else in
+  // the frame the animation renders anyway (still approximately while it
+  // moves the node).
+  return redraw_ || doc.paintDirty() || (doc.exactRepaintPending() && !animatingFrames());
+}
+
+bool Runtime::animatingFrames() const {
+  return input->animating() || doc.layoutAnimating() || animated->animating() || !animated->ends.empty() ||
+         (js && js->hasPendingWork(now + 17));
+}
 
 bool Runtime::wantsFrame() const {
   // A pending repaint alone is not a reason to tick: the host paints after
@@ -522,7 +533,7 @@ SkIRect Runtime::beginCanvasTracked(const void* key, int width, int height, bool
   trackedRects_.clear();
   // Nothing marked dirty and the retained surface holds our last frame:
   // nothing to repaint, without walking the tree.
-  if (sameTarget && !doc.paintDirty() && lastError.empty()) {
+  if (sameTarget && !doc.paintDirty() && !doc.exactRepaintPending() && lastError.empty()) {
     *keyValid = true;
     return SkIRect::MakeEmpty();
   }
@@ -578,7 +589,7 @@ SkIRect Runtime::paintTracked(SkCanvas* canvas, const void* pixels, int width, i
   doc.layout();
   // Nothing marked dirty and the buffer still holds our last frame: done,
   // without walking the tree.
-  if (incremental && !doc.paintDirty() && pixels == lastTarget_ && width == lastTargetW_ &&
+  if (incremental && !doc.paintDirty() && !doc.exactRepaintPending() && pixels == lastTarget_ && width == lastTargetW_ &&
       height == lastTargetH_ && rowBytes == lastTargetRowBytes_ && lastError.empty()) {
     redraw_ = false;
     return SkIRect::MakeEmpty();

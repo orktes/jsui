@@ -1629,7 +1629,7 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
     if (inexact) {
       rec->shadowInexact = true;
       n->markPaintTree();
-      ctx.doc.markPaintDirty();  // a frame after it stops, to repaint it exactly
+      ctx.doc.markExactRepaint();  // a frame after it stops, to repaint it exactly
     }
   }
   paintBackground(c, b, s, ctx.root, ctx.alpha);
@@ -1847,7 +1847,7 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
   // Another frame even if nothing changes: the one that repaints it exactly.
   if (inexact) {
     n->markPaintTree();
-    ctx.doc.markPaintDirty();
+    ctx.doc.markExactRepaint();
   }
   it->second.lastUsed = lc.frame;
   ctx.stats.layerDraws++;
