@@ -1040,6 +1040,81 @@ TEST(input_pass_through_keys_and_gamepad) {
   CHECK(f.in().gamepadButton(0, 0, false, 0));
 }
 
+// jsui_hit_regions: the regions answer like capturesAt everywhere (no
+// transforms or rounded corners here, where they are exact): pointer and
+// scroll targets, box-none containers, zIndex, overflow clipping, a scrolled
+// list and an inert panel covering a button. Inert rects are only kept over
+// ones that capture.
+TEST(input_hit_regions_match_hit_test) {
+  Fixture f;
+  Node* root = f.doc().root();
+  f.box(root, 0, 0, 100, 100);                                    // inert, under nothing: dropped
+  Node* btn = f.box(root, 200, 0, 100, 100, R"({"__events":["press"]})");
+  f.box(btn, 10, 10, 50, 20);                                     // label: the button's
+  Node* overlay = f.box(root, 0, 150, 400, 150);
+  f.style(overlay).pointerEvents = PointerEvents::BoxNone;
+  f.box(overlay, 10, 10, 40, 40, R"({"__events":["hoverIn"]})");
+  Node* sv = f.box(root, 100, 160, 100, 100, "{}", NodeType::ScrollView);
+  f.style(sv).overflow = Overflow::Hidden;
+  f.box(sv, 0, 0, 100, 300);
+  Node* row = f.box(sv, 0, 120, 100, 20, R"({"__events":["press"]})");  // below the fold until scrolled
+  Node* cover = f.box(root, 250, 50, 100, 30);                    // inert, over the button
+  Node* top = f.box(root, 300, 0, 50, 40, R"({"__events":["press"]})");
+  f.style(top).zIndex = -1;                                       // under the cover's sibling order
+  f.style(top).hasZIndex = true;
+  f.layout();
+  sv->scrollY = 40;  // the row moves to y = 160 + 80
+  (void)row;
+  (void)cover;
+  std::vector<float> regions;
+  f.in().hitRegions(&regions);
+  CHECK_EQ(regions.size() % 5, size_t(0));
+  auto lookup = [&](float x, float y) {
+    for (size_t i = regions.size(); i >= 5; i -= 5) {
+      const float* r = &regions[i - 5];
+      if (x >= r[0] && y >= r[1] && x < r[0] + r[2] && y < r[1] + r[3]) return unsigned(r[4]);
+    }
+    return 0u;
+  };
+  int mismatches = 0;
+  for (float y = 0.5f; y < 300; y += 3)
+    for (float x = 0.5f; x < 400; x += 3)
+      if (lookup(x, y) != f.in().capturesAt(x, y)) mismatches++;
+  CHECK_EQ(mismatches, 0);
+  CHECK_EQ(lookup(260, 60), 0u);                                  // the cover hides the button
+  CHECK_EQ(lookup(150, 245), unsigned(JSUI_HIT_POINTER | JSUI_HIT_SCROLL));  // the scrolled row
+  CHECK_EQ(lookup(150, 200), unsigned(JSUI_HIT_SCROLL));
+  for (size_t i = 0; i < regions.size(); i += 5)                  // the inert box at 0,0 is not listed
+    CHECK(!(regions[i] == 0 && regions[i + 1] == 0 && regions[i + 4] == 0));
+
+  // Through the C API, with a buffer too small at first.
+  JsuiConfig cfg;
+  jsui_config_init(&cfg);
+  cfg.width = 200;
+  cfg.height = 200;
+  JsuiRuntime* rt = jsui_create(&cfg);
+  const char* src =
+      "const n = __jsui_native;"
+      "for (const top of [10, 100]) {"
+      "  const b = n.createNode('View');"
+      "  n.setProps(b, {style: {position: 'absolute', left: 10, top, width: 50, height: 20}, __events: ['press']});"
+      "  n.appendChild(n.rootId, b); }"
+      "globalThis.__jsui_dispatchEvent = e => false;";
+  CHECK_EQ(jsui_load_bundle_source(rt, src, std::strlen(src), "regions.js"), 0);
+  jsui_tick(rt, 0);
+  float out[10] = {};
+  CHECK_EQ(jsui_hit_regions(rt, out, 1), 2);
+  CHECK_EQ(out[0], 10.f);
+  CHECK_EQ(out[1], 10.f);
+  CHECK_EQ(out[2], 50.f);
+  CHECK_EQ(out[4], float(JSUI_HIT_POINTER));
+  CHECK_EQ(out[5], 0.f);  // not written
+  CHECK_EQ(jsui_hit_regions(rt, out, 2), 2);
+  CHECK_EQ(out[6], 100.f);
+  CHECK_EQ(jsui_hit_regions(rt, nullptr, 0), 2);
+  jsui_destroy(rt);
+}
+
 TEST(input_capi_hit_test) {
   JsuiConfig cfg;
   jsui_config_init(&cfg);

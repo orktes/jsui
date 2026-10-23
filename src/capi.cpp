@@ -1,4 +1,5 @@
 // C API: thin wrappers over jsui::Runtime.
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -417,6 +418,14 @@ void jsui_set_event_time(JsuiRuntime* rt, double time_ms) { rt->surface->input->
 int jsui_hit_test(JsuiRuntime* rt, float x, float y) {
   if (!rt || !std::isfinite(x) || !std::isfinite(y)) return 0;
   return int(rt->surface->input->capturesAt(x, y));
+}
+int jsui_hit_regions(JsuiRuntime* rt, float* out, int max_regions) {
+  if (!rt) return 0;
+  std::vector<float> regions;
+  rt->surface->input->hitRegions(&regions);
+  int n = int(regions.size() / 5);
+  if (out && max_regions > 0) std::copy_n(regions.begin(), size_t(std::min(n, max_regions)) * 5, out);
+  return n;
 }
 int jsui_send_mouse_move(JsuiRuntime* rt, float x, float y) {
   JSUI_INPUT_SCOPE;
