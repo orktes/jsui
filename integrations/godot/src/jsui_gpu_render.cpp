@@ -345,11 +345,21 @@ bool JsuiView::createGpuContext(Renderer want, const String& driver, Object* int
 
 namespace {
 
-RID createTexture(RenderingDevice* rd, int w, int h, int64_t usage, const PackedByteArray& zeros) {
+// `srgb_view`: the texture may also be viewed as sRGB. Texture2DRD makes such
+// a view of every RGBA8 texture it wraps (Godot's texture_rd_initialize), which
+// is only valid on an image created with that format in its shareable list
+// (Vulkan: VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT, else the validation layer
+// reports VUID-VkImageViewCreateInfo-image-01762; Metal: PixelFormatView).
+RID createTexture(RenderingDevice* rd, int w, int h, int64_t usage, const PackedByteArray& zeros,
+                  bool srgb_view = false) {
   Ref<RDTextureFormat> fmt;
   fmt.instantiate();
   fmt->set_texture_type(RenderingDevice::TEXTURE_TYPE_2D);
   fmt->set_format(RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM);
+  if (srgb_view) {
+    fmt->add_shareable_format(RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM);
+    fmt->add_shareable_format(RenderingDevice::DATA_FORMAT_R8G8B8A8_SRGB);
+  }
   fmt->set_width(uint32_t(w));
   fmt->set_height(uint32_t(h));
   fmt->set_usage_bits(BitField<RenderingDevice::TextureUsageBits>(usage));
@@ -442,7 +452,7 @@ bool JsuiView::renderGpu() {
       t.dst = createTexture(rd, w, h,
                             RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice::TEXTURE_USAGE_CAN_COPY_TO_BIT |
                                 RenderingDevice::TEXTURE_USAGE_CAN_UPDATE_BIT | RenderingDevice::TEXTURE_USAGE_CAN_COPY_FROM_BIT,
-                            zeros);
+                            zeros, /*srgb_view=*/true);  // dst goes into a Texture2DRD
       if (!t.src.is_valid() || !t.dst.is_valid()) {
         freeTextures(t);
         ok = false;
