@@ -891,6 +891,7 @@ int main(int argc, char** argv) {
 
   JsuiConfig cfg;
   jsui_config_init(&cfg);
+  cfg.audio_disabled = 1;  // headless: no sound device
   cfg.width = o.width;
   cfg.height = o.height;
   cfg.pixel_ratio = o.scale;
