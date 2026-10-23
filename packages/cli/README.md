@@ -18,7 +18,12 @@ npx jsui dev app.jsx [--port 5173] [--host 127.0.0.1] [--no-hmr]
 npx jsui screenshot app.jsx -o shot.png [--width 1280 --height 720 --scale 2 --wait 1000]
 npx jsui inspect app.jsx [--find '#play'] [--json]
 npx jsui run app.jsx steps.json|script.mjs
+npx jsui run app.jsx press Down click '#play' screenshot after.png   # steps as words
 npx jsui skill [print --all | install [dir] [--global] | path]
+
+npx jsui dev app.jsx --shared                  # one live app you and agents use together
+npx jsui screenshot|inspect|run --attach http://127.0.0.1:5173 ...
+npx jsui log --attach http://127.0.0.1:5173 [--since N] [--follow]
 ```
 
 ## Build output
@@ -78,6 +83,27 @@ Saving a file updates the running UI without losing its state:
   and `invalidate()` for modules with side effects to clean up.
 
 `--no-hmr` serves the plain bundle and reloads it on every change.
+
+## Shared view: `jsui dev --shared`
+
+`--shared` also runs the app inside the dev server, as one live session that
+you and coding agents see and control together:
+
+* You open `http://127.0.0.1:5173/shared`: the app's frames stream to the
+  page, and your mouse, keyboard, text and gamepads drive it. A feed shows
+  who did what (your input, the agent's steps, the UI's messages, calls and
+  errors), and the agent's clicks show up as rings.
+* Agents use the headless commands with `--attach <url>` instead of an entry
+  (`jsui screenshot --attach`, `inspect --attach`, `run --attach`, and
+  `jsui log --attach` for the feed), or `attach(url)` from `@orktes/jsui-cli`
+  in scripts.
+* Saves hot-update the live app like any dev host, so an agent can edit,
+  save and screenshot in a loop while you watch.
+
+View options (`--width`, `--height`, `--scale`, `--fps`, `--component`,
+`--props`, `--state`) set up the live app. `--scale 2` makes the stream sharp
+on HiDPI screens. The runtime is the CPU WebAssembly build from
+`@orktes/jsui-web`; the regular dev-mode hosts keep working alongside it.
 
 ## Headless: screenshot, inspect, run
 

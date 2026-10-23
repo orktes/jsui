@@ -1,4 +1,15 @@
-# Headless tools: screenshot, inspect, run
+# Checking your work: the shared view and the headless tools
+
+Two ways to run the same commands:
+
+* **Shared view** (`jsui dev --shared` + `--attach <url>`): one live app in
+  the dev server that a person watches and plays at `/shared`, hot-updating
+  on every save. The fastest loop while building; real clock. See the end of
+  this file.
+* **Standalone** (`jsui screenshot|inspect|run <entry>`): a fresh app per
+  command, simulated clock, deterministic. For tests and exact checks.
+
+## Standalone headless runs
 
 `@orktes/jsui-cli` runs a JSUI app in Node on JSUI's CPU WebAssembly runtime
 (from `@orktes/jsui-web`): no browser, GPU or native build. The clock is
@@ -14,7 +25,16 @@ npx jsui screenshot app.jsx -o shot.png [--wait 1000] [--width 1280 --height 720
 npx jsui inspect app.jsx [--find '<selector>'] [--json] [--wait 1000]
 npx jsui run app.jsx steps.json [--keep-going]
 npx jsui run app.jsx script.mjs
+npx jsui run app.jsx press Down expect '#quit' focused=true click '#play' screenshot after.png
 ```
+
+Steps can be given as words instead of a file: an action word takes the
+next word as its value (JSON when it parses, except for names and text:
+`type 42` types "42"), `name=value` words add options to that step
+(`press A count=2`, `state gold value=99`, `drag '#knob' to=[400,300]`),
+`tree` and `reload` take no value, `idle` / `activity` an optional number,
+and a JSON word is a step or an array of steps. Quote selectors starting
+with `#` in the shell.
 
 Common options: `--component Name` (AppRegistry key), `--props '{"json":1}'`,
 `--state key=json` (repeatable; set before the bundle runs), `--fps 60`,
@@ -158,11 +178,69 @@ hold})`, `type(text)`, `press(button, {count, hold, pad})`, `stick(axis,
 value, {duration})`, `setState`, `patchState`, `getState`, `setBuffer(key,
 values, type)`, `postMessage(name, data)`, `callUi(name, args)`,
 `handle(name, valueOrFn)`, `run(component, props)`, `resize(w, h, scale)`,
-`hitTest(sel)`, `close()`. `tree()` returns `{roots: [{rootTag, viewport,
+`hitTest(sel)`, `reload()`, `close()`. `tree()` returns `{roots: [{rootTag, viewport,
 children: [element]}], focused}` with elements shaped as in `inspect
 --json`; `find` returns one element without `children`, `findAll` the
 matches with theirs. Records: `messages`, `calls`, `stateWrites`,
 `logs`, `errors`, `time` (UI clock, ms).
+
+## Shared view: `jsui dev --shared` and `--attach`
+
+```sh
+npx jsui dev src/app.jsx --shared [--width 1280 --height 720 --scale 1 --fps 60]
+                                   [--component Name --props '{...}' --state key=json]
+```
+
+prints the viewer link (`http://127.0.0.1:5173/shared`). The app runs in the
+dev server on the CPU WebAssembly runtime and loads the dev bundle like any
+dev-mode host, so saves hot-update it (React Fast Refresh) and build or JS
+errors show on its error overlay. The viewer streams its frames (about 60 fps
+on localhost), sends the person's mouse, wheel, touch, keyboard, text and
+gamepads to it, and shows an activity feed of who did what. Its Reload button
+restarts the bundle.
+
+Agents attach with the same commands, without an entry:
+
+```sh
+npx jsui screenshot --attach http://127.0.0.1:5173 [-o shot.png] [--wait ms]
+npx jsui inspect --attach http://127.0.0.1:5173 [--find sel] [--json]
+npx jsui run --attach http://127.0.0.1:5173 steps.json|script.mjs|<steps as words> [--keep-going]
+npx jsui log --attach http://127.0.0.1:5173 [--since <seq>] [--follow]
+```
+
+* Steps are the same as above, plus `{"activity": <seq>}` (the log as a
+  step) and `{"reload": true}`. Screenshot paths are written on this
+  machine. `calls` / `answer` steps keep answering for the rest of the
+  session. Unanswered Host.calls are rejected at once, as headless.
+* The clock is real: `wait` sleeps, `idle` waits until nothing loads or
+  animates, `drag` takes its duration.
+* `jsui log` prints one JSON line per event:
+  `{"seq", "time", "who": "agent"|"user"|"ui", "kind", ...}`. Kinds: user
+  `click` / `tap` / `key` / `type` / `press` / `reload`; agent `step` /
+  `command`; ui `message` / `call` / `state` / `log` / `error`. Pass the
+  last `seq` as `--since` to get only newer events.
+* Agent requests run one at a time; the person's input is applied as it
+  arrives, between your steps.
+* `inspect --attach` / `screenshot --attach` don't wait by default (the app
+  is already running); `run --attach` exits 1 on a failed step.
+
+JS scripts get a remote app with the same methods as `launch()`'s, all async
+(`await app.getState('gold')`); `handle(name, value)` takes a value or
+`{value}` / `{error}`, not a function:
+
+```js
+import { attach } from '@orktes/jsui-cli';
+const app = await attach('http://127.0.0.1:5173');
+await app.press('Down');
+await app.screenshot('shot.png');
+const events = await app.activity(0);
+await app.runSteps([{ click: '#play' }, { expectMessage: 'menu.play' }]);
+```
+
+Without a person: `GET /__jsui/shared/screenshot.png`, `/tree`,
+`/activity?since=N` and `/info` answer plain HTTP too. The POST endpoints
+only take `application/json` from localhost, so other web pages can't drive
+the app.
 
 ## Limits
 

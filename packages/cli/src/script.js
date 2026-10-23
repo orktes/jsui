@@ -3,7 +3,13 @@
 
 import { elementSummary, textsOf } from './headless.js';
 
-export const STEP_HELP = `steps (a JSON array, or {"steps": [...]}); targets are selectors ("#testID",
+export const STEP_HELP = `jsui run <entry> <script.json|script.mjs>, or the steps as words:
+  jsui run <entry> press Down click '#play' type Bob key Enter screenshot out.png
+  jsui run --attach <url> expect '#gold' text='99 gold' state gold value=99 press A count=2
+(an action word takes the next word as its value; name=value words add options; a
+JSON word is a step or an array of steps)
+
+steps (a JSON array, or {"steps": [...]}); targets are selectors ("#testID",
 "text=Exact", "Contains", "label=...", "type=TextInput", "... >> 1") or [x, y]:
   {"wait": 500}                         advance the UI clock (ms)
   {"idle": 3000}                        run until nothing loads or animates (max ms)
@@ -22,6 +28,7 @@ export const STEP_HELP = `steps (a JSON array, or {"steps": [...]}); targets are
   {"callUi": "ui.flash", "args": {...}} Host.handle handler; result in the output
   {"run": "Settings", "props": {...}}   switch the main surface's component
   {"resize": [1920, 1080, 1]}
+  {"reload": true}                      reload the bundle (resets component state; shared state stays)
   {"find": "#play"}                     the element (or null) in the output
   {"expect": "#row-vsync", "count": 1, "text": "On", "focused": true}
                                         fails the run unless it matches; "text" / "textContains"
@@ -35,6 +42,8 @@ export const STEP_HELP = `steps (a JSON array, or {"steps": [...]}); targets are
   {"tree": true}                        the whole view tree in the output
   {"getState": "settings"}
   {"hitTest": [640, 360]}               {pointer, scroll}: would the UI take input there?
+  {"activity": 0}                       (--attach only) what the person, agents and UI did after
+                                        that seq number: clicks, keys, messages, calls, logs
 Unanswered Host.calls are rejected; answer them with "answer" steps or a top-level
 {"calls": {"name": {"value": ...} | {"error": "..."}}, "steps": [...]}. Async UI work (calls,
 fetches) settles a frame or two later: follow it with {"wait": 100} or {"idle": 1000}.
@@ -43,7 +52,7 @@ The action is the step's first key. Every step may carry "label" (echoed in the 
 const ACTIONS = [
   'wait', 'idle', 'screenshot', 'click', 'tap', 'hover', 'drag', 'wheel', 'key', 'type', 'press', 'stick',
   'state', 'patch', 'buffer', 'message', 'callUi', 'run', 'resize', 'find', 'expect', 'expectMissing',
-  'expectState', 'expectMessage', 'tree', 'getState', 'hitTest', 'answer',
+  'expectState', 'expectMessage', 'tree', 'getState', 'hitTest', 'answer', 'activity', 'reload',
 ];
 
 // The step's first key that names an action ({"buffer": k, "type": "f32"} is a buffer step).
@@ -105,6 +114,10 @@ async function runStep(app, s) {
     case 'tree': return { action, tree: await app.tree() };
     case 'getState': return { action, value: app.getState(v) ?? null };
     case 'hitTest': return { action, ...(await app.hitTest(v)) };
+    case 'reload': await app.reload(); return { action };
+    case 'activity':
+      if (typeof app.activity !== 'function') throw new Error('"activity" needs the shared view (jsui run --attach)');
+      return { action, events: await app.activity(+v || 0) };
     case 'expect': {
       const els = await app.findAll(v);
       const el = elementSummary(els[0]) || null;
@@ -144,6 +157,69 @@ async function runStep(app, s) {
     }
   }
   return { action };
+}
+
+// Actions without a value (`tree`, `reload`) or with an optional number (`idle 3000`, `activity 12`).
+const NO_VALUE = new Set(['tree', 'reload']);
+const OPTIONAL_NUMBER = { idle: 5000, activity: 0 };
+// Actions whose value is a name or text, never JSON (`type 42` types "42").
+const STRING_VALUE = new Set(['type', 'key', 'screenshot', 'state', 'patch', 'buffer', 'message', 'callUi', 'run', 'answer',
+  'expectState', 'expectMessage', 'getState']);
+
+// A token's value: JSON when it parses (numbers, true, [x, y], {...}), else the string.
+function tokenValue(t) {
+  try {
+    return JSON.parse(t);
+  } catch {
+    return t;
+  }
+}
+
+/**
+ * Steps from command-line words, so `jsui run` needs no file:
+ *   press Down  click '#play'  type Bob  key Enter  wait 200  screenshot out.png
+ *   expect '#gold' text='99 gold'   state gold value=99   press A count=3   tree
+ * An action word takes the next word as its value (JSON if it parses, except
+ * for names and text); `name=value` words add options to the step before
+ * them. A word that is a JSON object or array is a step (or steps), as in
+ * script files.
+ */
+export function parseInlineSteps(words) {
+  const steps = [];
+  let cur = null;
+  for (let i = 0; i < words.length; i++) {
+    const w = String(words[i]);
+    if (/^\s*[[{]/.test(w)) {
+      const v = tokenValue(w);
+      if (typeof v !== 'object' || v === null) throw new Error(`not a JSON step: ${w}`);
+      for (const s of [].concat(v)) steps.push(s);
+      cur = null;
+      continue;
+    }
+    if (ACTIONS.includes(w)) {
+      const next = words[i + 1];
+      if (NO_VALUE.has(w)) {
+        cur = { [w]: true };
+      } else if (w in OPTIONAL_NUMBER) {
+        const n = next !== undefined && next !== '' ? Number(next) : NaN;
+        cur = { [w]: Number.isFinite(n) ? n : OPTIONAL_NUMBER[w] };
+        if (Number.isFinite(n)) i++;
+      } else {
+        if (next === undefined) throw new Error(`"${w}" needs a value`);
+        cur = { [w]: STRING_VALUE.has(w) ? String(next) : tokenValue(next) };
+        i++;
+      }
+      steps.push(cur);
+      continue;
+    }
+    const m = /^([a-zA-Z]\w*)=(.*)$/s.exec(w);
+    if (m && cur) {
+      cur[m[1]] = tokenValue(m[2]);
+      continue;
+    }
+    throw new Error(`unknown step word ${JSON.stringify(w)} (actions: ${ACTIONS.join(', ')})`);
+  }
+  return steps;
 }
 
 /**
