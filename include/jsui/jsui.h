@@ -422,7 +422,11 @@ enum {
     /* Render opacity layers offscreen every time they are painted instead of
      * compositing their cached textures (see "Composited layers" in
      * docs/ARCHITECTURE.md; for comparisons). */
-    JSUI_WEBGPU_NO_LAYER_CACHE = 1 << 3
+    JSUI_WEBGPU_NO_LAYER_CACHE = 1 << 3,
+    /* Paint subtrees that keep being repainted unchanged draw by draw
+     * instead of from cached textures of them (see "Raster cache" in
+     * docs/ARCHITECTURE.md; for comparisons). */
+    JSUI_WEBGPU_NO_RASTER_CACHE = 1 << 4
 };
 
 typedef struct JsuiWebGPUTarget {

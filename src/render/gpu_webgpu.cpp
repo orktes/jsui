@@ -270,7 +270,9 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
   const void* key = haveLast ? reinterpret_cast<const void*>(uintptr_t(g->retainedGen)) : nullptr;
   bool viaRetained = false, failed = false;
   bool copyAll = false;  // copy-back: the whole target into `back` after the frame
-  jsui::LayerCacheScope layerScope((t.flags & JSUI_WEBGPU_NO_LAYER_CACHE) ? nullptr : &g->layers);
+  const bool opacityLayers = !(t.flags & JSUI_WEBGPU_NO_LAYER_CACHE), raster = !(t.flags & JSUI_WEBGPU_NO_RASTER_CACHE);
+  g->layers.setModes(opacityLayers, raster);
+  jsui::LayerCacheScope layerScope(opacityLayers || raster ? &g->layers : nullptr);
   rt.renderCanvasTracked(key, w, h, [&](const SkIRect&, bool keyValid) -> Runtime::CanvasChoice {
     int64_t area = 0;
     for (SkRegion::Iterator it(rt.trackedDamage()); !it.done(); it.next())
