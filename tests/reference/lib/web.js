@@ -51,7 +51,7 @@ function fontFaceCss() {
 // machine's AppleFontSmoothing setting. "antialiased" makes Chrome use
 // SkFontHinting::kNone + kAntiAlias edging, i.e. exactly JSUI's text settings.
 // Linux and Windows Chrome ignore the property.
-function pageHtml(meta) {
+export function pageHtml(meta) {
   return `<!doctype html>
 <html><head><meta charset="utf-8">
 <style>
