@@ -304,6 +304,7 @@ void Node::updatePropFlags() {
   bool hint = f & (kAutoFocus | kModal), wasHint = propFlags_ & (kAutoFocus | kModal);
   bool listens = f & kListensLayout, listened = propFlags_ & kListensLayout;
   propFlags_ = f;
+  listenMaskValid = false;
   if (doc_ && hint != wasHint) doc_->setFocusHint(this, hint);
   if (doc_ && listens != listened) doc_->layoutListeners += listens ? 1 : -1;
 }

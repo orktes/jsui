@@ -98,6 +98,8 @@ class NativeAnimated {
   void removeEventMapping(uint32_t viewId, const std::string& eventType, int tag);
   // Applies the mappings for a native event before it reaches JS.
   void handleEvent(const Value& event);
+  // A mapping listens to `eventType` events of view `viewId`.
+  bool hasEventMapping(uint32_t viewId, const char* eventType) const;
 
   // ---- frame ---------------------------------------------------------------
   // Advances animations to nowMs and writes changed props into views.

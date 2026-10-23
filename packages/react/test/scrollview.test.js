@@ -41,17 +41,31 @@ test('ScrollView maps drag / momentum events to RN props in order', () => {
 });
 
 test('scrollEventThrottle limits onScroll and delivers the last offset', async () => {
+  // The runtime throttles (src/input/scroll.cpp, tests/native/scroll_test.cpp):
+  // the host node gets the interval, and what it sends reaches onScroll.
   const seen = [];
   render(h(ScrollView, { scrollEventThrottle: 100, onScroll: (e) => seen.push(e.nativeEvent.contentOffset.y) }, h(View)));
   const sv = scrollNode();
+  assert.equal(sv.props.scrollEventThrottle, 100);
+  assert.ok(sv.props.__events.includes('scroll'));
   scrollEvent(sv.id, 10, 1000);
   scrollEvent(sv.id, 20, 1020);
-  scrollEvent(sv.id, 30, 1040);
-  assert.deepEqual(seen, [10]);
+  assert.deepEqual(seen, [10, 20]);
+  render(null);
+  // Sticky headers follow every offset: the host sends all of them and JS
+  // throttles onScroll, with a trailing event for the latest offset.
+  const sticky = [];
+  render(h(ScrollView, { stickyHeaderIndices: [0], scrollEventThrottle: 100, onScroll: (e) => sticky.push(e.nativeEvent.contentOffset.y) }, h(View), h(View)));
+  const sv1 = scrollNode();
+  assert.equal(sv1.props.scrollEventThrottle, undefined);
+  scrollEvent(sv1.id, 10, 1000);
+  scrollEvent(sv1.id, 20, 1020);
+  scrollEvent(sv1.id, 30, 1040);
+  assert.deepEqual(sticky, [10]);
   await wait(120);
-  assert.deepEqual(seen, [10, 30]); // trailing event with the latest offset
-  scrollEvent(sv.id, 40, 1200);
-  assert.deepEqual(seen, [10, 30, 40]);
+  assert.deepEqual(sticky, [10, 30]); // trailing event with the latest offset
+  scrollEvent(sv1.id, 40, 1200);
+  assert.deepEqual(sticky, [10, 30, 40]);
   render(null);
   // Unset throttle: every event.
   const all = [];

@@ -10,6 +10,7 @@
 // onContentSizeChange, the drag / momentum events and the ref methods.
 
 import { createElement as h, Children, useLayoutEffect, useRef } from 'react';
+import { jsx, jsxs } from 'react/jsx-runtime';
 import { native } from '../native.js';
 import { omit } from './usePress.js';
 
@@ -123,7 +124,15 @@ export function ScrollView(props) {
   rest.horizontal = !!horizontal;
   rest.style = [horizontal ? scrollBaseH : scrollBase, props.style];
   const sticky = !horizontal && Array.isArray(stickyHeaderIndices) && stickyHeaderIndices.length > 0;
-  if (props.onScroll || sticky) {
+  const throttle = +props.scrollEventThrottle || 0;
+  if (props.onScroll && !sticky && throttle > 0) {
+    // The runtime throttles (src/input/scroll.cpp): at most one event per
+    // interval (per frame up to 16 ms), then a trailing one with the final
+    // offset, so held-back offsets never cross into JS.
+    rest.scrollEventThrottle = throttle;
+    rest.onScroll = emitScroll;
+  } else if (props.onScroll || sticky) {
+    // Sticky headers follow every offset; onScroll is throttled here.
     rest.onScroll = (e) => {
       if (sticky) {
         st.scrollY = e.nativeEvent.contentOffset.y;
@@ -216,6 +225,9 @@ export function ScrollView(props) {
       if (f) f(e.nativeEvent.layout.width, e.nativeEvent.layout.height);
     };
   }
-  return h('ScrollView', rest, refreshControl || null, h('View', content, kids));
+  content.children = kids;
+  rest.children = [refreshControl || null, jsx('View', content)];
+  // rest and content are ours: no copies. jsxs: static children (no keys).
+  return jsxs('ScrollView', rest);
 }
 ScrollView.displayName = 'ScrollView';

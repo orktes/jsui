@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "animated/native_animated.h"
 #include "input/input.h"
 #include "js/engine.h"
 #include "render_util.h"
@@ -313,7 +314,7 @@ TEST(scroll_snap_to_offsets) {
 
 TEST(scroll_smooth_scrollto_reaches_target) {
   ScrollFixture f;
-  Node* sv = addList(f);
+  Node* sv = addList(f, R"({"__events":["scroll"]})");
   f.tick(16);
   f.events();
   CHECK(f.in().scrollTo(sv, 0, 500, true));
@@ -365,6 +366,111 @@ TEST(scroll_smooth_wheel_and_trackpad) {
   f.in().smoothWheel = true;
   f.in().scrollTo(sv, 0, 900);
   CHECK(!f.in().mouseWheel(50, 50, 0, 100));
+}
+
+// Logs 'scroll' events as scroll@offset/timestamp (and pointer enter /
+// leave with their target) instead of the fixture's plain types.
+void logScrollOffsets(ScrollFixture& f) {
+  f.js("globalThis.__jsui_dispatchEvent = e => {"
+       "  if (e.type === 'scroll') log.push('scroll@' + e.contentOffset.y + '/' + e.timestamp);"
+       "  else if (e.type === 'pointerenter' || e.type === 'pointerleave') log.push(e.type + ':' + e.target);"
+       "  else log.push(e.type);"
+       "  return 0; };");
+}
+
+TEST(scroll_event_throttle_sends_leading_and_trailing_events) {
+  ScrollFixture f;
+  // Trackpad deltas (applied at once); RN scrollEventThrottle 50 ms.
+  Node* sv = addList(f, R"({"__events":["scroll"],"scrollEventThrottle":50})");
+  f.tick(16);
+  logScrollOffsets(f);
+  f.events(true);
+  // The first change goes out at once; later ones within 50 ms are held
+  // back and the latest goes out (stamped with its own time) once due.
+  for (int i = 0; i < 4; i++) {
+    CHECK(f.in().mouseWheel(50, 50, 0, 10.5f));  // at t = 16, 32, 48, 64
+    f.tick(16);
+  }
+  CHECK_EQ(sv->scrollY, 42.f);
+  CHECK_EQ(f.events(true), std::string("scroll@10.5/16 scroll@42/64"));
+  // Nothing more without changes; a later change waits for the interval.
+  f.tick(48);
+  CHECK_EQ(f.events(true), std::string());
+  CHECK(f.in().mouseWheel(50, 50, 0, 8));  // t = 128: 64 ms after the last one
+  CHECK_EQ(f.events(true), std::string("scroll@50/128"));
+  CHECK(f.in().mouseWheel(50, 50, 0, 8));
+  CHECK(f.s.rt->wantsFrame());
+  f.tick(64);
+  CHECK_EQ(f.events(true), std::string("scroll@58/128"));
+  // Up to 16 ms: at most one per frame, the rest at the next tick.
+  sv->setProps(Value::parseJson(R"({"__events":["scroll"],"scrollEventThrottle":16,)"
+                                R"("style":{"position":"absolute","left":0,"top":0,"width":100,"height":100}})"));
+  f.tick(16);
+  f.events(true);
+  CHECK(f.in().mouseWheel(50, 50, 0, 1));
+  CHECK(f.in().mouseWheel(50, 50, 0, 1));
+  CHECK(f.in().mouseWheel(50, 50, 0, 1));
+  CHECK_EQ(f.events(true), std::string("scroll@59/208"));
+  f.tick(16);
+  CHECK_EQ(f.events(true), std::string("scroll@61/208"));
+  // 0 / unset: every change.
+  sv->setProps(Value::parseJson(R"({"__events":["scroll"],)"
+                                R"("style":{"position":"absolute","left":0,"top":0,"width":100,"height":100}})"));
+  f.tick(16);
+  CHECK(f.in().mouseWheel(50, 50, 0, 1));
+  CHECK(f.in().mouseWheel(50, 50, 0, 1));
+  CHECK_EQ(f.events(true), std::string("scroll@62/240 scroll@63/240"));
+}
+
+TEST(scroll_events_reach_native_animated_mappings_without_listeners) {
+  ScrollFixture f;
+  Node* sv = addList(f, R"({"scrollEventThrottle":50})");
+  NativeAnimated& na = *f.s.rt->animated;
+  CHECK(na.createNode(1, Value::parseJson(R"({"type":"value","value":0})")));
+  na.addEventMapping(sv->id(), "scroll", {"contentOffset", "y"}, 1);
+  f.tick(16);
+  f.events(true);
+  // Animated.event(..., {useNativeDriver: true}) without a JS listener: the
+  // mapping follows every offset (no throttle), JS hears nothing.
+  for (int i = 1; i <= 3; i++) {
+    CHECK(f.in().mouseWheel(50, 50, 0, 5));
+    CHECK_EQ(na.getValue(1), 5.0 * i);
+  }
+  f.tick(100);
+  CHECK_EQ(f.events(true), std::string());
+}
+
+TEST(scroll_hover_catches_up_when_wheel_scrolling_pauses) {
+  ScrollFixture f;
+  // Rows of 20 px that track hover, under a still mouse at y = 50.
+  std::string rows;
+  for (int i = 0; i < 50; i++)
+    rows += std::string(i ? "," : "") + R"({"props":{"__events":["hoverIn","hoverOut"]},"style":{"height":20}})";
+  Node* sv = addList(f, "{}", R"({"style":{"height":1000},"children":[)" + rows + "]}");
+  Node* content = sv->children()[0];
+  f.tick(16);
+  logScrollOffsets(f);
+  f.in().mouseMove(50, 50);
+  auto row = [&](int i) { return std::to_string(content->children()[size_t(i)]->id()); };
+  CHECK_EQ(f.events(true), "pointerenter:" + row(2));
+  // Rows pass under the cursor while the list scrolls: no enter / leave per
+  // row (each would re-render it), only once the scrolling pauses.
+  for (int i = 0; i < 10; i++) {
+    f.in().mouseWheel(50, 50, 0, 10.5f);
+    f.tick(16);
+  }
+  CHECK_EQ(sv->scrollY, 105.f);
+  CHECK_EQ(f.events(true), std::string());
+  CHECK(f.s.rt->wantsFrame());
+  f.tick(48);
+  CHECK_EQ(f.events(true), std::string());
+  f.tick(64);
+  CHECK_EQ(f.events(true), "pointerleave:" + row(2) + " pointerenter:" + row(7));  // (50 + 105) / 20
+  // A mouse move updates it at once, scrolling or not.
+  f.in().mouseWheel(50, 50, 0, 10.5f);
+  f.events(true);
+  f.in().mouseMove(50, 90);
+  CHECK_EQ(f.events(true), "pointerleave:" + row(7) + " pointerenter:" + row(10));  // (90 + 115.5) / 20
 }
 
 TEST(scroll_gamepad_sticks) {
