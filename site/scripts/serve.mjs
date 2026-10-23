@@ -12,7 +12,7 @@ const pi = args.indexOf('--port');
 const port = pi >= 0 ? Number(args[pi + 1]) : 8080;
 const dir = path.resolve(args.find((a, i) => !a.startsWith('--') && args[i - 1] !== '--port') || path.join(SITE, 'dist'));
 const MIME = { '.js': 'text/javascript', '.html': 'text/html', '.wasm': 'application/wasm', '.json': 'application/json',
-  '.png': 'image/png', '.jpg': 'image/jpeg', '.ttf': 'font/ttf', '.txt': 'text/plain' };
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.ttf': 'font/ttf', '.txt': 'text/plain', '.wav': 'audio/wav' };
 
 http.createServer((req, res) => {
   const p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
