@@ -1403,8 +1403,8 @@ struct Ctx {
   SkMatrix snapSpace;
   bool transformed = false;  // a transform applies (node or ancestor)
   float alpha = 1;           // the painted node's opacity, when folded into its one draw
-  LayerCache* layers = nullptr;  // composited opacity layers (null: plain layers)
-  bool inLayer = false;          // painting into a plain layer (no raster-cached subtrees, see updateRasterCache)
+  LayerCache* layers = nullptr;  // composited opacity layers and raster-cached subtrees (null: neither)
+  bool opacityLayers = true;     // with `layers`: opacity layers composited (false: plain layers, raster cache only)
 };
 
 sk_sp<SkMaskFilter> cachedBlur(RootRecord* root, float blur) {
@@ -1812,10 +1812,15 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
     oc->clear(SK_ColorTRANSPARENT);
     oc->translate(float(-need.left()), float(-need.top()));
     oc->concat(m);
-    // The whole layer (no damage culling), with plain layers inside.
-    Ctx sub{ctx.doc, ctx.root, nullptr, {}, ctx.snapSpace, ctx.transformed, 1, nullptr};
+    // The whole layer (no damage culling), with plain layers inside. In an
+    // opacity layer the raster-cached subtrees are drawn from their textures
+    // (not in a raster-cached subtree's own texture: the two would be
+    // rendered together).
+    Ctx sub{ctx.doc, ctx.root, nullptr, {}, ctx.snapSpace, ctx.transformed, 1, raster ? nullptr : ctx.layers, false};
     paintContent(n, oc, sub, p.snap, p.w, p.h);
     ctx.stats.nodesPainted += sub.stats.nodesPainted;
+    ctx.stats.layerDraws += sub.stats.layerDraws;
+    ctx.stats.layerRenders += sub.stats.layerRenders;
 #if defined(JSUI_GRAPHITE_AS_IMAGE)
     sk_sp<SkImage> image = oc->recorder() ? SkSurfaces::AsImage(surf) : surf->makeImageSnapshot();
 #else
@@ -1887,9 +1892,10 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   SkMatrix parentSnap = ctx.snapSpace;
   bool parentTransformed = ctx.transformed;
   // A raster-cached subtree (see updateRasterCache), or a cached layer.
-  bool raster = ctx.layers && ctx.layers->impl->raster && !layer && alpha >= 1 && !ctx.inLayer && n->paintCache &&
+  bool raster = ctx.layers && ctx.layers->impl->raster && !layer && alpha >= 1 && n->paintCache &&
                 static_cast<const NodeRecord*>(n->paintCache.get())->rasterOn;
-  if (ctx.layers && (raster || (layer && ctx.layers->impl->opacityLayers && s.filters.empty() && !s.blendMode))) {
+  if (ctx.layers && (raster || (layer && ctx.opacityLayers && ctx.layers->impl->opacityLayers && s.filters.empty() &&
+                                !s.blendMode))) {
     ctx.snapSpace = p.snapSpace;
     ctx.transformed |= p.transformed;
     bool drawn = paintCachedLayer(n, c, ctx, opacity, p, raster);
@@ -1911,10 +1917,7 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   ctx.snapSpace = p.snapSpace;
   ctx.transformed |= p.transformed;
   ctx.alpha = alpha;
-  bool parentInLayer = ctx.inLayer;
-  ctx.inLayer |= layer;
   paintContent(n, c, ctx, p.snap, p.w, p.h);
-  ctx.inLayer = parentInLayer;
   ctx.alpha = 1;
   ctx.snapSpace = parentSnap;
   ctx.transformed = parentTransformed;
@@ -2018,7 +2021,10 @@ bool startBlitScan(Node* n, const NodeRecord* rec, const SkMatrix& m, float w, f
 // node, and is drawn while only the node's device position changes (whole
 // pixels; the nearest one while it moves, repainted exactly once it stops).
 // A candidate paints the same into a texture of its own (no blend modes
-// reaching what is below), has a few nodes and is not inside a plain layer.
+// reaching what is below) and has a few nodes. Inside a layer (a panel
+// fading in while a button in it pulses: the layer is painted again every
+// frame) its static parts are drawn from their textures too, also when the
+// layer is rendered into a cached texture of its own.
 // Compositing its texture is source-over of the same draws regrouped: equal
 // to painting them directly up to rounding (a level or two where the
 // subtree is translucent). So that every repaint gives the same pixels
