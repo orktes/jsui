@@ -158,6 +158,25 @@ const void* jsui_get_buffer(JsuiRuntime* rt, const char* key, JsuiBufferType* ty
   return e ? e->data() : nullptr;
 }
 
+int jsui_set_texture(JsuiRuntime* rt, const char* key, const JsuiTexture* texture) {
+  if (!key) return -1;
+  int r = rt->rt->textures.set(key, texture);
+  if (r < 0) rt->rt->log(JSUI_LOG_ERROR, std::string("jsui_set_texture(\"") + key + "\"): invalid texture");
+  return r;
+}
+
+int jsui_set_texture_pixels(JsuiRuntime* rt, const char* key, const void* rgba, int width, int height,
+                            size_t rowBytes, int flags) {
+  if (!key) return -1;
+  int r = rt->rt->textures.setPixels(key, rgba, width, height, rowBytes, flags);
+  if (r < 0) rt->rt->log(JSUI_LOG_ERROR, std::string("jsui_set_texture_pixels(\"") + key + "\"): invalid pixels");
+  return r;
+}
+
+int jsui_texture_updated(JsuiRuntime* rt, const char* key) { return key && rt->rt->textures.updated(key) ? 1 : -1; }
+
+int jsui_remove_texture(JsuiRuntime* rt, const char* key) { return key && rt->rt->textures.remove(key) ? 1 : 0; }
+
 int jsui_resolve_call(JsuiRuntime* rt, uint64_t id, const char* json) { return rt->rt->resolveCall(id, json); }
 int jsui_reject_call(JsuiRuntime* rt, uint64_t id, const char* message) { return rt->rt->rejectCall(id, message); }
 

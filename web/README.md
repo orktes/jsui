@@ -19,6 +19,7 @@ jsui.setState('gold', 1250);                                 // useHostState('go
 jsui.setBuffer('enemies', new Float32Array(positions));      // every frame, no JSON: useHostBuffer / useHostBufferValue
 const view = jsui.mapBuffer('enemies', Float32Array, 90);    // or write in place (zero copy) ...
 jsui.commitBuffer('enemies');                                // ... then publish
+jsui.bindVideo('trailer', videoElement);                     // <HostTexture name="trailer" /> in the UI
 ```
 
 ## Several root views (surfaces)
@@ -70,6 +71,59 @@ cart.destroy();
   changes still repaint only their damage.
 - `renderer: 'webgl'` gives a surface a WebGL context of its own (which counts
   against the cap); `'cpu'` and `'2d'` use the CPU raster.
+
+## Host textures (video, canvases, render targets)
+
+JSUI does not play video. It shows pictures the page makes itself: a
+`<video>`, WebCodecs `VideoFrame`s, a `<canvas>` your 3D scene draws into, a
+webcam, an image. Name a texture, keep it current, and show it in the UI by
+that name:
+
+```js
+const video = Object.assign(document.createElement('video'), {
+  src: 'https://example.com/trailer.webm', crossOrigin: 'anonymous', muted: true, loop: true, playsInline: true,
+});
+const unbind = jsui.bindVideo('trailer', video);   // one upload per presented frame
+video.play();
+
+jsui.setTexture('minimap', minimapCanvas);         // whenever its picture changes
+jsui.setTexture('cam', frame); frame.close();      // VideoFrame: yours to close
+jsui.removeTexture('minimap');
+```
+
+```jsx
+import { HostTexture, useHostTexture } from 'react-native';
+
+const size = useHostTexture('trailer');            // { width, height } once set, else null
+<HostTexture name="trailer" resizeMode="cover" style={{ width: 640, aspectRatio: 16 / 9, borderRadius: 16 }} />
+```
+
+- `setTexture(name, source, { opaque })`: `source` is a `VideoFrame`,
+  `HTMLVideoElement`, `HTMLCanvasElement`, `OffscreenCanvas`, `ImageBitmap`,
+  `HTMLImageElement` or `ImageData`; its current picture is uploaded. Calling
+  it again at the same size refills the same texture and repaints only the
+  views showing it (no layout, no JS); a new size re-lays them out and
+  updates `useHostTexture`. Returns `false` while the source has no picture
+  (a video before its first frame) or when the upload failed (logged).
+  `opaque` (default: `true` for video) ignores alpha.
+- `bindVideo(name, video, options)` keeps a texture current from a video
+  element (`requestVideoFrameCallback`, else polled per display frame,
+  paused frames and seeks included) and returns a function that stops it.
+  Playback (`play()`, `pause()`, `muted`, `currentTime`) stays on the element.
+- `removeTexture(name)`; `textureBackend` says where textures go now.
+- Textures belong to the runtime: every surface can show them, and they
+  survive bundle reloads.
+- Uploads use the renderer in use: on WebGPU a `GPUTexture` per name on the
+  page's device (`copyExternalImageToTexture`, sampled in place by Skia); on
+  WebGL a texture in the views' context; on the CPU raster, or when views
+  draw with different contexts (a main canvas with its own WebGL context next
+  to surfaces on the shared one), a CPU copy. Renderer fallbacks, lost
+  contexts and new devices re-upload from the last source by themselves
+  (except `VideoFrame`s, which are not kept: the next `setTexture` brings
+  them back).
+- GPU uploads of a cross-origin video or image need CORS: set
+  `crossOrigin = 'anonymous'` and serve it with `Access-Control-Allow-Origin`.
+  Browsers only autoplay muted video; unmute after a click.
 
 ## Input pass-through (HUD over a game)
 

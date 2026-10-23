@@ -47,6 +47,7 @@
 #include "include/gpu/graphite/dawn/DawnBackendContext.h"
 #include "include/gpu/graphite/dawn/DawnGraphiteTypes.h"
 #include "render/graphite_images.h"
+#include "render/host_textures.h"
 #include "render/painter.h"
 #include "render/pipeline_cache.h"
 #include "runtime.h"
@@ -77,6 +78,20 @@ struct WebGPUGpu final : JsuiGpuContext {
   std::unique_ptr<graphite::Context> ctx;
   std::unique_ptr<graphite::Recorder> recorder;
   sk_sp<CachingImageProvider> images;
+  // Host textures (JSUI_TEXTURE_WEBGPU, textures of `device`) drawn in this
+  // context's frames, sampled in place.
+  jsui::TextureWrapper textures{[this](const JsuiTexture& t) -> sk_sp<SkImage> {
+    if (t.kind != JSUI_TEXTURE_WEBGPU || !recorder) return nullptr;
+    wgpu::Texture texture(static_cast<WGPUTexture>(t.handle));
+    wgpu::TextureFormat f = t.format ? wgpu::TextureFormat(t.format) : texture.GetFormat();
+    SkColorType ct;
+    if (f == wgpu::TextureFormat::RGBA8Unorm) ct = kRGBA_8888_SkColorType;
+    else if (f == wgpu::TextureFormat::BGRA8Unorm) ct = kBGRA_8888_SkColorType;
+    else return nullptr;
+    graphite::BackendTexture bt = graphite::BackendTextures::MakeDawn(texture.Get());
+    if (!bt.isValid()) return nullptr;
+    return SkImages::WrapTexture(recorder.get(), bt, ct, jsui::textureAlphaType(t), nullptr);
+  }};
   // What render() keeps between frames of one surface. Several surfaces of
   // a runtime (several canvases) can share this context: one entry each.
   struct Frames {
@@ -178,6 +193,7 @@ struct WebGPUGpu final : JsuiGpuContext {
     if (precompiler) precompiler->shutdown();  // its PrecompileContext holds the device
     dropRetained();
     if (images) images->clear();
+    textures.clear();
     recorder.reset();
     if (!ctx) return;
     // Without a tick function Graphite cannot wait for in-flight GPU work in
@@ -211,6 +227,7 @@ struct WebGPUGpu final : JsuiGpuContext {
     ctx->submit(graphite::SyncToCpu::kNo);
     ctx->checkAsyncWorkCompletion();
     images->endFrame();
+    textures.endFrame();
     return true;
   }
 };
@@ -327,6 +344,7 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
   bool copyAll = false;  // copy-back: the whole target into `back` after the frame
   const bool opacityLayers = !(t.flags & JSUI_WEBGPU_NO_LAYER_CACHE), raster = !(t.flags & JSUI_WEBGPU_NO_RASTER_CACHE);
   f.layers->setModes(opacityLayers, raster);
+  jsui::TextureScope textureScope(&g->textures);
   jsui::LayerCacheScope layerScope(opacityLayers || raster ? f.layers.get() : nullptr);
   rt.renderCanvasTracked(key, w, h, [&](const SkIRect&, bool keyValid) -> Surface::CanvasChoice {
     int64_t area = 0;

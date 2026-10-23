@@ -51,10 +51,12 @@
 #include "include/gpu/graphite/Context.h"
 #include "include/gpu/graphite/ContextOptions.h"
 #include "include/gpu/graphite/GraphiteTypes.h"
+#include "include/gpu/graphite/Image.h"
 #include "include/gpu/graphite/Recorder.h"
 #include "include/gpu/graphite/Recording.h"
 #include "include/gpu/graphite/Surface.h"
 #include "render/graphite_images.h"
+#include "render/host_textures.h"
 #include "render/painter.h"
 #include "render/pipeline_cache.h"
 #include "runtime.h"
@@ -150,6 +152,13 @@ PFN_vkGetInstanceProcAddr loaderGetInstanceProcAddr() {
 }
 #endif
 
+#if defined(JSUI_GRAPHITE_METAL)
+constexpr unsigned kMTLPixelFormatRGBA8Unorm = 70;
+constexpr unsigned kMTLPixelFormatRGBA8Unorm_sRGB = 71;
+constexpr unsigned kMTLPixelFormatBGRA8Unorm = 80;
+constexpr unsigned kMTLPixelFormatBGRA8Unorm_sRGB = 81;
+#endif
+
 struct GraphiteGpu final : JsuiGpuContext {
   explicit GraphiteGpu(Api a) : JsuiGpuContext(Kind::Graphite), api(a) {}
   ~GraphiteGpu() override { release(); }
@@ -164,6 +173,8 @@ struct GraphiteGpu final : JsuiGpuContext {
   std::unique_ptr<graphite::Recorder> recorder;
   sk_sp<CachingImageProvider> images;
   size_t cacheBytes = kDefaultCacheBytes;
+  // Host textures drawn in this context's frames (wrapTexture).
+  jsui::TextureWrapper textures{[this](const JsuiTexture& t) { return wrapTexture(t); }};
 
 #if defined(JSUI_VULKAN)
   VkFns vk;
@@ -192,6 +203,51 @@ struct GraphiteGpu final : JsuiGpuContext {
     return Precompiler::Mode::Thread;
   }
 
+  // A host texture of this context's device, sampled in place.
+  sk_sp<SkImage> wrapTexture(const JsuiTexture& t) {
+    if (!recorder) return nullptr;
+    const SkISize size = SkISize::Make(t.width, t.height);
+    SkColorType ct = kRGBA_8888_SkColorType;
+    graphite::BackendTexture bt;
+    if (api == Api::Vulkan && t.kind == JSUI_TEXTURE_VULKAN) {
+#if defined(JSUI_VULKAN)
+      VkFormat vf = t.format ? VkFormat(t.format) : VK_FORMAT_R8G8B8A8_UNORM;
+      if (vf == VK_FORMAT_B8G8R8A8_UNORM) ct = kBGRA_8888_SkColorType;
+      else if (vf != VK_FORMAT_R8G8B8A8_UNORM) return nullptr;
+      graphite::VulkanTextureInfo info;
+      info.fSampleCount = graphite::SampleCount::k1;
+      info.fMipmapped = skgpu::Mipmapped::kNo;
+      info.fFormat = vf;
+      info.fImageTiling = VK_IMAGE_TILING_OPTIMAL;
+      info.fImageUsageFlags = t.usage ? VkImageUsageFlags(t.usage)
+                                      : VkImageUsageFlags(VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                                          VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+      info.fSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+      info.fAspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      // Host textures are in SHADER_READ_ONLY_OPTIMAL whenever a render runs
+      // (jsui.h), and sampling leaves them there.
+      bt = graphite::BackendTextures::MakeVulkan(size, info, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, queueFamily,
+                                                 static_cast<VkImage>(t.handle), skgpu::VulkanAlloc());
+#endif
+    } else if (api == Api::Metal && t.kind == JSUI_TEXTURE_METAL) {
+#if defined(JSUI_GRAPHITE_METAL)
+      if (t.format == kMTLPixelFormatBGRA8Unorm) ct = kBGRA_8888_SkColorType;
+      else if (t.format && t.format != kMTLPixelFormatRGBA8Unorm) return nullptr;
+      bt = graphite::BackendTextures::MakeMetal(size, static_cast<CFTypeRef>(t.handle));
+#endif
+    } else if (api == Api::Dawn && t.kind == JSUI_TEXTURE_WEBGPU) {
+#if defined(JSUI_GRAPHITE_DAWN)
+      wgpu::Texture texture(static_cast<WGPUTexture>(t.handle));
+      wgpu::TextureFormat f = t.format ? wgpu::TextureFormat(t.format) : texture.GetFormat();
+      if (f == wgpu::TextureFormat::BGRA8Unorm) ct = kBGRA_8888_SkColorType;
+      else if (f != wgpu::TextureFormat::RGBA8Unorm) return nullptr;
+      bt = graphite::BackendTextures::MakeDawn(texture.Get());
+#endif
+    }
+    if (!bt.isValid()) return nullptr;
+    return SkImages::WrapTexture(recorder.get(), bt, ct, jsui::textureAlphaType(t), nullptr);
+  }
+
   bool finishInit(const graphite::ContextOptions& opts) {
     (void)opts;
     if (!ctx) return false;
@@ -217,6 +273,7 @@ struct GraphiteGpu final : JsuiGpuContext {
   void release() {
     if (precompiler) precompiler->shutdown();  // its PrecompileContext holds the device
     if (images) images->clear();
+    textures.clear();
     recorder.reset();
     if (ctx) {
       // Wait for everything submitted (Graphite needs its work finished
@@ -255,6 +312,7 @@ struct GraphiteGpu final : JsuiGpuContext {
     bool ok = ctx->submit(graphite::SyncToCpu::kNo);
     ctx->checkAsyncWorkCompletion();
     images->endFrame();
+    textures.endFrame();
     return ok;
   }
 
@@ -332,10 +390,6 @@ bool vkColorType(unsigned format, VkFormat* vf, sk_sp<SkColorSpace>* cs) {
 #endif
 
 #if defined(JSUI_GRAPHITE_METAL)
-constexpr unsigned kMTLPixelFormatRGBA8Unorm = 70;
-constexpr unsigned kMTLPixelFormatRGBA8Unorm_sRGB = 71;
-constexpr unsigned kMTLPixelFormatBGRA8Unorm = 80;
-constexpr unsigned kMTLPixelFormatBGRA8Unorm_sRGB = 81;
 bool mtlColorSpace(unsigned format, sk_sp<SkColorSpace>* cs) {
   switch (format) {
     case 0:
@@ -624,6 +678,7 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* d
   const bool incremental = (t.flags & JSUI_GPU_INCREMENTAL) && !discard;
   const void* key = incremental ? t.texture : nullptr;
   const bool clear = !(t.flags & JSUI_GPU_NO_CLEAR) || discard;
+  jsui::TextureScope textureScope(&g->textures);
   SkIRect painted = rt.renderCanvasTracked(key, t.width, t.height, [&](const SkIRect&, bool) -> Surface::CanvasChoice {
     // Always into the target. It holds just our frame afterwards (so the
     // next frame may be incremental) unless the frame was composited over it.

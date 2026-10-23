@@ -240,6 +240,99 @@ JSUI_API int jsui_remove_buffer(JsuiRuntime* rt, const char* key);
  * NULL. Valid until the buffer is next changed. */
 JSUI_API const void* jsui_get_buffer(JsuiRuntime* rt, const char* key, JsuiBufferType* type, size_t* count);
 
+/* ------------------------------------------------------- Host textures
+ *
+ * Pictures the host makes itself, shown inside the UI: a video the engine
+ * decodes (Godot's VideoStreamPlayer texture, WebCodecs VideoFrames, a
+ * <video> element), a 3D viewport or render target (a character preview, a
+ * minimap camera), a webcam. JSUI does not decode or play anything: the host
+ * names a texture, keeps it current, and the UI shows it by that name:
+ *
+ *     <HostTexture name="trailer" resizeMode="contain" style={{ width: 640, aspectRatio: 16 / 9 }} />
+ *     const size = useHostTexture('trailer');   // { width, height } once set, else null
+ *
+ * HostTexture lays out and paints like Image (its intrinsic size is the
+ * texture's size in px, resizeMode, borderRadius clipping, tintColor,
+ * opacity, transforms). Like frame data, textures belong to the runtime
+ * (set them any time; they survive reloads) and every surface can show them.
+ *
+ * A texture is either CPU pixels (jsui_set_texture_pixels: copied, shown by
+ * every renderer, the CPU raster included) or a GPU texture of the device
+ * the runtime renders with (jsui_set_texture), sampled in place, no copy:
+ *
+ *     kind                  handle             renders that can show it
+ *     JSUI_TEXTURE_GL       GL texture name    jsui_render_gl* (same / shared GL context)
+ *     JSUI_TEXTURE_WEBGPU   WGPUTexture        jsui_gpu_create_webgpu, jsui_gpu_create_dawn*
+ *     JSUI_TEXTURE_VULKAN   VkImage            jsui_gpu_create_vulkan
+ *     JSUI_TEXTURE_METAL    id<MTLTexture>     jsui_gpu_create_metal, jsui_metal_create
+ *
+ * A render that cannot sample a texture (another API, the CPU raster for a
+ * GPU texture) leaves its views empty and logs one warning per texture.
+ *
+ * Per frame: when the host draws new contents into the same texture (the next
+ * video frame), it calls jsui_texture_updated(); the runtime then repaints
+ * just the views showing it (no layout, no JS). Setting a texture with a
+ * different handle, size or format also re-lays out the views whose size
+ * comes from it, and tells JS (useHostTexture) in the next jsui_tick().
+ *
+ * GPU textures stay the host's: JSUI keeps no reference past a render (its
+ * GPU work is submitted before the render returns). The host keeps a texture
+ * alive while it is set and while that work may still run, and orders its own
+ * writes before the render: on the same queue / GL context before the call
+ * (Vulkan: the render's full barriers order it; Metal: the same queue;
+ * WebGPU: queue order). Formats: 8-bit RGBA or BGRA, UNORM, holding
+ * sRGB-encoded values like images do (Vulkan / Metal / WebGPU / GL format 0:
+ * RGBA8 UNORM). Vulkan images must be in SHADER_READ_ONLY_OPTIMAL whenever a
+ * render runs (JSUI leaves them in it). */
+typedef enum JsuiTextureKind {
+    JSUI_TEXTURE_PIXELS = 0, /* CPU pixels (jsui_set_texture_pixels) */
+    JSUI_TEXTURE_GL,         /* handle: the GL texture name, (void*)(uintptr_t)name; GL_TEXTURE_2D */
+    JSUI_TEXTURE_WEBGPU,     /* handle: WGPUTexture (TextureBinding usage) */
+    JSUI_TEXTURE_VULKAN,     /* handle: VkImage (SAMPLED usage), on the context's device */
+    JSUI_TEXTURE_METAL       /* handle: id<MTLTexture> (ShaderRead usage), on the context's device */
+} JsuiTextureKind;
+
+enum {
+    /* The pixels are not premultiplied by alpha (straight alpha: most image
+     * files, Godot images, ImageData). Default: premultiplied. */
+    JSUI_TEXTURE_UNPREMULTIPLIED = 1 << 0,
+    /* Ignore alpha: every pixel is opaque (video frames). */
+    JSUI_TEXTURE_OPAQUE = 1 << 1,
+    /* Row 0 is the bottom of the picture (a GL render target drawn the GL
+     * way). Default: row 0 is the top (uploaded images and video frames). */
+    JSUI_TEXTURE_BOTTOM_LEFT_ORIGIN = 1 << 2
+};
+
+typedef struct JsuiTexture {
+    int kind;             /* JsuiTextureKind (not JSUI_TEXTURE_PIXELS) */
+    void* handle;         /* see JsuiTextureKind */
+    /* VkFormat / MTLPixelFormat / WGPUTextureFormat / GL sized internal format
+     * (GL_RGBA8, GL_BGRA8_EXT); 0: RGBA8 UNORM. */
+    unsigned int format;
+    int width, height;    /* px */
+    int flags;            /* JSUI_TEXTURE_* */
+    /* Vulkan: the VkImageUsageFlags the image was created with (0: SAMPLED |
+     * TRANSFER_SRC | TRANSFER_DST). Unused elsewhere. */
+    unsigned int usage;
+} JsuiTexture;
+
+/* Sets texture `key` to a GPU texture (`texture` NULL removes it). Returns 1
+ * when the texture changed, 0 when it is the same as before (same handle,
+ * size, format and flags: use jsui_texture_updated for new contents), -1 for
+ * a NULL key or an invalid texture (no handle, size <= 0, unknown kind). */
+JSUI_API int jsui_set_texture(JsuiRuntime* rt, const char* key, const JsuiTexture* texture);
+/* Sets texture `key` to a copy of `width` x `height` RGBA8 pixels (rows
+ * `row_bytes` apart; 0: width * 4), sRGB-encoded, flags JSUI_TEXTURE_*.
+ * Every call is new contents. Returns 1, or -1 for a NULL key or bad size. */
+JSUI_API int jsui_set_texture_pixels(JsuiRuntime* rt, const char* key, const void* rgba, int width, int height,
+                                     size_t row_bytes, int flags);
+/* The host drew new contents into texture `key` (same handle): repaints the
+ * views showing it. Returns 1, or -1 for an unknown key. */
+JSUI_API int jsui_texture_updated(JsuiRuntime* rt, const char* key);
+/* Removes texture `key` (its views draw nothing; JS sees null). Returns 1 if
+ * it existed. */
+JSUI_API int jsui_remove_texture(JsuiRuntime* rt, const char* key);
+
 /* ---------------------------------------------------------------- Config */
 
 typedef struct JsuiConfig {

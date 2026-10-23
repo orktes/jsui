@@ -72,6 +72,22 @@
 //           the frame is copied into that canvas' 2D context in the same task.
 //
 // See JsuiSurfaceOptions.renderer.
+//
+// Host textures (include/jsui/jsui.h): pictures the page makes itself, shown
+// in the UI with <HostTexture name="trailer" /> and useHostTexture('trailer').
+// JSUI plays nothing itself; a video is one source among others:
+//
+//   jsui.setTexture('minimap', canvas);               // any time its picture changes
+//   jsui.setTexture('cam', videoFrame); videoFrame.close();
+//   const unbind = jsui.bindVideo('trailer', video);  // per presented frame
+//   jsui.removeTexture('trailer');
+//
+// Sources: VideoFrame, <video>, <canvas>, OffscreenCanvas, ImageBitmap, <img>,
+// ImageData. Textures belong to the runtime (every surface can show them) and
+// are uploaded with the renderer in use: a GPUTexture on the page's WebGPU
+// device (copyExternalImageToTexture), a texture of the views' WebGL context,
+// or CPU pixels when the views cannot share one (web/jsui-textures.js). They
+// follow renderer fallbacks and context loss by themselves.
 
 /** @typedef {{
  *   canvas?: HTMLCanvasElement,  // the main surface's canvas; null / omitted: not shown (a page
@@ -119,6 +135,7 @@
  * }} JsuiOptions */
 
 import { SharedWebGPU, WebGPURenderer, requestWebGPU } from './jsui-webgpu.js';
+import { HostTextureSet } from './jsui-textures.js';
 
 export { requestWebGPU, webgpuSupported } from './jsui-webgpu.js';
 
@@ -681,6 +698,7 @@ class CanvasView {
       M.GL.deleteContext(this._glHandle);
       this._glHandle = M.GL.registerContext(gl, this._glAttrs);
       this._glLost = false;
+      this._glGen = (this._glGen ?? 0) + 1;  // host textures: earlier GL objects are gone
       this._sizeChanged = true;  // repaint into the new context
     }, { signal });
     return true;
@@ -1300,6 +1318,7 @@ class SharedGL {
     this.stencilBits = gl.getContextAttributes()?.stencil ? 8 : 0;
     this.views = new Set();
     this.lost = false;
+    this.gen = 0;  // context restores (host textures re-upload)
     this.destroyed = false;
     this._abort = new AbortController();
     const M = this.module, signal = this._abort.signal;
@@ -1322,6 +1341,7 @@ class SharedGL {
       M.GL.deleteContext(this.handle);
       this.handle = M.GL.registerContext(gl, glAttrs);
       this.lost = false;
+      this.gen++;
       for (const v of this.views) v._sizeChanged = true;  // repaint into the new context
     }, { signal });
   }
@@ -1413,6 +1433,7 @@ class JsuiHost extends CanvasView {
     this._stage = 0;             // setBuffer staging memory (WASM heap)
     this._stageSize = 0;
     this._uiCalls = new Map();   // callUi id -> {resolve, reject}
+    this._textures = null;       // HostTextureSet (setTexture), made on first use
     this.rootTag = 1;
 
     (M.__jsuiHosts ??= new Map()).set(this.hostId, {
@@ -1543,6 +1564,57 @@ class JsuiHost extends CanvasView {
   /** Removes buffer `key` (the UI sees undefined). Returns true if it existed. */
   removeBuffer(key) {
     return this._withStrings([String(key)], (k) => this.module._jsui_remove_buffer(this.rt, k)) === 1;
+  }
+
+  // ------------------------------------------------- host textures (jsui.h)
+
+  /** Host texture: shows `source`'s current picture wherever the UI has
+   * <HostTexture name={name}> (useHostTexture(name) gives its size). `source`:
+   * a VideoFrame, <video>, <canvas>, OffscreenCanvas, ImageBitmap, <img> or
+   * ImageData. Call it again whenever the picture changes (each video
+   * frame): the same size refills the same texture, and only the views
+   * showing it repaint. Uploaded with the renderer in use (WebGPU
+   * copyExternalImageToTexture, a WebGL texture, or CPU pixels; see
+   * web/jsui-textures.js). `options.opaque`: ignore alpha (default: true for
+   * video). Cross-origin sources need CORS (crossOrigin = 'anonymous').
+   * VideoFrames are not kept: close them when this returns. Returns true
+   * when uploaded, false when the source has no picture yet (a <video>
+   * before its first frame) or the upload failed (logged). Null removes it. */
+  setTexture(name, source, options) {
+    if (this._destroyed) return false;
+    return this._textureSet().set(name, source, options ?? {});
+  }
+
+  /** Removes host texture `name` (its views draw nothing; useHostTexture gives
+   * null) and stops a bindVideo() of it. True if it existed. */
+  removeTexture(name) {
+    if (this._destroyed) return false;
+    return this._textureSet().remove(name);
+  }
+
+  /** Keeps host texture `name` showing `video`'s current frame (one upload
+   * per presented frame, requestVideoFrameCallback; else polled per display
+   * frame), also while paused (first frame, seeks). Playback stays the
+   * page's: play(), pause(), muted, ... on the element. Returns a function
+   * that stops it (the texture keeps its last frame; removeTexture clears it).
+   * The video must be same-origin or CORS-enabled (crossOrigin = 'anonymous'). */
+  bindVideo(name, video, options) {
+    if (this._destroyed) throw new Error('bindVideo: runtime destroyed');
+    return this._textureSet().bindVideo(name, video, options ?? {});
+  }
+
+  /** Where host textures go now: 'webgpu' (GPU textures on the page's
+   * device), 'gl' (textures of the views' WebGL context), 'pixels' (CPU
+   * copies), or null while a GPU context is lost. */
+  get textureBackend() { return this._textureSet().backend; }
+
+  _textureSet() { return (this._textures ??= new HostTextureSet(this)); }
+
+  // The views that draw this runtime's textures (host textures go where all can sample them).
+  _views() {
+    const v = this.canvas && !this._destroyed ? [this] : [];
+    for (const s of this._surfaces) if (s.canvas && !s._destroyed) v.push(s);
+    return v;
   }
 
   /** Answers the UI's `Host.call(name, args)`: `fn(args)` returns a value or a
@@ -1704,6 +1776,8 @@ class JsuiHost extends CanvasView {
     if (this._destroyed) return;
     const M = this.module, rt = this.rt, st = this.stats;
     if (this._padsActive) this._pollGamepads();
+    // Host textures follow renderer changes (fallbacks, context restores, surfaces).
+    this._textures?.sync();
     const t0 = performance.now();
     M._jsui_tick(rt, now);
     st.tickMs = ema(st.tickMs, performance.now() - t0);
@@ -1727,6 +1801,9 @@ class JsuiHost extends CanvasView {
   destroy() {
     if (this._destroyed) return;
     this.stop();
+    // GPU textures first, while their contexts exist.
+    this._textures?.destroy();
+    this._textures = null;
     // jsui_destroy frees the surface handles with the runtime.
     for (const s of this._surfaces) s._destroyView(true);
     this._surfaces.clear();

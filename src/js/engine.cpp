@@ -646,6 +646,15 @@ void JsEngine::buffersChanged(const std::vector<std::string>& keys) {
   callGlobal("__jsui_onHostBuffer", &arg, 1);
 }
 
+void JsEngine::texturesChanged(const std::vector<std::string>& keys) {
+  if (keys.empty()) return;
+  Value::Array list;
+  list.reserve(keys.size());
+  for (auto& k : keys) list.emplace_back(k);
+  Value arg(std::move(list));
+  callGlobal("__jsui_onHostTexture", &arg, 1);
+}
+
 void JsEngine::Impl::releaseBuffer(const std::string& key) {
   auto it = bufferViews.find(key);
   if (it == bufferViews.end()) return;

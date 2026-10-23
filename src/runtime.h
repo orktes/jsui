@@ -10,6 +10,7 @@
 #include "core/document.h"
 #include "host_buffers.h"
 #include "host_state.h"
+#include "render/host_textures.h"
 #include "include/core/SkRect.h"
 #include "include/core/SkRefCnt.h"
 #include "include/core/SkRegion.h"
@@ -117,6 +118,9 @@ class Runtime {
   // Frame data (jsui_set_buffer / jsui_map_buffer; HostBuffer in JS). Lives
   // as long as the runtime; JS views point into it (declared before js).
   HostBuffers buffers;
+  // Host textures (jsui_set_texture; HostTexture in JS). Declared before the
+  // surfaces: their Image nodes unregister from it when destroyed.
+  HostTextures textures;
 
   // Calls: Host.call <-> on_call / jsui_resolve_call, and
   // jsui_call_ui <-> Host.handle.
@@ -172,6 +176,8 @@ class Runtime {
   void deliverStateChanges();
   // Same for frame data buffers.
   void deliverBufferChanges();
+  // ... and the host textures whose size or handle changed.
+  void deliverTextureChanges();
   // Runs the done callbacks of settled jsui_call_ui calls.
   void deliverUiCallResults();
   // The JS context is going away: cancels its unanswered Host.calls (ids

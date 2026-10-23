@@ -11,6 +11,7 @@
 #include "include/core/SkColorSpace.h"
 #include "include/core/SkShader.h"
 #include "include/core/SkTileMode.h"
+#include "render/host_textures.h"
 #include "render/image_cache.h"
 
 namespace jsui::image {
@@ -41,7 +42,13 @@ YGSize measureImage(YGNodeConstRef y, float width, YGMeasureMode wm, float heigh
   if (!c) return {0, 0};
   float w = c->sourceWidth, h = c->sourceHeight;
   c->measuredLoaded = false;
-  if (!(w > 0 && h > 0) && n->document()->images) {
+  if (!c->texture.empty()) {
+    // A host texture: its size in px (HostTextures re-measures on resize).
+    const HostTextures::Entry* e = c->textures ? c->textures->find(c->texture) : nullptr;
+    w = e ? e->desc.width / c->scale : 0;
+    h = e ? e->desc.height / c->scale : 0;
+    c->measuredLoaded = e != nullptr;
+  } else if (!(w > 0 && h > 0) && n->document()->images) {
     ImageCache::State st;
     if (sk_sp<SkImage> img = n->document()->images->get(c->url, &st)) {
       w = img->width() / c->scale;
@@ -70,6 +77,10 @@ YGSize measureImage(YGNodeConstRef y, float width, YGMeasureMode wm, float heigh
 
 }  // namespace
 
+NodeCache::~NodeCache() {
+  if (textures && !texture.empty()) textures->removeUser(texture, node);
+}
+
 void installMeasure(Node* node) {
   if (node->type() == NodeType::Image && node->yoga() && YGNodeGetChildCount(node->yoga()) == 0)
     YGNodeSetMeasureFunc(node->yoga(), measureImage);
@@ -80,6 +91,16 @@ NodeCache* ensure(Node* node) {
   auto c = std::make_unique<NodeCache>();
   Document* doc = node->document();
   const Value& props = node->props();
+  c->node = node;
+  if (props["texture"].isString() && !props["texture"].asString().empty()) {
+    c->texture = props["texture"].asString();
+    c->scale = std::max(0.01f, float(props["scale"].asNumber(1)));
+    c->textures = doc ? doc->textures : nullptr;
+    if (c->textures) c->textures->addUser(c->texture, node);
+    NodeCache* raw = c.get();
+    node->imageCache = std::move(c);
+    return raw;
+  }
   const Value* srcp = &props["source"];
   if (srcp->isNull()) srcp = &props["src"];
   if (srcp->isNull()) srcp = &props["defaultSource"];
@@ -134,7 +155,8 @@ void append(std::string* key, const T& v) {
 bool paintKey(Node* node, std::string* key) {
   NodeCache* c = ensure(node);
   Document* doc = node->document();
-  if (!c || c->url.empty() || !doc || !doc->images) return false;
+  // Host textures change behind the painter's back (a video): never cached.
+  if (!c || !c->texture.empty() || c->url.empty() || !doc || !doc->images) return false;
   sk_sp<SkImage> img = doc->images->get(c->url);
   if (!img) return false;
   append(key, img->uniqueID());
@@ -149,8 +171,17 @@ bool paintKey(Node* node, std::string* key) {
 void paint(Node* node, SkCanvas* canvas, const SkRect& box, const SkRRect& clip) {
   NodeCache* c = ensure(node);
   Document* doc = node->document();
-  if (!c || c->url.empty() || !doc || !doc->images || box.isEmpty()) return;
-  sk_sp<SkImage> img = doc->images->get(c->url);
+  if (!c || !doc || box.isEmpty()) return;
+  sk_sp<SkImage> img;
+  bool flip = false;  // a GPU texture whose row 0 is its bottom
+  if (!c->texture.empty()) {
+    if (!c->textures) return;
+    img = c->textures->image(c->texture);
+    const HostTextures::Entry* e = c->textures->find(c->texture);
+    flip = e && !e->pixels && (e->desc.flags & JSUI_TEXTURE_BOTTOM_LEFT_ORIGIN);
+  } else if (!c->url.empty() && doc->images) {
+    img = doc->images->get(c->url);
+  }
   if (!img) return;
   const ComputedStyle& s = node->style();
   ResizeMode mode = resizeModeOf(node);
@@ -165,7 +196,8 @@ void paint(Node* node, SkCanvas* canvas, const SkRect& box, const SkRRect& clip)
     paint.setColorFilter(SkColorFilters::Blend(SkColor4f{t.r, t.g, t.b, t.a}, nullptr, SkBlendMode::kSrcIn));
   }
   // Chrome samples images bilinearly with mipmaps when scaling down.
-  SkSamplingOptions sampling(SkFilterMode::kLinear, SkMipmapMode::kLinear);
+  // Host textures have no mipmaps (a new video frame would need new ones).
+  SkSamplingOptions sampling(SkFilterMode::kLinear, c->texture.empty() ? SkMipmapMode::kLinear : SkMipmapMode::kNone);
 
   canvas->save();
   if (clip.isRect()) canvas->clipRect(clip.rect(), true);
@@ -174,6 +206,7 @@ void paint(Node* node, SkCanvas* canvas, const SkRect& box, const SkRRect& clip)
     // react-native-web: background-position "0" = left edge, centered vertically.
     SkMatrix m = SkMatrix::Translate(box.left(), box.top() + (box.height() - ih) / 2);
     m.preScale(1 / c->scale, 1 / c->scale);
+    if (flip) m.preConcat(SkMatrix::MakeAll(1, 0, 0, 0, -1, float(img->height()), 0, 0, 1));
     paint.setShader(img->makeShader(SkTileMode::kRepeat, SkTileMode::kRepeat, sampling, &m));
     canvas->drawRect(box, paint);
   } else {
@@ -186,6 +219,10 @@ void paint(Node* node, SkCanvas* canvas, const SkRect& box, const SkRRect& clip)
       dh = ih * k;
     }
     SkRect dst = SkRect::MakeXYWH(box.centerX() - dw / 2, box.centerY() - dh / 2, dw, dh);
+    if (flip) {
+      canvas->translate(0, dst.top() + dst.bottom());
+      canvas->scale(1, -1);
+    }
     canvas->drawImageRect(img, SkRect::MakeIWH(img->width(), img->height()), dst, sampling, &paint,
                           SkCanvas::kFast_SrcRectConstraint);
   }

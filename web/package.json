@@ -32,6 +32,7 @@
   "exports": {
     ".": "./jsui-web.js",
     "./jsui-webgpu.js": "./jsui-webgpu.js",
+    "./jsui-textures.js": "./jsui-textures.js",
     "./dist/*": "./dist/*",
     "./dist-webgl/*": "./dist-webgl/*",
     "./dist-gpu/*": "./dist-gpu/*",
@@ -40,6 +41,7 @@
   "files": [
     "jsui-web.js",
     "jsui-webgpu.js",
+    "jsui-textures.js",
     "dist/jsui.js",
     "dist/jsui.wasm",
     "dist-webgl/jsui.js",
@@ -54,6 +56,7 @@
   "scripts": {
     "test:web": "node test/node-smoke.mjs && node test/browser.test.mjs",
     "test:node": "node test/node-smoke.mjs",
+    "test:unit": "node --test test/textures.test.mjs",
     "test:browser": "node test/browser.test.mjs",
     "serve": "node test/serve.mjs",
     "prepack": "node scripts/check-dist.mjs"

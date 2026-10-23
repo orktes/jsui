@@ -8,6 +8,7 @@
 //   cancelCall(id) -> bool                       callResult(id, ok, payload)
 //   buffer(key) -> [ArrayBuffer, type, count, version] | undefined
 //   bufferVersion(key) -> number (0: unset)      bufferKeys() -> [key]
+//   texture(key) -> [width, height, version] | undefined   textureKeys() -> [key]
 #include <string>
 
 #include "js/engine_impl.h"
@@ -120,6 +121,27 @@ JSValue js_bufferKeys(JSContext* ctx, JSValueConst, int, JSValueConst*) {
   return arr;
 }
 
+// Host textures: what JS needs to lay views out (useHostTexture); the pixels
+// never reach JS.
+JSValue js_texture(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  if (argc < 1) return JS_UNDEFINED;
+  const HostTextures::Entry* e = runtimeOf(ctx).textures.find(toStdString(ctx, argv[0]));
+  if (!e) return JS_UNDEFINED;
+  JSValue arr = JS_NewArray(ctx);
+  JS_SetPropertyUint32(ctx, arr, 0, JS_NewInt32(ctx, e->desc.width));
+  JS_SetPropertyUint32(ctx, arr, 1, JS_NewInt32(ctx, e->desc.height));
+  JS_SetPropertyUint32(ctx, arr, 2, JS_NewFloat64(ctx, double(e->descVersion)));
+  return arr;
+}
+
+JSValue js_textureKeys(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+  auto keys = runtimeOf(ctx).textures.keys();
+  JSValue arr = JS_NewArray(ctx);
+  for (size_t i = 0; i < keys.size(); i++)
+    JS_SetPropertyUint32(ctx, arr, uint32_t(i), JS_NewStringLen(ctx, keys[i].data(), keys[i].size()));
+  return arr;
+}
+
 JSValue js_hostCall(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   auto& impl = implOf(ctx);
   Runtime& rt = impl.rt;
@@ -162,6 +184,7 @@ void installHostDataBridge(JsEngine::Impl& impl, JSValue native) {
   } fns[] = {{"getState", js_getState, 1},   {"stateVersion", js_stateVersion, 1}, {"stateKeys", js_stateKeys, 0},
              {"statePatches", js_statePatches, 2},
              {"buffer", js_buffer, 1},       {"bufferVersion", js_bufferVersion, 1}, {"bufferKeys", js_bufferKeys, 0},
+             {"texture", js_texture, 1},     {"textureKeys", js_textureKeys, 0},
              {"hostCall", js_hostCall, 3},   {"cancelCall", js_cancelCall, 1},     {"callResult", js_callResult, 3}};
   for (auto& f : fns) JS_SetPropertyStr(ctx, native, f.name, JS_NewCFunction(ctx, f.fn, f.name, f.len));
   JS_SetPropertyStr(ctx, native, "setState",

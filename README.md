@@ -76,6 +76,20 @@ function Marker({ i }) {
 }
 ```
 
+Pictures the game draws itself (a video it decodes, a render target, a
+camera) are shown by name; JSUI samples the engine's own GPU texture in place
+and repaints just those views when the game says it has new contents:
+
+```c
+JsuiTexture t = {JSUI_TEXTURE_VULKAN, vk_image, 0, 1280, 720, JSUI_TEXTURE_OPAQUE};
+jsui_set_texture(rt, "trailer", &t);   // once (or when it changes)
+jsui_texture_updated(rt, "trailer");   // after each new video frame
+```
+
+```jsx
+<HostTexture name="trailer" resizeMode="contain" style={{ width: 640, aspectRatio: 16 / 9, borderRadius: 12 }} />
+```
+
 ## npm packages
 
 `@orktes/jsui-react` (the React Native API), `@orktes/jsui-cli` (`jsui build` / `jsui dev`)
