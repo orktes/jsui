@@ -858,6 +858,21 @@ was `preventDefault()`-ed.
   sent to JS unless a node on the path lists one); `hover`/`enter`/`leave`/`over`
   = wants `pointerenter`/`pointerleave` (sent only to such nodes); `wheel`;
   `"*"` = everything. Any pointer-ish name makes `jsui_send_*` report "consumed".
+* **Consumed vs. pass-through.** Every `jsui_send_*` returns whether the UI
+  captured the event, so the game handles everything else (a click on an empty
+  or merely decorative part of a HUD). Pointer: a node on the hit path with a
+  pointer-ish `__events` name, a TextInput, JS `preventDefault()`, or (touch
+  only) a ScrollView that can scroll; `pointerEvents` `none` / `box-none`
+  views are skipped by the hit test, so full-screen containers don't swallow
+  input. The press decides the gesture: its moves and release report what the
+  press did (`PointerState::owned`), so the game sees whole drags. Keys and
+  gamepad buttons: JS `preventDefault()` or a default action that ran (focus
+  moved, activation, scrolling, editing); the repeats and release of a
+  consumed press report consumed too (`consumedKeys_`, `Pad::consumed`).
+  Sticks: focus moved or a ScrollView scrolls. `jsui_hit_test(x, y)`
+  (`InputManager::capturesAt`) answers the pointer question without sending
+  anything, for hosts that route by hit testing: Godot's `JsuiView._has_point`
+  (`input_pass_through`), the web host's `passThrough` overlay mode.
 * **Pointer:** mouse `pointerId` 0, touch `id + 1`. Implicit capture while a
   button / touch is down; `click` (primary button only) targets the nearest
   common ancestor of the down and up nodes. Wheel `deltaY > 0` scrolls down

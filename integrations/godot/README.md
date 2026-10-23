@@ -414,6 +414,21 @@ func spawn_nameplate(enemy):
   continues through Godot (`mouse_filter` is `PASS`): parent controls, then
   `_unhandled_input`. For example, an unhandled Tab or arrow key can move
   Godot focus to another control.
+* Pass-through (`input_pass_through`, default on): only the points where the
+  UI captures input count as inside the view (`_has_point` asks
+  `jsui_hit_test`), so a click on an empty or decorative part of a full-screen
+  HUD goes to the Godot controls behind the view and to the game's
+  `_unhandled_input`, and doesn't take keyboard focus. "Captures" means
+  something in the UI handles it (onPress, pointer / hover / responder
+  handlers, TextInput, a ScrollView that can scroll), not that the point is
+  painted; views with `pointerEvents="box-none"` / `"none"` let input
+  through. A backdrop that should block the game (a pause menu) needs a
+  handler, e.g. `onStartShouldSetResponder={() => true}`. A drag the game
+  started keeps going to the game when it crosses UI, and a press the UI took
+  keeps its drag. Turn it off to make the whole rect a Control that receives
+  (and bubbles) every event. `hit_test(position)` returns `HIT_POINTER` /
+  `HIT_SCROLL` flags for any local point, e.g. for the game's own picking.
+  Each surface view hit-tests its own surface.
 
 ### Loading and exporting
 
