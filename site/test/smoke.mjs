@@ -22,6 +22,17 @@ if (!fs.existsSync(path.join(DIR, 'index.html'))) {
   console.error(`${DIR}/index.html missing: run node site/scripts/build.mjs first`);
   process.exit(1);
 }
+// Crawlers and agents: the static files and the page's text content (the UI itself is a canvas).
+for (const f of ['llms.txt', 'og.png']) {
+  if (!fs.existsSync(path.join(DIR, f))) {
+    console.error(`${DIR}/${f} missing (site/public)`);
+    process.exit(1);
+  }
+}
+if (!/<main id="about"[\s\S]*github\.com\/orktes\/jsui/.test(fs.readFileSync(path.join(DIR, 'index.html'), 'utf8'))) {
+  console.error('index.html: the crawlable #about content is missing');
+  process.exit(1);
+}
 
 const ROUTES = ['/', '/screens', '/screens/main-menu', '/screens/hud', '/screens/inventory', '/screens/battle-pass',
   '/screens/scoreboard', '/screens/dialogue', '/screens/settings', '/screens/loading', '/screens/notifications',
