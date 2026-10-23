@@ -834,6 +834,8 @@ function definePage(I) {
 
     reload() { this._send({ op: 'reload' }); }
 
+    devUpdate() { this._send({ op: 'devUpdate' }); }
+
     /** Copies the bytes to the worker; Promise<boolean>. */
     registerFont(family, bytes, weight = 400, italic = false) {
       const data = (ArrayBuffer.isView(bytes) ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
@@ -1479,6 +1481,7 @@ export function serve(I, early) {
       case 'loadUrl': host.loadUrl(op.url); return;
       case 'loadSource': reply(op.id, true, host.loadSource(op.source, op.name)); return;
       case 'reload': host.reload(); return;
+      case 'devUpdate': host.devUpdate(); return;
       case 'registerFont': reply(op.id, true, host.registerFont(op.family, op.bytes, op.weight, op.italic)); return;
       case 'idle':
         host.whenIdle().then(() => {

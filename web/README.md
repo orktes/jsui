@@ -211,7 +211,7 @@ value it returns in main-thread mode:
 | `surface.ready` (new) | the surface, once the worker made it | `surface.rootTag` is `undefined` until then |
 
 Already asynchronous in both modes: `callUi`, `whenIdle`, `readPixelsAsync`.
-Fire-and-forget calls keep their shape: `postMessage`, `loadUrl`, `reload`,
+Fire-and-forget calls keep their shape: `postMessage`, `loadUrl`, `reload`, `devUpdate`,
 `start`, `stop`, `frame`, `setProfiling`, `destroy`, `surface.destroy`.
 
 These stay synchronous because the page keeps a copy: `renderer`,
