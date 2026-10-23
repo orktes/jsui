@@ -19,6 +19,7 @@
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/time.hpp>
 #include <godot_cpp/classes/viewport.hpp>
+#include <godot_cpp/classes/viewport_texture.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/callable_method_pointer.hpp>
 #include <godot_cpp/variant/typed_array.hpp>
@@ -140,6 +141,9 @@ void JsuiView::_bind_methods() {
   ClassDB::bind_method(D_METHOD("get_state", "key"), &JsuiView::get_state);
   ClassDB::bind_method(D_METHOD("set_buffer", "key", "data"), &JsuiView::set_buffer);
   ClassDB::bind_method(D_METHOD("remove_buffer", "key"), &JsuiView::remove_buffer);
+  ClassDB::bind_method(D_METHOD("set_texture", "name", "texture", "live"), &JsuiView::set_texture, DEFVAL(false));
+  ClassDB::bind_method(D_METHOD("remove_texture", "name"), &JsuiView::remove_texture);
+  ClassDB::bind_method(D_METHOD("update_texture", "name"), &JsuiView::update_texture);
   ClassDB::bind_method(D_METHOD("get_state_json", "key"), &JsuiView::get_state_json);
   ClassDB::bind_method(D_METHOD("resolve_call", "id", "result"), &JsuiView::resolve_call, DEFVAL(Variant()));
   ClassDB::bind_method(D_METHOD("resolve_call_json", "id", "json"), &JsuiView::resolve_call_json);
@@ -214,6 +218,10 @@ JsuiView::~JsuiView() {
   // runtime view again.
   for (JsuiView* v : surfaces_) v->host_ = nullptr;
   surfaces_.clear();
+  for (HostTexture& e : textures_)
+    if (e.texture.is_valid() && e.texture->is_connected("changed", e.changed)) e.texture->disconnect("changed", e.changed);
+  releaseTextureGpu();
+  textures_.clear();
   releaseGpu();
   if (canvas_item_.is_valid() && RenderingServer::get_singleton())
     RenderingServer::get_singleton()->free_rid(canvas_item_);
@@ -354,6 +362,18 @@ void JsuiView::attachToRuntimeView() {
   if (!host) return;  // retried every frame (process) until the node is there
   host_ = host;
   host->surfaces_.push_back(this);
+  // Textures set while this view had no runtime view belong to the runtime.
+  if (!textures_.empty()) {
+    std::vector<HostTexture> mine;
+    mine.swap(textures_);
+    for (HostTexture& e : mine) {
+      if (e.texture.is_valid() && e.texture->is_connected("changed", e.changed)) e.texture->disconnect("changed", e.changed);
+      host->set_texture(e.name, e.texture, e.live);
+      if (e.cur.valid()) retired_mirrors_.push_back(e.cur);
+      if (e.next.valid()) retired_mirrors_.push_back(e.next);
+    }
+    releaseTextureGpu();
+  }
   if (host->rt_) createSurface();
 }
 
@@ -463,6 +483,12 @@ void JsuiView::start() {
   for (auto& [key, json] : state_) jsui_set_state(rt_, key.c_str(), json.c_str());
   for (auto& [key, b] : pendingBuffers_) jsui_set_buffer(rt_, key.c_str(), b.type, b.bytes.data(), b.count);
   pendingBuffers_.clear();
+  // Host textures: the new runtime gets them in the first frame (syncTextures,
+  // before the first tick), GPU copies already made included.
+  for (HostTexture& e : textures_) {
+    e.gpu_set = e.pixels_set = false;
+    e.dirty = true;
+  }
   // The main surface's component, and surface views waiting for a runtime
   // (their components start once the bundle has registered them).
   if (!component_.is_empty()) {
@@ -503,6 +529,7 @@ void JsuiView::stop() {
   if (is_inside_tree()) flushMessages();
   else messages_.clear();
   ui_callbacks_.clear();
+  for (HostTexture& e : textures_) e.gpu_set = e.pixels_set = e.shown_pending = false;
   // The GPU target held this runtime's frames; a new runtime repaints fully.
   gpu_retained_ = false;
 }
@@ -685,6 +712,10 @@ void JsuiView::process() {
   if (!rt_) return;
   updateViewport();
   for (JsuiView* v : surfaces_) v->updateViewport();
+  // Host textures before the tick: JS sees new and resized ones in it, and
+  // the views showing new contents repaint this frame.
+  syncTextures();
+  if (!rt_) return;
   const uint64_t tick0 = Time::get_singleton()->get_ticks_usec();
   // One tick for every surface of the runtime, then each paints.
   jsui_tick(rt_, clockMs());
@@ -710,6 +741,7 @@ void JsuiView::process() {
         v->render();
   batching_ = false;
   queueFrameJob();
+  queueTextureJob();  // this frame's texture copies, if the frame job did not take them
 }
 
 bool JsuiView::showsOurRuntime(const JsuiView* v) const {
@@ -1249,6 +1281,212 @@ int JsuiView::remove_buffer(const String& key) {
   if (it == pendingBuffers_.end()) return 0;
   pendingBuffers_.erase(it);
   return 1;
+}
+
+// ----------------------------------------------------------- host textures
+
+namespace {
+
+// Godot textures hold straight alpha, but a viewport's: its 2D / 3D renders
+// into a transparent background are effectively premultiplied (what
+// CanvasItemMaterial's BLEND_MODE_PREMULT_ALPHA is for).
+int textureFlagsFor(const Ref<Texture2D>& t) {
+  return Object::cast_to<ViewportTexture>(t.ptr()) ? 0 : JSUI_TEXTURE_UNPREMULTIPLIED;
+}
+
+}  // namespace
+
+int JsuiView::set_texture(const String& name, const Ref<Texture2D>& texture, bool live) {
+  if (host_) return host_->set_texture(name, texture, live);
+  if (texture.is_null()) return remove_texture(name);
+  waitRender();  // a queued render-thread job reads textures_
+  const std::string key = toStd(name);
+  auto it = std::find_if(textures_.begin(), textures_.end(), [&](const HostTexture& e) { return e.key == key; });
+  if (it != textures_.end() && it->texture == texture) {
+    if (it->live == live) return 0;
+    it->live = live;
+    it->dirty = true;
+    return 1;
+  }
+  if (it == textures_.end()) {
+    textures_.emplace_back();
+    it = textures_.end() - 1;
+    it->key = key;
+    it->name = name;
+    it->changed = callable_mp(this, &JsuiView::onTextureChanged).bind(name);
+  } else if (it->texture.is_valid() && it->texture->is_connected("changed", it->changed)) {
+    it->texture->disconnect("changed", it->changed);
+  }
+  // Another texture under the same name: its copy goes into the same mirror
+  // when the size and format match (no gap on screen), into a new one if not.
+  it->texture = texture;
+  it->live = live;
+  it->dirty = true;
+  it->flags = textureFlagsFor(texture);
+  it->src = RID();
+  it->src_ok = false;
+  it->cpu_only = false;
+  it->warned = false;
+  // ImageTexture.update() / set_image() emit `changed`: new contents.
+  if (!texture->is_connected("changed", it->changed)) texture->connect("changed", it->changed);
+  return 1;
+}
+
+int JsuiView::remove_texture(const String& name) {
+  if (host_) return host_->remove_texture(name);
+  waitRender();
+  const std::string key = toStd(name);
+  auto it = std::find_if(textures_.begin(), textures_.end(), [&](const HostTexture& e) { return e.key == key; });
+  if (it == textures_.end()) return 0;
+  // The runtime lets go first; the mirrors are freed by the next texture job,
+  // after any frame that sampled them (Godot defers the free past them).
+  if (rt_ && (it->gpu_set || it->pixels_set)) jsui_remove_texture(rt_, key.c_str());
+  if (it->texture.is_valid() && it->texture->is_connected("changed", it->changed)) it->texture->disconnect("changed", it->changed);
+  if (it->cur.valid()) retired_mirrors_.push_back(it->cur);
+  if (it->next.valid()) retired_mirrors_.push_back(it->next);
+  textures_.erase(it);
+  return 1;
+}
+
+int JsuiView::update_texture(const String& name) {
+  if (host_) return host_->update_texture(name);
+  const std::string key = toStd(name);
+  for (HostTexture& e : textures_)
+    if (e.key == key) {
+      e.dirty = true;  // only the main thread reads it
+      return 1;
+    }
+  return -1;
+}
+
+void JsuiView::onTextureChanged(const String& name) {
+  const std::string key = toStd(name);
+  for (HostTexture& e : textures_)
+    if (e.key == key) e.dirty = true;
+}
+
+bool JsuiView::uploadTexturePixels(HostTexture& e) {
+  // ImageTexture: a copy of what the RenderingServer holds (a GPU readback on
+  // Forward+ / Mobile); a ViewportTexture: the viewport's last frame.
+  Ref<Image> img = e.texture->get_image();
+  if (img.is_null() || img->is_empty()) return false;
+  if (img->is_compressed() || img->get_format() != Image::FORMAT_RGBA8) {
+    Ref<Image> copy;
+    copy.instantiate();
+    copy->copy_from(img);  // the original may be the server's own (headless)
+    if (copy->is_compressed() && copy->decompress() != OK) return false;
+    copy->convert(Image::FORMAT_RGBA8);
+    img = copy;
+  }
+  const int w = img->get_width(), h = img->get_height();
+  PackedByteArray data = img->get_data();  // mipmaps follow level 0: not read
+  if (w <= 0 || h <= 0 || data.size() < int64_t(w) * h * 4) return false;
+  return jsui_set_texture_pixels(rt_, e.key.c_str(), data.ptr(), w, h, size_t(w) * 4, e.flags) > 0;
+}
+
+void JsuiView::syncTextures() {
+  if (textures_.empty() && retired_mirrors_.empty()) return;
+  waitRender();  // the last texture work has run (in steady state it has)
+  JsuiRuntime* rt = rt_;
+  if (!rt) return;
+  // GPU copies when the runtime renders on the GPU (one Skia context for all
+  // its views); CPU pixels when any of its views paints with the CPU raster,
+  // which cannot sample GPU textures (but every renderer draws pixels).
+  bool anyCpu = false, anyChosen = false;
+  for (JsuiView* v : surfaces_) {
+    anyCpu = anyCpu || v->renderer_ == Renderer::Cpu;
+    anyChosen = anyChosen || v->renderer_ != Renderer::Unknown;
+  }
+  anyCpu = anyCpu || renderer_ == Renderer::Cpu;
+  anyChosen = anyChosen || renderer_ != Renderer::Unknown;
+  if (!anyChosen && !textures_.empty()) chooseRenderer();  // what the first render would do
+  const TextureMode mode = !anyCpu && renderer_ != Renderer::Cpu && gpu_ ? TextureMode::Gpu : TextureMode::Pixels;
+  if (mode != texture_mode_) {
+    for (HostTexture& e : textures_) {
+      e.pixels_set = false;
+      e.cpu_only = false;
+      e.src = RID();
+      e.src_ok = false;
+      e.dirty = true;
+    }
+    texture_mode_ = mode;
+  }
+  texture_frame_ = Engine::get_singleton()->get_frames_drawn();
+  bool work = !retired_mirrors_.empty();
+  for (HostTexture& e : textures_) {
+    if (e.texture.is_null()) continue;
+    if (mode == TextureMode::Gpu && e.cpu_only && !e.warned) {
+      e.warned = true;
+      e.pixels_set = false;
+      UtilityFunctions::push_warning("JsuiView: texture \"" + e.name + "\" " + String::utf8(e.why.c_str()) +
+                                     ": copying it through the CPU instead (get_image(), slow for live textures)");
+    }
+    if (mode == TextureMode::Pixels || e.cpu_only) {
+      if (e.live || e.dirty || !e.pixels_set) {
+        if (mode == TextureMode::Gpu) {
+          // doTextureWork checks whether the GPU path can take a new source.
+          e.rs = e.texture->get_rid();
+          e.copy = true;
+          work = true;
+        }
+        e.dirty = false;
+        e.pixels_set = uploadTexturePixels(e);
+      }
+      // Pixels replace a GPU copy in the runtime (or nothing does: then it
+      // lets go of it now); the copies go with this frame's texture work.
+      if (e.cur.valid() || e.next.valid()) {
+        if (e.gpu_set && !e.pixels_set) jsui_remove_texture(rt, e.key.c_str());
+        if (e.cur.valid()) retired_mirrors_.push_back(e.cur);
+        if (e.next.valid()) retired_mirrors_.push_back(e.next);
+        e.cur = e.next = TextureMirror{};
+        e.gpu_set = e.shown_pending = false;
+        work = true;
+      }
+      continue;
+    }
+    // A mirror made in an earlier frame: Godot has submitted that frame (its
+    // first copy and layout pass), so the runtime can sample it now. The one
+    // it replaces is freed by this frame's texture work, after every frame
+    // that sampled it.
+    if (e.next.valid() && texture_frame_ > e.next.created_frame) {
+      if (e.cur.valid()) retired_mirrors_.push_back(e.cur);
+      e.cur = e.next;
+      e.next = TextureMirror{};
+      e.gpu_set = false;
+      e.shown_pending = false;
+      work = true;
+    }
+    if (e.cur.valid() && (!e.gpu_set || e.gpu_flags != e.flags)) {
+      JsuiTexture t{};
+      t.kind = gpu_api_ == Renderer::Vulkan  ? JSUI_TEXTURE_VULKAN
+               : gpu_api_ == Renderer::Metal ? JSUI_TEXTURE_METAL
+                                             : JSUI_TEXTURE_WEBGPU;
+      t.handle = e.cur.handle;
+      t.format = e.cur.format;
+      t.width = e.cur.w;
+      t.height = e.cur.h;
+      t.flags = e.flags;
+      t.usage = 0;  // Vulkan: sampled + transfer src / dst, as the mirror is created
+      e.gpu_set = jsui_set_texture(rt, e.key.c_str(), &t) >= 0;
+      e.gpu_flags = e.flags;
+      e.pixels_set = false;
+    } else if (e.gpu_set && e.shown_pending) {
+      jsui_texture_updated(rt, e.key.c_str());  // last frame's copy: repaint the views showing it
+    }
+    e.shown_pending = false;
+    // This frame's copy (recorded into Godot's frame by doTextureWork).
+    e.rs = e.texture->get_rid();
+    e.copy = e.live || e.dirty || (!e.cur.valid() && !e.next.valid());
+    e.dirty = false;
+    work = work || e.copy;
+  }
+  if (!work) return;
+  RenderingServer* rs = RenderingServer::get_singleton();
+  if (!rs || rs->is_on_render_thread()) {
+    doTextureWork();  // RenderingServer on this thread: now
+  } else {
+    texture_work_ = true;  // with the frame job, or a job of its own (queueTextureJob)
+  }
 }
 
 // ------------------------------------------------------------------- input

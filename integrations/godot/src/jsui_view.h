@@ -32,6 +32,13 @@
 // `auto_size` sizes the view to its component's content (its minimum size),
 // for small widgets inside existing Godot UIs.
 //
+// Host textures (set_texture, jsui_set_texture): Godot textures the UI shows
+// with <HostTexture name="..."/> (a VideoStreamPlayer's frames, a SubViewport,
+// any Texture2D). They belong to the runtime (the runtime view keeps them,
+// across restarts). With the GPU renderer each is copied on the GPU into a
+// texture of the view's own, which Skia samples (jsui_gpu_render.cpp); with
+// the CPU renderer its pixels go through get_image().
+//
 // GPU pipeline cache (jsui_gpu_set_pipeline_cache): the runtime's Skia
 // context records every GPU pipeline it creates in the runtime view's
 // `pipeline_cache_path`, with the renderer's name before the extension
@@ -133,6 +140,21 @@ class JsuiView : public godot::Control {
   int set_buffer(const godot::String& key, const godot::Variant& data);
   int remove_buffer(const godot::String& key);
 
+  // Host textures (jsui_set_texture): a Godot Texture2D shown by the UI's
+  // <HostTexture name="..."/> (useHostTexture(name) gives its size), e.g.
+  // VideoStreamPlayer.get_video_texture() or a SubViewport's texture. `live`:
+  // its contents change every frame (a playing video, a viewport that renders
+  // every frame), so the view copies it every frame; otherwise only when the
+  // texture emits `changed` (ImageTexture.update / set_image) or after
+  // update_texture(). Kept across start() / stop() and re-applied to new
+  // runtimes. GPU renderer: copied on the GPU into a texture of the view's
+  // own that Skia samples (jsui_gpu_render.cpp); CPU renderer (and formats
+  // the GPU path cannot take): get_image() -> jsui_set_texture_pixels.
+  // Returns 1 changed, 0 unchanged (a null texture removes it).
+  int set_texture(const godot::String& name, const godot::Ref<godot::Texture2D>& texture, bool live);
+  int remove_texture(const godot::String& name);  // 1 if it existed
+  int update_texture(const godot::String& name);  // new contents: 1, or -1 for an unknown name
+
   // Calls: Host.call() -> call_requested signal -> resolve_call / reject_call;
   // call_ui() -> Host.handle() handler -> callback(ok, result) + ui_call_completed.
   int resolve_call(int64_t id, const godot::Variant& result);
@@ -212,6 +234,18 @@ class JsuiView : public godot::Control {
   JsuiView* runtimeView() { return host_ ? host_ : this; }
   bool renderGpu();
   void releaseGpu();
+  // Host textures (set_texture). On the runtime view. syncTextures (main
+  // thread, before the tick) picks how they reach the runtime (GPU copies or
+  // CPU pixels), adopts GPU copies made in earlier frames and decides this
+  // frame's copies; doTextureWork (render thread, jsui_gpu_render.cpp) makes
+  // them. With a separate render thread the work goes with the runtime's
+  // frame job, or as a job of its own on the same fence (queueTextureJob).
+  void syncTextures();
+  void queueTextureJob();
+  void runTextureJob();
+  void doTextureWork();
+  void releaseTextureGpu();  // frees every GPU copy and the layout pass (blocking)
+  void onTextureChanged(const godot::String& name);
   void runOnRenderThread(const std::function<void()>& job);
   void runRenderJob();
   // The steady-state frame (with a separate render thread): batchFrame adds
@@ -301,6 +335,70 @@ class JsuiView : public godot::Control {
     size_t count;
   };
   std::vector<std::pair<std::string, PendingBuffer>> pendingBuffers_;
+  // Host textures (set_texture), on the runtime view; kept across restarts.
+  // With the GPU renderer each one is copied (RenderingDevice.texture_copy,
+  // recorded into Godot's frame) into a mirror: a RenderingDevice texture of
+  // ours, which is what the runtime samples (jsui_set_texture). Godot thus
+  // keeps doing every barrier, layout and lifetime of its own texture (a
+  // video frame upload, a SubViewport render, an ImageTexture replaced), and
+  // the mirror lives as long as JSUI may use it. A mirror made in frame N is
+  // handed to the runtime in frame N + 1 (adopted), once Godot has submitted
+  // the frame with its first copy; a replaced one is freed after that.
+  struct TextureMirror {
+    godot::RID rd;        // our RenderingDevice texture
+    godot::RID uniforms;  // Vulkan: the layout pass's uniform set for it
+    void* handle = nullptr;
+    unsigned format = 0;  // VkFormat / MTLPixelFormat / 0 (WebGPU: the texture's own)
+    int64_t data_format = 0;  // RenderingDevice::DataFormat
+    int w = 0, h = 0;
+    uint64_t created_frame = 0;
+    bool valid() const { return rd.is_valid(); }
+  };
+  struct HostTexture {
+    std::string key;
+    godot::String name;
+    godot::Ref<godot::Texture2D> texture;
+    godot::Callable changed;  // connected to the texture's `changed`
+    bool live = false;
+    bool dirty = true;      // new contents since they were last taken
+    int flags = 0;          // JSUI_TEXTURE_*
+    bool pixels_set = false;  // the runtime holds CPU pixels of it
+    // GPU copies. The render thread reads `rs` / `copy` and writes the rest
+    // but `cur` (the main thread adopts `next` into it); the main thread
+    // touches them only after waitRender().
+    godot::RID rs;          // the Texture2D's RenderingServer texture
+    bool copy = false;      // copy it this frame (doTextureWork)
+    godot::RID src;         // its RenderingDevice texture, last seen
+    bool src_ok = false;
+    int64_t mirror_format = 0;
+    int src_w = 0, src_h = 0;
+    TextureMirror cur, next;  // cur: what the runtime samples; next: a new one, adopted next frame
+    bool gpu_set = false;     // the runtime holds cur
+    int gpu_flags = 0;        // the flags it was set with
+    bool shown_pending = false;  // a copy into cur the runtime has not been told about
+    bool cpu_only = false;    // the GPU path cannot take it (why): CPU pixels instead
+    std::string why;
+    bool warned = false;
+  };
+  std::vector<HostTexture> textures_;
+  std::vector<TextureMirror> retired_mirrors_;  // freed by the next doTextureWork
+  enum class TextureMode { None, Pixels, Gpu };
+  TextureMode texture_mode_ = TextureMode::None;
+  Renderer gpu_api_ = Renderer::Unknown;  // the API of gpu_
+  bool texture_work_ = false;        // doTextureWork is due (main thread)
+  bool frame_job_textures_ = false;  // the queued frame job does it
+  uint64_t texture_frame_ = 0;       // Engine.get_frames_drawn() of this frame's sync
+  uint64_t texture_job_id_ = 0;
+  // Vulkan: Skia samples a mirror in SHADER_READ_ONLY_OPTIMAL (jsui.h), but
+  // Godot's render graph leaves a copy destination in TRANSFER_DST_OPTIMAL.
+  // After each copy a one-texel compute dispatch samples the mirror, so the
+  // graph moves it to SHADER_READ_ONLY_OPTIMAL itself, in the same frame.
+  struct LayoutPass {
+    godot::RID shader, pipeline, sampler, sink;
+    bool failed = false;
+  };
+  LayoutPass layout_pass_;
+  bool uploadTexturePixels(HostTexture& e);  // CPU pixels of e (get_image)
   JsuiView* host_ = nullptr;             // the runtime view, for a surface view
   std::vector<JsuiView*> surfaces_;      // surface views of this view's runtime
   bool attach_wanted_ = false;           // a surface view that should show its surface
