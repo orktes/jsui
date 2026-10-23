@@ -114,6 +114,19 @@ end?)`, `pause`, `resume`, `reset`). The runtime plays it with Skia's Skottie:
 no JS per frame. `import LottieView from 'lottie-react-native'` works too
 (the CLI aliases it).
 
+Shaders: `<ShaderView source={sksl\`...\`} uniforms={{...}} images={{...}} />`
+paints the view with your own SkSL (Skia runtime effects, on every
+renderer). `uniforms` take numbers, arrays, colors and `Animated` values
+(also inside arrays; they become `uniform:<name>` style keys, so the native
+driver and `Animated.hostBuffer` drive them with no JS per frame). `time`
+(seconds since mount; the view then repaints every frame), `resolution`
+and `pixelRatio` are filled in when declared and not given; `paused` stops
+the clock. `images` gives child shaders (`uniform shader name;`): an image
+source or `{ texture: 'name' }` (a host texture), with `fit` and `tile`. A
+child named `content` that `images` leaves out is the view's own painting,
+for post-processing. `onError` reports compile errors; `compileShader(src)`
+returns `{ error }` or `{ uniforms, children }`.
+
 Focus props on any element: `focusable`, `autoFocus`, `hasTVPreferredFocus`,
 `onFocus`, `onBlur`, `onKeyDown` / `onKeyUp` (RN-web style: `e.key`,
 `e.code`, modifiers), `nextFocusUp/Down/Left/Right`. Pressables are focusable

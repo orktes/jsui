@@ -1009,6 +1009,58 @@ ref.current.play(30, 60); ref.current.pause(); ref.current.resume(); ref.current
   about 360 KB to `jsui.wasm` (~90 KB brotli; ~136 KB brotli on the m157
   WebGPU build). Off, sources fail with an error and nothing is linked.
 
+### Shaders (ShaderView)
+
+Your own SkSL (Skia runtime effects, https://skia.org/docs/user/sksl/)
+paints a view, on every renderer (the CPU raster runs SkSL too):
+
+```jsx
+<ShaderView source={sksl`...`} uniforms={{ glow: anim, tint: '#7cf', center: [x, y] }}
+            images={{ image: require('./card.png'), video: { texture: 'trailer', fit: 'contain' } }}
+            paused={false} onError={(e) => console.warn(e.nativeEvent.error)} style={...}>
+  {children}
+</ShaderView>
+```
+
+* `ShaderView` is a host node (`NodeType::Shader`, render/shader_view.h).
+  `ShaderEffects` (on the Runtime, `Document::shaders`) compiles each
+  distinct source once (`SkRuntimeEffect::MakeForShader`) and shares it.
+* Uniforms, per frame: style key `uniform:<name>` (whole value), then the
+  `uniforms` prop, then the built-ins `time` (float, seconds since the view
+  mounted, frozen while `paused`), `resolution` (float2, px) and
+  `pixelRatio`; `uniform:<name>.<i>` style keys override single components.
+  Values flatten numbers / arrays / booleans / colors (unpremultiplied
+  r, g, b, a in 0..1; `layout(color)` uniforms are converted to the working
+  color space by Skia); int uniforms round. The `uniform:` keys are a
+  paint-only style group (`kGroupShader`), so Animated (JS or native
+  driver, `Animated.hostBuffer`) writes them through patchStyle with no
+  relayout; @orktes/jsui-react's ShaderView turns Animated uniforms into
+  them (one key per animated component of an array).
+* Clock: a view whose shader declares `uniform float time` and does not
+  get it from the app is repainted by `ShaderEffects::tick` every tick
+  (`wantsFrame`), like a playing LottieView; only its own rect is damaged.
+* Children (`uniform shader name;`): `images[name]` (`{uri}`, `{texture}`
+  for a host texture, `fit`: cover / contain / stretch / center / none /
+  repeat, `tile`: clamp / repeat / mirror / decal), mapped onto the view
+  like an Image so `name.eval(p)` samples it at view position `p`. Image
+  loads repaint through `ImageCache::generation`; host textures register
+  the view as a user (new frames repaint it). Missing children are
+  transparent.
+* Fill (default): drawn into the padding box after the background and
+  borders, before children; coordinates start at the padding box's
+  top-left. Content: a shader declaring `uniform shader content` (not given
+  in `images`) runs as an `SkImageFilters::RuntimeShader` on the view's
+  layer, so its background and children are its input (coordinates from the
+  border box, clipped to its rounded border box, sample radius = the whole
+  view). A change anywhere in that subtree damages the whole view.
+* Errors: a source that fails to compile paints nothing; the view gets one
+  `error` event (`onError`, `nativeEvent.error` = Skia's message).
+  `__jsui_native.shaderInfo(src)` compiles synchronously and returns
+  `{error}` or `{uniforms: [{name, type, count, color}], children}`.
+* Cost: SkSL compilation and SkRuntimeEffect were already linked (Skottie
+  and the GPU backends use them), so ShaderView adds almost nothing to
+  `jsui.wasm`.
+
 ## JS bridge contract
 
 Native globals (installed by `JsEngine`):
@@ -1017,7 +1069,7 @@ Native globals (installed by `JsEngine`):
 | --- | --- |
 | `__jsui_native.rootId` | id of the root container node |
 | `__jsui_native.devMode` | `true` when the runtime runs with `cfg.dev_mode` |
-| `createNode(type, rootTag?) → id` | `type` ∈ `View`, `Text`, `RawText`, `Image`, `ScrollView`, `TextInput`, `LottieView`; created in the document of surface `rootTag` (default: the main one; see "Surfaces") |
+| `createNode(type, rootTag?) → id` | `type` ∈ `View`, `Text`, `RawText`, `Image`, `ScrollView`, `TextInput`, `LottieView`, `ShaderView`; created in the document of surface `rootTag` (default: the main one; see "Surfaces") |
 | `viewport(rootTag?) → {width, height, scale}` | logical size of a surface (default: the main one) |
 | `surfaceApp(rootTag) → {appKey, initialProps} \| null` | the app the host picked for a surface |
 | `setProps(id, props)` | replaces all props; `props.style` is a **flattened** style object; functions are dropped; `props.__events` lists event names the element listens to (e.g. `["press","pointerMove","layout"]`) |
@@ -1033,6 +1085,7 @@ Native globals (installed by `JsEngine`):
 | `flashScrollIndicators(id)` | shows a ScrollView's overlay indicators for ~1 s |
 | `lottieData(json) → key` | hands an inline Lottie composition to native once; LottieViews use the key (content hash) as their `source`. `lottie`: `true` when the build plays Lottie |
 | `lottieCommand(id, cmd, a, b) → bool` | LottieView `play` (frames `a`–`b`, undefined: the whole composition) / `pause` / `resume` / `reset` |
+| `shaderInfo(sksl) → {error} \| {uniforms, children}` | compiles a ShaderView source (shared with the views using it) |
 | `postMessage(name, json)` | to the embedder's `on_message`. A string is passed through as the JSON text; any other value is `JSON.stringify`-ed |
 | `getState(key) → json \| undefined`, `stateVersion(key) → number`, `stateKeys() → [key]` | shared host state (see "Game data"); version 0 = unset |
 | `statePatches(key, sinceVersion) → [json] \| undefined` | the merge patches (JSON texts) that took `key` from `sinceVersion` to its current version, oldest first; `undefined` when the bounded log (64 patches / 64 KB since the last `set`) cannot cover the gap. `@orktes/jsui-react` applies them to its cached value instead of re-parsing the whole state after each `jsui_patch_state` |
