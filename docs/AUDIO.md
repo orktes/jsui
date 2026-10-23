@@ -1,0 +1,121 @@
+# Audio
+
+JSUI plays UI sounds (hover, focus moves, press, confirm / back), music and
+ambience that the UI asks for. Like [host textures](ARCHITECTURE.md#host-textures),
+playback belongs to the host: the runtime does not mix audio itself, it hands
+every request to an **audio handler**. A game engine implements the handler
+with its own mixer, so UI sounds go through the game's buses, follow its
+volume settings and effects, and pause with it. Hosts that do not care get a
+**default implementation**:
+
+| Host | Who plays the sounds |
+| --- | --- |
+| Native library, no handler (jsui-viewer, simple embedders) | Built-in backend: [miniaudio](https://miniaud.io), CMake option `JSUI_AUDIO` (ON by default on desktop) |
+| Browser (`@orktes/jsui-web`) | Web Audio, in `web/jsui-audio.js` |
+| Godot (`JsuiView`) | `AudioStreamPlayer`s on Godot's audio buses |
+| Any engine | Your `JsuiConfig.on_audio` handler |
+| Headless tools, tests | Nobody: `JsuiConfig.audio_disabled = 1` |
+
+## In the UI (React)
+
+```jsx
+import { Pressable } from 'react-native';
+import { Sound, useSound, useMusic, UISounds } from '@orktes/jsui-react';
+import confirm from './sounds/confirm.wav';   // the bundler emits it next to the bundle
+import tick from './sounds/tick.wav';
+import menuMusic from './music/menu.ogg';
+
+// Interaction sounds for every pressable element inside (an element's own
+// `sounds` prop overrides per event; sounds={false} mutes one element).
+<UISounds sounds={{ hoverIn: tick, focus: tick, press: confirm }} volume={0.8}>
+  <Pressable onPress={start}>...</Pressable>
+  <Pressable onPress={quit} sounds={{ press: { source: back, volume: 0.6 } }}>...</Pressable>
+</UISounds>
+
+// Music while the screen is mounted; a new source crossfades.
+useMusic(menuMusic, { volume: 0.7, fadeIn: 1500, fadeOut: 800 });
+
+// Sounds from code.
+const click = useSound(confirm, { bus: 'ui' });  // preloaded on mount; click() plays it
+const voice = Sound.play(explosion, { bus: 'sfx', volume: 0.9, pitch: 1.1, pan: -0.3 });
+voice.setVolume(0.2, { fade: 300 });
+voice.stop({ fade: 500 });
+const { reason } = await voice.ended;            // 'finished' | 'stopped' | 'failed'
+
+// Settings screens: the UI's own per-bus volume (multiplies its voices).
+Sound.setBusVolume('music', 0.5, { fade: 200 });
+Sound.setBusMuted('ui', true);
+await Sound.preload(bossTheme);                  // -> { duration } (seconds, or null)
+```
+
+* **Sources** are URLs (relative ones resolve against the bundle URL) or
+  `{ uri }`. Imported `.wav`, `.ogg`, `.mp3`, `.flac`, `.opus`, `.m4a`
+  files evaluate to their URL. Which formats play depends on the host: the
+  built-in backend decodes WAV, FLAC, MP3 and Ogg Vorbis; browsers decode
+  what their Web Audio decodes (WAV, MP3, Ogg Vorbis / Opus except older
+  Safari, AAC); Godot loads WAV, Ogg Vorbis and MP3.
+* **Buses** are names: `'ui'` (UISounds / Pressable sounds), `'sfx'`
+  (`Sound.play` default), `'music'` (`useMusic` default), or any other.
+  Engines map them to their own buses.
+* **Interaction events** (`sounds` / `UISounds`): `hoverIn` (mouse or pen
+  enters; not touch), `focus` (keyboard or gamepad navigation moved focus
+  here from another element; not clicks, not the first focus of a screen),
+  `pressIn`, `press` (the press activated: onPress), `longPress`. Each entry
+  is a source or `{ source, volume, pitch, bus }`. `UISounds` defaults apply
+  only to elements that do something when pressed (`onPress`, `onPressIn`,
+  `onLongPress`); an element's own `sounds` prop always applies.
+  `useUISound()` plays them from custom widgets (sliders, carousels, tabs).
+* `useMusic(source, { volume, bus, loop, fadeIn, fadeOut, pitch, paused })`
+  loops by default; changing `volume` ramps (250 ms, `volumeFade`), `paused`
+  pauses and resumes, `null` fades out.
+* A reload (dev mode, `jsui_reload`) stops every voice.
+
+## The host contract (C API)
+
+See the "Audio" section of [`include/jsui/jsui.h`](../include/jsui/jsui.h).
+The runtime calls `JsuiConfig.on_audio(user, const JsuiAudioCommand*)`
+synchronously on its thread:
+
+| `op` | Fields | Meaning |
+| --- | --- | --- |
+| `JSUI_AUDIO_PRELOAD` | `sound` | Load / decode ahead; answer with `jsui_audio_sound_loaded(rt, sound, ok, duration_s)` |
+| `JSUI_AUDIO_UNLOAD` | `sound` | No longer needed (playing voices may finish) |
+| `JSUI_AUDIO_PLAY` | `voice`, `sound`, `bus`, `volume`, `pitch`, `pan`, `loop`, `fade_ms` (fade in), `offset_s` | Start a voice |
+| `JSUI_AUDIO_STOP` | `voice`, `fade_ms` | Fade out, then stop |
+| `JSUI_AUDIO_PAUSE` / `_RESUME` | `voice` | |
+| `JSUI_AUDIO_SET` | `voice`, `volume`, `pitch`, `pan`, `fade_ms` | Ramp to new values |
+| `JSUI_AUDIO_BUS` | `bus`, `volume`, `muted`, `fade_ms` | The UI's volume for a group (buses start at 1, unmuted) |
+| `JSUI_AUDIO_STOP_ALL` | `bus` (NULL: all), `fade_ms` | Also sent when the JS context goes away |
+
+* `sound` is an absolute URL. Load it however the engine likes (a `res://`
+  bundle gives `res://` sounds), or read the bytes with
+  `jsui_fetch(rt, url, done, user)`, which goes through the runtime's loader
+  (dev server, files, a custom `JsuiLoadFn`).
+* Every `PLAY` must end with exactly one
+  `jsui_audio_voice_ended(rt, voice, status)`: `JSUI_AUDIO_FINISHED` (played
+  to the end), `JSUI_AUDIO_STOPPED` (`STOP` / `STOP_ALL`), or
+  `JSUI_AUDIO_FAILED` (could not load or play). It may be called from inside
+  the handler; JS hears about it in the next `jsui_tick()`. Looping voices
+  end only when stopped.
+* Volumes are linear gains, `pitch` is the playback rate (1 = normal),
+  `pan` is -1 (left) to 1 (right).
+* Keep the engine's own bus volumes separate from `JSUI_AUDIO_BUS`: the
+  player's settings stay the game's; the UI's bus volume multiplies on top.
+
+A handler sketch:
+
+```c
+static void on_audio(void* user, const JsuiAudioCommand* c) {
+    GameAudio* audio = user;
+    switch (c->op) {
+    case JSUI_AUDIO_PLAY:
+        game_audio_play(audio, c->voice, c->sound, c->bus, c->volume, c->pitch, c->loop);
+        break;  /* game_audio calls jsui_audio_voice_ended(rt, voice, ...) when it ends */
+    case JSUI_AUDIO_STOP: game_audio_stop(audio, c->voice, c->fade_ms); break;
+    /* ... */
+    default: break;
+    }
+}
+cfg.on_audio = on_audio;
+cfg.audio_user = &game_audio;
+```

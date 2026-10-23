@@ -68,6 +68,7 @@ library with a C API, and the same core compiles to WebAssembly.
 | `src/js/` | QuickJS host (`JsEngine`) and bridge globals |
 | `src/input/` | Hit testing, event routing, focus and gamepad navigation |
 | `src/platform/` | Resource loader backends (file, http, emscripten) |
+| `src/audio/` | UI audio: requests to the host's audio handler or the built-in miniaudio backend (see [AUDIO.md](AUDIO.md)) |
 | `src/net/` | Minimal HTTP/1.1 client for dev servers (native) |
 | `src/runtime.*`, `src/capi.cpp` | Runtime object and C API wrappers |
 | `tools/jsui-render` | Headless renderer: bundle → PNG (tests, CI) |
