@@ -114,6 +114,8 @@ export const SUPPORTED_STYLES = new Set([
   'shadowColor',
   'textShadowColor',
   'textDecorationColor',
+  // LottieView's progress (packages/react/src/lottie.js).
+  'lottieProgress',
 ]);
 
 export const SUPPORTED_TRANSFORMS = new Set([

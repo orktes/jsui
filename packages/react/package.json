@@ -31,6 +31,7 @@
   "exports": {
     ".": "./src/index.js",
     "./shims/*": "./src/shims/*.js",
+    "./lottie": "./src/lottie.js",
     "./package.json": "./package.json"
   },
   "files": [
