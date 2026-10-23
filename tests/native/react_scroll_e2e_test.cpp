@@ -130,6 +130,29 @@ TEST(react_e2e_scroll) {
   jsui_send_key(t.rt, "Home", "Home", 0, 0, 0);
   t.settle();
   CHECK_EQ(t.lastScroll(), std::string("0"));
+  t.take();
+
+  // A vertical drag on a PanResponder inside a ScrollView stays with the
+  // PanResponder (onShouldBlockNativeResponder defaults to true, like RN).
+  jsui_send_touch(t.rt, 1, 0, 100, 150);
+  for (float y : {140.f, 125.f, 110.f}) {
+    t.tick(16);
+    jsui_send_touch(t.rt, 1, 1, 100, y);
+  }
+  jsui_send_touch(t.rt, 1, 2, 100, 110);
+  t.settle();
+  CHECK_EQ(t.take(), std::string("pan=-40"));
+
+  // A responder that does not block native gestures is asked, agrees, and is
+  // terminated when the ScrollView starts dragging.
+  jsui_send_touch(t.rt, 2, 0, 100, 250);
+  for (float y : {240.f, 225.f, 210.f}) {
+    t.tick(16);
+    jsui_send_touch(t.rt, 2, 1, 100, y);
+  }
+  jsui_send_touch(t.rt, 2, 2, 100, 210);
+  t.settle();
+  CHECK_EQ(t.take(), std::string("politeterm=0 outerbegin=0"));
 
   CHECK(jsui_last_error(t.rt) == nullptr);
 }

@@ -47,7 +47,9 @@ class JsEngine {
   bool hasPendingWork(double nowMs) const;
 
   // Native -> JS. Returns the bitmask from __jsui_dispatchEvent.
-  enum DispatchFlags { kHandled = 1, kDefaultPrevented = 2 };
+  // kResponder: a JS responder holds the gesture; kBlocksNative: and it
+  // blocks native ones (ScrollView touch drags), RN's blockNativeResponder.
+  enum DispatchFlags { kHandled = 1, kDefaultPrevented = 2, kBlocksNative = 4, kResponder = 8 };
   int dispatchEvent(const Value& event);
   void hostMessage(const std::string& name, const std::string& json);
   void layoutEvent(uint32_t id, float x, float y, float w, float h);

@@ -602,7 +602,8 @@ with the stack. `onLayout` events raised while JS is on the stack (e.g. by
 Callbacks the bundle installs (all optional):
 
 * `__jsui_dispatchEvent(event) → number` — native → JS event. Bitmask: `1` a
-  handler ran, `2` `preventDefault()` was called.
+  handler ran, `2` `preventDefault()` was called, `8` a JS responder holds the
+  gesture, `4` and it blocks native gestures.
 * `__jsui_onHostMessage(name, json)` — from `jsui_post_message`.
 * `__jsui_onHostState(keys)` — shared-state keys the embedder changed, once per tick.
 * `__jsui_onCall(id, name, json)` — `jsui_call_ui`; answer with `callResult`.
@@ -667,6 +668,14 @@ was `preventDefault()`-ed.
   default prevented (a boolean `true` is treated as `3` for compatibility).
   A JS Pressable that handles Enter/Space/A itself prevents the default so no
   extra `click` follows. Exception: focus-on-press always happens.
+* **Touch drags vs. ScrollView** follow React Native's host responder rules.
+  A drag past the slop inside a ScrollView starts scrolling (the target gets
+  `pointercancel`) unless a JS responder holds the touch and either blocks
+  native gestures (its `onResponderGrant` returned `true`; PanResponder's
+  `onShouldBlockNativeResponder`, default `true`) or refuses the
+  `responderterminationrequest` native sends first
+  (`onResponderTerminationRequest` → `false`). `preventDefault()` on
+  `pointermove` keeps the touch too, like `touch-action: none`.
 * **`__events` drives native decisions.** Names are matched case-insensitively
   by substring: `press`/`click` = pressable (focusable by default, `pointer`
   cursor); `move`/`responder`/`pan`/`drag` = wants `pointermove` (moves are not

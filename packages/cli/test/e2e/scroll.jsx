@@ -2,10 +2,23 @@
 // touch / wheel / gamepad scrolling -> @jsui/react ScrollView events -> host
 // messages back to C.
 import React, { useRef } from 'react';
-import { AppRegistry, View, Text, ScrollView } from 'react-native';
+import { AppRegistry, View, Text, ScrollView, PanResponder } from 'react-native';
 import { Host, useHostMessage } from '@jsui/react';
 
 const rows = Array.from({ length: 20 }, (_, i) => i);
+
+// Gesture negotiation below the list: a PanResponder (blocks native gestures
+// by default) and a responder that lets the ScrollView take over.
+const pan = PanResponder.create({
+  onStartShouldSetPanResponder: () => true,
+  onPanResponderRelease: (e, g) => Host.postMessage('pan', Math.round(g.dy)),
+  onPanResponderTerminate: () => Host.postMessage('panterm', 0),
+});
+const polite = PanResponder.create({
+  onStartShouldSetPanResponder: () => true,
+  onShouldBlockNativeResponder: () => false,
+  onPanResponderTerminate: () => Host.postMessage('politeterm', 0),
+});
 
 function App() {
   const ref = useRef(null);
@@ -30,6 +43,11 @@ function App() {
         {rows.map((i) => (
           <View key={i} style={{ height: 50, backgroundColor: i % 2 ? '#334466' : '#446688' }} />
         ))}
+      </ScrollView>
+      <ScrollView style={{ height: 200, flexGrow: 0 }} onScrollBeginDrag={(e) => Host.postMessage('outerbegin', Math.round(e.nativeEvent.contentOffset.y))}>
+        <View {...pan.panHandlers} style={{ height: 100 }} />
+        <View {...polite.panHandlers} style={{ height: 100 }} />
+        <View style={{ height: 400 }} />
       </ScrollView>
     </View>
   );

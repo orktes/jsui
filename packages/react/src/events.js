@@ -151,14 +151,24 @@ let pendingError = null;
 function call(fn, inst, syn) {
   syn.currentTarget = inst.id;
   try {
-    fn(syn);
+    return fn(syn);
   } catch (e) {
     if (!pendingError) pendingError = e;
+    return undefined;
   }
 }
 
 // --- responder system (subset of RN's ResponderEventPlugin) ---------------
+//
+// Native gestures (a ScrollView's touch drag) negotiate with it like RN's
+// host responders: while the responder's onResponderGrant returned true
+// (PanResponder: onShouldBlockNativeResponder, default true) native never
+// takes the gesture over. Otherwise native asks first with a
+// 'responderterminationrequest' event, which the responder can refuse with
+// onResponderTerminationRequest returning false; if it agrees, native sends
+// pointercancel and the responder gets onResponderTerminate.
 let responder = null;  // HostInstance holding the responder
+let blockNative = false;  // its onResponderGrant returned true
 
 function pathOf(inst) {
   const path = [];
@@ -202,7 +212,7 @@ function grant(inst, syn) {
   }
   responder = inst;
   const gr = inst.props.onResponderGrant;
-  if (gr) call(gr, inst, syn);
+  blockNative = !!gr && call(gr, inst, syn) === true;
   const st = inst.props.onResponderStart;
   if (st) call(st, inst, syn);
   return true;
@@ -211,6 +221,7 @@ function grant(inst, syn) {
 function handleResponder(type, path, syn) {
   let ran = false;
   if (responder && !instances.has(responder.id)) responder = null;
+  if (!responder) blockNative = false;
   if (type === 'pointerdown') {
     const inst = negotiate(path, 'onStartShouldSetResponder', syn);
     if (inst && inst !== responder) ran = grant(inst, syn) || ran;
@@ -232,6 +243,7 @@ function handleResponder(type, path, syn) {
     if (responder) {
       const r = responder;
       responder = null;
+      blockNative = false;
       const end = r.props.onResponderEnd;
       if (end) call(end, r, syn);
       const f = type === 'pointerup' ? r.props.onResponderRelease : r.props.onResponderTerminate;
@@ -242,13 +254,27 @@ function handleResponder(type, path, syn) {
   return ran;
 }
 
+// Native wants the current gesture (a ScrollView starting to drag). Returns
+// true when the responder refuses to let it go.
+function refuseTermination(ev) {
+  if (responder && !instances.has(responder.id)) responder = null;
+  if (!responder) return false;
+  if (blockNative) return true;
+  const req = responder.props.onResponderTerminationRequest;
+  if (!req) return false;
+  const syn = new SyntheticEvent('pointermove', ev, responder.id);
+  return !call2(req, responder, syn);
+}
+
 // --- dispatch --------------------------------------------------------------
 
 /**
  * Entry point installed as globalThis.__jsui_dispatchEvent. Returns a
  * bitmask: 1 = at least one handler ran, 2 = preventDefault() was called
  * (native then skips its default action: click synthesis, focus moves,
- * scrolling, ...). 0 = nobody cared.
+ * scrolling, ...), 8 = a responder holds the gesture, 4 = and it blocks
+ * native gestures (scrolling). 0 = nobody cared. For 'responderterminationrequest'
+ * 2 means the responder refused to give the gesture up.
  */
 export function dispatchEvent(ev) {
   if (!ev || typeof ev !== 'object') return 0;
@@ -256,6 +282,21 @@ export function dispatchEvent(ev) {
   if (type === 'resize') {
     emitGlobal('resize', ev);
     return 1;
+  }
+  if (type === 'responderterminationrequest') {
+    let refused = false;
+    const prev = setUpdatePriority(DiscreteEventPriority);
+    try {
+      reconciler.batchedUpdates(() => (refused = refuseTermination(ev)), null);
+    } finally {
+      setUpdatePriority(prev);
+    }
+    if (pendingError) {
+      const e = pendingError;
+      pendingError = null;
+      throw e;
+    }
+    return refused ? 3 : 0;
   }
   const info = TYPES[type];
   const target = instances.get(ev.target);
@@ -300,7 +341,7 @@ export function dispatchEvent(ev) {
     pendingError = null;
     throw e;
   }
-  return (ran ? 1 : 0) | (syn.defaultPrevented ? 2 : 0);
+  return (ran ? 1 : 0) | (syn.defaultPrevented ? 2 : 0) | (responder ? (blockNative ? 12 : 8) : 0);
 }
 
 // --- layout ----------------------------------------------------------------

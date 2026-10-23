@@ -175,6 +175,8 @@ class InputManager {
     uint32_t downId = 0;      // primary-button down target (click rule)
     uint32_t scrollingId = 0; // touch drag scrolling this ScrollView
     bool dragStarted = false; // scrollbegindrag sent for scrollingId
+    bool jsOwns = false;      // a JS responder kept this gesture: no native scrolling
+    bool jsResponder = false; // a JS responder held it at the last dispatch
     std::vector<uint32_t> chain;  // hovered path, root first
   };
   struct Repeat {
@@ -224,8 +226,12 @@ class InputManager {
   bool visible(const Node* n) const;  // attached and no display:none on the path
   Affine localToViewport(const Node* n) const;
 
-  // Returns true when JS called preventDefault().
+  // Returns true when JS called preventDefault(). The full JsEngine flags
+  // land in lastFlags_.
   bool dispatch(Value::Object&& ev);
+  // Asks the JS responder (if any) to let a native gesture take the touch
+  // over; false when it refuses (RN onResponderTerminationRequest).
+  bool jsReleasesGesture(const PointerState& p, Node* target);
   Value::Object baseEvent(const char* type, const Node* target) const;
   bool dispatchPointer(const char* type, Node* target, const PointerState& p, int button, float x, float y);
   void updateHover(PointerState& p, Node* hit);
@@ -321,6 +327,7 @@ class InputManager {
   std::unordered_map<uint32_t, ScrollState> scrolls_;
   double lastTick_ = -1;
   double eventTime_ = std::numeric_limits<double>::quiet_NaN();
+  int lastFlags_ = 0;
   mutable double lastEventTime_ = -std::numeric_limits<double>::infinity();
   bool pointerFocus_ = false;  // focus change caused by a press: no scroll into view
 
