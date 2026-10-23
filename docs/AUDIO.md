@@ -167,3 +167,80 @@ jsui-viewer uses it; jsui-render, jsui-record and the benchmarks set
   690 KB. miniaudio is built without
   its resource manager, encoders and generators (`MA_NO_RESOURCE_MANAGER`,
   `MA_NO_ENCODING`, `MA_NO_GENERATION`).
+
+## Web (Web Audio)
+
+In the browser, `@orktes/jsui-web` plays the commands itself with Web Audio
+(`web/jsui-audio.js`); `web/native/jsui_web.cpp` sets `JsuiConfig.on_audio`
+to a trampoline that hands each command to the page's host object.
+
+```
+AudioBufferSourceNode (pitch = playbackRate, loop, offset)
+  -> GainNode (voice volume, fades) -> StereoPannerNode (pan)
+  -> GainNode per bus (Sound.setBusVolume / setBusMuted)
+  -> GainNode master (jsui.audio.setVolume / muted) -> AudioContext.destination
+```
+
+* **One `AudioContext` per page**, shared by every runtime on it and closed
+  when the last one is destroyed. Each runtime has its own master and bus
+  gains. Decoded sounds are cached per page by URL (`fetch` +
+  `decodeAudioData`, one load however many voices ask); `UNLOAD` drops the
+  cache entry (playing voices keep their buffer).
+* **Long files stream**: when a sound's `Content-Length` is over 2 MiB
+  (`audio: { streamBytes }`), it is not decoded into memory (minutes of
+  music would be hundreds of MB of PCM) but played through an `<audio>`
+  element and a `MediaElementAudioSourceNode`, with the same gain / pan /
+  bus chain.
+* Fades and volume changes are `AudioParam` ramps (`linearRampToValueAtTime`;
+  instant changes use a 4 ms `setTargetAtTime` so they do not click). `PAUSE`
+  remembers the position and `RESUME` starts a new source there, with 12 ms
+  fades either side.
+* **Autoplay policy**: browsers allow sound only after a user gesture. The
+  host creates (or resumes) the context inside the first `pointerdown`,
+  `pointerup`, `mousedown`, `keydown`, `touchend` or `click` on the page,
+  and resumes it when the page becomes visible again (a page that already
+  had a gesture starts at once). Until audio is unlocked:
+  * one-shot voices (UI sounds, effects) are **dropped and end `FAILED`**
+    (`Sound.play(...).ended` resolves `{ reason: 'failed' }`), so nothing
+    plays late or piles up. Sounds triggered within 400 ms of the unlocking
+    gesture wait for the context instead (the press sound of the click that
+    unlocked audio plays);
+  * looping voices (`useMusic`) wait and start, with their fade-in, once
+    audio unlocks; their file is fetched only then;
+  * `PRELOAD` decodes at once (with an `OfflineAudioContext`), so UI sounds
+    are ready for the first gesture.
+* **Gamepads do not unlock audio**: no browser counts gamepad input as a
+  user activation. A controller-only player hears nothing until they click,
+  tap or press a key; show a hint ("Press any key / click to enable sound")
+  and call `jsui.audio.unlock()` from gesture handlers of your own.
+* Reports (`jsui_audio_voice_ended`, `jsui_audio_sound_loaded`) are queued
+  and delivered in a microtask, never from inside `on_audio`. Voice ids
+  cross into JS as doubles (`jsui_web_audio_voice_ended(rt, double, status)`).
+* Without Web Audio (Node: `@orktes/jsui-cli` screenshot / inspect / run)
+  the runtime is created with `audio_disabled`: voices end `failed`, preloads
+  reject, nothing throws.
+
+Page API (`createJsui()` returns the host):
+
+```js
+jsui.audio.unlocked                         // can sound play now?
+jsui.on('audiounlock', () => ...)           // it can (again: also after an iOS interruption)
+jsui.audio.unlock()                         // call from a gesture handler of your own
+jsui.audio.setVolume(0.5, { fade: 300 })    // master volume of this runtime
+jsui.audio.muted = true
+jsui.audio.context                          // the AudioContext, or null before the first gesture
+jsui.audio.stats                            // { voices, playing, waiting, sounds }
+
+createJsui({ ..., audio: false })                         // silence (audio_disabled)
+createJsui({ ..., audio: { context: gameAudioContext } }) // play into the game's own context (not closed)
+createJsui({ ..., audio: (cmd, audio) => { ... } })       // your own player, like JsuiConfig.on_audio:
+// cmd = { op, voice, sound, bus, volume, pitch, pan, fadeMs, offset, loop, muted } (AudioOp from
+// '@orktes/jsui-web'); report with audio.voiceEnded(voice, AudioStatus.*) and
+// audio.soundLoaded(url, ok, durationSeconds).
+```
+
+The showcase site (`site/`) uses all of it: a `<UISounds>` set around the
+whole app, menu music that crossfades between game screens, live mix sliders
+on the Settings screen, and a sound switch in the nav bar that reads "Enable
+sound" until the browser unlocks audio. Its sounds and music loops are
+synthesized by `site/scripts/gen-ui-sounds.mjs` (CC0).

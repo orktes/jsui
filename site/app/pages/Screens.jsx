@@ -7,11 +7,17 @@
 // the screen returns to the selector. [ and ] switch screens anywhere; LB / RB
 // switch while focus is outside the screen (inside, they belong to the game).
 import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
-import { Animated, Easing, Pressable, ScrollView, StyleSheet, Text, View, useGamepad } from 'react-native';
+import { Animated, Easing, Pressable, ScrollView, StyleSheet, Text, View, useGamepad, useMusic } from 'react-native';
 import { Button, Column, Eyebrow, GITHUB, Key, Reveal, Stage, useLayout } from '../components/ui.jsx';
 import { colors, font, site, text } from '../theme.js';
 import { useRouter } from '../router.js';
 import { SCREENS, screenById } from '../screens/index.js';
+import { MUSIC, playUI } from '../sound.js';
+
+// Music per screen (site/app/sound.js): the menu theme carries on between the
+// main menu and its settings, the Rift has its own; switching crossfades, and
+// the other screens fade it out.
+const SCREEN_MUSIC = { 'main-menu': MUSIC.menu, settings: MUSIC.menu, rift: MUSIC.rift };
 
 const SIDE_W = 360;
 const GAP = 24;
@@ -77,6 +83,7 @@ function LiveStage({ id, width, mountKey, onEscape, padInside, onShown }) {
 
   useEffect(() => {
     if (id === shown.id) return;
+    playUI('swipe', { volume: 0.55 });
     const dir = SCREENS.findIndex((s) => s.id === id) > SCREENS.findIndex((s) => s.id === shown.id) ? 1 : -1;
     setLeaving(dir);
     Animated.timing(t, { toValue: 0, duration: 170, easing: Easing.in(Easing.quad), useNativeDriver: true }).start(({ finished }) => {
@@ -98,6 +105,7 @@ function LiveStage({ id, width, mountKey, onEscape, padInside, onShown }) {
         if (e.key === 'Escape') {
           e.preventDefault();
           e.stopPropagation();
+          playUI('back');
           onEscape();
         }
       }}
@@ -106,6 +114,7 @@ function LiveStage({ id, width, mountKey, onEscape, padInside, onShown }) {
         if (e.pressed && e.buttonIndex === 1) {
           e.preventDefault();
           e.stopPropagation();
+          playUI('back');
           onEscape();
         }
       }}
@@ -145,6 +154,7 @@ export function ScreensPage({ params = [] }) {
   const strip = useRef(null);
   const padInside = useRef(false);
   const [mountKey, setMountKey] = useState(0);
+  useMusic(SCREEN_MUSIC[id] || null, { volume: 0.85, fadeIn: 1800, fadeOut: 1000 });
 
   // A switch made from outside the stage keeps focus on the selector: the
   // newly selected card takes it once the new screen is mounted (otherwise

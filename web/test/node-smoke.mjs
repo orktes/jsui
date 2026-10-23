@@ -28,7 +28,7 @@ function frame(rt, w, h) {
 
 // 1. bundle from source
 {
-  const rt = M._jsui_web_create(0, 320, 200, 1, 0, 0);
+  const rt = M._jsui_web_create(0, 320, 200, 1, 0, 0, 0);
   const src = fs.readFileSync(path.join(WEB, 'test/fixtures/bands.js'), 'utf8');
   const n = M.lengthBytesUTF8(src);
   const p = str(src), name = str('bands.js');
@@ -63,7 +63,7 @@ function frame(rt, w, h) {
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${server.address().port}/app/index.html`;
   const baseP = str(base);
-  const rt = M._jsui_web_create(0, 320, 200, 1, 0, baseP);
+  const rt = M._jsui_web_create(0, 320, 200, 1, 0, baseP, 0);
   const url = str('../fixtures/solid.js');  // relative to the base URL
   M._jsui_load_bundle_url(rt, url);
   M._free(url);
@@ -77,7 +77,7 @@ function frame(rt, w, h) {
   const at = frame(rt, 320, 200);
   check(JSON.stringify(at(10, 50)) === '[0,128,128,255]', `fetched bundle rendered ${at(10, 50)}`);
 
-  const rt2 = M._jsui_web_create(0, 100, 100, 1, 0, baseP);
+  const rt2 = M._jsui_web_create(0, 100, 100, 1, 0, baseP, 0);
   const missing = str('nope.js');
   M._jsui_load_bundle_url(rt2, missing);
   M._free(missing);
@@ -91,7 +91,7 @@ function frame(rt, w, h) {
   check(err && err.includes('404') && err.includes('/app/nope.js'), `404 reported: ${err}`);
 
   // Destroy with a request in flight: the late response must be dropped safely.
-  const rt3 = M._jsui_web_create(0, 100, 100, 1, 0, baseP);
+  const rt3 = M._jsui_web_create(0, 100, 100, 1, 0, baseP, 0);
   const u3 = str('../fixtures/solid.js');
   M._jsui_load_bundle_url(rt3, u3);
   M._free(u3);
@@ -103,7 +103,7 @@ function frame(rt, w, h) {
   // fetch() from JS through the browser loader: method, request/response headers, body, status.
   const got = [];
   (M.__jsuiHosts ??= new Map()).set(7, { onMessage: (name, json) => got.push([name, JSON.parse(json)]) });
-  const rt4 = M._jsui_web_create(7, 100, 100, 1, 0, baseP);
+  const rt4 = M._jsui_web_create(7, 100, 100, 1, 0, baseP, 0);
   const fsrc = `fetch('/echo', { method: 'POST', headers: { 'X-Test': 'abc' }, body: 'héllo' })
     .then((r) => r.text().then((t) => __jsui_native.postMessage('echo', JSON.stringify(
       { status: r.status, ok: r.ok, reply: r.headers.get('x-reply'), text: t }))))
@@ -129,7 +129,7 @@ function frame(rt, w, h) {
 // Surfaces through the C API: a second root view of one runtime, its own
 // pixels and an auto-sized one (web/test/fixtures/surfaces.js).
 {
-  const rt = M._jsui_web_create(0, 64, 64, 1, 0, 0);
+  const rt = M._jsui_web_create(0, 64, 64, 1, 0, 0, 0);
   const key = str('Plate'), props = str('{"color":"#ff0000"}');
   const s = M._jsui_surface_create(rt, key, props, 40, 20, 1);
   check(s !== 0 && M._jsui_surface_tag(s) > 1 && M._jsui_surface_runtime(s) === rt, 'surface_create');
@@ -157,7 +157,7 @@ function frame(rt, w, h) {
 {
   const got = [];
   (M.__jsuiHosts ??= new Map()).set(9, { onMessage: (name, json) => got.push([name, JSON.parse(json)]) });
-  const rt = M._jsui_web_create(9, 64, 64, 1, 0, 0);
+  const rt = M._jsui_web_create(9, 64, 64, 1, 0, 0, 0);
   const src = `globalThis.__jsui_onHostBuffer = (keys) => {
     const i = __jsui_native.buffer('pos');
     __jsui_native.postMessage('buf', JSON.stringify([keys, i[1], Array.from(new Float32Array(i[0], 0, i[2]))]));

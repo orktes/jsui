@@ -2,7 +2,9 @@
 // Site smoke test: serves a built site (site/dist; run `node site/scripts/build.mjs`
 // first), opens every route in headless Chromium at desktop and phone sizes,
 // waits for the runtime to go idle and checks that it reported no error and
-// painted something. Screenshots land in site/test/output/.
+// painted something. Screenshots land in site/test/output/. At desktop size
+// it then unlocks audio with a click and checks that the main menu's music
+// plays through Web Audio without errors.
 //
 //   node site/test/smoke.mjs [--dir site/dist] [route filters...]
 import fs from 'node:fs';
@@ -30,7 +32,7 @@ const ROUTES = ['/', '/screens', '/screens/main-menu', '/screens/hud', '/screens
 const SIZES = [{ name: 'desktop', width: 1440, height: 900, scale: 1 }, { name: 'phone', width: 390, height: 844, scale: 2 }];
 
 const MIME = { '.js': 'text/javascript', '.html': 'text/html', '.wasm': 'application/wasm', '.json': 'application/json',
-  '.png': 'image/png', '.jpg': 'image/jpeg', '.ttf': 'font/ttf' };
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.ttf': 'font/ttf', '.wav': 'audio/wav' };
 const server = http.createServer((req, res) => {
   const p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
   const file = path.normalize(path.join(DIR, p.endsWith('/') ? p + 'index.html' : p));
@@ -108,6 +110,28 @@ for (const size of SIZES) {
     } catch (e) {
       failed++;
       console.log(`  FAIL  ${name}: ${e.message.split('\n').slice(0, 6).join('\n        ')}`);
+    }
+  }
+  // Audio: locked until a gesture (UI sounds were dropped above without
+  // errors); a click on an empty spot unlocks it and the menu music starts.
+  if (size.name === 'desktop' && (!filters.length || filters.some((f) => '/screens/main-menu'.includes(f)))) {
+    logs.length = 0;
+    try {
+      await page.evaluate(() => { location.hash = '/screens/main-menu'; });
+      await page.evaluate(() => window.jsui.whenIdle());
+      if (await page.evaluate(() => window.jsui.audio.unlocked)) throw new Error('audio unlocked before any gesture');
+      await page.mouse.click(4, size.height - 4);
+      await page.waitForFunction(() => window.jsui.audio.unlocked, null, { timeout: 5000 });
+      await page.waitForFunction(() => window.jsui.audio.stats.playing >= 1, null, { timeout: 10000 });
+      const stats = await page.evaluate(() => window.jsui.audio.stats);
+      const err = await page.evaluate(() => window.jsui.lastError);
+      if (err) throw new Error('runtime error: ' + err);
+      const bad = logs.filter((l) => /error|exception|could not/i.test(l));
+      if (bad.length) throw new Error('console: ' + bad.join(' | '));
+      console.log(`  ok    ${size.name} audio (unlocked by a click; ${stats.playing} playing, ${stats.sounds} sounds decoded)`);
+    } catch (e) {
+      failed++;
+      console.log(`  FAIL  ${size.name} audio: ${e.message.split('\n').slice(0, 6).join('\n        ')}`);
     }
   }
   await ctx.close();
