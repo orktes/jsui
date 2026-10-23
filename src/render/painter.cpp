@@ -1313,6 +1313,12 @@ struct NodeRecord : Node::Cache {
   // of it changes; `stableFrames` counts the frames since it last did.
   SkMatrix local;                          // place().local: the node in its parent's space
   SkVector snap = {0, 0};                  // place().snap
+  SkMatrix childSnap;                      // place().snapSpace
+  bool transformed = false;                // place().transformed
+  // computeBox() at the size box.w x box.h, while the node is not found
+  // changed (boxOf).
+  Box box;
+  bool boxValid = false;
   uint32_t contentVersion = 0;
   uint64_t layerStamp = 0;
   uint32_t stableFrames = 0;
@@ -1418,6 +1424,23 @@ NodeRecord* record(Node* n) {
 }
 
 RootRecord* rootRecord(Document& doc) { return static_cast<RootRecord*>(record(doc.root())); }
+
+// computeBox(), kept in the node's record: it depends on the node's style
+// and layout (Yoga's borders and padding) and on its size, and the record
+// forgets it whenever updateRecords finds the node changed (dirty). A dirty
+// node (painted without an update) has it computed again.
+const Box& boxOf(Node* n, float w, float h, Box* scratch) {
+  auto* rec = static_cast<NodeRecord*>(n->paintCache.get());
+  if (!rec || n->paintTreeDirty()) {
+    computeBox(n, w, h, scratch);
+    return *scratch;
+  }
+  if (!rec->boxValid || rec->box.w != w || rec->box.h != h) {
+    computeBox(n, w, h, &rec->box);
+    rec->boxValid = true;
+  }
+  return rec->box;
+}
 
 struct Ctx {
   Document& doc;
@@ -1674,8 +1697,8 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
   const int first = ctx.backdropFirst;
   ctx.backdropFirst = -1;
   const bool front = first < 0 || ctx.backdropRender, rest = first < 0 || !ctx.backdropRender;
-  Box b;
-  computeBox(n, w, h, &b);
+  Box scratch;
+  const Box& b = boxOf(n, w, h, &scratch);
   ctx.stats.nodesPainted++;
   if (front && !s.boxShadows.empty()) {
     auto* rec = static_cast<const NodeRecord*>(n->paintCache.get());
@@ -1884,6 +1907,7 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
     ctx.stats.nodesPainted += sub.stats.nodesPainted;
     ctx.stats.layerDraws += sub.stats.layerDraws;
     ctx.stats.layerRenders += sub.stats.layerRenders;
+    ctx.stats.placements += sub.stats.placements;
 #if defined(JSUI_GRAPHITE_AS_IMAGE)
     sk_sp<SkImage> image = oc->recorder() ? SkSurfaces::AsImage(surf) : surf->makeImageSnapshot();
 #else
@@ -1933,15 +1957,26 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
     first = int(ctx.backdrop->path[ctx.backdropDepth++].second);
   // Incremental repaint: skip subtrees entirely outside the damage. Their
   // records were refreshed by updateDamage() this frame.
-  if (ctx.damage) {
-    auto* rec = static_cast<NodeRecord*>(n->paintCache.get());
-    if (rec && rec->valid && !ctx.damage->intersects(rec->subtree)) {
-      ctx.stats.nodesCulled++;
-      return;
-    }
+  const auto* rec = static_cast<const NodeRecord*>(n->paintCache.get());
+  if (ctx.damage && rec && rec->valid && !ctx.damage->intersects(rec->subtree)) {
+    ctx.stats.nodesCulled++;
+    return;
   }
   const ComputedStyle& s = n->style();
-  Placement p = place(n, ctx.snapSpace);
+  // Where updateRecords placed it, when that was for this snap space and
+  // nothing changed since (painting without an update: placed again).
+  Placement p;
+  if (rec && rec->valid && rec->painted && !n->paintTreeDirty() && rec->inSnap == ctx.snapSpace) {
+    p.local = rec->local;
+    p.snapSpace = rec->childSnap;
+    p.snap = rec->snap;
+    p.w = rec->w;
+    p.h = rec->h;
+    p.transformed = rec->transformed;
+  } else {
+    p = place(n, ctx.snapSpace);
+    ctx.stats.placements++;
+  }
   int saveCount = c->save();
   c->concat(p.local);
   float opacity = s.opacity * animOpacity(n);
@@ -1964,8 +1999,7 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   SkMatrix parentSnap = ctx.snapSpace;
   bool parentTransformed = ctx.transformed;
   // A raster-cached subtree (see updateRasterCache), or a cached layer.
-  bool raster = ctx.layers && ctx.layers->impl->raster && !layer && alpha >= 1 && n->paintCache &&
-                static_cast<const NodeRecord*>(n->paintCache.get())->rasterOn;
+  bool raster = ctx.layers && ctx.layers->impl->raster && !layer && alpha >= 1 && rec && rec->rasterOn;
   SkASSERT(first < 0 || (!layer && !raster));
   if (ctx.layers && (raster || (layer && ctx.opacityLayers && ctx.layers->impl->opacityLayers && s.filters.empty() &&
                                 !s.blendMode && !contentShader))) {
@@ -2299,6 +2333,7 @@ void addDamage(SkRegion* d, const SkIRect& r) {
 void clearPaintTree(Node* n) {
   if (!n->paintTreeDirty()) return;
   n->clearPaintTree();
+  if (auto* rec = static_cast<NodeRecord*>(n->paintCache.get())) rec->boxValid = false;
   for (Node* g : n->ghosts) clearPaintTree(g);
   for (Node* ch : n->children()) clearPaintTree(ch);
 }
@@ -2312,9 +2347,11 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
     clearPaintTree(n);
     return SkIRect::MakeEmpty();  // raw text: painted by its paragraph
   }
+  const bool dirty = n->paintTreeDirty();
   n->clearPaintTree();
   if (tSkip) tSkip->visited++;
   NodeRecord* rec = record(n);
+  if (dirty) rec->boxValid = false;  // its layout or style may have changed (see boxOf)
   const size_t curvedStart = curved->size(), rasterStart = tRasterCandidates ? tRasterCandidates->size() : 0;
   bool quietKids = true;
   SkIRect own = SkIRect::MakeEmpty(), sub = SkIRect::MakeEmpty(), bars = SkIRect::MakeEmpty();
@@ -2351,6 +2388,8 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
     h = p.h;
     local = p.local;
     snap = p.snap;
+    rec->childSnap = p.snapSpace;
+    rec->transformed = p.transformed;
     const SkIRect ownFull = deviceBounds(m, ownVisualBounds(n, w, h));
     full = ownFull;
     if (!own.intersect(ownFull, clip)) own.setEmpty();
@@ -2374,8 +2413,8 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
         bool outside = s.outlineWidth > 0;
         for (const Shadow& sh : s.boxShadows) outside |= !sh.inset && sh.blur <= 0;
         if (!outside && s.borderStyle == BorderStyle::Solid && m.isScaleTranslate()) {
-          Box b;
-          computeBox(n, w, h, &b);
+          Box scratch;
+          const Box& b = boxOf(n, w, h, &scratch);
           SkRRect dev;
           if (b.inner.transform(m, &dev)) {
             dev.inset(1, 1);
@@ -3029,6 +3068,7 @@ void paintDocumentRects(Document& doc, SkCanvas* canvas, const std::vector<SkIRe
     sum.spriteRenders += s.spriteRenders;
     sum.layerDraws += s.layerDraws;
     sum.layerRenders += s.layerRenders;
+    sum.placements += s.placements;
   }
   sum.nodesUpdated = rootRecord(doc)->nodesUpdated;
   rootRecord(doc)->stats = sum;

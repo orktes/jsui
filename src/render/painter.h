@@ -91,6 +91,9 @@ struct PaintStats {
   // those the ones rendered this paint (misses).
   int layerDraws = 0;
   int layerRenders = 0;
+  // Always counted: painted nodes placed again (see place() in painter.cpp)
+  // instead of where their records say (none after an update).
+  int placements = 0;
 };
 PaintStats lastPaintStats(const Document& doc);
 

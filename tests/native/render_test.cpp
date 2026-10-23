@@ -407,6 +407,8 @@ TEST(render_incremental_matches_full) {
   auto check = [&](const char* what) {
     s.doc().layout();
     SkIRect damage = s.rt->renderIncremental(inc.data(), 320, 240, 320 * 4);
+    // Painted where updateDamage placed each node, without placing it again.
+    CHECK_EQ(lastPaintStats(s.doc()).placements, 0);
     s.rt->render(full.data(), 320, 240, 320 * 4);
     size_t diff = 0;
     for (size_t i = 0; i < inc.size(); i++) diff += inc[i] != full[i];
