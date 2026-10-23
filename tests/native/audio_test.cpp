@@ -66,7 +66,7 @@ struct AudioHost {
 
 // Posts every report __jsui_onAudio receives; play(...) posts the voice id.
 const char* kAudioBundle = R"(
-  const N = __jsui_native;
+  var N = __jsui_native;
   globalThis.__jsui_onAudio = (events) => N.postMessage('audio', JSON.stringify(events));
   globalThis.play = (...a) => { const id = N.audioPlay(...a); N.postMessage('voice', String(id)); return id; };
 )";
@@ -120,8 +120,12 @@ TEST(audio_voice_ended_reaches_js_on_the_next_tick_once) {
   CHECK_EQ(h.take(), std::string("audio=[[0,2,1]]"));
   // Voice commands for ended voices are not sent.
   h.cmds.clear();
-  CHECK(h.load(std::string(kAudioBundle) + "N.audioVoice(3, 2, 1, 1, 0, 0); N.audioVoice(6, 1, 0.25, 1, 0, 100);"));
-  CHECK_EQ(h.cmds.size(), size_t(0));  // a new bundle: a new context, every voice was stopped
+  CHECK(h.load("N.audioVoice(3, 2, 1, 1, 0, 0); N.audioVoice(6, 1, 0.25, 1, 0, 100);"));
+  CHECK_EQ(h.cmds.size(), size_t(1));
+  if (h.cmds.size() == 1) {
+    CHECK_EQ(h.cmds[0].op, int(JSUI_AUDIO_SET));
+    CHECK_EQ(h.cmds[0].voice, uint64_t(1));
+  }
 }
 
 TEST(audio_voice_commands_bus_preload_and_stop_all) {
@@ -167,7 +171,8 @@ TEST(audio_reload_stops_every_voice_and_drops_their_reports) {
   h.take();
   h.cmds.clear();
   jsui_audio_voice_ended(h.rt, 1, JSUI_AUDIO_FINISHED);  // queued for the old context
-  jsui_reload(h.rt);
+  jsui_reload(h.rt);  // re-runs the bundle in a new context: plays two new voices
+  CHECK_EQ(h.take(), std::string("voice=3 voice=4"));  // ids are never reused
   CHECK(!h.cmds.empty());
   if (!h.cmds.empty()) {
     CHECK_EQ(h.cmds[0].op, int(JSUI_AUDIO_STOP_ALL));
@@ -177,9 +182,6 @@ TEST(audio_reload_stops_every_voice_and_drops_their_reports) {
   jsui_audio_voice_ended(h.rt, 2, JSUI_AUDIO_STOPPED);  // the handler's answer: ignored
   h.tick();
   CHECK_EQ(h.take(), std::string());
-  // Voice ids keep counting (never reused).
-  CHECK(h.load(std::string(kAudioBundle) + "play('c.wav');"));
-  CHECK_EQ(h.take(), std::string("voice=3"));
 }
 
 TEST(audio_ended_inside_the_handler) {
