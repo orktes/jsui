@@ -461,11 +461,16 @@ test('audio: autoplay lock, unlock by a click, voices end, preload, destroy', as
   await mount(page, { jsui: { bundleUrl: 'fixtures/audio.js' } });
   const msgs = (name) => page.evaluate((n) => window.hosts.ui.messages.filter(([m]) => m === n).map(([, d]) => d), name);
   const send = (name, data) => page.evaluate(([n, d]) => window.hosts.ui.postMessage(n, d), [name, data]);
-  const voiceOf = async (tag) => (await msgs('voice')).find((v) => v.tag === tag).voice;
   const reports = async () => (await msgs('audio')).flat();
   const waitFor = async (fn, what, ms = 5000) => {
     for (const end = Date.now() + ms; Date.now() < end; await page.waitForTimeout(50)) if (await fn()) return;
     throw new Error('timed out: ' + what + ' ' + JSON.stringify(await reports()));
+  };
+  // Worker mode: the UI's answer arrives a message later.
+  const voiceOf = async (tag) => {
+    const find = async () => (await msgs('voice')).find((v) => v.tag === tag);
+    await waitFor(find, 'voice ' + tag);
+    return (await find()).voice;
   };
   const url = (ms) => `${ORIGIN}/audio/tone-${ms}.wav`;
   assert(!(await page.evaluate(() => window.hosts.ui.audio.unlocked)), 'locked before a gesture');
