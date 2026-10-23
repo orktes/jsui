@@ -418,7 +418,11 @@ enum {
     JSUI_WEBGPU_NO_CLEAR = 1 << 1,
     /* Paint straight into the target (full repaint every frame) instead of
      * through the context's retained frame texture. */
-    JSUI_WEBGPU_NO_RETAIN = 1 << 2
+    JSUI_WEBGPU_NO_RETAIN = 1 << 2,
+    /* Render opacity layers offscreen every time they are painted instead of
+     * compositing their cached textures (see "Composited layers" in
+     * docs/ARCHITECTURE.md; for comparisons). */
+    JSUI_WEBGPU_NO_LAYER_CACHE = 1 << 3
 };
 
 typedef struct JsuiWebGPUTarget {

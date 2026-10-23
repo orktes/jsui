@@ -1951,6 +1951,12 @@ void applyStyle(const Value& style, ComputedStyle* out, YGNodeRef yoga, float pi
 
 uint32_t paintStyleGroup(const std::string& key) { return paintGroupOf(key); }
 
+bool styleGroupsMoveOnly(uint32_t groups) {
+  constexpr uint32_t kMove =
+      kGroupOpacity | kGroupTransform | kGroupTransformOrigin | kGroupZIndex | kGroupPointerEvents | kGroupCursor;
+  return (groups & ~kMove) == 0;
+}
+
 void applyStyleGroups(const Value& style, uint32_t groups, ComputedStyle* out, float pixelRatio) {
   const StyleMap sm(style);
   applyPaintGroups(sm, groups, out, pixelRatio);
