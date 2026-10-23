@@ -32,11 +32,18 @@ void paintDocument(Document& doc, SkCanvas* canvas, const SkRegion* damage = nul
 // scroll exposes, and `blit` says how to move the viewport's pixels first:
 // what was at p goes to p + (dx, dy), within `rect`. The caller must do that
 // before painting the damage (or repaint fully). Empty rect: no blit.
+//
+// `growCurves` false (Graphite): damage that crosses an anti-aliased curved
+// outline grows to the whole node only when the backend's pixels for that
+// outline may depend on the clip (dashed edges, outlines over 1024 px; see
+// CurvedNode). Graphite draws solid rrects analytically and, patched, applies
+// a whole-pixel rect clip as a scissor, so the rest come out the same.
 struct ScrollBlit {
   SkIRect rect = SkIRect::MakeEmpty();
   int dx = 0, dy = 0;
 };
-SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBlit* blit = nullptr);
+SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBlit* blit = nullptr,
+                      bool growCurves = true);
 // Moves the pixels of `b.rect` by (dx, dy) in an RGBA8888 buffer.
 void applyScrollBlit(void* pixels, size_t rowBytes, int width, int height, const ScrollBlit& b);
 // Records a blit in the last paint's stats (PaintStats::blitPixels).

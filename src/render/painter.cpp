@@ -324,7 +324,7 @@ ShadowCache& shadowCache(RootRecord* root);
 // is slow on the CPU). False when the transform is not axis-aligned (the
 // caller blurs directly then).
 bool drawCachedShadow(SkCanvas* c, const SkRRect& shape, const SkRRect* hole, const SkRRect& box, float blur,
-                      const SkPaint& paint, ShadowCache& cache) {
+                      const SkPaint& paint, ShadowCache& cache, float alpha = 1) {
   const SkMatrix& m = c->getTotalMatrix();
   if (!m.isScaleTranslate() || m.getScaleX() <= 0 || m.getScaleY() <= 0) return false;
   SkRRect dev;
@@ -389,7 +389,8 @@ bool drawCachedShadow(SkCanvas* c, const SkRRect& shape, const SkRRect* hole, co
     it = cache.insert(key, std::move(sm));
   }
   it->second.lastUsed = cache.frame;
-  SkPaint p;  // colour is baked in; plain src-over sprite
+  SkPaint p;  // colour is baked in (the opacity is not: it may animate); plain src-over sprite
+  p.setAlphaf(alpha);
   const SkImage* img = it->second.image.get();
   float x0 = ox - float(it->second.margin), y0 = oy - float(it->second.margin);
   SkIRect all = SkIRect::MakeXYWH(int(x0), int(y0), img->width(), img->height());
@@ -509,8 +510,10 @@ bool drawCachedInsetShadow(SkCanvas* c, const SkRRect& inner, const SkRRect& fra
   return true;
 }
 
-void paintOuterShadows(SkCanvas* c, const Box& b, const ComputedStyle& s, RootRecord* root) {
-  bool opaqueBg = s.backgroundColor.a >= 1 && s.backgroundImages.empty();
+// `alpha`: the node's opacity folded into the draws (see opacityFoldable); the
+// shadow is then cut out under an opaque background too, which no longer hides it.
+void paintOuterShadows(SkCanvas* c, const Box& b, const ComputedStyle& s, RootRecord* root, float alpha) {
+  bool opaqueBg = s.backgroundColor.a >= 1 && s.backgroundImages.empty() && alpha >= 1;
   // The first shadow is on top, so paint in reverse.
   for (auto it = s.boxShadows.rbegin(); it != s.boxShadows.rend(); ++it) {
     const Shadow& sh = *it;
@@ -524,8 +527,10 @@ void paintOuterShadows(SkCanvas* c, const Box& b, const ComputedStyle& s, RootRe
     p.setMaskFilter(cachedBlur(root, sh.blur));
     // Shadows are cut out of the border box (visible through translucent
     // backgrounds otherwise). An opaque background hides it anyway.
-    if (sh.blur > 0 && drawCachedShadow(c, shape, opaqueBg ? nullptr : &b.outer, b.outer, sh.blur, p, shadowCache(root)))
+    if (sh.blur > 0 &&
+        drawCachedShadow(c, shape, opaqueBg ? nullptr : &b.outer, b.outer, sh.blur, p, shadowCache(root), alpha))
       continue;
+    p.setAlphaf(p.getAlphaf() * alpha);
     c->save();
     if (!opaqueBg) {
       SkRect bounds = shape.rect().makeOutset(sh.blur * 1.5f + 1, sh.blur * 1.5f + 1);
@@ -865,7 +870,7 @@ void strokeSide(SkCanvas* c, SkPoint a, SkPoint b, float width, BorderStyle styl
   c->drawLine(a, b, p);
 }
 
-void paintBorders(SkCanvas* c, const Box& b, const ComputedStyle& s) {
+void paintBorders(SkCanvas* c, const Box& b, const ComputedStyle& s, float alpha) {
   const float* w = b.border;
   bool any = false;
   for (int i = 0; i < 4; i++) any |= w[i] > 0 && !s.borderColor[i].transparent();
@@ -882,6 +887,7 @@ void paintBorders(SkCanvas* c, const Box& b, const ComputedStyle& s) {
   if (s.borderStyle == BorderStyle::Solid) {
     if (uniformColor) {
       p.setColor4f(sk(s.borderColor[first]));
+      p.setAlphaf(p.getAlphaf() * alpha);
       if (b.inner.isEmpty()) drawRRect(c, b.outer, p);
       else c->drawDRRect(b.outer, b.inner, p);
       return;
@@ -949,6 +955,7 @@ void paintBorders(SkCanvas* c, const Box& b, const ComputedStyle& s) {
       c->save();
       c->clipPath(clip, true);
       p.setColor4f(sk(s.borderColor[i]));
+      p.setAlphaf(p.getAlphaf() * alpha);
       if (b.inner.isEmpty()) drawRRect(c, b.outer, p);
       else c->drawDRRect(b.outer, b.inner, p);
       c->restore();
@@ -1139,6 +1146,38 @@ bool singleDraw(const Node* n) {
   return int(!s.backgroundColor.transparent()) + int(s.backgroundImages.size()) <= 1;
 }
 
+// The node's draws never overlap, so its opacity can be applied to each draw
+// instead of a layer (the same pixels up to rounding at anti-aliased edges):
+// a background (one colour or gradient) with at most one outer shadow, which
+// is then cut out of the border box under it, or only a solid border ring of
+// one colour. A layer costs an offscreen pass on the GPU (a texture cleared,
+// stored and sampled back) and a buffer to clear and composite on the CPU,
+// and animated opacity (a pulsing badge, a fading ring) needs one every frame.
+bool opacityFoldable(const Node* n) {
+  if (singleDraw(n)) return true;
+  const ComputedStyle& s = n->style();
+  if (n->type() != NodeType::View || !n->children().empty() || !n->ghosts.empty() || s.outlineWidth > 0) return false;
+  int outer = 0;
+  for (const Shadow& sh : s.boxShadows) {
+    if (sh.color.transparent()) continue;
+    if (sh.inset) return false;
+    outer++;
+  }
+  int fills = int(!s.backgroundColor.transparent()) + int(s.backgroundImages.size());
+  YGNodeRef y = n->yoga();
+  const YGEdge edges[4] = {YGEdgeTop, YGEdgeRight, YGEdgeBottom, YGEdgeLeft};  // as computeBox
+  bool border = false;
+  int first = -1;
+  for (int i = 0; i < 4; i++) {
+    if (YGNodeLayoutGetBorder(y, edges[i]) <= 0 || s.borderColor[i].transparent()) continue;
+    border = true;
+    if (first < 0) first = i;
+    else if (!(s.borderColor[i] == s.borderColor[first])) return false;
+  }
+  if (border) return fills == 0 && outer == 0 && s.borderStyle == BorderStyle::Solid;
+  return fills <= 1 && outer <= 1;
+}
+
 bool backfaceFlipped(const ComputedStyle& s) {
   bool flipped = false;
   for (auto& op : s.transform) flipped ^= op.flipsBackface;
@@ -1184,9 +1223,12 @@ struct NodeRecord : Node::Cache {
 // A node with anti-aliased curved or diagonal outlines, in device pixels.
 // Damage strictly inside `safe` (the padding box inset by a pixel) never
 // crosses an outline; other damage touching `bounds` must include all of it.
+// `clipDependent`: Graphite may still draw this outline differently under a
+// tighter clip (see updateDamage's growCurves).
 struct CurvedNode {
   SkIRect bounds;
   SkRRect safe;
+  bool clipDependent = true;
 };
 
 // Per-document painter state, kept on the root node.
@@ -1439,10 +1481,10 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
   Box b;
   computeBox(n, w, h, &b);
   ctx.stats.nodesPainted++;
-  if (!s.boxShadows.empty()) paintOuterShadows(c, b, s, ctx.root);
+  if (!s.boxShadows.empty()) paintOuterShadows(c, b, s, ctx.root, ctx.alpha);
   paintBackground(c, b, s, ctx.root, ctx.alpha);
   if (!s.boxShadows.empty()) paintInsetShadows(c, b, s, ctx.root);
-  paintBorders(c, b, s);
+  paintBorders(c, b, s, ctx.alpha);
 
   // Text uses the unsnapped layout box, like Chrome's text fragments: a
   // snapped (narrower) width would re-wrap a max-content paragraph.
@@ -1501,12 +1543,17 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   int saveCount = c->save();
   c->concat(p.local);
   float opacity = s.opacity * animOpacity(n);
+  if (opacity * 255 < 0.5f) {  // invisible at 8 bits (fading out): no layer to fill and composite
+    c->restoreToCount(saveCount);
+    return;
+  }
   bool layer = opacity < 1 || !s.filters.empty() || s.blendMode != 0;
-  // A node that paints one draw (a background colour or one gradient, no
-  // children) applies its opacity to that draw: the same pixels as a layer
-  // (up to rounding), without allocating, clearing and compositing one.
+  // A node whose draws do not overlap (one background colour or gradient, no
+  // children; see opacityFoldable) applies its opacity to each draw: the same
+  // pixels as a layer (up to rounding), without allocating, clearing and
+  // compositing one.
   float alpha = 1;
-  if (layer && s.filters.empty() && !s.blendMode && singleDraw(n)) {
+  if (layer && s.filters.empty() && !s.blendMode && opacityFoldable(n)) {
     alpha = opacity;
     layer = false;
   }
@@ -1642,6 +1689,17 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
       SkIRect ci;
       if (!co.isEmpty() && ci.intersect(deviceBounds(m, co), clip)) {
         CurvedNode cn{ci, SkRRect::MakeEmpty()};
+        {
+          // Graphite draws solid rrects (borders, fills, sharp shadows and
+          // rounded clips) analytically, and with the Skia patch a damage
+          // rect is only a scissor, so those pixels do not depend on it.
+          // Dashed or dotted edges become paths, and path masks larger than
+          // an atlas plot (1024 px) are still cut to the clip.
+          SkIRect full = deviceBounds(m, co);
+          cn.clipDependent = s.borderStyle != BorderStyle::Solid ||
+                             (s.outlineWidth > 0 && s.outlineStyle != BorderStyle::Solid) ||
+                             full.width() > 1024 || full.height() > 1024;
+        }
         // Outlines and sharp shadows lie outside the box: no safe interior.
         bool outside = s.outlineWidth > 0;
         for (const Shadow& sh : s.boxShadows) outside |= !sh.inset && sh.blur <= 0;
@@ -1660,7 +1718,7 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
     bars = scrollIndicatorBounds(n, m, w, h, clip);
     if (!bars.isEmpty()) {
       own.join(bars);
-      curved->push_back({bars, SkRRect::MakeEmpty()});  // rounded thumbs: never cut
+      curved->push_back({bars, SkRRect::MakeEmpty(), false});  // rounded thumbs: never cut
     }
     sub = own;
     if (paintsChildren(n) && (!n->children().empty() || !n->ghosts.empty())) {
@@ -1907,7 +1965,7 @@ void noteScrollBlit(Document& doc, const ScrollBlit& b) {
       moved.intersect(b.rect.makeOffset(b.dx, b.dy)) ? int64_t(moved.width()) * moved.height() : 0;
 }
 
-SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBlit* blit) {
+SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBlit* blit, bool growCurves) {
   RootRecord* root = rootRecord(doc);
   SkRegion damage;
   if (blit) *blit = ScrollBlit{};
@@ -1967,10 +2025,13 @@ SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBl
   // contain the whole outline and only the region's spans cut it (growing
   // just the bounds, by a pixel at each corner, is exact on x86 but left a
   // few pixels off there: render_incremental_* in CI).
+  // growCurves false (Graphite): only outlines whose pixels depend on the
+  // clip grow, see CurvedNode.
   if (!damage.isEmpty()) {
     for (int pass = 0; pass < 16; pass++) {
       bool grew = false;
       for (const CurvedNode& cn : root->curved) {
+        if (!growCurves && !cn.clipDependent) continue;
         if (!damage.intersects(cn.bounds) || damage.contains(cn.bounds)) continue;
         bool cuts = false;
         for (SkRegion::Iterator it(damage); !it.done() && !cuts; it.next()) {

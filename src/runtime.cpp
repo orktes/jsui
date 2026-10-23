@@ -512,7 +512,7 @@ SkIRect Runtime::renderImpl(void* pixels, int width, int height, size_t rowBytes
   return paintTracked(surface->getCanvas(), pixels, width, height, rowBytes, incremental);
 }
 
-SkIRect Runtime::beginCanvasTracked(const void* key, int width, int height, bool* keyValid) {
+SkIRect Runtime::beginCanvasTracked(const void* key, int width, int height, bool* keyValid, bool growCurves) {
   doc.layout();
   bool sameTarget = key && key == lastTarget_ && width == lastTargetW_ && height == lastTargetH_ &&
                     lastTargetRowBytes_ == 0;
@@ -527,7 +527,7 @@ SkIRect Runtime::beginCanvasTracked(const void* key, int width, int height, bool
   }
   // Always refresh the paint records so the next frame compares against
   // what was painted.
-  trackedDamage_ = updateDamage(doc, width, height);
+  trackedDamage_ = updateDamage(doc, width, height, nullptr, growCurves);
   const SkRegion& damage = trackedDamage_;
   bool dev = config.dev_mode != 0;
   trackedFrozen_ = dev && lastGoodFrame_ && (!lastError.empty() || doc.root()->children().empty());

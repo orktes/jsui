@@ -773,6 +773,76 @@ test('webgpu: no multisampled targets, no per-frame blur passes for inset shadow
   assert(r.r8 === 0, `${r.r8} single-channel (blur mask) passes in full repaints after the first frame`);
 });
 
+test('webgpu: steady animation frames (interactions showcase): retained, few passes and bind groups, exact', async ({ page }) => {
+  // examples/showcase/interactions.jsx keeps animating a glow, a pulsing ring
+  // and a live dot. Steady frames repaint only that damage into the retained
+  // frame (scissored rects; curved outlines need not grow to whole nodes on
+  // Graphite), fold the opacity of single-box layers into their paint (no
+  // offscreen passes), and reuse uniform bind groups. Before: 2-3 canvas-size
+  // passes, ~172 draws and ~175 new bind groups per frame.
+  let build;
+  try {
+    ({ build } = await import('@jsui/cli'));
+  } catch (e) {
+    skip(`@jsui/cli unavailable: ${e.message}`, true);
+  }
+  const outfile = path.join(WEB, 'test/output/interactions.js');
+  fs.mkdirSync(path.dirname(outfile), { recursive: true });
+  await build({ entry: path.join(WEB, '../examples/showcase/interactions.jsx'), outfile, minify: true });
+  await page.addInitScript({ path: path.join(WEB, 'test/gpu-count.js') });
+  await page.reload();
+  await page.waitForFunction(() => window.testReady);
+  // Created together and driven by the same frame times from the first frame
+  // on: part of the app's state follows timers (the wall clock).
+  const renderers = await page.evaluate(async (dist) => {
+    const make = () => {
+      const c = document.createElement('canvas');
+      c.style.width = '1280px';
+      c.style.height = '720px';
+      document.body.appendChild(c);
+      return window.createJsui({ canvas: c, bundleUrl: 'output/interactions.js', renderer: 'webgpu', autoStart: false,
+        moduleUrl: new URL(`../${dist}/jsui.js`, location.href) });
+    };
+    const [a, b] = await Promise.all([make(), make()]);
+    window.hosts = { a, b };
+    return [a.renderer, b.renderer];
+  }, DIST);
+  if (renderers.some((n) => n !== 'webgpu')) skip(`no WebGPU renderer with web/${DIST} (${renderers})`, DIST !== 'dist-gpu');
+  const r = await page.evaluate(async () => {
+    const { a, b } = window.hosts;
+    b._wgpu.flags = 4;  // JSUI_WEBGPU_NO_RETAIN: 'b' repaints every frame fully
+    let t = performance.now();
+    const sum = (re) => [...window.__gpuCounts].filter(([k]) => re.test(k)).reduce((n, [, v]) => n + v, 0);
+    const rows = [];
+    for (let i = 0; i < 240; i++) {
+      t += 16.67;
+      window.__gpuCounts.clear();
+      // Back to back: some of the app's state follows the wall clock. The
+      // WebGPU calls (counted) are all made inside frame().
+      a.frame(t);
+      if (i >= 180) {  // after the entrance animations
+        rows.push({ passes: sum(/^pass color /), retained: sum(/^pass color .* load=load/),
+          bindGroups: sum(/\.createBindGroup$/), draws: sum(/\.draw(Indexed)?(Indirect)?$/) });
+      }
+      b.frame(t);
+      await a._wgpu.device.queue.onSubmittedWorkDone();
+    }
+    const max = (k) => Math.max(...rows.map((row) => row[k]));
+    const mean = (k) => rows.reduce((n, row) => n + row[k], 0) / rows.length;
+    return { maxPasses: max('passes'), retained: mean('retained'), maxBindGroups: max('bindGroups'),
+      bindGroups: mean('bindGroups'), draws: mean('draws') };
+  });
+  console.log(`      steady frame: passes <= ${r.maxPasses}, bind groups ${r.bindGroups.toFixed(1)} (max ${r.maxBindGroups}), ` +
+    `draws ${r.draws.toFixed(1)}, retained ${(r.retained * 100).toFixed(0)}%`);
+  assert(r.retained >= 0.9, `steady frames do not go through the retained frame: ${JSON.stringify(r)}`);
+  assert(r.maxPasses <= 2, `offscreen passes in steady frames: ${JSON.stringify(r)}`);
+  assert(r.maxBindGroups <= 24, `uniform bind groups are not reused: ${JSON.stringify(r)}`);
+  assert(r.draws <= 100, `steady frames repaint more than their damage: ${JSON.stringify(r)}`);
+  const d = await frameDiff(page, ['a', 'b']);
+  assert(!d.missing && !d.size, `readback ${JSON.stringify(d)}`);
+  assert(d.max <= 1, `retained frame differs from a full repaint: ${JSON.stringify(d)}`);
+}, { viewport: { width: 1300, height: 1500 } });
+
 test('webgpu: devicePixelRatio 2 and resize', async ({ page }) => {
   const info = await mountWebGPU(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
   assert(info.pw === 640 && info.ph === 400, `backing store ${info.pw}x${info.ph}`);

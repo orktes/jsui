@@ -90,10 +90,12 @@ class Runtime {
   };
   // While `choose` runs: the frame's exact damage region (device pixels).
   const SkRegion& trackedDamage() const { return trackedDamage_; }
+  // `growCurves`: see updateDamage (false only for canvases whose curved
+  // outlines do not depend on the damage clip).
   template <typename Choose>
-  SkIRect renderCanvasTracked(const void* key, int width, int height, Choose&& choose) {
+  SkIRect renderCanvasTracked(const void* key, int width, int height, Choose&& choose, bool growCurves = true) {
     bool keyValid = false;
-    SkIRect damage = beginCanvasTracked(key, width, height, &keyValid);
+    SkIRect damage = beginCanvasTracked(key, width, height, &keyValid, growCurves);
     return finishCanvasTracked(choose(damage, keyValid), width, height, keyValid, damage);
   }
 
@@ -157,7 +159,7 @@ class Runtime {
   // An image event can be delivered on the next tick.
   bool imageEventsReady() const;
   // renderCanvasTracked(): layout + damage (the bounds, or empty), then the paint.
-  SkIRect beginCanvasTracked(const void* key, int width, int height, bool* keyValid);
+  SkIRect beginCanvasTracked(const void* key, int width, int height, bool* keyValid, bool growCurves);
   SkIRect finishCanvasTracked(const CanvasChoice& c, int width, int height, bool keyValid, const SkIRect& damage);
   bool trackedFrozen_ = false, trackedOverlay_ = false;
   const void* trackedKey_ = nullptr;

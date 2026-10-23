@@ -10,11 +10,11 @@
 //
 // Frames (Runtime::renderCanvasTracked): when most of the frame changed it is
 // painted straight into the target (one pass). When little changed, only the
-// damage bounds are repainted into a retained texture owned by the context,
-// which is then drawn into the target with one draw (targets such as canvas
-// textures start cleared every frame). Raster images (decoded images, shadow
-// masks) are uploaded once and cached by image id (CachingImageProvider),
-// like Ganesh's resource cache does on the GL path.
+// damage (a few scissored rects) is repainted into a retained texture owned
+// by the context, which is then drawn into the target with one draw (targets
+// such as canvas textures start cleared every frame). Raster images (decoded
+// images, shadow masks) are uploaded once and cached by image id
+// (CachingImageProvider), like Ganesh's resource cache does on the GL path.
 #include "render/gpu.h"
 
 #if defined(JSUI_WEBGPU)
@@ -207,13 +207,21 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
   sk_sp<SkSurface> target = SkSurfaces::WrapBackendTexture(g->recorder.get(), backendTex, nullptr, &props);
   if (!target) return -1;
 
-  // Where the frame is painted (Runtime::renderCanvasTracked):
+  // Where the frame is painted (Runtime::renderCanvasTracked), like the GL
+  // backend:
   //   * Most of the frame changed (an animated full-screen UI): straight into
   //     the target with a full repaint, one pass, no copy. The retained
   //     texture misses that frame.
-  //   * Small damage (a spinner, a hover): only the damage bounds into the
-  //     retained texture, then one draw copies it into the target (canvas
-  //     textures start cleared every frame, so the target needs it all).
+  //   * Small damage (a spinner, a hover, a few looping animations spread
+  //     over the screen): only the damage, as a few scissored rects
+  //     (Runtime::CanvasChoice::splitDamage: rect clips are scissors on
+  //     Graphite too), into the retained texture, then one draw copies it
+  //     into the target (canvas textures start cleared every frame, so the
+  //     target needs it all). "Small" is the damaged area, not its bounds:
+  //     two small animations in opposite corners have bounds as large as the
+  //     screen, and a full repaint of a full-screen UI (backgrounds,
+  //     gradients, every panel and text run) costs far more on the CPU
+  //     (recording every draw) and on the GPU than the damage and a copy.
   //   After direct frames the retained texture is repainted fully once the
   //   damage stayed small for kRetainAfter frames (switching back costs a full
   //   repaint plus the copy, more than another direct frame).
@@ -226,8 +234,11 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
   if (t.flags & JSUI_WEBGPU_NO_RETAIN) g->retained.reset();
   const void* key = g->retained ? reinterpret_cast<const void*>(uintptr_t(g->retainedGen)) : nullptr;
   bool viaRetained = false, failed = false;
-  rt.renderCanvasTracked(key, w, h, [&](const SkIRect& damage, bool keyValid) -> Runtime::CanvasChoice {
-    bool large = int64_t(damage.width()) * damage.height() * 2 >= int64_t(w) * h;
+  rt.renderCanvasTracked(key, w, h, [&](const SkIRect&, bool keyValid) -> Runtime::CanvasChoice {
+    int64_t area = 0;
+    for (SkRegion::Iterator it(rt.trackedDamage()); !it.done(); it.next())
+      area += int64_t(it.rect().width()) * it.rect().height();
+    bool large = area * 2 >= int64_t(w) * h;
     g->smallFrames = large ? 0 : g->smallFrames + 1;
     bool retain = !(t.flags & JSUI_WEBGPU_NO_RETAIN) && (keyValid ? !large : g->smallFrames >= kRetainAfter);
     if (!retain) {
@@ -247,8 +258,10 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
       g->retainedGen++;
     }
     viaRetained = true;
-    return {g->retained->getCanvas(), reinterpret_cast<const void*>(uintptr_t(g->retainedGen)), true};
-  });
+    Runtime::CanvasChoice c{g->retained->getCanvas(), reinterpret_cast<const void*>(uintptr_t(g->retainedGen)), true};
+    c.splitDamage = true;
+    return c;
+  }, /*growCurves=*/false);
   if (failed) return -1;
   if (viaRetained) {
     SkPaint paint;
