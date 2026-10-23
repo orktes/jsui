@@ -98,6 +98,21 @@ import LottieView from 'lottie-react-native';
 <LottieView source={require('./victory.json')} autoPlay loop style={{ width: 200, height: 200 }} />
 ```
 
+Custom shaders: your own SkSL (Skia runtime effects) paint a view on every
+renderer. Uniforms can be Animated values (also on the native driver), a
+shader that reads `time` animates on the runtime clock, child shaders are
+images or host textures, and `uniform shader content` post-processes the
+view's own children:
+
+```jsx
+<ShaderView
+  source={sksl`uniform float2 resolution; uniform float time; layout(color) uniform half4 tint;
+    half4 main(float2 p) { return tint * half(0.5 + 0.5 * sin(p.x / resolution.x * 6.28 + time)); }`}
+  uniforms={{ tint: animatedColor }}
+  style={{ width: 300, height: 120, borderRadius: 16 }}
+/>
+```
+
 ## npm packages
 
 `@orktes/jsui-react` (the React Native API), `@orktes/jsui-cli` (`jsui build` / `jsui dev`)

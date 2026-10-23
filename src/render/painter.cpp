@@ -50,6 +50,7 @@
 #include "render/image_cache.h"
 #include "render/image_node.h"
 #include "render/lottie.h"
+#include "render/shader_view.h"
 #include "render/paint_counter.h"
 #include "text/font_manager.h"
 #include "text/text_layout.h"
@@ -1120,8 +1121,9 @@ void paintOutline(SkCanvas* c, const Box& b, const ComputedStyle& s) {
 
 sk_sp<SkColorFilter> matrixFilter(const float m[20]) { return SkColorFilters::Matrix(m); }
 
-sk_sp<SkImageFilter> buildFilter(const std::vector<FilterOp>& ops) {
-  sk_sp<SkImageFilter> f;
+// `input`: what the first filter applies to (nullptr: the layer's painting).
+sk_sp<SkImageFilter> buildFilter(const std::vector<FilterOp>& ops, sk_sp<SkImageFilter> input = nullptr) {
+  sk_sp<SkImageFilter> f = std::move(input);
   for (const FilterOp& op : ops) {
     float a = op.amount;
     sk_sp<SkColorFilter> cf;
@@ -1214,7 +1216,7 @@ SkBlendMode blendMode(uint8_t i) {
 
 bool clipsChildren(const Node* n) {
   return n->style().overflow != Overflow::Visible || n->type() == NodeType::ScrollView ||
-         n->type() == NodeType::Image || n->type() == NodeType::Lottie;
+         n->type() == NodeType::Image || n->type() == NodeType::Lottie || n->type() == NodeType::Shader;
 }
 
 bool paintsChildren(const Node* n) {
@@ -1660,6 +1662,7 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
       image::paint(n, c, b.inner.rect(), b.inner);
   }
   if (n->type() == NodeType::Lottie) lottie::paint(n, c, b.inner.rect(), b.inner);
+  if (n->type() == NodeType::Shader) shader::paint(n, c, b.inner.rect(), b.inner);
 
   if (paintsChildren(n) && (!n->children().empty() || !n->ghosts.empty())) {
     bool clip = clipsChildren(n);
@@ -1885,7 +1888,9 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
     c->restoreToCount(saveCount);
     return;
   }
-  bool layer = opacity < 1 || !s.filters.empty() || s.blendMode != 0;
+  // A ShaderView whose shader post-processes its own painting (`content`).
+  bool contentShader = n->type() == NodeType::Shader && shader::wantsContent(n);
+  bool layer = opacity < 1 || !s.filters.empty() || s.blendMode != 0 || contentShader;
   // A node whose draws do not overlap (one background colour or gradient, no
   // children; see opacityFoldable) applies its opacity to each draw: the same
   // pixels as a layer (up to rounding), without allocating, clearing and
@@ -1901,7 +1906,7 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   bool raster = ctx.layers && ctx.layers->impl->raster && !layer && alpha >= 1 && n->paintCache &&
                 static_cast<const NodeRecord*>(n->paintCache.get())->rasterOn;
   if (ctx.layers && (raster || (layer && ctx.opacityLayers && ctx.layers->impl->opacityLayers && s.filters.empty() &&
-                                !s.blendMode))) {
+                                !s.blendMode && !contentShader))) {
     ctx.snapSpace = p.snapSpace;
     ctx.transformed |= p.transformed;
     bool drawn = paintCachedLayer(n, c, ctx, opacity, p, raster);
@@ -1915,7 +1920,16 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   if (layer) {
     SkPaint lp;
     lp.setAlphaf(opacity);
-    if (!s.filters.empty()) lp.setImageFilter(buildFilter(s.filters));
+    sk_sp<SkImageFilter> filter;
+    if (contentShader) {
+      filter = shader::contentFilter(n, SkRect::MakeWH(p.w, p.h));
+      // The shader's output covers the whole layer: keep it in the border box.
+      Box b;
+      computeBox(n, p.w, p.h, &b);
+      clipRRect(c, b.outer);
+    }
+    if (!s.filters.empty()) filter = buildFilter(s.filters, std::move(filter));
+    if (filter) lp.setImageFilter(std::move(filter));
     if (s.blendMode) lp.setBlendMode(blendMode(s.blendMode));
     SkRect bounds = visualBounds(n);
     c->saveLayer(&bounds, &lp);
@@ -2153,7 +2167,7 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
   bool isolatable = true;
   SkIRect full = SkIRect::MakeEmpty();  // `sub` without the clips of ancestors
   uint64_t kids = childListHash(n);
-  uint32_t gen = n->type() == NodeType::Image ? imageGen : 0;
+  uint32_t gen = n->type() == NodeType::Image || n->type() == NodeType::Shader ? imageGen : 0;
   bool contentChanged = false;
   // Whether the node's own paint state changed (then the whole subtree's old
   // and new rects are damaged, below); if it only moved, its own rects are
@@ -2312,6 +2326,9 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
       int e = int(std::ceil(fe * std::max(1.f, m.getMaxScale())));
       full.outset(e, e);
     }
+    // A shader post-processing the subtree may move any of its pixels
+    // anywhere in the view: a change inside repaints all of it.
+    if (below && n->type() == NodeType::Shader && shader::wantsContent(n)) addDamage(damage, sub);
   } else {
     checkContent();
     for (Node* ch : n->ghosts) clearPaintTree(ch);

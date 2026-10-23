@@ -24,6 +24,7 @@ enum class NodeType : uint8_t {
   ScrollView,  // "ScrollView" - View with a scrollable content offset
   TextInput,   // "TextInput"
   Lottie,      // "LottieView" - plays a Lottie composition (render/lottie.h)
+  Shader,      // "ShaderView" - painted by an SkSL shader (render/shader_view.h)
 };
 
 // Parses the element type names used by the reconciler ("View", "Text", ...).

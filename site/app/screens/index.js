@@ -16,6 +16,7 @@ import * as Loading from './loading.jsx';
 import * as Notifications from './notifications.jsx';
 import * as Cinematic from './cinematic.jsx';
 import * as Victory from './victory.jsx';
+import * as Rift from './rift.jsx';
 
 const mod = (m) => ({ component: m.default, feature: m.feature || null });
 
@@ -96,6 +97,13 @@ export const SCREENS = [
     ...mod(Victory),
     accent: '#ffd36b',
     blurb: 'End-of-match rewards around Lottie animations played natively: segments, scrubbing, team colors, looping icons.',
+  },
+  {
+    id: 'rift',
+    title: 'Rift',
+    ...mod(Rift),
+    accent: '#b46bff',
+    blurb: 'Champion select where everything that glows is your own SkSL shader: nebula, portal, hologram card, post-processed UI, live editing.',
   },
 ];
 
