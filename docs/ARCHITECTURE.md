@@ -378,6 +378,27 @@ used to process Dawn events).
   animates during the fade. `webgpu: fading and moving layers` in the
   browser tests checks no offscreen passes and pixels equal to plain
   layers.
+* **Raster cache.** Damage under or over a subtree that does not change
+  repaints it draw by draw: on `interactions.jsx` the glow drifting behind
+  the top bar repainted the top bar, the menu, the carousel and the top of
+  the armory panel (~75 nodes) every frame. Like Flutter's raster cache, a
+  subtree (4+ nodes, no blend mode reaching what is below it, not inside a
+  plain layer) that damage reached in two consecutive damaged frames with
+  its stamp unchanged is drawn from a texture of it (the same `LayerCache`
+  entries and stamps as composited layers, at opacity 1), until its stamp
+  changes, it scales, or no damage reached it for 120 damaged frames
+  (`updateRasterCache` in `painter.cpp`). A texture that would be mostly
+  hidden (a scroll view's whole content behind its viewport) is not made.
+  The texture is the subtree's draws composited as a group: equal to
+  painting them directly up to rounding where it is translucent. So that a
+  retained frame still equals a full repaint, the state follows the damage
+  only (never what a frame happened to paint), and the whole subtree is
+  repainted whenever it switches. On `interactions.jsx` at 1280x720 a
+  steady frame went from ~70 draws to ~30 (main thread ~2.7 to ~2.2 ms per
+  awaited frame, SwiftShader); scrolling the armory list draws each row
+  from its texture (~136 to ~65 draws). `JSUI_WEBGPU_NO_RASTER_CACHE` turns
+  it off; `webgpu: raster cache` in the browser tests compares it with
+  direct painting.
 * **What each pass is** (`interactions.jsx`, `frame-bench.mjs` lists them
   with GPU times). Steady (the looping glow, deploy pulse, live dot and
   progress shimmer): one pass, the canvas (cleared, the last frame drawn

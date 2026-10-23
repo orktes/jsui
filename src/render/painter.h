@@ -112,6 +112,9 @@ class LayerCache {
   LayerCache(const LayerCache&) = delete;
   LayerCache& operator=(const LayerCache&) = delete;
   void clear();
+  // What it caches: opacity layers and / or raster-cached subtrees (see
+  // updateRasterCache in painter.cpp). Both by default.
+  void setModes(bool opacityLayers, bool raster);
   // After a frame: frees layers unused for a while, and the least recently
   // used ones over the budget.
   void endFrame();

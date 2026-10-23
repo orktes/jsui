@@ -1323,6 +1323,21 @@ struct NodeRecord : Node::Cache {
   // The cached layer was last drawn at a whole-pixel offset from where the
   // node is (while it moved); repainted exactly once it stops.
   mutable bool layerInexact = false;
+  // Raster cache (see updateRasterCache): painted nodes in the subtree,
+  // whether it paints the same into a texture of its own (no blend modes),
+  // and its state: drawn from its texture (rasterOn), the consecutive
+  // damaged frames that reached it (rasterHits, the last one rasterLast)
+  // and its bounds when last drawn from it.
+  uint32_t subtreeNodes = 0;
+  bool isolatable = true;
+  SkIRect subtreeFull = SkIRect::MakeEmpty();  // `subtree` without the clips of ancestors
+  bool rasterOn = false;
+  uint8_t rasterHits = 0;
+  uint32_t rasterLast = 0;
+  SkIRect rasterBounds = SkIRect::MakeEmpty();
+  // visualBounds() for layerStamp `vbStamp`.
+  mutable uint64_t vbStamp = 0;
+  mutable SkRect vb = SkRect::MakeEmpty();
 };
 
 // A node with anti-aliased curved or diagonal outlines, in device pixels.
@@ -1346,6 +1361,8 @@ struct RootRecord : NodeRecord {
   ShadowCache shadows;
   SpriteCache sprites;
   bool counting = false;                                     // setPaintCounting
+  std::vector<NodeRecord*> rasterCandidates;                 // this frame's (see updateRasterCache)
+  uint32_t damagedFrames = 0;                                // updates that found damage
 };
 
 ShadowCache& shadowCache(RootRecord* root) { return root->shadows; }
@@ -1370,6 +1387,7 @@ struct Ctx {
   bool transformed = false;  // a transform applies (node or ancestor)
   float alpha = 1;           // the painted node's opacity, when folded into its one draw
   LayerCache* layers = nullptr;  // composited opacity layers (null: plain layers)
+  bool inLayer = false;          // painting into a plain layer (no raster-cached subtrees, see updateRasterCache)
 };
 
 sk_sp<SkMaskFilter> cachedBlur(RootRecord* root, float blur) {
@@ -1656,6 +1674,8 @@ struct LayerCache::Impl {
   std::unordered_map<const Node*, Entry> entries;
   size_t bytes = 0, budget = 0;
   uint32_t frame = 0;
+  bool opacityLayers = true;  // composite cached opacity layers
+  bool raster = true;         // raster-cached subtrees (see updateRasterCache)
   static size_t sizeOf(const Entry& e) { return e.image ? size_t(e.image->width()) * e.image->height() * 4 : 0; }
   void erase(std::unordered_map<const Node*, Entry>::iterator it) {
     bytes -= sizeOf(it->second);
@@ -1672,6 +1692,10 @@ LayerCache::~LayerCache() = default;
 void LayerCache::clear() {
   impl->entries.clear();
   impl->bytes = 0;
+}
+void LayerCache::setModes(bool opacityLayers, bool raster) {
+  impl->opacityLayers = opacityLayers;
+  impl->raster = raster;
 }
 size_t LayerCache::bytes() const { return impl->bytes; }
 int LayerCache::size() const { return int(impl->entries.size()); }
@@ -1695,11 +1719,25 @@ LayerCacheScope::~LayerCacheScope() { tLayerCache = prev_; }
 
 namespace {
 
+constexpr int kMaxLayerSide = 4096;  // cached layer textures
+
+// visualBounds(n), computed once per layer stamp (it walks the subtree, and
+// changes only with what the stamp covers).
+const SkRect& stampedVisualBounds(Node* n, const NodeRecord* rec) {
+  if (rec->vbStamp != rec->layerStamp) {
+    rec->vb = visualBounds(n);
+    rec->vbStamp = rec->layerStamp;
+  }
+  return rec->vb;
+}
+
 // Paints node `n` (its canvas already at the node's local space, ctx set up
 // as paintNode does) through its cached layer: draws the cached texture at
 // `opacity`, rendering it first when it is stale. False when the layer
-// cannot be cached here (the caller paints a plain layer).
-bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Placement& p) {
+// cannot be cached here (the caller paints a plain layer). `raster`: a
+// subtree without a layer of its own (see updateRasterCache), false when
+// it cannot be drawn from a texture (the caller paints it directly).
+bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Placement& p, bool raster = false) {
   LayerCache::Impl& lc = *ctx.layers->impl;
   auto* rec = static_cast<const NodeRecord*>(n->paintCache.get());
   if (!rec || !rec->valid || !rec->layerStamp) return false;
@@ -1708,8 +1746,8 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
   if (!owner) return false;
   const SkMatrix m = c->getTotalMatrix();
   if (m.hasPerspective()) return false;
-  SkRect vb = visualBounds(n);
-  constexpr int kMaxSide = 4096;
+  SkRect vb = stampedVisualBounds(n, rec);
+  constexpr int kMaxSide = kMaxLayerSide;
   SkIRect full = m.mapRect(vb).roundOut(), need;
   if (!need.intersect(full, SkIRect::MakeSize(c->getBaseLayerSize()))) return true;  // offscreen
   if (c->quickReject(vb)) return true;
@@ -1737,6 +1775,9 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
     // texture of the whole layer every frame would cost more than a layer
     // clipped to the damage.
     if (rec->stableFrames < 1) return false;
+    // A subtree scaling (a button springing): painting it directly costs
+    // less than a texture of it at every scale.
+    if (raster && rec->scaling) return false;
     // The whole layer when it fits, so it can move into view without
     // being rendered again.
     if (full.width() <= kMaxSide && full.height() <= kMaxSide &&
@@ -1824,10 +1865,13 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   }
   SkMatrix parentSnap = ctx.snapSpace;
   bool parentTransformed = ctx.transformed;
-  if (layer && ctx.layers && s.filters.empty() && !s.blendMode) {
+  // A raster-cached subtree (see updateRasterCache), or a cached layer.
+  bool raster = ctx.layers && ctx.layers->impl->raster && !layer && alpha >= 1 && !ctx.inLayer && n->paintCache &&
+                static_cast<const NodeRecord*>(n->paintCache.get())->rasterOn;
+  if (ctx.layers && (raster || (layer && ctx.layers->impl->opacityLayers && s.filters.empty() && !s.blendMode))) {
     ctx.snapSpace = p.snapSpace;
     ctx.transformed |= p.transformed;
-    bool drawn = paintCachedLayer(n, c, ctx, opacity, p);
+    bool drawn = paintCachedLayer(n, c, ctx, opacity, p, raster);
     ctx.snapSpace = parentSnap;
     ctx.transformed = parentTransformed;
     if (drawn) {
@@ -1846,7 +1890,10 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   ctx.snapSpace = p.snapSpace;
   ctx.transformed |= p.transformed;
   ctx.alpha = alpha;
+  bool parentInLayer = ctx.inLayer;
+  ctx.inLayer |= layer;
   paintContent(n, c, ctx, p.snap, p.w, p.h);
+  ctx.inLayer = parentInLayer;
   ctx.alpha = 1;
   ctx.snapSpace = parentSnap;
   ctx.transformed = parentTransformed;
@@ -1942,6 +1989,61 @@ bool startBlitScan(Node* n, const NodeRecord* rec, const SkMatrix& m, float w, f
   return true;
 }
 
+// Raster cache (GPU canvases, with a LayerCache): a subtree that keeps
+// being repainted while nothing in it changes (damage from something moving
+// over or under it: a glow drifting behind a top bar and the panels below
+// it) is drawn from a texture of it, one draw instead of every node's. Like
+// a cached layer the texture holds the subtree as painted relative to the
+// node, and is drawn while only the node's device position changes (whole
+// pixels; the nearest one while it moves, repainted exactly once it stops).
+// A candidate paints the same into a texture of its own (no blend modes
+// reaching what is below), has a few nodes and is not inside a plain layer.
+// Compositing its texture is source-over of the same draws regrouped: equal
+// to painting them directly up to rounding (a level or two where the
+// subtree is translucent). So that every repaint gives the same pixels
+// however much of the frame it covers (the retained frame equals a full
+// repaint), the state follows the damage only, never what was painted: a
+// subtree is drawn from its texture once damage reached it in two
+// consecutive damaged frames with its stamp unchanged (a one-off repaint
+// does not pay for a texture), until its stamp changes or no damage reached
+// it for a while, and it is repainted whole whenever that switches.
+constexpr uint32_t kRasterMinNodes = 4;
+constexpr uint32_t kRasterIdleFrames = 120;  // damaged frames without reaching it
+thread_local std::vector<NodeRecord*>* tRasterCandidates = nullptr;
+
+void updateRasterCache(RootRecord* root, SkRegion* damage, const SkIRect& screen) {
+  root->damagedFrames++;
+  const uint32_t frame = root->damagedFrames;
+  SkRegion base(*damage);  // what reached each subtree, before the switches below
+  auto area = [](const SkIRect& r) { return int64_t(r.width()) * r.height(); };
+  for (NodeRecord* rec : root->rasterCandidates) {
+    // Mostly visible: a texture of a scroll view's whole content (hidden by
+    // the viewport but for a part) costs more to render than it saves. The
+    // texture is the whole subtree when it fits (paintCachedLayer).
+    const SkIRect& f = rec->subtreeFull;
+    SkIRect tex = f;
+    if (f.width() > kMaxLayerSide || f.height() > kMaxLayerSide) tex.intersect(screen);
+    bool visible = !rec->subtree.isEmpty() && area(tex) <= 2 * area(rec->subtree);
+    bool stable = visible && rec->stableFrames >= 1 && !rec->scaling;
+    bool hit = base.intersects(rec->subtree);
+    if (hit) {
+      rec->rasterHits = rec->rasterLast + 1 == frame ? uint8_t(std::min(rec->rasterHits + 1, 255)) : 1;
+      rec->rasterLast = frame;
+    }
+    bool on = rec->rasterOn;
+    if (!stable) on = false;
+    else if (!on) on = hit && rec->rasterHits >= 2;
+    else if (frame - rec->rasterLast > kRasterIdleFrames) on = false;
+    if (on != rec->rasterOn) {
+      damage->op(rec->subtree, SkRegion::kUnion_Op);
+      damage->op(rec->rasterBounds, SkRegion::kUnion_Op);
+      rec->rasterOn = on;
+    }
+    if (!stable) rec->rasterHits = 0;
+    rec->rasterBounds = on ? rec->subtree : SkIRect::MakeEmpty();
+  }
+}
+
 // Walks the tree like paintNode (same matrices and snapping), refreshes each
 // node's record and adds what changed since the last frame to `damage`.
 // Returns the node's device subtree bounds.
@@ -1956,15 +2058,22 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
   SkMatrix local;
   SkVector snap = {0, 0};
   bool below = false;  // a descendant's painting changed in its parent's space
+  uint32_t subtreeNodes = painted ? 1 : 0;
+  bool isolatable = true;
+  SkIRect full = SkIRect::MakeEmpty();  // `sub` without the clips of ancestors
   if (painted) {
     const ComputedStyle& s = n->style();
+    // A blend mode composites with what is below the node.
+    isolatable = !s.blendMode;
     Placement p = place(n, parentSnap);
     m.preConcat(p.local);
     w = p.w;
     h = p.h;
     local = p.local;
     snap = p.snap;
-    if (!own.intersect(deviceBounds(m, ownVisualBounds(n, w, h)), clip)) own.setEmpty();
+    const SkIRect ownFull = deviceBounds(m, ownVisualBounds(n, w, h));
+    full = ownFull;
+    if (!own.intersect(ownFull, clip)) own.setEmpty();
     if (!own.isEmpty()) {
       SkRect co = curvedOutline(n, m, w, h);
       SkIRect ci;
@@ -2023,6 +2132,12 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
         sub.join(updateRecords(ch, cm, cs, childClip, imageGen, childDamage, curved, scan));
         auto* cr = static_cast<const NodeRecord*>(ch->paintCache.get());
         below |= !cr || cr->relChanged;
+        if (cr) {
+          subtreeNodes += cr->subtreeNodes;
+          isolatable &= cr->isolatable;
+          SkIRect cf = cr->subtreeFull;
+          if (!clipsChildren(n) || cf.intersect(deviceBounds(m, SkRect::MakeWH(w, h)))) full.join(cf);
+        }
       };
       for (Node* ch : n->ghosts) visit(ch);
       for (Node* ch : n->children()) visit(ch);
@@ -2036,6 +2151,10 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
       int e = int(std::ceil(fe * std::max(1.f, m.getMaxScale())));
       SkIRect grown = sub.makeOutset(e, e);
       if (!sub.intersect(grown, clip)) sub.setEmpty();
+    }
+    if (fe > 0 && !full.isEmpty()) {
+      int e = int(std::ceil(fe * std::max(1.f, m.getMaxScale())));
+      full.outset(e, e);
     }
   }
   // TextInput caret blink / move: only the caret's old and new rects.
@@ -2123,6 +2242,10 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
   rec->h = h;
   rec->painted = painted;
   rec->valid = true;
+  rec->subtreeNodes = subtreeNodes;
+  rec->isolatable = isolatable;
+  rec->subtreeFull = full;
+  if (tRasterCandidates && painted && isolatable && subtreeNodes >= kRasterMinNodes) tRasterCandidates->push_back(rec);
   return sub;
 }
 
@@ -2299,7 +2422,14 @@ SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBl
   root->curved.clear();
   BlitScan scan;
   scan.enabled = blit && damage.isEmpty();
+  const bool raster = tLayerCache && tLayerCache->impl->raster;
+  root->rasterCandidates.clear();
+  tRasterCandidates = raster ? &root->rasterCandidates : nullptr;
   updateRecords(doc.root(), m, m, screen, imageGen, &damage, &root->curved, &scan);
+  tRasterCandidates = nullptr;
+  // Frames without damage leave the raster cache as it is (a host may
+  // update the records of an unchanged frame or not).
+  if (raster && !damage.isEmpty()) updateRasterCache(root, &damage, screen);
   if (scan.node) {
     // Scroll blit: the viewport's pixels move with the content, so only
     // what the scroll exposes repaints, plus what is painted above the
