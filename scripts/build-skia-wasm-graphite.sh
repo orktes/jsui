@@ -32,6 +32,14 @@
 # Dawn *native* with CMake, which is meaningless where the browser is the
 # WebGPU implementation.
 #
+# Three changes for JSUI's frames, marked "jsui:" (docs/ARCHITECTURE.md,
+# WebGPU): DawnResourceProvider caches uniform bind groups (without push
+# constants Graphite made one per pipeline / uniform change); ClipStack
+# applies a whole-pixel device rect clip as a scissor instead of cropping
+# draws to it or merging it into other clip shapes; Device rasterizes paths
+# up to 1024 px whole into the path atlas instead of cut to the clip. The
+# last two keep damage-only repaints identical to full ones.
+#
 # SIMD: as build-skia-wasm.sh (SKIA_WASM_SIMD=1, its default), Skia is built
 # with -msimd128 -msse4.1 so the raster pipeline runs its SSE4.1 stages on
 # WASM SIMD128; the patch also drops SKVX_DISABLE_SIMD (m157's name for
