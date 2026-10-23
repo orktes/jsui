@@ -188,6 +188,11 @@ class NativeAnimated {
 
   Document& doc_;
   std::unordered_map<int, ANode> nodes_;
+  std::vector<int> propsNodes_;  // tags of the Props nodes in nodes_
+  // flush() scratch, kept between frames.
+  std::unordered_set<int> seen_;
+  std::vector<int> stack_;
+  std::vector<ANode*> props_;
   std::vector<Anim> animations_;
   std::vector<Mapping> mappings_;
   std::unordered_set<int> listening_;
