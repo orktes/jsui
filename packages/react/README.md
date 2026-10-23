@@ -105,6 +105,15 @@ resizeMode="contain" style={...} />` shows texture `name` like an `Image`
 keys / subscribe` read the same. New contents repaint the view without any
 JS.
 
+Lottie: `<LottieView source={require('./anim.json')} autoPlay loop />` with
+lottie-react-native's props (`source` as an object, JSON text or `{uri}`,
+`progress` (also an `Animated` value, on the native driver too), `speed`,
+`loop`, `autoPlay`, `resizeMode`, `colorFilters`, `onAnimationLoaded`,
+`onAnimationFinish`, `onAnimationFailure`) and ref methods (`play(start?,
+end?)`, `pause`, `resume`, `reset`). The runtime plays it with Skia's Skottie:
+no JS per frame. `import LottieView from 'lottie-react-native'` works too
+(the CLI aliases it).
+
 Focus props on any element: `focusable`, `autoFocus`, `hasTVPreferredFocus`,
 `onFocus`, `onBlur`, `onKeyDown` / `onKeyUp` (RN-web style: `e.key`,
 `e.code`, modifiers), `nextFocusUp/Down/Left/Right`. Pressables are focusable

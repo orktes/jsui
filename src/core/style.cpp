@@ -1509,8 +1509,9 @@ enum PaintGroup : uint32_t {
   kGroupBlend = 1u << 16,
   kGroupOutline = 1u << 17,
   kGroupText = 1u << 18,
+  kGroupLottie = 1u << 19,
 };
-constexpr uint32_t kAllPaintGroups = (1u << 19) - 1;
+constexpr uint32_t kAllPaintGroups = (1u << 20) - 1;
 
 struct PaintKey {
   const char* key;
@@ -1558,6 +1559,7 @@ constexpr PaintKey kPaintKeys[] = {
     {"fontWeight", kGroupText},
     {"letterSpacing", kGroupText},
     {"lineHeight", kGroupText},
+    {"lottieProgress", kGroupLottie},
     {"mixBlendMode", kGroupBlend},
     {"objectFit", kGroupResizeMode},
     {"opacity", kGroupOpacity},
@@ -1728,6 +1730,13 @@ void applyPaintGroups(const StyleMap& s, uint32_t groups, ComputedStyle* out, fl
   if (groups & kGroupText) {
     out->text = TextStyle();
     parseTextStyle(s, &out->text);
+  }
+  if (groups & kGroupLottie) {
+    out->lottieProgress = kDefault.lottieProgress;
+    if (s["lottieProgress"].isNumber()) {
+      double p = s["lottieProgress"].asNumber();
+      if (p == p) out->lottieProgress = float(std::clamp(p, 0.0, 1.0));
+    }
   }
 }
 

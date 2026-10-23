@@ -14,8 +14,9 @@
 #
 # The gn args follow modules/canvaskit/compile.sh (CPU variant): FreeType
 # (bundled), HarfBuzz + ICU shaping (skshaper/skunicode/skparagraph), PNG/JPEG/
-# WebP/GIF decode, PNG encode, no fontconfig/expat/system libs, no PDF/SVG/
-# Skottie. The default build has no GPU backend; WEBGL=1 adds Ganesh with the
+# WebP/GIF decode, PNG encode, no fontconfig/expat/system libs, no PDF/SVG.
+# Skottie (Lottie, LottieView) is built too. The default build has no GPU
+# backend; WEBGL=1 adds Ganesh with the
 # WebGL GL standard like canvaskit's default (GPU) variant (skia_enable_ganesh,
 # skia_use_webgl, skia_gl_standard="webgl"; JSUI links it with
 # -sMAX_WEBGL_VERSION=2). Optimised with -O3 (frame time beats a few hundred KB
@@ -205,7 +206,7 @@ skia_use_lua=false
 
 skia_enable_pdf=false
 skia_enable_svg=false
-skia_enable_skottie=false
+skia_enable_skottie=true
 skia_enable_tools=false
 skia_enable_spirv_validation=false
 "
@@ -215,7 +216,7 @@ ARGS="$(echo "$ARGS" | sed '/^$/d' | tr '\n' ' ')"
 echo "gn args: $ARGS"
 bin/gn gen "$BUILD_DIR" --args="$ARGS"
 
-TARGETS="skia skparagraph skshaper skunicode"
+TARGETS="skia skparagraph skshaper skunicode skottie sksg"
 nice ninja -C "$BUILD_DIR" -j "$JOBS" $TARGETS
 
 # ---------------------------------------------------------------- install
@@ -245,7 +246,7 @@ cp "$BUILD_DIR/args.gn" "$OUT_DIR.tmp/out/args.gn"
 # SK_SHAPER_HARFBUZZ_AVAILABLE, SK_UNICODE_ICU_IMPLEMENTATION, ...). They change
 # public headers, so consumers must compile with exactly these.
 : > "$OUT_DIR.tmp/out/defines.txt"
-for target in //:skia //modules/skshaper:skshaper //modules/skunicode:skunicode //modules/skparagraph:skparagraph; do
+for target in //:skia //modules/skshaper:skshaper //modules/skunicode:skunicode //modules/skparagraph:skparagraph //modules/skottie:skottie; do
   for config in $(bin/gn desc "$BUILD_DIR" "$target" public_configs); do
     bin/gn desc "$BUILD_DIR" "$config" defines >> "$OUT_DIR.tmp/out/defines.txt"
   done

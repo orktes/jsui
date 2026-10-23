@@ -191,7 +191,7 @@ skia_use_lua=false
 
 skia_enable_pdf=false
 skia_enable_svg=false
-skia_enable_skottie=false
+skia_enable_skottie=true
 skia_enable_tools=false
 skia_enable_spirv_validation=false
 skia_use_partition_alloc=false
@@ -200,7 +200,7 @@ ARGS="$(echo "$ARGS" | sed '/^$/d' | tr '\n' ' ')"
 echo "gn args: $ARGS"
 bin/gn gen "$BUILD_DIR" --args="$ARGS"
 
-TARGETS="${SKIA_TARGETS:-skia skparagraph skshaper skunicode}"
+TARGETS="${SKIA_TARGETS:-skia skparagraph skshaper skunicode skottie sksg}"
 nice ninja -C "$BUILD_DIR" -j "$JOBS" $TARGETS
 [ -n "${SKIA_TARGETS:-}" ] && exit 0  # partial build (debugging the patch)
 
@@ -234,7 +234,7 @@ echo "$EMSDK_VERSION" > "$OUT_DIR.tmp/out/emsdk-version.txt"
 echo "$SKIA_BRANCH $SKIA_COMMIT" > "$OUT_DIR.tmp/out/skia-version.txt"
 
 : > "$OUT_DIR.tmp/out/defines.txt"
-for target in //:skia //modules/skshaper:skshaper //modules/skunicode:skunicode //modules/skparagraph:skparagraph; do
+for target in //:skia //modules/skshaper:skshaper //modules/skunicode:skunicode //modules/skparagraph:skparagraph //modules/skottie:skottie; do
   for config in $(bin/gn desc "$BUILD_DIR" "$target" public_configs); do
     bin/gn desc "$BUILD_DIR" "$config" defines >> "$OUT_DIR.tmp/out/defines.txt"
   done

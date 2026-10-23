@@ -957,6 +957,58 @@ const size = useHostTexture('trailer');   // { width, height } once set, else nu
   passes the RenderingDevice texture behind any `Texture2D` (or its pixels
   on the CPU path).
 
+### Lottie (LottieView)
+
+Lottie (Bodymovin JSON) animations play natively with Skia's Skottie
+module (`src/render/lottie.*`, `packages/react/src/lottie.js`). The API is
+lottie-react-native's; the CLI aliases `lottie-react-native` to it:
+
+```jsx
+import LottieView from 'lottie-react-native';
+<LottieView source={require('./victory.json')} autoPlay loop style={{ width: 200, height: 200 }} />
+<LottieView source={{ uri: 'https://example.com/a.json' }} progress={animatedValue} colorFilters={[{ keypath: '**.Fill 1', color: '#f00' }]} />
+ref.current.play(30, 60); ref.current.pause(); ref.current.resume(); ref.current.reset();
+```
+
+* `LottieView` is a host node (`NodeType::Lottie`, "LottieView"). Sources:
+  `{uri}` / URI strings load through the `ResourceLoader` (files, http, data:
+  URIs, the embedder's loader); inline compositions (`require('./a.json')`,
+  an object or JSON text) go to native once with `lottieData(json)`, which
+  returns a content-hash key the view uses as its source. `LottieCache` (one
+  per runtime) parses a composition once per source and colorFilters set and
+  shares it between views (each paint seeks it, then renders).
+* Playback runs on the runtime clock: `LottieCache::tick()` (in `jsui_tick`
+  and `jsui_tick_native`, before layout) advances playing views and calls
+  `markPaintDirty()` on just those nodes, so a playing animation repaints its
+  own rect and runs no JS. `autoPlay` starts it once the source loads;
+  `loop` (default true), `speed` (negative plays backwards) and segments
+  (`play(startFrame, endFrame)`, end < start plays down) follow
+  lottie-react-native. Calls made before the load apply when it loads.
+  `wantsFrame` is true only while a view plays.
+* `progress` (0–1) shows that frame instead of playing. It travels as the
+  paint-only style key `lottieProgress` (its own style group, no relayout),
+  so an `Animated` value drives it like any animated style, on the JS or the
+  native driver; `createAnimatedComponent(LottieView)` maps an animated
+  `progress` prop to it (`Component.__animatedStyleProps`).
+* Without a size the view takes the composition's size (keeping its aspect
+  ratio when one side is set); `resizeMode` contain (default), cover, center
+  or stretch place it in the padding box, clipped to rounded corners.
+* `colorFilters`: `[{keypath, color}]` override solid fills and strokes
+  (Skottie `PropertyObserver` color handles, re-applied after every seek).
+  A keypath's dot-separated names ("*" one, "**" any) must match, in order,
+  names along a property's path (layers, groups, the fill / stroke itself);
+  names in between may be skipped, so `"Layer"` recolors a whole layer.
+  Gradients are not color properties.
+* Events: `load` (onAnimationLoaded), `error` (onAnimationFailure, also for
+  JSON that is not a composition) and `animationfinish` (onAnimationFinish,
+  `isCancelled` when `play` / `reset` interrupt a non-looping segment).
+* Embedded images (data: URIs) and fonts registered with the runtime work;
+  external image assets, expressions and dotLottie (.lottie) archives do not.
+* Build: `JSUI_LOTTIE` (default on when the Skia build has `libskottie`;
+  every `scripts/build-skia-*.sh` and the aseprite prebuilt do). It adds
+  about 360 KB to `jsui.wasm` (~90 KB brotli; ~136 KB brotli on the m157
+  WebGPU build). Off, sources fail with an error and nothing is linked.
+
 ## JS bridge contract
 
 Native globals (installed by `JsEngine`):
@@ -965,7 +1017,7 @@ Native globals (installed by `JsEngine`):
 | --- | --- |
 | `__jsui_native.rootId` | id of the root container node |
 | `__jsui_native.devMode` | `true` when the runtime runs with `cfg.dev_mode` |
-| `createNode(type, rootTag?) → id` | `type` ∈ `View`, `Text`, `RawText`, `Image`, `ScrollView`, `TextInput`; created in the document of surface `rootTag` (default: the main one; see "Surfaces") |
+| `createNode(type, rootTag?) → id` | `type` ∈ `View`, `Text`, `RawText`, `Image`, `ScrollView`, `TextInput`, `LottieView`; created in the document of surface `rootTag` (default: the main one; see "Surfaces") |
 | `viewport(rootTag?) → {width, height, scale}` | logical size of a surface (default: the main one) |
 | `surfaceApp(rootTag) → {appKey, initialProps} \| null` | the app the host picked for a surface |
 | `setProps(id, props)` | replaces all props; `props.style` is a **flattened** style object; functions are dropped; `props.__events` lists event names the element listens to (e.g. `["press","pointerMove","layout"]`) |
@@ -979,6 +1031,8 @@ Native globals (installed by `JsEngine`):
 | `focus(id)`, `blur(id)` | `InputManager::focus` / `blur` |
 | `scrollTo(id, x, y, animated)` | `InputManager::scrollTo` (clamped, dispatches `scroll`). `animated`: eases there on the runtime clock; otherwise immediate (and stops a running fling) |
 | `flashScrollIndicators(id)` | shows a ScrollView's overlay indicators for ~1 s |
+| `lottieData(json) → key` | hands an inline Lottie composition to native once; LottieViews use the key (content hash) as their `source`. `lottie`: `true` when the build plays Lottie |
+| `lottieCommand(id, cmd, a, b) → bool` | LottieView `play` (frames `a`–`b`, undefined: the whole composition) / `pause` / `resume` / `reset` |
 | `postMessage(name, json)` | to the embedder's `on_message`. A string is passed through as the JSON text; any other value is `JSON.stringify`-ed |
 | `getState(key) → json \| undefined`, `stateVersion(key) → number`, `stateKeys() → [key]` | shared host state (see "Game data"); version 0 = unset |
 | `statePatches(key, sinceVersion) → [json] \| undefined` | the merge patches (JSON texts) that took `key` from `sinceVersion` to its current version, oldest first; `undefined` when the bounded log (64 patches / 64 KB since the last `set`) cannot cover the gap. `@orktes/jsui-react` applies them to its cached value instead of re-parsing the whole state after each `jsui_patch_state` |

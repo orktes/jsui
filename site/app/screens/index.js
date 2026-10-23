@@ -15,6 +15,7 @@ import * as Settings from './settings.jsx';
 import * as Loading from './loading.jsx';
 import * as Notifications from './notifications.jsx';
 import * as Cinematic from './cinematic.jsx';
+import * as Victory from './victory.jsx';
 
 const mod = (m) => ({ component: m.default, feature: m.feature || null });
 
@@ -88,6 +89,13 @@ export const SCREENS = [
     ...mod(Cinematic),
     accent: '#ff7a59',
     blurb: 'A trailer player around a video the page streams: the picture is a host texture, everything around it is JSUI.',
+  },
+  {
+    id: 'victory',
+    title: 'Victory',
+    ...mod(Victory),
+    accent: '#ffd36b',
+    blurb: 'End-of-match rewards around Lottie animations played natively: segments, scrubbing, team colors, looping icons.',
   },
 ];
 

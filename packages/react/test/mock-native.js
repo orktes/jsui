@@ -2,6 +2,7 @@
 // bridge call. Import this before @orktes/jsui-react.
 
 const nodes = new Map();
+const lottieKeys = new Map(); // JSON -> key
 const calls = [];
 let nextId = 2;
 const ROOT = 1;
@@ -22,7 +23,7 @@ function detach(n) {
   }
 }
 
-const TYPES = new Set(['View', 'Text', 'RawText', 'Image', 'ScrollView', 'TextInput']);
+const TYPES = new Set(['View', 'Text', 'RawText', 'Image', 'ScrollView', 'TextInput', 'LottieView']);
 
 export const mock = {
   nodes,
@@ -30,6 +31,7 @@ export const mock = {
   focused: null,
   layouts: new Map(),
   messages: [],
+  lottieData: new Map(), // key -> JSON
   reset() {
     calls.length = 0;
   },
@@ -140,6 +142,23 @@ globalThis.__jsui_native = {
   },
   flashScrollIndicators(id) {
     calls.push(['flashScrollIndicators', id]);
+  },
+  // LottieView (src/render/lottie.cpp): inline compositions by key.
+  lottie: true,
+  lottieData(json) {
+    if (typeof json !== 'string') throw new TypeError('lottieData: expected a JSON string');
+    let key = lottieKeys.get(json);
+    if (!key) {
+      key = 'lottie:' + (lottieKeys.size + 1);
+      lottieKeys.set(json, key);
+      mock.lottieData.set(key, json);
+    }
+    calls.push(['lottieData', key]);
+    return key;
+  },
+  lottieCommand(id, cmd, a, b) {
+    calls.push(['lottieCommand', id, cmd, a, b]);
+    return true;
   },
   postMessage(name, json) {
     mock.messages.push([name, json]);

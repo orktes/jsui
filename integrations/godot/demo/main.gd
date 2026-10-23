@@ -541,6 +541,7 @@ func _run_self_test() -> void:
 	await _test_surface()  # with the render hand-off check (--max-render-waits)
 	await _test_runtime_freed_first()
 	await _test_host_textures()
+	await _test_lottie()
 
 	if _tour:
 		await _run_tour()
@@ -870,6 +871,47 @@ func _test_host_textures() -> void:
 	probe.queue_free()
 	if viewport:
 		viewport.queue_free()
+	await get_tree().process_frame
+
+
+## Lottie (LottieView, played natively by Skottie): a LottieProbe (ui/
+## lottie-probe.jsx, 64x32 px) held at progress 0.5 shows its square in the
+## middle on this renderer; one that plays changes its frame on its own (the
+## runtime's clock, no JS per frame).
+func _test_lottie() -> void:
+	var make := func(props: Dictionary, y: float) -> JsuiView:
+		var v := JsuiView.new()
+		v.bundle_url = ui.bundle_url
+		v.component = "LottieProbe"
+		v.initial_props = props
+		v.auto_size = true
+		v.pixel_ratio = 1.0
+		v.pipeline_cache_path = ""
+		v.position = Vector2(96, y)
+		add_child(v)
+		return v
+	var held: JsuiView = make.call({"progress": 0.5}, 112)
+	var blue := Color8(41, 89, 230)
+	var square_at := func(view: JsuiView, x: int) -> bool:
+		var img: Image = view.get_frame_image()
+		if img == null or img.get_size() != PROBE_SIZE:
+			return false
+		var c := img.get_pixel(x, PROBE_SIZE.y / 2)
+		return absi(c.r8 - blue.r8) <= 6 and absi(c.g8 - blue.g8) <= 6 and absi(c.b8 - blue.b8) <= 6 and c.a8 > 250
+	var shown := await _wait_for(func(): return square_at.call(held, 32) and not square_at.call(held, 6), 10.0)
+	_check("lottie", shown, "progress 0.5 draws the square in the middle (%s renderer)" % held.get_renderer())
+	held.queue_free()
+	var playing: JsuiView = make.call({}, 112)
+	var xs := {}
+	var seen_moving := func() -> bool:
+		for x in range(0, PROBE_SIZE.x, 2):
+			if square_at.call(playing, x):
+				xs[x] = true  # the square's left edge this frame
+				break
+		return xs.size() >= 3
+	var moved := await _wait_for(seen_moving, 10.0)
+	_check("lottie playing", moved, "the square was seen at %d places while it plays" % xs.size())
+	playing.queue_free()
 	await get_tree().process_frame
 
 

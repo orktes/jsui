@@ -153,6 +153,12 @@ struct ComputedStyle {
   ResizeMode resizeMode = ResizeMode::Cover;
   std::optional<Color> tintColor;
 
+  // LottieView: the frame shown, as progress through the composition in
+  // [0, 1] (the `progress` prop, which @orktes/jsui-react passes as the
+  // lottieProgress style key so native Animated can drive it); < 0: none,
+  // the view plays on its own.
+  float lottieProgress = -1;
+
   TextStyle text;
 
   // Added by the render area:

@@ -15,6 +15,7 @@
 #include "input/input.h"
 #include "js/engine.h"
 #include "render/image_cache.h"
+#include "render/lottie.h"
 #include "render/image_node.h"
 #include "render/painter.h"
 
@@ -52,6 +53,7 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
     : config(cfg), handle(h), loader(h, cfg.load, cfg.load_user), doc(mainDocument(surfaces_, *this, &nextNodeId_)) {
   if (cfg.base_url) baseUrl = cfg.base_url;
   images = std::make_unique<ImageCache>(*this);
+  lotties = std::make_unique<LottieCache>(*this);
   animated = std::make_unique<NativeAnimated>(doc);
   animated->findView = [this](uint32_t id) { return findNode(id); };
   animated->buffers = &buffers;
@@ -88,6 +90,7 @@ void Runtime::attach(Surface& s) {
   d.fonts = &fonts;
   d.images = images.get();
   d.textures = &textures;
+  d.lotties = lotties.get();
   s.input = std::make_unique<InputManager>(*this, d, s.cursor);
   InputManager* in = s.input.get();
   d.onNodeDestroyed = [this, in](Node* n) {
@@ -432,6 +435,7 @@ void Runtime::reload() {
   loader.cancelAll();
   devPollInFlight_ = false;
   images->clear();  // its in-flight loads were just cancelled
+  lotties->clear();
   lastError.clear();
   resetEngine();
   if (!bundleUrl.empty()) loadUrl(bundleUrl);
@@ -511,6 +515,10 @@ void Runtime::tick(double nowMs) {
   // scroll physics of this tick (Animated.event mappings saw the offsets).
   animated->tick(nowMs);
   deliverAnimatedEvents();
+  // LottieViews advance on the same clock (and a loaded source sizes its
+  // views before this tick's layout).
+  lotties->tick(nowMs);
+  deliverLottieEvents();
   for (auto& s : surfaces_) {
     s->doc.layout();
     s->doc.tickLayoutAnimations(nowMs);
@@ -526,6 +534,7 @@ void Runtime::tickNative(double nowMs) {
   now = nowMs;
   for (auto& s : surfaces_) s->doc.now = nowMs;
   animated->tick(nowMs);  // end events stay queued until the next tick()
+  lotties->tick(nowMs);   // so do LottieView events
   for (auto& s : surfaces_) {
     s->doc.layout();
     s->doc.tickLayoutAnimations(nowMs);
@@ -562,6 +571,24 @@ bool listensFor(const Node* n, const char* token) {
   return false;
 }
 }  // namespace
+
+void Runtime::deliverLottieEvents() {
+  if (!js || lotties->events.empty()) return;
+  std::vector<LottieCache::Event> events = std::move(lotties->events);
+  lotties->events.clear();
+  for (const LottieCache::Event& e : events) {
+    Node* n = findNode(e.node);
+    if (!n || n->type() != NodeType::Lottie) continue;
+    const char* type = e.kind == LottieCache::Event::Kind::Loaded   ? "load"
+                       : e.kind == LottieCache::Event::Kind::Failed ? "error"
+                                                                    : "animationfinish";
+    if (!listensFor(n, e.kind == LottieCache::Event::Kind::Finished ? "animationFinish" : type)) continue;
+    Value::Object ev{{"type", Value(type)}, {"target", Value(double(e.node))}};
+    if (e.kind == LottieCache::Event::Kind::Failed) ev.emplace("error", Value(e.error));
+    if (e.kind == LottieCache::Event::Kind::Finished) ev.emplace("isCancelled", Value(e.cancelled));
+    js->dispatchEvent(Value(std::move(ev)));
+  }
+}
 
 bool Runtime::imageEventsReady(const Document& doc) const {
   for (const auto& e : doc.imageEvents) {
@@ -647,7 +674,7 @@ bool Runtime::wantsFrame() const {
   // A pending repaint alone is not a reason to tick: the host paints after
   // the tick it already ran.
   if (reloadRequested_ || loader.pending() > 0 || (js && js->hasPendingWork(now + 17)) || animated->animating() ||
-      !animated->ends.empty() || state.hasDirty() || buffers.hasDirty() || textures.hasDirty() || !uiResults_.empty() || !doomed_.empty())
+      !animated->ends.empty() || lotties->animating() || state.hasDirty() || buffers.hasDirty() || textures.hasDirty() || !uiResults_.empty() || !doomed_.empty())
     return true;
   for (const auto& s : surfaces_)
     if (s->input->animating() || s->doc.layoutAnimating() || imageEventsReady(s->doc) ||
@@ -658,6 +685,7 @@ bool Runtime::wantsFrame() const {
 
 bool Runtime::animatingFrames(const Surface& s) const {
   return s.input->animating() || s.doc.layoutAnimating() || animated->animating() || !animated->ends.empty() ||
+         lotties->animating() ||
          (js && js->hasPendingWork(now + 17));
 }
 

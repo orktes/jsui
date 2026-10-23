@@ -15,6 +15,7 @@ namespace jsui {
 class FontManager;
 class ImageCache;
 class HostTextures;
+class LottieCache;
 
 // LayoutAnimation (React Native): animates the next layout pass.
 enum class LayoutAnimCurve : uint8_t { Linear, EaseInEaseOut, EaseIn, EaseOut, Spring, Keyboard };
@@ -105,6 +106,7 @@ class Document {
   FontManager* fonts = nullptr;
   ImageCache* images = nullptr;
   HostTextures* textures = nullptr;  // host textures (HostTexture views)
+  LottieCache* lotties = nullptr;    // Lottie sources and playing views (LottieView)
 
   // Called after layout for nodes whose props contain `__events` with
   // "layout" when their layoutRect changed.

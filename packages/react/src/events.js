@@ -37,6 +37,7 @@ const TYPES = {
   load: ['onLoad', false, true],
   error: ['onError', false, true],
   progress: ['onProgress', false, false],
+  animationfinish: ['onAnimationFinish', false, true],
   gamepadbutton: ['onGamepadButton', true, true],
   gamepadaxis: ['onGamepadAxis', true, false],
 };

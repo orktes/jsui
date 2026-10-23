@@ -49,6 +49,7 @@
 #include "modules/skparagraph/include/Paragraph.h"
 #include "render/image_cache.h"
 #include "render/image_node.h"
+#include "render/lottie.h"
 #include "render/paint_counter.h"
 #include "text/font_manager.h"
 #include "text/text_layout.h"
@@ -1213,7 +1214,7 @@ SkBlendMode blendMode(uint8_t i) {
 
 bool clipsChildren(const Node* n) {
   return n->style().overflow != Overflow::Visible || n->type() == NodeType::ScrollView ||
-         n->type() == NodeType::Image;
+         n->type() == NodeType::Image || n->type() == NodeType::Lottie;
 }
 
 bool paintsChildren(const Node* n) {
@@ -1658,6 +1659,7 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
         !drawSprite(c, ctx.root, b.inner.rect(), key, [&](SkCanvas* oc) { image::paint(n, oc, b.inner.rect(), b.inner); }))
       image::paint(n, c, b.inner.rect(), b.inner);
   }
+  if (n->type() == NodeType::Lottie) lottie::paint(n, c, b.inner.rect(), b.inner);
 
   if (paintsChildren(n) && (!n->children().empty() || !n->ghosts.empty())) {
     bool clip = clipsChildren(n);

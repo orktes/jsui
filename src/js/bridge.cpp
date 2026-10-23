@@ -2,10 +2,12 @@
 // plus imperative methods (measure, focus, scrollTo), the animation fast
 // path (patchStyle), host messages, fonts and reload.
 #include <algorithm>
+#include <limits>
 
 #include "core/document.h"
 #include "input/input.h"
 #include "js/engine_impl.h"
+#include "render/lottie.h"
 #include "runtime.h"
 
 namespace jsui {
@@ -237,6 +239,26 @@ JSValue js_scrollTo(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
   return JS_UNDEFINED;
 }
 
+// lottieData(json) -> key: hands an inline composition (LottieView
+// source={require('./anim.json')}) to native once; views use the key as
+// their source. The same JSON gives the same key.
+JSValue js_lottieData(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  if (argc < 1 || !JS_IsString(argv[0])) return JS_ThrowTypeError(ctx, "lottieData: expected a JSON string");
+  return JS_NewString(ctx, runtimeOf(ctx).lotties->addData(toStdString(ctx, argv[0])).c_str());
+}
+
+// lottieCommand(id, cmd, a, b): LottieView play(startFrame, endFrame) /
+// pause / resume / reset. Frames are NaN (undefined) for the whole
+// composition. Returns false for an unknown view or command.
+JSValue js_lottieCommand(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
+  if (!n || argc < 2) return JS_FALSE;
+  double a = std::numeric_limits<double>::quiet_NaN(), b = a;
+  if (argc > 2 && JS_IsNumber(argv[2])) JS_ToFloat64(ctx, &a, argv[2]);
+  if (argc > 3 && JS_IsNumber(argv[3])) JS_ToFloat64(ctx, &b, argv[3]);
+  return JS_NewBool(ctx, lottie::command(n, toStdString(ctx, argv[1]), a, b));
+}
+
 // flashScrollIndicators(id): shows the overlay scroll indicators briefly.
 JSValue js_flashScrollIndicators(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
@@ -402,11 +424,14 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
              {"setTextInputSelection", js_setTextInputSelection, 3},
              {"getClipboard", js_getClipboard, 0}, {"setClipboard", js_setClipboard, 1},
              {"flashScrollIndicators", js_flashScrollIndicators, 1},
-             {"configureLayoutAnimation", js_configureLayoutAnimation, 1}};
+             {"configureLayoutAnimation", js_configureLayoutAnimation, 1},
+             {"lottieData", js_lottieData, 1},     {"lottieCommand", js_lottieCommand, 4}};
   for (auto& f : fns) JS_SetPropertyStr(ctx, native, f.name, JS_NewCFunction(ctx, f.fn, f.name, f.len));
   JS_SetPropertyStr(ctx, native, "rootId", JS_NewUint32(ctx, impl.rt.doc.root()->id()));
   // TextInput text is edited natively (change / selectionchange events).
   JS_SetPropertyStr(ctx, native, "textEditing", JS_TRUE);
+  // LottieView plays (the build has Skottie).
+  JS_SetPropertyStr(ctx, native, "lottie", JS_NewBool(ctx, LottieCache::available()));
   JS_SetPropertyStr(ctx, native, "devMode", JS_NewBool(ctx, impl.rt.config.dev_mode != 0));
   installAnimatedBridge(impl, native);
   installHostDataBridge(impl, native);
