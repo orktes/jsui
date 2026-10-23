@@ -53,7 +53,10 @@
       const t = a[1]?.texture, sz = a[2] ?? {};
       const [w, h] = Array.isArray(sz) || sz[Symbol.iterator] ? [...sz] : [sz.width, sz.height ?? 1];
       if (t) {
-        const k = `upload to ${t.width}x${t.height} ${t.format}${t.label ? ` "${t.label}"` : ''}`;
+        // Atlas-sized textures by creation order (Graphite's text and path
+        // atlases are both 2048x2048 r8unorm; the first one made is used first).
+        const k = `upload to ${t.width}x${t.height} ${t.format}${t.label ? ` "${t.label}"` : ''}` +
+          `${t.width >= 1024 && t.__seq ? ` #${t.__seq}` : ''}`;
         bump(k);
         bump(`${k} texels`, (w ?? 0) * (h ?? 1));
       }
@@ -65,6 +68,13 @@
   wrap('GPUBuffer', ['mapAsync', 'unmap', 'getMappedRange', 'destroy']);
   wrap('GPUTexture', ['destroy']);
   wrap('GPUCanvasContext', ['getCurrentTexture']);
+  let seq = 0;
+  const createTexture = GPUDevice.prototype.createTexture;
+  GPUDevice.prototype.createTexture = function (...a) {
+    const t = createTexture.apply(this, a);
+    try { t.__seq = ++seq; } catch {}
+    return t;
+  };
   // Views carry their texture's size / samples / format for the pass entries.
   const createView = GPUTexture.prototype.createView;
   GPUTexture.prototype.createView = function (...a) {

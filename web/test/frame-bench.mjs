@@ -160,7 +160,10 @@ async function open(renderer, { init = [], stepped = false } = {}) {
   for (const f of init) await context.addInitScript({ path: path.join(WEB, 'test', f) });
   await context.addInitScript(DRIVE, { scenario: SCENARIO, at: SCROLL_AT });
   const page = await context.newPage();
-  if (process.env.JSUI_BENCH_CONSOLE) page.on('console', (m) => console.log(`[console] ${m.text()}`));
+  if (process.env.JSUI_BENCH_CONSOLE) {
+    console.log(`[page] ${renderer} ${init.join(",") || "plain"}${stepped ? " stepped" : ""}`);
+    page.on("console", (m) => console.log(`[console] ${m.text()}`));
+  }
   if (renderer === 'chrome') {
     await page.goto(`${ORIGIN}/rnw.html`);
     await page.evaluate(async () => {
@@ -425,7 +428,7 @@ for (const renderer of RENDERERS) {
       for (const [k, v] of window.__gpuCounts) if (k !== 'GPUQueue.onSubmittedWorkDone') out[k] = v / n;
       j.destroy();
       return out;
-    }, { n: Math.min(N, 30) });
+    }, { n: Number(process.env.JSUI_BENCH_COUNT_FRAMES ?? Math.min(N, 30)) });
     await c.context.close();
   }
 

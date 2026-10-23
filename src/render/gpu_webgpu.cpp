@@ -131,6 +131,12 @@ struct WebGPUGpu final : JsuiGpuContext {
     graphite::RecorderOptions ropts;
     ropts.fImageProvider = images;
     ropts.fGpuBudgetInBytes = cacheBytes;
+    // Every Recording is inserted, in the order it was snapped. Without
+    // this Graphite assumes they may be played back in any order and evicts
+    // its text, path and clip atlases after every snap(): every glyph a frame
+    // draws was rasterised and uploaded again (134 glyphs per frame of the
+    // interactions showcase's steady animation, ~560 per full repaint).
+    ropts.fRequireOrderedRecordings = true;
     recorder = ctx->makeRecorder(ropts);
     return recorder != nullptr;
   }
