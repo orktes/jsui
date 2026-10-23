@@ -312,7 +312,7 @@ export default function Victory({ active = true }) {
   const status = still ? 'Preview' : scrub != null ? `Frame ${scrub} / ${LOOP_END}` : paused ? 'Paused' : phase === 'intro' ? 'Intro · once' : 'Idle loop';
 
   return (
-    <View style={styles.root} onKeyDown={onKeyDown} onGamepadButton={onPad}>
+    <View focusable autoFocus={active} style={styles.root} onKeyDown={onKeyDown} onGamepadButton={onPad}>
       <ImageBackground source={BG} style={StyleSheet.absoluteFill} resizeMode="cover" />
       <View style={styles.shade} />
       <View style={[styles.burst, { backgroundColor: accent }]} />
