@@ -1,5 +1,6 @@
 #include "jsui_view.h"
 
+#include <godot_cpp/classes/audio_server.hpp>
 #include <godot_cpp/classes/dir_access.hpp>
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/file_access.hpp>
@@ -29,6 +30,7 @@
 #include <cmath>
 #include <cstring>
 
+#include "jsui_audio.h"
 #include "keymap.h"
 
 using namespace godot;
@@ -127,6 +129,16 @@ void JsuiView::_bind_methods() {
   ClassDB::bind_method(D_METHOD("set_fixed_fps", "fps"), &JsuiView::set_fixed_fps);
   ClassDB::bind_method(D_METHOD("get_fixed_fps"), &JsuiView::get_fixed_fps);
   ClassDB::bind_method(D_METHOD("get_root_tag"), &JsuiView::get_root_tag);
+  ClassDB::bind_method(D_METHOD("set_audio_enabled", "enabled"), &JsuiView::set_audio_enabled);
+  ClassDB::bind_method(D_METHOD("get_audio_enabled"), &JsuiView::get_audio_enabled);
+  ClassDB::bind_method(D_METHOD("set_audio_bus", "bus"), &JsuiView::set_audio_bus);
+  ClassDB::bind_method(D_METHOD("get_audio_bus"), &JsuiView::get_audio_bus);
+  ClassDB::bind_method(D_METHOD("set_audio_bus_map", "map"), &JsuiView::set_audio_bus_map);
+  ClassDB::bind_method(D_METHOD("get_audio_bus_map"), &JsuiView::get_audio_bus_map);
+  ClassDB::bind_method(D_METHOD("stop_all_sounds", "bus", "fade_ms"), &JsuiView::stop_all_sounds, DEFVAL(String()),
+                       DEFVAL(0.0));
+  ClassDB::bind_method(D_METHOD("get_audio_voices"), &JsuiView::get_audio_voices);
+  ClassDB::bind_method(D_METHOD("resolve_audio_bus", "bus"), &JsuiView::resolve_audio_bus);
 
   ClassDB::bind_method(D_METHOD("start"), &JsuiView::start);
   ClassDB::bind_method(D_METHOD("stop"), &JsuiView::stop);
@@ -183,6 +195,10 @@ void JsuiView::_bind_methods() {
                "set_pipeline_cache_path", "get_pipeline_cache_path");
   ADD_PROPERTY(PropertyInfo(Variant::INT, "fixed_fps", PROPERTY_HINT_RANGE, "0,240"), "set_fixed_fps",
                "get_fixed_fps");
+  ADD_GROUP("Audio", "audio_");
+  ADD_PROPERTY(PropertyInfo(Variant::BOOL, "audio_enabled"), "set_audio_enabled", "get_audio_enabled");
+  ADD_PROPERTY(PropertyInfo(Variant::STRING, "audio_bus"), "set_audio_bus", "get_audio_bus");
+  ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "audio_bus_map"), "set_audio_bus_map", "get_audio_bus_map");
 
   ADD_SIGNAL(MethodInfo("message_received", PropertyInfo(Variant::STRING, "name"),
                         PropertyInfo(Variant::NIL, "data", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NIL_IS_VARIANT),
@@ -198,6 +214,12 @@ void JsuiView::_bind_methods() {
   ADD_SIGNAL(MethodInfo("ui_call_completed", PropertyInfo(Variant::INT, "id"), PropertyInfo(Variant::BOOL, "ok"), result));
   ADD_SIGNAL(MethodInfo("js_error", PropertyInfo(Variant::STRING, "message")));
   ADD_SIGNAL(MethodInfo("frame_rendered", PropertyInfo(Variant::RECT2I, "dirty_rect")));
+  ADD_SIGNAL(MethodInfo("sound_played", PropertyInfo(Variant::INT, "voice"), PropertyInfo(Variant::STRING, "url"),
+                        PropertyInfo(Variant::STRING, "bus")));
+  ADD_SIGNAL(MethodInfo("sound_ended", PropertyInfo(Variant::INT, "voice"), PropertyInfo(Variant::INT, "status")));
+  BIND_CONSTANT(SOUND_FINISHED);
+  BIND_CONSTANT(SOUND_STOPPED);
+  BIND_CONSTANT(SOUND_FAILED);
 }
 
 // --------------------------------------------------------------- lifecycle
@@ -259,6 +281,10 @@ void JsuiView::_notification(int what) {
       }
       break;
     case NOTIFICATION_PROCESS: process(); break;
+    case NOTIFICATION_PREDELETE:
+      // Our children (the audio players) go before our destructor runs.
+      if (audio_) audio_->dropPlayers();
+      break;
     case NOTIFICATION_RESIZED:
     case NOTIFICATION_VISIBILITY_CHANGED: render_pending_ = true; break;
     case NOTIFICATION_MOUSE_EXIT:
@@ -466,11 +492,19 @@ void JsuiView::start() {
     cfg.load = &JsuiView::onLoad;
     cfg.load_user = this;
   }
+  // The UI's sounds play through Godot's audio (jsui_audio.h).
+  if (!audio_) {
+    audio_ = std::make_unique<ViewAudio>(*this);
+    audio_->setEnabled(audio_enabled_);
+  }
+  cfg.on_audio = &ViewAudio::onAudio;
+  cfg.audio_user = audio_.get();
   rt_ = jsui_create(&cfg);
   if (!rt_) {
     UtilityFunctions::push_error("JsuiView: jsui_create failed");
     return;
   }
+  audio_->attach(rt_.unsynced());
   if (profiling_) jsui_set_profiling(rt_, 1);
   start_usec_ = Time::get_singleton()->get_ticks_usec();
   clock_ms_ = clock_wall_ms_ = 0;
@@ -519,6 +553,7 @@ void JsuiView::stop() {
   // Open Host.calls are cancelled and open call_ui calls fail here; their
   // signals / callbacks still run (below), so the game can drop its work.
   jsui_destroy(rt);
+  if (audio_) audio_->attach(nullptr);  // its voices stopped with the runtime
   held_keys_.clear();
   mouse_buttons_ = 0;
   pads_.clear();
@@ -532,6 +567,34 @@ void JsuiView::stop() {
   for (HostTexture& e : textures_) e.gpu_set = e.pixels_set = e.shown_pending = false;
   // The GPU target held this runtime's frames; a new runtime repaints fully.
   gpu_retained_ = false;
+}
+
+// -------------------------------------------------------------------- audio
+
+void JsuiView::set_audio_enabled(bool on) {
+  audio_enabled_ = on;
+  if (audio_) audio_->setEnabled(on);
+}
+
+void JsuiView::stop_all_sounds(const String& bus, float fade_ms) {
+  if (host_) return host_->stop_all_sounds(bus, fade_ms);
+  if (audio_) audio_->stopAll(toStd(bus), fade_ms);
+}
+
+Array JsuiView::get_audio_voices() const {
+  if (host_) return host_->get_audio_voices();
+  return audio_ ? audio_->voices() : Array();
+}
+
+String JsuiView::resolve_audio_bus(const String& bus) const {
+  if (host_) return host_->resolve_audio_bus(bus);
+  if (audio_bus_map_.has(bus)) return String(audio_bus_map_[bus]);
+  AudioServer* as = AudioServer::get_singleton();
+  if (as->get_bus_index(bus) >= 0) return bus;
+  // "music" plays on a bus named "Music".
+  for (int32_t i = 0, n = as->get_bus_count(); i < n; i++)
+    if (as->get_bus_name(i).nocasecmp_to(bus) == 0) return as->get_bus_name(i);
+  return audio_bus_.is_empty() || as->get_bus_index(audio_bus_) < 0 ? String("Master") : audio_bus_;
 }
 
 void JsuiView::reload() {
@@ -716,6 +779,12 @@ void JsuiView::process() {
   // the views showing new contents repaint this frame.
   syncTextures();
   if (!rt_) return;
+  // Sounds: fades, voices that ended, reports for this tick (and the
+  // sound_played / sound_ended signals, which may stop the view).
+  if (audio_) {
+    audio_->update(rt_);
+    if (!rt_) return;
+  }
   const uint64_t tick0 = Time::get_singleton()->get_ticks_usec();
   // One tick for every surface of the runtime, then each paints.
   jsui_tick(rt_, clockMs());
