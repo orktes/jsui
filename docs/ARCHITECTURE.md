@@ -905,6 +905,58 @@ the views natively removes both (JS ~15 µs at 1000 markers); what is left is
 the native Animated evaluation and style writes (~2.4 µs per marker with two
 animated transforms).
 
+### Host textures
+
+Pictures the host makes itself are shown inside the UI by name: a video the
+engine decodes (Godot's `VideoStreamPlayer` texture, WebCodecs
+`VideoFrame`s, a `<video>` element), a 3D render target (a character
+preview, a minimap camera), a webcam. JSUI decodes and plays nothing; it
+samples textures (`src/render/host_textures.*`,
+`packages/react/src/hostTexture.js`):
+
+```jsx
+<HostTexture name="trailer" resizeMode="contain" style={{ width: 640, aspectRatio: 16 / 9, borderRadius: 12 }} />
+const size = useHostTexture('trailer');   // { width, height } once set, else null
+```
+
+* `HostTexture` is an `Image` host node with a `texture` prop, so it lays out
+  and paints like an image: intrinsic size = the texture's px / `scale`,
+  `resizeMode`, rounded clipping, `tintColor`, opacity and transforms. It
+  is never raster-cached as a sprite and is sampled without mipmaps (new
+  contents every frame).
+* A texture is CPU pixels (`jsui_set_texture_pixels`: copied into a raster
+  `SkImage`, so every renderer shows it, the CPU raster included; GPU
+  backends upload it like any image) or a GPU texture of the device the
+  runtime renders with (`jsui_set_texture` with a `JsuiTexture`: a GL
+  texture name, `WGPUTexture`, `VkImage` or `id<MTLTexture>`), sampled in
+  place with no copy. The description stays the host's: each GPU backend
+  wraps it as an `SkImage` of its own device inside its render
+  (`TextureWrapper`, made current by a thread-local `TextureScope` around
+  the frame, like `LayerCacheScope`): `SkImages::BorrowTextureFrom` on
+  Ganesh GL / Metal, `SkImages::WrapTexture` on Graphite (Vulkan in
+  `SHADER_READ_ONLY_OPTIMAL`, Metal, Dawn / browser WebGPU). The painter
+  only asks `HostTextures::image()`, so it stays backend independent. A
+  canvas that cannot sample a kind (the CPU raster for a GPU texture, a GL
+  texture on Graphite) draws nothing and logs one warning per texture.
+  Wraps are cached per texture until its contents change.
+* Repaint: Image nodes showing a texture register with the registry while
+  their `NodeCache` lives. `jsui_texture_updated` (the host drew the next
+  video frame into the same texture) and `jsui_set_texture_pixels` call
+  `markPaintDirty()` on just those nodes: the damage is their rects, no
+  layout, no JS. A new size also re-measures them, and textures set,
+  resized or removed reach JS once per `jsui_tick` as
+  `__jsui_onHostTexture(keys)` (`useHostTexture`, `HostTextures.subscribe`).
+  Setting an identical description is a no-op.
+* Origins: GPU textures with `JSUI_TEXTURE_BOTTOM_LEFT_ORIGIN` (GL render
+  targets) are flipped where they are drawn; CPU pixels are flipped when
+  copied.
+* Hosts: the web host uploads `VideoFrame` / `<video>` / canvas /
+  `ImageBitmap` sources with the renderer in use (WebGPU
+  `copyExternalImageToTexture`, WebGL `texImage2D`, the CPU raster through
+  `getImageData`); the Godot `JsuiView.set_texture(name, texture, live)`
+  passes the RenderingDevice texture behind any `Texture2D` (or its pixels
+  on the CPU path).
+
 ## JS bridge contract
 
 Native globals (installed by `JsEngine`):

@@ -97,6 +97,14 @@ cb)` (no re-render), and `useHostBufferValue(key, index)` /
 `Animated.hostBuffer(key, index)`: a native Animated node, so views follow the
 buffer without JS running per frame.
 
+Host textures (`jsui_set_texture`: video frames, render targets or any
+picture the host draws itself): `<HostTexture name="trailer"
+resizeMode="contain" style={...} />` shows texture `name` like an `Image`
+(sized by the texture unless styled), `useHostTexture(name)` returns
+`{ width, height }` once the host set it (else `null`), and `HostTextures.get /
+keys / subscribe` read the same. New contents repaint the view without any
+JS.
+
 Focus props on any element: `focusable`, `autoFocus`, `hasTVPreferredFocus`,
 `onFocus`, `onBlur`, `onKeyDown` / `onKeyUp` (RN-web style: `e.key`,
 `e.code`, modifiers), `nextFocusUp/Down/Left/Right`. Pressables are focusable

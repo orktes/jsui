@@ -231,6 +231,121 @@ struct Vk {
     return px;
   }
 
+  // A SAMPLED | TRANSFER_DST image holding `px` (w x h RGBA8), left in
+  // SHADER_READ_ONLY_OPTIMAL like an engine's texture. Freed with the Vk.
+  VkImage makeTexture(const std::vector<uint32_t>& px, int tw, int th) {
+    VKFN(vkGetDeviceProcAddr);
+    VKDFN(vkCreateImage);
+    VKDFN(vkGetImageMemoryRequirements);
+    VKDFN(vkBindImageMemory);
+    VKDFN(vkCreateBuffer);
+    VKDFN(vkGetBufferMemoryRequirements);
+    VKDFN(vkBindBufferMemory);
+    VKDFN(vkMapMemory);
+    VKDFN(vkUnmapMemory);
+    VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ii.imageType = VK_IMAGE_TYPE_2D;
+    ii.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ii.extent = {uint32_t(tw), uint32_t(th), 1};
+    ii.mipLevels = 1;
+    ii.arrayLayers = 1;
+    ii.samples = VK_SAMPLE_COUNT_1_BIT;
+    ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ii.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    Owned o;
+    if (vkCreateImage(device, &ii, nullptr, &o.image) != VK_SUCCESS) return VK_NULL_HANDLE;
+    VkMemoryRequirements mr;
+    vkGetImageMemoryRequirements(device, o.image, &mr);
+    o.imageMem = alloc(mr, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    vkBindImageMemory(device, o.image, o.imageMem, 0);
+    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bi.size = VkDeviceSize(px.size()) * 4;
+    bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    vkCreateBuffer(device, &bi, nullptr, &o.buffer);
+    vkGetBufferMemoryRequirements(device, o.buffer, &mr);
+    o.bufferMem = alloc(mr, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    vkBindBufferMemory(device, o.buffer, o.bufferMem, 0);
+    void* p = nullptr;
+    vkMapMemory(device, o.bufferMem, 0, VK_WHOLE_SIZE, 0, &p);
+    std::memcpy(p, px.data(), px.size() * 4);
+    vkUnmapMemory(device, o.bufferMem);
+    owned.push_back(o);
+    upload(o.image, o.buffer, tw, th, VK_IMAGE_LAYOUT_UNDEFINED);
+    return o.image;
+  }
+
+  // Copies `buffer` into `img` (from layout `from`) and leaves it in
+  // SHADER_READ_ONLY_OPTIMAL; waits for the queue.
+  void upload(VkImage img, VkBuffer buf, int tw, int th, VkImageLayout from) {
+    VKFN(vkGetDeviceProcAddr);
+    VKDFN(vkAllocateCommandBuffers);
+    VKDFN(vkBeginCommandBuffer);
+    VKDFN(vkCmdPipelineBarrier);
+    VKDFN(vkCmdCopyBufferToImage);
+    VKDFN(vkEndCommandBuffer);
+    VKDFN(vkQueueSubmit);
+    VKDFN(vkQueueWaitIdle);
+    VKDFN(vkFreeCommandBuffers);
+    VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    ai.commandPool = pool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    VkCommandBuffer cb;
+    vkAllocateCommandBuffers(device, &ai, &cb);
+    VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cb, &cbi);
+    VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    b.oldLayout = from;
+    b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = img;
+    b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                         nullptr, 1, &b);
+    VkBufferImageCopy r{};
+    r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    r.imageExtent = {uint32_t(tw), uint32_t(th), 1};
+    vkCmdCopyBufferToImage(cb, buf, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r);
+    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+                         nullptr, 1, &b);
+    vkEndCommandBuffer(cb);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cb;
+    vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(queue);
+    vkFreeCommandBuffers(device, pool, 1, &cb);
+  }
+  // New contents for a makeTexture() image (same size).
+  void rewrite(VkImage img, const std::vector<uint32_t>& px, int tw, int th) {
+    VKFN(vkGetDeviceProcAddr);
+    VKDFN(vkMapMemory);
+    VKDFN(vkUnmapMemory);
+    for (auto& o : owned)
+      if (o.image == img) {
+        void* p = nullptr;
+        vkMapMemory(device, o.bufferMem, 0, VK_WHOLE_SIZE, 0, &p);
+        std::memcpy(p, px.data(), px.size() * 4);
+        vkUnmapMemory(device, o.bufferMem);
+        upload(img, o.buffer, tw, th, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+      }
+  }
+  struct Owned {
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory imageMem = VK_NULL_HANDLE;
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory bufferMem = VK_NULL_HANDLE;
+  };
+  std::vector<Owned> owned;
+
   ~Vk() {
     if (!instance) return;
     if (device) {
@@ -243,6 +358,12 @@ struct Vk {
       VKDFN(vkDestroyDevice);
       vkDeviceWaitIdle(device);
       if (pool) vkDestroyCommandPool(device, pool, nullptr);
+      for (auto& o : owned) {
+        vkDestroyImage(device, o.image, nullptr);
+        vkDestroyBuffer(device, o.buffer, nullptr);
+        vkFreeMemory(device, o.imageMem, nullptr);
+        vkFreeMemory(device, o.bufferMem, nullptr);
+      }
       if (image) vkDestroyImage(device, image, nullptr);
       if (buffer) vkDestroyBuffer(device, buffer, nullptr);
       if (imageMem) vkFreeMemory(device, imageMem, nullptr);
@@ -513,6 +634,84 @@ TEST(vulkan_pipeline_cache_warms_the_next_context) {
   CHECK_EQ(renderFrames(vk, gpu), 0ull);
   jsui_gpu_destroy(gpu);
   std::remove(path.c_str());
+#endif
+}
+
+// Host textures (JSUI_TEXTURE_VULKAN): an engine's sampled image drawn in
+// place by Graphite, new contents shown after jsui_texture_updated, the
+// image still usable by the host (SHADER_READ_ONLY_OPTIMAL) afterwards.
+TEST(vulkan_host_texture) {
+#if !JSUI_VULKAN_TESTS
+  skip("vulkan_host_texture", "built without JSUI_VULKAN");
+#else
+  const int W = 64, H = 48;
+  Vk vk;
+  std::string why = vk.init(W, H);
+  if (!why.empty()) {
+    skip("vulkan_host_texture", why.c_str());
+    return;
+  }
+  JsuiVulkanDevice d = vk.desc();
+  JsuiGpuContext* gpu = jsui_gpu_create_vulkan(&d);
+  CHECK(gpu != nullptr);
+  if (!gpu) return;
+  std::vector<uint32_t> px(8);
+  for (int x = 0; x < 4; x++) {
+    px[x] = 0xff0000ffu;      // top row red
+    px[4 + x] = 0xffff0000u;  // bottom row blue
+  }
+  VkImage tex = vk.makeTexture(px, 4, 2);
+  CHECK(tex != VK_NULL_HANDLE);
+  JsuiConfig cfg;
+  jsui_config_init(&cfg);
+  cfg.width = W;
+  cfg.height = H;
+  JsuiRuntime* rt = jsui_create(&cfg);
+  const char* src =
+      "const n = __jsui_native; const v = n.createNode('Image');"
+      "n.setProps(v, {texture: 'engine', resizeMode: 'stretch',"
+      " style: {position: 'absolute', left: 8, top: 8, width: 40, height: 32}});"
+      "n.appendChild(n.rootId, v);";
+  CHECK_EQ(jsui_load_bundle_source(rt, src, std::strlen(src), "vktex.js"), 0);
+  JsuiTexture t{};
+  t.kind = JSUI_TEXTURE_VULKAN;
+  t.handle = tex;
+  t.width = 4;
+  t.height = 2;
+  t.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  CHECK_EQ(jsui_set_texture(rt, "engine", &t), 1);
+  auto render = [&](int layout, int flags) {
+    jsui_tick(rt, 16);
+    JsuiGpuTarget gt{};
+    gt.texture = vk.image;
+    gt.width = W;
+    gt.height = H;
+    gt.layout = layout;
+    gt.final_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    gt.flags = flags;
+    CHECK_EQ(jsui_render_gpu_target(rt, gpu, &gt, nullptr), 0);
+    return vk.read();
+  };
+  std::vector<uint32_t> out = render(VK_IMAGE_LAYOUT_UNDEFINED, 0);
+  auto at = [&](int x, int y) { return out[size_t(y) * W + x]; };
+  CHECK_EQ(at(28, 12), 0xff0000ffu);
+  CHECK_EQ(at(28, 36), 0xffff0000u);
+  CHECK_EQ(at(2, 2), 0u);
+  // The host draws the next "frame" into the same image.
+  std::vector<uint32_t> green(8, 0xff00ff00u);
+  vk.rewrite(tex, green, 4, 2);
+  CHECK_EQ(jsui_texture_updated(rt, "engine"), 1);
+  CHECK(jsui_needs_redraw(rt));
+  out = render(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, JSUI_GPU_INCREMENTAL);
+  CHECK_EQ(at(28, 12), 0xff00ff00u);
+  CHECK_EQ(at(28, 36), 0xff00ff00u);
+  // A format Graphite cannot sample here: the view is left empty.
+  t.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+  CHECK_EQ(jsui_set_texture(rt, "engine", &t), 1);
+  out = render(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0);
+  CHECK_EQ(at(28, 12), 0u);
+  jsui_destroy(rt);
+  jsui_gpu_destroy(gpu);
 #endif
 }
 
