@@ -282,6 +282,9 @@ func _key(keycode: Key, unicode := 0, shift := false) -> void:
 		await get_tree().process_frame
 
 
+## A quick tap: press and release in the same frame. (A frame apart, a slow
+## frame, e.g. 2x on a software Vulkan renderer, can outlast JSUI's 400 ms
+## D-pad repeat delay and move the focus twice.)
 func _pad(button: JoyButton) -> void:
 	for pressed in [true, false]:
 		var e := InputEventJoypadButton.new()
@@ -290,7 +293,7 @@ func _pad(button: JoyButton) -> void:
 		e.pressed = pressed
 		e.pressure = 1.0 if pressed else 0.0
 		Input.parse_input_event(e)
-		await get_tree().process_frame
+	await get_tree().process_frame
 
 
 func _run_self_test() -> void:
