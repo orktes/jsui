@@ -223,6 +223,8 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | `patch_state(key, patch) -> int` | RFC 7386 merge patch of a key (`jsui_patch_state`): Dictionaries merge, `null` members delete. Keep big collections as Dictionaries keyed by id |
 | `get_state(key) -> Variant` | current value (also keys the UI set with `HostState.set`) |
 | `set_state_json` / `patch_state_json` / `get_state_json` | the same with JSON strings |
+| `set_buffer(key, data) -> int` | frame data (`jsui_set_buffer`): numbers pushed every frame without JSON, e.g. enemy positions for nameplates. `data` is a `PackedFloat32Array`, `PackedFloat64Array`, `PackedInt32Array`, `PackedByteArray`, or a `PackedVector2Array` / `PackedVector3Array` / `PackedColorArray` (their components in order). JS reads it with `useHostBuffer` / `useHostBufferSelector`, and `useHostBufferValue(key, index)` moves `Animated` views natively, without JS per frame. Returns 1 changed, 0 unchanged, -1 unsupported type. Set before `start()`: applied when it starts |
+| `remove_buffer(key) -> int` | removes a buffer (1 if it existed) |
 | `resolve_call(id, result = null) -> int` | answer a `call_requested` call; the UI's `await Host.call(...)` resolves with `result`. Any later frame is fine. -1: unknown or cancelled id |
 | `resolve_call_json(id, json)` / `reject_call(id, message)` | JSON result / reject (the promise rejects with `Error(message)`) |
 | `call_ui(name, args = null, callback = Callable()) -> int` | run the UI's `Host.handle(name, fn)` / `useHostHandler` handler; `callback(ok: bool, result)` (and `ui_call_completed`) runs once it settles: `result` is the handler's value, or the error message when `ok` is false |
@@ -263,6 +265,13 @@ func _ready():
 
 func _on_gold_changed(gold):
     ui.patch_state("player", {"gold": gold})   # only "gold" changes; only its readers re-render
+
+func _process(_delta):
+    # Every frame: screen positions of the enemies for their nameplates.
+    var pos := PackedVector2Array()
+    for e in enemies:
+        pos.append(camera.unproject_position(e.global_position + Vector3.UP * 2))
+    ui.set_buffer("enemies", pos)   # x0, y0, x1, y1, ... in JS
 
 func _on_ui_call(id, name, args):
     match name:

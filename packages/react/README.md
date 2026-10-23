@@ -89,6 +89,14 @@ const pad = useGamepad({ onButton: (e) => e.buttonIndex === 9 && (openMenu(), e.
 const { focused, focusProps } = useFocus();           // <View {...focusProps} />
 ```
 
+Frame data (`jsui_set_buffer`: typed arrays the game pushes every frame, no
+JSON): `HostBuffer.get(key)` (a typed array over the runtime's memory),
+`useHostBuffer(key)` (re-renders on every change), `useHostBufferSelector(key,
+selector, fallback)` (only when the result changes), `useHostBufferListener(key,
+cb)` (no re-render), and `useHostBufferValue(key, index)` /
+`Animated.hostBuffer(key, index)`: a native Animated node, so views follow the
+buffer without JS running per frame.
+
 Focus props on any element: `focusable`, `autoFocus`, `hasTVPreferredFocus`,
 `onFocus`, `onBlur`, `onKeyDown` / `onKeyUp` (RN-web style: `e.key`,
 `e.code`, modifiers), `nextFocusUp/Down/Left/Right`. Pressables are focusable

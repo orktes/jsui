@@ -15,6 +15,10 @@ import { createJsui } from '@orktes/jsui-web';
 const jsui = await createJsui({ canvas: document.querySelector('canvas'), bundleUrl: './bundle.js' });
 jsui.on('message', (name, data) => console.log(name, data)); // Host.postMessage(...) from the UI
 jsui.postMessage('hud', { hp: 42 });                         // Host.handle('hud', fn) in the UI
+jsui.setState('gold', 1250);                                 // useHostState('gold') in the UI
+jsui.setBuffer('enemies', new Float32Array(positions));      // every frame, no JSON: useHostBuffer / useHostBufferValue
+const view = jsui.mapBuffer('enemies', Float32Array, 90);    // or write in place (zero copy) ...
+jsui.commitBuffer('enemies');                                // ... then publish
 ```
 
 ## Several root views (surfaces)
