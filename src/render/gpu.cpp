@@ -41,6 +41,8 @@
 #include <dlfcn.h>
 #elif defined(__EMSCRIPTEN__)
 #include <emscripten/html5.h>
+
+#include "include/gpu/ShaderErrorHandler.h"
 #endif
 
 namespace {
@@ -155,6 +157,21 @@ sk_sp<SkImage> wrapTexture(GrDirectContext* ctx, const JsuiTexture& t) {
   // on the backends without origins.
   return SkImages::BorrowTextureFrom(ctx, bt, kTopLeft_GrSurfaceOrigin, ct, jsui::textureAlphaType(t), nullptr);
 }
+
+#if defined(__EMSCRIPTEN__)
+// WebKit marks a WebGL context lost when a call into its GPU process fails,
+// in the middle of a frame: the shaders compiling then fail with "(unknown
+// error)". That is the loss, which the host handles (restore, repaint), not
+// a shader error. Other failures go to Skia's default handler.
+struct WebGLShaderErrors final : skgpu::ShaderErrorHandler {
+  using skgpu::ShaderErrorHandler::compileError;
+  void compileError(const char* shader, const char* errors) override {
+    if (emscripten_is_webgl_context_lost(emscripten_webgl_get_current_context())) return;
+    skgpu::DefaultShaderErrorHandler()->compileError(shader, errors);
+  }
+};
+WebGLShaderErrors webglShaderErrors;
+#endif
 
 struct GLGpu final : JsuiGpuContext {
   GLGpu() : JsuiGpuContext(Kind::GL), textures([this](const JsuiTexture& t) { return wrapTexture(ctx.get(), t); }) {}
@@ -272,6 +289,9 @@ struct GLGpu final : JsuiGpuContext {
     // render pass in two at each one: reordering renders them first and
     // keeps the frame one pass (fewer framebuffer switches).
     opts.fReduceOpsTaskSplitting = GrContextOptions::Enable::kYes;
+#if defined(__EMSCRIPTEN__)
+    opts.fShaderErrorHandler = &webglShaderErrors;
+#endif
     ctx = GrDirectContexts::MakeGL(std::move(iface), opts);
     if (ctx && cacheBytes) ctx->setResourceCacheLimit(cacheBytes);
     return ctx != nullptr;

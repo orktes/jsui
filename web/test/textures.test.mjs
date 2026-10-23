@@ -4,7 +4,8 @@
 //   node --test web/test/textures.test.mjs
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { HostTextureSet, TEXTURE_OPAQUE, TEXTURE_UNPREMULTIPLIED, sourceSize, textureTarget } from '../jsui-textures.js';
+import { HostTextureSet, TEXTURE_OPAQUE, TEXTURE_UNPREMULTIPLIED, sourceSize, textureTarget, videoFramesContextLost }
+  from '../jsui-textures.js';
 
 function mockModule() {
   const mem = new ArrayBuffer(1 << 20);
@@ -217,6 +218,25 @@ test('lost context: uploads wait for the restore, which re-uploads into new text
   assert.ok(!gl.log.some((l) => l[0] === 'delete'));
 });
 
+test('lost during an upload (WebKit: createTexture gives null): no warning, uploaded after the restore', () => {
+  const gl = mockGL();
+  const sgl = { gl, lost: false, gen: 0 };
+  const { M, set, warnings } = setup([{ _sgl: sgl }]);
+  gl.createTexture = () => {
+    gl.state.lost = true;  // noticed by this call, after textureTarget() looked
+    return null;
+  };
+  assert.equal(set.set('g', canvas(4, 4)), false);
+  assert.deepEqual(warnings, []);
+  assert.ok(!M.calls.some((c) => c[0] === 'set'));
+  delete gl.createTexture;
+  gl.createTexture = () => ({ gltex: true });
+  gl.state.lost = false;
+  sgl.gen++;
+  set.sync();
+  assert.ok(M.calls.some((c) => c[0] === 'set'));
+});
+
 test('a cross-origin source is reported once, not thrown', () => {
   const dev = mockDevice();
   dev.queue.copyExternalImageToTexture = () => { const e = new Error('tainted'); e.name = 'SecurityError'; throw e; };
@@ -227,6 +247,19 @@ test('a cross-origin source is reported once, not thrown', () => {
   assert.match(warnings[0], /crossOrigin/);
   assert.ok(!M.calls.some((c) => c[0] === 'set'));
   assert.ok(dev.created.every((t) => t.destroyed));
+});
+
+test('a cross-origin video is not tried again until its URL changes', () => {
+  const dev = mockDevice();
+  let tries = 0;
+  dev.queue.copyExternalImageToTexture = () => { tries++; const e = new Error('tainted'); e.name = 'SecurityError'; throw e; };
+  const { set } = setup([webgpuView(dev)]);
+  const video = { videoWidth: 16, videoHeight: 9, readyState: 4, currentSrc: 'https://a.example/v.webm' };
+  for (let i = 0; i < 3; i++) assert.equal(set.set('v', video), false);
+  assert.equal(tries, 1);
+  video.currentSrc = 'https://b.example/v.webm';
+  assert.equal(set.set('v', video), false);
+  assert.equal(tries, 2);
 });
 
 test('bindVideo: one upload per presented frame, stops on unbind / remove', () => {
@@ -256,4 +289,59 @@ test('bindVideo: one upload per presented frame, stops on unbind / remove', () =
   set.remove('v');
   assert.equal(cbs.size, 0);
   assert.ok(M.calls.some((c) => c[0] === 'remove'));
+});
+
+// Last: the switch to polling is for the rest of the page (module state).
+test('bindVideo: a WebGL context lost right after a frame callback switches every video to polling', () => {
+  const dev = mockDevice();
+  const { M, set } = setup([webgpuView(dev)]);
+  const rafs = new Map();
+  let nextRaf = 1;
+  globalThis.requestAnimationFrame = (cb) => { rafs.set(nextRaf, cb); return nextRaf++; };
+  globalThis.cancelAnimationFrame = (id) => rafs.delete(id);
+  const displayFrame = () => { const cbs = [...rafs.values()]; rafs.clear(); cbs.forEach((cb) => cb()); };
+  try {
+    const mkVideo = () => {
+      const cbs = new Map();
+      let nextId = 1;
+      return {
+        cbs, videoWidth: 16, videoHeight: 9, readyState: 4, currentTime: 0, paused: true, decoded: 0,
+        getVideoPlaybackQuality() { return { totalVideoFrames: this.decoded }; },
+        requestVideoFrameCallback(cb) { const id = nextId++; cbs.set(id, cb); return id; },
+        cancelVideoFrameCallback(id) { cbs.delete(id); },
+        addEventListener(type, fn) { (this.on ??= {})[type] = fn; },
+      };
+    };
+    const a = mkVideo();
+    set.bindVideo('a', a);
+    assert.equal(a.cbs.size, 1);
+    // Paused: a loss now is no frame callback's doing.
+    assert.equal(videoFramesContextLost(), null);
+    a.paused = false;
+    a.on.playing();
+    assert.match(videoFramesContextLost(), /polled/);
+    assert.equal(a.cbs.size, 0);  // the frame callback is cancelled
+    const uploads = () => M.calls.filter((c) => c[0] === 'updated' && c[1] === 'a').length;
+    const before = uploads();
+    displayFrame();
+    assert.equal(uploads(), before);  // no new frame: no upload
+    a.currentTime = 0.04;
+    displayFrame();
+    assert.equal(uploads(), before + 1);
+    a.decoded = 5;  // a new frame at the same position (a live stream)
+    displayFrame();
+    assert.equal(uploads(), before + 2);
+    // Later binds poll from the start.
+    const b = mkVideo();
+    set.bindVideo('b', b);
+    assert.equal(b.cbs.size, 0);
+    b.currentTime = 1;
+    displayFrame();
+    assert.ok(M.calls.some((c) => c[0] === 'updated' && c[1] === 'b'));
+    set.destroy();
+    assert.equal(rafs.size, 0);
+  } finally {
+    delete globalThis.requestAnimationFrame;
+    delete globalThis.cancelAnimationFrame;
+  }
 });

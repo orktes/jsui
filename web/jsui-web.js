@@ -153,7 +153,8 @@
  * }} JsuiOptions */
 
 import { SharedWebGPU, WebGPURenderer, requestWebGPU } from './jsui-webgpu.js';
-import { HostTextureSet, defaultOpaque, isVideoFrame, sourceSize } from './jsui-textures.js';
+import { HostTextureSet, defaultOpaque, isVideoFrame, sourceSize, taintKey, videoFramesContextLost, watchVideoFrames }
+  from './jsui-textures.js';
 
 export { requestWebGPU, webgpuSupported } from './jsui-webgpu.js';
 
@@ -274,7 +275,7 @@ function replaceCanvas(old) {
 function internals() {
   return { DomView, CanvasView, JsuiHost, JsuiSurface, HIT_POINTER, HIT_SCROLL, NAV_KEYS, webgpuFor, loadModuleFor,
     bufferType, BUFFER_TYPES, sourceSize, defaultOpaque, isVideoFrame, transferred, replaceCanvas, fontArgs, fontList,
-    hostUrl: import.meta.url, workerName: WORKER_NAME };
+    taintKey, videoFramesContextLost, watchVideoFrames, hostUrl: import.meta.url, workerName: WORKER_NAME };
 }
 const WORKER_NAME = 'jsui-host';
 
@@ -327,6 +328,24 @@ const PERF_TIMES = ['js_us', 'commit_us', 'animated_us', 'style_us', 'layout_us'
   'gpu_submit_us', 'image_decode_us'];
 const PERF_COUNTS = ['image_decodes', 'pipeline_compiles', 'paragraph_builds', 'text_measures', 'layout_passes',
   'bridge_calls'];
+
+// GL work that may find its context lost halfway: WebKit marks a context
+// lost when a call into its GPU process fails, in the middle of a frame. A
+// throw while the context reports itself lost is that loss, not an error:
+// `lost(error)` runs and the result is undefined. The WASM stack pointer goes
+// back to where it was (a throw through Skia's frames skipped their
+// epilogues; web/native/jsui_webgl_lost.js keeps the GL glue from throwing).
+export function guardGL(M, gl, fn, lost) {
+  const sp = M.stackSave?.();
+  try {
+    return fn();
+  } catch (e) {
+    if (!gl?.isContextLost()) throw e;
+    if (sp !== undefined) M.stackRestore(sp);
+    lost?.(e);
+    return undefined;
+  }
+}
 
 const webglProbe = {};
 let noGpuWarned = false;  // CanvasView._warnNoGpu
@@ -1172,11 +1191,15 @@ class CanvasView extends DomView {
     this.canvas.addEventListener('webglcontextrestored', () => this._glRestoredNow(), { signal });
   }
 
+  // A throw that guardGL took for a context loss (logged: the GL glue should not throw).
+  _lostInFrame = (e) => this._log(1, `WebGL context lost during a frame (${e?.message ?? e})`);
+
   _glLostNow() {
     if (this._glLost) return;
     this._glLost = true;
     this._log(1, 'WebGL context lost: waiting for the browser to restore it');
     this._glOnLost?.();
+    this._hostOf()._contextLost();
   }
 
   _glRestoredNow() {
@@ -1184,7 +1207,8 @@ class CanvasView extends DomView {
     clearTimeout(this._restoreTimer);
     this._glLost = false;
     this._log(1, 'WebGL context restored');
-    this._glOnRestored?.();
+    // Lost again while setting up: wait for the next restore.
+    guardGL(this.module, this._gl, () => this._glOnRestored?.(), () => this._glLostNow());
   }
 
   // Before GL work. A browser marks a context lost (isContextLost()) when it
@@ -1298,6 +1322,7 @@ class CanvasView extends DomView {
   // Draws a GPU frame: true when drawn, false when the GPU path failed (the
   // caller falls back to the CPU), undefined while the context is lost.
   _renderGpu() {
+    this._checkGL();
     if (this._glLost || !this._glHandle) return undefined;
     const M = this.module;
     M.GL.makeContextCurrent(this._glHandle);
@@ -1307,8 +1332,13 @@ class CanvasView extends DomView {
     M.HEAP32[t + 3] = this.pixelWidth;
     M.HEAP32[t + 4] = this.pixelHeight;
     M.HEAP32[t + 6] = this._stencilBits;
-    if (M._jsui_render_gl_target(this.rt, this._gpu, this._dirty) === 0) return true;
-    return this._gl.isContextLost() ? undefined : false;
+    const r = guardGL(M, this._gl, () => M._jsui_render_gl_target(this.rt, this._gpu, this._dirty), this._lostInFrame);
+    // Lost during the frame (WebKit): not drawn, whatever Skia said.
+    if (this._gl.isContextLost()) {
+      this._glLostNow();
+      return undefined;
+    }
+    return r === 0;
   }
 
   // Renders a frame and reads it back from the drawing buffer (in the same
@@ -1527,6 +1557,7 @@ class SharedGL {
     this.lost = true;
     this.host._log(1, 'shared WebGL context lost: waiting for the browser to restore it');
     this.module._jsui_gpu_context_lost(this.gpu);  // drop GPU objects without GL calls
+    this.host._contextLost();
     clearTimeout(this._restoreTimer);
     const ms = this.host.opts.contextRestoreTimeout ?? 3000;
     if (!(ms >= 0 && ms < Infinity)) return;
@@ -1590,10 +1621,14 @@ class SharedGL {
     M.HEAP32[t + 3] = w;
     M.HEAP32[t + 4] = h;
     M.HEAP32[t + 6] = this.stencilBits;
-    const r = M._jsui_render_gl_target(view.rt, this.gpu, view._dirty);
+    const r = guardGL(M, this.gl, () => M._jsui_render_gl_target(view.rt, this.gpu, view._dirty), view._lostInFrame);
     M.GL.makeContextCurrent(0);
-    if (r === 0) return true;
-    return this.gl.isContextLost() ? undefined : false;
+    // Lost during the frame (WebKit): not drawn, whatever Skia said.
+    if (this.gl.isContextLost()) {
+      this._lostNow();
+      return undefined;
+    }
+    return r === 0;
   }
 
   // Renders `view` and reads it back. Premultiplied RGBA, top row first.
@@ -1826,6 +1861,26 @@ class JsuiHost extends CanvasView {
 
   _textureSet() { return (this._textures ??= new HostTextureSet(this)); }
 
+  // A loss or restore of any of the runtime's WebGL contexts not handled yet
+  // (CanvasView._checkGL), before GL work.
+  _checkContexts() {
+    this._checkGL();
+    if (this._sgl0 && !this._sgl0.destroyed) this._sgl0.check();
+    for (const s of this._surfaces) s._checkGL();
+  }
+
+  _anyContextLost() {
+    const lost = (v) => !!v._gl?.isContextLost?.();
+    return lost(this) || !!this._sgl0?.gl.isContextLost() || [...this._surfaces].some(lost);
+  }
+
+  // One of the runtime's WebGL contexts was lost. Bound videos switch to
+  // polled frames if a frame callback seems to have cost it (jsui-textures.js).
+  _contextLost() {
+    const switched = videoFramesContextLost();
+    if (switched) this._log(1, switched);
+  }
+
   // The views that draw this runtime's textures (host textures go where all can sample them).
   _views() {
     const v = this.canvas && !this._destroyed ? [this] : [];
@@ -2053,8 +2108,23 @@ class JsuiHost extends CanvasView {
   /** Runs one frame (tick + paint if needed). Called by the rAF loop; usable for manual stepping. */
   frame(now = performance.now()) {
     if (this._destroyed) return;
+    const sp = this.module.stackSave?.();
+    try {
+      this._frameNow(now);
+    } catch (e) {
+      // A context lost in the middle of GL work (see guardGL): the loss, not an error.
+      if (!this._anyContextLost()) throw e;
+      if (sp !== undefined) this.module.stackRestore(sp);
+      this._lostInFrame(e);
+      this._checkContexts();
+    }
+  }
+
+  _frameNow(now) {
     const M = this.module, rt = this.rt, st = this.stats;
     if (this._padsActive) this._pollGamepads();
+    // Context losses and restores first: the textures then move in this frame.
+    this._checkContexts();
     // Host textures follow renderer changes (fallbacks, context restores, surfaces).
     this._textures?.sync();
     const t0 = performance.now();
