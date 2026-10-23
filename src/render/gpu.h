@@ -15,11 +15,17 @@
 
 #include "jsui/jsui.h"
 
+namespace jsui::pipeline_cache {
+class Precompiler;
+}
+
 struct JsuiGpuContext {
   enum class Kind { GL, WebGPU, Graphite };
   explicit JsuiGpuContext(Kind k) : kind(k) {}
   virtual ~JsuiGpuContext() = default;
   const Kind kind;
+  // Graphite contexts: their pipeline cache (pipeline_cache.h); null on GL.
+  jsui::pipeline_cache::Precompiler* pipelines = nullptr;
 };
 
 namespace jsui {

@@ -163,6 +163,19 @@ if(JSUI_GRAPHITE_DAWN)
 endif()
 message(STATUS "JSUI_GRAPHITE_DAWN: ${JSUI_GRAPHITE_DAWN} (Dawn ${JSUI_DAWN_REVISION}, ${JSUI_DAWN_INCLUDE_DIR})")
 
+# The Skia revision, when the Skia build recorded one in <skia>/REVISION:
+# part of the GPU pipeline cache's build id (src/render/pipeline_cache.h), so
+# caches of another build of the same Skia milestone are not reused.
+set(_jsui_skia_revision "")
+if(EXISTS "${JSUI_SKIA_DIR}/REVISION")
+  file(STRINGS "${JSUI_SKIA_DIR}/REVISION" _jsui_skia_revision LIMIT_COUNT 1)
+endif()
+set(JSUI_SKIA_REVISION "${_jsui_skia_revision}" CACHE STRING "Skia revision for the GPU pipeline cache's build id (empty: the Skia milestone alone)")
+if(JSUI_SKIA_REVISION MATCHES "^[0-9A-Za-z._-]+$")
+  set_source_files_properties(src/render/pipeline_cache.cpp PROPERTIES
+    COMPILE_DEFINITIONS "JSUI_SKIA_REVISION=\"${JSUI_SKIA_REVISION}\"")
+endif()
+
 # Metal backend (Skia Ganesh on Metal, jsui_render_metal). On by default on
 # iOS, whose Skia is built from source with Metal (scripts/build-skia-ios.sh);
 # elsewhere it needs a Skia built with skia_use_metal=true.

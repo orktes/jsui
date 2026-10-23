@@ -633,6 +633,51 @@ singleton contract).
   table unchanged, and `jsui_dawn_revision()` is checked. Rendering on a real
   Dawn device is verified on the fork only (no Dawn runtime in CI).
 
+### Pipeline cache (Graphite)
+
+Graphite creates a GPU pipeline the first time a frame needs one, inside
+that frame's submit: on a cold driver a list's first scroll or a panel's
+first entrance stalls for tens of milliseconds. Every Graphite context
+(Vulkan, Metal, Dawn native, browser WebGPU) has a
+`pipeline_cache::Precompiler` (`src/render/pipeline_cache.*`;
+`jsui_gpu_set_pipeline_cache` / `jsui_gpu_precompile_pipelines` in jsui.h):
+
+* **Recording.** `ContextOptions::fPipelineCachingCallback` reports each
+  pipeline created on demand with its serialized key; new keys (de-duplicated
+  by a 64-bit hash) are appended to the cache file as one record each, in a
+  single `write` (`O_APPEND`), so a crash leaves at most a torn last record.
+* **Loading.** The file's header names the format version, the Skia build
+  and the backend; another one makes the file stale and it starts afresh. A
+  torn or corrupt record ends the file there. Each case logs one line, and
+  the file is rewritten (temp file + rename) without the bad part. A file
+  without the magic is not touched.
+* **Precompiling off the frame.** Queued keys go to
+  `PrecompileContext::precompile`: on a worker thread on Vulkan and Metal
+  (thread-safe devices; the worker only creates pipelines, Graphite locks its
+  shared caches) and on Dawn devices with `ImplicitDeviceSynchronization`
+  (Dawn locks the device). Other Dawn devices and the browser are not thread
+  safe, so they precompile for ~2 ms after a render (at most one slice per
+  12 ms: once per frame, however many surfaces share the context), or when
+  the host calls `jsui_gpu_precompile_step`. A frame that needs a pipeline
+  still queued compiles it as usual.
+* **Keys from other GPUs.** Graphite decodes a key with range checks only,
+  and on Vulkan a render pass whose attachment format the device lacks is
+  undefined behaviour. So each key is decoded first and fitted to the
+  device (`fitKey`): depth/stencil attachments get the format this device's
+  Graphite picks for the same aspects (D24_S8 on lavapipe, D32F_S8 on AMD),
+  a dst read strategy the device does not use becomes its own, and a key with
+  an attachment the device cannot render at its sample count is skipped.
+  That is what makes a list shipped with an app (the Godot demo's,
+  recorded on lavapipe by `integrations/godot/record-pipelines.sh`) safe on
+  other GPUs.
+* **Tests.** `tests/native/pipeline_cache_test.cpp` covers the format and
+  file repair. `vulkan_test.cpp` records a context's pipelines, then checks
+  that the next context precompiles them (worker thread, and sliced) and
+  that the same frames compile nothing, also from a list whose depth formats
+  were swapped as another vendor's would be. The Godot job's Vulkan run
+  records a cache and a second run checks that the list's first scroll
+  compiles no pipeline.
+
 ## Game data
 
 Three channels connect the game and the UI (`include/jsui/jsui.h`):

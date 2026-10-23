@@ -8,13 +8,18 @@
 // scripts/build-skia-desktop.sh) and a Vulkan loader + ICD at run time;
 // otherwise the test prints SKIP and passes. JSUI_VULKAN_TEST_REQUIRE=1
 // turns that skip into a failure (CI jobs that install lavapipe set it).
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "jsui/jsui.h"
+#include "render/gpu.h"
+#include "render/pipeline_cache.h"
 #include "test.h"
 
 #if defined(JSUI_VULKAN) && defined(__linux__)
@@ -305,6 +310,45 @@ JsuiRuntime* makeRuntime(int w, int h) {
   return rt;
 }
 
+// kBundle's six frames, by a new runtime, into vk.image. Returns the
+// pipelines its renders compiled on demand (JsuiPerf::pipeline_compiles).
+unsigned long long renderFrames(Vk& vk, JsuiGpuContext* gpu) {
+  JsuiRuntime* rt = makeRuntime(vk.w, vk.h);
+  int layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  for (int frame = 0; frame < 6; frame++) {
+    jsui_tick(rt, frame * 16.0 + 1);
+    JsuiGpuTarget t{};
+    t.texture = vk.image;
+    t.width = vk.w;
+    t.height = vk.h;
+    t.layout = layout;
+    t.final_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    t.flags = frame > 0 ? JSUI_GPU_INCREMENTAL : 0;
+    CHECK_EQ(jsui_render_gpu_target(rt, gpu, &t, nullptr), 0);
+    layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+  }
+  vk.read();  // waits for the queue
+  JsuiPerf p;
+  jsui_get_perf(rt, &p, 0);
+  jsui_destroy(rt);
+  return p.pipeline_compiles;
+}
+
+JsuiPipelineStats pipelineStats(JsuiGpuContext* gpu) {
+  JsuiPipelineStats s;
+  jsui_gpu_get_pipeline_stats(gpu, &s);
+  return s;
+}
+
+// Until the worker thread precompiled everything queued (lavapipe is slow).
+bool waitPrecompiled(JsuiGpuContext* gpu) {
+  for (int i = 0; i < 6000; i++) {
+    if (pipelineStats(gpu).queued == 0) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return false;
+}
+
 #endif  // JSUI_VULKAN_TESTS
 
 }  // namespace
@@ -378,6 +422,97 @@ TEST(vulkan_graphite_matches_cpu) {
   jsui_destroy(g);
   jsui_destroy(c);
   jsui_gpu_destroy(gpu);
+#endif
+}
+
+// The pipeline cache (jsui_gpu_set_pipeline_cache): a first context compiles
+// every pipeline in its frames and records them; the next one precompiles
+// them on its worker thread and the same frames compile nothing. A list
+// saved in memory warms a context that precompiles in host-driven slices,
+// and one from a device of other formats a context of this device.
+TEST(vulkan_pipeline_cache_warms_the_next_context) {
+#if !JSUI_VULKAN_TESTS
+  skip("vulkan_pipeline_cache_warms_the_next_context", "built without JSUI_VULKAN");
+#else
+  Vk vk;
+  std::string why = vk.init(240, 160);
+  if (!why.empty()) {
+    skip("vulkan_pipeline_cache_warms_the_next_context", why.c_str());
+    return;
+  }
+  JsuiVulkanDevice d = vk.desc();
+  const std::string path = (std::filesystem::temp_directory_path() / "jsui-test-vulkan-pipelines.bin").string();
+  std::remove(path.c_str());
+
+  JsuiGpuContext* gpu = jsui_gpu_create_vulkan(&d);
+  CHECK(gpu != nullptr);
+  if (!gpu) return;
+  CHECK_EQ(jsui_gpu_set_pipeline_cache(gpu, path.c_str()), 0);  // a new file
+  const unsigned long long cold = renderFrames(vk, gpu);
+  JsuiPipelineStats s = pipelineStats(gpu);
+  std::printf("  cold: %llu pipelines compiled in frames, %llu recorded, %llu not serializable\n", cold, s.added,
+              s.unserializable);
+  CHECK(cold > 0);
+  CHECK_EQ(s.mode, int(JSUI_PRECOMPILE_THREAD));
+  CHECK_EQ(s.compiled, cold);
+  CHECK_EQ(s.unserializable, 0ull);
+  CHECK_EQ(s.added, cold);
+  jsui_gpu_destroy(gpu);
+
+  gpu = jsui_gpu_create_vulkan(&d);
+  const int n = jsui_gpu_set_pipeline_cache(gpu, path.c_str());
+  CHECK_EQ(n, int(cold));
+  CHECK(waitPrecompiled(gpu));
+  s = pipelineStats(gpu);
+  CHECK_EQ(s.precompiled, (unsigned long long)n);
+  CHECK_EQ(s.failed, 0ull);
+  CHECK_EQ(renderFrames(vk, gpu), 0ull);
+  CHECK_EQ(pipelineStats(gpu).compiled, 0ull);
+  void* list = nullptr;
+  size_t size = 0;
+  CHECK_EQ(jsui_gpu_save_pipelines(gpu, &list, &size), 0);
+  const std::string saved(static_cast<const char*>(list), size);
+  jsui_free(list);
+  jsui_gpu_destroy(gpu);
+
+  // Destroyed while its worker is precompiling: stops after the pipeline it
+  // is on, before the device goes.
+  gpu = jsui_gpu_create_vulkan(&d);
+  CHECK_EQ(jsui_gpu_set_pipeline_cache(gpu, path.c_str()), n);
+  jsui_gpu_destroy(gpu);
+
+  jsui::pipeline_cache::setForceSliced(true);
+  gpu = jsui_gpu_create_vulkan(&d);
+  jsui::pipeline_cache::setForceSliced(false);
+  CHECK_EQ(pipelineStats(gpu).mode, int(JSUI_PRECOMPILE_SLICED));
+  CHECK_EQ(jsui_gpu_precompile_pipelines(gpu, saved.data(), saved.size()), n);
+  CHECK_EQ(pipelineStats(gpu).queued, n);
+  CHECK_EQ(jsui_gpu_precompile_step(gpu, 0), n - 1);  // at least one per step
+  CHECK_EQ(jsui_gpu_precompile_step(gpu, 1e6), 0);
+  CHECK_EQ(pipelineStats(gpu).precompiled, (unsigned long long)n);
+  CHECK_EQ(renderFrames(vk, gpu), 0ull);
+  jsui_gpu_destroy(gpu);
+
+  // A list recorded on a device whose Graphite picks other depth/stencil
+  // formats (as a list shipped from one vendor's GPU meets another's): its
+  // keys are fitted to this device and still warm the frames.
+  using namespace jsui::pipeline_cache;
+  gpu = jsui_gpu_create_vulkan(&d);
+  std::string other = header(Backend::Vulkan);
+  int swapped = 0;
+  for (const Entry& e : parse(saved.data(), saved.size(), Backend::Vulkan).entries) {
+    const std::string k = gpu->pipelines->swapDepthStencilForTest(e.data);
+    swapped += !k.empty();
+    other += k.empty() ? record(e.data.data(), e.data.size()) : record(k.data(), k.size());
+  }
+  std::printf("  %d of %d keys with the other depth/stencil format\n", swapped, n);
+  CHECK(swapped > 0);
+  CHECK_EQ(jsui_gpu_precompile_pipelines(gpu, other.data(), other.size()), n);
+  CHECK(waitPrecompiled(gpu));
+  CHECK_EQ(pipelineStats(gpu).failed, 0ull);
+  CHECK_EQ(renderFrames(vk, gpu), 0ull);
+  jsui_gpu_destroy(gpu);
+  std::remove(path.c_str());
 #endif
 }
 

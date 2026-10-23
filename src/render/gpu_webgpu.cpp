@@ -15,6 +15,12 @@
 // such as canvas textures start cleared every frame). Raster images (decoded
 // images, shadow masks) are uploaded once and cached by image id
 // (CachingImageProvider), like Ganesh's resource cache does on the GL path.
+//
+// Pipeline cache (pipeline_cache.h): the browser has no threads to spare
+// (and no file system: lists go through jsui_gpu_precompile_pipelines /
+// jsui_gpu_save_pipelines), so it precompiles in slices after renders; Dawn
+// native on a worker thread when the device has ImplicitDeviceSynchronization
+// (see gpu_graphite.cpp), otherwise in slices too.
 #include "render/gpu.h"
 
 #if defined(JSUI_WEBGPU)
@@ -42,6 +48,7 @@
 #include "include/gpu/graphite/dawn/DawnGraphiteTypes.h"
 #include "render/graphite_images.h"
 #include "render/painter.h"
+#include "render/pipeline_cache.h"
 #include "runtime.h"
 
 namespace graphite = skgpu::graphite;
@@ -50,6 +57,7 @@ namespace {
 
 using jsui::graphite_support::CachingImageProvider;
 using jsui::graphite_support::kDefaultCacheBytes;
+using jsui::pipeline_cache::Precompiler;
 
 struct WebGPUGpu final : JsuiGpuContext {
   WebGPUGpu() : JsuiGpuContext(Kind::WebGPU) {}
@@ -58,6 +66,14 @@ struct WebGPUGpu final : JsuiGpuContext {
   wgpu::Instance instance;
   wgpu::Device device;
   wgpu::Queue queue;
+  // Outlives ctx (its pipeline callback).
+  std::unique_ptr<Precompiler> precompiler = std::make_unique<Precompiler>(
+#if defined(__EMSCRIPTEN__)
+      jsui::pipeline_cache::Backend::BrowserWebGPU
+#else
+      jsui::pipeline_cache::Backend::Dawn
+#endif
+  );
   std::unique_ptr<graphite::Context> ctx;
   std::unique_ptr<graphite::Recorder> recorder;
   sk_sp<CachingImageProvider> images;
@@ -125,6 +141,7 @@ struct WebGPUGpu final : JsuiGpuContext {
     // the CPU raster's anti-aliasing.
     opts.fInternalMultisampleCount = graphite::SampleCount::k1;
 #endif
+    precompiler->configure(opts);  // the pipeline cache's callback
     ctx = graphite::ContextFactory::MakeDawn(backend, opts);
     if (!ctx) return false;
     ctx->setMaxBudgetedBytes(cacheBytes);
@@ -140,12 +157,25 @@ struct WebGPUGpu final : JsuiGpuContext {
     // interactions showcase's steady animation, ~560 per full repaint).
     ropts.fRequireOrderedRecordings = true;
     recorder = ctx->makeRecorder(ropts);
-    return recorder != nullptr;
+    if (!recorder) return false;
+    precompiler->attach(ctx.get(), precompileMode());
+    pipelines = precompiler.get();
+    return true;
+  }
+
+  Precompiler::Mode precompileMode() {
+#if defined(__EMSCRIPTEN__)
+    return Precompiler::Mode::Sliced;
+#else
+    return device.HasFeature(wgpu::FeatureName::ImplicitDeviceSynchronization) ? Precompiler::Mode::Thread
+                                                                               : Precompiler::Mode::Sliced;
+#endif
   }
 
   void dropRetained() { frames.clear(); }
 
   void release() {
+    if (precompiler) precompiler->shutdown();  // its PrecompileContext holds the device
     dropRetained();
     if (images) images->clear();
     recorder.reset();
@@ -369,6 +399,7 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
     Perf::Scope gpuScope(rt.doc.perf, Phase::Gpu);
     if (!g->flush()) return -1;
   }
+  rt.doc.perf.counters.pipelineCompiles += g->precompiler->takeCompiles();
   if (viaRetained && copyBack) {
     // After Graphite's submit (same queue): `back` becomes this frame.
     wgpu::CommandEncoder enc = g->device.CreateCommandEncoder();
@@ -392,7 +423,9 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
     wgpu::CommandBuffer cb = enc.Finish();
     g->queue.Submit(1, &cb);
   }
-  return g->isLost() ? -1 : 0;
+  if (g->isLost()) return -1;
+  g->precompiler->afterFrame();
+  return 0;
 }
 
 }  // namespace webgpu

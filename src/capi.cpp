@@ -13,6 +13,7 @@
 #include "jsui/jsui.h"
 #include "render/gpu.h"
 #include "render/gpu_metal.h"
+#include "render/pipeline_cache.h"
 #include "runtime.h"
 
 // A runtime handle (jsui_create: owns the runtime, shows its main surface)
@@ -248,6 +249,49 @@ int jsui_render_vulkan(JsuiRuntime* rt, JsuiGpuContext* gpu, void* image, int wi
   t.flags = flags;
   t.layout = t.final_layout = 5;  // VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
   return jsui_render_gpu_target(rt, gpu, &t, nullptr);
+}
+
+int jsui_gpu_set_pipeline_cache(JsuiGpuContext* gpu, const char* path) {
+  if (!gpu || !gpu->pipelines) return -1;
+  return gpu->pipelines->setFile(path ? path : "");
+}
+
+int jsui_gpu_precompile_pipelines(JsuiGpuContext* gpu, const void* data, size_t size) {
+  if (!gpu || !gpu->pipelines) return -1;
+  return gpu->pipelines->addList(data, size);
+}
+
+int jsui_gpu_save_pipelines(JsuiGpuContext* gpu, void** outData, size_t* outSize) {
+  if (!outData || !outSize) return -1;
+  *outData = nullptr;
+  *outSize = 0;
+  if (!gpu || !gpu->pipelines) return -1;
+  std::string list = gpu->pipelines->save();
+  void* p = std::malloc(list.size());
+  if (!p) return -1;
+  std::memcpy(p, list.data(), list.size());
+  *outData = p;
+  *outSize = list.size();
+  return 0;
+}
+
+int jsui_gpu_precompile_step(JsuiGpuContext* gpu, double budgetMs) {
+  return gpu && gpu->pipelines ? gpu->pipelines->step(budgetMs) : 0;
+}
+
+void jsui_gpu_get_pipeline_stats(JsuiGpuContext* gpu, JsuiPipelineStats* out) {
+  if (!out) return;
+  *out = JsuiPipelineStats{};
+  if (!gpu || !gpu->pipelines) return;
+  jsui::pipeline_cache::Stats s = gpu->pipelines->stats();
+  out->mode = s.mode;
+  out->queued = s.queued;
+  out->precompiled = s.precompiled;
+  out->failed = s.failed;
+  out->compiled = s.compiled;
+  out->added = s.added;
+  out->unserializable = s.unserializable;
+  out->known = s.known;
 }
 
 int jsui_render_gl(JsuiRuntime* rt, JsuiGpuContext* gpu, unsigned int fbo, int width, int height, int flags) {
