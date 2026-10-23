@@ -254,6 +254,12 @@ when you save, and shows JS errors in an on-screen overlay. You can also set
 `bundle_url = "http://127.0.0.1:5173/bundle.js"` and `dev_mode = true` on the
 node in the inspector.
 
+The view also joins the dev server's shared session as `Godot: <node name>`:
+coding agents attached to the server (`jsui screenshot|inspect|run --attach
+http://127.0.0.1:5173`) then drive and screenshot the UI inside the running
+game, and see what you click and press in it (`jsui log --attach`). See the
+CLI's README.
+
 ## JsuiView reference
 
 | Property | Type | Default | |

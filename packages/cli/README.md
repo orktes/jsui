@@ -21,8 +21,9 @@ npx jsui run app.jsx steps.json|script.mjs
 npx jsui run app.jsx press Down click '#play' screenshot after.png   # steps as words
 npx jsui skill [print --all | install [dir] [--global] | path]
 
-npx jsui dev app.jsx --shared                  # one live app you and agents use together
-npx jsui screenshot|inspect|run --attach http://127.0.0.1:5173 ...
+npx jsui dev app.jsx [--headless]              # + a runtime inside the server
+npx jsui clients --attach http://127.0.0.1:5173 # runtimes in the shared session
+npx jsui screenshot|inspect|run --attach http://127.0.0.1:5173 [--client sel] ...
 npx jsui log --attach http://127.0.0.1:5173 [--since N] [--follow]
 ```
 
@@ -84,26 +85,39 @@ Saving a file updates the running UI without losing its state:
 
 `--no-hmr` serves the plain bundle and reloads it on every change.
 
-## Shared view: `jsui dev --shared`
+## Shared session: `jsui dev` and `--attach`
 
-`--shared` also runs the app inside the dev server, as one live session that
-you and coding agents see and control together:
+Every runtime that loads the dev server's bundle in dev mode joins its shared
+session, whatever hosts it: a Godot `JsuiView` with `dev_mode` on, the native
+viewer (`jsui-viewer --dev http://127.0.0.1:5173/bundle.js`), a browser page,
+or `--headless`, a runtime inside the dev server. You and coding agents then
+see and control the same app:
 
-* You open `http://127.0.0.1:5173/shared`: the app's frames stream to the
-  page, and your mouse, keyboard, text and gamepads drive it. A feed shows
-  who did what (your input, the agent's steps, the UI's messages, calls and
-  errors), and the agent's clicks show up as rings.
 * Agents use the headless commands with `--attach <url>` instead of an entry
   (`jsui screenshot --attach`, `inspect --attach`, `run --attach`, and
   `jsui log --attach` for the feed), or `attach(url)` from `@orktes/jsui-cli`
-  in scripts.
-* Saves hot-update the live app like any dev host, so an agent can edit,
-  save and screenshot in a loop while you watch.
+  in scripts. They drive the live runtime, the last one to join;
+  `--client <name|id>` picks another, `jsui clients --attach` lists them.
+  With none connected, commands wait 30 s for one, then say how to open one.
+* `http://127.0.0.1:5173/shared` shows the session: the runtimes, and a feed
+  of who did what (your input in any runtime, the agent's steps, the UI's
+  messages, calls and errors). With nothing else connected it runs the app
+  itself in the browser's web host; with `--headless` it streams that
+  runtime's frames and your mouse, keyboard, text and gamepads drive it.
+* Saves hot-update every runtime like any dev host, so an agent can edit,
+  save and screenshot in a loop while you play.
+
+The runtime speaks a small HTTP protocol to the server (a held
+`POST /__jsui/session/poll` for commands, `POST /__jsui/session/push` for
+results and events), built into it for every platform; embedders name their
+runtime or opt out with `jsui_set_dev_session(rt, name, enabled)`. `answer`
+steps and `resize` need `--headless` (games and pages answer their own
+Host.calls and own their window size).
 
 View options (`--width`, `--height`, `--scale`, `--fps`, `--component`,
-`--props`, `--state`) set up the live app. `--scale 2` makes the stream sharp
-on HiDPI screens. The runtime is the CPU WebAssembly build from
-`@orktes/jsui-web`; the regular dev-mode hosts keep working alongside it.
+`--props`, `--state`) set up the headless runtime. `--scale 2` makes its
+stream sharp on HiDPI screens. It is the CPU WebAssembly build from
+`@orktes/jsui-web`. (`--shared` is the old name of `--headless`.)
 
 ## Headless: screenshot, inspect, run
 
