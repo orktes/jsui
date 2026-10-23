@@ -129,6 +129,7 @@ export class WebGPURenderer {
     this.ctx = ctx;
     this.format = format;
     this.lost = false;
+    this.flags = 0;  // JSUI_WEBGPU_* flags for jsui_render_webgpu (tests: 4 = NO_RETAIN)
     this.device.lost.then((info) => {
       if (this.gpu && !this._destroyed) this._onLost(info);
     });
@@ -148,7 +149,7 @@ export class WebGPURenderer {
     const ptr = M.WebGPU.importJsTexture(texture, this.instance);
     let r;
     try {
-      r = M._jsui_render_webgpu(this.host.rt, this.gpu, ptr, this.host.pixelWidth, this.host.pixelHeight, 0);
+      r = M._jsui_render_webgpu(this.host.rt, this.gpu, ptr, this.host.pixelWidth, this.host.pixelHeight, this.flags);
     } finally {
       M._jsui_web_wgpu_release_texture(ptr);
     }

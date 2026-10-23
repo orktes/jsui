@@ -246,12 +246,17 @@ used to process Dawn events).
 * **Direct or retained, per frame.** `Runtime::renderCanvasTracked` (the
   same damage tracking as the CPU path) tells the context the bounds of the
   changed pixels before anything is painted. When they cover half the frame
-  or more (an animated full-screen UI) the frame is painted straight into the
-  target: one pass, no copy. When less changed, only the damage bounds are
-  repainted into a Graphite render target the context keeps (clipped to
-  that one rect, a scissor: a region clip is a complex clip on Graphite),
-  then that is copied into the target with one draw (canvas textures start
-  cleared every frame). After direct frames the retained target is repainted
+  or more (an animated full-screen UI; the area of the damage rects, not
+  their bounds) the frame is painted straight into the target: one pass, no
+  copy. When less changed, only the damage is repainted into a Graphite
+  render target the context keeps, rect by rect (`splitDamage`: each a
+  scissor, where a region clip is a complex clip on Graphite), then that is
+  copied into the target with one draw (canvas textures start cleared every
+  frame). Damage crossing a curved outline does not grow to the whole node
+  here (see Paint performance), so a few small animations stay small: on
+  `interactions.jsx` the glow, the pulsing ring and the live dot are ~240k
+  of 920k pixels, where growing to the cards and buttons under the glow made
+  every frame a full repaint. After direct frames the retained target is repainted
   fully once the damage stayed small for 3 frames. The web host skips frames
   where nothing changed altogether (no `getCurrentTexture()`, so the canvas
   keeps its last frame). `JSUI_WEBGPU_NO_RETAIN` always paints the whole
@@ -273,6 +278,25 @@ used to process Dawn events).
   WebGPU calls per frame). The device asks for `dual-source-blending` when
   the adapter has it (anti-aliased non-src-over Porter-Duff draws then need
   no destination copy).
+* **Per-draw cost.** Chrome validates and translates every WebGPU call in
+  its GPU process, and `finish` / GPU-done times on a real GPU include that
+  work, so the call count is what the backend pays for. Browser WebGPU has
+  no push constants, so Graphite's Dawn backend made a new uniform bind
+  group for every pipeline or uniform buffer change (~175 per frame); the
+  Skia patch caches them in `DawnResourceProvider` by layout, buffers and
+  binding sizes (the offsets are dynamic), which leaves ~5 new ones per
+  frame. Two more parts of the patch keep damage-only frames exact: a
+  whole-pixel device rect clip is applied as a scissor rather than cropping
+  each draw's geometry or being merged into other clip shapes
+  (`ClipStack.cpp`; cropping shifts the interpolation of local coordinates,
+  so retained frames differed from full ones by 1), and paths up to an atlas
+  plot (1024 px) are rasterized whole into the path atlas instead of cut to
+  the clip (`Device.cpp`), so their masks do not depend on the damage and
+  are reused across frames. On `interactions.jsx` (1280x720, SwiftShader) a
+  steady frame went from ~2.8 render passes, ~172 draws, ~175 new bind
+  groups, 67 pipeline binds and 9 buffer maps to 2 passes (the damage pass
+  and the copy), ~40-70 draws, ~5 bind groups, ~40 pipeline binds and 2-3
+  maps; `webgpu: steady animation frames` in the browser tests guards it.
 * **No CPU waits.** In the browser Graphite runs without a tick function:
   submits never wait, buffer maps are async and finished work is collected by
   `checkAsyncWorkCompletion()` each frame. Raster images are uploaded once per
@@ -287,7 +311,8 @@ used to process Dawn events).
   `web/dist-gpu/jsui.{js,wasm}`. Skia does not support Emdawnwebgpu upstream
   yet (its emscripten code still targets the removed `-sUSE_WEBGPU`), so
   `scripts/patches/skia-m157-emdawnwebgpu.patch` ports Graphite's Dawn
-  backend to it. The m124 builds (`web/dist`, `web/dist-webgl`) and native
+  backend to it (and carries the bind group cache, scissor clip and whole
+  path mask changes above, each marked `jsui:`). The m124 builds (`web/dist`, `web/dist-webgl`) and native
   Skia are unchanged; the JSUI sources build against both milestones
   (`__has_include` checks for the APIs that changed).
 * **Browser host.** `renderer: 'auto'` (default) tries WebGPU on a hardware
@@ -302,7 +327,9 @@ used to process Dawn events).
 * **Tests.** `JSUI_WEB_DIST=dist-gpu node web/test/browser.test.mjs` adds the
   `webgpu:` tests (WebGPU vs CPU pixel comparisons on the HUD and effects
   fixtures, incremental repaints, DPR 2 / resize, device loss, several
-  runtimes, idle frames, direct vs retained frames, no MSAA targets) on
+  runtimes, idle frames, direct vs retained frames, no MSAA targets, the
+  steady frames of `interactions.jsx`: passes, bind groups, draws and
+  retained vs full-repaint pixels) on
   Chromium's SwiftShader WebGPU adapter (`--enable-unsafe-webgpu`).
 * **Benchmark.** `node web/test/frame-bench.mjs` measures
   `examples/showcase/interactions.jsx` per renderer: the rAF-to-rAF interval
@@ -984,6 +1011,10 @@ the expensive per-pixel work is done once:
   rasterize an anti-aliased outline cut by the clip exactly like the whole
   outline, so damage crossing a curved node's edge grows to the whole node
   (damage inside its padding box does not), and the repaint stays exact.
+  On Graphite (WebGPU) only outlines whose pixels depend on the clip grow
+  (dashed or dotted edges, outlines over 1024 device px): it draws solid
+  rrects analytically and, patched, applies a whole-pixel damage rect as a
+  scissor (see WebGPU).
 * **Scroll blit.** When a ScrollView's content only scrolled by whole device
   pixels over a uniform backdrop, the CPU path moves the viewport's pixels
   and repaints only what the scroll exposed, what is painted above the
@@ -994,9 +1025,13 @@ the expensive per-pixel work is done once:
   per document); blurred shadows and inset shadows are cached masks drawn
   the same way. Sub-pixel positions draw directly (a moving sprite would be
   re-rendered every frame).
-* **Layers.** A node that paints one draw (a background colour or one
-  gradient, nothing else) applies its opacity to that draw instead of a
-  `saveLayer`.
+* **Layers.** A node whose draws cannot overlap applies its opacity to them
+  instead of a `saveLayer` (`opacityFoldable`): one draw (a background
+  colour or one gradient, nothing else), a childless box with at most one
+  fill and one outer shadow (the shadow is then not drawn under the box), or
+  a childless box that only draws a solid border ring of one colour. A
+  layer at zero opacity is skipped. On GPU backends each layer is an
+  offscreen pass.
 * **Text.** Paragraphs keep one layout: painting and the painter's overflow
   bounds lay out at the same content width.
 

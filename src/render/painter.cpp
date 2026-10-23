@@ -1223,9 +1223,12 @@ struct NodeRecord : Node::Cache {
 // A node with anti-aliased curved or diagonal outlines, in device pixels.
 // Damage strictly inside `safe` (the padding box inset by a pixel) never
 // crosses an outline; other damage touching `bounds` must include all of it.
+// `clipDependent`: Graphite may still draw this outline differently under a
+// tighter clip (see updateDamage's growCurves).
 struct CurvedNode {
   SkIRect bounds;
   SkRRect safe;
+  bool clipDependent = true;
 };
 
 // Per-document painter state, kept on the root node.
@@ -1686,6 +1689,17 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
       SkIRect ci;
       if (!co.isEmpty() && ci.intersect(deviceBounds(m, co), clip)) {
         CurvedNode cn{ci, SkRRect::MakeEmpty()};
+        {
+          // Graphite draws solid rrects (borders, fills, sharp shadows and
+          // rounded clips) analytically, and with the Skia patch a damage
+          // rect is only a scissor, so those pixels do not depend on it.
+          // Dashed or dotted edges become paths, and path masks larger than
+          // an atlas plot (1024 px) are still cut to the clip.
+          SkIRect full = deviceBounds(m, co);
+          cn.clipDependent = s.borderStyle != BorderStyle::Solid ||
+                             (s.outlineWidth > 0 && s.outlineStyle != BorderStyle::Solid) ||
+                             full.width() > 1024 || full.height() > 1024;
+        }
         // Outlines and sharp shadows lie outside the box: no safe interior.
         bool outside = s.outlineWidth > 0;
         for (const Shadow& sh : s.boxShadows) outside |= !sh.inset && sh.blur <= 0;
@@ -1704,7 +1718,7 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
     bars = scrollIndicatorBounds(n, m, w, h, clip);
     if (!bars.isEmpty()) {
       own.join(bars);
-      curved->push_back({bars, SkRRect::MakeEmpty()});  // rounded thumbs: never cut
+      curved->push_back({bars, SkRRect::MakeEmpty(), false});  // rounded thumbs: never cut
     }
     sub = own;
     if (paintsChildren(n) && (!n->children().empty() || !n->ghosts.empty())) {
@@ -1951,7 +1965,7 @@ void noteScrollBlit(Document& doc, const ScrollBlit& b) {
       moved.intersect(b.rect.makeOffset(b.dx, b.dy)) ? int64_t(moved.width()) * moved.height() : 0;
 }
 
-SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBlit* blit) {
+SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBlit* blit, bool growCurves) {
   RootRecord* root = rootRecord(doc);
   SkRegion damage;
   if (blit) *blit = ScrollBlit{};
@@ -2011,10 +2025,13 @@ SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBl
   // contain the whole outline and only the region's spans cut it (growing
   // just the bounds, by a pixel at each corner, is exact on x86 but left a
   // few pixels off there: render_incremental_* in CI).
+  // growCurves false (Graphite): only outlines whose pixels depend on the
+  // clip grow, see CurvedNode.
   if (!damage.isEmpty()) {
     for (int pass = 0; pass < 16; pass++) {
       bool grew = false;
       for (const CurvedNode& cn : root->curved) {
+        if (!growCurves && !cn.clipDependent) continue;
         if (!damage.intersects(cn.bounds) || damage.contains(cn.bounds)) continue;
         bool cuts = false;
         for (SkRegion::Iterator it(damage); !it.done() && !cuts; it.next()) {
