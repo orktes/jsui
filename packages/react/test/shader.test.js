@@ -6,7 +6,7 @@ import { mock, animated } from './mock-native-animated.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement as h } from 'react';
-import { Animated, ShaderView, sksl, compileShader, render } from '../src/index.js';
+import { Animated, ShaderView, sksl, compileShader, precompileShaders, render } from '../src/index.js';
 
 const wait = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 const byId = (id) => mock.find((x) => x.props.nativeID === id);
@@ -117,4 +117,34 @@ test('onError gets the compile error', async () => {
   assert.deepEqual(seen, ['error: 1: missing main()']);
   render(null);
   await wait();
+});
+
+test('precompileShaders: compiles, queues the warm-up, resolves after it ran', async () => {
+  mock.reset();
+  mock.warming = 0;
+  assert.equal(ShaderView.preload, precompileShaders);
+  let done = null;
+  precompileShaders([SRC, { source: SRC, images: { image: { uri: 'a.png' }, video: { texture: 'v', tile: 'mirror' } } }, 'bad']).then(
+    (r) => (done = r),
+  );
+  assert.deepEqual(
+    mock.calls.filter((c) => c[0] === 'shaderPreload').map((c) => c.slice(2)),
+    [[], [{ image: { uri: 'a.png' }, video: { texture: 'v', tile: 'mirror' } }], []],
+  );
+  assert.equal(mock.warming, 2);
+  mock.frame();
+  await wait();
+  assert.equal(done, null, 'waits for the warm-up frame');
+  mock.warming = 0;
+  mock.frame();
+  await wait();
+  assert.equal(done.length, 3);
+  assert.deepEqual(done[0].children, ['image']);
+  assert.ok(done[2].error);
+  // One source on its own.
+  const pending = precompileShaders(SRC);
+  assert.equal(mock.warming, 1);
+  mock.warming = 0;
+  mock.frame();
+  assert.equal((await pending).length, 1);
 });

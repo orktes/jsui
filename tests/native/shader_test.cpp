@@ -204,3 +204,56 @@ n.appendChild(n.rootId, id);
   CHECK_EQ(s.at(5, 5), kGreen);  // just the background
   CHECK(!s.rt->wantsFrame());
 }
+
+// Preloading (ShaderEffects::preload, jsui_precompile_shader, the bridge's
+// shaderPreload): compiled at once, queued once per source and images, a
+// frame wanted; a raster frame has nothing to warm and drops the queue.
+// (The GPU warm-up: vulkan_test.cpp's vulkan_shader_preload_warms_pipelines.)
+TEST(shader_preload_queues_a_warm_up) {
+  ShaderScene s(20, 20);
+  s.frame(0);
+  CHECK(!s.rt->main().needsRedraw());
+  jsui::ShaderEffects& fx = *s.rt->shaders;
+  auto p = fx.preload(kColor);
+  CHECK(p->effect != nullptr);
+  CHECK(fx.get(kColor) == p);  // views share it
+  const size_t variants = fx.warmPending();  // geometry / clip variants of one draw
+  CHECK(variants > 1);
+  fx.preload(kColor);
+  CHECK_EQ(fx.warmPending(), variants);
+  fx.preload(kColor, jsui::Value::parseJson(R"({"img":{"uri":"a.png"}})"));  // no such child: the same draws
+  CHECK_EQ(fx.warmPending(), 2 * variants);
+  CHECK(!fx.preload("half4 main(float2 p) { return nope; }")->error.empty());
+  CHECK_EQ(fx.warmPending(), 2 * variants);
+  CHECK(s.rt->main().needsRedraw());
+  int dw = s.dw(), dh = s.dh();
+  std::vector<uint32_t> buf(size_t(dw) * dh, 0);
+  s.rt->tick(16);
+  s.rt->renderIncremental(buf.data(), dw, dh, size_t(dw) * 4);
+  CHECK_EQ(fx.warmPending(), size_t(0));
+  CHECK(!s.rt->main().needsRedraw());
+  // The bridge: an image child, loaded and not yet.
+  std::string js = R"J(
+var n = __jsui_native;
+var info = n.shaderPreload('layout(color) uniform half4 c; uniform shader img; half4 main(float2 p) { return c; }', {img: {texture: 't'}});
+if (info.error || info.children.join() !== 'img') throw new Error(JSON.stringify(info));
+if (n.shadersWarming() !== 2 * VARIANTS) throw new Error('warming ' + n.shadersWarming());
+if (!n.shaderPreload('nope').error) throw new Error('no error');
+)J";
+  CHECK(s.rt->loadSource("var VARIANTS = " + std::to_string(variants) + ";" + js, "preload.js"));
+  CHECK_EQ(fx.warmPending(), 2 * variants);
+}
+
+TEST(shader_precompile_capi) {
+  JsuiRuntime* rt = jsui_create(nullptr);
+  CHECK_EQ(jsui_precompile_shader(rt, kColor, nullptr), 0);
+  CHECK_EQ(jsui_precompile_shader(rt, "half4 main(float2 p) { return nope; }", nullptr), -1);
+  CHECK_EQ(jsui_precompile_shader(rt, R"(uniform shader img; half4 main(float2 p) { return img.eval(p); })",
+                                  R"({"img":{"uri":"a.png","tile":"repeat"}})"),
+           0);
+  CHECK_EQ(jsui_needs_redraw(rt), 1);
+  std::vector<uint32_t> px(16 * 16);
+  jsui_render_rgba(rt, px.data(), 16, 16, 16 * 4);
+  CHECK_EQ(jsui_precompile_shader(nullptr, kColor, nullptr), -1);
+  jsui_destroy(rt);
+}

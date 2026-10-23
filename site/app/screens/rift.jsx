@@ -200,6 +200,18 @@ const HEROES = [
   { id: 'verdant', name: 'Sylvar', role: 'Warden · Grove', art: require('../../../examples/assets/card-verdant.png'), portrait: ROGUE, crest: require('../../../examples/assets/crest-eye.png'), tint: '#3fe08a', stats: [0.44, 0.94, 0.58] },
   { id: 'void', name: 'Nyxa', role: 'Assassin · Void', art: require('../../../examples/assets/card-void.png'), portrait: MAGE, crest: require('../../../examples/assets/crest-moon.png'), tint: '#b46bff', stats: [0.97, 0.3, 0.9] },
 ];
+// Every shader the screen draws, for precompileShaders(): the site preloads
+// them while idle, so opening the screen does not wait on the GPU building
+// their pipelines (the HOLO card as it samples its art and portrait).
+export const preload = [
+  NEBULA,
+  PORTAL,
+  { source: HOLO, images: { backdrop: HEROES[0].art, portrait: { source: ROGUE, fit: 'contain' } } },
+  CRT,
+  RIPPLE,
+  DISSOLVE,
+  BADGE,
+];
 const STAT_NAMES = ['Power', 'Resilience', 'Mobility'];
 const EFFECTS = [
   { id: 'none', label: 'None' },

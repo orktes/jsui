@@ -35,6 +35,15 @@
 // onError({nativeEvent: {error}}): the source failed to compile (the view
 // then paints only its background and children). compileShader(source)
 // compiles it now and returns {error} or {uniforms, children}.
+//
+// precompileShaders([source | {source, images}]) (also ShaderView.preload):
+// compiles shaders ahead of use and has the next frame build their GPU
+// pipelines off-screen, so the first frame that shows them does not hitch
+// (a GPU compiles a shader's pipelines the first time it draws it). Call it
+// while loading, or when idle before the screen that uses them. Give
+// `images` as the view will (which children are images, fit and tile) so
+// the warm-up samples the same kind of child. Resolves with each entry's
+// compileShader() result once that frame ran.
 
 import { jsx } from 'react/jsx-runtime';
 import { native, warnOnce } from './native.js';
@@ -84,6 +93,47 @@ function imageSpec(v) {
   return out;
 }
 
+function imageSpecs(images) {
+  let out = null;
+  if (images) {
+    for (const name in images) {
+      const spec = imageSpec(images[name]);
+      if (spec) (out || (out = {}))[name] = spec;
+    }
+  }
+  return out;
+}
+
+const nextFrame =
+  typeof globalThis.requestAnimationFrame === 'function'
+    ? (fn) => globalThis.requestAnimationFrame(fn)
+    : (fn) => setTimeout(fn, 16);
+
+/** Compiles shaders now and warms the GPU for them; see the top of this file. */
+export function precompileShaders(list) {
+  const entries = Array.isArray(list) ? list : [list];
+  if (!hasNative || typeof native.shaderPreload !== 'function') {
+    return Promise.resolve(entries.map(() => ({ error: 'this host has no native shader support' })));
+  }
+  const results = entries.map((e) => {
+    const isObj = e != null && typeof e === 'object';
+    const src = isObj ? (e.source != null ? e.source : e.sksl) : e;
+    if (src == null) return { error: 'precompileShaders: no source' };
+    const images = isObj ? imageSpecs(e.images) : null;
+    return images ? native.shaderPreload(String(src), images) : native.shaderPreload(String(src));
+  });
+  // Until a frame ran the warm-up (a host that renders no frame for long,
+  // e.g. hidden: give up waiting after a few seconds' worth of frames).
+  return new Promise((resolve) => {
+    let frames = 0;
+    const check = () => {
+      if (native.shadersWarming() === 0 || ++frames > 240) resolve(results);
+      else nextFrame(check);
+    };
+    check();
+  });
+}
+
 const AnimatedShaderHost = createAnimatedComponent('ShaderView');
 
 const OMIT = { source: 1, sksl: 1, uniforms: 1, images: 1, paused: 1, style: 1, onError: 1 };
@@ -120,14 +170,8 @@ export function ShaderView(props) {
     }
   }
   if (plain) out.uniforms = plain;
-  if (props.images) {
-    let images = null;
-    for (const name in props.images) {
-      const spec = imageSpec(props.images[name]);
-      if (spec) (images || (images = {}))[name] = spec;
-    }
-    if (images) out.images = images;
-  }
+  const images = imageSpecs(props.images);
+  if (images) out.images = images;
   if (props.paused) out.paused = true;
   out.style = animated ? [props.style, animated] : props.style;
   if (props.onError) {
@@ -139,5 +183,6 @@ export function ShaderView(props) {
   return jsx(AnimatedShaderHost, out);
 }
 ShaderView.displayName = 'ShaderView';
+ShaderView.preload = precompileShaders;
 
 export default ShaderView;
