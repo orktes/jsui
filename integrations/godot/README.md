@@ -210,6 +210,7 @@ node in the inspector.
 | `component` | String | `""` | the `AppRegistry` key this view shows. On a runtime view: the main surface's component (empty: the bundle's first registered one) |
 | `initial_props` | Dictionary | `{}` | the component's props; changing them re-renders it with the new props (state kept) |
 | `auto_size` | bool | `false` | size the view to the component's content: the view's minimum size follows the laid-out size |
+| `profiling` | bool | `false` | time every frame phase (`jsui_set_profiling`), read with `get_perf()` |
 
 Changing `bundle_url` or `dev_mode` on a running view restarts it.
 
@@ -230,7 +231,8 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | `get_frame_image()` | CPU copy of the last frame, straight alpha, works with `--headless` (with the GPU renderer it reads the texture back: slow, for tests and screenshots) |
 | `get_cpu_frame_image()` | the current frame painted by the CPU raster, straight alpha, whatever the renderer (to compare with `get_frame_image()`) |
 | `get_renderer()` | `"vulkan"`, `"metal"` or `"cpu"` (`""` before the first frame) |
-| `get_render_stats()` | Dictionary: `renderer`, `renders`, `render_usec_total` / `_last` / `_max` (time in the view's render call, CPU side), `dirty_pixels_total`; GPU renderer: `gpu_jobs` (the view's frames handed to the render thread without waiting), `render_thread_jobs` (the render-thread jobs those went in: one per frame for all the views of a runtime; the runtime view's count), `gpu_frame_in_flight` (the last frame handed over is not painted yet), `blocking_waits` / `main_wait_usec_total` (times the main thread waited for the render thread, and for how long), `gpu_job_usec_total` / `jsui_render_usec_total` (render-thread time of the view's GPU renders, and of `jsui_render_gpu_target` in them) |
+| `get_render_stats()` | Dictionary: `renderer`, `renders`, `render_usec_total` / `_last` / `_max` (time in the view's render call, CPU side), `dirty_pixels_total`, `tick_usec_last` (the last `jsui_tick`); GPU renderer: `gpu_jobs` (the view's frames handed to the render thread without waiting), `render_thread_jobs` (the render-thread jobs those went in: one per frame for all the views of a runtime; the runtime view's count), `gpu_frame_in_flight` (the last frame handed over is not painted yet), `blocking_waits` / `main_wait_usec_total` (times the main thread waited for the render thread, and for how long), `gpu_job_usec_total` / `jsui_render_usec_total` (render-thread time of the view's GPU renders, and of `jsui_render_gpu_target` in them) |
+| `get_perf(reset = true)` | Dictionary (`jsui_get_perf`) since the last reset: exclusive time per phase in µs (`js_us`, `commit_us`, `animated_us`, `style_us`, `layout_us`, `input_us`, `paint_us`, `gpu_submit_us`, `other_us`; with `profiling` on) and counters (`image_decodes`, `image_decode_us`, `pipeline_compiles`, `paragraph_builds`, `text_measures`, `layout_passes`, `bridge_calls`) |
 | `get_pending_loads()` | bundle/image/font/fetch loads in flight |
 | `get_last_error()` | last uncaught JS error, or `""` |
 | `get_effective_pixel_ratio()` | the ratio actually used |

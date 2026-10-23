@@ -118,6 +118,11 @@ class JsuiView : public godot::Control {
   godot::Ref<godot::Image> get_cpu_frame_image();
   godot::String get_renderer() const;  // "vulkan", "metal", "cpu" or "" before the first frame
   godot::Dictionary get_render_stats() const;
+  // Profiling (jsui_set_profiling / jsui_get_perf): time per frame phase and
+  // work counters since the last reset (`reset` starts new totals).
+  void set_profiling(bool on);
+  bool get_profiling() const { return profiling_; }
+  godot::Dictionary get_perf(bool reset);
   int get_pending_loads() const;
   godot::String get_last_error() const;
   float get_effective_pixel_ratio() const { return ratio_; }
@@ -211,6 +216,7 @@ class JsuiView : public godot::Control {
   godot::String component_;
   godot::Dictionary initial_props_;
   bool auto_size_ = false;
+  bool profiling_ = false;
 
   // The runtime handle this view renders and sends input to: the runtime it
   // owns (its main surface), or a surface of host_'s runtime. A GPU render
@@ -318,7 +324,8 @@ class JsuiView : public godot::Control {
   // the time the frames and jsui_render_gpu_target in them take.
   uint64_t blocking_waits_ = 0, main_wait_usec_total_ = 0, gpu_jobs_ = 0, render_thread_jobs_ = 0;
   std::atomic<uint64_t> gpu_job_usec_total_{0}, jsui_render_usec_total_{0};
-  // Stats (get_render_stats): CPU time of the render calls.
+  // Stats (get_render_stats): CPU time of the render calls and of the last tick.
+  uint64_t tick_usec_last_ = 0;
   uint64_t renders_ = 0, render_usec_total_ = 0, render_usec_last_ = 0, render_usec_max_ = 0;
   int64_t dirty_px_total_ = 0;
   godot::Ref<godot::CanvasItemMaterial> premul_;

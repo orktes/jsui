@@ -365,7 +365,10 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
     target->getCanvas()->drawImage(SkSurfaces::AsImage(f.retained), 0, 0, SkSamplingOptions(), &paint);
   }
   target.reset();
-  if (!g->flush()) return -1;
+  {
+    Perf::Scope gpuScope(rt.doc.perf, Phase::Gpu);
+    if (!g->flush()) return -1;
+  }
   if (viaRetained && copyBack) {
     // After Graphite's submit (same queue): `back` becomes this frame.
     wgpu::CommandEncoder enc = g->device.CreateCommandEncoder();

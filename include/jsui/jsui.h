@@ -327,6 +327,57 @@ typedef struct JsuiRect {
  * repainted, 0 otherwise. */
 JSUI_API int jsui_render_rgba_incremental(JsuiRuntime* rt, void* pixels, int width, int height, size_t row_bytes,
                                           JsuiRect* dirty);
+
+/* ------------------------------------------------------------- Profiling
+ *
+ * Where a runtime's frames spend their time, e.g. for an in-game stats
+ * overlay or to find what makes a frame hitch. The work counters are always
+ * on (a few increments per operation). With profiling on, every tick, input
+ * call and render also accumulates wall time per phase (two clock reads per
+ * phase change). Phases nest and are exclusive: a phase entered from another
+ * pauses it (a React commit's style update is js -> commit -> style), so the
+ * *_us phase fields add up to the time since the reset.
+ *
+ * Every surface handle (jsui_surface_create) has its own totals and switch:
+ * its commits, style, layout, input and renders. JS runs once for the whole
+ * runtime and is booked to the runtime handle, whose js_us therefore also
+ * covers its surfaces' commits.
+ *
+ *     jsui_set_profiling(rt, 1);
+ *     ... frames ...
+ *     JsuiPerf p;
+ *     jsui_get_perf(rt, &p, 1);  // since the last reset, and reset
+ */
+typedef struct JsuiPerf {
+    /* Exclusive time per phase in microseconds (0 while profiling is off). */
+    double js_us;         /* QuickJS: timers, requestAnimationFrame, events, microtasks */
+    double commit_us;     /* the native side of React's tree and prop mutations */
+    double animated_us;   /* native-driven Animated */
+    double style_us;      /* style resolution */
+    double layout_us;     /* Yoga layout and text measurement */
+    double input_us;      /* hit testing and event routing (JS handlers count as js_us) */
+    double paint_us;      /* renders: recording the frame (the CPU raster also rasterises it) */
+    double other_us;      /* everything else, including the time between JSUI calls */
+    double gpu_submit_us; /* Graphite renders (jsui_render_gpu_target / _webgpu): submitting the
+                             recorded frame, which includes compiling new GPU pipelines and
+                             uploading textures */
+    /* Always measured. */
+    double image_decode_us;               /* decoding images (also inside the phase that needed them) */
+    unsigned long long image_decodes;
+    unsigned long long pipeline_compiles; /* GPU pipelines compiled on demand by this runtime's renders:
+                                             each is a possible hitch (see the pipeline cache) */
+    unsigned long long paragraph_builds;  /* text shaping */
+    unsigned long long text_measures;     /* text measured for layout */
+    unsigned long long layout_passes;
+    unsigned long long bridge_calls;      /* React -> native mutation calls */
+} JsuiPerf;
+
+/* Turns the per-phase timing on (non-zero) or off. Off by default. */
+JSUI_API void jsui_set_profiling(JsuiRuntime* rt, int on);
+/* The totals since the runtime was created or last reset; `reset` non-zero
+ * starts new totals. */
+JSUI_API void jsui_get_perf(JsuiRuntime* rt, JsuiPerf* out, int reset);
+
 /* ------------------------------------------------------------ GPU (OpenGL)
  *
  * Optional GPU backend: Skia Ganesh draws the frame straight into the

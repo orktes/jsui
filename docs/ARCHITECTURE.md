@@ -1226,9 +1226,14 @@ changed rather than to the tree size:
 
 `Document::perf` counts the work (`src/core/perf.h`: bridge calls, setProps,
 style resolves, layout passes, text measures / shaping, Animated writes,
-events, hit-test node visits) and, when `profiling` is set, the exclusive
-time per phase. `tests/native/perf_counters_test.cpp` asserts on these
-counters, so regressions fail deterministically, without timing.
+events, hit-test node visits, image decodes and their time, GPU pipelines
+compiled by the runtime's renders) and, when `profiling` is set, the
+exclusive time per phase (JS, commit, Animated, style, layout, input, paint,
+and Graphite's submit after the paint, where pipelines compile).
+`tests/native/perf_counters_test.cpp` asserts on these counters, so
+regressions fail deterministically, without timing. Hosts read the same
+numbers through `jsui_set_profiling` / `jsui_get_perf` (JsuiView
+`profiling` / `get_perf()` in Godot).
 
 `tools/jsui-bench` runs a bundle on a simulated 60 Hz clock and prints
 mean / p50 / p95 per phase plus the counters, Yoga layouts / cache hits /

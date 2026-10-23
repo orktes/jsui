@@ -607,7 +607,11 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* d
 #if defined(JSUI_VULKAN)
   if (g->api == Api::Vulkan && !g->submitBarrier()) return -1;
 #endif
-  bool ok = g->flush(surface.get(), finalState.get());
+  bool ok;
+  {
+    Perf::Scope gpuScope(rt.doc.perf, Phase::Gpu);
+    ok = g->flush(surface.get(), finalState.get());
+  }
   surface.reset();
 #if defined(JSUI_VULKAN)
   if (g->api == Api::Vulkan && !g->submitBarrier()) return -1;

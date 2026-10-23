@@ -138,6 +138,9 @@ void JsuiView::_bind_methods() {
   ClassDB::bind_method(D_METHOD("get_cpu_frame_image"), &JsuiView::get_cpu_frame_image);
   ClassDB::bind_method(D_METHOD("get_renderer"), &JsuiView::get_renderer);
   ClassDB::bind_method(D_METHOD("get_render_stats"), &JsuiView::get_render_stats);
+  ClassDB::bind_method(D_METHOD("set_profiling", "enabled"), &JsuiView::set_profiling);
+  ClassDB::bind_method(D_METHOD("get_profiling"), &JsuiView::get_profiling);
+  ClassDB::bind_method(D_METHOD("get_perf", "reset"), &JsuiView::get_perf, DEFVAL(true));
   ClassDB::bind_method(D_METHOD("get_pending_loads"), &JsuiView::get_pending_loads);
   ClassDB::bind_method(D_METHOD("get_last_error"), &JsuiView::get_last_error);
   ClassDB::bind_method(D_METHOD("get_effective_pixel_ratio"), &JsuiView::get_effective_pixel_ratio);
@@ -157,6 +160,7 @@ void JsuiView::_bind_methods() {
   ADD_PROPERTY(PropertyInfo(Variant::STRING, "component"), "set_component", "get_component");
   ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "initial_props"), "set_initial_props", "get_initial_props");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "auto_size"), "set_auto_size", "get_auto_size");
+  ADD_PROPERTY(PropertyInfo(Variant::BOOL, "profiling"), "set_profiling", "get_profiling");
 
   ADD_SIGNAL(MethodInfo("message_received", PropertyInfo(Variant::STRING, "name"),
                         PropertyInfo(Variant::NIL, "data", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NIL_IS_VARIANT),
@@ -354,6 +358,7 @@ void JsuiView::createSurface() {
   std::string k = toStd(component_), props = propsJson();
   rt_ = jsui_surface_create(host_->rt_, k.c_str(), props.c_str(), w, h, computeRatio());
   if (!rt_) return;
+  if (profiling_) jsui_set_profiling(rt_, 1);
   start_usec_ = host_->start_usec_;
   logical_w_ = logical_h_ = pixel_w_ = pixel_h_ = 0;
   viewport_auto_ = false;
@@ -425,6 +430,7 @@ void JsuiView::start() {
     UtilityFunctions::push_error("JsuiView: jsui_create failed");
     return;
   }
+  if (profiling_) jsui_set_profiling(rt_, 1);
   start_usec_ = Time::get_singleton()->get_ticks_usec();
   logical_w_ = logical_h_ = pixel_w_ = pixel_h_ = 0;
   last_error_.clear();
@@ -645,8 +651,10 @@ void JsuiView::process() {
   if (!rt_) return;
   updateViewport();
   for (JsuiView* v : surfaces_) v->updateViewport();
+  const uint64_t tick0 = Time::get_singleton()->get_ticks_usec();
   // One tick for every surface of the runtime, then each paints.
   jsui_tick(rt_, nowMs());
+  tick_usec_last_ = Time::get_singleton()->get_ticks_usec() - tick0;
   flushMessages();
   if (!rt_) return;  // a message handler stopped the view
   reportErrors();
@@ -861,6 +869,36 @@ Dictionary JsuiView::get_render_stats() const {
   d["main_wait_usec_total"] = int64_t(main_wait_usec_total_);
   d["gpu_job_usec_total"] = int64_t(gpu_job_usec_total_.load(std::memory_order_relaxed));
   d["jsui_render_usec_total"] = int64_t(jsui_render_usec_total_.load(std::memory_order_relaxed));
+  d["tick_usec_last"] = int64_t(tick_usec_last_);
+  return d;
+}
+
+void JsuiView::set_profiling(bool on) {
+  profiling_ = on;
+  if (rt_) jsui_set_profiling(rt_, on ? 1 : 0);
+}
+
+Dictionary JsuiView::get_perf(bool reset) {
+  Dictionary d;
+  if (!rt_) return d;
+  JsuiPerf p;
+  jsui_get_perf(rt_, &p, reset ? 1 : 0);
+  d["js_us"] = p.js_us;
+  d["commit_us"] = p.commit_us;
+  d["animated_us"] = p.animated_us;
+  d["style_us"] = p.style_us;
+  d["layout_us"] = p.layout_us;
+  d["input_us"] = p.input_us;
+  d["paint_us"] = p.paint_us;
+  d["other_us"] = p.other_us;
+  d["gpu_submit_us"] = p.gpu_submit_us;
+  d["image_decode_us"] = p.image_decode_us;
+  d["image_decodes"] = int64_t(p.image_decodes);
+  d["pipeline_compiles"] = int64_t(p.pipeline_compiles);
+  d["paragraph_builds"] = int64_t(p.paragraph_builds);
+  d["text_measures"] = int64_t(p.text_measures);
+  d["layout_passes"] = int64_t(p.layout_passes);
+  d["bridge_calls"] = int64_t(p.bridge_calls);
   return d;
 }
 
