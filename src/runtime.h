@@ -26,6 +26,7 @@ namespace jsui {
 class JsEngine;
 class InputManager;
 class ImageCache;
+class LottieCache;
 class NativeAnimated;
 
 class Runtime {
@@ -136,6 +137,8 @@ class Runtime {
   FontManager fonts;
   ResourceLoader loader;
   std::unique_ptr<ImageCache> images;
+  // Lottie sources and playing LottieViews (render/lottie.h).
+  std::unique_ptr<LottieCache> lotties;
 
  private:
   // Node ids are unique across the surfaces (JS addresses nodes by id alone).
@@ -178,6 +181,8 @@ class Runtime {
   void deliverBufferChanges();
   // ... and the host textures whose size or handle changed.
   void deliverTextureChanges();
+  // LottieView load / error / finish events.
+  void deliverLottieEvents();
   // Runs the done callbacks of settled jsui_call_ui calls.
   void deliverUiCallResults();
   // The JS context is going away: cancels its unanswered Host.calls (ids

@@ -123,4 +123,6 @@ sk_sp<SkUnicode> FontManager::unicodeRef() {
 sk_sp<skia::textlayout::FontCollection> FontManager::collection() { return impl_->collection; }
 sk_sp<SkFontMgr> FontManager::fontMgr() { return impl_->system; }
 
+sk_sp<SkFontMgr> FontManager::assetFontMgr() { return impl_->provider; }
+
 }  // namespace jsui

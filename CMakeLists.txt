@@ -19,8 +19,12 @@ add_library(jsui STATIC ${JSUI_SOURCES})
 target_include_directories(jsui PUBLIC include PRIVATE src)
 target_link_libraries(jsui PUBLIC jsui_quickjs jsui_yoga jsui_skia)
 target_compile_definitions(jsui PRIVATE JSUI_BUILDING)
-# Subclasses a Skia canvas: Skia is built without RTTI, so is this file.
-set_source_files_properties(src/render/paint_counter.cpp PROPERTIES COMPILE_OPTIONS
+if(JSUI_LOTTIE)
+  target_compile_definitions(jsui PRIVATE JSUI_LOTTIE=1)
+endif()
+# Subclass Skia classes (a canvas, Skottie observers): Skia is built
+# without RTTI, so are these files.
+set_source_files_properties(src/render/paint_counter.cpp src/render/lottie.cpp PROPERTIES COMPILE_OPTIONS
   "$<IF:$<CXX_COMPILER_ID:MSVC>,/GR-,-fno-rtti>")
 include(EmbedFonts)
 jsui_embed_fonts(jsui)

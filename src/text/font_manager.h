@@ -34,6 +34,8 @@ class FontManager {
   // font, then to system fonts when available.
   sk_sp<skia::textlayout::FontCollection> collection();
   sk_sp<SkFontMgr> fontMgr();
+  // The registered and embedded fonts alone (Lottie text layers).
+  sk_sp<SkFontMgr> assetFontMgr();
 
   // Family used when a style names none (default: "Inter").
   std::string defaultFamily = "Inter";

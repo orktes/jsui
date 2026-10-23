@@ -5,6 +5,7 @@
 
 #include "core/document.h"
 #include "render/image_node.h"
+#include "render/lottie.h"
 #include "text/text_edit.h"
 #include "text/text_layout.h"
 
@@ -16,7 +17,8 @@ bool nodeTypeFromName(const std::string& n, NodeType* out) {
     NodeType type;
   } kTypes[] = {{"View", NodeType::View},           {"Text", NodeType::Text},
                 {"RawText", NodeType::RawText},     {"Image", NodeType::Image},
-                {"ScrollView", NodeType::ScrollView}, {"TextInput", NodeType::TextInput}};
+                {"ScrollView", NodeType::ScrollView}, {"TextInput", NodeType::TextInput},
+                {"LottieView", NodeType::Lottie}};
   for (auto& t : kTypes) {
     if (n == t.name) {
       *out = t.type;
@@ -34,6 +36,7 @@ const char* nodeTypeName(NodeType t) {
     case NodeType::Image: return "Image";
     case NodeType::ScrollView: return "ScrollView";
     case NodeType::TextInput: return "TextInput";
+    case NodeType::Lottie: return "LottieView";
   }
   return "?";
 }
@@ -60,6 +63,7 @@ Node::Node(Document* doc, uint32_t id, NodeType type) : doc_(doc), id_(id), type
     applyStyle(Value(), &style_, yoga_);
     text::installMeasure(this);
     image::installMeasure(this);
+    lottie::installMeasure(this);
   }
 }
 
@@ -210,6 +214,7 @@ void Node::setProps(const Value& props) {
         }
       }
     }
+    if (type_ == NodeType::Lottie) lottie::propsChanged(this, old, &relayout);
   }
   paintVersion++;
   contentVersion++;

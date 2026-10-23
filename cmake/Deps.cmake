@@ -310,6 +310,17 @@ if(JSUI_SKIA_SOURCE_BUILT)
 else()
   set(_jsui_skia_named_libs skparagraph skshaper skunicode skresources skia harfbuzz icu freetype2 png jpeg webp webp_sse41 wuffs zlib expat skcms)
 endif()
+# Lottie (LottieView): Skia's Skottie module, when the Skia build has it
+# (the aseprite prebuilt and every scripts/build-skia-*.sh build do).
+# Off, LottieView sources fail with an error and nothing Skottie is linked.
+set(_jsui_lottie_default OFF)
+if(EXISTS ${JSUI_SKIA_LIB_DIR}/${_p}skottie${_s})
+  set(_jsui_lottie_default ON)
+endif()
+option(JSUI_LOTTIE "Lottie animations (LottieView) with Skia's Skottie module" ${_jsui_lottie_default})
+if(JSUI_LOTTIE AND NOT JSUI_SKIA_SOURCE_BUILT)
+  list(PREPEND _jsui_skia_named_libs skottie sksg jsonreader)
+endif()
 foreach(_lib ${_jsui_skia_named_libs})
   set(_f ${JSUI_SKIA_LIB_DIR}/${_p}${_lib}${_s})
   if(EXISTS ${_f})
