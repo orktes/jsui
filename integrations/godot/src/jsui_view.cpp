@@ -104,6 +104,8 @@ void JsuiView::_bind_methods() {
   ClassDB::bind_method(D_METHOD("get_autostart"), &JsuiView::get_autostart);
   ClassDB::bind_method(D_METHOD("set_forward_gamepad", "enabled"), &JsuiView::set_forward_gamepad);
   ClassDB::bind_method(D_METHOD("get_forward_gamepad"), &JsuiView::get_forward_gamepad);
+  ClassDB::bind_method(D_METHOD("set_force_cpu", "enabled"), &JsuiView::set_force_cpu);
+  ClassDB::bind_method(D_METHOD("get_force_cpu"), &JsuiView::get_force_cpu);
 
   ClassDB::bind_method(D_METHOD("start"), &JsuiView::start);
   ClassDB::bind_method(D_METHOD("stop"), &JsuiView::stop);
@@ -124,6 +126,9 @@ void JsuiView::_bind_methods() {
                        DEFVAL(Callable()));
   ClassDB::bind_method(D_METHOD("get_texture"), &JsuiView::get_texture);
   ClassDB::bind_method(D_METHOD("get_frame_image"), &JsuiView::get_frame_image);
+  ClassDB::bind_method(D_METHOD("get_cpu_frame_image"), &JsuiView::get_cpu_frame_image);
+  ClassDB::bind_method(D_METHOD("get_renderer"), &JsuiView::get_renderer);
+  ClassDB::bind_method(D_METHOD("get_render_stats"), &JsuiView::get_render_stats);
   ClassDB::bind_method(D_METHOD("get_pending_loads"), &JsuiView::get_pending_loads);
   ClassDB::bind_method(D_METHOD("get_last_error"), &JsuiView::get_last_error);
   ClassDB::bind_method(D_METHOD("get_effective_pixel_ratio"), &JsuiView::get_effective_pixel_ratio);
@@ -137,6 +142,7 @@ void JsuiView::_bind_methods() {
                "get_pixel_ratio");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "autostart"), "set_autostart", "get_autostart");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "forward_gamepad"), "set_forward_gamepad", "get_forward_gamepad");
+  ADD_PROPERTY(PropertyInfo(Variant::BOOL, "force_cpu"), "set_force_cpu", "get_force_cpu");
 
   ADD_SIGNAL(MethodInfo("message_received", PropertyInfo(Variant::STRING, "name"),
                         PropertyInfo(Variant::NIL, "data", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NIL_IS_VARIANT),
@@ -165,7 +171,9 @@ JsuiView::JsuiView() {
 
 JsuiView::~JsuiView() {
   stop();
-  if (canvas_item_.is_valid()) RenderingServer::get_singleton()->free_rid(canvas_item_);
+  releaseGpu();
+  if (canvas_item_.is_valid() && RenderingServer::get_singleton())
+    RenderingServer::get_singleton()->free_rid(canvas_item_);
 }
 
 void JsuiView::_notification(int what) {
@@ -219,6 +227,17 @@ void JsuiView::set_dev_mode(bool on) {
   if (on == dev_mode_) return;
   dev_mode_ = on;
   if (is_node_ready() && rt_) start();
+}
+
+void JsuiView::set_force_cpu(bool on) {
+  if (on == force_cpu_) return;
+  force_cpu_ = on;
+  // Choose again on the next frame (the GPU resources go now).
+  releaseGpu();
+  renderer_ = Renderer::Unknown;
+  texture_.unref();
+  pixels_w_ = pixels_h_ = 0;
+  render_pending_ = true;
 }
 
 void JsuiView::set_pixel_ratio(float ratio) {
@@ -295,6 +314,8 @@ void JsuiView::stop() {
   if (is_inside_tree()) flushMessages();
   else messages_.clear();
   ui_callbacks_.clear();
+  // The GPU target held this runtime's frames; a new runtime repaints fully.
+  gpu_retained_ = false;
 }
 
 void JsuiView::reload() {
@@ -422,15 +443,8 @@ void JsuiView::updateViewport() {
   logical_h_ = lh;
   ratio_ = ratio;
   jsui_set_viewport(rt_, lw, lh, ratio);
-  int pw = std::max(1, int(std::lround(lw * ratio)));
-  int ph = std::max(1, int(std::lround(lh * ratio)));
-  if (pw != pixel_w_ || ph != pixel_h_) {
-    pixel_w_ = pw;
-    pixel_h_ = ph;
-    pixels_.assign(size_t(pw) * size_t(ph) * 4, 0);
-    upload_.resize(int64_t(pixels_.size()));
-    std::memset(upload_.ptrw(), 0, pixels_.size());
-  }
+  pixel_w_ = std::max(1, int(std::lround(lw * ratio)));
+  pixel_h_ = std::max(1, int(std::lround(lh * ratio)));
   render_pending_ = true;
 }
 
@@ -447,8 +461,47 @@ void JsuiView::process() {
 }
 
 void JsuiView::render() {
+  if (pixel_w_ <= 0 || pixel_h_ <= 0) return;
   render_pending_ = false;
-  if (pixels_.empty()) return;
+  if (renderer_ == Renderer::Unknown) chooseRenderer();
+  const uint64_t t0 = Time::get_singleton()->get_ticks_usec();
+  if (renderer_ == Renderer::Vulkan || renderer_ == Renderer::Metal) {
+    if (!renderGpu()) {
+      UtilityFunctions::push_warning("JsuiView: GPU rendering failed; using the CPU renderer");
+      releaseGpu();
+      renderer_ = Renderer::Cpu;
+      renderCpu();
+    }
+  } else {
+    renderCpu();
+  }
+  const uint64_t dt = Time::get_singleton()->get_ticks_usec() - t0;
+  render_usec_last_ = dt;
+  render_usec_total_ += dt;
+  render_usec_max_ = std::max(render_usec_max_, dt);
+}
+
+void JsuiView::showTexture(const RID& texture) {
+  RenderingServer* rs = RenderingServer::get_singleton();
+  if (!canvas_item_.is_valid()) {
+    canvas_item_ = rs->canvas_item_create();
+    rs->canvas_item_set_parent(canvas_item_, get_canvas_item());
+    premul_.instantiate();
+    premul_->set_blend_mode(CanvasItemMaterial::BLEND_MODE_PREMULT_ALPHA);
+    rs->canvas_item_set_material(canvas_item_, premul_->get_rid());
+  }
+  rs->canvas_item_clear(canvas_item_);
+  rs->canvas_item_add_texture_rect(canvas_item_, Rect2(0, 0, float(logical_w_), float(logical_h_)), texture);
+}
+
+void JsuiView::renderCpu() {
+  if (pixels_w_ != pixel_w_ || pixels_h_ != pixel_h_) {
+    pixels_w_ = pixel_w_;
+    pixels_h_ = pixel_h_;
+    pixels_.assign(size_t(pixel_w_) * size_t(pixel_h_) * 4, 0);
+    upload_.resize(int64_t(pixels_.size()));
+    std::memset(upload_.ptrw(), 0, pixels_.size());
+  }
   JsuiRect dirty{0, 0, 0, 0};
   const size_t stride = size_t(pixel_w_) * 4;
   int changed = jsui_render_rgba_incremental(rt_, pixels_.data(), pixel_w_, pixel_h_, stride, &dirty);
@@ -476,39 +529,85 @@ void JsuiView::render() {
   }
   Ref<Image> img = Image::create_from_data(pixel_w_, pixel_h_, false, Image::FORMAT_RGBA8, upload_);
   if (img.is_null()) return;
-  RenderingServer* rs = RenderingServer::get_singleton();
   if (resized) {
     if (texture_.is_null()) texture_.instantiate();
     texture_->set_image(img);
   } else {
     texture_->update(img);
   }
-  if (!canvas_item_.is_valid()) {
-    canvas_item_ = rs->canvas_item_create();
-    rs->canvas_item_set_parent(canvas_item_, get_canvas_item());
-    premul_.instantiate();
-    premul_->set_blend_mode(CanvasItemMaterial::BLEND_MODE_PREMULT_ALPHA);
-    rs->canvas_item_set_material(canvas_item_, premul_->get_rid());
-  }
-  rs->canvas_item_clear(canvas_item_);
-  rs->canvas_item_add_texture_rect(canvas_item_, Rect2(0, 0, float(logical_w_), float(logical_h_)), texture_->get_rid());
+  showTexture(texture_->get_rid());
+  renders_++;
+  dirty_px_total_ += int64_t(x1 - x0) * (y1 - y0);
   emit_signal("frame_rendered", Rect2i(x0, y0, x1 - x0, y1 - y0));
 }
 
-Ref<Image> JsuiView::get_frame_image() const {
-  // CPU copy of the last frame, un-premultiplied (for screenshots / tests;
-  // independent of the rendering backend, so it also works with --headless).
-  if (pixels_.empty()) return Ref<Image>();
+namespace {
+
+// Premultiplied RGBA8 -> an Image with straight alpha.
+Ref<Image> unpremultipliedImage(const uint8_t* px, int w, int h) {
+  const size_t n = size_t(w) * size_t(h) * 4;
   PackedByteArray out;
-  out.resize(int64_t(pixels_.size()));
+  out.resize(int64_t(n));
   uint8_t* d = out.ptrw();
-  for (size_t i = 0; i < pixels_.size(); i += 4) {
-    uint8_t a = pixels_[i + 3];
+  for (size_t i = 0; i < n; i += 4) {
+    uint8_t a = px[i + 3];
     for (int c = 0; c < 3; c++)
-      d[i + c] = a == 0 ? 0 : a == 255 ? pixels_[i + c] : uint8_t(std::min(255, (pixels_[i + c] * 255 + a / 2) / a));
+      d[i + c] = a == 0 ? 0 : a == 255 ? px[i + c] : uint8_t(std::min(255, (px[i + c] * 255 + a / 2) / a));
     d[i + 3] = a;
   }
-  return Image::create_from_data(pixel_w_, pixel_h_, false, Image::FORMAT_RGBA8, out);
+  return Image::create_from_data(w, h, false, Image::FORMAT_RGBA8, out);
+}
+
+}  // namespace
+
+Ref<Texture2D> JsuiView::get_texture() const {
+  if (gpu_cur_.valid() && gpu_texture_.is_valid()) return gpu_texture_;
+  return texture_;
+}
+
+Ref<Image> JsuiView::get_frame_image() {
+  // Copy of the last frame, un-premultiplied (screenshots / tests). The CPU
+  // renderer has it in memory (so this works with --headless); the GPU one
+  // reads the texture back (a GPU sync: not for every frame).
+  if (gpu_cur_.valid()) {
+    PackedByteArray px = readGpuFrame();
+    if (px.size() < int64_t(gpu_cur_.w) * gpu_cur_.h * 4) return Ref<Image>();
+    return unpremultipliedImage(px.ptr(), gpu_cur_.w, gpu_cur_.h);
+  }
+  if (pixels_.empty()) return Ref<Image>();
+  return unpremultipliedImage(pixels_.data(), pixels_w_, pixels_h_);
+}
+
+Ref<Image> JsuiView::get_cpu_frame_image() {
+  if (!rt_ || pixel_w_ <= 0 || pixel_h_ <= 0) return Ref<Image>();
+  // Bring the shown frame up to date first, so both describe the same state.
+  if ((render_pending_ || jsui_needs_redraw(rt_)) && is_visible_in_tree()) render();
+  std::vector<uint8_t> px(size_t(pixel_w_) * size_t(pixel_h_) * 4);
+  jsui_render_rgba(rt_, px.data(), pixel_w_, pixel_h_, size_t(pixel_w_) * 4);
+  // That was a full repaint outside the renderers' own targets: their next
+  // frame repaints fully.
+  gpu_retained_ = false;
+  return unpremultipliedImage(px.data(), pixel_w_, pixel_h_);
+}
+
+String JsuiView::get_renderer() const {
+  switch (renderer_) {
+    case Renderer::Vulkan: return "vulkan";
+    case Renderer::Metal: return "metal";
+    case Renderer::Cpu: return "cpu";
+    default: return "";
+  }
+}
+
+Dictionary JsuiView::get_render_stats() const {
+  Dictionary d;
+  d["renderer"] = get_renderer();
+  d["renders"] = int64_t(renders_);
+  d["render_usec_total"] = int64_t(render_usec_total_);
+  d["render_usec_last"] = int64_t(render_usec_last_);
+  d["render_usec_max"] = int64_t(render_usec_max_);
+  d["dirty_pixels_total"] = dirty_px_total_;
+  return d;
 }
 
 void JsuiView::updateCursor() {

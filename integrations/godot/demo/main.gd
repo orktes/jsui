@@ -15,6 +15,17 @@ extends Control
 ##                       TextInput, gamepad focus, the Ping button and an
 ##                       unhandled click, plus a call_ui. Prints PASS / FAIL
 ##                       per check and fails the run on any FAIL
+##   --force-cpu         JsuiView.force_cpu: CPU raster + texture upload even
+##                       when Godot runs on Vulkan / Metal
+##   --expect-renderer R fail the run unless JsuiView rendered with R
+##                       ("vulkan", "metal" or "cpu")
+##   --max-gpu-diff D    with --capture on a GPU renderer: also paint the same
+##                       frame with the CPU raster, save it as <png>-cpu.png and
+##                       fail if the mean channel difference exceeds D
+##   --bench <n>         measure n frames of hover springs and n frames of
+##                       list scrolling (JsuiView.get_render_stats, frame
+##                       times), print them and quit
+##   --no-world          leave the 3D scene out (benchmarks: the UI only)
 ##
 ## Scene: world/world.tscn renders live 3D behind the view; `godot.scene`
 ## (shared state) tells the UI to leave its backdrop out so the scene shows.
@@ -34,6 +45,9 @@ var _frame := 0
 var _stats_timer := 0.0
 var _self_test := false
 var _window_size := Vector2i.ZERO
+var _expect_renderer := ""
+var _max_gpu_diff := -1.0
+var _bench := 0
 var _pongs := 0
 var _ui_answers := 0
 var _unhandled_clicks := 0
@@ -71,6 +85,22 @@ func _enter_tree() -> void:
 				i += 1
 			"--self-test":
 				_self_test = true
+			"--force-cpu":
+				view.force_cpu = true
+			"--expect-renderer":
+				_expect_renderer = v
+				i += 1
+			"--max-gpu-diff":
+				_max_gpu_diff = float(v)
+				i += 1
+			"--bench":
+				_bench = int(v)
+				i += 1
+			"--no-world":
+				var world := get_node_or_null("World")
+				if world:
+					remove_child(world)
+					world.free()
 			"--window":
 				var wh := v.split("x")
 				if wh.size() == 2:
@@ -96,7 +126,9 @@ func _ready() -> void:
 	ui.js_error.connect(func(msg): printerr("[jsui error] ", msg))
 	ui.grab_focus()  # keyboard / gamepad go to the UI
 	print("JsuiView running=%s bundle=%s dev=%s" % [ui.is_running(), ui.bundle_url, ui.dev_mode])
-	if _capture != "" and _self_test:
+	if _bench > 0:
+		_run_bench()
+	elif _capture != "" and _self_test:
 		_run_self_test()
 
 
@@ -143,7 +175,7 @@ func _process(delta: float) -> void:
 	if _stats_timer <= 0.0:
 		_stats_timer = 1.0
 		_send_stats()
-	if _capture != "" and not _self_test:
+	if _capture != "" and not _self_test and _bench == 0:
 		_frame += 1
 		if _frame >= _frames and ui.get_pending_loads() == 0:
 			_save_capture()
@@ -395,7 +427,13 @@ func _save_capture() -> void:
 		get_tree().quit(1)
 		return
 	img.save_png(path)
-	print("capture: JsuiView frame %dx%d (pixel ratio %.2f) -> %s" % [img.get_width(), img.get_height(), ui.get_effective_pixel_ratio(), path])
+	print("capture: JsuiView frame %dx%d (pixel ratio %.2f, renderer %s) -> %s" % [img.get_width(), img.get_height(), ui.get_effective_pixel_ratio(), ui.get_renderer(), path])
+	var ok: bool = ui.get_last_error() == ""
+	if _expect_renderer != "" and ui.get_renderer() != _expect_renderer:
+		printerr("renderer: %s, expected %s" % [ui.get_renderer(), _expect_renderer])
+		ok = false
+	if _max_gpu_diff >= 0.0 and ui.get_renderer() != "cpu":
+		ok = _compare_with_cpu(path) and ok
 	# With a real renderer (not --headless) also grab the composited window,
 	# which shows the texture as Godot drew it.
 	if DisplayServer.get_name() != "headless":
@@ -405,13 +443,94 @@ func _save_capture() -> void:
 			var vpath := path.get_basename() + "-viewport.png"
 			shot.save_png(vpath)
 			print("capture: viewport %dx%d -> %s" % [shot.get_width(), shot.get_height(), vpath])
-	var ok: bool = ui.get_last_error() == ""
 	if _self_test:
 		print("self-test: %d failed (pongs=%d ui_answers=%d unhandled_clicks=%d)" % [_failures, _pongs, _ui_answers, _unhandled_clicks])
 		if _failures > 0:
 			printerr("self-test failed")
 			ok = false
 	get_tree().quit(0 if ok else 1)
+
+
+## Paints the current frame with the CPU raster too and compares it with the
+## GPU frame (both read now, so they show the same state).
+func _compare_with_cpu(path: String) -> bool:
+	var cpu: Image = ui.get_cpu_frame_image()
+	var gpu: Image = ui.get_frame_image()
+	if cpu == null or gpu == null or cpu.get_size() != gpu.get_size():
+		printerr("gpu-vs-cpu: no frames to compare")
+		return false
+	cpu.save_png(path.get_basename() + "-cpu.png")
+	gpu.save_png(path.get_basename() + "-gpu.png")
+	var m: Dictionary = gpu.compute_image_metrics(cpu, false)
+	# Share of channels that differ by more than 8 / 255.
+	var w := gpu.get_width()
+	var h := gpu.get_height()
+	var a := gpu.get_data()
+	var b := cpu.get_data()
+	var over := 0
+	for k in range(0, a.size(), 7):  # a sample of the channels is plenty
+		if absi(a[k] - b[k]) > 8:
+			over += 1
+	var over_pct := 100.0 * over / (a.size() / 7.0)
+	var ok: bool = m.mean <= _max_gpu_diff
+	print("gpu-vs-cpu: %s %dx%d mean %.3f, rms %.3f, max %d, channels off by > 8: %.3f%% (limit mean %.3f) %s" % [
+		ui.get_renderer(), w, h, m.mean, m.root_mean_squared, int(m.max), over_pct, _max_gpu_diff, "ok" if ok else "FAIL"])
+	if not ok:
+		printerr("gpu-vs-cpu: the GPU frame differs from the CPU raster")
+	return ok
+
+
+## --bench: hover springs (small damage) then list scrolling (larger damage),
+## `_bench` frames each, with the vsync and frame cap off.
+func _run_bench() -> void:
+	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
+	Engine.max_fps = 0
+	var need := ["menu-1", "menu-2", "menu-3", "menu-4", "armory"]
+	var ready := await _wait_for(func():
+		for a in need:
+			if not _anchors.has(a):
+				return false
+		return ui.get_pending_loads() == 0, 8.0)
+	if not ready:
+		printerr("bench: the UI did not report its anchors")
+		get_tree().quit(1)
+		return
+	await _wait(1.5)
+	var results := []
+	for phase in ["hover", "scroll"]:
+		var s0: Dictionary = ui.get_render_stats()
+		var t0 := Time.get_ticks_usec()
+		var list := _center("armory")
+		for f in _bench:
+			if phase == "hover":
+				# Sweep across the menu buttons: hover-in / out springs.
+				var target := _center(need[(f / 6) % 4])
+				_mouse_move(target + Vector2(float((f % 6) * 8 - 20), 0))
+			else:
+				_mouse_move(list)
+				_mouse_button(list, MOUSE_BUTTON_WHEEL_DOWN if (f / 20) % 2 == 0 else MOUSE_BUTTON_WHEEL_UP, true)
+				_mouse_button(list, MOUSE_BUTTON_WHEEL_DOWN if (f / 20) % 2 == 0 else MOUSE_BUTTON_WHEEL_UP, false)
+			await get_tree().process_frame
+		await RenderingServer.frame_post_draw
+		var dt := Time.get_ticks_usec() - t0
+		var s1: Dictionary = ui.get_render_stats()
+		var renders: int = s1.renders - s0.renders
+		var r := {
+			"phase": phase,
+			"renderer": ui.get_renderer(),
+			"frames": _bench,
+			"frame_ms": dt / 1000.0 / _bench,
+			"renders": renders,
+			"render_ms": (s1.render_usec_total - s0.render_usec_total) / 1000.0 / max(1, renders),
+			"dirty_kpx": (s1.dirty_pixels_total - s0.dirty_pixels_total) / 1000.0 / max(1, renders),
+		}
+		results.append(r)
+		print("bench: %s %s: %d frames, %.2f ms/frame (wall), %d renders, %.3f ms/render (JsuiView.render, CPU side), %.1f kpx damage/render" % [
+			r.renderer, phase, _bench, r.frame_ms, renders, r.render_ms, r.dirty_kpx])
+		_mouse_move(Vector2(-100, -100))
+		await _wait(1.0)
+	print("bench-json: ", JSON.stringify(results))
+	get_tree().quit(0)
 
 
 func _unhandled_input(event: InputEvent) -> void:

@@ -1,9 +1,18 @@
 // JsuiView: a Godot Control that runs a JSUI bundle and shows it.
 //
-// The runtime ticks in NOTIFICATION_PROCESS, paints with
-// jsui_render_rgba_incremental into a CPU buffer that persists between
-// frames, and uploads to an ImageTexture only when pixels changed. The
-// texture is drawn by an internal canvas item with premultiplied-alpha
+// The runtime ticks in NOTIFICATION_PROCESS and paints only when something
+// changed, with one of two renderers (chosen in the first render from the
+// RenderingServer's driver; `force_cpu` pins the CPU one):
+//
+//   * GPU (Vulkan / Metal, jsui_gpu_render.cpp): Skia Graphite draws into a
+//     texture of Godot's RenderingDevice on the render thread, repainting
+//     only the damaged rect, which Godot then copies into the texture it
+//     samples (a Texture2DRD).
+//   * CPU: jsui_render_rgba_incremental into a buffer that persists between
+//     frames, uploaded to an ImageTexture when pixels changed (the
+//     Compatibility renderer, headless runs, or when the GPU path fails).
+//
+// The texture is drawn by an internal canvas item with premultiplied-alpha
 // blending (JSUI produces premultiplied RGBA), so the node's own `material`
 // stays free for the game.
 #pragma once
@@ -11,11 +20,15 @@
 #include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/canvas_item_material.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
+#include <godot_cpp/classes/texture2d.hpp>
+#include <godot_cpp/classes/texture2drd.hpp>
 #include <godot_cpp/classes/input_event.hpp>
+#include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/rid.hpp>
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 #include <utility>
@@ -43,6 +56,8 @@ class JsuiView : public godot::Control {
   bool get_autostart() const { return autostart_; }
   void set_forward_gamepad(bool on) { forward_gamepad_ = on; }
   bool get_forward_gamepad() const { return forward_gamepad_; }
+  void set_force_cpu(bool on);
+  bool get_force_cpu() const { return force_cpu_; }
 
   // Methods.
   void start();   // (re)creates the runtime and loads bundle_url
@@ -68,8 +83,13 @@ class JsuiView : public godot::Control {
   int resolve_call_json(int64_t id, const godot::String& json);
   int reject_call(int64_t id, const godot::String& message);
   int64_t call_ui(const godot::String& name, const godot::Variant& args, const godot::Callable& callback);
-  godot::Ref<godot::ImageTexture> get_texture() const { return texture_; }
-  godot::Ref<godot::Image> get_frame_image() const;
+  godot::Ref<godot::Texture2D> get_texture() const;
+  godot::Ref<godot::Image> get_frame_image();
+  // The current UI state painted by the CPU raster (tests: compare it with
+  // get_frame_image() from the GPU path). Renders first if a frame is due.
+  godot::Ref<godot::Image> get_cpu_frame_image();
+  godot::String get_renderer() const;  // "vulkan", "metal", "cpu" or "" before the first frame
+  godot::Dictionary get_render_stats() const;
   int get_pending_loads() const;
   godot::String get_last_error() const;
   float get_effective_pixel_ratio() const { return ratio_; }
@@ -92,6 +112,17 @@ class JsuiView : public godot::Control {
   void process();
   void updateViewport();
   void render();
+  void renderCpu();
+  // GPU path (jsui_gpu_render.cpp). renderGpu returns false when the GPU
+  // path failed and the view must fall back to the CPU.
+  enum class Renderer { Unknown, Cpu, Vulkan, Metal };
+  void chooseRenderer();
+  bool renderGpu();
+  void releaseGpu();
+  void runOnRenderThread(const std::function<void()>& job);
+  void runRenderJob();
+  godot::PackedByteArray readGpuFrame();
+  void showTexture(const godot::RID& texture);
   void updateCursor();
   void flushMessages();
   void reportErrors();
@@ -106,6 +137,7 @@ class JsuiView : public godot::Control {
   float pixel_ratio_ = 0.f;  // 0: follow the canvas -> screen scale
   bool autostart_ = true;
   bool forward_gamepad_ = true;
+  bool force_cpu_ = false;
 
   JsuiRuntime* rt_ = nullptr;
   uint64_t start_usec_ = 0;
@@ -113,9 +145,32 @@ class JsuiView : public godot::Control {
   float ratio_ = 1.f;
   bool render_pending_ = true;
 
+  // CPU renderer.
   std::vector<uint8_t> pixels_;   // jsui's incremental target (stable address)
+  int pixels_w_ = 0, pixels_h_ = 0;
   godot::PackedByteArray upload_; // staging copy handed to the Image
   godot::Ref<godot::ImageTexture> texture_;
+
+  // GPU renderer. `src` is Skia's retained render target (only JSUI draws
+  // into it); `dst` is what the canvas item samples; Godot copies the damage
+  // from one to the other, so Godot's RenderingDevice tracks dst's layout and
+  // barriers itself. A new pair (start, resize) is used from the frame after
+  // its creation, once Godot has run the initial upload and priming copy.
+  Renderer renderer_ = Renderer::Unknown;
+  JsuiGpuContext* gpu_ = nullptr;
+  struct GpuTextures {
+    godot::RID src, dst;
+    int w = 0, h = 0;
+    uint64_t created_frame = 0;
+    bool valid() const { return src.is_valid(); }
+  };
+  GpuTextures gpu_cur_, gpu_next_;
+  bool gpu_retained_ = false;  // gpu_cur_.src holds the last frame (incremental repaint)
+  godot::Ref<godot::Texture2DRD> gpu_texture_;
+  std::function<void()> render_job_;
+  // Stats (get_render_stats): CPU time of the render calls.
+  uint64_t renders_ = 0, render_usec_total_ = 0, render_usec_last_ = 0, render_usec_max_ = 0;
+  int64_t dirty_px_total_ = 0;
   godot::Ref<godot::CanvasItemMaterial> premul_;
   godot::RID canvas_item_;
 
