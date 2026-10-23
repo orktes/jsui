@@ -1,24 +1,65 @@
 {
   "name": "@jsui/web",
   "version": "0.1.0",
-  "private": true,
   "description": "Browser host for the JSUI WebAssembly build",
+  "author": "Jaakko Lukkari",
+  "license": "MIT",
+  "homepage": "https://github.com/orktes/jsui/tree/main/web#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/orktes/jsui.git",
+    "directory": "web"
+  },
+  "bugs": {
+    "url": "https://github.com/orktes/jsui/issues"
+  },
+  "keywords": [
+    "jsui",
+    "react-native",
+    "game-ui",
+    "webassembly",
+    "wasm",
+    "webgpu",
+    "webgl",
+    "skia",
+    "canvas"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "jsui-web.js",
   "exports": {
     ".": "./jsui-web.js",
+    "./jsui-webgpu.js": "./jsui-webgpu.js",
     "./dist/*": "./dist/*",
     "./dist-webgl/*": "./dist-webgl/*",
-    "./dist-gpu/*": "./dist-gpu/*"
+    "./dist-gpu/*": "./dist-gpu/*",
+    "./package.json": "./package.json"
   },
-  "files": ["jsui-web.js", "jsui-webgpu.js", "dist/jsui.js", "dist/jsui.wasm", "index.html", "demo"],
+  "files": [
+    "jsui-web.js",
+    "jsui-webgpu.js",
+    "dist/jsui.js",
+    "dist/jsui.wasm",
+    "dist-webgl/jsui.js",
+    "dist-webgl/jsui.wasm",
+    "dist-gpu/jsui.js",
+    "dist-gpu/jsui.wasm",
+    "index.html",
+    "demo",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test:web": "node test/node-smoke.mjs && node test/browser.test.mjs",
     "test:node": "node test/node-smoke.mjs",
     "test:browser": "node test/browser.test.mjs",
-    "serve": "node test/serve.mjs"
+    "serve": "node test/serve.mjs",
+    "prepack": "node scripts/check-dist.mjs"
   },
   "devDependencies": {
     "playwright": "1.56.1"
-  }
+  },
+  "sideEffects": false
 }
