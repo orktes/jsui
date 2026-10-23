@@ -342,10 +342,11 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
   const void* key = haveLast ? reinterpret_cast<const void*>(uintptr_t(f.retainedGen)) : nullptr;
   bool viaRetained = false, failed = false;
   bool copyAll = false;  // copy-back: the whole target into `back` after the frame
-  const bool opacityLayers = !(t.flags & JSUI_WEBGPU_NO_LAYER_CACHE), raster = !(t.flags & JSUI_WEBGPU_NO_RASTER_CACHE);
-  f.layers->setModes(opacityLayers, raster);
+  const bool opacityLayers = !(t.flags & JSUI_WEBGPU_NO_LAYER_CACHE), raster = !(t.flags & JSUI_WEBGPU_NO_RASTER_CACHE),
+             backdrop = !(t.flags & JSUI_WEBGPU_NO_BACKDROP);
+  f.layers->setModes(opacityLayers, raster, backdrop);
   jsui::TextureScope textureScope(&g->textures);
-  jsui::LayerCacheScope layerScope(opacityLayers || raster ? f.layers.get() : nullptr);
+  jsui::LayerCacheScope layerScope(opacityLayers || raster || backdrop ? f.layers.get() : nullptr);
   rt.renderCanvasTracked(key, w, h, [&](const SkIRect&, bool keyValid) -> Surface::CanvasChoice {
     int64_t area = 0;
     for (SkRegion::Iterator it(rt.trackedDamage()); !it.done(); it.next())

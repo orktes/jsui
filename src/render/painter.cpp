@@ -1320,6 +1320,10 @@ struct NodeRecord : Node::Cache {
   bool moved = false;                      // this frame: the device matrix changed
   bool scaling = false;                    // this frame: the device matrix' scale / skew changed
   bool resizing = false;                   // this frame: its size changed
+  // This frame: its own painting (without its descendants) is what it was,
+  // where it was: paint state, size, child list, scroll offsets and device
+  // matrix unchanged (see Backdrop).
+  bool selfStill = false;
   // Its shadow was drawn from a mask of a nearby scale (see quantizedScale);
   // repainted exactly once the scale stops changing.
   mutable bool shadowInexact = false;
@@ -1366,6 +1370,23 @@ struct CurvedNode {
   bool clipDependent = true;
 };
 
+// Static backdrop (GPU canvases with a LayerCache, see paintDocumentRects):
+// the start of the document's paint order, up to the first node that is
+// changing (a background image under a scrim, say), while it stays the
+// same. Damage rects are repainted over a texture of it: one draw, where
+// each rect otherwise repaints all of it. It is what the document paints
+// first, over nothing, so the texture holds exactly the pixels painting it
+// directly gives: a frame painted over it equals a full repaint.
+struct Backdrop {
+  // The nodes it ends inside of, from the root down: each paints its own
+  // decorations (background, borders, shadows) and its children before the
+  // second member into it; that child is the next entry's node, or the
+  // first child not in it.
+  std::vector<std::pair<Node*, uint32_t>> path;
+  uint64_t sig = 0;     // what it paints (0: too little to be worth a texture)
+  uint32_t stable = 0;  // consecutive updates that found the same
+};
+
 // Per-document painter state, kept on the root node.
 struct RootRecord : NodeRecord {
   PaintStats stats;
@@ -1385,6 +1406,7 @@ struct RootRecord : NodeRecord {
   uint32_t passImageGen = 0;
   bool passRaster = false;
   int nodesUpdated = 0;  // PaintStats::nodesUpdated
+  Backdrop backdrop;     // see updateBackdrop
 };
 
 ShadowCache& shadowCache(RootRecord* root) { return root->shadows; }
@@ -1410,6 +1432,14 @@ struct Ctx {
   float alpha = 1;           // the painted node's opacity, when folded into its one draw
   LayerCache* layers = nullptr;  // composited opacity layers and raster-cached subtrees (null: neither)
   bool opacityLayers = true;     // with `layers`: opacity layers composited (false: plain layers, raster cache only)
+  // Static backdrop (see Backdrop): painting only it (into its texture,
+  // `backdropRender`) or only the rest (over its texture). `backdropDepth`
+  // counts the path entries reached; `backdropFirst` is the entry of the
+  // node paintNode hands to paintContent (-1: not on the path).
+  const Backdrop* backdrop = nullptr;
+  bool backdropRender = false;
+  size_t backdropDepth = 0;
+  int backdropFirst = -1;
 };
 
 sk_sp<SkMaskFilter> cachedBlur(RootRecord* root, float blur) {
@@ -1576,6 +1606,21 @@ void paintChildren(Node* n, SkCanvas* c, Ctx& ctx) {
   order.resize(begin);
 }
 
+// The children of a node on the static backdrop's path (no ghosts, no
+// zIndex): those before `first` and the next node on the path when painting
+// the backdrop, the others when painting over it.
+void paintBackdropChildren(Node* n, SkCanvas* c, Ctx& ctx, size_t first) {
+  const auto& kids = n->children();
+  if (!ctx.backdropRender) {
+    for (size_t i = first; i < kids.size(); i++) paintNode(kids[i], c, ctx);
+    return;
+  }
+  for (size_t i = 0; i < first && i < kids.size(); i++) paintNode(kids[i], c, ctx);
+  const auto& path = ctx.backdrop->path;
+  if (first < kids.size() && ctx.backdropDepth < path.size() && path[ctx.backdropDepth].first == kids[first])
+    paintNode(kids[first], c, ctx);
+}
+
 // Overlay scroll indicators of a ScrollView, above its content, inside the
 // padding box. Fading is driven by Node::scrollIndicatorOpacity.
 void paintScrollIndicators(Node* n, SkCanvas* c, const Box& b, float w, float h) {
@@ -1624,10 +1669,15 @@ SkIRect scrollIndicatorBounds(Node* n, const SkMatrix& m, float w, float h, cons
 // pixel-snapped one (already applied to the canvas); `w`, `h` the snapped size.
 void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float h) {
   const ComputedStyle& s = n->style();
+  // On the static backdrop's path (see Backdrop): only its part of the node
+  // (decorations, children before `first`) or only the rest.
+  const int first = ctx.backdropFirst;
+  ctx.backdropFirst = -1;
+  const bool front = first < 0 || ctx.backdropRender, rest = first < 0 || !ctx.backdropRender;
   Box b;
   computeBox(n, w, h, &b);
   ctx.stats.nodesPainted++;
-  if (!s.boxShadows.empty()) {
+  if (front && !s.boxShadows.empty()) {
     auto* rec = static_cast<const NodeRecord*>(n->paintCache.get());
     bool inexact = false;
     paintOuterShadows(c, b, s, ctx.root, ctx.alpha, rec && rec->scaling, rec && rec->resizing, &inexact);
@@ -1637,9 +1687,11 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
       ctx.doc.markExactRepaint();  // a frame after it stops, to repaint it exactly
     }
   }
-  paintBackground(c, b, s, ctx.root, ctx.alpha);
-  if (!s.boxShadows.empty()) paintInsetShadows(c, b, s, ctx.root);
-  paintBorders(c, b, s, ctx.alpha);
+  if (front) {
+    paintBackground(c, b, s, ctx.root, ctx.alpha);
+    if (!s.boxShadows.empty()) paintInsetShadows(c, b, s, ctx.root);
+    paintBorders(c, b, s, ctx.alpha);
+  }
 
   // Text uses the unsnapped layout box, like Chrome's text fragments: a
   // snapped (narrower) width would re-wrap a max-content paragraph.
@@ -1676,10 +1728,12 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
       c->translate(-n->scrollX, -n->scrollY);
       ctx.snapSpace.preTranslate(-n->scrollX, -n->scrollY);
     }
-    paintChildren(n, c, ctx);
+    if (first < 0) paintChildren(n, c, ctx);
+    else paintBackdropChildren(n, c, ctx, size_t(first));
     ctx.snapSpace = snapSpace;
     c->restore();
   }
+  if (!rest) return;
   if (n->type() == NodeType::ScrollView) paintScrollIndicators(n, c, b, w, h);
   paintOutline(c, b, s);
 }
@@ -1701,6 +1755,7 @@ struct LayerCache::Impl {
   uint32_t frame = 0;
   bool opacityLayers = true;  // composite cached opacity layers
   bool raster = true;         // raster-cached subtrees (see updateRasterCache)
+  bool backdrop = true;       // the static backdrop (see Backdrop)
   static size_t sizeOf(const Entry& e) { return e.image ? size_t(e.image->width()) * e.image->height() * 4 : 0; }
   void erase(std::unordered_map<const Node*, Entry>::iterator it) {
     bytes -= sizeOf(it->second);
@@ -1718,9 +1773,10 @@ void LayerCache::clear() {
   impl->entries.clear();
   impl->bytes = 0;
 }
-void LayerCache::setModes(bool opacityLayers, bool raster) {
+void LayerCache::setModes(bool opacityLayers, bool raster, bool backdrop) {
   impl->opacityLayers = opacityLayers;
   impl->raster = raster;
+  impl->backdrop = backdrop;
 }
 size_t LayerCache::bytes() const { return impl->bytes; }
 int LayerCache::size() const { return int(impl->entries.size()); }
@@ -1870,6 +1926,11 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
 
 void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   if (!isPainted(n)) return;
+  // The next node on the static backdrop's path (opacity 1, no layer).
+  int first = -1;
+  if (ctx.backdrop && ctx.backdropDepth < ctx.backdrop->path.size() &&
+      ctx.backdrop->path[ctx.backdropDepth].first == n)
+    first = int(ctx.backdrop->path[ctx.backdropDepth++].second);
   // Incremental repaint: skip subtrees entirely outside the damage. Their
   // records were refreshed by updateDamage() this frame.
   if (ctx.damage) {
@@ -1905,6 +1966,7 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   // A raster-cached subtree (see updateRasterCache), or a cached layer.
   bool raster = ctx.layers && ctx.layers->impl->raster && !layer && alpha >= 1 && n->paintCache &&
                 static_cast<const NodeRecord*>(n->paintCache.get())->rasterOn;
+  SkASSERT(first < 0 || (!layer && !raster));
   if (ctx.layers && (raster || (layer && ctx.opacityLayers && ctx.layers->impl->opacityLayers && s.filters.empty() &&
                                 !s.blendMode && !contentShader))) {
     ctx.snapSpace = p.snapSpace;
@@ -1937,6 +1999,7 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   ctx.snapSpace = p.snapSpace;
   ctx.transformed |= p.transformed;
   ctx.alpha = alpha;
+  ctx.backdropFirst = first;
   paintContent(n, c, ctx, p.snap, p.w, p.h);
   ctx.alpha = 1;
   ctx.snapSpace = parentSnap;
@@ -2106,6 +2169,104 @@ void updateRasterCache(RootRecord* root, SkRegion* damage, const SkIRect& screen
     if (!eligible) rec->rasterHits = 0;
     rec->rasterBounds = on ? rec->subtree : SkIRect::MakeEmpty();
   }
+}
+
+// Whether a subtree paints without layers: no composited groups, no cached
+// layer textures (states of their own, which a texture of the backdrop
+// would not follow).
+bool layerFree(const Node* n) {
+  if (!isPainted(n)) return true;
+  const ComputedStyle& s = n->style();
+  if (!s.filters.empty() || s.blendMode || !n->ghosts.empty() || n->layoutAnim) return false;
+  if (s.opacity * animOpacity(n) < 1 && !opacityFoldable(n)) return false;
+  if (paintsChildren(n))
+    for (const Node* ch : n->children())
+      if (!layerFree(ch)) return false;
+  return true;
+}
+
+struct SigHash {
+  uint64_t h = 1469598103934665603ull;
+  void bytes(const void* p, size_t n) {
+    const auto* b = static_cast<const uint8_t*>(p);
+    for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull;
+  }
+  template <typename T>
+  void add(const T& v) {
+    bytes(&v, sizeof v);
+  }
+  void matrix(const SkMatrix& m) {
+    float v[9];
+    m.get9(v);
+    bytes(v, sizeof v);
+  }
+};
+
+// Finds the static backdrop (see Backdrop) in the records of this update.
+// Down from the root, each node it ends inside of paints its decorations
+// and children in order, so the backdrop holds them while they and the
+// children before the first one that is changing stay as they are: a node
+// on the path must be still itself (selfStill) and paint without a layer;
+// a child in it as a whole must be quiet, and small and layer-free so that
+// painting it needs no texture state (it can never be a raster-cache
+// candidate). The signature covers what each one paints and where.
+void updateBackdrop(Document& doc, RootRecord* root, int deviceWidth, int deviceHeight, uint32_t imageGen) {
+  Backdrop& bd = root->backdrop;
+  const uint64_t prev = bd.sig;
+  bd.path.clear();
+  bd.sig = 0;
+  SigHash h;
+  h.add(deviceWidth);
+  h.add(deviceHeight);
+  h.add(doc.pixelRatio());
+  h.add(root->fontGen);
+  h.add(imageGen);
+  uint32_t nodes = 0;  // painted nodes in it
+  for (Node* n = doc.root(); n;) {
+    const auto* rec = static_cast<const NodeRecord*>(n->paintCache.get());
+    const ComputedStyle& s = n->style();
+    if (!rec || !rec->valid || !rec->painted || !isPainted(n) || !rec->selfStill || rec->rasterOn ||
+        rec->shadowInexact || n->layoutAnim || n->ghostOf || !n->ghosts.empty() ||
+        (n->type() != NodeType::View && n->type() != NodeType::ScrollView) || s.opacity < 1 ||
+        !s.filters.empty() || s.blendMode)
+      break;
+    const auto& kids = n->children();
+    bool sorted = false;
+    for (const Node* ch : kids) sorted |= ch->style().hasZIndex && ch->style().zIndex != 0;
+    if (sorted) break;
+    h.add(n);
+    h.add(rec->version);
+    h.add(rec->contentVersion);
+    h.add(rec->w);
+    h.add(rec->h);
+    h.add(rec->snap);
+    h.matrix(rec->matrix);
+    if (!s.backgroundColor.transparent() || !s.backgroundImages.empty() || !s.boxShadows.empty()) nodes++;
+    uint32_t first = 0;
+    for (; first < kids.size(); first++) {
+      Node* ch = kids[first];
+      const auto* cr = static_cast<const NodeRecord*>(ch->paintCache.get());
+      if (!cr || !cr->valid) break;
+      const bool painted = isPainted(ch);
+      if (painted && (!cr->painted || !cr->quiet || cr->subtreeNodes >= kRasterMinNodes || !cr->isolatable ||
+                      !layerFree(ch)))
+        break;
+      h.add(ch);
+      h.add(painted);
+      h.add(cr->version);
+      h.add(cr->layerStamp);
+      h.add(cr->w);
+      h.add(cr->h);
+      h.matrix(cr->matrix);
+      if (painted) nodes += cr->subtreeNodes;
+    }
+    h.add(first);
+    bd.path.emplace_back(n, first);
+    n = first < kids.size() ? kids[first] : nullptr;
+  }
+  // One node (a background colour) saves a draw at most: not worth a texture.
+  if (nodes >= 2) bd.sig = h.h | 1;
+  bd.stable = bd.sig && bd.sig == prev ? bd.stable + 1 : 0;
 }
 
 // Clean-subtree skip. Most of a frame's tree is unchanged: a child that is
@@ -2390,6 +2551,8 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
   rec->scaling = rec->valid && (rec->matrix.getScaleX() != m.getScaleX() || rec->matrix.getScaleY() != m.getScaleY() ||
                                 rec->matrix.getSkewX() != m.getSkewX() || rec->matrix.getSkewY() != m.getSkewY());
   rec->resizing = rec->valid && (rec->w != w || rec->h != h);
+  rec->selfStill = rec->valid && !selfChanged && rec->version == n->paintVersion && !rec->moved && !rec->scaling &&
+                   !rec->resizing;
   if (rec->shadowInexact && !rec->scaling && !rec->resizing) {
     // Came to rest: its shadow from the exact mask.
     addDamage(damage, own);
@@ -2631,6 +2794,7 @@ SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBl
   // Frames without damage leave the raster cache as it is (a host may
   // update the records of an unchanged frame or not).
   if (raster && !damage.isEmpty()) updateRasterCache(root, &damage, screen);
+  if (tLayerCache && tLayerCache->impl->backdrop) updateBackdrop(doc, root, deviceWidth, deviceHeight, imageGen);
   if (scan.node) {
     // Scroll blit: the viewport's pixels move with the content, so only
     // what the scroll exposes repaints, plus what is painted above the
@@ -2700,7 +2864,11 @@ SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBl
   return damage;
 }
 
-void paintDocument(Document& doc, SkCanvas* canvas, const SkRegion* damage) {
+namespace {
+
+// paintDocument; `over`: painting over the texture of this backdrop, so
+// without it.
+void paintDocumentOver(Document& doc, SkCanvas* canvas, const SkRegion* damage, const Backdrop* over) {
   RootRecord* root = rootRecord(doc);
   root->shadows.frame++;
   SpriteCache& sprites = root->sprites;
@@ -2722,6 +2890,7 @@ void paintDocument(Document& doc, SkCanvas* canvas, const SkRegion* damage) {
   // Composited layers on GPU canvases only (a raster canvas has no recorder
   // or context, and the counting canvas none either).
   ctx.layers = tLayerCache;
+  ctx.backdrop = over;
   std::unique_ptr<SkCanvas> counter;
   if (root->counting && (counter = makeCountingCanvas(canvas, &ctx.stats))) {
     // Same clip and matrix as the target, so quick rejects match (the
@@ -2761,14 +2930,89 @@ void paintDocument(Document& doc, SkCanvas* canvas, const SkRegion* damage) {
   root->stats = ctx.stats;
 }
 
+// The texture of the document's static backdrop (see Backdrop) for this
+// canvas, rendered when what it paints changed; null when there is none (a
+// canvas without a LayerCache, a backdrop that keeps changing or too large
+// a texture). The canvas size, at the origin: the pixels painting the
+// backdrop into the canvas directly gives (dithering included).
+sk_sp<SkImage> backdropImage(Document& doc, SkCanvas* canvas) {
+  constexpr uint32_t kStableUpdates = 2;  // unchanged for as many updates first
+  RootRecord* root = rootRecord(doc);
+  const Backdrop& bd = root->backdrop;
+  LayerCache* cache = tLayerCache;
+  if (!cache || !cache->impl->backdrop || !bd.sig || bd.stable < kStableUpdates || !canvas->recorder()) return nullptr;
+  LayerCache::Impl& lc = *cache->impl;
+  const void* owner = canvas->recorder();
+  const SkISize size = canvas->getBaseLayerSize();
+  // Its entry, by a key no node has.
+  const Node* key = reinterpret_cast<const Node*>(&root->backdrop);
+  auto it = lc.entries.find(key);
+  if (it != lc.entries.end()) {
+    LayerCache::Impl::Entry& e = it->second;
+    if (e.stamp == bd.sig && e.owner == owner && e.image && e.image->dimensions() == size &&
+        e.image->colorType() == canvas->imageInfo().colorType()) {
+      e.lastUsed = lc.frame;
+      return e.image;
+    }
+    lc.erase(it);
+  }
+  if (size.isEmpty() || size_t(size.width()) * size_t(size.height()) * 4 > lc.budget / 2) return nullptr;
+  SkImageInfo info = canvas->imageInfo().makeDimensions(size).makeAlphaType(kPremul_SkAlphaType);
+  SkSurfaceProps props = surfaceProps();
+  sk_sp<SkSurface> surf = canvas->makeSurface(info, &props);
+  if (!surf) return nullptr;
+  SkCanvas* oc = surf->getCanvas();
+  oc->clear(SK_ColorTRANSPARENT);
+  // Painted as paintDocument does, without layers (it has none).
+  Ctx ctx{doc, root, nullptr, {}, {}};
+  ctx.backdrop = &bd;
+  ctx.backdropRender = true;
+  oc->scale(doc.pixelRatio(), doc.pixelRatio());
+  ctx.snapSpace = oc->getTotalMatrix();
+  paintNode(doc.root(), oc, ctx);
+#if defined(JSUI_GRAPHITE_AS_IMAGE)
+  sk_sp<SkImage> image = SkSurfaces::AsImage(surf);
+#else
+  sk_sp<SkImage> image = surf->makeImageSnapshot();
+#endif
+  if (!image) return nullptr;
+  LayerCache::Impl::Entry e;
+  e.stamp = bd.sig;
+  e.image = std::move(image);
+  e.rect = SkIRect::MakeSize(size);
+  e.whole = true;
+  e.owner = owner;
+  e.lastUsed = lc.frame;
+  lc.bytes += LayerCache::Impl::sizeOf(e);
+  return lc.entries.emplace(key, std::move(e)).first->second.image;
+}
+
+}  // namespace
+
+void paintDocument(Document& doc, SkCanvas* canvas, const SkRegion* damage) {
+  paintDocumentOver(doc, canvas, damage, nullptr);
+}
+
 void paintDocumentRects(Document& doc, SkCanvas* canvas, const std::vector<SkIRect>& rects) {
   PaintStats sum;
+  sk_sp<SkImage> backdrop = rects.empty() ? nullptr : backdropImage(doc, canvas);
   for (const SkIRect& r : rects) {
     SkRegion part(r);
     canvas->save();
     canvas->clipIRect(r);
-    canvas->clear(SK_ColorTRANSPARENT);
-    paintDocument(doc, canvas, &part);
+    if (backdrop) {
+      // Every pixel of the rect (transparent outside the backdrop): what
+      // clearing it and painting the backdrop gives.
+      SkPaint paint;
+      paint.setBlendMode(SkBlendMode::kSrc);
+      canvas->save();
+      canvas->resetMatrix();
+      canvas->drawImage(backdrop.get(), 0, 0, SkSamplingOptions(), &paint);
+      canvas->restore();
+    } else {
+      canvas->clear(SK_ColorTRANSPARENT);
+    }
+    paintDocumentOver(doc, canvas, &part, backdrop ? &rootRecord(doc)->backdrop : nullptr);
     canvas->restore();
     const PaintStats& s = rootRecord(doc)->stats;
     sum.nodesPainted += s.nodesPainted;

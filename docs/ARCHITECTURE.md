@@ -456,6 +456,30 @@ used to process Dawn events).
   `JSUI_WEBGPU_NO_RASTER_CACHE` turns it off; `webgpu: raster cache` in the
   browser tests compares it with direct painting, in steady frames and with
   the list scrolled at 2x.
+* **Static backdrop.** Each damage rect is cleared and repainted from the
+  root, so it also repaints whatever lies under everything: on
+  `interactions.jsx` the background colour, the full-screen image and the
+  scrim's two gradients, 4 draws (plus the clear) in each of a frame's 3-4
+  rects. What the document paints first, in paint order up to the first
+  node that is changing, is kept in a texture of the canvas' size
+  (`Backdrop`, `updateBackdrop` in `painter.cpp`, in the same `LayerCache`),
+  and each rect is drawn from it (`kSrc`, in place of the clear) before the
+  rest is painted. Down from the root, each node it ends inside of paints
+  its own decorations and its first children into it: such a node must be
+  unchanged itself (`selfStill`) and paint without a layer; a child in it
+  whole must be quiet, have fewer than 4 nodes and no layers (never a
+  raster-cache candidate, so nothing in it depends on texture state). A
+  signature of what each one paints and where (with the font and image
+  generations and the canvas size) must stay the same for 2 updates before
+  a texture is made, and a new one renders it again. Painted over nothing,
+  the texture holds exactly the pixels painting the backdrop directly gives
+  (the canvas' format, at the origin, so dithering matches too), so
+  repaints over it equal full ones bit for bit. It costs one texture of the
+  canvas' size. On `interactions.jsx` at 1280x720 Skia draws per frame went
+  from ~73 to ~58 scrolling the armory list and from ~48 to ~31 in steady
+  frames. `JSUI_WEBGPU_NO_BACKDROP` turns it off; `webgpu: static
+  backdrop` in the browser tests checks the pixels against painting it,
+  also after the backdrop changes.
 * **What each pass is** (`interactions.jsx`, `frame-bench.mjs` lists them
   with GPU times). Steady (the looping glow, deploy pulse, live dot and
   progress shimmer): one pass, the canvas (cleared, the last frame drawn

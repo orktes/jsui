@@ -62,7 +62,9 @@ SkMatrix localTransform(const Node& node);
 
 // Repaints the damage given as rects: each rect is cleared and painted in
 // its own pass, clipped to it (a scissor rect on the GPU). Rects may overlap.
-// The stats of the passes are summed.
+// With a LayerCache a rect starts from a texture of the document's static
+// backdrop instead of cleared, and is painted without it (see Backdrop in
+// painter.cpp). The stats of the passes are summed.
 void paintDocumentRects(Document& doc, SkCanvas* canvas, const std::vector<SkIRect>& rects);
 
 // Painter statistics of the last paintDocument() call (for benchmarks).
@@ -113,9 +115,10 @@ class LayerCache {
   LayerCache(const LayerCache&) = delete;
   LayerCache& operator=(const LayerCache&) = delete;
   void clear();
-  // What it caches: opacity layers and / or raster-cached subtrees (see
-  // updateRasterCache in painter.cpp). Both by default.
-  void setModes(bool opacityLayers, bool raster);
+  // What it caches: opacity layers, raster-cached subtrees (see
+  // updateRasterCache in painter.cpp) and / or the static backdrop (see
+  // Backdrop). All by default.
+  void setModes(bool opacityLayers, bool raster, bool backdrop = true);
   // After a frame: frees layers unused for a while, and the least recently
   // used ones over the budget.
   void endFrame();
