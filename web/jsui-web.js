@@ -63,7 +63,15 @@
 //   clock.destroy();
 //
 // The runtime ticks once per frame and every canvas paints what changed.
-// Each surface canvas has its own renderer context; see JsuiSurfaceOptions.
+// Surface canvases share the runtime's GPU context, so a page can hold many
+// GPU-drawn widgets (browsers cap live WebGL contexts at about 16):
+//
+//   WebGPU  one Skia Graphite context on the page's device draws every
+//           surface; each canvas has only its own GPUCanvasContext.
+//   WebGL   one offscreen WebGL context (SharedGL) draws each surface, and
+//           the frame is copied into that canvas' 2D context in the same task.
+//
+// See JsuiSurfaceOptions.renderer.
 
 /** @typedef {{
  *   canvas?: HTMLCanvasElement,  // the main surface's canvas; null / omitted: not shown (a page
@@ -107,7 +115,7 @@
  *                                // false lets an unhandled Tab move page focus on)
  * }} JsuiOptions */
 
-import { WebGPURenderer, requestWebGPU } from './jsui-webgpu.js';
+import { SharedWebGPU, WebGPURenderer, requestWebGPU } from './jsui-webgpu.js';
 
 export { requestWebGPU, webgpuSupported } from './jsui-webgpu.js';
 
@@ -291,6 +299,10 @@ class CanvasView {
         // frame + one copy).
         if (this._wgpu.render() === false) this._dropWebGPU('WebGPU frame failed');
         t2 = t3 = performance.now();
+      } else if (this._sgl) {
+        // Skia on the runtime's shared WebGL context, copied into this canvas.
+        if (this._sgl.render(this) === false) this._switchToCpu('shared GPU frame failed', false, '2d');
+        t2 = t3 = performance.now();
       } else if (this._gpu) {
         // Skia draws straight into the canvas' WebGL framebuffer (full repaint).
         if (this._renderGpu() === false) this._switchToCpu('GPU frame failed', false);
@@ -350,6 +362,7 @@ class CanvasView {
   /** The last rendered frame as premultiplied RGBA (copy), for tests and screenshots. */
   readPixels() {
     if (this._wgpu) return null;  // asynchronous on WebGPU: readPixelsAsync()
+    if (this._sgl) return this._sgl.read(this);
     if (this._gpu) return this._readGpuPixels();
     if (!this._buf) return null;
     return { width: this.pixelWidth, height: this.pixelHeight,
@@ -516,13 +529,14 @@ class CanvasView {
     // WebGPU first (createJsui acquired the device only for the modes that
     // may use it), then Skia on WebGL, then the CPU raster.
     if (this._webgpu && (mode === 'auto' || mode === 'gpu' || mode === 'webgpu')) {
-      this._wgpu = WebGPURenderer.create(this, this._webgpu);
+      this._wgpu = WebGPURenderer.create(this, this._webgpu, null, this._webgpuShare());
       if (this._wgpu) {
         this.renderer = 'webgpu';
         return;
       }
       this._webgpu = null;
     }
+    if (this._initSharedGL(mode)) return;
     if (mode === 'auto' || mode === 'gpu' || mode === 'webgl' || mode === 'webgpu') {
       if (this._initGpu(mode === 'auto')) return;
       mode = 'cpu';  // CPU raster + blit on the same canvas
@@ -630,6 +644,13 @@ class CanvasView {
   _switchToCpu(reason, freshCanvas, mode = 'cpu') {
     const M = this.module;
     clearTimeout(this._restoreTimer);
+    if (this._sgl) {
+      // The canvas already has a 2D context: keep it, with the CPU raster.
+      this._sgl.remove(this);
+      this._sgl = null;
+      freshCanvas = false;
+      mode = '2d';
+    }
     if (this._gpu) {
       if (this._glHandle) M.GL.makeContextCurrent(this._glHandle);
       M._jsui_gpu_destroy(this._gpu);
@@ -1001,6 +1022,8 @@ class CanvasView {
     const M = this.module;
     this._wgpu?.destroy();
     this._wgpu = null;
+    this._sgl?.remove(this);
+    this._sgl = null;
     if (this._gpu) {
       M.GL.makeContextCurrent(this._glHandle);
       M._jsui_gpu_destroy(this._gpu);
@@ -1020,6 +1043,158 @@ class CanvasView {
   }
 
   _releasePads() {}
+
+  // Shared GPU contexts (surfaces only, see JsuiSurface): the provider of a
+  // shared Skia WebGPU context, and whether the view now draws through the
+  // runtime's shared WebGL context.
+  _webgpuShare() { return null; }
+  _initSharedGL() { return false; }
+}
+
+// One offscreen WebGL context that draws the surfaces of a runtime: Skia
+// renders a surface into the bottom-left corner of its drawing buffer (grown
+// to the largest surface), then the frame is copied into the surface canvas'
+// 2D context. Both happen in the same task, so the drawing buffer need not be
+// preserved. Per-surface retained frames live in the GPU context
+// (src/render/gpu.cpp), so small changes still repaint only their damage.
+class SharedGL {
+  // Null when the module has no GL backend or no (hardware, for
+  // `hardwareOnly`) WebGL context / Skia context can be created.
+  static create(host, hardwareOnly) {
+    const M = host.module;
+    if (!M.GL || !M._jsui_gpu_create_gl || typeof document === 'undefined') return null;
+    const canvas = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(1, 1) : document.createElement('canvas');
+    const attrs = { alpha: true, premultipliedAlpha: true, antialias: false, depth: false, stencil: true,
+      preserveDrawingBuffer: false, powerPreference: 'high-performance', failIfMajorPerformanceCaveat: !!hardwareOnly };
+    let gl = null;
+    try { gl = canvas.getContext('webgl2', attrs) || canvas.getContext('webgl', attrs); } catch {}
+    if (!gl || gl.isContextLost()) return null;
+    const version = typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext ? 2 : 1;
+    const glAttrs = { ...attrs, majorVersion: version, minorVersion: 0, enableExtensionsByDefault: true };
+    const handle = M.GL.registerContext(gl, glAttrs);
+    if (!handle) return null;
+    M.GL.makeContextCurrent(handle);
+    const gpu = M._jsui_gpu_create_gl(0, 0);
+    M.GL.makeContextCurrent(0);
+    if (!gpu) {
+      M.GL.deleteContext(handle);
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      host._log(2, 'Skia GPU context creation failed for the shared WebGL context');
+      return null;
+    }
+    return new SharedGL(host, canvas, gl, glAttrs, handle, gpu, version);
+  }
+
+  constructor(host, canvas, gl, glAttrs, handle, gpu, version) {
+    this.host = host;
+    this.module = host.module;
+    this.canvas = canvas;
+    this.gl = gl;
+    this.glAttrs = glAttrs;
+    this.handle = handle;
+    this.gpu = gpu;
+    this.renderer = version === 2 ? 'gpu-webgl2-shared' : 'gpu-webgl-shared';
+    this.stencilBits = gl.getContextAttributes()?.stencil ? 8 : 0;
+    this.views = new Set();
+    this.lost = false;
+    this.destroyed = false;
+    this._abort = new AbortController();
+    const M = this.module, signal = this._abort.signal;
+    canvas.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();
+      this.lost = true;
+      M._jsui_gpu_context_lost(this.gpu);  // drop GPU objects without GL calls
+      clearTimeout(this._restoreTimer);
+      const ms = host.opts.contextRestoreTimeout ?? 3000;
+      if (!(ms >= 0 && ms < Infinity)) return;
+      this._restoreTimer = setTimeout(() => {
+        if (!this.lost || this.destroyed) return;
+        for (const v of [...this.views]) v._switchToCpu('shared WebGL context lost and not restored', false, '2d');
+      }, ms);
+    }, { signal });
+    canvas.addEventListener('webglcontextrestored', () => {
+      clearTimeout(this._restoreTimer);
+      // Extension objects of the lost context are dead: register afresh. The
+      // GPU context rebuilds itself on the next render.
+      M.GL.deleteContext(this.handle);
+      this.handle = M.GL.registerContext(gl, glAttrs);
+      this.lost = false;
+      for (const v of this.views) v._sizeChanged = true;  // repaint into the new context
+    }, { signal });
+  }
+
+  add(view) { this.views.add(view); }
+  remove(view) { this.views.delete(view); }
+
+  // Draws `view`'s frame and copies it into its canvas: true when drawn,
+  // false when the GPU path failed, undefined while the context is lost.
+  render(view) {
+    const r = this._draw(view);
+    if (r !== true) return r;
+    const w = view.pixelWidth, h = view.pixelHeight, ctx = view._ctx2d;
+    ctx.save();
+    ctx.globalCompositeOperation = 'copy';  // replace, alpha included
+    ctx.drawImage(this.canvas, 0, this.canvas.height - h, w, h, 0, 0, w, h);
+    ctx.restore();
+    return true;
+  }
+
+  _draw(view) {
+    if (this.lost || this.destroyed || !this.handle) return undefined;
+    const M = this.module, w = view.pixelWidth, h = view.pixelHeight, c = this.canvas;
+    // Grow only: a resize clears the buffer and reallocates it.
+    if (c.width < w || c.height < h) {
+      c.width = Math.max(c.width, w);
+      c.height = Math.max(c.height, h);
+    }
+    M.GL.makeContextCurrent(this.handle);
+    // JsuiGLTarget {fbo, texture, format, width, height, samples, stencil_bits, flags}:
+    // FBO 0 wrapped at the surface's size draws into the buffer's bottom-left corner.
+    const t = view._dirty >> 2;
+    M.HEAP32.fill(0, t, t + 8);
+    M.HEAP32[t + 3] = w;
+    M.HEAP32[t + 4] = h;
+    M.HEAP32[t + 6] = this.stencilBits;
+    const r = M._jsui_render_gl_target(view.rt, this.gpu, view._dirty);
+    M.GL.makeContextCurrent(0);
+    if (r === 0) return true;
+    return this.gl.isContextLost() ? undefined : false;
+  }
+
+  // Renders `view` and reads it back. Premultiplied RGBA, top row first.
+  read(view) {
+    if (this._draw(view) !== true) return null;
+    const gl = this.gl, w = view.pixelWidth, h = view.pixelHeight;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    if (typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext) {
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    }
+    gl.pixelStorei(gl.PACK_ALIGNMENT, 4);
+    const px = new Uint8Array(w * h * 4);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    const row = w * 4, tmp = new Uint8Array(row);
+    for (let y = 0; y < h >> 1; y++) {  // GL rows are bottom-up
+      const a = y * row, b = (h - 1 - y) * row;
+      tmp.set(px.subarray(a, a + row));
+      px.copyWithin(a, b, b + row);
+      px.set(tmp, b);
+    }
+    return { width: w, height: h, data: px };
+  }
+
+  destroy() {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this._abort.abort();
+    clearTimeout(this._restoreTimer);
+    const M = this.module;
+    if (this.handle) M.GL.makeContextCurrent(this.handle);
+    M._jsui_gpu_destroy(this.gpu);
+    M.GL.makeContextCurrent(0);
+    if (this.handle) M.GL.deleteContext(this.handle);
+    this.handle = this.gpu = 0;
+    this.gl.getExtension('WEBGL_lose_context')?.loseContext();  // free it now, not at GC
+  }
 }
 
 class JsuiHost extends CanvasView {
@@ -1245,6 +1420,28 @@ class JsuiHost extends CanvasView {
   /** New props for the main surface's component (it re-renders, keeping its state). */
   setProps(props) { return this.run(null, props); }
 
+  // The Skia WebGPU context the surfaces share on `webgpu`'s device (a new
+  // one after a device loss). Each surface renderer takes a reference.
+  _sharedWebGPU(webgpu) {
+    const cur = this._swgpu;
+    if (cur && !cur.lost && !cur.destroyed && cur.webgpu === webgpu) return cur;
+    const next = SharedWebGPU.create(this.module, webgpu, (t) => this._log(2, t));
+    if (!next) return null;
+    next.refs = 0;  // held by the surface renderers only
+    this._swgpu = next;
+    return next;
+  }
+
+  // The offscreen WebGL context the surfaces share (created once; null when
+  // that fails, and then not retried).
+  _sharedGL(hardwareOnly) {
+    if (this._sgl0 === undefined || this._sgl0?.destroyed) {
+      this._sgl0 = SharedGL.create(this, hardwareOnly);
+      if (this._sgl0) this._log(1, `surfaces share one ${this._sgl0.renderer.replace('-shared', '')} context`);
+    }
+    return this._sgl0;
+  }
+
   _surfaceDestroyed(s) {
     this._surfaces.delete(s);
     if (this._padView === s) {
@@ -1284,6 +1481,12 @@ class JsuiHost extends CanvasView {
     // jsui_destroy frees the surface handles with the runtime.
     for (const s of this._surfaces) s._destroyView(true);
     this._surfaces.clear();
+    this._sgl0?.destroy();
+    // A shared WebGPU context no surface took (the surfaces' unref frees the others).
+    if (this._swgpu?.refs === 0 && !this._swgpu.destroyed) {
+      this._swgpu.ref();
+      this._swgpu.unref();
+    }
     this._destroyView();
     const M = this.module;
     M._jsui_destroy(this.rt);
@@ -1412,9 +1615,14 @@ class JsuiHost extends CanvasView {
  *                                // size the canvas to the component's laid-out content (both axes,
  *                                // or one; the other follows the canvas' CSS box)
  *   renderer?: 'auto'|'gpu'|'webgpu'|'webgl'|'cpu'|'2d',
- *                                // default: the runtime's. Each canvas has its own context; with
- *                                // many small surfaces prefer 'cpu' / '2d' (browsers cap live WebGL
- *                                // contexts at ~16; WebGPU canvases share the runtime's device)
+ *                                // default: the runtime's. 'auto' / 'gpu' / 'webgpu' draw with GPU
+ *                                // contexts the runtime's surfaces share, so any number of GPU
+ *                                // surfaces fit under the browser's ~16 live WebGL contexts: Skia
+ *                                // Graphite on the page's WebGPU device (each canvas keeps only its
+ *                                // GPUCanvasContext), else one offscreen WebGL context whose frames
+ *                                // are copied into each canvas' 2D context. 'webgl': a WebGL
+ *                                // context of the canvas' own (counts against that cap). 'cpu' /
+ *                                // '2d': the CPU raster, as for the runtime
  *   pixelRatio?: number,         // default: the runtime's option, else window.devicePixelRatio
  *   autoFocus?: boolean,         // focus its keyboard sink on creation (default false)
  *   trapTab?: boolean,           // keep an unhandled Tab inside (default false: focus moves on in the page)
@@ -1458,6 +1666,22 @@ class JsuiSurface extends CanvasView {
   }
 
   _hostOf() { return this.host; }
+
+  // Surface renderers share the runtime's GPU contexts (see SharedGL).
+  _webgpuShare() { return (webgpu) => this.host._sharedWebGPU(webgpu); }
+
+  _initSharedGL(mode) {
+    if (mode !== 'auto' && mode !== 'gpu' && mode !== 'webgpu') return false;
+    const sgl = this.host._sharedGL(mode === 'auto');
+    if (!sgl) return false;  // the canvas is untouched: the per-canvas chain follows
+    const ctx = this.canvas.getContext('2d');
+    if (!ctx) return false;
+    this._ctx2d = ctx;
+    this._sgl = sgl;
+    sgl.add(this);
+    this.renderer = sgl.renderer;
+    return true;
+  }
 
   _log(level, text) { this.host._log(level, `${this.component} (root ${this.rootTag ?? '?'}): ${text}`); }
 

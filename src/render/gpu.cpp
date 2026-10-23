@@ -169,7 +169,9 @@ struct GLGpu final : JsuiGpuContext {
       }
     // Runtimes that stopped drawing here: drop their frames.
     constexpr uint64_t kMaxIdle = 600;
-    constexpr size_t kMaxRetained = 8;
+    // Room for the surfaces of a runtime sharing one context (web: every
+    // createSurface() canvas draws through one offscreen WebGL context).
+    constexpr size_t kMaxRetained = 32;
     retained.erase(std::remove_if(retained.begin(), retained.end(),
                                   [&](const Retained& e) { return frame - e.lastUsed > kMaxIdle; }),
                    retained.end());
@@ -300,7 +302,7 @@ struct GLGpu final : JsuiGpuContext {
     // host deleted the texture and reused its name. Framebuffers are looked
     // up by name on every bind, so their wrappers are safe to keep.
     if (!surface || key.texture) return surface;
-    constexpr size_t kMaxSurfaces = 4;
+    constexpr size_t kMaxSurfaces = 16;  // e.g. one size of the shared web canvas per surface
     if (surfaces.size() >= kMaxSurfaces) {
       size_t oldest = 0;
       for (size_t i = 1; i < surfaces.size(); i++)

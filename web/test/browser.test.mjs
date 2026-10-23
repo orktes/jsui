@@ -1137,6 +1137,98 @@ test('surfaces: createJsui without a canvas, component picks the main app', asyn
   assert(near(px, BLUE), `widget ${fmt(px)}`);
 });
 
+// Many GPU surfaces: more canvases than the browser's ~16 live WebGL contexts,
+// all drawn through the runtime's shared GPU context (one offscreen WebGL
+// context, or one Skia Graphite context on the WebGPU device). Every surface
+// shows its own pixels, keeps showing them after new props, and no context
+// is lost.
+for (const mode of ['webgl', 'webgpu']) {
+  test(`surfaces: 24 GPU surfaces share one ${mode} context`, async ({ page }) => {
+    const N = 24, COLS = 6, W = 50, H = 40;
+    if (mode === 'webgpu') await mountWebGPU(page, { jsui: { bundleUrl: 'fixtures/surfaces.js' } });
+    else await mount(page, { jsui: { bundleUrl: 'fixtures/surfaces.js' } });  // main view: CPU
+    const COLORS = ['#ff0000', '#00ff00', '#0000ff'];
+    const r = await page.evaluate(async ({ N, COLS, W, H, COLORS, mode }) => {
+      // Count the WebGL contexts made from here on and watch them for loss.
+      const stats = { webgl: 0, lost: 0 };
+      for (const C of [HTMLCanvasElement, globalThis.OffscreenCanvas].filter(Boolean)) {
+        const get = C.prototype.getContext;
+        C.prototype.getContext = function (type, ...rest) {
+          const had = this.__ctx;
+          const ctx = get.call(this, type, ...rest);
+          if (ctx && !had && (type === 'webgl' || type === 'webgl2')) {
+            stats.webgl++;
+            this.addEventListener('webglcontextlost', () => { stats.lost++; });
+          }
+          if (ctx) this.__ctx = true;
+          return ctx;
+        };
+      }
+      window.manyStats = stats;
+      const j = window.hosts.ui;
+      const holder = document.createElement('div');
+      holder.id = 'many';
+      Object.assign(holder.style, { position: 'relative', width: `${COLS * W}px`, height: `${Math.ceil(N / COLS) * H}px` });
+      document.body.appendChild(holder);
+      const list = [];
+      for (let i = 0; i < N; i++) {
+        const c = document.createElement('canvas');
+        Object.assign(c.style, { position: 'absolute', left: `${(i % COLS) * W}px`, top: `${Math.floor(i / COLS) * H}px` });
+        holder.appendChild(c);
+        // 'gpu' for the CPU main view (its mode would make the surfaces CPU);
+        // the WebGPU runtime's surfaces take its renderer.
+        list.push(j.createSurface(c, { component: 'Box', width: W, height: H,
+          initialProps: { color: COLORS[i % 3] }, ...(mode === 'webgl' ? { renderer: 'gpu' } : {}) }));
+      }
+      window.many = list;
+      await Promise.race([j.whenIdle(), new Promise((res) => setTimeout(res, 5000))]);
+      return { renderers: [...new Set(list.map((s) => s.renderer))],
+        skias: new Set(list.map((s) => s._wgpu?.skia ?? s._sgl)).size };
+    }, { N, COLS, W, H, COLORS, mode });
+    if (mode === 'webgl' && !r.renderers.every((n) => n.endsWith('-shared'))) {
+      skip(`module in web/${DIST} has no GPU backend (renderers ${r.renderers})`, DIST === 'dist');
+    }
+    if (mode === 'webgpu') assert(r.renderers.join() === 'webgpu', `renderers ${r.renderers}`);
+    assert(r.skias === 1, `${r.skias} GPU contexts for ${N} surfaces`);
+
+    const RGB = { '#ff0000': RED, '#00ff00': GREEN, '#0000ff': BLUE };
+    const points = Array.from({ length: N }, (_, i) => [(i % COLS) * W + W / 2, Math.floor(i / COLS) * H + H / 2]);
+    const check = async (shift, what) => {
+      const px = await screenPixels(page, '#many', points);
+      px.forEach((p, i) => {
+        const want = RGB[COLORS[(i + shift) % 3]];
+        assert(near(p, want), `${what}: surface ${i} ${fmt(p)}, want ${fmt(want)}`);
+      });
+    };
+    await check(0, 'first frame');
+    // New props for every surface: each repaints, none lost its context.
+    await page.evaluate((COLORS) => window.many.forEach((s, i) => s.setProps({ color: COLORS[(i + 1) % 3] })), COLORS);
+    await frames(page, 4);
+    await check(1, 'after setProps');
+    const after = await page.evaluate(() => ({ ...window.manyStats,
+      renderers: [...new Set(window.many.map((s) => s.renderer))] }));
+    assert(after.lost === 0, `${after.lost} WebGL contexts lost`);
+    assert(after.webgl <= 1, `${after.webgl} WebGL contexts for the surfaces`);
+    assert(after.renderers.join() === r.renderers.join(), `renderers changed to ${after.renderers}`);
+    // After destroying them all a new surface still gets a shared GPU renderer
+    // (WebGPU: a new Skia context once the last reference went).
+    const again = await page.evaluate(async () => {
+      window.many.forEach((s) => s.destroy());
+      const j = window.hosts.ui;
+      const c = document.createElement('canvas');
+      c.id = 'again';
+      document.body.appendChild(c);
+      const s = j.createSurface(c, { component: 'Box', width: 20, height: 20, initialProps: { color: '#0000ff' },
+        ...(j.renderer === 'webgpu' ? {} : { renderer: 'gpu' }) });
+      await Promise.race([j.whenIdle(), new Promise((res) => setTimeout(res, 3000))]);
+      return { renderer: s.renderer, count: j.surfaces.length };
+    });
+    assert(again.count === 1 && again.renderer === r.renderers[0], `after destroy ${JSON.stringify(again)}`);
+    const [blue] = await screenPixels(page, '#again', [[10, 10]]);
+    assert(near(blue, BLUE), `surface after destroy ${fmt(blue)}`);
+  });
+}
+
 // -------------------------------------------------------------------- run
 let failed = 0, skipped = 0, passed = 0;
 for (const t of tests) {
