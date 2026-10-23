@@ -226,6 +226,12 @@ async function loadModuleFor(opts, webgpu) {
   throw new Error('could not load a JSUI module (' + (errors.join('; ') || 'none deployed (moduleVersions)') + ')');
 }
 
+// JsuiPerf's fields in order (include/jsui/jsui.h), for CanvasView.getPerf().
+const PERF_TIMES = ['js_us', 'commit_us', 'animated_us', 'style_us', 'layout_us', 'input_us', 'paint_us', 'other_us',
+  'gpu_submit_us', 'image_decode_us'];
+const PERF_COUNTS = ['image_decodes', 'pipeline_compiles', 'paragraph_builds', 'text_measures', 'layout_passes',
+  'bridge_calls'];
+
 const webglProbe = {};
 let noGpuWarned = false;  // CanvasView._warnNoGpu
 /** True if this browser can create a WebGL (2 or 1) context; `hardware`: one without a major
@@ -401,6 +407,27 @@ class CanvasView {
   async readPixelsAsync() {
     if (this._wgpu) return this._wgpu.readPixels();
     return this.readPixels();
+  }
+
+  /** Times every frame phase (jsui_set_profiling), for getPerf(). A runtime's
+   * surfaces share its switch and totals. */
+  setProfiling(on) {
+    if (this.rt) this.module._jsui_set_profiling(this.rt, on ? 1 : 0);
+  }
+
+  /** What the frames since the last reset cost (jsui_get_perf): exclusive µs per
+   * phase (`js_us`, `commit_us`, `animated_us`, `style_us`, `layout_us`,
+   * `input_us`, `paint_us`, `other_us`, `gpu_submit_us`; with setProfiling(true))
+   * and work counters. `reset` starts new totals. */
+  getPerf(reset = true) {
+    if (!this.rt) return null;
+    const M = this.module, p = this._scratch;  // JsuiPerf: 10 doubles, 6 uint64 (128 bytes)
+    M._jsui_get_perf(this.rt, p, reset ? 1 : 0);
+    const v = new DataView(M.HEAPU8.buffer, p, 128);
+    const out = {};
+    PERF_TIMES.forEach((k, i) => { out[k] = v.getFloat64(i * 8, true); });
+    PERF_COUNTS.forEach((k, i) => { out[k] = Number(v.getBigUint64(80 + i * 8, true)); });
+    return out;
   }
 
   // ---------------------------------------------------------------- helpers

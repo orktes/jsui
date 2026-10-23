@@ -103,6 +103,21 @@ hud.gamepadConsumed(0, 0);                           // the UI took pad 0's A pr
   wheel and key events the UI didn't consume are not `preventDefault()`ed and
   bubble on as usual.
 
+## Profiling
+
+`jsui.setProfiling(true)` times every frame phase, and `jsui.getPerf(reset = true)`
+returns what the frames since the last reset cost, the same numbers as
+`jsui_get_perf` in the C API:
+
+- exclusive µs per phase: `js_us`, `commit_us`, `animated_us`, `style_us`,
+  `layout_us`, `input_us`, `paint_us`, `gpu_submit_us`, `other_us`;
+- work counters: `bridge_calls`, `layout_passes`, `text_measures`,
+  `paragraph_builds`, `image_decodes` / `image_decode_us`, `pipeline_compiles`.
+
+A runtime's surfaces share its switch and totals. Browsers round
+`performance.now()` to about 100 µs on pages that are not cross-origin
+isolated, so read phase times as averages over many frames.
+
 ## WASM modules
 
 The package ships three builds of the runtime. `createJsui()` loads the best
