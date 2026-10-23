@@ -948,7 +948,7 @@ test('webgpu: entrance of the interactions showcase: composited layers equal pla
     return [a.renderer, b.renderer];
   }, DIST);
   if (renderers.some((n) => n !== 'webgpu')) skip(`no WebGPU renderer with web/${DIST} (${renderers})`, DIST !== 'dist-gpu');
-  let worst = { max: 0 };
+  let worst = { max: 0, over: 0, mean: 0 };  // the worst frame (all of them may be exact)
   for (let k = 0; k < 6; k++) {
     await page.evaluate(async (k) => {
       const { a, b } = window.hosts;
