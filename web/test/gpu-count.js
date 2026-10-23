@@ -48,6 +48,16 @@
       if (ds) bump(`pass depth/stencil ${ds.view?.__tex ?? '?'} load=${ds.depthLoadOp ?? ds.stencilLoadOp} store=${ds.depthStoreOp ?? ds.stencilStoreOp}`);
     }
     if (name === 'copyBufferToBuffer') bump('bytes.copyBufferToBuffer', a[4] ?? 0);
+    if (name === 'copyBufferToTexture') {
+      // Uploads by destination texture (a glyph / path atlas, an image), with the texels written.
+      const t = a[1]?.texture, sz = a[2] ?? {};
+      const [w, h] = Array.isArray(sz) || sz[Symbol.iterator] ? [...sz] : [sz.width, sz.height ?? 1];
+      if (t) {
+        const k = `upload to ${t.width}x${t.height} ${t.format}${t.label ? ` "${t.label}"` : ''}`;
+        bump(k);
+        bump(`${k} texels`, (w ?? 0) * (h ?? 1));
+      }
+    }
   });
   wrap('GPURenderPassEncoder', ['draw', 'drawIndexed', 'drawIndirect', 'drawIndexedIndirect', 'setPipeline',
     'setBindGroup', 'setVertexBuffer', 'setIndexBuffer', 'setScissorRect', 'setViewport', 'setStencilReference',
