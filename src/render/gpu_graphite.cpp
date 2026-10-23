@@ -200,16 +200,40 @@ struct GraphiteGpu final : JsuiGpuContext {
 
   bool flush(SkSurface* target, skgpu::MutableTextureState* finalState) {
     std::unique_ptr<graphite::Recording> recording = recorder->snap();
-    if (!recording) return false;
+    if (!recording) {
+      SkDebugf("jsui: Graphite could not snap the frame's recording\n");
+      return false;
+    }
     graphite::InsertRecordingInfo info;
     info.fRecording = recording.get();
     info.fTargetSurface = finalState ? target : nullptr;
     info.fTargetTextureState = finalState;
-    if (ctx->insertRecording(info) != graphite::InsertStatus::kSuccess) return false;
+    info.fFinishedContext = this;
+    info.fFinishedProc = onFinished;
+    graphite::InsertStatus status = ctx->insertRecording(info);
+    if (status != graphite::InsertStatus::kSuccess) {
+      SkDebugf("jsui: Graphite rejected the frame's recording (InsertStatus %d%s%s)\n",
+               int(graphite::InsertStatus::V(status)), status.message().empty() ? "" : ": ", status.message().c_str());
+      return false;
+    }
     bool ok = ctx->submit(graphite::SyncToCpu::kNo);
     ctx->checkAsyncWorkCompletion();
     images->endFrame();
     return ok;
+  }
+
+  // Graphite's verdict on a frame's command buffer: kFailed when it could not
+  // be recorded or submitted (in m157 a submitted one is reported as a
+  // success whatever the GPU did with it; a lost Vulkan device also shows in
+  // isDeviceLost). Runs from submit / checkAsyncWorkCompletion or, at the
+  // latest, the context's teardown in release(), so `this` is alive.
+  uint32_t failedFrames = 0;
+  static void onFinished(graphite::GpuFinishedContext context, skgpu::CallbackResult result) {
+    if (result == skgpu::CallbackResult::kSuccess) return;
+    auto* g = static_cast<GraphiteGpu*>(context);
+    g->failedFrames++;
+    if (g->failedFrames <= 3 || g->failedFrames % 100 == 0)
+      SkDebugf("jsui: a frame's GPU work failed to submit (%u so far)\n", g->failedFrames);
   }
 
 #if defined(JSUI_VULKAN)

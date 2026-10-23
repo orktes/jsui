@@ -147,6 +147,12 @@ GODOT_DISPLAY=x11 xvfb-run -a integrations/godot/smoke-test.sh # real OpenGL ren
 # channel difference, default 1.5) and saves both as <out>-gpu.png / -cpu.png.
 GODOT_RENDERING=vulkan SIZES=1280x720 xvfb-run -a -s "-screen 0 1920x1080x24" \
   integrations/godot/smoke-test.sh build/godot-vulkan.png
+# The same under the Khronos validation layer (apt install
+# vulkan-validationlayers) with synchronization validation, as CI runs it:
+# fails on any validation error, e.g. a hazard between JSUI's Graphite work and
+# Godot's frame on the textures they share.
+VK_VALIDATION=sync GODOT_RENDERING=vulkan SIZES=1280x720 xvfb-run -a -s "-screen 0 1920x1080x24" \
+  integrations/godot/smoke-test.sh build/godot-vulkan.png
 # The same with Godot's RenderingServer on its own thread (--render-thread
 # separate, as some games run it; GODOT_RENDER_THREAD takes any of Godot's
 # modes).
