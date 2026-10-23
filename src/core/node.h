@@ -148,6 +148,10 @@ class Node {
   // paints into its own layer stays the same, so a cached layer of its
   // subtree can be composited again (painter.cpp, LayerCache).
   uint32_t contentVersion = 0;
+  // What props()["__events"] asks of input routing, as InputManager reads
+  // it (input.cpp listenMask); recomputed after the props change.
+  mutable uint32_t listenMask = 0;
+  mutable bool listenMaskValid = false;
 
   // Hit-test culling (InputManager::hitNode). A clean node caches whether
   // every hittable point of its subtree lies inside its own box, so a

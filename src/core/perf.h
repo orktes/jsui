@@ -38,6 +38,8 @@ struct PerfCounters {
   uint64_t paragraphBuilds = 0;  // text shaping (ParagraphBuilder::Build)
   uint64_t animatedWrites = 0;   // views written by native Animated
   uint64_t events = 0;           // events dispatched to JS
+  uint64_t jsCalls = 0;          // native -> JS function calls (events, timers, frame callbacks, layout, messages)
+  uint64_t jsJobs = 0;           // microtasks (promise jobs) run
   uint64_t hitNodes = 0;         // nodes visited by hit testing
   uint64_t imageDecodes = 0;     // encoded images decoded (ImageCache)
   double imageDecodeUs = 0;      // ... and the time that took (timed even without profiling)

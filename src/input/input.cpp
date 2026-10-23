@@ -79,10 +79,11 @@ enum Listen : unsigned {
   kMove = 2,     // wants pointermove
   kHover = 4,    // wants pointerenter / pointerleave
   kPress = 8,    // pressable (focusable by default, "pointer" cursor)
-  kWheel = 16,
+  kWheel = 16,   // wants wheel
+  kScroll = 32,  // wants scroll (a ScrollView's onScroll)
 };
 
-unsigned listenMask(const Node* n) {
+unsigned readListenMask(const Node* n) {
   unsigned m = 0;
   for (auto& e : n->props()["__events"].asArray()) {
     std::string_view s = e.asString();
@@ -95,8 +96,18 @@ unsigned listenMask(const Node* n) {
         icontains(s, "pointerout") || icontains(s, "mouseout"))
       m |= kHover | kPointer;
     if (icontains(s, "wheel")) m |= kWheel | kPointer;
+    if (icontains(s, "scroll")) m |= kScroll;
   }
   return m;
+}
+
+// Hot (every hit-test path, wheel and scroll event): cached on the node.
+unsigned listenMask(const Node* n) {
+  if (!n->listenMaskValid) {
+    n->listenMask = readListenMask(n);
+    n->listenMaskValid = true;
+  }
+  return n->listenMask;
 }
 
 PointerEvents pointerEventsOf(const Node* n) {
@@ -383,6 +394,14 @@ bool InputManager::consumes(const Node* hit, unsigned mask) const {
   return false;
 }
 
+bool InputManager::pathListens(const Node* n, unsigned mask) const {
+  for (; n; n = n->parent())
+    if (listenMask(n) & mask) return true;
+  return false;
+}
+
+bool InputManager::listensForScroll(const Node* sv) const { return (listenMask(sv) & kScroll) != 0; }
+
 Node* InputManager::commonAncestor(Node* a, Node* b) const {
   if (!a || !b) return nullptr;
   for (Node* x = a; x; x = x->parent())
@@ -414,13 +433,16 @@ void InputManager::addModifiers(Value::Object& ev) const {
   ev["metaKey"] = Value((mods_ & JSUI_MOD_META) != 0);
 }
 
-bool InputManager::dispatch(Value::Object&& ev) {
+bool InputManager::dispatch(Value::Object&& ev) { return deliver(std::move(ev), true); }
+
+bool InputManager::deliver(Value::Object&& ev, bool toJs) {
   if (!rt_.js) return false;
-  doc_.perf.counters.events++;
   Value event(std::move(ev));
   // Animated.event(..., {useNativeDriver: true}) mappings apply natively,
   // before (and independently of) JS.
   rt_.animated->handleEvent(event);
+  if (!toJs) return false;
+  doc_.perf.counters.events++;
   // Only preventDefault() suppresses the default action; a handler that
   // merely observes the event (flag 1) lets it proceed, like the DOM.
   lastFlags_ = rt_.js->dispatchEvent(event);
@@ -643,19 +665,25 @@ bool InputManager::mouseWheel(float x, float y, float dx, float dy) {
   if (!mouseInside_ || x != mouse_.x || y != mouse_.y) mouseMove(x, y);
   Node* target = hitTest(x, y);
   if (!target) return false;  // outside the viewport
-  Value::Object ev = baseEvent("wheel", target);
-  float lx = 0, ly = 0;
-  toLocal(target, x, y, &lx, &ly);
-  ev["x"] = Value(double(x));
-  ev["y"] = Value(double(y));
-  ev["localX"] = Value(double(lx));
-  ev["localY"] = Value(double(ly));
-  ev["deltaX"] = Value(double(dx));
-  ev["deltaY"] = Value(double(dy));
-  ev["pointerType"] = Value("mouse");
-  addModifiers(ev);
-  if (dispatch(std::move(ev))) return true;
-  Node* hit = hitTest(x, y);
+  // Like pointer moves, wheel events reach JS only when a node on the path
+  // listens (onWheel); native Animated.event mappings see them regardless.
+  bool js = pathListens(target, kWheel);
+  if (js || rt_.animated->hasEventMapping(target->id(), "wheel")) {
+    Value::Object ev = baseEvent("wheel", target);
+    float lx = 0, ly = 0;
+    toLocal(target, x, y, &lx, &ly);
+    ev["x"] = Value(double(x));
+    ev["y"] = Value(double(y));
+    ev["localX"] = Value(double(lx));
+    ev["localY"] = Value(double(ly));
+    ev["deltaX"] = Value(double(dx));
+    ev["deltaY"] = Value(double(dy));
+    ev["pointerType"] = Value("mouse");
+    addModifiers(ev);
+    if (deliver(std::move(ev), js)) return true;
+    if (js) target = hitTest(x, y);  // handlers may have changed the tree
+  }
+  Node* hit = target;
   // Default action: scroll the nearest ScrollView that can move this way.
   if (wheelScroll(hit, dx, dy)) return true;
   return consumes(alive(idOf(hit)), kWheel);
@@ -1234,8 +1262,13 @@ void InputManager::tick(double nowMs) {
   if (laidOut) tickFocusScopes();
   editTick();
   tickScrolling(nowMs, dt);
-  // The UI may have moved under a still mouse: refresh enter/leave + cursor.
+  // The UI may have moved under a still mouse: refresh enter/leave + cursor
+  // (while content scrolls under it, once the scrolling pauses).
   if (mouseInside_ && (laidOut || hoverDirty_ || doc_.paintDirty())) {
+    if (nowMs - scrolledUnderMouseAt_ < kHoverAfterScrollMs) {
+      hoverDirty_ = true;
+      return;
+    }
     hoverDirty_ = false;
     Node* hit = hitTest(mouse_.x, mouse_.y);
     updateHover(mouse_, hit);

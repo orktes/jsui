@@ -1,6 +1,7 @@
 // Pressable, Touchable*, Button.
 
 import { createElement as h, cloneElement, isValidElement, Children, useRef, useEffect } from 'react';
+import { jsx } from 'react/jsx-runtime';
 import { usePress, PRESS_PROPS, omit } from './usePress.js';
 import { flatten, StyleSheet } from '../StyleSheet.js';
 import { Text } from './basic.js';
@@ -33,7 +34,8 @@ export function Pressable(props) {
   const s = props.testOnly_pressed ? Object.assign({}, state, { pressed: true }) : state;
   const rest = hostProps(props, handlers, PRESSABLE_OMIT);
   rest.style = typeof style === 'function' ? style(s) : style;
-  return h('View', rest, typeof children === 'function' ? children(s) : children);
+  rest.children = typeof children === 'function' ? children(s) : children;
+  return jsx('View', rest);  // rest is ours: no copy (createElement would)
 }
 Pressable.displayName = 'Pressable';
 

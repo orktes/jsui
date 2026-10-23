@@ -211,6 +211,7 @@ void JsEngine::Impl::leave() {
 
 JSValue JsEngine::Impl::call(JSValueConst fn, JSValueConst thisVal, int argc, JSValueConst* argv) {
   Perf::Scope scope(rt.doc.perf, Phase::Js);
+  rt.doc.perf.counters.jsCalls++;
   enter();
   JSValue r = JS_Call(ctx, fn, thisVal, argc, argv);
   if (JS_IsException(r)) {
@@ -226,6 +227,7 @@ void JsEngine::Impl::runJobsRaw() {
   for (int guard = 0; guard < 10000000; guard++) {
     int r = JS_ExecutePendingJob(jrt, &pctx);
     if (r == 0) break;
+    rt.doc.perf.counters.jsJobs++;
     if (r < 0) reportException();
   }
 }
@@ -259,6 +261,7 @@ void JsEngine::Impl::drain() {
       JS_SetPropertyStr(ctx, args[1], "y", JS_NewFloat64(ctx, e.y));
       JS_SetPropertyStr(ctx, args[1], "width", JS_NewFloat64(ctx, e.w));
       JS_SetPropertyStr(ctx, args[1], "height", JS_NewFloat64(ctx, e.h));
+      rt.doc.perf.counters.jsCalls++;
       JSValue r = JS_Call(ctx, fn, JS_UNDEFINED, 2, args);
       if (JS_IsException(r)) reportException();
       JS_FreeValue(ctx, r);

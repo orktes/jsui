@@ -473,3 +473,32 @@ test('extraData re-renders mounted cells; unchanged rows are memoized', async ()
   await settle();
   assert.equal(renders, mounted);
 });
+
+test('scrolling inside the mounted window does not update the list; RN default scrollEventThrottle', async () => {
+  const getItemLayout = (_d, index) => ({ length: 50, offset: 50 * index, index });
+  const ref = createRef();
+  render(h(FlatList, { ref, data: data10k.slice(0, 500), renderItem, getItemLayout, updateCellsBatchingPeriod: 1 }));
+  await settle();
+  // React Native's VirtualizedList default (the runtime throttles natively).
+  assert.equal(scrollView().props.scrollEventThrottle, 50);
+  const list = ref.current._listRef;
+  let updates = 0;
+  const setState = list.setState.bind(list);
+  list.setState = (...args) => {
+    updates++;
+    return setState(...args);
+  };
+  const before = renderedIndices();
+  scrollBy(5);  // the window does not move: no state update (no React render / commit)
+  await settle();
+  assert.deepEqual(renderedIndices(), before);
+  assert.equal(updates, 0);
+  scrollBy(5000);
+  await settle();
+  assert.ok(updates > 0);
+  assert.ok(renderedIndices().includes(110));
+  // Sticky headers follow every offset: no default throttle.
+  render(h(FlatList, { data: data10k.slice(0, 50), renderItem, getItemLayout, stickyHeaderIndices: [0] }));
+  await settle();
+  assert.equal(scrollView().props.scrollEventThrottle, undefined);
+});

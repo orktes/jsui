@@ -221,6 +221,10 @@ const hostConfig = {
 };
 
 export const reconciler = Reconciler(hostConfig);
+// React DevTools (and profiling tools such as jsui-bench --react-stats) attach
+// through globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__; without one this does
+// nothing.
+reconciler.injectIntoDevTools();
 
 // --- roots -------------------------------------------------------------------
 
