@@ -1,0 +1,152 @@
+diff --git a/src/gpu/graphite/dawn/DawnCaps.cpp b/src/gpu/graphite/dawn/DawnCaps.cpp
+index e87ba05..a435efc 100644
+--- a/src/gpu/graphite/dawn/DawnCaps.cpp
++++ b/src/gpu/graphite/dawn/DawnCaps.cpp
+@@ -406,6 +406,7 @@ void DawnCaps::initCaps(const DawnBackendContext& backendContext, const ContextO
+         }
+     }
+ 
++#if !defined(SK_DAWN_LEGACY_SDK)  // features the older Dawn does not have
+     fSupportsRenderPassRenderArea =
+             backendContext.fDevice.HasFeature(wgpu::FeatureName::RenderPassRenderArea);
+ 
+@@ -413,6 +414,7 @@ void DawnCaps::initCaps(const DawnBackendContext& backendContext, const ContextO
+         fDiscardLoadOp = wgpu::LoadOp::Undefined;
+         fDiscardStoreOp = wgpu::StoreOp::Undefined;
+     }
++#endif
+ #endif
+ 
+     if (!fSupportsPartialLoadResolve &&
+diff --git a/src/gpu/graphite/dawn/DawnCommandBuffer.cpp b/src/gpu/graphite/dawn/DawnCommandBuffer.cpp
+index 64edfc3..1c035db 100644
+--- a/src/gpu/graphite/dawn/DawnCommandBuffer.cpp
++++ b/src/gpu/graphite/dawn/DawnCommandBuffer.cpp
+@@ -351,8 +351,15 @@ bool DawnCommandBuffer::beginRenderPass(const RenderPassDesc& renderPassDesc,
+ 
+     // Set up color attachment.
+ #if !defined(__EMSCRIPTEN__)
++#if defined(SK_DAWN_LEGACY_SDK)  // the older Dawn's name and field
++    wgpu::DawnRenderPassColorAttachmentRenderToSingleSampled mssaRenderToSingleSampledDesc;
++#define SK_DAWN_RTSS_SAMPLE_COUNT implicitSampleCount
++#else
+     wgpu::DawnRenderPassSampleCount mssaRenderToSingleSampledDesc;
++#define SK_DAWN_RTSS_SAMPLE_COUNT sampleCount
++#endif
+     wgpu::RenderPassDescriptorResolveRect wgpuPartialRect = {};
++#if !defined(SK_DAWN_LEGACY_SDK)  // no render area in the older Dawn (never supported there)
+     wgpu::RenderPassRenderAreaRect wgpuRenderArea = {};
+ 
+     if (fSharedContext->dawnCaps()->supportsRenderPassRenderArea()) {
+@@ -363,6 +370,7 @@ bool DawnCommandBuffer::beginRenderPass(const RenderPassDesc& renderPassDesc,
+         wgpuRenderPass.nextInChain = &wgpuRenderArea;
+     }
+ #endif
++#endif
+ 
+ #if WGPU_TIMESTAMP_WRITES_DEFINED
+ #if defined(__EMSCRIPTEN__)
+@@ -484,9 +492,14 @@ bool DawnCommandBuffer::beginRenderPass(const RenderPassDesc& renderPassDesc,
+                 SkASSERT(fSharedContext->device().HasFeature(
+                         wgpu::FeatureName::MSAARenderToSingleSampled));
+ 
++#if defined(SK_DAWN_LEGACY_SDK)  // the older Dawn chains it on the color attachment
++                mssaRenderToSingleSampledDesc.nextInChain = wgpuColorAttachment.nextInChain;
++                wgpuColorAttachment.nextInChain = &mssaRenderToSingleSampledDesc;
++#else
+                 mssaRenderToSingleSampledDesc.nextInChain = wgpuRenderPass.nextInChain;
+                 wgpuRenderPass.nextInChain = &mssaRenderToSingleSampledDesc;
+-                mssaRenderToSingleSampledDesc.sampleCount = (uint8_t)renderPassDesc.fSampleCount;
++#endif
++                mssaRenderToSingleSampledDesc.SK_DAWN_RTSS_SAMPLE_COUNT = (uint8_t)renderPassDesc.fSampleCount;
+             }
+ #endif
+         }
+diff --git a/src/gpu/graphite/dawn/DawnGraphiteUtils.cpp b/src/gpu/graphite/dawn/DawnGraphiteUtils.cpp
+index 81d560e..1bb8d5d 100644
+--- a/src/gpu/graphite/dawn/DawnGraphiteUtils.cpp
++++ b/src/gpu/graphite/dawn/DawnGraphiteUtils.cpp
+@@ -18,6 +18,14 @@
+ #include "src/gpu/graphite/dawn/DawnQueueManager.h"
+ #include "src/gpu/graphite/dawn/DawnSharedContext.h"
+ 
++// SK_DAWN_LEGACY_SDK: built against an older Dawn's webgpu.h (JSUI: the
++// Dawn SDK a host engine links), where some names differ.
++#if defined(SK_DAWN_LEGACY_SDK)
++#define SK_DAWN_OPAQUE_YCBCR External
++#else
++#define SK_DAWN_OPAQUE_YCBCR OpaqueYCbCrAndroid
++#endif
++
+ using namespace skia_private;
+ 
+ namespace SkContexts {
+@@ -320,7 +328,7 @@ const DawnFormatCapabilityMap& DawnFormatCapabilityMap::Get() {
+         {R8BG8Biplanar444Unorm,       {Core >> None}},
+         {R10X6BG10X6Biplanar444Unorm, {Core >> None}},
+         // This corresponds to Vulkan's external formats, which are always filterable.
+-        {OpaqueYCbCrAndroid,          {F::YCbCrVulkanSamplers >> Filter}},
++        {SK_DAWN_OPAQUE_YCBCR,          {F::YCbCrVulkanSamplers >> Filter}},
+ #endif
+     }};
+     return kSingleton;
+@@ -396,7 +404,7 @@ SkEnumBitMask<DawnFormatFlag> DawnTextureFormatSupport(wgpu::Device device,
+         M(TextureFormat::kYUV10x6_P2_422, wgpu::TextureFormat::R10X6BG10X6Biplanar422Unorm) \
+         M(TextureFormat::kYUV8_P2_444,    wgpu::TextureFormat::R8BG8Biplanar444Unorm)       \
+         M(TextureFormat::kYUV10x6_P2_444, wgpu::TextureFormat::R10X6BG10X6Biplanar444Unorm) \
+-        M(TextureFormat::kExternal,       wgpu::TextureFormat::OpaqueYCbCrAndroid)
++        M(TextureFormat::kExternal,       wgpu::TextureFormat::SK_DAWN_OPAQUE_YCBCR)
+ #else
+ #define DAWN_FORMAT_MAPPING_NATIVE_ONLY(M)
+ #endif
+diff --git a/third_party/dawn/BUILD.gn b/third_party/dawn/BUILD.gn
+index 187722e..dd09b96 100644
+--- a/third_party/dawn/BUILD.gn
++++ b/third_party/dawn/BUILD.gn
+@@ -132,7 +132,9 @@ group("tint") {
+ }
+ 
+ config("dawn_api_config") {
+-  if (!is_canvaskit) {
++  if (skia_dawn_sdk_include_dir != "") {
++    include_dirs = [ skia_dawn_sdk_include_dir ]
++  } else if (!is_canvaskit) {
+     include_dirs = [
+       "../externals/dawn",
+       "../externals/dawn/include",
+@@ -154,7 +156,9 @@ config("dawn_api_config") {
+   } else {
+     libs = []
+   }
+-  libs += [ "$root_out_dir/$_dawn_lib_name" ]
++  if (skia_dawn_sdk_include_dir == "") {
++    libs += [ "$root_out_dir/$_dawn_lib_name" ]
++  }
+ 
+   # https://dawn.googlesource.com/dawn/+/647c352f57aa8a4c2666258455158a36c0c385af/src/dawn/native/BUILD.gn#645
+   if (is_mac || is_ios) {
+@@ -318,7 +322,9 @@ config("dawn_defines") {
+ }
+ 
+ group("dawn") {
+-  public_deps = [ ":dawn_cmake" ]
++  if (skia_dawn_sdk_include_dir == "") {
++    public_deps = [ ":dawn_cmake" ]
++  }
+ 
+   public_configs = [ ":dawn_api_config" ]
+ 
+diff --git a/third_party/dawn/args.gni b/third_party/dawn/args.gni
+index 755562f..0215c4e 100644
+--- a/third_party/dawn/args.gni
++++ b/third_party/dawn/args.gni
+@@ -10,4 +10,9 @@ declare_args() {
+   dawn_enable_metal = is_mac || is_ios
+   dawn_enable_vulkan = is_linux || is_android
+   dawn_use_agility_sdk = false
++
++  # JSUI: compile against an installed Dawn SDK's headers (its include dir)
++  # instead of building Dawn; the WebGPU entry points are left undefined for
++  # the final binary to resolve (e.g. from a host process that links Dawn).
++  skia_dawn_sdk_include_dir = ""
+ }

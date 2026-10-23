@@ -1,5 +1,6 @@
-// Skia Graphite on an embedder's Vulkan or Metal device (jsui_gpu_create_vulkan,
-// jsui_gpu_create_metal, jsui_render_gpu_target / jsui_render_vulkan in jsui.h).
+// Skia Graphite on an embedder's Vulkan, Metal or native Dawn device
+// (jsui_gpu_create_vulkan, jsui_gpu_create_metal, jsui_gpu_create_dawn,
+// jsui_render_gpu_target / jsui_render_vulkan in jsui.h).
 //
 // The embedder (e.g. Godot's RenderingDevice) owns the device, the queue and
 // the target texture; this context only borrows them. Frames go through
@@ -17,9 +18,15 @@
 // finished pixels, whatever stages / accesses it uses them with. Skia moves
 // the image from `layout` to COLOR_ATTACHMENT and, through the recording's
 // target state, to `final_layout` at the end.
+//
+// Dawn: everything goes through the embedder's WGPUQueue, whose submissions
+// execute in order, so the render is ordered after what the host submitted
+// before and before what it submits afterwards; Dawn tracks the texture's
+// usage itself. Graphite waits for its own work (context teardown) by
+// calling wgpuInstanceProcessEvents on the embedder's instance.
 #include "render/gpu.h"
 
-#if defined(JSUI_VULKAN) || defined(JSUI_GRAPHITE_METAL)
+#if defined(JSUI_VULKAN) || defined(JSUI_GRAPHITE_METAL) || defined(JSUI_GRAPHITE_DAWN)
 
 #include <algorithm>
 #include <memory>
@@ -63,6 +70,14 @@
 #include "include/gpu/graphite/mtl/MtlGraphiteTypes_cpp.h"
 #endif
 
+#if defined(JSUI_GRAPHITE_DAWN)
+#include <webgpu/webgpu_cpp.h>
+
+#include "include/gpu/graphite/dawn/DawnBackendContext.h"
+#include "include/gpu/graphite/dawn/DawnGraphiteTypes.h"
+extern "C" int jsui_dawn_available(void);  // tools/dawn-shim (generated)
+#endif
+
 namespace graphite = skgpu::graphite;
 
 namespace {
@@ -70,7 +85,7 @@ namespace {
 using jsui::graphite_support::CachingImageProvider;
 using jsui::graphite_support::kDefaultCacheBytes;
 
-enum class Api { Vulkan, Metal };
+enum class Api { Vulkan, Metal, Dawn };
 
 #if defined(JSUI_VULKAN)
 // The few Vulkan entry points this file calls itself (Skia loads its own).
@@ -138,6 +153,11 @@ struct GraphiteGpu final : JsuiGpuContext {
   VkCommandPool pool = VK_NULL_HANDLE;
   VkCommandBuffer barrier = VK_NULL_HANDLE;  // one global barrier, submitted before and after
   bool submittedBarrier = false;
+#endif
+#if defined(JSUI_GRAPHITE_DAWN)
+  wgpu::Instance dawnInstance;  // references held for the context's lifetime
+  wgpu::Device dawnDevice;
+  wgpu::Queue dawnQueue;
 #endif
 
   bool finishInit(const graphite::ContextOptions& opts) {
@@ -262,6 +282,19 @@ bool mtlColorSpace(unsigned format, sk_sp<SkColorSpace>* cs) {
 }
 #endif
 
+#if defined(JSUI_GRAPHITE_DAWN)
+// WGPUTextureFormat values JSUI accepts (0: the texture's own format).
+bool dawnColorSpace(wgpu::TextureFormat format, sk_sp<SkColorSpace>* cs) {
+  switch (format) {
+    case wgpu::TextureFormat::RGBA8Unorm:
+    case wgpu::TextureFormat::BGRA8Unorm: return true;
+    case wgpu::TextureFormat::RGBA8UnormSrgb:
+    case wgpu::TextureFormat::BGRA8UnormSrgb: *cs = SkColorSpace::MakeSRGB(); return true;
+    default: return false;
+  }
+}
+#endif
+
 }  // namespace
 
 namespace jsui {
@@ -361,6 +394,32 @@ JsuiGpuContext* createMetal(void* device, void* queue) {
 #endif
 }
 
+JsuiGpuContext* createDawn(void* instance, void* device, void* queue) {
+#if defined(JSUI_GRAPHITE_DAWN)
+  // Only where the host process provides Dawn's entry points.
+  if (!instance || !device || !jsui_dawn_available()) return nullptr;
+  auto g = std::make_unique<GraphiteGpu>(Api::Dawn);
+  // The C++ wrappers add a reference to handles they are constructed from.
+  g->dawnInstance = wgpu::Instance(static_cast<WGPUInstance>(instance));
+  g->dawnDevice = wgpu::Device(static_cast<WGPUDevice>(device));
+  g->dawnQueue = queue ? wgpu::Queue(static_cast<WGPUQueue>(queue)) : g->dawnDevice.GetQueue();
+  graphite::DawnBackendContext backend;
+  backend.fInstance = g->dawnInstance;
+  backend.fDevice = g->dawnDevice;
+  backend.fQueue = g->dawnQueue;
+  backend.fTick = graphite::DawnNativeProcessEventsFunction;
+  graphite::ContextOptions opts;
+  g->ctx = graphite::ContextFactory::MakeDawn(backend, opts);
+  if (!g->finishInit(opts)) return nullptr;
+  return g.release();
+#else
+  (void)instance;
+  (void)device;
+  (void)queue;
+  return nullptr;
+#endif
+}
+
 bool owns(JsuiGpuContext* gpu) { return asGraphite(gpu) != nullptr; }
 
 void destroy(JsuiGpuContext* gpu) { delete asGraphite(gpu); }
@@ -426,6 +485,20 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* d
 #else
     return -1;
 #endif
+  } else if (g->api == Api::Dawn) {
+#if defined(JSUI_GRAPHITE_DAWN)
+    wgpu::Texture texture(static_cast<WGPUTexture>(t.texture));
+    if (!dawnColorSpace(t.format ? wgpu::TextureFormat(t.format) : texture.GetFormat(), &cs)) return -1;
+    // Graphite renders into RenderAttachment textures; it reads the
+    // destination back (some blends) through TextureBinding or CopySrc.
+    if ((texture.GetUsage() & wgpu::TextureUsage::RenderAttachment) == wgpu::TextureUsage::None) {
+      SkDebugf("jsui: Dawn target needs RenderAttachment usage\n");
+      return -1;
+    }
+    backendTex = graphite::BackendTextures::MakeDawn(texture.Get());
+#else
+    return -1;
+#endif
   } else {
 #if defined(JSUI_GRAPHITE_METAL)
     if (!mtlColorSpace(t.format, &cs)) return -1;
@@ -475,13 +548,14 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* d
 }  // namespace graphite_gpu
 }  // namespace jsui
 
-#else  // neither JSUI_VULKAN nor JSUI_GRAPHITE_METAL
+#else  // none of JSUI_VULKAN, JSUI_GRAPHITE_METAL, JSUI_GRAPHITE_DAWN
 
 namespace jsui {
 namespace graphite_gpu {
 bool available() { return false; }
 JsuiGpuContext* createVulkan(const JsuiVulkanDevice&) { return nullptr; }
 JsuiGpuContext* createMetal(void*, void*) { return nullptr; }
+JsuiGpuContext* createDawn(void*, void*, void*) { return nullptr; }
 bool owns(JsuiGpuContext* gpu) { return gpu && gpu->kind == JsuiGpuContext::Kind::Graphite; }
 void destroy(JsuiGpuContext*) {}
 void purge(JsuiGpuContext*, size_t) {}

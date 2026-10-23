@@ -465,7 +465,7 @@ void JsuiView::render() {
   render_pending_ = false;
   if (renderer_ == Renderer::Unknown) chooseRenderer();
   const uint64_t t0 = Time::get_singleton()->get_ticks_usec();
-  if (renderer_ == Renderer::Vulkan || renderer_ == Renderer::Metal) {
+  if (renderer_ == Renderer::Vulkan || renderer_ == Renderer::Metal || renderer_ == Renderer::WebGPU) {
     if (!renderGpu()) {
       UtilityFunctions::push_warning("JsuiView: GPU rendering failed; using the CPU renderer");
       releaseGpu();
@@ -594,6 +594,7 @@ String JsuiView::get_renderer() const {
   switch (renderer_) {
     case Renderer::Vulkan: return "vulkan";
     case Renderer::Metal: return "metal";
+    case Renderer::WebGPU: return "webgpu";
     case Renderer::Cpu: return "cpu";
     default: return "";
   }

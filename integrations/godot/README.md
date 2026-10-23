@@ -380,3 +380,46 @@ $GODOT --path . --rendering-method forward_plus --rendering-driver metal -- --be
 #    Metal API validation layer on, nothing should be reported:
 MTL_DEBUG_LAYER=1 $GODOT --path . --rendering-method forward_plus --rendering-driver metal
 ```
+
+## WebGPU (Dawn) on the godot-aw3 fork
+
+The [godot-aw3](https://github.com/orktes/godot-aw3) Godot fork has a
+`webgpu` rendering driver: Forward+ on native Dawn (Metal backend on macOS),
+with Dawn linked statically into the engine. Under it JsuiView renders with
+Skia Graphite on Godot's own Dawn device, with the same two-texture and
+`texture_copy` design as Vulkan / Metal (`get_renderer()` returns
+`"webgpu"`).
+
+* The extension links no Dawn. Skia and JSUI are compiled against the
+  headers of the Dawn SDK the fork links, and every `wgpu*` call goes through
+  a generated shim (`tools/dawn-shim`) that looks the engine's own entry
+  point up in the process. The same library therefore still loads in stock
+  Godot, which uses Vulkan or Metal, and in fork builds that do not export
+  Dawn, where JsuiView falls back to the CPU renderer.
+* The fork must return webgpu.h handles from `get_driver_resource`
+  (`TOPMOST_OBJECT` → `WGPUInstance`, `LOGICAL_DEVICE` → `WGPUDevice`,
+  `COMMAND_QUEUE` → `WGPUQueue`, `TEXTURE` → `WGPUTexture`) and export every
+  `wgpu*` symbol of its Dawn (the linker's `-dead_strip` drops the ones Godot
+  does not call). Both are local changes on the fork, branch
+  `jsui-webgpu-handles`.
+* Skia m157 pins a newer Dawn (2026-10) than the fork (`a082d8e7`,
+  2026-01). `scripts/patches/skia-m157-dawn-sdk.patch` makes
+  `//third_party/dawn` header-only and adapts Graphite's Dawn backend to the
+  older `webgpu.h` (`SK_DAWN_LEGACY_SDK`). The older Dawn has no render-area
+  passes, no undefined load/store ops and an older MSAA-render-to-single-sampled
+  struct, so those optimisations are off.
+
+```sh
+DAWN_SDK=/path/to/dawn/install/Release   # the SDK the fork links (misc/native-webgpu/README.md)
+SKIA_DAWN_SDK=$DAWN_SDK scripts/build-skia-desktop.sh   # -> third_party/skia-desktop-dawn
+cmake -S . -B build-dawn -G Ninja -DCMAKE_BUILD_TYPE=Release -DJSUI_BUILD_GODOT=ON \
+      -DJSUI_SKIA_DIR=third_party/skia-desktop-dawn
+#   configure prints "JSUI_GRAPHITE_DAWN: ON (<sdk>/include)"
+cmake --build build-dawn --target jsui_godot
+
+GODOT=/path/to/godot-aw3/bin/godot.macos.editor.arm64   # built with webgpu=yes
+cd integrations/godot/demo
+$GODOT --path . --rendering-method forward_plus --rendering-driver webgpu -- \
+  --capture /tmp/webgpu.png --self-test --expect-renderer webgpu --max-gpu-diff 1.5
+$GODOT --path . --rendering-method forward_plus --rendering-driver webgpu --disable-vsync -- --bench 240 --no-world
+```
