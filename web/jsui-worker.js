@@ -106,7 +106,7 @@ export async function startWorkerHost(I, opts) {
 
 function definePage(I) {
   const { DomView, HIT_POINTER, HIT_SCROLL, NAV_KEYS, bufferType, sourceSize, defaultOpaque, isVideoFrame, fontArgs,
-    fontList } = I;
+    fontList, taintKey, videoFramesContextLost, watchVideoFrames } = I;
 
   // Options as the worker gets them: cloneable, URLs absolute (a worker
   // resolves relative URLs against its own script).
@@ -553,6 +553,12 @@ function definePage(I) {
         case 'backend': this._backend = ev.value; return;
         case 'padsUsed': this._padsUsed = ev.pads; return;
         case 'texAck': this._bindings.get(ev.name)?.ack(); return;
+        case 'glLost': {
+          // A WebGL context in the worker was lost (see JsuiHost._contextLost).
+          const switched = videoFramesContextLost();
+          if (switched) this._log(1, switched);
+          return;
+        }
         case 'started': this._armWatchdog(); return;
         case 'raf':
           this._sawRaf = true;
@@ -754,12 +760,12 @@ function definePage(I) {
       this._bindings.get(name)?.unbind();
       const opts = { ...(options ?? {}) };
       if (opts.opaque === undefined) opts.opaque = defaultOpaque(video);
-      const b = { inflight: 0, again: false, stopped: false };
-      let handle = 0, raf = 0, lastTime = -1;
+      const b = { inflight: 0, again: false, stopped: false, tainted: null };
       const abort = new AbortController();
       const push = () => {
         if (b.stopped || this._destroyed || !(video.readyState >= 2)) return;
-        lastTime = video.currentTime;
+        // Cross-origin without CORS: not captured again until its URL changes.
+        if (b.tainted === taintKey(video)) return;
         if (b.inflight >= MAX_VIDEO_FRAMES) {
           b.again = true;  // sent when the worker is done with one
           return;
@@ -769,6 +775,7 @@ function definePage(I) {
         try {
           if (typeof VideoFrame === 'function') frame = new VideoFrame(video);
         } catch (e) {
+          if (e?.name === 'SecurityError') b.tainted = taintKey(video);
           this._warnOnce(textureWarning(name, e));
           return;
         }
@@ -782,7 +789,13 @@ function definePage(I) {
           this._send({ op: 'texture', name, source: src, options: opts, ack: true }, [src]);
         };
         if (frame) send(frame);
-        else createImageBitmap(video).then(send, (e) => { b.inflight--; this._warnOnce(textureWarning(name, e)); });
+        else {
+          createImageBitmap(video).then(send, (e) => {
+            b.inflight--;
+            if (e?.name === 'SecurityError') b.tainted = taintKey(video);
+            this._warnOnce(textureWarning(name, e));
+          });
+        }
       };
       b.ack = () => {
         b.inflight = Math.max(0, b.inflight - 1);
@@ -791,29 +804,15 @@ function definePage(I) {
           push();
         }
       };
-      if (typeof video.requestVideoFrameCallback === 'function') {
-        const onFrame = () => {
-          if (b.stopped) return;
-          handle = video.requestVideoFrameCallback(onFrame);
-          push();
-        };
-        handle = video.requestVideoFrameCallback(onFrame);
-      } else {
-        const loop = () => {
-          if (b.stopped) return;
-          raf = requestAnimationFrame(loop);
-          if (video.readyState >= 2 && video.currentTime !== lastTime) push();
-        };
-        raf = requestAnimationFrame(loop);
-      }
+      // Frame callbacks, or polling once per display frame (web/jsui-textures.js).
+      const stopFrames = watchVideoFrames(video, push);
       // A paused video presents frames for these too (first frame, seeks, a new src).
       for (const type of ['loadeddata', 'seeked', 'resize']) video.addEventListener(type, push, { signal: abort.signal });
       if (video.readyState >= 2) push();
       b.unbind = () => {
         if (b.stopped) return;
         b.stopped = true;
-        if (handle && typeof video.cancelVideoFrameCallback === 'function') video.cancelVideoFrameCallback(handle);
-        if (raf) cancelAnimationFrame(raf);
+        stopFrames();
         abort.abort();
         if (this._bindings.get(name) === b) this._bindings.delete(name);
       };
@@ -1334,6 +1333,9 @@ export function serve(I, early) {
   class RemoteHost extends remote(JsuiHost) {
     _makeSurface(target, options) { return new RemoteSurface(this, target, options); }
 
+    // The page binds the videos (see JsuiHost._contextLost).
+    _contextLost() { post({ ev: 'glLost' }); }
+
     _onCall(id, name, json) { post({ ev: 'call', id, name, json }); }
 
     _checkError() {
@@ -1693,7 +1695,25 @@ export function serve(I, early) {
         const gl = view?._gl ?? view?._sgl?.gl;
         const ext = gl?.getExtension('WEBGL_lose_context');
         if (!ext) return false;
-        ext.loseContext();
+        // Lost as in WebKit, whose create* calls then return null (Chromium's
+        // return objects). arg.mid: in the middle of the frame below, at its
+        // first shader compile (WebKit notices a lost GPU process in a GL call).
+        const CREATE = ['createProgram', 'createShader', 'createTexture'];
+        const lose = () => {
+          ext.loseContext();
+          for (const k of CREATE) gl[k] = () => null;
+        };
+        let fired = !arg?.mid;
+        if (arg?.mid) {
+          gl.compileShader = function (sh) {
+            delete gl.compileShader;
+            fired = true;
+            lose();
+            return gl.compileShader(sh);
+          };
+        } else {
+          lose();
+        }
         // arg.work: GL work in the same task, before the webglcontextlost
         // event (as when a lost GPU process is noticed first, as WebKit
         // does): new shaders, a texture upload, a frame.
@@ -1709,8 +1729,10 @@ export function serve(I, early) {
             error = String(e?.stack ?? e);
           }
         }
-        if (what === 'loseGL') setTimeout(() => ext.restoreContext(), 50);
-        return arg?.work ? { error } : true;
+        delete gl.compileShader;
+        for (const k of CREATE) delete gl[k];
+        if (what === 'loseGL' && fired) setTimeout(() => ext.restoreContext(), 50);
+        return arg?.work ? { error, fired } : true;
       }
       case 'destroyDevice':
         if (!view?._wgpu) return false;

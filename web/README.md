@@ -111,7 +111,13 @@ const size = useHostTexture('trailer');            // { width, height } once set
 - `bindVideo(name, video, options)` keeps a texture current from a video
   element (`requestVideoFrameCallback`, else polled per display frame,
   paused frames and seeks included) and returns a function that stops it.
+  Polling uploads only when `currentTime` or the decoded frame count moved.
   Playback (`play()`, `pause()`, `muted`, `currentTime`) stays on the element.
+  Playwright WebKit 26 on macOS loses every WebGL context of the page right
+  after a frame callback on a playing video. So if one of the runtime's WebGL
+  contexts is lost within a second of a bound video starting to play, every
+  bound video of the page switches to polling, and later binds start there
+  (logged once).
 - `removeTexture(name)`; `textureBackend` says where textures go now.
 - Textures belong to the runtime: every surface can show them, and they
   survive bundle reloads.
@@ -125,6 +131,8 @@ const size = useHostTexture('trailer');            // { width, height } once set
   them back).
 - GPU uploads of a cross-origin video or image need CORS: set
   `crossOrigin = 'anonymous'` and serve it with `Access-Control-Allow-Origin`.
+  A source the browser refuses (`SecurityError`) is logged once and not tried
+  again until its URL changes; a texture uploaded before it (a poster) stays.
   Browsers only autoplay muted video; unmute after a click.
 
 ## Input pass-through (HUD over a game)
@@ -279,7 +287,8 @@ transferred, and the caller's object is unusable afterwards. A `<video>`
 becomes `new VideoFrame(video)`, and `<img>` / canvases become an
 `ImageBitmap`. `bindVideo` captures on the page's thread: it uses
 `requestVideoFrameCallback`, or polls every display frame where that is
-missing. Each presented frame goes to the worker as a transferred `VideoFrame`,
+missing (or after the WebKit context loss above; the worker tells the page
+about its losses). Each presented frame goes to the worker as a transferred `VideoFrame`,
 with at most two in flight, so a busy worker skips frames rather than queueing
 them. The worker closes each frame after the upload. The same CORS rules apply.
 
@@ -341,8 +350,13 @@ GPU-loss handling also stays the same. A lost WebGL context is restored, or
 the view falls back to the CPU on a fresh canvas, which the page clones and
 transfers. In both modes, no GL work runs once the context reports itself
 lost, even before its `webglcontextlost` event arrives (WebKit lets a frame
-run in between). A lost WebGPU device is replaced. The no-GPU warning is logged as
-before. Text is measured and drawn by Skia in the WASM module, so it works
+run in between). WebKit can also notice the loss in the middle of a frame,
+when a GL call finds its GPU process gone, and WebGL then returns `null`
+from `createProgram` / `createShader`. JSUI's GL glue returns 0 for those, as
+GL does, so the frame fails quietly and the context is restored as above.
+Context checks run at the start of each frame, so a restore repaints in
+that frame, textures included. A lost WebGPU device is replaced. The no-GPU
+warning is logged as before. Text is measured and drawn by Skia in the WASM module, so it works
 the same in the worker.
 
 **Browser support.** Chrome and Edge: everything (OffscreenCanvas with WebGL

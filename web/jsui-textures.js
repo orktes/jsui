@@ -45,6 +45,84 @@ const DESC_BYTES = 28;  // JsuiTexture on wasm32: kind, handle, format, width, h
 
 const has = (name) => typeof globalThis[name] !== 'undefined';
 
+// A source whose upload threw SecurityError (cross-origin, not CORS-enabled)
+// is not tried again until its URL changes.
+export const taintKey = (s) => String(s.currentSrc ?? s.src ?? '');
+
+// ------------------------------------------------------ video frames
+// bindVideo takes a video's frames from requestVideoFrameCallback, and polls
+// once per display frame where there is none. Playwright WebKit 26 on macOS
+// loses every WebGL context of the page within half a second of a frame
+// callback on a playing video (restored ~40 ms later; the video's play()
+// is aborted). A WebGL context loss within RVFC_SUSPECT_MS of play() on a
+// video with a frame callback (videoFramesContextLost) switches
+// every bound video of the page to polling, and later binds start there.
+const RVFC_SUSPECT_MS = 1000;
+let rvfcOff = false;
+const frameWatches = new Set();
+
+/** Calls `onFrame` for each new frame of `video` (see above). Returns a
+ * function that stops it. */
+export function watchVideoFrames(video, onFrame) {
+  const frames = () => video.getVideoPlaybackQuality?.().totalVideoFrames ?? -1;
+  // The frame showing now is the caller's (bindVideo uploads it right away).
+  const w = { mode: 'poll', handle: 0, raf: 0, armed: -Infinity, time: video.currentTime, frames: frames(), stopped: false };
+  const abort = has('AbortController') ? new AbortController() : null;
+  const fire = () => {
+    w.time = video.currentTime;
+    w.frames = frames();
+    onFrame();
+  };
+  // Polling uploads only when the playback position or the decoded frame count moved.
+  const poll = () => {
+    if (w.stopped) return;
+    w.raf = requestAnimationFrame(poll);
+    if (video.readyState >= 2 && (video.currentTime !== w.time || frames() !== w.frames)) fire();
+  };
+  const callback = () => {
+    if (w.stopped || w.mode !== 'rvfc') return;
+    w.handle = video.requestVideoFrameCallback(callback);
+    fire();
+  };
+  w.poll = () => {
+    if (w.handle) video.cancelVideoFrameCallback?.(w.handle);
+    w.handle = 0;
+    w.mode = 'poll';
+    w.raf = requestAnimationFrame(poll);
+  };
+  if (!rvfcOff && typeof video.requestVideoFrameCallback === 'function') {
+    w.mode = 'rvfc';
+    // Armed from play() on: WebKit loses the context before 'playing' (and
+    // then aborts the play()).
+    const arm = () => { w.armed = performance.now(); };
+    if (video.paused === false) arm();
+    for (const type of ['play', 'playing']) video.addEventListener?.(type, arm, abort ? { signal: abort.signal } : undefined);
+    w.handle = video.requestVideoFrameCallback(callback);
+  } else {
+    w.poll();
+  }
+  frameWatches.add(w);
+  return () => {
+    if (w.stopped) return;
+    w.stopped = true;
+    frameWatches.delete(w);
+    if (w.handle) video.cancelVideoFrameCallback?.(w.handle);
+    if (w.raf) cancelAnimationFrame(w.raf);
+    abort?.abort();
+  };
+}
+
+/** A WebGL context of the page was lost. If that switched the bound videos
+ * to polling (see above): the line to log, else null. */
+export function videoFramesContextLost() {
+  const t = performance.now();
+  if (![...frameWatches].some((w) => w.mode === 'rvfc' && t - w.armed < RVFC_SUSPECT_MS)) return null;
+  rvfcOff = true;
+  for (const w of frameWatches) if (w.mode === 'rvfc') w.poll();
+  return 'bound videos: frames polled once per display frame from now on (a WebGL context was lost right ' +
+    'after a video frame callback)';
+}
+
 /** The picture size of a texture source in px, or null while it has none
  * (a <video> before its first frame, an <img> still loading). */
 export function sourceSize(s) {
@@ -142,6 +220,7 @@ export class HostTextureSet {
     this._ctx = null;
     this._instance = 0;         // WGPUInstance the imported textures hang off
     this._warned = new Set();
+    this._tainted = new WeakMap();  // source -> taintKey() when its upload threw SecurityError
     this.uploads = 0;
   }
 
@@ -162,6 +241,8 @@ export class HostTextureSet {
     }
     const size = sourceSize(source);
     if (!size) return false;
+    if (this._tainted.get(source) === taintKey(source)) return false;
+    this.host._checkContexts?.();  // a loss the views have not handled yet
     const target = this.sync();
     if (target.kind === 'lost') {
       // Uploaded when the context is back (sync), if we may keep the source.
@@ -186,30 +267,12 @@ export class HostTextureSet {
   bindVideo(name, video, options = {}) {
     name = String(name);
     this.bindings.get(name)?.();
-    let stopped = false, handle = 0, raf = 0, lastTime = -1;
+    let stopped = false;
     const push = () => {
-      if (stopped) return;
-      lastTime = video.currentTime;
-      this.set(name, video, options);
+      if (!stopped) this.set(name, video, options);
     };
     const abort = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    if (typeof video.requestVideoFrameCallback === 'function') {
-      const onFrame = () => {
-        if (stopped) return;
-        handle = video.requestVideoFrameCallback(onFrame);
-        push();
-      };
-      handle = video.requestVideoFrameCallback(onFrame);
-    } else {
-      // No requestVideoFrameCallback: poll once per display frame and upload
-      // when the playback position moved.
-      const loop = () => {
-        if (stopped) return;
-        raf = requestAnimationFrame(loop);
-        if (video.readyState >= 2 && video.currentTime !== lastTime) push();
-      };
-      raf = requestAnimationFrame(loop);
-    }
+    const stopFrames = watchVideoFrames(video, push);
     // A paused video presents frames for these too (first frame, seeks, a new src).
     for (const type of ['loadeddata', 'seeked', 'resize']) {
       video.addEventListener?.(type, push, abort ? { signal: abort.signal } : undefined);
@@ -218,8 +281,7 @@ export class HostTextureSet {
     const unbind = () => {
       if (stopped) return;
       stopped = true;
-      if (handle && typeof video.cancelVideoFrameCallback === 'function') video.cancelVideoFrameCallback(handle);
-      if (raf) cancelAnimationFrame(raf);
+      stopFrames();
       abort?.abort();
       if (!abort) for (const type of ['loadeddata', 'seeked', 'resize']) video.removeEventListener?.(type, push);
       if (this.bindings.get(name) === unbind) this.bindings.delete(name);
@@ -291,13 +353,21 @@ export class HostTextureSet {
       else if (target.kind === 'gl') this._uploadGL(e, source, size, flags, target);
       else this._uploadPixels(e, source, size, flags);
     } catch (err) {
-      this._warnOnce(name, err?.name === 'SecurityError'
-        ? `host texture "${name}": the source is cross-origin and not CORS-enabled (set crossOrigin = 'anonymous' ` +
-          'on the <video> / <img> and serve it with Access-Control-Allow-Origin)'
-        : `host texture "${name}": upload failed: ${err?.message ?? err}`);
       // Nothing valid left under this name (a first upload, or one into a
       // new place): the runtime must not keep a freed handle.
       if (!e.kind) this.host._withStrings([name], (k) => this.module._jsui_remove_texture(this.host.rt, k));
+      // The context was lost during the upload (WebKit notices a lost GPU
+      // process in a GL call): the source is uploaded again once it is back.
+      if (target.kind === 'gl' && target.gl.isContextLost()) return false;
+      if (err?.name === 'SecurityError') {
+        this._tainted.set(source, taintKey(source));
+        // A texture shown before (a poster) stays.
+        this._warnOnce(name, `host texture "${name}": the source is cross-origin and not CORS-enabled (set ` +
+          'crossOrigin = \'anonymous\' on the <video> / <img> and serve it with Access-Control-Allow-Origin); ' +
+          'not uploaded until its URL changes');
+      } else {
+        this._warnOnce(name, `host texture "${name}": upload failed: ${err?.message ?? err}`);
+      }
       return false;
     }
     e.target = target;
@@ -373,8 +443,9 @@ export class HostTextureSet {
     const prev = gl.getParameter(gl.TEXTURE_BINDING_2D);
     let tex = e.tex, id = e.id, old = null;
     if (fresh) {
-      old = e.kind ? this._detach(e) : null;
       tex = gl.createTexture();
+      if (!tex) throw new Error('no texture: the WebGL context is lost');  // lost since textureTarget()
+      old = e.kind ? this._detach(e) : null;
       id = GL.getNewId(GL.textures);
       tex.name = id;
       GL.textures[id] = tex;

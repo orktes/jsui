@@ -1,21 +1,32 @@
 #!/usr/bin/env node
 // Which part of the /screens/cinematic trailer loses a browser's WebGL
-// context (seen in Playwright WebKit on macOS, main and worker mode). Runs
-// each variant in a fresh page for --seconds and reports every
-// webglcontextlost / webglcontextrestored, with the trailer's state:
+// context (seen in Playwright WebKit 26 on macOS: a requestVideoFrameCallback
+// on a playing video loses every WebGL context of the page). Runs each
+// variant in a fresh page for --seconds and reports every webglcontextlost /
+// webglcontextrestored, with the trailer's state:
 //
-//   site-poster   the showcase on /screens/cinematic, ?autoplay=0 (poster only)
-//   site-video    the same, playing the trailer (1080p VP9 on the GPU paths)
-//   site-worker   the same in worker mode (?worker=1)
-//   bare-video    no JSUI: a WebGL2 canvas, texImage2D(<video>) per presented frame
-//   bare-frame    no JSUI: texImage2D(new VideoFrame(video)) per presented frame
-//   bare-blur     bare-video, also drawing it through a 37-tap blur, full canvas
+//   site-poster      the showcase on /screens/cinematic, ?autoplay=0 (poster only)
+//   site-video       the same, playing the trailer (1080p VP9 on the GPU paths)
+//   site-worker      the same in worker mode (?worker=1)
+//   bare-video       no JSUI: a WebGL2 canvas, texImage2D(<video>) per presented frame (rVFC)
+//   bare-frame       no JSUI: texImage2D(new VideoFrame(video)) per presented frame (rVFC)
+//   bare-blur        bare-video, also drawing it through a 37-tap blur, full canvas
+//   bare-poll        texImage2D(<video>) per display frame when the frame changed, no rVFC
+//                    (bindVideo's fallback)
+//   bare-rvfc        a GL clear per display frame, and a frame callback that does nothing
+//   bare-rvfc-early  the same, the callback registered (video playing) before the context exists
+//
+// The site variants also report JSUI's renderer: a loss only reaches a
+// WebGL renderer. JSUI loses its own detached WebGL probe canvas on purpose
+// right after probing (listed as such).
 //
 //   node site/test/context-loss.mjs [--browser webkit|chromium] [--dir site/dist] [--seconds 10]
 //                                   [--local-media <dir with 1080p.webm, poster.jpg>] [variants...]
 //
 // Build the site first (node site/scripts/build.mjs). --local-media answers
-// the Wikimedia URLs from local files (offline machines).
+// the Wikimedia URLs from local files (offline machines); a SecurityError on
+// upload (the video counted as not CORS-enabled) may then be Playwright's
+// fulfilled response rather than the browser, so check it without too.
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -30,7 +41,8 @@ const BROWSER = opt('--browser', 'webkit');
 const SECONDS = Number(opt('--seconds', 10));
 const MEDIA = opt('--local-media', null);
 const named = args.filter((a, i) => !a.startsWith('--') && !args[i - 1]?.startsWith('--'));
-const VARIANTS = ['site-poster', 'site-video', 'site-worker', 'bare-video', 'bare-frame', 'bare-blur']
+const VARIANTS = ['site-poster', 'site-video', 'site-worker', 'bare-video', 'bare-frame', 'bare-blur', 'bare-poll',
+  'bare-rvfc', 'bare-rvfc-early']
   .filter((v) => !named.length || named.includes(v));
 const VIDEO = 'https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.1080p.vp9.webm';
 
@@ -65,21 +77,45 @@ const watch = () => {
       const state = () => (v() ? `video ${v().videoWidth}x${v().videoHeight} t=${v().currentTime.toFixed(2)} rs=${v().readyState}` : 'no video');
       for (const ev of ['webglcontextlost', 'webglcontextrestored']) {
         this.addEventListener(ev, () => window.__glEvents.push(`${((performance.now() - t0) / 1000).toFixed(2)}s ${ev} ` +
-          `(${this.isConnected ? `${this.width}x${this.height}` : 'a detached canvas: the host\'s WebGL probe'}, ${state()})`));
+          `(${this.isConnected ? `${this.width}x${this.height}` : 'a detached canvas: JSUI\'s WebGL probe, lost on purpose'}, ${state()})`));
       }
     }
     return c;
   };
 };
 
-// No JSUI: a <video> uploaded into a WebGL2 texture per presented frame and drawn.
+// No JSUI: a <video> uploaded into a WebGL2 texture and drawn (per presented
+// frame, or polled), or a frame callback that does nothing next to a GL clear loop.
 const bare = async ({ url, mode, seconds }) => {
   const c = document.querySelector('canvas');
-  const gl = c.getContext('webgl2');
-  if (!gl) return 'no WebGL2';
   const v = Object.assign(document.createElement('video'), { crossOrigin: 'anonymous', muted: true, loop: true, playsInline: true, src: url });
   v.style.cssText = 'position:fixed;left:0;top:0;width:2px;height:2px;opacity:0.01';
   document.body.appendChild(v);
+  let callbacks = 0;
+  const noop = () => { callbacks++; v.requestVideoFrameCallback(noop); };
+  if (mode === 'rvfc-early') {
+    v.requestVideoFrameCallback(noop);
+    await v.play().catch((e) => window.__glEvents.push(`play: ${e}`));
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  const gl = c.getContext('webgl2');
+  if (!gl) return 'no WebGL2';
+  if (mode === 'rvfc' || mode === 'rvfc-early') {
+    let clears = 0;
+    const clear = () => {
+      requestAnimationFrame(clear);
+      if (gl.isContextLost()) return;
+      gl.clearColor(0, (clears++ % 60) / 60, 0.3, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    };
+    requestAnimationFrame(clear);
+    if (mode === 'rvfc') {
+      v.requestVideoFrameCallback(noop);
+      await v.play().catch((e) => window.__glEvents.push(`play: ${e}`));
+    }
+    await new Promise((r) => setTimeout(r, seconds * 1000));
+    return `${clears} clears, ${callbacks} frame callbacks, video ${v.videoWidth}x${v.videoHeight} t=${v.currentTime.toFixed(2)}`;
+  }
   const vs = `#version 300 es
     out vec2 uv; void main() { vec2 p = vec2(gl_VertexID & 1, gl_VertexID >> 1) * 2.0; uv = vec2(p.x, 1.0 - p.y) * 0.5 + 0.0;
     gl_Position = vec4(p * 2.0 - 1.0, 0, 1); }`;
@@ -94,7 +130,7 @@ const bare = async ({ url, mode, seconds }) => {
   gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, fs));
   gl.linkProgram(prog);
   const tex = gl.createTexture();
-  let uploads = 0, failures = 0;
+  let uploads = 0, failures = 0, firstError = '';
   const draw = () => {
     if (gl.isContextLost() || v.readyState < 2) return;
     try {
@@ -112,13 +148,28 @@ const bare = async ({ url, mode, seconds }) => {
       uploads++;
     } catch (e) {
       failures++;
+      firstError ||= `${e?.name}: ${e?.message}`;
     }
   };
-  const onFrame = () => { draw(); v.requestVideoFrameCallback(onFrame); };
-  v.requestVideoFrameCallback(onFrame);
+  if (mode === 'poll') {
+    let time = -1, frames = -1;
+    const poll = () => {
+      requestAnimationFrame(poll);
+      const n = v.getVideoPlaybackQuality?.().totalVideoFrames ?? -1;
+      if (v.currentTime === time && n === frames) return;
+      time = v.currentTime;
+      frames = n;
+      draw();
+    };
+    requestAnimationFrame(poll);
+  } else {
+    const onFrame = () => { draw(); v.requestVideoFrameCallback(onFrame); };
+    v.requestVideoFrameCallback(onFrame);
+  }
   await v.play().catch((e) => window.__glEvents.push(`play: ${e}`));
   await new Promise((r) => setTimeout(r, seconds * 1000));
-  return `${uploads} uploads, ${failures} failed, video ${v.videoWidth}x${v.videoHeight} t=${v.currentTime.toFixed(2)}`;
+  return `${uploads} uploads, ${failures} failed${firstError ? ` (${firstError})` : ''}, video ${v.videoWidth}x${v.videoHeight} ` +
+    `t=${v.currentTime.toFixed(2)}`;
 };
 
 const browser = await pw[BROWSER].launch(BROWSER === 'chromium'
