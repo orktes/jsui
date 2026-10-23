@@ -97,7 +97,11 @@
  *   initialProps?: object,       // props for `component`
  *   bundleUrl?: string,          // URL of the JS bundle (resolved against the page)
  *   bundleSource?: string,       // or the bundle source itself
- *   devMode?: boolean,           // dev overlay + live reload
+ *   devMode?: boolean,           // dev overlay + live reload; with an http:// bundle the
+ *                                // runtime also joins `jsui dev`'s shared session (agents
+ *                                // attached to the dev server can drive and screenshot it)
+ *   devName?: string,            // this page's name in that session (default: 'web')
+ *   devSession?: boolean,        // false: stay out of the shared session
  *   devPoll?: boolean,           // host-side polling of /__jsui/version. Default: only for
  *                                // https:// bundles; the runtime itself polls http:// origins
  *                                // (through this module's fetch loader) when devMode is set.
@@ -1477,6 +1481,9 @@ class JsuiHost extends CanvasView {
     this.rt = M._jsui_web_create(this.hostId, this.width, this.height, this.pixelRatio, opts.devMode ? 1 : 0,
       this._baseUrlPtr);
     if (!this.rt) throw new Error('jsui_web_create failed');
+    if (opts.devMode && M._jsui_set_dev_session) {
+      this._withStrings([opts.devName ?? null], (n) => M._jsui_set_dev_session(this.rt, n, opts.devSession === false ? 0 : 1));
+    }
     // The main surface's AppRegistry component (else the bundle's first).
     if (opts.component != null) this.run(opts.component, opts.initialProps);
 

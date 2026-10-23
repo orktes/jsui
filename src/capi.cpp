@@ -10,6 +10,7 @@
 #include "include/core/SkPixmap.h"
 #include "include/core/SkStream.h"
 #include "include/encode/SkPngEncoder.h"
+#include "dev_session.h"
 #include "input/input.h"
 #include "js/engine.h"
 #include "jsui/jsui.h"
@@ -29,6 +30,26 @@ struct JsuiRuntime {
 };
 
 jsui::Runtime* jsui::internalRuntime(JsuiRuntime* h) { return h ? h->rt : nullptr; }
+
+namespace {
+
+// The person's input, reported to the dev session (not the moves).
+jsui::DevSession* reportTo(JsuiRuntime* rt) {
+  jsui::DevSession* s = rt->rt->session.get();
+  return s && s->reporting() ? s : nullptr;
+}
+jsui::Value rounded(float v) { return jsui::Value(double(std::lround(v))); }
+std::string modText(int mods) {
+  static const char* names[] = {"shift+", "ctrl+", "alt+", "meta+"};
+  std::string out;
+  for (int i = 0; i < 4; i++)
+    if (mods & (1 << i)) out += names[i];
+  return out;
+}
+const char* const kPadNames[] = {"A",    "B",     "X",  "Y",  "LB", "RB",   "LT",    "RT",  "Back",
+                                 "Start", "LS",   "RS", "Up", "Down", "Left", "Right", "Home"};
+
+}  // namespace
 
 extern "C" {
 
@@ -193,9 +214,18 @@ int jsui_load_bundle_url(JsuiRuntime* rt, const char* url) {
   return 0;
 }
 
-void jsui_reload(JsuiRuntime* rt) { rt->rt->reload(); }
+void jsui_reload(JsuiRuntime* rt) {
+  if (jsui::DevSession* s = rt->rt->session.get(); s && s->reporting()) s->userInput("reload", {});
+  rt->rt->reload();
+}
 
 void jsui_dev_update(JsuiRuntime* rt) { rt->rt->devUpdate(); }
+
+void jsui_set_dev_session(JsuiRuntime* rt, const char* name, int enabled) {
+  if (!rt || !rt->rt->session) return;
+  rt->rt->session->name = name ? name : "";
+  rt->rt->session->setEnabled(enabled != 0);
+}
 
 int jsui_register_font(JsuiRuntime* rt, const char* family, const void* data, size_t size, int weight, int italic) {
   bool ok = rt->rt->fonts.registerFont(family, data, size, weight, italic != 0);
@@ -424,7 +454,10 @@ int jsui_send_mouse_move(JsuiRuntime* rt, float x, float y) {
 }
 int jsui_send_mouse_button(JsuiRuntime* rt, float x, float y, JsuiMouseButton b, int down, int mods) {
   JSUI_INPUT_SCOPE;
-  return rt->surface->input->mouseButton(x, y, int(b), down != 0, mods);
+  int r = rt->surface->input->mouseButton(x, y, int(b), down != 0, mods);
+  if (jsui::DevSession* s = down ? reportTo(rt) : nullptr)
+    s->userInput("click", {{"x", rounded(x)}, {"y", rounded(y)}, {"button", jsui::Value(int(b))}, {"consumed", jsui::Value(r != 0)}});
+  return r;
 }
 int jsui_send_mouse_wheel(JsuiRuntime* rt, float x, float y, float dx, float dy) {
   JSUI_INPUT_SCOPE;
@@ -436,20 +469,35 @@ int jsui_send_mouse_leave(JsuiRuntime* rt) {
 }
 int jsui_send_touch(JsuiRuntime* rt, int id, int phase, float x, float y) {
   JSUI_INPUT_SCOPE;
-  return rt->surface->input->touch(id, phase, x, y);
+  int r = rt->surface->input->touch(id, phase, x, y);
+  if (jsui::DevSession* s = phase == 0 ? reportTo(rt) : nullptr)
+    s->userInput("tap", {{"x", rounded(x)}, {"y", rounded(y)}, {"consumed", jsui::Value(r != 0)}});
+  return r;
 }
 int jsui_send_key(JsuiRuntime* rt, const char* key, const char* code, int down, int repeat, int mods) {
   JSUI_INPUT_SCOPE;
   if (rt->rt->devKey(key, down != 0)) return 1;  // dev overlay (Escape)
-  return rt->surface->input->key(key, code, down != 0, repeat != 0, mods);
+  int r = rt->surface->input->key(key, code, down != 0, repeat != 0, mods);
+  // Typed characters arrive as text; named keys and shortcuts here.
+  bool named = key && (std::strlen(key) > 1 || (mods & ~1));
+  if (jsui::DevSession* s = down && !repeat && named ? reportTo(rt) : nullptr)
+    s->userInput("key", {{"key", jsui::Value(modText(mods) + key)}, {"consumed", jsui::Value(r != 0)}});
+  return r;
 }
 int jsui_send_text(JsuiRuntime* rt, const char* utf8) {
   JSUI_INPUT_SCOPE;
-  return rt->surface->input->text(utf8);
+  int r = rt->surface->input->text(utf8);
+  if (jsui::DevSession* s = utf8 && *utf8 ? reportTo(rt) : nullptr) s->userInput("type", {{"text", jsui::Value(utf8)}});
+  return r;
 }
 int jsui_send_gamepad_button(JsuiRuntime* rt, int pad, int button, int down, float value) {
   JSUI_INPUT_SCOPE;
-  return rt->surface->input->gamepadButton(pad, button, down != 0, value);
+  int r = rt->surface->input->gamepadButton(pad, button, down != 0, value);
+  if (jsui::DevSession* s = down ? reportTo(rt) : nullptr) {
+    jsui::Value name = button >= 0 && button < 17 ? jsui::Value(kPadNames[button]) : jsui::Value(button);
+    s->userInput("press", {{"button", name}, {"pad", jsui::Value(pad)}, {"consumed", jsui::Value(r != 0)}});
+  }
+  return r;
 }
 int jsui_send_gamepad_axis(JsuiRuntime* rt, int pad, int axis, float value) {
   JSUI_INPUT_SCOPE;

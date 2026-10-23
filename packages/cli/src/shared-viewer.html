@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>JSUI shared view</title>
+<title>JSUI shared session</title>
 <style>
   :root {
     --bg: #0b0d12;
@@ -70,6 +70,16 @@
   @keyframes fade { 0%, 60% { opacity: 1; } 100% { opacity: 0; } }
   .placeholder { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); line-height: 1.5; pointer-events: none; background: #0b0d12; }
   .placeholder[hidden] { display: none; }
+  .placeholder .box { max-width: 520px; padding: 0 24px; text-align: center; pointer-events: auto; }
+  .placeholder .box b { color: var(--text); font-weight: 600; }
+  .placeholder .box code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #cfd6e4; }
+  .placeholder .box button { margin-top: 12px; }
+  .host { position: absolute; inset: 24px; border: 0; border-radius: 10px; width: calc(100% - 48px); height: calc(100% - 48px);
+    box-shadow: 0 0 0 1px var(--line), 0 24px 64px rgba(0,0,0,.55); background: #000; }
+  .host[hidden], .frame[hidden], .hint[hidden], button.tool[hidden] { display: none; }
+  .chip.client { color: var(--text); max-width: 320px; }
+  .chip.client .label { overflow: hidden; text-overflow: ellipsis; }
+  .chip.client .count { color: var(--muted); }
   .hint { position: absolute; left: 0; right: 0; bottom: 8px; text-align: center; color: var(--muted); font-size: 12px; pointer-events: none; }
   aside { display: grid; grid-template-rows: auto 1fr; border-left: 1px solid var(--line); background: var(--panel); min-height: 0; }
   aside h2 { margin: 0; padding: 12px 14px; font-size: 12px; font-weight: 600; color: var(--muted);
@@ -92,12 +102,14 @@
 </head>
 <body>
 <header>
-  <div class="brand"><div class="logo"></div>JSUI shared view</div>
+  <div class="brand"><div class="logo"></div>JSUI shared session</div>
   <div class="entry" id="entry"></div>
   <div class="spacer"></div>
   <span class="chip agent" id="agent" hidden><span class="dot"></span>Agent driving</span>
   <span class="chip" id="status"><span class="dot"></span><span id="status-text">Connecting</span></span>
+  <span class="chip client" id="client" title="The runtime agents drive (the last to join; jsui clients --attach lists them)"><span class="label" id="client-label">No runtime</span><span class="count" id="client-count"></span></span>
   <span class="chip" id="size">–</span>
+  <button class="tool" id="run-here" hidden title="Run the app in this page too (it becomes the live runtime)">Run here</button>
   <button class="tool" id="reload" title="Reload the bundle (resets component state)">Reload</button>
   <button class="tool" id="zoom" aria-pressed="false" title="Fit the window or show 1:1 pixels">Fit</button>
   <button class="tool" id="feed-toggle" aria-pressed="true" title="Show or hide the activity feed">Activity</button>
@@ -109,6 +121,8 @@
       <div class="overlay" id="overlay"></div>
       <div class="placeholder" id="placeholder">Waiting for the dev server…</div>
     </div>
+    <iframe class="host" id="host" hidden title="The app in the JSUI web host" allow="gamepad; clipboard-read; clipboard-write"></iframe>
+    <div class="placeholder" id="remote" hidden><div class="box" id="remote-box"></div></div>
     <div class="hint" id="hint">Click the view to control it. Keyboard and gamepads go to the app.</div>
   </section>
   <aside>
@@ -127,6 +141,10 @@ let oneToOne = false;
 // ------------------------------------------------------------ layout
 
 function layout() {
+  if (!info.headless) {
+    $('size').textContent = info.width ? `${info.width}×${info.height}` : '–';
+    return;
+  }
   const stage = $('stage').getBoundingClientRect();
   const maxW = Math.max(100, stage.width - 48), maxH = Math.max(100, stage.height - 64);
   let w = info.width, h = info.height;
@@ -164,6 +182,7 @@ const short = (v) => {
   return s.length > 120 ? s.slice(0, 117) + '…' : s;
 };
 const WHO = { agent: 'Agent', user: 'You', ui: 'UI' };
+const where = (e) => (e.client && clients.length > 1 ? ` <span class="data">· ${esc(e.client)}</span>` : '');
 function describe(e) {
   switch (e.kind) {
     case 'command': return `<code>${esc(e.text)}</code>`;
@@ -180,6 +199,8 @@ function describe(e) {
     case 'state': return `HostState <code>${esc(e.key)}</code> = <span class="data">${esc(short(e.value))}</span>`;
     case 'log': return esc(e.text);
     case 'error': return esc(e.text.split('\n')[0]);
+    case 'join': return `<b>${esc(e.client)}</b> joined`;
+    case 'leave': return `<b>${esc(e.client)}</b> left`;
     default: return esc(e.kind);
   }
 }
@@ -196,7 +217,7 @@ function addEvent(e) {
   row.className = 'ev' + (e.kind === 'error' || (e.kind === 'log' && e.level >= 3) ? ' error' : e.kind === 'log' && e.level === 2 ? ' warn' : '') + (e.ok === false ? ' fail' : '');
   row.dataset.kind = e.kind; row.dataset.who = e.who;
   if (e.kind === 'type') row.dataset.text = e.text;
-  row.innerHTML = `<span class="who ${e.who}">${WHO[e.who] || e.who}</span><span class="what">${describe(e)}</span>`;
+  row.innerHTML = `<span class="who ${e.who}">${WHO[e.who] || e.who}</span><span class="what">${describe(e)}${e.kind === 'join' || e.kind === 'leave' ? '' : where(e)}</span>`;
   row.title = `t=${(e.time / 1000).toFixed(2)} s`;
   const stick = feed.scrollTop + feed.clientHeight >= feed.scrollHeight - 24;
   feed.appendChild(row);
@@ -265,18 +286,68 @@ async function drawFrame(payload) {
   $('placeholder').hidden = true;
 }
 
+// ------------------------------------------------------------ runtimes
+
+// Without a headless runtime the page shows the live runtime by name, or
+// runs the app itself in the web host (an iframe that joins the session).
+let clients = [], live = null, hosting = false;
+function runHere() {
+  if (hosting || !info.webHost) return;
+  hosting = true;
+  const q = new URLSearchParams({ bundle: '/bundle.js', dev: '1', stats: '0', devName: 'browser' });
+  $('host').src = `${info.webHost}?${q}`;
+  render();
+}
+$('run-here').onclick = runHere;
+function render() {
+  const headless = !!info.headless;
+  const liveClient = clients.find((c) => c.id === live);
+  $('client-label').textContent = liveClient ? liveClient.label : 'No runtime';
+  $('client-count').textContent = clients.length > 1 ? ` · ${clients.length} connected` : '';
+  $('client').title = clients.map((c) => (c.id === live ? '* ' : '  ') + c.label).join('\n') || 'No runtime connected';
+  $('frame').hidden = !headless;
+  $('hint').hidden = !headless;
+  $('reload').hidden = !headless;
+  $('zoom').hidden = !headless;
+  $('host').hidden = headless || !hosting;
+  $('run-here').hidden = headless || hosting || !info.webHost;
+  const box = $('remote-box');
+  $('remote').hidden = headless || hosting;
+  if (headless || hosting) return;
+  const origin = location.origin;
+  const ways = `<p>Open one: <code>jsui-viewer --dev ${esc(origin)}/bundle.js</code>, a Godot JsuiView with <code>bundle_url</code> <code>${esc(origin)}/bundle.js</code> and <code>dev_mode</code> on${info.webHost ? ', or run it in this page.' : '.'}</p>`;
+  box.innerHTML = liveClient
+    ? `<p>Agents drive <b>${esc(liveClient.label)}</b> (${liveClient.width}×${liveClient.height}). What happens there shows in the activity feed.</p>` +
+      (info.webHost ? '<p><button class="tool" id="run-here-2">Run here too</button></p>' : '')
+    : `<p><b>No runtime is connected.</b></p>${ways}` + (info.webHost ? '<p><button class="tool" id="run-here-2">Run here</button></p>' : '');
+  const b = $('run-here-2');
+  if (b) b.onclick = runHere;
+}
+function setClients(list, liveId) {
+  clients = list || [];
+  live = liveId;
+  const c = clients.find((x) => x.id === live);
+  if (c && !info.headless) { info.width = c.width; info.height = c.height; layout(); }
+  render();
+}
+
 function onEvent(m) {
   if (m.type === 'hello') {
     info = m;
     $('entry').textContent = m.entry || '';
-    ensureCanvas(m.pixelWidth, m.pixelHeight);
+    if (m.headless) ensureCanvas(m.pixelWidth, m.pixelHeight);
+    else $('placeholder').hidden = true;
     layout();
+    setClients(m.clients, m.live);
+    // Nothing to watch: this page runs the app (and becomes the live runtime).
+    if (!m.headless && !m.clients?.length && m.webHost) runHere();
     if (m.activity) { feed.textContent = ''; m.activity.forEach(addEvent); if (!m.activity.length) feed.innerHTML = '<div class="empty" id="empty">Nothing yet. Agents attach with <code>jsui run --attach</code>.</div>'; }
     if (m.cursor) canvas.style.cursor = m.cursor;
   } else if (m.type === 'activity') addEvent(m.event);
   else if (m.type === 'pointer') showPointer(m);
   else if (m.type === 'cursor') canvas.style.cursor = m.cursor;
   else if (m.type === 'agent') $('agent').hidden = !m.busy;
+  else if (m.type === 'clients') setClients(m.clients, m.live);
 }
 
 function setStatus(live, text) {
@@ -411,6 +482,7 @@ sink.addEventListener('paste', (e) => { const t = e.clipboardData?.getData('text
 // Gamepads (W3C standard mapping), polled every frame.
 const pads = [];
 function pollPads() {
+  if (!info.headless) return void requestAnimationFrame(pollPads);
   const list = navigator.getGamepads ? navigator.getGamepads() : [];
   for (let i = 0; i < Math.max(list.length, pads.length); i++) {
     const p = list[i];

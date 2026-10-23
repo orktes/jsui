@@ -8,6 +8,7 @@
 
 #include "animated/native_animated.h"
 #include "dev_overlay.h"
+#include "dev_session.h"
 #include "include/core/SkCanvas.h"
 #include "include/core/SkPicture.h"
 #include "include/core/SkPictureRecorder.h"
@@ -70,6 +71,7 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
   attach(main());
   input = main().input.get();
   doc.setViewport(float(cfg.width), float(cfg.height), cfg.pixel_ratio > 0 ? cfg.pixel_ratio : 1.f);
+  if (cfg.dev_mode) session = std::make_unique<DevSession>(*this);
   resetEngine();
 }
 
@@ -231,6 +233,7 @@ void Runtime::redrawAll() {
 }
 
 void Runtime::log(JsuiLogLevel level, const std::string& msg) {
+  if (session && session->joined()) session->uiEvent("log", {{"level", Value(int(level))}, {"text", Value(msg)}});
   if (config.log) {
     config.log(config.log_user, level, msg.c_str());
     return;
@@ -241,6 +244,7 @@ void Runtime::log(JsuiLogLevel level, const std::string& msg) {
 
 void Runtime::reportError(const std::string& msg) {
   lastError = msg;
+  if (session && session->joined()) session->uiEvent("error", {{"text", Value(msg)}});
   log(JSUI_LOG_ERROR, msg);
   if (config.dev_mode) redrawAll();  // show the overlay
 }
@@ -276,8 +280,9 @@ int Runtime::setState(const char* key, const char* json, bool patch) {
 }
 
 void Runtime::uiStateChanged(const std::string& key) {
-  if (!config.on_state) return;
   const std::string* json = state.json(key);
+  if (session && session->joined()) session->uiEvent("state", {{"key", Value(key)}, {"value", json ? Value::parseJson(*json) : Value()}});
+  if (!config.on_state) return;
   config.on_state(config.state_user, key.c_str(), json ? json->c_str() : nullptr);
 }
 
@@ -440,6 +445,7 @@ void Runtime::reload() {
   }
   loader.cancelAll();
   devPollInFlight_ = false;
+  if (session) session->reset();
   images->clear();  // its in-flight loads were just cancelled
   lotties->clear();
   lastError.clear();
@@ -488,6 +494,7 @@ void Runtime::devPoll() {
     } else if (token != devVersion_) {
       devVersion_ = token;
       log(JSUI_LOG_INFO, "bundle changed (version " + token + ")");
+      if (session) session->serverChanged();
       devUpdate();
     }
   });
@@ -546,6 +553,8 @@ void Runtime::tick(double nowMs) {
   devPoll();
   // jsui_call_ui results settled during this tick (or since the last one).
   deliverUiCallResults();
+  // Shared-session commands run last, on the frame this tick produced.
+  if (session) session->tick(devOrigin_);
 }
 
 void Runtime::tickNative(double nowMs) {

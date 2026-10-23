@@ -103,16 +103,16 @@ async function runStep(app, s) {
     case 'type': await app.type(v, s); return { action };
     case 'press': return { action, consumed: await app.press(v, s) };
     case 'stick': await app.stick(v, s.value ?? 1, s); return { action };
-    case 'state': app.setState(v, s.value); await app.frame(); return { action };
-    case 'patch': app.patchState(v, s.value); await app.frame(); return { action };
-    case 'buffer': app.setBuffer(v, s.values || [], s.type || 'f32'); await app.frame(); return { action };
-    case 'message': app.postMessage(v, s.data); await app.frame(); return { action };
+    case 'state': await app.setState(v, s.value); await app.frame(); return { action };
+    case 'patch': await app.patchState(v, s.value); await app.frame(); return { action };
+    case 'buffer': await app.setBuffer(v, s.values || [], s.type || 'f32'); await app.frame(); return { action };
+    case 'message': await app.postMessage(v, s.data); await app.frame(); return { action };
     case 'callUi': return { action, result: await app.callUi(v, s.args) };
-    case 'run': app.run(v, s.props || {}); await app.frame(); return { action };
-    case 'resize': app.resize(+v[0], +v[1], v[2] != null ? +v[2] : undefined); return { action };
+    case 'run': await app.run(v, s.props || {}); await app.frame(); return { action };
+    case 'resize': await app.resize(+v[0], +v[1], v[2] != null ? +v[2] : undefined); return { action };
     case 'find': return { action, element: await app.find(v) };
     case 'tree': return { action, tree: await app.tree() };
-    case 'getState': return { action, value: app.getState(v) ?? null };
+    case 'getState': return { action, value: (await app.getState(v)) ?? null };
     case 'hitTest': return { action, ...(await app.hitTest(v)) };
     case 'reload': await app.reload(); return { action };
     case 'activity':
@@ -142,7 +142,7 @@ async function runStep(app, s) {
       return { action };
     }
     case 'expectState': {
-      const value = app.getState(v);
+      const value = await app.getState(v);
       const ok = 'match' in s ? isSubset(value, s.match) : deepEqual(value, s.value);
       if (!ok) throw Object.assign(new Error(`state ${v} is ${JSON.stringify(value)}`), { value });
       return { action, value };

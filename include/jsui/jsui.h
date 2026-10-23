@@ -380,6 +380,13 @@ JSUI_API void jsui_reload(JsuiRuntime* rt);
  * Refresh: components keep their state) and fall back to a reload; other
  * bundles reload. Dev mode with an http:// bundle URL does this on its own. */
 JSUI_API void jsui_dev_update(JsuiRuntime* rt);
+/* Dev mode with an http:// bundle URL also joins the dev server's shared
+ * session (`jsui dev`): coding agents attached to the server
+ * (`jsui run --attach`) can then drive this runtime (input, state, calls,
+ * screenshots) and see what the person does in it. `name` is shown there
+ * (e.g. "AW3 main menu"; default: the platform); `enabled` 0 keeps this
+ * runtime out of the session. Call before loading the bundle. */
+JSUI_API void jsui_set_dev_session(JsuiRuntime* rt, const char* name, int enabled);
 
 /* Register a font face from memory. Data is copied. `weight` 100..900,
  * `italic` 0/1. The JS side can also load fonts with `jsui.loadFont(...)`. */

@@ -30,6 +30,8 @@ class LottieCache;
 class ShaderEffects;
 class NativeAnimated;
 
+class DevSession;
+
 class Runtime {
  public:
   explicit Runtime(const JsuiConfig& cfg, JsuiRuntime* handle);
@@ -141,6 +143,8 @@ class Runtime {
 
   FontManager fonts;
   ResourceLoader loader;
+  // Dev mode: this runtime's side of the dev server's shared session.
+  std::unique_ptr<DevSession> session;
   std::unique_ptr<ImageCache> images;
   // Lottie sources and playing LottieViews (render/lottie.h).
   std::unique_ptr<LottieCache> lotties;
