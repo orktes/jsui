@@ -31,6 +31,17 @@ extends Control
 ##                       get_frame_image() reads JsuiView's own texture, so
 ##                       only this sees a canvas item that shows something
 ##                       else (e.g. Godot's magenta / black placeholder)
+##   --max-render-waits N
+##                       with --self-test on a GPU renderer: drive hover
+##                       springs and four surface views of the same runtime
+##                       for a while (all render every frame) and fail if the
+##                       main thread blocked on Godot's render thread more
+##                       than N times meanwhile (get_render_stats()
+##                       .blocking_waits), a view handed no frame over
+##                       without waiting (gpu_jobs) or the runtime did not
+##                       queue exactly one render-thread job per frame
+##                       (render_thread_jobs). With --max-viewport-diff the
+##                       viewport check also runs right after, mid-animation
 ##   --bench <n>         measure n frames of hover springs and n frames of
 ##                       list scrolling (JsuiView.get_render_stats, frame
 ##                       times), print them and quit
@@ -54,6 +65,7 @@ extends Control
 
 const PING_REWARD := 120
 const VIEWPORT_BACKDROP := Color8(40, 150, 110)  # --max-viewport-diff
+const HAND_OFF_SURFACES := 4  # --max-render-waits: surface views of ui's runtime
 
 var _capture := ""
 var _frames := 120
@@ -64,6 +76,7 @@ var _window_size := Vector2i.ZERO
 var _expect_renderer := ""
 var _max_gpu_diff := -1.0
 var _max_viewport_diff := -1.0
+var _max_render_waits := -1
 var _bench := 0
 var _pongs := 0
 var _ui_answers := 0
@@ -134,6 +147,9 @@ func _enter_tree() -> void:
 				i += 1
 			"--max-viewport-diff":
 				_max_viewport_diff = float(v)
+				i += 1
+			"--max-render-waits":
+				_max_render_waits = int(v)
 				i += 1
 			"--bench":
 				_bench = int(v)
@@ -458,7 +474,8 @@ func _run_self_test() -> void:
 	await _click(Vector2(200, 620))  # open space below the season card
 	_check("unhandled click", _unhandled_clicks > clicks, "reaches the game")
 
-	await _test_surface()
+	await _test_surface()  # with the render hand-off check (--max-render-waits)
+	await _test_runtime_freed_first()
 
 	_testing = false
 	await _wait(0.8)  # let the toast and springs settle for the capture
@@ -495,9 +512,186 @@ func _test_surface() -> void:
 		and not _badge_events.has("mount:Props"), "re-rendered with new props, state kept")
 	await _click(badge.position + Vector2(48, 16))
 	_check("surface input", await _wait_for(func(): return _badge_events.has("press:Props")), "onPress in the surface")
+	if _max_render_waits >= 0:
+		await _check_render_hand_off(badge)
 	badge.queue_free()
 	_check("surface unmount", await _wait_for(func(): return _badge_events.has("unmount:Surface")), "freeing the view unmounts it")
 	ui.grab_focus()
+
+
+## --max-render-waits: with a separate render thread the runtime view queues
+## the frame's GPU renders of all its views there as one job and does not
+## wait for it; Godot's main loop syncs with that thread after process, so the
+## next frame finds the job done. The surface test's badge and three more
+## surface views of ui's runtime are there too and get a new label every
+## frame, so every frame one job paints all five views (one Skia context for
+## the runtime), and the runtime view collects each view's result (stats,
+## frame_rendered) the next frame. Only process_frame awaits here: they resume
+## before the views' _process, the props changes run then, and the mouse
+## events reach the view at the start of the next frame (accumulated input),
+## so nothing in this loop calls into the runtime mid-frame.
+func _check_render_hand_off(badge: JsuiView) -> void:
+	if ui.get_renderer() == "cpu":
+		print("render hand-off: cpu renderer, nothing to check")
+		return
+	var extra := []
+	for i in HAND_OFF_SURFACES - 1:
+		var v := JsuiView.new()
+		v.component = "Badge"
+		v.initial_props = {"label": "S%d" % (i + 1)}
+		v.auto_size = true
+		v.position = Vector2(128 + 112 * i, 16)
+		add_child(v)
+		v.runtime_view = v.get_path_to(ui)
+		extra.append(v)
+	var surfaces: Array = [badge] + extra
+	var up := await _wait_for(func(): return extra.all(func(v): return v.get_render_stats().renders > 0))
+	var views: Array = [ui] + surfaces
+	var signals := []  # frame_rendered per view
+	var counters := []
+	for i in views.size():
+		signals.append(0)
+		counters.append(func(_r): signals[i] += 1)
+	var targets := ["menu-1", "menu-2", "menu-3", "menu-4"]
+	var frames := 30  # lavapipe draws the 3D scene at a few fps: keep it short
+	await get_tree().process_frame  # from here on: before the views' _process
+	var s0: Array = views.map(func(v): return v.get_render_stats())
+	for i in views.size():
+		views[i].frame_rendered.connect(counters[i])
+	for f in frames:
+		# Across the menu buttons: hover-in / out springs, a repaint every frame.
+		_mouse_move(_center(targets[(f / 6) % targets.size()]) + Vector2(float((f % 6) * 8 - 20), 0))
+		for i in surfaces.size():
+			surfaces[i].initial_props = {"label": "%d.%d" % [i, f]}
+		await get_tree().process_frame
+	var s1: Array = views.map(func(v): return v.get_render_stats())
+	for i in views.size():
+		views[i].frame_rendered.disconnect(counters[i])
+	var ok := up
+	var waits_total := 0
+	var parts := []
+	for i in views.size():
+		var jobs: int = s1[i].gpu_jobs - s0[i].gpu_jobs
+		var renders: int = s1[i].renders - s0[i].renders
+		var waits: int = s1[i].blocking_waits - s0[i].blocking_waits
+		waits_total += waits
+		# Every collected frame with damage counts once and emits frame_rendered
+		# once; a surface with a new label every frame hands over every frame.
+		ok = ok and jobs > 0 and renders > 0 and signals[i] == renders and (i == 0 or jobs == frames)
+		parts.append("%s %d frames handed over, %d with damage (%d frame_rendered), %d blocking waits (%.3f ms), render thread %.3f ms/frame (jsui_render_gpu_target %.3f ms)" % [
+			"view" if i == 0 else "surface %d" % i, jobs, renders, signals[i], waits,
+			(s1[i].main_wait_usec_total - s0[i].main_wait_usec_total) / 1000.0,
+			(s1[i].gpu_job_usec_total - s0[i].gpu_job_usec_total) / 1000.0 / max(1, jobs),
+			(s1[i].jsui_render_usec_total - s0[i].jsui_render_usec_total) / 1000.0 / max(1, jobs)])
+	# With a separate render thread: one job per frame for all the runtime's
+	# views. Without one, the frames are painted right away (no jobs).
+	var separate: bool = not RenderingServer.is_on_render_thread()
+	var thread_jobs: int = s1[0].render_thread_jobs - s0[0].render_thread_jobs
+	ok = ok and thread_jobs == (frames if separate else 0)
+	_check("render hand-off", ok and waits_total <= _max_render_waits,
+		"%d frames, one runtime, %d views: %d render-thread jobs (%s); %s; limit %d waits" % [
+			frames, views.size(), thread_jobs, "separate render thread" if separate else "rendering on the main thread",
+			"; ".join(parts), _max_render_waits])
+	if _max_viewport_diff >= 0.0 and _capture != "":
+		# Mid-animation: the last frames were all handed over without a wait.
+		var shown_ok: bool = await _compare_with_viewport(_capture.get_basename() + "-animating.png", surfaces)
+		if not shown_ok:
+			_failures += 1
+	# A call into the runtime later in the frame (from a timer: timers run
+	# after the views' _process) waits for the runtime's whole frame job,
+	# whichever of its views it is made on: once it returns, the badge's frame
+	# (in that job) has been painted. Once on the runtime view (a state call),
+	# once on the badge (its surface handle).
+	var fence_ok := true
+	var fence_parts := []
+	for side in ["view", "surface"]:
+		await get_tree().process_frame
+		var queued: int = badge.get_render_stats().gpu_jobs
+		badge.initial_props = {"label": "Fence " + side}
+		await get_tree().create_timer(0.0).timeout
+		var caller: JsuiView = ui if side == "view" else badge
+		var w0: int = caller.get_render_stats().blocking_waits
+		if side == "view":
+			ui.get_state_json("season")
+		else:
+			badge.get_root_tag()
+		var waited: bool = caller.get_render_stats().blocking_waits > w0
+		var bs: Dictionary = badge.get_render_stats()
+		fence_ok = fence_ok and bs.gpu_jobs == queued + 1 and not bs.gpu_frame_in_flight
+		fence_parts.append("a call on the %s: %d frame(s) handed over, then %s (%s)" % [side, bs.gpu_jobs - queued,
+			"still in flight" if bs.gpu_frame_in_flight else "painted",
+			"the call waited for the render thread" if waited else "it had run already"])
+	_check("surface fence", fence_ok, "the badge's frame after %s" % "; ".join(fence_parts))
+	# Freed while their last frames are still queued (queue_free frees them at
+	# the end of the frame, after ui's _process queued them).
+	await get_tree().process_frame
+	for v in extra:
+		v.initial_props = {"label": "Bye"}
+	await get_tree().create_timer(0.0).timeout
+	var in_flight: int = extra.filter(func(v): return v.get_render_stats().gpu_frame_in_flight).size()
+	for v in extra:
+		v.queue_free()
+	var gone := await _wait_for(func():
+		for i in extra.size():
+			if not _badge_events.has("unmount:S%d" % (i + 1)):
+				return false
+		return true)
+	_check("surfaces freed mid-frame", gone, "%d of %d freed with their frame on the render thread" % [in_flight, extra.size()])
+
+
+## A runtime view freed before its surface views, right after the frame job
+## with all their frames was queued (with a separate render thread it is
+## still on that thread), and a surface view taken out of the tree and put
+## back the frame before: the runtime view waits for the job before the
+## runtime, its textures and the runtime's Skia context go; its surface views
+## lose their surfaces, keep working without them and can be freed after it.
+func _test_runtime_freed_first() -> void:
+	var host := JsuiView.new()
+	host.bundle_url = ui.bundle_url
+	host.component = "Badge"
+	host.initial_props = {"label": "Host"}
+	host.auto_size = true
+	host.position = Vector2(16, 64)
+	add_child(host)
+	var guests := []
+	for i in 2:
+		var g := JsuiView.new()
+		g.component = "Badge"
+		g.initial_props = {"label": "Guest %d" % i}
+		g.auto_size = true
+		g.position = Vector2(128 + 112 * i, 64)
+		add_child(g)
+		g.runtime_view = g.get_path_to(host)
+		guests.append(g)
+	var views: Array = [host] + guests
+	var up := await _wait_for(func(): return views.all(func(v): return v.get_render_stats().renders > 0), 10.0)
+	# Out of the tree and back, its frame queued with the others.
+	await get_tree().process_frame
+	for v in views:
+		v.initial_props = {"label": "A"}
+	await get_tree().create_timer(0.0).timeout
+	var in_flight := 0
+	if guests[0].get_render_stats().gpu_frame_in_flight:
+		in_flight += 1
+	remove_child(guests[0])
+	var detached: bool = not guests[0].is_running()
+	add_child(guests[0])
+	var reattached: bool = guests[0].is_running()
+	# The runtime view freed first.
+	await get_tree().process_frame
+	for v in views:
+		v.initial_props = {"label": "B"}
+	await get_tree().create_timer(0.0).timeout
+	if guests[1].get_render_stats().gpu_frame_in_flight:
+		in_flight += 1
+	host.free()
+	var orphaned: bool = guests.all(func(g): return not g.is_running())
+	await get_tree().process_frame
+	await get_tree().process_frame
+	for g in guests:
+		g.free()
+	_check("runtime freed first", up and detached and reattached and orphaned,
+		"surface left and re-entered the tree, then its runtime view was freed (%d of 2 with a frame on the render thread)" % in_flight)
 
 
 func _last_scroll_y() -> float:
@@ -588,8 +782,11 @@ func _compare_with_cpu(path: String) -> bool:
 ## no repaints) over an opaque backdrop of a known colour, so the screen must
 ## show the frame blended over that colour, also where the UI is translucent
 ## and the 3D scene would show through. The frame is scaled to the view's
-## rect in window pixels if they differ.
-func _compare_with_viewport(path: String) -> bool:
+## rect in window pixels if they differ. `overlays`: surface views drawn over
+## the view (frozen with it: the runtime view ticks them); their frames are
+## blended in at their rects, and each rect must match on its own too (a
+## small one barely moves the mean of the whole view).
+func _compare_with_viewport(path: String, overlays: Array = []) -> bool:
 	if DisplayServer.get_name() == "headless":
 		printerr("viewport-vs-frame: needs a display (not --headless) FAIL")
 		return false
@@ -606,14 +803,14 @@ func _compare_with_viewport(path: String) -> bool:
 		await RenderingServer.frame_post_draw
 	var shot: Image = get_viewport().get_texture().get_image()
 	var frame: Image = ui.get_frame_image()
+	var overlay_frames: Array = overlays.map(func(v): return v.get_frame_image())
 	ui.remove_child(backdrop)
 	backdrop.free()
 	ui.set_process(true)
-	if shot == null or frame == null:
+	if shot == null or frame == null or overlay_frames.has(null):
 		printerr("viewport-vs-frame: no viewport image or frame FAIL")
 		return false
-	var r: Rect2 = get_viewport().get_final_transform() * ui.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, ui.size)
-	var full := Rect2i(Vector2i(r.position.round()), Vector2i(r.size.round()))
+	var full := _window_rect(ui)
 	var rect := full.intersection(Rect2i(Vector2i.ZERO, shot.get_size()))
 	if not rect.has_area():
 		printerr("viewport-vs-frame: the view (%s) is not in the viewport (%s) FAIL" % [full, shot.get_size()])
@@ -627,6 +824,15 @@ func _compare_with_viewport(path: String) -> bool:
 	var expected := Image.create_empty(rect.size.x, rect.size.y, false, Image.FORMAT_RGBA8)
 	expected.fill(VIEWPORT_BACKDROP)
 	expected.blend_rect(frame, Rect2i(rect.position - full.position, rect.size), Vector2i.ZERO)
+	var overlay_rects := []  # in `shown` / `expected` pixels
+	for i in overlays.size():
+		var orect: Rect2i = _window_rect(overlays[i])
+		var oframe: Image = overlay_frames[i]
+		oframe.convert(Image.FORMAT_RGBA8)
+		if oframe.get_size() != orect.size:
+			oframe.resize(orect.size.x, orect.size.y, Image.INTERPOLATE_BILINEAR)
+		expected.blend_rect(oframe, Rect2i(Vector2i.ZERO, orect.size), orect.position - rect.position)
+		overlay_rects.append(Rect2i(orect.position - rect.position, orect.size).intersection(Rect2i(Vector2i.ZERO, rect.size)))
 	shown.convert(Image.FORMAT_RGB8)
 	expected.convert(Image.FORMAT_RGB8)
 	shown.save_png(path.get_basename() + "-shown.png")
@@ -634,12 +840,27 @@ func _compare_with_viewport(path: String) -> bool:
 	var m: Dictionary = shown.compute_image_metrics(expected, false)
 	var mean: float = m.mean * 4.0 / 3.0  # metrics average R, G, B and A; A is 255 in both
 	var ok: bool = mean <= _max_viewport_diff
-	print("viewport-vs-frame: %s frame %dx%d, view at %s in a %dx%d viewport: mean %.3f, max %d (limit mean %.3f) %s" % [
+	var details := ""
+	for i in overlays.size():
+		var orect: Rect2i = overlay_rects[i]
+		var om: Dictionary = shown.get_region(orect).compute_image_metrics(expected.get_region(orect), false) \
+			if orect.has_area() else {"mean": INF, "max": 255}
+		var omean: float = om.mean * 4.0 / 3.0
+		ok = ok and omean <= _max_viewport_diff
+		details += ", surface %s %s at %s: mean %.3f, max %d" % [
+			overlays[i].component, overlays[i].get_renderer(), orect, omean, int(om.max)]
+	print("viewport-vs-frame: %s frame %dx%d, view at %s in a %dx%d viewport: mean %.3f, max %d%s (limit mean %.3f) %s" % [
 		ui.get_renderer(), frame_size.x, frame_size.y, rect, shot.get_width(), shot.get_height(), mean, int(m.max),
-		_max_viewport_diff, "ok" if ok else "FAIL"])
+		details, _max_viewport_diff, "ok" if ok else "FAIL"])
 	if not ok:
 		printerr("viewport-vs-frame: Godot does not show the frame JsuiView rendered (see %s-shown.png / -expected.png)" % path.get_basename())
 	return ok
+
+
+## A view's rect in window (viewport texture) pixels.
+func _window_rect(v: Control) -> Rect2i:
+	var r: Rect2 = get_viewport().get_final_transform() * v.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, v.size)
+	return Rect2i(Vector2i(r.position.round()), Vector2i(r.size.round()))
 
 
 ## --bench: hover springs (small damage) then list scrolling (larger damage),
