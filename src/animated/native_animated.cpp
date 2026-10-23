@@ -660,6 +660,12 @@ void NativeAnimated::removeEventMapping(uint32_t viewId, const std::string& even
                   mappings_.end());
 }
 
+bool NativeAnimated::hasEventMapping(uint32_t viewId, const char* eventType) const {
+  for (const Mapping& m : mappings_)
+    if (m.view == viewId && m.type == eventType) return true;
+  return false;
+}
+
 void NativeAnimated::handleEvent(const Value& ev) {
   if (mappings_.empty()) return;
   const Value& target = ev["target"];

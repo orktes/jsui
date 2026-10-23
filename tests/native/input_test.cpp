@@ -459,14 +459,32 @@ TEST(input_wheel_scrolls_scrollview) {
   f.in().smoothWheel = false;  // notches jump (smooth wheel: scroll_test.cpp)
   f.js("extra = e => e.type === 'scroll' ? '@' + e.contentOffset.y + '/' + e.contentSize.height + '/' +"
        " e.layoutMeasurement.height : '';");
-  CHECK(f.in().mouseWheel(50, 50, 0, 50));
+  // setProps replaces the Yoga style too: place the node again.
+  auto listen = [&](Node* n, const char* props, float h) {
+    n->setProps(Value::parseJson(props));
+    Fixture::style(n).overflow = n == sv ? Overflow::Scroll : Overflow::Visible;
+    f.place(n, 0, 0, 100, h);
+    f.layout();
+  };
+  // Nobody listens: wheel and scroll events never reach JS.
+  CHECK(f.in().mouseWheel(50, 50, 0, 20));
+  CHECK_NEAR(sv->scrollY, 20, 1e-4);
+  CHECK_EQ(f.events(), std::string());
+  // onScroll on the ScrollView, onWheel on the content.
+  listen(sv, R"({"__events":["scroll"]})", 100);
+  listen(content, R"({"__events":["wheel"]})", 300);
+  CHECK(f.in().mouseWheel(50, 50, 0, 30));
   CHECK_EQ(f.events(), ev("wheel", content) + " " + ev("scroll", sv) + "@50/300/100");
   CHECK_NEAR(sv->scrollY, 50, 1e-4);
   f.in().mouseWheel(50, 50, 0, 1000);  // clamped to content
   CHECK_NEAR(sv->scrollY, 200, 1e-4);
   f.events();
-  CHECK(!f.in().mouseWheel(50, 50, 0, 10));  // at the end: no scroll event, not consumed
+  CHECK(f.in().mouseWheel(50, 50, 0, 10));  // at the end: no scroll event; consumed by onWheel
   CHECK_EQ(f.events(), ev("wheel", content));
+  listen(content, "{}", 300);
+  CHECK(!f.in().mouseWheel(50, 50, 0, 10));  // no listener: not consumed
+  CHECK_EQ(f.events(), std::string());
+  listen(content, R"({"__events":["wheel"]})", 300);
   f.js("prevent.wheel = true;");
   f.in().mouseWheel(50, 50, 0, -100);
   CHECK_NEAR(sv->scrollY, 200, 1e-4);  // prevented
@@ -491,7 +509,7 @@ TEST(input_wheel_scrolls_scrollview) {
 TEST(input_touch) {
   Fixture f;
   Node* root = f.doc().root();
-  Node* sv = f.box(root, 0, 0, 100, 100, "{}", NodeType::ScrollView);
+  Node* sv = f.box(root, 0, 0, 100, 100, R"({"__events":["scroll"]})", NodeType::ScrollView);
   Node* content = f.box(sv, 0, 0, 100, 300);
   Node* btn = f.box(content, 0, 0, 100, 50, R"({"__events":["press","hoverIn"]})");
   f.layout();

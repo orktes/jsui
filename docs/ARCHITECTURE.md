@@ -1058,8 +1058,13 @@ was `preventDefault()`-ed.
   by substring: `press`/`click` = pressable (focusable by default, `pointer`
   cursor); `move`/`responder`/`pan`/`drag` = wants `pointermove` (moves are not
   sent to JS unless a node on the path lists one); `hover`/`enter`/`leave`/`over`
-  = wants `pointerenter`/`pointerleave` (sent only to such nodes); `wheel`;
-  `"*"` = everything. Any pointer-ish name makes `jsui_send_*` report "consumed".
+  = wants `pointerenter`/`pointerleave` (sent only to such nodes); `wheel` =
+  wants `wheel` (sent only when a node on the path lists it); `scroll` = a
+  ScrollView's `scroll` events reach JS (see Scrolling); `"*"` = everything.
+  Native `Animated.event` mappings see `wheel` and `scroll` events whether or
+  not JS listens. Any pointer-ish name makes `jsui_send_*` report "consumed".
+  The parsed mask is cached on the node (`Node::listenMask`) until its props
+  change.
 * **Consumed vs. pass-through.** Every `jsui_send_*` returns whether the UI
   captured the event, so the game handles everything else (a click on an empty
   or merely decorative part of a HUD). Pointer: a node on the hit path with a
@@ -1115,13 +1120,26 @@ was `preventDefault()`-ed.
     scrolls; programmatic focus after pointer input jumps edge-aligned.
   * `scrollEnabled: false` stops user scrolling only (programmatic and focus
     scrolling still work). Offsets are re-clamped when content shrinks.
+  * `scroll` events go to JS only when the ScrollView lists `scroll` in
+    `__events`, at the rate its `scrollEventThrottle` prop allows (RN): 0 /
+    unset sends every offset change; up to 16 ms at most one per frame; more
+    at most one per interval. An offset change inside the interval is held
+    back and sent from `jsui_tick` once it is due, with the offset then and
+    the time of the change, so JS always gets the final position (`trailing`
+    event; `ScrollState::scrollOwed`). Other scroll events (drag, momentum)
+    are never throttled.
+  * Content scrolling under a still mouse does not update hover per row:
+    enter / leave and the cursor catch up once it has stopped scrolling under
+    the mouse for 100 ms (`kHoverAfterScrollMs`), like browsers; a mouse move
+    updates them at once.
   * Overlay indicators (3 px thumbs, `indicatorStyle` `default`/`black`/
     `white`, hidden by `showsVertical/HorizontalScrollIndicator: false`) show
     while scrolling and fade out after 500 ms. Scrolling and fading repaint
     only the ScrollView's rect / the thumbs' rects.
   * `@orktes/jsui-react` adds `contentOffset` (applied on mount),
-    `scrollEventThrottle` (> 16 ms limits `onScroll`, with a trailing event;
-    otherwise every event), `stickyHeaderIndices` (vertical; headers wrapped
+    `scrollEventThrottle` (passed to native, which throttles as above, so
+    held-back offsets never reach JS; with sticky headers, which follow every
+    offset, `onScroll` is throttled in JS the same way), `stickyHeaderIndices` (vertical; headers wrapped
     in a `zIndex: 10` View translated on scroll, the next header pushes the
     previous one) and wraps paging children like react-native-web.
 * **Focusable:** `focusable: true`, pressable nodes (unless `focusable: false`),

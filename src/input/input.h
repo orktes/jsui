@@ -169,6 +169,11 @@ class InputManager {
   static constexpr float kScrollStickDeadzone = 0.2f;
   static constexpr float kScrollStickMaxSpeed = 1.6f;   // px/ms at full deflection
   static constexpr double kIndicatorHoldMs = 500;
+  // Content scrolling under a still mouse: hover (enter / leave, cursor)
+  // catches up once the scrolling has paused this long, like browsers, so
+  // rows passing under the cursor do not each re-render. A mouse move
+  // updates it at once.
+  static constexpr double kHoverAfterScrollMs = 100;
   static constexpr double kIndicatorFadeMs = 300;
   static constexpr double kIndicatorFlashMs = 1000;
 
@@ -230,6 +235,13 @@ class InputManager {
     double settleAt = -1;
     float settleDir = 0;     // -1 / 1: snap in that direction, 0: nearest
     double shownUntil = -1;  // indicators fully visible until, then fade
+    // 'scroll' to JS under scrollEventThrottle: when the last one went out
+    // (event time, frame), and the time of a held-back one still owed (the
+    // trailing event, sent from tick() with the latest offset).
+    double scrollSentAt = -std::numeric_limits<double>::infinity();
+    uint64_t scrollSentFrame = 0;
+    bool scrollOwed = false;
+    double scrollOwedAt = 0;
   };
 
   Node* hitNode(Node* n, float px, float py, float* lx, float* ly);
@@ -241,6 +253,8 @@ class InputManager {
   // Returns true when JS called preventDefault(). The full JsEngine flags
   // land in lastFlags_.
   bool dispatch(Value::Object&& ev);
+  // dispatch(), or only the native Animated.event mappings when !toJs.
+  bool deliver(Value::Object&& ev, bool toJs);
   // Asks the JS responder (if any) to let a native gesture take the touch
   // over; false when it refuses (RN onResponderTerminationRequest).
   bool jsReleasesGesture(const PointerState& p, Node* target);
@@ -250,6 +264,9 @@ class InputManager {
   void leaveAll(PointerState& p);
   void updateCursor(Node* hit);
   bool consumes(const Node* hit, unsigned mask) const;
+  // A node from `n` up lists a matching __events name ("*" matches all).
+  bool pathListens(const Node* n, unsigned mask) const;
+  bool listensForScroll(const Node* sv) const;
   bool pointerDown(PointerState& p, uint32_t hitId, int button);
   bool pointerUp(PointerState& p, uint32_t hitId, int button, bool cancel);
   Node* alive(uint32_t id) const;
@@ -277,7 +294,10 @@ class InputManager {
   bool editable(const Node* input) const;
 
   // Scrolling internals (src/input/scroll.cpp).
-  bool dispatchScrollEvent(const char* type, Node* sv, float vx = 0, float vy = 0, const float* target = nullptr);
+  bool dispatchScrollEvent(const char* type, Node* sv, float vx = 0, float vy = 0, const float* target = nullptr,
+                           bool toJs = true);
+  // Sends the trailing 'scroll' a throttle held back once it is due.
+  void flushOwedScroll(uint32_t svId, double now);
   // Sets the clamped offset and dispatches 'scroll' (no animation change).
   bool applyScroll(Node* sv, float x, float y, bool showIndicators);
   ScrollState& scrollState(Node* sv);
@@ -331,6 +351,7 @@ class InputManager {
   PointerState mouse_;
   bool mouseInside_ = false;
   bool hoverDirty_ = false;
+  double scrolledUnderMouseAt_ = -std::numeric_limits<double>::infinity();
   bool keyboardModality_ = false;  // last input was key/gamepad: focus is "visible"
   int mods_ = 0;
   std::vector<PointerState> touches_;
