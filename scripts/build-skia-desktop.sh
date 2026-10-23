@@ -24,7 +24,7 @@
 #          FreeType (as the prebuilt), bundled ICU + HarfBuzz.
 #   macOS: Graphite + Metal, Ganesh + GL + Metal, CoreText fonts.
 #   Both:  Graphite + Dawn (header-only). PNG / JPEG / WebP / GIF decode, PNG
-#          encode; no PDF / SVG / Skottie.
+#          encode; Skottie (Lottie); no PDF / SVG.
 #   Vulkan headers are Skia's own (include/third_party/vulkan) and memory is
 #   managed by the bundled VulkanMemoryAllocator; nothing Vulkan is linked
 #   (the GDExtension gets vkGetInstanceProcAddr from the loader at run time).
@@ -187,7 +187,7 @@ skia_use_lua=false
 
 skia_enable_pdf=false
 skia_enable_svg=false
-skia_enable_skottie=false
+skia_enable_skottie=true
 skia_enable_tools=false
 skia_enable_spirv_validation=false
 skia_use_partition_alloc=false
@@ -218,7 +218,7 @@ echo "[$slice] gn args: $ARGS"
 bin/gn gen "$BUILD_DIR" --args="$ARGS"
 # Archives are copied by glob below: drop stale ones (ninja re-archives).
 rm -f "$BUILD_DIR"/lib*.a
-TARGETS="skia skparagraph skshaper skunicode"
+TARGETS="skia skparagraph skshaper skunicode skottie sksg"
 # shellcheck disable=SC2086
 nice ninja -C "$BUILD_DIR" -j "$JOBS" $TARGETS
 
@@ -231,7 +231,7 @@ cp "$BUILD_DIR/args.gn" "$dest/args.gn"
 # SK_SHAPER_HARFBUZZ_AVAILABLE, SK_USE_INTERNAL_VULKAN_HEADERS, ...). They
 # change public headers, so consumers must compile with exactly these.
 : > "$dest/defines.txt"
-for target in //:skia //modules/skshaper:skshaper //modules/skunicode:skunicode //modules/skparagraph:skparagraph; do
+for target in //:skia //modules/skshaper:skshaper //modules/skunicode:skunicode //modules/skparagraph:skparagraph //modules/skottie:skottie; do
   for config in $(bin/gn desc "$BUILD_DIR" "$target" public_configs) \
                 $(bin/gn desc "$BUILD_DIR" "$target" all_dependent_configs); do
     { bin/gn desc "$BUILD_DIR" "$config" defines 2>/dev/null || true; } \

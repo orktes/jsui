@@ -137,13 +137,13 @@ skia_use_lua=false
 
 skia_enable_pdf=false
 skia_enable_svg=false
-skia_enable_skottie=false
+skia_enable_skottie=true
 skia_enable_tools=false
 skia_enable_spirv_validation=false
 skia_use_partition_alloc=false
 "
 
-TARGETS="skia skparagraph skshaper skunicode"
+TARGETS="skia skparagraph skshaper skunicode skottie sksg"
 for slice in $todo; do
   sdk="${slice%-*}"
   cpu="${slice##*-}"
@@ -174,7 +174,7 @@ xcode_sysroot=\"$(xcrun --sdk "$sdk" --show-sdk-path)\"
   # SK_SHAPER_HARFBUZZ_AVAILABLE, ...). They change public headers, so
   # consumers must compile with exactly these.
   : > "$dest/defines.txt"
-  for target in //:skia //modules/skshaper:skshaper //modules/skunicode:skunicode //modules/skparagraph:skparagraph; do
+  for target in //:skia //modules/skshaper:skshaper //modules/skunicode:skunicode //modules/skparagraph:skparagraph //modules/skottie:skottie; do
     for config in $(bin/gn desc "$BUILD_DIR" "$target" public_configs) \
                   $(bin/gn desc "$BUILD_DIR" "$target" all_dependent_configs); do
       # (a config without defines makes gn desc print a message and fail)
