@@ -319,6 +319,12 @@ GLGpu* asGL(JsuiGpuContext* g) { return g && g->kind == JsuiGpuContext::Kind::GL
 namespace jsui {
 namespace gpu {
 
+namespace {
+unsigned retainedDebug = 0;
+}  // namespace
+
+void setRetainedDebug(unsigned flags) { retainedDebug = flags; }
+
 bool available() { return true; }
 
 JsuiGpuContext* createGL(JsuiGLGetProcFn getProc, void* user) {
@@ -396,7 +402,9 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiGLTarget& t) {
   bool allowRetain = !(t.flags & JSUI_GL_NO_RETAIN) && t.samples <= 1;
   GLGpu::Retained* r = allowRetain ? g->retainedEntry(&rt) : nullptr;
   if (r && !GLGpu::matches(r->surface.get(), info)) r->surface.reset();
-  const void* key = r && r->surface ? reinterpret_cast<const void*>(r->key) : nullptr;
+  const void* key = r && r->surface && !(retainedDebug & kRetainedFullRepaint)
+                        ? reinterpret_cast<const void*>(r->key)
+                        : nullptr;
   bool viaRetained = false, failed = false;
   const int64_t frameArea = int64_t(t.width) * t.height;
   rt.renderCanvasTracked(key, t.width, t.height, [&](const SkIRect&, bool keyValid) -> Runtime::CanvasChoice {
@@ -418,11 +426,12 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiGLTarget& t) {
     }
     viaRetained = true;
     Runtime::CanvasChoice c{r->surface->getCanvas(), reinterpret_cast<const void*>(r->key), true};
-    c.splitDamage = true;  // Ganesh: one scissor per pass, no stencil or mask
+    c.splitDamage = !(retainedDebug & kRetainedOneRect);  // Ganesh: one scissor per pass, no stencil or mask
     return c;
   });
   if (failed) return -1;
   if (viaRetained) {
+    if (retainedDebug & kRetainedFlushFirst) g->ctx->flushAndSubmit(r->surface.get(), GrSyncCpu::kYes);
     SkPaint paint;
     paint.setBlendMode(clear ? SkBlendMode::kSrc : SkBlendMode::kSrcOver);
     r->surface->draw(surface->getCanvas(), 0, 0, SkSamplingOptions(), &paint);
@@ -447,6 +456,7 @@ void reset(JsuiGpuContext*) {}
 void contextLost(JsuiGpuContext*) {}
 void purge(JsuiGpuContext*, size_t) {}
 int render(Runtime&, JsuiGpuContext*, const JsuiGLTarget&) { return -1; }
+void setRetainedDebug(unsigned) {}
 }  // namespace gpu
 }  // namespace jsui
 

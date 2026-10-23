@@ -924,10 +924,10 @@ the expensive per-pixel work is done once:
 * **Damage.** `updateDamage` (`src/render/painter.cpp`) compares each node's
   paint record (version, size, device matrix, children, scroll indicators)
   with the last frame and damages the old and new bounds of what changed;
-  unchanged subtrees outside the damage are culled. Skia chops anti-aliased
-  outlines at the clip's bounds, so a curved node the damage touches is
-  never cut by the damage bounds: the bounds grow (single pixels at the
-  needed corners), not the region, so the repaint stays exact.
+  unchanged subtrees outside the damage are culled. Skia does not
+  rasterize an anti-aliased outline cut by the clip exactly like the whole
+  outline, so damage crossing a curved node's edge grows to the whole node
+  (damage inside its padding box does not), and the repaint stays exact.
 * **Scroll blit.** When a ScrollView's content only scrolled by whole device
   pixels over a uniform backdrop, the CPU path moves the viewport's pixels
   and repaints only what the scroll exposed, what is painted above the

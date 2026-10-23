@@ -1959,33 +1959,30 @@ SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBl
       damage.op(scan.sub, SkRegion::kUnion_Op);
     }
   }
-  // Skia's anti-aliased scan converter (paths, rrects, AA clips) clips the
-  // outline to the clip's *bounds* before rasterizing, which shifts edge
-  // coverage when those bounds cut through a curved or diagonal outline
-  // (pixels then differ from a full repaint by a few levels). Within the
-  // bounds, the region itself is applied per span and is exact. So every
-  // curved node the damage touches must lie inside the damage bounds: grow
-  // the bounds (by adding single pixels at its corners, which repaint like
-  // any damage) instead of the whole node, until that holds.
+  // Damage that crosses a curved or diagonal outline (an anti-aliased edge)
+  // grows to the whole node, and on to the curved nodes that growth
+  // crosses: such an edge is then repainted under the same clip spans as in
+  // a full frame. Cut by the clip, Skia does not reproduce the full frame's
+  // edge coverage exactly; on macOS arm64 not even when the clip's bounds
+  // contain the whole outline and only the region's spans cut it (growing
+  // just the bounds, by a pixel at each corner, is exact on x86 but left a
+  // few pixels off there: render_incremental_* in CI).
   if (!damage.isEmpty()) {
-    SkIRect need = damage.getBounds();
     for (int pass = 0; pass < 16; pass++) {
       bool grew = false;
       for (const CurvedNode& cn : root->curved) {
-        if (need.contains(cn.bounds) || !damage.intersects(cn.bounds)) continue;
+        if (!damage.intersects(cn.bounds) || damage.contains(cn.bounds)) continue;
         bool cuts = false;
         for (SkRegion::Iterator it(damage); !it.done() && !cuts; it.next()) {
           const SkIRect& d = it.rect();
           cuts = SkIRect::Intersects(d, cn.bounds) && !cn.safe.contains(SkRect::Make(d));
         }
         if (cuts) {
-          need.join(cn.bounds);
+          damage.op(cn.bounds, SkRegion::kUnion_Op);
           grew = true;
         }
       }
       if (!grew) break;
-      damage.op(SkIRect::MakeXYWH(need.fLeft, need.fTop, 1, 1), SkRegion::kUnion_Op);
-      damage.op(SkIRect::MakeXYWH(need.fRight - 1, need.fBottom - 1, 1, 1), SkRegion::kUnion_Op);
       if (pass == 15) damage.setRect(screen);
     }
   }
