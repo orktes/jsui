@@ -335,6 +335,41 @@ void patch(Node* n, const std::string& json) {
   n->setProps(Value(props));
 }
 
+// Damage-only repaints must match full repaints. The x86 Skia build
+// rasterizes an anti-aliased edge identically under the damage clip, and is
+// checked to the bit. The macOS arm64 build blends some edge pixels of a
+// node painted whole inside the damage region a level or two apart from the
+// full frame (CI, M1: e.g. a rounded box's corners, 40-70 px per frame at
+// most 2 levels), so there a frame passes within that: at most 4 levels on
+// at most a quarter percent of the pixels. Stale or missing paint differs
+// by far more.
+#if defined(__x86_64__) || defined(_M_X64)
+constexpr bool kExactUnderClip = true;
+#else
+constexpr bool kExactUnderClip = false;
+#endif
+
+struct PixelDiff {
+  size_t count = 0;  // pixels that differ at all
+  int max = 0;       // largest channel difference
+};
+
+PixelDiff pixelDiff(const std::vector<uint32_t>& a, const std::vector<uint32_t>& b) {
+  PixelDiff d;
+  for (size_t k = 0; k < a.size(); k++) {
+    if (a[k] == b[k]) continue;
+    d.count++;
+    for (int ch = 0; ch < 4; ch++)
+      d.max = std::max(d.max, std::abs(int((a[k] >> (ch * 8)) & 255) - int((b[k] >> (ch * 8)) & 255)));
+  }
+  return d;
+}
+
+bool matchesFull(const PixelDiff& d, size_t pixels) {
+  if (kExactUnderClip) return d.count == 0;
+  return d.max <= 4 && d.count * 400 <= pixels;
+}
+
 // Failure details for frames that should match: the repainted bounds and
 // the first few differing pixels (RGBA, incremental vs full), so a CI log
 // from another platform says where and by how much.
@@ -444,7 +479,8 @@ TEST(render_incremental_rounded_boxes_cut_anywhere) {
       seed = seed * 1664525u + 1013904223u;
       return lo + (hi - lo) * float(seed >> 8) / float(1u << 24);
     };
-    size_t bad = 0;
+    size_t bad = 0, differ = 0;
+    int worst = 0;
     double probeArea = 0, repainted = 0;
     for (int i = 0; i < 200; i++) {
       float pw = rnd(2, 40), ph = rnd(2, 30);
@@ -455,15 +491,18 @@ TEST(render_incremental_rounded_boxes_cut_anywhere) {
       SkIRect damage = s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);
       repainted += double(lastPaintStats(s.doc()).repaintedPixels);
       s.rt->render(full.data(), dw, dh, size_t(dw) * 4);
-      size_t diff = 0;
-      for (size_t k = 0; k < inc.size(); k++) diff += inc[k] != full[k];
-      if (diff && !bad) {
-        std::fprintf(stderr, "  dpr %g step %d: %zu pixels differ\n", dpr, i, diff);
+      PixelDiff d = pixelDiff(inc, full);
+      bool ok = matchesFull(d, inc.size());
+      if (!ok && !bad) {
+        std::fprintf(stderr, "  dpr %g step %d: %zu pixels differ\n", dpr, i, d.count);
         describeDiff(inc, full, dw, damage);
       }
-      bad += diff;
+      if (!ok) bad += d.count;
+      differ = std::max(differ, d.count);
+      worst = std::max(worst, d.max);
       s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);  // full again after render()
     }
+    std::printf("  dpr %g: at most %zu pixels per step differ from a full repaint, by at most %d\n", dpr, differ, worst);
     CHECK_EQ(bad, size_t(0));
     double frame = double(dw) * dh;
     std::printf("  dpr %g: repainted %.0f px per step (%.1f%% of the frame) for %.0f px of probe rects\n", dpr,
@@ -480,14 +519,14 @@ TEST(render_incremental_rounded_boxes_cut_anywhere) {
     std::printf("  dpr %g: inside a rounded box: repainted %.0f px\n", dpr, inside);
     CHECK(inside <= 2 * (9 + 4) * (7 + 4) * dpr * dpr);
     s.rt->render(full.data(), dw, dh, size_t(dw) * 4);
-    CHECK(inc == full);
+    CHECK(matchesFull(pixelDiff(inc, full), inc.size()));
   }
 }
 
 // Gradient backgrounds and scaled images are blitted from cached raster
 // sprites (and a one-draw node's opacity is folded into its draw): the
 // frame matches drawing everything directly (a picture canvas never uses
-// sprites) up to rounding, incremental frames match full ones exactly, and
+// sprites) up to rounding, incremental frames match full ones (matchesFull), and
 // later frames reuse the sprites. Perf guards: no sprite re-rendered while
 // only an unrelated probe moves; the folded opacity takes no layer.
 TEST(render_sprites_match_direct_and_are_reused) {
@@ -539,7 +578,11 @@ TEST(render_sprites_match_direct_and_are_reused) {
       layers += st.saveLayers;
       s.rt->render(full.data(), dw, dh, size_t(dw) * 4);
       renders += lastPaintStats(s.doc()).spriteRenders;
-      for (size_t k = 0; k < inc.size(); k++) bad += inc[k] != full[k];
+      PixelDiff d = pixelDiff(inc, full);
+      if (!matchesFull(d, inc.size())) {
+        if (!bad) std::fprintf(stderr, "  dpr %g step %d: %zu pixels differ, max %d\n", dpr, i, d.count, d.max);
+        bad += d.count;
+      }
       s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);
     }
     CHECK_EQ(bad, size_t(0));
@@ -559,17 +602,14 @@ TEST(render_sprites_match_direct_and_are_reused) {
 // Moved pixels are copies, so such differences never add up over frames.
 // x86 builds are exact at 1x and checked so (a real blit error, stale or
 // misplaced pixels, differs by far more than a few levels anywhere).
+// Repaints that do not blit are checked like other damage-only repaints
+// (matchesFull).
 // Perf guard: blitted frames repaint a fraction of the viewport. Frames that
 // cannot blit (a sub-pixel scroll, content changing while it scrolls)
-// repaint as before, exactly.
+// repaint as before.
 TEST(render_scroll_blit_matches_full) {
-#if defined(__x86_64__) || defined(_M_X64)
-  const bool exactAt1x = true;
-#else
-  const bool exactAt1x = false;
-#endif
   for (float dpr : {1.f, 2.f}) {
-    const bool exact = dpr == 1 && exactAt1x;
+    const bool exact = dpr == 1 && kExactUnderClip;
     Scene s(400, 300, dpr);
     s.add(R"J({"style":{"position":"absolute","left":0,"top":0,"width":400,"height":300,"backgroundColor":"#0b1020"},"children":[
       {"style":{"position":"absolute","left":0,"top":0,"width":100,"height":300,"backgroundColor":"#111830","borderRightWidth":1,
@@ -623,7 +663,7 @@ TEST(render_scroll_blit_matches_full) {
       }
       if (diff && (!blitted || exact || md > 4))
         std::fprintf(stderr, "  dpr %g %s to %g: %zu pixels differ, max %d\n", dpr, what, y, diff, md);
-      if (!blitted || exact) bad += diff;
+      if (exact || (!blitted && !matchesFull(PixelDiff{diff, md}, inc.size()))) bad += diff;
       off = std::max(off, diff);
       worst = std::max(worst, md);
       s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);  // in step again (full)
