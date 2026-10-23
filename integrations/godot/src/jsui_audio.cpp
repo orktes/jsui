@@ -507,7 +507,7 @@ AudioStreamPlayer* ViewAudio::takePlayer() {
 }
 
 void ViewAudio::releasePlayer(AudioStreamPlayer* p) {
-  p->set_stream_paused(false);  // first: a playback stopped while paused stayed in the AudioServer (leaked at exit)
+  p->set_stream_paused(false);  // a pooled player starts its next voice unpaused
   p->stop();
   p->set_stream(Ref<AudioStream>());
   if (idle_.size() < kIdlePlayers) {
