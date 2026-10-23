@@ -220,7 +220,7 @@ export function HomePage() {
             <Eyebrow style={{ textAlign: 'center' }}>Keep exploring</Eyebrow>
             <Text style={[phone ? text.h2 : text.h1, { textAlign: 'center', maxWidth: 720 }]}>Poke at it. Everything here is live.</Text>
             <Text style={[text.lead, { textAlign: 'center', maxWidth: 640 }, phone && { fontSize: 16, lineHeight: 25 }]}>
-              Nine interactive game screens, a live code playground and a guide to embedding the runtime in your engine.
+              Ten interactive game screens, a live code playground and a guide to embedding the runtime in your engine.
             </Text>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 12, justifyContent: 'center', marginTop: 8 }}>
               <Button label="Game screens" to="/screens" icon="▶" />

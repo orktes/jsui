@@ -1,5 +1,5 @@
 // /screens and /screens/<id>: one live game screen on a big Stage, a
-// selector for all nine, prev / next, what is interactive in the current
+// selector for all of them, prev / next, what is interactive in the current
 // screen and a link to its source. Only the selected screen is mounted.
 //
 // Input: the selector is focusable (Tab, arrows, D-pad). Pressing the
@@ -137,9 +137,9 @@ export function ScreensPage({ params = [] }) {
   const wide = !L.tablet;
   const inner = Math.min(L.width - L.gutter * 2, 1240);
   const stageW = wide ? inner - SIDE_W - GAP : L.phone ? L.width - 20 : inner;
-  // Nine cards in one row when they fit at 120 px, else a scrolling strip.
-  const cardFit = (inner - 8 * 10) / SCREENS.length;
-  const cardW = cardFit >= 118 ? cardFit : 168;
+  // All cards in one row when they fit at 110 px, else a scrolling strip.
+  const cardFit = (inner - (SCREENS.length - 1) * 10) / SCREENS.length;
+  const cardW = cardFit >= 110 ? cardFit : 168;
 
   const itemRefs = useRef([]).current;
   const strip = useRef(null);
@@ -191,8 +191,8 @@ export function ScreensPage({ params = [] }) {
 
   // Keep the selected card visible when the strip scrolls.
   useEffect(() => {
-    if (cardFit < 118 && strip.current) strip.current.scrollTo({ x: Math.max(0, idx * (cardW + 10) - 40), animated: true });
-  }, [idx, cardFit < 118]);
+    if (cardFit < 110 && strip.current) strip.current.scrollTo({ x: Math.max(0, idx * (cardW + 10) - 40), animated: true });
+  }, [idx, cardFit < 110]);
 
   const onKeyDown = (e) => {
     if (e.key === '[' || e.key === ']') {
@@ -251,7 +251,7 @@ export function ScreensPage({ params = [] }) {
         </View>
 
         <View style={{ marginTop: 18 }}>
-          {cardFit >= 118 ? (
+          {cardFit >= 110 ? (
             <View style={{ flexDirection: 'row', gap: 10 }}>{cards}</View>
           ) : (
             <ScrollView

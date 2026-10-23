@@ -6,7 +6,7 @@
 //
 // Layout of the output:
 //   index.html, jsui-web.js         page + browser host (web/jsui-web.js,
-//   jsui-webgpu.js                  and its WebGPU renderer)
+//   jsui-webgpu.js, jsui-textures.js and its WebGPU renderer and host textures)
 //   jsui/dist/jsui.{js,wasm}        CPU module (required)
 //   jsui/dist-webgl/jsui.{js,wasm}  WebGL module (optional; used when present)
 //   jsui/dist-gpu/jsui.{js,wasm}    WebGPU + WebGL + CPU module (optional; preferred when
@@ -19,8 +19,8 @@
 // (a new index.html with an old jsui-web.js, a jsui.js with the jsui.wasm of
 // another build: "Importing a module script failed"). Every URL the page
 // loads besides index.html itself is therefore versioned with a content
-// hash, ?v=<hash>: jsui-web.js (imported by index.html), jsui-webgpu.js
-// (imported by jsui-web.js, rewritten here), each module's jsui.js and its
+// hash, ?v=<hash>: jsui-web.js (imported by index.html), jsui-webgpu.js and
+// jsui-textures.js (imported by jsui-web.js, rewritten here), each module's jsui.js and its
 // jsui.wasm (one hash over both; the host passes the module URL's query on to
 // the wasm, see locateIn() in web/jsui-web.js) and app/bundle.js. index.html
 // gets the module versions inline (no modules.json fetch to go stale).
@@ -92,8 +92,11 @@ for (const w of r.warnings) console.warn('site: warning:', w.text);
 // The host scripts, each import pointing at the version deployed with it.
 const webgpuJs = fs.readFileSync(path.join(ROOT, 'web/jsui-webgpu.js'));
 fs.writeFileSync(path.join(out, 'jsui-webgpu.js'), webgpuJs);
-const webJs = replaceAll(fs.readFileSync(path.join(ROOT, 'web/jsui-web.js'), 'utf8'), "from './jsui-webgpu.js'",
-  `from './jsui-webgpu.js?v=${hash(webgpuJs)}'`, 'web/jsui-web.js');
+const texturesJs = fs.readFileSync(path.join(ROOT, 'web/jsui-textures.js'));
+fs.writeFileSync(path.join(out, 'jsui-textures.js'), texturesJs);
+let webJs = fs.readFileSync(path.join(ROOT, 'web/jsui-web.js'), 'utf8');
+webJs = replaceAll(webJs, "from './jsui-webgpu.js'", `from './jsui-webgpu.js?v=${hash(webgpuJs)}'`, 'web/jsui-web.js');
+webJs = replaceAll(webJs, "from './jsui-textures.js'", `from './jsui-textures.js?v=${hash(texturesJs)}'`, 'web/jsui-web.js');
 fs.writeFileSync(path.join(out, 'jsui-web.js'), webJs);
 let html = fs.readFileSync(path.join(SITE, 'index.html'), 'utf8');
 html = replaceAll(html, "from './jsui-web.js'", `from './jsui-web.js?v=${hash(webJs)}'`, 'site/index.html');
