@@ -460,7 +460,13 @@ TEST(render_skipped_subtrees_damage_like_a_full_walk) {
         {"style":{"width":"50%","height":10,"backgroundColor":"#ffffff"}}]}]},
     {"type":"ScrollView","style":{"position":"absolute","left":10,"top":130,"width":140,"height":60,"backgroundColor":"#11162a"},"children":[
       {"style":{"height":30,"margin":4,"borderRadius":5,"backgroundColor":"#4ade80"}},
-      {"style":{"height":30,"margin":4,"borderRadius":5,"backgroundColor":"#4fd1ff"}}]},
+      {"style":{"height":30,"margin":4,"borderRadius":5,"backgroundColor":"#4fd1ff"}},
+      {"style":{"height":30,"margin":4,"borderRadius":5,"backgroundColor":"#b26bff"},"children":[
+        {"type":"Text","style":{"color":"#fff","fontSize":12},"text":"Row 3"}]},
+      {"style":{"height":30,"margin":4,"borderRadius":5,"backgroundColor":"#f2c35b"}},
+      {"style":{"height":30,"margin":4,"borderRadius":5,"backgroundColor":"#ff4d6a"},"children":[
+        {"type":"Text","style":{"color":"#fff","fontSize":12},"text":"Row 5"}]},
+      {"style":{"height":30,"margin":4,"borderRadius":5,"backgroundColor":"#4ade80"}}]},
     {"style":{"position":"absolute","left":170,"top":130,"width":140,"height":100,"backgroundColor":"#302040"},"children":[
       {"style":{"position":"absolute","left":10,"top":10,"width":60,"height":30,"backgroundColor":"#b26bff"},"children":[
         {"style":{"position":"absolute","left":5,"top":5,"width":20,"height":20,"backgroundColor":"#ffffff"}}]},
@@ -499,7 +505,7 @@ TEST(render_skipped_subtrees_damage_like_a_full_walk) {
     fn(na, ra);
     fn(nb, rb);
   };
-  for (int i = 0; i < 40; i++) {
+  for (int i = 0; i < 44; i++) {
     both({4}, [&](Node* n, Node*) { patch(n, R"J({"transform":[{"translateX":)J" + std::to_string(i % 7) + "}]}"); });
     switch (i) {
       case 5: both({0, 1, 0}, [](Node* n, Node*) { patch(n, R"J({"backgroundColor":"#ff0000"})J"); }); break;
@@ -522,6 +528,14 @@ TEST(render_skipped_subtrees_damage_like_a_full_walk) {
       case 33: both({0}, [](Node* n, Node*) { patch(n, R"J({"left":12})J"); }); break;
       default: break;
     }
+    if (i >= 35) {
+      // Scrolling: rows move out of view and back in (skipped while out).
+      both({2}, [&](Node* n, Node*) {
+        n->scrollY = float((i - 35) % 3 == 2 ? 20 : 9 + 61 * ((i - 35) % 3)) + 0.5f * float(i % 2);
+        n->markBoundsDirty();
+      });
+    }
+    if (i == 38) both({2, 4, 0}, [](Node* n, Node*) { n->children()[0]->setText("Row 5!"); });  // out of view
     frame();
   }
   // In most frames only the glow changed: the other subtrees were skipped.
