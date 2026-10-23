@@ -96,7 +96,7 @@ void jsui_set_viewport(JsuiRuntime* rt, int width, int height, float pixelRatio)
   float scale = pixelRatio > 0 ? pixelRatio : 1.f;
   bool changed = doc.width() != float(width) || doc.height() != float(height) || doc.pixelRatio() != scale;
   doc.setViewport(float(width), float(height), scale);
-  // Dimensions / useWindowDimensions in @jsui/react listen for this.
+  // Dimensions / useWindowDimensions in @orktes/jsui-react listen for this.
   if (changed && rt->rt->js) {
     jsui::Value::Object ev{{"type", jsui::Value("resize")},
                            {"width", jsui::Value(double(width))},

@@ -8,7 +8,7 @@ twice at the same viewport size and the PNGs are compared pixel by pixel:
 | Side | How |
 | --- | --- |
 | **expected** | esbuild aliases `react-native` → `react-native-web`; react-dom renders it into a fixed-size root in headless Chromium (Playwright); screenshot. |
-| **actual** | the same file is bundled for JSUI (`@jsui/cli` `build()`, which aliases `react-native` → `@jsui/react`) and rendered by `build/jsui-render`. |
+| **actual** | the same file is bundled for JSUI (`@orktes/jsui-cli` `build()`, which aliases `react-native` → `@orktes/jsui-react`) and rendered by `build/jsui-render`. |
 
 Chrome is the oracle, so no golden images are committed. Chrome screenshots
 are cached by content hash in `output/.cache/`, which makes repeat runs fast.
@@ -33,7 +33,7 @@ Environment:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `JSUI_RENDER` | `build/jsui-render` | renderer binary |
-| `JSUI_REF_BUILDER` | auto | force `cli`, `package` (esbuild + `@jsui/react`) or `fallback` |
+| `JSUI_REF_BUILDER` | auto | force `cli`, `package` (esbuild + `@orktes/jsui-react`) or `fallback` |
 | `JSUI_REF_OUTPUT` | `tests/reference/output` | where results go |
 | `PLAYWRIGHT_BROWSERS_PATH` | (Playwright default) | Chromium location; never run `playwright install` here |
 
@@ -154,12 +154,12 @@ by `npm --workspace tests/reference run assets`
 
 ## JSUI bundling
 
-`lib/jsui.js` `buildJsuiBundle(entry, outFile)` prefers `@jsui/cli`'s
+`lib/jsui.js` `buildJsuiBundle(entry, outFile)` prefers `@orktes/jsui-cli`'s
 programmatic `build({ entry, outfile })`. Without it, it uses esbuild with
-`react-native` aliased to `@jsui/react`; if that package is missing too, it
+`react-native` aliased to `@orktes/jsui-react`; if that package is missing too, it
 uses `jsui-fallback/react-native.js`, a minimal static reconciler over the
 `__jsui_native` bridge that exists only so the pipeline can run before
-`@jsui/react` lands. The report header says which builder was used.
+`@orktes/jsui-react` lands. The report header says which builder was used.
 
 Both sides boot the app the React Native way:
 `AppRegistry.registerComponent('App', () => App)` then `runApplication`.

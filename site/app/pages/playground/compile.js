@@ -10,7 +10,7 @@ const RN = Object.assign({}, ReactNative, { __esModule: true, default: ReactNati
 const MODULES = {
   react: React,
   'react-native': RN,
-  '@jsui/react': RN,
+  '@orktes/jsui-react': RN,
 };
 
 function requireModule(name) {

@@ -1,6 +1,6 @@
-// End-to-end: a real @jsui/react bundle driven through the C API.
+// End-to-end: a real @orktes/jsui-react bundle driven through the C API.
 //
-// The bundle is built from packages/cli/test/e2e/app.jsx by the @jsui/cli
+// The bundle is built from packages/cli/test/e2e/app.jsx by the @orktes/jsui-cli
 // test suite, which then runs `jsui-tests react_e2e` with
 // JSUI_REACT_E2E_BUNDLE=<path>. Without the variable the test is skipped,
 // so the native suite does not depend on Node.
@@ -155,7 +155,7 @@ TEST(react_e2e) {
 // ---------------------------------------------------------------------------
 // Virtualized FlatList end to end: packages/cli/test/e2e/list.jsx (10,000
 // rows of 30 px, blue even / red odd) in a 400x300 viewport, built by the
-// @jsui/cli suite and passed as JSUI_REACT_LIST_BUNDLE. Checks that only a
+// @orktes/jsui-cli suite and passed as JSUI_REACT_LIST_BUNDLE. Checks that only a
 // window of rows is mounted, that every on-screen row is painted after
 // gamepad focus navigation, wheel scrolling, scrollToIndex and scrollToEnd,
 // and prints creation / scrolling timings.

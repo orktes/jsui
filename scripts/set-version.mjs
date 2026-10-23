@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Sets the version of the published npm packages (@jsui/react, @jsui/cli,
-// @jsui/web) in lockstep, including @jsui/cli's dependency on @jsui/react and
+// Sets the version of the published npm packages (@orktes/jsui-react, @orktes/jsui-cli,
+// @orktes/jsui-web) in lockstep, including @orktes/jsui-cli's dependency on @orktes/jsui-react and
 // the workspaces that depend on them (site/).  Usage: node scripts/set-version.mjs 0.2.0
 import fs from 'node:fs';
 import path from 'node:path';

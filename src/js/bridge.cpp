@@ -1,4 +1,4 @@
-// __jsui_native: the node-tree bridge used by @jsui/react's host config,
+// __jsui_native: the node-tree bridge used by @orktes/jsui-react's host config,
 // plus imperative methods (measure, focus, scrollTo), the animation fast
 // path (patchStyle), host messages, fonts and reload.
 #include <algorithm>
@@ -110,7 +110,7 @@ JSValue js_removeChild(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
 }
 
 // configureLayoutAnimation({duration, create, update, delete}): arms a
-// LayoutAnimation for the commit in progress (@jsui/react calls it from
+// LayoutAnimation for the commit in progress (@orktes/jsui-react calls it from
 // prepareForCommit after LayoutAnimation.configureNext). Each of create /
 // update / delete: {type, property, duration, delay, springDamping}.
 LayoutAnimSpec layoutAnimSpec(const Value& v, double duration) {

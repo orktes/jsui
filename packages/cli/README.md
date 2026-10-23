@@ -1,4 +1,4 @@
-# @jsui/cli
+# @orktes/jsui-cli
 
 Bundles React Native–style apps for the JSUI runtime (esbuild 0.28.2) and
 serves them to a dev host with live reload.
@@ -12,9 +12,9 @@ npx jsui dev app.jsx [--port 5173] [--host 127.0.0.1]
 
 * One IIFE script (ES2020, UTF-8) suitable for QuickJS: no top-level
   `import`/`export`, no runtime `require`.
-* `react-native` (and deep `react-native/...` paths) → `@jsui/react`.
+* `react-native` (and deep `react-native/...` paths) → `@orktes/jsui-react`.
   `react`, `react/jsx-runtime`, `react-reconciler` and `scheduler` always
-  resolve to the copy `@jsui/react` was built against (one React per bundle).
+  resolve to the copy `@orktes/jsui-react` was built against (one React per bundle).
   `react-native-safe-area-context`, `expo-status-bar`, `expo-linear-gradient`
   and `react-native-linear-gradient` resolve to JSUI shims.
 * JSX (automatic runtime) in `.js`, `.jsx`, `.tsx`; TypeScript is stripped.
@@ -45,9 +45,9 @@ Build errors are printed with file/line and the last good bundle stays live.
 ## Programmatic use
 
 ```js
-import { build, dev } from '@jsui/cli';
+import { build, dev } from '@orktes/jsui-cli';
 await build({ entry: 'app.jsx', outfile: 'dist/bundle.js', minify: true });
 const server = await dev({ entry: 'app.jsx', port: 0 }); // server.port, server.close()
 ```
 
-Tests: `npm test -w @jsui/cli`.
+Tests: `npm test -w @orktes/jsui-cli`.

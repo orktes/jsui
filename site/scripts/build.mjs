@@ -12,7 +12,7 @@
 //   jsui/dist-gpu/jsui.{js,wasm}    WebGPU + WebGL + CPU module (optional; preferred when
 //                                   present and the browser has WebGPU)
 //   modules.json                    which modules were deployed, and their versions
-//   app/bundle.js, app/assets/*     the site itself (site/app, built with @jsui/cli)
+//   app/bundle.js, app/assets/*     the site itself (site/app, built with @orktes/jsui-cli)
 //
 // Cache consistency: GitHub Pages serves everything with max-age=600, so a
 // browser may hold some files of the previous deploy and fetch others fresh
@@ -28,7 +28,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { build } from '@jsui/cli';
+import { build } from '@orktes/jsui-cli';
 
 const SITE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ROOT = path.resolve(SITE, '..');

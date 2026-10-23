@@ -1,9 +1,9 @@
 name: Release
 
-# Publishes @jsui/react, @jsui/cli and @jsui/web to npm with trusted
+# Publishes @orktes/jsui-react, @orktes/jsui-cli and @orktes/jsui-web to npm with trusted
 # publishing (GitHub OIDC; provenance is attached automatically and there is
 # no npm token anywhere). Nothing is compiled here: the WASM modules for
-# @jsui/web are the artifacts of the CI run on main for the released commit,
+# @orktes/jsui-web are the artifacts of the CI run on main for the released commit,
 # the same ones pages.yml deploys. See docs/RELEASING.md.
 #
 # Trigger: push a tag vX.Y.Z on a main commit whose CI run succeeded, or run
@@ -45,8 +45,8 @@ jobs:
             pv=$(node -p "require('./$p/package.json').version")
             [ "$pv" = "$v" ] || { echo "::error::$p is $pv, packages/react is $v"; exit 1; }
           done
-          dep=$(node -p "require('./packages/cli/package.json').dependencies['@jsui/react']")
-          [ "$dep" = "$v" ] || { echo "::error::@jsui/cli depends on @jsui/react $dep, not $v"; exit 1; }
+          dep=$(node -p "require('./packages/cli/package.json').dependencies['@orktes/jsui-react']")
+          [ "$dep" = "$v" ] || { echo "::error::@orktes/jsui-cli depends on @orktes/jsui-react $dep, not $v"; exit 1; }
           if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME}" != "v$v" ]; then
             echo "::error::tag ${GITHUB_REF_NAME} does not match package version $v"; exit 1
           fi
@@ -93,7 +93,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           DIST_TAG: ${{ steps.version.outputs.tag }}
         run: |
-          # Dependency order: @jsui/cli depends on @jsui/react.
+          # Dependency order: @orktes/jsui-cli depends on @orktes/jsui-react.
           for ws in packages/react packages/cli web; do
             name=$(node -p "require('./$ws/package.json').name")
             if npm view "$name@$VERSION" version >/dev/null 2>&1; then

@@ -1,5 +1,5 @@
 // Animated with useNativeDriver: true against a recording native module:
-// what @jsui/react serializes (nodes, animations, event mappings), the end /
+// what @orktes/jsui-react serializes (nodes, animations, event mappings), the end /
 // stop / listener / setValue sync, React Native's errors, and that nothing
 // runs on the JS frame loop. The runtime side is tested natively
 // (tests/native/native_animated_test.cpp, react_native_animated_e2e_test.cpp).

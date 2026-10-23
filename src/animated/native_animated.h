@@ -1,5 +1,5 @@
 // Native Animated driver (`useNativeDriver: true`), modelled on React
-// Native's NativeAnimatedModule. @jsui/react serializes the Animated graph
+// Native's NativeAnimatedModule. @orktes/jsui-react serializes the Animated graph
 // (values, interpolations, math nodes, transforms, styles, props) and its
 // animations (timing as a sampled easing curve, spring, decay, iterations)
 // through __jsui_native.animated.*; the runtime evaluates them on its own

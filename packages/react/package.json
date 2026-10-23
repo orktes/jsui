@@ -1,5 +1,5 @@
 {
-  "name": "@jsui/react",
+  "name": "@orktes/jsui-react",
   "version": "0.1.0",
   "description": "React Native compatible renderer for the JSUI game UI runtime (QuickJS + Yoga + Skia).",
   "author": "Jaakko Lukkari",

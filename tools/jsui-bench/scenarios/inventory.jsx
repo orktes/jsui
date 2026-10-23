@@ -4,7 +4,7 @@
 // (useHostState) and React.memo skips them.
 import React from 'react';
 import { AppRegistry, StyleSheet, Text, View } from 'react-native';
-import { useHostState } from '@jsui/react';
+import { useHostState } from '@orktes/jsui-react';
 
 const N = 500;
 const initial = { slots: {} };

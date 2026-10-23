@@ -6,9 +6,9 @@ import { assetPlugin } from './assets.js';
 
 const require = createRequire(import.meta.url);
 
-/** Directory of the installed @jsui/react package. */
+/** Directory of the installed @orktes/jsui-react package. */
 export function jsuiReactDir() {
-  return path.dirname(require.resolve('@jsui/react/package.json'));
+  return path.dirname(require.resolve('@orktes/jsui-react/package.json'));
 }
 
 // Popular RN ecosystem packages that JSUI provides drop-in shims for.
@@ -19,7 +19,7 @@ const SHIMS = {
   'react-native-linear-gradient': 'linear-gradient',
 };
 
-// These must resolve to the single copy @jsui/react was built against, or
+// These must resolve to the single copy @orktes/jsui-react was built against, or
 // hooks break (two Reacts) and the reconciler/react versions mismatch.
 const SINGLETONS = /^(react|react\/jsx-runtime|react\/jsx-dev-runtime|react-reconciler|react-reconciler\/constants|scheduler)$/;
 
@@ -30,8 +30,8 @@ function aliasPlugin() {
       const reactDir = jsuiReactDir();
       const index = path.join(reactDir, 'src', 'index.js');
       build.onResolve({ filter: /^react-native(\/.*)?$/ }, () => ({ path: index }));
-      // The app may not depend on @jsui/react itself (only on the CLI).
-      build.onResolve({ filter: /^@jsui\/react$/ }, () => ({ path: index }));
+      // The app may not depend on @orktes/jsui-react itself (only on the CLI).
+      build.onResolve({ filter: /^@orktes\/jsui-react$/ }, () => ({ path: index }));
       build.onResolve({ filter: /^[@a-z]/ }, async (args) => {
         if (args.pluginData && args.pluginData.jsuiAlias) return undefined;
         const shim = SHIMS[args.path];

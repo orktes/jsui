@@ -72,7 +72,7 @@ async function main() {
     }
     const kind = await jsuiBuilderKind();
     jsuiNote = `JSUI bundles via ${kind}`;
-    if (kind === 'fallback') console.warn(color(33, 'note: @jsui/react not found; JSUI bundles use tests/reference/jsui-fallback'));
+    if (kind === 'fallback') console.warn(color(33, 'note: @orktes/jsui-react not found; JSUI bundles use tests/reference/jsui-fallback'));
   }
 
   // 1. Chrome (expected) — one browser, sequential pages.

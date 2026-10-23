@@ -1,4 +1,4 @@
-// prepack: refuse to pack @jsui/web without all three WASM modules. They are
+// prepack: refuse to pack @orktes/jsui-web without all three WASM modules. They are
 // build outputs (scripts/build-wasm.sh, or the CI artifacts jsui-wasm,
 // jsui-wasm-webgl, jsui-wasm-gpu), not checked in, and npm would otherwise
 // silently publish a package whose default module is missing.
@@ -15,7 +15,7 @@ for (const dir of ['dist', 'dist-webgl', 'dist-gpu']) {
   }
 }
 if (missing.length) {
-  console.error(`@jsui/web: missing WASM build outputs:\n  ${missing.join('\n  ')}\n` +
+  console.error(`@orktes/jsui-web: missing WASM build outputs:\n  ${missing.join('\n  ')}\n` +
     'Build them with scripts/build-wasm.sh (plain, WEBGL=1 and GPU=1) or download the CI artifacts.');
   process.exit(1);
 }

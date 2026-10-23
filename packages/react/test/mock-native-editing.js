@@ -2,7 +2,7 @@
 // mock keeps each TextInput's native text, adopts `value` when
 // `mostRecentEventCount` has caught up, and `mock.edit(id, text, sel)`
 // simulates a user edit (change + selectionchange events). Import this
-// before @jsui/react.
+// before @orktes/jsui-react.
 import { mock } from './mock-native.js';
 
 const bridge = globalThis.__jsui_native;

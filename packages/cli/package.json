@@ -1,5 +1,5 @@
 {
-  "name": "@jsui/cli",
+  "name": "@orktes/jsui-cli",
   "version": "0.1.0",
   "description": "Build and dev server for JSUI bundles (esbuild).",
   "author": "Jaakko Lukkari",
@@ -43,7 +43,7 @@
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
-    "@jsui/react": "0.1.0",
+    "@orktes/jsui-react": "0.1.0",
     "esbuild": "0.28.2"
   },
   "engines": {

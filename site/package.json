@@ -1,5 +1,5 @@
 {
-  "name": "@jsui/site",
+  "name": "@orktes/jsui-site",
   "version": "0.1.0",
   "private": true,
   "description": "The JSUI showcase website, rendered entirely by the JSUI WebAssembly build",
@@ -10,8 +10,8 @@
     "test": "node test/smoke.mjs"
   },
   "dependencies": {
-    "@jsui/cli": "0.1.0",
-    "@jsui/react": "0.1.0",
+    "@orktes/jsui-cli": "0.1.0",
+    "@orktes/jsui-react": "0.1.0",
     "sucrase": "^3.35.1"
   }
 }

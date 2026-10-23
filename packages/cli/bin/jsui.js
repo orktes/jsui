@@ -8,7 +8,7 @@ const USAGE = `usage:
   jsui build <entry> [-o dist/bundle.js] [--minify] [--sourcemap] [--dev]
   jsui dev <entry> [--port 5173] [--host 127.0.0.1]
 
-'react-native' imports are aliased to @jsui/react; JSX works in .js/.jsx/.tsx.`;
+'react-native' imports are aliased to @orktes/jsui-react; JSX works in .js/.jsx/.tsx.`;
 
 async function main(argv) {
   const [cmd, ...rest] = argv;

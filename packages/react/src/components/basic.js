@@ -36,7 +36,7 @@ Text.displayName = 'Text';
 
 // --- Image -------------------------------------------------------------------
 
-// Asset sizes registered by @jsui/cli for imported images (url -> {width, height}).
+// Asset sizes registered by @orktes/jsui-cli for imported images (url -> {width, height}).
 function assetInfo(url) {
   const reg = globalThis.__jsui_assets;
   return reg && reg[url];

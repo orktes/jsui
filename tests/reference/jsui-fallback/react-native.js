@@ -1,5 +1,5 @@
 // Minimal `react-native` for JSUI, used by the reference harness ONLY while
-// @jsui/react (packages/react) is not available. It drives the
+// @orktes/jsui-react (packages/react) is not available. It drives the
 // __jsui_native bridge from docs/ARCHITECTURE.md with react-reconciler so the
 // Chrome-vs-JSUI pipeline can run end to end. No events, no animation:
 // static rendering of View/Text/Image/ImageBackground/ScrollView.

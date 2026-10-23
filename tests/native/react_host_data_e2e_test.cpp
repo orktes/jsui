@@ -1,10 +1,10 @@
-// End-to-end game data: a real @jsui/react bundle (packages/cli/test/e2e/
+// End-to-end game data: a real @orktes/jsui-react bundle (packages/cli/test/e2e/
 // host_data.jsx) driven through the C API. Shared state set before the
 // bundle loads, per-key re-renders, merge patches that re-render only the
 // changed memoized row, Host.call answered on a later frame (resolve, reject,
 // cancelled by a reload), HostState.set reaching on_state, jsui_call_ui
 // answered by Host.handle / useHostHandler, and state surviving a reload.
-// Built and run by the @jsui/cli test suite with
+// Built and run by the @orktes/jsui-cli test suite with
 // JSUI_REACT_HOST_DATA_BUNDLE=<path>; skipped without it.
 #include <cstdio>
 #include <cstdlib>

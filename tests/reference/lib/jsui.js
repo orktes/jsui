@@ -19,17 +19,17 @@ function tryResolve(id) {
 
 /**
  * Which implementation backs `react-native` in JSUI bundles:
- *   'cli'      - @jsui/cli's programmatic build() (preferred, what users run)
- *   'package'  - esbuild + alias to @jsui/react
+ *   'cli'      - @orktes/jsui-cli's programmatic build() (preferred, what users run)
+ *   'package'  - esbuild + alias to @orktes/jsui-react
  *   'fallback' - esbuild + the minimal reconciler in jsui-fallback/ (only
- *                until @jsui/react exists; proves the pipeline end to end)
+ *                until @orktes/jsui-react exists; proves the pipeline end to end)
  * JSUI_REF_BUILDER=cli|package|fallback forces one.
  */
 export async function jsuiBuilderKind() {
   const forced = process.env.JSUI_REF_BUILDER;
   if (forced) return forced;
   if (await loadCliBuild()) return 'cli';
-  if (tryResolve('@jsui/react')) return 'package';
+  if (tryResolve('@orktes/jsui-react')) return 'package';
   return 'fallback';
 }
 
@@ -37,7 +37,7 @@ let cliBuild;
 async function loadCliBuild() {
   if (cliBuild !== undefined) return cliBuild;
   cliBuild = null;
-  const resolved = tryResolve('@jsui/cli');
+  const resolved = tryResolve('@orktes/jsui-cli');
   if (resolved) {
     try {
       const mod = await import(resolved);
@@ -76,7 +76,7 @@ export async function buildJsuiBundle(entry, outFile) {
       await (await loadCliBuild())({ entry: bootstrap, outfile: outFile, minify: false, sourcemap: false });
       return { kind };
     }
-    const target = kind === 'package' ? '@jsui/react' : FALLBACK_RN;
+    const target = kind === 'package' ? '@orktes/jsui-react' : FALLBACK_RN;
     await esbuild.build({
       entryPoints: [bootstrap],
       bundle: true,

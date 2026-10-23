@@ -6,7 +6,7 @@
 // commit posts what it rendered as `render`. 400 x 300.
 import React, { memo, useEffect, useState } from 'react';
 import { AppRegistry, Pressable, Text, View } from 'react-native';
-import { Host, HostState, useHostHandler, useHostState } from '@jsui/react';
+import { Host, HostState, useHostHandler, useHostState } from '@orktes/jsui-react';
 
 let rowRenders = 0;
 const Row = memo(function Row({ id, item }) {
