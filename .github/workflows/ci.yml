@@ -242,8 +242,15 @@ jobs:
         # any error (a hazard between JSUI's GPU work and Godot's frame on the
         # textures they share, an invalid view of them, ...) fails the step.
         run: |
-          VK_VALIDATION=sync GODOT_RENDERING=vulkan SIZES=1280x720 xvfb-run -a -s "-screen 0 1920x1080x24" \
+          rm -f build/godot-pipelines.vulkan.bin
+          VK_VALIDATION=sync GODOT_RENDERING=vulkan SIZES=1280x720 PIPELINE_CACHE=build/godot-pipelines.bin xvfb-run -a -s "-screen 0 1920x1080x24" \
             integrations/godot/smoke-test.sh build/godot-vulkan.png
+      - name: Pipeline cache - a second Vulkan run precompiles what the first recorded; the list's first scroll compiles nothing
+        # Under sync validation too: the pipelines are created on a worker
+        # thread while Godot renders.
+        run: |
+          VK_VALIDATION=sync GODOT_RENDERING=vulkan SIZES=1280x720 PIPELINE_CACHE=build/godot-pipelines.bin FIRST_SCROLL=1 EXPECT_WARM_PIPELINES=1 \
+            xvfb-run -a -s "-screen 0 1920x1080x24" integrations/godot/smoke-test.sh
       - name: Vulkan with a separate render thread (--render-thread separate, as some games run it) - Godot must show the JSUI frame, and animating frames must not wait on the render thread
         # Under synchronization validation too: here JSUI's frames reach the
         # render thread as queued jobs, without the main thread waiting.

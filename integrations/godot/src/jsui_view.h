@@ -31,6 +31,13 @@
 // the main surface's component (empty: the bundle's first registered one).
 // `auto_size` sizes the view to its component's content (its minimum size),
 // for small widgets inside existing Godot UIs.
+//
+// GPU pipeline cache (jsui_gpu_set_pipeline_cache): the runtime's Skia
+// context records every GPU pipeline it creates in the runtime view's
+// `pipeline_cache_path`, with the renderer's name before the extension
+// (user://jsui-pipelines.bin -> user://jsui-pipelines.vulkan.bin), and the
+// next start precompiles them, plus a list shipped at the same path under
+// res:// (res://jsui-pipelines.vulkan.bin), off the frame.
 #pragma once
 
 #include <godot_cpp/classes/control.hpp>
@@ -86,6 +93,10 @@ class JsuiView : public godot::Control {
   godot::Dictionary get_initial_props() const { return initial_props_; }
   void set_auto_size(bool on);
   bool get_auto_size() const { return auto_size_; }
+  // Applies when the runtime's Skia context is created (the first GPU
+  // frame); "" for none. Surface views use their runtime view's.
+  void set_pipeline_cache_path(const godot::String& path) { pipeline_cache_path_ = path; }
+  godot::String get_pipeline_cache_path() const { return pipeline_cache_path_; }
 
   // Methods.
   void start();   // (re)creates the runtime and loads bundle_url (surface views: the surface)
@@ -169,6 +180,9 @@ class JsuiView : public godot::Control {
   // On the runtime view: its Skia context, which its surface views share
   // (created on first use; false when there is none).
   bool createGpuContext(Renderer want, const godot::String& driver, godot::Object* interop);
+  // The new context's pipeline cache (jsui_view.cpp): the shipped list and
+  // the file for `renderer` ("vulkan", ...).
+  void setupPipelineCache(const godot::String& renderer);
   JsuiView* runtimeView() { return host_ ? host_ : this; }
   bool renderGpu();
   void releaseGpu();
@@ -217,6 +231,8 @@ class JsuiView : public godot::Control {
   godot::Dictionary initial_props_;
   bool auto_size_ = false;
   bool profiling_ = false;
+  godot::String pipeline_cache_path_ = "user://jsui-pipelines.bin";
+  godot::String pipeline_file_;  // the runtime view's cache file in use (an OS path), "" for none
 
   // The runtime handle this view renders and sends input to: the runtime it
   // owns (its main surface), or a surface of host_'s runtime. A GPU render

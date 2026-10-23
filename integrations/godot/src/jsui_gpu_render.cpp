@@ -340,6 +340,7 @@ bool JsuiView::createGpuContext(Renderer want, const String& driver, Object* int
     return false;
   }
   UtilityFunctions::print("JsuiView: rendering with Skia Graphite on " + driver);
+  setupPipelineCache(want == Renderer::Vulkan ? "vulkan" : want == Renderer::Metal ? "metal" : "webgpu");
   return true;
 }
 

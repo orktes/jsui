@@ -42,6 +42,16 @@
 # hazard between JSUI's Graphite work and Godot's frame on the textures they
 # share, an invalid view of them, and so on. The errors are printed.
 #
+# PIPELINE_CACHE=<file> sets JsuiView.pipeline_cache_path (main.gd
+# --pipeline-cache; the renderer's name goes before the extension: x.bin ->
+# x.vulkan.bin), so GPU runs record the pipelines they compile there.
+# FIRST_SCROLL=1 measures the first scroll of the demo's list instead of the
+# self-test (main.gd --first-scroll; one run per size, no capture), and
+# EXPECT_WARM_PIPELINES=1 fails it unless the cache loaded and precompiled
+# pipelines and the scroll compiled none (CI: a second run over the file the
+# smoke test recorded). TOUR=1 also clicks through the rest of the UI after
+# the self-test (main.gd --tour; record-pipelines.sh).
+#
 # FAKE_WEBGPU_INTEROP=<rev> registers a stand-in for the godot-aw3 fork's
 # WebGPUInterop singleton (main.gd --fake-webgpu-interop) that reports Dawn
 # revision <rev> and null handles. Whatever the driver, JsuiView must then
@@ -129,6 +139,12 @@ fi
 if [[ -n "${GODOT_RENDER_THREAD:-}" ]]; then
   display+=(--render-thread "$GODOT_RENDER_THREAD")
 fi
+if [[ -n "${PIPELINE_CACHE:-}" ]]; then
+  mkdir -p "$(dirname "$PIPELINE_CACHE")"  # absolute: Godot runs in the project directory
+  checks+=(--pipeline-cache "$(cd "$(dirname "$PIPELINE_CACHE")" && pwd)/$(basename "$PIPELINE_CACHE")")
+fi
+[[ -n "${EXPECT_WARM_PIPELINES:-}" ]] && checks+=(--expect-warm-pipelines)
+[[ -n "${TOUR:-}" ]] && checks+=(--tour)
 log="$(mktemp)"
 vkdir=""
 trap 'rm -f "$log"; if [[ -n "$vkdir" ]]; then rm -rf "$vkdir"; fi' EXIT
@@ -173,10 +189,15 @@ fi
 # --resolution (its window is 64x64).
 run() {
   local size="$1" png="$2"
-  rm -f "$png"
+  local mode=(--capture "$png" --frames "$frames" --self-test)
+  if [[ -n "${FIRST_SCROLL:-}" ]]; then
+    mode=(--first-scroll)
+  else
+    rm -f "$png"
+  fi
   if [[ -n "$vkdir" ]]; then rm -f "$vkdir/validation.log"; fi
   echo "== Godot $GODOT_VERSION, window $size${GODOT_RENDER_THREAD:+, render thread $GODOT_RENDER_THREAD}${VK_VALIDATION:+, Vulkan $VK_VALIDATION validation}"
-  "$GODOT" "${display[@]}" --path "$demo" --resolution "$size" -- --capture "$png" --frames "$frames" --self-test --window "$size" "${checks[@]}" 2>&1 | tee "$log"
+  "$GODOT" "${display[@]}" --path "$demo" --resolution "$size" -- "${mode[@]}" --window "$size" "${checks[@]}" 2>&1 | tee "$log"
   local status=${PIPESTATUS[0]}
   if (( status != 0 )); then
     echo "godot exited with $status ($size)" >&2
@@ -190,13 +211,22 @@ run() {
     echo "no log line matching '$EXPECT_LOG' ($size)" >&2
     exit 1
   fi
-  if ! grep -q "^PASS mapping" "$log"; then
-    echo "the input self-test did not run ($size)" >&2
-    exit 1
-  fi
-  if [[ ! -s "$png" ]]; then
-    echo "no capture written to $png" >&2
-    exit 1
+  if [[ -n "${FIRST_SCROLL:-}" ]]; then
+    local want="^first-scroll: "
+    [[ "${GODOT_RENDERING:-}" == vulkan ]] && want="^first-scroll: vulkan: "
+    if ! grep -qE "$want" "$log"; then
+      echo "no first-scroll result${GODOT_RENDERING:+ on $GODOT_RENDERING} ($size)" >&2
+      exit 1
+    fi
+  else
+    if ! grep -q "^PASS mapping" "$log"; then
+      echo "the input self-test did not run ($size)" >&2
+      exit 1
+    fi
+    if [[ ! -s "$png" ]]; then
+      echo "no capture written to $png" >&2
+      exit 1
+    fi
   fi
   if [[ -n "$vkdir" ]]; then
     if [[ ! -f "$vkdir/validation.log" ]]; then
@@ -218,6 +248,6 @@ for size in ${SIZES:-1280x720 2560x1440}; do
   [[ "$size" != 1280x720 ]] && png="${out%.png}-${size}.png"
   [[ "$size" == 2560x1440 ]] && png="${out%.png}-2x.png"
   run "$size" "$png"
-  written+=("$png")
+  if [[ -n "${FIRST_SCROLL:-}" ]]; then written+=("first-scroll@$size"); else written+=("$png"); fi
 done
 echo "ok: ${written[*]}"

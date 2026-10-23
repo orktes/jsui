@@ -46,6 +46,24 @@ extends Control
 ##                       list scrolling (JsuiView.get_render_stats, frame
 ##                       times), print them and quit
 ##   --no-world          leave the 3D scene out (benchmarks: the UI only)
+##   --first-scroll      measure the armory list's first scroll: the worst
+##                       frame (wall time) and the worst JsuiView render while
+##                       it scrolls, and the GPU pipelines that compiled
+##                       meanwhile; waits for the pipeline cache to finish
+##                       precompiling first. Prints them and quits
+##   --tour              with --self-test: afterwards also click the tabs,
+##                       page the carousel and open / close the deploy panel
+##                       (more of the UI's draws, e.g. to record a pipeline list)
+##   --pipeline-cache P  JsuiView.pipeline_cache_path (the renderer's name goes
+##                       before the extension: P = /tmp/a.bin -> /tmp/a.vulkan.bin).
+##                       A path outside user:// also leaves the demo's shipped
+##                       list (res://jsui-pipelines.<renderer>.bin) out
+##   --expect-warm-pipelines
+##                       with --self-test or --first-scroll: wait until the
+##                       pipeline cache has precompiled what it loaded (it must
+##                       have loaded something), then fail if the UI still
+##                       compiles a pipeline on demand (a warm cache from a
+##                       previous run must hold every pipeline the UI needs)
 ##   --fake-webgpu-interop REV
 ##                       register a stand-in WebGPUInterop singleton (as the
 ##                       godot-aw3 fork's WebGPU driver does) that reports Dawn
@@ -78,6 +96,9 @@ var _max_gpu_diff := -1.0
 var _max_viewport_diff := -1.0
 var _max_render_waits := -1
 var _bench := 0
+var _first_scroll := false
+var _tour := false
+var _expect_warm := false
 var _pongs := 0
 var _ui_answers := 0
 var _unhandled_clicks := 0
@@ -154,6 +175,15 @@ func _enter_tree() -> void:
 			"--bench":
 				_bench = int(v)
 				i += 1
+			"--first-scroll":
+				_first_scroll = true
+			"--tour":
+				_tour = true
+			"--pipeline-cache":
+				view.pipeline_cache_path = v
+				i += 1
+			"--expect-warm-pipelines":
+				_expect_warm = true
 			"--no-world":
 				var world := get_node_or_null("World")
 				if world:
@@ -199,6 +229,8 @@ func _ready() -> void:
 	print("JsuiView running=%s bundle=%s dev=%s" % [ui.is_running(), ui.bundle_url, ui.dev_mode])
 	if _bench > 0:
 		_run_bench()
+	elif _first_scroll:
+		_run_first_scroll()
 	elif _capture != "" and _self_test:
 		_run_self_test()
 
@@ -248,7 +280,7 @@ func _process(delta: float) -> void:
 	if _stats_timer <= 0.0:
 		_stats_timer = 1.0
 		_send_stats()
-	if _capture != "" and not _self_test and _bench == 0:
+	if _capture != "" and not _self_test and _bench == 0 and not _first_scroll:
 		_frame += 1
 		if _frame >= _frames and ui.get_pending_loads() == 0:
 			_save_capture()
@@ -386,6 +418,10 @@ func _run_self_test() -> void:
 	print("self-test: window %s, view %s, view -> window scale %s, pixel ratio %.2f, screen scale %.2f" % [
 		win.size, ui.size, (get_viewport().get_final_transform() * ui.get_global_transform_with_canvas()).get_scale(),
 		ui.get_effective_pixel_ratio(), DisplayServer.screen_get_scale()])
+	var warm_compiled := -1
+	if _expect_warm:
+		await _check_precompiled()
+		warm_compiled = _pipeline_stats().get("compiled", 0)
 	_testing = true
 
 	# The texture covers the view in device pixels.
@@ -477,8 +513,14 @@ func _run_self_test() -> void:
 	await _test_surface()  # with the render hand-off check (--max-render-waits)
 	await _test_runtime_freed_first()
 
+	if _tour:
+		await _run_tour()
 	_testing = false
 	await _wait(0.8)  # let the toast and springs settle for the capture
+	if warm_compiled >= 0:
+		var compiled: int = _pipeline_stats().get("compiled", 0) - warm_compiled
+		_check("warm pipeline cache", compiled == 0,
+			"%d pipelines compiled on demand during the self-test (%s)" % [compiled, _pipeline_line()])
 	_finish()
 
 
@@ -694,6 +736,60 @@ func _test_runtime_freed_first() -> void:
 		"surface left and re-entered the tree, then its runtime view was freed (%d of 2 with a frame on the render thread)" % in_flight)
 
 
+## --tour: the parts of the UI the self-test leaves out (tabs, carousel
+## paging, the deploy panel), so a recorded pipeline list covers their draws.
+func _run_tour() -> void:
+	var need := ["tabs", "carousel", "deploy"]
+	if not await _wait_for(func(): return need.all(func(a): return _anchors.has(a)), 3.0):
+		_check("tour anchors", false, "missing: %s" % [need.filter(func(a): return not _anchors.has(a))])
+		return
+	var tabs: Dictionary = _anchors["tabs"]
+	for k in 4:  # the tab row: TABS buttons of 104 px from its left edge
+		await _click(Vector2(tabs.x + 52 + 104 * k, tabs.y + tabs.height / 2.0))
+		await _wait(0.15)
+	var carousel := _center("carousel")
+	_mouse_move(carousel)
+	for n in 6:  # horizontal wheel pages the snapping carousel
+		_mouse_button(carousel, MOUSE_BUTTON_WHEEL_RIGHT, true)
+		_mouse_button(carousel, MOUSE_BUTTON_WHEEL_RIGHT, false)
+		await _wait(0.12)
+	await _wait(0.5)
+	var mark := _events.size()
+	await _click(_center("deploy"))
+	var opened := await _wait_for(func(): return _find_event("panel", {"visible": true}, mark) != null)
+	_check("tour: deploy panel", opened, "opens")
+	await _wait(0.6)  # the spring settles; its buttons report their anchors
+	if _anchors.has("panel-cancel"):
+		_mouse_move(_center("panel-confirm"))
+		await _wait(0.3)
+		await _click(_center("panel-cancel"))
+	else:
+		await _key(KEY_ESCAPE)
+	var closed := await _wait_for(func(): return _find_event("panel", {"visible": false}, mark) != null)
+	_check("tour: deploy panel closes", closed, "")
+	_mouse_move(Vector2(-100, -100))
+	await _wait(0.6)
+
+
+## The GPU renderer's pipeline cache (get_render_stats().pipelines; {} on the CPU).
+func _pipeline_stats() -> Dictionary:
+	return ui.get_render_stats().get("pipelines", {})
+
+
+func _pipeline_line() -> String:
+	var p := _pipeline_stats()
+	if p.is_empty():
+		return "no pipeline cache"
+	return "%s: %d precompiled (%d failed, %d queued), %d compiled on demand (%d new), %d known, file %s" % [
+		p.mode, p.precompiled, p.failed, p.queued, p.compiled, p.added, p.known, p.file]
+
+
+## --expect-warm-pipelines: the cache loaded pipelines and precompiled them.
+func _check_precompiled() -> void:
+	var done := await _wait_for(func(): return _pipeline_stats().get("queued", 0) == 0, 120.0)
+	_check("pipelines precompiled", done and _pipeline_stats().get("precompiled", 0) > 0, _pipeline_line())
+
+
 func _last_scroll_y() -> float:
 	for i in range(_events.size() - 1, -1, -1):
 		var e = _events[i]
@@ -719,6 +815,8 @@ func _save_capture() -> void:
 		return
 	img.save_png(path)
 	print("capture: JsuiView frame %dx%d (pixel ratio %.2f, renderer %s) -> %s" % [img.get_width(), img.get_height(), ui.get_effective_pixel_ratio(), ui.get_renderer(), path])
+	if ui.get_renderer() != "cpu":
+		print("pipelines: ", _pipeline_line())
 	var ok: bool = ui.get_last_error() == ""
 	if _expect_renderer != "" and ui.get_renderer() != _expect_renderer:
 		printerr("renderer: %s, expected %s" % [ui.get_renderer(), _expect_renderer])
@@ -914,6 +1012,73 @@ func _run_bench() -> void:
 		await _wait(1.0)
 	print("bench-json: ", JSON.stringify(results))
 	get_tree().quit(0)
+
+
+## --first-scroll: the armory list's first scroll, frame by frame. On a GPU
+## renderer the first frames that draw something new compile Skia pipelines
+## (shaders + pipeline state) in the frame; the pipeline cache moves that to
+## startup, off the frame.
+func _run_first_scroll() -> void:
+	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
+	Engine.max_fps = 0
+	if not await _wait_for(func(): return _anchors.has("armory") and ui.get_pending_loads() == 0, 8.0):
+		printerr("first-scroll: the UI did not report its anchors")
+		get_tree().quit(1)
+		return
+	await _wait(1.5)  # the staggered entrance settles
+	var t_wait := Time.get_ticks_usec()
+	if _expect_warm:
+		await _check_precompiled()
+	else:
+		await _wait_for(func(): return _pipeline_stats().get("queued", 0) == 0, 120.0)
+	var waited_ms := (Time.get_ticks_usec() - t_wait) / 1000.0
+	await _wait(0.3)
+	ui.set_profiling(true)
+	ui.get_perf(true)
+	var p0 := _pipeline_stats()
+	var list := _center("armory")
+	_mouse_move(list)
+	await get_tree().process_frame
+	var s_prev: Dictionary = ui.get_render_stats()
+	var t_prev := Time.get_ticks_usec()
+	var worst_frame := 0
+	var worst_render := 0
+	var total := 0
+	var frames := 90
+	for f in frames:
+		if f < 24 and f % 2 == 0:  # a burst of wheel notches, then the momentum runs out
+			_mouse_button(list, MOUSE_BUTTON_WHEEL_DOWN, true)
+			_mouse_button(list, MOUSE_BUTTON_WHEEL_DOWN, false)
+		await get_tree().process_frame
+		var t := Time.get_ticks_usec()
+		var dt := t - t_prev
+		t_prev = t
+		total += dt
+		worst_frame = max(worst_frame, dt)
+		var s: Dictionary = ui.get_render_stats()
+		if s.renders > s_prev.renders:
+			worst_render = max(worst_render, s.render_usec_last)
+		s_prev = s
+	var perf: Dictionary = ui.get_perf(true)
+	var p1 := _pipeline_stats()
+	var r := {
+		"renderer": ui.get_renderer(),
+		"worst_frame_ms": worst_frame / 1000.0,
+		"mean_frame_ms": total / 1000.0 / frames,
+		"worst_render_ms": worst_render / 1000.0,
+		"gpu_submit_ms": perf.get("gpu_submit_us", 0.0) / 1000.0,
+		"paint_ms": perf.get("paint_us", 0.0) / 1000.0,
+		"pipelines_compiled": perf.get("pipeline_compiles", 0),
+		"precompile_wait_ms": waited_ms,
+		"pipelines": _pipeline_line(),
+	}
+	print("first-scroll: %s: worst frame %.1f ms (mean %.1f), worst JsuiView render %.1f ms, Graphite submit %.1f ms in all, %d pipelines compiled while scrolling (%s)" % [
+		r.renderer, r.worst_frame_ms, r.mean_frame_ms, r.worst_render_ms, r.gpu_submit_ms, r.pipelines_compiled, r.pipelines])
+	print("first-scroll-json: ", JSON.stringify(r))
+	if _expect_warm:
+		_check("warm pipeline cache", r.pipelines_compiled == 0 and p1.get("compiled", 0) == p0.get("compiled", 0),
+			"%d pipelines compiled on demand while scrolling" % r.pipelines_compiled)
+	get_tree().quit(1 if _failures > 0 else 0)
 
 
 func _unhandled_input(event: InputEvent) -> void:

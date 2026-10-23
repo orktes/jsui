@@ -1,5 +1,6 @@
 #include "jsui_view.h"
 
+#include <godot_cpp/classes/dir_access.hpp>
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/font.hpp>
@@ -14,6 +15,7 @@
 #include <godot_cpp/classes/input_event_screen_drag.hpp>
 #include <godot_cpp/classes/input_event_screen_touch.hpp>
 #include <godot_cpp/classes/json.hpp>
+#include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/time.hpp>
 #include <godot_cpp/classes/viewport.hpp>
@@ -114,6 +116,8 @@ void JsuiView::_bind_methods() {
   ClassDB::bind_method(D_METHOD("get_initial_props"), &JsuiView::get_initial_props);
   ClassDB::bind_method(D_METHOD("set_auto_size", "enabled"), &JsuiView::set_auto_size);
   ClassDB::bind_method(D_METHOD("get_auto_size"), &JsuiView::get_auto_size);
+  ClassDB::bind_method(D_METHOD("set_pipeline_cache_path", "path"), &JsuiView::set_pipeline_cache_path);
+  ClassDB::bind_method(D_METHOD("get_pipeline_cache_path"), &JsuiView::get_pipeline_cache_path);
   ClassDB::bind_method(D_METHOD("get_root_tag"), &JsuiView::get_root_tag);
 
   ClassDB::bind_method(D_METHOD("start"), &JsuiView::start);
@@ -161,6 +165,8 @@ void JsuiView::_bind_methods() {
   ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "initial_props"), "set_initial_props", "get_initial_props");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "auto_size"), "set_auto_size", "get_auto_size");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "profiling"), "set_profiling", "get_profiling");
+  ADD_PROPERTY(PropertyInfo(Variant::STRING, "pipeline_cache_path", PROPERTY_HINT_SAVE_FILE, "*.bin"),
+               "set_pipeline_cache_path", "get_pipeline_cache_path");
 
   ADD_SIGNAL(MethodInfo("message_received", PropertyInfo(Variant::STRING, "name"),
                         PropertyInfo(Variant::NIL, "data", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NIL_IS_VARIANT),
@@ -699,6 +705,27 @@ void JsuiView::afterTick() {
   if (jsui_needs_redraw(rt_)) render_pending_ = true;
 }
 
+void JsuiView::setupPipelineCache(const String& renderer) {
+  pipeline_file_ = "";
+  String path = pipeline_cache_path_;
+  if (!gpu_ || path.is_empty()) return;
+  // One file per backend: the renderer's name before the extension.
+  String ext = path.get_extension();
+  path = ext.is_empty() ? path + "." + renderer : path.get_basename() + "." + renderer + "." + ext;
+  // A list shipped with the game at the same path under res://.
+  if (path.begins_with("user://")) {
+    String shipped = "res://" + path.substr(7);
+    if (FileAccess::file_exists(shipped)) {
+      PackedByteArray list = FileAccess::get_file_as_bytes(shipped);
+      if (jsui_gpu_precompile_pipelines(gpu_, list.ptr(), size_t(list.size())) < 0)
+        UtilityFunctions::push_warning("JsuiView: " + shipped + " is not a pipeline list of this JSUI build and renderer");
+    }
+  }
+  String file = isGodotPath(path) ? ProjectSettings::get_singleton()->globalize_path(path) : path;
+  DirAccess::make_dir_recursive_absolute(file.get_base_dir());
+  if (jsui_gpu_set_pipeline_cache(gpu_, file.utf8().get_data()) >= 0) pipeline_file_ = file;
+}
+
 void JsuiView::render() {
   if (pixel_w_ <= 0 || pixel_h_ <= 0) return;
   render_pending_ = false;
@@ -870,6 +897,23 @@ Dictionary JsuiView::get_render_stats() const {
   d["gpu_job_usec_total"] = int64_t(gpu_job_usec_total_.load(std::memory_order_relaxed));
   d["jsui_render_usec_total"] = int64_t(jsui_render_usec_total_.load(std::memory_order_relaxed));
   d["tick_usec_last"] = int64_t(tick_usec_last_);
+  // The runtime's pipeline cache (its Skia context is the runtime view's).
+  const JsuiView* rv = host_ ? host_ : this;
+  if (renderer_ != Renderer::Cpu && renderer_ != Renderer::Unknown && rv->gpu_) {
+    JsuiPipelineStats s;
+    jsui_gpu_get_pipeline_stats(rv->gpu_, &s);
+    Dictionary p;
+    p["mode"] = s.mode == JSUI_PRECOMPILE_THREAD ? "thread" : s.mode == JSUI_PRECOMPILE_SLICED ? "sliced" : "none";
+    p["queued"] = s.queued;
+    p["precompiled"] = int64_t(s.precompiled);
+    p["failed"] = int64_t(s.failed);
+    p["compiled"] = int64_t(s.compiled);
+    p["added"] = int64_t(s.added);
+    p["unserializable"] = int64_t(s.unserializable);
+    p["known"] = int64_t(s.known);
+    p["file"] = rv->pipeline_file_;
+    d["pipelines"] = p;
+  }
   return d;
 }
 
