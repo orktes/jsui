@@ -287,7 +287,11 @@ func _on_ui_call(id, name, args):
   Godot's render graph tracks for a copy source. Godot then copies the
   damaged rect into the second texture (`RenderingDevice.texture_copy`),
   which the canvas item samples through a `Texture2DRD`, so Godot does that
-  texture's barriers itself. Nothing is read back or uploaded. New textures
+  texture's barriers itself. The `Texture2DRD` makes its RenderingServer
+  texture on the render thread: with a separate one (`--render-thread
+  separate`) JsuiView waits for that before it hands the texture to its
+  canvas item, which would otherwise keep Godot's placeholder (a magenta /
+  black checkerboard). Nothing is read back or uploaded. New textures
   (first frame, resize) are used from the next drawn frame; the old ones stay
   on screen until then.
 * CPU renderer: a changed frame uploads the whole texture (Godot 4 has no
