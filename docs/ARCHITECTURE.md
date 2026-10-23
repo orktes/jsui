@@ -248,16 +248,25 @@ used to process Dawn events).
   changed pixels before anything is painted. When they cover half the frame
   or more (an animated full-screen UI; the area of the damage rects, not
   their bounds) the frame is painted straight into the target: one pass, no
-  copy. When less changed, only the damage is repainted into a Graphite
-  render target the context keeps, rect by rect (`splitDamage`: each a
-  scissor, where a region clip is a complex clip on Graphite), then that is
-  copied into the target with one draw (canvas textures start cleared every
-  frame). Damage crossing a curved outline does not grow to the whole node
-  here (see Paint performance), so a few small animations stay small: on
-  `interactions.jsx` the glow, the pulsing ring and the live dot are ~240k
-  of 920k pixels, where growing to the cards and buttons under the glow made
-  every frame a full repaint. After direct frames the retained target is repainted
-  fully once the damage stayed small for 3 frames. The web host skips frames
+  copy. When less changed, only the damage is repainted, rect by rect
+  (`splitDamage`: each a scissor, where a region clip is a complex clip on
+  Graphite). Canvas textures start cleared every frame, so the last frame
+  comes from a copy the context keeps (copy-back, for targets with
+  `CopySrc` usage such as the web canvas): the frame's single pass first
+  draws that copy into the target, then the damage over it, and afterwards
+  the damage rects are copied (`copyTextureToTexture`) from the target into
+  the copy. That is one pass, like a direct frame, plus a full-frame read of
+  the copy. Targets without `CopySrc`, and `JSUI_WEBGPU_NO_CLEAR`, use a
+  retained Graphite render target instead: the damage pass loads and stores
+  all of it and a second pass draws it into the target. On a 4K canvas on
+  an Apple GPU those two full-frame passes cost more than a full repaint
+  (GPU done 4.5 vs 2.4 ms at 1080p@2x). Damage crossing a curved outline
+  does not grow to the whole node here (see Paint performance), so a few
+  small animations stay small: on `interactions.jsx` the glow, the pulsing
+  ring and the live dot are ~240k of 920k pixels, where growing to the
+  cards and buttons under the glow made every frame a full repaint. After
+  direct frames the last frame is made valid again once the damage stayed
+  small for 3 frames (a full repaint, copied whole). The web host skips frames
   where nothing changed altogether (no `getCurrentTexture()`, so the canvas
   keeps its last frame). `JSUI_WEBGPU_NO_RETAIN` always paints the whole
   frame into the target; `JSUI_WEBGPU_NO_CLEAR` composites over it.
@@ -294,9 +303,10 @@ used to process Dawn events).
   the clip (`Device.cpp`), so their masks do not depend on the damage and
   are reused across frames. On `interactions.jsx` (1280x720, SwiftShader) a
   steady frame went from ~2.8 render passes, ~172 draws, ~175 new bind
-  groups, 67 pipeline binds and 9 buffer maps to 2 passes (the damage pass
-  and the copy), ~40-70 draws, ~5 bind groups, ~40 pipeline binds and 2-3
-  maps; `webgpu: steady animation frames` in the browser tests guards it.
+  groups, 67 pipeline binds and 9 buffer maps to 1 pass (the canvas, with
+  the damage copied back), ~65 draws, ~5 bind groups, ~40 pipeline binds and
+  2-3 maps; `webgpu: steady animation frames` in the browser tests guards
+  it.
 * **No CPU waits.** In the browser Graphite runs without a tick function:
   submits never wait, buffer maps are async and finished work is collected by
   `checkAsyncWorkCompletion()` each frame. Raster images are uploaded once per

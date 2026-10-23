@@ -722,24 +722,29 @@ test('webgpu: full-frame changes paint straight into the canvas, small ones thro
     await a._wgpu.device.queue.onSubmittedWorkDone();
     const passes = [...window.__gpuCounts].filter(([k]) => k.startsWith('pass color ')).map(([k, n]) => `${k} x${n}`);
     const canvas = passes.filter((p) => p.startsWith(`pass color ${a.pixelWidth}x${a.pixelHeight} `));
-    return { canvas, loads: canvas.filter((p) => p.includes('load=load')).length,
-      clears: canvas.filter((p) => p.includes('load=clear')).reduce((n, p) => n + Number(p.split(' x').pop()), 0) };
+    return { canvas, passes: passes.length, loads: canvas.filter((p) => p.includes('load=load')).length,
+      clears: canvas.filter((p) => p.includes('load=clear')).reduce((n, p) => n + Number(p.split(' x').pop()), 0),
+      copies: window.__gpuCounts.get('GPUCommandEncoder.copyTextureToTexture') ?? 0 };
   }, { name, color });
   const same = async (what) => {
     const d = await frameDiff(page, ['a', 'b']);
     assert(!d.missing && !d.size && d.max <= 2, `${what}: WebGPU frame differs from the CPU frame: ${JSON.stringify(d)}`);
   };
-  // Most of the frame changed: one pass on the canvas texture, nothing loaded.
+  // Most of the frame changed: one pass on the canvas texture, nothing loaded
+  // or copied.
   let r = await step('bg', '#405060');
-  assert(r.loads === 0 && r.clears === 1, `full-frame change: ${r.canvas.join(' | ')}`);
+  assert(r.loads === 0 && r.clears === 1 && r.copies === 0, `full-frame change: ${JSON.stringify(r)}`);
   await same('after a full-frame change');
-  // Small changes: after a few frames they go through the retained texture,
-  // whose damage-only pass loads its previous contents.
+  // Small changes: after a few frames the canvas pass draws the last frame
+  // (a copy of the canvas) and only the damage over it, and the damage is
+  // copied back for the next frame. Still one pass: no retained render
+  // target to load and store (two extra full-frame passes on a 4K canvas).
   for (let i = 0; i < 5; i++) r = await step('box', i % 2 ? '#00ff00' : '#0000ff');
-  assert(r.loads === 1, `small change: no damage-only pass on the retained frame: ${r.canvas.join(' | ')}`);
+  assert(r.passes === 1 && r.clears === 1 && r.copies === 1,
+    `small change: not one pass plus a damage copy-back: ${JSON.stringify(r)}`);
   await same('after small changes');
   r = await step('bg', '#102030');
-  assert(r.loads === 0 && r.clears === 1, `full-frame change after small ones: ${r.canvas.join(' | ')}`);
+  assert(r.loads === 0 && r.clears === 1 && r.copies === 0, `full-frame change after small ones: ${JSON.stringify(r)}`);
   await same('after the next full-frame change');
   r = await step('box', '#ffffff');
   await same('after a small change following a full-frame one');
@@ -775,11 +780,12 @@ test('webgpu: no multisampled targets, no per-frame blur passes for inset shadow
 
 test('webgpu: steady animation frames (interactions showcase): retained, few passes and bind groups, exact', async ({ page }) => {
   // examples/showcase/interactions.jsx keeps animating a glow, a pulsing ring
-  // and a live dot. Steady frames repaint only that damage into the retained
-  // frame (scissored rects; curved outlines need not grow to whole nodes on
-  // Graphite), fold the opacity of single-box layers into their paint (no
-  // offscreen passes), and reuse uniform bind groups. Before: 2-3 canvas-size
-  // passes, ~172 draws and ~175 new bind groups per frame.
+  // and a live dot. Steady frames repaint only that damage over the last
+  // frame in the canvas pass (scissored rects; curved outlines need not grow
+  // to whole nodes on Graphite) and copy it back, fold the opacity of
+  // single-box layers into their paint (no offscreen passes), and reuse
+  // uniform bind groups. Before: 2-3 canvas-size passes, ~172 draws and ~175
+  // new bind groups per frame; then 2 passes (a retained render target).
   let build;
   try {
     ({ build } = await import('@jsui/cli'));
@@ -793,14 +799,17 @@ test('webgpu: steady animation frames (interactions showcase): retained, few pas
   await page.reload();
   await page.waitForFunction(() => window.testReady);
   // Created together and driven by the same frame times from the first frame
-  // on: part of the app's state follows timers (the wall clock).
+  // on.
   const renderers = await page.evaluate(async (dist) => {
+    // The bundle inline (bundleUrl only for its assets): both evaluate it on
+    // creation, where a fetched one can start one runtime's animations later.
+    const bundleSource = await (await fetch('output/interactions.js')).text();
     const make = () => {
       const c = document.createElement('canvas');
       c.style.width = '1280px';
       c.style.height = '720px';
       document.body.appendChild(c);
-      return window.createJsui({ canvas: c, bundleUrl: 'output/interactions.js', renderer: 'webgpu', autoStart: false,
+      return window.createJsui({ canvas: c, bundleSource, bundleUrl: 'output/interactions.js', renderer: 'webgpu', autoStart: false,
         moduleUrl: new URL(`../${dist}/jsui.js`, location.href) });
     };
     const [a, b] = await Promise.all([make(), make()]);
@@ -821,7 +830,7 @@ test('webgpu: steady animation frames (interactions showcase): retained, few pas
       // WebGPU calls (counted) are all made inside frame().
       a.frame(t);
       if (i >= 180) {  // after the entrance animations
-        rows.push({ passes: sum(/^pass color /), retained: sum(/^pass color .* load=load/),
+        rows.push({ passes: sum(/^pass color /), retained: sum(/\.copyTextureToTexture$/) > 0 ? 1 : 0,
           bindGroups: sum(/\.createBindGroup$/), draws: sum(/\.draw(Indexed)?(Indirect)?$/) });
       }
       b.frame(t);
@@ -835,7 +844,7 @@ test('webgpu: steady animation frames (interactions showcase): retained, few pas
   console.log(`      steady frame: passes <= ${r.maxPasses}, bind groups ${r.bindGroups.toFixed(1)} (max ${r.maxBindGroups}), ` +
     `draws ${r.draws.toFixed(1)}, retained ${(r.retained * 100).toFixed(0)}%`);
   assert(r.retained >= 0.9, `steady frames do not go through the retained frame: ${JSON.stringify(r)}`);
-  assert(r.maxPasses <= 2, `offscreen passes in steady frames: ${JSON.stringify(r)}`);
+  assert(r.maxPasses <= 1, `more than the canvas pass in steady frames: ${JSON.stringify(r)}`);
   assert(r.maxBindGroups <= 24, `uniform bind groups are not reused: ${JSON.stringify(r)}`);
   assert(r.draws <= 100, `steady frames repaint more than their damage: ${JSON.stringify(r)}`);
   const d = await frameDiff(page, ['a', 'b']);
