@@ -205,8 +205,26 @@ const styles = StyleSheet.create({
     boxShadow: '0 10px 28px rgba(0,0,0,0.5)',
   },
   toastDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#478cbf' },
+  badge: { width: 96, height: 32, borderRadius: 16, backgroundColor: '#478cbf', alignItems: 'center', justifyContent: 'center' },
+  badgeText: { fontFamily: font, fontWeight: '700', fontSize: 12, color: colors.text },
   toastText: { fontFamily: font, fontWeight: '600', fontSize: 13, color: colors.text },
 });
 
+// A second root view (JsuiView.runtime_view in main.gd's self-test): one
+// bundle and JS context, several surfaces.
+function Badge({ label }) {
+  useEffect(() => {
+    Host.postMessage('badge:mount', { label });
+    return () => Host.postMessage('badge:unmount', { label });
+  }, []);
+  useEffect(() => Host.postMessage('badge:render', { label }), [label]);
+  return (
+    <Pressable onPress={() => Host.postMessage('badge:press', { label })} style={styles.badge}>
+      <Text style={styles.badgeText}>{label}</Text>
+    </Pressable>
+  );
+}
+
 AppRegistry.registerComponent('App', () => App);
+AppRegistry.registerComponent('Badge', () => Badge);
 AppRegistry.runApplication('App', {});

@@ -106,6 +106,15 @@ void JsuiView::_bind_methods() {
   ClassDB::bind_method(D_METHOD("get_forward_gamepad"), &JsuiView::get_forward_gamepad);
   ClassDB::bind_method(D_METHOD("set_force_cpu", "enabled"), &JsuiView::set_force_cpu);
   ClassDB::bind_method(D_METHOD("get_force_cpu"), &JsuiView::get_force_cpu);
+  ClassDB::bind_method(D_METHOD("set_runtime_view", "path"), &JsuiView::set_runtime_view);
+  ClassDB::bind_method(D_METHOD("get_runtime_view"), &JsuiView::get_runtime_view);
+  ClassDB::bind_method(D_METHOD("set_component", "app_key"), &JsuiView::set_component);
+  ClassDB::bind_method(D_METHOD("get_component"), &JsuiView::get_component);
+  ClassDB::bind_method(D_METHOD("set_initial_props", "props"), &JsuiView::set_initial_props);
+  ClassDB::bind_method(D_METHOD("get_initial_props"), &JsuiView::get_initial_props);
+  ClassDB::bind_method(D_METHOD("set_auto_size", "enabled"), &JsuiView::set_auto_size);
+  ClassDB::bind_method(D_METHOD("get_auto_size"), &JsuiView::get_auto_size);
+  ClassDB::bind_method(D_METHOD("get_root_tag"), &JsuiView::get_root_tag);
 
   ClassDB::bind_method(D_METHOD("start"), &JsuiView::start);
   ClassDB::bind_method(D_METHOD("stop"), &JsuiView::stop);
@@ -143,6 +152,11 @@ void JsuiView::_bind_methods() {
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "autostart"), "set_autostart", "get_autostart");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "forward_gamepad"), "set_forward_gamepad", "get_forward_gamepad");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "force_cpu"), "set_force_cpu", "get_force_cpu");
+  ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "runtime_view", PROPERTY_HINT_NODE_PATH_VALID_TYPES, "JsuiView"),
+               "set_runtime_view", "get_runtime_view");
+  ADD_PROPERTY(PropertyInfo(Variant::STRING, "component"), "set_component", "get_component");
+  ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "initial_props"), "set_initial_props", "get_initial_props");
+  ADD_PROPERTY(PropertyInfo(Variant::BOOL, "auto_size"), "set_auto_size", "get_auto_size");
 
   ADD_SIGNAL(MethodInfo("message_received", PropertyInfo(Variant::STRING, "name"),
                         PropertyInfo(Variant::NIL, "data", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NIL_IS_VARIANT),
@@ -171,6 +185,11 @@ JsuiView::JsuiView() {
 
 JsuiView::~JsuiView() {
   stop();
+  detachFromRuntimeView();
+  // Surface views of our runtime (stop() freed their surfaces) look for a
+  // runtime view again.
+  for (JsuiView* v : surfaces_) v->host_ = nullptr;
+  surfaces_.clear();
   releaseGpu();
   if (canvas_item_.is_valid() && RenderingServer::get_singleton())
     RenderingServer::get_singleton()->free_rid(canvas_item_);
@@ -186,9 +205,22 @@ void JsuiView::_notification(int what) {
         if (!in->is_connected("joy_connection_changed", cb)) in->connect("joy_connection_changed", cb);
       }
       set_process(true);
-      if (autostart_ && !bundle_url_.is_empty()) start();
+      if (!runtime_view_.is_empty()) {
+        if (autostart_) attachToRuntimeView();
+      } else if (autostart_ && !bundle_url_.is_empty()) {
+        start();
+      }
+      break;
+    case NOTIFICATION_ENTER_TREE:
+      if (!editor && is_node_ready() && attach_wanted_) attachToRuntimeView();
       break;
     case NOTIFICATION_EXIT_TREE:
+      // A surface view leaves its surface (re-entering the tree attaches again).
+      if (host_) {
+        bool wanted = attach_wanted_;
+        detachFromRuntimeView();
+        attach_wanted_ = wanted;
+      }
       if (Input* in = Input::get_singleton()) {
         Callable cb(this, "_on_joy_connection_changed");
         if (in->is_connected("joy_connection_changed", cb)) in->disconnect("joy_connection_changed", cb);
@@ -245,7 +277,118 @@ void JsuiView::set_pixel_ratio(float ratio) {
   render_pending_ = true;
 }
 
+void JsuiView::set_runtime_view(const NodePath& path) {
+  if (path == runtime_view_) return;
+  bool running = rt_ != nullptr || attach_wanted_;
+  stop();
+  runtime_view_ = path;
+  if (is_node_ready() && (running || autostart_) && (!path.is_empty() || !bundle_url_.is_empty())) start();
+}
+
+void JsuiView::set_component(const String& key) {
+  if (key == component_) return;
+  component_ = key;
+  if (!rt_ || key.is_empty()) return;  // an empty key applies on the next start
+  std::string k = toStd(key), props = propsJson();
+  jsui_surface_run(rt_, k.c_str(), props.c_str());
+}
+
+void JsuiView::set_initial_props(const Dictionary& props) {
+  initial_props_ = props;
+  // New props re-render the running component (React Native appProperties).
+  if (!rt_ || component_.is_empty()) return;
+  std::string json = propsJson();
+  jsui_surface_set_props(rt_, json.c_str());
+}
+
+void JsuiView::set_auto_size(bool on) {
+  if (on == auto_size_) return;
+  auto_size_ = on;
+  viewport_auto_ = false;
+  logical_w_ = logical_h_ = pixel_w_ = pixel_h_ = 0;
+  if (!on) set_custom_minimum_size(Vector2());
+  render_pending_ = true;
+}
+
+std::string JsuiView::propsJson() const { return toStd(JSON::stringify(initial_props_, "", false)); }
+
+// ---------------------------------------------------------------- surfaces
+
+JsuiView* JsuiView::resolveRuntimeView() const {
+  if (runtime_view_.is_empty() || !is_inside_tree()) return nullptr;
+  auto* v = Object::cast_to<JsuiView>(get_node_or_null(runtime_view_));
+  if (v == this) return nullptr;
+  // A runtime view that is itself a surface view: share its runtime.
+  if (v && !v->runtime_view_.is_empty()) v = v->host_;
+  return v;
+}
+
+void JsuiView::attachToRuntimeView() {
+  attach_wanted_ = true;
+  if (host_) return;
+  JsuiView* host = resolveRuntimeView();
+  if (!host) return;  // retried every frame (process) until the node is there
+  host_ = host;
+  host->surfaces_.push_back(this);
+  if (host->rt_) createSurface();
+}
+
+void JsuiView::detachFromRuntimeView() {
+  attach_wanted_ = false;
+  if (!host_) return;
+  destroySurface();
+  auto& list = host_->surfaces_;
+  list.erase(std::remove(list.begin(), list.end(), this), list.end());
+  host_ = nullptr;
+}
+
+void JsuiView::createSurface() {
+  if (rt_ || !host_ || !host_->rt_) return;
+  if (component_.is_empty()) {
+    UtilityFunctions::push_warning("JsuiView: a view with runtime_view needs a component");
+    return;
+  }
+  Vector2 size = get_size();
+  int w = auto_size_ ? 0 : std::max(1, int(std::lround(size.x)));
+  int h = auto_size_ ? 0 : std::max(1, int(std::lround(size.y)));
+  std::string k = toStd(component_), props = propsJson();
+  rt_ = jsui_surface_create(host_->rt_, k.c_str(), props.c_str(), w, h, computeRatio());
+  if (!rt_) return;
+  start_usec_ = host_->start_usec_;
+  logical_w_ = logical_h_ = pixel_w_ = pixel_h_ = 0;
+  viewport_auto_ = false;
+  cursor_.clear();
+  render_pending_ = true;
+  gpu_retained_ = false;
+  updateViewport();
+  if (Input* in = Input::get_singleton()) {
+    TypedArray<int> pads = in->get_connected_joypads();
+    for (int64_t i = 0; i < pads.size(); i++) onJoyConnectionChanged(int64_t(pads[i]), true);
+  }
+}
+
+void JsuiView::destroySurface() {
+  if (!rt_ || !host_) return;
+  JsuiRuntime* s = rt_;
+  surfaceGone();
+  jsui_surface_destroy(s);
+  if (host_->is_inside_tree()) host_->flushMessages();  // unmount effects may have posted messages
+}
+
+void JsuiView::surfaceGone() {
+  rt_ = nullptr;
+  held_keys_.clear();
+  pads_.clear();
+  gpu_retained_ = false;
+}
+
 void JsuiView::start() {
+  if (!runtime_view_.is_empty()) {
+    // A surface view: (re)creates its surface on the runtime view's runtime.
+    detachFromRuntimeView();
+    if (!Engine::get_singleton()->is_editor_hint()) attachToRuntimeView();
+    return;
+  }
   stop();
   if (Engine::get_singleton()->is_editor_hint()) return;
   if (bundle_url_.is_empty()) {
@@ -288,6 +431,13 @@ void JsuiView::start() {
   updateViewport();
   // Shared state set before (or across) restarts: there before the bundle runs.
   for (auto& [key, json] : state_) jsui_set_state(rt_, key.c_str(), json.c_str());
+  // The main surface's component, and surface views waiting for a runtime
+  // (their components start once the bundle has registered them).
+  if (!component_.is_empty()) {
+    std::string k = toStd(component_), props = propsJson();
+    jsui_surface_run(rt_, k.c_str(), props.c_str());
+  }
+  for (JsuiView* v : surfaces_) v->createSurface();
 
   // Announce pads that are already connected.
   if (Input* in = Input::get_singleton()) {
@@ -299,9 +449,15 @@ void JsuiView::start() {
 }
 
 void JsuiView::stop() {
+  if (host_ || !runtime_view_.is_empty()) {
+    detachFromRuntimeView();
+    return;
+  }
   if (!rt_) return;
   JsuiRuntime* rt = rt_;
   rt_ = nullptr;
+  // jsui_destroy frees the surface handles of our surface views too.
+  for (JsuiView* v : surfaces_) v->surfaceGone();
   // Open Host.calls are cancelled and open call_ui calls fail here; their
   // signals / callbacks still run (below), so the game can drop its work.
   jsui_destroy(rt);
@@ -319,7 +475,8 @@ void JsuiView::stop() {
 }
 
 void JsuiView::reload() {
-  if (rt_) jsui_reload(rt_);
+  if (host_) host_->reload();
+  else if (rt_) jsui_reload(rt_);
 }
 
 // --------------------------------------------------------------- callbacks
@@ -432,6 +589,18 @@ float JsuiView::computeRatio() const {
 
 void JsuiView::updateViewport() {
   if (!rt_) return;
+  if (auto_size_) {
+    // The content decides the size (updateAutoSize, after the tick).
+    float ratio = computeRatio();
+    if (viewport_auto_ && std::abs(ratio - ratio_) < 1e-3f) return;
+    viewport_auto_ = true;
+    ratio_ = ratio;
+    jsui_set_viewport(rt_, 0, 0, ratio);
+    logical_w_ = logical_h_ = 0;
+    render_pending_ = true;
+    return;
+  }
+  viewport_auto_ = false;
   Vector2 size = get_size();
   int lw = std::max(1, int(std::lround(size.x)));
   int lh = std::max(1, int(std::lround(size.y)));
@@ -448,14 +617,43 @@ void JsuiView::updateViewport() {
   render_pending_ = true;
 }
 
+void JsuiView::updateAutoSize() {
+  if (!auto_size_ || !rt_) return;
+  float w = 0, h = 0;
+  jsui_surface_get_size(rt_, &w, &h);
+  int lw = std::max(1, int(std::ceil(w - 1e-3f)));
+  int lh = std::max(1, int(std::ceil(h - 1e-3f)));
+  if (lw == logical_w_ && lh == logical_h_ && pixel_w_ > 0) return;
+  logical_w_ = lw;
+  logical_h_ = lh;
+  float ratio = std::min(ratio_, float(kMaxTexture) / float(std::max(lw, lh)));
+  pixel_w_ = std::max(1, int(std::lround(lw * ratio)));
+  pixel_h_ = std::max(1, int(std::lround(lh * ratio)));
+  render_pending_ = true;
+  set_custom_minimum_size(Vector2(float(lw), float(lh)));
+}
+
 void JsuiView::process() {
+  if (attach_wanted_ && !host_) attachToRuntimeView();  // the runtime view was not there yet
+  if (host_) return;  // the runtime view ticks the runtime and paints us
   if (!rt_) return;
   updateViewport();
+  for (JsuiView* v : surfaces_) v->updateViewport();
+  // One tick for every surface of the runtime, then each paints.
   jsui_tick(rt_, nowMs());
   flushMessages();
   if (!rt_) return;  // a message handler stopped the view
-  updateCursor();
   reportErrors();
+  afterTick();
+  std::vector<JsuiView*> views = surfaces_;  // signal handlers may detach views
+  for (JsuiView* v : views)
+    if (std::find(surfaces_.begin(), surfaces_.end(), v) != surfaces_.end()) v->afterTick();
+}
+
+void JsuiView::afterTick() {
+  if (!rt_) return;
+  updateAutoSize();
+  updateCursor();
   if (jsui_needs_redraw(rt_)) render_pending_ = true;
   if (render_pending_ && is_visible_in_tree()) render();
 }
@@ -620,6 +818,11 @@ void JsuiView::updateCursor() {
 }
 
 void JsuiView::flushMessages() {
+  // A surface view's runtime callbacks queue on the runtime view.
+  if (host_) {
+    host_->flushMessages();
+    return;
+  }
   if (messages_.empty()) return;
   auto batch = std::move(messages_);
   messages_.clear();
@@ -698,6 +901,7 @@ int JsuiView::set_state(const String& key, const Variant& value) {
 }
 
 int JsuiView::set_state_json(const String& key, const String& json) {
+  if (host_) return host_->set_state_json(key, json);
   std::string k = toStd(key), j = toStd(json);
   if (rt_) {
     int r = jsui_set_state(rt_, k.c_str(), json.is_empty() ? nullptr : j.c_str());
@@ -728,6 +932,7 @@ int JsuiView::patch_state(const String& key, const Variant& patch) {
 }
 
 int JsuiView::patch_state_json(const String& key, const String& json) {
+  if (host_) return host_->patch_state_json(key, json);
   std::string k = toStd(key), j = toStd(json);
   if (rt_) {
     int r = jsui_patch_state(rt_, k.c_str(), j.c_str());
@@ -748,6 +953,7 @@ Variant JsuiView::get_state(const String& key) const {
 }
 
 String JsuiView::get_state_json(const String& key) const {
+  if (host_) return host_->get_state_json(key);
   std::string k = toStd(key);
   if (rt_) {
     const char* json = jsui_get_state(rt_, k.c_str());
@@ -763,6 +969,7 @@ int JsuiView::resolve_call(int64_t id, const Variant& result) {
 }
 
 int JsuiView::resolve_call_json(int64_t id, const String& json) {
+  if (host_) return host_->resolve_call_json(id, json);
   if (!rt_ || id <= 0) return -1;
   std::string j = toStd(json);
   int r = jsui_resolve_call(rt_, uint64_t(id), json.is_empty() ? nullptr : j.c_str());
@@ -771,6 +978,7 @@ int JsuiView::resolve_call_json(int64_t id, const String& json) {
 }
 
 int JsuiView::reject_call(int64_t id, const String& message) {
+  if (host_) return host_->reject_call(id, message);
   if (!rt_ || id <= 0) return -1;
   std::string m = toStd(message);
   int r = jsui_reject_call(rt_, uint64_t(id), m.c_str());
@@ -779,6 +987,7 @@ int JsuiView::reject_call(int64_t id, const String& message) {
 }
 
 int64_t JsuiView::call_ui(const String& name, const Variant& args, const Callable& callback) {
+  if (host_) return host_->call_ui(name, args, callback);
   if (!rt_) {
     UtilityFunctions::push_error("JsuiView.call_ui: the view is not running");
     return 0;
@@ -801,9 +1010,13 @@ void JsuiView::reportErrors() {
   }
 }
 
-int JsuiView::get_pending_loads() const { return rt_ ? jsui_pending_loads(rt_) : 0; }
+int JsuiView::get_pending_loads() const {
+  if (host_) return host_->get_pending_loads();
+  return rt_ ? jsui_pending_loads(rt_) : 0;
+}
 
 String JsuiView::get_last_error() const {
+  if (host_) return host_->get_last_error();
   if (!rt_) return String();
   const char* e = jsui_last_error(rt_);
   return e ? String::utf8(e) : String();
@@ -814,6 +1027,10 @@ void JsuiView::post_message(const String& name, const Variant& data) {
 }
 
 void JsuiView::post_message_json(const String& name, const String& json) {
+  if (host_) {
+    host_->post_message_json(name, json);
+    return;
+  }
   if (!rt_) return;
   std::string n = toStd(name), j = toStd(json);
   jsui_post_message(rt_, n.c_str(), j.c_str());
