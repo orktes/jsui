@@ -315,8 +315,9 @@ used to process Dawn events).
   `CopySrc` usage such as the web canvas): the frame's single pass first
   draws that copy into the target, then the damage over it, and afterwards
   the damage rects are copied (`copyTextureToTexture`) from the target into
-  the copy. That is one pass, like a direct frame, plus a full-frame read of
-  the copy. Targets without `CopySrc`, and `JSUI_WEBGPU_NO_CLEAR`, use a
+  the copy, as tasks of the same Graphite recording (one command encoder and
+  one submit a frame). That is one pass, like a direct frame, plus a
+  full-frame read of the copy. Targets without `CopySrc`, and `JSUI_WEBGPU_NO_CLEAR`, use a
   retained Graphite render target instead: the damage pass loads and stores
   all of it and a second pass draws it into the target. On a 4K canvas on
   an Apple GPU those two full-frame passes cost more than a full repaint
@@ -456,6 +457,30 @@ used to process Dawn events).
   `JSUI_WEBGPU_NO_RASTER_CACHE` turns it off; `webgpu: raster cache` in the
   browser tests compares it with direct painting, in steady frames and with
   the list scrolled at 2x.
+* **Static backdrop.** Each damage rect is cleared and repainted from the
+  root, so it also repaints whatever lies under everything: on
+  `interactions.jsx` the background colour, the full-screen image and the
+  scrim's two gradients, 4 draws (plus the clear) in each of a frame's 3-4
+  rects. What the document paints first, in paint order up to the first
+  node that is changing, is kept in a texture of the canvas' size
+  (`Backdrop`, `updateBackdrop` in `painter.cpp`, in the same `LayerCache`),
+  and each rect is drawn from it (`kSrc`, in place of the clear) before the
+  rest is painted. Down from the root, each node it ends inside of paints
+  its own decorations and its first children into it: such a node must be
+  unchanged itself (`selfStill`) and paint without a layer; a child in it
+  whole must be quiet, have fewer than 4 nodes and no layers (never a
+  raster-cache candidate, so nothing in it depends on texture state). A
+  signature of what each one paints and where (with the font and image
+  generations and the canvas size) must stay the same for 2 updates before
+  a texture is made, and a new one renders it again. Painted over nothing,
+  the texture holds exactly the pixels painting the backdrop directly gives
+  (the canvas' format, at the origin, so dithering matches too), so
+  repaints over it equal full ones bit for bit. It costs one texture of the
+  canvas' size. On `interactions.jsx` at 1280x720 Skia draws per frame went
+  from ~73 to ~58 scrolling the armory list and from ~48 to ~31 in steady
+  frames. `JSUI_WEBGPU_NO_BACKDROP` turns it off; `webgpu: static
+  backdrop` in the browser tests checks the pixels against painting it,
+  also after the backdrop changes.
 * **What each pass is** (`interactions.jsx`, `frame-bench.mjs` lists them
   with GPU times). Steady (the looping glow, deploy pulse, live dot and
   progress shimmer): one pass, the canvas (cleared, the last frame drawn
@@ -501,8 +526,8 @@ used to process Dawn events).
   take ~0.3 ms, the damage walk ~0.13 ms and native Animated ~0.09 ms;
   Graphite's snap, command encoding and submit and the canvas texture take
   ~0.85 ms (Graphite's `queue.submit` ~0.2 ms of it), and the copy-back's
-  own submit, which carries one copy, ~0.13 ms (one submit for both would
-  be the next cut), with the JS / wasm crossings most of the rest.
+  own encoder and submit, which carried one copy, ~0.13 ms (since folded
+  into Graphite's recording), with the JS / wasm crossings most of the rest.
 * **No CPU waits.** In the browser Graphite runs without a tick function:
   submits never wait, buffer maps are async and finished work is collected by
   `checkAsyncWorkCompletion()` each frame. Raster images are uploaded once per

@@ -693,7 +693,11 @@ enum {
     /* Paint subtrees that keep being repainted unchanged draw by draw
      * instead of from cached textures of them (see "Raster cache" in
      * docs/ARCHITECTURE.md; for comparisons). */
-    JSUI_WEBGPU_NO_RASTER_CACHE = 1 << 4
+    JSUI_WEBGPU_NO_RASTER_CACHE = 1 << 4,
+    /* Repaint damage over a cleared target instead of over a cached
+     * texture of the static background (see "Static backdrop" in
+     * docs/ARCHITECTURE.md; for comparisons). */
+    JSUI_WEBGPU_NO_BACKDROP = 1 << 5
 };
 
 typedef struct JsuiWebGPUTarget {

@@ -407,6 +407,8 @@ TEST(render_incremental_matches_full) {
   auto check = [&](const char* what) {
     s.doc().layout();
     SkIRect damage = s.rt->renderIncremental(inc.data(), 320, 240, 320 * 4);
+    // Painted where updateDamage placed each node, without placing it again.
+    CHECK_EQ(lastPaintStats(s.doc()).placements, 0);
     s.rt->render(full.data(), 320, 240, 320 * 4);
     size_t diff = 0;
     for (size_t i = 0; i < inc.size(); i++) diff += inc[i] != full[i];
@@ -540,6 +542,19 @@ TEST(render_skipped_subtrees_damage_like_a_full_walk) {
   }
   // In most frames only the glow changed: the other subtrees were skipped.
   CHECK(skippedSteps > 30);
+  // Children out of view (rows scrolled out of the list, an invisible box)
+  // do not keep their ancestors from being skipped: once the rest settles,
+  // only the glow and the two nodes above it are visited (the list, its
+  // rows out of view since the scroll, stays skipped too).
+  both({3, 0}, [](Node* n, Node*) { patch(n, R"J({"opacity":0})J"); });
+  int visited = 0;
+  for (int i = 0; i < 6; i++) {
+    both({4}, [&](Node* n, Node*) { patch(n, R"J({"transform":[{"translateX":)J" + std::to_string(i) + "}]}"); });
+    frame();
+    visited = lastPaintStats(a.doc()).nodesUpdated;
+  }
+  std::printf("  settled: %d nodes visited per frame\n", visited);
+  CHECK(visited <= 3);
 }
 
 // Damage cutting through rounded boxes at random places (a small box moving
