@@ -429,6 +429,14 @@ used to process Dawn events).
   changes, it scales, or no damage reached it for 120 damaged frames
   (`updateRasterCache` in `painter.cpp`). A texture that would be mostly
   hidden (a scroll view's whole content behind its viewport) is not made.
+  A subtree too large for one texture (over 4096 px a
+  side, or half the cache's budget) gets a texture of its part on the
+  screen, used only while the subtree stays where it is: at 2x the armory
+  list's content (48 rows of 60 px, 5760 device px) passed as mostly
+  visible by that part, and moving in every scrolled frame it was rendered
+  into a new 704x2160 texture in 3 frames of 5, all its rows painted into
+  it (~120 draws and ~136 KB of staged data per frame at 1080p@2x, to ~61
+  and ~68 KB now, as at 1280x720).
   The texture is the subtree's draws composited as a group: equal to
   painting them directly up to rounding where it is translucent. So that a
   retained frame still equals a full repaint, the state follows the damage
@@ -443,7 +451,8 @@ used to process Dawn events).
   subtree's raster texture, which would only be rendered with it): in the
   entrance the armory panel's rows, ~63 to ~38 draws per frame.
   `JSUI_WEBGPU_NO_RASTER_CACHE` turns it off; `webgpu: raster cache` in the
-  browser tests compares it with direct painting.
+  browser tests compares it with direct painting, in steady frames and with
+  the list scrolled at 2x.
 * **What each pass is** (`interactions.jsx`, `frame-bench.mjs` lists them
   with GPU times). Steady (the looping glow, deploy pulse, live dot and
   progress shimmer): one pass, the canvas (cleared, the last frame drawn
@@ -457,8 +466,9 @@ used to process Dawn events).
   mapped staging buffer and 4-6 `copyBufferToBuffer` (browser WebGPU
   cannot map vertex or uniform buffers). Scrolling the armory list: the
   same single pass (no scroll blit on the GPU path; the list's damage is
-  repainted), 4 copies, and the raster texture of each row coming into
-  view (352x61, ~0.6 a frame). The entrance (first ~2.5 s): plain layers
+  repainted), 4 copies, and the raster textures of the row coming into
+  view and of the two whose hover state changes under the pointer (352x61,
+  ~0.6 a frame). The entrance (first ~2.5 s): plain layers
   only for the armory panel and the season card, which fade while their
   content animates (the list fills in, the progress bar grows): 1024x1024
   and 512x128 approx-fit passes per damage rect at 1280x720, 1536x1024 /

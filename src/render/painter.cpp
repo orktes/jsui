@@ -2047,15 +2047,24 @@ void updateRasterCache(RootRecord* root, SkRegion* damage, const SkIRect& screen
   const uint32_t frame = root->damagedFrames;
   SkRegion base(*damage);  // what reached each subtree, before the switches below
   auto area = [](const SkIRect& r) { return int64_t(r.width()) * r.height(); };
+  const size_t maxBytes = tLayerCache ? tLayerCache->impl->budget / 2 : SIZE_MAX;
   for (NodeRecord* rec : root->rasterCandidates) {
     // Mostly visible: a texture of a scroll view's whole content (hidden by
     // the viewport but for a part) costs more to render than it saves. The
-    // texture is the whole subtree when it fits (paintCachedLayer).
+    // texture is the whole subtree when it fits (paintCachedLayer), else
+    // its part on the screen.
     const SkIRect& f = rec->subtreeFull;
+    const bool whole = f.width() <= kMaxLayerSide && f.height() <= kMaxLayerSide &&
+                       size_t(f.width()) * size_t(f.height()) * 4 <= maxBytes;
     SkIRect tex = f;
-    if (f.width() > kMaxLayerSide || f.height() > kMaxLayerSide) tex.intersect(screen);
+    if (!whole) tex.intersect(screen);
     bool visible = !rec->subtree.isEmpty() && area(tex) <= 2 * area(rec->subtree);
-    bool stable = visible && rec->stableFrames >= 1 && !rec->scaling;
+    // A part is drawn again only while the subtree stays where it is: one
+    // that moves would be rendered into a new texture every frame, on top of
+    // being painted. That is a scrolling list's content at 2x (48 rows of 60
+    // px are taller than a texture can be): its part on the screen is about
+    // its viewport, and it moves in every frame that damages it.
+    bool stable = visible && rec->stableFrames >= 1 && !rec->scaling && (whole || !rec->moved);
     bool hit = base.intersects(rec->subtree);
     if (hit) {
       rec->rasterHits = rec->rasterLast + 1 == frame ? uint8_t(std::min(rec->rasterHits + 1, 255)) : 1;
