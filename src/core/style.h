@@ -187,6 +187,9 @@ bool applyPaintStyleChanges(const Value& oldStyle, const Value& newStyle, Comput
 // The paint group a style key belongs to (0: a layout or unknown key), and
 // re-resolution of just those groups of `out` from `style`.
 uint32_t paintStyleGroup(const std::string& key);
+// True when `groups` only move, fade or restack the node as a whole
+// (opacity, transform, transformOrigin, zIndex, pointerEvents, cursor).
+bool styleGroupsMoveOnly(uint32_t groups);
 void applyStyleGroups(const Value& style, uint32_t groups, ComputedStyle* out, float pixelRatio);
 // Deep equality of style values (shared containers compare by identity first).
 bool styleValueEquals(const Value& a, const Value& b);

@@ -307,6 +307,64 @@ used to process Dawn events).
   the damage copied back), ~65 draws, ~5 bind groups, ~40 pipeline binds and
   2-3 maps; `webgpu: steady animation frames` in the browser tests guards
   it.
+* **Composited layers.** Like Chrome's compositor layers for opacity and
+  transform animations, a layer (a node whose opacity needs one: children
+  or overlapping draws) is rendered into a texture of its own once and
+  then drawn again at each frame's opacity, instead of being rendered
+  offscreen every time it is painted (`LayerCache` in `painter.h`, owned by
+  the WebGPU context and set with `LayerCacheScope` around a frame). The
+  texture is reused while the subtree paints the same relative to the node:
+  `updateRecords` gives each node a stamp that changes whenever anything
+  under it changes, but not when only the node's own opacity, transform or
+  zIndex change (`Node::contentVersion`, which `patchStyle` leaves alone for
+  those groups). It holds the whole layer (up to 4096 px a side), so a layer
+  moving into view needs no new render. A whole-pixel move draws the same
+  pixels as a layer; while the node moves by sub-pixels (an Animated
+  translation) the texture is drawn at the nearest whole pixel, as a
+  compositor would, and when it comes to rest the next frame repaints it
+  exactly (`layerInexact`). A subtree that changed in the last frame (a
+  progress bar inside a fading panel) takes a plain layer clipped to the
+  damage, as before. Textures are freed after 120 unused frames or over
+  96 MB (LRU); `JSUI_WEBGPU_NO_LAYER_CACHE` turns it off. On
+  `interactions.jsx` the entrance (staggered menu buttons and panels fading
+  and sliding in) went from ~5.9 render passes and ~140 draws per frame to
+  ~3.4 and ~90 at 1280x720; what is left are two panels whose content
+  animates during the fade. `webgpu: fading and moving layers` in the
+  browser tests checks no offscreen passes and pixels equal to plain
+  layers.
+* **What each pass is** (`interactions.jsx`, `frame-bench.mjs` lists them
+  with GPU times). Steady (the looping glow, deploy pulse, live dot and
+  progress shimmer): one pass, the canvas (cleared, the last frame drawn
+  from the copy-back texture, the damage repainted in up to 4 scissored
+  rects), then up to 4 `copyTextureToTexture` back. No offscreen passes:
+  the animated boxes are childless, so their opacity folds into their
+  draws; outer and inset shadows are cached sprites; paths are rasterized
+  into Graphite's path atlas on the CPU and text into its glyph atlas, both
+  uploaded with `copyBufferToTexture` (a few small rects per frame, plus a
+  new sprite texture when the scaling live dot's shadow changes size), not
+  rendered. Scrolling the armory list: the same single pass (no scroll
+  blit on the GPU path; the list's damage is repainted) and 4 copies. The
+  entrance (first ~2.5 s): plain layers only for the armory panel and the
+  season card, which fade while their content animates (the list fills
+  in, the progress bar grows): 1024x1024 and 512x128 approx-fit passes
+  per damage rect at 1280x720, 1536x1024 / 1536x512 / 1536x256 / 1024x256
+  at 1080p@2x. The menu buttons (512x64 each) and the centre column
+  (512x1024) fade and slide as composited layers, rendered once.
+* **Compared with Chrome.** `frame-bench --renderers chrome` renders the
+  same app through react-native-web. Chrome's structural advantages: the
+  page's main thread only records paint ops; rasterization happens in the
+  GPU process (or raster workers) into 256 px tiles that are kept, so only
+  invalidated tiles are re-rastered; compositor layers (animated opacity /
+  transform, will-change) are moved and faded by the compositor without
+  re-rasterizing; and the display compositor redraws only the damaged
+  part of the screen (partial swap). JSUI records with Skia on the page's
+  main thread (wasm) and, on WebGPU, must fill the whole canvas every frame
+  (`getCurrentTexture()` is a fresh texture), which the copy-back texture
+  makes one full-screen textured draw; the composited layers above are the
+  part of Chrome's model JSUI now has. Headless (SwiftShader) at 1280x720,
+  steady: Chrome's main thread ~1.5 ms and GPU main thread ~2.6 ms per
+  frame; JSUI on WebGPU ~5.9 ms and ~96 ms (SwiftShader drawing the full
+  canvas), on WebGL ~4.6 ms and ~52 ms.
 * **No CPU waits.** In the browser Graphite runs without a tick function:
   submits never wait, buffer maps are async and finished work is collected by
   `checkAsyncWorkCompletion()` each frame. Raster images are uploaded once per
@@ -342,15 +400,27 @@ used to process Dawn events).
   retained vs full-repaint pixels) on
   Chromium's SwiftShader WebGPU adapter (`--enable-unsafe-webgpu`).
 * **Benchmark.** `node web/test/frame-bench.mjs` measures
-  `examples/showcase/interactions.jsx` per renderer: the rAF-to-rAF interval
-  of the host's own loop in the steady state (what the user feels) with the
-  main-thread time per frame and, on WebGPU, when the GPU finished each frame
-  (observed, never awaited); then the old "finish" metric (frames stepped by
-  hand, each awaited until the GPU is done, which adds the round trip to the
-  GPU process that the real loop never waits for); then the WebGPU calls per
-  frame (`web/test/gpu-count.js`). Headless it runs on SwiftShader; on a Mac
-  with Chrome installed, `node web/test/frame-bench.mjs --real-gpu
-  --renderers webgpu,webgl` uses the real GPU (Metal) in a visible window.
+  `examples/showcase/interactions.jsx` per renderer, after its entrance
+  animations (`--settle`, 3 s): the rAF-to-rAF interval of the host's own
+  loop (what the user feels) with the main-thread time per frame and, on
+  WebGPU, when the GPU finished each frame (observed, never awaited); the
+  busy time per frame of the page's main thread, compositor, raster
+  workers, GPU main thread and viz from a Chrome trace; then the old
+  "finish" metric (frames stepped by hand, each awaited until the GPU is
+  done: WebGPU `onSubmittedWorkDone()`, WebGL a 1-pixel `readPixels`, which
+  add the round trip to the GPU process that the real loop never waits for);
+  then the WebGPU calls per frame (`web/test/gpu-count.js`); then GPU time
+  per frame from timestamps around every render pass and copy
+  (`web/test/gpu-timing.js`, the `timestamp-query` feature; WebGL: timer
+  queries where available), listed by pass target and copy kind.
+  `--scenario entrance` measures from mount (the instrumented pages step
+  from mount time, so it plays the same on a slow software GPU) and
+  `--scenario scroll` turns the wheel over a list. `--renderers chrome`
+  renders the same app with react-native-web (the reference tests'
+  bundler) in Chrome itself, the bar to compare with (rAF interval and
+  thread times). Headless it runs on SwiftShader; on a Mac with Chrome
+  installed, `node web/test/frame-bench.mjs --real-gpu --renderers
+  webgpu,webgl,chrome` uses the real GPU (Metal) in a visible window.
 
 ### Vulkan and Metal (Skia Graphite, native)
 
@@ -1095,7 +1165,9 @@ the expensive per-pixel work is done once:
   fill and one outer shadow (the shadow is then not drawn under the box), or
   a childless box that only draws a solid border ring of one colour. A
   layer at zero opacity is skipped. On GPU backends each layer is an
-  offscreen pass.
+  offscreen pass, per damage rect, every time it is painted; on WebGPU the
+  layer's texture is cached and composited instead while its subtree is
+  unchanged (`LayerCache`, see WebGPU: Composited layers).
 * **Text.** Paragraphs keep one layout: painting and the painter's overflow
   bounds lay out at the same content width.
 

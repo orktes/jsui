@@ -11,6 +11,7 @@
 #include "render/painter.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <memory>
 #include <unordered_map>
@@ -33,6 +34,10 @@
 #include "include/core/SkRegion.h"
 #include "include/core/SkSurface.h"
 #include "include/core/SkRect.h"
+#if defined(SK_GRAPHITE) && __has_include("include/gpu/graphite/Surface.h")
+#include "include/gpu/graphite/Surface.h"  // SkSurfaces::AsImage (no copy)
+#define JSUI_GRAPHITE_AS_IMAGE 1
+#endif
 #include "include/effects/SkDashPathEffect.h"
 #if __has_include("include/effects/SkGradient.h")
 #include "include/effects/SkGradient.h"  // Skia m157+ (the WebGPU wasm build)
@@ -1218,6 +1223,19 @@ struct NodeRecord : Node::Cache {
   float scrollX = 0, scrollY = 0;          // ScrollView offsets painted
   bool painted = false;
   bool valid = false;
+  // Layer compositing (LayerCache): what the subtree paints relative to the
+  // node. `layerStamp` is unique (global sequence) and changes whenever any
+  // of it changes; `stableFrames` counts the frames since it last did.
+  SkMatrix local;                          // place().local: the node in its parent's space
+  SkVector snap = {0, 0};                  // place().snap
+  uint32_t contentVersion = 0;
+  uint64_t layerStamp = 0;
+  uint32_t stableFrames = 0;
+  bool relChanged = true;                  // this frame: its painting changed in its parent's space
+  bool moved = false;                      // this frame: the device matrix changed
+  // The cached layer was last drawn at a whole-pixel offset from where the
+  // node is (while it moved); repainted exactly once it stops.
+  mutable bool layerInexact = false;
 };
 
 // A node with anti-aliased curved or diagonal outlines, in device pixels.
@@ -1264,6 +1282,7 @@ struct Ctx {
   SkMatrix snapSpace;
   bool transformed = false;  // a transform applies (node or ancestor)
   float alpha = 1;           // the painted node's opacity, when folded into its one draw
+  LayerCache* layers = nullptr;  // composited opacity layers (null: plain layers)
 };
 
 sk_sp<SkMaskFilter> cachedBlur(RootRecord* root, float blur) {
@@ -1527,6 +1546,157 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
   paintOutline(c, b, s);
 }
 
+}  // namespace
+
+struct LayerCache::Impl {
+  struct Entry {
+    uint64_t stamp = 0;
+    sk_sp<SkImage> image;
+    SkIRect rect;          // device rect of the image when rendered
+    bool whole = false;    // the image holds the whole layer (not cut at the canvas edge)
+    SkMatrix matrix;       // the node's device matrix then
+    const void* owner = nullptr;  // the canvas' Graphite recorder / Ganesh context
+    uint32_t lastUsed = 0;
+  };
+  std::unordered_map<const Node*, Entry> entries;
+  size_t bytes = 0, budget = 0;
+  uint32_t frame = 0;
+  static size_t sizeOf(const Entry& e) { return e.image ? size_t(e.image->width()) * e.image->height() * 4 : 0; }
+  void erase(std::unordered_map<const Node*, Entry>::iterator it) {
+    bytes -= sizeOf(it->second);
+    entries.erase(it);
+  }
+};
+
+namespace {
+thread_local LayerCache* tLayerCache = nullptr;
+}  // namespace
+
+LayerCache::LayerCache(size_t budgetBytes) : impl(std::make_unique<Impl>()) { impl->budget = budgetBytes; }
+LayerCache::~LayerCache() = default;
+void LayerCache::clear() {
+  impl->entries.clear();
+  impl->bytes = 0;
+}
+size_t LayerCache::bytes() const { return impl->bytes; }
+int LayerCache::size() const { return int(impl->entries.size()); }
+void LayerCache::endFrame() {
+  Impl& c = *impl;
+  c.frame++;
+  constexpr uint32_t kMaxIdle = 120;  // frames
+  for (auto it = c.entries.begin(); it != c.entries.end();) {
+    auto next = std::next(it);
+    if (c.frame - it->second.lastUsed > kMaxIdle) c.erase(it);
+    it = next;
+  }
+  while (c.bytes > c.budget && !c.entries.empty()) {
+    auto lru = std::min_element(c.entries.begin(), c.entries.end(),
+                                [](const auto& a, const auto& b) { return a.second.lastUsed < b.second.lastUsed; });
+    c.erase(lru);
+  }
+}
+LayerCacheScope::LayerCacheScope(LayerCache* cache) : prev_(tLayerCache) { tLayerCache = cache; }
+LayerCacheScope::~LayerCacheScope() { tLayerCache = prev_; }
+
+namespace {
+
+// Paints node `n` (its canvas already at the node's local space, ctx set up
+// as paintNode does) through its cached layer: draws the cached texture at
+// `opacity`, rendering it first when it is stale. False when the layer
+// cannot be cached here (the caller paints a plain layer).
+bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Placement& p) {
+  LayerCache::Impl& lc = *ctx.layers->impl;
+  auto* rec = static_cast<const NodeRecord*>(n->paintCache.get());
+  if (!rec || !rec->valid || !rec->layerStamp) return false;
+  const void* owner = c->recorder() ? static_cast<const void*>(c->recorder())
+                                    : static_cast<const void*>(c->recordingContext());
+  if (!owner) return false;
+  const SkMatrix m = c->getTotalMatrix();
+  if (m.hasPerspective()) return false;
+  SkRect vb = visualBounds(n);
+  constexpr int kMaxSide = 4096;
+  SkIRect full = m.mapRect(vb).roundOut(), need;
+  if (!need.intersect(full, SkIRect::MakeSize(c->getBaseLayerSize()))) return true;  // offscreen
+  if (c->quickReject(vb)) return true;
+  auto it = lc.entries.find(n);
+  int dx = 0, dy = 0;
+  bool hit = false, inexact = false;
+  if (it != lc.entries.end()) {
+    const auto& e = it->second;
+    const SkMatrix& em = e.matrix;
+    float fx = m.getTranslateX() - em.getTranslateX(), fy = m.getTranslateY() - em.getTranslateY();
+    dx = int(std::lround(fx));
+    dy = int(std::lround(fy));
+    hit = e.stamp == rec->layerStamp && e.owner == owner && e.image &&
+          e.image->colorType() == c->imageInfo().colorType() && m.getScaleX() == em.getScaleX() &&
+          m.getScaleY() == em.getScaleY() && m.getSkewX() == em.getSkewX() && m.getSkewY() == em.getSkewY() &&
+          (e.whole || e.rect.makeOffset(dx, dy).contains(need));
+    // A whole-pixel move is exact. While the node moves (an Animated
+    // translation) a sub-pixel one is drawn at the nearest whole pixel, as a
+    // compositor would; once it stops it is repainted exactly (layerInexact).
+    inexact = std::fabs(fx - float(dx)) >= 1e-4f || std::fabs(fy - float(dy)) >= 1e-4f;
+    if (inexact && !rec->moved) hit = false;
+  }
+  if (!hit) {
+    // Content that keeps changing (a spinner inside a fading panel): a
+    // texture of the whole layer every frame would cost more than a layer
+    // clipped to the damage.
+    if (rec->stableFrames < 1) return false;
+    // The whole layer when it fits, so it can move into view without
+    // being rendered again.
+    if (full.width() <= kMaxSide && full.height() <= kMaxSide &&
+        size_t(full.width()) * full.height() * 4 <= lc.budget / 2)
+      need = full;
+    if (need.width() > kMaxSide || need.height() > kMaxSide ||
+        size_t(need.width()) * need.height() * 4 > lc.budget / 2)
+      return false;
+    SkImageInfo info = c->imageInfo().makeWH(need.width(), need.height()).makeAlphaType(kPremul_SkAlphaType);
+    SkSurfaceProps props = surfaceProps();
+    sk_sp<SkSurface> surf = c->makeSurface(info, &props);
+    if (!surf) return false;
+    SkCanvas* oc = surf->getCanvas();
+    oc->clear(SK_ColorTRANSPARENT);
+    oc->translate(float(-need.left()), float(-need.top()));
+    oc->concat(m);
+    // The whole layer (no damage culling), with plain layers inside.
+    Ctx sub{ctx.doc, ctx.root, nullptr, {}, ctx.snapSpace, ctx.transformed, 1, nullptr};
+    paintContent(n, oc, sub, p.snap, p.w, p.h);
+    ctx.stats.nodesPainted += sub.stats.nodesPainted;
+#if defined(JSUI_GRAPHITE_AS_IMAGE)
+    sk_sp<SkImage> image = oc->recorder() ? SkSurfaces::AsImage(surf) : surf->makeImageSnapshot();
+#else
+    sk_sp<SkImage> image = surf->makeImageSnapshot();
+#endif
+    if (!image) return false;
+    if (it != lc.entries.end()) lc.erase(it);
+    LayerCache::Impl::Entry e;
+    e.stamp = rec->layerStamp;
+    e.image = std::move(image);
+    e.rect = need;
+    e.whole = need == full;
+    e.matrix = m;
+    e.owner = owner;
+    lc.bytes += LayerCache::Impl::sizeOf(e);
+    it = lc.entries.emplace(n, std::move(e)).first;
+    dx = dy = 0;
+    inexact = false;
+    ctx.stats.layerRenders++;
+  }
+  rec->layerInexact = inexact;
+  // Another frame even if nothing changes: the one that repaints it exactly.
+  if (inexact) ctx.doc.markPaintDirty();
+  it->second.lastUsed = lc.frame;
+  ctx.stats.layerDraws++;
+  SkPaint lp;
+  lp.setAlphaf(opacity);
+  c->save();
+  c->resetMatrix();
+  c->drawImage(it->second.image.get(), float(it->second.rect.left() + dx), float(it->second.rect.top() + dy),
+               SkSamplingOptions(), &lp);
+  c->restore();
+  return true;
+}
+
 void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   if (!isPainted(n)) return;
   // Incremental repaint: skip subtrees entirely outside the damage. Their
@@ -1557,6 +1727,19 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
     alpha = opacity;
     layer = false;
   }
+  SkMatrix parentSnap = ctx.snapSpace;
+  bool parentTransformed = ctx.transformed;
+  if (layer && ctx.layers && s.filters.empty() && !s.blendMode) {
+    ctx.snapSpace = p.snapSpace;
+    ctx.transformed |= p.transformed;
+    bool drawn = paintCachedLayer(n, c, ctx, opacity, p);
+    ctx.snapSpace = parentSnap;
+    ctx.transformed = parentTransformed;
+    if (drawn) {
+      c->restoreToCount(saveCount);
+      return;
+    }
+  }
   if (layer) {
     SkPaint lp;
     lp.setAlphaf(opacity);
@@ -1565,8 +1748,6 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
     SkRect bounds = visualBounds(n);
     c->saveLayer(&bounds, &lp);
   }
-  SkMatrix parentSnap = ctx.snapSpace;
-  bool parentTransformed = ctx.transformed;
   ctx.snapSpace = p.snapSpace;
   ctx.transformed |= p.transformed;
   ctx.alpha = alpha;
@@ -1677,12 +1858,17 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
   SkMatrix m = parent;
   float w = 0, h = 0;
   bool painted = isPainted(n);
+  SkMatrix local;
+  SkVector snap = {0, 0};
+  bool below = false;  // a descendant's painting changed in its parent's space
   if (painted) {
     const ComputedStyle& s = n->style();
     Placement p = place(n, parentSnap);
     m.preConcat(p.local);
     w = p.w;
     h = p.h;
+    local = p.local;
+    snap = p.snap;
     if (!own.intersect(deviceBounds(m, ownVisualBounds(n, w, h)), clip)) own.setEmpty();
     if (!own.isEmpty()) {
       SkRect co = curvedOutline(n, m, w, h);
@@ -1738,8 +1924,13 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
           childDamage = &scan->sub;
         }
       }
-      for (Node* ch : n->ghosts) sub.join(updateRecords(ch, cm, cs, childClip, imageGen, childDamage, curved, scan));
-      for (Node* ch : n->children()) sub.join(updateRecords(ch, cm, cs, childClip, imageGen, childDamage, curved, scan));
+      auto visit = [&](Node* ch) {
+        sub.join(updateRecords(ch, cm, cs, childClip, imageGen, childDamage, curved, scan));
+        auto* cr = static_cast<const NodeRecord*>(ch->paintCache.get());
+        below |= !cr || cr->relChanged;
+      };
+      for (Node* ch : n->ghosts) visit(ch);
+      for (Node* ch : n->children()) visit(ch);
       if (scanning) {
         scan->inside = false;
         scan->curvedEnd = curved->size();
@@ -1791,6 +1982,30 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
     if (contentChanged || caret || rec->bars != bars || rec->barAlpha != barAlpha || !nearlyEqual(moved, m))
       scan->pure = false;
   }
+  // Layer stamp: the subtree's painting relative to this node, which leaves
+  // out the node's own opacity and transform (contentVersion) and where it
+  // is placed (local).
+  bool selfChanged = !rec->valid || rec->contentVersion != n->contentVersion || rec->painted != painted ||
+                     rec->w != w || rec->h != h || rec->children != kids || rec->imageGen != gen || caret ||
+                     rec->bars != bars || rec->barAlpha != barAlpha || rec->scrollX != n->scrollX ||
+                     rec->scrollY != n->scrollY || rec->snap != snap;
+  if (selfChanged || below || !rec->layerStamp) {
+    static std::atomic<uint64_t> stamps{0};
+    rec->layerStamp = ++stamps;
+    rec->stableFrames = 0;
+  } else if (rec->stableFrames < 1000000) {
+    rec->stableFrames++;
+  }
+  rec->relChanged = selfChanged || below || rec->version != n->paintVersion || rec->local != local;
+  rec->moved = rec->valid && rec->matrix != m;
+  if (rec->layerInexact && !rec->moved) {
+    // Came to rest after moving as a cached layer: paint it exactly.
+    damage->op(sub, SkRegion::kUnion_Op);
+    rec->layerInexact = false;
+  }
+  rec->local = local;
+  rec->snap = snap;
+  rec->contentVersion = n->contentVersion;
   rec->scrollX = n->scrollX;
   rec->scrollY = n->scrollY;
   rec->bars = bars;
@@ -2070,6 +2285,9 @@ void paintDocument(Document& doc, SkCanvas* canvas, const SkRegion* damage) {
     }
   }
   Ctx ctx{doc, root, damage, {}, {}};
+  // Composited layers on GPU canvases only (a raster canvas has no recorder
+  // or context, and the counting canvas none either).
+  ctx.layers = tLayerCache;
   std::unique_ptr<SkCanvas> counter;
   if (root->counting && (counter = makeCountingCanvas(canvas, &ctx.stats))) {
     // Same clip and matrix as the target, so quick rejects match (the
@@ -2130,6 +2348,8 @@ void paintDocumentRects(Document& doc, SkCanvas* canvas, const std::vector<SkIRe
     sum.clips += s.clips;
     sum.spriteDraws += s.spriteDraws;
     sum.spriteRenders += s.spriteRenders;
+    sum.layerDraws += s.layerDraws;
+    sum.layerRenders += s.layerRenders;
   }
   rootRecord(doc)->stats = sum;
 }

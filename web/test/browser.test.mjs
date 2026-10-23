@@ -852,6 +852,132 @@ test('webgpu: steady animation frames (interactions showcase): retained, few pas
   assert(d.max <= 1, `retained frame differs from a full repaint: ${JSON.stringify(d)}`);
 }, { viewport: { width: 1300, height: 1500 } });
 
+test('webgpu: entrance of the interactions showcase: composited layers equal plain layers', async ({ page }) => {
+  // The entrance fades and slides panels and menu buttons (layers over
+  // children) while some of their content animates too: every frame of 'a'
+  // (layer cache) must match 'b' (JSUI_WEBGPU_NO_LAYER_CACHE), so a cached
+  // layer is never drawn with stale content.
+  let build;
+  try {
+    ({ build } = await import('@jsui/cli'));
+  } catch (e) {
+    skip(`@jsui/cli unavailable: ${e.message}`, true);
+  }
+  const outfile = path.join(WEB, 'test/output/interactions.js');
+  fs.mkdirSync(path.dirname(outfile), { recursive: true });
+  await build({ entry: path.join(WEB, '../examples/showcase/interactions.jsx'), outfile, minify: true });
+  const renderers = await page.evaluate(async (dist) => {
+    const bundleSource = await (await fetch('output/interactions.js')).text();
+    const make = () => {
+      const c = document.createElement('canvas');
+      c.style.width = '1280px';
+      c.style.height = '720px';
+      document.body.appendChild(c);
+      return window.createJsui({ canvas: c, bundleSource, bundleUrl: 'output/interactions.js', renderer: 'webgpu', autoStart: false,
+        moduleUrl: new URL(`../${dist}/jsui.js`, location.href) });
+    };
+    window.t0 = performance.now();
+    const [a, b] = await Promise.all([make(), make()]);
+    window.hosts = { a, b };
+    b._wgpu.flags = 8;  // JSUI_WEBGPU_NO_LAYER_CACHE
+    return [a.renderer, b.renderer];
+  }, DIST);
+  if (renderers.some((n) => n !== 'webgpu')) skip(`no WebGPU renderer with web/${DIST} (${renderers})`, DIST !== 'dist-gpu');
+  let worst = { max: 0 };
+  for (let k = 0; k < 6; k++) {
+    await page.evaluate(async (k) => {
+      const { a, b } = window.hosts;
+      for (let i = 0; i < 12; i++) {
+        const t = window.t0 + (k * 12 + i + 1) * 16.67;
+        a.frame(t);
+        b.frame(t);
+        await a._wgpu.device.queue.onSubmittedWorkDone();
+      }
+    }, k);
+    const d = await frameDiff(page, ['a', 'b']);
+    assert(!d.missing && !d.size, `readback ${JSON.stringify(d)}`);
+    if (d.max > worst.max || d.over > (worst.over ?? 0)) worst = { ...d, frame: (k + 1) * 12 };
+  }
+  console.log(`      entrance: composited vs plain layers max diff ${worst.max}`);
+  // Some of the app's state follows the wall clock (the JS-driven progress
+  // bar), so the two runtimes can differ by a few levels at an edge; a stale
+  // or misplaced layer differs by far more (text and box edges).
+  assert(worst.over === 0 && worst.max <= 12 && worst.mean < 0.01,
+    `a composited layer differs from a plain one during the entrance: ${JSON.stringify(worst)}`);
+}, { viewport: { width: 1300, height: 1500 } });
+
+test('webgpu: fading and moving layers are composited from cached textures, exact', async ({ page }) => {
+  // A panel with children needs a layer for its opacity: an offscreen render
+  // pass every frame of a fade (one per damage rect). With the layer cache
+  // its texture is drawn again while only its opacity / position change:
+  // no offscreen passes, the same pixels as a layer (whole-pixel moves; a
+  // sub-pixel move is composited at the nearest pixel while it moves and
+  // repainted exactly when it stops).
+  await page.addInitScript({ path: path.join(WEB, 'test/gpu-count.js') });
+  await page.reload();
+  await page.waitForFunction(() => window.testReady);
+  const renderers = await page.evaluate(async (dist) => {
+    const make = () => {
+      const c = document.createElement('canvas');
+      c.style.width = '400px';
+      c.style.height = '300px';
+      document.body.appendChild(c);
+      return window.createJsui({ canvas: c, bundleUrl: 'fixtures/layers.js', renderer: 'webgpu', autoStart: false,
+        moduleUrl: new URL(`../${dist}/jsui.js`, location.href) });
+    };
+    const [a, b] = await Promise.all([make(), make()]);
+    window.hosts = { a, b };
+    return [a.renderer, b.renderer];
+  }, DIST);
+  if (renderers.some((n) => n !== 'webgpu')) skip(`no WebGPU renderer with web/${DIST} (${renderers})`, DIST !== 'dist-gpu');
+  await page.evaluate(() => {
+    window.hosts.b._wgpu.flags = 8;  // JSUI_WEBGPU_NO_LAYER_CACHE: a plain layer every frame
+    window.t = performance.now();
+  });
+  // Steps both runtimes through `moves`; returns the offscreen passes of 'a'
+  // per frame after the first `warm` frames.
+  const run = (moves, warm = 0) => page.evaluate(async ({ moves, warm }) => {
+    const { a, b } = window.hosts;
+    const offscreen = [];
+    for (let i = 0; i < moves.length; i++) {
+      for (const h of [a, b]) if (moves[i]) h.postMessage('move', moves[i]);
+      window.t += 16.67;
+      window.__gpuCounts.clear();
+      a.frame(window.t);
+      const n = [...window.__gpuCounts].filter(([k]) => k.startsWith('pass color ') && !k.includes(' 400x300 '))
+        .reduce((s, [, v]) => s + v, 0);
+      if (i >= warm) offscreen.push(n);
+      b.frame(window.t);
+      await a._wgpu.device.queue.onSubmittedWorkDone();
+    }
+    return offscreen;
+  }, { moves, warm });
+  const steps = (n, f) => Array.from({ length: n }, (_, i) => f(i));
+  await run(steps(3, () => null));
+  const fade = await run(steps(12, (i) => ({ opacity: 0.3 + i * 0.05, x: 0, y: 0 })), 2);
+  assert(fade.every((n) => n === 0), `offscreen passes while fading: ${fade}`);
+  let d = await frameDiff(page, ['a', 'b']);
+  assert(!d.missing && !d.size && d.max <= 1, `faded: composited layer differs from a layer: ${JSON.stringify(d)}`);
+  const slide = await run(steps(8, (i) => ({ opacity: 0.8 - i * 0.04, x: 3 * (i + 1), y: -(i + 1) })));
+  assert(slide.every((n) => n === 0), `offscreen passes while moving by whole pixels: ${slide}`);
+  d = await frameDiff(page, ['a', 'b']);
+  assert(d.max <= 1, `moved: composited layer differs from a layer: ${JSON.stringify(d)}`);
+  const glide = await run(steps(8, (i) => ({ opacity: 0.6, x: 24 + 0.37 * (i + 1), y: -8 + 0.21 * (i + 1) })));
+  assert(glide.every((n) => n === 0), `offscreen passes while moving by sub-pixels: ${glide}`);
+  await run(steps(3, () => null));  // at rest
+  d = await frameDiff(page, ['a', 'b']);
+  assert(d.max <= 1, `at rest after a sub-pixel move: not repainted exactly: ${JSON.stringify(d)}`);
+  // Content under the layer changes (a child's own opacity, transform or
+  // colour) while the panel fades: the cached texture must follow.
+  const childMoves = [{ opacity: 0.5 }, { transform: [{ rotate: '20deg' }] }, { backgroundColor: '#00ff88' }];
+  for (const [k, cm] of childMoves.entries()) {
+    await page.evaluate((cm) => { for (const h of Object.values(window.hosts)) h.postMessage('child', cm); }, cm);
+    await run(steps(3, (i) => ({ opacity: 0.5 + 0.1 * i, x: 24, y: -8 + k })));
+    d = await frameDiff(page, ['a', 'b']);
+    assert(d.max <= 1, `child change ${JSON.stringify(cm)}: stale composited layer: ${JSON.stringify(d)}`);
+  }
+}, { viewport: { width: 900, height: 400 } });
+
 test('webgpu: devicePixelRatio 2 and resize', async ({ page }) => {
   const info = await mountWebGPU(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
   assert(info.pw === 640 && info.ph === 400, `backing store ${info.pw}x${info.ph}`);

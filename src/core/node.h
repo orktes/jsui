@@ -143,6 +143,11 @@ class Node {
   // Bumped on every change that affects how this node itself paints (props,
   // text, children list). The painter compares it against its cache.
   uint32_t paintVersion = 0;
+  // Like paintVersion, but not bumped by changes that only move or fade the
+  // node as a whole (opacity, transform, zIndex: an Animated frame): what it
+  // paints into its own layer stays the same, so a cached layer of its
+  // subtree can be composited again (painter.cpp, LayerCache).
+  uint32_t contentVersion = 0;
 
   // Hit-test culling (InputManager::hitNode). A clean node caches whether
   // every hittable point of its subtree lies inside its own box, so a

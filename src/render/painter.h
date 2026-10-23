@@ -1,7 +1,9 @@
 // Paints a laid-out Document with Skia.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "include/core/SkMatrix.h"
@@ -82,8 +84,54 @@ struct PaintStats {
   int spriteDraws = 0;
   int spriteRenders = 0;
   int64_t blitPixels = 0;  // pixels moved by a scroll blit instead of repainted
+  // Always counted: opacity layers composited from a LayerCache, and of
+  // those the ones rendered this paint (misses).
+  int layerDraws = 0;
+  int layerRenders = 0;
 };
 PaintStats lastPaintStats(const Document& doc);
+
+// Composited opacity layers (GPU backends). A node painted through a layer
+// (opacity < 1 over children or overlapping draws) normally renders its
+// subtree into an offscreen texture every time it is painted: on Graphite a
+// render pass per layer and per damage rect, every frame of a fade. With a
+// LayerCache active (LayerCacheScope, set by the GPU context around a
+// frame), the layer's texture is kept and drawn again, at the frame's
+// opacity, while the subtree paints the same relative to the node (no
+// change below it other than the node's own opacity / transform, see
+// Node::contentVersion) and the node's device matrix differs from the cached
+// one only by a whole-pixel translation. Those draws are the pixels the
+// layer would have produced. A subtree that keeps changing (stamp changed in
+// the last frame) is painted through a plain layer, clipped to the damage.
+// Textures belong to the GPU context the canvas draws with: the owner frees
+// the cache (clear()) before its context.
+class LayerCache {
+ public:
+  explicit LayerCache(size_t budgetBytes = size_t(96) << 20);
+  ~LayerCache();
+  LayerCache(const LayerCache&) = delete;
+  LayerCache& operator=(const LayerCache&) = delete;
+  void clear();
+  // After a frame: frees layers unused for a while, and the least recently
+  // used ones over the budget.
+  void endFrame();
+  size_t bytes() const;
+  int size() const;
+  struct Impl;
+  std::unique_ptr<Impl> impl;
+};
+// Makes `cache` the one paintDocument() uses on this thread while in scope
+// (null: none).
+class LayerCacheScope {
+ public:
+  explicit LayerCacheScope(LayerCache* cache);
+  ~LayerCacheScope();
+  LayerCacheScope(const LayerCacheScope&) = delete;
+  LayerCacheScope& operator=(const LayerCacheScope&) = delete;
+
+ private:
+  LayerCache* prev_;
+};
 
 // Benchmarks / perf tests: count the canvas calls of each paintDocument()
 // (see PaintStats). Off by default; it wraps the canvas, which costs a

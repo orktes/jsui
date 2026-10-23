@@ -61,6 +61,7 @@ struct WebGPUGpu final : JsuiGpuContext {
   std::unique_ptr<graphite::Context> ctx;
   std::unique_ptr<graphite::Recorder> recorder;
   sk_sp<CachingImageProvider> images;
+  jsui::LayerCache layers;    // composited opacity layers (painter.h)
   sk_sp<SkSurface> retained;  // the last frame, for damage-only repaints
   // The last frame as a copy of the target (copy-back mode, see render()).
   wgpu::Texture back;
@@ -114,6 +115,7 @@ struct WebGPUGpu final : JsuiGpuContext {
 
   void release() {
     dropRetained();
+    layers.clear();
     if (images) images->clear();
     recorder.reset();
     if (!ctx) return;
@@ -187,6 +189,7 @@ void contextLost(JsuiGpuContext* gpu) {
   if (!g) return;
   g->lost = true;
   g->dropRetained();
+  g->layers.clear();
   if (g->images) g->images->clear();
 }
 
@@ -199,6 +202,7 @@ void purge(JsuiGpuContext* gpu, size_t cacheBytes) {
     g->images->setBudget(cacheBytes / 2);
   }
   g->images->clear();
+  g->layers.clear();
   g->recorder->freeGpuResources();
   g->ctx->freeGpuResources();
 }
@@ -260,6 +264,7 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
   const void* key = haveLast ? reinterpret_cast<const void*>(uintptr_t(g->retainedGen)) : nullptr;
   bool viaRetained = false, failed = false;
   bool copyAll = false;  // copy-back: the whole target into `back` after the frame
+  jsui::LayerCacheScope layerScope((t.flags & JSUI_WEBGPU_NO_LAYER_CACHE) ? nullptr : &g->layers);
   rt.renderCanvasTracked(key, w, h, [&](const SkIRect&, bool keyValid) -> Runtime::CanvasChoice {
     int64_t area = 0;
     for (SkRegion::Iterator it(rt.trackedDamage()); !it.done(); it.next())
@@ -319,6 +324,7 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
     c.splitDamage = true;
     return c;
   }, /*growCurves=*/false);
+  g->layers.endFrame();
   if (failed) return -1;
   if (viaRetained && !copyBack) {
     SkPaint paint;
@@ -339,17 +345,13 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
       enc.CopyTextureToTexture(&src, &dst, &size);
     };
     SkIRect all = SkIRect::MakeWH(w, h);
-    const SkRegion& damage = rt.trackedDamage();
     if (copyAll) {
       copy(all);
-    } else if (damage.computeRegionComplexity() > 32) {  // many small rects: one copy
-      SkIRect r = damage.getBounds();
-      if (r.intersect(all)) copy(r);
     } else {
-      for (SkRegion::Iterator it(damage); !it.done(); it.next()) {
-        SkIRect r = it.rect();
+      // The rects the frame repainted (a few covering the damage region,
+      // which can be dozens of bands), not the region's rects.
+      for (SkIRect r : rt.trackedRects())
         if (r.intersect(all)) copy(r);
-      }
     }
     wgpu::CommandBuffer cb = enc.Finish();
     g->queue.Submit(1, &cb);

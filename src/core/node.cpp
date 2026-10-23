@@ -211,6 +211,7 @@ void Node::setProps(const Value& props) {
     }
   }
   paintVersion++;
+  contentVersion++;
   if (!doc_) return;
   if (relayout) doc_->markLayoutDirty();
   else doc_->markPaintDirty();
@@ -225,6 +226,7 @@ void Node::textStyleChanged(const TextStyle& oldText, bool propsMetrics, bool pr
   if (!root) return;
   root->textCache.reset();
   root->paintVersion++;
+  root->contentVersion++;
   if (metrics && root->yoga_ && YGNodeHasMeasureFunc(root->yoga_)) {
     YGNodeMarkDirty(root->yoga_);
     *relayout = true;
@@ -277,6 +279,7 @@ bool Node::patchStyle(const Value::Object& partial) {
   bool relayout = false;
   if (isText) textStyleChanged(oldText, false, false, &relayout);
   paintVersion++;
+  if (!styleGroupsMoveOnly(groups)) contentVersion++;
   if (relayout) doc_->markLayoutDirty();
   else doc_->markPaintDirty();
   if (type_ == NodeType::TextInput) edit::syncProps(this);
@@ -346,12 +349,14 @@ Rect Node::absoluteRect() const {
 
 void Node::markDirty() {
   paintVersion++;
+  contentVersion++;
   textCache.reset();
   // Text measurement depends on descendants: dirty the paragraph root's measure.
   if (type_ == NodeType::Text || type_ == NodeType::RawText) {
     if (Node* p = paragraphRoot()) {
       p->textCache.reset();
       p->paintVersion++;
+      p->contentVersion++;
       if (p->yoga_ && YGNodeHasMeasureFunc(p->yoga_)) YGNodeMarkDirty(p->yoga_);
     }
   }
@@ -360,6 +365,7 @@ void Node::markDirty() {
 
 void Node::markPaintDirty() {
   paintVersion++;
+  contentVersion++;
   if (doc_) doc_->markPaintDirty();
 }
 
