@@ -22,6 +22,15 @@ extends Control
 ##   --max-gpu-diff D    with --capture on a GPU renderer: also paint the same
 ##                       frame with the CPU raster, save it as <png>-cpu.png and
 ##                       fail if the mean channel difference exceeds D
+##   --max-viewport-diff D
+##                       with --capture and a display (not --headless): read
+##                       back what Godot drew for the view (the viewport
+##                       texture, with the view frozen over an opaque backdrop)
+##                       and fail if it differs from get_frame_image() over
+##                       that backdrop by a mean channel difference above D.
+##                       get_frame_image() reads JsuiView's own texture, so
+##                       only this sees a canvas item that shows something
+##                       else (e.g. Godot's magenta / black placeholder)
 ##   --bench <n>         measure n frames of hover springs and n frames of
 ##                       list scrolling (JsuiView.get_render_stats, frame
 ##                       times), print them and quit
@@ -44,6 +53,7 @@ extends Control
 @onready var ui = $JsuiView
 
 const PING_REWARD := 120
+const VIEWPORT_BACKDROP := Color8(40, 150, 110)  # --max-viewport-diff
 
 var _capture := ""
 var _frames := 120
@@ -53,6 +63,7 @@ var _self_test := false
 var _window_size := Vector2i.ZERO
 var _expect_renderer := ""
 var _max_gpu_diff := -1.0
+var _max_viewport_diff := -1.0
 var _bench := 0
 var _pongs := 0
 var _ui_answers := 0
@@ -119,6 +130,9 @@ func _enter_tree() -> void:
 				i += 1
 			"--max-gpu-diff":
 				_max_gpu_diff = float(v)
+				i += 1
+			"--max-viewport-diff":
+				_max_viewport_diff = float(v)
 				i += 1
 			"--bench":
 				_bench = int(v)
@@ -477,6 +491,9 @@ func _save_capture() -> void:
 		ok = false
 	if _max_gpu_diff >= 0.0 and ui.get_renderer() != "cpu":
 		ok = _compare_with_cpu(path) and ok
+	if _max_viewport_diff >= 0.0:
+		var shown_ok: bool = await _compare_with_viewport(path)
+		ok = shown_ok and ok
 	# With a real renderer (not --headless) also grab the composited window,
 	# which shows the texture as Godot drew it.
 	if DisplayServer.get_name() != "headless":
@@ -520,6 +537,68 @@ func _compare_with_cpu(path: String) -> bool:
 		ui.get_renderer(), w, h, m.mean, m.root_mean_squared, int(m.max), over_pct, _max_gpu_diff, "ok" if ok else "FAIL"])
 	if not ok:
 		printerr("gpu-vs-cpu: the GPU frame differs from the CPU raster")
+	return ok
+
+
+## --max-viewport-diff: what Godot drew for the view against the frame
+## JsuiView rendered. get_frame_image() reads the view's own texture, so it is
+## right even when the canvas item draws another one (Godot's placeholder, a
+## magenta / black checkerboard: Texture2DRD.get_rid() before the render
+## thread created its RenderingServer texture). The view is frozen (no ticks,
+## no repaints) over an opaque backdrop of a known colour, so the screen must
+## show the frame blended over that colour, also where the UI is translucent
+## and the 3D scene would show through. The frame is scaled to the view's
+## rect in window pixels if they differ.
+func _compare_with_viewport(path: String) -> bool:
+	if DisplayServer.get_name() == "headless":
+		printerr("viewport-vs-frame: needs a display (not --headless) FAIL")
+		return false
+	ui.set_process(false)
+	var backdrop := ColorRect.new()
+	backdrop.color = VIEWPORT_BACKDROP
+	backdrop.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	backdrop.show_behind_parent = true  # under the view's own canvas item
+	ui.add_child(backdrop)
+	backdrop.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	# With a separate render thread the frame_post_draw that arrives first can
+	# be for a frame drawn before the backdrop was there.
+	for n in 3:
+		await RenderingServer.frame_post_draw
+	var shot: Image = get_viewport().get_texture().get_image()
+	var frame: Image = ui.get_frame_image()
+	ui.remove_child(backdrop)
+	backdrop.free()
+	ui.set_process(true)
+	if shot == null or frame == null:
+		printerr("viewport-vs-frame: no viewport image or frame FAIL")
+		return false
+	var r: Rect2 = get_viewport().get_final_transform() * ui.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, ui.size)
+	var full := Rect2i(Vector2i(r.position.round()), Vector2i(r.size.round()))
+	var rect := full.intersection(Rect2i(Vector2i.ZERO, shot.get_size()))
+	if not rect.has_area():
+		printerr("viewport-vs-frame: the view (%s) is not in the viewport (%s) FAIL" % [full, shot.get_size()])
+		return false
+	shot.convert(Image.FORMAT_RGBA8)
+	frame.convert(Image.FORMAT_RGBA8)
+	var frame_size := frame.get_size()
+	if frame_size != full.size:
+		frame.resize(full.size.x, full.size.y, Image.INTERPOLATE_BILINEAR)
+	var shown := shot.get_region(rect)
+	var expected := Image.create_empty(rect.size.x, rect.size.y, false, Image.FORMAT_RGBA8)
+	expected.fill(VIEWPORT_BACKDROP)
+	expected.blend_rect(frame, Rect2i(rect.position - full.position, rect.size), Vector2i.ZERO)
+	shown.convert(Image.FORMAT_RGB8)
+	expected.convert(Image.FORMAT_RGB8)
+	shown.save_png(path.get_basename() + "-shown.png")
+	expected.save_png(path.get_basename() + "-expected.png")
+	var m: Dictionary = shown.compute_image_metrics(expected, false)
+	var mean: float = m.mean * 4.0 / 3.0  # metrics average R, G, B and A; A is 255 in both
+	var ok: bool = mean <= _max_viewport_diff
+	print("viewport-vs-frame: %s frame %dx%d, view at %s in a %dx%d viewport: mean %.3f, max %d (limit mean %.3f) %s" % [
+		ui.get_renderer(), frame_size.x, frame_size.y, rect, shot.get_width(), shot.get_height(), mean, int(m.max),
+		_max_viewport_diff, "ok" if ok else "FAIL"])
+	if not ok:
+		printerr("viewport-vs-frame: Godot does not show the frame JsuiView rendered (see %s-shown.png / -expected.png)" % path.get_basename())
 	return ok
 
 

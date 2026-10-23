@@ -166,7 +166,9 @@ jobs:
   # its Dawn patch) so JsuiView can render
   # straight into Godot's RenderingDevice textures. Godot runs headless
   # (CPU raster) and on Vulkan through Mesa's lavapipe under Xvfb (Skia
-  # Graphite, checked against the CPU raster of the same frame).
+  # Graphite, checked against the CPU raster of the same frame, and what
+  # Godot drew read back from the viewport and checked against that frame,
+  # also with a separate render thread).
   godot:
     name: godot (GDExtension, ubuntu)
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
@@ -237,6 +239,10 @@ jobs:
         run: |
           GODOT_RENDERING=vulkan SIZES=1280x720 xvfb-run -a -s "-screen 0 1920x1080x24" \
             integrations/godot/smoke-test.sh build/godot-vulkan.png
+      - name: Vulkan with a separate render thread (--render-thread separate, as some games run it) - Godot must show the JSUI frame
+        run: |
+          GODOT_RENDERING=vulkan GODOT_RENDER_THREAD=separate SIZES=1280x720 xvfb-run -a -s "-screen 0 1920x1080x24" \
+            integrations/godot/smoke-test.sh build/godot-vulkan-separate.png
       - name: Vulkan in Godot 4.3 too
         run: |
           GODOT_VERSION=4.3-stable GODOT_RENDERING=vulkan SIZES=1280x720 xvfb-run -a -s "-screen 0 1920x1080x24" \
