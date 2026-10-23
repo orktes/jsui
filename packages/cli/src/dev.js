@@ -16,6 +16,10 @@
 //                             current one (see hmr.js / hmr-runtime.js)
 //   GET /__jsui/error         text of the current build error ('' when ok)
 //   GET /                     small index page (links the WASM web host if built)
+//   /shared, /__jsui/shared/* with `shared`: one live runtime in this process
+//                             that a person (the /shared viewer page) and
+//                             agents (jsui run --attach) drive together; see
+//                             shared.js
 // Anything else is served from the entry's directory (for fetch('./data.json')).
 
 import * as esbuild from 'esbuild';
@@ -25,6 +29,7 @@ import path from 'node:path';
 import { esbuildOptions } from './config.js';
 import { formatErrors } from './build.js';
 import { createHmr } from './hmr.js';
+import { createShared } from './shared.js';
 
 const TYPES = {
   '.js': 'text/javascript; charset=utf-8',
@@ -64,7 +69,7 @@ function safeJoin(root, rel) {
   return p === root || p.startsWith(root + path.sep) ? p : null;
 }
 
-export async function dev({ entry, port = 5173, host = '127.0.0.1', log = console.log, minify = false, hmr = true }) {
+export async function dev({ entry, port = 5173, host = '127.0.0.1', log = console.log, minify = false, hmr = true, shared = null }) {
   const absEntry = path.resolve(entry);
   const entryDir = path.dirname(absEntry);
   const webDir = findWebHost(entryDir) || findWebHost(process.cwd());
@@ -132,8 +137,10 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
     res.end(body);
   };
 
+  let sharedView = null;
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
+    if (sharedView && sharedView.handle(req, res, url)) return undefined;
     const p = decodeURIComponent(url.pathname);
     if (req.method === 'OPTIONS') return send(res, 204, 'text/plain', '', { 'Access-Control-Allow-Methods': 'GET', 'Access-Control-Allow-Headers': '*' });
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'text/plain', 'method not allowed');
@@ -181,6 +188,7 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
 <h1>jsui dev server</h1>
 <p>Bundle: <a href="/bundle.js">/bundle.js</a> &middot; version: <code>${state.version}</code></p>
 <p>Native: <code>jsui-viewer --dev http://${host}:${port}/bundle.js</code></p>
+${sharedView ? `<p><a href="/shared">Shared view</a> (agents: <code>jsui run --attach http://${host}:${port} steps.json</code>)</p>` : ''}
 ${web}
 ${state.error ? `<pre style="color:#f88">${state.error.replace(/[<&]/g, (c) => (c === '<' ? '&lt;' : '&amp;'))}</pre>` : ''}`;
       return send(res, 200, TYPES['.html'], html);
@@ -202,11 +210,25 @@ ${state.error ? `<pre style="color:#f88">${state.error.replace(/[<&]/g, (c) => (
   });
   const actualPort = server.address().port;
   log(`[jsui] dev server: http://${host}:${actualPort}/bundle.js  (version endpoint /__jsui/version)`);
+  if (shared) {
+    // The runtime fetches the bundle (and hot updates) from this server.
+    const local = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host.includes(':') ? `[${host}]` : host;
+    try {
+      sharedView = await createShared({ ...shared, entry: path.relative(process.cwd(), absEntry), bundleUrl: `http://${local}:${actualPort}/bundle.js`, hosts: [host, local], log });
+    } catch (e) {
+      await ctx.dispose();
+      await new Promise((r) => server.close(r));
+      throw e;
+    }
+    log(`[jsui] shared view: http://${local}:${actualPort}/shared  (agents: jsui run --attach http://${local}:${actualPort} steps.json)`);
+  }
   return {
     port: actualPort,
     state,
+    shared: sharedView,
     async close() {
       notify();
+      if (sharedView) await sharedView.close();
       await ctx.dispose();
       await new Promise((r) => server.close(r));
       server.closeAllConnections?.();

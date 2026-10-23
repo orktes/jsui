@@ -8,12 +8,15 @@ import { pathToFileURL } from 'node:url';
 import { build } from '../src/build.js';
 import { dev } from '../src/dev.js';
 import { elementSummary, formatTree, launch } from '../src/headless.js';
+import { attach } from '../src/attach.js';
 import { answerOf, runSteps, STEP_HELP } from '../src/script.js';
 import { skillCommand, SKILL_USAGE } from '../src/skill.js';
 
 const USAGE = `usage:
   jsui build <entry> [-o dist/bundle.js] [--minify] [--sourcemap] [--dev]
   jsui dev <entry> [--port 5173] [--host 127.0.0.1] [--no-hmr]
+     [--shared [view options]]  one live app you (http://127.0.0.1:5173/shared)
+                                and agents (--attach) see and control together
 
   jsui screenshot <entry> [-o screenshot.png] [--wait 1000] [view options]
   jsui inspect <entry> [--wait 1000] [--find <selector>] [--json] [view options]
@@ -21,6 +24,12 @@ const USAGE = `usage:
      view options: [--width 1280] [--height 720] [--scale 1] [--fps 60]
        [--component Name] [--props '{"json":1}'] [--state key='json' ...]
        [--bundle] (entry is a built bundle.js) [--dev] (development React)
+
+  jsui screenshot|inspect|run --attach http://127.0.0.1:5173 ...  (no <entry>)
+     drive the app of 'jsui dev --shared' instead: the same commands, on the
+     live app the person sees, in real time
+  jsui log --attach <url> [--since <seq>] [--follow]
+     what the person, agents and the UI did (clicks, keys, messages, calls)
 
 ${SKILL_USAGE}
 
@@ -43,6 +52,10 @@ const VIEW_OPTIONS = {
   find: { type: 'string' },
   json: { type: 'boolean' },
   'keep-going': { type: 'boolean' },
+  attach: { type: 'string' },
+  shared: { type: 'boolean' },
+  since: { type: 'string' },
+  follow: { type: 'boolean' },
 };
 
 function num(v, name, fallback) {
@@ -98,19 +111,22 @@ function reportErrors(app) {
 }
 
 async function headless(cmd, values, positionals) {
+  const attached = values.attach != null;
+  // Attached, there is no <entry>: run's script is the first positional.
+  if (attached) positionals = [null, ...positionals];
   const entry = positionals[0];
-  const app = await launch(viewOptions(values, entry));
+  const app = attached ? await attach(values.attach) : await launch(viewOptions(values, entry));
   try {
     await app.ready();
     if (cmd === 'screenshot') {
-      await app.wait(values.wait != null ? Number(values.wait) : 1000);
+      await app.wait(values.wait != null ? Number(values.wait) : attached ? 0 : 1000);
       const out = values.out || 'screenshot.png';
       await app.screenshot(out);
       console.log(`jsui: wrote ${out} (${app.width * app.scale}x${app.height * app.scale})`);
       return reportErrors(app);
     }
     if (cmd === 'inspect') {
-      await app.wait(values.wait != null ? Number(values.wait) : 1000);
+      await app.wait(values.wait != null ? Number(values.wait) : attached ? 0 : 1000);
       if (values.find) {
         const found = (await app.findAll(values.find)).map(elementSummary);
         console.log(values.json ? JSON.stringify(found, null, 2) : found.map((el) => formatTree({ roots: [{ rootTag: '', children: [el] }] }).split('\n')[1].trim()).join('\n') || '(no match)');
@@ -129,12 +145,19 @@ async function headless(cmd, values, positionals) {
       if (typeof fn !== 'function') throw new UsageError(`${scriptPath} must export default async function (app) {...}`);
       const result = await fn(app);
       console.log(JSON.stringify({ done: true, result: result ?? null, messages: app.messages, calls: app.calls, errors: app.errors }));
-      return reportErrors(app);
+      // Attached, errors from before this script are the session's, not ours.
+      return attached ? 0 : reportErrors(app);
     }
     const parsed = JSON.parse(await readFile(scriptPath, 'utf8'));
     const steps = Array.isArray(parsed) ? parsed : parsed.steps;
-    if (!Array.isArray(parsed) && parsed.calls) for (const [name, answer] of Object.entries(parsed.calls)) app.handle(name, answerOf(answer));
     if (!Array.isArray(steps)) throw new UsageError(`${scriptPath}: expected an array of steps or {"steps": [...]}`);
+    if (attached) {
+      const r = await app.runSteps(steps, { keepGoing: !!values['keep-going'], calls: Array.isArray(parsed) ? undefined : parsed.calls });
+      for (const out of r.results) console.log(JSON.stringify(out));
+      console.log(JSON.stringify({ done: true, ok: r.ok, failed: r.failed, messages: app.messages, calls: app.calls, errors: app.errors }));
+      return r.ok ? 0 : 1;
+    }
+    if (!Array.isArray(parsed) && parsed.calls) for (const [name, answer] of Object.entries(parsed.calls)) app.handle(name, answerOf(answer));
     const r = await runSteps(app, steps, {
       keepGoing: !!values['keep-going'],
       onResult: (out) => console.log(JSON.stringify(out)),
@@ -143,6 +166,21 @@ async function headless(cmd, values, positionals) {
     return r.ok ? reportErrors(app) : 1;
   } finally {
     app.close();
+  }
+}
+
+// `jsui log --attach <url>`: the shared view's activity, one JSON line per event.
+async function activityLog(values) {
+  const app = await attach(values.attach);
+  let since = values.since != null ? Number(values.since) || 0 : 0;
+  for (;;) {
+    const events = await app.activity(since);
+    for (const e of events) {
+      console.log(JSON.stringify(e));
+      since = Math.max(since, e.seq);
+    }
+    if (!values.follow) return 0;
+    await new Promise((r) => setTimeout(r, 500));
   }
 }
 
@@ -171,6 +209,26 @@ async function main(argv) {
   if (values.help) {
     console.log(cmd === 'run' ? STEP_HELP : USAGE);
     return 0;
+  }
+  if (cmd === 'log') {
+    if (values.attach == null) {
+      console.error('jsui log: --attach <url> is required');
+      return 2;
+    }
+    try {
+      return await activityLog(values);
+    } catch (e) {
+      console.error((e && e.message) || String(e));
+      return 1;
+    }
+  }
+  if (values.attach != null && (cmd === 'screenshot' || cmd === 'inspect' || cmd === 'run')) {
+    try {
+      return await headless(cmd, values, positionals);
+    } catch (e) {
+      console.error(e instanceof UsageError ? 'jsui: ' + e.message : (e && e.message) || String(e));
+      return e instanceof UsageError ? 2 : 1;
+    }
   }
   const entry = positionals[0];
   if (!entry) {
@@ -209,7 +267,12 @@ async function main(argv) {
       return 2;
     }
     try {
-      const server = await dev({ entry, port, host: values.host || '127.0.0.1', hmr: !values['no-hmr'] });
+      let shared = null;
+      if (values.shared) {
+        const v = viewOptions(values, entry);
+        shared = { width: v.width, height: v.height, scale: v.scale, fps: v.fps, component: v.component, props: v.props, state: v.state };
+      }
+      const server = await dev({ entry, port, host: values.host || '127.0.0.1', hmr: !values['no-hmr'], shared });
       const stop = async () => {
         await server.close();
         process.exit(0);

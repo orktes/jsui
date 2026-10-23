@@ -11,7 +11,7 @@ import zlib from 'node:zlib';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { launch, findWasmDir, parseSelector, SKILL_DIR } from '../src/index.js';
+import { attach, dev, launch, findWasmDir, parseSelector, SKILL_DIR } from '../src/index.js';
 
 const exec = promisify(execFile);
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'jsui.js');
@@ -246,4 +246,113 @@ test('skill: SKILL.md frontmatter, references resolve, print and install', async
   assert.equal(refused.code, 1);
   await exec(process.execPath, [BIN, 'skill', 'install', dir, '--force']);
   assert.equal(await readFile(path.join(dir, '.claude', 'skills', 'jsui', 'SKILL.md'), 'utf8'), md);
+});
+
+// Reads the shared view's stream until `n` messages arrived.
+async function readStream(origin, n) {
+  const res = await fetch(origin + '/__jsui/shared/stream');
+  const reader = res.body.getReader();
+  const out = [];
+  let buf = Buffer.alloc(0);
+  while (out.length < n) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf = Buffer.concat([buf, Buffer.from(value)]);
+    while (buf.length >= 5 && buf.length - 4 >= buf.readUInt32LE(0)) {
+      const len = buf.readUInt32LE(0);
+      const type = buf[4];
+      const payload = buf.subarray(5, 4 + len);
+      out.push(type === 2 ? JSON.parse(payload.toString()) : { type: 'frame', w: payload.readUInt16LE(8), h: payload.readUInt16LE(10), pixels: zlib.inflateRawSync(payload.subarray(12)) });
+      buf = buf.subarray(4 + len);
+    }
+  }
+  await reader.cancel();
+  return out;
+}
+
+test('dev --shared: viewer stream, viewer input, attach(), jsui run --attach', { skip }, async () => {
+  const dir = await fixture();
+  const server = await dev({ entry: path.join(dir, 'app.jsx'), port: 0, log: () => {}, shared: { width: 640, height: 360 } });
+  const origin = `http://127.0.0.1:${server.port}`;
+  try {
+    const page = await fetch(origin + '/shared');
+    assert.equal(page.status, 200);
+    assert.match(await page.text(), /JSUI shared view/);
+
+    const app = await attach(origin);
+    assert.equal(app.width, 640);
+    await app.idle(3000);
+    assert.equal((await app.find('#title')).text, 'Menu');
+
+    // A viewer gets a hello and a full first frame.
+    const [hello, first] = await readStream(origin, 2);
+    assert.equal(hello.type, 'hello');
+    assert.equal(hello.pixelWidth, 640);
+    assert.equal(first.type, 'frame');
+    assert.equal(first.w, 640);
+    assert.equal(first.pixels.length, 640 * 360 * 4);
+
+    // The person's input reaches the same app.
+    const title = await app.get('#play');
+    const at = { x: title.rect.x + 10, y: title.rect.y + 10 };
+    const post = (body) => fetch(origin + '/__jsui/shared/input', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    assert.equal((await post([{ t: 'button', ...at, button: 0, down: true, mods: 0 }])).status, 204);
+    await app.wait(60);
+    await post([{ t: 'button', ...at, button: 0, down: false, mods: 0 }]);
+    await app.wait(60);
+    assert.deepEqual(app.messages.map((m) => m.name), ['play']);
+    const activity = await app.activity(0);
+    assert.ok(activity.some((e) => e.who === 'user' && e.kind === 'click'));
+    assert.ok(activity.some((e) => e.who === 'ui' && e.kind === 'message' && e.name === 'play'));
+
+    // Other pages cannot drive it (no JSON content type / foreign Host).
+    assert.equal((await fetch(origin + '/__jsui/shared/input', { method: 'POST', body: '[]' })).status, 415);
+
+    // The CLI attaches with the same steps as `jsui run`.
+    const steps = path.join(dir, 'steps.json');
+    await writeFile(steps, JSON.stringify({
+      calls: { 'shop.buy': { value: { gold: 7 } } },
+      steps: [
+        { state: 'gold', value: 42 },
+        { expect: '#gold', text: '42 gold' },
+        { click: '#buy' },
+        { wait: 100 },
+        { expect: '#bought', text: 'ok 7' },
+        { screenshot: 'shot.png' },
+      ],
+    }));
+    const r = await exec(process.execPath, [BIN, 'run', '--attach', origin, steps], { cwd: dir });
+    const lines = r.stdout.trim().split('\n').map((l) => JSON.parse(l));
+    assert.ok(lines.at(-1).ok, r.stdout);
+    assert.equal(pngSize(await readFile(path.join(dir, 'shot.png'))).width, 640);
+    const shot = await exec(process.execPath, [BIN, 'screenshot', '--attach', origin, '-o', path.join(dir, 's2.png')]);
+    assert.match(shot.stdout, /wrote/);
+    const tree = await exec(process.execPath, [BIN, 'inspect', '--attach', origin, '--find', '#gold']);
+    assert.match(tree.stdout, /"42 gold"/);
+    const log = await exec(process.execPath, [BIN, 'log', '--attach', origin]);
+    assert.match(log.stdout, /"who":"agent"/);
+
+    // A save hot-updates the live app in place: focus and state survive.
+    await app.click('#play');
+    await app.press('Down');
+    assert.ok((await app.find('#buy')).focused);
+    const since = (await app.activity(0)).at(-1).seq;
+    await writeFile(path.join(dir, 'app.jsx'), APP.replace("title = 'Menu'", "title = 'Edited'"));
+    for (let i = 0; i < 100 && (await app.find('#title')).text !== 'Edited'; i++) await app.wait(100);
+    assert.equal((await app.find('#title')).text, 'Edited');
+    // A runtime older than hot updates (a pre-0.4 jsui.wasm) reloads instead;
+    // CI builds the current one (JSUI_HEADLESS_STRICT).
+    const reloaded = (await app.activity(since)).some((e) => e.kind === 'log' && /reloading/.test(e.text));
+    if (process.env.JSUI_HEADLESS_STRICT || !reloaded) {
+      assert.ok(!reloaded, 'hot update, not a reload');
+      assert.ok((await app.find('#buy')).focused, 'focus kept across the hot update');
+    }
+
+    // Reload: fresh component state, shared state kept.
+    await app.reload();
+    assert.equal((await app.find('#bought')).text, '');
+    assert.equal((await app.find('#gold')).text, '42 gold');
+  } finally {
+    await server.close();
+  }
 });

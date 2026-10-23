@@ -22,6 +22,7 @@ export const STEP_HELP = `steps (a JSON array, or {"steps": [...]}); targets are
   {"callUi": "ui.flash", "args": {...}} Host.handle handler; result in the output
   {"run": "Settings", "props": {...}}   switch the main surface's component
   {"resize": [1920, 1080, 1]}
+  {"reload": true}                      reload the bundle (resets component state; shared state stays)
   {"find": "#play"}                     the element (or null) in the output
   {"expect": "#row-vsync", "count": 1, "text": "On", "focused": true}
                                         fails the run unless it matches; "text" / "textContains"
@@ -35,6 +36,8 @@ export const STEP_HELP = `steps (a JSON array, or {"steps": [...]}); targets are
   {"tree": true}                        the whole view tree in the output
   {"getState": "settings"}
   {"hitTest": [640, 360]}               {pointer, scroll}: would the UI take input there?
+  {"activity": 0}                       (--attach only) what the person, agents and UI did after
+                                        that seq number: clicks, keys, messages, calls, logs
 Unanswered Host.calls are rejected; answer them with "answer" steps or a top-level
 {"calls": {"name": {"value": ...} | {"error": "..."}}, "steps": [...]}. Async UI work (calls,
 fetches) settles a frame or two later: follow it with {"wait": 100} or {"idle": 1000}.
@@ -43,7 +46,7 @@ The action is the step's first key. Every step may carry "label" (echoed in the 
 const ACTIONS = [
   'wait', 'idle', 'screenshot', 'click', 'tap', 'hover', 'drag', 'wheel', 'key', 'type', 'press', 'stick',
   'state', 'patch', 'buffer', 'message', 'callUi', 'run', 'resize', 'find', 'expect', 'expectMissing',
-  'expectState', 'expectMessage', 'tree', 'getState', 'hitTest', 'answer',
+  'expectState', 'expectMessage', 'tree', 'getState', 'hitTest', 'answer', 'activity', 'reload',
 ];
 
 // The step's first key that names an action ({"buffer": k, "type": "f32"} is a buffer step).
@@ -105,6 +108,10 @@ async function runStep(app, s) {
     case 'tree': return { action, tree: await app.tree() };
     case 'getState': return { action, value: app.getState(v) ?? null };
     case 'hitTest': return { action, ...(await app.hitTest(v)) };
+    case 'reload': await app.reload(); return { action };
+    case 'activity':
+      if (typeof app.activity !== 'function') throw new Error('"activity" needs the shared view (jsui run --attach)');
+      return { action, events: await app.activity(+v || 0) };
     case 'expect': {
       const els = await app.findAll(v);
       const el = elementSummary(els[0]) || null;

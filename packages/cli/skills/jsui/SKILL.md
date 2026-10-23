@@ -44,8 +44,10 @@ Packages: `@orktes/jsui-cli` (bundler, dev server, headless tools, this skill),
    bars; use shared state (`useHostState`) for things that change now and then.
 8. **Give important elements a `testID`** so you (and tests) can find, click
    and check them with `jsui inspect` / `jsui run`.
-9. **Always look at what you built:** `npx jsui screenshot app.jsx -o shot.png`,
-   then open the PNG. Check focus with `jsui run` and a `press` step.
+9. **Always look at what you built.** With a shared view running
+   (`jsui dev --shared`, below), `npx jsui screenshot --attach <url>` after
+   each save; otherwise `npx jsui screenshot app.jsx -o shot.png`. Open the
+   PNG. Check focus with a `press` step.
 10. No browser APIs: no `document`, `window.addEventListener`, CSS, `<div>`,
     `localStorage`. `fetch`, timers, `requestAnimationFrame`, `TextEncoder`,
     `URL`, `AbortController` and `performance.now()` exist. Native builds have
@@ -64,6 +66,39 @@ npx jsui dev src/app.jsx                         # http://127.0.0.1:5173/bundle.
 json mp4 ...) emit assets next to the bundle. `name@2x.png` is a 2x image
 (half the intrinsic size). JSON is inlined. `.jsui.js` then `.native.js`
 platform files resolve first. TypeScript is stripped (no type checking).
+
+## The fast loop: a shared live view (`jsui dev --shared`)
+
+The quickest way to iterate, and the one to use whenever a person is around:
+one live app runs inside the dev server. The person watches and plays it in
+the browser (mouse, keyboard, gamepad), and you drive **the same app** with
+the same commands as the headless tools. Every save hot-updates it in place
+(component state is kept), so you see a change in about a second, on the
+screen you already navigated to, without rebuilding or replaying steps.
+
+```sh
+npx jsui dev src/app.jsx --shared [--width 1920 --height 1080 --scale 2]
+#   -> shared view: http://127.0.0.1:5173/shared   (give the person this link)
+U=http://127.0.0.1:5173
+npx jsui screenshot --attach $U -o shot.png    # exactly what the person sees now
+npx jsui inspect --attach $U                   # live view tree (--find '#play' --json)
+npx jsui run --attach $U steps.json            # the same steps as jsui run, on the live app
+npx jsui log --attach $U --since 0             # what the person clicked / pressed, UI messages, calls, errors
+```
+
+* Check for one first: `curl -s $U/__jsui/shared/info` answers when a shared
+  view is running. If none is, start `jsui dev ... --shared` in the
+  background and send the person the `/shared` link.
+* Loop: edit, save, `screenshot --attach`, look, repeat. Use `run --attach`
+  to navigate to the screen you're working on or to check interactions;
+  `{"reload": true}` starts over with fresh component state.
+* It is the person's session: the clock is real (`{"wait": 500}` takes
+  500 ms), they may be clicking at the same time, and state you set stays
+  set. Read `jsui log` before assuming what is on screen, and tell them what
+  you're about to drive. Your clicks show up in their view as rings, and
+  your steps in its activity feed.
+* For checks that must repeat exactly (tests, CI, before/after comparisons)
+  use the standalone headless commands below: they run on a simulated clock.
 
 ## Minimal screen
 
@@ -108,7 +143,7 @@ const s = StyleSheet.create({
 AppRegistry.registerComponent('main', () => App);
 ```
 
-## Check your work (headless, no browser or GPU)
+## Check your work headlessly (no browser, GPU or dev server)
 
 The CLI runs the bundle on JSUI's CPU WebAssembly runtime inside Node, on a
 simulated clock, so results are deterministic.
@@ -155,7 +190,7 @@ Read the reference that matches the task:
 | Game data: shared state, calls, messages, per-frame buffers, several root views | [references/game-data.md](references/game-data.md) |
 | Host textures (video, render targets), LottieView, ShaderView / SkSL | [references/media-and-effects.md](references/media-and-effects.md) |
 | Embedding: C API, Godot `JsuiView`, web host, dev mode | [references/embedding.md](references/embedding.md) |
-| `jsui screenshot` / `inspect` / `run`, `launch()` API, selectors, all steps | [references/testing-tools.md](references/testing-tools.md) |
+| `jsui dev --shared` + `--attach`, `jsui screenshot` / `inspect` / `run`, `launch()` / `attach()` APIs, selectors, all steps | [references/testing-tools.md](references/testing-tools.md) |
 | Game UI patterns: layout for 16:9, focus visuals, HUD, menus, lists | [references/game-ui-patterns.md](references/game-ui-patterns.md) |
 
 `npx @orktes/jsui-cli skill print --all` prints this skill with every reference;

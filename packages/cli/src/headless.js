@@ -40,7 +40,8 @@ export function findWasmDir(dir) {
 
 let modulePromise = null;
 let moduleDir = null;
-async function loadModule(wasmDir) {
+/** Loads the CPU WebAssembly module once per directory. */
+export async function loadModule(wasmDir) {
   const dir = findWasmDir(wasmDir);
   if (!dir) {
     throw new Error(
@@ -272,11 +273,17 @@ export async function launch(o = {}) {
   } else {
     bundlePath = path.resolve(o.bundle);
   }
-  return new HeadlessApp(M, bundlePath, tmp, o);
+  return new HeadlessApp(M, { path: bundlePath, tmp }, o);
 }
 
-class HeadlessApp {
-  constructor(M, bundlePath, tmp, o) {
+/**
+ * A runtime on the CPU module. `load` is {path, tmp} (a bundle file, read
+ * and evaluated at once) or {url} (fetched by the runtime: an http:// URL of
+ * `jsui dev`, whose hot updates the runtime then applies when `o.devMode`).
+ */
+export class HeadlessApp {
+  constructor(M, load, o) {
+    const tmp = load.tmp || null;
     this.M = M;
     this.tmp = tmp;
     this.width = o.width || 1280;
@@ -299,22 +306,26 @@ class HeadlessApp {
     M.__jsuiHosts.set(this.hostId, {
       onLog: (level, text) => {
         this.logs.push({ level, text });
+        this._event('log', { level, text });
         if (this._onLog) this._onLog(level, text);
       },
       onMessage: (name, json) => {
         let data = null;
         if (json !== '') try { data = JSON.parse(json); } catch { data = json; }
         this.messages.push({ name, data, time: Math.round(this.time) });
+        this._event('message', { name, data });
       },
       onState: (key, json) => {
         let value;
         try { value = json == null ? null : JSON.parse(json); } catch { value = json; }
         this.stateWrites.push({ key, value, time: Math.round(this.time) });
+        this._event('state', { key, value });
       },
       onCall: (id, name, json) => {
         let args;
         try { args = JSON.parse(json); } catch { args = undefined; }
         this.calls.push({ name, args, time: Math.round(this.time) });
+        this._event('call', { name, args });
         // Answer outside on_call (the runtime must not be re-entered from it);
         // frames yield to the event loop while answers are pending.
         this._answering++;
@@ -340,21 +351,25 @@ class HeadlessApp {
         try { p.resolve(JSON.parse(payload)); } catch (e) { p.reject(e); }
       },
     });
-    this.bundleUrl = pathToFileURL(bundlePath).href;
+    this.bundleUrl = load.url || pathToFileURL(load.path).href;
     this._baseUrlPtr = this._str(this.bundleUrl);
-    this.rt = M._jsui_web_create(this.hostId, this.width, this.height, this.scale, 0, this._baseUrlPtr);
+    this.rt = M._jsui_web_create(this.hostId, this.width, this.height, this.scale, o.devMode ? 1 : 0, this._baseUrlPtr);
     if (!this.rt) throw new Error('jsui: runtime creation failed');
     for (const [k, v] of Object.entries(o.state || {})) this.setState(k, v);
     // Props alone go to 'main' (what single-screen entries register).
     if (o.component != null || o.props != null) this.run(o.component ?? 'main', o.props || {});
-    const src = readFileSync(bundlePath, 'utf8');
-    const len = M.lengthBytesUTF8(src);
-    const sp = M._malloc(len + 1);
-    M.stringToUTF8(src, sp, len + 1);
-    const r = this._withStrings([this.bundleUrl], (n) => M._jsui_load_bundle_source(this.rt, sp, len, n));
-    M._free(sp);
-    this._checkError();
-    if (r !== 0 && !this.errors.length) this.errors.push('bundle evaluation failed');
+    if (load.url) {
+      this._withStrings([load.url], (u) => M._jsui_load_bundle_url(this.rt, u));
+    } else {
+      const src = readFileSync(load.path, 'utf8');
+      const len = M.lengthBytesUTF8(src);
+      const sp = M._malloc(len + 1);
+      M.stringToUTF8(src, sp, len + 1);
+      const r = this._withStrings([this.bundleUrl], (n) => M._jsui_load_bundle_source(this.rt, sp, len, n));
+      M._free(sp);
+      this._checkError();
+      if (r !== 0 && !this.errors.length) this.errors.push('bundle evaluation failed');
+    }
     this._ready = this._settle();
   }
 
@@ -375,6 +390,9 @@ class HeadlessApp {
     }
   }
 
+  // UI -> host traffic (messages, calls, state writes, logs); for subclasses.
+  _event() {}
+
   _reject(id, message) {
     if (this.rt) this._withStrings([message], (m) => this.M._jsui_web_reject_call(this.rt, id, m));
   }
@@ -382,7 +400,10 @@ class HeadlessApp {
   _checkError() {
     const p = this.M._jsui_last_error(this.rt);
     const e = p ? this.M.UTF8ToString(p) : '';
-    if (e && this.errors[this.errors.length - 1] !== e) this.errors.push(e);
+    if (e && this.errors[this.errors.length - 1] !== e) {
+      this.errors.push(e);
+      this._event('error', { text: e });
+    }
   }
 
   _alive() {
@@ -478,17 +499,21 @@ class HeadlessApp {
   async callUi(name, args) {
     this._alive();
     await this._ready;
-    const result = new Promise((resolve, reject) => {
-      const id = this._withStrings([String(name), JSON.stringify(args === undefined ? null : args)], (n, j) =>
-        this.M._jsui_web_call_ui(this.rt, this.hostId, n, j));
-      this._uiCalls.set(id, { resolve, reject });
-    });
+    const result = this._startUiCall(name, args);
     // Results are delivered at the end of a tick; handlers may be async.
     for (let i = 0; i < 600 && this._uiCalls.size; i++) {
       this._tick(i > 0);
       if (this._uiCalls.size) await this._yield();
     }
     return result;
+  }
+
+  _startUiCall(name, args) {
+    return new Promise((resolve, reject) => {
+      const id = this._withStrings([String(name), JSON.stringify(args === undefined ? null : args)], (n, j) =>
+        this.M._jsui_web_call_ui(this.rt, this.hostId, n, j));
+      this._uiCalls.set(id, { resolve, reject });
+    });
   }
 
   /** The view tree: {roots: [{rootTag, viewport, children: [element]}], focused}. */
@@ -738,6 +763,16 @@ class HeadlessApp {
   run(component, props = {}) {
     this._alive();
     return this._withStrings([component == null ? null : String(component), JSON.stringify(props)], (k, p) => this.M._jsui_surface_run(this.rt, k, p)) === 0;
+  }
+
+  /** Reloads the bundle (a fresh JS context: component state is reset; shared state stays). */
+  async reload() {
+    this._alive();
+    await this._ready;
+    this.M._jsui_reload(this.rt);
+    this._ready = this._settle();
+    await this._ready;
+    return this;
   }
 
   /** New viewport size (and pixel ratio). */
