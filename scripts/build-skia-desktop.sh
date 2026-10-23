@@ -131,7 +131,8 @@ python3 "$DAWN_SRC/generator/dawn_json_generator.py" \
   --root-dir "$DAWN_SRC" \
   --dawn-json "$DAWN_SRC/src/dawn/dawn.json" \
   --wire-json "$DAWN_SRC/src/dawn/dawn_wire.json" \
-  --jinja2-path "$SKIA_SRC/third_party/externals/jinja2/.." \
+  --jinja2-path "$SKIA_SRC/third_party/externals/jinja2" \
+  --markupsafe-path "$SKIA_SRC/third_party/externals/markupsafe" \
   --targets headers,cpp_headers \
   --output-dir "$DAWN_GEN"
 [ -f "$DAWN_GEN/include/dawn/webgpu.h" ] && [ -f "$DAWN_GEN/include/dawn/webgpu_cpp.h" ] || {
