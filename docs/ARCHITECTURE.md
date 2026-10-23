@@ -1083,19 +1083,25 @@ paints a view, on every renderer (the CPU raster runs SkSL too):
   `__jsui_native.shaderInfo(src)` compiles synchronously and returns
   `{error}` or `{uniforms: [{name, type, count, color}], children}`.
 * Preloading: a GPU compiles a shader's pipelines the first time a frame
-  draws it (a hitch: tens of ms per pipeline on WebGPU / WebGL).
-  `ShaderEffects::preload` (JS `precompileShaders()` /
+  draws it (cold: 130-250 ms per runtime-effect pipeline on WebGPU / WebGL
+  on a Mac Studio). `ShaderEffects::preload` (JS `precompileShaders()` /
   `__jsui_native.shaderPreload(src, images?)`, C `jsui_precompile_shader`)
-  compiles the source and queues a warm-up; the next frame painted on a GPU
-  (`Surface::finishCanvasTracked` / `renderCanvas`) first draws each queued
-  shader into a small off-screen surface of the target's format, the way
-  views draw it (fill clipped to a rect and to a rounded rect, aligned and
-  not; `content` shaders as the layer's image filter; image children as an
-  image and as not loaded yet), so that frame's flush builds the pipelines.
-  A queued warm-up keeps `needsRedraw()` true; a raster frame drops the
-  queue (the CPU has nothing to warm). `__jsui_native.shadersWarming()`
-  counts what is still queued. vulkan_test checks the frame that mounts
-  preloaded views compiles no pipeline.
+  compiles the source and queues warm-up draws: one per pipeline-key
+  variant a view may produce (aligned / AA rect, rect / rounded own clip,
+  with / without a parent's rounded clip (AnalyticClip), and each
+  combination of loaded / not-yet-loaded image children; `content` shaders
+  as the layer's image filter). Frames painted on a GPU
+  (`Surface::finishCanvasTracked` / `renderCanvas`) draw one queued draw
+  each into a small off-screen surface of the target's format, so each
+  frame builds at most one new pipeline. Views place the shader by
+  translating the canvas, never with a local matrix (part of the key, which
+  the warm-up's draws would not match). A queued warm-up keeps
+  `needsRedraw()` true; a raster frame drops the queue (the CPU has nothing
+  to warm). `__jsui_native.shadersWarming()` counts the queued draws.
+  vulkan_test checks that mounting preloaded views compiles no pipeline;
+  site/test/first-visit.mjs measures a screen's first-visit hitch (Rift,
+  cold Metal cache: WebGPU 801 → 150 ms, WebGL 517 → 100 ms; what remains
+  is ordinary image / clip pipelines).
 * Cost: SkSL compilation and SkRuntimeEffect were already linked (Skottie
   and the GPU backends use them), so ShaderView adds almost nothing to
   `jsui.wasm`.

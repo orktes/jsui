@@ -374,10 +374,10 @@ namespace {
 
 // The off-screen surface the warm-up draws into (device px).
 constexpr int kWarmSize = 64;
-// Warm-up draws per frame: a GPU may take a few hundred ms to build one
-// runtime effect's pipeline (WebGPU / Metal, cold), so a preload spreads
-// over frames.
-constexpr int kWarmPerFrame = 4;
+// Warm-up draws per frame: one, so a frame builds at most one new pipeline
+// (a runtime effect's can take 130-250 ms on WebGPU / WebGL with a cold
+// cache); a draw whose pipeline exists costs next to nothing.
+constexpr int kWarmPerFrame = 1;
 
 // What image children sample during the warm-up: a small opaque image,
 // uploaded like any loaded image.
