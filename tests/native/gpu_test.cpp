@@ -585,7 +585,7 @@ TEST(gpu_matches_cpu_scene) {
       t.height = h;
       t.flags = JSUI_GL_TOP_LEFT_ORIGIN;
       s.doc().markPaintDirty();
-      CHECK_EQ(jsui::gpu::render(*s.rt, gpu, t), 0);
+      CHECK_EQ(jsui::gpu::render(s.rt->main(), gpu, t), 0);
       CHECK(!s.rt->needsRedraw());
       std::vector<uint32_t> out = rtex.read(false);
       Diff d = compare(out, s.px, 24);
@@ -599,7 +599,7 @@ TEST(gpu_matches_cpu_scene) {
       // Second frame on the same context (cached surface, cached image
       // textures, cached shadow masks) is identical to the first.
       s.doc().markPaintDirty();
-      CHECK_EQ(jsui::gpu::render(*s.rt, gpu, t), 0);
+      CHECK_EQ(jsui::gpu::render(s.rt->main(), gpu, t), 0);
       std::vector<uint32_t> again = rtex.read(false);
       if (again != out) {
         Diff d2 = compare(again, out, 0);
@@ -659,7 +659,7 @@ RetainedRun runRetained(GLContext& c, JsuiGpuContext* gpu, Api api, unsigned deb
   t.height = 240;
   t.texture = ta.tex;
   t.flags = JSUI_GL_TOP_LEFT_ORIGIN;
-  CHECK_EQ(jsui::gpu::render(*a.rt, gpu, t), 0);
+  CHECK_EQ(jsui::gpu::render(a.rt->main(), gpu, t), 0);
   uint32_t seed = 777;
   auto rnd = [&](float lo, float hi) {
     seed = seed * 1664525u + 1013904223u;
@@ -678,14 +678,14 @@ RetainedRun runRetained(GLContext& c, JsuiGpuContext* gpu, Api api, unsigned deb
     }
     t.texture = ta.tex;
     t.flags = JSUI_GL_TOP_LEFT_ORIGIN;
-    CHECK_EQ(jsui::gpu::render(*a.rt, gpu, t), 0);
+    CHECK_EQ(jsui::gpu::render(a.rt->main(), gpu, t), 0);
     jsui::PaintStats st = jsui::lastPaintStats(a.doc());
     run.repainted += double(st.repaintedPixels);
     run.passes += st.damageRects;
     t.texture = tb.tex;
     t.flags = JSUI_GL_TOP_LEFT_ORIGIN | JSUI_GL_NO_RETAIN;
     b.doc().markPaintDirty();
-    CHECK_EQ(jsui::gpu::render(*b.rt, gpu, t), 0);
+    CHECK_EQ(jsui::gpu::render(b.rt->main(), gpu, t), 0);
     std::vector<uint32_t> ra = ta.read(false), rb = tb.read(false);
     Diff d = compare(ra, rb, 2);
     run.worst = std::max(run.worst, d.maxDiff);
@@ -718,7 +718,7 @@ RetainedRun runRetained(GLContext& c, JsuiGpuContext* gpu, Api api, unsigned deb
                    (long long)st.repaintedPixels, offA, offB);
       std::fprintf(stderr, "    damage:");
       int shown = 0;
-      for (SkRegion::Iterator it(a.rt->trackedDamage()); !it.done() && shown < 12; it.next(), shown++)
+      for (SkRegion::Iterator it(a.rt->main().trackedDamage()); !it.done() && shown < 12; it.next(), shown++)
         std::fprintf(stderr, " [%d,%d %dx%d]", it.rect().left(), it.rect().top(), it.rect().width(), it.rect().height());
       std::fprintf(stderr, "\n");
       std::string tag = std::string("_") + apiName(api) + "_debug" + std::to_string(debug);
@@ -765,7 +765,7 @@ TEST(gpu_fbo_bottom_left_and_no_clear) {
     RenderTexture rtex(c.gl, 64, 48);
     CHECK(rtex.complete());
     s.doc().markPaintDirty();
-    CHECK_EQ(jsui::gpu::render(*s.rt, gpu, JsuiGLTarget{rtex.fbo, 0, 0, 64, 48, 0, 0, 0}), 0);
+    CHECK_EQ(jsui::gpu::render(s.rt->main(), gpu, JsuiGLTarget{rtex.fbo, 0, 0, 64, 48, 0, 0, 0}), 0);
     std::vector<uint32_t> out = rtex.read(true);
     Diff d = compare(out, s.px, 2);
     CHECK_EQ(d.maxDiff, 0);
@@ -777,7 +777,7 @@ TEST(gpu_fbo_bottom_left_and_no_clear) {
     c.gl.Clear(GL_COLOR_BUFFER_BIT);
     jsui_gpu_reset(gpu);  // we touched GL state behind Skia's back
     s.doc().markPaintDirty();
-    CHECK_EQ(jsui::gpu::render(*s.rt, gpu, JsuiGLTarget{rtex.fbo, 0, 0, 64, 48, 0, 0, JSUI_GL_NO_CLEAR}), 0);
+    CHECK_EQ(jsui::gpu::render(s.rt->main(), gpu, JsuiGLTarget{rtex.fbo, 0, 0, 64, 48, 0, 0, JSUI_GL_NO_CLEAR}), 0);
     out = rtex.read(true);
     auto px = [&](int x, int y) { return out[size_t(y) * 64 + x]; };
     CHECK_EQ(px(40, 30), 0xff00ff00u);  // untouched: green
@@ -804,15 +804,15 @@ TEST(gpu_context_lost_and_recreated) {
     t.width = 320;
     t.height = 240;
     t.flags = JSUI_GL_TOP_LEFT_ORIGIN;
-    CHECK_EQ(jsui::gpu::render(*s.rt, gpu, t), 0);
+    CHECK_EQ(jsui::gpu::render(s.rt->main(), gpu, t), 0);
     std::vector<uint32_t> before = rtex.read(false);
     jsui_gpu_context_lost(gpu);
     jsui_gpu_purge(gpu, 0);  // no-op while lost
-    CHECK_EQ(jsui::gpu::render(*s.rt, gpu, t), 0);
+    CHECK_EQ(jsui::gpu::render(s.rt->main(), gpu, t), 0);
     std::vector<uint32_t> after = rtex.read(false);
     CHECK(sameFrame(after, before));
     jsui_gpu_purge(gpu, 64u << 20);
-    CHECK_EQ(jsui::gpu::render(*s.rt, gpu, t), 0);
+    CHECK_EQ(jsui::gpu::render(s.rt->main(), gpu, t), 0);
     CHECK(sameFrame(rtex.read(false), before));
   });
 }

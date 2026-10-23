@@ -34,7 +34,10 @@ float layoutAnimProgress(LayoutAnimCurve curve, float springDamping, float t);
 
 class Document {
  public:
-  Document();
+  // `sharedNextId`: the node id counter of the runtime when several
+  // documents (surfaces) share one JS context, so ids stay unique across
+  // them; nullptr: the document numbers its own nodes.
+  explicit Document(uint32_t* sharedNextId = nullptr);
   ~Document();
 
   // The root container (id 1). The reconciler appends its top level here.
@@ -47,9 +50,13 @@ class Document {
   // Destroys everything except the root (used on reload).
   void clear();
 
+  // A width or height <= 0 sizes that axis to the content: layout leaves it
+  // unconstrained and width() / height() report the laid-out size.
   void setViewport(float width, float height, float pixelRatio);
   float width() const { return width_; }
   float height() const { return height_; }
+  bool autoWidth() const { return autoWidth_; }
+  bool autoHeight() const { return autoHeight_; }
   float pixelRatio() const { return pixelRatio_; }
 
   // Runs Yoga if anything is dirty. Returns true if layout changed.
@@ -135,7 +142,9 @@ class Document {
   std::unordered_map<uint32_t, Rect> reportedLayout_;
   Node* root_ = nullptr;
   uint32_t nextId_ = 1;
+  uint32_t* idCounter_ = &nextId_;
   float width_ = 0, height_ = 0, pixelRatio_ = 1;
+  bool autoWidth_ = false, autoHeight_ = false;
   bool layoutDirty_ = true, paintDirty_ = true;
   uint32_t fontGeneration_ = 0;  // FontManager::generation the text caches were built with
   YGConfigRef yogaConfig_ = nullptr;

@@ -169,7 +169,8 @@ uint32_t idOf(const Node* n) { return n ? n->id() : 0; }
 
 // ---------------------------------------------------------- InputManager
 
-InputManager::InputManager(Runtime& rt) : rt_(rt) {
+InputManager::InputManager(Runtime& rt, Document& doc, std::string& cursor)
+    : rt_(rt), doc_(doc), cursor_(cursor) {
   mouse_.pointerId = kMousePointerId;
   zOrder_.reserve(256);
   chainBuild_.reserve(64);
@@ -178,14 +179,14 @@ InputManager::InputManager(Runtime& rt) : rt_(rt) {
 InputManager::~InputManager() = default;
 
 bool InputManager::attached(const Node* n) const {
-  const Node* root = rt_.doc.root();
+  const Node* root = doc_.root();
   for (; n; n = n->parent())
     if (n == root) return true;
   return false;
 }
 
 bool InputManager::visible(const Node* n) const {
-  const Node* root = rt_.doc.root();
+  const Node* root = doc_.root();
   for (; n; n = n->parent()) {
     if (!n->style().display) return false;
     if (n == root) return true;
@@ -246,7 +247,7 @@ Node* InputManager::hitTest(float x, float y) {
 
 Node* InputManager::hitTest(float x, float y, float* localX, float* localY) {
   zOrder_.clear();
-  return hitNode(rt_.doc.root(), x, y, localX, localY);
+  return hitNode(doc_.root(), x, y, localX, localY);
 }
 
 // Whether every point hitNode can return in n's subtree lies inside n's
@@ -301,7 +302,7 @@ bool InputManager::subtreeContained(Node* n) {
 
 // (px, py) is in the parent's content space (parent-local + parent scroll).
 Node* InputManager::hitNode(Node* n, float px, float py, float* outX, float* outY) {
-  rt_.doc.perf.counters.hitNodes++;
+  doc_.perf.counters.hitNodes++;
   if (!n->yoga()) return nullptr;
   const ComputedStyle& s = n->style();
   if (!s.display) return nullptr;
@@ -386,7 +387,7 @@ Node* InputManager::commonAncestor(Node* a, Node* b) const {
 Value::Object InputManager::baseEvent(const char* type, const Node* target) const {
   Value::Object ev;
   ev["type"] = Value(type);
-  ev["target"] = Value(double(target ? target->id() : rt_.doc.root()->id()));
+  ev["target"] = Value(double(target ? target->id() : doc_.root()->id()));
   ev["timestamp"] = Value(eventTime());
   return ev;
 }
@@ -406,7 +407,7 @@ void InputManager::addModifiers(Value::Object& ev) const {
 
 bool InputManager::dispatch(Value::Object&& ev) {
   if (!rt_.js) return false;
-  rt_.doc.perf.counters.events++;
+  doc_.perf.counters.events++;
   Value event(std::move(ev));
   // Animated.event(..., {useNativeDriver: true}) mappings apply natively,
   // before (and independently of) JS.
@@ -461,11 +462,11 @@ void InputManager::updateHover(PointerState& p, Node* hit) {
   std::vector<uint32_t> next = p.chain;  // stable copy: handlers may re-enter
   // DOM order: leave bottom-up on the old path, then enter top-down.
   for (size_t i = old.size(); i-- > common;) {
-    Node* n = rt_.doc.get(old[i]);
+    Node* n = doc_.get(old[i]);
     if (n && (listenMask(n) & kHover)) dispatchPointer("pointerleave", n, p, -1, p.x, p.y);
   }
   for (size_t i = common; i < next.size(); i++) {
-    Node* n = rt_.doc.get(next[i]);
+    Node* n = doc_.get(next[i]);
     if (n && (listenMask(n) & kHover)) dispatchPointer("pointerenter", n, p, -1, p.x, p.y);
   }
 }
@@ -476,7 +477,7 @@ void InputManager::updateCursor(Node* hit) {
   const char* cursor = "default";
   for (Node* n = hit; n; n = n->parent()) {
     if (!n->style().cursor.empty()) {
-      rt_.cursor = n->style().cursor;
+      cursor_ = n->style().cursor;
       return;
     }
     if (n->type() == NodeType::TextInput) {
@@ -488,7 +489,7 @@ void InputManager::updateCursor(Node* hit) {
       break;
     }
   }
-  rt_.cursor = cursor;
+  cursor_ = cursor;
 }
 
 // ---------------------------------------------------------------- pointer
@@ -496,7 +497,7 @@ void InputManager::updateCursor(Node* hit) {
 // Any dispatch can run JS that destroys nodes, so node pointers are never
 // held across a dispatch: they are re-resolved from ids (`alive`).
 
-Node* InputManager::alive(uint32_t id) const { return id ? rt_.doc.get(id) : nullptr; }
+Node* InputManager::alive(uint32_t id) const { return id ? doc_.get(id) : nullptr; }
 
 bool InputManager::mouseMove(float x, float y) {
   bool moved = !mouseInside_ || x != mouse_.x || y != mouse_.y;
@@ -610,7 +611,7 @@ bool InputManager::mouseLeave() {
   mouseInside_ = false;
   leaveAll(mouse_);
   hovered_ = nullptr;
-  rt_.cursor = "default";
+  cursor_ = "default";
   return false;
 }
 
@@ -818,12 +819,12 @@ void hintsInTreeOrder(const Document& doc, uint8_t flag, bool skipTextChildren, 
 Node* InputManager::modalScope() const {
   // The last displayed modal subtree in tree order traps focus
   // (accessibilityViewIsModal / aria-modal), like a dialog.
-  Node* scope = rt_.doc.root();
-  if (rt_.doc.focusHints().empty()) return scope;
+  Node* scope = doc_.root();
+  if (doc_.focusHints().empty()) return scope;
   std::vector<Node*> modals;
-  hintsInTreeOrder(rt_.doc, Node::kModal, true, &modals);
+  hintsInTreeOrder(doc_, Node::kModal, true, &modals);
   for (Node* n : modals)
-    if (n != rt_.doc.root()) scope = n;
+    if (n != doc_.root()) scope = n;
   return scope;
 }
 
@@ -884,7 +885,7 @@ bool InputManager::navigate(NavDirection dir) {
   static const char* kNext[] = {"nextFocusUp", "nextFocusDown", "nextFocusLeft", "nextFocusRight"};
   const Value& explicitNext = cur->props()[kNext[int(dir)]];
   if (explicitNext.isNumber()) {
-    Node* t = rt_.doc.get(uint32_t(explicitNext.asNumber()));
+    Node* t = doc_.get(uint32_t(explicitNext.asNumber()));
     if (t && isFocusable(t) && visible(t)) {
       setFocus(t);
       return true;
@@ -951,9 +952,9 @@ void InputManager::tickFocusScopes() {
   // New autoFocus / hasTVPreferredFocus nodes take focus when nothing (or
   // nothing inside the active scope) is focused.
   uint32_t autoId = 0;
-  if (!rt_.doc.focusHints().empty()) {
+  if (!doc_.focusHints().empty()) {
     std::vector<Node*> hints;
-    hintsInTreeOrder(rt_.doc, Node::kAutoFocus, false, &hints);
+    hintsInTreeOrder(doc_, Node::kAutoFocus, false, &hints);
     for (Node* n : hints)
       if (autoFocusSeen_.insert(n->id()).second && !autoId && inside(n, scope) && isFocusable(n)) autoId = n->id();
   }
@@ -970,7 +971,7 @@ void InputManager::tickFocusScopes() {
       restoreId = scopeStack_.back().restoreId;
       scopeStack_.pop_back();
     }
-    bool entering = scope != rt_.doc.root() && (scopeStack_.empty() || scopeStack_.back().scopeId != sid);
+    bool entering = scope != doc_.root() && (scopeStack_.empty() || scopeStack_.back().scopeId != sid);
     if (entering) scopeStack_.push_back({sid, idOf(focused_)});
     scopeId_ = sid;
     if (entering) {
@@ -1161,7 +1162,7 @@ void InputManager::gamepadConnected(int pad, bool connected, const char* id) {
 // ------------------------------------------------------------------- tick
 
 void InputManager::tick(double nowMs) {
-  Perf::Scope perfScope(rt_.doc.perf, Phase::Input);
+  Perf::Scope perfScope(doc_.perf, Phase::Input);
   double dt = lastTick_ < 0 ? 0 : std::clamp(nowMs - lastTick_, 0.0, 100.0);
   lastTick_ = nowMs;
   // Held D-pad / stick repeat: first after kRepeatDelayMs, then every
@@ -1175,12 +1176,12 @@ void InputManager::tick(double nowMs) {
     }
   }
   tickSticks(dt);
-  bool laidOut = rt_.doc.layout();
+  bool laidOut = doc_.layout();
   if (laidOut) tickFocusScopes();
   editTick();
   tickScrolling(nowMs, dt);
   // The UI may have moved under a still mouse: refresh enter/leave + cursor.
-  if (mouseInside_ && (laidOut || hoverDirty_ || rt_.doc.paintDirty())) {
+  if (mouseInside_ && (laidOut || hoverDirty_ || doc_.paintDirty())) {
     hoverDirty_ = false;
     Node* hit = hitTest(mouse_.x, mouse_.y);
     updateHover(mouse_, hit);

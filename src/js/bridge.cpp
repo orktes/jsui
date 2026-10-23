@@ -22,7 +22,18 @@ Node* nodeArg(JSContext* ctx, JSValueConst v) {
   if (!JS_IsNumber(v)) return nullptr;
   uint32_t id = 0;
   if (JS_ToUint32(ctx, &id, v)) return nullptr;
-  return runtimeOf(ctx).doc.get(id);
+  return runtimeOf(ctx).findNode(id);
+}
+
+// The input of the surface showing `n`.
+InputManager& inputOf(JSContext* ctx, Node* n) { return *runtimeOf(ctx).surfaceOf(n->document()).input; }
+
+// Nodes of different surfaces cannot be joined (a portal into another
+// surface's tree, for example).
+bool sameDocument(JSContext* ctx, Node* a, Node* b) {
+  if (a->document() == b->document()) return true;
+  runtimeOf(ctx).log(JSUI_LOG_WARN, "a node cannot move to another surface (createPortal into another root view?)");
+  return false;
 }
 
 JSValue js_createNode(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
@@ -30,7 +41,13 @@ JSValue js_createNode(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
   NodeType t;
   std::string name = argc > 0 ? toStdString(ctx, argv[0]) : "";
   if (!nodeTypeFromName(name, &t)) return JS_ThrowTypeError(ctx, "unknown element type '%s'", name.c_str());
-  return JS_NewUint32(ctx, runtimeOf(ctx).doc.createNode(t)->id());
+  // createNode(type, rootTag): the node belongs to that surface's document.
+  Runtime& rt = runtimeOf(ctx);
+  Document* doc = &rt.doc;
+  uint32_t tag = 0;
+  if (argc > 1 && JS_IsNumber(argv[1]) && !JS_ToUint32(ctx, &tag, argv[1]))
+    if (Surface* s = rt.surfaceByTag(tag)) doc = &s->doc;
+  return JS_NewUint32(ctx, doc->createNode(t)->id());
 }
 
 JSValue js_setProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
@@ -85,7 +102,7 @@ JSValue js_appendChild(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
   if (argc < 2) return JS_UNDEFINED;
   Node* p = nodeArg(ctx, argv[0]);
   Node* c = nodeArg(ctx, argv[1]);
-  if (p && c && !isAncestorOrSelf(c, p)) p->appendChild(c);
+  if (p && c && !isAncestorOrSelf(c, p) && sameDocument(ctx, p, c)) p->appendChild(c);
   return JS_UNDEFINED;
 }
 
@@ -96,7 +113,7 @@ JSValue js_insertBefore(JSContext* ctx, JSValueConst, int argc, JSValueConst* ar
   Node* c = nodeArg(ctx, argv[1]);
   Node* b = argc > 2 ? nodeArg(ctx, argv[2]) : nullptr;
   if (b && b->parent() != p) b = nullptr;
-  if (p && c && c != b && !isAncestorOrSelf(c, p)) p->insertBefore(c, b);
+  if (p && c && c != b && !isAncestorOrSelf(c, p) && sameDocument(ctx, p, c)) p->insertBefore(c, b);
   return JS_UNDEFINED;
 }
 
@@ -105,7 +122,7 @@ JSValue js_removeChild(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
   if (argc < 2) return JS_UNDEFINED;
   Node* p = nodeArg(ctx, argv[0]);
   Node* c = nodeArg(ctx, argv[1]);
-  if (p && c) runtimeOf(ctx).doc.removeChild(p, c);  // may keep it as a LayoutAnimation ghost
+  if (p && c) p->document()->removeChild(p, c);  // may keep it as a LayoutAnimation ghost
   return JS_UNDEFINED;
 }
 
@@ -135,10 +152,11 @@ LayoutAnimSpec layoutAnimSpec(const Value& v, double duration) {
   return s;
 }
 
+// The commit may touch any surface: all of them are armed.
 JSValue js_configureLayoutAnimation(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  Document& doc = runtimeOf(ctx).doc;
+  Runtime& rt = runtimeOf(ctx);
   if (argc < 1 || !JS_IsObject(argv[0])) {
-    doc.disarmLayoutAnimation();
+    for (auto& s : rt.surfaces()) s->doc.disarmLayoutAnimation();
     return JS_UNDEFINED;
   }
   Value cfg = toValue(ctx, argv[0]);
@@ -147,14 +165,14 @@ JSValue js_configureLayoutAnimation(JSContext* ctx, JSValueConst, int argc, JSVa
   c.create = layoutAnimSpec(cfg["create"], duration);
   c.update = layoutAnimSpec(cfg["update"], duration);
   c.remove = layoutAnimSpec(cfg["delete"], duration);
-  doc.armLayoutAnimation(c);
+  for (auto& s : rt.surfaces()) s->doc.armLayoutAnimation(c);
   return JS_UNDEFINED;
 }
 
 JSValue js_destroyNode(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   JSUI_COMMIT_SCOPE;
   if (argc < 1) return JS_UNDEFINED;
-  if (Node* n = nodeArg(ctx, argv[0])) runtimeOf(ctx).doc.destroyNode(n);
+  if (Node* n = nodeArg(ctx, argv[0])) n->document()->destroyNode(n);
   return JS_UNDEFINED;
 }
 
@@ -163,7 +181,7 @@ JSValue js_measure(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   if (!n) return JS_NULL;
   // Layout may be stale mid-commit; onLayout events it raises are queued
   // until JS unwinds (see JsEngine::layoutEvent).
-  runtimeOf(ctx).doc.layout();
+  n->document()->layout();
   Rect r = n->layoutRect(), a = n->absoluteRect();
   JSValue o = JS_NewObject(ctx);
   JS_SetPropertyStr(ctx, o, "x", JS_NewFloat64(ctx, r.x));
@@ -175,9 +193,16 @@ JSValue js_measure(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   return o;
 }
 
-// viewport() -> {width, height, scale}: logical viewport size (Dimensions).
-JSValue js_viewport(JSContext* ctx, JSValueConst, int, JSValueConst*) {
-  const Document& doc = runtimeOf(ctx).doc;
+// viewport(rootTag?) -> {width, height, scale}: logical viewport size of a
+// surface (the main one by default; Dimensions). An auto-sized axis reports
+// its laid-out size.
+JSValue js_viewport(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  Runtime& rt = runtimeOf(ctx);
+  const Document* d = &rt.doc;
+  uint32_t tag = 0;
+  if (argc > 0 && JS_IsNumber(argv[0]) && !JS_ToUint32(ctx, &tag, argv[0]))
+    if (Surface* s = rt.surfaceByTag(tag)) d = &s->doc;
+  const Document& doc = *d;
   JSValue o = JS_NewObject(ctx);
   JS_SetPropertyStr(ctx, o, "width", JS_NewFloat64(ctx, doc.width()));
   JS_SetPropertyStr(ctx, o, "height", JS_NewFloat64(ctx, doc.height()));
@@ -187,13 +212,13 @@ JSValue js_viewport(JSContext* ctx, JSValueConst, int, JSValueConst*) {
 
 JSValue js_focus(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
-  if (n) runtimeOf(ctx).input->focus(n);
+  if (n) inputOf(ctx, n).focus(n);
   return JS_UNDEFINED;
 }
 
 JSValue js_blur(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
-  if (n) runtimeOf(ctx).input->blur(n);
+  if (n) inputOf(ctx, n).blur(n);
   return JS_UNDEFINED;
 }
 
@@ -207,9 +232,8 @@ JSValue js_scrollTo(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
   if (argc > 1) JS_ToFloat64(ctx, &x, argv[1]);
   if (argc > 2) JS_ToFloat64(ctx, &y, argv[2]);
   bool animated = argc > 3 && JS_ToBool(ctx, argv[3]) > 0;
-  Runtime& rt = runtimeOf(ctx);
-  rt.doc.layout();
-  rt.input->scrollTo(n, float(x == x ? x : 0), float(y == y ? y : 0), animated);
+  n->document()->layout();
+  inputOf(ctx, n).scrollTo(n, float(x == x ? x : 0), float(y == y ? y : 0), animated);
   return JS_UNDEFINED;
 }
 
@@ -217,9 +241,8 @@ JSValue js_scrollTo(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
 JSValue js_flashScrollIndicators(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
   if (!n) return JS_UNDEFINED;
-  Runtime& rt = runtimeOf(ctx);
-  rt.doc.layout();
-  rt.input->flashScrollIndicators(n);
+  n->document()->layout();
+  inputOf(ctx, n).flashScrollIndicators(n);
   return JS_UNDEFINED;
 }
 
@@ -233,7 +256,7 @@ JSValue js_setTextInputSelection(JSContext* ctx, JSValueConst, int argc, JSValue
   end = start;
   if (argc > 2 && !JS_IsUndefined(argv[2]) && !JS_IsNull(argv[2])) JS_ToFloat64(ctx, &end, argv[2]);
   auto toIndex = [](double v) { return v == v ? int(std::clamp(v, 0.0, 1e9)) : 0; };
-  runtimeOf(ctx).input->setInputSelection(n, toIndex(start), toIndex(end));
+  inputOf(ctx, n).setInputSelection(n, toIndex(start), toIndex(end));
   return JS_UNDEFINED;
 }
 
@@ -289,8 +312,10 @@ void fontLoaded(JsEngine::Impl& impl, uint64_t id, Resource& res, const std::str
     error = "loadFont: " + res.url + " is not a supported font file";
   }
   if (error.empty()) {
-    invalidateText(rt.doc.root());
-    rt.doc.markLayoutDirty();
+    for (auto& s : rt.surfaces()) {
+      invalidateText(s->doc.root());
+      s->doc.markLayoutDirty();
+    }
     JSValue ok = JS_TRUE;
     JS_FreeValue(ctx, impl.call(resolve, JS_UNDEFINED, 1, &ok));
   } else {
@@ -335,6 +360,20 @@ JSValue js_loadFont(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
   return promise;
 }
 
+// surfaceApp(rootTag) -> {appKey, initialProps} | null: the app the host
+// asked the surface to run (AppRegistry skips its auto-start on the main
+// surface when the host picked one).
+JSValue js_surfaceApp(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  uint32_t tag = 0;
+  if (argc < 1 || !JS_IsNumber(argv[0]) || JS_ToUint32(ctx, &tag, argv[0])) return JS_NULL;
+  Surface* s = runtimeOf(ctx).surfaceByTag(tag);
+  if (!s || s->appKey.empty()) return JS_NULL;
+  JSValue o = JS_NewObject(ctx);
+  JS_SetPropertyStr(ctx, o, "appKey", JS_NewStringLen(ctx, s->appKey.data(), s->appKey.size()));
+  JS_SetPropertyStr(ctx, o, "initialProps", JS_ParseJSON(ctx, s->propsJson.data(), s->propsJson.size(), "<props>"));
+  return o;
+}
+
 JSValue js_reload(JSContext* ctx, JSValueConst, int, JSValueConst*) {
   runtimeOf(ctx).requestReload();
   return JS_UNDEFINED;
@@ -358,7 +397,8 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
              {"measure", js_measure, 1},           {"focus", js_focus, 1},
              {"blur", js_blur, 1},                 {"scrollTo", js_scrollTo, 4},
              {"postMessage", js_postMessage, 2},   {"loadFont", js_loadFont, 4},
-             {"reload", js_reload, 0},             {"viewport", js_viewport, 0},
+             {"reload", js_reload, 0},             {"viewport", js_viewport, 1},
+             {"surfaceApp", js_surfaceApp, 1},
              {"setTextInputSelection", js_setTextInputSelection, 3},
              {"getClipboard", js_getClipboard, 0}, {"setClipboard", js_setClipboard, 1},
              {"flashScrollIndicators", js_flashScrollIndicators, 1},

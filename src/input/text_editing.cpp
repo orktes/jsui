@@ -83,7 +83,7 @@ void InputManager::editSelect(Node* n, int anchor, int focus, bool keepGoal) {
   anchor = std::clamp(anchor, 0, len);
   focus = std::clamp(focus, 0, len);
   resetBlink(s, rt_);
-  rt_.doc.markPaintDirty();
+  doc_.markPaintDirty();
   if (!keepGoal) s->hasGoalX = false;
   s->coalesceTyping = false;
   if (anchor == s->anchor && focus == s->focus) return;
@@ -405,7 +405,7 @@ void InputManager::editTick() {
   bool on = t < 0 || std::fmod(t, 2 * kBlinkMs) < kBlinkMs;
   if (on != s->caretOn) {
     s->caretOn = on;
-    rt_.doc.markPaintDirty();  // the painter damages just the caret rect
+    doc_.markPaintDirty();  // the painter damages just the caret rect
   }
 }
 

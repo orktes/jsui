@@ -4,7 +4,7 @@
 //
 // The embedder (e.g. Godot's RenderingDevice) owns the device, the queue and
 // the target texture; this context only borrows them. Frames go through
-// Runtime::renderCanvasTracked: with JSUI_GPU_INCREMENTAL the target is the
+// Surface::renderCanvasTracked: with JSUI_GPU_INCREMENTAL the target is the
 // retained frame and only the damage bounds are repainted (clipped to that
 // rect), otherwise the whole frame is. Raster images are uploaded once
 // (CachingImageProvider, shared with the WebGPU backend).
@@ -479,7 +479,7 @@ void purge(JsuiGpuContext* gpu, size_t cacheBytes) {
   g->ctx->freeGpuResources();
 }
 
-int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* dirty) {
+int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* dirty) {
   if (dirty) *dirty = JsuiRect{0, 0, 0, 0};
   GraphiteGpu* g = asGraphite(gpu);
   if (!g || !g->ctx || !t.texture || t.width <= 0 || t.height <= 0) return -1;
@@ -561,12 +561,12 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* d
   const bool incremental = (t.flags & JSUI_GPU_INCREMENTAL) && !discard;
   const void* key = incremental ? t.texture : nullptr;
   const bool clear = !(t.flags & JSUI_GPU_NO_CLEAR) || discard;
-  SkIRect painted = rt.renderCanvasTracked(key, t.width, t.height, [&](const SkIRect&, bool) -> Runtime::CanvasChoice {
+  SkIRect painted = rt.renderCanvasTracked(key, t.width, t.height, [&](const SkIRect&, bool) -> Surface::CanvasChoice {
     // Always into the target. It holds just our frame afterwards (so the
     // next frame may be incremental) unless the frame was composited over it.
     // Scattered damage (several small animations) as a few scissored passes
     // rather than their bounding box (CanvasChoice::splitDamage).
-    Runtime::CanvasChoice c{surface->getCanvas(), clear ? t.texture : nullptr, clear};
+    Surface::CanvasChoice c{surface->getCanvas(), clear ? t.texture : nullptr, clear};
     c.splitDamage = true;
     return c;
   });
@@ -603,7 +603,7 @@ const char* dawnRevision() { return nullptr; }
 bool owns(JsuiGpuContext* gpu) { return gpu && gpu->kind == JsuiGpuContext::Kind::Graphite; }
 void destroy(JsuiGpuContext*) {}
 void purge(JsuiGpuContext*, size_t) {}
-int render(Runtime&, JsuiGpuContext*, const JsuiGpuTarget&, JsuiRect* dirty) {
+int render(Surface&, JsuiGpuContext*, const JsuiGpuTarget&, JsuiRect* dirty) {
   if (dirty) *dirty = JsuiRect{0, 0, 0, 0};
   return -1;
 }

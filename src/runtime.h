@@ -14,17 +14,16 @@
 #include "include/core/SkRegion.h"
 #include "jsui/jsui.h"
 #include "platform/loader.h"
+#include "surface.h"
 #include "text/font_manager.h"
 
 class SkCanvas;
-class SkPicture;
 
 namespace jsui {
 
 class JsEngine;
 class InputManager;
 class ImageCache;
-class DevOverlay;
 class NativeAnimated;
 
 class Runtime {
@@ -50,64 +49,48 @@ class Runtime {
   // Animated animations, LayoutAnimations, layout) without running JS:
   // timers, rAF, events and animation end callbacks wait for the next tick().
   void tickNative(double nowMs);
+  // Any surface has something new to paint.
   bool needsRedraw() const;
   // Animations / timers / held input want another tick soon (jsui_wants_frame).
   bool wantsFrame() const;
-  void render(void* pixels, int width, int height, size_t rowBytes);
-  // Like render(), but `pixels` must still hold the frame this runtime last
-  // rendered into it: only the changed region is repainted. Returns the
-  // repainted device rect (empty when nothing changed). A different buffer,
-  // size or an intervening render() makes it a full repaint.
-  SkIRect renderIncremental(void* pixels, int width, int height, size_t rowBytes);
-  // Full repaint into any canvas of width x height device px (the GPU
-  // backend's surfaces). `clear`: clear to transparent first, else draw over
-  // what the canvas holds. The next renderIncremental() repaints fully.
-  void renderCanvas(SkCanvas* canvas, int width, int height, bool clear);
-  // Damage-tracked repaint for a GPU backend that may keep the frame in a
-  // surface of its own (the WebGPU backend's retained frame texture; its
-  // targets, canvas textures, start cleared every frame). `key` names that
-  // retained surface (nullptr: none yet); it is valid when it holds the frame
-  // this runtime last painted. Once the frame's damage is known (the bounds
-  // of the changed device pixels), `choose` says where to paint:
-  //   * {canvas, key}: `canvas` is the retained surface `key`. When it was
-  //     valid only the damage bounds are repainted, clipped to that one rect
-  //     (a scissor: complex clips cost GPU backends extra passes); otherwise
-  //     the whole frame. The next frame can repaint incrementally again.
-  //   * {canvas, nullptr}: a full repaint into some other canvas (the target
-  //     itself, when most of the frame changed anyway); the retained surface
-  //     misses this frame, so its next use repaints fully.
-  //   * {nullptr}: nothing is painted (the backend failed).
-  // Returns the repainted device rect.
-  struct CanvasChoice {
-    SkCanvas* canvas = nullptr;
-    const void* key = nullptr;  // the retained surface painted into, or nullptr
-    bool clear = true;          // full repaints: clear first, else draw over the canvas
-    // Damage-only repaints: a few rects covering the damage, each painted
-    // in its own pass scissored to it (see paintDocumentRects), instead of
-    // the one bounding rect. Fewer pixels when the damage is scattered;
-    // a pass costs a tree walk and the draws it crosses again.
-    bool splitDamage = false;
-  };
-  // While `choose` runs: the frame's exact damage region (device pixels).
-  const SkRegion& trackedDamage() const { return trackedDamage_; }
-  // The rects the last damage-only renderCanvasTracked() repainted (each
-  // cleared and painted whole; they cover trackedDamage() in a few rects).
-  const std::vector<SkIRect>& trackedRects() const { return trackedRects_; }
-  // `growCurves`: see updateDamage (false only for canvases whose curved
-  // outlines do not depend on the damage clip).
-  template <typename Choose>
-  SkIRect renderCanvasTracked(const void* key, int width, int height, Choose&& choose, bool growCurves = true) {
-    bool keyValid = false;
-    SkIRect damage = beginCanvasTracked(key, width, height, &keyValid, growCurves);
-    return finishCanvasTracked(choose(damage, keyValid), width, height, keyValid, damage);
+  // The main surface (tests and tools that render a runtime directly).
+  void render(void* pixels, int width, int height, size_t rowBytes) { main().render(pixels, width, height, rowBytes); }
+  SkIRect renderIncremental(void* pixels, int width, int height, size_t rowBytes) {
+    return main().renderIncremental(pixels, width, height, rowBytes);
   }
+  void renderCanvas(SkCanvas* canvas, int width, int height, bool clear) {
+    main().renderCanvas(canvas, width, height, clear);
+  }
+
+  // ---- surfaces (React Native root views; see surface.h)
+  Surface& main() const { return *surfaces_.front(); }
+  const std::vector<std::unique_ptr<Surface>>& surfaces() const { return surfaces_; }
+  // A new surface running the AppRegistry component `appKey` with
+  // `propsJson` (an object; empty: {}). Returns nullptr (and logs) for
+  // invalid props.
+  Surface* createSurface(const std::string& appKey, const std::string& propsJson, float width, float height,
+                         float pixelRatio);
+  // Unmounts the surface's app and frees it (later in the tick when JS is on
+  // the stack).
+  void destroySurface(Surface* s);
+  // (Re)runs `appKey` (empty: the current one) with `propsJson` on `s`
+  // (React Native's appProperties / runApplication). Returns false for
+  // invalid props.
+  bool runSurface(Surface* s, const std::string& appKey, const std::string& propsJson);
+  // The surface whose root container is `tag`, or nullptr.
+  Surface* surfaceByTag(uint32_t tag) const;
+  // The surface that owns `doc` (main when unknown).
+  Surface& surfaceOf(const Document* doc) const;
+  // A node of any surface.
+  Node* findNode(uint32_t id) const;
+  // Every surface repaints on the next render (errors, reloads).
+  void redrawAll();
 
   JsuiConfig config;
   JsuiRuntime* handle;
   std::string baseUrl;
   std::string bundleUrl, bundleSource, bundleName;
   std::string lastError;
-  std::string cursor = "default";
 
   // Clipboard: the embedder's callbacks (jsui_set_clipboard_callbacks),
   // else an in-process string.
@@ -138,42 +121,42 @@ class Runtime {
   // A Host.handle handler settled (or could not run); delivered at the end of the tick.
   void uiCallSettled(uint64_t id, bool ok, std::string payload);
 
-  Document doc;
   FontManager fonts;
   ResourceLoader loader;
   std::unique_ptr<ImageCache> images;
+
+ private:
+  // Node ids are unique across the surfaces (JS addresses nodes by id alone).
+  uint32_t nextNodeId_ = 1;
+  std::vector<std::unique_ptr<Surface>> surfaces_;  // [0]: the main surface
+  // Destroyed while JS was on the stack: freed at the start of the next tick.
+  std::vector<std::unique_ptr<Surface>> doomed_;
+
+ public:
+  // The main surface's document and input (most of the runtime predates
+  // surfaces; per-surface code takes the Surface).
+  Document& doc;
+  InputManager* input = nullptr;
   std::unique_ptr<JsEngine> js;
-  std::unique_ptr<InputManager> input;
   // Animated graphs driven natively (useNativeDriver: true).
   std::unique_ptr<NativeAnimated> animated;
 
  private:
-  SkIRect renderImpl(void* pixels, int width, int height, size_t rowBytes, bool incremental);
-  SkIRect paintTracked(SkCanvas* canvas, const void* key, int width, int height, size_t rowBytes,
-                       bool incremental);
-  // The full frame: document (or the frozen last good frame) + dev overlay.
-  void paintFrame(SkCanvas* canvas, bool frozen, bool overlay);
+  // Wires a new surface to the runtime's services.
+  void attach(Surface& s);
+  // Hands surfaces with an app to JS (__jsui_runSurface).
+  void startSurface(Surface& s);
+  void startSurfaces();
+  bool bundleRan_ = false;  // the current context evaluated the bundle
   void resetEngine();
   // Hands native animation end events / value updates to JS.
   void deliverAnimatedEvents();
   // Image onLoad / onError / onProgress for images that settled (React
   // Native: always asynchronous, also for cached images and data URIs).
-  void deliverImageEvents();
+  void deliverImageEvents(Document& doc);
   // An image event can be delivered on the next tick.
-  bool imageEventsReady() const;
-  // renderCanvasTracked(): layout + damage (the bounds, or empty), then the paint.
-  SkIRect beginCanvasTracked(const void* key, int width, int height, bool* keyValid, bool growCurves);
-  SkIRect finishCanvasTracked(const CanvasChoice& c, int width, int height, bool keyValid, const SkIRect& damage);
-  bool trackedFrozen_ = false, trackedOverlay_ = false;
-  const void* trackedKey_ = nullptr;
-  SkRegion trackedDamage_;
-  std::vector<SkIRect> trackedRects_;
-  // The buffer the last frame was painted into (incremental repaint).
-  const void* lastTarget_ = nullptr;
-  int lastTargetW_ = 0, lastTargetH_ = 0;
-  size_t lastTargetRowBytes_ = 0;
+  bool imageEventsReady(const Document& doc) const;
   void devPoll();
-  bool redraw_ = true;
 
   // Hands the state keys the embedder changed since the last tick to JS.
   void deliverStateChanges();
@@ -202,8 +185,6 @@ class Runtime {
   bool devPollInFlight_ = false;
   double devNextPoll_ = 0;
   bool reloadRequested_ = false;
-  sk_sp<SkPicture> lastGoodFrame_;
-  std::unique_ptr<DevOverlay> overlay_;
 };
 
 // The Runtime behind a C handle (tools and tests that read internals such as

@@ -1,12 +1,12 @@
 // ActivityIndicator, Switch, Modal, StatusBar and the trivial containers.
 
-import { createElement as h, useEffect, useLayoutEffect, useRef } from 'react';
+import { createElement as h, useContext, useEffect, useLayoutEffect, useRef } from 'react';
 import { Pressable } from './pressables.js';
 import { AnimatedValue } from '../animated/nodes.js';
 import { timing, loop } from '../animated/animations.js';
 import { Easing } from '../animated/Easing.js';
 import { createAnimatedComponent } from '../animated/createAnimatedComponent.js';
-import { createPortal } from '../renderer.js';
+import { createPortal, rootContainer, RootTagContext } from '../renderer.js';
 import { addGlobalListener } from '../events.js';
 
 const AnimatedView = createAnimatedComponent('View');
@@ -149,6 +149,8 @@ const modalFill = { position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, 
 const modalFillOpaque = Object.assign({}, modalFill, { backgroundColor: 'white' });
 
 function ModalContent(props) {
+  // Modals cover the surface they are rendered in.
+  const rootTag = useContext(RootTagContext);
   const latest = useRef(props);
   latest.current = props;
   useLayoutEffect(() => {
@@ -173,6 +175,7 @@ function ModalContent(props) {
       },
       props.children,
     ),
+    rootContainer(rootTag),
   );
 }
 

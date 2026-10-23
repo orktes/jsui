@@ -25,6 +25,7 @@
 namespace jsui {
 
 class Runtime;
+class Document;
 
 // 2D affine matrix in CSS matrix(a, b, c, d, e, f) form:
 //   x' = a x + c y + e,  y' = b x + d y + f
@@ -52,7 +53,9 @@ enum class NavDirection : uint8_t { Up, Down, Left, Right };
 
 class InputManager {
  public:
-  explicit InputManager(Runtime& rt);
+  // Input of one surface: `doc` is the surface's document and `cursor` the
+  // cursor it reports (jsui_get_cursor).
+  InputManager(Runtime& rt, Document& doc, std::string& cursor);
   ~InputManager();
 
   bool mouseMove(float x, float y);
@@ -307,6 +310,8 @@ class InputManager {
   void tickFocusScopes();
 
   Runtime& rt_;
+  Document& doc_;
+  std::string& cursor_;
   Node* focused_ = nullptr;
   Node* hovered_ = nullptr;  // deepest hovered node (mouse)
 

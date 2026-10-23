@@ -152,7 +152,7 @@ struct GLGpu final : JsuiGpuContext {
   uint64_t frame = 0;
   // Retained frames, one per runtime drawn with this context (see render()).
   struct Retained {
-    const jsui::Runtime* rt = nullptr;
+    const jsui::Surface* rt = nullptr;
     sk_sp<SkSurface> surface;  // null until a frame is painted into it
     uintptr_t key = 0;         // identifies the surface's contents to the runtime
     uint64_t lastUsed = 0;
@@ -161,7 +161,7 @@ struct GLGpu final : JsuiGpuContext {
   std::vector<Retained> retained;
   uintptr_t nextKey = 1;
 
-  Retained* retainedEntry(const jsui::Runtime* rt) {
+  Retained* retainedEntry(const jsui::Surface* rt) {
     for (auto& e : retained)
       if (e.rt == rt) {
         e.lastUsed = frame;
@@ -376,7 +376,7 @@ void purge(JsuiGpuContext* gpu, size_t cacheBytes) {
   g->ctx->purgeUnlockedResources(GrPurgeResourceOptions::kAllResources);
 }
 
-int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiGLTarget& t) {
+int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGLTarget& t) {
   GLGpu* g = asGL(gpu);
   if (!g || t.width <= 0 || t.height <= 0) return -1;
   if (!g->ensure()) return -1;
@@ -385,7 +385,7 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiGLTarget& t) {
   sk_sp<SkSurface> surface = g->surfaceFor(t);
   if (!surface) return -1;
   bool clear = (t.flags & JSUI_GL_NO_CLEAR) == 0;
-  // Where the frame is painted (Runtime::renderCanvasTracked), like the
+  // Where the frame is painted (Surface::renderCanvasTracked), like the
   // WebGPU backend:
   //   * Small damage (a spinner, a hover, a caret): only the damage, as a
   //     few scissored rects, into a retained frame owned by the context,
@@ -407,7 +407,7 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiGLTarget& t) {
                         : nullptr;
   bool viaRetained = false, failed = false;
   const int64_t frameArea = int64_t(t.width) * t.height;
-  rt.renderCanvasTracked(key, t.width, t.height, [&](const SkIRect&, bool keyValid) -> Runtime::CanvasChoice {
+  rt.renderCanvasTracked(key, t.width, t.height, [&](const SkIRect&, bool keyValid) -> Surface::CanvasChoice {
     int64_t area = 0;
     for (SkRegion::Iterator it(rt.trackedDamage()); !it.done(); it.next())
       area += int64_t(it.rect().width()) * it.rect().height();
@@ -425,7 +425,7 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiGLTarget& t) {
       return {};
     }
     viaRetained = true;
-    Runtime::CanvasChoice c{r->surface->getCanvas(), reinterpret_cast<const void*>(r->key), true};
+    Surface::CanvasChoice c{r->surface->getCanvas(), reinterpret_cast<const void*>(r->key), true};
     c.splitDamage = !(retainedDebug & kRetainedOneRect);  // Ganesh: one scissor per pass, no stencil or mask
     return c;
   });
@@ -455,7 +455,7 @@ void destroy(JsuiGpuContext*) {}
 void reset(JsuiGpuContext*) {}
 void contextLost(JsuiGpuContext*) {}
 void purge(JsuiGpuContext*, size_t) {}
-int render(Runtime&, JsuiGpuContext*, const JsuiGLTarget&) { return -1; }
+int render(Surface&, JsuiGpuContext*, const JsuiGLTarget&) { return -1; }
 void setRetainedDebug(unsigned) {}
 }  // namespace gpu
 }  // namespace jsui

@@ -389,7 +389,7 @@ const Value& NativeAnimated::evalOut(int tag) {
 }
 
 void NativeAnimated::applyProps(ANode& p) {
-  Node* view = p.view ? doc_.get(p.view) : nullptr;
+  Node* view = p.view ? (findView ? findView(p.view) : doc_.get(p.view)) : nullptr;
   if (!view) return;
   const Value& partial = evalOut(p.tag);
   // patchStyle skips unchanged values and, for the paint keys the JS side
@@ -422,7 +422,7 @@ void NativeAnimated::flush() {
   // reconciler sends the value it rendered with; ours is the live one).
   for (auto& [tag, n] : nodes_) {
     if (n.type != Type::Props || !n.view || seen.count(tag)) continue;
-    Node* v = doc_.get(n.view);
+    Node* v = findView ? findView(n.view) : doc_.get(n.view);
     if (v && (!n.viewWritten || v->paintVersion != n.viewPaintVersion)) props.push_back(&n);
   }
   for (ANode* p : props) applyProps(*p);

@@ -33,7 +33,16 @@ for (const mode of ['production', 'development']) {
     await build({ entry: path.join(here, 'e2e', 'host_data.jsx'), outfile: hostDataFile, mode });
     const imagesFile = path.join(dir, 'images.js');
     await build({ entry: path.join(here, 'e2e', 'images.jsx'), outfile: imagesFile, mode });
-    const tests = ['react_e2e', 'react_interactions_e2e', 'react_native_animated_e2e', 'react_host_data_e2e', 'react_images_e2e'];
+    const surfacesFile = path.join(dir, 'surfaces.js');
+    await build({ entry: path.join(here, 'e2e', 'surfaces.jsx'), outfile: surfacesFile, mode });
+    const tests = [
+      'react_e2e',
+      'react_interactions_e2e',
+      'react_native_animated_e2e',
+      'react_host_data_e2e',
+      'react_images_e2e',
+      'react_surfaces_e2e',
+    ];
     const { stdout } = await promisify(execFile)(binary, tests, {
       env: Object.assign({}, process.env, {
         JSUI_REACT_E2E_BUNDLE: outfile,
@@ -42,6 +51,7 @@ for (const mode of ['production', 'development']) {
         JSUI_REACT_NATIVE_ANIMATED_BUNDLE: nativeAnimatedFile,
         JSUI_REACT_HOST_DATA_BUNDLE: hostDataFile,
         JSUI_REACT_IMAGES_BUNDLE: imagesFile,
+        JSUI_REACT_SURFACES_BUNDLE: surfacesFile,
       }),
       cwd: repo,
     }).catch((e) => {
@@ -53,6 +63,8 @@ for (const mode of ['production', 'development']) {
     assert.match(stdout, /PASS react_native_animated_e2e/);
     assert.match(stdout, /PASS react_host_data_e2e/);
     assert.match(stdout, /PASS react_images_e2e/);
+    assert.match(stdout, /PASS react_surfaces_e2e$/m);
+    assert.match(stdout, /PASS react_surfaces_e2e_host_picks_main/);
     if (process.env.JSUI_E2E_VERBOSE) console.log(stdout);
     assert.doesNotMatch(stdout, /skipped/);
   });

@@ -418,17 +418,17 @@ TEST(input_cursor) {
   f.layout();
   Fixture::style(custom).cursor = "grab";
   f.in().mouseMove(5, 5);
-  CHECK_EQ(f.rt->cursor, std::string("pointer"));
+  CHECK_EQ(f.rt->main().cursor, std::string("pointer"));
   Fixture::style(label).cursor = "help";
   f.in().mouseMove(6, 6);
   f.rt->tick(16);
-  CHECK_EQ(f.rt->cursor, std::string("help"));
+  CHECK_EQ(f.rt->main().cursor, std::string("help"));
   f.in().mouseMove(210, 10);
-  CHECK_EQ(f.rt->cursor, std::string("text"));
+  CHECK_EQ(f.rt->main().cursor, std::string("text"));
   f.in().mouseMove(10, 210);
-  CHECK_EQ(f.rt->cursor, std::string("grab"));
+  CHECK_EQ(f.rt->main().cursor, std::string("grab"));
   f.in().mouseMove(390, 290);
-  CHECK_EQ(f.rt->cursor, std::string("default"));
+  CHECK_EQ(f.rt->main().cursor, std::string("default"));
   (void)field;
 }
 

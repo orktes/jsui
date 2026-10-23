@@ -8,7 +8,7 @@
 // browser specific except that the browser context cannot block on the GPU
 // (no tick function: Graphite then never waits, see DawnBackendContext.h).
 //
-// Frames (Runtime::renderCanvasTracked): when most of the frame changed it is
+// Frames (Surface::renderCanvasTracked): when most of the frame changed it is
 // painted straight into the target (one pass). When little changed, only the
 // damage (a few scissored rects) is repainted into a retained texture owned
 // by the context, which is then drawn into the target with one draw (targets
@@ -207,7 +207,7 @@ void purge(JsuiGpuContext* gpu, size_t cacheBytes) {
   g->ctx->freeGpuResources();
 }
 
-int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
+int render(Surface& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
   WebGPUGpu* g = asWebGPU(gpu);
   if (!g || !t.texture || g->isLost()) return -1;
   wgpu::Texture texture(static_cast<WGPUTexture>(t.texture));
@@ -220,12 +220,12 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
   sk_sp<SkSurface> target = SkSurfaces::WrapBackendTexture(g->recorder.get(), backendTex, nullptr, &props);
   if (!target) return -1;
 
-  // Where the frame is painted (Runtime::renderCanvasTracked):
+  // Where the frame is painted (Surface::renderCanvasTracked):
   //   * Most of the frame changed (an animated full-screen UI): straight into
   //     the target with a full repaint, one pass, no copy.
   //   * Small damage (a spinner, a hover, a few looping animations spread
   //     over the screen): only the damage, as a few scissored rects
-  //     (Runtime::CanvasChoice::splitDamage: rect clips are scissors on
+  //     (Surface::CanvasChoice::splitDamage: rect clips are scissors on
   //     Graphite too). "Small" is the damaged area, not its bounds: two small
   //     animations in opposite corners have bounds as large as the screen,
   //     and a full repaint of a full-screen UI (backgrounds, gradients, every
@@ -265,7 +265,7 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
   bool viaRetained = false, failed = false;
   bool copyAll = false;  // copy-back: the whole target into `back` after the frame
   jsui::LayerCacheScope layerScope((t.flags & JSUI_WEBGPU_NO_LAYER_CACHE) ? nullptr : &g->layers);
-  rt.renderCanvasTracked(key, w, h, [&](const SkIRect&, bool keyValid) -> Runtime::CanvasChoice {
+  rt.renderCanvasTracked(key, w, h, [&](const SkIRect&, bool keyValid) -> Surface::CanvasChoice {
     int64_t area = 0;
     for (SkRegion::Iterator it(rt.trackedDamage()); !it.done(); it.next())
       area += int64_t(it.rect().width()) * it.rect().height();
@@ -298,7 +298,7 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
         keyValid = false;
       }
       viaRetained = true;
-      Runtime::CanvasChoice c{target->getCanvas(), reinterpret_cast<const void*>(uintptr_t(g->retainedGen)), true};
+      Surface::CanvasChoice c{target->getCanvas(), reinterpret_cast<const void*>(uintptr_t(g->retainedGen)), true};
       if (keyValid) {
         // The last frame first (every pixel), then the damage over it.
         SkPaint paint;
@@ -320,7 +320,7 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
       g->retainedGen++;
     }
     viaRetained = true;
-    Runtime::CanvasChoice c{g->retained->getCanvas(), reinterpret_cast<const void*>(uintptr_t(g->retainedGen)), true};
+    Surface::CanvasChoice c{g->retained->getCanvas(), reinterpret_cast<const void*>(uintptr_t(g->retainedGen)), true};
     c.splitDamage = true;
     return c;
   }, /*growCurves=*/false);
@@ -371,7 +371,7 @@ JsuiGpuContext* create(void*, void*, void*) { return nullptr; }
 void destroy(JsuiGpuContext*) {}
 void contextLost(JsuiGpuContext*) {}
 void purge(JsuiGpuContext*, size_t) {}
-int render(Runtime&, JsuiGpuContext*, const JsuiWebGPUTarget&) { return -1; }
+int render(Surface&, JsuiGpuContext*, const JsuiWebGPUTarget&) { return -1; }
 }  // namespace webgpu
 }  // namespace jsui
 

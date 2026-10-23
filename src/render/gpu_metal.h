@@ -8,7 +8,7 @@
 
 namespace jsui {
 
-class Runtime;
+class Surface;
 
 namespace metal {
 
@@ -17,7 +17,7 @@ JsuiMetalContext* create(void* device, void* queue);
 void destroy(JsuiMetalContext* mtl);
 void purge(JsuiMetalContext* mtl, size_t cacheBytes);
 // Full repaint of `rt` into `texture`. 0 on success, -1 on failure.
-int render(Runtime& rt, JsuiMetalContext* mtl, void* texture, unsigned format, int width, int height, int flags);
+int render(Surface& rt, JsuiMetalContext* mtl, void* texture, unsigned format, int width, int height, int flags);
 
 }  // namespace metal
 }  // namespace jsui
