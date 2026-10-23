@@ -445,6 +445,89 @@ TEST(render_incremental_matches_full) {
   CHECK(r.isEmpty());
 }
 
+// updateDamage skips subtrees in which nothing changed: the damage must be
+// what walking every node finds, whatever changes deep inside a subtree
+// that was skipped, while a box animating in front leaves the rest alone.
+TEST(render_skipped_subtrees_damage_like_a_full_walk) {
+  const char* tree = R"J({"style":{"position":"absolute","left":0,"top":0,"width":320,"height":240},"children":[
+    {"style":{"position":"absolute","left":10,"top":10,"width":140,"height":100,"borderRadius":12,"backgroundColor":"#1d2442"},"children":[
+      {"type":"Text","style":{"position":"absolute","left":10,"top":8,"color":"#fff","fontSize":12},"text":"Title"},
+      {"style":{"position":"absolute","left":10,"top":40,"width":60,"height":20,"borderRadius":4,"backgroundColor":"#4ade80"},"children":[
+        {"style":{"position":"absolute","left":4,"top":4,"width":12,"height":12,"borderRadius":6,"backgroundColor":"#f2c35b"}}]}]},
+    {"style":{"position":"absolute","left":170,"top":10,"width":140,"height":100,"backgroundColor":"#26304f"},"children":[
+      {"style":{"margin":8,"height":20,"backgroundColor":"#ff4d6a"}},
+      {"style":{"margin":8,"height":20,"backgroundColor":"#4fd1ff"},"children":[
+        {"style":{"width":"50%","height":10,"backgroundColor":"#ffffff"}}]}]},
+    {"type":"ScrollView","style":{"position":"absolute","left":10,"top":130,"width":140,"height":60,"backgroundColor":"#11162a"},"children":[
+      {"style":{"height":30,"margin":4,"borderRadius":5,"backgroundColor":"#4ade80"}},
+      {"style":{"height":30,"margin":4,"borderRadius":5,"backgroundColor":"#4fd1ff"}}]},
+    {"style":{"position":"absolute","left":170,"top":130,"width":140,"height":100,"backgroundColor":"#302040"},"children":[
+      {"style":{"position":"absolute","left":10,"top":10,"width":60,"height":30,"backgroundColor":"#b26bff"},"children":[
+        {"style":{"position":"absolute","left":5,"top":5,"width":20,"height":20,"backgroundColor":"#ffffff"}}]},
+      {"type":"Text","style":{"position":"absolute","left":0,"top":50,"width":120,"height":30,"paddingLeft":"10%","color":"#fff","fontSize":12},"text":"Padded"}]},
+    {"style":{"position":"absolute","left":0,"top":200,"width":30,"height":30,"borderRadius":15,"backgroundColor":"#f2c35b"}}]})J";
+  Scene a(320, 240), b(320, 240);
+  Node* ra = a.add(tree);
+  Node* rb = b.add(tree);
+  int step = 0, skippedSteps = 0;
+  auto frame = [&]() {
+    a.doc().layout();
+    b.doc().layout();
+    SkRegion da = updateDamage(a.doc(), 320, 240);
+    int visitedA = lastPaintStats(a.doc()).nodesUpdated;
+    setRecordSkipping(false);
+    SkRegion db = updateDamage(b.doc(), 320, 240);
+    int visitedB = lastPaintStats(b.doc()).nodesUpdated;
+    setRecordSkipping(true);
+    if (da != db) {
+      SkIRect ba = da.getBounds(), bb = db.getBounds();
+      std::fprintf(stderr, "  step %d: damage [%d,%d %dx%d] with skips, [%d,%d %dx%d] walking all\n", step, ba.left(),
+                   ba.top(), ba.width(), ba.height(), bb.left(), bb.top(), bb.width(), bb.height());
+    }
+    CHECK(da == db);
+    if (visitedA < visitedB) skippedSteps++;
+    step++;
+  };
+  // The same change to both trees (the node found by child indices).
+  auto both = [&](std::initializer_list<int> path, auto&& fn) {
+    Node* na = ra;
+    Node* nb = rb;
+    for (int i : path) {
+      na = na->children()[size_t(i)];
+      nb = nb->children()[size_t(i)];
+    }
+    fn(na, ra);
+    fn(nb, rb);
+  };
+  for (int i = 0; i < 40; i++) {
+    both({4}, [&](Node* n, Node*) { patch(n, R"J({"transform":[{"translateX":)J" + std::to_string(i % 7) + "}]}"); });
+    switch (i) {
+      case 5: both({0, 1, 0}, [](Node* n, Node*) { patch(n, R"J({"backgroundColor":"#ff0000"})J"); }); break;
+      case 8: both({1, 1, 0}, [](Node* n, Node*) { patch(n, R"J({"width":"80%"})J"); }); break;
+      case 11: both({0, 0}, [](Node* n, Node*) { n->children()[0]->setText("A longer title"); }); break;
+      case 14:
+        both({2}, [](Node* n, Node*) {
+          n->scrollY = 9;
+          n->markBoundsDirty();
+        });
+        break;
+      case 17: both({3, 0}, [](Node* n, Node*) { patch(n, R"J({"opacity":0})J"); }); break;
+      case 18: both({3, 0, 0}, [](Node* n, Node*) { patch(n, R"J({"backgroundColor":"#00ff00","left":15})J"); }); break;
+      case 21: both({3, 0}, [](Node* n, Node*) { patch(n, R"J({"opacity":1})J"); }); break;
+      case 24: both({3}, [](Node* n, Node*) { patch(n, R"J({"width":120})J"); }); break;  // the Text's padding
+      case 27:  // a subtree moves to another parent
+        both({0, 1}, [](Node* n, Node* root) { root->children()[1]->children()[0]->appendChild(n->children()[0]); });
+        break;
+      case 30: both({1}, [](Node* n, Node*) { n->removeChild(n->children()[0]); }); break;
+      case 33: both({0}, [](Node* n, Node*) { patch(n, R"J({"left":12})J"); }); break;
+      default: break;
+    }
+    frame();
+  }
+  // In most frames only the glow changed: the other subtrees were skipped.
+  CHECK(skippedSteps > 30);
+}
+
 // Damage cutting through rounded boxes at random places (a small box moving
 // over them, also translucent and under a scale) must still repaint exactly
 // like a full frame. Perf guards: damage inside a rounded box's padding box

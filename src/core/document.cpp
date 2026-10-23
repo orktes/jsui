@@ -179,6 +179,7 @@ bool Document::layout() {
 void Document::afterLayout(Node* node, bool report) {
   if (!node->yoga() || !YGNodeGetHasNewLayout(node->yoga())) return;
   YGNodeSetHasNewLayout(node->yoga(), false);
+  node->markPaintTree();  // padding, border or content size may have changed too
   Rect r = node->layoutRect();
   const Rect& b = node->boundsLayout;
   if (b.x != r.x || b.y != r.y || b.width != r.width || b.height != r.height) {
