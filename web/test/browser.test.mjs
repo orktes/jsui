@@ -1059,6 +1059,84 @@ test('perf: 1080p HUD (~540 nodes), steady state (webgpu)', async ({ page }) => 
   console.log(`      perf (${r.renderer}, 1920x1080, headless/swiftshader): tick ${r.tick.toFixed(2)} ms, Skia Graphite draw+GPU done ${r.paint.toFixed(2)} ms`);
 });
 
+// ---------------------------------------------------------------- surfaces
+// One runtime, several canvases (createSurface): own props, pixels, input,
+// sizes; props updates, auto-size and destroy.
+test('surfaces: one runtime on several canvases', async ({ page }) => {
+  await mount(page, { jsui: { bundleUrl: 'fixtures/surfaces.js' } });
+  const made = await page.evaluate(async () => {
+    const j = window.hosts.ui;
+    const holder = document.createElement('div');
+    holder.id = 'plate-holder';
+    Object.assign(holder.style, { width: '120px', height: '40px' });
+    document.body.appendChild(holder);
+    const plate = j.createSurface(holder, { component: 'Plate', initialProps: { color: '#ff0000' }, renderer: 'cpu' });
+    plate.canvas.id = 'plate';
+    const c = document.createElement('canvas');
+    c.id = 'badge';
+    document.body.appendChild(c);
+    const badge = j.createSurface(c, { component: 'Badge', initialProps: { color: '#0000ff', size: [30, 12] },
+      autoSize: true, renderer: '2d' });
+    window.surfaces = { plate, badge };
+    await Promise.race([j.whenIdle(), new Promise((r) => setTimeout(r, 3000))]);
+    return { plate: plate.rootTag, badge: badge.rootTag, size: [c.style.width, c.style.height],
+      runs: j.messages.filter(([n]) => n === 'run').map(([, d]) => d.appKey), count: j.surfaces.length };
+  });
+  assert(made.plate > 1 && made.badge > 1 && made.plate !== made.badge, `root tags ${made.plate} ${made.badge}`);
+  assert(made.runs.join() === 'Plate,Badge', `runs ${made.runs}`);
+  assert(made.count === 2, `surfaces ${made.count}`);
+  assert(made.size.join() === '30px,12px', `auto size ${made.size}`);
+  const [plate] = await screenPixels(page, '#plate', [[60, 20]]);
+  assert(near(plate, RED), `plate ${fmt(plate)}`);
+  const [badge] = await screenPixels(page, '#badge', [[15, 6]]);
+  assert(near(badge, BLUE), `badge ${fmt(badge)}`);
+  const [main] = await screenPixels(page, '#ui', [[10, 50]]);
+  assert(near(main, [0, 128, 128, 255]), `main ${fmt(main)}`);
+
+  // Input reaches the surface under the pointer.
+  const box = await page.locator('#plate').boundingBox();
+  await page.mouse.move(box.x + 60, box.y + 20);
+  await page.mouse.down();
+  await page.mouse.up();
+  await frames(page);
+  const press = await page.evaluate(() => window.hosts.ui.messages.filter(([n]) => n === 'press').map(([, d]) => d));
+  assert(press.join() === String(made.plate), `press ${press}`);
+
+  // New props repaint just that surface; destroy unmounts and drops the canvas createSurface made.
+  await page.evaluate(() => window.surfaces.plate.setProps({ color: '#00ff00' }));
+  await frames(page);
+  const [green] = await screenPixels(page, '#plate', [[60, 20]]);
+  assert(near(green, GREEN), `plate after setProps ${fmt(green)}`);
+  const after = await page.evaluate(async () => {
+    window.surfaces.plate.destroy();
+    await new Promise(requestAnimationFrame);
+    const j = window.hosts.ui;
+    return { stops: j.messages.filter(([n]) => n === 'stop').map(([, d]) => d), canvas: !!document.getElementById('plate'),
+      count: j.surfaces.length };
+  });
+  assert(after.stops.join() === String(made.plate) && !after.canvas && after.count === 1, `destroy ${JSON.stringify(after)}`);
+});
+
+test('surfaces: createJsui without a canvas, component picks the main app', async ({ page }) => {
+  const r = await page.evaluate(async (dist) => {
+    const j = await window.createJsui({ renderer: 'cpu', moduleUrl: new URL(`../${dist}/jsui.js`, location.href),
+      bundleUrl: 'fixtures/surfaces.js', component: 'Main', initialProps: { color: '#ff0000' } });
+    const msgs = [];
+    j.on('message', (n, d) => msgs.push([n, d]));
+    const c = document.createElement('canvas');
+    c.id = 'w';
+    Object.assign(c.style, { width: '50px', height: '50px' });
+    document.body.appendChild(c);
+    j.createSurface(c, { component: 'W', initialProps: { color: '#0000ff' }, renderer: 'cpu' });
+    await Promise.race([j.whenIdle(), new Promise((res) => setTimeout(res, 3000))]);
+    return { msgs, renderer: j.renderer ?? null };
+  }, DIST);
+  const runs = r.msgs.filter(([n]) => n === 'run').map(([, d]) => `${d.tag}:${d.appKey}`);
+  assert(runs.includes('1:Main') && runs.some((s) => s.endsWith(':W')), `runs ${runs}`);
+  const [px] = await screenPixels(page, '#w', [[25, 25]]);
+  assert(near(px, BLUE), `widget ${fmt(px)}`);
+});
+
 // -------------------------------------------------------------------- run
 let failed = 0, skipped = 0, passed = 0;
 for (const t of tests) {

@@ -17,6 +17,50 @@ jsui.on('message', (name, data) => console.log(name, data)); // Host.postMessage
 jsui.postMessage('hud', { hp: 42 });                         // Host.handle('hud', fn) in the UI
 ```
 
+## Several root views (surfaces)
+
+Like React Native's root views, one runtime (one bundle, JS context, shared
+state, fonts and images) can show several components, each on its own canvas
+with its own props, size, input and focus. Register them in the bundle and
+place them anywhere in the page:
+
+```js
+// app.jsx
+AppRegistry.registerComponent('Clock', () => Clock);
+AppRegistry.registerComponent('Cart', () => Cart);
+```
+
+```js
+const jsui = await createJsui({ bundleUrl: './bundle.js' });  // no canvas: only the widgets below
+const clock = jsui.createSurface(document.querySelector('#clock'), {
+  component: 'Clock',
+  initialProps: { tz: 'UTC' },
+  autoSize: true,          // the canvas takes the component's laid-out size
+});
+const cart = jsui.createSurface(document.querySelector('#cart'), { component: 'Cart', renderer: '2d' });
+clock.setProps({ tz: 'CET' });  // re-renders, keeping its state
+cart.destroy();
+```
+
+- `createSurface(target, options)` takes a `<canvas>` or an element (it gets a
+  canvas filling it). Options: `component` (the AppRegistry key),
+  `initialProps`, `width` / `height` (CSS px), `autoSize` (`true`, `'width'`
+  or `'height'`), `renderer`, `pixelRatio`, `autoFocus` (default false),
+  `trapTab` (default false, so Tab moves on through the page).
+- The surface object has `setProps(props)`, `run(component, props)`,
+  `destroy()`, `rootTag`, `canvas` and `stats`. In the UI, `RootTagContext`
+  and `useWindowDimensions()` give the surface's root tag and size.
+- `createJsui({ component, initialProps })` picks the main canvas' component
+  (default: the bundle's first registered one); `jsui.run()` / `jsui.setProps()`
+  change it later. Without `canvas` the main surface is not shown.
+- The runtime ticks once per frame and each canvas repaints only what changed.
+  Surfaces have a transparent background. Keyboard input goes to the surface
+  whose canvas was clicked last; gamepads to the one that has keyboard focus.
+- Every canvas has its own rendering context. WebGPU canvases share the
+  runtime's device; browsers cap live WebGL contexts (about 16), so for many
+  small widgets pass `renderer: 'cpu'` or `'2d'` (the CPU raster repaints only
+  damaged pixels, which is cheap at widget sizes).
+
 ## WASM modules
 
 The package ships three builds of the runtime. `createJsui()` loads the best

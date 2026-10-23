@@ -126,5 +126,31 @@ function frame(rt, w, h) {
   server.close();
 }
 
+// Surfaces through the C API: a second root view of one runtime, its own
+// pixels and an auto-sized one (web/test/fixtures/surfaces.js).
+{
+  const rt = M._jsui_web_create(0, 64, 64, 1, 0, 0);
+  const key = str('Plate'), props = str('{"color":"#ff0000"}');
+  const s = M._jsui_surface_create(rt, key, props, 40, 20, 1);
+  check(s !== 0 && M._jsui_surface_tag(s) > 1 && M._jsui_surface_runtime(s) === rt, 'surface_create');
+  const src = fs.readFileSync(path.join(WEB, 'test/fixtures/surfaces.js'), 'utf8');
+  const p = str(src), name = str('surfaces.js');
+  check(M._jsui_load_bundle_source(rt, p, M.lengthBytesUTF8(src), name) === 0, 'surfaces bundle');
+  M._free(p); M._free(name);
+  const bkey = str('Badge'), bprops = str('{"color":"#0000ff","size":[30,12]}');
+  const b = M._jsui_surface_create(rt, bkey, bprops, 0, 0, 1);
+  for (let t = 0; t <= 64; t += 16) M._jsui_tick(rt, t);
+  check(JSON.stringify(frame(s, 40, 20)(20, 10)) === '[255,0,0,255]', 'surface pixels');
+  check(JSON.stringify(frame(rt, 64, 64)(10, 50)) === '[0,128,128,255]', 'main surface pixels');
+  const size = M._malloc(8);
+  M._jsui_surface_get_size(b, size, size + 4);
+  const f = new Float32Array(M.HEAPU8.buffer, size, 2);
+  check(f[0] === 30 && f[1] === 12, `auto size ${f[0]}x${f[1]}`);
+  M._free(size);
+  M._jsui_surface_destroy(s);
+  [key, props, bkey, bprops].forEach((x) => M._free(x));
+  M._jsui_destroy(rt);  // frees the badge handle too
+}
+
 console.log(failures ? `${failures} failure(s)` : 'node smoke: all ok');
 process.exit(failures ? 1 : 0);
