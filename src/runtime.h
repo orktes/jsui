@@ -90,6 +90,9 @@ class Runtime {
   };
   // While `choose` runs: the frame's exact damage region (device pixels).
   const SkRegion& trackedDamage() const { return trackedDamage_; }
+  // The rects the last damage-only renderCanvasTracked() repainted (each
+  // cleared and painted whole; they cover trackedDamage() in a few rects).
+  const std::vector<SkIRect>& trackedRects() const { return trackedRects_; }
   // `growCurves`: see updateDamage (false only for canvases whose curved
   // outlines do not depend on the damage clip).
   template <typename Choose>
@@ -164,6 +167,7 @@ class Runtime {
   bool trackedFrozen_ = false, trackedOverlay_ = false;
   const void* trackedKey_ = nullptr;
   SkRegion trackedDamage_;
+  std::vector<SkIRect> trackedRects_;
   // The buffer the last frame was painted into (incremental repaint).
   const void* lastTarget_ = nullptr;
   int lastTargetW_ = 0, lastTargetH_ = 0;

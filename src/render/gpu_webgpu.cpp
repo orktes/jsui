@@ -339,17 +339,13 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
       enc.CopyTextureToTexture(&src, &dst, &size);
     };
     SkIRect all = SkIRect::MakeWH(w, h);
-    const SkRegion& damage = rt.trackedDamage();
     if (copyAll) {
       copy(all);
-    } else if (damage.computeRegionComplexity() > 32) {  // many small rects: one copy
-      SkIRect r = damage.getBounds();
-      if (r.intersect(all)) copy(r);
     } else {
-      for (SkRegion::Iterator it(damage); !it.done(); it.next()) {
-        SkIRect r = it.rect();
+      // The rects the frame repainted (a few covering the damage region,
+      // which can be dozens of bands), not the region's rects.
+      for (SkIRect r : rt.trackedRects())
         if (r.intersect(all)) copy(r);
-      }
     }
     wgpu::CommandBuffer cb = enc.Finish();
     g->queue.Submit(1, &cb);

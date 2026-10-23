@@ -519,6 +519,7 @@ SkIRect Runtime::beginCanvasTracked(const void* key, int width, int height, bool
   trackedFrozen_ = trackedOverlay_ = false;
   trackedKey_ = key;
   trackedDamage_.setEmpty();
+  trackedRects_.clear();
   // Nothing marked dirty and the retained surface holds our last frame:
   // nothing to repaint, without walking the tree.
   if (sameTarget && !doc.paintDirty() && lastError.empty()) {
@@ -552,9 +553,11 @@ SkIRect Runtime::finishCanvasTracked(const CanvasChoice& c, int width, int heigh
   if (c.key && keyValid && c.key == trackedKey_) {
     if (damage.isEmpty()) return SkIRect::MakeEmpty();
     if (c.splitDamage) {
-      paintDocumentRects(doc, canvas, coverRects(trackedDamage_));
+      trackedRects_ = coverRects(trackedDamage_);
+      paintDocumentRects(doc, canvas, trackedRects_);
       return damage;
     }
+    trackedRects_.assign(1, damage);
     // One rect: GPU backends clip to it with a scissor, where a region
     // (several rects) is a complex clip (a mask, or MSAA) on Graphite.
     SkRegion rect(damage);
