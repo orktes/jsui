@@ -1,8 +1,10 @@
-// Fixed top bar: wordmark, page links (horizontally scrollable on phones) and GitHub.
+// Fixed top bar: wordmark, page links (horizontally scrollable on phones),
+// the sound switch and GitHub.
 import React from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Host, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { colors, font, site } from '../theme.js';
 import { segments, useRouter } from '../router.js';
+import { useAudioState } from '../sound.js';
 import { Button, GITHUB, useLayout } from './ui.jsx';
 
 export const NAV_HEIGHT = 64;
@@ -42,6 +44,41 @@ function NavLink({ to, label, active }) {
   );
 }
 
+// Sound on / off (the page mutes its Web Audio output and remembers it).
+// Until the first click or key press the browser keeps audio locked: the
+// switch says so ("Enable sound"), and pressing it is that gesture.
+const EQ = [0.45, 0.85, 0.6, 1];
+function SoundSwitch({ compact }) {
+  const { unlocked, muted } = useAudioState();
+  const on = unlocked && !muted;
+  const label = muted ? 'Sound off' : unlocked ? 'Sound on' : 'Enable sound';
+  return (
+    <Pressable
+      onPress={() => Host.postMessage('sound', { muted: unlocked ? !muted : false })}
+      accessibilityRole="switch"
+      accessibilityLabel={label}
+      accessibilityState={{ checked: on }}
+      style={{ cursor: 'pointer', alignSelf: 'center', marginRight: compact ? 0 : 8 }}
+    >
+      {({ hovered, focused }) => (
+        <View style={[styles.sound, (hovered || focused) && styles.linkHot]}>
+          <View style={styles.eq}>
+            {EQ.map((h, i) => (
+              <View key={i} style={[styles.eqBar, { height: on ? 4 + h * 12 : 3, backgroundColor: on ? colors.gold : colors.textDim }]} />
+            ))}
+            {muted ? <View style={styles.eqSlash} /> : null}
+          </View>
+          {compact ? null : (
+            <Text style={[styles.linkText, { fontSize: 13 }, (hovered || focused) && { color: colors.text }, !unlocked && !muted && { color: colors.gold }]}>
+              {label}
+            </Text>
+          )}
+        </View>
+      )}
+    </Pressable>
+  );
+}
+
 export function NavBar() {
   const { path, go } = useRouter();
   const { tablet, phone, gutter } = useLayout();
@@ -61,6 +98,7 @@ export function NavBar() {
           <NavLink key={l.to} {...l} active={head === l.to} />
         ))}
       </ScrollView>
+      <SoundSwitch compact={tablet} />
       {phone ? null : <Button small kind="ghost" label="GitHub" icon="★" href={GITHUB} self="center" />}
     </View>
   );
@@ -91,5 +129,9 @@ const styles = StyleSheet.create({
   linkHot: { backgroundColor: 'rgba(255,255,255,0.05)' },
   linkActive: {},
   linkText: { fontFamily: font, fontWeight: '600', fontSize: 14, color: colors.textDim },
+  sound: { height: 40, paddingHorizontal: 10, borderRadius: 10, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  eq: { width: 18, height: 16, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' },
+  eqBar: { width: 3, borderRadius: 1.5 },
+  eqSlash: { position: 'absolute', left: 8, top: -2, width: 2, height: 20, borderRadius: 1, backgroundColor: colors.textDim, transform: [{ rotate: '45deg' }] },
   underline: { position: 'absolute', left: 14, right: 14, bottom: 4, height: 2, borderRadius: 1, backgroundColor: colors.gold },
 });

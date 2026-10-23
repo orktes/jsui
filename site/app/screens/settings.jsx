@@ -21,6 +21,7 @@ export const feature = {
   keys: ['↑ ↓ / D-pad: move, ← →: change value', 'Q E / LB RB: switch tab', 'F / X: apply · R / Y: revert'],
 };
 import { colors, font } from '../../../examples/theme.js';
+import { applyMix, currentMix, playUI, sliderTick } from '../sound.js';
 
 const PREVIEWS = {
   gameplay: require('../../../examples/assets/card-ember.png'),
@@ -80,7 +81,9 @@ const TABS = [
       { key: 'master', label: 'Master Volume', type: 'slider', min: 0, max: 100, step: 1, kstep: 5, fmt: (v) => v + '%', help: 'Overall output level. The meter above follows it.', impact: 0, accent: colors.gold },
       { key: 'music', label: 'Music', type: 'slider', min: 0, max: 100, step: 1, kstep: 5, fmt: (v) => v + '%', help: 'Score and ambient music.', impact: 0 },
       { key: 'sfx', label: 'Effects', type: 'slider', min: 0, max: 100, step: 1, kstep: 5, fmt: (v) => v + '%', help: 'Combat, footsteps, spells and the world.', impact: 0 },
+      { key: 'ui', label: 'Interface', type: 'slider', min: 0, max: 100, step: 1, kstep: 5, fmt: (v) => v + '%', help: 'Menu sounds: hover, focus, confirm and back. This whole site plays them.', impact: 0 },
       { key: 'voice', label: 'Dialogue', type: 'slider', min: 0, max: 100, step: 1, kstep: 5, fmt: (v) => v + '%', help: 'Spoken dialogue and party chatter.', impact: 0 },
+      { key: 'muteAll', label: 'Mute All', type: 'toggle', help: 'Silences music, effects, interface and dialogue. The sliders stay where they are.', impact: 0 },
       { section: 'Output' },
       { key: 'speakers', label: 'Speaker Setup', type: 'seg', options: ['Stereo', 'Headphones', '5.1', '7.1'], help: 'Headphones enables binaural spatial audio.', impact: 1 },
       { key: 'subtitles', label: 'Subtitles', type: 'toggle', help: 'Show subtitles for dialogue and important sounds.', impact: 0 },
@@ -122,7 +125,7 @@ const TABS = [
 const DEFAULTS = {
   difficulty: 1, aimAssist: true, shake: 70, hudOpacity: 100, autoLoot: true, language: 0,
   preset: 4, resolution: 1, windowMode: 1, vsync: true, fps: 144, fov: 90, shadows: 3, motionBlur: false, rt: true,
-  master: 80, music: 60, sfx: 85, voice: 90, speakers: 1, subtitles: true, bgMute: false,
+  master: 80, music: 60, sfx: 85, ui: 70, voice: 90, muteAll: false, speakers: 1, subtitles: true, bgMute: false,
   sens: 5.5, invertY: false, deadzone: 8, layout: 0, vibration: 70, sprint: true,
   callsign: 'Valkyrie_07', interact: 'E', dodge: 'Space',
   textSize: 1, colorblind: 0, brightness: 50, reduceMotion: false, flash: 100, holdToggle: false,
@@ -135,6 +138,9 @@ const TRACK_W = 196;
 const ROW_H = 52;
 const spring = (v, toValue, native = true) => Animated.spring(v, { toValue, stiffness: 420, damping: 30, mass: 0.8, useNativeDriver: native });
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+// The Audio tab's rows that drive the site's real mix (site/app/sound.js).
+const MIX_KEYS = ['master', 'music', 'sfx', 'ui', 'voice', 'muteAll'];
+const mixOf = (v) => Object.fromEntries(MIX_KEYS.map((k) => [k, v[k]]));
 
 // --- controls ---------------------------------------------------------------
 
@@ -152,7 +158,12 @@ const Slider = memo(function Slider({ row, value, onChange }) {
   const p = (value - row.min) / (row.max - row.min);
   const pos = useRef(new Animated.Value(p)).current;
   const [dragging, setDragging] = useState(false);
-  useEffect(() => spring(pos, p).start(), [p]);
+  const first = useRef(true);
+  useEffect(() => {
+    spring(pos, p).start();
+    if (first.current) first.current = false;
+    else sliderTick(p);  // every step ticks, pitched by the value
+  }, [p]);
   const fromX = (x) => {
     const raw = row.min + clamp(x / TRACK_W, 0, 1) * (row.max - row.min);
     const v = Math.round(raw / row.step) * row.step;
@@ -524,8 +535,9 @@ function Hint({ glyph, label, color = colors.textDim }) {
 
 export default function Settings({ active = true }) {
   const [tabIdx, setTabIdx] = useState(1);
-  const [values, setValues] = useState(DEFAULTS);
-  const [saved, setSaved] = useState(DEFAULTS);
+  // The audio rows start from the mix in effect (and change it live).
+  const [values, setValues] = useState(() => ({ ...DEFAULTS, ...currentMix() }));
+  const [saved, setSaved] = useState(values);
   const [hot, setHot] = useState('fps');
   const [menu, setMenu] = useState(null); // row key
   const [toast, setToast] = useState(null);
@@ -564,7 +576,10 @@ export default function Settings({ active = true }) {
     focusFirst.current = !!fromKeys;
   }, []);
 
+  const firstTab = useRef(true);
   useEffect(() => {
+    if (firstTab.current) firstTab.current = false;
+    else playUI('swipe', { volume: 0.45, pitch: dir.current > 0 ? 1.08 : 0.94 });
     Animated.spring(rail, { toValue: tabIdx, stiffness: 300, damping: 26, useNativeDriver: true }).start();
     slide.setValue(0);
     Animated.timing(slide, { toValue: 1, duration: 320, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
@@ -633,6 +648,10 @@ export default function Settings({ active = true }) {
   changedKeysRef.current = changedKeys;
   const savedRef = useRef(saved);
   savedRef.current = saved;
+
+  // Audio previews live; leaving without Apply restores the saved mix.
+  useEffect(() => applyMix(mixOf(values)), MIX_KEYS.map((k) => values[k]));
+  useEffect(() => () => applyMix(mixOf(savedRef.current)), []);
 
   const closeMenu = useCallback(() => {
     const k = menu;

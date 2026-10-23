@@ -1,7 +1,7 @@
 // The JSUI showcase site. Every pixel of the page is drawn by the JSUI
 // runtime compiled to WebAssembly; this file is ordinary React Native code.
 import React, { useEffect, useRef } from 'react';
-import { Animated, AppRegistry, Easing, Fonts, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Animated, AppRegistry, Easing, Fonts, ScrollView, StyleSheet, Text, UISounds, View } from 'react-native';
 import { RouterProvider, segments, useRouterState } from './router.js';
 import { mono, site } from './theme.js';
 import { NavBar, NAV_HEIGHT } from './components/NavBar.jsx';
@@ -13,6 +13,7 @@ import { InputPage } from './pages/Input.jsx';
 import { MotionPage } from './pages/Motion.jsx';
 import { PlaygroundPage } from './pages/Playground.jsx';
 import { EmbedPage } from './pages/Embed.jsx';
+import { UI_SOUNDS, applyMix, currentMix, preloadUISounds } from './sound.js';
 
 Fonts.load(mono, require('./assets/fonts/JetBrainsMonoNL-Regular.ttf'), { weight: 400 });
 Fonts.load(mono, require('./assets/fonts/JetBrainsMonoNL-Bold.ttf'), { weight: 700 });
@@ -56,13 +57,21 @@ function NotFound() {
 
 function App() {
   const router = useRouterState();
+  useEffect(() => {
+    applyMix(currentMix(), 0);
+    preloadUISounds();
+  }, []);
+  // Every button and link of the site (and of the game screens) hovers,
+  // focuses and presses with the site's UI sound set (site/app/sound.js).
   return (
     <RouterProvider value={router}>
-      <View style={styles.root}>
-        <View pointerEvents="none" style={styles.glow} />
-        <Page path={router.path} />
-        <NavBar />
-      </View>
+      <UISounds sounds={UI_SOUNDS}>
+        <View style={styles.root}>
+          <View pointerEvents="none" style={styles.glow} />
+          <Page path={router.path} />
+          <NavBar />
+        </View>
+      </UISounds>
     </RouterProvider>
   );
 }

@@ -73,7 +73,9 @@
         } else if (name === 'jsui:openURL') window.open(data.url, '_blank', 'noopener');
         else if (name === 'title') document.title = data;
         else if (name === 'cinematic') cinematic(data);
+        else if (name === 'sound') sound.setMuted(data.muted);
       });
+      const sound = soundSwitch(jsui);
       const cinematic = trailerPlayer(jsui, { autoplay: q.get('autoplay') !== '0' });
       addEventListener('popstate', () => jsui.postMessage('route', route()));
       addEventListener('hashchange', () => jsui.postMessage('route', route()));
@@ -89,6 +91,30 @@
       setTimeout(() => splash.remove(), 600);
     } catch (e) {
       showError('Could not start the JSUI runtime: ' + (e && e.stack || e));
+    }
+
+    // Sound (site/app/sound.js): jsui.audio plays the UI's sounds with Web
+    // Audio. The UI's sound switch sends { muted }; the page mutes the
+    // runtime's output, remembers the choice and reports HostState 'audio'
+    // ({ unlocked, muted }). Browsers unlock audio on the first click / tap /
+    // key press (the host listens for those); until then the switch reads
+    // "Enable sound".
+    function soundSwitch(jsui) {
+      let muted = false;
+      try { muted = localStorage.getItem('jsui-site-muted') === '1'; } catch {}
+      jsui.audio.setMuted(muted);
+      const publish = () => jsui.setState('audio', { unlocked: jsui.audio.unlocked, muted });
+      jsui.on('audiounlock', publish);
+      publish();
+      return {
+        setMuted(m) {
+          muted = !!m;
+          jsui.audio.setMuted(muted, { fade: 200 });
+          try { localStorage.setItem('jsui-site-muted', muted ? '1' : '0'); } catch {}
+          jsui.audio.unlock();  // the press that sent this is a user gesture
+          publish();
+        },
+      };
     }
 
     // The /screens/cinematic trailer. JSUI plays no video: this page owns a
