@@ -1,0 +1,495 @@
+// Skia Graphite on an embedder's Vulkan or Metal device (jsui_gpu_create_vulkan,
+// jsui_gpu_create_metal, jsui_render_gpu_target / jsui_render_vulkan in jsui.h).
+//
+// The embedder (e.g. Godot's RenderingDevice) owns the device, the queue and
+// the target texture; this context only borrows them. Frames go through
+// Runtime::renderCanvasTracked: with JSUI_GPU_INCREMENTAL the target is the
+// retained frame and only the damage bounds are repainted (clipped to that
+// rect), otherwise the whole frame is. Raster images are uploaded once
+// (CachingImageProvider, shared with the WebGPU backend).
+//
+// Vulkan synchronisation: each render submits, on the embedder's queue,
+// [full barrier] [Skia's command buffer] [full barrier]. The barriers are
+// global memory barriers (all commands, all memory accesses), recorded once
+// into SIMULTANEOUS_USE command buffers, so the render is ordered after
+// whatever the host submitted to the queue before (e.g. the previous frame
+// still sampling the texture) and everything it submits afterwards sees the
+// finished pixels, whatever stages / accesses it uses them with. Skia moves
+// the image from `layout` to COLOR_ATTACHMENT and, through the recording's
+// target state, to `final_layout` at the end.
+#include "render/gpu.h"
+
+#if defined(JSUI_VULKAN) || defined(JSUI_GRAPHITE_METAL)
+
+#include <algorithm>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "include/core/SkCanvas.h"
+#include "include/core/SkColorSpace.h"
+#include "include/core/SkSurface.h"
+#include "include/gpu/MutableTextureState.h"
+#include "include/gpu/graphite/BackendTexture.h"
+#include "include/gpu/graphite/Context.h"
+#include "include/gpu/graphite/ContextOptions.h"
+#include "include/gpu/graphite/GraphiteTypes.h"
+#include "include/gpu/graphite/Recorder.h"
+#include "include/gpu/graphite/Recording.h"
+#include "include/gpu/graphite/Surface.h"
+#include "render/graphite_images.h"
+#include "render/painter.h"
+#include "runtime.h"
+
+#if defined(JSUI_VULKAN)
+#include "include/gpu/graphite/vk/VulkanGraphiteContext.h"
+#include "include/gpu/graphite/vk/VulkanGraphiteTypes.h"
+#include "include/gpu/vk/VulkanBackendContext.h"
+#include "include/gpu/vk/VulkanExtensions.h"
+#include "include/gpu/vk/VulkanMemoryAllocator.h"
+#include "include/gpu/vk/VulkanMutableTextureState.h"
+#include "src/gpu/GpuTypesPriv.h"  // skgpu::ThreadSafe
+#include "src/gpu/vk/vulkanmemoryallocator/VulkanMemoryAllocatorPriv.h"
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+#endif
+
+#if defined(JSUI_GRAPHITE_METAL)
+#include "include/gpu/graphite/mtl/MtlBackendContext.h"
+#include "include/gpu/graphite/mtl/MtlGraphiteTypes_cpp.h"
+#endif
+
+namespace graphite = skgpu::graphite;
+
+namespace {
+
+using jsui::graphite_support::CachingImageProvider;
+using jsui::graphite_support::kDefaultCacheBytes;
+
+enum class Api { Vulkan, Metal };
+
+#if defined(JSUI_VULKAN)
+// The few Vulkan entry points this file calls itself (Skia loads its own).
+struct VkFns {
+  PFN_vkGetInstanceProcAddr getInstanceProcAddr = nullptr;
+  PFN_vkGetDeviceProcAddr getDeviceProcAddr = nullptr;
+  PFN_vkCreateCommandPool createCommandPool = nullptr;
+  PFN_vkDestroyCommandPool destroyCommandPool = nullptr;
+  PFN_vkAllocateCommandBuffers allocateCommandBuffers = nullptr;
+  PFN_vkBeginCommandBuffer beginCommandBuffer = nullptr;
+  PFN_vkEndCommandBuffer endCommandBuffer = nullptr;
+  PFN_vkCmdPipelineBarrier cmdPipelineBarrier = nullptr;
+  PFN_vkQueueSubmit queueSubmit = nullptr;
+  PFN_vkQueueWaitIdle queueWaitIdle = nullptr;
+  PFN_vkGetPhysicalDeviceProperties getPhysicalDeviceProperties = nullptr;
+};
+
+PFN_vkGetInstanceProcAddr loaderGetInstanceProcAddr() {
+  static PFN_vkGetInstanceProcAddr fn = [] {
+    void* sym = nullptr;
+#if defined(_WIN32)
+    HMODULE lib = GetModuleHandleA("vulkan-1.dll");
+    if (!lib) lib = LoadLibraryA("vulkan-1.dll");
+    if (lib) sym = reinterpret_cast<void*>(GetProcAddress(lib, "vkGetInstanceProcAddr"));
+#else
+    // Engines load the loader themselves (Godot: volk on libvulkan.so.1);
+    // the same library hands out the same dispatchable handles.
+    sym = dlsym(RTLD_DEFAULT, "vkGetInstanceProcAddr");
+    const char* names[] = {
+#if defined(__APPLE__)
+        "libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib",
+#else
+        "libvulkan.so.1", "libvulkan.so",
+#endif
+    };
+    for (const char* n : names) {
+      if (sym) break;
+      if (void* lib = dlopen(n, RTLD_NOW | RTLD_LOCAL)) sym = dlsym(lib, "vkGetInstanceProcAddr");
+    }
+#endif
+    return reinterpret_cast<PFN_vkGetInstanceProcAddr>(sym);
+  }();
+  return fn;
+}
+#endif
+
+struct GraphiteGpu final : JsuiGpuContext {
+  explicit GraphiteGpu(Api a) : JsuiGpuContext(Kind::Graphite), api(a) {}
+  ~GraphiteGpu() override { release(); }
+
+  const Api api;
+  std::unique_ptr<graphite::Context> ctx;
+  std::unique_ptr<graphite::Recorder> recorder;
+  sk_sp<CachingImageProvider> images;
+  size_t cacheBytes = kDefaultCacheBytes;
+
+#if defined(JSUI_VULKAN)
+  VkFns vk;
+  VkInstance instance = VK_NULL_HANDLE;
+  VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+  VkDevice device = VK_NULL_HANDLE;
+  VkQueue queue = VK_NULL_HANDLE;
+  uint32_t queueFamily = 0;
+  std::unique_ptr<skgpu::VulkanExtensions> extensions;
+  VkCommandPool pool = VK_NULL_HANDLE;
+  VkCommandBuffer barrier = VK_NULL_HANDLE;  // one global barrier, submitted before and after
+  bool submittedBarrier = false;
+#endif
+
+  bool finishInit(const graphite::ContextOptions& opts) {
+    (void)opts;
+    if (!ctx) return false;
+    ctx->setMaxBudgetedBytes(cacheBytes);
+    images = sk_make_sp<CachingImageProvider>();
+    images->setBudget(cacheBytes / 2);
+    graphite::RecorderOptions ropts;
+    ropts.fImageProvider = images;
+    ropts.fGpuBudgetInBytes = cacheBytes;
+    recorder = ctx->makeRecorder(ropts);
+    return recorder != nullptr;
+  }
+
+  void release() {
+    if (images) images->clear();
+    recorder.reset();
+    if (ctx) {
+      // Wait for everything submitted (Graphite needs its work finished
+      // before it frees its resources).
+      ctx->submit(graphite::SyncToCpu::kYes);
+      ctx.reset();
+    }
+#if defined(JSUI_VULKAN)
+    if (pool != VK_NULL_HANDLE) {
+      // The barrier command buffer may still be pending after the last render.
+      if (submittedBarrier && vk.queueWaitIdle) vk.queueWaitIdle(queue);
+      vk.destroyCommandPool(device, pool, nullptr);
+      pool = VK_NULL_HANDLE;
+    }
+#endif
+  }
+
+  bool flush(SkSurface* target, skgpu::MutableTextureState* finalState) {
+    std::unique_ptr<graphite::Recording> recording = recorder->snap();
+    if (!recording) return false;
+    graphite::InsertRecordingInfo info;
+    info.fRecording = recording.get();
+    info.fTargetSurface = finalState ? target : nullptr;
+    info.fTargetTextureState = finalState;
+    if (ctx->insertRecording(info) != graphite::InsertStatus::kSuccess) return false;
+    bool ok = ctx->submit(graphite::SyncToCpu::kNo);
+    ctx->checkAsyncWorkCompletion();
+    images->endFrame();
+    return ok;
+  }
+
+#if defined(JSUI_VULKAN)
+  bool initBarrier() {
+    VkCommandPoolCreateInfo pci{};
+    pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pci.queueFamilyIndex = queueFamily;
+    if (vk.createCommandPool(device, &pci, nullptr, &pool) != VK_SUCCESS) return false;
+    VkCommandBufferAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.commandPool = pool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    if (vk.allocateCommandBuffers(device, &ai, &barrier) != VK_SUCCESS) return false;
+    VkCommandBufferBeginInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+    if (vk.beginCommandBuffer(barrier, &bi) != VK_SUCCESS) return false;
+    VkMemoryBarrier mb{};
+    mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    mb.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    vk.cmdPipelineBarrier(barrier, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0,
+                          nullptr, 0, nullptr);
+    return vk.endCommandBuffer(barrier) == VK_SUCCESS;
+  }
+
+  bool submitBarrier() {
+    VkSubmitInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &barrier;
+    if (vk.queueSubmit(queue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) return false;
+    submittedBarrier = true;
+    return true;
+  }
+#endif
+};
+
+GraphiteGpu* asGraphite(JsuiGpuContext* g) {
+  return g && g->kind == JsuiGpuContext::Kind::Graphite ? static_cast<GraphiteGpu*>(g) : nullptr;
+}
+
+#if defined(JSUI_VULKAN)
+// VkFormat values JSUI accepts and the matching Skia colour types.
+bool vkColorType(unsigned format, VkFormat* vf, sk_sp<SkColorSpace>* cs) {
+  switch (format) {
+    case 0:
+    case VK_FORMAT_R8G8B8A8_UNORM: *vf = VK_FORMAT_R8G8B8A8_UNORM; return true;
+    case VK_FORMAT_B8G8R8A8_UNORM: *vf = VK_FORMAT_B8G8R8A8_UNORM; return true;
+    // sRGB targets encode on write: blending happens in linear light.
+    case VK_FORMAT_R8G8B8A8_SRGB:
+    case VK_FORMAT_B8G8R8A8_SRGB:
+      *vf = VkFormat(format);
+      *cs = SkColorSpace::MakeSRGB();
+      return true;
+    default: return false;
+  }
+}
+#endif
+
+#if defined(JSUI_GRAPHITE_METAL)
+constexpr unsigned kMTLPixelFormatRGBA8Unorm = 70;
+constexpr unsigned kMTLPixelFormatRGBA8Unorm_sRGB = 71;
+constexpr unsigned kMTLPixelFormatBGRA8Unorm = 80;
+constexpr unsigned kMTLPixelFormatBGRA8Unorm_sRGB = 81;
+bool mtlColorSpace(unsigned format, sk_sp<SkColorSpace>* cs) {
+  switch (format) {
+    case 0:
+    case kMTLPixelFormatRGBA8Unorm:
+    case kMTLPixelFormatBGRA8Unorm: return true;
+    case kMTLPixelFormatRGBA8Unorm_sRGB:
+    case kMTLPixelFormatBGRA8Unorm_sRGB: *cs = SkColorSpace::MakeSRGB(); return true;
+    default: return false;
+  }
+}
+#endif
+
+}  // namespace
+
+namespace jsui {
+namespace graphite_gpu {
+
+bool available() { return true; }
+
+JsuiGpuContext* createVulkan(const JsuiVulkanDevice& d) {
+#if defined(JSUI_VULKAN)
+  if (!d.instance || !d.physical_device || !d.device || !d.queue) return nullptr;
+  auto g = std::make_unique<GraphiteGpu>(Api::Vulkan);
+  g->instance = static_cast<VkInstance>(d.instance);
+  g->physicalDevice = static_cast<VkPhysicalDevice>(d.physical_device);
+  g->device = static_cast<VkDevice>(d.device);
+  g->queue = static_cast<VkQueue>(d.queue);
+  g->queueFamily = d.queue_family;
+  VkFns& vk = g->vk;
+  vk.getInstanceProcAddr = d.get_instance_proc_addr ? reinterpret_cast<PFN_vkGetInstanceProcAddr>(d.get_instance_proc_addr)
+                                                    : loaderGetInstanceProcAddr();
+  if (!vk.getInstanceProcAddr) return nullptr;
+  VkInstance inst = g->instance;
+  VkDevice dev = g->device;
+  vk.getDeviceProcAddr =
+      reinterpret_cast<PFN_vkGetDeviceProcAddr>(vk.getInstanceProcAddr(inst, "vkGetDeviceProcAddr"));
+  if (!vk.getDeviceProcAddr) return nullptr;
+  auto devFn = [&](const char* n) { return vk.getDeviceProcAddr(dev, n); };
+  vk.createCommandPool = reinterpret_cast<PFN_vkCreateCommandPool>(devFn("vkCreateCommandPool"));
+  vk.destroyCommandPool = reinterpret_cast<PFN_vkDestroyCommandPool>(devFn("vkDestroyCommandPool"));
+  vk.allocateCommandBuffers = reinterpret_cast<PFN_vkAllocateCommandBuffers>(devFn("vkAllocateCommandBuffers"));
+  vk.beginCommandBuffer = reinterpret_cast<PFN_vkBeginCommandBuffer>(devFn("vkBeginCommandBuffer"));
+  vk.endCommandBuffer = reinterpret_cast<PFN_vkEndCommandBuffer>(devFn("vkEndCommandBuffer"));
+  vk.cmdPipelineBarrier = reinterpret_cast<PFN_vkCmdPipelineBarrier>(devFn("vkCmdPipelineBarrier"));
+  vk.queueSubmit = reinterpret_cast<PFN_vkQueueSubmit>(devFn("vkQueueSubmit"));
+  vk.queueWaitIdle = reinterpret_cast<PFN_vkQueueWaitIdle>(devFn("vkQueueWaitIdle"));
+  vk.getPhysicalDeviceProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
+      vk.getInstanceProcAddr(inst, "vkGetPhysicalDeviceProperties"));
+  if (!vk.createCommandPool || !vk.destroyCommandPool || !vk.allocateCommandBuffers || !vk.beginCommandBuffer ||
+      !vk.endCommandBuffer || !vk.cmdPipelineBarrier || !vk.queueSubmit || !vk.queueWaitIdle ||
+      !vk.getPhysicalDeviceProperties)
+    return nullptr;
+
+  VkPhysicalDeviceProperties props{};
+  vk.getPhysicalDeviceProperties(g->physicalDevice, &props);
+  uint32_t api = d.api_version ? d.api_version : VK_API_VERSION_1_1;
+  if (props.apiVersion < api) api = props.apiVersion;
+  if (api < VK_API_VERSION_1_1) return nullptr;  // Graphite's minimum
+
+  PFN_vkGetInstanceProcAddr gipa = vk.getInstanceProcAddr;
+  PFN_vkGetDeviceProcAddr gdpa = vk.getDeviceProcAddr;
+  skgpu::VulkanGetProc getProc = [gipa, gdpa](const char* name, VkInstance i, VkDevice dv) -> PFN_vkVoidFunction {
+    if (dv != VK_NULL_HANDLE) return gdpa(dv, name);
+    return gipa(i, name);
+  };
+  g->extensions = std::make_unique<skgpu::VulkanExtensions>();
+  g->extensions->init(getProc, g->instance, g->physicalDevice, uint32_t(std::max(0, d.instance_extension_count)),
+                      d.instance_extensions, uint32_t(std::max(0, d.device_extension_count)), d.device_extensions);
+
+  skgpu::VulkanBackendContext backend;
+  backend.fInstance = g->instance;
+  backend.fPhysicalDevice = g->physicalDevice;
+  backend.fDevice = g->device;
+  backend.fQueue = g->queue;
+  backend.fGraphicsQueueIndex = g->queueFamily;
+  backend.fMaxAPIVersion = api;
+  backend.fVkExtensions = g->extensions.get();
+  backend.fDeviceFeatures2 = static_cast<const VkPhysicalDeviceFeatures2*>(d.device_features2);
+  backend.fGetProc = getProc;
+  backend.fMemoryAllocator = skgpu::VulkanMemoryAllocators::Make(backend, skgpu::ThreadSafe::kNo);
+  if (!backend.fMemoryAllocator) return nullptr;
+
+  graphite::ContextOptions opts;
+  g->ctx = graphite::ContextFactory::MakeVulkan(backend, opts);
+  if (!g->finishInit(opts)) return nullptr;
+  if (!g->initBarrier()) return nullptr;
+  return g.release();
+#else
+  (void)d;
+  return nullptr;
+#endif
+}
+
+JsuiGpuContext* createMetal(void* device, void* queue) {
+#if defined(JSUI_GRAPHITE_METAL)
+  if (!device || !queue) return nullptr;
+  auto g = std::make_unique<GraphiteGpu>(Api::Metal);
+  graphite::MtlBackendContext backend;
+  backend.fDevice.retain(static_cast<CFTypeRef>(device));
+  backend.fQueue.retain(static_cast<CFTypeRef>(queue));
+  graphite::ContextOptions opts;
+  g->ctx = graphite::ContextFactory::MakeMetal(backend, opts);
+  if (!g->finishInit(opts)) return nullptr;
+  return g.release();
+#else
+  (void)device;
+  (void)queue;
+  return nullptr;
+#endif
+}
+
+bool owns(JsuiGpuContext* gpu) { return asGraphite(gpu) != nullptr; }
+
+void destroy(JsuiGpuContext* gpu) { delete asGraphite(gpu); }
+
+void purge(JsuiGpuContext* gpu, size_t cacheBytes) {
+  GraphiteGpu* g = asGraphite(gpu);
+  if (!g || !g->ctx) return;
+  if (cacheBytes) {
+    g->cacheBytes = cacheBytes;
+    g->ctx->setMaxBudgetedBytes(cacheBytes);
+    g->images->setBudget(cacheBytes / 2);
+  }
+  g->images->clear();
+  g->recorder->freeGpuResources();
+  g->ctx->freeGpuResources();
+}
+
+int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* dirty) {
+  if (dirty) *dirty = JsuiRect{0, 0, 0, 0};
+  GraphiteGpu* g = asGraphite(gpu);
+  if (!g || !g->ctx || !t.texture || t.width <= 0 || t.height <= 0) return -1;
+  if (g->ctx->isDeviceLost()) return -1;
+  const SkISize size = SkISize::Make(t.width, t.height);
+  sk_sp<SkColorSpace> cs;
+  graphite::BackendTexture backendTex;
+  bool discard = false;      // the target's contents are undefined: full repaint
+  bool needsTransition = false;  // Vulkan: `layout` != the final layout
+  std::unique_ptr<skgpu::MutableTextureState> finalState;
+
+  if (g->api == Api::Vulkan) {
+#if defined(JSUI_VULKAN)
+    VkFormat vf;
+    if (!vkColorType(t.format, &vf, &cs)) return -1;
+    VkImageUsageFlags usage =
+        t.usage ? VkImageUsageFlags(t.usage)
+                : VkImageUsageFlags(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT |
+                                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                    VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    // Graphite renders only into colour attachments that are also input
+    // attachments (it reads the destination through them for some blends).
+    constexpr VkImageUsageFlags kNeeded = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+    if ((usage & kNeeded) != kNeeded) {
+      SkDebugf("jsui: Vulkan target needs COLOR_ATTACHMENT and INPUT_ATTACHMENT usage\n");
+      return -1;
+    }
+    graphite::VulkanTextureInfo info;
+    info.fSampleCount = graphite::SampleCount::k1;
+    info.fMipmapped = skgpu::Mipmapped::kNo;
+    info.fFormat = vf;
+    info.fImageTiling = VK_IMAGE_TILING_OPTIMAL;
+    info.fImageUsageFlags = usage;
+    info.fSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    info.fAspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    VkImageLayout layout = VkImageLayout(t.layout);
+    discard = layout == VK_IMAGE_LAYOUT_UNDEFINED;
+    backendTex = graphite::BackendTextures::MakeVulkan(size, info, layout, g->queueFamily,
+                                                       static_cast<VkImage>(t.texture), skgpu::VulkanAlloc());
+    VkImageLayout finalLayout =
+        t.final_layout ? VkImageLayout(t.final_layout) : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    needsTransition = finalLayout != layout;
+    finalState = std::make_unique<skgpu::MutableTextureState>(
+        skgpu::MutableTextureStates::MakeVulkan(finalLayout, g->queueFamily));
+#else
+    return -1;
+#endif
+  } else {
+#if defined(JSUI_GRAPHITE_METAL)
+    if (!mtlColorSpace(t.format, &cs)) return -1;
+    backendTex = graphite::BackendTextures::MakeMetal(size, static_cast<CFTypeRef>(t.texture));
+#else
+    return -1;
+#endif
+  }
+  if (!backendTex.isValid()) return -1;
+
+  SkSurfaceProps props = jsui::surfaceProps();
+  sk_sp<SkSurface> surface = SkSurfaces::WrapBackendTexture(g->recorder.get(), backendTex, cs, &props);
+  if (!surface) return -1;
+
+  // The target is the retained frame when the host says it still holds our
+  // last one; the key is the texture handle (the host drops the flag after
+  // recreating a texture, which may reuse a handle).
+  const bool incremental = (t.flags & JSUI_GPU_INCREMENTAL) && !discard;
+  const void* key = incremental ? t.texture : nullptr;
+  const bool clear = !(t.flags & JSUI_GPU_NO_CLEAR) || discard;
+  SkIRect painted = rt.renderCanvasTracked(key, t.width, t.height, [&](const SkIRect&, bool) -> Runtime::CanvasChoice {
+    // Always into the target. It holds just our frame afterwards (so the
+    // next frame may be incremental) unless the frame was composited over it.
+    // Scattered damage (several small animations) as a few scissored passes
+    // rather than their bounding box (CanvasChoice::splitDamage).
+    Runtime::CanvasChoice c{surface->getCanvas(), clear ? t.texture : nullptr, clear};
+    c.splitDamage = true;
+    return c;
+  });
+  // Nothing changed and the target is retained: no GPU work at all (unless
+  // the image must still move to another layout).
+  if (painted.isEmpty() && incremental && !needsTransition) return 0;
+
+#if defined(JSUI_VULKAN)
+  if (g->api == Api::Vulkan && !g->submitBarrier()) return -1;
+#endif
+  bool ok = g->flush(surface.get(), finalState.get());
+  surface.reset();
+#if defined(JSUI_VULKAN)
+  if (g->api == Api::Vulkan && !g->submitBarrier()) return -1;
+#endif
+  if (!ok || g->ctx->isDeviceLost()) return -1;
+  if (dirty) *dirty = JsuiRect{painted.x(), painted.y(), painted.width(), painted.height()};
+  return 0;
+}
+
+}  // namespace graphite_gpu
+}  // namespace jsui
+
+#else  // neither JSUI_VULKAN nor JSUI_GRAPHITE_METAL
+
+namespace jsui {
+namespace graphite_gpu {
+bool available() { return false; }
+JsuiGpuContext* createVulkan(const JsuiVulkanDevice&) { return nullptr; }
+JsuiGpuContext* createMetal(void*, void*) { return nullptr; }
+bool owns(JsuiGpuContext* gpu) { return gpu && gpu->kind == JsuiGpuContext::Kind::Graphite; }
+void destroy(JsuiGpuContext*) {}
+void purge(JsuiGpuContext*, size_t) {}
+int render(Runtime&, JsuiGpuContext*, const JsuiGpuTarget&, JsuiRect* dirty) {
+  if (dirty) *dirty = JsuiRect{0, 0, 0, 0};
+  return -1;
+}
+}  // namespace graphite_gpu
+}  // namespace jsui
+
+#endif

@@ -5,6 +5,9 @@
 //   * WebGPU: Skia Graphite on a WebGPU device (jsui_render_webgpu*), compiled
 //     in when JSUI_WEBGPU is defined (gpu_webgpu.cpp): the browser's WebGPU
 //     through emscripten, or Dawn native with an embedder-provided device.
+//   * Graphite: Skia Graphite on an embedder's Vulkan / Metal device
+//     (jsui_gpu_create_vulkan / _metal, jsui_render_gpu_target), compiled in
+//     when JSUI_VULKAN / JSUI_GRAPHITE_METAL is defined (gpu_graphite.cpp).
 //
 // Without a backend its entry points exist but always fail, so hosts fall
 // back to the next backend / the CPU path.
@@ -13,7 +16,7 @@
 #include "jsui/jsui.h"
 
 struct JsuiGpuContext {
-  enum class Kind { GL, WebGPU };
+  enum class Kind { GL, WebGPU, Graphite };
   explicit JsuiGpuContext(Kind k) : kind(k) {}
   virtual ~JsuiGpuContext() = default;
   const Kind kind;
@@ -58,4 +61,18 @@ void purge(JsuiGpuContext* gpu, size_t cacheBytes);
 int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& target);
 
 }  // namespace webgpu
+
+namespace graphite_gpu {
+
+// True when this build has the Vulkan and/or Metal Graphite backend.
+bool available();
+JsuiGpuContext* createVulkan(const JsuiVulkanDevice& device);
+JsuiGpuContext* createMetal(void* device, void* queue);
+bool owns(JsuiGpuContext* gpu);  // a Graphite (Vulkan / Metal) context
+void destroy(JsuiGpuContext* gpu);
+void purge(JsuiGpuContext* gpu, size_t cacheBytes);
+// 0 on success, -1 on failure; `dirty` (optional) gets the repainted rect.
+int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& target, JsuiRect* dirty);
+
+}  // namespace graphite_gpu
 }  // namespace jsui

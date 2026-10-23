@@ -57,6 +57,8 @@ jobs:
             godot:
               - *core
               - 'integrations/godot/**'
+              - 'scripts/build-skia-desktop.sh'
+              - 'tests/native/**'
               - 'packages/**'
               - 'examples/showcase/**'
               - 'examples/theme.js'
@@ -157,11 +159,17 @@ jobs:
             bands-gpu-core.png
 
   # ------------------------------------------------- Godot GDExtension (Linux)
+  # Built against Skia m157 from source (scripts/build-skia-desktop.sh,
+  # Graphite + Vulkan; cached on the script's hash) so JsuiView can render
+  # straight into Godot's RenderingDevice textures. Godot runs headless
+  # (CPU raster) and on Vulkan through Mesa's lavapipe under Xvfb (Skia
+  # Graphite, checked against the CPU raster of the same frame).
   godot:
     name: godot (GDExtension, ubuntu)
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.godot == 'true'
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -170,16 +178,26 @@ jobs:
       - name: System packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build clang libfontconfig1-dev zlib1g-dev python3 unzip
-      - name: Cache prebuilt Skia + FetchContent sources + Godot
+          sudo apt-get install -y --no-install-recommends ninja-build clang libfontconfig1-dev zlib1g-dev python3 unzip rsync \
+            libvulkan1 mesa-vulkan-drivers xvfb xauth libegl1 libegl-mesa0 libgl1-mesa-dri \
+            libgl-dev libegl-dev libgles-dev libx11-dev libvulkan-dev
+      - name: Cache desktop Skia (m157, Graphite + Vulkan)
+        id: skia-desktop
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-desktop
+          key: skia-desktop-${{ runner.os }}-x64-${{ hashFiles('scripts/build-skia-desktop.sh') }}
+      - name: Skia m157 for desktop (cache miss only, ~25 min on 4 cores)
+        if: steps.skia-desktop.outputs.cache-hit != 'true'
+        run: JOBS=$(nproc) scripts/build-skia-desktop.sh
+      - name: Cache FetchContent sources + Godot
         uses: actions/cache@v4
         with:
           path: |
-            third_party/skia-prebuilt
             build/_deps/*-src
             build/_deps/godot
-          key: godot-deps-4.7.2-cpp10-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'integrations/godot/CMakeLists.txt', 'integrations/godot/smoke-test.sh') }}
-          restore-keys: godot-deps-4.7.2-cpp10-${{ runner.os }}-
+          key: godot-deps-m157-4.7.2-cpp10-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'integrations/godot/CMakeLists.txt', 'integrations/godot/smoke-test.sh') }}
+          restore-keys: godot-deps-m157-4.7.2-cpp10-${{ runner.os }}-
       - name: ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
@@ -189,10 +207,17 @@ jobs:
         run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
-          -DJSUI_BUILD_TESTS=OFF -DJSUI_BUILD_VIEWER=OFF -DJSUI_BUILD_GODOT=ON
+          -DJSUI_SKIA_DIR=third_party/skia-desktop -DJSUI_VULKAN=ON
+          -DJSUI_BUILD_TESTS=ON -DJSUI_BUILD_VIEWER=OFF -DJSUI_BUILD_GODOT=ON
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-      - name: Build GDExtension
-        run: cmake --build build -j "$(nproc)" --target jsui_godot
+      - name: Build GDExtension + native tests
+        run: cmake --build build -j "$(nproc)" --target jsui_godot jsui-tests
+      - name: Native tests against Skia m157 (incl. Graphite on Vulkan / lavapipe)
+        # vulkan_test renders through jsui_gpu_create_vulkan on its own
+        # lavapipe device and compares with the CPU raster; require it.
+        env:
+          JSUI_VULKAN_TEST_REQUIRE: 1
+        run: ./build/jsui-tests
       - name: Demo bundle
         run: |
           if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
@@ -201,6 +226,14 @@ jobs:
         run: integrations/godot/smoke-test.sh build/godot-smoke.png
       - name: Run it in Godot 4.3 too (compatibility_minimum)
         run: GODOT_VERSION=4.3-stable integrations/godot/smoke-test.sh build/godot-smoke-4.3.png
+      - name: Run it on Vulkan (Forward+, lavapipe) - Skia Graphite into the RenderingDevice texture, compared with the CPU raster
+        run: |
+          GODOT_RENDERING=vulkan SIZES=1280x720 xvfb-run -a -s "-screen 0 1920x1080x24" \
+            integrations/godot/smoke-test.sh build/godot-vulkan.png
+      - name: Vulkan in Godot 4.3 too
+        run: |
+          GODOT_VERSION=4.3-stable GODOT_RENDERING=vulkan SIZES=1280x720 xvfb-run -a -s "-screen 0 1920x1080x24" \
+            integrations/godot/smoke-test.sh build/godot-vulkan-4.3.png
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -208,7 +241,47 @@ jobs:
           path: |
             integrations/godot/demo/bin/
             build/godot-smoke*.png
+            build/godot-vulkan*.png
           if-no-files-found: warn
+
+  # --------------------------------------- Godot GDExtension (macOS), advisory
+  # Compile check of the Metal path: Skia m157 for macOS (Graphite + Metal,
+  # cached on the script's hash), then the GDExtension and the native tests.
+  # Godot itself is not run here (no Metal RenderingDevice on hosted
+  # runners): the Metal renderer needs a run on a real Mac.
+  godot-macos:
+    name: godot (GDExtension, macOS, Metal build)
+    runs-on: macos-15
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.godot == 'true'
+    continue-on-error: true
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache desktop Skia (m157, Graphite + Metal)
+        id: skia-desktop
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-desktop
+          key: skia-desktop-${{ runner.os }}-arm64-${{ hashFiles('scripts/build-skia-desktop.sh') }}
+      - name: Tools
+        run: command -v ninja || brew install ninja
+      - name: Skia m157 for macOS (cache miss only)
+        if: steps.skia-desktop.outputs.cache-hit != 'true'
+        run: JOBS=$(sysctl -n hw.ncpu) scripts/build-skia-desktop.sh
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DJSUI_SKIA_DIR=third_party/skia-desktop -DJSUI_GRAPHITE_METAL=ON
+          -DJSUI_BUILD_TESTS=ON -DJSUI_BUILD_VIEWER=OFF -DJSUI_BUILD_GODOT=ON
+      - name: Build GDExtension + native tests
+        run: cmake --build build -j "$(sysctl -n hw.ncpu)" --target jsui_godot jsui-tests
+      - name: Native tests
+        run: ./build/jsui-tests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-godot-macos
+          path: integrations/godot/demo/bin/
 
   # --------------------------------------------------------------------- wasm
   wasm:

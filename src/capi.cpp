@@ -132,7 +132,8 @@ bool isWebGPU(JsuiGpuContext* gpu) { return gpu && gpu->kind == JsuiGpuContext::
 }  // namespace
 
 void jsui_gpu_destroy(JsuiGpuContext* gpu) {
-  if (isWebGPU(gpu)) jsui::webgpu::destroy(gpu);
+  if (jsui::graphite_gpu::owns(gpu)) jsui::graphite_gpu::destroy(gpu);
+  else if (isWebGPU(gpu)) jsui::webgpu::destroy(gpu);
   else jsui::gpu::destroy(gpu);
 }
 void jsui_gpu_reset(JsuiGpuContext* gpu) {
@@ -143,7 +144,8 @@ void jsui_gpu_context_lost(JsuiGpuContext* gpu) {
   else jsui::gpu::contextLost(gpu);
 }
 void jsui_gpu_purge(JsuiGpuContext* gpu, size_t cacheBytes) {
-  if (isWebGPU(gpu)) jsui::webgpu::purge(gpu, cacheBytes);
+  if (jsui::graphite_gpu::owns(gpu)) jsui::graphite_gpu::purge(gpu, cacheBytes);
+  else if (isWebGPU(gpu)) jsui::webgpu::purge(gpu, cacheBytes);
   else jsui::gpu::purge(gpu, cacheBytes);
 }
 
@@ -154,6 +156,29 @@ int jsui_render_webgpu(JsuiRuntime* rt, JsuiGpuContext* gpu, void* texture, int 
 
 int jsui_render_webgpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget* target) {
   return target ? jsui::webgpu::render(*rt->rt, gpu, *target) : -1;
+}
+
+JsuiGpuContext* jsui_gpu_create_vulkan(const JsuiVulkanDevice* device) {
+  return device ? jsui::graphite_gpu::createVulkan(*device) : nullptr;
+}
+JsuiGpuContext* jsui_gpu_create_metal(void* device, void* queue) { return jsui::graphite_gpu::createMetal(device, queue); }
+
+int jsui_render_gpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiGpuTarget* target, JsuiRect* dirty) {
+  if (!rt || !target) {
+    if (dirty) *dirty = JsuiRect{0, 0, 0, 0};
+    return -1;
+  }
+  return jsui::graphite_gpu::render(*rt->rt, gpu, *target, dirty);
+}
+
+int jsui_render_vulkan(JsuiRuntime* rt, JsuiGpuContext* gpu, void* image, int width, int height, int flags) {
+  JsuiGpuTarget t{};
+  t.texture = image;
+  t.width = width;
+  t.height = height;
+  t.flags = flags;
+  t.layout = t.final_layout = 5;  // VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+  return jsui_render_gpu_target(rt, gpu, &t, nullptr);
 }
 
 int jsui_render_gl(JsuiRuntime* rt, JsuiGpuContext* gpu, unsigned int fbo, int width, int height, int flags) {

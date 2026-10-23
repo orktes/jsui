@@ -438,6 +438,117 @@ JSUI_API JsuiGpuContext* jsui_gpu_create_webgpu(void* instance, void* device, vo
 JSUI_API int jsui_render_webgpu(JsuiRuntime* rt, JsuiGpuContext* gpu, void* texture, int width, int height, int flags);
 JSUI_API int jsui_render_webgpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget* target);
 
+/* ------------------------------------------- GPU (Vulkan / Metal, Graphite)
+ *
+ * Skia Graphite draws the frame into a texture of an engine's own Vulkan
+ * device (VkImage) or Metal device (id<MTLTexture>), e.g. a texture created
+ * by Godot's RenderingDevice. Available when the library was built with
+ * JSUI_VULKAN / JSUI_GRAPHITE_METAL (a Skia from scripts/build-skia-desktop.sh);
+ * otherwise the create functions return NULL and the host keeps using
+ * jsui_render_rgba(). Handles are passed as void* so this header does not
+ * depend on vulkan.h / Metal.
+ *
+ *     JsuiVulkanDevice d = {0};
+ *     d.instance = instance; d.physical_device = phys; d.device = device;
+ *     d.queue = queue; d.queue_family = family;
+ *     JsuiGpuContext* gpu = jsui_gpu_create_vulkan(&d);
+ *     // per frame, on the thread that owns `queue`:
+ *     jsui_tick(rt, now_ms);
+ *     if (jsui_needs_redraw(rt)) {
+ *         JsuiGpuTarget t = {0};
+ *         t.texture = image; t.width = w; t.height = h;
+ *         t.layout = t.final_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+ *         t.flags = JSUI_GPU_INCREMENTAL;   // the image still holds our last frame
+ *         JsuiRect dirty;
+ *         jsui_render_gpu_target(rt, gpu, &t, &dirty);
+ *     }
+ *     jsui_gpu_destroy(gpu);
+ *
+ * Synchronisation (Vulkan): every render submits its work to `queue` before
+ * it returns: a full pipeline barrier (all commands, all memory), Skia's
+ * command buffer, which leaves the image in `final_layout`, and another full
+ * barrier, so work the host submits to the same queue afterwards sees the
+ * finished image, and the render waits for host work submitted before it.
+ * The host must not use the queue from another thread during the call
+ * (Vulkan queues need external synchronisation). The image must be in
+ * `layout` when the call is made (UNDEFINED discards it: full repaint).
+ * Metal: the work is committed to `queue`; command buffers the host commits
+ * to the same queue afterwards are ordered after it (tracked resources).
+ *
+ * Incremental repaint: with JSUI_GPU_INCREMENTAL the target is retained (the
+ * host keeps the image between frames and nothing else draws into it), so
+ * only the damage bounds are repainted; `dirty` receives the repainted rect
+ * (empty when nothing changed), e.g. to copy just that region elsewhere.
+ * Without it the whole target is repainted. Like jsui_render_rgba the render
+ * lays out first and clears needs_redraw.
+ *
+ * One context may serve any number of runtimes; use it from one thread.
+ */
+enum {
+    /* Draw over the target's current contents (premultiplied source-over)
+     * on full repaints. Default: replace them. */
+    JSUI_GPU_NO_CLEAR = 1 << 1,
+    /* The target still holds the frame this runtime last rendered into it:
+     * repaint only what changed. */
+    JSUI_GPU_INCREMENTAL = 1 << 3
+};
+
+typedef struct JsuiVulkanDevice {
+    void* instance;          /* VkInstance */
+    void* physical_device;   /* VkPhysicalDevice */
+    void* device;            /* VkDevice */
+    void* queue;             /* VkQueue the work is submitted to */
+    unsigned int queue_family; /* its queue family index (needs graphics) */
+    /* VK_MAKE_API_VERSION the instance / device were created for (Skia uses
+     * nothing newer); 0: 1.1 (the minimum, and the safe choice when unknown). */
+    unsigned int api_version;
+    /* PFN_vkGetInstanceProcAddr; NULL: from the Vulkan loader (libvulkan.so.1,
+     * vulkan-1.dll, libvulkan.1.dylib / the process). */
+    void* get_instance_proc_addr;
+    /* Optional: extensions the instance / device were created with, and the
+     * VkPhysicalDeviceFeatures2 chain they were created with. NULL / 0: none
+     * assumed (always valid; Skia then uses core Vulkan 1.1 only). */
+    const char* const* instance_extensions;
+    int instance_extension_count;
+    const char* const* device_extensions;
+    int device_extension_count;
+    const void* device_features2;
+} JsuiVulkanDevice;
+
+typedef struct JsuiGpuTarget {
+    void* texture;           /* VkImage / id<MTLTexture> */
+    /* VkFormat / MTLPixelFormat; 0: 8-bit RGBA unorm (VK_FORMAT_R8G8B8A8_UNORM
+     * / MTLPixelFormatRGBA8Unorm). Also BGRA8 and the sRGB variants. */
+    unsigned int format;
+    int width, height;       /* device px (the texture's size) */
+    int flags;               /* JSUI_GPU_* */
+    /* Vulkan: the VkImageUsageFlags the image was created with (0: colour
+     * attachment + input attachment + sampled + transfer src / dst; Skia
+     * Graphite needs at least COLOR_ATTACHMENT and INPUT_ATTACHMENT), the
+     * VkImageLayout it is in
+     * on entry and the one to leave it in (0 = UNDEFINED on entry discards
+     * the contents; final 0: COLOR_ATTACHMENT_OPTIMAL). Unused on Metal. */
+    unsigned int usage;
+    int layout;
+    int final_layout;
+} JsuiGpuTarget;
+
+/* NULL when the library was built without JSUI_VULKAN or Skia rejects the
+ * device (it needs Vulkan 1.1 and a graphics queue). */
+JSUI_API JsuiGpuContext* jsui_gpu_create_vulkan(const JsuiVulkanDevice* device);
+/* `device`: id<MTLDevice>, `queue`: id<MTLCommandQueue> of that device (both
+ * retained). NULL without JSUI_GRAPHITE_METAL. (iOS hosts that want Ganesh
+ * use jsui_metal_create below.) */
+JSUI_API JsuiGpuContext* jsui_gpu_create_metal(void* device, void* queue);
+/* Paints the current frame into `target`. `dirty` (optional) receives the
+ * repainted rect. Returns 0 on success, -1 on failure (device lost, bad
+ * target, wrong kind of context). */
+JSUI_API int jsui_render_gpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiGpuTarget* target, JsuiRect* dirty);
+/* Shorthand: an R8G8B8A8_UNORM VkImage with the default usage (colour +
+ * input attachment, sampled, transfer src / dst) that is in
+ * VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL before and after the call. */
+JSUI_API int jsui_render_vulkan(JsuiRuntime* rt, JsuiGpuContext* gpu, void* image, int width, int height, int flags);
+
 /* ------------------------------------------------------------- GPU (Metal)
  *
  * Skia Ganesh on Metal: draws the frame straight into a Metal texture (a

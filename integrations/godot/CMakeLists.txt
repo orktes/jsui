@@ -47,6 +47,7 @@ add_subdirectory(${_godot_cpp_src} ${CMAKE_BINARY_DIR}/_deps/godot-cpp-build EXC
 add_library(jsui_godot SHARED
   src/register_types.cpp
   src/jsui_view.cpp
+  src/jsui_gpu_render.cpp
   src/keymap.cpp)
 target_link_libraries(jsui_godot PRIVATE jsui godot::cpp)
 

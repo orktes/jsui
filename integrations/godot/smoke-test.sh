@@ -11,6 +11,15 @@
 #
 # GODOT_DISPLAY=x11 runs with a real (OpenGL) renderer, e.g. under xvfb-run,
 # and additionally saves the composited window as <out>-viewport.png.
+#
+# GODOT_RENDERING=vulkan runs Godot on Vulkan (Forward+, x11 display: run it
+# under xvfb-run; Mesa's lavapipe is enough) and checks that JsuiView renders
+# with Skia Graphite straight into its RenderingDevice texture: the run fails
+# on the CPU fallback, or when the GPU frame differs from the CPU raster of
+# the same frame by more than GPU_MAX_DIFF (mean channel difference, 0..255;
+# default 1.5) and writes <out>-gpu.png / <out>-cpu.png. Without it every run
+# must use the CPU raster (headless, OpenGL Compatibility).
+# SIZES (default "1280x720 2560x1440") picks the window sizes.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -74,7 +83,11 @@ fi
 
 mkdir -p "$(dirname "$out")"
 display=(--headless)
-if [[ "${GODOT_DISPLAY:-headless}" != headless ]]; then
+checks=(--expect-renderer cpu)
+if [[ "${GODOT_RENDERING:-}" == vulkan ]]; then
+  display=(--display-driver "${GODOT_DISPLAY:-x11}" --rendering-driver vulkan --rendering-method forward_plus --audio-driver Dummy)
+  checks=(--expect-renderer vulkan --max-gpu-diff "${GPU_MAX_DIFF:-1.5}")
+elif [[ "${GODOT_DISPLAY:-headless}" != headless ]]; then
   display=(--display-driver "$GODOT_DISPLAY" --rendering-driver opengl3 --audio-driver Dummy)
 fi
 log="$(mktemp)"
@@ -96,13 +109,13 @@ run() {
   local size="$1" png="$2"
   rm -f "$png"
   echo "== Godot $GODOT_VERSION, window $size"
-  "$GODOT" "${display[@]}" --path "$demo" --resolution "$size" -- --capture "$png" --frames "$frames" --self-test --window "$size" 2>&1 | tee "$log"
+  "$GODOT" "${display[@]}" --path "$demo" --resolution "$size" -- --capture "$png" --frames "$frames" --self-test --window "$size" "${checks[@]}" 2>&1 | tee "$log"
   local status=${PIPESTATUS[0]}
   if (( status != 0 )); then
     echo "godot exited with $status ($size)" >&2
     exit "$status"
   fi
-  if grep -qE "SCRIPT ERROR|^FAIL |self-test failed|Cannot get class 'JsuiView'|GDExtension dynamic library not found|\[jsui error\]" "$log"; then
+  if grep -qE "SCRIPT ERROR|^FAIL |self-test failed|Cannot get class 'JsuiView'|GDExtension dynamic library not found|\[jsui error\]|^renderer: |gpu-vs-cpu: .*FAIL" "$log"; then
     echo "errors in the Godot log ($size)" >&2
     exit 1
   fi
@@ -116,6 +129,12 @@ run() {
   fi
 }
 
-run 1280x720 "$out"
-run 2560x1440 "${out%.png}-2x.png"
-echo "ok: $out ${out%.png}-2x.png"
+written=()
+for size in ${SIZES:-1280x720 2560x1440}; do
+  png="$out"
+  [[ "$size" != 1280x720 ]] && png="${out%.png}-${size}.png"
+  [[ "$size" == 2560x1440 ]] && png="${out%.png}-2x.png"
+  run "$size" "$png"
+  written+=("$png")
+done
+echo "ok: ${written[*]}"
