@@ -1,7 +1,8 @@
 // End-to-end fixture for tests/native/react_surfaces_e2e_test.cpp: one bundle,
 // several root views (jsui_surface_create). `Main` auto-starts on the main
 // surface; `Nameplate` instances get their own props, size, input and state;
-// `Badge` is content-sized; `Late` registers after a timer. Components post
+// `Badge` is content-sized; `Boom` throws when asked to; `Late` registers
+// after a timer. Components post
 // what they rendered with Host.postMessage.
 import React, { useContext, useEffect, useRef, useState } from 'react';
 import { AppRegistry, Pressable, RootTagContext, Text, View, useWindowDimensions } from 'react-native';
@@ -51,6 +52,11 @@ function Badge({ label }) {
   );
 }
 
+function Boom({ boom }) {
+  if (boom) throw new Error('boom');
+  return <View style={{ flex: 1, backgroundColor: '#ffffff' }} />;
+}
+
 function Late() {
   useEffect(() => Host.postMessage('late', null), []);
   return <View style={{ flex: 1, backgroundColor: '#0000ff' }} />;
@@ -59,4 +65,5 @@ function Late() {
 AppRegistry.registerComponent('Main', () => Main);
 AppRegistry.registerComponent('Nameplate', () => Nameplate);
 AppRegistry.registerComponent('Badge', () => Badge);
+AppRegistry.registerComponent('Boom', () => Boom);
 setTimeout(() => AppRegistry.registerComponent('Late', () => Late), 500);

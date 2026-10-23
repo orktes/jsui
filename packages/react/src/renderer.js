@@ -235,9 +235,14 @@ export function describeError(error) {
 function reportUncaught(error, info) {
   const stack = info && info.componentStack ? '\nComponent stack:' + info.componentStack : '';
   console.error('[jsui] Uncaught error in a React component: ' + describeError(error) + stack);
-  // Hand it to the runtime (jsui_last_error, dev overlay): __jsui_reportError
-  // or the standard reportError global if the host has one, otherwise
-  // rethrow from a timer so the engine reports it like any uncaught error.
+  reportToRuntime(error);
+}
+
+// Hands an error to the runtime (jsui_last_error, dev overlay):
+// __jsui_reportError or the standard reportError global if the host has one,
+// otherwise rethrown from a timer so the engine reports it like any uncaught
+// error.
+export function reportToRuntime(error) {
   if (typeof globalThis.__jsui_reportError === 'function') {
     globalThis.__jsui_reportError(error);
     return;
@@ -261,12 +266,26 @@ function reportRecoverable(error) {
 }
 
 const roots = new Map();
+// Container node id -> its container object, shared by the React root
+// rendering into it and the portals targeting it.
+const containers = new Map();
+
+function containerOf(id) {
+  let container = containers.get(id);
+  if (!container) containers.set(id, (container = { id, type: 'Root', children: [] }));
+  return container;
+}
+
+/** Forgets a container whose native node is gone (a destroyed surface). */
+export function forgetContainer(id) {
+  if (!roots.has(id)) containers.delete(id);
+}
 
 /** Creates (or returns) the React root for a native container node id. */
 export function getRoot(containerId = native.rootId) {
   let root = roots.get(containerId);
   if (!root) {
-    const container = { id: containerId, type: 'Root', children: [] };
+    const container = containerOf(containerId);
     const fiberRoot = reconciler.createContainer(
       container,
       ConcurrentRoot,
@@ -295,9 +314,21 @@ export function render(element, options) {
     reconciler.updateContainer(element, root.fiberRoot, null, null);
   } else {
     reconciler.updateContainerSync(element, root.fiberRoot, null, null);
-    reconciler.flushSyncWork();
+    if (!batchDepth) reconciler.flushSyncWork();
   }
   return root;
+}
+
+let batchDepth = 0;
+
+/** Runs `fn`, which renders into several roots, and commits them all in one synchronous pass. */
+export function renderBatch(fn) {
+  batchDepth++;
+  try {
+    return fn();
+  } finally {
+    if (--batchDepth === 0) reconciler.flushSyncWork();
+  }
 }
 
 export function unmount(options) {
@@ -317,7 +348,7 @@ export const RootTagContext = createContext(native.rootId);
 
 /** The container object of a root tag (default: the main root), e.g. a portal target. */
 export function rootContainer(rootTag) {
-  return getRoot(rootTag == null ? native.rootId : rootTag).container;
+  return containerOf(rootTag == null ? native.rootId : rootTag);
 }
 
 export function createPortal(children, container, key) {

@@ -116,7 +116,7 @@ Surface* Runtime::createSurface(const std::string& appKey, const std::string& pr
     log(JSUI_LOG_ERROR, "jsui_surface_create(\"" + appKey + "\"): invalid initial props (" + error + ")");
     return nullptr;
   }
-  surfaces_.push_back(std::make_unique<Surface>(*this, &nextNodeId_));
+  surfaces_.push_back(std::make_unique<Surface>(*this, &nextNodeId_, &doc.perf));
   Surface& s = *surfaces_.back();
   attach(s);
   s.doc.now = now;
@@ -124,7 +124,7 @@ Surface* Runtime::createSurface(const std::string& appKey, const std::string& pr
   s.doc.setViewport(width, height, pixelRatio > 0 ? pixelRatio : 1.f);
   s.appKey = appKey;
   s.propsJson = props;
-  if (bundleRan_) startSurface(s);
+  s.pending = true;
   return &s;
 }
 
@@ -152,26 +152,45 @@ bool Runtime::runSurface(Surface* s, const std::string& appKey, const std::strin
     log(JSUI_LOG_ERROR, "jsui_surface_run: invalid props (" + error + ")");
     return false;
   }
-  if (!appKey.empty()) s->appKey = appKey;
-  if (s->appKey.empty()) {
+  if (appKey.empty() && s->appKey.empty()) {
     log(JSUI_LOG_ERROR, "jsui_surface_run: no app key");
     return false;
   }
-  s->propsJson = props;
-  if (bundleRan_) startSurface(*s);
+  // Hosts often push their state every frame: unchanged props cost nothing.
+  if ((appKey.empty() || appKey == s->appKey) && props == s->propsJson) return true;
+  if (!appKey.empty()) s->appKey = appKey;
+  s->propsJson = std::move(props);
+  s->pending = true;
   return true;
 }
 
-void Runtime::startSurface(Surface& s) {
-  if (!js || s.appKey.empty()) return;
-  Value args[3] = {Value(double(s.tag())), Value(s.appKey), Value(s.propsJson)};
-  if (!js->callGlobal("__jsui_runSurface", args, 3))
-    log(JSUI_LOG_WARN, "surface \"" + s.appKey +
-                           "\": the bundle has no AppRegistry (import AppRegistry from 'react-native')");
-}
+void Runtime::startSurfaces() { flushSurfaces(true); }
 
-void Runtime::startSurfaces() {
-  for (size_t i = 0; i < surfaces_.size(); i++) startSurface(*surfaces_[i]);
+void Runtime::flushSurfaces(bool all) {
+  if (!js) return;
+  if (!bundleRan_) {
+    for (auto& s : surfaces_) s->resizePending = false;  // the bundle reads the sizes when it runs
+    return;
+  }
+  Value::Array batch;
+  std::vector<Surface*> resized;
+  for (auto& s : surfaces_) {
+    if (s->resizePending) resized.push_back(s.get());
+    if (!(s->pending || all) || s->appKey.empty()) continue;
+    s->pending = false;
+    batch.emplace_back(Value::Array{Value(double(s->tag())), Value(s->appKey), Value(s->propsJson)});
+  }
+  if (batch.empty() && resized.empty()) return;
+  // One microtask drain for everything: React commits the resizes and the
+  // new props together.
+  js->beginBatch();
+  for (Surface* s : resized) s->dispatchResize();
+  if (!batch.empty()) {
+    Value arg(std::move(batch));
+    if (!js->callGlobal("__jsui_runSurfaces", &arg, 1))
+      log(JSUI_LOG_WARN, "surfaces: the bundle has no AppRegistry (import AppRegistry from 'react-native')");
+  }
+  js->endBatch();
 }
 
 Surface* Runtime::surfaceByTag(uint32_t tag) const {
@@ -444,6 +463,7 @@ void Runtime::tick(double nowMs) {
   loader.pump();
   // Shared state the embedder changed since the last tick: subscribers
   // re-render in one batch before this tick's timers and frame callbacks.
+  flushSurfaces();
   deliverStateChanges();
   js->runTimers(nowMs);
   js->runAnimationFrame(nowMs);
@@ -605,7 +625,9 @@ bool Runtime::wantsFrame() const {
       !animated->ends.empty() || state.hasDirty() || !uiResults_.empty() || !doomed_.empty())
     return true;
   for (const auto& s : surfaces_)
-    if (s->input->animating() || s->doc.layoutAnimating() || imageEventsReady(s->doc)) return true;
+    if (s->input->animating() || s->doc.layoutAnimating() || imageEventsReady(s->doc) ||
+        (bundleRan_ && (s->pending || s->resizePending)))
+      return true;
   return false;
 }
 

@@ -72,6 +72,10 @@ class JsEngine {
   // True while JS is on the stack (native code called from JS). Destroying
   // the engine then is not allowed; Runtime defers reloads instead.
   bool inCall() const;
+  // Calls between begin and end share one microtask drain (at end): React
+  // updates scheduled by several native -> JS calls commit together.
+  void beginBatch();
+  void endBatch();
   // Bytes allocated by the JS heap (for diagnostics / leak checks).
   size_t memoryUsage() const;
 

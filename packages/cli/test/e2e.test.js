@@ -65,6 +65,7 @@ for (const mode of ['production', 'development']) {
     assert.match(stdout, /PASS react_images_e2e/);
     assert.match(stdout, /PASS react_surfaces_e2e$/m);
     assert.match(stdout, /PASS react_surfaces_e2e_host_picks_main/);
+    assert.match(stdout, /PASS react_surfaces_e2e_error_isolation/);
     if (process.env.JSUI_E2E_VERBOSE) console.log(stdout);
     assert.doesNotMatch(stdout, /skipped/);
   });

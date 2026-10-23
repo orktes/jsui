@@ -3,7 +3,8 @@
 //
 //   jsui-bench bundle.js [--frames 600] [--warmup 120] [--width 1280] [--height 720]
 //              [--paint incremental|full|none] [--mouse-sweep X,Y0,Y1,FRAMES]
-//              [--patch-state KEY,N] [--name NAME] [--json out.json]
+//              [--patch-state KEY,N] [--surfaces N[,changing|same|one|resize]]
+//              [--name NAME] [--json out.json]
 //   jsui-bench --suite DIR [--json out.json] [--compare baseline.json]
 //
 // --suite runs the standard scenarios from DIR (built by tools/jsui-bench/run.sh):
@@ -12,6 +13,10 @@
 //   menu          hover springs; the mouse sweeps over the buttons
 //   inventory     500 slots, one jsui_patch_state per frame
 //   idle          the inventory with no updates (should do no work)
+//   surfaces-*    30 root views (jsui_surface_create) of one bundle: static,
+//                 every surface's props changing every frame, the same props
+//                 pushed every frame, one surface's props changing per frame,
+//                 every surface resized every frame
 //
 // Phase times are exclusive (core/perf.h), in microseconds per frame:
 //   js        QuickJS execution (timers, rAF, React render + reconcile, events)
@@ -132,6 +137,10 @@ struct Options {
   int sweepFrames = 120;
   std::string patchKey;
   int patchSlots = 0;
+  // Root views of app "Plate" (120x40) next to the main surface, and what the
+  // host does with their props every frame.
+  int surfaces = 0;
+  enum class SurfaceProps { None, Changing, Same, One, Resize } surfaceProps = SurfaceProps::None;
 };
 
 // Columns of the report.
@@ -219,6 +228,19 @@ bool run(const Options& o, Result* out) {
   }
   std::vector<uint32_t> px(size_t(o.width) * size_t(o.height));
   const size_t rowBytes = size_t(o.width) * 4;
+  constexpr int kPlateW = 120, kPlateH = 40;
+  auto plateProps = [](int i, int frame) {
+    char props[96];
+    std::snprintf(props, sizeof props, "{\"name\":\"Enemy %d\",\"hp\":%d,\"level\":%d}", i, (i * 13 + frame) % 101,
+                  1 + i % 60);
+    return std::string(props);
+  };
+  std::vector<JsuiRuntime*> surfaces;
+  std::vector<std::vector<uint32_t>> platePx;
+  for (int i = 0; i < o.surfaces; i++) {
+    surfaces.push_back(jsui_surface_create(h, "Plate", plateProps(i, 0).c_str(), kPlateW, kPlateH, 1));
+    platePx.emplace_back(size_t(kPlateW) * kPlateH);
+  }
   double now = 0;
   int frame = 0;
   auto step = [&]() {
@@ -235,11 +257,29 @@ bool run(const Options& o, Result* out) {
                     1 + frame % 97);
       jsui_patch_state(h, o.patchKey.c_str(), patch);
     }
+    if (o.surfaceProps == Options::SurfaceProps::Resize) {
+      for (size_t i = 0; i < surfaces.size(); i++)
+        jsui_set_viewport(surfaces[i], float(kPlateW - 30 + (frame + int(i)) % 30), kPlateH, 1);
+    } else if (o.surfaceProps != Options::SurfaceProps::None) {
+      jsui::Perf::Scope host(perf, jsui::Phase::Js);  // the host's call into JS
+      for (size_t i = 0; i < surfaces.size(); i++) {
+        // One: only surface frame % N gets new props (the others the same).
+        bool changes = o.surfaceProps == Options::SurfaceProps::Changing ||
+                       (o.surfaceProps == Options::SurfaceProps::One && int(i) == frame % int(surfaces.size()));
+        jsui_surface_set_props(surfaces[i], plateProps(int(i), changes ? frame : 0).c_str());
+      }
+    }
     jsui_tick(h, now);
     if (o.paint != PaintMode::None && jsui_needs_redraw(h)) {
       jsui::Perf::Scope paint(perf, jsui::Phase::Paint);
       if (o.paint == PaintMode::Full) jsui_render_rgba(h, px.data(), o.width, o.height, rowBytes);
       else jsui_render_rgba_incremental(h, px.data(), o.width, o.height, rowBytes, nullptr);
+    }
+    for (size_t i = 0; o.paint != PaintMode::None && i < surfaces.size(); i++) {
+      if (!jsui_needs_redraw(surfaces[i])) continue;
+      jsui::Perf::Scope paint(perf, jsui::Phase::Paint);
+      if (o.paint == PaintMode::Full) jsui_render_rgba(surfaces[i], platePx[i].data(), kPlateW, kPlateH, kPlateW * 4);
+      else jsui_render_rgba_incremental(surfaces[i], platePx[i].data(), kPlateW, kPlateH, kPlateW * 4, nullptr);
     }
     frame++;
   };
@@ -270,7 +310,8 @@ bool run(const Options& o, Result* out) {
   uint64_t allocs = gAllocs - a0;
   out->name = o.name;
   out->frames = o.frames;
-  out->nodes = countNodes(rt->doc.root());
+  out->nodes = 0;
+  for (const auto& s : rt->surfaces()) out->nodes += countNodes(s->doc.root());
   for (int p = 0; p < kPhaseCount; p++) out->phase[p] = summarize(phase[p]);
   out->total = summarize(total);
   double f = double(o.frames);
@@ -389,6 +430,16 @@ std::vector<Options> suite(const std::string& dir, const Options& base) {
   // The inventory with nothing changing: an idle frame should cost ~nothing.
   Options& idle = add("idle");
   idle.bundle = dir + "/inventory.js";
+  for (auto [name, props] : {std::pair{"surfaces-static", Options::SurfaceProps::None},
+                             std::pair{"surfaces-props", Options::SurfaceProps::Changing},
+                             std::pair{"surfaces-same-props", Options::SurfaceProps::Same},
+                             std::pair{"surfaces-one-props", Options::SurfaceProps::One},
+                             std::pair{"surfaces-resize", Options::SurfaceProps::Resize}}) {
+    Options& s = add(name);
+    s.bundle = dir + "/surfaces.js";
+    s.surfaces = 30;
+    s.surfaceProps = props;
+  }
   return list;
 }
 
@@ -425,11 +476,19 @@ int main(int argc, char** argv) {
       auto comma = v.find(',');
       o.patchKey = v.substr(0, comma);
       o.patchSlots = comma == std::string::npos ? 500 : std::atoi(v.c_str() + comma + 1);
+    } else if (a == "--surfaces") {
+      std::string v = next();
+      o.surfaces = std::max(0, std::atoi(v.c_str()));
+      if (v.find(",changing") != std::string::npos) o.surfaceProps = Options::SurfaceProps::Changing;
+      else if (v.find(",same") != std::string::npos) o.surfaceProps = Options::SurfaceProps::Same;
+      else if (v.find(",one") != std::string::npos) o.surfaceProps = Options::SurfaceProps::One;
+      else if (v.find(",resize") != std::string::npos) o.surfaceProps = Options::SurfaceProps::Resize;
     } else if (a == "-h" || a == "--help") {
       std::printf(
           "usage: jsui-bench <bundle.js> [--frames N] [--warmup N] [--width W] [--height H]\n"
           "                  [--paint incremental|full|none] [--mouse-sweep X,Y0,Y1,FRAMES]\n"
-          "                  [--patch-state KEY,SLOTS] [--name NAME] [--json out.json]\n"
+          "                  [--patch-state KEY,SLOTS] [--surfaces N[,changing|same|one|resize]]\n"
+          "                  [--name NAME] [--json out.json]\n"
           "       jsui-bench --suite DIR [--json out.json] [--compare baseline.json]\n");
       return 0;
     } else o.bundle = a;

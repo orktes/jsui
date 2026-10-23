@@ -66,16 +66,16 @@ class Runtime {
   Surface& main() const { return *surfaces_.front(); }
   const std::vector<std::unique_ptr<Surface>>& surfaces() const { return surfaces_; }
   // A new surface running the AppRegistry component `appKey` with
-  // `propsJson` (an object; empty: {}). Returns nullptr (and logs) for
-  // invalid props.
+  // `propsJson` (an object; empty: {}), started on the next tick. Returns
+  // nullptr (and logs) for invalid props.
   Surface* createSurface(const std::string& appKey, const std::string& propsJson, float width, float height,
                          float pixelRatio);
   // Unmounts the surface's app and frees it (later in the tick when JS is on
   // the stack).
   void destroySurface(Surface* s);
   // (Re)runs `appKey` (empty: the current one) with `propsJson` on `s`
-  // (React Native's appProperties / runApplication). Returns false for
-  // invalid props.
+  // (React Native's appProperties / runApplication) on the next tick; the
+  // same key and props again do nothing. Returns false for invalid props.
   bool runSurface(Surface* s, const std::string& appKey, const std::string& propsJson);
   // The surface whose root container is `tag`, or nullptr.
   Surface* surfaceByTag(uint32_t tag) const;
@@ -144,9 +144,11 @@ class Runtime {
  private:
   // Wires a new surface to the runtime's services.
   void attach(Surface& s);
-  // Hands surfaces with an app to JS (__jsui_runSurface).
-  void startSurface(Surface& s);
+  // Hands every surface with an app to JS (after a bundle evaluated).
   void startSurfaces();
+  // Hands the pending surfaces' (all: every surface's) apps and props to JS
+  // in one call: __jsui_runSurfaces([[rootTag, appKey, propsJson], ...]).
+  void flushSurfaces(bool all = false);
   bool bundleRan_ = false;  // the current context evaluated the bundle
   void resetEngine();
   // Hands native animation end events / value updates to JS.

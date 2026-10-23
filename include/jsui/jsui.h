@@ -260,8 +260,10 @@ JSUI_API int jsui_register_font(JsuiRuntime* rt, const char* family, const void*
 
 /* Creates a surface showing the component registered as `app_key` with
  * `initial_props_json` (a JSON object; NULL: {}). Returns NULL (and logs) on
- * a missing key or invalid props. A key the bundle registers later (after
- * an await, say) starts the surface when it is registered. */
+ * a missing key or invalid props. The component mounts on the next
+ * jsui_tick, in one batch with the other surfaces started or updated since
+ * the last tick. A key the bundle registers later (after an await, say)
+ * starts the surface when it is registered. */
 JSUI_API JsuiRuntime* jsui_surface_create(JsuiRuntime* rt, const char* app_key, const char* initial_props_json,
                                           int width, int height, float pixel_ratio);
 /* Unmounts the surface's component and frees the surface; the handle is
@@ -270,8 +272,12 @@ JSUI_API JsuiRuntime* jsui_surface_create(JsuiRuntime* rt, const char* app_key, 
 JSUI_API void jsui_surface_destroy(JsuiRuntime* surface);
 /* Runs `app_key` (NULL: the surface's current one) on the surface with new
  * props: the component re-renders with them, keeping its state when the key
- * is unchanged (React Native's appProperties). On the runtime handle this
- * picks the main surface's component. Returns 0, or -1 for invalid props. */
+ * is unchanged (React Native's appProperties). Applied on the next
+ * jsui_tick, batched with every other surface's update (one React commit);
+ * the last call before the tick wins, and the same key and props as the
+ * surface already has cost nothing, so a host may push props every frame.
+ * On the runtime handle this picks the main surface's component. Returns 0,
+ * or -1 for invalid props. */
 JSUI_API int jsui_surface_run(JsuiRuntime* surface, const char* app_key, const char* props_json);
 /* jsui_surface_run(surface, NULL, props_json). */
 JSUI_API int jsui_surface_set_props(JsuiRuntime* surface, const char* props_json);
@@ -307,7 +313,8 @@ JSUI_API int jsui_needs_redraw(JsuiRuntime* rt);
  * soon even without input: requestAnimationFrame callbacks, due timers,
  * scroll animations (flings, smooth scrolling, snapping), scroll indicator
  * fades, held gamepad sticks / D-pad, native-driven Animated animations,
- * LayoutAnimations. Hosts that sleep when idle keep calling
+ * LayoutAnimations, surfaces started / given new props / resized since the
+ * last tick. Hosts that sleep when idle keep calling
  * jsui_tick at display rate while this is set. */
 JSUI_API int jsui_wants_frame(JsuiRuntime* rt);
 /* Paint into a caller-owned RGBA8888 premultiplied buffer of

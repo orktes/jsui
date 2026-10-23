@@ -1,7 +1,8 @@
 // Surfaces (jsui_surface_create) without React: the runtime <-> JS protocol
-// (__jsui_runSurface / __jsui_stopSurface, createNode(type, rootTag)), node
+// (__jsui_runSurfaces / __jsui_stopSurface, createNode(type, rootTag)), node
 // ids unique across surfaces, nodes that cannot cross surfaces, per-surface
-// viewports and resize events, auto-sized axes, and a surface destroyed from
+// viewports and resize events, starts / props / resizes batched per tick and
+// unchanged props skipped, auto-sized axes, and a surface destroyed from
 // inside a JS callback.
 #include <cstdio>
 #include <cstring>
@@ -54,7 +55,11 @@ struct SurfaceHost {
 const char* kBundle = R"JS(
 const n = __jsui_native;
 const boxes = (globalThis.boxes = {});
-globalThis.__jsui_runSurface = (tag, appKey, propsJson) => {
+globalThis.__jsui_runSurfaces = (list) => {
+  n.postMessage('batch', list.length);
+  for (const [tag, appKey, propsJson] of list) run(tag, appKey, propsJson);
+};
+const run = (tag, appKey, propsJson) => {
   const props = JSON.parse(propsJson);
   let box = boxes[tag];
   if (!box) {
@@ -94,13 +99,21 @@ TEST(surfaces_protocol) {
   CHECK_EQ(jsui_load_bundle_source(h.rt, kBundle, std::strlen(kBundle), "surfaces.js"), 0);
   std::string tagA = std::to_string(jsui_surface_tag(a));
   CHECK(has(h.take(), "run={\"tag\":" + tagA + ",\"appKey\":\"A\""));
+  // Surfaces created after load start on the next tick, in one batch.
   JsuiRuntime* b = jsui_surface_create(h.rt, "B", R"({"color":"#0000ff"})", 30, 30, 1);
+  JsuiRuntime* c = jsui_surface_create(h.rt, "C", R"({"color":"#00ff00"})", 30, 30, 1);
   std::string tagB = std::to_string(jsui_surface_tag(b));
   CHECK(tagA != tagB);
-  CHECK(has(h.take(), "run={\"tag\":" + tagB));
+  CHECK(h.take().empty());
+  h.tick();
+  std::string m = h.take();
+  CHECK(has(m, "batch=2 run={\"tag\":" + tagB));
+  CHECK(has(m, "\"appKey\":\"C\""));
+  jsui_surface_destroy(c);
+  h.take();
 
   jsui::Runtime* rt = jsui::internalRuntime(h.rt);
-  CHECK_EQ(rt->surfaces().size(), size_t(3));
+  CHECK_EQ(rt->surfaces().size(), size_t(3));  // main, A, B
   // Node ids are unique across the documents, and each box lives in its surface's.
   jsui::Surface* sa = rt->surfaceByTag(uint32_t(jsui_surface_tag(a)));
   jsui::Surface* sb = rt->surfaceByTag(uint32_t(jsui_surface_tag(b)));
@@ -128,10 +141,15 @@ TEST(surfaces_protocol) {
   CHECK_EQ(pixel(b, 30, 30, 15, 15), 0xffff0000u);
   CHECK_EQ(pixel(h.rt, 64, 64, 32, 32), 0u);
 
-  // Viewports are per surface; resize events carry the root tag.
+  // Viewports are per surface; resize events carry the root tag and reach JS
+  // on the next tick (the last size wins).
   h.take();
+  jsui_set_viewport(a, 30, 12, 2);
   jsui_set_viewport(a, 40, 12, 2);
-  CHECK(has(h.take(), "\"rootTag\":" + tagA));
+  CHECK(h.take().empty());
+  h.tick();
+  m = h.take();
+  CHECK_EQ(m, "resize={\"height\":12,\"rootTag\":" + tagA + ",\"scale\":2,\"type\":\"resize\",\"width\":40}");
   float w = 0, hh = 0;
   jsui_surface_get_size(a, &w, &hh);
   CHECK_NEAR(w, 40.f, 0.01f);
@@ -139,9 +157,23 @@ TEST(surfaces_protocol) {
   jsui_surface_get_size(h.rt, &w, &hh);
   CHECK_NEAR(w, 64.f, 0.01f);
 
-  // Props updates reuse the surface's tree.
+  // Props updates reuse the surface's tree; they apply on the next tick, the
+  // last one wins, and the same props again are not delivered.
+  CHECK_EQ(jsui_surface_set_props(a, R"({"color":"#ffff00"})"), 0);
   CHECK_EQ(jsui_surface_set_props(a, R"({"color":"#00ff00"})"), 0);
-  CHECK(has(h.take(), "\"box\":" + std::to_string(boxA) + ",\"color\":\"#00ff00\""));
+  CHECK_EQ(jsui_surface_set_props(b, R"({"color":"#0000ff"})"), 0);  // unchanged
+  CHECK(h.take().empty());
+  CHECK(jsui_wants_frame(h.rt));  // hosts that sleep when idle tick to deliver them
+  h.tick();
+  CHECK(!jsui_wants_frame(h.rt));
+  m = h.take();
+  CHECK(has(m, "batch=1 run={\"tag\":" + tagA + ",\"appKey\":\"A\",\"box\":" + std::to_string(boxA) +
+                   ",\"color\":\"#00ff00\""));
+  CHECK(!has(m, "ffff00"));
+  CHECK_EQ(jsui_surface_set_props(a, R"({"color":"#00ff00"})"), 0);
+  h.tick();
+  CHECK(h.take().empty());
+  CHECK_EQ(jsui_surface_set_props(a, "[1]"), -1);
   CHECK_EQ(pixel(a, 80, 24, 40, 12), 0xff00ff00u);
 
   // Destroy from inside a JS callback: unmounted now, freed on the next tick.
@@ -163,16 +195,16 @@ TEST(surfaces_auto_size) {
   SurfaceHost h;
   const char* src = R"JS(
 const n = __jsui_native;
-globalThis.__jsui_runSurface = (tag) => {
+globalThis.__jsui_runSurfaces = (list) => list.forEach(([tag]) => {
   const v = n.createNode('View', tag);
   n.setProps(v, { style: { width: 30, height: 12, backgroundColor: '#ffffff' } });
   n.appendChild(tag, v);
-};
+});
 )JS";
   CHECK_EQ(jsui_load_bundle_source(h.rt, src, std::strlen(src), "auto.js"), 0);
   // Width from the content, height fixed; then both from the content.
   JsuiRuntime* s = jsui_surface_create(h.rt, "X", nullptr, 0, 20, 1);
-  h.tick();
+  h.tick(2);
   float w = 0, hh = 0;
   jsui_surface_get_size(s, &w, &hh);
   CHECK_NEAR(w, 30.f, 0.01f);
