@@ -111,7 +111,7 @@ jobs:
         run: |
           dir="$RUNNER_TEMP/npx-smoke"
           mkdir -p "$dir" && cd "$dir"
-          for i in 1 2 3 4 5 6; do
+          for i in $(seq 60); do  # new versions take minutes to show up
             npm view "@orktes/jsui-cli@$VERSION" version >/dev/null 2>&1 && break
             sleep 10
           done
