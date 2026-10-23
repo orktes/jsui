@@ -219,6 +219,7 @@ class Runtime {
   // while a reloaded bundle is broken.
   std::string devOrigin_, devVersion_;
   bool devPollInFlight_ = false;
+  bool sessionOffered_ = false;  // the last /__jsui/version had X-Jsui-Session
   double devNextPoll_ = 0;
   bool reloadRequested_ = false;
 };

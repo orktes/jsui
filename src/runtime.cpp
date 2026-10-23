@@ -420,9 +420,13 @@ void Runtime::loadUrl(const std::string& url) {
     }
     // A dev server may stamp the bundle with its version so a change between
     // this response and the first poll is not missed.
+    bool session = false;
     for (auto& [k, v] : res.headers) {
       if (lower(k) == "x-jsui-version") devVersion_ = trimmed(v);
+      if (lower(k) == "x-jsui-session") session = true;
     }
+    sessionOffered_ = session;
+    if (this->session) this->session->setOffered(session);
     loadSource(res.text(), bundleUrl);
   });
 }
@@ -488,13 +492,19 @@ void Runtime::devPoll() {
       return;
     }
     devNextPoll_ = now + 500;
+    if (session) {
+      bool offered = false;
+      for (auto& [k, v] : res.headers)
+        if (lower(k) == "x-jsui-session") offered = true;
+      // Only on a change: a 404 to the session poll holds until the server restarts.
+      if (offered != sessionOffered_) session->setOffered(sessionOffered_ = offered);
+    }
     std::string token = trimmed(res.text());
     if (devVersion_.empty()) {
       devVersion_ = token;
     } else if (token != devVersion_) {
       devVersion_ = token;
       log(JSUI_LOG_INFO, "bundle changed (version " + token + ")");
-      if (session) session->serverChanged();
       devUpdate();
     }
   });

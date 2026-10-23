@@ -1,4 +1,4 @@
-// Dev mode: the runtime joins the shared session of `jsui dev --shared`.
+// Dev mode: the runtime joins the shared session of `jsui dev`.
 //
 // Every dev-mode runtime with an http:// bundle (native viewer, Godot
 // JsuiView, the web host, ...) offers itself to the dev server, which can
@@ -19,8 +19,10 @@
 // getState, setBuffer, postMessage, callUi (answered when the UI handler
 // settles), run, hitTest, screenshot (PNG, base64), status, reload.
 //
-// A server without a shared session answers 404 to the poll: the runtime
-// then stops asking until its bundle changes (a restarted server may have one).
+// The runtime joins only when the dev server says it has a session (the
+// X-Jsui-Session header on the bundle and on /__jsui/version), so other
+// servers never see these requests. A 404 to the poll stops it until the
+// next version poll offers the session again.
 #pragma once
 
 #include <cstdint>
@@ -47,8 +49,9 @@ class DevSession {
   void tick(const std::string& origin);
   // The runtime cancelled its loads (reload): forget in-flight requests.
   void reset();
-  // The dev server published a new build: try joining again if it said no.
-  void serverChanged();
+  // Whether the dev server offers a session (its X-Jsui-Session header on
+  // the bundle and /__jsui/version): other servers are never polled.
+  void setOffered(bool on);
   // The runtime is executing a session command (its input is not reported
   // as the person's).
   bool injecting() const { return injecting_ > 0; }
@@ -76,7 +79,7 @@ class DevSession {
   std::string id_;
   std::string origin_;
   bool wanted_ = true;       // the host did not opt out
-  bool enabled_ = true;      // false after a 404 (no shared session)
+  bool enabled_ = false;     // offered by the server (and no 404 since)
   bool joined_ = false;      // the server accepted a poll
   bool polling_ = false;
   bool pushing_ = false;

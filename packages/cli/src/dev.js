@@ -153,6 +153,8 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
   await ctx.rebuild().catch(() => {});  // errors are reported by onEnd
   await ctx.watch();
 
+  // Runtimes join the shared session only when the server offers one.
+  const offer = { 'X-Jsui-Session': '1', 'Access-Control-Expose-Headers': 'X-Jsui-Version, X-Jsui-Session' };
   const send = (res, status, type, body, extra) => {
     res.writeHead(status, Object.assign({ 'Content-Type': type, 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' }, extra));
     res.end(body);
@@ -169,20 +171,20 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
       if (!state.bundle) return send(res, 503, 'text/plain; charset=utf-8', 'no successful build yet\n' + state.error);
       // The runtime compares this with /__jsui/version to detect changes
       // that landed between loading the bundle and its first poll.
-      return send(res, 200, TYPES['.js'], state.bundle, { 'X-Jsui-Version': state.version });
+      return send(res, 200, TYPES['.js'], state.bundle, { 'X-Jsui-Version': state.version, ...offer });
     }
     if (p === '/bundle.js.map') return state.map ? send(res, 200, TYPES['.map'], state.map) : send(res, 404, 'text/plain', 'no map');
     if (p === '/__jsui/version') {
       const token = url.searchParams.get('hmr') === '1' ? hotToken : () => state.version;
       const since = url.searchParams.get('since');
-      if (since == null || since !== token()) return send(res, 200, 'text/plain; charset=utf-8', token());
+      if (since == null || since !== token()) return send(res, 200, 'text/plain; charset=utf-8', token(), offer);
       let done = false;
       const finish = () => {
         if (done) return;
         done = true;
         clearTimeout(timer);
         waiters.delete(finish);
-        send(res, 200, 'text/plain; charset=utf-8', token());
+        send(res, 200, 'text/plain; charset=utf-8', token(), offer);
       };
       const timer = setTimeout(finish, 25000);
       waiters.add(finish);

@@ -96,11 +96,11 @@ struct CallUiContext {
 
 DevSession::DevSession(Runtime& rt) : rt_(rt), id_(randomId()) {}
 
-void DevSession::serverChanged() {
-  if (!enabled_) {
-    enabled_ = true;
-    nextPoll_ = 0;
-  }
+void DevSession::setOffered(bool on) {
+  if (on == enabled_) return;
+  enabled_ = on;
+  if (on) nextPoll_ = 0;
+  else joined_ = false;
 }
 
 void DevSession::reset() {
