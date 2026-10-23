@@ -2090,6 +2090,12 @@ struct SkipState {
 thread_local SkipState* tSkip = nullptr;
 bool gRecordSkip = true;  // setRecordSkipping
 
+// Adds a rect to a damage region (most rects of a frame lie inside what is
+// already damaged: a node's children inside its own rects).
+void addDamage(SkRegion* d, const SkIRect& r) {
+  if (!r.isEmpty() && !d->contains(r)) d->op(r, SkRegion::kUnion_Op);
+}
+
 // Clears the dirty flags of a subtree updateRecords does not walk (hidden,
 // or painted by its paragraph), so that a later change marks up to the root.
 void clearPaintTree(Node* n) {
@@ -2123,6 +2129,20 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
   uint32_t subtreeNodes = painted ? 1 : 0;
   bool isolatable = true;
   SkIRect full = SkIRect::MakeEmpty();  // `sub` without the clips of ancestors
+  uint64_t kids = childListHash(n);
+  uint32_t gen = n->type() == NodeType::Image ? imageGen : 0;
+  bool contentChanged = false;
+  // Whether the node's own paint state changed (then the whole subtree's old
+  // and new rects are damaged, below); if it only moved, its own rects are
+  // damaged here, before the children's (which they often contain).
+  auto checkContent = [&] {
+    contentChanged = !rec->valid || rec->version != n->paintVersion || rec->painted != painted || rec->w != w ||
+                     rec->h != h || rec->children != kids || rec->imageGen != gen;
+    if (!contentChanged && rec->matrix != m) {
+      addDamage(damage, rec->own);
+      addDamage(damage, own);
+    }
+  };
   if (painted) {
     const ComputedStyle& s = n->style();
     // A blend mode composites with what is below the node.
@@ -2173,6 +2193,7 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
       curved->push_back({bars, SkRRect::MakeEmpty(), false});  // rounded thumbs: never cut
     }
     sub = own;
+    checkContent();
     if (paintsChildren(n) && (!n->children().empty() || !n->ghosts.empty())) {
       SkIRect childClip = clip;
       if (clipsChildren(n) && !childClip.intersect(deviceBounds(m, SkRect::MakeWH(w, h)))) childClip.setEmpty();
@@ -2193,8 +2214,28 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
       auto visit = [&](Node* ch) {
         auto* cr = static_cast<NodeRecord*>(ch->paintCache.get());
         SkipState* sk = tSkip;
-        if (sk && sk->enabled && !scan->inside && !ch->ghostOf && cr && cr->valid && cr->quiet && cr->pass + 1 == sk->pass &&
-            !ch->paintTreeDirty() && cr->inClip == childClip && cr->inMatrix == cm && cr->inSnap == cs) {
+        bool skip = false, hidden = false;
+        SkIRect childFull;
+        if (sk && sk->enabled && !scan->inside && !ch->ghostOf && cr && cr->valid && cr->pass + 1 == sk->pass &&
+            !ch->paintTreeDirty()) {
+          childFull = cr->subtreeFull;
+          skip = cr->quiet && cr->inClip == childClip && cr->inMatrix == cm && cr->inSnap == cs;
+          if (!skip && cr->subtree.isEmpty() && cm.getScaleX() == cr->inMatrix.getScaleX() &&
+              cm.getScaleY() == cr->inMatrix.getScaleY() && cm.getSkewX() == cr->inMatrix.getSkewX() &&
+              cm.getSkewY() == cr->inMatrix.getSkewY() && !cm.hasPerspective() && !cr->inMatrix.hasPerspective()) {
+            // Out of view (scrolled out of its scroll view, or not painted)
+            // and still out of view after a translation (whole-pixel
+            // snapping may differ by a pixel): its records stay as they were
+            // for the old placement, which a visit compares with when it
+            // comes into view.
+            float dx = cm.getTranslateX() - cr->inMatrix.getTranslateX(),
+                  dy = cm.getTranslateY() - cr->inMatrix.getTranslateY();
+            SkRect moved = SkRect::Make(cr->subtreeFull).makeOffset(dx, dy);
+            childFull = cr->subtreeFull.isEmpty() ? cr->subtreeFull : moved.roundOut();
+            hidden = skip = !SkIRect::Intersects(moved.makeOutset(2, 2).roundOut(), childClip);
+          }
+        }
+        if (skip) {
           sub.join(cr->subtree);
           size_t b = curved->size();
           curved->insert(curved->end(), sk->curvedPrev->begin() + cr->curvedBegin,
@@ -2209,6 +2250,8 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
             cr->rasterEnd = uint32_t(tRasterCandidates->size());
           }
           cr->pass = sk->pass;
+          // Out of view: nothing in it changed relative to this node.
+          if (hidden) cr->relChanged = false;
         } else if (ch->ghostOf && sk && sk->enabled) {
           sk->enabled = false;
           sub.join(updateRecords(ch, cm, cs, childClip, imageGen, childDamage, curved, scan));
@@ -2218,11 +2261,11 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
         }
         cr = static_cast<NodeRecord*>(ch->paintCache.get());
         below |= !cr || cr->relChanged;
-        quietKids &= cr && cr->quiet;
+        quietKids &= cr && cr->quiet && !hidden;
         if (cr) {
           subtreeNodes += cr->subtreeNodes;
           isolatable &= cr->isolatable;
-          SkIRect cf = cr->subtreeFull;
+          SkIRect cf = skip ? childFull : cr->subtreeFull;
           if (!clipsChildren(n) || cf.intersect(deviceBounds(m, SkRect::MakeWH(w, h)))) full.join(cf);
         }
       };
@@ -2247,6 +2290,7 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
       full.outset(e, e);
     }
   } else {
+    checkContent();
     for (Node* ch : n->ghosts) clearPaintTree(ch);
     for (Node* ch : n->children()) clearPaintTree(ch);
   }
@@ -2257,29 +2301,22 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
     caret = true;
     for (const SkRect& cr : {caretA, caretB}) {
       SkIRect dr;
-      if (!cr.isEmpty() && dr.intersect(deviceBounds(m, cr.makeOutset(1, 1)), clip)) damage->op(dr, SkRegion::kUnion_Op);
+      if (!cr.isEmpty() && dr.intersect(deviceBounds(m, cr.makeOutset(1, 1)), clip)) addDamage(damage, dr);
     }
   }
   // A hidden node's descendants keep their old records; the check below
   // repaints where the subtree was.
-  uint64_t kids = childListHash(n);
-  uint32_t gen = n->type() == NodeType::Image ? imageGen : 0;
-  bool contentChanged = !rec->valid || rec->version != n->paintVersion || rec->painted != painted || rec->w != w ||
-                        rec->h != h || rec->children != kids || rec->imageGen != gen;
   if (contentChanged) {
     // Paint state of the node itself changed: it may affect the whole
     // subtree (opacity, clip, transform of a layer...).
-    damage->op(rec->subtree, SkRegion::kUnion_Op);
-    damage->op(sub, SkRegion::kUnion_Op);
-  } else if (rec->matrix != m) {
-    damage->op(rec->own, SkRegion::kUnion_Op);
-    damage->op(own, SkRegion::kUnion_Op);
+    addDamage(damage, rec->subtree);
+    addDamage(damage, sub);
   }
   float barAlpha = bars.isEmpty() ? 0 : n->scrollIndicatorOpacity;
   if (rec->bars != bars || rec->barAlpha != barAlpha) {
     // Scroll indicators moved or faded: only their rects repaint.
-    damage->op(rec->bars, SkRegion::kUnion_Op);
-    damage->op(bars, SkRegion::kUnion_Op);
+    addDamage(damage, rec->bars);
+    addDamage(damage, bars);
   }
   if (scan->inside) {
     // Content of a scroll blit candidate: it must have moved by exactly the
@@ -2310,12 +2347,12 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
   rec->resizing = rec->valid && (rec->w != w || rec->h != h);
   if (rec->shadowInexact && !rec->scaling && !rec->resizing) {
     // Came to rest: its shadow from the exact mask.
-    damage->op(own, SkRegion::kUnion_Op);
+    addDamage(damage, own);
     rec->shadowInexact = false;
   }
   if (rec->layerInexact && !rec->moved) {
     // Came to rest after moving as a cached layer: paint it exactly.
-    damage->op(sub, SkRegion::kUnion_Op);
+    addDamage(damage, sub);
     rec->layerInexact = false;
   }
   rec->local = local;
