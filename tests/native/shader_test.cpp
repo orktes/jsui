@@ -217,12 +217,14 @@ TEST(shader_preload_queues_a_warm_up) {
   auto p = fx.preload(kColor);
   CHECK(p->effect != nullptr);
   CHECK(fx.get(kColor) == p);  // views share it
+  const size_t variants = fx.warmPending();  // geometry / clip variants of one draw
+  CHECK(variants > 1);
   fx.preload(kColor);
-  CHECK_EQ(fx.warmPending(), size_t(1));
-  fx.preload(kColor, jsui::Value::parseJson(R"({"img":{"uri":"a.png"}})"));
-  CHECK_EQ(fx.warmPending(), size_t(2));
+  CHECK_EQ(fx.warmPending(), variants);
+  fx.preload(kColor, jsui::Value::parseJson(R"({"img":{"uri":"a.png"}})"));  // no such child: the same draws
+  CHECK_EQ(fx.warmPending(), 2 * variants);
   CHECK(!fx.preload("half4 main(float2 p) { return nope; }")->error.empty());
-  CHECK_EQ(fx.warmPending(), size_t(2));
+  CHECK_EQ(fx.warmPending(), 2 * variants);
   CHECK(s.rt->main().needsRedraw());
   int dw = s.dw(), dh = s.dh();
   std::vector<uint32_t> buf(size_t(dw) * dh, 0);
@@ -230,16 +232,16 @@ TEST(shader_preload_queues_a_warm_up) {
   s.rt->renderIncremental(buf.data(), dw, dh, size_t(dw) * 4);
   CHECK_EQ(fx.warmPending(), size_t(0));
   CHECK(!s.rt->main().needsRedraw());
-  // The bridge.
+  // The bridge: an image child, loaded and not yet.
   std::string js = R"J(
 var n = __jsui_native;
 var info = n.shaderPreload('layout(color) uniform half4 c; uniform shader img; half4 main(float2 p) { return c; }', {img: {texture: 't'}});
 if (info.error || info.children.join() !== 'img') throw new Error(JSON.stringify(info));
-if (n.shadersWarming() !== 1) throw new Error('warming ' + n.shadersWarming());
+if (n.shadersWarming() !== 2 * VARIANTS) throw new Error('warming ' + n.shadersWarming());
 if (!n.shaderPreload('nope').error) throw new Error('no error');
 )J";
-  CHECK(s.rt->loadSource(js, "preload.js"));
-  CHECK_EQ(fx.warmPending(), size_t(1));
+  CHECK(s.rt->loadSource("var VARIANTS = " + std::to_string(variants) + ";" + js, "preload.js"));
+  CHECK_EQ(fx.warmPending(), 2 * variants);
 }
 
 TEST(shader_precompile_capi) {

@@ -68,7 +68,29 @@ std::shared_ptr<const ShaderEffects::Program> ShaderEffects::preload(const std::
   if (!p->effect) return p;
   for (const Warm& w : warm_)
     if (w.program == p && styleValueEquals(w.images, images)) return p;
-  warm_.push_back({p, images});
+  // Image children (`content` as the view's own painting is not one): each
+  // loaded or not yet (images load after the view shows), every combination
+  // when there are few, else all and none. The likeliest first: all loaded.
+  std::vector<std::string> named;
+  for (const SkRuntimeEffect::Child& c : p->effect->children()) {
+    std::string name(c.name);
+    if (c.type == SkRuntimeEffect::ChildType::kShader && images.has(name)) named.push_back(name);
+  }
+  const uint32_t all = (1u << std::min<size_t>(named.size(), 31)) - 1;
+  std::vector<uint32_t> masks;
+  if (named.size() <= 3) {
+    for (uint32_t m = 0; m <= all; m++) masks.push_back(m);
+    std::stable_sort(masks.begin(), masks.end(),
+                     [](uint32_t a, uint32_t b) { return __builtin_popcount(a) > __builtin_popcount(b); });
+  } else {
+    masks = {all, 0};
+  }
+  for (uint32_t m : masks) {
+    Value::Object loaded;
+    for (size_t i = 0; i < named.size(); i++)
+      if (m & (1u << i)) loaded[named[i]] = images[named[i]];
+    for (int variant = 0; variant < kWarmVariants; variant++) warm_.push_back({p, images, Value(loaded), variant});
+  }
   return p;
 }
 
@@ -318,8 +340,10 @@ void paint(Node* node, SkCanvas* canvas, const SkRect& box, const SkRRect& clip)
   SkRuntimeShaderBuilder b(st->program->effect);
   fillUniforms(node, st, b, box.width(), box.height());
   fillChildren(node, st, b, box.width(), box.height(), false);
-  SkMatrix local = SkMatrix::Translate(box.left(), box.top());
-  sk_sp<SkShader> shader = b.makeShader(&local);
+  // The box's origin by translating the canvas, not by a local matrix on the
+  // shader: a local matrix is part of the GPU pipeline's key (and the
+  // warm-up's draws have none).
+  sk_sp<SkShader> shader = b.makeShader();
   if (!shader) return;
   SkPaint p;
   p.setShader(std::move(shader));
@@ -327,7 +351,8 @@ void paint(Node* node, SkCanvas* canvas, const SkRect& box, const SkRRect& clip)
   canvas->save();
   if (clip.isRect()) canvas->clipRect(clip.rect(), true);
   else canvas->clipRRect(clip, true);
-  canvas->drawRect(box, p);
+  canvas->translate(box.left(), box.top());
+  canvas->drawRect(SkRect::MakeWH(box.width(), box.height()), p);
   canvas->restore();
 }
 
@@ -349,6 +374,10 @@ namespace {
 
 // The off-screen surface the warm-up draws into (device px).
 constexpr int kWarmSize = 64;
+// Warm-up draws per frame: a GPU may take a few hundred ms to build one
+// runtime effect's pipeline (WebGPU / Metal, cold), so a preload spreads
+// over frames.
+constexpr int kWarmPerFrame = 4;
 
 // What image children sample during the warm-up: a small opaque image,
 // uploaded like any loaded image.
@@ -363,72 +392,70 @@ sk_sp<SkImage> warmImage() {
   return image;
 }
 
-// One draw of each kind a ShaderView makes with `program` (see paint() and
-// painter.cpp's `content` layer): clipped to a rect (a scissor) and to a
-// rounded rect (an analytic clip), pixel-aligned and not. `loaded`: image
-// children as images, else transparent (not loaded yet).
-void warmDraws(SkCanvas* c, const ShaderEffects::Program& program, const Value& images, bool loaded) {
-  SkRuntimeShaderBuilder b(program.effect);  // uniforms: zeros (the values do not change the pipelines)
+}  // namespace
+
+// One draw the way a ShaderView draws `program` (shader::paint, and
+// painter.cpp's layer for `content`). The variant's bits pick the pipeline
+// key's parts: 1 fractional device coordinates (an AA rect: AnalyticRRect
+// rather than CoverBounds), 2 the view's own clip rounded, 4 inside another
+// rounded clip (a parent's overflow: an AnalyticClip). `loaded`: the image
+// children drawn as images; the others are not loaded yet (transparent).
+void ShaderEffects::warmDraw(SkCanvas* c, const Warm& w) {
+  const Program& program = *w.program;
+  SkRuntimeShaderBuilder b(program.effect);  // uniforms: zeros (values are not in the key)
   const float size = kWarmSize / 2;
   for (const SkRuntimeEffect::Child& ch : program.effect->children()) {
     if (ch.type != SkRuntimeEffect::ChildType::kShader) continue;
     std::string name(ch.name);
-    if (program.content && name == "content" && !images.has(name)) continue;
+    if (program.content && name == "content" && !w.images.has(name)) continue;
     sk_sp<SkShader> s;
-    if (loaded && images.has(name)) {
-      const Value& spec = images[name];
+    if (w.loaded.has(name)) {
+      const Value& spec = w.loaded[name];
       s = shader::fitImage(warmImage(), spec, size, size, !spec["texture"].asString().empty(), false);
     }
     b.child(ch.name) = s ? s : SkShaders::Color(SK_ColorTRANSPARENT);
   }
-  const SkRect rects[] = {SkRect::MakeWH(size, size), SkRect::MakeXYWH(size + 0.5f, 0.5f, size - 1, size - 1)};
-  for (const SkRect& r : rects) {
-    for (bool round : {false, true}) {
-      c->save();
-      if (round) c->clipRRect(SkRRect::MakeRectXY(r, 6, 6), true);
-      else c->clipRect(r, true);
-      if (program.content && !images.has("content")) {
-        float radius = std::max(r.width(), r.height());
-        SkPaint lp;
-        lp.setImageFilter(SkImageFilters::RuntimeShader(b, radius, "content", nullptr));
-        c->saveLayer(&r, &lp);
-        SkPaint fill;
-        fill.setColor(SK_ColorWHITE);
-        fill.setAntiAlias(true);
-        c->drawRRect(SkRRect::MakeRectXY(r.makeInset(4, 4), 4, 4), fill);
-        c->restore();
-      } else if (sk_sp<SkShader> shader = b.makeShader()) {
-        SkPaint p;
-        p.setShader(std::move(shader));
-        p.setAntiAlias(true);
-        c->drawRect(r, p);
-      }
-      c->restore();
-    }
+  const bool fractional = w.variant & 1, round = w.variant & 2, outer = w.variant & 4;
+  const SkRect r = fractional ? SkRect::MakeXYWH(0.5f, 0.5f, size - 1, size - 1) : SkRect::MakeWH(size, size);
+  c->save();
+  if (outer) c->clipRRect(SkRRect::MakeRectXY(SkRect::MakeXYWH(4, 4, size, size), 10, 10), true);
+  if (round) c->clipRRect(SkRRect::MakeRectXY(r, 6, 6), true);
+  else c->clipRect(r, true);
+  if (program.content && !w.images.has("content")) {
+    float radius = std::max(r.width(), r.height());
+    SkPaint lp;
+    lp.setImageFilter(SkImageFilters::RuntimeShader(b, radius, "content", nullptr));
+    c->saveLayer(&r, &lp);
+    SkPaint fill;
+    fill.setColor(SK_ColorWHITE);
+    fill.setAntiAlias(true);
+    c->drawRRect(SkRRect::MakeRectXY(r.makeInset(4, 4), 4, 4), fill);
+    c->restore();
+  } else if (sk_sp<SkShader> shader = b.makeShader()) {
+    SkPaint p;
+    p.setShader(std::move(shader));
+    p.setAntiAlias(true);
+    c->translate(r.left(), r.top());
+    c->drawRect(SkRect::MakeWH(r.width(), r.height()), p);
   }
+  c->restore();
 }
-
-}  // namespace
 
 bool ShaderEffects::warm(SkCanvas* canvas) {
   if (warm_.empty() || !canvas) return false;
-  std::vector<Warm> queue;
-  queue.swap(warm_);
-  if (!canvas->recorder() && !canvas->recordingContext()) return false;  // raster: compiled is all there is
+  if (!canvas->recorder() && !canvas->recordingContext()) {  // raster: compiled is all there is
+    warm_.clear();
+    return false;
+  }
+  size_t n = std::min<size_t>(warm_.size(), kWarmPerFrame);
+  std::vector<Warm> batch(warm_.begin(), warm_.begin() + n);
+  warm_.erase(warm_.begin(), warm_.begin() + n);
   SkImageInfo info = canvas->imageInfo().makeWH(kWarmSize, kWarmSize);
   if (info.colorType() == kUnknown_SkColorType) return false;
   SkSurfaceProps props = canvas->getBaseProps();
   sk_sp<SkSurface> surface = canvas->makeSurface(info, &props);
   if (!surface) return false;
-  SkCanvas* c = surface->getCanvas();
-  for (const Warm& w : queue) {
-    bool hasImages = false;
-    for (const SkRuntimeEffect::Child& ch : w.program->effect->children())
-      hasImages |= ch.type == SkRuntimeEffect::ChildType::kShader && w.images.has(std::string(ch.name));
-    // Images load after the view shows: its first frames draw without them.
-    warmDraws(c, *w.program, w.images, false);
-    if (hasImages) warmDraws(c, *w.program, w.images, true);
-  }
+  for (const Warm& w : batch) warmDraw(surface->getCanvas(), w);
 #if defined(JSUI_GPU)
   // Ganesh: into the frame's flush. (Graphite records the surface's draws
   // when it goes.)

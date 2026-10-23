@@ -471,9 +471,9 @@ bool waitPrecompiled(JsuiGpuContext* gpu) {
 }
 
 // ShaderViews (a fill with an image child, and one post-processing its
-// content) mounted in the second frame over a page drawn in the first, which
-// preloads their shaders when `preload`. Returns the pipelines the second
-// frame compiled.
+// content, inside a rounded overflow clip) mounted at 600 ms over a page
+// that preloads their shaders when `preload` (warmed over the frames before).
+// Returns the pipelines the frames from the mount on compiled.
 unsigned long long shaderFrames(Vk& vk, JsuiGpuContext* gpu, bool preload) {
   static const char* kShaders =
       "const FILL = 'uniform shader img; uniform float glow; half4 main(float2 p) {"
@@ -491,16 +491,19 @@ unsigned long long shaderFrames(Vk& vk, JsuiGpuContext* gpu, bool preload) {
                        "view('View', n.rootId, {position: 'absolute', left: 4, top: 120, width: 20, height: 20,"
                        "  backgroundColor: '#ff0000'});" +
                        (preload ? "if (n.shaderPreload(FILL, IMAGES).error || n.shaderPreload(CONTENT).error) throw new Error('compile');"
-                                  "if (n.shadersWarming() !== 2) throw new Error('queued ' + n.shadersWarming());"
+                                  "if (!(n.shadersWarming() > 2)) throw new Error('queued ' + n.shadersWarming());"
                                 : "") +
                        "setTimeout(() => {"
-                       "  view('ShaderView', n.rootId, {position: 'absolute', left: 30, top: 10, width: 60, height: 40},"
+                       "  if (n.shadersWarming() !== 0) throw new Error('still warming');"
+                       "  const clip = view('View', n.rootId, {position: 'absolute', left: 20.5, top: 5, width: 80,"
+                       "    height: 50, borderRadius: 12, overflow: 'hidden'});"
+                       "  view('ShaderView', clip, {position: 'absolute', left: 9.5, top: 5, width: 60, height: 40},"
                        "    {source: FILL, uniforms: {glow: 0.5}, images: IMAGES});"
                        "  const c = view('ShaderView', n.rootId, {position: 'absolute', left: 100, top: 10, width: 60,"
                        "    height: 40}, {source: CONTENT});"
                        "  view('View', c, {position: 'absolute', left: 4, top: 4, width: 20, height: 20,"
                        "    backgroundColor: '#ff0000'});"
-                       "}, 10);";
+                       "}, 600);";
   JsuiConfig cfg;
   jsui_config_init(&cfg);
   cfg.width = vk.w;
@@ -508,10 +511,10 @@ unsigned long long shaderFrames(Vk& vk, JsuiGpuContext* gpu, bool preload) {
   JsuiRuntime* rt = jsui_create(&cfg);
   CHECK_EQ(jsui_load_bundle_source(rt, bundle.data(), bundle.size(), "shaders.js"), 0);
   int layout = VK_IMAGE_LAYOUT_UNDEFINED;
-  unsigned long long compiles[2] = {0, 0};
-  for (int frame = 0; frame < 2; frame++) {
-    jsui_tick(rt, frame * 16.0 + 1);
-    if (frame == 0) CHECK(jsui_needs_redraw(rt));
+  unsigned long long compiles[2] = {0, 0};  // before / from the mount on
+  for (int frame = 0; frame < 40; frame++) {
+    const double now = frame * 16.0 + 1;
+    jsui_tick(rt, now);
     JsuiGpuTarget t{};
     t.texture = vk.image;
     t.width = vk.w;
@@ -523,13 +526,14 @@ unsigned long long shaderFrames(Vk& vk, JsuiGpuContext* gpu, bool preload) {
     layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     JsuiPerf p;
     jsui_get_perf(rt, &p, 1);
-    compiles[frame] = p.pipeline_compiles;
+    compiles[now >= 600] += p.pipeline_compiles;
   }
+  CHECK(jsui_last_error(rt) == nullptr || !*jsui_last_error(rt));
   std::vector<uint32_t> out = vk.read();
   // The views drew: the fill's blue, the mirrored red box (bgra: blue).
-  CHECK_EQ(out[size_t(30) * vk.w + 60] >> 16 & 255, 128u);
+  CHECK_EQ(out[size_t(30) * vk.w + 60] >> 16 & 255, 128u);  // inside the clip
   CHECK_EQ(out[size_t(20) * vk.w + 100 + 60 - 14], 0xffff0000u);
-  std::printf("  %s: frame 0 compiled %llu pipelines, frame 1 (the ShaderViews) %llu\n",
+  std::printf("  %s: %llu pipelines compiled before the ShaderViews, %llu with them\n",
               preload ? "preloaded" : "cold", compiles[0], compiles[1]);
   jsui_destroy(rt);
   return compiles[1];

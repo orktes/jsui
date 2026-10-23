@@ -73,12 +73,13 @@ class ShaderEffects {
   // view's `images` prop will be (which children are images, their fit and
   // tile mode), so the warm-up samples the same kind of child.
   std::shared_ptr<const Program> preload(const std::string& sksl, const Value& images = Value());
-  // Shaders waiting for their warm-up (the next frame painted).
+  // Warm-up draws still queued (a few per frame painted).
   size_t warmPending() const { return warm_.size(); }
   // The surfaces call it with the canvas of each frame they paint. On a GPU
-  // canvas it draws every queued shader into a small off-screen surface of
-  // the canvas's format (nothing shows); the frame's flush then builds the
-  // pipelines. A raster canvas has nothing to warm: the queue is dropped.
+  // canvas it draws the next few queued warm-up draws (every combination of
+  // geometry, clip and loaded children a view may draw the shader with)
+  // into a small off-screen surface of the canvas's format (nothing shows);
+  // the frame's flush then builds the pipelines. A raster canvas has nothing to warm: the queue is dropped.
   // Returns whether it drew (the frame must reach the GPU).
   bool warm(SkCanvas* canvas);
 
@@ -103,10 +104,14 @@ class ShaderEffects {
   std::unordered_map<std::string, std::shared_ptr<const Program>> programs_;
   std::unordered_set<Node*> views_;
   double now_ = 0;
+  static constexpr int kWarmVariants = 8;
   struct Warm {
     std::shared_ptr<const Program> program;
-    Value images;
+    Value images;  // as preloaded
+    Value loaded;  // the image children drawn as images (the others: not loaded yet)
+    int variant = 0;
   };
+  void warmDraw(SkCanvas* canvas, const Warm& w);
   std::vector<Warm> warm_;
 };
 
