@@ -44,10 +44,10 @@ Packages: `@orktes/jsui-cli` (bundler, dev server, headless tools, this skill),
    bars; use shared state (`useHostState`) for things that change now and then.
 8. **Give important elements a `testID`** so you (and tests) can find, click
    and check them with `jsui inspect` / `jsui run`.
-9. **Always look at what you built.** With a shared view running
-   (`jsui dev --shared`, below), `npx jsui screenshot --attach <url>` after
-   each save; otherwise `npx jsui screenshot app.jsx -o shot.png`. Open the
-   PNG. Check focus with a `press` step.
+9. **Always look at what you built.** With `jsui dev` running and a runtime
+   in its session (below), `npx jsui screenshot --attach <url>` after each
+   save; otherwise `npx jsui screenshot app.jsx -o shot.png`. Open the PNG.
+   Check focus with a `press` step.
 10. No browser APIs: no `document`, `window.addEventListener`, CSS, `<div>`,
     `localStorage`. `fetch`, timers, `requestAnimationFrame`, `TextEncoder`,
     `URL`, `AbortController` and `performance.now()` exist. Native builds have
@@ -67,14 +67,16 @@ json mp4 ...) emit assets next to the bundle. `name@2x.png` is a 2x image
 (half the intrinsic size). JSON is inlined. `.jsui.js` then `.native.js`
 platform files resolve first. TypeScript is stripped (no type checking).
 
-## The fast loop: a shared live view (`jsui dev --shared`)
+## The fast loop: the dev server's shared session
 
-The quickest way to iterate, and the one to use whenever a person is around:
-one live app runs inside the dev server. The person watches and plays it in
-the browser (mouse, keyboard, gamepad), and you drive **the same app** with
-the same commands as the headless tools. Every save hot-updates it in place
-(component state is kept), so you see a change in about a second, on the
-screen you already navigated to, without rebuilding or replaying steps.
+The quickest way to iterate, and the one to use whenever a person is around.
+Every runtime that loads the dev bundle in dev mode joins the dev server's
+**shared session**: the game (a Godot `JsuiView` with `dev_mode` on), the
+native viewer, the browser page at `/shared`, or a headless runtime inside the
+dev server. You drive **the live one** (the last to join) with the same
+commands as the headless tools, on the screen the person sees, and read what
+they did there. Every save hot-updates it in place (component state is kept),
+so you see a change in about a second on the screen you already navigated to.
 Keep screens and components in their own modules: an edit to the entry file
 (the one calling `AppRegistry.registerComponent`) reloads the whole app.
 
@@ -82,27 +84,42 @@ In a project with `@orktes/jsui-cli` installed (see Project setup; outside
 one, use `npx @orktes/jsui-cli` instead of `npx jsui`):
 
 ```sh
-npx jsui dev src/app.jsx --shared [--width 1920 --height 1080 --scale 2]
-#   -> shared view: http://127.0.0.1:5173/shared   (give the person this link)
+npx jsui dev src/app.jsx                       # http://127.0.0.1:5173: session for any runtime
+npx jsui dev src/app.jsx --headless [--width 1920 --height 1080 --scale 2]
+                                               # ... plus a runtime inside the server (no window needed)
 U=http://127.0.0.1:5173
-npx jsui screenshot --attach $U -o shot.png    # exactly what the person sees now
+npx jsui clients --attach $U                   # which runtimes are connected (* = live)
+npx jsui screenshot --attach $U -o shot.png    # exactly what the live runtime shows now
 npx jsui inspect --attach $U                   # live view tree (--find '#play' --json)
 npx jsui run --attach $U press Down click '#play' screenshot shot.png   # steps as words, no file
 npx jsui run --attach $U steps.json            # or a steps file, as jsui run
 npx jsui log --attach $U --since 0             # what the person clicked / pressed, UI messages, calls, errors
 ```
 
-* Check for one first: `curl -s $U/__jsui/shared/info` answers when a shared
-  view is running. If none is, start `jsui dev ... --shared` in the
-  background and send the person the `/shared` link.
+* Pick the runtime the work needs. **Standalone UI** (menus, tools that
+  don't need the game): `--headless`, or the person opens `$U/shared`, which
+  runs the app in the browser's web host. **UI inside the game** (HUD over
+  the 3D scene, game state, host calls): the game must be running with its
+  `JsuiView` on `$U/bundle.js` in dev mode; ask the person to start it.
+  Native viewer: `jsui-viewer --dev $U/bundle.js`.
+* Check first: `npx jsui clients --attach $U`. No server: start `jsui dev`
+  in the background. No runtime: commands wait up to 30 s for one to join,
+  then fail with how to open one; start one with `--headless` when the work
+  doesn't need the game, else ask the person and send them the `/shared`
+  link.
+* Several connected: `--client <name|id>` (on screenshot / inspect / run)
+  picks one, e.g. `--client godot`, `--client headless`, `--client browser`.
 * Loop: edit, save, `screenshot --attach`, look, repeat. Use `run --attach`
   to navigate to the screen you're working on or to check interactions;
   `{"reload": true}` starts over with fresh component state.
 * It is the person's session: the clock is real (`{"wait": 500}` takes
-  500 ms), they may be clicking at the same time, and state you set stays
-  set. Read `jsui log` before assuming what is on screen, and tell them what
-  you're about to drive. Your clicks show up in their view as rings, and
-  your steps in its activity feed.
+  500 ms), they may be playing at the same time, and state you set stays set.
+  Read `jsui log` before assuming what is on screen, and tell them what
+  you're about to drive. Your steps show in the `/shared` activity feed.
+* In a game or browser runtime the host answers Host.calls and owns the
+  window size: `answer` steps and `resize` work with `--headless` only.
+  A paused game or a background browser tab stops ticking, and commands time
+  out.
 * For checks that must repeat exactly (tests, CI, before/after comparisons)
   use the standalone headless commands below: they run on a simulated clock.
 
@@ -203,7 +220,7 @@ Read the reference that matches the task:
 | Game data: shared state, calls, messages, per-frame buffers, several root views | [references/game-data.md](references/game-data.md) |
 | Host textures (video, render targets), LottieView, ShaderView / SkSL | [references/media-and-effects.md](references/media-and-effects.md) |
 | Embedding: C API, Godot `JsuiView`, web host, dev mode | [references/embedding.md](references/embedding.md) |
-| `jsui dev --shared` + `--attach`, `jsui screenshot` / `inspect` / `run`, `launch()` / `attach()` APIs, selectors, all steps | [references/testing-tools.md](references/testing-tools.md) |
+| `jsui dev` session + `--attach`, `jsui screenshot` / `inspect` / `run`, `launch()` / `attach()` APIs, selectors, all steps | [references/testing-tools.md](references/testing-tools.md) |
 | Game UI patterns: layout for 16:9, focus visuals, HUD, menus, lists | [references/game-ui-patterns.md](references/game-ui-patterns.md) |
 
 `npx @orktes/jsui-cli skill print --all` prints this skill with every reference;

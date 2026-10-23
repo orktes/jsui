@@ -312,7 +312,11 @@ void DevSession::run(const Value& c) {
   if (op == "screenshot") {
     void* data = nullptr;
     size_t size = 0;
-    if (jsui_render_png(h, &data, &size) != 0) return result(id, false, Value(), "render failed");
+    int r = jsui_render_png(h, &data, &size);
+    // That paint (a CPU raster of the same frame) took the dirty state: the
+    // host still has to paint this tick's changes on its own target.
+    rt_.redrawAll();
+    if (r != 0) return result(id, false, Value(), "render failed");
     std::string b64 = base64Encode(static_cast<const uint8_t*>(data), size);
     jsui_free(data);
     return result(id, true, Value(std::move(b64)));
