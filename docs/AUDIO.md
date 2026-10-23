@@ -119,3 +119,51 @@ static void on_audio(void* user, const JsuiAudioCommand* c) {
 cfg.on_audio = on_audio;
 cfg.audio_user = &game_audio;
 ```
+
+## Built-in backend (miniaudio)
+
+Without `JsuiConfig.on_audio` (and without `audio_disabled`), the native
+library plays the commands itself: `src/audio/audio_builtin.cpp` on
+[miniaudio](https://miniaud.io) 0.11.25 (`cmake/Deps.cmake`, compiled in its
+own target `jsui_miniaudio` from `src/audio/miniaudio.c`). The CMake option
+`JSUI_AUDIO` is ON by default for desktop builds (Linux, macOS, Windows) and
+OFF for Emscripten (the browser host uses Web Audio) and iOS; built OFF,
+`audio_builtin.cpp` compiles to a stub and voices without a handler fail.
+jsui-viewer uses it; jsui-render, jsui-record and the benchmarks set
+`audio_disabled`.
+
+* **Device**: the engine and its output device open on the first `PLAY` or
+  `PRELOAD`, so a host that never plays a sound never opens one. miniaudio
+  picks the platform's backend (WASAPI, Core Audio, PulseAudio / ALSA,
+  loaded at run time on Linux; nothing to install at build time). If no
+  device opens, that is logged once and every voice and preload fails.
+  `JSUI_AUDIO_BACKEND=null` (environment) plays to miniaudio's null device,
+  which runs in real time without hardware (CI, `tests/native/audio_builtin_test.cpp`);
+  another backend name (`alsa`, `pulseaudio`, `jack`, `coreaudio`, `wasapi`,
+  ...) forces that backend.
+* **Loading**: bytes come through the runtime's loader (`rt.loader`), like
+  the bundle and images: dev-server URLs, files, `data:` URIs and a custom
+  `JsuiLoadFn` all work. A worker thread decodes them (WAV, FLAC, MP3, Ogg
+  Vorbis via miniaudio's bundled stb_vorbis). Sounds up to 1 MB encoded and
+  20 s long are decoded whole to f32 at the device rate and shared by their
+  voices; longer ones are kept encoded and each voice decodes as it plays
+  (music). One read and decode per URL until `UNLOAD`; a failed load is
+  forgotten, so a later request retries. A `PLAY` that arrives before its
+  bytes waits for them, and fails if they cannot be loaded or decoded.
+* **Mixing**: one `ma_sound_group` per bus (`BUS` ramps the group's fader;
+  mute sets its volume to 0). A voice's volume is its fader (fade in on
+  `PLAY`, ramps on `SET`, the fade out on `STOP`); `SET` ramps pitch (the
+  playback rate) and pan per tick. `STOP` with a fade reports `STOPPED`
+  when the fade has finished; without a fade (or for a paused or waiting
+  voice) right away.
+* **Threads**: end-of-sound callbacks run on the audio thread and are only
+  queued there; reports (`voiceEnded`, `soundLoaded`) and freeing finished
+  voices happen in `AudioBackend::update()` on the runtime thread, every
+  `jsui_tick()`. While decodes, fades or reports are pending,
+  `jsui_wants_frame()` stays true.
+* **Size** (Linux x64, Release, JSUI_AUDIO ON vs OFF): libjsui.a grows by
+  about 100 KB (the backend) and links libjsui_miniaudio.a (about 1 MB
+  archive, 640 KB of code and data); a stripped jsui-viewer grows by about
+  690 KB. miniaudio is built without
+  its resource manager, encoders and generators (`MA_NO_RESOURCE_MANAGER`,
+  `MA_NO_ENCODING`, `MA_NO_GENERATION`).
