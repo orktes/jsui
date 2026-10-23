@@ -386,6 +386,103 @@ unsigned InputManager::capturesAt(float x, float y) {
   return r;
 }
 
+// hitNode's walk over the whole tree, bottom to top: every node it could
+// return emits its (clipped, bounding) box with the flags capturesAt would
+// give there. `mask`: the listeners of the node's ancestors (consumes()),
+// `scroll`: a scrollable ScrollView among them.
+struct InputManager::RegionWalk {
+  std::vector<float>* out;
+  // Bounds of the rects emitted so far that capture something: a rect that
+  // captures nothing only matters over them.
+  float fx0 = 0, fy0 = 0, fx1 = 0, fy1 = 0;
+  bool any = false;
+  void emit(float x0, float y0, float x1, float y1, unsigned flags) {
+    if (!(x1 > x0 && y1 > y0)) return;
+    if (!flags) {
+      if (!any || x1 <= fx0 || x0 >= fx1 || y1 <= fy0 || y0 >= fy1) return;
+    } else if (!any) {
+      fx0 = x0, fy0 = y0, fx1 = x1, fy1 = y1;
+      any = true;
+    } else {
+      fx0 = std::min(fx0, x0), fy0 = std::min(fy0, y0), fx1 = std::max(fx1, x1), fy1 = std::max(fy1, y1);
+    }
+    out->insert(out->end(), {x0, y0, x1 - x0, y1 - y0, float(flags)});
+  }
+};
+
+void InputManager::hitRegions(std::vector<float>* out) {
+  out->clear();
+  Node* root = doc_.root();
+  if (!root || !root->yoga()) return;
+  Rect r = root->visualRect();
+  if (!finiteRect(r)) return;
+  RegionWalk w{out};
+  // Points outside the root box are outside the view.
+  hitRegionsOf(root, Affine{}, {r.x, r.y, r.width, r.height}, 0, false, w);
+}
+
+void InputManager::hitRegionsOf(Node* n, const Affine& parent, const Rect& clip, unsigned mask, bool scroll,
+                                RegionWalk& w) {
+  if (!n->yoga()) return;
+  const ComputedStyle& s = n->style();
+  if (!s.display) return;
+  Rect r = n->visualRect();
+  if (!finiteRect(r)) return;
+  PointerEvents pe = pointerEventsOf(n);
+  if (pe == PointerEvents::None) return;
+  Affine local = nodeLocalToParent(n), inv;
+  if (!s.transform.empty() && !local.invert(&inv)) return;  // scale(0): nothing to hit
+  Affine m = parent * local;
+  float xs[4], ys[4];
+  m.apply(0, 0, &xs[0], &ys[0]);
+  m.apply(r.width, 0, &xs[1], &ys[1]);
+  m.apply(r.width, r.height, &xs[2], &ys[2]);
+  m.apply(0, r.height, &xs[3], &ys[3]);
+  float x0 = *std::min_element(xs, xs + 4), x1 = *std::max_element(xs, xs + 4);
+  float y0 = *std::min_element(ys, ys + 4), y1 = *std::max_element(ys, ys + 4);
+  // consumes(): a TextInput takes everything, else what the path listens to.
+  mask |= n->type() == NodeType::TextInput ? ~0u : listenMask(n);
+  if (n->type() == NodeType::ScrollView && scrollableAncestor(n, 0, 0) == n) scroll = true;
+  const auto& kids = n->children();
+  const bool text = n->type() == NodeType::Text;
+  if (text) {
+    // A leaf here; its spans' handlers (textHitTest) count for its box.
+    std::vector<const Node*> stack(kids.begin(), kids.end());
+    while (!stack.empty()) {
+      const Node* c = stack.back();
+      stack.pop_back();
+      mask |= listenMask(c);
+      stack.insert(stack.end(), c->children().begin(), c->children().end());
+    }
+  }
+  if (pe != PointerEvents::BoxNone) {
+    unsigned flags = ((mask & kPointer) ? JSUI_HIT_POINTER : 0) | ((mask & kWheel) || scroll ? JSUI_HIT_SCROLL : 0);
+    w.emit(std::max(x0, clip.x), std::max(y0, clip.y), std::min(x1, clip.x + clip.width),
+           std::min(y1, clip.y + clip.height), flags);
+  }
+  if (pe == PointerEvents::BoxOnly || text || kids.empty()) return;
+  Rect inner = clip;
+  if (s.overflow != Overflow::Visible) {
+    float cx0 = std::max(x0, clip.x), cy0 = std::max(y0, clip.y);
+    float cx1 = std::min(x1, clip.x + clip.width), cy1 = std::min(y1, clip.y + clip.height);
+    if (!(cx1 > cx0 && cy1 > cy0)) return;
+    inner = {cx0, cy0, cx1 - cx0, cy1 - cy0};
+  }
+  Affine cm = m * Affine::translate(-n->scrollX, -n->scrollY);
+  bool zSorted = false;
+  for (Node* c : kids)
+    if (c->style().zIndex != 0) zSorted = true;
+  if (!zSorted) {
+    for (Node* c : kids) hitRegionsOf(c, cm, inner, mask, scroll, w);
+    return;
+  }
+  // Paint order, as hitNode sorts it (topmost last).
+  std::vector<Node*> order(kids.begin(), kids.end());
+  std::stable_sort(order.begin(), order.end(),
+                   [](Node* a, Node* b) { return a->style().zIndex < b->style().zIndex; });
+  for (Node* c : order) hitRegionsOf(c, cm, inner, mask, scroll, w);
+}
+
 bool InputManager::consumes(const Node* hit, unsigned mask) const {
   for (const Node* n = hit; n; n = n->parent()) {
     if (n->type() == NodeType::TextInput) return true;

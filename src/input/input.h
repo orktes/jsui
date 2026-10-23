@@ -78,6 +78,14 @@ class InputManager {
   // ScrollView that can scroll (or a wheel listener) is on the path. 0: the
   // point passes through to whatever is behind the UI.
   unsigned capturesAt(float x, float y);
+  // capturesAt() for the whole viewport, for hosts that answer the pointer
+  // question on another thread from a copy (jsui_hit_regions): rects x, y,
+  // w, h, flags (5 floats each, viewport px) in paint order, the last one
+  // containing a point gives its flags, none: 0. Transformed nodes give
+  // their bounding box, rounded corners are ignored, and a Text with
+  // pointer handlers on its spans captures its whole box. Rects that
+  // capture nothing are kept only where they cover one that does.
+  void hitRegions(std::vector<float>* out);
   // Same, also returning the point in the target's local coordinates.
   Node* hitTest(float x, float y, float* localX, float* localY);
 
@@ -245,6 +253,8 @@ class InputManager {
   };
 
   Node* hitNode(Node* n, float px, float py, float* lx, float* ly);
+  struct RegionWalk;
+  void hitRegionsOf(Node* n, const Affine& parent, const Rect& clip, unsigned mask, bool scroll, RegionWalk& w);
   bool subtreeContained(Node* n);
   bool attached(const Node* n) const;
   bool visible(const Node* n) const;  // attached and no display:none on the path

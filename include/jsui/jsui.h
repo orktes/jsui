@@ -1053,6 +1053,17 @@ enum {
  * input there passes through to whatever is behind the UI. Uses the current
  * layout and sends no events. */
 JSUI_API int jsui_hit_test(JsuiRuntime* rt, float x, float y);
+/* jsui_hit_test for the whole view at once, for hosts that must answer it
+ * where the runtime is not (the web host's worker mode answers on the page's
+ * thread from the last copy): writes up to `max_regions` regions to `out`,
+ * 5 floats each (x, y, width, height in logical px, then the JSUI_HIT_*
+ * flags), bottom to top. The last region containing a point gives its
+ * flags; none: 0. Approximate where jsui_hit_test is exact: transformed
+ * views give their bounding box, rounded corners are ignored, and text
+ * with pointer handlers on some of its spans captures its whole box.
+ * Returns the number of regions (call again with a bigger buffer when it
+ * exceeds `max_regions`). Uses the current layout. */
+JSUI_API int jsui_hit_regions(JsuiRuntime* rt, float* out, int max_regions);
 
 JSUI_API int jsui_send_mouse_move(JsuiRuntime* rt, float x, float y);
 JSUI_API int jsui_send_mouse_button(JsuiRuntime* rt, float x, float y, JsuiMouseButton button, int down, int mods);
