@@ -1472,7 +1472,9 @@ void JsuiView::applyFontSettings() {
 }
 
 void JsuiView::set_fonts(const Array& fonts) {
-  fonts_ = fonts;
+  // startFonts() passes fonts_ itself, and godot-cpp's Array self-assignment
+  // drops the array before taking the new reference.
+  if (&fonts != &fonts_) fonts_ = fonts;
   if (host_) {
     forwardFonts();
     return;
