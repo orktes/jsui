@@ -83,11 +83,18 @@
 //   jsui.removeTexture('trailer');
 //
 // Sources: VideoFrame, <video>, <canvas>, OffscreenCanvas, ImageBitmap, <img>,
-// ImageData. Textures belong to the runtime (every surface can show them) and
-// are uploaded with the renderer in use: a GPUTexture on the page's WebGPU
-// device (copyExternalImageToTexture), a texture of the views' WebGL context,
-// or CPU pixels when the views cannot share one (web/jsui-textures.js). They
-// follow renderer fallbacks and context loss by themselves.
+// ImageData, { data, width, height } (RGBA bytes). Textures belong to the
+// runtime (every surface can show them) and are uploaded with the renderer in
+// use: a GPUTexture on the page's WebGPU device (copyExternalImageToTexture),
+// a texture of the views' WebGL context, or CPU pixels when the views cannot
+// share one (web/jsui-textures.js). They follow renderer fallbacks and
+// context loss by themselves.
+//
+// Worker mode (createJsui({ worker: true }), web/jsui-worker.js): the
+// runtime, its frame loop and the renderers run in a dedicated Worker on
+// OffscreenCanvases; this thread keeps the DOM side (input listeners, sizes,
+// cursor, gamepad polling, video frame capture). Same API, but calls that
+// answer from the runtime return Promises there (see web/README.md).
 
 /** @typedef {{
  *   canvas?: HTMLCanvasElement,  // the main surface's canvas; null / omitted: not shown (a page
@@ -132,10 +139,17 @@
  *   passThrough?: boolean,       // the canvas is a layer over the page (a game's canvas): input the
  *                                // UI doesn't capture reaches what is under it, consumed input
  *                                // doesn't (default false). Turns autoFocus / trapTab off by default.
+ *   worker?: boolean,            // run the runtime, frame loop and rendering in a dedicated Worker
+ *                                // (web/jsui-worker.js; default false). Falls back to this thread,
+ *                                // with one warning, where Worker / OffscreenCanvas /
+ *                                // transferControlToOffscreen are missing or the worker fails to start.
+ *   workerLoop?: 'raf'|'main',   // worker mode's frame clock: 'raf' (default) the worker's own
+ *                                // requestAnimationFrame, 'main' this thread's rAF posting each
+ *                                // frame (used anyway when the worker has none)
  * }} JsuiOptions */
 
 import { SharedWebGPU, WebGPURenderer, requestWebGPU } from './jsui-webgpu.js';
-import { HostTextureSet } from './jsui-textures.js';
+import { HostTextureSet, defaultOpaque, isVideoFrame, sourceSize } from './jsui-textures.js';
 
 export { requestWebGPU, webgpuSupported } from './jsui-webgpu.js';
 
@@ -164,10 +178,10 @@ function loadModule(moduleUrl) {
   return p;
 }
 
-// JsuiBufferType of a typed array (or its prototype).
+// JsuiBufferType of a typed array, or of a typed array constructor.
 const BUFFER_TYPES = [Float32Array, Float64Array, Int32Array, Uint32Array, Int16Array, Uint16Array, Int8Array, Uint8Array];
 function bufferType(data) {
-  const t = BUFFER_TYPES.findIndex((T) => data instanceof T);
+  const t = typeof data === 'function' ? BUFFER_TYPES.indexOf(data) : BUFFER_TYPES.findIndex((T) => data instanceof T);
   if (t < 0) throw new TypeError('setBuffer / mapBuffer: expected a Float32Array, Float64Array, Int32Array, Uint32Array, Int16Array, Uint16Array, Int8Array or Uint8Array');
   return t;
 }
@@ -194,10 +208,42 @@ const AXIS_EPSILON = 1 / 256;
 export async function createJsui(opts) {
   // No canvas: the main surface is not shown, for pages that only place
   // createSurface() widgets.
-  const canvas = opts.canvas ?? null;
+  let canvas = opts.canvas ?? null;
+  if (opts.worker) {
+    let r;
+    try {
+      const { startWorkerHost } = await import('./jsui-worker.js');
+      r = await startWorkerHost(internals(), opts);
+    } catch (e) {
+      console.warn(`[jsui] worker mode unavailable (${e?.message ?? e}): running on the page's main thread`);
+      r = { canvas };
+    }
+    if (r.host) return r.host;
+    canvas = r.canvas;
+  }
+  // A canvas a worker-mode runtime had (its control went to an OffscreenCanvas
+  // for good): a clone of it in its place.
+  if (canvas && transferred.has(canvas)) canvas = replaceCanvas(canvas);
   const webgpu = await webgpuFor(opts);
-  return new JsuiHost(await loadModuleFor(opts, webgpu), canvas, { ...opts, _webgpu: webgpu });
+  return new JsuiHost(await loadModuleFor(opts, webgpu), canvas, { ...opts, canvas, _webgpu: webgpu });
 }
+
+const transferred = new WeakSet();  // canvases given to a worker (transferControlToOffscreen)
+
+function replaceCanvas(old) {
+  const c = old.cloneNode(false);
+  old.replaceWith(c);
+  return c;
+}
+
+// What web/jsui-worker.js needs from this module (it imports nothing itself,
+// so the worker's copy of this file and the page's stay one module graph each).
+function internals() {
+  return { DomView, CanvasView, JsuiHost, JsuiSurface, HIT_POINTER, HIT_SCROLL, NAV_KEYS, webgpuFor, loadModuleFor,
+    bufferType, BUFFER_TYPES, sourceSize, defaultOpaque, isVideoFrame, transferred, replaceCanvas,
+    hostUrl: import.meta.url, workerName: WORKER_NAME };
+}
+const WORKER_NAME = 'jsui-host';
 
 const CPU_MODULE = './dist/jsui.js';
 const GPU_MODULE = './dist-webgl/jsui.js';
@@ -259,7 +305,8 @@ export function webglAvailable(hardware = false) {
   if (webglProbe[key] !== undefined) return webglProbe[key];
   try {
     const attrs = { failIfMajorPerformanceCaveat: hardware };
-    const c = document.createElement('canvas');
+    // An OffscreenCanvas in worker mode (web/jsui-worker.js): no document there.
+    const c = typeof document !== 'undefined' ? document.createElement('canvas') : new OffscreenCanvas(1, 1);
     const gl = c.getContext('webgl2', attrs) || c.getContext('webgl', attrs);
     webglProbe[key] = !!gl;
     gl?.getExtension('WEBGL_lose_context')?.loseContext();  // free it now, not at GC
@@ -269,15 +316,14 @@ export function webglAvailable(hardware = false) {
   return webglProbe[key];
 }
 
-// A canvas showing one surface of a runtime: its size, renderer (WebGPU /
-// WebGL / CPU blit), input and cursor. JsuiHost is the main surface's view
-// and owns the runtime; JsuiSurface views show the surfaces made with
-// createSurface(). Every view talks to the runtime through its own handle
-// (`rt`): the runtime handle for the main surface, a jsui_surface_create
-// handle for the others (include/jsui/jsui.h, Surfaces).
-class CanvasView {
-  constructor(M, canvas, opts) {
-    this.module = M;
+// The page side of a view: a canvas element's size and device pixel ratio,
+// its input listeners (pointer, wheel, keyboard sink, focus) and cursor, and
+// the view's event listeners. Input goes to the runtime through the _in*
+// methods, and hitTest() answers what the UI captures: CanvasView calls the
+// module, worker mode's proxy views (web/jsui-worker.js) post them to the
+// worker and answer from its last hit map.
+class DomView {
+  constructor(canvas, opts) {
     this.canvas = canvas;
     this.opts = opts;
     this.listeners = new Map();
@@ -296,7 +342,475 @@ class CanvasView {
     this._contentW = this._contentH = 0;
     this.width = this.height = this.pixelWidth = this.pixelHeight = 0;
     this.pixelRatio = 1;
+  }
 
+  // Input, focus and resize tracking on the page.
+  _installDom() {
+    this._installInput();
+    this._installCanvasInput();
+    this._installResize();
+  }
+
+  // Undoes _installDom.
+  _destroyDom() {
+    this._abort.abort();
+    this._canvasAbort?.abort();
+    this._resizeObserver?.disconnect();
+    this._sink?.remove();
+  }
+
+  // The view that owns the runtime (gamepads, the frame loop).
+  _hostOf() { return this; }
+
+  /** Focuses the view's keyboard sink (replaced once input is installed). */
+  focus() {}
+
+  // The viewport handed to the runtime: 0 on auto-sized axes.
+  _viewportSize() { return [this._autoW ? 0 : this.width, this._autoH ? 0 : this.height]; }
+
+  /** Subscribe: 'message' (name, data), 'state' (key, value: HostState.set in the UI),
+   * 'call' (id, name, args: Host.call without a handle() handler), 'callCancel' (id),
+   * 'error' (message), 'log' (level, text), 'frame' (stats), 'renderer' (name, reason). */
+  on(type, cb) {
+    let set = this.listeners.get(type);
+    if (!set) this.listeners.set(type, (set = new Set()));
+    set.add(cb);
+    return () => this.off(type, cb);
+  }
+
+  off(type, cb) { this.listeners.get(type)?.delete(cb); }
+
+  _listens(type) { return !!this.listeners.get(type)?.size; }
+
+  _emit(type, ...args) {
+    const set = this.listeners.get(type);
+    if (!set || set.size === 0) return false;
+    for (const cb of set) {
+      try { cb(...args); } catch (e) { console.error(e); }
+    }
+    return true;
+  }
+
+  _log(level, text) {
+    if (!this._emit('log', level, text)) (level >= 2 ? console.warn : console.log)('[jsui] ' + text);
+  }
+
+  _updateCursor() {
+    const c = this._cursorNow();
+    if (c !== this._cursor) {
+      this._cursor = c;
+      this.canvas.style.cursor = c;
+    }
+  }
+
+  // ------------------------------------------------------------ size / DPR
+
+  _ratio() { return this._fixedRatio || (typeof devicePixelRatio === 'number' ? devicePixelRatio : 1) || 1; }
+
+  // The canvas' CSS box when no ResizeObserver entry gives it.
+  _cssBox() {
+    const c = this.canvas;
+    return c ? [c.clientWidth || c.width, c.clientHeight || c.height] : [1, 1];
+  }
+
+  _setBackingStore(w, h) {
+    if (!this.canvas) return;
+    this.canvas.width = w;
+    this.canvas.height = h;
+  }
+
+  // Logical size = the canvas' CSS box; device size = logical * ratio, which
+  // is also the backing store size, so frames are blitted 1:1.
+  _measure(entry) {
+    let cssW, cssH, devW, devH;
+    if (entry) {
+      const box = entry.contentBoxSize?.[0];
+      cssW = box ? box.inlineSize : entry.contentRect.width;
+      cssH = box ? box.blockSize : entry.contentRect.height;
+      // Exact device-pixel size when the browser reports it (avoids blurry
+      // 1px-off backing stores at fractional DPRs). Ignored when it disagrees
+      // with CSS size * DPR by more than rounding (DPR emulation reports CSS px).
+      const dbox = !this._fixedRatio && entry.devicePixelContentBoxSize?.[0];
+      const r = this._ratio();
+      if (dbox && Math.abs(dbox.inlineSize - cssW * r) <= 1 && Math.abs(dbox.blockSize - cssH * r) <= 1) {
+        devW = dbox.inlineSize;
+        devH = dbox.blockSize;
+      }
+    } else {
+      [cssW, cssH] = this._cssBox();
+    }
+    this._cssW = cssW;
+    this._cssH = cssH;
+    // Auto-sized axes follow the content (see _fitContent).
+    if (this._autoW) { cssW = this._contentW || 1; devW = devH = 0; }
+    if (this._autoH) { cssH = this._contentH || 1; devW = devH = 0; }
+    const w = Math.max(1, Math.round(cssW)), h = Math.max(1, Math.round(cssH));
+    const ratio = this._ratio();
+    devW = devW || Math.round(w * ratio);
+    devH = devH || Math.round(h * ratio);
+    const pr = devW / w;  // exact ratio of the backing store
+    if (w === this.width && h === this.height && devW === this.pixelWidth && devH === this.pixelHeight) return false;
+    this.width = w;
+    this.height = h;
+    this.pixelRatio = pr;
+    this.pixelWidth = devW;
+    this.pixelHeight = devH;
+    this._setBackingStore(devW, devH);
+    this._sizeChanged = true;
+    return true;
+  }
+
+  // The size changed (CanvasView: tell the runtime).
+  _resized() { this._rect = null; }
+
+  _installResize() {
+    const apply = (entry) => {
+      if (this._measure(entry)) this._resized();
+    };
+    if (typeof ResizeObserver !== 'undefined') {
+      this._resizeObserver = new ResizeObserver((entries) => apply(entries[entries.length - 1]));
+      this._observeCanvas();
+    }
+    // DPR changes (zoom, moving between monitors) without a CSS size change.
+    if (!this._fixedRatio && typeof matchMedia === 'function') {
+      const watch = () => {
+        const mq = matchMedia(`(resolution: ${this._ratio()}dppx)`);
+        mq.addEventListener('change', () => { apply(); watch(); }, { once: true, signal: this._abort.signal });
+      };
+      watch();
+    }
+    addEventListener('scroll', () => { this._rect = null; }, { passive: true, capture: true, signal: this._abort.signal });
+    addEventListener('resize', () => { this._rect = null; }, { passive: true, signal: this._abort.signal });
+  }
+
+  _observeCanvas() {
+    const ro = this._resizeObserver;
+    if (!ro) return;
+    try {
+      ro.observe(this.canvas, { box: 'device-pixel-content-box' });
+    } catch {
+      ro.observe(this.canvas);
+    }
+  }
+
+  // ------------------------------------------------------------------ input
+
+  _point(e) {
+    const r = this._rect ??= this.canvas.getBoundingClientRect();
+    // Map CSS px of the element box to logical px (equal unless the canvas is CSS-transformed).
+    const sx = r.width ? this.width / r.width : 1, sy = r.height ? this.height / r.height : 1;
+    return [(e.clientX - r.left) * sx, (e.clientY - r.top) * sy];
+  }
+
+  // Pointer / wheel listeners on the canvas (again on a replacement canvas
+  // after a CPU fallback, see _switchToCpu).
+  _installCanvasInput() {
+    this._canvasAbort?.abort();
+    this._canvasAbort = new AbortController();
+    const c = this.canvas, signal = this._canvasAbort.signal;
+    const opt = { signal };
+    const active = { signal, passive: false };
+    const focusSink = () => this.focus();
+    if (this.opts.passThrough) {
+      this._installPassThroughInput(signal);
+      return;
+    }
+    c.style.touchAction = 'none';
+    c.style.overscrollBehavior = 'none';
+    c.style.userSelect = 'none';
+    c.style.webkitUserSelect = 'none';
+    c.style.outline = 'none';
+
+    // The DOM event time (same clock as the rAF timestamps given to
+    // jsui_tick) stamps the event: gesture velocities see the real spacing
+    // of the events that arrive between two frames.
+    const stamp = (e) => this._inTime(e.timeStamp);
+    c.addEventListener('pointerdown', (e) => {
+      stamp(e);
+      const [x, y] = this._point(e);
+      let used;
+      if (e.pointerType === 'mouse') {
+        this._mouseButtons |= 1 << e.button;
+        used = this._inButton(x, y, mouseButton(e.button), 1, modsOf(e));
+      } else {
+        used = this._inTouch(e.pointerId, 0, x, y);
+      }
+      try { c.setPointerCapture(e.pointerId); } catch {}
+      // Not for touch: focusing a textarea pops up the virtual keyboard.
+      if (e.pointerType !== 'touch') focusSink();
+      if (used) e.preventDefault();
+      this._updateCursor();
+    }, active);
+    c.addEventListener('pointermove', (e) => {
+      stamp(e);
+      const [x, y] = this._point(e);
+      if (e.pointerType === 'mouse') this._inMove(x, y);
+      else this._inTouch(e.pointerId, 1, x, y);
+    }, opt);
+    const up = (e, cancel) => {
+      stamp(e);
+      const [x, y] = this._point(e);
+      let used;
+      if (e.pointerType === 'mouse') {
+        if (!(this._mouseButtons & (1 << e.button))) return;
+        this._mouseButtons &= ~(1 << e.button);
+        used = this._inButton(x, y, mouseButton(e.button), 0, modsOf(e));
+      } else {
+        used = this._inTouch(e.pointerId, cancel ? 3 : 2, x, y);
+      }
+      if (used) e.preventDefault();
+      this._updateCursor();
+    };
+    c.addEventListener('pointerup', (e) => up(e, false), active);
+    c.addEventListener('pointercancel', (e) => up(e, true), active);
+    c.addEventListener('pointerleave', (e) => {
+      if (e.pointerType === 'mouse' && !this._mouseButtons) this._inLeave();
+    }, opt);
+    c.addEventListener('wheel', (e) => {
+      const [x, y] = this._point(e);
+      // Normalise to px like browsers do for pixel-mode wheels.
+      const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.height : 1;
+      if (this._inWheel(x, y, e.deltaX * k, e.deltaY * k)) e.preventDefault();
+    }, active);
+    c.addEventListener('contextmenu', (e) => e.preventDefault(), active);
+    // iOS Safari can still rubber-band the page under a touch-action: none
+    // canvas; the canvas then moves under the finger and its scroll views see
+    // phantom motion. A cancelled touchmove never pans or bounces the page.
+    c.addEventListener('touchmove', (e) => { if (e.cancelable) e.preventDefault(); }, active);
+    // The compat mousedown would move focus to <body> (the canvas is not
+    // focusable), stealing it from the keyboard sink focused in pointerdown.
+    c.addEventListener('mousedown', (e) => e.preventDefault(), active);
+  }
+
+  // passThrough: whatever the UI doesn't capture reaches the page under the
+  // canvas (a game's own canvas or DOM), like a click on an empty part of a
+  // HUD. The canvas has pointer-events: none ('auto' only while the mouse
+  // hovers something the UI captures, for its cursor), and window capture
+  // listeners route events: a press inside the canvas goes to the UI first.
+  // When the UI consumes it (jsui_send_* returns non-zero), the event, its
+  // gesture's moves and release and the click after it are stopped before the
+  // page sees them; otherwise they go on to their target untouched. Touch
+  // events (touchstart / touchmove / touchend) follow the hit test.
+  _installPassThroughInput(signal) {
+    const c = this.canvas;
+    const opt = { signal, capture: true, passive: false };
+    const stamp = (e) => this._inTime(e.timeStamp);
+    const inside = (x, y) => x >= 0 && y >= 0 && x < this.width && y < this.height && c.isConnected;
+    const take = (e) => {
+      if (e.cancelable) e.preventDefault();
+      e.stopImmediatePropagation();
+    };
+    const gestures = new Map();  // pointerId -> whether the UI consumed its press
+    const touches = new Set();   // Touch.identifier of touches the UI captures
+    let hovering = false, swallowClick = false;
+    const setHot = (hot) => {
+      const v = hot ? 'auto' : 'none';
+      if (c.style.pointerEvents !== v) c.style.pointerEvents = v;
+    };
+    setHot(false);
+    addEventListener('pointerdown', (e) => {
+      const [x, y] = this._point(e);
+      if (!inside(x, y)) return;
+      stamp(e);
+      swallowClick = false;
+      let used;
+      if (e.pointerType === 'mouse') {
+        this._mouseButtons |= 1 << e.button;
+        used = this._inButton(x, y, mouseButton(e.button), 1, modsOf(e));
+      } else {
+        used = this._inTouch(e.pointerId, 0, x, y);
+      }
+      gestures.set(e.pointerId, !!used);
+      if (used) {
+        take(e);
+        if (e.pointerType !== 'touch') this.focus();
+      }
+      this._updateCursor();
+    }, opt);
+    addEventListener('pointermove', (e) => {
+      const [x, y] = this._point(e);
+      const owned = gestures.get(e.pointerId);
+      if (owned === undefined) {
+        // Hover. A drag whose press the page got stays the page's.
+        if (e.pointerType !== 'mouse') return;
+        if (!inside(x, y)) {
+          if (hovering) {
+            hovering = false;
+            this._inLeave();
+            setHot(false);
+            this._updateCursor();
+          }
+          return;
+        }
+        hovering = true;
+        stamp(e);
+        const used = this._inMove(x, y);
+        setHot(!e.buttons && (this.hitTest(x, y) & HIT_POINTER) !== 0);
+        if (used && !e.buttons) e.stopImmediatePropagation();
+        this._updateCursor();
+        return;
+      }
+      stamp(e);
+      if (e.pointerType === 'mouse') this._inMove(x, y);
+      else this._inTouch(e.pointerId, 1, x, y);
+      if (owned) take(e);
+    }, opt);
+    const up = (e, cancel) => {
+      const owned = gestures.get(e.pointerId);
+      if (owned === undefined) return;
+      stamp(e);
+      const [x, y] = this._point(e);
+      if (e.pointerType === 'mouse') {
+        if (!(this._mouseButtons & (1 << e.button))) return;
+        this._mouseButtons &= ~(1 << e.button);
+        this._inButton(x, y, mouseButton(e.button), 0, modsOf(e));
+        if (!this._mouseButtons) gestures.delete(e.pointerId);
+      } else {
+        this._inTouch(e.pointerId, cancel ? 3 : 2, x, y);
+        gestures.delete(e.pointerId);
+      }
+      if (owned) {
+        take(e);
+        swallowClick = !cancel;
+      }
+      this._updateCursor();
+    };
+    addEventListener('pointerup', (e) => up(e, false), opt);
+    addEventListener('pointercancel', (e) => up(e, true), opt);
+    // The click (and auxclick) of a press the UI consumed; right-clicks and
+    // double clicks on what the UI captures.
+    const captures = (e) => {
+      const [x, y] = this._point(e);
+      return inside(x, y) && (this.hitTest(x, y) & HIT_POINTER) !== 0;
+    };
+    for (const type of ['click', 'auxclick']) {
+      addEventListener(type, (e) => {
+        if (swallowClick) take(e);
+        swallowClick = false;
+      }, opt);
+    }
+    addEventListener('dblclick', (e) => { if (captures(e)) take(e); }, opt);
+    addEventListener('contextmenu', (e) => { if (captures(e)) take(e); }, opt);
+    addEventListener('wheel', (e) => {
+      const [x, y] = this._point(e);
+      if (!inside(x, y)) return;
+      const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.height : 1;
+      if (this._inWheel(x, y, e.deltaX * k, e.deltaY * k)) take(e);
+    }, opt);
+    const touch = (e) => {
+      let all = e.changedTouches.length > 0;
+      for (const t of e.changedTouches) {
+        if (e.type === 'touchstart') {
+          const [x, y] = this._point(t);
+          if (inside(x, y) && this.hitTest(x, y) !== 0) touches.add(t.identifier);
+        }
+        if (!touches.has(t.identifier)) all = false;
+        if (e.type === 'touchend' || e.type === 'touchcancel') touches.delete(t.identifier);
+      }
+      if (all) take(e);
+    };
+    for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) addEventListener(type, touch, opt);
+    addEventListener('blur', () => {
+      gestures.clear();
+      touches.clear();
+      hovering = false;
+      setHot(false);
+    }, { signal });
+  }
+
+  _installInput() {
+    const signal = this._abort.signal;
+    const opt = { signal };
+    const active = { signal, passive: false };
+
+    // Keyboard sink: a transparent textarea over the canvas. It gives us real
+    // text input (IME composition, dead keys, emoji pickers, mobile keyboards)
+    // instead of guessing text from keydown.
+    const sink = document.createElement('textarea');
+    sink.setAttribute('aria-hidden', 'true');
+    sink.setAttribute('autocomplete', 'off');
+    sink.setAttribute('autocapitalize', 'off');
+    sink.setAttribute('spellcheck', 'false');
+    sink.tabIndex = 0;
+    Object.assign(sink.style, { position: 'fixed', left: '0px', top: '0px', width: '1px', height: '1px',
+      opacity: '0', padding: '0', border: '0', margin: '0', resize: 'none', overflow: 'hidden',
+      pointerEvents: 'none', zIndex: '-1', caretColor: 'transparent' });
+    document.body.appendChild(sink);
+    this._sink = sink;
+    const focusSink = () => {
+      const r = this._rect ??= this.canvas.getBoundingClientRect();
+      sink.style.left = `${Math.max(0, r.left)}px`;
+      sink.style.top = `${Math.max(0, r.top)}px`;
+      if (document.activeElement !== sink) sink.focus({ preventScroll: true });
+    };
+    this.focus = focusSink;
+
+    sink.addEventListener('keydown', (e) => {
+      if (e.isComposing || e.keyCode === 229) return;  // IME owns this key
+      if (!e.repeat) this._pressedKeys.set(e.code || e.key, e.key);
+      const used = this._inKey(e.key || null, e.code || null, 1, e.repeat ? 1 : 0, modsOf(e));
+      if ((used && (NAV_KEYS.has(e.key) || e.ctrlKey || e.metaKey)) || (e.key === 'Tab' && this._trapTab)) {
+        e.preventDefault();
+      }
+      // passThrough: keys the UI consumed don't reach the page's listeners.
+      if (used && this.opts.passThrough) e.stopPropagation();
+    }, active);
+    sink.addEventListener('keyup', (e) => {
+      this._pressedKeys.delete(e.code || e.key);
+      const used = this._inKey(e.key || null, e.code || null, 0, 0, modsOf(e));
+      if (used && NAV_KEYS.has(e.key)) e.preventDefault();
+      if (used && this.opts.passThrough) e.stopPropagation();
+    }, active);
+    const flushText = () => {
+      const v = sink.value;
+      sink.value = '';
+      if (v) this._inText(v);
+    };
+    sink.addEventListener('input', (e) => { if (!e.isComposing) flushText(); }, opt);
+    sink.addEventListener('compositionend', flushText, opt);
+    // Losing focus must not leave keys or buttons stuck down in the UI.
+    const releaseAll = () => {
+      for (const [code, key] of this._pressedKeys) {
+        this._inKey(key, code, 0, 0, 0);
+      }
+      this._pressedKeys.clear();
+    };
+    sink.addEventListener('blur', releaseAll, opt);
+    // Gamepads drive the view that has (or last had) keyboard focus.
+    sink.addEventListener('focus', () => this._sinkFocused(), opt);
+    addEventListener('blur', () => {
+      releaseAll();
+      if (this._mouseButtons) {
+        for (let b = 0; b < 3; b++) {
+          if (this._mouseButtons & (1 << b)) this._inButton(-1, -1, mouseButton(b), 0, 0);
+        }
+        this._mouseButtons = 0;
+      }
+      this._inLeave();
+      this._hostOf()._releasePads();
+    }, opt);
+    if (this.opts.autoFocus ?? !this.opts.passThrough) focusSink();
+  }
+
+  _releasePads() {}
+
+  // Gamepads drive the view that has (or last had) keyboard focus.
+  _focusPads() {}
+
+  // The keyboard sink got focus (a click, Tab from the page, focus()).
+  _sinkFocused() { this._hostOf()._focusPads(this); }
+}
+
+// A canvas showing one surface of a runtime: its size, renderer (WebGPU /
+// WebGL / CPU blit), input and cursor. JsuiHost is the main surface's view
+// and owns the runtime; JsuiSurface views show the surfaces made with
+// createSurface(). Every view talks to the runtime through its own handle
+// (`rt`): the runtime handle for the main surface, a jsui_surface_create
+// handle for the others (include/jsui/jsui.h, Surfaces).
+class CanvasView extends DomView {
+  constructor(M, canvas, opts) {
+    super(canvas, opts);
+    this.module = M;
     // Small reusable scratch area for short strings (key names, codes).
     this._scratch = M._malloc(512);
     this._dirty = M._malloc(32);  // JsuiRect filled by jsui_render_rgba_incremental / JsuiGLTarget
@@ -311,9 +825,7 @@ class CanvasView {
     this._initBlitter(mode);
     this._log(1, `renderer: ${this.renderer}` + (this._wgpu ? ` (${this._webgpu.description})` : ''));
     this._warnNoGpu(mode);
-    this._installInput();
-    this._installCanvasInput();
-    this._installResize();
+    this._installDom();
   }
 
   // A mode that may use the GPU ended on the CPU raster because the browser
@@ -327,12 +839,6 @@ class CanvasView {
       + 'only), so the UI renders on the CPU, which is much slower. In Chrome, chrome://gpu shows why: after '
       + 'repeated GPU process crashes Chrome turns GPU access off until it is restarted.');
   }
-
-  // The view that owns the runtime (gamepads, the frame loop).
-  _hostOf() { return this; }
-
-  /** Focuses the view's keyboard sink (replaced once input is installed). */
-  focus() {}
 
   // Paints the surface if it changed (after the runtime's tick).
   _paint() {
@@ -380,9 +886,6 @@ class CanvasView {
   // Shown and has something new to paint.
   _wantsPaint() { return !!this.canvas && !this._destroyed && !!this.module._jsui_needs_redraw(this.rt); }
 
-  // The viewport handed to the runtime: 0 on auto-sized axes.
-  _viewportSize() { return [this._autoW ? 0 : this.width, this._autoH ? 0 : this.height]; }
-
   // Auto-sized axes: the component's laid-out size (jsui_surface_get_size)
   // becomes the canvas' CSS size (and backing store).
   _fitContent() {
@@ -393,22 +896,15 @@ class CanvasView {
     if (w === this._contentW && h === this._contentH) return;
     this._contentW = w;
     this._contentH = h;
+    this._contentSized(w, h);
+  }
+
+  _contentSized(w, h) {
     if (this._autoW) this.canvas.style.width = `${w}px`;
     if (this._autoH) this.canvas.style.height = `${h}px`;
     if (this._measure()) this._setViewport();
     this._rect = null;
   }
-  /** Subscribe: 'message' (name, data), 'state' (key, value: HostState.set in the UI),
-   * 'call' (id, name, args: Host.call without a handle() handler), 'callCancel' (id),
-   * 'error' (message), 'log' (level, text), 'frame' (stats). */
-  on(type, cb) {
-    let set = this.listeners.get(type);
-    if (!set) this.listeners.set(type, (set = new Set()));
-    set.add(cb);
-    return () => this.off(type, cb);
-  }
-
-  off(type, cb) { this.listeners.get(type)?.delete(cb); }
 
   /** The last rendered frame as premultiplied RGBA (copy), for tests and screenshots. */
   readPixels() {
@@ -449,15 +945,6 @@ class CanvasView {
 
   // ---------------------------------------------------------------- helpers
 
-  _emit(type, ...args) {
-    const set = this.listeners.get(type);
-    if (!set || set.size === 0) return false;
-    for (const cb of set) {
-      try { cb(...args); } catch (e) { console.error(e); }
-    }
-    return true;
-  }
-
   _newString(s) {
     const M = this.module;
     const n = M.lengthBytesUTF8(s) + 1;
@@ -492,99 +979,36 @@ class CanvasView {
    * through to the page. */
   hitTest(x, y) { return this.rt ? this.module._jsui_hit_test(this.rt, x, y) : 0; }
 
-  _updateCursor() {
+  _cursorNow() {
     const p = this.module._jsui_get_cursor(this.rt);
-    const c = p ? this.module.UTF8ToString(p) : 'default';
-    if (c !== this._cursor) {
-      this._cursor = c;
-      this.canvas.style.cursor = c;
-    }
+    return p ? this.module.UTF8ToString(p) : 'default';
   }
+
+  // Input into the runtime (DomView's listeners). Each returns whether the UI
+  // consumed the event (jsui_send_*). `_inTime`: the DOM time of the events
+  // sent next (same clock as the rAF timestamps given to jsui_tick).
+  _inTime(t) { this.module._jsui_set_event_time?.(this.rt, t); }
+  _inButton(x, y, button, down, mods) { return this.module._jsui_send_mouse_button(this.rt, x, y, button, down, mods); }
+  _inMove(x, y) { return this.module._jsui_send_mouse_move(this.rt, x, y); }
+  _inTouch(id, phase, x, y) { return this.module._jsui_send_touch(this.rt, id, phase, x, y); }
+  _inWheel(x, y, dx, dy) { return this.module._jsui_send_mouse_wheel(this.rt, x, y, dx, dy); }
+  _inLeave() { return this.module._jsui_send_mouse_leave(this.rt); }
+  _inKey(key, code, down, repeat, mods) {
+    return this._withStrings([key, code], (k, c) => this.module._jsui_send_key(this.rt, k, c, down, repeat, mods));
+  }
+  _inText(text) { return this._withStrings([text], (t) => this.module._jsui_send_text(this.rt, t)); }
 
   // ------------------------------------------------------------ size / DPR
-
-  _ratio() { return this._fixedRatio || (typeof devicePixelRatio === 'number' ? devicePixelRatio : 1) || 1; }
-
-  // Logical size = the canvas' CSS box; device size = logical * ratio, which
-  // is also the backing store size, so frames are blitted 1:1.
-  _measure(entry) {
-    const c = this.canvas;
-    let cssW, cssH, devW, devH;
-    if (entry) {
-      const box = entry.contentBoxSize?.[0];
-      cssW = box ? box.inlineSize : entry.contentRect.width;
-      cssH = box ? box.blockSize : entry.contentRect.height;
-      // Exact device-pixel size when the browser reports it (avoids blurry
-      // 1px-off backing stores at fractional DPRs). Ignored when it disagrees
-      // with CSS size * DPR by more than rounding (DPR emulation reports CSS px).
-      const dbox = !this._fixedRatio && entry.devicePixelContentBoxSize?.[0];
-      const r = this._ratio();
-      if (dbox && Math.abs(dbox.inlineSize - cssW * r) <= 1 && Math.abs(dbox.blockSize - cssH * r) <= 1) {
-        devW = dbox.inlineSize;
-        devH = dbox.blockSize;
-      }
-    } else {
-      cssW = c ? c.clientWidth || c.width : 1;
-      cssH = c ? c.clientHeight || c.height : 1;
-    }
-    // Auto-sized axes follow the content (see _fitContent).
-    if (this._autoW) { cssW = this._contentW || 1; devW = devH = 0; }
-    if (this._autoH) { cssH = this._contentH || 1; devW = devH = 0; }
-    const w = Math.max(1, Math.round(cssW)), h = Math.max(1, Math.round(cssH));
-    const ratio = this._ratio();
-    devW = devW || Math.round(w * ratio);
-    devH = devH || Math.round(h * ratio);
-    const pr = devW / w;  // exact ratio of the backing store
-    if (w === this.width && h === this.height && devW === this.pixelWidth && devH === this.pixelHeight) return false;
-    this.width = w;
-    this.height = h;
-    this.pixelRatio = pr;
-    this.pixelWidth = devW;
-    this.pixelHeight = devH;
-    if (c) {
-      c.width = devW;
-      c.height = devH;
-    }
-    this._sizeChanged = true;
-    return true;
-  }
 
   _setViewport() {
     const [w, h] = this._viewportSize();
     this.module._jsui_set_viewport(this.rt, w, h, this.pixelRatio);
   }
 
-  _installResize() {
-    const apply = (entry) => {
-      if (this._measure(entry) && this.rt) {
-        this._setViewport();
-        this._rect = null;
-      }
-    };
-    if (typeof ResizeObserver !== 'undefined') {
-      this._resizeObserver = new ResizeObserver((entries) => apply(entries[entries.length - 1]));
-      this._observeCanvas();
-    }
-    // DPR changes (zoom, moving between monitors) without a CSS size change.
-    if (!this._fixedRatio && typeof matchMedia === 'function') {
-      const watch = () => {
-        const mq = matchMedia(`(resolution: ${this._ratio()}dppx)`);
-        mq.addEventListener('change', () => { apply(); watch(); }, { once: true, signal: this._abort.signal });
-      };
-      watch();
-    }
-    addEventListener('scroll', () => { this._rect = null; }, { passive: true, capture: true, signal: this._abort.signal });
-    addEventListener('resize', () => { this._rect = null; }, { passive: true, signal: this._abort.signal });
-  }
-
-  _observeCanvas() {
-    const ro = this._resizeObserver;
-    if (!ro) return;
-    try {
-      ro.observe(this.canvas, { box: 'device-pixel-content-box' });
-    } catch {
-      ro.observe(this.canvas);
-    }
+  _resized() {
+    if (!this.rt) return;
+    this._setViewport();
+    this._rect = null;
   }
 
   _ensureBuffer() {
@@ -737,22 +1161,33 @@ class CanvasView {
       this._gpu = this._glHandle = 0;
     }
     if (freshCanvas) {
-      const old = this.canvas;
-      const c = old.cloneNode(false);
-      old.replaceWith(c);
-      this.canvas = c;
       this._gl = null;
       this._glLost = false;
       this._tex = this._prog = this._vb = null;
-      this._resizeObserver?.unobserve(old);
-      this._observeCanvas();
-      this._installCanvasInput();
-      c.width = this.pixelWidth;
-      c.height = this.pixelHeight;
-      this._rect = null;
-    } else if (this._gl) {
-      resetGLState(this._gl);
+      this._freshCanvas(() => this._cpuReady(reason, mode));
+      return;
     }
+    if (this._gl) resetGLState(this._gl);
+    this._cpuReady(reason, mode);
+  }
+
+  // Replaces the canvas by a clone (same id / class / style / place in the
+  // DOM), then calls `then` (worker mode: once the page sent the clone).
+  _freshCanvas(then) {
+    const old = this.canvas;
+    const c = old.cloneNode(false);
+    old.replaceWith(c);
+    this.canvas = c;
+    this._resizeObserver?.unobserve(old);
+    this._observeCanvas();
+    this._installCanvasInput();
+    c.width = this.pixelWidth;
+    c.height = this.pixelHeight;
+    this._rect = null;
+    then();
+  }
+
+  _cpuReady(reason, mode) {
     this._texW = this._texH = 0;
     this._imageData = null;
     this._initBlitter(mode);
@@ -787,10 +1222,6 @@ class CanvasView {
     this._sizeChanged = true;  // full repaint on the next frame
     this._log(2, `${reason}: WebGPU renderer recreated`);
     this._emit('renderer', this.renderer, reason);
-  }
-
-  _log(level, text) {
-    if (!this._emit('log', level, text)) (level >= 2 ? console.warn : console.log)('[jsui] ' + text);
   }
 
   // Draws a GPU frame: true when drawn, false when the GPU path failed (the
@@ -924,322 +1355,12 @@ class CanvasView {
     st.lastBlit = { x, y, width: rw, height: rh };
   }
 
-  // ------------------------------------------------------------------ input
-
-  _point(e) {
-    const r = this._rect ??= this.canvas.getBoundingClientRect();
-    // Map CSS px of the element box to logical px (equal unless the canvas is CSS-transformed).
-    const sx = r.width ? this.width / r.width : 1, sy = r.height ? this.height / r.height : 1;
-    return [(e.clientX - r.left) * sx, (e.clientY - r.top) * sy];
-  }
-
-  // Pointer / wheel listeners on the canvas (again on a replacement canvas
-  // after a CPU fallback, see _switchToCpu).
-  _installCanvasInput() {
-    this._canvasAbort?.abort();
-    this._canvasAbort = new AbortController();
-    const M = this.module, c = this.canvas, signal = this._canvasAbort.signal;
-    const opt = { signal };
-    const active = { signal, passive: false };
-    const focusSink = () => this.focus();
-    if (this.opts.passThrough) {
-      this._installPassThroughInput(signal);
-      return;
-    }
-    c.style.touchAction = 'none';
-    c.style.overscrollBehavior = 'none';
-    c.style.userSelect = 'none';
-    c.style.webkitUserSelect = 'none';
-    c.style.outline = 'none';
-
-    // The DOM event time (same clock as the rAF timestamps given to
-    // jsui_tick) stamps the event: gesture velocities see the real spacing
-    // of the events that arrive between two frames.
-    const stamp = (e) => M._jsui_set_event_time?.(this.rt, e.timeStamp);
-    c.addEventListener('pointerdown', (e) => {
-      stamp(e);
-      const [x, y] = this._point(e);
-      let used;
-      if (e.pointerType === 'mouse') {
-        this._mouseButtons |= 1 << e.button;
-        used = M._jsui_send_mouse_button(this.rt, x, y, mouseButton(e.button), 1, modsOf(e));
-      } else {
-        used = M._jsui_send_touch(this.rt, e.pointerId, 0, x, y);
-      }
-      try { c.setPointerCapture(e.pointerId); } catch {}
-      // Not for touch: focusing a textarea pops up the virtual keyboard.
-      if (e.pointerType !== 'touch') focusSink();
-      if (used) e.preventDefault();
-      this._updateCursor();
-    }, active);
-    c.addEventListener('pointermove', (e) => {
-      stamp(e);
-      const [x, y] = this._point(e);
-      if (e.pointerType === 'mouse') M._jsui_send_mouse_move(this.rt, x, y);
-      else M._jsui_send_touch(this.rt, e.pointerId, 1, x, y);
-    }, opt);
-    const up = (e, cancel) => {
-      stamp(e);
-      const [x, y] = this._point(e);
-      let used;
-      if (e.pointerType === 'mouse') {
-        if (!(this._mouseButtons & (1 << e.button))) return;
-        this._mouseButtons &= ~(1 << e.button);
-        used = M._jsui_send_mouse_button(this.rt, x, y, mouseButton(e.button), 0, modsOf(e));
-      } else {
-        used = M._jsui_send_touch(this.rt, e.pointerId, cancel ? 3 : 2, x, y);
-      }
-      if (used) e.preventDefault();
-      this._updateCursor();
-    };
-    c.addEventListener('pointerup', (e) => up(e, false), active);
-    c.addEventListener('pointercancel', (e) => up(e, true), active);
-    c.addEventListener('pointerleave', (e) => {
-      if (e.pointerType === 'mouse' && !this._mouseButtons) M._jsui_send_mouse_leave(this.rt);
-    }, opt);
-    c.addEventListener('wheel', (e) => {
-      const [x, y] = this._point(e);
-      // Normalise to px like browsers do for pixel-mode wheels.
-      const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.height : 1;
-      if (M._jsui_send_mouse_wheel(this.rt, x, y, e.deltaX * k, e.deltaY * k)) e.preventDefault();
-    }, active);
-    c.addEventListener('contextmenu', (e) => e.preventDefault(), active);
-    // iOS Safari can still rubber-band the page under a touch-action: none
-    // canvas; the canvas then moves under the finger and its scroll views see
-    // phantom motion. A cancelled touchmove never pans or bounces the page.
-    c.addEventListener('touchmove', (e) => { if (e.cancelable) e.preventDefault(); }, active);
-    // The compat mousedown would move focus to <body> (the canvas is not
-    // focusable), stealing it from the keyboard sink focused in pointerdown.
-    c.addEventListener('mousedown', (e) => e.preventDefault(), active);
-  }
-
-  // passThrough: whatever the UI doesn't capture reaches the page under the
-  // canvas (a game's own canvas or DOM), like a click on an empty part of a
-  // HUD. The canvas has pointer-events: none ('auto' only while the mouse
-  // hovers something the UI captures, for its cursor), and window capture
-  // listeners route events: a press inside the canvas goes to the UI first.
-  // When the UI consumes it (jsui_send_* returns non-zero), the event, its
-  // gesture's moves and release and the click after it are stopped before the
-  // page sees them; otherwise they go on to their target untouched. Touch
-  // events (touchstart / touchmove / touchend) follow the hit test.
-  _installPassThroughInput(signal) {
-    const M = this.module, c = this.canvas;
-    const opt = { signal, capture: true, passive: false };
-    const stamp = (e) => M._jsui_set_event_time?.(this.rt, e.timeStamp);
-    const inside = (x, y) => x >= 0 && y >= 0 && x < this.width && y < this.height && c.isConnected;
-    const take = (e) => {
-      if (e.cancelable) e.preventDefault();
-      e.stopImmediatePropagation();
-    };
-    const gestures = new Map();  // pointerId -> whether the UI consumed its press
-    const touches = new Set();   // Touch.identifier of touches the UI captures
-    let hovering = false, swallowClick = false;
-    const setHot = (hot) => {
-      const v = hot ? 'auto' : 'none';
-      if (c.style.pointerEvents !== v) c.style.pointerEvents = v;
-    };
-    setHot(false);
-    addEventListener('pointerdown', (e) => {
-      const [x, y] = this._point(e);
-      if (!inside(x, y)) return;
-      stamp(e);
-      swallowClick = false;
-      let used;
-      if (e.pointerType === 'mouse') {
-        this._mouseButtons |= 1 << e.button;
-        used = M._jsui_send_mouse_button(this.rt, x, y, mouseButton(e.button), 1, modsOf(e));
-      } else {
-        used = M._jsui_send_touch(this.rt, e.pointerId, 0, x, y);
-      }
-      gestures.set(e.pointerId, !!used);
-      if (used) {
-        take(e);
-        if (e.pointerType !== 'touch') this.focus();
-      }
-      this._updateCursor();
-    }, opt);
-    addEventListener('pointermove', (e) => {
-      const [x, y] = this._point(e);
-      const owned = gestures.get(e.pointerId);
-      if (owned === undefined) {
-        // Hover. A drag whose press the page got stays the page's.
-        if (e.pointerType !== 'mouse') return;
-        if (!inside(x, y)) {
-          if (hovering) {
-            hovering = false;
-            M._jsui_send_mouse_leave(this.rt);
-            setHot(false);
-            this._updateCursor();
-          }
-          return;
-        }
-        hovering = true;
-        stamp(e);
-        const used = M._jsui_send_mouse_move(this.rt, x, y);
-        setHot(!e.buttons && (M._jsui_hit_test(this.rt, x, y) & HIT_POINTER) !== 0);
-        if (used && !e.buttons) e.stopImmediatePropagation();
-        this._updateCursor();
-        return;
-      }
-      stamp(e);
-      if (e.pointerType === 'mouse') M._jsui_send_mouse_move(this.rt, x, y);
-      else M._jsui_send_touch(this.rt, e.pointerId, 1, x, y);
-      if (owned) take(e);
-    }, opt);
-    const up = (e, cancel) => {
-      const owned = gestures.get(e.pointerId);
-      if (owned === undefined) return;
-      stamp(e);
-      const [x, y] = this._point(e);
-      if (e.pointerType === 'mouse') {
-        if (!(this._mouseButtons & (1 << e.button))) return;
-        this._mouseButtons &= ~(1 << e.button);
-        M._jsui_send_mouse_button(this.rt, x, y, mouseButton(e.button), 0, modsOf(e));
-        if (!this._mouseButtons) gestures.delete(e.pointerId);
-      } else {
-        M._jsui_send_touch(this.rt, e.pointerId, cancel ? 3 : 2, x, y);
-        gestures.delete(e.pointerId);
-      }
-      if (owned) {
-        take(e);
-        swallowClick = !cancel;
-      }
-      this._updateCursor();
-    };
-    addEventListener('pointerup', (e) => up(e, false), opt);
-    addEventListener('pointercancel', (e) => up(e, true), opt);
-    // The click (and auxclick) of a press the UI consumed; right-clicks and
-    // double clicks on what the UI captures.
-    const captures = (e) => {
-      const [x, y] = this._point(e);
-      return inside(x, y) && (M._jsui_hit_test(this.rt, x, y) & HIT_POINTER) !== 0;
-    };
-    for (const type of ['click', 'auxclick']) {
-      addEventListener(type, (e) => {
-        if (swallowClick) take(e);
-        swallowClick = false;
-      }, opt);
-    }
-    addEventListener('dblclick', (e) => { if (captures(e)) take(e); }, opt);
-    addEventListener('contextmenu', (e) => { if (captures(e)) take(e); }, opt);
-    addEventListener('wheel', (e) => {
-      const [x, y] = this._point(e);
-      if (!inside(x, y)) return;
-      const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.height : 1;
-      if (M._jsui_send_mouse_wheel(this.rt, x, y, e.deltaX * k, e.deltaY * k)) take(e);
-    }, opt);
-    const touch = (e) => {
-      let all = e.changedTouches.length > 0;
-      for (const t of e.changedTouches) {
-        if (e.type === 'touchstart') {
-          const [x, y] = this._point(t);
-          if (inside(x, y) && M._jsui_hit_test(this.rt, x, y) !== 0) touches.add(t.identifier);
-        }
-        if (!touches.has(t.identifier)) all = false;
-        if (e.type === 'touchend' || e.type === 'touchcancel') touches.delete(t.identifier);
-      }
-      if (all) take(e);
-    };
-    for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) addEventListener(type, touch, opt);
-    addEventListener('blur', () => {
-      gestures.clear();
-      touches.clear();
-      hovering = false;
-      setHot(false);
-    }, { signal });
-  }
-
-  _installInput() {
-    const M = this.module, signal = this._abort.signal;
-    const opt = { signal };
-    const active = { signal, passive: false };
-
-    // Keyboard sink: a transparent textarea over the canvas. It gives us real
-    // text input (IME composition, dead keys, emoji pickers, mobile keyboards)
-    // instead of guessing text from keydown.
-    const sink = document.createElement('textarea');
-    sink.setAttribute('aria-hidden', 'true');
-    sink.setAttribute('autocomplete', 'off');
-    sink.setAttribute('autocapitalize', 'off');
-    sink.setAttribute('spellcheck', 'false');
-    sink.tabIndex = 0;
-    Object.assign(sink.style, { position: 'fixed', left: '0px', top: '0px', width: '1px', height: '1px',
-      opacity: '0', padding: '0', border: '0', margin: '0', resize: 'none', overflow: 'hidden',
-      pointerEvents: 'none', zIndex: '-1', caretColor: 'transparent' });
-    document.body.appendChild(sink);
-    this._sink = sink;
-    const focusSink = () => {
-      const r = this._rect ??= this.canvas.getBoundingClientRect();
-      sink.style.left = `${Math.max(0, r.left)}px`;
-      sink.style.top = `${Math.max(0, r.top)}px`;
-      if (document.activeElement !== sink) sink.focus({ preventScroll: true });
-    };
-    this.focus = focusSink;
-
-    sink.addEventListener('keydown', (e) => {
-      if (e.isComposing || e.keyCode === 229) return;  // IME owns this key
-      if (!e.repeat) this._pressedKeys.set(e.code || e.key, e.key);
-      const used = this._withStrings([e.key || null, e.code || null], (k, cd) =>
-        M._jsui_send_key(this.rt, k, cd, 1, e.repeat ? 1 : 0, modsOf(e)));
-      if ((used && (NAV_KEYS.has(e.key) || e.ctrlKey || e.metaKey)) || (e.key === 'Tab' && this._trapTab)) {
-        e.preventDefault();
-      }
-      // passThrough: keys the UI consumed don't reach the page's listeners.
-      if (used && this.opts.passThrough) e.stopPropagation();
-    }, active);
-    sink.addEventListener('keyup', (e) => {
-      this._pressedKeys.delete(e.code || e.key);
-      const used = this._withStrings([e.key || null, e.code || null], (k, cd) =>
-        M._jsui_send_key(this.rt, k, cd, 0, 0, modsOf(e)));
-      if (used && NAV_KEYS.has(e.key)) e.preventDefault();
-      if (used && this.opts.passThrough) e.stopPropagation();
-    }, active);
-    const flushText = () => {
-      const v = sink.value;
-      sink.value = '';
-      if (v) this._withStrings([v], (t) => M._jsui_send_text(this.rt, t));
-    };
-    sink.addEventListener('input', (e) => { if (!e.isComposing) flushText(); }, opt);
-    sink.addEventListener('compositionend', flushText, opt);
-    // Losing focus must not leave keys or buttons stuck down in the UI.
-    const releaseAll = () => {
-      for (const [code, key] of this._pressedKeys) {
-        this._withStrings([key, code], (k, cd) => M._jsui_send_key(this.rt, k, cd, 0, 0, 0));
-      }
-      this._pressedKeys.clear();
-    };
-    sink.addEventListener('blur', releaseAll, opt);
-    // Gamepads drive the view that has (or last had) keyboard focus.
-    sink.addEventListener('focus', () => {
-      const host = this._hostOf();
-      if ((host._padView ?? host) === this) return;
-      host._releasePads();
-      host._padView = this === host ? null : this;
-    }, opt);
-    addEventListener('blur', () => {
-      releaseAll();
-      if (this._mouseButtons) {
-        for (let b = 0; b < 3; b++) {
-          if (this._mouseButtons & (1 << b)) M._jsui_send_mouse_button(this.rt, -1, -1, mouseButton(b), 0, 0);
-        }
-        this._mouseButtons = 0;
-      }
-      M._jsui_send_mouse_leave(this.rt);
-      this._hostOf()._releasePads();
-    }, opt);
-    if (this.opts.autoFocus ?? !this.opts.passThrough) focusSink();
-  }
-
-
   // Frees the view's renderer, listeners and buffers (not its handle).
   _destroyView() {
     this._destroyed = true;
-    this._abort.abort();
+    this._destroyDom();
     this._blitAbort?.abort();
-    this._canvasAbort?.abort();
     clearTimeout(this._restoreTimer);
-    this._resizeObserver?.disconnect();
-    this._sink?.remove();
     const M = this.module;
     this._wgpu?.destroy();
     this._wgpu = null;
@@ -1263,8 +1384,6 @@ class CanvasView {
     }
   }
 
-  _releasePads() {}
-
   // Shared GPU contexts (surfaces only, see JsuiSurface): the provider of a
   // shared Skia WebGPU context, and whether the view now draws through the
   // runtime's shared WebGL context.
@@ -1283,7 +1402,8 @@ class SharedGL {
   // `hardwareOnly`) WebGL context / Skia context can be created.
   static create(host, hardwareOnly) {
     const M = host.module;
-    if (!M.GL || !M._jsui_gpu_create_gl || typeof document === 'undefined') return null;
+    if (!M.GL || !M._jsui_gpu_create_gl) return null;
+    if (typeof OffscreenCanvas === 'undefined' && typeof document === 'undefined') return null;
     const canvas = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(1, 1) : document.createElement('canvas');
     const attrs = { alpha: true, premultipliedAlpha: true, antialias: false, depth: false, stencil: true,
       preserveDrawingBuffer: false, powerPreference: 'high-performance', failIfMajorPerformanceCaveat: !!hardwareOnly };
@@ -1550,7 +1670,7 @@ class JsuiHost extends CanvasView {
    * again every frame (the view is invalid after the next mapBuffer /
    * setBuffer of the key, or when the WASM memory grows). */
   mapBuffer(key, Type, count) {
-    const type = bufferType(Type.prototype);
+    const type = bufferType(Type);
     const M = this.module;
     const p = this._withStrings([String(key)], (k) => M._jsui_map_buffer(this.rt, k, type, count));
     return p ? new Type(M.HEAPU8.buffer, p, count) : null;
@@ -1570,8 +1690,9 @@ class JsuiHost extends CanvasView {
 
   /** Host texture: shows `source`'s current picture wherever the UI has
    * <HostTexture name={name}> (useHostTexture(name) gives its size). `source`:
-   * a VideoFrame, <video>, <canvas>, OffscreenCanvas, ImageBitmap, <img> or
-   * ImageData. Call it again whenever the picture changes (each video
+   * a VideoFrame, <video>, <canvas>, OffscreenCanvas, ImageBitmap, <img>,
+   * ImageData or { data, width, height } (straight-alpha RGBA in any typed
+   * array). Call it again whenever the picture changes (each video
    * frame): the same size refills the same texture, and only the views
    * showing it repaint. Uploaded with the renderer in use (WebGPU
    * copyExternalImageToTexture, a WebGL texture, or CPU pixels; see
@@ -1731,10 +1852,12 @@ class JsuiHost extends CanvasView {
    */
   createSurface(target, options) {
     if (this._destroyed) throw new Error('createSurface: runtime destroyed');
-    const s = new JsuiSurface(this, target, options ?? {});
+    const s = this._makeSurface(target, options ?? {});
     this._surfaces.add(s);
     return s;
   }
+
+  _makeSurface(target, options) { return new JsuiSurface(this, target, options); }
 
   /** The surfaces made with createSurface() and not destroyed. */
   get surfaces() { return Array.from(this._surfaces); }
@@ -1797,7 +1920,7 @@ class JsuiHost extends CanvasView {
       s._paint();
     }
     this._checkError();
-    if (this.listeners.get('frame')?.size) this._emit('frame', st);
+    if (this._listens('frame')) this._emit('frame', st);
     if (this._idleWaiters?.length && !M._jsui_pending_loads(rt) && !this._wantsPaint() &&
         !this.surfaces.some((s) => s._wantsPaint())) {
       const w = this._idleWaiters;
@@ -1852,9 +1975,8 @@ class JsuiHost extends CanvasView {
     this._padsActive = Array.from(navigator.getGamepads()).some(Boolean);
   }
 
-  _pollGamepads() {
+  _pollGamepads(pads = navigator.getGamepads()) {
     const M = this.module, rt = (this._padView ?? this).rt;
-    const pads = navigator.getGamepads();
     let any = false;
     const n = Math.max(pads.length, this._pads.length);
     for (let i = 0; i < n; i++) {
@@ -1924,6 +2046,12 @@ class JsuiHost extends CanvasView {
 
   _releasePads() { this._pads.forEach((s, i) => s && this._releasePad(i, s)); }
 
+  _focusPads(view) {
+    if ((this._padView ?? this) === view) return;
+    this._releasePads();
+    this._padView = view === this ? null : view;
+  }
+
   // --------------------------------------------------------------- dev mode
 
   // Polls GET <bundle origin>/__jsui/version (served by `jsui dev`); the body
@@ -1985,7 +2113,9 @@ class JsuiSurface extends CanvasView {
     if (!opts.component) throw new Error('createSurface: component is required');
     if (!target) throw new Error('createSurface: a canvas or element is required');
     let canvas = target, owned = false;
-    if (target.tagName !== 'CANVAS') {
+    // An OffscreenCanvas: worker mode's surfaces (web/jsui-worker.js).
+    const offscreen = typeof OffscreenCanvas !== 'undefined' && target instanceof OffscreenCanvas;
+    if (target.tagName !== 'CANVAS' && !offscreen) {
       canvas = document.createElement('canvas');
       canvas.style.display = 'block';
       if (!opts.autoSize) Object.assign(canvas.style, { width: '100%', height: '100%' });
@@ -2000,8 +2130,8 @@ class JsuiSurface extends CanvasView {
     this.component = String(opts.component);
     this._autoW = opts.autoSize === true || opts.autoSize === 'width';
     this._autoH = opts.autoSize === true || opts.autoSize === 'height';
-    if (opts.width > 0 && !this._autoW) canvas.style.width = `${opts.width}px`;
-    if (opts.height > 0 && !this._autoH) canvas.style.height = `${opts.height}px`;
+    if (opts.width > 0 && !this._autoW && canvas.style) canvas.style.width = `${opts.width}px`;
+    if (opts.height > 0 && !this._autoH && canvas.style) canvas.style.height = `${opts.height}px`;
     this._measure();
     const [w, h] = this._viewportSize();
     this.rt = this._withStrings([this.component, JSON.stringify(opts.initialProps ?? {})],
@@ -2115,3 +2245,14 @@ function resetGLState(gl) {
 }
 
 export default createJsui;
+
+// Worker mode: this file is also the worker's entry (new Worker(import.meta.url),
+// web/jsui-worker.js), so the worker loads the same versioned module the page did.
+if (typeof WorkerGlobalScope !== 'undefined' && typeof document === 'undefined' &&
+    globalThis instanceof WorkerGlobalScope && globalThis.name === WORKER_NAME) {
+  const early = [];  // messages that arrive before jsui-worker.js is loaded
+  globalThis.onmessage = (e) => early.push(e);
+  import('./jsui-worker.js').then((w) => w.serve(internals(), early), (e) => {
+    globalThis.postMessage({ t: 'evs', list: [{ ev: 'initError', message: `jsui-worker.js: ${e?.message ?? e}` }] });
+  });
+}

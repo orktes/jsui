@@ -1264,6 +1264,9 @@ was `preventDefault()`-ed.
   (`InputManager::capturesAt`) answers the pointer question without sending
   anything, for hosts that route by hit testing: Godot's `JsuiView._has_point`
   (`input_pass_through`), the web host's `passThrough` overlay mode.
+  `jsui_hit_regions` returns the same answer for the whole view as rects
+  (clipped bounding boxes in paint order, with their `JSUI_HIT_*` flags), for
+  hosts that hit-test away from the runtime (the web host's worker mode).
 * **Pointer:** mouse `pointerId` 0, touch `id + 1`. Implicit capture while a
   button / touch is down; `click` (primary button only) targets the nearest
   common ancestor of the down and up nodes. Wheel `deltaY > 0` scrolls down
@@ -1551,6 +1554,24 @@ The default font is Inter (bundled); `fontFamily` falls back to it.
   `web/jsui-web.js`; `jsui.on('message', (name, data) => …)`, `jsui.postMessage(name, data)`.
   The browser loader backend is `fetch()` (`src/platform/loader_emscripten.cpp`).
   Tests: `node web/test/node-smoke.mjs`, `node web/test/browser.test.mjs` (Playwright).
+* Web worker mode (`createJsui({ worker: true })`, `web/jsui-worker.js`): the
+  runtime, frame loop and renderers run in a dedicated Worker on
+  OffscreenCanvases (`transferControlToOffscreen`), with the same WebGPU →
+  WebGL → CPU chain and the same GPU-loss handling. The worker's entry is
+  `jsui-web.js` itself, so both threads load the same versioned files. The
+  page's thread only does what needs the DOM. It forwards input with
+  timestamps (moves and wheels coalesced per frame), canvas size and DPR,
+  gamepad snapshots and `bindVideo` frames (`new VideoFrame(video)`,
+  transferred). Both directions batch messages, one `postMessage` per task.
+  The page answers synchronous questions from copies the worker posts:
+  `hitTest` and pass-through routing from a hit map (`jsui_hit_regions`,
+  posted when it changes, so it is about a frame old), keys from the
+  runtime's last answer, the cursor, `renderer` and stats. Calls that need a
+  runtime answer (`getState`, `getPerf`, `readPixels`, ...) return Promises;
+  `mapBuffer` is a page-side array that `commitBuffer` copies over (no
+  SharedArrayBuffer). The worker's rAF drives frames; the page's rAF takes
+  over where a worker has none. Missing APIs or a failed start fall back to
+  main-thread mode with one warning. See `web/README.md` ("Worker mode").
 * Desktop Skia m157 (Graphite on Vulkan / Metal and header-only Dawn, for the
   Godot GPU renderer): `scripts/build-skia-desktop.sh` (Linux / macOS, about
   25 min on 4 cores, cached in CI on the hash of the script and its Dawn
