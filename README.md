@@ -59,6 +59,23 @@ State lives in the runtime, so it survives hot reloads. The UI can own keys
 too (`HostState.set` → `JsuiConfig.on_state`), and the game can call handlers
 the UI registers with `Host.handle(name, fn)` (`jsui_call_ui`).
 
+Data that changes every frame (enemy positions for nameplates and markers)
+skips JSON: the game pushes typed arrays, the UI reads them in place, and
+`Animated` views can follow them natively without any JS per frame:
+
+```c
+float enemies[30 * 3];                                      // x, y, hp per enemy
+jsui_set_buffer(rt, "enemies", JSUI_BUFFER_F32, enemies, 30 * 3);  // every frame
+```
+
+```jsx
+const count = useHostBufferSelector('enemies', (b) => b.length / 3, 0);  // re-renders when the count changes
+function Marker({ i }) {
+  const x = useHostBufferValue('enemies', i * 3), y = useHostBufferValue('enemies', i * 3 + 1);
+  return <Animated.View style={{ transform: [{ translateX: x }, { translateY: y }] }} />;  // moved by the runtime
+}
+```
+
 ## npm packages
 
 `@orktes/jsui-react` (the React Native API), `@orktes/jsui-cli` (`jsui build` / `jsui dev`)

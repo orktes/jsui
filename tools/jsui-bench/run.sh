@@ -14,7 +14,7 @@ out="$build/bench-bundles"
 mkdir -p "$out"
 jsui="$repo/packages/cli/bin/jsui.js"
 node "$jsui" build "$repo/examples/showcase/interactions.jsx" -o "$out/interactions.js" >/dev/null
-for s in list menu inventory surfaces; do
+for s in list menu inventory surfaces markers; do
   node "$jsui" build "$repo/tools/jsui-bench/scenarios/$s.jsx" -o "$out/$s.js" >/dev/null
 done
 exec "$build/jsui-bench" --suite "$out" "$@"

@@ -54,6 +54,13 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
   images = std::make_unique<ImageCache>(*this);
   animated = std::make_unique<NativeAnimated>(doc);
   animated->findView = [this](uint32_t id) { return findNode(id); };
+  animated->buffers = &buffers;
+  // JS views over storage that is about to be freed are detached first.
+  buffers.onRelease = [this](const std::string& key) {
+    if (js) js->releaseBuffer(key);
+  };
+  // Animated.hostBuffer nodes follow their buffer (also in jsui_tick_native).
+  buffers.onChange = [this](const std::string& key) { animated->bufferChanged(key); };
   main().handle = h;
   attach(main());
   input = main().input.get();
@@ -272,6 +279,12 @@ void Runtime::deliverStateChanges() {
   js->stateChanged(keys);
 }
 
+void Runtime::deliverBufferChanges() {
+  if (!buffers.hasDirty()) return;
+  std::vector<std::string> keys = buffers.takeDirty();
+  js->buffersChanged(keys);
+}
+
 int Runtime::resolveCall(uint64_t id, const char* json) {
   if (!js || !js->hasCall(id)) return -1;
   std::string text = json ? json : "null";
@@ -363,6 +376,7 @@ bool Runtime::loadSource(const std::string& source, const std::string& name) {
   // The bundle reads the current shared state as it starts; earlier changes
   // need no delivery.
   state.takeDirty();
+  buffers.takeDirty();
   bool ok = js->eval(source, name);
   // Surfaces run their apps once the bundle registered its components (a
   // component registered later starts its surface then, see AppRegistry).
@@ -465,6 +479,7 @@ void Runtime::tick(double nowMs) {
   // re-render in one batch before this tick's timers and frame callbacks.
   flushSurfaces();
   deliverStateChanges();
+  deliverBufferChanges();
   js->runTimers(nowMs);
   js->runAnimationFrame(nowMs);
   js->runJobs();
@@ -622,7 +637,7 @@ bool Runtime::wantsFrame() const {
   // A pending repaint alone is not a reason to tick: the host paints after
   // the tick it already ran.
   if (reloadRequested_ || loader.pending() > 0 || (js && js->hasPendingWork(now + 17)) || animated->animating() ||
-      !animated->ends.empty() || state.hasDirty() || !uiResults_.empty() || !doomed_.empty())
+      !animated->ends.empty() || state.hasDirty() || buffers.hasDirty() || !uiResults_.empty() || !doomed_.empty())
     return true;
   for (const auto& s : surfaces_)
     if (s->input->animating() || s->doc.layoutAnimating() || imageEventsReady(s->doc) ||

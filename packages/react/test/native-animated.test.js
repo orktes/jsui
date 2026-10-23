@@ -296,3 +296,22 @@ test('Animated.event with useNativeDriver maps nativeEvent paths natively', () =
   render(null);
   assert.equal(animated.count('removeEventMapping'), 3);
 });
+
+test('Animated.hostBuffer: native from the start; the runtime reads the buffer (hostBuffer node -> transform -> view)', () => {
+  animated.reset();
+  const x = Animated.hostBuffer('enemies', 4);
+  const o = Animated.hostBuffer('enemies', 7).interpolate({ inputRange: [0, 1], outputRange: [0.2, 1] });
+  render(h(Animated.View, { nativeID: 'marker', style: { opacity: o, transform: [{ translateX: x }, { scale: 2 }] } }));
+  const created = animated.of('createNode').map(([, c]) => c);
+  const buf = created.filter((c) => c.type === 'hostBuffer');
+  assert.deepEqual(buf, [
+    { type: 'hostBuffer', key: 'enemies', index: 7 },
+    { type: 'hostBuffer', key: 'enemies', index: 4 },
+  ]);
+  const transform = created.find((c) => c.type === 'transform');
+  assert.equal(transform.transforms[0].property, 'translateX');
+  assert.deepEqual(transform.transforms[1], { property: 'scale', value: 2 });
+  assert.equal(animated.count('connectToView'), 1);
+  assert.equal(animated.count('startAnimation'), 0);
+  render(null);
+});

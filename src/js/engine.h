@@ -16,9 +16,11 @@
 //   globalThis.__jsui_onHostMessage(name, json)
 //   globalThis.__jsui_onLayout(id, {x,y,width,height})
 //   globalThis.__jsui_onHostState(keys)            shared state changed
+//   globalThis.__jsui_onHostBuffer(keys)           frame data buffers changed
 //   globalThis.__jsui_onCall(id, name, json)       jsui_call_ui -> Host.handle
 // Shared state / calls (bridge_host.cpp): __jsui_native.getState, stateVersion,
-//   setState, patchState, stateKeys, hostCall, cancelCall, callResult.
+//   setState, patchState, stateKeys, hostCall, cancelCall, callResult,
+//   buffer, bufferVersion, bufferKeys.
 #pragma once
 
 #include <cstdint>
@@ -59,6 +61,11 @@ class JsEngine {
 
   // Shared state keys the embedder changed: __jsui_onHostState(keys).
   void stateChanged(const std::vector<std::string>& keys);
+  // Frame data buffers the embedder changed: __jsui_onHostBuffer(keys).
+  void buffersChanged(const std::vector<std::string>& keys);
+  // The storage of buffer `key` is about to be freed: detaches the
+  // ArrayBuffer JS sees over it (its typed arrays read as empty).
+  void releaseBuffer(const std::string& key);
   // Host.call bookkeeping: each pending call holds the JS settle function
   // the bundle passed to __jsui_native.hostCall.
   bool hasCall(uint64_t id) const;

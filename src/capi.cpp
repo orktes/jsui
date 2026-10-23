@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "include/core/SkData.h"
@@ -130,6 +131,31 @@ const char* jsui_get_state(JsuiRuntime* rt, const char* key) {
   if (!key) return nullptr;
   const std::string* json = rt->rt->state.json(key);
   return json ? json->c_str() : nullptr;
+}
+
+int jsui_set_buffer(JsuiRuntime* rt, const char* key, JsuiBufferType type, const void* data, size_t count) {
+  if (!key) return -1;
+  int r = rt->rt->buffers.set(key, type, data, count);
+  if (r < 0) rt->rt->log(JSUI_LOG_ERROR, std::string("jsui_set_buffer(\"") + key + "\"): invalid type");
+  return r;
+}
+
+void* jsui_map_buffer(JsuiRuntime* rt, const char* key, JsuiBufferType type, size_t count) {
+  if (!key) return nullptr;
+  void* p = rt->rt->buffers.map(key, type, count);
+  if (!p) rt->rt->log(JSUI_LOG_ERROR, std::string("jsui_map_buffer(\"") + key + "\"): invalid type");
+  return p;
+}
+
+int jsui_commit_buffer(JsuiRuntime* rt, const char* key) { return key && rt->rt->buffers.commit(key) ? 1 : -1; }
+
+int jsui_remove_buffer(JsuiRuntime* rt, const char* key) { return key && rt->rt->buffers.remove(key) ? 1 : 0; }
+
+const void* jsui_get_buffer(JsuiRuntime* rt, const char* key, JsuiBufferType* type, size_t* count) {
+  const jsui::HostBuffers::Entry* e = key ? rt->rt->buffers.find(key) : nullptr;
+  if (type) *type = e ? e->type : JSUI_BUFFER_F32;
+  if (count) *count = e ? e->count : 0;
+  return e ? e->data() : nullptr;
 }
 
 int jsui_resolve_call(JsuiRuntime* rt, uint64_t id, const char* json) { return rt->rt->resolveCall(id, json); }

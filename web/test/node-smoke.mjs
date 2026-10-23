@@ -152,5 +152,32 @@ function frame(rt, w, h) {
   M._jsui_destroy(rt);  // frees the badge handle too
 }
 
+// Frame data: jsui_set_buffer / jsui_map_buffer into the WASM heap, read by
+// JS as a typed array over the same memory.
+{
+  const got = [];
+  (M.__jsuiHosts ??= new Map()).set(9, { onMessage: (name, json) => got.push([name, JSON.parse(json)]) });
+  const rt = M._jsui_web_create(9, 64, 64, 1, 0, 0);
+  const src = `globalThis.__jsui_onHostBuffer = (keys) => {
+    const i = __jsui_native.buffer('pos');
+    __jsui_native.postMessage('buf', JSON.stringify([keys, i[1], Array.from(new Float32Array(i[0], 0, i[2]))]));
+  };`;
+  const p = str(src), name = str('buffers.js'), key = str('pos');
+  M._jsui_load_bundle_source(rt, p, M.lengthBytesUTF8(src), name);
+  const data = M._malloc(12);
+  new Float32Array(M.HEAPU8.buffer, data, 3).set([1.5, -2, 3]);
+  check(M._jsui_set_buffer(rt, key, 0, data, 3) === 1 && M._jsui_set_buffer(rt, key, 0, data, 3) === 0, 'set_buffer');
+  M._jsui_tick(rt, 16);
+  check(JSON.stringify(got) === '[["buf",[["pos"],0,[1.5,-2,3]]]]', `buffer reached JS ${JSON.stringify(got)}`);
+  got.length = 0;
+  const m = M._jsui_map_buffer(rt, key, 0, 2);
+  new Float32Array(M.HEAPU8.buffer, m, 2).set([7, 8]);
+  M._jsui_commit_buffer(rt, key);
+  M._jsui_tick(rt, 32);
+  check(JSON.stringify(got) === '[["buf",[["pos"],0,[7,8]]]]', `mapped buffer ${JSON.stringify(got)}`);
+  [p, name, key, data].forEach((x) => M._free(x));
+  M._jsui_destroy(rt);
+}
+
 console.log(failures ? `${failures} failure(s)` : 'node smoke: all ok');
 process.exit(failures ? 1 : 0);

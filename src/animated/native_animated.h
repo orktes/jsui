@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "core/value.h"
+#include "host_buffers.h"
 
 namespace jsui {
 
@@ -32,6 +33,8 @@ class NativeAnimated {
   // Resolves view ids when views live in several documents (surfaces of one
   // runtime); unset: the document given to the constructor.
   std::function<Node*(uint32_t)> findView;
+  // Frame data read by hostBuffer nodes (the runtime's).
+  const HostBuffers* buffers = nullptr;
 
   // ---- graph (tags are chosen by JS) ---------------------------------
   // config.type: value {value, offset} | interpolation {inputRange,
@@ -39,8 +42,10 @@ class NativeAnimated {
   // parts (string template), extrapolateLeft/Right, easing: [samples]} |
   // addition | subtraction | multiplication | division {input: [a, b]} |
   // modulus {input, modulus} | diffclamp {input, min, max} |
-  // color {r, g, b, a} | transform {transforms: [{property, nodeTag} |
-  // {property, value}]} | style {style: {key: tag}} | props {props: {style: tag}}.
+  // color {r, g, b, a} | hostBuffer {key, index} (element `index` of a
+  // frame data buffer, 0 when out of range) | transform {transforms:
+  // [{property, nodeTag} | {property, value}]} | style {style: {key: tag}} |
+  // props {props: {style: tag}}.
   // Returns false (and sets *error) for an unknown type.
   bool createNode(int tag, const Value& config, std::string* error = nullptr);
   void connectNodes(int parent, int child);
@@ -82,6 +87,10 @@ class NativeAnimated {
   bool animating() const { return !animations_.empty(); }
   size_t animationCount() const { return animations_.size(); }
 
+  // Buffer `key` has new contents: its hostBuffer nodes are re-evaluated at
+  // the next flush (tick).
+  void bufferChanged(const std::string& key);
+
   // ---- events (Animated.event with useNativeDriver) ------------------------
   // `eventType` is the native event type ("scroll", ...), `path` the keys
   // below the event object (e.g. ["contentOffset", "y"]).
@@ -117,7 +126,7 @@ class NativeAnimated {
  private:
   enum class Type : uint8_t {
     Value, Interpolation, Addition, Subtraction, Multiplication, Division, Modulus, DiffClamp,
-    Color, Transform, Style, Props
+    Color, HostBuffer, Transform, Style, Props
   };
   enum class Extrapolate : uint8_t { Extend, Clamp, Identity };
   enum class OutKind : uint8_t { Number, Color, String };
@@ -144,6 +153,11 @@ class NativeAnimated {
     double modulus = 1, min = 0, max = 0, lastInput = 0, clamped = 0;
     bool diffInit = false;
     // color: r, g, b, a in inputs[0..3]
+    // hostBuffer (the entry is cached while buffers->generation() holds)
+    std::string bufferKey;
+    size_t bufferIndex = 0;
+    const HostBuffers::Entry* bufferEntry = nullptr;
+    uint64_t bufferGen = 0;
     // transform / style
     std::vector<TransformEntry> transforms;
     std::vector<std::pair<std::string, int>> style;
@@ -204,6 +218,7 @@ class NativeAnimated {
   std::unordered_set<int> listening_;
   std::unordered_set<int> dirtyValues_;  // value nodes changed since the last flush
   std::unordered_set<int> dirtyNotify_;  // changed natively (listener updates)
+  std::unordered_map<std::string, std::vector<int>> bufferNodes_;  // key -> hostBuffer node tags
   uint64_t gen_ = 1;
 };
 

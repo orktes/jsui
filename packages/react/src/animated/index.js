@@ -2,13 +2,14 @@
 // rAF loop + direct style patches); with useNativeDriver: true the runtime
 // evaluates them natively on its frame clock (NativeAnimatedHelper.js).
 
-import { useRef } from 'react';
+import { useMemo, useRef } from 'react';
 import {
   AnimatedNode,
   AnimatedValue,
   AnimatedValueXY,
   AnimatedColor,
   AnimatedInterpolation,
+  AnimatedHostBuffer,
   add,
   subtract,
   multiply,
@@ -101,6 +102,16 @@ export function useAnimatedValue(initialValue, config) {
   return ref.current;
 }
 
+/**
+ * Animated node of element `index` of frame data buffer `key`
+ * (jsui_set_buffer), stable across renders. With the native module the
+ * runtime moves the views that use it each time the buffer changes, without
+ * JS: style={{ transform: [{ translateX: useHostBufferValue('enemies', i * 4) }] }}.
+ */
+export function useHostBufferValue(key, index) {
+  return useMemo(() => new AnimatedHostBuffer(key, index), [key, index]);
+}
+
 // Called once by the package index with the base components (avoids an
 // import cycle between Animated and the components that use it).
 export function makeAnimated(base) {
@@ -137,6 +148,7 @@ export const Animated = {
   divide,
   modulo,
   diffClamp,
+  hostBuffer: (key, index) => new AnimatedHostBuffer(key, index),
   createAnimatedComponent,
   attachNativeEvent,
   forkEvent: (event1, listener) => {

@@ -113,6 +113,11 @@ bool NativeAnimated::createNode(int tag, const Value& c, std::string* error) {
   } else if (type == "color") {
     n.type = Type::Color;
     for (const char* k : {"r", "g", "b", "a"}) n.inputs.push_back(int(c[k].asNumber()));
+  } else if (type == "hostBuffer") {
+    n.type = Type::HostBuffer;
+    n.bufferKey = c["key"].asString();
+    double index = c["index"].asNumber();
+    n.bufferIndex = index >= 0 && index < 4294967296.0 ? size_t(index) : size_t(-1);
   } else if (type == "transform") {
     n.type = Type::Transform;
     for (const Value& t : c["transforms"].asArray()) {
@@ -134,6 +139,7 @@ bool NativeAnimated::createNode(int tag, const Value& c, std::string* error) {
     return false;
   }
   if (nodes_.count(tag)) dropNode(tag);
+  if (n.type == Type::HostBuffer) bufferNodes_[n.bufferKey].push_back(tag);
   if (n.type == Type::Props) propsNodes_.push_back(tag);
   nodes_.emplace(tag, std::move(n));
   return true;
@@ -178,8 +184,21 @@ void NativeAnimated::dropNode(int tag) {
   listening_.erase(tag);
   dirtyValues_.erase(tag);
   dirtyNotify_.erase(tag);
+  if (n->type == Type::HostBuffer) {
+    auto it = bufferNodes_.find(n->bufferKey);
+    if (it != bufferNodes_.end()) {
+      it->second.erase(std::remove(it->second.begin(), it->second.end(), tag), it->second.end());
+      if (it->second.empty()) bufferNodes_.erase(it);
+    }
+  }
   if (n->type == Type::Props) propsNodes_.erase(std::remove(propsNodes_.begin(), propsNodes_.end(), tag), propsNodes_.end());
   nodes_.erase(tag);
+}
+
+void NativeAnimated::bufferChanged(const std::string& key) {
+  auto it = bufferNodes_.find(key);
+  if (it == bufferNodes_.end()) return;
+  for (int tag : it->second) markDirty(tag);
 }
 
 void NativeAnimated::clear() {
@@ -190,6 +209,7 @@ void NativeAnimated::clear() {
   listening_.clear();
   dirtyValues_.clear();
   dirtyNotify_.clear();
+  bufferNodes_.clear();
   ends.clear();
   updates.clear();
 }
@@ -291,6 +311,16 @@ void NativeAnimated::evaluate(ANode& n) {
       n.num = n.value + n.offset;
       n.out = Value(n.num);
       break;
+    case Type::HostBuffer: {
+      if (!n.bufferEntry || !buffers || n.bufferGen != buffers->generation()) {
+        n.bufferEntry = buffers ? buffers->find(n.bufferKey) : nullptr;
+        n.bufferGen = n.bufferEntry ? buffers->generation() : 0;
+      }
+      n.num = n.bufferEntry ? n.bufferEntry->at(n.bufferIndex) : 0;
+      if (n.num != n.num) n.num = 0;  // NaN
+      n.out = Value(n.num);
+      break;
+    }
     case Type::Interpolation: {
       double x = n.parents.empty() ? 0 : evalNum(n.parents[0]);
       if (n.outKind == OutKind::Number) {

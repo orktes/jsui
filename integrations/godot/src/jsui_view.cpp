@@ -138,6 +138,8 @@ void JsuiView::_bind_methods() {
   ClassDB::bind_method(D_METHOD("patch_state", "key", "patch"), &JsuiView::patch_state);
   ClassDB::bind_method(D_METHOD("patch_state_json", "key", "json"), &JsuiView::patch_state_json);
   ClassDB::bind_method(D_METHOD("get_state", "key"), &JsuiView::get_state);
+  ClassDB::bind_method(D_METHOD("set_buffer", "key", "data"), &JsuiView::set_buffer);
+  ClassDB::bind_method(D_METHOD("remove_buffer", "key"), &JsuiView::remove_buffer);
   ClassDB::bind_method(D_METHOD("get_state_json", "key"), &JsuiView::get_state_json);
   ClassDB::bind_method(D_METHOD("resolve_call", "id", "result"), &JsuiView::resolve_call, DEFVAL(Variant()));
   ClassDB::bind_method(D_METHOD("resolve_call_json", "id", "json"), &JsuiView::resolve_call_json);
@@ -459,6 +461,8 @@ void JsuiView::start() {
   updateViewport();
   // Shared state set before (or across) restarts: there before the bundle runs.
   for (auto& [key, json] : state_) jsui_set_state(rt_, key.c_str(), json.c_str());
+  for (auto& [key, b] : pendingBuffers_) jsui_set_buffer(rt_, key.c_str(), b.type, b.bytes.data(), b.count);
+  pendingBuffers_.clear();
   // The main surface's component, and surface views waiting for a runtime
   // (their components start once the bundle has registered them).
   if (!component_.is_empty()) {
@@ -1196,6 +1200,55 @@ void JsuiView::post_message_json(const String& name, const String& json) {
   std::string n = toStd(name), j = toStd(json);
   jsui_post_message(rt_, n.c_str(), j.c_str());
   flushMessages();
+}
+
+// -------------------------------------------------------------- frame data
+
+int JsuiView::set_buffer(const String& key, const Variant& data) {
+  if (host_) return host_->set_buffer(key, data);
+  const void* ptr = nullptr;
+  size_t count = 0;
+  JsuiBufferType type = JSUI_BUFFER_F32;
+  constexpr JsuiBufferType kReal = sizeof(real_t) == 8 ? JSUI_BUFFER_F64 : JSUI_BUFFER_F32;
+  // The packed arrays are copied into locals (copy-on-write: no data copy).
+  PackedFloat32Array f32;
+  PackedFloat64Array f64;
+  PackedInt32Array i32;
+  PackedByteArray u8;
+  PackedVector2Array v2;
+  PackedVector3Array v3;
+  PackedColorArray col;
+  switch (data.get_type()) {
+    case Variant::PACKED_FLOAT32_ARRAY: f32 = data; ptr = f32.ptr(); count = size_t(f32.size()); break;
+    case Variant::PACKED_FLOAT64_ARRAY: f64 = data; ptr = f64.ptr(); count = size_t(f64.size()); type = JSUI_BUFFER_F64; break;
+    case Variant::PACKED_INT32_ARRAY: i32 = data; ptr = i32.ptr(); count = size_t(i32.size()); type = JSUI_BUFFER_I32; break;
+    case Variant::PACKED_BYTE_ARRAY: u8 = data; ptr = u8.ptr(); count = size_t(u8.size()); type = JSUI_BUFFER_U8; break;
+    case Variant::PACKED_VECTOR2_ARRAY: v2 = data; ptr = v2.ptr(); count = size_t(v2.size()) * 2; type = kReal; break;
+    case Variant::PACKED_VECTOR3_ARRAY: v3 = data; ptr = v3.ptr(); count = size_t(v3.size()) * 3; type = kReal; break;
+    case Variant::PACKED_COLOR_ARRAY: col = data; ptr = col.ptr(); count = size_t(col.size()) * 4; break;
+    default:
+      UtilityFunctions::push_error("JsuiView.set_buffer(\"" + key + "\"): expected a packed array, got " +
+                                   Variant::get_type_name(data.get_type()));
+      return -1;
+  }
+  std::string k = toStd(key);
+  if (rt_) return jsui_set_buffer(rt_, k.c_str(), type, ptr, count);
+  PendingBuffer b{type, {}, count};
+  if (ptr) b.bytes.assign(static_cast<const uint8_t*>(ptr), static_cast<const uint8_t*>(ptr) + count * (type == JSUI_BUFFER_F64 ? 8 : type == JSUI_BUFFER_U8 ? 1 : 4));
+  auto it = std::find_if(pendingBuffers_.begin(), pendingBuffers_.end(), [&](auto& kv) { return kv.first == k; });
+  if (it != pendingBuffers_.end()) it->second = std::move(b);
+  else pendingBuffers_.emplace_back(k, std::move(b));
+  return 1;
+}
+
+int JsuiView::remove_buffer(const String& key) {
+  if (host_) return host_->remove_buffer(key);
+  std::string k = toStd(key);
+  if (rt_) return jsui_remove_buffer(rt_, k.c_str());
+  auto it = std::find_if(pendingBuffers_.begin(), pendingBuffers_.end(), [&](auto& kv) { return kv.first == k; });
+  if (it == pendingBuffers_.end()) return 0;
+  pendingBuffers_.erase(it);
+  return 1;
 }
 
 // ------------------------------------------------------------------- input

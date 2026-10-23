@@ -110,6 +110,7 @@ var _fixed_fps := 0
 var _start_frame := 0  # Engine.get_process_frames() as the UI started
 var _pongs := 0
 var _ui_answers := 0
+var _buffer_seen := []  # what the UI's useHostBufferListener saw (set_buffer)
 var _unhandled_clicks := 0
 var _player := {"name": "Valkyrie_07", "level": 42, "role": "Vanguard", "credits": 12480}
 
@@ -259,6 +260,8 @@ func _on_ui_message(name: String, data, json: String) -> void:
 			_anchors.merge(data, true)
 		"badge:mount", "badge:render", "badge:press", "badge:unmount":
 			_badge_events.append(name.trim_prefix("badge:") + ":" + str(data.label))
+		"buffer:seen":
+			_buffer_seen.append(data)
 		_:
 			print("[ui -> godot] ", name, " ", json)
 
@@ -524,6 +527,14 @@ func _run_self_test() -> void:
 	ui.call_ui("ui.flash", {"text": "hello from Godot"}, _on_flash_answer)
 	_check("call_ui", await _wait_for(func(): return _ui_answers > 0), "ui.flash handler answered")
 	await _test_pass_through()
+
+	# Frame data: a packed array reaches the UI as a typed array (no JSON).
+	ui.set_buffer("godot.selftest", PackedFloat32Array([1.5, 2.5, 3.5]))
+	var got_buffer := await _wait_for(func(): return _buffer_seen.size() > 0 and _buffer_seen[-1] == [1.5, 2.5, 3.5])
+	_check("set_buffer", got_buffer, "useHostBufferListener saw %s" % [_buffer_seen])
+	_check("set_buffer unchanged", ui.set_buffer("godot.selftest", PackedFloat32Array([1.5, 2.5, 3.5])) == 0)
+	ui.set_buffer("godot.selftest", PackedVector2Array([Vector2(4, 5)]))
+	_check("set_buffer vectors", await _wait_for(func(): return _buffer_seen[-1] == [4.0, 5.0]), "saw %s" % [_buffer_seen])
 
 	await _test_surface()  # with the render hand-off check (--max-render-waits)
 	await _test_runtime_freed_first()

@@ -4,7 +4,7 @@
 //   jsui-bench bundle.js [--frames 600] [--warmup 120] [--width 1280] [--height 720]
 //              [--paint incremental|full|none] [--mouse-sweep X,Y0,Y1,FRAMES]
 //              [--patch-state KEY,N] [--surfaces N[,changing|same|one|resize]]
-//              [--name NAME] [--json out.json]
+//              [--markers N,json|buffer|native] [--name NAME] [--json out.json]
 //   jsui-bench --suite DIR [--json out.json] [--compare baseline.json]
 //
 // --suite runs the standard scenarios from DIR (built by tools/jsui-bench/run.sh):
@@ -17,6 +17,10 @@
 //                 every surface's props changing every frame, the same props
 //                 pushed every frame, one surface's props changing per frame,
 //                 every surface resized every frame
+//   markers-*     N enemy markers moving every frame (scenarios/markers.jsx),
+//                 fed as JSON shared state, as a frame data buffer rendered by
+//                 React, or as a buffer driving Animated.hostBuffer natively;
+//                 for N = 30, 100, 1000 (painting off: the data path only)
 //
 // Phase times are exclusive (core/perf.h), in microseconds per frame:
 //   js        QuickJS execution (timers, rAF, React render + reconcile, events)
@@ -26,9 +30,12 @@
 //   layout    Yoga + text measurement
 //   input     hit testing / event routing
 //   paint     jsui_render_rgba(_incremental)
+//   host      the host's own share of pushing data (building the JSON text /
+//             filling the buffer) up to the jsui_* call; counted in total
 // Counters are per frame: bridge calls, style resolves, Yoga nodes laid out
 // (not served from Yoga's cache), text measure callbacks, allocations, ...
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -141,6 +148,10 @@ struct Options {
   // host does with their props every frame.
   int surfaces = 0;
   enum class SurfaceProps { None, Changing, Same, One, Resize } surfaceProps = SurfaceProps::None;
+  // Enemy markers (scenarios/markers.jsx) moving every frame, and how their
+  // positions reach the UI.
+  int markers = 0;
+  enum class MarkerFeed { Json, Buffer, Native } markerFeed = MarkerFeed::Json;
 };
 
 // Columns of the report.
@@ -193,6 +204,7 @@ struct Result {
   int frames = 0;
   int nodes = 0;
   Stat phase[kPhaseCount];
+  Stat host;  // the host's own work (see the header)
   Stat total;
   double counters[kCounterCount] = {};
   double extra[kExtraCount] = {};
@@ -221,6 +233,12 @@ bool run(const Options& o, Result* out) {
   JsuiRuntime* h = jsui_create(&cfg);
   jsui::Runtime* rt = jsui::internalRuntime(h);
   jsui::Perf& perf = rt->doc.perf;
+  if (o.markers > 0) {
+    const char* app = o.markerFeed == Options::MarkerFeed::Json     ? "JsonMarkers"
+                      : o.markerFeed == Options::MarkerFeed::Buffer ? "BufferMarkers"
+                                                                    : "NativeMarkers";
+    jsui_surface_run(h, app, "{}");
+  }
   if (jsui_load_bundle_source(h, src.data(), src.size(), o.bundle.c_str()) != 0) {
     std::fprintf(stderr, "jsui-bench: %s failed to load: %s\n", o.bundle.c_str(), jsui_last_error(h));
     jsui_destroy(h);
@@ -243,8 +261,42 @@ bool run(const Options& o, Result* out) {
   }
   double now = 0;
   int frame = 0;
+  // Markers: x, y, hp per enemy, circling around the screen.
+  std::vector<float> enemyData(size_t(o.markers) * 3);
+  std::string enemyJson;
+  double hostUs = 0;
+  auto pushMarkers = [&]() {
+    for (int i = 0; i < o.markers; i++) {
+      double a = double(frame) * 0.02 + double(i) * 0.37;
+      double r = 80 + double(i % 7) * 40;
+      enemyData[size_t(i) * 3] = float(o.width / 2 + std::cos(a) * r * 1.6);
+      enemyData[size_t(i) * 3 + 1] = float(o.height / 2 + std::sin(a) * r);
+      enemyData[size_t(i) * 3 + 2] = float((i * 7 + frame) % 101);
+    }
+    // The game has its data in its own structures; a buffer can take it as
+    // is (here: already packed), JSON has to be written out.
+    auto t0 = std::chrono::steady_clock::now();
+    if (o.markerFeed == Options::MarkerFeed::Json) {
+      enemyJson.clear();
+      enemyJson += '[';
+      char item[96];
+      for (int i = 0; i < o.markers; i++) {
+        std::snprintf(item, sizeof item, "%s[%.2f,%.2f,%g]", i ? "," : "", double(enemyData[size_t(i) * 3]),
+                      double(enemyData[size_t(i) * 3 + 1]), double(enemyData[size_t(i) * 3 + 2]));
+        enemyJson += item;
+      }
+      enemyJson += ']';
+    }
+    hostUs = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+    // The jsui_* call itself (parsing the JSON / copying the buffer) is
+    // the runtime's work: counted as commit (native side of the bridge).
+    jsui::Perf::Scope scope(perf, jsui::Phase::Commit);
+    if (o.markerFeed == Options::MarkerFeed::Json) jsui_set_state(h, "enemies", enemyJson.c_str());
+    else jsui_set_buffer(h, "enemies", JSUI_BUFFER_F32, enemyData.data(), enemyData.size());
+  };
   auto step = [&]() {
     now += 1000.0 / 60.0;
+    if (o.markers > 0) pushMarkers();
     if (o.mouseSweep) {
       // Triangle wave over the button column.
       double t = double(frame % o.sweepFrames) / double(o.sweepFrames);
@@ -285,7 +337,7 @@ bool run(const Options& o, Result* out) {
   };
   for (int i = 0; i < o.warmup; i++) step();
 
-  std::vector<double> phase[kPhaseCount], total;
+  std::vector<double> phase[kPhaseCount], host, total;
   for (auto& v : phase) v.reserve(size_t(o.frames));
   perf.profiling = true;
   perf.reset();
@@ -302,7 +354,8 @@ bool run(const Options& o, Result* out) {
       phase[p].push_back(d);
       sum += d;
     }
-    total.push_back(sum);
+    host.push_back(hostUs);
+    total.push_back(sum + hostUs);
     std::copy(std::begin(perf.us), std::end(perf.us), prevUs);
   }
   CALLGRIND_STOP_INSTRUMENTATION;
@@ -313,6 +366,7 @@ bool run(const Options& o, Result* out) {
   out->nodes = 0;
   for (const auto& s : rt->surfaces()) out->nodes += countNodes(s->doc.root());
   for (int p = 0; p < kPhaseCount; p++) out->phase[p] = summarize(phase[p]);
+  out->host = summarize(host);
   out->total = summarize(total);
   double f = double(o.frames);
   for (int c = 0; c < kCounterCount; c++) out->counters[c] = double(kCounters[c].get(perf.counters)) / f;
@@ -331,6 +385,7 @@ void print(const Result& r) {
   std::printf("  %-10s %10s %10s %10s\n", "phase(us)", "mean", "p50", "p95");
   for (int p = 0; p < kPhaseCount; p++)
     std::printf("  %-10s %10.1f %10.1f %10.1f\n", kPhaseNames[p], r.phase[p].mean, r.phase[p].p50, r.phase[p].p95);
+  if (r.host.p95 > 0) std::printf("  %-10s %10.1f %10.1f %10.1f\n", "host", r.host.mean, r.host.p50, r.host.p95);
   std::printf("  %-10s %10.1f %10.1f %10.1f\n", "total", r.total.mean, r.total.p50, r.total.p95);
   std::printf("  per frame:");
   int col = 0;
@@ -353,6 +408,7 @@ std::string toJson(const std::vector<Result>& results) {
       s << ", \"" << n << "\": {\"mean\": " << st.mean << ", \"p50\": " << st.p50 << ", \"p95\": " << st.p95 << "}";
     };
     for (int p = 0; p < kPhaseCount; p++) stat(kPhaseNames[p], r.phase[p]);
+    stat("host", r.host);
     stat("total", r.total);
     s << ", \"counters\": {";
     for (int c = 0; c < kCounterCount; c++) s << (c ? ", " : "") << "\"" << kCounters[c].name << "\": " << r.counters[c];
@@ -372,6 +428,7 @@ std::map<std::string, std::map<std::string, double>> readBaseline(const std::str
   jsui::Value v = jsui::Value::parseJson(text);
   for (auto& [name, r] : v.asObject()) {
     for (int p = 0; p < kPhaseCount; p++) out[name][kPhaseNames[p]] = r[kPhaseNames[p]]["mean"].asNumber();
+    if (r["host"].isObject()) out[name]["host"] = r["host"]["mean"].asNumber();
     out[name]["total"] = r["total"]["mean"].asNumber();
     for (auto& [k, c] : r["counters"].asObject()) out[name][k] = c.asNumber();
   }
@@ -401,6 +458,7 @@ void compare(const std::vector<Result>& results, const std::string& path) {
       std::printf("    %-18s %10.1f -> %10.1f  %s\n", k, was, now, delta);
     };
     for (int p = 0; p < kPhaseCount; p++) line(kPhaseNames[p], r.phase[p].mean);
+    if (r.host.mean > 0) line("host", r.host.mean);
     line("total", r.total.mean);
     for (int c = 0; c < kCounterCount; c++) line(kCounters[c].name, r.counters[c]);
     for (int c = 0; c < kExtraCount; c++) line(kExtraNames[c], r.extra[c]);
@@ -439,6 +497,16 @@ std::vector<Options> suite(const std::string& dir, const Options& base) {
     s.bundle = dir + "/surfaces.js";
     s.surfaces = 30;
     s.surfaceProps = props;
+  }
+  for (int n : {30, 100, 1000}) {
+    for (auto [feed, fname] : {std::pair{Options::MarkerFeed::Json, "json"}, std::pair{Options::MarkerFeed::Buffer, "buffer"},
+                               std::pair{Options::MarkerFeed::Native, "native"}}) {
+      Options& m = add(("markers-" + std::string(fname) + "-" + std::to_string(n)).c_str());
+      m.bundle = dir + "/markers.js";
+      m.markers = n;
+      m.markerFeed = feed;
+      m.paint = PaintMode::None;
+    }
   }
   return list;
 }
@@ -483,12 +551,17 @@ int main(int argc, char** argv) {
       else if (v.find(",same") != std::string::npos) o.surfaceProps = Options::SurfaceProps::Same;
       else if (v.find(",one") != std::string::npos) o.surfaceProps = Options::SurfaceProps::One;
       else if (v.find(",resize") != std::string::npos) o.surfaceProps = Options::SurfaceProps::Resize;
+    } else if (a == "--markers") {
+      std::string v = next();
+      o.markers = std::max(0, std::atoi(v.c_str()));
+      if (v.find(",buffer") != std::string::npos) o.markerFeed = Options::MarkerFeed::Buffer;
+      else if (v.find(",native") != std::string::npos) o.markerFeed = Options::MarkerFeed::Native;
     } else if (a == "-h" || a == "--help") {
       std::printf(
           "usage: jsui-bench <bundle.js> [--frames N] [--warmup N] [--width W] [--height H]\n"
           "                  [--paint incremental|full|none] [--mouse-sweep X,Y0,Y1,FRAMES]\n"
           "                  [--patch-state KEY,SLOTS] [--surfaces N[,changing|same|one|resize]]\n"
-          "                  [--name NAME] [--json out.json]\n"
+          "                  [--markers N,json|buffer|native] [--name NAME] [--json out.json]\n"
           "       jsui-bench --suite DIR [--json out.json] [--compare baseline.json]\n");
       return 0;
     } else o.bundle = a;

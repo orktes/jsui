@@ -13,6 +13,7 @@ import {
   stopListening,
   sampleCurve,
 } from './NativeAnimatedHelper.js';
+import { HostBuffer } from '../hostBuffer.js';
 
 let nextListenerId = 1;
 
@@ -517,6 +518,61 @@ export function interpolationNativeConfig(config) {
   out.parts = template.split(NUMBER_RE);
   out.outputs = numbers[0].map((_, i) => numbers.map((n) => (n[i] !== undefined ? n[i] : 0)));
   return out;
+}
+
+// Element `index` of frame data buffer `key` (jsui_set_buffer;
+// Animated.hostBuffer). Native whenever the runtime has the native module:
+// the runtime then writes the views that use it as the buffer changes,
+// without JS. Otherwise (JS driver) it follows HostBuffer.subscribe.
+export class AnimatedHostBuffer extends AnimatedNode {
+  constructor(key, index) {
+    super();
+    this._key = String(key);
+    this._index = Math.max(0, Math.floor(+index || 0));
+    this._sub = null;
+    this._listenSub = null;
+    if (NativeAnimatedAPI) this._isNative = true;
+  }
+  __getValue() {
+    const b = HostBuffer.get(this._key);
+    const v = b && this._index < b.length ? b[this._index] : 0;
+    return v === v ? v : 0;
+  }
+  __getNativeConfig() {
+    return { type: 'hostBuffer', key: this._key, index: this._index };
+  }
+  __attach() {
+    if (!this._isNative) this._sub = HostBuffer.subscribe(this._key, () => batch(() => this.__changed()));
+  }
+  __detach() {
+    if (this._sub) this._sub();
+    this._sub = null;
+    this.__dropNative();
+  }
+  addListener(callback) {
+    const id = super.addListener(callback);
+    if (!this._listenSub) {
+      this._listenSub = HostBuffer.subscribe(this._key, () => {
+        // An attached JS-driven node tells its listeners in __changed().
+        if (this._sub || !this._listeners) return;
+        const value = this.__getValue();
+        for (const k in this._listeners) this._listeners[k]({ value });
+      });
+    }
+    return id;
+  }
+  removeListener(id) {
+    super.removeListener(id);
+    if (this._listenSub && !this.hasListeners()) {
+      this._listenSub();
+      this._listenSub = null;
+    }
+  }
+  removeAllListeners() {
+    super.removeAllListeners();
+    if (this._listenSub) this._listenSub();
+    this._listenSub = null;
+  }
 }
 
 export class AnimatedInterpolation extends AnimatedNode {

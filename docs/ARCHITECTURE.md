@@ -720,11 +720,12 @@ first entrance stalls for tens of milliseconds. Every Graphite context
 
 ## Game data
 
-Three channels connect the game and the UI (`include/jsui/jsui.h`):
+Four channels connect the game and the UI (`include/jsui/jsui.h`):
 
 | | Game → UI | UI → game | Use for |
 | --- | --- | --- | --- |
 | **Shared state** | `jsui_set_state` / `jsui_patch_state` → `useHostState(key)` | `HostState.set` / `patch` → `on_state` | anything the UI shows: currency, inventory, quests, settings |
+| **Frame data** | `jsui_set_buffer` / `jsui_map_buffer` → `useHostBuffer*`, `Animated.hostBuffer` | | numbers that change every frame: enemy positions for nameplates and markers, minimap blips, cooldowns |
 | **Calls** | `jsui_call_ui` → `Host.handle(name, fn)` → `done` | `await Host.call(name, args)` → `on_call` → `jsui_resolve_call` / `jsui_reject_call` | requests with an answer: buy, equip, confirm dialogs |
 | **Messages** | `jsui_post_message` → `useHostMessage` | `Host.postMessage` → `on_message` | fire-and-forget events: "level up", "play sound" |
 
@@ -843,6 +844,66 @@ Hosts: the WASM page API mirrors this (`jsui.setState` / `patchState` /
 `call_requested` + `resolve_call` / `reject_call` and `call_ui(name, args,
 Callable)` (see `integrations/godot/README.md`). `tools/jsui-record`
 timelines can set state with `{"state": key, "data": value}` steps.
+
+### Frame data
+
+Shared state is JSON: the game writes text, the runtime parses it, JS parses
+it again, and React reconciles what changed. That is fine for data that
+changes now and then, but a list of 30 enemy positions pushed every frame
+pays all of it every frame. Frame data buffers (`src/host_buffers.*`,
+`packages/react/src/hostBuffer.js`) are named typed arrays instead:
+
+* The game copies numbers in (`jsui_set_buffer(rt, key, JSUI_BUFFER_F32,
+  data, count)`, a no-op when the bytes are unchanged) or writes them in
+  place (`jsui_map_buffer` + `jsui_commit_buffer`). Element types: f32, f64,
+  i32, u32, i16, u16, i8, u8. The layout (e.g. x, y, hp per enemy) is a
+  convention between game and UI. Buffers belong to the runtime like shared
+  state (set any time, survive reloads, shared by all surfaces).
+* JS sees a buffer as a typed array over the runtime's storage: an
+  ArrayBuffer created with QuickJS's `JS_NewArrayBuffer` on the host memory
+  (no copy, no free function), one per key and reused while the storage
+  stays put. Storage grows geometrically and only moves when a buffer
+  outgrows its capacity or is removed; the ArrayBuffer is detached first
+  (`HostBuffers::onRelease` → `JsEngine::releaseBuffer`), so a kept view
+  reads as empty rather than freed memory. `HostBuffer.get(key)` caches the
+  typed array by version.
+* Delivery: changed keys reach JS once per `jsui_tick` (right after shared
+  state) as `__jsui_onHostBuffer(keys)`, notifying `HostBuffer.subscribe`
+  callbacks and hooks in one discrete-priority batch. `useHostBuffer(key)`
+  re-renders on every change; `useHostBufferSelector(key, selector)` only
+  when the selected value changes (the number of enemies), and
+  `useHostBufferListener(key, cb)` never.
+* `Animated.hostBuffer(key, index)` (`useHostBufferValue`) is an Animated
+  node that is native from the start: a `hostBuffer` node in
+  `src/animated/native_animated.cpp` reads element `index` (0 when out of
+  range or unset) and is marked dirty by `HostBuffers::onChange`, so the
+  views using it (transforms, opacity, colors through `interpolate()`, math
+  nodes) are written by the runtime in the next `jsui_tick` or
+  `jsui_tick_native`, with no JS and no React render. A nameplate per enemy
+  re-renders only when the enemy count changes. Without the native module it
+  follows `HostBuffer.subscribe` on the JS driver.
+* Hosts: the Godot `JsuiView.set_buffer(key, packed_array)` takes
+  `PackedFloat32Array` / `PackedFloat64Array` / `PackedInt32Array` /
+  `PackedByteArray` and `PackedVector2Array` / `PackedVector3Array` /
+  `PackedColorArray` (their components); the web host has
+  `setBuffer(key, typedArray)` and zero-copy `mapBuffer(key, Float32Array,
+  count)` + `commitBuffer(key)`.
+
+`tools/jsui-bench` compares the three ways at 30, 100 and 1000 moving
+markers (`markers-json-*`, `markers-buffer-*`, `markers-native-*`, see
+"Performance"). Per frame on an M1 Ultra (Release, painting off, mean µs):
+
+| markers | JSON state + React | buffer + React | buffer + `Animated.hostBuffer` |
+| --- | --- | --- | --- |
+| 30 | 911 | 861 | 54 |
+| 100 | 2965 | 2815 | 192 |
+| 1000 | 29527 | 27601 | 2709 |
+
+Dropping JSON alone saves the serialization and parsing (~5%); the rest is
+React rendering every marker and the bridge's setProps each frame. Driving
+the views natively removes both (JS ~15 µs at 1000 markers); what is left is
+the native Animated evaluation and style writes (~2.4 µs per marker with two
+animated transforms).
 
 ## JS bridge contract
 
@@ -1359,7 +1420,11 @@ hover), `inventory` (500 slots through `useHostState` +
 `surfaces-props` (every surface's props change every frame),
 `surfaces-same-props` (pushed unchanged every frame), `surfaces-one-props`
 (one surface's per frame), `surfaces-resize` (every surface resized every
-frame). Under valgrind, run with
+frame), and `markers-{json,buffer,native}-{30,100,1000}` (N enemy markers
+moving every frame, fed as JSON shared state, as a frame data buffer rendered
+by React, or as a buffer driving `Animated.hostBuffer` natively; painting
+off; `host` is the host's own share, writing the JSON text, and counts in
+`total`). `--markers N,json|buffer|native` runs one. Under valgrind, run with
 `--tool=callgrind --instr-atstart=no`: the tool switches instrumentation on
 for the measured frames only.
 

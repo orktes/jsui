@@ -147,6 +147,14 @@ function loadModule(moduleUrl) {
   return p;
 }
 
+// JsuiBufferType of a typed array (or its prototype).
+const BUFFER_TYPES = [Float32Array, Float64Array, Int32Array, Uint32Array, Int16Array, Uint16Array, Int8Array, Uint8Array];
+function bufferType(data) {
+  const t = BUFFER_TYPES.findIndex((T) => data instanceof T);
+  if (t < 0) throw new TypeError('setBuffer / mapBuffer: expected a Float32Array, Float64Array, Int32Array, Uint32Array, Int16Array, Uint16Array, Int8Array or Uint8Array');
+  return t;
+}
+
 let nextHostId = 1;
 const modsOf = (e) => (e.shiftKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
 // Keys whose browser default (focus move, caret move inside the keyboard sink)
@@ -1375,6 +1383,8 @@ class JsuiHost extends CanvasView {
     this._padView = null;            // the view gamepads drive (null: this one)
     this._surfaces = new Set();      // JsuiSurface views
     this._handlers = new Map();  // Host.call name -> fn (handle())
+    this._stage = 0;             // setBuffer staging memory (WASM heap)
+    this._stageSize = 0;
     this._uiCalls = new Map();   // callUi id -> {resolve, reject}
     this.rootTag = 1;
 
@@ -1462,6 +1472,50 @@ class JsuiHost extends CanvasView {
   getState(key) {
     const p = this._withStrings([String(key)], (k) => this.module._jsui_get_state(this.rt, k));
     return p ? JSON.parse(this.module.UTF8ToString(p)) : undefined;
+  }
+
+  // ------------------------------------------------- frame data (jsui.h)
+
+  /** Frame data: numbers the UI reads without JSON (useHostBuffer /
+   * useHostBufferValue / HostBuffer.get). `data` is a typed array
+   * (Float32Array, Float64Array, Int32Array, Uint32Array, Int16Array,
+   * Uint16Array, Int8Array or Uint8Array), copied into the runtime; undefined
+   * removes the buffer. Returns true if the contents changed. */
+  setBuffer(key, data) {
+    if (data == null) return this.removeBuffer(key);
+    const type = bufferType(data);
+    const M = this.module;
+    const bytes = data.byteLength;
+    if (bytes > this._stageSize) {
+      if (this._stage) M._free(this._stage);
+      this._stageSize = Math.max(bytes, this._stageSize * 2, 256);
+      this._stage = M._malloc(this._stageSize);
+    }
+    // Read HEAPU8 after the malloc: memory growth replaces the ArrayBuffer.
+    if (bytes) M.HEAPU8.set(new Uint8Array(data.buffer, data.byteOffset, bytes), this._stage);
+    return this._withStrings([String(key)], (k) =>
+      M._jsui_set_buffer(this.rt, k, type, this._stage, data.length)) === 1;
+  }
+
+  /** Zero-copy: a typed array of `count` elements of `Type` (Float32Array, ...)
+   * over the runtime's buffer `key`, to fill and then commitBuffer(key). Map
+   * again every frame (the view is invalid after the next mapBuffer /
+   * setBuffer of the key, or when the WASM memory grows). */
+  mapBuffer(key, Type, count) {
+    const type = bufferType(Type.prototype);
+    const M = this.module;
+    const p = this._withStrings([String(key)], (k) => M._jsui_map_buffer(this.rt, k, type, count));
+    return p ? new Type(M.HEAPU8.buffer, p, count) : null;
+  }
+
+  /** Publishes what was written through mapBuffer(key). */
+  commitBuffer(key) {
+    return this._withStrings([String(key)], (k) => this.module._jsui_commit_buffer(this.rt, k)) === 1;
+  }
+
+  /** Removes buffer `key` (the UI sees undefined). Returns true if it existed. */
+  removeBuffer(key) {
+    return this._withStrings([String(key)], (k) => this.module._jsui_remove_buffer(this.rt, k)) === 1;
   }
 
   /** Answers the UI's `Host.call(name, args)`: `fn(args)` returns a value or a
@@ -1662,6 +1716,8 @@ class JsuiHost extends CanvasView {
     M.__jsuiHosts.delete(this.hostId);
     if (this._baseUrlPtr) M._free(this._baseUrlPtr);
     this._baseUrlPtr = 0;
+    if (this._stage) M._free(this._stage);
+    this._stage = this._stageSize = 0;
   }
 
   _checkError() {

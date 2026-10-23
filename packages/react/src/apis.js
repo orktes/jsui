@@ -673,6 +673,7 @@ export { onHostMessage } from './events.js';
 import { onHostMessage } from './events.js';
 import { call as hostCall, handle as hostHandle } from './hostData.js';
 export { HostState, useHostState, useHostStateSelector, useHostHandler } from './hostData.js';
+export { HostBuffer, useHostBuffer, useHostBufferSelector, useHostBufferListener } from './hostBuffer.js';
 
 /**
  * Game <-> UI messages (postMessage / onMessage; payloads are JSON-serialized)

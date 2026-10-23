@@ -492,6 +492,8 @@ JsEngine::~JsEngine() {
   impl.rejections.clear();
   for (auto& [id, fn] : impl.hostCalls) JS_FreeValue(ctx, fn);
   impl.hostCalls.clear();
+  for (auto& [key, view] : impl.bufferViews) JS_FreeValue(ctx, view.buffer);
+  impl.bufferViews.clear();
   for (auto& [a, name] : impl.atomNames) JS_FreeAtom(ctx, a);
   impl.atomNames.clear();
   JS_FreeAtom(ctx, impl.atomDispatch);
@@ -631,6 +633,25 @@ void JsEngine::stateChanged(const std::vector<std::string>& keys) {
   Value arg(std::move(list));
   callGlobal("__jsui_onHostState", &arg, 1);
 }
+
+void JsEngine::buffersChanged(const std::vector<std::string>& keys) {
+  if (keys.empty()) return;
+  Value::Array list;
+  list.reserve(keys.size());
+  for (auto& k : keys) list.emplace_back(k);
+  Value arg(std::move(list));
+  callGlobal("__jsui_onHostBuffer", &arg, 1);
+}
+
+void JsEngine::Impl::releaseBuffer(const std::string& key) {
+  auto it = bufferViews.find(key);
+  if (it == bufferViews.end()) return;
+  JS_DetachArrayBuffer(ctx, it->second.buffer);
+  JS_FreeValue(ctx, it->second.buffer);
+  bufferViews.erase(it);
+}
+
+void JsEngine::releaseBuffer(const std::string& key) { impl_->releaseBuffer(key); }
 
 bool JsEngine::hasCall(uint64_t id) const { return impl_->hostCalls.count(id) > 0; }
 

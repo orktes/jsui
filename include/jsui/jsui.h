@@ -180,6 +180,66 @@ typedef void (*JsuiCallResultFn)(void* user, uint64_t call_id, int ok, const cha
 JSUI_API uint64_t jsui_call_ui(JsuiRuntime* rt, const char* name, const char* args_json, JsuiCallResultFn done,
                                void* user);
 
+/* ------------------------------------------------------- Frame data
+ *
+ * Numbers the game pushes every frame (30 enemy positions for nameplates
+ * and markers, minimap blips, cooldown timers): named typed arrays, no JSON.
+ * Like shared state they belong to the runtime (set them any time; they
+ * survive reloads) and are shared by all of its surfaces. JS sees a buffer as
+ * a typed array over the runtime's own memory (no copy, no parsing):
+ *
+ *     // Re-render only when the number of enemies changes ...
+ *     const count = useHostBufferSelector('enemies', (b) => b.length / 4, 0);
+ *     // ... and let the runtime move each marker every frame, no JS at all:
+ *     const x = useHostBufferValue('enemies', i * 4), y = useHostBufferValue('enemies', i * 4 + 1);
+ *     <Animated.View style={{ transform: [{ translateX: x }, { translateY: y }] }} />
+ *
+ *     useHostBuffer('enemies')                 // Float32Array; re-renders on every change
+ *     useHostBufferListener('enemies', (b) => ...)   // per change, no re-render
+ *     HostBuffer.get('enemies') / subscribe(key, cb)
+ *
+ * Animated.hostBuffer(key, index) (useHostBufferValue) is a native Animated
+ * node: the runtime writes the views that use it (transforms, opacity,
+ * colors through interpolate(), ...) in the jsui_tick() or jsui_tick_native()
+ * after the buffer changed. Changed keys reach JS subscribers once per
+ * jsui_tick(), like shared state.
+ *
+ * The layout of a buffer is up to the game and the UI (e.g. x, y, hp, flags
+ * per enemy). Setting the same contents again is a no-op. Treat the JS view as
+ * read-only; it is valid until the buffer grows past its capacity or is
+ * removed, after which it is detached (length 0): read it through the API
+ * each time instead of keeping it. */
+typedef enum JsuiBufferType {
+    JSUI_BUFFER_F32 = 0, /* Float32Array */
+    JSUI_BUFFER_F64,     /* Float64Array */
+    JSUI_BUFFER_I32,     /* Int32Array */
+    JSUI_BUFFER_U32,     /* Uint32Array */
+    JSUI_BUFFER_I16,     /* Int16Array */
+    JSUI_BUFFER_U16,     /* Uint16Array */
+    JSUI_BUFFER_I8,      /* Int8Array */
+    JSUI_BUFFER_U8       /* Uint8Array */
+} JsuiBufferType;
+
+/* Copies `count` elements of `type` from `data` into buffer `key`. Returns 1
+ * if the contents changed, 0 if they were the same, -1 for a NULL key or an
+ * invalid type. */
+JSUI_API int jsui_set_buffer(JsuiRuntime* rt, const char* key, JsuiBufferType type, const void* data, size_t count);
+/* Zero-copy alternative: returns the buffer's storage for `count` elements of
+ * `type` (earlier contents kept up to that length, new elements 0) for the
+ * game to write into, then jsui_commit_buffer(). Write and commit before the
+ * next jsui_tick() or input call. The pointer is valid until the next
+ * jsui_map_buffer / jsui_set_buffer / jsui_remove_buffer of that key. NULL for
+ * a NULL key or an invalid type. */
+JSUI_API void* jsui_map_buffer(JsuiRuntime* rt, const char* key, JsuiBufferType type, size_t count);
+/* Publishes what was written through jsui_map_buffer (always counts as a
+ * change). Returns 1, or -1 for an unknown key. */
+JSUI_API int jsui_commit_buffer(JsuiRuntime* rt, const char* key);
+/* Removes buffer `key` (JS then sees undefined). Returns 1 if it existed. */
+JSUI_API int jsui_remove_buffer(JsuiRuntime* rt, const char* key);
+/* The committed contents of `key` (NULL if unset); `type` and `count` may be
+ * NULL. Valid until the buffer is next changed. */
+JSUI_API const void* jsui_get_buffer(JsuiRuntime* rt, const char* key, JsuiBufferType* type, size_t* count);
+
 /* ---------------------------------------------------------------- Config */
 
 typedef struct JsuiConfig {

@@ -35,6 +35,8 @@ for (const mode of ['production', 'development']) {
     await build({ entry: path.join(here, 'e2e', 'images.jsx'), outfile: imagesFile, mode });
     const surfacesFile = path.join(dir, 'surfaces.js');
     await build({ entry: path.join(here, 'e2e', 'surfaces.jsx'), outfile: surfacesFile, mode });
+    const hostBuffersFile = path.join(dir, 'host_buffers.js');
+    await build({ entry: path.join(here, 'e2e', 'host_buffers.jsx'), outfile: hostBuffersFile, mode });
     const tests = [
       'react_e2e',
       'react_interactions_e2e',
@@ -42,6 +44,7 @@ for (const mode of ['production', 'development']) {
       'react_host_data_e2e',
       'react_images_e2e',
       'react_surfaces_e2e',
+      'react_host_buffers_e2e',
     ];
     const { stdout } = await promisify(execFile)(binary, tests, {
       env: Object.assign({}, process.env, {
@@ -52,6 +55,7 @@ for (const mode of ['production', 'development']) {
         JSUI_REACT_HOST_DATA_BUNDLE: hostDataFile,
         JSUI_REACT_IMAGES_BUNDLE: imagesFile,
         JSUI_REACT_SURFACES_BUNDLE: surfacesFile,
+        JSUI_REACT_HOST_BUFFERS_BUNDLE: hostBuffersFile,
       }),
       cwd: repo,
     }).catch((e) => {
@@ -66,6 +70,7 @@ for (const mode of ['production', 'development']) {
     assert.match(stdout, /PASS react_surfaces_e2e$/m);
     assert.match(stdout, /PASS react_surfaces_e2e_host_picks_main/);
     assert.match(stdout, /PASS react_surfaces_e2e_error_isolation/);
+    assert.match(stdout, /PASS react_host_buffers_e2e/);
     if (process.env.JSUI_E2E_VERBOSE) console.log(stdout);
     assert.doesNotMatch(stdout, /skipped/);
   });
