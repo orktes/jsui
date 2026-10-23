@@ -158,7 +158,7 @@ function Hints() {
   return (
     <View pointerEvents="none" style={styles.hints}>
       <Text style={styles.hintText}>
-        Drag empty space to orbit · wheel to zoom · Space spawns · Tab / D-pad moves focus · Enter / A presses
+        Drag empty space to move the camera · wheel to zoom · Space spawns · Tab / D-pad moves focus · Enter / A presses
       </Text>
     </View>
   );
