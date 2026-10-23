@@ -340,7 +340,7 @@ typedef struct JsuiConfig {
     int height;
     float pixel_ratio;      /* device pixels per logical px */
     const char* base_url;   /* resolves relative URLs; defaults to the bundle URL */
-    int dev_mode;           /* 1: poll the dev server and reload on change, show error overlay */
+    int dev_mode;           /* 1: poll the dev server and hot-update / reload on change, show error overlay */
 
     JsuiLogFn log;          /* NULL: print to stderr / console */
     void* log_user;
@@ -375,6 +375,11 @@ JSUI_API int jsui_load_bundle_source(JsuiRuntime* rt, const char* source, size_t
 JSUI_API int jsui_load_bundle_url(JsuiRuntime* rt, const char* url);
 /* Tear down the JS context and reload the last bundle (dev mode does this automatically). */
 JSUI_API void jsui_reload(JsuiRuntime* rt);
+/* For hosts that watch the dev server themselves: it has a new build (or a
+ * build error). Bundles from `jsui dev` hot-update in place (React Fast
+ * Refresh: components keep their state) and fall back to a reload; other
+ * bundles reload. Dev mode with an http:// bundle URL does this on its own. */
+JSUI_API void jsui_dev_update(JsuiRuntime* rt);
 
 /* Register a font face from memory. Data is copied. `weight` 100..900,
  * `italic` 0/1. The JS side can also load fonts with `jsui.loadFont(...)`. */

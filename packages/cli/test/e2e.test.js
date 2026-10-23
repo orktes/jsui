@@ -6,13 +6,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdtemp } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { build } from '../src/index.js';
+import { build, dev } from '../src/index.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..', '..');
@@ -92,3 +92,45 @@ for (const mode of ['production', 'development']) {
     assert.doesNotMatch(stdout, /skipped/);
   });
 }
+
+// Hot updates in the real runtime: `jsui dev` serves test/e2e/hmr (copied to a
+// temp dir) and tests/native/react_hmr_e2e_test.cpp loads it in dev mode,
+// then copies steps/<n>/* over the app and checks what renders.
+test('native runtime hot updates (jsui dev)', { skip: !existsSync(binary) && `no ${binary}` }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'jsui-e2e-hmr-'));
+  await cp(path.join(here, 'e2e', 'hmr'), dir, { recursive: true });
+  const app = await readFile(path.join(dir, 'App.jsx'), 'utf8');
+  const index = await readFile(path.join(dir, 'index.jsx'), 'utf8');
+  const steps = [
+    { 'App.jsx': app.replace("'v1 '", "'v2 '") },
+    { 'label.js': "export const label = 'b';\n" },
+    { 'App.jsx': app.replace("const text = 'v1 '", 'const text = <View') },
+    { 'App.jsx': app.replace("'v1 '", "'v3 '") },
+    { 'App.jsx': app.replace("const text = 'v1 '", "if (n >= 0) throw new Error('render boom');\n  const text = 'v4 '") },
+    { 'App.jsx': app.replace("'v1 '", "'v5 '") },
+    { 'index.jsx': index + '// edited\n' },
+  ];
+  for (let i = 0; i < steps.length; i++) {
+    const d = path.join(dir, 'steps', String(i + 1));
+    await mkdir(d, { recursive: true });
+    for (const [f, c] of Object.entries(steps[i])) await writeFile(path.join(d, f), c);
+  }
+  // The steps directory is not imported, so the watcher ignores it.
+  const server = await dev({ entry: path.join(dir, 'index.jsx'), port: 0, log: () => {} });
+  try {
+    const { stdout } = await promisify(execFile)(binary, ['react_hmr_e2e'], {
+      env: Object.assign({}, process.env, {
+        JSUI_REACT_HMR_URL: `http://127.0.0.1:${server.port}/bundle.js`,
+        JSUI_REACT_HMR_DIR: dir,
+      }),
+      cwd: repo,
+    }).catch((e) => {
+      throw new Error(`jsui-tests failed:\n${e.stdout}\n${e.stderr}`);
+    });
+    if (process.env.JSUI_E2E_VERBOSE) console.log(stdout);
+    assert.match(stdout, /PASS react_hmr_e2e/);
+    assert.doesNotMatch(stdout, /skipped/);
+  } finally {
+    await server.close();
+  }
+});

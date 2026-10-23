@@ -13,7 +13,7 @@ import { skillCommand, SKILL_USAGE } from '../src/skill.js';
 
 const USAGE = `usage:
   jsui build <entry> [-o dist/bundle.js] [--minify] [--sourcemap] [--dev]
-  jsui dev <entry> [--port 5173] [--host 127.0.0.1]
+  jsui dev <entry> [--port 5173] [--host 127.0.0.1] [--no-hmr]
 
   jsui screenshot <entry> [-o screenshot.png] [--wait 1000] [view options]
   jsui inspect <entry> [--wait 1000] [--find <selector>] [--json] [view options]
@@ -25,6 +25,8 @@ const USAGE = `usage:
 ${SKILL_USAGE}
 
 'react-native' imports are aliased to @orktes/jsui-react; JSX works in .js/.jsx/.tsx.
+jsui dev hot-updates edited components in place (React Fast Refresh, state is
+kept); --no-hmr reloads the whole bundle on every change instead.
 screenshot / inspect / run render with the CPU WebAssembly runtime in Node
 (deterministic; no browser or GPU). 'jsui run --help' lists the script steps.`;
 
@@ -161,6 +163,7 @@ async function main(argv) {
       dev: { type: 'boolean' },
       port: { type: 'string', short: 'p' },
       host: { type: 'string' },
+      'no-hmr': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       ...VIEW_OPTIONS,
     },
@@ -206,7 +209,7 @@ async function main(argv) {
       return 2;
     }
     try {
-      const server = await dev({ entry, port, host: values.host || '127.0.0.1' });
+      const server = await dev({ entry, port, host: values.host || '127.0.0.1', hmr: !values['no-hmr'] });
       const stop = async () => {
         await server.close();
         process.exit(0);

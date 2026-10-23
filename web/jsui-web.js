@@ -1677,6 +1677,14 @@ class JsuiHost extends CanvasView {
 
   reload() { this.module._jsui_reload(this.rt); }
 
+  /** The dev server has a new build: hot-updates a `jsui dev` bundle in place
+   * (components keep their state), reloads any other. Dev mode with an
+   * http:// bundle URL does this on its own. */
+  devUpdate() {
+    if (this.module._jsui_dev_update) this.module._jsui_dev_update(this.rt);
+    else this.reload();
+  }
+
   /** Register a font from bytes (ArrayBuffer / typed array). */
   registerFont(family, bytes, weight = 400, italic = false) {
     const M = this.module;
@@ -1919,10 +1927,11 @@ class JsuiHost extends CanvasView {
   // --------------------------------------------------------------- dev mode
 
   // Polls GET <bundle origin>/__jsui/version (served by `jsui dev`); the body
-  // is an opaque token that changes whenever the bundle was rebuilt. A
-  // long-polling server simply holds the request; we re-ask right away.
+  // is an opaque token that changes whenever the bundle was rebuilt (or, with
+  // hmr=1, failed to build). A long-polling server simply holds the request;
+  // we re-ask right away.
   async _startDevPoll() {
-    const url = new URL('/__jsui/version', this._bundleUrl).href;
+    const url = new URL('/__jsui/version?hmr=1', this._bundleUrl).href;
     const signal = this._abort.signal;
     let last = null;
     while (!this._destroyed) {
@@ -1932,8 +1941,8 @@ class JsuiHost extends CanvasView {
         if (res.ok) {
           const v = (await res.text()).trim();
           if (last !== null && v !== last && !this._destroyed) {
-            this._emit('log', 1, 'bundle changed, reloading');
-            this.reload();
+            this._emit('log', 1, 'bundle changed');
+            this.devUpdate();
           }
           last = v;
           ok = true;

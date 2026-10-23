@@ -1,12 +1,12 @@
 # @orktes/jsui-cli
 
 Bundles React Native–style apps for the JSUI runtime (esbuild 0.28.2), serves
-them to a dev host with live reload, renders and scripts them headlessly, and
-ships the JSUI agent skill for coding agents.
+them to a dev host with hot updates (React Fast Refresh), renders and scripts
+them headlessly, and ships the JSUI agent skill for coding agents.
 
 ```sh
 npx jsui build app.jsx -o dist/bundle.js [--minify] [--sourcemap] [--dev]
-npx jsui dev app.jsx [--port 5173] [--host 127.0.0.1]
+npx jsui dev app.jsx [--port 5173] [--host 127.0.0.1] [--no-hmr]
 npx jsui screenshot app.jsx -o shot.png [--width 1280 --height 720 --scale 2 --wait 1000]
 npx jsui inspect app.jsx [--find '#play'] [--json]
 npx jsui run app.jsx steps.json|script.mjs
@@ -37,15 +37,39 @@ npx jsui skill [print --all | install [dir] [--global] | path]
 
 | Path | |
 | --- | --- |
-| `/bundle.js`, `/bundle.js.map` | last successful build (errors keep the previous one) |
+| `/bundle.js` | last successful build (errors keep the previous one); the hot-updating dev bundle unless `--no-hmr` |
+| `/bundle.js.map` | its source map (`--no-hmr` only) |
 | `/assets/*` | emitted assets |
-| `/__jsui/version` | plain-text opaque token; changes on every successful rebuild. `?since=<token>` long-polls (~25 s) until it differs |
+| `/__jsui/version` | plain-text opaque token; changes on every successful rebuild (with `?hmr=1`, failed builds too). `?since=<token>` long-polls (~25 s) until it differs |
+| `/__jsui/hmr?from=<token>` | the hot update script from that version to the current one |
 | `/__jsui/error` | current build error text (empty when OK) |
 | `/` | index page (links the WASM web host if `web/` is built) |
 | anything else | static files from the entry's directory |
 
-Point a host at it: `jsui-viewer --dev http://127.0.0.1:5173/bundle.js`.
+Point a host at it: `jsui-viewer --dev http://127.0.0.1:5173/bundle.js`, the
+web host (`/web/index.html?bundle=/bundle.js`), or Godot (`JsuiView.dev_mode`).
 Build errors are printed with file/line and the last good bundle stays live.
+
+### Hot updates
+
+Saving a file updates the running UI without losing its state:
+
+* A file whose exports are all React components re-renders in place; its
+  components keep their state (`useState`, refs, scroll positions). If you
+  change which hooks a component calls, that one component remounts.
+* Any other module (constants, styles, helpers, JSON) re-runs together with
+  the modules that import it, up to the nearest component-only files.
+* An edit that no component file sits above (the entry file that calls
+  `AppRegistry.registerComponent`), a change to a dependency or an asset, or a
+  restarted dev server reloads the whole bundle instead.
+* Build errors and errors thrown while re-running a module appear on the
+  runtime's error overlay; the next good save clears it. A component that
+  throws while rendering unmounts the root as usual, and the fix mounts it
+  again.
+* `module.hot` has `accept()`, `dispose((data) => ...)`, `data`, `decline()`
+  and `invalidate()` for modules with side effects to clean up.
+
+`--no-hmr` serves the plain bundle and reloads it on every change.
 
 ## Headless: screenshot, inspect, run
 

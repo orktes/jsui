@@ -195,6 +195,8 @@ int jsui_load_bundle_url(JsuiRuntime* rt, const char* url) {
 
 void jsui_reload(JsuiRuntime* rt) { rt->rt->reload(); }
 
+void jsui_dev_update(JsuiRuntime* rt) { rt->rt->devUpdate(); }
+
 int jsui_register_font(JsuiRuntime* rt, const char* family, const void* data, size_t size, int weight, int italic) {
   bool ok = rt->rt->fonts.registerFont(family, data, size, weight, italic != 0);
   if (ok)

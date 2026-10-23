@@ -9,7 +9,7 @@ Fast development of beautiful, responsive in-game UIs with React.
   straight into your OpenGL / GLES / WebGL framebuffer or texture with the
   optional Skia Ganesh GPU backend (`jsui_render_gl`).
 * Native and **WebAssembly** builds from one codebase.
-* Dev mode: point the runtime at a local server and it live-reloads your bundle.
+* Dev mode: point the runtime at `jsui dev` and edits hot-update in place (React Fast Refresh keeps component state), with an error overlay for build and runtime errors.
 * Reference tests compare every example pixel-by-pixel with the same code
   rendered by react-native-web in headless Chrome.
 

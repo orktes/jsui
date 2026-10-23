@@ -72,7 +72,7 @@ library with a C API, and the same core compiles to WebAssembly.
 | `src/runtime.*`, `src/capi.cpp` | Runtime object and C API wrappers |
 | `tools/jsui-render` | Headless renderer: bundle → PNG (tests, CI) |
 | `tools/jsui-record` | Headless recorder: bundle + JSON input timeline → 60 fps frames / H.264 (ffmpeg), with cursor, caption and input-legend overlay |
-| `tools/jsui-viewer` | Windowed host with dev mode (live reload) |
+| `tools/jsui-viewer` | Windowed host with dev mode (hot updates / live reload) |
 | `tools/jsui-bench` | Frame benchmark: per-phase time (JS, commit, Animated, style, layout, input, paint), work counters and allocations per frame (see "Performance") |
 | `tools/jsui-paint-bench` | Paint benchmark: paint time, pixels repainted, draw calls and GL calls per frame on the CPU raster and Ganesh GL (see "Paint performance") |
 | `integrations/godot` | Godot 4 GDExtension (`JsuiView` Control) + demo project |
@@ -1738,19 +1738,45 @@ Point any host at it (`jsui-viewer --dev http://localhost:5173/bundle.js`, or
 `cfg.dev_mode = 1` + `jsui_load_bundle_url`).
 
 * **Version endpoint.** When the bundle came from `http://host:port/...`, the
-  runtime GETs `http://host:port/__jsui/version` every ~500 ms (2 s while the
-  server is unreachable). The response body is an opaque version token
-  (whitespace trimmed); any change means "the bundle changed" and triggers
-  `reload()`. The server should answer immediately (no long-poll needed); a
-  bundle response may carry `X-Jsui-Version: <token>` so a rebuild between
-  the bundle download and the first poll is not missed.
+  runtime GETs `http://host:port/__jsui/version?hmr=1` every ~500 ms (2 s
+  while the server is unreachable). The response body is an opaque version
+  token (whitespace trimmed); any change means "the bundle changed" and calls
+  `Runtime::devUpdate()` (C API `jsui_dev_update`, for hosts that poll
+  themselves, like the web host on https). If the bundle defined
+  `globalThis.__jsui_onDevUpdate`, that handles it (hot update); otherwise the
+  runtime does a `reload()`. The server should answer immediately (no
+  long-poll needed); a bundle response may carry `X-Jsui-Version: <token>` so
+  a rebuild between the bundle download and the first poll is not missed.
+  With `hmr=1`, `jsui dev` also changes the token when a build fails, so the
+  hot-update client can show the error.
+* **Hot updates (React Fast Refresh).** `jsui dev` (unless `--no-hmr`) serves
+  a module-per-function bundle (`packages/cli/src/hmr.js`): the vendor part
+  (node_modules, `@orktes/jsui-react`, assets) bundled once by esbuild, then
+  each app file run through react-refresh's Babel plugin and esbuild's
+  CommonJS transform, wrapped in `__jsui_hmr.define(id, deps, factory)`, and
+  the client (`hmr-runtime.js`). On a change the client fetches
+  `/__jsui/hmr?from=<its version>`, a script with the changed modules and
+  `__jsui_hmr.apply(ids, version)`, which it runs with
+  `__jsui_native.evalScript(source, name)`. `apply` re-executes the changed
+  modules and their importers up to the nearest refresh boundaries (modules
+  that export only React components) and calls React Refresh: edited
+  components re-render and keep their state (hooks that changed remount
+  that component). An edit that reaches a module without importers (the
+  entry), a changed dependency or asset, or an unknown version reloads the
+  whole bundle instead. Build errors, and errors thrown while re-running a
+  module, go to `__jsui_native.devError(text)` (the overlay); the next good
+  update clears it with `devError(null)` and retries what failed. A render
+  error unmounts the root as usual; the fix mounts it again. `module.hot`
+  offers `accept()`, `dispose(cb)`, `data`, `decline()` and `invalidate()`.
 * **Reload** tears down the JS context, the Document, in-flight loads and the
   image cache, then reloads the bundle URL. The last good frame (recorded as
   an `SkPicture` before teardown) stays on screen until the new bundle renders,
   and keeps showing if the new bundle throws.
 * **Error overlay.** While `jsui_last_error()` is set, a red-tinted panel with
   the message and stack (monospace) is painted over the frame. Escape
-  (`jsui_send_key`) dismisses it; the next successful load clears it.
+  (`jsui_send_key`) dismisses it; the next successful load (or hot update)
+  clears it. A bundle URL that answers with an error status shows the
+  response body too (`jsui dev` sends the build error with its 503).
 
 ## Resource loading
 
