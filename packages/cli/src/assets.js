@@ -9,7 +9,7 @@ import path from 'node:path';
 
 export const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'];
 export const FONT_EXTS = ['ttf', 'otf', 'woff', 'woff2'];
-export const OTHER_EXTS = ['mp3', 'wav', 'ogg', 'mp4', 'bin'];
+export const OTHER_EXTS = ['mp3', 'wav', 'ogg', 'oga', 'opus', 'flac', 'm4a', 'aac', 'mp4', 'bin'];
 
 /** Intrinsic size of an image buffer, or null. */
 export function imageSize(buf, ext) {

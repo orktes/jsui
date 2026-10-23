@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "audio/audio.h"
 #include "core/document.h"
 #include "host_buffers.h"
 #include "host_state.h"
@@ -146,6 +147,9 @@ class Runtime {
   std::unique_ptr<LottieCache> lotties;
   // Compiled SkSL sources and ShaderViews (render/shader_view.h).
   std::unique_ptr<ShaderEffects> shaders;
+  // UI audio (jsui.h "Audio"): Sound requests to the handler / built-in
+  // backend. After the loader (the built-in backend reads through it).
+  std::unique_ptr<Audio> audio;
 
  private:
   // Node ids are unique across the surfaces (JS addresses nodes by id alone).
@@ -192,6 +196,8 @@ class Runtime {
   void deliverLottieEvents();
   // ShaderView compile errors.
   void deliverShaderEvents();
+  // Voice-ended / sound-loaded reports.
+  void deliverAudioEvents();
   // Runs the done callbacks of settled jsui_call_ui calls.
   void deliverUiCallResults();
   // The JS context is going away: cancels its unanswered Host.calls (ids
