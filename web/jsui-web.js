@@ -548,6 +548,8 @@ class DomView {
       this._installPassThroughInput(signal);
       return;
     }
+    this._pointerOver(false);  // until this canvas says otherwise
+    c.addEventListener('pointerenter', () => this._pointerOver(true), opt);
     c.style.touchAction = 'none';
     c.style.overscrollBehavior = 'none';
     c.style.userSelect = 'none';
@@ -598,6 +600,7 @@ class DomView {
     c.addEventListener('pointercancel', (e) => up(e, true), active);
     c.addEventListener('pointerleave', (e) => {
       if (e.pointerType === 'mouse' && !this._mouseButtons) this._inLeave();
+      this._pointerOver(false);
     }, opt);
     c.addEventListener('wheel', (e) => {
       const [x, y] = this._point(e);
@@ -678,7 +681,7 @@ class DomView {
         hovering = true;
         stamp(e);
         const used = this._inMove(x, y);
-        setHot(!e.buttons && (this.hitTest(x, y) & HIT_POINTER) !== 0);
+        setHot(!e.buttons && (this._hitAt(x, y) & HIT_POINTER) !== 0);
         if (used && !e.buttons) e.stopImmediatePropagation();
         this._updateCursor();
         return;
@@ -714,7 +717,7 @@ class DomView {
     // double clicks on what the UI captures.
     const captures = (e) => {
       const [x, y] = this._point(e);
-      return inside(x, y) && (this.hitTest(x, y) & HIT_POINTER) !== 0;
+      return inside(x, y) && (this._hitAt(x, y) & HIT_POINTER) !== 0;
     };
     for (const type of ['click', 'auxclick']) {
       addEventListener(type, (e) => {
@@ -735,7 +738,7 @@ class DomView {
       for (const t of e.changedTouches) {
         if (e.type === 'touchstart') {
           const [x, y] = this._point(t);
-          if (inside(x, y) && this.hitTest(x, y) !== 0) touches.add(t.identifier);
+          if (inside(x, y) && this._hitAt(x, y) !== 0) touches.add(t.identifier);
         }
         if (!touches.has(t.identifier)) all = false;
         if (e.type === 'touchend' || e.type === 'touchcancel') touches.delete(t.identifier);
@@ -832,6 +835,12 @@ class DomView {
 
   // The keyboard sink got focus (a click, Tab from the page, focus()).
   _sinkFocused() { this._hostOf()._focusPads(this); }
+
+  // A pointer entered / left the canvas (worker mode needs the hit map then).
+  _pointerOver() {}
+
+  // hitTest() for this file's own listeners (worker mode: no hitTest() caller).
+  _hitAt(x, y) { return this.hitTest(x, y); }
 }
 
 // A canvas showing one surface of a runtime: its size, renderer (WebGPU /

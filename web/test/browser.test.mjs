@@ -1697,6 +1697,10 @@ for (const renderer of ['cpu', 'webgpu']) test(`host textures: ImageData, canvas
 // effect (the pass-through / preventDefault answers come from it).
 test('scroll: the wheel scrolls a ScrollView, clicks land on the scrolled rows', async ({ page }) => {
   await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js' } });
+  // Worker mode: the first hitTest() asks the worker for the hit map, which comes with the next frame.
+  await page.evaluate(() => window.hosts.ui.hitTest(0, 0));
+  await frames(page, 2);
+  await idle(page);
   const hits = await page.evaluate(() => [130, 50, 335].map((x) => window.hosts.ui.hitTest(x, 10)));
   assert(hits.join() === '3,0,0', `hitTest over a row, the texture, nothing: ${hits}`);
   await page.mouse.move(200, 100);
@@ -1834,6 +1838,37 @@ for (const renderer of ['cpu', 'webgl', 'webgpu']) test(`worker: pixels equal ma
   const pts = [[20, 20], [100, 60], [240, 160], [400, 280], [60, 250]];
   const [pa, pb] = [await screenPixels(page, '#a', pts), await screenPixels(page, '#b', pts)];
   pts.forEach((_, i) => assert(near(pa[i], pb[i], 1), `screen at ${pts[i]}: main ${fmt(pa[i])}, worker ${fmt(pb[i])}`));
+});
+
+// The hit map (jsui_hit_regions, most of the worker frame's extras) is
+// computed only while the page needs it: a pointer over the canvas (wheel
+// events ask it), hitTest() called, or pass-through.
+test('worker: the hit map is computed only while the page needs it', async ({ page }) => {
+  await page.mouse.move(700, 500);  // away from the canvas
+  await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js', worker: true } });
+  const step = (fn) => page.evaluate(async (fn) => {
+    const j = window.hosts.ui;
+    if (fn === 'fx') j.postMessage('fx', null);  // a repaint
+    if (fn === 'hitTest') j.hitTest(10, 10);
+    for (let i = 0; i < 3; i++) await new Promise(requestAnimationFrame);
+    await j.whenIdle();
+    return { calls: (await j._debug('info')).hitCalls, updates: j.hitMapStats.updates };
+  }, fn);
+  const idle = await step('fx');
+  assert(idle.calls === 0 && idle.updates === 0, `computed without a consumer: ${JSON.stringify(idle)}`);
+  await page.mouse.move(100, 100);  // over the canvas
+  const over = await step('fx');
+  assert(over.calls > 0 && over.updates > 0, `pointer over the canvas: ${JSON.stringify(over)}`);
+  await page.mouse.move(700, 500);
+  const left = await step('fx');
+  const later = await step('fx');
+  assert(later.calls === left.calls, `computed after the pointer left: ${JSON.stringify([left, later])}`);
+  const asked = await step('hitTest');
+  const kept = await step('fx');
+  assert(asked.calls > later.calls && kept.calls > asked.calls, `after hitTest(): ${JSON.stringify([later, asked, kept])}`);
+  await mount(page, { id: 'pt', width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js', worker: true, passThrough: true } });
+  const pt = await page.evaluate(async () => (await window.hosts.pt._debug('info')).hitCalls);
+  assert(pt > 0, `passThrough: ${pt} hit map computations`);
 });
 
 test('worker: WebGL context loss: restored, then lost for good (CPU on a fresh canvas)', async ({ page }) => {
