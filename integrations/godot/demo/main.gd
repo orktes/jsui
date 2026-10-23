@@ -542,6 +542,7 @@ func _run_self_test() -> void:
 	await _test_runtime_freed_first()
 	await _test_host_textures()
 	await _test_lottie()
+	await _test_shaders()
 
 	if _tour:
 		await _run_tour()
@@ -912,6 +913,52 @@ func _test_lottie() -> void:
 	var moved := await _wait_for(seen_moving, 10.0)
 	_check("lottie playing", moved, "the square was seen at %d places while it plays" % xs.size())
 	playing.queue_free()
+	await get_tree().process_frame
+
+
+## Shaders (ShaderView, SkSL runtime effects) on this renderer: a fill from
+## colour uniforms, a shader post-processing the view's own painting
+## (`content`, mirrored), a host texture as a child shader (mirrored) and a
+## shader on the runtime clock (`time`) that repaints on its own.
+func _test_shaders() -> void:
+	var make := func(props: Dictionary) -> JsuiView:
+		var v := JsuiView.new()
+		v.bundle_url = ui.bundle_url
+		v.component = "ShaderProbe"
+		v.initial_props = props
+		v.auto_size = true
+		v.pixel_ratio = 1.0
+		v.pipeline_cache_path = ""
+		v.position = Vector2(176, 112)
+		return v
+	var red := Color8(220, 40, 60)
+	var green := Color8(30, 200, 90)
+	var fill: JsuiView = make.call({"mode": "fill"})
+	add_child(fill)
+	_check("shader fill", await _wait_for(func(): return _probe_shows(fill, red, green), 10.0),
+		"colour uniforms in each half (%s renderer; %s)" % [fill.get_renderer(), _probe_line(fill)])
+	fill.queue_free()
+	var content: JsuiView = make.call({"mode": "content"})
+	add_child(content)
+	_check("shader content", await _wait_for(func(): return _probe_shows(content, green, red), 10.0),
+		"the view's own children, mirrored (%s)" % _probe_line(content))
+	content.queue_free()
+	var textured: JsuiView = make.call({"mode": "texture", "name": "shaderprobe"})
+	textured.set_texture("shaderprobe", _two_colour_texture(red, green))
+	add_child(textured)
+	_check("shader host texture", await _wait_for(func(): return _probe_shows(textured, green, red), 10.0),
+		"a host texture as a child shader, mirrored (%s)" % _probe_line(textured))
+	textured.queue_free()
+	var clock: JsuiView = make.call({"mode": "clock"})
+	add_child(clock)
+	var reds := {}
+	var ticking := func() -> bool:
+		var img: Image = clock.get_frame_image()
+		if img != null and img.get_size() == PROBE_SIZE:
+			reds[img.get_pixel(32, 16).r8] = true
+		return reds.size() >= 3
+	_check("shader clock", await _wait_for(ticking, 10.0), "time advanced on its own: %d distinct frames" % reds.size())
+	clock.queue_free()
 	await get_tree().process_frame
 
 
