@@ -7,6 +7,7 @@ import { SCREENS } from '../screens/index.js';
 import { Features } from './home/Features.jsx';
 import { Pipeline } from './home/Pipeline.jsx';
 import { CodeTabs } from './home/CodeTabs.jsx';
+import { Highlights, SkillInstall } from './home/Highlights.jsx';
 
 const HeroScreen = SCREENS[0].component;
 
@@ -117,7 +118,9 @@ export function HomePage() {
   const { width, gutter, phone, tablet } = useLayout();
   const inner = Math.min(width - gutter * 2, 1240);
   const stackHero = width < 1100;
-  const heroW = stackHero ? inner : Math.round(inner * 0.6);
+  // Side by side: the hero copy column keeps room for two columns of highlights.
+  const heroW = stackHero ? inner : Math.min(Math.round(inner * 0.6), inner - 448 - 48);
+  const copyW = stackHero ? inner : inner - heroW - 48;  // the hero copy column
   return (
     <View>
       <Column style={{ paddingTop: phone ? 32 : 60 }}>
@@ -146,7 +149,13 @@ export function HomePage() {
                 <Button label="Open the playground" kind="ghost" to="/playground" />
               </View>
             </Reveal>
-            <Reveal delay={240}>
+            <View style={{ gap: 10 }}>
+              <Highlights width={copyW} delay={220} />
+              <Reveal delay={300} style={{ maxWidth: 520 }}>
+                <SkillInstall />
+              </Reveal>
+            </View>
+            <Reveal delay={340}>
               <View style={styles.proof}>
                 <View style={styles.proofDot} />
                 <Text style={styles.proofText}>This entire page is rendered by JSUI's WASM build into one canvas. No DOM, no CSS.</Text>

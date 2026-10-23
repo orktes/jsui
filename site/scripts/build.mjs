@@ -13,6 +13,7 @@
 //                                   present and the browser has WebGPU)
 //   modules.json                    which modules were deployed, and their versions
 //   app/bundle.js, app/assets/*     the site itself (site/app, built with @orktes/jsui-cli)
+//   llms.txt, og.png                site/public, copied as is
 //
 // Cache consistency: GitHub Pages serves everything with max-age=600, so a
 // browser may hold some files of the previous deploy and fetch others fresh
@@ -106,5 +107,7 @@ html = replaceAll(html, 'const modules = null;  // set by site/scripts/build.mjs
   `const modules = ${JSON.stringify(modules)};`, 'site/index.html');
 fs.writeFileSync(path.join(out, 'index.html'), html);
 fs.writeFileSync(path.join(out, '.nojekyll'), '');
+// Static files served as they are: llms.txt, the social preview image (og.png).
+fs.cpSync(path.join(SITE, 'public'), out, { recursive: true });
 console.log(`site: bundle ${(r.bytes / 1024).toFixed(1)} KiB, ${r.assets.length} assets in ${Date.now() - t0} ms`);
 console.log(`site: wrote ${out} (modules: cpu${gpu ? ' + webgl' : ''}${webgpu ? ' + webgpu' : ''})`);
