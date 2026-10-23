@@ -162,6 +162,9 @@ JsuiGpuContext* jsui_gpu_create_vulkan(const JsuiVulkanDevice* device) {
   return device ? jsui::graphite_gpu::createVulkan(*device) : nullptr;
 }
 JsuiGpuContext* jsui_gpu_create_metal(void* device, void* queue) { return jsui::graphite_gpu::createMetal(device, queue); }
+JsuiGpuContext* jsui_gpu_create_dawn(void* instance, void* device, void* queue) {
+  return jsui::graphite_gpu::createDawn(instance, device, queue);
+}
 
 int jsui_render_gpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiGpuTarget* target, JsuiRect* dirty) {
   if (!rt || !target) {

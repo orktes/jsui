@@ -115,6 +115,39 @@ if(JSUI_GRAPHITE_METAL)
 endif()
 message(STATUS "JSUI_VULKAN: ${JSUI_VULKAN}, JSUI_GRAPHITE_METAL: ${JSUI_GRAPHITE_METAL}")
 
+# Graphite on an embedder's native Dawn device (jsui_gpu_create_dawn,
+# jsui_render_gpu_target), e.g. the WebGPU rendering driver of the godot-aw3
+# Godot fork: on when the Skia was built with SKIA_DAWN_SDK
+# (scripts/build-skia-desktop.sh). Skia and JSUI compile against that Dawn
+# SDK's headers, but Dawn is not linked: tools/dawn-shim generates wgpu*
+# entry points that call the host process's own Dawn (dlsym), so the library
+# loads anywhere and the Dawn path works where the host links Dawn.
+set(_jsui_graphite_dawn_default OFF)
+set(_jsui_dawn_include "")
+if(NOT EMSCRIPTEN AND _jsui_skia_gn MATCHES "skia_use_dawn *= *true")
+  set(_jsui_graphite_dawn_default ON)
+  string(REGEX MATCH "skia_dawn_sdk_include_dir *= *\"([^\"]*)\"" _m "${_jsui_skia_gn}")
+  set(_jsui_dawn_include "${CMAKE_MATCH_1}")
+endif()
+option(JSUI_GRAPHITE_DAWN "Build the Skia Graphite Dawn backend on the host's Dawn (jsui_gpu_create_dawn)" ${_jsui_graphite_dawn_default})
+set(JSUI_DAWN_INCLUDE_DIR "${_jsui_dawn_include}" CACHE PATH "Dawn SDK include dir (webgpu/webgpu_cpp.h) the Skia was built against")
+if(JSUI_GRAPHITE_DAWN)
+  if(NOT EXISTS "${JSUI_DAWN_INCLUDE_DIR}/dawn/webgpu.h")
+    message(FATAL_ERROR "JSUI_GRAPHITE_DAWN needs JSUI_DAWN_INCLUDE_DIR (no dawn/webgpu.h in '${JSUI_DAWN_INCLUDE_DIR}')")
+  endif()
+  set(_jsui_dawn_shim ${CMAKE_BINARY_DIR}/generated/dawn_shim.c)
+  add_custom_command(OUTPUT ${_jsui_dawn_shim}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/generated
+    COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/dawn-shim/gen_dawn_shim.py ${JSUI_DAWN_INCLUDE_DIR}/dawn/webgpu.h ${_jsui_dawn_shim}
+    DEPENDS ${CMAKE_SOURCE_DIR}/tools/dawn-shim/gen_dawn_shim.py ${JSUI_DAWN_INCLUDE_DIR}/dawn/webgpu.h
+    COMMENT "Generating the Dawn entry-point shim")
+  target_sources(jsui PRIVATE ${_jsui_dawn_shim})
+  target_compile_definitions(jsui PUBLIC JSUI_GRAPHITE_DAWN=1)
+  target_include_directories(jsui PRIVATE ${JSUI_DAWN_INCLUDE_DIR})
+  target_link_libraries(jsui PUBLIC ${CMAKE_DL_LIBS})
+endif()
+message(STATUS "JSUI_GRAPHITE_DAWN: ${JSUI_GRAPHITE_DAWN} (${JSUI_DAWN_INCLUDE_DIR})")
+
 # Metal backend (Skia Ganesh on Metal, jsui_render_metal). On by default on
 # iOS, whose Skia is built from source with Metal (scripts/build-skia-ios.sh);
 # elsewhere it needs a Skia built with skia_use_metal=true.

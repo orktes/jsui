@@ -35,14 +35,35 @@
 #              reset to pristine first)
 #   JOBS       ninja parallelism (default: all cores)
 #   CC / CXX   compilers (Linux default clang / clang++)
-#   SKIA_DESKTOP_OUT  install dir (default third_party/skia-desktop)
+#   SKIA_DESKTOP_OUT  install dir (default third_party/skia-desktop, or
+#              third_party/skia-desktop-dawn with SKIA_DAWN_SDK)
+#   SKIA_DAWN_SDK  also build Graphite's Dawn (WebGPU) backend, compiled
+#              against this installed Dawn SDK's headers (<sdk>/include with
+#              webgpu/webgpu_cpp.h), e.g. the Dawn a game engine links (the
+#              godot-aw3 fork's WebGPU driver). Dawn is not built or linked:
+#              whatever links these libraries must provide the wgpu* entry
+#              points (the Godot GDExtension resolves them from the engine
+#              binary). scripts/patches/skia-m157-dawn-sdk.patch makes
+#              //third_party/dawn header-only and, with SKIA_DAWN_LEGACY=1
+#              (default), adapts Graphite's Dawn backend to the older webgpu.h
+#              of Dawn a082d8e7 (2026-01; m157 pins 2026-10's ada56770).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SKIA_BRANCH="chrome/m157"
 SKIA_COMMIT="3c6589d4882124ecb315db04227eccd81fe0b435"  # same as build-skia-wasm-graphite.sh / build-skia-ios.sh
 SKIA_SRC="${SKIA_SRC:-$ROOT/third_party/skia-src-m157}"
-OUT_DIR="${SKIA_DESKTOP_OUT:-$ROOT/third_party/skia-desktop}"
+SKIA_DAWN_SDK="${SKIA_DAWN_SDK:-}"
+SKIA_DAWN_LEGACY="${SKIA_DAWN_LEGACY:-1}"
+DAWN_PATCH="$ROOT/scripts/patches/skia-m157-dawn-sdk.patch"
+if [ -n "$SKIA_DAWN_SDK" ]; then
+  SKIA_DAWN_SDK="$(cd "$SKIA_DAWN_SDK" && pwd)"
+  [ -f "$SKIA_DAWN_SDK/include/webgpu/webgpu_cpp.h" ] || {
+    echo "SKIA_DAWN_SDK=$SKIA_DAWN_SDK has no include/webgpu/webgpu_cpp.h" >&2; exit 1; }
+  OUT_DIR="${SKIA_DESKTOP_OUT:-$ROOT/third_party/skia-desktop-dawn}"
+else
+  OUT_DIR="${SKIA_DESKTOP_OUT:-$ROOT/third_party/skia-desktop}"
+fi
 
 case "$(uname -s)" in
   Linux) os=linux; JOBS="${JOBS:-$(nproc)}" ;;
@@ -59,7 +80,9 @@ slice="$os-$CPU"
 dest="$OUT_DIR/out/$slice"
 
 hash_cmd() { if command -v sha256sum >/dev/null; then sha256sum; else shasum -a 256; fi; }
-STAMP_VALUE="$(hash_cmd < "$ROOT/scripts/build-skia-desktop.sh" | cut -d' ' -f1)"
+STAMP_VALUE="$({ cat "$ROOT/scripts/build-skia-desktop.sh"; [ -z "$SKIA_DAWN_SDK" ] || {
+  cat "$DAWN_PATCH" "$SKIA_DAWN_SDK/include/webgpu/webgpu.h" "$SKIA_DAWN_SDK/include/dawn/webgpu.h";
+  echo "$SKIA_DAWN_LEGACY"; }; } | hash_cmd | cut -d' ' -f1)"
 if [ -f "$dest/.stamp" ] && [ "$(cat "$dest/.stamp")" = "$STAMP_VALUE" ] && [ -f "$dest/libskia.a" ] && [ -d "$OUT_DIR/include" ]; then
   echo "skia-desktop $slice is up to date"
   exit 0
@@ -77,6 +100,7 @@ if [ "$(git rev-parse HEAD)" != "$SKIA_COMMIT" ]; then
 fi
 # The wasm Graphite build patches these in the same checkout: build pristine.
 git checkout -q -- src include third_party/dawn modules/skcms gn
+[ -z "$SKIA_DAWN_SDK" ] || git apply "$DAWN_PATCH"
 
 # Only the third-party repos this configuration compiles.
 python3 - <<'PY'
@@ -109,7 +133,6 @@ skia_enable_ganesh=true
 skia_use_gl=true
 skia_use_angle=false
 skia_enable_graphite=true
-skia_use_dawn=false
 
 skia_use_icu=true
 skia_use_client_icu=false
@@ -168,8 +191,16 @@ skia_use_fontconfig=false
 skia_use_freetype=false
 "
 fi
-BUILD_DIR="out/jsui-desktop-$slice"
-ARGS="$(printf '%s\n%s\n' "$COMMON_ARGS" "$OS_ARGS" | sed '/^$/d' | tr '\n' ' ')"
+DAWN_ARGS="skia_use_dawn=false"
+if [ -n "$SKIA_DAWN_SDK" ]; then
+  DAWN_ARGS="skia_use_dawn=true skia_dawn_sdk_include_dir=\"$SKIA_DAWN_SDK/include\""
+  [ "$SKIA_DAWN_LEGACY" = 0 ] || DAWN_ARGS="$DAWN_ARGS extra_cflags=[\"-DSK_DAWN_LEGACY_SDK\"]"
+  slice_dir="$slice-dawn"
+else
+  slice_dir="$slice"
+fi
+BUILD_DIR="out/jsui-desktop-$slice_dir"
+ARGS="$(printf '%s\n%s\n%s\n' "$COMMON_ARGS" "$OS_ARGS" "$DAWN_ARGS" | sed '/^$/d' | tr '\n' ' ')"
 echo "[$slice] gn args: $ARGS"
 bin/gn gen "$BUILD_DIR" --args="$ARGS"
 # Archives are copied by glob below: drop stale ones (ninja re-archives).

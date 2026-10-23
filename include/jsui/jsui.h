@@ -516,7 +516,7 @@ typedef struct JsuiVulkanDevice {
 } JsuiVulkanDevice;
 
 typedef struct JsuiGpuTarget {
-    void* texture;           /* VkImage / id<MTLTexture> */
+    void* texture;           /* VkImage / id<MTLTexture> / WGPUTexture */
     /* VkFormat / MTLPixelFormat; 0: 8-bit RGBA unorm (VK_FORMAT_R8G8B8A8_UNORM
      * / MTLPixelFormatRGBA8Unorm). Also BGRA8 and the sRGB variants. */
     unsigned int format;
@@ -540,6 +540,18 @@ JSUI_API JsuiGpuContext* jsui_gpu_create_vulkan(const JsuiVulkanDevice* device);
  * retained). NULL without JSUI_GRAPHITE_METAL. (iOS hosts that want Ganesh
  * use jsui_metal_create below.) */
 JSUI_API JsuiGpuContext* jsui_gpu_create_metal(void* device, void* queue);
+/* Graphite on a native Dawn device the host owns (e.g. a game engine's WebGPU
+ * renderer): `instance` (WGPUInstance, required: Graphite processes its events
+ * while it waits for GPU work), `device` (WGPUDevice) and `queue` (WGPUQueue;
+ * NULL: the device's queue). With this context JsuiGpuTarget.texture is a
+ * WGPUTexture with RenderAttachment usage (plus TextureBinding or CopySrc
+ * for blends that read the destination) and `format` a WGPUTextureFormat
+ * (0: the texture's own; RGBA8 / BGRA8, unorm or sRGB). Work is submitted to
+ * `queue` before the call returns; Dawn orders it with the host's
+ * submissions. NULL when the library was built without JSUI_GRAPHITE_DAWN,
+ * the process does not provide Dawn's wgpu* entry points (the library calls
+ * the host's Dawn, it links none) or Skia rejects the device. */
+JSUI_API JsuiGpuContext* jsui_gpu_create_dawn(void* instance, void* device, void* queue);
 /* Paints the current frame into `target`. `dirty` (optional) receives the
  * repainted rect. Returns 0 on success, -1 on failure (device lost, bad
  * target, wrong kind of context). */

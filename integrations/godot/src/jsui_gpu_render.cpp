@@ -1,5 +1,6 @@
 // JsuiView's GPU renderer: Skia Graphite on Godot's own RenderingDevice
-// (Vulkan on Linux / Windows, Metal on macOS), see jsui_view.h.
+// (Vulkan on Linux / Windows, Metal on macOS, and Dawn under the WebGPU
+// rendering driver of the godot-aw3 fork), see jsui_view.h.
 //
 // Per view there are two RD textures of the view's pixel size:
 //
@@ -21,7 +22,12 @@
 // process, i.e. before Godot submits the frame that contains the copy. On
 // Vulkan the render is bracketed by full pipeline barriers (gpu_graphite.cpp),
 // which also order it after the previous frame that may still be copying from
-// src. On Metal both use the same MTLCommandQueue and tracked resources.
+// src. On Metal both use the same MTLCommandQueue and tracked resources. On
+// WebGPU (godot-aw3) both use Godot's WGPUQueue, whose submissions run in
+// order, and Dawn tracks the textures' usage. The fork's
+// get_driver_resource returns webgpu.h handles (instance, device, queue,
+// WGPUTexture) and its binary exports Dawn's wgpu* entry points, which JSUI
+// calls (it links no Dawn of its own).
 //
 // New textures (first frame, resize) are created with zeroed initial data and
 // primed with one copy, and first rendered into on the next frame: by then
@@ -56,8 +62,9 @@ void* driverResource(RenderingDevice* rd, RenderingDevice::DriverResource what, 
   return reinterpret_cast<void*>(uintptr_t(rd->get_driver_resource(what, rid, 0)));
 }
 
-// Which RenderingDevice driver Godot runs: "vulkan", "metal", "d3d12", or ""
-// (Compatibility / headless: no RenderingDevice at all).
+// Which RenderingDevice driver Godot runs: "vulkan", "metal", "d3d12",
+// "webgpu" (godot-aw3), or "" (Compatibility / headless: no RenderingDevice
+// at all).
 String renderingDriver(RenderingServer* rs) {
   if (!rs->get_rendering_device()) return String();
   // Godot 4.4+; the extension builds against the 4.3 API, so call it by name.
@@ -105,7 +112,10 @@ void JsuiView::chooseRenderer() {
   RenderingServer* rs = RenderingServer::get_singleton();
   if (force_cpu_ || !rs) return;
   String driver = renderingDriver(rs);
-  Renderer want = driver == "vulkan" ? Renderer::Vulkan : driver == "metal" ? Renderer::Metal : Renderer::Cpu;
+  Renderer want = driver == "vulkan" ? Renderer::Vulkan
+                  : driver == "metal"  ? Renderer::Metal
+                  : driver == "webgpu" ? Renderer::WebGPU
+                                       : Renderer::Cpu;
   if (want == Renderer::Cpu) {
     UtilityFunctions::print_verbose("JsuiView: CPU renderer (rendering driver '" + driver + "')");
     return;
@@ -123,6 +133,10 @@ void JsuiView::chooseRenderer() {
       // Godot does not expose its extension / feature lists: Skia assumes
       // none (core Vulkan 1.1), which is always valid on Godot's device.
       gpu_ = jsui_gpu_create_vulkan(&d);
+    } else if (want == Renderer::WebGPU) {
+      gpu_ = jsui_gpu_create_dawn(driverResource(rd, RenderingDevice::DRIVER_RESOURCE_TOPMOST_OBJECT),
+                                  driverResource(rd, RenderingDevice::DRIVER_RESOURCE_LOGICAL_DEVICE),
+                                  driverResource(rd, RenderingDevice::DRIVER_RESOURCE_COMMAND_QUEUE));
     } else {
       gpu_ = jsui_gpu_create_metal(driverResource(rd, RenderingDevice::DRIVER_RESOURCE_LOGICAL_DEVICE),
                                    driverResource(rd, RenderingDevice::DRIVER_RESOURCE_COMMAND_QUEUE));
@@ -130,8 +144,10 @@ void JsuiView::chooseRenderer() {
   });
   if (!gpu_) {
     UtilityFunctions::print("JsuiView: no Skia GPU context on '" + driver + "' (" +
-                            String(want == Renderer::Vulkan ? "built without JSUI_VULKAN or Skia rejected the device"
-                                                            : "built without JSUI_GRAPHITE_METAL or Skia rejected the device") +
+                            String(want == Renderer::Vulkan   ? "built without JSUI_VULKAN or Skia rejected the device"
+                                   : want == Renderer::WebGPU ? "built without JSUI_GRAPHITE_DAWN, no Dawn in this Godot "
+                                                                "(needs godot-aw3's WebGPU driver) or Skia rejected the device"
+                                                              : "built without JSUI_GRAPHITE_METAL or Skia rejected the device") +
                             "); using the CPU renderer");
     return;
   }
@@ -229,6 +245,8 @@ bool JsuiView::renderGpu() {
       t.format = 0;  // VK_FORMAT_R8G8B8A8_UNORM
       t.usage = 0;   // colour + input attachment, sampled, transfer src / dst (the bits above)
       t.layout = t.final_layout = kVkImageLayoutTransferSrcOptimal;
+    } else if (renderer_ == Renderer::WebGPU) {
+      t.format = 0;  // the texture's own: WGPUTextureFormat_RGBA8Unorm (DATA_FORMAT_R8G8B8A8_UNORM)
     } else {
       t.format = kMTLPixelFormatRGBA8Unorm;
     }

@@ -64,11 +64,12 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& target);
 
 namespace graphite_gpu {
 
-// True when this build has the Vulkan and/or Metal Graphite backend.
+// True when this build has the Vulkan, Metal and/or Dawn Graphite backend.
 bool available();
 JsuiGpuContext* createVulkan(const JsuiVulkanDevice& device);
 JsuiGpuContext* createMetal(void* device, void* queue);
-bool owns(JsuiGpuContext* gpu);  // a Graphite (Vulkan / Metal) context
+JsuiGpuContext* createDawn(void* instance, void* device, void* queue);
+bool owns(JsuiGpuContext* gpu);  // a Graphite (Vulkan / Metal / Dawn) context
 void destroy(JsuiGpuContext* gpu);
 void purge(JsuiGpuContext* gpu, size_t cacheBytes);
 // 0 on success, -1 on failure; `dirty` (optional) gets the repainted rect.

@@ -4,7 +4,7 @@
 // changed, with one of two renderers (chosen in the first render from the
 // RenderingServer's driver; `force_cpu` pins the CPU one):
 //
-//   * GPU (Vulkan / Metal, jsui_gpu_render.cpp): Skia Graphite draws into a
+//   * GPU (Vulkan / Metal / WebGPU on godot-aw3, jsui_gpu_render.cpp): Skia Graphite draws into a
 //     texture of Godot's RenderingDevice on the render thread, repainting
 //     only the damaged rect, which Godot then copies into the texture it
 //     samples (a Texture2DRD).
@@ -115,7 +115,7 @@ class JsuiView : public godot::Control {
   void renderCpu();
   // GPU path (jsui_gpu_render.cpp). renderGpu returns false when the GPU
   // path failed and the view must fall back to the CPU.
-  enum class Renderer { Unknown, Cpu, Vulkan, Metal };
+  enum class Renderer { Unknown, Cpu, Vulkan, Metal, WebGPU };
   void chooseRenderer();
   bool renderGpu();
   void releaseGpu();
