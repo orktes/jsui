@@ -17,7 +17,8 @@ Packages: `@orktes/jsui-cli` (bundler, dev server, headless tools, this skill),
 
 1. **Import RN components from `'react-native'`** (the CLI aliases it to
    `@orktes/jsui-react`). Import JSUI extras (`Host`, `useHostState`,
-   `useGamepad`, `useFocus`, `HostTexture`, `ShaderView`, `sksl`, `Fonts`, ...)
+   `useGamepad`, `useFocus`, `HostTexture`, `ShaderView`, `sksl`, `Fonts`, `Sound`,
+   `UISounds`, `useMusic`, ...)
    from `'@orktes/jsui-react'`. `lottie-react-native`,
    `react-native-safe-area-context`, `expo-linear-gradient` and
    `react-native-linear-gradient` work as imports too (shims).
@@ -202,6 +203,7 @@ Read the reference that matches the task:
 | `Animated` (native driver), springs, `LayoutAnimation`, performance | [references/animation-and-performance.md](references/animation-and-performance.md) |
 | Game data: shared state, calls, messages, per-frame buffers, several root views | [references/game-data.md](references/game-data.md) |
 | Host textures (video, render targets), LottieView, ShaderView / SkSL | [references/media-and-effects.md](references/media-and-effects.md) |
+| Sound: UI sounds on hover / focus / press (`UISounds`), music (`useMusic`), `Sound.play`, buses | [references/audio.md](references/audio.md) |
 | Embedding: C API, Godot `JsuiView`, web host, dev mode | [references/embedding.md](references/embedding.md) |
 | `jsui dev --shared` + `--attach`, `jsui screenshot` / `inspect` / `run`, `launch()` / `attach()` APIs, selectors, all steps | [references/testing-tools.md](references/testing-tools.md) |
 | Game UI patterns: layout for 16:9, focus visuals, HUD, menus, lists | [references/game-ui-patterns.md](references/game-ui-patterns.md) |
