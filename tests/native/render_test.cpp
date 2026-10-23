@@ -540,6 +540,19 @@ TEST(render_skipped_subtrees_damage_like_a_full_walk) {
   }
   // In most frames only the glow changed: the other subtrees were skipped.
   CHECK(skippedSteps > 30);
+  // Children out of view (rows scrolled out of the list, an invisible box)
+  // do not keep their ancestors from being skipped: once the rest settles,
+  // only the glow and the two nodes above it are visited (the list, its
+  // rows out of view since the scroll, stays skipped too).
+  both({3, 0}, [](Node* n, Node*) { patch(n, R"J({"opacity":0})J"); });
+  int visited = 0;
+  for (int i = 0; i < 6; i++) {
+    both({4}, [&](Node* n, Node*) { patch(n, R"J({"transform":[{"translateX":)J" + std::to_string(i) + "}]}"); });
+    frame();
+    visited = lastPaintStats(a.doc()).nodesUpdated;
+  }
+  std::printf("  settled: %d nodes visited per frame\n", visited);
+  CHECK(visited <= 3);
 }
 
 // Damage cutting through rounded boxes at random places (a small box moving

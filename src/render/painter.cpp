@@ -2298,7 +2298,12 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
         }
         cr = static_cast<NodeRecord*>(ch->paintCache.get());
         below |= !cr || cr->relChanged;
-        quietKids &= cr && cr->quiet && !hidden;
+        // A child left out of view is quiet: while this node is visited with
+        // the same arguments it stays out of view, unchanged (a change marks
+        // it dirty, which brings it back). Not counting it kept every
+        // ancestor of a hidden node (an invisible highlight, a row scrolled
+        // out of its list) from ever being skipped.
+        quietKids &= cr && (cr->quiet || hidden);
         if (cr) {
           subtreeNodes += cr->subtreeNodes;
           isolatable &= cr->isolatable;
