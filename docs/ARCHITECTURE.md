@@ -750,7 +750,19 @@ pays all of it every frame. Frame data buffers (`src/host_buffers.*`,
 
 `tools/jsui-bench` compares the three ways at 30, 100 and 1000 moving
 markers (`markers-json-*`, `markers-buffer-*`, `markers-native-*`, see
-"Performance").
+"Performance"). Per frame on an M1 Ultra (Release, painting off, mean µs):
+
+| markers | JSON state + React | buffer + React | buffer + `Animated.hostBuffer` |
+| --- | --- | --- | --- |
+| 30 | 911 | 861 | 54 |
+| 100 | 2965 | 2815 | 192 |
+| 1000 | 29527 | 27601 | 2709 |
+
+Dropping JSON alone saves the serialization and parsing (~5%); the rest is
+React rendering every marker and the bridge's setProps each frame. Driving
+the views natively removes both (JS ~15 µs at 1000 markers); what is left is
+the native Animated evaluation and style writes (~2.4 µs per marker with two
+animated transforms).
 
 ## JS bridge contract
 
