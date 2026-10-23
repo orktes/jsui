@@ -1,7 +1,7 @@
 {
   "name": "@orktes/jsui-cli",
   "version": "0.2.0",
-  "description": "Build and dev server for JSUI bundles (esbuild).",
+  "description": "Build, dev server, headless screenshots / scripting and the agent skill for JSUI apps.",
   "author": "Jaakko Lukkari",
   "license": "MIT",
   "homepage": "https://github.com/orktes/jsui/tree/main/packages/cli#readme",
@@ -19,7 +19,10 @@
     "game-ui",
     "bundler",
     "esbuild",
-    "cli"
+    "cli",
+    "screenshot",
+    "headless",
+    "agent-skill"
   ],
   "publishConfig": {
     "access": "public"
@@ -36,6 +39,8 @@
   "files": [
     "bin",
     "src",
+    "skills",
+    ".claude-plugin",
     "README.md",
     "LICENSE"
   ],
@@ -44,6 +49,7 @@
   },
   "dependencies": {
     "@orktes/jsui-react": "0.2.0",
+    "@orktes/jsui-web": "0.2.0",
     "esbuild": "0.28.2"
   },
   "engines": {

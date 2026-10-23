@@ -38,11 +38,13 @@ import { installHostBuffer } from './hostBuffer.js';
 import { installHostTexture, HostTexture } from './hostTexture.js';
 import { LottieView } from './lottie.js';
 import { ShaderView, sksl, compileShader } from './shader.js';
+import { installInspector, inspect } from './inspect.js';
 
 installGlobals();
 installHostData();
 installHostBuffer();
 installHostTexture();
+installInspector();
 // include/jsui/jsui.h documents a `jsui` global for host messages.
 if (!globalThis.jsui) globalThis.jsui = Host;
 makeAnimated({ View, Text, Image, ScrollView, FlatList, SectionList });
@@ -94,6 +96,7 @@ export {
   rootContainer,
   bridgeStats,
   registerAsset,
+  inspect,
 };
 
 export const unstable_batchedUpdates = batchedUpdates;

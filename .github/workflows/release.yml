@@ -47,6 +47,8 @@ jobs:
           done
           dep=$(node -p "require('./packages/cli/package.json').dependencies['@orktes/jsui-react']")
           [ "$dep" = "$v" ] || { echo "::error::@orktes/jsui-cli depends on @orktes/jsui-react $dep, not $v"; exit 1; }
+          dep=$(node -p "require('./packages/cli/package.json').dependencies['@orktes/jsui-web']")
+          [ "$dep" = "$v" ] || { echo "::error::@orktes/jsui-cli depends on @orktes/jsui-web $dep, not $v"; exit 1; }
           if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME}" != "v$v" ]; then
             echo "::error::tag ${GITHUB_REF_NAME} does not match package version $v"; exit 1
           fi

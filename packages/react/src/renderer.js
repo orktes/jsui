@@ -280,6 +280,11 @@ function containerOf(id) {
   return container;
 }
 
+/** Every root container (surfaces, portal targets) with its children in order. */
+export function rootContainers() {
+  return Array.from(containers.values());
+}
+
 /** Forgets a container whose native node is gone (a destroyed surface). */
 export function forgetContainer(id) {
   if (!roots.has(id)) containers.delete(id);

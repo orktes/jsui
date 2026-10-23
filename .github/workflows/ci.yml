@@ -54,6 +54,8 @@ jobs:
               - 'scripts/**'
               - 'web/**'
               - 'site/**'
+              - 'packages/cli/**'
+              - 'packages/react/src/inspect.js'
             godot:
               - *core
               - 'integrations/godot/**'
@@ -359,6 +361,11 @@ jobs:
         run: JOBS=$(nproc) scripts/build-wasm.sh Release
       - name: Node smoke test
         run: node web/test/node-smoke.mjs
+      # jsui screenshot / inspect / run (the CLI's headless runtime) on the module just built.
+      - name: CLI headless tests (screenshot / inspect / run on web/dist)
+        run: |
+          npm ci --no-audit --no-fund
+          JSUI_HEADLESS_STRICT=1 node --test packages/cli/test/headless.test.js
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
@@ -529,6 +536,9 @@ jobs:
           tgz="$RUNNER_TEMP/tgz" app="$RUNNER_TEMP/app"
           mkdir -p "$tgz" "$app"
           npm pack --workspace packages/react --workspace packages/cli --pack-destination "$tgz"
+          # @orktes/jsui-cli depends on @orktes/jsui-web (its headless runtime); pack it
+          # too (without the WASM builds, which this job does not have).
+          npm pack --workspace web --ignore-scripts --pack-destination "$tgz"
           cd "$app"
           npm init -y > /dev/null
           npm install --no-audit --no-fund "$tgz"/*.tgz
@@ -536,6 +546,8 @@ jobs:
             "AppRegistry.registerComponent('main', () => () => <View><Text>Hello</Text></View>);" > app.jsx
           npx jsui build app.jsx -o out/bundle.js
           test -s out/bundle.js
+          npx jsui skill install . && test -s .claude/skills/jsui/SKILL.md
+          npx jsui skill print --all | grep -q 'name: jsui'
 
   # ---------------------------------------------------------------- reference
   reference:
