@@ -80,30 +80,23 @@ export class WebGPURenderer {
    * canvas' 'webgpu' context (only once Skia accepted the device, so a
    * failure leaves the canvas free for WebGL). Null on failure.
    */
-  static create(host, webgpu, canvasContext = null) {
+  // `sharedFor(webgpu)`: a SharedWebGPU context to draw with instead of a
+  // Skia context of the renderer's own (the surfaces of a runtime share one
+  // per device; each canvas keeps only its GPUCanvasContext).
+  static create(host, webgpu, canvasContext = null, sharedFor = null) {
     const M = host.module;
     if (!webgpu || !M.WebGPU || !M._jsui_gpu_create_webgpu) return null;
-    let gpu = 0, instance = 0;
-    try {
-      // Imported objects hang off an instance, which delivers the device's
-      // async callbacks (buffer maps, queue work done) to Skia.
-      instance = M._jsui_web_wgpu_create_instance();
-      const dev = M.WebGPU.importJsDevice(webgpu.device, instance);
-      gpu = M._jsui_gpu_create_webgpu(instance, dev, 0);
-      M._jsui_web_wgpu_release_device(dev);  // the context holds its own reference
-    } catch (e) {
-      host._log(2, `WebGPU: Skia context creation threw: ${e?.message ?? e}`);
+    const shared = sharedFor ? sharedFor(webgpu) : null;
+    let own = null;
+    if (!shared) {
+      own = SharedWebGPU.create(M, webgpu, (t) => host._log(2, t));
+      if (!own) return null;
     }
-    if (!gpu) {
-      if (instance) M._jsui_web_wgpu_release_instance(instance);
-      host._log(2, 'WebGPU: Skia Graphite context creation failed');
-      return null;
-    }
+    const skia = shared ?? own;
     let ctx = canvasContext;
     try { ctx ??= host.canvas.getContext('webgpu'); } catch {}
     if (!ctx) {
-      M._jsui_gpu_destroy(gpu);
-      M._jsui_web_wgpu_release_instance(instance);
+      own?.unref();
       return null;
     }
     const format = navigator.gpu.getPreferredCanvasFormat();
@@ -112,20 +105,22 @@ export class WebGPURenderer {
         usage: USAGE_RENDER_ATTACHMENT | USAGE_COPY_SRC | USAGE_TEXTURE_BINDING });
     } catch (e) {
       host._log(2, `WebGPU: canvas configure failed: ${e?.message ?? e}`);
-      M._jsui_gpu_destroy(gpu);
-      M._jsui_web_wgpu_release_instance(instance);
+      own?.unref();
       return null;
     }
-    return new WebGPURenderer(host, webgpu, gpu, instance, ctx, format);
+    if (shared) shared.ref();
+    return new WebGPURenderer(host, webgpu, skia, ctx, format, sharedFor);
   }
 
-  constructor(host, webgpu, gpu, instance, ctx, format) {
+  constructor(host, webgpu, skia, ctx, format, sharedFor) {
     this.host = host;
     this.module = host.module;
     this.webgpu = webgpu;
     this.device = webgpu.device;
-    this.gpu = gpu;
-    this.instance = instance;
+    this.skia = skia;  // SharedWebGPU holding a reference for us
+    this.gpu = skia.gpu;
+    this.instance = skia.instance;
+    this.sharedFor = sharedFor;
     this.ctx = ctx;
     this.format = format;
     this.lost = false;
@@ -198,29 +193,87 @@ export class WebGPURenderer {
   // be destroyed once the work it submitted is done: wait for the queue, then
   // destroy (a lost device finishes everything at once).
   _release() {
-    const M = this.module, gpu = this.gpu, instance = this.instance;
+    const skia = this.skia;
+    this.skia = null;
     this.gpu = this.instance = 0;
-    if (!gpu) return;
+    skia?.unref();
+  }
+
+  async _onLost(info) {
+    const host = this.host;
+    this.lost = true;
+    this.skia?.markLost();
+    this._release();
+    host._log(2, `WebGPU device lost (${info?.reason ?? 'unknown'}: ${info?.message ?? ''}), recreating`);
+    const webgpu = await requestWebGPU({ allowSoftware: true, fresh: true });
+    if (this._destroyed || host._destroyed) return;
+    const next = webgpu && WebGPURenderer.create(host, webgpu, this.ctx, this.sharedFor);
+    host._webgpuRecovered(next, 'WebGPU device lost');
+  }
+}
+
+/**
+ * A Skia Graphite context on a WebGPU device, reference counted: a
+ * renderer's own, or one shared by every surface canvas of a runtime (the
+ * runtime keeps per-surface frames apart, src/render/gpu_webgpu.cpp), so a
+ * page of many small widgets needs one Skia context, not one per canvas.
+ */
+export class SharedWebGPU {
+  /** Null (logged through `log`) when Skia cannot use the device. */
+  static create(M, webgpu, log) {
+    let gpu = 0, instance = 0;
+    try {
+      // Imported objects hang off an instance, which delivers the device's
+      // async callbacks (buffer maps, queue work done) to Skia.
+      instance = M._jsui_web_wgpu_create_instance();
+      const dev = M.WebGPU.importJsDevice(webgpu.device, instance);
+      gpu = M._jsui_gpu_create_webgpu(instance, dev, 0);
+      M._jsui_web_wgpu_release_device(dev);  // the context holds its own reference
+    } catch (e) {
+      log(`WebGPU: Skia context creation threw: ${e?.message ?? e}`);
+    }
+    if (!gpu) {
+      if (instance) M._jsui_web_wgpu_release_instance(instance);
+      log('WebGPU: Skia Graphite context creation failed');
+      return null;
+    }
+    return new SharedWebGPU(M, webgpu, gpu, instance);
+  }
+
+  constructor(M, webgpu, gpu, instance) {
+    this.module = M;
+    this.webgpu = webgpu;
+    this.gpu = gpu;
+    this.instance = instance;
+    this.refs = 1;
+    this.lost = false;
+    this.destroyed = false;
+  }
+
+  ref() { this.refs++; }
+
+  // The device was lost: drop the GPU objects (no GPU calls).
+  markLost() {
+    if (this.lost || this.destroyed) return;
+    this.lost = true;
+    this.module._jsui_gpu_context_lost(this.gpu);
+  }
+
+  // Graphite in the browser never waits for the GPU, so its context may only
+  // be destroyed once the work it submitted is done: wait for the queue, then
+  // destroy (a lost device finishes everything at once).
+  unref() {
+    if (--this.refs > 0 || this.destroyed) return;
+    this.destroyed = true;
+    const M = this.module, gpu = this.gpu, instance = this.instance;
     const done = () => setTimeout(() => {
       M._jsui_gpu_destroy(gpu);
       M._jsui_web_wgpu_release_instance(instance);
     }, 0);
     try {
-      this.device.queue.onSubmittedWorkDone().then(done, done);
+      this.webgpu.device.queue.onSubmittedWorkDone().then(done, done);
     } catch {
       done();
     }
-  }
-
-  async _onLost(info) {
-    const host = this.host, M = host.module;
-    this.lost = true;
-    M._jsui_gpu_context_lost(this.gpu);
-    this._release();
-    host._log(2, `WebGPU device lost (${info?.reason ?? 'unknown'}: ${info?.message ?? ''}), recreating`);
-    const webgpu = await requestWebGPU({ allowSoftware: true, fresh: true });
-    if (this._destroyed || host._destroyed) return;
-    const next = webgpu && WebGPURenderer.create(host, webgpu, this.ctx);
-    host._webgpuRecovered(next, 'WebGPU device lost');
   }
 }

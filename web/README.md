@@ -37,7 +37,7 @@ const clock = jsui.createSurface(document.querySelector('#clock'), {
   initialProps: { tz: 'UTC' },
   autoSize: true,          // the canvas takes the component's laid-out size
 });
-const cart = jsui.createSurface(document.querySelector('#cart'), { component: 'Cart', renderer: '2d' });
+const cart = jsui.createSurface(document.querySelector('#cart'), { component: 'Cart' });
 clock.setProps({ tz: 'CET' });  // re-renders, keeping its state
 cart.destroy();
 ```
@@ -56,10 +56,16 @@ cart.destroy();
 - The runtime ticks once per frame and each canvas repaints only what changed.
   Surfaces have a transparent background. Keyboard input goes to the surface
   whose canvas was clicked last; gamepads to the one that has keyboard focus.
-- Every canvas has its own rendering context. WebGPU canvases share the
-  runtime's device; browsers cap live WebGL contexts (about 16), so for many
-  small widgets pass `renderer: 'cpu'` or `'2d'` (the CPU raster repaints only
-  damaged pixels, which is cheap at widget sizes).
+- Surfaces are GPU-drawn by default and share the runtime's GPU context, so a
+  page can hold any number of them without running into the browser's cap of
+  about 16 live WebGL contexts. On WebGPU one Skia Graphite context on the
+  page's device draws every surface, and each canvas keeps only its own
+  `GPUCanvasContext`. On WebGL one offscreen WebGL context draws each surface
+  and the frame is copied into that canvas' 2D context (`renderer` then reads
+  `gpu-webgl2-shared`). Each surface keeps its own retained frame, so small
+  changes still repaint only their damage.
+- `renderer: 'webgl'` gives a surface a WebGL context of its own (which counts
+  against the cap); `'cpu'` and `'2d'` use the CPU raster.
 
 ## WASM modules
 

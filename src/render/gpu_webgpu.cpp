@@ -62,14 +62,42 @@ struct WebGPUGpu final : JsuiGpuContext {
   std::unique_ptr<graphite::Recorder> recorder;
   sk_sp<CachingImageProvider> images;
   jsui::LayerCache layers;    // composited opacity layers (painter.h)
-  sk_sp<SkSurface> retained;  // the last frame, for damage-only repaints
-  // The last frame as a copy of the target (copy-back mode, see render()).
-  wgpu::Texture back;
-  sk_sp<SkImage> backImage;
-  uint64_t retainedGen = 0;   // bumped for every new retained surface (its key)
-  int smallFrames = 0;        // consecutive frames with small damage
-  int directFrames = 0;       // consecutive frames painted straight into the target
+  // What render() keeps between frames of one surface. Several surfaces of
+  // a runtime (several canvases) can share this context: one entry each.
+  struct Frames {
+    sk_sp<SkSurface> retained;  // the last frame, for damage-only repaints
+    // The last frame as a copy of the target (copy-back mode, see render()).
+    wgpu::Texture back;
+    sk_sp<SkImage> backImage;
+    uint64_t retainedGen = 0;   // the key of the current retained frame
+    int smallFrames = 0;        // consecutive frames with small damage
+    int directFrames = 0;       // consecutive frames painted straight into the target
+    uint64_t lastUsed = 0;
+    void drop() {
+      retained.reset();
+      backImage.reset();
+      back = nullptr;
+    }
+  };
+  std::unordered_map<const jsui::Surface*, Frames> frames;
+  uint64_t nextGen = 0;     // retained frame keys, unique across the surfaces
+  uint64_t renderCount = 0;
   bool lost = false;
+
+  // The surface's entry; surfaces that stopped drawing here (destroyed, or
+  // moved to another context) lose theirs after a while.
+  Frames& framesOf(const jsui::Surface* s) {
+    renderCount++;
+    auto it = frames.find(s);
+    if (it == frames.end()) {
+      constexpr uint64_t kMaxIdle = 600;
+      for (auto i = frames.begin(); i != frames.end();)
+        i = renderCount - i->second.lastUsed > kMaxIdle ? frames.erase(i) : std::next(i);
+      it = frames.emplace(s, Frames{}).first;
+    }
+    it->second.lastUsed = renderCount;
+    return it->second;
+  }
   size_t cacheBytes = kDefaultCacheBytes;
 
   bool init() {
@@ -107,11 +135,7 @@ struct WebGPUGpu final : JsuiGpuContext {
     return recorder != nullptr;
   }
 
-  void dropRetained() {
-    retained.reset();
-    backImage.reset();
-    back = nullptr;
-  }
+  void dropRetained() { frames.clear(); }
 
   void release() {
     dropRetained();
@@ -251,17 +275,18 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
   const bool noClear = (t.flags & JSUI_WEBGPU_NO_CLEAR) != 0;
   const bool copyBack = !noClear && (texture.GetUsage() & wgpu::TextureUsage::CopySrc);
   SkImageInfo info = target->imageInfo();
-  if (g->retained && (g->retained->width() != w || g->retained->height() != h ||
-                      g->retained->imageInfo().colorType() != info.colorType() || copyBack))
-    g->retained.reset();
-  if (g->back && (int(g->back.GetWidth()) != w || int(g->back.GetHeight()) != h ||
-                  g->back.GetFormat() != texture.GetFormat() || !copyBack)) {
-    g->backImage.reset();
-    g->back = nullptr;
+  WebGPUGpu::Frames& f = g->framesOf(&rt);
+  if (f.retained && (f.retained->width() != w || f.retained->height() != h ||
+                      f.retained->imageInfo().colorType() != info.colorType() || copyBack))
+    f.retained.reset();
+  if (f.back && (int(f.back.GetWidth()) != w || int(f.back.GetHeight()) != h ||
+                  f.back.GetFormat() != texture.GetFormat() || !copyBack)) {
+    f.backImage.reset();
+    f.back = nullptr;
   }
-  if (t.flags & JSUI_WEBGPU_NO_RETAIN) g->dropRetained();
-  const bool haveLast = copyBack ? bool(g->backImage) : bool(g->retained);
-  const void* key = haveLast ? reinterpret_cast<const void*>(uintptr_t(g->retainedGen)) : nullptr;
+  if (t.flags & JSUI_WEBGPU_NO_RETAIN) f.drop();
+  const bool haveLast = copyBack ? bool(f.backImage) : bool(f.retained);
+  const void* key = haveLast ? reinterpret_cast<const void*>(uintptr_t(f.retainedGen)) : nullptr;
   bool viaRetained = false, failed = false;
   bool copyAll = false;  // copy-back: the whole target into `back` after the frame
   jsui::LayerCacheScope layerScope((t.flags & JSUI_WEBGPU_NO_LAYER_CACHE) ? nullptr : &g->layers);
@@ -270,57 +295,57 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
     for (SkRegion::Iterator it(rt.trackedDamage()); !it.done(); it.next())
       area += int64_t(it.rect().width()) * it.rect().height();
     bool large = area * 2 >= int64_t(w) * h;
-    g->smallFrames = large ? 0 : g->smallFrames + 1;
-    bool retain = !(t.flags & JSUI_WEBGPU_NO_RETAIN) && (keyValid ? !large : g->smallFrames >= kRetainAfter);
+    f.smallFrames = large ? 0 : f.smallFrames + 1;
+    bool retain = !(t.flags & JSUI_WEBGPU_NO_RETAIN) && (keyValid ? !large : f.smallFrames >= kRetainAfter);
     if (!retain) {
       // A last frame unused for a while (a UI that animates all over) is
       // freed: a full-size texture of memory.
-      if (++g->directFrames > kFreeRetainedAfter) g->dropRetained();
+      if (++f.directFrames > kFreeRetainedAfter) f.drop();
       return {target->getCanvas(), nullptr, !noClear};
     }
-    g->directFrames = 0;
+    f.directFrames = 0;
     if (copyBack) {
-      if (!g->back) {
+      if (!f.back) {
         wgpu::TextureDescriptor desc;
         desc.size = {uint32_t(w), uint32_t(h), 1};
         desc.format = texture.GetFormat();
         desc.usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
-        g->back = g->device.CreateTexture(&desc);
-        g->backImage = g->back ? SkImages::WrapTexture(g->recorder.get(),
-                                                       graphite::BackendTextures::MakeDawn(g->back.Get()),
+        f.back = g->device.CreateTexture(&desc);
+        f.backImage = f.back ? SkImages::WrapTexture(g->recorder.get(),
+                                                       graphite::BackendTextures::MakeDawn(f.back.Get()),
                                                        kPremul_SkAlphaType, info.refColorSpace())
                                : nullptr;
-        if (!g->backImage) {
-          g->back = nullptr;
+        if (!f.backImage) {
+          f.back = nullptr;
           return {target->getCanvas(), nullptr, true};  // direct this time
         }
-        g->retainedGen++;
+        f.retainedGen = ++g->nextGen;
         keyValid = false;
       }
       viaRetained = true;
-      Surface::CanvasChoice c{target->getCanvas(), reinterpret_cast<const void*>(uintptr_t(g->retainedGen)), true};
+      Surface::CanvasChoice c{target->getCanvas(), reinterpret_cast<const void*>(uintptr_t(f.retainedGen)), true};
       if (keyValid) {
         // The last frame first (every pixel), then the damage over it.
         SkPaint paint;
         paint.setBlendMode(SkBlendMode::kSrc);
-        target->getCanvas()->drawImage(g->backImage, 0, 0, SkSamplingOptions(), &paint);
+        target->getCanvas()->drawImage(f.backImage, 0, 0, SkSamplingOptions(), &paint);
         c.splitDamage = true;
       } else {
         copyAll = true;  // a full repaint (the runtime clears the target)
       }
       return c;
     }
-    if (!g->retained) {
+    if (!f.retained) {
       SkImageInfo ri = SkImageInfo::Make(w, h, info.colorType(), kPremul_SkAlphaType, info.refColorSpace());
-      g->retained = SkSurfaces::RenderTarget(g->recorder.get(), ri, skgpu::Mipmapped::kNo, &props);
-      if (!g->retained) {
+      f.retained = SkSurfaces::RenderTarget(g->recorder.get(), ri, skgpu::Mipmapped::kNo, &props);
+      if (!f.retained) {
         failed = true;
         return {};
       }
-      g->retainedGen++;
+      f.retainedGen = ++g->nextGen;
     }
     viaRetained = true;
-    Surface::CanvasChoice c{g->retained->getCanvas(), reinterpret_cast<const void*>(uintptr_t(g->retainedGen)), true};
+    Surface::CanvasChoice c{f.retained->getCanvas(), reinterpret_cast<const void*>(uintptr_t(f.retainedGen)), true};
     c.splitDamage = true;
     return c;
   }, /*growCurves=*/false);
@@ -329,7 +354,7 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
   if (viaRetained && !copyBack) {
     SkPaint paint;
     paint.setBlendMode(noClear ? SkBlendMode::kSrcOver : SkBlendMode::kSrc);
-    target->getCanvas()->drawImage(SkSurfaces::AsImage(g->retained), 0, 0, SkSamplingOptions(), &paint);
+    target->getCanvas()->drawImage(SkSurfaces::AsImage(f.retained), 0, 0, SkSamplingOptions(), &paint);
   }
   target.reset();
   if (!g->flush()) return -1;
@@ -338,7 +363,7 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
     wgpu::CommandEncoder enc = g->device.CreateCommandEncoder();
     wgpu::TexelCopyTextureInfo src, dst;
     src.texture = texture;
-    dst.texture = g->back;
+    dst.texture = f.back;
     auto copy = [&](const SkIRect& r) {
       src.origin = dst.origin = {uint32_t(r.x()), uint32_t(r.y()), 0};
       wgpu::Extent3D size = {uint32_t(r.width()), uint32_t(r.height()), 1};
