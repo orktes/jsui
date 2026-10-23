@@ -548,6 +548,8 @@ class DomView {
       this._installPassThroughInput(signal);
       return;
     }
+    this._pointerOver(false);  // until this canvas says otherwise
+    c.addEventListener('pointerenter', () => this._pointerOver(true), opt);
     c.style.touchAction = 'none';
     c.style.overscrollBehavior = 'none';
     c.style.userSelect = 'none';
@@ -598,6 +600,7 @@ class DomView {
     c.addEventListener('pointercancel', (e) => up(e, true), active);
     c.addEventListener('pointerleave', (e) => {
       if (e.pointerType === 'mouse' && !this._mouseButtons) this._inLeave();
+      this._pointerOver(false);
     }, opt);
     c.addEventListener('wheel', (e) => {
       const [x, y] = this._point(e);
@@ -678,7 +681,7 @@ class DomView {
         hovering = true;
         stamp(e);
         const used = this._inMove(x, y);
-        setHot(!e.buttons && (this.hitTest(x, y) & HIT_POINTER) !== 0);
+        setHot(!e.buttons && (this._hitAt(x, y) & HIT_POINTER) !== 0);
         if (used && !e.buttons) e.stopImmediatePropagation();
         this._updateCursor();
         return;
@@ -714,7 +717,7 @@ class DomView {
     // double clicks on what the UI captures.
     const captures = (e) => {
       const [x, y] = this._point(e);
-      return inside(x, y) && (this.hitTest(x, y) & HIT_POINTER) !== 0;
+      return inside(x, y) && (this._hitAt(x, y) & HIT_POINTER) !== 0;
     };
     for (const type of ['click', 'auxclick']) {
       addEventListener(type, (e) => {
@@ -735,7 +738,7 @@ class DomView {
       for (const t of e.changedTouches) {
         if (e.type === 'touchstart') {
           const [x, y] = this._point(t);
-          if (inside(x, y) && this.hitTest(x, y) !== 0) touches.add(t.identifier);
+          if (inside(x, y) && this._hitAt(x, y) !== 0) touches.add(t.identifier);
         }
         if (!touches.has(t.identifier)) all = false;
         if (e.type === 'touchend' || e.type === 'touchcancel') touches.delete(t.identifier);
@@ -832,6 +835,12 @@ class DomView {
 
   // The keyboard sink got focus (a click, Tab from the page, focus()).
   _sinkFocused() { this._hostOf()._focusPads(this); }
+
+  // A pointer entered / left the canvas (worker mode needs the hit map then).
+  _pointerOver() {}
+
+  // hitTest() for this file's own listeners (worker mode: no hitTest() caller).
+  _hitAt(x, y) { return this.hitTest(x, y); }
 }
 
 // A canvas showing one surface of a runtime: its size, renderer (WebGPU /
@@ -876,6 +885,7 @@ class CanvasView extends DomView {
   // Paints the surface if it changed (after the runtime's tick).
   _paint() {
     if (!this.canvas || this._destroyed) return;
+    this._checkGL();
     const M = this.module, rt = this.rt, st = this.stats;
     if (this._autoW || this._autoH) this._fitContent();
     if ((M._jsui_needs_redraw(rt) || this._sizeChanged) && this.pixelWidth > 0 && this.pixelHeight > 0) {
@@ -1060,6 +1070,7 @@ class CanvasView extends DomView {
   _initBlitter(mode) {
     this._blitAbort?.abort();
     this._blitAbort = new AbortController();
+    this._glOnLost = this._glOnRestored = null;
     // WebGPU first (createJsui acquired the device only for the modes that
     // may use it), then Skia on WebGL, then the CPU raster.
     if (this._webgpu && (mode === 'auto' || mode === 'gpu' || mode === 'webgpu')) {
@@ -1083,19 +1094,11 @@ class CanvasView extends DomView {
       try { gl ??= this.canvas.getContext('webgl2', attrs) || this.canvas.getContext('webgl', attrs); } catch {}
       if (gl && !gl.isContextLost()) {
         this._setupGL(gl);
-        const signal = this._blitAbort.signal;
-        this.canvas.addEventListener('webglcontextlost', (e) => {
-          e.preventDefault();
-          this._glLost = true;
-          this._armRestoreTimer('2d');
-        }, { signal });
-        this.canvas.addEventListener('webglcontextrestored', () => {
-          clearTimeout(this._restoreTimer);
-          this._glLost = false;
+        this._watchGL(() => this._armRestoreTimer('2d'), () => {
           this._setupGL(gl);
           this._texW = this._texH = 0;
           this._sizeChanged = true;  // repaint into the new context
-        }, { signal });
+        });
         return;
       }
       this._gl = null;
@@ -1141,24 +1144,59 @@ class CanvasView extends DomView {
     this._glHandle = handle;
     this._stencilBits = gl.getContextAttributes()?.stencil ? 8 : 0;
     this.renderer = version === 2 ? 'gpu-webgl2' : 'gpu-webgl';
-    const signal = this._blitAbort.signal;
-    this.canvas.addEventListener('webglcontextlost', (e) => {
-      e.preventDefault();
-      this._glLost = true;
+    this._watchGL(() => {
       if (this._gpu) M._jsui_gpu_context_lost(this._gpu);  // drop GPU objects without GL calls
       this._armRestoreTimer('cpu');
-    }, { signal });
-    this.canvas.addEventListener('webglcontextrestored', () => {
-      clearTimeout(this._restoreTimer);
+    }, () => {
       // Extension objects of the lost context are dead: register afresh. The
       // GPU context rebuilds itself on the next render.
       M.GL.deleteContext(this._glHandle);
       this._glHandle = M.GL.registerContext(gl, this._glAttrs);
-      this._glLost = false;
       this._glGen = (this._glGen ?? 0) + 1;  // host textures: earlier GL objects are gone
       this._sizeChanged = true;  // repaint into the new context
-    }, { signal });
+    });
     return true;
+  }
+
+  // The canvas' WebGL context (this._gl): `lost` runs once per loss and
+  // `restored` once it is back, on the webglcontextlost / -restored events
+  // or, when _checkGL() notices first, before them.
+  _watchGL(lost, restored) {
+    const signal = this._blitAbort.signal;
+    this._glOnLost = lost;
+    this._glOnRestored = restored;
+    this.canvas.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();  // we want it back
+      this._glLostNow();
+    }, { signal });
+    this.canvas.addEventListener('webglcontextrestored', () => this._glRestoredNow(), { signal });
+  }
+
+  _glLostNow() {
+    if (this._glLost) return;
+    this._glLost = true;
+    this._log(1, 'WebGL context lost: waiting for the browser to restore it');
+    this._glOnLost?.();
+  }
+
+  _glRestoredNow() {
+    if (!this._glLost) return;
+    clearTimeout(this._restoreTimer);
+    this._glLost = false;
+    this._log(1, 'WebGL context restored');
+    this._glOnRestored?.();
+  }
+
+  // Before GL work. A browser marks a context lost (isContextLost()) when it
+  // notices, and fires webglcontextlost in a later task: a frame or a texture
+  // upload can run in between (WebKit; the worker's rAF), and on a lost
+  // context Skia's shader compiles fail and emscripten's glCreateProgram
+  // throws on the null program. A restore without its event counts too.
+  _checkGL() {
+    const gl = this._gl;
+    if (!gl || !this._glOnLost) return;
+    if (gl.isContextLost()) this._glLostNow();
+    else if (this._glLost) this._glRestoredNow();
   }
 
   // A lost context that does not come back within contextRestoreTimeout:
@@ -1474,29 +1512,49 @@ class SharedGL {
     this.gen = 0;  // context restores (host textures re-upload)
     this.destroyed = false;
     this._abort = new AbortController();
-    const M = this.module, signal = this._abort.signal;
+    const signal = this._abort.signal;
     canvas.addEventListener('webglcontextlost', (e) => {
-      e.preventDefault();
-      this.lost = true;
-      M._jsui_gpu_context_lost(this.gpu);  // drop GPU objects without GL calls
-      clearTimeout(this._restoreTimer);
-      const ms = host.opts.contextRestoreTimeout ?? 3000;
-      if (!(ms >= 0 && ms < Infinity)) return;
-      this._restoreTimer = setTimeout(() => {
-        if (!this.lost || this.destroyed) return;
-        for (const v of [...this.views]) v._switchToCpu('shared WebGL context lost and not restored', false, '2d');
-      }, ms);
+      e.preventDefault();  // we want it back
+      this._lostNow();
     }, { signal });
-    canvas.addEventListener('webglcontextrestored', () => {
-      clearTimeout(this._restoreTimer);
-      // Extension objects of the lost context are dead: register afresh. The
-      // GPU context rebuilds itself on the next render.
-      M.GL.deleteContext(this.handle);
-      this.handle = M.GL.registerContext(gl, glAttrs);
-      this.lost = false;
-      this.gen++;
-      for (const v of this.views) v._sizeChanged = true;  // repaint into the new context
-    }, { signal });
+    canvas.addEventListener('webglcontextrestored', () => this._restoredNow(), { signal });
+  }
+
+  // Once per loss: on webglcontextlost, or before it when check() notices
+  // (see CanvasView._checkGL).
+  _lostNow() {
+    if (this.lost) return;
+    this.lost = true;
+    this.host._log(1, 'shared WebGL context lost: waiting for the browser to restore it');
+    this.module._jsui_gpu_context_lost(this.gpu);  // drop GPU objects without GL calls
+    clearTimeout(this._restoreTimer);
+    const ms = this.host.opts.contextRestoreTimeout ?? 3000;
+    if (!(ms >= 0 && ms < Infinity)) return;
+    this._restoreTimer = setTimeout(() => {
+      if (!this.lost || this.destroyed) return;
+      for (const v of [...this.views]) v._switchToCpu('shared WebGL context lost and not restored', false, '2d');
+    }, ms);
+  }
+
+  _restoredNow() {
+    if (!this.lost) return;
+    const M = this.module;
+    clearTimeout(this._restoreTimer);
+    // Extension objects of the lost context are dead: register afresh. The
+    // GPU context rebuilds itself on the next render.
+    M.GL.deleteContext(this.handle);
+    this.handle = M.GL.registerContext(this.gl, this.glAttrs);
+    this.lost = false;
+    this.gen++;
+    this.host._log(1, 'shared WebGL context restored');
+    for (const v of this.views) v._sizeChanged = true;  // repaint into the new context
+  }
+
+  // Before GL work: a loss or restore the events have not reported yet.
+  check() {
+    if (this.destroyed) return;
+    if (this.gl.isContextLost()) this._lostNow();
+    else if (this.lost) this._restoredNow();
   }
 
   add(view) { this.views.add(view); }
@@ -1516,6 +1574,7 @@ class SharedGL {
   }
 
   _draw(view) {
+    this.check();
     if (this.lost || this.destroyed || !this.handle) return undefined;
     const M = this.module, w = view.pixelWidth, h = view.pixelHeight, c = this.canvas;
     // Grow only: a resize clears the buffer and reallocates it.

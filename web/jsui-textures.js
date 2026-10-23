@@ -98,10 +98,11 @@ export function textureTarget(views) {
       if (v._wgpu.lost) return { kind: 'lost' };
       k = { kind: 'webgpu', device: v._wgpu.webgpu.device, owner: v._wgpu.webgpu.device, gen: 0 };
     } else if (v._sgl) {
-      if (v._sgl.lost) return { kind: 'lost' };
+      // The context may be lost before its event said so (CanvasView._checkGL).
+      if (v._sgl.lost || v._sgl.gl.isContextLost()) return { kind: 'lost' };
       k = { kind: 'gl', gl: v._sgl.gl, owner: v._sgl, gen: v._sgl.gen ?? 0 };
     } else if (v._gpu) {
-      if (v._glLost) return { kind: 'lost' };
+      if (v._glLost || v._gl.isContextLost()) return { kind: 'lost' };
       k = { kind: 'gl', gl: v._gl, owner: v, gen: v._glGen ?? 0 };
     } else {
       return { kind: 'pixels' };

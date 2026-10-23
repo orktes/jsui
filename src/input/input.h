@@ -84,7 +84,9 @@ class InputManager {
   // containing a point gives its flags, none: 0. Transformed nodes give
   // their bounding box, rounded corners are ignored, and a Text with
   // pointer handlers on its spans captures its whole box. Rects that
-  // capture nothing are kept only where they cover one that does.
+  // capture nothing are kept only where they cover one that does, and a
+  // rect that would give the answer the rects under it already give is left
+  // out.
   void hitRegions(std::vector<float>* out);
   // Same, also returning the point in the target's local coordinates.
   Node* hitTest(float x, float y, float* localX, float* localY);
@@ -254,7 +256,9 @@ class InputManager {
 
   Node* hitNode(Node* n, float px, float py, float* lx, float* ly);
   struct RegionWalk;
-  void hitRegionsOf(Node* n, const Affine& parent, const Rect& clip, unsigned mask, bool scroll, RegionWalk& w);
+  struct RegionCover;
+  void hitRegionsOf(Node* n, const Affine& parent, const Rect& clip, unsigned mask, bool scroll, RegionWalk& w,
+                    const RegionCover& cover);
   bool subtreeContained(Node* n);
   bool attached(const Node* n) const;
   bool visible(const Node* n) const;  // attached and no display:none on the path

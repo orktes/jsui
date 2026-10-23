@@ -1044,13 +1044,18 @@ TEST(input_pass_through_keys_and_gamepad) {
 // transforms or rounded corners here, where they are exact): pointer and
 // scroll targets, box-none containers, zIndex, overflow clipping, a scrolled
 // list and an inert panel covering a button. Inert rects are only kept over
-// ones that capture.
+// ones that capture, and rects that repeat the answer under them are left
+// out (a label in its button), unless something between covers them.
 TEST(input_hit_regions_match_hit_test) {
   Fixture f;
   Node* root = f.doc().root();
   f.box(root, 0, 0, 100, 100);                                    // inert, under nothing: dropped
   Node* btn = f.box(root, 200, 0, 100, 100, R"({"__events":["press"]})");
-  f.box(btn, 10, 10, 50, 20);                                     // label: the button's
+  f.box(btn, 10, 10, 50, 20);                                     // label: the button's, not listed
+  Node* inner = f.box(btn, 0, 40, 100, 40, "{}", NodeType::ScrollView);  // pointer + scroll
+  f.style(inner).overflow = Overflow::Hidden;
+  f.box(inner, 0, 0, 100, 120);
+  f.box(btn, 0, 50, 60, 20);                                      // the button's again, over it: listed
   Node* overlay = f.box(root, 0, 150, 400, 150);
   f.style(overlay).pointerEvents = PointerEvents::BoxNone;
   f.box(overlay, 10, 10, 40, 40, R"({"__events":["hoverIn"]})");
@@ -1084,6 +1089,15 @@ TEST(input_hit_regions_match_hit_test) {
   CHECK_EQ(lookup(260, 60), 0u);                                  // the cover hides the button
   CHECK_EQ(lookup(150, 245), unsigned(JSUI_HIT_POINTER | JSUI_HIT_SCROLL));  // the scrolled row
   CHECK_EQ(lookup(150, 200), unsigned(JSUI_HIT_SCROLL));
+  CHECK_EQ(lookup(210, 60), unsigned(JSUI_HIT_POINTER));          // the second label over the scroll view
+  CHECK_EQ(lookup(220, 45), unsigned(JSUI_HIT_POINTER | JSUI_HIT_SCROLL));  // the scroll view in the button
+  int labels = 0, scrollBoxes = 0;
+  for (size_t i = 0; i < regions.size(); i += 5) {
+    if (regions[i] == 210 && regions[i + 1] == 10) labels++;      // the first label
+    if (regions[i] == 100 && regions[i + 1] == 160) scrollBoxes++;  // the list, its content clipped to it
+  }
+  CHECK_EQ(labels, 0);
+  CHECK_EQ(scrollBoxes, 1);
   for (size_t i = 0; i < regions.size(); i += 5)                  // the inert box at 0,0 is not listed
     CHECK(!(regions[i] == 0 && regions[i + 1] == 0 && regions[i + 4] == 0));
 

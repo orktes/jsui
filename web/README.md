@@ -290,8 +290,12 @@ to `preventDefault()` an event and, with `passThrough`, whether it reaches the
 page below. It decides from a **hit map**: the worker posts the rects of what
 the UI captures (`jsui_hit_regions`) whenever they change (after a repaint, a
 resize, and at least every 30 frames), and `hitTest(x, y)` answers from the
-last one. The map is the one from the last frame that changed what is under
-the pointer, delivered one `postMessage` later. It reaches the page about when
+last one. The worker computes and posts it only while the page needs it: with
+`passThrough`, while the pointer is over the canvas, on touch screens
+(`navigator.maxTouchPoints > 0`), and from the first `hitTest()` call on
+(that call answers from the last map, or an empty one, until the next
+frame's arrives). The map is the one from the last frame that changed what is
+under the pointer, delivered one `postMessage` later. It reaches the page about when
 that frame's pixels do, and about one frame after the input that changed it.
 In headless Chromium at 60 Hz, the page has the new map a median 16 ms after
 a wheel event, and 1.5 ms after the start of the frame that made it.
@@ -310,19 +314,34 @@ the runtime disagreed (`misses`), and keeps latency samples. Things to know:
   because the previous Tab moved focus inside the UI. The next Tab moves page
   focus on. Focusing the UI again resets this.
 - `gamepadConsumed` / `gamepadAxisConsumed` answer for the last frame the
-  worker ran, one frame behind main-thread mode.
+  worker ran, one frame behind main-thread mode. The worker starts reporting
+  them on the first call, so that call answers `false`.
 
 **Frame loop.** The worker's own `requestAnimationFrame` times frames. If the
 worker has none, or its callbacks never come (checked for one second while
 the page is visible), the page's rAF posts each frame instead.
 `workerLoop: 'main'` forces that. Frame times and event timestamps are on the
-page's clock in both cases.
+page's clock in both cases. A frame is two callbacks in a row: the first
+applies the queued input, ticks, paints and submits; the second computes the
+hit map and posts the frame's events and replies, so the frame's GPU commands
+leave the worker before that work runs.
+
+**In traces.** The GPU process can look busier in worker mode: at 1080p @2x on
+an M1 Ultra (Chrome, WebGPU), 1.2 ms per frame against 0.54 ms on the main
+thread. Most of the difference is
+`IOSurfaceImageBacking::WaitForCommandsToBeScheduled` (0.6 ms per frame, 0.003
+ms on the main thread): the OffscreenCanvas frame reaches the compositor right
+after the worker submitted it, and the compositor waits until Metal has
+scheduled those commands before it uses the frame. That time is a blocking
+wait on the GPU process' thread, not CPU work.
 
 **Renderers.** Worker mode uses the same order as main-thread mode: WebGPU in
 the worker, then Skia on WebGL on the OffscreenCanvas, then the CPU raster.
 GPU-loss handling also stays the same. A lost WebGL context is restored, or
 the view falls back to the CPU on a fresh canvas, which the page clones and
-transfers. A lost WebGPU device is replaced. The no-GPU warning is logged as
+transfers. In both modes, no GL work runs once the context reports itself
+lost, even before its `webglcontextlost` event arrives (WebKit lets a frame
+run in between). A lost WebGPU device is replaced. The no-GPU warning is logged as
 before. Text is measured and drawn by Skia in the WASM module, so it works
 the same in the worker.
 
