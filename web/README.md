@@ -111,9 +111,10 @@ const size = useHostTexture('trailer');            // { width, height } once set
 - `bindVideo(name, video, options)` keeps a texture current from a video
   element (`requestVideoFrameCallback`, else polled per display frame,
   paused frames and seeks included) and returns a function that stops it.
-  Polling uploads when the decoded frame count moved (once it is seen
-  moving, only then while playing: one upload per video frame, not per
-  display frame), or when `currentTime` moved.
+  Polling uploads when the decoded frame count or `currentTime` moved.
+  While playing, a count that ticks frame by frame (Chrome; WebKit's H.264
+  count jumps ~45 frames every 1.5 s) decides alone: one upload per video
+  frame, not per display frame.
   Playback (`play()`, `pause()`, `muted`, `currentTime`) stays on the element.
   Playwright WebKit 26 on macOS loses every WebGL context of the page right
   after a frame callback on a playing video (with the runtime in a worker it

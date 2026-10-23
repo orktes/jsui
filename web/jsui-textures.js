@@ -65,6 +65,7 @@ export const corsWarning = (name) => `host texture "${name}": the source is cros
 // (videoFramesContextLost) switches every bound video of the page to
 // polling, and later binds start there.
 const RVFC_SUSPECT_MS = 1000;
+const COUNT_TICKS = 3, COUNT_STALL_S = 1 / 15;  // polling: when the frame count decides (below)
 let rvfcOff = false;
 const webkit = () => globalThis.navigator?.vendor === 'Apple Computer, Inc.';
 const frameWatches = new Set();
@@ -74,7 +75,7 @@ const frameWatches = new Set();
 export function watchVideoFrames(video, onFrame) {
   const frames = () => video.getVideoPlaybackQuality?.().totalVideoFrames ?? -1;
   // The frame showing now is the caller's (bindVideo uploads it right away).
-  const w = { mode: 'poll', handle: 0, raf: 0, armed: -Infinity, time: video.currentTime, frames: frames(), counts: false, stopped: false };
+  const w = { mode: 'poll', handle: 0, raf: 0, armed: -Infinity, time: video.currentTime, frames: frames(), ticks: 0, stopped: false };
   const abort = has('AbortController') ? new AbortController() : null;
   const fire = () => {
     w.time = video.currentTime;
@@ -82,20 +83,27 @@ export function watchVideoFrames(video, onFrame) {
     onFrame();
   };
   // Polling uploads only when the decoded frame count or the playback
-  // position moved. The position moves every display frame while playing,
-  // so once the count is seen moving, only the count does then (one upload
-  // per video frame, not per display frame); paused, a seek still does.
+  // position moved. The position moves every display frame while playing.
+  // The count ticks once per video frame in Chrome, but WebKit's (H.264)
+  // jumps ~45 frames about every 1.5 s. So the count decides alone while
+  // playing (one upload per video frame, not per display frame) only after
+  // COUNT_TICKS ticks of one or two frames in a row, and only until the
+  // position moves COUNT_STALL_S without a tick. Paused, a seek uploads.
   const poll = () => {
     if (w.stopped) return;
     w.raf = requestAnimationFrame(poll);
     if (video.readyState < 2) return;
-    const f = frames();
+    const f = frames(), t = video.currentTime;
     if (f !== w.frames) {
-      w.counts ||= f > 0;
+      const d = f - w.frames;
+      w.ticks = d >= 1 && d <= 2 ? w.ticks + 1 : 0;
       fire();
-    } else if (video.currentTime !== w.time) {
-      if (w.counts && video.paused === false) w.time = video.currentTime;
-      else fire();
+    } else if (t !== w.time) {
+      if (w.ticks >= COUNT_TICKS && video.paused === false) {
+        if (Math.abs(t - w.time) < COUNT_STALL_S) return;
+        w.ticks = 0;
+      }
+      fire();
     }
   };
   const callback = () => {

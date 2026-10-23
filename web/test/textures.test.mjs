@@ -325,7 +325,7 @@ test('bindVideo: one upload per presented frame, stops on unbind / remove', () =
   assert.ok(M.calls.some((c) => c[0] === 'remove'));
 });
 
-test('bindVideo: WebKit polls from the start, one upload per decoded frame while playing', () => {
+test('bindVideo: WebKit polls from the start; a frame count that ticks per frame decides alone', () => {
   const dev = mockDevice();
   const { M, set } = setup([webgpuView(dev)]);
   const rafs = new Map();
@@ -337,34 +337,51 @@ test('bindVideo: WebKit polls from the start, one upload per decoded frame while
   const displayFrame = () => { const cbs = [...rafs.values()]; rafs.clear(); cbs.forEach((cb) => cb()); };
   try {
     let callbacks = 0;
-    const v = {
-      videoWidth: 16, videoHeight: 9, readyState: 4, currentTime: 0, paused: false, decoded: 0,
-      getVideoPlaybackQuality() { return { totalVideoFrames: this.decoded }; },
-      requestVideoFrameCallback() { return ++callbacks; },
-      addEventListener() {},
+    const mkVideo = (name) => {
+      const v = {
+        videoWidth: 16, videoHeight: 9, readyState: 4, currentTime: 0, paused: false, decoded: 0,
+        getVideoPlaybackQuality() { return { totalVideoFrames: this.decoded }; },
+        requestVideoFrameCallback() { return ++callbacks; },
+        addEventListener() {},
+      };
+      set.bindVideo(name, v);
+      return { v, uploads: () => M.calls.filter((c) => c[0] === 'updated' && c[1] === name).length };
     };
-    set.bindVideo('v', v);
+    // 60 Hz display frames (the position moves 1/60 s each).
+    const run = (v, n, tick) => {
+      for (let i = 1; i <= n; i++) {
+        v.currentTime += 1 / 60;
+        v.decoded += tick(i);
+        displayFrame();
+      }
+    };
+    // Chrome-like: a 30 fps video ticks every other display frame.
+    const a = mkVideo('a');
     assert.equal(callbacks, 0);
-    const uploads = () => M.calls.filter((c) => c[0] === 'updated' && c[1] === 'v').length;
-    // Before the count moves, the position decides.
-    v.currentTime = 0.016;
+    run(a.v, 5, (i) => i % 2);         // three ticks; until then the position uploads too
+    assert.equal(a.uploads(), 5);
+    run(a.v, 8, (i) => 1 - (i % 2));   // now one upload per video frame
+    assert.equal(a.uploads(), 5 + 4);
+    // The count stops ticking while playing: after 1/15 s the position decides again.
+    a.v.currentTime += 0.05;
     displayFrame();
-    assert.equal(uploads(), 1);
-    // A 30 fps video on a 60 Hz display: the position moves every display
-    // frame, the count every other one.
-    for (let i = 1; i <= 8; i++) {
-      v.currentTime += 0.016;
-      if (i % 2) v.decoded++;
-      displayFrame();
-    }
-    assert.equal(uploads(), 1 + 4);
+    assert.equal(a.uploads(), 9);
+    a.v.currentTime += 0.05;
+    displayFrame();
+    assert.equal(a.uploads(), 10);
+    run(a.v, 2, () => 0);
+    assert.equal(a.uploads(), 12);
     // Paused, a seek uploads.
-    v.paused = true;
+    a.v.paused = true;
     displayFrame();
-    assert.equal(uploads(), 5);
-    v.currentTime = 3;
+    const paused = a.uploads();
+    a.v.currentTime = 3;
     displayFrame();
-    assert.equal(uploads(), 6);
+    assert.equal(a.uploads(), paused + 1);
+    // WebKit-like (H.264): the count jumps ~45 frames now and then, so every display frame uploads.
+    const b = mkVideo('b');
+    run(b.v, 90, (i) => (i % 45 === 0 ? 45 : 0));
+    assert.equal(b.uploads(), 90);
     set.destroy();
   } finally {
     if (nav) Object.defineProperty(globalThis, 'navigator', nav);
