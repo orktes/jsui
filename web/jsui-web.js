@@ -51,9 +51,26 @@
 //
 // One WASM module instance is shared by all runtimes on the page (one per
 // module URL); each createJsui() call owns an independent JsuiRuntime.
+//
+// Surfaces (React Native root views): one runtime, one bundle and JS context
+// can show several AppRegistry components on separate canvases, each with
+// its own props, size, input and focus (a HUD next to a menu, or small
+// widgets placed inside an existing page):
+//
+//   AppRegistry.registerComponent('Clock', () => Clock);       // in the bundle
+//   const clock = jsui.createSurface(el, { component: 'Clock', initialProps: { tz: 'UTC' } });
+//   clock.setProps({ tz: 'CET' });   // re-renders, keeps its state
+//   clock.destroy();
+//
+// The runtime ticks once per frame and every canvas paints what changed.
+// Each surface canvas has its own renderer context; see JsuiSurfaceOptions.
 
 /** @typedef {{
- *   canvas: HTMLCanvasElement,
+ *   canvas?: HTMLCanvasElement,  // the main surface's canvas; null / omitted: not shown (a page
+ *                                // that only places createSurface() widgets)
+ *   component?: string,          // the main surface's AppRegistry key (default: the bundle's first
+ *                                // registered component, or what it renders itself)
+ *   initialProps?: object,       // props for `component`
  *   bundleUrl?: string,          // URL of the JS bundle (resolved against the page)
  *   bundleSource?: string,       // or the bundle source itself
  *   devMode?: boolean,           // dev overlay + live reload
@@ -136,8 +153,9 @@ const AXIS_EPSILON = 1 / 256;
  * @param {JsuiOptions} opts
  */
 export async function createJsui(opts) {
-  const canvas = opts.canvas;
-  if (!canvas) throw new Error('createJsui: canvas is required');
+  // No canvas: the main surface is not shown, for pages that only place
+  // createSurface() widgets.
+  const canvas = opts.canvas ?? null;
   const webgpu = await webgpuFor(opts);
   return new JsuiHost(await loadModuleFor(opts, webgpu), canvas, { ...opts, _webgpu: webgpu });
 }
@@ -205,241 +223,67 @@ export function webglAvailable(hardware = false) {
   return webglProbe[key];
 }
 
-class JsuiHost {
+// A canvas showing one surface of a runtime: its size, renderer (WebGPU /
+// WebGL / CPU blit), input and cursor. JsuiHost is the main surface's view
+// and owns the runtime; JsuiSurface views show the surfaces made with
+// createSurface(). Every view talks to the runtime through its own handle
+// (`rt`): the runtime handle for the main surface, a jsui_surface_create
+// handle for the others (include/jsui/jsui.h, Surfaces).
+class CanvasView {
   constructor(M, canvas, opts) {
     this.module = M;
     this.canvas = canvas;
     this.opts = opts;
-    this.hostId = nextHostId++;
     this.listeners = new Map();
     // renders: frames painted. blits / blitPixels: CPU path uploads and the
     // pixels they covered (lastBlit: the last uploaded rect, device px).
     this.stats = { frames: 0, renders: 0, tickMs: 0, renderMs: 0, blitMs: 0, blits: 0, blitPixels: 0, lastBlit: null };
-    this._lastError = null;
     this._cursor = '';
-    this._raf = 0;
     this._destroyed = false;
     this._abort = new AbortController();
     this._pressedKeys = new Map();  // code -> key, released on blur
     this._mouseButtons = 0;
-    this._pads = [];
     this._fixedRatio = opts.pixelRatio > 0 ? opts.pixelRatio : 0;
     this._trapTab = opts.trapTab !== false;
-    this._handlers = new Map();  // Host.call name -> fn (handle())
-    this._uiCalls = new Map();   // callUi id -> {resolve, reject}
-
-    (M.__jsuiHosts ??= new Map()).set(this.hostId, {
-      onMessage: (name, json) => {
-        let data;
-        try { data = JSON.parse(json); } catch { data = json; }
-        this._emit('message', name, data);
-      },
-      onState: (key, json) => {
-        let value;
-        try { value = json == null ? undefined : JSON.parse(json); } catch { value = json; }
-        this._emit('state', key, value);
-      },
-      onCall: (id, name, json) => this._onCall(id, name, json),
-      onCallCancel: (id) => this._emit('callCancel', id),
-      onCallResult: (id, ok, payload) => {
-        const p = this._uiCalls.get(id);
-        if (!p) return;
-        this._uiCalls.delete(id);
-        if (!ok) {
-          const e = new Error(payload);
-          e.name = 'UiCallError';
-          p.reject(e);
-          return;
-        }
-        try { p.resolve(JSON.parse(payload)); } catch (e) { p.reject(e); }
-      },
-      onLog: (level, text) => {
-        if (!this._emit('log', level, text)) {
-          (level >= 3 ? console.error : level === 2 ? console.warn : level === 0 ? console.debug : console.log)(
-            '[jsui] ' + text);
-        }
-      },
-    });
+    // Auto-sized axes take the component's laid-out size (surfaces only).
+    this._autoW = this._autoH = false;
+    this._contentW = this._contentH = 0;
+    this.width = this.height = this.pixelWidth = this.pixelHeight = 0;
+    this.pixelRatio = 1;
 
     // Small reusable scratch area for short strings (key names, codes).
     this._scratch = M._malloc(512);
     this._dirty = M._malloc(32);  // JsuiRect filled by jsui_render_rgba_incremental / JsuiGLTarget
     this._buf = 0;
     this._bufSize = 0;
+  }
 
-    this._measure();
-    const pageUrl = typeof location !== 'undefined' ? location.href : undefined;
-    this._bundleUrl = opts.bundleUrl ? new URL(opts.bundleUrl, pageUrl).href : null;
-    // Lives as long as the runtime (JsuiConfig keeps the pointer).
-    this._baseUrlPtr = this._bundleUrl ? this._newString(this._bundleUrl) : 0;
-    this.rt = M._jsui_web_create(this.hostId, this.width, this.height, this.pixelRatio, opts.devMode ? 1 : 0,
-      this._baseUrlPtr);
-    if (!this.rt) throw new Error('jsui_web_create failed');
-
-    this._mode = opts.renderer ?? 'auto';
-    this._webgpu = opts._webgpu ?? null;
-    this._initBlitter(this._mode);
+  // The renderer, input and resize tracking, once `rt` exists.
+  _initView(mode, webgpu) {
+    this._mode = mode;
+    this._webgpu = webgpu ?? null;
+    this._initBlitter(mode);
     this._log(1, `renderer: ${this.renderer}` + (this._wgpu ? ` (${this._webgpu.description})` : ''));
     this._installInput();
     this._installCanvasInput();
     this._installResize();
-    if (opts.gamepads !== false) this._installGamepads();
-
-    if (opts.bundleSource != null) this.loadSource(opts.bundleSource, this._bundleUrl ?? 'bundle.js');
-    else if (this._bundleUrl) this.loadUrl(this._bundleUrl);
-    const runtimePolls = this._bundleUrl?.startsWith('http://');
-    if (opts.devMode && (opts.devPoll ?? !runtimePolls) && this._bundleUrl) this._startDevPoll();
-    if (opts.autoStart !== false) this.start();
   }
 
-  // ------------------------------------------------------------- public API
+  // The view that owns the runtime (gamepads, the frame loop).
+  _hostOf() { return this; }
 
-  /** Subscribe: 'message' (name, data), 'state' (key, value: HostState.set in the UI),
-   * 'call' (id, name, args: Host.call without a handle() handler), 'callCancel' (id),
-   * 'error' (message), 'log' (level, text), 'frame' (stats). */
-  on(type, cb) {
-    let set = this.listeners.get(type);
-    if (!set) this.listeners.set(type, (set = new Set()));
-    set.add(cb);
-    return () => this.off(type, cb);
-  }
+  /** Focuses the view's keyboard sink (replaced once input is installed). */
+  focus() {}
 
-  off(type, cb) { this.listeners.get(type)?.delete(cb); }
-
-  /** Send data to the UI (`jsui.onMessage(name, cb)` / useHostMessage in JS). */
-  postMessage(name, data) {
-    this._withStrings([String(name), JSON.stringify(data === undefined ? null : data)], (n, j) =>
-      this.module._jsui_post_message(this.rt, n, j));
-  }
-
-  // ------------------------------------------------- game data (jsui.h)
-
-  /** Shared state: the UI reads it with useHostState(key) / HostState.get(key).
-   * `value` undefined removes the key. Returns true if the value changed. */
-  setState(key, value) {
-    const json = value === undefined ? null : JSON.stringify(value);
-    return this._withStrings([String(key), json], (k, j) => this.module._jsui_set_state(this.rt, k, j)) === 1;
-  }
-
-  /** RFC 7386 merge patch of a state key (null members delete). Returns true if the value changed. */
-  patchState(key, patch) {
-    return this._withStrings([String(key), JSON.stringify(patch === undefined ? null : patch)],
-      (k, j) => this.module._jsui_patch_state(this.rt, k, j)) === 1;
-  }
-
-  /** Current value of a state key (also keys the UI set with HostState.set), or undefined. */
-  getState(key) {
-    const p = this._withStrings([String(key)], (k) => this.module._jsui_get_state(this.rt, k));
-    return p ? JSON.parse(this.module.UTF8ToString(p)) : undefined;
-  }
-
-  /** Answers the UI's `Host.call(name, args)`: `fn(args)` returns a value or a
-   * promise (a throw / rejection rejects the call). Calls without a handler
-   * are emitted as 'call' (id, name, args) for resolveCall / rejectCall, or
-   * rejected when nobody listens. Returns an unregister function. */
-  handle(name, fn) {
-    this._handlers.set(String(name), fn);
-    return () => { if (this._handlers.get(String(name)) === fn) this._handlers.delete(String(name)); };
-  }
-
-  resolveCall(id, value) {
-    if (this._destroyed) return -1;
-    return this._withStrings([JSON.stringify(value === undefined ? null : value)],
-      (j) => this.module._jsui_web_resolve_call(this.rt, id, j));
-  }
-
-  rejectCall(id, message) {
-    if (this._destroyed) return -1;
-    return this._withStrings([String(message ?? 'rejected')], (m) => this.module._jsui_web_reject_call(this.rt, id, m));
-  }
-
-  /** Calls a handler the UI registered with Host.handle(name, fn); resolves with its result. */
-  callUi(name, args) {
-    return new Promise((resolve, reject) => {
-      const json = JSON.stringify(args === undefined ? null : args);
-      const id = this._withStrings([String(name), json], (n, j) => this.module._jsui_web_call_ui(this.rt, this.hostId, n, j));
-      this._uiCalls.set(id, { resolve, reject });
-    });
-  }
-
-  _onCall(id, name, json) {
-    let args;
-    try { args = JSON.parse(json); } catch { args = undefined; }
-    const fn = this._handlers.get(name);
-    if (!fn) {
-      if (!this._emit('call', id, name, args)) this.rejectCall(id, `no host handler for "${name}"`);
-      return;
-    }
-    // Settled asynchronously (never re-entering the runtime from inside on_call).
-    Promise.resolve().then(() => fn(args)).then(
-      (v) => this.resolveCall(id, v),
-      (e) => this.rejectCall(id, e && e.message !== undefined ? e.message : String(e)));
-  }
-
-  loadUrl(url) {
-    const abs = new URL(url, typeof location !== 'undefined' ? location.href : undefined).href;
-    this._withStrings([abs], (u) => this.module._jsui_load_bundle_url(this.rt, u));
-  }
-
-  loadSource(source, name = 'bundle.js') {
-    const M = this.module;
-    const len = M.lengthBytesUTF8(source);
-    const src = M._malloc(len + 1);
-    M.stringToUTF8(source, src, len + 1);
-    const r = this._withStrings([name], (n) => M._jsui_load_bundle_source(this.rt, src, len, n));
-    M._free(src);
-    return r === 0;
-  }
-
-  reload() { this.module._jsui_reload(this.rt); }
-
-  /** Register a font from bytes (ArrayBuffer / typed array). */
-  registerFont(family, bytes, weight = 400, italic = false) {
-    const M = this.module;
-    const data = ArrayBuffer.isView(bytes) ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-      : new Uint8Array(bytes);
-    const p = M._malloc(data.length);
-    M.HEAPU8.set(data, p);
-    const r = this._withStrings([family], (f) => M._jsui_register_font(this.rt, f, p, data.length, weight, italic ? 1 : 0));
-    M._free(p);
-    return r === 0;
-  }
-
-  get lastError() { return this._lastError; }
-
-  /** Resolves after a frame with no resource loads in flight (bundle, images,
-   * fonts, fetch) and nothing left to paint: the UI is on screen. */
-  whenIdle() {
-    return new Promise((resolve) => (this._idleWaiters ??= []).push(resolve));
-  }
-
-  start() {
-    if (this._raf || this._destroyed) return;
-    const loop = (t) => {
-      this._raf = requestAnimationFrame(loop);
-      this.frame(t);
-    };
-    this._raf = requestAnimationFrame(loop);
-  }
-
-  stop() {
-    if (this._raf) cancelAnimationFrame(this._raf);
-    this._raf = 0;
-  }
-
-  /** Runs one frame (tick + paint if needed). Called by the rAF loop; usable for manual stepping. */
-  frame(now = performance.now()) {
-    if (this._destroyed) return;
+  // Paints the surface if it changed (after the runtime's tick).
+  _paint() {
+    if (!this.canvas || this._destroyed) return;
     const M = this.module, rt = this.rt, st = this.stats;
-    if (this._padsActive) this._pollGamepads();
-    const t0 = performance.now();
-    M._jsui_tick(rt, now);
-    const t1 = performance.now();
-    st.tickMs = ema(st.tickMs, t1 - t0);
-    st.frames++;
+    if (this._autoW || this._autoH) this._fitContent();
     if ((M._jsui_needs_redraw(rt) || this._sizeChanged) && this.pixelWidth > 0 && this.pixelHeight > 0) {
       const resized = this._sizeChanged;
       this._sizeChanged = false;
+      const t1 = performance.now();
       let t2, t3;
       if (this._wgpu) {
         // Skia Graphite into the canvas' WebGPU texture (straight in when most
@@ -467,15 +311,41 @@ class JsuiHost {
       st.blitMs = ema(st.blitMs, t3 - t2);
       st.renders++;
     }
-    this._checkError();
     this._updateCursor();
-    if (this.listeners.get('frame')?.size) this._emit('frame', st);
-    if (this._idleWaiters?.length && !M._jsui_pending_loads(rt) && !M._jsui_needs_redraw(rt)) {
-      const w = this._idleWaiters;
-      this._idleWaiters = [];
-      w.forEach((r) => r());
-    }
   }
+
+  // Shown and has something new to paint.
+  _wantsPaint() { return !!this.canvas && !this._destroyed && !!this.module._jsui_needs_redraw(this.rt); }
+
+  // The viewport handed to the runtime: 0 on auto-sized axes.
+  _viewportSize() { return [this._autoW ? 0 : this.width, this._autoH ? 0 : this.height]; }
+
+  // Auto-sized axes: the component's laid-out size (jsui_surface_get_size)
+  // becomes the canvas' CSS size (and backing store).
+  _fitContent() {
+    const M = this.module;
+    if (M._jsui_surface_get_size(this.rt, this._dirty, this._dirty + 4) !== 0) return;
+    const f = new Float32Array(M.HEAPU8.buffer, this._dirty, 2);
+    const w = Math.max(1, Math.ceil(f[0] - 0.001)), h = Math.max(1, Math.ceil(f[1] - 0.001));
+    if (w === this._contentW && h === this._contentH) return;
+    this._contentW = w;
+    this._contentH = h;
+    if (this._autoW) this.canvas.style.width = `${w}px`;
+    if (this._autoH) this.canvas.style.height = `${h}px`;
+    if (this._measure()) this._setViewport();
+    this._rect = null;
+  }
+  /** Subscribe: 'message' (name, data), 'state' (key, value: HostState.set in the UI),
+   * 'call' (id, name, args: Host.call without a handle() handler), 'callCancel' (id),
+   * 'error' (message), 'log' (level, text), 'frame' (stats). */
+  on(type, cb) {
+    let set = this.listeners.get(type);
+    if (!set) this.listeners.set(type, (set = new Set()));
+    set.add(cb);
+    return () => this.off(type, cb);
+  }
+
+  off(type, cb) { this.listeners.get(type)?.delete(cb); }
 
   /** The last rendered frame as premultiplied RGBA (copy), for tests and screenshots. */
   readPixels() {
@@ -490,41 +360,6 @@ class JsuiHost {
   async readPixelsAsync() {
     if (this._wgpu) return this._wgpu.readPixels();
     return this.readPixels();
-  }
-
-  destroy() {
-    if (this._destroyed) return;
-    this.stop();
-    this._destroyed = true;
-    this._abort.abort();
-    this._blitAbort?.abort();
-    this._canvasAbort?.abort();
-    clearTimeout(this._restoreTimer);
-    this._resizeObserver?.disconnect();
-    this._sink?.remove();
-    const M = this.module;
-    M._jsui_destroy(this.rt);
-    this.rt = 0;
-    this._wgpu?.destroy();
-    this._wgpu = null;
-    if (this._gpu) {
-      M.GL.makeContextCurrent(this._glHandle);
-      M._jsui_gpu_destroy(this._gpu);
-      M.GL.makeContextCurrent(0);
-      M.GL.deleteContext(this._glHandle);
-      this._gpu = this._glHandle = 0;
-    }
-    M.__jsuiHosts.delete(this.hostId);
-    if (this._buf) M._free(this._buf);
-    if (this._baseUrlPtr) M._free(this._baseUrlPtr);
-    M._free(this._scratch);
-    M._free(this._dirty);
-    this._buf = this._scratch = this._baseUrlPtr = this._dirty = 0;
-    if (this._gl && this._tex) {
-      this._gl.deleteTexture(this._tex);
-      this._gl.deleteBuffer(this._vb);
-      this._gl.deleteProgram(this._prog);
-    }
   }
 
   // ---------------------------------------------------------------- helpers
@@ -567,15 +402,6 @@ class JsuiHost {
     try { return fn(...ptrs); } finally { for (const p of owned) M._free(p); }
   }
 
-  _checkError() {
-    const p = this.module._jsui_last_error(this.rt);
-    const msg = p ? this.module.UTF8ToString(p) : null;
-    if (msg !== this._lastError) {
-      this._lastError = msg;
-      if (msg) this._emit('error', msg);
-    }
-  }
-
   _updateCursor() {
     const p = this.module._jsui_get_cursor(this.rt);
     const c = p ? this.module.UTF8ToString(p) : 'default';
@@ -608,9 +434,12 @@ class JsuiHost {
         devH = dbox.blockSize;
       }
     } else {
-      cssW = c.clientWidth || c.width;
-      cssH = c.clientHeight || c.height;
+      cssW = c ? c.clientWidth || c.width : 1;
+      cssH = c ? c.clientHeight || c.height : 1;
     }
+    // Auto-sized axes follow the content (see _fitContent).
+    if (this._autoW) { cssW = this._contentW || 1; devW = devH = 0; }
+    if (this._autoH) { cssH = this._contentH || 1; devW = devH = 0; }
     const w = Math.max(1, Math.round(cssW)), h = Math.max(1, Math.round(cssH));
     const ratio = this._ratio();
     devW = devW || Math.round(w * ratio);
@@ -622,16 +451,23 @@ class JsuiHost {
     this.pixelRatio = pr;
     this.pixelWidth = devW;
     this.pixelHeight = devH;
-    c.width = devW;
-    c.height = devH;
+    if (c) {
+      c.width = devW;
+      c.height = devH;
+    }
     this._sizeChanged = true;
     return true;
+  }
+
+  _setViewport() {
+    const [w, h] = this._viewportSize();
+    this.module._jsui_set_viewport(this.rt, w, h, this.pixelRatio);
   }
 
   _installResize() {
     const apply = (entry) => {
       if (this._measure(entry) && this.rt) {
-        this.module._jsui_set_viewport(this.rt, this.width, this.height, this.pixelRatio);
+        this._setViewport();
         this._rect = null;
       }
     };
@@ -1131,6 +967,13 @@ class JsuiHost {
       this._pressedKeys.clear();
     };
     sink.addEventListener('blur', releaseAll, opt);
+    // Gamepads drive the view that has (or last had) keyboard focus.
+    sink.addEventListener('focus', () => {
+      const host = this._hostOf();
+      if ((host._padView ?? host) === this) return;
+      host._releasePads();
+      host._padView = this === host ? null : this;
+    }, opt);
     addEventListener('blur', () => {
       releaseAll();
       if (this._mouseButtons) {
@@ -1140,9 +983,323 @@ class JsuiHost {
         this._mouseButtons = 0;
       }
       M._jsui_send_mouse_leave(this.rt);
-      this._releasePads();
+      this._hostOf()._releasePads();
     }, opt);
     if (this.opts.autoFocus !== false) focusSink();
+  }
+
+
+  // Frees the view's renderer, listeners and buffers (not its handle).
+  _destroyView() {
+    this._destroyed = true;
+    this._abort.abort();
+    this._blitAbort?.abort();
+    this._canvasAbort?.abort();
+    clearTimeout(this._restoreTimer);
+    this._resizeObserver?.disconnect();
+    this._sink?.remove();
+    const M = this.module;
+    this._wgpu?.destroy();
+    this._wgpu = null;
+    if (this._gpu) {
+      M.GL.makeContextCurrent(this._glHandle);
+      M._jsui_gpu_destroy(this._gpu);
+      M.GL.makeContextCurrent(0);
+      M.GL.deleteContext(this._glHandle);
+      this._gpu = this._glHandle = 0;
+    }
+    if (this._buf) M._free(this._buf);
+    M._free(this._scratch);
+    M._free(this._dirty);
+    this._buf = this._scratch = this._dirty = 0;
+    if (this._gl && this._tex) {
+      this._gl.deleteTexture(this._tex);
+      this._gl.deleteBuffer(this._vb);
+      this._gl.deleteProgram(this._prog);
+    }
+  }
+
+  _releasePads() {}
+}
+
+class JsuiHost extends CanvasView {
+  constructor(M, canvas, opts) {
+    super(M, canvas, opts);
+    this.hostId = nextHostId++;
+    this._lastError = null;
+    this._raf = 0;
+    this._pads = [];
+    this._padView = null;            // the view gamepads drive (null: this one)
+    this._surfaces = new Set();      // JsuiSurface views
+    this._handlers = new Map();  // Host.call name -> fn (handle())
+    this._uiCalls = new Map();   // callUi id -> {resolve, reject}
+    this.rootTag = 1;
+
+    (M.__jsuiHosts ??= new Map()).set(this.hostId, {
+      onMessage: (name, json) => {
+        let data;
+        try { data = JSON.parse(json); } catch { data = json; }
+        this._emit('message', name, data);
+      },
+      onState: (key, json) => {
+        let value;
+        try { value = json == null ? undefined : JSON.parse(json); } catch { value = json; }
+        this._emit('state', key, value);
+      },
+      onCall: (id, name, json) => this._onCall(id, name, json),
+      onCallCancel: (id) => this._emit('callCancel', id),
+      onCallResult: (id, ok, payload) => {
+        const p = this._uiCalls.get(id);
+        if (!p) return;
+        this._uiCalls.delete(id);
+        if (!ok) {
+          const e = new Error(payload);
+          e.name = 'UiCallError';
+          p.reject(e);
+          return;
+        }
+        try { p.resolve(JSON.parse(payload)); } catch (e) { p.reject(e); }
+      },
+      onLog: (level, text) => {
+        if (!this._emit('log', level, text)) {
+          (level >= 3 ? console.error : level === 2 ? console.warn : level === 0 ? console.debug : console.log)(
+            '[jsui] ' + text);
+        }
+      },
+    });
+
+    this._measure();
+    const pageUrl = typeof location !== 'undefined' ? location.href : undefined;
+    this._bundleUrl = opts.bundleUrl ? new URL(opts.bundleUrl, pageUrl).href : null;
+    // Lives as long as the runtime (JsuiConfig keeps the pointer).
+    this._baseUrlPtr = this._bundleUrl ? this._newString(this._bundleUrl) : 0;
+    this.rt = M._jsui_web_create(this.hostId, this.width, this.height, this.pixelRatio, opts.devMode ? 1 : 0,
+      this._baseUrlPtr);
+    if (!this.rt) throw new Error('jsui_web_create failed');
+    // The main surface's AppRegistry component (else the bundle's first).
+    if (opts.component != null) this.run(opts.component, opts.initialProps);
+
+    this._mode = opts.renderer ?? 'auto';
+    this._webgpu = opts._webgpu ?? null;
+    // Without a canvas the main surface is not shown (a page of createSurface() widgets).
+    if (canvas) this._initView(this._mode, this._webgpu);
+    if (opts.gamepads !== false) this._installGamepads();
+
+    if (opts.bundleSource != null) this.loadSource(opts.bundleSource, this._bundleUrl ?? 'bundle.js');
+    else if (this._bundleUrl) this.loadUrl(this._bundleUrl);
+    const runtimePolls = this._bundleUrl?.startsWith('http://');
+    if (opts.devMode && (opts.devPoll ?? !runtimePolls) && this._bundleUrl) this._startDevPoll();
+    if (opts.autoStart !== false) this.start();
+  }
+
+  // ------------------------------------------------------------- public API
+
+  /** Send data to the UI (`jsui.onMessage(name, cb)` / useHostMessage in JS). */
+  postMessage(name, data) {
+    this._withStrings([String(name), JSON.stringify(data === undefined ? null : data)], (n, j) =>
+      this.module._jsui_post_message(this.rt, n, j));
+  }
+
+  // ------------------------------------------------- game data (jsui.h)
+
+  /** Shared state: the UI reads it with useHostState(key) / HostState.get(key).
+   * `value` undefined removes the key. Returns true if the value changed. */
+  setState(key, value) {
+    const json = value === undefined ? null : JSON.stringify(value);
+    return this._withStrings([String(key), json], (k, j) => this.module._jsui_set_state(this.rt, k, j)) === 1;
+  }
+
+  /** RFC 7386 merge patch of a state key (null members delete). Returns true if the value changed. */
+  patchState(key, patch) {
+    return this._withStrings([String(key), JSON.stringify(patch === undefined ? null : patch)],
+      (k, j) => this.module._jsui_patch_state(this.rt, k, j)) === 1;
+  }
+
+  /** Current value of a state key (also keys the UI set with HostState.set), or undefined. */
+  getState(key) {
+    const p = this._withStrings([String(key)], (k) => this.module._jsui_get_state(this.rt, k));
+    return p ? JSON.parse(this.module.UTF8ToString(p)) : undefined;
+  }
+
+  /** Answers the UI's `Host.call(name, args)`: `fn(args)` returns a value or a
+   * promise (a throw / rejection rejects the call). Calls without a handler
+   * are emitted as 'call' (id, name, args) for resolveCall / rejectCall, or
+   * rejected when nobody listens. Returns an unregister function. */
+  handle(name, fn) {
+    this._handlers.set(String(name), fn);
+    return () => { if (this._handlers.get(String(name)) === fn) this._handlers.delete(String(name)); };
+  }
+
+  resolveCall(id, value) {
+    if (this._destroyed) return -1;
+    return this._withStrings([JSON.stringify(value === undefined ? null : value)],
+      (j) => this.module._jsui_web_resolve_call(this.rt, id, j));
+  }
+
+  rejectCall(id, message) {
+    if (this._destroyed) return -1;
+    return this._withStrings([String(message ?? 'rejected')], (m) => this.module._jsui_web_reject_call(this.rt, id, m));
+  }
+
+  /** Calls a handler the UI registered with Host.handle(name, fn); resolves with its result. */
+  callUi(name, args) {
+    return new Promise((resolve, reject) => {
+      const json = JSON.stringify(args === undefined ? null : args);
+      const id = this._withStrings([String(name), json], (n, j) => this.module._jsui_web_call_ui(this.rt, this.hostId, n, j));
+      this._uiCalls.set(id, { resolve, reject });
+    });
+  }
+
+  _onCall(id, name, json) {
+    let args;
+    try { args = JSON.parse(json); } catch { args = undefined; }
+    const fn = this._handlers.get(name);
+    if (!fn) {
+      if (!this._emit('call', id, name, args)) this.rejectCall(id, `no host handler for "${name}"`);
+      return;
+    }
+    // Settled asynchronously (never re-entering the runtime from inside on_call).
+    Promise.resolve().then(() => fn(args)).then(
+      (v) => this.resolveCall(id, v),
+      (e) => this.rejectCall(id, e && e.message !== undefined ? e.message : String(e)));
+  }
+
+  loadUrl(url) {
+    const abs = new URL(url, typeof location !== 'undefined' ? location.href : undefined).href;
+    this._withStrings([abs], (u) => this.module._jsui_load_bundle_url(this.rt, u));
+  }
+
+  loadSource(source, name = 'bundle.js') {
+    const M = this.module;
+    const len = M.lengthBytesUTF8(source);
+    const src = M._malloc(len + 1);
+    M.stringToUTF8(source, src, len + 1);
+    const r = this._withStrings([name], (n) => M._jsui_load_bundle_source(this.rt, src, len, n));
+    M._free(src);
+    return r === 0;
+  }
+
+  reload() { this.module._jsui_reload(this.rt); }
+
+  /** Register a font from bytes (ArrayBuffer / typed array). */
+  registerFont(family, bytes, weight = 400, italic = false) {
+    const M = this.module;
+    const data = ArrayBuffer.isView(bytes) ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+      : new Uint8Array(bytes);
+    const p = M._malloc(data.length);
+    M.HEAPU8.set(data, p);
+    const r = this._withStrings([family], (f) => M._jsui_register_font(this.rt, f, p, data.length, weight, italic ? 1 : 0));
+    M._free(p);
+    return r === 0;
+  }
+
+  get lastError() { return this._lastError; }
+
+  /** Resolves after a frame with no resource loads in flight (bundle, images,
+   * fonts, fetch) and nothing left to paint on any canvas: the UI is on screen. */
+  whenIdle() {
+    return new Promise((resolve) => (this._idleWaiters ??= []).push(resolve));
+  }
+
+  start() {
+    if (this._raf || this._destroyed) return;
+    const loop = (t) => {
+      this._raf = requestAnimationFrame(loop);
+      this.frame(t);
+    };
+    this._raf = requestAnimationFrame(loop);
+  }
+
+  stop() {
+    if (this._raf) cancelAnimationFrame(this._raf);
+    this._raf = 0;
+  }
+
+  // ------------------------------------------------------------- surfaces
+
+  /**
+   * Shows the AppRegistry component `options.component` on another canvas,
+   * like a React Native root view: same bundle, JS context, state and fonts,
+   * its own props, size, renderer, input and focus. `target`: a <canvas>, or
+   * an element that gets a canvas filling it (removed again by destroy()).
+   * @param {HTMLCanvasElement|HTMLElement} target
+   * @param {JsuiSurfaceOptions} options
+   */
+  createSurface(target, options) {
+    if (this._destroyed) throw new Error('createSurface: runtime destroyed');
+    const s = new JsuiSurface(this, target, options ?? {});
+    this._surfaces.add(s);
+    return s;
+  }
+
+  /** The surfaces made with createSurface() and not destroyed. */
+  get surfaces() { return Array.from(this._surfaces); }
+
+  /** Runs `component` (null: the current one) on the main surface with `props`
+   * (jsui_surface_run). False for props that are not a JSON object. */
+  run(component, props) {
+    return this._withStrings([component == null ? null : String(component), JSON.stringify(props ?? {})],
+      (k, p) => this.module._jsui_surface_run(this.rt, k, p)) === 0;
+  }
+
+  /** New props for the main surface's component (it re-renders, keeping its state). */
+  setProps(props) { return this.run(null, props); }
+
+  _surfaceDestroyed(s) {
+    this._surfaces.delete(s);
+    if (this._padView === s) {
+      this._releasePads();
+      this._padView = null;
+    }
+  }
+
+  /** Runs one frame (tick + paint if needed). Called by the rAF loop; usable for manual stepping. */
+  frame(now = performance.now()) {
+    if (this._destroyed) return;
+    const M = this.module, rt = this.rt, st = this.stats;
+    if (this._padsActive) this._pollGamepads();
+    const t0 = performance.now();
+    M._jsui_tick(rt, now);
+    st.tickMs = ema(st.tickMs, performance.now() - t0);
+    st.frames++;
+    // One tick for the runtime, then every canvas paints what changed.
+    this._paint();
+    for (const s of this._surfaces) {
+      s.stats.frames++;
+      s._paint();
+    }
+    this._checkError();
+    if (this.listeners.get('frame')?.size) this._emit('frame', st);
+    if (this._idleWaiters?.length && !M._jsui_pending_loads(rt) && !this._wantsPaint() &&
+        !this.surfaces.some((s) => s._wantsPaint())) {
+      const w = this._idleWaiters;
+      this._idleWaiters = [];
+      w.forEach((r) => r());
+    }
+  }
+
+  destroy() {
+    if (this._destroyed) return;
+    this.stop();
+    // jsui_destroy frees the surface handles with the runtime.
+    for (const s of this._surfaces) s._destroyView(true);
+    this._surfaces.clear();
+    this._destroyView();
+    const M = this.module;
+    M._jsui_destroy(this.rt);
+    this.rt = 0;
+    M.__jsuiHosts.delete(this.hostId);
+    if (this._baseUrlPtr) M._free(this._baseUrlPtr);
+    this._baseUrlPtr = 0;
+  }
+
+  _checkError() {
+    const p = this.module._jsui_last_error(this.rt);
+    const msg = p ? this.module.UTF8ToString(p) : null;
+    if (msg !== this._lastError) {
+      this._lastError = msg;
+      if (msg) this._emit('error', msg);
+    }
   }
 
   // ---------------------------------------------------------------- gamepad
@@ -1157,7 +1314,7 @@ class JsuiHost {
   }
 
   _pollGamepads() {
-    const M = this.module, rt = this.rt;
+    const M = this.module, rt = (this._padView ?? this).rt;
     const pads = navigator.getGamepads();
     let any = false;
     const n = Math.max(pads.length, this._pads.length);
@@ -1203,13 +1360,13 @@ class JsuiHost {
     for (let b = 0; b < GAMEPAD_BUTTONS; b++) {
       if (s.pressed[b]) {
         s.pressed[b] = 0;
-        this.module._jsui_send_gamepad_button(this.rt, i, b, 0, 0);
+        this.module._jsui_send_gamepad_button((this._padView ?? this).rt, i, b, 0, 0);
       }
     }
     for (let a = 0; a < GAMEPAD_AXES; a++) {
       if (s.axes[a] !== 0) {
         s.axes[a] = 0;
-        this.module._jsui_send_gamepad_axis(this.rt, i, a, 0);
+        this.module._jsui_send_gamepad_axis((this._padView ?? this).rt, i, a, 0);
       }
     }
   }
@@ -1243,6 +1400,92 @@ class JsuiHost {
       }
       await new Promise((r) => setTimeout(r, ok ? 500 : 2000));
     }
+  }
+}
+
+/** @typedef {{
+ *   component: string,           // the AppRegistry key (AppRegistry.registerComponent)
+ *   initialProps?: object,       // the component's props (JSON-serializable)
+ *   width?: number,              // CSS px; sets the canvas' CSS width (default: its CSS box)
+ *   height?: number,
+ *   autoSize?: boolean|'width'|'height',
+ *                                // size the canvas to the component's laid-out content (both axes,
+ *                                // or one; the other follows the canvas' CSS box)
+ *   renderer?: 'auto'|'gpu'|'webgpu'|'webgl'|'cpu'|'2d',
+ *                                // default: the runtime's. Each canvas has its own context; with
+ *                                // many small surfaces prefer 'cpu' / '2d' (browsers cap live WebGL
+ *                                // contexts at ~16; WebGPU canvases share the runtime's device)
+ *   pixelRatio?: number,         // default: the runtime's option, else window.devicePixelRatio
+ *   autoFocus?: boolean,         // focus its keyboard sink on creation (default false)
+ *   trapTab?: boolean,           // keep an unhandled Tab inside (default false: focus moves on in the page)
+ * }} JsuiSurfaceOptions */
+
+// A further root view of a runtime (JsuiHost.createSurface).
+class JsuiSurface extends CanvasView {
+  constructor(host, target, opts) {
+    if (!opts.component) throw new Error('createSurface: component is required');
+    if (!target) throw new Error('createSurface: a canvas or element is required');
+    let canvas = target, owned = false;
+    if (target.tagName !== 'CANVAS') {
+      canvas = document.createElement('canvas');
+      canvas.style.display = 'block';
+      if (!opts.autoSize) Object.assign(canvas.style, { width: '100%', height: '100%' });
+      target.appendChild(canvas);
+      owned = true;
+    }
+    super(host.module, canvas, { ...opts, autoFocus: opts.autoFocus === true, trapTab: opts.trapTab ?? false,
+      pixelRatio: opts.pixelRatio ?? host.opts.pixelRatio });
+    const M = host.module;
+    this.host = host;
+    this._ownsCanvas = owned;
+    this.component = String(opts.component);
+    this._autoW = opts.autoSize === true || opts.autoSize === 'width';
+    this._autoH = opts.autoSize === true || opts.autoSize === 'height';
+    if (opts.width > 0 && !this._autoW) canvas.style.width = `${opts.width}px`;
+    if (opts.height > 0 && !this._autoH) canvas.style.height = `${opts.height}px`;
+    this._measure();
+    const [w, h] = this._viewportSize();
+    this.rt = this._withStrings([this.component, JSON.stringify(opts.initialProps ?? {})],
+      (k, p) => M._jsui_surface_create(host.rt, k, p, w, h, this.pixelRatio));
+    if (!this.rt) {
+      super._destroyView();
+      if (owned) canvas.remove();
+      throw new Error(`createSurface("${this.component}") failed (see the log)`);
+    }
+    /** The surface's React Native root tag (RootTagContext in its components). */
+    this.rootTag = M._jsui_surface_tag(this.rt);
+    this._initView(opts.renderer ?? host._mode, host._webgpu);
+  }
+
+  _hostOf() { return this.host; }
+
+  _log(level, text) { this.host._log(level, `${this.component} (root ${this.rootTag ?? '?'}): ${text}`); }
+
+  /** New props: the component re-renders with them, keeping its state. False for invalid props. */
+  setProps(props) { return this.run(null, props); }
+
+  /** Runs `component` (null: the current one) with `props` on this surface. */
+  run(component, props) {
+    if (this._destroyed) return false;
+    const ok = this._withStrings([component == null ? null : String(component), JSON.stringify(props ?? {})],
+      (k, p) => this.module._jsui_surface_run(this.rt, k, p)) === 0;
+    if (ok && component != null) this.component = String(component);
+    return ok;
+  }
+
+  /** Unmounts the component and frees the surface (and the canvas createSurface made). */
+  destroy() { this._destroyView(false); }
+
+  // `runtimeGone`: the runtime is being destroyed and frees the handle itself.
+  _destroyView(runtimeGone) {
+    if (this._destroyed) return;
+    super._destroyView();
+    if (!runtimeGone) {
+      this.module._jsui_surface_destroy(this.rt);
+      this.host._surfaceDestroyed(this);
+    }
+    this.rt = 0;
+    if (this._ownsCanvas) this.canvas.remove();
   }
 }
 

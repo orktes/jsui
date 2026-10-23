@@ -195,6 +195,10 @@ node in the inspector.
 | `autostart` | bool | `true` | start in `_ready` (otherwise call `start()`) |
 | `forward_gamepad` | bool | `true` | forward joypad events received while focused |
 | `force_cpu` | bool | `false` | always use the CPU renderer, also on Vulkan / Metal |
+| `runtime_view` | NodePath | empty | show a surface of that JsuiView's runtime instead of running a bundle of its own (see [Several views, one runtime](#several-views-one-runtime)) |
+| `component` | String | `""` | the `AppRegistry` key this view shows. On a runtime view: the main surface's component (empty: the bundle's first registered one) |
+| `initial_props` | Dictionary | `{}` | the component's props; changing them re-renders it with the new props (state kept) |
+| `auto_size` | bool | `false` | size the view to the component's content: the view's minimum size follows the laid-out size |
 
 Changing `bundle_url` or `dev_mode` on a running view restarts it.
 
@@ -219,6 +223,7 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | `get_pending_loads()` | bundle/image/font/fetch loads in flight |
 | `get_last_error()` | last uncaught JS error, or `""` |
 | `get_effective_pixel_ratio()` | the ratio actually used |
+| `get_root_tag()` | the React Native root tag of the view's surface (1: a runtime's main surface, 0: not running) |
 | `is_running()` | |
 
 | Signal | |
@@ -256,6 +261,52 @@ func _on_ui_call(id, name, args):
         _:
             ui.reject_call(id, "unknown call " + name)
 ```
+
+### Several views, one runtime
+
+Like React Native root views, one bundle and one JS context can feed many
+views: a HUD, a nameplate over each character, a small widget inside an
+existing Godot UI. The bundle registers each component:
+
+```js
+AppRegistry.registerComponent('Hud', () => Hud);
+AppRegistry.registerComponent('Nameplate', () => Nameplate);
+AppRegistry.registerComponent('Badge', () => Badge);
+```
+
+One JsuiView runs the bundle (the runtime view); the others set
+`runtime_view` to it and pick a `component`:
+
+```gdscript
+@onready var ui: JsuiView = $UI   # bundle_url = "res://ui/dist/bundle.js", component = "Hud"
+
+func spawn_nameplate(enemy):
+    var plate := JsuiView.new()
+    plate.component = "Nameplate"
+    plate.initial_props = {"name": enemy.name, "hp": enemy.hp}
+    plate.size = Vector2(160, 40)
+    enemy.add_child(plate)
+    plate.runtime_view = plate.get_path_to(ui)   # attaches (autostart): the surface starts
+    enemy.hp_changed.connect(func(hp): plate.initial_props = {"name": enemy.name, "hp": hp})
+```
+
+* Each view has its own size, pixel ratio, input, focus, cursor, renderer
+  and texture; JS state, `HostState`, fonts and images are shared. Inside a
+  component, `useWindowDimensions()` is its view's size and
+  `useContext(RootTagContext)` its root tag.
+* The runtime view ticks the runtime once per frame and then paints every
+  surface view whose frame changed (surface views are not ticked on their
+  own, so the cost of a frame is one JS tick however many views there are).
+* The runtime's signals (`message_received`, `state_changed`,
+  `call_requested`, …) are emitted by the runtime view. On a surface view the
+  state, call, message and `reload()` methods act on the runtime view.
+* `stop()` / `start()` on a surface view destroy / recreate its surface;
+  on the runtime view they take every surface with them, and the surfaces
+  come back with the new runtime. Freeing a surface view unmounts its
+  component.
+* `auto_size` makes a surface view take its component's laid-out size (a
+  component with a fixed or content size, like a badge or a button inside a
+  Godot `Container`).
 
 ### Rendering
 

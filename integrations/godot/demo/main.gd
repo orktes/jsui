@@ -77,6 +77,7 @@ var _anchors := {}
 var _failures := 0
 var _testing := false
 var _fake_interop: Object = null
+var _badge_events: Array = []  # "mount:<label>", "render:<label>", "press:<label>", "unmount:<label>"
 
 
 ## The WebGPUInterop contract (integrations/godot/README.md) with null handles.
@@ -194,6 +195,8 @@ func _on_ui_message(name: String, data, json: String) -> void:
 				print("[ui event] ", json)
 		"jsui-record:anchors", "demo:anchors":
 			_anchors.merge(data, true)
+		"badge:mount", "badge:render", "badge:press", "badge:unmount":
+			_badge_events.append(name.trim_prefix("badge:") + ":" + str(data.label))
 		_:
 			print("[ui -> godot] ", name, " ", json)
 
@@ -455,9 +458,46 @@ func _run_self_test() -> void:
 	await _click(Vector2(200, 620))  # open space below the season card
 	_check("unhandled click", _unhandled_clicks > clicks, "reaches the game")
 
+	await _test_surface()
+
 	_testing = false
 	await _wait(0.8)  # let the toast and springs settle for the capture
 	_finish()
+
+
+## A second JsuiView on the same runtime (runtime_view): the bundle's
+## 'Badge' component in a surface of its own, sized by its content. Ticked by
+## the main view; has its own props, input and texture.
+func _test_surface() -> void:
+	var badge := JsuiView.new()
+	badge.component = "Badge"
+	badge.initial_props = {"label": "Surface"}
+	badge.auto_size = true
+	badge.position = Vector2(16, 16)
+	add_child(badge)
+	badge.runtime_view = badge.get_path_to(ui)
+	var mounted := await _wait_for(func(): return _badge_events.has("mount:Surface"))
+	_check("surface mount", mounted and badge.is_running() and badge.get_root_tag() > 1,
+		"root tag %d" % badge.get_root_tag())
+	var ratio: float = badge.get_effective_pixel_ratio()
+	var want := Vector2i(roundi(96 * ratio), roundi(32 * ratio))
+	var sized := await _wait_for(func():
+		var im: Image = badge.get_frame_image()
+		return im != null and im.get_size() == want)
+	_check("surface auto size", sized and badge.custom_minimum_size == Vector2(96, 32),
+		"min size %s, frame %s, want %s" % [badge.custom_minimum_size, badge.get_frame_image().get_size() if badge.get_frame_image() else null, want])
+	var img: Image = badge.get_frame_image()
+	var c := img.get_pixel(int(want.x * 0.15), want.y / 2) if img else Color()
+	_check("surface pixels", img != null and absi(c.r8 - 71) <= 3 and absi(c.g8 - 140) <= 3 and absi(c.b8 - 191) <= 3,
+		"badge fill %s" % [c])
+	badge.initial_props = {"label": "Props"}
+	_check("surface props", await _wait_for(func(): return _badge_events.has("render:Props")) \
+		and not _badge_events.has("mount:Props"), "re-rendered with new props, state kept")
+	await _click(badge.position + Vector2(48, 16))
+	_check("surface input", await _wait_for(func(): return _badge_events.has("press:Props")), "onPress in the surface")
+	badge.queue_free()
+	_check("surface unmount", await _wait_for(func(): return _badge_events.has("unmount:Surface")), "freeing the view unmounts it")
+	ui.grab_focus()
 
 
 func _last_scroll_y() -> float:

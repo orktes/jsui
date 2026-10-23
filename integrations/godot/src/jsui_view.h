@@ -15,6 +15,18 @@
 // The texture is drawn by an internal canvas item with premultiplied-alpha
 // blending (JSUI produces premultiplied RGBA), so the node's own `material`
 // stays free for the game.
+//
+// Several views can share one runtime (one bundle and JS context), like
+// React Native root views: a view whose `runtime_view` points at another
+// JsuiView shows a surface of that view's runtime (jsui_surface_create)
+// running the AppRegistry component `component` with `initial_props`. The
+// runtime view ticks the runtime once per frame and then paints every
+// surface view whose frame changed; it also emits the runtime's signals
+// (messages, state, calls, errors), and the state / call / message methods
+// of a surface view act on it. `component` on the runtime view itself picks
+// the main surface's component (empty: the bundle's first registered one).
+// `auto_size` sizes the view to its component's content (its minimum size),
+// for small widgets inside existing Godot UIs.
 #pragma once
 
 #include <godot_cpp/classes/control.hpp>
@@ -24,6 +36,7 @@
 #include <godot_cpp/classes/texture2drd.hpp>
 #include <godot_cpp/classes/input_event.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
+#include <godot_cpp/variant/node_path.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/rid.hpp>
 
@@ -58,10 +71,18 @@ class JsuiView : public godot::Control {
   bool get_forward_gamepad() const { return forward_gamepad_; }
   void set_force_cpu(bool on);
   bool get_force_cpu() const { return force_cpu_; }
+  void set_runtime_view(const godot::NodePath& path);
+  godot::NodePath get_runtime_view() const { return runtime_view_; }
+  void set_component(const godot::String& key);
+  godot::String get_component() const { return component_; }
+  void set_initial_props(const godot::Dictionary& props);
+  godot::Dictionary get_initial_props() const { return initial_props_; }
+  void set_auto_size(bool on);
+  bool get_auto_size() const { return auto_size_; }
 
   // Methods.
-  void start();   // (re)creates the runtime and loads bundle_url
-  void stop();    // destroys the runtime
+  void start();   // (re)creates the runtime and loads bundle_url (surface views: the surface)
+  void stop();    // destroys the runtime (surface views: the surface)
   void reload();  // re-evaluates the last bundle (keeps the runtime)
   bool is_running() const { return rt_ != nullptr; }
   void post_message(const godot::String& name, const godot::Variant& data);
@@ -93,6 +114,9 @@ class JsuiView : public godot::Control {
   int get_pending_loads() const;
   godot::String get_last_error() const;
   float get_effective_pixel_ratio() const { return ratio_; }
+  // The React Native root tag of the view's surface (1: a runtime's main
+  // surface; 0 while not running).
+  int get_root_tag() const { return rt_ ? jsui_surface_tag(rt_) : 0; }
 
   void _gui_input(const godot::Ref<godot::InputEvent>& event) override;
   void _notification(int what);
@@ -110,7 +134,18 @@ class JsuiView : public godot::Control {
   static void onLoad(void* user, JsuiRuntime* rt, uint64_t id, const char* url);
 
   void process();
+  // After the runtime's tick: cursor, auto size and the frame if it changed.
+  void afterTick();
   void updateViewport();
+  void updateAutoSize();
+  // Surface views (runtime_view): attach to / detach from the runtime view.
+  JsuiView* resolveRuntimeView() const;
+  void attachToRuntimeView();
+  void detachFromRuntimeView();
+  void createSurface();   // the runtime view is running: show our component
+  void destroySurface();  // frees the surface (the runtime stays)
+  void surfaceGone();     // the runtime went away (its handles are freed)
+  std::string propsJson() const;
   void render();
   void renderCpu();
   // GPU path (jsui_gpu_render.cpp). renderGpu returns false when the GPU
@@ -138,8 +173,18 @@ class JsuiView : public godot::Control {
   bool autostart_ = true;
   bool forward_gamepad_ = true;
   bool force_cpu_ = false;
+  godot::NodePath runtime_view_;
+  godot::String component_;
+  godot::Dictionary initial_props_;
+  bool auto_size_ = false;
 
+  // The runtime handle this view renders and sends input to: the runtime it
+  // owns (its main surface), or a surface of host_'s runtime.
   JsuiRuntime* rt_ = nullptr;
+  JsuiView* host_ = nullptr;             // the runtime view, for a surface view
+  std::vector<JsuiView*> surfaces_;      // surface views of this view's runtime
+  bool attach_wanted_ = false;           // a surface view that should show its surface
+  bool viewport_auto_ = false;           // jsui_set_viewport(0, 0) applied
   uint64_t start_usec_ = 0;
   int logical_w_ = 0, logical_h_ = 0, pixel_w_ = 0, pixel_h_ = 0;
   float ratio_ = 1.f;
