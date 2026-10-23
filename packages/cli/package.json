@@ -1,6 +1,6 @@
 {
   "name": "@orktes/jsui-cli",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Build, dev server, headless screenshots / scripting and the agent skill for JSUI apps.",
   "author": "Jaakko Lukkari",
   "license": "MIT",
@@ -49,8 +49,8 @@
   },
   "dependencies": {
     "@babel/core": "8.0.9",
-    "@orktes/jsui-react": "0.3.0",
-    "@orktes/jsui-web": "0.3.0",
+    "@orktes/jsui-react": "0.4.0",
+    "@orktes/jsui-web": "0.4.0",
     "esbuild": "0.28.2",
     "react-refresh": "0.19.0"
   },

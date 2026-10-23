@@ -1,6 +1,6 @@
 {
   "name": "jsui",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Build in-game UIs with JSUI (React Native on QuickJS + Yoga + Skia): components, animation, gamepad focus, game data, embedding, and headless screenshot / scripting tools.",
   "author": {
     "name": "Jaakko Lukkari"

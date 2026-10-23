@@ -25,7 +25,7 @@ succeeded with all three, including the advisory WebGPU job.
    (Or run the Release workflow by hand from the Actions tab on `main`.)
 3. The workflow checks the tag matches the package versions, downloads the
    WASM modules, runs the JS tests, and publishes `@orktes/jsui-react`, then
-   `@orktes/jsui-cli`, then `@orktes/jsui-web`. Versions already on npm are skipped, so a
+   `@orktes/jsui-web`, then `@orktes/jsui-cli` (which depends on both). Versions already on npm are skipped, so a
    failed run can simply be re-run.
 
 Prerelease versions (`0.2.0-rc.1`) are published under the `next` dist-tag;
