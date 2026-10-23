@@ -1,7 +1,8 @@
 // "Runs in" band under the hero: the hosts JSUI has a working example for
 // (monochrome marks, tinted to the site palette), then the ones in progress.
 // Logos: the Godot mark (Andrea Calabró, CC BY 4.0, used to say JSUI runs in
-// Godot) and the WebAssembly logo (CC0); the other glyphs are generic.
+// Godot) and the WebAssembly logo (CC0); the other glyphs are generic
+// (raylib, SDL3 and sokol included: their own logos are not used).
 import React from 'react';
 import { Image, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import { colors, font, site } from '../../theme.js';
@@ -13,9 +14,12 @@ const TARGETS = [
   { name: 'Web', sub: 'WebAssembly', icon: require('../../assets/engines/webassembly@2x.png'), to: '/embed' },
   { name: 'iOS', sub: 'Metal', icon: require('../../assets/engines/ios@2x.png'), href: GITHUB + '/tree/main/integrations/ios' },
   { name: 'Custom engine', sub: 'C API', icon: require('../../assets/engines/custom@2x.png'), to: '/embed' },
+  { name: 'raylib', icon: require('../../assets/engines/raylib@2x.png'), href: GITHUB + '/tree/main/integrations/raylib' },
+  { name: 'SDL3', icon: require('../../assets/engines/sdl@2x.png'), href: GITHUB + '/tree/main/integrations/sdl3' },
+  { name: 'sokol', icon: require('../../assets/engines/sokol@2x.png'), href: GITHUB + '/tree/main/integrations/sokol' },
   { name: 'Standalone', sub: 'SDL2 viewer', icon: require('../../assets/engines/standalone@2x.png'), href: GITHUB + '/tree/main/tools/jsui-viewer' },
 ];
-const SOON = ['raylib', 'sokol'];
+const SOON = [];
 
 function Target({ t }) {
   const { go } = useRouter();

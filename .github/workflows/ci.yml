@@ -31,6 +31,7 @@ jobs:
       js: ${{ steps.filter.outputs.js }}
       reference: ${{ steps.filter.outputs.reference }}
       ios: ${{ steps.filter.outputs.ios }}
+      engines: ${{ steps.filter.outputs.engines }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -75,6 +76,14 @@ jobs:
               - 'tests/native/**'
               - 'package.json'
               - 'package-lock.json'
+            engines:
+              - *core
+              - 'integrations/raylib/**'
+              - 'integrations/sdl3/**'
+              - 'integrations/sokol/**'
+              - 'integrations/shared/**'
+              - 'packages/**'
+              - 'examples/theme.js'
             ios:
               - *core
               - 'integrations/ios/**'
@@ -163,6 +172,76 @@ jobs:
             bands.png
             bands-gpu.png
             bands-gpu-core.png
+
+  # ------------------------------------------- engine examples (Linux, Xvfb)
+  # integrations/raylib, sdl3 and sokol: the shared HUD in three game loops.
+  # Each runs its --selftest (an empty-space click passes through to the game,
+  # a click on the Spawn button is consumed and its message reaches the game)
+  # on the GPU path (Mesa llvmpipe GL) and on the CPU path, and saves the
+  # composed frame.
+  engines:
+    name: engine examples (raylib, SDL3, sokol)
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.engines == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build clang libfontconfig1-dev zlib1g-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxinerama-dev libxfixes-dev \
+            libgl1-mesa-dev libegl1 libegl-mesa0 libgl1-mesa-dri xvfb xauth
+      - name: Cache prebuilt Skia + engine sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/skia-prebuilt
+            build/_deps/*-src
+          key: engines-deps-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'integrations/*/CMakeLists.txt', 'integrations/shared/fetch.cmake') }}
+          restore-keys: engines-deps-${{ runner.os }}-
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: engines-${{ runner.os }}
+          max-size: 500M
+      - name: UI bundle
+        run: |
+          npm ci
+          npx jsui build integrations/shared/ui/app.jsx -o integrations/shared/ui/dist/bundle.js
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DJSUI_BUILD_TESTS=OFF -DJSUI_BUILD_VIEWER=OFF
+          -DJSUI_BUILD_RAYLIB=ON -DJSUI_BUILD_SDL3=ON -DJSUI_BUILD_SOKOL=ON
+      - name: Build
+        run: cmake --build build -j "$(nproc)" --target jsui-raylib jsui-sdl3 jsui-sokol
+      - name: Self-tests and frames
+        run: |
+          mkdir -p engines
+          x() { xvfb-run -a -s "-screen 0 1600x1000x24" "$@"; }
+          x ./build/jsui-raylib --selftest --screenshot engines/raylib.png | tee engines/raylib.log
+          grep -q '^GPU: ' engines/raylib.log && grep -q 'selftest: ok' engines/raylib.log
+          x ./build/jsui-raylib --cpu --selftest --screenshot engines/raylib-cpu.png | tee engines/raylib-cpu.log
+          ! grep -q '^GPU: ' engines/raylib-cpu.log && grep -q 'selftest: ok' engines/raylib-cpu.log
+          x ./build/jsui-sokol --selftest --screenshot engines/sokol.png | tee engines/sokol.log
+          grep -q '^GPU: ' engines/sokol.log && grep -q 'selftest: ok' engines/sokol.log
+          x ./build/jsui-sokol --cpu --selftest --screenshot engines/sokol-cpu.png | tee engines/sokol-cpu.log
+          grep -q 'selftest: ok' engines/sokol-cpu.log
+          x ./build/jsui-sdl3 --selftest --screenshot engines/sdl3.png | tee engines/sdl3.log
+          grep -q 'selftest: ok' engines/sdl3.log
+          SDL_VIDEO_DRIVER=dummy ./build/jsui-sdl3 --renderer software --selftest --screenshot engines/sdl3-software.png | tee engines/sdl3-software.log
+          grep -q 'selftest: ok' engines/sdl3-software.log
+          for f in engines/*.png; do test -s "$f"; done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: engine-examples-linux
+          path: engines/
 
   # ------------------------------------------------- Godot GDExtension (Linux)
   # Built against Skia m157 from source (scripts/build-skia-desktop.sh,

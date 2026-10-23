@@ -10,6 +10,9 @@ option(JSUI_BUILD_TOOLS "Build jsui-render and the viewer" ON)
 option(JSUI_BUILD_TESTS "Build native tests" ON)
 option(JSUI_BUILD_VIEWER "Build tools/jsui-viewer (downloads and builds SDL2)" ON)
 option(JSUI_BUILD_GODOT "Build the Godot 4 GDExtension in integrations/godot (fetches godot-cpp, needs python3)" OFF)
+option(JSUI_BUILD_RAYLIB "Build the raylib example host in integrations/raylib (downloads raylib)" OFF)
+option(JSUI_BUILD_SDL3 "Build the SDL3 example host in integrations/sdl3 (downloads SDL3)" OFF)
+option(JSUI_BUILD_SOKOL "Build the sokol example host in integrations/sokol (downloads the sokol headers)" OFF)
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 include(Deps)
@@ -252,6 +255,20 @@ endif()
 
 if(JSUI_BUILD_GODOT AND NOT EMSCRIPTEN)
   add_subdirectory(integrations/godot)
+endif()
+
+# Engine examples: the shared HUD (integrations/shared/ui) in a raylib, an
+# SDL3 and a sokol game loop, each through the C API.
+if(NOT EMSCRIPTEN AND NOT IOS)
+  if(JSUI_BUILD_RAYLIB)
+    add_subdirectory(integrations/raylib)
+  endif()
+  if(JSUI_BUILD_SDL3)
+    add_subdirectory(integrations/sdl3)
+  endif()
+  if(JSUI_BUILD_SOKOL)
+    add_subdirectory(integrations/sokol)
+  endif()
 endif()
 
 if(EMSCRIPTEN)
