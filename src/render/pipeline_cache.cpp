@@ -447,9 +447,12 @@ sk_sp<SkData> fitKey(const skgpu::graphite::Caps* caps, skgpu::graphite::ShaderC
 }
 #endif
 
-bool envFlag(const char* name) {
-  const char* v = std::getenv(name);
-  return v && *v && std::strcmp(v, "0") != 0;
+// JSUI_LOG_PIPELINES: unset / 0 nothing, "compiled" the pipelines frames
+// compiled, anything else every pipeline created.
+int logLevel() {
+  const char* v = std::getenv("JSUI_LOG_PIPELINES");
+  if (!v || !*v || std::strcmp(v, "0") == 0) return 0;
+  return std::strcmp(v, "compiled") == 0 ? 2 : 1;
 }
 
 }  // namespace
@@ -460,7 +463,7 @@ Precompiler::~Precompiler() { shutdown(); }
 
 void Precompiler::configure(skgpu::graphite::ContextOptions& opts) {
 #if defined(JSUI_PRECOMPILE)
-  log_ = envFlag("JSUI_LOG_PIPELINES");
+  log_ = logLevel();
   opts.fPipelineCallbackContext = this;
   opts.fPipelineCachingCallback = pipelineCallback;
 #else
@@ -577,7 +580,7 @@ void Precompiler::kickLocked() {
 void Precompiler::doneLocked() {
   if (reported_ || inFlight_ || !queue_.empty()) return;
   reported_ = true;
-  if (stats_.failed || log_)
+  if (stats_.failed || log_ == 1)
     SkDebugf("jsui: precompiled %llu pipelines in %.0f ms (%s), %llu keys rejected by this Skia / device\n",
              (unsigned long long)stats_.precompiled, precompileMs_, mode_ == Mode::Thread ? "worker thread" : "sliced",
              (unsigned long long)stats_.failed);
@@ -670,11 +673,12 @@ uint64_t Precompiler::takeCompiles() {
 }
 
 void Precompiler::onPipelineAdded(const std::string& label, bool fromPrecompile, const void* data, size_t size) {
-  if (log_)
-    SkDebugf("jsui: pipeline %s%s: %s\n", fromPrecompile ? "precompiled" : "compiled in a frame",
-             data ? "" : " (not serializable)", label.c_str());
-  if (fromPrecompile) return;  // its key came from a list or file
+  if (fromPrecompile) {  // its key came from a list or file
+    if (log_ == 1) SkDebugf("jsui: pipeline precompiled: %s\n", label.c_str());
+    return;
+  }
   compiles_++;
+  const char* what = "not serializable";
   std::shared_ptr<File> file;
   Entry e;
   {
@@ -683,17 +687,21 @@ void Precompiler::onPipelineAdded(const std::string& label, bool fromPrecompile,
     if (!data || !size || size > kMaxRecord) {
       // Keys with runtime effects Graphite does not know by a stable id.
       stats_.unserializable++;
-      return;
+    } else if (entries_.size() >= kMaxEntries) {
+      what = "not recorded, the cache is full";
+    } else if (e.hash = hash(data, size); !known_.insert(e.hash).second) {
+      // Queued but not precompiled yet, or evicted and compiled again.
+      what = "known";
+    } else {
+      what = "new";
+      e.data.assign(static_cast<const char*>(data), size);
+      entries_.push_back(e);
+      created_.push_back(e);
+      stats_.added++;
+      file = file_;
     }
-    e.hash = hash(data, size);
-    // Known: queued but not precompiled yet, or evicted and compiled again.
-    if (entries_.size() >= kMaxEntries || !known_.insert(e.hash).second) return;
-    e.data.assign(static_cast<const char*>(data), size);
-    entries_.push_back(e);
-    created_.push_back(e);
-    stats_.added++;
-    file = file_;
   }
+  if (log_) SkDebugf("jsui: pipeline compiled in a frame (%s): %s\n", what, label.c_str());
   if (file) file->append(e);
 }
 

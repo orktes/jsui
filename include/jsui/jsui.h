@@ -733,7 +733,9 @@ JSUI_API int jsui_render_vulkan(JsuiRuntime* rt, JsuiGpuContext* gpu, void* imag
  *   jsui_gpu_precompile_step: call it on the thread that renders.
  * - Development: the environment variable JSUI_PIPELINE_CACHE names a file
  *   that every Graphite context uses in place of the host's;
- *   JSUI_LOG_PIPELINES=1 logs every pipeline a context creates.
+ *   JSUI_LOG_PIPELINES=1 logs every pipeline a context creates,
+ *   JSUI_LOG_PIPELINES=compiled only those a frame compiled (new: not in
+ *   the cache yet; known: still queued for the precompile).
  */
 enum {
     JSUI_PRECOMPILE_NONE = 0,   /* no pipeline cache (GL contexts) */

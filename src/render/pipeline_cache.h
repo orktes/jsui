@@ -182,7 +182,7 @@ class Precompiler {
 
   const Backend backend_;
   Mode mode_ = Mode::None;
-  bool log_ = false;      // JSUI_LOG_PIPELINES: one line per pipeline created
+  int log_ = 0;           // JSUI_LOG_PIPELINES: 1 every pipeline created, 2 those frames compiled
   std::string envFile_;   // JSUI_PIPELINE_CACHE: overrides setFile
   std::unique_ptr<Compiler> compiler_;
 
