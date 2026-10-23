@@ -82,8 +82,12 @@ The action is the step's first key.
   {"expect": "#play", "focused": true},
   {"expect": "text=Victory", "count": 1},
   {"expect": "#gold", "text": "1250 gold"},
+  {"expect": "#row-vsync", "text": "On"},
   {"expectMissing": "#spinner"},
-  {"expectState": "settings", "value": {"volume": 0.5}},
+  {"expectState": "settings", "value": {"volume": 50, "vsync": true}},
+  {"expectState": "settings", "match": {"volume": 50}},
+  {"answer": "settings.apply", "value": {"ok": true}},
+  {"answer": "settings.apply", "error": "Disk full"},
   {"expectMessage": "audio.play"},
   {"getState": "settings"},
   {"tree": true},
@@ -91,11 +95,27 @@ The action is the step's first key.
 ]
 ```
 
-Gamepad buttons: `A B X Y LB RB LT RT Back Start LS RS Up Down Left Right
-Home` (or indices 0-16). Input steps report `"consumed"`: whether the UI took
-the input (false means it would pass through to the game). `Host.call`s
-from the UI are recorded in the summary's `calls` and rejected unless a JS
-script answers them (`app.handle`).
+* `expect` with `text` / `textContains` checks the element's own text or,
+  for a View, one of the Texts inside it (so `#row-vsync` with `"text":
+  "On"` works when "On" is a child Text).
+* `expectState` with `value` is an exact deep-equal; with `match` only the
+  keys given are compared (recursively).
+* Gamepad buttons: `A B X Y LB RB LT RT Back Start LS RS Up Down Left Right
+  Home` (or indices 0-16).
+* Input steps report `"consumed"`: whether the UI took the input (false
+  means it would pass through to the game).
+* `Host.call`s from the UI are recorded in the summary's `calls`. Unanswered
+  ones are rejected (`no answer for Host.call(...)`). Answer them with
+  `answer` steps, a top-level `{"calls": {"settings.apply": {"value":
+  {...}}}, "steps": [...]}` (or `{"error": "..."}` to reject), or
+  `app.handle` in a JS script.
+* Async work in the UI (a call's answer, a fetch, a state update that
+  re-renders after an effect) lands a frame or two later. Put a
+  `{"wait": 100}` (or `{"idle": 1000}`) between the action and the
+  `expect` that checks its result.
+* A mouse click also hovers. A Pressable that was clicked looks hovered and
+  focused while another element may still show gamepad focus elsewhere:
+  this is expected; use `press` steps to test controller focus.
 
 ## JS scripts and the `launch()` API
 
@@ -118,14 +138,19 @@ Or from any Node script / test:
 ```js
 import { launch } from '@orktes/jsui-cli';
 
-const app = await launch({ entry: 'src/app.jsx', width: 1280, height: 720, state: { gold: 10 } });
+const app = await launch({ entry: 'src/app.jsx', width: 1280, height: 720, state: { gold: 10 },
+  calls: { 'shop.buy': ({ item }) => ({ gold: 5 }) } });
 await app.ready();
 await app.click('#buy');
+await app.wait(100);                     // let the call's answer render
+app.setState('gold', 99);
+await app.frame();                       // state reaches the UI on the next frame
 console.log(app.getState('gold'), app.messages, app.errors);
 app.close();
 ```
 
-`app` methods: `ready()`, `wait(ms)`, `idle(maxMs)`, `screenshot(file?)` →
+`app` methods: `ready()`, `wait(ms)`, `frame()` (one frame: state and
+buffers you set reach the UI), `idle(maxMs)`, `screenshot(file?)` →
 PNG Buffer, `tree()`, `find(sel)` / `get(sel)` (throws) / `findAll(sel)`,
 `point(sel)`, `click(sel, {hold, button, mods})`, `tap`, `hover`, `drag(from,
 to, {duration, touch})`, `wheel(sel, dy, dx)`, `key(key, {code, mods, count,
@@ -133,7 +158,10 @@ hold})`, `type(text)`, `press(button, {count, hold, pad})`, `stick(axis,
 value, {duration})`, `setState`, `patchState`, `getState`, `setBuffer(key,
 values, type)`, `postMessage(name, data)`, `callUi(name, args)`,
 `handle(name, valueOrFn)`, `run(component, props)`, `resize(w, h, scale)`,
-`hitTest(sel)`, `close()`. Records: `messages`, `calls`, `stateWrites`,
+`hitTest(sel)`, `close()`. `tree()` returns `{roots: [{rootTag, viewport,
+children: [element]}], focused}` with elements shaped as in `inspect
+--json`; `find` returns one element without `children`, `findAll` the
+matches with theirs. Records: `messages`, `calls`, `stateWrites`,
 `logs`, `errors`, `time` (UI clock, ms).
 
 ## Limits

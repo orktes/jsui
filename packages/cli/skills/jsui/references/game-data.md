@@ -19,7 +19,7 @@ const gold = useHostState('gold', 0);                              // fallback w
 const { items } = useHostState('inventory', { items: {} });
 const hp = useHostStateSelector('player', (p) => p.hp, 100);       // re-renders only when hp changes
 HostState.set('settings', { volume: 0.8 });                         // UI-owned key -> engine on_state
-HostState.patch('settings', { volume: 0.5 });                       // RFC 7386 merge patch
+HostState.patch('settings', { volume: 0.5 });                       // RFC 7386 merge patch (also on an unset key)
 HostState.get('gold'); HostState.subscribe('gold', cb); HostState.keys();
 ```
 

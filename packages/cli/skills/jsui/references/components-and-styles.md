@@ -93,6 +93,12 @@ await Fonts.load('Cinzel', require('./fonts/Cinzel-Bold.ttf'), { weight: 700 });
 const [loaded] = useFonts({ Cinzel: require('./fonts/Cinzel-Regular.ttf') });
 ```
 
+Inter covers Latin, Greek and Cyrillic and common punctuation, arrows and
+math signs, but not dingbats, game-controller symbols or emoji: a missing
+glyph draws as an empty box without a warning. Draw button hints as Views
+(a circle with a letter), images or an icon font you load, and screenshot
+them.
+
 Text re-lays out when the font arrives. Hosts can also register fonts
 (`jsui_register_font`). Complex scripts (Arabic, CJK, emoji) need a font that
 covers them; text is shaped with HarfBuzz and laid out with Skia's paragraph

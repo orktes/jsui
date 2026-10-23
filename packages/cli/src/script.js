@@ -1,7 +1,7 @@
 // `jsui run`: executes a list of steps (JSON) against a headless app and
 // reports one result per step. See STEP_HELP for the format.
 
-import { elementSummary } from './headless.js';
+import { elementSummary, textsOf } from './headless.js';
 
 export const STEP_HELP = `steps (a JSON array, or {"steps": [...]}); targets are selectors ("#testID",
 "text=Exact", "Contains", "label=...", "type=TextInput", "... >> 1") or [x, y]:
@@ -23,25 +23,50 @@ export const STEP_HELP = `steps (a JSON array, or {"steps": [...]}); targets are
   {"run": "Settings", "props": {...}}   switch the main surface's component
   {"resize": [1920, 1080, 1]}
   {"find": "#play"}                     the element (or null) in the output
-  {"expect": "text=Victory", "count": 1, "text": "Victory", "focused": true}
-                                        fails the run unless it matches
+  {"expect": "#row-vsync", "count": 1, "text": "On", "focused": true}
+                                        fails the run unless it matches; "text" / "textContains"
+                                        check the element's text, or one of the Texts inside it
   {"expectMissing": "#spinner"}
-  {"expectState": "settings", "value": {...}}  deep-equal check of a state key
+  {"expectState": "settings", "value": {...}}  exact (deep-equal) check of a state key
+  {"expectState": "settings", "match": {"volume": 50}}  only the keys given
+  {"answer": "settings.apply", "value": {...}}  answer the UI's Host.call(name) from now on
+  {"answer": "settings.apply", "error": "Disk full"}  ... or reject it
   {"expectMessage": "audio.play"}       the UI posted this Host.postMessage name
   {"tree": true}                        the whole view tree in the output
   {"getState": "settings"}
   {"hitTest": [640, 360]}               {pointer, scroll}: would the UI take input there?
+Unanswered Host.calls are rejected; answer them with "answer" steps or a top-level
+{"calls": {"name": {"value": ...} | {"error": "..."}}, "steps": [...]}. Async UI work (calls,
+fetches) settles a frame or two later: follow it with {"wait": 100} or {"idle": 1000}.
 The action is the step's first key. Every step may carry "label" (echoed in the output).`;
 
 const ACTIONS = [
   'wait', 'idle', 'screenshot', 'click', 'tap', 'hover', 'drag', 'wheel', 'key', 'type', 'press', 'stick',
   'state', 'patch', 'buffer', 'message', 'callUi', 'run', 'resize', 'find', 'expect', 'expectMissing',
-  'expectState', 'expectMessage', 'tree', 'getState', 'hitTest',
+  'expectState', 'expectMessage', 'tree', 'getState', 'hitTest', 'answer',
 ];
 
 // The step's first key that names an action ({"buffer": k, "type": "f32"} is a buffer step).
 function actionOf(s) {
   return s && typeof s === 'object' ? Object.keys(s).find((k) => ACTIONS.includes(k)) || null : null;
+}
+
+// `expected` with only some keys: every key it has must match (recursively).
+function isSubset(actual, expected) {
+  if (!expected || typeof expected !== 'object' || Array.isArray(expected)) return deepEqual(actual, expected);
+  if (!actual || typeof actual !== 'object') return false;
+  return Object.keys(expected).every((k) => isSubset(actual[k], expected[k]));
+}
+
+/** A Host.call answer from a step / script: {"value": v} resolves, {"error": "msg"} rejects. */
+export function answerOf(s) {
+  if (s && typeof s === 'object' && 'error' in s) {
+    const message = String(s.error);
+    return () => {
+      throw new Error(message);
+    };
+  }
+  return s && typeof s === 'object' && 'value' in s ? s.value : null;
 }
 
 function deepEqual(a, b) {
@@ -83,11 +108,15 @@ async function runStep(app, s) {
     case 'expect': {
       const els = await app.findAll(v);
       const el = elementSummary(els[0]) || null;
+      const texts = els[0] ? textsOf(els[0]).map((t) => t.trim()) : [];
       if (s.count != null ? els.length !== s.count : !els.length) {
         throw Object.assign(new Error(`expected ${s.count ?? '≥1'} match(es) for ${JSON.stringify(v)}, found ${els.length}`), { element: el });
       }
-      if (s.text != null && (!el || (el.text ?? '').trim() !== String(s.text).trim())) {
-        throw Object.assign(new Error(`expected text ${JSON.stringify(s.text)}, got ${JSON.stringify(el && el.text)}`), { element: el });
+      if (s.text != null && !texts.includes(String(s.text).trim())) {
+        throw Object.assign(new Error(`expected text ${JSON.stringify(s.text)}, got ${JSON.stringify(texts)}`), { element: el });
+      }
+      if (s.textContains != null && !texts.some((t) => t.toLowerCase().includes(String(s.textContains).toLowerCase()))) {
+        throw Object.assign(new Error(`expected text containing ${JSON.stringify(s.textContains)}, got ${JSON.stringify(texts)}`), { element: el });
       }
       if (s.focused != null && !!(el && el.focused) !== !!s.focused) {
         throw Object.assign(new Error(`expected ${JSON.stringify(v)} ${s.focused ? '' : 'not '}to be focused`), { element: el });
@@ -101,9 +130,13 @@ async function runStep(app, s) {
     }
     case 'expectState': {
       const value = app.getState(v);
-      if (!deepEqual(value, s.value)) throw Object.assign(new Error(`state ${v} is ${JSON.stringify(value)}`), { value });
+      const ok = 'match' in s ? isSubset(value, s.match) : deepEqual(value, s.value);
+      if (!ok) throw Object.assign(new Error(`state ${v} is ${JSON.stringify(value)}`), { value });
       return { action, value };
     }
+    case 'answer':
+      app.handle(v, answerOf(s));
+      return { action };
     case 'expectMessage': {
       const m = app.messages.filter((x) => x.name === v);
       if (!m.length) throw new Error(`no Host.postMessage("${v}") so far (got: ${[...new Set(app.messages.map((x) => x.name))].join(', ') || 'none'})`);

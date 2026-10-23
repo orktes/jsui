@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { build } from '../src/build.js';
 import { dev } from '../src/dev.js';
 import { elementSummary, formatTree, launch } from '../src/headless.js';
-import { runSteps, STEP_HELP } from '../src/script.js';
+import { answerOf, runSteps, STEP_HELP } from '../src/script.js';
 import { skillCommand, SKILL_USAGE } from '../src/skill.js';
 
 const USAGE = `usage:
@@ -131,6 +131,7 @@ async function headless(cmd, values, positionals) {
     }
     const parsed = JSON.parse(await readFile(scriptPath, 'utf8'));
     const steps = Array.isArray(parsed) ? parsed : parsed.steps;
+    if (!Array.isArray(parsed) && parsed.calls) for (const [name, answer] of Object.entries(parsed.calls)) app.handle(name, answerOf(answer));
     if (!Array.isArray(steps)) throw new UsageError(`${scriptPath}: expected an array of steps or {"steps": [...]}`);
     const r = await runSteps(app, steps, {
       keepGoing: !!values['keep-going'],

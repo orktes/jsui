@@ -195,6 +195,26 @@ test('cli: screenshot, inspect, run (json + js), default-export screens', { skip
   assert.equal(JSON.parse(js.stdout).result, 'ok 42');
 });
 
+test('run: answers, partial state match, text inside views', { skip }, async () => {
+  const dir = await fixture();
+  const steps = path.join(dir, 'answers.json');
+  await writeFile(steps, JSON.stringify({
+    calls: { 'shop.buy': { error: 'sold out' } },
+    steps: [
+      { expect: '#play', text: 'Play' },
+      { click: '#buy' }, { wait: 100 }, { expect: '#bought', text: 'err sold out' },
+      { answer: 'shop.buy', value: { gold: 12 } },
+      { click: '#buy' }, { wait: 100 }, { expect: '#bought', textContains: 'ok 12' },
+      { state: 'settings', value: { volume: 1, lang: 'fi' } },
+      { expectState: 'settings', match: { lang: 'fi' } },
+    ],
+  }));
+  const run = await exec(process.execPath, [BIN, 'run', path.join(dir, 'app.jsx'), steps]);
+  const lines = run.stdout.trim().split('\n').map((l) => JSON.parse(l));
+  assert.ok(lines.every((l) => l.ok), run.stdout);
+  assert.ok(lines.at(-1).calls.every((c) => Number.isInteger(c.time)));
+});
+
 test('cli: JS errors fail the command', { skip }, async () => {
   const dir = await fixture();
   await writeFile(path.join(dir, 'bad.jsx'), `import { View } from 'react-native';

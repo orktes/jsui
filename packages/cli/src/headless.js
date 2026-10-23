@@ -226,6 +226,14 @@ export function formatTree(tree) {
   return lines.join('\n');
 }
 
+/** The texts of an element: its own, else those of the Texts inside it (tree order). */
+export function textsOf(el) {
+  if (el.text != null) return [el.text];
+  const out = [];
+  for (const c of el.children || []) out.push(...textsOf(c));
+  return out;
+}
+
 /** Strips children for compact output. */
 export function elementSummary(el) {
   if (!el) return null;
@@ -296,17 +304,17 @@ class HeadlessApp {
       onMessage: (name, json) => {
         let data = null;
         if (json !== '') try { data = JSON.parse(json); } catch { data = json; }
-        this.messages.push({ name, data, time: this.time });
+        this.messages.push({ name, data, time: Math.round(this.time) });
       },
       onState: (key, json) => {
         let value;
         try { value = json == null ? null : JSON.parse(json); } catch { value = json; }
-        this.stateWrites.push({ key, value, time: this.time });
+        this.stateWrites.push({ key, value, time: Math.round(this.time) });
       },
       onCall: (id, name, json) => {
         let args;
         try { args = JSON.parse(json); } catch { args = undefined; }
-        this.calls.push({ name, args, time: this.time });
+        this.calls.push({ name, args, time: Math.round(this.time) });
         // Answer outside on_call (the runtime must not be re-entered from it);
         // frames yield to the event loop while answers are pending.
         this._answering++;
@@ -314,7 +322,7 @@ class HeadlessApp {
           if (!this.rt) return void this._answering--;
           if (!this._handlers.has(name)) {
             this._answering--;
-            return void this._reject(id, `no handler for Host.call("${name}") (pass calls: {"${name}": ...})`);
+            return void this._reject(id, `no answer for Host.call("${name}") (jsui run: an {"answer": "${name}", "value": ...} step; launch(): calls / app.handle)`);
           }
           const h = this._handlers.get(name);
           Promise.resolve()

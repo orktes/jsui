@@ -41,6 +41,40 @@ function Card({ item }) {
 }
 ```
 
+A settings row: focusable, Left / Right change its value instead of moving
+focus (`onGamepadButton` and `onKeyDown` work on any element, including
+Pressables, and fire on the focused element and its ancestors):
+
+```jsx
+function OptionRow({ testID, label, value, options, onChange, first }) {
+  const i = options.indexOf(value);
+  const step = (d) => onChange(options[Math.max(0, Math.min(options.length - 1, i + d))]);
+  const dir = (e) => {
+    const k = e.nativeEvent.key, b = e.buttonIndex;
+    if (b === 14 || k === 'ArrowLeft') return -1;
+    if (b === 15 || k === 'ArrowRight') return 1;
+    return 0;
+  };
+  const handle = (e) => {
+    const d = dir(e);
+    if (d && (e.pressed !== false)) { step(d); e.preventDefault(); }   // preventDefault: no focus move
+  };
+  return (
+    <Pressable testID={testID} hasTVPreferredFocus={first} onPress={() => step(1)}
+      onGamepadButton={handle} onKeyDown={handle}
+      style={({ focused }) => [styles.row, focused && styles.rowFocused]}>
+      <Text style={styles.rowLabel}>{label}</Text>
+      <Text testID={testID + '-value'} style={styles.rowValue}>{String(value)}</Text>
+    </Pressable>
+  );
+}
+```
+
+Gamepad events carry `buttonIndex`, `pressed` (false on release), `value`
+and `repeat` directly on the event; key events carry `key` / `code` on
+`e.nativeEvent`. `hasTVPreferredFocus` / `autoFocus` take focus whenever the
+element mounts, so a tab whose rows remount focuses its first row again.
+
 Design every screen for the controller first: one obvious initial focus,
 a strong focused style (border color, glow via `boxShadow`, scale spring), a
 layout where spatial navigation is unambiguous (rows and columns), and
