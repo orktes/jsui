@@ -213,6 +213,7 @@ async function loadModuleFor(opts, webgpu) {
 }
 
 const webglProbe = {};
+let noGpuWarned = false;  // CanvasView._warnNoGpu
 /** True if this browser can create a WebGL (2 or 1) context; `hardware`: one without a major
  * performance caveat, i.e. not a software rasteriser such as SwiftShader the browser fell back
  * to (probed once each, on a throwaway canvas). */
@@ -272,9 +273,22 @@ class CanvasView {
     this._webgpu = webgpu ?? null;
     this._initBlitter(mode);
     this._log(1, `renderer: ${this.renderer}` + (this._wgpu ? ` (${this._webgpu.description})` : ''));
+    this._warnNoGpu(mode);
     this._installInput();
     this._installCanvasInput();
     this._installResize();
+  }
+
+  // A mode that may use the GPU ended on the CPU raster because the browser
+  // has no hardware WebGPU or WebGL: say so once per page, since that is
+  // several times slower and usually a browser setting or state, not JSUI.
+  _warnNoGpu(mode) {
+    if (noGpuWarned || mode === 'cpu' || mode === '2d') return;
+    if (this.renderer === 'webgpu' || this.renderer.startsWith('gpu-') || webglAvailable(true)) return;
+    noGpuWarned = true;
+    this._log(2, 'no hardware GPU acceleration in this browser (WebGPU and WebGL are unavailable or software '
+      + 'only), so the UI renders on the CPU, which is much slower. In Chrome, chrome://gpu shows why: after '
+      + 'repeated GPU process crashes Chrome turns GPU access off until it is restarted.');
   }
 
   // The view that owns the runtime (gamepads, the frame loop).
