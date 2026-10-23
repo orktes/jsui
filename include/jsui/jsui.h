@@ -228,8 +228,64 @@ JSUI_API void jsui_reload(JsuiRuntime* rt);
 JSUI_API int jsui_register_font(JsuiRuntime* rt, const char* family, const void* data, size_t size,
                                 int weight, int italic);
 
+/* -------------------------------------------------------------- Surfaces
+ *
+ * One runtime (one bundle, one JS context, shared state, fonts and image
+ * cache) can show several independent root views, like React Native's
+ * RCTRootView / ReactRootView: the bundle registers components with
+ * AppRegistry.registerComponent('Nameplate', () => Nameplate) and the host
+ * creates a surface per place it wants one (a HUD, a nameplate over each
+ * character, a widget inside an existing UI), each with its own initial
+ * props, viewport, input, focus, cursor and render target.
+ *
+ * A surface handle is a JsuiRuntime*: the per-surface calls take it in place
+ * of the runtime handle (jsui_set_viewport, jsui_needs_redraw, every
+ * jsui_render_* call, every jsui_send_* / input call, jsui_get_cursor).
+ * Runtime-wide calls (jsui_tick, bundles, state, calls, fonts, reload,
+ * jsui_wants_frame) act on the shared runtime whichever handle is passed:
+ * tick the runtime once per frame, then render each surface that
+ * jsui_needs_redraw. The runtime handle itself is the main surface (root tag
+ * 1), which runs the first registered component unless jsui_surface_run
+ * picks one.
+ *
+ * Surface roots render with a transparent background. A width or height
+ * <= 0 sizes that axis to the component's content: read the laid-out size
+ * with jsui_surface_get_size after a tick and size the render target to it
+ * (times the pixel ratio).
+ *
+ * In JS a surface's app receives its props, and RootTagContext /
+ * useWindowDimensions() give its root tag and size; Dimensions.get('window')
+ * stays the main surface's. Surfaces survive jsui_reload (their apps start
+ * again with the new bundle). */
+
+/* Creates a surface showing the component registered as `app_key` with
+ * `initial_props_json` (a JSON object; NULL: {}). Returns NULL (and logs) on
+ * a missing key or invalid props. A key the bundle registers later (after
+ * an await, say) starts the surface when it is registered. */
+JSUI_API JsuiRuntime* jsui_surface_create(JsuiRuntime* rt, const char* app_key, const char* initial_props_json,
+                                          int width, int height, float pixel_ratio);
+/* Unmounts the surface's component and frees the surface; the handle is
+ * invalid afterwards. Not for the runtime handle (jsui_destroy frees the
+ * runtime, its main surface and every surface handle still alive). */
+JSUI_API void jsui_surface_destroy(JsuiRuntime* surface);
+/* Runs `app_key` (NULL: the surface's current one) on the surface with new
+ * props: the component re-renders with them, keeping its state when the key
+ * is unchanged (React Native's appProperties). On the runtime handle this
+ * picks the main surface's component. Returns 0, or -1 for invalid props. */
+JSUI_API int jsui_surface_run(JsuiRuntime* surface, const char* app_key, const char* props_json);
+/* jsui_surface_run(surface, NULL, props_json). */
+JSUI_API int jsui_surface_set_props(JsuiRuntime* surface, const char* props_json);
+/* The surface's React Native root tag (1 for the main surface). */
+JSUI_API int jsui_surface_tag(JsuiRuntime* surface);
+/* The runtime handle a surface belongs to (itself for the runtime handle). */
+JSUI_API JsuiRuntime* jsui_surface_runtime(JsuiRuntime* surface);
+/* The surface's laid-out size in logical px (auto-sized axes report their
+ * content's size; runs layout if needed). Returns 0. */
+JSUI_API int jsui_surface_get_size(JsuiRuntime* surface, float* width, float* height);
+
 /* ------------------------------------------------------------ Frame loop */
 
+/* The viewport of the handle's surface (see Surfaces for sizes <= 0). */
 JSUI_API void jsui_set_viewport(JsuiRuntime* rt, int width, int height, float pixel_ratio);
 /* Advance time to `now_ms` (monotonic). Runs due timers, resolves loaded
  * resources, runs requestAnimationFrame callbacks, microtasks and layout. */
@@ -245,7 +301,7 @@ JSUI_API void jsui_tick_native(JsuiRuntime* rt, double now_ms);
 /* Number of resource loads (bundle, fetch, images, fonts) still in flight.
  * Headless hosts keep ticking until this reaches 0 before capturing. */
 JSUI_API int jsui_pending_loads(JsuiRuntime* rt);
-/* Non-zero when the last tick changed what would be painted. */
+/* Non-zero when the last tick changed what the handle's surface would paint. */
 JSUI_API int jsui_needs_redraw(JsuiRuntime* rt);
 /* Non-zero while something is in motion and the next frame should be ticked
  * soon even without input: requestAnimationFrame callbacks, due timers,

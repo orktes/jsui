@@ -505,7 +505,7 @@ std::vector<Sample> runPass(const Options& o, const Scenario& sc, const std::str
         target.height = h;
         if (backend == "gl-direct") target.flags = JSUI_GL_NO_RETAIN;
         auto a = Clock::now();
-        int rc = jsui::gpu::render(*rt, gpu, target);
+        int rc = jsui::gpu::render(rt->main(), gpu, target);
         auto b = Clock::now();
         glFinish_real ? glFinish_real() : gl.Finish();
         auto c = Clock::now();

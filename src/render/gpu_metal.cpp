@@ -103,7 +103,7 @@ void purge(JsuiMetalContext* m, size_t cacheBytes) {
   m->ctx->purgeUnlockedResources(GrPurgeResourceOptions::kAllResources);
 }
 
-int render(Runtime& rt, JsuiMetalContext* m, void* texture, unsigned format, int width, int height, int flags) {
+int render(Surface& rt, JsuiMetalContext* m, void* texture, unsigned format, int width, int height, int flags) {
   if (!m || !m->ctx || !texture || width <= 0 || height <= 0) return -1;
   SkColorType ct;
   sk_sp<SkColorSpace> cs;
@@ -133,7 +133,7 @@ bool available() { return false; }
 JsuiMetalContext* create(void*, void*) { return nullptr; }
 void destroy(JsuiMetalContext*) {}
 void purge(JsuiMetalContext*, size_t) {}
-int render(Runtime&, JsuiMetalContext*, void*, unsigned, int, int, int) { return -1; }
+int render(Surface&, JsuiMetalContext*, void*, unsigned, int, int, int) { return -1; }
 }  // namespace metal
 }  // namespace jsui
 

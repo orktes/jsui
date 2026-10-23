@@ -83,8 +83,10 @@ void dirtyImageNodes(Node* n, const std::string& url) {
 
 void ImageCache::loaded(const std::string& url) {
   generation++;
-  dirtyImageNodes(rt_.doc.root(), url);
-  rt_.doc.markLayoutDirty();
+  for (auto& s : rt_.surfaces()) {
+    dirtyImageNodes(s->doc.root(), url);
+    s->doc.markLayoutDirty();
+  }
 }
 
 sk_sp<SkImage> ImageCache::get(const std::string& url, State* state) {

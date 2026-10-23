@@ -15,11 +15,17 @@
 #include "render/gpu_metal.h"
 #include "runtime.h"
 
+// A runtime handle (jsui_create: owns the runtime, shows its main surface)
+// or a surface handle (jsui_surface_create). Runtime-wide calls act on the
+// shared runtime through either; per-surface calls (viewport, rendering,
+// input, cursor) act on the handle's surface.
 struct JsuiRuntime {
-  std::unique_ptr<jsui::Runtime> rt;
+  std::unique_ptr<jsui::Runtime> owned;
+  jsui::Runtime* rt = nullptr;
+  jsui::Surface* surface = nullptr;
 };
 
-jsui::Runtime* jsui::internalRuntime(JsuiRuntime* h) { return h ? h->rt.get() : nullptr; }
+jsui::Runtime* jsui::internalRuntime(JsuiRuntime* h) { return h ? h->rt : nullptr; }
 
 extern "C" {
 
@@ -35,11 +41,68 @@ JsuiRuntime* jsui_create(const JsuiConfig* cfg) {
   if (cfg) c = *cfg;
   else jsui_config_init(&c);
   auto* h = new JsuiRuntime;
-  h->rt = std::make_unique<jsui::Runtime>(c, h);
+  h->owned = std::make_unique<jsui::Runtime>(c, h);
+  h->rt = h->owned.get();
+  h->surface = &h->rt->main();
   return h;
 }
 
-void jsui_destroy(JsuiRuntime* rt) { delete rt; }
+void jsui_destroy(JsuiRuntime* rt) {
+  if (rt && !rt->owned) {
+    jsui_surface_destroy(rt);
+    return;
+  }
+  if (rt) {
+    // Surface handles die with the runtime.
+    std::vector<JsuiRuntime*> handles;
+    for (auto& s : rt->rt->surfaces())
+      if (s->handle != rt) handles.push_back(s->handle);
+    rt->owned.reset();
+    for (JsuiRuntime* h : handles) delete h;
+  }
+  delete rt;
+}
+
+JsuiRuntime* jsui_surface_create(JsuiRuntime* rt, const char* appKey, const char* propsJson, int width, int height,
+                                 float pixelRatio) {
+  if (!rt) return nullptr;
+  jsui::Surface* s = rt->rt->createSurface(appKey ? appKey : "", propsJson ? propsJson : "", float(width),
+                                           float(height), pixelRatio);
+  if (!s) return nullptr;
+  auto* h = new JsuiRuntime;
+  h->rt = rt->rt;
+  h->surface = s;
+  s->handle = h;
+  return h;
+}
+
+void jsui_surface_destroy(JsuiRuntime* surface) {
+  if (!surface || surface->owned) return;  // the main surface lives as long as the runtime
+  surface->rt->destroySurface(surface->surface);
+  delete surface;
+}
+
+int jsui_surface_run(JsuiRuntime* surface, const char* appKey, const char* propsJson) {
+  if (!surface) return -1;
+  return surface->rt->runSurface(surface->surface, appKey ? appKey : "", propsJson ? propsJson : "") ? 0 : -1;
+}
+
+int jsui_surface_set_props(JsuiRuntime* surface, const char* propsJson) {
+  return jsui_surface_run(surface, nullptr, propsJson);
+}
+
+int jsui_surface_tag(JsuiRuntime* surface) { return surface ? int(surface->surface->tag()) : 0; }
+
+JsuiRuntime* jsui_surface_runtime(JsuiRuntime* surface) { return surface ? surface->rt->main().handle : nullptr; }
+
+int jsui_surface_get_size(JsuiRuntime* surface, float* width, float* height) {
+  if (!surface) return -1;
+  jsui::Document& doc = surface->surface->doc;
+  doc.layout();
+  if (width) *width = doc.width();
+  if (height) *height = doc.height();
+  return 0;
+}
 
 void jsui_resource_complete(JsuiRuntime* rt, uint64_t id, int status, const char* contentType, const void* data,
                             size_t size) {
@@ -87,37 +150,27 @@ void jsui_reload(JsuiRuntime* rt) { rt->rt->reload(); }
 
 int jsui_register_font(JsuiRuntime* rt, const char* family, const void* data, size_t size, int weight, int italic) {
   bool ok = rt->rt->fonts.registerFont(family, data, size, weight, italic != 0);
-  if (ok) rt->rt->doc.markLayoutDirty();
+  if (ok)
+    for (auto& s : rt->rt->surfaces()) s->doc.markLayoutDirty();
   return ok ? 0 : -1;
 }
 
 void jsui_set_viewport(JsuiRuntime* rt, int width, int height, float pixelRatio) {
-  jsui::Document& doc = rt->rt->doc;
-  float scale = pixelRatio > 0 ? pixelRatio : 1.f;
-  bool changed = doc.width() != float(width) || doc.height() != float(height) || doc.pixelRatio() != scale;
-  doc.setViewport(float(width), float(height), scale);
-  // Dimensions / useWindowDimensions in @orktes/jsui-react listen for this.
-  if (changed && rt->rt->js) {
-    jsui::Value::Object ev{{"type", jsui::Value("resize")},
-                           {"width", jsui::Value(double(width))},
-                           {"height", jsui::Value(double(height))},
-                           {"scale", jsui::Value(double(scale))}};
-    rt->rt->js->dispatchEvent(jsui::Value(std::move(ev)));
-  }
+  rt->surface->setViewport(float(width), float(height), pixelRatio);
 }
 
 void jsui_tick(JsuiRuntime* rt, double nowMs) { rt->rt->tick(nowMs); }
 void jsui_tick_native(JsuiRuntime* rt, double nowMs) { rt->rt->tickNative(nowMs); }
 int jsui_pending_loads(JsuiRuntime* rt) { return int(rt->rt->loader.pending()); }
-int jsui_needs_redraw(JsuiRuntime* rt) { return rt->rt->needsRedraw() ? 1 : 0; }
+int jsui_needs_redraw(JsuiRuntime* rt) { return rt->surface->needsRedraw() ? 1 : 0; }
 int jsui_wants_frame(JsuiRuntime* rt) { return rt->rt->wantsFrame() ? 1 : 0; }
 
 void jsui_render_rgba(JsuiRuntime* rt, void* pixels, int width, int height, size_t rowBytes) {
-  rt->rt->render(pixels, width, height, rowBytes);
+  rt->surface->render(pixels, width, height, rowBytes);
 }
 
 int jsui_render_rgba_incremental(JsuiRuntime* rt, void* pixels, int width, int height, size_t rowBytes, JsuiRect* dirty) {
-  SkIRect r = rt->rt->renderIncremental(pixels, width, height, rowBytes);
+  SkIRect r = rt->surface->renderIncremental(pixels, width, height, rowBytes);
   if (dirty) *dirty = JsuiRect{r.x(), r.y(), r.width(), r.height()};
   return r.isEmpty() ? 0 : 1;
 }
@@ -151,11 +204,11 @@ void jsui_gpu_purge(JsuiGpuContext* gpu, size_t cacheBytes) {
 
 int jsui_render_webgpu(JsuiRuntime* rt, JsuiGpuContext* gpu, void* texture, int width, int height, int flags) {
   JsuiWebGPUTarget t{texture, width, height, flags};
-  return jsui::webgpu::render(*rt->rt, gpu, t);
+  return jsui::webgpu::render(*rt->surface, gpu, t);
 }
 
 int jsui_render_webgpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget* target) {
-  return target ? jsui::webgpu::render(*rt->rt, gpu, *target) : -1;
+  return target ? jsui::webgpu::render(*rt->surface, gpu, *target) : -1;
 }
 
 JsuiGpuContext* jsui_gpu_create_vulkan(const JsuiVulkanDevice* device) {
@@ -175,7 +228,7 @@ int jsui_render_gpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiGpuTa
     if (dirty) *dirty = JsuiRect{0, 0, 0, 0};
     return -1;
   }
-  return jsui::graphite_gpu::render(*rt->rt, gpu, *target, dirty);
+  return jsui::graphite_gpu::render(*rt->surface, gpu, *target, dirty);
 }
 
 int jsui_render_vulkan(JsuiRuntime* rt, JsuiGpuContext* gpu, void* image, int width, int height, int flags) {
@@ -194,11 +247,11 @@ int jsui_render_gl(JsuiRuntime* rt, JsuiGpuContext* gpu, unsigned int fbo, int w
   t.width = width;
   t.height = height;
   t.flags = flags;
-  return jsui::gpu::render(*rt->rt, gpu, t);
+  return jsui::gpu::render(*rt->surface, gpu, t);
 }
 
 int jsui_render_gl_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiGLTarget* target) {
-  return target ? jsui::gpu::render(*rt->rt, gpu, *target) : -1;
+  return target ? jsui::gpu::render(*rt->surface, gpu, *target) : -1;
 }
 
 JsuiMetalContext* jsui_metal_create(void* device, void* queue) { return jsui::metal::create(device, queue); }
@@ -206,14 +259,16 @@ void jsui_metal_destroy(JsuiMetalContext* mtl) { jsui::metal::destroy(mtl); }
 void jsui_metal_purge(JsuiMetalContext* mtl, size_t cacheBytes) { jsui::metal::purge(mtl, cacheBytes); }
 int jsui_render_metal(JsuiRuntime* rt, JsuiMetalContext* mtl, void* texture, unsigned int format, int width,
                       int height, int flags) {
-  return rt ? jsui::metal::render(*rt->rt, mtl, texture, format, width, height, flags) : -1;
+  return rt ? jsui::metal::render(*rt->surface, mtl, texture, format, width, height, flags) : -1;
 }
 
 int jsui_render_png(JsuiRuntime* rt, void** outData, size_t* outSize) {
-  auto& doc = rt->rt->doc;
+  auto& doc = rt->surface->doc;
+  doc.layout();
   int w = int(doc.width() * doc.pixelRatio() + 0.5f), h = int(doc.height() * doc.pixelRatio() + 0.5f);
+  if (w <= 0 || h <= 0) return -1;
   std::vector<uint8_t> px(size_t(w) * h * 4);
-  rt->rt->render(px.data(), w, h, size_t(w) * 4);
+  rt->surface->render(px.data(), w, h, size_t(w) * 4);
   SkPixmap pm(SkImageInfo::Make(w, h, kRGBA_8888_SkColorType, kPremul_SkAlphaType), px.data(), size_t(w) * 4);
   SkDynamicMemoryWStream out;
   if (!SkPngEncoder::Encode(&out, pm, {})) return -1;
@@ -226,49 +281,49 @@ int jsui_render_png(JsuiRuntime* rt, void** outData, size_t* outSize) {
 
 void jsui_free(void* p) { std::free(p); }
 
-void jsui_set_event_time(JsuiRuntime* rt, double time_ms) { rt->rt->input->setEventTime(time_ms); }
-#define JSUI_INPUT_SCOPE jsui::Perf::Scope perf_scope(rt->rt->doc.perf, jsui::Phase::Input)
+void jsui_set_event_time(JsuiRuntime* rt, double time_ms) { rt->surface->input->setEventTime(time_ms); }
+#define JSUI_INPUT_SCOPE jsui::Perf::Scope perf_scope(rt->surface->doc.perf, jsui::Phase::Input)
 int jsui_send_mouse_move(JsuiRuntime* rt, float x, float y) {
   JSUI_INPUT_SCOPE;
-  return rt->rt->input->mouseMove(x, y);
+  return rt->surface->input->mouseMove(x, y);
 }
 int jsui_send_mouse_button(JsuiRuntime* rt, float x, float y, JsuiMouseButton b, int down, int mods) {
   JSUI_INPUT_SCOPE;
-  return rt->rt->input->mouseButton(x, y, int(b), down != 0, mods);
+  return rt->surface->input->mouseButton(x, y, int(b), down != 0, mods);
 }
 int jsui_send_mouse_wheel(JsuiRuntime* rt, float x, float y, float dx, float dy) {
   JSUI_INPUT_SCOPE;
-  return rt->rt->input->mouseWheel(x, y, dx, dy);
+  return rt->surface->input->mouseWheel(x, y, dx, dy);
 }
 int jsui_send_mouse_leave(JsuiRuntime* rt) {
   JSUI_INPUT_SCOPE;
-  return rt->rt->input->mouseLeave();
+  return rt->surface->input->mouseLeave();
 }
 int jsui_send_touch(JsuiRuntime* rt, int id, int phase, float x, float y) {
   JSUI_INPUT_SCOPE;
-  return rt->rt->input->touch(id, phase, x, y);
+  return rt->surface->input->touch(id, phase, x, y);
 }
 int jsui_send_key(JsuiRuntime* rt, const char* key, const char* code, int down, int repeat, int mods) {
   JSUI_INPUT_SCOPE;
   if (rt->rt->devKey(key, down != 0)) return 1;  // dev overlay (Escape)
-  return rt->rt->input->key(key, code, down != 0, repeat != 0, mods);
+  return rt->surface->input->key(key, code, down != 0, repeat != 0, mods);
 }
 int jsui_send_text(JsuiRuntime* rt, const char* utf8) {
   JSUI_INPUT_SCOPE;
-  return rt->rt->input->text(utf8);
+  return rt->surface->input->text(utf8);
 }
 int jsui_send_gamepad_button(JsuiRuntime* rt, int pad, int button, int down, float value) {
   JSUI_INPUT_SCOPE;
-  return rt->rt->input->gamepadButton(pad, button, down != 0, value);
+  return rt->surface->input->gamepadButton(pad, button, down != 0, value);
 }
 int jsui_send_gamepad_axis(JsuiRuntime* rt, int pad, int axis, float value) {
   JSUI_INPUT_SCOPE;
-  return rt->rt->input->gamepadAxis(pad, axis, value);
+  return rt->surface->input->gamepadAxis(pad, axis, value);
 }
 void jsui_set_gamepad_connected(JsuiRuntime* rt, int pad, int connected, const char* id) {
-  rt->rt->input->gamepadConnected(pad, connected != 0, id);
+  rt->surface->input->gamepadConnected(pad, connected != 0, id);
 }
-const char* jsui_get_cursor(JsuiRuntime* rt) { return rt->rt->cursor.c_str(); }
+const char* jsui_get_cursor(JsuiRuntime* rt) { return rt->surface->cursor.c_str(); }
 void jsui_set_clipboard_callbacks(JsuiRuntime* rt, JsuiClipboardGetFn get, JsuiClipboardSetFn set, void* user) {
   if (!rt) return;
   rt->rt->clipboardGet = get;

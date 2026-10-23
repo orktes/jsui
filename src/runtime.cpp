@@ -39,59 +39,24 @@ std::string lower(std::string s) {
   return s;
 }
 
-int64_t area(const SkIRect& r) { return int64_t(r.width()) * r.height(); }
+}  // namespace
 
-// The damage as a few rects that cover it (each one scissor rect and one
-// paint pass on the GPU): greedily join the pair whose join adds the least
-// area while there are more than kMaxRects, or while a join adds little
-// (a pass costs a tree walk and the draws it crosses again).
-std::vector<SkIRect> coverRects(const SkRegion& damage) {
-  constexpr size_t kMaxRects = 4, kMaxInput = 48;
-  constexpr int64_t kCheapJoin = 64 * 64;
-  std::vector<SkIRect> rects;
-  for (SkRegion::Iterator it(damage); !it.done(); it.next()) {
-    if (rects.size() == kMaxInput) return {damage.getBounds()};
-    rects.push_back(it.rect());
-  }
-  while (rects.size() > 1) {
-    size_t bi = 0, bj = 1;
-    int64_t best = std::numeric_limits<int64_t>::max();
-    for (size_t i = 0; i < rects.size(); i++)
-      for (size_t j = i + 1; j < rects.size(); j++) {
-        SkIRect u = rects[i];
-        u.join(rects[j]);
-        int64_t cost = area(u) - area(rects[i]) - area(rects[j]);
-        if (cost < best) best = cost, bi = i, bj = j;
-      }
-    if (rects.size() <= kMaxRects && best > kCheapJoin) break;
-    rects[bi].join(rects[bj]);
-    rects.erase(rects.begin() + bj);
-  }
-  // Several passes only when they save a good part of the bounds' area
-  // (passes split the draws: more state changes, less batching).
-  int64_t sum = 0;
-  for (const SkIRect& r : rects) sum += area(r);
-  if (rects.size() > 1 && sum * 3 > area(damage.getBounds()) * 2) return {damage.getBounds()};
-  return rects;
+namespace {
+Document& mainDocument(std::vector<std::unique_ptr<Surface>>& surfaces, Runtime& rt, uint32_t* nextNodeId) {
+  surfaces.push_back(std::make_unique<Surface>(rt, nextNodeId));
+  return surfaces.back()->doc;
 }
-
 }  // namespace
 
 Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
-    : config(cfg), handle(h), loader(h, cfg.load, cfg.load_user) {
+    : config(cfg), handle(h), loader(h, cfg.load, cfg.load_user), doc(mainDocument(surfaces_, *this, &nextNodeId_)) {
   if (cfg.base_url) baseUrl = cfg.base_url;
-  doc.fonts = &fonts;
   images = std::make_unique<ImageCache>(*this);
-  doc.images = images.get();
-  input = std::make_unique<InputManager>(*this);
   animated = std::make_unique<NativeAnimated>(doc);
-  doc.onNodeDestroyed = [this](Node* n) {
-    input->nodeRemoved(n);
-    animated->viewDestroyed(n->id());
-  };
-  doc.onLayout = [this](Node* n, const Rect& r) {
-    if (js) js->layoutEvent(n->id(), r.x, r.y, r.width, r.height);
-  };
+  animated->findView = [this](uint32_t id) { return findNode(id); };
+  main().handle = h;
+  attach(main());
+  input = main().input.get();
   doc.setViewport(float(cfg.width), float(cfg.height), cfg.pixel_ratio > 0 ? cfg.pixel_ratio : 1.f);
   resetEngine();
 }
@@ -102,9 +67,133 @@ Runtime::~Runtime() {
   js.reset();
   endCalls(calls, "runtime destroyed");
   deliverUiCallResults();
-  doc.clear();
-  doc.onNodeDestroyed = nullptr;
-  doc.onLayout = nullptr;
+  doomed_.clear();
+  for (auto& s : surfaces_) {
+    s->doc.clear();
+    s->doc.onNodeDestroyed = nullptr;
+    s->doc.onLayout = nullptr;
+  }
+}
+
+void Runtime::attach(Surface& s) {
+  Document& d = s.doc;
+  d.fonts = &fonts;
+  d.images = images.get();
+  s.input = std::make_unique<InputManager>(*this, d, s.cursor);
+  InputManager* in = s.input.get();
+  d.onNodeDestroyed = [this, in](Node* n) {
+    in->nodeRemoved(n);
+    animated->viewDestroyed(n->id());
+  };
+  d.onLayout = [this](Node* n, const Rect& r) {
+    if (js) js->layoutEvent(n->id(), r.x, r.y, r.width, r.height);
+  };
+}
+
+// ------------------------------------------------------------ surfaces
+
+namespace {
+bool validProps(const std::string& json, std::string* error) {
+  Json v;
+  if (!Json::parse(json, &v, error)) return false;
+  if (!v.isObject()) {
+    *error = "not an object";
+    return false;
+  }
+  return true;
+}
+}  // namespace
+
+Surface* Runtime::createSurface(const std::string& appKey, const std::string& propsJson, float width, float height,
+                                float pixelRatio) {
+  std::string props = propsJson.empty() ? "{}" : propsJson;
+  std::string error;
+  if (appKey.empty()) {
+    log(JSUI_LOG_ERROR, "jsui_surface_create: app_key is required");
+    return nullptr;
+  }
+  if (!validProps(props, &error)) {
+    log(JSUI_LOG_ERROR, "jsui_surface_create(\"" + appKey + "\"): invalid initial props (" + error + ")");
+    return nullptr;
+  }
+  surfaces_.push_back(std::make_unique<Surface>(*this, &nextNodeId_));
+  Surface& s = *surfaces_.back();
+  attach(s);
+  s.doc.now = now;
+  s.doc.frame = doc.frame;
+  s.doc.setViewport(width, height, pixelRatio > 0 ? pixelRatio : 1.f);
+  s.appKey = appKey;
+  s.propsJson = props;
+  if (bundleRan_) startSurface(s);
+  return &s;
+}
+
+void Runtime::destroySurface(Surface* s) {
+  if (!s || s == &main()) return;
+  auto it = std::find_if(surfaces_.begin(), surfaces_.end(), [s](const auto& p) { return p.get() == s; });
+  if (it == surfaces_.end()) return;
+  // Unmount first, while JS can still reach the surface's nodes.
+  if (js && bundleRan_) {
+    Value arg(double(s->tag()));
+    js->callGlobal("__jsui_stopSurface", &arg, 1);
+  }
+  it = std::find_if(surfaces_.begin(), surfaces_.end(), [s](const auto& p) { return p.get() == s; });
+  if (it == surfaces_.end()) return;
+  std::unique_ptr<Surface> owned = std::move(*it);
+  surfaces_.erase(it);
+  if (js && js->inCall()) doomed_.push_back(std::move(owned));
+}
+
+bool Runtime::runSurface(Surface* s, const std::string& appKey, const std::string& propsJson) {
+  if (!s) return false;
+  std::string props = propsJson.empty() ? "{}" : propsJson;
+  std::string error;
+  if (!validProps(props, &error)) {
+    log(JSUI_LOG_ERROR, "jsui_surface_run: invalid props (" + error + ")");
+    return false;
+  }
+  if (!appKey.empty()) s->appKey = appKey;
+  if (s->appKey.empty()) {
+    log(JSUI_LOG_ERROR, "jsui_surface_run: no app key");
+    return false;
+  }
+  s->propsJson = props;
+  if (bundleRan_) startSurface(*s);
+  return true;
+}
+
+void Runtime::startSurface(Surface& s) {
+  if (!js || s.appKey.empty()) return;
+  Value args[3] = {Value(double(s.tag())), Value(s.appKey), Value(s.propsJson)};
+  if (!js->callGlobal("__jsui_runSurface", args, 3))
+    log(JSUI_LOG_WARN, "surface \"" + s.appKey +
+                           "\": the bundle has no AppRegistry (import AppRegistry from 'react-native')");
+}
+
+void Runtime::startSurfaces() {
+  for (size_t i = 0; i < surfaces_.size(); i++) startSurface(*surfaces_[i]);
+}
+
+Surface* Runtime::surfaceByTag(uint32_t tag) const {
+  for (const auto& s : surfaces_)
+    if (s->tag() == tag) return s.get();
+  return nullptr;
+}
+
+Surface& Runtime::surfaceOf(const Document* d) const {
+  for (const auto& s : surfaces_)
+    if (&s->doc == d) return *s;
+  return main();
+}
+
+Node* Runtime::findNode(uint32_t id) const {
+  for (const auto& s : surfaces_)
+    if (Node* n = s->doc.get(id)) return n;
+  return nullptr;
+}
+
+void Runtime::redrawAll() {
+  for (auto& s : surfaces_) s->requestRedraw();
 }
 
 void Runtime::log(JsuiLogLevel level, const std::string& msg) {
@@ -119,17 +208,18 @@ void Runtime::log(JsuiLogLevel level, const std::string& msg) {
 void Runtime::reportError(const std::string& msg) {
   lastError = msg;
   log(JSUI_LOG_ERROR, msg);
-  if (config.dev_mode) redraw_ = true;  // show the overlay
+  if (config.dev_mode) redrawAll();  // show the overlay
 }
 
 void Runtime::resetEngine() {
   std::vector<uint64_t> calls = js ? js->pendingCalls() : std::vector<uint64_t>();
   js.reset();
+  bundleRan_ = false;
   animated->clear();
-  doc.clear();
+  for (auto& s : surfaces_) s->doc.clear();
   // Shared state outlives the context (the new bundle reads it as it starts).
   js = std::make_unique<JsEngine>(*this);
-  redraw_ = true;
+  redrawAll();
   endCalls(calls, "the UI was reloaded");
 }
 
@@ -250,11 +340,16 @@ bool Runtime::loadSource(const std::string& source, const std::string& name) {
   bundleName = name;
   if (baseUrl.empty()) baseUrl = name;
   lastError.clear();
-  redraw_ = true;
+  redrawAll();
   // The bundle reads the current shared state as it starts; earlier changes
   // need no delivery.
   state.takeDirty();
-  return js->eval(source, name);
+  bool ok = js->eval(source, name);
+  // Surfaces run their apps once the bundle registered its components (a
+  // component registered later starts its surface then, see AppRegistry).
+  bundleRan_ = true;
+  startSurfaces();
+  return ok;
 }
 
 void Runtime::loadUrl(const std::string& url) {
@@ -278,7 +373,7 @@ void Runtime::loadUrl(const std::string& url) {
 
 void Runtime::requestReload() {
   reloadRequested_ = true;
-  redraw_ = true;
+  redrawAll();
 }
 
 void Runtime::reload() {
@@ -287,14 +382,10 @@ void Runtime::reload() {
     return;
   }
   reloadRequested_ = false;
-  if (config.dev_mode && lastError.empty() && !doc.root()->children().empty()) {
-    // Keep the current frame on screen until the new bundle renders, and
-    // keep showing it if the new bundle throws.
-    doc.layout();
-    float pr = doc.pixelRatio();
-    SkPictureRecorder rec;
-    paintDocument(doc, rec.beginRecording(SkRect::MakeWH(doc.width() * pr, doc.height() * pr)));
-    lastGoodFrame_ = rec.finishRecordingAsPicture();
+  if (config.dev_mode) {
+    // Keep the current frames on screen until the new bundle renders, and
+    // keep showing them if the new bundle throws.
+    for (auto& s : surfaces_) s->snapshotFrame();
   }
   loader.cancelAll();
   devPollInFlight_ = false;
@@ -309,7 +400,7 @@ bool Runtime::devKey(const char* key, bool down) {
   if (!config.dev_mode || !key || !down || lastError.empty()) return false;
   if (std::strcmp(key, "Escape") != 0) return false;
   lastError.clear();
-  redraw_ = true;
+  redrawAll();
   return true;
 }
 
@@ -343,10 +434,13 @@ void Runtime::devPoll() {
 
 void Runtime::tick(double nowMs) {
   now = nowMs;
-  doc.now = nowMs;
+  doomed_.clear();
+  for (auto& s : surfaces_) s->doc.now = nowMs;
   if (reloadRequested_) reload();
-  doc.frame++;
-  input->setEventTime(std::numeric_limits<double>::quiet_NaN());  // jsui_set_event_time lasts until a tick
+  for (auto& s : surfaces_) {
+    s->doc.frame++;
+    s->input->setEventTime(std::numeric_limits<double>::quiet_NaN());  // jsui_set_event_time lasts until a tick
+  }
   loader.pump();
   // Shared state the embedder changed since the last tick: subscribers
   // re-render in one batch before this tick's timers and frame callbacks.
@@ -354,31 +448,43 @@ void Runtime::tick(double nowMs) {
   js->runTimers(nowMs);
   js->runAnimationFrame(nowMs);
   js->runJobs();
-  input->tick(nowMs);
+  // Surfaces created or destroyed by callbacks below are picked up next tick.
+  std::vector<Surface*> list;
+  for (auto& s : surfaces_) list.push_back(s.get());
+  auto live = [this](Surface* s) {
+    for (auto& p : surfaces_)
+      if (p.get() == s) return true;
+    return false;
+  };
+  for (Surface* s : list)
+    if (live(s)) s->input->tick(nowMs);
   // After this tick's timers and jobs (React's passive effects of the commit
   // that mounted an image have run when its onLoad arrives).
-  deliverImageEvents();
+  for (Surface* s : list)
+    if (live(s)) deliverImageEvents(s->doc);
   // Native-driven Animated: evaluated on the frame clock after JS and
   // scroll physics of this tick (Animated.event mappings saw the offsets).
   animated->tick(nowMs);
   deliverAnimatedEvents();
-  doc.layout();
-  doc.tickLayoutAnimations(nowMs);
-  // A LayoutAnimation applies to the commit that armed it only.
-  doc.disarmLayoutAnimation();
+  for (auto& s : surfaces_) {
+    s->doc.layout();
+    s->doc.tickLayoutAnimations(nowMs);
+    // A LayoutAnimation applies to the commit that armed it only.
+    s->doc.disarmLayoutAnimation();
+  }
   devPoll();
   // jsui_call_ui results settled during this tick (or since the last one).
   deliverUiCallResults();
-  if (doc.paintDirty()) redraw_ = true;
 }
 
 void Runtime::tickNative(double nowMs) {
   now = nowMs;
-  doc.now = nowMs;
+  for (auto& s : surfaces_) s->doc.now = nowMs;
   animated->tick(nowMs);  // end events stay queued until the next tick()
-  doc.layout();
-  doc.tickLayoutAnimations(nowMs);
-  if (doc.paintDirty()) redraw_ = true;
+  for (auto& s : surfaces_) {
+    s->doc.layout();
+    s->doc.tickLayoutAnimations(nowMs);
+  }
 }
 
 void Runtime::deliverAnimatedEvents() {
@@ -412,7 +518,7 @@ bool listensFor(const Node* n, const char* token) {
 }
 }  // namespace
 
-bool Runtime::imageEventsReady() const {
+bool Runtime::imageEventsReady(const Document& doc) const {
   for (const auto& e : doc.imageEvents) {
     if (e.frame >= doc.frame) return true;  // waits for the next tick at most
     Node* n = doc.get(e.node);
@@ -421,7 +527,7 @@ bool Runtime::imageEventsReady() const {
   return false;
 }
 
-void Runtime::deliverImageEvents() {
+void Runtime::deliverImageEvents(Document& doc) {
   if (!js || doc.imageEvents.empty()) return;
   std::vector<Document::ImageEvent> pending = std::move(doc.imageEvents);
   doc.imageEvents.clear();
@@ -486,169 +592,21 @@ void Runtime::setClipboardText(const std::string& text) {
   else clipboard = text;
 }
 
-bool Runtime::needsRedraw() const { return redraw_ || doc.paintDirty(); }
+bool Runtime::needsRedraw() const {
+  for (const auto& s : surfaces_)
+    if (s->needsRedraw()) return true;
+  return false;
+}
 
 bool Runtime::wantsFrame() const {
   // A pending repaint alone is not a reason to tick: the host paints after
   // the tick it already ran.
-  return reloadRequested_ || loader.pending() > 0 || (js && js->hasPendingWork(now + 17)) || input->animating() ||
-         doc.layoutAnimating() || animated->animating() || !animated->ends.empty() || state.hasDirty() ||
-         !uiResults_.empty() || imageEventsReady();
-}
-
-void Runtime::render(void* pixels, int width, int height, size_t rowBytes) {
-  renderImpl(pixels, width, height, rowBytes, false);
-}
-
-SkIRect Runtime::renderIncremental(void* pixels, int width, int height, size_t rowBytes) {
-  return renderImpl(pixels, width, height, rowBytes, true);
-}
-
-SkIRect Runtime::renderImpl(void* pixels, int width, int height, size_t rowBytes, bool incremental) {
-  SkImageInfo info = SkImageInfo::Make(width, height, kRGBA_8888_SkColorType, kPremul_SkAlphaType);
-  SkSurfaceProps props = surfaceProps();
-  auto surface = SkSurfaces::WrapPixels(info, pixels, rowBytes, &props);
-  if (!surface) return SkIRect::MakeEmpty();
-  return paintTracked(surface->getCanvas(), pixels, width, height, rowBytes, incremental);
-}
-
-SkIRect Runtime::beginCanvasTracked(const void* key, int width, int height, bool* keyValid, bool growCurves) {
-  doc.layout();
-  bool sameTarget = key && key == lastTarget_ && width == lastTargetW_ && height == lastTargetH_ &&
-                    lastTargetRowBytes_ == 0;
-  trackedFrozen_ = trackedOverlay_ = false;
-  trackedKey_ = key;
-  trackedDamage_.setEmpty();
-  trackedRects_.clear();
-  // Nothing marked dirty and the retained surface holds our last frame:
-  // nothing to repaint, without walking the tree.
-  if (sameTarget && !doc.paintDirty() && lastError.empty()) {
-    *keyValid = true;
-    return SkIRect::MakeEmpty();
-  }
-  // Always refresh the paint records so the next frame compares against
-  // what was painted.
-  trackedDamage_ = updateDamage(doc, width, height, nullptr, growCurves);
-  const SkRegion& damage = trackedDamage_;
-  bool dev = config.dev_mode != 0;
-  trackedFrozen_ = dev && lastGoodFrame_ && (!lastError.empty() || doc.root()->children().empty());
-  trackedOverlay_ = dev && !lastError.empty();
-  *keyValid = sameTarget && !trackedFrozen_ && !trackedOverlay_;
-  return damage.getBounds();
-}
-
-SkIRect Runtime::finishCanvasTracked(const CanvasChoice& c, int width, int height, bool keyValid,
-                                     const SkIRect& damage) {
-  doc.clearPaintDirty();
-  redraw_ = false;
-  lastTargetW_ = width;
-  lastTargetH_ = height;
-  lastTargetRowBytes_ = 0;
-  // Frames with the error overlay or a frozen picture are not tracked by the
-  // records: the next frame repaints fully.
-  bool tracked = !trackedFrozen_ && !trackedOverlay_;
-  lastTarget_ = c.canvas && c.key && tracked ? c.key : nullptr;
-  if (!c.canvas) return SkIRect::MakeEmpty();
-  SkCanvas* canvas = c.canvas;
-  if (c.key && keyValid && c.key == trackedKey_) {
-    if (damage.isEmpty()) return SkIRect::MakeEmpty();
-    if (c.splitDamage) {
-      trackedRects_ = coverRects(trackedDamage_);
-      paintDocumentRects(doc, canvas, trackedRects_);
-      return damage;
-    }
-    trackedRects_.assign(1, damage);
-    // One rect: GPU backends clip to it with a scissor, where a region
-    // (several rects) is a complex clip (a mask, or MSAA) on Graphite.
-    SkRegion rect(damage);
-    canvas->save();
-    canvas->clipIRect(damage);
-    canvas->clear(SK_ColorTRANSPARENT);
-    paintDocument(doc, canvas, &rect);
-    canvas->restore();
-    return damage;
-  }
-  if (c.clear || c.key) canvas->clear(SK_ColorTRANSPARENT);
-  paintFrame(canvas, trackedFrozen_, trackedOverlay_);
-  return SkIRect::MakeWH(width, height);
-}
-
-SkIRect Runtime::paintTracked(SkCanvas* canvas, const void* pixels, int width, int height, size_t rowBytes,
-                              bool incremental) {
-  doc.layout();
-  // Nothing marked dirty and the buffer still holds our last frame: done,
-  // without walking the tree.
-  if (incremental && !doc.paintDirty() && pixels == lastTarget_ && width == lastTargetW_ &&
-      height == lastTargetH_ && rowBytes == lastTargetRowBytes_ && lastError.empty()) {
-    redraw_ = false;
-    return SkIRect::MakeEmpty();
-  }
-  bool dev = config.dev_mode != 0;
-  bool frozen = dev && lastGoodFrame_ && (!lastError.empty() || doc.root()->children().empty());
-  bool overlay = dev && !lastError.empty();
-  bool partial = incremental && !frozen && !overlay && pixels == lastTarget_ && width == lastTargetW_ &&
-                 height == lastTargetH_ && rowBytes == lastTargetRowBytes_;
-  // Always refresh the paint records so the next incremental frame compares
-  // against what is in the buffer. A partial repaint of a pixel buffer can
-  // move scrolled content instead of repainting it.
-  ScrollBlit blit;
-  SkRegion damage = updateDamage(doc, width, height, partial && rowBytes ? &blit : nullptr);
-  // Frames with the error overlay or a frozen picture are not tracked by the
-  // records: the next frame repaints fully.
-  bool tracked = !frozen && !overlay;
-  lastTarget_ = tracked ? pixels : nullptr;
-  lastTargetW_ = width;
-  lastTargetH_ = height;
-  lastTargetRowBytes_ = rowBytes;
-  doc.clearPaintDirty();
-  redraw_ = false;
-  if (partial) {
-    if (damage.isEmpty() && blit.rect.isEmpty()) return SkIRect::MakeEmpty();
-    if (!blit.rect.isEmpty()) applyScrollBlit(const_cast<void*>(pixels), rowBytes, width, height, blit);
-    canvas->save();
-    canvas->clipRegion(damage);
-    canvas->clear(SK_ColorTRANSPARENT);
-    paintDocument(doc, canvas, &damage);
-    canvas->restore();
-    SkIRect changed = damage.getBounds();
-    if (!blit.rect.isEmpty()) {
-      noteScrollBlit(doc, blit);
-      changed.join(blit.rect);
-    }
-    return changed;
-  }
-  canvas->clear(SK_ColorTRANSPARENT);
-  paintFrame(canvas, frozen, overlay);
-  return SkIRect::MakeWH(width, height);
-}
-
-void Runtime::paintFrame(SkCanvas* canvas, bool frozen, bool overlay) {
-  if (frozen) {
-    canvas->drawPicture(lastGoodFrame_);
-  } else {
-    paintDocument(doc, canvas);
-    if (lastGoodFrame_ && lastError.empty()) lastGoodFrame_.reset();
-  }
-  if (overlay) {
-    if (!overlay_) overlay_ = std::make_unique<DevOverlay>(fonts);
-    overlay_->paint(canvas, lastError, doc.width(), doc.height(), doc.pixelRatio());
-  }
-}
-
-void Runtime::renderCanvas(SkCanvas* canvas, int width, int height, bool clear) {
-  doc.layout();
-  // Keep the paint records current (they are what the CPU incremental path
-  // compares against), but nothing here is tracked: a later incremental CPU
-  // render repaints fully.
-  updateDamage(doc, width, height);
-  bool dev = config.dev_mode != 0;
-  bool frozen = dev && lastGoodFrame_ && (!lastError.empty() || doc.root()->children().empty());
-  bool overlay = dev && !lastError.empty();
-  lastTarget_ = nullptr;
-  doc.clearPaintDirty();
-  redraw_ = false;
-  if (clear) canvas->clear(SK_ColorTRANSPARENT);
-  paintFrame(canvas, frozen, overlay);
+  if (reloadRequested_ || loader.pending() > 0 || (js && js->hasPendingWork(now + 17)) || animated->animating() ||
+      !animated->ends.empty() || state.hasDirty() || !uiResults_.empty() || !doomed_.empty())
+    return true;
+  for (const auto& s : surfaces_)
+    if (s->input->animating() || s->doc.layoutAnimating() || imageEventsReady(s->doc)) return true;
+  return false;
 }
 
 }  // namespace jsui

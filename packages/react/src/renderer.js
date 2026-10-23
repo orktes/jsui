@@ -60,17 +60,18 @@ const hostConfig = {
   getPublicInstance: (instance) => instance,
   shouldSetTextContent: () => false,
 
-  createInstance(type, props) {
-    const id = native.createNode(type);
+  // The root container picks the surface (document) the node belongs to.
+  createInstance(type, props, root) {
+    const id = native.createNode(type, root.id);
     const inst = new HostInstance(id, type, props);
     instances.set(id, inst);
     return inst;
   },
-  createTextInstance(text, _root, hostContext) {
+  createTextInstance(text, root, hostContext) {
     // Like RN: a string outside <Text> is an error (whitespace is tolerated
     // because it is invisible and very common in hand-written JSX).
     if (!hostContext.inText && text.trim() !== '') throw textOutsideText(text);
-    const id = native.createNode('RawText');
+    const id = native.createNode('RawText', root.id);
     native.setText(id, text);
     const inst = new TextInstance(id, text);
     instances.set(id, inst);
@@ -308,9 +309,15 @@ export function unmount(options) {
   roots.delete(id);
 }
 
-/** The container object used as a portal target for the default root. */
-export function rootContainer() {
-  return getRoot().container;
+/**
+ * The root tag (React Native) of the tree a component renders in: the main
+ * surface's root container id, or a surface's (AppRegistry provides it).
+ */
+export const RootTagContext = createContext(native.rootId);
+
+/** The container object of a root tag (default: the main root), e.g. a portal target. */
+export function rootContainer(rootTag) {
+  return getRoot(rootTag == null ? native.rootId : rootTag).container;
 }
 
 export function createPortal(children, container, key) {

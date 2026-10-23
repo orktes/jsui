@@ -1,10 +1,10 @@
 // Non-component React Native APIs.
 
-import { createElement as h, useEffect, useState, useSyncExternalStore, createContext } from 'react';
+import { createElement as h, useContext, useEffect, useState, useSyncExternalStore } from 'react';
 import { native, readViewport, warnOnce } from './native.js';
 import { LayoutAnimation } from './layoutAnimation.js';
 import { addGlobalListener } from './events.js';
-import { render as renderRoot } from './renderer.js';
+import { render as renderRoot, unmount as unmountRoot, RootTagContext } from './renderer.js';
 import { modalHandlesBack } from './components/misc.js';
 
 // --- Platform ------------------------------------------------------------------
@@ -37,7 +37,27 @@ function dims() {
   return windowDims;
 }
 
+// Surfaces other than the main one (jsui_surface_create): their own sizes,
+// for useWindowDimensions() inside them.
+const surfaceDims = new Map();
+
+function surfaceDimsOf(tag) {
+  let d = surfaceDims.get(tag);
+  if (!d) {
+    const v = typeof native.viewport === 'function' ? native.viewport(tag) : null;
+    d = v && v.width >= 0 ? Object.freeze({ width: +v.width, height: +v.height, scale: +(v.scale || 1), fontScale: 1 }) : dims();
+    surfaceDims.set(tag, d);
+  }
+  return d;
+}
+
 function onResize(ev) {
+  if (ev && ev.rootTag != null && ev.rootTag !== native.rootId) {
+    surfaceDims.delete(ev.rootTag);
+    const d = surfaceDimsOf(ev.rootTag);
+    for (const fn of Array.from(dimListeners)) fn({ window: dims(), screen: dims(), rootTag: ev.rootTag, surface: d });
+    return;
+  }
   const fresh = ev && ev.width > 0 ? { width: +ev.width, height: +ev.height, scale: +(ev.scale || ev.pixelRatio || viewport.scale) } : readViewport();
   if (fresh.width === viewport.width && fresh.height === viewport.height && fresh.scale === viewport.scale) return;
   viewport = fresh;
@@ -71,8 +91,11 @@ function subscribeDims(cb) {
   return () => dimListeners.delete(cb);
 }
 
+/** The size of the surface the component renders in (the window for the main one). */
 export function useWindowDimensions() {
-  return useSyncExternalStore(subscribeDims, dims, dims);
+  const tag = useContext(RootTagContext);
+  const get = tag === native.rootId ? dims : () => surfaceDimsOf(tag);
+  return useSyncExternalStore(subscribeDims, get, get);
 }
 
 export const PixelRatio = {
@@ -84,24 +107,48 @@ export const PixelRatio = {
 };
 
 // --- AppRegistry -------------------------------------------------------------------
+//
+// One bundle can show several root views (React Native's RCTRootView): the
+// host creates surfaces by app key (jsui_surface_create) and the runtime
+// calls __jsui_runSurface(rootTag, appKey, propsJson) for each; every surface
+// renders into its own React root. A key registered later (after an await)
+// starts the surfaces waiting for it.
 
 const registry = new Map();
-let started = false;
+let started = false; // the main surface runs an app
 let autoStartScheduled = false;
+const waiting = new Map(); // rootTag -> {appKey, initialProps}: key not registered yet
 
+// Fills a sized surface; in an auto-sized one Yoga ignores the 0 flex basis
+// (no definite size to flex in) and the app takes its content's size.
 const appStyle = { flex: 1, pointerEvents: 'box-none' };
-export const RootTagContext = createContext(1);
+export { RootTagContext };
+
+// The host picked the main surface's app (jsui_surface_run on the runtime).
+function hostPicksMain() {
+  return typeof native.surfaceApp === 'function' && native.surfaceApp(native.rootId) != null;
+}
+
+function runSurface(rootTag, appKey, initialProps) {
+  if (!registry.has(appKey)) {
+    waiting.set(rootTag, { appKey, initialProps });
+    return;
+  }
+  waiting.delete(rootTag);
+  AppRegistry.runApplication(appKey, { rootTag, initialProps });
+}
 
 export const AppRegistry = {
   registerComponent(appKey, getComponent) {
     registry.set(appKey, { getComponent });
+    for (const [rootTag, w] of Array.from(waiting)) if (w.appKey === appKey) runSurface(rootTag, appKey, w.initialProps);
     // RN native starts the registered app automatically. Do it at the end of
     // bundle evaluation (microtask), so a later explicit runApplication call
     // (react-native-web style) or other registrations still win.
     if (!autoStartScheduled) {
       autoStartScheduled = true;
       Promise.resolve().then(() => {
-        if (!started && registry.has(appKey)) AppRegistry.runApplication(appKey, {});
+        if (!started && registry.has(appKey) && !hostPicksMain()) AppRegistry.runApplication(appKey, {});
       });
     }
     return appKey;
@@ -118,29 +165,56 @@ export const AppRegistry = {
   },
   getAppKeys: () => Array.from(registry.keys()),
   getRunnable: (appKey) => registry.get(appKey),
-  getApplication(appKey) {
-    return { element: AppRegistry._element(appKey, {}) };
+  getApplication(appKey, params) {
+    return { element: AppRegistry._element(appKey, params || {}) };
   },
   _element(appKey, params) {
     const entry = registry.get(appKey);
     if (!entry || !entry.getComponent) throw new Error(`AppRegistry: no component registered as "${appKey}"`);
     const App = entry.getComponent();
-    return h(RootTagContext.Provider, { value: 1 }, h('View', { style: appStyle }, h(App, (params && params.initialProps) || {})));
+    const rootTag = rootTagOf(params);
+    return h(RootTagContext.Provider, { value: rootTag }, h('View', { style: appStyle }, h(App, (params && params.initialProps) || {})));
   },
+  /** Renders `appKey` into params.rootTag (default: the main surface) with params.initialProps. */
   runApplication(appKey, params) {
     const entry = registry.get(appKey);
     if (!entry) throw new Error(`AppRegistry: application "${appKey}" has not been registered`);
-    started = true;
-    if (entry.run) return entry.run(params || {});
-    renderRoot(AppRegistry._element(appKey, params));
+    const rootTag = rootTagOf(params);
+    if (rootTag === native.rootId) started = true;
+    if (entry.run) return entry.run({ ...(params || {}), rootTag });
+    renderRoot(AppRegistry._element(appKey, params), { container: rootTag });
     return undefined;
   },
-  unmountApplicationComponentAtRootTag() {
-    renderRoot(null);
+  unmountApplicationComponentAtRootTag(rootTag) {
+    const tag = typeof rootTag === 'number' ? rootTag : native.rootId;
+    waiting.delete(tag);
+    unmountRoot({ container: tag });
   },
   setWrapperComponentProvider() {},
   setComponentProviderInstrumentationHook() {},
   enableArchitectureIndicator() {},
+};
+
+// A numeric root tag (a surface), else the main surface (react-native-web
+// passes a DOM element here).
+function rootTagOf(params) {
+  const tag = params && params.rootTag;
+  return typeof tag === 'number' ? tag : native.rootId;
+}
+
+// Called by the runtime (surfaces created / props changed, a bundle loaded).
+globalThis.__jsui_runSurface = (rootTag, appKey, propsJson) => {
+  let props = {};
+  try {
+    props = typeof propsJson === 'string' ? JSON.parse(propsJson) : propsJson || {};
+  } catch (e) {
+    console.error(`[jsui] surface "${appKey}": invalid props: ${e && e.message}`);
+  }
+  runSurface(rootTag, appKey, props);
+};
+globalThis.__jsui_stopSurface = (rootTag) => {
+  surfaceDims.delete(rootTag);
+  AppRegistry.unmountApplicationComponentAtRootTag(rootTag);
 };
 
 // --- Appearance / color scheme --------------------------------------------------

@@ -8,7 +8,8 @@
 
 namespace jsui {
 
-Document::Document() {
+Document::Document(uint32_t* sharedNextId) {
+  if (sharedNextId) idCounter_ = sharedNextId;
   // Layout stays fractional like CSS (no Yoga pixel rounding); the painter
   // snaps box edges to device pixels the way Chrome does.
   yogaConfig_ = YGConfigNew();
@@ -30,7 +31,7 @@ Document::~Document() {
 }
 
 Node* Document::createNode(NodeType type) {
-  uint32_t id = nextId_++;
+  uint32_t id = (*idCounter_)++;
   auto node = std::make_unique<Node>(this, id, type);
   Node* raw = node.get();
   nodes_[id] = std::move(node);
@@ -123,10 +124,15 @@ void restyle(Node* n) {
 }  // namespace
 
 void Document::setViewport(float width, float height, float pixelRatio) {
-  if (width == width_ && height == height_ && pixelRatio == pixelRatio_) return;
+  bool autoW = !(width > 0), autoH = !(height > 0);
+  if (autoW == autoWidth_ && autoH == autoHeight_ && (autoW || width == width_) && (autoH || height == height_) &&
+      pixelRatio == pixelRatio_)
+    return;
   bool prChanged = pixelRatio != pixelRatio_;
-  width_ = width;
-  height_ = height;
+  autoWidth_ = autoW;
+  autoHeight_ = autoH;
+  if (!autoW) width_ = width;
+  if (!autoH) height_ = height;
   pixelRatio_ = pixelRatio;
   if (prChanged && root_) restyle(root_);
   markLayoutDirty();
@@ -147,9 +153,15 @@ bool Document::layout() {
   std::vector<std::pair<Node*, Rect>> before;
   bool animate = armedSet_;
   if (animate) snapshotLayout(root_, &before);
-  YGNodeStyleSetWidth(root_->yoga(), width_);
-  YGNodeStyleSetHeight(root_->yoga(), height_);
-  YGNodeCalculateLayout(root_->yoga(), width_, height_, YGDirectionLTR);
+  // Auto-sized axes are left unconstrained; the root takes its content's size.
+  float w = autoWidth_ ? YGUndefined : width_, h = autoHeight_ ? YGUndefined : height_;
+  if (autoWidth_) YGNodeStyleSetWidthAuto(root_->yoga());
+  else YGNodeStyleSetWidth(root_->yoga(), w);
+  if (autoHeight_) YGNodeStyleSetHeightAuto(root_->yoga());
+  else YGNodeStyleSetHeight(root_->yoga(), h);
+  YGNodeCalculateLayout(root_->yoga(), w, h, YGDirectionLTR);
+  if (autoWidth_) width_ = YGNodeLayoutGetWidth(root_->yoga());
+  if (autoHeight_) height_ = YGNodeLayoutGetHeight(root_->yoga());
   if (animate) {
     armedSet_ = false;
     startLayoutAnimations(before);

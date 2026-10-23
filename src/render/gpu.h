@@ -24,7 +24,7 @@ struct JsuiGpuContext {
 
 namespace jsui {
 
-class Runtime;
+class Surface;
 
 namespace gpu {
 
@@ -36,7 +36,7 @@ void reset(JsuiGpuContext* gpu);
 void contextLost(JsuiGpuContext* gpu);
 void purge(JsuiGpuContext* gpu, size_t cacheBytes);
 // Full repaint of `rt` into `target`. 0 on success, -1 on failure.
-int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiGLTarget& target);
+int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGLTarget& target);
 
 // Tests only (gpu_retained_frame_matches_direct): variations of the
 // retained-frame path, to tell which step misbehaves on a driver.
@@ -58,7 +58,7 @@ void destroy(JsuiGpuContext* gpu);
 void contextLost(JsuiGpuContext* gpu);
 void purge(JsuiGpuContext* gpu, size_t cacheBytes);
 // 0 on success, -1 on failure (device lost: see jsui.h).
-int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& target);
+int render(Surface& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& target);
 
 }  // namespace webgpu
 
@@ -75,7 +75,7 @@ bool owns(JsuiGpuContext* gpu);  // a Graphite (Vulkan / Metal / Dawn) context
 void destroy(JsuiGpuContext* gpu);
 void purge(JsuiGpuContext* gpu, size_t cacheBytes);
 // 0 on success, -1 on failure; `dirty` (optional) gets the repainted rect.
-int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& target, JsuiRect* dirty);
+int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& target, JsuiRect* dirty);
 
 }  // namespace graphite_gpu
 }  // namespace jsui

@@ -131,7 +131,7 @@ bool InputManager::applyScroll(Node* sv, float x, float y, bool showIndicators) 
   }
   // Children move: the painter damages only what changed inside the
   // ScrollView's clip.
-  rt_.doc.markPaintDirty();
+  doc_.markPaintDirty();
   hoverDirty_ = true;
   dispatchScroll(sv);
   return true;
@@ -166,7 +166,7 @@ void InputManager::flashScrollIndicators(Node* sv) {
   st.shownUntil = std::max(st.shownUntil, rt_.now + kIndicatorFlashMs);
   if (sv->scrollIndicatorOpacity != 1) {
     sv->scrollIndicatorOpacity = 1;
-    rt_.doc.markPaintDirty();
+    doc_.markPaintDirty();
   }
 }
 
@@ -567,7 +567,7 @@ void InputManager::tickScrolling(double now, double /*dt*/) {
   std::vector<uint32_t> ids;
   ids.reserve(scrolls_.size());
   for (auto& e : scrolls_) ids.push_back(e.first);
-  float pr = rt_.doc.pixelRatio();
+  float pr = doc_.pixelRatio();
   // In-flight frames land on device pixels (crisp text while gliding); the
   // final frame is the exact target.
   auto devicePx = [pr](float v) { return std::round(v * pr) / pr; };
@@ -645,7 +645,7 @@ void InputManager::tickScrolling(double now, double /*dt*/) {
                       : float(std::max(0.0, 1.0 - (now - s.shownUntil) / kIndicatorFadeMs));
     if (alpha != sv->scrollIndicatorOpacity) {
       sv->scrollIndicatorOpacity = alpha;
-      rt_.doc.markPaintDirty();
+      doc_.markPaintDirty();
     }
     if (alpha == 0) s.shownUntil = -1;
     bool idle = s.anim == ScrollState::Anim::None && !s.dragging && s.settleAt < 0 && alpha == 0;

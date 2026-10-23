@@ -9,6 +9,7 @@
 #pragma once
 
 #include <array>
+#include <functional>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -22,10 +23,15 @@
 namespace jsui {
 
 class Document;
+class Node;
 
 class NativeAnimated {
  public:
   explicit NativeAnimated(Document& doc) : doc_(doc) {}
+
+  // Resolves view ids when views live in several documents (surfaces of one
+  // runtime); unset: the document given to the constructor.
+  std::function<Node*(uint32_t)> findView;
 
   // ---- graph (tags are chosen by JS) ---------------------------------
   // config.type: value {value, offset} | interpolation {inputRange,
