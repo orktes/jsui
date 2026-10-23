@@ -184,8 +184,7 @@ export default function Cinematic({ active }) {
         </View>
         <View style={styles.credit}>
           <Text style={styles.creditTitle}>Big Buck Bunny</Text>
-          <Text style={styles.creditText}>© 2008 Blender Foundation · peach.blender.org</Text>
-          <Text style={styles.creditText}>Licensed CC BY 3.0 · streamed from Wikimedia Commons</Text>
+          <Text style={styles.creditText}>© 2008 Blender Foundation · CC BY 3.0 · via Wikimedia Commons</Text>
         </View>
       </Animated.View>
     </View>
@@ -468,7 +467,7 @@ function Feeds({ tex, live }) {
           <View style={styles.feed}>
             {tex ? (
               <>
-                <HostTexture name={TEXTURE} resizeMode="cover" style={[StyleSheet.absoluteFill, { filter: 'grayscale(1) brightness(1.35) contrast(1.25)' }]} />
+                <HostTexture name={TEXTURE} resizeMode="cover" style={[StyleSheet.absoluteFill, { filter: 'grayscale(1) contrast(1.6) brightness(0.9)' }]} />
                 <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(40, 255, 120, 0.16)' }]} />
                 <View pointerEvents="none" style={styles.scanlines} />
               </>
@@ -635,7 +634,7 @@ const styles = StyleSheet.create({
   chipBar: { marginTop: 'auto', height: 3, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.08)', overflow: 'hidden' },
   chipFill: { height: 3, backgroundColor: colors.gold },
 
-  side: { position: 'absolute', left: 904, top: 116, width: 328, gap: 14 },
+  side: { position: 'absolute', left: 904, top: 116, width: 328, gap: 12 },
   feedLabel: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', height: 16 },
   feedTitle: { fontFamily: font, fontWeight: '700', fontSize: 10.5, letterSpacing: 1.8, textTransform: 'uppercase', color: colors.textDim },
   feedLive: { flexDirection: 'row', alignItems: 'center', gap: 5 },
