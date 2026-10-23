@@ -35,6 +35,7 @@
 #include <windows.h>
 #include <GL/gl.h>
 #else
+#define GL_GLEXT_PROTOTYPES  // glBindFramebuffer
 #include <GL/gl.h>
 #endif
 

@@ -20,6 +20,8 @@ set(SDL_TESTS OFF CACHE BOOL "" FORCE)
 set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(SDL_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
 set(SDL_DISABLE_UNINSTALL ON CACHE BOOL "" FORCE)
+# Not used by the example; SDL3 otherwise fails the configure without libXtst.
+set(SDL_X11_XTEST OFF CACHE BOOL "" FORCE)
 add_subdirectory(${_sdl3_src} ${CMAKE_BINARY_DIR}/_deps/sdl3-build EXCLUDE_FROM_ALL)
 
 add_executable(jsui-sdl3 main.cpp)
