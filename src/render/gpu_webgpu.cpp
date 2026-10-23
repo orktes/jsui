@@ -62,6 +62,9 @@ struct WebGPUGpu final : JsuiGpuContext {
   std::unique_ptr<graphite::Recorder> recorder;
   sk_sp<CachingImageProvider> images;
   sk_sp<SkSurface> retained;  // the last frame, for damage-only repaints
+  // The last frame as a copy of the target (copy-back mode, see render()).
+  wgpu::Texture back;
+  sk_sp<SkImage> backImage;
   uint64_t retainedGen = 0;   // bumped for every new retained surface (its key)
   int smallFrames = 0;        // consecutive frames with small damage
   int directFrames = 0;       // consecutive frames painted straight into the target
@@ -103,8 +106,14 @@ struct WebGPUGpu final : JsuiGpuContext {
     return recorder != nullptr;
   }
 
-  void release() {
+  void dropRetained() {
     retained.reset();
+    backImage.reset();
+    back = nullptr;
+  }
+
+  void release() {
+    dropRetained();
     if (images) images->clear();
     recorder.reset();
     if (!ctx) return;
@@ -177,7 +186,7 @@ void contextLost(JsuiGpuContext* gpu) {
   WebGPUGpu* g = asWebGPU(gpu);
   if (!g) return;
   g->lost = true;
-  g->retained.reset();
+  g->dropRetained();
   if (g->images) g->images->clear();
 }
 
@@ -207,33 +216,50 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
   sk_sp<SkSurface> target = SkSurfaces::WrapBackendTexture(g->recorder.get(), backendTex, nullptr, &props);
   if (!target) return -1;
 
-  // Where the frame is painted (Runtime::renderCanvasTracked), like the GL
-  // backend:
+  // Where the frame is painted (Runtime::renderCanvasTracked):
   //   * Most of the frame changed (an animated full-screen UI): straight into
-  //     the target with a full repaint, one pass, no copy. The retained
-  //     texture misses that frame.
+  //     the target with a full repaint, one pass, no copy.
   //   * Small damage (a spinner, a hover, a few looping animations spread
   //     over the screen): only the damage, as a few scissored rects
   //     (Runtime::CanvasChoice::splitDamage: rect clips are scissors on
-  //     Graphite too), into the retained texture, then one draw copies it
-  //     into the target (canvas textures start cleared every frame, so the
-  //     target needs it all). "Small" is the damaged area, not its bounds:
-  //     two small animations in opposite corners have bounds as large as the
-  //     screen, and a full repaint of a full-screen UI (backgrounds,
-  //     gradients, every panel and text run) costs far more on the CPU
-  //     (recording every draw) and on the GPU than the damage and a copy.
-  //   After direct frames the retained texture is repainted fully once the
-  //   damage stayed small for kRetainAfter frames (switching back costs a full
-  //   repaint plus the copy, more than another direct frame).
+  //     Graphite too). "Small" is the damaged area, not its bounds: two small
+  //     animations in opposite corners have bounds as large as the screen,
+  //     and a full repaint of a full-screen UI (backgrounds, gradients, every
+  //     panel and text run) costs far more on the CPU (recording every draw)
+  //     and on the GPU than the damage.
+  // The target does not keep its pixels (canvas textures start cleared every
+  // frame), so damage-only frames need the last frame from elsewhere:
+  //   * Copy-back (a target with CopySrc usage, such as the web canvas): the
+  //     frame's one pass draws the last frame into the target, then the
+  //     damage over it; afterwards the damage rects are copied from the
+  //     target into `back`, which then holds this frame. One render pass and
+  //     a full-frame read of `back`, like the direct frame's single pass.
+  //   * Otherwise (or JSUI_WEBGPU_NO_CLEAR, which composites over the
+  //     target): the damage is painted into a retained render target, a pass
+  //     that loads and stores all of it, and one draw copies that into the
+  //     target in a second pass. On a tiler (Apple GPUs) at 4K those two
+  //     full-frame load / store passes cost more than a full repaint.
+  //   After direct frames the last frame is made valid again once the damage
+  //   stayed small for kRetainAfter frames: copy-back copies a full repaint
+  //   of the target; the retained target is repainted fully (switching back
+  //   costs a full repaint plus the copy, more than another direct frame).
   constexpr int kRetainAfter = 3, kFreeRetainedAfter = 300;
   const bool noClear = (t.flags & JSUI_WEBGPU_NO_CLEAR) != 0;
+  const bool copyBack = !noClear && (texture.GetUsage() & wgpu::TextureUsage::CopySrc);
   SkImageInfo info = target->imageInfo();
   if (g->retained && (g->retained->width() != w || g->retained->height() != h ||
-                      g->retained->imageInfo().colorType() != info.colorType()))
+                      g->retained->imageInfo().colorType() != info.colorType() || copyBack))
     g->retained.reset();
-  if (t.flags & JSUI_WEBGPU_NO_RETAIN) g->retained.reset();
-  const void* key = g->retained ? reinterpret_cast<const void*>(uintptr_t(g->retainedGen)) : nullptr;
+  if (g->back && (int(g->back.GetWidth()) != w || int(g->back.GetHeight()) != h ||
+                  g->back.GetFormat() != texture.GetFormat() || !copyBack)) {
+    g->backImage.reset();
+    g->back = nullptr;
+  }
+  if (t.flags & JSUI_WEBGPU_NO_RETAIN) g->dropRetained();
+  const bool haveLast = copyBack ? bool(g->backImage) : bool(g->retained);
+  const void* key = haveLast ? reinterpret_cast<const void*>(uintptr_t(g->retainedGen)) : nullptr;
   bool viaRetained = false, failed = false;
+  bool copyAll = false;  // copy-back: the whole target into `back` after the frame
   rt.renderCanvasTracked(key, w, h, [&](const SkIRect&, bool keyValid) -> Runtime::CanvasChoice {
     int64_t area = 0;
     for (SkRegion::Iterator it(rt.trackedDamage()); !it.done(); it.next())
@@ -242,12 +268,43 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
     g->smallFrames = large ? 0 : g->smallFrames + 1;
     bool retain = !(t.flags & JSUI_WEBGPU_NO_RETAIN) && (keyValid ? !large : g->smallFrames >= kRetainAfter);
     if (!retain) {
-      // A retained texture unused for a while (a UI that animates all over)
-      // is freed: a full-size texture of memory.
-      if (++g->directFrames > kFreeRetainedAfter) g->retained.reset();
+      // A last frame unused for a while (a UI that animates all over) is
+      // freed: a full-size texture of memory.
+      if (++g->directFrames > kFreeRetainedAfter) g->dropRetained();
       return {target->getCanvas(), nullptr, !noClear};
     }
     g->directFrames = 0;
+    if (copyBack) {
+      if (!g->back) {
+        wgpu::TextureDescriptor desc;
+        desc.size = {uint32_t(w), uint32_t(h), 1};
+        desc.format = texture.GetFormat();
+        desc.usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
+        g->back = g->device.CreateTexture(&desc);
+        g->backImage = g->back ? SkImages::WrapTexture(g->recorder.get(),
+                                                       graphite::BackendTextures::MakeDawn(g->back.Get()),
+                                                       kPremul_SkAlphaType, info.refColorSpace())
+                               : nullptr;
+        if (!g->backImage) {
+          g->back = nullptr;
+          return {target->getCanvas(), nullptr, true};  // direct this time
+        }
+        g->retainedGen++;
+        keyValid = false;
+      }
+      viaRetained = true;
+      Runtime::CanvasChoice c{target->getCanvas(), reinterpret_cast<const void*>(uintptr_t(g->retainedGen)), true};
+      if (keyValid) {
+        // The last frame first (every pixel), then the damage over it.
+        SkPaint paint;
+        paint.setBlendMode(SkBlendMode::kSrc);
+        target->getCanvas()->drawImage(g->backImage, 0, 0, SkSamplingOptions(), &paint);
+        c.splitDamage = true;
+      } else {
+        copyAll = true;  // a full repaint (the runtime clears the target)
+      }
+      return c;
+    }
     if (!g->retained) {
       SkImageInfo ri = SkImageInfo::Make(w, h, info.colorType(), kPremul_SkAlphaType, info.refColorSpace());
       g->retained = SkSurfaces::RenderTarget(g->recorder.get(), ri, skgpu::Mipmapped::kNo, &props);
@@ -263,13 +320,40 @@ int render(Runtime& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
     return c;
   }, /*growCurves=*/false);
   if (failed) return -1;
-  if (viaRetained) {
+  if (viaRetained && !copyBack) {
     SkPaint paint;
     paint.setBlendMode(noClear ? SkBlendMode::kSrcOver : SkBlendMode::kSrc);
     target->getCanvas()->drawImage(SkSurfaces::AsImage(g->retained), 0, 0, SkSamplingOptions(), &paint);
   }
   target.reset();
   if (!g->flush()) return -1;
+  if (viaRetained && copyBack) {
+    // After Graphite's submit (same queue): `back` becomes this frame.
+    wgpu::CommandEncoder enc = g->device.CreateCommandEncoder();
+    wgpu::TexelCopyTextureInfo src, dst;
+    src.texture = texture;
+    dst.texture = g->back;
+    auto copy = [&](const SkIRect& r) {
+      src.origin = dst.origin = {uint32_t(r.x()), uint32_t(r.y()), 0};
+      wgpu::Extent3D size = {uint32_t(r.width()), uint32_t(r.height()), 1};
+      enc.CopyTextureToTexture(&src, &dst, &size);
+    };
+    SkIRect all = SkIRect::MakeWH(w, h);
+    const SkRegion& damage = rt.trackedDamage();
+    if (copyAll) {
+      copy(all);
+    } else if (damage.computeRegionComplexity() > 32) {  // many small rects: one copy
+      SkIRect r = damage.getBounds();
+      if (r.intersect(all)) copy(r);
+    } else {
+      for (SkRegion::Iterator it(damage); !it.done(); it.next()) {
+        SkIRect r = it.rect();
+        if (r.intersect(all)) copy(r);
+      }
+    }
+    wgpu::CommandBuffer cb = enc.Finish();
+    g->queue.Submit(1, &cb);
+  }
   return g->isLost() ? -1 : 0;
 }
 
