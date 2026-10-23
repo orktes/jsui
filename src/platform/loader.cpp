@@ -352,7 +352,8 @@ uint64_t ResourceLoader::load(const std::string& url, Callback cb) {
 
 uint64_t ResourceLoader::load(LoadRequest req, Callback cb) {
   uint64_t id = nextId_++;
-  pending_[id] = {std::move(cb), req.url};
+  pending_[id] = {std::move(cb), req.url, req.background};
+  if (req.background) background_++;
   if (req.url.rfind("data:", 0) == 0) {
     // Decoded inline on every platform, but still delivered from pump() so
     // callbacks never run re-entrantly inside load().
@@ -401,7 +402,7 @@ int ResourceLoader::pump() {
     Callback cb = std::move(it->second.cb);
     if (res.url.empty()) res.url = it->second.url;  // embedder completions carry no URL
     if (res.status == 0 && res.error.empty()) res.error = "failed to load " + res.url;
-    pending_.erase(it);
+    erasePending(it);
     cb(std::move(res));
     n++;
   }
@@ -409,16 +410,23 @@ int ResourceLoader::pump() {
   return n;
 }
 
+void ResourceLoader::erasePending(std::unordered_map<uint64_t, PendingLoad>::iterator it) {
+  if (it->second.background) background_--;
+  pending_.erase(it);
+}
+
 void ResourceLoader::cancel(uint64_t id) {
-  pending_.erase(id);
+  auto it = pending_.find(id);
+  if (it != pending_.end()) erasePending(it);
   if (worker_) worker_->cancel(id);
 }
 
 void ResourceLoader::cancelAll() {
   pending_.clear();
+  background_ = 0;
   if (worker_) worker_->cancelAll();
 }
 
-bool ResourceLoader::busy() const { return !pending_.empty(); }
+bool ResourceLoader::busy() const { return pending() > 0; }
 
 }  // namespace jsui

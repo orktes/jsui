@@ -502,6 +502,9 @@ void JsuiView::start() {
     TypedArray<int> pads = in->get_connected_joypads();
     for (int64_t i = 0; i < pads.size(); i++) onJoyConnectionChanged(int64_t(pads[i]), true);
   }
+  // Dev mode: shown in `jsui dev`'s shared session as "Godot: <node name>".
+  std::string devName = toStd("Godot: " + String(get_name()));
+  jsui_set_dev_session(rt_, devName.c_str(), 1);
   std::string url = toStd(bundle_url_);
   jsui_load_bundle_url(rt_, url.c_str());
 }

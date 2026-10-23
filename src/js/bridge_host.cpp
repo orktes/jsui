@@ -11,6 +11,7 @@
 //   texture(key) -> [width, height, version] | undefined   textureKeys() -> [key]
 #include <string>
 
+#include "dev_session.h"
 #include "js/engine_impl.h"
 #include "runtime.h"
 
@@ -146,9 +147,12 @@ JSValue js_hostCall(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
   auto& impl = implOf(ctx);
   Runtime& rt = impl.rt;
   if (argc < 3 || !JS_IsFunction(ctx, argv[2])) return JS_ThrowTypeError(ctx, "hostCall(name, json, settle)");
-  if (!rt.config.on_call) return JS_NewInt32(ctx, 0);
+  if (!rt.config.on_call && !(rt.session && rt.session->joined())) return JS_NewInt32(ctx, 0);
   std::string name = toStdString(ctx, argv[0]);
   std::string json = JS_IsUndefined(argv[1]) ? "null" : toStdString(ctx, argv[1]);
+  if (rt.session && rt.session->joined())
+    rt.session->uiEvent("call", {{"name", Value(name)}, {"args", Value::parseJson(json)}});
+  if (!rt.config.on_call) return JS_NewInt32(ctx, 0);
   uint64_t id = rt.newCallId();
   // Registered before on_call runs, so the embedder may answer from inside it.
   impl.hostCalls[id] = JS_DupValue(ctx, argv[2]);
