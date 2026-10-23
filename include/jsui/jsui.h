@@ -479,6 +479,13 @@ JSUI_API void jsui_reload(JsuiRuntime* rt);
  * Refresh: components keep their state) and fall back to a reload; other
  * bundles reload. Dev mode with an http:// bundle URL does this on its own. */
 JSUI_API void jsui_dev_update(JsuiRuntime* rt);
+/* Dev mode with an http:// bundle URL also joins the dev server's shared
+ * session (`jsui dev`): coding agents attached to the server
+ * (`jsui run --attach`) can then drive this runtime (input, state, calls,
+ * screenshots) and see what the person does in it. `name` is shown there
+ * (e.g. "AW3 main menu"; default: the platform); `enabled` 0 keeps this
+ * runtime out of the session. Call before loading the bundle. */
+JSUI_API void jsui_set_dev_session(JsuiRuntime* rt, const char* name, int enabled);
 
 /* Register a font face from memory. Data is copied. `weight` 100..900,
  * `italic` 0/1. The JS side can also load fonts with `jsui.loadFont(...)`. */
@@ -1152,6 +1159,17 @@ enum {
  * input there passes through to whatever is behind the UI. Uses the current
  * layout and sends no events. */
 JSUI_API int jsui_hit_test(JsuiRuntime* rt, float x, float y);
+/* jsui_hit_test for the whole view at once, for hosts that must answer it
+ * where the runtime is not (the web host's worker mode answers on the page's
+ * thread from the last copy): writes up to `max_regions` regions to `out`,
+ * 5 floats each (x, y, width, height in logical px, then the JSUI_HIT_*
+ * flags), bottom to top. The last region containing a point gives its
+ * flags; none: 0. Approximate where jsui_hit_test is exact: transformed
+ * views give their bounding box, rounded corners are ignored, and text
+ * with pointer handlers on some of its spans captures its whole box.
+ * Returns the number of regions (call again with a bigger buffer when it
+ * exceeds `max_regions`). Uses the current layout. */
+JSUI_API int jsui_hit_regions(JsuiRuntime* rt, float* out, int max_regions);
 
 JSUI_API int jsui_send_mouse_move(JsuiRuntime* rt, float x, float y);
 JSUI_API int jsui_send_mouse_button(JsuiRuntime* rt, float x, float y, JsuiMouseButton button, int down, int mods);

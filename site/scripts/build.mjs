@@ -6,22 +6,24 @@
 //
 // Layout of the output:
 //   index.html, jsui-web.js         page + browser host (web/jsui-web.js,
-//   jsui-webgpu.js, jsui-textures.js, and its WebGPU renderer, host textures
-//   jsui-audio.js                   and Web Audio)
+//   jsui-webgpu.js, jsui-textures.js, and its WebGPU renderer, host textures,
+//   jsui-worker.js, jsui-audio.js   worker mode and Web Audio; jsui-web.js is also the worker's entry)
 //   jsui/dist/jsui.{js,wasm}        CPU module (required)
 //   jsui/dist-webgl/jsui.{js,wasm}  WebGL module (optional; used when present)
 //   jsui/dist-gpu/jsui.{js,wasm}    WebGPU + WebGL + CPU module (optional; preferred when
 //                                   present and the browser has WebGPU)
 //   modules.json                    which modules were deployed, and their versions
 //   app/bundle.js, app/assets/*     the site itself (site/app, built with @orktes/jsui-cli)
+//   llms.txt, og.png                site/public, copied as is
 //
 // Cache consistency: GitHub Pages serves everything with max-age=600, so a
 // browser may hold some files of the previous deploy and fetch others fresh
 // (a new index.html with an old jsui-web.js, a jsui.js with the jsui.wasm of
 // another build: "Importing a module script failed"). Every URL the page
 // loads besides index.html itself is therefore versioned with a content
-// hash, ?v=<hash>: jsui-web.js (imported by index.html), jsui-webgpu.js and
-// jsui-textures.js, jsui-audio.js (imported by jsui-web.js, rewritten here), each module's jsui.js and its
+// hash, ?v=<hash>: jsui-web.js (imported by index.html, and the worker's
+// script in worker mode), jsui-webgpu.js, jsui-textures.js, jsui-worker.js and
+// jsui-audio.js (imported by jsui-web.js, rewritten here), each module's jsui.js and its
 // jsui.wasm (one hash over both; the host passes the module URL's query on to
 // the wasm, see locateIn() in web/jsui-web.js) and app/bundle.js. index.html
 // gets the module versions inline (no modules.json fetch to go stale).
@@ -97,10 +99,13 @@ const texturesJs = fs.readFileSync(path.join(ROOT, 'web/jsui-textures.js'));
 fs.writeFileSync(path.join(out, 'jsui-textures.js'), texturesJs);
 const audioJs = fs.readFileSync(path.join(ROOT, 'web/jsui-audio.js'));
 fs.writeFileSync(path.join(out, 'jsui-audio.js'), audioJs);
+const workerJs = fs.readFileSync(path.join(ROOT, 'web/jsui-worker.js'));
+fs.writeFileSync(path.join(out, 'jsui-worker.js'), workerJs);
 let webJs = fs.readFileSync(path.join(ROOT, 'web/jsui-web.js'), 'utf8');
 webJs = replaceAll(webJs, "from './jsui-webgpu.js'", `from './jsui-webgpu.js?v=${hash(webgpuJs)}'`, 'web/jsui-web.js');
 webJs = replaceAll(webJs, "from './jsui-textures.js'", `from './jsui-textures.js?v=${hash(texturesJs)}'`, 'web/jsui-web.js');
 webJs = replaceAll(webJs, "from './jsui-audio.js'", `from './jsui-audio.js?v=${hash(audioJs)}'`, 'web/jsui-web.js');
+webJs = replaceAll(webJs, "import('./jsui-worker.js')", `import('./jsui-worker.js?v=${hash(workerJs)}')`, 'web/jsui-web.js');
 fs.writeFileSync(path.join(out, 'jsui-web.js'), webJs);
 let html = fs.readFileSync(path.join(SITE, 'index.html'), 'utf8');
 html = replaceAll(html, "from './jsui-web.js'", `from './jsui-web.js?v=${hash(webJs)}'`, 'site/index.html');
@@ -110,5 +115,7 @@ html = replaceAll(html, 'const modules = null;  // set by site/scripts/build.mjs
   `const modules = ${JSON.stringify(modules)};`, 'site/index.html');
 fs.writeFileSync(path.join(out, 'index.html'), html);
 fs.writeFileSync(path.join(out, '.nojekyll'), '');
+// Static files served as they are: llms.txt, the social preview image (og.png).
+fs.cpSync(path.join(SITE, 'public'), out, { recursive: true });
 console.log(`site: bundle ${(r.bytes / 1024).toFixed(1)} KiB, ${r.assets.length} assets in ${Date.now() - t0} ms`);
 console.log(`site: wrote ${out} (modules: cpu${gpu ? ' + webgl' : ''}${webgpu ? ' + webgpu' : ''})`);

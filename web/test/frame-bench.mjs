@@ -32,6 +32,13 @@
 //             Needs the adapter's 'timestamp-query' feature (real GPUs; the
 //             SwiftShader adapter may not have it, then it says so).
 //
+// --worker: JSUI's renderers in worker mode (createJsui({ worker: true }),
+// web/jsui-worker.js): the frame loop runs on the worker's own rAF, so
+// interval and frame CPU are the worker's (recorded there), and threads adds
+// the worker's busy time next to the page's main thread, which now only
+// forwards input and DOM state. finish / gpu calls / gpu time need the
+// renderer on the page's thread and are skipped.
+//
 // Renderers: webgpu, webgl, cpu (JSUI's web host), and chrome: the same app
 // bundled with react-native-web (as the reference tests do) and rendered by
 // Chrome itself, the bar JSUI is held to. For chrome, "main thread" and the
@@ -45,7 +52,7 @@
 //   node web/test/frame-bench.mjs [--dist dist-gpu] [--frames 120] [--renderers webgpu,webgl,cpu,chrome]
 //                                 [--width 1280 --height 720 --dpr 1] [--real-gpu] [--scenario steady]
 //                                 [--settle 3000] [--no-counts] [--no-gpu-timing] [--no-trace]
-//                                 [--webgl-sync readpixels|fence|finish]
+//                                 [--webgl-sync readpixels|fence|finish] [--worker]
 //                                 [--json out.json] [app.jsx]
 //
 // Default: headless Chromium from Playwright, where WebGL runs on SwiftShader
@@ -66,7 +73,7 @@ import { build } from '@orktes/jsui-cli';
 const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ROOT = path.resolve(WEB, '..');
 const args = process.argv.slice(2);
-const FLAGS = new Set(['--real-gpu', '--no-counts', '--no-gpu-timing', '--no-trace']);
+const FLAGS = new Set(['--real-gpu', '--no-counts', '--no-gpu-timing', '--no-trace', '--worker']);
 const opt = (name, def) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : def; };
 const DIST = opt('--dist', 'dist-gpu');
 const N = Number(opt('--frames', 120));
@@ -76,6 +83,7 @@ const REAL_GPU = args.includes('--real-gpu');
 const COUNTS = !args.includes('--no-counts');
 const GPU_TIMING = !args.includes('--no-gpu-timing');
 const TRACE = !args.includes('--no-trace');
+const WORKER = args.includes('--worker');
 const SCENARIO = opt('--scenario', 'steady');
 // How the finish metric waits for a WebGL frame: readpixels (default) a
 // 1-pixel read-back; fence a fenceSync polled from short tasks (no read-back,
@@ -139,7 +147,7 @@ const browser = REAL_GPU
     args: [...COMMON_ARGS, '--enable-unsafe-swiftshader', '--use-angle=swiftshader', '--ignore-gpu-blocklist',
       '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-vulkan=swiftshader'],
   });
-console.log(`${path.relative(ROOT, entry)} ${W}x${H} @${DPR}x, web/${DIST}, ${N} frames, scenario ${SCENARIO} ` +
+console.log(`${path.relative(ROOT, entry)} ${W}x${H} @${DPR}x, web/${DIST}${WORKER ? ' (worker mode)' : ''}, ${N} frames, scenario ${SCENARIO} ` +
   `(settle ${SETTLE} ms), ${REAL_GPU ? 'Chrome (real GPU)' : 'headless Chromium (SwiftShader)'} ${browser.version()}`);
 
 // The scroll scenario's wheel input inside the page (stepped frames): a
@@ -181,14 +189,14 @@ async function open(renderer, { init = [], stepped = false } = {}) {
   await page.waitForFunction(() => window.testReady);
   await page.bringToFront();
   const fromMount = stepped && SCENARIO === 'entrance';
-  const info = await page.evaluate(async ({ renderer, dist, w, h, fromMount }) => {
+  const info = await page.evaluate(async ({ renderer, dist, w, h, fromMount, worker }) => {
     const c = document.createElement('canvas');
     c.style.width = `${w}px`;
     c.style.height = `${h}px`;
     document.body.appendChild(c);
     window.__t0 = performance.now();
     const j = window.j = await window.createJsui({ canvas: c, bundleUrl: 'output/bench/bundle.js', renderer,
-      autoFocus: false, autoStart: !fromMount, moduleUrl: new URL(`../${dist}/jsui.js`, location.href) });
+      autoFocus: false, autoStart: !fromMount, moduleUrl: new URL(`../${dist}/jsui.js`, location.href), worker });
     j.on('log', () => {});
     // Assets loaded and the first frames painted (whenIdle resolves right
     // after a frame, even while animations keep running).
@@ -196,13 +204,18 @@ async function open(renderer, { init = [], stepped = false } = {}) {
       window.__t0 = null;
       await Promise.race([j.whenIdle(), new Promise((r) => setTimeout(r, 8000))]);
     }
+    if (worker) {
+      if (!j.worker) throw new Error('worker mode fell back to the main thread');
+      const d = await j._debug('info');
+      return { name: j.renderer, adapter: d.adapter, gl: d.gl };
+    }
     return { name: j.renderer, adapter: j._webgpu?.description ?? null,
       gl: (() => {
         const gl = j._gl;
         const ext = gl?.getExtension('WEBGL_debug_renderer_info');
         return gl ? gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER) : null;
       })() };
-  }, { renderer, dist: DIST, w: W, h: H, fromMount });
+  }, { renderer, dist: DIST, w: W, h: H, fromMount, worker: WORKER && renderer !== 'chrome' });
   if (SETTLE && !fromMount) await page.waitForTimeout(SETTLE);  // the host's loop runs the entrance animations
   return { context, page, info };
 }
@@ -258,8 +271,8 @@ function threadBusy(json) {
   }
   return out;
 }
-const THREADS = [['CrRendererMain', 'main'], ['Compositor', 'compositor'], ['CompositorTileWorker', 'raster'],
-  ['GPU CrGpuMain', 'gpu-main'], ['GPU VizCompositorThread', 'viz']];
+const THREADS = [['CrRendererMain', 'main'], ['DedicatedWorker thread', 'worker'], ['Compositor', 'compositor'],
+  ['CompositorTileWorker', 'raster'], ['GPU CrGpuMain', 'gpu-main'], ['GPU VizCompositorThread', 'viz']];
 
 const sorted = (a) => [...a].sort((x, y) => x - y);
 const avg = (a) => a.reduce((x, y) => x + y, 0) / Math.max(1, a.length);
@@ -275,9 +288,16 @@ for (const renderer of RENDERERS) {
   //    (traced, unless --no-trace).
   if (TRACE) await browser.startTracing(page, { categories: TRACE_CATEGORIES });
   const wheel = wheelLoop(page);
-  const steady = await page.evaluate(async ({ n, warmup, chrome }) => {
+  const steady = await page.evaluate(async ({ n, warmup, chrome, worker }) => {
     const stamps = [], cpu = [], gpuDone = [];
     let i = 0, t0 = 0, t1 = 0;
+    if (worker) {
+      // The worker's own loop, recorded there (frame CPU is the worker's).
+      const r = await window.j._bench({ n: n + 1, warmup });
+      const iv = r.stamps.slice(1).map((t, k) => t - r.stamps[k]);
+      return { intervals: iv, cpu: r.cpu.slice(1), gpuDone: [], renders: r.renders, frames: n,
+        window: r.stamps[r.stamps.length - 1] - r.stamps[0] };
+    }
     if (chrome) {
       // Chrome's own loop: only the rAF timestamps are visible from the page.
       await new Promise((resolve) => {
@@ -319,7 +339,7 @@ for (const renderer of RENDERERS) {
     const intervals = stamps.slice(1).map((t, k) => t - stamps[k]);
     return { intervals, cpu: cpu.slice(1), gpuDone: gpuDone.slice(1).filter((v) => !Number.isNaN(v)),
       renders: j.stats.renders - r0, frames: i - warmup, window: t1 - t0 };
-  }, { n: N, warmup: WARMUP, chrome: isChrome });
+  }, { n: N, warmup: WARMUP, chrome: isChrome, worker: WORKER && !isChrome });
   await wheel.stop();
   let threads = null;
   if (TRACE) {
@@ -333,7 +353,7 @@ for (const renderer of RENDERERS) {
   }
 
   // 2. The old metric: frames stepped by hand, each awaited until the GPU finished it.
-  const finish = isChrome ? null : await page.evaluate(async ({ n, gpuTiming, webglSync }) => {
+  const finish = isChrome || WORKER ? null : await page.evaluate(async ({ n, gpuTiming, webglSync }) => {
     const j = window.j;
     j.stop();
     const px = new Uint8Array(4), gl = j._gl;
@@ -409,7 +429,7 @@ for (const renderer of RENDERERS) {
 
   // 3. WebGPU calls per frame (instrumented page).
   let counts = null;
-  if (COUNTS && info.name === 'webgpu') {
+  if (COUNTS && info.name === 'webgpu' && !WORKER) {
     const c = await open(renderer, { init: ['gpu-count.js'], stepped: true });
     counts = await c.page.evaluate(async ({ n }) => {
       const j = window.j;
@@ -437,7 +457,7 @@ for (const renderer of RENDERERS) {
 
   // 4. GPU time per pass (timestamps, instrumented page).
   let timing = null;
-  if (GPU_TIMING && info.name === 'webgpu') {
+  if (GPU_TIMING && info.name === 'webgpu' && !WORKER) {
     const c = await open(renderer, { init: ['gpu-timing.js'], stepped: true });
     timing = await c.page.evaluate(async ({ n }) => {
       const j = window.j, T = window.__gpuTiming;
@@ -474,7 +494,7 @@ for (const renderer of RENDERERS) {
   console.log(`  ${renderer.padEnd(7)} (${info.name}${where ? `, ${where}` : ''})`);
   console.log(`    interval  mean ${f2(iv.mean)} ms, p50 ${f2(iv.p50)}, p95 ${f2(iv.p95)}, p99 ${f2(iv.p99)}, ` +
     `late (>1.5x p50) ${late}/${steady.intervals.length}` +
-    (cpu ? `; main thread mean ${f2(cpu.mean)}, p95 ${f2(cpu.p95)}` : '') +
+    (cpu ? `; ${WORKER && !isChrome ? 'worker frame' : 'main thread'} mean ${f2(cpu.mean)}, p95 ${f2(cpu.p95)}` : '') +
     (gpu ? `; GPU done after mean ${f2(gpu.mean)}, p95 ${f2(gpu.p95)}` : '') +
     (steady.renders != null ? `; ${steady.renders} repaints` : ''));
   if (threads) {
@@ -529,11 +549,12 @@ for (const renderer of RENDERERS) {
       console.log(`      ${r.ms.toFixed(3).padStart(7)} ms  ${r.perFrame.toFixed(2).padStart(6)}x  ${r.label}`);
     }
   }
-  results.push({ renderer, name: info.name, adapter: where, interval: iv, late, mainThread: cpu, gpuDone: gpu, threads,
+  results.push({ renderer, worker: WORKER && !isChrome, name: info.name, adapter: where, interval: iv, late,
+    [WORKER && !isChrome ? 'workerFrame' : 'mainThread']: cpu, gpuDone: gpu, threads,
     finish: fin, finishMainThread: finCpu, repaints: steady.renders, counts,
     gpuTime: gpuTime ?? (finish?.gpuMs?.length ? { total: stats(finish.gpuMs) } : null) });
 }
-if (JSON_OUT) fs.writeFileSync(JSON_OUT, JSON.stringify({ entry, width: W, height: H, dpr: DPR, realGpu: REAL_GPU,
+if (JSON_OUT) fs.writeFileSync(JSON_OUT, JSON.stringify({ entry, width: W, height: H, dpr: DPR, realGpu: REAL_GPU, worker: WORKER,
   scenario: SCENARIO, settle: SETTLE, browser: browser.version(), results }, null, 2));
 await browser.close();
 server.close();

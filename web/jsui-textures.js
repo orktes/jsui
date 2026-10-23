@@ -61,12 +61,22 @@ export function sourceSize(s) {
   return w > 0 && h > 0 ? { width: Math.round(w), height: Math.round(h) } : null;
 }
 
-const isVideoFrame = (s) => 'displayWidth' in s && typeof s.close === 'function';
+export const isVideoFrame = (s) => 'displayWidth' in s && typeof s.close === 'function';
 const isImageData = (s) => s.data instanceof Uint8ClampedArray && !('getContext' in s);
+// { data, width, height }: straight-alpha RGBA rows in any typed array (not an ImageData).
+const isRawPixels = (s) => typeof ImageData !== 'undefined' && !(s instanceof ImageData) && ArrayBuffer.isView(s.data)
+  && !('getContext' in s) && s.width > 0 && s.height > 0;
+
+// A raw pixel source as an ImageData over the same bytes; null when too short.
+function rawImageData(s) {
+  const n = Math.round(s.width) * Math.round(s.height) * 4, d = s.data;
+  if (d.byteLength < n) return null;
+  return new ImageData(new Uint8ClampedArray(d.buffer, d.byteOffset, n), Math.round(s.width), Math.round(s.height));
+}
 
 // Video has no alpha (VideoFrames in an alpha format excepted): OPAQUE lets
 // Skia skip blending.
-function defaultOpaque(s) {
+export function defaultOpaque(s) {
   if ('videoWidth' in s) return true;
   if (isVideoFrame(s)) return !/A$|^RGBA|^BGRA/.test(String(s.format ?? ''));
   return false;
@@ -145,6 +155,10 @@ export class HostTextureSet {
   set(name, source, options = {}) {
     name = String(name);
     if (source == null) return this.remove(name);
+    if (isRawPixels(source)) {
+      source = rawImageData(source);
+      if (!source) return false;
+    }
     const size = sourceSize(source);
     if (!size) return false;
     const target = this.sync();

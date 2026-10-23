@@ -141,10 +141,11 @@ npx jsui inspect app.jsx                      # view tree: types, testIDs, text,
 npx jsui run app.jsx steps.json               # scripted clicks / keys / gamepad / state + expectations
 ```
 
-`jsui dev app.jsx --shared` runs one live, hot-updating app that you watch and play at
-`http://127.0.0.1:5173/shared` while an agent drives the same app with
-`jsui screenshot|inspect|run --attach http://127.0.0.1:5173` and reads what you did with
-`jsui log --attach`.
+Every runtime that loads the bundle from `jsui dev` in dev mode (the game, the native
+viewer, the browser at `http://127.0.0.1:5173/shared`, or `jsui dev --headless` inside the
+server) joins its shared session: an agent drives and screenshots the live one with
+`jsui screenshot|inspect|run --attach http://127.0.0.1:5173` while you play it, and reads
+what you did with `jsui log --attach`.
 
 ## Build (native)
 

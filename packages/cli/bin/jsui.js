@@ -8,15 +8,20 @@ import { pathToFileURL } from 'node:url';
 import { build } from '../src/build.js';
 import { dev } from '../src/dev.js';
 import { elementSummary, formatTree, launch } from '../src/headless.js';
-import { attach } from '../src/attach.js';
+import { attach, sessionClients } from '../src/attach.js';
 import { answerOf, parseInlineSteps, runSteps, STEP_HELP } from '../src/script.js';
 import { skillCommand, SKILL_USAGE } from '../src/skill.js';
 
 const USAGE = `usage:
   jsui build <entry> [-o dist/bundle.js] [--minify] [--sourcemap] [--dev]
   jsui dev <entry> [--port 5173] [--host 127.0.0.1] [--no-hmr]
-     [--shared [view options]]  one live app you (http://127.0.0.1:5173/shared)
-                                and agents (--attach) see and control together
+     [--headless [view options]]
+     Every runtime that loads the bundle in dev mode joins the server's shared
+     session: http://127.0.0.1:5173/shared in a browser, the native viewer
+     (jsui-viewer --dev <url>/bundle.js), a Godot JsuiView in dev mode, ...
+     Agents (--attach) drive the live one: the last to join, or --client.
+     --headless also runs one inside the server (no window needed), streamed
+     to /shared.
 
   jsui screenshot <entry> [-o screenshot.png] [--wait 1000] [view options]
   jsui inspect <entry> [--wait 1000] [--find <selector>] [--json] [view options]
@@ -27,10 +32,15 @@ const USAGE = `usage:
        [--bundle] (entry is a built bundle.js) [--dev] (development React)
 
   jsui screenshot|inspect|run --attach http://127.0.0.1:5173 ...  (no <entry>)
-     drive the app of 'jsui dev --shared' instead: the same commands, on the
-     live app the person sees, in real time
+     [--client <name|id>]
+     drive the live runtime of 'jsui dev' instead: the same commands, on the
+     app the person sees (browser, native, game), in real time. Waits up to
+     30 s for a runtime to join when none is connected.
+  jsui clients --attach <url> [--json]
+     the runtimes in the session (* = live)
   jsui log --attach <url> [--since <seq>] [--follow]
      what the person, agents and the UI did (clicks, keys, messages, calls)
+     and which runtimes joined
 
 ${SKILL_USAGE}
 
@@ -54,7 +64,9 @@ const VIEW_OPTIONS = {
   json: { type: 'boolean' },
   'keep-going': { type: 'boolean' },
   attach: { type: 'string' },
-  shared: { type: 'boolean' },
+  client: { type: 'string' },
+  headless: { type: 'boolean' },
+  shared: { type: 'boolean' },  // the old name of --headless
   since: { type: 'string' },
   follow: { type: 'boolean' },
 };
@@ -129,7 +141,7 @@ async function headless(cmd, values, positionals) {
       }
     }
   }
-  const app = attached ? await attach(values.attach) : await launch(viewOptions(values, entry));
+  const app = attached ? await attach(values.attach, { client: values.client }) : await launch(viewOptions(values, entry));
   try {
     await app.ready();
     if (cmd === 'screenshot') {
@@ -140,6 +152,8 @@ async function headless(cmd, values, positionals) {
       return reportErrors(app);
     }
     if (cmd === 'inspect') {
+      // `jsui inspect <entry> '#buy'`: a selector given without --find.
+      if (values.find == null && positionals[1] != null) values.find = positionals[1];
       await app.wait(values.wait != null ? Number(values.wait) : attached ? 0 : 1000);
       if (values.find) {
         const found = (await app.findAll(values.find)).map(elementSummary);
@@ -223,6 +237,22 @@ async function main(argv) {
     console.log(cmd === 'run' ? STEP_HELP : USAGE);
     return 0;
   }
+  if (cmd === 'clients') {
+    if (values.attach == null) {
+      console.error('jsui clients: --attach <url> is required');
+      return 2;
+    }
+    try {
+      const list = await sessionClients(values.attach);
+      if (values.json) console.log(JSON.stringify(list, null, 2));
+      else if (!list.length) console.log('(no runtime connected: open <url>/shared, the native viewer or the game in dev mode)');
+      else for (const c of list) console.log(`${c.live ? '*' : ' '} ${c.id.slice(0, 8)}  ${c.label}  ${c.width}x${c.height}${c.scale !== 1 ? ' @' + c.scale + 'x' : ''}`);
+      return 0;
+    } catch (e) {
+      console.error((e && e.message) || String(e));
+      return 1;
+    }
+  }
   if (cmd === 'log') {
     if (values.attach == null) {
       console.error('jsui log: --attach <url> is required');
@@ -280,12 +310,12 @@ async function main(argv) {
       return 2;
     }
     try {
-      let shared = null;
-      if (values.shared) {
+      let headlessView = null;
+      if (values.headless || values.shared) {
         const v = viewOptions(values, entry);
-        shared = { width: v.width, height: v.height, scale: v.scale, fps: v.fps, component: v.component, props: v.props, state: v.state };
+        headlessView = { width: v.width, height: v.height, scale: v.scale, fps: v.fps, component: v.component, props: v.props, state: v.state };
       }
-      const server = await dev({ entry, port, host: values.host || '127.0.0.1', hmr: !values['no-hmr'], shared });
+      const server = await dev({ entry, port, host: values.host || '127.0.0.1', hmr: !values['no-hmr'], headless: headlessView });
       const stop = async () => {
         await server.close();
         process.exit(0);

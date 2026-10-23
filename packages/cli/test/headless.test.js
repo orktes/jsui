@@ -12,6 +12,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { attach, dev, launch, findWasmDir, parseInlineSteps, parseSelector, SKILL_DIR } from '../src/index.js';
+import { loadModule } from '../src/headless.js';
+import { LiveApp } from '../src/shared.js';
 
 const exec = promisify(execFile);
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'jsui.js');
@@ -312,7 +314,7 @@ async function readStream(origin, n) {
   return out;
 }
 
-test('dev --shared: viewer stream, viewer input, attach(), jsui run --attach', { skip }, async () => {
+test('dev --headless: viewer stream, viewer input, attach(), jsui run --attach', { skip }, async () => {
   const dir = await fixture();
   // The title lives in a component-only module, which hot-updates in place
   // (an edit to the entry file, which registers the app, reloads instead).
@@ -322,12 +324,12 @@ export default function Title({ text }) { return <Text testID="title" style={{ c
   await writeFile(path.join(dir, 'title.jsx'), TITLE);
   await writeFile(path.join(dir, 'app.jsx'), "import Title from './title.jsx';\n" +
     APP.replace(`<Text testID="title" style={{ color: '#fff', fontSize: 32 }}>{title}</Text>`, '<Title text={title} />'));
-  const server = await dev({ entry: path.join(dir, 'app.jsx'), port: 0, log: () => {}, shared: { width: 640, height: 360 } });
+  const server = await dev({ entry: path.join(dir, 'app.jsx'), port: 0, log: () => {}, headless: { width: 640, height: 360 } });
   const origin = `http://127.0.0.1:${server.port}`;
   try {
     const page = await fetch(origin + '/shared');
     assert.equal(page.status, 200);
-    assert.match(await page.text(), /JSUI shared view/);
+    assert.match(await page.text(), /JSUI shared session/);
 
     const app = await attach(origin);
     assert.equal(app.width, 640);
@@ -406,5 +408,64 @@ export default function Title({ text }) { return <Text testID="title" style={{ c
     assert.equal((await app.find('#gold')).text, '42 gold');
   } finally {
     await server.close();
+  }
+});
+
+// The runtime's own session client (src/dev_session.cpp), as every dev-mode
+// host runs it: here the WebAssembly build in Node, loading from the server.
+test('dev: a runtime in dev mode joins the session; agents drive it, its input is reported', { skip }, async () => {
+  const dir = await fixture();
+  const server = await dev({ entry: path.join(dir, 'app.jsx'), port: 0, log: () => {} });
+  const origin = `http://127.0.0.1:${server.port}`;
+  const M = await loadModule();
+  if (!M._jsui_set_dev_session) {
+    await server.close();
+    if (process.env.JSUI_HEADLESS_STRICT) throw new Error('jsui.wasm has no jsui_set_dev_session');
+    return;  // a jsui.wasm older than the session client
+  }
+  const rt = new LiveApp(M, origin + '/bundle.js', { width: 640, height: 360, devSession: 'wasm test' });
+  try {
+    const app = await attach(origin);
+    await app.idle(5000);
+    assert.equal(app.runtime.label, 'wasm test (web)');
+    assert.equal(app.width, 640);
+    assert.equal((await app.find('#title')).text, 'Menu');
+
+    await app.setState('gold', 42);
+    await app.idle(2000);
+    assert.equal((await app.find('#gold')).text, '42 gold');
+    assert.equal(await app.getState('gold'), 42);
+    await app.press('Down');
+    assert.ok((await app.find('#buy')).focused);
+    await app.click('#play');
+    assert.deepEqual(app.messages.map((m) => m.name), ['play']);
+    assert.equal(pngSize(await app.screenshot()).width, 640);
+
+    // Input from the host itself (the person) is reported as theirs.
+    const play = await app.get('#play');
+    const x = play.rect.x + 5;
+    const y = play.rect.y + 5;
+    M._jsui_send_mouse_button(rt.rt, x, y, 0, 1, 0);
+    await rt.wait(50);
+    M._jsui_send_mouse_button(rt.rt, x, y, 0, 0, 0);
+    let feed = [];
+    for (let i = 0; i < 50 && !feed.some((e) => e.who === 'user' && e.kind === 'click'); i++) {
+      await app.frame();
+      feed = await app.activity(0);
+    }
+    const click = feed.find((e) => e.who === 'user' && e.kind === 'click');
+    assert.ok(click, JSON.stringify(feed));
+    assert.equal(click.client, 'wasm test (web)');
+    assert.deepEqual([click.x, click.y, click.consumed], [Math.round(x), Math.round(y), true]);
+    // The agent's own clicks are not.
+    assert.equal(feed.filter((e) => e.who === 'user' && e.kind === 'click').length, 1);
+    assert.ok(feed.some((e) => e.who === 'ui' && e.kind === 'message' && e.name === 'play'));
+
+    // The CLI drives it the same way.
+    const words = await exec(process.execPath, [BIN, 'run', '--attach', origin, 'patch', 'settings', 'value={"volume":0.25}', 'expectState', 'settings', 'match={"volume":0.25}']);
+    assert.ok(JSON.parse(words.stdout.trim().split('\n').at(-1)).ok, words.stdout);
+  } finally {
+    await server.close();
+    rt.close();
   }
 });

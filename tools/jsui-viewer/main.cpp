@@ -235,6 +235,7 @@ class Viewer {
         },
         [](void*, const char* text) { SDL_SetClipboardText(text); }, this);
     updateViewport();
+    jsui_set_dev_session(rt_, "jsui-viewer", 1);  // dev mode: joins `jsui dev`'s shared session
     jsui_load_bundle_url(rt_, opt_.bundle.c_str());
     SDL_StartTextInput();
 

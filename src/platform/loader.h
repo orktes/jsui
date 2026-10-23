@@ -44,6 +44,9 @@ struct LoadRequest {
   HeaderList headers;
   std::vector<uint8_t> body;
   int timeoutMs = 0;  // 0: default (30 s for http)
+  // Not counted by pending() / busy() (jsui_pending_loads): a long poll the
+  // runtime keeps open in the background (dev session).
+  bool background = false;
 };
 
 class ResourceLoader {
@@ -70,7 +73,7 @@ class ResourceLoader {
   // Drops callbacks of in-flight requests (on reload / destroy).
   void cancelAll();
   bool busy() const;
-  size_t pending() const { return pending_.size(); }
+  size_t pending() const { return pending_.size() - background_; }
 
   // Decodes a data: URI (base64 or percent-encoded). Exposed for tests.
   static bool decodeDataUri(const std::string& uri, Resource* out);
@@ -85,8 +88,11 @@ class ResourceLoader {
   struct PendingLoad {
     Callback cb;
     std::string url;
+    bool background = false;
   };
   std::unordered_map<uint64_t, PendingLoad> pending_;
+  size_t background_ = 0;  // background entries of pending_
+  void erasePending(std::unordered_map<uint64_t, PendingLoad>::iterator it);
   mutable std::mutex mutex_;
   std::vector<std::pair<uint64_t, Resource>> done_, doneScratch_;
   struct Worker;

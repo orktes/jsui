@@ -676,6 +676,9 @@ export class JsuiAudio {
     this._muted = false;
     this.backend = null;
     this.handler = null;
+    // Where reports go instead of the host's runtime (worker mode: posted to
+    // the worker that runs it).
+    this.sink = null;
     if (options === false) this.mode = 'off';
     else if (typeof options === 'function') {
       this.mode = 'custom';
@@ -764,6 +767,10 @@ export class JsuiAudio {
     this._flushing = false;
     const q = this._queue;
     this._queue = [];
+    if (this.sink) {
+      if (q.length) this.sink(q);
+      return;
+    }
     const h = this.host, M = h.module;
     if (h._destroyed || !h.rt) return;
     for (const r of q) {

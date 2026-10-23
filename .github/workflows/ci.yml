@@ -491,6 +491,11 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json', 'web/package.json') }}
+      # The workspace install gives the browser tests @orktes/jsui-cli, which
+      # builds the interactions showcase for the WebGPU perf guards (steady
+      # frames, raster cache, layers); without it those tests skip.
+      - name: Install workspace packages
+        run: npm ci --no-audit --no-fund
       - name: Browser tests against the WebGPU module (Playwright / Chromium)
         working-directory: web
         run: |
@@ -503,7 +508,6 @@ jobs:
           path: web/dist-gpu
       - name: Site (build + smoke test on WebGPU)
         run: |
-          npm ci --no-audit --no-fund
           node site/scripts/build.mjs --wasm web/dist-gpu --wasm-webgl web/dist-gpu --wasm-gpu web/dist-gpu
           SITE_WEBGPU=1 SITE_EXPECT_RENDERER=webgpu node site/test/smoke.mjs
       - uses: actions/upload-artifact@v4

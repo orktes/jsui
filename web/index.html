@@ -37,6 +37,7 @@
         canvas: document.getElementById('ui'),
         bundleUrl: q.get('bundle') || './demo/bundle.js',
         devMode: q.get('dev') === '1',
+        devName: q.get('devName') || undefined,  // its name in jsui dev's shared session
         renderer: q.get('renderer') || 'auto',
         moduleUrl: q.get('module') ? new URL(q.get('module'), location.href) : undefined,
       });

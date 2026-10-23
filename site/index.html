@@ -4,8 +4,37 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>JSUI · React Native game UI, everywhere</title>
-  <meta name="description" content="JSUI is an embeddable game UI runtime: write React Native, ship it inside your engine. This whole site is rendered by JSUI compiled to WebAssembly.">
+  <meta name="description" content="JSUI is an open-source, embeddable game UI runtime: write React Native, ship it inside Godot, your own C++ engine or the browser (WebAssembly). GPU rendering on WebGPU, WebGL, Metal and Vulkan, gamepad focus, hot updates and a coding agent skill.">
+  <meta name="keywords" content="game UI, React Native, embeddable UI runtime, Godot UI, WebAssembly UI, Skia, Yoga, QuickJS, gamepad navigation, HMR, coding agent skill">
   <meta name="theme-color" content="#05070f">
+  <link rel="canonical" href="https://orktes.github.io/jsui/">
+  <link rel="alternate" type="text/plain" title="llms.txt" href="llms.txt">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="JSUI">
+  <meta property="og:title" content="JSUI: game UI in React Native, rendered everywhere">
+  <meta property="og:description" content="An embeddable UI runtime for games. Write React Native, ship it in Godot, a C/C++ engine or the browser. This whole site is rendered by JSUI's WebAssembly build into one canvas.">
+  <meta property="og:url" content="https://orktes.github.io/jsui/">
+  <meta property="og:image" content="https://orktes.github.io/jsui/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="The JSUI showcase home page: game UI in React Native, rendered everywhere">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="JSUI: game UI in React Native, rendered everywhere">
+  <meta name="twitter:description" content="An embeddable UI runtime for games. Write React Native, ship it in Godot, a C/C++ engine or the browser.">
+  <meta name="twitter:image" content="https://orktes.github.io/jsui/og.png">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareSourceCode",
+    "name": "JSUI",
+    "description": "An embeddable game UI runtime: React Native components run on QuickJS, laid out by Yoga and painted by Skia, embedded through a small C API in Godot, C/C++ engines and the browser via WebAssembly.",
+    "url": "https://orktes.github.io/jsui/",
+    "codeRepository": "https://github.com/orktes/jsui",
+    "programmingLanguage": ["C++", "JavaScript"],
+    "runtimePlatform": ["WebAssembly", "Godot 4", "macOS", "Linux"],
+    "license": "https://github.com/orktes/jsui/blob/main/LICENSE"
+  }
+  </script>
   <style>
     :root { color-scheme: dark; }
     html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #05070f; }
@@ -21,6 +50,11 @@
     #splash .bar b { display: block; height: 100%; width: 30%; background: #f2c35b; animation: slide 1.1s ease-in-out infinite; }
     @keyframes pulse { 50% { transform: scale(.92); opacity: .8; } }
     @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(330%); } }
+    /* Crawlable, screen-reader-readable description of the site. The UI itself is drawn
+       into the canvas, so this text mirrors it; visible only without JavaScript. Its links
+       are out of the Tab order (tabindex -1): Tab moves focus inside the canvas UI. */
+    .sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0);
+          clip-path: inset(50%); white-space: nowrap; border: 0; }
     #err { position: fixed; left: 12px; right: 12px; bottom: 12px; max-height: 40vh; overflow: auto; padding: 10px 12px;
            border-radius: 8px; background: #3d1214ee; color: #ffdcd7; font: 12px/1.4 ui-monospace, monospace;
            white-space: pre-wrap; display: none; z-index: 2; }
@@ -30,14 +64,98 @@
   <canvas id="ui" aria-label="JSUI showcase (rendered by the JSUI WebAssembly runtime)"></canvas>
   <div id="splash"><div class="mark"><i></i></div><div>Booting the JSUI runtime…</div><div class="bar"><b></b></div></div>
   <div id="err"></div>
-  <noscript><p style="color:#eef2ff;font:16px system-ui;padding:24px">This site is rendered by a WebAssembly UI runtime and needs JavaScript.</p></noscript>
+  <main id="about" class="sr">
+    <h1>JSUI: game UI in React Native, rendered everywhere</h1>
+    <p>JSUI is an open-source (MIT), embeddable UI runtime for games. Write ordinary React Native
+      (<code>import { View, Text } from 'react-native'</code>), then ship it inside your engine through a small C API:
+      Godot 4, your own C or C++ renderer, or the browser via WebAssembly. JavaScript runs on QuickJS, Yoga lays out the
+      views and Skia paints them. This whole site is rendered by JSUI's WebAssembly build into one canvas, with no DOM
+      and no CSS in the UI.</p>
+    <p>Source code, documentation and issues: <a tabindex="-1" href="https://github.com/orktes/jsui">github.com/orktes/jsui</a>.
+      A summary for AI assistants: <a tabindex="-1" href="llms.txt">llms.txt</a>.</p>
+
+    <h2>Runs in</h2>
+    <ul>
+      <li><strong>Godot 4</strong>: the <code>JsuiView</code> GDExtension, rendering on Godot's own Vulkan or Metal device.</li>
+      <li><strong>The web</strong>: the WebAssembly build with <code>@orktes/jsui-web</code>, on WebGPU, WebGL or the CPU.</li>
+      <li><strong>iOS</strong>: a UIKit host rendering with Skia on Metal, with touch, keyboards and game controllers.</li>
+      <li><strong>Custom engines</strong>: any C or C++ engine through the C API.</li>
+      <li><strong>Standalone</strong>: <code>jsui-viewer</code>, a windowed SDL2 host with dev mode.</li>
+    </ul>
+
+    <h2>Features</h2>
+    <ul>
+      <li><strong>Built for coding agents.</strong> An agent skill (<code>npx @orktes/jsui-cli skill install</code>, or the
+        Claude Code plugin: <code>/plugin marketplace add orktes/jsui</code>), headless <code>jsui screenshot</code>,
+        <code>jsui inspect</code> and <code>jsui run</code> that run the WebAssembly runtime in Node with no browser, and
+        <code>jsui dev --shared</code>: one live app that a person and agents use together.</li>
+      <li><strong>Hot updates on every edit.</strong> <code>jsui dev</code> serves the bundle and React Fast Refresh updates
+        the running UI in place, keeping component state, with an error overlay for build and runtime errors.</li>
+      <li><strong>GPU rendering everywhere.</strong> Skia Graphite on WebGPU, Metal and Vulkan, Skia on WebGL2 and OpenGL,
+        and a CPU raster fallback that repaints only damaged rectangles.</li>
+      <li><strong>Embeds in your engine.</strong> A small C API (<code>include/jsui/jsui.h</code>): feed it mouse, keyboard,
+        touch and gamepad input, tick it, and take pixels or let it draw into your GPU target. Input the UI does not consume
+        passes through to the game. A Godot 4 GDExtension (<code>JsuiView</code>) renders on Godot's own Vulkan or Metal
+        device.</li>
+      <li><strong>Gamepad-first focus.</strong> Spatial D-pad and stick navigation, focus scopes, focus-visible rings, Tab
+        order and hold-to-repeat, built into the runtime.</li>
+      <li><strong>Native animation.</strong> <code>useNativeDriver: true</code> runs springs, timings, decays and
+        interpolations in C++, and Lottie animations play natively on Skia's Skottie with lottie-react-native's API.</li>
+      <li><strong>Custom SkSL shaders.</strong> <code>ShaderView</code> paints views with your own Skia runtime effects,
+        with Animated uniforms and post-processing of a view's children.</li>
+      <li><strong>Host textures and video.</strong> <code>HostTexture</code> shows textures the game owns (render targets,
+        cameras, decoded video) in place; this site plays Big Buck Bunny through it.</li>
+      <li><strong>Game data.</strong> State shared by key (<code>useHostState</code>), promise-based calls between the UI
+        and the game (<code>Host.call</code>), and per-frame typed arrays (<code>jsui_set_buffer</code>,
+        <code>useHostBufferValue</code>) that Animated views follow with no JavaScript per frame.</li>
+      <li><strong>The React Native API.</strong> View, Text, Image, ScrollView, FlatList, SectionList, TextInput, Modal,
+        Pressable and StyleSheet; text shaping with HarfBuzz and ICU and bidirectional text; reference tests compare every
+        example pixel by pixel with react-native-web in Chrome.</li>
+    </ul>
+
+    <h2>Get started</h2>
+    <pre><code>npx @orktes/jsui-cli skill install        # add the JSUI agent skill to your project
+npm install --save-dev @orktes/jsui-cli   # the CLI, @orktes/jsui-react and the headless runtime
+npx jsui dev src/app.jsx                  # dev server with hot updates
+npx jsui build src/app.jsx -o dist/bundle.js
+npx jsui screenshot src/app.jsx -o shot.png</code></pre>
+    <p>npm packages:
+      <a tabindex="-1" href="https://www.npmjs.com/package/@orktes/jsui-react">@orktes/jsui-react</a> (the React Native API),
+      <a tabindex="-1" href="https://www.npmjs.com/package/@orktes/jsui-cli">@orktes/jsui-cli</a> (build, dev server, headless tools and
+      the agent skill) and
+      <a tabindex="-1" href="https://www.npmjs.com/package/@orktes/jsui-web">@orktes/jsui-web</a> (the browser host and its WebAssembly
+      modules).</p>
+
+    <h2>On this site</h2>
+    <ul>
+      <li><a tabindex="-1" href="#/screens">Game screens</a>: main menu, HUD, inventory, battle pass, scoreboard, dialogue, settings,
+        loading, notifications, cinematic, victory and rift screens, each demonstrating a runtime feature.</li>
+      <li><a tabindex="-1" href="#/interactions">Interactions</a>, <a tabindex="-1" href="#/input">input and gamepad focus</a> and
+        <a tabindex="-1" href="#/motion">motion</a>.</li>
+      <li><a tabindex="-1" href="#/playground">Live code playground</a>: edit React Native code and see JSUI render it.</li>
+      <li><a tabindex="-1" href="#/embed">Embedding guide</a>: Godot, the C API, the web host and dev mode.</li>
+    </ul>
+  </main>
+  <noscript>
+    <style>
+      html, body { overflow: auto; height: auto; }
+      #ui, #splash { display: none; }
+      #about.sr { position: static; width: auto; height: auto; margin: 0 auto; overflow: visible; clip: auto; clip-path: none;
+                  white-space: normal; max-width: 760px; padding: 8px 20px 40px; color: #a3aecb; font: 16px/1.6 system-ui, sans-serif; }
+      #about h1, #about h2, #about strong { color: #eef2ff; }
+      #about a { color: #4fd1ff; }
+      #about pre { overflow: auto; padding: 12px; border-radius: 8px; background: #0b1020; color: #d6def5; }
+    </style>
+    <p style="color:#f2c35b;font:16px system-ui;padding:24px 20px 0;max-width:760px;margin:0 auto">The interactive site is rendered by a WebAssembly UI runtime and needs JavaScript.</p>
+  </noscript>
   <script type="module">
     import { createJsui } from './jsui-web.js';
 
     // Query options: ?renderer=auto|gpu|webgpu|webgl|cpu|2d (default: gpu,
     // i.e. Skia on WebGPU, else on WebGL, else the CPU raster, when a GPU
     // module is deployed), ?stats=1 logs frame timings, ?dev=<bundle url>
-    // runs a `jsui dev` bundle with live reload inside this page.
+    // runs a `jsui dev` bundle with live reload inside this page, ?worker=1
+    // runs the runtime and its rendering in a Worker (worker mode).
     const q = new URLSearchParams(location.search);
     const err = document.getElementById('err');
     const splash = document.getElementById('splash');
@@ -62,6 +180,7 @@
         moduleVersions: modules.versions,
         // Big canvases at 3x cost a lot of fill for little gain.
         pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
+        worker: q.get('worker') === '1',
       });
       window.jsui = jsui;
       jsui.on('error', showError);
@@ -74,6 +193,7 @@
         else if (name === 'title') document.title = data;
         else if (name === 'cinematic') cinematic(data);
         else if (name === 'sound') sound.setMuted(data.muted);
+        else if (name === 'copy') navigator.clipboard?.writeText(String(data)).catch(() => {});
       });
       const sound = soundSwitch(jsui);
       const cinematic = trailerPlayer(jsui, { autoplay: q.get('autoplay') !== '0' });

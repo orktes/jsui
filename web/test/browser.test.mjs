@@ -95,7 +95,15 @@ const browser = await chromium.launch({
 class Skip extends Error {}
 const skip = (why, soft = false) => { const e = new Skip(why); e.soft = soft; throw e; };
 const tests = [];
-const test = (name, fn, ctxOpts = {}) => tests.push({ name, fn, ctxOpts });
+// Tests registered with { worker: true } run twice: as written, and as
+// 'worker: <name>' with createJsui({ worker: true }) (web/jsui-worker.js:
+// the runtime and its rendering in a Worker). mount(), spy() and the other
+// helpers follow the running test's mode (WORKER).
+let WORKER = false;
+const test = (name, fn, ctxOpts = {}, { worker = false } = {}) => {
+  tests.push({ name, fn, ctxOpts, worker: false });
+  if (worker) tests.push({ name: `worker: ${name}`, fn, ctxOpts, worker: true });
+};
 const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
 const near = (px, want, tol = 3) => want.every((v, i) => Math.abs(px[i] - v) <= tol);
 const fmt = (px) => `(${Array.from(px).join(',')})`;
@@ -119,8 +127,8 @@ async function newPage(ctxOpts) {
 // check the same path whichever module is under test; GPU tests pass
 // renderer 'webgl' / 'webgpu' / 'auto' explicitly.
 async function mount(page, opts = {}) {
-  return page.evaluate(async ({ id, w, h, opts, dist }) => {
-    opts = { renderer: 'cpu', moduleUrl: new URL(`../${dist}/jsui.js`, location.href), ...opts };
+  const info = await page.evaluate(async ({ id, w, h, opts, dist, worker }) => {
+    opts = { renderer: 'cpu', moduleUrl: new URL(`../${dist}/jsui.js`, location.href), worker, ...opts };
     const c = document.createElement('canvas');
     c.id = id;
     c.style.width = `${w}px`;
@@ -135,8 +143,11 @@ async function mount(page, opts = {}) {
     if (!opts.expectError) {
       await Promise.race([jsui.whenIdle(), new Promise((r) => setTimeout(r, 5000))]);
     }
-    return { renderer: jsui.renderer, pw: jsui.pixelWidth, ph: jsui.pixelHeight };
-  }, { id: opts.id ?? 'ui', w: opts.width ?? 320, h: opts.height ?? 200, opts: opts.jsui ?? {}, dist: DIST });
+    return { renderer: jsui.renderer, pw: jsui.pixelWidth, ph: jsui.pixelHeight, worker: !!jsui.worker };
+  }, { id: opts.id ?? 'ui', w: opts.width ?? 320, h: opts.height ?? 200, opts: opts.jsui ?? {}, dist: DIST, worker: WORKER });
+  // Worker mode must not have fallen back to the main thread.
+  if ((opts.jsui?.worker ?? WORKER) && !info.worker) throw new Error('worker mode fell back to the main thread');
+  return info;
 }
 
 // Mounts with renderer 'webgl' (Skia Ganesh on WebGL); SKIPs when the module
@@ -192,8 +203,10 @@ async function screenPixels(page, sel, points) {
   }, { b64: png.toString('base64'), points });
 }
 
-// Wraps module exports to record calls (decoding string args where named).
+// Wraps module exports to record calls (decoding string args where named);
+// in worker mode the worker's (ProxyView._debug).
 async function spy(page, id = 'ui') {
+  if (WORKER) return page.evaluate((id) => window.hosts[id]._debug('spy'), id);
   await page.evaluate((id) => {
     const jsui = window.hosts[id], M = jsui.module;
     const calls = window.calls = [];
@@ -213,7 +226,13 @@ async function spy(page, id = 'ui') {
     }
   }, id);
 }
-const takeCalls = (page) => page.evaluate(() => window.calls.splice(0));
+const takeCalls = (page, id = 'ui') => page.evaluate(({ id, worker }) => (worker ? window.hosts[id]._debug('calls')
+  : window.calls.splice(0)), { id, worker: WORKER });
+// Resolves once runtime `id` had a frame with nothing left to load or paint
+// (in worker mode: input posted so far was applied, its events came back).
+const idle = (page, id = 'ui') => page.evaluate((id) => window.hosts[id].whenIdle(), id);
+// Waits for `fn(arg)` in the page to be truthy.
+const until = (page, fn, arg, timeout = 3000) => page.waitForFunction(fn, arg, { timeout, polling: 10 });
 
 const BANDS = [[10, 25], [10, 75], [10, 125], [10, 175]];
 const RED = [255, 0, 0, 255], GREEN = [0, 255, 0, 255], BLUE = [0, 0, 255, 255], HALF_RED = [255, 127, 127, 255];
@@ -226,11 +245,11 @@ for (const renderer of ['cpu', '2d']) {
     assert(info.pw === 320 && info.ph === 200, `backing store ${info.pw}x${info.ph}`);
     const px = await screenPixels(page, '#ui', BANDS);
     [RED, GREEN, BLUE, HALF_RED].forEach((want, i) => assert(near(px[i], want), `band ${i}: ${fmt(px[i])} want ${fmt(want)}`));
-    const raw = await page.evaluate(() => { const p = window.hosts.ui.readPixels(); const o = (175 * p.width + 10) * 4; return Array.from(p.data.slice(o, o + 4)); });
+    const raw = await page.evaluate(async () => { const p = await window.hosts.ui.readPixelsAsync(); const o = (175 * p.width + 10) * 4; return Array.from(p.data.slice(o, o + 4)); });
     assert(near(raw, [128, 0, 0, 128], 1), `premultiplied frame ${fmt(raw)}`);
     const below = await page.evaluate(() => getComputedStyle(document.getElementById('ui')).cursor);
     assert(below === 'default', `cursor ${below}`);
-  });
+  }, {}, { worker: true });
 }
 
 test('devicePixelRatio 2: backing store and 1:1 blit', async ({ page }) => {
@@ -240,7 +259,7 @@ test('devicePixelRatio 2: backing store and 1:1 blit', async ({ page }) => {
   assert(near(px[0], RED) && near(px[1], GREEN), `edge at y=100: ${fmt(px[0])} ${fmt(px[1])}`);
   assert(near(px[2], GREEN) && near(px[3], BLUE), `edge at y=200: ${fmt(px[2])} ${fmt(px[3])}`);
   assert(near(px[4], RED), `x=600: ${fmt(px[4])}`);
-}, { deviceScaleFactor: 2 });
+}, { deviceScaleFactor: 2 }, { worker: true });
 
 test('canvas resize updates the viewport without stretching', async ({ page }) => {
   await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
@@ -251,7 +270,7 @@ test('canvas resize updates the viewport without stretching', async ({ page }) =
   const px = await screenPixels(page, '#ui', [[10, 25], [10, 75], [10, 250], [380, 25]]);
   assert(near(px[0], RED) && near(px[1], GREEN), `bands moved/stretched: ${fmt(px[0])} ${fmt(px[1])}`);
   assert(near(px[2], [255, 255, 255, 255]) && near(px[3], [255, 255, 255, 255]), `outside bands: ${fmt(px[2])} ${fmt(px[3])}`);
-});
+}, {}, { worker: true });
 
 test('WebGL context loss and restore repaints', async ({ page }) => {
   await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
@@ -275,7 +294,7 @@ test('timers drive repaints', async ({ page }) => {
   await frames(page, 2);
   const [px] = await screenPixels(page, '#ui', [BANDS[2]]);
   assert(near(px, [255, 255, 0, 255]), `band 2 after timer: ${fmt(px)}`);
-});
+}, {}, { worker: true });
 
 test('profiling: getPerf() reports phase times and counters', async ({ page }) => {
   await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
@@ -283,10 +302,11 @@ test('profiling: getPerf() reports phase times and counters', async ({ page }) =
   const perf = await page.evaluate(async () => {
     const h = window.hosts.ui;
     h.setProfiling(true);
-    h.getPerf();  // reset
+    await h.getPerf();  // reset (a Promise in worker mode)
     h.postMessage('paint', { color: '#ff00ff' });
     for (let i = 0; i < 3; i++) await new Promise((r) => requestAnimationFrame(r));
-    const p = h.getPerf();
+    await h.whenIdle();
+    const p = await h.getPerf();
     h.setProfiling(false);
     return p;
   });
@@ -294,7 +314,7 @@ test('profiling: getPerf() reports phase times and counters', async ({ page }) =
   const total = perf.js_us + perf.commit_us + perf.style_us + perf.layout_us + perf.paint_us + perf.gpu_submit_us +
     perf.other_us;
   assert(total > 0, `no time measured: ${JSON.stringify(perf)}`);
-});
+}, {}, { worker: true });
 
 test('host -> UI messages (jsui.postMessage)', async ({ page }) => {
   await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
@@ -303,7 +323,7 @@ test('host -> UI messages (jsui.postMessage)', async ({ page }) => {
   const [px] = await screenPixels(page, '#ui', [BANDS[0]]);
   if (near(px, RED)) skip('engine hostMessage() is a skeleton stub');
   assert(near(px, [255, 0, 255, 255]), `band 0 after message: ${fmt(px)}`);
-});
+}, {}, { worker: true });
 
 test('UI -> host messages with UTF-8 payload', async ({ page }) => {
   await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
@@ -312,7 +332,7 @@ test('UI -> host messages with UTF-8 payload', async ({ page }) => {
   if (!msgs.length) skip('engine __jsui_native.postMessage not implemented yet');
   const ready = msgs.find(([n]) => n === 'ready');
   assert(ready && ready[1].text === 'héllo ✓ 日本' && ready[1].bands === 4, `messages ${JSON.stringify(msgs)}`);
-});
+}, {}, { worker: true });
 
 test('pointer, wheel, keyboard and text input are forwarded', async ({ page }) => {
   await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
@@ -353,7 +373,7 @@ test('pointer, wheel, keyboard and text input are forwarded', async ({ page }) =
   calls = await takeCalls(page);
   has(([n, k, c, d]) => n === 'send_key' && c === 'KeyW' && d === 0, 'KeyW released on blur');
   await page.keyboard.up('KeyW');
-});
+}, {}, { worker: true });
 
 test('touch input is forwarded', async ({ page }) => {
   await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
@@ -364,7 +384,7 @@ test('touch input is forwarded', async ({ page }) => {
   const touches = calls.filter(([n]) => n === 'send_touch');
   assert(touches.length >= 2 && touches[0][2] === 0 && touches.at(-1)[2] === 2, `touch phases ${JSON.stringify(touches)}`);
   assert(touches[0][3] === 30 && touches[0][4] === 130, `touch pos ${JSON.stringify(touches[0])}`);
-}, { hasTouch: true });
+}, { hasTouch: true }, { worker: true });
 
 test('gamepad buttons / axes / connection are forwarded', async ({ page }) => {
   await page.evaluate(() => {
@@ -393,16 +413,17 @@ test('gamepad buttons / axes / connection are forwarded', async ({ page }) => {
     ['set_gamepad_connected', 0, 0, null],
   ];
   assert(JSON.stringify(calls) === JSON.stringify(want), `gamepad calls ${JSON.stringify(calls)}`);
-});
+}, {}, { worker: true });
 
 test('click reaches the UI and UI messages the host', async ({ page }) => {
   await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
   await page.mouse.click(100, 75);
   await frames(page, 3);
+  await idle(page);
   const [px] = await screenPixels(page, '#ui', [BANDS[1]]);
   if (near(px, GREEN)) skip('InputManager hit testing is a skeleton stub');
   assert(near(px, [255, 255, 255, 255]), `band 1 after click: ${fmt(px)}`);
-});
+}, {}, { worker: true });
 
 test('bundle errors are reported (404 and throwing bundle)', async ({ page }) => {
   await mount(page, { id: 'a', jsui: { bundleUrl: 'fixtures/missing.js', expectError: true } });
@@ -412,7 +433,7 @@ test('bundle errors are reported (404 and throwing bundle)', async ({ page }) =>
   assert(ea.some((e) => /failed to load bundle/.test(e) && /404/.test(e) && /fixtures\/missing\.js/.test(e)), `404 error: ${JSON.stringify(ea)}`);
   assert(eb.some((e) => /fixture exploded/.test(e)), `throw error: ${JSON.stringify(eb)}`);
   return { allowErrors: true };
-});
+}, {}, { worker: true });
 
 test('several runtimes on one page are independent', async ({ page }) => {
   await mount(page, { id: 'a', jsui: { bundleUrl: 'fixtures/bands.js' } });
@@ -426,7 +447,7 @@ test('several runtimes on one page are independent', async ({ page }) => {
   await frames(page, 2);
   const [p2] = await screenPixels(page, '#a', [BANDS[2]]);
   assert(near(p2, [255, 255, 0, 255]), `a keeps running after b destroyed: ${fmt(p2)}`);
-});
+}, {}, { worker: true });
 
 // UI audio on real Web Audio (web/jsui-audio.js): locked until a gesture
 // (one-shots end failed, loops wait), a click unlocks it, voices finish /
@@ -476,7 +497,7 @@ test('audio: autoplay lock, unlock by a click, voices end, preload, destroy', as
     return ctx.state;
   });
   assert(state === 'closed', `context closed with the last runtime: ${state}`);
-});
+}, {}, { worker: true });
 
 test('moduleVersions: only deployed modules are tried, jsui.js and jsui.wasm carry the version', async ({ page }) => {
   const requests = [];
@@ -495,7 +516,7 @@ test('bundleSource option and loadSource()', async ({ page }) => {
   await frames(page, 3);
   const [px] = await screenPixels(page, '#ui', [[10, 50]]);
   assert(near(px, [0, 128, 128, 255]), `bundleSource: ${fmt(px)}`);
-});
+}, {}, { worker: true });
 
 for (const renderer of ['auto', 'webgl', 'webgpu']) test(`create/destroy cycles: no heap growth, destroy during load is safe (${renderer})`, async ({ page }) => {
   const result = await page.evaluate(async ({ dist, renderer }) => {
@@ -1372,6 +1393,7 @@ test('passThrough: unhandled input reaches the page under the canvas', async ({ 
 
   await page.mouse.click(50, 25);  // the button
   await frames(page);
+  await idle(page);
   let r = await take();
   assert(r.press === 1 && r.game === '', `button click ${JSON.stringify(r)}`);
   const hot = await page.evaluate(() => document.getElementById('ui').style.pointerEvents);
@@ -1381,6 +1403,7 @@ test('passThrough: unhandled input reaches the page under the canvas', async ({ 
   await page.mouse.wheel(0, 100);
   await page.mouse.click(200, 150, { button: 'right' });
   await frames(page);
+  await idle(page);
   r = await take();
   const sorted = r.game.split(',').sort().join();
   assert(r.press === 0 && sorted === 'click,contextmenu,pointerdown,pointerdown,pointerup,pointerup,wheel',
@@ -1394,13 +1417,14 @@ test('passThrough: unhandled input reaches the page under the canvas', async ({ 
   await page.mouse.move(50, 25, { steps: 4 });
   await page.mouse.up();
   await frames(page);
+  await idle(page);
   r = await take();
   assert(r.press === 0 && r.game.startsWith('pointerdown') && r.game.includes('pointerup'), `game drag ${JSON.stringify(r)}`);
 
   // Unconsumed keys reach the page; the keyboard isn't taken by unhandled clicks.
   const focused = await page.evaluate(() => document.activeElement?.tagName);
   assert(focused !== 'TEXTAREA', `focus after a pass-through click: ${focused}`);
-});
+}, {}, { worker: true });
 
 // ---------------------------------------------------------------- surfaces
 // One runtime, several canvases (createSurface): own props, pixels, input,
@@ -1442,28 +1466,31 @@ test('surfaces: one runtime on several canvases', async ({ page }) => {
   await page.mouse.down();
   await page.mouse.up();
   await frames(page);
+  await idle(page);
   const press = await page.evaluate(() => window.hosts.ui.messages.filter(([n]) => n === 'press').map(([, d]) => d));
   assert(press.join() === String(made.plate), `press ${press}`);
 
   // New props repaint just that surface; destroy unmounts and drops the canvas createSurface made.
   await page.evaluate(() => window.surfaces.plate.setProps({ color: '#00ff00' }));
   await frames(page);
+  await idle(page);
   const [green] = await screenPixels(page, '#plate', [[60, 20]]);
   assert(near(green, GREEN), `plate after setProps ${fmt(green)}`);
   const after = await page.evaluate(async () => {
     window.surfaces.plate.destroy();
     await new Promise(requestAnimationFrame);
     const j = window.hosts.ui;
+    await j.whenIdle();
     return { stops: j.messages.filter(([n]) => n === 'stop').map(([, d]) => d), canvas: !!document.getElementById('plate'),
       count: j.surfaces.length };
   });
   assert(after.stops.join() === String(made.plate) && !after.canvas && after.count === 1, `destroy ${JSON.stringify(after)}`);
-});
+}, {}, { worker: true });
 
 test('surfaces: createJsui without a canvas, component picks the main app', async ({ page }) => {
-  const r = await page.evaluate(async (dist) => {
+  const r = await page.evaluate(async ({ dist, worker }) => {
     const j = await window.createJsui({ renderer: 'cpu', moduleUrl: new URL(`../${dist}/jsui.js`, location.href),
-      bundleUrl: 'fixtures/surfaces.js', component: 'Main', initialProps: { color: '#ff0000' } });
+      bundleUrl: 'fixtures/surfaces.js', component: 'Main', initialProps: { color: '#ff0000' }, worker });
     const msgs = [];
     j.on('message', (n, d) => msgs.push([n, d]));
     const c = document.createElement('canvas');
@@ -1472,13 +1499,14 @@ test('surfaces: createJsui without a canvas, component picks the main app', asyn
     document.body.appendChild(c);
     j.createSurface(c, { component: 'W', initialProps: { color: '#0000ff' }, renderer: 'cpu' });
     await Promise.race([j.whenIdle(), new Promise((res) => setTimeout(res, 3000))]);
-    return { msgs, renderer: j.renderer ?? null };
-  }, DIST);
+    return { msgs, renderer: j.renderer ?? null, worker: !!j.worker };
+  }, { dist: DIST, worker: WORKER });
+  assert(r.worker === WORKER, `worker mode ${r.worker}`);
   const runs = r.msgs.filter(([n]) => n === 'run').map(([, d]) => `${d.tag}:${d.appKey}`);
   assert(runs.includes('1:Main') && runs.some((s) => s.endsWith(':W')), `runs ${runs}`);
   const [px] = await screenPixels(page, '#w', [[25, 25]]);
   assert(near(px, BLUE), `widget ${fmt(px)}`);
-});
+}, {}, { worker: true });
 
 // Many GPU surfaces: more canvases than the browser's ~16 live WebGL contexts,
 // all drawn through the runtime's shared GPU context (one offscreen WebGL
@@ -1572,10 +1600,297 @@ for (const mode of ['webgl', 'webgpu']) {
   });
 }
 
+// ------------------------------------------------- game data, textures, scroll
+// Host API round trips that return Promises in worker mode (awaited here in
+// both modes).
+test('game data and calls: state, frame data, callUi, Host.call', async ({ page }) => {
+  await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js' } });
+  const r = await page.evaluate(async () => {
+    const j = window.hosts.ui, out = {};
+    const message = async (name) => {
+      for (let i = 0; i < 200; i++) {
+        const m = j.messages.find(([n]) => n === name);
+        if (m) return m[1];
+        await new Promise((res) => setTimeout(res, 10));
+      }
+      return 'timeout';
+    };
+    out.set1 = await j.setState('k', { a: 1 });
+    out.set2 = await j.setState('k', { a: 1 });
+    out.patch = await j.patchState('k', { b: 2 });
+    out.get = await j.getState('k');
+    out.missing = await j.getState('nope');
+    out.buf = await j.setBuffer('b', Float32Array.of(1, 2, 3));
+    const m = j.mapBuffer('b', Float32Array, 3);
+    out.mapped = Array.from(m);
+    m[1] = 5;
+    out.commit = await j.commitBuffer('b');
+    j.postMessage('buf');
+    out.seen = await message('buf');
+    j.handle('host.greet', (a) => `hi ${a.who}`);
+    j.postMessage('greet', { who: 'ui' });
+    out.sum = await j.callUi('ui.add', { a: 2, b: 3 });
+    try { await j.callUi('ui.nope', {}); } catch (e) { out.err = [e.name, e.message]; }
+    out.greeted = await message('greeted');
+    out.removed = await j.removeBuffer('b');
+    out.removedAgain = await j.removeBuffer('b');
+    return out;
+  });
+  const want = { set1: true, set2: false, patch: true, get: { a: 1, b: 2 }, missing: undefined, buf: true, mapped: [1, 2, 3],
+    commit: true, seen: [1, 5, 3], sum: 5, removed: true, removedAgain: false };
+  for (const [k, v] of Object.entries(want)) assert(JSON.stringify(r[k]) === JSON.stringify(v), `${k}: ${JSON.stringify(r[k])}, want ${JSON.stringify(v)}`);
+  assert(r.err?.[0] === 'UiCallError' && /ui\.nope/.test(r.err[1]), `callUi rejection ${JSON.stringify(r.err)}`);
+  assert(r.greeted?.ok && JSON.parse(r.greeted.payload) === 'hi ui', `Host.call ${JSON.stringify(r.greeted)}`);
+}, {}, { worker: true });
+
+// Host textures from the page's sources (worker mode: converted here, sent
+// to the worker; bindVideo captures VideoFrames here).
+for (const renderer of ['cpu', 'webgpu']) test(`host textures: ImageData, canvas, raw pixels, a bound video (${renderer})`, async ({ page }) => {
+  const info = await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js', renderer } });
+  if (renderer === 'webgpu') skipNoBackend('webgpu', info.renderer);
+  const at = async () => {
+    await frames(page, 2);
+    await idle(page);
+    return (await screenPixels(page, '#ui', [[50, 50]]))[0];
+  };
+  const set = (what) => page.evaluate(async (what) => {
+    const j = window.hosts.ui;
+    if (what === 'imagedata') {
+      const d = new ImageData(4, 4);
+      for (let i = 0; i < d.data.length; i += 4) d.data.set([255, 0, 0, 255], i);
+      return j.setTexture('tex', d);
+    }
+    if (what === 'canvas') {
+      const c = document.createElement('canvas');
+      c.width = c.height = 8;
+      const g = c.getContext('2d');
+      g.fillStyle = '#00ff00';
+      g.fillRect(0, 0, 8, 8);
+      return j.setTexture('tex', c);
+    }
+    if (what === 'raw') {
+      const data = new Uint8Array(2 * 2 * 4);
+      for (let i = 0; i < data.length; i += 4) data.set([0, 0, 255, 255], i);
+      return j.setTexture('tex', { data, width: 2, height: 2 });
+    }
+    return null;
+  }, what);
+  let ok = await set('imagedata');
+  assert(ok === true, `setTexture(ImageData): ${ok}`);
+  let px = await at();
+  assert(near(px, RED), `ImageData texture ${fmt(px)}`);
+  const backend = await page.evaluate(() => window.hosts.ui.textureBackend);
+  assert(backend === (renderer === 'webgpu' ? 'webgpu' : 'pixels'), `textureBackend ${backend}`);
+  ok = await set('canvas');
+  assert(ok === true, `setTexture(canvas): ${ok}`);
+  px = await at();
+  assert(near(px, GREEN), `canvas texture ${fmt(px)}`);
+  ok = await set('raw');
+  assert(ok === true, `setTexture(raw pixels): ${ok}`);
+  px = await at();
+  assert(near(px, BLUE), `raw pixel texture ${fmt(px)}`);
+  // A <video> playing a canvas' stream, bound with bindVideo.
+  const state = await page.evaluate(async () => {
+    const c = document.createElement('canvas');
+    c.width = c.height = 32;
+    const g = c.getContext('2d');
+    let n = 0;
+    const paint = () => { g.fillStyle = n++ % 2 ? '#ffff00' : '#ffff01'; g.fillRect(0, 0, 32, 32); };
+    paint();
+    window.__paint = setInterval(paint, 20);
+    const v = document.createElement('video');
+    Object.assign(v, { muted: true, playsInline: true, srcObject: c.captureStream(30) });
+    Object.assign(v.style, { position: 'fixed', left: '0px', top: '300px', width: '4px', height: '4px' });
+    document.body.appendChild(v);
+    try { await v.play(); } catch (e) { return `play: ${e}`; }
+    for (let i = 0; i < 100 && v.readyState < 2; i++) await new Promise((r) => setTimeout(r, 20));
+    window.__unbind = window.hosts.ui.bindVideo('tex', v);
+    await new Promise((r) => setTimeout(r, 300));
+    return v.readyState;
+  });
+  if (typeof state === 'string' || state < 2) skip(`no video playback in this browser (${state})`, true);
+  px = await at();
+  assert(near(px, [255, 255, 0, 255], 24), `video texture ${fmt(px)}`);
+  ok = await page.evaluate(() => { clearInterval(window.__paint); return window.hosts.ui.removeTexture('tex'); });
+  assert(ok === true, `removeTexture: ${ok}`);
+  px = await at();
+  assert(near(px, [255, 255, 255, 255]), `after removeTexture ${fmt(px)}`);
+}, {}, { worker: true });
+
+// The wheel scrolls a ScrollView and a click lands on the row under it.
+// Worker mode: also how long after an input the page's hit map shows its
+// effect (the pass-through / preventDefault answers come from it).
+test('scroll: the wheel scrolls a ScrollView, clicks land on the scrolled rows', async ({ page }) => {
+  await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js' } });
+  const hits = await page.evaluate(() => [130, 50, 335].map((x) => window.hosts.ui.hitTest(x, 10)));
+  assert(hits.join() === '3,0,0', `hitTest over a row, the texture, nothing: ${hits}`);
+  await page.mouse.move(200, 100);
+  await page.mouse.wheel(0, 120);
+  await frames(page, 3);
+  await idle(page);
+  let [px] = await screenPixels(page, '#ui', [[130, 10]]);
+  assert(near(px, BLUE), `row 3 after scrolling 120px: ${fmt(px)}`);
+  await page.mouse.click(200, 10);
+  await frames(page, 2);
+  await idle(page);
+  let rows = await page.evaluate(() => window.hosts.ui.messages.filter(([n]) => n === 'row').map(([, i]) => i));
+  assert(rows.join() === '3', `clicked rows ${rows}`);
+  // 30 more wheel steps of 10px, one per ~frame, each timed until the page's
+  // hit map moved (worker mode).
+  const r = await page.evaluate(async () => {
+    const j = window.hosts.ui, c = j.canvas, box = c.getBoundingClientRect();
+    const waits = [];
+    // A task yield that lets the hit map's message in (setTimeout(0) is
+    // clamped to 4 ms after a few nested calls); one channel, reused.
+    const ch = new MessageChannel();
+    let wake = null;
+    ch.port1.onmessage = () => wake?.();
+    const yieldTask = () => new Promise((res) => {
+      wake = res;
+      ch.port2.postMessage(0);
+    });
+    if (j.hitMapStats) {  // count from here
+      for (const k of ['latency', 'transit']) j.hitMapStats[k] = { n: 0, mean: 0, max: 0, samples: [] };
+    }
+    for (let i = 0; i < 30; i++) {
+      const before = j.hitMapStats?.updates ?? 0, t0 = performance.now();
+      c.dispatchEvent(new WheelEvent('wheel', { clientX: box.left + 200, clientY: box.top + 100, deltaY: 10,
+        bubbles: true, cancelable: true }));
+      if (j.hitMapStats) {
+        while (j.hitMapStats.updates === before && performance.now() - t0 < 1000) await yieldTask();
+        waits.push(performance.now() - t0);
+      }
+      await new Promise(requestAnimationFrame);
+    }
+    ch.port1.close();
+    await j.whenIdle();
+    const s = j.hitMapStats;
+    const pct = (a, p) => { const v = [...a].sort((x, y) => x - y); return v[Math.min(v.length - 1, Math.floor(p * v.length))]; };
+    return s && { waits, p50: pct(waits, 0.5), p95: pct(waits, 0.95), max: Math.max(...waits),
+      updates: s.updates, regions: s.regions,
+      latency: { p50: pct(s.latency.samples, 0.5), p95: pct(s.latency.samples, 0.95), max: s.latency.max },
+      transit: { mean: s.transit.mean, max: s.transit.max }, misses: s.misses, lookups: s.lookups };
+  });
+  await page.mouse.click(200, 10);
+  await frames(page, 2);
+  await idle(page);
+  rows = await page.evaluate(() => window.hosts.ui.messages.filter(([n]) => n === 'row').map(([, i]) => i));
+  assert(rows.join() === '3,10', `clicked rows after 420px ${rows}`);
+  [px] = await screenPixels(page, '#ui', [[130, 10]]);
+  assert(near(px, GREEN), `row 10 after scrolling 420px: ${fmt(px)}`);
+  if (r) {
+    const f = (x) => x.toFixed(1);
+    console.log(`      hit map: input -> page has the new map: median ${f(r.p50)} ms, p95 ${f(r.p95)}, ` +
+      `max ${f(r.max)} (step ${r.waits.indexOf(r.max)}); ` +
+      `frame start -> page: median ${f(r.latency.p50)}, p95 ${f(r.latency.p95)}, max ${f(r.latency.max)}; ` +
+      `postMessage: mean ${f(r.transit.mean)}, max ${f(r.transit.max)}; ${r.updates} maps of ~${r.regions} rects, ` +
+      `${r.misses} mispredictions in ${r.lookups} lookups`);
+    assert(r.misses === 0, `${r.misses} mispredictions`);
+  }
+}, {}, { worker: true });
+
+// -------------------------------------------------------------- worker mode
+// The same frame as main mode, pixel for pixel (text included: measured and
+// shaped in the worker).
+for (const renderer of ['cpu', 'webgl', 'webgpu']) test(`worker: pixels equal main mode (effects fixture, ${renderer})`, async ({ page }) => {
+  const a = await mount(page, { id: 'a', width: 480, height: 320, jsui: { bundleUrl: 'fixtures/effects.js', renderer, worker: false } });
+  if (renderer !== 'cpu') skipNoBackend(renderer, a.renderer);
+  const b = await mount(page, { id: 'b', width: 480, height: 320, jsui: { bundleUrl: 'fixtures/effects.js', renderer, worker: true } });
+  assert(a.renderer === b.renderer, `renderers: main ${a.renderer}, worker ${b.renderer}`);
+  const d = await frameDiff(page, ['a', 'b']);
+  assert(!d.missing && !d.size, `readback ${JSON.stringify(d)}`);
+  assert(d.max === 0, `worker frame differs from the main-thread one: ${JSON.stringify(d)}`);
+  const pts = [[20, 20], [100, 60], [240, 160], [400, 280], [60, 250]];
+  const [pa, pb] = [await screenPixels(page, '#a', pts), await screenPixels(page, '#b', pts)];
+  pts.forEach((_, i) => assert(near(pa[i], pb[i], 1), `screen at ${pts[i]}: main ${fmt(pa[i])}, worker ${fmt(pb[i])}`));
+});
+
+test('worker: WebGL context loss: restored, then lost for good (CPU on a fresh canvas)', async ({ page }) => {
+  const info = await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js', renderer: 'webgl', contextRestoreTimeout: 100, worker: true } });
+  skipNoBackend('webgl', info.renderer);
+  const r = await page.evaluate(async () => {
+    const j = window.hosts.ui, old = j.canvas;
+    const events = [];
+    j.on('renderer', (name, reason) => events.push([name, reason]));
+    j.on('log', () => {});  // the fallback warning is expected
+    if (!(await j._debug('loseGL'))) return null;  // restored after 50 ms
+    for (let i = 0; i < 10; i++) await new Promise(requestAnimationFrame);
+    await j.whenIdle();
+    const restored = { events: events.length, renderer: j.renderer };
+    await j._debug('loseGLForGood');
+    for (let i = 0; i < 100 && !events.length; i++) await new Promise((res) => setTimeout(res, 20));
+    await j.whenIdle();
+    return { restored, events, renderer: j.renderer, replaced: j.canvas !== old && !old.isConnected && j.canvas.isConnected,
+      id: j.canvas.id };
+  });
+  if (!r) skip('WEBGL_lose_context unavailable');
+  assert(r.restored.events === 0 && r.restored.renderer.startsWith('gpu-'), `after a restore: ${JSON.stringify(r.restored)}`);
+  assert(r.events.length === 1 && r.replaced && r.id === 'ui', `fallback: ${JSON.stringify(r)}`);
+  assert(r.renderer.startsWith('webgl'), `fallback renderer ${r.renderer}`);
+  const px = await screenPixels(page, '#ui', BANDS);
+  [RED, GREEN, null, HALF_RED].forEach((want, i) => want && assert(near(px[i], want), `band ${i} after fallback: ${fmt(px[i])}`));
+});
+
+test('worker: WebGPU device loss recreates the renderer and repaints', async ({ page }) => {
+  const info = await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js', renderer: 'webgpu', worker: true } });
+  skipNoBackend('webgpu', info.renderer);
+  const r = await page.evaluate(async () => {
+    const j = window.hosts.ui;
+    const events = [];
+    j.on('renderer', (name, reason) => events.push([name, reason]));
+    j.on('log', () => {});
+    await j._debug('destroyDevice');
+    for (let i = 0; i < 80 && !events.length; i++) await new Promise((res) => setTimeout(res, 25));
+    for (let i = 0; i < 4; i++) await new Promise(requestAnimationFrame);
+    await j.whenIdle();
+    return { events, renderer: j.renderer };
+  });
+  assert(r.events.length, 'no renderer event after device loss');
+  const px = await screenPixels(page, '#ui', BANDS);
+  [RED, GREEN, null, HALF_RED].forEach((want, i) => want && assert(near(px[i], want), `band ${i} after loss (${r.renderer}): ${fmt(px[i])}`));
+  console.log(`      after device loss: ${r.renderer} (${r.events.map((e) => e[1]).join(', ')})`);
+  return { allowErrors: true };  // Skia logs the buffer maps the loss aborted
+});
+
+test("worker: frames are timed by the worker's requestAnimationFrame, or the page's (workerLoop 'main')", async ({ page }) => {
+  await mount(page, { id: 'a', jsui: { bundleUrl: 'fixtures/bands.js', worker: true } });
+  await mount(page, { id: 'b', jsui: { bundleUrl: 'fixtures/bands.js', worker: true, workerLoop: 'main' } });
+  await page.waitForTimeout(300);  // band 2's 200 ms timer
+  await frames(page, 3);
+  const info = await page.evaluate(async () => Promise.all(['a', 'b'].map((id) => window.hosts[id]._debug('info'))));
+  assert(info[0].rafs && !info[0].ticks, `worker rAF: ${JSON.stringify(info[0])}`);
+  assert(info[1].ticks, `page-timed: ${JSON.stringify(info[1])}`);
+  for (const id of ['a', 'b']) {
+    const [px] = await screenPixels(page, `#${id}`, [BANDS[2]]);
+    assert(near(px, [255, 255, 0, 255]), `${id}: band 2 after its timer ${fmt(px)}`);
+  }
+});
+
+test('worker: without Worker, createJsui({ worker: true }) runs on the main thread with one warning', async ({ page }) => {
+  const warnings = [];
+  page.on('console', (m) => { if (m.type() === 'warning' && /worker mode/.test(m.text())) warnings.push(m.text()); });
+  const r = await page.evaluate(async (dist) => {
+    window.Worker = undefined;
+    const c = document.createElement('canvas');
+    c.id = 'ui';
+    Object.assign(c.style, { width: '320px', height: '200px' });
+    document.body.appendChild(c);
+    const j = await window.createJsui({ canvas: c, worker: true, renderer: 'cpu', bundleUrl: 'fixtures/bands.js',
+      moduleUrl: new URL(`../${dist}/jsui.js`, location.href) });
+    await j.whenIdle();
+    return { worker: !!j.worker, renderer: j.renderer, sameCanvas: j.canvas === c };
+  }, DIST);
+  assert(!r.worker && r.sameCanvas && r.renderer.startsWith('webgl'), `fallback ${JSON.stringify(r)}`);
+  assert(warnings.length === 1 && /no Worker/.test(warnings[0]), `warnings ${JSON.stringify(warnings)}`);
+  const px = await screenPixels(page, '#ui', BANDS);
+  [RED, GREEN].forEach((want, i) => assert(near(px[i], want), `band ${i}: ${fmt(px[i])}`));
+});
+
 // -------------------------------------------------------------------- run
 let failed = 0, skipped = 0, passed = 0;
 for (const t of tests) {
   if (ONLY && !t.name.includes(ONLY)) continue;
+  WORKER = t.worker;
   const { page, context, errors } = await newPage(t.ctxOpts);
   try {
     const r = await t.fn({ page });

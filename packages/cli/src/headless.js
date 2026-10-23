@@ -119,7 +119,7 @@ async function buildEntry(entry, dir, mode) {
   return outfile;
 }
 
-const BUFFER_TYPES = { f32: [0, Float32Array], f64: [1, Float64Array], i32: [2, Int32Array], u32: [3, Uint32Array], i16: [4, Int16Array], u16: [5, Uint16Array], i8: [6, Int8Array], u8: [7, Uint8Array] };
+export const BUFFER_TYPES = { f32: [0, Float32Array], f64: [1, Float64Array], i32: [2, Int32Array], u32: [3, Uint32Array], i16: [4, Int16Array], u16: [5, Uint16Array], i8: [6, Int8Array], u8: [7, Uint8Array] };
 
 /** W3C standard gamepad mapping. */
 export const PAD_BUTTONS = {
@@ -128,10 +128,10 @@ export const PAD_BUTTONS = {
   back: 8, select: 8, view: 8, start: 9, menu: 9, options: 9, ls: 10, l3: 10, rs: 11, r3: 11,
   up: 12, dpadup: 12, down: 13, dpaddown: 13, left: 14, dpadleft: 14, right: 15, dpadright: 15, home: 16,
 };
-const PAD_AXES = { lx: 0, ly: 1, rx: 2, ry: 3 };
+export const PAD_AXES = { lx: 0, ly: 1, rx: 2, ry: 3 };
 const MODS = { shift: 1, ctrl: 2, control: 2, alt: 4, option: 4, meta: 8, cmd: 8, command: 8 };
 
-function keyCode(key) {
+export function keyCode(key) {
   if (key === ' ') return 'Space';
   if (/^[a-z]$/i.test(key)) return 'Key' + key.toUpperCase();
   if (/^[0-9]$/.test(key)) return 'Digit' + key;
@@ -139,7 +139,7 @@ function keyCode(key) {
   return null;
 }
 
-function modsOf(m) {
+export function modsOf(m) {
   if (typeof m === 'number') return m;
   let bits = 0;
   for (const name of [].concat(m || [])) bits |= MODS[String(name).toLowerCase()] || 0;
@@ -356,6 +356,11 @@ export class HeadlessApp {
     // Audio off (no Web Audio in Node): every Sound.play() ends 'failed', preloads reject.
     this.rt = M._jsui_web_create(this.hostId, this.width, this.height, this.scale, o.devMode ? 1 : 0, this._baseUrlPtr, 0);
     if (!this.rt) throw new Error('jsui: runtime creation failed');
+    // Dev mode joins the dev server's shared session only with devSession
+    // (the dev server registers its own headless runtime directly).
+    if (o.devMode && M._jsui_set_dev_session) {
+      this._withStrings([o.devSession ? String(o.devSession) : null], (n) => M._jsui_set_dev_session(this.rt, n, o.devSession ? 1 : 0));
+    }
     for (const [k, v] of Object.entries(o.state || {})) this.setState(k, v);
     // Props alone go to 'main' (what single-screen entries register).
     if (o.component != null || o.props != null) this.run(o.component ?? 'main', o.props || {});

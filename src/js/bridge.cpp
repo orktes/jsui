@@ -6,6 +6,7 @@
 
 #include "core/document.h"
 #include "input/input.h"
+#include "dev_session.h"
 #include "js/engine_impl.h"
 #include "render/lottie.h"
 #include "render/shader_view.h"
@@ -342,6 +343,8 @@ JSValue js_postMessage(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
       JS_FreeValue(ctx, j);
     }
   }
+  if (rt.session && rt.session->joined())
+    rt.session->uiEvent("message", {{"name", Value(name)}, {"data", json.empty() ? Value() : Value::parseJson(json)}});
   if (rt.config.on_message) rt.config.on_message(rt.config.message_user, name.c_str(), json.c_str());
   return JS_UNDEFINED;
 }
