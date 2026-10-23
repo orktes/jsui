@@ -2035,9 +2035,11 @@ bool startBlitScan(Node* n, const NodeRecord* rec, const SkMatrix& m, float w, f
 // however much of the frame it covers (the retained frame equals a full
 // repaint), the state follows the damage only, never what was painted: a
 // subtree is drawn from its texture once damage reached it in two
-// consecutive damaged frames with its stamp unchanged (a one-off repaint
-// does not pay for a texture), until its stamp changes or no damage reached
-// it for a while, and it is repainted whole whenever that switches.
+// consecutive damaged frames, its stamp unchanged in the second (a one-off
+// repaint does not pay for a texture; a row of a scrolling list that just
+// changed, entering the viewport or hovered, is drawn from one from the
+// next frame on), until its stamp changes or no damage reached it for a
+// while, and it is repainted whole whenever that switches.
 constexpr uint32_t kRasterMinNodes = 4;
 constexpr uint32_t kRasterIdleFrames = 120;  // damaged frames without reaching it
 thread_local std::vector<NodeRecord*>* tRasterCandidates = nullptr;
@@ -2047,15 +2049,29 @@ void updateRasterCache(RootRecord* root, SkRegion* damage, const SkIRect& screen
   const uint32_t frame = root->damagedFrames;
   SkRegion base(*damage);  // what reached each subtree, before the switches below
   auto area = [](const SkIRect& r) { return int64_t(r.width()) * r.height(); };
+  const size_t maxBytes = tLayerCache ? tLayerCache->impl->budget / 2 : SIZE_MAX;
   for (NodeRecord* rec : root->rasterCandidates) {
     // Mostly visible: a texture of a scroll view's whole content (hidden by
     // the viewport but for a part) costs more to render than it saves. The
-    // texture is the whole subtree when it fits (paintCachedLayer).
+    // texture is the whole subtree when it fits (paintCachedLayer), else
+    // its part on the screen.
     const SkIRect& f = rec->subtreeFull;
+    const bool whole = f.width() <= kMaxLayerSide && f.height() <= kMaxLayerSide &&
+                       size_t(f.width()) * size_t(f.height()) * 4 <= maxBytes;
     SkIRect tex = f;
-    if (f.width() > kMaxLayerSide || f.height() > kMaxLayerSide) tex.intersect(screen);
-    bool visible = !rec->subtree.isEmpty() && area(tex) <= 2 * area(rec->subtree);
-    bool stable = visible && rec->stableFrames >= 1 && !rec->scaling;
+    if (!whole) tex.intersect(screen);
+    // A small one (a list row entering or leaving the viewport) is worth a
+    // texture however much of it shows: it is drawn from it while it
+    // scrolls, instead of being painted for every frame it is cut.
+    bool visible = !rec->subtree.isEmpty() &&
+                   (area(tex) <= 2 * area(rec->subtree) || (whole && area(tex) * 8 <= area(screen)));
+    // A part is drawn again only while the subtree stays where it is: one
+    // that moves would be rendered into a new texture every frame, on top of
+    // being painted. That is a scrolling list's content at 2x (48 rows of 60
+    // px are taller than a texture can be): its part on the screen is about
+    // its viewport, and it moves in every frame that damages it.
+    bool eligible = visible && !rec->scaling && (whole || !rec->moved);
+    bool stable = eligible && rec->stableFrames >= 1;
     bool hit = base.intersects(rec->subtree);
     if (hit) {
       rec->rasterHits = rec->rasterLast + 1 == frame ? uint8_t(std::min(rec->rasterHits + 1, 255)) : 1;
@@ -2070,7 +2086,8 @@ void updateRasterCache(RootRecord* root, SkRegion* damage, const SkIRect& screen
       damage->op(rec->rasterBounds, SkRegion::kUnion_Op);
       rec->rasterOn = on;
     }
-    if (!stable) rec->rasterHits = 0;
+    // A frame that changed it counts: damage reached it then too.
+    if (!eligible) rec->rasterHits = 0;
     rec->rasterBounds = on ? rec->subtree : SkIRect::MakeEmpty();
   }
 }
