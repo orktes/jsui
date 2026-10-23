@@ -323,19 +323,88 @@ struct ShadowCache {
 };
 ShadowCache& shadowCache(RootRecord* root);
 
+// GPU canvases (Graphite, Ganesh) draw shadow masks at their sub-pixel
+// position with bilinear filtering instead of keying them by it: a mask is a
+// texture there, and a shadow gliding across the screen (a panel sliding in,
+// a tab underline springing) made a new one every frame (rasterised and
+// blurred on the CPU, a texture created and uploaded). A blurred mask shifted
+// by a fraction of a pixel is the mask rendered there to within rounding
+// (sigma >= 1 px), and a straight cut-out edge is too (its coverage is
+// linear in the phase). The CPU raster keeps exact phases (whole-pixel
+// sprite blits are its fast path).
+bool phaseFreeMasks(SkCanvas* c) { return c->recorder() != nullptr || c->recordingContext() != nullptr; }
+
+// While a node's scale animates (a pulsing dot, a button springing) or its
+// size does (a progress bar's fill), its shadow's device size changes every
+// frame: a new mask (blurred on the CPU, a texture created and uploaded) per
+// frame. On GPU canvases such a shadow is drawn from a mask of a nearby size
+// (8 steps per octave), scaled to the node with bilinear filtering:
+//   * scaling: the mask of the node at the nearest quantized scale. A blurred
+//     shape scaled is the shape scaled then blurred with the sigma scaled, so
+//     the geometry and blur land where they belong; only resampling differs
+//     (a few levels at the cut-out edge).
+//   * resizing: the mask of the box at the nearest quantized width / height
+//     (same corner radii and blur), stretched to the box, which scales the
+//     blur and radii along that axis by at most 4.4%.
+// The node is repainted exactly once it stops changing
+// (NodeRecord::shadowInexact).
+float quantizedScale(float s) { return s > 0 ? std::exp2(std::round(std::log2(s) * 8) / 8) : s; }
+// Mask key values of a resized box: float noise in the derived sizes must
+// not make keys differ.
+float keyRound(float v) { return std::round(v * 64) / 64; }
+
 // Draws `shape` (local coords) blurred by CSS `blur` with `paint`'s color
 // from the cache, minus `hole` (the border box, when the background does not
 // hide the shadow; baking it into the mask avoids an anti-aliased clip, which
 // is slow on the CPU). False when the transform is not axis-aligned (the
 // caller blurs directly then).
 bool drawCachedShadow(SkCanvas* c, const SkRRect& shape, const SkRRect* hole, const SkRRect& box, float blur,
-                      const SkPaint& paint, ShadowCache& cache, float alpha = 1) {
-  const SkMatrix& m = c->getTotalMatrix();
+                      const SkPaint& paint, ShadowCache& cache, float alpha = 1, bool scaling = false,
+                      bool resizing = false, bool* inexact = nullptr) {
+  SkMatrix m = c->getTotalMatrix();
   if (!m.isScaleTranslate() || m.getScaleX() <= 0 || m.getScaleY() <= 0) return false;
+  const bool phaseFree = phaseFreeMasks(c);
+  // The mask's device space -> the canvas' device space (see quantizedScale).
+  SkMatrix post = SkMatrix::I();
+  if (scaling && phaseFree) {
+    float sx = m.getScaleX(), sy = m.getScaleY(), qx = quantizedScale(sx), qy = quantizedScale(sy);
+    if (qx != sx || qy != sy) {
+      float tx = m.getTranslateX(), ty = m.getTranslateY();
+      m = SkMatrix::MakeAll(qx, 0, tx, 0, qy, ty, 0, 0, 1);
+      post = SkMatrix::Translate(tx, ty);
+      post.preScale(sx / qx, sy / qy);
+      post.preTranslate(-tx, -ty);
+      if (inexact) *inexact = true;
+    }
+  }
   SkRRect dev;
   if (!shape.transform(m, &dev)) return false;
+  SkRRect devHole;
+  if (hole && !hole->transform(m, &devHole)) return false;
+  if (resizing && phaseFree && post.isIdentity()) {
+    SkRect d = dev.rect();
+    float qw = keyRound(quantizedScale(d.width())), qh = keyRound(quantizedScale(d.height()));
+    if (qw != d.width() || qh != d.height()) {
+      SkVector radii[4];
+      for (int i = 0; i < 4; i++) radii[i] = dev.radii(SkRRect::Corner(i));
+      dev.setRectRadii(SkRect::MakeXYWH(d.left(), d.top(), qw, qh), radii);
+      if (hole) {
+        // The same distances to the box's edges.
+        SkRect hr = devHole.rect();
+        SkVector hradii[4];
+        for (int i = 0; i < 4; i++) hradii[i] = devHole.radii(SkRRect::Corner(i));
+        hr = SkRect::MakeLTRB(hr.left(), hr.top(), hr.right() + qw - d.width(), hr.bottom() + qh - d.height());
+        devHole.setRectRadii(hr, hradii);
+      }
+      post = SkMatrix::Translate(d.left(), d.top());
+      post.preScale(d.width() / qw, d.height() / qh);
+      post.preTranslate(-d.left(), -d.top());
+      if (inexact) *inexact = true;
+    }
+  }
+  const bool roundKey = !post.isIdentity();
   const SkRect& r = dev.rect();
-  float ox = std::floor(r.left()), oy = std::floor(r.top());
+  float ox = phaseFree ? r.left() : std::floor(r.left()), oy = phaseFree ? r.top() : std::floor(r.top());
   ShadowKey key{};
   key.w = r.width();
   key.h = r.height();
@@ -347,9 +416,7 @@ bool drawCachedShadow(SkCanvas* c, const SkRRect& shape, const SkRRect* hole, co
     key.radii[i * 2] = v.fX;
     key.radii[i * 2 + 1] = v.fY;
   }
-  SkRRect devHole;
   if (hole) {
-    if (!hole->transform(m, &devHole)) return false;
     key.hole[0] = devHole.rect().left() - r.left();
     key.hole[1] = devHole.rect().top() - r.top();
     key.hole[2] = devHole.rect().width();
@@ -359,6 +426,12 @@ bool drawCachedShadow(SkCanvas* c, const SkRRect& shape, const SkRRect* hole, co
       key.holeRadii[i * 2] = v.fX;
       key.holeRadii[i * 2 + 1] = v.fY;
     }
+  }
+  if (roundKey) {
+    for (float* v : {&key.w, &key.h, &key.sigma}) *v = keyRound(*v);
+    for (float& v : key.radii) v = keyRound(v);
+    for (float& v : key.hole) v = keyRound(v);
+    for (float& v : key.holeRadii) v = keyRound(v);
   }
   SkColor4f col = paint.getColor4f();
   key.color[0] = col.fR;
@@ -398,7 +471,7 @@ bool drawCachedShadow(SkCanvas* c, const SkRRect& shape, const SkRRect* hole, co
   p.setAlphaf(alpha);
   const SkImage* img = it->second.image.get();
   float x0 = ox - float(it->second.margin), y0 = oy - float(it->second.margin);
-  SkIRect all = SkIRect::MakeXYWH(int(x0), int(y0), img->width(), img->height());
+  SkIRect all = SkRect::MakeXYWH(x0, y0, float(img->width()), float(img->height())).roundOut();
   // The box interior (inset by its corner radii) is either cut out of the
   // mask or covered by an opaque background: draw only the ring around it.
   SkRRect devBox;
@@ -418,14 +491,18 @@ bool drawCachedShadow(SkCanvas* c, const SkRRect& shape, const SkRRect* hole, co
     }
   }
   c->save();
-  c->setMatrix(SkMatrix::I());
+  c->setMatrix(post);
+  if (!post.isIdentity()) skip.setEmpty();  // scaled: the ring's clips would not be whole pixels
   // Whole-image draws at integer offsets take Skia's sprite blitter; the
   // ring parts are pixel-aligned clips of the same draw.
+  const SkSamplingOptions sampling = post.isIdentity() && x0 == std::floor(x0) && y0 == std::floor(y0)
+                                         ? SkSamplingOptions()
+                                         : SkSamplingOptions(SkFilterMode::kLinear);
   auto part = [&](const SkIRect& d) {
     if (d.isEmpty()) return;
     c->save();
     c->clipIRect(d);
-    c->drawImage(img, x0, y0, SkSamplingOptions(), &p);
+    c->drawImage(img, x0, y0, sampling, &p);
     c->restore();
   };
   if (skip.isEmpty() || skip.width() < 16 || skip.height() < 16) {
@@ -455,7 +532,8 @@ bool drawCachedInsetShadow(SkCanvas* c, const SkRRect& inner, const SkRRect& fra
   if (!inner.transform(m, &dev)) return false;
   if (!hole.isEmpty() && !hole.transform(m, &devHole)) return false;
   const SkRect& r = dev.rect();
-  float ox = std::floor(r.left()), oy = std::floor(r.top());
+  const bool phaseFree = phaseFreeMasks(c);
+  float ox = phaseFree ? r.left() : std::floor(r.left()), oy = phaseFree ? r.top() : std::floor(r.top());
   ShadowKey key{};
   key.inset = 1;
   key.w = r.width();
@@ -510,14 +588,17 @@ bool drawCachedInsetShadow(SkCanvas* c, const SkRRect& inner, const SkRRect& fra
   it->second.lastUsed = cache.frame;
   c->save();
   c->setMatrix(SkMatrix::I());
-  c->drawImage(it->second.image.get(), ox - kMargin, oy - kMargin, SkSamplingOptions());
+  c->drawImage(it->second.image.get(), ox - kMargin, oy - kMargin,
+               ox == std::floor(ox) && oy == std::floor(oy) ? SkSamplingOptions()
+                                                             : SkSamplingOptions(SkFilterMode::kLinear));
   c->restore();
   return true;
 }
 
 // `alpha`: the node's opacity folded into the draws (see opacityFoldable); the
 // shadow is then cut out under an opaque background too, which no longer hides it.
-void paintOuterShadows(SkCanvas* c, const Box& b, const ComputedStyle& s, RootRecord* root, float alpha) {
+void paintOuterShadows(SkCanvas* c, const Box& b, const ComputedStyle& s, RootRecord* root, float alpha,
+                       bool scaling = false, bool resizing = false, bool* inexact = nullptr) {
   bool opaqueBg = s.backgroundColor.a >= 1 && s.backgroundImages.empty() && alpha >= 1;
   // The first shadow is on top, so paint in reverse.
   for (auto it = s.boxShadows.rbegin(); it != s.boxShadows.rend(); ++it) {
@@ -533,7 +614,8 @@ void paintOuterShadows(SkCanvas* c, const Box& b, const ComputedStyle& s, RootRe
     // Shadows are cut out of the border box (visible through translucent
     // backgrounds otherwise). An opaque background hides it anyway.
     if (sh.blur > 0 &&
-        drawCachedShadow(c, shape, opaqueBg ? nullptr : &b.outer, b.outer, sh.blur, p, shadowCache(root), alpha))
+        drawCachedShadow(c, shape, opaqueBg ? nullptr : &b.outer, b.outer, sh.blur, p, shadowCache(root), alpha,
+                         scaling, resizing, inexact))
       continue;
     p.setAlphaf(p.getAlphaf() * alpha);
     c->save();
@@ -1233,6 +1315,11 @@ struct NodeRecord : Node::Cache {
   uint32_t stableFrames = 0;
   bool relChanged = true;                  // this frame: its painting changed in its parent's space
   bool moved = false;                      // this frame: the device matrix changed
+  bool scaling = false;                    // this frame: the device matrix' scale / skew changed
+  bool resizing = false;                   // this frame: its size changed
+  // Its shadow was drawn from a mask of a nearby scale (see quantizedScale);
+  // repainted exactly once the scale stops changing.
+  mutable bool shadowInexact = false;
   // The cached layer was last drawn at a whole-pixel offset from where the
   // node is (while it moved); repainted exactly once it stops.
   mutable bool layerInexact = false;
@@ -1500,7 +1587,15 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
   Box b;
   computeBox(n, w, h, &b);
   ctx.stats.nodesPainted++;
-  if (!s.boxShadows.empty()) paintOuterShadows(c, b, s, ctx.root, ctx.alpha);
+  if (!s.boxShadows.empty()) {
+    auto* rec = static_cast<const NodeRecord*>(n->paintCache.get());
+    bool inexact = false;
+    paintOuterShadows(c, b, s, ctx.root, ctx.alpha, rec && rec->scaling, rec && rec->resizing, &inexact);
+    if (inexact) {
+      rec->shadowInexact = true;
+      ctx.doc.markPaintDirty();  // a frame after it stops, to repaint it exactly
+    }
+  }
   paintBackground(c, b, s, ctx.root, ctx.alpha);
   if (!s.boxShadows.empty()) paintInsetShadows(c, b, s, ctx.root);
   paintBorders(c, b, s, ctx.alpha);
@@ -1998,6 +2093,14 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
   }
   rec->relChanged = selfChanged || below || rec->version != n->paintVersion || rec->local != local;
   rec->moved = rec->valid && rec->matrix != m;
+  rec->scaling = rec->valid && (rec->matrix.getScaleX() != m.getScaleX() || rec->matrix.getScaleY() != m.getScaleY() ||
+                                rec->matrix.getSkewX() != m.getSkewX() || rec->matrix.getSkewY() != m.getSkewY());
+  rec->resizing = rec->valid && (rec->w != w || rec->h != h);
+  if (rec->shadowInexact && !rec->scaling && !rec->resizing) {
+    // Came to rest: its shadow from the exact mask.
+    damage->op(own, SkRegion::kUnion_Op);
+    rec->shadowInexact = false;
+  }
   if (rec->layerInexact && !rec->moved) {
     // Came to rest after moving as a cached layer: paint it exactly.
     damage->op(sub, SkRegion::kUnion_Op);
