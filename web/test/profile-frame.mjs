@@ -10,8 +10,12 @@
 //   render        jsui_render_webgpu / jsui_render_gl: everything below
 //     damage      updateDamage (paint records)
 //     paint       paintDocument (the painter's canvas calls)
-//     snap        Graphite Recorder::snap (recording -> commands)
-//     submit      Context::insertRecording + submit (WebGPU calls)
+//     snap        Graphite Recorder::snap (draw lists -> a recording)
+//     commands    insertRecording's TaskList::addCommands (WebGPU encoding)
+//     submit      QueueManager::submitToGpu (queue.submit, work-done callbacks)
+//     surface     the canvas texture: getCurrentTexture, wrapping, release
+// Under LTO Recorder::snap and Context::insertRecording are inlined into
+// the render function, so these match the functions they call.
 //
 // Function names need a module linked with --profiling-funcs (build one
 // with -DCMAKE_EXE_LINKER_FLAGS=--profiling-funcs into its own dist dir).
@@ -162,8 +166,10 @@ const phases = [
   ['render', sumWhere(/^_?jsui_render_(webgpu|gl)/)],
   ['  damage', sumUnder(/^_?jsui_render_(webgpu|gl)/, /updateDamage/)],
   ['  paint', sumUnder(/^_?jsui_render_(webgpu|gl)/, /paintDocument/)],
-  ['  snap', sumUnder(/^_?jsui_render_(webgpu|gl)/, /Recorder::snap/)],
-  ['  submit', sumUnder(/^_?jsui_render_(webgpu|gl)/, /insertRecording|Context::submit|flushAndSubmit/)],
+  ['  snap', sumUnder(/^_?jsui_render_(webgpu|gl)/, /Recorder::snap|snapDrawPass|TaskList::prepareResources/)],
+  ['  commands', sumUnder(/^_?jsui_render_(webgpu|gl)/, /TaskList::addCommands/)],
+  ['  submit', sumUnder(/^_?jsui_render_(webgpu|gl)/, /QueueManager::submitToGpu|Context::submit|flushAndSubmit/)],
+  ['  surface', sumUnder(/^_?jsui_render_(webgpu|gl)/, /^getCurrentTexture$|onCreateWrappedTexture|Surface::~Surface/)],
 ];
 for (const [k, v] of phases) console.log(`  ${k.padEnd(22)} ${per(v)} ms/frame`);
 const top = (m) => [...m].filter(([k]) => !k.startsWith('(')).sort((a, b) => b[1] - a[1]).slice(0, TOP);

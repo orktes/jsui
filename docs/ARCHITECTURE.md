@@ -351,8 +351,32 @@ used to process Dawn events).
   steady frame went from ~2.8 render passes, ~172 draws, ~175 new bind
   groups, 67 pipeline binds and 9 buffer maps to 1 pass (the canvas, with
   the damage copied back), ~65 draws, ~5 bind groups, ~40 pipeline binds and
-  2-3 maps; `webgpu: steady animation frames` in the browser tests guards
-  it.
+  2-3 maps (~30 draws, ~2 bind groups, ~22 pipeline binds and 1 map with
+  the atlases, masks and raster cache below); `webgpu: steady animation
+  frames` in the browser tests guards it.
+* **No uploads in steady frames.** Graphite evicts its text, path and clip
+  atlases after every `snap()` unless every Recording is inserted in the
+  order it was snapped, which the contexts promise
+  (`fRequireOrderedRecordings`, here and in `gpu_graphite.cpp`): a glyph is
+  rasterized and uploaded once, not in every frame that draws it (~134
+  glyphs a frame of the showcase's steady animation, ~560 per full
+  repaint). Shadow masks (blurred on the CPU, uploaded as textures) were
+  made anew whenever a shadow moved by a sub-pixel or changed size. On GPU
+  canvases a mask is drawn at its fractional position with bilinear
+  filtering instead of being keyed by it, and the shadow of a node whose
+  scale or size animates is drawn from the mask of the nearest of 8 sizes
+  per octave, stretched to it, and repainted exactly once it stops
+  (`quantizedScale`, `shadowInexact` in `painter.cpp`). Such approximate
+  draws ask for an exact repaint (`Document::markExactRepaint`), which
+  `jsui_needs_redraw()` reports once nothing animates any more: while
+  animations, scroll physics or JS frame callbacks drive frames the next
+  one repaints it anyway, and the runtime still goes idle after each frame
+  (`whenIdle`, a perpetually scaling loading screen). A steady showcase
+  frame creates no textures and uploads nothing (before: ~1 new texture a
+  frame for the deploy button's moving shadow, the tab underline, the
+  pulsing live dot and the progress bar's glow); the entrance and
+  scrolling upload only what is drawn for the first time (glyphs, item
+  icons and card art with their mips).
 * **Composited layers.** Like Chrome's compositor layers for opacity and
   transform animations, a layer (a node whose opacity needs one: children
   or overlapping draws) is rendered into a texture of its own once and
@@ -370,7 +394,8 @@ used to process Dawn events).
   compositor would, and when it comes to rest the next frame repaints it
   exactly (`layerInexact`). A subtree that changed in the last frame (a
   progress bar inside a fading panel) takes a plain layer clipped to the
-  damage, as before. Textures are freed after 120 unused frames or over
+  damage, as before, with its static parts drawn from raster textures (see
+  Raster cache). Textures are freed after 120 unused frames or over
   96 MB (LRU); `JSUI_WEBGPU_NO_LAYER_CACHE` turns it off. On
   `interactions.jsx` the entrance (staggered menu buttons and panels fading
   and sliding in) went from ~5.9 render passes and ~140 draws per frame to
@@ -382,9 +407,9 @@ used to process Dawn events).
   repaints it draw by draw: on `interactions.jsx` the glow drifting behind
   the top bar repainted the top bar, the menu, the carousel and the top of
   the armory panel (~75 nodes) every frame. Like Flutter's raster cache, a
-  subtree (4+ nodes, no blend mode reaching what is below it, not inside a
-  plain layer) that damage reached in two consecutive damaged frames with
-  its stamp unchanged is drawn from a texture of it (the same `LayerCache`
+  subtree (4+ nodes, no blend mode reaching what is below it) that damage
+  reached in two consecutive damaged frames with its stamp unchanged is
+  drawn from a texture of it (the same `LayerCache`
   entries and stamps as composited layers, at opacity 1), until its stamp
   changes, it scales, or no damage reached it for 120 damaged frames
   (`updateRasterCache` in `painter.cpp`). A texture that would be mostly
@@ -396,9 +421,14 @@ used to process Dawn events).
   repainted whenever it switches. On `interactions.jsx` at 1280x720 a
   steady frame went from ~70 draws to ~30 (main thread ~2.7 to ~2.2 ms per
   awaited frame, SwiftShader); scrolling the armory list draws each row
-  from its texture (~136 to ~65 draws). `JSUI_WEBGPU_NO_RASTER_CACHE` turns
-  it off; `webgpu: raster cache` in the browser tests compares it with
-  direct painting.
+  from its texture (~136 to ~65 draws). Inside a layer that is painted again
+  every frame (a panel fading in while its content changes) the static
+  subtrees are drawn from their textures too, in a plain layer and when the
+  layer is rendered into its cached texture alike (not inside another
+  subtree's raster texture, which would only be rendered with it): in the
+  entrance the armory panel's rows, ~63 to ~38 draws per frame.
+  `JSUI_WEBGPU_NO_RASTER_CACHE` turns it off; `webgpu: raster cache` in the
+  browser tests compares it with direct painting.
 * **What each pass is** (`interactions.jsx`, `frame-bench.mjs` lists them
   with GPU times). Steady (the looping glow, deploy pulse, live dot and
   progress shimmer): one pass, the canvas (cleared, the last frame drawn
@@ -407,16 +437,19 @@ used to process Dawn events).
   the animated boxes are childless, so their opacity folds into their
   draws; outer and inset shadows are cached sprites; paths are rasterized
   into Graphite's path atlas on the CPU and text into its glyph atlas, both
-  uploaded with `copyBufferToTexture` (a few small rects per frame, plus a
-  new sprite texture when the scaling live dot's shadow changes size), not
-  rendered. Scrolling the armory list: the same single pass (no scroll
-  blit on the GPU path; the list's damage is repainted) and 4 copies. The
-  entrance (first ~2.5 s): plain layers only for the armory panel and the
-  season card, which fade while their content animates (the list fills
-  in, the progress bar grows): 1024x1024 and 512x128 approx-fit passes
-  per damage rect at 1280x720, 1536x1024 / 1536x512 / 1536x256 / 1024x256
-  at 1080p@2x. The menu buttons (512x64 each) and the centre column
-  (512x1024) fade and slide as composited layers, rendered once.
+  uploaded with `copyBufferToTexture` when first drawn, not rendered. The
+  frame's vertex, index and uniform data (~35-80 KB) goes through one
+  mapped staging buffer and 4-6 `copyBufferToBuffer` (browser WebGPU
+  cannot map vertex or uniform buffers). Scrolling the armory list: the
+  same single pass (no scroll blit on the GPU path; the list's damage is
+  repainted), 4 copies, and the raster texture of each row coming into
+  view (352x61, ~0.6 a frame). The entrance (first ~2.5 s): plain layers
+  only for the armory panel and the season card, which fade while their
+  content animates (the list fills in, the progress bar grows): 1024x1024
+  and 512x128 approx-fit passes per damage rect at 1280x720, 1536x1024 /
+  1536x512 / 1536x256 / 1024x256 at 1080p@2x, with the armory's rows drawn
+  from their raster textures. The menu buttons (512x64 each) and the centre
+  column (512x1024) fade and slide as composited layers, rendered once.
 * **Compared with Chrome.** `frame-bench --renderers chrome` renders the
   same app through react-native-web. Chrome's structural advantages: the
   page's main thread only records paint ops; rasterization happens in the
@@ -428,10 +461,20 @@ used to process Dawn events).
   main thread (wasm) and, on WebGPU, must fill the whole canvas every frame
   (`getCurrentTexture()` is a fresh texture), which the copy-back texture
   makes one full-screen textured draw; the composited layers above are the
-  part of Chrome's model JSUI now has. Headless (SwiftShader) at 1280x720,
-  steady: Chrome's main thread ~1.5 ms and GPU main thread ~2.6 ms per
-  frame; JSUI on WebGPU ~5.9 ms and ~96 ms (SwiftShader drawing the full
-  canvas), on WebGL ~4.6 ms and ~52 ms.
+  part of Chrome's model JSUI now has, and the raster cache stands in for
+  its kept tiles. Headless (SwiftShader) at 1280x720, steady: Chrome's main
+  thread is busy ~1.6 ms and its GPU main thread ~2.8 ms per frame; JSUI on
+  WebGPU ~4.6 ms (~2.5 ms in `jsui.frame()` per awaited frame; ~7.3 and
+  ~3.8 ms before the atlas, mask, raster cache and record-skip changes) and
+  ~88 ms (SwiftShader drawing the full canvas), on WebGL ~3.1 ms per
+  awaited frame and ~50 ms. Of a profiled steady WebGPU frame
+  (`web/test/profile-frame.mjs`, ~1.9 ms of `jsui.frame()` with the
+  profiler on; ~3.2 ms before the changes above) the painter's canvas calls
+  take ~0.3 ms, the damage walk ~0.13 ms and native Animated ~0.09 ms;
+  Graphite's snap, command encoding and submit and the canvas texture take
+  ~0.85 ms (Graphite's `queue.submit` ~0.2 ms of it), and the copy-back's
+  own submit, which carries one copy, ~0.13 ms (one submit for both would
+  be the next cut), with the JS / wasm crossings most of the rest.
 * **No CPU waits.** In the browser Graphite runs without a tick function:
   submits never wait, buffer maps are async and finished work is collected by
   `checkAsyncWorkCompletion()` each frame. Raster images are uploaded once per
@@ -476,10 +519,15 @@ used to process Dawn events).
   "finish" metric (frames stepped by hand, each awaited until the GPU is
   done: WebGPU `onSubmittedWorkDone()`, WebGL a 1-pixel `readPixels`, which
   add the round trip to the GPU process that the real loop never waits for);
-  then the WebGPU calls per frame (`web/test/gpu-count.js`); then GPU time
-  per frame from timestamps around every render pass and copy
-  (`web/test/gpu-timing.js`, the `timestamp-query` feature; WebGL: timer
-  queries where available), listed by pass target and copy kind.
+  then the WebGPU calls per frame (`web/test/gpu-count.js`, with the bytes
+  copied and mapped); then GPU time per frame from timestamps around every
+  render pass and every run of back-to-back copies (`web/test/gpu-timing.js`,
+  the `timestamp-query` feature; WebGL: timer queries, in a loop of their
+  own), listed by pass target and copy kind. WebGPU only writes timestamps
+  at pass boundaries, so the marks are empty compute passes: around each
+  single copy they added a pass and two encoder switches to what was
+  measured (on an M1, Graphite's few small staging copies read as ~0.4 ms a
+  frame), and a run's time still includes one such switch.
   `--scenario entrance` measures from mount (the instrumented pages step
   from mount time, so it plays the same on a slow software GPU) and
   `--scenario scroll` turns the wheel over a list. `--renderers chrome`
@@ -1210,7 +1258,20 @@ the expensive per-pixel work is done once:
 * **Damage.** `updateDamage` (`src/render/painter.cpp`) compares each node's
   paint record (version, size, device matrix, children, scroll indicators)
   with the last frame and damages the old and new bounds of what changed;
-  unchanged subtrees outside the damage are culled. Skia does not
+  unchanged subtrees outside the damage are culled. Unchanged subtrees are
+  not walked either: every change that can affect painting (props, text,
+  children, layout, scroll offsets and indicators, LayoutAnimation frames,
+  the caret) marks the node and its ancestors (`Node::markPaintTree`,
+  stopping at the first marked one, like the hit-test bounds flag), and a
+  clean child that was not changing in the last frame and is placed with
+  the same matrices and clip keeps its records, its curved outlines and
+  raster candidates carried over. A clean child out of view (scrolled out
+  of its scroll view) is skipped as long as a translation keeps it out;
+  its records keep the old placement until it comes back. A steady
+  showcase frame walks the 19 nodes on the paths to what animates instead
+  of the whole tree. `PaintStats::nodesUpdated` counts the walked nodes;
+  `setRecordSkipping(false)` walks them all, which the tests compare with.
+  Skia does not
   rasterize an anti-aliased outline cut by the clip exactly like the whole
   outline, so damage crossing a curved node's edge grows to the whole node
   (damage inside its padding box does not), and the repaint stays exact.
