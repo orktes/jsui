@@ -104,6 +104,11 @@ void JsuiView::_bind_methods() {
   ClassDB::bind_method(D_METHOD("get_autostart"), &JsuiView::get_autostart);
   ClassDB::bind_method(D_METHOD("set_forward_gamepad", "enabled"), &JsuiView::set_forward_gamepad);
   ClassDB::bind_method(D_METHOD("get_forward_gamepad"), &JsuiView::get_forward_gamepad);
+  ClassDB::bind_method(D_METHOD("set_input_pass_through", "enabled"), &JsuiView::set_input_pass_through);
+  ClassDB::bind_method(D_METHOD("get_input_pass_through"), &JsuiView::get_input_pass_through);
+  ClassDB::bind_method(D_METHOD("hit_test", "position"), &JsuiView::hit_test);
+  BIND_CONSTANT(HIT_POINTER);
+  BIND_CONSTANT(HIT_SCROLL);
   ClassDB::bind_method(D_METHOD("set_force_cpu", "enabled"), &JsuiView::set_force_cpu);
   ClassDB::bind_method(D_METHOD("get_force_cpu"), &JsuiView::get_force_cpu);
   ClassDB::bind_method(D_METHOD("set_runtime_view", "path"), &JsuiView::set_runtime_view);
@@ -151,6 +156,7 @@ void JsuiView::_bind_methods() {
                "get_pixel_ratio");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "autostart"), "set_autostart", "get_autostart");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "forward_gamepad"), "set_forward_gamepad", "get_forward_gamepad");
+  ADD_PROPERTY(PropertyInfo(Variant::BOOL, "input_pass_through"), "set_input_pass_through", "get_input_pass_through");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "force_cpu"), "set_force_cpu", "get_force_cpu");
   ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "runtime_view", PROPERTY_HINT_NODE_PATH_VALID_TYPES, "JsuiView"),
                "set_runtime_view", "get_runtime_view");
@@ -178,7 +184,9 @@ void JsuiView::_bind_methods() {
 
 JsuiView::JsuiView() {
   set_focus_mode(FOCUS_ALL);
-  // Unconsumed clicks bubble to parent controls and on to the game.
+  // Unconsumed events bubble to parent controls and on to the game; with
+  // input_pass_through, points the UI doesn't capture aren't even inside the
+  // view (_has_point), so controls behind it get them too.
   set_mouse_filter(MOUSE_FILTER_PASS);
   set_clip_contents(true);
 }
@@ -371,6 +379,7 @@ void JsuiView::destroySurface() {
   if (!rt_ || !host_) return;
   JsuiRuntime* s = rt_;
   surfaceGone();
+  mouse_buttons_ = 0;
   jsui_surface_destroy(s);
   if (host_->is_inside_tree()) host_->flushMessages();  // unmount effects may have posted messages
 }
@@ -464,6 +473,7 @@ void JsuiView::stop() {
   // signals / callbacks still run (below), so the game can drop its work.
   jsui_destroy(rt);
   held_keys_.clear();
+  mouse_buttons_ = 0;
   pads_.clear();
   std::vector<Event> pending;
   pending.swap(messages_);
@@ -1147,6 +1157,19 @@ bool JsuiView::handleGamepad(const Ref<InputEvent>& event) {
   return false;
 }
 
+int JsuiView::hit_test(const Vector2& position) const {
+  JsuiRuntime* rt = rt_;
+  return rt ? jsui_hit_test(rt, float(position.x), float(position.y)) : 0;
+}
+
+bool JsuiView::_has_point(const Vector2& point) const {
+  if (!input_pass_through_ || Engine::get_singleton()->is_editor_hint())
+    return Rect2(Vector2(), get_size()).has_point(point);
+  // A press that reached the UI keeps the pointer until it is released.
+  if (mouse_buttons_ && int64_t(Input::get_singleton()->get_mouse_button_mask()) != 0) return true;
+  return hit_test(point) != 0;
+}
+
 void JsuiView::_gui_input(const Ref<InputEvent>& event) {
   if (!rt_ || event.is_null()) return;
   bool consumed = false;
@@ -1155,6 +1178,9 @@ void JsuiView::_gui_input(const Ref<InputEvent>& event) {
     if (mm->get_device() == kEmulatedDevice) return;  // touch already forwarded as touch
     Vector2 p = mm->get_position();
     consumed = jsui_send_mouse_move(rt_, p.x, p.y) != 0;
+    // A drag whose press went to the game (or a control behind the view)
+    // stays theirs while it passes over the UI.
+    if (int64_t(mm->get_button_mask()) != 0 && !mouse_buttons_) consumed = false;
   } else if (const auto* mb = Object::cast_to<InputEventMouseButton>(event.ptr())) {
     if (mb->get_device() == kEmulatedDevice) return;
     Vector2 p = mb->get_position();
@@ -1172,8 +1198,17 @@ void JsuiView::_gui_input(const Ref<InputEvent>& event) {
     } else if (idx == MOUSE_BUTTON_LEFT || idx == MOUSE_BUTTON_RIGHT || idx == MOUSE_BUTTON_MIDDLE) {
       JsuiMouseButton b = idx == MOUSE_BUTTON_RIGHT ? JSUI_MOUSE_RIGHT : idx == MOUSE_BUTTON_MIDDLE ? JSUI_MOUSE_MIDDLE
                                                                                                     : JSUI_MOUSE_LEFT;
-      if (mb->is_pressed() && get_focus_mode() != FOCUS_NONE && !has_focus()) grab_focus();
+      int bit = 1 << int(b);
+      if (!mb->is_pressed() && !(mouse_buttons_ & bit)) {
+        // The press went elsewhere: the UI never saw it.
+        flushMessages();
+        return;
+      }
+      if (mb->is_pressed()) mouse_buttons_ |= bit;
+      else mouse_buttons_ &= ~bit;
       consumed = jsui_send_mouse_button(rt_, p.x, p.y, b, mb->is_pressed() ? 1 : 0, modsOf(mb)) != 0;
+      // Clicks the UI passes on don't take the keyboard away from the game.
+      if (consumed && mb->is_pressed() && get_focus_mode() != FOCUS_NONE && !has_focus()) grab_focus();
     }
   } else if (const auto* pg = Object::cast_to<InputEventPanGesture>(event.ptr())) {
     // Trackpad two-finger scroll (macOS): delta is in "wheel notches".

@@ -366,6 +366,15 @@ Node* InputManager::hitNode(Node* n, float px, float py, float* outX, float* out
   return n;
 }
 
+unsigned InputManager::capturesAt(float x, float y) {
+  Node* hit = hitTest(x, y);
+  if (!hit) return 0;
+  unsigned r = 0;
+  if (consumes(hit, kPointer)) r |= JSUI_HIT_POINTER;
+  if (consumes(hit, kWheel) || scrollableAncestor(hit, 0, 0)) r |= JSUI_HIT_SCROLL;
+  return r;
+}
+
 bool InputManager::consumes(const Node* hit, unsigned mask) const {
   for (const Node* n = hit; n; n = n->parent()) {
     if (n->type() == NodeType::TextInput) return true;
@@ -514,7 +523,9 @@ bool InputManager::mouseMove(float x, float y) {
   // propagation path listens to moves.
   if (moved && alive(targetId) && consumes(alive(targetId), kMove))
     handled = dispatchPointer("pointermove", alive(targetId), mouse_, -1, x, y);
-  return handled || consumes(alive(hitId), kPointer) || consumes(alive(targetId), kPointer);
+  // While a button is held the whole gesture belongs to whoever got the press.
+  if (mouse_.buttons) return handled || mouse_.owned;
+  return handled || consumes(alive(hitId), kPointer);
 }
 
 void InputManager::focusFromPointer(Node* hit) {
@@ -539,6 +550,7 @@ bool InputManager::pointerDown(PointerState& p, uint32_t hitId, int button) {
     p.startX = p.x;
     p.startY = p.y;
     p.jsOwns = false;
+    p.owned = false;
   }
   if (button == 0) p.downId = hitId;
   Node* target = alive(p.captureId) ? alive(p.captureId) : alive(hitId);
@@ -557,7 +569,13 @@ bool InputManager::pointerDown(PointerState& p, uint32_t hitId, int button) {
     if (hit && hit == focused_ && hit->type() == NodeType::TextInput) editPointerDown(hit, p, mods_);
     selectedOnFocusId_ = 0;
   }
-  return handled || consumes(alive(hitId), kPointer);
+  // The first press decides who owns the gesture. A touch on a ScrollView
+  // that can scroll is the scroll view's (it may turn into a drag); a mouse
+  // press on its background is not.
+  Node* hit = alive(hitId);
+  if (first) p.owned = consumes(hit, kPointer) || (p.touch && scrollableAncestor(hit, 0, 0));
+  p.owned |= handled;
+  return p.owned;
 }
 
 bool InputManager::pointerUp(PointerState& p, uint32_t hitId, int button, bool cancel) {
@@ -577,13 +595,16 @@ bool InputManager::pointerUp(PointerState& p, uint32_t hitId, int button, bool c
     }
   }
   if (button == 0) p.downId = 0;
+  bool owned = p.owned;
   if (p.buttons == 0 || cancel) {
     if (!p.touch) dragInputId_ = 0;
     p.buttons = 0;
     p.captureId = 0;
     p.scrollingId = 0;
+    p.owned = false;
   }
-  return handled || consumes(alive(hitId), kPointer) || consumes(alive(targetId), kPointer);
+  // The release goes with its press: consumed when the UI consumed the press.
+  return handled || owned;
 }
 
 bool InputManager::mouseButton(float x, float y, int button, bool down, int mods) {
@@ -593,11 +614,13 @@ bool InputManager::mouseButton(float x, float y, int button, bool down, int mods
   uint32_t hitId = idOf(hitTest(x, y));
   int bit = domButtonBit(button);
   if (down) {
-    if (mouse_.buttons & bit) return consumed || consumes(alive(hitId), kPointer);  // duplicate down
-    return pointerDown(mouse_, hitId, button) || consumed;
+    if (mouse_.buttons & bit) return mouse_.owned;  // duplicate down
+    bool first = mouse_.buttons == 0;
+    // The move to the press point reported hover: the press decides.
+    return pointerDown(mouse_, hitId, button) || (!first && consumed);
   }
   if (!(mouse_.buttons & bit)) return consumed || consumes(alive(hitId), kPointer);  // stray up
-  bool r = pointerUp(mouse_, hitId, button, false) || consumed;
+  bool r = pointerUp(mouse_, hitId, button, false);
   // Capture released: the pointer may now be over something else.
   if (mouse_.buttons == 0 && mouseInside_) {
     uint32_t h = idOf(hitTest(x, y));
@@ -654,7 +677,7 @@ bool InputManager::touch(int id, int phase, float x, float y) {
     p.y = y;
     uint32_t hitId = idOf(hitTest(x, y));
     updateHover(p, alive(hitId));
-    if (p.buttons) return consumes(alive(hitId), kPointer);  // duplicate begin
+    if (p.buttons) return p.owned;  // duplicate begin
     // A touch on a flinging / animating ScrollView catches it (like iOS):
     // the animation stops and the touch belongs to the scroll view, so it
     // neither presses what is under the finger nor needs the slop to drag.
@@ -668,6 +691,7 @@ bool InputManager::touch(int id, int phase, float x, float y) {
       p.downId = 0;
       p.scrollingId = svId;
       p.dragStarted = false;
+      p.owned = true;
       ScrollState& st = scrollState(alive(svId));
       st.dragging = true;
       st.sampleCount = 0;
@@ -709,13 +733,14 @@ bool InputManager::touch(int id, int phase, float x, float y) {
         }
         dispatchPointer("pointercancel", alive(targetId), p, 0, x, y);
         p.scrollingId = svId;
+        p.owned = true;
         p.downId = 0;
         if ((sv = alive(svId))) beginDrag(p, sv);
         if ((sv = alive(svId))) dragTo(p, sv, x, y);
         return true;
       }
     }
-    return handled || consumes(alive(hitId), kPointer) || consumes(alive(targetId), kPointer);
+    return handled || p.owned;
   }
   // End / cancel.
   bool wasScrolling = p.scrollingId != 0;
@@ -989,6 +1014,15 @@ void InputManager::tickFocusScopes() {
 // --------------------------------------------------------------- keyboard
 
 bool InputManager::key(const char* keyName, const char* code, bool down, bool repeat, int mods) {
+  std::string id = code && *code ? code : keyName ? keyName : "";
+  bool r = keyAction(keyName, code, down, repeat, mods);
+  if (!down) return consumedKeys_.erase(id) > 0 || r;
+  if (r) consumedKeys_.insert(id);
+  else if (!repeat) consumedKeys_.erase(id);
+  return r || (repeat && consumedKeys_.count(id) > 0);
+}
+
+bool InputManager::keyAction(const char* keyName, const char* code, bool down, bool repeat, int mods) {
   mods_ = mods;
   keyboardModality_ = true;
   std::string k = keyName ? keyName : "";
@@ -1052,6 +1086,24 @@ void InputManager::padRepeat(Repeat& r, int dir) {
 }
 
 bool InputManager::gamepadButton(int pad, int button, bool down, float value) {
+  Pad* ps = (pad >= 0 && pad < int(pads_.size()) && button >= 0 && button < 32) ? &pads_[size_t(pad)] : nullptr;
+  bool wasDown = ps && (ps->buttons >> button) & 1u;
+  bool r = gamepadButtonAction(pad, button, down, value);
+  if (!ps) return r;
+  // A press the UI consumed keeps its repeats and release; one it passed on
+  // stays the game's.
+  uint32_t bit = 1u << button;
+  if (!down) {
+    bool was = (ps->consumed & bit) != 0;
+    ps->consumed &= ~bit;
+    return was || r;
+  }
+  if (r) ps->consumed |= bit;
+  else if (!wasDown) ps->consumed &= ~bit;
+  return r || (wasDown && (ps->consumed & bit));
+}
+
+bool InputManager::gamepadButtonAction(int pad, int button, bool down, float value) {
   keyboardModality_ = true;
   Pad* ps = (pad >= 0 && pad < int(pads_.size())) ? &pads_[size_t(pad)] : nullptr;
   bool wasDown = ps && button >= 0 && button < 32 && (ps->buttons >> button) & 1u;
@@ -1067,7 +1119,7 @@ bool InputManager::gamepadButton(int pad, int button, bool down, float value) {
   ev["repeat"] = Value(down && wasDown);
   bool handled = dispatch(std::move(ev));
   bool edge = down != wasDown || !ps;
-  if (!edge) return handled || focused_ != nullptr;
+  if (!edge) return handled;
   // D-pad: 12 up, 13 down, 14 left, 15 right.
   int dir = button == 12 ? 0 : button == 13 ? 1 : button == 14 ? 2 : button == 15 ? 3 : -1;
   if (dir >= 0) {
@@ -1077,8 +1129,8 @@ bool InputManager::gamepadButton(int pad, int button, bool down, float value) {
     }
     if (handled) return true;
     if (ps) padRepeat(ps->dpad, dir);
-    navStep(dir);
-    return true;
+    // Nothing to move focus to or scroll: the D-pad is the game's.
+    return navStep(dir);
   }
   if (button == 0 && down && !handled && focusedUsable()) {
     Node* f = focused_;
@@ -1115,7 +1167,8 @@ bool InputManager::gamepadAxis(int pad, int axis, float value) {
     // Right stick: continuous scrolling of the focused / hovered ScrollView
     // (tickSticks), unless JS took the stick.
     ps->rightBlocked = handled;
-    return handled || std::hypot(ps->axes[2], ps->axes[3]) > kScrollStickDeadzone;
+    return handled || (std::hypot(ps->axes[2], ps->axes[3]) > kScrollStickDeadzone &&
+                       (scrollTarget(false) || scrollTarget(true)));
   }
   if (!ps || (axis != 0 && axis != 1)) return handled;
   // Left stick -> direction of the dominant axis beyond the deadzone.
@@ -1131,7 +1184,7 @@ bool InputManager::gamepadAxis(int pad, int axis, float value) {
     ps->leftScrolls = false;
     return true;
   }
-  if (dir == ps->stick.dir) return dir >= 0;
+  if (dir == ps->stick.dir) return dir >= 0 && ps->stickConsumed;
   if (dir < 0) {
     ps->stick.dir = -1;
     ps->leftScrolls = false;
@@ -1143,11 +1196,12 @@ bool InputManager::gamepadAxis(int pad, int axis, float value) {
   if (ps->leftScrolls) {
     ps->stick.dir = dir;
     ps->stick.next = std::numeric_limits<double>::infinity();
-    return true;
+    ps->stickConsumed = scrollTarget(dir >= 2) != nullptr;
+    return ps->stickConsumed;
   }
   padRepeat(ps->stick, dir);
-  navStep(dir);
-  return true;
+  ps->stickConsumed = navStep(dir);
+  return ps->stickConsumed;
 }
 
 void InputManager::gamepadConnected(int pad, bool connected, const char* id) {

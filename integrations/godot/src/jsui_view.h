@@ -76,6 +76,8 @@ class JsuiView : public godot::Control {
   bool get_autostart() const { return autostart_; }
   void set_forward_gamepad(bool on) { forward_gamepad_ = on; }
   bool get_forward_gamepad() const { return forward_gamepad_; }
+  void set_input_pass_through(bool on) { input_pass_through_ = on; }
+  bool get_input_pass_through() const { return input_pass_through_; }
   void set_force_cpu(bool on);
   bool get_force_cpu() const { return force_cpu_; }
   void set_runtime_view(const godot::NodePath& path);
@@ -124,8 +126,17 @@ class JsuiView : public godot::Control {
   // The React Native root tag of the view's surface (1: a runtime's main
   // surface; 0 while not running).
   int get_root_tag() const { return rt_ ? jsui_surface_tag(rt_) : 0; }
+  // jsui_hit_test at a point in the view's local coordinates: HIT_POINTER /
+  // HIT_SCROLL flags, 0 where input passes through the UI.
+  int hit_test(const godot::Vector2& position) const;
+  static constexpr int HIT_POINTER = JSUI_HIT_POINTER;
+  static constexpr int HIT_SCROLL = JSUI_HIT_SCROLL;
 
   void _gui_input(const godot::Ref<godot::InputEvent>& event) override;
+  // With input_pass_through, only points where the UI captures input are
+  // inside the view, so Godot hands the rest to the controls behind it and to
+  // the game (_unhandled_input), and never gives the view focus for them.
+  bool _has_point(const godot::Vector2& point) const override;
   void _notification(int what);
 
  protected:
@@ -206,6 +217,8 @@ class JsuiView : public godot::Control {
   float pixel_ratio_ = 0.f;  // 0: follow the canvas -> screen scale
   bool autostart_ = true;
   bool forward_gamepad_ = true;
+  bool input_pass_through_ = true;
+  int mouse_buttons_ = 0;  // buttons whose press reached the UI (DOM bits)
   bool force_cpu_ = false;
   godot::NodePath runtime_view_;
   godot::String component_;

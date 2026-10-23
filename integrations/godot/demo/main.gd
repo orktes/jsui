@@ -12,8 +12,9 @@ extends Control
 ##   --self-test         with --capture: drive the UI through Godot's own input
 ##                       pipeline (Input.parse_input_event, like real devices):
 ##                       hover, click, wheel, trackpad pan, keyboard into a
-##                       TextInput, gamepad focus, the Ping button and an
-##                       unhandled click, plus a call_ui. Prints PASS / FAIL
+##                       TextInput, gamepad focus, the Ping button, clicks
+##                       that pass through the UI to the game and to a
+##                       control behind it, plus a call_ui. Prints PASS / FAIL
 ##                       per check and fails the run on any FAIL
 ##   --force-cpu         JsuiView.force_cpu: CPU raster + texture upload even
 ##                       when Godot runs on Vulkan / Metal
@@ -466,13 +467,13 @@ func _run_self_test() -> void:
 	# Bridge: click Ping (Host.call -> resolve_call), call into the UI, and a
 	# click on empty space falls through to _unhandled_input.
 	var pongs := _pongs
+	var clicks := _unhandled_clicks
 	await _click(_center("ping"))
 	_check("ping", await _wait_for(func(): return _pongs > pongs), "Host.call('godot.ping') answered")
+	_check("handled click", _unhandled_clicks == clicks, "a click the UI handles doesn't reach the game")
 	ui.call_ui("ui.flash", {"text": "hello from Godot"}, _on_flash_answer)
 	_check("call_ui", await _wait_for(func(): return _ui_answers > 0), "ui.flash handler answered")
-	var clicks := _unhandled_clicks
-	await _click(Vector2(200, 620))  # open space below the season card
-	_check("unhandled click", _unhandled_clicks > clicks, "reaches the game")
+	await _test_pass_through()
 
 	await _test_surface()  # with the render hand-off check (--max-render-waits)
 	await _test_runtime_freed_first()
@@ -480,6 +481,37 @@ func _run_self_test() -> void:
 	_testing = false
 	await _wait(0.8)  # let the toast and springs settle for the capture
 	_finish()
+
+
+## Input pass-through: what nothing in the UI captures goes to the game,
+## painted UI or not, and to Godot controls behind the view.
+func _test_pass_through() -> void:
+	var open_space := Vector2(200, 620)  # below the season card
+	# The bridge pill's "GODOT" label: painted, but nothing in it handles input.
+	var label := Vector2(70, _center("ping").y)
+	_check("hit test", (ui.hit_test(_center("ping")) & JsuiView.HIT_POINTER) != 0 and ui.hit_test(open_space) == 0 \
+			and ui.hit_test(label) == 0, "Ping captures pointers, open space and the label don't")
+	var clicks := _unhandled_clicks
+	await _click(open_space)
+	_check("unhandled click", _unhandled_clicks > clicks, "reaches the game")
+	ui.release_focus()
+	clicks = _unhandled_clicks
+	await _click(label)
+	_check("click through painted UI", _unhandled_clicks > clicks and not ui.has_focus(),
+			"a click on a label without handlers reaches the game and leaves focus alone")
+	# A Godot control behind the view gets clicks on the UI's empty parts.
+	var behind := Button.new()
+	behind.position = open_space - Vector2(40, 15)
+	behind.size = Vector2(80, 30)
+	var pressed := [0]
+	behind.pressed.connect(func(): pressed[0] += 1)
+	add_child(behind)
+	move_child(behind, ui.get_index())  # drawn (and hit) below the JsuiView
+	await get_tree().process_frame
+	await _click(open_space)
+	_check("control behind", pressed[0] == 1, "a Button behind the view is pressed through it")
+	behind.queue_free()
+	await get_tree().process_frame
 
 
 ## A second JsuiView on the same runtime (runtime_view): the bundle's

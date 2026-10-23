@@ -697,9 +697,33 @@ JSUI_API void jsui_free(void* p);
 /* ----------------------------------------------------------------- Input
  *
  * Pointer coordinates are logical px relative to the viewport's top-left.
- * Each function returns non-zero if the UI consumed the event (it hit an
- * element with a handler, or a focused element handled the key), so the game
- * can decide whether to process the input itself.
+ *
+ * Each jsui_send_* function returns non-zero if the UI consumed the event, so
+ * the game processes the input itself only when it gets 0 (e.g. a click on a
+ * part of a HUD that nothing in the UI handles goes through to the world).
+ * Consumed means something in the UI captured it, not that the point is over
+ * painted UI:
+ *  - pointer / touch: the hit element or an ancestor has a press, pointer,
+ *    hover or responder handler (onPress, onPointerDown, onHoverIn,
+ *    onStartShouldSetResponder, PanResponder, ...) or is a TextInput, or JS
+ *    called preventDefault(). A touch on a ScrollView that can scroll is
+ *    consumed too. Views with pointerEvents 'none' / 'box-none' are not hit
+ *    themselves, so full-screen containers let input through. A decorative
+ *    backdrop that should block the game needs a handler, e.g.
+ *    onStartShouldSetResponder={() => true}.
+ *  - a press decides its whole gesture: the moves while buttons are held and
+ *    the release are consumed exactly when the press was (a drag the game
+ *    started over empty UI stays the game's, even over buttons).
+ *  - wheel: JS handled it or a ScrollView scrolled.
+ *  - keys / gamepad buttons: a JS handler called preventDefault(), or a
+ *    default action ran (focus moved, a focused element was activated, a
+ *    ScrollView scrolled, a TextInput edited). The repeats and the release of
+ *    a consumed press are consumed too; those of a press the UI passed on are
+ *    not.
+ *  - sticks: focus moved, a ScrollView scrolls, or JS handled it.
+ * jsui_hit_test answers the pointer question before any event is sent, for
+ * hosts that route input by hit testing (a Godot Control's _has_point, a web
+ * overlay deciding whether the page below gets an event).
  */
 typedef enum JsuiMouseButton {
     JSUI_MOUSE_LEFT = 0,
@@ -722,6 +746,16 @@ enum {
  * spacing of events that arrive between two frames. Without it events carry
  * the time of the last tick. Timestamps never go backwards. NaN clears it. */
 JSUI_API void jsui_set_event_time(JsuiRuntime* rt, double time_ms);
+
+/* jsui_hit_test flags. */
+enum {
+    JSUI_HIT_POINTER = 1 << 0, /* presses / pointer input at the point are captured */
+    JSUI_HIT_SCROLL = 1 << 1   /* a ScrollView that can scroll (or a wheel handler) is there */
+};
+/* What the UI would capture at (x, y) (logical px): JSUI_HIT_* flags, 0 when
+ * input there passes through to whatever is behind the UI. Uses the current
+ * layout and sends no events. */
+JSUI_API int jsui_hit_test(JsuiRuntime* rt, float x, float y);
 
 JSUI_API int jsui_send_mouse_move(JsuiRuntime* rt, float x, float y);
 JSUI_API int jsui_send_mouse_button(JsuiRuntime* rt, float x, float y, JsuiMouseButton button, int down, int mods);

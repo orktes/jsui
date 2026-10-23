@@ -887,6 +887,164 @@ TEST(input_capi_click_roundtrip) {
   jsui_destroy(rt);
 }
 
+// ------------------------------------------------------- pass-through
+
+// What the UI consumes is what something in it captures, not what it paints:
+// the game gets everything else (e.g. clicks on empty parts of a HUD).
+TEST(input_pass_through_pointer) {
+  Fixture f;
+  Node* root = f.doc().root();
+  Node* deco = f.box(root, 0, 0, 100, 100);  // painted, no handlers
+  Node* btn = f.box(root, 200, 0, 100, 100, R"({"__events":["press"]})");
+  Node* label = f.box(btn, 10, 10, 50, 20);  // inside the button: the button captures it
+  Node* overlay = f.box(root, 0, 150, 400, 150);  // full-width container...
+  f.style(overlay).pointerEvents = PointerEvents::BoxNone;
+  Node* chip = f.box(overlay, 10, 10, 40, 40, R"({"__events":["hoverIn"]})");  // ...with one hover target
+  f.layout();
+  (void)deco;
+  (void)label;
+  (void)chip;
+  CHECK_EQ(f.in().capturesAt(50, 50), 0u);
+  CHECK_EQ(f.in().capturesAt(220, 20), unsigned(JSUI_HIT_POINTER));
+  CHECK_EQ(f.in().capturesAt(350, 50), 0u);   // root
+  CHECK_EQ(f.in().capturesAt(200, 250), 0u);  // box-none container
+  CHECK_EQ(f.in().capturesAt(20, 170), unsigned(JSUI_HIT_POINTER));
+
+  CHECK(!f.in().mouseMove(50, 50));
+  CHECK(!f.in().mouseButton(50, 50, 0, true, 0));
+  CHECK(!f.in().mouseButton(50, 50, 0, false, 0));
+  CHECK(!f.in().mouseButton(200, 250, 2, true, 0));
+  CHECK(!f.in().mouseButton(200, 250, 2, false, 0));
+  CHECK(f.in().mouseMove(20, 170));  // hover target
+  CHECK(!f.in().mouseMove(100, 250));
+  CHECK(f.in().mouseButton(220, 20, 0, true, 0));
+  CHECK(f.in().mouseButton(220, 20, 0, false, 0));
+
+  // A press decides its gesture: a drag the game started over empty UI stays
+  // the game's when it crosses the button, and the other way round.
+  CHECK(!f.in().mouseButton(50, 50, 0, true, 0));
+  CHECK(!f.in().mouseMove(220, 20));
+  CHECK(!f.in().mouseButton(220, 20, 2, true, 0));  // second button: same gesture
+  CHECK(!f.in().mouseButton(220, 20, 2, false, 0));
+  CHECK(!f.in().mouseButton(220, 20, 0, false, 0));
+  CHECK(f.in().mouseMove(225, 25));  // hover again once released
+  CHECK(f.in().mouseButton(220, 20, 0, true, 0));
+  CHECK(f.in().mouseMove(50, 50));
+  CHECK(f.in().mouseButton(50, 50, 0, false, 0));
+  CHECK(!f.in().mouseMove(55, 55));
+
+  // Touches: the same rules.
+  CHECK(!f.in().touch(1, 0, 50, 50));
+  CHECK(!f.in().touch(1, 1, 220, 20));
+  CHECK(!f.in().touch(1, 2, 220, 20));
+  CHECK(f.in().touch(2, 0, 220, 20));
+  CHECK(f.in().touch(2, 1, 50, 50));
+  CHECK(f.in().touch(2, 2, 50, 50));
+
+  // JS can take any event with preventDefault().
+  f.js("prevent.pointerdown = true;");
+  CHECK(f.in().mouseButton(50, 50, 0, true, 0));
+  CHECK(f.in().mouseMove(60, 60));
+  CHECK(f.in().mouseButton(60, 60, 0, false, 0));
+}
+
+TEST(input_pass_through_scroll) {
+  Fixture f;
+  Node* root = f.doc().root();
+  Node* sv = f.box(root, 0, 0, 100, 100, "{}", NodeType::ScrollView);
+  f.box(sv, 0, 0, 100, 300);
+  Node* fixed = f.box(root, 200, 0, 100, 100, "{}", NodeType::ScrollView);  // content fits
+  f.box(fixed, 0, 0, 100, 50);
+  f.layout();
+  CHECK_EQ(f.in().capturesAt(50, 50), unsigned(JSUI_HIT_SCROLL));
+  CHECK_EQ(f.in().capturesAt(250, 20), 0u);
+  // A touch on a list can become a drag: the list's from the start.
+  CHECK(f.in().touch(1, 0, 50, 50));
+  CHECK(f.in().touch(1, 2, 50, 50));
+  CHECK(!f.in().touch(1, 0, 250, 20));
+  CHECK(!f.in().touch(1, 2, 250, 20));
+  // The mouse doesn't drag-scroll: a press on the list's background passes.
+  CHECK(!f.in().mouseButton(50, 50, 0, true, 0));
+  CHECK(!f.in().mouseButton(50, 50, 0, false, 0));
+  CHECK(f.in().mouseWheel(50, 50, 0, 40));
+  CHECK(!f.in().mouseWheel(250, 20, 0, 40));
+}
+
+TEST(input_pass_through_keys_and_gamepad) {
+  Fixture f;
+  Node* root = f.doc().root();
+  f.box(root, 0, 0, 100, 100);  // nothing focusable, nothing to scroll
+  f.layout();
+  CHECK(!f.in().key("Tab", "Tab", true, false, 0));
+  CHECK(!f.in().key("Tab", "Tab", false, false, 0));
+  CHECK(!f.in().key("ArrowDown", "ArrowDown", true, false, 0));
+  CHECK(!f.in().key("ArrowDown", "ArrowDown", true, true, 0));
+  CHECK(!f.in().key("ArrowDown", "ArrowDown", false, false, 0));
+  CHECK(!f.in().key("Enter", "Enter", true, false, 0));
+  CHECK(!f.in().key("Enter", "Enter", false, false, 0));
+  CHECK(!f.in().gamepadButton(0, 13, true, 1));  // D-pad down
+  CHECK(!f.in().gamepadButton(0, 13, false, 0));
+  CHECK(!f.in().gamepadButton(0, 0, true, 1));  // A with nothing focused
+  CHECK(!f.in().gamepadButton(0, 0, true, 1));  // held (host resends)
+  CHECK(!f.in().gamepadButton(0, 0, false, 0));
+  CHECK(!f.in().gamepadAxis(0, 1, 1.f));  // left stick: nothing to navigate or scroll
+  CHECK(!f.in().gamepadAxis(0, 1, 0.9f));
+  CHECK(!f.in().gamepadAxis(0, 1, 0.f));
+  CHECK(!f.in().gamepadAxis(0, 3, 1.f));  // right stick: no ScrollView
+  CHECK(!f.in().gamepadAxis(0, 3, 0.f));
+
+  // JS took the press: its repeats and release are the UI's too.
+  f.js("prevent.keydown = true; prevent.gamepadbutton = true;");
+  CHECK(f.in().key("x", "KeyX", true, false, 0));
+  f.js("prevent = {};");
+  CHECK(f.in().key("x", "KeyX", true, true, 0));
+  CHECK(f.in().key("x", "KeyX", false, false, 0));
+  CHECK(!f.in().key("x", "KeyX", true, false, 0));  // next press: not handled
+  CHECK(!f.in().key("x", "KeyX", false, false, 0));
+  f.js("prevent.gamepadbutton = true;");
+  CHECK(f.in().gamepadButton(0, 3, true, 1));
+  f.js("prevent = {};");
+  CHECK(f.in().gamepadButton(0, 3, false, 0));
+  CHECK(!f.in().gamepadButton(0, 3, true, 1));
+  CHECK(!f.in().gamepadButton(0, 3, false, 0));
+
+  // Something to focus: navigation consumes the keys and the D-pad.
+  Node* a = f.box(root, 0, 200, 50, 50, R"({"__events":["press"]})");
+  Node* b = f.box(root, 0, 250, 50, 50, R"({"__events":["press"]})");
+  f.layout();
+  CHECK(f.in().key("Tab", "Tab", true, false, 0));
+  CHECK(f.in().key("Tab", "Tab", false, false, 0));
+  CHECK_EQ(f.in().focused(), a);
+  CHECK(f.in().gamepadButton(0, 13, true, 1));
+  CHECK(f.in().gamepadButton(0, 13, false, 0));
+  CHECK_EQ(f.in().focused(), b);
+  CHECK(f.in().gamepadButton(0, 0, true, 1));  // activates b
+  CHECK(f.in().gamepadButton(0, 0, false, 0));
+}
+
+TEST(input_capi_hit_test) {
+  JsuiConfig cfg;
+  jsui_config_init(&cfg);
+  cfg.width = 200;
+  cfg.height = 200;
+  JsuiRuntime* rt = jsui_create(&cfg);
+  const char* src =
+      "const n = __jsui_native;"
+      "const btn = n.createNode('View');"
+      "n.setProps(btn, {style: {width: 100, height: 50, margin: 10}, __events: ['press']});"
+      "n.appendChild(n.rootId, btn);"
+      "globalThis.__jsui_dispatchEvent = e => false;";
+  CHECK_EQ(jsui_load_bundle_source(rt, src, std::strlen(src), "hit.js"), 0);
+  jsui_tick(rt, 0);
+  CHECK_EQ(jsui_hit_test(rt, 20, 20), JSUI_HIT_POINTER);
+  CHECK_EQ(jsui_hit_test(rt, 150, 150), 0);
+  CHECK_EQ(jsui_hit_test(rt, NAN, 20), 0);
+  CHECK_EQ(jsui_hit_test(rt, -5, 20), 0);
+  CHECK(jsui_send_mouse_button(rt, 150, 150, JSUI_MOUSE_LEFT, 1, 0) == 0);
+  CHECK(jsui_send_mouse_button(rt, 150, 150, JSUI_MOUSE_LEFT, 0, 0) == 0);
+  jsui_destroy(rt);
+}
+
 // ------------------------------------------------------------ performance
 
 TEST(input_perf_hit_test) {
