@@ -297,7 +297,7 @@ export class HostTextureSet {
     const d = this._desc >> 2;
     M.HEAP32.fill(0, d, d + DESC_BYTES / 4);
     M.HEAP32[d] = kind;
-    M.HEAPU32[d + 1] = handle;  // pointer / GL name (wasm32)
+    M.HEAP32[d + 1] = handle | 0;  // pointer / GL name (wasm32; the module exports HEAP32, not HEAPU32)
     M.HEAP32[d + 2] = 0;        // format 0: RGBA8 UNORM
     M.HEAP32[d + 3] = width;
     M.HEAP32[d + 4] = height;

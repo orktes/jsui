@@ -11,13 +11,13 @@ function mockModule() {
   let top = 64;
   const calls = [];
   const M = {
-    HEAP32: new Int32Array(mem), HEAPU32: new Uint32Array(mem), HEAPU8: new Uint8Array(mem),
+    HEAP32: new Int32Array(mem), HEAPU8: new Uint8Array(mem),
     _malloc: (n) => { const p = top; top += (n + 7) & ~7; return p; },
     _free: () => {},
     calls,
     _jsui_set_texture: (rt, key, p) => {
       const d = p >> 2;
-      calls.push(['set', key, { kind: M.HEAP32[d], handle: M.HEAPU32[d + 1], format: M.HEAP32[d + 2],
+      calls.push(['set', key, { kind: M.HEAP32[d], handle: M.HEAP32[d + 1] >>> 0, format: M.HEAP32[d + 2],
         width: M.HEAP32[d + 3], height: M.HEAP32[d + 4], flags: M.HEAP32[d + 5], usage: M.HEAP32[d + 6] }]);
       return 1;
     },
