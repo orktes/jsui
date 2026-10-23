@@ -609,4 +609,9 @@ bool Runtime::wantsFrame() const {
   return false;
 }
 
+bool Runtime::animatingFrames(const Surface& s) const {
+  return s.input->animating() || s.doc.layoutAnimating() || animated->animating() || !animated->ends.empty() ||
+         (js && js->hasPendingWork(now + 17));
+}
+
 }  // namespace jsui

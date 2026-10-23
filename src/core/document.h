@@ -64,7 +64,17 @@ class Document {
   void markLayoutDirty() { layoutDirty_ = true; paintDirty_ = true; }
   void markPaintDirty() { paintDirty_ = true; }
   bool paintDirty() const { return paintDirty_; }
-  void clearPaintDirty() { paintDirty_ = false; }
+  void clearPaintDirty() {
+    paintDirty_ = false;
+    exactRepaint_ = false;
+  }
+  // The painter drew something approximately while it moved or scaled (a
+  // cached layer at the nearest whole pixel, a shadow from the mask of a
+  // nearby size): it repaints it exactly in the next frame that renders,
+  // which Runtime::needsRedraw asks for once nothing animates any more (not
+  // in every frame while something does, so the UI still goes idle).
+  void markExactRepaint() { exactRepaint_ = true; }
+  bool exactRepaintPending() const { return exactRepaint_; }
 
   // LayoutAnimation. arm(): the next layout pass animates the frames that
   // change (`update`), fades / scales in nodes that appear (`create`), and
@@ -145,7 +155,7 @@ class Document {
   uint32_t* idCounter_ = &nextId_;
   float width_ = 0, height_ = 0, pixelRatio_ = 1;
   bool autoWidth_ = false, autoHeight_ = false;
-  bool layoutDirty_ = true, paintDirty_ = true;
+  bool layoutDirty_ = true, paintDirty_ = true, exactRepaint_ = false;
   uint32_t fontGeneration_ = 0;  // FontManager::generation the text caches were built with
   YGConfigRef yogaConfig_ = nullptr;
 };
