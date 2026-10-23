@@ -90,6 +90,14 @@ jsui_texture_updated(rt, "trailer");   // after each new video frame
 <HostTexture name="trailer" resizeMode="contain" style={{ width: 640, aspectRatio: 16 / 9, borderRadius: 12 }} />
 ```
 
+Lottie animations play natively (Skia's Skottie, no JS per frame) with
+lottie-react-native's API:
+
+```jsx
+import LottieView from 'lottie-react-native';
+<LottieView source={require('./victory.json')} autoPlay loop style={{ width: 200, height: 200 }} />
+```
+
 ## npm packages
 
 `@orktes/jsui-react` (the React Native API), `@orktes/jsui-cli` (`jsui build` / `jsui dev`)

@@ -19,7 +19,6 @@ import { useImperativeHandle, useRef } from 'react';
 import { jsx } from 'react/jsx-runtime';
 import { native, warnOnce } from './native.js';
 import { resolveAssetSource } from './components/basic.js';
-import { AnimatedNode } from './animated/nodes.js';
 import { createAnimatedComponent } from './animated/createAnimatedComponent.js';
 
 const hasNative = typeof native.lottieData === 'function' && native.lottie !== false;
@@ -101,7 +100,9 @@ export function LottieView(props) {
   if (onAnimationLoaded) out.onLoad = () => onAnimationLoaded();
   if (onAnimationFailure) out.onError = (e) => onAnimationFailure(String(e.nativeEvent.error || 'failed to load'));
   if (onAnimationFinish) out.onAnimationFinish = (e) => onAnimationFinish(!!e.nativeEvent.isCancelled);
-  return jsx(progress instanceof AnimatedNode ? AnimatedLottieHost : 'LottieView', out);
+  // Always through the animated host, so `progress` can turn into an
+  // Animated value (and back) without remounting the native view.
+  return jsx(AnimatedLottieHost, out);
 }
 LottieView.displayName = 'LottieView';
 // Animated.createAnimatedComponent(LottieView): an animated `progress` is

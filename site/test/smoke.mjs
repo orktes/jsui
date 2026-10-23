@@ -25,7 +25,7 @@ if (!fs.existsSync(path.join(DIR, 'index.html'))) {
 
 const ROUTES = ['/', '/screens', '/screens/main-menu', '/screens/hud', '/screens/inventory', '/screens/battle-pass',
   '/screens/scoreboard', '/screens/dialogue', '/screens/settings', '/screens/loading', '/screens/notifications',
-  '/screens/cinematic',
+  '/screens/cinematic', '/screens/victory',
   '/interactions', '/input', '/motion', '/playground', '/embed'].filter((r) => !filters.length || filters.some((f) => r.includes(f)));
 const SIZES = [{ name: 'desktop', width: 1440, height: 900, scale: 1 }, { name: 'phone', width: 390, height: 844, scale: 2 }];
 
