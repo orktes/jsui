@@ -1510,8 +1510,9 @@ enum PaintGroup : uint32_t {
   kGroupOutline = 1u << 17,
   kGroupText = 1u << 18,
   kGroupLottie = 1u << 19,
+  kGroupShader = 1u << 20,  // ShaderView uniforms ("uniform:<name>"), read when painting
 };
-constexpr uint32_t kAllPaintGroups = (1u << 20) - 1;
+constexpr uint32_t kAllPaintGroups = (1u << 21) - 1;
 
 struct PaintKey {
   const char* key;
@@ -1591,6 +1592,7 @@ constexpr PaintKey kPaintKeys[] = {
 };
 
 uint32_t paintGroupOf(const std::string& key) {
+  if (key.compare(0, 8, "uniform:") == 0) return kGroupShader;
   size_t lo = 0, hi = sizeof(kPaintKeys) / sizeof(kPaintKeys[0]);
   while (lo < hi) {
     size_t mid = (lo + hi) / 2;

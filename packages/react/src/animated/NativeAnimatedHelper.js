@@ -135,7 +135,8 @@ export const SUPPORTED_TRANSFORMS = new Set([
 ]);
 
 export function validateStyle(key) {
-  if (!SUPPORTED_STYLES.has(key)) {
+  // ShaderView uniforms (packages/react/src/shader.js): paint-only.
+  if (!SUPPORTED_STYLES.has(key) && !key.startsWith('uniform:')) {
     throw new Error(`Style property '${key}' is not supported by native animated module`);
   }
 }

@@ -23,7 +23,7 @@ function detach(n) {
   }
 }
 
-const TYPES = new Set(['View', 'Text', 'RawText', 'Image', 'ScrollView', 'TextInput', 'LottieView']);
+const TYPES = new Set(['View', 'Text', 'RawText', 'Image', 'ScrollView', 'TextInput', 'LottieView', 'ShaderView']);
 
 export const mock = {
   nodes,
@@ -159,6 +159,19 @@ globalThis.__jsui_native = {
   lottieCommand(id, cmd, a, b) {
     calls.push(['lottieCommand', id, cmd, a, b]);
     return true;
+  },
+  // ShaderView (src/render/shader_view.cpp): a stand-in compiler that
+  // reports uniforms / children declared on their own lines.
+  shaderInfo(sksl) {
+    if (typeof sksl !== 'string') throw new TypeError('shaderInfo: expected an SkSL string');
+    if (!/\bmain\s*\(/.test(sksl)) return { error: 'error: 1: missing main()' };
+    const uniforms = [];
+    const children = [];
+    for (const m of sksl.matchAll(/(layout\(color\)\s*)?uniform\s+(\w+)\s+(\w+)/g)) {
+      if (m[2] === 'shader') children.push(m[3]);
+      else uniforms.push({ name: m[3], type: m[2], count: 1, color: !!m[1] });
+    }
+    return { uniforms, children };
   },
   postMessage(name, json) {
     mock.messages.push([name, json]);

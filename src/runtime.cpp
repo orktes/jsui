@@ -16,6 +16,7 @@
 #include "js/engine.h"
 #include "render/image_cache.h"
 #include "render/lottie.h"
+#include "render/shader_view.h"
 #include "render/image_node.h"
 #include "render/painter.h"
 
@@ -54,6 +55,7 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
   if (cfg.base_url) baseUrl = cfg.base_url;
   images = std::make_unique<ImageCache>(*this);
   lotties = std::make_unique<LottieCache>(*this);
+  shaders = std::make_unique<ShaderEffects>(*this);
   animated = std::make_unique<NativeAnimated>(doc);
   animated->findView = [this](uint32_t id) { return findNode(id); };
   animated->buffers = &buffers;
@@ -91,6 +93,7 @@ void Runtime::attach(Surface& s) {
   d.images = images.get();
   d.textures = &textures;
   d.lotties = lotties.get();
+  d.shaders = shaders.get();
   s.input = std::make_unique<InputManager>(*this, d, s.cursor);
   InputManager* in = s.input.get();
   d.onNodeDestroyed = [this, in](Node* n) {
@@ -519,6 +522,9 @@ void Runtime::tick(double nowMs) {
   // views before this tick's layout).
   lotties->tick(nowMs);
   deliverLottieEvents();
+  // ShaderViews whose shader reads `time` repaint on the same clock.
+  shaders->tick(nowMs);
+  deliverShaderEvents();
   for (auto& s : surfaces_) {
     s->doc.layout();
     s->doc.tickLayoutAnimations(nowMs);
@@ -535,6 +541,7 @@ void Runtime::tickNative(double nowMs) {
   for (auto& s : surfaces_) s->doc.now = nowMs;
   animated->tick(nowMs);  // end events stay queued until the next tick()
   lotties->tick(nowMs);   // so do LottieView events
+  shaders->tick(nowMs);   // and ShaderView errors
   for (auto& s : surfaces_) {
     s->doc.layout();
     s->doc.tickLayoutAnimations(nowMs);
@@ -587,6 +594,17 @@ void Runtime::deliverLottieEvents() {
     if (e.kind == LottieCache::Event::Kind::Failed) ev.emplace("error", Value(e.error));
     if (e.kind == LottieCache::Event::Kind::Finished) ev.emplace("isCancelled", Value(e.cancelled));
     js->dispatchEvent(Value(std::move(ev)));
+  }
+}
+
+void Runtime::deliverShaderEvents() {
+  if (!js || shaders->events.empty()) return;
+  std::vector<ShaderEffects::Event> events = std::move(shaders->events);
+  shaders->events.clear();
+  for (const ShaderEffects::Event& e : events) {
+    Node* n = findNode(e.node);
+    if (!n || n->type() != NodeType::Shader || !listensFor(n, "error")) continue;
+    js->dispatchEvent(Value(Value::Object{{"type", Value("error")}, {"target", Value(double(e.node))}, {"error", Value(e.error)}}));
   }
 }
 
@@ -674,7 +692,7 @@ bool Runtime::wantsFrame() const {
   // A pending repaint alone is not a reason to tick: the host paints after
   // the tick it already ran.
   if (reloadRequested_ || loader.pending() > 0 || (js && js->hasPendingWork(now + 17)) || animated->animating() ||
-      !animated->ends.empty() || lotties->animating() || state.hasDirty() || buffers.hasDirty() || textures.hasDirty() || !uiResults_.empty() || !doomed_.empty())
+      !animated->ends.empty() || lotties->animating() || shaders->animating() || state.hasDirty() || buffers.hasDirty() || textures.hasDirty() || !uiResults_.empty() || !doomed_.empty())
     return true;
   for (const auto& s : surfaces_)
     if (s->input->animating() || s->doc.layoutAnimating() || imageEventsReady(s->doc) ||
@@ -685,7 +703,7 @@ bool Runtime::wantsFrame() const {
 
 bool Runtime::animatingFrames(const Surface& s) const {
   return s.input->animating() || s.doc.layoutAnimating() || animated->animating() || !animated->ends.empty() ||
-         lotties->animating() ||
+         lotties->animating() || shaders->animating() ||
          (js && js->hasPendingWork(now + 17));
 }
 

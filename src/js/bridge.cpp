@@ -8,6 +8,8 @@
 #include "input/input.h"
 #include "js/engine_impl.h"
 #include "render/lottie.h"
+#include "render/shader_view.h"
+#include "include/effects/SkRuntimeEffect.h"
 #include "runtime.h"
 
 namespace jsui {
@@ -259,6 +261,38 @@ JSValue js_lottieCommand(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
   return JS_NewBool(ctx, lottie::command(n, toStdString(ctx, argv[1]), a, b));
 }
 
+// shaderInfo(sksl) -> {error} | {uniforms: [{name, type, count, color}], children: [name]}:
+// compiles an SkSL shader (ShaderView source) like the view does, so JS can
+// report errors or list what the shader takes.
+JSValue js_shaderInfo(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  if (argc < 1 || !JS_IsString(argv[0])) return JS_ThrowTypeError(ctx, "shaderInfo: expected an SkSL string");
+  auto prog = runtimeOf(ctx).shaders->get(toStdString(ctx, argv[0]));
+  JSValue out = JS_NewObject(ctx);
+  if (!prog->effect) {
+    JS_SetPropertyStr(ctx, out, "error", JS_NewString(ctx, prog->error.c_str()));
+    return out;
+  }
+  static const char* const kTypes[] = {"float",    "float2",   "float3", "float4", "float2x2", "float3x3",
+                                       "float4x4", "int",      "int2",   "int3",   "int4"};
+  JSValue uniforms = JS_NewArray(ctx);
+  uint32_t i = 0;
+  for (const SkRuntimeEffect::Uniform& u : prog->effect->uniforms()) {
+    JSValue o = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, o, "name", JS_NewStringLen(ctx, u.name.data(), u.name.size()));
+    JS_SetPropertyStr(ctx, o, "type", JS_NewString(ctx, kTypes[int(u.type)]));
+    JS_SetPropertyStr(ctx, o, "count", JS_NewInt32(ctx, u.count));
+    JS_SetPropertyStr(ctx, o, "color", JS_NewBool(ctx, u.isColor()));
+    JS_SetPropertyUint32(ctx, uniforms, i++, o);
+  }
+  JSValue children = JS_NewArray(ctx);
+  i = 0;
+  for (const SkRuntimeEffect::Child& c : prog->effect->children())
+    JS_SetPropertyUint32(ctx, children, i++, JS_NewStringLen(ctx, c.name.data(), c.name.size()));
+  JS_SetPropertyStr(ctx, out, "uniforms", uniforms);
+  JS_SetPropertyStr(ctx, out, "children", children);
+  return out;
+}
+
 // flashScrollIndicators(id): shows the overlay scroll indicators briefly.
 JSValue js_flashScrollIndicators(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
@@ -425,7 +459,8 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
              {"getClipboard", js_getClipboard, 0}, {"setClipboard", js_setClipboard, 1},
              {"flashScrollIndicators", js_flashScrollIndicators, 1},
              {"configureLayoutAnimation", js_configureLayoutAnimation, 1},
-             {"lottieData", js_lottieData, 1},     {"lottieCommand", js_lottieCommand, 4}};
+             {"lottieData", js_lottieData, 1},     {"lottieCommand", js_lottieCommand, 4},
+             {"shaderInfo", js_shaderInfo, 1}};
   for (auto& f : fns) JS_SetPropertyStr(ctx, native, f.name, JS_NewCFunction(ctx, f.fn, f.name, f.len));
   JS_SetPropertyStr(ctx, native, "rootId", JS_NewUint32(ctx, impl.rt.doc.root()->id()));
   // TextInput text is edited natively (change / selectionchange events).

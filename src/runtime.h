@@ -27,6 +27,7 @@ class JsEngine;
 class InputManager;
 class ImageCache;
 class LottieCache;
+class ShaderEffects;
 class NativeAnimated;
 
 class Runtime {
@@ -139,6 +140,8 @@ class Runtime {
   std::unique_ptr<ImageCache> images;
   // Lottie sources and playing LottieViews (render/lottie.h).
   std::unique_ptr<LottieCache> lotties;
+  // Compiled SkSL sources and ShaderViews (render/shader_view.h).
+  std::unique_ptr<ShaderEffects> shaders;
 
  private:
   // Node ids are unique across the surfaces (JS addresses nodes by id alone).
@@ -183,6 +186,8 @@ class Runtime {
   void deliverTextureChanges();
   // LottieView load / error / finish events.
   void deliverLottieEvents();
+  // ShaderView compile errors.
+  void deliverShaderEvents();
   // Runs the done callbacks of settled jsui_call_ui calls.
   void deliverUiCallResults();
   // The JS context is going away: cancels its unanswered Host.calls (ids

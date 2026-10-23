@@ -37,6 +37,7 @@ import { installHostData } from './hostData.js';
 import { installHostBuffer } from './hostBuffer.js';
 import { installHostTexture, HostTexture } from './hostTexture.js';
 import { LottieView } from './lottie.js';
+import { ShaderView, sksl, compileShader } from './shader.js';
 
 installGlobals();
 installHostData();
@@ -54,6 +55,9 @@ export {
   ImageBackground,
   HostTexture,
   LottieView,
+  ShaderView,
+  sksl,
+  compileShader,
   ScrollView,
   TextInput,
   Pressable,
