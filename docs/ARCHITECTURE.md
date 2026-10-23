@@ -391,7 +391,7 @@ to render into RenderingDevice textures (integrations/godot/README.md,
 * **Build.** Needs Skia m157 built by `scripts/build-skia-desktop.sh`
   (pinned commit, shared checkout with the wasm Graphite build; Linux:
   Graphite + Vulkan, Ganesh + GL; macOS: Graphite + Metal, Ganesh + GL +
-  Metal) into `third_party/skia-desktop`; `-DJSUI_SKIA_DIR=third_party/skia-desktop`
+  Metal; both: Graphite + Dawn, header-only) into `third_party/skia-desktop`; `-DJSUI_SKIA_DIR=third_party/skia-desktop`
   then turns the options on from its `args.gn`, and `cmake/Deps.cmake`
   compiles with the defines the build recorded (`defines.txt`) and links
   all its libraries. The prebuilt m124 has neither backend: the functions
@@ -402,6 +402,50 @@ to render into RenderingDevice textures (integrations/godot/README.md,
   `JSUI_VULKAN_TEST_REQUIRE=1` turns its skip into a failure. The Godot job
   also runs the demo on Vulkan (lavapipe) and compares the GPU frame with
   the CPU raster. Metal compiles in the macOS CI job but is not run there.
+
+### Dawn native (Skia Graphite on a host's Dawn)
+
+`jsui_gpu_create_dawn_procs(wgpu_get_proc_address, instance, device, queue)`
+(and the older `jsui_gpu_create_dawn(instance, device, queue)`) with
+`jsui_render_gpu_target` (`src/render/gpu_graphite.cpp`, CMake option
+`JSUI_GRAPHITE_DAWN`) draw with Graphite's Dawn backend on a host's native
+Dawn device into a `WGPUTexture` it owns. The godot-aw3 fork's `webgpu`
+rendering driver is the host this exists for (integrations/godot/README.md,
+"WebGPU (Dawn) on the godot-aw3 fork", which also has the `WebGPUInterop`
+singleton contract).
+
+* **One binary, no Dawn linked.** `scripts/build-skia-desktop.sh` always
+  builds Graphite's Dawn backend next to Vulkan / Metal. It is header-only:
+  `webgpu.h` / `webgpu_cpp.h` are generated from Skia's own Dawn checkout at
+  the revision m157 pins (`DAWN_REVISION`,
+  `scripts/patches/skia-m157-dawn-header-only.patch`) and installed into
+  `third_party/skia-desktop/dawn/`. `tools/dawn-shim/gen_dawn_shim.py` turns
+  every function of that `webgpu.h` into a hidden trampoline that calls
+  through one slot of a process-wide table. Nothing defines a real `wgpu*`
+  function (the build script checks the archives), so the same library loads
+  in hosts without Dawn and chooses Vulkan, Metal or Dawn at run time.
+* **Filling the table.** `jsui_gpu_create_dawn_procs` asks the host's
+  `wgpuGetProcAddress` for each name (explicit-length `WGPUStringView`);
+  `jsui_gpu_create_dawn` uses `dlsym(RTLD_DEFAULT)`, which needs a host
+  binary that exports every `wgpu*` symbol and does not work on Windows. The
+  table is replaced only when every entry point resolved. Otherwise the call
+  returns NULL before any `wgpu*` call. The table is process-wide, so all
+  Dawn contexts of a process share the host's Dawn.
+* **Same revision or nothing.** `jsui_dawn_revision()` returns the Dawn commit
+  the headers came from (`<skia>/dawn/REVISION`, compiled into the shim).
+  `webgpu.h`'s structs and enums change between Dawn revisions, so a host
+  must link exactly that Dawn. The Godot extension compares it with the
+  fork's `WebGPUInterop.get_dawn_revision()` and uses the CPU renderer on a
+  mismatch.
+* **Ordering.** Everything is submitted to the host's `WGPUQueue`, so queue
+  order sequences it with the host's work and Dawn tracks the texture's
+  usage. Graphite processes events on the host's `WGPUInstance` while it
+  waits (context teardown).
+* **Tests.** `tests/native/dawn_procs_test.cpp` fills the table from a fake
+  `wgpuGetProcAddress`: every entry point is looked up by name and a
+  trampoline calls through. A missing entry point gives NULL and leaves the
+  table unchanged, and `jsui_dawn_revision()` is checked. Rendering on a real
+  Dawn device is verified on the fork only (no Dawn runtime in CI).
 
 ## Game data
 
@@ -946,11 +990,12 @@ The default font is Inter (bundled); `fontFamily` falls back to it.
   `web/jsui-web.js`; `jsui.on('message', (name, data) => …)`, `jsui.postMessage(name, data)`.
   The browser loader backend is `fetch()` (`src/platform/loader_emscripten.cpp`).
   Tests: `node web/test/node-smoke.mjs`, `node web/test/browser.test.mjs` (Playwright).
-* Desktop Skia m157 (Graphite on Vulkan / Metal, for the Godot GPU renderer):
-  `scripts/build-skia-desktop.sh` (Linux / macOS, about 25 min on 4 cores,
-  cached in CI on the script's hash) into `third_party/skia-desktop`, then
-  configure with `-DJSUI_SKIA_DIR=third_party/skia-desktop`. See
-  "Vulkan and Metal (Skia Graphite, native)".
+* Desktop Skia m157 (Graphite on Vulkan / Metal and header-only Dawn, for the
+  Godot GPU renderer): `scripts/build-skia-desktop.sh` (Linux / macOS, about
+  25 min on 4 cores, cached in CI on the hash of the script and its Dawn
+  patch) into `third_party/skia-desktop`, then configure with
+  `-DJSUI_SKIA_DIR=third_party/skia-desktop`. See "Vulkan and Metal (Skia
+  Graphite, native)" and "Dawn native".
 * JS: `npm install` at the repo root (npm workspaces), `npx jsui build app.jsx`
   or `npx jsui dev app.jsx` (serves `bundle.js` and a reload endpoint).
 

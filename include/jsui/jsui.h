@@ -548,10 +548,30 @@ JSUI_API JsuiGpuContext* jsui_gpu_create_metal(void* device, void* queue);
  * for blends that read the destination) and `format` a WGPUTextureFormat
  * (0: the texture's own; RGBA8 / BGRA8, unorm or sRGB). Work is submitted to
  * `queue` before the call returns; Dawn orders it with the host's
- * submissions. NULL when the library was built without JSUI_GRAPHITE_DAWN,
- * the process does not provide Dawn's wgpu* entry points (the library calls
- * the host's Dawn, it links none) or Skia rejects the device. */
+ * submissions.
+ *
+ * The library links no Dawn: every wgpu* function it (and Skia) calls goes
+ * through a table of the host's entry points, filled when the context is
+ * created, all or nothing. The host's Dawn must be the revision
+ * jsui_dawn_revision() names (webgpu.h's ABI changes between revisions).
+ *
+ * jsui_gpu_create_dawn_procs: the table is resolved by name through
+ * `wgpu_get_proc_address`, the host's Dawn `wgpuGetProcAddress`
+ * (WGPUProc (*)(WGPUStringView)); the host need not export any symbol.
+ * jsui_gpu_create_dawn: the same through the process's exported wgpu*
+ * symbols (dlsym; unavailable on Windows).
+ *
+ * NULL when the library was built without JSUI_GRAPHITE_DAWN, an argument
+ * is NULL, any entry point does not resolve (the table is then left as it
+ * was) or Skia rejects the device. The table is process-wide: every Dawn
+ * context of a process must use the same host Dawn. */
+JSUI_API JsuiGpuContext* jsui_gpu_create_dawn_procs(void* wgpu_get_proc_address, void* instance, void* device,
+                                                    void* queue);
 JSUI_API JsuiGpuContext* jsui_gpu_create_dawn(void* instance, void* device, void* queue);
+/* The Dawn revision (commit hash, e.g. "ada567700e13...") whose headers the
+ * library was built against, i.e. the Dawn a host must provide; NULL when
+ * built without JSUI_GRAPHITE_DAWN. */
+JSUI_API const char* jsui_dawn_revision(void);
 /* Paints the current frame into `target`. `dirty` (optional) receives the
  * repainted rect. Returns 0 on success, -1 on failure (device lost, bad
  * target, wrong kind of context). */

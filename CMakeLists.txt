@@ -115,30 +115,45 @@ if(JSUI_GRAPHITE_METAL)
 endif()
 message(STATUS "JSUI_VULKAN: ${JSUI_VULKAN}, JSUI_GRAPHITE_METAL: ${JSUI_GRAPHITE_METAL}")
 
-# Graphite on an embedder's native Dawn device (jsui_gpu_create_dawn,
-# jsui_render_gpu_target), e.g. the WebGPU rendering driver of the godot-aw3
-# Godot fork: on when the Skia was built with SKIA_DAWN_SDK
-# (scripts/build-skia-desktop.sh). Skia and JSUI compile against that Dawn
-# SDK's headers, but Dawn is not linked: tools/dawn-shim generates wgpu*
-# entry points that call the host process's own Dawn (dlsym), so the library
-# loads anywhere and the Dawn path works where the host links Dawn.
+# Graphite on an embedder's native Dawn device (jsui_gpu_create_dawn_procs /
+# jsui_gpu_create_dawn, jsui_render_gpu_target), e.g. the WebGPU rendering
+# driver of the godot-aw3 Godot fork: on when the Skia has Graphite + Dawn
+# (scripts/build-skia-desktop.sh always builds it, header-only). Skia and
+# JSUI compile against Dawn's headers from that build (<skia>/dawn/include,
+# of the Dawn revision in <skia>/dawn/REVISION), but no Dawn is linked:
+# tools/dawn-shim generates the wgpu* entry points as trampolines into a
+# table that is filled at run time from the host's wgpuGetProcAddress (or,
+# for jsui_gpu_create_dawn, from the process's exported symbols). The library
+# loads anywhere; the Dawn path works where the host hands over its Dawn.
 set(_jsui_graphite_dawn_default OFF)
 set(_jsui_dawn_include "")
+set(_jsui_dawn_revision "")
 if(NOT EMSCRIPTEN AND _jsui_skia_gn MATCHES "skia_use_dawn *= *true")
   set(_jsui_graphite_dawn_default ON)
-  string(REGEX MATCH "skia_dawn_sdk_include_dir *= *\"([^\"]*)\"" _m "${_jsui_skia_gn}")
-  set(_jsui_dawn_include "${CMAKE_MATCH_1}")
+  if(EXISTS "${JSUI_SKIA_DIR}/dawn/include/dawn/webgpu.h")
+    set(_jsui_dawn_include "${JSUI_SKIA_DIR}/dawn/include")
+  else()
+    string(REGEX MATCH "skia_dawn_header_only_include_dir *= *\"([^\"]*)\"" _m "${_jsui_skia_gn}")
+    set(_jsui_dawn_include "${CMAKE_MATCH_1}")
+  endif()
+  if(EXISTS "${JSUI_SKIA_DIR}/dawn/REVISION")
+    file(STRINGS "${JSUI_SKIA_DIR}/dawn/REVISION" _jsui_dawn_revision LIMIT_COUNT 1)
+  endif()
 endif()
-option(JSUI_GRAPHITE_DAWN "Build the Skia Graphite Dawn backend on the host's Dawn (jsui_gpu_create_dawn)" ${_jsui_graphite_dawn_default})
-set(JSUI_DAWN_INCLUDE_DIR "${_jsui_dawn_include}" CACHE PATH "Dawn SDK include dir (webgpu/webgpu_cpp.h) the Skia was built against")
+option(JSUI_GRAPHITE_DAWN "Build the Skia Graphite Dawn backend on the host's Dawn (jsui_gpu_create_dawn_procs)" ${_jsui_graphite_dawn_default})
+set(JSUI_DAWN_INCLUDE_DIR "${_jsui_dawn_include}" CACHE PATH "Dawn include dir (dawn/webgpu.h, webgpu/webgpu_cpp.h) the Skia was built against")
+set(JSUI_DAWN_REVISION "${_jsui_dawn_revision}" CACHE STRING "Dawn revision of JSUI_DAWN_INCLUDE_DIR (jsui_dawn_revision(); the host's Dawn must match)")
 if(JSUI_GRAPHITE_DAWN)
   if(NOT EXISTS "${JSUI_DAWN_INCLUDE_DIR}/dawn/webgpu.h")
     message(FATAL_ERROR "JSUI_GRAPHITE_DAWN needs JSUI_DAWN_INCLUDE_DIR (no dawn/webgpu.h in '${JSUI_DAWN_INCLUDE_DIR}')")
   endif()
+  if(NOT JSUI_DAWN_REVISION MATCHES "^[0-9a-f]+$")
+    message(FATAL_ERROR "JSUI_GRAPHITE_DAWN needs JSUI_DAWN_REVISION (the Dawn revision of its headers; got '${JSUI_DAWN_REVISION}')")
+  endif()
   set(_jsui_dawn_shim ${CMAKE_BINARY_DIR}/generated/dawn_shim.c)
   add_custom_command(OUTPUT ${_jsui_dawn_shim}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/generated
-    COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/dawn-shim/gen_dawn_shim.py ${JSUI_DAWN_INCLUDE_DIR}/dawn/webgpu.h ${_jsui_dawn_shim}
+    COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/dawn-shim/gen_dawn_shim.py ${JSUI_DAWN_INCLUDE_DIR}/dawn/webgpu.h ${_jsui_dawn_shim} ${JSUI_DAWN_REVISION}
     DEPENDS ${CMAKE_SOURCE_DIR}/tools/dawn-shim/gen_dawn_shim.py ${JSUI_DAWN_INCLUDE_DIR}/dawn/webgpu.h
     COMMENT "Generating the Dawn entry-point shim")
   target_sources(jsui PRIVATE ${_jsui_dawn_shim})
@@ -146,7 +161,7 @@ if(JSUI_GRAPHITE_DAWN)
   target_include_directories(jsui PRIVATE ${JSUI_DAWN_INCLUDE_DIR})
   target_link_libraries(jsui PUBLIC ${CMAKE_DL_LIBS})
 endif()
-message(STATUS "JSUI_GRAPHITE_DAWN: ${JSUI_GRAPHITE_DAWN} (${JSUI_DAWN_INCLUDE_DIR})")
+message(STATUS "JSUI_GRAPHITE_DAWN: ${JSUI_GRAPHITE_DAWN} (Dawn ${JSUI_DAWN_REVISION}, ${JSUI_DAWN_INCLUDE_DIR})")
 
 # Metal backend (Skia Ganesh on Metal, jsui_render_metal). On by default on
 # iOS, whose Skia is built from source with Metal (scripts/build-skia-ios.sh);
@@ -209,6 +224,9 @@ if(JSUI_BUILD_TESTS AND NOT EMSCRIPTEN)
   add_executable(jsui-tests ${JSUI_TEST_SOURCES})
   target_include_directories(jsui-tests PRIVATE src)
   target_link_libraries(jsui-tests PRIVATE jsui)
+  if(JSUI_GRAPHITE_DAWN)
+    target_compile_definitions(jsui-tests PRIVATE JSUI_TEST_DAWN_REVISION="${JSUI_DAWN_REVISION}")
+  endif()
   jsui_copy_icu_data(jsui-tests)
   add_test(NAME jsui-tests COMMAND jsui-tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
