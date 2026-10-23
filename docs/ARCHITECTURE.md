@@ -332,6 +332,39 @@ used to process Dawn events).
   animates during the fade. `webgpu: fading and moving layers` in the
   browser tests checks no offscreen passes and pixels equal to plain
   layers.
+* **What each pass is** (`interactions.jsx`, `frame-bench.mjs` lists them
+  with GPU times). Steady (the looping glow, deploy pulse, live dot and
+  progress shimmer): one pass, the canvas (cleared, the last frame drawn
+  from the copy-back texture, the damage repainted in up to 4 scissored
+  rects), then up to 4 `copyTextureToTexture` back. No offscreen passes:
+  the animated boxes are childless, so their opacity folds into their
+  draws; outer and inset shadows are cached sprites; paths are rasterized
+  into Graphite's path atlas on the CPU and text into its glyph atlas, both
+  uploaded with `copyBufferToTexture` (a few small rects per frame, plus a
+  new sprite texture when the scaling live dot's shadow changes size), not
+  rendered. Scrolling the armory list: the same single pass (no scroll
+  blit on the GPU path; the list's damage is repainted) and 4 copies. The
+  entrance (first ~2.5 s): plain layers only for the armory panel and the
+  season card, which fade while their content animates (the list fills
+  in, the progress bar grows): 1024x1024 and 512x128 approx-fit passes
+  per damage rect at 1280x720, 1536x1024 / 1536x512 / 1536x256 / 1024x256
+  at 1080p@2x. The menu buttons (512x64 each) and the centre column
+  (512x1024) fade and slide as composited layers, rendered once.
+* **Compared with Chrome.** `frame-bench --renderers chrome` renders the
+  same app through react-native-web. Chrome's structural advantages: the
+  page's main thread only records paint ops; rasterization happens in the
+  GPU process (or raster workers) into 256 px tiles that are kept, so only
+  invalidated tiles are re-rastered; compositor layers (animated opacity /
+  transform, will-change) are moved and faded by the compositor without
+  re-rasterizing; and the display compositor redraws only the damaged
+  part of the screen (partial swap). JSUI records with Skia on the page's
+  main thread (wasm) and, on WebGPU, must fill the whole canvas every frame
+  (`getCurrentTexture()` is a fresh texture), which the copy-back texture
+  makes one full-screen textured draw; the composited layers above are the
+  part of Chrome's model JSUI now has. Headless (SwiftShader) at 1280x720,
+  steady: Chrome's main thread ~1.5 ms and GPU main thread ~2.6 ms per
+  frame; JSUI on WebGPU ~5.9 ms and ~96 ms (SwiftShader drawing the full
+  canvas), on WebGL ~4.6 ms and ~52 ms.
 * **No CPU waits.** In the browser Graphite runs without a tick function:
   submits never wait, buffer maps are async and finished work is collected by
   `checkAsyncWorkCompletion()` each frame. Raster images are uploaded once per
