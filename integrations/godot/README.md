@@ -44,8 +44,8 @@ npx jsui build integrations/godot/demo/ui/app.jsx -o integrations/godot/demo/ui/
 That build uses the prebuilt Skia m124, which has no Vulkan, Metal or
 Graphite: the view then always uses the CPU renderer. For the GPU renderer,
 build Skia m157 from source first (Linux: Graphite + Vulkan; macOS:
-Graphite + Metal; about 25 minutes on 4 cores, done once) and point CMake at
-it:
+Graphite + Metal; both also Graphite + Dawn for the godot-aw3 fork; about
+25 minutes on 4 cores, done once) and point CMake at it:
 
 ```sh
 scripts/build-skia-desktop.sh            # -> third_party/skia-desktop
@@ -54,6 +54,7 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
       -DJSUI_BUILD_GODOT=ON -DJSUI_SKIA_DIR=third_party/skia-desktop
 cmake --build build --target jsui_godot
 # configure prints "JSUI_VULKAN: ON" (Linux) / "JSUI_GRAPHITE_METAL: ON" (macOS)
+# and "JSUI_GRAPHITE_DAWN: ON (Dawn ada567700e13..., ...)"
 ```
 
 CMake options:
@@ -67,6 +68,7 @@ CMake options:
 | `JSUI_GODOT_OUTPUT_DIR` | `integrations/godot/demo/bin` | where the library is written |
 | `JSUI_SKIA_DIR` | prebuilt m124 | `third_party/skia-desktop` (from `scripts/build-skia-desktop.sh`) enables the GPU renderer |
 | `JSUI_VULKAN` / `JSUI_GRAPHITE_METAL` | on when that Skia has them | the Vulkan / Metal Graphite backends |
+| `JSUI_GRAPHITE_DAWN` | on when that Skia has Dawn | the Dawn Graphite backend (godot-aw3's `webgpu` driver); no Dawn is linked |
 
 The library statically links the JSUI runtime (QuickJS, Yoga, Skia) and only
 exports the GDExtension entry point (`jsui_godot_init`). One build serves the
@@ -264,14 +266,16 @@ func _on_ui_call(id, name, args):
 
   | Godot renderer / driver | JsuiView renderer |
   | --- | --- |
+  | godot-aw3's `webgpu` driver (`WebGPUInterop` singleton, same Dawn revision) | `webgpu`: Skia Graphite on Godot's `WGPUDevice` and queue ([below](#webgpu-dawn-on-the-godot-aw3-fork)) |
   | Forward+ / Mobile on Vulkan (Linux, Windows) | `vulkan`: Skia Graphite on Godot's `VkDevice` and main queue |
   | Forward+ / Mobile on Metal (macOS, Apple Silicon) | `metal`: Skia Graphite on Godot's `MTLDevice` and command queue |
   | Compatibility (OpenGL), headless, D3D12, `force_cpu` | `cpu`: CPU raster + `ImageTexture` upload |
 
   It also falls back to `cpu` (with a warning) when the library was built
-  against a Skia without that backend, when Skia rejects the device or when
-  a GPU frame fails. Godot 4.3 cannot name its driver: there, Linux is taken
-  as Vulkan and other platforms use `cpu`.
+  against a Skia without that backend, when Skia rejects the device, when
+  `WebGPUInterop` reports another Dawn revision or when a GPU frame fails.
+  Godot 4.3 cannot name its driver: there, Linux is taken as Vulkan and
+  other platforms use `cpu`.
 * GPU renderer: per view there are two RenderingDevice textures of the
   view's pixel size. Skia renders into the first (colour + input attachment;
   it keeps the last frame, so a frame repaints only its damage, split into
@@ -384,42 +388,96 @@ MTL_DEBUG_LAYER=1 $GODOT --path . --rendering-method forward_plus --rendering-dr
 ## WebGPU (Dawn) on the godot-aw3 fork
 
 The [godot-aw3](https://github.com/orktes/godot-aw3) Godot fork has a
-`webgpu` rendering driver: Forward+ on native Dawn (Metal backend on macOS),
-with Dawn linked statically into the engine. Under it JsuiView renders with
-Skia Graphite on Godot's own Dawn device, with the same two-texture and
-`texture_copy` design as Vulkan / Metal (`get_renderer()` returns
-`"webgpu"`).
+`webgpu` rendering driver: Forward+ on native Dawn, with Dawn linked
+statically into the engine. Under it JsuiView renders with Skia Graphite on
+Godot's own Dawn device, with the same two-texture and `texture_copy` design
+as Vulkan / Metal (`get_renderer()` returns `"webgpu"`).
 
-* The extension links no Dawn. Skia and JSUI are compiled against the
-  headers of the Dawn SDK the fork links, and every `wgpu*` call goes through
-  a generated shim (`tools/dawn-shim`) that looks the engine's own entry
-  point up in the process. The same library therefore still loads in stock
-  Godot, which uses Vulkan or Metal, and in fork builds that do not export
-  Dawn, where JsuiView falls back to the CPU renderer.
-* The fork must return webgpu.h handles from `get_driver_resource`
-  (`TOPMOST_OBJECT` → `WGPUInstance`, `LOGICAL_DEVICE` → `WGPUDevice`,
-  `COMMAND_QUEUE` → `WGPUQueue`, `TEXTURE` → `WGPUTexture`) and export every
-  `wgpu*` symbol of its Dawn (the linker's `-dead_strip` drops the ones Godot
-  does not call). Both are local changes on the fork, branch
-  `jsui-webgpu-handles`.
-* Skia m157 pins a newer Dawn (2026-10) than the fork (`a082d8e7`,
-  2026-01). `scripts/patches/skia-m157-dawn-sdk.patch` makes
-  `//third_party/dawn` header-only and adapts Graphite's Dawn backend to the
-  older `webgpu.h` (`SK_DAWN_LEGACY_SDK`). The older Dawn has no render-area
-  passes, no undefined load/store ops and an older MSAA-render-to-single-sampled
-  struct, so those optimisations are off.
+The same `libjsui_godot` serves both engines. It chooses the backend at run
+time, on the first frame:
+
+1. If `Engine.has_singleton("WebGPUInterop")` and that singleton's
+   `get_dawn_revision()` equals the Dawn revision the library was built
+   against (`jsui_dawn_revision()`), JsuiView uses `webgpu`.
+2. Otherwise it uses `vulkan` or `metal` on those drivers, as on stock Godot.
+3. Otherwise it uses `cpu`.
+
+If the revisions differ, JsuiView pushes one warning naming both and uses
+`cpu`. The `webgpu.h` ABI changes between Dawn revisions, so there is no
+partial fallback.
+
+* The extension links no Dawn and needs no exported symbols. Skia and JSUI
+  are compiled against Dawn's headers at the revision Skia m157 pins.
+  Every `wgpu*` call goes through a generated trampoline (`tools/dawn-shim`)
+  into a table that `jsui_gpu_create_dawn_procs` fills, all or nothing, by
+  asking the engine's `wgpuGetProcAddress` for each name. If any entry point
+  does not resolve, no context is made and JsuiView uses `cpu`.
+* `scripts/build-skia-desktop.sh` always builds Graphite's Dawn backend
+  next to Vulkan (Linux) / Metal (macOS). It uses Skia's own Dawn checkout
+  (`third_party/externals/dawn`), only for headers generated by Dawn's code
+  generator (`scripts/patches/skia-m157-dawn-header-only.patch`), and
+  installs them into `third_party/skia-desktop/dawn/include` with the
+  revision in `dawn/REVISION`. CMake turns `JSUI_GRAPHITE_DAWN` on when the
+  Skia has Dawn and configure prints
+  `JSUI_GRAPHITE_DAWN: ON (Dawn ada567700e13…, …)`.
+
+### The WebGPUInterop contract (what the fork provides)
+
+| | |
+| --- | --- |
+| Dawn | exactly `ada567700e13aecf7989d78b21f7d330b522ea80`, the revision Skia m157 (`3c6589d488`) pins in its DEPS (`DAWN_REVISION` in `scripts/build-skia-desktop.sh`) |
+| Singleton | `Engine.register_singleton("WebGPUInterop", obj)`, with `obj` a plain `Object`. Registered only while the WebGPU rendering driver is active (stock Godot has none) and before the first frame is drawn, i.e. once the RenderingDevice exists |
+| `get_proc_address() -> int` | the address of Dawn's `WGPUProc wgpuGetProcAddress(WGPUStringView procName)`, as an int64 |
+| `get_instance() -> int` | the `WGPUInstance` the device comes from. Graphite calls `wgpuInstanceProcessEvents` on it while it waits for GPU work |
+| `get_device() -> int` | the RenderingDevice's `WGPUDevice` |
+| `get_queue() -> int` | the `WGPUQueue` Godot submits its frames to |
+| `get_dawn_revision() -> String` | the 40-character Dawn commit hash the engine links (lower case; surrounding whitespace is ignored) |
+
+All methods take no arguments. Pointer values are returned as `int`
+(int64). The methods are called on Godot's render thread, so they must be
+safe to call there. They should just return stored values.
+
+`wgpuGetProcAddress` must resolve every function that the revision's
+`webgpu.h` declares, the free functions included, as Dawn's own
+`dawn::native::GetProcs().getProcAddress` does. JSUI looks up each name
+once, with an explicit length (not `WGPU_STRLEN`). JSUI adds its own
+references to the instance, device and queue (`wgpu*AddRef`) and releases
+them when the view is freed. The objects must stay valid until then.
+
+RenderingDevice native handles are webgpu.h handles as well:
+`get_driver_resource(DRIVER_RESOURCE_TEXTURE, rid, 0)` returns the
+`WGPUTexture` of an RD texture. JsuiView creates its render target with
+`COLOR_ATTACHMENT | INPUT_ATTACHMENT | SAMPLING | CAN_COPY_FROM | CAN_COPY_TO
+| CAN_UPDATE` in `DATA_FORMAT_R8G8B8A8_UNORM`. On the WGPUTexture that must
+include `RenderAttachment` and `TextureBinding` (or `CopySrc`) usage, in
+`RGBA8Unorm`. JSUI submits to the same `WGPUQueue` from the render thread
+during `_process`, before Godot submits its frame, so queue order alone
+handles synchronisation. `DRIVER_RESOURCE_TOPMOST_OBJECT` /
+`LOGICAL_DEVICE` / `COMMAND_QUEUE` should return the instance, device and
+queue too, but JSUI takes those from the singleton.
+
+### Building and running
 
 ```sh
-DAWN_SDK=/path/to/dawn/install/Release   # the SDK the fork links (misc/native-webgpu/README.md)
-SKIA_DAWN_SDK=$DAWN_SDK scripts/build-skia-desktop.sh   # -> third_party/skia-desktop-dawn
-cmake -S . -B build-dawn -G Ninja -DCMAKE_BUILD_TYPE=Release -DJSUI_BUILD_GODOT=ON \
-      -DJSUI_SKIA_DIR=third_party/skia-desktop-dawn
-#   configure prints "JSUI_GRAPHITE_DAWN: ON (<sdk>/include)"
-cmake --build build-dawn --target jsui_godot
+scripts/build-skia-desktop.sh        # -> third_party/skia-desktop (Graphite: Vulkan or Metal, + Dawn)
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DJSUI_BUILD_GODOT=ON \
+      -DJSUI_SKIA_DIR=third_party/skia-desktop
+#   configure prints "JSUI_GRAPHITE_DAWN: ON (Dawn ada567700e13..., ...)"
+cmake --build build --target jsui_godot
 
-GODOT=/path/to/godot-aw3/bin/godot.macos.editor.arm64   # built with webgpu=yes
+GODOT=/path/to/godot-aw3/bin/godot.macos.editor.arm64   # built with webgpu=yes, Dawn at the revision above
 cd integrations/godot/demo
 $GODOT --path . --rendering-method forward_plus --rendering-driver webgpu -- \
   --capture /tmp/webgpu.png --self-test --expect-renderer webgpu --max-gpu-diff 1.5
 $GODOT --path . --rendering-method forward_plus --rendering-driver webgpu --disable-vsync -- --bench 240 --no-world
 ```
+
+On stock Godot, `FAKE_WEBGPU_INTEROP=<rev> integrations/godot/smoke-test.sh`
+(the demo's `--fake-webgpu-interop <rev>`) registers a stand-in singleton
+with null handles. CI uses it to check that another revision gives the
+warning and the CPU renderer.
+
+To move to another Dawn, the Skia pin and the fork's Dawn must move
+together. Bump `SKIA_COMMIT` / `DAWN_REVISION` in
+`scripts/build-skia-desktop.sh`, which fails if Skia's DEPS pin a different
+Dawn, and rebuild the fork against the new revision.
