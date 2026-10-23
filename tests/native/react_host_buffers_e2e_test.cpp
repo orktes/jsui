@@ -28,10 +28,7 @@ struct BuffersE2E {
   JsuiRuntime* rt = nullptr;
   double now = 0;
 
-  bool load(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return false;
-    std::string src((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  BuffersE2E() {
     JsuiConfig cfg;
     jsui_config_init(&cfg);
     cfg.width = 400;
@@ -41,11 +38,14 @@ struct BuffersE2E {
     };
     cfg.message_user = this;
     rt = jsui_create(&cfg);
+  }
+  bool load(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    std::string src((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     return jsui_load_bundle_source(rt, src.data(), src.size(), path.c_str()) == 0;
   }
-  ~BuffersE2E() {
-    if (rt) jsui_destroy(rt);
-  }
+  ~BuffersE2E() { jsui_destroy(rt); }
   void tick() { jsui_tick(rt, now += 16); }
   std::vector<std::string> take(const std::string& name) {
     std::vector<std::string> out;

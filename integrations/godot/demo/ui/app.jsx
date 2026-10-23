@@ -32,6 +32,7 @@ import {
   StyleSheet,
   Text,
   View,
+  useHostBufferListener,
   useHostHandler,
   useHostState,
   useWindowDimensions,
@@ -74,6 +75,8 @@ function Bridge() {
   const [pong, setPong] = useState(null);
   const pingRef = useRef(null);
   useEffect(() => Host.postMessage('ui:ready', {}), []);
+  // Frame data (JsuiView.set_buffer): main.gd's self-test checks it arrives.
+  useHostBufferListener('godot.selftest', (b) => Host.postMessage('buffer:seen', Array.from(b)));
   // Where the Ping button is (logical px), for main.gd's self-test.
   const onPingLayout = () =>
     pingRef.current?.measureInWindow((x, y, width, height) => Host.postMessage('demo:anchors', { ping: { x, y, width, height } }));

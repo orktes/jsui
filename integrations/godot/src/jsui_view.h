@@ -105,6 +105,15 @@ class JsuiView : public godot::Control {
   godot::Variant get_state(const godot::String& key) const;
   godot::String get_state_json(const godot::String& key) const;
 
+  // Frame data (jsui_set_buffer): numbers pushed every frame without JSON.
+  // `data` is a PackedFloat32Array / PackedFloat64Array / PackedInt32Array /
+  // PackedByteArray, or a PackedVector2Array / PackedVector3Array /
+  // PackedColorArray (their components, in order). JS reads it with
+  // useHostBuffer / useHostBufferValue. Returns 1 changed, 0 unchanged, -1
+  // for an unsupported type. Set before start(): applied when it starts.
+  int set_buffer(const godot::String& key, const godot::Variant& data);
+  int remove_buffer(const godot::String& key);
+
   // Calls: Host.call() -> call_requested signal -> resolve_call / reject_call;
   // call_ui() -> Host.handle() handler -> callback(ok, result) + ui_call_completed.
   int resolve_call(int64_t id, const godot::Variant& result);
@@ -242,6 +251,13 @@ class JsuiView : public godot::Control {
     JsuiRuntime* rt_ = nullptr;
   };
   RuntimeRef rt_{this};
+  // Buffers set while no runtime runs (type, bytes), applied by start().
+  struct PendingBuffer {
+    JsuiBufferType type;
+    std::vector<uint8_t> bytes;
+    size_t count;
+  };
+  std::vector<std::pair<std::string, PendingBuffer>> pendingBuffers_;
   JsuiView* host_ = nullptr;             // the runtime view, for a surface view
   std::vector<JsuiView*> surfaces_;      // surface views of this view's runtime
   bool attach_wanted_ = false;           // a surface view that should show its surface

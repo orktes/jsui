@@ -215,7 +215,7 @@ TEST(host_buffers_native_animated) {
   std::string m = h.take();
   CHECK(m.rfind("box=", 0) == 0);
   jsui::Runtime& r = *jsui::internalRuntime(h.rt);
-  jsui::Node* box = r.findNode(uint32_t(std::stoul(m.substr(5))));
+  jsui::Node* box = r.findNode(uint32_t(std::stoul(m.substr(4))));
   CHECK(box != nullptr);
   if (!box) return;
   auto tx = [&](size_t i) -> jsui::Value {
