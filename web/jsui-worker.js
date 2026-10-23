@@ -106,7 +106,9 @@ export async function startWorkerHost(I, opts) {
 
 function definePage(I) {
   const { DomView, HIT_POINTER, HIT_SCROLL, NAV_KEYS, bufferType, sourceSize, defaultOpaque, isVideoFrame, fontArgs,
-    fontList, taintKey, videoFramesContextLost, watchVideoFrames } = I;
+    fontList, corsWarning, taintKey, videoFramesContextLost, watchVideoFrames } = I;
+  const textureWarning = (name, e) => (e?.name === 'SecurityError' ? corsWarning(name)
+    : `host texture "${name}": capture failed: ${msgOf(e)}`);
 
   // Options as the worker gets them: cloneable, URLs absolute (a worker
   // resolves relative URLs against its own script).
@@ -404,7 +406,7 @@ function definePage(I) {
       this._replies = new Map();
       this._nextReply = 1;
       this._out = [];
-      this._outTransfer = [];
+      this._outTransfer = [];  // per op of _out: its transferables (or null)
       this._flushQueued = false;
       this._live = false;      // events wait in _backlog until createJsui's caller could subscribe
       this._backlog = [];
@@ -413,6 +415,8 @@ function definePage(I) {
       this._maps = new Map();      // mapBuffer arrays
       this._texSeq = new Map();    // name -> setTexture / video frame sequence (newest wins)
       this._bindings = new Map();  // bindVideo
+      this._texSources = new Map();  // name -> { source, options } setTexture can capture again (_texturesReset)
+      this._tainted = new WeakMap();  // source -> taintKey() when the browser refused it (SecurityError)
       this._padsUsed = [];
       this._padView = null;
       this._warned = new Set();
@@ -486,7 +490,7 @@ function definePage(I) {
         }
       }
       q.push(op);
-      if (transfer) for (const t of transfer) if (t) this._outTransfer.push(t);
+      this._outTransfer.push(transfer?.length ? transfer.filter(Boolean) : null);
       if (!this._flushQueued) {
         this._flushQueued = true;
         queueMicrotask(() => this._flush());
@@ -496,14 +500,37 @@ function definePage(I) {
     _flush() {
       this._flushQueued = false;
       if (!this._out.length || this._dead) return;
-      const list = this._out, transfer = this._outTransfer;
+      const list = this._out, transfers = this._outTransfer;
       this._out = [];
       this._outTransfer = [];
       try {
-        this.worker.postMessage({ t: 'ops', list }, transfer);
-      } catch (e) {
-        console.error('[jsui] worker postMessage failed:', e);
+        this.worker.postMessage({ t: 'ops', list }, transfers.flat().filter(Boolean));
+      } catch {
+        // One op could not be cloned (an ImageBitmap of a cross-origin <img>
+        // without CORS cannot be sent): one by one, so only that op fails.
+        list.forEach((op, i) => {
+          try {
+            this.worker.postMessage({ t: 'ops', list: [op] }, transfers[i] ?? []);
+          } catch (e) {
+            this._unsent(op, transfers[i] ?? [], e);
+          }
+        });
       }
+    }
+
+    // An op postMessage refused: its reply settles, a bound video's frame
+    // slot is freed.
+    _unsent(op, transfer, e) {
+      // A picture that cannot be cloned has no origin-clean flag (a detached one has no size).
+      const tainted = op.op === 'texture' && e?.name === 'DataCloneError' && !!sourceSize(op.source);
+      for (const t of transfer) t?.close?.();
+      if (tainted) this._warnOnce(corsWarning(op.name));
+      else console.error('[jsui] worker postMessage failed:', e);
+      if (op.ack) this._bindings.get(op.name)?.ack();
+      const r = op.id && this._replies.get(op.id);
+      if (!r) return;
+      this._replies.delete(op.id);
+      r.resolve(tainted ? 'tainted' : r.dflt);
     }
 
     // An op the worker answers: a Promise of its answer (`dflt` once destroyed).
@@ -553,6 +580,7 @@ function definePage(I) {
         case 'backend': this._backend = ev.value; return;
         case 'padsUsed': this._padsUsed = ev.pads; return;
         case 'texAck': this._bindings.get(ev.name)?.ack(); return;
+        case 'texReset': this._texturesReset(); return;
         case 'glLost': {
           // A WebGL context in the worker was lost (see JsuiHost._contextLost).
           const switched = videoFramesContextLost();
@@ -686,33 +714,73 @@ function definePage(I) {
       name = String(name);
       if (source == null) return this.removeTexture(name);
       if (!sourceSize(source)) return Promise.resolve(false);
+      // Cross-origin without CORS: not tried again until its URL changes (as in main mode).
+      if (this._tainted.get(source) === taintKey(source)) return Promise.resolve(false);
       const opts = { ...(options ?? {}) };
       const transfer = !!opts.transfer;
       delete opts.transfer;
       if (opts.opaque === undefined) opts.opaque = defaultOpaque(source);
       const seq = this._nextSeq(name);
+      this._keepSource(name, source, options);
+      const taint = (e) => {
+        if (e?.name === 'SecurityError') this._tainted.set(source, taintKey(source));
+        this._warnOnce(textureWarning(name, e));
+        return false;
+      };
       const send = (src, list) => {
         if (this._texSeq.get(name) !== seq || this._destroyed) {
           for (const t of list) t?.close?.();
           return false;
         }
-        return this._request({ op: 'texture', name, source: src, options: opts }, list, false);
+        // 'tainted': the worker's upload threw SecurityError (and logged it).
+        return this._request({ op: 'texture', name, source: src, options: opts }, list, false).then((ok) => {
+          if (ok !== 'tainted') return ok;
+          this._tainted.set(source, taintKey(source));
+          return false;
+        });
       };
       let r;
       try {
         r = this._textureSource(name, source, transfer);
       } catch (e) {
-        this._warnOnce(textureWarning(name, e));
-        return Promise.resolve(false);
+        return Promise.resolve(taint(e));
       }
       if (!r) return Promise.resolve(false);
-      if (r instanceof Promise) {
-        return r.then((x) => (x ? send(x.src, x.transfer) : false), (e) => {
-          this._warnOnce(textureWarning(name, e));
-          return false;
-        });
-      }
+      if (r instanceof Promise) return r.then((x) => (x ? send(x.src, x.transfer) : false), taint);
       return send(r.src, r.transfer);
+    }
+
+    // What the page captures again once the worker placed its textures anew
+    // after a GPU loss (_texturesReset). The worker re-uploads its own copies
+    // first, but an ImageBitmap made before WebKit lost its GPU process
+    // uploads blank after the restore (texImage2D succeeds, the pixels are
+    // zero; a bitmap made afterwards is fine). So <img>, canvases and <video>
+    // are captured again here. ImageData and raw pixels are not: the worker
+    // holds them in CPU memory. VideoFrames are dropped on such a change, as
+    // in main mode.
+    _keepSource(name, source, options) {
+      if (isVideoFrame(source) || (typeof ImageData !== 'undefined' && source instanceof ImageData) ||
+        ArrayBuffer.isView(source.data)) {
+        this._texSources.delete(name);
+      } else if (typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap) {
+        this._texSources.set(name, { bitmap: true });  // the caller's: not ours to capture again
+      } else {
+        this._texSources.set(name, { source, options });
+      }
+    }
+
+    // The worker placed its textures again after a GPU loss (see _keepSource).
+    _texturesReset() {
+      if (this._destroyed) return;
+      for (const [name, k] of [...this._texSources]) {
+        if (!k.bitmap) this.setTexture(name, k.source, k.options);
+        else if (!this._warned.has(`reset ${name}`)) {
+          this._warned.add(`reset ${name}`);
+          this._log(1, `host texture "${name}": the GPU was reset, and an ImageBitmap source may come back blank ` +
+            '(WebKit): set it again');
+        }
+      }
+      for (const b of this._bindings.values()) b.push();  // a paused video's frame too
     }
 
     _nextSeq(name) {
@@ -746,6 +814,7 @@ function definePage(I) {
       if (this._destroyed) return Promise.resolve(false);
       name = String(name);
       this._bindings.get(name)?.unbind();
+      this._texSources.delete(name);
       this._nextSeq(name);  // drops conversions still under way
       return this._request({ op: 'removeTexture', name }, null, false);
     }
@@ -758,6 +827,7 @@ function definePage(I) {
       if (this._destroyed) throw new Error('bindVideo: runtime destroyed');
       name = String(name);
       this._bindings.get(name)?.unbind();
+      this._texSources.delete(name);  // the binding sends its frames (and again after a GPU loss)
       const opts = { ...(options ?? {}) };
       if (opts.opaque === undefined) opts.opaque = defaultOpaque(video);
       const b = { inflight: 0, again: false, stopped: false, tainted: null };
@@ -797,6 +867,7 @@ function definePage(I) {
           });
         }
       };
+      b.push = push;
       b.ack = () => {
         b.inflight = Math.max(0, b.inflight - 1);
         if (b.again) {
@@ -1015,6 +1086,7 @@ function definePage(I) {
     destroy() {
       if (this._destroyed) return;
       for (const b of [...this._bindings.values()]) b.unbind();
+      this._texSources.clear();
       for (const s of this._surfaces) s._destroyLocal();
       this._surfaces.clear();
       this._mainTicks(false);
@@ -1120,13 +1192,6 @@ function definePage(I) {
   }
 
   return { ProxyView, WorkerHost, WorkerSurface };
-}
-
-function textureWarning(name, e) {
-  return e?.name === 'SecurityError'
-    ? `host texture "${name}": the source is cross-origin and not CORS-enabled (set crossOrigin = 'anonymous' ` +
-      'on the <video> / <img> and serve it with Access-Control-Allow-Origin)'
-    : `host texture "${name}": capture failed: ${msgOf(e)}`;
 }
 
 // Latency samples: count, mean, max and the last 512 for percentiles.
@@ -1333,8 +1398,17 @@ export function serve(I, early) {
   class RemoteHost extends remote(JsuiHost) {
     _makeSurface(target, options) { return new RemoteSurface(this, target, options); }
 
-    // The page binds the videos (see JsuiHost._contextLost).
-    _contextLost() { post({ ev: 'glLost' }); }
+    // The page binds the videos (see JsuiHost._contextLost). The textures
+    // tell the page once they are placed again (_texturesReset), also when
+    // none has arrived yet: the page's may be on the way, made before the loss.
+    _contextLost() {
+      post({ ev: 'glLost' });
+      if (!this._destroyed) this._textureSet()._reset = true;
+    }
+
+    // The textures were placed again after a GPU loss: the page captures
+    // its sources again (WorkerHost._keepSource).
+    _texturesReset() { post({ ev: 'texReset' }); }
 
     _onCall(id, name, json) { post({ ev: 'call', id, name, json }); }
 
@@ -1576,7 +1650,9 @@ export function serve(I, early) {
       case 'removeBuffer': reply(op.id, true, host.removeBuffer(op.key)); return;
       case 'texture': {
         const src = op.source;
-        const ok = host.setTexture(op.name, src, op.options);
+        let ok = host.setTexture(op.name, src, op.options);
+        // Cross-origin (SecurityError, logged): the page does not send it again until its URL changes.
+        if (!ok && host._textures?._tainted.has(src)) ok = 'tainted';
         host._bitmaps ??= new Map();
         const prev = host._bitmaps.get(op.name);
         if (typeof ImageBitmap !== 'undefined' && src instanceof ImageBitmap) {
@@ -1703,6 +1779,35 @@ export function serve(I, early) {
           ext.loseContext();
           for (const k of CREATE) gl[k] = () => null;
         };
+        // arg.blankBitmaps: the kept ImageBitmaps lose their pixels, as
+        // WebKit's do with its GPU process (re-uploaded blank after the restore).
+        if (arg?.blankBitmaps) {
+          for (const e of host._textures?.entries.values() ?? []) {
+            if (!(e.source instanceof ImageBitmap)) continue;
+            const c = new OffscreenCanvas(e.source.width, e.source.height);
+            c.getContext('2d');
+            const blank = c.transferToImageBitmap();
+            if (host._bitmaps?.get(e.name) === e.source) host._bitmaps.set(e.name, blank);
+            e.source.close();
+            e.source = blank;
+          }
+        }
+        // arg.onTexture: lost when the next host texture arrives, right before
+        // it is set (isContextLost() true, the event not handled yet).
+        if (arg?.onTexture) {
+          const set = host.setTexture;
+          host.setTexture = function (...a) {
+            delete host.setTexture;
+            lose();
+            try {
+              return set.apply(this, a);
+            } finally {
+              for (const k of CREATE) delete gl[k];
+              setTimeout(() => ext.restoreContext(), 50);
+            }
+          };
+          return true;
+        }
         let fired = !arg?.mid;
         if (arg?.mid) {
           gl.compileShader = function (sh) {

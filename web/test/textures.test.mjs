@@ -237,6 +237,40 @@ test('lost during an upload (WebKit: createTexture gives null): no warning, uplo
   assert.ok(M.calls.some((c) => c[0] === 'set'));
 });
 
+test('restore: lost again during the re-upload keeps the source; the host hears of each reset once', () => {
+  const gl = mockGL();
+  const sgl = { gl, lost: false, gen: 0 };
+  const { M, set } = setup([{ _sgl: sgl }]);
+  let resets = 0;
+  set.host._texturesReset = () => resets++;
+  set.set('g', canvas(4, 4));
+  set.sync();
+  assert.equal(resets, 0);
+  sgl.lost = gl.state.lost = true;
+  set.sync();
+  // Restored, and lost again by the re-upload's first GL call.
+  sgl.lost = gl.state.lost = false;
+  sgl.gen++;
+  gl.createTexture = () => {
+    gl.state.lost = true;
+    return null;
+  };
+  M.calls.length = 0;
+  set.sync();
+  assert.equal(resets, 1);
+  assert.ok(set.entries.get('g')?.source, 'the source is kept');
+  assert.ok(!M.calls.some((c) => c[0] === 'set'));
+  // Back for good.
+  gl.createTexture = () => ({ gltex: true });
+  gl.state.lost = false;
+  sgl.gen++;
+  set.sync();
+  assert.ok(M.calls.some((c) => c[0] === 'set' && c[1] === 'g'));
+  assert.equal(resets, 2);
+  set.sync();
+  assert.equal(resets, 2);
+});
+
 test('a cross-origin source is reported once, not thrown', () => {
   const dev = mockDevice();
   dev.queue.copyExternalImageToTexture = () => { const e = new Error('tainted'); e.name = 'SecurityError'; throw e; };
