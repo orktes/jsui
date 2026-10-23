@@ -435,6 +435,35 @@ JSValue js_reload(JSContext* ctx, JSValueConst, int, JSValueConst*) {
   return JS_UNDEFINED;
 }
 
+// devError(text): shows `text` as the error (dev overlay, jsui_last_error);
+// devError(null) clears it. Hot updates (jsui dev) report build and update
+// errors through this.
+JSValue js_devError(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  Runtime& rt = runtimeOf(ctx);
+  if (argc < 1 || JS_IsNull(argv[0]) || JS_IsUndefined(argv[0])) {
+    if (!rt.lastError.empty()) {
+      rt.lastError.clear();
+      rt.redrawAll();
+    }
+    return JS_UNDEFINED;
+  }
+  rt.reportError(toStdString(ctx, argv[0]));
+  return JS_UNDEFINED;
+}
+
+// evalScript(source, name): evaluates a script in the global scope (hot
+// updates); `name` is the file name stack traces show. Returns its value.
+JSValue js_evalScript(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  if (argc < 1) return JS_UNDEFINED;
+  size_t len = 0;
+  const char* src = JS_ToCStringLen(ctx, &len, argv[0]);
+  if (!src) return JS_EXCEPTION;
+  std::string name = argc > 1 ? toStdString(ctx, argv[1]) : std::string("<eval>");
+  JSValue r = JS_Eval(ctx, src, len, name.c_str(), JS_EVAL_TYPE_GLOBAL);
+  JS_FreeCString(ctx, src);
+  return r;
+}
+
 }  // namespace
 
 void installAnimatedBridge(JsEngine::Impl& impl, JSValue native);  // bridge_animated.cpp
@@ -454,7 +483,8 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
              {"blur", js_blur, 1},                 {"scrollTo", js_scrollTo, 4},
              {"postMessage", js_postMessage, 2},   {"loadFont", js_loadFont, 4},
              {"reload", js_reload, 0},             {"viewport", js_viewport, 1},
-             {"surfaceApp", js_surfaceApp, 1},
+             {"surfaceApp", js_surfaceApp, 1},     {"devError", js_devError, 1},
+             {"evalScript", js_evalScript, 2},
              {"setTextInputSelection", js_setTextInputSelection, 3},
              {"getClipboard", js_getClipboard, 0}, {"setClipboard", js_setClipboard, 1},
              {"flashScrollIndicators", js_flashScrollIndicators, 1},

@@ -406,8 +406,11 @@ void Runtime::loadUrl(const std::string& url) {
   if (config.dev_mode) devOrigin_ = httpOrigin(bundleUrl);
   loader.load(bundleUrl, [this](Resource res) {
     if (!res.ok()) {
+      // A dev server answers 503 with the build error.
+      std::string body = res.status >= 400 ? trimmed(res.text()) : std::string();
+      if (body.size() > 4000) body = body.substr(0, 4000) + "\n...";
       reportError("failed to load bundle " + res.url + " (status " + std::to_string(res.status) +
-                  (res.error.empty() ? "" : ": " + res.error) + ")");
+                  (res.error.empty() ? "" : ": " + res.error) + ")" + (body.empty() ? "" : "\n" + body));
       return;
     }
     // A dev server may stamp the bundle with its version so a change between
@@ -445,6 +448,14 @@ void Runtime::reload() {
   else if (!bundleSource.empty()) loadSource(bundleSource, bundleName);
 }
 
+void Runtime::devUpdate() {
+  if (js && !reloadRequested_ && bundleRan_) {
+    Value token(devVersion_);
+    if (js->callGlobal("__jsui_onDevUpdate", &token, 1)) return;
+  }
+  reload();
+}
+
 bool Runtime::devKey(const char* key, bool down) {
   if (!config.dev_mode || !key || !down || lastError.empty()) return false;
   if (std::strcmp(key, "Escape") != 0) return false;
@@ -455,12 +466,13 @@ bool Runtime::devKey(const char* key, bool down) {
 
 // Polls <origin>/__jsui/version (an opaque token; any change means the
 // bundle changed). The dev server answers immediately; we poll every 500 ms,
-// backing off to 2 s while the server is unreachable.
+// backing off to 2 s while the server is unreachable. `hmr=1`: a failed
+// build changes the token too, so a hot-updating bundle can show the error.
 void Runtime::devPoll() {
   if (!config.dev_mode || devOrigin_.empty() || devPollInFlight_ || now < devNextPoll_) return;
   devPollInFlight_ = true;
   LoadRequest req;
-  req.url = devOrigin_ + "/__jsui/version";
+  req.url = devOrigin_ + "/__jsui/version?hmr=1";
   req.timeoutMs = 5000;
   req.headers.emplace_back("Cache-Control", "no-cache");
   loader.load(std::move(req), [this](Resource res) {
@@ -475,8 +487,8 @@ void Runtime::devPoll() {
       devVersion_ = token;
     } else if (token != devVersion_) {
       devVersion_ = token;
-      log(JSUI_LOG_INFO, "bundle changed (version " + token + "), reloading");
-      reload();
+      log(JSUI_LOG_INFO, "bundle changed (version " + token + ")");
+      devUpdate();
     }
   });
 }

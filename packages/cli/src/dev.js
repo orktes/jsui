@@ -1,13 +1,19 @@
-// `jsui dev <entry> [--port 5173] [--host 127.0.0.1]`
+// `jsui dev <entry> [--port 5173] [--host 127.0.0.1] [--no-hmr]`
 //
 // Rebuilds on change and serves (contract with the runtime's dev mode):
-//   GET /bundle.js            last good bundle (build errors keep it served)
-//   GET /bundle.js.map        its source map
+//   GET /bundle.js            last good bundle (build errors keep it served).
+//                             With HMR (the default) it is the module-per-
+//                             function dev bundle of hmr.js.
+//   GET /bundle.js.map        its source map (without HMR)
 //   GET /assets/*             emitted images / fonts
 //   GET /__jsui/version       plain-text opaque token, changes on every
 //                             successful rebuild. `?since=<token>` long-polls:
 //                             the reply is held (up to ~25 s) until the token
-//                             differs from <token>.
+//                             differs from <token>. With `hmr=1` (and HMR on)
+//                             a failed build changes the token too, so the
+//                             runtime asks /__jsui/hmr and shows the error.
+//   GET /__jsui/hmr?from=<v>  hot update script from version <v> to the
+//                             current one (see hmr.js / hmr-runtime.js)
 //   GET /__jsui/error         text of the current build error ('' when ok)
 //   GET /                     small index page (links the WASM web host if built)
 // Anything else is served from the entry's directory (for fetch('./data.json')).
@@ -18,6 +24,7 @@ import { existsSync, statSync, createReadStream } from 'node:fs';
 import path from 'node:path';
 import { esbuildOptions } from './config.js';
 import { formatErrors } from './build.js';
+import { createHmr } from './hmr.js';
 
 const TYPES = {
   '.js': 'text/javascript; charset=utf-8',
@@ -57,11 +64,14 @@ function safeJoin(root, rel) {
   return p === root || p.startsWith(root + path.sep) ? p : null;
 }
 
-export async function dev({ entry, port = 5173, host = '127.0.0.1', log = console.log, minify = false }) {
+export async function dev({ entry, port = 5173, host = '127.0.0.1', log = console.log, minify = false, hmr = true }) {
   const absEntry = path.resolve(entry);
   const entryDir = path.dirname(absEntry);
   const webDir = findWebHost(entryDir) || findWebHost(process.cwd());
-  const state = { bundle: null, map: null, assets: new Map(), version: '0', error: '', builds: 0 };
+  const state = { bundle: null, map: null, assets: new Map(), version: '0', error: '', builds: 0, failures: 0 };
+  const hot = hmr ? createHmr({ entry: absEntry, mode: 'development', assets: state.assets, log }) : null;
+  // The token runtimes poll with hmr=1: a failed build changes it too.
+  const hotToken = () => (hot && state.error ? `${state.version}!${state.failures}` : state.version);
   const waiters = new Set();
   const outfile = path.join(entryDir, '.jsui-dev', 'bundle.js');
 
@@ -78,19 +88,34 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
         t0 = Date.now();
       });
       b.onEnd(async (result) => {
-        if (result.errors.length) {
-          state.error = await formatErrors(result.errors);
+        const fail = (text) => {
+          state.error = text;
+          state.failures++;
           log(`\n[jsui] build failed (serving the last good bundle):\n${state.error}`);
-          return;
-        }
+          notify();
+        };
+        if (result.errors.length) return fail(await formatErrors(result.errors));
+        const version = Date.now().toString(36) + '-' + (state.builds + 1);
+        let bundle = null;
+        let map = null;
         for (const f of result.outputFiles || []) {
-          if (f.path.endsWith('.map')) state.map = Buffer.from(f.contents);
-          else if (f.path.endsWith('.js')) state.bundle = Buffer.from(f.contents);
+          if (f.path.endsWith('.map')) map = Buffer.from(f.contents);
+          else if (f.path.endsWith('.js')) bundle = Buffer.from(f.contents);
         }
+        if (hot) {
+          try {
+            bundle = Buffer.from(await hot.commit(result.metafile, version));
+            map = null;
+          } catch (e) {
+            return fail(e.errors ? await formatErrors(e.errors) : String(e.stack || e));
+          }
+        }
+        state.bundle = bundle;
+        state.map = map;
         state.error = '';
         state.builds++;
-        state.version = Date.now().toString(36) + '-' + state.builds;
-        log(`[jsui] built ${path.relative(process.cwd(), absEntry)} in ${Date.now() - t0} ms (${(state.bundle.length / 1024).toFixed(0)} KiB) -> version ${state.version}`);
+        state.version = version;
+        log(`[jsui] built ${path.relative(process.cwd(), absEntry)} in ${Date.now() - t0} ms (${(state.bundle.length / 1024).toFixed(0)} KiB${hot ? ', hot' : ''}) -> version ${state.version}`);
         notify();
       });
     },
@@ -120,15 +145,16 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
     }
     if (p === '/bundle.js.map') return state.map ? send(res, 200, TYPES['.map'], state.map) : send(res, 404, 'text/plain', 'no map');
     if (p === '/__jsui/version') {
+      const token = url.searchParams.get('hmr') === '1' ? hotToken : () => state.version;
       const since = url.searchParams.get('since');
-      if (since == null || since !== state.version) return send(res, 200, 'text/plain; charset=utf-8', state.version);
+      if (since == null || since !== token()) return send(res, 200, 'text/plain; charset=utf-8', token());
       let done = false;
       const finish = () => {
         if (done) return;
         done = true;
         clearTimeout(timer);
         waiters.delete(finish);
-        send(res, 200, 'text/plain; charset=utf-8', state.version);
+        send(res, 200, 'text/plain; charset=utf-8', token());
       };
       const timer = setTimeout(finish, 25000);
       waiters.add(finish);
@@ -138,6 +164,10 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
         waiters.delete(finish);
       });
       return undefined;
+    }
+    if (p === '/__jsui/hmr') {
+      if (!hot) return send(res, 200, TYPES['.js'], '__jsui_hmr.reload("hot updates are off (jsui dev --no-hmr)");\n');
+      return send(res, 200, TYPES['.js'], hot.update(url.searchParams.get('from') || '', state.error));
     }
     if (p === '/__jsui/error') return send(res, 200, 'text/plain; charset=utf-8', state.error);
     if (p.startsWith('/assets/')) {
