@@ -10,6 +10,14 @@ option(JSUI_BUILD_TOOLS "Build jsui-render and the viewer" ON)
 option(JSUI_BUILD_TESTS "Build native tests" ON)
 option(JSUI_BUILD_VIEWER "Build tools/jsui-viewer (downloads and builds SDL2)" ON)
 option(JSUI_BUILD_GODOT "Build the Godot 4 GDExtension in integrations/godot (fetches godot-cpp, needs python3)" OFF)
+# The built-in audio backend (src/audio/audio_builtin.cpp) for hosts without
+# an audio handler: desktop only. The browser host plays sounds with Web Audio
+# (web/jsui-web.js) and iOS embedders bring their own handler.
+set(_jsui_audio_default ON)
+if(EMSCRIPTEN OR IOS OR ANDROID)
+  set(_jsui_audio_default OFF)
+endif()
+option(JSUI_AUDIO "Build the built-in miniaudio audio backend" ${_jsui_audio_default})
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 include(Deps)
@@ -22,6 +30,11 @@ target_compile_definitions(jsui PRIVATE JSUI_BUILDING)
 if(JSUI_LOTTIE)
   target_compile_definitions(jsui PRIVATE JSUI_LOTTIE=1)
 endif()
+if(JSUI_AUDIO)
+  target_compile_definitions(jsui PUBLIC JSUI_AUDIO=1)
+  target_link_libraries(jsui PRIVATE jsui_miniaudio)
+endif()
+message(STATUS "JSUI_AUDIO: ${JSUI_AUDIO}")
 # Subclass Skia classes (a canvas, Skottie observers): Skia is built
 # without RTTI, so are these files.
 set_source_files_properties(src/render/paint_counter.cpp src/render/lottie.cpp PROPERTIES COMPILE_OPTIONS

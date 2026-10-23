@@ -410,3 +410,42 @@ if(NOT EMSCRIPTEN)
     target_link_libraries(jsui_skia INTERFACE jsui_zlib)
   endif()
 endif()
+
+# ----------------------------------------------------------------- miniaudio
+# The built-in audio backend (JSUI_AUDIO, src/audio/audio_builtin.cpp):
+# device output, mixing and decoding (WAV, FLAC, MP3, and Ogg Vorbis through
+# the stb_vorbis copy miniaudio ships in extras/). One C translation unit,
+# src/audio/miniaudio.c. The MA_* options are PUBLIC: they change miniaudio's
+# structs, so the backend must see the same ones.
+if(JSUI_AUDIO)
+  FetchContent_Declare(miniaudio
+    GIT_REPOSITORY https://github.com/mackron/miniaudio.git
+    GIT_TAG 0.11.25
+    GIT_SHALLOW TRUE)
+  FetchContent_GetProperties(miniaudio)
+  if(NOT miniaudio_POPULATED)
+    FetchContent_Populate(miniaudio)
+  endif()
+  add_library(jsui_miniaudio STATIC ${CMAKE_SOURCE_DIR}/src/audio/miniaudio.c)
+  target_include_directories(jsui_miniaudio PUBLIC ${miniaudio_SOURCE_DIR})
+  # Not used by the backend: the resource manager (sounds are decoded by the
+  # backend from the loader's bytes), encoders and waveform / noise generators.
+  target_compile_definitions(jsui_miniaudio PUBLIC MA_NO_RESOURCE_MANAGER MA_NO_ENCODING MA_NO_GENERATION)
+  set_target_properties(jsui_miniaudio PROPERTIES C_STANDARD 99 POSITION_INDEPENDENT_CODE ON)
+  if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(jsui_miniaudio PRIVATE -w)
+  elseif(MSVC)
+    target_compile_options(jsui_miniaudio PRIVATE /w)
+  endif()
+  if(APPLE)
+    # Linked, not loaded at run time (miniaudio's default there), which
+    # Apple's notarization does not accept without extra entitlements.
+    target_compile_definitions(jsui_miniaudio PUBLIC MA_NO_RUNTIME_LINKING)
+    target_link_libraries(jsui_miniaudio PUBLIC "-framework CoreFoundation" "-framework CoreAudio" "-framework AudioToolbox")
+  elseif(UNIX)
+    # ALSA / PulseAudio / JACK are loaded at run time (dlopen): nothing to
+    # link against, no build dependency on their headers.
+    find_package(Threads REQUIRED)
+    target_link_libraries(jsui_miniaudio PUBLIC Threads::Threads ${CMAKE_DL_LIBS} m)
+  endif()
+endif()

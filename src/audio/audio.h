@@ -25,6 +25,9 @@ class AudioBackend {
   // Every jsui_tick(), on the runtime's thread (deliver reports, free
   // finished voices).
   virtual void update() {}
+  // Work that update() will turn into reports (decoding, ended voices, fades
+  // to finish): keeps the host ticking (jsui_wants_frame).
+  virtual bool busy() const { return false; }
 };
 
 // The library's built-in backend (audio_builtin.cpp: miniaudio when built
@@ -66,6 +69,7 @@ class Audio {
   void update();
   std::vector<Event> takeEvents();
   bool hasEvents() const { return !events_.empty(); }
+  bool busy() const { return builtin_ && builtin_->busy(); }
   bool live(uint64_t voice) const { return live_.count(voice) > 0; }
 
  private:

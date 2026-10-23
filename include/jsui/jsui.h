@@ -349,7 +349,9 @@ JSUI_API int jsui_remove_texture(JsuiRuntime* rt, const char* key);
  * them itself: the native library's built-in backend (miniaudio, built when
  * JSUI_AUDIO is ON, the default on desktop platforms) and, in the browser,
  * Web Audio in web/jsui-web.js. JsuiConfig.audio_disabled = 1 turns sound
- * off (headless tools, tests).
+ * off (headless tools, tests). The built-in backend opens the output device
+ * on the first PLAY / PRELOAD; JSUI_AUDIO_BACKEND=null (environment) makes
+ * it play to a null device (CI without sound hardware). See docs/AUDIO.md.
  *
  * Sounds are URLs resolved against the base URL (the bundler emits imported
  * .wav / .ogg / .mp3 / .flac files next to the bundle). A handler loads them
