@@ -186,9 +186,8 @@ export function HomePage() {
       </Column>
 
       <Column style={{ marginTop: phone ? 72 : 120 }}>
-        {/* Stacked: stretch both halves to the column width. With flex-start the left half is sized
-            as fit-content, which Yoga measures with its flex: 1 text rows at zero width (one character
-            per line, ~6000 px tall), and the code block would overflow the screen at its natural width. */}
+        {/* Stacked: stretch both halves to the column width, or the code block would overflow the
+            screen at its natural width. */}
         <View style={[styles.codeSplit, tablet && { flexDirection: 'column', alignItems: 'stretch' }]}>
           <View style={{ flex: tablet ? 0 : 0.85, gap: 18 }}>
             <SectionHead eyebrow="Write it once" title="It is just React Native" lead="Same components, same StyleSheet, same Pressable states. The host side is a dozen lines: feed input, tick, take pixels." />

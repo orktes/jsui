@@ -1833,9 +1833,13 @@ void applyStyle(const Value& style, ComputedStyle* out, YGNodeRef yoga, float pi
   YGNodeStyleSetBoxSizing(yoga, enumKey("boxSizing") == "content-box" ? YGBoxSizingContentBox : YGBoxSizingBorderBox);
 
   float f;
+  const bool flexPositive = numFromValue(s["flex"], &f) && f > 0;
   YGNodeStyleSetFlex(yoga, numFromValue(s["flex"], &f) ? f : YGUndefined);
   YGNodeStyleSetFlexGrow(yoga, numFromValue(s["flexGrow"], &f) ? std::max(0.f, f) : YGUndefined);
-  YGNodeStyleSetFlexShrink(yoga, numFromValue(s["flexShrink"], &f) ? std::max(0.f, f) : YGUndefined);
+  // `flex: N > 0` is `flex: N 1 0%` on the web (react-native-web), so the item
+  // may shrink; Yoga's own default for it is 0. The shrink only matters while
+  // a row is sized to fit its content (see the Yoga patch in cmake/Deps.cmake).
+  YGNodeStyleSetFlexShrink(yoga, numFromValue(s["flexShrink"], &f) ? std::max(0.f, f) : flexPositive ? 1.f : YGUndefined);
   {
     // aspectRatio: number or "16/9" / "16 / 9" string.
     float ar = YGUndefined;

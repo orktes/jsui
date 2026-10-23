@@ -272,6 +272,47 @@ TEST(style_yoga_mapping) {
   CHECK(!col->style().display);
 }
 
+// `flex: N` items are sized by their content while their container is sized
+// to fit its content (web: the 0% basis of `flex: N 1 0%` is indefinite then),
+// and shrink when that content is wider than the space. Yoga gave them 0.
+// The showcase site's stacked "Write it once" list; see cmake/Deps.cmake.
+TEST(style_flex_shorthand_in_content_sized_container) {
+  Document doc;
+  doc.setViewport(354, 600, 1);
+  Node* stack = doc.createNode(NodeType::View);
+  stack->setProps(Value::parseJson(R"({"style":{"alignItems":"flex-start"}})"));
+  doc.root()->appendChild(stack);
+  auto point = [&](float contentWidth, Node** inner) {
+    Node* col = doc.createNode(NodeType::View);
+    col->setProps(Value::parseJson(R"({"style":{"flex":0}})"));
+    Node* row = doc.createNode(NodeType::View);
+    row->setProps(Value::parseJson(R"({"style":{"flexDirection":"row"}})"));
+    Node* check = doc.createNode(NodeType::View);
+    check->setProps(Value::parseJson(R"({"style":{"width":20,"height":20}})"));
+    *inner = doc.createNode(NodeType::View);
+    (*inner)->setProps(Value::parseJson(R"({"style":{"flex":1}})"));
+    Node* content = doc.createNode(NodeType::View);
+    content->setProps(Value::parseJson("{\"style\":{\"width\":" + std::to_string(contentWidth) + ",\"height\":10}}"));
+    (*inner)->appendChild(content);
+    row->appendChild(check);
+    row->appendChild(*inner);
+    col->appendChild(row);
+    stack->appendChild(col);
+    return col;
+  };
+  Node *shortInner, *longInner;
+  Node* shortCol = point(100, &shortInner);
+  Node* longCol = point(600, &longInner);
+  doc.layout();
+  CHECK_NEAR(shortCol->layoutRect().width, 120, 0.01);
+  CHECK_NEAR(shortInner->layoutRect().width, 100, 0.01);
+  CHECK_NEAR(longCol->layoutRect().width, 354, 0.01);
+  CHECK_NEAR(longInner->layoutRect().width, 334, 0.01);
+  CHECK_NEAR(longCol->layoutRect().height, 20, 0.01);
+  // `flex: N > 0` maps to flexShrink 1 unless flexShrink is given.
+  CHECK_NEAR(YGNodeStyleGetFlexShrink(shortInner->yoga()), 1, 1e-6);
+}
+
 TEST(style_paint_only_changes_skip_layout) {
   Document doc;
   doc.setViewport(100, 100, 1);
