@@ -1413,8 +1413,16 @@ Options: `--frames`, `--warmup`, `--width` / `--height`, `--paint
 incremental|full|none`, `--mouse-sweep X,Y0,Y1,FRAMES` (moves the mouse
 every frame), `--patch-state KEY,SLOTS` (one `jsui_patch_state` per frame),
 `--surfaces N[,changing|same|one|resize]` (N `Plate` surfaces of 120x40 and
-what the host does to them every frame). Scenarios: `interactions`
-(examples), `list` (2000 rows, one counter), `menu` (native spring on
+what the host does to them every frame), `--wheel X,Y,DY[,FRAMES]` (a wheel
+delta at X,Y every frame, reversing every FRAMES), `--react-stats` (installs
+a React DevTools hook and adds `reactCommits` / `reactRenders`: commits and
+function / memo / forwardRef components rendered per frame). Besides the
+phase times, the JS work is counted: `events` (events sent to JS), `jsCalls`
+(native → JS calls: events, timers, frame callbacks, layout callbacks,
+messages), `jsJobs` (promise jobs) and `hostMessages` (`postMessage` to the
+host). Scenarios: `interactions`
+(examples), `interactions-wheel` (the same, wheel-scrolling the armory
+list under a still mouse), `list` (2000 rows, one counter), `menu` (native spring on
 hover), `inventory` (500 slots through `useHostState` +
 `jsui_patch_state`), `idle`, and 30 nameplate surfaces: `surfaces-static`,
 `surfaces-props` (every surface's props change every frame),
