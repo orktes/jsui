@@ -8,6 +8,7 @@ import { Features } from './home/Features.jsx';
 import { Pipeline } from './home/Pipeline.jsx';
 import { CodeTabs } from './home/CodeTabs.jsx';
 import { Highlights, SkillInstall } from './home/Highlights.jsx';
+import { RunsIn } from './home/RunsIn.jsx';
 
 const HeroScreen = SCREENS[0].component;
 
@@ -162,9 +163,14 @@ export function HomePage() {
               </View>
             </Reveal>
           </View>
-          <Reveal delay={200} distance={28} style={stackHero ? { marginTop: 12 } : null}>
-            <HeroVisual width={heroW} />
-          </Reveal>
+          <View style={[{ width: heroW, gap: phone ? 28 : 44 }, stackHero && { marginTop: 12 }]}>
+            <Reveal delay={200} distance={28}>
+              <HeroVisual width={heroW} />
+            </Reveal>
+            <Reveal delay={380}>
+              <RunsIn />
+            </Reveal>
+          </View>
         </View>
       </Column>
 
