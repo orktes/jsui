@@ -17,8 +17,13 @@
 # with Skia Graphite straight into its RenderingDevice texture: the run fails
 # on the CPU fallback, or when the GPU frame differs from the CPU raster of
 # the same frame by more than GPU_MAX_DIFF (mean channel difference, 0..255;
-# default 1.5) and writes <out>-gpu.png / <out>-cpu.png. Without it every run
-# must use the CPU raster (headless, OpenGL Compatibility).
+# default 1.5) and writes <out>-gpu.png / <out>-cpu.png. It also drives
+# hover springs and four surface views of the runtime for 30 frames and
+# fails when the main thread blocked on Godot's render thread more than
+# RENDER_MAX_WAITS times meanwhile (default 0; with
+# GODOT_RENDER_THREAD=separate the frames of all the views are queued there
+# as one job per frame, without waiting). Without it every run must use the
+# CPU raster (headless, OpenGL Compatibility).
 # Runs with a display (GODOT_RENDERING=vulkan or GODOT_DISPLAY) also read
 # back what Godot drew for JsuiView (the viewport texture) and fail when it
 # differs from JsuiView's own frame by more than VIEWPORT_MAX_DIFF (mean
@@ -105,7 +110,7 @@ display=(--headless)
 checks=(--expect-renderer cpu)
 if [[ "${GODOT_RENDERING:-}" == vulkan ]]; then
   display=(--display-driver "${GODOT_DISPLAY:-x11}" --rendering-driver vulkan --rendering-method forward_plus --audio-driver Dummy)
-  checks=(--expect-renderer vulkan --max-gpu-diff "${GPU_MAX_DIFF:-1.5}")
+  checks=(--expect-renderer vulkan --max-gpu-diff "${GPU_MAX_DIFF:-1.5}" --max-render-waits "${RENDER_MAX_WAITS:-0}")
 elif [[ "${GODOT_DISPLAY:-headless}" != headless ]]; then
   display=(--display-driver "$GODOT_DISPLAY" --rendering-driver opengl3 --audio-driver Dummy)
 fi

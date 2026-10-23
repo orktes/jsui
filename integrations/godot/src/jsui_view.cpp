@@ -376,7 +376,9 @@ void JsuiView::destroySurface() {
 }
 
 void JsuiView::surfaceGone() {
-  rt_ = nullptr;
+  rt_ = nullptr;  // waits for the renders queued on the runtime (ours among them)
+  // Our queued frame has run; its result goes with the surface.
+  gpu_job_pending_ = false;
   held_keys_.clear();
   pads_.clear();
   gpu_retained_ = false;
@@ -636,6 +638,10 @@ void JsuiView::updateAutoSize() {
 void JsuiView::process() {
   if (attach_wanted_ && !host_) attachToRuntimeView();  // the runtime view was not there yet
   if (host_) return;  // the runtime view ticks the runtime and paints us
+  // The frames queued on a separate render thread last frame, ours and our
+  // surface views': they have run (Godot syncs with that thread every
+  // frame), take their results.
+  collectFrames();
   if (!rt_) return;
   updateViewport();
   for (JsuiView* v : surfaces_) v->updateViewport();
@@ -644,10 +650,38 @@ void JsuiView::process() {
   flushMessages();
   if (!rt_) return;  // a message handler stopped the view
   reportErrors();
-  afterTick();
-  std::vector<JsuiView*> views = surfaces_;  // signal handlers may detach views
+  std::vector<JsuiView*> views{this};  // signal handlers may detach views
+  views.insert(views.end(), surfaces_.begin(), surfaces_.end());
   for (JsuiView* v : views)
-    if (std::find(surfaces_.begin(), surfaces_.end(), v) != surfaces_.end()) v->afterTick();
+    if (showsOurRuntime(v)) v->afterTick();
+  // Then the views whose frame changed paint. With a separate render thread
+  // the GPU frames of all of them go there as one job (queueFrameJob), which
+  // uses the runtime until it has run; the main thread waits for that before
+  // it touches the runtime again. So every view's work on the runtime above
+  // comes first, and the CPU renderers (which paint on the main thread)
+  // paint before the GPU frames are queued.
+  batching_ = true;
+  for (bool cpu : {true, false})
+    for (JsuiView* v : views)
+      if (showsOurRuntime(v) && (v->renderer_ == Renderer::Cpu) == cpu && v->rt_.unsynced() && v->render_pending_ &&
+          v->is_visible_in_tree())
+        v->render();
+  batching_ = false;
+  queueFrameJob();
+}
+
+bool JsuiView::showsOurRuntime(const JsuiView* v) const {
+  return v == this || std::find(surfaces_.begin(), surfaces_.end(), v) != surfaces_.end();
+}
+
+void JsuiView::collectFrames() {
+  std::vector<JsuiView*> views{this};  // frame_rendered handlers may detach views
+  views.insert(views.end(), surfaces_.begin(), surfaces_.end());
+  for (JsuiView* v : views) {
+    if (!showsOurRuntime(v) || v->collectGpuRender()) continue;
+    v->gpuFailed();
+    v->render_pending_ = true;
+  }
 }
 
 void JsuiView::afterTick() {
@@ -655,22 +689,28 @@ void JsuiView::afterTick() {
   updateAutoSize();
   updateCursor();
   if (jsui_needs_redraw(rt_)) render_pending_ = true;
-  if (render_pending_ && is_visible_in_tree()) render();
 }
 
 void JsuiView::render() {
   if (pixel_w_ <= 0 || pixel_h_ <= 0) return;
   render_pending_ = false;
-  if (renderer_ == Renderer::Unknown) chooseRenderer();
+  const bool gpuRenderer = renderer_ == Renderer::Vulkan || renderer_ == Renderer::Metal || renderer_ == Renderer::WebGPU;
+  // Also when the runtime's Skia context is not there (yet): a surface view
+  // that moved to another runtime view, or one that dropped its context.
+  if (renderer_ == Renderer::Unknown || (gpuRenderer && !runtimeView()->gpu_)) chooseRenderer();
   const uint64_t t0 = Time::get_singleton()->get_ticks_usec();
+  // Only a steady-state GPU frame joins the runtime's frame job (renderGpu);
+  // every other render queues the frames batched so far first, since it may
+  // run the game's code (frame_rendered, the texture's `changed`) and that
+  // must not see views in an unqueued batch (they could go meanwhile).
   if (renderer_ == Renderer::Vulkan || renderer_ == Renderer::Metal || renderer_ == Renderer::WebGPU) {
     if (!renderGpu()) {
-      UtilityFunctions::push_warning("JsuiView: GPU rendering failed; using the CPU renderer");
-      releaseGpu();
-      renderer_ = Renderer::Cpu;
+      gpuFailed();
+      runtimeView()->queueFrameJob();
       renderCpu();
     }
   } else {
+    runtimeView()->queueFrameJob();
     renderCpu();
   }
   const uint64_t dt = Time::get_singleton()->get_ticks_usec() - t0;
@@ -806,6 +846,21 @@ Dictionary JsuiView::get_render_stats() const {
   d["render_usec_last"] = int64_t(render_usec_last_);
   d["render_usec_max"] = int64_t(render_usec_max_);
   d["dirty_pixels_total"] = dirty_px_total_;
+  // The render-thread hand-off (jsui_gpu_render.cpp): GPU render jobs, the
+  // main thread's waits on the render thread (count and time), and the
+  // render-thread time of the jobs and of jsui_render_gpu_target in them.
+  // gpu_jobs: this view's frames handed over; render_thread_jobs: the
+  // runtime's render-thread jobs for them (one per frame for all its views;
+  // counted by the runtime view). gpu_frame_in_flight: the view's last
+  // frame handed over has not been painted yet.
+  d["gpu_jobs"] = int64_t(gpu_jobs_);
+  d["render_thread_jobs"] = int64_t((host_ ? host_ : this)->render_thread_jobs_);
+  d["gpu_frame_in_flight"] =
+      gpu_job_pending_ && gpu_job_.fence && gpu_job_.fence->done.load(std::memory_order_acquire) < gpu_job_.id;
+  d["blocking_waits"] = int64_t(blocking_waits_);
+  d["main_wait_usec_total"] = int64_t(main_wait_usec_total_);
+  d["gpu_job_usec_total"] = int64_t(gpu_job_usec_total_.load(std::memory_order_relaxed));
+  d["jsui_render_usec_total"] = int64_t(jsui_render_usec_total_.load(std::memory_order_relaxed));
   return d;
 }
 

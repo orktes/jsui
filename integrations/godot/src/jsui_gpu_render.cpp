@@ -2,6 +2,12 @@
 // (Vulkan on Linux / Windows, Metal on macOS, and Dawn under the WebGPU
 // rendering driver of the godot-aw3 fork), see jsui_view.h.
 //
+// The views of one runtime (the runtime view and its surface views, see
+// jsui_view.h) share one Skia context, the runtime view's: one image cache and
+// one Recorder for the runtime, created when the first of them renders on the
+// GPU. It goes with the runtime view (or when that leaves the GPU path while
+// no surface view is attached), after every render queued on the runtime.
+//
 // Per view there are two RD textures of the view's pixel size:
 //
 //   src  COLOR_ATTACHMENT | INPUT_ATTACHMENT | SAMPLING | CAN_COPY_FROM |
@@ -19,7 +25,9 @@
 //
 // Ordering: JSUI submits its work straight to Godot's main queue (the one
 // RenderingDevice records the frame for) from the render thread, during
-// process, i.e. before Godot submits the frame that contains the copy. On
+// process (or, with a separate render thread, in a job queued during process,
+// which runs before that frame's draw: the render thread's queue is FIFO), i.e.
+// before Godot submits the frame that contains the copy. On
 // Vulkan the render is bracketed by full pipeline barriers (gpu_graphite.cpp),
 // which also order it after the previous frame that may still be copying from
 // src. On Metal both use the same MTLCommandQueue and tracked resources. On
@@ -44,6 +52,46 @@
 // Godot has submitted the upload (possibly on a transfer queue it waits for)
 // and moved src into COPY_FROM. Until then the previous textures stay on
 // screen.
+//
+// Hand-off to the render thread. With Godot's default thread model the
+// RenderingServer runs on the main thread and every job below runs inline.
+// With a separate render thread (--render-thread separate) the main thread
+// waits on it only where it must:
+//   * Steady state (the textures fit, none pending): a view's frame (its
+//     jsui_render_gpu_target into its src, the copy into its dst) joins the
+//     runtime view's frame job (batchFrame). Once every view of the runtime
+//     has painted, the runtime view's process queues that one job with
+//     call_on_render_thread (queueFrameJob) and returns: one render-thread
+//     job per frame for all of a runtime's views, however many surfaces it
+//     has. It runs before this frame's draw, so the latency is unchanged. The
+//     job uses the runtime (every view's frame paints a surface of it), so
+//     the main thread must not touch the runtime until it has run: reading
+//     rt_ on any view of the runtime waits for it (waitRender, on the runtime
+//     view's fence, which the job signals; jobs run in order, so
+//     done == queued means all have run). That is why the runtime view's
+//     process does every view's main-thread work on the runtime (tick, auto
+//     size, cursor, CPU renders) before the GPU frames are batched, and why
+//     every other kind of render queues the batch first (render(),
+//     renderGpu()): what it does may run the game's code (frame_rendered,
+//     the texture's `changed`), which must not see views in an unqueued
+//     batch, and it keeps the render thread's order. Godot's main
+//     loop calls RenderingServer.sync() after process every frame, so by the
+//     next frame's input and process the job has run and nothing waits; only
+//     calls into the runtime's views later in the same frame (after the
+//     runtime view's _process) can block, until the job has run. The views'
+//     results (frame_rendered, stats, a failure) are collected at the start
+//     of the runtime view's next process.
+//   * Blocking, per view, as before: choosing the renderer (creating the
+//     runtime's context), creating / promoting a texture pair (start, resize;
+//     with the Texture2DRD wait below), reading the frame back
+//     (get_frame_image) and teardown (releaseGpu).
+// The main thread holds no lock the job needs while it waits (the fence's
+// mutex is released while waiting), and the job never waits for the main
+// thread (waitRender returns at once on the render thread). Lifetimes: a
+// surface view waits for the runtime's job before its surface goes (detach,
+// free, the runtime stopping), and a runtime view before its runtime, its
+// fence and the runtime's context go, so a job never outlives a view,
+// surface, fence or context it uses.
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/rd_texture_format.hpp>
 #include <godot_cpp/classes/rd_texture_view.hpp>
@@ -54,6 +102,7 @@
 #include <godot_cpp/variant/typed_array.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 
@@ -68,8 +117,52 @@ namespace {
 constexpr int kVkImageLayoutTransferSrcOptimal = 6;  // VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
 constexpr unsigned kMTLPixelFormatRGBA8Unorm = 70;
 
+uint64_t usecNow() {
+  return uint64_t(
+      std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
 void* driverResource(RenderingDevice* rd, RenderingDevice::DriverResource what, const RID& rid = RID()) {
   return reinterpret_cast<void*>(uintptr_t(rd->get_driver_resource(what, rid, 0)));
+}
+
+enum class TargetKind { Vulkan, WebGPU, Metal };
+
+// What jsui_render_gpu_target needs about src, but its handle.
+JsuiGpuTarget targetFor(TargetKind kind, int w, int h, int flags) {
+  JsuiGpuTarget t{};
+  t.width = w;
+  t.height = h;
+  t.flags = flags;
+  if (kind == TargetKind::Vulkan) {
+    t.format = 0;  // VK_FORMAT_R8G8B8A8_UNORM
+    t.usage = 0;   // colour + input attachment, sampled, transfer src / dst (the bits in renderGpu)
+    t.layout = t.final_layout = kVkImageLayoutTransferSrcOptimal;
+  } else if (kind == TargetKind::WebGPU) {
+    t.format = 0;  // the texture's own: WGPUTextureFormat_RGBA8Unorm (DATA_FORMAT_R8G8B8A8_UNORM)
+  } else {
+    t.format = kMTLPixelFormatRGBA8Unorm;
+  }
+  return t;
+}
+
+// On the render thread: Skia paints the frame into src, then Godot copies the
+// repainted rect into dst (texture_copy, recorded into Godot's frame).
+// false: the GPU path failed.
+bool paintGpuTarget(RenderingDevice* rd, JsuiRuntime* rt, JsuiGpuContext* gpu, JsuiGpuTarget t, const RID& src,
+                    const RID& dst, JsuiRect* dirty, std::atomic<uint64_t>& renderUsec) {
+  *dirty = JsuiRect{0, 0, 0, 0};
+  t.texture = driverResource(rd, RenderingDevice::DRIVER_RESOURCE_TEXTURE, src);
+  if (!t.texture || !rt || !gpu) return false;
+  const uint64_t t0 = usecNow();
+  const int rc = jsui_render_gpu_target(rt, gpu, &t, dirty);
+  renderUsec.fetch_add(usecNow() - t0, std::memory_order_relaxed);
+  if (rc != 0) return false;
+  if (dirty->width > 0 && dirty->height > 0) {
+    Vector3 pos(float(dirty->x), float(dirty->y), 0);
+    rd->texture_copy(src, dst, pos, pos, Vector3(float(dirty->width), float(dirty->height), 1), 0, 0, 0, 0);
+  }
+  return true;
 }
 
 // Which RenderingDevice driver Godot runs: "vulkan", "metal", "d3d12",
@@ -144,6 +237,7 @@ void JsuiView::runOnRenderThread(const std::function<void()>& job) {
     job();
     return;
   }
+  const uint64_t t0 = usecNow();
   std::mutex m;
   std::condition_variable cv;
   bool done = false;
@@ -156,6 +250,25 @@ void JsuiView::runOnRenderThread(const std::function<void()>& job) {
   rs->call_on_render_thread(callable_mp(this, &JsuiView::runRenderJob));
   std::unique_lock<std::mutex> lock(m);
   cv.wait(lock, [&] { return done; });
+  blocking_waits_++;
+  main_wait_usec_total_ += usecNow() - t0;
+}
+
+void JsuiView::waitRender() {
+  // Every job on the runtime: a surface view's render uses the shared
+  // runtime as much as the runtime view's own.
+  Fence& f = runtimeFence();
+  const uint64_t queued = f.queued.load(std::memory_order_relaxed);
+  if (f.done.load(std::memory_order_acquire) == queued) return;
+  // On the render thread we are inside the job (a runtime callback) or ahead
+  // of it in the queue: never wait for it there.
+  RenderingServer* rs = RenderingServer::get_singleton();
+  if (!rs || rs->is_on_render_thread()) return;
+  const uint64_t t0 = usecNow();
+  std::unique_lock<std::mutex> lock(f.m);
+  f.cv.wait(lock, [&] { return f.done.load(std::memory_order_acquire) == queued; });
+  blocking_waits_++;
+  main_wait_usec_total_ += usecNow() - t0;
 }
 
 void JsuiView::chooseRenderer() {
@@ -182,6 +295,16 @@ void JsuiView::chooseRenderer() {
     return;
   }
   if (want == Renderer::WebGPU) driver = "webgpu (Dawn " + String(jsui_dawn_revision()).substr(0, 12) + ")";
+  // One Skia context per runtime: the runtime view's, shared by its surface
+  // views (one image cache, no context switches, one job per frame).
+  if (!runtimeView()->createGpuContext(want, driver, interop)) return;
+  renderer_ = want;
+}
+
+bool JsuiView::createGpuContext(Renderer want, const String& driver, Object* interop) {
+  if (gpu_) return true;
+  RenderingServer* rs = RenderingServer::get_singleton();
+  if (!rs) return false;
   runOnRenderThread([&]() {
     RenderingDevice* rd = rs->get_rendering_device();
     if (!rd) return;
@@ -214,10 +337,10 @@ void JsuiView::chooseRenderer() {
                                                                     "no device or Skia rejected the device"
                                                               : "built without JSUI_GRAPHITE_METAL or Skia rejected the device") +
                             "); using the CPU renderer");
-    return;
+    return false;
   }
-  renderer_ = want;
   UtilityFunctions::print("JsuiView: rendering with Skia Graphite on " + driver);
+  return true;
 }
 
 namespace {
@@ -240,15 +363,56 @@ RID createTexture(RenderingDevice* rd, int w, int h, int64_t usage, const Packed
 }  // namespace
 
 bool JsuiView::renderGpu() {
+  // The job queued last frame first (the runtime view's process() has
+  // normally taken it).
+  if (!collectGpuRender()) return false;
   RenderingServer* rs = RenderingServer::get_singleton();
+  JsuiGpuContext* gpu = runtimeView()->gpu_;  // the runtime's
   const int w = pixel_w_, h = pixel_h_;
+  const TargetKind kind = renderer_ == Renderer::Vulkan   ? TargetKind::Vulkan
+                          : renderer_ == Renderer::WebGPU ? TargetKind::WebGPU
+                                                          : TargetKind::Metal;
+  // Steady state: the textures on screen fit and no new pair is pending.
+  if (gpu_cur_.valid() && gpu_cur_.w == w && gpu_cur_.h == h && !gpu_next_.valid()) {
+    GpuJob& j = gpu_job_;
+    j.rt = rt_.unsynced();
+    j.gpu = gpu;
+    j.src = gpu_cur_.src;
+    j.dst = gpu_cur_.dst;
+    j.target = targetFor(kind, w, h, gpu_retained_ ? JSUI_GPU_INCREMENTAL : 0);
+    j.fence = nullptr;
+    j.id = 0;
+    j.ok = false;
+    j.dirty = JsuiRect{0, 0, 0, 0};
+    // src holds this frame once the job has run (a failed job ends the GPU
+    // path, and with it the retained frame).
+    gpu_retained_ = true;
+    gpu_job_pending_ = true;
+    gpu_jobs_++;
+    if (!rs || rs->is_on_render_thread()) {
+      // No separate render thread: paint now and take the result
+      // (frame_rendered in this render, as before).
+      paintGpuJob();
+      return collectGpuRender();
+    }
+    runtimeView()->batchFrame(this);
+    return true;
+  }
+
+  // Start / resize: create, prime and promote a texture pair, blocking. The
+  // frames batched so far go first (it may emit frame_rendered, see
+  // render()); the job runs after them (FIFO), and the main thread waits for
+  // it without touching the runtime meanwhile.
+  runtimeView()->queueFrameJob();
+  JsuiRuntime* rt = rt_.unsynced();
   const uint64_t frame = Engine::get_singleton()->get_frames_drawn();
   bool ok = true, promoted = false, waiting = false;
   GpuTextures retired;  // the previous pair, freed once dst is off screen
   JsuiRect dirty{0, 0, 0, 0};
   runOnRenderThread([&]() {
+    const uint64_t t0 = usecNow();
     RenderingDevice* rd = rs->get_rendering_device();
-    if (!rd || !gpu_) {
+    if (!rd || !gpu) {
       ok = false;
       return;
     }
@@ -300,31 +464,10 @@ bool JsuiView::renderGpu() {
       gpu_retained_ = false;
       promoted = true;
     }
-
-    JsuiGpuTarget t{};
-    t.texture = driverResource(rd, RenderingDevice::DRIVER_RESOURCE_TEXTURE, gpu_cur_.src);
-    t.width = w;
-    t.height = h;
-    t.flags = gpu_retained_ ? JSUI_GPU_INCREMENTAL : 0;
-    if (renderer_ == Renderer::Vulkan) {
-      t.format = 0;  // VK_FORMAT_R8G8B8A8_UNORM
-      t.usage = 0;   // colour + input attachment, sampled, transfer src / dst (the bits above)
-      t.layout = t.final_layout = kVkImageLayoutTransferSrcOptimal;
-    } else if (renderer_ == Renderer::WebGPU) {
-      t.format = 0;  // the texture's own: WGPUTextureFormat_RGBA8Unorm (DATA_FORMAT_R8G8B8A8_UNORM)
-    } else {
-      t.format = kMTLPixelFormatRGBA8Unorm;
-    }
-    if (!t.texture || jsui_render_gpu_target(rt_, gpu_, &t, &dirty) != 0) {
-      ok = false;
-      return;
-    }
-    gpu_retained_ = true;
-    if (dirty.width > 0 && dirty.height > 0) {
-      Vector3 pos(float(dirty.x), float(dirty.y), 0);
-      rd->texture_copy(gpu_cur_.src, gpu_cur_.dst, pos, pos, Vector3(float(dirty.width), float(dirty.height), 1), 0, 0,
-                       0, 0);
-    }
+    ok = paintGpuTarget(rd, rt, gpu, targetFor(kind, w, h, gpu_retained_ ? JSUI_GPU_INCREMENTAL : 0), gpu_cur_.src,
+                        gpu_cur_.dst, &dirty, jsui_render_usec_total_);
+    if (ok) gpu_retained_ = true;
+    gpu_job_usec_total_.fetch_add(usecNow() - t0, std::memory_order_relaxed);
   });
   if (!ok) return false;
   if (waiting) {
@@ -361,17 +504,85 @@ bool JsuiView::renderGpu() {
     }
     if (!adopted) return false;
   }
-  if (dirty.width > 0 && dirty.height > 0) {
-    renders_++;
-    dirty_px_total_ += int64_t(dirty.width) * dirty.height;
-    emit_signal("frame_rendered", Rect2i(dirty.x, dirty.y, dirty.width, dirty.height));
-  }
+  finishGpuFrame(dirty);
   return true;
+}
+
+void JsuiView::batchFrame(JsuiView* view) {
+  frame_batch_.push_back(view);
+  // Outside process()'s paint pass (e.g. get_cpu_frame_image): right away.
+  if (!batching_) queueFrameJob();
+}
+
+void JsuiView::queueFrameJob() {
+  if (frame_batch_.empty()) return;
+  RenderingServer* rs = RenderingServer::get_singleton();
+  // The previous frame job reads frame_job_views_ until it has run: it has
+  // in steady state (one job per frame, and Godot syncs every frame).
+  waitRender();
+  frame_job_views_.swap(frame_batch_);
+  frame_batch_.clear();
+  frame_job_id_ = fence_.queued.load(std::memory_order_relaxed) + 1;
+  fence_.queued.store(frame_job_id_, std::memory_order_relaxed);
+  for (JsuiView* v : frame_job_views_) {
+    v->gpu_job_.fence = &fence_;
+    v->gpu_job_.id = frame_job_id_;
+  }
+  render_thread_jobs_++;
+  // FIFO: it runs after what the render thread has queued already (the
+  // previous frame's draw) and before this frame's draw.
+  rs->call_on_render_thread(callable_mp(this, &JsuiView::runFrameJob));
+}
+
+void JsuiView::runFrameJob() {
+  // Each view into its own src, copied into its own dst, with the runtime's
+  // context; the main thread reads the results once the fence has moved.
+  for (JsuiView* v : frame_job_views_) v->paintGpuJob();
+  // Signal under the lock, and touch nothing of the views from then on: once
+  // done is stored a surface view (and its surface) may go. The fence is
+  // ours (the runtime view's): we wait for it and take this lock before we
+  // go (stop(), releaseGpu()).
+  const uint64_t id = frame_job_id_;
+  std::lock_guard<std::mutex> lock(fence_.m);
+  fence_.done.store(id, std::memory_order_release);
+  fence_.cv.notify_all();
+}
+
+void JsuiView::paintGpuJob() {
+  const uint64_t t0 = usecNow();
+  GpuJob& j = gpu_job_;
+  RenderingServer* rs = RenderingServer::get_singleton();
+  RenderingDevice* rd = rs ? rs->get_rendering_device() : nullptr;
+  j.ok = rd && paintGpuTarget(rd, j.rt, j.gpu, j.target, j.src, j.dst, &j.dirty, jsui_render_usec_total_);
+  gpu_job_usec_total_.fetch_add(usecNow() - t0, std::memory_order_relaxed);
+}
+
+bool JsuiView::collectGpuRender() {
+  if (!gpu_job_pending_) return true;
+  waitRender();
+  gpu_job_pending_ = false;
+  if (!gpu_job_.ok) return false;
+  finishGpuFrame(gpu_job_.dirty);
+  return true;
+}
+
+void JsuiView::finishGpuFrame(const JsuiRect& dirty) {
+  if (dirty.width <= 0 || dirty.height <= 0) return;
+  renders_++;
+  dirty_px_total_ += int64_t(dirty.width) * dirty.height;
+  emit_signal("frame_rendered", Rect2i(dirty.x, dirty.y, dirty.width, dirty.height));
+}
+
+void JsuiView::gpuFailed() {
+  UtilityFunctions::push_warning("JsuiView: GPU rendering failed; using the CPU renderer");
+  releaseGpu();
+  renderer_ = Renderer::Cpu;
 }
 
 PackedByteArray JsuiView::readGpuFrame() {
   PackedByteArray px;
   if (!gpu_cur_.valid()) return px;
+  // Queued after a pending render job (FIFO), so this reads the frame it rendered.
   runOnRenderThread([&]() {
     RenderingServer* rs = RenderingServer::get_singleton();
     RenderingDevice* rd = rs ? rs->get_rendering_device() : nullptr;
@@ -381,12 +592,20 @@ PackedByteArray JsuiView::readGpuFrame() {
 }
 
 void JsuiView::releaseGpu() {
+  // A queued render job uses the textures, the context and the runtime: let
+  // it finish, and let it leave the fence (a runtime view may be going away).
+  waitRender();
+  { std::lock_guard<std::mutex> settled(runtimeFence().m); }
+  gpu_job_pending_ = false;
   RenderingServer* rs = RenderingServer::get_singleton();
   if (!rs) {
     gpu_ = nullptr;
     return;
   }
-  if (!gpu_ && !gpu_cur_.valid() && !gpu_next_.valid()) return;
+  // Our Skia context (as a runtime view) goes too unless surface views use
+  // it; their renders have run (waitRender above covers the runtime).
+  const bool dropContext = gpu_ && surfaces_.empty();
+  if (!dropContext && !gpu_cur_.valid() && !gpu_next_.valid()) return;
   if (gpu_texture_.is_valid()) gpu_texture_->set_texture_rd_rid(RID());
   runOnRenderThread([&]() {
     RenderingDevice* rd = rs->get_rendering_device();
@@ -395,8 +614,10 @@ void JsuiView::releaseGpu() {
       if (rd && t->dst.is_valid()) rd->free_rid(t->dst);
       *t = GpuTextures{};
     }
-    if (gpu_) jsui_gpu_destroy(gpu_);
-    gpu_ = nullptr;
+    if (dropContext) {
+      jsui_gpu_destroy(gpu_);
+      gpu_ = nullptr;
+    }
   });
   gpu_retained_ = false;
 }

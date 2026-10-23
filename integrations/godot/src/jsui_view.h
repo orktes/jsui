@@ -7,7 +7,11 @@
 //   * GPU (Vulkan / Metal / WebGPU on godot-aw3, jsui_gpu_render.cpp): Skia Graphite draws into a
 //     texture of Godot's RenderingDevice on the render thread, repainting
 //     only the damaged rect, which Godot then copies into the texture it
-//     samples (a Texture2DRD).
+//     samples (a Texture2DRD). The views of one runtime share one Skia
+//     context (the runtime view's). With a separate render thread the
+//     frame's renders of all of a runtime's views are queued there as one
+//     job and the main thread goes on; whatever touches the runtime next
+//     waits for that job (rt_, see RuntimeRef).
 //   * CPU: jsui_render_rgba_incremental into a buffer that persists between
 //     frames, uploaded to an ImageTexture when pixels changed (the
 //     Compatibility renderer, headless runs, or when the GPU path fails).
@@ -40,9 +44,12 @@
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/rid.hpp>
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -84,7 +91,7 @@ class JsuiView : public godot::Control {
   void start();   // (re)creates the runtime and loads bundle_url (surface views: the surface)
   void stop();    // destroys the runtime (surface views: the surface)
   void reload();  // re-evaluates the last bundle (keeps the runtime)
-  bool is_running() const { return rt_ != nullptr; }
+  bool is_running() const { return rt_.unsynced() != nullptr; }
   void post_message(const godot::String& name, const godot::Variant& data);
   void post_message_json(const godot::String& name, const godot::String& json);
 
@@ -134,7 +141,8 @@ class JsuiView : public godot::Control {
   static void onLoad(void* user, JsuiRuntime* rt, uint64_t id, const char* url);
 
   void process();
-  // After the runtime's tick: cursor, auto size and the frame if it changed.
+  // After the runtime's tick: cursor, auto size and whether the frame changed
+  // (process() then paints the views that changed).
   void afterTick();
   void updateViewport();
   void updateAutoSize();
@@ -145,6 +153,7 @@ class JsuiView : public godot::Control {
   void createSurface();   // the runtime view is running: show our component
   void destroySurface();  // frees the surface (the runtime stays)
   void surfaceGone();     // the runtime went away (its handles are freed)
+  bool showsOurRuntime(const JsuiView* v) const;  // this view or one of surfaces_
   std::string propsJson() const;
   void render();
   void renderCpu();
@@ -152,10 +161,35 @@ class JsuiView : public godot::Control {
   // path failed and the view must fall back to the CPU.
   enum class Renderer { Unknown, Cpu, Vulkan, Metal, WebGPU };
   void chooseRenderer();
+  // On the runtime view: its Skia context, which its surface views share
+  // (created on first use; false when there is none).
+  bool createGpuContext(Renderer want, const godot::String& driver, godot::Object* interop);
+  JsuiView* runtimeView() { return host_ ? host_ : this; }
   bool renderGpu();
   void releaseGpu();
   void runOnRenderThread(const std::function<void()>& job);
   void runRenderJob();
+  // The steady-state frame (with a separate render thread): batchFrame adds
+  // the view to the runtime view's frame job, queueFrameJob queues that on
+  // the render thread (once per frame, after the views painted), and
+  // runFrameJob paints each view in it there (paintGpuJob) without the main
+  // thread waiting.
+  void batchFrame(JsuiView* view);
+  void queueFrameJob();
+  void runFrameJob();
+  void paintGpuJob();
+  // Main thread: waits until the render thread has run every job queued on
+  // the runtime's fence, the other views' too (returns at once when it has,
+  // or on the render thread itself).
+  void waitRender();
+  // Main thread: takes the queued job's result (frame_rendered, stats);
+  // false when it failed (then gpuFailed()).
+  bool collectGpuRender();
+  // The runtime view, before its tick: collectGpuRender for itself and each
+  // surface view (a failed one falls back to the CPU renderer).
+  void collectFrames();
+  void gpuFailed();
+  void finishGpuFrame(const JsuiRect& dirty);
   godot::PackedByteArray readGpuFrame();
   void showTexture(const godot::RID& texture);
   void updateCursor();
@@ -179,8 +213,35 @@ class JsuiView : public godot::Control {
   bool auto_size_ = false;
 
   // The runtime handle this view renders and sends input to: the runtime it
-  // owns (its main surface), or a surface of host_'s runtime.
-  JsuiRuntime* rt_ = nullptr;
+  // owns (its main surface), or a surface of host_'s runtime. A GPU render
+  // queued on Godot's render thread (a separate one: jsui_gpu_render.cpp)
+  // uses the runtime until it has run, and so does every other view's render
+  // queued on the same runtime. Reading rt_ on the main thread therefore
+  // first waits for all of them (waitRender, on the runtime's fence; Godot
+  // syncs with its render thread after process every frame, so in steady
+  // state they have run by the next frame). Every jsui_*(rt_, ...) call is
+  // safe that way, also for surface views and calls forwarded to host_.
+  class RuntimeRef {
+   public:
+    explicit RuntimeRef(JsuiView* view) : view_(view) {}
+    RuntimeRef& operator=(JsuiRuntime* rt) {
+      view_->waitRender();
+      rt_ = rt;
+      return *this;
+    }
+    operator JsuiRuntime*() const {
+      view_->waitRender();
+      return rt_;
+    }
+    // The handle without waiting: for the render job itself, and to test
+    // whether there is one (only the main thread changes it).
+    JsuiRuntime* unsynced() const { return rt_; }
+
+   private:
+    JsuiView* view_;
+    JsuiRuntime* rt_ = nullptr;
+  };
+  RuntimeRef rt_{this};
   JsuiView* host_ = nullptr;             // the runtime view, for a surface view
   std::vector<JsuiView*> surfaces_;      // surface views of this view's runtime
   bool attach_wanted_ = false;           // a surface view that should show its surface
@@ -202,6 +263,10 @@ class JsuiView : public godot::Control {
   // barriers itself. A new pair (start, resize) is used from the frame after
   // its creation, once Godot has run the initial upload and priming copy.
   Renderer renderer_ = Renderer::Unknown;
+  // The runtime's Skia context, on the runtime view (surface views use their
+  // runtime view's: one per runtime). It goes with the runtime view, or
+  // when the runtime view leaves the GPU path while no surface view is
+  // attached, after the runtime's queued renders have run.
   JsuiGpuContext* gpu_ = nullptr;
   struct GpuTextures {
     godot::RID src, dst;
@@ -213,6 +278,46 @@ class JsuiView : public godot::Control {
   bool gpu_retained_ = false;  // gpu_cur_.src holds the last frame (incremental repaint)
   godot::Ref<godot::Texture2DRD> gpu_texture_;
   std::function<void()> render_job_;
+  // Render jobs queued on a runtime, in order: the runtime view numbers the
+  // frame jobs of all its views on its fence, and the render thread runs
+  // them in that order, so done == queued means all of them have run. A
+  // runtime view outlives the jobs on its fence: stop() and the destructor
+  // wait for them first.
+  struct Fence {
+    std::mutex m;
+    std::condition_variable cv;
+    std::atomic<uint64_t> queued{0}, done{0};  // job ids
+  };
+  Fence fence_;  // ours while we own the runtime (or have none)
+  Fence& runtimeFence() { return host_ ? host_->fence_ : fence_; }
+  // This view's part of a frame job (batchFrame): the main thread fills it,
+  // the render thread paints it and fills in ok / dirty, the main thread
+  // reads those back once the job's fence has reached id.
+  struct GpuJob {
+    JsuiRuntime* rt = nullptr;
+    JsuiGpuContext* gpu = nullptr;
+    godot::RID src, dst;
+    JsuiGpuTarget target{};  // all but .texture (the render thread looks src up)
+    Fence* fence = nullptr;  // the runtime's, signalled when the job has run
+    uint64_t id = 0;
+    bool ok = false;
+    JsuiRect dirty{0, 0, 0, 0};
+  };
+  GpuJob gpu_job_;
+  bool gpu_job_pending_ = false;  // queued, result not collected yet (main thread)
+  // The runtime view's frame job: the views batched while process() paints
+  // (main thread), and the ones of the queued job (read by the render thread
+  // until the fence reaches frame_job_id_). No game code runs while views
+  // are batched (any other render queues the batch first), so none of them
+  // can go meanwhile.
+  std::vector<JsuiView*> frame_batch_, frame_job_views_;
+  bool batching_ = false;
+  uint64_t frame_job_id_ = 0;
+  // Hand-off stats (get_render_stats): main-thread waits on the render
+  // thread, frames handed to it, the runtime's render-thread frame jobs, and
+  // the time the frames and jsui_render_gpu_target in them take.
+  uint64_t blocking_waits_ = 0, main_wait_usec_total_ = 0, gpu_jobs_ = 0, render_thread_jobs_ = 0;
+  std::atomic<uint64_t> gpu_job_usec_total_{0}, jsui_render_usec_total_{0};
   // Stats (get_render_stats): CPU time of the render calls.
   uint64_t renders_ = 0, render_usec_total_ = 0, render_usec_last_ = 0, render_usec_max_ = 0;
   int64_t dirty_px_total_ = 0;

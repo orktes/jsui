@@ -167,7 +167,12 @@ difference above `VIEWPORT_MAX_DIFF` (default 2); both are saved as
 `--force-cpu` (sets `force_cpu`), `--expect-renderer vulkan|metal|cpu`,
 `--max-gpu-diff D` (with `--capture`: compare the GPU frame with the CPU
 raster), `--max-viewport-diff D` (with `--capture` and a display: compare
-what the viewport shows with the frame), `--bench N` (N frames of hover
+what the viewport shows with the frame), `--max-render-waits N` (with
+`--self-test` on a GPU renderer: 30 frames of hover springs and of four
+surface views of the runtime changing every frame may make at most N
+main-thread waits on the render thread, and must queue exactly one
+render-thread job per frame; the Vulkan smoke runs pass 0),
+`--bench N` (N frames of hover
 springs, then of list scrolling, with vsync off; prints frame and render
 times) and `--no-world` (no 3D scene).
 The project uses the Compatibility renderer by default (it runs everywhere);
@@ -219,7 +224,7 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | `get_frame_image()` | CPU copy of the last frame, straight alpha, works with `--headless` (with the GPU renderer it reads the texture back: slow, for tests and screenshots) |
 | `get_cpu_frame_image()` | the current frame painted by the CPU raster, straight alpha, whatever the renderer (to compare with `get_frame_image()`) |
 | `get_renderer()` | `"vulkan"`, `"metal"` or `"cpu"` (`""` before the first frame) |
-| `get_render_stats()` | Dictionary: `renderer`, `renders`, `render_usec_total` / `_last` / `_max` (time in the view's render call, CPU side), `dirty_pixels_total` |
+| `get_render_stats()` | Dictionary: `renderer`, `renders`, `render_usec_total` / `_last` / `_max` (time in the view's render call, CPU side), `dirty_pixels_total`; GPU renderer: `gpu_jobs` (the view's frames handed to the render thread without waiting), `render_thread_jobs` (the render-thread jobs those went in: one per frame for all the views of a runtime; the runtime view's count), `gpu_frame_in_flight` (the last frame handed over is not painted yet), `blocking_waits` / `main_wait_usec_total` (times the main thread waited for the render thread, and for how long), `gpu_job_usec_total` / `jsui_render_usec_total` (render-thread time of the view's GPU renders, and of `jsui_render_gpu_target` in them) |
 | `get_pending_loads()` | bundle/image/font/fetch loads in flight |
 | `get_last_error()` | last uncaught JS error, or `""` |
 | `get_effective_pixel_ratio()` | the ratio actually used |
@@ -234,7 +239,7 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | `call_cancelled(id: int)` | a call ended unanswered (JS timeout / abort, reload, `stop()`): drop its work |
 | `ui_call_completed(id: int, ok: bool, result: Variant)` | a `call_ui` call settled (also when the runtime stopped first) |
 | `js_error(message: String)` | a new uncaught JS error |
-| `frame_rendered(dirty_rect: Rect2i)` | the texture was updated. The rect is in device pixels |
+| `frame_rendered(dirty_rect: Rect2i)` | the texture was updated. The rect is in device pixels. With a separate render thread and the GPU renderer it comes at the start of the next frame's processing of the runtime view (the render ran on that thread before the frame was drawn) |
 
 Signals are emitted after the runtime returns (after the tick or the input
 call), so handlers can call back into the view safely.
@@ -297,6 +302,9 @@ func spawn_nameplate(enemy):
 * The runtime view ticks the runtime once per frame and then paints every
   surface view whose frame changed (surface views are not ticked on their
   own, so the cost of a frame is one JS tick however many views there are).
+  With the GPU renderer the views share one Skia context (the runtime
+  view's), and with a separate render thread their frames go to that
+  thread as one job per frame (see Rendering).
 * The runtime's signals (`message_received`, `state_changed`,
   `call_requested`, …) are emitted by the runtime view. On a surface view the
   state, call, message and `reload()` methods act on the runtime view.
@@ -347,11 +355,23 @@ func spawn_nameplate(enemy):
   view's pixel size. Skia renders into the first (colour + input attachment;
   it keeps the last frame, so a frame repaints only its damage, split into
   up to four scissored rects when changes are far apart), all on Godot's render
-  thread (`RenderingServer.call_on_render_thread` when Godot renders on a
-  separate thread). JSUI submits its work to Godot's queue during `_process`,
-  before Godot submits its frame; on Vulkan it is bracketed by full pipeline
-  barriers and leaves the image in `TRANSFER_SRC_OPTIMAL`, the layout
-  Godot's render graph tracks for a copy source. Godot then copies the
+  thread, with one Skia context for all the views of a runtime. JSUI submits
+  its work to Godot's queue during `_process`, before Godot submits its
+  frame. When Godot renders on a separate thread (`--render-thread
+  separate`), the runtime view queues the frame's renders of all its views
+  (each into its own textures) there as one job
+  (`RenderingServer.call_on_render_thread`) and does not wait: the queue is
+  in order, so it still runs before that frame is drawn. The renders use the
+  runtime, so the next call into it on any of its views (input, `set_state`,
+  `initial_props`, the next `_process`, ...) waits until the job has run.
+  Godot syncs with its render thread after `_process` every frame, so in
+  steady state nothing waits; only calls into the runtime's views later in
+  the same frame (after the runtime view's `_process`) can. Creating the
+  textures (start, resize), `get_frame_image()` and freeing a view still
+  wait for the render thread (a view, its surface and the shared context go
+  only after the renders queued with them have run). On Vulkan the render is bracketed by
+  full pipeline barriers and leaves the image in `TRANSFER_SRC_OPTIMAL`, the
+  layout Godot's render graph tracks for a copy source. Godot then copies the
   damaged rect into the second texture (`RenderingDevice.texture_copy`),
   which the canvas item samples through a `Texture2DRD`, so Godot does that
   texture's barriers itself. The `Texture2DRD` makes its RenderingServer
