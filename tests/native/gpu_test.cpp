@@ -489,6 +489,13 @@ void buildScene(Scene& s, const std::string& png) {
   s.add(R"J({"type":"Text","style":{"position":"absolute","left":130,"top":206,"fontSize":14,"color":"#ffd0a0",
             "textShadowColor":"rgba(0,0,0,0.9)","textShadowOffset":{"width":1,"height":1},"textShadowRadius":2,
             "transform":[{"rotate":"-4deg"}]},"text":"Ganesh text"})J");
+  // SkSL: a ShaderView fill (gradient from its uniforms) and one that
+  // post-processes its own children (mirrored, channels swapped).
+  s.add(R"J({"type":"ShaderView","props":{"source":"uniform float2 resolution; layout(color) uniform half4 a; layout(color) uniform half4 b; half4 main(float2 p) { return mix(a, b, half(p.x / resolution.x)); }",
+            "uniforms":{"a":"#ff2060","b":[0.1,0.8,1,1]}},"style":{"position":"absolute","left":262,"top":204,"width":26,"height":30,"borderRadius":6}})J");
+  s.add(R"J({"type":"ShaderView","props":{"source":"uniform shader content; uniform float2 resolution; half4 main(float2 p) { return content.eval(float2(resolution.x - p.x, p.y)).brga; }"},
+            "style":{"position":"absolute","left":292,"top":204,"width":26,"height":30},
+            "children":[{"style":{"width":10,"height":30,"backgroundColor":"#ff8800"}}]})J");
 }
 
 // Runs fn(ctx, api) once per GL API that works here; SKIP when none does.
