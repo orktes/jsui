@@ -182,13 +182,12 @@ export default function Cinematic({ active }) {
             <Stat k="JS / frame" v="0" />
           </View>
         </View>
+        <View style={styles.credit}>
+          <Text style={styles.creditTitle}>Big Buck Bunny</Text>
+          <Text style={styles.creditText}>© 2008 Blender Foundation · peach.blender.org</Text>
+          <Text style={styles.creditText}>Licensed CC BY 3.0 · streamed from Wikimedia Commons</Text>
+        </View>
       </Animated.View>
-
-      <View style={styles.credit}>
-        <Text style={styles.creditTitle}>Big Buck Bunny</Text>
-        <Text style={styles.creditText}>© 2008 Blender Foundation · peach.blender.org</Text>
-        <Text style={styles.creditText}>Licensed CC BY 3.0 · streamed from Wikimedia Commons</Text>
-      </View>
     </View>
   );
 }
@@ -470,7 +469,7 @@ function Feeds({ tex, live }) {
             {tex ? (
               <>
                 <HostTexture name={TEXTURE} resizeMode="cover" style={[StyleSheet.absoluteFill, { filter: 'grayscale(1) brightness(1.35) contrast(1.25)' }]} />
-                <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(40, 255, 120, 0.22)' }]} />
+                <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(40, 255, 120, 0.16)' }]} />
                 <View pointerEvents="none" style={styles.scanlines} />
               </>
             ) : (
@@ -575,8 +574,8 @@ const styles = StyleSheet.create({
   tagDot: { width: 8, height: 8, borderRadius: 4 },
   tagText: { fontFamily: font, fontWeight: '700', fontSize: 10.5, letterSpacing: 1.6, textTransform: 'uppercase' },
   unmuteWrap: { position: 'absolute', right: 18, top: 16, cursor: 'pointer' },
-  unmute: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 13, height: 32, borderRadius: 16, backgroundColor: 'rgba(242, 195, 91, 0.16)', borderWidth: 1, borderColor: 'rgba(242, 195, 91, 0.6)' },
-  unmuteHot: { backgroundColor: 'rgba(242, 195, 91, 0.3)' },
+  unmute: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 13, height: 32, borderRadius: 16, backgroundColor: 'rgba(14, 12, 6, 0.78)', borderWidth: 1, borderColor: 'rgba(242, 195, 91, 0.7)', boxShadow: '0 4px 14px rgba(0,0,0,0.5)' },
+  unmuteHot: { backgroundColor: 'rgba(46, 36, 12, 0.9)' },
   unmuteText: { fontFamily: font, fontWeight: '600', fontSize: 12.5, color: colors.goldLight },
 
   center: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center', gap: 22, paddingBottom: 30 },
@@ -648,7 +647,7 @@ const styles = StyleSheet.create({
   crosshairV: { position: 'absolute', left: '50%', top: '50%', width: 1, height: 22, marginTop: -11, backgroundColor: 'rgba(255, 77, 106, 0.85)' },
   scanlines: {
     ...StyleSheet.absoluteFillObject,
-    experimental_backgroundImage: 'repeating-linear-gradient(0deg, rgba(0,0,0,0.28) 0px, rgba(0,0,0,0.28) 1px, rgba(0,0,0,0) 1px, rgba(0,0,0,0) 3px)',
+    experimental_backgroundImage: 'repeating-linear-gradient(0deg, rgba(0,0,0,0.14) 0px, rgba(0,0,0,0.14) 1px, rgba(0,0,0,0) 1px, rgba(0,0,0,0) 4px)',
   },
   noSignal: { alignItems: 'center', justifyContent: 'center', backgroundColor: '#070a14' },
   noSignalText: { fontFamily: 'JetBrains Mono', fontSize: 11, letterSpacing: 2, textTransform: 'uppercase', color: colors.textMute },
@@ -660,7 +659,7 @@ const styles = StyleSheet.create({
   statV: { fontFamily: 'JetBrains Mono', fontWeight: '700', fontSize: 15, color: colors.cyan },
   statK: { fontFamily: font, fontSize: 9.5, letterSpacing: 0.8, textTransform: 'uppercase', color: colors.textMute },
 
-  credit: { position: 'absolute', left: 904, top: 612, width: 328, paddingLeft: 12, borderLeftWidth: 2, borderLeftColor: 'rgba(242, 195, 91, 0.5)', gap: 3 },
+  credit: { paddingLeft: 12, borderLeftWidth: 2, borderLeftColor: 'rgba(242, 195, 91, 0.5)', gap: 3 },
   creditTitle: { fontFamily: font, fontWeight: '700', fontSize: 12, letterSpacing: 1.4, textTransform: 'uppercase', color: colors.text },
   creditText: { fontFamily: font, fontSize: 11.5, lineHeight: 16, color: colors.textDim },
 });
