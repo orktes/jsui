@@ -317,8 +317,9 @@ test('bindVideo: a WebGL context lost right after a frame callback switches ever
     assert.equal(a.cbs.size, 1);
     // Paused: a loss now is no frame callback's doing.
     assert.equal(videoFramesContextLost(), null);
+    // play() arms it: WebKit loses the context before 'playing'.
     a.paused = false;
-    a.on.playing();
+    a.on.play();
     assert.match(videoFramesContextLost(), /polled/);
     assert.equal(a.cbs.size, 0);  // the frame callback is cancelled
     const uploads = () => M.calls.filter((c) => c[0] === 'updated' && c[1] === 'a').length;

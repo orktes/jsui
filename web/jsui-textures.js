@@ -54,8 +54,8 @@ export const taintKey = (s) => String(s.currentSrc ?? s.src ?? '');
 // once per display frame where there is none. Playwright WebKit 26 on macOS
 // loses every WebGL context of the page within half a second of a frame
 // callback on a playing video (restored ~40 ms later; the video's play()
-// is aborted). A WebGL context loss within RVFC_SUSPECT_MS of a video
-// starting to play with a frame callback (videoFramesContextLost) switches
+// is aborted). A WebGL context loss within RVFC_SUSPECT_MS of play() on a
+// video with a frame callback (videoFramesContextLost) switches
 // every bound video of the page to polling, and later binds start there.
 const RVFC_SUSPECT_MS = 1000;
 let rvfcOff = false;
@@ -92,9 +92,11 @@ export function watchVideoFrames(video, onFrame) {
   };
   if (!rvfcOff && typeof video.requestVideoFrameCallback === 'function') {
     w.mode = 'rvfc';
+    // Armed from play() on: WebKit loses the context before 'playing' (and
+    // then aborts the play()).
     const arm = () => { w.armed = performance.now(); };
     if (video.paused === false) arm();
-    video.addEventListener?.('playing', arm, abort ? { signal: abort.signal } : undefined);
+    for (const type of ['play', 'playing']) video.addEventListener?.(type, arm, abort ? { signal: abort.signal } : undefined);
     w.handle = video.requestVideoFrameCallback(callback);
   } else {
     w.poll();
