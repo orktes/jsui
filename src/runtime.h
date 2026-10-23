@@ -44,6 +44,10 @@ class Runtime {
   void reload();
   // Reload at the start of the next tick (safe to call from JS / callbacks).
   void requestReload();
+  // Dev mode: the dev server has a new build (or a build error). A bundle
+  // that hot-updates (jsui dev) handles it in __jsui_onDevUpdate; any other
+  // bundle is reloaded.
+  void devUpdate();
   // Dev-mode key handling (Escape dismisses the error overlay, F5 reloads).
   // Returns true if the key was consumed.
   bool devKey(const char* key, bool down);

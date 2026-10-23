@@ -6,9 +6,11 @@ import { dev } from '../src/dev.js';
 
 const USAGE = `usage:
   jsui build <entry> [-o dist/bundle.js] [--minify] [--sourcemap] [--dev]
-  jsui dev <entry> [--port 5173] [--host 127.0.0.1]
+  jsui dev <entry> [--port 5173] [--host 127.0.0.1] [--no-hmr]
 
-'react-native' imports are aliased to @orktes/jsui-react; JSX works in .js/.jsx/.tsx.`;
+'react-native' imports are aliased to @orktes/jsui-react; JSX works in .js/.jsx/.tsx.
+jsui dev hot-updates edited components in place (React Fast Refresh, state is
+kept); --no-hmr reloads the whole bundle on every change instead.`;
 
 async function main(argv) {
   const [cmd, ...rest] = argv;
@@ -26,6 +28,7 @@ async function main(argv) {
       dev: { type: 'boolean' },
       port: { type: 'string', short: 'p' },
       host: { type: 'string' },
+      'no-hmr': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
   });
@@ -62,7 +65,7 @@ async function main(argv) {
       return 2;
     }
     try {
-      const server = await dev({ entry, port, host: values.host || '127.0.0.1' });
+      const server = await dev({ entry, port, host: values.host || '127.0.0.1', hmr: !values['no-hmr'] });
       const stop = async () => {
         await server.close();
         process.exit(0);
