@@ -20,8 +20,10 @@ Packages: `@orktes/jsui-cli` (bundler, dev server, headless tools, this skill),
    `useGamepad`, `useFocus`, `HostTexture`, `ShaderView`, `sksl`, `Fonts`, `Sound`,
    `UISounds`, `useMusic`, ...)
    from `'@orktes/jsui-react'`. `lottie-react-native`,
-   `react-native-safe-area-context`, `expo-linear-gradient` and
-   `react-native-linear-gradient` work as imports too (shims).
+   `react-native-safe-area-context`, `expo-linear-gradient`,
+   `react-native-linear-gradient` and `expo-font` (so `@expo-google-fonts/*`)
+   work as imports too (shims). Custom fonts: `useFonts({ Game:
+   require('./Game.ttf') })`, see components-and-styles.md.
 2. **Register the root:** `AppRegistry.registerComponent('main', () => App)`.
    It starts automatically. (The headless tools also accept a file that only
    `export default`s a component.)
@@ -215,7 +217,7 @@ Read the reference that matches the task:
 
 | Task | Reference |
 | --- | --- |
-| Components, props, styles, images, fonts, what's not supported | [references/components-and-styles.md](references/components-and-styles.md) |
+| Components, props, styles, images, fonts (loading, weights, fallbacks, variable fonts), what's not supported | [references/components-and-styles.md](references/components-and-styles.md) |
 | Focus, gamepad, keyboard, pointer, scrolling, modals, input pass-through | [references/input-and-focus.md](references/input-and-focus.md) |
 | `Animated` (native driver), springs, `LayoutAnimation`, performance | [references/animation-and-performance.md](references/animation-and-performance.md) |
 | Game data: shared state, calls, messages, per-frame buffers, several root views | [references/game-data.md](references/game-data.md) |

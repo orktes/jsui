@@ -74,7 +74,8 @@ no DOM, no Node APIs).
   where it matters) so imports never fail.
 * **Shims** (aliased by the CLI): `react-native-safe-area-context`,
   `expo-status-bar`, `expo-linear-gradient`, `react-native-linear-gradient`
-  (rendered as a native `linear-gradient` background).
+  (rendered as a native `linear-gradient` background), `lottie-react-native`,
+  `expo-font` (so `@expo-google-fonts/*` packages work unchanged).
 
 ## JSUI extras
 
@@ -84,7 +85,7 @@ import { Host, useHostMessage, Fonts, useFonts, useGamepad, useFocus } from '@or
 Host.postMessage('buy', { item: 'sword' });          // -> embedder on_message
 const off = Host.onMessage('hp', (hp) => ...);        // <- jsui_post_message
 useHostMessage('hp', (hp) => setHp(hp));
-await Fonts.load('Orbitron', require('./orbitron.ttf'), { weight: 700 });
+await Fonts.load('Orbitron', require('./orbitron.ttf'), { weight: 700 }); // see Fonts below
 const pad = useGamepad({ onButton: (e) => e.buttonIndex === 9 && (openMenu(), e.preventDefault()) });
 const { focused, focusProps } = useFocus();           // <View {...focusProps} />
 ```
@@ -141,6 +142,41 @@ Focus props on any element: `focusable`, `autoFocus`, `hasTVPreferredFocus`,
 `onFocus`, `onBlur`, `onKeyDown` / `onKeyUp` (RN-web style: `e.key`,
 `e.code`, modifiers), `nextFocusUp/Down/Left/Right`. Pressables are focusable
 by default; Enter / Space and gamepad A press the focused one.
+
+### Fonts
+
+Inter (400-700, italic) is built in. Other fonts (TTF, OTF, TTC, WOFF,
+WOFF2, variable) load at runtime; with the CLI, `require('./x.ttf')` is a URL
+relative to the bundle. The API is expo-font compatible, plus extras:
+
+```js
+const [loaded, error] = useFonts({
+  Cinzel: require('./Cinzel.ttf'),                                   // weight / style from the file
+  Game: [                                                            // several faces under one family
+    { source: require('./Game-Regular.otf'), weight: 400 },
+    { source: require('./Game-Bold.otf'), weight: 'bold' },
+    { uri: 'fonts/Game-Italic.woff2', weight: 400, style: 'italic' },
+  ],
+});                                                                  // already loaded: [true, null] at once
+
+await Fonts.load('Mono', require('./Mono.ttf'), { weight: 700, style: 'normal' });
+await Fonts.loadAsync('Runes', new Uint8Array(bytes));             // or loadAsync({ Family: source })
+Fonts.isLoaded('Mono'); Fonts.isLoading('Game'); Fonts.getLoadedFonts();
+await Fonts.unloadAsync('Mono'); await Fonts.unloadAllAsync();     // only fonts loaded here; Inter stays
+Fonts.setFallbacks(['Noto Color Emoji', 'Noto Sans JP']);         // for glyphs the styled font lacks
+Fonts.setDefaultFamily('Game');                                    // when a style names no fontFamily
+```
+
+Sources: URL string, `require(...)`, `{ uri }`, `{ default }` (ESM interop),
+`ArrayBuffer` / typed array (registered synchronously). `weight`: number or
+`'bold'` / `'normal'` / `'semibold'` ...; `style`: `'italic'` / `'normal'`;
+omitted, both come from the file. Identical loads run once; a failed load
+rejects (and `useFonts` returns `[false, error]`) and can be retried. Styles:
+`fontFamily` takes a fallback list (`'Game, Noto Sans JP'`),
+`fontVariationSettings` (`"'wght' 650"` or `{ wght: 650 }`) and
+`fontFeatureSettings` (`"'ss01' 1, 'liga' 0"` or `{ ss01: 1 }`). Hosts can
+register fonts too (`jsui_register_font`, Godot `register_font`, web
+`registerFont` / `loadFont`).
 
 ## How it works (and why it is fast)
 

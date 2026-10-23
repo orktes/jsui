@@ -1118,7 +1118,10 @@ Native globals (installed by `JsEngine`):
 | `setState(key, json \| undefined) → version`, `patchState(key, json) → version` | UI-owned writes (`undefined` removes); report to `on_state`; invalid JSON throws `SyntaxError` |
 | `hostCall(name, json, settle) → id` | `on_call`; `settle(ok, payload)` runs on `jsui_resolve_call` (JSON text) / `jsui_reject_call` (message). Returns 0 without `on_call` |
 | `cancelCall(id) → bool`, `callResult(id, ok, payload)` | drop an unanswered call (`on_call_cancel`); the result of a `__jsui_onCall` |
-| `loadFont(family, url, weight, italic) → Promise<true>` | load via the resource loader (URL relative to the bundle), register with the FontManager, relayout text; rejects with an `Error` on 404 / bad font data |
+| `loadFont(family, url, weight, italic) → Promise<true>` | load via the resource loader (URL relative to the bundle), register with the FontManager, relayout text; rejects with an `Error` on 404 / bad font data. `''` family = the file's; weight `0` / italic `-1` = the file's (see "Fonts") |
+| `loadFontData(family, bytes, weight, italic) → true` | the same from an ArrayBuffer / typed array, synchronously; throws on bad data |
+| `unloadFont(family) → bool`, `getFontFamilies() → [family]` | drop a family; the registered families (built-in Inter first) |
+| `setFontFallbacks([family])`, `setDefaultFontFamily(family)` | glyph fallback list; the family of text whose style names none |
 | `reload()` | reload the bundle at the start of the next tick (safe from inside JS) |
 | `textEditing` | `true`: TextInput text is edited natively (see "TextInput editing") |
 | `setTextInputSelection(id, start, end)` | TextInput selection (UTF-16 indices, clamped; no event) |
@@ -1522,8 +1525,8 @@ Style keys follow React Native, including RN 0.76+ web-style additions:
   `radial-gradient`), `transform` (RN array or CSS string), `transformOrigin`,
   `filter` (`blur`, `brightness`, `contrast`, `saturate`, `grayscale`),
   `zIndex`, `pointerEvents`, `cursor`.
-* Text: `color`, `fontFamily`, `fontSize`, `fontWeight`, `fontStyle`,
-  `lineHeight`, `letterSpacing`, `textAlign`, `textTransform`,
+* Text: `color`, `fontFamily` (a CSS list), `fontSize`, `fontWeight`, `fontStyle`,
+  `fontVariant`, `fontVariationSettings`, `fontFeatureSettings`, `lineHeight`, `letterSpacing`, `textAlign`, `textTransform`,
   `textDecorationLine`, `textDecorationColor`, `textShadow*`; props
   `numberOfLines`, `ellipsizeMode`.
 * Image: `resizeMode` (style or prop), `tintColor`; `source={{uri}}` or
@@ -1531,6 +1534,39 @@ Style keys follow React Native, including RN 0.76+ web-style additions:
 
 Colors are CSS colors (`#rgb[a]`, `#rrggbb[aa]`, `rgb[a]()`, `hsl[a]()`, names).
 The default font is Inter (bundled); `fontFamily` falls back to it.
+
+### Fonts
+
+`FontManager` (src/text/font_manager.cpp) owns a registry of faces that is
+skparagraph's asset font manager and Skottie's. Fonts are runtime-wide.
+
+* Sources: app code (`Fonts.load` / `useFonts` / the `expo-font` shim, from
+  `require('./x.ttf')`, a URL or bytes), hosts (`jsui_register_font`, web
+  `registerFont` / `loadFont`, Godot `JsuiView.register_font` / `fonts`).
+* Containers: TTF, OTF, TTC / OTC (every face), WOFF (zlib) and WOFF2
+  (google/woff2 + brotli), unpacked to sfnt in src/text/font_decode.cpp
+  because not every platform font manager reads web fonts (cmake/WebFonts.cmake;
+  `-DJSUI_WOFF2=OFF` drops WOFF2). A Skia build that ships libbrotli provides
+  the brotli symbols.
+* Matching works like CSS @font-face: a face is registered under a family
+  name (case-insensitive) with a weight and slant, taken from the file unless
+  the caller overrides them; `fontWeight` / `fontStyle` pick the closest
+  face (CSS3 matching). skparagraph synthesizes bold / oblique when the
+  picked face is 200+ lighter / upright. Re-registering a family + style
+  replaces that face.
+* Variable fonts: a 'wght' axis without a weight override is registered once
+  per 100 step of its range (instances share the data), so `fontWeight` works;
+  `fontVariationSettings` (`"'wght' 650, 'wdth' 80"` or `{wght: 650}`) sets
+  axes directly, with 'wght' following `fontWeight` unless named.
+  `fontFeatureSettings` (`"'ss01', 'liga' 0"` or `{ss01: 1}`) adds OpenType
+  features.
+* Glyph fallback, per character: the style's family list, the default
+  family, `Fonts.setFallbacks` / `jsui_set_font_fallbacks` (in order), then
+  any registered font that has the glyph, then system fonts on platforms that
+  have them (none on the web). Ship emoji / CJK fonts and list them as
+  fallbacks for deterministic results.
+* Any change bumps `FontManager::generation` and `Runtime::fontsChanged()`
+  re-measures text on every surface.
 
 ## Builds
 
@@ -1850,7 +1886,8 @@ Details of how the JS package uses the bridge, for native implementers:
   (Animated / `setNativeProps`; otherwise `setProps` with the merged style),
   `animated` (native Animated driver; otherwise `useNativeDriver` uses the JS driver),
   `viewport()` (native: returns `{width, height, scale}`), `focus`, `blur`,
-  `scrollTo`, `flashScrollIndicators`, `measure`, `postMessage`, `loadFont`, `getImageSize(uri)`,
+  `scrollTo`, `flashScrollIndicators`, `measure`, `postMessage`, `loadFont`, `loadFontData`,
+  `unloadFont`, `getFontFamilies`, `setFontFallbacks`, `setDefaultFontFamily`, `getImageSize(uri)`,
   `prefetchImage(uri)`, `reload`.
 * Events beyond input: `{type: 'resize', width, height, scale}` (sent by
   `jsui_set_viewport` when the size changes; drives Dimensions);

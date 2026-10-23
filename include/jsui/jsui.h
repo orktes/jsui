@@ -487,10 +487,33 @@ JSUI_API void jsui_dev_update(JsuiRuntime* rt);
  * runtime out of the session. Call before loading the bundle. */
 JSUI_API void jsui_set_dev_session(JsuiRuntime* rt, const char* name, int enabled);
 
-/* Register a font face from memory. Data is copied. `weight` 100..900,
- * `italic` 0/1. The JS side can also load fonts with `jsui.loadFont(...)`. */
+/* -------------------------------------------------------------- Fonts
+ *
+ * Fonts are runtime-wide (every surface). Inter is built in and is the
+ * default family. App code loads its own with Fonts.load / useFonts (from the
+ * bundle, a URL or bytes); hosts can register fonts they already have.
+ *
+ * Register the faces in `data` (TTF, OTF, a TTC / OTC collection: every face,
+ * WOFF or WOFF2; copied) under `family`, like a CSS @font-face rule:
+ *   family  NULL or "" = the family name inside the file
+ *   weight  1..1000 overrides the file's weight; <= 0 = from the file. A
+ *           variable font with a 'wght' axis and weight <= 0 is registered
+ *           once per 100 step of its weight range, so fontWeight picks the
+ *           instance; with a weight it is pinned to that weight.
+ *   italic  0/1 overrides the file's slant; < 0 = from the file
+ * Registering the same family and style again replaces that face. Text on
+ * every surface is laid out again. Returns 0, or -1 if the data is not a font. */
 JSUI_API int jsui_register_font(JsuiRuntime* rt, const char* family, const void* data, size_t size,
                                 int weight, int italic);
+/* Remove every face of `family` (case-insensitive). 0, or -1 if unknown. */
+JSUI_API int jsui_unregister_font(JsuiRuntime* rt, const char* family);
+/* Families tried in order for characters the styled font lacks (emoji, CJK,
+ * symbols), comma separated ("Noto Sans JP, Noto Color Emoji"); NULL or ""
+ * clears. Per-glyph fallback then tries every other registered font, then
+ * the system fonts where the platform has them (not on the web). */
+JSUI_API void jsui_set_font_fallbacks(JsuiRuntime* rt, const char* families);
+/* The family used when a style names none (default "Inter"). */
+JSUI_API void jsui_set_default_font_family(JsuiRuntime* rt, const char* family);
 
 /* -------------------------------------------------------------- Surfaces
  *

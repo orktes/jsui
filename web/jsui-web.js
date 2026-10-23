@@ -209,6 +209,35 @@ function bufferType(data) {
   return t;
 }
 
+// registerFont / loadFont arguments as jsui_register_font takes them:
+// [family ('' = the file's), bytes, weight (0 = the file's), italic (-1 = the
+// file's, 0, 1)]. Accepts (family, bytes, weight?, italic?), (family, bytes,
+// { weight, style | italic }) and (bytes, options?).
+function fontArgs(family, bytes, weight, italic) {
+  if (family != null && typeof family === 'object') [family, bytes, weight, italic] = ['', family, bytes, weight];
+  if (weight != null && typeof weight === 'object') {
+    const o = weight;
+    weight = o.weight;
+    italic = o.style !== undefined ? o.style : o.italic;
+  }
+  let w = weight === 'normal' ? 400 : weight === 'bold' ? 700 : Number(weight ?? 0);
+  w = Number.isFinite(w) && w > 0 ? Math.min(1000, Math.round(w)) : 0;
+  let i;
+  if (italic == null) i = -1;
+  else if (typeof italic === 'string') i = italic === 'italic' || italic === 'oblique' ? 1 : 0;
+  else if (typeof italic === 'number') i = italic < 0 ? -1 : italic ? 1 : 0;
+  else i = italic ? 1 : 0;
+  return [family == null ? '' : String(family), bytes, w, i];
+}
+
+// setFontFallbacks' list as jsui_set_font_fallbacks takes it (null clears).
+function fontList(families) {
+  if (families == null) return null;
+  const list = (typeof families === 'string' ? families.split(',') : Array.from(families, String))
+    .map((f) => f.trim().replace(/^(['"])(.*)\1$/, '$2')).filter(Boolean);
+  return list.length ? list.join(',') : null;
+}
+
 let nextHostId = 1;
 const modsOf = (e) => (e.shiftKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
 // Keys whose browser default (focus move, caret move inside the keyboard sink)
@@ -263,7 +292,7 @@ function replaceCanvas(old) {
 // so the worker's copy of this file and the page's stay one module graph each).
 function internals() {
   return { DomView, CanvasView, JsuiHost, JsuiSurface, HIT_POINTER, HIT_SCROLL, NAV_KEYS, webgpuFor, loadModuleFor,
-    bufferType, BUFFER_TYPES, sourceSize, defaultOpaque, isVideoFrame, transferred, replaceCanvas, JsuiAudio,
+    bufferType, BUFFER_TYPES, sourceSize, defaultOpaque, isVideoFrame, transferred, replaceCanvas, fontArgs, fontList, JsuiAudio,
     hostUrl: import.meta.url, workerName: WORKER_NAME };
 }
 const WORKER_NAME = 'jsui-host';
@@ -1836,16 +1865,69 @@ class JsuiHost extends CanvasView {
     else this.reload();
   }
 
-  /** Register a font from bytes (ArrayBuffer / typed array). */
-  registerFont(family, bytes, weight = 400, italic = false) {
+  /**
+   * Registers a font from bytes (ArrayBuffer / typed array: TTF, OTF, TTC /
+   * OTC, WOFF or WOFF2; copied) for every surface. `family` '' / null: the
+   * family name in the file. `weight` (1..1000) and `italic` (boolean, or
+   * 'italic' / 'normal') override the file's; omitted, they come from the
+   * file. `weight` may instead be `{ weight, style }` (style 'italic' /
+   * 'normal'), and `registerFont(bytes, { ... })` drops the family. True on
+   * success, false for data that is not a font.
+   */
+  registerFont(family, bytes, weight, italic) {
+    if (this._destroyed) return false;
+    [family, bytes, weight, italic] = fontArgs(family, bytes, weight, italic);
     const M = this.module;
     const data = ArrayBuffer.isView(bytes) ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
       : new Uint8Array(bytes);
-    const p = M._malloc(data.length);
+    const p = M._malloc(Math.max(1, data.length));
     M.HEAPU8.set(data, p);
-    const r = this._withStrings([family], (f) => M._jsui_register_font(this.rt, f, p, data.length, weight, italic ? 1 : 0));
+    const r = this._withStrings([family], (f) => M._jsui_register_font(this.rt, f, p, data.length, weight, italic));
     M._free(p);
     return r === 0;
+  }
+
+  /** Fetches a font (`url` resolved against the page) and registers it as
+   * registerFont(family, bytes, weight, italic) does. Promise<boolean>:
+   * false (logged) on a failed fetch or data that is not a font. */
+  async loadFont(family, url, weight, italic) {
+    if (this._destroyed) return false;
+    const abs = new URL(url, typeof location !== 'undefined' ? location.href : undefined).href;
+    let bytes;
+    try {
+      const res = await fetch(abs);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      bytes = await res.arrayBuffer();
+    } catch (e) {
+      this._log(2, `loadFont ${abs}: ${e?.message ?? e}`);
+      return false;
+    }
+    if (this._destroyed) return false;
+    const ok = this.registerFont(family ?? '', bytes, weight, italic);
+    if (!ok) this._log(2, `loadFont ${abs}: not a font`);
+    return ok;
+  }
+
+  /** Removes every face registered under `family` (text using it falls back
+   * to the default family). True if it was registered. */
+  unregisterFont(family) {
+    if (this._destroyed) return false;
+    return this._withStrings([String(family)], (f) => this.module._jsui_unregister_font(this.rt, f)) === 0;
+  }
+
+  /** Families tried, in order, for glyphs the styled font lacks (emoji, CJK):
+   * an array or a comma-separated string. Null / [] clears the list. Every
+   * registered font is searched after these anyway. */
+  setFontFallbacks(families) {
+    if (this._destroyed) return;
+    this._withStrings([fontList(families)], (f) => this.module._jsui_set_font_fallbacks(this.rt, f));
+  }
+
+  /** The family used when a style names none (default 'Inter'). */
+  setDefaultFontFamily(family) {
+    if (this._destroyed) return;
+    this._withStrings([family == null ? null : String(family)],
+      (f) => this.module._jsui_set_default_font_family(this.rt, f));
   }
 
   get lastError() { return this._lastError; }

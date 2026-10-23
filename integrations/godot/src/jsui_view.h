@@ -53,6 +53,13 @@
 // (user://jsui-pipelines.bin -> user://jsui-pipelines.vulkan.bin), and the
 // next start precompiles them, plus a list shipped at the same path under
 // res:// (res://jsui-pipelines.vulkan.bin), off the frame.
+//
+// Fonts (register_font, jsui_register_font): FontFile resources, bytes or
+// font files the UI's fontFamily can name. Like host textures they belong to
+// the runtime: the runtime view registers the `fonts` property and every
+// register_font / unregister_font / fallback / default-family call on each
+// new runtime (start()), in order, so calls made before start() and across
+// restarts apply; a surface view forwards them to its runtime view.
 #pragma once
 
 #include <godot_cpp/classes/control.hpp>
@@ -61,9 +68,11 @@
 #include <godot_cpp/classes/texture2d.hpp>
 #include <godot_cpp/classes/texture2drd.hpp>
 #include <godot_cpp/classes/input_event.hpp>
+#include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/node_path.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
+#include <godot_cpp/variant/packed_string_array.hpp>
 #include <godot_cpp/variant/rid.hpp>
 
 #include <atomic>
@@ -130,6 +139,11 @@ class JsuiView : public godot::Control {
   godot::String get_audio_bus() const { return audio_bus_; }
   void set_audio_bus_map(const godot::Dictionary& map) { audio_bus_map_ = map; }
   godot::Dictionary get_audio_bus_map() const { return audio_bus_map_; }
+  // Fonts registered (family from the file) on every new runtime. Assigning
+  // the property registers the fonts it adds on a running one; fonts it
+  // drops stay registered until the next start().
+  void set_fonts(const godot::Array& fonts);
+  godot::Array get_fonts() const { return fonts_; }
 
   // Methods.
   void start();   // (re)creates the runtime and loads bundle_url (surface views: the surface)
@@ -181,6 +195,22 @@ class JsuiView : public godot::Control {
   void stop_all_sounds(const godot::String& bus, float fade_ms);
   godot::Array get_audio_voices() const;
   godot::String resolve_audio_bus(const godot::String& bus) const;
+  // Fonts (jsui_register_font and friends), for the runtime (every view of
+  // it). `font`: a FontFile (or a FontVariation of one; its data), a
+  // PackedByteArray, or a path (res://, user://, absolute) of a TTF / OTF /
+  // TTC / WOFF / WOFF2 file. `family` "": the family name in the file;
+  // weight <= 0 / italic < 0: the file's, else overrides (1..1000, 0 / 1).
+  // Remembered and re-applied to every new runtime. False when the font
+  // cannot be read or (with a runtime) is not a font.
+  bool register_font(const godot::String& family, const godot::Variant& font, int weight, int italic);
+  // Removes the family's faces; true if it was registered (without a
+  // runtime: if a queued registration of it was dropped).
+  bool unregister_font(const godot::String& family);
+  // Families tried in order for glyphs the styled font lacks (emoji, CJK);
+  // empty clears the list.
+  void set_font_fallbacks(const godot::PackedStringArray& families);
+  // The family of text whose style names none (default "Inter").
+  void set_default_font_family(const godot::String& family);
 
   // Calls: Host.call() -> call_requested signal -> resolve_call / reject_call;
   // call_ui() -> Host.handle() handler -> callback(ok, result) + ui_call_completed.
@@ -307,6 +337,20 @@ class JsuiView : public godot::Control {
   void reportErrors();
   void releaseHeldInput();
   void onJoyConnectionChanged(int64_t device, bool connected);
+  // Fonts. A FontOp is one register_font / unregister_font call, kept (on
+  // the runtime view, or a surface view until it attaches) and replayed on
+  // every new runtime after the `fonts` property.
+  struct FontOp {
+    bool unregister = false;
+    std::string family;
+    godot::PackedByteArray data;
+    int weight = 0, italic = -1;
+  };
+  bool applyFontOp(FontOp op);  // applies it to the runtime (if any) and logs it
+  bool runFontOp(const FontOp& op);  // jsui_register_font / jsui_unregister_font on rt_
+  void applyFontSettings();          // fallbacks and default family, on rt_
+  void startFonts();                 // a new runtime: the property, the log, the settings
+  void forwardFonts();               // surface view: its fonts and queued calls go to host_
   bool handleGamepad(const godot::Ref<godot::InputEvent>& event);
   float computeRatio() const;
   double nowMs() const;
@@ -371,6 +415,13 @@ class JsuiView : public godot::Control {
     size_t count;
   };
   std::vector<std::pair<std::string, PendingBuffer>> pendingBuffers_;
+  // Fonts: the `fonts` property, the entries of it the runtime (or host_,
+  // for a surface view) got, the calls to replay, and the settings.
+  godot::Array fonts_, fonts_applied_;
+  JsuiView* fonts_host_ = nullptr;  // the runtime view fonts_applied_ went to (surface view)
+  std::vector<FontOp> font_ops_;
+  bool font_fallbacks_set_ = false, default_font_set_ = false;
+  std::string font_fallbacks_, default_font_family_;
   // Host textures (set_texture), on the runtime view; kept across restarts.
   // With the GPU renderer each one is copied (RenderingDevice.texture_copy,
   // recorded into Godot's frame) into a mirror: a RenderingDevice texture of

@@ -178,9 +178,37 @@ globalThis.__jsui_native = {
   postMessage(name, json) {
     mock.messages.push([name, json]);
   },
+  // Fonts (src/render/fonts.cpp contract). URLs containing 'missing' reject
+  // like a 404; with mock.holdFonts set, loads wait for mock.releaseFonts().
   loadFont(family, url, weight, italic) {
     calls.push(['loadFont', family, url, weight, italic]);
-    return Promise.resolve(true);
+    if (/missing/.test(url)) return Promise.reject(new Error('loadFont: 404 ' + url));
+    const done = () => {
+      mock.fontFamilies.add(family);
+      return true;
+    };
+    if (mock.holdFonts) return new Promise((res) => mock.pendingFonts.push(() => res(done())));
+    return Promise.resolve().then(done);
+  },
+  loadFontData(family, bytes, weight, italic) {
+    if (!(bytes instanceof ArrayBuffer || ArrayBuffer.isView(bytes))) throw new TypeError('loadFontData: expected an ArrayBuffer or typed array');
+    calls.push(['loadFontData', family, bytes.byteLength, weight, italic]);
+    if (bytes.byteLength < 4) throw new Error('loadFontData: not a font');
+    mock.fontFamilies.add(family);
+    return true;
+  },
+  unloadFont(family) {
+    calls.push(['unloadFont', family]);
+    return mock.fontFamilies.delete(family);
+  },
+  getFontFamilies() {
+    return Array.from(mock.fontFamilies);
+  },
+  setFontFallbacks(families) {
+    calls.push(['setFontFallbacks', families]);
+  },
+  setDefaultFontFamily(family) {
+    calls.push(['setDefaultFontFamily', family]);
   },
   // Shared state (src/host_state.cpp semantics: a runtime-wide version per change).
   getState(key) {
@@ -293,6 +321,14 @@ function applyPatch(target, patch) {
   return out;
 }
 Object.assign(mock, {
+  fontFamilies: new Set(['Inter']),
+  holdFonts: false,
+  pendingFonts: [],
+  releaseFonts() {
+    const q = mock.pendingFonts;
+    mock.pendingFonts = [];
+    for (const f of q) f();
+  },
   uiState: [],
   hostCalls: new Map(),
   cancelled: [],

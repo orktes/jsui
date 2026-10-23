@@ -453,6 +453,18 @@ void Runtime::requestReload() {
   redrawAll();
 }
 
+static void invalidateText(Node* n) {
+  if (n->type() == NodeType::Text || n->type() == NodeType::TextInput) n->markDirty();
+  for (Node* c : n->children()) invalidateText(c);
+}
+
+void Runtime::fontsChanged() {
+  for (auto& s : surfaces_) {
+    if (s->doc.root()) invalidateText(s->doc.root());
+    s->doc.markLayoutDirty();
+  }
+}
+
 void Runtime::reload() {
   if (js && js->inCall()) {  // called from JS or from a callback JS triggered
     requestReload();

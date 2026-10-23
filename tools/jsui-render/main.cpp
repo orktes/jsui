@@ -73,7 +73,7 @@ int main(int argc, char** argv) {
 
   for (auto& [family, path] : fonts) {
     std::string data;
-    if (!readFile(path, &data) || jsui_register_font(rt, family.c_str(), data.data(), data.size(), 400, 0) != 0) {
+    if (!readFile(path, &data) || jsui_register_font(rt, family.c_str(), data.data(), data.size(), 0, -1) != 0) {
       std::fprintf(stderr, "failed to load font %s\n", path.c_str());
       return 1;
     }

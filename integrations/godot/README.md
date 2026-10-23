@@ -293,6 +293,7 @@ CLI's README.
 | `audio_enabled` | bool | `true` | play the UI's sounds; off: nothing plays and every voice ends as failed (voices playing stop) |
 | `audio_bus` | String | `"Master"` | the Godot bus for JSUI buses that have no Godot bus of their own (see [Audio](#audio)) |
 | `audio_bus_map` | Dictionary | `{}` | JSUI bus → Godot bus, e.g. `{"sfx": "Effects"}`; wins over the same-name match |
+| `fonts` | Array[Font] | `[]` | `FontFile`s registered on every new runtime, family / weight / style from the file (see [Fonts](#fonts)). Assigning the array registers the fonts it adds on a running runtime; fonts it drops stay until the next `start()` |
 | `fixed_fps` | int | `0` | `0`: the runtime's clock (animations, timers, scrolling) is the wall clock. `N`: every frame advances it by 1/N s however long frames take, so the UI draws the frames of a machine running at N fps on any machine (tests, recording a pipeline list). The runtime view's applies |
 
 Changing `bundle_url` or `dev_mode` on a running view restarts it.
@@ -312,6 +313,10 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | `set_texture(name, texture, live = false) -> int` | shows a Godot `Texture2D` in the UI as host texture `name` (`<HostTexture name=...>`, `useHostTexture(name)`): an `ImageTexture`, a `ViewportTexture`, a `VideoStreamPlayer`'s texture, a `Texture2DRD`… `live`: its contents change every frame (a video, a viewport), so they are copied every frame; otherwise only when the texture emits `changed` or on `update_texture`. Calling it again with another texture replaces it. Kept by the view across `stop()` / `start()`; set before `start()` it is there for the first frame. Returns 1. See [Host textures](#host-textures) |
 | `remove_texture(name) -> int` | stops showing it (`<HostTexture>` draws nothing, `useHostTexture` returns null); 1 if it existed |
 | `update_texture(name) -> int` | the texture's contents changed (for a non-live texture that does not emit `changed`, e.g. a `Texture2DRD` the game draws into); -1: unknown name |
+| `register_font(family, font, weight = 0, italic = -1) -> bool` | registers a font with the runtime (every view of it): `font` is a `FontFile` (or a `FontVariation` of one), a `PackedByteArray`, or a path (`res://`, `user://`, absolute) of a TTF / OTF / TTC / WOFF / WOFF2 file. `family` `""`: the name in the file; `weight` `0` / `italic` `-1`: the file's, otherwise overrides (1..1000, `0` / `1`). Kept and re-applied to new runtimes; called before `start()` it is there for the first frame. `false`: unreadable or not a font. See [Fonts](#fonts) |
+| `unregister_font(family) -> bool` | removes every face of the family; `true` if it was registered |
+| `set_font_fallbacks(families: PackedStringArray)` | families tried in order for glyphs the styled font lacks (emoji, CJK); empty clears it. Every registered font is searched after them anyway |
+| `set_default_font_family(family)` | the family of text whose style names none (`"Inter"` by default) |
 | `resolve_call(id, result = null) -> int` | answer a `call_requested` call; the UI's `await Host.call(...)` resolves with `result`. Any later frame is fine. -1: unknown or cancelled id |
 | `resolve_call_json(id, json)` / `reject_call(id, message)` | JSON result / reject (the promise rejects with `Error(message)`) |
 | `call_ui(name, args = null, callback = Callable()) -> int` | run the UI's `Host.handle(name, fn)` / `useHostHandler` handler; `callback(ok: bool, result)` (and `ui_call_completed`) runs once it settles: `result` is the handler's value, or the error message when `ok` is false |
@@ -663,6 +668,48 @@ Surface views (`runtime_view`) play through their runtime view, whose
   (and bubbles) every event. `hit_test(position)` returns `HIT_POINTER` /
   `HIT_SCROLL` flags for any local point, e.g. for the game's own picking.
   Each surface view hit-tests its own surface.
+
+### Fonts
+
+The runtime ships Inter. Any other font the UI's `fontFamily` names is
+registered by the game or loaded by the UI itself; either way it belongs to
+the runtime and every view of it, and text already on screen relayouts.
+
+```gdscript
+@export var title_font: FontFile   # e.g. res://fonts/Display-Bold.ttf
+
+func _ready():
+    ui.register_font("Display", title_font)                  # weight / style from the file
+    ui.register_font("Display", "res://fonts/Display-Italic.woff2", 400, 1)
+    ui.register_font("", "res://fonts/NotoSansJP.otf")      # family name from the file
+    ui.set_font_fallbacks(["Noto Sans JP", "Noto Color Emoji"])
+    ui.set_default_font_family("Display")                  # text without a fontFamily
+```
+
+```jsx
+<Text style={{ fontFamily: 'Display', fontWeight: '700' }}>Victory</Text>
+```
+
+* Or list the fonts in the inspector: the `fonts` property takes `FontFile`
+  resources (drag `.ttf` / `.otf` / `.woff2` files onto it), registered with
+  the family, weight and style in each file whenever the runtime starts.
+* The view keeps every `register_font` / `unregister_font` call and the
+  fallback and default-family settings, and replays them, after `fonts`, on
+  each new runtime (`start()`, a new `bundle_url`), like `set_state`. Calls on
+  a surface view go to its runtime view; a surface view's own `fonts` are
+  registered there when it attaches.
+* A `FontFile`'s data is the file it was imported from, so its weight and
+  style come from that file; a `FontVariation`'s settings are not applied
+  (pass `weight` / `italic`, or use `fontVariationSettings` in the UI).
+  `SystemFont` and bitmap fonts have no font file and are refused.
+* The UI can load fonts itself: `Fonts.load('Display', 'fonts/Display.woff2')`
+  (`useFonts` / `Fonts.loadAsync` too) resolves against the bundle URL and,
+  for a `res://` / `user://` bundle, reads the file through `FileAccess`.
+  Godot imports `.ttf` / `.otf` / `.woff` / `.woff2` files as `FontFile`s, and
+  an export ships only that imported copy unless the file matches the
+  non-resource filter (below); a font file the filter leaves out is read from
+  its imported `FontFile` instead, so both work. A bundle loaded from an
+  `http://` dev server loads its fonts from the dev server.
 
 ### Loading and exporting
 

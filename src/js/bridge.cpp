@@ -349,14 +349,8 @@ JSValue js_postMessage(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
   return JS_UNDEFINED;
 }
 
-// Text measurement caches depend on the font set: dirty every Text node.
-void invalidateText(Node* n) {
-  if (n->type() == NodeType::Text) n->markDirty();
-  for (Node* c : n->children()) invalidateText(c);
-}
-
 void fontLoaded(JsEngine::Impl& impl, uint64_t id, Resource& res, const std::string& family, int weight,
-                bool italic) {
+                int italic) {
   auto it = impl.pending.find(id);
   if (it == impl.pending.end()) return;
   JSContext* ctx = impl.ctx;
@@ -367,14 +361,11 @@ void fontLoaded(JsEngine::Impl& impl, uint64_t id, Resource& res, const std::str
   if (!res.ok()) {
     error = "loadFont: failed to load " + res.url + " (status " + std::to_string(res.status) +
             (res.error.empty() ? "" : ", " + res.error) + ")";
-  } else if (!rt.fonts.registerFont(family, res.data.data(), res.data.size(), weight, italic)) {
-    error = "loadFont: " + res.url + " is not a supported font file";
+  } else if (std::string why; !rt.fonts.registerFont(family, res.data.data(), res.data.size(), weight, italic, &why)) {
+    error = "loadFont: " + res.url + ": " + why;
   }
   if (error.empty()) {
-    for (auto& s : rt.surfaces()) {
-      invalidateText(s->doc.root());
-      s->doc.markLayoutDirty();
-    }
+    rt.fontsChanged();
     JSValue ok = JS_TRUE;
     JS_FreeValue(ctx, impl.call(resolve, JS_UNDEFINED, 1, &ok));
   } else {
@@ -388,21 +379,31 @@ void fontLoaded(JsEngine::Impl& impl, uint64_t id, Resource& res, const std::str
   JS_FreeValue(ctx, reject);
 }
 
+// Font face hints: weight <= 0 and italic < 0 take the file's own.
+void fontHints(JSContext* ctx, int argc, JSValueConst* argv, int at, int* weight, int* italic) {
+  *weight = 0;
+  *italic = -1;
+  if (argc > at && JS_IsNumber(argv[at])) JS_ToInt32(ctx, weight, argv[at]);
+  if (argc > at + 1) {
+    if (JS_IsBool(argv[at + 1])) *italic = JS_ToBool(ctx, argv[at + 1]) ? 1 : 0;
+    else if (JS_IsNumber(argv[at + 1])) JS_ToInt32(ctx, italic, argv[at + 1]);
+  }
+}
+
 // loadFont(family, url, weight, italic) -> Promise<true>
 JSValue js_loadFont(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   auto& impl = implOf(ctx);
   Runtime& rt = impl.rt;
-  std::string family = argc > 0 ? toStdString(ctx, argv[0]) : "";
+  std::string family = argc > 0 && JS_IsString(argv[0]) ? toStdString(ctx, argv[0]) : "";
   std::string url = argc > 1 ? toStdString(ctx, argv[1]) : "";
-  int weight = 400;
-  if (argc > 2 && JS_IsNumber(argv[2])) JS_ToInt32(ctx, &weight, argv[2]);
-  bool italic = argc > 3 && JS_ToBool(ctx, argv[3]);
+  int weight, italic;
+  fontHints(ctx, argc, argv, 2, &weight, &italic);
   JSValue funcs[2];
   JSValue promise = JS_NewPromiseCapability(ctx, funcs);
   if (JS_IsException(promise)) return promise;
-  if (family.empty() || url.empty()) {
+  if (url.empty()) {
     JSValue err = JS_NewError(ctx);
-    JS_SetPropertyStr(ctx, err, "message", JS_NewString(ctx, "loadFont(family, url): family and url are required"));
+    JS_SetPropertyStr(ctx, err, "message", JS_NewString(ctx, "loadFont(family, url): url is required"));
     JS_FreeValue(ctx, JS_Call(ctx, funcs[1], JS_UNDEFINED, 1, &err));
     JS_FreeValue(ctx, err);
     JS_FreeValue(ctx, funcs[0]);
@@ -417,6 +418,81 @@ JSValue js_loadFont(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
   });
   impl.pending[id] = {funcs[0], funcs[1]};
   return promise;
+}
+
+// loadFontData(family, bytes, weight, italic) -> true; throws on bad data.
+// `bytes`: ArrayBuffer / typed array / DataView. Empty family = the file's.
+JSValue js_loadFontData(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  Runtime& rt = runtimeOf(ctx);
+  std::string family = argc > 0 && JS_IsString(argv[0]) ? toStdString(ctx, argv[0]) : "";
+  std::vector<uint8_t> data;
+  if (argc < 2 || JS_IsString(argv[1]) || !bytesOf(ctx, argv[1], &data) || data.empty())
+    return JS_ThrowTypeError(ctx, "loadFontData(family, bytes): bytes must be an ArrayBuffer or typed array");
+  int weight, italic;
+  fontHints(ctx, argc, argv, 2, &weight, &italic);
+  std::string why;
+  if (!rt.fonts.registerFont(family, data.data(), data.size(), weight, italic, &why))
+    return JS_ThrowTypeError(ctx, "loadFontData: %s", why.c_str());
+  rt.fontsChanged();
+  return JS_TRUE;
+}
+
+// unloadFont(family) -> boolean
+JSValue js_unloadFont(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  Runtime& rt = runtimeOf(ctx);
+  bool ok = argc > 0 && rt.fonts.unregisterFamily(toStdString(ctx, argv[0]));
+  if (ok) rt.fontsChanged();
+  return JS_NewBool(ctx, ok);
+}
+
+// getFontFamilies() -> string[] (registration order, built-in Inter first)
+JSValue js_getFontFamilies(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+  auto names = runtimeOf(ctx).fonts.familyNames();
+  JSValue arr = JS_NewArray(ctx);
+  for (size_t i = 0; i < names.size(); i++)
+    JS_SetPropertyUint32(ctx, arr, uint32_t(i), JS_NewStringLen(ctx, names[i].data(), names[i].size()));
+  return arr;
+}
+
+// setFontFallbacks(families: string[] | "A, B")
+JSValue js_setFontFallbacks(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  Runtime& rt = runtimeOf(ctx);
+  std::vector<std::string> list;
+  auto addList = [&](const std::string& csv) {
+    size_t i = 0;
+    while (i <= csv.size()) {
+      size_t c = csv.find(',', i);
+      if (c == std::string::npos) c = csv.size();
+      std::string f = csv.substr(i, c - i);
+      i = c + 1;
+      size_t a = f.find_first_not_of(" \t\"'"), b = f.find_last_not_of(" \t\"'");
+      if (a != std::string::npos) list.push_back(f.substr(a, b - a + 1));
+    }
+  };
+  if (argc > 0 && JS_IsArray(argv[0])) {
+    int64_t n = 0;
+    JS_GetLength(ctx, argv[0], &n);
+    for (int64_t i = 0; i < n; i++) {
+      JSValue e = JS_GetPropertyInt64(ctx, argv[0], i);
+      if (JS_IsString(e)) addList(toStdString(ctx, e));
+      JS_FreeValue(ctx, e);
+    }
+  } else if (argc > 0 && JS_IsString(argv[0])) {
+    addList(toStdString(ctx, argv[0]));
+  }
+  uint32_t gen = rt.fonts.generation;
+  rt.fonts.setFallbackFamilies(std::move(list));
+  if (rt.fonts.generation != gen) rt.fontsChanged();
+  return JS_UNDEFINED;
+}
+
+// setDefaultFontFamily(family): the family of text whose style names none.
+JSValue js_setDefaultFontFamily(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  Runtime& rt = runtimeOf(ctx);
+  uint32_t gen = rt.fonts.generation;
+  if (argc > 0 && JS_IsString(argv[0])) rt.fonts.setDefaultFamily(toStdString(ctx, argv[0]));
+  if (rt.fonts.generation != gen) rt.fontsChanged();
+  return JS_UNDEFINED;
 }
 
 // surfaceApp(rootTag) -> {appKey, initialProps} | null: the app the host
@@ -494,7 +570,11 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
              {"flashScrollIndicators", js_flashScrollIndicators, 1},
              {"configureLayoutAnimation", js_configureLayoutAnimation, 1},
              {"lottieData", js_lottieData, 1},     {"lottieCommand", js_lottieCommand, 4},
-             {"shaderInfo", js_shaderInfo, 1}};
+             {"shaderInfo", js_shaderInfo, 1},
+             {"loadFontData", js_loadFontData, 4}, {"unloadFont", js_unloadFont, 1},
+             {"getFontFamilies", js_getFontFamilies, 0},
+             {"setFontFallbacks", js_setFontFallbacks, 1},
+             {"setDefaultFontFamily", js_setDefaultFontFamily, 1}};
   for (auto& f : fns) JS_SetPropertyStr(ctx, native, f.name, JS_NewCFunction(ctx, f.fn, f.name, f.len));
   JS_SetPropertyStr(ctx, native, "rootId", JS_NewUint32(ctx, impl.rt.doc.root()->id()));
   // TextInput text is edited natively (change / selectionchange events).

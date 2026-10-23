@@ -14,6 +14,7 @@
 #include "include/core/SkCanvas.h"
 #include "include/core/SkFont.h"
 #include "include/core/SkFontMetrics.h"
+#include "include/core/SkFontArguments.h"
 #include "include/core/SkFontStyle.h"
 #include "modules/skparagraph/include/FontCollection.h"
 #include "include/core/SkMaskFilter.h"
@@ -53,6 +54,8 @@ struct Resolved {
   uint8_t decorationStyle = 0;
   std::vector<Shadow> shadows;
   std::vector<std::string> fontVariant;
+  std::vector<FontSetting> variations;  // fontVariationSettings
+  std::vector<FontSetting> features;    // fontFeatureSettings
   TextAlign align = TextAlign::Auto;
   int8_t direction = 0;
 };
@@ -74,6 +77,8 @@ void merge(Resolved* r, const TextStyle& t) {
   if (t.decorationStyle) r->decorationStyle = *t.decorationStyle;
   if (t.hasTextShadow) r->shadows = t.textShadows;
   if (t.fontVariant) r->fontVariant = *t.fontVariant;
+  if (t.fontVariationSettings) r->variations = *t.fontVariationSettings;
+  if (t.fontFeatureSettings) r->features = *t.fontFeatureSettings;
   if (t.textAlign) r->align = *t.textAlign;
   if (t.writingDirection) r->direction = *t.writingDirection;
 }
@@ -89,9 +94,11 @@ SkColor toSk(const Color& c) {
 }
 
 // CSS font-family list -> skparagraph families, always ending in the default
-// family. Generic / platform UI names map to the default (react-native-web's
-// "System" stack resolves to the bundled font here).
-std::vector<SkString> families(const std::string& list, const std::string& def) {
+// family and then the fallback families (Fonts.setFallbacks). Generic /
+// platform UI names map to the default (react-native-web's "System" stack
+// resolves to the bundled font here).
+std::vector<SkString> families(const std::string& list, FontManager* fm) {
+  const std::string& def = fm->defaultFamily();
   std::vector<SkString> out;
   size_t i = 0;
   while (i <= list.size()) {
@@ -110,6 +117,8 @@ std::vector<SkString> families(const std::string& list, const std::string& def) 
     if (std::find(out.begin(), out.end(), SkString(f.c_str())) == out.end()) out.emplace_back(f.c_str());
   }
   if (std::find(out.begin(), out.end(), SkString(def.c_str())) == out.end()) out.emplace_back(def.c_str());
+  for (auto& f : fm->fallbackFamilies())
+    if (std::find(out.begin(), out.end(), SkString(f.c_str())) == out.end()) out.emplace_back(f.c_str());
   return out;
 }
 
@@ -173,10 +182,9 @@ LineMetrics chromeLineMetrics(FontManager* fm, const tl::TextStyle& ts, float ex
 // `rootShift`: the paragraph root's baseline shift, applied as a paint offset
 // instead (shifting runs relative to the strut would grow every line box).
 tl::TextStyle toSkStyle(const Resolved& r, FontManager* fm, float rootShift, LineMetrics* metricsOut = nullptr) {
-  const std::string& defFamily = fm->defaultFamily;
   tl::TextStyle ts;
   ts.setColor(toSk(r.color));
-  ts.setFontFamilies(families(r.family, defFamily));
+  ts.setFontFamilies(families(r.family, fm));
   ts.setFontSize(r.fontSize);
   ts.setFontStyle(SkFontStyle(r.weight, SkFontStyle::kNormal_Width,
                               r.italic ? SkFontStyle::kItalic_Slant : SkFontStyle::kUpright_Slant));
@@ -209,6 +217,22 @@ tl::TextStyle toSkStyle(const Resolved& r, FontManager* fm, float rootShift, Lin
     else if (v == "small-caps") tag = "smcp";
     else if (v == "slashed-zero") tag = "zero";
     if (tag) ts.addFontFeature(SkString(tag), 1);
+  }
+  for (auto& f : r.features) ts.addFontFeature(SkString(f.tag.c_str()), int(std::lround(f.value)));
+  if (!r.variations.empty()) {
+    // Axes left out take their default, so 'wght' follows fontWeight unless
+    // the settings name it (as in CSS).
+    std::vector<SkFontArguments::VariationPosition::Coordinate> coords;
+    bool hasWeight = false;
+    for (auto& v : r.variations) {
+      SkFourByteTag tag = SkSetFourByteTag(v.tag[0], v.tag[1], v.tag[2], v.tag[3]);
+      hasWeight = hasWeight || tag == SkSetFourByteTag('w', 'g', 'h', 't');
+      coords.push_back({tag, v.value});
+    }
+    if (!hasWeight) coords.push_back({SkSetFourByteTag('w', 'g', 'h', 't'), float(r.weight)});
+    SkFontArguments args;
+    args.setVariationDesignPosition({coords.data(), int(coords.size())});
+    ts.setFontArguments(args);
   }
   return ts;
 }
