@@ -57,6 +57,9 @@ const browser = await chromium.launch({
 let failed = 0;
 for (const size of SIZES) {
   const ctx = await browser.newContext({ viewport: { width: size.width, height: size.height }, deviceScaleFactor: size.scale });
+  // Playwright's evaluate() counts as a user activation: hide it, so the
+  // routes run with audio locked, as on a first visit.
+  await ctx.addInitScript(() => Object.defineProperty(navigator, 'userActivation', { value: { hasBeenActive: false } }));
   const page = await ctx.newPage();
   const logs = [];
   page.on('console', (m) => logs.push(m.text()));
