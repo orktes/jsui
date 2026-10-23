@@ -75,6 +75,8 @@ the browser (mouse, keyboard, gamepad), and you drive **the same app** with
 the same commands as the headless tools. Every save hot-updates it in place
 (component state is kept), so you see a change in about a second, on the
 screen you already navigated to, without rebuilding or replaying steps.
+Keep screens and components in their own modules: an edit to the entry file
+(the one calling `AppRegistry.registerComponent`) reloads the whole app.
 
 ```sh
 npx jsui dev src/app.jsx --shared [--width 1920 --height 1080 --scale 2]

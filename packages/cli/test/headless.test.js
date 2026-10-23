@@ -272,6 +272,14 @@ async function readStream(origin, n) {
 
 test('dev --shared: viewer stream, viewer input, attach(), jsui run --attach', { skip }, async () => {
   const dir = await fixture();
+  // The title lives in a component-only module, which hot-updates in place
+  // (an edit to the entry file, which registers the app, reloads instead).
+  const TITLE = `import { Text } from 'react-native';
+export default function Title({ text }) { return <Text testID="title" style={{ color: '#fff', fontSize: 32 }}>{text}</Text>; }
+`;
+  await writeFile(path.join(dir, 'title.jsx'), TITLE);
+  await writeFile(path.join(dir, 'app.jsx'), "import Title from './title.jsx';\n" +
+    APP.replace(`<Text testID="title" style={{ color: '#fff', fontSize: 32 }}>{title}</Text>`, '<Title text={title} />'));
   const server = await dev({ entry: path.join(dir, 'app.jsx'), port: 0, log: () => {}, shared: { width: 640, height: 360 } });
   const origin = `http://127.0.0.1:${server.port}`;
   try {
@@ -337,9 +345,9 @@ test('dev --shared: viewer stream, viewer input, attach(), jsui run --attach', {
     await app.press('Down');
     assert.ok((await app.find('#buy')).focused);
     const since = (await app.activity(0)).at(-1).seq;
-    await writeFile(path.join(dir, 'app.jsx'), APP.replace("title = 'Menu'", "title = 'Edited'"));
-    for (let i = 0; i < 100 && (await app.find('#title')).text !== 'Edited'; i++) await app.wait(100);
-    assert.equal((await app.find('#title')).text, 'Edited');
+    await writeFile(path.join(dir, 'title.jsx'), TITLE.replace('{text}', "{text + ' (edited)'}"));
+    for (let i = 0; i < 100 && (await app.find('#title')).text !== 'Menu (edited)'; i++) await app.wait(100);
+    assert.equal((await app.find('#title')).text, 'Menu (edited)');
     // A runtime older than hot updates (a pre-0.4 jsui.wasm) reloads instead;
     // CI builds the current one (JSUI_HEADLESS_STRICT).
     const reloaded = (await app.activity(since)).some((e) => e.kind === 'log' && /reloading/.test(e.text));
