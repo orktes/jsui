@@ -1,4 +1,5 @@
 // C API: thin wrappers over jsui::Runtime.
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -366,6 +367,10 @@ void jsui_get_perf(JsuiRuntime* rt, JsuiPerf* out, int reset) {
 
 void jsui_set_event_time(JsuiRuntime* rt, double time_ms) { rt->surface->input->setEventTime(time_ms); }
 #define JSUI_INPUT_SCOPE jsui::Perf::Scope perf_scope(rt->surface->doc.perf, jsui::Phase::Input)
+int jsui_hit_test(JsuiRuntime* rt, float x, float y) {
+  if (!rt || !std::isfinite(x) || !std::isfinite(y)) return 0;
+  return int(rt->surface->input->capturesAt(x, y));
+}
 int jsui_send_mouse_move(JsuiRuntime* rt, float x, float y) {
   JSUI_INPUT_SCOPE;
   return rt->surface->input->mouseMove(x, y);

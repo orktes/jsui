@@ -139,18 +139,32 @@ wants one.
   `createNode(type, rootTag)` creates the node in that surface's document;
   `appendChild` / `insertBefore` across documents are refused with a
   warning (a portal into another surface).
-* JS protocol: after the bundle evaluates (and whenever a surface is created
-  or gets new props) the runtime calls `__jsui_runSurface(rootTag, appKey,
-  propsJson)`; `jsui_surface_destroy` calls `__jsui_stopSurface(rootTag)`
+* JS protocol: after the bundle evaluates, the runtime calls
+  `__jsui_runSurfaces([[rootTag, appKey, propsJson], ...])` with every
+  surface. Surfaces created or given new props (`jsui_surface_run` /
+  `jsui_surface_set_props`) are delivered at the start of the next tick, all
+  in one call, which commits them in one React pass; the same props again
+  cost nothing (hosts may push their state every frame). `jsui_surface_destroy` calls `__jsui_stopSurface(rootTag)`
   first, then frees the surface (at the start of the next tick when JS is on
   the stack). `@orktes/jsui-react`'s AppRegistry renders each app into its
-  own React root; a key registered later starts the surfaces waiting for it.
+  own subtree; a key registered later starts the surfaces waiting for it.
+  The main surface's app has a React root of its own; the other surfaces'
+  apps share one more root, each portaled into its surface's root container
+  under an error boundary (an app that throws unmounts alone and is
+  reported like an uncaught error). New props re-render only that surface
+  (`forceUpdate` of its `SurfaceRoot`, under `flushSync`), so one frame's
+  updates of many surfaces are one React render and commit.
   `__jsui_native.surfaceApp(rootTag)` tells AppRegistry whether the host
   picked the main surface's app (`jsui_surface_run` on the runtime handle),
   in which case the first registered component does not auto-start.
 * `RootTagContext` gives a component its surface; `useWindowDimensions()`
   is the surface's size (`viewport(rootTag)`), `Dimensions.get('window')`
-  the main surface's; `resize` events carry `rootTag`. `Modal` portals into
+  the main surface's; `resize` events carry `rootTag` and wake only that
+  surface's `useWindowDimensions` subscribers (`Dimensions` change
+  listeners hear about the main surface only). A surface's (not the main
+  one's) resize reaches JS at the start of the next tick, together with the
+  other surfaces' resizes and props, in one microtask drain
+  (`JsEngine::beginBatch`). `Modal` portals into
   the root of the surface it is rendered in.
 * A viewport width or height <= 0 sizes that axis to the content: the root
   is laid out unconstrained (Yoga ignores the app wrapper's 0 flex basis
@@ -972,6 +986,21 @@ was `preventDefault()`-ed.
   sent to JS unless a node on the path lists one); `hover`/`enter`/`leave`/`over`
   = wants `pointerenter`/`pointerleave` (sent only to such nodes); `wheel`;
   `"*"` = everything. Any pointer-ish name makes `jsui_send_*` report "consumed".
+* **Consumed vs. pass-through.** Every `jsui_send_*` returns whether the UI
+  captured the event, so the game handles everything else (a click on an empty
+  or merely decorative part of a HUD). Pointer: a node on the hit path with a
+  pointer-ish `__events` name, a TextInput, JS `preventDefault()`, or (touch
+  only) a ScrollView that can scroll; `pointerEvents` `none` / `box-none`
+  views are skipped by the hit test, so full-screen containers don't swallow
+  input. The press decides the gesture: its moves and release report what the
+  press did (`PointerState::owned`), so the game sees whole drags. Keys and
+  gamepad buttons: JS `preventDefault()` or a default action that ran (focus
+  moved, activation, scrolling, editing); the repeats and release of a
+  consumed press report consumed too (`consumedKeys_`, `Pad::consumed`).
+  Sticks: focus moved or a ScrollView scrolls. `jsui_hit_test(x, y)`
+  (`InputManager::capturesAt`) answers the pointer question without sending
+  anything, for hosts that route by hit testing: Godot's `JsuiView._has_point`
+  (`input_pass_through`), the web host's `passThrough` overlay mode.
 * **Pointer:** mouse `pointerId` 0, touch `id + 1`. Implicit capture while a
   button / touch is down; `click` (primary button only) targets the nearest
   common ancestor of the down and up nodes. Wheel `deltaY > 0` scrolls down
@@ -1282,7 +1311,8 @@ changed rather than to the tree size:
   the whole key; for large collections, select the slice each child needs
   (`useHostStateSelector`) so unchanged children bail out.
 
-`Document::perf` counts the work (`src/core/perf.h`: bridge calls, setProps,
+`Document::perf` (one per runtime: surfaces report into the main
+surface's) counts the work (`src/core/perf.h`: bridge calls, setProps,
 style resolves, layout passes, text measures / shaping, Animated writes,
 events, hit-test node visits, image decodes and their time, GPU pipelines
 compiled by the runtime's renders) and, when `profiling` is set, the
@@ -1307,10 +1337,16 @@ build/jsui-bench app.js --frames 600 --paint none --mouse-sweep 200,100,600,240
 
 Options: `--frames`, `--warmup`, `--width` / `--height`, `--paint
 incremental|full|none`, `--mouse-sweep X,Y0,Y1,FRAMES` (moves the mouse
-every frame), `--patch-state KEY,SLOTS` (one `jsui_patch_state` per frame).
-Scenarios: `interactions` (examples), `list` (2000 rows, one counter),
-`menu` (native spring on hover), `inventory` (500 slots through
-`useHostState` + `jsui_patch_state`), `idle`. Under valgrind, run with
+every frame), `--patch-state KEY,SLOTS` (one `jsui_patch_state` per frame),
+`--surfaces N[,changing|same|one|resize]` (N `Plate` surfaces of 120x40 and
+what the host does to them every frame). Scenarios: `interactions`
+(examples), `list` (2000 rows, one counter), `menu` (native spring on
+hover), `inventory` (500 slots through `useHostState` +
+`jsui_patch_state`), `idle`, and 30 nameplate surfaces: `surfaces-static`,
+`surfaces-props` (every surface's props change every frame),
+`surfaces-same-props` (pushed unchanged every frame), `surfaces-one-props`
+(one surface's per frame), `surfaces-resize` (every surface resized every
+frame). Under valgrind, run with
 `--tool=callgrind --instr-atstart=no`: the tool switches instrumentation on
 for the measured frames only.
 

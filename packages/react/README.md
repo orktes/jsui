@@ -36,7 +36,9 @@ AppRegistry.registerComponent('Nameplate', () => Nameplate); // ({ name }) => ..
 
 `RootTagContext` gives a component its surface's root tag. The first
 registered component auto-starts on the main surface unless the host picks
-one.
+one. Hosts may push props to many surfaces every frame: unchanged props cost
+nothing, and the changed ones re-render in one batch on the next tick, only
+the surfaces whose props changed.
 
 React 19.3.1 with `react-reconciler` 0.34.0 (pinned; both run on QuickJS:
 no DOM, no Node APIs).

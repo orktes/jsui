@@ -37,7 +37,8 @@ class Document {
   // `sharedNextId`: the node id counter of the runtime when several
   // documents (surfaces) share one JS context, so ids stay unique across
   // them; nullptr: the document numbers its own nodes.
-  explicit Document(uint32_t* sharedNextId = nullptr);
+  // Surfaces of one runtime share the node id counter and the perf stats.
+  explicit Document(uint32_t* sharedNextId = nullptr, Perf* sharedPerf = nullptr);
   ~Document();
 
   // The root container (id 1). The reconciler appends its top level here.
@@ -128,7 +129,9 @@ class Document {
   int layoutListeners = 0;
 
   // Work counters and (when profiling) phase times; see core/perf.h.
-  Perf perf;
+  // Surfaces report into the main surface's.
+  Perf ownPerf_;
+  Perf& perf;
 
   // Ticks run so far (Runtime::tick); image events wait for a later tick
   // than the one that set the source, so they are always asynchronous.

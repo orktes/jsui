@@ -145,6 +145,20 @@ TEST(react_surfaces_e2e) {
   CHECK(has(m, "\"presses\":1,\"mounts\":1"));
   CHECK(!has(m, "mount={"));
   CHECK_EQ(jsui_surface_set_props(orc, "nope"), -1);
+  // The same props again (a host pushing its state every frame) render nothing.
+  CHECK_EQ(jsui_surface_set_props(orc, R"({"name":"orc","hp":10,"color":"#ff0000"})"), 0);
+  t.tick(16);
+  CHECK(!has(t.take(), "plate="));
+  // Updates to several surfaces in one frame land in the same tick.
+  CHECK_EQ(jsui_surface_set_props(orc, R"({"name":"orc","hp":9,"color":"#ff0000"})"), 0);
+  CHECK_EQ(jsui_surface_set_props(elf, R"({"name":"elf","hp":70,"color":"#0000ff"})"), 0);
+  t.tick(16);
+  m = t.take();
+  CHECK(has(m, "\"name\":\"orc\",\"hp\":9"));
+  CHECK(has(m, "\"name\":\"elf\",\"hp\":70"));
+  CHECK_EQ(jsui_surface_set_props(orc, R"({"name":"orc","hp":10,"color":"#ff0000"})"), 0);
+  t.tick(16);
+  t.take();
 
   // Resizing a surface tells only its components.
   jsui_set_viewport(orc, 150, 50, 1);
@@ -220,4 +234,34 @@ TEST(react_surfaces_e2e_host_picks_main) {
   // The main surface cannot be destroyed through the surface API.
   jsui_surface_destroy(t.rt);
   CHECK_EQ(jsui_surface_tag(t.rt), 1);
+}
+
+TEST(react_surfaces_e2e_error_isolation) {
+  const char* path = std::getenv("JSUI_REACT_SURFACES_BUNDLE");
+  if (!path) {
+    std::printf("  (skipped: set JSUI_REACT_SURFACES_BUNDLE, see packages/cli/test)\n");
+    return;
+  }
+  SurfacesE2E t;
+  CHECK(t.read(path));
+  CHECK(t.load());
+  JsuiRuntime* orc = jsui_surface_create(t.rt, "Nameplate", R"({"name":"orc","hp":50,"color":"#ff0000"})", 120, 40, 1);
+  JsuiRuntime* boom = jsui_surface_create(t.rt, "Boom", R"({"boom":false})", 20, 20, 1);
+  t.tick(16);
+  CHECK_EQ(pixel(boom, 20, 20, 10, 10), 0xffffffffu);
+  t.take();
+  // A surface whose app throws unmounts alone; the error is reported.
+  CHECK_EQ(jsui_surface_set_props(boom, R"({"boom":true})"), 0);
+  CHECK_EQ(jsui_surface_set_props(orc, R"({"name":"orc","hp":40,"color":"#ff0000"})"), 0);
+  t.tick(16);
+  const char* err = jsui_last_error(t.rt);
+  CHECK(err != nullptr && std::string(err).find("boom") != std::string::npos);
+  CHECK(has(t.take(), "\"hp\":40"));
+  CHECK_EQ(pixel(boom, 20, 20, 10, 10), 0u);
+  CHECK_EQ(pixel(orc, 120, 40, 60, 20), 0xff0000ffu);
+  SurfacesE2E::click(t, orc, 60, 20);
+  CHECK(has(t.take(), "press={\"name\":\"orc\"}"));
+  // The main surface keeps running too.
+  SurfacesE2E::click(t, t.rt, 60, 20);
+  CHECK(has(t.take(), "mainPress"));
 }

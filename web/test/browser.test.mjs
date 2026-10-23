@@ -1124,6 +1124,63 @@ test('perf: 1080p HUD (~540 nodes), steady state (webgpu)', async ({ page }) => 
   console.log(`      perf (${r.renderer}, 1920x1080, headless/swiftshader): tick ${r.tick.toFixed(2)} ms, Skia Graphite draw+GPU done ${r.paint.toFixed(2)} ms`);
 });
 
+// passThrough: the canvas is a layer over a "game" element; what the UI
+// doesn't capture reaches the game, what it consumes doesn't.
+test('passThrough: unhandled input reaches the page under the canvas', async ({ page }) => {
+  await page.evaluate(() => {
+    const g = document.createElement('div');
+    g.id = 'game';
+    Object.assign(g.style, { position: 'absolute', left: '0px', top: '0px', width: '320px', height: '200px' });
+    document.body.appendChild(g);
+    window.gameEvents = [];
+    for (const t of ['pointerdown', 'pointerup', 'click', 'wheel', 'contextmenu']) {
+      g.addEventListener(t, (e) => window.gameEvents.push(t), { passive: true });
+    }
+  });
+  await mount(page, { jsui: { bundleUrl: 'fixtures/passthrough.js', passThrough: true } });
+  await page.evaluate(() => Object.assign(document.getElementById('ui').style,
+    { position: 'absolute', left: '0px', top: '0px', zIndex: '1' }));
+  const take = () => page.evaluate(() => {
+    const r = { game: window.gameEvents.join(), press: window.hosts.ui.messages.filter(([n]) => n === 'press').length };
+    window.gameEvents = [];
+    window.hosts.ui.messages = [];
+    return r;
+  });
+  const hits = await page.evaluate(() => [window.hosts.ui.hitTest(50, 25), window.hosts.ui.hitTest(200, 150)]);
+  assert(hits.join() === '1,0', `hitTest ${hits}`);
+
+  await page.mouse.click(50, 25);  // the button
+  await frames(page);
+  let r = await take();
+  assert(r.press === 1 && r.game === '', `button click ${JSON.stringify(r)}`);
+  const hot = await page.evaluate(() => document.getElementById('ui').style.pointerEvents);
+  assert(hot === 'auto', `pointer-events over the button: ${hot}`);
+
+  await page.mouse.click(200, 150);  // painted panel, no handlers
+  await page.mouse.wheel(0, 100);
+  await page.mouse.click(200, 150, { button: 'right' });
+  await frames(page);
+  r = await take();
+  const sorted = r.game.split(',').sort().join();
+  assert(r.press === 0 && sorted === 'click,contextmenu,pointerdown,pointerdown,pointerup,pointerup,wheel',
+    `panel click ${JSON.stringify(r)}`);
+  const cold = await page.evaluate(() => document.getElementById('ui').style.pointerEvents);
+  assert(cold === 'none', `pointer-events over the panel: ${cold}`);
+
+  // A drag the game started stays the game's over the button.
+  await page.mouse.move(200, 150);
+  await page.mouse.down();
+  await page.mouse.move(50, 25, { steps: 4 });
+  await page.mouse.up();
+  await frames(page);
+  r = await take();
+  assert(r.press === 0 && r.game.startsWith('pointerdown') && r.game.includes('pointerup'), `game drag ${JSON.stringify(r)}`);
+
+  // Unconsumed keys reach the page; the keyboard isn't taken by unhandled clicks.
+  const focused = await page.evaluate(() => document.activeElement?.tagName);
+  assert(focused !== 'TEXTAREA', `focus after a pass-through click: ${focused}`);
+});
+
 // ---------------------------------------------------------------- surfaces
 // One runtime, several canvases (createSurface): own props, pixels, input,
 // sizes; props updates, auto-size and destroy.

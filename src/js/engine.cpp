@@ -692,6 +692,10 @@ void JsEngine::layoutEvent(uint32_t id, float x, float y, float w, float h) {
 
 bool JsEngine::inCall() const { return impl_->depth > 0; }
 
+void JsEngine::beginBatch() { impl_->enter(); }
+
+void JsEngine::endBatch() { impl_->leave(); }
+
 size_t JsEngine::memoryUsage() const {
   JSMemoryUsage u;
   JS_ComputeMemoryUsage(impl_->jrt, &u);

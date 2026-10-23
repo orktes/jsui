@@ -72,6 +72,12 @@ class InputManager {
   // Topmost node accepting pointer events at (x, y), honoring transforms,
   // overflow clipping, zIndex and pointerEvents.
   Node* hitTest(float x, float y);
+  // What the UI would capture at (x, y) (jsui_hit_test): JSUI_HIT_POINTER
+  // when the hit node or an ancestor handles pointer input (press / pointer /
+  // hover / responder listeners, TextInput), JSUI_HIT_SCROLL when a
+  // ScrollView that can scroll (or a wheel listener) is on the path. 0: the
+  // point passes through to whatever is behind the UI.
+  unsigned capturesAt(float x, float y);
   // Same, also returning the point in the target's local coordinates.
   Node* hitTest(float x, float y, float* localX, float* localY);
 
@@ -180,6 +186,7 @@ class InputManager {
     bool dragStarted = false; // scrollbegindrag sent for scrollingId
     bool jsOwns = false;      // a JS responder kept this gesture: no native scrolling
     bool jsResponder = false; // a JS responder held it at the last dispatch
+    bool owned = false;       // the UI consumed the press: its moves / release are consumed too
     std::vector<uint32_t> chain;  // hovered path, root first
   };
   struct Repeat {
@@ -189,6 +196,8 @@ class InputManager {
   struct Pad {
     float axes[4] = {0, 0, 0, 0};
     uint32_t buttons = 0;
+    uint32_t consumed = 0;      // buttons whose press the UI consumed (release / repeats match)
+    bool stickConsumed = false; // the left stick's current direction moved focus / scrolls
     Repeat stick, dpad;
     bool leftScrolls = false;   // left stick scrolls (nothing focusable to navigate)
     bool rightBlocked = false;  // JS preventDefault()-ed the right stick
@@ -301,6 +310,10 @@ class InputManager {
   void tickScrolling(double nowMs, double dtMs);
   void tickSticks(double dtMs);
 
+  // key() / gamepadButton() without the press bookkeeping of what they return.
+  bool keyAction(const char* key, const char* code, bool down, bool repeat, int mods);
+  bool gamepadButtonAction(int pad, int button, bool down, float value);
+
   Node* modalScope() const;
   void collectFocusable(Node* scope, std::vector<Node*>* out) const;
   Node* preferredFocus(Node* scope) const;
@@ -323,6 +336,9 @@ class InputManager {
   std::vector<PointerState> touches_;
   std::array<Pad, 8> pads_;
   std::unordered_set<uint32_t> autoFocusSeen_;
+  // Keys (code, else key) whose keydown the UI consumed: their repeats and
+  // keyup report consumed too, so the game sees whole presses.
+  std::unordered_set<std::string> consumedKeys_;
   struct ScopeMemo {
     uint32_t scopeId;
     uint32_t restoreId;

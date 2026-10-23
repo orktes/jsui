@@ -260,8 +260,10 @@ JSUI_API int jsui_register_font(JsuiRuntime* rt, const char* family, const void*
 
 /* Creates a surface showing the component registered as `app_key` with
  * `initial_props_json` (a JSON object; NULL: {}). Returns NULL (and logs) on
- * a missing key or invalid props. A key the bundle registers later (after
- * an await, say) starts the surface when it is registered. */
+ * a missing key or invalid props. The component mounts on the next
+ * jsui_tick, in one batch with the other surfaces started or updated since
+ * the last tick. A key the bundle registers later (after an await, say)
+ * starts the surface when it is registered. */
 JSUI_API JsuiRuntime* jsui_surface_create(JsuiRuntime* rt, const char* app_key, const char* initial_props_json,
                                           int width, int height, float pixel_ratio);
 /* Unmounts the surface's component and frees the surface; the handle is
@@ -270,8 +272,12 @@ JSUI_API JsuiRuntime* jsui_surface_create(JsuiRuntime* rt, const char* app_key, 
 JSUI_API void jsui_surface_destroy(JsuiRuntime* surface);
 /* Runs `app_key` (NULL: the surface's current one) on the surface with new
  * props: the component re-renders with them, keeping its state when the key
- * is unchanged (React Native's appProperties). On the runtime handle this
- * picks the main surface's component. Returns 0, or -1 for invalid props. */
+ * is unchanged (React Native's appProperties). Applied on the next
+ * jsui_tick, batched with every other surface's update (one React commit);
+ * the last call before the tick wins, and the same key and props as the
+ * surface already has cost nothing, so a host may push props every frame.
+ * On the runtime handle this picks the main surface's component. Returns 0,
+ * or -1 for invalid props. */
 JSUI_API int jsui_surface_run(JsuiRuntime* surface, const char* app_key, const char* props_json);
 /* jsui_surface_run(surface, NULL, props_json). */
 JSUI_API int jsui_surface_set_props(JsuiRuntime* surface, const char* props_json);
@@ -307,7 +313,8 @@ JSUI_API int jsui_needs_redraw(JsuiRuntime* rt);
  * soon even without input: requestAnimationFrame callbacks, due timers,
  * scroll animations (flings, smooth scrolling, snapping), scroll indicator
  * fades, held gamepad sticks / D-pad, native-driven Animated animations,
- * LayoutAnimations. Hosts that sleep when idle keep calling
+ * LayoutAnimations, surfaces started / given new props / resized since the
+ * last tick. Hosts that sleep when idle keep calling
  * jsui_tick at display rate while this is set. */
 JSUI_API int jsui_wants_frame(JsuiRuntime* rt);
 /* Paint into a caller-owned RGBA8888 premultiplied buffer of
@@ -825,9 +832,33 @@ JSUI_API void jsui_free(void* p);
 /* ----------------------------------------------------------------- Input
  *
  * Pointer coordinates are logical px relative to the viewport's top-left.
- * Each function returns non-zero if the UI consumed the event (it hit an
- * element with a handler, or a focused element handled the key), so the game
- * can decide whether to process the input itself.
+ *
+ * Each jsui_send_* function returns non-zero if the UI consumed the event, so
+ * the game processes the input itself only when it gets 0 (e.g. a click on a
+ * part of a HUD that nothing in the UI handles goes through to the world).
+ * Consumed means something in the UI captured it, not that the point is over
+ * painted UI:
+ *  - pointer / touch: the hit element or an ancestor has a press, pointer,
+ *    hover or responder handler (onPress, onPointerDown, onHoverIn,
+ *    onStartShouldSetResponder, PanResponder, ...) or is a TextInput, or JS
+ *    called preventDefault(). A touch on a ScrollView that can scroll is
+ *    consumed too. Views with pointerEvents 'none' / 'box-none' are not hit
+ *    themselves, so full-screen containers let input through. A decorative
+ *    backdrop that should block the game needs a handler, e.g.
+ *    onStartShouldSetResponder={() => true}.
+ *  - a press decides its whole gesture: the moves while buttons are held and
+ *    the release are consumed exactly when the press was (a drag the game
+ *    started over empty UI stays the game's, even over buttons).
+ *  - wheel: JS handled it or a ScrollView scrolled.
+ *  - keys / gamepad buttons: a JS handler called preventDefault(), or a
+ *    default action ran (focus moved, a focused element was activated, a
+ *    ScrollView scrolled, a TextInput edited). The repeats and the release of
+ *    a consumed press are consumed too; those of a press the UI passed on are
+ *    not.
+ *  - sticks: focus moved, a ScrollView scrolls, or JS handled it.
+ * jsui_hit_test answers the pointer question before any event is sent, for
+ * hosts that route input by hit testing (a Godot Control's _has_point, a web
+ * overlay deciding whether the page below gets an event).
  */
 typedef enum JsuiMouseButton {
     JSUI_MOUSE_LEFT = 0,
@@ -850,6 +881,16 @@ enum {
  * spacing of events that arrive between two frames. Without it events carry
  * the time of the last tick. Timestamps never go backwards. NaN clears it. */
 JSUI_API void jsui_set_event_time(JsuiRuntime* rt, double time_ms);
+
+/* jsui_hit_test flags. */
+enum {
+    JSUI_HIT_POINTER = 1 << 0, /* presses / pointer input at the point are captured */
+    JSUI_HIT_SCROLL = 1 << 1   /* a ScrollView that can scroll (or a wheel handler) is there */
+};
+/* What the UI would capture at (x, y) (logical px): JSUI_HIT_* flags, 0 when
+ * input there passes through to whatever is behind the UI. Uses the current
+ * layout and sends no events. */
+JSUI_API int jsui_hit_test(JsuiRuntime* rt, float x, float y);
 
 JSUI_API int jsui_send_mouse_move(JsuiRuntime* rt, float x, float y);
 JSUI_API int jsui_send_mouse_button(JsuiRuntime* rt, float x, float y, JsuiMouseButton button, int down, int mods);

@@ -28,7 +28,7 @@ class DevOverlay;
 
 class Surface {
  public:
-  Surface(Runtime& rt, uint32_t* nextNodeId);
+  Surface(Runtime& rt, uint32_t* nextNodeId, Perf* perf = nullptr);
   ~Surface();
 
   Runtime& rt;
@@ -43,6 +43,14 @@ class Surface {
   // explicit render()).
   std::string appKey;
   std::string propsJson = "{}";
+  // appKey / propsJson changed since JS last got them: delivered on the next
+  // tick, in one batch with the other surfaces' (Runtime::flushSurfaces).
+  bool pending = false;
+  // The viewport changed since JS last heard (surfaces but the main one tell
+  // JS on the next tick, all in one batch).
+  bool resizePending = false;
+  // Tells JS the current size (a "resize" event with this rootTag).
+  void dispatchResize();
 
   // The root tag (React Native): the id of the root container node.
   uint32_t tag() const { return doc.root()->id(); }
