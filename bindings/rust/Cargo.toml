@@ -1,0 +1,29 @@
+[package]
+name = "jsui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Rust bindings for JSUI: React Native UIs rendered with Skia, embedded through libjsui's C API"
+license = "MIT"
+repository = "https://github.com/orktes/jsui"
+links = "jsui"
+build = "build.rs"
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+png = "0.18.1"
+
+# The example's window and GL context. GLFW is built from the crate's bundled
+# sources (no system GLFW, no download).
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+glfw = { version = "0.63.0", default-features = false, features = ["src-build", "x11"] }
+[target.'cfg(not(target_os = "linux"))'.dev-dependencies]
+glfw = { version = "0.63.0", default-features = false, features = ["src-build"] }
+
+[[example]]
+name = "quests"
