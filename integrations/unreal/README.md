@@ -63,10 +63,14 @@ where the GPU path is available) and `--dev` (with `npx jsui dev integrations/sh
 `--bundle=http://127.0.0.1:5173/bundle.js` for hot reload). `--selftest` is
 the same pass-through check as the other examples (see
 [../README.md](../README.md#build-and-run)): it logs `selftest: ok` and exits
-0, or logs what failed and exits 1:
+0, or logs what failed and exits 1. Its clicks go through
+`FSlateApplication`'s platform message handler at desktop coordinates, the
+path real clicks take (and it moves the cursor); run it both windowed and
+fullscreen (the default):
 
 ```sh
 "build/unreal/Mac/JsuiExample.app/Contents/MacOS/JsuiExample" -windowed -ResX=1280 -ResY=720 --selftest --screenshot=/tmp/unreal.png
+"build/unreal/Mac/JsuiExample.app/Contents/MacOS/JsuiExample" --selftest
 ```
 
 The example app is not sandboxed (`Build/Mac/Resources/Unsandboxed.entitlements`;

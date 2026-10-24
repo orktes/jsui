@@ -76,8 +76,9 @@ public:
 	FString GetRendererName() const;
 	/** Whether the last left press went to the UI (a drag that started there is not the game's). */
 	bool IsPointerCaptured() const { return bPointerCaptured; }
-	/** Absolute (desktop) position to UI coordinates (logical px, top-left of the view). */
-	FVector2D AbsoluteToUi(const FVector2D& Absolute) const;
+	/** Desktop position (a pointer event's screen-space position, FSlateApplication::GetCursorPos)
+	 *  to UI coordinates (logical px, top-left of the view). */
+	FVector2D AbsoluteToUi(const FVector2D& Screen) const;
 	void SetForwardInput(bool bForward) { bForwardInput = bForward; }
 
 	/** Host.postMessage(name, payload) from JS: name and the payload as JSON. */
@@ -120,7 +121,8 @@ private:
 	void Paint();
 	void PaintGpu(int32 PixelWidth, int32 PixelHeight);
 	void PaintCpu(int32 PixelWidth, int32 PixelHeight);
-	bool InsideView(const FVector2D& Absolute) const;
+	bool InsideView(const FVector2D& Screen) const;
+	void UpdateWindowOffset();
 	void OnActivationChanged(bool bActive);
 	void ReleaseKeys();
 
@@ -133,6 +135,10 @@ private:
 
 	FGeometry LastGeometry;
 	bool bHasGeometry = false;
+	TWeakPtr<SWindow> Window;
+	// Where Slate believes the view's window is minus where it is on the
+	// desktop (nonzero for a fullscreen window on macOS: UpdateWindowOffset).
+	FVector2D WindowOffset = FVector2D::ZeroVector;
 	int32 Width = 1, Height = 1;  // logical px
 	float Ratio = 1.f;
 

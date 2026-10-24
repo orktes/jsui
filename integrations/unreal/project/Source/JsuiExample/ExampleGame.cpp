@@ -135,7 +135,6 @@ void AJsuiExampleGame::BeginPlay()
 	}
 
 	Ui = NewObject<UJsuiWidget>(this);
-	Ui->bForwardInput = !bSelfTest;
 	Ui->bForceCpu = bCpu;
 	Ui->bDevMode = bDev;
 	if (!BundleOverride.IsEmpty()) Ui->Bundle = BundleOverride;
@@ -315,10 +314,9 @@ void AJsuiExampleGame::Tick(float DeltaSeconds)
 	}
 
 	Frame++;
-	if (Test)
+	if (Test && View)
 	{
-		const FVector2D Size = Ui->GetUiSize();
-		const int32 R = Test->Step(Ui->GetRuntime(), Size.X, Size.Y, Units.Num());
+		const int32 R = Test->Step(*View, Units.Num(), Clicks);
 		if (R != 0)
 		{
 			Test.Reset();
