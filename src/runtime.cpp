@@ -614,6 +614,10 @@ void Runtime::tick(double nowMs) {
   };
   for (Surface* s : list)
     if (live(s)) s->input->tick(nowMs);
+  // Interaction state styles of this frame's input (before native Animated,
+  // which reads their weights through Animated.interaction).
+  for (Surface* s : list)
+    if (live(s)) s->input->tickStates(nowMs);
   // After this tick's timers and jobs (React's passive effects of the commit
   // that mounted an image have run when its onLoad arrives).
   for (Surface* s : list)
@@ -705,7 +709,10 @@ void Runtime::freeDestroyedNodes() {
 
 void Runtime::tickNative(double nowMs) {
   now = nowMs;
-  for (auto& s : surfaces_) s->doc.now = nowMs;
+  for (auto& s : surfaces_) {
+    s->doc.now = nowMs;
+    s->input->tickStates(nowMs);  // state styles follow input without JS too
+  }
   animated->tick(nowMs);  // end events stay queued until the next tick()
   lotties->tick(nowMs);   // so do LottieView events
   shaders->tick(nowMs);   // and ShaderView errors

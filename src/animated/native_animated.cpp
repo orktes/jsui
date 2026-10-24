@@ -7,6 +7,7 @@
 
 #include "core/document.h"
 #include "core/node.h"
+#include "core/state_style.h"
 
 namespace jsui {
 
@@ -129,6 +130,12 @@ bool NativeAnimated::createNode(int tag, const Value& c, std::string* error) {
     n.outKind = OutKind::String;
   } else if (type == "clock") {
     n.type = Type::Clock;
+  } else if (type == "interaction") {
+    n.type = Type::Interaction;
+    n.interactionKey = c["key"].asString();
+    const std::string& st = c["state"].asString();
+    n.slot = st == "pressed" ? kPressed : st == "focused" ? kFocused : st == "focusVisible" ? kFocusVisible
+             : st == "disabled" ? kDisabled : kHovered;
   } else if (type == "expression") {
     n.type = Type::Expression;
     for (const Value& t : c["input"].asArray()) n.inputs.push_back(int(t.asNumber()));
@@ -158,6 +165,7 @@ bool NativeAnimated::createNode(int tag, const Value& c, std::string* error) {
   if (n.type == Type::HostBuffer) bufferNodes_[n.bufferKey].push_back(tag);
   if (n.type == Type::Props) propsNodes_.push_back(tag);
   if (n.type == Type::Clock) clockNodes_.push_back(tag);
+  if (n.type == Type::Interaction) interactionNodes_.push_back(tag);
   nodes_.emplace(tag, std::move(n));
   return true;
 }
@@ -211,6 +219,8 @@ void NativeAnimated::dropNode(int tag) {
   }
   if (n->type == Type::Props) propsNodes_.erase(std::remove(propsNodes_.begin(), propsNodes_.end(), tag), propsNodes_.end());
   if (n->type == Type::Clock) clockNodes_.erase(std::remove(clockNodes_.begin(), clockNodes_.end(), tag), clockNodes_.end());
+  if (n->type == Type::Interaction)
+    interactionNodes_.erase(std::remove(interactionNodes_.begin(), interactionNodes_.end(), tag), interactionNodes_.end());
   nodes_.erase(tag);
 }
 
@@ -230,6 +240,7 @@ void NativeAnimated::clear() {
   dirtyNotify_.clear();
   bufferNodes_.clear();
   clockNodes_.clear();
+  interactionNodes_.clear();
   groups_.clear();
   leafDone_.clear();
   leafGroup_.clear();
@@ -375,6 +386,10 @@ void NativeAnimated::evaluate(ANode& n) {
     }
     case Type::Clock:
       n.num = clockMs_ / 1000;
+      n.out = Value(n.num);
+      break;
+    case Type::Interaction:
+      n.num = interactionWeight(n);
       n.out = Value(n.num);
       break;
     case Type::Expression:
@@ -1022,6 +1037,9 @@ void NativeAnimated::tick(double nowMs) {
     for (int tag : clockNodes_)
       if (ANode* n = node(tag); n && !n->children.empty()) markDirty(*n);
   }
+  // Interaction weights moved by this frame's input (InputManager::tickStates).
+  for (int tag : interactionNodes_)
+    if (ANode* n = node(tag); n && !n->children.empty() && interactionWeight(*n) != n->num) markDirty(*n);
   std::vector<int> leaves;  // group steps that ended: they go on after this walk
   for (size_t i = 0; i < animations_.size();) {
     Anim& a = animations_[i];
@@ -1273,6 +1291,14 @@ double NativeAnimated::runExpression(ANode& n) {
   }
   double v = sp ? st[sp - 1] : 0;
   return v == v ? v : 0;  // NaN -> 0, as in the JS evaluator
+}
+
+double NativeAnimated::interactionWeight(const ANode& n) const {
+  auto it = doc_.interactionNodes.find(n.interactionKey);
+  if (it == doc_.interactionNodes.end()) return 0;
+  Node* v = doc_.get(it->second);
+  const StateStyles* s = v ? v->stateStyles.get() : nullptr;
+  return s && s->interaction == n.interactionKey ? double(s->weight[n.slot]) : 0;
 }
 
 size_t NativeAnimated::liveClocks() const {

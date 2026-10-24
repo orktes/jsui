@@ -138,6 +138,11 @@ class Document {
   // Ids of Text nodes created since they were last looked at: shaped ahead
   // of their first layout in spare frame time (Runtime::prepareText).
   std::vector<uint32_t> newTexts;
+  // Nodes with state styles, `group` or `interaction` (Node::stateStyles),
+  // walked by InputManager::tickStates; dead ids are dropped there.
+  std::vector<uint32_t> stateNodes;
+  // `interaction` key -> the node that carries it (Animated.interaction).
+  std::unordered_map<std::string, uint32_t> interactionNodes;
   // Live nodes with an onLayout listener (Node::kListensLayout). Without
   // any, layout passes skip the onLayout walk.
   int layoutListeners = 0;

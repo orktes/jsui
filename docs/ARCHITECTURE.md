@@ -1778,10 +1778,52 @@ Native's API and both of its drivers:
   * `Animated.clock()`: a `clock` node, the runtime clock in seconds. Clock
     nodes with dependents are marked dirty in every `NativeAnimated::tick`
     and count as animating (`jsui_wants_frame`).
+  * `Animated.interaction()` / `useInteraction()`: `interaction` nodes
+    (`{key, state}`) read the eased 0..1 weight of one state of the element
+    whose `interaction` prop carries `key` (see "State styles"); marked dirty
+    when the weight moved.
   * Not native (yet): `toValue` bound to another Animated node (RN's
     `tracking` node) restarts native animations from JS when the target
     changes; scroll physics (and so `Animated.event` from flings) only
     advance in `jsui_tick`, not in `jsui_tick_native`.
+
+## State styles
+
+Hover / press / focus feedback without JS (`src/core/state_style.*`,
+`src/input/state_styles.cpp`). Host props, on any element:
+`hoveredStyle`, `pressedStyle`, `focusedStyle`, `focusVisibleStyle`,
+`disabledStyle`; `group` (`true` or a name) and, on descendants,
+`groupHoveredStyle` / `groupPressedStyle` / `groupFocusedStyle` /
+`groupFocusVisibleStyle` (+ `groupName`); `transition` (ms or `{duration,
+easing, delay, <state>: ...}`); `interaction` (`{key}`, from
+`useInteraction`).
+
+* `Node::setProps` keeps the React props (`StateStyles::raw`, what it diffs
+  against) and their style as the base; `props()["style"]` is the base with
+  the overlays at their current weights, so re-renders keep the active
+  states.
+* `InputManager::tickStates`, every `jsui_tick` (after input and JS) and
+  `jsui_tick_native`, before native Animated: for each element in
+  `Document::stateNodes`, which states hold (hovered: id on the mouse's
+  hover chain; pressed: a primary pointer press that began on it or a
+  descendant while the pointer is inside its visual rect and not scrolling,
+  an activation key / gamepad A held on it while focused, or a press since
+  the last frame; focused / focusVisible: `focused_`, with keyboard modality;
+  group: the same for the nearest `group` ancestor-or-self, focus within;
+  disabled: the `disabled` prop, which turns hovered / pressed off). Each
+  state's weight eases toward 0 / 1 over its transition (starting a frame
+  back: the input came during the last frame), and changed weights write the
+  overlay keys through `patchStyle` (paint keys re-resolve their groups,
+  layout keys relayout).
+* Blend: per overlay key, from the base value through the states in order
+  (group hovered / focused / focusVisible / pressed, hovered, focused,
+  focusVisible, pressed, disabled), mixing numbers, colors (alpha-weighted,
+  a missing base is the target color transparent), transforms of the same
+  functions (angles in degrees, a missing base is identity) and numeric
+  objects; anything else switches at 0.5. A key the base lacks returns to
+  absent at weight 0.
+* The first frame an element is seen takes its states without a
+  transition; `disabledStyle` already applies at mount.
 
 ## LayoutAnimation
 

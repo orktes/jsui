@@ -775,6 +775,61 @@ export class AnimatedClock extends AnimatedNode {
   }
 }
 
+// One state of an element's interaction (useInteraction): 0..1, eased by
+// the element's `transition`, computed by the runtime from input
+// (core/state_style.h). Native only: a JS-driven consumer sees 0.
+export class AnimatedInteraction extends AnimatedNode {
+  constructor(key, state) {
+    super();
+    this._key = key;
+    this._state = state;
+    if (NativeAnimatedAPI) this._isNative = true;
+  }
+  __getValue() {
+    return 0;
+  }
+  __getNativeConfig() {
+    return { type: 'interaction', key: this._key, state: this._state };
+  }
+  __detach() {
+    this.__dropNative();
+  }
+}
+
+let interactionKeys = 0;
+
+/**
+ * An element's interaction state as native Animated values: pass it as the
+ * `interaction` prop of a host element (View, Pressable, ...) and use
+ * `.hovered`, `.pressed`, `.focused`, `.focusVisible`, `.disabled` (0..1,
+ * following that element's `transition`) in native-driven styles,
+ * interpolations or Animated.derive. Only the `key` crosses the bridge.
+ */
+export class Interaction {
+  constructor() {
+    this.key = 'ix' + ++interactionKeys;
+    Object.defineProperty(this, '_values', { value: {}, enumerable: false });
+  }
+  _value(state) {
+    return this._values[state] || (this._values[state] = new AnimatedInteraction(this.key, state));
+  }
+  get hovered() {
+    return this._value('hovered');
+  }
+  get pressed() {
+    return this._value('pressed');
+  }
+  get focused() {
+    return this._value('focused');
+  }
+  get focusVisible() {
+    return this._value('focusVisible');
+  }
+  get disabled() {
+    return this._value('disabled');
+  }
+}
+
 // Animated.format(node, {decimals, grouping, prefix, suffix, minDigits}): a
 // number as text, for Animated.Text's `text` prop. Native with its input
 // (the runtime formats it and sets the text without JS); the C++ twin is

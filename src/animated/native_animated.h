@@ -44,7 +44,9 @@ class NativeAnimated {
   // modulus {input, modulus} | diffclamp {input, min, max} |
   // color {r, g, b, a} | hostBuffer {key, index} (element `index` of a
   // frame data buffer, 0 when out of range) | clock (the frame clock in
-  // seconds) | format {input, decimals (-1: shortest), grouping, prefix,
+  // seconds) | interaction {key, state: hovered|pressed|focused|
+  // focusVisible|disabled} (that state's 0..1 weight on the element with
+  // that `interaction` key, core/state_style.h) | format {input, decimals (-1: shortest), grouping, prefix,
   // suffix, minDigits} (a number as text) | expression {input: [tags], code: [...], slots} (a stack
   // program compiled by @orktes/jsui-react's animated/expression.js from an
   // Animated.derive function; ops below) | transform {transforms:
@@ -141,7 +143,7 @@ class NativeAnimated {
  private:
   enum class Type : uint8_t {
     Value, Interpolation, Addition, Subtraction, Multiplication, Division, Modulus, DiffClamp,
-    Color, HostBuffer, Clock, Expression, Format, Transform, Style, Props
+    Color, HostBuffer, Clock, Interaction, Expression, Format, Transform, Style, Props
   };
   // Expression ops (packages/react/src/animated/expression.js OP).
   enum class Op : uint8_t {
@@ -191,6 +193,9 @@ class NativeAnimated {
     size_t bufferIndex = 0;
     const HostBuffers::Entry* bufferEntry = nullptr;
     uint64_t bufferGen = 0;
+    // interaction: the element's `interaction` key and the StateSlot read
+    std::string interactionKey;
+    int slot = 0;
     // format
     int decimals = -1, minDigits = 0;
     std::string grouping, prefix, suffix;
@@ -314,6 +319,8 @@ class NativeAnimated {
   std::vector<int> dirtyNotify_;  // values changed natively (listener updates; ANode::notifyQueued)
   std::unordered_map<std::string, std::vector<int>> bufferNodes_;  // key -> hostBuffer node tags
   std::vector<int> clockNodes_;  // tags of the Clock nodes
+  std::vector<int> interactionNodes_;  // tags of the Interaction nodes
+  double interactionWeight(const ANode& n) const;
   double clockMs_ = 0;           // the last tick's time
   std::vector<double> exprStack_, exprSlots_;  // runExpression scratch
   uint64_t gen_ = 1;

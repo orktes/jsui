@@ -4,6 +4,7 @@
 #include <optional>
 
 #include "core/document.h"
+#include "core/state_style.h"
 #include "render/image_node.h"
 #include "render/lottie.h"
 #include "render/shader_view.h"
@@ -157,6 +158,42 @@ struct HitShape {
 // Paint-only updates (opacity, transform, colors, shadows, ...) - e.g. every
 // frame of an Animated transform - therefore never re-run Yoga.
 void Node::setProps(const Value& props) {
+  if (stateStyles || wantsStateStyles(props)) {
+    // React's style is the base; props_ gets it with the state overlays.
+    if (stateStyles && yoga_ && stateStyles->raw.equals(props)) {
+      if (doc_) {
+        doc_->perf.counters.setProps++;
+        doc_->perf.counters.setPropsSkipped++;
+      }
+      return;
+    }
+    if (!wantsStateStyles(props)) {
+      stateStyles.reset();
+      applyProps(props);
+      return;
+    }
+    if (!stateStyles) {
+      stateStyles = std::make_unique<StateStyles>();
+      if (doc_) doc_->stateNodes.push_back(id_);
+    }
+    parseStateStyles(props, stateStyles.get());
+    if (doc_ && !stateStyles->interaction.empty()) doc_->interactionNodes[stateStyles->interaction] = id_;
+    Value eff = props;
+    Value style = blendStateStyle(*stateStyles);
+    if (style.isNull()) eff.mutableObject().erase("style");
+    else eff.mutableObject().insert_or_assign("style", std::move(style));
+    applyProps(eff);
+    return;
+  }
+  applyProps(props);
+}
+
+bool Node::applyStateStyles() {
+  if (!stateStyles || !stateStyles->hasOverlays()) return false;
+  return patchStyle(blendStateKeys(*stateStyles));
+}
+
+void Node::applyProps(const Value& props) {
   // React re-renders often send identical props: nothing to do (and nothing
   // to repaint).
   if (doc_) {

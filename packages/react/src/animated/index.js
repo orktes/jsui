@@ -14,6 +14,7 @@ import {
   AnimatedExpression,
   AnimatedFormat,
   AnimatedClock,
+  Interaction,
   add,
   subtract,
   multiply,
@@ -116,6 +117,15 @@ export function useHostBufferValue(key, index) {
   return useMemo(() => new AnimatedHostBuffer(key, index), [key, index]);
 }
 
+/**
+ * A stable Animated.interaction() for this component: pass it as the
+ * `interaction` prop of the element to follow, read `.hovered` / `.pressed`
+ * / `.focused` / `.focusVisible` / `.disabled` (native 0..1 values).
+ */
+export function useInteraction() {
+  return useMemo(() => new Interaction(), []);
+}
+
 // Called once by the package index with the base components (avoids an
 // import cycle between Animated and the components that use it).
 export function makeAnimated(base) {
@@ -158,6 +168,8 @@ export const Animated = {
   derive: (inputs, fn, meta) => new AnimatedDerived(inputs, fn, meta),
   expr: (fn, meta) => new AnimatedExpression(fn, meta),
   clock: () => new AnimatedClock(),
+  // An element's hover / press / focus state as native 0..1 values.
+  interaction: () => new Interaction(),
   // A number as text for Animated.Text's `text` prop (set natively, no re-render).
   format: (node, options) => new AnimatedFormat(node, options),
   createAnimatedComponent,
