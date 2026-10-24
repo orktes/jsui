@@ -268,3 +268,66 @@ JS_CASE(qjs_for_in, R"JS(
   }
   same(keys({own: 1}), ['own'], 'after delete');
 )JS")
+
+JS_CASE(qjs_shapes, R"JS(
+  function Point(x, y) { this.x = x; this.y = y; this.z = 0; }
+  const made = [];
+  loop((i) => {
+    const a = {k1: i, k2: 2, k3: 3};
+    const b = {k1: i, k2: 2, k3: 3};
+    made.push(a, b);
+    // Changing one object of a shared shape does not touch the others.
+    delete a.k2;
+    same(Object.keys(a), ['k1', 'k3'], 'delete on one');
+    same(Object.keys(b), ['k1', 'k2', 'k3'], 'other unchanged');
+    Object.defineProperty(b, 'k1', {enumerable: false});
+    same(Object.keys(b), ['k2', 'k3'], 'flags on one');
+    const c = {k1: 0, k2: 0, k3: 0};
+    same(Object.keys(c), ['k1', 'k2', 'k3'], 'new object after changes');
+    same(Object.getOwnPropertyDescriptor(c, 'k1'), {value: 0, writable: true, enumerable: true, configurable: true}, 'fresh descriptor');
+    Object.freeze(c);
+    const d = {k1: 1, k2: 1, k3: 1};
+    d.k1 = 5;
+    eq(d.k1, 5, 'frozen sibling does not freeze others');
+    eq(Object.isFrozen(d), false, 'not frozen');
+    Object.setPrototypeOf(d, {inherited: 1});
+    eq(d.inherited, 1, 'prototype change on one');
+    eq(({k1: 1, k2: 1, k3: 1}).inherited, undefined, 'prototype change does not leak');
+    const p = new Point(i, 1);
+    const q = new Point(2, i);
+    eq(p.x + q.y, 2 * i, 'constructor fields');
+    same(Object.keys(q), ['x', 'y', 'z'], 'constructor order');
+    q.w = 1;
+    same(Object.keys(new Point(0, 0)), ['x', 'y', 'z'], 'extra field stays on its object');
+    // A setter or read-only property on the prototype still wins over adding.
+    let set = 0;
+    function WithSetter() { this.s = 1; }
+    Object.defineProperty(WithSetter.prototype, 's', {set(v) { set += v; }, configurable: true});
+    new WithSetter();
+    eq(set, 1, 'prototype setter called by this.s = ...');
+    function ReadOnly() { 'use strict'; this.r = 1; }
+    Object.defineProperty(ReadOnly.prototype, 'r', {value: 0, writable: false});
+    eq(throws(() => new ReadOnly()) instanceof TypeError, true, 'read-only prototype property throws in strict code');
+    function Sloppy() { this.r = 1; }
+    Sloppy.prototype = ReadOnly.prototype;
+    eq(Object.hasOwn(new Sloppy(), 'r'), false, 'read-only prototype property is not shadowed');
+    // Non-extensible and proxy receivers.
+    const ne = Object.preventExtensions({});
+    eq(throws(() => { 'use strict'; ne.x = 1; }) instanceof TypeError, true, 'non-extensible');
+    const log = [];
+    const px = new Proxy({}, {set(t, k, v) { log.push(k); t[k] = v; return true; }});
+    px.a = 1;
+    same(log, ['a'], 'proxy set trap');
+    // Many keys (dictionary-like) and many distinct literal shapes.
+    const dict = {};
+    for (let k = 0; k < 100; k++) dict['key' + k] = k;
+    eq(Object.keys(dict).length, 100, 'dictionary');
+    eq(dict.key99, 99, 'dictionary value');
+    const wide = {};
+    for (let k = 0; k < 40; k++) wide['w' + k] = k;
+    for (let k = 0; k < 40; k += 2) delete wide['w' + k];
+    same(Object.keys(wide).slice(0, 3), ['w1', 'w3', 'w5'], 'deletes in a big object');
+  });
+  eq(made.length, 100, 'objects kept alive');
+  eq(made[98].k1, 49, 'values of kept objects');
+)JS")
