@@ -1044,12 +1044,14 @@ jobs:
       - name: Build jsui.wasm
         run: JOBS=$(nproc) scripts/build-wasm.sh Release
       - name: Node smoke test
-        run: node web/test/node-smoke.mjs
-      # jsui screenshot / inspect / run (the CLI's headless runtime) on the module just built.
+        run: node web/test/node-smoke.mjs && JSUI_JS=host node web/test/node-smoke.mjs
+      # jsui screenshot / inspect / run (the CLI's headless runtime) on the module just built,
+      # on QuickJS and on the host JS engine (Node's V8), and QuickJS / host parity.
       - name: CLI headless tests (screenshot / inspect / run on web/dist)
         run: |
           npm ci --no-audit --no-fund
-          JSUI_HEADLESS_STRICT=1 node --test packages/cli/test/headless.test.js
+          JSUI_HEADLESS_STRICT=1 node --test packages/cli/test/headless.test.js packages/cli/test/hostjs.test.js
+          JSUI_HEADLESS_STRICT=1 JSUI_JS=host node --test packages/cli/test/headless.test.js
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
@@ -1061,6 +1063,7 @@ jobs:
           npm install --no-package-lock --no-audit --no-fund
           npx playwright install chromium
           JSUI_WEB_STRICT=1 npm run test:browser
+          JSUI_WEB_STRICT=1 JSUI_JS=host npm run test:browser
       - uses: actions/upload-artifact@v4
         with:
           name: jsui-wasm

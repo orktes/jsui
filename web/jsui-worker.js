@@ -452,6 +452,7 @@ function definePage(I) {
       return p.then((r) => {
         this._starting = null;
         this.renderer = r.renderer;
+        this.jsEngine = r.jsEngine;
         this._backend = r.backend;
         this._lastError = r.lastError ?? null;
         if (this.canvas) this._installDom();
@@ -1576,7 +1577,7 @@ export function serve(I, early) {
     }
     views.set(0, host);
     host._backend = host.textureBackend;
-    post({ ev: 'ready', renderer: host.renderer, backend: host._backend, lastError: host.lastError });
+    post({ ev: 'ready', renderer: host.renderer, backend: host._backend, lastError: host.lastError, jsEngine: host.jsEngine });
     const p = pending;
     pending = null;
     for (const list of p) apply(list);

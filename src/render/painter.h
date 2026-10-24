@@ -44,6 +44,9 @@ struct ScrollBlit {
   SkIRect rect = SkIRect::MakeEmpty();
   int dx = 0, dy = 0;
 };
+// The damage as a few rects that cover it (each one scissor rect and one
+// paint pass on the GPU; at most 4, or the bounds).
+std::vector<SkIRect> coverRects(const SkRegion& damage);
 SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBlit* blit = nullptr,
                       bool growCurves = true);
 // Moves the pixels of `b.rect` by (dx, dy) in an RGBA8888 buffer.

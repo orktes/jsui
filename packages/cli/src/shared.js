@@ -558,6 +558,7 @@ export async function createShared(o) {
       component: o.component,
       props: o.props,
       state: o.state,
+      js: o.js,
       onLog: (level, text) => {
         if (level >= 2) log(`[jsui headless] ${level >= 3 ? 'error' : 'warn'}: ${text}`);
       },

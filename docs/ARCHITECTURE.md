@@ -1,8 +1,9 @@
 # JSUI architecture
 
 JSUI is a small, embeddable UI runtime for games: React (JSX) components
-written exactly like React Native code, executed by QuickJS, laid out by Yoga
-and painted by Skia. It is a "browser-shaped" stack (JS + layout + 2D paint +
+written exactly like React Native code, executed by QuickJS (or, in the
+browser and Node, by the host's own JS engine), laid out by Yoga and painted
+by Skia. It is a "browser-shaped" stack (JS + layout + 2D paint +
 resource loading + input) without a browser: the whole runtime is a static
 library with a C API, and the same core compiles to WebAssembly.
 
@@ -37,8 +38,9 @@ library with a C API, and the same core compiles to WebAssembly.
   Game engines (Godot GDExtension, Unreal, Unity native plugins) consume C/C++
   directly. The public surface is a C header so any language can bind it.
 * **QuickJS-ng** — small, fast startup, ES2023, embeddable, compiles to WASM.
-  The engine is isolated behind `JsEngine`, so a different engine (or the
-  browser's own JS when running as WASM) can be slotted in later.
+  The engine is isolated behind the `JsEngine` interface: the WASM build can
+  run the bundle on the browser's (or Node's) own JIT-compiled engine
+  instead (see [Host JS engine](#host-js-engine)).
 * **Yoga** — the layout engine React Native uses, so flexbox behaves exactly
   like RN (column default, `flexShrink: 0`, `position: relative`, etc.).
 * **Skia** — what Chrome and Flutter paint with; gives us anti-aliased rounded
@@ -65,7 +67,7 @@ library with a C API, and the same core compiles to WebAssembly.
 | `src/core/` | `Value`, `Node`, `Document`, style parsing (`style.cpp`) |
 | `src/render/` | Skia painter, image cache, GPU backend (`gpu.cpp`) |
 | `src/text/` | Font manager, paragraph building and Yoga measure for `Text` |
-| `src/js/` | QuickJS host (`JsEngine`) and bridge globals |
+| `src/js/` | `JsEngine`: the QuickJS host and bridge globals, and the host JS engine's native half (`engine_hostjs.cpp`) |
 | `src/input/` | Hit testing, event routing, focus and gamepad navigation |
 | `src/platform/` | Resource loader backends (file, http, emscripten) |
 | `src/audio/` | UI audio: requests to the host's audio handler or the built-in miniaudio backend (see [AUDIO.md](AUDIO.md)) |
@@ -1417,6 +1419,93 @@ was `preventDefault()`-ed.
   400 ms, then every 120 ms. Focus changes scroll the node into view in its
   ScrollView ancestors (see Scrolling).
 
+## Host JS engine
+
+In the WASM build the bundle (React and the app's code) can run on the JS
+engine of whatever loaded `jsui.wasm`, i.e. V8, JavaScriptCore or
+SpiderMonkey in a page or worker and V8 in Node, instead of QuickJS
+compiled to WASM: `createJsui({ js: 'host' })` on the web,
+`jsui screenshot|inspect|run|dev --headless --js host` and
+`launch({ js: 'host' })` in the CLI (`JSUI_JS=host` makes it the default
+there). Everything else stays in WASM: the document, Yoga, Skia, input,
+native Animated, host data, fonts, resources and the renderers. Native
+builds keep QuickJS. `jsui.jsEngine` / `app.hostJs` say which engine runs.
+A module built without it (`-DJSUI_HOST_JS=OFF`; on by default in every
+WASM variant) falls back to QuickJS, with a warning. JIT-compiled React is
+several times faster than interpreted QuickJS in WASM. See
+[Performance](#performance).
+
+* **One module, two engines.** `JsEngine` (`src/js/engine.h`) is an
+  interface; `JsEngine::create(rt, kind)` makes the QuickJS engine
+  (`engine.cpp`) or the host one (`engine_hostjs.cpp`), per runtime
+  (`jsui_web_create`'s `js` argument sets `JsEngine::nextKind` around
+  `jsui_create`). Runtimes on both engines can share a page.
+* **Native → JS.** `engine_hostjs.cpp` calls into `web/native/jsui_hostjs.js`
+  (linked into `jsui.js` with `--pre-js`) through `EM_JS`: eval, the timer /
+  rAF / microtask runs, events, host messages, layout events, settle
+  functions, load and font callbacks. Each call is timed as the `js` phase.
+* **JS → native.** `__jsui_native` is implemented in JS over
+  `jsui_hjs_*` exports (`EMSCRIPTEN_KEEPALIVE`, called raw from
+  `wasmExports`). Numbers and ids go as numbers; strings as (pointer,
+  length) into a scratch arena the JS side writes (ASCII without
+  `TextEncoder`); props, style patches, events, Animated configs and call
+  arguments as JSON texts (`Value::parseJson` / `toJson`). Strings back are
+  a pointer with the length (and number results) in `jsui_hjs_scratch`.
+  The host engine has no `updateProps` / `getProps`, so `@orktes/jsui-react`
+  diffs props in JS (`toNativeProps` / `nativePropsChanged`) and sends
+  `setProps` only for changed elements, as it does on older runtimes.
+* **The runtime's globals, not the host's.** The prelude (`prelude.cpp`'s
+  sources, the same QuickJS runs) and the bundle are evaluated as
+  `(function (<names>) { … })` (indirect eval, with `//# sourceURL`, the
+  wrapper on the first line so line numbers match). The parameters are the
+  runtime's global object `G`'s properties: the ECMAScript built-ins, the
+  shim's `setTimeout` / `setInterval` / `requestAnimationFrame` /
+  `queueMicrotask` / `performance` on the runtime clock (`jsui_hjs_now`,
+  driven by `jsui_tick`), the prelude's `fetch`, `console`, `URL`,
+  `TextEncoder`, `MessageChannel`, `process`, … and `globalThis` / `window`
+  / `self` = `G`. Every other global of the host (`document`,
+  `WebAssembly`, Node's `setImmediate`, …) is a parameter too, `undefined`,
+  so feature checks (React's scheduler) see what QuickJS has. Globals a
+  script defines later and others read as bare identifiers
+  (`__REACT_DEVTOOLS_GLOBAL_HOOK__`, `__jsui_hmr`) are live bindings to
+  `G`'s property. `Intl` is the host's (QuickJS has none).
+* **Batching.** As in `JsEngine::Impl`: every native → JS call increments a
+  depth; when the outermost returns, the runtime's microtask queue drains,
+  then queued `onLayout` events, up to 64 rounds. `beginBatch` / `endBatch`
+  hold the drain across a native batch, and a `queueMicrotask` outside any
+  call flushes on a promise job. Native promises (`async` functions,
+  `Promise.then`) are the host's and settle at the host's own microtask
+  checkpoint, after the task that ran the frame, not inside the call that
+  resolved them. `@orktes/jsui-react` uses the runtime's `queueMicrotask`
+  where the order matters (`AppRegistry`'s auto start, `Host.handle` plain
+  results, FlatList's deferred scroll); headless (`jsui screenshot` etc.)
+  yields to Node's event loop after every frame on the host engine.
+* **Errors.** Exceptions of native → JS calls are reported like QuickJS's
+  (`jsui_last_error`, the dev overlay); unhandled rejections come from the
+  host's `unhandledrejection` event (page, worker; `preventDefault`-ed) or
+  `process.on('unhandledRejection')` (Node, where other listeners see them
+  too), attributed to the runtime whose script the stack names.
+* **Host data.** `getBuffer` returns a copy of the elements per buffer
+  version (an `ArrayBuffer` cannot alias part of WASM memory without
+  copying the whole heap), with the same `[ArrayBuffer, type, count,
+  version]` shape; state, textures, calls, audio, Lottie and shader events
+  cross as above.
+* **Not on the host engine:** the watchdog (`js_timeout_ms`), the memory and
+  stack limits (`js_memory_limit_mb`, `js_stack_size_kb`) and
+  `memoryUsage()`: a runaway script blocks the page like any other script.
+  String code passed to `setTimeout` is ignored. The page needs `eval`
+  (a CSP with `'unsafe-eval'`). The sampling JS profiler
+  (`JSUI_JS_PROFILE`) samples QuickJS only; use the host's own profiler
+  (Chrome DevTools, `node --cpu-prof`).
+
+Tests: `packages/cli/test/hostjs.test.js` renders `examples/showcase` and
+the jsui-bench scenarios on both engines and compares the pixels and view
+trees, and checks events, `Host.call`, host data, timers, native Animated,
+errors and hot updates. `JSUI_JS=host` runs `web/test/node-smoke.mjs`,
+`web/test/browser.test.mjs` (`npm run test:web:host`, main thread and
+worker) and the CLI tests on the host engine. `web/test/js-bench.mjs`
+measures both.
+
 ## TextInput editing
 
 The runtime owns a TextInput's text like a native text field does in React
@@ -1671,7 +1760,10 @@ skparagraph's asset font manager and Skottie's. Fonts are runtime-wide.
   In the page: `const jsui = await createJsui({ canvas, bundleUrl })` from
   `web/jsui-web.js`; `jsui.on('message', (name, data) => …)`, `jsui.postMessage(name, data)`.
   The browser loader backend is `fetch()` (`src/platform/loader_emscripten.cpp`).
-  Tests: `node web/test/node-smoke.mjs`, `node web/test/browser.test.mjs` (Playwright).
+  `-DJSUI_HOST_JS=OFF` leaves out the host JS engine (`createJsui({ js: 'host' })`,
+  see [Host JS engine](#host-js-engine)), which links `web/native/jsui_hostjs.js` as a `--pre-js`.
+  Tests: `node web/test/node-smoke.mjs`, `node web/test/browser.test.mjs` (Playwright);
+  `JSUI_JS=host` runs both on the host JS engine.
 * Web worker mode (`createJsui({ worker: true })`, `web/jsui-worker.js`): the
   runtime, frame loop and renderers run in a dedicated Worker on
   OffscreenCanvases (`transferControlToOffscreen`), with the same WebGPU →
@@ -1878,6 +1970,38 @@ names.
   memoizes correctly. Bundles grow 2-9%. Compiled and uncompiled bundles
   render identical pixels for every reference case and bench scenario
   (`JSUI_REF_REACT_COMPILER=1`, `jsui-bench --dump`).
+
+### JS engines compared
+
+`node web/test/js-bench.mjs` runs jsui-bench scenarios on QuickJS (in
+`jsui.wasm`) and on the host JS engine ([Host JS engine](#host-js-engine)),
+in Node (the CLI's headless runtime, no paint) and in headless Chromium (the
+web host's CPU renderer, painting every frame). Per frame (mean of 300
+after 60 warm-up frames, median of 3 runs), on a 4-core shared Linux VM with
+Node 22 and Chromium 153. `js` is the profiler's `js` phase, `core` adds
+commit, Animated, style and layout, `wall` is the frame's wall time
+(Chromium: with the CPU paint and blit). Mount is
+`examples/showcase/interactions.jsx` loaded into a running runtime: the
+bundle's evaluation and its first 10 frames in one total, each run compiling
+source the engine has not seen (median of 9).
+
+| Scenario | Where | js QuickJS → host | core QuickJS → host | wall QuickJS → host |
+| --- | --- | --- | --- | --- |
+| markers, 100, buffer feed | Node | 4.81 → 0.81 ms | 5.93 → 1.96 ms | 5.99 → 1.98 ms |
+| | Chromium | 6.12 → 1.02 ms | 7.65 → 2.67 ms | 20.3 → 15.2 ms |
+| inventory (one slot patched) | Node | 4.92 → 0.40 ms | 5.69 → 0.90 ms | 5.80 → 0.93 ms |
+| | Chromium | 6.43 → 0.41 ms | 7.28 → 1.00 ms | 8.23 → 1.56 ms |
+| surfaces (30, props every frame) | Node | 5.99 → 0.43 ms | 6.71 → 0.96 ms | 6.90 → 1.06 ms |
+| | Chromium | 6.65 → 0.38 ms | 7.42 → 0.94 ms | 7.70 → 1.05 ms |
+| mount interactions.jsx | Node | 100 → 88 ms | 133 → 115 ms | 137 → 122 ms |
+| | Chromium | 244 → 172 ms | 392 → 283 ms | 802 → 613 ms |
+
+Steady-state frames spend 6 to 17 times less time in JS once V8 has
+compiled the hot paths. The core figure also counts the boundary on the
+host engine: JSON props and events, and JS-side prop diffing in place of
+QuickJS's native `updateProps`. A mount gains much less: it is mostly
+code that runs once (compiling the bundle, React's first render), which a
+JIT runs about as fast as an interpreter, plus GC.
 
 ## Paint performance
 

@@ -146,5 +146,11 @@ void installHostDataBridge(JsEngine::Impl& impl, JSValue native);
 void installHostApi(JsEngine::Impl& impl, JSValue global, JSValue host);
 // Evaluates the JS prelude; each piece is a function expression called with `host`.
 bool runPrelude(JsEngine::Impl& impl, JSValue host);
+// The prelude's pieces (the host JS engine evaluates the same sources).
+struct PreludePiece {
+  const char* name;
+  const char* source;
+};
+const PreludePiece* preludePieces(size_t* count);
 
 }  // namespace jsui

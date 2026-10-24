@@ -16,7 +16,7 @@
 // semantics.
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { native } from './native.js';
+import { native, queueMicrotask } from './native.js';
 import { reconciler, setUpdatePriority, DiscreteEventPriority } from './renderer.js';
 
 const g = globalThis;
@@ -413,7 +413,7 @@ function onCall(id, name, json) {
     fail(e);
     return;
   }
-  Promise.resolve(result).then((v) => {
+  const done = (v) => {
     let out;
     try {
       out = v === undefined ? 'null' : JSON.stringify(v);
@@ -423,7 +423,12 @@ function onCall(id, name, json) {
       return;
     }
     native.callResult(id, true, out);
-  }, fail);
+  };
+  // A plain result settles on the runtime's microtask queue (in this tick on
+  // every JS engine); a promise when it resolves.
+  if (result !== null && (typeof result === 'object' || typeof result === 'function') && typeof result.then === 'function')
+    Promise.resolve(result).then(done, fail);
+  else queueMicrotask(() => done(result));
 }
 
 export function installHostData() {
