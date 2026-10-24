@@ -88,7 +88,10 @@ void InputManager::tickStates(double nowMs) {
       }
     }
     bool moving = false;
-    if (stepStateWeights(s, t, nowMs, &moving)) n->applyStateStyles();
+    if (stepStateWeights(s, t, nowMs, &moving)) {
+      n->applyStateStyles();
+      if (!s.interaction.empty()) doc_.interactionsMoved = true;
+    }
     statesMoving_ |= moving;
   }
   list.resize(keep);

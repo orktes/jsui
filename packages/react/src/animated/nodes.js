@@ -890,8 +890,33 @@ export class AnimatedHostState extends AnimatedNode {
 // number as text, for Animated.Text's `text` prop. Native with its input
 // (the runtime formats it and sets the text without JS); the C++ twin is
 // NativeAnimated::formatNumber.
+// time: 'h:mm:ss' | 'mm:ss' | ...: whole seconds (floored, at least 0) as
+// h / m / s fields; a doubled letter pads to two digits. Without an h
+// field the minutes are the total minutes, without m the seconds the total.
+function formatTime(v, pattern) {
+  const total = isFinite(v) && v > 0 ? Math.floor(v) : 0;
+  const hasH = pattern.indexOf('h') >= 0, hasM = pattern.indexOf('m') >= 0;
+  const f = { h: Math.floor(total / 3600), m: hasH ? Math.floor(total / 60) % 60 : Math.floor(total / 60), s: hasM ? total % 60 : total };
+  let out = '';
+  for (let i = 0; i < pattern.length; ) {
+    const c = pattern[i];
+    if (c === 'h' || c === 'm' || c === 's') {
+      let j = i;
+      while (j < pattern.length && pattern[j] === c) j++;
+      const d = String(f[c]);
+      out += d.length < j - i ? '0'.repeat(j - i - d.length) + d : d;
+      i = j;
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out;
+}
+
 export function formatNumber(v, o) {
   const prefix = o.prefix || '', suffix = o.suffix || '';
+  if (typeof o.time === 'string' && o.time) return prefix + formatTime(v, o.time) + suffix;
   if (!isFinite(v)) return prefix + String(v) + suffix;
   const decimals = typeof o.decimals === 'number' ? Math.max(-1, Math.min(20, Math.trunc(o.decimals))) : -1;
   let digits;
@@ -936,6 +961,7 @@ export class AnimatedFormat extends AnimatedNode {
       prefix: o.prefix || '',
       suffix: o.suffix || '',
       minDigits: o.minDigits || 0,
+      time: typeof o.time === 'string' ? o.time : '',
     };
   }
   __attach() {

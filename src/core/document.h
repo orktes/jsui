@@ -145,6 +145,9 @@ class Document {
   std::unordered_map<std::string, uint32_t> interactionNodes;
   // A state transition started outside InputManager::tickStates (Node::setHidden).
   bool statesKick = false;
+  // A weight of an element with an `interaction` key changed: native
+  // Animated re-reads its interaction nodes (instead of polling them).
+  bool interactionsMoved = false;
   // Live nodes with an onLayout listener (Node::kListensLayout). Without
   // any, layout passes skip the onLayout walk.
   int layoutListeners = 0;

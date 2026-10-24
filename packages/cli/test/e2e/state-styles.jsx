@@ -3,7 +3,7 @@
 // disabledStyle with a transition, group styles and useInteraction values,
 // all resolved by the runtime from input (no JS handler, no re-render).
 // 400 x 300.
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { AppRegistry, View, Text, Pressable, Animated } from 'react-native';
 import { Host, useHostMessage, useInteraction } from '@orktes/jsui-react';
 
@@ -18,6 +18,9 @@ function App() {
   useHostMessage('rerender', () => setTick((t) => t + 1));
   useHostMessage('renders', () => post('renders', renders));
   const ix = useInteraction();
+  // A natively animated transform under a pressedStyle transform.
+  const grow = useMemo(() => new Animated.Value(1, { useNativeDriver: true }), []);
+  useHostMessage('grow', (v) => grow.setValue(v));
   useEffect(() => {
     const ids = {};
     for (const k in reg) ids[k] = reg[k] && reg[k]._nativeTag;
@@ -61,6 +64,11 @@ function App() {
           opacity: ix.hovered,
           transform: [{ translateX: ix.pressed.interpolate({ inputRange: [0, 1], outputRange: [0, 50] }) }],
         }}
+      />
+      <Animated.View
+        ref={at('knob')}
+        style={{ position: 'absolute', left: 200, top: 100, width: 40, height: 40, transform: [{ scale: grow }] }}
+        pressedStyle={{ transform: [{ scale: 0.5 }] }}
       />
     </View>
   );

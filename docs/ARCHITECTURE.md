@@ -1732,7 +1732,8 @@ Native's API and both of its drivers:
     a new animation on it stops the whole group.
   * Text: `<Animated.Text text={node} />` sets the Text's content from an
     Animated node (`Animated.format(node, {decimals, grouping, prefix,
-    suffix, minDigits})` for numbers): natively a `format` node feeds the
+    suffix, minDigits, time})` for numbers; `time: 'h:mm:ss'` formats
+    whole seconds as clock fields): natively a `format` node feeds the
     props node's `text` input, which sets the view's first RawText child,
     and React keeps the children it rendered when the view went native, so
     it never writes stale text. On the JS driver the component re-renders.
