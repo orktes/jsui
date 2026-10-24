@@ -8,32 +8,12 @@
 
 #include "core/document.h"
 #include "core/node.h"
+#include "core/number.h"
 #include "core/state_style.h"
 
 namespace jsui {
 
-std::string formatAnimatedNumber(double v) {
-  if (!std::isfinite(v)) return v != v ? "NaN" : (v > 0 ? "Infinity" : "-Infinity");
-  if (v == 0) return "0";  // also -0, like String(-0)
-  char buf[64];
-  if (v == std::floor(v) && std::fabs(v) < 1e21) {
-    std::snprintf(buf, sizeof buf, "%.0f", v);
-    return buf;
-  }
-  // Shortest representation that round-trips (what JS's Number#toString does).
-  for (int p = 1; p <= 17; p++) {
-    std::snprintf(buf, sizeof buf, "%.*g", p, v);
-    if (std::strtod(buf, nullptr) == v) break;
-  }
-  if (std::strchr(buf, 'e') && std::fabs(v) >= 1e-7 && std::fabs(v) < 1e21) {
-    // JS prints 0.00001 positionally (%g would say 1e-05).
-    std::snprintf(buf, sizeof buf, "%.20f", v);
-    size_t n = std::strlen(buf);
-    while (n > 0 && buf[n - 1] == '0') buf[--n] = 0;
-    if (n > 0 && buf[n - 1] == '.') buf[--n] = 0;
-  }
-  return buf;
-}
+std::string formatAnimatedNumber(double v) { return formatNumber(v); }
 
 namespace {
 
