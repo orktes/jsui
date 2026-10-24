@@ -216,6 +216,17 @@ if(JSUI_METAL)
 endif()
 message(STATUS "JSUI_METAL: ${JSUI_METAL}")
 
+# Android: the library plus the example host app (integrations/android, a
+# NativeActivity .so that scripts/build-android.sh packages into an APK).
+if(ANDROID)
+  set(JSUI_BUILD_TOOLS OFF)
+  set(JSUI_BUILD_TESTS OFF)
+  option(JSUI_BUILD_ANDROID_APP "Build the Android example app's native library (integrations/android)" ON)
+  if(JSUI_BUILD_ANDROID_APP)
+    add_subdirectory(integrations/android)
+  endif()
+endif()
+
 # iOS: the library plus the example host app (integrations/ios); the
 # desktop tools and native tests are not built.
 if(IOS)
@@ -273,7 +284,7 @@ endif()
 
 # Engine examples: the shared HUD (integrations/shared/ui) in a raylib, an
 # SDL3 and a sokol game loop, each through the C API.
-if(NOT EMSCRIPTEN AND NOT IOS)
+if(NOT EMSCRIPTEN AND NOT IOS AND NOT ANDROID)
   if(JSUI_BUILD_RAYLIB)
     add_subdirectory(integrations/raylib)
   endif()

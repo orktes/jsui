@@ -3,6 +3,7 @@
 | Host | What it is |
 | --- | --- |
 | [godot](godot/README.md) | GDExtension with a `JsuiView` Control, rendering on Godot's own Vulkan / Metal device |
+| [android](android/README.md) | NDK NativeActivity app, Skia on OpenGL ES (EGL), touch, keys and gamepads |
 | [ios](ios/README.md) | UIKit app, Skia on Metal, touch, keyboards and game controllers |
 | [raylib](raylib/README.md) | raylib 6.2 game loop; Skia draws the UI into a `RenderTexture2D` on raylib's GL context |
 | [sdl3](sdl3/README.md) | SDL3 game loop on `SDL_Renderer`; Skia into SDL's own texture on Metal, Vulkan or GL (CPU dirty-rect upload elsewhere) |
