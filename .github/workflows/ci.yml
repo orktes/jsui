@@ -32,6 +32,7 @@ jobs:
       reference: ${{ steps.filter.outputs.reference }}
       ios: ${{ steps.filter.outputs.ios }}
       engines: ${{ steps.filter.outputs.engines }}
+      dist: ${{ steps.filter.outputs.dist }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -88,6 +89,21 @@ jobs:
               - 'integrations/shared/**'
               - 'packages/**'
               - 'examples/theme.js'
+            # Release binaries: on pull requests only when the packaging or
+            # the build changes (every push to main builds them).
+            dist:
+              - 'scripts/dist/**'
+              - 'tests/shared/**'
+              - 'cmake/**'
+              - 'CMakeLists.txt'
+              - 'include/**'
+              - 'tools/jsui-viewer/**'
+              - 'integrations/godot/CMakeLists.txt'
+              - 'integrations/unity/CMakeLists.txt'
+              - 'scripts/build-skia-desktop.sh'
+              - 'scripts/build-skia-ios.sh'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/release.yml'
             ios:
               - *core
               - 'integrations/ios/**'
@@ -431,6 +447,286 @@ jobs:
         with:
           name: jsui-godot-macos
           path: integrations/godot/demo/bin/
+
+  # ---------------------------------------------------- release binaries (dist)
+  # The prebuilt native binaries every release attaches (release.yml takes
+  # these artifacts from the CI run on main for the tagged commit, as it
+  # does the WASM modules): per platform the shared C API library (jsui_shared)
+  # with its header and CMake package, the viewer, the Godot GDExtension
+  # library and the Unity plugin, staged by scripts/dist/stage-native.sh into
+  # jsui-native-<platform>; the shared library and the Unity plugin also on
+  # their own (jsui-shared-*, jsui-unity-*) for the engine plugin packaging.
+  # Each package is checked like a host would use it
+  # (scripts/dist/check-shared.sh). Desktop Skia m157 on Linux and macOS
+  # (Graphite on Vulkan / Metal), the m124 prebuilt on Windows.
+  dist-linux:
+    name: dist (linux-${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.dist == 'true'
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build clang libfontconfig1-dev zlib1g-dev python3 unzip rsync \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxinerama-dev libxfixes-dev \
+            libgl-dev libegl-dev libgl1-mesa-dev libegl1 libegl-mesa0 libgl1-mesa-dri xvfb xauth
+      - name: Cache desktop Skia (m157)
+        id: skia-desktop
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-desktop
+          # Same key as the godot job on x64.
+          key: skia-desktop-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('scripts/build-skia-desktop.sh', 'scripts/patches/skia-m157-dawn-header-only.patch') }}
+      - name: Skia m157 for desktop (cache miss only)
+        if: steps.skia-desktop.outputs.cache-hit != 'true'
+        run: JOBS=$(nproc) scripts/build-skia-desktop.sh
+      - name: Cache FetchContent sources
+        uses: actions/cache@v4
+        with:
+          path: build/_deps/*-src
+          key: dist-deps-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('cmake/*.cmake', 'integrations/godot/CMakeLists.txt', 'tools/jsui-viewer/CMakeLists.txt') }}
+          restore-keys: dist-deps-${{ runner.os }}-${{ matrix.arch }}-
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: dist-${{ runner.os }}-${{ matrix.arch }}
+          max-size: 500M
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DJSUI_SKIA_DIR=third_party/skia-desktop -DJSUI_BUILD_SHARED=ON -DJSUI_BUILD_TESTS=OFF
+          -DJSUI_BUILD_GODOT=ON -DJSUI_GODOT_OUTPUT_DIR=$PWD/build/godot
+          -DJSUI_BUILD_UNITY=ON -DJSUI_UNITY_PLUGIN_DIR=$PWD/build/unity
+      - name: Build
+        run: cmake --build build -j "$(nproc)" --target jsui_shared jsui-viewer jsui_godot jsui_unity
+      - name: Stage
+        run: scripts/dist/stage-native.sh linux-${{ matrix.arch }} dist build
+      - name: Check the shared library (a host build against the package)
+        run: scripts/dist/check-shared.sh dist/shared
+      - name: Viewer smoke (the staged binary, Xvfb + Mesa GL)
+        run: |
+          xvfb-run -a -s "-screen 0 1280x1024x24" dist/viewer/jsui-viewer --width 320 --height 200 \
+            --frames 10 --screenshot viewer.png web/test/fixtures/bands.js | tee viewer.log
+          grep -q '^GPU: ' viewer.log
+          test -s viewer.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-native-linux-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-shared-linux-${{ matrix.arch }}
+          path: dist/shared/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-unity-linux-${{ matrix.arch }}
+          path: dist/unity/
+          if-no-files-found: error
+
+  dist-macos:
+    name: dist (macos-universal)
+    runs-on: macos-15
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.dist == 'true'
+    timeout-minutes: 180
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache desktop Skia (m157, arm64)
+        id: skia-arm64
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-desktop
+          # Same key as the godot-macos job.
+          key: skia-desktop-${{ runner.os }}-arm64-${{ hashFiles('scripts/build-skia-desktop.sh', 'scripts/patches/skia-m157-dawn-header-only.patch') }}
+      - name: Cache desktop Skia (m157, x86_64)
+        id: skia-x64
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-desktop-x64
+          key: skia-desktop-${{ runner.os }}-x64-${{ hashFiles('scripts/build-skia-desktop.sh', 'scripts/patches/skia-m157-dawn-header-only.patch') }}
+      - name: Tools
+        run: command -v ninja || brew install ninja
+      - name: Skia m157 for macOS arm64 (cache miss only)
+        if: steps.skia-arm64.outputs.cache-hit != 'true'
+        run: JOBS=$(sysctl -n hw.ncpu) scripts/build-skia-desktop.sh
+      - name: Skia m157 for macOS x86_64 (cache miss only, cross-compiled)
+        if: steps.skia-x64.outputs.cache-hit != 'true'
+        run: SKIA_CPU=x64 SKIA_DESKTOP_OUT=$PWD/third_party/skia-desktop-x64 JOBS=$(sysctl -n hw.ncpu) scripts/build-skia-desktop.sh
+      - name: Cache FetchContent sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            build-arm64/_deps/*-src
+            build-x64/_deps/*-src
+          key: dist-deps-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'integrations/godot/CMakeLists.txt', 'tools/jsui-viewer/CMakeLists.txt') }}
+          restore-keys: dist-deps-${{ runner.os }}-
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: dist-${{ runner.os }}
+          max-size: 1G
+      - name: Configure and build (arm64, x86_64)
+        run: |
+          for arch in arm64 x64; do
+            if [ $arch = arm64 ]; then osx=arm64; skia=$PWD/third_party/skia-desktop; else osx=x86_64; skia=$PWD/third_party/skia-desktop-x64; fi
+            cmake -S . -B build-$arch -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=$osx \
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+              -DJSUI_SKIA_DIR=$skia -DJSUI_SKIA_LIB_DIR=$skia/out/macos-$arch \
+              -DJSUI_BUILD_SHARED=ON -DJSUI_BUILD_TESTS=OFF \
+              -DJSUI_BUILD_GODOT=ON -DJSUI_GODOT_OUTPUT_DIR=$PWD/build-$arch/godot \
+              -DJSUI_BUILD_UNITY=ON -DJSUI_UNITY_PLUGIN_DIR=$PWD/build-$arch/unity
+            grep -q 'JSUI_GRAPHITE_METAL:BOOL=ON' build-$arch/CMakeCache.txt
+            cmake --build build-$arch -j "$(sysctl -n hw.ncpu)" --target jsui_shared jsui-viewer jsui_godot jsui_unity
+          done
+      - name: Stage (universal binaries)
+        run: scripts/dist/stage-native.sh macos-universal dist build-arm64 build-x64
+      - name: Check the shared library (a host build against the package, both architectures)
+        env:
+          CONSUMER_CMAKE_ARGS: -DCMAKE_OSX_ARCHITECTURES=arm64;x86_64
+        run: |
+          scripts/dist/check-shared.sh dist/shared
+          nm -gU dist/shared/lib/libjsui.dylib | grep -q ' _jsui_gpu_create_metal$'
+      - name: Viewer smoke (the staged binary)
+        run: |
+          dist/viewer/jsui-viewer --width 320 --height 200 --frames 10 --screenshot viewer.png web/test/fixtures/bands.js | tee viewer.log
+          grep -q '^GPU: ' viewer.log
+          test -s viewer.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-native-macos-universal
+          path: dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-shared-macos-universal
+          path: dist/shared/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-unity-macos-universal
+          path: dist/unity/
+          if-no-files-found: error
+
+  dist-windows:
+    name: dist (windows-x64)
+    runs-on: windows-2022
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.dist == 'true'
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache prebuilt Skia + FetchContent sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/skia-prebuilt
+            build/_deps/*-src
+          key: dist-deps-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'integrations/godot/CMakeLists.txt', 'tools/jsui-viewer/CMakeLists.txt') }}
+          restore-keys: dist-deps-${{ runner.os }}-
+      - name: Configure
+        # ClangCL and the static C runtime, as the prebuilt Skia is built.
+        run: >
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -T ClangCL
+          -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          -DJSUI_BUILD_SHARED=ON -DJSUI_BUILD_TESTS=OFF
+          -DJSUI_BUILD_GODOT=ON -DJSUI_GODOT_OUTPUT_DIR="$(pwd -W)/build/godot"
+      - name: Build
+        run: cmake --build build --config Release -j 4 --target jsui_shared jsui-viewer jsui_godot
+      - name: Stage
+        run: scripts/dist/stage-native.sh windows-x64 dist build
+      - name: Check the shared library (a host build against the package)
+        run: scripts/dist/check-shared.sh dist/shared
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-native-windows-x64
+          path: dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-shared-windows-x64
+          path: dist/shared/
+          if-no-files-found: error
+
+  # Advisory, like the iOS job: the release attaches the xcframework when this
+  # succeeded and goes without it otherwise.
+  dist-ios:
+    name: dist (ios-xcframework, advisory)
+    runs-on: macos-15
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.dist == 'true'
+    continue-on-error: true
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache iOS Skia (device + simulator)
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-ios
+          key: skia-ios-dist-${{ hashFiles('scripts/build-skia-ios.sh') }}
+      - name: Tools
+        run: command -v ninja || brew install ninja
+      - name: Build JSUI.xcframework (builds the Skia slices on a cache miss)
+        run: scripts/dist/build-ios-xcframework.sh dist-ios
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-ios-xcframework
+          path: dist-ios/
+          if-no-files-found: error
+
+  # What the release would attach, assembled from the artifacts above with
+  # the release script (scripts/dist/assemble-release.sh), so a broken
+  # archive shows up here and not on a tag.
+  dist-assemble:
+    name: dist (release archives)
+    runs-on: ubuntu-24.04
+    needs: [dist-linux, dist-macos, dist-windows, dist-ios]
+    if: ${{ !cancelled() && needs.dist-linux.result == 'success' && needs.dist-macos.result == 'success' && needs.dist-windows.result == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: jsui-native-*
+          path: artifacts
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: jsui-ios-xcframework
+          path: artifacts/jsui-ios-xcframework
+      - name: Assemble
+        run: scripts/dist/assemble-release.sh "$(node -p "require('./packages/react/package.json').version")" artifacts release
+      - name: Check the archives
+        run: |
+          cd release
+          sha256sum -c SHA256SUMS.txt
+          unzip -l jsui-godot-*.zip | tee godot.txt
+          for f in linux.x86_64.so linux.arm64.so windows.x86_64.dll macos.universal.dylib; do grep -q "addons/jsui/bin/libjsui_godot.$f" godot.txt; done
+          unzip -p jsui-godot-*.zip addons/jsui/jsui.gdextension
+          for f in *.tar.gz; do tar -tzf "$f" | grep -q '/lib/cmake/jsui/jsuiConfig.cmake$'; done
+          unzip -l jsui-*-windows-x64.zip | grep -q 'bin/jsui.dll'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-release-preview
+          path: release/
 
   # --------------------------------------------------------------------- wasm
   wasm:

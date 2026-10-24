@@ -216,6 +216,37 @@ if(JSUI_METAL)
 endif()
 message(STATUS "JSUI_METAL: ${JSUI_METAL}")
 
+# jsui_shared: the prebuilt release library (libjsui.so / libjsui.dylib /
+# jsui.dll) for hosts that load JSUI as a plain C library (Unity, Unreal, a
+# game built with another toolchain). The static library is linked into it
+# whole and only the C API is exported: Skia, QuickJS, Yoga and their
+# dependencies stay private, and on Linux so does libstdc++ (linked
+# statically), so the host's C++ runtime never meets ours.
+option(JSUI_BUILD_SHARED "Build the shared C API library jsui_shared (libjsui.so / .dylib / jsui.dll)" OFF)
+if(JSUI_BUILD_SHARED AND NOT EMSCRIPTEN AND NOT IOS)
+  if(CMAKE_VERSION VERSION_LESS 3.24)
+    message(FATAL_ERROR "JSUI_BUILD_SHARED needs CMake 3.24 or newer (WHOLE_ARCHIVE linking)")
+  endif()
+  add_library(jsui_shared SHARED cmake/jsui_shared.c)
+  target_link_libraries(jsui_shared PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,jsui>")
+  target_include_directories(jsui_shared PUBLIC include)
+  set_target_properties(jsui_shared PROPERTIES OUTPUT_NAME jsui LINKER_LANGUAGE CXX
+    C_VISIBILITY_PRESET hidden CXX_VISIBILITY_PRESET hidden)
+  if(WIN32)
+    # The functions are compiled dllexport into the static library (which
+    # the tools still link statically); consumers define JSUI_SHARED too.
+    target_compile_definitions(jsui PRIVATE JSUI_SHARED)
+    target_compile_definitions(jsui_shared INTERFACE JSUI_SHARED)
+  elseif(APPLE)
+    target_link_options(jsui_shared PRIVATE "LINKER:-exported_symbol,_jsui_*" "LINKER:-dead_strip")
+    set_target_properties(jsui_shared PROPERTIES INSTALL_NAME_DIR "@rpath" BUILD_WITH_INSTALL_NAME_DIR ON)
+  else()
+    target_link_options(jsui_shared PRIVATE "LINKER:--version-script=${CMAKE_SOURCE_DIR}/cmake/jsui_shared.map"
+      "LINKER:--no-undefined" "LINKER:-Bsymbolic" "LINKER:--gc-sections" -static-libstdc++ -static-libgcc)
+    set_target_properties(jsui_shared PROPERTIES LINK_DEPENDS ${CMAKE_SOURCE_DIR}/cmake/jsui_shared.map)
+  endif()
+endif()
+
 # iOS: the library plus the example host app (integrations/ios); the
 # desktop tools and native tests are not built.
 if(IOS)

@@ -31,12 +31,16 @@
 extern "C" {
 #endif
 
+/* Windows: define JSUI_SHARED when using jsui.dll (the prebuilt release
+ * library); a static build needs nothing. */
 #if defined(_WIN32) && defined(JSUI_SHARED)
 #  ifdef JSUI_BUILDING
 #    define JSUI_API __declspec(dllexport)
 #  else
 #    define JSUI_API __declspec(dllimport)
 #  endif
+#elif defined(_WIN32)
+#  define JSUI_API
 #elif defined(__EMSCRIPTEN__)
 /* Same as EMSCRIPTEN_KEEPALIVE; spelled out because <emscripten.h> must not
  * be included inside this header's extern "C" block. */
