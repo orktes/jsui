@@ -75,6 +75,10 @@ export const mock = {
 };
 
 globalThis.__jsui_native = {
+  // This frame's JS budget is spent (tests set mock.overBudget).
+  shouldYield() {
+    return !!mock.overBudget;
+  },
   rootId: ROOT,
   viewport: { width: 800, height: 600, scale: 2 },
   createNode(type) {

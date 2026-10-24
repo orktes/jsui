@@ -29,6 +29,11 @@ void installMeasure(Node* node);
 // `width` (the content box width). nullptr when there is no text.
 skia::textlayout::Paragraph* layoutParagraph(Node* node, float width);
 
+// Shapes the paragraph of a Text node ahead of its first measure (the same
+// build and unconstrained first layout the measure would do). Returns false
+// when there was nothing to do (already shaped, or no font manager).
+bool prepareText(Node* node);
+
 // Paints a paragraph-root Text node whose content box starts at (x, y).
 // `layoutSpace` is given when a transform applies to the canvas: it maps the
 // canvas coordinates to device pixels without the transforms (the space

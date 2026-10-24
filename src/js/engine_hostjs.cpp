@@ -358,6 +358,8 @@ EMSCRIPTEN_KEEPALIVE const char* jsui_hjs_last_string() {
 
 // The runtime clock (performance.now, timers).
 EMSCRIPTEN_KEEPALIVE double jsui_hjs_now(int e) { return R(e).now; }
+// __jsui_native.shouldYield (bridge.cpp's js_shouldYield).
+EMSCRIPTEN_KEEPALIVE int jsui_hjs_should_yield(int e) { return R(e).jsShouldYield() ? 1 : 0; }
 
 // Microtask jobs a drain ran (PerfCounters::jsJobs).
 EMSCRIPTEN_KEEPALIVE void jsui_hjs_count_jobs(int e, int jobs) { R(e).doc.perf.counters.jsJobs += uint64_t(jobs); }

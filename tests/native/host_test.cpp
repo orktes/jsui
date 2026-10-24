@@ -685,3 +685,81 @@ TEST(host_multiple_runtimes_are_independent) {
   CHECK_EQ(a.messages.size(), size_t(1));
   CHECK_EQ(b.messages.size(), size_t(1));
 }
+
+// The per-tick JS budget (jsui_set_js_frame_budget): __jsui_native.shouldYield
+// turns true once this tick's JS has run for the budget (React's scheduler
+// time-slices transitions on it), and zero-delay timers queued after that run
+// next tick instead of extending this one. A budget <= 0 is no limit.
+TEST(host_js_frame_budget) {
+  Host h;
+  CHECK_EQ(jsui_get_js_frame_budget(h.rt), 5.0);
+  h.load(R"(
+    globalThis.spin = (ms) => { const end = Date.now() + ms; while (Date.now() < end) {} };
+    globalThis.log = [];
+    globalThis.chain = () => {
+      setTimeout(() => {
+        log.push('a:' + __jsui_native.shouldYield());
+        spin(3);
+        setTimeout(() => { log.push('b:' + __jsui_native.shouldYield()); __jsui_native.postMessage('chain', log); }, 0);
+      }, 0);
+    };
+  )");
+  jsui_set_js_frame_budget(h.rt, 1);
+  CHECK_EQ(jsui_get_js_frame_budget(h.rt), 1.0);
+  h.load("chain();");
+  h.tick();
+  CHECK(h.message("chain") == nullptr);  // over budget: the nested timer waits
+  h.tick();
+  const std::string* m = h.message("chain");
+  CHECK(m != nullptr);
+  if (m) CHECK_EQ(*m, std::string("[\"a:false\",\"b:false\"]"));
+
+  h.messages.clear();
+  jsui_set_js_frame_budget(h.rt, 0);
+  h.load("log = []; chain();");
+  h.tick();
+  m = h.message("chain");
+  CHECK(m != nullptr);  // no limit: both in one tick
+  if (m) CHECK_EQ(*m, std::string("[\"a:false\",\"b:false\"]"));
+
+  h.messages.clear();
+  jsui_set_js_frame_budget(h.rt, 1);
+  h.load("setTimeout(() => { spin(3); __jsui_native.postMessage('y', __jsui_native.shouldYield()); }, 0);");
+  h.tick();
+  m = h.message("y");
+  CHECK(m != nullptr);
+  if (m) CHECK_EQ(*m, std::string("true"));
+}
+
+// Text created ahead of its commit (a time-sliced render) is shaped in the
+// spare time of the frames before: the frame that attaches and lays it out
+// builds no paragraph. Nested Text is part of its root's paragraph, and a
+// Text not attached to anything yet waits.
+TEST(host_prepares_text_before_commit) {
+  Host h;
+  h.load(R"(
+    const N = __jsui_native;
+    const text = (s) => { const t = N.createNode('Text'); const r = N.createNode('RawText'); N.setText(r, s); N.appendChild(t, r); return t; };
+    globalThis.box = N.createNode('View');
+    globalThis.loose = text('not attached to anything');
+    const outer = text('outer ');
+    N.appendChild(outer, text('nested'));
+    N.appendChild(box, outer);
+    N.appendChild(box, text('second paragraph'));
+  )");
+  JsuiPerf p;
+  jsui_get_perf(h.rt, &p, 1);
+  h.tick();
+  jsui_get_perf(h.rt, &p, 1);
+  CHECK_EQ(p.paragraph_builds, uint64_t(2));  // outer (with nested) + second
+  h.load("__jsui_native.appendChild(__jsui_native.rootId, box);");
+  h.tick();
+  jsui_get_perf(h.rt, &p, 1);
+  CHECK_EQ(p.paragraph_builds, uint64_t(0));
+  CHECK(p.text_measures > 0);
+  // Attached later, the loose one is shaped then.
+  h.load("__jsui_native.appendChild(box, loose);");
+  h.tick();
+  jsui_get_perf(h.rt, &p, 1);
+  CHECK_EQ(p.paragraph_builds, uint64_t(1));
+}

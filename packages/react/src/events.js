@@ -7,7 +7,8 @@
 // The RN responder system (PanResponder) is layered on pointer events.
 
 import { instances } from './instances.js';
-import { now } from './native.js';
+import { native, now } from './native.js';
+import { startTransition } from 'react';
 import { reconciler, setUpdatePriority, DiscreteEventPriority, ContinuousEventPriority } from './renderer.js';
 
 const g = globalThis;
@@ -353,6 +354,14 @@ export function dispatchLayout(id, layout) {
   if (!f) return;
   const l = layout || {};
   const e = new SyntheticEvent('layout', { layout: { x: +l.x || 0, y: +l.y || 0, width: +l.width || 0, height: +l.height || 0 } }, id);
+  // State set in onLayout renders in this frame, unless this frame's JS
+  // budget is already spent (a page that just mounted, whose components size
+  // themselves from onLayout, one nesting level per render): then it renders
+  // as a transition, time-sliced over the next frames.
+  if (native.shouldYield && native.shouldYield()) {
+    startTransition(() => reconciler.batchedUpdates(() => f(e), null));
+    return;
+  }
   const prev = setUpdatePriority(DiscreteEventPriority);
   try {
     reconciler.batchedUpdates(() => f(e), null);

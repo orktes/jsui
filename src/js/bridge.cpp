@@ -218,6 +218,15 @@ JSValue js_updateProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
 
 // getProps(id): the props native holds for a node (what updateProps built
 // from the React props, with patchStyle's writes), or undefined.
+// React's scheduler asks this between units of concurrent work (the CLI
+// bundles scheduler with that check, packages/cli/src/specialize.js):
+// true once this tick's JS budget is spent, so a transition yields to the
+// next frame. performance.now() is the frame clock and never advances
+// within a tick, so the scheduler's own check would never yield.
+JSValue js_shouldYield(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+  return JS_NewBool(ctx, runtimeOf(ctx).jsShouldYield());
+}
+
 JSValue js_getProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   if (argc < 1) return JS_UNDEFINED;
   Node* n = nodeArg(ctx, argv[0]);
@@ -739,6 +748,7 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
   } fns[] = {{"createNode", js_createNode, 1},     {"setProps", js_setProps, 2},
              {"updateProps", js_updateProps, 3},
              {"getProps", js_getProps, 1},
+             {"shouldYield", js_shouldYield, 0},
              {"patchStyle", js_patchStyle, 2},     {"setText", js_setText, 2},
              {"appendChild", js_appendChild, 2},   {"insertBefore", js_insertBefore, 3},
              {"removeChild", js_removeChild, 2},   {"destroyNode", js_destroyNode, 1},

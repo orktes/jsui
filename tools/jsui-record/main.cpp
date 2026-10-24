@@ -898,6 +898,9 @@ int main(int argc, char** argv) {
   cfg.on_message = &Recorder::onMessage;
   cfg.message_user = &r;
   r.rt = jsui_create(&cfg);
+  // Simulated time: no wall-clock frame budget, so what a frame shows does
+  // not depend on how fast this machine is (transitions render whole).
+  jsui_set_js_frame_budget(r.rt, 0);
   for (auto& [family, path] : o.fonts) {
     std::string data;
     if (!readFile(path, &data) || jsui_register_font(r.rt, family.c_str(), data.data(), data.size(), 0, -1) != 0) {

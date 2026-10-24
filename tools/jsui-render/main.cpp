@@ -70,6 +70,9 @@ int main(int argc, char** argv) {
   cfg.height = height;
   cfg.pixel_ratio = scale;
   JsuiRuntime* rt = jsui_create(&cfg);
+  // Simulated time: no wall-clock frame budget, so what a frame shows does
+  // not depend on how fast this machine is (transitions render whole).
+  jsui_set_js_frame_budget(rt, 0);
 
   for (auto& [family, path] : fonts) {
     std::string data;
