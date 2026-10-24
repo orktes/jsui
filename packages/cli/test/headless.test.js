@@ -209,12 +209,18 @@ AppRegistry.registerComponent('main', () => () => <View style={{ flex: 1, backgr
   assert.ok(!isPrecompiled(src));
   assert.equal(bundleSource(src), src.toString('utf8'));
 
-  // Without the source fallback the bytecode alone runs.
+  // Without the source fallback the bytecode alone runs (on QuickJS; the
+  // host JS engine has nothing to run and says so).
   const lean = path.join(dir, 'out', 'lean.js');
   await writeFile(lean, await compileBundle(src, { keepSource: false }));
   assert.equal(bundleSource(await readFile(lean)), '');
-  await exec(process.execPath, [BIN, 'screenshot', lean, '--bundle', '-o', shot, '--width', '64', '--height', '32']);
-  assert.deepEqual(firstPixel(await readFile(shot)), [0x12, 0x34, 0x56, 255]);
+  const leanShot = exec(process.execPath, [BIN, 'screenshot', lean, '--bundle', '-o', shot, '--width', '64', '--height', '32']);
+  if (process.env.JSUI_JS === 'host') {
+    await assert.rejects(leanShot, /no source for the host JS engine/);
+  } else {
+    await leanShot;
+    assert.deepEqual(firstPixel(await readFile(shot)), [0x12, 0x34, 0x56, 255]);
+  }
 
   // split: bytecode without the source, which sits next to it.
   const split = path.join(dir, 'out', 'split.js');
