@@ -47,17 +47,40 @@ public class Jsui : ModuleRules
 			RuntimeDependencies.Add("$(BinaryOutputDir)/jsui.dll", Path.Combine(LibraryDir, "bin", "jsui.dll"));
 			// Skia's ICU reads its data from next to the executable.
 			RuntimeDependencies.Add("$(BinaryOutputDir)/icudtl.dat", Path.Combine(LibraryDir, "bin", "icudtl.dat"));
+
+			// The GPU paths: Skia Ganesh on the D3D12 RHI's device and queue
+			// (ID3D12DynamicRHI::RHIRunOnQueue), Ganesh on a D3D12 device next
+			// to the D3D11 RHI's (ID3D11DynamicRHI::RHIGetDevice), Skia
+			// Graphite on the Vulkan RHI's (-vulkan; IVulkanDynamicRHI). Only
+			// the RHIs' interface headers are used (virtual calls).
+			PrivateDependencyModuleNames.AddRange(new string[] { "D3D11RHI", "D3D12RHI", "VulkanRHI" });
+			AddEngineThirdPartyPrivateStaticDependencies(Target, "DX11", "DX12", "Vulkan");
+			PrivateDefinitions.AddRange(new string[] { "JSUI_UE_D3D11=1", "JSUI_UE_D3D12=1", "JSUI_UE_VULKAN=1" });
 		}
 		else if (Target.Platform == UnrealTargetPlatform.Linux)
 		{
 			string So = Path.Combine(LibraryDir, "lib", "libjsui.so");
 			PublicAdditionalLibraries.Add(So);
 			RuntimeDependencies.Add("$(BinaryOutputDir)/libjsui.so", So);
+
+			// The GPU path: Skia Graphite on the Vulkan RHI's device and
+			// graphics queue (IVulkanDynamicRHI::RHIRunOnQueue).
+			PrivateDependencyModuleNames.Add("VulkanRHI");
+			AddEngineThirdPartyPrivateStaticDependencies(Target, "Vulkan");
+			PrivateDefinitions.Add("JSUI_UE_VULKAN=1");
 		}
 
 		if (Target.Platform != UnrealTargetPlatform.Mac)
 		{
 			PrivateDefinitions.Add("JSUI_UE_METAL=0");
+		}
+		if (Target.Platform != UnrealTargetPlatform.Win64)
+		{
+			PrivateDefinitions.AddRange(new string[] { "JSUI_UE_D3D11=0", "JSUI_UE_D3D12=0" });
+		}
+		if (Target.Platform != UnrealTargetPlatform.Win64 && Target.Platform != UnrealTargetPlatform.Linux)
+		{
+			PrivateDefinitions.Add("JSUI_UE_VULKAN=0");
 		}
 	}
 }
