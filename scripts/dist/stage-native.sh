@@ -49,7 +49,7 @@ case "$PLATFORM" in
     [ ! -f "$OUT/unity/libjsui_unity.so" ] || strip --strip-unneeded "$OUT/unity/libjsui_unity.so"
     ;;
   windows-x64)
-    # Visual Studio generator: outputs are under <dir>/Release.
+    # Ninja puts outputs in <dir>; the Visual Studio generator under <dir>/Release.
     win() { for f in "$BUILD/Release/$1" "$BUILD/$1" "$BUILD/$2/Release/$1" "$BUILD/$2/$1"; do
               [ -f "$f" ] && { echo "$f"; return; }; done
             echo "stage-native: missing $1 in $BUILD" >&2; exit 1; }

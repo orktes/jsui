@@ -641,14 +641,28 @@ jobs:
           path: build/_deps/*-src
           key: windows-deps-m157-${{ hashFiles('cmake/*.cmake', 'integrations/godot/CMakeLists.txt', 'tools/jsui-viewer/CMakeLists.txt') }}
           restore-keys: windows-deps-m157-
+      - name: MSVC environment (Windows SDK, link libraries)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Ninja
+        run: pip install ninja==1.13.0
+      - name: sccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          variant: sccache
+          key: windows-native
+          max-size: 1G
       - name: Configure
         run: >
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -T ClangCL
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          "-DCMAKE_C_COMPILER=C:/Program Files/LLVM/bin/clang-cl.exe" "-DCMAKE_CXX_COMPILER=C:/Program Files/LLVM/bin/clang-cl.exe"
+          -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DJSUI_SKIA_DIR=third_party/skia-desktop
           -DJSUI_BUILD_TESTS=ON -DJSUI_BUILD_GODOT=ON
           "-DCMAKE_CXX_FLAGS_RELEASE=-O2 -Ob2 -DNDEBUG -Z7" "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=-DEBUG"
       - name: Build
-        run: cmake --build build --config Release -j 4 --target jsui-tests jsui-viewer jsui_godot
+        run: cmake --build build -j 4 --target jsui-tests jsui-viewer jsui_godot
       - name: Native tests (GPU backends required)
         env:
           JSUI_VULKAN_TEST_REQUIRE: 1
@@ -663,7 +677,7 @@ jobs:
           export PATH="$(dirname "$loader"):$sdk/Bin:$PATH"
           export VK_DRIVER_FILES="$(cygpath -w "$icd")"
           vulkaninfo --summary 2>&1 | head -40 || true
-          ./build/Release/jsui-tests.exe
+          ./build/jsui-tests.exe
 
   # ---------------------------------------------------- release binaries (dist)
   # The prebuilt native binaries every release attaches (release.yml takes
@@ -886,16 +900,30 @@ jobs:
           path: build/_deps/*-src
           key: dist-deps-m157-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'integrations/godot/CMakeLists.txt', 'tools/jsui-viewer/CMakeLists.txt') }}
           restore-keys: dist-deps-m157-${{ runner.os }}-
+      - name: MSVC environment (Windows SDK, link libraries)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Ninja
+        run: pip install ninja==1.13.0
+      - name: sccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          variant: sccache
+          key: windows-dist
+          max-size: 1G
       - name: Configure
-        # ClangCL and the static C runtime, as Skia is built.
+        # clang-cl from LLVM and the static C runtime, as Skia is built.
         run: >
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -T ClangCL
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          "-DCMAKE_C_COMPILER=C:/Program Files/LLVM/bin/clang-cl.exe" "-DCMAKE_CXX_COMPILER=C:/Program Files/LLVM/bin/clang-cl.exe"
+          -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DJSUI_SKIA_DIR=third_party/skia-desktop
           -DJSUI_BUILD_SHARED=ON -DJSUI_BUILD_TESTS=OFF
           -DJSUI_BUILD_GODOT=ON -DJSUI_GODOT_OUTPUT_DIR="$(pwd -W)/build/godot"
           -DJSUI_BUILD_UNITY=ON -DJSUI_UNITY_PLUGIN_DIR="$(pwd -W)/build/unity"
       - name: Build
-        run: cmake --build build --config Release -j 4 --target jsui_shared jsui-viewer jsui_godot jsui_unity
+        run: cmake --build build -j 4 --target jsui_shared jsui-viewer jsui_godot jsui_unity
       - name: Stage
         run: scripts/dist/stage-native.sh windows-x64 dist build
       - name: Check the shared library (a host build against the package)
