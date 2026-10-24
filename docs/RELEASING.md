@@ -101,3 +101,39 @@ is not set up.
 
 Not done yet: notarization of the macOS binaries (they are ad-hoc signed),
 Graphite on Windows (needs a source-built Skia there), Android.
+
+### Profile-guided QuickJS
+
+The Linux and macOS `dist-*` jobs compile QuickJS with profile-guided
+optimization (6-9% less JS time on React-heavy scenarios; see "QuickJS PGO"
+in docs/ARCHITECTURE.md). Their configure step is
+`scripts/pgo-quickjs.sh BUILD_DIR <the usual cmake args>`, which in the same
+build directory configures an instrumented QuickJS
+(`-DJSUI_QUICKJS_PGO=generate`), builds jsui-bench and jsui-render, runs the
+training set, merges the profile and reconfigures with
+`-DJSUI_QUICKJS_PGO=use -DJSUI_QUICKJS_PROFILE=BUILD_DIR/pgo/quickjs.profdata`.
+The job's normal build step then recompiles QuickJS with the profile and
+reuses every other object. The profile is made fresh in each job with the
+job's own compiler; nothing is checked in or cached across compiler
+versions.
+
+| Platform | PGO | Profile |
+| --- | --- | --- |
+| linux-x64, linux-arm64 | yes (clang; `llvm-profdata` from the `llvm` package, the profile runtime from `libclang-rt-dev`, which Ubuntu does not install with clang) | trained on the runner's own CPU |
+| macos-universal | yes (Apple clang, `xcrun llvm-profdata`) | trained in the arm64 build; the x86_64 slice reuses it (Clang's instrumentation profiles are keyed by source function, so they carry over between targets of the same compiler; the few functions that differ are simply not optimized with it) |
+| windows-x64 | no | ClangCL would need the profile runtime and `llvm-profdata` from the VS LLVM; not set up |
+| ios-xcframework | no | could reuse the macOS arm64 profile (same Xcode clang), but the advisory job runs in parallel with `dist-macos`; passing `-DJSUI_QUICKJS_PGO=use -DJSUI_QUICKJS_PROFILE=...` to its CMake is all it takes |
+| WASM, Android | no | other compilers (emscripten's / the NDK's clang), so the profile format may not match; the configure check would turn that into a warning |
+
+It never fails a release: if the instrumented build, the training, the
+merge or the profile itself does not work (another LLVM's format, a missing
+`llvm-profdata`), the job prints a `pgo-quickjs` warning and builds QuickJS
+without PGO; look for `QuickJS PGO: optimizing with` in the configure log
+to confirm a build used it. The stage costs the instrumented QuickJS and
+two tool links (the rest of the objects are shared with the real build),
+an `npm ci` for the training bundles and about a minute of training.
+
+To build the same locally: `npm ci`, then
+`scripts/pgo-quickjs.sh build -G Ninja -DCMAKE_BUILD_TYPE=Release` and
+`cmake --build build`. With GCC the profile is the directory of `.gcda`
+files the training wrote (`build/pgo/raw`); the script handles both.

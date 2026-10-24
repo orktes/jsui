@@ -100,6 +100,7 @@ jobs:
             # the build changes (every push to main builds them).
             dist:
               - 'scripts/dist/**'
+              - 'scripts/pgo-quickjs.sh'
               - 'tests/shared/**'
               - 'cmake/**'
               - 'CMakeLists.txt'
@@ -571,10 +572,15 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4  # the PGO training bundles (jsui CLI)
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
       - name: System packages
+        # llvm, libclang-rt-dev: llvm-profdata and the profile runtime for QuickJS PGO.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build clang libfontconfig1-dev zlib1g-dev python3 unzip rsync \
+          sudo apt-get install -y --no-install-recommends ninja-build clang llvm libclang-rt-dev libfontconfig1-dev zlib1g-dev python3 unzip rsync \
             libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxinerama-dev libxfixes-dev \
             libgl-dev libegl-dev libgl1-mesa-dev libegl1 libegl-mesa0 libgl1-mesa-dri xvfb xauth
       - name: Cache desktop Skia (m157)
@@ -598,9 +604,9 @@ jobs:
         with:
           key: dist-${{ runner.os }}-${{ matrix.arch }}
           max-size: 500M
-      - name: Configure
+      - name: Configure, with QuickJS PGO (instrumented build, training, profile; falls back to no PGO with a warning)
         run: >
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          scripts/pgo-quickjs.sh build -G Ninja -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DJSUI_SKIA_DIR=third_party/skia-desktop -DJSUI_BUILD_SHARED=ON -DJSUI_BUILD_TESTS=OFF
@@ -657,6 +663,10 @@ jobs:
         with:
           path: third_party/skia-desktop-x64
           key: skia-desktop-${{ runner.os }}-x64-${{ hashFiles('scripts/build-skia-desktop.sh', 'scripts/patches/skia-m157-dawn-header-only.patch') }}
+      - uses: actions/setup-node@v4  # the PGO training bundles (jsui CLI)
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
       - name: Tools
         run: command -v ninja || brew install ninja
       - name: Skia m157 for macOS arm64 (cache miss only)
@@ -678,11 +688,20 @@ jobs:
         with:
           key: dist-${{ runner.os }}
           max-size: 1G
+      # QuickJS PGO: scripts/pgo-quickjs.sh trains the arm64 build on this
+      # (arm64) runner; the x86_64 slice uses the same profile (Clang's
+      # profiles are per source function, not per CPU). Without a profile
+      # both build without PGO, with a warning.
       - name: Configure and build (arm64, x86_64)
         run: |
           for arch in arm64 x64; do
             if [ $arch = arm64 ]; then osx=arm64; skia=$PWD/third_party/skia-desktop; else osx=x86_64; skia=$PWD/third_party/skia-desktop-x64; fi
-            cmake -S . -B build-$arch -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=$osx \
+            if [ $arch = arm64 ]; then
+              configure="scripts/pgo-quickjs.sh build-$arch"
+            else
+              configure="cmake -S . -B build-$arch -DJSUI_QUICKJS_PGO=use -DJSUI_QUICKJS_PROFILE=$PWD/build-arm64/pgo/quickjs.profdata"
+            fi
+            $configure -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=$osx \
               -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
               -DJSUI_SKIA_DIR=$skia -DJSUI_SKIA_LIB_DIR=$skia/out/macos-$arch \
               -DJSUI_BUILD_SHARED=ON -DJSUI_BUILD_TESTS=OFF \
