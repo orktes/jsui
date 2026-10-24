@@ -1,0 +1,161 @@
+# Engine patches
+
+`engine/quickjs-ng` is a git submodule tracking upstream QuickJS-NG unchanged.
+Every change we make to the engine lives here as a patch, applied to that
+submodule's working tree by `scripts/apply-patches.js`.
+
+The table below is the whole fork at a glance. You should be able to understand
+what we changed and why without opening a single `.patch` file.
+
+## The patches
+
+| Patch | What it does | Why we need it | Adds | Bytecode bump? |
+|---|---|---|---|---|
+| `0001` | Reports how much memory the engine is currently holding | The runtime decides when to collect garbage based on how much memory is live, and the existing way to measure it walks the whole heap | `JS_GetMallocSize` | No |
+| `0002` | Lets the app choose when garbage collection runs | Otherwise a collection lands in the middle of a frame and drops it; the worst frame went from 45ms to 3.3ms | `JS_SetGCDeferred`, `JS_HasPendingGC`, `JS_RunPendingGC` | No |
+| `0003` | Lets a debugger pause code, read variables and evaluate expressions | Without it no debugger can attach to an app running on this engine, and `debugger;` does nothing | `JS_SetDebugTraceHandler`, `JS_GetStackDepth`, `JS_GetLocalVariablesAtLevel`, `JS_FreeLocalVariables`, `JS_SetVariableAtLevel`, `JS_EvalInStackFrame` | **Yes** - adds an opcode |
+| `0004` | Lets the debugger ask where each stack frame is | Chrome DevTools shows a full call stack, not just the line that stopped | `JS_GetFrameInfoAtLevel` | No |
+| `0005` | Turns the debugger's per-statement callback on and off cheaply | A debugger must stay installed all session; idle, the callback cost 4,040ns per statement against 546ns with none | `JS_SetDebugTraceArmed` | No |
+| `0006` | Lets us attach native data to a JavaScript object where script cannot see or overwrite it | The engine's embedder slot only exists on objects the embedder created, and this data attaches to any object. The alternative, a WeakMap, enters JavaScript on every read and write: reads went 11.1ns to 4.4ns, writes 59.5ns to 8.6ns | `JS_NewPrivateSymbol` | No |
+| `0007` | Makes a stripped bytecode function stringify as `[stripped source]` rather than `[native code]` | Stripping the source text made every affected function indistinguishable from a C built-in, which is a lie that confuses debugging | - | No |
+| `0008` | Speeds up JSON.parse and JSON.stringify on mobile-real payloads: integer arrays, plain ASCII strings, small nested objects | JSON is what native bindings and the bridge use, so its hot shapes dominate real payloads; the old code allocated per character and per element | - | No |
+| `0009` | Speeds up JSON.stringify: enumerate object keys as atoms, quote keys and strings straight into the buffer, and format floats/booleans/null directly (integral doubles exact within +/-2^53) | JSON.stringify dominates network payloads; the old code built a key array and an intermediate quoted string per key and per value | - | No |
+| `0010` | Faster json tokenizer for structural punctuation: `[ ] { } : ,` return directly without per-token state bookkeeping | Punctuation is 50-80% of JSON tokens, and each previously paid the full tokenizer update for a byte the parse loop just compares against | - | No |
+| `0011` | Lazy JSON.parse with shared source, structural tape, direct markers, repeated-layout construction, and access feedback | Large payloads are often only partly inspected; eager parsing pays for values that are never read, while the lazy document keeps source and tape ownership safe for retained descendants | - | No |
+| `0012` | Caches shapes for eligible static object literals and serializes their reusable metadata with bytecode | Repeated object-literal sites otherwise rebuild the same property shape through one transition per property | - | Yes |
+| `0013` | Accelerates forward string `indexOf` and `includes` searches with `memchr` and same-width `memcmp` | Forward searches repeatedly scan for candidate bytes and compare matching-width strings; libc can perform both operations efficiently | - | No |
+| `0014` | Reclaims one primary opcode slot with a compact escape prefix for debugger traps | The one-byte opcode table is full, so the escape form provides room for later engine opcodes without changing ordinary dispatch | `esc1` | **Yes** - changes bytecode encoding |
+| `0015` | Adds the foundational monomorphic property and transition-store inline caches, with lazy tables and a cheap megamorphic call-site guard | React Native repeatedly reads and initializes the same object fields; caching the receiver shape avoids repeating hashed property lookup while unsafe cases keep the generic path | `get_field_ic`, `get_field2_ic`, `put_field_ic` | **Yes** - adds opcodes |
+| `0016` | Composes explicitly enabled four-entry sites, depth-two prototype reads, and a non-owning megamorphic fallback cache on top of the foundational inline caches | Polymorphic and megamorphic workloads can revisit a small set of receiver shapes and prototype paths often enough to justify the optional wider cache | - | No |
+| `0017` | Makes the four-entry inline-cache configuration the shipping default | The validated composed cache was measured at width four on device, while the release projection still defaulted to width one | - | No |
+| `0018` | Adds bounded metadata for regular-expression optimization | The matcher needs safe, serialized search information for supported literal and prefix patterns | - | **Yes** - extends serialized regular-expression bytecode |
+| `0019` | Adds specialized regular-expression matcher execution | Common eight-bit expressions should not pay for wide-character handling on every operation | - | No |
+| `0020` | Analyzes regular expressions for literal, prefix, and first-set prefilters | Search-heavy expressions reject most input positions before a match can begin | - | **Yes** - emits regular-expression metadata |
+| `0021` | Connects regular-expression metadata to JavaScript matching | Compiled metadata only helps when RegExp operations use it to skip impossible candidates | - | No |
+| `0022` | Reduces setup and capture overhead in regular-expression execution | Repeated execution otherwise rebuilds state and allocates capture storage for common small expressions | - | No |
+| `0023` | Optimizes regular-expression result arrays and boolean tests | Successful matches with captures pay unnecessary property-growth and result-object costs | - | No |
+| `0024` | Adds a fast scanning path for `RegExp[Symbol.split]` and recognizes whitespace first sets | Splitting otherwise invokes the sticky matcher once per source position, while whitespace-led patterns lose the prefilter entirely | - | No |
+| `0025` | Interns the six non-predefined RegExp flag property names once per runtime | Repeated `.flags` reads otherwise redo atom-table lookups for names that are already permanent atoms | - | No |
+| `0026` | Derives RegExp flags directly from compiled bytecode under a semantic guard | Standard RegExp instances can answer `.flags` without eight generic prototype lookups and native getter calls | - | No |
+| `0027` | Keeps the malformed RegExp test fixture synchronized with the opcode table and tightens its assertion | Adding matcher opcodes must not silently turn a bounds-check regression test into a different bytecode program | - | No |
+| `0028` | Hardens RegExp metadata validation and keeps first-set scans interruptible | Deserialized metadata must not drive out-of-bounds fast-path reads, and large no-hit scans must remain interruptible | - | No |
+| `0029` | Adds regression coverage for malformed RegExp metadata | Header mutations must be rejected before optimized execution can consume them | - | No |
+| `0030` | Replaces the serialized-bytecode checksum with portable CRC-32C and uses hardware acceleration when available | Bytecode loading scans the full payload before parsing, so faster integrity verification reduces cold-start cost while preserving corruption detection | - | **Yes** - changes checksum encoding |
+| `0031` | Frames serialized function bodies and provides one checked bounded reader for eager and lazy-ready records | A declared body boundary and shared overflow-safe layout prevent malformed function records from consuming adjacent data while allowing later lazy materialization to use the same parser | - | **Yes** - changes bytecode record layout |
+| `0032` | Adds explicit caller-owned borrowed storage for lazy bytecode input | Embedders with stable immutable storage can avoid the engine-owned payload copy without changing the safe copied-lazy default | `JS_READ_OBJ_BORROW` | No |
+| `0033` | Defers atom interning for lazy bytecode entries until first use | Cold Metro function bodies need not construct their string and symbol atoms during startup; entries are validated, memoized, and shared when materialized | - | No |
+| `0034` | Dispatches interpreter-issued calls to native functions without an interpreter activation | Native calls otherwise enter the bytecode-call machinery before reaching the same class call entry, adding setup and argument spill work that is unnecessary for non-bytecode callees | - | No |
+| `0035` | Copies eligible dense array spreads directly into the argument accumulator | Unchanged builtin array iterators otherwise allocate an iterator and route every element through general property definition before the call | - | No |
+| `0036` | Copies unchanged dense mapped arguments directly from their live variable-reference slots during apply | Avoids one exotic property lookup per forwarded argument while preserving the generic path for modified or sparse arguments objects | - | No |
+| `0037` | Skips COPY_ARGV materialization for functions proven not to write or retain argument slots | Callback callees that only read their arguments can reuse the caller's complete argument array without allocation or duplication | - | No |
+| `0038` | Avoids reifying frame-visible mapped arguments for length, indexed reads, and verified builtin apply calls | Non-escaping argument uses can read the active frame without allocating an arguments object, while all observable slow paths retain the ordinary object | - | Yes |
+| `0039` | Keeps a pending exception when a formal parameter fails to parse | A stack overflow, interrupt or allocation failure raised while reading the parameter token is the real error; replacing it with "missing formal parameter" hides the cause and makes the reported failure depend on native stack depth | - | No |
+| `0040` | Assigns the C-function frame argument buffer | `js_call_c_function_data` and `js_call_c_closure` published a frame whose `arg_buf` was never set, so anything that walks frames precisely read an uninitialized buffer | - | No |
+| `0041` | Appends map and filter results directly to the dense result array | The generic define path turns every result index into an atom and re-derives, per element, that this is an append to a dense array | - | No |
+| `0042` | Keeps an array dense when an index is skipped or deleted, by storing holes and tracking how many | Upstream demotes the array to a property table permanently the first time a store lands past the end, so `Array(n)`, gap fills, row-offset matrices and `delete` cost every later access | - | No |
+| `0043` | Stores the array/string iterator record inline and steps array iterators from the dense storage | Every iteration step re-read `length` with a property get and the element with a generic get; each iterator also allocated a record | - | No |
+| `0044` | Fills `slice` and `splice` results directly into the dense result array | The generic define path re-derives per element that the index appends to a dense array, and cannot see that the result was created with exactly that length | - | No |
+| `0045` | Copies `concat` inputs that are already dense fast arrays straight into the result | The per-element get and define re-derive that this is an ordinary dense read followed by an append to a dense array, when the input is already dense storage | - | No |
+| `0046` | Reserves capped fast-array capacity for the `filter` result before the callback loop | The result starts empty and grows while the callback keeps elements, reallocating and copying storage repeatedly although the final size is known to be at most the input length | - | No |
+| `0047` | Overwrites an object literal's slot inline in `OP_define_field` | A templated literal arrives with every slot already present as `JS_UNDEFINED` with flags exactly `C_W_E`, so each store was a re-define through the generic path: a hash lookup, the flag checks, the AUTOINIT/getset branches and two provably no-op flag updates behind a six-argument call | - | No |
+| `0048` | Initializes a templated object literal's slots in place | The template path staged a 16-slot `JSProperty` array on the stack for the allocator to copy into the new object, so every slot was written twice and read once on the path every object literal takes | - | No |
+| `0049` | Builds a closure from a cached per-realm shape, in one allocation | Every closure of a kind ends at the identical shape, so the two or three defines rebuilt that same shape per function object: a shape-hash lookup, a refcount swap, an atom dup and a property-array realloc for the third property | - | No |
+| `0050` | Carves a small property array out of the object's own allocation | Every object was two allocations and two frees; an inline property array costs no second block header and no separate free, which every object literal, closure and for-in iterator pays | - | No |
+| `0051` | Retains a shape's predecessor so the transition that produced it survives | The predecessor was reachable only from the transition table, which holds no reference, so it died with its last object and every later object on the same construction path cloned the successor again | - | No |
+| `0052` | Fuses an object literal's field stores into one `OP_object_fill` at compile time | Each `OP_define_field` costs a dispatch, a four-byte atom decode, a tag test, an exotic test, a shape lookup and a flags test before the store, and the values can wait on the operand stack for one op to store them | - | No (9999 holds the version and this patch's rebuilt builtins) |
+| `0053` | Removes the dtoa exponent cliff for small values | The shortest-representation search builds radix^f by repeatedly multiplying or dividing the whole number, so its cost grows with the decimal exponent: the smallest denormal took 49 us per conversion against 0.47 us in the ordinary range | - | No |
+| `0054` | Compares identical strings by pointer before their bytes | Two references to the same JSString ran a memcmp of a buffer against itself, and interned literals make that the common case for a prop tested against a constant | - | No |
+| `0055` | Answers loose equality between a rope and a flat string | A rope and a flat string are the same ECMAScript type, but `js_eq_slow` dispatched on tag equality, so `rope == flat` answered false while `rope === flat` answered true (ECMA-262 7.2.15 step 1) | - | No |
+| `0056` | Answers `parseInt(<number>)` from the number | The general path converts the number to a decimal string, copies it to a second buffer, parses the digits back and frees both -- two allocations, a dtoa and an atof to recompute a value already in a register | - | No |
+| `0057` | Fuses `x += s` string accumulation into the accumulator | `x += s` loads `x`, so at the add the accumulator is held by `x`'s storage and the operand stack; `JS_ConcatString2`'s in-place extend requires refcount 1, so the whole accumulator is copied instead -- 42.7 GB of characters on Octane pdfjs | - | No |
+| `0058` | Pads a concatenation result when the bytecode shows the chain continues | A concat result is the most likely left operand of the next concat, and exact sizing is what refuses `JS_ConcatString2`'s in-place append -- `A + x + B` then pays an allocation, a copy and a free for the second concat | Octane splay +4.04%, geomean of nine rows +0.48%; a four-part chain +10.0% | No |
+| `0059` | Interns one-character Latin-1 strings per runtime | pdfjs allocates 22.4 M single-character strings, 21.0 M of them through `js_new_string_char`, each a `js_malloc` plus header init plus one-byte memcpy with a matching `js_free` later | Octane pdfjs +3.08%, allocation size −1.99%; geomean of nine rows +0.13% | No |
+| `0060` | Answers `charCodeAt`/`charAt` from a primitive receiver without converting | `s.charCodeAt(i)` spends 65 instructions reaching about 10 of work: `JS_ToStringCheckObject` is an identity plus a refcount round trip on a primitive string, and `JS_ToInt32Sat` is a tagged dispatch that does nothing for an int | charCodeAt +11.3%, charAt +6.0%, slice receiver +10.2%; geomean of nine rows +0.39% | No |
+| `0061` | Caches canonical decimal strings for small integers | pdfjs makes 51,028 integer conversions covering only 12 distinct small values, deltablue 60,802 covering 101 -- each one an `i32toa` plus an allocation | `''+i` +4.3%, `'a'+i+'b'` +4.8%; group corpus geomean +0.18% (no corpus claim alone) | No |
+| `0062` | Caches two-character ASCII strings within a bound | pdfjs makes 3,092 length-2 requests with 37 distinct pairs and typescript 21,840 with 147 -- a full table would need 65,536 entries, so the cache is a bounded 1,024-entry direct-mapped table that still serves them at 98.6-99.8% | two-character substring +15.6%, six-character control +1.9%; group corpus geomean +0.18% | No |
+| `0063` | Case-converts ASCII strings without the Unicode machinery | The Unicode path walks code points through `lre_case_conv` and a `StringBuffer` even when the answer is the string it was given, and ASCII is the common case in comparisons and formatters | mixed-case lowercase +50.1%, already-lowercase +70.7%, uppercase +55.3%, non-ASCII -1.0%; group corpus geomean +0.18% | No |
+| `0064` | Fuses a local-keyed element load into one opcode | `obj[k]` with a local key paid a second dispatch, a stack push and pop for the key and a dup/free round trip on it, and prop-driven code reads `x[key]` once per property per object | Against 0063, five host passes: RN-prop rows 3.9% faster (all six ahead, diff/flatten 2.5–5.1%), React 1.5% faster (7 of 9), Octane unchanged at +0.24% geomean (4 of 13 rows) | Yes |
+| `0065` | Removes two dead dispatches in `resolve_labels`: `dup put_x_check(n) drop` becomes `put_x_check(n)`, and `lnot` before a conditional branch becomes the inverted branch | The TDZ-checked stores have no `set_x` form, so the existing `dup put_x(n) drop` peephole could not match them and every `let`/`const` assignment used as a statement kept its dup and its drop; `!x` in front of an `if` ran a ToBoolean and a branch where the branch alone does the same work | Landed as part of the 0065-0072 stack and measured as a unit against the landed 0064: Octane geomean +10.5% (12 of 13 rows), React 4.3% faster (7 of 9), RN props 2.8% faster (6 of 6) over three passes; the stack cannot be split because 0068 needs 0067, 0069 needs 0066 and 0072 needs 0066+0069 | No |
+| `0066` | Fuses the argument-frame element load (`get_arg get_loc get_array_el` -> `OP_get_arg8_loc8_array_el`) and the for-in branch (`for_in_next if_false` -> `OP_for_in_next_if_false`), retiring `put_arg2`, `put_arg3` and `set_arg1..3` to pay for them | On prop-diff code the receiver of `nextProps[propKey]` is a function parameter, so the first fusion still paid two dispatches and a stack round trip for the receiver; every `for_in_next` on that path is immediately followed by its branch | Landed as part of the 0065-0072 stack and measured as a unit against the landed 0064: Octane geomean +10.5% (12 of 13 rows), React 4.3% faster (7 of 9), RN props 2.8% faster (6 of 6) over three passes; the stack cannot be split because 0068 needs 0067, 0069 needs 0066 and 0072 needs 0066+0069 | Yes |
+| `0067` | Folds the prologue store-load pair (`put_loc(n) get_loc(n)` -> `set_loc(n)`) and the minified boolean constant a bundler emits (`push_i32(0) lnot` -> `push_false`) | Upstream's `put_x(n) get_x(n)` -> `set_x(n)` fold never sees the prologue initialisers because they are written before the rewriting loop starts, and terser writes `true` as `!0` -- 478-488 of them in a production RN bundle here | Landed as part of the 0065-0072 stack and measured as a unit against the landed 0064: Octane geomean +10.5% (12 of 13 rows), React 4.3% faster (7 of 9), RN props 2.8% faster (6 of 6) over three passes; the stack cannot be split because 0068 needs 0067, 0069 needs 0066 and 0072 needs 0066+0069 | No |
+| `0068` | Rewrites `OP_get_loc_check` to `OP_get_loc` for lexical locals already known to hold a value, in a linear pass before label resolution | Every read of a lexical local is emitted with a TDZ test because the emission site decides on `is_lexical` alone, so `const n = props.n; f(n); g(n); h(n);` pays the test four times when three cannot fire | Landed as part of the 0065-0072 stack and measured as a unit against the landed 0064: Octane geomean +10.5% (12 of 13 rows), React 4.3% faster (7 of 9), RN props 2.8% faster (6 of 6) over three passes; the stack cannot be split because 0068 needs 0067, 0069 needs 0066 and 0072 needs 0066+0069 | Yes |
+| `0069` | Adds `OP_get_arg_field_nr`, the argument-register form of `OP_get_loc_field_nr`: `get_arg(n) get_field(atom)` becomes one instruction that never pushes the receiver | Prop-diff code reads fields off a parameter, and the argument form had to keep the receiver on the stack just to read one field, paying the dup/free round trip and the 16-byte push and pop | Landed as part of the 0065-0072 stack and measured as a unit against the landed 0064: Octane geomean +10.5% (12 of 13 rows), React 4.3% faster (7 of 9), RN props 2.8% faster (6 of 6) over three passes; the stack cannot be split because 0068 needs 0067, 0069 needs 0066 and 0072 needs 0066+0069 | Yes |
+| `0070` | Deletes the fixed eleven-instruction stack template every computed element store was compiled through, so `[obj][key][val] put_array_el` is the whole store | `function f(a,i,v){ a[i]=v; }` compiled to sixteen opcodes where five carry the meaning | Landed as part of the 0065-0072 stack and measured as a unit against the landed 0064: Octane geomean +10.5% (12 of 13 rows), React 4.3% faster (7 of 9), RN props 2.8% faster (6 of 6) over three passes; the stack cannot be split because 0068 needs 0067, 0069 needs 0066 and 0072 needs 0066+0069 | No |
+| `0071` | Teaches the arguments-elision scan a fourth site kind, `var a = arguments;`: the site emits nothing, swallows the adjacent `put_loc`, and later reads of the alias are rewritten to read the argument frame directly | An alias of `arguments` is not a real local, but the scan did not recognise the declaration form, so every aliased read paid for the reified object | Landed as part of the 0065-0072 stack and measured as a unit against the landed 0064: Octane geomean +10.5% (12 of 13 rows), React 4.3% faster (7 of 9), RN props 2.8% faster (6 of 6) over three passes; the stack cannot be split because 0068 needs 0067, 0069 needs 0066 and 0072 needs 0066+0069 | No |
+| `0072` | Adds `OP_get_arg8_array_el`, the argument-register form of `OP_get_loc8_array_el`: `get_arg(a) get_array_el` becomes one instruction whose key is borrowed out of the argument register and never pushed | The keyed read `nextProps[propKey]` with the key in a parameter still paid a push, a pop and a dup/free round trip for the key | Landed as part of the 0065-0072 stack and measured as a unit against the landed 0064: Octane geomean +10.5% (12 of 13 rows), React 4.3% faster (7 of 9), RN props 2.8% faster (6 of 6) over three passes; the stack cannot be split because 0068 needs 0067, 0069 needs 0066 and 0072 needs 0066+0069 | Yes |
+| `9999` | Raises the bytecode version number, once, for every patch above that needs it | Bytecode built by a patched engine must not load in an unpatched one. Doing it here rather than in each patch stops patches colliding on the same line | - | This is the bump |
+
+## Reading the patches
+
+`patch_viewer.html` renders every `.patch` in this directory side by side, with
+the header, the diff and syntax highlighting. Open it from a local server so it
+can list the directory, or drag the patch files onto it:
+
+```
+python3 -m http.server -d engine/patches
+```
+
+## Writing a patch header
+
+Headers are for people. Keep them short -- usually twenty to forty lines --
+and say things the way you would say them out loud.
+
+```
+Subject: <one sentence saying what this adds>
+
+What this does
+  Two to four short sentences.
+
+Why we need it
+  What in the current engine is broken or impossible without this.
+
+What it adds
+  JS_GetFrameInfoAtLevel()  - asks the engine where a given stack frame is
+                              in the source: which file, which line, which
+                              column, and the function's name.
+
+Needs a bytecode version bump
+  No.
+
+Notes
+  Anything a reviewer genuinely needs. Leave it out if there is nothing.
+```
+
+Rules:
+
+- Spell acronyms out the first time. Write "the Chrome DevTools debugging
+  protocol", not "CDP".
+- No decoration. No symbols, no shouting in capitals, no bookkeeping about
+  which branch or session produced it.
+- Nothing a stranger cannot follow. No references to internal documents, and
+  no using a patch number as if it were a name.
+- Describe behaviour, not internals. "Lets the debugger ask where each stack
+  frame is" beats a paragraph about borrowed atoms. Details like who frees
+  what go under **Notes**, if they matter at all.
+- If the patch exists for speed, show the measurement.
+
+## No patch bumps the bytecode version
+
+A patch that changes the bytecode format **must not touch `BC_VERSION`**. It
+says so in its header and in its README row, and changes nothing.
+
+One patch raises the number, once, for the whole series:
+
+    9999-bc-version-bump.patch
+
+It is numbered `9999` so that adding patches never renumbers it and it always
+applies last. Its header lists every patch that made the bump necessary.
+
+The reason is not tidiness. If each patch bumps the version itself, then any
+two such patches conflict over the same line for reasons that have nothing to
+do with what either one does, and rebasing the series becomes a day's work
+instead of a minute's.
+
+The precompiled `builtin-*.h` blobs record the bytecode version in their first
+byte, so they are regenerated *after* the tail patch, as part of the projection
+step — never inside the patch that changed an opcode.
+
+`scripts/apply-patches.js --check` enforces all of this. It fails if a patch
+has no row in this table, if a row names a patch that does not exist, if any
+patch other than `9999` touches `BC_VERSION`, or if a patch says it needs a
+bump while `9999` is missing.

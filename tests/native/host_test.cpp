@@ -694,12 +694,9 @@ TEST(host_js_frame_budget) {
   Host h;
   CHECK_EQ(jsui_get_js_frame_budget(h.rt), 5.0);
   h.load(R"(
-    // Start on a clock edge: Date.now() can tick in ~15 ms steps (Windows),
-    // and an unaligned spin may then end right away.
-    globalThis.spin = (ms) => {
-      const t = Date.now(); while (Date.now() === t) {}
-      const end = Date.now() + ms; while (Date.now() < end) {}
-    };
+    // From a clock edge: Date.now() is ~15 ms coarse on Windows, so a plain
+    // `now + ms` deadline can pass right away.
+    globalThis.spin = (ms) => { const s = Date.now(); while (Date.now() === s) {} const end = Date.now() + ms; while (Date.now() < end) {} };
     globalThis.log = [];
     globalThis.chain = () => {
       setTimeout(() => {
@@ -767,4 +764,34 @@ TEST(host_prepares_text_before_commit) {
   h.tick();
   jsui_get_perf(h.rt, &p, 1);
   CHECK_EQ(p.paragraph_builds, uint64_t(1));
+}
+
+TEST(host_frees_destroyed_nodes_in_spare_time) {
+  Host h;
+  h.load(R"(
+    const N = __jsui_native;
+    globalThis.page = N.createNode('View');
+    for (let i = 0; i < 2000; i++) N.appendChild(page, N.createNode('View'));
+    N.appendChild(N.rootId, page);
+  )");
+  h.tick();
+  Document& doc = h.runtime().surfaces()[0]->doc;
+  CHECK(!doc.hasDestroyed());
+  h.load("__jsui_native.removeChild(__jsui_native.rootId, page); __jsui_native.destroyNode(page);");
+  // Gone from the document at once, freed over the following ticks.
+  CHECK(h.load("if (__jsui_native.getProps(page) !== undefined) throw new Error('still there');"));
+  CHECK(h.errors.empty());
+  CHECK(doc.hasDestroyed());
+  CHECK(jsui_wants_frame(h.rt));
+  for (int i = 0; i < 20 && doc.hasDestroyed(); i++) h.tick();
+  CHECK(!doc.hasDestroyed());
+  // Without a JS budget (simulated-time tools) they go in the same tick.
+  jsui_set_js_frame_budget(h.rt, 0);
+  h.load(R"(
+    globalThis.page = __jsui_native.createNode('View');
+    for (let i = 0; i < 2000; i++) __jsui_native.appendChild(page, __jsui_native.createNode('View'));
+    __jsui_native.destroyNode(page);
+  )");
+  h.tick();
+  CHECK(!doc.hasDestroyed());
 }

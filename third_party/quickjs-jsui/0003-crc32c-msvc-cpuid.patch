@@ -1,0 +1,34 @@
+Subject: Detect SSE4.2 with CPUID on MSVC-ABI targets
+
+What this does
+  rnq's 0030-crc32c-bytecode-checksum picks the hardware CRC32C path with
+  __builtin_cpu_supports("sse4.2"). Under clang-cl that needs __cpu_model
+  from compiler-rt, which the MSVC runtime doesn't have, so Windows links
+  fail. On _MSC_VER targets the check now reads CPUID leaf 1 directly.
+
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -43531,6 +43531,22 @@
+ 
+ #if defined(__SSE4_2__)
+ #define bc_csum_hw_available() 1
++#elif defined(_MSC_VER)
++/* JSUI: clang-cl links against the MSVC runtime, which has no __cpu_model
++   for __builtin_cpu_supports; ask CPUID (leaf 1, ECX bit 20) directly. */
++#include <intrin.h>
++static int bc_csum_hw_available(void)
++{
++    static int sse42 = -1;
++    if (sse42 < 0) {
++        int r[4];
++        __cpuid(r, 1);
++        sse42 = (r[2] >> 20) & 1;
++    }
++    return sse42;
++}
++/* bc_csum() tests for the name with #ifdef */
++#define bc_csum_hw_available bc_csum_hw_available
+ #else
+ #define bc_csum_hw_available() __builtin_cpu_supports("sse4.2")
+ #endif

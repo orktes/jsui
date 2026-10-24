@@ -401,3 +401,48 @@ TEST(native_animated_runtime_frame_clock) {
   CHECK(!messages.empty() && messages[0].find("unsupported animated node type 'nope'") != std::string::npos);
   jsui_destroy(rt);
 }
+
+// Expression nodes (Animated.derive): programs are validated when created
+// and evaluated on their inputs; clock nodes follow tick().
+TEST(native_animated_expression) {
+  Document doc;
+  NativeAnimated na(doc);
+  CHECK(na.createNode(1, json(R"({"type":"value","value":3})")));
+  CHECK(na.createNode(2, json(R"({"type":"value","value":4})")));
+  // const s = a * a; return s + (b > 3 ? clamp(b, 0, 3.5) : 0)  -> 9 + 3.5
+  CHECK(na.createNode(3, json(R"({"type":"expression","input":[1,2],"slots":1,
+    "code":[1,0, 1,0, 12, 3,0, 2,0, 1,1, 0,3, 22, 1,1, 0,0, 0,3.5, 40,26, 0,0, 28, 10]})")));
+  na.connectNodes(1, 3);
+  na.connectNodes(2, 3);
+  CHECK_NEAR(na.nodeOutput(3), 12.5, 1e-12);
+  na.setValue(2, 1);
+  CHECK_NEAR(na.nodeOutput(3), 9, 1e-12);
+  // NaN -> 0.
+  CHECK(na.createNode(4, json(R"({"type":"expression","input":[1],"slots":0,"code":[0,0,0,0,13]})")));
+  CHECK_EQ(na.nodeOutput(4), 0.0);
+  // Rejected: underflow, leftover values, bad indices / ops / functions.
+  std::string err;
+  for (const char* bad : {R"({"type":"expression","input":[1],"code":[10]})",
+                          R"({"type":"expression","input":[1],"code":[0,1,0,2]})",
+                          R"({"type":"expression","input":[1],"code":[1,1]})",
+                          R"({"type":"expression","input":[1],"slots":0,"code":[2,0]})",
+                          R"({"type":"expression","input":[1],"code":[99]})",
+                          R"({"type":"expression","input":[1],"code":[0,1,40,77]})",
+                          R"({"type":"expression","input":[1],"code":[0]})"}) {
+    err.clear();
+    CHECK(!na.createNode(9, json(bad), &err));
+    CHECK(err.find("expression") != std::string::npos);
+  }
+  // Clock: seconds of the frame clock, dirty every tick while used.
+  CHECK(na.createNode(5, json(R"({"type":"clock"})")));
+  CHECK(!na.animating());
+  CHECK(na.createNode(6, json(R"({"type":"expression","input":[5],"code":[1,0,0,2,12]})")));
+  na.connectNodes(5, 6);
+  CHECK(na.animating());
+  na.tick(1500);
+  CHECK_NEAR(na.nodeOutput(6), 3, 1e-12);
+  na.tick(2000);
+  CHECK_NEAR(na.nodeOutput(6), 4, 1e-12);
+  na.dropNode(6);
+  CHECK(!na.animating());
+}

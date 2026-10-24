@@ -29,6 +29,10 @@ namespace jsui {
 
 namespace {
 
+// A tick shorter than this leaves the frame room for a deferred cycle
+// collection.
+constexpr double kLightTickMs = 4.0;
+
 // "http://host:port/a/b.js?x" -> "http://host:port"; empty if not http.
 std::string httpOrigin(const std::string& url) {
   if (url.rfind("http://", 0) != 0) return {};
@@ -641,7 +645,17 @@ void Runtime::tick(double nowMs) {
   deliverUiCallResults();
   // Shared-session commands run last, on the frame this tick produced.
   if (session) session->tick(devOrigin_);
+  // Cycle collections the engine deferred while JS ran run between frames,
+  // in light ticks (no commit to speak of) or while nothing moves (see
+  // JsEngine::collectIdle).
+  if (js) {
+    double tickMs = wallMs() - tickWallStart;
+    bool idle = !wantsFrame();
+    for (auto& s : surfaces_) idle = idle && !s->needsRedraw();
+    js->collectIdle(tickMs < kLightTickMs, idle);
+  }
   prepareText();
+  freeDestroyedNodes();
 }
 
 // A time-sliced render (startTransition) creates its Text nodes frames before
@@ -669,6 +683,23 @@ void Runtime::prepareText() {
     }
     for (; i < list.size(); i++) list[keep++] = list[i];
     list.resize(keep);
+  }
+}
+
+// Nodes the reconciler destroyed (an old page after a navigation: thousands
+// of them) leave their document at once but are freed here, in this frame's
+// spare time, a few hundred at least per tick so that a busy app still gets
+// its memory back. Without a JS budget everything goes at once.
+void Runtime::freeDestroyedNodes() {
+  double until = tickWallStart + 2 * jsSliceMs;
+  for (auto& s : surfaces_) {
+    if (jsSliceMs <= 0) {
+      s->doc.freeDestroyed(SIZE_MAX);
+      continue;
+    }
+    if (!s->doc.freeDestroyed(256)) continue;
+    while (wallMs() < until && s->doc.freeDestroyed(64)) {
+    }
   }
 }
 
@@ -833,7 +864,7 @@ bool Runtime::wantsFrame() const {
       !animated->ends.empty() || lotties->animating() || shaders->animating() || state.hasDirty() || buffers.hasDirty() || textures.hasDirty() || audio->hasEvents() || audio->busy() || !uiResults_.empty() || !doomed_.empty())
     return true;
   for (const auto& s : surfaces_)
-    if (s->input->animating() || s->doc.layoutAnimating() || imageEventsReady(s->doc) ||
+    if (s->doc.hasDestroyed() || s->input->animating() || s->doc.layoutAnimating() || imageEventsReady(s->doc) ||
         (bundleRan_ && (s->pending || s->resizePending)))
       return true;
   return false;

@@ -1741,6 +1741,25 @@ Native's API and both of its drivers:
     (`FinalizationRegistry`). A reload clears the native graph.
   * Without `__jsui_native.animated` (Node tests, other hosts)
     `useNativeDriver` falls back to the JS driver.
+  * Derived values: `Animated.derive(inputs, fn)` (and `Animated.expr(fn)`
+    to define one up front) compiles `fn`'s body, a pure-math subset of JS
+    (`packages/react/src/animated/expression.js`), into a stack program
+    (`expression` node: constants, inputs, locals, arithmetic, comparisons,
+    `&&` / `||` / `?:` as eager selects, `Math.*` and GLSL-style helpers).
+    The native node validates the program once (ops, operand ranges, stack
+    balance) and runs it without allocating; the JS driver runs the same
+    program, so both agree bit for bit
+    (`tests/native/react_derive_e2e_test.cpp`). Bytecode bundles have no
+    function source, so `jsui build` (`packages/cli/src/derive.js`) rewrites
+    inline `derive(..., fn)` / `.expr(fn)` calls to pass `{source, scope}`:
+    a text pass (strings, comments and template text masked) that uses the
+    runtime's own parser to find the function's end and its free names.
+    Free names are captured at call time: numbers become constants,
+    Animated nodes extra inputs. Functions outside the subset are build
+    warnings and run only on the JS driver (making them native throws).
+  * `Animated.clock()`: a `clock` node, the runtime clock in seconds. Clock
+    nodes with dependents are marked dirty in every `NativeAnimated::tick`
+    and count as animating (`jsui_wants_frame`).
   * Not native (yet): `toValue` bound to another Animated node (RN's
     `tracking` node) restarts native animations from JS when the target
     changes; scroll physics (and so `Animated.event` from flings) only
@@ -2026,6 +2045,13 @@ changed rather than to the tree size:
     the frames before the commit (`Runtime::prepareText`, up to twice the
     budget per tick): the same paragraph build and first layout the measure
     would do, so pixels are unchanged.
+  Tearing down the old page is spread out the same way. The bundled
+  reconciler queues React's per-fiber detach of a deleted subtree
+  (`detachFiberAfterEffects`) and runs it at idle priority in budget-sized
+  slices. Each field it nulls frees what it held, which took 4-8 ms of the
+  frame after a navigation commit. The runtime takes destroyed nodes out of
+  the document at once, but frees them in each tick's spare time
+  (`Runtime::freeDestroyedNodes`, at least 256 per tick).
   Offline tools on simulated time (jsui-render, jsui-record, jsui-bench, the
   CLI's headless runtime) turn the budget off, so a frame's content does not
   depend on the machine's speed.
@@ -2202,7 +2228,35 @@ names.
   Layout and allocator effects move such numbers by about ±1%, so compare
   several scenarios before trusting a small change. Pixels are identical
   (reference suite and `jsui-bench --dump` on every scenario).
-* **QuickJS.** `cmake/Deps.cmake` compiles a patched copy of quickjs.c:
+* **QuickJS engine patches.** `cmake/Deps.cmake` applies two patch series
+  (`git apply`, in file name order) to a copy of the QuickJS-ng sources in
+  the build tree. `third_party/quickjs-rnq` is react-native-quickjs's engine
+  work (MIT; rebased from their quickjs-ng base onto v0.17.0, what each patch
+  does: `UPSTREAM-README.md` there): inline caches for property reads and
+  stores, object literal shape templates, fused opcodes for prop-diff code,
+  dense arrays with holes, string caches, faster JSON and RegExp, deferred
+  GC and the debugger interface. On an M1 Ultra they take 8-24% off the JS
+  time of every jsui-bench scenario (mount 24%, React commits about 11%) for
+  about 100 KB more code (56 KB gzipped), with the same memory.
+  `third_party/quickjs-jsui` holds JSUI's own, on top of those:
+  * *Cycle collection between frames.* QuickJS frees by reference counting
+    and collects cycles with a stop-the-world pass over every GC object
+    (about 1 ms per MB of heap), which landed 15-35 ms pauses in the middle
+    of React commits (a screen mount). Collections that come due while JS
+    runs are deferred (react-native-quickjs's 0002, with a dynamic ceiling),
+    and `Runtime::tick` runs them at the end of a tick
+    (`JsEngine::collectIdle`): on a light tick (under 4 ms), else after 3
+    heavy ones. That took the JS p95 of the mount scenario from 24 to 8.4 ms
+    on an M1 Ultra. The patch also has a generational mode (young
+    collections over the objects allocated since the last one, in time-boxed
+    slices, survivors kept as roots); it is off, because on showcase
+    navigation and mounts it cost 3-5x the GC time and 5 MB more for no
+    shorter pause: a new screen outlives the next few collections anyway.
+    `jsui_get_perf` reports collections and pauses (`gc_*`).
+  * *Platform fixes* for the rnq series: the holey-array union on 32-bit
+    targets, SSE4.2 detection under clang-cl, and the inline-cache hit paths
+    under switch dispatch (Emscripten, MSVC), which ran the opcode twice.
+* **QuickJS.** On top of the patch series, `cmake/Deps.cmake` patches quickjs.c further:
   `JS_FreeValue` / `JS_DupValue` are inlined (quickjs-ng exports them out of
   line, a call per value the interpreter pops) and `===` / `!==` decide
   objects, symbols, booleans, null, undefined, mismatched types and string
@@ -2214,15 +2268,11 @@ names.
   `JS_GetOwnPropertyNames` on non-exotic objects), `for-in` (the iterator
   keeps its key table instead of building a dictionary object, and skips
   prototypes with no enumerable string keys without listing them),
-  `define-field` (object literal fields go straight to `add_property`) and
-  `shape-transitions` (adding a property named in the code, by an object
-  literal or `obj.name = v`, keeps the old shape as the parent of the new
-  one up to 32 properties, so literals and constructors built the same way
-  share one hashed shape chain instead of each owning a private shape;
-  computed keys keep upstream's in-place shape update, so maps used as
-  dictionaries do not grow memory). Together they take 5-11% of the
-  instructions out of the React scenarios in `jsui-bench`, for 3 KB of
-  code; none changes the bytecode. `JSUI_QUICKJS_FLAGS`
+  and `define-field` (object literal fields go straight to
+  `add_property`). Together with the former `shape-transitions` patch
+  (now react-native-quickjs's 0051) they took 5-11% of the instructions out
+  of the React scenarios in `jsui-bench`, for 3 KB of code; none changes
+  the bytecode. `JSUI_QUICKJS_FLAGS`
   adds compile flags for QuickJS alone.
 * **QuickJS PGO.** Release binaries compile QuickJS (and only QuickJS) with
   profile-guided optimization: 6-9% less JS time on React-heavy scenarios

@@ -1032,16 +1032,22 @@ class CanvasView extends DomView {
 
   /** What the frames since the last reset cost (jsui_get_perf): exclusive µs per
    * phase (`js_us`, `commit_us`, `animated_us`, `style_us`, `layout_us`,
-   * `input_us`, `paint_us`, `other_us`, `gpu_submit_us`; with setProfiling(true))
-   * and work counters. `reset` starts new totals. */
+   * `input_us`, `paint_us`, `other_us`, `gpu_submit_us`; with setProfiling(true)),
+   * work counters and JS garbage collection (`gc_collections`,
+   * `gc_full_collections`, `gc_us`, `gc_max_us`). `reset` starts new totals. */
   getPerf(reset = true) {
     if (!this.rt) return null;
-    const M = this.module, p = this._scratch;  // JsuiPerf: 10 doubles, 6 uint64 (128 bytes)
+    // JsuiPerf: 10 doubles, 6 uint64, then the GC fields (2 uint64, 2 doubles): 160 bytes
+    const M = this.module, p = this._scratch;
     M._jsui_get_perf(this.rt, p, reset ? 1 : 0);
-    const v = new DataView(M.HEAPU8.buffer, p, 128);
+    const v = new DataView(M.HEAPU8.buffer, p, 160);
     const out = {};
     PERF_TIMES.forEach((k, i) => { out[k] = v.getFloat64(i * 8, true); });
     PERF_COUNTS.forEach((k, i) => { out[k] = Number(v.getBigUint64(80 + i * 8, true)); });
+    out.gc_collections = Number(v.getBigUint64(128, true));
+    out.gc_full_collections = Number(v.getBigUint64(136, true));
+    out.gc_us = v.getFloat64(144, true);
+    out.gc_max_us = v.getFloat64(152, true);
     return out;
   }
 

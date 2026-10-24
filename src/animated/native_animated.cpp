@@ -118,6 +118,12 @@ bool NativeAnimated::createNode(int tag, const Value& c, std::string* error) {
     n.bufferKey = c["key"].asString();
     double index = c["index"].asNumber();
     n.bufferIndex = index >= 0 && index < 4294967296.0 ? size_t(index) : size_t(-1);
+  } else if (type == "clock") {
+    n.type = Type::Clock;
+  } else if (type == "expression") {
+    n.type = Type::Expression;
+    for (const Value& t : c["input"].asArray()) n.inputs.push_back(int(t.asNumber()));
+    if (!compileExpression(n, c, error)) return false;
   } else if (type == "transform") {
     n.type = Type::Transform;
     for (const Value& t : c["transforms"].asArray()) {
@@ -141,6 +147,7 @@ bool NativeAnimated::createNode(int tag, const Value& c, std::string* error) {
   if (nodes_.count(tag)) dropNode(tag);
   if (n.type == Type::HostBuffer) bufferNodes_[n.bufferKey].push_back(tag);
   if (n.type == Type::Props) propsNodes_.push_back(tag);
+  if (n.type == Type::Clock) clockNodes_.push_back(tag);
   nodes_.emplace(tag, std::move(n));
   return true;
 }
@@ -193,6 +200,7 @@ void NativeAnimated::dropNode(int tag) {
     }
   }
   if (n->type == Type::Props) propsNodes_.erase(std::remove(propsNodes_.begin(), propsNodes_.end(), tag), propsNodes_.end());
+  if (n->type == Type::Clock) clockNodes_.erase(std::remove(clockNodes_.begin(), clockNodes_.end(), tag), clockNodes_.end());
   nodes_.erase(tag);
 }
 
@@ -211,6 +219,7 @@ void NativeAnimated::clear() {
   dirtyValues_.clear();
   dirtyNotify_.clear();
   bufferNodes_.clear();
+  clockNodes_.clear();
   recheckViews_ = true;
   ends.clear();
   updates.clear();
@@ -351,6 +360,14 @@ void NativeAnimated::evaluate(ANode& n) {
       n.out = Value(n.num);
       break;
     }
+    case Type::Clock:
+      n.num = clockMs_ / 1000;
+      n.out = Value(n.num);
+      break;
+    case Type::Expression:
+      n.num = runExpression(n);
+      n.out = Value(n.num);
+      break;
     case Type::Interpolation: {
       double x = n.parents.empty() ? 0 : evalNum(n.parents[0]);
       if (n.outKind == OutKind::Number) {
@@ -691,6 +708,11 @@ bool NativeAnimated::step(Anim& a, double t) {
 
 void NativeAnimated::tick(double nowMs) {
   Perf::Scope scope(doc_.perf, Phase::Animated);
+  if (nowMs != clockMs_) {
+    clockMs_ = nowMs;
+    for (int tag : clockNodes_)
+      if (ANode* n = node(tag); n && !n->children.empty()) markDirty(*n);
+  }
   for (size_t i = 0; i < animations_.size();) {
     Anim& a = animations_[i];
     if (step(a, nowMs)) {
@@ -709,6 +731,198 @@ void NativeAnimated::tick(double nowMs) {
     if (listening_.count(tag)) updates.push_back({tag, n->value});
   }
   dirtyNotify_.clear();
+}
+
+// -------------------------------------------------------------- expressions
+
+namespace {
+
+// Function ids of expression.js FUNCS, with their arity.
+constexpr uint8_t kFuncArity[] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2,
+                                  1, 1, 1, 2, 2, 2, 2, 3, 3, 2, 3, 1, 2};
+constexpr size_t kFuncCount = sizeof kFuncArity;
+
+bool truthy(double v) { return v != 0 && v == v; }
+
+double callFunc(uint8_t f, const double* a) {
+  switch (f) {
+    case 0: return std::fabs(a[0]);
+    case 1: return a[0] > 0 ? 1 : a[0] < 0 ? -1 : a[0];  // keeps -0 / NaN, like Math.sign
+    case 2: return std::floor(a[0]);
+    case 3: return std::ceil(a[0]);
+    case 4: return jsRound(a[0]);
+    case 5: return std::trunc(a[0]);
+    case 6: return std::sqrt(a[0]);
+    case 7: return std::cbrt(a[0]);
+    case 8: return std::exp(a[0]);
+    case 9: return std::log(a[0]);
+    case 10: return std::log2(a[0]);
+    case 11: return std::log10(a[0]);
+    case 12: return std::sin(a[0]);
+    case 13: return std::cos(a[0]);
+    case 14: return std::tan(a[0]);
+    case 15: return std::asin(a[0]);
+    case 16: return std::acos(a[0]);
+    case 17: return std::atan(a[0]);
+    case 18: return std::atan2(a[0], a[1]);
+    case 19: return std::sinh(a[0]);
+    case 20: return std::cosh(a[0]);
+    case 21: return std::tanh(a[0]);
+    case 22: return std::pow(a[0], a[1]);
+    case 23: return std::hypot(a[0], a[1]);
+    // Math.min / max: NaN wins, -0 < +0.
+    case 24: return a[0] != a[0] || a[1] != a[1] ? NAN : a[0] < a[1] || (a[0] == a[1] && std::signbit(a[0])) ? a[0] : a[1];
+    case 25: return a[0] != a[0] || a[1] != a[1] ? NAN : a[0] > a[1] || (a[0] == a[1] && !std::signbit(a[0])) ? a[0] : a[1];
+    case 26: {  // clamp = min(max(x, lo), hi)
+      double m = callFunc(25, a);
+      double b[2] = {m, a[2]};
+      return callFunc(24, b);
+    }
+    case 27: return a[0] + (a[1] - a[0]) * a[2];
+    case 28: return a[1] < a[0] ? 0 : 1;
+    case 29: {
+      double t = (a[2] - a[0]) / (a[1] - a[0]);
+      double c[3] = {t, 0, 1};
+      t = callFunc(26, c);
+      return t * t * (3 - 2 * t);
+    }
+    case 30: return a[0] - std::floor(a[0]);
+    case 31: return std::fmod(std::fmod(a[0], a[1]) + a[1], a[1]);
+  }
+  return NAN;
+}
+
+}  // namespace
+
+// The program is checked once here (known ops, operand indices in range,
+// a balanced stack ending with one value), so runExpression needs no checks.
+bool NativeAnimated::compileExpression(ANode& n, const Value& c, std::string* error) {
+  auto fail = [&](const char* msg) {
+    if (error) *error = std::string("expression: ") + msg;
+    return false;
+  };
+  const Value::Array& code = c["code"].asArray();
+  double slots = c["slots"].asNumber();
+  if (!(slots >= 0 && slots <= 4096)) return fail("bad slot count");
+  n.slots = uint32_t(slots);
+  int depth = 0, maxDepth = 0;
+  auto operand = [&](size_t& i, double* out) {
+    if (++i >= code.size() || !code[i].isNumber()) return false;
+    *out = code[i].asNumber();
+    return true;
+  };
+  for (size_t i = 0; i < code.size(); i++) {
+    if (!code[i].isNumber()) return fail("non-number op");
+    double raw = code[i].asNumber();
+    int op = int(raw);
+    if (double(op) != raw) return fail("bad op");
+    Instr ins{Op(op)};
+    int pops = 0, pushes = 1;
+    double arg = 0;
+    switch (Op(op)) {
+      case Op::Const:
+        if (!operand(i, &ins.k)) return fail("missing constant");
+        pushes = 1;
+        break;
+      case Op::Input:
+      case Op::Load:
+      case Op::Store: {
+        if (!operand(i, &arg) || arg < 0 || arg != std::floor(arg)) return fail("bad index");
+        size_t limit = Op(op) == Op::Input ? n.inputs.size() : n.slots;
+        if (arg >= double(limit)) return fail("index out of range");
+        ins.index = uint32_t(arg);
+        if (Op(op) == Op::Store) pops = 1, pushes = 0;
+        break;
+      }
+      case Op::Neg:
+      case Op::Not: pops = 1; break;
+      case Op::Add: case Op::Sub: case Op::Mul: case Op::Div: case Op::Mod: case Op::Pow:
+      case Op::Lt: case Op::Le: case Op::Gt: case Op::Ge: case Op::Eq: case Op::Ne:
+      case Op::And: case Op::Or: pops = 2; break;
+      case Op::Select: pops = 3; break;
+      case Op::Call:
+        if (!operand(i, &arg) || arg < 0 || arg >= double(kFuncCount) || arg != std::floor(arg)) return fail("bad function");
+        ins.fn = uint8_t(arg);
+        pops = kFuncArity[ins.fn];
+        break;
+      default: return fail("unknown op");
+    }
+    if (depth < pops) return fail("stack underflow");
+    depth += pushes - pops;
+    maxDepth = std::max(maxDepth, depth);
+    n.code.push_back(ins);
+  }
+  if (depth != 1) return fail("the program must leave one value");
+  n.stackSize = uint32_t(maxDepth);
+  return true;
+}
+
+double NativeAnimated::runExpression(ANode& n) {
+  // Inputs are evaluated first: evaluating one may run another expression,
+  // which reuses the scratch stacks.
+  double inputsSmall[8];
+  std::vector<double> inputsBig;
+  double* in = inputsSmall;
+  if (n.inputs.size() > 8) {
+    inputsBig.resize(n.inputs.size());
+    in = inputsBig.data();
+  }
+  for (size_t i = 0; i < n.inputs.size(); i++) in[i] = evalNum(n.inputs[i]);
+  exprStack_.resize(n.stackSize);
+  exprSlots_.resize(n.slots);
+  double* st = exprStack_.data();
+  double* slots = exprSlots_.data();
+  size_t sp = 0;
+  for (const Instr& ins : n.code) {
+    switch (ins.op) {
+      case Op::Const: st[sp++] = ins.k; break;
+      case Op::Input: st[sp++] = in[ins.index]; break;
+      case Op::Load: st[sp++] = slots[ins.index]; break;
+      case Op::Store: slots[ins.index] = st[--sp]; break;
+      case Op::Neg: st[sp - 1] = -st[sp - 1]; break;
+      case Op::Not: st[sp - 1] = truthy(st[sp - 1]) ? 0 : 1; break;
+      case Op::Select: sp -= 2; st[sp - 1] = truthy(st[sp - 1]) ? st[sp] : st[sp + 1]; break;
+      case Op::Call: {
+        uint8_t k = kFuncArity[ins.fn];
+        sp -= k;
+        st[sp] = callFunc(ins.fn, st + sp);
+        sp++;
+        break;
+      }
+      default: {
+        double b = st[--sp], a = st[sp - 1], r = 0;
+        switch (ins.op) {
+          case Op::Add: r = a + b; break;
+          case Op::Sub: r = a - b; break;
+          case Op::Mul: r = a * b; break;
+          case Op::Div: r = a / b; break;
+          case Op::Mod: r = std::fmod(a, b); break;
+          case Op::Pow: r = (b != b || ((a == 1 || a == -1) && std::isinf(b))) ? NAN : std::pow(a, b); break;
+          case Op::Lt: r = a < b; break;
+          case Op::Le: r = a <= b; break;
+          case Op::Gt: r = a > b; break;
+          case Op::Ge: r = a >= b; break;
+          case Op::Eq: r = a == b; break;
+          case Op::Ne: r = !(a == b); break;
+          case Op::And: r = truthy(a) ? b : a; break;
+          case Op::Or: r = truthy(a) ? a : b; break;
+          default: break;
+        }
+        st[sp - 1] = r;
+      }
+    }
+  }
+  double v = sp ? st[sp - 1] : 0;
+  return v == v ? v : 0;  // NaN -> 0, as in the JS evaluator
+}
+
+size_t NativeAnimated::liveClocks() const {
+  size_t live = 0;
+  for (int tag : clockNodes_) {
+    auto it = nodes_.find(tag);
+    if (it != nodes_.end() && !it->second.children.empty()) live++;
+  }
+  return live;
 }
 
 // ------------------------------------------------------------------- events

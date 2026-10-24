@@ -348,6 +348,10 @@ if(JSUI_BUILD_TOOLS AND NOT EMSCRIPTEN)
   target_link_libraries(jsui-bench PRIVATE jsui)
   target_include_directories(jsui-bench PRIVATE src)
   jsui_copy_icu_data(jsui-bench)
+  # Showcase navigation: frame times and GC pauses over page changes.
+  add_executable(jsui-nav tools/jsui-bench/nav.cpp)
+  target_link_libraries(jsui-nav PRIVATE jsui)
+  jsui_copy_icu_data(jsui-nav)
   # Paint benchmark: CPU raster (incremental / full) and headless Ganesh GL.
   add_executable(jsui-paint-bench tools/jsui-paint-bench/main.cpp)
   target_link_libraries(jsui-paint-bench PRIVATE jsui)
