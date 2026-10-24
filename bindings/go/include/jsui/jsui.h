@@ -269,6 +269,7 @@ JSUI_API const void* jsui_get_buffer(JsuiRuntime* rt, const char* key, JsuiBuffe
  *     JSUI_TEXTURE_WEBGPU   WGPUTexture        jsui_gpu_create_webgpu, jsui_gpu_create_dawn*
  *     JSUI_TEXTURE_VULKAN   VkImage            jsui_gpu_create_vulkan
  *     JSUI_TEXTURE_METAL    id<MTLTexture>     jsui_gpu_create_metal, jsui_metal_create
+ *     JSUI_TEXTURE_D3D12    ID3D12Resource*    jsui_gpu_create_d3d12
  *
  * A render that cannot sample a texture (another API, the CPU raster for a
  * GPU texture) leaves its views empty and logs one warning per texture.
@@ -286,14 +287,22 @@ JSUI_API const void* jsui_get_buffer(JsuiRuntime* rt, const char* key, JsuiBuffe
  * (Vulkan: the render's full barriers order it; Metal: the same queue;
  * WebGPU: queue order). Formats: 8-bit RGBA or BGRA, UNORM, holding
  * sRGB-encoded values like images do (Vulkan / Metal / WebGPU / GL format 0:
- * RGBA8 UNORM). Vulkan images must be in SHADER_READ_ONLY_OPTIMAL whenever a
- * render runs (JSUI leaves them in it). */
+ * RGBA8 UNORM; D3D12 format 0: the resource's own, RGBA8 / BGRA8 UNORM or
+ * TYPELESS). Vulkan images must be in SHADER_READ_ONLY_OPTIMAL whenever a
+ * render runs (JSUI leaves them in it). D3D12 resources must be in the state
+ * JsuiTexture.usage names (0: PIXEL_SHADER_RESOURCE) whenever a render runs:
+ * a render that samples one in another state transitions it back before it
+ * returns (in its own command list on the queue), so the host's state
+ * tracking stays valid. A D3D12 context holds a reference (AddRef) to a
+ * resource while it keeps it wrapped (until the end of the next frame that
+ * does not show it, or jsui_gpu_purge). */
 typedef enum JsuiTextureKind {
     JSUI_TEXTURE_PIXELS = 0, /* CPU pixels (jsui_set_texture_pixels) */
     JSUI_TEXTURE_GL,         /* handle: the GL texture name, (void*)(uintptr_t)name; GL_TEXTURE_2D */
     JSUI_TEXTURE_WEBGPU,     /* handle: WGPUTexture (TextureBinding usage) */
     JSUI_TEXTURE_VULKAN,     /* handle: VkImage (SAMPLED usage), on the context's device */
-    JSUI_TEXTURE_METAL       /* handle: id<MTLTexture> (ShaderRead usage), on the context's device */
+    JSUI_TEXTURE_METAL,      /* handle: id<MTLTexture> (ShaderRead usage), on the context's device */
+    JSUI_TEXTURE_D3D12       /* handle: ID3D12Resource*, on the context's device (state: usage) */
 } JsuiTextureKind;
 
 enum {
@@ -316,7 +325,9 @@ typedef struct JsuiTexture {
     int width, height;    /* px */
     int flags;            /* JSUI_TEXTURE_* */
     /* Vulkan: the VkImageUsageFlags the image was created with (0: SAMPLED |
-     * TRANSFER_SRC | TRANSFER_DST). Unused elsewhere. */
+     * TRANSFER_SRC | TRANSFER_DST). D3D12: the D3D12_RESOURCE_STATES the
+     * resource is in whenever a render runs, and is left in (0:
+     * PIXEL_SHADER_RESOURCE). Unused elsewhere. */
     unsigned int usage;
 } JsuiTexture;
 
@@ -933,7 +944,7 @@ typedef struct JsuiVulkanDevice {
 } JsuiVulkanDevice;
 
 typedef struct JsuiGpuTarget {
-    void* texture;           /* VkImage / id<MTLTexture> / WGPUTexture */
+    void* texture;           /* VkImage / id<MTLTexture> / WGPUTexture / ID3D12Resource* / ID3D11Texture2D* */
     /* VkFormat / MTLPixelFormat; 0: 8-bit RGBA unorm (VK_FORMAT_R8G8B8A8_UNORM
      * / MTLPixelFormatRGBA8Unorm). Also BGRA8 and the sRGB variants. */
     unsigned int format;
@@ -997,6 +1008,75 @@ JSUI_API int jsui_render_gpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const 
  * input attachment, sampled, transfer src / dst) that is in
  * VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL before and after the call. */
 JSUI_API int jsui_render_vulkan(JsuiRuntime* rt, JsuiGpuContext* gpu, void* image, int width, int height, int flags);
+
+/* ------------------------------------- GPU (Direct3D 12 / 11, Windows; Ganesh)
+ *
+ * Skia Graphite has no Direct3D backend, so on Direct3D hosts (Unreal and
+ * Godot on D3D12, Unity on D3D11 / D3D12) the frame is drawn by Skia Ganesh
+ * on Direct3D 12. Available when the library was built with JSUI_D3D (a
+ * Windows Skia from scripts/build-skia-desktop.sh, skia_use_direct3d);
+ * otherwise the create functions return NULL. Both contexts render with
+ * jsui_render_gpu_target() and a JsuiGpuTarget whose fields mean:
+ *
+ *     texture       ID3D12Resource* (D3D12) / ID3D11Texture2D* (D3D11), a 2D
+ *                   texture of the context's device, one mip, one sample
+ *     format        DXGI_FORMAT; 0: the texture's own. R8G8B8A8 / B8G8R8A8,
+ *                   UNORM or UNORM_SRGB (or the TYPELESS of those: then
+ *                   drawn as UNORM). D3D12: no B8G8R8A8_UNORM_SRGB (Skia
+ *                   Ganesh has no such format; use B8G8R8A8_TYPELESS);
+ *                   R8G8B8A8_UNORM_SRGB blends in linear light, as on GL /
+ *                   Vulkan. D3D11: the frame is drawn as UNORM and copied
+ *                   bit for bit, so an sRGB texture gets sRGB-encoded
+ *                   values blended like the CPU raster.
+ *     layout        D3D12: the D3D12_RESOURCE_STATES the resource is in when
+ *                   the call is made (0 = COMMON)
+ *     final_layout  D3D12: the state to leave it in (e.g. 0x80
+ *                   PIXEL_SHADER_RESOURCE for a texture the host samples next)
+ *     usage         unused
+ *
+ * D3D12 (jsui_gpu_create_d3d12): Ganesh on the host's ID3D12Device and
+ * ID3D12CommandQueue (a DIRECT queue; both AddRef'd). The resource needs
+ * D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET. Every render executes its
+ * command lists on `queue` before it returns, so it is ordered after what
+ * the host executed on the queue before and before what it executes after
+ * (queue order; the resource is transitioned from `layout` and back to
+ * `final_layout` within the render's own command lists). The host must not
+ * use the queue from another thread during the call. With
+ * JSUI_GPU_INCREMENTAL only the damage is repainted into the resource;
+ * without it small damage is repainted into a frame the context keeps per
+ * runtime and drawn into the resource whole (`dirty`: the whole target).
+ *
+ * D3D11 (jsui_gpu_create_d3d11): Ganesh draws on a Direct3D 12 device the
+ * context creates on the same adapter as the host's ID3D11Device (which
+ * must be an ID3D11Device5, Windows 10 1703+). The frame is drawn into a
+ * shared texture the context owns (one per runtime and size) and copied
+ * into the host's texture with the device's immediate context, behind a
+ * shared fence: the render waits on the D3D11 side for the D3D12 work and
+ * the copy is queued on the immediate context like a host CopyResource
+ * (call it on the thread that owns the immediate context). The host's
+ * texture needs no shared or bind flags (a plain RenderTexture works;
+ * DEFAULT usage, one sample). The shared texture keeps the runtime's last
+ * frame, so only the damage is ever repainted; with JSUI_GPU_INCREMENTAL
+ * only the damage is copied too (`dirty`: the copied rect), else the whole
+ * frame. JSUI_GPU_NO_CLEAR copies the host's texture into the shared one
+ * first and draws the whole frame over it.
+ *
+ * Device removal: a render returns -1 once the device is removed
+ * (GetDeviceRemovedReason); destroy the context and create a new one on
+ * the new device.
+ *
+ * Host textures (jsui_set_texture): JSUI_TEXTURE_D3D12 (ID3D12Resource of
+ * the context's device, in the state JsuiTexture.usage names, 0:
+ * PIXEL_SHADER_RESOURCE, whenever a render runs; JSUI returns it to that
+ * state) on D3D12 contexts. D3D11 contexts cannot sample host textures yet.
+ */
+/* `device`: ID3D12Device*, `queue`: its ID3D12CommandQueue* (DIRECT). NULL
+ * without JSUI_D3D, on a NULL argument, or when Skia rejects the device. */
+JSUI_API JsuiGpuContext* jsui_gpu_create_d3d12(void* device, void* queue);
+/* `device`: ID3D11Device* (an ID3D11Device5). NULL without JSUI_D3D, when the
+ * device is not an ID3D11Device5 or no D3D12 device can be created on its
+ * adapter. */
+JSUI_API JsuiGpuContext* jsui_gpu_create_d3d11(void* device);
 
 /* ---------------------------------------------- GPU pipeline cache (Graphite)
  *
