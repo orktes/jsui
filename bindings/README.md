@@ -46,7 +46,8 @@ cd bindings/go/examples/quests && go run .
 ```
 
 On Linux GLFW needs the X11 and GL development packages (`libx11-dev
-libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev`).
+libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev`; Go's GLFW also
+`libxxf86vm-dev`).
 
 Both examples take the same options:
 

@@ -310,7 +310,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ninja-build clang cmake libfontconfig1-dev zlib1g-dev \
-            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxinerama-dev libxfixes-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxinerama-dev libxfixes-dev libxxf86vm-dev \
             libgl1-mesa-dev libegl1 libegl-mesa0 libgl1-mesa-dri xvfb xauth
       - name: Cache prebuilt Skia
         uses: actions/cache@v4
