@@ -1,5 +1,6 @@
 // esbuild configuration shared by `jsui build` and `jsui dev`.
 
+import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { assetPlugin } from './assets.js';
@@ -47,6 +48,46 @@ function aliasPlugin() {
   };
 }
 
+// Small, exact source patches to react-reconciler's production build for
+// QuickJS (no JIT: every loop iteration of React's own bookkeeping is paid
+// in the interpreter). Each patch is applied only when its anchor matches
+// exactly once, so another React version builds unpatched rather than
+// wrongly. JSUI_REACT_PATCHES=0 turns them off (A/B measurements).
+const REACT_PATCHES = [
+  {
+    // Lazy context propagation: every fiber that bails out walks up to the
+    // root looking for context providers whose value changed, stopping at a
+    // fiber that already did (DidPropagateContext, 262144). Siblings never
+    // stop early, so 500 memoized list rows that bail out walk the whole
+    // ancestor chain 500 times (17% of an inventory update's JS). When the
+    // walk found no changed provider, the parent's walk (a suffix of it)
+    // would find none either: mark it, so the siblings stop there.
+    file: /react-reconciler[\\/]cjs[\\/]react-reconciler\.production\.js$/,
+    from: '    workInProgress.flags |= 262144;\n    return null !== current;\n',
+    to: '    workInProgress.flags |= 262144;\n    null === current && null !== workInProgress.return && (workInProgress.return.flags |= 262144);\n    return null !== current;\n',
+  },
+];
+
+function reactPatchPlugin() {
+  return {
+    name: 'jsui-react-patches',
+    setup(build) {
+      if (process.env.JSUI_REACT_PATCHES === '0') return;
+      build.onLoad({ filter: /react-reconciler[\\/]cjs[\\/].*\.js$/ }, async (args) => {
+        const patches = REACT_PATCHES.filter((p) => p.file.test(args.path));
+        if (!patches.length) return undefined;
+        let src = await fs.promises.readFile(args.path, 'utf8');
+        for (const p of patches) {
+          const i = src.indexOf(p.from);
+          if (i < 0 || src.indexOf(p.from, i + 1) >= 0) continue;
+          src = src.slice(0, i) + p.to + src.slice(i + p.from.length);
+        }
+        return { contents: src, loader: 'js' };
+      });
+    },
+  };
+}
+
 /**
  * @param {object} o
  * @param {string} o.entry
@@ -88,7 +129,7 @@ export function esbuildOptions(o) {
     // Libraries sometimes read process.* beyond NODE_ENV.
     banner: { js: `var process = globalThis.process || { env: { NODE_ENV: ${JSON.stringify(o.mode)} }, platform: "jsui", nextTick: function (f) { Promise.resolve().then(f); } };` },
     logLevel: 'silent',
-    plugins: [aliasPlugin(), assetPlugin(o.assets)],
+    plugins: [aliasPlugin(), reactPatchPlugin(), assetPlugin(o.assets)],
     metafile: true,
   };
 }
