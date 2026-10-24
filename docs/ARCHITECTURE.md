@@ -1804,16 +1804,31 @@ the expensive per-pixel work is done once:
   pixels over a uniform backdrop, the CPU path moves the viewport's pixels
   and repaints only what the scroll exposed, what is painted above the
   content and curved outlines at the viewport's edge (`ScrollBlit`).
-* **Sprites.** On the CPU raster, gradient backgrounds and Image nodes of
-  128x128 to 2.2M device pixels are rendered once per content, device scale
-  and sub-pixel phase and blitted at whole-pixel offsets afterwards
-  (`drawSprite`, 48 MB per document), so static art at a fractional
-  position is cached too. While a node keeps moving by sub-pixels or
-  scaling (it changed in this frame and the one before, `PaintMotion`) its
-  sprites are drawn directly instead, as a new sprite every frame would
-  cost more, and the node is repainted from the sprite a frame after it
-  stops (`NodeRecord::approximate`, `Document::markExactRepaint`): static
-  frames and frames at rest paint exactly the pixels of a full repaint.
+* **Sprites.** On the CPU raster, gradient backgrounds of 128x128 and
+  Image nodes of 16x16 (a downscaled, mipmapped icon costs ~350
+  instructions a pixel drawn directly) to 2.2M device pixels are rendered
+  once per content, device scale and sub-pixel phase and blitted at
+  whole-pixel offsets afterwards (`drawSprite`, 48 MB per document), so
+  static art at a fractional position is cached too. While a node keeps
+  moving by sub-pixels or scaling (it changed in this frame and the one
+  before, `PaintMotion`) a sprite per phase would be a new sprite every
+  frame: a gradient moving by sub-pixels (the showcase's drifting glow) is
+  then resampled from its sprite of phase 0 (`resampleMask`, within ~5
+  levels of an exact paint, at its anti-aliased edge), images and scaling
+  content are drawn directly, and the node is repainted from the sprite a
+  frame after it stops (`NodeRecord::approximate`,
+  `Document::markExactRepaint`): static frames and frames at rest paint
+  exactly the pixels of a full repaint.
+* **Blits.** Sprite and shadow-mask blits on a raster target bypass Skia's
+  drawImage (`blitSprite`): an SSE2 src-over of premultiplied 8888 rows
+  over the clip's pixel rects (a region; anti-aliased clips are left to
+  Skia), with transparent and opaque runs skipped or copied. It uses the
+  arithmetic of Skia's 8-bit raster pipeline and is only used after a check
+  at first use that it paints Skia's pixels on this build and CPU
+  (`fastSpriteBlits()`; elsewhere, NEON included, Skia draws). Skia draws
+  such a blit through its generic pipeline at ~20 instructions a pixel,
+  and a game UI repaints its full-screen backdrop and art sprites under
+  whatever animates (~45% of the CPU frame of the interactions showcase).
 * **Shadows.** Blurred shadows and inset shadows are cached masks, blurred
   once per device size, sigma, sub-pixel phase, radii and colour
   (`ShadowCache`) and blitted at whole-pixel offsets; only the ring around
@@ -1843,11 +1858,12 @@ the expensive per-pixel work is done once:
 
 `PaintStats` (`lastPaintStats()`) reports per paint the nodes painted and
 culled, the pixels and rects repainted, sprite draws and renders, shadow
-mask draws and renders (blurs), blitted pixels and, with `setPaintCounting()`, the canvas draw calls, text / image
-draws, layers and clips. `tests/native/render_test.cpp` and `gpu_test.cpp`
-assert on these (incremental frames equal full ones; perf guards on
-pixels repainted, passes, sprite re-renders, shadow blurs while a shadow
-moves, layers).
+mask draws and renders (blurs), blitted pixels and, with
+`setPaintCounting()`, the canvas draw calls, text / image draws, layers and
+clips. `tests/native/render_test.cpp` and `gpu_test.cpp` assert on these
+(incremental frames equal full ones; perf guards on pixels repainted,
+passes, sprite re-renders, also while a gradient moves, shadow blurs while
+a shadow moves, layers).
 
 `tools/jsui-paint-bench` renders bundles headless on a simulated 60 Hz
 clock and times only the paint call, per backend: `cpu`

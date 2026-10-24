@@ -174,6 +174,320 @@ struct PaintMotion {
   bool* inexact = nullptr;
 };
 
+// ---------------------------------------------------------- resampling
+
+// The inside of a shadow's box, which a mask draw leaves out: it is cut out
+// of the mask or covered by an opaque background. Two device rects, the box
+// inset by 1 px and by its corner radii (+ 1 px) across (`tall`) and along
+// (`wide`), so wide's rows are within tall's and tall's columns within
+// wide's.
+struct MaskSkip {
+  SkIRect tall = SkIRect::MakeEmpty(), wide = SkIRect::MakeEmpty();
+  // The columns [*l, *r) of device row y left out (*l == *r: none).
+  void row(int y, int* l, int* r) const {
+    const SkIRect& k = y >= wide.top() && y < wide.bottom() ? wide : tall;
+    if (y >= k.top() && y < k.bottom()) {
+      *l = k.left();
+      *r = k.right();
+    } else {
+      *l = *r = 0;
+    }
+  }
+};
+
+// o[k] = a[k] + (b[k] - a[k]) * t / 256, rounded, for n bytes; t (0..256)
+// per byte from `w`, or `wc` for all. 16 bytes at a time where the target
+// has SIMD (in 16-bit lanes: 255 * 256 + 128 fits).
+void lerpBytes(const uint8_t* a, const uint8_t* b, const uint16_t* w, uint16_t wc, uint8_t* o, size_t n) {
+  size_t k = 0;
+#if JSUI_LERP_SSE2
+  const __m128i z = _mm_setzero_si128(), half = _mm_set1_epi16(128), full = _mm_set1_epi16(256);
+  for (; k + 16 <= n; k += 16) {
+    __m128i x = _mm_loadu_si128(reinterpret_cast<const __m128i*>(a + k));
+    __m128i y = _mm_loadu_si128(reinterpret_cast<const __m128i*>(b + k));
+    __m128i t0 = w ? _mm_loadu_si128(reinterpret_cast<const __m128i*>(w + k)) : _mm_set1_epi16(short(wc));
+    __m128i t1 = w ? _mm_loadu_si128(reinterpret_cast<const __m128i*>(w + k + 8)) : t0;
+    auto mix = [&](__m128i xs, __m128i ys, __m128i t) {
+      __m128i v = _mm_add_epi16(_mm_mullo_epi16(xs, _mm_sub_epi16(full, t)), _mm_mullo_epi16(ys, t));
+      return _mm_srli_epi16(_mm_add_epi16(v, half), 8);
+    };
+    __m128i lo = mix(_mm_unpacklo_epi8(x, z), _mm_unpacklo_epi8(y, z), t0);
+    __m128i hi = mix(_mm_unpackhi_epi8(x, z), _mm_unpackhi_epi8(y, z), t1);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(o + k), _mm_packus_epi16(lo, hi));
+  }
+#elif JSUI_LERP_NEON
+  const uint16x8_t full = vdupq_n_u16(256);
+  for (; k + 16 <= n; k += 16) {
+    uint8x16_t x = vld1q_u8(a + k), y = vld1q_u8(b + k);
+    uint16x8_t t0 = w ? vld1q_u16(w + k) : vdupq_n_u16(wc);
+    uint16x8_t t1 = w ? vld1q_u16(w + k + 8) : t0;
+    uint16x8_t lo = vmlaq_u16(vmulq_u16(vmovl_u8(vget_low_u8(x)), vsubq_u16(full, t0)), vmovl_u8(vget_low_u8(y)), t0);
+    uint16x8_t hi = vmlaq_u16(vmulq_u16(vmovl_u8(vget_high_u8(x)), vsubq_u16(full, t1)), vmovl_u8(vget_high_u8(y)), t1);
+    vst1q_u8(o + k, vcombine_u8(vrshrn_n_u16(lo, 8), vrshrn_n_u16(hi, 8)));  // (v + 128) >> 8
+  }
+#endif
+  for (; k < n; k++) {
+    uint32_t t = w ? w[k] : wc;
+    o[k] = uint8_t((a[k] * (256 - t) + b[k] * t + 128) >> 8);
+  }
+}
+
+// The device pixels `area` of the premultiplied 8888 mask `src` drawn at
+// (x0, y0) under `post` (scale and translate, device space) with bilinear
+// filtering, into `out` (row pitch area.width()); pixels in `skip` are left
+// alone. What a bilinear drawImage samples (pixel centres, transparent
+// outside the image), in 8-bit fixed point: Skia's raster pipeline gathers
+// and filters every pixel in a generic stage (~40x a sprite blit), and a
+// moving or scaling shadow would pay that over its whole mask in every
+// frame. Separable: each source row the output needs is filtered
+// horizontally once (two rows kept), then pairs of rows vertically, both
+// channel-blind lerps over bytes (premultiplied channels filter alike).
+void resampleMask(const SkPixmap& src, float x0, float y0, const SkMatrix& post, const SkIRect& area,
+                  const MaskSkip& skip, uint32_t* out) {
+  const int w = area.width(), h = area.height(), sw = src.width(), sh = src.height();
+  const float sx = post.getScaleX(), sy = post.getScaleY(), tx = post.getTranslateX(), ty = post.getTranslateY();
+  // Per column: the left tap and its weight (the right tap's, per byte).
+  thread_local std::vector<int> ix;
+  thread_local std::vector<uint16_t> wx;
+  thread_local std::vector<uint32_t> rows, left, right;
+  ix.resize(size_t(w));
+  wx.resize(size_t(w) * 4);
+  rows.resize(size_t(w) * 2);
+  left.resize(size_t(w));
+  right.resize(size_t(w));
+  int first = w, last = 0;  // the columns whose taps are both inside the image (ix is monotonic)
+  for (int i = 0; i < w; i++) {
+    float u = (float(area.left() + i) + 0.5f - tx) / sx - x0 - 0.5f, f = std::floor(u);
+    ix[size_t(i)] = std::clamp(int(f), -2, sw);
+    uint16_t t = uint16_t(std::lround((u - f) * 256));
+    for (int k = 0; k < 4; k++) wx[size_t(i) * 4 + k] = t;
+    if (ix[size_t(i)] >= 0 && ix[size_t(i)] + 1 < sw) {
+      first = std::min(first, i);
+      last = i + 1;
+    }
+  }
+  // A translation: one weight and consecutive taps inside the image
+  // (filtered in place; the columns at its edges as any others).
+  const bool shift = sx == 1 && first < last;
+  auto filterRow = [&](int y, uint32_t* o) {
+    if (y < 0 || y >= sh) {
+      std::fill(o, o + w, 0u);
+      return;
+    }
+    const uint32_t* r = src.addr32(0, y);
+    auto edge = [&](int i) {
+      int x = ix[size_t(i)];
+      left[size_t(i)] = x >= 0 && x < sw ? r[x] : 0u;
+      right[size_t(i)] = x + 1 >= 0 && x + 1 < sw ? r[x + 1] : 0u;
+    };
+    if (shift) {
+      const uint32_t* a = r + ix[size_t(first)];
+      lerpBytes(reinterpret_cast<const uint8_t*>(a), reinterpret_cast<const uint8_t*>(a + 1), nullptr,
+                wx[size_t(first) * 4], reinterpret_cast<uint8_t*>(o + first), size_t(last - first) * 4);
+      for (int i : {0, last}) {
+        const int end = i ? w : first;
+        for (int k = i; k < end; k++) edge(k);
+        lerpBytes(reinterpret_cast<const uint8_t*>(left.data() + i),
+                  reinterpret_cast<const uint8_t*>(right.data() + i), wx.data() + size_t(i) * 4, 0,
+                  reinterpret_cast<uint8_t*>(o + i), size_t(end - i) * 4);
+      }
+      return;
+    }
+    for (int i = 0; i < std::min(first, w); i++) edge(i);
+    for (int i = first; i < last; i++) {
+      const uint32_t* p = r + ix[size_t(i)];
+      left[size_t(i)] = p[0];
+      right[size_t(i)] = p[1];
+    }
+    for (int i = std::max(first, last); i < w; i++) edge(i);
+    lerpBytes(reinterpret_cast<const uint8_t*>(left.data()), reinterpret_cast<const uint8_t*>(right.data()),
+              wx.data(), 0, reinterpret_cast<uint8_t*>(o), size_t(w) * 4);
+  };
+  int have[2] = {INT_MIN, INT_MIN};  // the source row in rows[0] / rows[1]
+  auto row = [&](int y) -> const uint8_t* {
+    for (int k = 0; k < 2; k++)
+      if (have[k] == y) return reinterpret_cast<const uint8_t*>(rows.data() + size_t(k) * w);
+    int k = have[0] < have[1] ? 0 : 1;  // rows only move down: replace the upper one
+    filterRow(y, rows.data() + size_t(k) * w);
+    have[k] = y;
+    return reinterpret_cast<const uint8_t*>(rows.data() + size_t(k) * w);
+  };
+  for (int j = 0; j < h; j++) {
+    const int y = area.top() + j;
+    float v = (float(y) + 0.5f - ty) / sy - y0 - 0.5f, f = std::floor(v);
+    const int iy = int(f);
+    const uint16_t t = uint16_t(std::lround((v - f) * 256));
+    uint32_t* o = out + size_t(j) * w;
+    if (iy + 1 < 0 || iy >= sh) {
+      std::fill(o, o + w, 0u);
+      continue;
+    }
+    const uint8_t* r0 = row(iy);
+    const uint8_t* r1 = row(iy + 1);
+    int sl, sr;
+    skip.row(y, &sl, &sr);
+    const size_t cutL = size_t(sl < sr ? std::clamp(sl - area.left(), 0, w) : w);
+    const size_t cutR = size_t(sl < sr ? std::clamp(sr - area.left(), int(cutL), w) : w);
+    uint8_t* ob = reinterpret_cast<uint8_t*>(o);
+    lerpBytes(r0, r1, nullptr, t, ob, cutL * 4);
+    lerpBytes(r0 + cutR * 4, r1 + cutR * 4, nullptr, t, ob + cutR * 4, (size_t(w) - cutR) * 4);
+  }
+}
+
+// -------------------------------------------------------------- blits
+
+// d = s * k / 255 + d * (255 - sa) / 255 per channel of n premultiplied 8888
+// pixels (either byte order: alpha is the last byte), k the paint alpha
+// (0..255), in the arithmetic of Skia's 8-bit raster pipeline (load,
+// scale_1_float, srcover: x / 255 as (x + 255) >> 8, which it uses on SSE /
+// AVX), so the result is that of the drawImage it replaces; blitSprite
+// checks that it is before using it. `swap`: s has red and blue swapped.
+void srcOverRow(const uint32_t* s, uint32_t* d, int n, uint32_t k, bool swap) {
+  int i = 0;
+#if JSUI_LERP_SSE2
+  const __m128i zero = _mm_setzero_si128(), c255 = _mm_set1_epi16(255), kk = _mm_set1_epi16(int16_t(k));
+  auto half = [&](__m128i sv, __m128i dv) {  // two pixels, 16 bits a channel
+    if (swap) sv = _mm_shufflehi_epi16(_mm_shufflelo_epi16(sv, _MM_SHUFFLE(3, 0, 1, 2)), _MM_SHUFFLE(3, 0, 1, 2));
+    if (k != 255) sv = _mm_srli_epi16(_mm_add_epi16(_mm_mullo_epi16(sv, kk), c255), 8);
+    __m128i a = _mm_shufflehi_epi16(_mm_shufflelo_epi16(sv, _MM_SHUFFLE(3, 3, 3, 3)), _MM_SHUFFLE(3, 3, 3, 3));
+    __m128i t = _mm_mullo_epi16(dv, _mm_sub_epi16(c255, a));
+    return _mm_add_epi16(sv, _mm_srli_epi16(_mm_add_epi16(t, c255), 8));
+  };
+  const __m128i alphas = _mm_set1_epi32(int32_t(0xff000000u));
+  for (; i + 4 <= n; i += 4) {
+    __m128i sv = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + i));
+    // Transparent pixels leave d as it is, opaque ones at full alpha replace
+    // it (exactly, in the arithmetic above).
+    const int opaque = _mm_movemask_epi8(_mm_cmpeq_epi32(_mm_and_si128(sv, alphas), alphas));
+    if (opaque == 0xffff && k == 255 && !swap) {
+      _mm_storeu_si128(reinterpret_cast<__m128i*>(d + i), sv);
+      continue;
+    }
+    if (_mm_movemask_epi8(_mm_cmpeq_epi32(_mm_and_si128(sv, alphas), zero)) == 0xffff) continue;
+    __m128i dv = _mm_loadu_si128(reinterpret_cast<const __m128i*>(d + i));
+    __m128i lo = half(_mm_unpacklo_epi8(sv, zero), _mm_unpacklo_epi8(dv, zero));
+    __m128i hi = half(_mm_unpackhi_epi8(sv, zero), _mm_unpackhi_epi8(dv, zero));
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(d + i), _mm_packus_epi16(lo, hi));
+  }
+#endif
+  for (; i < n; i++) {
+    const uint8_t* sp = reinterpret_cast<const uint8_t*>(s + i);
+    uint8_t* dp = reinterpret_cast<uint8_t*>(d + i);
+    uint32_t c[4];
+    for (int ch = 0; ch < 4; ch++) {
+      uint32_t v = sp[swap && ch != 3 ? 2 - ch : ch];
+      c[ch] = k == 255 ? v : (v * k + 255) >> 8;
+    }
+    for (int ch = 0; ch < 4; ch++) dp[ch] = uint8_t(c[ch] + ((dp[ch] * (255 - c[3]) + 255) >> 8));
+  }
+}
+
+bool srcOverMatchesSkia();
+
+// Draws the premultiplied raster image `img` with its top left at the
+// device pixel (x, y), src-over at `alpha`, like drawImage under an identity
+// matrix (a sprite blit), when the target allows it: the top layer is raster
+// 8888, the clip whole pixels. Skia draws such a blit through its generic
+// raster pipeline (~20 instructions a pixel); a game UI repaints its
+// full-screen backdrop and art sprites under whatever animates. False when
+// it does not (the caller draws).
+bool blitSprite(SkCanvas* c, const SkImage* img, int x, int y, float alpha, bool checked = true) {
+  if (alpha <= 0 || alpha > 1) return false;
+  SkImageInfo info;
+  size_t rowBytes;
+  SkIPoint origin;
+  auto* px = static_cast<uint8_t*>(c->accessTopLayerPixels(&info, &rowBytes, &origin));
+  if (!px || (info.colorType() != kRGBA_8888_SkColorType && info.colorType() != kBGRA_8888_SkColorType) ||
+      info.alphaType() != kPremul_SkAlphaType)
+    return false;
+  SkPixmap src;
+  if (!img->peekPixels(&src) || src.alphaType() != kPremul_SkAlphaType) return false;
+  SkColorType ct = src.colorType();
+  if ((ct != kRGBA_8888_SkColorType && ct != kBGRA_8888_SkColorType) ||
+      !SkColorSpace::Equals(info.colorSpace(), src.colorSpace()))
+    return false;
+  if (checked && !srcOverMatchesSkia()) return false;
+  // The clip as pixels: a region, unless it has anti-aliased edges (then
+  // only its bounds, a rect, which isClipRect tells apart).
+  SkRegion clip;
+  c->temporary_internal_getRgnClip(&clip);
+  if (clip.isEmpty() || (!clip.isComplex() && !c->isClipRect())) return false;
+  SkIRect r = SkIRect::MakeXYWH(x, y, src.width(), src.height());
+  if (!r.intersect(SkIRect::MakeXYWH(origin.x(), origin.y(), info.width(), info.height()))) return true;
+  const uint32_t k = uint32_t(alpha * 255 + 0.5f);
+  const bool swap = info.colorType() != ct;
+  for (SkRegion::Cliperator it(clip, r); !it.done(); it.next()) {
+    const SkIRect& d = it.rect();
+    for (int row = d.top(); row < d.bottom(); row++) {
+      srcOverRow(src.addr32(d.left() - x, row - y),
+                 reinterpret_cast<uint32_t*>(px + size_t(row - origin.y()) * rowBytes) + (d.left() - origin.x()),
+                 d.width(), k, swap);
+    }
+  }
+  return true;
+}
+
+// Whether blitSprite paints what Skia's drawImage does on this build and
+// CPU (its pipeline differs per instruction set and version): both draw a
+// sample of premultiplied pixels over others, at several alphas, clipped and
+// in a layer; on any difference blitSprite is not used.
+bool srcOverMatchesSkia() {
+  static const bool ok = [] {
+    const int w = 37, h = 30;
+    std::vector<uint32_t> src(size_t(w) * h), dst(src.size());
+    uint32_t seed = 0x9e3779b9u;
+    auto next = [&] {
+      seed = seed * 1664525u + 1013904223u;
+      return seed >> 8;
+    };
+    auto pixel = [&](int i) {
+      uint32_t a = i % 7 == 0 ? 255 : i % 11 == 0 ? 0 : next() & 255, v = a;
+      for (int ch = 0; ch < 3; ch++) v = v << 8 | (a ? next() % (a + 1) : 0);
+      return v;  // alpha in the last byte
+    };
+    for (size_t i = 0; i < src.size(); i++) {
+      src[i] = pixel(int(i));
+      dst[i] = pixel(int(i) + 3);
+    }
+    SkImageInfo info = SkImageInfo::Make(w, h, kRGBA_8888_SkColorType, kPremul_SkAlphaType);
+    SkRegion region(SkIRect::MakeLTRB(3, 2, w - 5, h - 1));
+    region.op(SkIRect::MakeLTRB(12, 8, 20, 40), SkRegion::kDifference_Op);
+    for (SkColorType ct : {kRGBA_8888_SkColorType, kBGRA_8888_SkColorType}) {
+      sk_sp<SkImage> img = SkImages::RasterFromPixmapCopy(SkPixmap(info.makeColorType(ct), src.data(), size_t(w) * 4));
+      if (!img) return false;
+      for (float alpha : {1.f, 0.5f, 0.37f, 0.0137f, 0.999f}) {
+        // A rect clip, in a layer, a region, a region and a curve.
+        for (int mode = 0; mode < 4; mode++) {
+          std::vector<uint32_t> out[2] = {dst, dst};
+          for (int ours = 0; ours < 2; ours++) {
+            auto cv = SkCanvas::MakeRasterDirect(info, out[ours].data(), size_t(w) * 4);
+            if (!cv) return false;
+            if (mode < 2) cv->clipIRect(region.getBounds());
+            else cv->clipRegion(region);
+            if (mode == 1) {
+              SkRect lb = SkRect::MakeLTRB(7, 5, float(w - 9), float(h - 4));
+              cv->saveLayer(&lb, nullptr);
+            }
+            if (mode == 3) cv->clipRRect(SkRRect::MakeRectXY(SkRect::MakeLTRB(4.5f, 3, 30, 27), 7, 7), true);
+            SkPaint p;
+            p.setAlphaf(alpha);
+            if (ours && blitSprite(cv.get(), img.get(), 1, -1, alpha, false)) {
+            } else if (ours && mode != 3) {
+              return false;  // a plain case it should take
+            } else {
+              cv->drawImage(img.get(), 1, -1, SkSamplingOptions(), &p);
+            }
+            if (mode == 1) cv->restore();
+          }
+          if (out[0] != out[1]) return false;
+        }
+      }
+    }
+    return true;
+  }();
+  return ok;
+}
+
 // ------------------------------------------------------------- sprites
 
 // Raster sprites of expensive draws that stay the same from frame to frame
@@ -187,8 +501,9 @@ struct PaintMotion {
 // the same pixels whether the draw was cached or not (incremental frames
 // match full ones), except while the node keeps moving by sub-pixels or
 // scaling (PaintMotion): a sprite per frame would cost more than drawing
-// directly, which it does then, and it is repainted from the sprite once it
-// stops.
+// directly. Smooth content (gradients) moving by sub-pixels is then resampled
+// from its sprite of phase 0 (resampleMask), the rest drawn directly, and the
+// node is repainted from the sprite once it stops.
 struct SpriteKey {
   std::string bytes;
   SpriteKey& add(const void* p, size_t n) {
@@ -222,19 +537,34 @@ struct SpriteCache {
   SkColorType colorType = kUnknown_SkColorType;
   sk_sp<SkColorSpace> colorSpace;
   int draws = 0, renders = 0;  // this paint's sprite draws / of which rendered
+  std::vector<uint32_t> scratch;  // a resampled sprite
   static constexpr size_t kMaxBytes = 48u << 20;
   static constexpr int64_t kMinPixels = 128 * 128;  // smaller draws are cheap enough directly
+  // Images, which cost far more a pixel (a mipmapped, filtered lookup:
+  // ~350 instructions a pixel for a downscaled icon).
+  static constexpr int64_t kMinImagePixels = 16 * 16;
   static constexpr int64_t kMaxPixels = 2200000;    // per sprite (a full 1080p screen)
 };
 struct RootRecord;
 SpriteCache& spriteCache(RootRecord* root);
 
+// How drawSprite draws: at `alpha`, for a node changing as `motion` says;
+// `smooth`: what it paints may be resampled while it moves (no detail a
+// bilinear filter would soften); sprites from `minPixels` device pixels.
+struct SpriteDraw {
+  float alpha = 1;
+  const PaintMotion* motion = nullptr;
+  bool smooth = false;
+  int64_t minPixels = SpriteCache::kMinPixels;
+};
+
 // Paints `draw(canvas)` (local coordinates, painting nothing outside
-// `bounds`) through a sprite when the canvas allows it, at `alpha`; false
-// when it does not (the caller draws directly).
+// `bounds`) through a sprite when the canvas allows it; false when it does
+// not (the caller draws directly).
 template <class F>
-bool drawSprite(SkCanvas* c, RootRecord* root, const SkRect& bounds, SpriteKey& key, F&& draw, float alpha = 1,
-                const PaintMotion* motion = nullptr) {
+bool drawSprite(SkCanvas* c, RootRecord* root, const SkRect& bounds, SpriteKey& key, F&& draw,
+                const SpriteDraw& how = {}) {
+  const PaintMotion* motion = how.motion;
   SpriteCache& sc = spriteCache(root);
   if (!sc.raster) return false;
   const SkMatrix& m = c->getTotalMatrix();
@@ -243,14 +573,19 @@ bool drawSprite(SkCanvas* c, RootRecord* root, const SkRect& bounds, SpriteKey& 
   float tx = std::round(m.getTranslateX()), ty = std::round(m.getTranslateY());
   float fx = m.getTranslateX() - tx, fy = m.getTranslateY() - ty;
   if (std::fabs(fx) <= 1e-3f && std::fabs(fy) <= 1e-3f) fx = fy = 0;
+  // Moving by sub-pixels: the sprite of phase 0, resampled to (fx, fy).
+  const bool resample = motion && motion->moving && (fx != 0 || fy != 0 || motion->scaling);
+  const float phaseX = fx, phaseY = fy;
+  if (resample) fx = fy = 0;
   SkMatrix local = SkMatrix::MakeAll(m.getScaleX(), 0, fx, 0, m.getScaleY(), fy, 0, 0, 1);
   SkIRect area = local.mapRect(bounds).roundOut().makeOutset(1, 1);
   int64_t px = int64_t(area.width()) * area.height();
-  if (px < SpriteCache::kMinPixels || px > SpriteCache::kMaxPixels) return false;
-  if (motion && motion->moving && (fx != 0 || fy != 0 || motion->scaling)) {
-    // A new sprite every frame (measured: more than drawing directly).
+  if (px < how.minPixels || px > SpriteCache::kMaxPixels) return false;
+  if (resample) {
     if (motion->inexact) *motion->inexact = true;
-    return false;
+    // Otherwise a new sprite every frame (measured: more than drawing
+    // directly).
+    if (!how.smooth || motion->scaling || SkColorTypeBytesPerPixel(sc.colorType) != 4) return false;
   }
   if (c->quickReject(bounds)) return true;
   key.f(m.getScaleX()).f(m.getScaleY()).f(fx).f(fy).rect(bounds);
@@ -286,12 +621,32 @@ bool drawSprite(SkCanvas* c, RootRecord* root, const SkRect& bounds, SpriteKey& 
   }
   sc.draws++;
   it->second.lastUsed = sc.frame;
+  const SkImage* img = it->second.image.get();
+  float x = tx + float(it->second.origin.fX), y = ty + float(it->second.origin.fY);
+  sk_sp<SkImage> shifted;
+  SkPixmap src;
+  if (resample) {
+    if (!img->peekPixels(&src)) return false;
+    SkIRect dev = SkRect::MakeXYWH(x + phaseX, y + phaseY, float(img->width()), float(img->height())).roundOut();
+    if (!dev.intersect(c->getDeviceClipBounds())) return true;
+    size_t n = size_t(dev.width()) * dev.height();
+    if (sc.scratch.size() < n) sc.scratch.resize(n);
+    resampleMask(src, x + phaseX, y + phaseY, SkMatrix::I(), dev, MaskSkip(), sc.scratch.data());
+    // Drawn before the next sprite reuses the buffer (a raster canvas draws
+    // immediately).
+    SkPixmap pm(src.info().makeWH(dev.width(), dev.height()), sc.scratch.data(), size_t(dev.width()) * 4);
+    shifted = SkImages::RasterFromPixmap(pm, nullptr, nullptr);
+    if (!shifted) return false;
+    img = shifted.get();
+    x = float(dev.left());
+    y = float(dev.top());
+  }
+  if (blitSprite(c, img, int(x), int(y), how.alpha)) return true;
   c->save();
   c->setMatrix(SkMatrix::I());
   SkPaint p;
-  p.setAlphaf(alpha);
-  c->drawImage(it->second.image.get(), tx + float(it->second.origin.fX), ty + float(it->second.origin.fY),
-               SkSamplingOptions(), &p);
+  p.setAlphaf(how.alpha);
+  c->drawImage(img, x, y, SkSamplingOptions(), &p);
   c->restore();
   return true;
 }
@@ -393,156 +748,6 @@ float quantizedScale(float s) { return s > 0 ? std::exp2(std::round(std::log2(s)
 // not make keys differ.
 float keyRound(float v) { return std::round(v * 64) / 64; }
 
-// The inside of a shadow's box, which a mask draw leaves out: it is cut out
-// of the mask or covered by an opaque background. Two device rects, the box
-// inset by 1 px and by its corner radii (+ 1 px) across (`tall`) and along
-// (`wide`), so wide's rows are within tall's and tall's columns within
-// wide's.
-struct MaskSkip {
-  SkIRect tall = SkIRect::MakeEmpty(), wide = SkIRect::MakeEmpty();
-  // The columns [*l, *r) of device row y left out (*l == *r: none).
-  void row(int y, int* l, int* r) const {
-    const SkIRect& k = y >= wide.top() && y < wide.bottom() ? wide : tall;
-    if (y >= k.top() && y < k.bottom()) {
-      *l = k.left();
-      *r = k.right();
-    } else {
-      *l = *r = 0;
-    }
-  }
-};
-
-// o[k] = a[k] + (b[k] - a[k]) * t / 256, rounded, for n bytes; t (0..256)
-// per byte from `w`, or `wc` for all. 16 bytes at a time where the target
-// has SIMD (in 16-bit lanes: 255 * 256 + 128 fits).
-void lerpBytes(const uint8_t* a, const uint8_t* b, const uint16_t* w, uint16_t wc, uint8_t* o, size_t n) {
-  size_t k = 0;
-#if JSUI_LERP_SSE2
-  const __m128i z = _mm_setzero_si128(), half = _mm_set1_epi16(128), full = _mm_set1_epi16(256);
-  for (; k + 16 <= n; k += 16) {
-    __m128i x = _mm_loadu_si128(reinterpret_cast<const __m128i*>(a + k));
-    __m128i y = _mm_loadu_si128(reinterpret_cast<const __m128i*>(b + k));
-    __m128i t0 = w ? _mm_loadu_si128(reinterpret_cast<const __m128i*>(w + k)) : _mm_set1_epi16(short(wc));
-    __m128i t1 = w ? _mm_loadu_si128(reinterpret_cast<const __m128i*>(w + k + 8)) : t0;
-    auto mix = [&](__m128i xs, __m128i ys, __m128i t) {
-      __m128i v = _mm_add_epi16(_mm_mullo_epi16(xs, _mm_sub_epi16(full, t)), _mm_mullo_epi16(ys, t));
-      return _mm_srli_epi16(_mm_add_epi16(v, half), 8);
-    };
-    __m128i lo = mix(_mm_unpacklo_epi8(x, z), _mm_unpacklo_epi8(y, z), t0);
-    __m128i hi = mix(_mm_unpackhi_epi8(x, z), _mm_unpackhi_epi8(y, z), t1);
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(o + k), _mm_packus_epi16(lo, hi));
-  }
-#elif JSUI_LERP_NEON
-  const uint16x8_t full = vdupq_n_u16(256);
-  for (; k + 16 <= n; k += 16) {
-    uint8x16_t x = vld1q_u8(a + k), y = vld1q_u8(b + k);
-    uint16x8_t t0 = w ? vld1q_u16(w + k) : vdupq_n_u16(wc);
-    uint16x8_t t1 = w ? vld1q_u16(w + k + 8) : t0;
-    uint16x8_t lo = vmlaq_u16(vmulq_u16(vmovl_u8(vget_low_u8(x)), vsubq_u16(full, t0)), vmovl_u8(vget_low_u8(y)), t0);
-    uint16x8_t hi = vmlaq_u16(vmulq_u16(vmovl_u8(vget_high_u8(x)), vsubq_u16(full, t1)), vmovl_u8(vget_high_u8(y)), t1);
-    vst1q_u8(o + k, vcombine_u8(vrshrn_n_u16(lo, 8), vrshrn_n_u16(hi, 8)));  // (v + 128) >> 8
-  }
-#endif
-  for (; k < n; k++) {
-    uint32_t t = w ? w[k] : wc;
-    o[k] = uint8_t((a[k] * (256 - t) + b[k] * t + 128) >> 8);
-  }
-}
-
-// The device pixels `area` of the premultiplied 8888 mask `src` drawn at
-// (x0, y0) under `post` (scale and translate, device space) with bilinear
-// filtering, into `out` (row pitch area.width()); pixels in `skip` are left
-// alone. What a bilinear drawImage samples (pixel centres, transparent
-// outside the image), in 8-bit fixed point: Skia's raster pipeline gathers
-// and filters every pixel in a generic stage (~40x a sprite blit), and a
-// moving or scaling shadow would pay that over its whole mask in every
-// frame. Separable: each source row the output needs is filtered
-// horizontally once (two rows kept), then pairs of rows vertically, both
-// channel-blind lerps over bytes (premultiplied channels filter alike).
-void resampleMask(const SkPixmap& src, float x0, float y0, const SkMatrix& post, const SkIRect& area,
-                  const MaskSkip& skip, uint32_t* out) {
-  const int w = area.width(), h = area.height(), sw = src.width(), sh = src.height();
-  const float sx = post.getScaleX(), sy = post.getScaleY(), tx = post.getTranslateX(), ty = post.getTranslateY();
-  // Per column: the left tap and its weight (the right tap's, per byte).
-  thread_local std::vector<int> ix;
-  thread_local std::vector<uint16_t> wx;
-  thread_local std::vector<uint32_t> rows, left, right;
-  ix.resize(size_t(w));
-  wx.resize(size_t(w) * 4);
-  rows.resize(size_t(w) * 2);
-  left.resize(size_t(w));
-  right.resize(size_t(w));
-  int first = w, last = 0;  // the columns whose taps are both inside the image (ix is monotonic)
-  for (int i = 0; i < w; i++) {
-    float u = (float(area.left() + i) + 0.5f - tx) / sx - x0 - 0.5f, f = std::floor(u);
-    ix[size_t(i)] = std::clamp(int(f), -2, sw);
-    uint16_t t = uint16_t(std::lround((u - f) * 256));
-    for (int k = 0; k < 4; k++) wx[size_t(i) * 4 + k] = t;
-    if (ix[size_t(i)] >= 0 && ix[size_t(i)] + 1 < sw) {
-      first = std::min(first, i);
-      last = i + 1;
-    }
-  }
-  // A translation: one weight and consecutive taps (filtered in place).
-  const bool shift = sx == 1 && w > 0 && ix[0] >= 0 && ix[size_t(w) - 1] + 1 < sw;
-  auto filterRow = [&](int y, uint32_t* o) {
-    if (y < 0 || y >= sh) {
-      std::fill(o, o + w, 0u);
-      return;
-    }
-    const uint32_t* r = src.addr32(0, y);
-    if (shift) {
-      const uint32_t* a = r + ix[0];
-      lerpBytes(reinterpret_cast<const uint8_t*>(a), reinterpret_cast<const uint8_t*>(a + 1), nullptr, wx[0],
-                reinterpret_cast<uint8_t*>(o), size_t(w) * 4);
-      return;
-    }
-    auto edge = [&](int i) {
-      int x = ix[size_t(i)];
-      left[size_t(i)] = x >= 0 && x < sw ? r[x] : 0u;
-      right[size_t(i)] = x + 1 >= 0 && x + 1 < sw ? r[x + 1] : 0u;
-    };
-    for (int i = 0; i < std::min(first, w); i++) edge(i);
-    for (int i = first; i < last; i++) {
-      const uint32_t* p = r + ix[size_t(i)];
-      left[size_t(i)] = p[0];
-      right[size_t(i)] = p[1];
-    }
-    for (int i = std::max(first, last); i < w; i++) edge(i);
-    lerpBytes(reinterpret_cast<const uint8_t*>(left.data()), reinterpret_cast<const uint8_t*>(right.data()),
-              wx.data(), 0, reinterpret_cast<uint8_t*>(o), size_t(w) * 4);
-  };
-  int have[2] = {INT_MIN, INT_MIN};  // the source row in rows[0] / rows[1]
-  auto row = [&](int y) -> const uint8_t* {
-    for (int k = 0; k < 2; k++)
-      if (have[k] == y) return reinterpret_cast<const uint8_t*>(rows.data() + size_t(k) * w);
-    int k = have[0] < have[1] ? 0 : 1;  // rows only move down: replace the upper one
-    filterRow(y, rows.data() + size_t(k) * w);
-    have[k] = y;
-    return reinterpret_cast<const uint8_t*>(rows.data() + size_t(k) * w);
-  };
-  for (int j = 0; j < h; j++) {
-    const int y = area.top() + j;
-    float v = (float(y) + 0.5f - ty) / sy - y0 - 0.5f, f = std::floor(v);
-    const int iy = int(f);
-    const uint16_t t = uint16_t(std::lround((v - f) * 256));
-    uint32_t* o = out + size_t(j) * w;
-    if (iy + 1 < 0 || iy >= sh) {
-      std::fill(o, o + w, 0u);
-      continue;
-    }
-    const uint8_t* r0 = row(iy);
-    const uint8_t* r1 = row(iy + 1);
-    int sl, sr;
-    skip.row(y, &sl, &sr);
-    const size_t cutL = size_t(sl < sr ? std::clamp(sl - area.left(), 0, w) : w);
-    const size_t cutR = size_t(sl < sr ? std::clamp(sr - area.left(), int(cutL), w) : w);
-    uint8_t* ob = reinterpret_cast<uint8_t*>(o);
-    lerpBytes(r0, r1, nullptr, t, ob, cutL * 4);
-    lerpBytes(r0 + cutR * 4, r1 + cutR * 4, nullptr, t, ob + cutR * 4, (size_t(w) - cutR) * 4);
-  }
-}
-
 // Draws a cached mask `img` placed at (x0, y0) in the space `post` maps to
 // device space, with `p`, leaving out `skip` (parts under 16 px are drawn).
 // Whole-pixel placements are sprite blits; others are filtered: on GPU
@@ -627,6 +832,11 @@ void drawMask(SkCanvas* c, ShadowCache& cache, const SkImage* img, float x0, flo
     c->save();
     c->clipIRect(d);
     if (cut && !shifted) c->clipRRect(*cut, SkClipOp::kDifference, true);  // not resampled after all
+    if (sprite && cache.raster && p.isSrcOver() && !p.getColorFilter() && !p.getImageFilter() &&
+        blitSprite(c, img, int(x0), int(y0), p.getAlphaf())) {
+      c->restore();
+      return;
+    }
     if (!place.isIdentity()) c->setMatrix(place);
     c->drawImage(img, x0, y0, sampling, &p);
     c->restore();
@@ -1147,7 +1357,8 @@ void paintBackground(SkCanvas* c, const Box& b, const ComputedStyle& s, RootReco
   SpriteKey key;
   key.u('G').rrect(b.outer).rect(b.inner.rect());
   for (const Gradient& g : s.backgroundImages) addGradientKey(key, g);
-  if (drawSprite(c, root, b.outer.rect(), key, [&](SkCanvas* oc) { paintGradients(oc, b, s); }, alpha, &motion))
+  if (drawSprite(c, root, b.outer.rect(), key, [&](SkCanvas* oc) { paintGradients(oc, b, s); },
+                 {alpha, &motion, true}))
     return;
   paintGradients(c, b, s, alpha);
 }
@@ -2022,9 +2233,9 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
     SpriteKey key;
     key.u('I').rrect(b.inner);
     if (!image::paintKey(n, &key.bytes) ||
-        !drawSprite(
-            c, ctx.root, b.inner.rect(), key, [&](SkCanvas* oc) { image::paint(n, oc, b.inner.rect(), b.inner); }, 1,
-            &motion))
+        !drawSprite(c, ctx.root, b.inner.rect(), key,
+                    [&](SkCanvas* oc) { image::paint(n, oc, b.inner.rect(), b.inner); },
+                    {1, &motion, false, SpriteCache::kMinImagePixels}))
       image::paint(n, c, b.inner.rect(), b.inner);
   }
   if (inexact) {
@@ -3360,6 +3571,8 @@ sk_sp<SkImage> backdropImage(Document& doc, SkCanvas* canvas) {
 }
 
 }  // namespace
+
+bool fastSpriteBlits() { return srcOverMatchesSkia(); }
 
 void paintDocument(Document& doc, SkCanvas* canvas, const SkRegion* damage) {
   paintDocumentOver(doc, canvas, damage, nullptr);
