@@ -48,7 +48,10 @@ function forget(inst) {
   if (instances.get(inst.id) === inst) instances.delete(inst.id);
 }
 
-const hostConfig = {
+// Production bundles fold the constant entries (flags, shouldSetTextContent,
+// getPublicInstance) and the no-op fragment ref hooks into the reconciler
+// (packages/cli/src/specialize.js; its tests check they still match).
+export const hostConfig = {
   rendererPackageName: '@orktes/jsui-react',
   rendererVersion: '0.1.0',
   extraDevToolsConfig: null,
