@@ -144,6 +144,7 @@ export class HostInstance {
     this.parent = null;
     this.hidden = false;
     this.responderState = null;
+    this.texts = null;  // child TextInstances, forgotten with this node (renderer.js)
     bridgeCalls++;
     if (NATIVE_PROPS) {
       // The runtime builds and diffs what it sees from the React props

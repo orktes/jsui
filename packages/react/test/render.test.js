@@ -2,7 +2,7 @@ import { mock } from './mock-native.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement as h, useState, Fragment, Suspense } from 'react';
-import { View, Text, Image, StyleSheet, render, ScrollView, FlatList, AppRegistry, flushSync } from '../src/index.js';
+import { View, Text, Image, StyleSheet, render, ScrollView, FlatList, AppRegistry, flushSync, bridgeStats } from '../src/index.js';
 
 const styles = StyleSheet.create({ box: { width: 10, height: 20, backgroundColor: 'red' }, big: { width: 30 } });
 
@@ -183,4 +183,33 @@ test('AppRegistry.registerComponent auto-starts the app', async () => {
   assert.deepEqual(root.props.style, { flex: 1, pointerEvents: 'box-none' });
   assert.equal(mock.nodes.get(root.children[0]).props.nativeID, 'main');
   render(null);
+});
+
+test('navigating between pages and back keeps the live node count stable', async () => {
+  // Raw text is never handed to detachDeletedInstance by React, so it used
+  // to stay in the instance map forever (the showcase's growing node count).
+  const settle = () => new Promise((r) => setTimeout(r, 5));
+  const Home = ({ n }) =>
+    h(View, null,
+      h(Text, null, 'Nodes: ', n, ' live'),
+      h(Text, null, h(Text, null, 'nested '), 'text'),
+      h(View, null, n % 2 ? h(Text, null, 'odd') : null));
+  const Other = () => h(ScrollView, null, h(View, null, h(Text, null, 'other page')), h(Text, null, 'more'));
+  const live = () => bridgeStats().nodes;
+  const counts = { home: new Set(), other: new Set() };
+  for (let i = 0; i < 20; i++) {
+    const home = i % 2 === 0;
+    render(home ? h(Home, { n: i }) : h(Other));
+    await settle();
+    // A text child removed from a live parent (the 'odd' branch toggling) is freed too.
+    if (home) render(h(Home, { n: i + 1 }));
+    await settle();
+    counts[home ? 'home' : 'other'].add(live());
+  }
+  assert.deepEqual([...counts.home].length, 1, `home counts: ${[...counts.home]}`);
+  assert.deepEqual([...counts.other].length, 1, `other counts: ${[...counts.other]}`);
+  render(null);
+  await settle();
+  // Every JS instance has a live native node behind it.
+  assert.equal(live(), mock.nodes.size - 1);
 });
