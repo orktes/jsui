@@ -1,6 +1,7 @@
 #include "runtime.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -25,6 +26,10 @@
 namespace jsui {
 
 namespace {
+
+// A tick shorter than this leaves the frame room for a deferred cycle
+// collection (young ones take well under a millisecond).
+constexpr double kLightTickMs = 4.0;
 
 // "http://host:port/a/b.js?x" -> "http://host:port"; empty if not http.
 std::string httpOrigin(const std::string& url) {
@@ -553,6 +558,7 @@ void Runtime::devPoll() {
 }
 
 void Runtime::tick(double nowMs) {
+  auto tickStart = std::chrono::steady_clock::now();
   now = nowMs;
   doomed_.clear();
   for (auto& s : surfaces_) s->doc.now = nowMs;
@@ -609,6 +615,12 @@ void Runtime::tick(double nowMs) {
   deliverUiCallResults();
   // Shared-session commands run last, on the frame this tick produced.
   if (session) session->tick(devOrigin_);
+  // Cycle collections the engine deferred while JS ran: now, between frames,
+  // if this tick was light (no commit to speak of), else within a few ticks.
+  if (js) {
+    double tickMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tickStart).count();
+    js->collectIdle(tickMs < kLightTickMs);
+  }
 }
 
 void Runtime::tickNative(double nowMs) {

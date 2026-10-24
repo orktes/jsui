@@ -20,40 +20,43 @@ FetchContent_GetProperties(quickjs)
 if(NOT quickjs_POPULATED)
   FetchContent_Populate(quickjs)
 endif()
-# react-native-quickjs's engine patches (third_party/quickjs-rnq, MIT; what
-# each does and why: UPSTREAM-README.md there): inline caches, object literal
-# shape templates, fused opcodes, dense arrays with holes, string caches,
-# deferred GC and the debugger interface. They are applied with `git apply`
-# to a copy of the fetched sources in the build tree (redone when a patch
-# changes), and everything below builds from that copy.
-option(JSUI_QUICKJS_RNQ "Apply the react-native-quickjs engine patches to QuickJS" ON)
-if(JSUI_QUICKJS_RNQ)
-  find_package(Git REQUIRED)
-  file(GLOB _rnq_patches ${CMAKE_CURRENT_LIST_DIR}/../third_party/quickjs-rnq/*.patch)
-  list(SORT _rnq_patches)
-  set(_rnq_sum "${quickjs_SOURCE_DIR}")
-  foreach(_p IN LISTS _rnq_patches)
-    file(SHA256 ${_p} _h)
-    string(APPEND _rnq_sum "${_h}")
-  endforeach()
-  string(SHA256 _rnq_sum "${_rnq_sum}")
-  set(_rnq_dir ${CMAKE_BINARY_DIR}/quickjs-rnq)
-  if(NOT EXISTS ${_rnq_dir}/.jsui-${_rnq_sum})
-    file(REMOVE_RECURSE ${_rnq_dir})
-    file(COPY ${quickjs_SOURCE_DIR}/ DESTINATION ${_rnq_dir} PATTERN .git EXCLUDE)
-    execute_process(
-      COMMAND ${GIT_EXECUTABLE} apply --whitespace=nowarn ${_rnq_patches}
-      WORKING_DIRECTORY ${_rnq_dir}
-      RESULT_VARIABLE _rnq_rc
-      ERROR_VARIABLE _rnq_err)
-    if(NOT _rnq_rc EQUAL 0)
-      message(FATAL_ERROR "react-native-quickjs patches do not apply to ${quickjs_SOURCE_DIR}:\n${_rnq_err}"
-        "Configure with -DJSUI_QUICKJS_RNQ=OFF to build stock QuickJS.")
-    endif()
-    file(TOUCH ${_rnq_dir}/.jsui-${_rnq_sum})
+# Engine patches, applied with `git apply` to a copy of the fetched sources
+# in the build tree (redone when a patch changes); everything below builds
+# from that copy:
+#   third_party/quickjs-rnq   react-native-quickjs's patches (MIT; what each
+#                             does and why: UPSTREAM-README.md there): inline
+#                             caches, object literal shape templates, fused
+#                             opcodes, dense arrays with holes, string caches,
+#                             deferred GC, the debugger interface
+#   third_party/quickjs-jsui  JSUI's, on top of those: generational cycle
+#                             collection (JsEngine runs collections in idle ticks)
+find_package(Git REQUIRED)
+file(GLOB _qjs_patches ${CMAKE_CURRENT_LIST_DIR}/../third_party/quickjs-rnq/*.patch)
+file(GLOB _qjs_jsui_patches ${CMAKE_CURRENT_LIST_DIR}/../third_party/quickjs-jsui/*.patch)
+list(SORT _qjs_patches)
+list(SORT _qjs_jsui_patches)
+list(APPEND _qjs_patches ${_qjs_jsui_patches})
+set(_qjs_sum "${quickjs_SOURCE_DIR}")
+foreach(_p IN LISTS _qjs_patches)
+  file(SHA256 ${_p} _h)
+  string(APPEND _qjs_sum "${_h}")
+endforeach()
+string(SHA256 _qjs_sum "${_qjs_sum}")
+set(_qjs_dir ${CMAKE_BINARY_DIR}/quickjs-src)
+if(NOT EXISTS ${_qjs_dir}/.jsui-${_qjs_sum})
+  file(REMOVE_RECURSE ${_qjs_dir})
+  file(COPY ${quickjs_SOURCE_DIR}/ DESTINATION ${_qjs_dir} PATTERN .git EXCLUDE)
+  execute_process(
+    COMMAND ${GIT_EXECUTABLE} apply --whitespace=nowarn ${_qjs_patches}
+    WORKING_DIRECTORY ${_qjs_dir}
+    RESULT_VARIABLE _qjs_rc
+    ERROR_VARIABLE _qjs_err)
+  if(NOT _qjs_rc EQUAL 0)
+    message(FATAL_ERROR "The QuickJS patches do not apply to ${quickjs_SOURCE_DIR}:\n${_qjs_err}")
   endif()
-  set(quickjs_SOURCE_DIR ${_rnq_dir})
+  file(TOUCH ${_qjs_dir}/.jsui-${_qjs_sum})
 endif()
+set(quickjs_SOURCE_DIR ${_qjs_dir})
 # quickjs-ng exports JS_FreeValue / JS_DupValue (and the RT variants) as
 # out-of-line functions, so every value the interpreter pops or copies costs
 # a call (12% of the instructions of a React commit). The patched copy in the

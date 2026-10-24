@@ -538,6 +538,8 @@ class QuickJsEngine final : public JsEngine {
   void beginBatch() override;
   void endBatch() override;
   size_t memoryUsage() const override;
+  bool collectIdle(bool light) override;
+  GcStats gcStats(bool reset) override;
 
  private:
   std::unique_ptr<Impl> impl_;
@@ -569,6 +571,12 @@ QuickJsEngine::QuickJsEngine(Runtime& rt) : impl_(std::make_unique<Impl>(rt)) {
   constexpr int kDefaultStackKb = 1024;
 #endif
   JS_SetMaxStackSize(impl.jrt, size_t(cfg.js_stack_size_kb > 0 ? cfg.js_stack_size_kb : kDefaultStackKb) << 10);
+  // Cycle collection pauses grow with the heap (about 1 ms per MB): collect
+  // only the objects allocated since the last collection, and never under
+  // running JS, so a pause does not land in the middle of a React commit.
+  // Runtime::tick runs them between frames (collectIdle).
+  JS_SetGCGenerational(impl.jrt, true);
+  JS_SetGCDeferred(impl.jrt, true, 0);
   JS_SetInterruptHandler(impl.jrt, interruptHandler, &impl);
   JS_SetHostPromiseRejectionTracker(impl.jrt, rejectionTracker, &impl);
   impl.ctx = JS_NewContext(impl.jrt);
@@ -870,10 +878,31 @@ void QuickJsEngine::beginBatch() { impl_->enter(); }
 
 void QuickJsEngine::endBatch() { impl_->leave(); }
 
-size_t QuickJsEngine::memoryUsage() const {
-  JSMemoryUsage u;
-  JS_ComputeMemoryUsage(impl_->jrt, &u);
-  return size_t(u.malloc_size);
+size_t QuickJsEngine::memoryUsage() const { return JS_GetMallocSize(impl_->jrt); }
+
+bool QuickJsEngine::collectIdle(bool light) {
+  Impl& impl = *impl_;
+  if (impl.depth > 0) return false;
+  if (!JS_HasPendingGC(impl.jrt)) {
+    impl.gcWaitTicks = 0;
+    // A full collection that came due waits for a light tick (the engine
+    // runs it anyway once the heap reaches 2.5x the last full one).
+    return light && JS_RunIdleGC(impl.jrt);
+  }
+  if (!light && ++impl.gcWaitTicks < 8) return false;
+  impl.gcWaitTicks = 0;
+  return JS_RunIdleGC(impl.jrt);
+}
+
+JsEngine::GcStats QuickJsEngine::gcStats(bool reset) {
+  JSGCStats s;
+  JS_GetGCStats(impl_->jrt, &s, reset);
+  GcStats out;
+  out.collections = s.count;
+  out.full = s.full_count;
+  out.us = double(s.total_ns) / 1000.0;
+  out.maxUs = double(s.max_ns) / 1000.0;
+  return out;
 }
 
 }  // namespace jsui

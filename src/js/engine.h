@@ -106,6 +106,18 @@ class JsEngine {
   // Bytes allocated by the JS heap (for diagnostics / leak checks; 0 when
   // the engine cannot tell).
   virtual size_t memoryUsage() const = 0;
+  // Garbage collection between frames. The QuickJS engine collects cycles
+  // generationally and defers collections that come due while JS runs:
+  // collectIdle(light) runs one that is waiting (or a full one that is due)
+  // when the tick was light, or once one has waited a few ticks. Returns
+  // whether it collected.
+  virtual bool collectIdle(bool light) { return false; }
+  struct GcStats {
+    uint64_t collections = 0, full = 0;
+    double us = 0, maxUs = 0;
+  };
+  // Collections since the last call with reset.
+  virtual GcStats gcStats(bool reset) { return {}; }
 
   // QuickJS state shared by engine.cpp and the bridge files (engine_impl.h).
   struct Impl;
