@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "core/document.h"
@@ -119,6 +120,11 @@ bool NativeAnimated::createNode(int tag, const Value& c, std::string* error) {
     n.bufferKey = c["key"].asString();
     double index = c["index"].asNumber();
     n.bufferIndex = index >= 0 && index < 4294967296.0 ? size_t(index) : size_t(-1);
+  } else if (type == "hostState") {
+    n.type = Type::HostState;
+    n.bufferKey = c["key"].asString();
+    for (const Value& p : c["path"].asArray())
+      n.statePath.push_back(p.isNumber() ? std::to_string(int64_t(p.asNumber())) : p.asString());
   } else if (type == "format") {
     n.type = Type::Format;
     n.inputs.push_back(int(c["input"].asNumber()));
@@ -133,6 +139,7 @@ bool NativeAnimated::createNode(int tag, const Value& c, std::string* error) {
   } else if (type == "interaction") {
     n.type = Type::Interaction;
     n.interactionKey = c["key"].asString();
+    n.instant = c["instant"].asBool();
     const std::string& st = c["state"].asString();
     n.slot = st == "pressed" ? kPressed : st == "focused" ? kFocused : st == "focusVisible" ? kFocusVisible
              : st == "disabled" ? kDisabled : kHovered;
@@ -157,12 +164,14 @@ bool NativeAnimated::createNode(int tag, const Value& c, std::string* error) {
     n.type = Type::Props;
     n.styleTag = int(c["props"]["style"].asNumber());
     n.textTag = int(c["props"]["text"].asNumber());
+    n.visibleTag = int(c["props"]["visible"].asNumber());
   } else {
     if (error) *error = "unsupported animated node type '" + type + "'";
     return false;
   }
   if (nodes_.count(tag)) dropNode(tag);
   if (n.type == Type::HostBuffer) bufferNodes_[n.bufferKey].push_back(tag);
+  if (n.type == Type::HostState) stateNodes_[n.bufferKey].push_back(tag);
   if (n.type == Type::Props) propsNodes_.push_back(tag);
   if (n.type == Type::Clock) clockNodes_.push_back(tag);
   if (n.type == Type::Interaction) interactionNodes_.push_back(tag);
@@ -217,6 +226,13 @@ void NativeAnimated::dropNode(int tag) {
       if (it->second.empty()) bufferNodes_.erase(it);
     }
   }
+  if (n->type == Type::HostState) {
+    auto it = stateNodes_.find(n->bufferKey);
+    if (it != stateNodes_.end()) {
+      it->second.erase(std::remove(it->second.begin(), it->second.end(), tag), it->second.end());
+      if (it->second.empty()) stateNodes_.erase(it);
+    }
+  }
   if (n->type == Type::Props) propsNodes_.erase(std::remove(propsNodes_.begin(), propsNodes_.end(), tag), propsNodes_.end());
   if (n->type == Type::Clock) clockNodes_.erase(std::remove(clockNodes_.begin(), clockNodes_.end(), tag), clockNodes_.end());
   if (n->type == Type::Interaction)
@@ -230,8 +246,15 @@ void NativeAnimated::bufferChanged(const std::string& key) {
   for (int tag : it->second) markDirty(tag);
 }
 
+void NativeAnimated::stateChanged(const std::string& key) {
+  auto it = stateNodes_.find(key);
+  if (it == stateNodes_.end()) return;
+  for (int tag : it->second) markDirty(tag);
+}
+
 void NativeAnimated::clear() {
   nodes_.clear();
+  stateNodes_.clear();
   propsNodes_.clear();
   animations_.clear();
   mappings_.clear();
@@ -384,6 +407,26 @@ void NativeAnimated::evaluate(ANode& n) {
       n.out = Value(n.num);
       break;
     }
+    case Type::HostState: {
+      const Json* j = state ? state->value(n.bufferKey) : nullptr;
+      for (size_t i = 0; j && i < n.statePath.size(); i++) {
+        const std::string& seg = n.statePath[i];
+        if (j->kind() == Json::Kind::Array) {
+          char* end = nullptr;
+          unsigned long k = std::strtoul(seg.c_str(), &end, 10);
+          j = end != seg.c_str() && *end == 0 && k < j->items().size() ? &j->items()[k] : nullptr;
+        } else {
+          j = j->find(seg);
+        }
+      }
+      n.num = 0;
+      if (j && j->kind() == Json::Kind::Number) n.num = std::strtod(j->text().c_str(), nullptr);
+      else if (j && j->kind() == Json::Kind::Bool) n.num = j->boolean() ? 1 : 0;
+      if (n.num != n.num) n.num = 0;
+      if (j && j->kind() == Json::Kind::String) n.out = Value(j->text());  // text; num stays 0
+      else n.out = Value(n.num);
+      break;
+    }
     case Type::Clock:
       n.num = clockMs_ / 1000;
       n.out = Value(n.num);
@@ -526,9 +569,10 @@ void NativeAnimated::applyProps(ANode& p) {
     writes_.clear();
     for (const StyleEntry& e : style->style) writes_.push_back({&e.key, e.group, &evalOut(e.tag)});
     view->patchStyle(writes_.data(), writes_.size());
-  } else if (!p.textTag) {
+  } else if (!p.textTag && !p.visibleTag) {
     view->patchStyle(evalOut(p.tag).asObject());
   }
+  if (p.visibleTag) view->setHidden(evalNum(p.visibleTag) == 0);
   if (p.textTag) {
     const Value& text = evalOut(p.textTag);
     std::string num;
@@ -1298,7 +1342,8 @@ double NativeAnimated::interactionWeight(const ANode& n) const {
   if (it == doc_.interactionNodes.end()) return 0;
   Node* v = doc_.get(it->second);
   const StateStyles* s = v ? v->stateStyles.get() : nullptr;
-  return s && s->interaction == n.interactionKey ? double(s->weight[n.slot]) : 0;
+  if (!s || s->interaction != n.interactionKey) return 0;
+  return n.instant ? (s->target[n.slot] ? 1 : 0) : double(s->weight[n.slot]);
 }
 
 size_t NativeAnimated::liveClocks() const {

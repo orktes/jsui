@@ -9,6 +9,7 @@ import { AnimatedValue } from '../animated/nodes.js';
 import { timing } from '../animated/animations.js';
 import { Easing } from '../animated/Easing.js';
 import { createAnimatedComponent } from '../animated/createAnimatedComponent.js';
+import { useGroupProvider } from './group.js';
 
 const AnimatedView = createAnimatedComponent('View');
 
@@ -34,7 +35,10 @@ export function Pressable(props) {
   const s = props.testOnly_pressed ? Object.assign({}, state, { pressed: true }) : state;
   const rest = hostProps(props, handlers, PRESSABLE_OMIT);
   rest.style = typeof style === 'function' ? style(s) : style;
-  rest.children = typeof children === 'function' ? children(s) : children;
+  // group: descendants' useGroupState() reads this element's interaction.
+  const g = useGroupProvider(props.group, props.interaction, typeof children === 'function' ? children(s) : children);
+  if (props.group) rest.interaction = g.ix;
+  rest.children = g.children;
   return jsx('View', rest);  // rest is ours: no copy (createElement would)
 }
 Pressable.displayName = 'Pressable';

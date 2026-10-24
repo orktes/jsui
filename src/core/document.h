@@ -143,6 +143,8 @@ class Document {
   std::vector<uint32_t> stateNodes;
   // `interaction` key -> the node that carries it (Animated.interaction).
   std::unordered_map<std::string, uint32_t> interactionNodes;
+  // A state transition started outside InputManager::tickStates (Node::setHidden).
+  bool statesKick = false;
   // Live nodes with an onLayout listener (Node::kListensLayout). Without
   // any, layout passes skip the onLayout walk.
   int layoutListeners = 0;

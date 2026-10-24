@@ -14,10 +14,12 @@ namespace {
 const char* const kSlotProps[kStateSlots] = {
     "groupHoveredStyle", "groupFocusedStyle", "groupFocusVisibleStyle", "groupPressedStyle", "hoveredStyle",
     "focusedStyle",      "focusVisibleStyle", "pressedStyle",           "disabledStyle",
+    nullptr,  // kHidden: from `visibility`
 };
 // transition: {hovered: ..., pressed: ...} per state (group states use their state's name)
 const char* const kSlotNames[kStateSlots] = {
     "hovered", "focused", "focusVisible", "pressed", "hovered", "focused", "focusVisible", "pressed", "disabled",
+    "visibility",
 };
 
 // StyleSheet.flatten over Values: nested arrays, falsy entries skipped,
@@ -199,7 +201,8 @@ bool StateStyles::hasGroupOverlays() const {
 bool wantsStateStyles(const Value& props) {
   if (!props.isObject()) return false;
   for (const char* k : kSlotProps)
-    if (props.has(k)) return true;
+    if (k && props.has(k)) return true;
+  if (props["visibility"].isObject()) return true;
   const Value& g = props["group"];
   return g.asBool() || (g.isString() && !g.asString().empty()) || props["interaction"].isObject();
 }
@@ -209,11 +212,46 @@ void parseStateStyles(const Value& props, StateStyles* s) {
   s->base = flattenStyle(props["style"]);
   s->keys.clear();
   for (int i = 0; i < kStateSlots; i++) {
-    Value o = flattenStyle(props[kSlotProps[i]]);
+    Value o = kSlotProps[i] ? flattenStyle(props[kSlotProps[i]]) : Value();
     s->overlay[i] = o.isObject() && !o.asObject().empty() ? o : Value();
     for (auto& [k, v] : s->overlay[i].asObject())
       if (std::find(s->keys.begin(), s->keys.end(), k) == s->keys.end()) s->keys.push_back(k);
   }
+  // <Visibility>: visibility {mode: remove | hide, effect: fade | scale |
+  // none, scale}; with it, visible: false hides (an Animated `visible` is
+  // written natively instead, Node::setHidden).
+  const Value& vis = props["visibility"];
+  if (vis.isObject()) {
+    std::string effect = vis["effect"].isString() ? vis["effect"].asString()
+                         : props["transition"].isNull() ? "none" : "fade";
+    Value::Object o;
+    if (effect == "fade" || effect == "scale") o.emplace("opacity", Value(0));
+    if (effect == "scale") {
+      Value::Object sc;
+      sc.emplace("scale", Value(vis["scale"].asNumber(0.9)));
+      o.emplace("transform", Value(Value::Array{Value(std::move(sc))}));
+    }
+    Value::Object end;
+    if (vis["mode"].asString() == "hide") {
+      end.emplace("pointerEvents", Value("none"));
+      if (!o.count("opacity")) end.emplace("opacity", Value(0));
+    } else {
+      end.emplace("display", Value("none"));
+    }
+    s->overlay[kHidden] = o.empty() ? Value() : Value(std::move(o));
+    for (auto& [k, v] : s->overlay[kHidden].asObject())
+      if (std::find(s->keys.begin(), s->keys.end(), k) == s->keys.end()) s->keys.push_back(k);
+    for (auto& [k, v] : end)
+      if (std::find(s->keys.begin(), s->keys.end(), k) == s->keys.end()) s->keys.push_back(k);
+    s->hiddenEnd = Value(std::move(end));
+  } else {
+    s->hiddenEnd = Value();
+  }
+  if (vis.isObject() && props.has("visible")) {
+    const Value& v = props["visible"];
+    s->hidden = !(v.asBool() || (v.isNumber() && v.asNumber() != 0));
+  }
+  if (!s->seen) s->weight[kHidden] = s->hidden ? 1.f : 0.f;
   // transition: ms, or {duration, easing, delay, hovered: ..., pressed: ...}
   const Value& t = props["transition"];
   s->hasTransition = t.isNumber() || t.isObject();
@@ -312,13 +350,14 @@ Value blendKey(const StateStyles& s, const std::string& key) {
     if (w <= 0 || !s.overlay[i].has(key)) continue;
     v = mixStyleValue(key, v, s.overlay[i][key], w);
   }
+  if (s.weight[kHidden] >= 1 && s.hiddenEnd.has(key)) v = s.hiddenEnd[key];
   return v;
 }
 
 }  // namespace
 
 Value blendStateStyle(const StateStyles& s) {
-  bool any = false;
+  bool any = s.weight[kHidden] >= 1 && s.hiddenEnd.isObject();
   for (int i = 0; i < kStateSlots && !any; i++) any = s.weight[i] > 0 && s.overlay[i].isObject();
   if (!any) return s.base;
   Value out = s.base.isObject() ? s.base : Value(Value::Object());
@@ -349,6 +388,9 @@ void inheritGroupTransition(StateStyles& s, const StateStyles& g) {
 
 bool stepStateWeights(StateStyles& s, const bool targets[kStateSlots], double nowMs, bool* moving) {
   bool changed = false;
+  // A change seen a second time in one frame (native Animated toggling
+  // Visibility after tickStates) still starts a frame back.
+  if (nowMs > s.lastMs) s.frameMs = std::clamp(nowMs - s.lastMs, 0.0, 1000.0 / 60);
   for (int i = 0; i < kStateSlots; i++) {
     float goal = targets[i] ? 1.f : 0.f;
     if (!s.seen) {
@@ -365,7 +407,7 @@ bool stepStateWeights(StateStyles& s, const bool targets[kStateSlots], double no
       // already shows one frame of it.
       s.target[i] = targets[i];
       s.from[i] = s.weight[i];
-      s.start[i] = nowMs - std::clamp(nowMs - s.lastMs, 0.0, 1000.0 / 60);
+      s.start[i] = nowMs - s.frameMs;
     }
     if (s.weight[i] == goal) continue;
     double t = s.duration[i] > 0 ? (nowMs - s.start[i] - s.delay[i]) / s.duration[i] : 1;
