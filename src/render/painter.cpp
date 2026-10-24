@@ -665,6 +665,7 @@ struct ShadowKey {
   float holeRadii[8];
   float color[4];             // pre-coloured: drawn as a sprite, the fastest CPU blit
   float inset;                // 1: an inset shadow (w / h / radii: the padding box it is clipped to)
+  float stretched;            // 1: a nine-patch mask (see MaskStretch), GPU canvases only
   bool operator==(const ShadowKey& o) const { return std::memcmp(this, &o, sizeof(ShadowKey)) == 0; }
 };
 struct ShadowKeyHash {
@@ -675,9 +676,17 @@ struct ShadowKeyHash {
     return size_t(h);
   }
 };
+// A nine-patch shadow mask: the image is the full mask with `extraX`
+// columns (`extraY` rows) taken out of its uniform middle, and column `atX`
+// (row `atY`) of the image stands for 1 + extra of them; -1: not stretched.
+struct MaskStretch {
+  int atX = -1, extraX = 0, atY = -1, extraY = 0;
+  bool any() const { return atX >= 0 || atY >= 0; }
+};
 struct ShadowMask {
   sk_sp<SkImage> image;  // premultiplied N32
   int margin = 0;
+  MaskStretch stretch;
   uint32_t lastUsed = 0;
 };
 struct ShadowCache {
@@ -751,9 +760,10 @@ float keyRound(float v) { return std::round(v * 64) / 64; }
 // image blitted as a sprite (only the visible part of the ring), with `cut`
 // (device space) cut out of it there.
 void drawMask(SkCanvas* c, ShadowCache& cache, const SkImage* img, float x0, float y0, const SkMatrix& post,
-              MaskSkip skip, const SkPaint& p, const SkRRect* cut = nullptr) {
+              MaskSkip skip, const SkPaint& p, const SkRRect* cut = nullptr, const MaskStretch& st = {}) {
   const bool whole = post.isIdentity() && x0 == std::floor(x0) && y0 == std::floor(y0);
-  SkIRect all = post.mapRect(SkRect::MakeXYWH(x0, y0, float(img->width()), float(img->height()))).roundOut();
+  SkIRect all = post.mapRect(SkRect::MakeXYWH(x0, y0, float(img->width() + st.extraX), float(img->height() + st.extraY)))
+                    .roundOut();
   for (SkIRect* k : {&skip.tall, &skip.wide})
     if (!k->intersect(all) || k->width() < 16 || k->height() < 16) k->setEmpty();
   if (!cache.raster) {
@@ -762,6 +772,44 @@ void drawMask(SkCanvas* c, ShadowCache& cache, const SkImage* img, float x0, flo
     if (!post.isIdentity() || !skip.tall.intersect(skip.wide)) skip.tall.setEmpty();
     if (skip.tall.width() < 16 || skip.tall.height() < 16) skip.tall.setEmpty();
     skip.wide = skip.tall;
+  }
+  if (st.any() && !cache.raster) {
+    // Nine-patch: the middle column / row stretched over the columns / rows
+    // taken out, which all hold the same pixels; the other parts 1:1. The
+    // middle part is left out under the box (skip). Whole-pixel placements
+    // sample nearest (the stretched column repeated); others bilinear, which
+    // reads only uniform pixels around the stretched one.
+    const float w = float(img->width()), h = float(img->height());
+    float xs[4] = {0, w}, xd[4] = {0, w}, ys[4] = {0, h}, yd[4] = {0, h};
+    int nx = 1, ny = 1;
+    if (st.atX >= 0) {
+      const float a = float(st.atX), e = float(st.extraX);
+      float s4[4] = {0, a, a + 1, w}, d4[4] = {0, a, a + 1 + e, w + e};
+      std::copy(s4, s4 + 4, xs);
+      std::copy(d4, d4 + 4, xd);
+      nx = 3;
+    }
+    if (st.atY >= 0) {
+      const float a = float(st.atY), e = float(st.extraY);
+      float s4[4] = {0, a, a + 1, h}, d4[4] = {0, a, a + 1 + e, h + e};
+      std::copy(s4, s4 + 4, ys);
+      std::copy(d4, d4 + 4, yd);
+      ny = 3;
+    }
+    const SkSamplingOptions sampling = whole ? SkSamplingOptions() : SkSamplingOptions(SkFilterMode::kLinear);
+    c->save();
+    c->setMatrix(post);
+    for (int j = 0; j < ny; j++)
+      for (int i = 0; i < nx; i++) {
+        SkRect src = SkRect::MakeLTRB(xs[i], ys[j], xs[i + 1], ys[j + 1]);
+        SkRect dst = SkRect::MakeLTRB(x0 + xd[i], y0 + yd[j], x0 + xd[i + 1], y0 + yd[j + 1]);
+        if (src.isEmpty()) continue;
+        if (i == nx / 2 && j == ny / 2 && !skip.tall.isEmpty() && skip.tall.contains(post.mapRect(dst).roundOut()))
+          continue;
+        c->drawImageRect(img, src, dst, sampling, &p, SkCanvas::kFast_SrcRectConstraint);
+      }
+    c->restore();
+    return;
   }
   sk_sp<SkImage> shifted;
   SkMatrix place = post;
@@ -852,6 +900,129 @@ void drawMask(SkCanvas* c, ShadowCache& cache, const SkImage* img, float x0, flo
     for (SkRegion::Iterator it(parts); !it.done(); it.next()) part(it.rect());
   }
   c->restore();
+}
+
+// Renders the mask of `shape` blurred by `sigma` with `col`, minus `hole`
+// (both in mask space), into an iw x ih raster surface.
+sk_sp<SkSurface> renderShadowMask(const SkRRect& shape, const SkRRect* hole, const SkColor4f& col, float sigma,
+                                  int iw, int ih) {
+  sk_sp<SkSurface> surf = SkSurfaces::Raster(SkImageInfo::MakeN32Premul(iw, ih));
+  if (!surf) return nullptr;
+  surf->getCanvas()->clear(SK_ColorTRANSPARENT);
+  SkPaint mp;
+  mp.setAntiAlias(true);
+  mp.setColor4f(col);
+  mp.setMaskFilter(SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, sigma));
+  surf->getCanvas()->drawRRect(shape, mp);
+  if (hole) {
+    SkPaint hp;
+    hp.setAntiAlias(true);
+    hp.setBlendMode(SkBlendMode::kDstOut);
+    surf->getCanvas()->drawRRect(*hole, hp);
+  }
+  return surf;
+}
+
+// The same mask as a nine-patch (see MaskStretch), or null when the shape is
+// too small for one. Skia blurs a big round rect as a nine-patch itself: a
+// small blurred copy (the corners and their blur) with its middle column and
+// row repeated over the rest, so the mask of the shape made narrower by E
+// columns is the full one with E fewer copies of that column (to within
+// Skia's blending, which rounds a long span 1 level differently from a short
+// one now and then). Which column that is depends on Skia's version (its margins and
+// stretch geometry differ between releases), so it is found in the narrow
+// mask: the longest run of identical columns (rows), kept long by leaving
+// the narrow shape well above the size Skia needs. The hole (an anti-aliased
+// round rect, the same in every column of its straight middle) is then cut
+// out, and the stretched column must lie in its straight part too (its
+// anti-aliased corners land a few levels apart at a few pixels: Skia's edge
+// coverage depends on the position a little; the box's own edge covers
+// them).
+sk_sp<SkSurface> renderNinePatchMask(SkRRect shape, const SkRRect* fullHole, const SkColor4f& col, float sigma,
+                                     int iw, int ih, MaskStretch* st) {
+  constexpr int kMinRun = 32;
+  SkRRect hole = fullHole ? *fullHole : SkRRect();
+  // Columns (rows) to leave out: all but what the corners, Skia's margins
+  // (~3 sigma each side, twice) and a run of kMinRun need.
+  auto maxR = [&](const SkRRect& r, SkRRect::Corner a, SkRRect::Corner b, bool x) {
+    SkVector u = r.radii(a), v = r.radii(b);
+    return x ? std::max(u.fX, v.fX) : std::max(u.fY, v.fY);
+  };
+  // Skia blurs other shapes (smaller ones, pills, ovals) directly, which is
+  // not the same in every column: both sides must be long enough.
+  bool big = true;
+  auto extra = [&](bool x) {
+    float lo = maxR(shape, SkRRect::kUpperLeft_Corner, x ? SkRRect::kLowerLeft_Corner : SkRRect::kUpperRight_Corner, x);
+    float hi =
+        maxR(shape, SkRRect::kLowerRight_Corner, x ? SkRRect::kUpperRight_Corner : SkRRect::kLowerLeft_Corner, x);
+    float corners = lo + hi + 4 * (3 * sigma + 2), size = x ? shape.width() : shape.height();
+    if (size < corners + kMinRun) big = false;
+    int e = int(size - corners - 2 * kMinRun);
+    return e >= 16 ? e : 0;
+  };
+  const int ex = extra(true), ey = extra(false);
+  if (!big || (!ex && !ey)) return nullptr;
+  for (SkRRect* r : {&shape, fullHole ? &hole : nullptr}) {
+    if (!r) continue;
+    SkVector radii[4];
+    for (int i = 0; i < 4; i++) radii[i] = r->radii(SkRRect::Corner(i));
+    SkRect b = r->rect();
+    b.fRight -= float(ex);
+    b.fBottom -= float(ey);
+    r->setRectRadii(b, radii);
+  }
+  const int w = iw - ex, h = ih - ey;
+  sk_sp<SkSurface> surf = renderShadowMask(shape, nullptr, col, sigma, w, h);
+  SkPixmap px;
+  if (!surf || !surf->peekPixels(&px)) return nullptr;
+  // Identical neighbours: column x and x + 1 (row y and y + 1).
+  std::vector<uint8_t> sameX(size_t(w), 1), sameY(size_t(h), 1);
+  for (int y = 0; y < h; y++) {
+    const uint32_t* row = px.addr32(0, y);
+    for (int x = 0; x + 1 < w; x++)
+      if (row[x] != row[x + 1]) sameX[size_t(x)] = 0;
+    if (y + 1 < h) sameY[size_t(y)] = std::memcmp(row, px.addr32(0, y + 1), size_t(w) * 4) == 0;
+  }
+  // The middle of the longest run of identical columns (rows), within
+  // [lo, hi]; -1 when shorter than kMinRun.
+  auto pick = [](const std::vector<uint8_t>& same, int n, float lo, float hi) {
+    int best0 = 0, best1 = -1;
+    for (int i = 0; i < n;) {
+      int j = i;
+      while (j + 1 < n && same[size_t(j)]) j++;
+      if (j - i > best1 - best0) best0 = i, best1 = j;
+      i = j + 1;
+    }
+    if (best1 - best0 + 1 < kMinRun) return -1;
+    // Not at the run's ends: bilinear draws read the neighbours too.
+    int a = std::max(best0 + 1, int(std::ceil(lo))), b = std::min(best1 - 1, int(std::floor(hi)) - 1);
+    return a <= b ? (a + b) / 2 : -1;
+  };
+  // The straight part of the hole: past its corners and their anti-aliasing.
+  float hx0 = -1e9f, hx1 = 1e9f, hy0 = -1e9f, hy1 = 1e9f;
+  if (fullHole) {
+    hx0 = hole.rect().left() + maxR(hole, SkRRect::kUpperLeft_Corner, SkRRect::kLowerLeft_Corner, true) + 2;
+    hx1 = hole.rect().right() - maxR(hole, SkRRect::kUpperRight_Corner, SkRRect::kLowerRight_Corner, true) - 2;
+    hy0 = hole.rect().top() + maxR(hole, SkRRect::kUpperLeft_Corner, SkRRect::kUpperRight_Corner, false) + 2;
+    hy1 = hole.rect().bottom() - maxR(hole, SkRRect::kLowerLeft_Corner, SkRRect::kLowerRight_Corner, false) - 2;
+  }
+  if (ex) {
+    st->atX = pick(sameX, w, hx0, hx1);
+    if (st->atX < 0) return nullptr;
+    st->extraX = ex;
+  }
+  if (ey) {
+    st->atY = pick(sameY, h, hy0, hy1);
+    if (st->atY < 0) return nullptr;
+    st->extraY = ey;
+  }
+  if (fullHole) {
+    SkPaint hp;
+    hp.setAntiAlias(true);
+    hp.setBlendMode(SkBlendMode::kDstOut);
+    surf->getCanvas()->drawRRect(hole, hp);
+  }
+  return surf;
 }
 
 // Draws `shape` (local coords) blurred by CSS `blur` with `paint`'s color
@@ -950,32 +1121,30 @@ bool drawCachedShadow(SkCanvas* c, const SkRRect& shape, const SkRRect* hole, co
   key.color[1] = col.fG;
   key.color[2] = col.fB;
   key.color[3] = col.fA;
+  // GPU canvases draw masks as nine-patches (drawMask): the CPU work of a
+  // big card's shadow (blur, cut-out, upload) is then that of a small one.
+  const bool ninePatch = gpu && !cache.raster;
+  key.stretched = ninePatch ? 1 : 0;
   auto it = cache.masks.find(key);
   if (it == cache.masks.end()) {
     int margin = int(std::ceil(key.sigma * 3)) + 2;
     int iw = int(std::ceil(key.fx + key.w)) + margin * 2, ih = int(std::ceil(key.fy + key.h)) + margin * 2;
     if (iw <= 0 || ih <= 0 || size_t(iw) * size_t(ih) > (4u << 20)) return false;  // huge: blur directly
-    sk_sp<SkSurface> surf = SkSurfaces::Raster(SkImageInfo::MakeN32Premul(iw, ih));
-    if (!surf) return false;
-    surf->getCanvas()->clear(SK_ColorTRANSPARENT);
-    SkPaint mp;
-    mp.setAntiAlias(true);
-    mp.setColor4f(col);
-    mp.setMaskFilter(SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, key.sigma));
-    SkRRect local = dev;
+    SkRRect local = dev, h = devHole;
     local.offset(margin - ox, margin - oy);
-    surf->getCanvas()->drawRRect(local, mp);
-    if (hole) {
-      SkPaint hp;
-      hp.setAntiAlias(true);
-      hp.setBlendMode(SkBlendMode::kDstOut);
-      SkRRect h = devHole;
-      h.offset(margin - ox, margin - oy);
-      surf->getCanvas()->drawRRect(h, hp);
+    h.offset(margin - ox, margin - oy);
+    MaskStretch st;
+    sk_sp<SkSurface> surf;
+    if (ninePatch) surf = renderNinePatchMask(local, hole ? &h : nullptr, col, key.sigma, iw, ih, &st);
+    if (!surf) {
+      st = MaskStretch();
+      surf = renderShadowMask(local, hole ? &h : nullptr, col, key.sigma, iw, ih);
     }
+    if (!surf) return false;
     ShadowMask sm;
     sm.image = surf->makeImageSnapshot();
     sm.margin = margin;
+    sm.stretch = st;
     it = cache.insert(key, std::move(sm));
   }
   it->second.lastUsed = cache.frame;
@@ -1003,7 +1172,7 @@ bool drawCachedShadow(SkCanvas* c, const SkRRect& shape, const SkRRect* hole, co
     skip.tall = inside(devBox.rect().makeInset(rx + 1, 1));
     skip.wide = inside(devBox.rect().makeInset(1, ry + 1));
   }
-  drawMask(c, cache, img, x0, y0, post, skip, p, cutLater ? &cut : nullptr);
+  drawMask(c, cache, img, x0, y0, post, skip, p, cutLater ? &cut : nullptr, it->second.stretch);
   return true;
 }
 
