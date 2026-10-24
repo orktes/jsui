@@ -6,6 +6,7 @@
 #   UE_ROOT       default: /Users/Shared/Epic Games/UE_5.8 (env UE_ROOT)
 #   JSUI_SKIA_DIR a Skia with Graphite (scripts/build-skia-desktop.sh), for the
 #                 GPU path; default third_party/skia-desktop (env JSUI_SKIA_DIR)
+# env JSUI_UNREAL_OUT: where the packaged game goes (default build/unreal)
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
@@ -13,7 +14,7 @@ ue=${1:-${UE_ROOT:-/Users/Shared/Epic Games/UE_5.8}}
 skia=${2:-${JSUI_SKIA_DIR:-$root/third_party/skia-desktop}}
 build="$root/build-unreal"
 project="$root/integrations/unreal/project"
-out="$root/build/unreal"
+out=${JSUI_UNREAL_OUT:-$root/build/unreal}
 
 # 1. The UI bundle, copied into the project (Content/Jsui is staged as a
 #    non-UFS directory, DefaultGame.ini).
