@@ -54,6 +54,11 @@ class Perf {
   using Clock = std::chrono::steady_clock;
   PerfCounters counters;
   bool profiling = false;
+  // Not a statistic (never cleared): bumped by every Node::setProps and
+  // Node::patchStyle(object) of the runtime's documents, so native Animated
+  // re-checks its connected views for React re-props (or other style
+  // writes) only after there were any.
+  uint64_t propsEpoch = 0;
   // Accumulated exclusive time per phase in microseconds (reset by the caller).
   double us[size_t(Phase::Count)] = {};
 

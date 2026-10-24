@@ -54,6 +54,27 @@ class Value {
     else if (std::get<5>(v_).use_count() > 1) v_ = std::make_shared<Object>(*std::get<5>(v_));
     return *std::get<5>(v_);
   }
+  // Copy-on-write access to the array (a non-array becomes an empty array).
+  Array& mutableArray() {
+    if (!isArray()) v_ = std::make_shared<Array>();
+    else if (std::get<4>(v_).use_count() > 1) v_ = std::make_shared<Array>(*std::get<4>(v_));
+    return *std::get<4>(v_);
+  }
+  // Sets a string value, reusing this value's string buffer when it holds one.
+  void setString(const std::string& s) {
+    if (isString()) std::get<3>(v_) = s;
+    else v_ = s;
+  }
+  // Makes this value equal to `src` and returns whether it changed, in one
+  // walk: its own containers and string buffers are reused where they are
+  // not shared and have src's shape (same array length, same object keys);
+  // a shared container is only copied when something in it changes, and a
+  // shape mismatch shares src's container instead. A per-frame write of a
+  // same-shaped value (an Animated transform into a view's style) then
+  // allocates nothing.
+  bool assignReusing(const Value& src);
+  // Deep equality (shared containers compare by identity first).
+  bool equals(const Value& o) const;
   // Object member lookup; returns a null Value when missing.
   const Value& operator[](const std::string& key) const {
     static const Value null;

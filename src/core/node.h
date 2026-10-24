@@ -66,6 +66,17 @@ class Node {
   // and just their style groups are re-resolved. Returns false if nothing
   // changed. The animation path (patchStyle, native Animated).
   bool patchStyle(const Value::Object& partial);
+  // The same for writes whose keys and paint groups the caller resolved
+  // once (native Animated: one per animated style key of a view). Values
+  // are copied into the style reusing its containers and strings
+  // (Value::assignReusing), so a steady stream of same-shaped values
+  // (transform arrays, numbers, color strings) allocates nothing.
+  struct StyleWrite {
+    const std::string* key;
+    uint32_t group;      // paintStyleGroup(*key); 0: a layout or unknown key
+    const Value* value;  // null removes the key
+  };
+  bool patchStyle(const StyleWrite* writes, size_t count);
   // Facts about props() that hot paths ask for (computed by setProps).
   enum PropFlag : uint8_t {
     kListensLayout = 1,  // __events has "layout" (onLayout)
@@ -191,6 +202,9 @@ class Node {
 
  private:
   void updatePropFlags();
+  // patchStyle's paint-only tail: re-resolves `groups` from the (already
+  // merged) style, props_["style"], and invalidates what they affect.
+  void applyPatchedGroups(uint32_t groups, const Value& style);
   // Text / TextInput: invalidates the paragraph after a style change.
   void textStyleChanged(const TextStyle& oldText, bool propsMetrics, bool propsPaint, bool* relayout);
   void attachYoga(Node* child, size_t index);

@@ -1473,10 +1473,24 @@ Native's API and both of its drivers:
     `shadowRadius`, ...) and transforms; layout keys throw `Style property
     'width' is not supported by native animated module`, animated non-style
     props throw too. `Animated.ValueXY` is native through its channels.
-  * Writes go through `Node::setProps` with the merged style (paint-only, so
-    no relayout; the incremental renderer damages just the node's old and
-    new rects). When React re-props a connected view, the live values are
-    overlaid again in the same tick. Unchanged frames write nothing.
+  * Writes go through `Node::patchStyle` (paint-only, so no relayout; the
+    incremental renderer damages just the node's old and new rects). Each
+    `style` node keeps its keys with their paint groups, resolved once when
+    it is created, and hands the view its inputs' outputs directly
+    (`Node::StyleWrite`): no partial style object is built. The view's
+    `props.style` is updated in place with `Value::assignReusing`, which
+    compares and copies in one walk and reuses the existing transform
+    arrays, objects and strings, so later `setProps` diffs see the live
+    values; only the written groups are re-resolved (transform, opacity and
+    backgroundColor without indexing the whole style). Transform nodes
+    update their output array in place and color / string outputs reuse
+    their buffers, and the flush bookkeeping uses per-node flags instead of
+    hash sets, so a steady frame allocates nothing
+    (`perf_native_animated_writes_allocate_nothing`). When React re-props
+    a connected view, the live values are overlaid again in the same tick;
+    views are only re-checked for that after some `setProps` /
+    `patchStyle` ran (`Perf::propsEpoch`), not every frame. Unchanged
+    frames write nothing.
   * Native nodes are freed when their derived JS node detaches, when the
     component unmounts, and (values) when the JS object is garbage collected
     (`FinalizationRegistry`). A reload clears the native graph.
@@ -1649,7 +1663,10 @@ changed rather than to the tree size:
   (opacity, transform, colors, radii, shadows, gradients, filters, text, ...)
   are re-resolved and Yoga is not touched (`applyPaintStyleChanges`,
   `src/core/style.cpp`). `patchStyle` (bridge and native Animated) does the
-  same in place, without copying the props.
+  same in place, without copying the props; native Animated's writes
+  allocate nothing in steady state (see "Animated"): `markers-native-1000`
+  (2000 view writes per frame) went from ~31k allocations and ~19.7M
+  instructions per frame to 6 and ~6.6M.
 * **Layout.** Yoga only reruns when something layout-affecting changed; the
   post-layout walk (`Document::afterLayout`) visits only nodes Yoga flagged
   (`hasNewLayout`). Text measurement reuses the paragraph's intrinsic layout.

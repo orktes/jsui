@@ -2,18 +2,38 @@
 // timed (Document::perf counters, src/core/perf.h), so the checks are exact
 // and machine independent. Each test pins down one "this must not scale
 // with the tree" property that tools/jsui-bench measures in microseconds.
+// Heap allocations are counted too (operator new is replaced below).
+#include <cmath>
+#include <cstdlib>
 #include <memory>
+#include <new>
 #include <string>
 #include <vector>
 
+#include "animated/native_animated.h"
 #include "core/document.h"
 #include "core/value.h"
+#include "host_buffers.h"
 #include "input/input.h"
 #include "jsui/jsui.h"
 #include "runtime.h"
 #include "test.h"
 
 using namespace jsui;
+
+namespace {
+// operator new calls made by this thread while tCountAllocs is set.
+thread_local bool tCountAllocs = false;
+thread_local uint64_t tAllocs = 0;
+}  // namespace
+
+void* operator new(size_t n) {
+  if (tCountAllocs) tAllocs++;
+  if (void* p = std::malloc(n ? n : 1)) return p;
+  throw std::bad_alloc();
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, size_t) noexcept { std::free(p); }
 
 namespace {
 
@@ -204,4 +224,102 @@ TEST(perf_capi_counters_and_phases) {
   CHECK(p.layout_us > 0);
   CHECK_EQ(p.gpu_submit_us, 0.0);  // a CPU render
   jsui_destroy(rt);
+}
+
+// Native Animated writing views every frame (tools/jsui-bench markers-native:
+// Animated.hostBuffer values through interpolations into transforms, plus an
+// opacity and a color): each write re-resolves only the written groups,
+// never relayouts, and in steady state the whole flush allocates nothing
+// (no partial style objects, no hash-set nodes, no strings).
+TEST(perf_native_animated_writes_allocate_nothing) {
+  constexpr int kMarkers = 50;
+  Document doc;
+  doc.setViewport(800, 600, 1);
+  HostBuffers buffers;
+  NativeAnimated na(doc);
+  na.buffers = &buffers;
+  std::vector<Node*> markers, fills;
+  auto create = [&](int tag, const std::string& config) { CHECK(na.createNode(tag, Value::parseJson(config))); };
+  for (int i = 0; i < kMarkers; i++) {
+    Node* marker = doc.createNode(NodeType::View);
+    marker->setProps(Value::parseJson(
+        R"({"style":{"position":"absolute","width":48,"height":14,"padding":3,"borderRadius":3,"backgroundColor":"#0d1322cc","transform":[{"translateX":0},{"translateY":0}]}})"));
+    doc.root()->appendChild(marker);
+    Node* fill = doc.createNode(NodeType::View);
+    fill->setProps(Value::parseJson(R"({"style":{"flex":1,"backgroundColor":"#ef476f"}})"));
+    marker->appendChild(fill);
+    markers.push_back(marker);
+    fills.push_back(fill);
+    int t = 100 + i * 20;
+    for (int k = 0; k < 3; k++) {
+      create(t + k, R"({"type":"hostBuffer","key":"enemies","index":)" + std::to_string(i * 3 + k) + "}");
+    }
+    create(t + 3, R"({"type":"interpolation","inputRange":[0,100],"outputs":[[0,1]]})");
+    create(t + 4, R"({"type":"interpolation","inputRange":[0,100],"outputType":"color","outputs":[[255,0],[0,200],[0,0],[1,0.5]]})");
+    na.connectNodes(t + 2, t + 3);
+    na.connectNodes(t + 2, t + 4);
+    create(t + 5, R"({"type":"transform","transforms":[{"property":"translateX","nodeTag":)" + std::to_string(t) +
+                      R"(},{"property":"translateY","nodeTag":)" + std::to_string(t + 1) + "}]}");
+    na.connectNodes(t, t + 5);
+    na.connectNodes(t + 1, t + 5);
+    create(t + 6, R"({"type":"style","style":{"transform":)" + std::to_string(t + 5) + "}}");
+    na.connectNodes(t + 5, t + 6);
+    create(t + 7, R"({"type":"props","props":{"style":)" + std::to_string(t + 6) + "}}");
+    na.connectNodes(t + 6, t + 7);
+    na.connectToView(t + 7, marker->id());
+    create(t + 8, R"({"type":"transform","transforms":[{"property":"scaleX","nodeTag":)" + std::to_string(t + 3) + "}]}");
+    na.connectNodes(t + 3, t + 8);
+    create(t + 9, R"({"type":"style","style":{"transform":)" + std::to_string(t + 8) + R"(,"opacity":)" +
+                      std::to_string(t + 3) + R"(,"backgroundColor":)" + std::to_string(t + 4) + "}}");
+    na.connectNodes(t + 8, t + 9);
+    na.connectNodes(t + 3, t + 9);
+    na.connectNodes(t + 4, t + 9);
+    create(t + 10, R"({"type":"props","props":{"style":)" + std::to_string(t + 9) + "}}");
+    na.connectNodes(t + 9, t + 10);
+    na.connectToView(t + 10, fill->id());
+  }
+  doc.layout();
+  std::vector<float> data(kMarkers * 3);
+  auto frame = [&](int f) {
+    for (int i = 0; i < kMarkers; i++) {
+      data[size_t(i * 3)] = float(i * 10 + f % 7);
+      data[size_t(i * 3 + 1)] = float(i * 5 + f % 11);
+      data[size_t(i * 3 + 2)] = float(50 + 40 * std::sin(f * 0.37 + i));
+    }
+    buffers.set("enemies", JSUI_BUFFER_F32, data.data(), data.size());
+    doc.perf.counters = {};
+    tAllocs = 0;
+    tCountAllocs = true;
+    na.bufferChanged("enemies");
+    na.tick(f * 16.0);
+    tCountAllocs = false;
+    return doc.perf.counters;
+  };
+  for (int f = 0; f < 40; f++) frame(f);  // warm up: every value range seen
+  for (int f = 40; f < 100; f++) {
+    PerfCounters c = frame(f);
+    CHECK_EQ(c.animatedWrites, uint64_t(2 * kMarkers));
+    CHECK_EQ(c.styleResolves, uint64_t(2 * kMarkers));
+    CHECK_EQ(tAllocs, uint64_t(0));
+  }
+  CHECK(!doc.layout());  // paint groups only
+  // The views' styles hold the live values next to React's keys, and the
+  // computed styles match them.
+  const Value& ms = markers[3]->props()["style"];
+  CHECK_EQ(ms["transform"].toJson(), std::string(R"([{"translateX":31},{"translateY":15}])"));  // frame 99
+  CHECK_EQ(ms["borderRadius"].asNumber(), 3.0);
+  CHECK_EQ(markers[3]->style().transform.size(), size_t(2));
+  CHECK_EQ(markers[3]->style().transform[0].a, 31.f);
+  CHECK_EQ(markers[3]->style().transform[1].b, 15.f);
+  const Value& fs = fills[3]->props()["style"];
+  CHECK_EQ(fs["transform"].asArray().at(0)["scaleX"].asNumber(), fs["opacity"].asNumber());
+  CHECK_EQ(double(fills[3]->style().opacity), double(float(fs["opacity"].asNumber())));
+  CHECK(fs["backgroundColor"].asString().rfind("rgba(", 0) == 0);
+  CHECK_EQ(fs["flex"].asNumber(), 1.0);
+  // An unchanged frame re-resolves and repaints nothing.
+  uint32_t version = fills[3]->paintVersion;
+  PerfCounters same = frame(99);
+  CHECK_EQ(same.styleResolves, uint64_t(0));
+  CHECK_EQ(fills[3]->paintVersion, version);
+  CHECK_EQ(tAllocs, uint64_t(0));
 }
