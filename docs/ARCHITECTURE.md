@@ -3,56 +3,81 @@
 JSUI is a small, embeddable UI runtime for games: React (JSX) components
 written exactly like React Native code, executed by QuickJS (or, in the
 browser and Node, by the host's own JS engine), laid out by Yoga and painted
-by Skia. It is a "browser-shaped" stack (JS + layout + 2D paint +
-resource loading + input) without a browser: the whole runtime is a static
-library with a C API, and the same core compiles to WebAssembly.
+by Skia, on the GPU wherever the host has one. It is a "browser-shaped" stack
+(JS + layout + 2D paint + resource loading + input + audio requests) without
+a browser: the whole runtime is a static (or shared) library with a C API,
+and the same core compiles to WebAssembly.
 
 ```
- ┌───────────────────────── app bundle (JS) ──────────────────────────┐
- │  import { View, Text, Image, StyleSheet } from 'react-native'       │
- │  react + react-reconciler + @orktes/jsui-react (host config, components,   │
- │  event system, StyleSheet)  — bundled by @orktes/jsui-cli (esbuild)        │
- └───────────────┬───────────────────────────────▲─────────────────────┘
-   __jsui_native.* (create/setProps/append…)     │ __jsui_dispatchEvent(ev)
- ┌───────────────▼───────────────────────────────┴─────────────────────┐
- │ JsEngine (QuickJS-ng): globals, timers, rAF, fetch, fonts, messages │
- ├──────────────────────────────────────────────────────────────────────┤
- │ Document / Node tree ── Yoga layout ── Text (skparagraph) ── Images  │
- │ InputManager: hit test, pointer/keyboard/gamepad, focus navigation   │
- │ Painter (Skia): backgrounds, gradients, borders, radii, shadows,     │
- │                 transforms, opacity, clipping, images, text          │
- ├──────────────────────────────────────────────────────────────────────┤
- │ ResourceLoader: file, http (dev server), embedder callback, browser  │
- └───────────────┬──────────────────────────────────────────────────────┘
+ ┌───────────────────────── app bundle (JS) ────────────────────────────────┐
+ │  import { View, Text, Image, StyleSheet } from 'react-native'            │
+ │  react + react-reconciler + @orktes/jsui-react (host config, components, │
+ │  events, Animated, host data hooks, LottieView, ShaderView, Sound)       │
+ │  bundled by @orktes/jsui-cli (esbuild; QuickJS bytecode by default)      │
+ └───────────────┬────────────────────────────────▲─────────────────────────┘
+   __jsui_native.* (create/updateProps/append…)   │ __jsui_dispatchEvent(ev), __jsui_on*(…)
+ ┌───────────────▼────────────────────────────────┴─────────────────────────┐
+ │ JsEngine: QuickJS-ng (native, WASM) or the host's JS engine (WASM only)  │
+ │   globals, timers, rAF, fetch, fonts, host data bridge, dev session      │
+ ├──────────────────────────────────────────────────────────────────────────┤
+ │ Surfaces ── Document / Node tree ── Yoga layout ── Text (skparagraph)    │
+ │ InputManager: hit test, pointer/keyboard/gamepad, focus, scrolling       │
+ │ Native Animated, LayoutAnimation, Lottie (Skottie), ShaderView (SkSL)    │
+ │ Host data: shared state, frame buffers, calls, messages, host textures   │
+ │ Painter (Skia) with damage tracking, sprite / shadow / layer caches      │
+ │ Audio: requests to the host's handler, or built-in miniaudio             │
+ ├──────────────────────────────────────────────────────────────────────────┤
+ │ Renderers: CPU raster │ Ganesh GL / GLES / WebGL / Metal / Direct3D 12   │
+ │                       │ Graphite Vulkan / Metal / Dawn / browser WebGPU  │
+ ├──────────────────────────────────────────────────────────────────────────┤
+ │ ResourceLoader: file, http (dev server), embedder callback, browser      │
+ └───────────────┬──────────────────────────────────────────────────────────┘
           C API  │ include/jsui/jsui.h
-   ┌─────────────┼───────────────┬─────────────────────┬──────────────┐
-   │ jsui-render │ jsui-viewer   │ web/ (WASM + canvas)│ game engine  │
-   │ (headless)  │ (window, dev) │                     │ (Godot, ...) │
-   └─────────────┴───────────────┴─────────────────────┴──────────────┘
+   ┌─────────────┼─────────────┬───────────────┬────────────────┬──────────┐
+   │ jsui-viewer │ web/ (WASM, │ jsui CLI      │ game engines:  │ bindings │
+   │ jsui-render │ main thread │ (headless in  │ Godot, Unity,  │ Rust, Go │
+   │ jsui-record │ or worker)  │ Node; agents) │ Unreal, raylib,│          │
+   │ jsui-bench  │             │               │ SDL3, sokol,   │          │
+   │             │             │               │ Android, iOS   │          │
+   └─────────────┴─────────────┴───────────────┴────────────────┴──────────┘
 ```
 
 ## Why these choices
 
 * **C++20 core.** Skia and Yoga are C++, QuickJS is C. One language, no FFI
-  layer, a single static library, and Emscripten builds it for the browser.
-  Game engines (Godot GDExtension, Unreal, Unity native plugins) consume C/C++
-  directly. The public surface is a C header so any language can bind it.
+  layer, one library, and Emscripten builds it for the browser. Game
+  engines (Godot GDExtension, Unreal, Unity native plugins) consume C/C++
+  directly. The public surface is a C header so any language can bind it
+  (see [Hosts and integrations](#hosts-and-integrations)).
 * **QuickJS-ng** — small, fast startup, ES2023, embeddable, compiles to WASM.
+  Bundles ship as precompiled QuickJS bytecode by default (see
+  [Bundles](#bundles-precompiled-bytecode)), and QuickJS itself is patched
+  and built with PGO in release builds (see [Performance](#performance)).
   The engine is isolated behind the `JsEngine` interface: the WASM build can
   run the bundle on the browser's (or Node's) own JIT-compiled engine
-  instead (see [Host JS engine](#host-js-engine)).
+  instead (see [Host JS engine](#host-js-engine)). Small binary size and
+  memory matter more here than peak JS speed, which a UI layer rarely needs.
 * **Yoga** — the layout engine React Native uses, so flexbox behaves exactly
   like RN (column default, `flexShrink: 0`, `position: relative`, etc.).
 * **Skia** — what Chrome and Flutter paint with; gives us anti-aliased rounded
   rects, blurs for shadows, gradients, text shaping (HarfBuzz + ICU via
-  skparagraph) and image codecs. Native builds use prebuilt static libraries
-  (aseprite/skia m124); WASM uses the same milestone built with
-  `scripts/build-skia-wasm.sh`.
-* **CPU raster first, GPU optional.** By default the runtime paints into an
-  RGBA buffer the embedder uploads as a texture. Deterministic (great for
-  reference tests) and works everywhere. The optional GPU backend runs the
-  same `paintDocument()` on a Skia Ganesh surface wrapping the embedder's
-  OpenGL / GLES / WebGL framebuffer or texture (see [GPU backend](#gpu-backend)).
+  skparagraph), image codecs, Skottie (Lottie) and SkSL runtime effects.
+  Two milestones are in use: the default native build links the aseprite
+  prebuilt static libraries (m124: CPU raster + Ganesh GL), and the plain /
+  WebGL WASM modules use m124 built by `scripts/build-skia-wasm.sh`. Every
+  GPU path beyond GL (Graphite on Vulkan / Metal / Dawn / WebGPU, Ganesh on
+  Metal and Direct3D), Android, iOS and the release binaries use Skia m157
+  built from source by `scripts/build-skia-{desktop,wasm-graphite,android,ios}.sh`. The
+  JSUI sources build against both (`__has_include` checks for the APIs that
+  changed).
+* **GPU by default, CPU raster as the fallback.** Every interactive host
+  draws with Skia on the host's own GPU device (the viewer, the browser,
+  Godot, Unity, Unreal, the engine examples, Android and iOS); see
+  [GPU backend](#gpu-backend) for which backend each uses. The CPU raster
+  (`jsui_render_rgba*`, an RGBA buffer the host uploads) runs the same
+  `paintDocument()` and is used when no GPU context can be made, in CI and
+  reference tests (deterministic pixels), and by the headless tools
+  (`jsui-render`, `jsui-record`, the CLI's `screenshot` / `inspect` / `run`).
 * **React Native semantics, written as `react-native` imports.** App code
   imports from `'react-native'`; the JSUI bundler aliases that to
   `@orktes/jsui-react`, and the Chrome reference build aliases it to
@@ -63,25 +88,32 @@ library with a C API, and the same core compiles to WebAssembly.
 
 | Path | What |
 | --- | --- |
-| `include/jsui/jsui.h` | Public C API (embedding, input, resources, messages, shared state, calls) |
-| `src/core/` | `Value`, `Node`, `Document`, style parsing (`style.cpp`) |
-| `src/render/` | Skia painter, image cache, GPU backend (`gpu.cpp`) |
-| `src/text/` | Font manager, paragraph building and Yoga measure for `Text` |
-| `src/js/` | `JsEngine`: the QuickJS host and bridge globals, and the host JS engine's native half (`engine_hostjs.cpp`) |
-| `src/input/` | Hit testing, event routing, focus and gamepad navigation |
-| `src/platform/` | Resource loader backends (file, http, emscripten) |
+| `include/jsui/jsui.h` | Public C API (embedding, input, resources, rendering, host data, textures, audio, fonts, surfaces) |
+| `src/core/` | `Value`, `Node`, `Document`, style parsing (`style.cpp`), JSON, scrolling geometry, LayoutAnimation, perf counters |
+| `src/render/` | Skia painter, image cache, host textures, Lottie, ShaderView, pipeline cache, GPU backends (`gpu.cpp` Ganesh GL, `gpu_metal.cpp` Ganesh Metal, `gpu_d3d.cpp` Ganesh D3D12 / D3D11, `gpu_graphite.cpp` Graphite Vulkan / Metal / Dawn, `gpu_webgpu.cpp` Graphite on browser WebGPU) |
+| `src/text/` | Font manager and decoding (WOFF / WOFF2 / TTC), paragraph building and Yoga measure for `Text`, TextInput editing |
+| `src/js/` | `JsEngine`: the QuickJS host and bridge globals (`bridge*.cpp`), bytecode bundles (`bytecode.cpp`), and the host JS engine's native half (`engine_hostjs.cpp`) |
+| `src/animated/` | Native Animated driver |
+| `src/input/` | Hit testing, event routing, focus and gamepad navigation, scrolling, text editing keys |
 | `src/audio/` | UI audio: requests to the host's audio handler or the built-in miniaudio backend (see [AUDIO.md](AUDIO.md)) |
+| `src/platform/` | Resource loader backends (file, http, emscripten) |
 | `src/net/` | Minimal HTTP/1.1 client for dev servers (native) |
-| `src/runtime.*`, `src/capi.cpp` | Runtime object and C API wrappers |
+| `src/host_state.*`, `src/host_buffers.*` | Shared state and frame data buffers (see "Game data") |
+| `src/surface.*`, `src/runtime.*`, `src/capi.cpp` | Surfaces, the runtime object and the C API wrappers |
+| `src/dev_session.*`, `src/dev_overlay.cpp` | Dev mode: the `jsui dev` shared session client and the error overlay |
 | `tools/jsui-render` | Headless renderer: bundle → PNG (tests, CI) |
 | `tools/jsui-record` | Headless recorder: bundle + JSON input timeline → 60 fps frames / H.264 (ffmpeg), with cursor, caption and input-legend overlay |
-| `tools/jsui-viewer` | Windowed host with dev mode (hot updates / live reload) |
+| `tools/jsui-viewer` | Windowed host (SDL2) with dev mode (hot updates / live reload), GPU by default |
 | `tools/jsui-bench` | Frame benchmark: per-phase time (JS, commit, Animated, style, layout, input, paint), work counters and allocations per frame (see "Performance") |
 | `tools/jsui-paint-bench` | Paint benchmark: paint time, pixels repainted, draw calls and GL calls per frame on the CPU raster and Ganesh GL (see "Paint performance") |
-| `integrations/godot` | Godot 4 GDExtension (`JsuiView` Control) + demo project |
-| `web/` | Browser host for the WASM build |
-| `packages/react` | `@orktes/jsui-react`: reconciler, components, StyleSheet, events |
-| `packages/cli` | `@orktes/jsui-cli`: `jsui build` / `jsui dev` (esbuild + dev server) |
+| `tools/dawn-shim` | Generates the `wgpu*` trampolines of the Dawn native backend (see "Dawn native") |
+| `integrations/` | Host examples and engine plugins: Godot, Unity, Unreal, raylib, SDL3, sokol, Android, iOS (see [Hosts and integrations](#hosts-and-integrations)) |
+| `bindings/` | Rust and Go bindings over the C API, with a quest-log example app |
+| `web/` | Browser host for the WASM build (`@orktes/jsui-web`): main-thread and worker modes, WebGPU / WebGL / CPU, Web Audio, host textures |
+| `packages/react` | `@orktes/jsui-react`: reconciler, components, StyleSheet, events, Animated, host data hooks |
+| `packages/cli` | `@orktes/jsui-cli`: `jsui build` / `jsui dev` (esbuild, HMR, shared session), headless `screenshot` / `inspect` / `run`, the agent skill |
+| `site/` | The showcase site (GitHub Pages) |
+| `scripts/` | Skia / WASM / Android / iOS builds, PGO, release packaging (`scripts/dist/`), version bumps |
 | `examples/` | Realistic game UI examples (shared by reference tests) |
 | `tests/native/` | C++ unit tests (`jsui-tests`) |
 | `tests/reference/` | Pixel comparison against react-native-web in headless Chrome |
@@ -92,17 +124,22 @@ library with a C API, and the same core compiles to WebAssembly.
 The embedder owns the loop (see `jsui.h`):
 
 1. Forward input with `jsui_send_*`. The InputManager hit-tests against the
-   last layout and calls `__jsui_dispatchEvent` synchronously.
+   last layout and calls `__jsui_dispatchEvent` synchronously. Each call
+   returns whether the UI consumed the event, so the game gets the rest
+   (see "Input routing details").
 2. `jsui_tick(now)`: deliver finished resource loads, run due timers, run
    `requestAnimationFrame` callbacks, drain promise jobs, advance scroll
    physics, evaluate native-driven Animated animations (then deliver their
    end callbacks / listener updates to JS), run Yoga if dirty, advance
    LayoutAnimations, emit `onLayout` events.
    `jsui_tick_native(now)` does only the native part (native-driven Animated,
-   LayoutAnimations, layout) without running any JS, for hosts that skip JS
-   on a frame (see "Animated").
-3. If `jsui_needs_redraw()`, `jsui_render_rgba()` paints the tree (or
-   `jsui_render_gl()` with the GPU backend).
+   LayoutAnimations, Lottie playback, layout) without running any JS, for
+   hosts that skip JS on a frame (see "Animated").
+3. If `jsui_needs_redraw()`, render with the backend the host set up:
+   `jsui_render_gl()` / `jsui_render_gl_target()`, `jsui_render_metal()`,
+   `jsui_render_gpu_target()` (Vulkan, Metal, Dawn, Direct3D),
+   `jsui_render_webgpu()`, or the CPU raster (`jsui_render_rgba()` /
+   `jsui_render_rgba_incremental()`).
 
 Hosts that sleep when idle check `jsui_wants_frame()`: it stays set while
 something moves on its own (rAF callbacks, due timers, in-flight loads,
@@ -113,7 +150,10 @@ display rate. JS-driven Animated animations run on `requestAnimationFrame`,
 so an endless `Animated.loop` keeps it set without any input either way.
 
 Everything is single-threaded except resource I/O, which completes onto a
-queue drained in `jsui_tick`.
+queue drained in `jsui_tick`, Graphite's pipeline precompiles on Vulkan and
+Metal (a worker thread, see "Pipeline cache") and the built-in audio
+backend's device callback. In the browser's worker mode the whole runtime
+runs in a Worker (see "Builds").
 
 ## Surfaces (several root views)
 
@@ -176,6 +216,29 @@ wants one.
   bundle. Their roots render on transparent.
 
 ## GPU backend
+
+The runtime draws with Skia on the host's own GPU device and queue: it
+never creates a device of its own (D3D11 hosts excepted, see below) and
+never owns the swapchain. Every backend runs the same painter and damage
+tracking as the CPU raster; what differs is how a frame reaches the
+target. Which one a host uses:
+
+| Backend | Skia | C API | CMake option | Used by |
+| --- | --- | --- | --- | --- |
+| OpenGL / GLES / WebGL | Ganesh | `jsui_gpu_create_gl`, `jsui_render_gl[_target]` | `JSUI_GPU` | jsui-viewer, raylib, sokol, SDL3 on GL, Rust / Go examples, Android (GLES 3), the browser's WebGL fallback |
+| Browser WebGPU | Graphite (Dawn backend on Emdawnwebgpu) | `jsui_gpu_create_webgpu`, `jsui_render_webgpu[_target]` | `JSUI_WEBGPU` | the web host's first choice |
+| Vulkan | Graphite | `jsui_gpu_create_vulkan`, `jsui_render_gpu_target` | `JSUI_VULKAN` | Godot, Unity, Unreal and SDL3 on Linux, and on Windows when the engine runs on Vulkan |
+| Metal (desktop) | Graphite | `jsui_gpu_create_metal`, `jsui_render_gpu_target` | `JSUI_GRAPHITE_METAL` | Godot, Unity, Unreal and SDL3 on macOS |
+| Metal (iOS) | Ganesh | `jsui_metal_create`, `jsui_render_metal` | `JSUI_METAL` | the iOS example |
+| Direct3D 12 / 11 | Ganesh on D3D12 | `jsui_gpu_create_d3d12` / `_d3d11`, `jsui_render_gpu_target` | `JSUI_D3D` | Godot, Unity and Unreal on Windows |
+| Dawn native | Graphite | `jsui_gpu_create_dawn_procs`, `jsui_render_gpu_target` | `JSUI_GRAPHITE_DAWN` | Godot's `webgpu` driver on the godot-aw3 fork |
+
+Host textures (`jsui_set_texture`) are sampled in place on each of these,
+and every Graphite context can record and precompile its pipelines (see
+"Pipeline cache"). Each host's README
+in `integrations/` says how it orders JSUI's work with its own.
+
+### OpenGL / GLES / WebGL (Skia Ganesh)
 
 `jsui_gpu_create_gl()` / `jsui_render_gl()` / `jsui_render_gl_target()`
 (`include/jsui/jsui.h`, `src/render/gpu.cpp`) draw a frame with Skia Ganesh
@@ -261,8 +324,9 @@ jsui_render_gl_target(rt, gpu, &t);
   has GLSL 1.20, which Skia's shaders cannot use (`gl_VertexID`). Ganesh
   detects core profiles (`GL_CONTEXT_PROFILE_MASK`) and binds its own vertex
   array object, since core profiles have no default one. In the browser,
-  `createJsui({ canvas })` (renderer `'auto'`) loads `web/dist-webgl/jsui.js`
-  when WebGL is available (else, or when that is not deployed,
+  when it gets no WebGPU device (WebGPU comes first, see "WebGPU (Skia
+  Graphite)"), `createJsui({ canvas })` (renderer `'auto'`) loads
+  `web/dist-webgl/jsui.js` when WebGL is available (else, or when that is not deployed,
   `web/dist/jsui.js`), registers the canvas' WebGL2 (or WebGL 1) context with
   emscripten and draws through Skia, unless WebGL is only available through
   a software rasteriser (`failIfMajorPerformanceCaveat`, e.g. Chrome's
@@ -645,6 +709,18 @@ to render into RenderingDevice textures (integrations/godot/README.md,
   `JSUI_VULKAN_TEST_REQUIRE=1` turns its skip into a failure. The Godot job
   also runs the demo on Vulkan (lavapipe) and compares the GPU frame with
   the CPU raster. Metal compiles in the macOS CI job but is not run there.
+
+### Metal (Skia Ganesh, iOS)
+
+`jsui_metal_create(device, queue)` / `jsui_render_metal(rt, mtl, texture,
+format, w, h, flags)` (`src/render/gpu_metal.cpp`, CMake option
+`JSUI_METAL`, on by default in iOS builds) draw with Ganesh on Metal
+straight into an `id<MTLTexture>`, typically a `CAMetalLayer` drawable. JSUI
+submits on the host's queue, so whatever the host encodes on it afterwards
+(present, compositing) runs after the UI. Like the GL path it repaints the
+whole target each frame (`JSUI_GL_NO_CLEAR` draws over it). Desktop Metal
+hosts use Graphite instead (`jsui_gpu_create_metal`, previous section). See
+`integrations/ios/README.md`.
 
 ### Direct3D 12 / 11 (Skia Ganesh, Windows)
 
@@ -1155,6 +1231,21 @@ paints a view, on every renderer (the CPU raster runs SkSL too):
   and the GPU backends use them), so ShaderView adds almost nothing to
   `jsui.wasm`.
 
+### Audio
+
+The UI asks for sounds; the host plays them (`src/audio/`,
+`packages/react/src/sound.js`, full contract in [AUDIO.md](AUDIO.md)).
+`Sound.play` / `useSound` / `useMusic` / `UISounds` (interaction sounds on
+hover, focus moves and presses) turn into `__jsui_native.audioPlay` /
+`audioVoice` / `audioBus` / `audioStopAll` / `audioPreload`, which the
+runtime hands to `JsuiConfig.on_audio` as `JsuiAudioCommand`s, so UI
+sounds go through the game's own mixer and buses. Hosts without a handler
+get a default: the built-in miniaudio backend (`JSUI_AUDIO`, on by default on
+desktop), Web Audio in the browser (`web/jsui-audio.js`), or
+`AudioStreamPlayer`s on Godot's buses. Hosts report voice ends and loads
+back with `jsui_audio_voice_ended` / `jsui_audio_sound_loaded`, delivered to
+JS as `__jsui_onAudio`. `JsuiConfig.audio_disabled` turns it off (headless tools, tests).
+
 ## JS bridge contract
 
 Native globals (installed by `JsEngine`):
@@ -1166,6 +1257,7 @@ Native globals (installed by `JsEngine`):
 | `createNode(type, rootTag?) → id` | `type` ∈ `View`, `Text`, `RawText`, `Image`, `ScrollView`, `TextInput`, `LottieView`, `ShaderView`; created in the document of surface `rootTag` (default: the main one; see "Surfaces") |
 | `viewport(rootTag?) → {width, height, scale}` | logical size of a surface (default: the main one) |
 | `surfaceApp(rootTag) → {appKey, initialProps} \| null` | the app the host picked for a surface |
+| `updateProps(id, reactProps, hidden)` / `getProps(id)` | the host config's prop path, done natively: builds what native sees from the React props (event handlers → `__events`, flattened style, `pointerEvents` / hidden into it) and diffs it in `Node::setProps` (see "Performance: Props"); `getProps` returns what native holds. The host JS engine has neither (`@orktes/jsui-react` then diffs in JS and calls `setProps`) |
 | `setProps(id, props)` | replaces all props; `props.style` is a **flattened** style object; functions are dropped; `props.__events` lists event names the element listens to (e.g. `["press","pointerMove","layout"]`) |
 | `patchStyle(id, partialStyle)` | animation fast path: merges keys into the node's current `props.style` (a `null`/`undefined` value removes the key) and keeps all other props (`Node::patchStyle`). When only paint keys such as `transform`, `opacity`, colors changed, the style is updated in place and only those keys' style groups are re-resolved, with no relayout; a layout key takes the `setProps` path. Use it per frame from `requestAnimationFrame` instead of re-rendering through React. |
 | `setText(id, string)` | content of a `RawText` |
@@ -1187,11 +1279,15 @@ Native globals (installed by `JsEngine`):
 | `setState(key, json \| undefined) → version`, `patchState(key, json) → version` | UI-owned writes (`undefined` removes); report to `on_state`; invalid JSON throws `SyntaxError` |
 | `hostCall(name, json, settle) → id` | `on_call`; `settle(ok, payload)` runs on `jsui_resolve_call` (JSON text) / `jsui_reject_call` (message). Returns 0 without `on_call` |
 | `cancelCall(id) → bool`, `callResult(id, ok, payload)` | drop an unanswered call (`on_call_cancel`); the result of a `__jsui_onCall` |
+| `buffer(key) → [ArrayBuffer, type, count, version]`, `bufferVersion(key)`, `bufferKeys()` | frame data buffers (see "Frame data") |
+| `texture(key) → [width, height, version]`, `textureKeys()` | host texture sizes for layout (see "Host textures"); pixels never reach JS |
+| `audioPlay(url, bus, volume, pitch, pan, loop, fadeMs, offsetS) → voice`, `audioVoice(op, voice, …)`, `audioBus(bus, volume, muted, fadeMs)`, `audioStopAll(bus, fadeMs)`, `audioPreload` / `audioUnload` / `audioResolve(url)` | UI audio requests (see "Audio") |
 | `loadFont(family, url, weight, italic) → Promise<true>` | load via the resource loader (URL relative to the bundle), register with the FontManager, relayout text; rejects with an `Error` on 404 / bad font data. `''` family = the file's; weight `0` / italic `-1` = the file's (see "Fonts") |
 | `loadFontData(family, bytes, weight, italic) → true` | the same from an ArrayBuffer / typed array, synchronously; throws on bad data |
 | `unloadFont(family) → bool`, `getFontFamilies() → [family]` | drop a family; the registered families (built-in Inter first) |
 | `setFontFallbacks([family])`, `setDefaultFontFamily(family)` | glyph fallback list; the family of text whose style names none |
 | `reload()` | reload the bundle at the start of the next tick (safe from inside JS) |
+| `evalScript(source, name)`, `devError(text \| null)` | dev mode: run a hot update in the global scope; show / clear an error in the overlay (see "Dev mode") |
 | `textEditing` | `true`: TextInput text is edited natively (see "TextInput editing") |
 | `setTextInputSelection(id, start, end)` | TextInput selection (UTF-16 indices, clamped; no event) |
 | `getClipboard() → string`, `setClipboard(text)` | the embedder's clipboard (`jsui_set_clipboard_callbacks`) or the runtime's in-process one |
@@ -1241,6 +1337,15 @@ Callbacks the bundle installs (all optional):
   gesture, `4` and it blocks native gestures.
 * `__jsui_onHostMessage(name, json)` — from `jsui_post_message`.
 * `__jsui_onHostState(keys)` — shared-state keys the embedder changed, once per tick.
+* `__jsui_onHostBuffer(keys)` / `__jsui_onHostTexture(keys)` — frame data
+  buffers changed; host textures set, resized or removed (once per tick).
+* `__jsui_runSurfaces([[rootTag, appKey, propsJson], …])` /
+  `__jsui_stopSurface(rootTag)` — surfaces to start or re-prop, and to stop
+  (see "Surfaces").
+* `__jsui_onAudio(reports)` — voice status and load results from the audio
+  host (see "Audio").
+* `__jsui_onDevUpdate(token)` — the dev server has a new build (hot update;
+  absent: the runtime reloads).
 * `__jsui_onCall(id, name, json)` — `jsui_call_ui`; answer with `callResult`.
 * `__jsui_onLayout(id, {x, y, width, height})` — for `onLayout` listeners.
 * `__jsui_onAnimatedEnd(id, finished, value)` / `__jsui_onAnimatedValueUpdate(tag, value)`
@@ -1782,14 +1887,107 @@ skparagraph's asset font manager and Skottie's. Fonts are runtime-wide.
   SharedArrayBuffer). The worker's rAF drives frames; the page's rAF takes
   over where a worker has none. Missing APIs or a failed start fall back to
   main-thread mode with one warning. See `web/README.md` ("Worker mode").
-* Desktop Skia m157 (Graphite on Vulkan / Metal and header-only Dawn, for the
-  Godot GPU renderer): `scripts/build-skia-desktop.sh` (Linux / macOS, about
-  25 min on 4 cores, cached in CI on the hash of the script and its Dawn
-  patch) into `third_party/skia-desktop`, then configure with
-  `-DJSUI_SKIA_DIR=third_party/skia-desktop`. See "Vulkan and Metal (Skia
-  Graphite, native)" and "Dawn native".
+* Desktop Skia m157 (Graphite on Vulkan / Metal and header-only Dawn,
+  Ganesh on GL, plus Metal on macOS and Direct3D 12 on Windows):
+  `scripts/build-skia-desktop.sh` (Linux / macOS / Windows, about 25 min on
+  4 cores, cached in CI on the hash of the script and its Dawn patch) into
+  `third_party/skia-desktop`, then configure with
+  `-DJSUI_SKIA_DIR=third_party/skia-desktop`. Every GPU host beyond GL
+  (Godot, Unity, Unreal, SDL3 on Metal / Vulkan, anything on Direct3D)
+  and the release binaries use it. See "Vulkan and Metal (Skia Graphite, native)", "Direct3D 12 /
+  11" and "Dawn native".
+* Shared library: `-DJSUI_BUILD_SHARED=ON` builds `jsui_shared`
+  (`libjsui.so` / `.dylib` / `jsui.dll`), the static library linked whole
+  into a shared one that exports only the `jsui_*` C API. Unreal, the Rust /
+  Go bindings and the release archives use it.
+* Hosts: `-DJSUI_BUILD_GODOT=ON`, `-DJSUI_BUILD_UNITY=ON`,
+  `-DJSUI_BUILD_RAYLIB=ON`, `-DJSUI_BUILD_SDL3=ON`, `-DJSUI_BUILD_SOKOL=ON`
+  (all off by default); Android and iOS through `scripts/build-android.sh`
+  / `scripts/build-ios.sh` (Skia m157 from `scripts/build-skia-android.sh`
+  / `build-skia-ios.sh`). Each README in `integrations/` has the details.
+* Release binaries: the CI `dist-*` jobs build the shared library, the
+  viewer, the Godot addon, the Unity package, the Unreal plugin and the iOS
+  xcframework, and `.github/workflows/release.yml` attaches them to the
+  GitHub Release of each `vX.Y.Z` tag next to the npm packages. See
+  [RELEASING.md](RELEASING.md).
 * JS: `npm install` at the repo root (npm workspaces), `npx jsui build app.jsx`
-  or `npx jsui dev app.jsx` (serves `bundle.js` and a reload endpoint).
+  (QuickJS bytecode with the source inside by default, see
+  [Bundles](#bundles-precompiled-bytecode)) or `npx jsui dev app.jsx` (serves
+  `bundle.js`, hot updates and the shared session, see "Dev mode").
+
+## Bundles (precompiled bytecode)
+
+`jsui build` compiles the bundle to QuickJS bytecode by default, so a
+runtime skips parsing and keeps no function source in memory
+(`src/js/bytecode.*`, `packages/cli/src/bytecode.js`). The file is a small
+container: an 8-byte magic (`"\0JSUIBC\1"`, never valid JS), the key of the
+QuickJS that compiled it, the bytecode (`JS_WriteObject`), an optional
+source URL and an optional source. The CLI compiles with the CPU WASM
+runtime, which has the same patched QuickJS as every native runtime of that
+JSUI version.
+
+Bytecode is only valid for the exact QuickJS it came from (its version plus
+a hash of JSUI's patched `quickjs.c` / `.h` / opcode list,
+`jsui_bytecode_key()`), so `Runtime::loadSource` runs the bytecode only
+when the key matches and the engine runs bytecode (not the host JS engine);
+otherwise it runs the embedded source, or loads the source URL. `--format`
+picks what goes in:
+
+| Format | Contents | Size (vs JS) | Loads in |
+| --- | --- | --- | --- |
+| `combo` (default) | bytecode + the source as the fallback | ~2.2x | every runtime |
+| `bytecode` | bytecode only | ~1.25x | this JSUI version's QuickJS only |
+| `source` | plain JS | 1x | everything (browser JS engines, other tools) |
+| `split` | bytecode, source next to it in `<name>.source.js`, read only as the fallback | ~1.25x + the source file | every runtime |
+
+`jsui dev` and the headless commands serve and run source.
+
+## Hosts and integrations
+
+Every host drives the same C API (`include/jsui/jsui.h`): it forwards input
+and uses what the UI did not consume, ticks once per frame, renders into its
+own target and exchanges game data (see "Game data"). The engine examples
+share one HUD (`integrations/shared/ui/app.jsx`) and a `--selftest` that
+clicks through each host's own input path; [integrations/README.md](../integrations/README.md)
+walks through the pattern.
+
+| Host | Where | Rendering |
+| --- | --- | --- |
+| Native viewer | `tools/jsui-viewer` (SDL2) | Ganesh GL, CPU fallback |
+| Browser | `web/` (`@orktes/jsui-web`), [web/README.md](../web/README.md) | WebGPU → WebGL → CPU; on the main thread or in a worker |
+| CLI / Node | `packages/cli` (`@orktes/jsui-cli`), [README](../packages/cli/README.md) | CPU raster of the WASM module (deterministic) |
+| Godot 4 | [integrations/godot](../integrations/godot/README.md) (GDExtension, `JsuiView`) | Graphite on Godot's Vulkan / Metal device, Ganesh D3D12, Dawn on the godot-aw3 fork |
+| Unity 6 | [integrations/unity](../integrations/unity/README.md) (`com.orktes.jsui`) | Graphite Metal / Vulkan, Ganesh D3D11 / D3D12 |
+| Unreal Engine 5 | [integrations/unreal](../integrations/unreal/README.md) (`UJsuiWidget` / `SJsuiView`) | Graphite Metal / Vulkan, Ganesh D3D12 / D3D11 |
+| raylib, SDL3, sokol | [integrations/raylib](../integrations/raylib/README.md), [sdl3](../integrations/sdl3/README.md), [sokol](../integrations/sokol/README.md) | Ganesh GL (SDL3: Graphite on Metal / Vulkan) |
+| Android | [integrations/android](../integrations/android/README.md) (NDK NativeActivity) | Ganesh on GLES 3 |
+| iOS | [integrations/ios](../integrations/ios/README.md) (UIKit) | Ganesh on Metal |
+| Rust, Go | [bindings/](../bindings/README.md) over `libjsui` | Ganesh GL (GLFW window) |
+
+## Agent tools and the shared session
+
+The CLI runs a bundle headless in Node (`packages/cli/src/headless.js`: the
+CPU WASM module on a simulated clock, so the same bundle and steps give the
+same pixels): `jsui screenshot`, `jsui inspect` (the view tree, `--find`
+selectors) and `jsui run` (scripted steps: clicks by `testID`, keys,
+gamepad buttons, waits on the UI clock, state writes), plus the `launch()`
+API for scripts and tests. `jsui skill install` installs the JSUI agent
+skill (`packages/cli/skills/jsui`) for coding agents.
+
+`jsui dev` hosts a shared session (`packages/cli/src/shared.js`) that a
+person and agents use together. Every dev-mode runtime with an `http://`
+bundle (the native viewer, a Godot `JsuiView`, the web host, a
+`--headless` runtime inside the server) joins it when the server offers one
+(`X-Jsui-Session` on the bundle and version responses): `src/dev_session.*`
+long-polls `POST /__jsui/session/poll` for commands and pushes results and
+events (the person's input, UI messages, calls, state writes, logs, errors)
+to `POST /__jsui/session/push`. Commands run at the end of a tick through
+the C API (pointer, keys, text, gamepad, state, buffers, messages, UI calls,
+hit tests, screenshots, reload). Agents attach with
+`jsui screenshot|inspect|run --attach <url>`, `jsui clients` and `jsui log`
+and drive the live runtime (the last to join, or `--client`); in a
+browser, `/shared` shows the live app and the session's activity feed. `jsui_set_dev_session`
+(web: `devName` / `devSession`) names a runtime or keeps it out.
 
 ## Performance
 
@@ -2141,7 +2339,9 @@ rasterization run on the CPU); the GL call counts carry over.
 
 `jsui dev app.jsx` rebuilds on change and serves `http://localhost:5173/bundle.js`.
 Point any host at it (`jsui-viewer --dev http://localhost:5173/bundle.js`, or
-`cfg.dev_mode = 1` + `jsui_load_bundle_url`).
+`cfg.dev_mode = 1` + `jsui_load_bundle_url`). A dev-mode runtime also joins the
+server's shared session, where agents can drive it (see "Agent tools and
+the shared session").
 
 * **Version endpoint.** When the bundle came from `http://host:port/...`, the
   runtime GETs `http://host:port/__jsui/version?hmr=1` every ~500 ms (2 s
@@ -2259,8 +2459,10 @@ Details of how the JS package uses the bridge, for native implementers:
   `disabled: true` and `focusable: false`; `ScrollView` carries `horizontal`.
 * Dev server endpoints besides `/bundle.js` and `/__jsui/version`:
   `/__jsui/version?since=<token>` long-polls until the token changes;
-  `/__jsui/error` returns the current build error text; `/bundle.js` carries
-  an `X-Jsui-Version` header.
+  `/__jsui/error` returns the current build error text; `/__jsui/hmr?from=<version>`
+  serves hot updates; `/__jsui/session/*` and `/__jsui/shared/*` (with the
+  `/shared` page) are the shared session (see "Agent tools and the shared
+  session"); `/bundle.js` carries an `X-Jsui-Version` header.
 * Lists (`packages/react/src/components/lists.js`): `FlatList`,
   `SectionList` and `VirtualizedList` are virtualized like React Native and
   use only the public ScrollView API (`onScroll`, `onLayout`,

@@ -63,7 +63,7 @@ what CI tested:
 | `jsui-X.Y.Z-linux-x64.tar.gz` | `include/jsui/jsui.h`, `lib/libjsui.so`, `lib/cmake/jsui/` (`find_package(jsui)`), `bin/jsui-viewer` | `dist-linux` (Jaakko's runner), Skia m157 |
 | `jsui-X.Y.Z-linux-arm64.tar.gz` | same | `dist-linux` (`ubuntu-24.04-arm`), Skia m157 |
 | `jsui-X.Y.Z-macos-universal.tar.gz` | same with `lib/libjsui.dylib` (arm64 + x86_64, macOS 13+) | `dist-macos`, Skia m157 built for both CPUs, merged with `lipo` |
-| `jsui-X.Y.Z-windows-x64.zip` | same with `bin/jsui.dll`, `bin/icudtl.dat`, `lib/jsui.lib` | `dist-windows` (ClangCL, static CRT), prebuilt Skia m124 |
+| `jsui-X.Y.Z-windows-x64.zip` | same with `bin/jsui.dll`, `bin/icudtl.dat`, `lib/jsui.lib` | `dist-windows` (ClangCL, static CRT), Skia m157 |
 | `jsui-X.Y.Z-ios-xcframework.zip` | `JSUI.xcframework`: static library (JSUI + QuickJS + Yoga + Skia) + header, device and simulator arm64 | `dist-ios` (advisory: left out when it failed) |
 | `jsui-godot-X.Y.Z.zip` | `addons/jsui/`: `jsui.gdextension` + the GDExtension library of every platform above | all `dist-*` desktop jobs |
 | `com.orktes.jsui-X.Y.Z.tgz` | the Unity package (`integrations/unity/package`) with `Plugins/macOS/jsui_unity.bundle`, `Plugins/Linux/x86_64/libjsui_unity.so` and `Plugins/Windows/x86_64/jsui_unity.dll` (+ `icudtl.dat`) and their `.meta` import settings | `dist-macos`, `dist-linux`, `dist-windows` |
