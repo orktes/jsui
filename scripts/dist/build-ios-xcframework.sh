@@ -40,7 +40,9 @@ for slice in $SLICES; do
     -DCMAKE_OSX_DEPLOYMENT_TARGET="$IOS_MIN" -DJSUI_BUILD_IOS_APP=OFF ${CMAKE_EXTRA_ARGS:-}
   cmake --build "$build" -j "$JOBS" --target jsui
   # Everything the app would otherwise link one by one, in one archive.
-  libs=("$build/libjsui.a" "$build/libjsui_quickjs.a" "$build/libjsui_yoga.a")
+  # (every static library of the build: jsui, QuickJS, Yoga, the WOFF2 / zlib decoders, ...)
+  libs=()
+  for l in "$build"/lib*.a; do libs+=("$l"); done
   for l in "$ROOT/third_party/skia-ios/out/$slice"/lib*.a; do libs+=("$l"); done
   mkdir -p "$build/dist"
   libtool -static -no_warning_for_no_symbols -o "$build/dist/libjsui.a" "${libs[@]}"
