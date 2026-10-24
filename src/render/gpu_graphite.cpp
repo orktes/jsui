@@ -34,6 +34,9 @@
 // around every call); without it the cache precompiles in slices after
 // renders, on the render thread (Graphite creates precompiled pipelines
 // synchronously even where it creates the others asynchronously).
+// The same thread-safe devices also get a small compile thread pool
+// (ContextOptions::fExecutor): the new pipelines a frame needs compile in
+// parallel, and precompiles queue behind them.
 #include "render/gpu.h"
 
 #if defined(JSUI_VULKAN) || defined(JSUI_GRAPHITE_METAL) || defined(JSUI_GRAPHITE_DAWN)
@@ -45,6 +48,8 @@
 
 #include "include/core/SkCanvas.h"
 #include "include/core/SkColorSpace.h"
+#include "include/core/SkExecutor.h"
+#include "include/core/SkMilestone.h"
 #include "include/core/SkSurface.h"
 #include "include/gpu/MutableTextureState.h"
 #include "include/gpu/graphite/BackendTexture.h"
@@ -174,6 +179,8 @@ struct GraphiteGpu final : JsuiGpuContext {
       api == Api::Vulkan  ? jsui::pipeline_cache::Backend::Vulkan
       : api == Api::Metal ? jsui::pipeline_cache::Backend::Metal
                           : jsui::pipeline_cache::Backend::Dawn);
+  // Outlives ctx too (Graphite's compile tasks; see makeCompileExecutor).
+  std::unique_ptr<SkExecutor> compileExecutor;
   std::unique_ptr<graphite::Context> ctx;
   std::unique_ptr<graphite::Recorder> recorder;
   sk_sp<CachingImageProvider> images;
@@ -206,6 +213,18 @@ struct GraphiteGpu final : JsuiGpuContext {
                                                                                      : Precompiler::Mode::Sliced;
 #endif
     return Precompiler::Mode::Thread;
+  }
+
+  // Before the Context is made: the pipeline cache's callback and, where
+  // the device may be used from other threads, parallel pipeline compiles.
+  void configure(graphite::ContextOptions& opts) {
+    precompiler->configure(opts);
+#if SK_MILESTONE >= 140
+    if (precompileMode() == Precompiler::Mode::Thread) {
+      compileExecutor = jsui::pipeline_cache::makeCompileExecutor();
+      opts.fExecutor = compileExecutor.get();
+    }
+#endif
   }
 
   // A host texture of this context's device, sampled in place.
@@ -270,7 +289,7 @@ struct GraphiteGpu final : JsuiGpuContext {
     ropts.fRequireOrderedRecordings = true;
     recorder = ctx->makeRecorder(ropts);
     if (!recorder) return false;
-    precompiler->attach(ctx.get(), precompileMode());
+    precompiler->attach(ctx.get(), precompileMode(), compileExecutor.get());
     pipelines = precompiler.get();
     return true;
   }
@@ -491,7 +510,7 @@ JsuiGpuContext* createVulkan(const JsuiVulkanDevice& d) {
   if (!backend.fMemoryAllocator) return nullptr;
 
   graphite::ContextOptions opts;
-  g->precompiler->configure(opts);  // the pipeline cache's callback
+  g->configure(opts);
   g->ctx = graphite::ContextFactory::MakeVulkan(backend, opts);
   if (!g->finishInit(opts)) return nullptr;
   if (!g->initBarrier()) return nullptr;
@@ -510,7 +529,7 @@ JsuiGpuContext* createMetal(void* device, void* queue) {
   backend.fDevice.retain(static_cast<CFTypeRef>(device));
   backend.fQueue.retain(static_cast<CFTypeRef>(queue));
   graphite::ContextOptions opts;
-  g->precompiler->configure(opts);  // the pipeline cache's callback
+  g->configure(opts);
   g->ctx = graphite::ContextFactory::MakeMetal(backend, opts);
   if (!g->finishInit(opts)) return nullptr;
   return g.release();
@@ -536,7 +555,7 @@ JsuiGpuContext* makeDawn(void* instance, void* device, void* queue) {
   backend.fQueue = g->dawnQueue;
   backend.fTick = graphite::DawnNativeProcessEventsFunction;
   graphite::ContextOptions opts;
-  g->precompiler->configure(opts);  // the pipeline cache's callback
+  g->configure(opts);
   g->ctx = graphite::ContextFactory::MakeDawn(backend, opts);
   if (!g->finishInit(opts)) return nullptr;
   return g.release();

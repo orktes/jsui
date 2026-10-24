@@ -4,11 +4,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <map>
 
+#include "include/core/SkExecutor.h"
 #include "include/core/SkMilestone.h"
 #include "include/core/SkTypes.h"
 
@@ -208,6 +211,74 @@ Parsed parse(const void* data, size_t size, Backend backend) {
 }
 
 void setForceSliced(bool on) { gForceSliced = on; }
+
+namespace {
+
+// Work list 0 (Graphite's pipelines a frame waits for) before work list 1
+// (precompiles).
+class CompileExecutor final : public SkExecutor {
+ public:
+  explicit CompileExecutor(int threads) {
+    for (int i = 0; i < threads; i++) threads_.emplace_back([this] { run(); });
+  }
+  ~CompileExecutor() override {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stopping_ = true;
+    }
+    cv_.notify_all();
+    for (std::thread& t : threads_) t.join();
+  }
+  void add(std::function<void(void)> fn, int workList) override {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      lists_[workList > 0 ? 1 : 0].push_back(std::move(fn));
+    }
+    cv_.notify_one();
+  }
+  void add(std::function<void(void)> fn) override { add(std::move(fn), 0); }
+  int pending(int workList) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return int(lists_[workList].size()) + running_[workList];
+  }
+
+ private:
+  void run() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    for (;;) {
+      cv_.wait(lock, [this] { return stopping_ || !lists_[0].empty() || !lists_[1].empty(); });
+      // Graphite waits for its tasks before the Context goes: none are left.
+      if (stopping_) return;
+      const int i = lists_[0].empty() ? 1 : 0;
+      std::function<void(void)> fn = std::move(lists_[i].front());
+      lists_[i].pop_front();
+      running_[i]++;
+      lock.unlock();
+      fn();
+      lock.lock();
+      running_[i]--;
+    }
+  }
+
+  mutable std::mutex mutex_;
+  std::condition_variable cv_;
+  std::deque<std::function<void(void)>> lists_[2];
+  int running_[2] = {0, 0};
+  std::vector<std::thread> threads_;
+  bool stopping_ = false;
+};
+
+}  // namespace
+
+std::unique_ptr<SkExecutor> makeCompileExecutor() {
+  // Compiling is CPU work on the driver's side too: leave cores to the game.
+  const int cores = int(std::thread::hardware_concurrency());
+  return std::make_unique<CompileExecutor>(std::clamp(cores / 2, 1, 4));
+}
+
+int pendingPrecompiles(const SkExecutor* executor) {
+  return executor ? static_cast<const CompileExecutor*>(executor)->pending(1) : 0;
+}
 
 // ---------------------------------------------------------------- Files
 
@@ -471,7 +542,8 @@ void Precompiler::configure(skgpu::graphite::ContextOptions& opts) {
 #endif
 }
 
-void Precompiler::attach(skgpu::graphite::Context* ctx, Mode mode) {
+void Precompiler::attach(skgpu::graphite::Context* ctx, Mode mode, const SkExecutor* executor) {
+  executor_ = executor;
 #if defined(JSUI_PRECOMPILE)
   if (mode != Mode::None && gForceSliced) mode = Mode::Sliced;
   auto c = std::make_unique<Compiler>();
@@ -589,6 +661,15 @@ void Precompiler::doneLocked() {
 void Precompiler::run() {
   std::unique_lock<std::mutex> lock(mutex_);
   while (!stopping_ && !queue_.empty()) {
+    // Keys go to the executor a few at a time: Graphite compiles everything
+    // handed over before the Context goes, so a context destroyed early
+    // waits for a few compiles, not the whole list.
+    while (!stopping_ && pendingPrecompiles(executor_) >= 4) {
+      lock.unlock();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      lock.lock();
+    }
+    if (stopping_) break;
     Entry e = std::move(queue_.front());
     queue_.pop_front();
     inFlight_ = 1;
@@ -662,7 +743,7 @@ Stats Precompiler::stats() {
   std::lock_guard<std::mutex> lock(mutex_);
   Stats s = stats_;
   s.mode = int(mode_);
-  s.queued = int(queue_.size()) + inFlight_;
+  s.queued = int(queue_.size()) + inFlight_ + pendingPrecompiles(executor_);
   s.known = entries_.size();
   return s;
 }

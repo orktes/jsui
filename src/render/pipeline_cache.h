@@ -55,6 +55,8 @@
 #include <unordered_set>
 #include <vector>
 
+class SkExecutor;
+
 namespace skgpu::graphite {
 class Context;
 struct ContextOptions;
@@ -103,6 +105,17 @@ struct Parsed {
 };
 Parsed parse(const void* data, size_t size, Backend backend);
 
+// Graphite's ContextOptions::fExecutor for contexts whose device is thread
+// safe: a few threads that compile the pipelines a frame needs in parallel
+// (and, at a lower priority, the precompiled ones) instead of one after the
+// other on the render thread. A frame with several new kinds of draws then
+// waits for the slowest compile rather than for their sum. Outlives the
+// Context (which waits for its tasks when destroyed).
+std::unique_ptr<SkExecutor> makeCompileExecutor();
+// Precompiles that executor has queued or is running (Graphite hands them
+// over and returns: they finish there).
+int pendingPrecompiles(const SkExecutor* executor);
+
 // Tests only: precompile in slices (Mode::Sliced) whatever the backend.
 void setForceSliced(bool on);
 
@@ -133,7 +146,9 @@ class Precompiler {
   void configure(skgpu::graphite::ContextOptions& opts);
   // Once the Context exists: precompiles in `mode` from now on. Loads the
   // JSUI_PIPELINE_CACHE file (a development override of setFile) if set.
-  void attach(skgpu::graphite::Context* ctx, Mode mode);
+  // `executor`: the Context's makeCompileExecutor(), which then runs the
+  // precompiles (they count as queued until it has).
+  void attach(skgpu::graphite::Context* ctx, Mode mode, const SkExecutor* executor = nullptr);
   // Before the Context is destroyed: stops the worker (after the pipeline it
   // is compiling) and drops the PrecompileContext.
   void shutdown();
@@ -185,6 +200,7 @@ class Precompiler {
   int log_ = 0;           // JSUI_LOG_PIPELINES: 1 every pipeline created, 2 those frames compiled
   std::string envFile_;   // JSUI_PIPELINE_CACHE: overrides setFile
   std::unique_ptr<Compiler> compiler_;
+  const SkExecutor* executor_ = nullptr;
 
   std::mutex mutex_;  // everything below (the callback runs on any thread)
   std::shared_ptr<File> file_;
