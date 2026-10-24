@@ -71,7 +71,10 @@ JSValue js_createNode(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
 JSValue js_setProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   JSUI_COMMIT_SCOPE;
   if (argc < 2) return JS_UNDEFINED;
-  commands(ctx).pushValue(Op::SetProps, idArg(ctx, argc, argv, 0), toValue(ctx, argv[1]));
+  CommandBuffer& cmds = commands(ctx);
+  CommandBuffer::Writer w = cmds.begin();
+  writeValue(ctx, argv[1], w);
+  cmds.end(Op::SetProps, idArg(ctx, argc, argv, 0));
   return JS_UNDEFINED;
 }
 
@@ -133,9 +136,11 @@ const std::vector<std::string>* eventTokens(const std::string& key) {
   return it == table.end() ? nullptr : &it->second;
 }
 
-// StyleSheet.flatten into `out`: nested arrays, falsy entries skipped, later
-// objects win, undefined values ignored. Returns how many objects it merged.
-int flattenStyle(JSContext* ctx, JSValueConst s, Value::Object& out, int depth) {
+// StyleSheet.flatten into the style object being written: nested arrays,
+// falsy entries skipped, later objects win (the reader keeps a key's last
+// value), undefined values ignored. Returns how many objects it merged;
+// sets *pointerEvents when one of them had a pointerEvents value.
+int flattenStyle(JSContext* ctx, JSValueConst s, CommandBuffer::Writer& w, int depth, bool* pointerEvents) {
   if (depth > 32 || !JS_IsObject(s) || JS_IsFunction(ctx, s)) return 0;
   if (JS_IsArray(s)) {
     int64_t len = 0;
@@ -146,7 +151,7 @@ int flattenStyle(JSContext* ctx, JSValueConst s, Value::Object& out, int depth) 
     int n = 0;
     for (int64_t i = 0; i < len && i < (1 << 20); i++) {
       JSValue e = JS_GetPropertyInt64(ctx, s, i);
-      n += flattenStyle(ctx, e, out, depth + 1);
+      n += flattenStyle(ctx, e, w, depth + 1, pointerEvents);
       JS_FreeValue(ctx, e);
     }
     return n;
@@ -164,7 +169,11 @@ int flattenStyle(JSContext* ctx, JSValueConst s, Value::Object& out, int depth) 
     if (JS_IsException(e)) {
       JS_FreeValue(ctx, JS_GetException(ctx));
     } else if (!JS_IsUndefined(e) && !JS_IsFunction(ctx, e)) {
-      if (const std::string* k = impl.atomName(props[i].atom)) out.insert_or_assign(*k, toValue(ctx, e, depth + 1));
+      if (const std::string* k = impl.atomName(props[i].atom)) {
+        if (*k == "pointerEvents") *pointerEvents = true;
+        w.key(*k);
+        writeValue(ctx, e, w, depth + 1);
+      }
     }
     JS_FreeValue(ctx, e);
   }
@@ -180,13 +189,18 @@ JSValue js_updateProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
   bool hidden = argc > 2 && JS_ToBool(ctx, argv[2]);
   bool keepStyle = argc > 3 && JS_ToBool(ctx, argv[3]);
   JsEngine::Impl& impl = implOf(ctx);
-  Value::Object out;
-  Value::Array events;
+  // Event tokens, deduplicated (static strings; a node has a handful).
+  constexpr int kMaxEvents = 64;
+  const std::string* events[kMaxEvents];
+  int eventCount = 0;
   JSValue style = JS_UNDEFINED, pointerEvents = JS_UNDEFINED;
   JSPropertyEnum* keys = nullptr;
   uint32_t count = 0;
   if (JS_GetOwnPropertyNames(ctx, &keys, &count, argv[1], JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) != 0)
     return JS_EXCEPTION;
+  CommandBuffer& cmds = commands(ctx);
+  CommandBuffer::Writer w = cmds.begin();
+  w.beginObject();
   for (uint32_t i = 0; i < count; i++) {
     const std::string* k = impl.atomName(keys[i].atom);
     if (!k || *k == "children" || *k == "ref" || *k == "key") continue;
@@ -203,45 +217,56 @@ JSValue js_updateProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
     if (JS_IsFunction(ctx, v)) {
       if (const auto* toks = eventTokens(*k))
         for (const std::string& t : *toks)
-          if (std::none_of(events.begin(), events.end(), [&](const Value& e) { return e.asString() == t; }))
-            events.push_back(Value(t));
+          if (eventCount < kMaxEvents &&
+              std::none_of(events, events + eventCount, [&](const std::string* e) { return *e == t; }))
+            events[eventCount++] = &t;
     } else if (!JS_IsUndefined(v) && !JS_IsSymbol(v)) {
       if (*k == "pointerEvents") pointerEvents = JS_DupValue(ctx, v);
-      out.insert_or_assign(*k, toValue(ctx, v, 1));
+      w.key(*k);
+      writeValue(ctx, v, w, 1);
     }
     JS_FreeValue(ctx, v);
   }
   JS_FreePropertyEnum(ctx, keys, count);
+  uint8_t flags = 0;
   if (keepStyle) {
     // The style is merged when the command is applied (the current one).
-    uint8_t flags = (hidden ? CommandBuffer::kHidden : 0) |
-                    (JS_ToBool(ctx, pointerEvents) ? CommandBuffer::kPointerEvents : 0);
-    JS_FreeValue(ctx, pointerEvents);
-    if (!events.empty()) out.insert_or_assign("__events", Value(std::move(events)));
-    commands(ctx).pushValue(Op::SetPropsKeepStyle, id, Value(std::move(out)), 0, flags);
-    return JS_UNDEFINED;
+    flags = (hidden ? CommandBuffer::kHidden : 0) | (JS_ToBool(ctx, pointerEvents) ? CommandBuffer::kPointerEvents : 0);
+  } else {
+    size_t noStyle = w.mark();
+    w.key("style", 5);
+    w.beginObject();
+    bool flatPointerEvents = false;
+    bool hasStyle = flattenStyle(ctx, style, w, 1, &flatPointerEvents) > 0;
+    // RN accepts pointerEvents as a prop; native reads it from the style.
+    if (JS_ToBool(ctx, pointerEvents) && !flatPointerEvents) {
+      w.key("pointerEvents", 13);
+      writeValue(ctx, pointerEvents, w, 1);
+      hasStyle = true;
+    }
+    if (hidden) {
+      w.key("display", 7);
+      w.string("none", 4);
+      hasStyle = true;
+    }
+    if (hasStyle) w.endObject();
+    else w.rollback(noStyle);
   }
-  Value::Object flat;
-  bool hasStyle = flattenStyle(ctx, style, flat, 1) > 0;
   JS_FreeValue(ctx, style);
-  // RN accepts pointerEvents as a prop; native reads it from the style.
-  if (JS_ToBool(ctx, pointerEvents) && !flat.count("pointerEvents")) {
-    flat.insert_or_assign("pointerEvents", toValue(ctx, pointerEvents, 1));
-    hasStyle = true;
-  }
   JS_FreeValue(ctx, pointerEvents);
-  if (hidden) {
-    flat.insert_or_assign("display", Value("none"));
-    hasStyle = true;
+  if (eventCount) {
+    w.key("__events", 8);
+    w.beginArray(uint32_t(eventCount));
+    for (int i = 0; i < eventCount; i++) w.string(events[i]->data(), events[i]->size());
   }
-  if (hasStyle) out.insert_or_assign("style", Value(std::move(flat)));
-  if (!events.empty()) out.insert_or_assign("__events", Value(std::move(events)));
-  commands(ctx).pushValue(Op::SetProps, id, Value(std::move(out)));
+  w.endObject();
+  cmds.end(keepStyle ? Op::SetPropsKeepStyle : Op::SetProps, id, 0, flags);
   return JS_UNDEFINED;
 }
 
-// shouldYield(): React's scheduler asks this between units of concurrent work (the CLI
-// bundles scheduler with that check, packages/cli/src/specialize.js):
+// shouldYield(): React's scheduler asks this between units of concurrent
+// work (the CLI bundles scheduler with that check,
+// packages/cli/src/specialize.js):
 // true once this tick's JS budget is spent, so a transition yields to the
 // next frame. performance.now() is the frame clock and never advances
 // within a tick, so the scheduler's own check would never yield.
@@ -266,29 +291,37 @@ JSValue js_patchStyle(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
   if (argc < 2 || !JS_IsObject(argv[1])) return JS_UNDEFINED;
   uint32_t id = idArg(ctx, argc, argv, 0);
   if (!id) return JS_UNDEFINED;
-  Value::Object partial;
   JSPropertyEnum* keys = nullptr;
   uint32_t count = 0;
   if (JS_GetOwnPropertyNames(ctx, &keys, &count, argv[1], JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) != 0) return JS_EXCEPTION;
+  CommandBuffer& cmds = commands(ctx);
+  CommandBuffer::Writer w = cmds.begin();
+  w.beginObject();
   for (uint32_t i = 0; i < count; i++) {
     const std::string* k = implOf(ctx).atomName(keys[i].atom);
     JSValue v = JS_GetProperty(ctx, argv[1], keys[i].atom);
     if (k && !JS_IsException(v)) {
-      // undefined / null remove the key (a null Value in the partial).
-      partial.insert_or_assign(*k, JS_IsUndefined(v) || JS_IsNull(v) ? Value() : toValue(ctx, v));
+      // undefined / null remove the key (a null value in the partial).
+      w.key(*k);
+      if (JS_IsUndefined(v) || JS_IsNull(v)) w.null();
+      else writeValue(ctx, v, w);
     }
     if (JS_IsException(v)) JS_FreeValue(ctx, JS_GetException(ctx));
     JS_FreeValue(ctx, v);
   }
   JS_FreePropertyEnum(ctx, keys, count);
-  commands(ctx).pushObject(Op::PatchStyle, id, std::move(partial));
+  w.endObject();
+  cmds.end(Op::PatchStyle, id);
   return JS_UNDEFINED;
 }
 
 JSValue js_setText(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   JSUI_COMMIT_SCOPE;
   if (argc < 2) return JS_UNDEFINED;
-  commands(ctx).pushString(Op::SetText, idArg(ctx, argc, argv, 0), toStdString(ctx, argv[1]));
+  CommandBuffer& cmds = commands(ctx);
+  CommandBuffer::Writer w = cmds.begin();
+  writeString(ctx, argv[1], w);
+  cmds.end(Op::SetText, idArg(ctx, argc, argv, 0));
   return JS_UNDEFINED;
 }
 
@@ -325,7 +358,10 @@ JSValue js_configureLayoutAnimation(JSContext* ctx, JSValueConst, int argc, JSVa
     commands(ctx).push(Op::ArmLayoutAnim, 0, 0, 0, CommandBuffer::kDisarm);
     return JS_UNDEFINED;
   }
-  commands(ctx).pushValue(Op::ArmLayoutAnim, 0, toValue(ctx, argv[0]));
+  CommandBuffer& cmds = commands(ctx);
+  CommandBuffer::Writer w = cmds.begin();
+  writeValue(ctx, argv[0], w);
+  cmds.end(Op::ArmLayoutAnim, 0);
   return JS_UNDEFINED;
 }
 
@@ -435,7 +471,10 @@ JSValue js_lottieCommand(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
   double a = std::numeric_limits<double>::quiet_NaN(), b = a;
   if (argc > 2 && JS_IsNumber(argv[2])) JS_ToFloat64(ctx, &a, argv[2]);
   if (argc > 3 && JS_IsNumber(argv[3])) JS_ToFloat64(ctx, &b, argv[3]);
-  commands(ctx).pushString(Op::LottieCommand, id, toStdString(ctx, argv[1]), 0, 0, a, b);
+  CommandBuffer& cmds = commands(ctx);
+  CommandBuffer::Writer w = cmds.begin();
+  writeString(ctx, argv[1], w);
+  cmds.end(Op::LottieCommand, id, 0, 0, a, b);
   return JS_NewBool(ctx, implOf(ctx).applyNow().ok);
 }
 

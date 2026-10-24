@@ -35,7 +35,11 @@ uint32_t tagArg(JSContext* ctx, int argc, JSValueConst* argv, int i) { return ui
 // with the node tree's. createNode and startAnimation apply at once
 // single-threaded: they throw on a bad config.
 JSValue js_createNode(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  commands(ctx).pushValue(Op::AnimCreate, tagArg(ctx, argc, argv, 0), argc > 1 ? toValue(ctx, argv[1]) : Value());
+  CommandBuffer& cmds = commands(ctx);
+  CommandBuffer::Writer w = cmds.begin();
+  if (argc > 1) writeValue(ctx, argv[1], w);
+  else w.null();
+  cmds.end(Op::AnimCreate, tagArg(ctx, argc, argv, 0));
   const CommandBuffer::Result& r = implOf(ctx).applyNow();
   if (!r.ok) return JS_ThrowTypeError(ctx, "Animated (native): %s", r.error.c_str());
   return JS_UNDEFINED;
@@ -94,8 +98,11 @@ JSValue js_getValue(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
 
 // startAnimation(id, valueTag, config): starts on the runtime clock now.
 JSValue js_startAnimation(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  commands(ctx).pushValue(Op::AnimStart, tagArg(ctx, argc, argv, 0), argc > 2 ? toValue(ctx, argv[2]) : Value(),
-                          tagArg(ctx, argc, argv, 1));
+  CommandBuffer& cmds = commands(ctx);
+  CommandBuffer::Writer w = cmds.begin();
+  if (argc > 2) writeValue(ctx, argv[2], w);
+  else w.null();
+  cmds.end(Op::AnimStart, tagArg(ctx, argc, argv, 0), tagArg(ctx, argc, argv, 1));
   const CommandBuffer::Result& r = implOf(ctx).applyNow();
   if (!r.ok) return JS_ThrowTypeError(ctx, "Animated (native): %s", r.error.c_str());
   return JS_UNDEFINED;
@@ -115,18 +122,20 @@ JSValue js_stopAnimation(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
 // addEventMapping(viewId, eventType, path[], valueTag)
 JSValue js_addEventMapping(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   if (argc < 4) return JS_UNDEFINED;
-  Value keys = toValue(ctx, argv[2]);
   CommandBuffer& cmds = commands(ctx);
-  cmds.pushString(Op::AnimAddEventMapping, tagArg(ctx, argc, argv, 0), toStdString(ctx, argv[1]),
-                  tagArg(ctx, argc, argv, 3), uint32_t(keys.asArray().size()));
-  for (const Value& k : keys.asArray()) cmds.pushString(k.asString());
+  CommandBuffer::Writer w = cmds.begin();
+  writeValue(ctx, argv[2], w);   // the path (its keys)
+  writeString(ctx, argv[1], w);  // the event type
+  cmds.end(Op::AnimAddEventMapping, tagArg(ctx, argc, argv, 0), tagArg(ctx, argc, argv, 3));
   return JS_UNDEFINED;
 }
 
 JSValue js_removeEventMapping(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   if (argc < 3) return JS_UNDEFINED;
-  commands(ctx).pushString(Op::AnimRemoveEventMapping, tagArg(ctx, argc, argv, 0), toStdString(ctx, argv[1]),
-                           tagArg(ctx, argc, argv, 2));
+  CommandBuffer& cmds = commands(ctx);
+  CommandBuffer::Writer w = cmds.begin();
+  writeString(ctx, argv[1], w);
+  cmds.end(Op::AnimRemoveEventMapping, tagArg(ctx, argc, argv, 0), tagArg(ctx, argc, argv, 2));
   return JS_UNDEFINED;
 }
 

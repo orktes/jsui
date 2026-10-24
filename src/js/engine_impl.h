@@ -8,6 +8,7 @@
 
 #include <quickjs.h>
 
+#include <cassert>
 #include <chrono>
 #include <functional>
 #include <cstdint>
@@ -119,22 +120,25 @@ struct JsEngine::Impl {
   void applyCommands();
   // The end of a JS task: the microtasks have drained (drain()). The
   // commands JS recorded are published as one batch, so a React commit is
-  // applied whole.
-  void publish() { applyCommands(); }
+  // applied whole. (Single-threaded, the sync points below have applied
+  // them already.)
+  void publish() {
+    if (!commands.empty()) applyCommands();
+  }
   // JS returned to native code inside a task (a call() that is part of a
   // batch, a microtask round, a script's evaluation), or a bridge call is
   // about to read or affect native state (measure, getProps, Animated
   // getValue, host callbacks, fonts). Single-threaded, everything recorded
   // so far is applied here, so native never sees the tree behind JS. (On a
-  // JS thread these reads would come from a snapshot of the last frame and
-  // only publish() would apply.)
+  // JS thread, reads would come from a snapshot of the last frame instead
+  // and only publish() would apply.)
   void syncPoint() {
     if (!commands.empty()) applyCommands();
   }
-  // Records nothing itself: applies an op of CommandBuffer::appliesAtOnce
-  // that was just recorded, with everything before it, and returns its
-  // answer.
+  // For an op of CommandBuffer::appliesAtOnce that was just recorded:
+  // applies it with everything before it and returns its answer.
   const CommandBuffer::Result& applyNow() {
+    assert(!commands.empty() && CommandBuffer::appliesAtOnce(commands.last()));
     applyCommands();
     return commands.result();
   }
@@ -173,6 +177,9 @@ std::string toStdString(JSContext* ctx, JSValueConst v);
 std::string formatError(JSContext* ctx, JSValueConst exc);
 Value toValue(JSContext* ctx, JSValueConst v, int depth = 0);
 JSValue fromValue(JSContext* ctx, const Value& v);
+// toValue / toStdString into a command payload (js/command_buffer.h).
+void writeValue(JSContext* ctx, JSValueConst v, CommandBuffer::Writer& w, int depth = 0);
+void writeString(JSContext* ctx, JSValueConst v, CommandBuffer::Writer& w);
 // Copies the bytes of a string / ArrayBuffer / typed array / DataView.
 bool bytesOf(JSContext* ctx, JSValueConst v, std::vector<uint8_t>* out);
 

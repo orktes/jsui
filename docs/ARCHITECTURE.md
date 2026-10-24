@@ -92,7 +92,7 @@ and the same core compiles to WebAssembly.
 | `src/core/` | `Value`, `Node`, `Document`, style parsing (`style.cpp`), JSON, scrolling geometry, LayoutAnimation, perf counters |
 | `src/render/` | Skia painter, image cache, host textures, Lottie, ShaderView, pipeline cache, GPU backends (`gpu.cpp` Ganesh GL, `gpu_metal.cpp` Ganesh Metal, `gpu_d3d.cpp` Ganesh D3D12 / D3D11, `gpu_graphite.cpp` Graphite Vulkan / Metal / Dawn, `gpu_webgpu.cpp` Graphite on browser WebGPU) |
 | `src/text/` | Font manager and decoding (WOFF / WOFF2 / TTC), paragraph building and Yoga measure for `Text`, TextInput editing |
-| `src/js/` | `JsEngine`: the QuickJS host and bridge globals (`bridge*.cpp`), bytecode bundles (`bytecode.cpp`), and the host JS engine's native half (`engine_hostjs.cpp`) |
+| `src/js/` | `JsEngine`: the QuickJS host and bridge globals (`bridge*.cpp`), the mutation command buffer (`command_buffer.*`), bytecode bundles (`bytecode.cpp`), and the host JS engine's native half (`engine_hostjs.cpp`) |
 | `src/animated/` | Native Animated driver |
 | `src/input/` | Hit testing, event routing, focus and gamepad navigation, scrolling, text editing keys |
 | `src/audio/` | UI audio: requests to the host's audio handler or the built-in miniaudio backend (see [AUDIO.md](AUDIO.md)) |
@@ -1254,10 +1254,10 @@ Native globals (installed by `JsEngine`):
 | --- | --- |
 | `__jsui_native.rootId` | id of the root container node |
 | `__jsui_native.devMode` | `true` when the runtime runs with `cfg.dev_mode` |
-| `createNode(type, rootTag?) → id` | `type` ∈ `View`, `Text`, `RawText`, `Image`, `ScrollView`, `TextInput`, `LottieView`, `ShaderView`; created in the document of surface `rootTag` (default: the main one; see "Surfaces") |
+| `createNode(type, rootTag?) → id` | `type` ∈ `View`, `Text`, `RawText`, `Image`, `ScrollView`, `TextInput`, `LottieView`, `ShaderView`; created in the document of surface `rootTag` (default: the main one; see "Surfaces"). The id is taken at once; the node exists natively when the command is applied (see "Command buffer") |
 | `viewport(rootTag?) → {width, height, scale}` | logical size of a surface (default: the main one) |
 | `surfaceApp(rootTag) → {appKey, initialProps} \| null` | the app the host picked for a surface |
-| `updateProps(id, reactProps, hidden)` / `getProps(id)` | the host config's prop path, done natively: builds what native sees from the React props (event handlers → `__events`, flattened style, `pointerEvents` / hidden into it) and diffs it in `Node::setProps` (see "Performance: Props"); `getProps` returns what native holds. The host JS engine has neither (`@orktes/jsui-react` then diffs in JS and calls `setProps`) |
+| `updateProps(id, reactProps, hidden, keepStyle?)` / `getProps(id)` | the host config's prop path, done natively: builds what native sees from the React props (event handlers → `__events`, flattened style, `pointerEvents` / hidden into it) and diffs it in `Node::setProps` (see "Performance: Props"); `getProps` returns what native holds (the inspector reads it). `keepStyle` (`setNativeProps` of non-style props; `updatePropsKeepsStyle: true` says the runtime has it): `reactProps.style` is ignored and the node keeps the style it has when the command is applied, `patchStyle` and native Animated writes included. The host JS engine has neither (`@orktes/jsui-react` then diffs in JS and calls `setProps`) |
 | `setProps(id, props)` | replaces all props; `props.style` is a **flattened** style object; functions are dropped; `props.__events` lists event names the element listens to (e.g. `["press","pointerMove","layout"]`) |
 | `patchStyle(id, partialStyle)` | animation fast path: merges keys into the node's current `props.style` (a `null`/`undefined` value removes the key) and keeps all other props (`Node::patchStyle`). When only paint keys such as `transform`, `opacity`, colors changed, the style is updated in place and only those keys' style groups are re-resolved, with no relayout; a layout key takes the `setProps` path. Use it per frame from `requestAnimationFrame` instead of re-rendering through React. |
 | `setText(id, string)` | content of a `RawText` |
@@ -1268,6 +1268,7 @@ Native globals (installed by `JsEngine`):
 | `measure(id) → {x, y, width, height, pageX, pageY}` | layout of a node (synchronous; runs a pending layout first). `null` for unknown ids |
 | `focus(id)`, `blur(id)` | `InputManager::focus` / `blur` |
 | `scrollTo(id, x, y, animated)` | `InputManager::scrollTo` (clamped, dispatches `scroll`). `animated`: eases there on the runtime clock; otherwise immediate (and stops a running fling) |
+| `scrollToEnd(id, contentId, horizontal, animated)` | scrolls to the content container's laid-out size minus the ScrollView's on the scroll axis (`contentId` 0: the ScrollView itself), measured when the command is applied; `HostInstance.scrollToEnd` uses it when present |
 | `flashScrollIndicators(id)` | shows a ScrollView's overlay indicators for ~1 s |
 | `lottieData(json) → key` | hands an inline Lottie composition to native once; LottieViews use the key (content hash) as their `source`. `lottie`: `true` when the build plays Lottie |
 | `lottieCommand(id, cmd, a, b) → bool` | LottieView `play` (frames `a`–`b`, undefined: the whole composition) / `pause` / `resume` / `reset` |
@@ -1291,6 +1292,61 @@ Native globals (installed by `JsEngine`):
 | `textEditing` | `true`: TextInput text is edited natively (see "TextInput editing") |
 | `setTextInputSelection(id, start, end)` | TextInput selection (UTF-16 indices, clamped; no event) |
 | `getClipboard() → string`, `setClipboard(text)` | the embedder's clipboard (`jsui_set_clipboard_callbacks`) or the runtime's in-process one |
+
+### Command buffer
+
+The QuickJS bridge does not change the native side while JS runs. Every
+mutation call (`createNode`, `setProps` / `updateProps`, `patchStyle`,
+`setText`, the tree edits, `destroyNode`, `configureLayoutAnimation`,
+`focus` / `blur`, `scrollTo` / `scrollToEnd`, `flashScrollIndicators`,
+`setTextInputSelection`, `lottieCommand` and the whole `animated.*` graph
+API) converts its arguments and records a command in
+`JsEngine::Impl::commands` (`src/js/command_buffer.h`); `CommandBuffer::apply`
+(`command_buffer.cpp`) does the native work later, in call order. This is
+the first step of running JS on a thread of its own (the owner thread
+applies what the JS thread published); today everything is still
+single-threaded and behaves exactly as when each call applied at once:
+
+* **Publication.** A JS task (one native → JS entry with its microtask
+  drain, `Impl::drain`) publishes what it recorded as one batch
+  (`Impl::publish`), so a React commit is applied whole, never in parts.
+  Single-threaded, the engine also applies at every **sync point**
+  (`Impl::syncPoint`): whenever JS returns to native code (`call()` inside a
+  batch, a microtask round, a script's evaluation, an `onLayout` handler),
+  so native never looks at a tree behind JS (e.g. `InputManager` re-hit
+  testing after a handler). Commands recorded during a time-sliced render
+  (`createInstance` → `createNode` + `updateProps`) create detached nodes;
+  only the commit's task attaches them.
+* **Reads and host callbacks** apply what is recorded first: `measure`,
+  `getProps` and `animated.getValue` answer from the tree JS built, and
+  `postMessage`, `setState` / `patchState`, `hostCall` and the font calls
+  (which re-measure text) see it too. On a JS thread these reads will come
+  from a snapshot of the last frame instead.
+* **Ops that answer or call back** (`CommandBuffer::appliesAtOnce`) are
+  applied as soon as they are recorded, with everything before them:
+  focus / blur / scroll / selection run JS event handlers inside the call,
+  `lottieCommand` returns a bool, `animated.createNode` / `startAnimation`
+  throw on a bad config and `stopAnimation` returns the velocity.
+* **Ids.** `createNode` takes the id from the runtime's atomic node counter
+  (`Runtime::allocNodeId`, the counter every surface numbers its nodes with)
+  and records `Create(id, type, rootTag)` (`Document::createNode(type, id)`
+  when applied), so later commands of the batch can name the node first.
+  Ids stay in creation order across JS and native creations (surface
+  roots). Unknown ids are ignored when applied, as before.
+* **Payloads.** Props, styles, text and configs are written straight from
+  the JS values into one flat byte arena (`CommandBuffer::Writer`: tagged
+  scalars, length-prefixed strings and keys, counted arrays, objects up to
+  an end tag) instead of `Value`s; `apply` builds each command's `Value`
+  right before the node takes it. Recording allocates nothing once the
+  arrays have grown (they keep their capacity across batches), and the
+  allocator reuses the memory each node's previous props free: building all
+  `Value`s of a 2000-node commit first and freeing the old props after made
+  commits 10-25% slower, while the arena makes them ~20% faster than
+  applying each call at once (`markers-*-1000` in jsui-bench). A JS getter
+  that calls the bridge while a payload is being read records its own
+  command first (payloads are staged per nesting level).
+* **Perf.** Recording and applying both count as the `Commit` phase;
+  `bridgeCalls` counts recorded mutation calls as before.
 
 Standard globals (`src/js/prelude.cpp` + `host_api.cpp`):
 
@@ -2593,9 +2649,12 @@ Details of how the JS package uses the bridge, for native implementers:
   synthesizes is the press itself.
 * Optional bridge members used when present: `patchStyle(id, partialStyle)`
   (Animated / `setNativeProps`; otherwise `setProps` with the merged style),
+  `updatePropsKeepsStyle` (`setNativeProps` of other props passes
+  `keepStyle`; otherwise it reads the style back with `getProps`),
   `animated` (native Animated driver; otherwise `useNativeDriver` uses the JS driver),
   `viewport()` (native: returns `{width, height, scale}`), `focus`, `blur`,
-  `scrollTo`, `flashScrollIndicators`, `measure`, `postMessage`, `loadFont`, `loadFontData`,
+  `scrollTo`, `scrollToEnd` (otherwise measured in JS), `flashScrollIndicators`,
+  `measure`, `postMessage`, `loadFont`, `loadFontData`,
   `unloadFont`, `getFontFamilies`, `setFontFallbacks`, `setDefaultFontFamily`, `getImageSize(uri)`,
   `prefetchImage(uri)`, `reload`.
 * Events beyond input: `{type: 'resize', width, height, scale}` (sent by

@@ -68,7 +68,6 @@ void CommandBuffer::apply(Runtime& rt) {
     // A copy: applying may record more commands (and grow cmds_).
     Command cmd = cmds_[next_++];
     applyOne(rt, cmd);
-    applied_++;
   }
   if (--depth_ == 0) clear();
 }
@@ -76,15 +75,78 @@ void CommandBuffer::apply(Runtime& rt) {
 void CommandBuffer::clear() {
   if (depth_ > 0) return;
   cmds_.clear();
-  values_.clear();
-  objects_.clear();
-  strings_.clear();
+  bytes_.clear();
   next_ = 0;
 }
 
+// ------------------------------------------------------------- payloads
+
+std::string CommandBuffer::readString(size_t& at) const {
+  if (bytes_.data()[at] != kString) {
+    readValue(at);  // skipped
+    return {};
+  }
+  at++;
+  uint32_t n = readU32(at);
+  std::string s(reinterpret_cast<const char*>(bytes_.data() + at), n);
+  at += n;
+  return s;
+}
+
+Value::Object CommandBuffer::readObject(size_t& at) const {
+  Value::Object o;
+  if (bytes_.data()[at] != kObject) {
+    readValue(at);
+    return o;
+  }
+  at++;
+  while (bytes_.data()[at++] == kKey) {  // ... kEnd
+    uint32_t n = readU32(at);
+    std::string k(reinterpret_cast<const char*>(bytes_.data() + at), n);
+    at += n;
+    o.insert_or_assign(std::move(k), readValue(at));
+  }
+  return o;
+}
+
+Value CommandBuffer::readValue(size_t& at) const {
+  switch (bytes_.data()[at]) {
+    case kFalse:
+      at++;
+      return Value(false);
+    case kTrue:
+      at++;
+      return Value(true);
+    case kNumber: {
+      double d;
+      std::memcpy(&d, bytes_.data() + at + 1, sizeof d);
+      at += 1 + sizeof d;
+      return Value(d);
+    }
+    case kString:
+      return Value(readString(at));
+    case kArray: {
+      at++;
+      uint32_t n = readU32(at);
+      Value::Array arr;
+      arr.reserve(n);
+      for (uint32_t i = 0; i < n; i++) arr.push_back(readValue(at));
+      return Value(std::move(arr));
+    }
+    case kObject:
+      return Value(readObject(at));
+    default:  // kNull
+      at++;
+      return Value();
+  }
+}
+
+// ------------------------------------------------------------- apply
+
 void CommandBuffer::applyOne(Runtime& rt, const Command& cmd) {
-  // Payloads are moved out of the arrays before anything runs: a command
-  // that calls into JS can grow them.
+  // A payload is decoded before its command runs: a command that calls into
+  // JS (focus) can record more and grow the arena.
+  size_t at = cmd.payload;
   switch (cmd.op) {
     case Op::Create: {
       Document* doc = &rt.doc;
@@ -94,7 +156,7 @@ void CommandBuffer::applyOne(Runtime& rt, const Command& cmd) {
       return;
     }
     case Op::SetProps: {
-      Value props = std::move(values_[cmd.arg]);
+      Value props = readValue(at);
       if (Node* n = rt.findNode(cmd.a)) n->setProps(props);
       return;
     }
@@ -102,7 +164,7 @@ void CommandBuffer::applyOne(Runtime& rt, const Command& cmd) {
       // What updateProps(id, {...props, style: getProps(id).style}, hidden)
       // built: the node's style as it is now (with patchStyle's and native
       // Animated's writes), plus pointerEvents and hidden.
-      Value props = std::move(values_[cmd.arg]);
+      Value props = readValue(at);
       Node* n = rt.findNode(cmd.a);
       if (!n) return;
       Value::Object flat;
@@ -122,12 +184,12 @@ void CommandBuffer::applyOne(Runtime& rt, const Command& cmd) {
       return;
     }
     case Op::PatchStyle: {
-      Value::Object partial = std::move(objects_[cmd.arg]);
+      Value::Object partial = readObject(at);
       if (Node* n = rt.findNode(cmd.a)) n->patchStyle(partial);
       return;
     }
     case Op::SetText: {
-      std::string text = std::move(strings_[cmd.arg]);
+      std::string text = readString(at);
       if (Node* n = rt.findNode(cmd.a)) n->setText(std::move(text));
       return;
     }
@@ -160,7 +222,7 @@ void CommandBuffer::applyOne(Runtime& rt, const Command& cmd) {
         for (auto& s : rt.surfaces()) s->doc.disarmLayoutAnimation();
         return;
       }
-      Value cfg = std::move(values_[cmd.arg]);
+      Value cfg = readValue(at);
       double duration = cfg["duration"].isNumber() ? cfg["duration"].asNumber() : 300;
       LayoutAnimConfig c;
       c.create = layoutAnimSpec(cfg["create"], duration);
@@ -215,13 +277,13 @@ void CommandBuffer::applyOne(Runtime& rt, const Command& cmd) {
       return;
     }
     case Op::LottieCommand: {
-      std::string name = std::move(strings_[cmd.arg]);
+      std::string name = readString(at);
       Node* n = rt.findNode(cmd.a);
       result_.ok = n && lottie::command(n, name, cmd.x, cmd.y);
       return;
     }
     case Op::AnimCreate: {
-      Value config = std::move(values_[cmd.arg]);
+      Value config = readValue(at);
       result_.error.clear();
       result_.ok = rt.animated->createNode(tagOf(cmd.a), config, &result_.error);
       return;
@@ -256,7 +318,7 @@ void CommandBuffer::applyOne(Runtime& rt, const Command& cmd) {
       return;
     case Op::AnimStart: {
       // Starts on the runtime clock now (single-threaded: the time JS called).
-      Value config = std::move(values_[cmd.arg]);
+      Value config = readValue(at);
       result_.error.clear();
       result_.ok = rt.animated->startAnimation(tagOf(cmd.a), tagOf(cmd.b), config, rt.now, &result_.error);
       return;
@@ -266,15 +328,15 @@ void CommandBuffer::applyOne(Runtime& rt, const Command& cmd) {
       result_.ok = rt.animated->stopAnimation(tagOf(cmd.a), &result_.number);
       return;
     case Op::AnimAddEventMapping: {
-      std::string type = std::move(strings_[cmd.arg]);
+      Value keys = readValue(at);
+      std::string type = readString(at);
       std::vector<std::string> path;
-      path.reserve(cmd.count);
-      for (uint32_t i = 0; i < cmd.count; i++) path.push_back(std::move(strings_[cmd.arg + 1 + i]));
+      for (const Value& k : keys.asArray()) path.push_back(k.asString());
       rt.animated->addEventMapping(cmd.a, type, std::move(path), tagOf(cmd.b));
       return;
     }
     case Op::AnimRemoveEventMapping: {
-      std::string type = std::move(strings_[cmd.arg]);
+      std::string type = readString(at);
       rt.animated->removeEventMapping(cmd.a, type, tagOf(cmd.b));
       return;
     }
