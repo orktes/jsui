@@ -14,6 +14,8 @@ import {
   sampleCurve,
 } from './NativeAnimatedHelper.js';
 import { HostBuffer } from '../hostBuffer.js';
+import { now, requestFrame, cancelFrame } from '../native.js';
+import { compileExpression, evaluateExpression, ExpressionError } from './expression.js';
 
 let nextListenerId = 1;
 
@@ -656,4 +658,119 @@ export function diffClamp(a, min, max) {
     value = Math.min(Math.max(value + diff, min), max);
     return value;
   }, () => ({ type: 'diffclamp', min, max, last, value }));
+}
+
+// Animated.derive(inputs, fn): fn's body compiled to an expression program
+// (expression.js). Native when any input is (the runtime evaluates it every
+// frame: no JS, no lag); otherwise the JS driver runs the same program. A
+// function outside the expression subset still works with the JS driver
+// (fn is called) but cannot go native: making it native throws.
+const compiledBySource = new Map();
+
+/** Animated.expr(fn): an expression function kept for Animated.derive(inputs, expr). */
+export class AnimatedExpression {
+  constructor(fn, meta) {
+    if (typeof fn !== 'function') throw new TypeError('Animated.expr(fn): fn must be a function');
+    this.fn = fn;
+    this.meta = meta;
+  }
+}  // source -> {code, slots, free} (scope-free programs)
+
+export class AnimatedDerived extends AnimatedNode {
+  constructor(inputs, fn, meta) {
+    super();
+    if (!Array.isArray(inputs)) inputs = [inputs];
+    if (fn instanceof AnimatedExpression) {
+      meta = fn.meta;
+      fn = fn.fn;
+    }
+    if (typeof fn !== 'function') throw new TypeError('Animated.derive(inputs, fn): fn must be a function or an Animated.expr()');
+    this._fn = fn;
+    let inputNodes = inputs.map((v) => (v instanceof AnimatedNode ? v : new AnimatedValue(+v || 0)));
+    this._program = null;
+    this._error = null;
+    const source = meta && typeof meta.source === 'string' ? meta.source : Function.prototype.toString.call(fn);
+    if (/\{\s*\[native code\]\s*\}\s*$/.test(source)) {
+      this._error = 'its source is not available (build the bundle with jsui build, which keeps it)';
+    } else {
+      try {
+        const scope = meta && meta.scope;
+        let prog = !scope ? compiledBySource.get(source) : null;
+        if (!prog || prog.inputCount !== inputNodes.length) {
+          prog = compileExpression(source, inputNodes.length, scope);
+          prog.inputCount = inputNodes.length;
+          if (!scope && prog.inputs.length === 0) compiledBySource.set(source, prog);
+        }
+        this._program = prog;
+        inputNodes = inputNodes.concat(prog.inputs);
+      } catch (e) {
+        if (!(e instanceof ExpressionError)) throw e;
+        this._error = e.message;
+      }
+    }
+    this._inputs = inputNodes;
+    this._values = new Array(inputNodes.length);
+    if (this._inputs.some((n) => n.__isNative())) this.__makeNative();
+  }
+  __getInputs() {
+    return this._inputs;
+  }
+  __getValue() {
+    const vals = this._values;
+    for (let i = 0; i < vals.length; i++) vals[i] = this._inputs[i].__getValue();
+    if (this._program) return evaluateExpression(this._program.code, vals, this._program.slots);
+    const v = +this._fn(...vals.slice(0, vals.length));
+    return v === v ? v : 0;
+  }
+  __makeNative() {
+    if (!this._program && NativeAnimatedAPI) {
+      throw new Error(`Animated.derive: this function cannot run natively: ${this._error}`);
+    }
+    super.__makeNative();
+  }
+  __getNativeConfig() {
+    return {
+      type: 'expression',
+      input: this._inputs.map((n) => n.__getNativeTag()),
+      code: this._program.code,
+      slots: this._program.slots,
+    };
+  }
+  __attach() {
+    for (const n of this._inputs) n.__addChild(this);
+  }
+  __detach() {
+    for (const n of this._inputs) n.__removeChild(this);
+    this.__dropNative();
+  }
+}
+
+// Animated.clock(): the frame clock in seconds. Native whenever the native
+// module is there (the runtime advances it every frame while something
+// uses it); with the JS driver it ticks on requestAnimationFrame.
+export class AnimatedClock extends AnimatedNode {
+  constructor() {
+    super();
+    this._raf = null;
+    if (NativeAnimatedAPI) this._isNative = true;
+  }
+  __getValue() {
+    return now() / 1000;
+  }
+  __getNativeConfig() {
+    return { type: 'clock' };
+  }
+  __attach() {
+    if (this._isNative) return;
+    const loop = () => {
+      this._raf = requestFrame(loop);
+      batch(() => this.__changed());
+    };
+    this._raf = requestFrame(loop);
+  }
+  __detach() {
+    if (this._raf != null) cancelFrame(this._raf);
+    this._raf = null;
+    this.__dropNative();
+  }
 }

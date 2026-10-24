@@ -43,7 +43,10 @@ class NativeAnimated {
   // addition | subtraction | multiplication | division {input: [a, b]} |
   // modulus {input, modulus} | diffclamp {input, min, max} |
   // color {r, g, b, a} | hostBuffer {key, index} (element `index` of a
-  // frame data buffer, 0 when out of range) | transform {transforms:
+  // frame data buffer, 0 when out of range) | clock (the frame clock in
+  // seconds) | expression {input: [tags], code: [...], slots} (a stack
+  // program compiled by @orktes/jsui-react's animated/expression.js from an
+  // Animated.derive function; ops below) | transform {transforms:
   // [{property, nodeTag} | {property, value}]} | style {style: {key: tag}} |
   // props {props: {style: tag}}.
   // Returns false (and sets *error) for an unknown type.
@@ -84,7 +87,8 @@ class NativeAnimated {
   // when it was not running. *lastVelocity: a spring's velocity (units/s),
   // which a spring started next on the same value continues with.
   bool stopAnimation(int id, double* lastVelocity = nullptr);
-  bool animating() const { return !animations_.empty(); }
+  // Running animations, or a clock node something depends on.
+  bool animating() const { return !animations_.empty() || liveClocks() > 0; }
   size_t animationCount() const { return animations_.size(); }
 
   // Buffer `key` has new contents: its hostBuffer nodes are re-evaluated at
@@ -128,7 +132,20 @@ class NativeAnimated {
  private:
   enum class Type : uint8_t {
     Value, Interpolation, Addition, Subtraction, Multiplication, Division, Modulus, DiffClamp,
-    Color, HostBuffer, Transform, Style, Props
+    Color, HostBuffer, Clock, Expression, Transform, Style, Props
+  };
+  // Expression ops (packages/react/src/animated/expression.js OP).
+  enum class Op : uint8_t {
+    Const = 0, Input = 1, Load = 2, Store = 3,
+    Add = 10, Sub = 11, Mul = 12, Div = 13, Mod = 14, Pow = 15, Neg = 16, Not = 17,
+    Lt = 20, Le = 21, Gt = 22, Ge = 23, Eq = 24, Ne = 25, And = 26, Or = 27, Select = 28,
+    Call = 40,
+  };
+  struct Instr {
+    Op op;
+    uint8_t fn = 0;  // Call: function id
+    uint32_t index = 0;  // Input / Load / Store
+    double k = 0;  // Const
   };
   enum class Extrapolate : uint8_t { Extend, Clamp, Identity };
   enum class OutKind : uint8_t { Number, Color, String };
@@ -165,6 +182,9 @@ class NativeAnimated {
     size_t bufferIndex = 0;
     const HostBuffers::Entry* bufferEntry = nullptr;
     uint64_t bufferGen = 0;
+    // expression
+    std::vector<Instr> code;
+    uint32_t slots = 0, stackSize = 0;
     // transform / style
     std::vector<TransformEntry> transforms;
     std::vector<StyleEntry> style;
@@ -223,6 +243,9 @@ class NativeAnimated {
   // Advances one animation; returns true when it finished (all iterations).
   bool step(Anim& a, double nowMs);
   void stopAnimationsOf(int tag, bool report);
+  bool compileExpression(ANode& n, const Value& config, std::string* error);
+  double runExpression(ANode& n);
+  size_t liveClocks() const;
 
   Document& doc_;
   std::unordered_map<int, ANode> nodes_;
@@ -243,6 +266,9 @@ class NativeAnimated {
   std::vector<int> dirtyValues_;  // nodes changed since the last flush (ANode::queued)
   std::vector<int> dirtyNotify_;  // values changed natively (listener updates; ANode::notifyQueued)
   std::unordered_map<std::string, std::vector<int>> bufferNodes_;  // key -> hostBuffer node tags
+  std::vector<int> clockNodes_;  // tags of the Clock nodes
+  double clockMs_ = 0;           // the last tick's time
+  std::vector<double> exprStack_, exprSlots_;  // runExpression scratch
   uint64_t gen_ = 1;
 };
 

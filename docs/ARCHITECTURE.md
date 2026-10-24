@@ -1741,6 +1741,25 @@ Native's API and both of its drivers:
     (`FinalizationRegistry`). A reload clears the native graph.
   * Without `__jsui_native.animated` (Node tests, other hosts)
     `useNativeDriver` falls back to the JS driver.
+  * Derived values: `Animated.derive(inputs, fn)` (and `Animated.expr(fn)`
+    to define one up front) compiles `fn`'s body, a pure-math subset of JS
+    (`packages/react/src/animated/expression.js`), into a stack program
+    (`expression` node: constants, inputs, locals, arithmetic, comparisons,
+    `&&` / `||` / `?:` as eager selects, `Math.*` and GLSL-style helpers).
+    The native node validates the program once (ops, operand ranges, stack
+    balance) and runs it without allocating; the JS driver runs the same
+    program, so both agree bit for bit
+    (`tests/native/react_derive_e2e_test.cpp`). Bytecode bundles have no
+    function source, so `jsui build` (`packages/cli/src/derive.js`) rewrites
+    inline `derive(..., fn)` / `.expr(fn)` calls to pass `{source, scope}`:
+    a text pass (strings, comments and template text masked) that uses the
+    runtime's own parser to find the function's end and its free names.
+    Free names are captured at call time: numbers become constants,
+    Animated nodes extra inputs. Functions outside the subset are build
+    warnings and run only on the JS driver (making them native throws).
+  * `Animated.clock()`: a `clock` node, the runtime clock in seconds. Clock
+    nodes with dependents are marked dirty in every `NativeAnimated::tick`
+    and count as animating (`jsui_wants_frame`).
   * Not native (yet): `toValue` bound to another Animated node (RN's
     `tracking` node) restarts native animations from JS when the target
     changes; scroll physics (and so `Animated.event` from flings) only

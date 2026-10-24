@@ -36,6 +36,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { esbuildOptions, jsuiReactDir } from './config.js';
 import { compileSource } from './react-compiler.js';
+import { transformDerive } from './derive.js';
 import { concatMaps, inlineMapComment, lineCount, prepareMap } from './sourcemap.js';
 
 const require = createRequire(import.meta.url);
@@ -104,7 +105,7 @@ export function createHmr(o) {
 
   async function compile(key, deps) {
     const abs = path.resolve(cwd, key);
-    const source = await readFile(abs, 'utf8');
+    const source = (await transformDerive(await readFile(abs, 'utf8'), abs)).code;
     const depsJson = JSON.stringify(deps);
     const hash = sha1(source + '\0' + depsJson);
     const hit = compiled.get(key);
