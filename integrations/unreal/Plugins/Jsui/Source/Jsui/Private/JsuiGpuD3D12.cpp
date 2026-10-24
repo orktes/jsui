@@ -7,7 +7,20 @@
 // into ERHIAccess::RTV (D3D12_RESOURCE_STATE_RENDER_TARGET) before the job and
 // back to ERHIAccess::SRVMask after it. The render takes it in RENDER_TARGET
 // and leaves it there (layout = final_layout), so what Unreal tracks is right
-// all along.
+// all along. UE 5.8 uses legacy resource barriers by default
+// (r.D3D12.PreferredBarrierImplementation=1, D3D12Adapter.cpp), the same kind
+// Ganesh issues. With enhanced barriers (=2, or 0 on a driver that has them),
+// ERHIAccess::RTV is D3D12_BARRIER_LAYOUT_RENDER_TARGET, the layout D3D12
+// pairs with the legacy RENDER_TARGET state; that mode is untested.
+//
+// RHIUpdateResourceResidency / RHIFlushResourceBarriers act on the executing
+// command list's context (FD3D12CommandContext::Get, D3D12RHI.cpp), hence
+// the EnqueueLambda.
+//
+// RHIRunOnQueue (D3D12RHI.cpp) queues a payload behind every payload
+// submitted before it, and the submission thread executes the command lists
+// batched so far before it runs the callback (D3D12Submission.cpp:
+// FlushBatchedPayloads, Flush() before PreExecute()).
 //
 // Ordering, per render:
 //  1. the render thread records the transition (and makes the resource

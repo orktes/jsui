@@ -12,7 +12,14 @@
 // i.e. VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL: the render takes it in that
 // layout (UNDEFINED for a new image: a full repaint) and leaves it there. The
 // render target is only touched by the RHI: Unknown -> CopyDest, the copy,
-// CopyDest -> SRVMask, so its tracked layout is always right.
+// CopyDest -> SRVMask, so its tracked layout is always right. (VulkanBarriers.cpp:
+// CopySrc alone is TRANSFER_SRC_OPTIMAL, CopyDest TRANSFER_DST_OPTIMAL;
+// VulkanTexture.cpp: a CopySrc initial state is TRANSFER_SRC_OPTIMAL, after the
+// RHI's initial clear on its upload context, submitted with the command list.)
+//
+// RHIRunOnQueue (VulkanSubmission.cpp) queues a payload on the graphics
+// queue's pending list behind every payload submitted before it; the
+// callback runs when the queue reaches it (FVulkanQueue::SubmitQueuedPayloads).
 //
 // Ordering, per render:
 //  1. the render thread flushes the immediate command list to the GPU

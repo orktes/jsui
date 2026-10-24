@@ -183,17 +183,27 @@ details):
   extensions; the RHI does not expose its enabled instance extensions or
   feature chain, so Skia assumes no optional features.
 
-Not verified yet: none of the Windows / Linux paths has been compiled or run
-(they were written against the UE 5.8 RHI interface headers only). Things to
-check on first run: the job really runs after the command lists submitted
-before `RHIRunOnQueue` (the Metal path relies on the same and works); on
-Vulkan, that the plugin's image gets `INPUT_ATTACHMENT` usage from
-`InputAttachmentRead` (else the first render fails and the view falls back to
-the CPU with a log line), and no validation-layer layout errors; on D3D12,
-that the `RTV` state matches what Ganesh is told when the RHI runs with
-enhanced barriers. Each render on Vulkan / D3D12 waits for the RHI thread to
-catch up (`FlushRHIThread`), which costs the render thread some parallelism
-on frames where the UI changed.
+Not verified yet: none of the Windows / Linux paths has been compiled or run.
+They were written against the UE 5.8 RHI sources, which confirm:
+
+* D3D12: `RHIRunOnQueue` queues behind the payloads submitted before it, and
+  the submission thread executes the command lists batched so far before the
+  callback (`D3D12Submission.cpp`). Legacy resource barriers are the default
+  (`r.D3D12.PreferredBarrierImplementation=1`), the same kind Ganesh issues;
+  the enhanced-barrier mode is untested. The residency / barrier-flush calls
+  need the executing command list (hence `EnqueueLambda`).
+* Vulkan: `InputAttachmentRead` on a `RenderTargetable` texture adds
+  `INPUT_ATTACHMENT`, and every image gets `TRANSFER_SRC | TRANSFER_DST |
+  SAMPLED` (`VulkanTexture.cpp`). `CopySrc` / `CopyDest` are
+  `TRANSFER_SRC_OPTIMAL` / `TRANSFER_DST_OPTIMAL` (`VulkanBarriers.cpp`).
+  `RHIRunOnQueue` queues behind the payloads submitted before it
+  (`VulkanSubmission.cpp`).
+
+Still to check: whether the Vulkan queue submits the payloads batched before
+the callback, as D3D12 does (`FVulkanQueue::SubmitQueuedPayloads`), and that
+the validation layer reports no layout errors. Each render on Vulkan / D3D12
+waits for the RHI thread to catch up (`FlushRHIThread`), which costs the
+render thread some parallelism on frames where the UI changed.
 
 ## Using it in your game
 

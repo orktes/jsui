@@ -8,6 +8,10 @@
 #include "RenderingThread.h"
 #include "TextureResource.h"
 
+#if JSUI_UE_METAL
+#include "IMetalDynamicRHI.h"  // IsRHIMetal
+#endif
+
 // GPU path. Skia draws the UI straight into the view's render target on the
 // RHI's own device, ordered with Unreal's GPU work on the RHI's own queue:
 //
@@ -126,11 +130,12 @@ void FJsuiHost::TakeLogs(TArray<FLog>& Out)
 FJsuiHost::EGpuApi FJsuiHost::GpuApi()
 {
 	if (!GDynamicRHI) return EGpuApi::None;
+#if JSUI_UE_METAL
+	// The Metal RHI's own test (as before this file had other RHIs).
+	if (IsRHIMetal()) return EGpuApi::Metal;
+#endif
 	switch (GDynamicRHI->GetInterfaceType())
 	{
-#if JSUI_UE_METAL
-	case ERHIInterfaceType::Metal: return EGpuApi::Metal;
-#endif
 #if JSUI_UE_VULKAN
 	case ERHIInterfaceType::Vulkan: return EGpuApi::Vulkan;
 #endif
