@@ -1,3 +1,5 @@
+// Same scheduler path on every engine: React's scheduler sees only a setTimeout stub (the bench flushes synchronously, so nothing needs to fire).
+(function (setTimeout, clearTimeout, setImmediate, MessageChannel) {
 (() => {
   var __create = Object.create;
   var __defProp = Object.defineProperty;
@@ -10128,3 +10130,4 @@ react/cjs/react-jsx-runtime.production.js:
    * LICENSE file in the root directory of this source tree.
    *)
 */
+})(function () { return 0; }, function () {}, undefined, undefined);

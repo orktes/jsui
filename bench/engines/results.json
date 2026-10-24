@@ -1,0 +1,230 @@
+{
+ "QuickJS-ng (JSUI patched)": {
+  "speed": {
+   "init": 0.162,
+   "mount 500 views": 3.722,
+   "update plain (none)": 2.649,
+   "update plain (tenth)": 2.672,
+   "update plain (all)": 2.655,
+   "update memo (none)": 1.393,
+   "update memo (tenth)": 1.713,
+   "update memo (all)": 2.98,
+   "total": 1553.0
+  },
+  "start_init": 39.836165960878134,
+  "start_init_min": 32.183957984671,
+  "start_trivial": 4.584416979923844,
+  "rss_full": 13.28125,
+  "rss_init": 8.125,
+  "rss_trivial": 2.484375
+ },
+ "QuickJS-ng bytecode exe (qjs -c)": {
+  "speed": {
+   "init": 0.161,
+   "mount 500 views": 3.635,
+   "update plain (none)": 2.632,
+   "update plain (tenth)": 2.66,
+   "update plain (all)": 2.657,
+   "update memo (none)": 1.389,
+   "update memo (tenth)": 1.729,
+   "update memo (all)": 2.993,
+   "total": 1553.7
+  },
+  "start_init": 6.742084166035056,
+  "start_init_min": 6.7137919832021,
+  "start_trivial": 4.981625126674771,
+  "rss_full": 6.8125,
+  "rss_init": 3.484375,
+  "rss_trivial": 2.40625
+ },
+ "QuickJS-ng (stock v0.17.0)": {
+  "speed": {
+   "init": 0.167,
+   "mount 500 views": 3.755,
+   "update plain (none)": 2.689,
+   "update plain (tenth)": 2.72,
+   "update plain (all)": 2.721,
+   "update memo (none)": 1.431,
+   "update memo (tenth)": 1.769,
+   "update memo (all)": 3.069,
+   "total": 1593.2
+  },
+  "start_init": 40.29908310621977,
+  "start_init_min": 32.712666084989905,
+  "start_trivial": 4.966667154803872,
+  "rss_full": 12.1875,
+  "rss_init": 7.953125,
+  "rss_trivial": 2.53125
+ },
+ "Hermes source": {
+  "speed": {
+   "init": 0.0,
+   "mount 500 views": 1.45,
+   "update plain (none)": 1.2,
+   "update plain (tenth)": 1.22,
+   "update plain (all)": 1.2,
+   "update memo (none)": 0.68,
+   "update memo (tenth)": 0.84,
+   "update memo (all)": 1.39,
+   "total": 716.0
+  },
+  "start_init": 264.7064998745918,
+  "start_init_min": 262.5579589512199,
+  "start_trivial": 9.744167095050216,
+  "rss_full": 68.21875,
+  "rss_init": 41.6875,
+  "rss_trivial": 9.671875
+ },
+ "Hermes .hbc": {
+  "speed": {
+   "init": 0.0,
+   "mount 500 views": 1.5,
+   "update plain (none)": 1.2,
+   "update plain (tenth)": 1.22,
+   "update plain (all)": 1.21,
+   "update memo (none)": 0.68,
+   "update memo (tenth)": 0.84,
+   "update memo (all)": 1.37,
+   "total": 712.0
+  },
+  "start_init": 8.613208075985312,
+  "start_init_min": 8.745874976739287,
+  "start_trivial": 8.472665911540389,
+  "rss_full": 34.984375,
+  "rss_init": 8.9375,
+  "rss_trivial": 8.46875
+ },
+ "Hermes .hbc + JIT (-Xjit=on)": {
+  "speed": {
+   "init": 0.0,
+   "mount 500 views": 0.9,
+   "update plain (none)": 0.6,
+   "update plain (tenth)": 0.6,
+   "update plain (all)": 0.6,
+   "update memo (none)": 0.39,
+   "update memo (tenth)": 0.46,
+   "update memo (all)": 0.74,
+   "total": 381.0
+  },
+  "start_init": 9.138500085100532,
+  "start_init_min": 8.756416151300073,
+  "start_trivial": 8.182917023077607,
+  "rss_full": 37.46875,
+  "rss_init": 9.03125,
+  "rss_trivial": 8.625
+ },
+ "Static Hermes (shermes, untyped native)": {
+  "speed": {
+   "init": 0.0,
+   "mount 500 views": 0.95,
+   "update plain (none)": 0.7,
+   "update plain (tenth)": 0.71,
+   "update plain (all)": 0.71,
+   "update memo (none)": 0.4,
+   "update memo (tenth)": 0.49,
+   "update memo (all)": 0.86,
+   "total": 426.0
+  },
+  "start_init": 9.896124945953488,
+  "start_init_min": null,
+  "start_trivial": 9.605624945834279,
+  "rss_full": 37.046875,
+  "rss_init": 10.234375,
+  "rss_trivial": 9.671875
+ },
+ "JSC full JIT (default)": {
+  "speed": {
+   "init": 1.1,
+   "mount 500 views": 0.319,
+   "update plain (none)": 0.191,
+   "update plain (tenth)": 0.211,
+   "update plain (all)": 0.109,
+   "update memo (none)": 0.088,
+   "update memo (tenth)": 0.07,
+   "update memo (all)": 0.113,
+   "total": 101.3
+  },
+  "start_init": 16.216833144426346,
+  "start_init_min": 14.677457977086306,
+  "start_trivial": 10.097000049427152,
+  "rss_full": 147.03125,
+  "rss_init": 10.125,
+  "rss_trivial": 7.25
+ },
+ "JSC baseline JIT only": {
+  "speed": {
+   "init": 1.08,
+   "mount 500 views": 0.643,
+   "update plain (none)": 0.476,
+   "update plain (tenth)": 0.494,
+   "update plain (all)": 0.458,
+   "update memo (none)": 0.233,
+   "update memo (tenth)": 0.292,
+   "update memo (all)": 0.515,
+   "total": 281.0
+  },
+  "start_init": 15.84979216568172,
+  "start_init_min": 14.494167175143957,
+  "start_trivial": 10.47129207290709,
+  "rss_full": 53.921875,
+  "rss_init": 10.171875,
+  "rss_trivial": 7.28125
+ },
+ "JSC LLInt only (--useJIT=false, = iOS app)": {
+  "speed": {
+   "init": 1.04,
+   "mount 500 views": 2.263,
+   "update plain (none)": 1.979,
+   "update plain (tenth)": 2.027,
+   "update plain (all)": 2.005,
+   "update memo (none)": 0.962,
+   "update memo (tenth)": 1.2,
+   "update memo (all)": 2.162,
+   "total": 1134.1
+  },
+  "start_init": 15.125625068321824,
+  "start_init_min": 13.691958971321583,
+  "start_trivial": 9.504707995802164,
+  "rss_full": 42.21875,
+  "rss_init": 9.078125,
+  "rss_trivial": 6.5
+ },
+ "Node/V8 (reference)": {
+  "speed": {
+   "init": 1.392,
+   "mount 500 views": 0.32,
+   "update plain (none)": 0.174,
+   "update plain (tenth)": 0.135,
+   "update plain (all)": 0.13,
+   "update memo (none)": 0.074,
+   "update memo (tenth)": 0.085,
+   "update memo (all)": 0.136,
+   "total": 102.1
+  },
+  "start_init": 80.53245791234076,
+  "start_init_min": 78.54366698302329,
+  "start_trivial": 74.4254169985652,
+  "rss_full": 77.640625,
+  "rss_init": 52.53125,
+  "rss_trivial": 49.0
+ },
+ "Node/V8 --jitless": {
+  "speed": {
+   "init": 1.344,
+   "mount 500 views": 2.008,
+   "update plain (none)": 1.734,
+   "update plain (tenth)": 1.729,
+   "update plain (all)": 1.73,
+   "update memo (none)": 0.783,
+   "update memo (tenth)": 0.995,
+   "update memo (all)": 1.798,
+   "total": 971.1
+  },
+  "start_init": 80.29779209755361,
+  "start_init_min": 77.36245798878372,
+  "start_trivial": 72.42337497882545,
+  "rss_full": 66.34375,
+  "rss_init": 49.890625,
+  "rss_trivial": 46.640625
+ }
+}
