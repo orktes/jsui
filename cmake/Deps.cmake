@@ -46,12 +46,17 @@ set(_qjs_dir ${CMAKE_BINARY_DIR}/quickjs-src)
 if(NOT EXISTS ${_qjs_dir}/.jsui-${_qjs_sum})
   file(REMOVE_RECURSE ${_qjs_dir})
   file(COPY ${quickjs_SOURCE_DIR}/ DESTINATION ${_qjs_dir} PATTERN .git EXCLUDE)
+  # Inside another git checkout (a build dir in the repo) `git apply` would
+  # take paths relative to that repository and skip every file: stop the
+  # repository search at the build dir.
   execute_process(
-    COMMAND ${GIT_EXECUTABLE} apply --whitespace=nowarn ${_qjs_patches}
+    COMMAND ${CMAKE_COMMAND} -E env GIT_CEILING_DIRECTORIES=${CMAKE_BINARY_DIR}
+            ${GIT_EXECUTABLE} apply --whitespace=nowarn ${_qjs_patches}
     WORKING_DIRECTORY ${_qjs_dir}
     RESULT_VARIABLE _qjs_rc
     ERROR_VARIABLE _qjs_err)
-  if(NOT _qjs_rc EQUAL 0)
+  file(STRINGS ${_qjs_dir}/quickjs.c _qjs_bc REGEX "^#define BC_VERSION 29$")
+  if(NOT _qjs_rc EQUAL 0 OR NOT _qjs_bc)
     message(FATAL_ERROR "The QuickJS patches do not apply to ${quickjs_SOURCE_DIR}:\n${_qjs_err}")
   endif()
   file(TOUCH ${_qjs_dir}/.jsui-${_qjs_sum})
