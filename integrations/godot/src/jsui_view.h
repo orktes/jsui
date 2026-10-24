@@ -110,6 +110,8 @@ class JsuiView : public godot::Control {
   bool get_autostart() const { return autostart_; }
   void set_forward_gamepad(bool on) { forward_gamepad_ = on; }
   bool get_forward_gamepad() const { return forward_gamepad_; }
+  void set_js_frame_budget_ms(double ms);
+  double get_js_frame_budget_ms() const { return js_frame_budget_ms_; }
   void set_input_pass_through(bool on) { input_pass_through_ = on; }
   bool get_input_pass_through() const { return input_pass_through_; }
   void set_force_cpu(bool on);
@@ -361,6 +363,7 @@ class JsuiView : public godot::Control {
   float pixel_ratio_ = 0.f;  // 0: follow the canvas -> screen scale
   bool autostart_ = true;
   bool forward_gamepad_ = true;
+  double js_frame_budget_ms_ = 5;
   bool input_pass_through_ = true;
   int mouse_buttons_ = 0;  // buttons whose press reached the UI (DOM bits)
   bool force_cpu_ = false;

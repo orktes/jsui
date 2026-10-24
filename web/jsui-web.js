@@ -167,6 +167,9 @@
  *   workerLoop?: 'raf'|'main',   // worker mode's frame clock: 'raf' (default) the worker's own
  *                                // requestAnimationFrame, 'main' this thread's rAF posting each
  *                                // frame (used anyway when the worker has none)
+ *   jsFrameBudget?: number,      // ms of JS per frame before React's scheduler yields (default 5):
+ *                                // transitions (startTransition) render in slices across frames.
+ *                                // <= 0: no limit (jsui_set_js_frame_budget)
  *   js?: 'quickjs'|'host',       // the JS engine the bundle runs on: 'host' (default) this page's /
  *                                // worker's own engine (V8, JavaScriptCore, SpiderMonkey), with the
  *                                // native core still in WASM (docs/ARCHITECTURE.md "Host JS engine");
@@ -1777,6 +1780,7 @@ class JsuiHost extends CanvasView {
     this.rt = M._jsui_web_create(this.hostId, this.width, this.height, this.pixelRatio, opts.devMode ? 1 : 0,
       this._baseUrlPtr, this.audio.enabled ? 1 : 0, this.jsEngine === 'host' ? 1 : 0);
     if (!this.rt) throw new Error('jsui_web_create failed');
+    if (opts.jsFrameBudget != null) M._jsui_set_js_frame_budget(this.rt, +opts.jsFrameBudget);
     if (opts.devMode && M._jsui_set_dev_session) {
       this._withStrings([opts.devName ?? null], (n) => M._jsui_set_dev_session(this.rt, n, opts.devSession === false ? 0 : 1));
     }

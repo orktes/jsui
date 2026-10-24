@@ -174,6 +174,13 @@ test('debugger: breakpoints in JSX, scopes, stepping, console, hot updates (nati
     const later = await c.send('Runtime.evaluate', { expression: '1 + 1', returnByValue: true });
     assert.equal(later.result.result.value, 2);
 
+    // With no breakpoints the statement traps are off; a pause request turns
+    // them back on and stops the running app.
+    const pauseSeen = c.events.length;
+    await c.send('Debugger.pause');
+    await c.event((m) => m.method === 'Debugger.paused', pauseSeen);
+    await c.send('Debugger.resume');
+
     // A hot update is a script of its own, with an inline map to the JSX.
     const hotSeen = c.events.length;
     await writeFile(appFile, APP.replace("'tick '", "'tock '"));
