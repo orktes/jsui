@@ -1742,6 +1742,29 @@ off; `host` is the host's own share, writing the JSON text, and counts in
 `--tool=callgrind --instr-atstart=no`: the tool switches instrumentation on
 for the measured frames only.
 
+Where the JS time goes: with `JSUI_JS_PROFILE=out.txt` in the environment the
+engine samples the JS stack from QuickJS's interrupt poll (every ~10000
+bytecode ops) while the runtime profiles its frames (jsui-bench's measured
+frames), weights each sample by the time since the previous poll, and writes
+self and inclusive shares per function at exit (`JSUI_JS_PROFILE_LINES=1`:
+per source line). Bundles built without `--minify` keep React's function
+names.
+
+* **Props.** `__jsui_native.updateProps(id, reactProps, hidden)` builds what
+  native sees from the React props (event handlers become `__events`
+  tokens, the style is flattened, `pointerEvents` / hidden go into it) and
+  `Node::setProps` diffs it, so the host config does neither in JS; it only
+  skips renders whose React props are identical (`mayDiffer`). A style
+  array rebuilt with equal contents therefore reaches native (a skipped
+  `setProps`), which is cheaper than diffing every changed style in JS.
+* **QuickJS.** `cmake/Deps.cmake` compiles a patched copy of quickjs.c:
+  `JS_FreeValue` / `JS_DupValue` are inlined (quickjs-ng exports them out of
+  line, a call per value the interpreter pops) and `===` / `!==` decide
+  objects, symbols, booleans, null and undefined inline. `JSUI_QUICKJS_FLAGS`
+  adds compile flags for QuickJS alone (profile-guided optimization with
+  `-fprofile-instr-generate` / `-fprofile-instr-use=` measured 6-9% less JS
+  time on React-heavy scenarios on an M1 Ultra).
+
 ## Paint performance
 
 What painting costs is proportional to the damage, and within the damage
