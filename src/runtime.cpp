@@ -29,7 +29,7 @@ namespace jsui {
 namespace {
 
 // A tick shorter than this leaves the frame room for a deferred cycle
-// collection (young ones take well under a millisecond).
+// collection.
 constexpr double kLightTickMs = 4.0;
 
 // "http://host:port/a/b.js?x" -> "http://host:port"; empty if not http.
@@ -634,9 +634,9 @@ void Runtime::tick(double nowMs) {
   deliverUiCallResults();
   // Shared-session commands run last, on the frame this tick produced.
   if (session) session->tick(devOrigin_);
-  // Cycle collections the engine deferred while JS ran run between frames:
-  // young ones in light ticks (no commit to speak of), full ones while
-  // nothing moves (see JsEngine::collectIdle).
+  // Cycle collections the engine deferred while JS ran run between frames,
+  // in light ticks (no commit to speak of) or while nothing moves (see
+  // JsEngine::collectIdle).
   if (js) {
     double tickMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tickStart).count();
     bool idle = !wantsFrame();

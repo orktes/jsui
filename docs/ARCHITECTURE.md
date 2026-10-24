@@ -2182,21 +2182,23 @@ names.
   time of every jsui-bench scenario (mount 24%, React commits about 11%) for
   about 100 KB more code (56 KB gzipped), with the same memory.
   `third_party/quickjs-jsui` holds JSUI's own, on top of those:
-  * *Generational cycle collection.* QuickJS frees by reference counting
+  * *Cycle collection between frames.* QuickJS frees by reference counting
     and collects cycles with a stop-the-world pass over every GC object
-    (about 1 ms per MB of heap), which landed 15-30 ms pauses in the middle
-    of navigation frames. With the patch, collections that come due while
-    JS runs are deferred (react-native-quickjs's 0002), and a young
-    collection scans only the objects allocated since the last one, the
-    oldest first, in slices sized to about 2 ms; survivors move to an old
-    list that acts as roots. `Runtime::tick` runs them at the end of a tick
-    (`JsEngine::collectIdle`): a slice on a light tick, the whole young
-    generation after 3 heavy ones. Old garbage (an unmounted screen) needs
-    a full collection: it comes due when the heap left after collections
-    grew by a quarter since the last full one and runs when the runtime is
-    idle (nothing to animate or repaint), else on a light tick after 10
-    ticks, at the latest after 30 (and in the engine at 2x). `jsui_get_perf`
-    reports collections and pauses (`gc_*`).
+    (about 1 ms per MB of heap), which landed 15-35 ms pauses in the middle
+    of React commits (a screen mount). Collections that come due while JS
+    runs are deferred (react-native-quickjs's 0002, with a dynamic ceiling),
+    and `Runtime::tick` runs them at the end of a tick
+    (`JsEngine::collectIdle`): on a light tick (under 4 ms), else after 3
+    heavy ones. That took the JS p95 of the mount scenario from 24 to 8.4 ms
+    on an M1 Ultra. The patch also has a generational mode (young
+    collections over the objects allocated since the last one, in time-boxed
+    slices, survivors kept as roots); it is off, because on showcase
+    navigation and mounts it cost 3-5x the GC time and 5 MB more for no
+    shorter pause: a new screen outlives the next few collections anyway.
+    `jsui_get_perf` reports collections and pauses (`gc_*`).
+  * *Platform fixes* for the rnq series: the holey-array union on 32-bit
+    targets, SSE4.2 detection under clang-cl, and the inline-cache hit paths
+    under switch dispatch (Emscripten, MSVC), which ran the opcode twice.
 * **QuickJS.** On top of the patch series, `cmake/Deps.cmake` patches quickjs.c further:
   `JS_FreeValue` / `JS_DupValue` are inlined (quickjs-ng exports them out of
   line, a call per value the interpreter pops) and `===` / `!==` decide

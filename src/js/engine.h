@@ -106,13 +106,12 @@ class JsEngine {
   // Bytes allocated by the JS heap (for diagnostics / leak checks; 0 when
   // the engine cannot tell).
   virtual size_t memoryUsage() const = 0;
-  // Garbage collection between frames. The QuickJS engine collects cycles
-  // generationally and defers collections that come due while JS runs.
-  // After each tick: a waiting young collection runs (a slice of it) when
-  // the tick was `light` or it has waited a few ticks; a full collection
-  // that came due runs when the runtime is `idle` (nothing to animate or
-  // repaint), or after a long wait on a light tick. Returns whether it
-  // collected.
+  // Garbage collection between frames. The QuickJS engine defers cycle
+  // collections that come due while JS runs. After each tick: a waiting
+  // collection runs when the tick was `light` or it has waited a few ticks;
+  // one the engine only flags as due runs when the runtime is `idle`
+  // (nothing to animate or repaint), or after a long wait on a light tick.
+  // Returns whether it collected.
   virtual bool collectIdle(bool light, bool idle) { return false; }
   struct GcStats {
     uint64_t collections = 0, full = 0;
