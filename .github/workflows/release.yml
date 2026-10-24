@@ -2,9 +2,11 @@ name: Release
 
 # Publishes @orktes/jsui-react, @orktes/jsui-cli and @orktes/jsui-web to npm with trusted
 # publishing (GitHub OIDC; provenance is attached automatically and there is
-# no npm token anywhere). Nothing is compiled here: the WASM modules for
-# @orktes/jsui-web are the artifacts of the CI run on main for the released commit,
-# the same ones pages.yml deploys. See docs/RELEASING.md.
+# no npm token anywhere), and attaches the prebuilt native binaries to the
+# GitHub Release of the tag. Nothing is compiled here: the WASM modules for
+# @orktes/jsui-web and the native binaries are the artifacts of the CI run on
+# main for the released commit (the WASM ones are what pages.yml deploys).
+# See docs/RELEASING.md.
 #
 # Trigger: push a tag vX.Y.Z on a main commit whose CI run succeeded, or run
 # it by hand on main. Versions already on npm are skipped, so re-running a
@@ -117,3 +119,68 @@ jobs:
           done
           npx --yes "@orktes/jsui-cli@$VERSION" skill install
           test -s .claude/skills/jsui/SKILL.md
+
+  # The prebuilt native binaries on the GitHub Release of the tag: the dist-*
+  # artifacts of the same CI run, assembled by scripts/dist/assemble-release.sh
+  # (per-platform archives with the shared library, header, CMake package and
+  # viewer; the Godot addon zip; the iOS xcframework when its advisory job
+  # succeeded; SHA256SUMS.txt). Re-running replaces the assets.
+  binaries:
+    name: GitHub Release binaries
+    # Tag pushes only (a manual run on main publishes to npm alone); to redo
+    # a release's binaries, re-run the tag's workflow run.
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write  # create the release, upload assets
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version and tag
+        id: version
+        run: |
+          v=$(node -p "require('./packages/react/package.json').version")
+          [ "${GITHUB_REF_NAME}" = "v$v" ] || { echo "::error::tag ${GITHUB_REF_NAME} does not match package version $v"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: Find the CI run for this commit
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id=$(gh run list -R "$GITHUB_REPOSITORY" --workflow ci.yml --branch main --event push --commit "$GITHUB_SHA" \
+            --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          [ -n "$id" ] || { echo "::error::no successful CI run on main for $GITHUB_SHA (merge to main and wait for CI first)"; exit 1; }
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+      - name: Native binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: jsui-native-*
+          path: artifacts
+          run-id: ${{ steps.run.outputs.id }}
+          github-token: ${{ github.token }}
+      - name: iOS xcframework (when its advisory job succeeded)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: jsui-ios-xcframework
+          path: artifacts/jsui-ios-xcframework
+          run-id: ${{ steps.run.outputs.id }}
+          github-token: ${{ github.token }}
+      - name: Assemble
+        run: |
+          for p in linux-x64 linux-arm64 macos-universal windows-x64; do
+            [ -d "artifacts/jsui-native-$p" ] || { echo "::error::the CI run has no jsui-native-$p artifact"; exit 1; }
+          done
+          scripts/dist/assemble-release.sh "${{ steps.version.outputs.version }}" artifacts release
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          tag="v$VERSION"
+          if ! gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            pre=""
+            case "$VERSION" in *-*) pre="--prerelease" ;; esac
+            gh release create "$tag" -R "$GITHUB_REPOSITORY" --verify-tag --title "JSUI $VERSION" --generate-notes $pre
+          fi
+          gh release upload "$tag" -R "$GITHUB_REPOSITORY" --clobber release/*

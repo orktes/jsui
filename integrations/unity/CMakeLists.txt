@@ -24,6 +24,7 @@ endif()
 set(JSUI_UNITY_PLUGIN_API_DIR "${_unity_api_default}" CACHE PATH
     "Unity's native plugin API headers (Unity.app/Contents/PluginAPI), for the GPU path")
 if(APPLE AND JSUI_GRAPHITE_METAL AND EXISTS "${JSUI_UNITY_PLUGIN_API_DIR}/IUnityGraphicsMetal.h")
+  enable_language(OBJCXX)  # per directory: another subdirectory enabling it does not count here
   target_sources(jsui_unity PRIVATE native/jsui_unity_metal.mm)
   target_include_directories(jsui_unity PRIVATE ${JSUI_UNITY_PLUGIN_API_DIR})
   target_compile_definitions(jsui_unity PRIVATE JSUI_UNITY_GPU=1)

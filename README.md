@@ -147,6 +147,15 @@ server) joins its shared session: an agent drives and screenshots the live one w
 `jsui screenshot|inspect|run --attach http://127.0.0.1:5173` while you play it, and reads
 what you did with `jsui log --attach`.
 
+## Prebuilt binaries
+
+Every release on [GitHub Releases](https://github.com/orktes/jsui/releases) has the C API
+as a shared library (`libjsui.so` for Linux x64 / arm64, a universal `libjsui.dylib`,
+`jsui.dll`) with `jsui.h`, a CMake package (`find_package(jsui)` → `jsui::jsui`) and the
+viewer; `JSUI.xcframework` for iOS; and the Godot addon (`addons/jsui`, every desktop
+platform in one zip). The library exports only the `jsui_*` functions, so it drops into
+any engine or toolchain. See [docs/RELEASING.md](docs/RELEASING.md#native-binaries).
+
 ## Build (native)
 
 ```sh
