@@ -1,5 +1,6 @@
 // esbuild configuration shared by `jsui build` and `jsui dev`.
 
+import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { assetPlugin } from './assets.js';
@@ -27,7 +28,48 @@ const SHIMS = {
 // hooks break (two Reacts) and the reconciler/react versions mismatch.
 const SINGLETONS = /^(react|react\/jsx-runtime|react\/jsx-dev-runtime|react\/compiler-runtime|react-reconciler|react-reconciler\/constants|scheduler)$/;
 
-function aliasPlugin() {
+// React's packages are CommonJS. esbuild hands an ESM `import { useState }
+// from 'react'` a copy of module.exports whose every property is a getter
+// (__toESM), so each `useState(...)` and each JSX element (`jsx(...)` from
+// react/jsx-runtime) called a getter function first: one more JS call per
+// hook and per element in QuickJS. ESM imports of these modules get a facade
+// instead that copies the exports once into plain ESM bindings, which
+// esbuild then references directly; `export *` keeps names React does not
+// export building (undefined at runtime, as before). require() still gets
+// module.exports. Production only (the HMR vendor bundle of `jsui dev`
+// resolves these modules by path).
+const ESM_FACADES = /^react(\/jsx-runtime|\/jsx-dev-runtime|\/compiler-runtime)?$/;
+const facadeKeys = new Map();
+
+/** Every export name of a CommonJS entry, in development and production. */
+function exportNames(file) {
+  let names = facadeKeys.get(file);
+  if (names) return names;
+  const set = new Set();
+  const add = (f) => {
+    for (const k of Object.keys(require(f))) set.add(k);
+  };
+  // The entry picks its build by NODE_ENV: read both.
+  const src = fs.readFileSync(file, 'utf8');
+  const builds = [...src.matchAll(/require\(['"](\.\/cjs\/[^'"]+)['"]\)/g)].map((m) => path.join(path.dirname(file), m[1]));
+  if (builds.length) builds.forEach(add);
+  else add(file);
+  set.delete('default');
+  set.delete('__esModule');
+  names = [...set].filter((k) => /^[A-Za-z_$][\w$]*$/.test(k)).sort();
+  facadeKeys.set(file, names);
+  return names;
+}
+
+function esmFacade(file) {
+  const names = exportNames(file);
+  return (
+    `import M from ${JSON.stringify(file)};\nexport default M;\nexport * from ${JSON.stringify(file)};\n` +
+    (names.length ? `export var ${names.map((k) => `${k} = M.${k}`).join(',\n  ')};\n` : '')
+  );
+}
+
+function aliasPlugin({ facades = false } = {}) {
   return {
     name: 'jsui-alias',
     setup(build) {
@@ -43,8 +85,11 @@ function aliasPlugin() {
         if (!SINGLETONS.test(args.path)) return undefined;
         const r = await build.resolve(args.path, { kind: args.kind, resolveDir: reactDir, pluginData: { jsuiAlias: true } });
         if (r.errors.length) return { errors: r.errors };
+        // (The facade's path is only its name in the bundle: no local paths.)
+        if (facades && args.kind === 'import-statement' && ESM_FACADES.test(args.path)) return { path: args.path, namespace: 'jsui-esm', pluginData: { file: r.path } };
         return { path: r.path, sideEffects: r.sideEffects };
       });
+      build.onLoad({ filter: /.*/, namespace: 'jsui-esm' }, (args) => ({ contents: esmFacade(args.pluginData.file), loader: 'js', resolveDir: path.dirname(args.pluginData.file) }));
     },
   };
 }
@@ -102,7 +147,7 @@ export function esbuildOptions(o) {
     plugins: [
       // Before the alias plugin: it claims renderer.js's react-reconciler import.
       ...(dev ? [] : [specializePlugin({ reactDir: jsuiReactDir(), log: o.log })]),
-      aliasPlugin(),
+      aliasPlugin({ facades: !dev }),
       assetPlugin(o.assets),
       ...(o.reactCompiler ? [reactCompilerPlugin({ reactDir: jsuiReactDir(), sourcemap: !!o.sourcemap, hmr: !!o.compilerHmr, report: o.compilerReport, log: o.log })] : []),
     ],
