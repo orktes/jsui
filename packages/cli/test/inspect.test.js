@@ -295,6 +295,42 @@ test('inspect: WebSocket framing (handshake, fragments, ping, close) and origin 
   }
 });
 
+// chrome://inspect's network discovery asks for /json/version and /json/list
+// in bare HTTP/1.1 requests without a Host header.
+test('inspect: discovery without a Host header (chrome://inspect)', async () => {
+  const s = await server({ hmr: false });
+  const held = poll(s.origin, 'rt-nohost').catch(() => {});
+  try {
+    await until(async () => (await (await fetch(s.origin + '/json/list')).json()).length === 1, 'target listed');
+    const get = (p) => new Promise((resolve, reject) => {
+      const sock = net.connect(s.port, '127.0.0.1', () => sock.write(`GET ${p} HTTP/1.1\r\n\r\n`));
+      let data = Buffer.alloc(0);
+      const done = (body) => resolve({ status: Number(String(data).split(' ')[1]), body });
+      sock.on('data', (d) => {
+        data = Buffer.concat([data, d]);
+        const head = data.indexOf('\r\n\r\n');
+        const len = /content-length: (\d+)/i.exec(String(data));
+        if (head >= 0 && len && data.length >= head + 4 + Number(len[1])) {
+          sock.destroy();
+          done(JSON.parse(data.subarray(head + 4).toString('utf8')));
+        }
+      });
+      sock.on('end', () => done(null));
+      sock.on('error', reject);
+    });
+    const v = await get('/json/version');
+    assert.equal(v.status, 200);
+    assert.match(v.body.Browser, /^jsui\//);
+    const list = await get('/json/list');
+    assert.equal(list.status, 200);
+    assert.equal(list.body[0].id, 'rt-nohost');
+    assert.equal(list.body[0].webSocketDebuggerUrl, `ws://127.0.0.1:${s.port}/__jsui/inspect/ws/rt-nohost`);
+  } finally {
+    await s.close();
+    await held;
+  }
+});
+
 test('--no-inspect: no header, no relay', async () => {
   const s = await server({ inspect: false, hmr: false });
   try {

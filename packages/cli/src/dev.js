@@ -178,7 +178,9 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
   let origin = `http://127.0.0.1:${port}`;  // set once listening
   // Before listening: a runtime that finds no relay (404) stops trying.
   const inspector = inspect ? createInspector({ origin: () => origin, hosts: [host], version: CLI_VERSION, log }) : null;
-  const server = http.createServer((req, res) => {
+  // chrome://inspect's network discovery sends /json/version and /json/list
+  // without a Host header, which Node's http server rejects (400) by default.
+  const server = http.createServer({ requireHostHeader: false }, (req, res) => {
     const url = new URL(req.url, 'http://x');
     if (sharedView && sharedView.handle(req, res, url)) return undefined;
     if (inspector && inspector.handle(req, res, url)) return undefined;
