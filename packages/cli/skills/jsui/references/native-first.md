@@ -44,7 +44,10 @@ default; use React state only for things that change now and then.
 
 - The runtime merges the active states' styles over `style` every frame
   input changes (no JS, no render), so the feedback shows on the frame of
-  the input even while JS is busy. React re-renders keep the overlays.
+  the input even while JS is busy. React re-renders keep the overlays, and
+  so do natively animated writes to a key a state style sets (a press scale
+  over an animated `transform`): the write updates the base and shows again
+  once the state lets go.
 - States: `hovered` (mouse over it or a descendant), `pressed` (a primary
   press that began on it, while the pointer stays over it; Enter / Space /
   gamepad A on it while focused; a click shorter than a frame still shows
@@ -161,9 +164,26 @@ return <Animated.Text style={styles.xp} text={label} />;  // "XP 0" ... "XP 25,0
 
 `text` takes any Animated node: `Animated.format` (`decimals` (default:
 shortest), `grouping` (thousands separator), `prefix`, `suffix`,
-`minDigits` (zero padding: `minDigits: 2` for clocks)) or a plain numeric
-node. Combine with `Animated.derive` for computed numbers, e.g. a countdown:
-`Animated.format(Animated.derive([t], (s) => Math.ceil(s)), { suffix: 's' })`.
+`minDigits` (zero padding: `minDigits: 2` for clocks), `time`) or a plain
+numeric node. Combine with `Animated.derive` for computed numbers, e.g. a
+countdown: `Animated.format(Animated.derive([t], (s) => Math.ceil(s)), { suffix: 's' })`.
+
+`time: 'h:mm:ss'` (or `'m:ss'`, `'mm:ss'`, ...) formats whole seconds
+(floored, at least 0) as clock fields; a doubled letter pads to two digits.
+Without an `h` field the minutes are the total minutes (`'m:ss'` shows
+`75:03`). A match timer counting down from 5 minutes, all native:
+
+```jsx
+const left = useMemo(() => new Animated.Value(300, { useNativeDriver: true }), []);
+const label = useMemo(() => Animated.format(left, { time: 'm:ss' }), [left]);
+useEffect(() => {
+  Animated.timing(left, { toValue: 0, duration: 300000, easing: Easing.linear, useNativeDriver: true }).start();
+}, []);
+return <Animated.Text text={label} />;  // "5:00" ... "0:00"
+```
+
+A timer that has to pause: `left.stopAnimation()` and start a new timing
+from where it stopped (`Animated.clock()` cannot pause).
 
 ## Animated.derive
 

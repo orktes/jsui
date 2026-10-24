@@ -221,6 +221,8 @@ TEST(react_derive_e2e) {
   // sets the text every frame, without JS or React renders.
   CHECK_EQ(t.text("score"), std::string("XP 0!"));
   CHECK_EQ(t.text("jsScore"), std::string("000.00"));
+  CHECK_EQ(t.text("time"), std::string("T 0:00:00"));
+  CHECK_EQ(t.text("jsTime"), std::string("00:00"));
   t.post("renders");
   t.tick();
   auto r0 = t.take("renders");
@@ -236,8 +238,10 @@ TEST(react_derive_e2e) {
   std::printf("\n");
   CHECK(texts[0] != "XP 0!");
   CHECK_EQ(texts.back(), std::string("XP 1,234,567!"));
+  CHECK_EQ(t.text("time"), std::string("T 342:56:07"));  // format time: 1234567 s
   t.tick();
   CHECK_EQ(t.text("jsScore"), std::string("1234.57"));  // JS driver: a re-render of that Text only
+  CHECK_EQ(t.text("jsTime"), std::string("20:34"));      // no h: total minutes
   t.post("renders");
   t.tick();
   auto r1 = t.take("renders");

@@ -66,6 +66,7 @@ class Node {
   std::unique_ptr<StateStyles> stateStyles;
   // Re-applies the state overlays at their current weights (InputManager::tickStates).
   bool applyStateStyles();
+  bool stateBlending_ = false;  // applyStateStyles is writing (not a new base value)
   // <Visibility visible={node}>: native Animated sets the hidden state; it
   // starts its transition (or applies) at once.
   void setHidden(bool hidden);
