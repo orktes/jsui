@@ -694,7 +694,9 @@ TEST(host_js_frame_budget) {
   Host h;
   CHECK_EQ(jsui_get_js_frame_budget(h.rt), 5.0);
   h.load(R"(
-    globalThis.spin = (ms) => { const end = Date.now() + ms; while (Date.now() < end) {} };
+    // From a clock edge: Date.now() is ~15 ms coarse on Windows, so a plain
+    // `now + ms` deadline can pass right away.
+    globalThis.spin = (ms) => { const s = Date.now(); while (Date.now() === s) {} const end = Date.now() + ms; while (Date.now() < end) {} };
     globalThis.log = [];
     globalThis.chain = () => {
       setTimeout(() => {
