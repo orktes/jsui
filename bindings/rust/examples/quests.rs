@@ -233,7 +233,6 @@ fn main() {
     let mut frame = 0u32;
     let mut selftest = SelfTest::default();
     let mut dirty = true;
-    let mut passed_clicks = 0u32;
     loop {
         if window.should_close() || app.borrow().quit {
             break;
@@ -269,7 +268,7 @@ fn main() {
                     let consumed = rt.send_mouse_button(mouse.0, mouse.1, button, action == Action::Press, mods(m));
                     // Input the UI did not consume is the app's (a game would orbit its camera here).
                     if !consumed && action == Action::Press {
-                        passed_clicks += 1;
+                        println!("click at {:.0},{:.0} passed through to the app", mouse.0, mouse.1);
                     }
                 }
                 WindowEvent::Scroll(dx, dy) => {
@@ -317,7 +316,7 @@ fn main() {
         if opt.selftest {
             match selftest.step(&rt, &app, frame) {
                 Some(Ok(())) => {
-                    println!("selftest: ok ({passed_clicks} click(s) passed through to the app)");
+                    println!("selftest: ok");
                     break;
                 }
                 Some(Err(e)) => {

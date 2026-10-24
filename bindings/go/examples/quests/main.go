@@ -230,7 +230,6 @@ func main() {
 
 	// --- input: every event goes to the UI first
 	var mx, my float32
-	passedClicks := 0
 	dirty := true
 	resize := func() {
 		w, h := win.GetSize()
@@ -255,7 +254,7 @@ func main() {
 		consumed := rt.SendMouseButton(mx, my, button, action == glfw.Press, mods(m))
 		// Input the UI did not consume is the program's (a game would orbit its camera here).
 		if !consumed && action == glfw.Press {
-			passedClicks++
+			fmt.Printf("click at %.0f,%.0f passed through to the app\n", mx, my)
 		}
 	})
 	win.SetScrollCallback(func(_ *glfw.Window, dx, dy float64) {
@@ -311,7 +310,7 @@ func main() {
 				os.Exit(1)
 			}
 			if done {
-				fmt.Printf("selftest: ok (%d click(s) passed through to the app)\n", passedClicks)
+				fmt.Println("selftest: ok")
 				break
 			}
 		} else if *frames > 0 && frame >= *frames {
