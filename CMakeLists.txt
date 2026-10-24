@@ -1,10 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
 project(jsui C CXX)
-# Objective-C++ sources (Godot's Metal texture, the Unity plugin's Metal path)
-# live in subdirectories; a language enabled in one subdirectory is not set up
-# for its siblings or for directories added before it, so enable it here.
+# Objective-C / C++ sources live in subdirectories (SDL2's .m files, Godot's
+# Metal texture, the Unity plugin's Metal path). Once one subdirectory enables
+# OBJCXX, .m files elsewhere may be classified as OBJCXX in directories that
+# have no rules for it; enabling both languages here sets them up everywhere.
 if(APPLE)
-  enable_language(OBJCXX)
+  enable_language(OBJC OBJCXX)
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
