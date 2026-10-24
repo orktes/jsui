@@ -88,7 +88,10 @@ WebAssembly module in Node) is not a debug target for the same reason.
   server never attaches the agent. Its code has no traps and runs at full
   speed. Precompiled bundles (`jsui build`) never contain traps.
 * **In `jsui dev`.** Each statement runs one extra trap instruction, which
-  checks a flag while no debugger is attached.
+  checks a flag. The traps stay off while nothing can stop at them, so an
+  attached debugger with no breakpoints costs about the same. While a
+  breakpoint is set, or while stepping, each statement also looks up its
+  line: CPU-heavy JS runs about 2x slower until you remove the breakpoints.
 
 ## Limits
 
