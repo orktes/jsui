@@ -13,7 +13,7 @@ npx @orktes/jsui-cli skill install            # -> .claude/skills/jsui/ (--globa
 In a project with `npm install --save-dev @orktes/jsui-cli`:
 
 ```sh
-npx jsui build app.jsx -o dist/bundle.js [--minify] [--sourcemap] [--dev]
+npx jsui build app.jsx -o dist/bundle.js [--minify] [--sourcemap] [--dev] [--no-bytecode]
 npx jsui dev app.jsx [--port 5173] [--host 127.0.0.1] [--no-hmr]
 npx jsui screenshot app.jsx -o shot.png [--width 1280 --height 720 --scale 2 --wait 1000]
 npx jsui inspect app.jsx [--find '#play'] [--json]
@@ -31,6 +31,18 @@ npx jsui log --attach http://127.0.0.1:5173 [--since N] [--follow]
 
 * One IIFE script (ES2020, UTF-8) suitable for QuickJS: no top-level
   `import`/`export`, no runtime `require`.
+* Precompiled to QuickJS bytecode by default: the runtime skips parsing
+  (startup of a React bundle drops from tens of ms to a few) and keeps no
+  function source in memory. The file is a small binary container (see
+  `src/js/bytecode.h`) holding the bytecode plus the source as a fallback: a
+  runtime built from different QuickJS sources (another JSUI version) runs
+  the source and logs a warning. Compiling uses the WebAssembly runtime from
+  `@orktes/jsui-web`, the same patched QuickJS as the native runtimes of that
+  version; without it the bundle stays plain JS. Every JSUI host loads either
+  form. `--no-bytecode` writes plain JS (for a browser JS engine or other
+  tools); `bundleSource(bytes)` from this package extracts the source of a
+  precompiled bundle, and `compileBundle(source, { keepSource })` /
+  `jsui_compile_bundle()` (C API) precompile one.
 * `react-native` (and deep `react-native/...` paths) → `@orktes/jsui-react`.
   `react`, `react/jsx-runtime`, `react-reconciler` and `scheduler` always
   resolve to the copy `@orktes/jsui-react` was built against (one React per bundle).

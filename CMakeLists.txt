@@ -38,6 +38,15 @@ add_library(jsui STATIC ${JSUI_SOURCES})
 target_include_directories(jsui PUBLIC include PRIVATE src)
 target_link_libraries(jsui PUBLIC jsui_quickjs jsui_yoga jsui_skia)
 target_compile_definitions(jsui PRIVATE JSUI_BUILDING)
+# Precompiled bundles (src/js/bytecode.h) only load on the QuickJS that
+# compiled them: the key hashes the patched sources (cmake/Deps.cmake's
+# ${_qjs_c}), so any patch change makes old bytecode fall back to its source.
+file(SHA256 ${_qjs_c} _qjs_c_hash)
+file(SHA256 ${quickjs_SOURCE_DIR}/quickjs.h _qjs_h_hash)
+file(SHA256 ${quickjs_SOURCE_DIR}/quickjs-opcode.h _qjs_op_hash)
+string(SHA256 _qjs_key "${_qjs_c_hash}${_qjs_h_hash}${_qjs_op_hash}")
+string(SUBSTRING ${_qjs_key} 0 16 _qjs_key)
+set_property(SOURCE src/js/bytecode.cpp APPEND PROPERTY COMPILE_DEFINITIONS JSUI_BYTECODE_KEY="${_qjs_key}")
 if(JSUI_LOTTIE)
   target_compile_definitions(jsui PRIVATE JSUI_LOTTIE=1)
 endif()

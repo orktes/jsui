@@ -13,7 +13,10 @@ import { answerOf, parseInlineSteps, runSteps, STEP_HELP } from '../src/script.j
 import { skillCommand, SKILL_USAGE } from '../src/skill.js';
 
 const USAGE = `usage:
-  jsui build <entry> [-o dist/bundle.js] [--minify] [--sourcemap] [--dev]
+  jsui build <entry> [-o dist/bundle.js] [--minify] [--sourcemap] [--dev] [--no-bytecode]
+     Precompiles to QuickJS bytecode (faster startup, less memory; the source
+     stays inside as a fallback). --no-bytecode writes plain JS (browser JS
+     engines, other tools).
   jsui dev <entry> [--port 5173] [--host 127.0.0.1] [--no-hmr]
      [--headless [view options]]
      Every runtime that loads the bundle in dev mode joins the server's shared
@@ -229,6 +232,7 @@ async function main(argv) {
       port: { type: 'string', short: 'p' },
       host: { type: 'string' },
       'no-hmr': { type: 'boolean' },
+      'no-bytecode': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       ...VIEW_OPTIONS,
     },
@@ -295,8 +299,11 @@ async function main(argv) {
         minify: !!values.minify,
         sourcemap: !!values.sourcemap,
         mode: values.dev ? 'development' : 'production',
+        bytecode: !values['no-bytecode'],
       });
-      console.log(`jsui: wrote ${r.outfile} (${(r.bytes / 1024).toFixed(1)} KiB, ${r.assets.length} assets) in ${Date.now() - t0} ms`);
+      const kind = r.bytecode === true ? `bytecode + ${(r.sourceBytes / 1024).toFixed(1)} KiB source` : 'source';
+      console.log(`jsui: wrote ${r.outfile} (${(r.bytes / 1024).toFixed(1)} KiB, ${kind}, ${r.assets.length} assets) in ${Date.now() - t0} ms`);
+      if (typeof r.bytecode === 'string') console.warn(`jsui: not precompiled (${r.bytecode}); pass --no-bytecode to silence this`);
       return 0;
     } catch (e) {
       console.error('jsui: build failed\n' + (e && e.message ? e.message : e));

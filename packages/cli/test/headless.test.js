@@ -11,7 +11,7 @@ import zlib from 'node:zlib';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { attach, dev, launch, findWasmDir, parseInlineSteps, parseSelector, SKILL_DIR } from '../src/index.js';
+import { attach, bundleSource, compileBundle, dev, isPrecompiled, launch, findWasmDir, parseInlineSteps, parseSelector, SKILL_DIR } from '../src/index.js';
 import { loadModule } from '../src/headless.js';
 import { LiveApp } from '../src/shared.js';
 
@@ -186,6 +186,37 @@ export default function Screen() {
   } finally {
     app.close();
   }
+});
+
+test('jsui build precompiles to bytecode; the runtime runs it', { skip }, async () => {
+  const dir = await fixture();
+  await writeFile(path.join(dir, 'reg.jsx'), `import { AppRegistry, View } from 'react-native';
+AppRegistry.registerComponent('main', () => () => <View style={{ flex: 1, backgroundColor: '#123456' }} />);
+`);
+  const out = path.join(dir, 'out', 'bundle.js');
+  const r = await exec(process.execPath, [BIN, 'build', path.join(dir, 'reg.jsx'), '-o', out, '--minify']);
+  assert.match(r.stdout, /bytecode \+ [\d.]+ KiB source/);
+  const bytes = await readFile(out);
+  assert.ok(isPrecompiled(bytes));
+  assert.match(bundleSource(bytes), /registerComponent/);
+  const shot = path.join(dir, 'b.png');
+  await exec(process.execPath, [BIN, 'screenshot', out, '--bundle', '-o', shot, '--width', '64', '--height', '32']);
+  assert.deepEqual(firstPixel(await readFile(shot)), [0x12, 0x34, 0x56, 255]);
+
+  const plain = path.join(dir, 'out', 'plain.js');
+  await exec(process.execPath, [BIN, 'build', path.join(dir, 'reg.jsx'), '-o', plain, '--no-bytecode']);
+  const src = await readFile(plain);
+  assert.ok(!isPrecompiled(src));
+  assert.equal(bundleSource(src), src.toString('utf8'));
+
+  // Without the source fallback the bytecode alone runs.
+  const lean = path.join(dir, 'out', 'lean.js');
+  await writeFile(lean, await compileBundle(src, { keepSource: false }));
+  assert.equal(bundleSource(await readFile(lean)), '');
+  await exec(process.execPath, [BIN, 'screenshot', lean, '--bundle', '-o', shot, '--width', '64', '--height', '32']);
+  assert.deepEqual(firstPixel(await readFile(shot)), [0x12, 0x34, 0x56, 255]);
+
+  await assert.rejects(compileBundle('let x = ;', { name: 'broken.js' }), /SyntaxError[\s\S]*broken\.js/);
 });
 
 test('cli: screenshot, inspect, run (json + js), default-export screens', { skip }, async () => {
