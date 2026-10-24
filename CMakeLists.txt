@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
 project(jsui C CXX)
+# Objective-C++ sources (Godot's Metal texture, the Unity plugin's Metal path)
+# live in subdirectories; a language enabled in one subdirectory is not set up
+# for its siblings or for directories added before it, so enable it here.
+if(APPLE)
+  enable_language(OBJCXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
