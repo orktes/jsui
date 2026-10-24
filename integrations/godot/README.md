@@ -10,14 +10,23 @@ queue); on the Compatibility (OpenGL) renderer and headless it paints with
 `ImageTexture` (see [Rendering](#rendering)). It forwards Godot input and
 bridges game data both ways: shared state
 (`set_state` → `useHostState`), calls (`Host.call` → `call_requested` →
-`resolve_call`, and `call_ui` → `Host.handle`) and messages.
+`resolve_call`, and `call_ui` → `Host.handle`) and messages, and shows
+Godot's own textures in the UI (`set_texture` → `<HostTexture>`: a video, a
+SubViewport, any `Texture2D`; see [Host textures](#host-textures)). It plays
+the UI's sounds (`Sound.play`, `useMusic`, `<UISounds>`) with
+`AudioStreamPlayer`s on Godot's audio buses, so they follow the game's volume
+settings and effects (see [Audio](#audio)).
 
 ```
 integrations/godot/
   CMakeLists.txt        GDExtension target (jsui_godot), fetches godot-cpp
-  src/                  JsuiView, key/gamepad mapping, entry point
+  src/                  JsuiView, its audio handler (jsui_audio.*), key/gamepad mapping, entry point
   demo/                 Godot 4.7 project: main.tscn + main.gd + jsui.gdextension
   demo/ui/app.jsx       demo UI: examples/showcase/interactions.jsx + a bridge strip
+  demo/ui/sounds/       the demo's UI sounds and music loop (make-sounds.py synthesizes them)
+  demo/cinema/          host textures demo: a VideoStreamPlayer TV and a
+                        SubViewport preview inside a JSUI UI (ui/cinema.jsx);
+                        fetch-video.sh downloads the clip
   smoke-test.sh         runs the demo headless with an input self-test at 1x and
                         2x content scale and saves the frames (used by CI);
                         GODOT_RENDERING=vulkan runs it on Vulkan (GPU renderer)
@@ -46,8 +55,10 @@ npx jsui build integrations/godot/demo/ui/app.jsx -o integrations/godot/demo/ui/
 That build uses the prebuilt Skia m124, which has no Vulkan, Metal or
 Graphite: the view then always uses the CPU renderer. For the GPU renderer,
 build Skia m157 from source first (Linux: Graphite + Vulkan; macOS:
-Graphite + Metal; both also Graphite + Dawn for the godot-aw3 fork; about
-25 minutes on 4 cores, done once) and point CMake at it:
+Graphite + Metal; Windows, from Git Bash with LLVM's clang-cl: Graphite +
+Vulkan and Ganesh + Direct3D 12; all also Graphite + Dawn for the godot-aw3
+fork; about 25 minutes on 4 cores, done once) and point CMake at it (the
+release's Windows `.dll` is built this way):
 
 ```sh
 scripts/build-skia-desktop.sh            # -> third_party/skia-desktop
@@ -128,11 +139,24 @@ chip updates. The self-test calls into the UI with `call_ui('ui.flash',
 ...)`, which shows a toast. Clicks the UI does not handle fall through to
 `_unhandled_input`. F5 reloads the bundle (the state survives it).
 
+The UI has sound: `<UISounds>` gives every pressable a tick on hover / focus
+and a chime on press (bus `ui`), and `useMusic` loops a quiet pad (bus
+`music`) that the strip's "Music" button mutes. They play on the "UI" and
+"Music" buses of the demo's `default_bus_layout.tres`.
+
 Headless check (no GPU needed). This is what CI runs. `main.gd --self-test`
 drives the UI through Godot's own input pipeline (`Input.parse_input_event`):
 hover, click (and checks that JSUI saw exactly the logical point it aimed
 at), gamepad D-pad focus + A, wheel and trackpad-pan scrolling, click to
-focus + typing + Enter in the TextInput, the Ping call, `call_ui` and an
+focus + typing + Enter in the TextInput, the Ping call, `call_ui`, host
+textures (`set_texture` in a probe view of its own: set before start,
+replaced, kept across a restart, removed; with a renderer also updated in
+place and a live SubViewport; on Vulkan this is the GPU copy path), UI
+audio (the demo's music and interaction sounds, then a probe view driven
+with `call_ui`: players on the mapped buses with the voice's pitch and volume,
+the UI's bus volume, ramps, STOP with a fade, loops, pause, `stop_all_sounds`,
+sounds that play to the end, WAV / MP3 / Ogg decoded from `user://` bytes, a
+missing file and `audio_enabled` off, each checked against what JS saw) and an
 unhandled click. The UI reports what happened as `showcase:event` messages
 and the script prints `PASS` / `FAIL` per check. It runs at a 1280x720 window
 (content scale 1) and at 2560x1440 (content scale 2, like a Retina Mac).
@@ -210,6 +234,30 @@ JSUI_LOG_PIPELINES=compiled GODOT_RENDERING=vulkan SIZES=1280x720 PIPELINE_CACHE
 The project uses the Compatibility renderer by default (it runs everywhere);
 pass `--rendering-method forward_plus` (or `mobile`) for the GPU renderer.
 
+### Host textures demo
+
+```sh
+integrations/godot/demo/cinema/fetch-video.sh   # once: the Big Buck Bunny trailer, 4.4 MB
+godot --path integrations/godot/demo res://cinema/cinema.tscn
+godot --path integrations/godot/demo --rendering-method forward_plus res://cinema/cinema.tscn   # GPU path
+```
+
+`cinema/cinema.tscn` is an in-game TV and a character preview, both drawn by
+Godot and framed by a JSUI UI (`ui/cinema.jsx`, component `Cinema`). A
+`VideoStreamPlayer` plays the trailer (Ogg Theora, what Godot decodes) and
+`cinema.gd` hands its texture to the view with
+`set_texture("tv", video.get_video_texture(), true)`; the play / pause,
+restart and mute buttons are JSUI `Pressable`s that post messages, and the
+progress bar follows `set_buffer("cinema.progress", ...)` without JS per
+frame. A `SubViewport` renders a spinning 3D figure every frame
+(`set_texture("preview", viewport.get_texture(), true)`), shown in a round
+frame with colour swatches. The video is not in the repository:
+`fetch-video.sh` downloads it from Wikimedia Commons (falling back to the
+Internet Archive's copy of the film; `--full` gets the whole film). Without
+it the TV shows "NO SIGNAL" and the rest runs. *Big Buck Bunny* is
+© 2008 Blender Foundation (www.bigbuckbunny.org), licensed CC BY 3.0; the
+scene shows the credit under the TV.
+
 ### Dev mode (live reload)
 
 ```sh
@@ -221,6 +269,12 @@ In dev mode the runtime polls the dev server (`/__jsui/version`), reloads
 when you save, and shows JS errors in an on-screen overlay. You can also set
 `bundle_url = "http://127.0.0.1:5173/bundle.js"` and `dev_mode = true` on the
 node in the inspector.
+
+The view also joins the dev server's shared session as `Godot: <node name>`:
+coding agents attached to the server (`jsui screenshot|inspect|run --attach
+http://127.0.0.1:5173`) then drive and screenshot the UI inside the running
+game, and see what you click and press in it (`jsui log --attach`). See the
+CLI's README.
 
 ## JsuiView reference
 
@@ -238,6 +292,10 @@ node in the inspector.
 | `auto_size` | bool | `false` | size the view to the component's content: the view's minimum size follows the laid-out size |
 | `profiling` | bool | `false` | time every frame phase (`jsui_set_profiling`), read with `get_perf()` |
 | `pipeline_cache_path` | String | `"user://jsui-pipelines.bin"` | the GPU pipeline cache of the runtime's Skia context (the renderer's name goes before the extension); empty: none. Applies when the context is created; a surface view uses its runtime view's. See [Rendering](#rendering) |
+| `audio_enabled` | bool | `true` | play the UI's sounds; off: nothing plays and every voice ends as failed (voices playing stop) |
+| `audio_bus` | String | `"Master"` | the Godot bus for JSUI buses that have no Godot bus of their own (see [Audio](#audio)) |
+| `audio_bus_map` | Dictionary | `{}` | JSUI bus → Godot bus, e.g. `{"sfx": "Effects"}`; wins over the same-name match |
+| `fonts` | Array[Font] | `[]` | `FontFile`s registered on every new runtime, family / weight / style from the file (see [Fonts](#fonts)). Assigning the array registers the fonts it adds on a running runtime; fonts it drops stay until the next `start()` |
 | `fixed_fps` | int | `0` | `0`: the runtime's clock (animations, timers, scrolling) is the wall clock. `N`: every frame advances it by 1/N s however long frames take, so the UI draws the frames of a machine running at N fps on any machine (tests, recording a pipeline list). The runtime view's applies |
 
 Changing `bundle_url` or `dev_mode` on a running view restarts it.
@@ -254,13 +312,20 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | `set_state_json` / `patch_state_json` / `get_state_json` | the same with JSON strings |
 | `set_buffer(key, data) -> int` | frame data (`jsui_set_buffer`): numbers pushed every frame without JSON, e.g. enemy positions for nameplates. `data` is a `PackedFloat32Array`, `PackedFloat64Array`, `PackedInt32Array`, `PackedByteArray`, or a `PackedVector2Array` / `PackedVector3Array` / `PackedColorArray` (their components in order). JS reads it with `useHostBuffer` / `useHostBufferSelector`, and `useHostBufferValue(key, index)` moves `Animated` views natively, without JS per frame. Returns 1 changed, 0 unchanged, -1 unsupported type. Set before `start()`: applied when it starts |
 | `remove_buffer(key) -> int` | removes a buffer (1 if it existed) |
+| `set_texture(name, texture, live = false) -> int` | shows a Godot `Texture2D` in the UI as host texture `name` (`<HostTexture name=...>`, `useHostTexture(name)`): an `ImageTexture`, a `ViewportTexture`, a `VideoStreamPlayer`'s texture, a `Texture2DRD`… `live`: its contents change every frame (a video, a viewport), so they are copied every frame; otherwise only when the texture emits `changed` or on `update_texture`. Calling it again with another texture replaces it. Kept by the view across `stop()` / `start()`; set before `start()` it is there for the first frame. Returns 1. See [Host textures](#host-textures) |
+| `remove_texture(name) -> int` | stops showing it (`<HostTexture>` draws nothing, `useHostTexture` returns null); 1 if it existed |
+| `update_texture(name) -> int` | the texture's contents changed (for a non-live texture that does not emit `changed`, e.g. a `Texture2DRD` the game draws into); -1: unknown name |
+| `register_font(family, font, weight = 0, italic = -1) -> bool` | registers a font with the runtime (every view of it): `font` is a `FontFile` (or a `FontVariation` of one), a `PackedByteArray`, or a path (`res://`, `user://`, absolute) of a TTF / OTF / TTC / WOFF / WOFF2 file. `family` `""`: the name in the file; `weight` `0` / `italic` `-1`: the file's, otherwise overrides (1..1000, `0` / `1`). Kept and re-applied to new runtimes; called before `start()` it is there for the first frame. `false`: unreadable or not a font. See [Fonts](#fonts) |
+| `unregister_font(family) -> bool` | removes every face of the family; `true` if it was registered |
+| `set_font_fallbacks(families: PackedStringArray)` | families tried in order for glyphs the styled font lacks (emoji, CJK); empty clears it. Every registered font is searched after them anyway |
+| `set_default_font_family(family)` | the family of text whose style names none (`"Inter"` by default) |
 | `resolve_call(id, result = null) -> int` | answer a `call_requested` call; the UI's `await Host.call(...)` resolves with `result`. Any later frame is fine. -1: unknown or cancelled id |
 | `resolve_call_json(id, json)` / `reject_call(id, message)` | JSON result / reject (the promise rejects with `Error(message)`) |
 | `call_ui(name, args = null, callback = Callable()) -> int` | run the UI's `Host.handle(name, fn)` / `useHostHandler` handler; `callback(ok: bool, result)` (and `ui_call_completed`) runs once it settles: `result` is the handler's value, or the error message when `ok` is false |
 | `get_texture()` | the `Texture2D` being drawn (premultiplied RGBA): a `Texture2DRD` with the GPU renderer, an `ImageTexture` with the CPU one |
 | `get_frame_image()` | CPU copy of the last frame, straight alpha, works with `--headless` (with the GPU renderer it reads the texture back: slow, for tests and screenshots) |
 | `get_cpu_frame_image()` | the current frame painted by the CPU raster, straight alpha, whatever the renderer (to compare with `get_frame_image()`) |
-| `get_renderer()` | `"vulkan"`, `"metal"` or `"cpu"` (`""` before the first frame) |
+| `get_renderer()` | `"vulkan"`, `"metal"`, `"d3d12"`, `"webgpu"` or `"cpu"` (`""` before the first frame) |
 | `get_render_stats()` | Dictionary: `renderer`, `renders`, `render_usec_total` / `_last` / `_max` (time in the view's render call, CPU side), `dirty_pixels_total`, `tick_usec_last` (the last `jsui_tick`); GPU renderer: `gpu_jobs` (the view's frames handed to the render thread without waiting), `render_thread_jobs` (the render-thread jobs those went in: one per frame for all the views of a runtime; the runtime view's count), `gpu_frame_in_flight` (the last frame handed over is not painted yet), `blocking_waits` / `main_wait_usec_total` (times the main thread waited for the render thread, and for how long), `gpu_job_usec_total` / `jsui_render_usec_total` (render-thread time of the view's GPU renders, and of `jsui_render_gpu_target` in them); `pipelines` (the runtime's pipeline cache, `jsui_gpu_get_pipeline_stats`: `mode` `"thread"` / `"sliced"`, `queued`, `precompiled`, `failed`, `compiled` on demand, `added` to the file, `unserializable`, `known`, and the `file`) |
 | `get_perf(reset = true)` | Dictionary (`jsui_get_perf`) since the last reset: exclusive time per phase in µs (`js_us`, `commit_us`, `animated_us`, `style_us`, `layout_us`, `input_us`, `paint_us`, `gpu_submit_us`, `other_us`; with `profiling` on) and counters (`image_decodes`, `image_decode_us`, `pipeline_compiles`, `paragraph_builds`, `text_measures`, `layout_passes`, `bridge_calls`) |
 | `get_pending_loads()` | bundle/image/font/fetch loads in flight |
@@ -268,6 +333,9 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | `get_effective_pixel_ratio()` | the ratio actually used |
 | `get_root_tag()` | the React Native root tag of the view's surface (1: a runtime's main surface, 0: not running) |
 | `is_running()` | |
+| `stop_all_sounds(bus = "", fade_ms = 0)` | stops the UI's voices of one JSUI bus (`""`: all), fading out over `fade_ms`; JS sees them end as `stopped` |
+| `get_audio_voices() -> Array` | the UI's voices now: Dictionaries with `voice`, `url`, `bus` (JSUI), `godot_bus`, `player` (its `AudioStreamPlayer`, null while the sound loads), `volume` (voice × fade × the UI's bus volume), `pitch`, `loop`, `paused`, `loading` |
+| `resolve_audio_bus(bus) -> String` | the Godot bus JSUI bus `bus` plays on now |
 
 | Signal | |
 | --- | --- |
@@ -277,6 +345,8 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | `call_cancelled(id: int)` | a call ended unanswered (JS timeout / abort, reload, `stop()`): drop its work |
 | `ui_call_completed(id: int, ok: bool, result: Variant)` | a `call_ui` call settled (also when the runtime stopped first) |
 | `js_error(message: String)` | a new uncaught JS error |
+| `sound_played(voice: int, url: String, bus: String)` | a UI sound started playing (`bus`: the JSUI bus; `get_audio_voices()` has its player) |
+| `sound_ended(voice: int, status: int)` | a UI voice ended: `SOUND_FINISHED` (0), `SOUND_STOPPED` (1) or `SOUND_FAILED` (-1), as JS hears it |
 | `frame_rendered(dirty_rect: Rect2i)` | the texture was updated. The rect is in device pixels. With a separate render thread and the GPU renderer it comes at the start of the next frame's processing of the runtime view (the render ran on that thread before the frame was drawn) |
 
 Signals are emitted after the runtime returns (after the tick or the input
@@ -361,6 +431,119 @@ func spawn_nameplate(enemy):
   component with a fixed or content size, like a badge or a button inside a
   Godot `Container`).
 
+### Host textures
+
+`set_texture(name, texture, live)` shows any Godot `Texture2D` inside the
+UI. JSUI plays or renders nothing itself: the game decodes the video, renders
+the viewport or draws the texture, and the UI lays it out with
+`<HostTexture name="tv" resizeMode="contain" />` (clipped by rounded
+corners, transformed, composited like an image). `useHostTexture(name)`
+returns `{width, height}` (or null) for layout. When only a texture changes,
+no JS runs: the runtime repaints the views that show it.
+
+```gdscript
+ui.set_texture("tv", $VideoStreamPlayer.get_video_texture(), true)   # live: copied every frame
+ui.set_texture("preview", $SubViewport.get_texture(), true)
+ui.set_texture("portrait", load("res://hero.png"))                   # static: copied once
+ui.remove_texture("portrait")
+```
+
+How the pixels reach Skia depends on the view's renderer:
+
+* GPU renderer (Vulkan, Metal, WebGPU): the view keeps a *mirror* texture of
+  its own per host texture, in the format Skia samples (RGBA8 / BGRA8 UNORM),
+  and copies the Godot texture into it on Godot's render thread with
+  `RenderingDevice.texture_copy` (recorded in Godot's frame, so Godot orders
+  it after whatever drew the source). Skia samples the mirror, never Godot's
+  texture: Godot may free or replace its texture at any time (a
+  `texture_replace`, a resized viewport) and its layout is Godot's business.
+  The copy of frame N is shown from frame N+1, so a host texture lags one
+  frame behind the game. A live texture costs one GPU copy per frame; a
+  static one is copied when it changes. A mirror is reused while the source's
+  size and format stay; a new one (and its native handle, resolved with
+  `get_driver_resource` on the render thread) is made when they change, and
+  the old one is freed once no frame in flight uses it.
+  * Vulkan: Skia assumes a sampled texture is in
+    `VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL` (`JsuiTexture` has no layout
+    field). After the copy Godot leaves the mirror in `TRANSFER_DST`, so the
+    view then samples each copied mirror in a one-texel compute dispatch
+    (a tiny "layout pass" in Godot's frame); Godot's render graph transitions
+    it to `SHADER_READ_ONLY_OPTIMAL` and orders the copy before JSUI's work.
+    The cost is one dispatch per frame for all copied textures. CI runs this
+    under synchronization validation.
+  * Metal: the mirror is an `MTLTexture` the view makes itself (tracked,
+    so Metal orders the copy and Skia's sampling) and gives to Godot with
+    `texture_create_from_extension`.
+  * WebGPU (godot-aw3): the mirror's `WGPUTexture`; Skia reads its format.
+  * Formats: the source must be a 2D, single-layer, single-sample
+    `RGBA8` / `BGRA8` UNORM or SRGB texture created with
+    `TEXTURE_USAGE_CAN_COPY_FROM_BIT` (`ImageTexture`, viewports,
+    `VideoStreamPlayer` textures are; a `Texture2DRD` must be created with
+    it). SRGB sources are copied into UNORM mirrors (the bytes, no
+    conversion), like JSUI's other images. Anything else (HDR viewports'
+    `RGBA16F`, compressed textures, a missing usage bit) falls back to the
+    CPU path below for that texture, with one warning.
+* CPU renderer (Compatibility / OpenGL, headless, `force_cpu`), and any view
+  of a runtime that has a CPU view: `get_image()`, converted to RGBA8, is
+  passed to `jsui_set_texture_pixels`. On a renderer this reads the texture
+  back from the GPU (a stall), every frame for a live texture: fine for a
+  small preview, costly for a 1080p video. Static textures are read once and
+  again on `changed` / `update_texture`.
+
+Alpha: host textures are treated as straight (unpremultiplied) alpha, like
+Godot's textures; a `ViewportTexture` as premultiplied (viewport render
+targets with a transparent background hold premultiplied colour).
+
+Host textures belong to the runtime: on a surface view (`runtime_view`) they
+are set on the runtime view and every surface can show them. The view keeps
+the `Texture2D` referenced until `remove_texture` or until the view is freed.
+
+### Audio
+
+The UI asks for sounds (`Sound.play(require('./confirm.wav'), { bus: 'ui' })`,
+`useMusic`, `<UISounds>` / `sounds` on pressables; see `include/jsui/jsui.h`
+"Audio") and JsuiView plays them through Godot: each voice is an
+`AudioStreamPlayer`, an internal child of the runtime view (pooled, not shared
+with other views), on one of Godot's buses. UI sounds thus go through the
+game's mixer, effects and volume settings like any other sound, and the
+library's own audio backend stays out of the way.
+
+* **Buses.** A JSUI bus (`ui`, `sfx`, `music`, any name) plays on the Godot bus
+  `audio_bus_map` names for it, else on the Godot bus with the same name
+  (case-insensitive: `music` → `Music`), else on `audio_bus` (default
+  `"Master"`). The UI's own bus volume and mute (`Sound.setBusVolume`,
+  `setBusMuted`) scale its voices; JsuiView never changes `AudioServer` bus
+  volumes, so a game's settings menu stays in charge of those.
+* **Loading.** `res://` and `user://` sounds load with `ResourceLoader` when
+  Godot imported them (the editor imports the bundle's `.wav` / `.ogg` /
+  `.mp3` files in `ui/dist/assets/`; an exported game has only the imported
+  copies), otherwise as bytes through `FileAccess`. Other URLs (a dev
+  server's `http://`) are read through the runtime's loader (`jsui_fetch`).
+  Bytes are decoded by their header: WAV (PCM 8 / 16 / 24 / 32-bit, float;
+  mono or stereo), Ogg Vorbis, MP3. Loaded streams are cached per URL, so
+  `Sound.preload` / `useSound` make the first play instant; a play that comes
+  while its sound loads starts when it is there.
+* **Voices.** Volume (× fade × the UI's bus volume) is `volume_db`, pitch is
+  `pitch_scale`, the start offset `play(from_position)`. A looping voice plays
+  a copy of the stream with its loop flag on. Fades (fade in, fade out on
+  stop, `setVolume` / bus ramps) advance every frame. Pause / resume use
+  `stream_paused`. A voice has finished when its player stops on its own; JS
+  hears every end (`finished`, `stopped`, `failed`) on the next tick.
+* **The game's side.** `sound_played` / `sound_ended` report the UI's voices,
+  `get_audio_voices()` lists them with their players, `stop_all_sounds()`
+  stops them (e.g. when pausing the game) and `audio_enabled = false` silences
+  the UI entirely.
+
+```gdscript
+ui.audio_bus = "SFX"                          # buses the game has no match for
+ui.audio_bus_map = {"ui": "Interface"}        # explicit JSUI -> Godot buses
+ui.sound_played.connect(func(voice, url, bus): print("UI sound ", url, " on ", bus))
+ui.stop_all_sounds("music", 300)              # fade the UI's music out
+```
+
+Surface views (`runtime_view`) play through their runtime view, whose
+`audio_*` properties apply.
+
 ### Rendering
 
 * The view's logical size is the control's size. The runtime rasterises at
@@ -389,7 +572,8 @@ func spawn_nameplate(enemy):
   | godot-aw3's `webgpu` driver (`WebGPUInterop` singleton, same Dawn revision) | `webgpu`: Skia Graphite on Godot's `WGPUDevice` and queue ([below](#webgpu-dawn-on-the-godot-aw3-fork)) |
   | Forward+ / Mobile on Vulkan (Linux, Windows) | `vulkan`: Skia Graphite on Godot's `VkDevice` and main queue |
   | Forward+ / Mobile on Metal (macOS, Apple Silicon) | `metal`: Skia Graphite on Godot's `MTLDevice` and command queue |
-  | Compatibility (OpenGL), headless, D3D12, `force_cpu` | `cpu`: CPU raster + `ImageTexture` upload |
+  | Forward+ / Mobile on Direct3D 12 (Windows) | `d3d12`: Skia Ganesh on Godot's `ID3D12Device` and DIRECT queue (Graphite has no D3D backend; no pipeline cache) |
+  | Compatibility (OpenGL), headless, `force_cpu` | `cpu`: CPU raster + `ImageTexture` upload |
 
   It also falls back to `cpu` (with a warning) when the library was built
   against a Skia without that backend, when Skia rejects the device, when
@@ -488,6 +672,48 @@ func spawn_nameplate(enemy):
   `HIT_SCROLL` flags for any local point, e.g. for the game's own picking.
   Each surface view hit-tests its own surface.
 
+### Fonts
+
+The runtime ships Inter. Any other font the UI's `fontFamily` names is
+registered by the game or loaded by the UI itself; either way it belongs to
+the runtime and every view of it, and text already on screen relayouts.
+
+```gdscript
+@export var title_font: FontFile   # e.g. res://fonts/Display-Bold.ttf
+
+func _ready():
+    ui.register_font("Display", title_font)                  # weight / style from the file
+    ui.register_font("Display", "res://fonts/Display-Italic.woff2", 400, 1)
+    ui.register_font("", "res://fonts/NotoSansJP.otf")      # family name from the file
+    ui.set_font_fallbacks(["Noto Sans JP", "Noto Color Emoji"])
+    ui.set_default_font_family("Display")                  # text without a fontFamily
+```
+
+```jsx
+<Text style={{ fontFamily: 'Display', fontWeight: '700' }}>Victory</Text>
+```
+
+* Or list the fonts in the inspector: the `fonts` property takes `FontFile`
+  resources (drag `.ttf` / `.otf` / `.woff2` files onto it), registered with
+  the family, weight and style in each file whenever the runtime starts.
+* The view keeps every `register_font` / `unregister_font` call and the
+  fallback and default-family settings, and replays them, after `fonts`, on
+  each new runtime (`start()`, a new `bundle_url`), like `set_state`. Calls on
+  a surface view go to its runtime view; a surface view's own `fonts` are
+  registered there when it attaches.
+* A `FontFile`'s data is the file it was imported from, so its weight and
+  style come from that file; a `FontVariation`'s settings are not applied
+  (pass `weight` / `italic`, or use `fontVariationSettings` in the UI).
+  `SystemFont` and bitmap fonts have no font file and are refused.
+* The UI can load fonts itself: `Fonts.load('Display', 'fonts/Display.woff2')`
+  (`useFonts` / `Fonts.loadAsync` too) resolves against the bundle URL and,
+  for a `res://` / `user://` bundle, reads the file through `FileAccess`.
+  Godot imports `.ttf` / `.otf` / `.woff` / `.woff2` files as `FontFile`s, and
+  an export ships only that imported copy unless the file matches the
+  non-resource filter (below); a font file the filter leaves out is read from
+  its imported `FontFile` instead, so both work. A bundle loaded from an
+  `http://` dev server loads its fonts from the dev server.
+
 ### Loading and exporting
 
 `res://` and `user://` bundles are read through `FileAccess`, so they work
@@ -501,7 +727,8 @@ When exporting, add the bundle folder to the preset's non-resource filter
 (Export → Resources → "Filters to export non-resource files", e.g.
 `ui/dist/*`). This ships the raw `.js` and image files and not only Godot's
 imported copies. A shipped pipeline list needs the filter too
-(`jsui-pipelines.*.bin`).
+(`jsui-pipelines.*.bin`). Sounds need no filter: JsuiView loads their
+imported copies (`ResourceLoader`).
 
 ## Limitations
 
@@ -520,10 +747,28 @@ imported copies. A shipped pipeline list needs the filter too
 * GPU renderer, Metal: compiles in CI (macOS job) but has not been run yet;
   see [Verifying Metal on a Mac](#verifying-metal-on-a-mac). Intel Macs that
   run Forward+ on MoltenVK go through the Vulkan path, untested.
+* Host textures, GPU renderer: one frame of latency (the copy is shown the
+  next frame) and one GPU copy per live texture per frame. Only RGBA8 /
+  BGRA8 sources take the GPU path. The Vulkan path is exercised on lavapipe
+  in CI; Metal and WebGPU have not been run yet. Headless, Godot's dummy
+  renderer keeps no image updates and renders no viewports, so there only
+  static `ImageTexture`s show (the self-test checks the rest with a
+  renderer).
+* Audio: `pan` is not applied (an `AudioStreamPlayer` has no pan, and a bus
+  per voice costs more than UI sounds are worth). FLAC and Ogg Opus files
+  are not supported (Godot has no streams for them), nor ADPCM WAVs given as
+  bytes (an imported one plays). A sound's first play loads it
+  synchronously when it is a `res://` / `user://` file (preload big ones).
 * The macOS library is named `.universal` but a source-built Skia is for the
   host architecture only.
-* Built and tested on Linux x86_64 (CI: headless, OpenGL and Vulkan via
-  lavapipe). Windows (Vulkan / D3D12) is not built or tested.
+* Tested in Godot on Linux x86_64 (CI: headless, OpenGL and Vulkan via
+  lavapipe). Windows is built in CI with the Vulkan and Direct3D 12 GPU
+  paths, and the library's Vulkan and D3D12 backends are tested there
+  (lavapipe, WARP), but the GDExtension has not been run in Godot on
+  Windows yet. D3D12: src stays in `COPY_SOURCE` between frames (as on
+  Vulkan); Ganesh's legacy resource barriers assume Godot's tracked state
+  for it is that, which should hold in both of Godot's barrier modes
+  (legacy states and enhanced barriers) but is unverified.
 
 ## Verifying Metal on a Mac
 

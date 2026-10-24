@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Sets the version of the published npm packages (@orktes/jsui-react, @orktes/jsui-cli,
 // @orktes/jsui-web) in lockstep, including @orktes/jsui-cli's dependency on @orktes/jsui-react and
-// the workspaces that depend on them (site/).  Usage: node scripts/set-version.mjs 0.2.0
+// the workspaces that depend on them (site/) and the CLI's Claude Code plugin manifest.  Usage: node scripts/set-version.mjs 0.2.0
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,5 +24,13 @@ for (const dir of [...PUBLISHED, 'site']) {
   }
   fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + '\n');
   console.log(`${dir}/package.json`);
+}
+// The Claude Code plugin that ships the CLI's agent skill (packages/cli/.claude-plugin).
+const plugin = path.join(ROOT, 'packages/cli/.claude-plugin/plugin.json');
+if (fs.existsSync(plugin)) {
+  const manifest = JSON.parse(fs.readFileSync(plugin, 'utf8'));
+  manifest.version = version;
+  fs.writeFileSync(plugin, JSON.stringify(manifest, null, 2) + '\n');
+  console.log('packages/cli/.claude-plugin/plugin.json');
 }
 console.log('Now run npm install to refresh package-lock.json.');

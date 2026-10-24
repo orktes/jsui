@@ -5,6 +5,8 @@
 
 #include "core/document.h"
 #include "render/image_node.h"
+#include "render/lottie.h"
+#include "render/shader_view.h"
 #include "text/text_edit.h"
 #include "text/text_layout.h"
 
@@ -16,7 +18,8 @@ bool nodeTypeFromName(const std::string& n, NodeType* out) {
     NodeType type;
   } kTypes[] = {{"View", NodeType::View},           {"Text", NodeType::Text},
                 {"RawText", NodeType::RawText},     {"Image", NodeType::Image},
-                {"ScrollView", NodeType::ScrollView}, {"TextInput", NodeType::TextInput}};
+                {"ScrollView", NodeType::ScrollView}, {"TextInput", NodeType::TextInput},
+                {"LottieView", NodeType::Lottie}, {"ShaderView", NodeType::Shader}};
   for (auto& t : kTypes) {
     if (n == t.name) {
       *out = t.type;
@@ -34,6 +37,8 @@ const char* nodeTypeName(NodeType t) {
     case NodeType::Image: return "Image";
     case NodeType::ScrollView: return "ScrollView";
     case NodeType::TextInput: return "TextInput";
+    case NodeType::Lottie: return "LottieView";
+    case NodeType::Shader: return "ShaderView";
   }
   return "?";
 }
@@ -60,6 +65,7 @@ Node::Node(Document* doc, uint32_t id, NodeType type) : doc_(doc), id_(id), type
     applyStyle(Value(), &style_, yoga_);
     text::installMeasure(this);
     image::installMeasure(this);
+    lottie::installMeasure(this);
   }
 }
 
@@ -153,7 +159,10 @@ struct HitShape {
 void Node::setProps(const Value& props) {
   // React re-renders often send identical props: nothing to do (and nothing
   // to repaint).
-  if (doc_) doc_->perf.counters.setProps++;
+  if (doc_) {
+    doc_->perf.counters.setProps++;
+    doc_->perf.propsEpoch++;
+  }
   if (yoga_ && valueEquals(props_, props) && props_.isObject()) {
     if (doc_) doc_->perf.counters.setPropsSkipped++;
     return;
@@ -199,7 +208,8 @@ void Node::setProps(const Value& props) {
     }
     if (type_ == NodeType::Image) {
       if (!valueEquals(old["source"], props_["source"]) || !valueEquals(old["src"], props_["src"]) ||
-          !valueEquals(old["defaultSource"], props_["defaultSource"])) {
+          !valueEquals(old["defaultSource"], props_["defaultSource"]) ||
+          !valueEquals(old["texture"], props_["texture"])) {
         imageCache.reset();
         image::request(this);
         if (doc_) doc_->queueImageEvents(id_, image::settled(this));
@@ -209,6 +219,8 @@ void Node::setProps(const Value& props) {
         }
       }
     }
+    if (type_ == NodeType::Lottie) lottie::propsChanged(this, old, &relayout);
+    if (type_ == NodeType::Shader) shader::propsChanged(this, old);
   }
   paintVersion++;
   contentVersion++;
@@ -235,8 +247,16 @@ void Node::textStyleChanged(const TextStyle& oldText, bool propsMetrics, bool pr
   }
 }
 
+namespace {
+const std::string kStyleKey = "style";
+const uint32_t kPointerEventsGroup = paintStyleGroup("pointerEvents");
+const uint32_t kTextGroup = paintStyleGroup("color");
+}  // namespace
+
 bool Node::patchStyle(const Value::Object& partial) {
-  const Value& cur = props_["style"];
+  // A style write native Animated did not make (see Perf::propsEpoch).
+  if (doc_) doc_->perf.propsEpoch++;
+  const Value& cur = props_[kStyleKey];
   uint32_t groups = 0;
   bool layout = false, any = false;
   for (auto& [k, v] : partial) {
@@ -256,37 +276,82 @@ bool Node::patchStyle(const Value::Object& partial) {
       if (v.isNull()) style.erase(k);
       else style.insert_or_assign(k, v);
     }
-    props.insert_or_assign("style", Value(std::move(style)));
+    props.insert_or_assign(kStyleKey, Value(std::move(style)));
     setProps(Value(std::move(props)));
     return true;
   }
   doc_->perf.counters.setProps++;
-  Value::Object& style = props_.mutableObject()["style"].mutableObject();
+  Value& styleValue = props_.mutableObject()[kStyleKey];
+  Value::Object& style = styleValue.mutableObject();
   for (auto& [k, v] : partial) {
     if (v.isNull()) style.erase(k);
     else style.insert_or_assign(k, v);
   }
-  bool isText = type_ == NodeType::Text || type_ == NodeType::TextInput;
-  TextStyle oldText;
+  applyPatchedGroups(groups, styleValue);
+  return true;
+}
+
+bool Node::patchStyle(const StyleWrite* writes, size_t count) {
+  // A layout key that changes takes the general path (full restyle,
+  // relayout); those are compared before anything is touched.
+  bool general = !yoga_ || !doc_;
+  if (!general) {
+    const Value::Object& cur = props_[kStyleKey].asObject();
+    for (size_t i = 0; i < count && !general; i++) {
+      const StyleWrite& w = writes[i];
+      if (w.group) continue;
+      auto it = cur.find(*w.key);
+      general = w.value->isNull() ? it != cur.end() : it == cur.end() || !valueEquals(it->second, *w.value);
+    }
+  }
+  if (general) {
+    Value::Object partial;
+    for (size_t i = 0; i < count; i++) partial.insert_or_assign(*writes[i].key, *writes[i].value);
+    return patchStyle(partial);
+  }
+  // Paint keys: compared and merged in one walk, in place.
+  Value& styleValue = props_.mutableObject()[kStyleKey];
+  Value::Object& style = styleValue.mutableObject();
+  uint32_t groups = 0;
+  for (size_t i = 0; i < count; i++) {
+    const StyleWrite& w = writes[i];
+    if (!w.group) continue;  // unchanged (checked above)
+    if (w.value->isNull()) {
+      if (style.erase(*w.key)) groups |= w.group;
+      continue;
+    }
+    // A new key starts null, which any non-null value changes.
+    if (style.try_emplace(*w.key).first->second.assignReusing(*w.value)) groups |= w.group;
+  }
+  if (!groups) return false;
+  doc_->perf.counters.setProps++;
+  applyPatchedGroups(groups, styleValue);
+  return true;
+}
+
+void Node::applyPatchedGroups(uint32_t groups, const Value& style) {
+  bool isText = (type_ == NodeType::Text || type_ == NodeType::TextInput) && (groups & kTextGroup);
+  std::optional<TextStyle> oldText;
   if (isText) oldText = style_.text;
   HitShape shape(style_);
   {
     Perf::Scope scope(doc_->perf, Phase::Style);
     doc_->perf.counters.styleResolves++;
-    applyStyleGroups(props_["style"], groups, &style_, doc_->pixelRatio());
+    applyStyleGroups(style, groups, &style_, doc_->pixelRatio());
   }
-  if (props_["pointerEvents"].isString() && !props_["style"].has("pointerEvents"))
+  // The pointerEvents prop stands in for a missing style key; untouched
+  // when that group was not re-resolved (style_ still has it applied).
+  if ((groups & kPointerEventsGroup) && props_["pointerEvents"].isString() && !style.has("pointerEvents"))
     style_.pointerEvents = parsePointerEvents(props_["pointerEvents"]);
   if (!shape.same(style_)) markBoundsDirty();
   bool relayout = false;
-  if (isText) textStyleChanged(oldText, false, false, &relayout);
+  if (isText) textStyleChanged(*oldText, false, false, &relayout);
   paintVersion++;
   if (!styleGroupsMoveOnly(groups)) contentVersion++;
   markPaintTree();
   if (relayout) doc_->markLayoutDirty();
   else doc_->markPaintDirty();
   if (type_ == NodeType::TextInput) edit::syncProps(this);
-  return true;
 }
 
 namespace {
@@ -304,6 +369,7 @@ void Node::updatePropFlags() {
   bool hint = f & (kAutoFocus | kModal), wasHint = propFlags_ & (kAutoFocus | kModal);
   bool listens = f & kListensLayout, listened = propFlags_ & kListensLayout;
   propFlags_ = f;
+  listenMaskValid = false;
   if (doc_ && hint != wasHint) doc_->setFocusHint(this, hint);
   if (doc_ && listens != listened) doc_->layoutListeners += listens ? 1 : -1;
 }

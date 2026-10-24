@@ -7,9 +7,11 @@
 #include <unordered_map>
 #include <vector>
 
+#include "audio/audio.h"
 #include "core/document.h"
 #include "host_buffers.h"
 #include "host_state.h"
+#include "render/host_textures.h"
 #include "include/core/SkRect.h"
 #include "include/core/SkRefCnt.h"
 #include "include/core/SkRegion.h"
@@ -25,7 +27,11 @@ namespace jsui {
 class JsEngine;
 class InputManager;
 class ImageCache;
+class LottieCache;
+class ShaderEffects;
 class NativeAnimated;
+
+class DevSession;
 
 class Runtime {
  public:
@@ -39,8 +45,15 @@ class Runtime {
   bool loadSource(const std::string& source, const std::string& name);
   void loadUrl(const std::string& url);
   void reload();
+  // The font set changed (register / unregister / fallbacks / default
+  // family): re-measure and repaint the text on every surface.
+  void fontsChanged();
   // Reload at the start of the next tick (safe to call from JS / callbacks).
   void requestReload();
+  // Dev mode: the dev server has a new build (or a build error). A bundle
+  // that hot-updates (jsui dev) handles it in __jsui_onDevUpdate; any other
+  // bundle is reloaded.
+  void devUpdate();
   // Dev-mode key handling (Escape dismisses the error overlay, F5 reloads).
   // Returns true if the key was consumed.
   bool devKey(const char* key, bool down);
@@ -117,6 +130,9 @@ class Runtime {
   // Frame data (jsui_set_buffer / jsui_map_buffer; HostBuffer in JS). Lives
   // as long as the runtime; JS views point into it (declared before js).
   HostBuffers buffers;
+  // Host textures (jsui_set_texture; HostTexture in JS). Declared before the
+  // surfaces: their Image nodes unregister from it when destroyed.
+  HostTextures textures;
 
   // Calls: Host.call <-> on_call / jsui_resolve_call, and
   // jsui_call_ui <-> Host.handle.
@@ -131,7 +147,16 @@ class Runtime {
 
   FontManager fonts;
   ResourceLoader loader;
+  // Dev mode: this runtime's side of the dev server's shared session.
+  std::unique_ptr<DevSession> session;
   std::unique_ptr<ImageCache> images;
+  // Lottie sources and playing LottieViews (render/lottie.h).
+  std::unique_ptr<LottieCache> lotties;
+  // Compiled SkSL sources and ShaderViews (render/shader_view.h).
+  std::unique_ptr<ShaderEffects> shaders;
+  // UI audio (jsui.h "Audio"): Sound requests to the handler / built-in
+  // backend. After the loader (the built-in backend reads through it).
+  std::unique_ptr<Audio> audio;
 
  private:
   // Node ids are unique across the surfaces (JS addresses nodes by id alone).
@@ -172,6 +197,14 @@ class Runtime {
   void deliverStateChanges();
   // Same for frame data buffers.
   void deliverBufferChanges();
+  // ... and the host textures whose size or handle changed.
+  void deliverTextureChanges();
+  // LottieView load / error / finish events.
+  void deliverLottieEvents();
+  // ShaderView compile errors.
+  void deliverShaderEvents();
+  // Voice-ended / sound-loaded reports.
+  void deliverAudioEvents();
   // Runs the done callbacks of settled jsui_call_ui calls.
   void deliverUiCallResults();
   // The JS context is going away: cancels its unanswered Host.calls (ids
@@ -195,6 +228,7 @@ class Runtime {
   // while a reloaded bundle is broken.
   std::string devOrigin_, devVersion_;
   bool devPollInFlight_ = false;
+  bool sessionOffered_ = false;  // the last /__jsui/version had X-Jsui-Session
   double devNextPoll_ = 0;
   bool reloadRequested_ = false;
 };

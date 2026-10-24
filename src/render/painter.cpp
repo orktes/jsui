@@ -12,11 +12,19 @@
 
 #include <algorithm>
 #include <atomic>
+#include <climits>
 #include <cstring>
 #include <memory>
 #include <unordered_map>
 #include <cmath>
 #include <vector>
+#if defined(__SSE2__) || defined(_M_X64)
+#include <emmintrin.h>
+#define JSUI_LERP_SSE2 1
+#elif defined(__ARM_NEON)
+#include <arm_neon.h>
+#define JSUI_LERP_NEON 1
+#endif
 
 #include "core/document.h"
 #include "core/scroll.h"
@@ -49,6 +57,8 @@
 #include "modules/skparagraph/include/Paragraph.h"
 #include "render/image_cache.h"
 #include "render/image_node.h"
+#include "render/lottie.h"
+#include "render/shader_view.h"
 #include "render/paint_counter.h"
 #include "text/font_manager.h"
 #include "text/text_layout.h"
@@ -153,17 +163,32 @@ void drawRRect(SkCanvas* c, const SkRRect& rr, const SkPaint& p) {
   else c->drawRRect(rr, p);
 }
 
+// How the painted node changes this frame (NodeRecord): its device scale,
+// its size, or anything of its device matrix in this frame and the one
+// before (an animation or a drag rather than a one-off jump). `inexact` is
+// set when one of its draws was not what a frame of the node at rest paints
+// (an approximate shadow, a sprite drawn directly): the node is repainted
+// once it stops (NodeRecord::approximate).
+struct PaintMotion {
+  bool scaling = false, resizing = false, moving = false;
+  bool* inexact = nullptr;
+};
+
 // ------------------------------------------------------------- sprites
 
 // Raster sprites of expensive draws that stay the same from frame to frame
 // (gradient backgrounds, scaled images): the CPU raster pipeline evaluates a
 // multi-stop gradient or a bilinear, mipmapped image for every pixel, every
 // time a pixel is repainted, while blitting a sprite is a load and a blend.
-// A sprite holds what the draw paints at a device scale, with the canvas
-// translation factored out, so it is reused while the node moves by whole
-// pixels. Whether a draw goes through a sprite depends only on the draw and
-// the canvas (never on history), so a frame paints the same pixels whether
-// the draw was cached or not: incremental frames match full ones.
+// A sprite holds what the draw paints at a device scale and sub-pixel phase,
+// with the whole pixels of the canvas translation factored out, so it is
+// reused while the node stays or moves by whole pixels. Whether a draw goes
+// through a sprite depends only on the draw and the canvas, so a frame paints
+// the same pixels whether the draw was cached or not (incremental frames
+// match full ones), except while the node keeps moving by sub-pixels or
+// scaling (PaintMotion): a sprite per frame would cost more than drawing
+// directly, which it does then, and it is repainted from the sprite once it
+// stops.
 struct SpriteKey {
   std::string bytes;
   SpriteKey& add(const void* p, size_t n) {
@@ -208,22 +233,27 @@ SpriteCache& spriteCache(RootRecord* root);
 // `bounds`) through a sprite when the canvas allows it, at `alpha`; false
 // when it does not (the caller draws directly).
 template <class F>
-bool drawSprite(SkCanvas* c, RootRecord* root, const SkRect& bounds, SpriteKey& key, F&& draw, float alpha = 1) {
+bool drawSprite(SkCanvas* c, RootRecord* root, const SkRect& bounds, SpriteKey& key, F&& draw, float alpha = 1,
+                const PaintMotion* motion = nullptr) {
   SpriteCache& sc = spriteCache(root);
   if (!sc.raster) return false;
   const SkMatrix& m = c->getTotalMatrix();
   if (!m.isScaleTranslate() || m.getScaleX() <= 0 || m.getScaleY() <= 0) return false;
-  // Whole-pixel translations only: a sprite keyed by a sub-pixel phase would
-  // be re-rendered every frame for content that moves smoothly (measured:
-  // more expensive than drawing directly).
+  // The sprite's space: the canvas' without its whole-pixel translation.
   float tx = std::round(m.getTranslateX()), ty = std::round(m.getTranslateY());
-  if (std::fabs(m.getTranslateX() - tx) > 1e-3f || std::fabs(m.getTranslateY() - ty) > 1e-3f) return false;
-  SkMatrix scale = SkMatrix::Scale(m.getScaleX(), m.getScaleY());
-  SkIRect area = scale.mapRect(bounds).roundOut().makeOutset(1, 1);
+  float fx = m.getTranslateX() - tx, fy = m.getTranslateY() - ty;
+  if (std::fabs(fx) <= 1e-3f && std::fabs(fy) <= 1e-3f) fx = fy = 0;
+  SkMatrix local = SkMatrix::MakeAll(m.getScaleX(), 0, fx, 0, m.getScaleY(), fy, 0, 0, 1);
+  SkIRect area = local.mapRect(bounds).roundOut().makeOutset(1, 1);
   int64_t px = int64_t(area.width()) * area.height();
   if (px < SpriteCache::kMinPixels || px > SpriteCache::kMaxPixels) return false;
+  if (motion && motion->moving && (fx != 0 || fy != 0 || motion->scaling)) {
+    // A new sprite every frame (measured: more than drawing directly).
+    if (motion->inexact) *motion->inexact = true;
+    return false;
+  }
   if (c->quickReject(bounds)) return true;
-  key.f(m.getScaleX()).f(m.getScaleY()).rect(bounds);
+  key.f(m.getScaleX()).f(m.getScaleY()).f(fx).f(fy).rect(bounds);
   auto it = sc.sprites.find(key.bytes);
   if (it == sc.sprites.end()) {
     SkImageInfo info =
@@ -234,7 +264,7 @@ bool drawSprite(SkCanvas* c, RootRecord* root, const SkRect& bounds, SpriteKey& 
     SkCanvas* oc = surf->getCanvas();
     oc->clear(SK_ColorTRANSPARENT);
     oc->translate(float(-area.left()), float(-area.top()));
-    oc->concat(scale);
+    oc->concat(local);
     draw(oc);
     Sprite sp;
     sp.image = surf->makeImageSnapshot();
@@ -303,6 +333,10 @@ struct ShadowCache {
   std::unordered_map<ShadowKey, ShadowMask, ShadowKeyHash> masks;
   size_t bytes = 0;
   uint32_t frame = 0;
+  int draws = 0, renders = 0;  // this paint's mask draws / of which rendered (blurred)
+  bool raster = false;         // the paintDocument target is a raster canvas (SpriteCache::raster)
+  std::vector<uint32_t> scratch;   // drawMask's resampled mask
+  std::vector<uint8_t> coverage;   // and the coverage of the box it cuts out
   static constexpr size_t kMaxBytes = 24u << 20;
   using Map = std::unordered_map<ShadowKey, ShadowMask, ShadowKeyHash>;
   Map::iterator insert(const ShadowKey& key, ShadowMask&& m) {
@@ -318,6 +352,7 @@ struct ShadowCache {
         }
       }
     }
+    renders++;
     return masks.emplace(key, std::move(m)).first;
   }
 };
@@ -331,14 +366,19 @@ ShadowCache& shadowCache(RootRecord* root);
 // by a fraction of a pixel is the mask rendered there to within rounding
 // (sigma >= 1 px), and a straight cut-out edge is too (its coverage is
 // linear in the phase). The CPU raster keeps exact phases (whole-pixel
-// sprite blits are its fast path).
-bool phaseFreeMasks(SkCanvas* c) { return c->recorder() != nullptr || c->recordingContext() != nullptr; }
+// sprite blits are its fast path), except for a shadow that keeps moving (a
+// menu button springing on hover re-blurred its mask every frame, a fifth of
+// the frame): it is drawn from the mask at phase 0, resampled at its
+// position (resampleMask), and repainted exactly once it stops
+// (NodeRecord::approximate), like the approximate sizes below.
+bool gpuMasks(SkCanvas* c) { return c->recorder() != nullptr || c->recordingContext() != nullptr; }
 
 // While a node's scale animates (a pulsing dot, a button springing) or its
 // size does (a progress bar's fill), its shadow's device size changes every
-// frame: a new mask (blurred on the CPU, a texture created and uploaded) per
-// frame. On GPU canvases such a shadow is drawn from a mask of a nearby size
-// (8 steps per octave), scaled to the node with bilinear filtering:
+// frame: a new mask (blurred on the CPU, on GPU canvases also a texture
+// created and uploaded) per frame. Such a shadow is drawn from a mask of a
+// nearby size (8 steps per octave), scaled to the node with bilinear
+// filtering (on the CPU raster while it keeps changing, see PaintMotion):
 //   * scaling: the mask of the node at the nearest quantized scale. A blurred
 //     shape scaled is the shape scaled then blurred with the sigma scaled, so
 //     the geometry and blur land where they belong; only resampling differs
@@ -347,11 +387,266 @@ bool phaseFreeMasks(SkCanvas* c) { return c->recorder() != nullptr || c->recordi
 //     (same corner radii and blur), stretched to the box, which scales the
 //     blur and radii along that axis by at most 4.4%.
 // The node is repainted exactly once it stops changing
-// (NodeRecord::shadowInexact).
+// (NodeRecord::approximate).
 float quantizedScale(float s) { return s > 0 ? std::exp2(std::round(std::log2(s) * 8) / 8) : s; }
 // Mask key values of a resized box: float noise in the derived sizes must
 // not make keys differ.
 float keyRound(float v) { return std::round(v * 64) / 64; }
+
+// The inside of a shadow's box, which a mask draw leaves out: it is cut out
+// of the mask or covered by an opaque background. Two device rects, the box
+// inset by 1 px and by its corner radii (+ 1 px) across (`tall`) and along
+// (`wide`), so wide's rows are within tall's and tall's columns within
+// wide's.
+struct MaskSkip {
+  SkIRect tall = SkIRect::MakeEmpty(), wide = SkIRect::MakeEmpty();
+  // The columns [*l, *r) of device row y left out (*l == *r: none).
+  void row(int y, int* l, int* r) const {
+    const SkIRect& k = y >= wide.top() && y < wide.bottom() ? wide : tall;
+    if (y >= k.top() && y < k.bottom()) {
+      *l = k.left();
+      *r = k.right();
+    } else {
+      *l = *r = 0;
+    }
+  }
+};
+
+// o[k] = a[k] + (b[k] - a[k]) * t / 256, rounded, for n bytes; t (0..256)
+// per byte from `w`, or `wc` for all. 16 bytes at a time where the target
+// has SIMD (in 16-bit lanes: 255 * 256 + 128 fits).
+void lerpBytes(const uint8_t* a, const uint8_t* b, const uint16_t* w, uint16_t wc, uint8_t* o, size_t n) {
+  size_t k = 0;
+#if JSUI_LERP_SSE2
+  const __m128i z = _mm_setzero_si128(), half = _mm_set1_epi16(128), full = _mm_set1_epi16(256);
+  for (; k + 16 <= n; k += 16) {
+    __m128i x = _mm_loadu_si128(reinterpret_cast<const __m128i*>(a + k));
+    __m128i y = _mm_loadu_si128(reinterpret_cast<const __m128i*>(b + k));
+    __m128i t0 = w ? _mm_loadu_si128(reinterpret_cast<const __m128i*>(w + k)) : _mm_set1_epi16(short(wc));
+    __m128i t1 = w ? _mm_loadu_si128(reinterpret_cast<const __m128i*>(w + k + 8)) : t0;
+    auto mix = [&](__m128i xs, __m128i ys, __m128i t) {
+      __m128i v = _mm_add_epi16(_mm_mullo_epi16(xs, _mm_sub_epi16(full, t)), _mm_mullo_epi16(ys, t));
+      return _mm_srli_epi16(_mm_add_epi16(v, half), 8);
+    };
+    __m128i lo = mix(_mm_unpacklo_epi8(x, z), _mm_unpacklo_epi8(y, z), t0);
+    __m128i hi = mix(_mm_unpackhi_epi8(x, z), _mm_unpackhi_epi8(y, z), t1);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(o + k), _mm_packus_epi16(lo, hi));
+  }
+#elif JSUI_LERP_NEON
+  const uint16x8_t full = vdupq_n_u16(256);
+  for (; k + 16 <= n; k += 16) {
+    uint8x16_t x = vld1q_u8(a + k), y = vld1q_u8(b + k);
+    uint16x8_t t0 = w ? vld1q_u16(w + k) : vdupq_n_u16(wc);
+    uint16x8_t t1 = w ? vld1q_u16(w + k + 8) : t0;
+    uint16x8_t lo = vmlaq_u16(vmulq_u16(vmovl_u8(vget_low_u8(x)), vsubq_u16(full, t0)), vmovl_u8(vget_low_u8(y)), t0);
+    uint16x8_t hi = vmlaq_u16(vmulq_u16(vmovl_u8(vget_high_u8(x)), vsubq_u16(full, t1)), vmovl_u8(vget_high_u8(y)), t1);
+    vst1q_u8(o + k, vcombine_u8(vrshrn_n_u16(lo, 8), vrshrn_n_u16(hi, 8)));  // (v + 128) >> 8
+  }
+#endif
+  for (; k < n; k++) {
+    uint32_t t = w ? w[k] : wc;
+    o[k] = uint8_t((a[k] * (256 - t) + b[k] * t + 128) >> 8);
+  }
+}
+
+// The device pixels `area` of the premultiplied 8888 mask `src` drawn at
+// (x0, y0) under `post` (scale and translate, device space) with bilinear
+// filtering, into `out` (row pitch area.width()); pixels in `skip` are left
+// alone. What a bilinear drawImage samples (pixel centres, transparent
+// outside the image), in 8-bit fixed point: Skia's raster pipeline gathers
+// and filters every pixel in a generic stage (~40x a sprite blit), and a
+// moving or scaling shadow would pay that over its whole mask in every
+// frame. Separable: each source row the output needs is filtered
+// horizontally once (two rows kept), then pairs of rows vertically, both
+// channel-blind lerps over bytes (premultiplied channels filter alike).
+void resampleMask(const SkPixmap& src, float x0, float y0, const SkMatrix& post, const SkIRect& area,
+                  const MaskSkip& skip, uint32_t* out) {
+  const int w = area.width(), h = area.height(), sw = src.width(), sh = src.height();
+  const float sx = post.getScaleX(), sy = post.getScaleY(), tx = post.getTranslateX(), ty = post.getTranslateY();
+  // Per column: the left tap and its weight (the right tap's, per byte).
+  thread_local std::vector<int> ix;
+  thread_local std::vector<uint16_t> wx;
+  thread_local std::vector<uint32_t> rows, left, right;
+  ix.resize(size_t(w));
+  wx.resize(size_t(w) * 4);
+  rows.resize(size_t(w) * 2);
+  left.resize(size_t(w));
+  right.resize(size_t(w));
+  int first = w, last = 0;  // the columns whose taps are both inside the image (ix is monotonic)
+  for (int i = 0; i < w; i++) {
+    float u = (float(area.left() + i) + 0.5f - tx) / sx - x0 - 0.5f, f = std::floor(u);
+    ix[size_t(i)] = std::clamp(int(f), -2, sw);
+    uint16_t t = uint16_t(std::lround((u - f) * 256));
+    for (int k = 0; k < 4; k++) wx[size_t(i) * 4 + k] = t;
+    if (ix[size_t(i)] >= 0 && ix[size_t(i)] + 1 < sw) {
+      first = std::min(first, i);
+      last = i + 1;
+    }
+  }
+  // A translation: one weight and consecutive taps (filtered in place).
+  const bool shift = sx == 1 && w > 0 && ix[0] >= 0 && ix[size_t(w) - 1] + 1 < sw;
+  auto filterRow = [&](int y, uint32_t* o) {
+    if (y < 0 || y >= sh) {
+      std::fill(o, o + w, 0u);
+      return;
+    }
+    const uint32_t* r = src.addr32(0, y);
+    if (shift) {
+      const uint32_t* a = r + ix[0];
+      lerpBytes(reinterpret_cast<const uint8_t*>(a), reinterpret_cast<const uint8_t*>(a + 1), nullptr, wx[0],
+                reinterpret_cast<uint8_t*>(o), size_t(w) * 4);
+      return;
+    }
+    auto edge = [&](int i) {
+      int x = ix[size_t(i)];
+      left[size_t(i)] = x >= 0 && x < sw ? r[x] : 0u;
+      right[size_t(i)] = x + 1 >= 0 && x + 1 < sw ? r[x + 1] : 0u;
+    };
+    for (int i = 0; i < std::min(first, w); i++) edge(i);
+    for (int i = first; i < last; i++) {
+      const uint32_t* p = r + ix[size_t(i)];
+      left[size_t(i)] = p[0];
+      right[size_t(i)] = p[1];
+    }
+    for (int i = std::max(first, last); i < w; i++) edge(i);
+    lerpBytes(reinterpret_cast<const uint8_t*>(left.data()), reinterpret_cast<const uint8_t*>(right.data()),
+              wx.data(), 0, reinterpret_cast<uint8_t*>(o), size_t(w) * 4);
+  };
+  int have[2] = {INT_MIN, INT_MIN};  // the source row in rows[0] / rows[1]
+  auto row = [&](int y) -> const uint8_t* {
+    for (int k = 0; k < 2; k++)
+      if (have[k] == y) return reinterpret_cast<const uint8_t*>(rows.data() + size_t(k) * w);
+    int k = have[0] < have[1] ? 0 : 1;  // rows only move down: replace the upper one
+    filterRow(y, rows.data() + size_t(k) * w);
+    have[k] = y;
+    return reinterpret_cast<const uint8_t*>(rows.data() + size_t(k) * w);
+  };
+  for (int j = 0; j < h; j++) {
+    const int y = area.top() + j;
+    float v = (float(y) + 0.5f - ty) / sy - y0 - 0.5f, f = std::floor(v);
+    const int iy = int(f);
+    const uint16_t t = uint16_t(std::lround((v - f) * 256));
+    uint32_t* o = out + size_t(j) * w;
+    if (iy + 1 < 0 || iy >= sh) {
+      std::fill(o, o + w, 0u);
+      continue;
+    }
+    const uint8_t* r0 = row(iy);
+    const uint8_t* r1 = row(iy + 1);
+    int sl, sr;
+    skip.row(y, &sl, &sr);
+    const size_t cutL = size_t(sl < sr ? std::clamp(sl - area.left(), 0, w) : w);
+    const size_t cutR = size_t(sl < sr ? std::clamp(sr - area.left(), int(cutL), w) : w);
+    uint8_t* ob = reinterpret_cast<uint8_t*>(o);
+    lerpBytes(r0, r1, nullptr, t, ob, cutL * 4);
+    lerpBytes(r0 + cutR * 4, r1 + cutR * 4, nullptr, t, ob + cutR * 4, (size_t(w) - cutR) * 4);
+  }
+}
+
+// Draws a cached mask `img` placed at (x0, y0) in the space `post` maps to
+// device space, with `p`, leaving out `skip` (parts under 16 px are drawn).
+// Whole-pixel placements are sprite blits; others are filtered: on GPU
+// canvases by the sampler, on a raster target by resampleMask into a scratch
+// image blitted as a sprite (only the visible part of the ring), with `cut`
+// (device space) cut out of it there.
+void drawMask(SkCanvas* c, ShadowCache& cache, const SkImage* img, float x0, float y0, const SkMatrix& post,
+              MaskSkip skip, const SkPaint& p, const SkRRect* cut = nullptr) {
+  const bool whole = post.isIdentity() && x0 == std::floor(x0) && y0 == std::floor(y0);
+  SkIRect all = post.mapRect(SkRect::MakeXYWH(x0, y0, float(img->width()), float(img->height()))).roundOut();
+  for (SkIRect* k : {&skip.tall, &skip.wide})
+    if (!k->intersect(all) || k->width() < 16 || k->height() < 16) k->setEmpty();
+  if (!cache.raster) {
+    // One rect (four parts): each part is a draw of its own on GPU canvases.
+    // Scaled, the ring would still be four stretched draws: one is cheaper.
+    if (!post.isIdentity() || !skip.tall.intersect(skip.wide)) skip.tall.setEmpty();
+    if (skip.tall.width() < 16 || skip.tall.height() < 16) skip.tall.setEmpty();
+    skip.wide = skip.tall;
+  }
+  sk_sp<SkImage> shifted;
+  SkMatrix place = post;
+  SkPixmap src;
+  if (!whole && cache.raster && img->peekPixels(&src) && src.info().bytesPerPixel() == 4) {
+    if (!all.intersect(c->getDeviceClipBounds())) return;
+    size_t n = size_t(all.width()) * all.height();
+    if (cache.scratch.size() < n) cache.scratch.resize(n);
+    resampleMask(src, x0, y0, post, all, skip, cache.scratch.data());
+    SkIRect band = cut ? cut->rect().roundOut() : SkIRect::MakeEmpty();
+    if (cut && band.intersect(all)) {
+      // dst-out of the anti-aliased box (over its bounds, but for what is
+      // not drawn), like the hole of an exact mask.
+      const int bw = band.width(), bh = band.height();
+      if (cache.coverage.size() < size_t(bw) * bh) cache.coverage.resize(size_t(bw) * bh);
+      if (auto cc = SkCanvas::MakeRasterDirect(SkImageInfo::MakeA8(bw, bh), cache.coverage.data(), size_t(bw))) {
+        cc->clear(SK_ColorTRANSPARENT);
+        cc->translate(float(-band.left()), float(-band.top()));
+        SkPaint cp;
+        cp.setAntiAlias(true);
+        cc->drawRRect(*cut, cp);
+      }
+      for (int y = band.top(); y < band.bottom(); y++) {
+        int sl, sr;
+        skip.row(y, &sl, &sr);
+        const uint8_t* cv = cache.coverage.data() + size_t(y - band.top()) * bw;
+        auto* o = reinterpret_cast<uint8_t*>(cache.scratch.data() + size_t(y - all.top()) * all.width());
+        for (int x = band.left(); x < band.right(); x++) {
+          if (x == sl && sl < sr) x = sr;  // not drawn
+          if (x >= band.right()) break;
+          const uint32_t k = 255 - cv[x - band.left()];
+          if (k == 255) continue;
+          uint8_t* px = o + size_t(x - all.left()) * 4;
+          if (!k) {
+            std::memset(px, 0, 4);
+            continue;
+          }
+          for (int ch = 0; ch < 4; ch++) {
+            uint32_t v = px[ch] * k + 128;
+            px[ch] = uint8_t((v + (v >> 8)) >> 8);  // / 255, rounded
+          }
+        }
+      }
+    }
+    // Drawn before the next mask reuses the buffer (a raster canvas draws
+    // immediately).
+    SkPixmap pm(src.info().makeWH(all.width(), all.height()), cache.scratch.data(), size_t(all.width()) * 4);
+    shifted = SkImages::RasterFromPixmap(pm, nullptr, nullptr);
+    if (shifted) {
+      img = shifted.get();
+      x0 = float(all.left());
+      y0 = float(all.top());
+      place = SkMatrix::I();
+    }
+  }
+  const bool sprite = whole || shifted;
+  // Whole-image draws at integer offsets take Skia's sprite blitter; the
+  // ring parts are pixel-aligned (device) clips of the same draw.
+  const SkSamplingOptions sampling = sprite ? SkSamplingOptions() : SkSamplingOptions(SkFilterMode::kLinear);
+  c->save();
+  c->setMatrix(SkMatrix::I());
+  auto part = [&](const SkIRect& d) {
+    if (d.isEmpty()) return;
+    c->save();
+    c->clipIRect(d);
+    if (cut && !shifted) c->clipRRect(*cut, SkClipOp::kDifference, true);  // not resampled after all
+    if (!place.isIdentity()) c->setMatrix(place);
+    c->drawImage(img, x0, y0, sampling, &p);
+    c->restore();
+  };
+  if (skip.tall.isEmpty() && skip.wide.isEmpty()) {
+    part(all);
+  } else if (skip.tall == skip.wide) {
+    const SkIRect& k = skip.tall;
+    part(SkIRect::MakeLTRB(all.left(), all.top(), all.right(), k.top()));
+    part(SkIRect::MakeLTRB(all.left(), k.bottom(), all.right(), all.bottom()));
+    part(SkIRect::MakeLTRB(all.left(), k.top(), k.left(), k.bottom()));
+    part(SkIRect::MakeLTRB(k.right(), k.top(), all.right(), k.bottom()));
+  } else {
+    SkRegion parts(all);
+    parts.op(skip.tall, SkRegion::kDifference_Op);
+    parts.op(skip.wide, SkRegion::kDifference_Op);
+    for (SkRegion::Iterator it(parts); !it.done(); it.next()) part(it.rect());
+  }
+  c->restore();
+}
 
 // Draws `shape` (local coords) blurred by CSS `blur` with `paint`'s color
 // from the cache, minus `hole` (the border box, when the background does not
@@ -359,14 +654,14 @@ float keyRound(float v) { return std::round(v * 64) / 64; }
 // is slow on the CPU). False when the transform is not axis-aligned (the
 // caller blurs directly then).
 bool drawCachedShadow(SkCanvas* c, const SkRRect& shape, const SkRRect* hole, const SkRRect& box, float blur,
-                      const SkPaint& paint, ShadowCache& cache, float alpha = 1, bool scaling = false,
-                      bool resizing = false, bool* inexact = nullptr) {
+                      const SkPaint& paint, ShadowCache& cache, float alpha = 1, const PaintMotion& motion = {}) {
   SkMatrix m = c->getTotalMatrix();
   if (!m.isScaleTranslate() || m.getScaleX() <= 0 || m.getScaleY() <= 0) return false;
-  const bool phaseFree = phaseFreeMasks(c);
+  const bool gpu = gpuMasks(c), approx = gpu || motion.moving;
+  bool* inexact = motion.inexact;
   // The mask's device space -> the canvas' device space (see quantizedScale).
   SkMatrix post = SkMatrix::I();
-  if (scaling && phaseFree) {
+  if (motion.scaling && approx) {
     float sx = m.getScaleX(), sy = m.getScaleY(), qx = quantizedScale(sx), qy = quantizedScale(sy);
     if (qx != sx || qy != sy) {
       float tx = m.getTranslateX(), ty = m.getTranslateY();
@@ -381,7 +676,7 @@ bool drawCachedShadow(SkCanvas* c, const SkRRect& shape, const SkRRect* hole, co
   if (!shape.transform(m, &dev)) return false;
   SkRRect devHole;
   if (hole && !hole->transform(m, &devHole)) return false;
-  if (resizing && phaseFree && post.isIdentity()) {
+  if (motion.resizing && approx && post.isIdentity()) {
     SkRect d = dev.rect();
     float qw = keyRound(quantizedScale(d.width())), qh = keyRound(quantizedScale(d.height()));
     if (qw != d.width() || qh != d.height()) {
@@ -404,11 +699,22 @@ bool drawCachedShadow(SkCanvas* c, const SkRRect& shape, const SkRRect* hole, co
   }
   const bool roundKey = !post.isIdentity();
   const SkRect& r = dev.rect();
-  float ox = phaseFree ? r.left() : std::floor(r.left()), oy = phaseFree ? r.top() : std::floor(r.top());
   ShadowKey key{};
   key.w = r.width();
   key.h = r.height();
   key.sigma = blur / 2 * std::max(m.getScaleX(), m.getScaleY());
+  const bool phaseFree = approx;
+  float ox = phaseFree ? r.left() : std::floor(r.left()), oy = phaseFree ? r.top() : std::floor(r.top());
+  const bool fractional = ox != std::floor(ox) || oy != std::floor(oy);
+  if (!gpu && phaseFree && inexact && fractional) *inexact = true;
+  // A mask the raster target resamples (drawMask) has the box cut out at its
+  // device position afterwards instead: an anti-aliased edge resampled is off
+  // by up to ~16 levels at round corners, cut there it is the hole of an
+  // exact mask. The mask is then the one without the hole.
+  SkRRect cut;
+  const bool cutLater = hole && cache.raster && !gpu && (fractional || !post.isIdentity()) &&
+                        hole->transform(c->getTotalMatrix(), &cut);
+  if (cutLater) hole = nullptr;
   key.fx = r.left() - ox;
   key.fy = r.top() - oy;
   for (int i = 0; i < 4; i++) {
@@ -467,53 +773,31 @@ bool drawCachedShadow(SkCanvas* c, const SkRRect& shape, const SkRRect* hole, co
     it = cache.insert(key, std::move(sm));
   }
   it->second.lastUsed = cache.frame;
+  cache.draws++;
   SkPaint p;  // colour is baked in (the opacity is not: it may animate); plain src-over sprite
   p.setAlphaf(alpha);
   const SkImage* img = it->second.image.get();
   float x0 = ox - float(it->second.margin), y0 = oy - float(it->second.margin);
-  SkIRect all = SkRect::MakeXYWH(x0, y0, float(img->width()), float(img->height())).roundOut();
-  // The box interior (inset by its corner radii) is either cut out of the
-  // mask or covered by an opaque background: draw only the ring around it.
+  // The box interior is either cut out of the mask or covered by an opaque
+  // background: draw only the ring around it.
   SkRRect devBox;
-  SkIRect skip = SkIRect::MakeEmpty();
-  if (box.transform(m, &devBox)) {
+  MaskSkip skip;
+  if (box.transform(c->getTotalMatrix(), &devBox)) {
     float rx = 0, ry = 0;
     for (int i = 0; i < 4; i++) {
       SkVector v = devBox.radii(SkRRect::Corner(i));
       rx = std::max(rx, v.fX);
       ry = std::max(ry, v.fY);
     }
-    SkRect in = devBox.rect().makeInset(rx + 1, ry + 1);
-    if (!in.isEmpty()) {
-      skip = SkIRect::MakeLTRB(int(std::ceil(in.left())), int(std::ceil(in.top())), int(std::floor(in.right())),
-                               int(std::floor(in.bottom())));
-      if (!skip.intersect(all)) skip.setEmpty();
-    }
+    auto inside = [](const SkRect& in) {
+      return in.isEmpty() ? SkIRect::MakeEmpty()
+                          : SkIRect::MakeLTRB(int(std::ceil(in.left())), int(std::ceil(in.top())),
+                                              int(std::floor(in.right())), int(std::floor(in.bottom())));
+    };
+    skip.tall = inside(devBox.rect().makeInset(rx + 1, 1));
+    skip.wide = inside(devBox.rect().makeInset(1, ry + 1));
   }
-  c->save();
-  c->setMatrix(post);
-  if (!post.isIdentity()) skip.setEmpty();  // scaled: the ring's clips would not be whole pixels
-  // Whole-image draws at integer offsets take Skia's sprite blitter; the
-  // ring parts are pixel-aligned clips of the same draw.
-  const SkSamplingOptions sampling = post.isIdentity() && x0 == std::floor(x0) && y0 == std::floor(y0)
-                                         ? SkSamplingOptions()
-                                         : SkSamplingOptions(SkFilterMode::kLinear);
-  auto part = [&](const SkIRect& d) {
-    if (d.isEmpty()) return;
-    c->save();
-    c->clipIRect(d);
-    c->drawImage(img, x0, y0, sampling, &p);
-    c->restore();
-  };
-  if (skip.isEmpty() || skip.width() < 16 || skip.height() < 16) {
-    part(all);
-  } else {
-    part(SkIRect::MakeLTRB(all.left(), all.top(), all.right(), skip.top()));
-    part(SkIRect::MakeLTRB(all.left(), skip.bottom(), all.right(), all.bottom()));
-    part(SkIRect::MakeLTRB(all.left(), skip.top(), skip.left(), skip.bottom()));
-    part(SkIRect::MakeLTRB(skip.right(), skip.top(), all.right(), skip.bottom()));
-  }
-  c->restore();
+  drawMask(c, cache, img, x0, y0, post, skip, p, cutLater ? &cut : nullptr);
   return true;
 }
 
@@ -525,20 +809,21 @@ bool drawCachedShadow(SkCanvas* c, const SkRRect& shape, const SkRRect* hole, co
 // for every shadow in every repaint. False when the transform is not
 // axis-aligned (the caller blurs directly then).
 bool drawCachedInsetShadow(SkCanvas* c, const SkRRect& inner, const SkRRect& frame, const SkRRect& hole, float blur,
-                           const SkColor4f& col, ShadowCache& cache) {
+                           const SkColor4f& col, ShadowCache& cache, const PaintMotion& motion) {
   const SkMatrix& m = c->getTotalMatrix();
   if (!m.isScaleTranslate() || m.getScaleX() <= 0 || m.getScaleY() <= 0) return false;
   SkRRect dev, devHole;
   if (!inner.transform(m, &dev)) return false;
   if (!hole.isEmpty() && !hole.transform(m, &devHole)) return false;
   const SkRect& r = dev.rect();
-  const bool phaseFree = phaseFreeMasks(c);
-  float ox = phaseFree ? r.left() : std::floor(r.left()), oy = phaseFree ? r.top() : std::floor(r.top());
   ShadowKey key{};
   key.inset = 1;
   key.w = r.width();
   key.h = r.height();
   key.sigma = blur / 2 * std::max(m.getScaleX(), m.getScaleY());
+  const bool gpu = gpuMasks(c), phaseFree = gpu || motion.moving;
+  float ox = phaseFree ? r.left() : std::floor(r.left()), oy = phaseFree ? r.top() : std::floor(r.top());
+  if (!gpu && phaseFree && motion.inexact && (ox != std::floor(ox) || oy != std::floor(oy))) *motion.inexact = true;
   key.fx = r.left() - ox;
   key.fy = r.top() - oy;
   for (int i = 0; i < 4; i++) {
@@ -586,19 +871,15 @@ bool drawCachedInsetShadow(SkCanvas* c, const SkRRect& inner, const SkRRect& fra
     it = cache.insert(key, std::move(sm));
   }
   it->second.lastUsed = cache.frame;
-  c->save();
-  c->setMatrix(SkMatrix::I());
-  c->drawImage(it->second.image.get(), ox - kMargin, oy - kMargin,
-               ox == std::floor(ox) && oy == std::floor(oy) ? SkSamplingOptions()
-                                                             : SkSamplingOptions(SkFilterMode::kLinear));
-  c->restore();
+  cache.draws++;
+  drawMask(c, cache, it->second.image.get(), ox - kMargin, oy - kMargin, SkMatrix::I(), MaskSkip(), SkPaint());
   return true;
 }
 
 // `alpha`: the node's opacity folded into the draws (see opacityFoldable); the
 // shadow is then cut out under an opaque background too, which no longer hides it.
 void paintOuterShadows(SkCanvas* c, const Box& b, const ComputedStyle& s, RootRecord* root, float alpha,
-                       bool scaling = false, bool resizing = false, bool* inexact = nullptr) {
+                       const PaintMotion& motion) {
   bool opaqueBg = s.backgroundColor.a >= 1 && s.backgroundImages.empty() && alpha >= 1;
   // The first shadow is on top, so paint in reverse.
   for (auto it = s.boxShadows.rbegin(); it != s.boxShadows.rend(); ++it) {
@@ -615,7 +896,7 @@ void paintOuterShadows(SkCanvas* c, const Box& b, const ComputedStyle& s, RootRe
     // backgrounds otherwise). An opaque background hides it anyway.
     if (sh.blur > 0 &&
         drawCachedShadow(c, shape, opaqueBg ? nullptr : &b.outer, b.outer, sh.blur, p, shadowCache(root), alpha,
-                         scaling, resizing, inexact))
+                         motion))
       continue;
     p.setAlphaf(p.getAlphaf() * alpha);
     c->save();
@@ -629,7 +910,8 @@ void paintOuterShadows(SkCanvas* c, const Box& b, const ComputedStyle& s, RootRe
   }
 }
 
-void paintInsetShadows(SkCanvas* c, const Box& b, const ComputedStyle& s, RootRecord* root) {
+void paintInsetShadows(SkCanvas* c, const Box& b, const ComputedStyle& s, RootRecord* root,
+                       const PaintMotion& motion) {
   bool any = false;
   for (auto& sh : s.boxShadows) any |= sh.inset && !sh.color.transparent();
   if (!any || b.inner.isEmpty()) return;
@@ -640,7 +922,8 @@ void paintInsetShadows(SkCanvas* c, const Box& b, const ComputedStyle& s, RootRe
     hole.offset(sh.offsetX, sh.offsetY);
     float pad = sh.blur * 1.5f + std::fabs(sh.offsetX) + std::fabs(sh.offsetY) + std::fabs(sh.spread) + 2;
     SkRRect frame = SkRRect::MakeRect(b.inner.rect().makeOutset(pad, pad));
-    if (sh.blur > 0 && drawCachedInsetShadow(c, b.inner, frame, hole, sh.blur, sk(sh.color), shadowCache(root)))
+    if (sh.blur > 0 &&
+        drawCachedInsetShadow(c, b.inner, frame, hole, sh.blur, sk(sh.color), shadowCache(root), motion))
       continue;
     SkPaint p;
     p.setAntiAlias(true);
@@ -851,7 +1134,8 @@ void addGradientKey(SpriteKey& k, const Gradient& g) {
 void paintGradients(SkCanvas* c, const Box& b, const ComputedStyle& s, float alpha = 1);
 
 // `alpha`: the node's opacity folded into the draw (see paintNode).
-void paintBackground(SkCanvas* c, const Box& b, const ComputedStyle& s, RootRecord* root, float alpha) {
+void paintBackground(SkCanvas* c, const Box& b, const ComputedStyle& s, RootRecord* root, float alpha,
+                     const PaintMotion& motion) {
   if (!s.backgroundColor.transparent()) {
     SkPaint p;
     p.setAntiAlias(true);
@@ -863,7 +1147,8 @@ void paintBackground(SkCanvas* c, const Box& b, const ComputedStyle& s, RootReco
   SpriteKey key;
   key.u('G').rrect(b.outer).rect(b.inner.rect());
   for (const Gradient& g : s.backgroundImages) addGradientKey(key, g);
-  if (drawSprite(c, root, b.outer.rect(), key, [&](SkCanvas* oc) { paintGradients(oc, b, s); }, alpha)) return;
+  if (drawSprite(c, root, b.outer.rect(), key, [&](SkCanvas* oc) { paintGradients(oc, b, s); }, alpha, &motion))
+    return;
   paintGradients(c, b, s, alpha);
 }
 
@@ -1119,8 +1404,9 @@ void paintOutline(SkCanvas* c, const Box& b, const ComputedStyle& s) {
 
 sk_sp<SkColorFilter> matrixFilter(const float m[20]) { return SkColorFilters::Matrix(m); }
 
-sk_sp<SkImageFilter> buildFilter(const std::vector<FilterOp>& ops) {
-  sk_sp<SkImageFilter> f;
+// `input`: what the first filter applies to (nullptr: the layer's painting).
+sk_sp<SkImageFilter> buildFilter(const std::vector<FilterOp>& ops, sk_sp<SkImageFilter> input = nullptr) {
+  sk_sp<SkImageFilter> f = std::move(input);
   for (const FilterOp& op : ops) {
     float a = op.amount;
     sk_sp<SkColorFilter> cf;
@@ -1213,7 +1499,7 @@ SkBlendMode blendMode(uint8_t i) {
 
 bool clipsChildren(const Node* n) {
   return n->style().overflow != Overflow::Visible || n->type() == NodeType::ScrollView ||
-         n->type() == NodeType::Image;
+         n->type() == NodeType::Image || n->type() == NodeType::Lottie || n->type() == NodeType::Shader;
 }
 
 bool paintsChildren(const Node* n) {
@@ -1310,6 +1596,12 @@ struct NodeRecord : Node::Cache {
   // of it changes; `stableFrames` counts the frames since it last did.
   SkMatrix local;                          // place().local: the node in its parent's space
   SkVector snap = {0, 0};                  // place().snap
+  SkMatrix childSnap;                      // place().snapSpace
+  bool transformed = false;                // place().transformed
+  // computeBox() at the size box.w x box.h, while the node is not found
+  // changed (boxOf).
+  Box box;
+  bool boxValid = false;
   uint32_t contentVersion = 0;
   uint64_t layerStamp = 0;
   uint32_t stableFrames = 0;
@@ -1317,9 +1609,14 @@ struct NodeRecord : Node::Cache {
   bool moved = false;                      // this frame: the device matrix changed
   bool scaling = false;                    // this frame: the device matrix' scale / skew changed
   bool resizing = false;                   // this frame: its size changed
-  // Its shadow was drawn from a mask of a nearby scale (see quantizedScale);
-  // repainted exactly once the scale stops changing.
-  mutable bool shadowInexact = false;
+  bool changing = false;                   // the frame before: moved, scaling or resizing (see PaintMotion)
+  // This frame: its own painting (without its descendants) is what it was,
+  // where it was: paint state, size, child list, scroll offsets and device
+  // matrix unchanged (see Backdrop).
+  bool selfStill = false;
+  // Its shadow or a sprite-cached draw was not painted as at rest (see
+  // PaintMotion); repainted exactly once it stops moving.
+  mutable bool approximate = false;
   // The cached layer was last drawn at a whole-pixel offset from where the
   // node is (while it moved); repainted exactly once it stops.
   mutable bool layerInexact = false;
@@ -1350,6 +1647,12 @@ struct NodeRecord : Node::Cache {
   SkMatrix inMatrix, inSnap;
   SkIRect inClip = SkIRect::MakeEmpty();
   uint32_t curvedBegin = 0, curvedEnd = 0, rasterBegin = 0, rasterEnd = 0;
+  // The pass that last walked the node itself (its children brought up to
+  // date), and where its entries began in that pass' lists: while it is
+  // skipped its children keep that pass and those positions, which its
+  // copied entries still hold at the same offsets (see updateRecords).
+  uint64_t walkedPass = 0;
+  uint32_t walkedCurved = 0, walkedRaster = 0;
 };
 
 // A node with anti-aliased curved or diagonal outlines, in device pixels.
@@ -1361,6 +1664,23 @@ struct CurvedNode {
   SkIRect bounds;
   SkRRect safe;
   bool clipDependent = true;
+};
+
+// Static backdrop (GPU canvases with a LayerCache, see paintDocumentRects):
+// the start of the document's paint order, up to the first node that is
+// changing (a background image under a scrim, say), while it stays the
+// same. Damage rects are repainted over a texture of it: one draw, where
+// each rect otherwise repaints all of it. It is what the document paints
+// first, over nothing, so the texture holds exactly the pixels painting it
+// directly gives: a frame painted over it equals a full repaint.
+struct Backdrop {
+  // The nodes it ends inside of, from the root down: each paints its own
+  // decorations (background, borders, shadows) and its children before the
+  // second member into it; that child is the next entry's node, or the
+  // first child not in it.
+  std::vector<std::pair<Node*, uint32_t>> path;
+  uint64_t sig = 0;     // what it paints (0: too little to be worth a texture)
+  uint32_t stable = 0;  // consecutive updates that found the same
 };
 
 // Per-document painter state, kept on the root node.
@@ -1382,6 +1702,7 @@ struct RootRecord : NodeRecord {
   uint32_t passImageGen = 0;
   bool passRaster = false;
   int nodesUpdated = 0;  // PaintStats::nodesUpdated
+  Backdrop backdrop;     // see updateBackdrop
 };
 
 ShadowCache& shadowCache(RootRecord* root) { return root->shadows; }
@@ -1393,6 +1714,23 @@ NodeRecord* record(Node* n) {
 }
 
 RootRecord* rootRecord(Document& doc) { return static_cast<RootRecord*>(record(doc.root())); }
+
+// computeBox(), kept in the node's record: it depends on the node's style
+// and layout (Yoga's borders and padding) and on its size, and the record
+// forgets it whenever updateRecords finds the node changed (dirty). A dirty
+// node (painted without an update) has it computed again.
+const Box& boxOf(Node* n, float w, float h, Box* scratch) {
+  auto* rec = static_cast<NodeRecord*>(n->paintCache.get());
+  if (!rec || n->paintTreeDirty()) {
+    computeBox(n, w, h, scratch);
+    return *scratch;
+  }
+  if (!rec->boxValid || rec->box.w != w || rec->box.h != h) {
+    computeBox(n, w, h, &rec->box);
+    rec->boxValid = true;
+  }
+  return rec->box;
+}
 
 struct Ctx {
   Document& doc;
@@ -1407,6 +1745,14 @@ struct Ctx {
   float alpha = 1;           // the painted node's opacity, when folded into its one draw
   LayerCache* layers = nullptr;  // composited opacity layers and raster-cached subtrees (null: neither)
   bool opacityLayers = true;     // with `layers`: opacity layers composited (false: plain layers, raster cache only)
+  // Static backdrop (see Backdrop): painting only it (into its texture,
+  // `backdropRender`) or only the rest (over its texture). `backdropDepth`
+  // counts the path entries reached; `backdropFirst` is the entry of the
+  // node paintNode hands to paintContent (-1: not on the path).
+  const Backdrop* backdrop = nullptr;
+  bool backdropRender = false;
+  size_t backdropDepth = 0;
+  int backdropFirst = -1;
 };
 
 sk_sp<SkMaskFilter> cachedBlur(RootRecord* root, float blur) {
@@ -1573,6 +1919,21 @@ void paintChildren(Node* n, SkCanvas* c, Ctx& ctx) {
   order.resize(begin);
 }
 
+// The children of a node on the static backdrop's path (no ghosts, no
+// zIndex): those before `first` and the next node on the path when painting
+// the backdrop, the others when painting over it.
+void paintBackdropChildren(Node* n, SkCanvas* c, Ctx& ctx, size_t first) {
+  const auto& kids = n->children();
+  if (!ctx.backdropRender) {
+    for (size_t i = first; i < kids.size(); i++) paintNode(kids[i], c, ctx);
+    return;
+  }
+  for (size_t i = 0; i < first && i < kids.size(); i++) paintNode(kids[i], c, ctx);
+  const auto& path = ctx.backdrop->path;
+  if (first < kids.size() && ctx.backdropDepth < path.size() && path[ctx.backdropDepth].first == kids[first])
+    paintNode(kids[first], c, ctx);
+}
+
 // Overlay scroll indicators of a ScrollView, above its content, inside the
 // padding box. Fading is driven by Node::scrollIndicatorOpacity.
 void paintScrollIndicators(Node* n, SkCanvas* c, const Box& b, float w, float h) {
@@ -1621,22 +1982,28 @@ SkIRect scrollIndicatorBounds(Node* n, const SkMatrix& m, float w, float h, cons
 // pixel-snapped one (already applied to the canvas); `w`, `h` the snapped size.
 void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float h) {
   const ComputedStyle& s = n->style();
-  Box b;
-  computeBox(n, w, h, &b);
+  // On the static backdrop's path (see Backdrop): only its part of the node
+  // (decorations, children before `first`) or only the rest.
+  const int first = ctx.backdropFirst;
+  ctx.backdropFirst = -1;
+  const bool front = first < 0 || ctx.backdropRender, rest = first < 0 || !ctx.backdropRender;
+  Box scratch;
+  const Box& b = boxOf(n, w, h, &scratch);
   ctx.stats.nodesPainted++;
-  if (!s.boxShadows.empty()) {
-    auto* rec = static_cast<const NodeRecord*>(n->paintCache.get());
-    bool inexact = false;
-    paintOuterShadows(c, b, s, ctx.root, ctx.alpha, rec && rec->scaling, rec && rec->resizing, &inexact);
-    if (inexact) {
-      rec->shadowInexact = true;
-      n->markPaintTree();
-      ctx.doc.markExactRepaint();  // a frame after it stops, to repaint it exactly
-    }
+  bool inexact = false;
+  PaintMotion motion;
+  if (auto* rec = static_cast<const NodeRecord*>(n->paintCache.get())) {
+    motion.scaling = rec->scaling;
+    motion.resizing = rec->resizing;
+    motion.moving = rec->changing && (rec->moved || rec->scaling || rec->resizing);
   }
-  paintBackground(c, b, s, ctx.root, ctx.alpha);
-  if (!s.boxShadows.empty()) paintInsetShadows(c, b, s, ctx.root);
-  paintBorders(c, b, s, ctx.alpha);
+  motion.inexact = &inexact;
+  if (front && !s.boxShadows.empty()) paintOuterShadows(c, b, s, ctx.root, ctx.alpha, motion);
+  if (front) {
+    paintBackground(c, b, s, ctx.root, ctx.alpha, motion);
+    if (!s.boxShadows.empty()) paintInsetShadows(c, b, s, ctx.root, motion);
+    paintBorders(c, b, s, ctx.alpha);
+  }
 
   // Text uses the unsnapped layout box, like Chrome's text fragments: a
   // snapped (narrower) width would re-wrap a max-content paragraph.
@@ -1655,9 +2022,18 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
     SpriteKey key;
     key.u('I').rrect(b.inner);
     if (!image::paintKey(n, &key.bytes) ||
-        !drawSprite(c, ctx.root, b.inner.rect(), key, [&](SkCanvas* oc) { image::paint(n, oc, b.inner.rect(), b.inner); }))
+        !drawSprite(
+            c, ctx.root, b.inner.rect(), key, [&](SkCanvas* oc) { image::paint(n, oc, b.inner.rect(), b.inner); }, 1,
+            &motion))
       image::paint(n, c, b.inner.rect(), b.inner);
   }
+  if (inexact) {
+    if (auto* rec = static_cast<const NodeRecord*>(n->paintCache.get())) rec->approximate = true;
+    n->markPaintTree();
+    ctx.doc.markExactRepaint();  // a frame after it stops, to repaint it exactly
+  }
+  if (n->type() == NodeType::Lottie) lottie::paint(n, c, b.inner.rect(), b.inner);
+  if (n->type() == NodeType::Shader) shader::paint(n, c, b.inner.rect(), b.inner);
 
   if (paintsChildren(n) && (!n->children().empty() || !n->ghosts.empty())) {
     bool clip = clipsChildren(n);
@@ -1671,10 +2047,12 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
       c->translate(-n->scrollX, -n->scrollY);
       ctx.snapSpace.preTranslate(-n->scrollX, -n->scrollY);
     }
-    paintChildren(n, c, ctx);
+    if (first < 0) paintChildren(n, c, ctx);
+    else paintBackdropChildren(n, c, ctx, size_t(first));
     ctx.snapSpace = snapSpace;
     c->restore();
   }
+  if (!rest) return;
   if (n->type() == NodeType::ScrollView) paintScrollIndicators(n, c, b, w, h);
   paintOutline(c, b, s);
 }
@@ -1696,6 +2074,7 @@ struct LayerCache::Impl {
   uint32_t frame = 0;
   bool opacityLayers = true;  // composite cached opacity layers
   bool raster = true;         // raster-cached subtrees (see updateRasterCache)
+  bool backdrop = true;       // the static backdrop (see Backdrop)
   static size_t sizeOf(const Entry& e) { return e.image ? size_t(e.image->width()) * e.image->height() * 4 : 0; }
   void erase(std::unordered_map<const Node*, Entry>::iterator it) {
     bytes -= sizeOf(it->second);
@@ -1713,9 +2092,10 @@ void LayerCache::clear() {
   impl->entries.clear();
   impl->bytes = 0;
 }
-void LayerCache::setModes(bool opacityLayers, bool raster) {
+void LayerCache::setModes(bool opacityLayers, bool raster, bool backdrop) {
   impl->opacityLayers = opacityLayers;
   impl->raster = raster;
+  impl->backdrop = backdrop;
 }
 size_t LayerCache::bytes() const { return impl->bytes; }
 int LayerCache::size() const { return int(impl->entries.size()); }
@@ -1823,6 +2203,7 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
     ctx.stats.nodesPainted += sub.stats.nodesPainted;
     ctx.stats.layerDraws += sub.stats.layerDraws;
     ctx.stats.layerRenders += sub.stats.layerRenders;
+    ctx.stats.placements += sub.stats.placements;
 #if defined(JSUI_GRAPHITE_AS_IMAGE)
     sk_sp<SkImage> image = oc->recorder() ? SkSurfaces::AsImage(surf) : surf->makeImageSnapshot();
 #else
@@ -1865,17 +2246,33 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
 
 void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   if (!isPainted(n)) return;
+  // The next node on the static backdrop's path (opacity 1, no layer).
+  int first = -1;
+  if (ctx.backdrop && ctx.backdropDepth < ctx.backdrop->path.size() &&
+      ctx.backdrop->path[ctx.backdropDepth].first == n)
+    first = int(ctx.backdrop->path[ctx.backdropDepth++].second);
   // Incremental repaint: skip subtrees entirely outside the damage. Their
   // records were refreshed by updateDamage() this frame.
-  if (ctx.damage) {
-    auto* rec = static_cast<NodeRecord*>(n->paintCache.get());
-    if (rec && rec->valid && !ctx.damage->intersects(rec->subtree)) {
-      ctx.stats.nodesCulled++;
-      return;
-    }
+  const auto* rec = static_cast<const NodeRecord*>(n->paintCache.get());
+  if (ctx.damage && rec && rec->valid && !ctx.damage->intersects(rec->subtree)) {
+    ctx.stats.nodesCulled++;
+    return;
   }
   const ComputedStyle& s = n->style();
-  Placement p = place(n, ctx.snapSpace);
+  // Where updateRecords placed it, when that was for this snap space and
+  // nothing changed since (painting without an update: placed again).
+  Placement p;
+  if (rec && rec->valid && rec->painted && !n->paintTreeDirty() && rec->inSnap == ctx.snapSpace) {
+    p.local = rec->local;
+    p.snapSpace = rec->childSnap;
+    p.snap = rec->snap;
+    p.w = rec->w;
+    p.h = rec->h;
+    p.transformed = rec->transformed;
+  } else {
+    p = place(n, ctx.snapSpace);
+    ctx.stats.placements++;
+  }
   int saveCount = c->save();
   c->concat(p.local);
   float opacity = s.opacity * animOpacity(n);
@@ -1883,7 +2280,9 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
     c->restoreToCount(saveCount);
     return;
   }
-  bool layer = opacity < 1 || !s.filters.empty() || s.blendMode != 0;
+  // A ShaderView whose shader post-processes its own painting (`content`).
+  bool contentShader = n->type() == NodeType::Shader && shader::wantsContent(n);
+  bool layer = opacity < 1 || !s.filters.empty() || s.blendMode != 0 || contentShader;
   // A node whose draws do not overlap (one background colour or gradient, no
   // children; see opacityFoldable) applies its opacity to each draw: the same
   // pixels as a layer (up to rounding), without allocating, clearing and
@@ -1896,10 +2295,10 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   SkMatrix parentSnap = ctx.snapSpace;
   bool parentTransformed = ctx.transformed;
   // A raster-cached subtree (see updateRasterCache), or a cached layer.
-  bool raster = ctx.layers && ctx.layers->impl->raster && !layer && alpha >= 1 && n->paintCache &&
-                static_cast<const NodeRecord*>(n->paintCache.get())->rasterOn;
+  bool raster = ctx.layers && ctx.layers->impl->raster && !layer && alpha >= 1 && rec && rec->rasterOn;
+  SkASSERT(first < 0 || (!layer && !raster));
   if (ctx.layers && (raster || (layer && ctx.opacityLayers && ctx.layers->impl->opacityLayers && s.filters.empty() &&
-                                !s.blendMode))) {
+                                !s.blendMode && !contentShader))) {
     ctx.snapSpace = p.snapSpace;
     ctx.transformed |= p.transformed;
     bool drawn = paintCachedLayer(n, c, ctx, opacity, p, raster);
@@ -1913,7 +2312,16 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   if (layer) {
     SkPaint lp;
     lp.setAlphaf(opacity);
-    if (!s.filters.empty()) lp.setImageFilter(buildFilter(s.filters));
+    sk_sp<SkImageFilter> filter;
+    if (contentShader) {
+      filter = shader::contentFilter(n, SkRect::MakeWH(p.w, p.h));
+      // The shader's output covers the whole layer: keep it in the border box.
+      Box b;
+      computeBox(n, p.w, p.h, &b);
+      clipRRect(c, b.outer);
+    }
+    if (!s.filters.empty()) filter = buildFilter(s.filters, std::move(filter));
+    if (filter) lp.setImageFilter(std::move(filter));
     if (s.blendMode) lp.setBlendMode(blendMode(s.blendMode));
     SkRect bounds = visualBounds(n);
     c->saveLayer(&bounds, &lp);
@@ -1921,6 +2329,7 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   ctx.snapSpace = p.snapSpace;
   ctx.transformed |= p.transformed;
   ctx.alpha = alpha;
+  ctx.backdropFirst = first;
   paintContent(n, c, ctx, p.snap, p.w, p.h);
   ctx.alpha = 1;
   ctx.snapSpace = parentSnap;
@@ -2092,6 +2501,104 @@ void updateRasterCache(RootRecord* root, SkRegion* damage, const SkIRect& screen
   }
 }
 
+// Whether a subtree paints without layers: no composited groups, no cached
+// layer textures (states of their own, which a texture of the backdrop
+// would not follow).
+bool layerFree(const Node* n) {
+  if (!isPainted(n)) return true;
+  const ComputedStyle& s = n->style();
+  if (!s.filters.empty() || s.blendMode || !n->ghosts.empty() || n->layoutAnim) return false;
+  if (s.opacity * animOpacity(n) < 1 && !opacityFoldable(n)) return false;
+  if (paintsChildren(n))
+    for (const Node* ch : n->children())
+      if (!layerFree(ch)) return false;
+  return true;
+}
+
+struct SigHash {
+  uint64_t h = 1469598103934665603ull;
+  void bytes(const void* p, size_t n) {
+    const auto* b = static_cast<const uint8_t*>(p);
+    for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull;
+  }
+  template <typename T>
+  void add(const T& v) {
+    bytes(&v, sizeof v);
+  }
+  void matrix(const SkMatrix& m) {
+    float v[9];
+    m.get9(v);
+    bytes(v, sizeof v);
+  }
+};
+
+// Finds the static backdrop (see Backdrop) in the records of this update.
+// Down from the root, each node it ends inside of paints its decorations
+// and children in order, so the backdrop holds them while they and the
+// children before the first one that is changing stay as they are: a node
+// on the path must be still itself (selfStill) and paint without a layer;
+// a child in it as a whole must be quiet, and small and layer-free so that
+// painting it needs no texture state (it can never be a raster-cache
+// candidate). The signature covers what each one paints and where.
+void updateBackdrop(Document& doc, RootRecord* root, int deviceWidth, int deviceHeight, uint32_t imageGen) {
+  Backdrop& bd = root->backdrop;
+  const uint64_t prev = bd.sig;
+  bd.path.clear();
+  bd.sig = 0;
+  SigHash h;
+  h.add(deviceWidth);
+  h.add(deviceHeight);
+  h.add(doc.pixelRatio());
+  h.add(root->fontGen);
+  h.add(imageGen);
+  uint32_t nodes = 0;  // painted nodes in it
+  for (Node* n = doc.root(); n;) {
+    const auto* rec = static_cast<const NodeRecord*>(n->paintCache.get());
+    const ComputedStyle& s = n->style();
+    if (!rec || !rec->valid || !rec->painted || !isPainted(n) || !rec->selfStill || rec->rasterOn ||
+        rec->approximate || n->layoutAnim || n->ghostOf || !n->ghosts.empty() ||
+        (n->type() != NodeType::View && n->type() != NodeType::ScrollView) || s.opacity < 1 ||
+        !s.filters.empty() || s.blendMode)
+      break;
+    const auto& kids = n->children();
+    bool sorted = false;
+    for (const Node* ch : kids) sorted |= ch->style().hasZIndex && ch->style().zIndex != 0;
+    if (sorted) break;
+    h.add(n);
+    h.add(rec->version);
+    h.add(rec->contentVersion);
+    h.add(rec->w);
+    h.add(rec->h);
+    h.add(rec->snap);
+    h.matrix(rec->matrix);
+    if (!s.backgroundColor.transparent() || !s.backgroundImages.empty() || !s.boxShadows.empty()) nodes++;
+    uint32_t first = 0;
+    for (; first < kids.size(); first++) {
+      Node* ch = kids[first];
+      const auto* cr = static_cast<const NodeRecord*>(ch->paintCache.get());
+      if (!cr || !cr->valid) break;
+      const bool painted = isPainted(ch);
+      if (painted && (!cr->painted || !cr->quiet || cr->subtreeNodes >= kRasterMinNodes || !cr->isolatable ||
+                      !layerFree(ch)))
+        break;
+      h.add(ch);
+      h.add(painted);
+      h.add(cr->version);
+      h.add(cr->layerStamp);
+      h.add(cr->w);
+      h.add(cr->h);
+      h.matrix(cr->matrix);
+      if (painted) nodes += cr->subtreeNodes;
+    }
+    h.add(first);
+    bd.path.emplace_back(n, first);
+    n = first < kids.size() ? kids[first] : nullptr;
+  }
+  // One node (a background colour) saves a draw at most: not worth a texture.
+  if (nodes >= 2) bd.sig = h.h | 1;
+  bd.stable = bd.sig && bd.sig == prev ? bd.stable + 1 : 0;
+}
+
 // Clean-subtree skip. Most of a frame's tree is unchanged: a child that is
 // clean (Node::paintTreeDirty), was quiet when last brought up to date in
 // the previous pass and is visited with the same matrices and clip would
@@ -2122,6 +2629,7 @@ void addDamage(SkRegion* d, const SkIRect& r) {
 void clearPaintTree(Node* n) {
   if (!n->paintTreeDirty()) return;
   n->clearPaintTree();
+  if (auto* rec = static_cast<NodeRecord*>(n->paintCache.get())) rec->boxValid = false;
   for (Node* g : n->ghosts) clearPaintTree(g);
   for (Node* ch : n->children()) clearPaintTree(ch);
 }
@@ -2135,9 +2643,11 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
     clearPaintTree(n);
     return SkIRect::MakeEmpty();  // raw text: painted by its paragraph
   }
+  const bool dirty = n->paintTreeDirty();
   n->clearPaintTree();
   if (tSkip) tSkip->visited++;
   NodeRecord* rec = record(n);
+  if (dirty) rec->boxValid = false;  // its layout or style may have changed (see boxOf)
   const size_t curvedStart = curved->size(), rasterStart = tRasterCandidates ? tRasterCandidates->size() : 0;
   bool quietKids = true;
   SkIRect own = SkIRect::MakeEmpty(), sub = SkIRect::MakeEmpty(), bars = SkIRect::MakeEmpty();
@@ -2151,7 +2661,7 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
   bool isolatable = true;
   SkIRect full = SkIRect::MakeEmpty();  // `sub` without the clips of ancestors
   uint64_t kids = childListHash(n);
-  uint32_t gen = n->type() == NodeType::Image ? imageGen : 0;
+  uint32_t gen = n->type() == NodeType::Image || n->type() == NodeType::Shader ? imageGen : 0;
   bool contentChanged = false;
   // Whether the node's own paint state changed (then the whole subtree's old
   // and new rects are damaged, below); if it only moved, its own rects are
@@ -2174,6 +2684,8 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
     h = p.h;
     local = p.local;
     snap = p.snap;
+    rec->childSnap = p.snapSpace;
+    rec->transformed = p.transformed;
     const SkIRect ownFull = deviceBounds(m, ownVisualBounds(n, w, h));
     full = ownFull;
     if (!own.intersect(ownFull, clip)) own.setEmpty();
@@ -2197,8 +2709,8 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
         bool outside = s.outlineWidth > 0;
         for (const Shadow& sh : s.boxShadows) outside |= !sh.inset && sh.blur <= 0;
         if (!outside && s.borderStyle == BorderStyle::Solid && m.isScaleTranslate()) {
-          Box b;
-          computeBox(n, w, h, &b);
+          Box scratch;
+          const Box& b = boxOf(n, w, h, &scratch);
           SkRRect dev;
           if (b.inner.transform(m, &dev)) {
             dev.inset(1, 1);
@@ -2232,6 +2744,30 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
           childDamage = &scan->sub;
         }
       }
+      // The node's box in device space, which clips what its children add
+      // to `full` (computed once: a list visits thousands of them).
+      SkIRect box = SkIRect::MakeEmpty();
+      const bool clips = clipsChildren(n);
+      if (clips) box = deviceBounds(m, SkRect::MakeWH(w, h));
+      // Skipped (with its subtree) since a pass that walked it: its children
+      // were last brought up to date then, and their entries are in the
+      // previous pass' lists at the same offsets from the node's own as in
+      // that pass. Moved there, the children can be skipped again; else a
+      // list left alone for a while would walk all of its rows once one of
+      // them changes.
+      if (tSkip && tSkip->enabled && tSkip->prev && rec->pass == tSkip->prev && rec->walkedPass &&
+          rec->walkedPass != rec->pass) {
+        const uint32_t dc = rec->curvedBegin - rec->walkedCurved, dr = rec->rasterBegin - rec->walkedRaster;
+        for (Node* ch : n->children()) {
+          auto* cr = static_cast<NodeRecord*>(ch->paintCache.get());
+          if (!cr || cr->pass != rec->walkedPass) continue;
+          cr->pass = tSkip->prev;
+          cr->curvedBegin += dc;
+          cr->curvedEnd += dc;
+          cr->rasterBegin += dr;
+          cr->rasterEnd += dr;
+        }
+      }
       auto visit = [&](Node* ch) {
         auto* cr = static_cast<NodeRecord*>(ch->paintCache.get());
         SkipState* sk = tSkip;
@@ -2251,9 +2787,15 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
             // comes into view.
             float dx = cm.getTranslateX() - cr->inMatrix.getTranslateX(),
                   dy = cm.getTranslateY() - cr->inMatrix.getTranslateY();
-            SkRect moved = SkRect::Make(cr->subtreeFull).makeOffset(dx, dy);
-            childFull = cr->subtreeFull.isEmpty() ? cr->subtreeFull : moved.roundOut();
-            hidden = skip = !SkIRect::Intersects(moved.makeOutset(2, 2).roundOut(), childClip);
+            if (dx == 0 && dy == 0) {
+              // Not moved (a static list's rows out of view): the same rects
+              // in whole pixels.
+              hidden = skip = !SkIRect::Intersects(cr->subtreeFull.makeOutset(2, 2), childClip);
+            } else {
+              SkRect moved = SkRect::Make(cr->subtreeFull).makeOffset(dx, dy);
+              childFull = cr->subtreeFull.isEmpty() ? cr->subtreeFull : moved.roundOut();
+              hidden = skip = !SkIRect::Intersects(moved.makeOutset(2, 2).roundOut(), childClip);
+            }
           }
         }
         if (skip) {
@@ -2282,12 +2824,17 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
         }
         cr = static_cast<NodeRecord*>(ch->paintCache.get());
         below |= !cr || cr->relChanged;
-        quietKids &= cr && cr->quiet && !hidden;
+        // A child left out of view is quiet: while this node is visited with
+        // the same arguments it stays out of view, unchanged (a change marks
+        // it dirty, which brings it back). Not counting it kept every
+        // ancestor of a hidden node (an invisible highlight, a row scrolled
+        // out of its list) from ever being skipped.
+        quietKids &= cr && (cr->quiet || hidden);
         if (cr) {
           subtreeNodes += cr->subtreeNodes;
           isolatable &= cr->isolatable;
           SkIRect cf = skip ? childFull : cr->subtreeFull;
-          if (!clipsChildren(n) || cf.intersect(deviceBounds(m, SkRect::MakeWH(w, h)))) full.join(cf);
+          if (!clips || cf.intersect(box)) full.join(cf);
         }
       };
       for (Node* ch : n->ghosts) visit(ch);
@@ -2310,6 +2857,9 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
       int e = int(std::ceil(fe * std::max(1.f, m.getMaxScale())));
       full.outset(e, e);
     }
+    // A shader post-processing the subtree may move any of its pixels
+    // anywhere in the view: a change inside repaints all of it.
+    if (below && n->type() == NodeType::Shader && shader::wantsContent(n)) addDamage(damage, sub);
   } else {
     checkContent();
     for (Node* ch : n->ghosts) clearPaintTree(ch);
@@ -2362,14 +2912,17 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
     rec->stableFrames++;
   }
   rec->relChanged = selfChanged || below || rec->version != n->paintVersion || rec->local != local;
+  rec->changing = rec->moved || rec->scaling || rec->resizing;
   rec->moved = rec->valid && rec->matrix != m;
   rec->scaling = rec->valid && (rec->matrix.getScaleX() != m.getScaleX() || rec->matrix.getScaleY() != m.getScaleY() ||
                                 rec->matrix.getSkewX() != m.getSkewX() || rec->matrix.getSkewY() != m.getSkewY());
   rec->resizing = rec->valid && (rec->w != w || rec->h != h);
-  if (rec->shadowInexact && !rec->scaling && !rec->resizing) {
+  rec->selfStill = rec->valid && !selfChanged && rec->version == n->paintVersion && !rec->moved && !rec->scaling &&
+                   !rec->resizing;
+  if (rec->approximate && !rec->moved && !rec->scaling && !rec->resizing) {
     // Came to rest: its shadow from the exact mask.
     addDamage(damage, own);
-    rec->shadowInexact = false;
+    rec->approximate = false;
   }
   if (rec->layerInexact && !rec->moved) {
     // Came to rest after moving as a cached layer: paint it exactly.
@@ -2399,9 +2952,11 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
   if (tRasterCandidates && painted && isolatable && subtreeNodes >= kRasterMinNodes) tRasterCandidates->push_back(rec);
   // A focused input's caret blinks and moves without changing the node.
   rec->quiet = quietKids && !rec->relChanged && !rec->moved && !rec->scaling && !rec->resizing &&
-               rec->stableFrames >= 1 && !caret && !n->layoutAnim && !rec->shadowInexact && !rec->layerInexact &&
+               rec->stableFrames >= 1 && !caret && !n->layoutAnim && !rec->approximate && !rec->layerInexact &&
                !(n->type() == NodeType::TextInput && n->editState);
-  rec->pass = tSkip ? tSkip->pass : 0;
+  rec->pass = rec->walkedPass = tSkip ? tSkip->pass : 0;
+  rec->walkedCurved = uint32_t(curvedStart);
+  rec->walkedRaster = uint32_t(rasterStart);
   rec->inMatrix = parent;
   rec->inSnap = parentSnap;
   rec->inClip = clip;
@@ -2607,6 +3162,7 @@ SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBl
   // Frames without damage leave the raster cache as it is (a host may
   // update the records of an unchanged frame or not).
   if (raster && !damage.isEmpty()) updateRasterCache(root, &damage, screen);
+  if (tLayerCache && tLayerCache->impl->backdrop) updateBackdrop(doc, root, deviceWidth, deviceHeight, imageGen);
   if (scan.node) {
     // Scroll blit: the viewport's pixels move with the content, so only
     // what the scroll exposes repaints, plus what is painted above the
@@ -2676,9 +3232,14 @@ SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBl
   return damage;
 }
 
-void paintDocument(Document& doc, SkCanvas* canvas, const SkRegion* damage) {
+namespace {
+
+// paintDocument; `over`: painting over the texture of this backdrop, so
+// without it.
+void paintDocumentOver(Document& doc, SkCanvas* canvas, const SkRegion* damage, const Backdrop* over) {
   RootRecord* root = rootRecord(doc);
   root->shadows.frame++;
+  root->shadows.draws = root->shadows.renders = 0;
   SpriteCache& sprites = root->sprites;
   sprites.frame++;
   sprites.draws = sprites.renders = 0;
@@ -2686,6 +3247,7 @@ void paintDocument(Document& doc, SkCanvas* canvas, const SkRegion* damage) {
     SkImageInfo info = canvas->imageInfo();
     sprites.raster = !canvas->recordingContext() && !canvas->recorder() &&
                      (info.colorType() == kRGBA_8888_SkColorType || info.colorType() == kBGRA_8888_SkColorType);
+    root->shadows.raster = sprites.raster;
     if (sprites.raster && (info.colorType() != sprites.colorType ||
                            !SkColorSpace::Equals(info.colorSpace(), sprites.colorSpace.get()))) {
       sprites.sprites.clear();
@@ -2698,6 +3260,7 @@ void paintDocument(Document& doc, SkCanvas* canvas, const SkRegion* damage) {
   // Composited layers on GPU canvases only (a raster canvas has no recorder
   // or context, and the counting canvas none either).
   ctx.layers = tLayerCache;
+  ctx.backdrop = over;
   std::unique_ptr<SkCanvas> counter;
   if (root->counting && (counter = makeCountingCanvas(canvas, &ctx.stats))) {
     // Same clip and matrix as the target, so quick rejects match (the
@@ -2733,18 +3296,95 @@ void paintDocument(Document& doc, SkCanvas* canvas, const SkRegion* damage) {
   }
   ctx.stats.spriteDraws = sprites.draws;
   ctx.stats.spriteRenders = sprites.renders;
+  ctx.stats.shadowDraws = root->shadows.draws;
+  ctx.stats.shadowRenders = root->shadows.renders;
   ctx.stats.nodesUpdated = root->nodesUpdated;
   root->stats = ctx.stats;
 }
 
+// The texture of the document's static backdrop (see Backdrop) for this
+// canvas, rendered when what it paints changed; null when there is none (a
+// canvas without a LayerCache, a backdrop that keeps changing or too large
+// a texture). The canvas size, at the origin: the pixels painting the
+// backdrop into the canvas directly gives (dithering included).
+sk_sp<SkImage> backdropImage(Document& doc, SkCanvas* canvas) {
+  constexpr uint32_t kStableUpdates = 2;  // unchanged for as many updates first
+  RootRecord* root = rootRecord(doc);
+  const Backdrop& bd = root->backdrop;
+  LayerCache* cache = tLayerCache;
+  if (!cache || !cache->impl->backdrop || !bd.sig || bd.stable < kStableUpdates || !canvas->recorder()) return nullptr;
+  LayerCache::Impl& lc = *cache->impl;
+  const void* owner = canvas->recorder();
+  const SkISize size = canvas->getBaseLayerSize();
+  // Its entry, by a key no node has.
+  const Node* key = reinterpret_cast<const Node*>(&root->backdrop);
+  auto it = lc.entries.find(key);
+  if (it != lc.entries.end()) {
+    LayerCache::Impl::Entry& e = it->second;
+    if (e.stamp == bd.sig && e.owner == owner && e.image && e.image->dimensions() == size &&
+        e.image->colorType() == canvas->imageInfo().colorType()) {
+      e.lastUsed = lc.frame;
+      return e.image;
+    }
+    lc.erase(it);
+  }
+  if (size.isEmpty() || size_t(size.width()) * size_t(size.height()) * 4 > lc.budget / 2) return nullptr;
+  SkImageInfo info = canvas->imageInfo().makeDimensions(size).makeAlphaType(kPremul_SkAlphaType);
+  SkSurfaceProps props = surfaceProps();
+  sk_sp<SkSurface> surf = canvas->makeSurface(info, &props);
+  if (!surf) return nullptr;
+  SkCanvas* oc = surf->getCanvas();
+  oc->clear(SK_ColorTRANSPARENT);
+  // Painted as paintDocument does, without layers (it has none).
+  Ctx ctx{doc, root, nullptr, {}, {}};
+  ctx.backdrop = &bd;
+  ctx.backdropRender = true;
+  oc->scale(doc.pixelRatio(), doc.pixelRatio());
+  ctx.snapSpace = oc->getTotalMatrix();
+  paintNode(doc.root(), oc, ctx);
+#if defined(JSUI_GRAPHITE_AS_IMAGE)
+  sk_sp<SkImage> image = SkSurfaces::AsImage(surf);
+#else
+  sk_sp<SkImage> image = surf->makeImageSnapshot();
+#endif
+  if (!image) return nullptr;
+  LayerCache::Impl::Entry e;
+  e.stamp = bd.sig;
+  e.image = std::move(image);
+  e.rect = SkIRect::MakeSize(size);
+  e.whole = true;
+  e.owner = owner;
+  e.lastUsed = lc.frame;
+  lc.bytes += LayerCache::Impl::sizeOf(e);
+  return lc.entries.emplace(key, std::move(e)).first->second.image;
+}
+
+}  // namespace
+
+void paintDocument(Document& doc, SkCanvas* canvas, const SkRegion* damage) {
+  paintDocumentOver(doc, canvas, damage, nullptr);
+}
+
 void paintDocumentRects(Document& doc, SkCanvas* canvas, const std::vector<SkIRect>& rects) {
   PaintStats sum;
+  sk_sp<SkImage> backdrop = rects.empty() ? nullptr : backdropImage(doc, canvas);
   for (const SkIRect& r : rects) {
     SkRegion part(r);
     canvas->save();
     canvas->clipIRect(r);
-    canvas->clear(SK_ColorTRANSPARENT);
-    paintDocument(doc, canvas, &part);
+    if (backdrop) {
+      // Every pixel of the rect (transparent outside the backdrop): what
+      // clearing it and painting the backdrop gives.
+      SkPaint paint;
+      paint.setBlendMode(SkBlendMode::kSrc);
+      canvas->save();
+      canvas->resetMatrix();
+      canvas->drawImage(backdrop.get(), 0, 0, SkSamplingOptions(), &paint);
+      canvas->restore();
+    } else {
+      canvas->clear(SK_ColorTRANSPARENT);
+    }
+    paintDocumentOver(doc, canvas, &part, backdrop ? &rootRecord(doc)->backdrop : nullptr);
     canvas->restore();
     const PaintStats& s = rootRecord(doc)->stats;
     sum.nodesPainted += s.nodesPainted;
@@ -2759,8 +3399,11 @@ void paintDocumentRects(Document& doc, SkCanvas* canvas, const std::vector<SkIRe
     sum.clips += s.clips;
     sum.spriteDraws += s.spriteDraws;
     sum.spriteRenders += s.spriteRenders;
+    sum.shadowDraws += s.shadowDraws;
+    sum.shadowRenders += s.shadowRenders;
     sum.layerDraws += s.layerDraws;
     sum.layerRenders += s.layerRenders;
+    sum.placements += s.placements;
   }
   sum.nodesUpdated = rootRecord(doc)->nodesUpdated;
   rootRecord(doc)->stats = sum;

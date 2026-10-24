@@ -5,6 +5,7 @@
 #include "include/core/SkCanvas.h"
 #include "include/core/SkColorSpace.h"
 #include "include/core/SkSurface.h"
+#include "include/gpu/ganesh/SkImageGanesh.h"
 #include "include/gpu/ganesh/SkSurfaceGanesh.h"
 // Skia moved the Ganesh headers under include/gpu/ganesh/ after m124; the
 // factories below are the m124+ spellings (GrDirectContexts::MakeMetal,
@@ -24,6 +25,7 @@
 #endif
 #include "include/gpu/ganesh/mtl/GrMtlBackendSurface.h"
 #include "include/gpu/ganesh/mtl/GrMtlDirectContext.h"
+#include "render/host_textures.h"
 #include "render/painter.h"
 #include "runtime.h"
 
@@ -68,6 +70,19 @@ bool colorTypeFor(unsigned format, SkColorType* ct, sk_sp<SkColorSpace>* cs) {
 
 struct JsuiMetalContext {
   sk_sp<GrDirectContext> ctx;
+  // Host textures (JSUI_TEXTURE_METAL) drawn in this context's frames.
+  jsui::TextureWrapper textures{[this](const JsuiTexture& t) -> sk_sp<SkImage> {
+    if (t.kind != JSUI_TEXTURE_METAL || !ctx) return nullptr;
+    SkColorType ct;
+    if (!t.format || t.format == kMTLPixelFormatRGBA8Unorm) ct = kRGBA_8888_SkColorType;
+    else if (t.format == kMTLPixelFormatBGRA8Unorm) ct = kBGRA_8888_SkColorType;
+    else return nullptr;
+    GrMtlTextureInfo info;
+    info.fTexture.retain(static_cast<GrMTLHandle>(t.handle));
+    GrBackendTexture bt = GrBackendTextures::MakeMtl(t.width, t.height, skgpu::Mipmapped::kNo, info);
+    return SkImages::BorrowTextureFrom(ctx.get(), bt, kTopLeft_GrSurfaceOrigin, ct, jsui::textureAlphaType(t),
+                                       nullptr);
+  }};
 };
 
 namespace jsui {
@@ -90,6 +105,7 @@ JsuiMetalContext* create(void* device, void* queue) {
 
 void destroy(JsuiMetalContext* m) {
   if (!m) return;
+  m->textures.clear();
   if (m->ctx) {
     m->ctx->flushAndSubmit(GrSyncCpu::kYes);
     m->ctx.reset();
@@ -117,8 +133,12 @@ int render(Surface& rt, JsuiMetalContext* m, void* texture, unsigned format, int
   sk_sp<SkSurface> surface =
       SkSurfaces::WrapBackendRenderTarget(m->ctx.get(), target, kTopLeft_GrSurfaceOrigin, ct, cs, &props);
   if (!surface) return -1;
-  rt.renderCanvas(surface->getCanvas(), width, height, (flags & JSUI_GL_NO_CLEAR) == 0);
+  {
+    TextureScope textureScope(&m->textures);
+    rt.renderCanvas(surface->getCanvas(), width, height, (flags & JSUI_GL_NO_CLEAR) == 0);
+  }
   m->ctx->flushAndSubmit(surface.get(), GrSyncCpu::kNo);
+  m->textures.endFrame();
   return 0;
 }
 

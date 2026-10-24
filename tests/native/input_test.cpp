@@ -459,14 +459,32 @@ TEST(input_wheel_scrolls_scrollview) {
   f.in().smoothWheel = false;  // notches jump (smooth wheel: scroll_test.cpp)
   f.js("extra = e => e.type === 'scroll' ? '@' + e.contentOffset.y + '/' + e.contentSize.height + '/' +"
        " e.layoutMeasurement.height : '';");
-  CHECK(f.in().mouseWheel(50, 50, 0, 50));
+  // setProps replaces the Yoga style too: place the node again.
+  auto listen = [&](Node* n, const char* props, float h) {
+    n->setProps(Value::parseJson(props));
+    Fixture::style(n).overflow = n == sv ? Overflow::Scroll : Overflow::Visible;
+    f.place(n, 0, 0, 100, h);
+    f.layout();
+  };
+  // Nobody listens: wheel and scroll events never reach JS.
+  CHECK(f.in().mouseWheel(50, 50, 0, 20));
+  CHECK_NEAR(sv->scrollY, 20, 1e-4);
+  CHECK_EQ(f.events(), std::string());
+  // onScroll on the ScrollView, onWheel on the content.
+  listen(sv, R"({"__events":["scroll"]})", 100);
+  listen(content, R"({"__events":["wheel"]})", 300);
+  CHECK(f.in().mouseWheel(50, 50, 0, 30));
   CHECK_EQ(f.events(), ev("wheel", content) + " " + ev("scroll", sv) + "@50/300/100");
   CHECK_NEAR(sv->scrollY, 50, 1e-4);
   f.in().mouseWheel(50, 50, 0, 1000);  // clamped to content
   CHECK_NEAR(sv->scrollY, 200, 1e-4);
   f.events();
-  CHECK(!f.in().mouseWheel(50, 50, 0, 10));  // at the end: no scroll event, not consumed
+  CHECK(f.in().mouseWheel(50, 50, 0, 10));  // at the end: no scroll event; consumed by onWheel
   CHECK_EQ(f.events(), ev("wheel", content));
+  listen(content, "{}", 300);
+  CHECK(!f.in().mouseWheel(50, 50, 0, 10));  // no listener: not consumed
+  CHECK_EQ(f.events(), std::string());
+  listen(content, R"({"__events":["wheel"]})", 300);
   f.js("prevent.wheel = true;");
   f.in().mouseWheel(50, 50, 0, -100);
   CHECK_NEAR(sv->scrollY, 200, 1e-4);  // prevented
@@ -491,7 +509,7 @@ TEST(input_wheel_scrolls_scrollview) {
 TEST(input_touch) {
   Fixture f;
   Node* root = f.doc().root();
-  Node* sv = f.box(root, 0, 0, 100, 100, "{}", NodeType::ScrollView);
+  Node* sv = f.box(root, 0, 0, 100, 100, R"({"__events":["scroll"]})", NodeType::ScrollView);
   Node* content = f.box(sv, 0, 0, 100, 300);
   Node* btn = f.box(content, 0, 0, 100, 50, R"({"__events":["press","hoverIn"]})");
   f.layout();
@@ -1020,6 +1038,95 @@ TEST(input_pass_through_keys_and_gamepad) {
   CHECK_EQ(f.in().focused(), b);
   CHECK(f.in().gamepadButton(0, 0, true, 1));  // activates b
   CHECK(f.in().gamepadButton(0, 0, false, 0));
+}
+
+// jsui_hit_regions: the regions answer like capturesAt everywhere (no
+// transforms or rounded corners here, where they are exact): pointer and
+// scroll targets, box-none containers, zIndex, overflow clipping, a scrolled
+// list and an inert panel covering a button. Inert rects are only kept over
+// ones that capture, and rects that repeat the answer under them are left
+// out (a label in its button), unless something between covers them.
+TEST(input_hit_regions_match_hit_test) {
+  Fixture f;
+  Node* root = f.doc().root();
+  f.box(root, 0, 0, 100, 100);                                    // inert, under nothing: dropped
+  Node* btn = f.box(root, 200, 0, 100, 100, R"({"__events":["press"]})");
+  f.box(btn, 10, 10, 50, 20);                                     // label: the button's, not listed
+  Node* inner = f.box(btn, 0, 40, 100, 40, "{}", NodeType::ScrollView);  // pointer + scroll
+  f.style(inner).overflow = Overflow::Hidden;
+  f.box(inner, 0, 0, 100, 120);
+  f.box(btn, 0, 50, 60, 20);                                      // the button's again, over it: listed
+  Node* overlay = f.box(root, 0, 150, 400, 150);
+  f.style(overlay).pointerEvents = PointerEvents::BoxNone;
+  f.box(overlay, 10, 10, 40, 40, R"({"__events":["hoverIn"]})");
+  Node* sv = f.box(root, 100, 160, 100, 100, "{}", NodeType::ScrollView);
+  f.style(sv).overflow = Overflow::Hidden;
+  f.box(sv, 0, 0, 100, 300);
+  Node* row = f.box(sv, 0, 120, 100, 20, R"({"__events":["press"]})");  // below the fold until scrolled
+  Node* cover = f.box(root, 250, 50, 100, 30);                    // inert, over the button
+  Node* top = f.box(root, 300, 0, 50, 40, R"({"__events":["press"]})");
+  f.style(top).zIndex = -1;                                       // under the cover's sibling order
+  f.style(top).hasZIndex = true;
+  f.layout();
+  sv->scrollY = 40;  // the row moves to y = 160 + 80
+  (void)row;
+  (void)cover;
+  std::vector<float> regions;
+  f.in().hitRegions(&regions);
+  CHECK_EQ(regions.size() % 5, size_t(0));
+  auto lookup = [&](float x, float y) {
+    for (size_t i = regions.size(); i >= 5; i -= 5) {
+      const float* r = &regions[i - 5];
+      if (x >= r[0] && y >= r[1] && x < r[0] + r[2] && y < r[1] + r[3]) return unsigned(r[4]);
+    }
+    return 0u;
+  };
+  int mismatches = 0;
+  for (float y = 0.5f; y < 300; y += 3)
+    for (float x = 0.5f; x < 400; x += 3)
+      if (lookup(x, y) != f.in().capturesAt(x, y)) mismatches++;
+  CHECK_EQ(mismatches, 0);
+  CHECK_EQ(lookup(260, 60), 0u);                                  // the cover hides the button
+  CHECK_EQ(lookup(150, 245), unsigned(JSUI_HIT_POINTER | JSUI_HIT_SCROLL));  // the scrolled row
+  CHECK_EQ(lookup(150, 200), unsigned(JSUI_HIT_SCROLL));
+  CHECK_EQ(lookup(210, 60), unsigned(JSUI_HIT_POINTER));          // the second label over the scroll view
+  CHECK_EQ(lookup(220, 45), unsigned(JSUI_HIT_POINTER | JSUI_HIT_SCROLL));  // the scroll view in the button
+  int labels = 0, scrollBoxes = 0;
+  for (size_t i = 0; i < regions.size(); i += 5) {
+    if (regions[i] == 210 && regions[i + 1] == 10) labels++;      // the first label
+    if (regions[i] == 100 && regions[i + 1] == 160) scrollBoxes++;  // the list, its content clipped to it
+  }
+  CHECK_EQ(labels, 0);
+  CHECK_EQ(scrollBoxes, 1);
+  for (size_t i = 0; i < regions.size(); i += 5)                  // the inert box at 0,0 is not listed
+    CHECK(!(regions[i] == 0 && regions[i + 1] == 0 && regions[i + 4] == 0));
+
+  // Through the C API, with a buffer too small at first.
+  JsuiConfig cfg;
+  jsui_config_init(&cfg);
+  cfg.width = 200;
+  cfg.height = 200;
+  JsuiRuntime* rt = jsui_create(&cfg);
+  const char* src =
+      "const n = __jsui_native;"
+      "for (const top of [10, 100]) {"
+      "  const b = n.createNode('View');"
+      "  n.setProps(b, {style: {position: 'absolute', left: 10, top, width: 50, height: 20}, __events: ['press']});"
+      "  n.appendChild(n.rootId, b); }"
+      "globalThis.__jsui_dispatchEvent = e => false;";
+  CHECK_EQ(jsui_load_bundle_source(rt, src, std::strlen(src), "regions.js"), 0);
+  jsui_tick(rt, 0);
+  float out[10] = {};
+  CHECK_EQ(jsui_hit_regions(rt, out, 1), 2);
+  CHECK_EQ(out[0], 10.f);
+  CHECK_EQ(out[1], 10.f);
+  CHECK_EQ(out[2], 50.f);
+  CHECK_EQ(out[4], float(JSUI_HIT_POINTER));
+  CHECK_EQ(out[5], 0.f);  // not written
+  CHECK_EQ(jsui_hit_regions(rt, out, 2), 2);
+  CHECK_EQ(out[6], 100.f);
+  CHECK_EQ(jsui_hit_regions(rt, nullptr, 0), 2);
+  jsui_destroy(rt);
 }
 
 TEST(input_capi_hit_test) {

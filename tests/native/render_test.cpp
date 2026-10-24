@@ -399,14 +399,31 @@ TEST(render_incremental_matches_full) {
       {"style":{"height":30,"margin":4,"borderRadius":5,"backgroundColor":"#4ade80"}},
       {"style":{"height":30,"margin":4,"borderRadius":5,"backgroundColor":"#4fd1ff"}}]}]})J");
   Node* other = s.add(R"J({"style":{"position":"absolute","left":240,"top":30,"width":60,"height":60,"borderRadius":30,"backgroundColor":"#b26bff","opacity":0.8}})J");
+  // A fixed-size text whose padding is a percentage of its parent's width,
+  // and a clipped column of rows below a counter (rows laid out from Yoga's
+  // cache when the counter changes). Their damage (a text's ink bounds reach
+  // ~13 px beyond its box) stays clear of the panel's rounded outline: damage
+  // touching it repaints the whole panel under a non-rectangular clip, which
+  // Skia on macOS arm64 blends a level apart from the full frame on a few
+  // edge pixels (see kExactUnderClip; render_incremental_rounded_boxes_*
+  // covers that case).
+  Node* padBox = s.add(R"J({"style":{"position":"absolute","left":10,"top":200,"width":100,"height":36,"backgroundColor":"#26304f"},"children":[
+    {"type":"Text","style":{"width":80,"height":30,"paddingLeft":"20%","color":"#fff","fontSize":12},"text":"Pad"}]})J");
+  Node* column = s.add(R"J({"style":{"position":"absolute","left":240,"top":110,"width":70,"height":60,"overflow":"hidden"},"children":[
+    {"style":{"flexDirection":"row"},"children":[{"type":"Text","style":{"color":"#fff","fontSize":10},"text":"Frame 1"}]},
+    {"style":{"height":12,"backgroundColor":"#4ade80"}},{"style":{"height":12,"backgroundColor":"#4fd1ff"}},
+    {"style":{"height":12,"backgroundColor":"#b26bff"}},{"style":{"height":12,"backgroundColor":"#f2c35b"}}]})J");
   Node* needle = panel->children()[1];
   Node* label = panel->children()[2];
   Node* scroll = panel->children()[3];
   std::vector<uint32_t> inc(320 * 240), full(320 * 240);
   int step = 0;
+  SkIRect damage;
   auto check = [&](const char* what) {
     s.doc().layout();
-    SkIRect damage = s.rt->renderIncremental(inc.data(), 320, 240, 320 * 4);
+    damage = s.rt->renderIncremental(inc.data(), 320, 240, 320 * 4);
+    // Painted where updateDamage placed each node, without placing it again.
+    CHECK_EQ(lastPaintStats(s.doc()).placements, 0);
     s.rt->render(full.data(), 320, 240, 320 * 4);
     size_t diff = 0;
     for (size_t i = 0; i < inc.size(); i++) diff += inc[i] != full[i];
@@ -439,6 +456,18 @@ TEST(render_incremental_matches_full) {
   check("hide");
   panel->removeChild(scroll);
   check("remove");
+  // The text keeps its frame; only its padding (from its parent) changes.
+  const SkIRect panelBox = SkIRect::MakeLTRB(19, 19, 221, 181);
+  patch(padBox, R"J({"width":180})J");
+  check("percent padding");
+  CHECK(!damage.isEmpty() && !SkIRect::Intersects(damage, panelBox));
+  column->children()[0]->children()[0]->children()[0]->setText("Frame 22");
+  check("counter over cached rows");
+  CHECK(!damage.isEmpty() && !SkIRect::Intersects(damage, panelBox));
+  // The counter's row grows: the rows below move.
+  patch(column->children()[0], R"J({"height":20})J");
+  check("rows move");
+  CHECK(!damage.isEmpty() && !SkIRect::Intersects(damage, panelBox));
   // Nothing changed: nothing repainted.
   s.doc().layout();
   SkIRect r = s.rt->renderIncremental(inc.data(), 320, 240, 320 * 4);
@@ -540,6 +569,30 @@ TEST(render_skipped_subtrees_damage_like_a_full_walk) {
   }
   // In most frames only the glow changed: the other subtrees were skipped.
   CHECK(skippedSteps > 30);
+  // Children out of view (rows scrolled out of the list, an invisible box)
+  // do not keep their ancestors from being skipped: once the rest settles,
+  // only the glow and the two nodes above it are visited (the list, its
+  // rows out of view since the scroll, stays skipped too).
+  both({3, 0}, [](Node* n, Node*) { patch(n, R"J({"opacity":0})J"); });
+  int visited = 0;
+  for (int i = 0; i < 6; i++) {
+    both({4}, [&](Node* n, Node*) { patch(n, R"J({"transform":[{"translateX":)J" + std::to_string(i) + "}]}"); });
+    frame();
+    visited = lastPaintStats(a.doc()).nodesUpdated;
+  }
+  std::printf("  settled: %d nodes visited per frame\n", visited);
+  CHECK(visited <= 3);
+  // A change inside a subtree skipped for all those frames walks only its
+  // path: the clean children on it are skipped again (the rounded box next
+  // to the title, its curved outline carried over from where its skipped
+  // parent copied it).
+  both({0, 0}, [](Node* n, Node*) { n->children()[0]->setText("Title!"); });
+  frame();
+  visited = lastPaintStats(a.doc()).nodesUpdated;
+  std::printf("  deep change: %d nodes visited\n", visited);
+  CHECK(visited <= 5);
+  both({0, 1}, [](Node* n, Node*) { patch(n, R"J({"top":44})J"); });
+  frame();
 }
 
 // Damage cutting through rounded boxes at random places (a small box moving
@@ -685,6 +738,76 @@ TEST(render_sprites_match_direct_and_are_reused) {
     CHECK_EQ(bad, size_t(0));
     CHECK_EQ(renders, 0);
     CHECK_EQ(layers, 0);  // the 0.6 opacity is folded into its gradient
+  }
+}
+
+// A shadowed box springing like a hovered menu button (a sub-pixel
+// translation and a scale every frame, a translucent background, so the box
+// is cut out of the mask) draws its shadow from cached masks while it moves
+// (painter.cpp PaintMotion): after the first frames no mask is blurred
+// again (PaintStats::shadowRenders; one per quantized scale at most, where
+// every frame rendered one before), each frame is within a few levels of the
+// same state painted exactly from scratch, and once it stops the next frame
+// repaints it exactly (incremental == full).
+TEST(render_moving_shadow_reuses_its_mask) {
+  const char* box = R"J({"style":{"position":"absolute","left":40,"top":30,"width":180,"height":52,"borderRadius":10,
+    "backgroundColor":"rgba(26,36,64,0.9)","borderWidth":1,"borderColor":"rgba(148,170,255,0.32)",
+    "boxShadow":"0 4px 12px rgba(0,0,0,0.5)"}})J";
+  // A damped spring towards +14 px and 1.05x (overshooting).
+  auto spring = [](int i) {
+    float k = 1 - std::exp(-float(i) * 0.12f) * std::cos(float(i) * 0.5f);
+    return "{\"transform\":[{\"translateX\":" + std::to_string(14 * k) + "},{\"scale\":" +
+           std::to_string(1 + 0.05f * k) + "}]}";
+  };
+  for (float dpr : {1.f, 1.5f}) {
+    Scene s(320, 140, dpr);
+    Node* n = s.add(box);
+    int dw = s.dw(), dh = s.dh();
+    std::vector<uint32_t> inc(size_t(dw) * dh), full(inc.size());
+    s.doc().layout();
+    s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);
+    int renders = 0, draws = 0, approximate = 0, worst = 0;
+    size_t differ = 0, worstOver = 0;
+    const int frames = 40;
+    for (int i = 1; i <= frames; i++) {
+      patch(n, spring(i));
+      s.doc().layout();
+      s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);
+      PaintStats st = lastPaintStats(s.doc());
+      if (i > 2) renders += st.shadowRenders;  // the first moving frames: the exact mask, then phase 0
+      draws += st.shadowDraws;
+      approximate += s.doc().exactRepaintPending();
+      Scene e(320, 140, dpr);  // the same state, painted exactly
+      patch(e.add(box), spring(i));
+      e.render();
+      PixelDiff d = pixelDiff(inc, e.px);
+      size_t over = 0;  // pixels off by more than 4 levels
+      for (size_t k = 0; k < inc.size(); k++)
+        for (int ch = 0; ch < 4; ch++)
+          if (std::abs(int((inc[k] >> (ch * 8)) & 255) - int((e.px[k] >> (ch * 8)) & 255)) > 4) {
+            over++;
+            break;
+          }
+      worstOver = std::max(worstOver, over);
+      worst = std::max(worst, d.max);
+      differ = std::max(differ, d.count);
+    }
+    std::printf("  dpr %g: %d masks blurred in %d moving frames (%d shadow draws, %d approximate), "
+                "at most %zu pixels differ from exact (%zu by more than 4 levels), by at most %d\n",
+                dpr, renders, frames - 2, draws, approximate, differ, worstOver, worst);
+    CHECK(renders <= 2);
+    CHECK(draws >= frames);
+    CHECK(approximate >= frames - 2);
+    CHECK(worst <= 6);
+    // At rest: the next frame repaints it exactly.
+    CHECK(s.doc().exactRepaintPending());
+    s.doc().layout();
+    s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);
+    CHECK(!s.doc().exactRepaintPending());
+    s.rt->render(full.data(), dw, dh, size_t(dw) * 4);
+    PixelDiff d = pixelDiff(inc, full);
+    if (!matchesFull(d, inc.size())) std::fprintf(stderr, "  dpr %g at rest: %zu pixels differ, max %d\n", dpr, d.count, d.max);
+    CHECK(matchesFull(d, inc.size()));
   }
 }
 

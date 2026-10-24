@@ -2,7 +2,9 @@
 // Site smoke test: serves a built site (site/dist; run `node site/scripts/build.mjs`
 // first), opens every route in headless Chromium at desktop and phone sizes,
 // waits for the runtime to go idle and checks that it reported no error and
-// painted something. Screenshots land in site/test/output/.
+// painted something. Screenshots land in site/test/output/. At desktop size
+// it then unlocks audio with a click and checks that the main menu's music
+// plays through Web Audio without errors.
 //
 //   node site/test/smoke.mjs [--dir site/dist] [route filters...]
 import fs from 'node:fs';
@@ -22,14 +24,26 @@ if (!fs.existsSync(path.join(DIR, 'index.html'))) {
   console.error(`${DIR}/index.html missing: run node site/scripts/build.mjs first`);
   process.exit(1);
 }
+// Crawlers and agents: the static files and the page's text content (the UI itself is a canvas).
+for (const f of ['llms.txt', 'og.png']) {
+  if (!fs.existsSync(path.join(DIR, f))) {
+    console.error(`${DIR}/${f} missing (site/public)`);
+    process.exit(1);
+  }
+}
+if (!/<main id="about"[\s\S]*github\.com\/orktes\/jsui/.test(fs.readFileSync(path.join(DIR, 'index.html'), 'utf8'))) {
+  console.error('index.html: the crawlable #about content is missing');
+  process.exit(1);
+}
 
 const ROUTES = ['/', '/screens', '/screens/main-menu', '/screens/hud', '/screens/inventory', '/screens/battle-pass',
   '/screens/scoreboard', '/screens/dialogue', '/screens/settings', '/screens/loading', '/screens/notifications',
+  '/screens/cinematic', '/screens/victory', '/screens/rift',
   '/interactions', '/input', '/motion', '/playground', '/embed'].filter((r) => !filters.length || filters.some((f) => r.includes(f)));
 const SIZES = [{ name: 'desktop', width: 1440, height: 900, scale: 1 }, { name: 'phone', width: 390, height: 844, scale: 2 }];
 
 const MIME = { '.js': 'text/javascript', '.html': 'text/html', '.wasm': 'application/wasm', '.json': 'application/json',
-  '.png': 'image/png', '.jpg': 'image/jpeg', '.ttf': 'font/ttf' };
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.ttf': 'font/ttf', '.wav': 'audio/wav' };
 const server = http.createServer((req, res) => {
   const p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
   const file = path.normalize(path.join(DIR, p.endsWith('/') ? p + 'index.html' : p));
@@ -54,13 +68,19 @@ const browser = await chromium.launch({
 let failed = 0;
 for (const size of SIZES) {
   const ctx = await browser.newContext({ viewport: { width: size.width, height: size.height }, deviceScaleFactor: size.scale });
+  // Playwright's evaluate() counts as a user activation: hide it, so the
+  // routes run with audio locked, as on a first visit.
+  await ctx.addInitScript(() => Object.defineProperty(navigator, 'userActivation', { value: { hasBeenActive: false } }));
   const page = await ctx.newPage();
   const logs = [];
   page.on('console', (m) => logs.push(m.text()));
   page.on('pageerror', (e) => logs.push('pageerror: ' + e.message));
   const requests = [];
   page.on('request', (r) => requests.push(r.url()));
-  await page.goto(`${ORIGIN}/index.html`);
+  // autoplay=0: the cinematic screen streams its trailer only once played
+  // (CI has no business fetching video, and a playing video never goes idle):
+  // it must look finished with its own poster art.
+  await page.goto(`${ORIGIN}/index.html?autoplay=0`);
   await page.waitForFunction(() => window.jsui, null, { timeout: 60000 });
   // Every script, module, wasm and JSON the page loads is versioned (?v=<hash>,
   // site/scripts/build.mjs), so caches cannot mix files of two deploys.
@@ -104,6 +124,28 @@ for (const size of SIZES) {
     } catch (e) {
       failed++;
       console.log(`  FAIL  ${name}: ${e.message.split('\n').slice(0, 6).join('\n        ')}`);
+    }
+  }
+  // Audio: locked until a gesture (UI sounds were dropped above without
+  // errors); a click on an empty spot unlocks it and the menu music starts.
+  if (size.name === 'desktop' && (!filters.length || filters.some((f) => '/screens/main-menu'.includes(f)))) {
+    logs.length = 0;
+    try {
+      await page.evaluate(() => { location.hash = '/screens/main-menu'; });
+      await page.evaluate(() => window.jsui.whenIdle());
+      if (await page.evaluate(() => window.jsui.audio.unlocked)) throw new Error('audio unlocked before any gesture');
+      await page.mouse.click(4, size.height - 4);
+      await page.waitForFunction(() => window.jsui.audio.unlocked, null, { timeout: 5000 });
+      await page.waitForFunction(() => window.jsui.audio.stats.playing >= 1, null, { timeout: 10000 });
+      const stats = await page.evaluate(() => window.jsui.audio.stats);
+      const err = await page.evaluate(() => window.jsui.lastError);
+      if (err) throw new Error('runtime error: ' + err);
+      const bad = logs.filter((l) => /error|exception|could not/i.test(l));
+      if (bad.length) throw new Error('console: ' + bad.join(' | '));
+      console.log(`  ok    ${size.name} audio (unlocked by a click; ${stats.playing} playing, ${stats.sounds} sounds decoded)`);
+    } catch (e) {
+      failed++;
+      console.log(`  FAIL  ${size.name} audio: ${e.message.split('\n').slice(0, 6).join('\n        ')}`);
     }
   }
   await ctx.close();

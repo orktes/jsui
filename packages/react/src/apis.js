@@ -674,6 +674,7 @@ import { onHostMessage } from './events.js';
 import { call as hostCall, handle as hostHandle } from './hostData.js';
 export { HostState, useHostState, useHostStateSelector, useHostHandler } from './hostData.js';
 export { HostBuffer, useHostBuffer, useHostBufferSelector, useHostBufferListener } from './hostBuffer.js';
+export { HostTextures, useHostTexture } from './hostTexture.js';
 
 /**
  * Game <-> UI messages (postMessage / onMessage; payloads are JSON-serialized)
@@ -705,47 +706,264 @@ function useLatest(value) {
   return box;
 }
 
-const loadedFonts = new Map();
-export const Fonts = {
-  /** Registers a font face from a URL (relative to the bundle). Resolves when usable. */
-  load(family, url, options) {
-    const weight = options && options.weight != null ? +String(options.weight).replace('normal', '400').replace('bold', '700') || 400 : 400;
-    const italic = !!(options && options.style === 'italic');
-    const key = family + '|' + weight + '|' + italic + '|' + url;
-    let p = loadedFonts.get(key);
-    if (p) return p;
-    if (typeof native.loadFont !== 'function') {
-      warnOnce('loadFont', '[jsui] __jsui_native.loadFont is not available');
-      p = Promise.resolve(false);
-    } else {
-      p = Promise.resolve(native.loadFont(family, String(url), weight, italic));
+// --- Fonts -----------------------------------------------------------------------
+//
+// expo-font compatible (loadAsync / useFonts / isLoaded / unloadAsync ...) plus
+// JSUI extras. A face is (family, weight, italic, source); the same face loads
+// once. weight 0 / italic -1 mean "read it from the file" (native contract).
+
+const FONT_WEIGHTS = {
+  thin: 100, hairline: 100, extralight: 200, ultralight: 200, light: 300,
+  normal: 400, regular: 400, book: 400, medium: 500, semibold: 600, demibold: 600,
+  bold: 700, extrabold: 800, ultrabold: 800, black: 900, heavy: 900,
+};
+const fontFaces = new Map(); // key -> { family, state: 'loading'|'loaded'|'unsupported', promise }
+const bytesIds = new WeakMap();
+let nextBytesId = 1;
+
+function fontWeightArg(w) {
+  if (w == null || w === '') return 0;
+  if (typeof w === 'number') return w > 0 ? Math.min(1000, Math.round(w)) : 0;
+  const s = String(w).trim().toLowerCase().replace(/[\s_-]/g, '');
+  if (/^\d+$/.test(s)) return fontWeightArg(+s);
+  if (s in FONT_WEIGHTS) return FONT_WEIGHTS[s];
+  warnOnce('fontWeight:' + s, `[jsui] Fonts: unknown font weight '${w}', using the weight in the file`);
+  return 0;
+}
+
+function fontItalicArg(o) {
+  const st = o.style != null ? o.style : o.fontStyle;
+  if (st === 'italic' || st === 'oblique') return 1;
+  if (st === 'normal') return 0;
+  if (o.italic != null) return o.italic ? 1 : 0;
+  return -1;
+}
+
+const isFontBytes = (v) => v instanceof ArrayBuffer || ArrayBuffer.isView(v);
+
+/** source -> { url } | { bytes } | { assetId } | null */
+function fontSource(src) {
+  if (src == null) return null;
+  if (typeof src === 'string') return src ? { url: src } : null;
+  if (typeof src === 'number') return { assetId: src };
+  if (isFontBytes(src)) return { bytes: src };
+  if (typeof src === 'object') {
+    if (src.uri != null) return fontSource(src.uri);
+    if (src.source != null) return fontSource(src.source);
+    if ('default' in src) return fontSource(src.default);
+  }
+  return null;
+}
+
+function fontFace(family, source, options) {
+  const o = options || {};
+  const s = fontSource(source);
+  const weight = fontWeightArg(o.weight != null ? o.weight : o.fontWeight);
+  const italic = fontItalicArg(o);
+  let id = '';
+  if (s && s.url) id = 'u:' + s.url;
+  else if (s && s.bytes) {
+    id = bytesIds.get(s.bytes);
+    if (!id) bytesIds.set(s.bytes, (id = 'b:' + nextBytesId++));
+  }
+  const fam = family == null ? '' : String(family);
+  return { family: fam, s, weight, italic, key: fam + '|' + weight + '|' + italic + '|' + id };
+}
+
+/** A map value -> face descriptors: a source, { uri|source, weight, style }, or an array of those. */
+function faceList(value) {
+  if (Array.isArray(value)) return value.flatMap(faceList);
+  if (value && typeof value === 'object' && !isFontBytes(value)) {
+    if (value.uri == null && value.source == null && 'default' in value) return faceList(value.default);
+    return [{ source: value, options: value }];
+  }
+  return [{ source: value, options: null }];
+}
+
+function familyNames(nameOrMap) {
+  if (nameOrMap == null) return [];
+  if (typeof nameOrMap === 'string') return [nameOrMap];
+  if (Array.isArray(nameOrMap)) return nameOrMap.map(String);
+  return Object.keys(nameOrMap);
+}
+
+function mapFaces(nameOrMap, source) {
+  if (typeof nameOrMap === 'string') return faceList(source).map((f) => [nameOrMap, f]);
+  const map = nameOrMap || {};
+  return Object.keys(map).flatMap((k) => faceList(map[k]).map((f) => [k, f]));
+}
+
+function fontError(e) {
+  return e instanceof Error ? e : new Error(String(e && e.message ? e.message : e));
+}
+
+function hasFaces(family) {
+  for (const f of fontFaces.values()) if (f.family === family) return true;
+  return false;
+}
+
+function nativeUnload(family) {
+  if (typeof native.unloadFont !== 'function') {
+    warnOnce('unloadFont', '[jsui] __jsui_native.unloadFont is not available');
+    return false;
+  }
+  return !!native.unloadFont(family);
+}
+
+function loadFace(face) {
+  const { family, s, weight, italic, key } = face;
+  const label = `[jsui] Fonts.load('${family}')`;
+  if (!s) return Promise.reject(new Error(`${label}: no font source (expected a URL, require('./font.ttf'), { uri } or bytes)`));
+  if (s.assetId != null) {
+    warnOnce('fontAssetId', `${label}: numeric asset ids are not supported; bundle the font with the jsui CLI (require('./font.ttf') is a URL) or pass { uri }`);
+    return Promise.reject(new Error(`${label}: unsupported asset id ${s.assetId}`));
+  }
+  const prev = fontFaces.get(key);
+  if (prev) return prev.promise;
+  const f = { family, state: 'loading', promise: null };
+  fontFaces.set(key, f);
+  const settle = (ok) => {
+    if (fontFaces.get(key) !== f) {
+      // Unloaded while loading: undo the late registration.
+      if (ok && !hasFaces(family) && typeof native.unloadFont === 'function') native.unloadFont(family);
+      return !!ok;
     }
-    loadedFonts.set(key, p);
-    return p;
+    f.state = ok ? 'loaded' : 'unsupported';
+    return !!ok;
+  };
+  const fail = (e) => {
+    if (fontFaces.get(key) === f) fontFaces.delete(key);
+    throw fontError(e);
+  };
+  if (s.bytes) {
+    if (typeof native.loadFontData !== 'function') {
+      warnOnce('loadFontData', '[jsui] __jsui_native.loadFontData is not available; font bytes are ignored');
+      f.promise = Promise.resolve(settle(false));
+    } else {
+      try {
+        // Synchronous: isLoaded() is true right after the call.
+        f.promise = Promise.resolve(settle(native.loadFontData(family, s.bytes, weight, italic) !== false));
+      } catch (e) {
+        f.promise = Promise.resolve().then(() => fail(e));
+      }
+    }
+  } else if (typeof native.loadFont !== 'function') {
+    warnOnce('loadFont', '[jsui] __jsui_native.loadFont is not available');
+    f.promise = Promise.resolve(settle(false));
+  } else {
+    let p;
+    try {
+      p = Promise.resolve(native.loadFont(family, String(s.url), weight, italic));
+    } catch (e) {
+      p = Promise.reject(e);
+    }
+    f.promise = p.then((ok) => settle(ok !== false), fail);
+  }
+  return f.promise;
+}
+
+export const Fonts = {
+  /**
+   * Registers one face: Fonts.load(family, source, { weight, style }).
+   * source: URL, require('./x.ttf'), { uri }, { default }, ArrayBuffer / typed array.
+   * weight / style omitted: read from the file. Resolves true when usable
+   * (false when the runtime has no font support).
+   */
+  load(family, source, options) {
+    return loadFace(fontFace(family, source, options));
   },
-  /** expo-font style: loadAsync({Family: url}) */
-  loadAsync(map) {
-    return Promise.all(Object.keys(map).map((k) => Fonts.load(k, map[k])));
+  /**
+   * expo-font: loadAsync('Family', source) or loadAsync({ Family: source | face | [faces] }),
+   * face = { uri | source, weight, style }.
+   */
+  loadAsync(nameOrMap, source) {
+    return Promise.all(mapFaces(nameOrMap, source).map(([k, f]) => Fonts.load(k, f.source, f.options))).then(() => undefined);
+  },
+  /** True once a face of the family loaded through Fonts (or registered natively). */
+  isLoaded(family) {
+    for (const f of fontFaces.values()) if (f.family === family && f.state === 'loaded') return true;
+    if (typeof native.getFontFamilies === 'function') return native.getFontFamilies().indexOf(family) >= 0;
+    return false;
+  },
+  isLoading(family) {
+    for (const f of fontFaces.values()) if (f.family === family && f.state === 'loading') return true;
+    return false;
+  },
+  /** Registered families (native list incl. built-in Inter when available). */
+  getLoadedFonts() {
+    if (typeof native.getFontFamilies === 'function') return Array.from(native.getFontFamilies());
+    const out = [];
+    for (const f of fontFaces.values()) if (f.state === 'loaded' && out.indexOf(f.family) < 0) out.push(f.family);
+    return out;
+  },
+  /** Unloads families loaded through Fonts: unloadAsync('Family' | ['A','B'] | { Family: ... }). */
+  unloadAsync(nameOrMap) {
+    for (const family of familyNames(nameOrMap)) {
+      if (!hasFaces(family)) continue;
+      for (const [k, f] of fontFaces) if (f.family === family) fontFaces.delete(k);
+      nativeUnload(family);
+    }
+    return Promise.resolve();
+  },
+  /** Unloads every family loaded through Fonts (built-in and host fonts stay). */
+  unloadAllAsync() {
+    const families = [];
+    for (const f of fontFaces.values()) if (families.indexOf(f.family) < 0) families.push(f.family);
+    return Fonts.unloadAsync(families);
+  },
+  /** Families tried, in order, for glyphs the styled font lacks (emoji, CJK). [] clears. */
+  setFallbacks(families) {
+    const list = families == null ? [] : Array.isArray(families) ? families : String(families).split(',');
+    const clean = list.map((f) => String(f).trim().replace(/^["']|["']$/g, '')).filter(Boolean);
+    if (typeof native.setFontFallbacks !== 'function') {
+      warnOnce('setFontFallbacks', '[jsui] __jsui_native.setFontFallbacks is not available');
+      return;
+    }
+    native.setFontFallbacks(clean);
+  },
+  /** Family used when a style names none (default 'Inter'). */
+  setDefaultFamily(family) {
+    if (typeof native.setDefaultFontFamily !== 'function') {
+      warnOnce('setDefaultFontFamily', '[jsui] __jsui_native.setDefaultFontFamily is not available');
+      return;
+    }
+    native.setDefaultFontFamily(family == null ? '' : String(family));
   },
 };
 
+function fontMapState(map) {
+  const faces = mapFaces(map || {}).map(([k, f]) => fontFace(k, f.source, f.options));
+  let ready = true;
+  for (const f of faces) {
+    const e = fontFaces.get(f.key);
+    if (!e || e.state === 'loading') ready = false;
+  }
+  return { key: faces.map((f) => f.key).join('\n'), ready };
+}
+
 /**
- * useFonts({Family: url}) -> [loaded, error] (expo-font compatible).
+ * useFonts({ Family: source | face | [faces] }) -> [loaded, error] (expo-font
+ * compatible). Fonts that are already loaded give [true, null] on the first render.
  */
 export function useFonts(map) {
-  const [state, setState] = useState([false, null]);
-  const key = Object.keys(map || {}).map((k) => k + '=' + map[k]).join('|');
+  const { key, ready } = fontMapState(map);
+  const [st, setSt] = useState(null);
+  const cur = st && st.key === key ? st : { key, loaded: ready, error: null };
   useEffect(() => {
+    if (ready) {
+      if (!cur.loaded) setSt({ key, loaded: true, error: null });
+      return undefined;
+    }
     let alive = true;
     Fonts.loadAsync(map || {}).then(
-      () => alive && setState([true, null]),
-      (e) => alive && setState([false, e]),
+      () => alive && setSt({ key, loaded: true, error: null }),
+      (e) => alive && setSt({ key, loaded: false, error: fontError(e) }),
     );
     return () => {
       alive = false;
     };
   }, [key]);
-  return state;
+  return [cur.loaded, cur.error];
 }
 
 // Gamepad state, updated from native gamepad events.

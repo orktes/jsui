@@ -2,6 +2,7 @@
 // bridge call. Import this before @orktes/jsui-react.
 
 const nodes = new Map();
+const lottieKeys = new Map(); // JSON -> key
 const calls = [];
 let nextId = 2;
 const ROOT = 1;
@@ -22,7 +23,9 @@ function detach(n) {
   }
 }
 
-const TYPES = new Set(['View', 'Text', 'RawText', 'Image', 'ScrollView', 'TextInput']);
+const TYPES = new Set(['View', 'Text', 'RawText', 'Image', 'ScrollView', 'TextInput', 'LottieView', 'ShaderView']);
+
+const mockResolve = (url) => (/^[a-z]+:/.test(url) ? url : 'http://bundle/' + url.replace(/^\.\//, ''));
 
 export const mock = {
   nodes,
@@ -30,6 +33,8 @@ export const mock = {
   focused: null,
   layouts: new Map(),
   messages: [],
+  lottieData: new Map(), // key -> JSON
+  warming: 0, // preloaded shaders waiting for their warm-up frame (tests set it to 0)
   reset() {
     calls.length = 0;
   },
@@ -141,12 +146,79 @@ globalThis.__jsui_native = {
   flashScrollIndicators(id) {
     calls.push(['flashScrollIndicators', id]);
   },
+  // LottieView (src/render/lottie.cpp): inline compositions by key.
+  lottie: true,
+  lottieData(json) {
+    if (typeof json !== 'string') throw new TypeError('lottieData: expected a JSON string');
+    let key = lottieKeys.get(json);
+    if (!key) {
+      key = 'lottie:' + (lottieKeys.size + 1);
+      lottieKeys.set(json, key);
+      mock.lottieData.set(key, json);
+    }
+    calls.push(['lottieData', key]);
+    return key;
+  },
+  lottieCommand(id, cmd, a, b) {
+    calls.push(['lottieCommand', id, cmd, a, b]);
+    return true;
+  },
+  // ShaderView (src/render/shader_view.cpp): a stand-in compiler that
+  // reports uniforms / children declared on their own lines.
+  shaderInfo(sksl) {
+    if (typeof sksl !== 'string') throw new TypeError('shaderInfo: expected an SkSL string');
+    if (!/\bmain\s*\(/.test(sksl)) return { error: 'error: 1: missing main()' };
+    const uniforms = [];
+    const children = [];
+    for (const m of sksl.matchAll(/(layout\(color\)\s*)?uniform\s+(\w+)\s+(\w+)/g)) {
+      if (m[2] === 'shader') children.push(m[3]);
+      else uniforms.push({ name: m[3], type: m[2], count: 1, color: !!m[1] });
+    }
+    return { uniforms, children };
+  },
+  shaderPreload(sksl, images) {
+    calls.push(images === undefined ? ['shaderPreload', sksl] : ['shaderPreload', sksl, images]);
+    const info = globalThis.__jsui_native.shaderInfo(sksl);
+    if (!info.error) mock.warming++;
+    return info;
+  },
+  shadersWarming() {
+    return mock.warming;
+  },
   postMessage(name, json) {
     mock.messages.push([name, json]);
   },
+  // Fonts (src/render/fonts.cpp contract). URLs containing 'missing' reject
+  // like a 404; with mock.holdFonts set, loads wait for mock.releaseFonts().
   loadFont(family, url, weight, italic) {
     calls.push(['loadFont', family, url, weight, italic]);
-    return Promise.resolve(true);
+    if (/missing/.test(url)) return Promise.reject(new Error('loadFont: 404 ' + url));
+    const done = () => {
+      mock.fontFamilies.add(family);
+      return true;
+    };
+    if (mock.holdFonts) return new Promise((res) => mock.pendingFonts.push(() => res(done())));
+    return Promise.resolve().then(done);
+  },
+  loadFontData(family, bytes, weight, italic) {
+    if (!(bytes instanceof ArrayBuffer || ArrayBuffer.isView(bytes))) throw new TypeError('loadFontData: expected an ArrayBuffer or typed array');
+    calls.push(['loadFontData', family, bytes.byteLength, weight, italic]);
+    if (bytes.byteLength < 4) throw new Error('loadFontData: not a font');
+    mock.fontFamilies.add(family);
+    return true;
+  },
+  unloadFont(family) {
+    calls.push(['unloadFont', family]);
+    return mock.fontFamilies.delete(family);
+  },
+  getFontFamilies() {
+    return Array.from(mock.fontFamilies);
+  },
+  setFontFallbacks(families) {
+    calls.push(['setFontFallbacks', families]);
+  },
+  setDefaultFontFamily(family) {
+    calls.push(['setDefaultFontFamily', family]);
   },
   // Shared state (src/host_state.cpp semantics: a runtime-wide version per change).
   getState(key) {
@@ -191,6 +263,40 @@ globalThis.__jsui_native = {
   bufferKeys() {
     return Array.from(hostBuffers.keys());
   },
+  // Audio (src/js/bridge_audio.cpp): records commands in mock.audio.
+  audioPlay(url, bus, volume, pitch, pan, loop, fadeMs, offset) {
+    const id = mock.nextVoice++;
+    mock.audio.push(['play', { id, url: mockResolve(url), bus, volume, pitch, pan, loop, fadeMs, offset }]);
+    return id;
+  },
+  audioVoice(op, voice, volume, pitch, pan, fadeMs) {
+    mock.audio.push(['voice', { op, voice, volume, pitch, pan, fadeMs }]);
+  },
+  audioBus(bus, volume, muted, fadeMs) {
+    mock.audio.push(['bus', { bus, volume, muted, fadeMs }]);
+  },
+  audioStopAll(bus, fadeMs) {
+    mock.audio.push(['stopAll', { bus, fadeMs }]);
+  },
+  audioPreload(url) {
+    mock.audio.push(['preload', mockResolve(url)]);
+    return mockResolve(url);
+  },
+  audioUnload(url) {
+    mock.audio.push(['unload', mockResolve(url)]);
+    return mockResolve(url);
+  },
+  audioResolve(url) {
+    return mockResolve(url);
+  },
+  // Host textures (src/render/host_textures.cpp): [width, height, version].
+  texture(key) {
+    const e = hostTextures.get(key);
+    return e ? [e.width, e.height, e.version] : undefined;
+  },
+  textureKeys() {
+    return Array.from(hostTextures.keys());
+  },
   // Calls (Host.call -> on_call; the test answers with mock.resolveCall / rejectCall).
   hostCall(name, json, settle) {
     if (!mock.callsEnabled) return 0;
@@ -212,6 +318,7 @@ globalThis.__jsui_native = {
 const hostState = new Map();
 let stateVersion = 1;
 const hostBuffers = new Map(); // key -> {storage, type, count, version}
+const hostTextures = new Map(); // key -> {width, height, version}
 const BUFFER_TYPES = [Float32Array, Float64Array, Int32Array, Uint32Array, Int16Array, Uint16Array, Int8Array, Uint8Array];
 let nextCallId = 1;
 function applyPatch(target, patch) {
@@ -224,6 +331,14 @@ function applyPatch(target, patch) {
   return out;
 }
 Object.assign(mock, {
+  fontFamilies: new Set(['Inter']),
+  holdFonts: false,
+  pendingFonts: [],
+  releaseFonts() {
+    const q = mock.pendingFonts;
+    mock.pendingFonts = [];
+    for (const f of q) f();
+  },
   uiState: [],
   hostCalls: new Map(),
   cancelled: [],
@@ -257,6 +372,28 @@ Object.assign(mock, {
     mock.dirtyBuffers.add(key);
   },
   dirtyBuffers: new Set(),
+  /** Embedder side: jsui_set_texture ({width, height}; undefined removes). Delivered by mock.tickTextures(). */
+  setHostTexture(key, size) {
+    if (size === undefined) hostTextures.delete(key);
+    else hostTextures.set(key, { width: size.width, height: size.height, version: stateVersion++ });
+    mock.dirtyTextures.add(key);
+  },
+  dirtyTextures: new Set(),
+  /** Audio commands the UI sent: [kind, args]. */
+  audio: [],
+  nextVoice: 1,
+  /** Embedder side: jsui_audio_voice_ended / jsui_audio_sound_loaded, delivered at once (a tick). */
+  audioEnded(voice, status = 0) {
+    globalThis.__jsui_onAudio([[0, voice, status]]);
+  },
+  audioLoaded(url, ok = 1, duration = -1) {
+    globalThis.__jsui_onAudio([[1, mockResolve(url), ok, duration]]);
+  },
+  tickTextures() {
+    const keys = Array.from(mock.dirtyTextures);
+    mock.dirtyTextures.clear();
+    if (keys.length) globalThis.__jsui_onHostTexture(keys);
+  },
   tickBuffers() {
     const keys = Array.from(mock.dirtyBuffers);
     mock.dirtyBuffers.clear();

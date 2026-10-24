@@ -1,0 +1,66 @@
+# JSUI
+
+> JSUI is an open-source (MIT), embeddable UI runtime for games: write ordinary React Native, then ship it inside your engine through a small C API (Godot 4, your own C/C++ renderer, or the browser via WebAssembly). JavaScript runs on QuickJS, Yoga lays out the views and Skia paints them, on the GPU (WebGPU, WebGL, Metal, Vulkan, OpenGL) or a CPU raster fallback.
+
+The showcase site (https://orktes.github.io/jsui/) is itself a React Native app rendered by JSUI's WebAssembly build into one canvas. Source, docs and issues live at https://github.com/orktes/jsui.
+
+Key facts:
+
+- Components: `import { View, Text, Image, ScrollView, FlatList, SectionList, TextInput, Modal, Pressable, StyleSheet, Animated } from 'react-native'`. The CLI bundles with esbuild and aliases `react-native` to `@orktes/jsui-react`. No DOM, CSS or browser APIs (`document`, `window`, `localStorage`); `fetch`, timers, `requestAnimationFrame`, `TextEncoder`, `URL` and `performance.now()` exist.
+- Hot updates: `jsui dev` serves the bundle; React Fast Refresh updates the running UI in place on every save, keeping component state, with an error overlay.
+- Built for coding agents: an agent skill, headless `jsui screenshot` / `inspect` / `run` (the CPU WebAssembly runtime in Node, deterministic, no browser), and `jsui dev --shared`, one live app a person watches and plays in the browser while agents drive the same app with `--attach`.
+- Gamepad-first focus: spatial D-pad and stick navigation, focus scopes, focus-visible rings, Tab order, hold-to-repeat.
+- Native animation: `useNativeDriver: true` runs springs, timings, decays and interpolations in C++. Lottie plays natively on Skia's Skottie through lottie-react-native's API (`import LottieView from 'lottie-react-native'`).
+- Custom shaders: `ShaderView` paints a view with your own SkSL (Skia runtime effects); uniforms can be Animated values; `uniform shader content` post-processes the view's children.
+- Host textures: `<HostTexture name="trailer" />` shows a texture the game owns (render target, camera, decoded video) in place; C API `jsui_set_texture` / `jsui_texture_updated`.
+- Game data: shared state by key (`jsui_set_state` / `jsui_patch_state` in C, `useHostState` in React), promise calls (`Host.call` answered by `jsui_resolve_call`; `Host.handle` + `jsui_call_ui` the other way), and per-frame typed arrays (`jsui_set_buffer`, `useHostBufferValue`, `useHostBufferSelector`) that Animated views follow with no JS per frame.
+- Embedding: feed input (mouse, keyboard, touch, gamepad), tick, take pixels or draw into your GPU target. Each `jsui_send_*` returns whether the UI consumed the event, so unconsumed input passes through to the game. Godot 4: the `JsuiView` Control (GDExtension) renders on Godot's own Vulkan or Metal device.
+- Runs in: Godot 4 (GDExtension), the browser (WebAssembly, `@orktes/jsui-web`), iOS (UIKit host, Skia on Metal, `integrations/ios`), Android (NDK NativeActivity host, Skia on GLES, `integrations/android`), example game loops in raylib, SDL3 and sokol (`integrations/raylib`, `integrations/sdl3`, `integrations/sokol`), Unity 6 (a package with a `JsuiView` component, `integrations/unity`), Unreal Engine 5 (a plugin with a `UJsuiWidget` UMG widget, `integrations/unreal`), Rust and Go programs (bindings over the C API with a GPU desktop example app, `bindings/rust`, `bindings/go`), any C/C++ engine or any language with a C FFI (C API), and standalone (`jsui-viewer`, an SDL2 window with dev mode).
+- Verified rendering: reference tests compare every example pixel by pixel with the same code rendered by react-native-web in headless Chrome.
+
+## Install the agent skill
+
+```sh
+npx @orktes/jsui-cli skill install            # -> .claude/skills/jsui/ (--global: ~/.claude/skills/)
+```
+
+Or as a Claude Code plugin: `/plugin marketplace add orktes/jsui`, then `/plugin install jsui@jsui`. The skill teaches the supported React Native subset, gamepad focus, animation, game data, Lottie, shaders, host textures and embedding, and how to verify a UI without a browser.
+
+Note: always use the scoped package (`npx @orktes/jsui-cli ...`) unless `@orktes/jsui-cli` is installed in the project; the unscoped `jsui` npm package belongs to someone else.
+
+## CLI
+
+```sh
+npm install --save-dev @orktes/jsui-cli          # brings @orktes/jsui-react and the headless runtime
+npx jsui build src/app.jsx -o dist/bundle.js     # one IIFE script + dist/assets/*
+npx jsui dev src/app.jsx                         # dev server, hot updates (React Fast Refresh)
+npx jsui dev src/app.jsx --shared                # live app at http://127.0.0.1:5173/shared for a person and agents
+npx jsui screenshot src/app.jsx -o shot.png      # render headless to PNG
+npx jsui inspect src/app.jsx                     # view tree: types, testIDs, text, focus, layout
+npx jsui run src/app.jsx steps.json              # scripted clicks / keys / gamepad / state + expectations
+npx jsui screenshot --attach http://127.0.0.1:5173   # the same tools against a running `jsui dev --shared`
+npx jsui log --attach http://127.0.0.1:5173      # what the person did in the shared view
+npx jsui skill                                   # print the skill
+```
+
+## npm packages
+
+- [@orktes/jsui-react](https://www.npmjs.com/package/@orktes/jsui-react): the React Native API (components, Animated, focus, Host, HostTexture, ShaderView, LottieView).
+- [@orktes/jsui-cli](https://www.npmjs.com/package/@orktes/jsui-cli): `jsui build`, `jsui dev`, headless `screenshot` / `inspect` / `run`, and the agent skill.
+- [@orktes/jsui-web](https://www.npmjs.com/package/@orktes/jsui-web): the browser host (`createJsui({ canvas, bundleUrl })`) with the WebAssembly modules (WebGPU, WebGL and CPU).
+
+## Docs
+
+- [README](https://github.com/orktes/jsui/blob/main/README.md): overview, game data, host textures, Lottie, shaders, building.
+- [Architecture](https://github.com/orktes/jsui/blob/main/docs/ARCHITECTURE.md): runtime design, rendering, input, game data.
+- [Agent skill](https://github.com/orktes/jsui/blob/main/packages/cli/skills/jsui/SKILL.md): the skill coding agents load.
+- [C API header](https://github.com/orktes/jsui/blob/main/include/jsui/jsui.h): the embedding API.
+- [Godot integration](https://github.com/orktes/jsui/blob/main/integrations/godot/README.md): the GDExtension and demo project.
+- [Engine examples](https://github.com/orktes/jsui/blob/main/integrations/README.md): raylib, SDL3, sokol, Unity and Unreal hosts of one shared HUD (input pass-through, per-frame data, GPU and CPU paths).
+- [Web host](https://github.com/orktes/jsui/blob/main/web/README.md): `@orktes/jsui-web` in the browser.
+
+## Optional
+
+- [Showcase site](https://orktes.github.io/jsui/): game screens, input, motion, a live-code playground and an embedding guide, all rendered by JSUI.
+- [Showcase source](https://github.com/orktes/jsui/tree/main/site): the site as an ordinary React Native app.
+- [Releasing](https://github.com/orktes/jsui/blob/main/docs/RELEASING.md): versions and npm publishing.

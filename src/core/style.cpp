@@ -356,9 +356,23 @@ bool alphaChannel(std::string_view s, float* out) {
   return true;
 }
 
+// Color function args, without allocating (an animated color is parsed
+// every frame): the first kMax are kept, size() counts them all.
+struct ColorArgs {
+  static constexpr size_t kMax = 5;
+  std::string_view v[kMax];
+  size_t n = 0;
+  size_t size() const { return n; }
+  std::string_view operator[](size_t i) const { return v[i]; }
+  void push_back(std::string_view a) {
+    if (n < kMax) v[n] = a;
+    n++;
+  }
+};
+
 // Splits color function args: commas or spaces, optional "/ alpha".
-std::vector<std::string_view> colorArgs(std::string_view args) {
-  std::vector<std::string_view> out;
+ColorArgs colorArgs(std::string_view args) {
+  ColorArgs out;
   std::string_view alpha;
   size_t slash = args.find('/');
   std::string_view main = args;
@@ -868,10 +882,9 @@ TransformOp opMatrix(float a, float b, float c, float d, float e, float f) {
   return op;
 }
 
-// Adds one transform function given its name and argument values.
-bool addTransform(std::string_view nameIn, const std::vector<Value>& args, std::vector<TransformOp>* out) {
-  std::string name(nameIn);
-  auto argc = args.size();
+// Adds one transform function given its name and argument values (args[0,
+// argc)): no allocation, so an Animated transform frame re-parses for free.
+bool addTransform(std::string_view name, const Value* args, size_t argc, std::vector<TransformOp>* out) {
   auto ang = [&](size_t i, float* d) { return i < argc && angleFromValue(args[i], d); };
   auto num = [&](size_t i, float* d) { return i < argc && numFromValue(args[i], d); };
   if (name == "translate" || name == "translate3d" || name == "translateX" || name == "translateY") {
@@ -974,10 +987,9 @@ bool parseTransform(const Value& v, std::vector<TransformOp>* out) {
     for (auto& e : v.asArray()) {
       if (!e.isObject() || e.asObject().empty()) continue;
       auto& [k, arg] = *e.asObject().begin();
-      std::vector<Value> args;
-      if (arg.isArray()) args = arg.asArray();
-      else args.push_back(arg);
-      if (!addTransform(k, args, out)) {
+      const Value* args = arg.isArray() ? arg.asArray().data() : &arg;
+      size_t argc = arg.isArray() ? arg.asArray().size() : 1;
+      if (!addTransform(k, args, argc, out)) {
         out->clear();
         return false;
       }
@@ -998,7 +1010,8 @@ bool parseTransform(const Value& v, std::vector<TransformOp>* out) {
       }
       std::string_view name = trim(s.substr(i, open - i));
       std::string_view args = s.substr(open + 1, close - open - 1);
-      if (!addTransform(name, splitArgsAsValues(args), out)) {
+      std::vector<Value> argv = splitArgsAsValues(args);
+      if (!addTransform(name, argv.data(), argv.size(), out)) {
         out->clear();
         return false;
       }
@@ -1129,6 +1142,7 @@ bool textMetricsEqual(const TextStyle& a, const TextStyle& b) {
   return a.fontFamily == b.fontFamily && a.fontSize == b.fontSize && a.fontWeight == b.fontWeight &&
          a.italic == b.italic && a.lineHeight == b.lineHeight && a.lineHeightRelative == b.lineHeightRelative &&
          a.letterSpacing == b.letterSpacing && a.textTransform == b.textTransform && a.fontVariant == b.fontVariant &&
+         a.fontVariationSettings == b.fontVariationSettings && a.fontFeatureSettings == b.fontFeatureSettings &&
          a.writingDirection == b.writingDirection;
 }
 
@@ -1296,6 +1310,61 @@ bool parseFontWeight(const Value& v, int* out) {
   return true;
 }
 
+// CSS font-variation-settings / font-feature-settings: "'wght' 650, 'wdth' 80",
+// "'liga' 0, 'ss01'" (a bare feature = 1, "on"/"off"), or an object
+// {wght: 650}. "normal" or an empty list clears. `bare` is the value of a tag
+// given without one.
+static bool parseFontSettings(const Value& v, float bare, std::vector<FontSetting>* out) {
+  out->clear();
+  auto add = [&](std::string tag, float value) {
+    if (tag.size() != 4) return;
+    for (auto& e : *out)
+      if (e.tag == tag) return void(e.value = value);
+    out->push_back({std::move(tag), value});
+  };
+  if (v.isObject()) {
+    for (auto& [k, e] : v.asObject()) {
+      if (e.isNumber()) add(k, float(e.asNumber()));
+      else if (e.isBool()) add(k, e.asBool() ? 1.f : 0.f);
+    }
+    return true;
+  }
+  if (!v.isString()) return false;
+  std::string s(trim(v.asString()));
+  if (lower(s) == "normal") return true;
+  size_t i = 0;
+  while (i < s.size()) {
+    size_t comma = s.find(',', i);
+    if (comma == std::string::npos) comma = s.size();
+    std::string item(trim(std::string_view(s).substr(i, comma - i)));
+    i = comma + 1;
+    if (item.empty()) continue;
+    std::string tag, rest;
+    if (item[0] == '\'' || item[0] == '"') {
+      size_t close = item.find(item[0], 1);
+      if (close == std::string::npos) continue;
+      tag = item.substr(1, close - 1);
+      rest = std::string(trim(std::string_view(item).substr(close + 1)));
+    } else {
+      size_t sp = item.find_first_of(" \t");
+      tag = item.substr(0, sp);
+      rest = sp == std::string::npos ? "" : std::string(trim(std::string_view(item).substr(sp)));
+    }
+    float value = bare;
+    std::string lr = lower(rest);
+    if (lr == "on") value = 1;
+    else if (lr == "off") value = 0;
+    else if (!rest.empty()) {
+      float n;
+      std::string u;
+      if (!parseNumberUnit(rest, &n, &u) || !u.empty()) continue;
+      value = n;
+    }
+    add(tag, value);
+  }
+  return true;
+}
+
 void parseTextStyle(const StyleMap& style, TextStyle* t) {
   Color c;
   if (parseColor(style["color"], &c)) t->color = c;
@@ -1362,6 +1431,9 @@ void parseTextStyle(const StyleMap& style, TextStyle* t) {
     for (auto tok : tokens(style["fontVariant"].asString())) fv.emplace_back(tok);
     t->fontVariant = std::move(fv);
   }
+  std::vector<FontSetting> fs;
+  if (parseFontSettings(style["fontVariationSettings"], 0, &fs)) t->fontVariationSettings = std::move(fs);
+  if (parseFontSettings(style["fontFeatureSettings"], 1, &fs)) t->fontFeatureSettings = std::move(fs);
   if (style["writingDirection"].isString()) {
     std::string a = lower(style["writingDirection"].asString());
     t->writingDirection = a == "ltr" ? 1 : a == "rtl" ? 2 : 0;
@@ -1509,8 +1581,10 @@ enum PaintGroup : uint32_t {
   kGroupBlend = 1u << 16,
   kGroupOutline = 1u << 17,
   kGroupText = 1u << 18,
+  kGroupLottie = 1u << 19,
+  kGroupShader = 1u << 20,  // ShaderView uniforms ("uniform:<name>"), read when painting
 };
-constexpr uint32_t kAllPaintGroups = (1u << 19) - 1;
+constexpr uint32_t kAllPaintGroups = (1u << 21) - 1;
 
 struct PaintKey {
   const char* key;
@@ -1555,9 +1629,12 @@ constexpr PaintKey kPaintKeys[] = {
     {"fontSize", kGroupText},
     {"fontStyle", kGroupText},
     {"fontVariant", kGroupText},
+    {"fontVariationSettings", kGroupText},
+    {"fontFeatureSettings", kGroupText},
     {"fontWeight", kGroupText},
     {"letterSpacing", kGroupText},
     {"lineHeight", kGroupText},
+    {"lottieProgress", kGroupLottie},
     {"mixBlendMode", kGroupBlend},
     {"objectFit", kGroupResizeMode},
     {"opacity", kGroupOpacity},
@@ -1589,6 +1666,7 @@ constexpr PaintKey kPaintKeys[] = {
 };
 
 uint32_t paintGroupOf(const std::string& key) {
+  if (key.compare(0, 8, "uniform:") == 0) return kGroupShader;
   size_t lo = 0, hi = sizeof(kPaintKeys) / sizeof(kPaintKeys[0]);
   while (lo < hi) {
     size_t mid = (lo + hi) / 2;
@@ -1600,18 +1678,27 @@ uint32_t paintGroupOf(const std::string& key) {
   return 0;
 }
 
+// The groups resolved from one key each, which a native Animated frame
+// writes most (applyStyleGroups reads them without a StyleMap).
+void resolveBackground(const Value& v, ComputedStyle* out) {
+  out->backgroundColor = Color();
+  parseColor(v, &out->backgroundColor);
+}
+void resolveOpacity(const Value& v, ComputedStyle* out) {
+  float f;
+  out->opacity = 1;
+  if (numFromValue(v, &f)) out->opacity = clamp01(f);
+}
+void resolveTransform(const Value* v, ComputedStyle* out) {
+  out->transform.clear();
+  if (v) parseTransform(*v, &out->transform);
+}
+
 // Resets the fields of `groups` to their defaults and parses them from `s`.
 void applyPaintGroups(const StyleMap& s, uint32_t groups, ComputedStyle* out, float pixelRatio) {
   static const ComputedStyle kDefault;
-  float f;
-  if (groups & kGroupBackground) {
-    out->backgroundColor = kDefault.backgroundColor;
-    parseColor(s["backgroundColor"], &out->backgroundColor);
-  }
-  if (groups & kGroupOpacity) {
-    out->opacity = 1;
-    if (numFromValue(s["opacity"], &f)) out->opacity = clamp01(f);
-  }
+  if (groups & kGroupBackground) resolveBackground(s["backgroundColor"], out);
+  if (groups & kGroupOpacity) resolveOpacity(s["opacity"], out);
   if (groups & kGroupBorderColor) parseBorderColors(s, out->borderColor);
   if (groups & kGroupRadii) parseRadii(s, out->borderRadius);
   if (groups & kGroupBorderStyle) {
@@ -1641,10 +1728,7 @@ void applyPaintGroups(const StyleMap& s, uint32_t groups, ComputedStyle* out, fl
     if (s.has("experimental_backgroundImage")) parseBackgroundImage(s["experimental_backgroundImage"], &out->backgroundImages);
     else if (s.has("backgroundImage")) parseBackgroundImage(s["backgroundImage"], &out->backgroundImages);
   }
-  if (groups & kGroupTransform) {
-    out->transform.clear();
-    if (s.has("transform")) parseTransform(s["transform"], &out->transform);
-  }
+  if (groups & kGroupTransform) resolveTransform(s.has("transform") ? &s["transform"] : nullptr, out);
   if (groups & kGroupTransformOrigin) {
     out->transformOrigin[0] = kDefault.transformOrigin[0];
     out->transformOrigin[1] = kDefault.transformOrigin[1];
@@ -1729,33 +1813,18 @@ void applyPaintGroups(const StyleMap& s, uint32_t groups, ComputedStyle* out, fl
     out->text = TextStyle();
     parseTextStyle(s, &out->text);
   }
+  if (groups & kGroupLottie) {
+    out->lottieProgress = kDefault.lottieProgress;
+    if (s["lottieProgress"].isNumber()) {
+      double p = s["lottieProgress"].asNumber();
+      if (p == p) out->lottieProgress = float(std::clamp(p, 0.0, 1.0));
+    }
+  }
 }
 
 }  // namespace
 
-bool styleValueEquals(const Value& a, const Value& b) {
-  if (a.identity() && a.identity() == b.identity()) return true;
-  if (a.isNull() || b.isNull()) return a.isNull() && b.isNull();
-  if (a.isBool()) return b.isBool() && a.asBool() == b.asBool();
-  if (a.isNumber()) return b.isNumber() && a.asNumber() == b.asNumber();
-  if (a.isString()) return b.isString() && a.asString() == b.asString();
-  if (a.isArray()) {
-    if (!b.isArray() || a.asArray().size() != b.asArray().size()) return false;
-    for (size_t i = 0; i < a.asArray().size(); i++)
-      if (!styleValueEquals(a.asArray()[i], b.asArray()[i])) return false;
-    return true;
-  }
-  if (a.isObject()) {
-    if (!b.isObject() || a.asObject().size() != b.asObject().size()) return false;
-    auto ib = b.asObject().begin();
-    for (auto& [k, v] : a.asObject()) {
-      if (k != ib->first || !styleValueEquals(v, ib->second)) return false;
-      ++ib;
-    }
-    return true;
-  }
-  return false;
-}
+bool styleValueEquals(const Value& a, const Value& b) { return a.equals(b); }
 
 float snapBorderWidth(float w, float /*pixelRatio*/) {
   if (!(w > 0)) return w;
@@ -1958,6 +2027,20 @@ bool styleGroupsMoveOnly(uint32_t groups) {
 }
 
 void applyStyleGroups(const Value& style, uint32_t groups, ComputedStyle* out, float pixelRatio) {
+  constexpr uint32_t kOneKey = kGroupBackground | kGroupOpacity | kGroupTransform;
+  if (style.isObject() && (groups & ~kOneKey) == 0) {
+    // An Animated frame's transform / opacity / backgroundColor: a lookup
+    // per key instead of indexing the whole style.
+    static const std::string kBackground = "backgroundColor", kOpacity = "opacity", kTransform = "transform";
+    const Value::Object& o = style.asObject();
+    if (groups & kGroupBackground) resolveBackground(style[kBackground], out);
+    if (groups & kGroupOpacity) resolveOpacity(style[kOpacity], out);
+    if (groups & kGroupTransform) {
+      auto it = o.find(kTransform);
+      resolveTransform(it == o.end() ? nullptr : &it->second, out);
+    }
+    return;
+  }
   const StyleMap sm(style);
   applyPaintGroups(sm, groups, out, pixelRatio);
 }

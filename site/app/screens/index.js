@@ -4,7 +4,8 @@
 //
 // Each module exports its component as default and may export `feature`:
 // { title, points: [...], keys: [...] } describing the JSUI capability it
-// spotlights. Namespace imports keep a missing `feature` export harmless.
+// spotlights, and `preload`: the shaders it draws (precompileShaders()).
+// Namespace imports keep a missing `feature` export harmless.
 import * as MainMenu from './main-menu.jsx';
 import * as Hud from './hud.jsx';
 import * as Inventory from './inventory.jsx';
@@ -14,8 +15,11 @@ import * as Dialogue from './dialogue.jsx';
 import * as Settings from './settings.jsx';
 import * as Loading from './loading.jsx';
 import * as Notifications from './notifications.jsx';
+import * as Cinematic from './cinematic.jsx';
+import * as Victory from './victory.jsx';
+import * as Rift from './rift.jsx';
 
-const mod = (m) => ({ component: m.default, feature: m.feature || null });
+const mod = (m) => ({ component: m.default, feature: m.feature || null, preload: m.preload || null });
 
 export const SCREENS = [
   {
@@ -81,6 +85,30 @@ export const SCREENS = [
     accent: '#ffb23f',
     blurb: 'Toasts, achievements, loot and party invites that stack, time out and animate.',
   },
+  {
+    id: 'cinematic',
+    title: 'Cinematic',
+    ...mod(Cinematic),
+    accent: '#ff7a59',
+    blurb: 'A trailer player around a video the page streams: the picture is a host texture, everything around it is JSUI.',
+  },
+  {
+    id: 'victory',
+    title: 'Victory',
+    ...mod(Victory),
+    accent: '#ffd36b',
+    blurb: 'End-of-match rewards around Lottie animations played natively: segments, scrubbing, team colors, looping icons.',
+  },
+  {
+    id: 'rift',
+    title: 'Rift',
+    ...mod(Rift),
+    accent: '#b46bff',
+    blurb: 'Champion select where everything that glows is your own SkSL shader: nebula, portal, hologram card, post-processed UI, live editing.',
+  },
 ];
+
+// Every screen's shaders (see `preload` above).
+export const SCREEN_SHADERS = SCREENS.flatMap((s) => s.preload || []);
 
 export const screenById = (id) => SCREENS.find((s) => s.id === id);

@@ -14,6 +14,10 @@ namespace jsui {
 
 class FontManager;
 class ImageCache;
+class HostTextures;
+class LottieCache;
+class ShaderEffects;
+class ShaderEffects;
 
 // LayoutAnimation (React Native): animates the next layout pass.
 enum class LayoutAnimCurve : uint8_t { Linear, EaseInEaseOut, EaseIn, EaseOut, Spring, Keyboard };
@@ -103,6 +107,9 @@ class Document {
   // Services used by text measurement and painting. Set by the Runtime.
   FontManager* fonts = nullptr;
   ImageCache* images = nullptr;
+  HostTextures* textures = nullptr;  // host textures (HostTexture views)
+  LottieCache* lotties = nullptr;    // Lottie sources and playing views (LottieView)
+  ShaderEffects* shaders = nullptr;  // compiled SkSL and ShaderViews (render/shader_view.h)
 
   // Called after layout for nodes whose props contain `__events` with
   // "layout" when their layoutRect changed.
@@ -153,6 +160,7 @@ class Document {
   std::vector<Node*> focusHints_;
   std::unordered_map<uint32_t, std::unique_ptr<Node>> nodes_;
   std::unordered_map<uint32_t, Rect> reportedLayout_;
+  uint64_t yogaPass_ = 0;  // the last layout() pass (see afterLayout)
   Node* root_ = nullptr;
   uint32_t nextId_ = 1;
   uint32_t* idCounter_ = &nextId_;

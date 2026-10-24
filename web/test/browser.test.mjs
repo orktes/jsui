@@ -26,6 +26,7 @@ const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STRICT = !!process.env.JSUI_WEB_STRICT;
 const ONLY = process.env.JSUI_WEB_ONLY;  // substring filter on test names
 const DIST = process.env.JSUI_WEB_DIST || 'dist';  // module directory under web/
+const FONTS = path.join(WEB, '../assets/fonts');
 
 if (!fs.existsSync(path.join(WEB, DIST, 'jsui.wasm'))) {
   console.error(`web/${DIST}/jsui.wasm missing: build the wasm target first (see cmake/Emscripten.cmake)`);
@@ -52,11 +53,28 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'text/javascript', 'cache-control': 'no-store' });
     return res.end(dev.bundle);
   }
+  if (url.pathname.startsWith('/audio/tone-')) {  // /audio/tone-<ms>.wav: a 440 Hz sine WAV
+    res.writeHead(200, { 'content-type': 'audio/wav' });
+    return res.end(toneWav(parseInt(url.pathname.slice(12), 10) || 100));
+  }
+  if (url.pathname === '/__red.svg') {  // an image, loaded cross-origin (localhost) without CORS
+    res.writeHead(200, { 'content-type': 'image/svg+xml' });
+    return res.end('<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="red"/></svg>');
+  }
   if (url.pathname === '/slow/solid.js') {  // delayed response for destroy-during-load tests
     return setTimeout(() => {
       res.writeHead(200, { 'content-type': 'text/javascript' });
       res.end(fs.readFileSync(path.join(WEB, 'test/fixtures/solid.js')));
     }, 150);
+  }
+  if (url.pathname.startsWith('/__fonts/')) {  // the repo's fonts (assets/fonts), for the font tests
+    const font = path.join(FONTS, path.basename(decodeURIComponent(url.pathname)));
+    if (!fs.existsSync(font)) {
+      res.writeHead(404);
+      return res.end('not found');
+    }
+    res.writeHead(200, { 'content-type': 'font/ttf' });
+    return fs.createReadStream(font).pipe(res);
   }
   const file = path.normalize(path.join(WEB, decodeURIComponent(url.pathname)));
   if (!file.startsWith(WEB) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
@@ -66,6 +84,15 @@ const server = http.createServer((req, res) => {
   res.writeHead(200, { 'content-type': MIME[path.extname(file)] || 'application/octet-stream' });
   fs.createReadStream(file).pipe(res);
 });
+function toneWav(ms) {
+  const rate = 22050, n = Math.round((rate * ms) / 1000), data = Buffer.alloc(n * 2);
+  for (let i = 0; i < n; i++) data.writeInt16LE(Math.round(Math.sin((2 * Math.PI * 440 * i) / rate) * 8000), i * 2);
+  const h = Buffer.alloc(44);
+  h.write('RIFF', 0); h.writeUInt32LE(36 + data.length, 4); h.write('WAVEfmt ', 8); h.writeUInt32LE(16, 16);
+  h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22); h.writeUInt32LE(rate, 24); h.writeUInt32LE(rate * 2, 28);
+  h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34); h.write('data', 36); h.writeUInt32LE(data.length, 40);
+  return Buffer.concat([h, data]);
+}
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const ORIGIN = `http://127.0.0.1:${server.address().port}`;
 const PAGE = `${ORIGIN}/test/page.html`;
@@ -82,7 +109,15 @@ const browser = await chromium.launch({
 class Skip extends Error {}
 const skip = (why, soft = false) => { const e = new Skip(why); e.soft = soft; throw e; };
 const tests = [];
-const test = (name, fn, ctxOpts = {}) => tests.push({ name, fn, ctxOpts });
+// Tests registered with { worker: true } run twice: as written, and as
+// 'worker: <name>' with createJsui({ worker: true }) (web/jsui-worker.js:
+// the runtime and its rendering in a Worker). mount(), spy() and the other
+// helpers follow the running test's mode (WORKER).
+let WORKER = false;
+const test = (name, fn, ctxOpts = {}, { worker = false } = {}) => {
+  tests.push({ name, fn, ctxOpts, worker: false });
+  if (worker) tests.push({ name: `worker: ${name}`, fn, ctxOpts, worker: true });
+};
 const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
 const near = (px, want, tol = 3) => want.every((v, i) => Math.abs(px[i] - v) <= tol);
 const fmt = (px) => `(${Array.from(px).join(',')})`;
@@ -106,8 +141,8 @@ async function newPage(ctxOpts) {
 // check the same path whichever module is under test; GPU tests pass
 // renderer 'webgl' / 'webgpu' / 'auto' explicitly.
 async function mount(page, opts = {}) {
-  return page.evaluate(async ({ id, w, h, opts, dist }) => {
-    opts = { renderer: 'cpu', moduleUrl: new URL(`../${dist}/jsui.js`, location.href), ...opts };
+  const info = await page.evaluate(async ({ id, w, h, opts, dist, worker }) => {
+    opts = { renderer: 'cpu', moduleUrl: new URL(`../${dist}/jsui.js`, location.href), worker, ...opts };
     const c = document.createElement('canvas');
     c.id = id;
     c.style.width = `${w}px`;
@@ -122,8 +157,11 @@ async function mount(page, opts = {}) {
     if (!opts.expectError) {
       await Promise.race([jsui.whenIdle(), new Promise((r) => setTimeout(r, 5000))]);
     }
-    return { renderer: jsui.renderer, pw: jsui.pixelWidth, ph: jsui.pixelHeight };
-  }, { id: opts.id ?? 'ui', w: opts.width ?? 320, h: opts.height ?? 200, opts: opts.jsui ?? {}, dist: DIST });
+    return { renderer: jsui.renderer, pw: jsui.pixelWidth, ph: jsui.pixelHeight, worker: !!jsui.worker };
+  }, { id: opts.id ?? 'ui', w: opts.width ?? 320, h: opts.height ?? 200, opts: opts.jsui ?? {}, dist: DIST, worker: WORKER });
+  // Worker mode must not have fallen back to the main thread.
+  if ((opts.jsui?.worker ?? WORKER) && !info.worker) throw new Error('worker mode fell back to the main thread');
+  return info;
 }
 
 // Mounts with renderer 'webgl' (Skia Ganesh on WebGL); SKIPs when the module
@@ -179,8 +217,10 @@ async function screenPixels(page, sel, points) {
   }, { b64: png.toString('base64'), points });
 }
 
-// Wraps module exports to record calls (decoding string args where named).
+// Wraps module exports to record calls (decoding string args where named);
+// in worker mode the worker's (ProxyView._debug).
 async function spy(page, id = 'ui') {
+  if (WORKER) return page.evaluate((id) => window.hosts[id]._debug('spy'), id);
   await page.evaluate((id) => {
     const jsui = window.hosts[id], M = jsui.module;
     const calls = window.calls = [];
@@ -200,7 +240,13 @@ async function spy(page, id = 'ui') {
     }
   }, id);
 }
-const takeCalls = (page) => page.evaluate(() => window.calls.splice(0));
+const takeCalls = (page, id = 'ui') => page.evaluate(({ id, worker }) => (worker ? window.hosts[id]._debug('calls')
+  : window.calls.splice(0)), { id, worker: WORKER });
+// Resolves once runtime `id` had a frame with nothing left to load or paint
+// (in worker mode: input posted so far was applied, its events came back).
+const idle = (page, id = 'ui') => page.evaluate((id) => window.hosts[id].whenIdle(), id);
+// Waits for `fn(arg)` in the page to be truthy.
+const until = (page, fn, arg, timeout = 3000) => page.waitForFunction(fn, arg, { timeout, polling: 10 });
 
 const BANDS = [[10, 25], [10, 75], [10, 125], [10, 175]];
 const RED = [255, 0, 0, 255], GREEN = [0, 255, 0, 255], BLUE = [0, 0, 255, 255], HALF_RED = [255, 127, 127, 255];
@@ -213,11 +259,11 @@ for (const renderer of ['cpu', '2d']) {
     assert(info.pw === 320 && info.ph === 200, `backing store ${info.pw}x${info.ph}`);
     const px = await screenPixels(page, '#ui', BANDS);
     [RED, GREEN, BLUE, HALF_RED].forEach((want, i) => assert(near(px[i], want), `band ${i}: ${fmt(px[i])} want ${fmt(want)}`));
-    const raw = await page.evaluate(() => { const p = window.hosts.ui.readPixels(); const o = (175 * p.width + 10) * 4; return Array.from(p.data.slice(o, o + 4)); });
+    const raw = await page.evaluate(async () => { const p = await window.hosts.ui.readPixelsAsync(); const o = (175 * p.width + 10) * 4; return Array.from(p.data.slice(o, o + 4)); });
     assert(near(raw, [128, 0, 0, 128], 1), `premultiplied frame ${fmt(raw)}`);
     const below = await page.evaluate(() => getComputedStyle(document.getElementById('ui')).cursor);
     assert(below === 'default', `cursor ${below}`);
-  });
+  }, {}, { worker: true });
 }
 
 test('devicePixelRatio 2: backing store and 1:1 blit', async ({ page }) => {
@@ -227,7 +273,7 @@ test('devicePixelRatio 2: backing store and 1:1 blit', async ({ page }) => {
   assert(near(px[0], RED) && near(px[1], GREEN), `edge at y=100: ${fmt(px[0])} ${fmt(px[1])}`);
   assert(near(px[2], GREEN) && near(px[3], BLUE), `edge at y=200: ${fmt(px[2])} ${fmt(px[3])}`);
   assert(near(px[4], RED), `x=600: ${fmt(px[4])}`);
-}, { deviceScaleFactor: 2 });
+}, { deviceScaleFactor: 2 }, { worker: true });
 
 test('canvas resize updates the viewport without stretching', async ({ page }) => {
   await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
@@ -238,7 +284,7 @@ test('canvas resize updates the viewport without stretching', async ({ page }) =
   const px = await screenPixels(page, '#ui', [[10, 25], [10, 75], [10, 250], [380, 25]]);
   assert(near(px[0], RED) && near(px[1], GREEN), `bands moved/stretched: ${fmt(px[0])} ${fmt(px[1])}`);
   assert(near(px[2], [255, 255, 255, 255]) && near(px[3], [255, 255, 255, 255]), `outside bands: ${fmt(px[2])} ${fmt(px[3])}`);
-});
+}, {}, { worker: true });
 
 test('WebGL context loss and restore repaints', async ({ page }) => {
   await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
@@ -262,7 +308,27 @@ test('timers drive repaints', async ({ page }) => {
   await frames(page, 2);
   const [px] = await screenPixels(page, '#ui', [BANDS[2]]);
   assert(near(px, [255, 255, 0, 255]), `band 2 after timer: ${fmt(px)}`);
-});
+}, {}, { worker: true });
+
+test('profiling: getPerf() reports phase times and counters', async ({ page }) => {
+  await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
+  await frames(page, 2);
+  const perf = await page.evaluate(async () => {
+    const h = window.hosts.ui;
+    h.setProfiling(true);
+    await h.getPerf();  // reset (a Promise in worker mode)
+    h.postMessage('paint', { color: '#ff00ff' });
+    for (let i = 0; i < 3; i++) await new Promise((r) => requestAnimationFrame(r));
+    await h.whenIdle();
+    const p = await h.getPerf();
+    h.setProfiling(false);
+    return p;
+  });
+  assert(perf && typeof perf.paint_us === 'number' && typeof perf.bridge_calls === 'number', `getPerf: ${JSON.stringify(perf)}`);
+  const total = perf.js_us + perf.commit_us + perf.style_us + perf.layout_us + perf.paint_us + perf.gpu_submit_us +
+    perf.other_us;
+  assert(total > 0, `no time measured: ${JSON.stringify(perf)}`);
+}, {}, { worker: true });
 
 test('host -> UI messages (jsui.postMessage)', async ({ page }) => {
   await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
@@ -271,7 +337,7 @@ test('host -> UI messages (jsui.postMessage)', async ({ page }) => {
   const [px] = await screenPixels(page, '#ui', [BANDS[0]]);
   if (near(px, RED)) skip('engine hostMessage() is a skeleton stub');
   assert(near(px, [255, 0, 255, 255]), `band 0 after message: ${fmt(px)}`);
-});
+}, {}, { worker: true });
 
 test('UI -> host messages with UTF-8 payload', async ({ page }) => {
   await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
@@ -280,7 +346,7 @@ test('UI -> host messages with UTF-8 payload', async ({ page }) => {
   if (!msgs.length) skip('engine __jsui_native.postMessage not implemented yet');
   const ready = msgs.find(([n]) => n === 'ready');
   assert(ready && ready[1].text === 'héllo ✓ 日本' && ready[1].bands === 4, `messages ${JSON.stringify(msgs)}`);
-});
+}, {}, { worker: true });
 
 test('pointer, wheel, keyboard and text input are forwarded', async ({ page }) => {
   await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
@@ -321,7 +387,7 @@ test('pointer, wheel, keyboard and text input are forwarded', async ({ page }) =
   calls = await takeCalls(page);
   has(([n, k, c, d]) => n === 'send_key' && c === 'KeyW' && d === 0, 'KeyW released on blur');
   await page.keyboard.up('KeyW');
-});
+}, {}, { worker: true });
 
 test('touch input is forwarded', async ({ page }) => {
   await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
@@ -332,7 +398,7 @@ test('touch input is forwarded', async ({ page }) => {
   const touches = calls.filter(([n]) => n === 'send_touch');
   assert(touches.length >= 2 && touches[0][2] === 0 && touches.at(-1)[2] === 2, `touch phases ${JSON.stringify(touches)}`);
   assert(touches[0][3] === 30 && touches[0][4] === 130, `touch pos ${JSON.stringify(touches[0])}`);
-}, { hasTouch: true });
+}, { hasTouch: true }, { worker: true });
 
 test('gamepad buttons / axes / connection are forwarded', async ({ page }) => {
   await page.evaluate(() => {
@@ -361,16 +427,17 @@ test('gamepad buttons / axes / connection are forwarded', async ({ page }) => {
     ['set_gamepad_connected', 0, 0, null],
   ];
   assert(JSON.stringify(calls) === JSON.stringify(want), `gamepad calls ${JSON.stringify(calls)}`);
-});
+}, {}, { worker: true });
 
 test('click reaches the UI and UI messages the host', async ({ page }) => {
   await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
   await page.mouse.click(100, 75);
   await frames(page, 3);
+  await idle(page);
   const [px] = await screenPixels(page, '#ui', [BANDS[1]]);
   if (near(px, GREEN)) skip('InputManager hit testing is a skeleton stub');
   assert(near(px, [255, 255, 255, 255]), `band 1 after click: ${fmt(px)}`);
-});
+}, {}, { worker: true });
 
 test('bundle errors are reported (404 and throwing bundle)', async ({ page }) => {
   await mount(page, { id: 'a', jsui: { bundleUrl: 'fixtures/missing.js', expectError: true } });
@@ -380,7 +447,7 @@ test('bundle errors are reported (404 and throwing bundle)', async ({ page }) =>
   assert(ea.some((e) => /failed to load bundle/.test(e) && /404/.test(e) && /fixtures\/missing\.js/.test(e)), `404 error: ${JSON.stringify(ea)}`);
   assert(eb.some((e) => /fixture exploded/.test(e)), `throw error: ${JSON.stringify(eb)}`);
   return { allowErrors: true };
-});
+}, {}, { worker: true });
 
 test('several runtimes on one page are independent', async ({ page }) => {
   await mount(page, { id: 'a', jsui: { bundleUrl: 'fixtures/bands.js' } });
@@ -394,7 +461,62 @@ test('several runtimes on one page are independent', async ({ page }) => {
   await frames(page, 2);
   const [p2] = await screenPixels(page, '#a', [BANDS[2]]);
   assert(near(p2, [255, 255, 0, 255]), `a keeps running after b destroyed: ${fmt(p2)}`);
-});
+}, {}, { worker: true });
+
+// UI audio on real Web Audio (web/jsui-audio.js): locked until a gesture
+// (one-shots end failed, loops wait), a click unlocks it, voices finish /
+// stop, preloads report their duration, and destroy closes the context.
+test('audio: autoplay lock, unlock by a click, voices end, preload, destroy', async ({ page }) => {
+  // Playwright's evaluate() is a user activation (navigator.userActivation
+  // .hasBeenActive turns true, and the host would start audio at once): hide it.
+  await page.addInitScript(() => Object.defineProperty(navigator, 'userActivation', { value: { hasBeenActive: false } }));
+  await page.reload();
+  await page.waitForFunction(() => window.testReady);
+  await mount(page, { jsui: { bundleUrl: 'fixtures/audio.js' } });
+  const msgs = (name) => page.evaluate((n) => window.hosts.ui.messages.filter(([m]) => m === n).map(([, d]) => d), name);
+  const send = (name, data) => page.evaluate(([n, d]) => window.hosts.ui.postMessage(n, d), [name, data]);
+  const reports = async () => (await msgs('audio')).flat();
+  const waitFor = async (fn, what, ms = 5000) => {
+    for (const end = Date.now() + ms; Date.now() < end; await page.waitForTimeout(50)) if (await fn()) return;
+    throw new Error('timed out: ' + what + ' ' + JSON.stringify(await reports()));
+  };
+  // Worker mode: the UI's answer arrives a message later.
+  const voiceOf = async (tag) => {
+    const find = async () => (await msgs('voice')).find((v) => v.tag === tag);
+    await waitFor(find, 'voice ' + tag);
+    return (await find()).voice;
+  };
+  const url = (ms) => `${ORIGIN}/audio/tone-${ms}.wav`;
+  assert(!(await page.evaluate(() => window.hosts.ui.audio.unlocked)), 'locked before a gesture');
+  await send('play', { tag: 'early', url: url(100), bus: 'ui' });
+  await send('play', { tag: 'music', url: url(1000), bus: 'music', loop: true, fade: 200 });
+  await send('preload', { url: url(250) });
+  const early = await voiceOf('early'), music = await voiceOf('music');
+  await waitFor(async () => (await reports()).some((r) => r[0] === 0 && r[1] === early), 'early one-shot ended');
+  assert((await reports()).find((r) => r[1] === early)[2] === -1, 'a locked one-shot ends FAILED');
+  await waitFor(async () => (await reports()).some((r) => r[0] === 1), 'preload reported');
+  const loaded = (await reports()).find((r) => r[0] === 1);
+  assert(loaded[2] === 1 && Math.abs(loaded[3] - 0.25) < 0.01, `preload decoded while locked: ${JSON.stringify(loaded)}`);
+
+  await page.mouse.click(10, 10);  // a user activation
+  await page.waitForFunction(() => window.hosts.ui.audio.unlocked && window.hosts.ui.audio.context.state === 'running');
+  await waitFor(() => page.evaluate(() => window.hosts.ui.audio.stats.playing === 1), 'the waiting loop started');
+  await send('play', { tag: 'shot', url: url(150), bus: 'ui' });
+  const shot = await voiceOf('shot');
+  await waitFor(async () => (await reports()).some((r) => r[0] === 0 && r[1] === shot), 'one-shot finished');
+  assert((await reports()).find((r) => r[1] === shot)[2] === 0, 'one-shot ends FINISHED');
+  await send('bus', { bus: 'music', volume: 0.3, muted: true });
+  await send('stop', { voice: music, fade: 100 });
+  await waitFor(async () => (await reports()).some((r) => r[0] === 0 && r[1] === music), 'loop stopped');
+  assert((await reports()).find((r) => r[1] === music)[2] === 1, 'stopped loop ends STOPPED');
+  const state = await page.evaluate(async () => {
+    const a = window.hosts.ui.audio, ctx = a.context;
+    window.hosts.ui.destroy();
+    await new Promise((r) => setTimeout(r, 50));
+    return ctx.state;
+  });
+  assert(state === 'closed', `context closed with the last runtime: ${state}`);
+}, {}, { worker: true });
 
 test('moduleVersions: only deployed modules are tried, jsui.js and jsui.wasm carry the version', async ({ page }) => {
   const requests = [];
@@ -413,7 +535,35 @@ test('bundleSource option and loadSource()', async ({ page }) => {
   await frames(page, 3);
   const [px] = await screenPixels(page, '#ui', [[10, 50]]);
   assert(near(px, [0, 128, 128, 255]), `bundleSource: ${fmt(px)}`);
-});
+}, {}, { worker: true });
+
+test('fonts: registerFont, loadFont, unregisterFont, fallbacks, default family', async ({ page }) => {
+  await mount(page, { jsui: { bundleUrl: 'fixtures/solid.js' } });
+  const r = await page.evaluate(async () => {
+    const h = window.hosts.ui;
+    const italic = await (await fetch('/__fonts/Inter-Italic.ttf')).arrayBuffer();
+    const out = {
+      load: await h.loadFont('Test Display', '/__fonts/Inter-Bold.ttf'),
+      loadOpts: await h.loadFont('Test Display', '/__fonts/Inter-Regular.ttf', { weight: 400, style: 'normal' }),
+      missing: await h.loadFont('Missing', '/__fonts/missing.ttf'),
+      bytes: await h.registerFont('Test Italic', new Uint8Array(italic), 400, true),
+      fromFile: await h.registerFont(null, italic),  // family, weight and style from the file
+      bad: await h.registerFont('Bad', new Uint8Array([1, 2, 3, 4])),
+    };
+    h.setFontFallbacks(['Test Italic', 'Test Display']);
+    h.setFontFallbacks(null);
+    h.setDefaultFontFamily('Test Display');
+    h.setDefaultFontFamily('Inter');
+    out.unregister = await h.unregisterFont('Test Display');
+    out.unregisterAgain = await h.unregisterFont('Test Display');
+    await h.whenIdle();
+    return out;
+  });
+  const want = { load: true, loadOpts: true, missing: false, bytes: true, fromFile: true, bad: false, unregister: true,
+    unregisterAgain: false };
+  assert(JSON.stringify(r) === JSON.stringify(want), `fonts: ${JSON.stringify(r)}, want ${JSON.stringify(want)}`);
+  return { allowErrors: true };  // the missing font's 404 and the refused bytes are logged
+}, {}, { worker: true });
 
 for (const renderer of ['auto', 'webgl', 'webgpu']) test(`create/destroy cycles: no heap growth, destroy during load is safe (${renderer})`, async ({ page }) => {
   const result = await page.evaluate(async ({ dist, renderer }) => {
@@ -724,7 +874,9 @@ test('webgpu: full-frame changes paint straight into the canvas, small ones thro
     const canvas = passes.filter((p) => p.startsWith(`pass color ${a.pixelWidth}x${a.pixelHeight} `));
     return { canvas, passes: passes.length, loads: canvas.filter((p) => p.includes('load=load')).length,
       clears: canvas.filter((p) => p.includes('load=clear')).reduce((n, p) => n + Number(p.split(' x').pop()), 0),
-      copies: window.__gpuCounts.get('GPUCommandEncoder.copyTextureToTexture') ?? 0 };
+      copies: window.__gpuCounts.get('GPUCommandEncoder.copyTextureToTexture') ?? 0,
+      submits: window.__gpuCounts.get('GPUQueue.submit') ?? 0,
+      encoders: window.__gpuCounts.get('GPUDevice.createCommandEncoder') ?? 0 };
   }, { name, color });
   const same = async (what) => {
     const d = await frameDiff(page, ['a', 'b']);
@@ -739,8 +891,9 @@ test('webgpu: full-frame changes paint straight into the canvas, small ones thro
   // (a copy of the canvas) and only the damage over it, and the damage is
   // copied back for the next frame. Still one pass: no retained render
   // target to load and store (two extra full-frame passes on a 4K canvas).
+  // The copy is recorded with the pass: one command encoder and one submit.
   for (let i = 0; i < 5; i++) r = await step('box', i % 2 ? '#00ff00' : '#0000ff');
-  assert(r.passes === 1 && r.clears === 1 && r.copies === 1,
+  assert(r.passes === 1 && r.clears === 1 && r.copies === 1 && r.submits === 1 && r.encoders === 1,
     `small change: not one pass plus a damage copy-back: ${JSON.stringify(r)}`);
   await same('after small changes');
   r = await step('bg', '#102030');
@@ -819,7 +972,7 @@ test('webgpu: steady animation frames (interactions showcase): retained, few pas
   if (renderers.some((n) => n !== 'webgpu')) skip(`no WebGPU renderer with web/${DIST} (${renderers})`, DIST !== 'dist-gpu');
   const r = await page.evaluate(async () => {
     const { a, b } = window.hosts;
-    b._wgpu.flags = 4;  // JSUI_WEBGPU_NO_RETAIN: 'b' repaints every frame fully
+    if (b._wgpu) b._wgpu.flags = 4;  // JSUI_WEBGPU_NO_RETAIN: 'b' repaints every frame fully
     let t = performance.now();
     const sum = (re) => [...window.__gpuCounts].filter(([k]) => re.test(k)).reduce((n, [, v]) => n + v, 0);
     const rows = [];
@@ -890,7 +1043,7 @@ test('webgpu: raster cache: subtrees repainted unchanged are drawn from textures
   if (renderers.some((n) => n !== 'webgpu')) skip(`no WebGPU renderer with web/${DIST} (${renderers})`, DIST !== 'dist-gpu');
   const r = await page.evaluate(async () => {
     const { a, b } = window.hosts;
-    b._wgpu.flags = 16;  // JSUI_WEBGPU_NO_RASTER_CACHE
+    if (b._wgpu) b._wgpu.flags = 16;  // JSUI_WEBGPU_NO_RASTER_CACHE
     let t = performance.now();
     const sum = (re) => [...window.__gpuCounts].filter(([k]) => re.test(k)).reduce((n, [, v]) => n + v, 0);
     const draws = { a: 0, b: 0 }, offscreen = { a: 0, b: 0 };
@@ -954,7 +1107,7 @@ test('webgpu: raster cache: a list scrolled at 2x draws its rows from textures',
   if (renderers.some((n) => n !== 'webgpu')) skip(`no WebGPU renderer with web/${DIST} (${renderers})`, DIST !== 'dist-gpu');
   const r = await page.evaluate(async () => {
     const { a, b } = window.hosts;
-    b._wgpu.flags = 16;  // JSUI_WEBGPU_NO_RASTER_CACHE
+    if (b._wgpu) b._wgpu.flags = 16;  // JSUI_WEBGPU_NO_RASTER_CACHE
     let t = performance.now();
     const sum = (re) => [...window.__gpuCounts].filter(([k]) => re.test(k)).reduce((n, [, v]) => n + v, 0);
     // Texels of the offscreen passes (textures rendered), not the canvas'.
@@ -1021,7 +1174,7 @@ test('webgpu: entrance of the interactions showcase: composited layers equal pla
     window.t0 = performance.now();
     const [a, b] = await Promise.all([make(), make()]);
     window.hosts = { a, b };
-    b._wgpu.flags = 8;  // JSUI_WEBGPU_NO_LAYER_CACHE
+    if (b._wgpu) b._wgpu.flags = 8;  // JSUI_WEBGPU_NO_LAYER_CACHE
     return [a.renderer, b.renderer];
   }, DIST);
   if (renderers.some((n) => n !== 'webgpu')) skip(`no WebGPU renderer with web/${DIST} (${renderers})`, DIST !== 'dist-gpu');
@@ -1073,7 +1226,7 @@ test('webgpu: fading and moving layers are composited from cached textures, exac
   }, DIST);
   if (renderers.some((n) => n !== 'webgpu')) skip(`no WebGPU renderer with web/${DIST} (${renderers})`, DIST !== 'dist-gpu');
   await page.evaluate(() => {
-    window.hosts.b._wgpu.flags = 8;  // JSUI_WEBGPU_NO_LAYER_CACHE: a plain layer every frame
+    if (window.hosts.b._wgpu) window.hosts.b._wgpu.flags = 8;  // JSUI_WEBGPU_NO_LAYER_CACHE: a plain layer every frame
     window.t = performance.now();
   });
   // Steps both runtimes through `moves`; returns the offscreen passes of 'a'
@@ -1118,6 +1271,65 @@ test('webgpu: fading and moving layers are composited from cached textures, exac
     d = await frameDiff(page, ['a', 'b']);
     assert(d.max <= 1, `child change ${JSON.stringify(cm)}: stale composited layer: ${JSON.stringify(d)}`);
   }
+}, { viewport: { width: 900, height: 400 } });
+
+test('webgpu: static backdrop: damage repainted over a texture of it, exact', async ({ page }) => {
+  // The layers fixture's background and gradient strip are what it paints
+  // first and they do not change: each damage rect of the fading panel is
+  // repainted over a texture of them (one draw instead of a clear and their
+  // draws), the same pixels as painting them ('b', JSUI_WEBGPU_NO_BACKDROP),
+  // and a change to the strip renders the texture again.
+  await page.addInitScript({ path: path.join(WEB, 'test/gpu-count.js') });
+  await page.reload();
+  await page.waitForFunction(() => window.testReady);
+  const renderers = await page.evaluate(async (dist) => {
+    const make = () => {
+      const c = document.createElement('canvas');
+      c.style.width = '400px';
+      c.style.height = '300px';
+      document.body.appendChild(c);
+      return window.createJsui({ canvas: c, bundleUrl: 'fixtures/layers.js', renderer: 'webgpu', autoStart: false,
+        moduleUrl: new URL(`../${dist}/jsui.js`, location.href) });
+    };
+    const [a, b] = await Promise.all([make(), make()]);
+    window.hosts = { a, b };
+    return [a.renderer, b.renderer];
+  }, DIST);
+  if (renderers.some((n) => n !== 'webgpu')) skip(`no WebGPU renderer with web/${DIST} (${renderers})`, DIST !== 'dist-gpu');
+  // Fades the panel (over the strip) in both for `n` frames; returns the
+  // draws of each.
+  const fade = (n, msg) => page.evaluate(async ({ n, msg }) => {
+    const { a, b } = window.hosts;
+    if (b._wgpu) b._wgpu.flags = 32;  // JSUI_WEBGPU_NO_BACKDROP
+    if (msg) for (const h of [a, b]) h.postMessage('backdrop', msg);
+    window.t ??= performance.now();
+    const draws = { a: 0, b: 0 };
+    for (let i = 0; i < n; i++) {
+      window.t += 16.67;
+      for (const k of ['a', 'b']) {
+        window.hosts[k].postMessage('move', { opacity: 0.4 + 0.03 * (i % 10), x: 0, y: 40 });
+        window.__gpuCounts.clear();
+        window.hosts[k].frame(window.t);
+        draws[k] += [...window.__gpuCounts].filter(([key]) => /\.draw(Indexed)?$/.test(key)).reduce((s, [, v]) => s + v, 0);
+      }
+      await a._wgpu.device.queue.onSubmittedWorkDone();
+    }
+    return draws;
+  }, { n, msg });
+  await fade(4);
+  let draws = await fade(8);
+  let d = await frameDiff(page, ['a', 'b']);
+  assert(!d.missing && !d.size && d.max === 0, `over the backdrop texture: differs from painting it: ${JSON.stringify(d)}`);
+  assert(draws.a < draws.b, `damage not repainted over the backdrop texture: ${JSON.stringify(draws)}`);
+  // The strip changes: painted directly until it is still again, then over
+  // a new texture of it.
+  await fade(1, { backgroundImage: 'linear-gradient(90deg, #00c8ff, #ffe600)', left: 24 });
+  d = await frameDiff(page, ['a', 'b']);
+  assert(d.max === 0, `backdrop changing: ${JSON.stringify(d)}`);
+  draws = await fade(8);
+  d = await frameDiff(page, ['a', 'b']);
+  assert(d.max === 0, `stale backdrop texture: ${JSON.stringify(d)}`);
+  assert(draws.a < draws.b, `no new backdrop texture: ${JSON.stringify(draws)}`);
 }, { viewport: { width: 900, height: 400 } });
 
 test('webgpu: devicePixelRatio 2 and resize', async ({ page }) => {
@@ -1228,6 +1440,7 @@ test('passThrough: unhandled input reaches the page under the canvas', async ({ 
 
   await page.mouse.click(50, 25);  // the button
   await frames(page);
+  await idle(page);
   let r = await take();
   assert(r.press === 1 && r.game === '', `button click ${JSON.stringify(r)}`);
   const hot = await page.evaluate(() => document.getElementById('ui').style.pointerEvents);
@@ -1237,6 +1450,7 @@ test('passThrough: unhandled input reaches the page under the canvas', async ({ 
   await page.mouse.wheel(0, 100);
   await page.mouse.click(200, 150, { button: 'right' });
   await frames(page);
+  await idle(page);
   r = await take();
   const sorted = r.game.split(',').sort().join();
   assert(r.press === 0 && sorted === 'click,contextmenu,pointerdown,pointerdown,pointerup,pointerup,wheel',
@@ -1250,13 +1464,14 @@ test('passThrough: unhandled input reaches the page under the canvas', async ({ 
   await page.mouse.move(50, 25, { steps: 4 });
   await page.mouse.up();
   await frames(page);
+  await idle(page);
   r = await take();
   assert(r.press === 0 && r.game.startsWith('pointerdown') && r.game.includes('pointerup'), `game drag ${JSON.stringify(r)}`);
 
   // Unconsumed keys reach the page; the keyboard isn't taken by unhandled clicks.
   const focused = await page.evaluate(() => document.activeElement?.tagName);
   assert(focused !== 'TEXTAREA', `focus after a pass-through click: ${focused}`);
-});
+}, {}, { worker: true });
 
 // ---------------------------------------------------------------- surfaces
 // One runtime, several canvases (createSurface): own props, pixels, input,
@@ -1298,28 +1513,31 @@ test('surfaces: one runtime on several canvases', async ({ page }) => {
   await page.mouse.down();
   await page.mouse.up();
   await frames(page);
+  await idle(page);
   const press = await page.evaluate(() => window.hosts.ui.messages.filter(([n]) => n === 'press').map(([, d]) => d));
   assert(press.join() === String(made.plate), `press ${press}`);
 
   // New props repaint just that surface; destroy unmounts and drops the canvas createSurface made.
   await page.evaluate(() => window.surfaces.plate.setProps({ color: '#00ff00' }));
   await frames(page);
+  await idle(page);
   const [green] = await screenPixels(page, '#plate', [[60, 20]]);
   assert(near(green, GREEN), `plate after setProps ${fmt(green)}`);
   const after = await page.evaluate(async () => {
     window.surfaces.plate.destroy();
     await new Promise(requestAnimationFrame);
     const j = window.hosts.ui;
+    await j.whenIdle();
     return { stops: j.messages.filter(([n]) => n === 'stop').map(([, d]) => d), canvas: !!document.getElementById('plate'),
       count: j.surfaces.length };
   });
   assert(after.stops.join() === String(made.plate) && !after.canvas && after.count === 1, `destroy ${JSON.stringify(after)}`);
-});
+}, {}, { worker: true });
 
 test('surfaces: createJsui without a canvas, component picks the main app', async ({ page }) => {
-  const r = await page.evaluate(async (dist) => {
+  const r = await page.evaluate(async ({ dist, worker }) => {
     const j = await window.createJsui({ renderer: 'cpu', moduleUrl: new URL(`../${dist}/jsui.js`, location.href),
-      bundleUrl: 'fixtures/surfaces.js', component: 'Main', initialProps: { color: '#ff0000' } });
+      bundleUrl: 'fixtures/surfaces.js', component: 'Main', initialProps: { color: '#ff0000' }, worker });
     const msgs = [];
     j.on('message', (n, d) => msgs.push([n, d]));
     const c = document.createElement('canvas');
@@ -1328,13 +1546,14 @@ test('surfaces: createJsui without a canvas, component picks the main app', asyn
     document.body.appendChild(c);
     j.createSurface(c, { component: 'W', initialProps: { color: '#0000ff' }, renderer: 'cpu' });
     await Promise.race([j.whenIdle(), new Promise((res) => setTimeout(res, 3000))]);
-    return { msgs, renderer: j.renderer ?? null };
-  }, DIST);
+    return { msgs, renderer: j.renderer ?? null, worker: !!j.worker };
+  }, { dist: DIST, worker: WORKER });
+  assert(r.worker === WORKER, `worker mode ${r.worker}`);
   const runs = r.msgs.filter(([n]) => n === 'run').map(([, d]) => `${d.tag}:${d.appKey}`);
   assert(runs.includes('1:Main') && runs.some((s) => s.endsWith(':W')), `runs ${runs}`);
   const [px] = await screenPixels(page, '#w', [[25, 25]]);
   assert(near(px, BLUE), `widget ${fmt(px)}`);
-});
+}, {}, { worker: true });
 
 // Many GPU surfaces: more canvases than the browser's ~16 live WebGL contexts,
 // all drawn through the runtime's shared GPU context (one offscreen WebGL
@@ -1428,10 +1647,609 @@ for (const mode of ['webgl', 'webgpu']) {
   });
 }
 
+// ------------------------------------------------- game data, textures, scroll
+// Host API round trips that return Promises in worker mode (awaited here in
+// both modes).
+test('game data and calls: state, frame data, callUi, Host.call', async ({ page }) => {
+  await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js' } });
+  const r = await page.evaluate(async () => {
+    const j = window.hosts.ui, out = {};
+    const message = async (name) => {
+      for (let i = 0; i < 200; i++) {
+        const m = j.messages.find(([n]) => n === name);
+        if (m) return m[1];
+        await new Promise((res) => setTimeout(res, 10));
+      }
+      return 'timeout';
+    };
+    out.set1 = await j.setState('k', { a: 1 });
+    out.set2 = await j.setState('k', { a: 1 });
+    out.patch = await j.patchState('k', { b: 2 });
+    out.get = await j.getState('k');
+    out.missing = await j.getState('nope');
+    out.buf = await j.setBuffer('b', Float32Array.of(1, 2, 3));
+    const m = j.mapBuffer('b', Float32Array, 3);
+    out.mapped = Array.from(m);
+    m[1] = 5;
+    out.commit = await j.commitBuffer('b');
+    j.postMessage('buf');
+    out.seen = await message('buf');
+    j.handle('host.greet', (a) => `hi ${a.who}`);
+    j.postMessage('greet', { who: 'ui' });
+    out.sum = await j.callUi('ui.add', { a: 2, b: 3 });
+    try { await j.callUi('ui.nope', {}); } catch (e) { out.err = [e.name, e.message]; }
+    out.greeted = await message('greeted');
+    out.removed = await j.removeBuffer('b');
+    out.removedAgain = await j.removeBuffer('b');
+    return out;
+  });
+  const want = { set1: true, set2: false, patch: true, get: { a: 1, b: 2 }, missing: undefined, buf: true, mapped: [1, 2, 3],
+    commit: true, seen: [1, 5, 3], sum: 5, removed: true, removedAgain: false };
+  for (const [k, v] of Object.entries(want)) assert(JSON.stringify(r[k]) === JSON.stringify(v), `${k}: ${JSON.stringify(r[k])}, want ${JSON.stringify(v)}`);
+  assert(r.err?.[0] === 'UiCallError' && /ui\.nope/.test(r.err[1]), `callUi rejection ${JSON.stringify(r.err)}`);
+  assert(r.greeted?.ok && JSON.parse(r.greeted.payload) === 'hi ui', `Host.call ${JSON.stringify(r.greeted)}`);
+}, {}, { worker: true });
+
+// Host textures from the page's sources (worker mode: converted here, sent
+// to the worker; bindVideo captures VideoFrames here).
+for (const renderer of ['cpu', 'webgpu']) test(`host textures: ImageData, canvas, raw pixels, a bound video (${renderer})`, async ({ page }) => {
+  const info = await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js', renderer } });
+  if (renderer === 'webgpu') skipNoBackend('webgpu', info.renderer);
+  const at = async () => {
+    await frames(page, 2);
+    await idle(page);
+    return (await screenPixels(page, '#ui', [[50, 50]]))[0];
+  };
+  const set = (what) => page.evaluate(async (what) => {
+    const j = window.hosts.ui;
+    if (what === 'imagedata') {
+      const d = new ImageData(4, 4);
+      for (let i = 0; i < d.data.length; i += 4) d.data.set([255, 0, 0, 255], i);
+      return j.setTexture('tex', d);
+    }
+    if (what === 'canvas') {
+      const c = document.createElement('canvas');
+      c.width = c.height = 8;
+      const g = c.getContext('2d');
+      g.fillStyle = '#00ff00';
+      g.fillRect(0, 0, 8, 8);
+      return j.setTexture('tex', c);
+    }
+    if (what === 'raw') {
+      const data = new Uint8Array(2 * 2 * 4);
+      for (let i = 0; i < data.length; i += 4) data.set([0, 0, 255, 255], i);
+      return j.setTexture('tex', { data, width: 2, height: 2 });
+    }
+    return null;
+  }, what);
+  let ok = await set('imagedata');
+  assert(ok === true, `setTexture(ImageData): ${ok}`);
+  let px = await at();
+  assert(near(px, RED), `ImageData texture ${fmt(px)}`);
+  const backend = await page.evaluate(() => window.hosts.ui.textureBackend);
+  assert(backend === (renderer === 'webgpu' ? 'webgpu' : 'pixels'), `textureBackend ${backend}`);
+  ok = await set('canvas');
+  assert(ok === true, `setTexture(canvas): ${ok}`);
+  px = await at();
+  assert(near(px, GREEN), `canvas texture ${fmt(px)}`);
+  ok = await set('raw');
+  assert(ok === true, `setTexture(raw pixels): ${ok}`);
+  px = await at();
+  assert(near(px, BLUE), `raw pixel texture ${fmt(px)}`);
+  // A <video> playing a canvas' stream, bound with bindVideo.
+  const state = await page.evaluate(async () => {
+    const c = document.createElement('canvas');
+    c.width = c.height = 32;
+    const g = c.getContext('2d');
+    let n = 0;
+    const paint = () => { g.fillStyle = n++ % 2 ? '#ffff00' : '#ffff01'; g.fillRect(0, 0, 32, 32); };
+    paint();
+    window.__paint = setInterval(paint, 20);
+    const v = document.createElement('video');
+    Object.assign(v, { muted: true, playsInline: true, srcObject: c.captureStream(30) });
+    Object.assign(v.style, { position: 'fixed', left: '0px', top: '300px', width: '4px', height: '4px' });
+    document.body.appendChild(v);
+    try { await v.play(); } catch (e) { return `play: ${e}`; }
+    for (let i = 0; i < 100 && v.readyState < 2; i++) await new Promise((r) => setTimeout(r, 20));
+    window.__unbind = window.hosts.ui.bindVideo('tex', v);
+    await new Promise((r) => setTimeout(r, 300));
+    return v.readyState;
+  });
+  if (typeof state === 'string' || state < 2) skip(`no video playback in this browser (${state})`, true);
+  px = await at();
+  assert(near(px, [255, 255, 0, 255], 24), `video texture ${fmt(px)}`);
+  ok = await page.evaluate(() => { clearInterval(window.__paint); return window.hosts.ui.removeTexture('tex'); });
+  assert(ok === true, `removeTexture: ${ok}`);
+  px = await at();
+  assert(near(px, [255, 255, 255, 255]), `after removeTexture ${fmt(px)}`);
+}, {}, { worker: true });
+
+// Playwright WebKit 26 on macOS loses every WebGL context of the page right
+// after a frame callback on a playing video. Simulated: the first
+// requestVideoFrameCallback loses the view's context (in the worker, in
+// worker mode). bindVideo then polls the video once per display frame, and
+// the texture keeps following it.
+test('bindVideo: a WebGL context lost right after a video frame callback switches to polled frames', async ({ page }) => {
+  const info = await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js', renderer: 'webgl' } });
+  skipNoBackend('webgl', info.renderer);
+  const at = async () => {
+    await frames(page, 3);
+    await idle(page);
+    return (await screenPixels(page, '#ui', [[50, 50]]))[0];
+  };
+  const r = await page.evaluate(async (worker) => {
+    const j = window.hosts.ui;
+    window.__logs = [];
+    j.on('log', (level, text) => window.__logs.push(text));
+    const c = document.createElement('canvas');
+    c.width = c.height = 32;
+    const g = c.getContext('2d');
+    window.__color = '#ff0000';
+    window.__paint = setInterval(() => { g.fillStyle = window.__color; g.fillRect(0, 0, 32, 32); }, 20);
+    const v = document.createElement('video');
+    Object.assign(v, { muted: true, playsInline: true, srcObject: c.captureStream(30) });
+    Object.assign(v.style, { position: 'fixed', left: '0px', top: '300px', width: '4px', height: '4px' });
+    document.body.appendChild(v);
+    try { await v.play(); } catch (e) { return `play: ${e}`; }
+    for (let i = 0; i < 100 && v.readyState < 2; i++) await new Promise((r) => setTimeout(r, 20));
+    if (typeof v.requestVideoFrameCallback !== 'function') return 'no requestVideoFrameCallback';
+    const rvfc = v.requestVideoFrameCallback.bind(v);
+    window.__rvfc = 0;
+    v.requestVideoFrameCallback = (cb) => {
+      if (window.__rvfc++ === 0) {
+        if (worker) j._debug('loseGL');
+        else {
+          const ext = j._gl.getExtension('WEBGL_lose_context');
+          ext.loseContext();
+          setTimeout(() => ext.restoreContext(), 50);
+        }
+      }
+      return rvfc(cb);
+    };
+    j.bindVideo('tex', v);
+    await new Promise((r) => setTimeout(r, 600));
+    return v.readyState;
+  }, WORKER);
+  if (typeof r === 'string' || r < 2) skip(`no video playback in this browser (${r})`, true);
+  const logs = await page.evaluate(() => window.__logs);
+  assert(logs.some((l) => /bound videos: frames polled/.test(l)), `no switch to polling: ${JSON.stringify(logs)}`);
+  const calls = await page.evaluate(() => window.__rvfc);
+  let px = await at();
+  assert(near(px, RED, 24), `video texture after the restore ${fmt(px)}`);
+  await page.evaluate(() => { window.__color = '#00ff00'; });
+  await page.waitForTimeout(200);
+  px = await at();
+  assert(near(px, GREEN, 24), `video texture, polled, after the video changed ${fmt(px)}`);
+  await page.evaluate(() => { window.__color = '#0000ff'; });
+  await page.waitForTimeout(200);
+  px = await at();
+  assert(near(px, BLUE, 24), `video texture, polled, after the video changed again ${fmt(px)}`);
+  const later = await page.evaluate(() => { clearInterval(window.__paint); return window.__rvfc; });
+  assert(later === calls && calls <= 3, `frame callbacks after the switch: ${calls} then ${later}`);
+}, {}, { worker: true });
+
+// A host texture set while the context is lost, before the loss was handled
+// (WebKit: the poster arrived 0.26 s in, right after the loss): kept, and
+// shown once the context is back. The source is an ImageBitmap of the
+// caller's, so in worker mode only the worker's copy can bring it back.
+test('setTexture while the WebGL context is lost (its event not handled yet): shown after the restore', async ({ page }) => {
+  const info = await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js', renderer: 'webgl' } });
+  skipNoBackend('webgl', info.renderer);
+  const r = await page.evaluate(async (worker) => {
+    const j = window.hosts.ui;
+    const logs = [];
+    let restored = false;
+    j.on('log', (level, text) => {
+      if (level >= 2) logs.push(text);
+      if (/WebGL context restored/.test(text)) restored = true;
+    });
+    const c = document.createElement('canvas');
+    c.width = c.height = 8;
+    const g = c.getContext('2d');
+    g.fillStyle = '#00ff00';
+    g.fillRect(0, 0, 8, 8);
+    const bitmap = await createImageBitmap(c);
+    let ok;
+    if (worker) {
+      // Lost in the worker right before this texture is set there.
+      if (!(await j._debug('loseGL', { onTexture: true }))) return null;
+      ok = await j.setTexture('tex', bitmap);
+    } else {
+      const gl = j._gl, ext = gl?.getExtension('WEBGL_lose_context');
+      if (!ext) return null;
+      const CREATE = ['createProgram', 'createShader', 'createTexture'];
+      ext.loseContext();
+      for (const k of CREATE) gl[k] = () => null;  // as in WebKit
+      ok = j.setTexture('tex', bitmap);
+      for (const k of CREATE) delete gl[k];
+      setTimeout(() => ext.restoreContext(), 50);
+    }
+    for (let i = 0; i < 100 && !restored; i++) await new Promise((res) => setTimeout(res, 10));
+    for (let i = 0; i < 2; i++) await new Promise(requestAnimationFrame);
+    await j.whenIdle();
+    return { ok, restored, logs };
+  }, WORKER);
+  if (!r) skip('WEBGL_lose_context unavailable');
+  assert(r.ok === false, `setTexture on the lost context: ${r.ok}`);
+  assert(r.restored && !r.logs.length, `restore: ${JSON.stringify(r)}`);
+  const [px] = await screenPixels(page, '#ui', [[50, 50]]);
+  assert(near(px, GREEN), `texture after the restore ${fmt(px)}`);
+}, {}, { worker: true });
+
+// A cross-origin image without CORS: one warning, the same in both modes, and
+// not tried again until its URL changes (in worker mode not even sent). In
+// worker mode its ImageBitmap cannot be posted: the ops sent with it still go.
+test('a cross-origin <img> without CORS: one warning, not tried again; other textures unaffected', async ({ page }) => {
+  await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js' } });
+  const r = await page.evaluate(async (port) => {
+    const j = window.hosts.ui;
+    const logs = [];
+    j.on('log', (level, text) => logs.push([level, text]));
+    const img = new Image();
+    img.src = `http://localhost:${port}/__red.svg`;
+    await img.decode();
+    const ok = [await j.setTexture('tex', img), await j.setTexture('tex', img)];
+    // In one batch: an ImageBitmap of it, and a texture that is fine.
+    const bitmap = await createImageBitmap(img);
+    const d = new ImageData(4, 4);
+    for (let i = 0; i < d.data.length; i += 4) d.data.set([0, 255, 0, 255], i);
+    const both = await Promise.all([j.setTexture('other', bitmap), j.setTexture('tex', d)]);
+    for (let i = 0; i < 2; i++) await new Promise(requestAnimationFrame);
+    await j.whenIdle();
+    return { ok, both, logs };
+  }, server.address().port);
+  assert(r.ok.every((v) => v === false), `setTexture(<img>): ${JSON.stringify(r.ok)}`);
+  assert(r.both[0] === false && r.both[1] === true, `setTexture(ImageBitmap), setTexture(ImageData): ${JSON.stringify(r.both)}`);
+  const cors = /^host texture "(\w+)": the source is cross-origin and not CORS-enabled .* not uploaded until its URL changes$/;
+  assert(r.logs.length === 2 && r.logs.every(([level, t]) => level === 2 && cors.test(t)) &&
+    r.logs.map(([, t]) => t.match(cors)[1]).join() === 'tex,other', `logs: ${JSON.stringify(r.logs)}`);
+  const [px] = await screenPixels(page, '#ui', [[50, 50]]);
+  assert(near(px, GREEN), `texture sent with the cross-origin one ${fmt(px)}`);
+}, {}, { worker: true });
+
+// WebKit (Playwright 26, macOS): an ImageBitmap made before the GPU process
+// was lost uploads blank after the restore, without an error. Worker mode
+// keeps ImageBitmaps (of <img> and canvases, made on the page): simulated
+// with 'loseGL' blankBitmaps. The page captures its <img> again once the
+// worker placed its textures anew; for a caller's ImageBitmap, which the page
+// cannot make again, it logs once that it may be blank.
+test('worker: a GPU reset that blanks the kept ImageBitmaps: the page sends its <img> again', async ({ page }) => {
+  const info = await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js', renderer: 'webgl', worker: true } });
+  skipNoBackend('webgl', info.renderer);
+  const r = await page.evaluate(async () => {
+    const j = window.hosts.ui;
+    const logs = window.__logs = [];
+    j.on('log', (level, text) => logs.push([level, text]));
+    const c = document.createElement('canvas');
+    c.width = c.height = 8;
+    const g = c.getContext('2d');
+    g.fillStyle = '#ff0000';
+    g.fillRect(0, 0, 8, 8);
+    const img = new Image();
+    img.src = c.toDataURL();
+    await img.decode();
+    const ok = [await j.setTexture('tex', img), await j.setTexture('other', await createImageBitmap(c))];
+    for (let i = 0; i < 2; i++) await new Promise(requestAnimationFrame);
+    await j.whenIdle();
+    return { ok, lost: await j._debug('loseGL', { blankBitmaps: true }) };
+  });
+  assert(r.ok.every((v) => v === true), `setTexture before the loss: ${JSON.stringify(r.ok)}`);
+  if (!r.lost) skip('WEBGL_lose_context unavailable');
+  let px;
+  for (let i = 0; i < 20; i++) {
+    await frames(page, 2);
+    await idle(page);
+    [px] = await screenPixels(page, '#ui', [[50, 50]]);
+    if (near(px, RED)) break;
+  }
+  const logs = await page.evaluate(() => window.__logs);
+  assert(logs.some(([, t]) => /WebGL context restored/.test(t)), `no restore: ${JSON.stringify(logs)}`);
+  assert(near(px, RED), `<img> texture after the reset ${fmt(px)}`);
+  const blank = logs.filter(([, t]) => /host texture "other": the GPU was reset/.test(t));
+  const tex = logs.filter(([, t]) => /host texture "tex"/.test(t));
+  const warnings = logs.filter(([level]) => level >= 2);
+  assert(blank.length === 1 && !tex.length && !warnings.length, `logs: ${JSON.stringify(logs)}`);
+});
+
+// The wheel scrolls a ScrollView and a click lands on the row under it.
+// Worker mode: also how long after an input the page's hit map shows its
+// effect (the pass-through / preventDefault answers come from it).
+test('scroll: the wheel scrolls a ScrollView, clicks land on the scrolled rows', async ({ page }) => {
+  await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js' } });
+  // Worker mode: the first hitTest() asks the worker for the hit map, which comes with the next frame.
+  await page.evaluate(() => window.hosts.ui.hitTest(0, 0));
+  await frames(page, 2);
+  await idle(page);
+  const hits = await page.evaluate(() => [130, 50, 335].map((x) => window.hosts.ui.hitTest(x, 10)));
+  assert(hits.join() === '3,0,0', `hitTest over a row, the texture, nothing: ${hits}`);
+  await page.mouse.move(200, 100);
+  await page.mouse.wheel(0, 120);
+  await frames(page, 3);
+  await idle(page);
+  let [px] = await screenPixels(page, '#ui', [[130, 10]]);
+  assert(near(px, BLUE), `row 3 after scrolling 120px: ${fmt(px)}`);
+  await page.mouse.click(200, 10);
+  await frames(page, 2);
+  await idle(page);
+  let rows = await page.evaluate(() => window.hosts.ui.messages.filter(([n]) => n === 'row').map(([, i]) => i));
+  assert(rows.join() === '3', `clicked rows ${rows}`);
+  // 30 more wheel steps of 10px, one per ~frame, each timed until the page's
+  // hit map moved (worker mode).
+  const r = await page.evaluate(async () => {
+    const j = window.hosts.ui, c = j.canvas, box = c.getBoundingClientRect();
+    const waits = [];
+    // A task yield that lets the hit map's message in (setTimeout(0) is
+    // clamped to 4 ms after a few nested calls); one channel, reused.
+    const ch = new MessageChannel();
+    let wake = null;
+    ch.port1.onmessage = () => wake?.();
+    const yieldTask = () => new Promise((res) => {
+      wake = res;
+      ch.port2.postMessage(0);
+    });
+    if (j.hitMapStats) {  // count from here
+      for (const k of ['latency', 'transit']) j.hitMapStats[k] = { n: 0, mean: 0, max: 0, samples: [] };
+    }
+    for (let i = 0; i < 30; i++) {
+      const before = j.hitMapStats?.updates ?? 0, t0 = performance.now();
+      c.dispatchEvent(new WheelEvent('wheel', { clientX: box.left + 200, clientY: box.top + 100, deltaY: 10,
+        bubbles: true, cancelable: true }));
+      if (j.hitMapStats) {
+        while (j.hitMapStats.updates === before && performance.now() - t0 < 1000) await yieldTask();
+        waits.push(performance.now() - t0);
+      }
+      await new Promise(requestAnimationFrame);
+    }
+    ch.port1.close();
+    await j.whenIdle();
+    const s = j.hitMapStats;
+    const pct = (a, p) => { const v = [...a].sort((x, y) => x - y); return v[Math.min(v.length - 1, Math.floor(p * v.length))]; };
+    return s && { waits, p50: pct(waits, 0.5), p95: pct(waits, 0.95), max: Math.max(...waits),
+      updates: s.updates, regions: s.regions,
+      latency: { p50: pct(s.latency.samples, 0.5), p95: pct(s.latency.samples, 0.95), max: s.latency.max },
+      transit: { mean: s.transit.mean, max: s.transit.max }, misses: s.misses, lookups: s.lookups };
+  });
+  await page.mouse.click(200, 10);
+  await frames(page, 2);
+  await idle(page);
+  rows = await page.evaluate(() => window.hosts.ui.messages.filter(([n]) => n === 'row').map(([, i]) => i));
+  assert(rows.join() === '3,10', `clicked rows after 420px ${rows}`);
+  [px] = await screenPixels(page, '#ui', [[130, 10]]);
+  assert(near(px, GREEN), `row 10 after scrolling 420px: ${fmt(px)}`);
+  if (r) {
+    const f = (x) => x.toFixed(1);
+    console.log(`      hit map: input -> page has the new map: median ${f(r.p50)} ms, p95 ${f(r.p95)}, ` +
+      `max ${f(r.max)} (step ${r.waits.indexOf(r.max)}); ` +
+      `frame start -> page: median ${f(r.latency.p50)}, p95 ${f(r.latency.p95)}, max ${f(r.latency.max)}; ` +
+      `postMessage: mean ${f(r.transit.mean)}, max ${f(r.transit.max)}; ${r.updates} maps of ~${r.regions} rects, ` +
+      `${r.misses} mispredictions in ${r.lookups} lookups`);
+    assert(r.misses === 0, `${r.misses} mispredictions`);
+  }
+}, {}, { worker: true });
+
+// A lost WebGL context can be noticed before its webglcontextlost event (a
+// later task): WebKit, switching the showcase to its video, lost the context
+// and a frame and a texture upload ran on it first (in worker mode: a failed
+// shader compile, then emscripten's glCreateProgram threw on the null program,
+// then the upload's createTexture). Same here with WEBGL_lose_context: GL
+// work in the task that lost it, then the restore. Nothing may throw or log,
+// and the restored frame equals one that was never lost.
+// 'before': lost before the frame, its event not delivered yet. 'mid': lost
+// in the middle of the frame, at its first shader compile, as WebKit does
+// when a GL call finds its GPU process gone (Skia's next glCreateProgram /
+// glCreateShader then get null from WebGL: web/native/jsui_webgl_lost.js).
+for (const when of ['before', 'mid']) test(`WebGL context lost ${when === 'mid' ? 'in the middle of a frame' : 'before its event'}: no throw, everything back right after the restore`, async ({ page }) => {
+  const info = await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js', renderer: 'webgl' } });
+  skipNoBackend('webgl', info.renderer);
+  await mount(page, { id: 'ref', width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js', renderer: 'webgl' } });
+  const r = await page.evaluate(async ({ worker, mid }) => {
+    const j = window.hosts.ui, ref = window.hosts.ref;
+    const logs = [], renderers = [];
+    let restoredAt = 0;
+    j.on('log', (level, text) => {
+      // A throw the frame's guard took for the loss counts too: the GL glue must not throw.
+      if (level >= 2 || /during a frame/.test(text)) logs.push(text);
+      if (/WebGL context restored/.test(text)) restoredAt = performance.now();
+    });
+    j.on('renderer', (name, reason) => renderers.push([name, reason]));
+    const t0 = performance.now();
+    let res;
+    if (worker) {
+      res = await j._debug('loseGL', { work: true, mid });
+    } else {
+      const gl = j._gl, ext = gl?.getExtension('WEBGL_lose_context');
+      if (!ext) return null;
+      // As the worker's 'loseGL' hook: WebKit's create* calls return null once lost.
+      const CREATE = ['createProgram', 'createShader', 'createTexture'];
+      const lose = () => {
+        ext.loseContext();
+        for (const k of CREATE) gl[k] = () => null;
+      };
+      let fired = !mid;
+      if (mid) {
+        gl.compileShader = function (sh) {
+          delete gl.compileShader;
+          fired = true;
+          lose();
+          return gl.compileShader(sh);
+        };
+      } else {
+        lose();
+      }
+      res = { error: null, fired };
+      try {
+        j.postMessage('fx', null);
+        const img = new ImageData(8, 8);
+        img.data.fill(255);
+        j.setTexture('tex', img);
+        j.frame();
+      } catch (e) {
+        res.error = String(e?.stack ?? e);
+      }
+      delete gl.compileShader;
+      for (const k of CREATE) delete gl[k];
+      res.fired = fired;
+      if (fired) setTimeout(() => ext.restoreContext(), 50);
+    }
+    if (!res) return null;
+    // The reference gets the same, without a loss.
+    ref.postMessage('fx', null);
+    const img = new ImageData(8, 8);
+    img.data.fill(255);
+    await ref.setTexture('tex', img);
+    for (let i = 0; i < 100 && !restoredAt; i++) await new Promise((r) => setTimeout(r, 10));
+    // Right after the restore: two frames, then the canvas must be back.
+    for (let i = 0; i < 2; i++) await new Promise(requestAnimationFrame);
+    await Promise.all([j.whenIdle(), ref.whenIdle()]);
+    return { ...res, logs, renderers, renderer: j.renderer, restored: restoredAt ? restoredAt - t0 : null };
+  }, { worker: WORKER, mid: when === 'mid' });
+  if (!r) skip('WEBGL_lose_context unavailable');
+  assert(r.fired, `the frame compiled no shader: nothing was lost (${JSON.stringify(r)})`);
+  assert(!r.error, `GL work on the lost context threw: ${r.error}`);
+  assert(!r.logs.length, `logged: ${JSON.stringify(r.logs)}`);
+  assert(r.restored != null, `no restore logged: ${JSON.stringify(r)}`);
+  assert(!r.renderers.length && r.renderer === info.renderer, `renderer changed: ${JSON.stringify(r)}`);
+  // On screen first (frameDiff's read-back draws a frame of its own).
+  const [tex, fx] = await screenPixels(page, '#ui', [[50, 50], [85, 145]]);
+  assert(near(tex, [255, 255, 255, 255]), `texture after the restore ${fmt(tex)}`);
+  assert(!near(fx, [255, 255, 255, 255]) && fx[3] > 200, `'fx' after the restore ${fmt(fx)}`);
+  const d = await frameDiff(page, ['ui', 'ref']);
+  assert(!d.missing && !d.size && d.max === 0, `restored frame vs never lost: ${JSON.stringify(d)}`);
+}, {}, { worker: true });
+
+// -------------------------------------------------------------- worker mode
+// The same frame as main mode, pixel for pixel (text included: measured and
+// shaped in the worker).
+for (const renderer of ['cpu', 'webgl', 'webgpu']) test(`worker: pixels equal main mode (effects fixture, ${renderer})`, async ({ page }) => {
+  const a = await mount(page, { id: 'a', width: 480, height: 320, jsui: { bundleUrl: 'fixtures/effects.js', renderer, worker: false } });
+  if (renderer !== 'cpu') skipNoBackend(renderer, a.renderer);
+  const b = await mount(page, { id: 'b', width: 480, height: 320, jsui: { bundleUrl: 'fixtures/effects.js', renderer, worker: true } });
+  assert(a.renderer === b.renderer, `renderers: main ${a.renderer}, worker ${b.renderer}`);
+  const d = await frameDiff(page, ['a', 'b']);
+  assert(!d.missing && !d.size, `readback ${JSON.stringify(d)}`);
+  assert(d.max === 0, `worker frame differs from the main-thread one: ${JSON.stringify(d)}`);
+  const pts = [[20, 20], [100, 60], [240, 160], [400, 280], [60, 250]];
+  const [pa, pb] = [await screenPixels(page, '#a', pts), await screenPixels(page, '#b', pts)];
+  pts.forEach((_, i) => assert(near(pa[i], pb[i], 1), `screen at ${pts[i]}: main ${fmt(pa[i])}, worker ${fmt(pb[i])}`));
+});
+
+// The hit map (jsui_hit_regions, most of the worker frame's extras) is
+// computed only while the page needs it: a pointer over the canvas (wheel
+// events ask it), hitTest() called, or pass-through.
+test('worker: the hit map is computed only while the page needs it', async ({ page }) => {
+  await page.mouse.move(700, 500);  // away from the canvas
+  await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js', worker: true } });
+  const step = (fn) => page.evaluate(async (fn) => {
+    const j = window.hosts.ui;
+    if (fn === 'fx') j.postMessage('fx', null);  // a repaint
+    if (fn === 'hitTest') j.hitTest(10, 10);
+    for (let i = 0; i < 3; i++) await new Promise(requestAnimationFrame);
+    await j.whenIdle();
+    return { calls: (await j._debug('info')).hitCalls, updates: j.hitMapStats.updates };
+  }, fn);
+  const idle = await step('fx');
+  assert(idle.calls === 0 && idle.updates === 0, `computed without a consumer: ${JSON.stringify(idle)}`);
+  await page.mouse.move(100, 100);  // over the canvas
+  const over = await step('fx');
+  assert(over.calls > 0 && over.updates > 0, `pointer over the canvas: ${JSON.stringify(over)}`);
+  await page.mouse.move(700, 500);
+  const left = await step('fx');
+  const later = await step('fx');
+  assert(later.calls === left.calls, `computed after the pointer left: ${JSON.stringify([left, later])}`);
+  const asked = await step('hitTest');
+  const kept = await step('fx');
+  assert(asked.calls > later.calls && kept.calls > asked.calls, `after hitTest(): ${JSON.stringify([later, asked, kept])}`);
+  await mount(page, { id: 'pt', width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js', worker: true, passThrough: true } });
+  const pt = await page.evaluate(async () => (await window.hosts.pt._debug('info')).hitCalls);
+  assert(pt > 0, `passThrough: ${pt} hit map computations`);
+});
+
+test('worker: WebGL context loss: restored, then lost for good (CPU on a fresh canvas)', async ({ page }) => {
+  const info = await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js', renderer: 'webgl', contextRestoreTimeout: 100, worker: true } });
+  skipNoBackend('webgl', info.renderer);
+  const r = await page.evaluate(async () => {
+    const j = window.hosts.ui, old = j.canvas;
+    const events = [];
+    j.on('renderer', (name, reason) => events.push([name, reason]));
+    j.on('log', () => {});  // the fallback warning is expected
+    if (!(await j._debug('loseGL'))) return null;  // restored after 50 ms
+    for (let i = 0; i < 10; i++) await new Promise(requestAnimationFrame);
+    await j.whenIdle();
+    const restored = { events: events.length, renderer: j.renderer };
+    await j._debug('loseGLForGood');
+    for (let i = 0; i < 100 && !events.length; i++) await new Promise((res) => setTimeout(res, 20));
+    await j.whenIdle();
+    return { restored, events, renderer: j.renderer, replaced: j.canvas !== old && !old.isConnected && j.canvas.isConnected,
+      id: j.canvas.id };
+  });
+  if (!r) skip('WEBGL_lose_context unavailable');
+  assert(r.restored.events === 0 && r.restored.renderer.startsWith('gpu-'), `after a restore: ${JSON.stringify(r.restored)}`);
+  assert(r.events.length === 1 && r.replaced && r.id === 'ui', `fallback: ${JSON.stringify(r)}`);
+  assert(r.renderer.startsWith('webgl'), `fallback renderer ${r.renderer}`);
+  const px = await screenPixels(page, '#ui', BANDS);
+  [RED, GREEN, null, HALF_RED].forEach((want, i) => want && assert(near(px[i], want), `band ${i} after fallback: ${fmt(px[i])}`));
+});
+
+test('worker: WebGPU device loss recreates the renderer and repaints', async ({ page }) => {
+  const info = await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js', renderer: 'webgpu', worker: true } });
+  skipNoBackend('webgpu', info.renderer);
+  const r = await page.evaluate(async () => {
+    const j = window.hosts.ui;
+    const events = [];
+    j.on('renderer', (name, reason) => events.push([name, reason]));
+    j.on('log', () => {});
+    await j._debug('destroyDevice');
+    for (let i = 0; i < 80 && !events.length; i++) await new Promise((res) => setTimeout(res, 25));
+    for (let i = 0; i < 4; i++) await new Promise(requestAnimationFrame);
+    await j.whenIdle();
+    return { events, renderer: j.renderer };
+  });
+  assert(r.events.length, 'no renderer event after device loss');
+  const px = await screenPixels(page, '#ui', BANDS);
+  [RED, GREEN, null, HALF_RED].forEach((want, i) => want && assert(near(px[i], want), `band ${i} after loss (${r.renderer}): ${fmt(px[i])}`));
+  console.log(`      after device loss: ${r.renderer} (${r.events.map((e) => e[1]).join(', ')})`);
+  return { allowErrors: true };  // Skia logs the buffer maps the loss aborted
+});
+
+test("worker: frames are timed by the worker's requestAnimationFrame, or the page's (workerLoop 'main')", async ({ page }) => {
+  await mount(page, { id: 'a', jsui: { bundleUrl: 'fixtures/bands.js', worker: true } });
+  await mount(page, { id: 'b', jsui: { bundleUrl: 'fixtures/bands.js', worker: true, workerLoop: 'main' } });
+  await page.waitForTimeout(300);  // band 2's 200 ms timer
+  await frames(page, 3);
+  const info = await page.evaluate(async () => Promise.all(['a', 'b'].map((id) => window.hosts[id]._debug('info'))));
+  assert(info[0].rafs && !info[0].ticks, `worker rAF: ${JSON.stringify(info[0])}`);
+  assert(info[1].ticks, `page-timed: ${JSON.stringify(info[1])}`);
+  for (const id of ['a', 'b']) {
+    const [px] = await screenPixels(page, `#${id}`, [BANDS[2]]);
+    assert(near(px, [255, 255, 0, 255]), `${id}: band 2 after its timer ${fmt(px)}`);
+  }
+});
+
+test('worker: without Worker, createJsui({ worker: true }) runs on the main thread with one warning', async ({ page }) => {
+  const warnings = [];
+  page.on('console', (m) => { if (m.type() === 'warning' && /worker mode/.test(m.text())) warnings.push(m.text()); });
+  const r = await page.evaluate(async (dist) => {
+    window.Worker = undefined;
+    const c = document.createElement('canvas');
+    c.id = 'ui';
+    Object.assign(c.style, { width: '320px', height: '200px' });
+    document.body.appendChild(c);
+    const j = await window.createJsui({ canvas: c, worker: true, renderer: 'cpu', bundleUrl: 'fixtures/bands.js',
+      moduleUrl: new URL(`../${dist}/jsui.js`, location.href) });
+    await j.whenIdle();
+    return { worker: !!j.worker, renderer: j.renderer, sameCanvas: j.canvas === c };
+  }, DIST);
+  assert(!r.worker && r.sameCanvas && r.renderer.startsWith('webgl'), `fallback ${JSON.stringify(r)}`);
+  assert(warnings.length === 1 && /no Worker/.test(warnings[0]), `warnings ${JSON.stringify(warnings)}`);
+  const px = await screenPixels(page, '#ui', BANDS);
+  [RED, GREEN].forEach((want, i) => assert(near(px[i], want), `band ${i}: ${fmt(px[i])}`));
+});
+
 // -------------------------------------------------------------------- run
 let failed = 0, skipped = 0, passed = 0;
 for (const t of tests) {
   if (ONLY && !t.name.includes(ONLY)) continue;
+  WORKER = t.worker;
   const { page, context, errors } = await newPage(t.ctxOpts);
   try {
     const r = await t.fn({ page });

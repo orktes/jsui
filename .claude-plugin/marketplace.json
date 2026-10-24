@@ -1,0 +1,13 @@
+{
+  "name": "jsui",
+  "owner": { "name": "Jaakko Lukkari" },
+  "metadata": { "description": "The JSUI agent skill for Claude Code." },
+  "plugins": [
+    {
+      "name": "jsui",
+      "source": "./packages/cli",
+      "description": "Build in-game UIs with JSUI: React Native components on QuickJS + Yoga + Skia, embedded in Godot, the web or C/C++.",
+      "category": "development"
+    }
+  ]
+}

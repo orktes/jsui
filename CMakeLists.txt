@@ -1,5 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
 project(jsui C CXX)
+# Objective-C / C++ sources live in subdirectories (SDL2's .m files, Godot's
+# Metal texture, the Unity plugin's Metal path). Once one subdirectory enables
+# OBJCXX, .m files elsewhere may be classified as OBJCXX in directories that
+# have no rules for it; enabling both languages here sets them up everywhere.
+if(APPLE)
+  enable_language(OBJC OBJCXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,6 +17,18 @@ option(JSUI_BUILD_TOOLS "Build jsui-render and the viewer" ON)
 option(JSUI_BUILD_TESTS "Build native tests" ON)
 option(JSUI_BUILD_VIEWER "Build tools/jsui-viewer (downloads and builds SDL2)" ON)
 option(JSUI_BUILD_GODOT "Build the Godot 4 GDExtension in integrations/godot (fetches godot-cpp, needs python3)" OFF)
+# The built-in audio backend (src/audio/audio_builtin.cpp) for hosts without
+# an audio handler: desktop only. The browser host plays sounds with Web Audio
+# (web/jsui-web.js) and iOS embedders bring their own handler.
+set(_jsui_audio_default ON)
+if(EMSCRIPTEN OR IOS OR ANDROID)
+  set(_jsui_audio_default OFF)
+endif()
+option(JSUI_AUDIO "Build the built-in miniaudio audio backend" ${_jsui_audio_default})
+option(JSUI_BUILD_RAYLIB "Build the raylib example host in integrations/raylib (downloads raylib)" OFF)
+option(JSUI_BUILD_SDL3 "Build the SDL3 example host in integrations/sdl3 (downloads SDL3)" OFF)
+option(JSUI_BUILD_SOKOL "Build the sokol example host in integrations/sokol (downloads the sokol headers)" OFF)
+option(JSUI_BUILD_UNITY "Build the Unity native plugin into integrations/unity/package/Plugins" OFF)
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 include(Deps)
@@ -19,11 +38,22 @@ add_library(jsui STATIC ${JSUI_SOURCES})
 target_include_directories(jsui PUBLIC include PRIVATE src)
 target_link_libraries(jsui PUBLIC jsui_quickjs jsui_yoga jsui_skia)
 target_compile_definitions(jsui PRIVATE JSUI_BUILDING)
-# Subclasses a Skia canvas: Skia is built without RTTI, so is this file.
-set_source_files_properties(src/render/paint_counter.cpp PROPERTIES COMPILE_OPTIONS
+if(JSUI_LOTTIE)
+  target_compile_definitions(jsui PRIVATE JSUI_LOTTIE=1)
+endif()
+if(JSUI_AUDIO)
+  target_compile_definitions(jsui PUBLIC JSUI_AUDIO=1)
+  target_link_libraries(jsui PRIVATE jsui_miniaudio)
+endif()
+message(STATUS "JSUI_AUDIO: ${JSUI_AUDIO}")
+# Subclass Skia classes (a canvas, Skottie observers, the font manager): Skia is built
+# without RTTI, so are these files.
+set_source_files_properties(src/render/paint_counter.cpp src/render/lottie.cpp src/text/font_manager.cpp PROPERTIES COMPILE_OPTIONS
   "$<IF:$<CXX_COMPILER_ID:MSVC>,/GR-,-fno-rtti>")
 include(EmbedFonts)
 jsui_embed_fonts(jsui)
+include(WebFonts)
+jsui_webfonts(jsui)
 
 # GPU backend (Skia Ganesh on OpenGL / GLES / WebGL, jsui_render_gl*). The
 # native prebuilt Skia always has Ganesh GL; GL itself is resolved at run
@@ -193,6 +223,69 @@ if(JSUI_METAL)
 endif()
 message(STATUS "JSUI_METAL: ${JSUI_METAL}")
 
+# Direct3D backend (Skia Ganesh on Direct3D 12, jsui_gpu_create_d3d12 /
+# _d3d11, jsui_render_gpu_target): on by default on Windows with a Skia built
+# with skia_use_direct3d (scripts/build-skia-desktop.sh; not the m124
+# prebuilt). Graphite has no Direct3D backend.
+set(_jsui_d3d_default OFF)
+if(WIN32 AND _jsui_skia_gn MATCHES "skia_use_direct3d *= *true")
+  set(_jsui_d3d_default ON)
+endif()
+option(JSUI_D3D "Build the Skia Ganesh Direct3D 12 backend (jsui_gpu_create_d3d12 / _d3d11)" ${_jsui_d3d_default})
+if(JSUI_D3D)
+  target_compile_definitions(jsui PUBLIC JSUI_D3D=1)
+  target_compile_definitions(jsui_skia INTERFACE SK_GANESH SK_DIRECT3D)
+  target_link_libraries(jsui PUBLIC d3d12 d3d11 dxgi dxguid)
+endif()
+message(STATUS "JSUI_D3D: ${JSUI_D3D}")
+
+# jsui_shared: the prebuilt release library (libjsui.so / libjsui.dylib /
+# jsui.dll) for hosts that load JSUI as a plain C library (Unity, Unreal, a
+# game built with another toolchain). The static library is linked into it
+# whole and only the C API is exported: Skia, QuickJS, Yoga and their
+# dependencies stay private, and on Linux so does libstdc++ (linked
+# statically), so the host's C++ runtime never meets ours.
+option(JSUI_BUILD_SHARED "Build the shared C API library jsui_shared (libjsui.so / .dylib / jsui.dll)" OFF)
+if(JSUI_BUILD_SHARED AND NOT EMSCRIPTEN AND NOT IOS)
+  if(CMAKE_VERSION VERSION_LESS 3.24)
+    message(FATAL_ERROR "JSUI_BUILD_SHARED needs CMake 3.24 or newer (WHOLE_ARCHIVE linking)")
+  endif()
+  add_library(jsui_shared SHARED cmake/jsui_shared.c)
+  target_link_libraries(jsui_shared PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,jsui>")
+  target_include_directories(jsui_shared PUBLIC include)
+  set_target_properties(jsui_shared PROPERTIES OUTPUT_NAME jsui LINKER_LANGUAGE CXX
+    C_VISIBILITY_PRESET hidden CXX_VISIBILITY_PRESET hidden)
+  if(WIN32)
+    # jsui.dll's import library is jsui.lib: the static library takes
+    # another name, or the two overwrite each other in the same directory
+    # (and whatever links the static one after jsui_shared gets the import
+    # library).
+    set_target_properties(jsui PROPERTIES OUTPUT_NAME jsui_static)
+    # The functions are compiled dllexport into the static library (which
+    # the tools still link statically); consumers define JSUI_SHARED too.
+    target_compile_definitions(jsui PRIVATE JSUI_SHARED)
+    target_compile_definitions(jsui_shared INTERFACE JSUI_SHARED)
+  elseif(APPLE)
+    target_link_options(jsui_shared PRIVATE "LINKER:-exported_symbol,_jsui_*" "LINKER:-dead_strip")
+    set_target_properties(jsui_shared PROPERTIES INSTALL_NAME_DIR "@rpath" BUILD_WITH_INSTALL_NAME_DIR ON)
+  else()
+    target_link_options(jsui_shared PRIVATE "LINKER:--version-script=${CMAKE_SOURCE_DIR}/cmake/jsui_shared.map"
+      "LINKER:--no-undefined" "LINKER:-Bsymbolic" "LINKER:--gc-sections" -static-libstdc++ -static-libgcc)
+    set_target_properties(jsui_shared PROPERTIES LINK_DEPENDS ${CMAKE_SOURCE_DIR}/cmake/jsui_shared.map)
+  endif()
+endif()
+
+# Android: the library plus the example host app (integrations/android, a
+# NativeActivity .so that scripts/build-android.sh packages into an APK).
+if(ANDROID)
+  set(JSUI_BUILD_TOOLS OFF)
+  set(JSUI_BUILD_TESTS OFF)
+  option(JSUI_BUILD_ANDROID_APP "Build the Android example app's native library (integrations/android)" ON)
+  if(JSUI_BUILD_ANDROID_APP)
+    add_subdirectory(integrations/android)
+  endif()
+endif()
+
 # iOS: the library plus the example host app (integrations/ios); the
 # desktop tools and native tests are not built.
 if(IOS)
@@ -225,6 +318,11 @@ if(JSUI_BUILD_TOOLS AND NOT EMSCRIPTEN)
   if(UNIX AND NOT APPLE)
     target_link_libraries(jsui-paint-bench PRIVATE ${CMAKE_DL_LIBS})
   endif()
+  if(APPLE)
+    target_sources(jsui-paint-bench PRIVATE tools/jsui-paint-bench/metal_helper.mm)
+    set_source_files_properties(tools/jsui-paint-bench/metal_helper.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+    target_link_libraries(jsui-paint-bench PRIVATE "-framework Metal" "-framework Foundation")
+  endif()
   jsui_copy_icu_data(jsui-paint-bench)
   if(JSUI_BUILD_VIEWER)
     add_subdirectory(tools/jsui-viewer)
@@ -246,6 +344,24 @@ endif()
 
 if(JSUI_BUILD_GODOT AND NOT EMSCRIPTEN)
   add_subdirectory(integrations/godot)
+endif()
+
+# Engine examples: the shared HUD (integrations/shared/ui) in a raylib, an
+# SDL3 and a sokol game loop, each through the C API.
+if(NOT EMSCRIPTEN AND NOT IOS AND NOT ANDROID)
+  if(JSUI_BUILD_RAYLIB)
+    add_subdirectory(integrations/raylib)
+  endif()
+  if(JSUI_BUILD_SDL3)
+    add_subdirectory(integrations/sdl3)
+  endif()
+  if(JSUI_BUILD_SOKOL)
+    add_subdirectory(integrations/sokol)
+  endif()
+  # The Unity package's native plugin (the example is a Unity project).
+  if(JSUI_BUILD_UNITY)
+    add_subdirectory(integrations/unity)
+  endif()
 endif()
 
 if(EMSCRIPTEN)

@@ -62,7 +62,9 @@ SkMatrix localTransform(const Node& node);
 
 // Repaints the damage given as rects: each rect is cleared and painted in
 // its own pass, clipped to it (a scissor rect on the GPU). Rects may overlap.
-// The stats of the passes are summed.
+// With a LayerCache a rect starts from a texture of the document's static
+// backdrop instead of cleared, and is painted without it (see Backdrop in
+// painter.cpp). The stats of the passes are summed.
 void paintDocumentRects(Document& doc, SkCanvas* canvas, const std::vector<SkIRect>& rects);
 
 // Painter statistics of the last paintDocument() call (for benchmarks).
@@ -84,11 +86,18 @@ struct PaintStats {
   // scaled images), and of those the ones rendered this paint (misses).
   int spriteDraws = 0;
   int spriteRenders = 0;
+  // Always counted: blurred shadows (outer and inset) drawn from cached
+  // masks, and of those the ones rendered (blurred on the CPU) this paint.
+  int shadowDraws = 0;
+  int shadowRenders = 0;
   int64_t blitPixels = 0;  // pixels moved by a scroll blit instead of repainted
   // Always counted: opacity layers composited from a LayerCache, and of
   // those the ones rendered this paint (misses).
   int layerDraws = 0;
   int layerRenders = 0;
+  // Always counted: painted nodes placed again (see place() in painter.cpp)
+  // instead of where their records say (none after an update).
+  int placements = 0;
 };
 PaintStats lastPaintStats(const Document& doc);
 
@@ -113,9 +122,10 @@ class LayerCache {
   LayerCache(const LayerCache&) = delete;
   LayerCache& operator=(const LayerCache&) = delete;
   void clear();
-  // What it caches: opacity layers and / or raster-cached subtrees (see
-  // updateRasterCache in painter.cpp). Both by default.
-  void setModes(bool opacityLayers, bool raster);
+  // What it caches: opacity layers, raster-cached subtrees (see
+  // updateRasterCache in painter.cpp) and / or the static backdrop (see
+  // Backdrop). All by default.
+  void setModes(bool opacityLayers, bool raster, bool backdrop = true);
   // After a frame: frees layers unused for a while, and the least recently
   // used ones over the budget.
   void endFrame();

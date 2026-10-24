@@ -1,4 +1,5 @@
 // C API: thin wrappers over jsui::Runtime.
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -10,12 +11,14 @@
 #include "include/core/SkPixmap.h"
 #include "include/core/SkStream.h"
 #include "include/encode/SkPngEncoder.h"
+#include "dev_session.h"
 #include "input/input.h"
 #include "js/engine.h"
 #include "jsui/jsui.h"
 #include "render/gpu.h"
 #include "render/gpu_metal.h"
 #include "render/pipeline_cache.h"
+#include "render/shader_view.h"
 #include "runtime.h"
 
 // A runtime handle (jsui_create: owns the runtime, shows its main surface)
@@ -29,6 +32,26 @@ struct JsuiRuntime {
 };
 
 jsui::Runtime* jsui::internalRuntime(JsuiRuntime* h) { return h ? h->rt : nullptr; }
+
+namespace {
+
+// The person's input, reported to the dev session (not the moves).
+jsui::DevSession* reportTo(JsuiRuntime* rt) {
+  jsui::DevSession* s = rt->rt->session.get();
+  return s && s->reporting() ? s : nullptr;
+}
+jsui::Value rounded(float v) { return jsui::Value(double(std::lround(v))); }
+std::string modText(int mods) {
+  static const char* names[] = {"shift+", "ctrl+", "alt+", "meta+"};
+  std::string out;
+  for (int i = 0; i < 4; i++)
+    if (mods & (1 << i)) out += names[i];
+  return out;
+}
+const char* const kPadNames[] = {"A",    "B",     "X",  "Y",  "LB", "RB",   "LT",    "RT",  "Back",
+                                 "Start", "LS",   "RS", "Up", "Down", "Left", "Right", "Home"};
+
+}  // namespace
 
 extern "C" {
 
@@ -158,6 +181,39 @@ const void* jsui_get_buffer(JsuiRuntime* rt, const char* key, JsuiBufferType* ty
   return e ? e->data() : nullptr;
 }
 
+int jsui_set_texture(JsuiRuntime* rt, const char* key, const JsuiTexture* texture) {
+  if (!key) return -1;
+  int r = rt->rt->textures.set(key, texture);
+  if (r < 0) rt->rt->log(JSUI_LOG_ERROR, std::string("jsui_set_texture(\"") + key + "\"): invalid texture");
+  return r;
+}
+
+int jsui_set_texture_pixels(JsuiRuntime* rt, const char* key, const void* rgba, int width, int height,
+                            size_t rowBytes, int flags) {
+  if (!key) return -1;
+  int r = rt->rt->textures.setPixels(key, rgba, width, height, rowBytes, flags);
+  if (r < 0) rt->rt->log(JSUI_LOG_ERROR, std::string("jsui_set_texture_pixels(\"") + key + "\"): invalid pixels");
+  return r;
+}
+
+int jsui_texture_updated(JsuiRuntime* rt, const char* key) { return key && rt->rt->textures.updated(key) ? 1 : -1; }
+
+int jsui_remove_texture(JsuiRuntime* rt, const char* key) { return key && rt->rt->textures.remove(key) ? 1 : 0; }
+
+void jsui_audio_voice_ended(JsuiRuntime* rt, uint64_t voice, int status) {
+  if (rt) rt->rt->audio->voiceEnded(voice, status);
+}
+void jsui_audio_sound_loaded(JsuiRuntime* rt, const char* sound, int ok, double duration_s) {
+  if (rt && sound) rt->rt->audio->soundLoaded(sound, ok != 0, duration_s);
+}
+void jsui_fetch(JsuiRuntime* rt, const char* url, JsuiFetchFn done, void* user) {
+  if (!rt || !url || !done) return;
+  jsui::Runtime* r = rt->rt;
+  r->loader.load(jsui::ResourceLoader::resolve(r->baseUrl, url), [done, user](jsui::Resource res) {
+    done(user, res.status, res.contentType.c_str(), res.data.data(), res.data.size());
+  });
+}
+
 int jsui_resolve_call(JsuiRuntime* rt, uint64_t id, const char* json) { return rt->rt->resolveCall(id, json); }
 int jsui_reject_call(JsuiRuntime* rt, uint64_t id, const char* message) { return rt->rt->rejectCall(id, message); }
 
@@ -174,13 +230,56 @@ int jsui_load_bundle_url(JsuiRuntime* rt, const char* url) {
   return 0;
 }
 
-void jsui_reload(JsuiRuntime* rt) { rt->rt->reload(); }
+void jsui_reload(JsuiRuntime* rt) {
+  if (jsui::DevSession* s = rt->rt->session.get(); s && s->reporting()) s->userInput("reload", {});
+  rt->rt->reload();
+}
+
+void jsui_dev_update(JsuiRuntime* rt) { rt->rt->devUpdate(); }
+
+void jsui_set_dev_session(JsuiRuntime* rt, const char* name, int enabled) {
+  if (!rt || !rt->rt->session) return;
+  rt->rt->session->name = name ? name : "";
+  rt->rt->session->setEnabled(enabled != 0);
+}
 
 int jsui_register_font(JsuiRuntime* rt, const char* family, const void* data, size_t size, int weight, int italic) {
-  bool ok = rt->rt->fonts.registerFont(family, data, size, weight, italic != 0);
-  if (ok)
-    for (auto& s : rt->rt->surfaces()) s->doc.markLayoutDirty();
-  return ok ? 0 : -1;
+  std::string why;
+  if (!rt->rt->fonts.registerFont(family ? family : "", data, size, weight, italic, &why)) {
+    rt->rt->log(JSUI_LOG_WARN, "jsui_register_font(" + std::string(family ? family : "") + "): " + why);
+    return -1;
+  }
+  rt->rt->fontsChanged();
+  return 0;
+}
+
+int jsui_unregister_font(JsuiRuntime* rt, const char* family) {
+  if (!family || !rt->rt->fonts.unregisterFamily(family)) return -1;
+  rt->rt->fontsChanged();
+  return 0;
+}
+
+void jsui_set_font_fallbacks(JsuiRuntime* rt, const char* families) {
+  std::vector<std::string> list;
+  std::string csv = families ? families : "";
+  size_t i = 0;
+  while (i <= csv.size()) {
+    size_t c = csv.find(',', i);
+    if (c == std::string::npos) c = csv.size();
+    std::string f = csv.substr(i, c - i);
+    i = c + 1;
+    size_t a = f.find_first_not_of(" \t\"'"), b = f.find_last_not_of(" \t\"'");
+    if (a != std::string::npos) list.push_back(f.substr(a, b - a + 1));
+  }
+  uint32_t gen = rt->rt->fonts.generation;
+  rt->rt->fonts.setFallbackFamilies(std::move(list));
+  if (rt->rt->fonts.generation != gen) rt->rt->fontsChanged();
+}
+
+void jsui_set_default_font_family(JsuiRuntime* rt, const char* family) {
+  uint32_t gen = rt->rt->fonts.generation;
+  if (family) rt->rt->fonts.setDefaultFamily(family);
+  if (rt->rt->fonts.generation != gen) rt->rt->fontsChanged();
 }
 
 void jsui_set_viewport(JsuiRuntime* rt, int width, int height, float pixelRatio) {
@@ -220,6 +319,7 @@ bool isWebGPU(JsuiGpuContext* gpu) { return gpu && gpu->kind == JsuiGpuContext::
 
 void jsui_gpu_destroy(JsuiGpuContext* gpu) {
   if (jsui::graphite_gpu::owns(gpu)) jsui::graphite_gpu::destroy(gpu);
+  else if (jsui::d3d::owns(gpu)) jsui::d3d::destroy(gpu);
   else if (isWebGPU(gpu)) jsui::webgpu::destroy(gpu);
   else jsui::gpu::destroy(gpu);
 }
@@ -232,6 +332,7 @@ void jsui_gpu_context_lost(JsuiGpuContext* gpu) {
 }
 void jsui_gpu_purge(JsuiGpuContext* gpu, size_t cacheBytes) {
   if (jsui::graphite_gpu::owns(gpu)) jsui::graphite_gpu::purge(gpu, cacheBytes);
+  else if (jsui::d3d::owns(gpu)) jsui::d3d::purge(gpu, cacheBytes);
   else if (isWebGPU(gpu)) jsui::webgpu::purge(gpu, cacheBytes);
   else jsui::gpu::purge(gpu, cacheBytes);
 }
@@ -258,6 +359,8 @@ JsuiGpuContext* jsui_gpu_create_dawn_procs(void* wgpu_get_proc_address, void* in
   return jsui::graphite_gpu::createDawnProcs(wgpu_get_proc_address, instance, device, queue);
 }
 const char* jsui_dawn_revision(void) { return jsui::graphite_gpu::dawnRevision(); }
+JsuiGpuContext* jsui_gpu_create_d3d12(void* device, void* queue) { return jsui::d3d::create12(device, queue); }
+JsuiGpuContext* jsui_gpu_create_d3d11(void* device) { return jsui::d3d::create11(device); }
 
 int jsui_render_gpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiGpuTarget* target, JsuiRect* dirty) {
   if (!rt || !target) {
@@ -265,6 +368,7 @@ int jsui_render_gpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiGpuTa
     return -1;
   }
   JSUI_PAINT_SCOPE(rt);
+  if (jsui::d3d::owns(gpu)) return jsui::d3d::render(*rt->surface, gpu, *target, dirty);
   return jsui::graphite_gpu::render(*rt->surface, gpu, *target, dirty);
 }
 
@@ -304,6 +408,15 @@ int jsui_gpu_save_pipelines(JsuiGpuContext* gpu, void** outData, size_t* outSize
 
 int jsui_gpu_precompile_step(JsuiGpuContext* gpu, double budgetMs) {
   return gpu && gpu->pipelines ? gpu->pipelines->step(budgetMs) : 0;
+}
+
+int jsui_precompile_shader(JsuiRuntime* rt, const char* sksl, const char* imagesJson) {
+  if (!rt || !sksl) return -1;
+  jsui::Value images = imagesJson && *imagesJson ? jsui::Value::parseJson(imagesJson) : jsui::Value();
+  auto prog = rt->rt->shaders->preload(sksl, images);
+  if (prog->effect) return 0;
+  rt->rt->log(JSUI_LOG_WARN, "jsui_precompile_shader: " + prog->error);
+  return -1;
 }
 
 void jsui_gpu_get_pipeline_stats(JsuiGpuContext* gpu, JsuiPipelineStats* out) {
@@ -397,13 +510,24 @@ int jsui_hit_test(JsuiRuntime* rt, float x, float y) {
   if (!rt || !std::isfinite(x) || !std::isfinite(y)) return 0;
   return int(rt->surface->input->capturesAt(x, y));
 }
+int jsui_hit_regions(JsuiRuntime* rt, float* out, int max_regions) {
+  if (!rt) return 0;
+  std::vector<float> regions;
+  rt->surface->input->hitRegions(&regions);
+  int n = int(regions.size() / 5);
+  if (out && max_regions > 0) std::copy_n(regions.begin(), size_t(std::min(n, max_regions)) * 5, out);
+  return n;
+}
 int jsui_send_mouse_move(JsuiRuntime* rt, float x, float y) {
   JSUI_INPUT_SCOPE;
   return rt->surface->input->mouseMove(x, y);
 }
 int jsui_send_mouse_button(JsuiRuntime* rt, float x, float y, JsuiMouseButton b, int down, int mods) {
   JSUI_INPUT_SCOPE;
-  return rt->surface->input->mouseButton(x, y, int(b), down != 0, mods);
+  int r = rt->surface->input->mouseButton(x, y, int(b), down != 0, mods);
+  if (jsui::DevSession* s = down ? reportTo(rt) : nullptr)
+    s->userInput("click", {{"x", rounded(x)}, {"y", rounded(y)}, {"button", jsui::Value(int(b))}, {"consumed", jsui::Value(r != 0)}});
+  return r;
 }
 int jsui_send_mouse_wheel(JsuiRuntime* rt, float x, float y, float dx, float dy) {
   JSUI_INPUT_SCOPE;
@@ -415,20 +539,35 @@ int jsui_send_mouse_leave(JsuiRuntime* rt) {
 }
 int jsui_send_touch(JsuiRuntime* rt, int id, int phase, float x, float y) {
   JSUI_INPUT_SCOPE;
-  return rt->surface->input->touch(id, phase, x, y);
+  int r = rt->surface->input->touch(id, phase, x, y);
+  if (jsui::DevSession* s = phase == 0 ? reportTo(rt) : nullptr)
+    s->userInput("tap", {{"x", rounded(x)}, {"y", rounded(y)}, {"consumed", jsui::Value(r != 0)}});
+  return r;
 }
 int jsui_send_key(JsuiRuntime* rt, const char* key, const char* code, int down, int repeat, int mods) {
   JSUI_INPUT_SCOPE;
   if (rt->rt->devKey(key, down != 0)) return 1;  // dev overlay (Escape)
-  return rt->surface->input->key(key, code, down != 0, repeat != 0, mods);
+  int r = rt->surface->input->key(key, code, down != 0, repeat != 0, mods);
+  // Typed characters arrive as text; named keys and shortcuts here.
+  bool named = key && (std::strlen(key) > 1 || (mods & ~1));
+  if (jsui::DevSession* s = down && !repeat && named ? reportTo(rt) : nullptr)
+    s->userInput("key", {{"key", jsui::Value(modText(mods) + key)}, {"consumed", jsui::Value(r != 0)}});
+  return r;
 }
 int jsui_send_text(JsuiRuntime* rt, const char* utf8) {
   JSUI_INPUT_SCOPE;
-  return rt->surface->input->text(utf8);
+  int r = rt->surface->input->text(utf8);
+  if (jsui::DevSession* s = utf8 && *utf8 ? reportTo(rt) : nullptr) s->userInput("type", {{"text", jsui::Value(utf8)}});
+  return r;
 }
 int jsui_send_gamepad_button(JsuiRuntime* rt, int pad, int button, int down, float value) {
   JSUI_INPUT_SCOPE;
-  return rt->surface->input->gamepadButton(pad, button, down != 0, value);
+  int r = rt->surface->input->gamepadButton(pad, button, down != 0, value);
+  if (jsui::DevSession* s = down ? reportTo(rt) : nullptr) {
+    jsui::Value name = button >= 0 && button < 17 ? jsui::Value(kPadNames[button]) : jsui::Value(button);
+    s->userInput("press", {{"button", name}, {"pad", jsui::Value(pad)}, {"consumed", jsui::Value(r != 0)}});
+  }
+  return r;
 }
 int jsui_send_gamepad_axis(JsuiRuntime* rt, int pad, int axis, float value) {
   JSUI_INPUT_SCOPE;

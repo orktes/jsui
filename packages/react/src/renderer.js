@@ -221,6 +221,10 @@ const hostConfig = {
 };
 
 export const reconciler = Reconciler(hostConfig);
+// React DevTools (and profiling tools such as jsui-bench --react-stats) attach
+// through globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__; without one this does
+// nothing.
+reconciler.injectIntoDevTools();
 
 // --- roots -------------------------------------------------------------------
 
@@ -274,6 +278,11 @@ function containerOf(id) {
   let container = containers.get(id);
   if (!container) containers.set(id, (container = { id, type: 'Root', children: [] }));
   return container;
+}
+
+/** Every root container (surfaces, portal targets) with its children in order. */
+export function rootContainers() {
+  return Array.from(containers.values());
 }
 
 /** Forgets a container whose native node is gone (a destroyed surface). */

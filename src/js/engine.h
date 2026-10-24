@@ -9,6 +9,7 @@
 //   __jsui_native.postMessage(name, json)     .loadFont(family, url, w, italic) -> Promise
 //   __jsui_native.focus(id) / blur(id)        .scrollTo(id, x, y, animated)
 //   __jsui_native.patchStyle(id, partialStyle) .reload()
+//   __jsui_native.devError(text | null)       .evalScript(source, name)
 //   console, setTimeout/Interval, requestAnimationFrame, queueMicrotask,
 //   performance.now, fetch/Response/Headers, TextEncoder/TextDecoder, URL.
 // Callbacks the bundle installs:
@@ -17,10 +18,13 @@
 //   globalThis.__jsui_onLayout(id, {x,y,width,height})
 //   globalThis.__jsui_onHostState(keys)            shared state changed
 //   globalThis.__jsui_onHostBuffer(keys)           frame data buffers changed
+//   globalThis.__jsui_onHostTexture(keys)          host textures set / resized / removed
 //   globalThis.__jsui_onCall(id, name, json)       jsui_call_ui -> Host.handle
+//   globalThis.__jsui_onDevUpdate(token)           dev server has a new build
+//                                                  (hot update; absent: reload)
 // Shared state / calls (bridge_host.cpp): __jsui_native.getState, stateVersion,
 //   setState, patchState, stateKeys, hostCall, cancelCall, callResult,
-//   buffer, bufferVersion, bufferKeys.
+//   buffer, bufferVersion, bufferKeys, texture, textureKeys.
 #pragma once
 
 #include <cstdint>
@@ -66,6 +70,8 @@ class JsEngine {
   // The storage of buffer `key` is about to be freed: detaches the
   // ArrayBuffer JS sees over it (its typed arrays read as empty).
   void releaseBuffer(const std::string& key);
+  // Host textures whose size or handle changed: __jsui_onHostTexture(keys).
+  void texturesChanged(const std::vector<std::string>& keys);
   // Host.call bookkeeping: each pending call holds the JS settle function
   // the bundle passed to __jsui_native.hostCall.
   bool hasCall(uint64_t id) const;

@@ -10,6 +10,7 @@
 #include "input/input.h"
 #include "js/engine.h"
 #include "render/painter.h"
+#include "render/shader_view.h"
 #include "runtime.h"
 
 namespace jsui {
@@ -57,7 +58,8 @@ std::vector<SkIRect> coverRects(const SkRegion& damage) {
 Surface::Surface(Runtime& r, uint32_t* nextNodeId, Perf* perf) : rt(r), doc(nextNodeId, perf) {}
 
 bool Surface::needsRedraw() const {
-  return redraw_ || doc.paintDirty() || (doc.exactRepaintPending() && !rt.animatingFrames(*this));
+  return redraw_ || doc.paintDirty() || (doc.exactRepaintPending() && !rt.animatingFrames(*this)) ||
+         rt.shaders->warmPending();
 }
 
 Surface::~Surface() {
@@ -131,7 +133,8 @@ SkIRect Surface::beginCanvasTracked(const void* key, int width, int height, bool
   trackedRects_.clear();
   // Nothing marked dirty and the retained surface holds our last frame:
   // nothing to repaint, without walking the tree.
-  if (sameTarget && !doc.paintDirty() && !doc.exactRepaintPending() && rt.lastError.empty()) {
+  if (sameTarget && !doc.paintDirty() && !doc.exactRepaintPending() && rt.lastError.empty() &&
+      !rt.shaders->warmPending()) {
     *keyValid = true;
     return SkIRect::MakeEmpty();
   }
@@ -158,8 +161,12 @@ SkIRect Surface::finishCanvasTracked(const CanvasChoice& c, int width, int heigh
   lastTarget_ = c.canvas && c.key && tracked ? c.key : nullptr;
   if (!c.canvas) return SkIRect::MakeEmpty();
   SkCanvas* canvas = c.canvas;
+  // Preloaded shaders (ShaderEffects::preload): drawn off-screen, so this
+  // frame builds their pipelines. A frame with nothing else to paint still
+  // reports a pixel, so the backend flushes it.
+  bool warmed = rt.shaders->warm(canvas);
   if (c.key && keyValid && c.key == trackedKey_) {
-    if (damage.isEmpty()) return SkIRect::MakeEmpty();
+    if (damage.isEmpty()) return warmed ? SkIRect::MakeWH(1, 1) : SkIRect::MakeEmpty();
     if (c.splitDamage) {
       trackedRects_ = coverRects(trackedDamage_);
       paintDocumentRects(doc, canvas, trackedRects_);
@@ -183,6 +190,7 @@ SkIRect Surface::finishCanvasTracked(const CanvasChoice& c, int width, int heigh
 
 SkIRect Surface::paintTracked(SkCanvas* canvas, const void* pixels, int width, int height, size_t rowBytes,
                               bool incremental) {
+  rt.shaders->warm(canvas);  // a raster canvas: drops the queue (nothing to warm)
   doc.layout();
   // Nothing marked dirty and the buffer still holds our last frame: done,
   // without walking the tree.
@@ -254,6 +262,7 @@ void Surface::renderCanvas(SkCanvas* canvas, int width, int height, bool clear) 
   doc.clearPaintDirty();
   redraw_ = false;
   if (clear) canvas->clear(SK_ColorTRANSPARENT);
+  rt.shaders->warm(canvas);
   paintFrame(canvas, isFrozen, isOverlay);
 }
 

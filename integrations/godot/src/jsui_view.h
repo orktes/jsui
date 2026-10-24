@@ -32,12 +32,34 @@
 // `auto_size` sizes the view to its component's content (its minimum size),
 // for small widgets inside existing Godot UIs.
 //
+// Host textures (set_texture, jsui_set_texture): Godot textures the UI shows
+// with <HostTexture name="..."/> (a VideoStreamPlayer's frames, a SubViewport,
+// any Texture2D). They belong to the runtime (the runtime view keeps them,
+// across restarts). With the GPU renderer each is copied on the GPU into a
+// texture of the view's own, which Skia samples (jsui_gpu_render.cpp); with
+// the CPU renderer its pixels go through get_image().
+//
+// Audio (jsui_audio.h): the runtime view plays its runtime's UI sounds
+// (Sound.play, useMusic, <UISounds>, ...) with AudioStreamPlayers of its own
+// on Godot's audio buses, so they follow the game's volume settings and
+// effects. A JSUI bus plays on the Godot bus `audio_bus_map` names for it,
+// else on the Godot bus of the same name, else on `audio_bus`. The UI's own
+// bus volumes scale its voices, never Godot's buses. `audio_enabled` off
+// plays nothing (every voice fails).
+//
 // GPU pipeline cache (jsui_gpu_set_pipeline_cache): the runtime's Skia
 // context records every GPU pipeline it creates in the runtime view's
 // `pipeline_cache_path`, with the renderer's name before the extension
 // (user://jsui-pipelines.bin -> user://jsui-pipelines.vulkan.bin), and the
 // next start precompiles them, plus a list shipped at the same path under
 // res:// (res://jsui-pipelines.vulkan.bin), off the frame.
+//
+// Fonts (register_font, jsui_register_font): FontFile resources, bytes or
+// font files the UI's fontFamily can name. Like host textures they belong to
+// the runtime: the runtime view registers the `fonts` property and every
+// register_font / unregister_font / fallback / default-family call on each
+// new runtime (start()), in order, so calls made before start() and across
+// restarts apply; a surface view forwards them to its runtime view.
 #pragma once
 
 #include <godot_cpp/classes/control.hpp>
@@ -46,9 +68,11 @@
 #include <godot_cpp/classes/texture2d.hpp>
 #include <godot_cpp/classes/texture2drd.hpp>
 #include <godot_cpp/classes/input_event.hpp>
+#include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/node_path.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
+#include <godot_cpp/variant/packed_string_array.hpp>
 #include <godot_cpp/variant/rid.hpp>
 
 #include <atomic>
@@ -56,6 +80,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -64,6 +89,8 @@
 #include "jsui/jsui.h"
 
 namespace jsui_godot {
+
+class ViewAudio;
 
 class JsuiView : public godot::Control {
   GDCLASS(JsuiView, godot::Control)
@@ -105,6 +132,18 @@ class JsuiView : public godot::Control {
   // any machine (tests, recording a pipeline list). The runtime view's applies.
   void set_fixed_fps(int fps) { fixed_fps_ = fps > 0 ? fps : 0; }
   int get_fixed_fps() const { return fixed_fps_; }
+  // Audio (the runtime view's apply; see the top of this file).
+  void set_audio_enabled(bool on);
+  bool get_audio_enabled() const { return audio_enabled_; }
+  void set_audio_bus(const godot::String& bus) { audio_bus_ = bus; }
+  godot::String get_audio_bus() const { return audio_bus_; }
+  void set_audio_bus_map(const godot::Dictionary& map) { audio_bus_map_ = map; }
+  godot::Dictionary get_audio_bus_map() const { return audio_bus_map_; }
+  // Fonts registered (family from the file) on every new runtime. Assigning
+  // the property registers the fonts it adds on a running one; fonts it
+  // drops stay registered until the next start().
+  void set_fonts(const godot::Array& fonts);
+  godot::Array get_fonts() const { return fonts_; }
 
   // Methods.
   void start();   // (re)creates the runtime and loads bundle_url (surface views: the surface)
@@ -132,6 +171,46 @@ class JsuiView : public godot::Control {
   // for an unsupported type. Set before start(): applied when it starts.
   int set_buffer(const godot::String& key, const godot::Variant& data);
   int remove_buffer(const godot::String& key);
+
+  // Host textures (jsui_set_texture): a Godot Texture2D shown by the UI's
+  // <HostTexture name="..."/> (useHostTexture(name) gives its size), e.g.
+  // VideoStreamPlayer.get_video_texture() or a SubViewport's texture. `live`:
+  // its contents change every frame (a playing video, a viewport that renders
+  // every frame), so the view copies it every frame; otherwise only when the
+  // texture emits `changed` (ImageTexture.update / set_image) or after
+  // update_texture(). Kept across start() / stop() and re-applied to new
+  // runtimes. GPU renderer: copied on the GPU into a texture of the view's
+  // own that Skia samples (jsui_gpu_render.cpp); CPU renderer (and formats
+  // the GPU path cannot take): get_image() -> jsui_set_texture_pixels.
+  // Returns 1 changed, 0 unchanged (a null texture removes it).
+  int set_texture(const godot::String& name, const godot::Ref<godot::Texture2D>& texture, bool live);
+  int remove_texture(const godot::String& name);  // 1 if it existed
+  int update_texture(const godot::String& name);  // new contents: 1, or -1 for an unknown name
+
+  // Audio: stops the UI's voices (of one JSUI bus, or all for ""), fading
+  // out over fade_ms; the UI hears they were stopped. get_audio_voices lists
+  // the playing ones (voice, url, bus, godot_bus, player, volume, pitch,
+  // loop, paused, loading). resolve_audio_bus: the Godot bus a JSUI bus
+  // plays on now.
+  void stop_all_sounds(const godot::String& bus, float fade_ms);
+  godot::Array get_audio_voices() const;
+  godot::String resolve_audio_bus(const godot::String& bus) const;
+  // Fonts (jsui_register_font and friends), for the runtime (every view of
+  // it). `font`: a FontFile (or a FontVariation of one; its data), a
+  // PackedByteArray, or a path (res://, user://, absolute) of a TTF / OTF /
+  // TTC / WOFF / WOFF2 file. `family` "": the family name in the file;
+  // weight <= 0 / italic < 0: the file's, else overrides (1..1000, 0 / 1).
+  // Remembered and re-applied to every new runtime. False when the font
+  // cannot be read or (with a runtime) is not a font.
+  bool register_font(const godot::String& family, const godot::Variant& font, int weight, int italic);
+  // Removes the family's faces; true if it was registered (without a
+  // runtime: if a queued registration of it was dropped).
+  bool unregister_font(const godot::String& family);
+  // Families tried in order for glyphs the styled font lacks (emoji, CJK);
+  // empty clears the list.
+  void set_font_fallbacks(const godot::PackedStringArray& families);
+  // The family of text whose style names none (default "Inter").
+  void set_default_font_family(const godot::String& family);
 
   // Calls: Host.call() -> call_requested signal -> resolve_call / reject_call;
   // call_ui() -> Host.handle() handler -> callback(ok, result) + ui_call_completed.
@@ -162,6 +241,10 @@ class JsuiView : public godot::Control {
   int hit_test(const godot::Vector2& position) const;
   static constexpr int HIT_POINTER = JSUI_HIT_POINTER;
   static constexpr int HIT_SCROLL = JSUI_HIT_SCROLL;
+  // sound_ended's status (jsui_audio_voice_ended).
+  static constexpr int SOUND_FINISHED = JSUI_AUDIO_FINISHED;
+  static constexpr int SOUND_STOPPED = JSUI_AUDIO_STOPPED;
+  static constexpr int SOUND_FAILED = JSUI_AUDIO_FAILED;
 
   void _gui_input(const godot::Ref<godot::InputEvent>& event) override;
   // With input_pass_through, only points where the UI captures input are
@@ -201,7 +284,7 @@ class JsuiView : public godot::Control {
   void renderCpu();
   // GPU path (jsui_gpu_render.cpp). renderGpu returns false when the GPU
   // path failed and the view must fall back to the CPU.
-  enum class Renderer { Unknown, Cpu, Vulkan, Metal, WebGPU };
+  enum class Renderer { Unknown, Cpu, Vulkan, Metal, WebGPU, D3D12 };
   void chooseRenderer();
   // On the runtime view: its Skia context, which its surface views share
   // (created on first use; false when there is none).
@@ -212,6 +295,18 @@ class JsuiView : public godot::Control {
   JsuiView* runtimeView() { return host_ ? host_ : this; }
   bool renderGpu();
   void releaseGpu();
+  // Host textures (set_texture). On the runtime view. syncTextures (main
+  // thread, before the tick) picks how they reach the runtime (GPU copies or
+  // CPU pixels), adopts GPU copies made in earlier frames and decides this
+  // frame's copies; doTextureWork (render thread, jsui_gpu_render.cpp) makes
+  // them. With a separate render thread the work goes with the runtime's
+  // frame job, or as a job of its own on the same fence (queueTextureJob).
+  void syncTextures();
+  void queueTextureJob();
+  void runTextureJob();
+  void doTextureWork();
+  void releaseTextureGpu();  // frees every GPU copy and the layout pass (blocking)
+  void onTextureChanged(const godot::String& name);
   void runOnRenderThread(const std::function<void()>& job);
   void runRenderJob();
   // The steady-state frame (with a separate render thread): batchFrame adds
@@ -242,6 +337,20 @@ class JsuiView : public godot::Control {
   void reportErrors();
   void releaseHeldInput();
   void onJoyConnectionChanged(int64_t device, bool connected);
+  // Fonts. A FontOp is one register_font / unregister_font call, kept (on
+  // the runtime view, or a surface view until it attaches) and replayed on
+  // every new runtime after the `fonts` property.
+  struct FontOp {
+    bool unregister = false;
+    std::string family;
+    godot::PackedByteArray data;
+    int weight = 0, italic = -1;
+  };
+  bool applyFontOp(FontOp op);  // applies it to the runtime (if any) and logs it
+  bool runFontOp(const FontOp& op);  // jsui_register_font / jsui_unregister_font on rt_
+  void applyFontSettings();          // fallbacks and default family, on rt_
+  void startFonts();                 // a new runtime: the property, the log, the settings
+  void forwardFonts();               // surface view: its fonts and queued calls go to host_
   bool handleGamepad(const godot::Ref<godot::InputEvent>& event);
   float computeRatio() const;
   double nowMs() const;
@@ -263,6 +372,11 @@ class JsuiView : public godot::Control {
   godot::String pipeline_cache_path_ = "user://jsui-pipelines.bin";
   int fixed_fps_ = 0;
   godot::String pipeline_file_;  // the runtime view's cache file in use (an OS path), "" for none
+  bool audio_enabled_ = true;
+  godot::String audio_bus_ = "Master";
+  godot::Dictionary audio_bus_map_;
+  // The runtime's audio handler (runtime views; made with the first runtime).
+  std::unique_ptr<ViewAudio> audio_;
 
   // The runtime handle this view renders and sends input to: the runtime it
   // owns (its main surface), or a surface of host_'s runtime. A GPU render
@@ -301,6 +415,77 @@ class JsuiView : public godot::Control {
     size_t count;
   };
   std::vector<std::pair<std::string, PendingBuffer>> pendingBuffers_;
+  // Fonts: the `fonts` property, the entries of it the runtime (or host_,
+  // for a surface view) got, the calls to replay, and the settings.
+  godot::Array fonts_, fonts_applied_;
+  JsuiView* fonts_host_ = nullptr;  // the runtime view fonts_applied_ went to (surface view)
+  std::vector<FontOp> font_ops_;
+  bool font_fallbacks_set_ = false, default_font_set_ = false;
+  std::string font_fallbacks_, default_font_family_;
+  // Host textures (set_texture), on the runtime view; kept across restarts.
+  // With the GPU renderer each one is copied (RenderingDevice.texture_copy,
+  // recorded into Godot's frame) into a mirror: a RenderingDevice texture of
+  // ours, which is what the runtime samples (jsui_set_texture). Godot thus
+  // keeps doing every barrier, layout and lifetime of its own texture (a
+  // video frame upload, a SubViewport render, an ImageTexture replaced), and
+  // the mirror lives as long as JSUI may use it. A mirror made in frame N is
+  // handed to the runtime in frame N + 1 (adopted), once Godot has submitted
+  // the frame with its first copy; a replaced one is freed after that.
+  struct TextureMirror {
+    godot::RID rd;        // our RenderingDevice texture
+    godot::RID uniforms;  // Vulkan: the layout pass's uniform set for it
+    void* handle = nullptr;
+    unsigned format = 0;  // VkFormat / MTLPixelFormat / 0 (WebGPU: the texture's own)
+    int64_t data_format = 0;  // RenderingDevice::DataFormat
+    int w = 0, h = 0;
+    uint64_t created_frame = 0;
+    bool valid() const { return rd.is_valid(); }
+  };
+  struct HostTexture {
+    std::string key;
+    godot::String name;
+    godot::Ref<godot::Texture2D> texture;
+    godot::Callable changed;  // connected to the texture's `changed`
+    bool live = false;
+    bool dirty = true;      // new contents since they were last taken
+    int flags = 0;          // JSUI_TEXTURE_*
+    bool pixels_set = false;  // the runtime holds CPU pixels of it
+    // GPU copies. The render thread reads `rs` / `copy` and writes the rest
+    // but `cur` (the main thread adopts `next` into it); the main thread
+    // touches them only after waitRender().
+    godot::RID rs;          // the Texture2D's RenderingServer texture
+    bool copy = false;      // copy it this frame (doTextureWork)
+    godot::RID src;         // its RenderingDevice texture, last seen
+    bool src_ok = false;
+    int64_t mirror_format = 0;
+    int src_w = 0, src_h = 0;
+    TextureMirror cur, next;  // cur: what the runtime samples; next: a new one, adopted next frame
+    bool gpu_set = false;     // the runtime holds cur
+    int gpu_flags = 0;        // the flags it was set with
+    bool shown_pending = false;  // a copy into cur the runtime has not been told about
+    bool cpu_only = false;    // the GPU path cannot take it (why): CPU pixels instead
+    std::string why;
+    bool warned = false;
+  };
+  std::vector<HostTexture> textures_;
+  std::vector<TextureMirror> retired_mirrors_;  // freed by the next doTextureWork
+  enum class TextureMode { None, Pixels, Gpu };
+  TextureMode texture_mode_ = TextureMode::None;
+  Renderer gpu_api_ = Renderer::Unknown;  // the API of gpu_
+  bool texture_work_ = false;        // doTextureWork is due (main thread)
+  bool frame_job_textures_ = false;  // the queued frame job does it
+  uint64_t texture_frame_ = 0;       // Engine.get_frames_drawn() of this frame's sync
+  uint64_t texture_job_id_ = 0;
+  // Vulkan: Skia samples a mirror in SHADER_READ_ONLY_OPTIMAL (jsui.h), but
+  // Godot's render graph leaves a copy destination in TRANSFER_DST_OPTIMAL.
+  // After each copy a one-texel compute dispatch samples the mirror, so the
+  // graph moves it to SHADER_READ_ONLY_OPTIMAL itself, in the same frame.
+  struct LayoutPass {
+    godot::RID shader, pipeline, sampler, sink;
+    bool failed = false;
+  };
+  LayoutPass layout_pass_;
+  bool uploadTexturePixels(HostTexture& e);  // CPU pixels of e (get_image)
   JsuiView* host_ = nullptr;             // the runtime view, for a surface view
   std::vector<JsuiView*> surfaces_;      // surface views of this view's runtime
   bool attach_wanted_ = false;           // a surface view that should show its surface

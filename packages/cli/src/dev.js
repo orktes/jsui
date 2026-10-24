@@ -1,15 +1,29 @@
-// `jsui dev <entry> [--port 5173] [--host 127.0.0.1]`
+// `jsui dev <entry> [--port 5173] [--host 127.0.0.1] [--no-hmr]`
 //
 // Rebuilds on change and serves (contract with the runtime's dev mode):
-//   GET /bundle.js            last good bundle (build errors keep it served)
-//   GET /bundle.js.map        its source map
+//   GET /bundle.js            last good bundle (build errors keep it served).
+//                             With HMR (the default) it is the module-per-
+//                             function dev bundle of hmr.js.
+//   GET /bundle.js.map        its source map (without HMR)
 //   GET /assets/*             emitted images / fonts
 //   GET /__jsui/version       plain-text opaque token, changes on every
 //                             successful rebuild. `?since=<token>` long-polls:
 //                             the reply is held (up to ~25 s) until the token
-//                             differs from <token>.
+//                             differs from <token>. With `hmr=1` (and HMR on)
+//                             a failed build changes the token too, so the
+//                             runtime asks /__jsui/hmr and shows the error.
+//   GET /__jsui/hmr?from=<v>  hot update script from version <v> to the
+//                             current one (see hmr.js / hmr-runtime.js)
 //   GET /__jsui/error         text of the current build error ('' when ok)
 //   GET /                     small index page (links the WASM web host if built)
+//   /shared, /__jsui/shared/*, /__jsui/session/*
+//                             the shared session (shared.js): every runtime
+//                             loading /bundle.js in dev mode (native viewer,
+//                             Godot, the web host, ...) joins it, and agents
+//                             (jsui run --attach) drive the live one. With
+//                             `headless`, one more runtime runs in this process.
+//   /web/*                    the WASM web host (the repo's web/ or the
+//                             installed @orktes/jsui-web)
 // Anything else is served from the entry's directory (for fetch('./data.json')).
 
 import * as esbuild from 'esbuild';
@@ -18,6 +32,11 @@ import { existsSync, statSync, createReadStream } from 'node:fs';
 import path from 'node:path';
 import { esbuildOptions } from './config.js';
 import { formatErrors } from './build.js';
+import { createHmr } from './hmr.js';
+import { createShared } from './shared.js';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
 
 const TYPES = {
   '.js': 'text/javascript; charset=utf-8',
@@ -40,6 +59,15 @@ const TYPES = {
   '.txt': 'text/plain; charset=utf-8',
 };
 
+function webPackageDir() {
+  try {
+    const dir = path.dirname(require.resolve('@orktes/jsui-web/package.json'));
+    return existsSync(path.join(dir, 'index.html')) ? dir : null;
+  } catch {
+    return null;
+  }
+}
+
 function findWebHost(start) {
   let dir = path.resolve(start);
   for (;;) {
@@ -57,11 +85,19 @@ function safeJoin(root, rel) {
   return p === root || p.startsWith(root + path.sep) ? p : null;
 }
 
-export async function dev({ entry, port = 5173, host = '127.0.0.1', log = console.log, minify = false }) {
+/**
+ * `headless`: null, or the options of the in-process runtime ({width, height,
+ * scale, fps, component, props, state}). `waitMs`: how long agent commands
+ * wait for a runtime to join the session.
+ */
+export async function dev({ entry, port = 5173, host = '127.0.0.1', log = console.log, minify = false, hmr = true, headless = null, waitMs }) {
   const absEntry = path.resolve(entry);
   const entryDir = path.dirname(absEntry);
-  const webDir = findWebHost(entryDir) || findWebHost(process.cwd());
-  const state = { bundle: null, map: null, assets: new Map(), version: '0', error: '', builds: 0 };
+  const webDir = findWebHost(entryDir) || findWebHost(process.cwd()) || webPackageDir();
+  const state = { bundle: null, map: null, assets: new Map(), version: '0', error: '', builds: 0, failures: 0 };
+  const hot = hmr ? createHmr({ entry: absEntry, mode: 'development', assets: state.assets, log }) : null;
+  // The token runtimes poll with hmr=1: a failed build changes it too.
+  const hotToken = () => (hot && state.error ? `${state.version}!${state.failures}` : state.version);
   const waiters = new Set();
   const outfile = path.join(entryDir, '.jsui-dev', 'bundle.js');
 
@@ -78,19 +114,34 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
         t0 = Date.now();
       });
       b.onEnd(async (result) => {
-        if (result.errors.length) {
-          state.error = await formatErrors(result.errors);
+        const fail = (text) => {
+          state.error = text;
+          state.failures++;
           log(`\n[jsui] build failed (serving the last good bundle):\n${state.error}`);
-          return;
-        }
+          notify();
+        };
+        if (result.errors.length) return fail(await formatErrors(result.errors));
+        const version = Date.now().toString(36) + '-' + (state.builds + 1);
+        let bundle = null;
+        let map = null;
         for (const f of result.outputFiles || []) {
-          if (f.path.endsWith('.map')) state.map = Buffer.from(f.contents);
-          else if (f.path.endsWith('.js')) state.bundle = Buffer.from(f.contents);
+          if (f.path.endsWith('.map')) map = Buffer.from(f.contents);
+          else if (f.path.endsWith('.js')) bundle = Buffer.from(f.contents);
         }
+        if (hot) {
+          try {
+            bundle = Buffer.from(await hot.commit(result.metafile, version));
+            map = null;
+          } catch (e) {
+            return fail(e.errors ? await formatErrors(e.errors) : String(e.stack || e));
+          }
+        }
+        state.bundle = bundle;
+        state.map = map;
         state.error = '';
         state.builds++;
-        state.version = Date.now().toString(36) + '-' + state.builds;
-        log(`[jsui] built ${path.relative(process.cwd(), absEntry)} in ${Date.now() - t0} ms (${(state.bundle.length / 1024).toFixed(0)} KiB) -> version ${state.version}`);
+        state.version = version;
+        log(`[jsui] built ${path.relative(process.cwd(), absEntry)} in ${Date.now() - t0} ms (${(state.bundle.length / 1024).toFixed(0)} KiB${hot ? ', hot' : ''}) -> version ${state.version}`);
         notify();
       });
     },
@@ -102,13 +153,17 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
   await ctx.rebuild().catch(() => {});  // errors are reported by onEnd
   await ctx.watch();
 
+  // Runtimes join the shared session only when the server offers one.
+  const offer = { 'X-Jsui-Session': '1', 'Access-Control-Expose-Headers': 'X-Jsui-Version, X-Jsui-Session' };
   const send = (res, status, type, body, extra) => {
     res.writeHead(status, Object.assign({ 'Content-Type': type, 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' }, extra));
     res.end(body);
   };
 
+  let sharedView = null;
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
+    if (sharedView && sharedView.handle(req, res, url)) return undefined;
     const p = decodeURIComponent(url.pathname);
     if (req.method === 'OPTIONS') return send(res, 204, 'text/plain', '', { 'Access-Control-Allow-Methods': 'GET', 'Access-Control-Allow-Headers': '*' });
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'text/plain', 'method not allowed');
@@ -116,19 +171,20 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
       if (!state.bundle) return send(res, 503, 'text/plain; charset=utf-8', 'no successful build yet\n' + state.error);
       // The runtime compares this with /__jsui/version to detect changes
       // that landed between loading the bundle and its first poll.
-      return send(res, 200, TYPES['.js'], state.bundle, { 'X-Jsui-Version': state.version });
+      return send(res, 200, TYPES['.js'], state.bundle, { 'X-Jsui-Version': state.version, ...offer });
     }
     if (p === '/bundle.js.map') return state.map ? send(res, 200, TYPES['.map'], state.map) : send(res, 404, 'text/plain', 'no map');
     if (p === '/__jsui/version') {
+      const token = url.searchParams.get('hmr') === '1' ? hotToken : () => state.version;
       const since = url.searchParams.get('since');
-      if (since == null || since !== state.version) return send(res, 200, 'text/plain; charset=utf-8', state.version);
+      if (since == null || since !== token()) return send(res, 200, 'text/plain; charset=utf-8', token(), offer);
       let done = false;
       const finish = () => {
         if (done) return;
         done = true;
         clearTimeout(timer);
         waiters.delete(finish);
-        send(res, 200, 'text/plain; charset=utf-8', state.version);
+        send(res, 200, 'text/plain; charset=utf-8', token(), offer);
       };
       const timer = setTimeout(finish, 25000);
       waiters.add(finish);
@@ -138,6 +194,10 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
         waiters.delete(finish);
       });
       return undefined;
+    }
+    if (p === '/__jsui/hmr') {
+      if (!hot) return send(res, 200, TYPES['.js'], '__jsui_hmr.reload("hot updates are off (jsui dev --no-hmr)");\n');
+      return send(res, 200, TYPES['.js'], hot.update(url.searchParams.get('from') || '', state.error));
     }
     if (p === '/__jsui/error') return send(res, 200, 'text/plain; charset=utf-8', state.error);
     if (p.startsWith('/assets/')) {
@@ -151,6 +211,7 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
 <h1>jsui dev server</h1>
 <p>Bundle: <a href="/bundle.js">/bundle.js</a> &middot; version: <code>${state.version}</code></p>
 <p>Native: <code>jsui-viewer --dev http://${host}:${port}/bundle.js</code></p>
+<p><a href="/shared">Shared session</a> (agents: <code>jsui run --attach http://${host}:${port} steps.json</code>)</p>
 ${web}
 ${state.error ? `<pre style="color:#f88">${state.error.replace(/[<&]/g, (c) => (c === '<' ? '&lt;' : '&amp;'))}</pre>` : ''}`;
       return send(res, 200, TYPES['.html'], html);
@@ -172,11 +233,34 @@ ${state.error ? `<pre style="color:#f88">${state.error.replace(/[<&]/g, (c) => (
   });
   const actualPort = server.address().port;
   log(`[jsui] dev server: http://${host}:${actualPort}/bundle.js  (version endpoint /__jsui/version)`);
+  // The runtimes fetch the bundle (and hot updates) from this server.
+  const local = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host.includes(':') ? `[${host}]` : host;
+  const origin = `http://${local}:${actualPort}`;
+  try {
+    sharedView = await createShared({
+      ...(headless || {}),
+      headless: !!headless,
+      waitMs,
+      entry: path.relative(process.cwd(), absEntry),
+      bundleUrl: `${origin}/bundle.js`,
+      origin,
+      webHost: webDir ? '/web/index.html' : null,
+      hosts: [host, local],
+      log,
+    });
+  } catch (e) {
+    await ctx.dispose();
+    await new Promise((r) => server.close(r));
+    throw e;
+  }
+  log(`[jsui] shared session: ${origin}/shared  (agents: jsui run --attach ${origin} steps.json)`);
   return {
     port: actualPort,
     state,
+    shared: sharedView,
     async close() {
       notify();
+      if (sharedView) await sharedView.close();
       await ctx.dispose();
       await new Promise((r) => server.close(r));
       server.closeAllConnections?.();

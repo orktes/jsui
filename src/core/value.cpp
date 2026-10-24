@@ -6,6 +6,75 @@
 
 namespace jsui {
 
+bool Value::equals(const Value& b) const {
+  const Value& a = *this;
+  if (a.identity() && a.identity() == b.identity()) return true;
+  if (a.isNull() || b.isNull()) return a.isNull() && b.isNull();
+  if (a.isBool()) return b.isBool() && a.asBool() == b.asBool();
+  if (a.isNumber()) return b.isNumber() && a.asNumber() == b.asNumber();
+  if (a.isString()) return b.isString() && a.asString() == b.asString();
+  if (a.isArray()) {
+    if (!b.isArray() || a.asArray().size() != b.asArray().size()) return false;
+    for (size_t i = 0; i < a.asArray().size(); i++)
+      if (!a.asArray()[i].equals(b.asArray()[i])) return false;
+    return true;
+  }
+  if (a.isObject()) {
+    if (!b.isObject() || a.asObject().size() != b.asObject().size()) return false;
+    auto ib = b.asObject().begin();
+    for (auto& [k, v] : a.asObject()) {
+      if (k != ib->first || !v.equals(ib->second)) return false;
+      ++ib;
+    }
+    return true;
+  }
+  return false;
+}
+
+bool Value::assignReusing(const Value& src) {
+  if (isNumber() && src.isNumber()) {
+    double& d = std::get<2>(v_);
+    if (d == src.asNumber()) return false;
+    d = src.asNumber();
+    return true;
+  }
+  if (identity() && identity() == src.identity()) return false;
+  if (isArray() && src.isArray() && asArray().size() == src.asArray().size()) {
+    if (std::get<4>(v_).use_count() > 1 && equals(src)) return false;
+    Array& a = mutableArray();
+    const Array& b = src.asArray();
+    bool changed = false;
+    for (size_t i = 0; i < a.size(); i++) changed |= a[i].assignReusing(b[i]);
+    return changed;
+  }
+  if (isObject() && src.isObject() && asObject().size() == src.asObject().size()) {
+    if (std::get<5>(v_).use_count() > 1 && equals(src)) return false;
+    // Keys and values in one walk; on a key mismatch the entries changed so
+    // far do not matter, the whole object is replaced.
+    Object& a = mutableObject();
+    auto ib = src.asObject().begin();
+    bool changed = false;
+    for (auto& entry : a) {
+      if (entry.first != ib->first) {
+        *this = src;
+        return true;
+      }
+      changed |= entry.second.assignReusing(ib->second);
+      ++ib;
+    }
+    return changed;
+  }
+  if (isString() && src.isString()) {
+    std::string& s = std::get<3>(v_);
+    if (s == src.asString()) return false;
+    s = src.asString();
+    return true;
+  }
+  if (equals(src)) return false;  // bools, null
+  *this = src;
+  return true;
+}
+
 namespace {
 
 struct JsonParser {

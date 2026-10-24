@@ -20,6 +20,7 @@
 #include "include/core/SkBitmap.h"
 #include "include/core/SkData.h"
 #include "render/gpu.h"
+#include "render/shader_view.h"
 #include "render_util.h"
 #include "test.h"
 
@@ -174,7 +175,7 @@ struct GL {
 constexpr unsigned GL_TEXTURE_2D = 0x0DE1, GL_RGBA = 0x1908, GL_RGBA8 = 0x8058, GL_UNSIGNED_BYTE = 0x1401,
                    GL_FRAMEBUFFER = 0x8D40, GL_COLOR_ATTACHMENT0 = 0x8CE0, GL_FRAMEBUFFER_COMPLETE = 0x8CD5,
                    GL_TEXTURE_MIN_FILTER = 0x2801, GL_TEXTURE_MAG_FILTER = 0x2800, GL_NEAREST = 0x2600,
-                   GL_PACK_ALIGNMENT = 0x0D05, GL_COLOR_BUFFER_BIT = 0x4000, GL_SCISSOR_TEST = 0x0C11,
+                   GL_PACK_ALIGNMENT = 0x0D05, GL_UNPACK_ALIGNMENT = 0x0CF5, GL_COLOR_BUFFER_BIT = 0x4000, GL_SCISSOR_TEST = 0x0C11,
                    GL_VERSION = 0x1F02, GL_RENDERER = 0x1F01;
 
 #endif  // JSUI_GPU_TESTS
@@ -489,6 +490,18 @@ void buildScene(Scene& s, const std::string& png) {
   s.add(R"J({"type":"Text","style":{"position":"absolute","left":130,"top":206,"fontSize":14,"color":"#ffd0a0",
             "textShadowColor":"rgba(0,0,0,0.9)","textShadowOffset":{"width":1,"height":1},"textShadowRadius":2,
             "transform":[{"rotate":"-4deg"}]},"text":"Ganesh text"})J");
+  // SkSL: a ShaderView fill (gradient from its uniforms) and one that
+  // post-processes its own children (mirrored, channels swapped).
+  s.add(R"J({"type":"ShaderView","props":{"source":"uniform float2 resolution; layout(color) uniform half4 a; layout(color) uniform half4 b; half4 main(float2 p) { return mix(a, b, half(p.x / resolution.x)); }",
+            "uniforms":{"a":"#ff2060","b":[0.1,0.8,1,1]}},"style":{"position":"absolute","left":262,"top":204,"width":26,"height":30,"borderRadius":6}})J");
+  s.add(R"J({"type":"ShaderView","props":{"source":"uniform shader content; uniform float2 resolution; half4 main(float2 p) { return content.eval(float2(resolution.x - p.x, p.y)).brga; }"},
+            "style":{"position":"absolute","left":292,"top":204,"width":26,"height":30},
+            "children":[{"style":{"width":10,"height":30,"backgroundColor":"#ff8800"}}]})J");
+  // A preloaded shader no view uses yet: its warm-up draws (off-screen, in
+  // the first frame on Ganesh) leave the frame as the CPU paints it.
+  CHECK(s.rt->shaders->preload("uniform shader img; uniform float k; half4 main(float2 p) { return img.eval(p) * half(k); }",
+                               jsui::Value::parseJson(R"({"img":{"uri":"x.png","tile":"mirror"}})"))
+            ->effect);
 }
 
 // Runs fn(ctx, api) once per GL API that works here; SKIP when none does.
@@ -787,6 +800,85 @@ TEST(gpu_fbo_bottom_left_and_no_clear) {
     CHECK_NEAR(double((blend >> 8) & 255), 128, 3);
     CHECK_NEAR(double((blend >> 16) & 255), 128, 3);
     CHECK_EQ(int(blend >> 24), 255);
+  });
+}
+
+// Host textures (jsui_set_texture, JSUI_TEXTURE_GL): a texture of the GL
+// context drawn in place, matching the same pixels given as CPU pixels;
+// new contents (jsui_texture_updated) show in the next frame; a
+// bottom-left origin is flipped.
+TEST(gpu_host_texture_gl) {
+  forEachContext("gpu_host_texture_gl", [](GLContext& c, JsuiGpuContext* gpu, Api api) {
+    // 4x2, row 0 (the top as uploaded) red, row 1 blue.
+    std::vector<uint32_t> rows(8);
+    for (int x = 0; x < 4; x++) {
+      rows[x] = 0xff0000ffu;
+      rows[4 + x] = 0xffff0000u;
+    }
+    unsigned src = 0;
+    c.gl.GenTextures(1, &src);
+    c.gl.BindTexture(GL_TEXTURE_2D, src);
+    c.gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    c.gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    c.gl.PixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    c.gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, rows.data());
+    jsui_gpu_reset(gpu);
+    Scene s(64, 48);
+    jsui::Node* v = s.add(R"J({"type":"Image","props":{"texture":"gl","resizeMode":"stretch"},
+                               "style":{"position":"absolute","left":8,"top":8,"width":40,"height":32}})J");
+    (void)v;
+    // The CPU reference: the same pixels as CPU pixels.
+    s.rt->textures.setPixels("gl", rows.data(), 4, 2, 0, 0);
+    s.render();
+    JsuiTexture t{};
+    t.kind = JSUI_TEXTURE_GL;
+    t.handle = reinterpret_cast<void*>(uintptr_t(src));
+    t.width = 4;
+    t.height = 2;
+    CHECK_EQ(s.rt->textures.set("gl", &t), 1);
+    RenderTexture rtex(c.gl, 64, 48);
+    JsuiGLTarget target{};
+    target.texture = rtex.tex;
+    target.width = 64;
+    target.height = 48;
+    target.flags = JSUI_GL_TOP_LEFT_ORIGIN | JSUI_GL_NO_RETAIN;
+    CHECK_EQ(jsui::gpu::render(s.rt->main(), gpu, target), 0);
+    std::vector<uint32_t> out = rtex.read(false);
+    savePng((std::string("gpu_host_texture_") + apiName(api)).c_str(), out, 64, 48);
+    auto px = [&](int x, int y) { return out[size_t(y) * 64 + x]; };
+    CHECK_EQ(px(28, 12), 0xff0000ffu);  // top half red
+    CHECK_EQ(px(28, 36), 0xffff0000u);  // bottom half blue
+    CHECK_EQ(px(2, 2), 0u);
+    // Away from the red/blue edge (rows 16..31: the stretched texels are 16 px
+    // tall, so filtering blends there and its precision differs by driver,
+    // e.g. Apple's software renderer) the frame matches the CPU pixels.
+    std::vector<uint32_t> gpuRows = out, cpuRows = s.px;
+    for (int y = 16; y < 32; y++)
+      for (int x = 0; x < 64; x++) gpuRows[size_t(y) * 64 + x] = cpuRows[size_t(y) * 64 + x] = 0;
+    Diff d = compare(gpuRows, cpuRows, 8);
+    CHECK(d.over < 0.02);
+    if (d.over >= 0.02) std::printf("  host texture vs CPU pixels: max %d, mean %.3f, over %.3f\n", d.maxDiff, d.mean, d.over);
+    // New contents in the same texture: green.
+    std::vector<uint32_t> green(8, 0xff00ff00u);
+    c.gl.BindTexture(GL_TEXTURE_2D, src);
+    c.gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, green.data());
+    CHECK(!s.rt->needsRedraw());
+    CHECK(s.rt->textures.updated("gl"));
+    CHECK(s.rt->needsRedraw());
+    CHECK_EQ(jsui::gpu::render(s.rt->main(), gpu, target), 0);
+    out = rtex.read(false);
+    CHECK_EQ(px(28, 12), 0xff00ff00u);
+    // A bottom-left texture (rows bottom first) is shown upright.
+    c.gl.BindTexture(GL_TEXTURE_2D, src);
+    c.gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, rows.data());
+    t.flags = JSUI_TEXTURE_BOTTOM_LEFT_ORIGIN;
+    CHECK_EQ(s.rt->textures.set("gl", &t), 1);
+    CHECK_EQ(jsui::gpu::render(s.rt->main(), gpu, target), 0);
+    out = rtex.read(false);
+    CHECK_EQ(px(28, 12), 0xffff0000u);
+    CHECK_EQ(px(28, 36), 0xff0000ffu);
+    s.rt->textures.remove("gl");
+    c.gl.DeleteTextures(1, &src);
   });
 }
 

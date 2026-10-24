@@ -34,10 +34,13 @@ struct PerfCounters {
   uint64_t styleResolves = 0;    // applyStyle runs
   uint64_t valueConversions = 0; // JS objects / arrays converted to Value
   uint64_t layoutPasses = 0;     // YGNodeCalculateLayout runs
+  uint64_t layoutVisits = 0;     // nodes the post-layout walk visited (Document::afterLayout)
   uint64_t textMeasures = 0;     // Yoga measure callbacks for Text / TextInput
   uint64_t paragraphBuilds = 0;  // text shaping (ParagraphBuilder::Build)
   uint64_t animatedWrites = 0;   // views written by native Animated
   uint64_t events = 0;           // events dispatched to JS
+  uint64_t jsCalls = 0;          // native -> JS function calls (events, timers, frame callbacks, layout, messages)
+  uint64_t jsJobs = 0;           // microtasks (promise jobs) run
   uint64_t hitNodes = 0;         // nodes visited by hit testing
   uint64_t imageDecodes = 0;     // encoded images decoded (ImageCache)
   double imageDecodeUs = 0;      // ... and the time that took (timed even without profiling)
@@ -52,6 +55,11 @@ class Perf {
   using Clock = std::chrono::steady_clock;
   PerfCounters counters;
   bool profiling = false;
+  // Not a statistic (never cleared): bumped by every Node::setProps and
+  // Node::patchStyle(object) of the runtime's documents, so native Animated
+  // re-checks its connected views for React re-props (or other style
+  // writes) only after there were any.
+  uint64_t propsEpoch = 0;
   // Accumulated exclusive time per phase in microseconds (reset by the caller).
   double us[size_t(Phase::Count)] = {};
 

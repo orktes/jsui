@@ -16,6 +16,9 @@
 // scroll event moves the window and the following cells mount.
 
 import { createElement as h, Component, Fragment, isValidElement, cloneElement, memo, useState, useMemo, useCallback, useRef } from 'react';
+// jsx() takes the props object as is (createElement copies it key by key):
+// the list builds one element per mounted cell on every render.
+import { jsx } from 'react/jsx-runtime';
 import { ScrollView } from './basic.js';
 import { instances } from '../instances.js';
 import { addGlobalListener } from '../events.js';
@@ -252,14 +255,21 @@ function sameItem(a, b) {
   return true;
 }
 
+// The cells' props always have these keys (VirtualizedList.render).
 function cellPropsEqual(a, b) {
-  for (const k in a) {
-    if (k === 'item') {
-      if (!sameItem(a.item, b.item)) return false;
-    } else if (a[k] !== b[k]) return false;
-  }
-  for (const k in b) if (!(k in a)) return false;
-  return true;
+  return (
+    a.index === b.index &&
+    a.cellKey === b.cellKey &&
+    a.renderItem === b.renderItem &&
+    a.onLayout === b.onLayout &&
+    a.extraData === b.extraData &&
+    a.Separator === b.Separator &&
+    a.cellStyle === b.cellStyle &&
+    a.list === b.list &&
+    a.ListItemComponent === b.ListItemComponent &&
+    a.CellRendererComponent === b.CellRendererComponent &&
+    sameItem(a.item, b.item)
+  );
 }
 
 /**
@@ -388,6 +398,7 @@ export class VirtualizedList extends Component {
     this._sentEndForContentLength = 0;
     this._sentStartForContentLength = 0;
     this._hiPriInProgress = false;
+    this._cellsQueued = false;  // a cellsAroundViewport update is queued
     this._batchTimer = null;
     this._pendingScroll = null;
     this._lastFocusedKey = null;
@@ -713,7 +724,20 @@ export class VirtualizedList extends Component {
 
   _updateCellsToRender() {
     this._updateViewableItems();
+    // An updater that returns null still costs React a render and commit
+    // pass: skip it when the window would not move. Only while none of ours
+    // is queued, so this.state is the state that updater would see.
+    if (!this._cellsQueued) {
+      const cur = this.state.cellsAroundViewport;
+      const next = this._adjustCellsAroundViewport(this.props, cur);
+      if (next.first === cur.first && next.last === cur.last) {
+        this._hiPriInProgress = false;  // no componentDidUpdate follows
+        return;
+      }
+    }
+    this._cellsQueued = true;
     this.setState((state, props) => {
+      this._cellsQueued = false;
       const next = this._adjustCellsAroundViewport(props, state.cellsAroundViewport);
       const cur = state.cellsAroundViewport;
       if (next.first === cur.first && next.last === cur.last) return null;
@@ -970,7 +994,7 @@ export class VirtualizedList extends Component {
     const fa = this._frameApprox(a);
     const fb = this._frameApprox(b);
     const size = Math.max(0, fb.offset + fb.length - fa.offset);
-    return h('View', { key, style: horizontal ? { width: size } : { height: size } });
+    return jsx('View', { style: horizontal ? { width: size } : { height: size } }, key);
   }
 
   render() {
@@ -1007,20 +1031,23 @@ export class VirtualizedList extends Component {
         indexOfKey.set(key, i);
         if (stickyFromProps && stickyFromProps.has(i + stickyOffset)) stickyHeaderIndices.push(cells.length);
         cells.push(
-          h(CellRenderer, {
+          jsx(
+            CellRenderer,
+            {
+              cellKey: key,
+              item,
+              index: i,
+              list: this,
+              renderItem,
+              ListItemComponent,
+              extraData,
+              Separator: i < count - 1 ? ItemSeparatorComponent : undefined,
+              cellStyle,
+              CellRendererComponent,
+              onLayout: getAware ? this._layoutHandler(key) : undefined,
+            },
             key,
-            cellKey: key,
-            item,
-            index: i,
-            list: this,
-            renderItem,
-            ListItemComponent,
-            extraData,
-            Separator: i < count - 1 ? ItemSeparatorComponent : undefined,
-            cellStyle,
-            CellRendererComponent,
-            onLayout: getAware ? this._layoutHandler(key) : undefined,
-          }),
+          ),
         );
       }
       prevEnd = b;
@@ -1041,6 +1068,9 @@ export class VirtualizedList extends Component {
 
     const scrollProps = {};
     for (const k in p) if (!LIST_OMIT[k]) scrollProps[k] = p[k];
+    // React Native's VirtualizedList default: the window follows offsets at
+    // most every 50 ms (its sticky headers, StickyState, need every one).
+    if (scrollProps.scrollEventThrottle == null && !stickyFromProps) scrollProps.scrollEventThrottle = 50;
     scrollProps.horizontal = horizontal;
     scrollProps.onLayout = this._onLayout;
     scrollProps.onScroll = this._onScroll;

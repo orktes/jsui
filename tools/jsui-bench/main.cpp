@@ -4,11 +4,14 @@
 //   jsui-bench bundle.js [--frames 600] [--warmup 120] [--width 1280] [--height 720]
 //              [--paint incremental|full|none] [--mouse-sweep X,Y0,Y1,FRAMES]
 //              [--patch-state KEY,N] [--surfaces N[,changing|same|one|resize]]
-//              [--markers N,json|buffer|native] [--name NAME] [--json out.json]
+//              [--markers N,json|buffer|native] [--wheel X,Y,DY[,FRAMES]]
+//              [--react-stats] [--name NAME] [--json out.json]
 //   jsui-bench --suite DIR [--json out.json] [--compare baseline.json]
 //
 // --suite runs the standard scenarios from DIR (built by tools/jsui-bench/run.sh):
 //   interactions  examples/showcase/interactions.jsx (constant native animations)
+//   interactions-wheel  the same with a wheel turned over its armory list every
+//                 frame (12 px, the direction flipping every 60 frames)
 //   list          2000 static rows, one counter changing every frame
 //   menu          hover springs; the mouse sweeps over the buttons
 //   inventory     500 slots, one jsui_patch_state per frame
@@ -33,7 +36,10 @@
 //   host      the host's own share of pushing data (building the JSON text /
 //             filling the buffer) up to the jsui_* call; counted in total
 // Counters are per frame: bridge calls, style resolves, Yoga nodes laid out
-// (not served from Yoga's cache), text measure callbacks, allocations, ...
+// (not served from Yoga's cache), text measure callbacks, allocations, calls
+// into JS (jsCalls) and microtasks run (jsJobs), messages JS posted to the
+// host, ... --react-stats adds React commits and the components each commit
+// rendered (through React's DevTools hook, so it costs JS time itself).
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -61,6 +67,7 @@
 
 #include "core/document.h"
 #include "core/perf.h"
+#include "js/engine.h"
 #include "jsui/jsui.h"
 #include "runtime.h"
 
@@ -152,6 +159,12 @@ struct Options {
   // positions reach the UI.
   int markers = 0;
   enum class MarkerFeed { Json, Buffer, Native } markerFeed = MarkerFeed::Json;
+  // A mouse wheel turned at (wheelX, wheelY) every frame, wheelDy px, the
+  // direction flipping every wheelFrames frames.
+  bool wheel = false;
+  float wheelX = 0, wheelY = 0, wheelDy = 12;
+  int wheelFrames = 60;
+  bool reactStats = false;
 };
 
 // Columns of the report.
@@ -171,16 +184,50 @@ const CounterDef kCounters[] = {
     {"styleResolves", [](const jsui::PerfCounters& c) { return c.styleResolves; }},
     {"valueConversions", [](const jsui::PerfCounters& c) { return c.valueConversions; }},
     {"layoutPasses", [](const jsui::PerfCounters& c) { return c.layoutPasses; }},
+    {"layoutVisits", [](const jsui::PerfCounters& c) { return c.layoutVisits; }},
     {"textMeasures", [](const jsui::PerfCounters& c) { return c.textMeasures; }},
     {"paragraphBuilds", [](const jsui::PerfCounters& c) { return c.paragraphBuilds; }},
     {"animatedWrites", [](const jsui::PerfCounters& c) { return c.animatedWrites; }},
     {"events", [](const jsui::PerfCounters& c) { return c.events; }},
+    {"jsCalls", [](const jsui::PerfCounters& c) { return c.jsCalls; }},
+    {"jsJobs", [](const jsui::PerfCounters& c) { return c.jsJobs; }},
     {"hitNodes", [](const jsui::PerfCounters& c) { return c.hitNodes; }},
 };
 constexpr int kCounterCount = int(sizeof(kCounters) / sizeof(kCounters[0]));
 // Extra counters measured by the tool itself.
-const char* const kExtraNames[] = {"yogaLayouts", "yogaCachedLayouts", "yogaMeasures", "paragraphLayouts", "allocs"};
-constexpr int kExtraCount = 5;
+const char* const kExtraNames[] = {"yogaLayouts", "yogaCachedLayouts", "yogaMeasures", "paragraphLayouts", "allocs",
+                                   "hostMessages", "reactCommits", "reactRenders"};
+constexpr int kExtraCount = 8;
+
+// --react-stats: a minimal React DevTools hook, installed before the bundle
+// runs. Counts commits and the class / function components each commit
+// rendered: the fibers of the committed tree with PerformedWork, walking only
+// into subtrees React cloned (an untouched subtree keeps the old child).
+const char kReactStatsHook[] = R"JS(
+(function () {
+  var s = (globalThis.__jsuiBenchReact = { commits: 0, renders: 0 });
+  function walk(f) {
+    for (; f; f = f.sibling) {
+      var t = f.tag;
+      if ((t === 0 || t === 1 || t === 11 || t === 14 || t === 15) && (f.flags & 1)) s.renders++;
+      if (!f.alternate || f.child !== f.alternate.child) walk(f.child);
+    }
+  }
+  globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__ = {
+    supportsFiber: true,
+    renderers: new Map(),
+    inject: function () { return 1; },
+    onCommitFiberRoot: function (id, root) { s.commits++; walk(root.current.child); },
+    onCommitFiberUnmount: function () {},
+    onPostCommitFiberRoot: function () {},
+  };
+})();
+)JS";
+
+struct BenchMessages {
+  uint64_t count = 0;
+  double reactCommits = 0, reactRenders = 0;
+};
 
 struct Stat {
   double mean = 0, p50 = 0, p95 = 0;
@@ -222,13 +269,25 @@ bool run(const Options& o, Result* out) {
     std::fprintf(stderr, "jsui-bench: cannot read %s\n", o.bundle.c_str());
     return false;
   }
+  if (o.reactStats) src = kReactStatsHook + src;
+  BenchMessages messages;
   JsuiConfig cfg;
   jsui_config_init(&cfg);
+  cfg.audio_disabled = 1;  // headless: no sound device
   cfg.width = o.width;
   cfg.height = o.height;
   cfg.js_timeout_ms = -1;
   cfg.log = [](void*, JsuiLogLevel level, const char* msg) {
     if (level >= JSUI_LOG_WARN) std::fprintf(stderr, "[bench] %s\n", msg);
+  };
+  cfg.message_user = &messages;
+  cfg.on_message = [](void* user, const char* name, const char* json) {
+    auto* m = static_cast<BenchMessages*>(user);
+    if (std::strcmp(name, "__jsui_bench:react") == 0) {
+      std::sscanf(json, "[%lf,%lf]", &m->reactCommits, &m->reactRenders);
+      return;
+    }
+    m->count++;
   };
   JsuiRuntime* h = jsui_create(&cfg);
   jsui::Runtime* rt = jsui::internalRuntime(h);
@@ -294,9 +353,16 @@ bool run(const Options& o, Result* out) {
     if (o.markerFeed == Options::MarkerFeed::Json) jsui_set_state(h, "enemies", enemyJson.c_str());
     else jsui_set_buffer(h, "enemies", JSUI_BUFFER_F32, enemyData.data(), enemyData.size());
   };
+  if (o.wheel) jsui_send_mouse_move(h, o.wheelX, o.wheelY);
   auto step = [&]() {
     now += 1000.0 / 60.0;
     if (o.markers > 0) pushMarkers();
+    if (o.wheel) {
+      // Input arrives between frames, before the tick (like a browser's).
+      float dy = (frame / o.wheelFrames) % 2 ? -o.wheelDy : o.wheelDy;
+      jsui_set_event_time(h, now - 4);
+      jsui_send_mouse_wheel(h, o.wheelX, o.wheelY, 0, dy);
+    }
     if (o.mouseSweep) {
       // Triangle wave over the button column.
       double t = double(frame % o.sweepFrames) / double(o.sweepFrames);
@@ -336,6 +402,8 @@ bool run(const Options& o, Result* out) {
     frame++;
   };
   for (int i = 0; i < o.warmup; i++) step();
+  if (o.reactStats) rt->js->eval("__jsuiBenchReact.commits = __jsuiBenchReact.renders = 0;", "bench");
+  uint64_t messages0 = messages.count;
 
   std::vector<double> phase[kPhaseCount], host, total;
   for (auto& v : phase) v.reserve(size_t(o.frames));
@@ -375,6 +443,14 @@ bool run(const Options& o, Result* out) {
   out->extra[2] = double(gYoga.measures - y0.measures) / f;
   out->extra[3] = double(jsui::gParagraphLayouts - pl0) / f;
   out->extra[4] = double(allocs) / f;
+  out->extra[5] = double(messages.count - messages0) / f;
+  if (o.reactStats) {
+    rt->js->eval("__jsui_native.postMessage('__jsui_bench:react', "
+                 "JSON.stringify([__jsuiBenchReact.commits, __jsuiBenchReact.renders]));",
+                 "bench");
+    out->extra[6] = messages.reactCommits / f;
+    out->extra[7] = messages.reactRenders / f;
+  }
   if (const char* err = jsui_last_error(h); err && *err) std::fprintf(stderr, "[bench] %s: last error: %s\n", o.name.c_str(), err);
   jsui_destroy(h);
   return true;
@@ -475,6 +551,13 @@ std::vector<Options> suite(const std::string& dir, const Options& base) {
     return list.back();
   };
   add("interactions");
+  // The armory FlatList on the right of interactions.jsx (frame-bench.mjs
+  // --scenario scroll turns the wheel at the same spot).
+  Options& wheel = add("interactions-wheel");
+  wheel.bundle = dir + "/interactions.js";
+  wheel.wheel = true;
+  wheel.wheelX = float(base.width - 200);
+  wheel.wheelY = std::round(float(base.height) * 0.55f);
   add("list");
   Options& menu = add("menu");
   menu.mouseSweep = true;
@@ -556,12 +639,19 @@ int main(int argc, char** argv) {
       o.markers = std::max(0, std::atoi(v.c_str()));
       if (v.find(",buffer") != std::string::npos) o.markerFeed = Options::MarkerFeed::Buffer;
       else if (v.find(",native") != std::string::npos) o.markerFeed = Options::MarkerFeed::Native;
+    } else if (a == "--wheel") {
+      int n = std::sscanf(next().c_str(), "%f,%f,%f,%d", &o.wheelX, &o.wheelY, &o.wheelDy, &o.wheelFrames);
+      o.wheel = n >= 3;
+      o.wheelFrames = std::max(1, o.wheelFrames);
+    } else if (a == "--react-stats") {
+      o.reactStats = true;
     } else if (a == "-h" || a == "--help") {
       std::printf(
           "usage: jsui-bench <bundle.js> [--frames N] [--warmup N] [--width W] [--height H]\n"
           "                  [--paint incremental|full|none] [--mouse-sweep X,Y0,Y1,FRAMES]\n"
           "                  [--patch-state KEY,SLOTS] [--surfaces N[,changing|same|one|resize]]\n"
-          "                  [--markers N,json|buffer|native] [--name NAME] [--json out.json]\n"
+          "                  [--markers N,json|buffer|native] [--wheel X,Y,DY[,FRAMES]]\n"
+          "                  [--react-stats] [--name NAME] [--json out.json]\n"
           "       jsui-bench --suite DIR [--json out.json] [--compare baseline.json]\n");
       return 0;
     } else o.bundle = a;

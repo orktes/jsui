@@ -7,8 +7,9 @@
 // Scenarios: interactions (examples/showcase/interactions.jsx, idle: its
 // looping animations), interactions-hover (same, with a mouse sweep), caret
 // (static screen, blinking caret), cards (shadowed, rounded-clipped cards
-// scrolling) and text (text-heavy panels with a ticking clock, a ticker and
-// a pulsing badge).
+// scrolling), text (text-heavy panels with a ticking clock, a ticker and
+// a pulsing badge) and menu (jsui-bench's menu: shadowed buttons springing
+// on hover, with a mouse sweep).
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -36,6 +37,7 @@ const SCENES = [
   ['caret', 'tools/jsui-paint-bench/scenes/caret.jsx'],
   ['cards', 'tools/jsui-paint-bench/scenes/cards.jsx'],
   ['text', 'tools/jsui-paint-bench/scenes/text.jsx'],
+  ['menu', 'tools/jsui-bench/scenarios/menu.jsx', '@hover'],
 ].filter(([name]) => !only || only.split(',').includes(name));
 
 const specs = [];

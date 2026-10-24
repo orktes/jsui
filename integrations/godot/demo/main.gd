@@ -14,7 +14,9 @@ extends Control
 ##                       hover, click, wheel, trackpad pan, keyboard into a
 ##                       TextInput, gamepad focus, the Ping button, clicks
 ##                       that pass through the UI to the game and to a
-##                       control behind it, plus a call_ui. Prints PASS / FAIL
+##                       control behind it, a call_ui and host textures
+##                       (set_texture: an ImageTexture and a live SubViewport) and UI
+##                       sounds (AudioStreamPlayers on Godot's buses). Prints PASS / FAIL
 ##                       per check and fails the run on any FAIL
 ##   --force-cpu         JsuiView.force_cpu: CPU raster + texture upload even
 ##                       when Godot runs on Vulkan / Metal
@@ -91,6 +93,7 @@ extends Control
 const PING_REWARD := 120
 const VIEWPORT_BACKDROP := Color8(40, 150, 110)  # --max-viewport-diff
 const HAND_OFF_SURFACES := 4  # --max-render-waits: surface views of ui's runtime
+const PROBE_SIZE := Vector2i(64, 32)  # the host texture probe's frame (pixel ratio 1)
 
 var _capture := ""
 var _frames := 120
@@ -122,6 +125,7 @@ var _failures := 0
 var _testing := false
 var _fake_interop: Object = null
 var _badge_events: Array = []  # "mount:<label>", "render:<label>", "press:<label>", "unmount:<label>"
+var _ui_sounds: Array = []  # the demo UI's sound_played: [voice, url, bus]
 
 
 ## The WebGPUInterop contract (integrations/godot/README.md) with null handles.
@@ -240,6 +244,7 @@ func _ready() -> void:
 	ui.message_received.connect(_on_ui_message)
 	ui.call_requested.connect(_on_ui_call)
 	ui.js_error.connect(func(msg): printerr("[jsui error] ", msg))
+	ui.sound_played.connect(func(voice: int, url: String, bus: String): _ui_sounds.append([voice, url, bus]))
 	ui.grab_focus()  # keyboard / gamepad go to the UI
 	print("JsuiView running=%s bundle=%s dev=%s" % [ui.is_running(), ui.bundle_url, ui.dev_mode])
 	if _bench > 0:
@@ -538,6 +543,10 @@ func _run_self_test() -> void:
 
 	await _test_surface()  # with the render hand-off check (--max-render-waits)
 	await _test_runtime_freed_first()
+	await _test_host_textures()
+	await _test_lottie()
+	await _test_shaders()
+	await _test_audio()
 
 	if _tour:
 		await _run_tour()
@@ -645,6 +654,16 @@ func _check_render_hand_off(badge: JsuiView) -> void:
 		extra.append(v)
 	var surfaces: Array = [badge] + extra
 	var up := await _wait_for(func(): return extra.all(func(v): return v.get_render_stats().renders > 0))
+	# Steady state: a view's first frames, on a new texture pair, render
+	# without a hand-off (the pair is promoted by its next repaint), so
+	# repaint the new surfaces until each has handed a frame over.
+	var warm := [0]  # lambdas capture by value: count in an array
+	var handed := await _wait_for(func():
+		warm[0] += 1
+		for v in extra:
+			v.initial_props = {"label": "W%d" % warm[0]}
+		return extra.all(func(v): return v.get_render_stats().gpu_jobs > 0))
+	up = up and handed
 	var views: Array = [ui] + surfaces
 	var signals := []  # frame_rendered per view
 	var counters := []
@@ -688,8 +707,8 @@ func _check_render_hand_off(badge: JsuiView) -> void:
 	var thread_jobs: int = s1[0].render_thread_jobs - s0[0].render_thread_jobs
 	ok = ok and thread_jobs == (frames if separate else 0)
 	_check("render hand-off", ok and waits_total <= _max_render_waits,
-		"%d frames, one runtime, %d views: %d render-thread jobs (%s); %s; limit %d waits" % [
-			frames, views.size(), thread_jobs, "separate render thread" if separate else "rendering on the main thread",
+		"%d frames, one runtime, %d views (new surfaces %s): %d render-thread jobs (%s); %s; limit %d waits" % [
+			frames, views.size(), "up" if up else "never handed a frame over", thread_jobs, "separate render thread" if separate else "rendering on the main thread",
 			"; ".join(parts), _max_render_waits])
 	if _max_viewport_diff >= 0.0 and _capture != "":
 		# Mid-animation: the last frames were all handed over without a wait.
@@ -791,6 +810,358 @@ func _test_runtime_freed_first() -> void:
 		g.free()
 	_check("runtime freed first", up and detached and reattached and orphaned,
 		"surface left and re-entered the tree, then its runtime view was freed (%d of 2 with a frame on the render thread)" % in_flight)
+
+
+## Host textures (JsuiView.set_texture): Godot textures of known colours in a
+## TextureProbe (ui/cinema.jsx: one HostTexture stretched over 64x32 px) of a
+## runtime of its own. On Vulkan they reach Skia as GPU copies (so this also
+## runs under the CI's synchronization validation), headless and on OpenGL as
+## CPU pixels (get_image()). The texture is set before the view starts, then
+## replaced, kept across stop() / start() and removed; with a renderer (not
+## headless: the dummy server keeps no image updates and renders no
+## viewports) also updated in place (ImageTexture.update -> `changed`) and
+## swapped for a live SubViewport whose colour changes.
+func _test_host_textures() -> void:
+	var probe := JsuiView.new()
+	probe.bundle_url = ui.bundle_url
+	probe.component = "TextureProbe"
+	probe.initial_props = {"name": "probe", "width": PROBE_SIZE.x, "height": PROBE_SIZE.y}
+	probe.auto_size = true
+	probe.pixel_ratio = 1.0  # the frame is the probe's 64x32 px exactly
+	probe.pipeline_cache_path = ""
+	probe.position = Vector2(16, 112)
+	var sizes := []  # what useHostTexture reported
+	probe.message_received.connect(func(name: String, data, _json):
+		if name == "probe:size":
+			sizes.append(data["size"]))
+	var red := Color8(220, 40, 60)
+	var green := Color8(30, 200, 90)
+	var blue := Color8(40, 90, 230)
+	var gold := Color8(240, 190, 80)
+	# Set before the view starts (it starts in _ready, when added).
+	probe.set_texture("probe", _two_colour_texture(red, green))
+	add_child(probe)
+	var shown := await _wait_for(func(): return _probe_shows(probe, red, green), 10.0)
+	var renderer: String = probe.get_renderer()
+	_check("host texture", shown and (_expect_renderer == "" or renderer == _expect_renderer),
+		"an ImageTexture set before start() shows in the frame (%s renderer%s; %s)" % [renderer,
+			", expected " + _expect_renderer if _expect_renderer != "" else "", _probe_line(probe)])
+	_check("useHostTexture", await _wait_for(func(): return sizes.size() > 0 and sizes[-1] is Dictionary \
+			and sizes[-1].width == 8 and sizes[-1].height == 4), "JS saw %s" % [sizes])
+	probe.set_texture("probe", _two_colour_texture(green, red))
+	_check("host texture replaced", await _wait_for(func(): return _probe_shows(probe, green, red)), _probe_line(probe))
+	probe.stop()
+	probe.start()
+	_check("host texture across restart", await _wait_for(func(): return _probe_shows(probe, green, red), 10.0),
+		"kept by the view and given to the new runtime (%s)" % _probe_line(probe))
+	var viewport: SubViewport = null
+	if DisplayServer.get_name() != "headless":
+		# In place: ImageTexture.update() emits `changed`, which the view takes
+		# as new contents (no update_texture() needed).
+		var tex := _two_colour_texture(red, green)
+		probe.set_texture("probe", tex)
+		await _wait_for(func(): return _probe_shows(probe, red, green))
+		tex.update(_two_colour_image(blue, gold))
+		_check("host texture update", await _wait_for(func(): return _probe_shows(probe, blue, gold)), _probe_line(probe))
+		# Live: a SubViewport that renders every frame, its colour changed from
+		# here (Godot renders it, the probe shows its texture a frame later).
+		viewport = SubViewport.new()
+		viewport.size = Vector2i(16, 16)
+		viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+		var rect := ColorRect.new()
+		rect.color = gold
+		rect.size = Vector2(16, 16)
+		viewport.add_child(rect)
+		add_child(viewport)
+		probe.set_texture("probe", viewport.get_texture(), true)
+		_check("host texture viewport", await _wait_for(func(): return _probe_shows(probe, gold, gold)), _probe_line(probe))
+		rect.color = blue
+		_check("host texture live", await _wait_for(func(): return _probe_shows(probe, blue, blue)),
+			"the viewport's next frames show (%s)" % _probe_line(probe))
+	probe.remove_texture("probe")
+	_check("host texture removed", await _wait_for(func():
+		var img: Image = probe.get_frame_image()
+		return img != null and img.get_pixel(PROBE_SIZE.x / 4, PROBE_SIZE.y / 2).a8 < 8 \
+			and sizes.size() > 0 and sizes[-1] == null), "nothing drawn, useHostTexture null (%s)" % _probe_line(probe))
+	probe.queue_free()
+	if viewport:
+		viewport.queue_free()
+	await get_tree().process_frame
+
+
+## Lottie (LottieView, played natively by Skottie): a LottieProbe (ui/
+## lottie-probe.jsx, 64x32 px) held at progress 0.5 shows its square in the
+## middle on this renderer; one that plays changes its frame on its own (the
+## runtime's clock, no JS per frame).
+func _test_lottie() -> void:
+	var make := func(props: Dictionary, y: float) -> JsuiView:
+		var v := JsuiView.new()
+		v.bundle_url = ui.bundle_url
+		v.component = "LottieProbe"
+		v.initial_props = props
+		v.auto_size = true
+		v.pixel_ratio = 1.0
+		v.pipeline_cache_path = ""
+		v.position = Vector2(96, y)
+		add_child(v)
+		return v
+	var held: JsuiView = make.call({"progress": 0.5}, 112)
+	var blue := Color8(41, 89, 230)
+	var square_at := func(view: JsuiView, x: int) -> bool:
+		var img: Image = view.get_frame_image()
+		if img == null or img.get_size() != PROBE_SIZE:
+			return false
+		var c := img.get_pixel(x, PROBE_SIZE.y / 2)
+		return absi(c.r8 - blue.r8) <= 6 and absi(c.g8 - blue.g8) <= 6 and absi(c.b8 - blue.b8) <= 6 and c.a8 > 250
+	var shown := await _wait_for(func(): return square_at.call(held, 32) and not square_at.call(held, 6), 10.0)
+	_check("lottie", shown, "progress 0.5 draws the square in the middle (%s renderer)" % held.get_renderer())
+	held.queue_free()
+	var playing: JsuiView = make.call({}, 112)
+	var xs := {}
+	var seen_moving := func() -> bool:
+		for x in range(0, PROBE_SIZE.x, 2):
+			if square_at.call(playing, x):
+				xs[x] = true  # the square's left edge this frame
+				break
+		return xs.size() >= 3
+	var moved := await _wait_for(seen_moving, 10.0)
+	_check("lottie playing", moved, "the square was seen at %d places while it plays" % xs.size())
+	playing.queue_free()
+	await get_tree().process_frame
+
+
+## Shaders (ShaderView, SkSL runtime effects) on this renderer: a fill from
+## colour uniforms, a shader post-processing the view's own painting
+## (`content`, mirrored), a host texture as a child shader (mirrored) and a
+## shader on the runtime clock (`time`) that repaints on its own.
+func _test_shaders() -> void:
+	var make := func(props: Dictionary) -> JsuiView:
+		var v := JsuiView.new()
+		v.bundle_url = ui.bundle_url
+		v.component = "ShaderProbe"
+		v.initial_props = props
+		v.auto_size = true
+		v.pixel_ratio = 1.0
+		v.pipeline_cache_path = ""
+		v.position = Vector2(176, 112)
+		return v
+	var red := Color8(220, 40, 60)
+	var green := Color8(30, 200, 90)
+	var fill: JsuiView = make.call({"mode": "fill"})
+	add_child(fill)
+	_check("shader fill", await _wait_for(func(): return _probe_shows(fill, red, green), 10.0),
+		"colour uniforms in each half (%s renderer; %s)" % [fill.get_renderer(), _probe_line(fill)])
+	fill.queue_free()
+	var content: JsuiView = make.call({"mode": "content"})
+	add_child(content)
+	_check("shader content", await _wait_for(func(): return _probe_shows(content, green, red), 10.0),
+		"the view's own children, mirrored (%s)" % _probe_line(content))
+	content.queue_free()
+	var textured: JsuiView = make.call({"mode": "texture", "name": "shaderprobe"})
+	textured.set_texture("shaderprobe", _two_colour_texture(red, green))
+	add_child(textured)
+	_check("shader host texture", await _wait_for(func(): return _probe_shows(textured, green, red), 10.0),
+		"a host texture as a child shader, mirrored (%s)" % _probe_line(textured))
+	textured.queue_free()
+	var clock: JsuiView = make.call({"mode": "clock"})
+	add_child(clock)
+	var reds := {}
+	var ticking := func() -> bool:
+		var img: Image = clock.get_frame_image()
+		if img != null and img.get_size() == PROBE_SIZE:
+			reds[img.get_pixel(32, 16).r8] = true
+		return reds.size() >= 3
+	_check("shader clock", await _wait_for(ticking, 10.0), "time advanced on its own: %d distinct frames" % reds.size())
+	clock.queue_free()
+	await get_tree().process_frame
+
+
+## UI audio: JsuiView plays its runtime's sounds with AudioStreamPlayers of
+## its own on Godot's buses. First the demo UI's (useMusic on 'music', which
+## plays on the "Music" bus of default_bus_layout.tres; <UISounds> ticks on
+## 'ui' from the hovers and clicks above), then an AudioProbe (ui/
+## audio-probe.jsx) of a runtime of its own, driven with call_ui: players on
+## the mapped buses with the voice's pitch and volume, the UI's bus volume,
+## fades, loops, pause, STOP and stop_all_sounds, sounds that play to the end,
+## WAV / MP3 / Ogg decoded from bytes (user:// files: not imported), a
+## missing file and audio_enabled off. JS hears each voice end (`ended`).
+## Headless Godot mixes with its Dummy audio driver, which still advances
+## playback, so sounds finish on their own there too.
+func _test_audio() -> void:
+	var music: Array = ui.get_audio_voices().filter(func(v): return v.bus == "music")
+	_check("music", music.size() == 1 and music[0].godot_bus == "Music" and music[0].loop \
+			and music[0].player is AudioStreamPlayer and music[0].player.playing and music[0].player.bus == "Music",
+		"useMusic: %s" % [music])
+	var ui_buses := {}
+	for s in _ui_sounds:
+		ui_buses[s[2]] = true
+	_check("ui sounds", ui_buses.has("ui") and ui.resolve_audio_bus("ui") == "UI",
+		"<UISounds> played %d sounds (buses %s) on %s" % [_ui_sounds.size(), ui_buses.keys(), ui.resolve_audio_bus("ui")])
+
+	var probe := JsuiView.new()
+	probe.bundle_url = ui.bundle_url
+	probe.component = "AudioProbe"
+	probe.auto_size = true
+	probe.pipeline_cache_path = ""
+	probe.audio_bus_map = {"sfx": "UI"}
+	probe.position = Vector2(16, 160)
+	var ready := [false]
+	var ended := {}  # voice -> reason, as JS saw it (the voice's `ended`)
+	var statuses := {}  # voice -> status (sound_ended)
+	var played := {}  # voice -> bus (sound_played)
+	probe.message_received.connect(func(name: String, data, _json):
+		if name == "audio:ready":
+			ready[0] = true
+		elif name == "audio:ended":
+			ended[int(data.id)] = data.reason)
+	probe.sound_played.connect(func(voice: int, _url: String, bus: String): played[voice] = bus)
+	probe.sound_ended.connect(func(voice: int, status: int): statuses[voice] = status)
+	add_child(probe)
+	if not await _wait_for(func(): return ready[0], 10.0):
+		_check("audio probe", false, "AudioProbe did not mount")
+		probe.queue_free()
+		return
+	var voice_of := func(id: int) -> Dictionary:
+		for v in probe.get_audio_voices():
+			if v.voice == id:
+				return v
+		return {}
+
+	# A voice: an internal AudioStreamPlayer of the view, on the bus
+	# audio_bus_map names, with the voice's pitch and volume.
+	var r = await _ui_call(probe, "audio.play", {"sound": "loop", "bus": "sfx", "volume": 0.5, "pitch": 1.5})
+	var id: int = r.id if r else 0
+	await _wait_for(func(): return played.has(id))
+	var v: Dictionary = voice_of.call(id)
+	var p: AudioStreamPlayer = v.get("player")
+	_check("audio player", p != null and p.get_parent() == probe and not probe.get_children().has(p) \
+			and p.bus == "UI" and _near(p.pitch_scale, 1.5, 0.001) and _near(p.volume_db, linear_to_db(0.5)) \
+			and p.playing and not p.stream.has_loop() and played.get(id) == "sfx",
+		"bus %s, pitch %s, volume_db %s, playing %s" % [p.bus, p.pitch_scale, p.volume_db, p.playing] if p else "no player: %s" % [v])
+	# The UI's own bus volume scales the voice; Godot's bus stays as it is.
+	var ui_bus := AudioServer.get_bus_index("UI")
+	var ui_db := AudioServer.get_bus_volume_db(ui_bus)
+	await _ui_call(probe, "audio.bus", {"bus": "sfx", "volume": 0.25})
+	_check("audio bus volume", await _wait_for(func(): return p and _near(p.volume_db, linear_to_db(0.125))) \
+			and AudioServer.get_bus_volume_db(ui_bus) == ui_db,
+		"voice 0.5 x bus 0.25: volume_db %s" % [p.volume_db if p else null])
+	await _ui_call(probe, "audio.set", {"id": id, "volume": 1.0, "fade": 200})
+	var ramped := await _wait_for(func(): return p and _near(p.volume_db, linear_to_db(0.25)))
+	_check("audio set", ramped, "ramped to 1.0 x bus 0.25: volume_db %s" % [p.volume_db if p else null])
+	# STOP with a fade out: ends after it, as `stopped`.
+	var t0 := Time.get_ticks_msec()
+	await _ui_call(probe, "audio.stop", {"id": id, "fade": 300})
+	var stopped := await _wait_for(func(): return ended.has(id))
+	var took := Time.get_ticks_msec() - t0
+	_check("audio stop", stopped and ended[id] == "stopped" and statuses.get(id) == JsuiView.SOUND_STOPPED and took >= 250,
+		"ended %s after %d ms (fade 300)" % [ended.get(id), took])
+
+	# Played to the end: `finished`. 'ui' plays on the "UI" bus (same name).
+	r = await _ui_call(probe, "audio.play", {"sound": "tick", "bus": "ui"})
+	id = r.id if r else 0
+	var finished := await _wait_for(func(): return ended.has(id))
+	_check("audio finished", finished and ended[id] == "finished" and statuses.get(id) == JsuiView.SOUND_FINISHED \
+			and probe.resolve_audio_bus("ui") == "UI" and probe.resolve_audio_bus("voice") == "Master",
+		"tick.wav ended %s (status %s)" % [ended.get(id), statuses.get(id)])
+
+	# A loop (a copy of the stream with its loop flag on) keeps playing past
+	# its end (4 s at pitch 4: 1 s); pause / resume; stop_all_sounds from Godot.
+	r = await _ui_call(probe, "audio.play", {"sound": "loop", "bus": "music", "loop": true, "pitch": 4.0, "fadeIn": 200})
+	id = r.id if r else 0
+	await _wait_for(func(): return played.has(id))
+	v = voice_of.call(id)
+	p = v.get("player")
+	var fading_in: bool = p != null and p.volume_db < -1.0
+	await _wait(1.6)
+	_check("audio loop", p != null and fading_in and p.playing and p.stream.has_loop() and p.bus == "Music" \
+			and not ended.has(id) and _near(p.volume_db, 0.0),
+		"after 1.6 s: playing %s, loop %s, bus %s, volume_db %s" % [p.playing, p.stream.has_loop(), p.bus, p.volume_db] if p else "no player")
+	await _ui_call(probe, "audio.pause", {"id": id, "paused": true})
+	var paused: bool = p != null and p.stream_paused
+	await _wait(0.3)
+	var kept := not ended.has(id)
+	await _ui_call(probe, "audio.pause", {"id": id, "paused": false})
+	_check("audio pause", paused and kept and p.playing and not p.stream_paused,
+		"stream_paused while paused, playing again after resume")
+	probe.stop_all_sounds("music")
+	_check("stop_all_sounds", await _wait_for(func(): return ended.get(id) == "stopped"), "loop ended %s" % [ended.get(id)])
+
+	# Bytes: user:// files are not imported, so they load through FileAccess
+	# and decode here (MP3, 8-bit WAV, Ogg Vorbis).
+	DirAccess.make_dir_recursive_absolute("user://jsui-audio-selftest")
+	for f in ["blip.mp3", "back.wav", "menu-loop.ogg"]:
+		var out := FileAccess.open("user://jsui-audio-selftest/" + f, FileAccess.WRITE)
+		out.store_buffer(FileAccess.get_file_as_bytes("res://ui/sounds/" + f))
+		out.close()
+	var base := "user://jsui-audio-selftest/"
+	var ids := []
+	for f in ["blip.mp3", "back.wav"]:
+		r = await _ui_call(probe, "audio.play", {"url": base + f, "bus": "ui"})
+		ids.append(int(r.id) if r else 0)
+	var decoded := await _wait_for(func(): return ids.all(func(i): return ended.get(i) == "finished"))
+	var pre = await _ui_call(probe, "audio.preload", {"url": base + "menu-loop.ogg"})
+	_check("audio decode", decoded and pre and pre.ok and _near(pre.duration, 4.0, 0.1),
+		"mp3 / wav ended %s; ogg preload %s" % [ids.map(func(i): return ended.get(i)), pre])
+
+	# A missing file fails (PLAY and PRELOAD); so does every voice with
+	# audio_enabled off.
+	r = await _ui_call(probe, "audio.play", {"url": "sounds/missing.wav"})
+	id = r.id if r else 0
+	pre = await _ui_call(probe, "audio.preload", {"url": "sounds/missing.wav"})
+	_check("audio missing", await _wait_for(func(): return ended.get(id) == "failed") and pre and not pre.ok,
+		"play %s, preload %s" % [ended.get(id), pre])
+	probe.audio_enabled = false
+	r = await _ui_call(probe, "audio.play", {"sound": "tick"})
+	id = r.id if r else 0
+	_check("audio disabled", await _wait_for(func(): return ended.get(id) == "failed") and statuses.get(id) == JsuiView.SOUND_FAILED,
+		"ended %s" % [ended.get(id)])
+	probe.queue_free()
+	await get_tree().process_frame
+
+
+func _near(a: float, b: float, eps := 0.05) -> bool:
+	return absf(a - b) <= eps
+
+
+## call_ui on `view`, awaited: the handler's result, or null.
+func _ui_call(view: JsuiView, name: String, args: Dictionary):
+	var box := []
+	view.call_ui(name, args, func(ok: bool, result): box.append(result if ok else null))
+	await _wait_for(func(): return box.size() > 0, 5.0)
+	return box[0] if box.size() > 0 else null
+
+
+## An 8x4 image: `left` in its left half, `right` in its right half.
+func _two_colour_image(left: Color, right: Color) -> Image:
+	var img := Image.create_empty(8, 4, false, Image.FORMAT_RGBA8)
+	img.fill_rect(Rect2i(0, 0, 4, 4), left)
+	img.fill_rect(Rect2i(4, 0, 4, 4), right)
+	return img
+
+
+func _two_colour_texture(left: Color, right: Color) -> ImageTexture:
+	return ImageTexture.create_from_image(_two_colour_image(left, right))
+
+
+## The probe's frame shows `left` / `right` at the middle of each half.
+func _probe_shows(probe: JsuiView, left: Color, right: Color) -> bool:
+	var img: Image = probe.get_frame_image()
+	if img == null or img.get_size() != PROBE_SIZE:
+		return false
+	for side in [[PROBE_SIZE.x / 4, left], [PROBE_SIZE.x * 3 / 4, right]]:
+		var c := img.get_pixel(side[0], PROBE_SIZE.y / 2)
+		var want: Color = side[1]
+		if absi(c.r8 - want.r8) > 4 or absi(c.g8 - want.g8) > 4 or absi(c.b8 - want.b8) > 4 or c.a8 < 250:
+			return false
+	return true
+
+
+func _probe_line(probe: JsuiView) -> String:
+	var img: Image = probe.get_frame_image()
+	if img == null:
+		return "no frame"
+	return "frame %s, left %s, right %s" % [img.get_size(), img.get_pixel(PROBE_SIZE.x / 4, PROBE_SIZE.y / 2).to_html(),
+		img.get_pixel(PROBE_SIZE.x * 3 / 4, PROBE_SIZE.y / 2).to_html()]
 
 
 ## --tour: the parts of the UI the self-test leaves out (tabs, carousel

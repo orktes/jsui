@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JSUI shared session</title>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --panel: #12151c;
+    --panel-2: #181c25;
+    --line: #232836;
+    --text: #e6e9f0;
+    --muted: #8a93a6;
+    --accent: #7cc4ff;
+    --agent: #b494ff;
+    --user: #5fd3a5;
+    --ui: #8a93a6;
+    --warn: #ffc56b;
+    --error: #ff7a7a;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { display: grid; grid-template-rows: 48px 1fr; overflow: hidden; }
+  header { display: flex; align-items: center; gap: 12px; padding: 0 16px; background: var(--panel);
+    border-bottom: 1px solid var(--line); min-width: 0; }
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; letter-spacing: .2px; white-space: nowrap; }
+  .brand .logo { width: 18px; height: 18px; border-radius: 5px;
+    background: linear-gradient(135deg, var(--accent), var(--agent)); box-shadow: 0 0 12px rgba(124,196,255,.35); }
+  .entry { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .spacer { flex: 1; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 13px;
+    background: var(--panel-2); border: 1px solid var(--line); color: var(--muted); white-space: nowrap; font-size: 12px; }
+  .chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+  .chip.live .dot { background: var(--user); box-shadow: 0 0 0 0 rgba(95,211,165,.6); animation: pulse 2s infinite; }
+  .chip.live { color: var(--text); }
+  .chip.down .dot { background: var(--error); }
+  .chip.agent { color: var(--agent); border-color: rgba(180,148,255,.4); background: rgba(180,148,255,.08); }
+  .chip.agent .dot { background: var(--agent); animation: pulse-agent 1.2s infinite; }
+  .chip[hidden] { display: none; }
+  @keyframes pulse { 70% { box-shadow: 0 0 0 6px rgba(95,211,165,0); } 100% { box-shadow: 0 0 0 0 rgba(95,211,165,0); } }
+  @keyframes pulse-agent { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+  button.tool { height: 28px; padding: 0 10px; border-radius: 7px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--text); font: inherit; font-size: 12px; cursor: pointer; }
+  button.tool:hover { border-color: #33405a; }
+  button.tool[aria-pressed="true"] { border-color: rgba(124,196,255,.5); color: var(--accent); }
+  main { display: grid; grid-template-columns: 1fr 340px; min-height: 0; }
+  main.no-feed { grid-template-columns: 1fr 0; }
+  main.no-feed aside { display: none; }
+  .stage { position: relative; display: grid; place-items: center; padding: 24px; min-width: 0; min-height: 0;
+    background: radial-gradient(1200px 600px at 50% 40%, #131722, var(--bg)); }
+  .frame { position: relative; line-height: 0; border-radius: 10px; overflow: hidden; outline: none;
+    box-shadow: 0 0 0 1px var(--line), 0 24px 64px rgba(0,0,0,.55); background: #000; }
+  .frame.focused { box-shadow: 0 0 0 2px rgba(124,196,255,.65), 0 24px 64px rgba(0,0,0,.55); }
+  canvas { display: block; touch-action: none; image-rendering: auto; }
+  .overlay { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+  .ring { position: absolute; width: 36px; height: 36px; margin: -18px 0 0 -18px; border-radius: 50%;
+    border: 2px solid var(--agent); background: rgba(180,148,255,.18); box-shadow: 0 0 18px rgba(180,148,255,.6);
+    animation: ring .9s ease-out forwards; }
+  .ring.hover { width: 14px; height: 14px; margin: -7px 0 0 -7px; animation-duration: .6s; }
+  .tag { position: absolute; transform: translate(14px, -30px); padding: 2px 7px; border-radius: 6px; font-size: 11px;
+    line-height: 16px; background: var(--agent); color: #160b33; font-weight: 600; white-space: nowrap;
+    animation: fade 1.6s ease-out forwards; }
+  .trail { position: absolute; height: 2px; background: linear-gradient(90deg, rgba(180,148,255,.1), var(--agent));
+    transform-origin: 0 50%; animation: fade 1.2s ease-out forwards; }
+  @keyframes ring { 0% { transform: scale(.4); opacity: 1; } 100% { transform: scale(1.6); opacity: 0; } }
+  @keyframes fade { 0%, 60% { opacity: 1; } 100% { opacity: 0; } }
+  .placeholder { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); line-height: 1.5; pointer-events: none; background: #0b0d12; }
+  .placeholder[hidden] { display: none; }
+  .placeholder .box { max-width: 520px; padding: 0 24px; text-align: center; pointer-events: auto; }
+  .placeholder .box b { color: var(--text); font-weight: 600; }
+  .placeholder .box code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #cfd6e4; }
+  .placeholder .box button { margin-top: 12px; }
+  .host { position: absolute; inset: 24px; border: 0; border-radius: 10px; width: calc(100% - 48px); height: calc(100% - 48px);
+    box-shadow: 0 0 0 1px var(--line), 0 24px 64px rgba(0,0,0,.55); background: #000; }
+  .host[hidden], .frame[hidden], .hint[hidden], button.tool[hidden] { display: none; }
+  .chip.client { color: var(--text); max-width: 320px; }
+  .chip.client .label { overflow: hidden; text-overflow: ellipsis; }
+  .chip.client .count { color: var(--muted); }
+  .hint { position: absolute; left: 0; right: 0; bottom: 8px; text-align: center; color: var(--muted); font-size: 12px; pointer-events: none; }
+  aside { display: grid; grid-template-rows: auto 1fr; border-left: 1px solid var(--line); background: var(--panel); min-height: 0; }
+  aside h2 { margin: 0; padding: 12px 14px; font-size: 12px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .8px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; align-items: center; }
+  aside h2 .legend { margin-left: auto; display: flex; gap: 10px; text-transform: none; letter-spacing: 0; font-weight: 500; }
+  .legend span::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; vertical-align: 1px; background: currentColor; }
+  .feed { overflow-y: auto; padding: 6px 0; min-height: 0; }
+  .ev { display: grid; grid-template-columns: 48px 1fr; gap: 8px; padding: 5px 14px; align-items: baseline; }
+  .ev:hover { background: rgba(255,255,255,.02); }
+  .who { font-size: 10px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; }
+  .who.agent { color: var(--agent); } .who.user { color: var(--user); } .who.ui { color: var(--ui); }
+  .what { min-width: 0; overflow-wrap: anywhere; color: var(--text); }
+  .what code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #cfd6e4; }
+  .what .data { color: var(--muted); }
+  .ev.warn .what { color: var(--warn); } .ev.error .what { color: var(--error); } .ev.fail .what { color: var(--error); }
+  .empty { padding: 20px 14px; color: var(--muted); }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr 0; } main aside { display: none; }
+    main.feed-open { grid-template-columns: 1fr; grid-template-rows: 1fr 40%; } main.feed-open aside { display: grid; border-left: 0; border-top: 1px solid var(--line); } }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><div class="logo"></div>JSUI shared session</div>
+  <div class="entry" id="entry"></div>
+  <div class="spacer"></div>
+  <span class="chip agent" id="agent" hidden><span class="dot"></span>Agent driving</span>
+  <span class="chip" id="status"><span class="dot"></span><span id="status-text">Connecting</span></span>
+  <span class="chip client" id="client" title="The runtime agents drive (the last to join; jsui clients --attach lists them)"><span class="label" id="client-label">No runtime</span><span class="count" id="client-count"></span></span>
+  <span class="chip" id="size">–</span>
+  <button class="tool" id="run-here" hidden title="Run the app in this page too (it becomes the live runtime)">Run here</button>
+  <button class="tool" id="reload" title="Reload the bundle (resets component state)">Reload</button>
+  <button class="tool" id="zoom" aria-pressed="false" title="Fit the window or show 1:1 pixels">Fit</button>
+  <button class="tool" id="feed-toggle" aria-pressed="true" title="Show or hide the activity feed">Activity</button>
+</header>
+<main id="main">
+  <section class="stage" id="stage">
+    <div class="frame" id="frame" tabindex="0">
+      <canvas id="view" width="1280" height="720"></canvas>
+      <div class="overlay" id="overlay"></div>
+      <div class="placeholder" id="placeholder">Waiting for the dev server…</div>
+    </div>
+    <iframe class="host" id="host" hidden title="The app in the JSUI web host" allow="gamepad; clipboard-read; clipboard-write"></iframe>
+    <div class="placeholder" id="remote" hidden><div class="box" id="remote-box"></div></div>
+    <div class="hint" id="hint">Click the view to control it. Keyboard and gamepads go to the app.</div>
+  </section>
+  <aside>
+    <h2>Activity<span class="legend"><span style="color:var(--agent)">Agent</span><span style="color:var(--user)">You</span><span style="color:var(--ui)">UI</span></span></h2>
+    <div class="feed" id="feed"><div class="empty" id="empty">Nothing yet. Agents attach with <code>jsui run --attach</code>.</div></div>
+  </aside>
+</main>
+<textarea id="sink" aria-hidden="true" autocomplete="off" autocapitalize="off" spellcheck="false"
+  style="position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;border:0;padding:0;resize:none;pointer-events:none"></textarea>
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const canvas = $('view'), ctx = canvas.getContext('2d'), frame = $('frame'), overlay = $('overlay'), sink = $('sink');
+let info = { width: 1280, height: 720, scale: 1, pixelWidth: 1280, pixelHeight: 720 };
+let oneToOne = false;
+
+// ------------------------------------------------------------ layout
+
+function layout() {
+  if (!info.headless) {
+    $('size').textContent = info.width ? `${info.width}×${info.height}` : '–';
+    return;
+  }
+  const stage = $('stage').getBoundingClientRect();
+  const maxW = Math.max(100, stage.width - 48), maxH = Math.max(100, stage.height - 64);
+  let w = info.width, h = info.height;
+  if (!oneToOne) {
+    const k = Math.min(maxW / w, maxH / h);
+    w = Math.floor(w * k); h = Math.floor(h * k);
+  }
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  $('size').textContent = `${info.width}×${info.height}` + (info.scale !== 1 ? ` @${info.scale}x` : '');
+}
+addEventListener('resize', layout);
+$('zoom').onclick = () => {
+  oneToOne = !oneToOne;
+  $('zoom').textContent = oneToOne ? '1:1' : 'Fit';
+  $('zoom').setAttribute('aria-pressed', String(oneToOne));
+  layout();
+};
+$('reload').onclick = () => send({ t: 'reload' });
+$('feed-toggle').onclick = () => {
+  const main = $('main');
+  const narrow = matchMedia('(max-width: 860px)').matches;
+  const open = narrow ? main.classList.toggle('feed-open') : !main.classList.toggle('no-feed');
+  $('feed-toggle').setAttribute('aria-pressed', String(open));
+  layout();
+};
+
+// ------------------------------------------------------------ activity feed
+
+const feed = $('feed');
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const short = (v) => {
+  if (v === undefined || v === null) return '';
+  const s = typeof v === 'string' ? JSON.stringify(v) : JSON.stringify(v);
+  return s.length > 120 ? s.slice(0, 117) + '…' : s;
+};
+const WHO = { agent: 'Agent', user: 'You', ui: 'UI' };
+const where = (e) => (e.client && clients.length > 1 ? ` <span class="data">· ${esc(e.client)}</span>` : '');
+function describe(e) {
+  switch (e.kind) {
+    case 'command': return `<code>${esc(e.text)}</code>`;
+    case 'step': return `<code>${esc(e.text)}</code>` + (e.ok === false ? ` failed: ${esc(e.error)}` : '');
+    case 'resize': return `resized to ${e.width}×${e.height}`;
+    case 'reload': return 'reloaded the app';
+    case 'click': return `clicked at ${e.x}, ${e.y}` + (e.consumed ? '' : ' <span class="data">(passed through)</span>');
+    case 'tap': return `tapped at ${e.x}, ${e.y}`;
+    case 'key': return `pressed <code>${esc(e.key)}</code>`;
+    case 'type': return `typed <code>${esc(JSON.stringify(e.text))}</code>`;
+    case 'press': return `pressed <code>${esc(e.button)}</code> on gamepad ${e.pad}`;
+    case 'message': return `Host.postMessage <code>${esc(e.name)}</code> <span class="data">${esc(short(e.data))}</span>`;
+    case 'call': return `Host.call <code>${esc(e.name)}</code> <span class="data">${esc(short(e.args))}</span>`;
+    case 'state': return `HostState <code>${esc(e.key)}</code> = <span class="data">${esc(short(e.value))}</span>`;
+    case 'log': return esc(e.text);
+    case 'error': return esc(e.text.split('\n')[0]);
+    case 'join': return `<b>${esc(e.client)}</b> joined`;
+    case 'leave': return `<b>${esc(e.client)}</b> left`;
+    default: return esc(e.kind);
+  }
+}
+function addEvent(e) {
+  $('empty')?.remove();
+  // Typing comes one character at a time: extend the last row.
+  const last = feed.lastElementChild;
+  if (e.kind === 'type' && last && last.dataset.kind === 'type' && last.dataset.who === e.who) {
+    last.dataset.text += e.text;
+    last.querySelector('.what').innerHTML = describe({ kind: 'type', text: last.dataset.text });
+    return;
+  }
+  const row = document.createElement('div');
+  row.className = 'ev' + (e.kind === 'error' || (e.kind === 'log' && e.level >= 3) ? ' error' : e.kind === 'log' && e.level === 2 ? ' warn' : '') + (e.ok === false ? ' fail' : '');
+  row.dataset.kind = e.kind; row.dataset.who = e.who;
+  if (e.kind === 'type') row.dataset.text = e.text;
+  row.innerHTML = `<span class="who ${e.who}">${WHO[e.who] || e.who}</span><span class="what">${describe(e)}${e.kind === 'join' || e.kind === 'leave' ? '' : where(e)}</span>`;
+  row.title = `t=${(e.time / 1000).toFixed(2)} s`;
+  const stick = feed.scrollTop + feed.clientHeight >= feed.scrollHeight - 24;
+  feed.appendChild(row);
+  while (feed.childElementCount > 500) feed.firstElementChild.remove();
+  if (stick) feed.scrollTop = feed.scrollHeight;
+}
+
+// ------------------------------------------------------------ agent pointer
+
+function toCss(x, y) {
+  return [x / info.width * 100 + '%', y / info.height * 100 + '%'];
+}
+function showPointer(p) {
+  const [l, t] = toCss(p.x, p.y);
+  const ring = document.createElement('div');
+  ring.className = 'ring' + (p.action === 'hover' ? ' hover' : '');
+  ring.style.left = l; ring.style.top = t;
+  overlay.appendChild(ring);
+  const tag = document.createElement('div');
+  tag.className = 'tag'; tag.textContent = 'agent ' + p.action;
+  tag.style.left = l; tag.style.top = t;
+  overlay.appendChild(tag);
+  if (p.toX != null) {
+    const r = canvas.getBoundingClientRect();
+    const kx = r.width / info.width, ky = r.height / info.height;
+    const dx = (p.toX - p.x) * kx, dy = (p.toY - p.y) * ky;
+    const line = document.createElement('div');
+    line.className = 'trail';
+    line.style.left = l; line.style.top = t;
+    line.style.width = Math.hypot(dx, dy) + 'px';
+    line.style.transform = `rotate(${Math.atan2(dy, dx)}rad)`;
+    overlay.appendChild(line);
+    setTimeout(() => line.remove(), 1300);
+  }
+  setTimeout(() => { ring.remove(); tag.remove(); }, 1700);
+}
+
+// ------------------------------------------------------------ frames
+
+let image = null;
+function ensureCanvas(w, h) {
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w; canvas.height = h;
+    image = null;
+  }
+}
+async function inflate(bytes) {
+  const ds = new DecompressionStream('deflate-raw');
+  return new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(ds)).arrayBuffer());
+}
+async function drawFrame(payload) {
+  const v = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  const W = v.getUint16(0, true), H = v.getUint16(2, true);
+  const x = v.getUint16(4, true), y = v.getUint16(6, true), w = v.getUint16(8, true), h = v.getUint16(10, true);
+  const px = await inflate(payload.subarray(12));
+  ensureCanvas(W, H);
+  const img = new ImageData(w, h);
+  const d = img.data;
+  // Premultiplied -> straight alpha.
+  for (let i = 0; i < px.length; i += 4) {
+    const a = px[i + 3];
+    if (a === 255) { d[i] = px[i]; d[i + 1] = px[i + 1]; d[i + 2] = px[i + 2]; d[i + 3] = 255; }
+    else if (a) { const k = 255 / a; d[i] = px[i] * k + .5; d[i + 1] = px[i + 1] * k + .5; d[i + 2] = px[i + 2] * k + .5; d[i + 3] = a; }
+  }
+  ctx.putImageData(img, x, y);
+  $('placeholder').hidden = true;
+}
+
+// ------------------------------------------------------------ runtimes
+
+// Without a headless runtime the page shows the live runtime by name, or
+// runs the app itself in the web host (an iframe that joins the session).
+let clients = [], live = null, hosting = false;
+function runHere() {
+  if (hosting || !info.webHost) return;
+  hosting = true;
+  const q = new URLSearchParams({ bundle: '/bundle.js', dev: '1', stats: '0', devName: 'browser' });
+  $('host').src = `${info.webHost}?${q}`;
+  render();
+}
+$('run-here').onclick = runHere;
+function render() {
+  const headless = !!info.headless;
+  const liveClient = clients.find((c) => c.id === live);
+  $('client-label').textContent = liveClient ? liveClient.label : 'No runtime';
+  $('client-count').textContent = clients.length > 1 ? ` · ${clients.length} connected` : '';
+  $('client').title = clients.map((c) => (c.id === live ? '* ' : '  ') + c.label).join('\n') || 'No runtime connected';
+  $('frame').hidden = !headless;
+  $('hint').hidden = !headless;
+  $('reload').hidden = !headless;
+  $('zoom').hidden = !headless;
+  $('host').hidden = headless || !hosting;
+  $('run-here').hidden = headless || hosting || !info.webHost;
+  const box = $('remote-box');
+  $('remote').hidden = headless || hosting;
+  if (headless || hosting) return;
+  const origin = location.origin;
+  const ways = `<p>Open one: <code>jsui-viewer --dev ${esc(origin)}/bundle.js</code>, a Godot JsuiView with <code>bundle_url</code> <code>${esc(origin)}/bundle.js</code> and <code>dev_mode</code> on${info.webHost ? ', or run it in this page.' : '.'}</p>`;
+  box.innerHTML = liveClient
+    ? `<p>Agents drive <b>${esc(liveClient.label)}</b> (${liveClient.width}×${liveClient.height}). What happens there shows in the activity feed.</p>` +
+      (info.webHost ? '<p><button class="tool" id="run-here-2">Run here too</button></p>' : '')
+    : `<p><b>No runtime is connected.</b></p>${ways}` + (info.webHost ? '<p><button class="tool" id="run-here-2">Run here</button></p>' : '');
+  const b = $('run-here-2');
+  if (b) b.onclick = runHere;
+}
+function setClients(list, liveId) {
+  clients = list || [];
+  live = liveId;
+  const c = clients.find((x) => x.id === live);
+  if (c && !info.headless) { info.width = c.width; info.height = c.height; layout(); }
+  render();
+}
+
+function onEvent(m) {
+  if (m.type === 'hello') {
+    info = m;
+    $('entry').textContent = m.entry || '';
+    if (m.headless) ensureCanvas(m.pixelWidth, m.pixelHeight);
+    else $('placeholder').hidden = true;
+    layout();
+    setClients(m.clients, m.live);
+    // Nothing to watch: this page runs the app (and becomes the live runtime).
+    if (!m.headless && !m.clients?.length && m.webHost) runHere();
+    if (m.activity) { feed.textContent = ''; m.activity.forEach(addEvent); if (!m.activity.length) feed.innerHTML = '<div class="empty" id="empty">Nothing yet. Agents attach with <code>jsui run --attach</code>.</div>'; }
+    if (m.cursor) canvas.style.cursor = m.cursor;
+  } else if (m.type === 'activity') addEvent(m.event);
+  else if (m.type === 'pointer') showPointer(m);
+  else if (m.type === 'cursor') canvas.style.cursor = m.cursor;
+  else if (m.type === 'agent') $('agent').hidden = !m.busy;
+  else if (m.type === 'clients') setClients(m.clients, m.live);
+}
+
+function setStatus(live, text) {
+  $('status').className = 'chip ' + (live ? 'live' : 'down');
+  $('status-text').textContent = text;
+}
+
+async function connect() {
+  for (;;) {
+    try {
+      const res = await fetch('/__jsui/shared/stream', { cache: 'no-store' });
+      if (!res.ok || !res.body) throw new Error('status ' + res.status);
+      setStatus(true, 'Live');
+      const reader = res.body.getReader();
+      let buf = new Uint8Array(0);
+      let chain = Promise.resolve();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const next = new Uint8Array(buf.length + value.length);
+        next.set(buf); next.set(value, buf.length);
+        buf = next;
+        let off = 0;
+        while (buf.length - off >= 5) {
+          const len = new DataView(buf.buffer, buf.byteOffset + off).getUint32(0, true);
+          if (buf.length - off - 4 < len) break;
+          const type = buf[off + 4];
+          const payload = buf.slice(off + 5, off + 4 + len);
+          off += 4 + len;
+          if (type === 1) chain = chain.then(() => drawFrame(payload)).catch((e) => console.warn(e));
+          else if (type === 2) { const m = JSON.parse(new TextDecoder().decode(payload)); chain = chain.then(() => onEvent(m)); }
+        }
+        buf = buf.slice(off);
+      }
+    } catch (e) {
+      console.warn('jsui shared: stream', e);
+    }
+    setStatus(false, 'Reconnecting');
+    $('agent').hidden = true;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
+// ------------------------------------------------------------ input
+
+let queue = [], sending = false;
+function send(e) {
+  // Consecutive moves collapse into the latest.
+  const last = queue[queue.length - 1];
+  if (e.t === 'move' && last && last.t === 'move') queue[queue.length - 1] = e;
+  else queue.push(e);
+  if (!sending) flush();
+}
+async function flush() {
+  sending = true;
+  while (queue.length) {
+    const batch = queue; queue = [];
+    try {
+      await fetch('/__jsui/shared/input', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(batch) });
+    } catch { /* the stream shows the connection state */ }
+  }
+  sending = false;
+}
+const point = (e) => {
+  const r = canvas.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * info.width / r.width, y: (e.clientY - r.top) * info.height / r.height };
+};
+const mods = (e) => (e.shiftKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
+const btn = (b) => (b === 1 || b === 2 ? b : 0);
+const focusSink = () => { if (document.activeElement !== sink) sink.focus({ preventScroll: true }); };
+let mouseButtons = 0;
+
+canvas.addEventListener('pointerdown', (e) => {
+  const p = point(e);
+  if (e.pointerType === 'mouse') { mouseButtons |= 1 << e.button; send({ t: 'button', ...p, button: btn(e.button), down: true, mods: mods(e) }); }
+  else send({ t: 'touch', id: e.pointerId, phase: 0, ...p });
+  try { canvas.setPointerCapture(e.pointerId); } catch {}
+  focusSink();
+  e.preventDefault();
+});
+canvas.addEventListener('pointermove', (e) => {
+  const p = point(e);
+  if (e.pointerType === 'mouse') send({ t: 'move', ...p });
+  else send({ t: 'touch', id: e.pointerId, phase: 1, ...p });
+});
+const up = (e, cancel) => {
+  const p = point(e);
+  if (e.pointerType === 'mouse') {
+    if (!(mouseButtons & (1 << e.button))) return;
+    mouseButtons &= ~(1 << e.button);
+    send({ t: 'button', ...p, button: btn(e.button), down: false, mods: mods(e) });
+  } else send({ t: 'touch', id: e.pointerId, phase: cancel ? 3 : 2, ...p });
+};
+canvas.addEventListener('pointerup', (e) => up(e, false));
+canvas.addEventListener('pointercancel', (e) => up(e, true));
+canvas.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse' && !mouseButtons) send({ t: 'leave' }); });
+canvas.addEventListener('wheel', (e) => {
+  const p = point(e);
+  const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? info.height : 1;
+  send({ t: 'wheel', ...p, dx: e.deltaX * k, dy: e.deltaY * k });
+  e.preventDefault();
+}, { passive: false });
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+canvas.addEventListener('mousedown', (e) => e.preventDefault());
+frame.addEventListener('focus', focusSink);
+
+const pressed = new Map();
+const PAGE_KEYS = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', ' ', 'Enter', 'Escape', 'Backspace', 'Delete', 'PageUp', 'PageDown', 'Home', 'End']);
+sink.addEventListener('keydown', (e) => {
+  if (e.isComposing || e.keyCode === 229) return;
+  if (!e.repeat) pressed.set(e.code || e.key, e.key);
+  send({ t: 'key', key: e.key, code: e.code, down: true, repeat: e.repeat, mods: mods(e) });
+  // Browser shortcuts (reload, devtools) keep working; the rest goes to the app.
+  if (PAGE_KEYS.has(e.key) || ((e.ctrlKey || e.metaKey) && /^[acvxzy]$/i.test(e.key))) e.preventDefault();
+});
+sink.addEventListener('keyup', (e) => {
+  pressed.delete(e.code || e.key);
+  send({ t: 'key', key: e.key, code: e.code, down: false, repeat: false, mods: mods(e) });
+});
+const flushText = () => { const v = sink.value; sink.value = ''; if (v) send({ t: 'text', text: v }); };
+sink.addEventListener('input', (e) => { if (!e.isComposing) flushText(); });
+sink.addEventListener('compositionend', flushText);
+sink.addEventListener('focus', () => frame.classList.add('focused'));
+sink.addEventListener('blur', () => {
+  frame.classList.remove('focused');
+  for (const [code, key] of pressed) send({ t: 'key', key, code, down: false, repeat: false, mods: 0 });
+  pressed.clear();
+});
+// Clipboard shortcuts: paste goes in as text.
+sink.addEventListener('paste', (e) => { const t = e.clipboardData?.getData('text'); if (t) { send({ t: 'text', text: t }); e.preventDefault(); } });
+
+// Gamepads (W3C standard mapping), polled every frame.
+const pads = [];
+function pollPads() {
+  if (!info.headless) return void requestAnimationFrame(pollPads);
+  const list = navigator.getGamepads ? navigator.getGamepads() : [];
+  for (let i = 0; i < Math.max(list.length, pads.length); i++) {
+    const p = list[i];
+    let s = pads[i];
+    if (!p || !p.connected) {
+      if (s) { send({ t: 'padConnect', pad: i, connected: false }); pads[i] = undefined; }
+      continue;
+    }
+    if (!s) { s = pads[i] = { buttons: [], axes: [] }; send({ t: 'padConnect', pad: i, connected: true, id: p.id }); }
+    p.buttons.forEach((b, j) => {
+      if (j > 16) return;
+      if (b.pressed !== !!s.buttons[j]) { s.buttons[j] = b.pressed; send({ t: 'padButton', pad: i, button: j, down: b.pressed, value: b.value }); }
+    });
+    p.axes.forEach((a, j) => {
+      if (j > 3) return;
+      const v = Math.abs(a) < 0.12 ? 0 : a;
+      if (Math.abs(v - (s.axes[j] || 0)) > 0.02 || (v === 0 && s.axes[j])) { s.axes[j] = v; send({ t: 'padAxis', pad: i, axis: j, value: v }); }
+    });
+  }
+  requestAnimationFrame(pollPads);
+}
+addEventListener('gamepadconnected', () => {});
+requestAnimationFrame(pollPads);
+
+layout();
+connect();
+</script>
+</body>
+</html>

@@ -18,13 +18,13 @@
 #include <unordered_set>
 #include <vector>
 
+#include "core/node.h"
 #include "core/value.h"
 #include "host_buffers.h"
 
 namespace jsui {
 
 class Document;
-class Node;
 
 class NativeAnimated {
  public:
@@ -98,6 +98,8 @@ class NativeAnimated {
   void removeEventMapping(uint32_t viewId, const std::string& eventType, int tag);
   // Applies the mappings for a native event before it reaches JS.
   void handleEvent(const Value& event);
+  // A mapping listens to `eventType` events of view `viewId`.
+  bool hasEventMapping(uint32_t viewId, const char* eventType) const;
 
   // ---- frame ---------------------------------------------------------------
   // Advances animations to nowMs and writes changed props into views.
@@ -135,6 +137,11 @@ class NativeAnimated {
     int tag = 0;          // animated input, or 0
     Value staticValue;    // when tag == 0
   };
+  struct StyleEntry {
+    std::string key;
+    int tag = 0;
+    uint32_t group = 0;  // paintStyleGroup(key), resolved once
+  };
   struct ANode {
     Type type = Type::Value;
     int tag = 0;
@@ -160,16 +167,23 @@ class NativeAnimated {
     uint64_t bufferGen = 0;
     // transform / style
     std::vector<TransformEntry> transforms;
-    std::vector<std::pair<std::string, int>> style;
+    std::vector<StyleEntry> style;
     // props
     int styleTag = 0;
     uint32_t view = 0;
     uint32_t viewPaintVersion = 0;  // the view's paintVersion after our last write
     bool viewWritten = false;
-    // evaluation cache
+    // evaluation cache. `out` keeps its containers and string buffer from
+    // frame to frame (updated in place), so evaluating allocates nothing
+    // once a node has been evaluated.
     uint64_t evalGen = 0;
     double num = 0;
     Value out;
+    std::string str;  // scratch for string outputs
+    // flush bookkeeping (instead of hash sets, which allocate per insert)
+    uint64_t visitGen = 0;     // flush walk that last visited the node
+    bool queued = false;       // in dirtyValues_
+    bool notifyQueued = false; // in dirtyNotify_
   };
   struct Anim {
     enum class Kind : uint8_t { Frames, Spring, Decay } kind = Kind::Frames;
@@ -195,7 +209,11 @@ class NativeAnimated {
   };
 
   ANode* node(int tag);
+  Node* viewOf(const ANode& props);
   void markDirty(int tag);
+  void markDirty(ANode& n);
+  void markNotify(ANode& n);
+  void setRgba(ANode& n, double r, double g, double b, double a);
   double evalNum(int tag);
   const Value& evalOut(int tag);
   void evaluate(ANode& n);
@@ -210,14 +228,20 @@ class NativeAnimated {
   std::unordered_map<int, ANode> nodes_;
   std::vector<int> propsNodes_;  // tags of the Props nodes in nodes_
   // flush() scratch, kept between frames.
-  std::unordered_set<int> seen_;
   std::vector<int> stack_;
   std::vector<ANode*> props_;
+  std::vector<Node::StyleWrite> writes_;
+  uint64_t visitGen_ = 0;
+  // Views are re-checked for React re-props (paintVersion) only when some
+  // Node::setProps / patchStyle ran since the last check (Perf::propsEpoch)
+  // or a props node was connected.
+  uint64_t propsEpoch_ = 0;
+  bool recheckViews_ = true;
   std::vector<Anim> animations_;
   std::vector<Mapping> mappings_;
   std::unordered_set<int> listening_;
-  std::unordered_set<int> dirtyValues_;  // value nodes changed since the last flush
-  std::unordered_set<int> dirtyNotify_;  // changed natively (listener updates)
+  std::vector<int> dirtyValues_;  // nodes changed since the last flush (ANode::queued)
+  std::vector<int> dirtyNotify_;  // values changed natively (listener updates; ANode::notifyQueued)
   std::unordered_map<std::string, std::vector<int>> bufferNodes_;  // key -> hostBuffer node tags
   uint64_t gen_ = 1;
 };

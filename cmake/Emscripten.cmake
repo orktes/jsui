@@ -63,6 +63,7 @@ target_compile_definitions(jsui_quickjs PRIVATE EMSCRIPTEN=1)
 file(READ "${CMAKE_SOURCE_DIR}/include/jsui/jsui.h" _jsui_h)
 string(REGEX MATCHALL "JSUI_API[^;(]*[ *](jsui_[a-z0-9_]+)[ ]*\\(" _jsui_decls "${_jsui_h}")
 set(_jsui_exports _malloc _free _jsui_web_create _jsui_web_call_ui _jsui_web_resolve_call _jsui_web_reject_call
+    _jsui_web_audio_voice_ended
     _jsui_emscripten_fetch_begin _jsui_emscripten_fetch_end)
 foreach(_d ${_jsui_decls})
   string(REGEX REPLACE ".*[ *](jsui_[a-z0-9_]+)[ ]*\\($" "_\\1" _name "${_d}")
@@ -98,7 +99,9 @@ target_link_options(jsui-wasm PRIVATE
   "$<$<CONFIG:Debug>:-sASSERTIONS=2>"
   "$<$<CONFIG:Debug>:-gsource-map>")
 # The heap views are not exported by default since emscripten 4.
-set(_jsui_runtime_methods UTF8ToString,stringToUTF8,lengthBytesUTF8,HEAPU8,HEAP32)
+# stackSave / stackRestore: the host puts the stack pointer back after a
+# throw that unwound through WASM frames (web/jsui-web.js, guardGL).
+set(_jsui_runtime_methods UTF8ToString,stringToUTF8,lengthBytesUTF8,HEAPU8,HEAP32,stackSave,stackRestore)
 if(JSUI_WEBGPU)
   # Skia Graphite on WebGPU: the JS host imports its GPUDevice / the canvas
   # texture through Emdawnwebgpu's WebGPU object (web/jsui-webgpu.js).
@@ -110,12 +113,17 @@ if(JSUI_GPU)
   # scripts/build-skia-wasm.sh), like canvaskit's WebGL link flags. The JS host
   # creates the WebGL context itself and hands it to emscripten through the
   # exported GL object (GL.registerContext / makeContextCurrent).
+  # web/native/jsui_webgl_lost.js: GL glue that survives a context lost in
+  # the middle of a frame (WebKit).
+  set(_jsui_gl_lib "${CMAKE_SOURCE_DIR}/web/native/jsui_webgl_lost.js")
   target_link_options(jsui-wasm PRIVATE
     "-lGL"
     "-sUSE_WEBGL2=1"
     "-sMAX_WEBGL_VERSION=2"
     "-sMIN_WEBGL_VERSION=1"
+    "--js-library=${_jsui_gl_lib}"
     "-sEXPORTED_RUNTIME_METHODS=${_jsui_runtime_methods},GL")
+  set_property(TARGET jsui-wasm APPEND PROPERTY LINK_DEPENDS "${_jsui_gl_lib}")
 else()
   target_link_options(jsui-wasm PRIVATE
     "-sEXPORTED_RUNTIME_METHODS=${_jsui_runtime_methods}")

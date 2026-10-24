@@ -212,10 +212,19 @@ export function createAnimatedComponent(Component) {
     const next = {};
     const nativeEvents = [];
     let propsAnimated = false;
+    // Props the component forwards as a style key (LottieView's progress):
+    // animated like style, so the native driver can write them.
+    const styleProps = Component.__animatedStyleProps;
+    let mapped = null;
     for (const k in props) {
       if (k === 'ref') continue;
       const v = props[k];
       if (k === 'style') continue;
+      if (styleProps && styleProps[k] && v instanceof AnimatedNode) {
+        if (!mapped) mapped = {};
+        mapped[styleProps[k]] = v;
+        continue;
+      }
       if (typeof v === 'function' && v.__isNative) {
         // Native Animated.event: the runtime applies the mapping; JS only
         // runs the listener, if any.
@@ -231,7 +240,7 @@ export function createAnimatedComponent(Component) {
         next[k] = v;
       }
     }
-    const style = flatten(props.style);
+    const style = flatten(mapped ? [props.style, mapped] : props.style);
     const keys = [];
     if (style) {
       let resolved = null;

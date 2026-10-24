@@ -13,11 +13,18 @@ struct SkRect;
 class SkRRect;
 
 namespace jsui {
+class HostTextures;
 namespace image {
 
 // Per-node state kept in Node::imageCache.
 struct NodeCache : Node::Cache {
+  ~NodeCache() override;
   std::string url;           // resolved URL ("" = no source)
+  // props.texture: the host texture shown instead of a source (HostTexture),
+  // registered with `textures` while this cache lives.
+  std::string texture;
+  HostTextures* textures = nullptr;
+  Node* node = nullptr;
   float sourceWidth = 0;     // source={{uri, width, height}} (react-native-web sizes the box from these)
   float sourceHeight = 0;
   float scale = 1;           // source density (scale: 2 => @2x asset)

@@ -7,6 +7,8 @@ import { SCREENS } from '../screens/index.js';
 import { Features } from './home/Features.jsx';
 import { Pipeline } from './home/Pipeline.jsx';
 import { CodeTabs } from './home/CodeTabs.jsx';
+import { Highlights, SkillInstall } from './home/Highlights.jsx';
+import { RunsIn } from './home/RunsIn.jsx';
 
 const HeroScreen = SCREENS[0].component;
 
@@ -117,7 +119,9 @@ export function HomePage() {
   const { width, gutter, phone, tablet } = useLayout();
   const inner = Math.min(width - gutter * 2, 1240);
   const stackHero = width < 1100;
-  const heroW = stackHero ? inner : Math.round(inner * 0.6);
+  // Side by side: the hero copy column keeps room for two columns of highlights.
+  const heroW = stackHero ? inner : Math.min(Math.round(inner * 0.6), inner - 448 - 48);
+  const copyW = stackHero ? inner : inner - heroW - 48;  // the hero copy column
   return (
     <View>
       <Column style={{ paddingTop: phone ? 32 : 60 }}>
@@ -146,16 +150,27 @@ export function HomePage() {
                 <Button label="Open the playground" kind="ghost" to="/playground" />
               </View>
             </Reveal>
-            <Reveal delay={240}>
+            <View style={{ gap: 10 }}>
+              <Highlights width={copyW} delay={220} />
+              <Reveal delay={300} style={{ maxWidth: 520 }}>
+                <SkillInstall />
+              </Reveal>
+            </View>
+            <Reveal delay={340}>
               <View style={styles.proof}>
                 <View style={styles.proofDot} />
                 <Text style={styles.proofText}>This entire page is rendered by JSUI's WASM build into one canvas. No DOM, no CSS.</Text>
               </View>
             </Reveal>
           </View>
-          <Reveal delay={200} distance={28} style={stackHero ? { marginTop: 12 } : null}>
-            <HeroVisual width={heroW} />
-          </Reveal>
+          <View style={[{ width: heroW, gap: phone ? 28 : 44 }, stackHero && { marginTop: 12 }]}>
+            <Reveal delay={200} distance={28}>
+              <HeroVisual width={heroW} />
+            </Reveal>
+            <Reveal delay={380}>
+              <RunsIn />
+            </Reveal>
+          </View>
         </View>
       </Column>
 
@@ -220,7 +235,7 @@ export function HomePage() {
             <Eyebrow style={{ textAlign: 'center' }}>Keep exploring</Eyebrow>
             <Text style={[phone ? text.h2 : text.h1, { textAlign: 'center', maxWidth: 720 }]}>Poke at it. Everything here is live.</Text>
             <Text style={[text.lead, { textAlign: 'center', maxWidth: 640 }, phone && { fontSize: 16, lineHeight: 25 }]}>
-              Nine interactive game screens, a live code playground and a guide to embedding the runtime in your engine.
+              Ten interactive game screens, a live code playground and a guide to embedding the runtime in your engine.
             </Text>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 12, justifyContent: 'center', marginTop: 8 }}>
               <Button label="Game screens" to="/screens" icon="▶" />

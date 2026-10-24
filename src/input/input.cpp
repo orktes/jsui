@@ -79,10 +79,11 @@ enum Listen : unsigned {
   kMove = 2,     // wants pointermove
   kHover = 4,    // wants pointerenter / pointerleave
   kPress = 8,    // pressable (focusable by default, "pointer" cursor)
-  kWheel = 16,
+  kWheel = 16,   // wants wheel
+  kScroll = 32,  // wants scroll (a ScrollView's onScroll)
 };
 
-unsigned listenMask(const Node* n) {
+unsigned readListenMask(const Node* n) {
   unsigned m = 0;
   for (auto& e : n->props()["__events"].asArray()) {
     std::string_view s = e.asString();
@@ -95,8 +96,18 @@ unsigned listenMask(const Node* n) {
         icontains(s, "pointerout") || icontains(s, "mouseout"))
       m |= kHover | kPointer;
     if (icontains(s, "wheel")) m |= kWheel | kPointer;
+    if (icontains(s, "scroll")) m |= kScroll;
   }
   return m;
+}
+
+// Hot (every hit-test path, wheel and scroll event): cached on the node.
+unsigned listenMask(const Node* n) {
+  if (!n->listenMaskValid) {
+    n->listenMask = readListenMask(n);
+    n->listenMaskValid = true;
+  }
+  return n->listenMask;
 }
 
 PointerEvents pointerEventsOf(const Node* n) {
@@ -375,6 +386,134 @@ unsigned InputManager::capturesAt(float x, float y) {
   return r;
 }
 
+// The innermost emitted rect a node's box lies in (its nearest ancestor that
+// emitted one) and where the output stood after it: a node with the same
+// flags inside it adds nothing if no rect emitted since overlaps it (the
+// lookup, last to first, reaches the cover's rect with the same answer).
+struct InputManager::RegionCover {
+  float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+  unsigned flags = 0;
+  size_t end = 0;  // floats in the output after the cover's rect
+  bool valid = false;
+};
+
+// hitNode's walk over the whole tree, bottom to top: every node it could
+// return emits its (clipped, bounding) box with the flags capturesAt would
+// give there. `mask`: the listeners of the node's ancestors (consumes()),
+// `scroll`: a scrollable ScrollView among them.
+struct InputManager::RegionWalk {
+  std::vector<float>* out;
+  // Bounds of the rects emitted so far that capture something: a rect that
+  // captures nothing only matters over them.
+  float fx0 = 0, fy0 = 0, fx1 = 0, fy1 = 0;
+  bool any = false;
+  // Whether a rect would change any lookup (see RegionCover). Rects emitted
+  // since the cover are checked up to a bound, past which it says yes.
+  bool needed(float x0, float y0, float x1, float y1, unsigned flags, const RegionCover& c) const {
+    if (!c.valid || flags != c.flags || x0 < c.x0 || y0 < c.y0 || x1 > c.x1 || y1 > c.y1) return true;
+    const std::vector<float>& o = *out;
+    if (o.size() - c.end > 64 * 5) return true;
+    for (size_t i = c.end; i < o.size(); i += 5) {
+      if (o[i] < x1 && o[i + 1] < y1 && o[i] + o[i + 2] > x0 && o[i + 1] + o[i + 3] > y0) return true;
+    }
+    return false;
+  }
+  // Emits the rect if it matters; the cover for the node's children.
+  RegionCover emit(float x0, float y0, float x1, float y1, unsigned flags, const RegionCover& cover) {
+    if (!(x1 > x0 && y1 > y0)) return cover;
+    if (!flags) {
+      if (!any || x1 <= fx0 || x0 >= fx1 || y1 <= fy0 || y0 >= fy1) return cover;
+    }
+    if (!needed(x0, y0, x1, y1, flags, cover)) return cover;
+    if (flags) {
+      if (!any) {
+        fx0 = x0, fy0 = y0, fx1 = x1, fy1 = y1;
+        any = true;
+      } else {
+        fx0 = std::min(fx0, x0), fy0 = std::min(fy0, y0), fx1 = std::max(fx1, x1), fy1 = std::max(fy1, y1);
+      }
+    }
+    out->insert(out->end(), {x0, y0, x1 - x0, y1 - y0, float(flags)});
+    return {x0, y0, x1, y1, flags, out->size(), true};
+  }
+};
+
+void InputManager::hitRegions(std::vector<float>* out) {
+  out->clear();
+  Node* root = doc_.root();
+  if (!root || !root->yoga()) return;
+  Rect r = root->visualRect();
+  if (!finiteRect(r)) return;
+  RegionWalk w{out};
+  // Points outside the root box are outside the view.
+  hitRegionsOf(root, Affine{}, {r.x, r.y, r.width, r.height}, 0, false, w, RegionCover{});
+}
+
+// The listeners of a node's descendants (a Text's spans, which textHitTest
+// finds in its box).
+static unsigned spanMask(const Node* n) {
+  unsigned m = 0;
+  for (const Node* c : n->children()) m |= listenMask(c) | spanMask(c);
+  return m;
+}
+
+void InputManager::hitRegionsOf(Node* n, const Affine& parent, const Rect& clip, unsigned mask, bool scroll,
+                                RegionWalk& w, const RegionCover& cover) {
+  if (!n->yoga()) return;
+  const ComputedStyle& s = n->style();
+  if (!s.display) return;
+  Rect r = n->visualRect();
+  if (!finiteRect(r)) return;
+  PointerEvents pe = pointerEventsOf(n);
+  if (pe == PointerEvents::None) return;
+  Affine local = nodeLocalToParent(n), inv;
+  if (!s.transform.empty() && !local.invert(&inv)) return;  // scale(0): nothing to hit
+  Affine m = parent * local;
+  float xs[4], ys[4];
+  m.apply(0, 0, &xs[0], &ys[0]);
+  m.apply(r.width, 0, &xs[1], &ys[1]);
+  m.apply(r.width, r.height, &xs[2], &ys[2]);
+  m.apply(0, r.height, &xs[3], &ys[3]);
+  float x0 = *std::min_element(xs, xs + 4), x1 = *std::max_element(xs, xs + 4);
+  float y0 = *std::min_element(ys, ys + 4), y1 = *std::max_element(ys, ys + 4);
+  // consumes(): a TextInput takes everything, else what the path listens to.
+  mask |= n->type() == NodeType::TextInput ? ~0u : listenMask(n);
+  if (n->type() == NodeType::ScrollView && scrollableAncestor(n, 0, 0) == n) scroll = true;
+  const auto& kids = n->children();
+  const bool text = n->type() == NodeType::Text;
+  if (text) {
+    // A leaf here; its spans' handlers (textHitTest) count for its box.
+    for (const Node* c : kids) mask |= listenMask(c) | spanMask(c);
+  }
+  RegionCover inner_cover = cover;
+  if (pe != PointerEvents::BoxNone) {
+    unsigned flags = ((mask & kPointer) ? JSUI_HIT_POINTER : 0) | ((mask & kWheel) || scroll ? JSUI_HIT_SCROLL : 0);
+    inner_cover = w.emit(std::max(x0, clip.x), std::max(y0, clip.y), std::min(x1, clip.x + clip.width),
+                         std::min(y1, clip.y + clip.height), flags, cover);
+  }
+  if (pe == PointerEvents::BoxOnly || text || kids.empty()) return;
+  Rect inner = clip;
+  if (s.overflow != Overflow::Visible) {
+    float cx0 = std::max(x0, clip.x), cy0 = std::max(y0, clip.y);
+    float cx1 = std::min(x1, clip.x + clip.width), cy1 = std::min(y1, clip.y + clip.height);
+    if (!(cx1 > cx0 && cy1 > cy0)) return;
+    inner = {cx0, cy0, cx1 - cx0, cy1 - cy0};
+  }
+  Affine cm = m * Affine::translate(-n->scrollX, -n->scrollY);
+  bool zSorted = false;
+  for (Node* c : kids)
+    if (c->style().zIndex != 0) zSorted = true;
+  if (!zSorted) {
+    for (Node* c : kids) hitRegionsOf(c, cm, inner, mask, scroll, w, inner_cover);
+    return;
+  }
+  // Paint order, as hitNode sorts it (topmost last).
+  std::vector<Node*> order(kids.begin(), kids.end());
+  std::stable_sort(order.begin(), order.end(),
+                   [](Node* a, Node* b) { return a->style().zIndex < b->style().zIndex; });
+  for (Node* c : order) hitRegionsOf(c, cm, inner, mask, scroll, w, inner_cover);
+}
+
 bool InputManager::consumes(const Node* hit, unsigned mask) const {
   for (const Node* n = hit; n; n = n->parent()) {
     if (n->type() == NodeType::TextInput) return true;
@@ -382,6 +521,14 @@ bool InputManager::consumes(const Node* hit, unsigned mask) const {
   }
   return false;
 }
+
+bool InputManager::pathListens(const Node* n, unsigned mask) const {
+  for (; n; n = n->parent())
+    if (listenMask(n) & mask) return true;
+  return false;
+}
+
+bool InputManager::listensForScroll(const Node* sv) const { return (listenMask(sv) & kScroll) != 0; }
 
 Node* InputManager::commonAncestor(Node* a, Node* b) const {
   if (!a || !b) return nullptr;
@@ -414,13 +561,16 @@ void InputManager::addModifiers(Value::Object& ev) const {
   ev["metaKey"] = Value((mods_ & JSUI_MOD_META) != 0);
 }
 
-bool InputManager::dispatch(Value::Object&& ev) {
+bool InputManager::dispatch(Value::Object&& ev) { return deliver(std::move(ev), true); }
+
+bool InputManager::deliver(Value::Object&& ev, bool toJs) {
   if (!rt_.js) return false;
-  doc_.perf.counters.events++;
   Value event(std::move(ev));
   // Animated.event(..., {useNativeDriver: true}) mappings apply natively,
   // before (and independently of) JS.
   rt_.animated->handleEvent(event);
+  if (!toJs) return false;
+  doc_.perf.counters.events++;
   // Only preventDefault() suppresses the default action; a handler that
   // merely observes the event (flag 1) lets it proceed, like the DOM.
   lastFlags_ = rt_.js->dispatchEvent(event);
@@ -643,19 +793,25 @@ bool InputManager::mouseWheel(float x, float y, float dx, float dy) {
   if (!mouseInside_ || x != mouse_.x || y != mouse_.y) mouseMove(x, y);
   Node* target = hitTest(x, y);
   if (!target) return false;  // outside the viewport
-  Value::Object ev = baseEvent("wheel", target);
-  float lx = 0, ly = 0;
-  toLocal(target, x, y, &lx, &ly);
-  ev["x"] = Value(double(x));
-  ev["y"] = Value(double(y));
-  ev["localX"] = Value(double(lx));
-  ev["localY"] = Value(double(ly));
-  ev["deltaX"] = Value(double(dx));
-  ev["deltaY"] = Value(double(dy));
-  ev["pointerType"] = Value("mouse");
-  addModifiers(ev);
-  if (dispatch(std::move(ev))) return true;
-  Node* hit = hitTest(x, y);
+  // Like pointer moves, wheel events reach JS only when a node on the path
+  // listens (onWheel); native Animated.event mappings see them regardless.
+  bool js = pathListens(target, kWheel);
+  if (js || rt_.animated->hasEventMapping(target->id(), "wheel")) {
+    Value::Object ev = baseEvent("wheel", target);
+    float lx = 0, ly = 0;
+    toLocal(target, x, y, &lx, &ly);
+    ev["x"] = Value(double(x));
+    ev["y"] = Value(double(y));
+    ev["localX"] = Value(double(lx));
+    ev["localY"] = Value(double(ly));
+    ev["deltaX"] = Value(double(dx));
+    ev["deltaY"] = Value(double(dy));
+    ev["pointerType"] = Value("mouse");
+    addModifiers(ev);
+    if (deliver(std::move(ev), js)) return true;
+    if (js) target = hitTest(x, y);  // handlers may have changed the tree
+  }
+  Node* hit = target;
   // Default action: scroll the nearest ScrollView that can move this way.
   if (wheelScroll(hit, dx, dy)) return true;
   return consumes(alive(idOf(hit)), kWheel);
@@ -1234,8 +1390,13 @@ void InputManager::tick(double nowMs) {
   if (laidOut) tickFocusScopes();
   editTick();
   tickScrolling(nowMs, dt);
-  // The UI may have moved under a still mouse: refresh enter/leave + cursor.
+  // The UI may have moved under a still mouse: refresh enter/leave + cursor
+  // (while content scrolls under it, once the scrolling pauses).
   if (mouseInside_ && (laidOut || hoverDirty_ || doc_.paintDirty())) {
+    if (nowMs - scrolledUnderMouseAt_ < kHoverAfterScrollMs) {
+      hoverDirty_ = true;
+      return;
+    }
     hoverDirty_ = false;
     Node* hit = hitTest(mouse_.x, mouse_.y);
     updateHover(mouse_, hit);

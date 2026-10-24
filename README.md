@@ -2,6 +2,12 @@
 
 Fast development of beautiful, responsive in-game UIs with React.
 
+**Using a coding agent?** Add the JSUI skill to your project with one command:
+
+```sh
+npx @orktes/jsui-cli skill install            # -> .claude/skills/jsui/ (--global: ~/.claude/skills/)
+```
+
 * Write components exactly like React Native (`import { View, Text } from 'react-native'`).
 * Runs in **QuickJS**, lays out with **Yoga**, paints with **Skia**.
 * Embeds through a small C API (`include/jsui/jsui.h`): feed it input
@@ -9,7 +15,7 @@ Fast development of beautiful, responsive in-game UIs with React.
   straight into your OpenGL / GLES / WebGL framebuffer or texture with the
   optional Skia Ganesh GPU backend (`jsui_render_gl`).
 * Native and **WebAssembly** builds from one codebase.
-* Dev mode: point the runtime at a local server and it live-reloads your bundle.
+* Dev mode: point the runtime at `jsui dev` and edits hot-update in place (React Fast Refresh keeps component state), with an error overlay for build and runtime errors.
 * Reference tests compare every example pixel-by-pixel with the same code
   rendered by react-native-web in headless Chrome.
 
@@ -76,11 +82,79 @@ function Marker({ i }) {
 }
 ```
 
+Pictures the game draws itself (a video it decodes, a render target, a
+camera) are shown by name; JSUI samples the engine's own GPU texture in place
+and repaints just those views when the game says it has new contents:
+
+```c
+JsuiTexture t = {JSUI_TEXTURE_VULKAN, vk_image, 0, 1280, 720, JSUI_TEXTURE_OPAQUE};
+jsui_set_texture(rt, "trailer", &t);   // once (or when it changes)
+jsui_texture_updated(rt, "trailer");   // after each new video frame
+```
+
+```jsx
+<HostTexture name="trailer" resizeMode="contain" style={{ width: 640, aspectRatio: 16 / 9, borderRadius: 12 }} />
+```
+
+Lottie animations play natively (Skia's Skottie, no JS per frame) with
+lottie-react-native's API:
+
+```jsx
+import LottieView from 'lottie-react-native';
+<LottieView source={require('./victory.json')} autoPlay loop style={{ width: 200, height: 200 }} />
+```
+
+Custom shaders: your own SkSL (Skia runtime effects) paint a view on every
+renderer. Uniforms can be Animated values (also on the native driver), a
+shader that reads `time` animates on the runtime clock, child shaders are
+images or host textures, and `uniform shader content` post-processes the
+view's own children:
+
+```jsx
+<ShaderView
+  source={sksl`uniform float2 resolution; uniform float time; layout(color) uniform half4 tint;
+    half4 main(float2 p) { return tint * half(0.5 + 0.5 * sin(p.x / resolution.x * 6.28 + time)); }`}
+  uniforms={{ tint: animatedColor }}
+  style={{ width: 300, height: 120, borderRadius: 16 }}
+/>
+```
+
 ## npm packages
 
-`@orktes/jsui-react` (the React Native API), `@orktes/jsui-cli` (`jsui build` / `jsui dev`)
-and `@orktes/jsui-web` (the browser host with the WASM modules) are published to npm
-as 0.x releases. See [docs/RELEASING.md](docs/RELEASING.md).
+`@orktes/jsui-react` (the React Native API), `@orktes/jsui-cli` (`jsui build` / `jsui dev`,
+headless `jsui screenshot` / `inspect` / `run`, and the agent skill) and `@orktes/jsui-web`
+(the browser host with the WASM modules) are published to npm as 0.x releases. See
+[docs/RELEASING.md](docs/RELEASING.md).
+
+## Coding agents and headless checks
+
+`npx @orktes/jsui-cli skill install` adds the JSUI [agent skill](packages/cli/skills/jsui/SKILL.md)
+to a project (`.claude/skills/jsui/`; nothing else to install first), or install it in Claude Code as a plugin with
+`/plugin marketplace add orktes/jsui` and `/plugin install jsui@jsui`. It teaches the
+supported React Native subset, gamepad focus, animation, game data, Lottie, shaders, host
+textures and embedding, and how to verify a UI without a browser (with
+`@orktes/jsui-cli` in the project's devDependencies):
+
+```sh
+npx jsui screenshot app.jsx -o shot.png       # the CPU WASM runtime in Node, deterministic
+npx jsui inspect app.jsx                      # view tree: types, testIDs, text, focus, layout
+npx jsui run app.jsx steps.json               # scripted clicks / keys / gamepad / state + expectations
+```
+
+Every runtime that loads the bundle from `jsui dev` in dev mode (the game, the native
+viewer, the browser at `http://127.0.0.1:5173/shared`, or `jsui dev --headless` inside the
+server) joins its shared session: an agent drives and screenshots the live one with
+`jsui screenshot|inspect|run --attach http://127.0.0.1:5173` while you play it, and reads
+what you did with `jsui log --attach`.
+
+## Prebuilt binaries
+
+Every release on [GitHub Releases](https://github.com/orktes/jsui/releases) has the C API
+as a shared library (`libjsui.so` for Linux x64 / arm64, a universal `libjsui.dylib`,
+`jsui.dll`) with `jsui.h`, a CMake package (`find_package(jsui)` → `jsui::jsui`) and the
+viewer; `JSUI.xcframework` for iOS; and the Godot addon (`addons/jsui`, every desktop
+platform in one zip). The library exports only the `jsui_*` functions, so it drops into
+any engine or toolchain. See [docs/RELEASING.md](docs/RELEASING.md#native-binaries).
 
 ## Build (native)
 
@@ -107,3 +181,43 @@ what the deterministic tools (`jsui-render`, `jsui-record`) and reference tests 
 `integrations/godot` is a GDExtension with a `JsuiView` Control and a demo
 project. Build it with `-DJSUI_BUILD_GODOT=ON` (it is off by default). See
 [integrations/godot/README.md](integrations/godot/README.md).
+
+## iOS and Android
+
+[integrations/ios](integrations/ios/README.md) is a UIKit app rendering with
+Skia on Metal (`RUN=1 scripts/build-ios.sh` builds it and runs it in the
+simulator). [integrations/android](integrations/android/README.md) is an NDK
+NativeActivity app rendering with Skia on OpenGL ES (`RUN=1
+scripts/build-android.sh` builds the APK and runs it on a device or emulator).
+Both forward touch, hardware keys and gamepads and publish the safe area.
+
+## Rust, Go and other languages
+
+JSUI is a C library, so any language with a C FFI can host a React UI.
+[bindings/rust](bindings/rust/README.md) (a crate) and
+[bindings/go](bindings/go/README.md) (a cgo package) are thin bindings over the
+C API, and each comes with the same desktop app: a quest log whose data and
+rules live in Rust or Go while the UI is React, drawn by Skia on the GPU into a
+GLFW window. The program publishes shared state, the UI asks for changes with
+`Host.call`, and the program answers. See [bindings/README.md](bindings/README.md).
+
+## raylib, SDL3, sokol, Unity and Unreal
+
+`integrations/raylib`, `integrations/sdl3` and `integrations/sokol` run one
+shared game HUD in three game loops through the C API: input pass-through
+(what the UI does not consume moves the camera), per-frame unit positions
+driving nameplates with no JS per frame, and three ways to get the UI on
+screen (Skia GL into a raylib `RenderTexture2D`, Skia into SDL's own texture on
+its Metal, Vulkan or GL renderer, Skia GL straight into sokol's swapchain
+framebuffer).
+Build them with `-DJSUI_BUILD_RAYLIB=ON -DJSUI_BUILD_SDL3=ON
+-DJSUI_BUILD_SOKOL=ON`. See [integrations/README.md](integrations/README.md).
+
+The same game also runs in Unity 6: [integrations/unity](integrations/unity/README.md)
+is a Unity package (a native plugin exporting the C API to C#, and a
+`JsuiView` component that composites the UI as a uGUI overlay and passes on
+the input it did not consume) and an example project built from the command
+line. [integrations/unreal](integrations/unreal/README.md) is the same for
+Unreal Engine 5: a plugin (`UJsuiWidget` / `SJsuiView`, drawing with Skia
+Graphite on the Metal RHI's own queue) over JSUI as a shared library with just
+the C API, and a C++ example project packaged headlessly with RunUAT.

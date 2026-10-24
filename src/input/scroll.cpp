@@ -13,6 +13,7 @@
 #include <limits>
 #include <vector>
 
+#include "animated/native_animated.h"
 #include "core/document.h"
 #include "core/scroll.h"
 #include "input/input.h"
@@ -92,7 +93,8 @@ Node* InputManager::scrollableAncestor(Node* n, float dx, float dy) const {
 
 // --------------------------------------------------------------- events
 
-bool InputManager::dispatchScrollEvent(const char* type, Node* sv, float vx, float vy, const float* target) {
+bool InputManager::dispatchScrollEvent(const char* type, Node* sv, float vx, float vy, const float* target,
+                                       bool toJs) {
   ScrollMetrics m = scrollMetrics(sv);
   Value::Object ev = baseEvent(type, sv);
   ev["contentOffset"] = Value(pair(sv->scrollX, sv->scrollY, "x", "y"));
@@ -104,10 +106,65 @@ bool InputManager::dispatchScrollEvent(const char* type, Node* sv, float vx, flo
   ev["zoomScale"] = Value(1.0);
   ev["velocity"] = Value(pair(vx, vy, "x", "y"));
   if (target) ev["targetContentOffset"] = Value(pair(target[0], target[1], "x", "y"));
-  return dispatch(std::move(ev));
+  return deliver(std::move(ev), toJs);
 }
 
-bool InputManager::dispatchScroll(Node* sv) { return dispatchScrollEvent("scroll", sv); }
+namespace {
+
+// RN scrollEventThrottle (ms): 0 / unset sends every offset change; up to
+// 16 at most one per frame; more at most one per interval.
+double scrollThrottle(const Node* sv) {
+  double t = sv->props()["scrollEventThrottle"].asNumber(0);
+  return t > 0 ? t : 0;
+}
+
+}  // namespace
+
+// 'scroll' reaches JS only when the ScrollView listens (onScroll), at the
+// rate scrollEventThrottle allows: an offset change inside the interval is
+// held back and sent from tick() once it is due (with the offset then), so
+// JS always gets the final position. Native Animated.event mappings see
+// every change.
+bool InputManager::dispatchScroll(Node* sv) {
+  bool js = listensForScroll(sv);
+  if (!js && !rt_.animated->hasEventMapping(sv->id(), "scroll")) return false;
+  if (js) {
+    ScrollState& st = scrollState(sv);
+    double throttle = scrollThrottle(sv), t = eventTime();
+    bool due = throttle == 0 || (throttle <= 16 ? st.scrollSentFrame != doc_.frame : t - st.scrollSentAt >= throttle);
+    if (due) {
+      st.scrollSentAt = t;
+      st.scrollSentFrame = doc_.frame;
+      st.scrollOwed = false;
+    } else {
+      st.scrollOwed = true;
+      st.scrollOwedAt = t;
+      js = false;
+    }
+  }
+  return dispatchScrollEvent("scroll", sv, 0, 0, nullptr, js);
+}
+
+void InputManager::flushOwedScroll(uint32_t id, double now) {
+  auto it = scrolls_.find(id);
+  if (it == scrolls_.end() || !it->second.scrollOwed) return;
+  ScrollState& st = it->second;
+  Node* sv = alive(id);
+  if (!sv || !listensForScroll(sv)) {
+    st.scrollOwed = false;
+    return;
+  }
+  double throttle = scrollThrottle(sv);
+  if (throttle <= 16 ? st.scrollSentFrame == doc_.frame : now - st.scrollSentAt < throttle) return;
+  // Stamped with the time of the change it reports (like the event it stands for).
+  st.scrollOwed = false;
+  st.scrollSentAt = st.scrollOwedAt;
+  st.scrollSentFrame = doc_.frame;
+  double saved = eventTime_;
+  eventTime_ = st.scrollOwedAt;
+  dispatchScrollEvent("scroll", sv);
+  eventTime_ = saved;
+}
 
 // --------------------------------------------------------------- offsets
 
@@ -134,6 +191,7 @@ bool InputManager::applyScroll(Node* sv, float x, float y, bool showIndicators) 
   // ScrollView's clip.
   doc_.markPaintDirty();
   hoverDirty_ = true;
+  if (std::find(mouse_.chain.begin(), mouse_.chain.end(), sv->id()) != mouse_.chain.end()) scrolledUnderMouseAt_ = rt_.now;
   dispatchScroll(sv);
   return true;
 }
@@ -629,6 +687,7 @@ void InputManager::tickScrolling(double now, double /*dt*/) {
       ScrollMetrics m = scrollMetrics(sv);
       if (sv->scrollX > m.maxX() || sv->scrollY > m.maxY()) applyScroll(sv, sv->scrollX, sv->scrollY, false);
     }
+    flushOwedScroll(id, now);
     it = scrolls_.find(id);
     if (it == scrolls_.end() || !(sv = alive(id))) continue;
     ScrollState& s = it->second;
@@ -654,7 +713,7 @@ void InputManager::tickScrolling(double now, double /*dt*/) {
       doc_.markPaintDirty();
     }
     if (alpha == 0) s.shownUntil = -1;
-    bool idle = s.anim == ScrollState::Anim::None && !s.dragging && s.settleAt < 0 && alpha == 0;
+    bool idle = s.anim == ScrollState::Anim::None && !s.dragging && s.settleAt < 0 && alpha == 0 && !s.scrollOwed;
     if (idle && sv->scrollX == 0 && sv->scrollY == 0) scrolls_.erase(it);
   }
 }
@@ -662,8 +721,10 @@ void InputManager::tickScrolling(double now, double /*dt*/) {
 bool InputManager::animating() const {
   for (const auto& e : scrolls_) {
     const ScrollState& st = e.second;
-    if (st.anim != ScrollState::Anim::None || st.dragging || st.settleAt >= 0 || st.shownUntil >= 0) return true;
+    if (st.anim != ScrollState::Anim::None || st.dragging || st.settleAt >= 0 || st.shownUntil >= 0 || st.scrollOwed)
+      return true;
   }
+  if (mouseInside_ && hoverDirty_) return true;  // a hover refresh waits for scrolling to pause
   for (const Pad& p : pads_) {
     if (p.dpad.dir >= 0 || p.stick.dir >= 0 || p.stickScrollId) return true;
     if (!p.rightBlocked && std::hypot(p.axes[2], p.axes[3]) > kScrollStickDeadzone) return true;

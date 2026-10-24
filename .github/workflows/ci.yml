@@ -31,6 +31,10 @@ jobs:
       js: ${{ steps.filter.outputs.js }}
       reference: ${{ steps.filter.outputs.reference }}
       ios: ${{ steps.filter.outputs.ios }}
+      android: ${{ steps.filter.outputs.android }}
+      engines: ${{ steps.filter.outputs.engines }}
+      bindings: ${{ steps.filter.outputs.bindings }}
+      dist: ${{ steps.filter.outputs.dist }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -54,9 +58,15 @@ jobs:
               - 'scripts/**'
               - 'web/**'
               - 'site/**'
+              - 'packages/cli/**'
+              - 'packages/react/src/inspect.js'
             godot:
               - *core
               - 'integrations/godot/**'
+              - 'integrations/sdl3/**'
+              - 'integrations/shared/**'
+              - 'integrations/unity/native/**'
+              - 'integrations/unity/CMakeLists.txt'
               - 'scripts/build-skia-desktop.sh'
               - 'scripts/patches/skia-m157-dawn-header-only.patch'
               - 'tools/dawn-shim/**'
@@ -68,14 +78,54 @@ jobs:
             js:
               - *core
               - 'packages/**'
+              - 'web/jsui-*.js'
+              - 'web/test/textures.test.mjs'
+              - 'web/test/audio.test.mjs'
               - 'tests/native/**'
               - 'package.json'
               - 'package-lock.json'
+            engines:
+              - *core
+              - 'integrations/raylib/**'
+              - 'integrations/sdl3/**'
+              - 'integrations/sokol/**'
+              - 'integrations/unity/**'
+              - 'integrations/shared/**'
+              - 'packages/**'
+              - 'examples/theme.js'
+            bindings:
+              - *core
+              - 'bindings/**'
+              - 'packages/**'
+              - 'examples/theme.js'
+            # Release binaries: on pull requests only when the packaging or
+            # the build changes (every push to main builds them).
+            dist:
+              - 'scripts/dist/**'
+              - 'tests/shared/**'
+              - 'cmake/**'
+              - 'CMakeLists.txt'
+              - 'include/**'
+              - 'tools/jsui-viewer/**'
+              - 'integrations/godot/CMakeLists.txt'
+              - 'integrations/unity/CMakeLists.txt'
+              - 'integrations/unity/native/**'
+              - 'integrations/unity/package/**'
+              - 'integrations/unreal/Plugins/**'
+              - 'scripts/build-skia-desktop.sh'
+              - 'scripts/build-skia-ios.sh'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/release.yml'
             ios:
               - *core
               - 'integrations/ios/**'
               - 'scripts/build-skia-ios.sh'
               - 'scripts/build-ios.sh'
+            android:
+              - *core
+              - 'integrations/android/**'
+              - 'scripts/build-skia-android.sh'
+              - 'scripts/build-android.sh'
             reference:
               - *core
               - 'tools/jsui-render/**'
@@ -160,6 +210,163 @@ jobs:
             bands-gpu.png
             bands-gpu-core.png
 
+  # ------------------------------------------- engine examples (Linux, Xvfb)
+  # integrations/raylib, sdl3 and sokol: the shared HUD in three game loops.
+  # Each runs its --selftest (an empty-space click passes through to the game,
+  # a click on the Spawn button is consumed and its message reaches the game)
+  # on the GPU path (Mesa llvmpipe GL) and on the CPU path, and saves the
+  # composed frame.
+  engines:
+    name: engine examples (raylib, SDL3, sokol, Unity plugin)
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.engines == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build clang libfontconfig1-dev zlib1g-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxinerama-dev libxfixes-dev \
+            libgl1-mesa-dev libegl1 libegl-mesa0 libgl1-mesa-dri xvfb xauth
+      - name: Cache prebuilt Skia + engine sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/skia-prebuilt
+            build/_deps/*-src
+          key: engines-deps-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'integrations/*/CMakeLists.txt', 'integrations/shared/fetch.cmake') }}
+          restore-keys: engines-deps-${{ runner.os }}-
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: engines-${{ runner.os }}
+          max-size: 500M
+      - name: UI bundle
+        run: |
+          npm ci
+          npx jsui build integrations/shared/ui/app.jsx -o integrations/shared/ui/dist/bundle.js
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DJSUI_BUILD_TESTS=OFF -DJSUI_BUILD_VIEWER=OFF
+          -DJSUI_BUILD_RAYLIB=ON -DJSUI_BUILD_SDL3=ON -DJSUI_BUILD_SOKOL=ON -DJSUI_BUILD_UNITY=ON
+      - name: Build
+        run: cmake --build build -j "$(nproc)" --target jsui-raylib jsui-sdl3 jsui-sokol jsui_unity
+      - name: Unity plugin smoke (its C exports through ctypes; Unity itself needs a license)
+        run: python3 integrations/unity/native/smoke.py integrations/unity/package/Plugins/Linux/x86_64/libjsui_unity.so integrations/shared/ui/dist/bundle.js
+      - name: Self-tests and frames
+        run: |
+          mkdir -p engines
+          x() { xvfb-run -a -s "-screen 0 1600x1000x24" "$@"; }
+          x ./build/jsui-raylib --selftest --screenshot engines/raylib.png | tee engines/raylib.log
+          grep -q '^GPU: ' engines/raylib.log && grep -q 'selftest: ok' engines/raylib.log
+          x ./build/jsui-raylib --cpu --selftest --screenshot engines/raylib-cpu.png | tee engines/raylib-cpu.log
+          ! grep -q '^GPU: ' engines/raylib-cpu.log && grep -q 'selftest: ok' engines/raylib-cpu.log
+          x ./build/jsui-sokol --selftest --screenshot engines/sokol.png | tee engines/sokol.log
+          grep -q '^GPU: ' engines/sokol.log && grep -q 'selftest: ok' engines/sokol.log
+          x ./build/jsui-sokol --cpu --selftest --screenshot engines/sokol-cpu.png | tee engines/sokol-cpu.log
+          grep -q 'selftest: ok' engines/sokol-cpu.log
+          # Prebuilt Skia (Ganesh GL, no Graphite): SDL's opengl renderer, Skia into its texture.
+          x ./build/jsui-sdl3 --selftest --screenshot engines/sdl3.png | tee engines/sdl3.log
+          grep -q '^GPU: Skia Ganesh GL' engines/sdl3.log && grep -q 'selftest: ok' engines/sdl3.log
+          x ./build/jsui-sdl3 --cpu --selftest --screenshot engines/sdl3-cpu.png | tee engines/sdl3-cpu.log
+          ! grep -q '^GPU: ' engines/sdl3-cpu.log && grep -q 'selftest: ok' engines/sdl3-cpu.log
+          SDL_VIDEO_DRIVER=dummy ./build/jsui-sdl3 --renderer software --selftest --screenshot engines/sdl3-software.png | tee engines/sdl3-software.log
+          grep -q 'selftest: ok' engines/sdl3-software.log
+          for f in engines/*.png; do test -s "$f"; done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: engine-examples-linux
+          path: engines/
+
+  # ------------------------------------------------- Rust and Go bindings
+  # libjsui (jsui_shared, prebuilt Skia m124: Ganesh GL) linked from the Rust
+  # crate and the Go package: their tests, then each quest-log example's
+  # self-test on Mesa's GL under Xvfb.
+  bindings:
+    name: bindings (Rust, Go)
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.bindings == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: bindings/go/examples/quests/go.sum
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/rust
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build clang cmake libfontconfig1-dev zlib1g-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxinerama-dev libxfixes-dev libxxf86vm-dev \
+            libgl1-mesa-dev libegl1 libegl-mesa0 libgl1-mesa-dri xvfb xauth
+      - name: Cache prebuilt Skia
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-prebuilt
+          key: bindings-skia-${{ runner.os }}-${{ hashFiles('cmake/*.cmake') }}
+          restore-keys: bindings-skia-${{ runner.os }}-
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: bindings-${{ runner.os }}
+          max-size: 500M
+      - name: UI bundle
+        run: |
+          npm ci
+          npx jsui build bindings/ui/app.jsx -o bindings/ui/dist/bundle.js
+      - name: libjsui
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DJSUI_BUILD_SHARED=ON -DJSUI_BUILD_TESTS=OFF -DJSUI_BUILD_VIEWER=OFF -DJSUI_BUILD_TOOLS=OFF
+          cmake --build build -j "$(nproc)" --target jsui_shared
+      - name: The Go module's copy of jsui.h is current
+        run: cmp include/jsui/jsui.h bindings/go/include/jsui/jsui.h
+      - name: Rust
+        working-directory: bindings/rust
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+          cargo build --release --example quests
+      - name: Go
+        working-directory: bindings/go
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test ./...
+          cd examples/quests && go vet ./... && go build -o ../../../../build/quests-go .
+      - name: Self-tests and frames
+        run: |
+          mkdir -p bindings-out
+          x() { xvfb-run -a -s "-screen 0 1600x1000x24" "$@"; }
+          x bindings/rust/target/release/examples/quests --selftest --screenshot bindings-out/rust.png | tee bindings-out/rust.log
+          grep -q '^GPU: Skia Ganesh GL' bindings-out/rust.log && grep -q 'selftest: ok' bindings-out/rust.log
+          x build/quests-go --selftest --screenshot bindings-out/go.png | tee bindings-out/go.log
+          grep -q '^GPU: Skia Ganesh GL' bindings-out/go.log && grep -q 'selftest: ok' bindings-out/go.log
+          for f in bindings-out/*.png; do test -s "$f"; done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bindings-linux
+          path: bindings-out/
+
   # ------------------------------------------------- Godot GDExtension (Linux)
   # Built against Skia m157 from source (scripts/build-skia-desktop.sh,
   # Graphite + Vulkan + header-only Dawn; cached on the hash of the script and
@@ -187,7 +394,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ninja-build clang libfontconfig1-dev zlib1g-dev python3 unzip rsync \
             libvulkan1 mesa-vulkan-drivers vulkan-validationlayers xvfb xauth libegl1 libegl-mesa0 libgl1-mesa-dri \
-            libgl-dev libegl-dev libgles-dev libx11-dev libvulkan-dev
+            libgl-dev libegl-dev libgles-dev libx11-dev libvulkan-dev \
+            libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxinerama-dev libxfixes-dev
       - name: Cache desktop Skia (m157, Graphite + Vulkan + Dawn headers)
         id: skia-desktop
         uses: actions/cache@v4
@@ -215,20 +423,62 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
           -DJSUI_SKIA_DIR=third_party/skia-desktop -DJSUI_VULKAN=ON -DJSUI_GRAPHITE_DAWN=ON
-          -DJSUI_BUILD_TESTS=ON -DJSUI_BUILD_VIEWER=OFF -DJSUI_BUILD_GODOT=ON
+          -DJSUI_BUILD_TESTS=ON -DJSUI_BUILD_VIEWER=OFF -DJSUI_BUILD_GODOT=ON -DJSUI_BUILD_SDL3=ON
+          -DJSUI_BUILD_UNITY=ON -DJSUI_UNITY_PLUGIN_DIR=$PWD/build/unity
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Build GDExtension + native tests
-        run: cmake --build build -j "$(nproc)" --target jsui_godot jsui-tests
+        run: cmake --build build -j "$(nproc)" --target jsui_godot jsui-tests jsui-sdl3 jsui_unity jsui-unity-vulkan-test
       - name: Native tests against Skia m157 (incl. Graphite on Vulkan / lavapipe)
         # vulkan_test renders through jsui_gpu_create_vulkan on its own
         # lavapipe device and compares with the CPU raster; require it.
         env:
           JSUI_VULKAN_TEST_REQUIRE: 1
         run: ./build/jsui-tests
+      - name: Unity plugin on Vulkan (lavapipe) without Unity - a stand-in for Unity's plugin API drives the GPU path, under sync validation
+        # integrations/unity/native/test/unity_vulkan_test.cpp loads the
+        # built plugin, plays Unity's part (IUnityGraphicsVulkanV2, a frame
+        # recorded into command buffers submitted at its end, AccessQueue
+        # callbacks run synchronously and from a submission thread) and
+        # compares the frames with the CPU raster. Any validation error (a
+        # layout Unity's tracking does not expect, a hazard between the
+        # plugin's render and "Unity's" work on the texture) fails the step.
+        env:
+          JSUI_VULKAN_TEST_REQUIRE: 1
+        run: |
+          vkdir="$(mktemp -d)"
+          printf '%s\n' \
+            'khronos_validation.enables = VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT' \
+            'khronos_validation.report_flags = error' \
+            'khronos_validation.debug_action = VK_DBG_LAYER_ACTION_LOG_MSG' \
+            "khronos_validation.log_filename = $vkdir/validation.log" \
+            'khronos_validation.message_id_filter = VUID-vkGetPhysicalDeviceFormatProperties-format-parameter' \
+            > "$vkdir/vk_layer_settings.txt"
+          VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation VK_LAYER_SETTINGS_PATH="$vkdir" \
+            ./build/integrations/unity/jsui-unity-vulkan-test build/integrations/unity/libjsui_unity.so
+          if [ -s "$vkdir/validation.log" ]; then cat "$vkdir/validation.log"; exit 1; fi
       - name: Demo bundle
         run: |
           if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
           npx jsui build integrations/godot/demo/ui/app.jsx -o integrations/godot/demo/ui/dist/bundle.js
+      - name: SDL3 example on Vulkan (lavapipe) - Skia Graphite into the SDL_Texture's VkImage on SDL's queue, under sync validation
+        # The engines job runs the GL and CPU paths with the prebuilt Skia;
+        # this one has Graphite on Vulkan. Any validation error (a hazard
+        # between JSUI's render and SDL's frames on the shared image, a
+        # layout SDL does not expect) fails the step.
+        run: |
+          npx jsui build integrations/shared/ui/app.jsx -o integrations/shared/ui/dist/bundle.js
+          vkdir="$(mktemp -d)"
+          printf '%s\n' \
+            'khronos_validation.enables = VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT' \
+            'khronos_validation.report_flags = error' \
+            'khronos_validation.debug_action = VK_DBG_LAYER_ACTION_LOG_MSG' \
+            "khronos_validation.log_filename = $vkdir/validation.log" \
+            'khronos_validation.message_id_filter = VUID-vkGetPhysicalDeviceFormatProperties-format-parameter' \
+            > "$vkdir/vk_layer_settings.txt"
+          VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation VK_LAYER_SETTINGS_PATH="$vkdir" xvfb-run -a -s "-screen 0 1600x1000x24" \
+            ./build/jsui-sdl3 --selftest --screenshot build/sdl3-vulkan.png | tee build/sdl3-vulkan.log
+          grep -q '^GPU: Skia Graphite Vulkan' build/sdl3-vulkan.log && grep -q 'selftest: ok' build/sdl3-vulkan.log
+          if [ -s "$vkdir/validation.log" ]; then cat "$vkdir/validation.log"; exit 1; fi
       - name: Run the demo in Godot 4.7.2 (headless, input self-test at 1x and 2x) and capture frames
         run: integrations/godot/smoke-test.sh build/godot-smoke.png
       - name: Run it in Godot 4.3 too (compatibility_minimum)
@@ -278,6 +528,7 @@ jobs:
             integrations/godot/demo/bin/
             build/godot-smoke*.png
             build/godot-vulkan*.png
+            build/sdl3-vulkan.png
           if-no-files-found: warn
 
   # --------------------------------------- Godot GDExtension (macOS), advisory
@@ -319,6 +570,424 @@ jobs:
           name: jsui-godot-macos
           path: integrations/godot/demo/bin/
 
+  # ------------------------------------------------- Windows (Skia m157, GPU)
+  # Skia m157 for Windows built from source (scripts/build-skia-desktop.sh:
+  # Graphite + Vulkan, Ganesh + GL + Direct3D 12, clang-cl, /MT), cached on
+  # the hash of the script and its patch. A cache hit only looks the key up;
+  # the jobs below restore it.
+  skia-windows:
+    name: Skia m157 (windows-x64)
+    runs-on: windows-2022
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.native == 'true' || needs.changes.outputs.godot == 'true' || needs.changes.outputs.dist == 'true'
+    timeout-minutes: 240
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache key
+        id: key
+        run: echo "key=skia-desktop-${{ runner.os }}-x64-${{ hashFiles('scripts/build-skia-desktop.sh', 'scripts/patches/skia-m157-dawn-header-only.patch') }}" >> "$GITHUB_OUTPUT"
+      - name: Cache desktop Skia (m157)
+        id: skia
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-desktop
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
+      - name: Skia m157 for Windows (cache miss only)
+        if: steps.skia.outputs.cache-hit != 'true'
+        run: |
+          pip install ninja==1.13.0
+          git config --global core.longpaths true
+          JOBS=4 scripts/build-skia-desktop.sh
+          rm -rf third_party/skia-src-m157  # not cached
+
+  # Native tests on Windows against Skia m157, with the GPU backends required:
+  # Graphite on Vulkan (Mesa lavapipe) and Ganesh on Direct3D 12 / 11 (WARP,
+  # the runner has no GPU); each is compared with the CPU raster.
+  windows:
+    name: native (windows, Skia m157 + Vulkan / D3D12)
+    runs-on: windows-2022
+    needs: [changes, skia-windows]
+    if: ${{ !cancelled() && needs.skia-windows.result == 'success' && (github.event_name != 'pull_request' || needs.changes.outputs.native == 'true' || needs.changes.outputs.godot == 'true') }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Desktop Skia m157 (built by skia-windows)
+        uses: actions/cache/restore@v4
+        with:
+          path: third_party/skia-desktop
+          key: ${{ needs.skia-windows.outputs.key }}
+          fail-on-cache-miss: true
+      - name: Vulkan loader + Mesa lavapipe
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          vulkan_version: 1.4.328.1
+          install_runtime: true
+          install_lavapipe: true
+          cache: true
+          stripdown: true
+      - name: Cache FetchContent sources
+        uses: actions/cache@v4
+        with:
+          path: build/_deps/*-src
+          key: windows-deps-m157-${{ hashFiles('cmake/*.cmake', 'integrations/godot/CMakeLists.txt', 'tools/jsui-viewer/CMakeLists.txt') }}
+          restore-keys: windows-deps-m157-
+      - name: Configure
+        run: >
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -T ClangCL
+          -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DJSUI_SKIA_DIR=third_party/skia-desktop
+          -DJSUI_BUILD_TESTS=ON -DJSUI_BUILD_GODOT=ON
+          "-DCMAKE_CXX_FLAGS_RELEASE=-O2 -Ob2 -DNDEBUG -Z7" "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=-DEBUG"
+      - name: Build
+        run: cmake --build build --config Release -j 4 --target jsui-tests jsui-viewer jsui_godot
+      - name: Native tests (GPU backends required)
+        env:
+          JSUI_VULKAN_TEST_REQUIRE: 1
+          JSUI_D3D_TEST_REQUIRE: 1
+        run: |
+          # The loader (vulkan-1.dll) and lavapipe's ICD, wherever the action put them.
+          sdk="$(cygpath -u "$VULKAN_SDK")"
+          loader="$( (find "$sdk" /c/Windows/System32 -maxdepth 3 -iname vulkan-1.dll 2>/dev/null || true) | head -1)"
+          icd="$( (find /c/lavapipe "$sdk" -iname 'lvp_icd*.json' 2>/dev/null || true) | head -1)"
+          echo "loader: $loader, lavapipe ICD: $icd"
+          [ -n "$loader" ] && [ -n "$icd" ]
+          export PATH="$(dirname "$loader"):$sdk/Bin:$PATH"
+          export VK_DRIVER_FILES="$(cygpath -w "$icd")"
+          vulkaninfo --summary 2>&1 | head -40 || true
+          ./build/Release/jsui-tests.exe
+
+  # ---------------------------------------------------- release binaries (dist)
+  # The prebuilt native binaries every release attaches (release.yml takes
+  # these artifacts from the CI run on main for the tagged commit, as it
+  # does the WASM modules): per platform the shared C API library (jsui_shared)
+  # with its header and CMake package, the viewer, the Godot GDExtension
+  # library and the Unity plugin, staged by scripts/dist/stage-native.sh into
+  # jsui-native-<platform>; the shared library and the Unity plugin also on
+  # their own (jsui-shared-*, jsui-unity-*) for the engine plugin packaging.
+  # Each package is checked like a host would use it
+  # (scripts/dist/check-shared.sh). Desktop Skia m157 on Linux and macOS
+  # (Graphite on Vulkan / Metal), and on Windows (Graphite on Vulkan, Ganesh
+  # on Direct3D 12 / GL; skia-windows).
+  dist-linux:
+    name: dist (linux-${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.dist == 'true'
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build clang libfontconfig1-dev zlib1g-dev python3 unzip rsync \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxinerama-dev libxfixes-dev \
+            libgl-dev libegl-dev libgl1-mesa-dev libegl1 libegl-mesa0 libgl1-mesa-dri xvfb xauth
+      - name: Cache desktop Skia (m157)
+        id: skia-desktop
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-desktop
+          # Same key as the godot job on x64.
+          key: skia-desktop-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('scripts/build-skia-desktop.sh', 'scripts/patches/skia-m157-dawn-header-only.patch') }}
+      - name: Skia m157 for desktop (cache miss only)
+        if: steps.skia-desktop.outputs.cache-hit != 'true'
+        run: JOBS=$(nproc) scripts/build-skia-desktop.sh
+      - name: Cache FetchContent sources
+        uses: actions/cache@v4
+        with:
+          path: build/_deps/*-src
+          key: dist-deps-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('cmake/*.cmake', 'integrations/godot/CMakeLists.txt', 'tools/jsui-viewer/CMakeLists.txt') }}
+          restore-keys: dist-deps-${{ runner.os }}-${{ matrix.arch }}-
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: dist-${{ runner.os }}-${{ matrix.arch }}
+          max-size: 500M
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DJSUI_SKIA_DIR=third_party/skia-desktop -DJSUI_BUILD_SHARED=ON -DJSUI_BUILD_TESTS=OFF
+          -DJSUI_BUILD_GODOT=ON -DJSUI_GODOT_OUTPUT_DIR=$PWD/build/godot
+          -DJSUI_BUILD_UNITY=ON -DJSUI_UNITY_PLUGIN_DIR=$PWD/build/unity
+      - name: Build
+        run: cmake --build build -j "$(nproc)" --target jsui_shared jsui-viewer jsui_godot jsui_unity
+      - name: Stage
+        run: scripts/dist/stage-native.sh linux-${{ matrix.arch }} dist build
+      - name: Check the shared library (a host build against the package)
+        run: scripts/dist/check-shared.sh dist/shared
+      - name: Viewer smoke (the staged binary, Xvfb + Mesa GL)
+        run: |
+          xvfb-run -a -s "-screen 0 1280x1024x24" dist/viewer/jsui-viewer --width 320 --height 200 \
+            --frames 10 --screenshot viewer.png web/test/fixtures/bands.js | tee viewer.log
+          grep -q '^GPU: ' viewer.log
+          test -s viewer.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-native-linux-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-shared-linux-${{ matrix.arch }}
+          path: dist/shared/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-unity-linux-${{ matrix.arch }}
+          path: dist/unity/
+          if-no-files-found: error
+
+  dist-macos:
+    name: dist (macos-universal)
+    runs-on: macos-15
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.dist == 'true'
+    timeout-minutes: 180
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache desktop Skia (m157, arm64)
+        id: skia-arm64
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-desktop
+          # Same key as the godot-macos job.
+          key: skia-desktop-${{ runner.os }}-arm64-${{ hashFiles('scripts/build-skia-desktop.sh', 'scripts/patches/skia-m157-dawn-header-only.patch') }}
+      - name: Cache desktop Skia (m157, x86_64)
+        id: skia-x64
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-desktop-x64
+          key: skia-desktop-${{ runner.os }}-x64-${{ hashFiles('scripts/build-skia-desktop.sh', 'scripts/patches/skia-m157-dawn-header-only.patch') }}
+      - name: Tools
+        run: command -v ninja || brew install ninja
+      - name: Skia m157 for macOS arm64 (cache miss only)
+        if: steps.skia-arm64.outputs.cache-hit != 'true'
+        run: JOBS=$(sysctl -n hw.ncpu) scripts/build-skia-desktop.sh
+      - name: Skia m157 for macOS x86_64 (cache miss only, cross-compiled)
+        if: steps.skia-x64.outputs.cache-hit != 'true'
+        run: SKIA_CPU=x64 SKIA_DESKTOP_OUT=$PWD/third_party/skia-desktop-x64 JOBS=$(sysctl -n hw.ncpu) scripts/build-skia-desktop.sh
+      - name: Cache FetchContent sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            build-arm64/_deps/*-src
+            build-x64/_deps/*-src
+          key: dist-deps-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'integrations/godot/CMakeLists.txt', 'tools/jsui-viewer/CMakeLists.txt') }}
+          restore-keys: dist-deps-${{ runner.os }}-
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: dist-${{ runner.os }}
+          max-size: 1G
+      - name: Configure and build (arm64, x86_64)
+        run: |
+          for arch in arm64 x64; do
+            if [ $arch = arm64 ]; then osx=arm64; skia=$PWD/third_party/skia-desktop; else osx=x86_64; skia=$PWD/third_party/skia-desktop-x64; fi
+            cmake -S . -B build-$arch -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=$osx \
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+              -DJSUI_SKIA_DIR=$skia -DJSUI_SKIA_LIB_DIR=$skia/out/macos-$arch \
+              -DJSUI_BUILD_SHARED=ON -DJSUI_BUILD_TESTS=OFF \
+              -DJSUI_BUILD_GODOT=ON -DJSUI_GODOT_OUTPUT_DIR=$PWD/build-$arch/godot \
+              -DJSUI_BUILD_UNITY=ON -DJSUI_UNITY_PLUGIN_DIR=$PWD/build-$arch/unity
+            grep -q 'JSUI_GRAPHITE_METAL:BOOL=ON' build-$arch/CMakeCache.txt
+            cmake --build build-$arch -j "$(sysctl -n hw.ncpu)" --target jsui_shared jsui-viewer jsui_godot jsui_unity
+          done
+      - name: Stage (universal binaries)
+        run: scripts/dist/stage-native.sh macos-universal dist build-arm64 build-x64
+      - name: Check the shared library (a host build against the package, both architectures)
+        env:
+          CONSUMER_CMAKE_ARGS: -DCMAKE_OSX_ARCHITECTURES=arm64;x86_64
+        run: |
+          scripts/dist/check-shared.sh dist/shared
+          nm -gU dist/shared/lib/libjsui.dylib | grep -q ' _jsui_gpu_create_metal$'
+          # The Unity plugin's Metal path (a native rendering plugin; built
+          # against integrations/unity/native/unity_api, no Unity install here).
+          nm -gU dist/unity/jsui_unity.bundle/Contents/MacOS/jsui_unity | grep -q ' _UnityPluginLoad$'
+      - name: Viewer smoke (the staged binary)
+        run: |
+          dist/viewer/jsui-viewer --width 320 --height 200 --frames 10 --screenshot viewer.png web/test/fixtures/bands.js | tee viewer.log
+          grep -q '^GPU: ' viewer.log
+          test -s viewer.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-native-macos-universal
+          path: dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-shared-macos-universal
+          path: dist/shared/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-unity-macos-universal
+          path: dist/unity/
+          if-no-files-found: error
+
+  dist-windows:
+    name: dist (windows-x64)
+    runs-on: windows-2022
+    needs: [changes, skia-windows]
+    if: ${{ !cancelled() && needs.skia-windows.result == 'success' && (github.event_name != 'pull_request' || needs.changes.outputs.dist == 'true') }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Desktop Skia m157 (Graphite + Vulkan, Ganesh + GL + D3D12; built by skia-windows)
+        uses: actions/cache/restore@v4
+        with:
+          path: third_party/skia-desktop
+          key: ${{ needs.skia-windows.outputs.key }}
+          fail-on-cache-miss: true
+      - name: Cache FetchContent sources
+        uses: actions/cache@v4
+        with:
+          path: build/_deps/*-src
+          key: dist-deps-m157-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'integrations/godot/CMakeLists.txt', 'tools/jsui-viewer/CMakeLists.txt') }}
+          restore-keys: dist-deps-m157-${{ runner.os }}-
+      - name: Configure
+        # ClangCL and the static C runtime, as Skia is built.
+        run: >
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -T ClangCL
+          -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DJSUI_SKIA_DIR=third_party/skia-desktop
+          -DJSUI_BUILD_SHARED=ON -DJSUI_BUILD_TESTS=OFF
+          -DJSUI_BUILD_GODOT=ON -DJSUI_GODOT_OUTPUT_DIR="$(pwd -W)/build/godot"
+          -DJSUI_BUILD_UNITY=ON -DJSUI_UNITY_PLUGIN_DIR="$(pwd -W)/build/unity"
+      - name: Build
+        run: cmake --build build --config Release -j 4 --target jsui_shared jsui-viewer jsui_godot jsui_unity
+      - name: Stage
+        run: scripts/dist/stage-native.sh windows-x64 dist build
+      - name: Check the shared library (a host build against the package)
+        run: scripts/dist/check-shared.sh dist/shared
+      - name: Check the Unity plugin (loads; exports the plugin entry points, the C API and the helpers)
+        # Built with the GPU path (Vulkan, Direct3D 11 / 12); Unity itself
+        # cannot run here.
+        run: |
+          grep -q 'JSUI_VULKAN:BOOL=ON' build/CMakeCache.txt && grep -q 'JSUI_D3D:BOOL=ON' build/CMakeCache.txt
+          test -f dist/unity/icudtl.dat
+          python -c "
+          import ctypes, sys
+          d = ctypes.CDLL(sys.argv[1])
+          for f in ['UnityPluginLoad', 'UnityPluginUnload', 'jsui_create', 'jsui_render_gpu_target', 'jsuiu_create', 'jsuiu_gpu_available', 'jsuiu_render_event_func']:
+              getattr(d, f)
+          print('jsui_unity.dll: ok')
+          " "$(cygpath -w dist/unity/jsui_unity.dll)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-native-windows-x64
+          path: dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-shared-windows-x64
+          path: dist/shared/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-unity-windows-x64
+          path: dist/unity/
+          if-no-files-found: error
+
+  # Advisory, like the iOS job: the release attaches the xcframework when this
+  # succeeded and goes without it otherwise.
+  dist-ios:
+    name: dist (ios-xcframework, advisory)
+    runs-on: macos-15
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.dist == 'true'
+    continue-on-error: true
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache iOS Skia (device + simulator)
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-ios
+          key: skia-ios-dist-${{ hashFiles('scripts/build-skia-ios.sh') }}
+      - name: Tools
+        run: command -v ninja || brew install ninja
+      - name: Build JSUI.xcframework (builds the Skia slices on a cache miss)
+        run: scripts/dist/build-ios-xcframework.sh dist-ios
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-ios-xcframework
+          path: dist-ios/
+          if-no-files-found: error
+
+  # What the release would attach, assembled from the artifacts above with
+  # the release script (scripts/dist/assemble-release.sh), so a broken
+  # archive shows up here and not on a tag.
+  dist-assemble:
+    name: dist (release archives)
+    runs-on: ubuntu-24.04
+    needs: [dist-linux, dist-macos, dist-windows, dist-ios]
+    if: ${{ !cancelled() && needs.dist-linux.result == 'success' && needs.dist-macos.result == 'success' && needs.dist-windows.result == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: jsui-native-*
+          path: artifacts
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: jsui-ios-xcframework
+          path: artifacts/jsui-ios-xcframework
+      - name: Assemble
+        run: |
+          v=$(node -p "require('./packages/react/package.json').version")
+          scripts/dist/assemble-engines.sh "$v" artifacts release upm
+          scripts/dist/assemble-release.sh "$v" artifacts release
+      - name: Check the archives
+        run: |
+          cd release
+          sha256sum -c SHA256SUMS.txt
+          unzip -l jsui-godot-*.zip | tee godot.txt
+          for f in linux.x86_64.so linux.arm64.so windows.x86_64.dll macos.universal.dylib; do grep -q "addons/jsui/bin/libjsui_godot.$f" godot.txt; done
+          unzip -p jsui-godot-*.zip addons/jsui/jsui.gdextension
+          for f in *.tar.gz; do tar -tzf "$f" | grep -q '/lib/cmake/jsui/jsuiConfig.cmake$'; done
+          unzip -l jsui-*-windows-x64.zip | grep -q 'bin/jsui.dll'
+          tar -tzf com.orktes.jsui-*.tgz | tee unity.txt
+          for f in package.json Plugins/macOS/jsui_unity.bundle/Contents/MacOS/jsui_unity Plugins/macOS/jsui_unity.bundle.meta \
+                   Plugins/Linux/x86_64/libjsui_unity.so Plugins/Linux/x86_64/libjsui_unity.so.meta \
+                   Plugins/Windows/x86_64/jsui_unity.dll Plugins/Windows/x86_64/jsui_unity.dll.meta \
+                   Plugins/Windows/x86_64/icudtl.dat Plugins/Windows/x86_64/icudtl.dat.meta \
+                   Editor/JsuiBuildPostprocess.cs Editor/Jsui.Editor.asmdef; do grep -qx "package/$f" unity.txt; done
+          # An immutable package needs a .meta for every entry (the .bundle's insides aside).
+          grep -v '\.meta$' unity.txt | grep -v '^package/$' | grep -v '\.bundle/' | sed 's|/$||' | while read -r e; do
+            grep -qx "$e.meta" unity.txt || { echo "::error::$e has no .meta"; exit 1; }
+          done
+          unzip -l jsui-unreal-*.zip | tee unreal.txt
+          for f in Jsui.uplugin lib/libjsui.dylib lib/libjsui.so lib/jsui.lib bin/jsui.dll bin/icudtl.dat include/jsui/jsui.h; do
+            grep -q "Jsui/\(Source/ThirdParty/JsuiLibrary/\)\?$f\$" unreal.txt
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-release-preview
+          path: release/
+
   # --------------------------------------------------------------------- wasm
   wasm:
     name: wasm (emscripten + browser)
@@ -357,6 +1026,11 @@ jobs:
         run: JOBS=$(nproc) scripts/build-wasm.sh Release
       - name: Node smoke test
         run: node web/test/node-smoke.mjs
+      # jsui screenshot / inspect / run (the CLI's headless runtime) on the module just built.
+      - name: CLI headless tests (screenshot / inspect / run on web/dist)
+        run: |
+          npm ci --no-audit --no-fund
+          JSUI_HEADLESS_STRICT=1 node --test packages/cli/test/headless.test.js
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
@@ -481,6 +1155,11 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json', 'web/package.json') }}
+      # The workspace install gives the browser tests @orktes/jsui-cli, which
+      # builds the interactions showcase for the WebGPU perf guards (steady
+      # frames, raster cache, layers); without it those tests skip.
+      - name: Install workspace packages
+        run: npm ci --no-audit --no-fund
       - name: Browser tests against the WebGPU module (Playwright / Chromium)
         working-directory: web
         run: |
@@ -493,7 +1172,6 @@ jobs:
           path: web/dist-gpu
       - name: Site (build + smoke test on WebGPU)
         run: |
-          npm ci --no-audit --no-fund
           node site/scripts/build.mjs --wasm web/dist-gpu --wasm-webgl web/dist-gpu --wasm-gpu web/dist-gpu
           SITE_WEBGPU=1 SITE_EXPECT_RENDERER=webgpu node site/test/smoke.mjs
       - uses: actions/upload-artifact@v4
@@ -518,6 +1196,8 @@ jobs:
         run: if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
       - name: Tests (packages/*)
         run: npm run test:js
+      - name: Tests (web host, no browser)
+        run: node --test web/test/textures.test.mjs web/test/audio.test.mjs
       # The packed tarballs, installed outside the monorepo, must bundle an app
       # (catches a file missing from "files" or a workspace-only resolution).
       - name: Packed packages (install + build outside the workspace)
@@ -525,6 +1205,9 @@ jobs:
           tgz="$RUNNER_TEMP/tgz" app="$RUNNER_TEMP/app"
           mkdir -p "$tgz" "$app"
           npm pack --workspace packages/react --workspace packages/cli --pack-destination "$tgz"
+          # @orktes/jsui-cli depends on @orktes/jsui-web (its headless runtime); pack it
+          # too (without the WASM builds, which this job does not have).
+          npm pack --workspace web --ignore-scripts --pack-destination "$tgz"
           cd "$app"
           npm init -y > /dev/null
           npm install --no-audit --no-fund "$tgz"/*.tgz
@@ -532,6 +1215,8 @@ jobs:
             "AppRegistry.registerComponent('main', () => () => <View><Text>Hello</Text></View>);" > app.jsx
           npx jsui build app.jsx -o out/bundle.js
           test -s out/bundle.js
+          npx jsui skill install . && test -s .claude/skills/jsui/SKILL.md
+          npx jsui skill print --all | grep -q 'name: jsui'
 
   # ---------------------------------------------------------------- reference
   reference:
@@ -638,7 +1323,7 @@ jobs:
           path: tests/reference/output
           if-no-files-found: warn
 
-  # ------------------------------------------- native (macOS / Windows), advisory
+  # ----------------------------------------------- native (macOS, prebuilt), advisory
   native-other:
     name: native (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -648,7 +1333,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-2022]
+        os: [macos-14]
     steps:
       - uses: actions/checkout@v4
       - name: Cache prebuilt Skia
@@ -659,9 +1344,6 @@ jobs:
       - name: Configure (macOS)
         if: runner.os == 'macOS'
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-      - name: Configure (Windows)
-        if: runner.os == 'Windows'
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -T ClangCL -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
       - name: Build
         run: cmake --build build --config Release -j 4
       - name: Native tests (macOS)
@@ -678,9 +1360,55 @@ jobs:
             --frames 10 --screenshot bands-gpu.png web/test/fixtures/bands.js | tee viewer-gpu.log
           grep -q '^GPU: ' viewer-gpu.log  # not the CPU fallback
           test -s bands-gpu.png
-      - name: Native tests (Windows)
-        if: runner.os == 'Windows'
-        run: ./build/Release/jsui-tests.exe
+
+  # ------------------------------------------------------ Android, advisory
+  # Compile + package: Skia for Android (Ganesh on GLES) is built from source
+  # with the NDK (scripts/build-skia-android.sh) and cached on the script's
+  # hash; then the JsuiDemo APK is built for arm64-v8a. The hosted runner
+  # has the Android SDK; the NDK / build-tools / platform are pinned here.
+  android:
+    name: Android (APK build)
+    runs-on: ubuntu-24.04
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.android == 'true'
+    continue-on-error: true
+    timeout-minutes: 90
+    env:
+      NDK_VERSION: 30.0.16248370
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Android NDK, build-tools, platform
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+            "ndk;$NDK_VERSION" "build-tools;35.0.0" "platforms;android-35" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          sudo apt-get update > /dev/null && sudo apt-get install -y --no-install-recommends ninja-build rsync zip > /dev/null
+      - name: Cache Android Skia
+        id: skia
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-android
+          key: skia-android-${{ env.NDK_VERSION }}-${{ hashFiles('scripts/build-skia-android.sh') }}
+      - name: Skia (android-arm64)
+        if: steps.skia.outputs.cache-hit != 'true'
+        run: CPUS=arm64 scripts/build-skia-android.sh
+      - name: Install
+        run: npm ci
+      - name: Build JsuiDemo.apk
+        run: scripts/build-android.sh
+      - name: Check the APK
+        run: |
+          unzip -l build-android/JsuiDemo.apk | tee /dev/stderr | grep -q 'lib/arm64-v8a/libjsuidemo.so'
+          unzip -l build-android/JsuiDemo.apk | grep -q 'assets/ui/bundle.js'
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify build-android/JsuiDemo.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-android-apk
+          path: build-android/JsuiDemo.apk
+          retention-days: 14
 
   # ------------------------------------------------- iOS (simulator), advisory
   # Compile-only: Skia for iOS (Ganesh on Metal) is built from source

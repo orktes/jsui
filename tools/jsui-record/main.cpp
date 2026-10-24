@@ -891,6 +891,7 @@ int main(int argc, char** argv) {
 
   JsuiConfig cfg;
   jsui_config_init(&cfg);
+  cfg.audio_disabled = 1;  // headless: no sound device
   cfg.width = o.width;
   cfg.height = o.height;
   cfg.pixel_ratio = o.scale;
@@ -899,7 +900,7 @@ int main(int argc, char** argv) {
   r.rt = jsui_create(&cfg);
   for (auto& [family, path] : o.fonts) {
     std::string data;
-    if (!readFile(path, &data) || jsui_register_font(r.rt, family.c_str(), data.data(), data.size(), 400, 0) != 0) {
+    if (!readFile(path, &data) || jsui_register_font(r.rt, family.c_str(), data.data(), data.size(), 0, -1) != 0) {
       std::fprintf(stderr, "failed to load font %s\n", path.c_str());
       return 1;
     }

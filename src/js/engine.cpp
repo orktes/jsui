@@ -5,6 +5,12 @@
 #include "js/engine.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <unordered_map>
+#include <vector>
 #include <cmath>
 
 #include "core/document.h"
@@ -211,6 +217,7 @@ void JsEngine::Impl::leave() {
 
 JSValue JsEngine::Impl::call(JSValueConst fn, JSValueConst thisVal, int argc, JSValueConst* argv) {
   Perf::Scope scope(rt.doc.perf, Phase::Js);
+  rt.doc.perf.counters.jsCalls++;
   enter();
   JSValue r = JS_Call(ctx, fn, thisVal, argc, argv);
   if (JS_IsException(r)) {
@@ -226,6 +233,7 @@ void JsEngine::Impl::runJobsRaw() {
   for (int guard = 0; guard < 10000000; guard++) {
     int r = JS_ExecutePendingJob(jrt, &pctx);
     if (r == 0) break;
+    rt.doc.perf.counters.jsJobs++;
     if (r < 0) reportException();
   }
 }
@@ -259,6 +267,7 @@ void JsEngine::Impl::drain() {
       JS_SetPropertyStr(ctx, args[1], "y", JS_NewFloat64(ctx, e.y));
       JS_SetPropertyStr(ctx, args[1], "width", JS_NewFloat64(ctx, e.w));
       JS_SetPropertyStr(ctx, args[1], "height", JS_NewFloat64(ctx, e.h));
+      rt.doc.perf.counters.jsCalls++;
       JSValue r = JS_Call(ctx, fn, JS_UNDEFINED, 2, args);
       if (JS_IsException(r)) reportException();
       JS_FreeValue(ctx, r);
@@ -379,8 +388,84 @@ JSValue js_now(JSContext* ctx, JSValueConst, int, JSValueConst*) { return JS_New
 
 // ------------------------------------------------------- QuickJS hooks
 
+// JSUI_JS_PROFILE=path: a sampling JS profiler for benchmarks. QuickJS calls
+// the interrupt handler every ~10000 bytecode ops (calls and backward
+// jumps); each call samples the JS stack, and the self / inclusive sample
+// counts per function are written to `path` at exit.
+struct JsProfile {
+  std::string path;
+  // Weighted by the time since the previous poll (not counting the
+  // sampling itself): polls are not evenly spaced (every backward jump and
+  // call), so plain counts over-weight tight loops.
+  std::unordered_map<std::string, double> self, incl;
+  double samples = 0;
+  Clock::time_point last{};
+  ~JsProfile() {
+    if (path.empty() || !samples) return;
+    FILE* f = std::fopen(path.c_str(), "w");
+    if (!f) return;
+    auto dump = [&](const char* title, const std::unordered_map<std::string, double>& m) {
+      std::vector<std::pair<double, std::string>> v;
+      for (auto& [k, n] : m) v.push_back({n, k});
+      std::sort(v.rbegin(), v.rend());
+      std::fprintf(f, "== %s (%.1f ms sampled)\n", title, samples / 1000);
+      for (size_t i = 0; i < v.size() && i < 80; i++)
+        std::fprintf(f, "%6.2f%%  %s\n", 100.0 * v[i].first / samples, v[i].second.c_str());
+    };
+    dump("self", self);
+    dump("inclusive", incl);
+    std::fclose(f);
+  }
+};
+JsProfile* jsProfile() {
+  static JsProfile* p = [] {
+    const char* e = std::getenv("JSUI_JS_PROFILE");
+    if (!e || !*e) return (JsProfile*)nullptr;
+    static JsProfile prof;
+    prof.path = e;
+    return &prof;
+  }();
+  return p;
+}
+void sampleJs(JSContext* ctx, JsProfile& prof) {
+  auto t0 = Clock::now();
+  double w = std::chrono::duration<double, std::micro>(t0 - prof.last).count();
+  if (w > 2000) w = 2000;  // first poll of a JS entry: the gap includes native time
+  JSValue err = JS_NewError(ctx);
+  JSValue st = JS_GetPropertyStr(ctx, err, "stack");
+  const char* s = JS_ToCString(ctx, st);
+  if (s) {
+    prof.samples += w;
+    std::vector<std::string> seen;
+    bool leaf = true;
+    for (const char* p = s; *p;) {
+      const char* nl = std::strchr(p, '\n');
+      std::string line(p, nl ? size_t(nl - p) : std::strlen(p));
+      p = nl ? nl + 1 : p + line.size();
+      size_t a = line.find("at ");
+      if (a == std::string::npos) continue;
+      std::string fr = line.substr(a + 3);
+      // "fn (file:line:col)" -> "fn file:line"
+      size_t col = fr.rfind(':');
+      if (std::getenv("JSUI_JS_PROFILE_LINES")) { if (col != std::string::npos && fr.back() == ')') fr = fr.substr(0, col) + ")"; } else if (size_t sp = fr.find(' '); sp != std::string::npos) fr = fr.substr(0, sp);
+      if (leaf) prof.self[fr] += w, leaf = false;
+      if (std::find(seen.begin(), seen.end(), fr) == seen.end()) {
+        seen.push_back(fr);
+        prof.incl[fr] += w;
+      }
+    }
+    JS_FreeCString(ctx, s);
+  }
+  JS_FreeValue(ctx, st);
+  JS_FreeValue(ctx, err);
+  prof.last = Clock::now();
+}
+
 int interruptHandler(JSRuntime*, void* opaque) {
   auto* impl = static_cast<JsEngine::Impl*>(opaque);
+  // Only while the runtime profiles its frames (jsui-bench's measured ones).
+  if (JsProfile* prof = jsProfile(); prof && impl->depth > 0 && impl->ctx && impl->rt.doc.perf.profiling)
+    sampleJs(impl->ctx, *prof);
   if (impl->depth == 0 || impl->timeoutMs <= 0) return 0;
   if (Clock::now() < impl->deadline) return 0;
   impl->interrupted = true;
@@ -641,6 +726,15 @@ void JsEngine::buffersChanged(const std::vector<std::string>& keys) {
   for (auto& k : keys) list.emplace_back(k);
   Value arg(std::move(list));
   callGlobal("__jsui_onHostBuffer", &arg, 1);
+}
+
+void JsEngine::texturesChanged(const std::vector<std::string>& keys) {
+  if (keys.empty()) return;
+  Value::Array list;
+  list.reserve(keys.size());
+  for (auto& k : keys) list.emplace_back(k);
+  Value arg(std::move(list));
+  callGlobal("__jsui_onHostTexture", &arg, 1);
 }
 
 void JsEngine::Impl::releaseBuffer(const std::string& key) {

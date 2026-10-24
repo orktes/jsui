@@ -9,6 +9,7 @@
 #include "include/core/SkCanvas.h"
 #include "include/core/SkColorSpace.h"
 #include "include/core/SkSurface.h"
+#include "include/gpu/ganesh/SkImageGanesh.h"
 #include "include/gpu/ganesh/SkSurfaceGanesh.h"
 #include "include/gpu/ganesh/gl/GrGLBackendSurface.h"
 #include "include/gpu/ganesh/gl/GrGLDirectContext.h"
@@ -29,6 +30,7 @@
 #include "include/gpu/gl/GrGLInterface.h"
 #include "include/gpu/gl/GrGLTypes.h"
 #endif
+#include "render/host_textures.h"
 #include "render/painter.h"
 #include "runtime.h"
 
@@ -39,6 +41,8 @@
 #include <dlfcn.h>
 #elif defined(__EMSCRIPTEN__)
 #include <emscripten/html5.h>
+
+#include "include/gpu/ShaderErrorHandler.h"
 #endif
 
 namespace {
@@ -136,8 +140,43 @@ GrGLFuncPtr linuxGlxProc(void*, const char name[]) {
 
 namespace {
 
+// A host texture (JSUI_TEXTURE_GL) of this GL context, borrowed.
+sk_sp<SkImage> wrapTexture(GrDirectContext* ctx, const JsuiTexture& t) {
+  if (t.kind != JSUI_TEXTURE_GL || !ctx) return nullptr;
+  unsigned format = t.format ? t.format : kGL_RGBA8;
+  SkColorType ct;
+  if (format == kGL_RGBA8) ct = kRGBA_8888_SkColorType;
+  else if (format == kGL_BGRA8) ct = kBGRA_8888_SkColorType;
+  else return nullptr;
+  GrGLTextureInfo info;
+  info.fTarget = kGL_TEXTURE_2D;
+  info.fID = unsigned(reinterpret_cast<uintptr_t>(t.handle));
+  info.fFormat = format;
+  GrBackendTexture bt = GrBackendTextures::MakeGL(t.width, t.height, skgpu::Mipmapped::kNo, info);
+  // A bottom-left origin is flipped where it is drawn (image_node.cpp), as
+  // on the backends without origins.
+  return SkImages::BorrowTextureFrom(ctx, bt, kTopLeft_GrSurfaceOrigin, ct, jsui::textureAlphaType(t), nullptr);
+}
+
+#if defined(__EMSCRIPTEN__)
+// WebKit marks a WebGL context lost when a call into its GPU process fails,
+// in the middle of a frame: the shaders compiling then fail with "(unknown
+// error)". That is the loss, which the host handles (restore, repaint), not
+// a shader error. Other failures go to Skia's default handler.
+struct WebGLShaderErrors final : skgpu::ShaderErrorHandler {
+  using skgpu::ShaderErrorHandler::compileError;
+  void compileError(const char* shader, const char* errors) override {
+    if (emscripten_is_webgl_context_lost(emscripten_webgl_get_current_context())) return;
+    skgpu::DefaultShaderErrorHandler()->compileError(shader, errors);
+  }
+};
+WebGLShaderErrors webglShaderErrors;
+#endif
+
 struct GLGpu final : JsuiGpuContext {
-  GLGpu() : JsuiGpuContext(Kind::GL) {}
+  GLGpu() : JsuiGpuContext(Kind::GL), textures([this](const JsuiTexture& t) { return wrapTexture(ctx.get(), t); }) {}
+  // Host textures drawn in this context's frames.
+  jsui::TextureWrapper textures;
   JsuiGLGetProcFn getProc = nullptr;
   void* user = nullptr;
   sk_sp<GrDirectContext> ctx;
@@ -239,6 +278,7 @@ struct GLGpu final : JsuiGpuContext {
       ctx->abandonContext();
       surfaces.clear();
       retained.clear();
+      textures.clear();
       ctx.reset();
     }
     lost = false;
@@ -249,6 +289,9 @@ struct GLGpu final : JsuiGpuContext {
     // render pass in two at each one: reordering renders them first and
     // keeps the frame one pass (fewer framebuffer switches).
     opts.fReduceOpsTaskSplitting = GrContextOptions::Enable::kYes;
+#if defined(__EMSCRIPTEN__)
+    opts.fShaderErrorHandler = &webglShaderErrors;
+#endif
     ctx = GrDirectContexts::MakeGL(std::move(iface), opts);
     if (ctx && cacheBytes) ctx->setResourceCacheLimit(cacheBytes);
     return ctx != nullptr;
@@ -347,6 +390,7 @@ void destroy(JsuiGpuContext* gpu) {
     if (g->lost) g->ctx->abandonContext();
     g->surfaces.clear();
     g->retained.clear();
+    g->textures.clear();
     if (!g->lost) g->ctx->flushAndSubmit(GrSyncCpu::kNo);
     g->ctx.reset();
   }
@@ -365,6 +409,7 @@ void contextLost(JsuiGpuContext* gpu) {
   if (g->ctx) g->ctx->abandonContext();
   g->surfaces.clear();
   g->retained.clear();
+  g->textures.clear();
 }
 
 void purge(JsuiGpuContext* gpu, size_t cacheBytes) {
@@ -400,6 +445,7 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGLTarget& t) {
   // MSAA targets and JSUI_GL_NO_RETAIN always take the direct path (the
   // retained frame is single-sampled).
   constexpr int kRetainAfter = 3, kFreeRetainedAfter = 300;
+  jsui::TextureScope textureScope(&g->textures);
   const SkImageInfo info = surface->imageInfo();
   bool allowRetain = !(t.flags & JSUI_GL_NO_RETAIN) && t.samples <= 1;
   GLGpu::Retained* r = allowRetain ? g->retainedEntry(&rt) : nullptr;
@@ -441,6 +487,7 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGLTarget& t) {
   // One flush and submit per frame (with the retained frame's repaint, which
   // the target's draw depends on), and no CPU wait.
   g->ctx->flushAndSubmit(GrSyncCpu::kNo);
+  g->textures.endFrame();
   return g->ctx->abandoned() ? -1 : 0;
 }
 

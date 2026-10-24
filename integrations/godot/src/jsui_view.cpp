@@ -1,9 +1,12 @@
 #include "jsui_view.h"
 
+#include <godot_cpp/classes/audio_server.hpp>
 #include <godot_cpp/classes/dir_access.hpp>
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/font.hpp>
+#include <godot_cpp/classes/font_file.hpp>
+#include <godot_cpp/classes/font_variation.hpp>
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/input.hpp>
 #include <godot_cpp/classes/input_event_joypad_button.hpp>
@@ -17,8 +20,10 @@
 #include <godot_cpp/classes/json.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
+#include <godot_cpp/classes/resource_loader.hpp>
 #include <godot_cpp/classes/time.hpp>
 #include <godot_cpp/classes/viewport.hpp>
+#include <godot_cpp/classes/viewport_texture.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/callable_method_pointer.hpp>
 #include <godot_cpp/variant/typed_array.hpp>
@@ -28,6 +33,7 @@
 #include <cmath>
 #include <cstring>
 
+#include "jsui_audio.h"
 #include "keymap.h"
 
 using namespace godot;
@@ -67,11 +73,73 @@ const char* contentTypeFor(const String& path) {
   if (ext == "otf") return "font/otf";
   if (ext == "woff") return "font/woff";
   if (ext == "woff2") return "font/woff2";
+  if (ext == "ttc" || ext == "otc") return "font/collection";
   if (ext == "txt") return "text/plain";
   return "application/octet-stream";
 }
 
 bool isGodotPath(const String& url) { return url.begins_with("res://") || url.begins_with("user://"); }
+
+bool isFontFile(const String& path) {
+  String ext = path.get_extension().to_lower();
+  return ext == "ttf" || ext == "otf" || ext == "ttc" || ext == "otc" || ext == "woff" || ext == "woff2";
+}
+
+// The font file bytes of a Font resource: a FontFile's data (the file it was
+// imported from), or that of a FontVariation's base font. Empty (why set)
+// for anything else (SystemFont, a bitmap FontFile).
+PackedByteArray fontResourceData(Object* o, String& why) {
+  for (int depth = 0; o && depth < 8; depth++) {
+    if (auto* file = Object::cast_to<FontFile>(o)) {
+      PackedByteArray data = file->get_data();
+      if (data.is_empty()) why = "the FontFile has no font data (a bitmap font?)";
+      return data;
+    }
+    auto* variation = Object::cast_to<FontVariation>(o);
+    if (!variation) break;
+    Ref<Font> base = variation->get_base_font();  // the variation keeps it alive
+    o = base.ptr();
+  }
+  why = o ? "expected a FontFile, got " + o->get_class() : String("no font");
+  return {};
+}
+
+// A res:// font file Godot imported: the data of its FontFile. Exported
+// projects ship only the imported copy unless the file is in the export
+// preset's non-resource filter.
+PackedByteArray importedFontData(const String& path, String& why) {
+  ResourceLoader* loader = ResourceLoader::get_singleton();
+  if (!loader || !loader->exists(path, "FontFile")) return {};
+  Ref<Resource> res = loader->load(path, "FontFile");
+  return res.is_valid() ? fontResourceData(res.ptr(), why) : PackedByteArray();
+}
+
+// register_font's `font` argument as bytes: a PackedByteArray, a Font
+// resource, or the path of a font file (FileAccess, else the imported FontFile).
+PackedByteArray fontBytes(const Variant& font, String& why) {
+  switch (font.get_type()) {
+    case Variant::PACKED_BYTE_ARRAY: {
+      PackedByteArray data = font;
+      if (data.is_empty()) why = "empty PackedByteArray";
+      return data;
+    }
+    case Variant::STRING:
+    case Variant::STRING_NAME: {
+      String path = font;
+      if (FileAccess::file_exists(path)) {
+        PackedByteArray data = FileAccess::get_file_as_bytes(path);
+        if (!data.is_empty()) return data;
+      }
+      PackedByteArray data = isGodotPath(path) ? importedFontData(path, why) : PackedByteArray();
+      if (data.is_empty() && why.is_empty()) why = "cannot read " + path;
+      return data;
+    }
+    case Variant::OBJECT: return fontResourceData(static_cast<Object*>(font), why);
+    default:
+      why = "expected a FontFile, a PackedByteArray or a path, got " + Variant::get_type_name(font.get_type());
+      return {};
+  }
+}
 
 Control::CursorShape cursorShape(const std::string& c) {
   if (c == "pointer") return Control::CURSOR_POINTING_HAND;
@@ -126,6 +194,16 @@ void JsuiView::_bind_methods() {
   ClassDB::bind_method(D_METHOD("set_fixed_fps", "fps"), &JsuiView::set_fixed_fps);
   ClassDB::bind_method(D_METHOD("get_fixed_fps"), &JsuiView::get_fixed_fps);
   ClassDB::bind_method(D_METHOD("get_root_tag"), &JsuiView::get_root_tag);
+  ClassDB::bind_method(D_METHOD("set_audio_enabled", "enabled"), &JsuiView::set_audio_enabled);
+  ClassDB::bind_method(D_METHOD("get_audio_enabled"), &JsuiView::get_audio_enabled);
+  ClassDB::bind_method(D_METHOD("set_audio_bus", "bus"), &JsuiView::set_audio_bus);
+  ClassDB::bind_method(D_METHOD("get_audio_bus"), &JsuiView::get_audio_bus);
+  ClassDB::bind_method(D_METHOD("set_audio_bus_map", "map"), &JsuiView::set_audio_bus_map);
+  ClassDB::bind_method(D_METHOD("get_audio_bus_map"), &JsuiView::get_audio_bus_map);
+  ClassDB::bind_method(D_METHOD("stop_all_sounds", "bus", "fade_ms"), &JsuiView::stop_all_sounds, DEFVAL(String()),
+                       DEFVAL(0.0));
+  ClassDB::bind_method(D_METHOD("get_audio_voices"), &JsuiView::get_audio_voices);
+  ClassDB::bind_method(D_METHOD("resolve_audio_bus", "bus"), &JsuiView::resolve_audio_bus);
 
   ClassDB::bind_method(D_METHOD("start"), &JsuiView::start);
   ClassDB::bind_method(D_METHOD("stop"), &JsuiView::stop);
@@ -140,6 +218,16 @@ void JsuiView::_bind_methods() {
   ClassDB::bind_method(D_METHOD("get_state", "key"), &JsuiView::get_state);
   ClassDB::bind_method(D_METHOD("set_buffer", "key", "data"), &JsuiView::set_buffer);
   ClassDB::bind_method(D_METHOD("remove_buffer", "key"), &JsuiView::remove_buffer);
+  ClassDB::bind_method(D_METHOD("set_texture", "name", "texture", "live"), &JsuiView::set_texture, DEFVAL(false));
+  ClassDB::bind_method(D_METHOD("remove_texture", "name"), &JsuiView::remove_texture);
+  ClassDB::bind_method(D_METHOD("update_texture", "name"), &JsuiView::update_texture);
+  ClassDB::bind_method(D_METHOD("register_font", "family", "font", "weight", "italic"), &JsuiView::register_font,
+                       DEFVAL(0), DEFVAL(-1));
+  ClassDB::bind_method(D_METHOD("unregister_font", "family"), &JsuiView::unregister_font);
+  ClassDB::bind_method(D_METHOD("set_font_fallbacks", "families"), &JsuiView::set_font_fallbacks);
+  ClassDB::bind_method(D_METHOD("set_default_font_family", "family"), &JsuiView::set_default_font_family);
+  ClassDB::bind_method(D_METHOD("set_fonts", "fonts"), &JsuiView::set_fonts);
+  ClassDB::bind_method(D_METHOD("get_fonts"), &JsuiView::get_fonts);
   ClassDB::bind_method(D_METHOD("get_state_json", "key"), &JsuiView::get_state_json);
   ClassDB::bind_method(D_METHOD("resolve_call", "id", "result"), &JsuiView::resolve_call, DEFVAL(Variant()));
   ClassDB::bind_method(D_METHOD("resolve_call_json", "id", "json"), &JsuiView::resolve_call_json);
@@ -177,8 +265,17 @@ void JsuiView::_bind_methods() {
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "profiling"), "set_profiling", "get_profiling");
   ADD_PROPERTY(PropertyInfo(Variant::STRING, "pipeline_cache_path", PROPERTY_HINT_SAVE_FILE, "*.bin"),
                "set_pipeline_cache_path", "get_pipeline_cache_path");
+  // Array of Font resources in the inspector (MAKE_RESOURCE_TYPE_HINT("Font")).
+  ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "fonts", PROPERTY_HINT_TYPE_STRING,
+                            String::num_int64(Variant::OBJECT) + "/" + String::num_int64(PROPERTY_HINT_RESOURCE_TYPE) +
+                                ":Font"),
+               "set_fonts", "get_fonts");
   ADD_PROPERTY(PropertyInfo(Variant::INT, "fixed_fps", PROPERTY_HINT_RANGE, "0,240"), "set_fixed_fps",
                "get_fixed_fps");
+  ADD_GROUP("Audio", "audio_");
+  ADD_PROPERTY(PropertyInfo(Variant::BOOL, "audio_enabled"), "set_audio_enabled", "get_audio_enabled");
+  ADD_PROPERTY(PropertyInfo(Variant::STRING, "audio_bus"), "set_audio_bus", "get_audio_bus");
+  ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "audio_bus_map"), "set_audio_bus_map", "get_audio_bus_map");
 
   ADD_SIGNAL(MethodInfo("message_received", PropertyInfo(Variant::STRING, "name"),
                         PropertyInfo(Variant::NIL, "data", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NIL_IS_VARIANT),
@@ -194,6 +291,12 @@ void JsuiView::_bind_methods() {
   ADD_SIGNAL(MethodInfo("ui_call_completed", PropertyInfo(Variant::INT, "id"), PropertyInfo(Variant::BOOL, "ok"), result));
   ADD_SIGNAL(MethodInfo("js_error", PropertyInfo(Variant::STRING, "message")));
   ADD_SIGNAL(MethodInfo("frame_rendered", PropertyInfo(Variant::RECT2I, "dirty_rect")));
+  ADD_SIGNAL(MethodInfo("sound_played", PropertyInfo(Variant::INT, "voice"), PropertyInfo(Variant::STRING, "url"),
+                        PropertyInfo(Variant::STRING, "bus")));
+  ADD_SIGNAL(MethodInfo("sound_ended", PropertyInfo(Variant::INT, "voice"), PropertyInfo(Variant::INT, "status")));
+  BIND_CONSTANT(SOUND_FINISHED);
+  BIND_CONSTANT(SOUND_STOPPED);
+  BIND_CONSTANT(SOUND_FAILED);
 }
 
 // --------------------------------------------------------------- lifecycle
@@ -214,6 +317,10 @@ JsuiView::~JsuiView() {
   // runtime view again.
   for (JsuiView* v : surfaces_) v->host_ = nullptr;
   surfaces_.clear();
+  for (HostTexture& e : textures_)
+    if (e.texture.is_valid() && e.texture->is_connected("changed", e.changed)) e.texture->disconnect("changed", e.changed);
+  releaseTextureGpu();
+  textures_.clear();
   releaseGpu();
   if (canvas_item_.is_valid() && RenderingServer::get_singleton())
     RenderingServer::get_singleton()->free_rid(canvas_item_);
@@ -251,6 +358,10 @@ void JsuiView::_notification(int what) {
       }
       break;
     case NOTIFICATION_PROCESS: process(); break;
+    case NOTIFICATION_PREDELETE:
+      // Our children (the audio players) go before our destructor runs.
+      if (audio_) audio_->dropPlayers();
+      break;
     case NOTIFICATION_RESIZED:
     case NOTIFICATION_VISIBILITY_CHANGED: render_pending_ = true; break;
     case NOTIFICATION_MOUSE_EXIT:
@@ -354,6 +465,19 @@ void JsuiView::attachToRuntimeView() {
   if (!host) return;  // retried every frame (process) until the node is there
   host_ = host;
   host->surfaces_.push_back(this);
+  forwardFonts();  // before the surface lays out text
+  // Textures set while this view had no runtime view belong to the runtime.
+  if (!textures_.empty()) {
+    std::vector<HostTexture> mine;
+    mine.swap(textures_);
+    for (HostTexture& e : mine) {
+      if (e.texture.is_valid() && e.texture->is_connected("changed", e.changed)) e.texture->disconnect("changed", e.changed);
+      host->set_texture(e.name, e.texture, e.live);
+      if (e.cur.valid()) retired_mirrors_.push_back(e.cur);
+      if (e.next.valid()) retired_mirrors_.push_back(e.next);
+    }
+    releaseTextureGpu();
+  }
   if (host->rt_) createSurface();
 }
 
@@ -446,11 +570,19 @@ void JsuiView::start() {
     cfg.load = &JsuiView::onLoad;
     cfg.load_user = this;
   }
+  // The UI's sounds play through Godot's audio (jsui_audio.h).
+  if (!audio_) {
+    audio_ = std::make_unique<ViewAudio>(*this);
+    audio_->setEnabled(audio_enabled_);
+  }
+  cfg.on_audio = &ViewAudio::onAudio;
+  cfg.audio_user = audio_.get();
   rt_ = jsui_create(&cfg);
   if (!rt_) {
     UtilityFunctions::push_error("JsuiView: jsui_create failed");
     return;
   }
+  audio_->attach(rt_.unsynced());
   if (profiling_) jsui_set_profiling(rt_, 1);
   start_usec_ = Time::get_singleton()->get_ticks_usec();
   clock_ms_ = clock_wall_ms_ = 0;
@@ -463,6 +595,13 @@ void JsuiView::start() {
   for (auto& [key, json] : state_) jsui_set_state(rt_, key.c_str(), json.c_str());
   for (auto& [key, b] : pendingBuffers_) jsui_set_buffer(rt_, key.c_str(), b.type, b.bytes.data(), b.count);
   pendingBuffers_.clear();
+  startFonts();
+  // Host textures: the new runtime gets them in the first frame (syncTextures,
+  // before the first tick), GPU copies already made included.
+  for (HostTexture& e : textures_) {
+    e.gpu_set = e.pixels_set = false;
+    e.dirty = true;
+  }
   // The main surface's component, and surface views waiting for a runtime
   // (their components start once the bundle has registered them).
   if (!component_.is_empty()) {
@@ -476,6 +615,9 @@ void JsuiView::start() {
     TypedArray<int> pads = in->get_connected_joypads();
     for (int64_t i = 0; i < pads.size(); i++) onJoyConnectionChanged(int64_t(pads[i]), true);
   }
+  // Dev mode: shown in `jsui dev`'s shared session as "Godot: <node name>".
+  std::string devName = toStd("Godot: " + String(get_name()));
+  jsui_set_dev_session(rt_, devName.c_str(), 1);
   std::string url = toStd(bundle_url_);
   jsui_load_bundle_url(rt_, url.c_str());
 }
@@ -493,6 +635,7 @@ void JsuiView::stop() {
   // Open Host.calls are cancelled and open call_ui calls fail here; their
   // signals / callbacks still run (below), so the game can drop its work.
   jsui_destroy(rt);
+  if (audio_) audio_->attach(nullptr);  // its voices stopped with the runtime
   held_keys_.clear();
   mouse_buttons_ = 0;
   pads_.clear();
@@ -503,8 +646,37 @@ void JsuiView::stop() {
   if (is_inside_tree()) flushMessages();
   else messages_.clear();
   ui_callbacks_.clear();
+  for (HostTexture& e : textures_) e.gpu_set = e.pixels_set = e.shown_pending = false;
   // The GPU target held this runtime's frames; a new runtime repaints fully.
   gpu_retained_ = false;
+}
+
+// -------------------------------------------------------------------- audio
+
+void JsuiView::set_audio_enabled(bool on) {
+  audio_enabled_ = on;
+  if (audio_) audio_->setEnabled(on);
+}
+
+void JsuiView::stop_all_sounds(const String& bus, float fade_ms) {
+  if (host_) return host_->stop_all_sounds(bus, fade_ms);
+  if (audio_) audio_->stopAll(toStd(bus), fade_ms);
+}
+
+Array JsuiView::get_audio_voices() const {
+  if (host_) return host_->get_audio_voices();
+  return audio_ ? audio_->voices() : Array();
+}
+
+String JsuiView::resolve_audio_bus(const String& bus) const {
+  if (host_) return host_->resolve_audio_bus(bus);
+  if (audio_bus_map_.has(bus)) return String(audio_bus_map_[bus]);
+  AudioServer* as = AudioServer::get_singleton();
+  if (as->get_bus_index(bus) >= 0) return bus;
+  // "music" plays on a bus named "Music".
+  for (int32_t i = 0, n = as->get_bus_count(); i < n; i++)
+    if (as->get_bus_name(i).nocasecmp_to(bus) == 0) return as->get_bus_name(i);
+  return audio_bus_.is_empty() || as->get_bus_index(audio_bus_) < 0 ? String("Master") : audio_bus_;
 }
 
 void JsuiView::reload() {
@@ -578,6 +750,14 @@ void JsuiView::onLoad(void*, JsuiRuntime* rt, uint64_t id, const char* url_c) {
   if (cut >= 0) path = path.substr(0, cut);
   Ref<FileAccess> f = FileAccess::open(path, FileAccess::READ);
   if (f.is_null()) {
+    // A font file Godot imported, in an export that ships only the imported
+    // FontFile: its data is the file.
+    String why;
+    PackedByteArray font = isFontFile(path) && isGodotPath(path) ? importedFontData(path, why) : PackedByteArray();
+    if (!font.is_empty()) {
+      jsui_resource_complete(rt, id, 200, contentTypeFor(path), font.ptr(), size_t(font.size()));
+      return;
+    }
     jsui_resource_complete(rt, id, 404, "text/plain", nullptr, 0);
     return;
   }
@@ -685,6 +865,16 @@ void JsuiView::process() {
   if (!rt_) return;
   updateViewport();
   for (JsuiView* v : surfaces_) v->updateViewport();
+  // Host textures before the tick: JS sees new and resized ones in it, and
+  // the views showing new contents repaint this frame.
+  syncTextures();
+  if (!rt_) return;
+  // Sounds: fades, voices that ended, reports for this tick (and the
+  // sound_played / sound_ended signals, which may stop the view).
+  if (audio_) {
+    audio_->update(rt_);
+    if (!rt_) return;
+  }
   const uint64_t tick0 = Time::get_singleton()->get_ticks_usec();
   // One tick for every surface of the runtime, then each paints.
   jsui_tick(rt_, clockMs());
@@ -710,6 +900,7 @@ void JsuiView::process() {
         v->render();
   batching_ = false;
   queueFrameJob();
+  queueTextureJob();  // this frame's texture copies, if the frame job did not take them
 }
 
 bool JsuiView::showsOurRuntime(const JsuiView* v) const {
@@ -757,7 +948,8 @@ void JsuiView::setupPipelineCache(const String& renderer) {
 void JsuiView::render() {
   if (pixel_w_ <= 0 || pixel_h_ <= 0) return;
   render_pending_ = false;
-  const bool gpuRenderer = renderer_ == Renderer::Vulkan || renderer_ == Renderer::Metal || renderer_ == Renderer::WebGPU;
+  const bool gpuRenderer = renderer_ == Renderer::Vulkan || renderer_ == Renderer::Metal ||
+                           renderer_ == Renderer::WebGPU || renderer_ == Renderer::D3D12;
   // Also when the runtime's Skia context is not there (yet): a surface view
   // that moved to another runtime view, or one that dropped its context.
   if (renderer_ == Renderer::Unknown || (gpuRenderer && !runtimeView()->gpu_)) chooseRenderer();
@@ -766,7 +958,7 @@ void JsuiView::render() {
   // every other render queues the frames batched so far first, since it may
   // run the game's code (frame_rendered, the texture's `changed`) and that
   // must not see views in an unqueued batch (they could go meanwhile).
-  if (renderer_ == Renderer::Vulkan || renderer_ == Renderer::Metal || renderer_ == Renderer::WebGPU) {
+  if (gpuRenderer) {
     if (!renderGpu()) {
       gpuFailed();
       runtimeView()->queueFrameJob();
@@ -896,6 +1088,7 @@ String JsuiView::get_renderer() const {
     case Renderer::Vulkan: return "vulkan";
     case Renderer::Metal: return "metal";
     case Renderer::WebGPU: return "webgpu";
+    case Renderer::D3D12: return "d3d12";
     case Renderer::Cpu: return "cpu";
     default: return "";
   }
@@ -1249,6 +1442,367 @@ int JsuiView::remove_buffer(const String& key) {
   if (it == pendingBuffers_.end()) return 0;
   pendingBuffers_.erase(it);
   return 1;
+}
+
+// ----------------------------------------------------------- host textures
+
+namespace {
+
+// Godot textures hold straight alpha, but a viewport's: its 2D / 3D renders
+// into a transparent background are effectively premultiplied (what
+// CanvasItemMaterial's BLEND_MODE_PREMULT_ALPHA is for).
+int textureFlagsFor(const Ref<Texture2D>& t) {
+  return Object::cast_to<ViewportTexture>(t.ptr()) ? 0 : JSUI_TEXTURE_UNPREMULTIPLIED;
+}
+
+}  // namespace
+
+// -------------------------------------------------------------------- fonts
+
+bool JsuiView::register_font(const String& family, const Variant& font, int weight, int italic) {
+  String why;
+  PackedByteArray data = fontBytes(font, why);
+  if (data.is_empty()) {
+    UtilityFunctions::push_error("JsuiView.register_font(\"" + family + "\"): " + why);
+    return false;
+  }
+  FontOp op;
+  op.family = toStd(family);
+  op.data = data;
+  op.weight = weight > 0 ? std::min(weight, 1000) : 0;
+  op.italic = italic < 0 ? -1 : italic > 0 ? 1 : 0;
+  return applyFontOp(std::move(op));
+}
+
+bool JsuiView::unregister_font(const String& family) {
+  FontOp op;
+  op.unregister = true;
+  op.family = toStd(family);
+  return applyFontOp(std::move(op));
+}
+
+bool JsuiView::applyFontOp(FontOp op) {
+  if (host_) return host_->applyFontOp(std::move(op));
+  // A surface view that is not attached has no rt_: the call waits in its log.
+  const bool live = rt_ != nullptr;
+  const bool ok = live ? runFontOp(op) : true;
+  if (!op.unregister) {
+    if (ok) font_ops_.push_back(std::move(op));  // with a runtime, only fonts it took
+    return ok;
+  }
+  // Drop the logged registrations (and removals) of the family. The removal
+  // itself is kept only while faces whose family the log does not name (the
+  // file's own: family "", the `fonts` property) may have it.
+  const String family = String::utf8(op.family.c_str());
+  bool dropped = false, unnamed = !fonts_.is_empty();
+  std::vector<FontOp> keep;
+  for (FontOp& o : font_ops_) {
+    if (String::utf8(o.family.c_str()).nocasecmp_to(family) == 0) {
+      dropped = dropped || !o.unregister;
+      continue;
+    }
+    if (!o.unregister && o.family.empty()) unnamed = true;
+    keep.push_back(std::move(o));
+  }
+  font_ops_.swap(keep);
+  if (unnamed) font_ops_.push_back(std::move(op));
+  return live ? ok : dropped;
+}
+
+bool JsuiView::runFontOp(const FontOp& op) {
+  if (op.unregister) return jsui_unregister_font(rt_, op.family.c_str()) == 0;
+  if (jsui_register_font(rt_, op.family.c_str(), op.data.ptr(), size_t(op.data.size()), op.weight, op.italic) == 0)
+    return true;
+  UtilityFunctions::push_error("JsuiView.register_font(\"" + String::utf8(op.family.c_str()) +
+                               "\"): not a font (TTF, OTF, TTC, WOFF or WOFF2)");
+  return false;
+}
+
+void JsuiView::set_font_fallbacks(const PackedStringArray& families) {
+  if (host_) return host_->set_font_fallbacks(families);
+  PackedStringArray list;
+  for (int64_t i = 0; i < families.size(); i++) {
+    String f = families[i].strip_edges();
+    if (!f.is_empty()) list.push_back(f);
+  }
+  font_fallbacks_ = toStd(String(",").join(list));
+  font_fallbacks_set_ = true;
+  if (rt_) jsui_set_font_fallbacks(rt_, font_fallbacks_.c_str());
+}
+
+void JsuiView::set_default_font_family(const String& family) {
+  if (host_) return host_->set_default_font_family(family);
+  default_font_family_ = toStd(family.strip_edges());
+  default_font_set_ = true;
+  if (rt_) jsui_set_default_font_family(rt_, default_font_family_.c_str());
+}
+
+void JsuiView::applyFontSettings() {
+  if (font_fallbacks_set_) jsui_set_font_fallbacks(rt_, font_fallbacks_.c_str());
+  if (default_font_set_) jsui_set_default_font_family(rt_, default_font_family_.c_str());
+}
+
+void JsuiView::set_fonts(const Array& fonts) {
+  // startFonts() passes fonts_ itself, and godot-cpp's Array self-assignment
+  // drops the array before taking the new reference.
+  if (&fonts != &fonts_) fonts_ = fonts;
+  if (host_) {
+    forwardFonts();
+    return;
+  }
+  if (!rt_ || !runtime_view_.is_empty()) return;  // registered by start() / on attach
+  // A running runtime view: the fonts the array adds.
+  for (int64_t i = 0; i < fonts_.size(); i++) {
+    Variant v = fonts_[i];
+    if (v.get_type() == Variant::NIL || fonts_applied_.has(v)) continue;
+    fonts_applied_.append(v);
+    String why;
+    PackedByteArray data = fontBytes(v, why);
+    if (data.is_empty()) {
+      UtilityFunctions::push_error("JsuiView.fonts[" + String::num_int64(i) + "]: " + why);
+      continue;
+    }
+    if (jsui_register_font(rt_, "", data.ptr(), size_t(data.size()), 0, -1) != 0)
+      UtilityFunctions::push_error("JsuiView.fonts[" + String::num_int64(i) + "]: not a font (TTF, OTF, TTC, WOFF or WOFF2)");
+  }
+}
+
+void JsuiView::startFonts() {
+  fonts_applied_.clear();
+  set_fonts(fonts_);
+  // The logged calls, in order; registrations the new runtime refuses are
+  // dropped (reported once).
+  std::vector<FontOp> ops;
+  ops.swap(font_ops_);
+  for (FontOp& op : ops)
+    if (runFontOp(op) || op.unregister) font_ops_.push_back(std::move(op));
+  applyFontSettings();
+}
+
+void JsuiView::forwardFonts() {
+  if (!host_) return;
+  if (fonts_host_ != host_) {
+    fonts_applied_.clear();
+    fonts_host_ = host_;
+  }
+  // The runtime view keeps them (its log), so they outlive its restarts.
+  for (int64_t i = 0; i < fonts_.size(); i++) {
+    Variant v = fonts_[i];
+    if (v.get_type() == Variant::NIL || fonts_applied_.has(v)) continue;
+    fonts_applied_.append(v);
+    host_->register_font("", v, 0, -1);
+  }
+  std::vector<FontOp> ops;
+  ops.swap(font_ops_);
+  for (FontOp& op : ops) host_->applyFontOp(std::move(op));
+  if (font_fallbacks_set_) {
+    host_->font_fallbacks_ = font_fallbacks_;
+    host_->font_fallbacks_set_ = true;
+    if (host_->rt_) jsui_set_font_fallbacks(host_->rt_, font_fallbacks_.c_str());
+  }
+  if (default_font_set_) {
+    host_->default_font_family_ = default_font_family_;
+    host_->default_font_set_ = true;
+    if (host_->rt_) jsui_set_default_font_family(host_->rt_, default_font_family_.c_str());
+  }
+  font_fallbacks_set_ = default_font_set_ = false;
+}
+
+int JsuiView::set_texture(const String& name, const Ref<Texture2D>& texture, bool live) {
+  if (host_) return host_->set_texture(name, texture, live);
+  if (texture.is_null()) return remove_texture(name);
+  waitRender();  // a queued render-thread job reads textures_
+  const std::string key = toStd(name);
+  auto it = std::find_if(textures_.begin(), textures_.end(), [&](const HostTexture& e) { return e.key == key; });
+  if (it != textures_.end() && it->texture == texture) {
+    if (it->live == live) return 0;
+    it->live = live;
+    it->dirty = true;
+    return 1;
+  }
+  if (it == textures_.end()) {
+    textures_.emplace_back();
+    it = textures_.end() - 1;
+    it->key = key;
+    it->name = name;
+    it->changed = callable_mp(this, &JsuiView::onTextureChanged).bind(name);
+  } else if (it->texture.is_valid() && it->texture->is_connected("changed", it->changed)) {
+    it->texture->disconnect("changed", it->changed);
+  }
+  // Another texture under the same name: its copy goes into the same mirror
+  // when the size and format match (no gap on screen), into a new one if not.
+  it->texture = texture;
+  it->live = live;
+  it->dirty = true;
+  it->flags = textureFlagsFor(texture);
+  it->src = RID();
+  it->src_ok = false;
+  it->cpu_only = false;
+  it->warned = false;
+  // ImageTexture.update() / set_image() emit `changed`: new contents.
+  if (!texture->is_connected("changed", it->changed)) texture->connect("changed", it->changed);
+  return 1;
+}
+
+int JsuiView::remove_texture(const String& name) {
+  if (host_) return host_->remove_texture(name);
+  waitRender();
+  const std::string key = toStd(name);
+  auto it = std::find_if(textures_.begin(), textures_.end(), [&](const HostTexture& e) { return e.key == key; });
+  if (it == textures_.end()) return 0;
+  // The runtime lets go first; the mirrors are freed by the next texture job,
+  // after any frame that sampled them (Godot defers the free past them).
+  if (rt_ && (it->gpu_set || it->pixels_set)) jsui_remove_texture(rt_, key.c_str());
+  if (it->texture.is_valid() && it->texture->is_connected("changed", it->changed)) it->texture->disconnect("changed", it->changed);
+  if (it->cur.valid()) retired_mirrors_.push_back(it->cur);
+  if (it->next.valid()) retired_mirrors_.push_back(it->next);
+  textures_.erase(it);
+  return 1;
+}
+
+int JsuiView::update_texture(const String& name) {
+  if (host_) return host_->update_texture(name);
+  const std::string key = toStd(name);
+  for (HostTexture& e : textures_)
+    if (e.key == key) {
+      e.dirty = true;  // only the main thread reads it
+      return 1;
+    }
+  return -1;
+}
+
+void JsuiView::onTextureChanged(const String& name) {
+  const std::string key = toStd(name);
+  for (HostTexture& e : textures_)
+    if (e.key == key) e.dirty = true;
+}
+
+bool JsuiView::uploadTexturePixels(HostTexture& e) {
+  // ImageTexture: a copy of what the RenderingServer holds (a GPU readback on
+  // Forward+ / Mobile); a ViewportTexture: the viewport's last frame.
+  Ref<Image> img = e.texture->get_image();
+  if (img.is_null() || img->is_empty()) return false;
+  if (img->is_compressed() || img->get_format() != Image::FORMAT_RGBA8) {
+    Ref<Image> copy;
+    copy.instantiate();
+    copy->copy_from(img);  // the original may be the server's own (headless)
+    if (copy->is_compressed() && copy->decompress() != OK) return false;
+    copy->convert(Image::FORMAT_RGBA8);
+    img = copy;
+  }
+  const int w = img->get_width(), h = img->get_height();
+  PackedByteArray data = img->get_data();  // mipmaps follow level 0: not read
+  if (w <= 0 || h <= 0 || data.size() < int64_t(w) * h * 4) return false;
+  return jsui_set_texture_pixels(rt_, e.key.c_str(), data.ptr(), w, h, size_t(w) * 4, e.flags) > 0;
+}
+
+void JsuiView::syncTextures() {
+  if (textures_.empty() && retired_mirrors_.empty()) return;
+  waitRender();  // the last texture work has run (in steady state it has)
+  JsuiRuntime* rt = rt_;
+  if (!rt) return;
+  // GPU copies when the runtime renders on the GPU (one Skia context for all
+  // its views); CPU pixels when any of its views paints with the CPU raster,
+  // which cannot sample GPU textures (but every renderer draws pixels).
+  bool anyCpu = false, anyChosen = false;
+  for (JsuiView* v : surfaces_) {
+    anyCpu = anyCpu || v->renderer_ == Renderer::Cpu;
+    anyChosen = anyChosen || v->renderer_ != Renderer::Unknown;
+  }
+  anyCpu = anyCpu || renderer_ == Renderer::Cpu;
+  anyChosen = anyChosen || renderer_ != Renderer::Unknown;
+  if (!anyChosen && !textures_.empty()) chooseRenderer();  // what the first render would do
+  const TextureMode mode = !anyCpu && renderer_ != Renderer::Cpu && gpu_ ? TextureMode::Gpu : TextureMode::Pixels;
+  if (mode != texture_mode_) {
+    for (HostTexture& e : textures_) {
+      e.pixels_set = false;
+      e.cpu_only = false;
+      e.src = RID();
+      e.src_ok = false;
+      e.dirty = true;
+    }
+    texture_mode_ = mode;
+  }
+  texture_frame_ = Engine::get_singleton()->get_frames_drawn();
+  bool work = !retired_mirrors_.empty();
+  for (HostTexture& e : textures_) {
+    if (e.texture.is_null()) continue;
+    if (mode == TextureMode::Gpu && e.cpu_only && !e.warned) {
+      e.warned = true;
+      e.pixels_set = false;
+      UtilityFunctions::push_warning("JsuiView: texture \"" + e.name + "\" " + String::utf8(e.why.c_str()) +
+                                     ": copying it through the CPU instead (get_image(), slow for live textures)");
+    }
+    if (mode == TextureMode::Pixels || e.cpu_only) {
+      if (e.live || e.dirty || !e.pixels_set) {
+        if (mode == TextureMode::Gpu) {
+          // doTextureWork checks whether the GPU path can take a new source.
+          e.rs = e.texture->get_rid();
+          e.copy = true;
+          work = true;
+        }
+        e.dirty = false;
+        e.pixels_set = uploadTexturePixels(e);
+      }
+      // Pixels replace a GPU copy in the runtime (or nothing does: then it
+      // lets go of it now); the copies go with this frame's texture work.
+      if (e.cur.valid() || e.next.valid()) {
+        if (e.gpu_set && !e.pixels_set) jsui_remove_texture(rt, e.key.c_str());
+        if (e.cur.valid()) retired_mirrors_.push_back(e.cur);
+        if (e.next.valid()) retired_mirrors_.push_back(e.next);
+        e.cur = e.next = TextureMirror{};
+        e.gpu_set = e.shown_pending = false;
+        work = true;
+      }
+      continue;
+    }
+    // A mirror made in an earlier frame: Godot has submitted that frame (its
+    // first copy and layout pass), so the runtime can sample it now. The one
+    // it replaces is freed by this frame's texture work, after every frame
+    // that sampled it.
+    if (e.next.valid() && texture_frame_ > e.next.created_frame) {
+      if (e.cur.valid()) retired_mirrors_.push_back(e.cur);
+      e.cur = e.next;
+      e.next = TextureMirror{};
+      e.gpu_set = false;
+      e.shown_pending = false;
+      work = true;
+    }
+    if (e.cur.valid() && (!e.gpu_set || e.gpu_flags != e.flags)) {
+      JsuiTexture t{};
+      t.kind = gpu_api_ == Renderer::Vulkan  ? JSUI_TEXTURE_VULKAN
+               : gpu_api_ == Renderer::Metal ? JSUI_TEXTURE_METAL
+               : gpu_api_ == Renderer::D3D12 ? JSUI_TEXTURE_D3D12
+                                             : JSUI_TEXTURE_WEBGPU;
+      t.handle = e.cur.handle;
+      t.format = e.cur.format;
+      t.width = e.cur.w;
+      t.height = e.cur.h;
+      t.flags = e.flags;
+      // Vulkan: sampled + transfer src / dst, as the mirror is created. D3D12:
+      // the state the mirror is in when JSUI renders, COPY_DEST (Godot's
+      // tracker leaves it there after the copy; JSUI transitions it back).
+      t.usage = gpu_api_ == Renderer::D3D12 ? 0x400u : 0u;
+      e.gpu_set = jsui_set_texture(rt, e.key.c_str(), &t) >= 0;
+      e.gpu_flags = e.flags;
+      e.pixels_set = false;
+    } else if (e.gpu_set && e.shown_pending) {
+      jsui_texture_updated(rt, e.key.c_str());  // last frame's copy: repaint the views showing it
+    }
+    e.shown_pending = false;
+    // This frame's copy (recorded into Godot's frame by doTextureWork).
+    e.rs = e.texture->get_rid();
+    e.copy = e.live || e.dirty || (!e.cur.valid() && !e.next.valid());
+    e.dirty = false;
+    work = work || e.copy;
+  }
+  if (!work) return;
+  RenderingServer* rs = RenderingServer::get_singleton();
+  if (!rs || rs->is_on_render_thread()) {
+    doTextureWork();  // RenderingServer on this thread: now
+  } else {
+    texture_work_ = true;  // with the frame job, or a job of its own (queueTextureJob)
+  }
 }
 
 // ------------------------------------------------------------------- input

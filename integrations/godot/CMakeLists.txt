@@ -48,7 +48,8 @@ add_library(jsui_godot SHARED
   src/register_types.cpp
   src/jsui_view.cpp
   src/jsui_gpu_render.cpp
-  src/keymap.cpp)
+  src/keymap.cpp
+  src/jsui_audio.cpp)
 target_link_libraries(jsui_godot PRIVATE jsui godot::cpp)
 if(APPLE)
   # Tracked Metal texture for JsuiView's src (src/metal_texture.mm).

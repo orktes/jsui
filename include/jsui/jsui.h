@@ -31,12 +31,16 @@
 extern "C" {
 #endif
 
+/* Windows: define JSUI_SHARED when using jsui.dll (the prebuilt release
+ * library); a static build needs nothing. */
 #if defined(_WIN32) && defined(JSUI_SHARED)
 #  ifdef JSUI_BUILDING
 #    define JSUI_API __declspec(dllexport)
 #  else
 #    define JSUI_API __declspec(dllimport)
 #  endif
+#elif defined(_WIN32)
+#  define JSUI_API
 #elif defined(__EMSCRIPTEN__)
 /* Same as EMSCRIPTEN_KEEPALIVE; spelled out because <emscripten.h> must not
  * be included inside this header's extern "C" block. */
@@ -240,6 +244,205 @@ JSUI_API int jsui_remove_buffer(JsuiRuntime* rt, const char* key);
  * NULL. Valid until the buffer is next changed. */
 JSUI_API const void* jsui_get_buffer(JsuiRuntime* rt, const char* key, JsuiBufferType* type, size_t* count);
 
+/* ------------------------------------------------------- Host textures
+ *
+ * Pictures the host makes itself, shown inside the UI: a video the engine
+ * decodes (Godot's VideoStreamPlayer texture, WebCodecs VideoFrames, a
+ * <video> element), a 3D viewport or render target (a character preview, a
+ * minimap camera), a webcam. JSUI does not decode or play anything: the host
+ * names a texture, keeps it current, and the UI shows it by that name:
+ *
+ *     <HostTexture name="trailer" resizeMode="contain" style={{ width: 640, aspectRatio: 16 / 9 }} />
+ *     const size = useHostTexture('trailer');   // { width, height } once set, else null
+ *
+ * HostTexture lays out and paints like Image (its intrinsic size is the
+ * texture's size in px, resizeMode, borderRadius clipping, tintColor,
+ * opacity, transforms). Like frame data, textures belong to the runtime
+ * (set them any time; they survive reloads) and every surface can show them.
+ *
+ * A texture is either CPU pixels (jsui_set_texture_pixels: copied, shown by
+ * every renderer, the CPU raster included) or a GPU texture of the device
+ * the runtime renders with (jsui_set_texture), sampled in place, no copy:
+ *
+ *     kind                  handle             renders that can show it
+ *     JSUI_TEXTURE_GL       GL texture name    jsui_render_gl* (same / shared GL context)
+ *     JSUI_TEXTURE_WEBGPU   WGPUTexture        jsui_gpu_create_webgpu, jsui_gpu_create_dawn*
+ *     JSUI_TEXTURE_VULKAN   VkImage            jsui_gpu_create_vulkan
+ *     JSUI_TEXTURE_METAL    id<MTLTexture>     jsui_gpu_create_metal, jsui_metal_create
+ *     JSUI_TEXTURE_D3D12    ID3D12Resource*    jsui_gpu_create_d3d12
+ *
+ * A render that cannot sample a texture (another API, the CPU raster for a
+ * GPU texture) leaves its views empty and logs one warning per texture.
+ *
+ * Per frame: when the host draws new contents into the same texture (the next
+ * video frame), it calls jsui_texture_updated(); the runtime then repaints
+ * just the views showing it (no layout, no JS). Setting a texture with a
+ * different handle, size or format also re-lays out the views whose size
+ * comes from it, and tells JS (useHostTexture) in the next jsui_tick().
+ *
+ * GPU textures stay the host's: JSUI keeps no reference past a render (its
+ * GPU work is submitted before the render returns). The host keeps a texture
+ * alive while it is set and while that work may still run, and orders its own
+ * writes before the render: on the same queue / GL context before the call
+ * (Vulkan: the render's full barriers order it; Metal: the same queue;
+ * WebGPU: queue order). Formats: 8-bit RGBA or BGRA, UNORM, holding
+ * sRGB-encoded values like images do (Vulkan / Metal / WebGPU / GL format 0:
+ * RGBA8 UNORM; D3D12 format 0: the resource's own, RGBA8 / BGRA8 UNORM or
+ * TYPELESS). Vulkan images must be in SHADER_READ_ONLY_OPTIMAL whenever a
+ * render runs (JSUI leaves them in it). D3D12 resources must be in the state
+ * JsuiTexture.usage names (0: PIXEL_SHADER_RESOURCE) whenever a render runs:
+ * a render that samples one in another state transitions it back before it
+ * returns (in its own command list on the queue), so the host's state
+ * tracking stays valid. A D3D12 context holds a reference (AddRef) to a
+ * resource while it keeps it wrapped (until the end of the next frame that
+ * does not show it, or jsui_gpu_purge). */
+typedef enum JsuiTextureKind {
+    JSUI_TEXTURE_PIXELS = 0, /* CPU pixels (jsui_set_texture_pixels) */
+    JSUI_TEXTURE_GL,         /* handle: the GL texture name, (void*)(uintptr_t)name; GL_TEXTURE_2D */
+    JSUI_TEXTURE_WEBGPU,     /* handle: WGPUTexture (TextureBinding usage) */
+    JSUI_TEXTURE_VULKAN,     /* handle: VkImage (SAMPLED usage), on the context's device */
+    JSUI_TEXTURE_METAL,      /* handle: id<MTLTexture> (ShaderRead usage), on the context's device */
+    JSUI_TEXTURE_D3D12       /* handle: ID3D12Resource*, on the context's device (state: usage) */
+} JsuiTextureKind;
+
+enum {
+    /* The pixels are not premultiplied by alpha (straight alpha: most image
+     * files, Godot images, ImageData). Default: premultiplied. */
+    JSUI_TEXTURE_UNPREMULTIPLIED = 1 << 0,
+    /* Ignore alpha: every pixel is opaque (video frames). */
+    JSUI_TEXTURE_OPAQUE = 1 << 1,
+    /* Row 0 is the bottom of the picture (a GL render target drawn the GL
+     * way). Default: row 0 is the top (uploaded images and video frames). */
+    JSUI_TEXTURE_BOTTOM_LEFT_ORIGIN = 1 << 2
+};
+
+typedef struct JsuiTexture {
+    int kind;             /* JsuiTextureKind (not JSUI_TEXTURE_PIXELS) */
+    void* handle;         /* see JsuiTextureKind */
+    /* VkFormat / MTLPixelFormat / WGPUTextureFormat / GL sized internal format
+     * (GL_RGBA8, GL_BGRA8_EXT); 0: RGBA8 UNORM. */
+    unsigned int format;
+    int width, height;    /* px */
+    int flags;            /* JSUI_TEXTURE_* */
+    /* Vulkan: the VkImageUsageFlags the image was created with (0: SAMPLED |
+     * TRANSFER_SRC | TRANSFER_DST). D3D12: the D3D12_RESOURCE_STATES the
+     * resource is in whenever a render runs, and is left in (0:
+     * PIXEL_SHADER_RESOURCE). Unused elsewhere. */
+    unsigned int usage;
+} JsuiTexture;
+
+/* Sets texture `key` to a GPU texture (`texture` NULL removes it). Returns 1
+ * when the texture changed, 0 when it is the same as before (same handle,
+ * size, format and flags: use jsui_texture_updated for new contents), -1 for
+ * a NULL key or an invalid texture (no handle, size <= 0, unknown kind). */
+JSUI_API int jsui_set_texture(JsuiRuntime* rt, const char* key, const JsuiTexture* texture);
+/* Sets texture `key` to a copy of `width` x `height` RGBA8 pixels (rows
+ * `row_bytes` apart; 0: width * 4), sRGB-encoded, flags JSUI_TEXTURE_*.
+ * Every call is new contents. Returns 1, or -1 for a NULL key or bad size. */
+JSUI_API int jsui_set_texture_pixels(JsuiRuntime* rt, const char* key, const void* rgba, int width, int height,
+                                     size_t row_bytes, int flags);
+/* The host drew new contents into texture `key` (same handle): repaints the
+ * views showing it. Returns 1, or -1 for an unknown key. */
+JSUI_API int jsui_texture_updated(JsuiRuntime* rt, const char* key);
+/* Removes texture `key` (its views draw nothing; JS sees null). Returns 1 if
+ * it existed. */
+JSUI_API int jsui_remove_texture(JsuiRuntime* rt, const char* key);
+
+/* ------------------------------------------------------------------ Audio
+ *
+ * UI sounds (hover, press, focus moves, confirm / back), music and ambience.
+ * The UI asks for sounds; the host plays them. In JS:
+ *
+ *     Sound.play(require('./ui/confirm.wav'), { bus: 'ui', volume: 0.8 });
+ *     useMusic(require('./menu.ogg'), { fadeIn: 1500 });        // plays while mounted
+ *     <Pressable sounds={{ hoverIn: tick, press: confirm }} />  // or <UISounds> for a whole screen
+ *
+ * Every request becomes a JsuiAudioCommand passed to the audio handler
+ * (JsuiConfig.on_audio). A game engine routes them through its own mixer
+ * (Godot: AudioStreamPlayers on its audio buses), so UI sounds follow the
+ * game's volume settings and effects. Without a handler the runtime plays
+ * them itself: the native library's built-in backend (miniaudio, built when
+ * JSUI_AUDIO is ON, the default on desktop platforms) and, in the browser,
+ * Web Audio in web/jsui-web.js. JsuiConfig.audio_disabled = 1 turns sound
+ * off (headless tools, tests). The built-in backend opens the output device
+ * on the first PLAY / PRELOAD; JSUI_AUDIO_BACKEND=null (environment) makes
+ * it play to a null device (CI without sound hardware). See docs/AUDIO.md.
+ *
+ * Sounds are URLs resolved against the base URL (the bundler emits imported
+ * .wav / .ogg / .mp3 / .flac files next to the bundle). A handler loads them
+ * as it likes; jsui_fetch() reads them through the runtime's own loader (dev
+ * server, file system, a custom JsuiLoadFn).
+ *
+ * Voices: every PLAY carries a new voice id (never 0). The handler reports
+ * the end of each voice exactly once with jsui_audio_voice_ended(): it
+ * played to the end, it was stopped (after the fade out), or it could not
+ * load / play. A looping voice ends only when stopped. Commands for a voice
+ * that has ended are ignored by the handler.
+ *
+ * Buses are named groups of voices ("ui", "sfx", "music", "voice", ... any
+ * name): the UI's own volume / mute per group, multiplied with each voice's
+ * volume. Handlers that map buses to an engine's buses keep the engine's
+ * bus volumes separate (the game's settings stay the game's).
+ *
+ * Volumes are linear gains (1: unchanged, 0: silent). pitch is the playback
+ * rate (1: normal; changes pitch and speed together). pan: -1 left .. 1
+ * right. fade_ms ramps volume changes (PLAY: fade in from silence; STOP:
+ * fade out, then end; SET / BUS: ramp to the new value).
+ */
+typedef enum JsuiAudioOp {
+    JSUI_AUDIO_PRELOAD = 0,  /* sound: load / decode ahead so a later PLAY starts at once. Answer with
+                                jsui_audio_sound_loaded() (now or later). */
+    JSUI_AUDIO_UNLOAD = 1,   /* sound: no longer needed (voices playing it may finish) */
+    JSUI_AUDIO_PLAY = 2,     /* voice, sound, bus, volume, pitch, pan, loop, fade_ms (fade in), offset_s */
+    JSUI_AUDIO_STOP = 3,     /* voice, fade_ms (fade out, then end) */
+    JSUI_AUDIO_PAUSE = 4,    /* voice */
+    JSUI_AUDIO_RESUME = 5,   /* voice */
+    JSUI_AUDIO_SET = 6,      /* voice: volume, pitch, pan (ramped over fade_ms) */
+    JSUI_AUDIO_BUS = 7,      /* bus: volume (ramped over fade_ms), muted. Buses start at volume 1, unmuted. */
+    JSUI_AUDIO_STOP_ALL = 8  /* bus (NULL: every voice), fade_ms. Sent with bus NULL and fade 0 when the JS
+                                context goes away (jsui_reload, dev reloads, jsui_destroy). */
+} JsuiAudioOp;
+
+typedef struct JsuiAudioCommand {
+    JsuiAudioOp op;
+    uint64_t voice;     /* PLAY, STOP, PAUSE, RESUME, SET */
+    const char* sound;  /* PRELOAD, UNLOAD, PLAY: absolute URL */
+    const char* bus;    /* PLAY, BUS: never NULL; STOP_ALL: NULL for every bus */
+    float volume;       /* PLAY, SET, BUS */
+    float pitch;        /* PLAY, SET */
+    float pan;          /* PLAY, SET */
+    float fade_ms;      /* PLAY, STOP, SET, BUS, STOP_ALL */
+    double offset_s;    /* PLAY: start this far into the sound */
+    int loop;           /* PLAY */
+    int muted;          /* BUS */
+} JsuiAudioCommand;
+
+/* Called synchronously (usually while JS runs) on the runtime's thread. The
+ * command and its strings are valid only during the call. */
+typedef void (*JsuiAudioFn)(void* user, const JsuiAudioCommand* cmd);
+
+enum {
+    JSUI_AUDIO_FINISHED = 0, /* played to the end */
+    JSUI_AUDIO_STOPPED = 1,  /* STOP / STOP_ALL */
+    JSUI_AUDIO_FAILED = -1   /* the sound could not be loaded, decoded or played */
+};
+/* Voice `voice` ended (JSUI_AUDIO_FINISHED / _STOPPED / _FAILED). Call it
+ * exactly once per PLAY, also from inside the handler; JS hears about it in
+ * the next jsui_tick(). Unknown or already ended voices are ignored. */
+JSUI_API void jsui_audio_voice_ended(JsuiRuntime* rt, uint64_t voice, int status);
+/* Sound `sound` (the URL from the command) finished loading: ok 1 with its
+ * duration in seconds (< 0: unknown), or ok 0. Resolves JS's
+ * Sound.preload() promises for it. */
+JSUI_API void jsui_audio_sound_loaded(JsuiRuntime* rt, const char* sound, int ok, double duration_s);
+
+/* Reads `url` (relative URLs resolve against the base URL) through the
+ * runtime's loader, the same way the bundle and images are read. `done` runs
+ * once on the runtime's thread inside a later jsui_tick() with an HTTP-like
+ * status (200 ok, 404 missing, 0 network error) and the bytes (valid only
+ * during the call). It never runs if the runtime is destroyed first. */
+typedef void (*JsuiFetchFn)(void* user, int status, const char* content_type, const void* data, size_t size);
+JSUI_API void jsui_fetch(JsuiRuntime* rt, const char* url, JsuiFetchFn done, void* user);
+
 /* ---------------------------------------------------------------- Config */
 
 typedef struct JsuiConfig {
@@ -247,7 +450,7 @@ typedef struct JsuiConfig {
     int height;
     float pixel_ratio;      /* device pixels per logical px */
     const char* base_url;   /* resolves relative URLs; defaults to the bundle URL */
-    int dev_mode;           /* 1: poll the dev server and reload on change, show error overlay */
+    int dev_mode;           /* 1: poll the dev server and hot-update / reload on change, show error overlay */
 
     JsuiLogFn log;          /* NULL: print to stderr / console */
     void* log_user;
@@ -267,6 +470,10 @@ typedef struct JsuiConfig {
     int js_memory_limit_mb; /* default 256 */
     int js_stack_size_kb;   /* default 1024 (512 on Windows, whose threads get 1 MB stacks) */
     int js_timeout_ms;      /* default 5000 */
+
+    JsuiAudioFn on_audio;   /* plays the UI's sounds (see "Audio"); NULL: the built-in backend */
+    void* audio_user;
+    int audio_disabled;     /* 1: no sound at all (every voice fails, preloads fail) */
 } JsuiConfig;
 
 JSUI_API void jsui_config_init(JsuiConfig* cfg);
@@ -282,11 +489,46 @@ JSUI_API int jsui_load_bundle_source(JsuiRuntime* rt, const char* source, size_t
 JSUI_API int jsui_load_bundle_url(JsuiRuntime* rt, const char* url);
 /* Tear down the JS context and reload the last bundle (dev mode does this automatically). */
 JSUI_API void jsui_reload(JsuiRuntime* rt);
+/* For hosts that watch the dev server themselves: it has a new build (or a
+ * build error). Bundles from `jsui dev` hot-update in place (React Fast
+ * Refresh: components keep their state) and fall back to a reload; other
+ * bundles reload. Dev mode with an http:// bundle URL does this on its own. */
+JSUI_API void jsui_dev_update(JsuiRuntime* rt);
+/* Dev mode with an http:// bundle URL also joins the dev server's shared
+ * session (`jsui dev`): coding agents attached to the server
+ * (`jsui run --attach`) can then drive this runtime (input, state, calls,
+ * screenshots) and see what the person does in it. `name` is shown there
+ * (e.g. "AW3 main menu"; default: the platform); `enabled` 0 keeps this
+ * runtime out of the session. Call before loading the bundle. */
+JSUI_API void jsui_set_dev_session(JsuiRuntime* rt, const char* name, int enabled);
 
-/* Register a font face from memory. Data is copied. `weight` 100..900,
- * `italic` 0/1. The JS side can also load fonts with `jsui.loadFont(...)`. */
+/* -------------------------------------------------------------- Fonts
+ *
+ * Fonts are runtime-wide (every surface). Inter is built in and is the
+ * default family. App code loads its own with Fonts.load / useFonts (from the
+ * bundle, a URL or bytes); hosts can register fonts they already have.
+ *
+ * Register the faces in `data` (TTF, OTF, a TTC / OTC collection: every face,
+ * WOFF or WOFF2; copied) under `family`, like a CSS @font-face rule:
+ *   family  NULL or "" = the family name inside the file
+ *   weight  1..1000 overrides the file's weight; <= 0 = from the file. A
+ *           variable font with a 'wght' axis and weight <= 0 is registered
+ *           once per 100 step of its weight range, so fontWeight picks the
+ *           instance; with a weight it is pinned to that weight.
+ *   italic  0/1 overrides the file's slant; < 0 = from the file
+ * Registering the same family and style again replaces that face. Text on
+ * every surface is laid out again. Returns 0, or -1 if the data is not a font. */
 JSUI_API int jsui_register_font(JsuiRuntime* rt, const char* family, const void* data, size_t size,
                                 int weight, int italic);
+/* Remove every face of `family` (case-insensitive). 0, or -1 if unknown. */
+JSUI_API int jsui_unregister_font(JsuiRuntime* rt, const char* family);
+/* Families tried in order for characters the styled font lacks (emoji, CJK,
+ * symbols), comma separated ("Noto Sans JP, Noto Color Emoji"); NULL or ""
+ * clears. Per-glyph fallback then tries every other registered font, then
+ * the system fonts where the platform has them (not on the web). */
+JSUI_API void jsui_set_font_fallbacks(JsuiRuntime* rt, const char* families);
+/* The family used when a style names none (default "Inter"). */
+JSUI_API void jsui_set_default_font_family(JsuiRuntime* rt, const char* family);
 
 /* -------------------------------------------------------------- Surfaces
  *
@@ -600,7 +842,11 @@ enum {
     /* Paint subtrees that keep being repainted unchanged draw by draw
      * instead of from cached textures of them (see "Raster cache" in
      * docs/ARCHITECTURE.md; for comparisons). */
-    JSUI_WEBGPU_NO_RASTER_CACHE = 1 << 4
+    JSUI_WEBGPU_NO_RASTER_CACHE = 1 << 4,
+    /* Repaint damage over a cleared target instead of over a cached
+     * texture of the static background (see "Static backdrop" in
+     * docs/ARCHITECTURE.md; for comparisons). */
+    JSUI_WEBGPU_NO_BACKDROP = 1 << 5
 };
 
 typedef struct JsuiWebGPUTarget {
@@ -698,7 +944,7 @@ typedef struct JsuiVulkanDevice {
 } JsuiVulkanDevice;
 
 typedef struct JsuiGpuTarget {
-    void* texture;           /* VkImage / id<MTLTexture> / WGPUTexture */
+    void* texture;           /* VkImage / id<MTLTexture> / WGPUTexture / ID3D12Resource* / ID3D11Texture2D* */
     /* VkFormat / MTLPixelFormat; 0: 8-bit RGBA unorm (VK_FORMAT_R8G8B8A8_UNORM
      * / MTLPixelFormatRGBA8Unorm). Also BGRA8 and the sRGB variants. */
     unsigned int format;
@@ -762,6 +1008,75 @@ JSUI_API int jsui_render_gpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const 
  * input attachment, sampled, transfer src / dst) that is in
  * VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL before and after the call. */
 JSUI_API int jsui_render_vulkan(JsuiRuntime* rt, JsuiGpuContext* gpu, void* image, int width, int height, int flags);
+
+/* ------------------------------------- GPU (Direct3D 12 / 11, Windows; Ganesh)
+ *
+ * Skia Graphite has no Direct3D backend, so on Direct3D hosts (Unreal and
+ * Godot on D3D12, Unity on D3D11 / D3D12) the frame is drawn by Skia Ganesh
+ * on Direct3D 12. Available when the library was built with JSUI_D3D (a
+ * Windows Skia from scripts/build-skia-desktop.sh, skia_use_direct3d);
+ * otherwise the create functions return NULL. Both contexts render with
+ * jsui_render_gpu_target() and a JsuiGpuTarget whose fields mean:
+ *
+ *     texture       ID3D12Resource* (D3D12) / ID3D11Texture2D* (D3D11), a 2D
+ *                   texture of the context's device, one mip, one sample
+ *     format        DXGI_FORMAT; 0: the texture's own. R8G8B8A8 / B8G8R8A8,
+ *                   UNORM or UNORM_SRGB (or the TYPELESS of those: then
+ *                   drawn as UNORM). D3D12: no B8G8R8A8_UNORM_SRGB (Skia
+ *                   Ganesh has no such format; use B8G8R8A8_TYPELESS);
+ *                   R8G8B8A8_UNORM_SRGB blends in linear light, as on GL /
+ *                   Vulkan. D3D11: the frame is drawn as UNORM and copied
+ *                   bit for bit, so an sRGB texture gets sRGB-encoded
+ *                   values blended like the CPU raster.
+ *     layout        D3D12: the D3D12_RESOURCE_STATES the resource is in when
+ *                   the call is made (0 = COMMON)
+ *     final_layout  D3D12: the state to leave it in (e.g. 0x80
+ *                   PIXEL_SHADER_RESOURCE for a texture the host samples next)
+ *     usage         unused
+ *
+ * D3D12 (jsui_gpu_create_d3d12): Ganesh on the host's ID3D12Device and
+ * ID3D12CommandQueue (a DIRECT queue; both AddRef'd). The resource needs
+ * D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET. Every render executes its
+ * command lists on `queue` before it returns, so it is ordered after what
+ * the host executed on the queue before and before what it executes after
+ * (queue order; the resource is transitioned from `layout` and back to
+ * `final_layout` within the render's own command lists). The host must not
+ * use the queue from another thread during the call. With
+ * JSUI_GPU_INCREMENTAL only the damage is repainted into the resource;
+ * without it small damage is repainted into a frame the context keeps per
+ * runtime and drawn into the resource whole (`dirty`: the whole target).
+ *
+ * D3D11 (jsui_gpu_create_d3d11): Ganesh draws on a Direct3D 12 device the
+ * context creates on the same adapter as the host's ID3D11Device (which
+ * must be an ID3D11Device5, Windows 10 1703+). The frame is drawn into a
+ * shared texture the context owns (one per runtime and size) and copied
+ * into the host's texture with the device's immediate context, behind a
+ * shared fence: the render waits on the D3D11 side for the D3D12 work and
+ * the copy is queued on the immediate context like a host CopyResource
+ * (call it on the thread that owns the immediate context). The host's
+ * texture needs no shared or bind flags (a plain RenderTexture works;
+ * DEFAULT usage, one sample). The shared texture keeps the runtime's last
+ * frame, so only the damage is ever repainted; with JSUI_GPU_INCREMENTAL
+ * only the damage is copied too (`dirty`: the copied rect), else the whole
+ * frame. JSUI_GPU_NO_CLEAR copies the host's texture into the shared one
+ * first and draws the whole frame over it.
+ *
+ * Device removal: a render returns -1 once the device is removed
+ * (GetDeviceRemovedReason); destroy the context and create a new one on
+ * the new device.
+ *
+ * Host textures (jsui_set_texture): JSUI_TEXTURE_D3D12 (ID3D12Resource of
+ * the context's device, in the state JsuiTexture.usage names, 0:
+ * PIXEL_SHADER_RESOURCE, whenever a render runs; JSUI returns it to that
+ * state) on D3D12 contexts. D3D11 contexts cannot sample host textures yet.
+ */
+/* `device`: ID3D12Device*, `queue`: its ID3D12CommandQueue* (DIRECT). NULL
+ * without JSUI_D3D, on a NULL argument, or when Skia rejects the device. */
+JSUI_API JsuiGpuContext* jsui_gpu_create_d3d12(void* device, void* queue);
+/* `device`: ID3D11Device* (an ID3D11Device5). NULL without JSUI_D3D, when the
+ * device is not an ID3D11Device5 or no D3D12 device can be created on its
+ * adapter. */
+JSUI_API JsuiGpuContext* jsui_gpu_create_d3d11(void* device);
 
 /* ---------------------------------------------- GPU pipeline cache (Graphite)
  *
@@ -842,6 +1157,17 @@ JSUI_API int jsui_gpu_save_pipelines(JsuiGpuContext* gpu, void** out_data, size_
  * modes, where it does nothing else). */
 JSUI_API int jsui_gpu_precompile_step(JsuiGpuContext* gpu, double budget_ms);
 JSUI_API void jsui_gpu_get_pipeline_stats(JsuiGpuContext* gpu, JsuiPipelineStats* out);
+
+/* ShaderView sources compiled and warmed ahead of use (precompileShaders()
+ * in JS does the same): compiles `sksl` (UTF-8) now and draws it once
+ * off-screen in the next frame rendered on a GPU, so the GPU builds its
+ * pipelines in that frame instead of the one where a ShaderView first shows
+ * it. Call it while loading or idle. `images_json` (NULL: none) is the
+ * view's `images` prop as JSON (which children are images or textures, and
+ * their fit / tile), so the same kind of child is sampled. jsui_needs_redraw
+ * stays 1 until that frame. Returns 0, or -1 when the shader does not
+ * compile (logged as a warning). */
+JSUI_API int jsui_precompile_shader(JsuiRuntime* rt, const char* sksl, const char* images_json);
 
 /* ------------------------------------------------------------- GPU (Metal)
  *
@@ -951,6 +1277,17 @@ enum {
  * input there passes through to whatever is behind the UI. Uses the current
  * layout and sends no events. */
 JSUI_API int jsui_hit_test(JsuiRuntime* rt, float x, float y);
+/* jsui_hit_test for the whole view at once, for hosts that must answer it
+ * where the runtime is not (the web host's worker mode answers on the page's
+ * thread from the last copy): writes up to `max_regions` regions to `out`,
+ * 5 floats each (x, y, width, height in logical px, then the JSUI_HIT_*
+ * flags), bottom to top. The last region containing a point gives its
+ * flags; none: 0. Approximate where jsui_hit_test is exact: transformed
+ * views give their bounding box, rounded corners are ignored, and text
+ * with pointer handlers on some of its spans captures its whole box.
+ * Returns the number of regions (call again with a bigger buffer when it
+ * exceeds `max_regions`). Uses the current layout. */
+JSUI_API int jsui_hit_regions(JsuiRuntime* rt, float* out, int max_regions);
 
 JSUI_API int jsui_send_mouse_move(JsuiRuntime* rt, float x, float y);
 JSUI_API int jsui_send_mouse_button(JsuiRuntime* rt, float x, float y, JsuiMouseButton button, int down, int mods);

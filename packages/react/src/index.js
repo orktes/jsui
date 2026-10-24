@@ -35,10 +35,17 @@ import { registerAsset } from './components/basic.js';
 import { Host } from './apis.js';
 import { installHostData } from './hostData.js';
 import { installHostBuffer } from './hostBuffer.js';
+import { installHostTexture, HostTexture } from './hostTexture.js';
+import { LottieView } from './lottie.js';
+import { ShaderView, sksl, compileShader, precompileShaders } from './shader.js';
+import { Sound, SoundInstance, SoundEndReason, useSound, useMusic, UISounds, UISoundsContext, useUISound } from './sound.js';
+import { installInspector, inspect } from './inspect.js';
 
 installGlobals();
 installHostData();
 installHostBuffer();
+installHostTexture();
+installInspector();
 // include/jsui/jsui.h documents a `jsui` global for host messages.
 if (!globalThis.jsui) globalThis.jsui = Host;
 makeAnimated({ View, Text, Image, ScrollView, FlatList, SectionList });
@@ -49,6 +56,20 @@ export {
   Text,
   Image,
   ImageBackground,
+  HostTexture,
+  LottieView,
+  ShaderView,
+  Sound,
+  SoundInstance,
+  SoundEndReason,
+  useSound,
+  useMusic,
+  UISounds,
+  UISoundsContext,
+  useUISound,
+  sksl,
+  compileShader,
+  precompileShaders,
   ScrollView,
   TextInput,
   Pressable,
@@ -85,6 +106,7 @@ export {
   rootContainer,
   bridgeStats,
   registerAsset,
+  inspect,
 };
 
 export const unstable_batchedUpdates = batchedUpdates;

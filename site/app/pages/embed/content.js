@@ -232,6 +232,395 @@ if (!jsui_wants_frame(rt)) wait_for_input();
   ],
 };
 
+const ENGINES = {
+  id: 'engines',
+  label: 'raylib · SDL3 · sokol',
+  eyebrow: 'Engine examples · integrations/raylib, sdl3, sokol',
+  color: colors.purple,
+  title: 'Three game loops, one HUD',
+  lead: 'Small, complete hosts of the same game HUD (integrations/shared/ui/app.jsx): input goes to the UI first and what it does not consume moves the camera, per-frame unit positions drive nameplates with no JS per frame, and each one shows a different way to get the UI onto the screen.',
+  facts: [
+    ['raylib', '6.2 · GL texture'],
+    ['SDL3', '3.4 · Metal / Vulkan / GL'],
+    ['sokol', 'GL · swapchain'],
+    ['Self-test', 'in CI'],
+  ],
+  blocks: [
+    {
+      kind: 'code',
+      lang: 'sh',
+      title: 'build and run',
+      code: `
+npx jsui build integrations/shared/ui/app.jsx -o integrations/shared/ui/dist/bundle.js
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \\
+  -DJSUI_BUILD_RAYLIB=ON -DJSUI_BUILD_SDL3=ON -DJSUI_BUILD_SOKOL=ON
+cmake --build build --target jsui-raylib jsui-sdl3 jsui-sokol
+
+./build/jsui-raylib                 # --cpu: CPU raster + UpdateTextureRec
+./build/jsui-sdl3                   # --cpu, --renderer metal|vulkan|opengl|software
+./build/jsui-sokol                  # --cpu: CPU raster into a transient sg_image
+./build/jsui-raylib --dev http://127.0.0.1:5173/bundle.js   # with npx jsui dev
+`,
+    },
+    {
+      kind: 'pair',
+      items: [
+        {
+          kind: 'code',
+          lang: 'c',
+          title: 'raylib: the UI as a texture',
+          code: `
+int w = GetRenderWidth(), h = GetRenderHeight();
+RenderTexture2D ui = LoadRenderTexture(w, h);
+/* get_proc: rlGetProcAddress, raylib's GL loader */
+JsuiGpuContext* gpu = jsui_gpu_create_gl(get_proc, NULL);
+
+/* per frame, before BeginDrawing() */
+jsui_tick(rt, GetTime() * 1000.0);
+if (jsui_needs_redraw(rt)) {
+    rlDrawRenderBatchActive();
+    JsuiGLTarget t = {0};
+    t.texture = ui.texture.id;          /* Skia draws into it */
+    t.width = ui.texture.width; t.height = ui.texture.height;
+    jsui_render_gl_target(rt, gpu, &t);
+    restore_raylib_gl_state();
+}
+BeginDrawing();
+draw_scene();
+BeginBlendMode(BLEND_ALPHA_PREMULTIPLY);
+Rectangle flip = {0, 0, w, -h};       /* GL is bottom-up */
+DrawTexturePro(ui.texture, flip, screen, (Vector2){0}, 0, WHITE);
+EndBlendMode();
+EndDrawing();
+`,
+        },
+        {
+          kind: 'code',
+          lang: 'c',
+          title: 'sokol: straight into the swapchain',
+          code: `
+sg_swapchain sc = sglue_swapchain();   /* once per frame */
+sg_begin_pass(&(sg_pass){ .swapchain = sc });
+draw_scene();
+sgl_draw();
+sg_end_pass();
+
+JsuiGLTarget t = {0};
+t.fbo = sc.gl.framebuffer;
+t.width = sapp_width(); t.height = sapp_height();
+t.stencil_bits = 8;
+t.flags = JSUI_GL_NO_CLEAR;            /* over the scene */
+jsui_render_gl_target(rt, gpu, &t);
+sg_reset_state_cache();                /* GL changed behind sokol */
+sg_commit();
+`,
+        },
+      ],
+    },
+    {
+      kind: 'pair',
+      items: [
+        {
+          kind: 'code',
+          lang: 'c',
+          title: 'SDL3: Skia into SDL\'s own texture (the GL path)',
+          code: `
+SDL_Texture* ui = SDL_CreateTexture(r,
+    SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, pw, ph);
+SDL_SetTextureBlendMode(ui, SDL_BLENDMODE_BLEND_PREMULTIPLIED);
+GLuint tex = SDL_GetNumberProperty(SDL_GetTextureProperties(ui),
+    SDL_PROP_TEXTURE_OPENGL_TEXTURE_NUMBER, 0);
+
+if (jsui_needs_redraw(rt)) {
+    SDL_FlushRenderer(r);   /* SDL's queued draws out, its cache dirty */
+    JsuiGLTarget t = { .texture = tex, .width = pw, .height = ph,
+                       .flags = JSUI_GL_TOP_LEFT_ORIGIN };
+    jsui_render_gl_target(rt, gpu, &t);
+}
+SDL_RenderTexture(r, ui, NULL, NULL);
+`,
+        },
+        {
+          kind: 'code',
+          lang: 'c',
+          title: 'input pass-through (all three)',
+          code: `
+case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    if (!jsui_send_mouse_button(rt, x, y, JSUI_MOUSE_LEFT, 1, mods))
+        start_camera_drag();           /* the UI did not take it */
+    break;
+case SDL_EVENT_MOUSE_WHEEL:
+    if (!jsui_send_mouse_wheel(rt, x, y, dx * 40, -dy * 40))
+        zoom_camera(dy);
+    break;
+case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+    if (!jsui_send_gamepad_button(rt, pad, b, 1, 1.0f) && b == 9)
+        toggle_pause();                /* Start */
+    break;
+`,
+        },
+      ],
+    },
+    {
+      kind: 'table',
+      title: 'What each example shows',
+      head: ['HOST', 'INPUT', 'UI ON SCREEN'],
+      rows: [
+        ['raylib', 'polled · gamepad', 'Skia Ganesh draws into a RenderTexture2D only when the UI changed and raylib composites it (premultiplied). --cpu: dirty-rect UpdateTextureRec.'],
+        ['SDL3', 'events · gamepad', 'Skia straight into the SDL_Texture on SDL\'s own GPU API: Graphite on Metal (IOSurface textures) or Vulkan, Ganesh on OpenGL. CPU raster with dirty-rect uploads on other renderers or with --cpu.'],
+        ['sokol', 'events', 'Skia over the sokol_gfx pass in the swapchain\'s GL framebuffer, then sg_reset_state_cache(). --cpu: a transient sg_image. sokol_app has no gamepad API.'],
+      ],
+    },
+    {
+      kind: 'note',
+      color: colors.purple,
+      text: 'The game side of the contract is the same in all three: game state goes to useHostState(\'game\') with jsui_set_state, unit positions to the entities frame buffer with jsui_map_buffer every frame, and the HUD answers with Host.postMessage(\'game:spawn\' | \'game:pause\' | ...). --selftest clicks empty space (must pass through) and the Spawn button (must be consumed and reach the game).',
+    },
+  ],
+};
+
+const UNITY = {
+  id: 'unity',
+  label: 'Unity',
+  eyebrow: 'Unity 6 · integrations/unity',
+  color: colors.blue,
+  title: 'A JsuiView component',
+  lead: 'A Unity package: a native plugin that exports the C API to C#, and a JsuiView component that draws the UI over the game as a uGUI overlay, forwards mouse and keyboard input and tells the game what the UI did not take. The example project is the same game as the raylib, SDL3 and sokol examples, built from the command line.',
+  facts: [
+    ['Unity', '6000.3 LTS'],
+    ['Plugin', 'C API · P/Invoke'],
+    ['UI on screen', 'Metal · RenderTexture'],
+    ['Self-test', 'in the player'],
+  ],
+  blocks: [
+    {
+      kind: 'code',
+      lang: 'sh',
+      title: 'build and run',
+      code: `
+npx jsui build integrations/shared/ui/app.jsx -o integrations/shared/ui/dist/bundle.js
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DJSUI_BUILD_UNITY=ON \\
+      -DJSUI_SKIA_DIR=third_party/skia-desktop   # Graphite: the GPU path
+cmake --build build --target jsui_unity     # -> package/Plugins/<platform>/
+
+Unity -batchmode -nographics -projectPath integrations/unity/project \\
+      -executeMethod BuildExample.Build -logFile -
+"build/unity/JSUI Example.app/Contents/MacOS/JSUI Example" --selftest
+`,
+    },
+    {
+      kind: 'pair',
+      items: [
+        {
+          kind: 'code',
+          lang: 'cs',
+          title: 'the game side',
+          code: `
+var ui = gameObject.AddComponent<Jsui.JsuiView>();
+// bundle: StreamingAssets/jsui/bundle.js (or an http:// dev URL)
+
+ui.OnMessage += (name, json) => {
+    if (name == "game:spawn") Spawn();
+};
+// only input the UI did not consume
+ui.PassedMouseDown += (button, pos) => StartOrbit();
+ui.PassedWheel += delta => Zoom(delta.y);
+ui.PassedKeyDown += key => {
+    if (key == KeyCode.Escape) TogglePause();
+};
+`,
+        },
+        {
+          kind: 'code',
+          lang: 'cs',
+          title: 'per frame',
+          code: `
+void Update() {
+    ui.SetState("game", gameJson);   // useHostState('game')
+
+    for (int i = 0; i < units.Count; i++) {
+        var s = ui.WorldToUi(cam, units[i].head);
+        pos[i * 4 + 0] = s.x;
+        pos[i * 4 + 1] = s.y;
+        pos[i * 4 + 2] = s.z > 0 ? 1 : 0;
+        pos[i * 4 + 3] = units[i].hue;
+    }
+    ui.SetBuffer("entities", pos, units.Count * 4);
+}   // JsuiView ticks and paints in LateUpdate
+`,
+        },
+      ],
+    },
+    {
+      kind: 'note',
+      color: colors.blue,
+      text: 'On Metal, Skia Graphite draws the UI straight into a RenderTexture on Unity\'s own device and command queue, in a render job on Unity\'s render thread (GL.IssuePluginEvent), repainting only what changed. On other graphics APIs, or with forceCpu, it is rasterised on the CPU and uploaded into a Texture2D. JS messages and logs are queued inside jsui_tick and drained by C# afterwards, so no native code calls back into managed code (IL2CPP friendly). macOS and Linux today.',
+    },
+  ],
+};
+
+const UNREAL = {
+  id: 'unreal',
+  label: 'Unreal',
+  eyebrow: 'Unreal Engine 5 · integrations/unreal',
+  color: colors.purple,
+  title: 'A UMG widget',
+  lead: 'An Unreal plugin: UJsuiWidget (UMG) and SJsuiView (Slate) draw the UI over the game, see every mouse and key event before Slate routes it and tell the game what the UI did not take. It calls only the C API of a prebuilt JSUI shared library, so the plugin source builds against any UE 5.x. The example project is the same game as the other engine examples, packaged headlessly with RunUAT.',
+  facts: [
+    ['Unreal', '5.8'],
+    ['Plugin', 'C API · libjsui'],
+    ['UI on screen', 'Metal RHI · RenderTarget2D'],
+    ['Self-test', 'in the packaged game'],
+  ],
+  blocks: [
+    {
+      kind: 'code',
+      lang: 'sh',
+      title: 'build and run',
+      code: `
+npx jsui build integrations/shared/ui/app.jsx -o integrations/shared/ui/dist/bundle.js
+# libjsui (Graphite Metal) into the plugin, then RunUAT BuildCookRun
+integrations/unreal/scripts/build-example.sh "/Users/Shared/Epic Games/UE_5.8"
+
+build/unreal/Mac/JsuiExample.app/Contents/MacOS/JsuiExample \\
+    -windowed -ResX=1280 -ResY=720 --selftest
+`,
+    },
+    {
+      kind: 'pair',
+      items: [
+        {
+          kind: 'code',
+          lang: 'cpp',
+          title: 'the game side',
+          code: `
+UJsuiWidget* Ui = NewObject<UJsuiWidget>(this);
+// Bundle: Content/Jsui/bundle.js (or an http:// dev URL)
+
+Ui->OnMessageNative.AddLambda([this](const FString& Name, const FString& Json) {
+    if (Name == TEXT("game:spawn")) Spawn();
+});
+// only input the UI did not consume
+Ui->PassedMouseDownNative.AddLambda([this](const FKey& Button, const FVector2D& Pos) {
+    StartOrbit();
+});
+Ui->AddToViewport();
+`,
+        },
+        {
+          kind: 'code',
+          lang: 'cpp',
+          title: 'per frame',
+          code: `
+void AMyGame::Tick(float Dt) {
+    Ui->SetState(TEXT("game"), GameJson);   // useHostState('game')
+
+    for (int32 I = 0; I < Units.Num(); I++) {
+        FVector2D S;
+        bool bOn = FSceneView::ProjectWorldToScreen(Head(I), Rect, ViewProj, S);
+        S = Ui->ViewportToUi(S);
+        Pos[I * 4 + 0] = S.X;
+        Pos[I * 4 + 1] = S.Y;
+        Pos[I * 4 + 2] = bOn ? 1 : 0;
+        Pos[I * 4 + 3] = Units[I].Hue;
+    }
+    Ui->SetBuffer(TEXT("entities"), Pos);
+}   // SJsuiView ticks and paints in Slate's tick
+`,
+        },
+      ],
+    },
+    {
+      kind: 'note',
+      color: colors.purple,
+      text: 'On the Metal RHI, Skia Graphite draws the UI straight into a render target on the engine\'s own device and command queue (IMetalDynamicRHI::RHIRunOnQueue), committed before the Slate draw that samples it and repainting only what changed. On other RHIs, or with bForceCpu, it is rasterised on the CPU and the changed rectangle is uploaded into a UTexture2D. JSUI, Skia and their dependencies are one shared library exporting just the C API, so nothing clashes with the libraries Unreal bundles. macOS today; Win64 and Linux are wired up.',
+    },
+  ],
+};
+
+const LANGS = {
+  id: 'langs',
+  label: 'Rust & Go',
+  eyebrow: 'Any language · bindings/',
+  color: colors.orange,
+  title: 'Your language, a React UI',
+  lead: 'The C API is all a language needs. Thin bindings for Rust (a crate) and Go (a cgo package) wrap libjsui, and the same quest-log app runs in both: a GLFW window, Skia drawing on the GPU, the data and the rules in Rust or Go, the UI in React. The program owns the state, the UI asks for changes with Host.call, and the program answers.',
+  facts: [
+    ['Rust', 'jsui crate · glfw'],
+    ['Go', 'cgo package · go-gl/glfw'],
+    ['UI on screen', 'Skia Ganesh · OpenGL'],
+    ['Self-test', '--selftest'],
+  ],
+  blocks: [
+    {
+      kind: 'code',
+      lang: 'sh',
+      title: 'build and run',
+      code: `
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DJSUI_BUILD_SHARED=ON
+cmake --build build --target jsui_shared        # build/libjsui.so / .dylib
+npx jsui build bindings/ui/app.jsx -o bindings/ui/dist/bundle.js
+
+cd bindings/rust && cargo run --release --example quests
+cd bindings/go/examples/quests && go run .
+`,
+    },
+    {
+      kind: 'pair',
+      items: [
+        {
+          kind: 'code',
+          lang: 'rs',
+          title: 'Rust',
+          code: `
+let rt = jsui::Runtime::new(Config::default())?;
+rt.on_call(move |cx, call| match call.name {
+    "quests.add" => {
+        let args: Value = serde_json::from_str(call.args).unwrap();
+        let title = args["title"].as_str().unwrap_or("");
+        let id = app.borrow_mut().add(title);
+        cx.resolve_call(call.id, &json!({ "id": id }).to_string());
+    }
+    _ => { cx.reject_call(call.id, "unknown call"); }
+});
+rt.set_state("quests", &json!({ "items": quests }).to_string());
+rt.load_bundle_file("bindings/ui/dist/bundle.js")?;
+loop {
+    rt.tick(jsui::now_ms());
+    if rt.needs_redraw() { rt.render_gl(&gpu, 0, w, h, 0); }
+}
+`,
+        },
+        {
+          kind: 'code',
+          lang: 'go',
+          title: 'Go',
+          code: `
+rt, _ := jsui.New(jsui.Config{Width: 900, Height: 760})
+rt.OnCall = func(c jsui.Call) {
+    var args struct{ Title string }
+    c.Decode(&args)
+    id := app.Add(args.Title)
+    rt.ResolveCallValue(c.ID, map[string]any{"id": id})
+}
+rt.SetStateValue("quests", map[string]any{"items": app.Quests})
+rt.LoadBundleFile("bindings/ui/dist/bundle.js")
+for !win.ShouldClose() {
+    rt.Tick(jsui.NowMs())
+    if rt.NeedsRedraw() { rt.RenderGL(gpu, 0, w, h, 0) }
+}
+`,
+        },
+      ],
+    },
+    {
+      kind: 'note',
+      color: colors.orange,
+      text: 'Both bindings link libjsui, the shared library on every GitHub Release (or built with -DJSUI_BUILD_SHARED=ON), and expose the same pieces: shared state, messages and calls both ways, frame buffers, input with its consumed result, CPU and OpenGL rendering. Callbacks run on the thread that ticks the runtime; values cross as JSON text, with serde_json or encoding/json on top. Any language with a C FFI (Python, Zig, Swift, C#, Kotlin, ...) can do the same.',
+    },
+  ],
+};
+
 const DATA = {
   id: 'data',
   label: 'Game data',
@@ -612,4 +1001,4 @@ WEBGL=1 scripts/build-wasm.sh                         # -> web/dist-webgl/ (Skia
   ],
 };
 
-export const TARGETS = [GODOT, CAPI, DATA, WEB, DEV, BUILD];
+export const TARGETS = [GODOT, CAPI, ENGINES, UNITY, UNREAL, LANGS, DATA, WEB, DEV, BUILD];

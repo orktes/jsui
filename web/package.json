@@ -1,6 +1,6 @@
 {
   "name": "@orktes/jsui-web",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "description": "Browser host for the JSUI WebAssembly build",
   "author": "Jaakko Lukkari",
   "license": "MIT",
@@ -32,6 +32,9 @@
   "exports": {
     ".": "./jsui-web.js",
     "./jsui-webgpu.js": "./jsui-webgpu.js",
+    "./jsui-textures.js": "./jsui-textures.js",
+    "./jsui-audio.js": "./jsui-audio.js",
+    "./jsui-worker.js": "./jsui-worker.js",
     "./dist/*": "./dist/*",
     "./dist-webgl/*": "./dist-webgl/*",
     "./dist-gpu/*": "./dist-gpu/*",
@@ -40,6 +43,9 @@
   "files": [
     "jsui-web.js",
     "jsui-webgpu.js",
+    "jsui-textures.js",
+    "jsui-audio.js",
+    "jsui-worker.js",
     "dist/jsui.js",
     "dist/jsui.wasm",
     "dist-webgl/jsui.js",
@@ -54,6 +60,7 @@
   "scripts": {
     "test:web": "node test/node-smoke.mjs && node test/browser.test.mjs",
     "test:node": "node test/node-smoke.mjs",
+    "test:unit": "node --test test/textures.test.mjs test/audio.test.mjs",
     "test:browser": "node test/browser.test.mjs",
     "serve": "node test/serve.mjs",
     "prepack": "node scripts/check-dist.mjs"

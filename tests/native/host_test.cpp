@@ -266,6 +266,32 @@ TEST(host_load_font_promise) {
   CHECK(h.message("fontBad") && h.message("fontBad")->find("not a supported font") != std::string::npos);
 }
 
+TEST(host_font_bindings) {
+  Host h;
+  h.load(R"(
+    const n = __jsui_native;
+    n.loadFont('', 'tests/native/fonts/inter-abc.woff2', 0, -1).then(() => {
+      // Family from the file (Inter), so nothing new is listed; a named load is.
+      return n.loadFont('Var', 'tests/native/fonts/jsui-var.ttf', 0, -1);
+    }).then(() => {
+      let threw = '';
+      try { n.loadFontData('Junk', new Uint8Array([1, 2, 3, 4]), 0, -1); } catch (e) { threw = e.message; }
+      const fams = n.getFontFamilies();
+      n.setFontFallbacks(['Var', 'Nope']);
+      n.setDefaultFontFamily('Inter');
+      const unloaded = n.unloadFont('var') + ',' + n.unloadFont('Var');
+      n.postMessage('fonts', JSON.stringify({ fams, threw, unloaded, after: n.getFontFamilies() }));
+    }).catch(e => n.postMessage('fonts', 'error: ' + e.message));
+  )");
+  CHECK(h.until([&] { return h.message("fonts") != nullptr; }));
+  const std::string& m = *h.message("fonts");
+  CHECK(m.find("\"fams\":[\"Inter\",\"Var\"]") != std::string::npos);
+  CHECK(m.find("not a supported font") != std::string::npos);
+  CHECK(m.find("\"unloaded\":\"true,false\"") != std::string::npos);
+  CHECK(m.find("\"after\":[\"Inter\"]") != std::string::npos);
+  if (m.find("error") == 0) std::fprintf(stderr, "  %s\n", m.c_str());
+}
+
 TEST(host_reload_from_js_and_leak_free_teardown) {
   int evals = 0;
   Host h([&](JsuiConfig& c) { (void)c; });
@@ -460,7 +486,7 @@ TEST(host_dev_reload_on_version_change) {
   int versionHits = 0;
   jsui_test::TestHttpServer server([&](const jsui_test::HttpReq& r) {
     std::lock_guard<std::mutex> lock(m);
-    if (r.path == "/__jsui/version") {
+    if (r.path.rfind("/__jsui/version", 0) == 0) {
       versionHits++;
       return jsui_test::httpResponse(200, version + "\n");
     }
@@ -511,6 +537,86 @@ TEST(host_dev_reload_on_version_change) {
   jsui_render_rgba(h.rt, px.data(), 32, 32, 32 * 4);
   CHECK(px[0] == 0 && px[2] == 255);
   CHECK(jsui_last_error(h.rt) == nullptr);
+}
+
+// A bundle with __jsui_onDevUpdate (jsui dev's HMR client) is not reloaded on
+// a version change: it fetches and evaluates the update itself, and reports
+// errors through devError.
+TEST(host_dev_hot_update) {
+  std::mutex m;
+  std::string version = "v1";
+  std::string update;
+  std::string query;
+  const std::string bundle =
+      "const n = __jsui_native; globalThis.count = (globalThis.count || 0) + 1;"
+      "globalThis.__jsui_onDevUpdate = (token) => {"
+      "  fetch(new URL('/__jsui/hmr?from=' + token, location.href).href).then((r) => r.text())"
+      "    .then((code) => n.evalScript(code, 'hot-update.js'));"
+      "  return true;"
+      "};"
+      "n.postMessage('loaded', String(count));";
+  jsui_test::TestHttpServer server([&](const jsui_test::HttpReq& r) {
+    std::lock_guard<std::mutex> lock(m);
+    if (r.path.rfind("/__jsui/version", 0) == 0) {
+      query = r.path;
+      return jsui_test::httpResponse(200, version + "\n");
+    }
+    if (r.path.rfind("/__jsui/hmr", 0) == 0) return jsui_test::httpResponse(200, update, "text/javascript");
+    if (r.path == "/app/bundle.js") return jsui_test::httpResponse(200, bundle, "text/javascript");
+    return jsui_test::httpResponse(404, "");
+  });
+  Host h([](JsuiConfig& c) {
+    c.dev_mode = 1;
+    c.width = 32;
+    c.height = 32;
+  });
+  jsui_load_bundle_url(h.rt, server.url("/app/bundle.js").c_str());
+  CHECK(h.until([&] { return h.message("loaded") != nullptr; }));
+  CHECK(h.until([&] {
+    std::lock_guard<std::mutex> lock(m);
+    return !query.empty();
+  }));
+  CHECK(query.find("hmr=1") != std::string::npos);
+
+  // A build error: the update script shows it.
+  {
+    std::lock_guard<std::mutex> lock(m);
+    version = "v1!1";
+    update = "__jsui_native.devError('Build failed: App.js:3:1 unexpected token');";
+  }
+  CHECK(h.until([&] { return jsui_last_error(h.rt) != nullptr; }));
+  CHECK(h.hasError("unexpected token"));
+
+  // The fix: applied in place (no reload), error cleared.
+  {
+    std::lock_guard<std::mutex> lock(m);
+    version = "v2";
+    update =
+        "__jsui_native.devError(null);"
+        "__jsui_native.postMessage('updated', String(count) + ' ' + __jsui_native.evalScript('1 + 2', 'x.js'));";
+  }
+  CHECK(h.until([&] { return h.message("updated") != nullptr; }));
+  CHECK_EQ(*h.message("updated"), std::string("1 3"));
+  CHECK(jsui_last_error(h.rt) == nullptr);
+  CHECK(h.messages.size() == 2);  // loaded once: no reload
+
+  // An exception in the update script names its file.
+  {
+    std::lock_guard<std::mutex> lock(m);
+    version = "v3";
+    update = "\n\nthrow new Error('hot boom');";
+  }
+  CHECK(h.until([&] { return h.hasError("hot boom"); }));
+  CHECK(h.hasError("hot-update.js"));
+
+  // jsui_dev_update (hosts that poll themselves) takes the same path.
+  {
+    std::lock_guard<std::mutex> lock(m);
+    update = "__jsui_native.postMessage('manual', String(count));";
+  }
+  jsui_dev_update(h.rt);
+  CHECK(h.until([&] { return h.message("manual") != nullptr; }));
+  CHECK_EQ(*h.message("manual"), std::string("1"));
 }
 
 #endif  // _WIN32

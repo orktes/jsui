@@ -8,6 +8,7 @@
 
 #include "animated/native_animated.h"
 #include "dev_overlay.h"
+#include "dev_session.h"
 #include "include/core/SkCanvas.h"
 #include "include/core/SkPicture.h"
 #include "include/core/SkPictureRecorder.h"
@@ -15,6 +16,8 @@
 #include "input/input.h"
 #include "js/engine.h"
 #include "render/image_cache.h"
+#include "render/lottie.h"
+#include "render/shader_view.h"
 #include "render/image_node.h"
 #include "render/painter.h"
 
@@ -52,6 +55,9 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
     : config(cfg), handle(h), loader(h, cfg.load, cfg.load_user), doc(mainDocument(surfaces_, *this, &nextNodeId_)) {
   if (cfg.base_url) baseUrl = cfg.base_url;
   images = std::make_unique<ImageCache>(*this);
+  lotties = std::make_unique<LottieCache>(*this);
+  shaders = std::make_unique<ShaderEffects>(*this);
+  audio = std::make_unique<Audio>(*this);
   animated = std::make_unique<NativeAnimated>(doc);
   animated->findView = [this](uint32_t id) { return findNode(id); };
   animated->buffers = &buffers;
@@ -61,14 +67,18 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
   };
   // Animated.hostBuffer nodes follow their buffer (also in jsui_tick_native).
   buffers.onChange = [this](const std::string& key) { animated->bufferChanged(key); };
+  textures.log = [this](JsuiLogLevel level, const std::string& msg) { log(level, msg); };
   main().handle = h;
   attach(main());
   input = main().input.get();
   doc.setViewport(float(cfg.width), float(cfg.height), cfg.pixel_ratio > 0 ? cfg.pixel_ratio : 1.f);
+  if (cfg.dev_mode) session = std::make_unique<DevSession>(*this);
   resetEngine();
 }
 
 Runtime::~Runtime() {
+  audio->contextEnded();
+  audio.reset();
   loader.cancelAll();
   std::vector<uint64_t> calls = js ? js->pendingCalls() : std::vector<uint64_t>();
   js.reset();
@@ -86,6 +96,9 @@ void Runtime::attach(Surface& s) {
   Document& d = s.doc;
   d.fonts = &fonts;
   d.images = images.get();
+  d.textures = &textures;
+  d.lotties = lotties.get();
+  d.shaders = shaders.get();
   s.input = std::make_unique<InputManager>(*this, d, s.cursor);
   InputManager* in = s.input.get();
   d.onNodeDestroyed = [this, in](Node* n) {
@@ -223,6 +236,7 @@ void Runtime::redrawAll() {
 }
 
 void Runtime::log(JsuiLogLevel level, const std::string& msg) {
+  if (session && session->joined()) session->uiEvent("log", {{"level", Value(int(level))}, {"text", Value(msg)}});
   if (config.log) {
     config.log(config.log_user, level, msg.c_str());
     return;
@@ -233,12 +247,14 @@ void Runtime::log(JsuiLogLevel level, const std::string& msg) {
 
 void Runtime::reportError(const std::string& msg) {
   lastError = msg;
+  if (session && session->joined()) session->uiEvent("error", {{"text", Value(msg)}});
   log(JSUI_LOG_ERROR, msg);
   if (config.dev_mode) redrawAll();  // show the overlay
 }
 
 void Runtime::resetEngine() {
   std::vector<uint64_t> calls = js ? js->pendingCalls() : std::vector<uint64_t>();
+  audio->contextEnded();
   js.reset();
   bundleRan_ = false;
   animated->clear();
@@ -268,8 +284,9 @@ int Runtime::setState(const char* key, const char* json, bool patch) {
 }
 
 void Runtime::uiStateChanged(const std::string& key) {
-  if (!config.on_state) return;
   const std::string* json = state.json(key);
+  if (session && session->joined()) session->uiEvent("state", {{"key", Value(key)}, {"value", json ? Value::parseJson(*json) : Value()}});
+  if (!config.on_state) return;
   config.on_state(config.state_user, key.c_str(), json ? json->c_str() : nullptr);
 }
 
@@ -283,6 +300,25 @@ void Runtime::deliverBufferChanges() {
   if (!buffers.hasDirty()) return;
   std::vector<std::string> keys = buffers.takeDirty();
   js->buffersChanged(keys);
+}
+
+void Runtime::deliverAudioEvents() {
+  if (!audio->hasEvents()) return;
+  Value::Array list;
+  for (auto& e : audio->takeEvents()) {
+    if (e.loaded)
+      list.emplace_back(Value::Array{Value(1), Value(e.url), Value(e.status), Value(e.duration)});
+    else
+      list.emplace_back(Value::Array{Value(0), Value(double(e.voice)), Value(e.status)});
+  }
+  Value arg(std::move(list));
+  js->callGlobal("__jsui_onAudio", &arg, 1);
+}
+
+void Runtime::deliverTextureChanges() {
+  if (!textures.hasDirty()) return;
+  std::vector<std::string> keys = textures.takeDirty();
+  js->texturesChanged(keys);
 }
 
 int Runtime::resolveCall(uint64_t id, const char* json) {
@@ -377,6 +413,7 @@ bool Runtime::loadSource(const std::string& source, const std::string& name) {
   // need no delivery.
   state.takeDirty();
   buffers.takeDirty();
+  textures.takeDirty();
   bool ok = js->eval(source, name);
   // Surfaces run their apps once the bundle registered its components (a
   // component registered later starts its surface then, see AppRegistry).
@@ -391,15 +428,22 @@ void Runtime::loadUrl(const std::string& url) {
   if (config.dev_mode) devOrigin_ = httpOrigin(bundleUrl);
   loader.load(bundleUrl, [this](Resource res) {
     if (!res.ok()) {
+      // A dev server answers 503 with the build error.
+      std::string body = res.status >= 400 ? trimmed(res.text()) : std::string();
+      if (body.size() > 4000) body = body.substr(0, 4000) + "\n...";
       reportError("failed to load bundle " + res.url + " (status " + std::to_string(res.status) +
-                  (res.error.empty() ? "" : ": " + res.error) + ")");
+                  (res.error.empty() ? "" : ": " + res.error) + ")" + (body.empty() ? "" : "\n" + body));
       return;
     }
     // A dev server may stamp the bundle with its version so a change between
     // this response and the first poll is not missed.
+    bool session = false;
     for (auto& [k, v] : res.headers) {
       if (lower(k) == "x-jsui-version") devVersion_ = trimmed(v);
+      if (lower(k) == "x-jsui-session") session = true;
     }
+    sessionOffered_ = session;
+    if (this->session) this->session->setOffered(session);
     loadSource(res.text(), bundleUrl);
   });
 }
@@ -407,6 +451,18 @@ void Runtime::loadUrl(const std::string& url) {
 void Runtime::requestReload() {
   reloadRequested_ = true;
   redrawAll();
+}
+
+static void invalidateText(Node* n) {
+  if (n->type() == NodeType::Text || n->type() == NodeType::TextInput) n->markDirty();
+  for (Node* c : n->children()) invalidateText(c);
+}
+
+void Runtime::fontsChanged() {
+  for (auto& s : surfaces_) {
+    if (s->doc.root()) invalidateText(s->doc.root());
+    s->doc.markLayoutDirty();
+  }
 }
 
 void Runtime::reload() {
@@ -422,11 +478,21 @@ void Runtime::reload() {
   }
   loader.cancelAll();
   devPollInFlight_ = false;
+  if (session) session->reset();
   images->clear();  // its in-flight loads were just cancelled
+  lotties->clear();
   lastError.clear();
   resetEngine();
   if (!bundleUrl.empty()) loadUrl(bundleUrl);
   else if (!bundleSource.empty()) loadSource(bundleSource, bundleName);
+}
+
+void Runtime::devUpdate() {
+  if (js && !reloadRequested_ && bundleRan_) {
+    Value token(devVersion_);
+    if (js->callGlobal("__jsui_onDevUpdate", &token, 1)) return;
+  }
+  reload();
 }
 
 bool Runtime::devKey(const char* key, bool down) {
@@ -439,12 +505,13 @@ bool Runtime::devKey(const char* key, bool down) {
 
 // Polls <origin>/__jsui/version (an opaque token; any change means the
 // bundle changed). The dev server answers immediately; we poll every 500 ms,
-// backing off to 2 s while the server is unreachable.
+// backing off to 2 s while the server is unreachable. `hmr=1`: a failed
+// build changes the token too, so a hot-updating bundle can show the error.
 void Runtime::devPoll() {
   if (!config.dev_mode || devOrigin_.empty() || devPollInFlight_ || now < devNextPoll_) return;
   devPollInFlight_ = true;
   LoadRequest req;
-  req.url = devOrigin_ + "/__jsui/version";
+  req.url = devOrigin_ + "/__jsui/version?hmr=1";
   req.timeoutMs = 5000;
   req.headers.emplace_back("Cache-Control", "no-cache");
   loader.load(std::move(req), [this](Resource res) {
@@ -454,13 +521,20 @@ void Runtime::devPoll() {
       return;
     }
     devNextPoll_ = now + 500;
+    if (session) {
+      bool offered = false;
+      for (auto& [k, v] : res.headers)
+        if (lower(k) == "x-jsui-session") offered = true;
+      // Only on a change: a 404 to the session poll holds until the server restarts.
+      if (offered != sessionOffered_) session->setOffered(sessionOffered_ = offered);
+    }
     std::string token = trimmed(res.text());
     if (devVersion_.empty()) {
       devVersion_ = token;
     } else if (token != devVersion_) {
       devVersion_ = token;
-      log(JSUI_LOG_INFO, "bundle changed (version " + token + "), reloading");
-      reload();
+      log(JSUI_LOG_INFO, "bundle changed (version " + token + ")");
+      devUpdate();
     }
   });
 }
@@ -480,6 +554,9 @@ void Runtime::tick(double nowMs) {
   flushSurfaces();
   deliverStateChanges();
   deliverBufferChanges();
+  deliverTextureChanges();
+  audio->update();
+  deliverAudioEvents();
   js->runTimers(nowMs);
   js->runAnimationFrame(nowMs);
   js->runJobs();
@@ -501,6 +578,13 @@ void Runtime::tick(double nowMs) {
   // scroll physics of this tick (Animated.event mappings saw the offsets).
   animated->tick(nowMs);
   deliverAnimatedEvents();
+  // LottieViews advance on the same clock (and a loaded source sizes its
+  // views before this tick's layout).
+  lotties->tick(nowMs);
+  deliverLottieEvents();
+  // ShaderViews whose shader reads `time` repaint on the same clock.
+  shaders->tick(nowMs);
+  deliverShaderEvents();
   for (auto& s : surfaces_) {
     s->doc.layout();
     s->doc.tickLayoutAnimations(nowMs);
@@ -510,12 +594,16 @@ void Runtime::tick(double nowMs) {
   devPoll();
   // jsui_call_ui results settled during this tick (or since the last one).
   deliverUiCallResults();
+  // Shared-session commands run last, on the frame this tick produced.
+  if (session) session->tick(devOrigin_);
 }
 
 void Runtime::tickNative(double nowMs) {
   now = nowMs;
   for (auto& s : surfaces_) s->doc.now = nowMs;
   animated->tick(nowMs);  // end events stay queued until the next tick()
+  lotties->tick(nowMs);   // so do LottieView events
+  shaders->tick(nowMs);   // and ShaderView errors
   for (auto& s : surfaces_) {
     s->doc.layout();
     s->doc.tickLayoutAnimations(nowMs);
@@ -552,6 +640,35 @@ bool listensFor(const Node* n, const char* token) {
   return false;
 }
 }  // namespace
+
+void Runtime::deliverLottieEvents() {
+  if (!js || lotties->events.empty()) return;
+  std::vector<LottieCache::Event> events = std::move(lotties->events);
+  lotties->events.clear();
+  for (const LottieCache::Event& e : events) {
+    Node* n = findNode(e.node);
+    if (!n || n->type() != NodeType::Lottie) continue;
+    const char* type = e.kind == LottieCache::Event::Kind::Loaded   ? "load"
+                       : e.kind == LottieCache::Event::Kind::Failed ? "error"
+                                                                    : "animationfinish";
+    if (!listensFor(n, e.kind == LottieCache::Event::Kind::Finished ? "animationFinish" : type)) continue;
+    Value::Object ev{{"type", Value(type)}, {"target", Value(double(e.node))}};
+    if (e.kind == LottieCache::Event::Kind::Failed) ev.emplace("error", Value(e.error));
+    if (e.kind == LottieCache::Event::Kind::Finished) ev.emplace("isCancelled", Value(e.cancelled));
+    js->dispatchEvent(Value(std::move(ev)));
+  }
+}
+
+void Runtime::deliverShaderEvents() {
+  if (!js || shaders->events.empty()) return;
+  std::vector<ShaderEffects::Event> events = std::move(shaders->events);
+  shaders->events.clear();
+  for (const ShaderEffects::Event& e : events) {
+    Node* n = findNode(e.node);
+    if (!n || n->type() != NodeType::Shader || !listensFor(n, "error")) continue;
+    js->dispatchEvent(Value(Value::Object{{"type", Value("error")}, {"target", Value(double(e.node))}, {"error", Value(e.error)}}));
+  }
+}
 
 bool Runtime::imageEventsReady(const Document& doc) const {
   for (const auto& e : doc.imageEvents) {
@@ -637,7 +754,7 @@ bool Runtime::wantsFrame() const {
   // A pending repaint alone is not a reason to tick: the host paints after
   // the tick it already ran.
   if (reloadRequested_ || loader.pending() > 0 || (js && js->hasPendingWork(now + 17)) || animated->animating() ||
-      !animated->ends.empty() || state.hasDirty() || buffers.hasDirty() || !uiResults_.empty() || !doomed_.empty())
+      !animated->ends.empty() || lotties->animating() || shaders->animating() || state.hasDirty() || buffers.hasDirty() || textures.hasDirty() || audio->hasEvents() || audio->busy() || !uiResults_.empty() || !doomed_.empty())
     return true;
   for (const auto& s : surfaces_)
     if (s->input->animating() || s->doc.layoutAnimating() || imageEventsReady(s->doc) ||
@@ -648,6 +765,7 @@ bool Runtime::wantsFrame() const {
 
 bool Runtime::animatingFrames(const Surface& s) const {
   return s.input->animating() || s.doc.layoutAnimating() || animated->animating() || !animated->ends.empty() ||
+         lotties->animating() || shaders->animating() ||
          (js && js->hasPendingWork(now + 17));
 }
 

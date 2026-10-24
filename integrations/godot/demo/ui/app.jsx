@@ -15,6 +15,13 @@
 //   * JS -> Godot messages: `ui:ready` on mount, and the showcase's
 //     `showcase:event` reports (hover, press, focus, scroll, text...) that
 //     main.gd's self-test checks.
+// Sound: <UISounds> gives every pressable a hover / focus tick, a press
+// chime and a long-press one (bus 'ui'), and useMusic loops a quiet pad on
+// the 'music' bus; the strip's Music button mutes that bus (the UI's own
+// volume: Godot's buses stay the game's). JsuiView plays them with
+// AudioStreamPlayers on the Godot buses of the same names (the demo's
+// default_bus_layout.tres has "UI" and "Music"). The sounds are synthesized
+// by ui/sounds/make-sounds.py.
 // Godot -> JS shared state `godot.scene` (true in main.gd) says the host
 // draws a live 3D scene behind the view: the showcase then runs `transparent`
 // (no backdrop image, lighter scrim) and the root has no background, so the
@@ -29,17 +36,30 @@ import {
   Easing,
   Host,
   Pressable,
+  Sound,
   StyleSheet,
   Text,
+  UISounds,
   View,
   useHostBufferListener,
   useHostHandler,
   useHostState,
+  useMusic,
   useWindowDimensions,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Showcase from '../../../../examples/showcase/interactions.jsx';
 import { colors, font } from '../../../../examples/theme.js';
+import { AudioProbe } from './audio-probe.jsx';
+import { Cinema, TextureProbe } from './cinema.jsx';
+import { LottieProbe } from './lottie-probe.jsx';
+import { ShaderProbe } from './shader-probe.jsx';
+import back from './sounds/back.wav';
+import confirm from './sounds/confirm.wav';
+import menuLoop from './sounds/menu-loop.ogg';
+import tick from './sounds/tick.wav';
+
+const UI_SOUNDS = { hoverIn: tick, focus: tick, press: confirm, longPress: back };
 
 function Toast() {
   const [text, setText] = useState(null);
@@ -73,6 +93,7 @@ function Bridge() {
   const stats = useHostState('godot.stats', null);
   const [pings, setPings] = useState(0);
   const [pong, setPong] = useState(null);
+  const [musicOn, setMusicOn] = useState(true);
   const pingRef = useRef(null);
   useEffect(() => Host.postMessage('ui:ready', {}), []);
   // Frame data (JsuiView.set_buffer): main.gd's self-test checks it arrives.
@@ -108,6 +129,20 @@ function Bridge() {
       <Text style={styles.line}>
         {pong ? (pong.error ? `failed: ${pong.error}` : `pong #${pong.count} · +${pong.reward ?? 0} credits`) : 'no pong yet'}
       </Text>
+      <View style={styles.sep} />
+      <Pressable
+        onPress={() => {
+          Sound.setBusMuted('music', musicOn, { fade: 400 });
+          setMusicOn(!musicOn);
+        }}
+        style={({ pressed, focused, hovered }) => [
+          styles.button,
+          (focused || hovered) && styles.buttonActive,
+          pressed && styles.buttonPressed,
+        ]}
+      >
+        <Text style={styles.buttonText}>{musicOn ? 'Music on' : 'Music off'}</Text>
+      </Pressable>
     </View>
   );
 }
@@ -144,15 +179,18 @@ function Stage({ children }) {
 
 function App() {
   const scene = useHostState('godot.scene', false);
+  useMusic(menuLoop, { volume: 0.5, fadeIn: 2000 });
   return (
     // Insets are zero in Godot; on phones (the iOS host) the UI stays clear of
     // the notch / Dynamic Island / home indicator.
     <View style={scene ? styles.rootClear : styles.root}>
-      <Stage>
-        <Showcase transparent={scene} />
-        <Bridge />
-        <Toast />
-      </Stage>
+      <UISounds sounds={UI_SOUNDS} volume={0.7}>
+        <Stage>
+          <Showcase transparent={scene} />
+          <Bridge />
+          <Toast />
+        </Stage>
+      </UISounds>
     </View>
   );
 }
@@ -230,4 +268,16 @@ function Badge({ label }) {
 
 AppRegistry.registerComponent('App', () => App);
 AppRegistry.registerComponent('Badge', () => Badge);
+// Host textures (cinema.jsx): the cinema scene, and main.gd's self-test probe.
+AppRegistry.registerComponent('Cinema', () => Cinema);
+AppRegistry.registerComponent('TextureProbe', () => TextureProbe);
+// Lottie (lottie-probe.jsx): main.gd's self-test probe.
+AppRegistry.registerComponent('LottieProbe', () => LottieProbe);
+// ShaderView (shader-probe.jsx): main.gd's self-test probe.
+AppRegistry.registerComponent('ShaderProbe', () => ShaderProbe);
+// Sound (audio-probe.jsx): main.gd's self-test probe.
+AppRegistry.registerComponent('AudioProbe', () => AudioProbe);
+// Explicitly: the showcase's import registered 'Showcase' first. A view that
+// picks another component (JsuiView.component, e.g. cinema/cinema.tscn's
+// 'Cinema') still replaces it once the bundle has loaded.
 AppRegistry.runApplication('App', {});

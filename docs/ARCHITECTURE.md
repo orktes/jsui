@@ -68,11 +68,12 @@ library with a C API, and the same core compiles to WebAssembly.
 | `src/js/` | QuickJS host (`JsEngine`) and bridge globals |
 | `src/input/` | Hit testing, event routing, focus and gamepad navigation |
 | `src/platform/` | Resource loader backends (file, http, emscripten) |
+| `src/audio/` | UI audio: requests to the host's audio handler or the built-in miniaudio backend (see [AUDIO.md](AUDIO.md)) |
 | `src/net/` | Minimal HTTP/1.1 client for dev servers (native) |
 | `src/runtime.*`, `src/capi.cpp` | Runtime object and C API wrappers |
 | `tools/jsui-render` | Headless renderer: bundle → PNG (tests, CI) |
 | `tools/jsui-record` | Headless recorder: bundle + JSON input timeline → 60 fps frames / H.264 (ffmpeg), with cursor, caption and input-legend overlay |
-| `tools/jsui-viewer` | Windowed host with dev mode (live reload) |
+| `tools/jsui-viewer` | Windowed host with dev mode (hot updates / live reload) |
 | `tools/jsui-bench` | Frame benchmark: per-phase time (JS, commit, Animated, style, layout, input, paint), work counters and allocations per frame (see "Performance") |
 | `tools/jsui-paint-bench` | Paint benchmark: paint time, pixels repainted, draw calls and GL calls per frame on the CPU raster and Ganesh GL (see "Paint performance") |
 | `integrations/godot` | Godot 4 GDExtension (`JsuiView` Control) + demo project |
@@ -315,8 +316,9 @@ used to process Dawn events).
   `CopySrc` usage such as the web canvas): the frame's single pass first
   draws that copy into the target, then the damage over it, and afterwards
   the damage rects are copied (`copyTextureToTexture`) from the target into
-  the copy. That is one pass, like a direct frame, plus a full-frame read of
-  the copy. Targets without `CopySrc`, and `JSUI_WEBGPU_NO_CLEAR`, use a
+  the copy, as tasks of the same Graphite recording (one command encoder and
+  one submit a frame). That is one pass, like a direct frame, plus a
+  full-frame read of the copy. Targets without `CopySrc`, and `JSUI_WEBGPU_NO_CLEAR`, use a
   retained Graphite render target instead: the damage pass loads and stores
   all of it and a second pass draws it into the target. On a 4K canvas on
   an Apple GPU those two full-frame passes cost more than a full repaint
@@ -380,7 +382,9 @@ used to process Dawn events).
   filtering instead of being keyed by it, and the shadow of a node whose
   scale or size animates is drawn from the mask of the nearest of 8 sizes
   per octave, stretched to it, and repainted exactly once it stops
-  (`quantizedScale`, `shadowInexact` in `painter.cpp`). Such approximate
+  (`quantizedScale`, `NodeRecord::approximate` in `painter.cpp`; the CPU
+  raster does the same while a node keeps moving, see Paint performance:
+  Shadows). Such approximate
   draws ask for an exact repaint (`Document::markExactRepaint`, per
   surface), which `jsui_needs_redraw()` reports once nothing animates any
   more: while animations, scroll physics or JS frame callbacks drive frames
@@ -456,6 +460,30 @@ used to process Dawn events).
   `JSUI_WEBGPU_NO_RASTER_CACHE` turns it off; `webgpu: raster cache` in the
   browser tests compares it with direct painting, in steady frames and with
   the list scrolled at 2x.
+* **Static backdrop.** Each damage rect is cleared and repainted from the
+  root, so it also repaints whatever lies under everything: on
+  `interactions.jsx` the background colour, the full-screen image and the
+  scrim's two gradients, 4 draws (plus the clear) in each of a frame's 3-4
+  rects. What the document paints first, in paint order up to the first
+  node that is changing, is kept in a texture of the canvas' size
+  (`Backdrop`, `updateBackdrop` in `painter.cpp`, in the same `LayerCache`),
+  and each rect is drawn from it (`kSrc`, in place of the clear) before the
+  rest is painted. Down from the root, each node it ends inside of paints
+  its own decorations and its first children into it: such a node must be
+  unchanged itself (`selfStill`) and paint without a layer; a child in it
+  whole must be quiet, have fewer than 4 nodes and no layers (never a
+  raster-cache candidate, so nothing in it depends on texture state). A
+  signature of what each one paints and where (with the font and image
+  generations and the canvas size) must stay the same for 2 updates before
+  a texture is made, and a new one renders it again. Painted over nothing,
+  the texture holds exactly the pixels painting the backdrop directly gives
+  (the canvas' format, at the origin, so dithering matches too), so
+  repaints over it equal full ones bit for bit. It costs one texture of the
+  canvas' size. On `interactions.jsx` at 1280x720 Skia draws per frame went
+  from ~73 to ~58 scrolling the armory list and from ~48 to ~31 in steady
+  frames. `JSUI_WEBGPU_NO_BACKDROP` turns it off; `webgpu: static
+  backdrop` in the browser tests checks the pixels against painting it,
+  also after the backdrop changes.
 * **What each pass is** (`interactions.jsx`, `frame-bench.mjs` lists them
   with GPU times). Steady (the looping glow, deploy pulse, live dot and
   progress shimmer): one pass, the canvas (cleared, the last frame drawn
@@ -501,8 +529,8 @@ used to process Dawn events).
   take ~0.3 ms, the damage walk ~0.13 ms and native Animated ~0.09 ms;
   Graphite's snap, command encoding and submit and the canvas texture take
   ~0.85 ms (Graphite's `queue.submit` ~0.2 ms of it), and the copy-back's
-  own submit, which carries one copy, ~0.13 ms (one submit for both would
-  be the next cut), with the JS / wasm crossings most of the rest.
+  own encoder and submit, which carried one copy, ~0.13 ms (since folded
+  into Graphite's recording), with the JS / wasm crossings most of the rest.
 * **No CPU waits.** In the browser Graphite runs without a tick function:
   submits never wait, buffer maps are async and finished work is collected by
   `checkAsyncWorkCompletion()` each frame. Raster images are uploaded once per
@@ -615,6 +643,49 @@ to render into RenderingDevice textures (integrations/godot/README.md,
   `JSUI_VULKAN_TEST_REQUIRE=1` turns its skip into a failure. The Godot job
   also runs the demo on Vulkan (lavapipe) and compares the GPU frame with
   the CPU raster. Metal compiles in the macOS CI job but is not run there.
+
+### Direct3D 12 / 11 (Skia Ganesh, Windows)
+
+`jsui_gpu_create_d3d12(device, queue)` / `jsui_gpu_create_d3d11(device)`
+with `jsui_render_gpu_target` (`src/render/gpu_d3d.cpp`, CMake option
+`JSUI_D3D`) draw with Skia **Ganesh** on Direct3D 12 (Graphite has no
+Direct3D backend) for D3D hosts: Unreal and Godot on D3D12, Unity on D3D11
+or D3D12. `JsuiGpuTarget.texture` is an `ID3D12Resource*` /
+`ID3D11Texture2D*`, `format` a `DXGI_FORMAT` (0: the resource's own),
+`layout` / `final_layout` D3D12 resource states.
+
+* **D3D12: the host's device and queue.** Ganesh runs on the host's
+  `ID3D12Device` and DIRECT queue (adapter found by the device's LUID).
+  The target is wrapped per frame in its entry state; Ganesh records and
+  tracks its own transitions but cannot end in a state of the caller's
+  choosing (its flush ignores a new `MutableTextureState` on D3D), so after
+  Skia's submit the render executes one command list of its own on the
+  queue with the transition from the state Skia left it in to
+  `final_layout`, and those returning sampled host textures to their home
+  state (`JsuiTexture.usage`, 0: `PIXEL_SHADER_RESOURCE`; Godot's mirror
+  textures live in `COPY_DEST`). No CPU wait; its lists are recycled on a
+  fence of its own.
+* **Frames.** With `JSUI_GPU_INCREMENTAL` the target is the retained frame
+  (as on Graphite); without it small damage goes into a retained frame of
+  the context's, drawn into the target whole, as in the GL backend.
+* **D3D11: a D3D12 device beside the host's.** The context creates a D3D12
+  device on the D3D11 device's adapter and its own queue. Each runtime
+  draws into a shared texture (D3D12 `HEAP_FLAG_SHARED` +
+  `ALLOW_SIMULTANEOUS_ACCESS`, opened with `OpenSharedResource1`), which is
+  also its retained frame, ordered by one shared fence (D3D11 signal ->
+  D3D12 wait, Skia's work, after which the texture decays to `COMMON`, D3D12 signal
+  -> D3D11 wait) and copied into the host's texture on the immediate
+  context (`CopySubresourceRegion`; just the damage with
+  `JSUI_GPU_INCREMENTAL`). The host texture needs no special flags.
+* **Build.** `scripts/build-skia-desktop.sh` on Windows builds m157 with
+  `skia_use_direct3d`; `JSUI_D3D` then defaults on and links `d3d12`,
+  `d3d11`, `dxgi`, `dxguid`.
+* **Tests.** `tests/native/d3d_test.cpp` uses WARP (no GPU needed): D3D12
+  incremental and retained-frame frames compared with the CPU raster, a
+  host texture kept in `COPY_DEST`, and the D3D11 path on a WARP D3D11
+  device (incremental, full, `JSUI_GPU_NO_CLEAR`). With the D3D12 debug
+  layer installed it also fails on debug-layer errors.
+  `JSUI_D3D_TEST_REQUIRE=1` (the Windows CI job) turns skips into failures.
 
 ### Dawn native (Skia Graphite on a host's Dawn)
 
@@ -905,6 +976,183 @@ the views natively removes both (JS ~15 µs at 1000 markers); what is left is
 the native Animated evaluation and style writes (~2.4 µs per marker with two
 animated transforms).
 
+### Host textures
+
+Pictures the host makes itself are shown inside the UI by name: a video the
+engine decodes (Godot's `VideoStreamPlayer` texture, WebCodecs
+`VideoFrame`s, a `<video>` element), a 3D render target (a character
+preview, a minimap camera), a webcam. JSUI decodes and plays nothing; it
+samples textures (`src/render/host_textures.*`,
+`packages/react/src/hostTexture.js`):
+
+```jsx
+<HostTexture name="trailer" resizeMode="contain" style={{ width: 640, aspectRatio: 16 / 9, borderRadius: 12 }} />
+const size = useHostTexture('trailer');   // { width, height } once set, else null
+```
+
+* `HostTexture` is an `Image` host node with a `texture` prop, so it lays out
+  and paints like an image: intrinsic size = the texture's px / `scale`,
+  `resizeMode`, rounded clipping, `tintColor`, opacity and transforms. It
+  is never raster-cached as a sprite and is sampled without mipmaps (new
+  contents every frame).
+* A texture is CPU pixels (`jsui_set_texture_pixels`: copied into a raster
+  `SkImage`, so every renderer shows it, the CPU raster included; GPU
+  backends upload it like any image) or a GPU texture of the device the
+  runtime renders with (`jsui_set_texture` with a `JsuiTexture`: a GL
+  texture name, `WGPUTexture`, `VkImage`, `id<MTLTexture>` or
+  `ID3D12Resource*`), sampled in
+  place with no copy. The description stays the host's: each GPU backend
+  wraps it as an `SkImage` of its own device inside its render
+  (`TextureWrapper`, made current by a thread-local `TextureScope` around
+  the frame, like `LayerCacheScope`): `SkImages::BorrowTextureFrom` on
+  Ganesh GL / Metal / D3D12, `SkImages::WrapTexture` on Graphite (Vulkan in
+  `SHADER_READ_ONLY_OPTIMAL`, Metal, Dawn / browser WebGPU). The painter
+  only asks `HostTextures::image()`, so it stays backend independent. A
+  canvas that cannot sample a kind (the CPU raster for a GPU texture, a GL
+  texture on Graphite) draws nothing and logs one warning per texture.
+  Wraps are cached per texture until its contents change.
+* Repaint: Image nodes showing a texture register with the registry while
+  their `NodeCache` lives. `jsui_texture_updated` (the host drew the next
+  video frame into the same texture) and `jsui_set_texture_pixels` call
+  `markPaintDirty()` on just those nodes: the damage is their rects, no
+  layout, no JS. A new size also re-measures them, and textures set,
+  resized or removed reach JS once per `jsui_tick` as
+  `__jsui_onHostTexture(keys)` (`useHostTexture`, `HostTextures.subscribe`).
+  Setting an identical description is a no-op.
+* Origins: GPU textures with `JSUI_TEXTURE_BOTTOM_LEFT_ORIGIN` (GL render
+  targets) are flipped where they are drawn; CPU pixels are flipped when
+  copied.
+* Hosts: the web host uploads `VideoFrame` / `<video>` / canvas /
+  `ImageBitmap` sources with the renderer in use (WebGPU
+  `copyExternalImageToTexture`, WebGL `texImage2D`, the CPU raster through
+  `getImageData`); the Godot `JsuiView.set_texture(name, texture, live)`
+  passes the RenderingDevice texture behind any `Texture2D` (or its pixels
+  on the CPU path).
+
+### Lottie (LottieView)
+
+Lottie (Bodymovin JSON) animations play natively with Skia's Skottie
+module (`src/render/lottie.*`, `packages/react/src/lottie.js`). The API is
+lottie-react-native's; the CLI aliases `lottie-react-native` to it:
+
+```jsx
+import LottieView from 'lottie-react-native';
+<LottieView source={require('./victory.json')} autoPlay loop style={{ width: 200, height: 200 }} />
+<LottieView source={{ uri: 'https://example.com/a.json' }} progress={animatedValue} colorFilters={[{ keypath: '**.Fill 1', color: '#f00' }]} />
+ref.current.play(30, 60); ref.current.pause(); ref.current.resume(); ref.current.reset();
+```
+
+* `LottieView` is a host node (`NodeType::Lottie`, "LottieView"). Sources:
+  `{uri}` / URI strings load through the `ResourceLoader` (files, http, data:
+  URIs, the embedder's loader); inline compositions (`require('./a.json')`,
+  an object or JSON text) go to native once with `lottieData(json)`, which
+  returns a content-hash key the view uses as its source. `LottieCache` (one
+  per runtime) parses a composition once per source and colorFilters set and
+  shares it between views (each paint seeks it, then renders).
+* Playback runs on the runtime clock: `LottieCache::tick()` (in `jsui_tick`
+  and `jsui_tick_native`, before layout) advances playing views and calls
+  `markPaintDirty()` on just those nodes, so a playing animation repaints its
+  own rect and runs no JS. `autoPlay` starts it once the source loads;
+  `loop` (default true), `speed` (negative plays backwards) and segments
+  (`play(startFrame, endFrame)`, end < start plays down) follow
+  lottie-react-native. Calls made before the load apply when it loads.
+  `wantsFrame` is true only while a view plays.
+* `progress` (0–1) shows that frame instead of playing. It travels as the
+  paint-only style key `lottieProgress` (its own style group, no relayout),
+  so an `Animated` value drives it like any animated style, on the JS or the
+  native driver; `createAnimatedComponent(LottieView)` maps an animated
+  `progress` prop to it (`Component.__animatedStyleProps`).
+* Without a size the view takes the composition's size (keeping its aspect
+  ratio when one side is set); `resizeMode` contain (default), cover, center
+  or stretch place it in the padding box, clipped to rounded corners.
+* `colorFilters`: `[{keypath, color}]` override solid fills and strokes
+  (Skottie `PropertyObserver` color handles, re-applied after every seek).
+  A keypath's dot-separated names ("*" one, "**" any) must match, in order,
+  names along a property's path (layers, groups, the fill / stroke itself);
+  names in between may be skipped, so `"Layer"` recolors a whole layer.
+  Gradients are not color properties.
+* Events: `load` (onAnimationLoaded), `error` (onAnimationFailure, also for
+  JSON that is not a composition) and `animationfinish` (onAnimationFinish,
+  `isCancelled` when `play` / `reset` interrupt a non-looping segment).
+* Embedded images (data: URIs) and fonts registered with the runtime work;
+  external image assets, expressions and dotLottie (.lottie) archives do not.
+* Build: `JSUI_LOTTIE` (default on when the Skia build has `libskottie`;
+  every `scripts/build-skia-*.sh` and the aseprite prebuilt do). It adds
+  about 360 KB to `jsui.wasm` (~90 KB brotli; ~136 KB brotli on the m157
+  WebGPU build). Off, sources fail with an error and nothing is linked.
+
+### Shaders (ShaderView)
+
+Your own SkSL (Skia runtime effects, https://skia.org/docs/user/sksl/)
+paints a view, on every renderer (the CPU raster runs SkSL too):
+
+```jsx
+<ShaderView source={sksl`...`} uniforms={{ glow: anim, tint: '#7cf', center: [x, y] }}
+            images={{ image: require('./card.png'), video: { texture: 'trailer', fit: 'contain' } }}
+            paused={false} onError={(e) => console.warn(e.nativeEvent.error)} style={...}>
+  {children}
+</ShaderView>
+```
+
+* `ShaderView` is a host node (`NodeType::Shader`, render/shader_view.h).
+  `ShaderEffects` (on the Runtime, `Document::shaders`) compiles each
+  distinct source once (`SkRuntimeEffect::MakeForShader`) and shares it.
+* Uniforms, per frame: style key `uniform:<name>` (whole value), then the
+  `uniforms` prop, then the built-ins `time` (float, seconds since the view
+  mounted, frozen while `paused`), `resolution` (float2, px) and
+  `pixelRatio`; `uniform:<name>.<i>` style keys override single components.
+  Values flatten numbers / arrays / booleans / colors (unpremultiplied
+  r, g, b, a in 0..1; `layout(color)` uniforms are converted to the working
+  color space by Skia); int uniforms round. The `uniform:` keys are a
+  paint-only style group (`kGroupShader`), so Animated (JS or native
+  driver, `Animated.hostBuffer`) writes them through patchStyle with no
+  relayout; @orktes/jsui-react's ShaderView turns Animated uniforms into
+  them (one key per animated component of an array).
+* Clock: a view whose shader declares `uniform float time` and does not
+  get it from the app is repainted by `ShaderEffects::tick` every tick
+  (`wantsFrame`), like a playing LottieView; only its own rect is damaged.
+* Children (`uniform shader name;`): `images[name]` (`{uri}`, `{texture}`
+  for a host texture, `fit`: cover / contain / stretch / center / none /
+  repeat, `tile`: clamp / repeat / mirror / decal), mapped onto the view
+  like an Image so `name.eval(p)` samples it at view position `p`. Image
+  loads repaint through `ImageCache::generation`; host textures register
+  the view as a user (new frames repaint it). Missing children are
+  transparent.
+* Fill (default): drawn into the padding box after the background and
+  borders, before children; coordinates start at the padding box's
+  top-left. Content: a shader declaring `uniform shader content` (not given
+  in `images`) runs as an `SkImageFilters::RuntimeShader` on the view's
+  layer, so its background and children are its input (coordinates from the
+  border box, clipped to its rounded border box, sample radius = the whole
+  view). A change anywhere in that subtree damages the whole view.
+* Errors: a source that fails to compile paints nothing; the view gets one
+  `error` event (`onError`, `nativeEvent.error` = Skia's message).
+  `__jsui_native.shaderInfo(src)` compiles synchronously and returns
+  `{error}` or `{uniforms: [{name, type, count, color}], children}`.
+* Preloading: a GPU compiles a shader's pipelines the first time a frame
+  draws it (cold: 130-250 ms per runtime-effect pipeline on WebGPU / WebGL
+  on a Mac Studio). `ShaderEffects::preload` (JS `precompileShaders()` /
+  `__jsui_native.shaderPreload(src, images?)`, C `jsui_precompile_shader`)
+  compiles the source and queues warm-up draws: one per pipeline-key
+  variant a view may produce (aligned / AA rect, rect / rounded own clip,
+  with / without a parent's rounded clip (AnalyticClip), and each
+  combination of loaded / not-yet-loaded image children; `content` shaders
+  as the layer's image filter). Frames painted on a GPU
+  (`Surface::finishCanvasTracked` / `renderCanvas`) draw one queued draw
+  each into a small off-screen surface of the target's format, so each
+  frame builds at most one new pipeline. Views place the shader by
+  translating the canvas, never with a local matrix (part of the key, which
+  the warm-up's draws would not match). A queued warm-up keeps
+  `needsRedraw()` true; a raster frame drops the queue (the CPU has nothing
+  to warm). `__jsui_native.shadersWarming()` counts the queued draws.
+  vulkan_test checks that mounting preloaded views compiles no pipeline;
+  site/test/first-visit.mjs measures a screen's first-visit hitch (Rift,
+  cold Metal cache: WebGPU 801 → 150 ms, WebGL 517 → 100 ms; what remains
+  is ordinary image / clip pipelines).
+* Cost: SkSL compilation and SkRuntimeEffect were already linked (Skottie
+  and the GPU backends use them), so ShaderView adds almost nothing to
+  `jsui.wasm`.
+
 ## JS bridge contract
 
 Native globals (installed by `JsEngine`):
@@ -913,7 +1161,7 @@ Native globals (installed by `JsEngine`):
 | --- | --- |
 | `__jsui_native.rootId` | id of the root container node |
 | `__jsui_native.devMode` | `true` when the runtime runs with `cfg.dev_mode` |
-| `createNode(type, rootTag?) → id` | `type` ∈ `View`, `Text`, `RawText`, `Image`, `ScrollView`, `TextInput`; created in the document of surface `rootTag` (default: the main one; see "Surfaces") |
+| `createNode(type, rootTag?) → id` | `type` ∈ `View`, `Text`, `RawText`, `Image`, `ScrollView`, `TextInput`, `LottieView`, `ShaderView`; created in the document of surface `rootTag` (default: the main one; see "Surfaces") |
 | `viewport(rootTag?) → {width, height, scale}` | logical size of a surface (default: the main one) |
 | `surfaceApp(rootTag) → {appKey, initialProps} \| null` | the app the host picked for a surface |
 | `setProps(id, props)` | replaces all props; `props.style` is a **flattened** style object; functions are dropped; `props.__events` lists event names the element listens to (e.g. `["press","pointerMove","layout"]`) |
@@ -927,13 +1175,20 @@ Native globals (installed by `JsEngine`):
 | `focus(id)`, `blur(id)` | `InputManager::focus` / `blur` |
 | `scrollTo(id, x, y, animated)` | `InputManager::scrollTo` (clamped, dispatches `scroll`). `animated`: eases there on the runtime clock; otherwise immediate (and stops a running fling) |
 | `flashScrollIndicators(id)` | shows a ScrollView's overlay indicators for ~1 s |
+| `lottieData(json) → key` | hands an inline Lottie composition to native once; LottieViews use the key (content hash) as their `source`. `lottie`: `true` when the build plays Lottie |
+| `lottieCommand(id, cmd, a, b) → bool` | LottieView `play` (frames `a`–`b`, undefined: the whole composition) / `pause` / `resume` / `reset` |
+| `shaderInfo(sksl) → {error} \| {uniforms, children}` | compiles a ShaderView source (shared with the views using it) |
+| `shaderPreload(sksl, images?) → like shaderInfo` / `shadersWarming() → n` | compiles it and warms its GPU pipelines in the next frame (see "Shaders") / warm-ups still queued |
 | `postMessage(name, json)` | to the embedder's `on_message`. A string is passed through as the JSON text; any other value is `JSON.stringify`-ed |
 | `getState(key) → json \| undefined`, `stateVersion(key) → number`, `stateKeys() → [key]` | shared host state (see "Game data"); version 0 = unset |
 | `statePatches(key, sinceVersion) → [json] \| undefined` | the merge patches (JSON texts) that took `key` from `sinceVersion` to its current version, oldest first; `undefined` when the bounded log (64 patches / 64 KB since the last `set`) cannot cover the gap. `@orktes/jsui-react` applies them to its cached value instead of re-parsing the whole state after each `jsui_patch_state` |
 | `setState(key, json \| undefined) → version`, `patchState(key, json) → version` | UI-owned writes (`undefined` removes); report to `on_state`; invalid JSON throws `SyntaxError` |
 | `hostCall(name, json, settle) → id` | `on_call`; `settle(ok, payload)` runs on `jsui_resolve_call` (JSON text) / `jsui_reject_call` (message). Returns 0 without `on_call` |
 | `cancelCall(id) → bool`, `callResult(id, ok, payload)` | drop an unanswered call (`on_call_cancel`); the result of a `__jsui_onCall` |
-| `loadFont(family, url, weight, italic) → Promise<true>` | load via the resource loader (URL relative to the bundle), register with the FontManager, relayout text; rejects with an `Error` on 404 / bad font data |
+| `loadFont(family, url, weight, italic) → Promise<true>` | load via the resource loader (URL relative to the bundle), register with the FontManager, relayout text; rejects with an `Error` on 404 / bad font data. `''` family = the file's; weight `0` / italic `-1` = the file's (see "Fonts") |
+| `loadFontData(family, bytes, weight, italic) → true` | the same from an ArrayBuffer / typed array, synchronously; throws on bad data |
+| `unloadFont(family) → bool`, `getFontFamilies() → [family]` | drop a family; the registered families (built-in Inter first) |
+| `setFontFallbacks([family])`, `setDefaultFontFamily(family)` | glyph fallback list; the family of text whose style names none |
 | `reload()` | reload the bundle at the start of the next tick (safe from inside JS) |
 | `textEditing` | `true`: TextInput text is edited natively (see "TextInput editing") |
 | `setTextInputSelection(id, start, end)` | TextInput selection (UTF-16 indices, clamped; no event) |
@@ -1058,8 +1313,13 @@ was `preventDefault()`-ed.
   by substring: `press`/`click` = pressable (focusable by default, `pointer`
   cursor); `move`/`responder`/`pan`/`drag` = wants `pointermove` (moves are not
   sent to JS unless a node on the path lists one); `hover`/`enter`/`leave`/`over`
-  = wants `pointerenter`/`pointerleave` (sent only to such nodes); `wheel`;
-  `"*"` = everything. Any pointer-ish name makes `jsui_send_*` report "consumed".
+  = wants `pointerenter`/`pointerleave` (sent only to such nodes); `wheel` =
+  wants `wheel` (sent only when a node on the path lists it); `scroll` = a
+  ScrollView's `scroll` events reach JS (see Scrolling); `"*"` = everything.
+  Native `Animated.event` mappings see `wheel` and `scroll` events whether or
+  not JS listens. Any pointer-ish name makes `jsui_send_*` report "consumed".
+  The parsed mask is cached on the node (`Node::listenMask`) until its props
+  change.
 * **Consumed vs. pass-through.** Every `jsui_send_*` returns whether the UI
   captured the event, so the game handles everything else (a click on an empty
   or merely decorative part of a HUD). Pointer: a node on the hit path with a
@@ -1075,6 +1335,9 @@ was `preventDefault()`-ed.
   (`InputManager::capturesAt`) answers the pointer question without sending
   anything, for hosts that route by hit testing: Godot's `JsuiView._has_point`
   (`input_pass_through`), the web host's `passThrough` overlay mode.
+  `jsui_hit_regions` returns the same answer for the whole view as rects
+  (clipped bounding boxes in paint order, with their `JSUI_HIT_*` flags), for
+  hosts that hit-test away from the runtime (the web host's worker mode).
 * **Pointer:** mouse `pointerId` 0, touch `id + 1`. Implicit capture while a
   button / touch is down; `click` (primary button only) targets the nearest
   common ancestor of the down and up nodes. Wheel `deltaY > 0` scrolls down
@@ -1115,13 +1378,27 @@ was `preventDefault()`-ed.
     scrolls; programmatic focus after pointer input jumps edge-aligned.
   * `scrollEnabled: false` stops user scrolling only (programmatic and focus
     scrolling still work). Offsets are re-clamped when content shrinks.
+  * `scroll` events go to JS only when the ScrollView lists `scroll` in
+    `__events`, at the rate its `scrollEventThrottle` prop allows (RN): 0 /
+    unset sends every offset change; up to 16 ms at most one per frame; more
+    at most one per interval. An offset change inside the interval is held
+    back and sent from `jsui_tick` once it is due, with the offset then and
+    the time of the change, so JS always gets the final position (`trailing`
+    event; `ScrollState::scrollOwed`). Other scroll events (drag, momentum)
+    are never throttled.
+  * Content scrolling under a still mouse does not update hover per row:
+    enter / leave and the cursor catch up once it has stopped scrolling under
+    the mouse for 100 ms (`kHoverAfterScrollMs`), like browsers; a mouse move
+    updates them at once.
   * Overlay indicators (3 px thumbs, `indicatorStyle` `default`/`black`/
     `white`, hidden by `showsVertical/HorizontalScrollIndicator: false`) show
     while scrolling and fade out after 500 ms. Scrolling and fading repaint
     only the ScrollView's rect / the thumbs' rects.
   * `@orktes/jsui-react` adds `contentOffset` (applied on mount),
-    `scrollEventThrottle` (> 16 ms limits `onScroll`, with a trailing event;
-    otherwise every event), `stickyHeaderIndices` (vertical; headers wrapped
+    `scrollEventThrottle` (passed to native, which throttles as above, so
+    held-back offsets never reach JS; with sticky headers, which follow every
+    offset, `onScroll` is throttled in JS the same way; `VirtualizedList` /
+    `FlatList` / `SectionList` default it to 50 like RN), `stickyHeaderIndices` (vertical; headers wrapped
     in a `zIndex: 10` View translated on scroll, the next header pushes the
     previous one) and wraps paging children like react-native-web.
 * **Focusable:** `focusable: true`, pressable nodes (unless `focusable: false`),
@@ -1242,10 +1519,24 @@ Native's API and both of its drivers:
     `shadowRadius`, ...) and transforms; layout keys throw `Style property
     'width' is not supported by native animated module`, animated non-style
     props throw too. `Animated.ValueXY` is native through its channels.
-  * Writes go through `Node::setProps` with the merged style (paint-only, so
-    no relayout; the incremental renderer damages just the node's old and
-    new rects). When React re-props a connected view, the live values are
-    overlaid again in the same tick. Unchanged frames write nothing.
+  * Writes go through `Node::patchStyle` (paint-only, so no relayout; the
+    incremental renderer damages just the node's old and new rects). Each
+    `style` node keeps its keys with their paint groups, resolved once when
+    it is created, and hands the view its inputs' outputs directly
+    (`Node::StyleWrite`): no partial style object is built. The view's
+    `props.style` is updated in place with `Value::assignReusing`, which
+    compares and copies in one walk and reuses the existing transform
+    arrays, objects and strings, so later `setProps` diffs see the live
+    values; only the written groups are re-resolved (transform, opacity and
+    backgroundColor without indexing the whole style). Transform nodes
+    update their output array in place and color / string outputs reuse
+    their buffers, and the flush bookkeeping uses per-node flags instead of
+    hash sets, so a steady frame allocates nothing
+    (`perf_native_animated_writes_allocate_nothing`). When React re-props
+    a connected view, the live values are overlaid again in the same tick;
+    views are only re-checked for that after some `setProps` /
+    `patchStyle` ran (`Perf::propsEpoch`), not every frame. Unchanged
+    frames write nothing.
   * Native nodes are freed when their derived JS node detaches, when the
     component unmounts, and (values) when the JS object is garbage collected
     (`FinalizationRegistry`). A reload clears the native graph.
@@ -1315,8 +1606,8 @@ Style keys follow React Native, including RN 0.76+ web-style additions:
   `radial-gradient`), `transform` (RN array or CSS string), `transformOrigin`,
   `filter` (`blur`, `brightness`, `contrast`, `saturate`, `grayscale`),
   `zIndex`, `pointerEvents`, `cursor`.
-* Text: `color`, `fontFamily`, `fontSize`, `fontWeight`, `fontStyle`,
-  `lineHeight`, `letterSpacing`, `textAlign`, `textTransform`,
+* Text: `color`, `fontFamily` (a CSS list), `fontSize`, `fontWeight`, `fontStyle`,
+  `fontVariant`, `fontVariationSettings`, `fontFeatureSettings`, `lineHeight`, `letterSpacing`, `textAlign`, `textTransform`,
   `textDecorationLine`, `textDecorationColor`, `textShadow*`; props
   `numberOfLines`, `ellipsizeMode`.
 * Image: `resizeMode` (style or prop), `tintColor`; `source={{uri}}` or
@@ -1324,6 +1615,39 @@ Style keys follow React Native, including RN 0.76+ web-style additions:
 
 Colors are CSS colors (`#rgb[a]`, `#rrggbb[aa]`, `rgb[a]()`, `hsl[a]()`, names).
 The default font is Inter (bundled); `fontFamily` falls back to it.
+
+### Fonts
+
+`FontManager` (src/text/font_manager.cpp) owns a registry of faces that is
+skparagraph's asset font manager and Skottie's. Fonts are runtime-wide.
+
+* Sources: app code (`Fonts.load` / `useFonts` / the `expo-font` shim, from
+  `require('./x.ttf')`, a URL or bytes), hosts (`jsui_register_font`, web
+  `registerFont` / `loadFont`, Godot `JsuiView.register_font` / `fonts`).
+* Containers: TTF, OTF, TTC / OTC (every face), WOFF (zlib) and WOFF2
+  (google/woff2 + brotli), unpacked to sfnt in src/text/font_decode.cpp
+  because not every platform font manager reads web fonts (cmake/WebFonts.cmake;
+  `-DJSUI_WOFF2=OFF` drops WOFF2). A Skia build that ships libbrotli provides
+  the brotli symbols.
+* Matching works like CSS @font-face: a face is registered under a family
+  name (case-insensitive) with a weight and slant, taken from the file unless
+  the caller overrides them; `fontWeight` / `fontStyle` pick the closest
+  face (CSS3 matching). skparagraph synthesizes bold / oblique when the
+  picked face is 200+ lighter / upright. Re-registering a family + style
+  replaces that face.
+* Variable fonts: a 'wght' axis without a weight override is registered once
+  per 100 step of its range (instances share the data), so `fontWeight` works;
+  `fontVariationSettings` (`"'wght' 650, 'wdth' 80"` or `{wght: 650}`) sets
+  axes directly, with 'wght' following `fontWeight` unless named.
+  `fontFeatureSettings` (`"'ss01', 'liga' 0"` or `{ss01: 1}`) adds OpenType
+  features.
+* Glyph fallback, per character: the style's family list, the default
+  family, `Fonts.setFallbacks` / `jsui_set_font_fallbacks` (in order), then
+  any registered font that has the glyph, then system fonts on platforms that
+  have them (none on the web). Ship emoji / CJK fonts and list them as
+  fallbacks for deterministic results.
+* Any change bumps `FontManager::generation` and `Runtime::fontsChanged()`
+  re-measures text on every surface.
 
 ## Builds
 
@@ -1348,6 +1672,24 @@ The default font is Inter (bundled); `fontFamily` falls back to it.
   `web/jsui-web.js`; `jsui.on('message', (name, data) => …)`, `jsui.postMessage(name, data)`.
   The browser loader backend is `fetch()` (`src/platform/loader_emscripten.cpp`).
   Tests: `node web/test/node-smoke.mjs`, `node web/test/browser.test.mjs` (Playwright).
+* Web worker mode (`createJsui({ worker: true })`, `web/jsui-worker.js`): the
+  runtime, frame loop and renderers run in a dedicated Worker on
+  OffscreenCanvases (`transferControlToOffscreen`), with the same WebGPU →
+  WebGL → CPU chain and the same GPU-loss handling. The worker's entry is
+  `jsui-web.js` itself, so both threads load the same versioned files. The
+  page's thread only does what needs the DOM. It forwards input with
+  timestamps (moves and wheels coalesced per frame), canvas size and DPR,
+  gamepad snapshots and `bindVideo` frames (`new VideoFrame(video)`,
+  transferred). Both directions batch messages, one `postMessage` per task.
+  The page answers synchronous questions from copies the worker posts:
+  `hitTest` and pass-through routing from a hit map (`jsui_hit_regions`,
+  posted when it changes, so it is about a frame old), keys from the
+  runtime's last answer, the cursor, `renderer` and stats. Calls that need a
+  runtime answer (`getState`, `getPerf`, `readPixels`, ...) return Promises;
+  `mapBuffer` is a page-side array that `commitBuffer` copies over (no
+  SharedArrayBuffer). The worker's rAF drives frames; the page's rAF takes
+  over where a worker has none. Missing APIs or a failed start fall back to
+  main-thread mode with one warning. See `web/README.md` ("Worker mode").
 * Desktop Skia m157 (Graphite on Vulkan / Metal and header-only Dawn, for the
   Godot GPU renderer): `scripts/build-skia-desktop.sh` (Linux / macOS, about
   25 min on 4 cores, cached in CI on the hash of the script and its Dawn
@@ -1367,10 +1709,18 @@ changed rather than to the tree size:
   (opacity, transform, colors, radii, shadows, gradients, filters, text, ...)
   are re-resolved and Yoga is not touched (`applyPaintStyleChanges`,
   `src/core/style.cpp`). `patchStyle` (bridge and native Animated) does the
-  same in place, without copying the props.
+  same in place, without copying the props; native Animated's writes
+  allocate nothing in steady state (see "Animated"): `markers-native-1000`
+  (2000 view writes per frame) went from ~31k allocations and ~19.7M
+  instructions per frame to 6 and ~6.6M.
 * **Layout.** Yoga only reruns when something layout-affecting changed; the
   post-layout walk (`Document::afterLayout`) visits only nodes Yoga flagged
-  (`hasNewLayout`). Text measurement reuses the paragraph's intrinsic layout.
+  (`hasNewLayout`), and not the children of a node whose layout Yoga took
+  from its cache (it reports which through its `NodeLayout` event: a 2000-row
+  list next to a changing counter is one visit, not 2000). Only a node whose
+  frame, padding or border changed is marked for the painter
+  (`PerfCounters::layoutVisits` counts the visits). Text measurement reuses
+  the paragraph's intrinsic layout.
   Yoga's `PixelGrid.cpp` is patched at configure time (`cmake/Deps.cmake`) to
   skip pixel rounding when the point scale factor is 0, and `CalculateLayout.cpp`
   to check for baseline alignment once per node per pass, not once per flex line.
@@ -1413,8 +1763,16 @@ Options: `--frames`, `--warmup`, `--width` / `--height`, `--paint
 incremental|full|none`, `--mouse-sweep X,Y0,Y1,FRAMES` (moves the mouse
 every frame), `--patch-state KEY,SLOTS` (one `jsui_patch_state` per frame),
 `--surfaces N[,changing|same|one|resize]` (N `Plate` surfaces of 120x40 and
-what the host does to them every frame). Scenarios: `interactions`
-(examples), `list` (2000 rows, one counter), `menu` (native spring on
+what the host does to them every frame), `--wheel X,Y,DY[,FRAMES]` (a wheel
+delta at X,Y every frame, reversing every FRAMES), `--react-stats` (installs
+a React DevTools hook and adds `reactCommits` / `reactRenders`: commits and
+function / memo / forwardRef components rendered per frame). Besides the
+phase times, the JS work is counted: `events` (events sent to JS), `jsCalls`
+(native → JS calls: events, timers, frame callbacks, layout callbacks,
+messages), `jsJobs` (promise jobs) and `hostMessages` (`postMessage` to the
+host). Scenarios: `interactions`
+(examples), `interactions-wheel` (the same, wheel-scrolling the armory
+list under a still mouse), `list` (2000 rows, one counter), `menu` (native spring on
 hover), `inventory` (500 slots through `useHostState` +
 `jsui_patch_state`), `idle`, and 30 nameplate surfaces: `surfaces-static`,
 `surfaces-props` (every surface's props change every frame),
@@ -1427,6 +1785,29 @@ off; `host` is the host's own share, writing the JSON text, and counts in
 `total`). `--markers N,json|buffer|native` runs one. Under valgrind, run with
 `--tool=callgrind --instr-atstart=no`: the tool switches instrumentation on
 for the measured frames only.
+
+Where the JS time goes: with `JSUI_JS_PROFILE=out.txt` in the environment the
+engine samples the JS stack from QuickJS's interrupt poll (every ~10000
+bytecode ops) while the runtime profiles its frames (jsui-bench's measured
+frames), weights each sample by the time since the previous poll, and writes
+self and inclusive shares per function at exit (`JSUI_JS_PROFILE_LINES=1`:
+per source line). Bundles built without `--minify` keep React's function
+names.
+
+* **Props.** `__jsui_native.updateProps(id, reactProps, hidden)` builds what
+  native sees from the React props (event handlers become `__events`
+  tokens, the style is flattened, `pointerEvents` / hidden go into it) and
+  `Node::setProps` diffs it, so the host config does neither in JS; it only
+  skips renders whose React props are identical (`mayDiffer`). A style
+  array rebuilt with equal contents therefore reaches native (a skipped
+  `setProps`), which is cheaper than diffing every changed style in JS.
+* **QuickJS.** `cmake/Deps.cmake` compiles a patched copy of quickjs.c:
+  `JS_FreeValue` / `JS_DupValue` are inlined (quickjs-ng exports them out of
+  line, a call per value the interpreter pops) and `===` / `!==` decide
+  objects, symbols, booleans, null and undefined inline. `JSUI_QUICKJS_FLAGS`
+  adds compile flags for QuickJS alone (profile-guided optimization with
+  `-fprofile-instr-generate` / `-fprofile-instr-use=` measured 6-9% less JS
+  time on React-heavy scenarios on an M1 Ultra).
 
 ## Paint performance
 
@@ -1445,9 +1826,14 @@ the expensive per-pixel work is done once:
   the same matrices and clip keeps its records, its curved outlines and
   raster candidates carried over. A clean child out of view (scrolled out
   of its scroll view) is skipped as long as a translation keeps it out;
-  its records keep the old placement until it comes back. A steady
+  its records keep the old placement until it comes back. When a skipped
+  subtree is walked again (one of its rows changed), its clean children are
+  skipped again: their entries in the lists moved with the copies the
+  skipped parent made (`NodeRecord::walkedPass`), so the walk does not
+  fall back to every node below. A steady
   showcase frame walks the 19 nodes on the paths to what animates instead
-  of the whole tree. `PaintStats::nodesUpdated` counts the walked nodes;
+  of the whole tree, and jsui-bench `list` (20k nodes, one counter) the 5
+  nodes on the counter's path. `PaintStats::nodesUpdated` counts the walked nodes;
   `setRecordSkipping(false)` walks them all, which the tests compare with
   (also for two surfaces of one runtime: each document has its own
   records and passes). Skia does not
@@ -1463,11 +1849,30 @@ the expensive per-pixel work is done once:
   and repaints only what the scroll exposed, what is painted above the
   content and curved outlines at the viewport's edge (`ScrollBlit`).
 * **Sprites.** On the CPU raster, gradient backgrounds and Image nodes of
-  128x128 to 2.2M device pixels are rendered once per content and device
-  scale and blitted at whole-pixel offsets afterwards (`drawSprite`, 48 MB
-  per document); blurred shadows and inset shadows are cached masks drawn
-  the same way. Sub-pixel positions draw directly (a moving sprite would be
-  re-rendered every frame).
+  128x128 to 2.2M device pixels are rendered once per content, device scale
+  and sub-pixel phase and blitted at whole-pixel offsets afterwards
+  (`drawSprite`, 48 MB per document), so static art at a fractional
+  position is cached too. While a node keeps moving by sub-pixels or
+  scaling (it changed in this frame and the one before, `PaintMotion`) its
+  sprites are drawn directly instead, as a new sprite every frame would
+  cost more, and the node is repainted from the sprite a frame after it
+  stops (`NodeRecord::approximate`, `Document::markExactRepaint`): static
+  frames and frames at rest paint exactly the pixels of a full repaint.
+* **Shadows.** Blurred shadows and inset shadows are cached masks, blurred
+  once per device size, sigma, sub-pixel phase, radii and colour
+  (`ShadowCache`) and blitted at whole-pixel offsets; only the ring around
+  the box is drawn (`MaskSkip`: the box minus its corners, as a cross of
+  two rects on the CPU, one rect on GPU canvases). A node at rest gets its
+  exact mask. While it keeps moving or scaling (a spring, a drag) the CPU
+  raster approximates as GPU canvases always do: the mask of phase 0 and of
+  the nearest of 8 scales per octave (`quantizedScale`) is resampled to the
+  fractional position and size with a separable bilinear filter
+  (`resampleMask`, SSE2 / NEON) into a scratch buffer blitted as a sprite,
+  and the box's hole is cut out after resampling (its anti-aliased
+  coverage), so the edge stays sharp. The shadow then stays within 4 levels
+  of the exact one, the moving frames blur no mask after the first two
+  (the menu's springing buttons blurred one per button per frame, ~21% of
+  the frame), and the node is repainted exactly once it stops.
 * **Layers.** A node whose draws cannot overlap applies its opacity to them
   instead of a `saveLayer` (`opacityFoldable`): one draw (a background
   colour or one gradient, nothing else), a childless box with at most one
@@ -1481,11 +1886,12 @@ the expensive per-pixel work is done once:
   bounds lay out at the same content width.
 
 `PaintStats` (`lastPaintStats()`) reports per paint the nodes painted and
-culled, the pixels and rects repainted, sprite draws and renders, blitted
-pixels and, with `setPaintCounting()`, the canvas draw calls, text / image
+culled, the pixels and rects repainted, sprite draws and renders, shadow
+mask draws and renders (blurs), blitted pixels and, with `setPaintCounting()`, the canvas draw calls, text / image
 draws, layers and clips. `tests/native/render_test.cpp` and `gpu_test.cpp`
 assert on these (incremental frames equal full ones; perf guards on
-pixels repainted, passes, sprite re-renders, layers).
+pixels repainted, passes, sprite re-renders, shadow blurs while a shadow
+moves, layers).
 
 `tools/jsui-paint-bench` renders bundles headless on a simulated 60 Hz
 clock and times only the paint call, per backend: `cpu`
@@ -1512,11 +1918,14 @@ Scenarios (`run.mjs` bundles them into `build/paint-bench/`):
 animations), `interactions-hover` (the same with a mouse sweep), `caret`
 (a static screen with a blinking caret), `cards` (a grid of shadowed,
 rounded, clipped cards scrolling 6 px per frame) and `text` (text-heavy
-panels with a ticking clock, a ticker and a pulsing badge). Options:
+panels with a ticking clock, a ticker and a pulsing badge) and `menu`
+(jsui-bench's main menu, shadowed buttons springing in translation and
+scale under a mouse sweep). Options:
 `--frames`, `--warmup`, `--settle-ms`, `--width` / `--height` / `--scale`,
 `--backends`, `--json`, `--no-count`. Under valgrind (callgrind
 instruction counts are steadier than wall time on a shared machine), pass
-`--no-count` and `--toggle-collect='jsui::Runtime::renderIncremental(*'`.
+`--no-count` and `--toggle-collect='jsui::Surface::renderIncremental(*'`
+(`'jsui::gpu::render(*'` for `gl`; the warmup frames are counted too).
 Wall times on llvmpipe say little about a hardware GPU (shader JIT and
 rasterization run on the CPU); the GL call counts carry over.
 
@@ -1527,19 +1936,45 @@ Point any host at it (`jsui-viewer --dev http://localhost:5173/bundle.js`, or
 `cfg.dev_mode = 1` + `jsui_load_bundle_url`).
 
 * **Version endpoint.** When the bundle came from `http://host:port/...`, the
-  runtime GETs `http://host:port/__jsui/version` every ~500 ms (2 s while the
-  server is unreachable). The response body is an opaque version token
-  (whitespace trimmed); any change means "the bundle changed" and triggers
-  `reload()`. The server should answer immediately (no long-poll needed); a
-  bundle response may carry `X-Jsui-Version: <token>` so a rebuild between
-  the bundle download and the first poll is not missed.
+  runtime GETs `http://host:port/__jsui/version?hmr=1` every ~500 ms (2 s
+  while the server is unreachable). The response body is an opaque version
+  token (whitespace trimmed); any change means "the bundle changed" and calls
+  `Runtime::devUpdate()` (C API `jsui_dev_update`, for hosts that poll
+  themselves, like the web host on https). If the bundle defined
+  `globalThis.__jsui_onDevUpdate`, that handles it (hot update); otherwise the
+  runtime does a `reload()`. The server should answer immediately (no
+  long-poll needed); a bundle response may carry `X-Jsui-Version: <token>` so
+  a rebuild between the bundle download and the first poll is not missed.
+  With `hmr=1`, `jsui dev` also changes the token when a build fails, so the
+  hot-update client can show the error.
+* **Hot updates (React Fast Refresh).** `jsui dev` (unless `--no-hmr`) serves
+  a module-per-function bundle (`packages/cli/src/hmr.js`): the vendor part
+  (node_modules, `@orktes/jsui-react`, assets) bundled once by esbuild, then
+  each app file run through react-refresh's Babel plugin and esbuild's
+  CommonJS transform, wrapped in `__jsui_hmr.define(id, deps, factory)`, and
+  the client (`hmr-runtime.js`). On a change the client fetches
+  `/__jsui/hmr?from=<its version>`, a script with the changed modules and
+  `__jsui_hmr.apply(ids, version)`, which it runs with
+  `__jsui_native.evalScript(source, name)`. `apply` re-executes the changed
+  modules and their importers up to the nearest refresh boundaries (modules
+  that export only React components) and calls React Refresh: edited
+  components re-render and keep their state (hooks that changed remount
+  that component). An edit that reaches a module without importers (the
+  entry), a changed dependency or asset, or an unknown version reloads the
+  whole bundle instead. Build errors, and errors thrown while re-running a
+  module, go to `__jsui_native.devError(text)` (the overlay); the next good
+  update clears it with `devError(null)` and retries what failed. A render
+  error unmounts the root as usual; the fix mounts it again. `module.hot`
+  offers `accept()`, `dispose(cb)`, `data`, `decline()` and `invalidate()`.
 * **Reload** tears down the JS context, the Document, in-flight loads and the
   image cache, then reloads the bundle URL. The last good frame (recorded as
   an `SkPicture` before teardown) stays on screen until the new bundle renders,
   and keeps showing if the new bundle throws.
 * **Error overlay.** While `jsui_last_error()` is set, a red-tinted panel with
   the message and stack (monospace) is painted over the frame. Escape
-  (`jsui_send_key`) dismisses it; the next successful load clears it.
+  (`jsui_send_key`) dismisses it; the next successful load (or hot update)
+  clears it. A bundle URL that answers with an error status shows the
+  response body too (`jsui dev` sends the build error with its 503).
 
 ## Resource loading
 
@@ -1591,7 +2026,8 @@ Details of how the JS package uses the bridge, for native implementers:
   (Animated / `setNativeProps`; otherwise `setProps` with the merged style),
   `animated` (native Animated driver; otherwise `useNativeDriver` uses the JS driver),
   `viewport()` (native: returns `{width, height, scale}`), `focus`, `blur`,
-  `scrollTo`, `flashScrollIndicators`, `measure`, `postMessage`, `loadFont`, `getImageSize(uri)`,
+  `scrollTo`, `flashScrollIndicators`, `measure`, `postMessage`, `loadFont`, `loadFontData`,
+  `unloadFont`, `getFontFamilies`, `setFontFallbacks`, `setDefaultFontFamily`, `getImageSize(uri)`,
   `prefetchImage(uri)`, `reload`.
 * Events beyond input: `{type: 'resize', width, height, scale}` (sent by
   `jsui_set_viewport` when the size changes; drives Dimensions);

@@ -1,6 +1,7 @@
 // JsuiView's GPU renderer: Skia Graphite on Godot's own RenderingDevice
 // (Vulkan on Linux / Windows, Metal on macOS, and Dawn under the WebGPU
-// rendering driver of the godot-aw3 fork), see jsui_view.h.
+// rendering driver of the godot-aw3 fork), or Skia Ganesh on its Direct3D 12
+// device (Windows; Graphite has no D3D backend), see jsui_view.h.
 //
 // The views of one runtime (the runtime view and its surface views, see
 // jsui_view.h) share one Skia context, the runtime view's: one image cache and
@@ -16,7 +17,8 @@
 //        only its damage bounds (jsui_render_gpu_target with
 //        JSUI_GPU_INCREMENTAL). Godot only ever uses it as a copy source, so
 //        its RD tracker stays in COPY_FROM: on Vulkan the image is in
-//        TRANSFER_SRC_OPTIMAL between frames, and JSUI leaves it there.
+//        TRANSFER_SRC_OPTIMAL between frames (D3D12: COPY_SOURCE), and JSUI
+//        leaves it there.
 //   dst  SAMPLING | CAN_COPY_TO | CAN_UPDATE | CAN_COPY_FROM
 //        What the canvas item draws (a Texture2DRD). Godot copies the damaged
 //        rect src -> dst with RenderingDevice.texture_copy in its frame, so
@@ -32,7 +34,9 @@
 // which also order it after the previous frame that may still be copying from
 // src. On Metal both use the same MTLCommandQueue and tracked resources. On
 // WebGPU (godot-aw3) both use Godot's WGPUQueue, whose submissions run in
-// order, and Dawn tracks the textures' usage.
+// order, and Dawn tracks the textures' usage. On D3D12 both use Godot's
+// DIRECT ID3D12CommandQueue, whose command lists run in order, and Ganesh's
+// own command lists move src COPY_SOURCE -> RENDER_TARGET -> COPY_SOURCE.
 //
 // Backend choice (chooseRenderer), at run time, so one binary serves stock
 // Godot and the fork:
@@ -44,8 +48,8 @@
 //      JSUI links no Dawn of its own) and renders into the WGPUTexture
 //      get_driver_resource(DRIVER_RESOURCE_TEXTURE) returns. A different
 //      revision has a different webgpu.h ABI: one warning, CPU renderer.
-//   2. Otherwise Vulkan or Metal through get_driver_resource, as above.
-//   3. Otherwise (Compatibility, headless, D3D12, ...) the CPU renderer.
+//   2. Otherwise Vulkan, Metal or D3D12 through get_driver_resource, as above.
+//   3. Otherwise (Compatibility, headless, ...) the CPU renderer.
 //
 // New textures (first frame, resize) are created with zeroed initial data and
 // primed with one copy, and first rendered into on the next frame: by then
@@ -93,8 +97,12 @@
 // fence and the runtime's context go, so a job never outlives a view,
 // surface, fence or context it uses.
 #include <godot_cpp/classes/engine.hpp>
+#include <godot_cpp/classes/rd_sampler_state.hpp>
+#include <godot_cpp/classes/rd_shader_source.hpp>
+#include <godot_cpp/classes/rd_shader_spirv.hpp>
 #include <godot_cpp/classes/rd_texture_format.hpp>
 #include <godot_cpp/classes/rd_texture_view.hpp>
+#include <godot_cpp/classes/rd_uniform.hpp>
 #include <godot_cpp/classes/rendering_device.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/time.hpp>
@@ -141,7 +149,9 @@ void* driverResource(RenderingDevice* rd, RenderingDevice::DriverResource what, 
   return reinterpret_cast<void*>(uintptr_t(rd->get_driver_resource(what, rid, 0)));
 }
 
-enum class TargetKind { Vulkan, WebGPU, Metal };
+enum class TargetKind { Vulkan, WebGPU, Metal, D3D12 };
+
+constexpr int kD3D12ResourceStateCopySource = 0x800;  // D3D12_RESOURCE_STATE_COPY_SOURCE
 
 // What jsui_render_gpu_target needs about src, but its handle.
 JsuiGpuTarget targetFor(TargetKind kind, int w, int h, int flags) {
@@ -155,6 +165,9 @@ JsuiGpuTarget targetFor(TargetKind kind, int w, int h, int flags) {
     t.layout = t.final_layout = kVkImageLayoutTransferSrcOptimal;
   } else if (kind == TargetKind::WebGPU) {
     t.format = 0;  // the texture's own: WGPUTextureFormat_RGBA8Unorm (DATA_FORMAT_R8G8B8A8_UNORM)
+  } else if (kind == TargetKind::D3D12) {
+    t.format = 0;  // the resource's own: DXGI_FORMAT_R8G8B8A8_UNORM
+    t.layout = t.final_layout = kD3D12ResourceStateCopySource;
   } else {
     t.format = kMTLPixelFormatRGBA8Unorm;
   }
@@ -297,6 +310,7 @@ void JsuiView::chooseRenderer() {
                   : !why.is_empty()    ? Renderer::Cpu  // WebGPUInterop is there but unusable
                   : driver == "vulkan" ? Renderer::Vulkan
                   : driver == "metal"  ? Renderer::Metal
+                  : driver == "d3d12"  ? Renderer::D3D12
                                        : Renderer::Cpu;
   if (want == Renderer::Cpu) {
     if (!why.is_empty()) {
@@ -339,6 +353,10 @@ bool JsuiView::createGpuContext(Renderer want, const String& driver, Object* int
       gpu_ = jsui_gpu_create_dawn_procs(interopPointer(interop, "get_proc_address"),
                                         interopPointer(interop, "get_instance"), interopPointer(interop, "get_device"),
                                         interopPointer(interop, "get_queue"));
+    } else if (want == Renderer::D3D12) {
+      // ID3D12Device and Godot's DIRECT ID3D12CommandQueue.
+      gpu_ = jsui_gpu_create_d3d12(driverResource(rd, RenderingDevice::DRIVER_RESOURCE_LOGICAL_DEVICE),
+                                   driverResource(rd, RenderingDevice::DRIVER_RESOURCE_COMMAND_QUEUE));
     } else {
       gpu_ = jsui_gpu_create_metal(driverResource(rd, RenderingDevice::DRIVER_RESOURCE_LOGICAL_DEVICE),
                                    driverResource(rd, RenderingDevice::DRIVER_RESOURCE_COMMAND_QUEUE));
@@ -347,6 +365,7 @@ bool JsuiView::createGpuContext(Renderer want, const String& driver, Object* int
   if (!gpu_) {
     UtilityFunctions::print("JsuiView: no Skia GPU context on '" + driver + "' (" +
                             String(want == Renderer::Vulkan   ? "built without JSUI_VULKAN or Skia rejected the device"
+                                   : want == Renderer::D3D12  ? "built without JSUI_D3D or Skia rejected the device"
                                    : want == Renderer::WebGPU ? String(kWebGPUInterop) +
                                                                     " did not resolve every Dawn entry point, returned "
                                                                     "no device or Skia rejected the device"
@@ -354,8 +373,12 @@ bool JsuiView::createGpuContext(Renderer want, const String& driver, Object* int
                             "); using the CPU renderer");
     return false;
   }
-  UtilityFunctions::print("JsuiView: rendering with Skia Graphite on " + driver);
-  setupPipelineCache(want == Renderer::Vulkan ? "vulkan" : want == Renderer::Metal ? "metal" : "webgpu");
+  gpu_api_ = want;
+  UtilityFunctions::print("JsuiView: rendering with Skia " + String(want == Renderer::D3D12 ? "Ganesh" : "Graphite") +
+                          " on " + driver);
+  // Ganesh (D3D12) has no pipeline cache.
+  if (want != Renderer::D3D12)
+    setupPipelineCache(want == Renderer::Vulkan ? "vulkan" : want == Renderer::Metal ? "metal" : "webgpu");
   return true;
 }
 
@@ -397,6 +420,7 @@ bool JsuiView::renderGpu() {
   const int w = pixel_w_, h = pixel_h_;
   const TargetKind kind = renderer_ == Renderer::Vulkan   ? TargetKind::Vulkan
                           : renderer_ == Renderer::WebGPU ? TargetKind::WebGPU
+                          : renderer_ == Renderer::D3D12  ? TargetKind::D3D12
                                                           : TargetKind::Metal;
   // Steady state: the textures on screen fit and no new pair is pending.
   if (gpu_cur_.valid() && gpu_cur_.w == w && gpu_cur_.h == h && !gpu_next_.valid()) {
@@ -568,6 +592,10 @@ void JsuiView::queueFrameJob() {
   frame_batch_.clear();
   frame_job_id_ = fence_.queued.load(std::memory_order_relaxed) + 1;
   fence_.queued.store(frame_job_id_, std::memory_order_relaxed);
+  // This frame's host texture copies go first in the job (syncTextures ran
+  // before any view painted).
+  frame_job_textures_ = texture_work_;
+  texture_work_ = false;
   for (JsuiView* v : frame_job_views_) {
     v->gpu_job_.fence = &fence_;
     v->gpu_job_.id = frame_job_id_;
@@ -579,6 +607,10 @@ void JsuiView::queueFrameJob() {
 }
 
 void JsuiView::runFrameJob() {
+  if (frame_job_textures_) {
+    frame_job_textures_ = false;
+    doTextureWork();
+  }
   // Each view into its own src, copied into its own dst, with the runtime's
   // context; the main thread reads the results once the fence has moved.
   for (JsuiView* v : frame_job_views_) v->paintGpuJob();
@@ -661,9 +693,314 @@ void JsuiView::releaseGpu() {
     if (dropContext) {
       jsui_gpu_destroy(gpu_);
       gpu_ = nullptr;
+      gpu_api_ = Renderer::Unknown;
     }
   });
   gpu_retained_ = false;
+}
+
+// ------------------------------------------------------------ host textures
+//
+// set_texture's textures with the GPU renderer (see HostTexture in
+// jsui_view.h). syncTextures (main thread, before the tick) adopts the mirrors
+// made in earlier frames and marks the textures to copy this frame; here, on
+// the render thread, before any of the frame's renders:
+//   * the Texture2D's RenderingDevice texture is looked up
+//     (RenderingServer.texture_get_rd_texture: ImageTexture, ViewportTexture,
+//     VideoStreamPlayer's texture, Texture2DRD...), every frame for a live
+//     one, so a texture Godot recreated (a resize, ImageTexture.set_image) is
+//     simply the next source;
+//   * it is copied whole into the mirror (RenderingDevice.texture_copy, in
+//     Godot's frame graph: Godot orders it after its own writes this frame
+//     and does the source's barriers and layouts), a new mirror when the size
+//     or format changed;
+//   * Vulkan: a compute dispatch that samples one texel of the mirror follows
+//     the copy, so Godot's graph leaves the mirror in
+//     SHADER_READ_ONLY_OPTIMAL, the layout JSUI's render needs it in (jsui.h);
+//     Godot's graph would leave a copy destination in TRANSFER_DST_OPTIMAL.
+// The runtime samples the mirror from the next frame on (one frame of
+// latency: JSUI renders before Godot submits the frame holding the copy).
+// Metal: the mirror is our own tracked MTLTexture (as src above), so Metal
+// orders Godot's copy into it and Skia's sampling on the shared queue.
+// D3D12: no layout pass; the mirror stays in COPY_DEST, where Godot's tracker
+// leaves it, and JSUI is told so (JsuiTexture.usage): its render transitions
+// it for sampling and back within its own command lists on the shared queue.
+
+namespace {
+
+constexpr unsigned kVkFormatR8G8B8A8Unorm = 37, kVkFormatB8G8R8A8Unorm = 44;
+constexpr unsigned kDxgiFormatR8G8B8A8Unorm = 28, kDxgiFormatB8G8R8A8Unorm = 87;
+constexpr unsigned kMTLPixelFormatBGRA8Unorm = 80;
+
+// The compute shader of the Vulkan layout pass: samples the texture, so the
+// render graph moves it to SHADER_READ_ONLY_OPTIMAL. The result goes to a
+// 16-byte buffer nothing reads (an unused binding could be compiled out).
+const char* const kLayoutPassShader = R"(#version 450
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) uniform sampler2D mirror;
+layout(set = 0, binding = 1, std430) restrict writeonly buffer Sink { vec4 texel; } sink;
+void main() { sink.texel = texelFetch(mirror, ivec2(0), 0); }
+)";
+
+// The mirror's format for a source of RenderingDevice format `df` (false:
+// the GPU path cannot show it). sRGB sources keep their bytes (sRGB-encoded,
+// which is what JSUI expects) in a UNORM mirror: Vulkan and WebGPU copy
+// between the two; Metal only copies identical formats.
+bool mirrorFormatFor(int64_t df, bool metal, int64_t* mirror) {
+  switch (df) {
+    case RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM:
+    case RenderingDevice::DATA_FORMAT_B8G8R8A8_UNORM: *mirror = df; return true;
+    case RenderingDevice::DATA_FORMAT_R8G8B8A8_SRGB:
+      *mirror = RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM;
+      return !metal;
+    case RenderingDevice::DATA_FORMAT_B8G8R8A8_SRGB:
+      *mirror = RenderingDevice::DATA_FORMAT_B8G8R8A8_UNORM;
+      return !metal;
+    default: return false;
+  }
+}
+
+}  // namespace
+
+void JsuiView::queueTextureJob() {
+  if (!texture_work_) return;
+  RenderingServer* rs = RenderingServer::get_singleton();
+  if (!rs || rs->is_on_render_thread()) {
+    texture_work_ = false;
+    doTextureWork();
+    return;
+  }
+  // No frame job took it this frame (nothing painted on the GPU): a job of
+  // its own on the runtime's fence, so whatever touches textures_ next waits
+  // for it as for a frame job. Not counted in render_thread_jobs.
+  waitRender();
+  texture_work_ = false;
+  texture_job_id_ = fence_.queued.load(std::memory_order_relaxed) + 1;
+  fence_.queued.store(texture_job_id_, std::memory_order_relaxed);
+  rs->call_on_render_thread(callable_mp(this, &JsuiView::runTextureJob));
+}
+
+void JsuiView::runTextureJob() {
+  doTextureWork();
+  const uint64_t id = texture_job_id_;
+  std::lock_guard<std::mutex> lock(fence_.m);
+  fence_.done.store(id, std::memory_order_release);
+  fence_.cv.notify_all();
+}
+
+void JsuiView::doTextureWork() {
+  RenderingServer* rs = RenderingServer::get_singleton();
+  RenderingDevice* rd = rs ? rs->get_rendering_device() : nullptr;
+  auto freeMirror = [&](TextureMirror& m) {
+    if (rd && m.uniforms.is_valid() && rd->uniform_set_is_valid(m.uniforms)) rd->free_rid(m.uniforms);
+    if (rd && m.rd.is_valid()) rd->free_rid(m.rd);  // RenderingDevice defers it past the frames using it
+    m = TextureMirror{};
+  };
+  for (TextureMirror& m : retired_mirrors_) freeMirror(m);
+  retired_mirrors_.clear();
+  if (!rd) {
+    for (HostTexture& e : textures_) e.copy = false;
+    return;
+  }
+  const bool vulkan = gpu_api_ == Renderer::Vulkan, metal = gpu_api_ == Renderer::Metal;
+  auto fail = [](HostTexture& e, const std::string& why) {
+    e.cpu_only = true;
+    e.why = why;
+  };
+  // Vulkan: the layout pass's pipeline, once per runtime view.
+  auto layoutPass = [&]() -> bool {
+    LayoutPass& p = layout_pass_;
+    if (p.pipeline.is_valid()) return true;
+    if (p.failed) return false;
+    p.failed = true;
+    Ref<RDShaderSource> source;
+    source.instantiate();
+    source->set_stage_source(RenderingDevice::SHADER_STAGE_COMPUTE, kLayoutPassShader);
+    Ref<RDShaderSPIRV> spirv = rd->shader_compile_spirv_from_source(source, true);
+    if (spirv.is_null() || !spirv->get_stage_compile_error(RenderingDevice::SHADER_STAGE_COMPUTE).is_empty()) {
+      UtilityFunctions::push_warning("JsuiView: could not compile the host texture layout pass" +
+                                     (spirv.is_valid() ? ": " + spirv->get_stage_compile_error(RenderingDevice::SHADER_STAGE_COMPUTE)
+                                                       : String()));
+      return false;
+    }
+    p.shader = rd->shader_create_from_spirv(spirv, "JsuiView host texture layout pass");
+    if (p.shader.is_valid()) p.pipeline = rd->compute_pipeline_create(p.shader);
+    Ref<RDSamplerState> sampler;
+    sampler.instantiate();
+    p.sampler = rd->sampler_create(sampler);
+    p.sink = rd->storage_buffer_create(16);
+    if (!p.pipeline.is_valid() || !p.sampler.is_valid() || !p.sink.is_valid()) return false;
+    p.failed = false;
+    return true;
+  };
+  auto createMirror = [&](int w, int h, int64_t format) -> TextureMirror {
+    TextureMirror m;
+    const int64_t usage = RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice::TEXTURE_USAGE_CAN_COPY_TO_BIT |
+                          RenderingDevice::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
+#if defined(__APPLE__)
+    if (metal && metalTrackedSrc()) {
+      void* tex = newTrackedMetalTexture(driverResource(rd, RenderingDevice::DRIVER_RESOURCE_LOGICAL_DEVICE), w, h,
+                                         format == RenderingDevice::DATA_FORMAT_B8G8R8A8_UNORM);
+      if (tex) {
+        m.rd = rd->texture_create_from_extension(
+            RenderingDevice::TEXTURE_TYPE_2D, RenderingDevice::DataFormat(format), RenderingDevice::TEXTURE_SAMPLES_1,
+            BitField<RenderingDevice::TextureUsageBits>(usage), uint64_t(uintptr_t(tex)), uint64_t(w), uint64_t(h), 1, 1);
+        releaseMetalTexture(tex);
+      }
+    }
+    if (!m.rd.is_valid())
+#endif
+    {
+      // No initial data: the first copy writes all of it.
+      Ref<RDTextureFormat> fmt;
+      fmt.instantiate();
+      fmt->set_texture_type(RenderingDevice::TEXTURE_TYPE_2D);
+      fmt->set_format(RenderingDevice::DataFormat(format));
+      fmt->set_width(uint32_t(w));
+      fmt->set_height(uint32_t(h));
+      fmt->set_usage_bits(BitField<RenderingDevice::TextureUsageBits>(usage));
+      Ref<RDTextureView> view;
+      view.instantiate();
+      m.rd = rd->texture_create(fmt, view);
+    }
+    if (!m.rd.is_valid()) return TextureMirror{};
+    m.handle = driverResource(rd, RenderingDevice::DRIVER_RESOURCE_TEXTURE, m.rd);
+    const bool bgra = format == RenderingDevice::DATA_FORMAT_B8G8R8A8_UNORM;
+    m.format = vulkan  ? (bgra ? kVkFormatB8G8R8A8Unorm : kVkFormatR8G8B8A8Unorm)
+               : metal ? (bgra ? kMTLPixelFormatBGRA8Unorm : kMTLPixelFormatRGBA8Unorm)
+               : gpu_api_ == Renderer::D3D12 ? (bgra ? kDxgiFormatB8G8R8A8Unorm : kDxgiFormatR8G8B8A8Unorm)
+                                             : 0;  // WebGPU: the texture's own
+    m.data_format = format;
+    m.w = w;
+    m.h = h;
+    m.created_frame = texture_frame_;
+    if (vulkan && m.handle) {
+      TypedArray<RDUniform> uniforms;
+      Ref<RDUniform> tex;
+      tex.instantiate();
+      tex->set_uniform_type(RenderingDevice::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE);
+      tex->set_binding(0);
+      tex->add_id(layout_pass_.sampler);
+      tex->add_id(m.rd);
+      uniforms.push_back(tex);
+      Ref<RDUniform> sink;
+      sink.instantiate();
+      sink->set_uniform_type(RenderingDevice::UNIFORM_TYPE_STORAGE_BUFFER);
+      sink->set_binding(1);
+      sink->add_id(layout_pass_.sink);
+      uniforms.push_back(sink);
+      m.uniforms = rd->uniform_set_create(uniforms, layout_pass_.shader, 0);
+    }
+    if (!m.handle || (vulkan && !m.uniforms.is_valid())) freeMirror(m);
+    return m;
+  };
+
+  std::vector<RID> touched;  // Vulkan: the mirrors copied into, for the layout pass
+  for (HostTexture& e : textures_) {
+    if (!e.copy) continue;
+    e.copy = false;
+    // Every time: Godot may have replaced the texture (resize, set_image).
+    RID src = e.rs.is_valid() ? rs->texture_get_rd_texture(e.rs, false) : RID();
+    if (src.is_valid() && !rd->texture_is_valid(src)) src = RID();
+    if (e.cpu_only) {
+      // Shown through the CPU; a new source (e.g. a ViewportTexture whose
+      // viewport now exists, instead of its placeholder) is tried again.
+      if (!src.is_valid() || src == e.src) continue;
+      e.cpu_only = false;
+      e.warned = false;
+    }
+    if (vulkan && !layoutPass()) {
+      fail(e, "cannot be put in the layout Skia samples (no layout pass)");
+      continue;
+    }
+    if (!src.is_valid()) {
+      e.src = RID();
+      fail(e, "has no RenderingDevice texture");
+      continue;
+    }
+    if (src != e.src) {
+      e.src = src;
+      e.src_ok = false;
+      Ref<RDTextureFormat> f = rd->texture_get_format(src);
+      if (f.is_null()) {
+        fail(e, "has no texture format");
+        continue;
+      }
+      const int64_t df = f->get_format();
+      if (f->get_texture_type() != RenderingDevice::TEXTURE_TYPE_2D || f->get_array_layers() != 1 ||
+          f->get_samples() != RenderingDevice::TEXTURE_SAMPLES_1 || !mirrorFormatFor(df, metal, &e.mirror_format)) {
+        fail(e, "is not a 2D RGBA8 / BGRA8 texture (RenderingDevice format " + std::to_string(df) +
+                    "; e.g. an HDR viewport is RGBA16F)");
+        continue;
+      }
+      if (!(int64_t(f->get_usage_bits()) & RenderingDevice::TEXTURE_USAGE_CAN_COPY_FROM_BIT)) {
+        fail(e, "cannot be copied (its RenderingDevice texture lacks TEXTURE_USAGE_CAN_COPY_FROM_BIT)");
+        continue;
+      }
+      e.src_w = int(f->get_width());
+      e.src_h = int(f->get_height());
+      e.src_ok = true;
+    }
+    if (!e.src_ok) continue;
+    auto fits = [&](const TextureMirror& m) {
+      return m.valid() && m.w == e.src_w && m.h == e.src_h && m.data_format == e.mirror_format;
+    };
+    TextureMirror* target = fits(e.cur) ? &e.cur : fits(e.next) ? &e.next : nullptr;
+    if (!target) {
+      freeMirror(e.next);  // never handed to the runtime
+      e.next = createMirror(e.src_w, e.src_h, e.mirror_format);
+      if (!e.next.valid()) {
+        fail(e, "could not get a GPU copy");
+        continue;
+      }
+      target = &e.next;
+    }
+    const Error err = rd->texture_copy(src, target->rd, Vector3(), Vector3(), Vector3(float(e.src_w), float(e.src_h), 1), 0,
+                                       0, 0, 0);
+    if (err != OK) {
+      fail(e, "could not be copied on the GPU");
+      continue;
+    }
+    if (target == &e.cur) e.shown_pending = true;  // the runtime repaints its views next frame
+    if (vulkan) touched.push_back(target->uniforms);
+  }
+  if (!touched.empty()) {
+    const int64_t list = rd->compute_list_begin();
+    rd->compute_list_bind_compute_pipeline(list, layout_pass_.pipeline);
+    for (const RID& u : touched) {
+      rd->compute_list_bind_uniform_set(list, u, 0);
+      rd->compute_list_dispatch(list, 1, 1, 1);
+    }
+    rd->compute_list_end();
+  }
+}
+
+void JsuiView::releaseTextureGpu() {
+  bool any = !retired_mirrors_.empty() || layout_pass_.shader.is_valid() || layout_pass_.sink.is_valid() ||
+             layout_pass_.sampler.is_valid();
+  for (HostTexture& e : textures_) {
+    if (e.cur.valid()) retired_mirrors_.push_back(e.cur);
+    if (e.next.valid()) retired_mirrors_.push_back(e.next);
+    any = any || e.cur.valid() || e.next.valid();
+    e.cur = e.next = TextureMirror{};
+    e.copy = false;
+  }
+  if (!any) return;
+  waitRender();
+  runOnRenderThread([&]() {
+    RenderingServer* rs = RenderingServer::get_singleton();
+    RenderingDevice* rd = rs ? rs->get_rendering_device() : nullptr;
+    if (!rd) return;
+    for (TextureMirror& m : retired_mirrors_) {
+      if (m.uniforms.is_valid() && rd->uniform_set_is_valid(m.uniforms)) rd->free_rid(m.uniforms);
+      if (m.rd.is_valid()) rd->free_rid(m.rd);
+    }
+    LayoutPass& p = layout_pass_;
+    for (RID* r : {&p.pipeline, &p.shader, &p.sampler, &p.sink})
+      if (r->is_valid()) rd->free_rid(*r);
+  });
+  retired_mirrors_.clear();
+  layout_pass_ = LayoutPass{};
 }
 
 }  // namespace jsui_godot

@@ -1,0 +1,7 @@
+/* jsui_shared on Linux: export the C API (include/jsui/jsui.h) and nothing
+   else, so Skia, HarfBuzz, ICU, FreeType and the static libstdc++ stay
+   private to the library. */
+{
+  global: jsui_*;
+  local: *;
+};
