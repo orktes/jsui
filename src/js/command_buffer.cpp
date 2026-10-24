@@ -282,6 +282,12 @@ void CommandBuffer::applyOne(Runtime& rt, const Command& cmd) {
       result_.ok = n && lottie::command(n, name, cmd.x, cmd.y);
       return;
     }
+    case Op::ListenGlobal: {
+      std::string type = readString(at);
+      if (cmd.a) rt.globalListeners.insert(std::move(type));
+      else rt.globalListeners.erase(type);
+      return;
+    }
     case Op::AnimCreate: {
       Value config = readValue(at);
       result_.error.clear();

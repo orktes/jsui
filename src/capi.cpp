@@ -141,7 +141,7 @@ void jsui_resource_complete(JsuiRuntime* rt, uint64_t id, int status, const char
 }
 
 void jsui_post_message(JsuiRuntime* rt, const char* name, const char* json) {
-  rt->rt->js->hostMessage(name ? name : "", json ? json : "null");
+  rt->rt->inbound.hostMessage(name ? name : "", json ? json : "null");
 }
 
 int jsui_set_state(JsuiRuntime* rt, const char* key, const char* json) { return rt->rt->setState(key, json, false); }

@@ -61,7 +61,7 @@ void InputManager::editNotify(uint32_t id, bool text, bool selection) {
     Value::Object ev = baseEvent("change", n);
     ev["text"] = Value(edit::toUtf8(s->value));
     ev["eventCount"] = Value(s->eventCount);
-    dispatch(std::move(ev));
+    post(std::move(ev));
   }
   n = alive(id);  // the change handler may have removed it
   if (selection && n && listens(n, "selectionChange")) {
@@ -71,7 +71,7 @@ void InputManager::editNotify(uint32_t id, bool text, bool selection) {
     sel["end"] = Value(s->end());
     Value::Object ev = baseEvent("selectionchange", n);
     ev["selection"] = Value(std::move(sel));
-    dispatch(std::move(ev));
+    post(std::move(ev));
   }
 }
 

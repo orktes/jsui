@@ -139,6 +139,12 @@ export const PanResponder = {
         return config.onPanResponderTerminationRequest ? !!config.onPanResponderTerminationRequest(e, gs) : true;
       },
     };
+    // Static hints for native input routing (docs/ARCHITECTURE.md "Input
+    // routing details"), read when JS answers a touch late: whether the
+    // responder blocks native gestures without asking, and whether a
+    // termination request may be refused.
+    panHandlers.onResponderGrant.__blocksNative = !config.onShouldBlockNativeResponder;
+    panHandlers.onResponderTerminationRequest.__keepsGesture = !!config.onPanResponderTerminationRequest;
     return { panHandlers, getInteractionHandle: () => null };
   },
 };

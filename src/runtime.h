@@ -6,12 +6,14 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "audio/audio.h"
 #include "core/document.h"
 #include "host_buffers.h"
 #include "js/engine.h"
+#include "js/inbound.h"
 #include "host_state.h"
 #include "render/host_textures.h"
 #include "include/core/SkRect.h"
@@ -193,6 +195,19 @@ class Runtime {
   Document& doc;
   InputManager* input = nullptr;
   std::unique_ptr<JsEngine> js;
+  // Every call into JS goes through here (js/inbound.h).
+  Inbound inbound{*this};
+  // How long a default action JS could veto (Tab, Enter, wheel scrolling,
+  // a ScrollView taking a touch from a JS responder, ...) waits for JS's
+  // answer before it runs anyway (InputManager; single-threaded the answer
+  // is always there at once).
+  double eventDeadlineMs = 100;
+  // Event types the bundle listens to globally (addGlobalListener: modals,
+  // BackHandler, gamepad hooks), reported by __jsui_native.listenGlobal.
+  // Input asks it when an answer is late: a global keydown listener may
+  // veto the key's default action like one on the focused path.
+  std::unordered_set<std::string> globalListeners;
+  bool listensGlobally(const char* type) const { return globalListeners.count(type) > 0; }
   // Animated graphs driven natively (useNativeDriver: true).
   std::unique_ptr<NativeAnimated> animated;
 

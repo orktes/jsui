@@ -53,7 +53,7 @@ void Surface::dispatchResize() {
                    {"height", Value(double(doc.autoHeight() ? 0 : doc.height()))},
                    {"scale", Value(double(doc.pixelRatio()))},
                    {"rootTag", Value(double(tag()))}};
-  rt.js->dispatchEvent(Value(std::move(ev)));
+  rt.inbound.event(Value(std::move(ev)), false);
 }
 
 bool Surface::frozen() const {
