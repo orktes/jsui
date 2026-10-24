@@ -1804,15 +1804,13 @@ the expensive per-pixel work is done once:
   pixels over a uniform backdrop, the CPU path moves the viewport's pixels
   and repaints only what the scroll exposed, what is painted above the
   content and curved outlines at the viewport's edge (`ScrollBlit`).
-* **Sprites.** On the CPU raster, gradient backgrounds of 128x128 and
-  Image nodes of 16x16 (a downscaled, mipmapped icon costs ~350
-  instructions a pixel drawn directly) to 2.2M device pixels are rendered
-  once per content, device scale and sub-pixel phase and blitted at
-  whole-pixel offsets afterwards (`drawSprite`, 48 MB per document), so
-  static art at a fractional position is cached too. While a node keeps
-  moving by sub-pixels or scaling (it changed in this frame and the one
-  before, `PaintMotion`) a sprite per phase would be a new sprite every
-  frame: a gradient moving by sub-pixels (the showcase's drifting glow) is
+* **Sprites.** On the CPU raster, gradient backgrounds and Image nodes of
+  128x128 to 2.2M device pixels are rendered once per content, device scale
+  and sub-pixel phase and blitted at whole-pixel offsets afterwards
+  (`drawSprite`, 48 MB per document), so static art at a fractional
+  position is cached too. While a node keeps moving by sub-pixels or
+  scaling (it changed in this frame and the one before, `PaintMotion`) a
+  sprite per phase would be a new sprite every frame: a gradient moving by sub-pixels (the showcase's drifting glow) is
   then resampled from its sprite of phase 0 (`resampleMask`, within ~5
   levels of an exact paint, at its anti-aliased edge), images and scaling
   content are drawn directly, and the node is repainted from the sprite a

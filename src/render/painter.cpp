@@ -540,9 +540,6 @@ struct SpriteCache {
   std::vector<uint32_t> scratch;  // a resampled sprite
   static constexpr size_t kMaxBytes = 48u << 20;
   static constexpr int64_t kMinPixels = 128 * 128;  // smaller draws are cheap enough directly
-  // Images, which cost far more a pixel (a mipmapped, filtered lookup:
-  // ~350 instructions a pixel for a downscaled icon).
-  static constexpr int64_t kMinImagePixels = 16 * 16;
   static constexpr int64_t kMaxPixels = 2200000;    // per sprite (a full 1080p screen)
 };
 struct RootRecord;
@@ -550,12 +547,11 @@ SpriteCache& spriteCache(RootRecord* root);
 
 // How drawSprite draws: at `alpha`, for a node changing as `motion` says;
 // `smooth`: what it paints may be resampled while it moves (no detail a
-// bilinear filter would soften); sprites from `minPixels` device pixels.
+// bilinear filter would soften).
 struct SpriteDraw {
   float alpha = 1;
   const PaintMotion* motion = nullptr;
   bool smooth = false;
-  int64_t minPixels = SpriteCache::kMinPixels;
 };
 
 // Paints `draw(canvas)` (local coordinates, painting nothing outside
@@ -580,7 +576,7 @@ bool drawSprite(SkCanvas* c, RootRecord* root, const SkRect& bounds, SpriteKey& 
   SkMatrix local = SkMatrix::MakeAll(m.getScaleX(), 0, fx, 0, m.getScaleY(), fy, 0, 0, 1);
   SkIRect area = local.mapRect(bounds).roundOut().makeOutset(1, 1);
   int64_t px = int64_t(area.width()) * area.height();
-  if (px < how.minPixels || px > SpriteCache::kMaxPixels) return false;
+  if (px < SpriteCache::kMinPixels || px > SpriteCache::kMaxPixels) return false;
   if (resample) {
     if (motion->inexact) *motion->inexact = true;
     // Otherwise a new sprite every frame (measured: more than drawing
@@ -2235,7 +2231,7 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
     if (!image::paintKey(n, &key.bytes) ||
         !drawSprite(c, ctx.root, b.inner.rect(), key,
                     [&](SkCanvas* oc) { image::paint(n, oc, b.inner.rect(), b.inner); },
-                    {1, &motion, false, SpriteCache::kMinImagePixels}))
+                    {1, &motion}))
       image::paint(n, c, b.inner.rect(), b.inner);
   }
   if (inexact) {
