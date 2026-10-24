@@ -1,0 +1,21 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "JSUI",
+	"Description": "React Native UI for games: a JSUI runtime drawn over the game (UJsuiWidget / SJsuiView), with input pass-through and game <-> UI messages, state and frame buffers.",
+	"Category": "UI",
+	"CreatedBy": "orktes",
+	"CreatedByURL": "https://github.com/orktes/jsui",
+	"DocsURL": "https://github.com/orktes/jsui/tree/main/integrations/unreal",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"Modules": [
+		{
+			"Name": "Jsui",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [ "Mac", "Win64", "Linux" ]
+		}
+	]
+}
