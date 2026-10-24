@@ -463,7 +463,9 @@ void sampleJs(JSContext* ctx, JsProfile& prof) {
 
 int interruptHandler(JSRuntime*, void* opaque) {
   auto* impl = static_cast<JsEngine::Impl*>(opaque);
-  if (JsProfile* prof = jsProfile(); prof && impl->depth > 0 && impl->ctx) sampleJs(impl->ctx, *prof);
+  // Only while the runtime profiles its frames (jsui-bench's measured ones).
+  if (JsProfile* prof = jsProfile(); prof && impl->depth > 0 && impl->ctx && impl->rt.doc.perf.profiling)
+    sampleJs(impl->ctx, *prof);
   if (impl->depth == 0 || impl->timeoutMs <= 0) return 0;
   if (Clock::now() < impl->deadline) return 0;
   impl->interrupted = true;
