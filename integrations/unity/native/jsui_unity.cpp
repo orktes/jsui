@@ -191,6 +191,8 @@ JSUI_API void jsuiu_destroy(JsuiUnity* u) {
     std::lock_guard<std::mutex> lock(g_registryMutex);
     if (u->slot >= 0) g_slots[u->slot] = nullptr;
   }
+  if (const JsuiUnityBackend* b = jsuiu_backend())
+    if (b->forget) b->forget(u);
 #endif
   jsui_destroy(u->rt);
   delete u;

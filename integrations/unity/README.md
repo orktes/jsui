@@ -81,7 +81,7 @@ pass-through check as the other examples (see
   | Unity's graphics API | Platforms | Drawn by | How it is ordered with Unity's frame |
   | --- | --- | --- | --- |
   | Metal | macOS | Skia Graphite on Unity's `MTLDevice` / `MTLCommandQueue` ([jsui_unity_metal.mm](native/jsui_unity_metal.mm)) | commits what Unity recorded so far, then Skia's command buffer, on the same queue |
-  | Vulkan | Linux, Windows | Skia Graphite on Unity's `VkDevice` / graphics queue ([jsui_unity_vulkan.cpp](native/jsui_unity_vulkan.cpp)) | `AccessTexture` records the barrier into Unity's command buffer (and Unity tracks the layout), then `AccessQueue(flush)` renders once Unity's work so far is submitted and the queue is free |
+  | Vulkan | Linux, Windows | Skia Graphite on Unity's `VkDevice` / graphics queue ([jsui_unity_vulkan.cpp](native/jsui_unity_vulkan.cpp)) | `AccessTexture` records the barrier into Unity's command buffer (and Unity tracks the layout), then `AccessQueue(flush)` renders once Unity's work so far is submitted and the queue is free. A texture that is no input attachment (which Graphite needs) gets the frame through a plugin-owned image and a copy of the repainted rect |
   | Direct3D 11 (Windows default) | Windows | Skia Ganesh on a D3D12 device on the same adapter, copied into the texture on Unity's immediate context ([jsui_unity_d3d.cpp](native/jsui_unity_d3d.cpp)) | the copy is queued on the render thread like Unity's own commands |
   | Direct3D 12 | Windows (Unity 6.3+: `IUnityGraphicsD3D12v8`) | Skia Ganesh on Unity's `ID3D12Device` / command queue ([jsui_unity_d3d.cpp](native/jsui_unity_d3d.cpp)) | `RequestResourceState` in Unity's command list, then a render event configured for queue access after Unity flushed |
 
@@ -101,8 +101,8 @@ pass-through check as the other examples (see
   loads the built plugin, plays Unity's part over a lavapipe device (the
   plugin API, a frame recorded into command buffers submitted at its end,
   queue-access callbacks run synchronously and from a submission thread)
-  under synchronization validation, and compares the frames with the CPU
-  raster.
+  under synchronization validation, for textures with and without
+  INPUT_ATTACHMENT usage, and compares the frames with the CPU raster.
 * **Input pass-through.** `JsuiView` sends mouse input (polled in its
   `Update`, which runs before other scripts) and keyboard and text input (IMGUI
   events, which carry key repeats and typed characters) to the UI first. What
