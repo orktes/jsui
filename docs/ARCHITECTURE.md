@@ -384,7 +384,9 @@ used to process Dawn events).
   filtering instead of being keyed by it, and the shadow of a node whose
   scale or size animates is drawn from the mask of the nearest of 8 sizes
   per octave, stretched to it, and repainted exactly once it stops
-  (`quantizedScale`, `shadowInexact` in `painter.cpp`). Such approximate
+  (`quantizedScale`, `NodeRecord::approximate` in `painter.cpp`; the CPU
+  raster does the same while a node keeps moving, see Paint performance:
+  Shadows). Such approximate
   draws ask for an exact repaint (`Document::markExactRepaint`, per
   surface), which `jsui_needs_redraw()` reports once nothing animates any
   more: while animations, scroll physics or JS frame callbacks drive frames
@@ -1832,6 +1834,29 @@ off; `host` is the host's own share, writing the JSON text, and counts in
 `--tool=callgrind --instr-atstart=no`: the tool switches instrumentation on
 for the measured frames only.
 
+Where the JS time goes: with `JSUI_JS_PROFILE=out.txt` in the environment the
+engine samples the JS stack from QuickJS's interrupt poll (every ~10000
+bytecode ops) while the runtime profiles its frames (jsui-bench's measured
+frames), weights each sample by the time since the previous poll, and writes
+self and inclusive shares per function at exit (`JSUI_JS_PROFILE_LINES=1`:
+per source line). Bundles built without `--minify` keep React's function
+names.
+
+* **Props.** `__jsui_native.updateProps(id, reactProps, hidden)` builds what
+  native sees from the React props (event handlers become `__events`
+  tokens, the style is flattened, `pointerEvents` / hidden go into it) and
+  `Node::setProps` diffs it, so the host config does neither in JS; it only
+  skips renders whose React props are identical (`mayDiffer`). A style
+  array rebuilt with equal contents therefore reaches native (a skipped
+  `setProps`), which is cheaper than diffing every changed style in JS.
+* **QuickJS.** `cmake/Deps.cmake` compiles a patched copy of quickjs.c:
+  `JS_FreeValue` / `JS_DupValue` are inlined (quickjs-ng exports them out of
+  line, a call per value the interpreter pops) and `===` / `!==` decide
+  objects, symbols, booleans, null and undefined inline. `JSUI_QUICKJS_FLAGS`
+  adds compile flags for QuickJS alone (profile-guided optimization with
+  `-fprofile-instr-generate` / `-fprofile-instr-use=` measured 6-9% less JS
+  time on React-heavy scenarios on an M1 Ultra).
+
 ### JS engines compared
 
 `node web/test/js-bench.mjs` runs jsui-bench scenarios on QuickJS (in
@@ -1904,11 +1929,30 @@ the expensive per-pixel work is done once:
   and repaints only what the scroll exposed, what is painted above the
   content and curved outlines at the viewport's edge (`ScrollBlit`).
 * **Sprites.** On the CPU raster, gradient backgrounds and Image nodes of
-  128x128 to 2.2M device pixels are rendered once per content and device
-  scale and blitted at whole-pixel offsets afterwards (`drawSprite`, 48 MB
-  per document); blurred shadows and inset shadows are cached masks drawn
-  the same way. Sub-pixel positions draw directly (a moving sprite would be
-  re-rendered every frame).
+  128x128 to 2.2M device pixels are rendered once per content, device scale
+  and sub-pixel phase and blitted at whole-pixel offsets afterwards
+  (`drawSprite`, 48 MB per document), so static art at a fractional
+  position is cached too. While a node keeps moving by sub-pixels or
+  scaling (it changed in this frame and the one before, `PaintMotion`) its
+  sprites are drawn directly instead, as a new sprite every frame would
+  cost more, and the node is repainted from the sprite a frame after it
+  stops (`NodeRecord::approximate`, `Document::markExactRepaint`): static
+  frames and frames at rest paint exactly the pixels of a full repaint.
+* **Shadows.** Blurred shadows and inset shadows are cached masks, blurred
+  once per device size, sigma, sub-pixel phase, radii and colour
+  (`ShadowCache`) and blitted at whole-pixel offsets; only the ring around
+  the box is drawn (`MaskSkip`: the box minus its corners, as a cross of
+  two rects on the CPU, one rect on GPU canvases). A node at rest gets its
+  exact mask. While it keeps moving or scaling (a spring, a drag) the CPU
+  raster approximates as GPU canvases always do: the mask of phase 0 and of
+  the nearest of 8 scales per octave (`quantizedScale`) is resampled to the
+  fractional position and size with a separable bilinear filter
+  (`resampleMask`, SSE2 / NEON) into a scratch buffer blitted as a sprite,
+  and the box's hole is cut out after resampling (its anti-aliased
+  coverage), so the edge stays sharp. The shadow then stays within 4 levels
+  of the exact one, the moving frames blur no mask after the first two
+  (the menu's springing buttons blurred one per button per frame, ~21% of
+  the frame), and the node is repainted exactly once it stops.
 * **Layers.** A node whose draws cannot overlap applies its opacity to them
   instead of a `saveLayer` (`opacityFoldable`): one draw (a background
   colour or one gradient, nothing else), a childless box with at most one
@@ -1922,11 +1966,12 @@ the expensive per-pixel work is done once:
   bounds lay out at the same content width.
 
 `PaintStats` (`lastPaintStats()`) reports per paint the nodes painted and
-culled, the pixels and rects repainted, sprite draws and renders, blitted
-pixels and, with `setPaintCounting()`, the canvas draw calls, text / image
+culled, the pixels and rects repainted, sprite draws and renders, shadow
+mask draws and renders (blurs), blitted pixels and, with `setPaintCounting()`, the canvas draw calls, text / image
 draws, layers and clips. `tests/native/render_test.cpp` and `gpu_test.cpp`
 assert on these (incremental frames equal full ones; perf guards on
-pixels repainted, passes, sprite re-renders, layers).
+pixels repainted, passes, sprite re-renders, shadow blurs while a shadow
+moves, layers).
 
 `tools/jsui-paint-bench` renders bundles headless on a simulated 60 Hz
 clock and times only the paint call, per backend: `cpu`
@@ -1953,11 +1998,14 @@ Scenarios (`run.mjs` bundles them into `build/paint-bench/`):
 animations), `interactions-hover` (the same with a mouse sweep), `caret`
 (a static screen with a blinking caret), `cards` (a grid of shadowed,
 rounded, clipped cards scrolling 6 px per frame) and `text` (text-heavy
-panels with a ticking clock, a ticker and a pulsing badge). Options:
+panels with a ticking clock, a ticker and a pulsing badge) and `menu`
+(jsui-bench's main menu, shadowed buttons springing in translation and
+scale under a mouse sweep). Options:
 `--frames`, `--warmup`, `--settle-ms`, `--width` / `--height` / `--scale`,
 `--backends`, `--json`, `--no-count`. Under valgrind (callgrind
 instruction counts are steadier than wall time on a shared machine), pass
-`--no-count` and `--toggle-collect='jsui::Runtime::renderIncremental(*'`.
+`--no-count` and `--toggle-collect='jsui::Surface::renderIncremental(*'`
+(`'jsui::gpu::render(*'` for `gl`; the warmup frames are counted too).
 Wall times on llvmpipe say little about a hardware GPU (shader JIT and
 rasterization run on the CPU); the GL call counts carry over.
 
