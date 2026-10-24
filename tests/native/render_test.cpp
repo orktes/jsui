@@ -399,6 +399,15 @@ TEST(render_incremental_matches_full) {
       {"style":{"height":30,"margin":4,"borderRadius":5,"backgroundColor":"#4ade80"}},
       {"style":{"height":30,"margin":4,"borderRadius":5,"backgroundColor":"#4fd1ff"}}]}]})J");
   Node* other = s.add(R"J({"style":{"position":"absolute","left":240,"top":30,"width":60,"height":60,"borderRadius":30,"backgroundColor":"#b26bff","opacity":0.8}})J");
+  // A fixed-size text whose padding is a percentage of its parent's width,
+  // and a clipped column of rows below a counter (rows laid out from Yoga's
+  // cache when the counter changes).
+  Node* padBox = s.add(R"J({"style":{"position":"absolute","left":10,"top":190,"width":100,"height":40,"backgroundColor":"#26304f"},"children":[
+    {"type":"Text","style":{"width":80,"height":30,"paddingLeft":"20%","color":"#fff","fontSize":12},"text":"Pad"}]})J");
+  Node* column = s.add(R"J({"style":{"position":"absolute","left":130,"top":186,"width":100,"height":52,"overflow":"hidden"},"children":[
+    {"style":{"flexDirection":"row"},"children":[{"type":"Text","style":{"color":"#fff","fontSize":10},"text":"Frame 1"}]},
+    {"style":{"height":12,"backgroundColor":"#4ade80"}},{"style":{"height":12,"backgroundColor":"#4fd1ff"}},
+    {"style":{"height":12,"backgroundColor":"#b26bff"}},{"style":{"height":12,"backgroundColor":"#f2c35b"}}]})J");
   Node* needle = panel->children()[1];
   Node* label = panel->children()[2];
   Node* scroll = panel->children()[3];
@@ -441,6 +450,14 @@ TEST(render_incremental_matches_full) {
   check("hide");
   panel->removeChild(scroll);
   check("remove");
+  // The text keeps its frame; only its padding (from its parent) changes.
+  patch(padBox, R"J({"width":180})J");
+  check("percent padding");
+  column->children()[0]->children()[0]->children()[0]->setText("Frame 22");
+  check("counter over cached rows");
+  // The counter's row grows: the rows below move.
+  patch(column->children()[0], R"J({"height":20})J");
+  check("rows move");
   // Nothing changed: nothing repainted.
   s.doc().layout();
   SkIRect r = s.rt->renderIncremental(inc.data(), 320, 240, 320 * 4);
@@ -555,6 +572,17 @@ TEST(render_skipped_subtrees_damage_like_a_full_walk) {
   }
   std::printf("  settled: %d nodes visited per frame\n", visited);
   CHECK(visited <= 3);
+  // A change inside a subtree skipped for all those frames walks only its
+  // path: the clean children on it are skipped again (the rounded box next
+  // to the title, its curved outline carried over from where its skipped
+  // parent copied it).
+  both({0, 0}, [](Node* n, Node*) { n->children()[0]->setText("Title!"); });
+  frame();
+  visited = lastPaintStats(a.doc()).nodesUpdated;
+  std::printf("  deep change: %d nodes visited\n", visited);
+  CHECK(visited <= 5);
+  both({0, 1}, [](Node* n, Node*) { patch(n, R"J({"top":44})J"); });
+  frame();
 }
 
 // Damage cutting through rounded boxes at random places (a small box moving

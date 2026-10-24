@@ -34,6 +34,7 @@ struct PerfCounters {
   uint64_t styleResolves = 0;    // applyStyle runs
   uint64_t valueConversions = 0; // JS objects / arrays converted to Value
   uint64_t layoutPasses = 0;     // YGNodeCalculateLayout runs
+  uint64_t layoutVisits = 0;     // nodes the post-layout walk visited (Document::afterLayout)
   uint64_t textMeasures = 0;     // Yoga measure callbacks for Text / TextInput
   uint64_t paragraphBuilds = 0;  // text shaping (ParagraphBuilder::Build)
   uint64_t animatedWrites = 0;   // views written by native Animated

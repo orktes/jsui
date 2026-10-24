@@ -160,6 +160,7 @@ class Document {
   std::vector<Node*> focusHints_;
   std::unordered_map<uint32_t, std::unique_ptr<Node>> nodes_;
   std::unordered_map<uint32_t, Rect> reportedLayout_;
+  uint64_t yogaPass_ = 0;  // the last layout() pass (see afterLayout)
   Node* root_ = nullptr;
   uint32_t nextId_ = 1;
   uint32_t* idCounter_ = &nextId_;

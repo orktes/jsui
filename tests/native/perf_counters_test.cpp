@@ -16,6 +16,7 @@
 #include "host_buffers.h"
 #include "input/input.h"
 #include "jsui/jsui.h"
+#include "render/painter.h"
 #include "runtime.h"
 #include "test.h"
 
@@ -130,6 +131,46 @@ TEST(perf_one_text_change_measures_one_paragraph) {
     CHECK(c.textMeasures <= 2);
     CHECK_EQ(c.styleResolves, 0u);
   }
+}
+
+// The post-layout walk and the painter's damage walk (updateDamage) visit
+// the paths to what changed, not the 20000 nodes of the list: the counter's
+// relayout takes the list's layout from Yoga's cache, which must neither
+// walk its rows nor mark it for the painter (a marked list has the painter
+// check each of its 2000 rows).
+TEST(perf_one_text_change_walks_only_its_path) {
+  ListFixture f;
+  updateDamage(f.doc(), 1280, 720);  // the first records: every node
+  CHECK(lastPaintStats(f.doc()).nodesUpdated > kRows);
+  updateDamage(f.doc(), 1280, 720);  // unchanged since: settled (quiet)
+  int n = 0;
+  for (int i = 0; i < 3; i++) {
+    PerfCounters c = f.measure([&] { f.counter->setText("Frame " + std::to_string(++n)); });
+    CHECK(c.layoutVisits <= 8);
+    updateDamage(f.doc(), 1280, 720);
+    CHECK(lastPaintStats(f.doc()).nodesUpdated <= 6);
+    CHECK(f.list->paintTreeDirty() == false);
+  }
+  // A change inside one row walks that row's path; a row inserted at the
+  // top moves every row below it (all of them are laid out and placed
+  // again, which only a walk of the list finds).
+  for (int i = 0; i < 2; i++) {
+    PerfCounters c = f.measure([&] {
+      Value::Object partial;
+      partial["backgroundColor"] = Value(i ? "#6a4aa0" : "#4a5170");
+      CHECK(f.icons[5]->patchStyle(partial));
+    });
+    CHECK_EQ(c.layoutVisits, 0u);
+    updateDamage(f.doc(), 1280, 720);
+    CHECK(lastPaintStats(f.doc()).nodesUpdated <= 6);
+  }
+  Node* extra = f.doc().createNode(NodeType::View);
+  extra->setProps(Value::parseJson(R"({"style":{"height":28}})"));
+  PerfCounters c = f.measure([&] { f.list->insertBefore(extra, f.rows[0]); });
+  CHECK(c.layoutVisits > uint64_t(kRows));
+  CHECK(c.layoutVisits < uint64_t(kRows) * 2);  // the rows, not their children
+  updateDamage(f.doc(), 1280, 720);
+  CHECK(lastPaintStats(f.doc()).nodesUpdated > kRows);
 }
 
 TEST(perf_paint_only_style_changes_skip_layout) {

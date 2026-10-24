@@ -184,6 +184,7 @@ const CounterDef kCounters[] = {
     {"styleResolves", [](const jsui::PerfCounters& c) { return c.styleResolves; }},
     {"valueConversions", [](const jsui::PerfCounters& c) { return c.valueConversions; }},
     {"layoutPasses", [](const jsui::PerfCounters& c) { return c.layoutPasses; }},
+    {"layoutVisits", [](const jsui::PerfCounters& c) { return c.layoutVisits; }},
     {"textMeasures", [](const jsui::PerfCounters& c) { return c.textMeasures; }},
     {"paragraphBuilds", [](const jsui::PerfCounters& c) { return c.paragraphBuilds; }},
     {"animatedWrites", [](const jsui::PerfCounters& c) { return c.animatedWrites; }},
