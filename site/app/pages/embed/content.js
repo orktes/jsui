@@ -375,6 +375,85 @@ case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
   ],
 };
 
+const UNITY = {
+  id: 'unity',
+  label: 'Unity',
+  eyebrow: 'Unity 6 · integrations/unity',
+  color: colors.blue,
+  title: 'A JsuiView component',
+  lead: 'A Unity package: a native plugin that exports the C API to C#, and a JsuiView component that draws the UI over the game as a uGUI overlay, forwards mouse and keyboard input and tells the game what the UI did not take. The example project is the same game as the raylib, SDL3 and sokol examples, built from the command line.',
+  facts: [
+    ['Unity', '6000.3 LTS'],
+    ['Plugin', 'C API · P/Invoke'],
+    ['UI on screen', 'Texture2D'],
+    ['Self-test', 'in the player'],
+  ],
+  blocks: [
+    {
+      kind: 'code',
+      lang: 'sh',
+      title: 'build and run',
+      code: `
+npx jsui build integrations/shared/ui/app.jsx -o integrations/shared/ui/dist/bundle.js
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DJSUI_BUILD_UNITY=ON
+cmake --build build --target jsui_unity     # -> package/Plugins/<platform>/
+
+Unity -batchmode -nographics -projectPath integrations/unity/project \\
+      -executeMethod BuildExample.Build -logFile -
+"build/unity/JSUI Example.app/Contents/MacOS/JSUI Example" --selftest
+`,
+    },
+    {
+      kind: 'pair',
+      items: [
+        {
+          kind: 'code',
+          lang: 'cs',
+          title: 'the game side',
+          code: `
+var ui = gameObject.AddComponent<Jsui.JsuiView>();
+// bundle: StreamingAssets/jsui/bundle.js (or an http:// dev URL)
+
+ui.OnMessage += (name, json) => {
+    if (name == "game:spawn") Spawn();
+};
+// only input the UI did not consume
+ui.PassedMouseDown += (button, pos) => StartOrbit();
+ui.PassedWheel += delta => Zoom(delta.y);
+ui.PassedKeyDown += key => {
+    if (key == KeyCode.Escape) TogglePause();
+};
+`,
+        },
+        {
+          kind: 'code',
+          lang: 'cs',
+          title: 'per frame',
+          code: `
+void Update() {
+    ui.SetState("game", gameJson);   // useHostState('game')
+
+    for (int i = 0; i < units.Count; i++) {
+        var s = ui.WorldToUi(cam, units[i].head);
+        pos[i * 4 + 0] = s.x;
+        pos[i * 4 + 1] = s.y;
+        pos[i * 4 + 2] = s.z > 0 ? 1 : 0;
+        pos[i * 4 + 3] = units[i].hue;
+    }
+    ui.SetBuffer("entities", pos, units.Count * 4);
+}   // JsuiView ticks and paints in LateUpdate
+`,
+        },
+      ],
+    },
+    {
+      kind: 'note',
+      color: colors.blue,
+      text: 'The UI is rasterised on the CPU, repainted only where it changed and uploaded into a premultiplied Texture2D when anything did, so it runs on every graphics API Unity supports. JS messages and logs are queued inside jsui_tick and drained by C# afterwards, so no native code calls back into managed code (IL2CPP friendly). macOS and Linux today.',
+    },
+  ],
+};
+
 const DATA = {
   id: 'data',
   label: 'Game data',
@@ -755,4 +834,4 @@ WEBGL=1 scripts/build-wasm.sh                         # -> web/dist-webgl/ (Skia
   ],
 };
 
-export const TARGETS = [GODOT, CAPI, ENGINES, DATA, WEB, DEV, BUILD];
+export const TARGETS = [GODOT, CAPI, ENGINES, UNITY, DATA, WEB, DEV, BUILD];

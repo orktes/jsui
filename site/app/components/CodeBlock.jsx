@@ -8,6 +8,7 @@ const KEYWORDS = {
   c: 'int float double char void const static struct typedef enum return if else for while unsigned size_t uint32_t uint8_t bool true false NULL sizeof include define',
   gd: 'extends func var const if elif else for while return signal class_name and or not in true false null self await pass match',
   sh: 'npx npm node cmake git cd export',
+  cs: 'var void int float double bool string new return if else for foreach while using public private static class struct readonly true false null this switch case break continue out ref',
 };
 
 const PALETTE = {

@@ -142,18 +142,18 @@ public class ExampleGame : MonoBehaviour
         light.transform.rotation = Quaternion.Euler(50, -30, 0);
         RenderSettings.ambientLight = new Color(0.25f, 0.28f, 0.38f);
 
-        Material Mat(Color c)
+        Material Mat(Color c, float gloss = 0.35f)
         {
             var m = baseMaterial ? new Material(baseMaterial) : new Material(Shader.Find("Standard"));
             m.color = c;
-            if (m.HasProperty("_Glossiness")) m.SetFloat("_Glossiness", 0.35f);
+            if (m.HasProperty("_Glossiness")) m.SetFloat("_Glossiness", gloss);
             return m;
         }
 
         var ground = GameObject.CreatePrimitive(PrimitiveType.Plane);
         ground.name = "Ground";
         ground.transform.localScale = new Vector3(4, 1, 4);  // 40 x 40
-        ground.GetComponent<Renderer>().sharedMaterial = Mat(new Color32(14, 19, 34, 255));
+        ground.GetComponent<Renderer>().sharedMaterial = Mat(new Color32(14, 19, 34, 255), 0);  // matte: no sky reflection
 
         var tower = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
         tower.name = "Tower";
@@ -234,6 +234,7 @@ public class ExampleGame : MonoBehaviour
         float now = Time.realtimeSinceStartup;
         if (fpsWindow_ < 0) fpsWindow_ = now;
         fpsFrames_++;
+        if (fps_ == 0 && now > fpsWindow_) fps_ = Mathf.RoundToInt(fpsFrames_ / (now - fpsWindow_));  // until the first window closes
         if (now - fpsWindow_ >= 0.5f)
         {
             fps_ = Mathf.RoundToInt(fpsFrames_ / (now - fpsWindow_));

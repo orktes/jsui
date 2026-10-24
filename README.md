@@ -173,7 +173,7 @@ what the deterministic tools (`jsui-render`, `jsui-record`) and reference tests 
 project. Build it with `-DJSUI_BUILD_GODOT=ON` (it is off by default). See
 [integrations/godot/README.md](integrations/godot/README.md).
 
-## raylib, SDL3 and sokol
+## raylib, SDL3, sokol and Unity
 
 `integrations/raylib`, `integrations/sdl3` and `integrations/sokol` run one
 shared game HUD in three game loops through the C API: input pass-through
@@ -183,3 +183,9 @@ screen (Skia GL into a raylib `RenderTexture2D`, a dirty-rect CPU upload on any
 `SDL_Renderer` backend, Skia GL straight into sokol's swapchain framebuffer).
 Build them with `-DJSUI_BUILD_RAYLIB=ON -DJSUI_BUILD_SDL3=ON
 -DJSUI_BUILD_SOKOL=ON`. See [integrations/README.md](integrations/README.md).
+
+The same game also runs in Unity 6: [integrations/unity](integrations/unity/README.md)
+is a Unity package (a native plugin exporting the C API to C#, and a
+`JsuiView` component that composites the UI as a uGUI overlay and passes on
+the input it did not consume) and an example project built from the command
+line.
