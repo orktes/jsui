@@ -122,6 +122,13 @@ add_library(jsui_quickjs STATIC
   ${_qjs_c})
 target_include_directories(jsui_quickjs PUBLIC ${quickjs_SOURCE_DIR})
 target_compile_definitions(jsui_quickjs PRIVATE _GNU_SOURCE)
+# Extra compile flags for QuickJS alone (e.g. profile-guided optimization:
+# -fprofile-generate / -fprofile-use=...).
+set(JSUI_QUICKJS_FLAGS "" CACHE STRING "Extra compile flags for QuickJS")
+if(JSUI_QUICKJS_FLAGS)
+  separate_arguments(_qjs_flags NATIVE_COMMAND "${JSUI_QUICKJS_FLAGS}")
+  target_compile_options(jsui_quickjs PRIVATE ${_qjs_flags})
+endif()
 if(UNIX)
   target_link_libraries(jsui_quickjs PUBLIC m)
 endif()

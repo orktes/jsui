@@ -394,19 +394,23 @@ JSValue js_now(JSContext* ctx, JSValueConst, int, JSValueConst*) { return JS_New
 // counts per function are written to `path` at exit.
 struct JsProfile {
   std::string path;
-  std::unordered_map<std::string, uint64_t> self, incl;
-  uint64_t samples = 0;
+  // Weighted by the time since the previous poll (not counting the
+  // sampling itself): polls are not evenly spaced (every backward jump and
+  // call), so plain counts over-weight tight loops.
+  std::unordered_map<std::string, double> self, incl;
+  double samples = 0;
+  Clock::time_point last{};
   ~JsProfile() {
     if (path.empty() || !samples) return;
     FILE* f = std::fopen(path.c_str(), "w");
     if (!f) return;
-    auto dump = [&](const char* title, const std::unordered_map<std::string, uint64_t>& m) {
-      std::vector<std::pair<uint64_t, std::string>> v;
+    auto dump = [&](const char* title, const std::unordered_map<std::string, double>& m) {
+      std::vector<std::pair<double, std::string>> v;
       for (auto& [k, n] : m) v.push_back({n, k});
       std::sort(v.rbegin(), v.rend());
-      std::fprintf(f, "== %s (%llu samples)\n", title, (unsigned long long)samples);
+      std::fprintf(f, "== %s (%.1f ms sampled)\n", title, samples / 1000);
       for (size_t i = 0; i < v.size() && i < 80; i++)
-        std::fprintf(f, "%6.2f%%  %s\n", 100.0 * double(v[i].first) / double(samples), v[i].second.c_str());
+        std::fprintf(f, "%6.2f%%  %s\n", 100.0 * v[i].first / samples, v[i].second.c_str());
     };
     dump("self", self);
     dump("inclusive", incl);
@@ -424,11 +428,14 @@ JsProfile* jsProfile() {
   return p;
 }
 void sampleJs(JSContext* ctx, JsProfile& prof) {
+  auto t0 = Clock::now();
+  double w = std::chrono::duration<double, std::micro>(t0 - prof.last).count();
+  if (w > 2000) w = 2000;  // first poll of a JS entry: the gap includes native time
   JSValue err = JS_NewError(ctx);
   JSValue st = JS_GetPropertyStr(ctx, err, "stack");
   const char* s = JS_ToCString(ctx, st);
   if (s) {
-    prof.samples++;
+    prof.samples += w;
     std::vector<std::string> seen;
     bool leaf = true;
     for (const char* p = s; *p;) {
@@ -441,16 +448,17 @@ void sampleJs(JSContext* ctx, JsProfile& prof) {
       // "fn (file:line:col)" -> "fn file:line"
       size_t col = fr.rfind(':');
       if (std::getenv("JSUI_JS_PROFILE_LINES")) { if (col != std::string::npos && fr.back() == ')') fr = fr.substr(0, col) + ")"; } else if (size_t sp = fr.find(' '); sp != std::string::npos) fr = fr.substr(0, sp);
-      if (leaf) prof.self[fr]++, leaf = false;
+      if (leaf) prof.self[fr] += w, leaf = false;
       if (std::find(seen.begin(), seen.end(), fr) == seen.end()) {
         seen.push_back(fr);
-        prof.incl[fr]++;
+        prof.incl[fr] += w;
       }
     }
     JS_FreeCString(ctx, s);
   }
   JS_FreeValue(ctx, st);
   JS_FreeValue(ctx, err);
+  prof.last = Clock::now();
 }
 
 int interruptHandler(JSRuntime*, void* opaque) {
