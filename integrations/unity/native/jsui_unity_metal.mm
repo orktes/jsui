@@ -14,9 +14,7 @@
 // integration's Metal path).
 #import <Metal/Metal.h>
 
-#include "IUnityGraphics.h"
-#include "IUnityGraphicsMetal.h"
-#include "IUnityInterface.h"
+#include "jsui_unity_api.h"
 #include "jsui/jsui.h"
 #include "jsui_unity_gpu.h"
 

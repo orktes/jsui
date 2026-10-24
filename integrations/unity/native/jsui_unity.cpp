@@ -38,7 +38,7 @@
 
 #include "jsui/jsui.h"
 #if JSUI_UNITY_GPU
-#include "IUnityGraphics.h"
+#include "jsui_unity_api.h"
 #include "jsui_unity_gpu.h"
 #else
 #define UNITY_INTERFACE_API
