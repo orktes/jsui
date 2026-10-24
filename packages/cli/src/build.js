@@ -1,4 +1,4 @@
-// `jsui build <entry> [-o dist/bundle.js] [--minify] [--sourcemap] [--no-bytecode]`
+// `jsui build <entry> [-o dist/bundle.js] [--minify] [--sourcemap] [--no-bytecode] [--no-source-fallback]`
 
 import * as esbuild from 'esbuild';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -14,12 +14,12 @@ export async function formatErrors(errors) {
 /**
  * Builds a QuickJS-ready IIFE bundle and writes it plus its assets.
  * `bytecode` precompiles it to QuickJS bytecode (src/js/bytecode.h: faster
- * startup, less memory; the source stays inside as the fallback for other
- * runtime versions). Without the WebAssembly runtime the bundle stays
+ * startup, less memory; unless `sourceFallback` is false the source stays
+ * inside as the fallback for other runtime versions). Without the WebAssembly runtime the bundle stays
  * source and `bytecode` in the result says why.
  * @returns {Promise<{outfile: string, bytes: number, sourceBytes: number, bytecode: true | string | false, assets: string[], warnings: object[]}>}
  */
-export async function build({ entry, outfile = 'dist/bundle.js', minify = false, sourcemap = false, mode = 'production', bytecode = false, wasmDir }) {
+export async function build({ entry, outfile = 'dist/bundle.js', minify = false, sourcemap = false, mode = 'production', bytecode = false, sourceFallback = true, wasmDir }) {
   const assets = new Map();
   const absOut = path.resolve(outfile);
   let result;
@@ -44,7 +44,7 @@ export async function build({ entry, outfile = 'dist/bundle.js', minify = false,
       sourceBytes = contents.length;
       if (bytecode) {
         try {
-          contents = await compileBundle(contents, { name: path.basename(absOut), wasmDir });
+          contents = await compileBundle(contents, { name: path.basename(absOut), keepSource: sourceFallback, wasmDir });
           compiled = true;
         } catch (e) {
           if (e.code !== 'JSUI_NO_WASM') throw new Error(`${path.basename(absOut)}: ${e.message}`);

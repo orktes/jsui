@@ -14,9 +14,12 @@ import { skillCommand, SKILL_USAGE } from '../src/skill.js';
 
 const USAGE = `usage:
   jsui build <entry> [-o dist/bundle.js] [--minify] [--sourcemap] [--dev] [--no-bytecode]
+     [--no-source-fallback]
      Precompiles to QuickJS bytecode (faster startup, less memory; the source
-     stays inside as a fallback). --no-bytecode writes plain JS (browser JS
-     engines, other tools).
+     stays inside as a fallback for runtimes of other JSUI versions).
+     --no-source-fallback leaves it out (file ~1.25x the JS instead of ~2.2x;
+     only runtimes of this JSUI version can load it). --no-bytecode writes
+     plain JS (browser JS engines, other tools).
   jsui dev <entry> [--port 5173] [--host 127.0.0.1] [--no-hmr]
      [--headless [view options]]
      Every runtime that loads the bundle in dev mode joins the server's shared
@@ -233,6 +236,7 @@ async function main(argv) {
       host: { type: 'string' },
       'no-hmr': { type: 'boolean' },
       'no-bytecode': { type: 'boolean' },
+      'no-source-fallback': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       ...VIEW_OPTIONS,
     },
@@ -300,8 +304,9 @@ async function main(argv) {
         sourcemap: !!values.sourcemap,
         mode: values.dev ? 'development' : 'production',
         bytecode: !values['no-bytecode'],
+        sourceFallback: !values['no-source-fallback'],
       });
-      const kind = r.bytecode === true ? `bytecode + ${(r.sourceBytes / 1024).toFixed(1)} KiB source` : 'source';
+      const kind = r.bytecode !== true ? 'source' : values['no-source-fallback'] ? 'bytecode' : `bytecode + ${(r.sourceBytes / 1024).toFixed(1)} KiB source`;
       console.log(`jsui: wrote ${r.outfile} (${(r.bytes / 1024).toFixed(1)} KiB, ${kind}, ${r.assets.length} assets) in ${Date.now() - t0} ms`);
       if (typeof r.bytecode === 'string') console.warn(`jsui: not precompiled (${r.bytecode}); pass --no-bytecode to silence this`);
       return 0;
