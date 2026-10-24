@@ -39,7 +39,7 @@ const SCENARIO = opt('--scenario', 'steady');
 const N = Number(opt('--frames', 120));
 const TOP = Number(opt('--top', 40));
 const W = Number(opt('--width', 1280)), H = Number(opt('--height', 720)), DPR = Number(opt('--dpr', 1));
-const entry = args.find((a, i) => !a.startsWith('--') && !args[i - 1]?.startsWith('--')) ??
+const entry = args.find((a, i) => !a.startsWith('--') && !(args[i - 1]?.startsWith('--') && args[i - 1] !== '--real-gpu')) ??
   path.join(ROOT, 'examples/showcase/interactions.jsx');
 
 const OUT = path.join(WEB, 'test/output/profile');
@@ -58,10 +58,14 @@ const server = http.createServer((req, res) => {
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const ORIGIN = `http://127.0.0.1:${server.address().port}`;
-const browser = await chromium.launch({
-  args: ['--force-color-profile=srgb', '--enable-unsafe-swiftshader', '--use-angle=swiftshader', '--ignore-gpu-blocklist',
-    '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-vulkan=swiftshader'],
-});
+// --real-gpu: the installed Google Chrome, headed, on the machine's GPU (as frame-bench.mjs --real-gpu).
+const browser = args.includes('--real-gpu')
+  ? await chromium.launch({ channel: 'chrome', headless: false,
+    args: ['--force-color-profile=srgb', '--enable-unsafe-webgpu', '--enable-webgpu-developer-features', '--ignore-gpu-blocklist'] })
+  : await chromium.launch({
+    args: ['--force-color-profile=srgb', '--enable-unsafe-swiftshader', '--use-angle=swiftshader', '--ignore-gpu-blocklist',
+      '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-vulkan=swiftshader'],
+  });
 const context = await browser.newContext({ viewport: { width: W, height: H }, deviceScaleFactor: DPR });
 const page = await context.newPage();
 await page.goto(`${ORIGIN}/test/page.html`);
