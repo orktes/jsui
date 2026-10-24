@@ -27,6 +27,9 @@
 // are raised as the Passed* events below, so the game reacts only to input
 // that was not meant for the UI. JsuiView runs before other scripts
 // (DefaultExecutionOrder), so those events fire before the game's Update.
+// Each frame the pointer as Unity's Input reports it goes through
+// HandlePointer, which input from elsewhere (a self-test, another input
+// system) can call too.
 //
 // Game <-> UI. Messages from JS (Host.postMessage) arrive as OnMessage after
 // each tick; SetState / PostMessage / MapBuffer + CommitBuffer feed the UI
@@ -60,6 +63,8 @@ namespace Jsui
         public event Action<string, string> OnMessage;
         /// <summary>A mouse press the UI did not consume: button (0 left, 1 right, 2 middle as in Unity) and position (logical px, top-left origin).</summary>
         public event Action<int, Vector2> PassedMouseDown;
+        /// <summary>The release of a press the UI did not consume (PassedMouseDown): button and position (logical px).</summary>
+        public event Action<int, Vector2> PassedMouseUp;
         /// <summary>A wheel movement the UI did not consume (Unity's Input.mouseScrollDelta).</summary>
         public event Action<Vector2> PassedWheel;
         /// <summary>A key press the UI did not consume.</summary>
@@ -76,6 +81,19 @@ namespace Jsui
         public float PixelRatio => ratio_;
         /// <summary>Whether the last left press went to the UI (so a drag that started there is not the game's).</summary>
         public bool PointerCaptured { get; private set; }
+        /// <summary>The pointer's last position inside the view (logical px, top-left origin).</summary>
+        public Vector2 PointerPosition { get; private set; }
+
+        /// <summary>One frame of pointer input, as Unity's Input reports it.</summary>
+        public struct PointerFrame
+        {
+            /// <summary>Screen px, bottom-left origin (Input.mousePosition).</summary>
+            public Vector2 position;
+            /// <summary>Buttons that went down / up this frame, bit b for Unity's button b (0 left, 1 right, 2 middle).</summary>
+            public int pressed, released;
+            /// <summary>Input.mouseScrollDelta.</summary>
+            public Vector2 wheel;
+        }
 
         IntPtr plugin_, rt_;
         Canvas canvas_;
@@ -90,6 +108,7 @@ namespace Jsui
         Vector2 mouse_ = new Vector2(float.NaN, float.NaN);
         bool mouseInside_;
         readonly bool[] buttonDown_ = new bool[3];
+        readonly bool[] buttonPassed_ = new bool[3];  // pressed, and the press went to the game
         readonly HashSet<KeyCode> keysDown_ = new HashSet<KeyCode>();
         bool forceRepaint_ = true;
 
@@ -166,9 +185,23 @@ namespace Jsui
         {
             get
             {
-                if (gpu_) JsuiNative.jsuiu_wait_render(plugin_);
+                if (gpu_)
+                {
+                    long t = System.Diagnostics.Stopwatch.GetTimestamp();
+                    JsuiNative.jsuiu_wait_render(plugin_);
+                    renderWaitTicks_ += System.Diagnostics.Stopwatch.GetTimestamp() - t;
+                }
                 return rt_;
             }
+        }
+        long renderWaitTicks_;
+
+        /// <summary>Milliseconds the main thread spent waiting for queued GPU renders since the last call (frame-pacing diagnostics).</summary>
+        public double TakeRenderWaitMs()
+        {
+            double ms = renderWaitTicks_ * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            renderWaitTicks_ = 0;
+            return ms;
         }
 
         // ------------------------------------------------------------ API
@@ -336,7 +369,26 @@ namespace Jsui
         void ForwardPointer()
         {
             if (!Input.mousePresent) return;
-            var screen = (Vector2)Input.mousePosition;
+            var f = new PointerFrame { position = Input.mousePosition, wheel = Input.mouseScrollDelta };
+            for (int b = 0; b < 3; b++)
+            {
+                if (Input.GetMouseButtonDown(b)) f.pressed |= 1 << b;
+                if (Input.GetMouseButtonUp(b)) f.released |= 1 << b;
+            }
+            HandlePointer(f);
+        }
+
+        /// <summary>
+        /// Sends one frame of pointer input to the UI and raises the Passed*
+        /// events for what it did not consume: what the view does each frame
+        /// with Unity's Input (when forwardInput is on), for input that comes
+        /// from elsewhere. A press and its release may come in the same frame
+        /// (in separate calls).
+        /// </summary>
+        public void HandlePointer(PointerFrame f)
+        {
+            if (rt_ == IntPtr.Zero) return;
+            var screen = f.position;
             bool inside = screen.x >= 0 && screen.y >= 0 && screen.x < Screen.width && screen.y < Screen.height;
             var p = ScreenToUi(screen);
             if (inside && p != mouse_)
@@ -344,6 +396,7 @@ namespace Jsui
                 JsuiNative.jsui_send_mouse_move(Rt, p.x, p.y);
                 mouse_ = p;
             }
+            if (inside) PointerPosition = p;
             else if (!inside && mouseInside_ && !buttonDown_[0] && !buttonDown_[1] && !buttonDown_[2])
             {
                 JsuiNative.jsui_send_mouse_leave(Rt);
@@ -353,22 +406,28 @@ namespace Jsui
 
             for (int b = 0; b < 3; b++)
             {
-                if (Input.GetMouseButtonDown(b) && inside)
+                if ((f.pressed & (1 << b)) != 0 && inside)
                 {
                     buttonDown_[b] = true;
                     bool consumed = JsuiNative.jsui_send_mouse_button(Rt, p.x, p.y, kButtons[b], 1, Mods()) != 0;
                     if (b == 0) PointerCaptured = consumed;
+                    buttonPassed_[b] = !consumed;
                     if (!consumed) PassedMouseDown?.Invoke(b, p);
                 }
-                if (Input.GetMouseButtonUp(b) && buttonDown_[b])
+                if ((f.released & (1 << b)) != 0 && buttonDown_[b])
                 {
                     buttonDown_[b] = false;
                     JsuiNative.jsui_send_mouse_button(Rt, p.x, p.y, kButtons[b], 0, Mods());
                     if (b == 0) PointerCaptured = false;
+                    if (buttonPassed_[b])
+                    {
+                        buttonPassed_[b] = false;
+                        PassedMouseUp?.Invoke(b, p);
+                    }
                 }
             }
 
-            var wheel = Input.mouseScrollDelta;
+            var wheel = f.wheel;
             if (inside && wheel != Vector2.zero)
             {
                 // DOM: positive deltaY scrolls down, ~40 px per notch.
