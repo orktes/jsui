@@ -66,6 +66,17 @@ class Node {
   // and just their style groups are re-resolved. Returns false if nothing
   // changed. The animation path (patchStyle, native Animated).
   bool patchStyle(const Value::Object& partial);
+  // The same for writes whose keys and paint groups the caller resolved
+  // once (native Animated: one per animated style key of a view). Values
+  // are copied into the style reusing its containers and strings
+  // (Value::assignReusing), so a steady stream of same-shaped values
+  // (transform arrays, numbers, color strings) allocates nothing.
+  struct StyleWrite {
+    const std::string* key;
+    uint32_t group;      // paintStyleGroup(*key); 0: a layout or unknown key
+    const Value* value;  // null removes the key
+  };
+  bool patchStyle(const StyleWrite* writes, size_t count);
   // Facts about props() that hot paths ask for (computed by setProps).
   enum PropFlag : uint8_t {
     kListensLayout = 1,  // __events has "layout" (onLayout)
@@ -175,6 +186,13 @@ class Node {
   }
   // layoutRect() as of the last post-layout pass (Document::afterLayout).
   Rect boundsLayout{-1, -1, -1, -1};
+  // Its resolved padding and border (left, top, right, bottom each) as of
+  // that pass: with the frame, all of a node's layout the painter reads.
+  float edgesLayout[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+  // The Yoga passes (Document::layout) that last laid this node out and
+  // that last took its layout from Yoga's cache (which leaves its subtree
+  // as it was); see Document::afterLayout.
+  uint64_t yogaLaidOut = 0, yogaCached = 0;
 
   // Painter culling (render/painter.cpp, updateRecords): a node is dirty
   // when anything that can change what its subtree paints changed since the
@@ -191,6 +209,9 @@ class Node {
 
  private:
   void updatePropFlags();
+  // patchStyle's paint-only tail: re-resolves `groups` from the (already
+  // merged) style, props_["style"], and invalidates what they affect.
+  void applyPatchedGroups(uint32_t groups, const Value& style);
   // Text / TextInput: invalidates the paragraph after a style change.
   void textStyleChanged(const TextStyle& oldText, bool propsMetrics, bool propsPaint, bool* relayout);
   void attachYoga(Node* child, size_t index);

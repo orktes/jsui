@@ -35,7 +35,7 @@ const r1 = (v) => Math.round((+v || 0) * 10) / 10;
 
 function describe(inst, byParent, all) {
   const p = inst.props || {};
-  const np = inst.nativeProps || {};
+  const np = inst.nativeProps || (typeof native.getProps === 'function' && native.getProps(inst.id)) || {};
   const m = measureNode(inst.id);
   const el = { id: inst.id, type: inst.type };
   if (p.testID != null) el.testID = String(p.testID);

@@ -382,7 +382,9 @@ used to process Dawn events).
   filtering instead of being keyed by it, and the shadow of a node whose
   scale or size animates is drawn from the mask of the nearest of 8 sizes
   per octave, stretched to it, and repainted exactly once it stops
-  (`quantizedScale`, `shadowInexact` in `painter.cpp`). Such approximate
+  (`quantizedScale`, `NodeRecord::approximate` in `painter.cpp`; the CPU
+  raster does the same while a node keeps moving, see Paint performance:
+  Shadows). Such approximate
   draws ask for an exact repaint (`Document::markExactRepaint`, per
   surface), which `jsui_needs_redraw()` reports once nothing animates any
   more: while animations, scroll physics or JS frame callbacks drive frames
@@ -1473,10 +1475,24 @@ Native's API and both of its drivers:
     `shadowRadius`, ...) and transforms; layout keys throw `Style property
     'width' is not supported by native animated module`, animated non-style
     props throw too. `Animated.ValueXY` is native through its channels.
-  * Writes go through `Node::setProps` with the merged style (paint-only, so
-    no relayout; the incremental renderer damages just the node's old and
-    new rects). When React re-props a connected view, the live values are
-    overlaid again in the same tick. Unchanged frames write nothing.
+  * Writes go through `Node::patchStyle` (paint-only, so no relayout; the
+    incremental renderer damages just the node's old and new rects). Each
+    `style` node keeps its keys with their paint groups, resolved once when
+    it is created, and hands the view its inputs' outputs directly
+    (`Node::StyleWrite`): no partial style object is built. The view's
+    `props.style` is updated in place with `Value::assignReusing`, which
+    compares and copies in one walk and reuses the existing transform
+    arrays, objects and strings, so later `setProps` diffs see the live
+    values; only the written groups are re-resolved (transform, opacity and
+    backgroundColor without indexing the whole style). Transform nodes
+    update their output array in place and color / string outputs reuse
+    their buffers, and the flush bookkeeping uses per-node flags instead of
+    hash sets, so a steady frame allocates nothing
+    (`perf_native_animated_writes_allocate_nothing`). When React re-props
+    a connected view, the live values are overlaid again in the same tick;
+    views are only re-checked for that after some `setProps` /
+    `patchStyle` ran (`Perf::propsEpoch`), not every frame. Unchanged
+    frames write nothing.
   * Native nodes are freed when their derived JS node detaches, when the
     component unmounts, and (values) when the JS object is garbage collected
     (`FinalizationRegistry`). A reload clears the native graph.
@@ -1649,10 +1665,18 @@ changed rather than to the tree size:
   (opacity, transform, colors, radii, shadows, gradients, filters, text, ...)
   are re-resolved and Yoga is not touched (`applyPaintStyleChanges`,
   `src/core/style.cpp`). `patchStyle` (bridge and native Animated) does the
-  same in place, without copying the props.
+  same in place, without copying the props; native Animated's writes
+  allocate nothing in steady state (see "Animated"): `markers-native-1000`
+  (2000 view writes per frame) went from ~31k allocations and ~19.7M
+  instructions per frame to 6 and ~6.6M.
 * **Layout.** Yoga only reruns when something layout-affecting changed; the
   post-layout walk (`Document::afterLayout`) visits only nodes Yoga flagged
-  (`hasNewLayout`). Text measurement reuses the paragraph's intrinsic layout.
+  (`hasNewLayout`), and not the children of a node whose layout Yoga took
+  from its cache (it reports which through its `NodeLayout` event: a 2000-row
+  list next to a changing counter is one visit, not 2000). Only a node whose
+  frame, padding or border changed is marked for the painter
+  (`PerfCounters::layoutVisits` counts the visits). Text measurement reuses
+  the paragraph's intrinsic layout.
   Yoga's `PixelGrid.cpp` is patched at configure time (`cmake/Deps.cmake`) to
   skip pixel rounding when the point scale factor is 0, and `CalculateLayout.cpp`
   to check for baseline alignment once per node per pass, not once per flex line.
@@ -1718,6 +1742,29 @@ off; `host` is the host's own share, writing the JSON text, and counts in
 `--tool=callgrind --instr-atstart=no`: the tool switches instrumentation on
 for the measured frames only.
 
+Where the JS time goes: with `JSUI_JS_PROFILE=out.txt` in the environment the
+engine samples the JS stack from QuickJS's interrupt poll (every ~10000
+bytecode ops) while the runtime profiles its frames (jsui-bench's measured
+frames), weights each sample by the time since the previous poll, and writes
+self and inclusive shares per function at exit (`JSUI_JS_PROFILE_LINES=1`:
+per source line). Bundles built without `--minify` keep React's function
+names.
+
+* **Props.** `__jsui_native.updateProps(id, reactProps, hidden)` builds what
+  native sees from the React props (event handlers become `__events`
+  tokens, the style is flattened, `pointerEvents` / hidden go into it) and
+  `Node::setProps` diffs it, so the host config does neither in JS; it only
+  skips renders whose React props are identical (`mayDiffer`). A style
+  array rebuilt with equal contents therefore reaches native (a skipped
+  `setProps`), which is cheaper than diffing every changed style in JS.
+* **QuickJS.** `cmake/Deps.cmake` compiles a patched copy of quickjs.c:
+  `JS_FreeValue` / `JS_DupValue` are inlined (quickjs-ng exports them out of
+  line, a call per value the interpreter pops) and `===` / `!==` decide
+  objects, symbols, booleans, null and undefined inline. `JSUI_QUICKJS_FLAGS`
+  adds compile flags for QuickJS alone (profile-guided optimization with
+  `-fprofile-instr-generate` / `-fprofile-instr-use=` measured 6-9% less JS
+  time on React-heavy scenarios on an M1 Ultra).
+
 ## Paint performance
 
 What painting costs is proportional to the damage, and within the damage
@@ -1735,9 +1782,14 @@ the expensive per-pixel work is done once:
   the same matrices and clip keeps its records, its curved outlines and
   raster candidates carried over. A clean child out of view (scrolled out
   of its scroll view) is skipped as long as a translation keeps it out;
-  its records keep the old placement until it comes back. A steady
+  its records keep the old placement until it comes back. When a skipped
+  subtree is walked again (one of its rows changed), its clean children are
+  skipped again: their entries in the lists moved with the copies the
+  skipped parent made (`NodeRecord::walkedPass`), so the walk does not
+  fall back to every node below. A steady
   showcase frame walks the 19 nodes on the paths to what animates instead
-  of the whole tree. `PaintStats::nodesUpdated` counts the walked nodes;
+  of the whole tree, and jsui-bench `list` (20k nodes, one counter) the 5
+  nodes on the counter's path. `PaintStats::nodesUpdated` counts the walked nodes;
   `setRecordSkipping(false)` walks them all, which the tests compare with
   (also for two surfaces of one runtime: each document has its own
   records and passes). Skia does not
@@ -1753,11 +1805,30 @@ the expensive per-pixel work is done once:
   and repaints only what the scroll exposed, what is painted above the
   content and curved outlines at the viewport's edge (`ScrollBlit`).
 * **Sprites.** On the CPU raster, gradient backgrounds and Image nodes of
-  128x128 to 2.2M device pixels are rendered once per content and device
-  scale and blitted at whole-pixel offsets afterwards (`drawSprite`, 48 MB
-  per document); blurred shadows and inset shadows are cached masks drawn
-  the same way. Sub-pixel positions draw directly (a moving sprite would be
-  re-rendered every frame).
+  128x128 to 2.2M device pixels are rendered once per content, device scale
+  and sub-pixel phase and blitted at whole-pixel offsets afterwards
+  (`drawSprite`, 48 MB per document), so static art at a fractional
+  position is cached too. While a node keeps moving by sub-pixels or
+  scaling (it changed in this frame and the one before, `PaintMotion`) its
+  sprites are drawn directly instead, as a new sprite every frame would
+  cost more, and the node is repainted from the sprite a frame after it
+  stops (`NodeRecord::approximate`, `Document::markExactRepaint`): static
+  frames and frames at rest paint exactly the pixels of a full repaint.
+* **Shadows.** Blurred shadows and inset shadows are cached masks, blurred
+  once per device size, sigma, sub-pixel phase, radii and colour
+  (`ShadowCache`) and blitted at whole-pixel offsets; only the ring around
+  the box is drawn (`MaskSkip`: the box minus its corners, as a cross of
+  two rects on the CPU, one rect on GPU canvases). A node at rest gets its
+  exact mask. While it keeps moving or scaling (a spring, a drag) the CPU
+  raster approximates as GPU canvases always do: the mask of phase 0 and of
+  the nearest of 8 scales per octave (`quantizedScale`) is resampled to the
+  fractional position and size with a separable bilinear filter
+  (`resampleMask`, SSE2 / NEON) into a scratch buffer blitted as a sprite,
+  and the box's hole is cut out after resampling (its anti-aliased
+  coverage), so the edge stays sharp. The shadow then stays within 4 levels
+  of the exact one, the moving frames blur no mask after the first two
+  (the menu's springing buttons blurred one per button per frame, ~21% of
+  the frame), and the node is repainted exactly once it stops.
 * **Layers.** A node whose draws cannot overlap applies its opacity to them
   instead of a `saveLayer` (`opacityFoldable`): one draw (a background
   colour or one gradient, nothing else), a childless box with at most one
@@ -1771,11 +1842,12 @@ the expensive per-pixel work is done once:
   bounds lay out at the same content width.
 
 `PaintStats` (`lastPaintStats()`) reports per paint the nodes painted and
-culled, the pixels and rects repainted, sprite draws and renders, blitted
-pixels and, with `setPaintCounting()`, the canvas draw calls, text / image
+culled, the pixels and rects repainted, sprite draws and renders, shadow
+mask draws and renders (blurs), blitted pixels and, with `setPaintCounting()`, the canvas draw calls, text / image
 draws, layers and clips. `tests/native/render_test.cpp` and `gpu_test.cpp`
 assert on these (incremental frames equal full ones; perf guards on
-pixels repainted, passes, sprite re-renders, layers).
+pixels repainted, passes, sprite re-renders, shadow blurs while a shadow
+moves, layers).
 
 `tools/jsui-paint-bench` renders bundles headless on a simulated 60 Hz
 clock and times only the paint call, per backend: `cpu`
@@ -1802,11 +1874,14 @@ Scenarios (`run.mjs` bundles them into `build/paint-bench/`):
 animations), `interactions-hover` (the same with a mouse sweep), `caret`
 (a static screen with a blinking caret), `cards` (a grid of shadowed,
 rounded, clipped cards scrolling 6 px per frame) and `text` (text-heavy
-panels with a ticking clock, a ticker and a pulsing badge). Options:
+panels with a ticking clock, a ticker and a pulsing badge) and `menu`
+(jsui-bench's main menu, shadowed buttons springing in translation and
+scale under a mouse sweep). Options:
 `--frames`, `--warmup`, `--settle-ms`, `--width` / `--height` / `--scale`,
 `--backends`, `--json`, `--no-count`. Under valgrind (callgrind
 instruction counts are steadier than wall time on a shared machine), pass
-`--no-count` and `--toggle-collect='jsui::Runtime::renderIncremental(*'`.
+`--no-count` and `--toggle-collect='jsui::Surface::renderIncremental(*'`
+(`'jsui::gpu::render(*'` for `gl`; the warmup frames are counted too).
 Wall times on llvmpipe say little about a hardware GPU (shader JIT and
 rasterization run on the CPU); the GL call counts carry over.
 

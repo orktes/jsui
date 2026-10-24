@@ -130,7 +130,7 @@ bool NativeAnimated::createNode(int tag, const Value& c, std::string* error) {
   } else if (type == "style") {
     n.type = Type::Style;
     for (auto& [k, v] : c["style"].asObject())
-      if (v.isNumber()) n.style.emplace_back(k, int(v.asNumber()));
+      if (v.isNumber()) n.style.push_back({k, int(v.asNumber()), paintStyleGroup(k)});
   } else if (type == "props") {
     n.type = Type::Props;
     n.styleTag = int(c["props"]["style"].asNumber());
@@ -164,6 +164,7 @@ void NativeAnimated::connectToView(int propsTag, uint32_t viewId) {
   if (!p || p->type != Type::Props) return;
   p->view = viewId;
   p->viewWritten = false;  // written at the next flush
+  recheckViews_ = true;
 }
 
 void NativeAnimated::disconnectFromView(int propsTag, uint32_t viewId) {
@@ -182,8 +183,8 @@ void NativeAnimated::dropNode(int tag) {
   mappings_.erase(std::remove_if(mappings_.begin(), mappings_.end(), [&](const Mapping& m) { return m.tag == tag; }),
                   mappings_.end());
   listening_.erase(tag);
-  dirtyValues_.erase(tag);
-  dirtyNotify_.erase(tag);
+  if (n->queued) dirtyValues_.erase(std::remove(dirtyValues_.begin(), dirtyValues_.end(), tag), dirtyValues_.end());
+  if (n->notifyQueued) dirtyNotify_.erase(std::remove(dirtyNotify_.begin(), dirtyNotify_.end(), tag), dirtyNotify_.end());
   if (n->type == Type::HostBuffer) {
     auto it = bufferNodes_.find(n->bufferKey);
     if (it != bufferNodes_.end()) {
@@ -210,6 +211,7 @@ void NativeAnimated::clear() {
   dirtyValues_.clear();
   dirtyNotify_.clear();
   bufferNodes_.clear();
+  recheckViews_ = true;
   ends.clear();
   updates.clear();
 }
@@ -223,7 +225,21 @@ void NativeAnimated::viewDestroyed(uint32_t viewId) {
 
 // ------------------------------------------------------------------ values
 
-void NativeAnimated::markDirty(int tag) { dirtyValues_.insert(tag); }
+void NativeAnimated::markDirty(int tag) {
+  if (ANode* n = node(tag)) markDirty(*n);
+}
+
+void NativeAnimated::markDirty(ANode& n) {
+  if (n.queued) return;
+  n.queued = true;
+  dirtyValues_.push_back(n.tag);
+}
+
+void NativeAnimated::markNotify(ANode& n) {
+  if (n.notifyQueued) return;
+  n.notifyQueued = true;
+  dirtyNotify_.push_back(n.tag);
+}
 
 void NativeAnimated::setValue(int tag, double v) {
   ANode* n = node(tag);
@@ -302,6 +318,20 @@ double NativeAnimated::interpolate(ANode& n, size_t ch, double input) {
   return result;
 }
 
+void NativeAnimated::setRgba(ANode& n, double r, double g, double b, double a) {
+  std::string& s = n.str;
+  s.assign("rgba(");
+  s += formatAnimatedNumber(r);
+  s += ", ";
+  s += formatAnimatedNumber(g);
+  s += ", ";
+  s += formatAnimatedNumber(b);
+  s += ", ";
+  s += formatAnimatedNumber(a);
+  s += ')';
+  n.out.setString(s);
+}
+
 void NativeAnimated::evaluate(ANode& n) {
   if (n.evalGen == gen_) return;
   n.evalGen = gen_;  // set first: a cycle evaluates to the previous output
@@ -332,10 +362,10 @@ void NativeAnimated::evaluate(ANode& n) {
         double a = std::clamp(interpolate(n, 3, x), 0.0, 1.0);
         a = jsRound(a * 1000) / 1000;
         n.num = r;
-        n.out = Value("rgba(" + formatAnimatedNumber(r) + ", " + formatAnimatedNumber(g) + ", " +
-                      formatAnimatedNumber(b) + ", " + formatAnimatedNumber(a) + ")");
+        setRgba(n, r, g, b, a);
       } else {
-        std::string s;
+        std::string& s = n.str;
+        s.clear();
         for (size_t i = 0; i < n.parts.size(); i++) {
           s += n.parts[i];
           if (i < n.outputs.size() && i + 1 < n.parts.size()) {
@@ -344,7 +374,7 @@ void NativeAnimated::evaluate(ANode& n) {
             s += formatAnimatedNumber(jsRound(v * 1e5) / 1e5);
           }
         }
-        n.out = Value(std::move(s));
+        n.out.setString(s);
       }
       break;
     }
@@ -380,23 +410,28 @@ void NativeAnimated::evaluate(ANode& n) {
     case Type::Color: {
       double r = jsRound(in(0)), g = jsRound(in(1)), b = jsRound(in(2)), a = in(3);
       n.num = r;
-      n.out = Value("rgba(" + formatAnimatedNumber(r) + ", " + formatAnimatedNumber(g) + ", " +
-                    formatAnimatedNumber(b) + ", " + formatAnimatedNumber(a) + ")");
+      setRgba(n, r, g, b, a);
       break;
     }
     case Type::Transform: {
-      Value::Array arr;
-      for (auto& t : n.transforms) {
-        Value::Object o;
-        o[t.property] = t.tag ? evalOut(t.tag) : t.staticValue;
-        arr.emplace_back(std::move(o));
+      // [{property: value}, ...], built once and then updated in place.
+      if (!n.out.isArray() || n.out.asArray().size() != n.transforms.size()) {
+        Value::Array arr;
+        for (auto& t : n.transforms) arr.emplace_back(Value::Object{{t.property, Value()}});
+        n.out = Value(std::move(arr));
       }
-      n.out = Value(std::move(arr));
+      // Only this case writes a transform node's `out`, so every entry is
+      // still the one-key object built for its property.
+      Value::Array& arr = n.out.mutableArray();
+      for (size_t i = 0; i < arr.size(); i++) {
+        const TransformEntry& t = n.transforms[i];
+        arr[i].mutableObject().begin()->second.assignReusing(t.tag ? evalOut(t.tag) : t.staticValue);
+      }
       break;
     }
     case Type::Style: {
       Value::Object o;
-      for (auto& [k, tag] : n.style) o[k] = evalOut(tag);
+      for (auto& e : n.style) o[e.key] = evalOut(e.tag);
       n.out = Value(std::move(o));
       break;
     }
@@ -421,15 +456,29 @@ const Value& NativeAnimated::evalOut(int tag) {
   return n->out;
 }
 
+Node* NativeAnimated::viewOf(const ANode& p) {
+  return p.view ? (findView ? findView(p.view) : doc_.get(p.view)) : nullptr;
+}
+
 void NativeAnimated::applyProps(ANode& p) {
-  Node* view = p.view ? (findView ? findView(p.view) : doc_.get(p.view)) : nullptr;
+  Node* view = viewOf(p);
   if (!view) return;
-  const Value& partial = evalOut(p.tag);
+  doc_.perf.counters.animatedWrites++;
   // patchStyle skips unchanged values and, for the paint keys the JS side
   // lets through, updates the style in place and re-resolves just those
   // keys' style groups: no relayout, only the node's rects repaint.
-  doc_.perf.counters.animatedWrites++;
-  view->patchStyle(partial.asObject());
+  ANode* style = p.styleTag ? node(p.styleTag) : nullptr;
+  if (style && style->type == Type::Style) {
+    // The usual graph (props -> style -> values / transform): the style
+    // node's inputs go straight into the view, keyed by the strings and
+    // paint groups resolved when the node was created, without building a
+    // partial style object.
+    writes_.clear();
+    for (const StyleEntry& e : style->style) writes_.push_back({&e.key, e.group, &evalOut(e.tag)});
+    view->patchStyle(writes_.data(), writes_.size());
+  } else {
+    view->patchStyle(evalOut(p.tag).asObject());
+  }
   p.viewPaintVersion = view->paintVersion;
   p.viewWritten = true;
 }
@@ -437,32 +486,43 @@ void NativeAnimated::applyProps(ANode& p) {
 void NativeAnimated::flush() {
   if (nodes_.empty()) return;
   gen_++;
+  uint64_t visit = ++visitGen_;
   // Props nodes downstream of changed values.
-  std::unordered_set<int>& seen = seen_;
   std::vector<int>& stack = stack_;
   std::vector<ANode*>& props = props_;
-  seen.clear();
   props.clear();
   stack.assign(dirtyValues_.begin(), dirtyValues_.end());
+  for (int t : dirtyValues_)
+    if (ANode* n = node(t)) n->queued = false;
   dirtyValues_.clear();
   while (!stack.empty()) {
     int t = stack.back();
     stack.pop_back();
-    if (!seen.insert(t).second) continue;
     ANode* n = node(t);
-    if (!n) continue;
+    if (!n || n->visitGen == visit) continue;
+    n->visitGen = visit;
     if (n->type == Type::Props) props.push_back(n);
     for (int c : n->children) stack.push_back(c);
   }
   // ... and props whose view React re-propped since our last write (the
   // reconciler sends the value it rendered with; ours is the live one).
-  for (int tag : propsNodes_) {
-    ANode* n = node(tag);
-    if (!n || !n->view || seen.count(tag)) continue;
-    Node* v = findView ? findView(n->view) : doc_.get(n->view);
-    if (v && (!n->viewWritten || v->paintVersion != n->viewPaintVersion)) props.push_back(n);
+  // Only setProps (or a patchStyle not made here) changes a view's style,
+  // so without one since the last check (and no new connection) there is
+  // nothing to look for.
+  if (recheckViews_ || propsEpoch_ != doc_.perf.propsEpoch) {
+    recheckViews_ = false;
+    for (int tag : propsNodes_) {
+      ANode* n = node(tag);
+      if (!n || !n->view || n->visitGen == visit) continue;
+      Node* v = viewOf(*n);
+      if (v && (!n->viewWritten || v->paintVersion != n->viewPaintVersion)) props.push_back(n);
+      else if (!v && !n->viewWritten) recheckViews_ = true;  // its view may come later
+    }
   }
   for (ANode* p : props) applyProps(*p);
+  // Our own writes may go through setProps / patchStyle (a layout key, a
+  // props node without a style node): not React's.
+  propsEpoch_ = doc_.perf.propsEpoch;
 }
 
 // --------------------------------------------------------------- animations
@@ -617,8 +677,8 @@ bool NativeAnimated::step(Anim& a, double t) {
     }
   }
   n->value = value;
-  markDirty(a.tag);
-  dirtyNotify_.insert(a.tag);
+  markDirty(*n);
+  markNotify(*n);
   if (!done) return false;
   a.iteration++;
   if (a.iterations < 0 || a.iteration < a.iterations) {
@@ -642,8 +702,12 @@ void NativeAnimated::tick(double nowMs) {
     }
   }
   flush();
-  for (int tag : dirtyNotify_)
-    if (listening_.count(tag)) updates.push_back({tag, getValue(tag)});
+  for (int tag : dirtyNotify_) {
+    ANode* n = node(tag);
+    if (!n) continue;
+    n->notifyQueued = false;
+    if (listening_.count(tag)) updates.push_back({tag, n->value});
+  }
   dirtyNotify_.clear();
 }
 
@@ -680,8 +744,8 @@ void NativeAnimated::handleEvent(const Value& ev) {
     ANode* n = node(m.tag);
     if (!v->isNumber() || !n || n->type != Type::Value) continue;
     n->value = v->asNumber();
-    markDirty(m.tag);
-    dirtyNotify_.insert(m.tag);
+    markDirty(*n);
+    markNotify(*n);
     any = true;
   }
   if (any) flush();
