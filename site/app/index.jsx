@@ -15,6 +15,7 @@ import { PlaygroundPage } from './pages/Playground.jsx';
 import { EmbedPage } from './pages/Embed.jsx';
 import { UI_SOUNDS, applyMix, currentMix, preloadUISounds } from './sound.js';
 import { SCREEN_SHADERS } from './screens/index.js';
+import { Intro } from './intro/Intro.jsx';
 
 Fonts.load(mono, require('./assets/fonts/JetBrainsMonoNL-Regular.ttf'), { weight: 400 });
 Fonts.load(mono, require('./assets/fonts/JetBrainsMonoNL-Bold.ttf'), { weight: 700 });
@@ -90,6 +91,12 @@ function usePreloadedShaders() {
 
 function App() {
   const router = useRouterState();
+  // The intro's timeline (0..1, site/app/intro/Intro.jsx): the page settles
+  // into place while the nebula burns away.
+  const intro = useRef(new Animated.Value(0)).current;
+  const settle = useRef({
+    transform: [{ scale: intro.interpolate({ inputRange: [0, 0.72, 1], outputRange: [1.05, 1.05, 1], extrapolate: 'clamp' }) }],
+  }).current;
   usePreloadedShaders();
   useEffect(() => {
     applyMix(currentMix(), 0);
@@ -101,9 +108,12 @@ function App() {
     <RouterProvider value={router}>
       <UISounds sounds={UI_SOUNDS}>
         <View style={styles.root}>
-          <View pointerEvents="none" style={styles.glow} />
-          <Page path={router.path} />
-          <NavBar />
+          <Animated.View style={[{ flex: 1 }, settle]}>
+            <View pointerEvents="none" style={styles.glow} />
+            <Page path={router.path} />
+            <NavBar />
+          </Animated.View>
+          <Intro p={intro} />
         </View>
       </UISounds>
     </RouterProvider>

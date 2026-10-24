@@ -166,6 +166,17 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
     const err = document.getElementById('err');
     const splash = document.getElementById('splash');
     const showError = (msg) => { err.textContent = msg; err.style.display = msg ? 'block' : 'none'; };
+    const hideSplash = () => {
+      if (splash.classList.contains('gone')) return;
+      splash.classList.add('gone');
+      setTimeout(() => splash.remove(), 600);
+    };
+    // The intro (site/app/intro/Intro.jsx: a warp through an SkSL nebula into
+    // the page) plays on the GPU renderers, unless the visitor prefers reduced
+    // motion. ?intro=0 skips it, ?intro=1 always plays it, ?intro=0.5 holds its
+    // timeline at 0.5 (for screenshots).
+    const playIntro = (jsui) => /^(1|0\.\d+)$/.test(q.get('intro')) || (q.get('intro') !== '0' &&
+      !matchMedia('(prefers-reduced-motion: reduce)').matches && /^(webgpu|gpu)/.test(jsui.renderer || ''));
 
     // The deployed modules and their versions (content hashes). Every URL
     // this page loads is versioned (?v=<hash>), so a browser that cached
@@ -191,7 +202,12 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
       window.jsui = jsui;
       jsui.on('error', showError);
       jsui.on('message', (name, data) => {
-        if (name === 'ready') jsui.postMessage('route', route());
+        if (name === 'ready') {
+          jsui.postMessage('route', route());
+          jsui.postMessage('intro', { play: playIntro(jsui), hold: /^0\.\d+$/.test(q.get('intro')) ? +q.get('intro') : undefined });
+        } else if (name === 'intro') {
+          if (data.state === 'play') hideSplash();
+        }
         else if (name === 'route') {
           if (route() !== data) history.pushState(null, '', data === '/' ? location.pathname + location.search : '#' + data);
           document.title = 'JSUI · ' + (data === '/' ? 'React Native game UI, everywhere' : data.split('/')[1].replace(/^\w/, (c) => c.toUpperCase()));
@@ -213,8 +229,7 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
         });
       }
       await jsui.whenIdle();
-      splash.classList.add('gone');
-      setTimeout(() => splash.remove(), 600);
+      hideSplash();
     } catch (e) {
       showError('Could not start the JSUI runtime: ' + (e && e.stack || e));
     }
