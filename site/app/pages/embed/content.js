@@ -459,6 +459,85 @@ void Update() {
   ],
 };
 
+const UNREAL = {
+  id: 'unreal',
+  label: 'Unreal',
+  eyebrow: 'Unreal Engine 5 · integrations/unreal',
+  color: colors.purple,
+  title: 'A UMG widget',
+  lead: 'An Unreal plugin: UJsuiWidget (UMG) and SJsuiView (Slate) draw the UI over the game, see every mouse and key event before Slate routes it and tell the game what the UI did not take. It calls only the C API of a prebuilt JSUI shared library, so the plugin source builds against any UE 5.x. The example project is the same game as the other engine examples, packaged headlessly with RunUAT.',
+  facts: [
+    ['Unreal', '5.8'],
+    ['Plugin', 'C API · libjsui'],
+    ['UI on screen', 'Metal RHI · RenderTarget2D'],
+    ['Self-test', 'in the packaged game'],
+  ],
+  blocks: [
+    {
+      kind: 'code',
+      lang: 'sh',
+      title: 'build and run',
+      code: `
+npx jsui build integrations/shared/ui/app.jsx -o integrations/shared/ui/dist/bundle.js
+# libjsui (Graphite Metal) into the plugin, then RunUAT BuildCookRun
+integrations/unreal/scripts/build-example.sh "/Users/Shared/Epic Games/UE_5.8"
+
+build/unreal/Mac/JsuiExample.app/Contents/MacOS/JsuiExample \\
+    -windowed -ResX=1280 -ResY=720 --selftest
+`,
+    },
+    {
+      kind: 'pair',
+      items: [
+        {
+          kind: 'code',
+          lang: 'cpp',
+          title: 'the game side',
+          code: `
+UJsuiWidget* Ui = NewObject<UJsuiWidget>(this);
+// Bundle: Content/Jsui/bundle.js (or an http:// dev URL)
+
+Ui->OnMessageNative.AddLambda([this](const FString& Name, const FString& Json) {
+    if (Name == TEXT("game:spawn")) Spawn();
+});
+// only input the UI did not consume
+Ui->PassedMouseDownNative.AddLambda([this](const FKey& Button, const FVector2D& Pos) {
+    StartOrbit();
+});
+Ui->AddToViewport();
+`,
+        },
+        {
+          kind: 'code',
+          lang: 'cpp',
+          title: 'per frame',
+          code: `
+void AMyGame::Tick(float Dt) {
+    Ui->SetState(TEXT("game"), GameJson);   // useHostState('game')
+
+    for (int32 I = 0; I < Units.Num(); I++) {
+        FVector2D S;
+        bool bOn = FSceneView::ProjectWorldToScreen(Head(I), Rect, ViewProj, S);
+        S = Ui->ViewportToUi(S);
+        Pos[I * 4 + 0] = S.X;
+        Pos[I * 4 + 1] = S.Y;
+        Pos[I * 4 + 2] = bOn ? 1 : 0;
+        Pos[I * 4 + 3] = Units[I].Hue;
+    }
+    Ui->SetBuffer(TEXT("entities"), Pos);
+}   // SJsuiView ticks and paints in Slate's tick
+`,
+        },
+      ],
+    },
+    {
+      kind: 'note',
+      color: colors.purple,
+      text: 'On the Metal RHI, Skia Graphite draws the UI straight into a render target on the engine\'s own device and command queue (IMetalDynamicRHI::RHIRunOnQueue), committed before the Slate draw that samples it and repainting only what changed. On other RHIs, or with bForceCpu, it is rasterised on the CPU and the changed rectangle is uploaded into a UTexture2D. JSUI, Skia and their dependencies are one shared library exporting just the C API, so nothing clashes with the libraries Unreal bundles. macOS today; Win64 and Linux are wired up.',
+    },
+  ],
+};
+
 const DATA = {
   id: 'data',
   label: 'Game data',
@@ -839,4 +918,4 @@ WEBGL=1 scripts/build-wasm.sh                         # -> web/dist-webgl/ (Skia
   ],
 };
 
-export const TARGETS = [GODOT, CAPI, ENGINES, UNITY, DATA, WEB, DEV, BUILD];
+export const TARGETS = [GODOT, CAPI, ENGINES, UNITY, UNREAL, DATA, WEB, DEV, BUILD];
