@@ -216,6 +216,52 @@ if(JSUI_METAL)
 endif()
 message(STATUS "JSUI_METAL: ${JSUI_METAL}")
 
+# jsui_shared: the library as one shared library (libjsui.dylib, jsui.dll,
+# libjsui.so) with Skia and every other dependency linked in and only the C
+# API of include/jsui/jsui.h exported, for hosts that load a prebuilt JSUI
+# instead of linking the static libraries with their own toolchain (the
+# Unreal plugin, integrations/unreal). The export list is every JSUI_API
+# function of the header.
+option(JSUI_BUILD_SHARED "Build jsui_shared, the C API as a shared library (libjsui.dylib / jsui.dll / libjsui.so)" OFF)
+if(JSUI_BUILD_SHARED AND NOT EMSCRIPTEN AND NOT IOS)
+  file(READ ${CMAKE_SOURCE_DIR}/include/jsui/jsui.h _jsui_header)
+  string(REGEX MATCHALL "JSUI_API[^;(]*[ *]jsui_[a-z0-9_]+[ ]*\\(" _jsui_decls "${_jsui_header}")
+  set(_jsui_exports "")
+  foreach(_decl ${_jsui_decls})
+    string(REGEX MATCH "jsui_[a-z0-9_]+[ ]*\\($" _name "${_decl}")
+    string(REGEX REPLACE "[ (]" "" _name "${_name}")
+    list(APPEND _jsui_exports ${_name})
+  endforeach()
+  list(REMOVE_DUPLICATES _jsui_exports)
+  list(SORT _jsui_exports)
+  set(_jsui_gen ${CMAKE_BINARY_DIR}/generated)
+  file(WRITE ${_jsui_gen}/jsui_shared.c "/* jsui_shared: the static library linked whole (see CMakeLists.txt). */\n")
+  add_library(jsui_shared SHARED ${_jsui_gen}/jsui_shared.c)
+  set_target_properties(jsui_shared PROPERTIES OUTPUT_NAME jsui C_VISIBILITY_PRESET hidden)
+  target_include_directories(jsui_shared PUBLIC include)
+  if(APPLE)
+    list(TRANSFORM _jsui_exports PREPEND "_" OUTPUT_VARIABLE _jsui_list)
+    string(REPLACE ";" "\n" _jsui_list "${_jsui_list}")
+    file(WRITE ${_jsui_gen}/jsui_shared.exp "${_jsui_list}\n")
+    target_link_libraries(jsui_shared PRIVATE "-Wl,-force_load,$<TARGET_FILE:jsui>" jsui)
+    target_link_options(jsui_shared PRIVATE "-Wl,-exported_symbols_list,${_jsui_gen}/jsui_shared.exp" -Wl,-dead_strip)
+    set_target_properties(jsui_shared PROPERTIES INSTALL_NAME_DIR "@rpath")
+  elseif(WIN32)
+    string(REPLACE ";" "\n  " _jsui_list "${_jsui_exports}")
+    file(WRITE ${_jsui_gen}/jsui_shared.def "EXPORTS\n  ${_jsui_list}\n")
+    target_sources(jsui_shared PRIVATE ${_jsui_gen}/jsui_shared.def)
+    target_link_libraries(jsui_shared PRIVATE jsui)
+    target_link_options(jsui_shared PRIVATE "/WHOLEARCHIVE:$<TARGET_FILE:jsui>")
+  else()
+    string(REPLACE ";" ";\n    " _jsui_list "${_jsui_exports}")
+    file(WRITE ${_jsui_gen}/jsui_shared.map "{\n  global:\n    ${_jsui_list};\n  local: *;\n};\n")
+    target_link_libraries(jsui_shared PRIVATE -Wl,--whole-archive jsui -Wl,--no-whole-archive)
+    target_link_options(jsui_shared PRIVATE "-Wl,--version-script=${_jsui_gen}/jsui_shared.map" -Wl,--gc-sections
+                        -static-libstdc++ -static-libgcc)
+  endif()
+  message(STATUS "jsui_shared: ${CMAKE_SHARED_LIBRARY_PREFIX}jsui${CMAKE_SHARED_LIBRARY_SUFFIX}, exporting the C API")
+endif()
+
 # iOS: the library plus the example host app (integrations/ios); the
 # desktop tools and native tests are not built.
 if(IOS)
