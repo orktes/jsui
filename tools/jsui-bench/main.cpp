@@ -295,6 +295,8 @@ bool run(const Options& o, Result* out) {
     m->count++;
   };
   JsuiRuntime* h = jsui_create(&cfg);
+  // Deterministic frames: no wall-clock frame budget (see jsui-render).
+  jsui_set_js_frame_budget(h, 0);
   jsui::Runtime* rt = jsui::internalRuntime(h);
   jsui::Perf& perf = rt->doc.perf;
   if (o.markers > 0) {

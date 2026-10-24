@@ -131,6 +131,9 @@ class Document {
   // not), so focus bookkeeping does not walk the whole tree.
   const std::vector<Node*>& focusHints() const { return focusHints_; }
   void setFocusHint(Node* n, bool on);
+  // Ids of Text nodes created since they were last looked at: shaped ahead
+  // of their first layout in spare frame time (Runtime::prepareText).
+  std::vector<uint32_t> newTexts;
   // Live nodes with an onLayout listener (Node::kListensLayout). Without
   // any, layout passes skip the onLayout walk.
   int layoutListeners = 0;

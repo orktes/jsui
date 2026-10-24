@@ -10,6 +10,7 @@ itself cannot run without a license.
 import ctypes
 import pathlib
 import sys
+import time
 
 
 class Rect(ctypes.Structure):
@@ -43,7 +44,15 @@ def main():
 
     messages, painted = [], 0
     rect, pixels = Rect(), P()
-    for frame in range(60):
+    # The bundle loads on a background thread, so tick at a game's pace
+    # (wall-clock 16 ms frames) until the HUD reports in, then a few more.
+    deadline, settle = time.monotonic() + 10, 10
+    for frame in range(100000):
+        if time.monotonic() > deadline or settle == 0:
+            break
+        if "ui:ready" in messages and "ui:anchors" in messages:
+            settle -= 1
+        time.sleep(0.016)
         lib.jsui_tick(rt, frame * 16.0)
         name, json = ctypes.c_char_p(), ctypes.c_char_p()
         while lib.jsuiu_next_message(u, ctypes.byref(name), ctypes.byref(json)):

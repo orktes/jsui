@@ -174,6 +174,8 @@ void JsuiView::_bind_methods() {
   ClassDB::bind_method(D_METHOD("get_autostart"), &JsuiView::get_autostart);
   ClassDB::bind_method(D_METHOD("set_forward_gamepad", "enabled"), &JsuiView::set_forward_gamepad);
   ClassDB::bind_method(D_METHOD("get_forward_gamepad"), &JsuiView::get_forward_gamepad);
+  ClassDB::bind_method(D_METHOD("set_js_frame_budget_ms", "ms"), &JsuiView::set_js_frame_budget_ms);
+  ClassDB::bind_method(D_METHOD("get_js_frame_budget_ms"), &JsuiView::get_js_frame_budget_ms);
   ClassDB::bind_method(D_METHOD("set_input_pass_through", "enabled"), &JsuiView::set_input_pass_through);
   ClassDB::bind_method(D_METHOD("get_input_pass_through"), &JsuiView::get_input_pass_through);
   ClassDB::bind_method(D_METHOD("hit_test", "position"), &JsuiView::hit_test);
@@ -255,6 +257,10 @@ void JsuiView::_bind_methods() {
                "get_pixel_ratio");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "autostart"), "set_autostart", "get_autostart");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "forward_gamepad"), "set_forward_gamepad", "get_forward_gamepad");
+  // ms of JS per frame before React's scheduler yields: transitions render in
+  // slices across frames (jsui_set_js_frame_budget; 0 = no limit).
+  ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "js_frame_budget_ms", PROPERTY_HINT_RANGE, "0,33,0.5"),
+               "set_js_frame_budget_ms", "get_js_frame_budget_ms");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "input_pass_through"), "set_input_pass_through", "get_input_pass_through");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "force_cpu"), "set_force_cpu", "get_force_cpu");
   ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "runtime_view", PROPERTY_HINT_NODE_PATH_VALID_TYPES, "JsuiView"),
@@ -503,6 +509,7 @@ void JsuiView::createSurface() {
   rt_ = jsui_surface_create(host_->rt_, k.c_str(), props.c_str(), w, h, computeRatio());
   if (!rt_) return;
   if (profiling_) jsui_set_profiling(rt_, 1);
+  jsui_set_js_frame_budget(rt_, js_frame_budget_ms_);
   start_usec_ = host_->start_usec_;
   logical_w_ = logical_h_ = pixel_w_ = pixel_h_ = 0;
   viewport_auto_ = false;
@@ -853,6 +860,11 @@ void JsuiView::updateAutoSize() {
   pixel_h_ = std::max(1, int(std::lround(lh * ratio)));
   render_pending_ = true;
   set_custom_minimum_size(Vector2(float(lw), float(lh)));
+}
+
+void JsuiView::set_js_frame_budget_ms(double ms) {
+  js_frame_budget_ms_ = ms;
+  if (rt_) jsui_set_js_frame_budget(rt_, ms);
 }
 
 void JsuiView::process() {

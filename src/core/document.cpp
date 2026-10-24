@@ -41,6 +41,7 @@ Node* Document::createNode(NodeType type) {
   auto node = std::make_unique<Node>(this, id, type);
   Node* raw = node.get();
   nodes_[id] = std::move(node);
+  if (type == NodeType::Text) newTexts.push_back(id);
   return raw;
 }
 

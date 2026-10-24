@@ -163,6 +163,14 @@ test('hot updates keep component state; non-component edits propagate; entry edi
       const failures = server.state.failures;
       await writeFile(path.join(dir, file), contents);
       await until(() => server.state.version !== before || server.state.failures !== failures, 'rebuild of ' + file);
+      // A late duplicate fs event of the previous write can rebuild first (a
+      // slow runner): wait until no rebuild has started for a while, so the
+      // version applied below includes this write.
+      for (let seen = server.state.version + '/' + server.state.failures, t = Date.now(); Date.now() - t < 400; ) {
+        await sleep(50);
+        const now = server.state.version + '/' + server.state.failures;
+        if (now !== seen) (seen = now), (t = Date.now());
+      }
       version = await (await fetch(base + '/__jsui/version?hmr=1')).text();
       ctx.__jsui_onDevUpdate(version);
     };

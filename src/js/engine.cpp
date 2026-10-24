@@ -717,9 +717,12 @@ void QuickJsEngine::runTimers(double nowMs) {
   JSContext* ctx = impl.ctx;
   // Zero-delay timers queued by callbacks (MessageChannel, setImmediate,
   // promise-scheduled work) run in later passes of the same tick, bounded so
-  // a self-rescheduling timer cannot starve the frame.
+  // a self-rescheduling timer cannot starve the frame, and not once this
+  // tick's JS budget is spent (Runtime::jsShouldYield): React's scheduler
+  // continues a time-sliced render, and runs passive effects, next frame.
   constexpr int kMaxPasses = 8;
   for (int pass = 0; pass < kMaxPasses && impl.earliestDue <= nowMs; pass++) {
+    if (pass > 0 && impl.rt.jsShouldYield()) break;
     impl.dueScratch.clear();
     double later = 1e300;
     for (auto& [id, t] : impl.timers) {
