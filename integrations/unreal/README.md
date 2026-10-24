@@ -126,10 +126,11 @@ either path: the engine's frame, not the UI, sets the pace.
   `IInputProcessor` sees every mouse and key event before Slate routes it and
   sends it to the UI. What the UI consumed stops there (and so does its
   release); the rest goes on to the game as usual and is also raised as
-  `PassedMouseDown`, `PassedWheel` and `PassedKeyDown`. Typed text comes from
-  `OnKeyChar` while the view has keyboard focus, which it takes when the UI
-  consumes a press. In the example: drag empty space to orbit, wheel to zoom,
-  Space spawns, Esc pauses. No gamepad yet.
+  `PassedMouseDown` (and its release as `PassedMouseUp`), `PassedWheel` and
+  `PassedKeyDown`. Typed text comes from `OnKeyChar` while the view has
+  keyboard focus, which it takes when the UI consumes a press. In the example:
+  click a unit to select it, drag empty space to orbit, wheel to zoom, Space
+  spawns, Esc pauses. No gamepad yet.
 * **Game <-> UI.** `OnMessage` delivers `Host.postMessage` calls;
   `SetState(key, json)` feeds `useHostState`, `SetBuffer(key, floats)` a frame
   buffer read with `useHostBufferValue` (the example projects each unit with
