@@ -2,18 +2,21 @@
 // host runs a small game scene and this UI on top of it, through the same C
 // API:
 //   * Game -> UI shared state `game` (jsui_set_state): engine, renderer, fps,
-//     entity count, paused, and what the game received because the UI did not
-//     consume it (`passed`: clicks, wheel, keys, pad).
+//     entity count, paused, the selected unit (`selected`: its index in
+//     `entities`, -1 for none) and what the game received because the UI did
+//     not consume it (`passed`: clicks, wheel, keys, pad).
 //   * Game -> UI frame data `entities` (jsui_set_buffer, Float32Array of
 //     x, y, visible, hue per entity in logical px, every frame): one nameplate
 //     per entity, moved by the runtime with no JS per frame
 //     (useHostBufferValue).
 //   * UI -> game messages (Host.postMessage): game:spawn {count}, game:clear,
-//     game:pause {paused}, game:quit, and ui:anchors (where the Spawn button
-//     and an empty point are, for the hosts' --selftest).
+//     game:pause {paused}, game:quit, ui:anchors (where the Spawn button is,
+//     for the hosts' --selftest) and ui:selected {index} (the selection the
+//     UI shows, sent when it changes, so a --selftest can check it).
 // Input pass-through: the root and the nameplates take no input, so clicks,
 // drags and wheel on empty parts of the screen are not consumed and the host
-// hands them to the game (camera orbit, zoom, spawn). The pause menu's
+// hands them to the game (select a unit, camera orbit, zoom, spawn). The
+// game picks the unit under a click with its own raycast. The pause menu's
 // backdrop claims presses (onStartShouldSetResponder), so nothing reaches
 // the game behind it.
 import React, { useEffect, useRef } from 'react';
@@ -40,7 +43,9 @@ function hueColor(i) {
   return palette[i % palette.length];
 }
 
-function Nameplate({ index }) {
+const unitName = (index) => `UNIT ${String(index + 1).padStart(2, '0')}`;
+
+function Nameplate({ index, selected }) {
   const x = useHostBufferValue('entities', index * STRIDE);
   const y = useHostBufferValue('entities', index * STRIDE + 1);
   const visible = useHostBufferValue('entities', index * STRIDE + 2);
@@ -48,11 +53,21 @@ function Nameplate({ index }) {
   return (
     <Animated.View
       pointerEvents="none"
-      style={[styles.plate, { opacity: visible, transform: [{ translateX: x }, { translateY: y }] }]}
+      style={[
+        styles.plate,
+        selected && styles.plateSelected,
+        { opacity: visible, transform: [{ translateX: x }, { translateY: y }] },
+      ]}
     >
-      <View style={styles.plateInner}>
+      {selected ? <Text style={[styles.plateTag, { color: c }]}>SELECTED</Text> : null}
+      <View
+        style={[
+          styles.plateInner,
+          selected && { borderColor: c, backgroundColor: 'rgba(16, 22, 40, 0.94)', boxShadow: `0 0 14px ${c}` },
+        ]}
+      >
         <View style={[styles.plateDot, { backgroundColor: c, boxShadow: `0 0 8px ${c}` }]} />
-        <Text style={styles.plateText}>{`UNIT ${String(index + 1).padStart(2, '0')}`}</Text>
+        <Text style={[styles.plateText, selected && styles.plateTextSelected]}>{unitName(index)}</Text>
       </View>
       <View style={styles.plateBar}>
         <View style={[styles.plateFill, { width: `${40 + ((index * 37) % 60)}%`, backgroundColor: c }]} />
@@ -61,10 +76,12 @@ function Nameplate({ index }) {
   );
 }
 
-function Nameplates() {
+function Nameplates({ selected }) {
   const count = useHostBufferSelector('entities', countOf, 0);
   const plates = [];
-  for (let i = 0; i < count; i++) plates.push(<Nameplate key={i} index={i} />);
+  // The selected plate last: drawn over the others.
+  for (let i = 0; i < count; i++) if (i !== selected) plates.push(<Nameplate key={i} index={i} />);
+  if (selected >= 0 && selected < count) plates.push(<Nameplate key={selected} index={selected} selected />);
   return (
     <View pointerEvents="none" style={StyleSheet.absoluteFill}>
       {plates}
@@ -103,6 +120,20 @@ function EnginePanel({ game }) {
         <Stat label="Keys" value={String(passed.keys ?? 0)} />
         <Stat label="Pad" value={String(passed.pad ?? 0)} />
       </View>
+      <View style={styles.divider} />
+      <Text style={styles.sectionLabel}>Selected</Text>
+      <Selection index={game.selected ?? -1} />
+    </View>
+  );
+}
+
+function Selection({ index }) {
+  if (index < 0) return <Text style={styles.selectionNone}>None · click a unit</Text>;
+  const c = hueColor(index);
+  return (
+    <View style={styles.selection}>
+      <View style={[styles.selectionDot, { backgroundColor: c, boxShadow: `0 0 10px ${c}` }]} />
+      <Text style={[styles.selectionName, { color: c }]}>{unitName(index)}</Text>
     </View>
   );
 }
@@ -158,7 +189,7 @@ function Hints() {
   return (
     <View pointerEvents="none" style={styles.hints}>
       <Text style={styles.hintText}>
-        Drag empty space to move the camera · wheel to zoom · Space spawns · Tab / D-pad moves focus · Enter / A presses
+        Click a unit to select it · drag empty space to move the camera · wheel to zoom · Space spawns · Tab / D-pad moves focus · Enter / A presses
       </Text>
     </View>
   );
@@ -200,12 +231,15 @@ function PauseMenu({ game }) {
 
 function App() {
   const game = useHostState('game', {});
+  const selected = game.selected ?? -1;
   useEffect(() => Host.postMessage('ui:ready', {}), []);
+  // Tell the game what the UI now shows as selected (its --selftest checks it).
+  useEffect(() => Host.postMessage('ui:selected', { index: selected }), [selected]);
   return (
     // No background and no handlers on the root: the game shows through and
     // input on empty areas is not consumed.
     <View style={styles.root}>
-      <Nameplates />
+      <Nameplates selected={selected} />
       <EnginePanel game={game} />
       <Hints />
       <ActionBar game={game} />
@@ -232,6 +266,13 @@ const styles = StyleSheet.create({
   plateText: { fontFamily: font, fontWeight: '700', fontSize: 10, letterSpacing: 1.2, color: colors.text },
   plateBar: { marginTop: 3, width: 56, height: 3, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.12)', overflow: 'hidden' },
   plateFill: { height: 3, borderRadius: 2 },
+  plateSelected: { top: -60 },
+  plateTag: { fontFamily: font, fontWeight: '800', fontSize: 9, letterSpacing: 1.8, marginBottom: 3, textShadow: '0 1px 4px rgba(0,0,0,0.9)' },
+  plateTextSelected: { color: '#ffffff' },
+  selection: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6 },
+  selectionDot: { width: 8, height: 8, borderRadius: 4 },
+  selectionName: { fontFamily: font, fontWeight: '700', fontSize: 16, letterSpacing: 1.2 },
+  selectionNone: { fontFamily: font, fontWeight: '500', fontSize: 13, color: colors.textMute, marginTop: 6 },
   enginePanel: { ...panel, position: 'absolute', left: 20, top: 20, width: 300, padding: 16 },
   engineHead: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   liveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.green, boxShadow: '0 0 8px rgba(74,222,128,0.9)' },

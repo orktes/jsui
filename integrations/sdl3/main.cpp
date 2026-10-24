@@ -16,14 +16,14 @@
 // way the UI is repainted only when something in it changed.
 //
 // Input pass-through. Events go to the UI first; jsui_send_* returns whether
-// the UI consumed one. The rest drives the game: drag empty space to pan,
-// wheel to zoom, Space spawns a unit, Esc / Start pauses, the right stick
-// pans.
+// the UI consumed one. The rest drives the game: click a unit to select it
+// (or empty space to clear the selection), drag empty space to pan, wheel to
+// zoom, Space spawns a unit, Esc / Start pauses, the right stick pans.
 //
 // Per-frame data. Every frame the game writes each unit's screen position
 // into the `entities` frame buffer (x, y, visible, hue; logical px), which
-// moves the nameplates without JS; fps, unit count and the pass-through
-// counters go to the `game` shared state.
+// moves the nameplates without JS; fps, unit count, the selected unit and
+// the pass-through counters go to the `game` shared state.
 #include <SDL3/SDL.h>
 
 #include <algorithm>
@@ -203,7 +203,7 @@ struct Pad {
   float axes[4] = {0, 0, 0, 0};
 };
 
-class Game {
+class Game : public jsui_example::SelfTestHost {
  public:
   explicit Game(const Options& o, std::string renderer) : opt_(o), rendererName_(std::move(renderer)) {}
 
@@ -301,7 +301,7 @@ class Game {
 
       jsui_tick(rt_, now);
       if (opt_.selftest) {
-        int r = selftest_.step(rt_, float(logicalW_), float(logicalH_), int(units_.size()));
+        int r = selftest_.step(rt_, *this, float(logicalW_), float(logicalH_), hud_);
         if (r != 0) {
           result = r > 0 ? 0 : 1;
           quit_ = true;
@@ -404,6 +404,7 @@ class Game {
       for (int i = 0; i < n; i++) spawn();
     } else if (!std::strcmp(name, "game:clear")) {
       units_.clear();
+      hud_.selected = -1;
     } else if (!std::strcmp(name, "game:pause")) {
       hud_.paused = jsui_example::jsonBool(json, "paused");
     } else if (!std::strcmp(name, "game:quit")) {
@@ -414,7 +415,10 @@ class Game {
   float rnd(float a, float b) { return a + (b - a) * SDL_randf(); }
 
   void spawn() {
-    if (units_.size() >= 48) units_.erase(units_.begin());
+    if (units_.size() >= 48) {
+      units_.erase(units_.begin());
+      if (hud_.selected >= 0) hud_.selected--;  // -1 if it was the one removed
+    }
     Unit u;
     u.cx = rnd(-120, 120);
     u.cy = rnd(-80, 80);
@@ -461,11 +465,85 @@ class Game {
     }
     // The core in the middle, then the units: glowing diamonds.
     drawDiamond(toScreen(0, 0), 46 * zoom_, time_ * 0.3f, {0.1f, 0.14f, 0.25f, 1}, {0.31f, 0.82f, 1.f, 0.35f});
-    for (auto& u : units_) {
+    for (size_t i = 0; i < units_.size(); i++) {
+      const Unit& u = units_[i];
       SDL_FPoint p = toScreen(unitPos(u).x, unitPos(u).y);
       SDL_FColor glow = u.color;
       glow.a = 0.22f;
+      if (int(i) == hud_.selected) {
+        // Selected: a stronger glow, a lighter body and a pulsing ring.
+        glow.a = 0.6f;
+        float r = (u.size * 1.9f + 3.f * std::sin(time_ * 5.f)) * zoom_;
+        drawRing(p, r, {1, 1, 1, 0.95f});
+        drawRing(p, r + 4.f * zoom_, {u.color.r, u.color.g, u.color.b, 0.7f});
+        SDL_FColor lit{u.color.r + (1 - u.color.r) * 0.4f, u.color.g + (1 - u.color.g) * 0.4f,
+                       u.color.b + (1 - u.color.b) * 0.4f, 1};
+        drawDiamond(p, u.size * 1.15f * zoom_, time_ * u.speed * 3.f, lit, glow);
+        continue;
+      }
       drawDiamond(p, u.size * zoom_, time_ * u.speed * 3.f, u.color, glow);
+    }
+  }
+
+  void drawRing(SDL_FPoint c, float r, SDL_FColor color) {
+    SDL_FPoint pts[49];
+    for (int i = 0; i <= 48; i++) {
+      float a = i * 6.2831853f / 48;
+      pts[i] = {c.x + std::cos(a) * r, c.y + std::sin(a) * r};
+    }
+    SDL_SetRenderDrawColorFloat(renderer_, color.r, color.g, color.b, color.a);
+    SDL_RenderLines(renderer_, pts, 49);
+    for (auto& q : pts) q.x += 1;  // two px wide
+    SDL_RenderLines(renderer_, pts, 49);
+  }
+
+  // SelfTestHost: the unit under (x, y) (within its diamond's reach), the
+  // one drawn last (on top) first.
+  int pick(float x, float y) override {
+    for (int i = int(units_.size()) - 1; i >= 0; i--) {
+      SDL_FPoint w = unitPos(units_[i]);
+      SDL_FPoint p = toScreen(w.x, w.y);
+      if (std::hypot(x - p.x, y - p.y) <= units_[i].size * zoom_ * 1.15f) return i;
+    }
+    return -1;
+  }
+
+  bool unitOnScreen(int i, float* x, float* y) override {
+    if (i < 0 || i >= int(units_.size())) return false;
+    SDL_FPoint w = unitPos(units_[i]);
+    SDL_FPoint p = toScreen(w.x, w.y);
+    *x = p.x;
+    *y = p.y;
+    return p.x >= 0 && p.y >= 0 && p.x < logicalW_ && p.y < logicalH_;
+  }
+
+  void click(float x, float y) override {
+    mouseMove(x, y, x - mouse_.x, y - mouse_.y);
+    mouseButton(x, y, JSUI_MOUSE_LEFT, true, 0);
+    mouseButton(x, y, JSUI_MOUSE_LEFT, false, 0);
+  }
+
+  // Mouse input, from SDL events or the self-test.
+  void mouseMove(float x, float y, float dx, float dy) {
+    jsui_send_mouse_move(rt_, x, y);
+    if (dragging_) {
+      camX_ -= dx / zoom_;
+      camY_ -= dy / zoom_;
+      click_.move(x, y);
+    }
+    mouse_ = {x, y};
+  }
+
+  void mouseButton(float x, float y, JsuiMouseButton b, bool down, int mods) {
+    int consumed = jsui_send_mouse_button(rt_, x, y, b, down, mods);
+    if (b != JSUI_MOUSE_LEFT) return;
+    if (down && !consumed) {
+      dragging_ = true;  // the press is the game's: pan while held, select if it was a click
+      click_.press(x, y);
+      hud_.clicks++;
+    } else if (!down && dragging_) {
+      dragging_ = false;
+      if (click_.release(x, y)) hud_.selected = pick(x, y);
     }
   }
 
@@ -519,11 +597,7 @@ class Game {
       case SDL_EVENT_WINDOW_MOUSE_LEAVE: jsui_send_mouse_leave(rt_); break;
       case SDL_EVENT_MOUSE_MOTION:
         if (e.motion.which == SDL_TOUCH_MOUSEID) break;
-        jsui_send_mouse_move(rt_, e.motion.x, e.motion.y);
-        if (dragging_) {
-          camX_ -= e.motion.xrel / zoom_;
-          camY_ -= e.motion.yrel / zoom_;
-        }
+        mouseMove(e.motion.x, e.motion.y, e.motion.xrel, e.motion.yrel);
         break;
       case SDL_EVENT_MOUSE_BUTTON_DOWN:
       case SDL_EVENT_MOUSE_BUTTON_UP: {
@@ -531,16 +605,7 @@ class Game {
         JsuiMouseButton b = e.button.button == SDL_BUTTON_RIGHT    ? JSUI_MOUSE_RIGHT
                             : e.button.button == SDL_BUTTON_MIDDLE ? JSUI_MOUSE_MIDDLE
                                                                    : JSUI_MOUSE_LEFT;
-        bool down = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
-        int consumed = jsui_send_mouse_button(rt_, e.button.x, e.button.y, b, down, jsuiMods(SDL_GetModState()));
-        if (b == JSUI_MOUSE_LEFT) {
-          if (down && !consumed) {
-            dragging_ = true;  // the press is the game's: pan while held
-            hud_.clicks++;
-          } else if (!down) {
-            dragging_ = false;
-          }
-        }
+        mouseButton(e.button.x, e.button.y, b, e.type == SDL_EVENT_MOUSE_BUTTON_DOWN, jsuiMods(SDL_GetModState()));
         break;
       }
       case SDL_EVENT_MOUSE_WHEEL: {
@@ -678,6 +743,8 @@ class Game {
   jsui_example::HudState hud_;
   jsui_example::FpsCounter fps_;
   jsui_example::SelfTest selftest_;
+  jsui_example::ClickTracker click_;
+  SDL_FPoint mouse_{-1, -1};
   std::vector<Unit> units_;
   size_t spawned_ = 0;
   float time_ = 0;
