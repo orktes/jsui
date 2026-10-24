@@ -694,7 +694,12 @@ TEST(host_js_frame_budget) {
   Host h;
   CHECK_EQ(jsui_get_js_frame_budget(h.rt), 5.0);
   h.load(R"(
-    globalThis.spin = (ms) => { const end = Date.now() + ms; while (Date.now() < end) {} };
+    // Start on a clock edge: Date.now() can tick in ~15 ms steps (Windows),
+    // and an unaligned spin may then end right away.
+    globalThis.spin = (ms) => {
+      const t = Date.now(); while (Date.now() === t) {}
+      const end = Date.now() + ms; while (Date.now() < end) {}
+    };
     globalThis.log = [];
     globalThis.chain = () => {
       setTimeout(() => {
