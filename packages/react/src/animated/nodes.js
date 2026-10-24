@@ -774,3 +774,119 @@ export class AnimatedClock extends AnimatedNode {
     this.__dropNative();
   }
 }
+
+// One state of an element's interaction (useInteraction): 0..1, eased by
+// the element's `transition`, computed by the runtime from input
+// (core/state_style.h). Native only: a JS-driven consumer sees 0.
+export class AnimatedInteraction extends AnimatedNode {
+  constructor(key, state) {
+    super();
+    this._key = key;
+    this._state = state;
+    if (NativeAnimatedAPI) this._isNative = true;
+  }
+  __getValue() {
+    return 0;
+  }
+  __getNativeConfig() {
+    return { type: 'interaction', key: this._key, state: this._state };
+  }
+  __detach() {
+    this.__dropNative();
+  }
+}
+
+let interactionKeys = 0;
+
+/**
+ * An element's interaction state as native Animated values: pass it as the
+ * `interaction` prop of a host element (View, Pressable, ...) and use
+ * `.hovered`, `.pressed`, `.focused`, `.focusVisible`, `.disabled` (0..1,
+ * following that element's `transition`) in native-driven styles,
+ * interpolations or Animated.derive. Only the `key` crosses the bridge.
+ */
+export class Interaction {
+  constructor() {
+    this.key = 'ix' + ++interactionKeys;
+    Object.defineProperty(this, '_values', { value: {}, enumerable: false });
+  }
+  _value(state) {
+    return this._values[state] || (this._values[state] = new AnimatedInteraction(this.key, state));
+  }
+  get hovered() {
+    return this._value('hovered');
+  }
+  get pressed() {
+    return this._value('pressed');
+  }
+  get focused() {
+    return this._value('focused');
+  }
+  get focusVisible() {
+    return this._value('focusVisible');
+  }
+  get disabled() {
+    return this._value('disabled');
+  }
+}
+
+// Animated.format(node, {decimals, grouping, prefix, suffix, minDigits}): a
+// number as text, for Animated.Text's `text` prop. Native with its input
+// (the runtime formats it and sets the text without JS); the C++ twin is
+// NativeAnimated::formatNumber.
+export function formatNumber(v, o) {
+  const prefix = o.prefix || '', suffix = o.suffix || '';
+  if (!isFinite(v)) return prefix + String(v) + suffix;
+  const decimals = typeof o.decimals === 'number' ? Math.max(-1, Math.min(20, Math.trunc(o.decimals))) : -1;
+  let digits;
+  if (decimals < 0) {
+    digits = String(v === 0 ? 0 : v);
+  } else {
+    const scale = 10 ** decimals;
+    const r = Math.round(Math.abs(v) * scale) / scale;
+    digits = (v < 0 && r !== 0 ? '-' : '') + r.toFixed(decimals);
+  }
+  const neg = digits[0] === '-';
+  const body = neg ? digits.slice(1) : digits;
+  const dot = body.indexOf('.');
+  let int = dot < 0 ? body : body.slice(0, dot);
+  const minDigits = Math.max(0, Math.min(40, Math.trunc(o.minDigits || 0)));
+  if (int.length < minDigits) int = '0'.repeat(minDigits - int.length) + int;
+  if (o.grouping && int.indexOf('e') < 0) int = int.replace(/\B(?=(\d{3})+(?!\d))/g, o.grouping);
+  return prefix + (neg ? '-' : '') + int + (dot < 0 ? '' : body.slice(dot)) + suffix;
+}
+
+export class AnimatedFormat extends AnimatedNode {
+  constructor(input, options) {
+    super();
+    this._input = input instanceof AnimatedNode ? input : new AnimatedValue(+input || 0);
+    this._options = Object.assign({}, options);
+    if (this._input.__isNative()) this.__makeNative();
+  }
+  __getInputs() {
+    return [this._input];
+  }
+  __getValue() {
+    const v = this._input.__getValue();
+    return formatNumber(typeof v === 'number' ? v : +v, this._options);
+  }
+  __getNativeConfig() {
+    const o = this._options;
+    return {
+      type: 'format',
+      input: this._input.__getNativeTag(),
+      decimals: typeof o.decimals === 'number' ? o.decimals : -1,
+      grouping: o.grouping || '',
+      prefix: o.prefix || '',
+      suffix: o.suffix || '',
+      minDigits: o.minDigits || 0,
+    };
+  }
+  __attach() {
+    this._input.__addChild(this);
+  }
+  __detach() {
+    this._input.__removeChild(this);
+    this.__dropNative();
+  }
+}

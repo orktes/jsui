@@ -11,7 +11,7 @@
 //   box is repainted and incremental == full repaint; the end callback
 //   ({finished, value}) waits for the next jsui_tick;
 // - stop / setValue / listeners sync values back to JS; JS-driven animations
-//   on a native value throw; native loops; layout props throw like RN;
+//   on a native value throw; native loops; layout props animate natively;
 // - Animated.event: ScrollView offsets drive a header natively.
 // Built and run by the @orktes/jsui-cli suite with JSUI_REACT_NATIVE_ANIMATED_BUNDLE.
 #include <algorithm>
@@ -345,12 +345,26 @@ TEST(react_native_animated_e2e) {
     for (auto& e : ends) CHECK(!e.asBool());
   }
 
-  // ---- layout props are rejected like React Native.
+  // ---- layout props run natively too (unlike React Native): the view is
+  // relaid out on the frames the value changes, without JS.
   t.post("layoutProp");
+  t.tick(16);
   auto lp = t.take("layoutProp");
-  CHECK(!lp.empty() && lp[0].asString().find("Style property 'width' is not supported by native animated module") !=
-                           std::string::npos);
-  CHECK_EQ(t.style("width")["width"].asNumber(), 10.0);
+  CHECK(!lp.empty() && lp[0].asString() == "no error");
+  {
+    double last = 0;
+    bool grew = true;
+    for (int f = 0; f < 8; f++) {
+      t.now += 16;
+      jsui_tick_native(t.rt, t.now);
+      double w = t.runtime().doc.get(t.ids["width"])->layoutRect().width;
+      grew = grew && w >= last;
+      last = w;
+    }
+    CHECK(grew);
+    CHECK_EQ(t.style("width")["width"].asNumber(), 100.0);
+    CHECK_EQ(last, 100.0);
+  }
 
   // ---- Animated.event: the ScrollView's offset drives the header natively.
   CHECK_EQ(transformValue(t.style("header"), "translateY"), 0.0);

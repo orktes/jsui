@@ -83,6 +83,14 @@ struct DeriveE2E {
     }
     return out;
   }
+  std::string text(const char* name) {
+    auto it = ids.find(name);
+    jsui::Node* n = it == ids.end() ? nullptr : runtime().doc.get(it->second);
+    if (!n) return "<none>";
+    for (jsui::Node* c : n->children())
+      if (c->type() == jsui::NodeType::RawText) return c->text();
+    return "<no text>";
+  }
   double transform(const char* nativeId, const char* key) {
     auto it = ids.find(nativeId);
     jsui::Node* n = it == ids.end() ? nullptr : runtime().doc.get(it->second);
@@ -176,6 +184,64 @@ TEST(react_derive_e2e) {
     t.tickNative();
     CHECK_NEAR(t.transform("clock", "translateX"), std::fmod(t.now, 1000.0), 1e-6);
   }
+
+  // ---- a native composite (parallel(sequence(timing, delay, timing),
+  // stagger)) advances step by step with no JS at all; only its end waits
+  // for a JS tick.
+  t.post("seq");
+  t.tick();  // JS starts the group at this frame's time
+  std::vector<double> xs;
+  for (int f = 0; f < 12; f++) {
+    t.tickNative();
+    xs.push_back(t.transform("seq", "translateX"));
+  }
+  // 48 ms up, then the delay starts on the frame the timing ended (as a JS
+  // sequence's next step would), 32 ms, then 48 ms down.
+  std::printf("    composite x:");
+  for (double x : xs) std::printf(" %g", x);
+  std::printf("\n");
+  // (The group starts at the runtime time JS saw, one frame before the
+  // first native tick here.)
+  CHECK_NEAR(xs[0], 64, 1e-9);
+  CHECK_NEAR(xs[1], 96, 1e-9);
+  CHECK_NEAR(xs[3], 96, 1e-9);  // the 32 ms delay
+  CHECK_NEAR(xs[4], 64, 1e-9);
+  CHECK_NEAR(xs[5], 32, 1e-9);
+  CHECK_NEAR(xs[6], 0, 1e-9);
+  CHECK_NEAR(xs.back(), 0, 1e-9);
+  CHECK_NEAR(t.transform("seq", "translateY"), 10, 1e-9);
+  CHECK_NEAR(t.transform("seq", "scaleX"), 10, 1e-9);
+  CHECK(t.take("seqEnd").empty());  // no JS ran
+  t.tick();
+  auto se = t.take("seqEnd");
+  CHECK_EQ(se.size(), size_t(1));
+  if (!se.empty()) CHECK(se[0].asBool());
+
+  // ---- Animated.Text text={Animated.format(...)}: the runtime formats and
+  // sets the text every frame, without JS or React renders.
+  CHECK_EQ(t.text("score"), std::string("XP 0!"));
+  CHECK_EQ(t.text("jsScore"), std::string("000.00"));
+  t.post("renders");
+  t.tick();
+  auto r0 = t.take("renders");
+  t.post("score", "1234567");
+  t.tick();
+  std::vector<std::string> texts;
+  for (int f = 0; f < 5; f++) {
+    t.tickNative();
+    texts.push_back(t.text("score"));
+  }
+  std::printf("    score text:");
+  for (auto& s : texts) std::printf(" '%s'", s.c_str());
+  std::printf("\n");
+  CHECK(texts[0] != "XP 0!");
+  CHECK_EQ(texts.back(), std::string("XP 1,234,567!"));
+  t.tick();
+  CHECK_EQ(t.text("jsScore"), std::string("1234.57"));  // JS driver: a re-render of that Text only
+  t.post("renders");
+  t.tick();
+  auto r1 = t.take("renders");
+  CHECK(!r0.empty() && !r1.empty() && r0[0].asNumber() == r1[0].asNumber());  // App never re-rendered
 
   // ---- outside the subset: a clear error natively, still fine on the JS driver.
   t.post("notNative");

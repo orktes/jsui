@@ -13,6 +13,87 @@ default; use React state only for things that change now and then.
 | A value **computed** from animated / game values (clamp to screen, distance fade, conditional offsets) | `Animated.derive(inputs, fn)` | `addListener` → compute → `setValue` / `setState` (one frame late, JS every frame) |
 | Procedural motion (bob, pulse, orbit) without an animation | `Animated.derive([Animated.clock()], (t) => ...)` | a JS timer |
 | Scroll-linked effects | `Animated.event` with `useNativeDriver: true` + `interpolate` / `derive` | `onScroll` → `setState` |
+| Numbers that count up / tick (scores, XP, timers, ammo) | `<Animated.Text text={Animated.format(value, {...})} />` | `addListener` → `setState` → re-render |
+| Choreography: sequence / parallel / stagger / loop | `Animated.sequence(...)` etc. with every step `useNativeDriver: true` (delays too): runs as one native group | mixing JS-driven steps in (the whole composite then hops through JS between steps) |
+| Hover / press / focus feedback (highlight, press-down scale, focus ring) | `hoveredStyle` / `pressedStyle` / `focusedStyle` / `focusVisibleStyle` / `disabledStyle` + `transition` on any element (Pressable, View, Text, Image): swapped by the runtime on input | `style={({pressed, hovered}) => ...}` or `onHoverIn` → `setState` (a JS round trip and a re-render per change) |
+| Children reacting to the parent's hover / press / focus (card hover lights up its title and icon) | `group` on the parent, `groupHoveredStyle` / `groupPressedStyle` / `groupFocusedStyle` / `groupFocusVisibleStyle` on descendants | passing hover state down through props |
+| Driving anything else from interaction (a glow's intensity, an icon's rotation, a derive) | `useInteraction()` → `interaction={ix}` on the element, then `ix.hovered` / `ix.pressed` / `ix.focused` (native 0..1 values) | listeners → `setState` |
+| Animating size / position (`width`, `height`, `top`, `flex`) | the native driver works for layout keys too (relayout per frame); prefer transforms when they do the job | JS-driven layout animation |
+
+## State styles: hover, press, focus without JS
+
+```jsx
+<Pressable
+  onPress={buy}
+  group                                   // descendants can follow this element's state
+  style={styles.card}                     // the base, as usual
+  hoveredStyle={{ backgroundColor: '#2a3550', transform: [{ scale: 1.03 }] }}
+  pressedStyle={{ transform: [{ scale: 0.97 }] }}
+  focusVisibleStyle={{ borderColor: '#7cf' }}  // keyboard / gamepad focus only
+  disabledStyle={{ opacity: 0.4 }}
+  disabled={!canAfford}
+  transition={{ duration: 120, easing: 'easeOut', pressed: 40 }}
+>
+  <Text style={styles.title} groupHoveredStyle={{ color: '#fff' }}>Buy</Text>
+  <Image source={coin} style={styles.icon} groupPressedStyle={{ opacity: 0.6 }} />
+</Pressable>
+```
+
+- The runtime merges the active states' styles over `style` every frame
+  input changes (no JS, no render), so the feedback shows on the frame of
+  the input even while JS is busy. React re-renders keep the overlays.
+- States: `hovered` (mouse over it or a descendant), `pressed` (a primary
+  press that began on it, while the pointer stays over it; Enter / Space /
+  gamepad A on it while focused; a click shorter than a frame still shows
+  one frame), `focused` (any focus), `focusVisible` (focus from keyboard /
+  gamepad, like CSS `:focus-visible`: use this for focus rings in game UIs,
+  so a mouse click does not leave a ring behind), `disabled` (the element's
+  `disabled` prop; it also suppresses hovered / pressed).
+- Blend order, later wins: group states, then hovered, focused,
+  focusVisible, pressed, disabled.
+- `transition`: ms, or `{ duration, easing, delay }` (`'linear'`, `'ease'`
+  (default), `'easeIn'`, `'easeOut'`, `'easeInOut'`, or `[x1, y1, x2, y2]`),
+  with per-state overrides (`{ duration: 150, pressed: 0, focusVisible: {
+  duration: 80 } }`). Numbers, colors (a missing base fades in from
+  transparent), transforms with the same functions (a missing base starts
+  from identity), `shadowOffset` interpolate; other keys switch halfway.
+  Layout keys (`borderWidth`, `padding`, `width`) work and relayout.
+- Group styles: `group` (or `group="card"`) on an ancestor;
+  `groupHoveredStyle` etc. on any descendant follow the nearest group (or
+  the one named by `groupName="card"`). Group focus is focus *within* the
+  group. A descendant without its own `transition` uses the group's.
+- Use `style={({ pressed }) => ...}` only when the change is not a style
+  (different children, text).
+
+```jsx
+const ix = useInteraction();
+const glow = useMemo(() => ix.hovered.interpolate({ inputRange: [0, 1], outputRange: [0, 0.8] }), [ix]);
+<Pressable interaction={ix} transition={200} onPress={open}>
+  <Animated.View style={[styles.glow, { opacity: glow }]} />
+  ...
+</Pressable>
+```
+
+`useInteraction()` values follow the element's `transition` and work
+anywhere a native Animated node does (styles, `interpolate`,
+`Animated.derive`); they read 0 on the JS driver.
+
+## Animated.Text with a live number
+
+```jsx
+const xp = useAnimatedValue(0, { useNativeDriver: true });
+const label = useMemo(() => Animated.format(xp, { decimals: 0, grouping: ',', prefix: 'XP ' }), [xp]);
+useEffect(() => {
+  Animated.timing(xp, { toValue: 25000, duration: 1200, useNativeDriver: true }).start();
+}, []);
+return <Animated.Text style={styles.xp} text={label} />;  // "XP 0" ... "XP 25,000", no re-renders
+```
+
+`text` takes any Animated node: `Animated.format` (`decimals` (default:
+shortest), `grouping` (thousands separator), `prefix`, `suffix`,
+`minDigits` (zero padding: `minDigits: 2` for clocks)) or a plain numeric
+node. Combine with `Animated.derive` for computed numbers, e.g. a countdown:
+`Animated.format(Animated.derive([t], (s) => Math.ceil(s)), { suffix: 's' })`.
 
 ## Animated.derive
 
