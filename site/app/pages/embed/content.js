@@ -538,6 +538,89 @@ void AMyGame::Tick(float Dt) {
   ],
 };
 
+const LANGS = {
+  id: 'langs',
+  label: 'Rust & Go',
+  eyebrow: 'Any language · bindings/',
+  color: colors.orange,
+  title: 'Your language, a React UI',
+  lead: 'The C API is all a language needs. Thin bindings for Rust (a crate) and Go (a cgo package) wrap libjsui, and the same quest-log app runs in both: a GLFW window, Skia drawing on the GPU, the data and the rules in Rust or Go, the UI in React. The program owns the state, the UI asks for changes with Host.call, and the program answers.',
+  facts: [
+    ['Rust', 'jsui crate · glfw'],
+    ['Go', 'cgo package · go-gl/glfw'],
+    ['UI on screen', 'Skia Ganesh · OpenGL'],
+    ['Self-test', '--selftest'],
+  ],
+  blocks: [
+    {
+      kind: 'code',
+      lang: 'sh',
+      title: 'build and run',
+      code: `
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DJSUI_BUILD_SHARED=ON
+cmake --build build --target jsui_shared        # build/libjsui.so / .dylib
+npx jsui build bindings/ui/app.jsx -o bindings/ui/dist/bundle.js
+
+cd bindings/rust && cargo run --release --example quests
+cd bindings/go/examples/quests && go run .
+`,
+    },
+    {
+      kind: 'pair',
+      items: [
+        {
+          kind: 'code',
+          lang: 'rs',
+          title: 'Rust',
+          code: `
+let rt = jsui::Runtime::new(Config::default())?;
+rt.on_call(move |cx, call| match call.name {
+    "quests.add" => {
+        let args: Value = serde_json::from_str(call.args).unwrap();
+        let title = args["title"].as_str().unwrap_or("");
+        let id = app.borrow_mut().add(title);
+        cx.resolve_call(call.id, &json!({ "id": id }).to_string());
+    }
+    _ => { cx.reject_call(call.id, "unknown call"); }
+});
+rt.set_state("quests", &json!({ "items": quests }).to_string());
+rt.load_bundle_file("bindings/ui/dist/bundle.js")?;
+loop {
+    rt.tick(jsui::now_ms());
+    if rt.needs_redraw() { rt.render_gl(&gpu, 0, w, h, 0); }
+}
+`,
+        },
+        {
+          kind: 'code',
+          lang: 'go',
+          title: 'Go',
+          code: `
+rt, _ := jsui.New(jsui.Config{Width: 900, Height: 760})
+rt.OnCall = func(c jsui.Call) {
+    var args struct{ Title string }
+    c.Decode(&args)
+    id := app.Add(args.Title)
+    rt.ResolveCallValue(c.ID, map[string]any{"id": id})
+}
+rt.SetStateValue("quests", map[string]any{"items": app.Quests})
+rt.LoadBundleFile("bindings/ui/dist/bundle.js")
+for !win.ShouldClose() {
+    rt.Tick(jsui.NowMs())
+    if rt.NeedsRedraw() { rt.RenderGL(gpu, 0, w, h, 0) }
+}
+`,
+        },
+      ],
+    },
+    {
+      kind: 'note',
+      color: colors.orange,
+      text: 'Both bindings link libjsui, the shared library on every GitHub Release (or built with -DJSUI_BUILD_SHARED=ON), and expose the same pieces: shared state, messages and calls both ways, frame buffers, input with its consumed result, CPU and OpenGL rendering. Callbacks run on the thread that ticks the runtime; values cross as JSON text, with serde_json or encoding/json on top. Any language with a C FFI (Python, Zig, Swift, C#, Kotlin, ...) can do the same.',
+    },
+  ],
+};
+
 const DATA = {
   id: 'data',
   label: 'Game data',
@@ -918,4 +1001,4 @@ WEBGL=1 scripts/build-wasm.sh                         # -> web/dist-webgl/ (Skia
   ],
 };
 
-export const TARGETS = [GODOT, CAPI, ENGINES, UNITY, UNREAL, DATA, WEB, DEV, BUILD];
+export const TARGETS = [GODOT, CAPI, ENGINES, UNITY, UNREAL, LANGS, DATA, WEB, DEV, BUILD];

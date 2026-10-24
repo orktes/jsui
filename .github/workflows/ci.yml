@@ -33,6 +33,7 @@ jobs:
       ios: ${{ steps.filter.outputs.ios }}
       android: ${{ steps.filter.outputs.android }}
       engines: ${{ steps.filter.outputs.engines }}
+      bindings: ${{ steps.filter.outputs.bindings }}
       dist: ${{ steps.filter.outputs.dist }}
     steps:
       - uses: actions/checkout@v4
@@ -88,6 +89,11 @@ jobs:
               - 'integrations/sokol/**'
               - 'integrations/unity/**'
               - 'integrations/shared/**'
+              - 'packages/**'
+              - 'examples/theme.js'
+            bindings:
+              - *core
+              - 'bindings/**'
               - 'packages/**'
               - 'examples/theme.js'
             # Release binaries: on pull requests only when the packaging or
@@ -275,6 +281,88 @@ jobs:
         with:
           name: engine-examples-linux
           path: engines/
+
+  # ------------------------------------------------- Rust and Go bindings
+  # libjsui (jsui_shared, prebuilt Skia m124: Ganesh GL) linked from the Rust
+  # crate and the Go package: their tests, then each quest-log example's
+  # self-test on Mesa's GL under Xvfb.
+  bindings:
+    name: bindings (Rust, Go)
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.bindings == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: bindings/go/examples/quests/go.sum
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/rust
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build clang cmake libfontconfig1-dev zlib1g-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxinerama-dev libxfixes-dev libxxf86vm-dev \
+            libgl1-mesa-dev libegl1 libegl-mesa0 libgl1-mesa-dri xvfb xauth
+      - name: Cache prebuilt Skia
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-prebuilt
+          key: bindings-skia-${{ runner.os }}-${{ hashFiles('cmake/*.cmake') }}
+          restore-keys: bindings-skia-${{ runner.os }}-
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: bindings-${{ runner.os }}
+          max-size: 500M
+      - name: UI bundle
+        run: |
+          npm ci
+          npx jsui build bindings/ui/app.jsx -o bindings/ui/dist/bundle.js
+      - name: libjsui
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DJSUI_BUILD_SHARED=ON -DJSUI_BUILD_TESTS=OFF -DJSUI_BUILD_VIEWER=OFF -DJSUI_BUILD_TOOLS=OFF
+          cmake --build build -j "$(nproc)" --target jsui_shared
+      - name: The Go module's copy of jsui.h is current
+        run: cmp include/jsui/jsui.h bindings/go/include/jsui/jsui.h
+      - name: Rust
+        working-directory: bindings/rust
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+          cargo build --release --example quests
+      - name: Go
+        working-directory: bindings/go
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test ./...
+          cd examples/quests && go vet ./... && go build -o ../../../../build/quests-go .
+      - name: Self-tests and frames
+        run: |
+          mkdir -p bindings-out
+          x() { xvfb-run -a -s "-screen 0 1600x1000x24" "$@"; }
+          x bindings/rust/target/release/examples/quests --selftest --screenshot bindings-out/rust.png | tee bindings-out/rust.log
+          grep -q '^GPU: Skia Ganesh GL' bindings-out/rust.log && grep -q 'selftest: ok' bindings-out/rust.log
+          x build/quests-go --selftest --screenshot bindings-out/go.png | tee bindings-out/go.log
+          grep -q '^GPU: Skia Ganesh GL' bindings-out/go.log && grep -q 'selftest: ok' bindings-out/go.log
+          for f in bindings-out/*.png; do test -s "$f"; done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bindings-linux
+          path: bindings-out/
 
   # ------------------------------------------------- Godot GDExtension (Linux)
   # Built against Skia m157 from source (scripts/build-skia-desktop.sh,
