@@ -101,6 +101,11 @@ struct PaintStats {
 };
 PaintStats lastPaintStats(const Document& doc);
 
+// Whether raster targets blit sprites and shadow masks without Skia's
+// drawImage: only when they paint the same pixels on this build and CPU
+// (see blitSprite in painter.cpp).
+bool fastSpriteBlits();
+
 // Composited opacity layers (GPU backends). A node painted through a layer
 // (opacity < 1 over children or overlapping draws) normally renders its
 // subtree into an offscreen texture every time it is painted: on Graphite a

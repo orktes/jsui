@@ -13,8 +13,8 @@ npx @orktes/jsui-cli skill install            # -> .claude/skills/jsui/ (--globa
 In a project with `npm install --save-dev @orktes/jsui-cli`:
 
 ```sh
-npx jsui build app.jsx -o dist/bundle.js [--minify] [--sourcemap] [--dev]
-npx jsui dev app.jsx [--port 5173] [--host 127.0.0.1] [--no-hmr]
+npx jsui build app.jsx -o dist/bundle.js [--minify] [--sourcemap] [--dev] [--react-compiler [--compiler-report]]
+npx jsui dev app.jsx [--port 5173] [--host 127.0.0.1] [--no-hmr] [--react-compiler]
 npx jsui screenshot app.jsx -o shot.png [--width 1280 --height 720 --scale 2 --wait 1000]
 npx jsui inspect app.jsx [--find '#play'] [--json]
 npx jsui run app.jsx steps.json|script.mjs
@@ -46,6 +46,41 @@ npx jsui log --attach http://127.0.0.1:5173 [--since N] [--follow]
   `<Image source={require('./a.png')} />` works). Images also register their
   intrinsic size (`name@2x.png` halves it) so unsized `<Image>`s size
   themselves like React Native. JSON is inlined.
+
+### React Compiler
+
+`--react-compiler` (`build({ reactCompiler: true })`, `dev({ reactCompiler:
+true })`, also for `screenshot` / `inspect` / `run`) runs [React
+Compiler](https://react.dev/learn/react-compiler) (`babel-plugin-react-compiler`
+1.0.0, on Babel 7) over the app's own source files, not over `node_modules` or
+`@orktes/jsui-react`. Components and hooks are memoized automatically: when a
+parent re-renders, children whose inputs did not change are not rendered or
+diffed again. The compiled code imports `react/compiler-runtime`, which React
+19 has.
+
+It is off by default. Measured on QuickJS (`tools/jsui-bench`, instructions
+per frame with painting off): the showcase (`examples/showcase/interactions.jsx`)
+renders 1.3 instead of 5.1 components per frame and runs 53% fewer
+instructions, and 30 surfaces with changing props 27% fewer; but where every
+rendered component gets new props each frame (100 moving markers under
+`React.memo`) it costs 10% more (React copies each compiled component's memo
+cache per render), builds take 4-25x longer (the site: 0.3 s → 7 s, on 4
+worker threads), and bundles grow 2-9%. Turn it on when re-rendering parents
+is where the frame goes, and check the result with `jsui-bench --react-stats`.
+
+* Components and hooks that break the [Rules of
+  React](https://react.dev/reference/rules) are left as written (they still
+  work, unmemoized). `--compiler-report` lists them with the reason; the most
+  common in React Native code is `useRef(new Animated.Value(0)).current`
+  (reading a ref during render): `useAnimatedValue(0)` is the same value and
+  compiles.
+* Memoized code assumes that what render reads only changes through props,
+  state, context or hooks. A value read during render from somewhere else
+  (a mutable object, `HostBuffer.get()`, a module-level variable, a function
+  like `Font.isLoaded()`) can stay at its first value; read it through a hook
+  (`useHostBuffer`, `useHostState`, `useFonts`, ...) instead.
+* `jsui dev` compiles hot-updated modules too, and the compiler's
+  per-file source hash resets a component's memo cache when its file changes.
 
 ## Dev server
 
@@ -177,7 +212,7 @@ check them with the headless tools. It is versioned with this package:
 
 ```js
 import { build, dev } from '@orktes/jsui-cli';
-await build({ entry: 'app.jsx', outfile: 'dist/bundle.js', minify: true });
+await build({ entry: 'app.jsx', outfile: 'dist/bundle.js', minify: true }); // reactCompiler: true -> result.reactCompiler.skipped
 const server = await dev({ entry: 'app.jsx', port: 0 }); // server.port, server.close()
 ```
 

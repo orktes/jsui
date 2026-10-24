@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { esbuildOptions } from './config.js';
+import { REACT_COMPILER_DEFAULT } from './react-compiler.js';
 import { formatErrors } from './build.js';
 
 const require = createRequire(import.meta.url);
@@ -83,11 +84,11 @@ function installFileFetch() {
 
 // Builds `entry` into dir/bundle.js. Entries that export a component but
 // register none get it registered as 'main', so a single screen file works.
-async function buildEntry(entry, dir, mode) {
+async function buildEntry(entry, dir, mode, reactCompiler = REACT_COMPILER_DEFAULT) {
   const abs = path.resolve(entry);
   const outfile = path.join(dir, 'bundle.js');
   const assets = new Map();
-  const opts = esbuildOptions({ entry: abs, outfile, mode, assets });
+  const opts = esbuildOptions({ entry: abs, outfile, mode, assets, reactCompiler });
   delete opts.entryPoints;
   const spec = JSON.stringify('./' + path.basename(abs));
   opts.stdin = {
@@ -259,6 +260,7 @@ let nextHostId = 0x4a5000;
  * @param {object} [o.state]     shared state set before the bundle runs ({key: value})
  * @param {object} [o.calls]     Host.call answers: {name: value | (args) => value}
  * @param {boolean} [o.dev]      development React build (better errors)
+ * @param {boolean} [o.reactCompiler] React Compiler on the app sources (default off)
  * @param {string} [o.wasmDir]   directory with jsui.js + jsui.wasm (CPU build)
  * @param {(level: number, text: string) => void} [o.onLog]
  */
@@ -269,7 +271,7 @@ export async function launch(o = {}) {
   let bundlePath;
   if (o.entry) {
     tmp = await mkdtemp(path.join(tmpdir(), 'jsui-headless-'));
-    bundlePath = await buildEntry(o.entry, tmp, o.dev ? 'development' : 'production');
+    bundlePath = await buildEntry(o.entry, tmp, o.dev ? 'development' : 'production', o.reactCompiler);
   } else {
     bundlePath = path.resolve(o.bundle);
   }

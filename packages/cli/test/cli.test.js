@@ -153,6 +153,75 @@ test('build: minify + sourcemap + dev define', async () => {
   assert.match(title.children.map((c) => nodes.get(c).text).join(''), / dev /);
 });
 
+test('build: React Compiler on app files only (TS, defaulted props), skipped functions reported, off by default', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'jsui-cli-rc-'));
+  const pkg = path.join(dir, 'node_modules', 'lib');
+  await mkdir(pkg, { recursive: true });
+  await writeFile(path.join(pkg, 'package.json'), JSON.stringify({ name: 'lib', main: 'index.js' }));
+  await writeFile(path.join(pkg, 'index.js'), `import { Text } from 'react-native';\nexport function LibLabel({ s }) { return <Text>{s}</Text>; }\n`);
+  await writeFile(
+    path.join(dir, 'Row.tsx'),
+    `import React from 'react';
+import { Text } from 'react-native';
+export function Row({ label, n = 1 }: { label: string; n?: number }) {
+  return <Text nativeID={label}>{label + ':' + n}</Text>;
+}
+`,
+  );
+  await writeFile(
+    path.join(dir, 'App.js'),
+    `import React, { useRef, useState } from 'react';
+import { AppRegistry, View } from 'react-native';
+import { LibLabel } from 'lib';
+import { Row } from './Row';
+function Bad() {
+  const r = useRef(0);
+  r.current++;
+  return <Row label={'bad' + r.current} />;
+}
+function App() {
+  const [n, setN] = useState(1);
+  globalThis.inc = () => setN((x) => x + 1);
+  return (
+    <View>
+      <Row label="row" n={n} />
+      <Bad />
+      <LibLabel s="lib" />
+    </View>
+  );
+}
+AppRegistry.registerComponent('main', () => App);
+`,
+  );
+  const out = path.join(dir, 'rc', 'bundle.js');
+  const r = await build({ entry: path.join(dir, 'App.js'), outfile: out, reactCompiler: true });
+  assert.equal(r.reactCompiler.files, 2, 'App.js and Row.tsx, not node_modules');
+  assert.deepEqual(r.reactCompiler.skipped.map((s) => s.name).sort(), ['App', 'Bad']);
+  assert.match(r.reactCompiler.skipped.find((s) => s.name === 'Bad').reason, /ref/i);
+  assert.ok(r.reactCompiler.functions >= 1, 'Row compiles');
+  const code = await readFile(out, 'utf8');
+  assert.match(code, /function Row\(t0\) \{\n\s*const \$ = \(0, import_compiler_runtime\.c\)\(\d+\);/);
+  assert.match(code, /function LibLabel\(\{ s \}\) \{\n\s*return/, 'node_modules as written');
+  const { nodes, ctx, timers } = runBundle(code);
+  await new Promise((res) => setImmediate(res));
+  const text = (id) => {
+    const n = [...nodes.values()].find((x) => x.props.nativeID === id);
+    return n && n.children.map((c) => nodes.get(c).text).join('');
+  };
+  assert.equal(text('row'), 'row:1');
+  ctx.inc();
+  for (let i = 0; i < 3; i++) {
+    await new Promise((res) => setImmediate(res));
+    timers.splice(0).forEach((fn) => fn());
+  }
+  assert.equal(text('row'), 'row:2');
+  assert.deepEqual(ctx.errors, []);
+
+  const plain = await build({ entry: path.join(dir, 'App.js'), outfile: path.join(dir, 'plain', 'bundle.js') });
+  assert.equal(plain.reactCompiler, null);
+  assert.doesNotMatch(await readFile(path.join(dir, 'plain', 'bundle.js'), 'utf8'), /import_compiler_runtime/);
+});
+
 test('build: expo-font alias; an @expo-google-fonts style package works unchanged', async () => {
   const dir = await fixture();
   const pkg = path.join(dir, 'node_modules', '@expo-google-fonts', 'lato');
