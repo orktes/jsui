@@ -6,6 +6,7 @@
 // and image cache.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -28,7 +29,7 @@ class DevOverlay;
 
 class Surface {
  public:
-  Surface(Runtime& rt, uint32_t* nextNodeId, Perf* perf = nullptr);
+  Surface(Runtime& rt, std::atomic<uint32_t>* nextNodeId, Perf* perf = nullptr);
   ~Surface();
 
   Runtime& rt;

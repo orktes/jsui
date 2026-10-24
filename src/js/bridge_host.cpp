@@ -80,8 +80,12 @@ JSValue js_writeState(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
     changed = r == HostState::Result::Changed;
   }
   // JS notifies its own subscribers (the key is not queued for JS); the
-  // embedder is told here.
-  if (changed) rt.uiStateChanged(key);
+  // embedder is told here (with the tree JS built so far applied: on_state
+  // may look at it).
+  if (changed) {
+    implOf(ctx).syncPoint();
+    rt.uiStateChanged(key);
+  }
   return JS_NewFloat64(ctx, double(rt.state.version(key)));
 }
 
@@ -156,6 +160,7 @@ JSValue js_hostCall(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
   uint64_t id = rt.newCallId();
   // Registered before on_call runs, so the embedder may answer from inside it.
   impl.hostCalls[id] = JS_DupValue(ctx, argv[2]);
+  impl.syncPoint();
   rt.config.on_call(rt.config.call_user, id, name.c_str(), json.c_str());
   return JS_NewFloat64(ctx, double(id));
 }

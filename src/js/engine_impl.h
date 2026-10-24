@@ -1,6 +1,7 @@
 // Internal state of JsEngine, shared by the engine's translation units:
 //   engine.cpp   - context lifetime, entry/exit bookkeeping, errors, timers, rAF
 //   bridge.cpp   - __jsui_native (node tree, measure, focus, patchStyle, fonts)
+//   command_buffer.cpp - applies the mutations the bridge recorded
 //   host_api.cpp - __jsui_host helpers behind the JS prelude (fetch, UTF-8, log)
 //   prelude.cpp  - JS source of the web-style globals (console, fetch, URL, ...)
 #pragma once
@@ -17,6 +18,7 @@
 #include <vector>
 
 #include "core/value.h"
+#include "js/command_buffer.h"
 #include "js/engine.h"
 #include "platform/loader.h"
 
@@ -110,6 +112,32 @@ struct JsEngine::Impl {
   // The runtime's debugger once it is attached to this context (null in
   // builds without JSUI_DEBUGGER).
   std::shared_ptr<Inspector> inspector;
+
+  // ---- native mutations JS made, not applied yet (js/command_buffer.h)
+  CommandBuffer commands;
+  // Applies the recorded commands (in the Commit phase).
+  void applyCommands();
+  // The end of a JS task: the microtasks have drained (drain()). The
+  // commands JS recorded are published as one batch, so a React commit is
+  // applied whole.
+  void publish() { applyCommands(); }
+  // JS returned to native code inside a task (a call() that is part of a
+  // batch, a microtask round, a script's evaluation), or a bridge call is
+  // about to read or affect native state (measure, getProps, Animated
+  // getValue, host callbacks, fonts). Single-threaded, everything recorded
+  // so far is applied here, so native never sees the tree behind JS. (On a
+  // JS thread these reads would come from a snapshot of the last frame and
+  // only publish() would apply.)
+  void syncPoint() {
+    if (!commands.empty()) applyCommands();
+  }
+  // Records nothing itself: applies an op of CommandBuffer::appliesAtOnce
+  // that was just recorded, with everything before it, and returns its
+  // answer.
+  const CommandBuffer::Result& applyNow() {
+    applyCommands();
+    return commands.result();
+  }
 
   // Cached atoms for hot callbacks.
   JSAtom atomDispatch = 0, atomHostMessage = 0, atomOnLayout = 0;

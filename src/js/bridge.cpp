@@ -1,6 +1,11 @@
 // __jsui_native: the node-tree bridge used by @orktes/jsui-react's host config,
 // plus imperative methods (measure, focus, scrollTo), the animation fast
 // path (patchStyle), host messages, fonts and reload.
+//
+// Mutations are not applied here: each call converts its arguments and
+// records a command (js/command_buffer.h), which the engine applies when JS
+// returns to native. Calls that read native state (measure, getProps) or
+// reach the embedder (postMessage, fonts) apply what is recorded first.
 #include <algorithm>
 #include <limits>
 #include <string>
@@ -21,58 +26,65 @@ namespace jsui {
 
 namespace {
 
-// Native side of a tree / prop mutation from the reconciler.
+// Recording side of a tree / prop mutation from the reconciler (the
+// conversion; applying it is timed in the same phase).
 #define JSUI_COMMIT_SCOPE                                    \
   Document& commitDoc = runtimeOf(ctx).doc;                  \
   commitDoc.perf.counters.bridgeCalls++;                     \
   Perf::Scope commitScope(commitDoc.perf, Phase::Commit)
 
+using Op = CommandBuffer::Op;
+
+CommandBuffer& commands(JSContext* ctx) { return implOf(ctx).commands; }
+
+// A node id argument (0, which no node has, when it is not a number).
+// Whether the node exists is checked when the command is applied.
+uint32_t idArg(JSContext* ctx, int argc, JSValueConst* argv, int i) {
+  uint32_t id = 0;
+  if (i >= argc || !JS_IsNumber(argv[i]) || JS_ToUint32(ctx, &id, argv[i])) return 0;
+  return id;
+}
+
+// For reads: the node as JS sees it, after what it recorded is applied.
 Node* nodeArg(JSContext* ctx, JSValueConst v) {
   if (!JS_IsNumber(v)) return nullptr;
   uint32_t id = 0;
   if (JS_ToUint32(ctx, &id, v)) return nullptr;
+  implOf(ctx).syncPoint();
   return runtimeOf(ctx).findNode(id);
 }
 
-// The input of the surface showing `n`.
-InputManager& inputOf(JSContext* ctx, Node* n) { return *runtimeOf(ctx).surfaceOf(n->document()).input; }
-
-// Nodes of different surfaces cannot be joined (a portal into another
-// surface's tree, for example).
-bool sameDocument(JSContext* ctx, Node* a, Node* b) {
-  if (a->document() == b->document()) return true;
-  runtimeOf(ctx).log(JSUI_LOG_WARN, "a node cannot move to another surface (createPortal into another root view?)");
-  return false;
-}
-
+// createNode(type, rootTag) -> id: the node belongs to that surface's
+// document. The id is taken now; the node exists natively once the Create
+// command is applied.
 JSValue js_createNode(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   JSUI_COMMIT_SCOPE;
   NodeType t;
   std::string name = argc > 0 ? toStdString(ctx, argv[0]) : "";
   if (!nodeTypeFromName(name, &t)) return JS_ThrowTypeError(ctx, "unknown element type '%s'", name.c_str());
-  // createNode(type, rootTag): the node belongs to that surface's document.
-  Runtime& rt = runtimeOf(ctx);
-  Document* doc = &rt.doc;
-  uint32_t tag = 0;
-  if (argc > 1 && JS_IsNumber(argv[1]) && !JS_ToUint32(ctx, &tag, argv[1]))
-    if (Surface* s = rt.surfaceByTag(tag)) doc = &s->doc;
-  return JS_NewUint32(ctx, doc->createNode(t)->id());
+  uint32_t tag = idArg(ctx, argc, argv, 1);
+  uint32_t id = runtimeOf(ctx).allocNodeId();
+  commands(ctx).push(Op::Create, id, uint32_t(t), tag);
+  return JS_NewUint32(ctx, id);
 }
 
 JSValue js_setProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   JSUI_COMMIT_SCOPE;
   if (argc < 2) return JS_UNDEFINED;
-  if (Node* n = nodeArg(ctx, argv[0])) n->setProps(toValue(ctx, argv[1]));
+  commands(ctx).pushValue(Op::SetProps, idArg(ctx, argc, argv, 0), toValue(ctx, argv[1]));
   return JS_UNDEFINED;
 }
 
-// ---- updateProps(id, reactProps, hidden): the host config's prop path
-// done natively. Builds what native sees from the React props (functions
-// become props.__events tokens, symbols / children / ref / key are dropped,
-// the style is flattened, pointerEvents moves into the style, hidden adds
-// display: none) and hands it to Node::setProps, which diffs it against the
-// current props. Same result as @orktes/jsui-react's toNativeProps +
-// nativePropsChanged, without interpreting either in JS.
+// ---- updateProps(id, reactProps, hidden, keepStyle): the host config's
+// prop path done natively. Builds what native sees from the React props
+// (functions become props.__events tokens, symbols / children / ref / key
+// are dropped, the style is flattened, pointerEvents moves into the style,
+// hidden adds display: none) and hands it to Node::setProps, which diffs it
+// against the current props. Same result as @orktes/jsui-react's
+// toNativeProps + nativePropsChanged, without interpreting either in JS.
+// keepStyle (setNativeProps of non-style props): reactProps.style is
+// ignored and the node keeps the style it has when the command is applied
+// (patchStyle's and native Animated's writes included).
 
 // React prop -> props.__events tokens (packages/react/src/instances.js
 // EVENT_TOKENS; "...Capture" variants map like the bubbling prop, except for
@@ -163,9 +175,10 @@ int flattenStyle(JSContext* ctx, JSValueConst s, Value::Object& out, int depth) 
 JSValue js_updateProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   JSUI_COMMIT_SCOPE;
   if (argc < 2 || !JS_IsObject(argv[1])) return JS_UNDEFINED;
-  Node* n = nodeArg(ctx, argv[0]);
-  if (!n) return JS_UNDEFINED;
+  uint32_t id = idArg(ctx, argc, argv, 0);
+  if (!id) return JS_UNDEFINED;
   bool hidden = argc > 2 && JS_ToBool(ctx, argv[2]);
+  bool keepStyle = argc > 3 && JS_ToBool(ctx, argv[3]);
   JsEngine::Impl& impl = implOf(ctx);
   Value::Object out;
   Value::Array events;
@@ -183,7 +196,8 @@ JSValue js_updateProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
       continue;
     }
     if (*k == "style") {
-      style = v;
+      if (keepStyle) JS_FreeValue(ctx, v);
+      else style = v;
       continue;
     }
     if (JS_IsFunction(ctx, v)) {
@@ -198,6 +212,15 @@ JSValue js_updateProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
     JS_FreeValue(ctx, v);
   }
   JS_FreePropertyEnum(ctx, keys, count);
+  if (keepStyle) {
+    // The style is merged when the command is applied (the current one).
+    uint8_t flags = (hidden ? CommandBuffer::kHidden : 0) |
+                    (JS_ToBool(ctx, pointerEvents) ? CommandBuffer::kPointerEvents : 0);
+    JS_FreeValue(ctx, pointerEvents);
+    if (!events.empty()) out.insert_or_assign("__events", Value(std::move(events)));
+    commands(ctx).pushValue(Op::SetPropsKeepStyle, id, Value(std::move(out)), 0, flags);
+    return JS_UNDEFINED;
+  }
   Value::Object flat;
   bool hasStyle = flattenStyle(ctx, style, flat, 1) > 0;
   JS_FreeValue(ctx, style);
@@ -213,13 +236,11 @@ JSValue js_updateProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
   }
   if (hasStyle) out.insert_or_assign("style", Value(std::move(flat)));
   if (!events.empty()) out.insert_or_assign("__events", Value(std::move(events)));
-  n->setProps(Value(std::move(out)));
+  commands(ctx).pushValue(Op::SetProps, id, Value(std::move(out)));
   return JS_UNDEFINED;
 }
 
-// getProps(id): the props native holds for a node (what updateProps built
-// from the React props, with patchStyle's writes), or undefined.
-// React's scheduler asks this between units of concurrent work (the CLI
+// shouldYield(): React's scheduler asks this between units of concurrent work (the CLI
 // bundles scheduler with that check, packages/cli/src/specialize.js):
 // true once this tick's JS budget is spent, so a transition yields to the
 // next frame. performance.now() is the frame clock and never advances
@@ -228,6 +249,9 @@ JSValue js_shouldYield(JSContext* ctx, JSValueConst, int, JSValueConst*) {
   return JS_NewBool(ctx, runtimeOf(ctx).jsShouldYield());
 }
 
+// getProps(id): the props native holds for a node (what updateProps built
+// from the React props, with patchStyle's writes), or undefined. A read,
+// for the inspector (setNativeProps uses updateProps' keepStyle instead).
 JSValue js_getProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   if (argc < 1) return JS_UNDEFINED;
   Node* n = nodeArg(ctx, argv[0]);
@@ -240,8 +264,8 @@ JSValue js_getProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
 JSValue js_patchStyle(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   JSUI_COMMIT_SCOPE;
   if (argc < 2 || !JS_IsObject(argv[1])) return JS_UNDEFINED;
-  Node* n = nodeArg(ctx, argv[0]);
-  if (!n) return JS_UNDEFINED;
+  uint32_t id = idArg(ctx, argc, argv, 0);
+  if (!id) return JS_UNDEFINED;
   Value::Object partial;
   JSPropertyEnum* keys = nullptr;
   uint32_t count = 0;
@@ -257,99 +281,58 @@ JSValue js_patchStyle(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
     JS_FreeValue(ctx, v);
   }
   JS_FreePropertyEnum(ctx, keys, count);
-  n->patchStyle(partial);
+  commands(ctx).pushObject(Op::PatchStyle, id, std::move(partial));
   return JS_UNDEFINED;
 }
 
 JSValue js_setText(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   JSUI_COMMIT_SCOPE;
   if (argc < 2) return JS_UNDEFINED;
-  if (Node* n = nodeArg(ctx, argv[0])) n->setText(toStdString(ctx, argv[1]));
+  commands(ctx).pushString(Op::SetText, idArg(ctx, argc, argv, 0), toStdString(ctx, argv[1]));
   return JS_UNDEFINED;
 }
 
-bool isAncestorOrSelf(Node* a, Node* n) {
-  for (Node* p = n; p; p = p->parent())
-    if (p == a) return true;
-  return false;
-}
-
+// Tree edits are checked when applied (unknown nodes, cycles, nodes of
+// another surface).
 JSValue js_appendChild(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   JSUI_COMMIT_SCOPE;
   if (argc < 2) return JS_UNDEFINED;
-  Node* p = nodeArg(ctx, argv[0]);
-  Node* c = nodeArg(ctx, argv[1]);
-  if (p && c && !isAncestorOrSelf(c, p) && sameDocument(ctx, p, c)) p->appendChild(c);
+  commands(ctx).push(Op::Append, idArg(ctx, argc, argv, 0), idArg(ctx, argc, argv, 1));
   return JS_UNDEFINED;
 }
 
 JSValue js_insertBefore(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   JSUI_COMMIT_SCOPE;
   if (argc < 2) return JS_UNDEFINED;
-  Node* p = nodeArg(ctx, argv[0]);
-  Node* c = nodeArg(ctx, argv[1]);
-  Node* b = argc > 2 ? nodeArg(ctx, argv[2]) : nullptr;
-  if (b && b->parent() != p) b = nullptr;
-  if (p && c && c != b && !isAncestorOrSelf(c, p) && sameDocument(ctx, p, c)) p->insertBefore(c, b);
+  commands(ctx).push(Op::Insert, idArg(ctx, argc, argv, 0), idArg(ctx, argc, argv, 1), idArg(ctx, argc, argv, 2));
   return JS_UNDEFINED;
 }
 
 JSValue js_removeChild(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   JSUI_COMMIT_SCOPE;
   if (argc < 2) return JS_UNDEFINED;
-  Node* p = nodeArg(ctx, argv[0]);
-  Node* c = nodeArg(ctx, argv[1]);
-  if (p && c) p->document()->removeChild(p, c);  // may keep it as a LayoutAnimation ghost
+  commands(ctx).push(Op::Remove, idArg(ctx, argc, argv, 0), idArg(ctx, argc, argv, 1));
   return JS_UNDEFINED;
 }
 
 // configureLayoutAnimation({duration, create, update, delete}): arms a
 // LayoutAnimation for the commit in progress (@orktes/jsui-react calls it from
-// prepareForCommit after LayoutAnimation.configureNext). Each of create /
-// update / delete: {type, property, duration, delay, springDamping}.
-LayoutAnimSpec layoutAnimSpec(const Value& v, double duration) {
-  LayoutAnimSpec s;
-  if (!v.isObject()) return s;
-  s.enabled = true;
-  s.duration = v["duration"].isNumber() ? v["duration"].asNumber() : duration;
-  s.delay = v["delay"].isNumber() ? v["delay"].asNumber() : 0;
-  if (v["springDamping"].isNumber()) s.springDamping = float(v["springDamping"].asNumber());
-  const std::string type = v["type"].isString() ? v["type"].asString() : "easeInEaseOut";
-  s.curve = type == "linear"    ? LayoutAnimCurve::Linear
-            : type == "easeIn"  ? LayoutAnimCurve::EaseIn
-            : type == "easeOut" ? LayoutAnimCurve::EaseOut
-            : type == "spring"  ? LayoutAnimCurve::Spring
-            : type == "keyboard" ? LayoutAnimCurve::Keyboard
-                                 : LayoutAnimCurve::EaseInEaseOut;
-  const std::string prop = v["property"].isString() ? v["property"].asString() : "opacity";
-  s.property = prop == "scaleX"    ? LayoutAnimProperty::ScaleX
-               : prop == "scaleY"  ? LayoutAnimProperty::ScaleY
-               : prop == "scaleXY" ? LayoutAnimProperty::ScaleXY
-                                   : LayoutAnimProperty::Opacity;
-  return s;
-}
-
-// The commit may touch any surface: all of them are armed.
+// prepareForCommit after LayoutAnimation.configureNext, so it is recorded
+// before the commit's tree edits). Each of create / update / delete: {type,
+// property, duration, delay, springDamping}. No object: disarms.
 JSValue js_configureLayoutAnimation(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  Runtime& rt = runtimeOf(ctx);
   if (argc < 1 || !JS_IsObject(argv[0])) {
-    for (auto& s : rt.surfaces()) s->doc.disarmLayoutAnimation();
+    commands(ctx).push(Op::ArmLayoutAnim, 0, 0, 0, CommandBuffer::kDisarm);
     return JS_UNDEFINED;
   }
-  Value cfg = toValue(ctx, argv[0]);
-  double duration = cfg["duration"].isNumber() ? cfg["duration"].asNumber() : 300;
-  LayoutAnimConfig c;
-  c.create = layoutAnimSpec(cfg["create"], duration);
-  c.update = layoutAnimSpec(cfg["update"], duration);
-  c.remove = layoutAnimSpec(cfg["delete"], duration);
-  for (auto& s : rt.surfaces()) s->doc.armLayoutAnimation(c);
+  commands(ctx).pushValue(Op::ArmLayoutAnim, 0, toValue(ctx, argv[0]));
   return JS_UNDEFINED;
 }
 
 JSValue js_destroyNode(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   JSUI_COMMIT_SCOPE;
   if (argc < 1) return JS_UNDEFINED;
-  if (Node* n = nodeArg(ctx, argv[0])) n->document()->destroyNode(n);
+  commands(ctx).push(Op::Destroy, idArg(ctx, argc, argv, 0));
   return JS_UNDEFINED;
 }
 
@@ -387,15 +370,22 @@ JSValue js_viewport(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
   return o;
 }
 
+// Imperative view methods are commands too. Single-threaded they apply at
+// once (CommandBuffer::appliesAtOnce): focus and scroll events reach JS
+// inside the call, as before.
 JSValue js_focus(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
-  if (n) inputOf(ctx, n).focus(n);
+  if (uint32_t id = idArg(ctx, argc, argv, 0)) {
+    commands(ctx).push(Op::Focus, id);
+    implOf(ctx).applyNow();
+  }
   return JS_UNDEFINED;
 }
 
 JSValue js_blur(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
-  if (n) inputOf(ctx, n).blur(n);
+  if (uint32_t id = idArg(ctx, argc, argv, 0)) {
+    commands(ctx).push(Op::Blur, id);
+    implOf(ctx).applyNow();
+  }
   return JS_UNDEFINED;
 }
 
@@ -403,14 +393,28 @@ JSValue js_blur(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
 // dispatches scroll events. animated: eases there on the runtime clock;
 // otherwise the jump is immediate (and stops a running fling).
 JSValue js_scrollTo(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
-  if (!n) return JS_UNDEFINED;
+  uint32_t id = idArg(ctx, argc, argv, 0);
+  if (!id) return JS_UNDEFINED;
   double x = 0, y = 0;
   if (argc > 1) JS_ToFloat64(ctx, &x, argv[1]);
   if (argc > 2) JS_ToFloat64(ctx, &y, argv[2]);
   bool animated = argc > 3 && JS_ToBool(ctx, argv[3]) > 0;
-  n->document()->layout();
-  inputOf(ctx, n).scrollTo(n, float(x == x ? x : 0), float(y == y ? y : 0), animated);
+  commands(ctx).pushXY(Op::ScrollTo, id, x, y, animated ? CommandBuffer::kAnimated : 0);
+  implOf(ctx).applyNow();
+  return JS_UNDEFINED;
+}
+
+// scrollToEnd(id, contentId, horizontal, animated): scrolls to the end of
+// the content container (`contentId`, the ScrollView's first child in
+// React; 0: the ScrollView itself) on the scroll axis, measured when the
+// command is applied.
+JSValue js_scrollToEnd(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  uint32_t id = idArg(ctx, argc, argv, 0);
+  if (!id) return JS_UNDEFINED;
+  uint8_t flags = (argc > 2 && JS_ToBool(ctx, argv[2]) > 0 ? CommandBuffer::kHorizontal : 0) |
+                  (argc > 3 && JS_ToBool(ctx, argv[3]) > 0 ? CommandBuffer::kAnimated : 0);
+  commands(ctx).push(Op::ScrollToEnd, id, idArg(ctx, argc, argv, 1), 0, flags);
+  implOf(ctx).applyNow();
   return JS_UNDEFINED;
 }
 
@@ -426,12 +430,13 @@ JSValue js_lottieData(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
 // pause / resume / reset. Frames are NaN (undefined) for the whole
 // composition. Returns false for an unknown view or command.
 JSValue js_lottieCommand(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
-  if (!n || argc < 2) return JS_FALSE;
+  uint32_t id = idArg(ctx, argc, argv, 0);
+  if (!id || argc < 2) return JS_FALSE;
   double a = std::numeric_limits<double>::quiet_NaN(), b = a;
   if (argc > 2 && JS_IsNumber(argv[2])) JS_ToFloat64(ctx, &a, argv[2]);
   if (argc > 3 && JS_IsNumber(argv[3])) JS_ToFloat64(ctx, &b, argv[3]);
-  return JS_NewBool(ctx, lottie::command(n, toStdString(ctx, argv[1]), a, b));
+  commands(ctx).pushString(Op::LottieCommand, id, toStdString(ctx, argv[1]), 0, 0, a, b);
+  return JS_NewBool(ctx, implOf(ctx).applyNow().ok);
 }
 
 // {error} | {uniforms: [{name, type, count, color}], children: [name]}.
@@ -487,24 +492,24 @@ JSValue js_shadersWarming(JSContext* ctx, JSValueConst, int, JSValueConst*) {
 
 // flashScrollIndicators(id): shows the overlay scroll indicators briefly.
 JSValue js_flashScrollIndicators(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
-  if (!n) return JS_UNDEFINED;
-  n->document()->layout();
-  inputOf(ctx, n).flashScrollIndicators(n);
+  if (uint32_t id = idArg(ctx, argc, argv, 0)) {
+    commands(ctx).push(Op::FlashScrollIndicators, id);
+    implOf(ctx).applyNow();
+  }
   return JS_UNDEFINED;
 }
 
 // setTextInputSelection(id, start, end): TextInput selection from JS
 // (ref.setSelection, the controlled `selection` prop). UTF-16 indices.
 JSValue js_setTextInputSelection(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
-  if (!n) return JS_UNDEFINED;
+  uint32_t id = idArg(ctx, argc, argv, 0);
+  if (!id) return JS_UNDEFINED;
   double start = 0, end = 0;
   if (argc > 1) JS_ToFloat64(ctx, &start, argv[1]);
   end = start;
   if (argc > 2 && !JS_IsUndefined(argv[2]) && !JS_IsNull(argv[2])) JS_ToFloat64(ctx, &end, argv[2]);
-  auto toIndex = [](double v) { return v == v ? int(std::clamp(v, 0.0, 1e9)) : 0; };
-  inputOf(ctx, n).setInputSelection(n, toIndex(start), toIndex(end));
+  commands(ctx).pushXY(Op::SetSelection, id, start, end);
+  implOf(ctx).applyNow();
   return JS_UNDEFINED;
 }
 
@@ -522,6 +527,7 @@ JSValue js_setClipboard(JSContext* ctx, JSValueConst, int argc, JSValueConst* ar
 
 JSValue js_postMessage(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   Runtime& rt = runtimeOf(ctx);
+  implOf(ctx).syncPoint();  // the embedder's on_message may look at the tree
   std::string name = argc > 0 ? toStdString(ctx, argv[0]) : "";
   std::string json = "null";
   if (argc > 1) {
@@ -615,6 +621,7 @@ JSValue js_loadFont(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
 // `bytes`: ArrayBuffer / typed array / DataView. Empty family = the file's.
 JSValue js_loadFontData(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   Runtime& rt = runtimeOf(ctx);
+  implOf(ctx).syncPoint();  // fontsChanged() re-measures the text JS set before
   std::string family = argc > 0 && JS_IsString(argv[0]) ? toStdString(ctx, argv[0]) : "";
   std::vector<uint8_t> data;
   if (argc < 2 || JS_IsString(argv[1]) || !bytesOf(ctx, argv[1], &data) || data.empty())
@@ -631,6 +638,7 @@ JSValue js_loadFontData(JSContext* ctx, JSValueConst, int argc, JSValueConst* ar
 // unloadFont(family) -> boolean
 JSValue js_unloadFont(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   Runtime& rt = runtimeOf(ctx);
+  implOf(ctx).syncPoint();
   bool ok = argc > 0 && rt.fonts.unregisterFamily(toStdString(ctx, argv[0]));
   if (ok) rt.fontsChanged();
   return JS_NewBool(ctx, ok);
@@ -648,6 +656,7 @@ JSValue js_getFontFamilies(JSContext* ctx, JSValueConst, int, JSValueConst*) {
 // setFontFallbacks(families: string[] | "A, B")
 JSValue js_setFontFallbacks(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   Runtime& rt = runtimeOf(ctx);
+  implOf(ctx).syncPoint();
   std::vector<std::string> list;
   auto addList = [&](const std::string& csv) {
     size_t i = 0;
@@ -680,6 +689,7 @@ JSValue js_setFontFallbacks(JSContext* ctx, JSValueConst, int argc, JSValueConst
 // setDefaultFontFamily(family): the family of text whose style names none.
 JSValue js_setDefaultFontFamily(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   Runtime& rt = runtimeOf(ctx);
+  implOf(ctx).syncPoint();
   uint32_t gen = rt.fonts.generation;
   if (argc > 0 && JS_IsString(argv[0])) rt.fonts.setDefaultFamily(toStdString(ctx, argv[0]));
   if (rt.fonts.generation != gen) rt.fontsChanged();
@@ -750,7 +760,7 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
     JSCFunction* fn;
     int len;
   } fns[] = {{"createNode", js_createNode, 1},     {"setProps", js_setProps, 2},
-             {"updateProps", js_updateProps, 3},
+             {"updateProps", js_updateProps, 4},
              {"getProps", js_getProps, 1},
              {"shouldYield", js_shouldYield, 0},
              {"patchStyle", js_patchStyle, 2},     {"setText", js_setText, 2},
@@ -758,6 +768,7 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
              {"removeChild", js_removeChild, 2},   {"destroyNode", js_destroyNode, 1},
              {"measure", js_measure, 1},           {"focus", js_focus, 1},
              {"blur", js_blur, 1},                 {"scrollTo", js_scrollTo, 4},
+             {"scrollToEnd", js_scrollToEnd, 4},
              {"postMessage", js_postMessage, 2},   {"loadFont", js_loadFont, 4},
              {"reload", js_reload, 0},             {"viewport", js_viewport, 1},
              {"surfaceApp", js_surfaceApp, 1},     {"devError", js_devError, 1},
@@ -776,6 +787,9 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
              {"setDefaultFontFamily", js_setDefaultFontFamily, 1}};
   for (auto& f : fns) JS_SetPropertyStr(ctx, native, f.name, JS_NewCFunction(ctx, f.fn, f.name, f.len));
   JS_SetPropertyStr(ctx, native, "rootId", JS_NewUint32(ctx, impl.rt.doc.root()->id()));
+  // updateProps(id, props, hidden, true) keeps the node's current style
+  // (setNativeProps).
+  JS_SetPropertyStr(ctx, native, "updatePropsKeepsStyle", JS_TRUE);
   // TextInput text is edited natively (change / selectionchange events).
   JS_SetPropertyStr(ctx, native, "textEditing", JS_TRUE);
   // LottieView plays (the build has Skottie).

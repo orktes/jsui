@@ -217,11 +217,18 @@ void JsEngine::Impl::leave() {
   if (--depth == 0 && !draining) drain();
 }
 
+void JsEngine::Impl::applyCommands() {
+  Perf::Scope scope(rt.doc.perf, Phase::Commit);
+  commands.apply(rt);
+}
+
 JSValue JsEngine::Impl::call(JSValueConst fn, JSValueConst thisVal, int argc, JSValueConst* argv) {
   Perf::Scope scope(rt.doc.perf, Phase::Js);
   rt.doc.perf.counters.jsCalls++;
   enter();
   JSValue r = JS_Call(ctx, fn, thisVal, argc, argv);
+  // Native code runs next (the caller, or the next call of a batch).
+  syncPoint();
   if (JS_IsException(r)) {
     reportException();
     r = JS_EXCEPTION;
@@ -249,6 +256,7 @@ void JsEngine::Impl::drain() {
   interrupted = false;
   for (int round = 0; round < 64; round++) {
     runJobsRaw();
+    syncPoint();
     if (!rejections.empty()) {
       auto list = std::move(rejections);
       rejections.clear();
@@ -271,6 +279,7 @@ void JsEngine::Impl::drain() {
       JS_SetPropertyStr(ctx, args[1], "height", JS_NewFloat64(ctx, e.h));
       rt.doc.perf.counters.jsCalls++;
       JSValue r = JS_Call(ctx, fn, JS_UNDEFINED, 2, args);
+      syncPoint();
       if (JS_IsException(r)) reportException();
       JS_FreeValue(ctx, r);
       JS_FreeValue(ctx, args[1]);
@@ -279,6 +288,9 @@ void JsEngine::Impl::drain() {
     JS_FreeValue(ctx, fn);
     JS_FreeValue(ctx, global);
   }
+  // The task is over (its microtasks and the onLayout handlers they led to
+  // ran): what it recorded reaches the native tree.
+  publish();
   depth--;
   draining = false;
 }
@@ -637,6 +649,7 @@ QuickJsEngine::~QuickJsEngine() {
   if (impl.inspector) impl.inspector->detach(ctx);  // holds values of this context
 #endif
   impl.alive.reset();  // loader callbacks still queued become no-ops
+  impl.commands.clear();
   for (auto& [id, p] : impl.pending) {
     impl.rt.loader.cancel(id);
     JS_FreeValue(ctx, p.resolve);
@@ -715,6 +728,7 @@ bool QuickJsEngine::eval(const std::string& source, const std::string& name) {
 #endif
     r = evalSource(impl.ctx, source, name);
   }
+  impl.syncPoint();
   bool ok = !JS_IsException(r);
   if (!ok) impl.reportException();
   JS_FreeValue(impl.ctx, r);

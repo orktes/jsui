@@ -1,6 +1,7 @@
 // Owns all nodes of one runtime, the root container and the layout pass.
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <unordered_map>
@@ -42,13 +43,18 @@ class Document {
   // documents (surfaces) share one JS context, so ids stay unique across
   // them; nullptr: the document numbers its own nodes.
   // Surfaces of one runtime share the node id counter and the perf stats.
-  explicit Document(uint32_t* sharedNextId = nullptr, Perf* sharedPerf = nullptr);
+  // The counter is atomic: the JS bridge takes ids for the nodes its
+  // commands create later (js/command_buffer.h).
+  explicit Document(std::atomic<uint32_t>* sharedNextId = nullptr, Perf* sharedPerf = nullptr);
   ~Document();
 
   // The root container (id 1). The reconciler appends its top level here.
   Node* root() const { return root_; }
 
   Node* createNode(NodeType type);
+  // With an id taken from the counter earlier (the bridge's Create command).
+  // nullptr when the id is 0 or already in use.
+  Node* createNode(NodeType type, uint32_t id);
   Node* get(uint32_t id) const;
   // Destroys a detached node and its subtree.
   void destroyNode(Node* node);
@@ -165,8 +171,8 @@ class Document {
   std::unordered_map<uint32_t, Rect> reportedLayout_;
   uint64_t yogaPass_ = 0;  // the last layout() pass (see afterLayout)
   Node* root_ = nullptr;
-  uint32_t nextId_ = 1;
-  uint32_t* idCounter_ = &nextId_;
+  std::atomic<uint32_t> nextId_{1};
+  std::atomic<uint32_t>* idCounter_ = &nextId_;
   float width_ = 0, height_ = 0, pixelRatio_ = 1;
   bool autoWidth_ = false, autoHeight_ = false;
   bool layoutDirty_ = true, paintDirty_ = true, exactRepaint_ = false;
