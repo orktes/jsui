@@ -56,9 +56,12 @@ pass-through check as the other examples (see
   to managed callbacks, which IL2CPP restricts), and the CPU frame is kept
   between frames so `jsui_render_rgba_incremental` repaints only what changed.
   It is also a Unity native rendering plugin (`UnityPluginLoad`,
-  [native/jsui_unity_metal.mm](native/jsui_unity_metal.mm)) when built with
-  Unity's plugin API headers (`JSUI_UNITY_PLUGIN_API_DIR`, by default the
-  newest editor's `Unity.app/Contents/PluginAPI`) and a Graphite Skia.
+  [native/jsui_unity_metal.mm](native/jsui_unity_metal.mm)) when built on
+  macOS with a Graphite Skia. The few plugin API declarations it uses are in
+  [native/unity_api/jsui_unity_api.h](native/unity_api/jsui_unity_api.h), so
+  no Unity install is needed to build it; `-DJSUI_UNITY_PLUGIN_API_DIR=<an
+  editor's Unity.app/Contents/PluginAPI>` builds against Unity's own headers
+  instead and compiles a check that the two agree.
 * **Rendering** ([JsuiView.cs](package/Runtime/JsuiView.cs)). On Metal, Skia
   Graphite draws the UI straight into a `RenderTexture` on Unity's own
   `MTLDevice` and `MTLCommandQueue`: after `jsui_tick` in `LateUpdate` the
@@ -94,9 +97,16 @@ pass-through check as the other examples (see
 
 ## Using it in your game
 
-Add the package (Package Manager > Install package from disk, or
+Add the package with the native plugin prebuilt. In Package Manager, use
+**+ > Install package from git URL** with
+`https://github.com/orktes/jsui.git#upm` (or `#upm/vX.Y.Z` for a fixed
+version), or **Install package from tarball** with
+`com.orktes.jsui-X.Y.Z.tgz` from the
+[GitHub Releases](https://github.com/orktes/jsui/releases). The prebuilt plugin
+covers macOS (universal, Metal GPU path) and Linux x86_64; Windows isn't
+supported yet. To work on the package itself, use
 `"com.orktes.jsui": "file:<path>/integrations/unity/package"` in
-`Packages/manifest.json`), build the plugin as above, put your bundle in
+`Packages/manifest.json` and build the plugin as above. Then put your bundle in
 `Assets/StreamingAssets/jsui/bundle.js` and add a `JsuiView`:
 
 ```csharp

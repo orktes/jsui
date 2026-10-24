@@ -101,6 +101,8 @@ jobs:
               - 'tools/jsui-viewer/**'
               - 'integrations/godot/CMakeLists.txt'
               - 'integrations/unity/CMakeLists.txt'
+              - 'integrations/unity/package/**'
+              - 'integrations/unreal/Plugins/**'
               - 'scripts/build-skia-desktop.sh'
               - 'scripts/build-skia-ios.sh'
               - '.github/workflows/ci.yml'
@@ -609,6 +611,9 @@ jobs:
         run: |
           scripts/dist/check-shared.sh dist/shared
           nm -gU dist/shared/lib/libjsui.dylib | grep -q ' _jsui_gpu_create_metal$'
+          # The Unity plugin's Metal path (a native rendering plugin; built
+          # against integrations/unity/native/unity_api, no Unity install here).
+          nm -gU dist/unity/jsui_unity.bundle/Contents/MacOS/jsui_unity | grep -q ' _UnityPluginLoad$'
       - name: Viewer smoke (the staged binary)
         run: |
           dist/viewer/jsui-viewer --width 320 --height 200 --frames 10 --screenshot viewer.png web/test/fixtures/bands.js | tee viewer.log
@@ -719,7 +724,10 @@ jobs:
           name: jsui-ios-xcframework
           path: artifacts/jsui-ios-xcframework
       - name: Assemble
-        run: scripts/dist/assemble-release.sh "$(node -p "require('./packages/react/package.json').version")" artifacts release
+        run: |
+          v=$(node -p "require('./packages/react/package.json').version")
+          scripts/dist/assemble-engines.sh "$v" artifacts release upm
+          scripts/dist/assemble-release.sh "$v" artifacts release
       - name: Check the archives
         run: |
           cd release
@@ -729,6 +737,17 @@ jobs:
           unzip -p jsui-godot-*.zip addons/jsui/jsui.gdextension
           for f in *.tar.gz; do tar -tzf "$f" | grep -q '/lib/cmake/jsui/jsuiConfig.cmake$'; done
           unzip -l jsui-*-windows-x64.zip | grep -q 'bin/jsui.dll'
+          tar -tzf com.orktes.jsui-*.tgz | tee unity.txt
+          for f in package.json Plugins/macOS/jsui_unity.bundle/Contents/MacOS/jsui_unity Plugins/macOS/jsui_unity.bundle.meta \
+                   Plugins/Linux/x86_64/libjsui_unity.so Plugins/Linux/x86_64/libjsui_unity.so.meta; do grep -qx "package/$f" unity.txt; done
+          # An immutable package needs a .meta for every entry (the .bundle's insides aside).
+          grep -v '\.meta$' unity.txt | grep -v '^package/$' | grep -v '\.bundle/' | sed 's|/$||' | while read -r e; do
+            grep -qx "$e.meta" unity.txt || { echo "::error::$e has no .meta"; exit 1; }
+          done
+          unzip -l jsui-unreal-*.zip | tee unreal.txt
+          for f in Jsui.uplugin lib/libjsui.dylib lib/libjsui.so lib/jsui.lib bin/jsui.dll bin/icudtl.dat include/jsui/jsui.h; do
+            grep -q "Jsui/\(Source/ThirdParty/JsuiLibrary/\)\?$f\$" unreal.txt
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: jsui-release-preview

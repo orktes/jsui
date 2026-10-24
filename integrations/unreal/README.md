@@ -130,8 +130,12 @@ either path: the engine's frame, not the UI, sets the pace.
 
 ## Using it in your game
 
-Copy `Plugins/Jsui` into your project's `Plugins/` (with the library staged
-into `Source/ThirdParty/JsuiLibrary`), add `"Jsui"` to your module's
+Unzip `jsui-unreal-X.Y.Z.zip` from the
+[GitHub Releases](https://github.com/orktes/jsui/releases) into your project's
+`Plugins/`. It holds the plugin source plus the prebuilt JSUI library for
+macOS (universal), Win64 and Linux x86_64, and Unreal compiles the plugin's
+module. To use this checkout instead, copy `Plugins/Jsui` with the library
+staged by `scripts/stage-lib.sh`. Add `"Jsui"` to your module's
 dependencies, put your bundle in `Content/Jsui/bundle.js` and add
 `+DirectoriesToAlwaysStageAsNonUFS=(Path="Jsui")` to `DefaultGame.ini`'s
 `[/Script/UnrealEd.ProjectPackagingSettings]`. Then:
