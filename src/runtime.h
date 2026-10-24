@@ -10,6 +10,7 @@
 #include "audio/audio.h"
 #include "core/document.h"
 #include "host_buffers.h"
+#include "js/engine.h"
 #include "host_state.h"
 #include "render/host_textures.h"
 #include "include/core/SkRect.h"
@@ -183,6 +184,9 @@ class Runtime {
   // in one call: __jsui_runSurfaces([[rootTag, appKey, propsJson], ...]).
   void flushSurfaces(bool all = false);
   bool bundleRan_ = false;  // the current context evaluated the bundle
+  // The engine this runtime runs its bundle on (JsEngine::nextKind when it
+  // was created; reloads keep it).
+  JsEngine::Kind jsKind_ = JsEngine::Kind::QuickJs;
   void resetEngine();
   // Hands native animation end events / value updates to JS.
   void deliverAnimatedEvents();

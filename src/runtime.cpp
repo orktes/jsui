@@ -73,6 +73,7 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
   input = main().input.get();
   doc.setViewport(float(cfg.width), float(cfg.height), cfg.pixel_ratio > 0 ? cfg.pixel_ratio : 1.f);
   if (cfg.dev_mode) session = std::make_unique<DevSession>(*this);
+  jsKind_ = JsEngine::nextKind;
   resetEngine();
 }
 
@@ -260,7 +261,7 @@ void Runtime::resetEngine() {
   animated->clear();
   for (auto& s : surfaces_) s->doc.clear();
   // Shared state outlives the context (the new bundle reads it as it starts).
-  js = std::make_unique<JsEngine>(*this);
+  js = JsEngine::create(*this, jsKind_);
   redrawAll();
   endCalls(calls, "the UI was reloaded");
 }
