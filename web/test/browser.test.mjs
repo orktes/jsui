@@ -541,6 +541,30 @@ test('bundleSource option and loadSource()', async ({ page }) => {
   assert(near(px, [0, 128, 128, 255]), `bundleSource: ${fmt(px)}`);
 }, {}, { worker: true });
 
+// The bundle's engine (createJsui's `js`): the host's own engine has Intl,
+// QuickJS has none; both see the runtime's globals, not the page's.
+test('js option: QuickJS and the host engine', async ({ page }) => {
+  const src = fs.readFileSync(path.join(WEB, 'test/fixtures/solid.js'), 'utf8') +
+    `;setTimeout(() => __jsui_native.postMessage('engine', JSON.stringify({ intl: typeof Intl,
+      window: typeof window === 'object' && window === globalThis, document: typeof document, process: typeof process,
+      wasm: typeof WebAssembly, raf: typeof requestAnimationFrame })), 50);`;
+  for (const js of ['quickjs', 'host']) {
+    await mount(page, { id: js, jsui: { bundleSource: src, js } });
+    await frames(page, 6);
+    await page.waitForTimeout(100);
+    const r = await page.evaluate((id) => [window.hosts[id].jsEngine, window.hosts[id].messages], js);
+    assert(r[0] === js, `${js}: jsEngine ${r[0]}`);
+    const want = { intl: js === 'host' ? 'object' : 'undefined', window: true, document: 'undefined', process: 'object',
+      wasm: 'undefined', raf: 'function' };
+    assert(JSON.stringify(r[1]) === JSON.stringify([['engine', want]]), `${js}: ${JSON.stringify(r[1])}`);
+    const [px] = await screenPixels(page, '#' + js, [[10, 50]]);
+    assert(near(px, [0, 128, 128, 255]), `${js}: ${fmt(px)}`);
+  }
+  const bad = await page.evaluate((dist) => window.createJsui({ canvas: document.createElement('canvas'), renderer: 'cpu',
+    moduleUrl: new URL(`../${dist}/jsui.js`, location.href), js: 'v8' }).then(() => 'ok', (e) => e.message), DIST);
+  assert(/js must be/.test(bad), `js: 'v8': ${bad}`);
+}, {}, { worker: true });
+
 test('fonts: registerFont, loadFont, unregisterFont, fallbacks, default family', async ({ page }) => {
   await mount(page, { jsui: { bundleUrl: 'fixtures/solid.js' } });
   const r = await page.evaluate(async () => {
