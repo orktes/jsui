@@ -2,7 +2,7 @@
 // (monochrome marks, tinted to the site palette), then the ones in progress.
 // Logos: the Godot mark (Andrea Calabró, CC BY 4.0, used to say JSUI runs in
 // Godot) and the WebAssembly logo (CC0); the other glyphs are generic
-// (raylib, SDL3, sokol and Unity included: their own logos are not used).
+// (raylib, SDL3, sokol, Unity and Unreal included: their own logos are not used).
 import React from 'react';
 import { Image, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import { colors, font, site } from '../../theme.js';
@@ -18,6 +18,7 @@ const TARGETS = [
   { name: 'SDL3', icon: require('../../assets/engines/sdl@2x.png'), href: GITHUB + '/tree/main/integrations/sdl3' },
   { name: 'sokol', icon: require('../../assets/engines/sokol@2x.png'), href: GITHUB + '/tree/main/integrations/sokol' },
   { name: 'Unity', sub: 'C# package', icon: require('../../assets/engines/unity@2x.png'), href: GITHUB + '/tree/main/integrations/unity' },
+  { name: 'Unreal', sub: 'UE5 plugin', icon: require('../../assets/engines/unreal@2x.png'), href: GITHUB + '/tree/main/integrations/unreal' },
   { name: 'Standalone', sub: 'SDL2 viewer', icon: require('../../assets/engines/standalone@2x.png'), href: GITHUB + '/tree/main/tools/jsui-viewer' },
 ];
 const SOON = [];

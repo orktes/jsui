@@ -8,6 +8,7 @@
 | [sdl3](sdl3/README.md) | SDL3 game loop on `SDL_Renderer`; Skia into SDL's own texture on Metal, Vulkan or GL (CPU dirty-rect upload elsewhere) |
 | [sokol](sokol/README.md) | sokol_app + sokol_gfx (GL backend); Skia draws the UI straight into the swapchain framebuffer |
 | [unity](unity/README.md) | Unity 6 package (`com.orktes.jsui`): native plugin over the C API + a `JsuiView` component, with the same example game |
+| [unreal](unreal/README.md) | Unreal Engine 5 plugin: `UJsuiWidget` (UMG) / `SJsuiView` (Slate) over the JSUI shared library, Skia Graphite on the Metal RHI's queue, with the same example game |
 
 ## The engine examples
 
@@ -109,5 +110,8 @@ before `jsui_render_gl*` and re-apply what the engine caches afterwards
 [unity](unity/README.md) is the same game as a Unity project, on a Unity
 package whose native plugin exports the C API to C# (P/Invoke) and whose
 `JsuiView` component does the forwarding, ticking and compositing above.
-Unreal and Bevy would be plugins along the same lines; they are not in the
+[unreal](unreal/README.md) is the same game as an Unreal Engine 5 C++
+project, on a plugin that calls the C API of a prebuilt JSUI shared library
+and whose `UJsuiWidget` does the forwarding (an input preprocessor), ticking
+and compositing. Bevy would be a plugin along the same lines; it is not in the
 tree yet.
