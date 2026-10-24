@@ -2620,8 +2620,53 @@ bool gRecordSkip = true;  // setRecordSkipping
 
 // Adds a rect to a damage region (most rects of a frame lie inside what is
 // already damaged: a node's children inside its own rects).
+// During updateRecords' walk the damage rects are collected and unioned once
+// at its end (flushDamage): one SkRegion::op per rect costs time in the
+// region's size, so a frame with many small changes (300 markers moving: 600
+// rects) was quadratic, ~10 ms a frame in RgnOper. The balanced merge below
+// is n log n. Nothing reads the regions during the walk.
+struct PendingDamage {
+  SkRegion* target;
+  std::vector<SkIRect> rects;
+};
+thread_local std::vector<PendingDamage> tPendingDamage;
+thread_local bool tBatchDamage = false;
+
 void addDamage(SkRegion* d, const SkIRect& r) {
-  if (!r.isEmpty() && !d->contains(r)) d->op(r, SkRegion::kUnion_Op);
+  if (r.isEmpty()) return;
+  if (tBatchDamage) {
+    for (PendingDamage& p : tPendingDamage)
+      if (p.target == d) {
+        p.rects.push_back(r);
+        return;
+      }
+    tPendingDamage.push_back({d, {r}});
+    return;
+  }
+  if (!d->contains(r)) d->op(r, SkRegion::kUnion_Op);
+}
+
+SkRegion unionRects(const SkIRect* r, size_t n) {
+  SkRegion out;
+  if (n <= 8) {
+    for (size_t i = 0; i < n; i++)
+      if (!out.contains(r[i])) out.op(r[i], SkRegion::kUnion_Op);
+    return out;
+  }
+  out = unionRects(r, n / 2);
+  out.op(unionRects(r + n / 2, n - n / 2), SkRegion::kUnion_Op);
+  return out;
+}
+
+void flushDamage() {
+  tBatchDamage = false;
+  for (PendingDamage& p : tPendingDamage) {
+    if (p.rects.empty()) continue;
+    SkRegion u = unionRects(p.rects.data(), p.rects.size());
+    if (p.target->isEmpty()) p.target->swap(u);
+    else p.target->op(u, SkRegion::kUnion_Op);
+  }
+  tPendingDamage.clear();
 }
 
 // Clears the dirty flags of a subtree updateRecords does not walk (hidden,
@@ -3124,6 +3169,43 @@ void noteScrollBlit(Document& doc, const ScrollBlit& b) {
       moved.intersect(b.rect.makeOffset(b.dx, b.dy)) ? int64_t(moved.width()) * moved.height() : 0;
 }
 
+static int64_t rectArea_(const SkIRect& r) { return int64_t(r.width()) * r.height(); }
+
+// The damage as a few rects that cover it (each one scissor rect and one
+// paint pass on the GPU): greedily join the pair whose join adds the least
+// area while there are more than kMaxRects, or while a join adds little
+// (a pass costs a tree walk and the draws it crosses again).
+std::vector<SkIRect> coverRects(const SkRegion& damage) {
+  constexpr size_t kMaxRects = 4, kMaxInput = 48;
+  constexpr int64_t kCheapJoin = 64 * 64;
+  std::vector<SkIRect> rects;
+  for (SkRegion::Iterator it(damage); !it.done(); it.next()) {
+    if (rects.size() == kMaxInput) return {damage.getBounds()};
+    rects.push_back(it.rect());
+  }
+  while (rects.size() > 1) {
+    size_t bi = 0, bj = 1;
+    int64_t best = std::numeric_limits<int64_t>::max();
+    for (size_t i = 0; i < rects.size(); i++)
+      for (size_t j = i + 1; j < rects.size(); j++) {
+        SkIRect u = rects[i];
+        u.join(rects[j]);
+        int64_t cost = rectArea_(u) - rectArea_(rects[i]) - rectArea_(rects[j]);
+        if (cost < best) best = cost, bi = i, bj = j;
+      }
+    if (rects.size() <= kMaxRects && best > kCheapJoin) break;
+    rects[bi].join(rects[bj]);
+    rects.erase(rects.begin() + bj);
+  }
+  // Several passes only when they save a good part of the bounds' area
+  // (passes split the draws: more state changes, less batching).
+  int64_t sum = 0;
+  for (const SkIRect& r : rects) sum += rectArea_(r);
+  if (rects.size() > 1 && sum * 3 > rectArea_(damage.getBounds()) * 2) return {damage.getBounds()};
+  return rects;
+}
+
+
 SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBlit* blit, bool growCurves) {
   RootRecord* root = rootRecord(doc);
   SkRegion damage;
@@ -3155,7 +3237,9 @@ SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBl
   root->passRaster = raster;
   tSkip = &skip;
   tRasterCandidates = raster ? &root->rasterCandidates : nullptr;
+  tBatchDamage = true;
   updateRecords(doc.root(), m, m, screen, imageGen, &damage, &root->curved, &scan);
+  flushDamage();
   tRasterCandidates = nullptr;
   tSkip = nullptr;
   root->nodesUpdated = root->stats.nodesUpdated = skip.visited;
@@ -3197,6 +3281,17 @@ SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBl
     } else {
       damage.op(scan.sub, SkRegion::kUnion_Op);
     }
+  }
+  // A region of many rects (hundreds of small things moving) is replaced by
+  // the few rects that cover it: every draw and clip of the repaint walks
+  // all of its rects (SkRegion::Cliperator, SkAAClip::setRegion), as does
+  // the curve growth below (300 moving markers: 24 ms a frame on the CPU).
+  // Before the growth, so the curves it cuts still grow.
+  constexpr int kMaxDamageRects = 16;
+  if (damage.isComplex() && damage.computeRegionComplexity() > kMaxDamageRects) {
+    SkRegion cover;
+    for (const SkIRect& r : coverRects(damage)) cover.op(r, SkRegion::kUnion_Op);
+    damage.swap(cover);
   }
   // Damage that crosses a curved or diagonal outline (an anti-aliased edge)
   // grows to the whole node, and on to the curved nodes that growth
