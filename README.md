@@ -173,6 +173,15 @@ what the deterministic tools (`jsui-render`, `jsui-record`) and reference tests 
 project. Build it with `-DJSUI_BUILD_GODOT=ON` (it is off by default). See
 [integrations/godot/README.md](integrations/godot/README.md).
 
+## iOS and Android
+
+[integrations/ios](integrations/ios/README.md) is a UIKit app rendering with
+Skia on Metal (`RUN=1 scripts/build-ios.sh` builds it and runs it in the
+simulator). [integrations/android](integrations/android/README.md) is an NDK
+NativeActivity app rendering with Skia on OpenGL ES (`RUN=1
+scripts/build-android.sh` builds the APK and runs it on a device or emulator).
+Both forward touch, hardware keys and gamepads and publish the safe area.
+
 ## raylib, SDL3, sokol and Unity
 
 `integrations/raylib`, `integrations/sdl3` and `integrations/sokol` run one
