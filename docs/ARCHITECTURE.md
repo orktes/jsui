@@ -1805,9 +1805,39 @@ names.
   `JS_FreeValue` / `JS_DupValue` are inlined (quickjs-ng exports them out of
   line, a call per value the interpreter pops) and `===` / `!==` decide
   objects, symbols, booleans, null and undefined inline. `JSUI_QUICKJS_FLAGS`
-  adds compile flags for QuickJS alone (profile-guided optimization with
-  `-fprofile-instr-generate` / `-fprofile-instr-use=` measured 6-9% less JS
-  time on React-heavy scenarios on an M1 Ultra).
+  adds compile flags for QuickJS alone.
+* **QuickJS PGO.** Release binaries compile QuickJS (and only QuickJS) with
+  profile-guided optimization: 6-9% less JS time on React-heavy scenarios
+  (also ones outside the training set) and 2-3% on light ones on an M1 Ultra
+  with Apple clang; -O2 vs -O3 and frame-pointer flags made no difference.
+  On Linux x86-64 (shared cloud cores, so timing is noisy: medians of 10
+  interleaved suite runs) JS time dropped 2-3% with clang 18 and GCC 13
+  alike, and callgrind counts 3-4% (clang) / 8-9% (GCC) fewer instructions
+  per whole frame on `inventory`, `markers-json-100` and `surfaces-props`
+  (`menu`, with almost no JS, is unchanged).
+  `scripts/pgo-quickjs.sh BUILD_DIR [cmake args]` does both stages in one
+  build directory: it configures `-DJSUI_QUICKJS_PGO=generate`, builds an
+  instrumented jsui-bench and jsui-render, trains on jsui-bench `markers`
+  (100, buffer and JSON), `inventory`, `surfaces-props`,
+  `interactions-wheel`, `list` and `packages/react/bench/commit-bench.jsx`
+  (jsui-render), merges the profile (`llvm-profdata merge`, `xcrun
+  llvm-profdata` with Apple clang; GCC keeps its `.gcda` directory) and
+  reconfigures with `-DJSUI_QUICKJS_PGO=use -DJSUI_QUICKJS_PROFILE=...`.
+  Only QuickJS's four C files change flags, so the real build afterwards
+  reuses every other object and the stage costs an instrumented QuickJS, two
+  tool links and about a minute of training. `cmake/QuickJSPGO.cmake`
+  makes every failure soft: a missing profile, one the compiler cannot read
+  (checked with a test compile; another LLVM's format) or no PGO support
+  (MSVC / clang-cl) is a configure warning and a build without PGO; stale
+  or unprofiled functions are not diagnosed (`-Wno-profile-instr-*`; GCC:
+  `-Wno-missing-profile`, `-Wno-error=coverage-mismatch`,
+  `-fprofile-partial-training`, and `-fprofile-prefix-path` so the
+  `.gcda` names do not depend on the build directory). The script itself
+  falls back to a normal configuration with a warning when training or
+  merging fails (`PGO_STRICT=1` makes that an error). No profile is checked
+  in: profiles are tied to the compiler version and the patched quickjs.c,
+  so they are generated where they are used. Dev and test builds leave
+  `JSUI_QUICKJS_PGO` empty. Which release builds use it: docs/RELEASING.md.
 
 ## Paint performance
 
