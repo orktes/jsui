@@ -177,7 +177,9 @@ test('debugger: breakpoints in JSX, scopes, stepping, console, hot updates (nati
     // A hot update is a script of its own, with an inline map to the JSX.
     const hotSeen = c.events.length;
     await writeFile(appFile, APP.replace("'tick '", "'tock '"));
-    const hot = await c.event((m) => m.method === 'Debugger.scriptParsed' && m.params.url.includes('/__jsui/hmr/'), hotSeen, 20000);
+    // (A rebuild that changed no module, e.g. from the watcher seeing the
+    // files written just before startup, is an update with nothing to map.)
+    const hot = await c.event((m) => m.method === 'Debugger.scriptParsed' && m.params.url.includes('/__jsui/hmr/') && m.params.sourceMapURL, hotSeen, 20000);
     assert.match(hot.params.sourceMapURL, /^data:application\/json/);
 
     // DevTools going away resumes the runtime and drops its breakpoints.
