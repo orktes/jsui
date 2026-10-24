@@ -167,12 +167,13 @@
  *   workerLoop?: 'raf'|'main',   // worker mode's frame clock: 'raf' (default) the worker's own
  *                                // requestAnimationFrame, 'main' this thread's rAF posting each
  *                                // frame (used anyway when the worker has none)
- *   js?: 'quickjs'|'host',       // the JS engine the bundle runs on: 'quickjs' (default) QuickJS
- *                                // compiled into jsui.wasm; 'host' this page's / worker's own engine
- *                                // (V8, JavaScriptCore, SpiderMonkey), with the native core still in
- *                                // WASM (docs/ARCHITECTURE.md "Host JS engine"). Needs eval (no CSP
- *                                // without 'unsafe-eval'); falls back to QuickJS, with a warning, on
- *                                // a module built without it. jsui.jsEngine says which one runs.
+ *   js?: 'quickjs'|'host',       // the JS engine the bundle runs on: 'host' (default) this page's /
+ *                                // worker's own engine (V8, JavaScriptCore, SpiderMonkey), with the
+ *                                // native core still in WASM (docs/ARCHITECTURE.md "Host JS engine");
+ *                                // it needs eval, so a CSP without 'unsafe-eval' or a module built
+ *                                // without it runs QuickJS instead (a warning if 'host' was asked
+ *                                // for). 'quickjs': QuickJS compiled into jsui.wasm, as natively.
+ *                                // jsui.jsEngine says which one runs.
  * }} JsuiOptions */
 
 import { SharedWebGPU, WebGPURenderer, requestWebGPU } from './jsui-webgpu.js';
@@ -303,6 +304,16 @@ function internals() {
     corsWarning, taintKey, videoFramesContextLost, watchVideoFrames, hostUrl: import.meta.url, workerName: WORKER_NAME };
 }
 const WORKER_NAME = 'jsui-host';
+
+// Whether this thread may eval (the host JS engine needs it; a CSP without
+// 'unsafe-eval' throws an EvalError).
+function evalAllowed() {
+  try {
+    return (0, eval)('1') === 1;
+  } catch {
+    return false;
+  }
+}
 
 const CPU_MODULE = './dist/jsui.js';
 const GPU_MODULE = './dist-webgl/jsui.js';
@@ -1752,11 +1763,17 @@ class JsuiHost extends CanvasView {
     this._baseUrlPtr = this._bundleUrl ? this._newString(this._bundleUrl) : 0;
     // The JS engine: QuickJS in WASM, or this thread's own (the module's
     // jsui_web_host_js says whether it was built with it).
-    const js = opts.js ?? 'quickjs';
+    // Default: the host engine where it can run (built in, eval allowed).
+    const js = opts.js ?? 'host';
     if (js !== 'quickjs' && js !== 'host') throw new TypeError(`createJsui: js must be 'quickjs' or 'host', got ${js}`);
+    const hostBuilt = !!M._jsui_web_host_js?.();
+    const hostEval = hostBuilt && evalAllowed();
     /** 'quickjs' | 'host': the engine the bundle runs on. */
-    this.jsEngine = js === 'host' && M._jsui_web_host_js?.() ? 'host' : 'quickjs';
-    if (js !== this.jsEngine) console.warn('[jsui] this jsui.wasm has no host JS engine: running the bundle on QuickJS');
+    this.jsEngine = js === 'host' && hostEval ? 'host' : 'quickjs';
+    if (opts.js === 'host' && this.jsEngine !== 'host') {
+      console.warn(hostBuilt ? '[jsui] eval is blocked (Content-Security-Policy without \'unsafe-eval\'): running the bundle on QuickJS'
+                             : '[jsui] this jsui.wasm has no host JS engine: running the bundle on QuickJS');
+    }
     this.rt = M._jsui_web_create(this.hostId, this.width, this.height, this.pixelRatio, opts.devMode ? 1 : 0,
       this._baseUrlPtr, this.audio.enabled ? 1 : 0, this.jsEngine === 'host' ? 1 : 0);
     if (!this.rt) throw new Error('jsui_web_create failed');

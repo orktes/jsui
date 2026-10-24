@@ -1529,10 +1529,15 @@ was `preventDefault()`-ed.
 In the WASM build the bundle (React and the app's code) can run on the JS
 engine of whatever loaded `jsui.wasm`, i.e. V8, JavaScriptCore or
 SpiderMonkey in a page or worker and V8 in Node, instead of QuickJS
-compiled to WASM: `createJsui({ js: 'host' })` on the web,
+compiled to WASM. On the web it is `createJsui`'s default (`js: 'host'`;
+`js: 'quickjs'` opts out); a thread that may not eval (a
+Content-Security-Policy without `'unsafe-eval'`) runs QuickJS instead. In
+the CLI it is opt-in, so headless screenshots match native runtimes:
 `jsui screenshot|inspect|run|dev --headless --js host` and
-`launch({ js: 'host' })` in the CLI (`JSUI_JS=host` makes it the default
-there). Everything else stays in WASM: the document, Yoga, Skia, input,
+`launch({ js: 'host' })` (`JSUI_JS=host` makes it the default there). A
+precompiled bundle (`jsui build`'s default `combo` format) runs its
+embedded source on the host engine; a `bytecode`-only one cannot run there,
+and a `split` one loads its source file. Everything else stays in WASM: the document, Yoga, Skia, input,
 native Animated, host data, fonts, resources and the renderers. Native
 builds keep QuickJS. `jsui.jsEngine` / `app.hostJs` say which engine runs.
 A module built without it (`-DJSUI_HOST_JS=OFF`; on by default in every
@@ -2066,7 +2071,10 @@ host). Scenarios: `interactions`
 (examples), `interactions-wheel` (the same, wheel-scrolling the armory
 list under a still mouse), `list` (2000 rows, one counter), `menu` (native spring on
 hover), `inventory` (500 slots through `useHostState` +
-`jsui_patch_state`), `idle`, and 30 nameplate surfaces: `surfaces-static`,
+`jsui_patch_state`), `idle`, `mount` (the showcase screen of
+`examples/showcase/interactions.jsx` unmounted and mounted again every frame:
+React's mount path, the host config's createInstance / appendChild and
+Animated / Pressable setup), and 30 nameplate surfaces: `surfaces-static`,
 `surfaces-props` (every surface's props change every frame),
 `surfaces-same-props` (pushed unchanged every frame), `surfaces-one-props`
 (one surface's per frame), `surfaces-resize` (every surface resized every
@@ -2093,10 +2101,97 @@ names.
   skips renders whose React props are identical (`mayDiffer`). A style
   array rebuilt with equal contents therefore reaches native (a skipped
   `setProps`), which is cheaper than diffing every changed style in JS.
+  `mayDiffer` answers from `style` first (the prop that changes most) before
+  its for-in over the props, and keeps the props' key count on the instance
+  (`propCount`, -1 when unknown) so the old props are not enumerated again
+  to detect a removed key: for-in is one of QuickJS's dearer operations.
+* **React in the bundle.** Production `jsui build` bundles are tuned for
+  QuickJS, where a JS function call costs far more than in a JIT
+  (`JS_CallInternal` is about half of native self time on React-heavy
+  frames), so the aim is fewer calls and property reads per fiber:
+  * `minifySyntax` is on for production builds (constant folding, dead
+    branches, shorter conditionals): 1-4% fewer instructions per frame and
+    ~3% per commit. Identifier and whitespace minification add nothing
+    measurable, so `--minify` stays opt-in (it also drops React's function
+    names from `JSUI_JS_PROFILE`).
+  * `packages/cli/src/specialize.js` loads react-reconciler's production
+    build for the renderer and patches it at build time against the host
+    config in `packages/react/src/renderer.js` (`hostConfig`): the
+    `supportsMutation` / `supportsHydration` / `supportsPersistence` /
+    `supportsMicrotasks` / `supportsResources` / `supportsSingletons` /
+    `supportsTestSelectors` / `isPrimaryRenderer` reads become constants
+    (esbuild then drops the dead branches), `shouldSetTextContent` is
+    `false`, `getPublicInstance(x)` is `x`, and the fragment-instance calls
+    (our `createFragmentInstance` returns null) are gone. One patch changes
+    behaviour cost, not results: lazy context propagation
+    (`propagateParentContextChanges`) walks a fiber's siblings when a
+    context changes, until it meets one flagged `DidPropagateContext`;
+    React flags only fibers that bailed out, so a freshly mounted fiber
+    under a bailing parent made it re-scan every memo sibling on every
+    frame. The patch also flags the parent when a newly mounted fiber
+    propagates, which is what the walk would conclude anyway (inventory:
+    -8% per frame). Every patch is anchored on the expected number of
+    matches and the specializer is all-or-nothing: if any anchor misses (a
+    new React), the bundle uses the published build unchanged and the build
+    logs why. `JSUI_REACT_PATCHES=0` turns it off.
+    `packages/cli/test/specialize.test.js` checks that every patch applies,
+    that the folded constants match `hostConfig`, and runs a context app
+    (300 memo rows that bail out, deep consumers, a nested provider, commits
+    that keep the value) under both builds and compares every render.
+  * ESM imports of `react` and `react/jsx-runtime` go through a generated
+    facade of plain `export var` bindings (`config.js`, production only)
+    instead of esbuild's `__toESM` copy, whose every export is a getter: a
+    getter call per hook and per JSX element otherwise. `require()` still
+    gets `module.exports`, and names React does not export still build
+    (`export *`). About 1-1.5% per frame and per commit.
+  * In the React layer: `Easing` functions are memoized and marked pure, so
+    the native Animated driver samples each curve once (`sampleCurve`
+    cache: -6.6% on `mount`); animated props and styles are resolved in one
+    walk and the element is built with `jsx()`; `StyleSheet.flatten`
+    allocates no closure; `Text` / `Pressable` check press props directly;
+    host-state patches (`hostData.js` `patchShared`) copy only along the
+    patched members.
+
+  Ir per measured frame (callgrind, `--paint none`, QuickJS GC excluded:
+  where a collection falls in the measured window moves a scenario by
+  several percent) before → after these changes, Linux x86-64:
+
+  | scenario | Ir / frame |
+  | --- | --- |
+  | `mount` | 123.6M → 109.2M (−11.6%) |
+  | `inventory` | 30.7M → 26.9M (−12.4%) |
+  | `markers-buffer-100` | 25.0M → 22.8M (−9.1%) |
+  | `markers-json-100` | 27.4M → 25.1M (−8.2%) |
+  | `surfaces-props` | 26.9M → 24.9M (−7.5%) |
+  | `interactions-wheel` | 2.99M → 2.72M (−9%) |
+  | `list` | 2.45M → 2.32M (−5%) |
+
+  `commit-bench.jsx` (Ir per commit, sections run one by one in jsui-bench):
+  mount −5%, plain re-renders −9%, memo re-renders −7%, Animated ±1%.
+  Layout and allocator effects move such numbers by about ±1%, so compare
+  several scenarios before trusting a small change. Pixels are identical
+  (reference suite and `jsui-bench --dump` on every scenario).
 * **QuickJS.** `cmake/Deps.cmake` compiles a patched copy of quickjs.c:
   `JS_FreeValue` / `JS_DupValue` are inlined (quickjs-ng exports them out of
   line, a call per value the interpreter pops) and `===` / `!==` decide
-  objects, symbols, booleans, null and undefined inline. `JSUI_QUICKJS_FLAGS`
+  objects, symbols, booleans, null, undefined, mismatched types and string
+  pairs inline. Further named patches (each a whole-text replace that is
+  left out with a warning if quickjs.c changed under it, and that
+  `-DJSUI_QUICKJS_PATCHES_OFF="name;..."` leaves out for bisecting):
+  `object-keys` (`Object.keys` of an ordinary object builds its array in one
+  pass over the shape), `own-names` (the same for the string keys of
+  `JS_GetOwnPropertyNames` on non-exotic objects), `for-in` (the iterator
+  keeps its key table instead of building a dictionary object, and skips
+  prototypes with no enumerable string keys without listing them),
+  `define-field` (object literal fields go straight to `add_property`) and
+  `shape-transitions` (adding a property named in the code, by an object
+  literal or `obj.name = v`, keeps the old shape as the parent of the new
+  one up to 32 properties, so literals and constructors built the same way
+  share one hashed shape chain instead of each owning a private shape;
+  computed keys keep upstream's in-place shape update, so maps used as
+  dictionaries do not grow memory). Together they take 5-11% of the
+  instructions out of the React scenarios in `jsui-bench`, for 3 KB of
+  code; none changes the bytecode. `JSUI_QUICKJS_FLAGS`
   adds compile flags for QuickJS alone.
 * **QuickJS PGO.** Release binaries compile QuickJS (and only QuickJS) with
   profile-guided optimization: 6-9% less JS time on React-heavy scenarios

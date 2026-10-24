@@ -110,6 +110,33 @@ function share(prev, next) {
   return next;
 }
 
+// mergePatch(target, patch) with share(): only the members the patch names
+// are visited; a member whose patched value is deep-equal to the old one
+// keeps the old one, and an object none of whose members changed is
+// returned as it was (so React.memo consumers of it skip work).
+function patchShared(target, patch) {
+  if (!isPlainObject(patch)) return share(target, patch);
+  if (!isPlainObject(target)) return mergePatch(target, patch);
+  let out = null;
+  for (const k of Object.keys(patch)) {
+    const v = patch[k];
+    const has = Object.prototype.hasOwnProperty.call(target, k);
+    if (v === null) {
+      if (has) {
+        if (!out) out = Object.assign({}, target);
+        delete out[k];
+      }
+      continue;
+    }
+    const nv = has ? patchShared(target[k], v) : mergePatch(undefined, v);
+    if (!has || nv !== target[k]) {
+      if (!out) out = Object.assign({}, target);
+      out[k] = nv;
+    }
+  }
+  return out || target;
+}
+
 // Values are shared between every reader: mutating one would silently
 // diverge from the runtime's copy, so development builds freeze them.
 function freeze(v) {
@@ -142,13 +169,15 @@ function getValue(key) {
   // the whole document (a big inventory changing one slot per frame).
   const patches = entry && entry.value !== undefined && nativePatches ? native.statePatches(key, entry.version) : undefined;
   if (patches) {
+    // Patched along the patch's paths only: the rest keeps its identity
+    // without walking the whole value (share() is O(value) per change).
     value = entry.value;
-    for (let i = 0; i < patches.length; i++) value = mergePatch(value, parse(key, patches[i]));
+    for (let i = 0; i < patches.length; i++) value = patchShared(value, parse(key, patches[i]));
   } else {
     const json = readJson(key);
     value = json === undefined ? undefined : parse(key, json);
+    if (entry) value = share(entry.value, value);
   }
-  if (entry) value = share(entry.value, value);
   if (DEV) freeze(value);
   cache.set(key, { version, value });
   return value;

@@ -18,8 +18,6 @@ export const View = 'View';
 /** True inside a <Text> (RN's TextAncestorContext). */
 export const TextAncestorContext = createContext(false);
 
-const TEXT_PRESS = ['onPress', 'onPressIn', 'onPressOut', 'onLongPress'];
-
 function PressableText(props) {
   const [handlers] = usePress(props, false);
   const rest = omit(props, PRESS_PROPS);
@@ -29,9 +27,7 @@ function PressableText(props) {
 }
 
 export function Text(props) {
-  for (let i = 0; i < TEXT_PRESS.length; i++) {
-    if (props[TEXT_PRESS[i]]) return jsx(PressableText, props);
-  }
+  if (props.onPress || props.onPressIn || props.onPressOut || props.onLongPress) return jsx(PressableText, props);
   return jsx('Text', props);
 }
 Text.displayName = 'Text';

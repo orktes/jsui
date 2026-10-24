@@ -1,8 +1,8 @@
 # @orktes/jsui-web
 
 Runs the JSUI game-UI runtime (QuickJS + Yoga + Skia, compiled to
-WebAssembly) on a `<canvas>`, with the app's JS on QuickJS or on the page's
-own engine (`js: 'host'`). Pair it with `@orktes/jsui-cli`, which bundles your
+WebAssembly) on a `<canvas>`, with the app's JS on the page's own engine
+(the default) or on QuickJS (`js: 'quickjs'`). Pair it with `@orktes/jsui-cli`, which bundles your
 React Native–style app into the single script this host loads.
 
 ```sh
@@ -254,17 +254,18 @@ jsui.unregisterFont('Display');
 
 ## The page's own JS engine
 
-By default the bundle runs on QuickJS, compiled into `jsui.wasm` next to the
-rest of the runtime. `js: 'host'` runs it on the JS engine of the page (or of
-the worker, in worker mode) instead: V8, JavaScriptCore or SpiderMonkey,
-JIT-compiled. In the jsui-bench scenarios a steady-state frame spends 6 to 17
+By default the bundle runs on the JS engine of the page (or of the worker,
+in worker mode): V8, JavaScriptCore or SpiderMonkey, JIT-compiled.
+`js: 'quickjs'` runs it on QuickJS instead, compiled into `jsui.wasm` next to
+the rest of the runtime, as native builds do. A page whose
+Content-Security-Policy blocks `eval` gets QuickJS automatically. In the jsui-bench scenarios a steady-state frame spends 6 to 17
 times less time in JS; a first mount, mostly cold code, gains 1.1 to 1.4x.
 Layout, painting, input, native Animated and host data stay in WASM, and the
 app sees the same API and globals.
 
 ```js
-const jsui = await createJsui({ canvas, bundleUrl: './bundle.js', js: 'host' });
-jsui.jsEngine; // 'host' ('quickjs' when the module was built without it)
+const jsui = await createJsui({ canvas, bundleUrl: './bundle.js' });
+jsui.jsEngine; // 'host' ('quickjs' when eval is blocked or the module was built without it)
 ```
 
 The bundle still gets the runtime's own globals: `setTimeout`,
@@ -277,8 +278,10 @@ runtime's clock (`jsui.frame(now)`), and the page's DOM, `window` and
   within it. `queueMicrotask` keeps QuickJS's timing.
 - There is no watchdog or JS memory limit: a script stuck in a loop blocks
   its thread like any other script.
-- The page must allow `eval` (a Content-Security-Policy without
-  `'unsafe-eval'` blocks it).
+- It needs `eval`: under a Content-Security-Policy without
+  `'unsafe-eval'` the runtime falls back to QuickJS.
+- Ship bundles as `jsui build --format source` (or `combo`, whose QuickJS
+  bytecode the host engine skips; `bytecode`-only bundles can't run there).
 - `Intl` is the browser's (QuickJS has none).
 
 The CLI takes the same choice: `jsui screenshot|inspect|run|dev --headless
