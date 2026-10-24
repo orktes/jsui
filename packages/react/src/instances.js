@@ -110,6 +110,11 @@ export function nativePropsChanged(a, b) {
 // for another handler) cannot change what native sees, so most re-renders
 // skip building and diffing native props entirely.
 function mayDiffer(a, b) {
+  // The style is the prop that changes most (a new array or object per
+  // render): answer from it before paying for a for-in over the props.
+  const sb = b.style;
+  const sa = a.style;
+  if (sb !== sa && !(typeof sb === 'function' && typeof sa === 'function')) return true;
   let n = 0;
   for (const k in b) {
     n++;
