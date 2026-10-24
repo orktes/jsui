@@ -8,6 +8,7 @@
 // back to the JS driver, which also runs outside React.
 
 import { native } from '../native.js';
+import { isPureEasing } from './Easing.js';
 
 const g = globalThis;
 const api = native && native.animated && typeof native.animated.createNode === 'function' ? native.animated : null;
@@ -147,10 +148,28 @@ export function validateTransform(property) {
   }
 }
 
-/** Samples an easing function on [0, 1] (the native side interpolates linearly between samples). */
+// Easing function (made by Easing, so pure) -> Map(count -> samples).
+const curves = new WeakMap();
+
+/**
+ * Samples an easing function on [0, 1] (the native side interpolates
+ * linearly between samples). Samples of Easing's own functions are cached
+ * and shared: the result must not be modified.
+ */
 export function sampleCurve(fn, count) {
+  const cacheable = isPureEasing(fn);
+  let byCount;
+  if (cacheable) {
+    byCount = curves.get(fn);
+    const hit = byCount && byCount.get(count);
+    if (hit) return hit;
+  }
   const out = new Array(count);
   for (let i = 0; i < count; i++) out[i] = fn(i / (count - 1));
+  if (cacheable) {
+    if (!byCount) curves.set(fn, (byCount = new Map()));
+    byCount.set(count, out);
+  }
   return out;
 }
 
