@@ -4,6 +4,7 @@
 #include <optional>
 
 #include "core/document.h"
+#include "core/state_style.h"
 #include "render/image_node.h"
 #include "render/lottie.h"
 #include "render/shader_view.h"
@@ -157,6 +158,60 @@ struct HitShape {
 // Paint-only updates (opacity, transform, colors, shadows, ...) - e.g. every
 // frame of an Animated transform - therefore never re-run Yoga.
 void Node::setProps(const Value& props) {
+  if (stateStyles || wantsStateStyles(props)) {
+    // React's style is the base; props_ gets it with the state overlays.
+    if (stateStyles && yoga_ && stateStyles->raw.equals(props)) {
+      if (doc_) {
+        doc_->perf.counters.setProps++;
+        doc_->perf.counters.setPropsSkipped++;
+      }
+      return;
+    }
+    if (!wantsStateStyles(props)) {
+      stateStyles.reset();
+      applyProps(props);
+      return;
+    }
+    if (!stateStyles) {
+      stateStyles = std::make_unique<StateStyles>();
+      if (doc_) doc_->stateNodes.push_back(id_);
+    }
+    parseStateStyles(props, stateStyles.get());
+    if (doc_ && !stateStyles->interaction.empty()) doc_->interactionNodes[stateStyles->interaction] = id_;
+    Value eff = props;
+    Value style = blendStateStyle(*stateStyles);
+    if (style.isNull()) eff.mutableObject().erase("style");
+    else eff.mutableObject().insert_or_assign("style", std::move(style));
+    applyProps(eff);
+    return;
+  }
+  applyProps(props);
+}
+
+void Node::setHidden(bool hidden) {
+  StateStyles* s = stateStyles.get();
+  if (!s || s->hidden == hidden) return;
+  s->hidden = hidden;
+  bool t[kStateSlots];
+  std::copy(s->target, s->target + kStateSlots, t);
+  t[kHidden] = hidden;
+  bool moving = false;
+  if (stepStateWeights(*s, t, doc_ ? doc_->now : 0, &moving)) {
+    applyStateStyles();
+    if (doc_ && !s->interaction.empty()) doc_->interactionsMoved = true;
+  }
+  if (moving && doc_) doc_->statesKick = true;
+}
+
+bool Node::applyStateStyles() {
+  if (!stateStyles || !stateStyles->hasOverlays()) return false;
+  stateBlending_ = true;
+  bool r = patchStyle(blendStateKeys(*stateStyles));
+  stateBlending_ = false;
+  return r;
+}
+
+void Node::applyProps(const Value& props) {
   // React re-renders often send identical props: nothing to do (and nothing
   // to repaint).
   if (doc_) {
@@ -254,6 +309,28 @@ const uint32_t kTextGroup = paintStyleGroup("color");
 }  // namespace
 
 bool Node::patchStyle(const Value::Object& partial) {
+  if (stateStyles && stateStyles->hasOverlays() && !stateBlending_) {
+    // A write (native Animated, setNativeProps) to a key a state overlays:
+    // it is the new base, and the state still blends over it.
+    StateStyles& s = *stateStyles;
+    bool overlaid = false;
+    for (auto& [k, v] : partial)
+      if (std::find(s.keys.begin(), s.keys.end(), k) != s.keys.end()) overlaid = true;
+    if (overlaid) {
+      Value::Object out = partial;
+      Value::Object& base = s.base.mutableObject();
+      for (auto& [k, v] : out) {
+        if (std::find(s.keys.begin(), s.keys.end(), k) == s.keys.end()) continue;
+        if (v.isNull()) base.erase(k);
+        else base.insert_or_assign(k, v);
+        v = blendKey(s, k);
+      }
+      stateBlending_ = true;
+      bool r = patchStyle(out);
+      stateBlending_ = false;
+      return r;
+    }
+  }
   // A style write native Animated did not make (see Perf::propsEpoch).
   if (doc_) doc_->perf.propsEpoch++;
   const Value& cur = props_[kStyleKey];
@@ -277,7 +354,7 @@ bool Node::patchStyle(const Value::Object& partial) {
       else style.insert_or_assign(k, v);
     }
     props.insert_or_assign(kStyleKey, Value(std::move(style)));
-    setProps(Value(std::move(props)));
+    applyProps(Value(std::move(props)));  // not setProps: state styles keep React's props as their base
     return true;
   }
   doc_->perf.counters.setProps++;
@@ -293,8 +370,9 @@ bool Node::patchStyle(const Value::Object& partial) {
 
 bool Node::patchStyle(const StyleWrite* writes, size_t count) {
   // A layout key that changes takes the general path (full restyle,
-  // relayout); those are compared before anything is touched.
-  bool general = !yoga_ || !doc_;
+  // relayout); those are compared before anything is touched. So does a
+  // write to a key a state style overlays (the state blends over it).
+  bool general = !yoga_ || !doc_ || (stateStyles && stateStyles->hasOverlays());
   if (!general) {
     const Value::Object& cur = props_[kStyleKey].asObject();
     for (size_t i = 0; i < count && !general; i++) {

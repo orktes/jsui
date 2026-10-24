@@ -19,7 +19,7 @@
 // game picks the unit under a click with its own raycast. The pause menu's
 // backdrop claims presses (onStartShouldSetResponder), so nothing reaches
 // the game behind it.
-import React, { useEffect, useRef } from 'react';
+import React, { memo, useEffect, useRef } from 'react';
 import {
   Animated,
   AppRegistry,
@@ -76,7 +76,7 @@ function Nameplate({ index, selected }) {
   );
 }
 
-function Nameplates({ selected }) {
+const Nameplates = memo(function Nameplates({ selected }) {
   const count = useHostBufferSelector('entities', countOf, 0);
   const plates = [];
   // The selected plate last: drawn over the others.
@@ -87,16 +87,16 @@ function Nameplates({ selected }) {
       {plates}
     </View>
   );
-}
+});
 
-function Stat({ label, value, color }) {
+const Stat = memo(function Stat({ label, value, color }) {
   return (
     <View style={styles.stat}>
       <Text style={styles.statLabel}>{label}</Text>
       <Text style={[styles.statValue, color && { color }]}>{value}</Text>
     </View>
   );
-}
+});
 
 function EnginePanel({ game }) {
   const passed = game.passed || {};
@@ -127,7 +127,7 @@ function EnginePanel({ game }) {
   );
 }
 
-function Selection({ index }) {
+const Selection = memo(function Selection({ index }) {
   if (index < 0) return <Text style={styles.selectionNone}>None · click a unit</Text>;
   const c = hueColor(index);
   return (
@@ -136,7 +136,7 @@ function Selection({ index }) {
       <Text style={[styles.selectionName, { color: c }]}>{unitName(index)}</Text>
     </View>
   );
-}
+});
 
 function ActionButton({ label, hint, onPress, accent, innerRef, onLayout, autoFocus }) {
   return (
@@ -157,7 +157,7 @@ function ActionButton({ label, hint, onPress, accent, innerRef, onLayout, autoFo
   );
 }
 
-function ActionBar({ game }) {
+const ActionBar = memo(function ActionBar({ paused }) {
   const spawnRef = useRef(null);
   const reportAnchors = () =>
     spawnRef.current?.measureInWindow((x, y, width, height) =>
@@ -176,16 +176,16 @@ function ActionBar({ game }) {
       <ActionButton label="Spawn ×10" accent={colors.gold} onPress={() => Host.postMessage('game:spawn', { count: 10 })} />
       <ActionButton label="Clear" accent={colors.red} onPress={() => Host.postMessage('game:clear', {})} />
       <ActionButton
-        label={game.paused ? 'Resume' : 'Pause'}
+        label={paused ? 'Resume' : 'Pause'}
         hint="Esc / Start"
         accent={colors.cyan}
-        onPress={() => Host.postMessage('game:pause', { paused: !game.paused })}
+        onPress={() => Host.postMessage('game:pause', { paused: !paused })}
       />
     </View>
   );
-}
+});
 
-function Hints() {
+const Hints = memo(function Hints() {
   return (
     <View pointerEvents="none" style={styles.hints}>
       <Text style={styles.hintText}>
@@ -193,14 +193,14 @@ function Hints() {
       </Text>
     </View>
   );
-}
+});
 
-function PauseMenu({ game }) {
+const PauseMenu = memo(function PauseMenu({ paused, engine }) {
   const t = useRef(new Animated.Value(0)).current;
   useEffect(() => {
-    Animated.spring(t, { toValue: game.paused ? 1 : 0, stiffness: 240, damping: 22, useNativeDriver: true }).start();
-  }, [game.paused]);
-  if (!game.paused) return null;
+    Animated.spring(t, { toValue: paused ? 1 : 0, stiffness: 240, damping: 22, useNativeDriver: true }).start();
+  }, [paused]);
+  if (!paused) return null;
   return (
     // Claims presses: nothing behind the menu reaches the game while paused.
     <View style={styles.backdrop} onStartShouldSetResponder={() => true}>
@@ -210,7 +210,7 @@ function PauseMenu({ game }) {
           { opacity: t, transform: [{ scale: t.interpolate({ inputRange: [0, 1], outputRange: [0.92, 1] }) }] },
         ]}
       >
-        <Text style={styles.menuEyebrow}>{(game.engine || 'host').toUpperCase()}</Text>
+        <Text style={styles.menuEyebrow}>{(engine || 'host').toUpperCase()}</Text>
         <Text style={styles.menuTitle}>Paused</Text>
         <Text style={styles.menuBody}>
           The game loop keeps rendering; the simulation is stopped. Input over the menu stays in the UI.
@@ -227,7 +227,7 @@ function PauseMenu({ game }) {
       </Animated.View>
     </View>
   );
-}
+});
 
 function App() {
   const game = useHostState('game', {});
@@ -242,8 +242,8 @@ function App() {
       <Nameplates selected={selected} />
       <EnginePanel game={game} />
       <Hints />
-      <ActionBar game={game} />
-      <PauseMenu game={game} />
+      <ActionBar paused={!!game.paused} />
+      <PauseMenu paused={!!game.paused} engine={game.engine} />
     </View>
   );
 }

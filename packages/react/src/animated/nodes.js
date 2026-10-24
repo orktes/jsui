@@ -14,6 +14,9 @@ import {
   sampleCurve,
 } from './NativeAnimatedHelper.js';
 import { HostBuffer } from '../hostBuffer.js';
+import { HostState } from '../hostData.js';
+import { now, requestFrame, cancelFrame } from '../native.js';
+import { compileExpression, evaluateExpression, ExpressionError } from './expression.js';
 
 let nextListenerId = 1;
 
@@ -656,4 +659,316 @@ export function diffClamp(a, min, max) {
     value = Math.min(Math.max(value + diff, min), max);
     return value;
   }, () => ({ type: 'diffclamp', min, max, last, value }));
+}
+
+// Animated.derive(inputs, fn): fn's body compiled to an expression program
+// (expression.js). Native when any input is (the runtime evaluates it every
+// frame: no JS, no lag); otherwise the JS driver runs the same program. A
+// function outside the expression subset still works with the JS driver
+// (fn is called) but cannot go native: making it native throws.
+const compiledBySource = new Map();
+
+/** Animated.expr(fn): an expression function kept for Animated.derive(inputs, expr). */
+export class AnimatedExpression {
+  constructor(fn, meta) {
+    if (typeof fn !== 'function') throw new TypeError('Animated.expr(fn): fn must be a function');
+    this.fn = fn;
+    this.meta = meta;
+  }
+}  // source -> {code, slots, free} (scope-free programs)
+
+export class AnimatedDerived extends AnimatedNode {
+  constructor(inputs, fn, meta) {
+    super();
+    if (!Array.isArray(inputs)) inputs = [inputs];
+    if (fn instanceof AnimatedExpression) {
+      meta = fn.meta;
+      fn = fn.fn;
+    }
+    if (typeof fn !== 'function') throw new TypeError('Animated.derive(inputs, fn): fn must be a function or an Animated.expr()');
+    this._fn = fn;
+    let inputNodes = inputs.map((v) => (v instanceof AnimatedNode ? v : new AnimatedValue(+v || 0)));
+    this._program = null;
+    this._error = null;
+    const source = meta && typeof meta.source === 'string' ? meta.source : Function.prototype.toString.call(fn);
+    if (/\{\s*\[native code\]\s*\}\s*$/.test(source)) {
+      this._error = 'its source is not available (build the bundle with jsui build, which keeps it)';
+    } else {
+      try {
+        const scope = meta && meta.scope;
+        let prog = !scope ? compiledBySource.get(source) : null;
+        if (!prog || prog.inputCount !== inputNodes.length) {
+          prog = compileExpression(source, inputNodes.length, scope);
+          prog.inputCount = inputNodes.length;
+          if (!scope && prog.inputs.length === 0) compiledBySource.set(source, prog);
+        }
+        this._program = prog;
+        inputNodes = inputNodes.concat(prog.inputs);
+      } catch (e) {
+        if (!(e instanceof ExpressionError)) throw e;
+        this._error = e.message;
+      }
+    }
+    this._inputs = inputNodes;
+    this._values = new Array(inputNodes.length);
+    if (this._inputs.some((n) => n.__isNative())) this.__makeNative();
+  }
+  __getInputs() {
+    return this._inputs;
+  }
+  __getValue() {
+    const vals = this._values;
+    for (let i = 0; i < vals.length; i++) vals[i] = this._inputs[i].__getValue();
+    if (this._program) return evaluateExpression(this._program.code, vals, this._program.slots);
+    const v = +this._fn(...vals.slice(0, vals.length));
+    return v === v ? v : 0;
+  }
+  __makeNative() {
+    if (!this._program && NativeAnimatedAPI) {
+      throw new Error(`Animated.derive: this function cannot run natively: ${this._error}`);
+    }
+    super.__makeNative();
+  }
+  __getNativeConfig() {
+    return {
+      type: 'expression',
+      input: this._inputs.map((n) => n.__getNativeTag()),
+      code: this._program.code,
+      slots: this._program.slots,
+    };
+  }
+  __attach() {
+    for (const n of this._inputs) n.__addChild(this);
+  }
+  __detach() {
+    for (const n of this._inputs) n.__removeChild(this);
+    this.__dropNative();
+  }
+}
+
+// Animated.clock(): the frame clock in seconds. Native whenever the native
+// module is there (the runtime advances it every frame while something
+// uses it); with the JS driver it ticks on requestAnimationFrame.
+export class AnimatedClock extends AnimatedNode {
+  constructor() {
+    super();
+    this._raf = null;
+    if (NativeAnimatedAPI) this._isNative = true;
+  }
+  __getValue() {
+    return now() / 1000;
+  }
+  __getNativeConfig() {
+    return { type: 'clock' };
+  }
+  __attach() {
+    if (this._isNative) return;
+    const loop = () => {
+      this._raf = requestFrame(loop);
+      batch(() => this.__changed());
+    };
+    this._raf = requestFrame(loop);
+  }
+  __detach() {
+    if (this._raf != null) cancelFrame(this._raf);
+    this._raf = null;
+    this.__dropNative();
+  }
+}
+
+// One state of an element's interaction (useInteraction): 0..1, eased by
+// the element's `transition`, computed by the runtime from input
+// (core/state_style.h). Native only: a JS-driven consumer sees 0.
+export class AnimatedInteraction extends AnimatedNode {
+  constructor(key, state, instant) {
+    super();
+    this._key = key;
+    this._state = state;
+    this._instant = !!instant;
+    if (NativeAnimatedAPI) this._isNative = true;
+  }
+  __getValue() {
+    return 0;
+  }
+  __getNativeConfig() {
+    return { type: 'interaction', key: this._key, state: this._state, instant: this._instant };
+  }
+  __detach() {
+    this.__dropNative();
+  }
+}
+
+let interactionKeys = 0;
+
+/**
+ * An element's interaction state as native Animated values: pass it as the
+ * `interaction` prop of a host element (View, Pressable, ...) and use
+ * `.hovered`, `.pressed`, `.focused`, `.focusVisible`, `.disabled` (0..1,
+ * following that element's `transition`) in native-driven styles,
+ * interpolations or Animated.derive. Only the `key` crosses the bridge.
+ */
+export class Interaction {
+  constructor() {
+    this.key = 'ix' + ++interactionKeys;
+    Object.defineProperty(this, '_values', { value: {}, enumerable: false });
+    Object.defineProperty(this, '_instant', { value: null, writable: true, enumerable: false });
+  }
+  _value(state, instant) {
+    const k = instant ? state + '!' : state;
+    return this._values[k] || (this._values[k] = new AnimatedInteraction(this.key, state, instant));
+  }
+  /** The states themselves, 0 or 1 the frame they change (no transition). */
+  get instant() {
+    if (!this._instant) {
+      const ix = this;
+      this._instant = {
+        get hovered() { return ix._value('hovered', true); },
+        get pressed() { return ix._value('pressed', true); },
+        get focused() { return ix._value('focused', true); },
+        get focusVisible() { return ix._value('focusVisible', true); },
+        get disabled() { return ix._value('disabled', true); },
+      };
+    }
+    return this._instant;
+  }
+  get hovered() {
+    return this._value('hovered');
+  }
+  get pressed() {
+    return this._value('pressed');
+  }
+  get focused() {
+    return this._value('focused');
+  }
+  get focusVisible() {
+    return this._value('focusVisible');
+  }
+  get disabled() {
+    return this._value('disabled');
+  }
+}
+
+// Animated.hostState(key, path) / useHostStateBind: a value inside shared
+// host state (jsui_set_state), e.g. ('player', 'health.current'). Native:
+// the runtime re-reads it the moment the host changes the key, before any
+// JS runs. Numbers as is, booleans as 1 / 0, strings (for Animated.Text's
+// `text`) as is, anything else 0.
+function readPath(value, path) {
+  let v = value;
+  for (let i = 0; i < path.length && v != null; i++) v = typeof v === 'object' ? v[path[i]] : undefined;
+  if (typeof v === 'number') return v === v ? v : 0;
+  if (typeof v === 'boolean') return v ? 1 : 0;
+  if (typeof v === 'string') return v;
+  return 0;
+}
+
+export class AnimatedHostState extends AnimatedNode {
+  constructor(key, path) {
+    super();
+    this._key = String(key);
+    this._path = path == null || path === '' ? [] : Array.isArray(path) ? path.map(String) : String(path).split('.');
+    this._sub = null;
+    if (NativeAnimatedAPI) this._isNative = true;
+  }
+  __getValue() {
+    return readPath(HostState.get(this._key), this._path);
+  }
+  __getNativeConfig() {
+    return { type: 'hostState', key: this._key, path: this._path };
+  }
+  __attach() {
+    if (!this._isNative) this._sub = HostState.subscribe(this._key, () => batch(() => this.__changed()));
+  }
+  __detach() {
+    if (this._sub) this._sub();
+    this._sub = null;
+    this.__dropNative();
+  }
+}
+
+// Animated.format(node, {decimals, grouping, prefix, suffix, minDigits}): a
+// number as text, for Animated.Text's `text` prop. Native with its input
+// (the runtime formats it and sets the text without JS); the C++ twin is
+// NativeAnimated::formatNumber.
+// time: 'h:mm:ss' | 'mm:ss' | ...: whole seconds (floored, at least 0) as
+// h / m / s fields; a doubled letter pads to two digits. Without an h
+// field the minutes are the total minutes, without m the seconds the total.
+function formatTime(v, pattern) {
+  const total = isFinite(v) && v > 0 ? Math.floor(v) : 0;
+  const hasH = pattern.indexOf('h') >= 0, hasM = pattern.indexOf('m') >= 0;
+  const f = { h: Math.floor(total / 3600), m: hasH ? Math.floor(total / 60) % 60 : Math.floor(total / 60), s: hasM ? total % 60 : total };
+  let out = '';
+  for (let i = 0; i < pattern.length; ) {
+    const c = pattern[i];
+    if (c === 'h' || c === 'm' || c === 's') {
+      let j = i;
+      while (j < pattern.length && pattern[j] === c) j++;
+      const d = String(f[c]);
+      out += d.length < j - i ? '0'.repeat(j - i - d.length) + d : d;
+      i = j;
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out;
+}
+
+export function formatNumber(v, o) {
+  const prefix = o.prefix || '', suffix = o.suffix || '';
+  if (typeof o.time === 'string' && o.time) return prefix + formatTime(v, o.time) + suffix;
+  if (!isFinite(v)) return prefix + String(v) + suffix;
+  const decimals = typeof o.decimals === 'number' ? Math.max(-1, Math.min(20, Math.trunc(o.decimals))) : -1;
+  let digits;
+  if (decimals < 0) {
+    digits = String(v === 0 ? 0 : v);
+  } else {
+    const scale = 10 ** decimals;
+    const r = Math.round(Math.abs(v) * scale) / scale;
+    digits = (v < 0 && r !== 0 ? '-' : '') + r.toFixed(decimals);
+  }
+  const neg = digits[0] === '-';
+  const body = neg ? digits.slice(1) : digits;
+  const dot = body.indexOf('.');
+  let int = dot < 0 ? body : body.slice(0, dot);
+  const minDigits = Math.max(0, Math.min(40, Math.trunc(o.minDigits || 0)));
+  if (int.length < minDigits) int = '0'.repeat(minDigits - int.length) + int;
+  if (o.grouping && int.indexOf('e') < 0) int = int.replace(/\B(?=(\d{3})+(?!\d))/g, o.grouping);
+  return prefix + (neg ? '-' : '') + int + (dot < 0 ? '' : body.slice(dot)) + suffix;
+}
+
+export class AnimatedFormat extends AnimatedNode {
+  constructor(input, options) {
+    super();
+    this._input = input instanceof AnimatedNode ? input : new AnimatedValue(+input || 0);
+    this._options = Object.assign({}, options);
+    if (this._input.__isNative()) this.__makeNative();
+  }
+  __getInputs() {
+    return [this._input];
+  }
+  __getValue() {
+    const v = this._input.__getValue();
+    return formatNumber(typeof v === 'number' ? v : +v, this._options);
+  }
+  __getNativeConfig() {
+    const o = this._options;
+    return {
+      type: 'format',
+      input: this._input.__getNativeTag(),
+      decimals: typeof o.decimals === 'number' ? o.decimals : -1,
+      grouping: o.grouping || '',
+      prefix: o.prefix || '',
+      suffix: o.suffix || '',
+      minDigits: o.minDigits || 0,
+      time: typeof o.time === 'string' ? o.time : '',
+    };
+  }
+  __attach() {
+    this._input.__addChild(this);
+  }
+  __detach() {
+    this._input.__removeChild(this);
+    this.__dropNative();
+  }
 }

@@ -163,49 +163,47 @@ const AbilitySlot = memo(function AbilitySlot({ a, index, sweep, secs, ready, us
   const glow = fx.glow;
   const isUlt = a.ultimate;
   return (
-    <Pressable focusable={false} onPressIn={() => onUse(index, 'mouse')} style={{ cursor: 'pointer' }}>
-      {({ hovered }) => (
-        <Animated.View
-          style={[
-            styles.slot,
-            a.proc && ready && styles.slotReady,
-            isUlt && styles.slotUlt,
-            isUlt && charge >= 1 && styles.slotUltReady,
-            hovered && !isUlt && styles.slotHover,
-            { transform: [{ scale: fx.scale }, { translateX: fx.shake }] },
-          ]}
-        >
-          {isUlt ? (
-            <Animated.View
-              style={[
-                styles.ultFill,
-                { transform: [{ translateY: fx.charge.interpolate({ inputRange: [0, 1], outputRange: [66, 0] }) }] },
-              ]}
-            />
-          ) : null}
-          <Image source={a.icon} style={[styles.slotIcon, !usable && !isUlt && { opacity: 0.55 }]} />
-          {!isUlt ? <Sweep p={sweep} /> : null}
-          {secs ? (
-            <View style={styles.cdTextWrap} pointerEvents="none">
-              <Text style={styles.cdText}>{secs}</Text>
-            </View>
-          ) : null}
-          {count != null ? <Text style={styles.count}>{count}</Text> : null}
-          {isUlt && charge < 1 ? <Text style={styles.ultPct}>{Math.floor(charge * 100)}%</Text> : null}
-          <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { borderRadius: isUlt ? 33 : 8, backgroundColor: '#fff', opacity: fx.flash }]} />
-          {isUlt ? null : (
-            <View style={[styles.keycap, padMode && styles.keycapPad]}>
-              <Text style={[styles.keyText, padMode && { color: PAD_COLORS[a.pad] || colors.textDim }]}>{padMode ? a.pad : a.key}</Text>
-            </View>
-          )}
-          {isUlt ? (
-            <View style={[styles.keycap, styles.keycapUlt, padMode && styles.keycapPad]}>
-              <Text style={styles.keyText}>{padMode ? a.pad : a.key}</Text>
-            </View>
-          ) : null}
-          {a.proc ? <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.procGlow, { opacity: ready ? glow : 0 }]} /> : null}
-        </Animated.View>
-      )}
+    <Pressable focusable={false} onPressIn={() => onUse(index, 'mouse')} group style={{ cursor: 'pointer' }}>
+      <Animated.View
+        style={[
+          styles.slot,
+          a.proc && ready && styles.slotReady,
+          isUlt && styles.slotUlt,
+          isUlt && charge >= 1 && styles.slotUltReady,
+          { transform: [{ scale: fx.scale }, { translateX: fx.shake }] },
+        ]}
+        groupHoveredStyle={isUlt ? undefined : styles.slotHover}
+      >
+        {isUlt ? (
+          <Animated.View
+            style={[
+              styles.ultFill,
+              { transform: [{ translateY: fx.charge.interpolate({ inputRange: [0, 1], outputRange: [66, 0] }) }] },
+            ]}
+          />
+        ) : null}
+        <Image source={a.icon} style={[styles.slotIcon, !usable && !isUlt && { opacity: 0.55 }]} />
+        {!isUlt ? <Sweep p={sweep} /> : null}
+        {secs ? (
+          <View style={styles.cdTextWrap} pointerEvents="none">
+            <Text style={styles.cdText}>{secs}</Text>
+          </View>
+        ) : null}
+        {count != null ? <Text style={styles.count}>{count}</Text> : null}
+        {isUlt && charge < 1 ? <Text style={styles.ultPct}>{Math.floor(charge * 100)}%</Text> : null}
+        <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { borderRadius: isUlt ? 33 : 8, backgroundColor: '#fff', opacity: fx.flash }]} />
+        {isUlt ? null : (
+          <View style={[styles.keycap, padMode && styles.keycapPad]}>
+            <Text style={[styles.keyText, padMode && { color: PAD_COLORS[a.pad] || colors.textDim }]}>{padMode ? a.pad : a.key}</Text>
+          </View>
+        )}
+        {isUlt ? (
+          <View style={[styles.keycap, styles.keycapUlt, padMode && styles.keycapPad]}>
+            <Text style={styles.keyText}>{padMode ? a.pad : a.key}</Text>
+          </View>
+        ) : null}
+        {a.proc ? <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.procGlow, { opacity: ready ? glow : 0 }]} /> : null}
+      </Animated.View>
     </Pressable>
   );
 });
