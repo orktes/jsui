@@ -22,10 +22,18 @@
 #include "render/pipeline_cache.h"
 #include "test.h"
 
-#if defined(JSUI_VULKAN) && defined(__linux__)
+#if defined(JSUI_VULKAN) && (defined(__linux__) || defined(_WIN32))
 #define JSUI_VULKAN_TESTS 1
 #define VK_NO_PROTOTYPES 1
+#if defined(_WIN32)
+#if !defined(NOMINMAX)
+#define NOMINMAX
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
 #include <dlfcn.h>
+#endif
 
 #include "include/third_party/vulkan/vulkan/vulkan_core.h"
 #endif
@@ -72,9 +80,15 @@ struct Vk {
   std::string init(int width, int height) {
     w = width;
     h = height;
+#if defined(_WIN32)
+    HMODULE lib = LoadLibraryA("vulkan-1.dll");
+    if (!lib) return "no Vulkan loader (vulkan-1.dll)";
+    gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(reinterpret_cast<void*>(GetProcAddress(lib, "vkGetInstanceProcAddr")));
+#else
     void* lib = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
     if (!lib) return "no Vulkan loader (libvulkan.so.1)";
     gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(lib, "vkGetInstanceProcAddr"));
+#endif
     if (!gipa) return "no vkGetInstanceProcAddr";
     VKFN(vkCreateInstance);
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
