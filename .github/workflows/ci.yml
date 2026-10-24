@@ -611,6 +611,9 @@ jobs:
         run: |
           scripts/dist/check-shared.sh dist/shared
           nm -gU dist/shared/lib/libjsui.dylib | grep -q ' _jsui_gpu_create_metal$'
+          # The Unity plugin's Metal path (a native rendering plugin; built
+          # against integrations/unity/native/unity_api, no Unity install here).
+          nm -gU dist/unity/jsui_unity.bundle/Contents/MacOS/jsui_unity | grep -q ' _UnityPluginLoad$'
       - name: Viewer smoke (the staged binary)
         run: |
           dist/viewer/jsui-viewer --width 320 --height 200 --frames 10 --screenshot viewer.png web/test/fixtures/bands.js | tee viewer.log
