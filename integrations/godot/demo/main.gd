@@ -653,7 +653,11 @@ func _check_render_hand_off(badge: JsuiView) -> void:
 		v.runtime_view = v.get_path_to(ui)
 		extra.append(v)
 	var surfaces: Array = [badge] + extra
-	var up := await _wait_for(func(): return extra.all(func(v): return v.get_render_stats().renders > 0))
+	# Up means steady state: auto-sized like the badge and a frame handed over
+	# (a view's first frames, on a new or resized texture pair, render
+	# without a hand-off; on a loaded runner that can run into the loop).
+	var up := await _wait_for(func(): return extra.all(func(v):
+		return v.custom_minimum_size == badge.custom_minimum_size and v.get_render_stats().gpu_jobs > 0))
 	var views: Array = [ui] + surfaces
 	var signals := []  # frame_rendered per view
 	var counters := []
