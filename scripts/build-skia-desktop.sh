@@ -24,8 +24,10 @@
 #   Linux: Graphite + Vulkan, Ganesh + GL (+ Vulkan), fontconfig + bundled
 #          FreeType (as the prebuilt), bundled ICU + HarfBuzz.
 #   macOS: Graphite + Metal, Ganesh + GL + Metal, CoreText fonts.
-#   Windows (x64, Git Bash; clang-cl from LLVM, MSVC + Windows SDK found by
-#          gn): Graphite + Vulkan, Ganesh + GL + Direct3D 12 (Graphite has no
+#   Windows (x64; natively in Git Bash with clang-cl from LLVM and MSVC + the
+#          Windows SDK found by gn, or cross-compiled on Linux with
+#          SKIA_TARGET_OS=win: clang-cl + lld-link and an xwin splat, see
+#          scripts/setup-xwin.sh): Graphite + Vulkan, Ganesh + GL + Direct3D 12 (Graphite has no
 #          D3D backend), DirectWrite fonts, static CRT (/MT, clang-cl's
 #          default). ICU loads icudtl.dat from beside the executable at run
 #          time (SkLoadICU): the build installs it under
@@ -57,6 +59,11 @@
 #   JOBS       ninja parallelism (default: all cores)
 #   CC / CXX   compilers (Linux default clang / clang++)
 #   CLANG_WIN  Windows: the LLVM install with clang-cl (default C:/Program Files/LLVM)
+#   SKIA_TARGET_OS  win: cross-compile for Windows on a Linux host
+#   XWIN_SYSROOT    cross: the `xwin splat --use-winsysroot-style
+#              --preserve-ms-arch-notation` output (VC/, Windows Kits/10/)
+#   CLANG_CL / LLD_LINK  cross: the tools (default clang-cl / lld-link on PATH,
+#              else the newest clang-cl-NN / lld-link-NN)
 #   SKIA_DESKTOP_OUT  install dir (default third_party/skia-desktop)
 set -euo pipefail
 
@@ -75,6 +82,12 @@ case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*) os=win; JOBS="${JOBS:-${NUMBER_OF_PROCESSORS:-4}}" ;;
   *) echo "build-skia-desktop.sh supports Linux, macOS and Windows (Git Bash)" >&2; exit 1 ;;
 esac
+cross=""
+if [ "${SKIA_TARGET_OS:-}" = win ] && [ "$os" = linux ]; then
+  os=win; cross=1
+elif [ -n "${SKIA_TARGET_OS:-}" ] && [ "${SKIA_TARGET_OS}" != "$os" ]; then
+  echo "SKIA_TARGET_OS=$SKIA_TARGET_OS is only supported as win on a Linux host" >&2; exit 1
+fi
 case "$(uname -m)" in
   x86_64|amd64) cpu=x64 ;;
   arm64|aarch64) cpu=arm64 ;;
@@ -83,6 +96,18 @@ esac
 CPU="${SKIA_CPU:-$cpu}"
 slice="$os-$CPU"
 dest="$OUT_DIR/out/$slice"
+newest_tool() {  # newest_tool <name>: <name> on PATH, else the highest <name>-NN
+  command -v "$1" 2>/dev/null && return
+  compgen -c "$1-" | grep -E "^$1-[0-9]+$" | sort -t- -k3 -n | tail -1
+}
+if [ -n "$cross" ]; then
+  lib_main=skia.lib
+  XWIN_SYSROOT="${XWIN_SYSROOT:?set XWIN_SYSROOT to an xwin --use-winsysroot-style splat (scripts/setup-xwin.sh)}"
+  CLANG_CL="${CLANG_CL:-$(newest_tool clang-cl)}"
+  LLD_LINK="${LLD_LINK:-$(newest_tool lld-link)}"
+  NM="${NM:-$(newest_tool llvm-nm)}"
+  [ -n "$CLANG_CL" ] && [ -n "$LLD_LINK" ] && [ -n "$NM" ] || { echo "clang-cl, lld-link and llvm-nm are needed" >&2; exit 1; }
+else
 if [ "$os" = win ]; then
   lib_main=skia.lib
   CLANG_WIN="${CLANG_WIN:-C:/Program Files/LLVM}"
@@ -90,6 +115,7 @@ if [ "$os" = win ]; then
 else
   lib_main=libskia.a
   NM=nm
+fi
 fi
 PYTHON="${PYTHON:-$(command -v python3 || command -v python)}"
 
@@ -164,7 +190,7 @@ cp -R "$DAWN_SRC/include/." "$DAWN_GEN/include/"
 # ------------------------------------------------------------------ build
 # gn wants native paths (Git Bash's /d/a/... would become d/a/...).
 DAWN_GEN_GN="$DAWN_GEN/include"
-[ "$os" = win ] && DAWN_GEN_GN="$(cygpath -m "$DAWN_GEN_GN")"
+[ "$os" = win ] && [ -z "$cross" ] && DAWN_GEN_GN="$(cygpath -m "$DAWN_GEN_GN")"
 COMMON_ARGS="
 is_debug=false
 is_official_build=true
@@ -217,9 +243,31 @@ skia_enable_spirv_validation=false
 skia_use_partition_alloc=false
 skia_use_perfetto=false
 "
+if [ -n "$cross" ]; then
+  # gn's msvc toolchain runs \$clang_win/bin/{clang-cl,lld-link} and finds the
+  # CRT and SDK under win_vc / win_sdk (no spaces: gn does not quote lib dirs).
+  CLANG_WIN="$SKIA_SRC/out/jsui-clang-win"
+  rm -rf "$CLANG_WIN"; mkdir -p "$CLANG_WIN/bin" "$CLANG_WIN/sdk"
+  ln -s "$(command -v "$CLANG_CL")" "$CLANG_WIN/bin/clang-cl"
+  ln -s "$(command -v "$LLD_LINK")" "$CLANG_WIN/bin/lld-link"
+  ln -s "$XWIN_SYSROOT/VC" "$CLANG_WIN/vc"
+  ln -s "$XWIN_SYSROOT/Windows Kits/10" "$CLANG_WIN/sdk/10"
+  win_vc_ver="$(ls "$XWIN_SYSROOT/VC/Tools/MSVC" | sort -V | tail -1)"
+  win_sdk_ver="$(ls "$XWIN_SYSROOT/Windows Kits/10/Include" | sort -V | tail -1)"
+  clang_ver="$("$CLANG_CL" --version | sed -nE 's/.*clang version ([0-9]+).*/\1/p' | head -1)"
+  CROSS_ARGS="
+target_os=\"win\"
+win_vc=\"$CLANG_WIN/vc\"
+win_toolchain_version=\"$win_vc_ver\"
+win_sdk=\"$CLANG_WIN/sdk/10\"
+win_sdk_version=\"$win_sdk_ver\"
+clang_win_version=\"$clang_ver\"
+"
+fi
 if [ "$os" = win ]; then
   OS_ARGS="
 clang_win=\"$CLANG_WIN\"
+${CROSS_ARGS:-}
 skia_use_vulkan=true
 skia_use_direct3d=true
 skia_enable_direct3d_debug_layer=false
