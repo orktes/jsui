@@ -83,6 +83,11 @@ class ShaderEffects {
   // nothing to warm: the queue is dropped.
   // Returns whether it drew (the frame must reach the GPU).
   bool warm(SkCanvas* canvas);
+  // Every queued warm-up draw at once into `canvas`, an off-screen surface
+  // of a recorder that is never played back (a GPU context whose pipelines
+  // compile on worker threads: recording the draws hands their pipelines to
+  // the workers, and no frame waits for them). Empties the queue.
+  void warmAll(SkCanvas* canvas);
 
   // Repaints the views whose shader runs on the clock and queues compile
   // errors. Runs every tick.

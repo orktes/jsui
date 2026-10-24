@@ -441,6 +441,11 @@ void ShaderEffects::warmDraw(SkCanvas* c, const Warm& w) {
   c->restore();
 }
 
+void ShaderEffects::warmAll(SkCanvas* canvas) {
+  for (const Warm& w : warm_) warmDraw(canvas, w);
+  warm_.clear();
+}
+
 bool ShaderEffects::warm(SkCanvas* canvas) {
   if (warm_.empty() || !canvas) return false;
   if (!canvas->recorder() && !canvas->recordingContext()) {  // raster: compiled is all there is

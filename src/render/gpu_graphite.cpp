@@ -64,6 +64,7 @@
 #include "render/host_textures.h"
 #include "render/painter.h"
 #include "render/pipeline_cache.h"
+#include "render/shader_view.h"
 #include "runtime.h"
 
 #if defined(JSUI_VULKAN)
@@ -183,6 +184,7 @@ struct GraphiteGpu final : JsuiGpuContext {
   std::unique_ptr<SkExecutor> compileExecutor;
   std::unique_ptr<graphite::Context> ctx;
   std::unique_ptr<graphite::Recorder> recorder;
+  std::unique_ptr<graphite::Recorder> warmRecorder;  // warmShaders' (never played back)
   sk_sp<CachingImageProvider> images;
   size_t cacheBytes = kDefaultCacheBytes;
   // Host textures drawn in this context's frames (wrapTexture).
@@ -225,6 +227,25 @@ struct GraphiteGpu final : JsuiGpuContext {
       opts.fExecutor = compileExecutor.get();
     }
 #endif
+  }
+
+  // Preloaded shaders (precompileShaders): with the compile pool, their
+  // warm-up draws go to a recorder of their own that is snapped and never
+  // played back. Snapping prepares the draws, which hands their pipelines to
+  // the pool; the frames carry on, and the one that first draws a shader
+  // finds its pipelines built (or waits for the rest of a compile already
+  // under way). Without the pool the frames warm them one per frame
+  // (ShaderEffects::warm), each frame building one pipeline itself.
+  void warmShaders(jsui::ShaderEffects& shaders, SkColorType ct, const SkSurfaceProps& props) {
+    if (!compileExecutor || !shaders.warmPending()) return;
+    if (!warmRecorder) warmRecorder = ctx->makeRecorder();
+    if (!warmRecorder) return;
+    sk_sp<SkSurface> s = SkSurfaces::RenderTarget(
+        warmRecorder.get(), SkImageInfo::Make(64, 64, ct, kPremul_SkAlphaType), skgpu::Mipmapped::kNo, &props);
+    if (!s) return;
+    shaders.warmAll(s->getCanvas());
+    s.reset();
+    warmRecorder->snap();  // dropped: only its pipelines were wanted
   }
 
   // A host texture of this context's device, sampled in place.
@@ -298,6 +319,7 @@ struct GraphiteGpu final : JsuiGpuContext {
     if (precompiler) precompiler->shutdown();  // its PrecompileContext holds the device
     if (images) images->clear();
     textures.clear();
+    warmRecorder.reset();
     recorder.reset();
     if (ctx) {
       // Wait for everything submitted (Graphite needs its work finished
@@ -695,6 +717,7 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* d
   SkSurfaceProps props = jsui::surfaceProps();
   sk_sp<SkSurface> surface = SkSurfaces::WrapBackendTexture(g->recorder.get(), backendTex, cs, &props);
   if (!surface) return -1;
+  if (rt.rt.shaders) g->warmShaders(*rt.rt.shaders, surface->imageInfo().colorType(), props);
 
   // The target is the retained frame when the host says it still holds our
   // last one; the key is the texture handle (the host drops the flag after
