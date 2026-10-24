@@ -86,6 +86,9 @@ class Subscription {
     this.isNative = false;  // driven by the native animated module
     this.native = null;     // {viewId, propsTag, tags, nodes, sig}
     this.nativeEvents = []; // [[prop, handler, detach]]
+    this.textNode = null;   // the `text` prop's Animated node
+    this.frozenText = null; // the children React keeps once the runtime writes the text
+    this.visibleNode = null; // Visibility's `visible` prop as an Animated node
   }
 
   // --- native driver: a props -> style -> (transform) graph connected to the view
@@ -100,10 +103,13 @@ class Subscription {
     const host = this.host;
     const viewId = host && typeof host.id === 'number' ? host.id : null;
     const sig = viewId == null ? null : nativeSignature(viewId, this.style, this.animatedKeys);
+    const textNode = this.textNode;
+    const visibleNode = this.visibleNode;
+    const fullSig = sig == null ? null : sig + (textNode ? '|text' : '') + (visibleNode ? '|visible' : '');
     const cur = this.native;
-    if (cur && sig === cur.sig && cur.nodes.length === this.nodes.length && cur.nodes.every((n, i) => n === this.nodes[i])) return;
+    if (cur && fullSig === cur.sig && cur.nodes.length === this.nodes.length && cur.nodes.every((n, i) => n === this.nodes[i])) return;
     this.disconnectNative();
-    if (sig == null) return;
+    if (fullSig == null) return;
     if (this.propsAnimated) throw new Error('Animated: only style props can be driven by the native animated module (useNativeDriver)');
     const api = NativeAnimatedAPI;
     const tags = [];
@@ -141,9 +147,21 @@ class Subscription {
       }
     }
     const styleTag = create({ type: 'style', style }, Object.values(style));
-    const propsTag = create({ type: 'props', props: { style: styleTag } }, [styleTag]);
+    const props = { style: styleTag };
+    const inputs = [styleTag];
+    if (textNode) {
+      props.text = nativeTag(textNode);
+      inputs.push(props.text);
+      // React keeps rendering the text it has; the runtime writes the rest.
+      if (this.frozenText == null) this.frozenText = this.renderedText;
+    }
+    if (visibleNode) {
+      props.visible = nativeTag(visibleNode);
+      inputs.push(props.visible);
+    }
+    const propsTag = create({ type: 'props', props }, inputs);
     api.connectToView(propsTag, viewId);
-    this.native = { viewId, propsTag, tags, nodes: this.nodes.slice(), sig };
+    this.native = { viewId, propsTag, tags, nodes: this.nodes.slice(), sig: fullSig };
   }
 
   disconnectNative() {
@@ -188,7 +206,7 @@ class Subscription {
   update() {
     if (this.isNative) return;  // the runtime writes the styles
     const host = this.host;
-    if (this.propsAnimated || !host || typeof host.patchStyle !== 'function') {
+    if (this.propsAnimated || this.textNode || this.visibleNode || !host || typeof host.patchStyle !== 'function') {
       this.forceUpdate();
       return;
     }
@@ -231,10 +249,25 @@ export function createAnimatedComponent(Component) {
     // animated like style, so the native driver can write them.
     const styleProps = Component.__animatedStyleProps;
     let mapped = null;
+    let textNode = null;
+    let visibleNode = null;
     for (const k in props) {
       if (k === 'ref') continue;
       const v = props[k];
       if (k === 'style') continue;
+      if (k === 'text' && v instanceof AnimatedNode) {
+        // Animated.Text's text={node}: its value is the content.
+        textNode = v;
+        if (nodes.indexOf(v) < 0) nodes.push(v);
+        continue;
+      }
+      if (k === 'visible' && v instanceof AnimatedNode) {
+        // Visibility's visible={node}: nonzero shows. Native: the runtime
+        // sets it (Node::setHidden); JS driver: a re-render with the value.
+        visibleNode = v;
+        if (nodes.indexOf(v) < 0) nodes.push(v);
+        continue;
+      }
       if (styleProps && styleProps[k] && v instanceof AnimatedNode) {
         if (!mapped) mapped = {};
         mapped[styleProps[k]] = v;
@@ -276,6 +309,18 @@ export function createAnimatedComponent(Component) {
     sub.style = style;
     sub.animatedKeys = keys;
     sub.propsAnimated = propsAnimated;
+    if (sub.textNode !== textNode) sub.frozenText = null;
+    sub.textNode = textNode;
+    sub.visibleNode = visibleNode;
+    if (visibleNode && !visibleNode.__isNative()) {
+      const v = visibleNode.__getValue();
+      next.visible = typeof v === 'number' ? v !== 0 : !!v;
+    }
+    if (textNode) {
+      const v = textNode.__getValue();
+      sub.renderedText = sub.frozenText != null && sub.isNative ? sub.frozenText : typeof v === 'string' ? v : String(v);
+      next.children = sub.renderedText;
+    }
 
     const setRef = useCallback(
       (instance) => {
@@ -292,7 +337,7 @@ export function createAnimatedComponent(Component) {
       sub.syncNative();
       sub.setNativeEvents(nativeEvents);
       // A value may have changed between render and commit.
-      if (nodes.length && !propsAnimated) sub.update();
+      if (nodes.length && !propsAnimated && !textNode && !visibleNode) sub.update();
     });
     useLayoutEffect(() => () => sub.detach(), []);
 

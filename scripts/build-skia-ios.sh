@@ -18,7 +18,7 @@
 #
 # Configuration: Ganesh + Metal (skia_use_metal), no GL / Vulkan / Graphite;
 # CoreText fonts (the platform font manager, like the macOS build); bundled
-# ICU + HarfBuzz for skparagraph shaping (ICU data is linked into libicu);
+# ICU + HarfBuzz for skparagraph shaping (the trimmed ICU data is linked into libicu);
 # PNG / JPEG / WebP / GIF decode, PNG encode. Needs macOS with Xcode.
 #
 # Idempotent: a slice whose .stamp matches the hash of this script is
@@ -68,6 +68,29 @@ if [ "$(git rev-parse HEAD)" != "$SKIA_COMMIT" ]; then
   git fetch --depth 1 origin "$SKIA_COMMIT"
   git checkout -q --force "$SKIA_COMMIT"
 fi
+
+# ICU data: the trimmed set Skia's wasm build (and our Windows build, as
+# icudtl.dat) uses, ~0.85 MB instead of the ~10 MB ios set that would be
+# linked into every library. It has everything SkUnicode / SkParagraph use:
+# char / word / line break rules (with the Thai, Lao, Khmer and Burmese
+# dictionaries), NFKC, emoji and layout properties. Left out: collation,
+# locale data, converters, time zones and the CJK word dictionary (CJK line
+# breaking is per character and stays correct).
+git checkout -q -- third_party/icu/BUILD.gn
+sed -e 's|data_dir += "ios"|data_dir += "flutter"|' third_party/icu/BUILD.gn > third_party/icu/BUILD.gn.jsui
+mv third_party/icu/BUILD.gn.jsui third_party/icu/BUILD.gn
+grep -q 'data_dir += "ios"' third_party/icu/BUILD.gn && { echo "ICU data patch did not apply" >&2; exit 1; }
+# Skia compiles iOS arm64 as arm64 + arm64e fat objects. App Store apps are
+# arm64 (arm64e is for Apple's own binaries), so the arm64e half only doubled
+# the build time and the xcframework's size: arm64 alone.
+git checkout -q -- gn/skia/BUILD.gn
+python3 - <<'PY'
+p = "gn/skia/BUILD.gn"
+s = open(p).read()
+old = '"-arch",\n        "arm64",\n        "-arch",\n        "arm64e",\n'
+assert s.count(old) == 1, "arm64e patch did not apply"
+open(p, "w").write(s.replace(old, '"-arch",\n        "arm64",\n'))
+PY
 
 # Only sync the third-party repos this configuration compiles.
 python3 - <<'PY'
@@ -169,6 +192,9 @@ xcode_sysroot=\"$(xcrun --sdk "$sdk" --show-sdk-path)\"
   rm -rf "$dest"
   mkdir -p "$dest"
   find "$BUILD_DIR" -maxdepth 1 -name 'lib*.a' -exec cp {} "$dest/" \;
+  archs="$(lipo -archs "$dest/libskia.a")"
+  want="$cpu"; [ "$cpu" = x64 ] && want=x86_64
+  [ "$archs" = "$want" ] || { echo "[$slice] libskia.a has architectures '$archs', expected '$want'" >&2; exit 1; }
   cp "$BUILD_DIR/args.gn" "$dest/args.gn"
   # Defines dependents get in gn (public + all-dependent configs: SK_GANESH, SK_METAL,
   # SK_SHAPER_HARFBUZZ_AVAILABLE, ...). They change public headers, so

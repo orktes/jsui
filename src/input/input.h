@@ -99,6 +99,13 @@ class InputManager {
   void nodeRemoved(Node* n);
   // Per-tick work (stick repeat, hover refresh after layout changes).
   void tick(double nowMs);
+  // Interaction state styles (core/state_style.h): which states hold for
+  // each element that asks, the weights' transitions and the blended styles
+  // (state_styles.cpp). After tick() and JS, before native Animated.
+  void tickStates(double nowMs);
+  // Whether `n` is hovered / pressed / focused for state styles.
+  bool stateHovered(const Node* n) const;
+  bool statePressed(const Node* n) const;
 
   // Event timestamps (jsui_set_event_time): `t` on the runtime clock stamps
   // the input events sent after it until the next tick (NaN: back to the
@@ -386,6 +393,15 @@ class InputManager {
   int lastFlags_ = 0;
   mutable double lastEventTime_ = -std::numeric_limits<double>::infinity();
   bool pointerFocus_ = false;  // focus change caused by a press: no scroll into view
+  // State styles: the element an activation key / gamepad A holds pressed,
+  // presses that began since the last tickStates (a click shorter than a
+  // frame still shows its pressed state for one frame), and whether a
+  // transition is running.
+  uint32_t keyPressId_ = 0;
+  std::string keyPressKey_;
+  int padPress_ = -1;
+  std::vector<uint32_t> pressFlash_;
+  bool statesMoving_ = false;
 
   // TextInput pointer selection: drag target, granularity (0 characters,
   // 1 words, 2 everything) and the word the drag started on.

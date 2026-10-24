@@ -75,6 +75,9 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
   };
   // Animated.hostBuffer nodes follow their buffer (also in jsui_tick_native).
   buffers.onChange = [this](const std::string& key) { animated->bufferChanged(key); };
+  // Animated.hostState / useHostStateBind nodes follow their key at once.
+  animated->state = &state;
+  state.onChange = [this](const std::string& key) { animated->stateChanged(key); };
   textures.log = [this](JsuiLogLevel level, const std::string& msg) { log(level, msg); };
   main().handle = h;
   attach(main());
@@ -614,6 +617,10 @@ void Runtime::tick(double nowMs) {
   };
   for (Surface* s : list)
     if (live(s)) s->input->tick(nowMs);
+  // Interaction state styles of this frame's input (before native Animated,
+  // which reads their weights through Animated.interaction).
+  for (Surface* s : list)
+    if (live(s)) s->input->tickStates(nowMs);
   // After this tick's timers and jobs (React's passive effects of the commit
   // that mounted an image have run when its onLoad arrives).
   for (Surface* s : list)
@@ -655,6 +662,7 @@ void Runtime::tick(double nowMs) {
     js->collectIdle(tickMs < kLightTickMs, idle);
   }
   prepareText();
+  freeDestroyedNodes();
 }
 
 // A time-sliced render (startTransition) creates its Text nodes frames before
@@ -685,9 +693,29 @@ void Runtime::prepareText() {
   }
 }
 
+// Nodes the reconciler destroyed (an old page after a navigation: thousands
+// of them) leave their document at once but are freed here, in this frame's
+// spare time, a few hundred at least per tick so that a busy app still gets
+// its memory back. Without a JS budget everything goes at once.
+void Runtime::freeDestroyedNodes() {
+  double until = tickWallStart + 2 * jsSliceMs;
+  for (auto& s : surfaces_) {
+    if (jsSliceMs <= 0) {
+      s->doc.freeDestroyed(SIZE_MAX);
+      continue;
+    }
+    if (!s->doc.freeDestroyed(256)) continue;
+    while (wallMs() < until && s->doc.freeDestroyed(64)) {
+    }
+  }
+}
+
 void Runtime::tickNative(double nowMs) {
   now = nowMs;
-  for (auto& s : surfaces_) s->doc.now = nowMs;
+  for (auto& s : surfaces_) {
+    s->doc.now = nowMs;
+    s->input->tickStates(nowMs);  // state styles follow input without JS too
+  }
   animated->tick(nowMs);  // end events stay queued until the next tick()
   lotties->tick(nowMs);   // so do LottieView events
   shaders->tick(nowMs);   // and ShaderView errors
@@ -846,7 +874,7 @@ bool Runtime::wantsFrame() const {
       !animated->ends.empty() || lotties->animating() || shaders->animating() || state.hasDirty() || buffers.hasDirty() || textures.hasDirty() || audio->hasEvents() || audio->busy() || !uiResults_.empty() || !doomed_.empty())
     return true;
   for (const auto& s : surfaces_)
-    if (s->input->animating() || s->doc.layoutAnimating() || imageEventsReady(s->doc) ||
+    if (s->doc.hasDestroyed() || s->input->animating() || s->doc.layoutAnimating() || imageEventsReady(s->doc) ||
         (bundleRan_ && (s->pending || s->resizePending)))
       return true;
   return false;

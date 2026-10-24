@@ -110,19 +110,32 @@ test('loops run natively (iterations); sequences chain native animations', () =>
   forever.stop();
   assert.equal(done.at(-1).finished, false);
 
+  // A sequence of native animations runs as one native group.
   const w = new Animated.Value(0);
   const seq = [];
   Animated.sequence([
     Animated.timing(w, { toValue: 5, duration: 10, useNativeDriver: true }),
+    Animated.delay(30),
     Animated.timing(w, { toValue: 2, duration: 10, useNativeDriver: true }),
   ]).start((r) => seq.push(r.finished));
-  const a1 = lastStart();
-  assert.equal(a1[2].toValue, 5);
-  animated.end(a1[0], true, 5);
-  const a2 = lastStart();
-  assert.equal(a2[2].toValue, 2);
-  animated.end(a2[0], true, 2);
+  const g = lastStart();
+  assert.equal(g[2].type, 'group');
+  assert.equal(g[2].root.type, 'sequence');
+  assert.deepEqual(g[2].root.children.map((c) => c.type), ['leaf', 'wait', 'leaf']);
+  assert.equal(g[2].root.children[0].config.toValue, 5);
+  assert.equal(g[2].root.children[1].duration, 30);
+  assert.equal(g[2].root.children[2].config.toValue, 2);
+  animated.end(g[0], true);
   assert.deepEqual(seq, [true]);
+  // A step that needs JS (a JS-driven timing) keeps the JS composite.
+  const js = new Animated.Value(0);
+  const before2 = animated.count('startAnimation');
+  Animated.sequence([
+    Animated.timing(w, { toValue: 1, duration: 10, useNativeDriver: true }),
+    Animated.timing(js, { toValue: 1, duration: 10 }),
+  ]).start();
+  assert.equal(lastStart()[2].type, 'frames');
+  assert.equal(animated.count('startAnimation'), before2 + 1);
 });
 
 test('loop(sequence([timing, zero-duration reset])) repeats; reset restores the native value (RN)', () => {
@@ -133,19 +146,17 @@ test('loop(sequence([timing, zero-duration reset])) repeats; reset restores the 
       Animated.timing(v, { toValue: 0, duration: 0, useNativeDriver: true }),
     ]),
   );
-  l.start();
-  for (let i = 0; i < 3; i++) {
-    const up = lastStart();
-    assert.equal(up[2].toValue, 1);
-    assert.equal(up[2].duration, 800);
-    animated.end(up[0], true, 1);
-    const reset = lastStart();
-    assert.equal(reset[2].toValue, 0);
-    assert.equal(reset[2].duration, 0);
-    animated.end(reset[0], true, 0);
-  }
-  assert.equal(lastStart()[2].toValue, 1, 'the loop keeps going');
+  const ends = [];
+  l.start((r) => ends.push(r.finished));
+  const [gid, , cfg] = lastStart();
+  assert.equal(cfg.type, 'group');
+  assert.equal(cfg.root.type, 'loop');
+  assert.equal(cfg.root.iterations, -1);
+  assert.deepEqual(cfg.root.resets, [[v.__getNativeTag(), 0], [v.__getNativeTag(), 0]]);
+  assert.deepEqual(cfg.root.child.children.map((c) => [c.config.toValue, c.config.duration]), [[1, 800], [0, 0]]);
   l.stop();
+  assert.deepEqual(ends, [false]);
+  assert.equal(animated.of('stopAnimation').at(-1)[0], gid);
 
   // resetAnimation writes the starting value to the native node too.
   const w = new Animated.Value(0.5);
@@ -209,13 +220,11 @@ test('interpolations, math nodes, colors and transforms serialize for the native
   render(null);
 });
 
-test('React Native errors: layout props, JS-driven animations on native values, non-style props', () => {
+test('React Native errors: JS-driven animations on native values, non-style props; layout props are native (JSUI)', () => {
   const w = new Animated.Value(10);
   render(h(Animated.View, { style: { width: w } }));
-  assert.throws(
-    () => Animated.timing(w, { toValue: 20, duration: 10, useNativeDriver: true }).start(),
-    /Style property 'width' is not supported by native animated module/,
-  );
+  Animated.timing(w, { toValue: 20, duration: 10, useNativeDriver: true }).start();
+  assert.ok(w.__isNative());
   render(null);
   const t = new Animated.Value(0);
   render(h(Animated.View, { style: { transform: [{ translateX: t }] } }));

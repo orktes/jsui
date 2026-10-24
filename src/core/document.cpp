@@ -33,6 +33,7 @@ Document::~Document() {
     while (n->parent()) n = n->parent();
     destroyRecursive(n);
   }
+  graveyard_.clear();
   YGConfigFree(yogaConfig_);
 }
 
@@ -76,7 +77,16 @@ void Document::destroyRecursive(Node* node) {
   if (node->propFlags() & (Node::kAutoFocus | Node::kModal)) setFocusHint(node, false);
   if (node->propFlags() & Node::kListensLayout) layoutListeners--;
   reportedLayout_.erase(node->id());
-  nodes_.erase(node->id());
+  auto it = nodes_.find(node->id());
+  if (it == nodes_.end()) return;
+  graveyard_.push_back(std::move(it->second));
+  nodes_.erase(it);
+}
+
+bool Document::freeDestroyed(size_t max) {
+  size_t n = std::min(max, graveyard_.size());
+  graveyard_.erase(graveyard_.end() - n, graveyard_.end());
+  return !graveyard_.empty();
 }
 
 void Document::destroyNode(Node* node) {

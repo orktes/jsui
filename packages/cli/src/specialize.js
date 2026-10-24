@@ -76,6 +76,46 @@ function patches() {
     '\n    workInProgress.flags |= 262144;\n    null === current && null !== workInProgress.return && (workInProgress.return.flags |= 262144);\n    return null !== current;\n',
     1,
   ]);
+  // Deleted subtrees: after a deleted fiber's passive cleanups ran, React
+  // nulls every field of it and of its alternate (detachFiberAfterEffects)
+  // so that a stray reference to one fiber cannot keep the whole old tree
+  // alive. In QuickJS each of those writes drops a reference and frees what
+  // it held, so detaching an old page (thousands of fibers) took 4-8 ms of
+  // the frame after a navigation commit. The fibers are unreachable from
+  // the live tree once the walk has passed them, so the detach is queued
+  // and run at idle priority in budget-sized slices instead.
+  list.push([
+    'deferred detach of deleted fibers',
+    /\n(\s*)detachFiberAfterEffects\(cache\);\n(\s*)if \(cache === fiber\) \{/g,
+    '\n$1deferDetachFiber(cache);\n$2if (cache === fiber) {',
+    1,
+  ]);
+  list.push([
+    'deferred detach queue',
+    /\n  function detachFiberAfterEffects\(fiber\) \{/g,
+    `
+  var jsuiDetachQueue = null,
+    jsuiDetachTask = null;
+  function drainDetachQueue() {
+    var queue = jsuiDetachQueue;
+    for (var i = 0; i < queue.length; i++)
+      if ((detachFiberAfterEffects(queue[i]), 63 === (i & 63) && shouldYield()))
+        return queue.splice(0, i + 1), drainDetachQueue;
+    jsuiDetachQueue = jsuiDetachTask = null;
+    return null;
+  }
+  function deferDetachFiber(fiber) {
+    null === jsuiDetachQueue && (jsuiDetachQueue = []);
+    jsuiDetachQueue.push(fiber);
+    if (20000 < jsuiDetachQueue.length) {
+      null !== jsuiDetachTask && cancelCallback$1(jsuiDetachTask);
+      for (var queue = jsuiDetachQueue, i = 0; i < queue.length; i++) detachFiberAfterEffects(queue[i]);
+      jsuiDetachQueue = jsuiDetachTask = null;
+    } else null === jsuiDetachTask && (jsuiDetachTask = scheduleCallback$3(IdlePriority, drainDetachQueue));
+  }
+  function detachFiberAfterEffects(fiber) {`,
+    1,
+  ]);
   return list;
 }
 

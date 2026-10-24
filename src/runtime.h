@@ -133,6 +133,7 @@ class Runtime {
   double jsSliceMs = 5;  // jsui_set_js_frame_budget; <= 0: no limit
   static double wallMs();
   void prepareText();
+  void freeDestroyedNodes();
   bool jsShouldYield() const { return jsSliceMs > 0 && wallMs() - tickWallStart >= jsSliceMs; }
 
   // Shared host state (jsui_set_state / HostState in JS). Lives as long as

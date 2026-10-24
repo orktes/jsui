@@ -22,6 +22,7 @@
 
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { transformDerive } from './derive.js';
 import { realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { availableParallelism } from 'node:os';
@@ -248,7 +249,9 @@ export function reactCompilerPlugin(o) {
       });
       build.onLoad({ filter: SOURCE_EXT, namespace: 'file' }, async (args) => {
         if (!isApp(args.path)) return undefined;
-        const source = await readFile(args.path, 'utf8');
+        const original = await readFile(args.path, 'utf8');
+        const derived = await transformDerive(original, args.path);
+        const source = derived.code;
         let hit;
         try {
           // With hmr, hmr.js compiles the same files and asks for their maps
@@ -265,9 +268,10 @@ export function reactCompilerPlugin(o) {
           o.report.functions += hit.functions;
           o.report.skipped.push(...hit.skipped);
         }
+        if (hit.code == null) hit.code = source === original && !derived.warnings.length ? null : source;
         if (hit.code == null) return undefined;
         const ext = path.extname(args.path).slice(1).toLowerCase();
-        return { contents: hit.code, loader: ext === 'ts' || ext === 'tsx' ? ext : 'jsx' };
+        return { contents: hit.code, warnings: derived.warnings, loader: ext === 'ts' || ext === 'tsx' ? ext : 'jsx' };
       });
     },
   };
