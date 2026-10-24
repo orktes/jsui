@@ -1999,6 +1999,37 @@ browser, `/shared` shows the live app and the session's activity feed. `jsui_set
 What a frame costs before painting, and how it stays proportional to what
 changed rather than to the tree size:
 
+* **Frame budget for JS** (`jsui_set_js_frame_budget`, default 5 ms; web
+  `jsFrameBudget`, Godot `js_frame_budget_ms`; 0 turns it off). The frame
+  clock (`performance.now()`) stands still within a tick, so React's
+  scheduler, which times its slices with it, would never yield. The bundled
+  scheduler instead asks `__jsui_native.shouldYield()`, which turns true once
+  this tick's JS has run for the budget (`packages/cli/src/specialize.js`,
+  `patchScheduler`). Updates in `startTransition` therefore render in slices
+  across frames; the site's router navigates in a transition, so a click
+  does no rendering in its own event, and the new page commits a few frames
+  later (the showcase on one cloud CPU core, native QuickJS: from a 45-97 ms
+  click handler and a frame of up to 62 ms after it, to ~5 ms slices and a
+  15-24 ms commit frame).
+  Zero-delay timers queued after the budget is spent (the scheduler's next
+  slice, passive effects) wait for the next tick.
+  Three things keep the commit frame small:
+  * The `onLayout` events of a tick's layout passes are delivered in one
+    batch (one microtask drain): state set by several handlers renders once.
+  * Once the frame's budget is spent, state set in `onLayout` renders as a
+    transition from the next frames, not synchronously: a page whose
+    components size themselves from `onLayout`, one nesting level per render,
+    no longer runs those renders back to back in the frame that commits it
+    (react-native-web renders ResizeObserver updates in a later task too).
+    Within budget, `onLayout` state still renders in the same frame.
+  * Text nodes created by a sliced render are shaped in the spare time of
+    the frames before the commit (`Runtime::prepareText`, up to twice the
+    budget per tick): the same paragraph build and first layout the measure
+    would do, so pixels are unchanged.
+  Offline tools on simulated time (jsui-render, jsui-record, jsui-bench, the
+  CLI's headless runtime) turn the budget off, so a frame's content does not
+  depend on the machine's speed.
+
 * **Style.** `setProps` diffs the old and new style objects; when every
   changed key is a known paint key, only the paint groups those keys feed
   (opacity, transform, colors, radii, shadows, gradients, filters, text, ...)

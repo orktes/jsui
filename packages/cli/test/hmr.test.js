@@ -21,6 +21,23 @@ async function until(pred, what, ms = 8000) {
   }
 }
 
+// Writes a file and waits until the dev server has built it: a build that
+// started after the write has ended and no build ran for a while. On a slow
+// runner esbuild may still be rebuilding for an earlier write (or a late
+// duplicate fs event) when this write lands; that build's version does not
+// carry the write.
+async function rebuilt(server, file, contents) {
+  await sleep(150);  // let duplicate fs events of the previous write settle
+  const started = server.state.started;
+  await writeFile(file, contents);
+  const idle = () => server.state.started > started && server.state.ended === server.state.started;
+  await until(idle, 'rebuild of ' + path.basename(file));
+  for (let seen = server.state.started, t = Date.now(); Date.now() - t < 400 || !idle(); ) {
+    await sleep(50);
+    if (server.state.started !== seen) (seen = server.state.started), (t = Date.now());
+  }
+}
+
 function app(label, extra = '') {
   return `import React, { useState } from 'react';
 import { View, Text } from 'react-native';
@@ -158,11 +175,7 @@ test('hot updates keep component state; non-component edits propagate; entry edi
 
     // The runtime polls with hmr=1 and calls __jsui_onDevUpdate on a change.
     const edit = async (file, contents) => {
-      await sleep(150);  // let duplicate fs events of the previous write settle
-      const before = server.state.version;
-      const failures = server.state.failures;
-      await writeFile(path.join(dir, file), contents);
-      await until(() => server.state.version !== before || server.state.failures !== failures, 'rebuild of ' + file);
+      await rebuilt(server, path.join(dir, file), contents);
       version = await (await fetch(base + '/__jsui/version?hmr=1')).text();
       ctx.__jsui_onDevUpdate(version);
     };
@@ -278,11 +291,7 @@ export default function App() {
     ctx.bump();
     ctx.bump();
     await until(() => text('title') === 'v1 2', 'state update');
-    await sleep(150);
-    const before = server.state.version;
-    await writeFile(path.join(dir, 'App.js'), counter('v2'));
-    await until(() => server.state.version !== before, 'rebuild');
-    await sleep(300);  // let duplicate fs events settle
+    await rebuilt(server, path.join(dir, 'App.js'), counter('v2'));
     // The updated module checks its source hash against the memo cache's.
     const update = await (await fetch(base + '/__jsui/hmr?from=' + ctx.__jsui_hmr.version)).text();
     assert.match(update, /if \(\$\[0\] !== "[0-9a-f]{64}"\)/);

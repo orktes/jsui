@@ -501,6 +501,33 @@ test('onLayout, host messages, postMessage', async () => {
   render(null);
 });
 
+test('onLayout state renders this frame, or as a transition once the frame budget is spent', async () => {
+  const seen = [];
+  function App() {
+    const [w, setW] = useState(0);
+    seen.push(w);
+    return h(View, { nativeID: 'm', onLayout: (e) => setW(e.nativeEvent.layout.width) });
+  }
+  render(h(App));
+  await wait();
+  const id = byNativeID('m').id;
+  globalThis.__jsui_onLayout(id, { x: 0, y: 0, width: 3, height: 1 });
+  await Promise.resolve();
+  assert.equal(seen.at(-1), 3, 'rendered in the microtask checkpoint after the event');
+
+  mock.overBudget = true;
+  try {
+    globalThis.__jsui_onLayout(id, { x: 0, y: 0, width: 5, height: 1 });
+    await Promise.resolve();
+    assert.equal(seen.at(-1), 3, 'deferred while over budget');
+  } finally {
+    mock.overBudget = false;
+  }
+  await wait(20);
+  assert.equal(seen.at(-1), 5);
+  render(null);
+});
+
 test('Dimensions + useWindowDimensions follow resize events', async () => {
   assert.deepEqual(Dimensions.get('window'), { width: 800, height: 600, scale: 2, fontScale: 1 });
   const seen = [];

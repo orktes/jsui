@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
-import { HOST_FLAGS, specializeReconciler } from '../src/specialize.js';
+import { HOST_FLAGS, patchScheduler, specializeReconciler } from '../src/specialize.js';
 import { jsuiReactDir } from '../src/config.js';
 import { build } from '../src/build.js';
 
@@ -168,4 +168,16 @@ test('specialize: context propagation under bailing-out memo rows renders as unp
   assert.match(tree, /\|5:light:2\|/);
   assert.match(tree, /\|150:light:7\|/);
   assert.match(tree, /\|tick3\|/);
+});
+
+test('scheduler: every bundled build yields on the runtime frame budget', async () => {
+  for (const name of ['scheduler.native.production.js', 'scheduler.native.development.js', 'scheduler.production.js', 'scheduler.development.js']) {
+    const file = require.resolve('scheduler/cjs/' + name, { paths: [jsuiReactDir()] });
+    const { code, ok } = patchScheduler(await readFile(file, 'utf8'));
+    assert.ok(ok, name);
+    // shouldYieldToHost asks __jsui_native.shouldYield first, and keeps its
+    // own clock without the bridge.
+    const fn = code.slice(code.indexOf('function shouldYieldToHost()'));
+    assert.match(fn.slice(0, 400), /jsui\.shouldYield\(\)/, name);
+  }
 });

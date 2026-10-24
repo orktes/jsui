@@ -268,6 +268,10 @@ const jsui = await createJsui({ canvas, bundleUrl: './bundle.js' });
 jsui.jsEngine; // 'host' ('quickjs' when eval is blocked or the module was built without it)
 ```
 
+`jsFrameBudget` (ms, default 5) is how long the bundle's JS may run in one
+frame before React yields: updates in `startTransition` render in slices
+across frames instead of in one long frame. `0` turns slicing off.
+
 The bundle still gets the runtime's own globals: `setTimeout`,
 `requestAnimationFrame`, `performance.now()` and `queueMicrotask` follow the
 runtime's clock (`jsui.frame(now)`), and the page's DOM, `window` and

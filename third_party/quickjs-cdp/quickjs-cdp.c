@@ -722,6 +722,21 @@ static char *take_message(QJSCDPAgent *agent, void **session) {
   return msg;
 }
 
+/* jsui: the statement traps only run while something could stop at one: a
+   breakpoint, a step, a requested pause. An attached debugger with none of
+   those costs nothing per statement (it was ~4-6x slower with them armed).
+   `debugger;` statements reach the handler armed or not. JS thread only
+   (disarming is); qjs_cdp_pause arms from any thread. */
+static void update_arming(QJSCDPAgent *agent) {
+  bool armed = agent->debugger_enabled && !agent->skip_all_pauses &&
+               (agent->pause_pending || agent->mode != MODE_RUN ||
+                (agent->breakpoints_active && agent->nbps > 0));
+  JS_SetDebugTraceArmed(agent->ctx, armed);
+  /* A pause requested from another thread meanwhile must not be lost. */
+  if (!armed && agent->pause_pending && agent->debugger_enabled)
+    JS_SetDebugTraceArmed(agent->ctx, true);
+}
+
 /* Stops the JS thread here and answers the frontend from inside the engine
    until it is told to continue. This is the only reason the message queue
    exists: while this loop is running the JS thread cannot return to whatever
@@ -764,6 +779,7 @@ static void pause_until_resumed(
   cdp_mutex_unlock(&agent->lock);
 
   agent->paused = false;
+  update_arming(agent); /* jsui: on for a step, off for a plain resume */
   /* jsui: the scopes of the frames shown while paused are not used again. */
   release_object_group(agent, "backtrace");
   send_event(agent, "Debugger.resumed", json_object(agent));
@@ -1505,6 +1521,7 @@ static void handle_message(QJSCDPAgent *agent, const char *json, size_t len) {
     dispatch(agent, id, method, params);
   else
     send_error(agent, id, "Message had no method");
+  update_arming(agent); /* jsui: breakpoints, steps or pauses changed */
 
   if (method) JS_FreeCString(agent->jctx, method);
   JS_FreeValue(agent->jctx, params);
@@ -1719,7 +1736,6 @@ void qjs_cdp_import_state(QJSCDPAgent *agent, const char *json) {
   }
 
   agent->debugger_enabled = json_get_bool(agent, state, "enabled", false);
-  if (agent->debugger_enabled) JS_SetDebugTraceArmed(agent->ctx, true);
   agent->next_bp_id = json_get_int(agent, state, "nextBreakpointId", 0);
 
   JSValue list = json_get(agent, state, "breakpoints");
@@ -1749,6 +1765,7 @@ void qjs_cdp_import_state(QJSCDPAgent *agent, const char *json) {
   }
   JS_FreeValue(agent->jctx, list);
   JS_FreeValue(agent->jctx, state);
+  update_arming(agent);
 }
 
 bool qjs_cdp_debugger_enabled(QJSCDPAgent *agent) {
@@ -1759,7 +1776,7 @@ void qjs_cdp_set_debugger_enabled(QJSCDPAgent *agent, bool enabled) {
   agent->debugger_enabled = enabled;
   /* Disarmed rather than uninstalled: uninstalling the handler would
      permanently un-instrument everything parsed afterwards. */
-  JS_SetDebugTraceArmed(agent->ctx, enabled);
+  update_arming(agent);
 }
 
 char *qjs_cdp_capture_stack_trace(QJSCDPAgent *agent, int frames_to_skip) {
@@ -1833,4 +1850,5 @@ void qjs_cdp_set_execution_context(QJSCDPAgent *agent, int id) {
 void qjs_cdp_pause(QJSCDPAgent *agent) {
   /* jsui: a flag write only; the agent's runtime belongs to the JS thread. */
   agent->pause_pending = true;
+  if (agent->debugger_enabled) JS_SetDebugTraceArmed(agent->ctx, true);
 }
