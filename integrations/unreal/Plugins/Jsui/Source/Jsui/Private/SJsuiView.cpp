@@ -12,6 +12,7 @@
 #include "RHI.h"
 #include "Rendering/DrawElements.h"
 #include "TextureResource.h"
+#include "Widgets/SWindow.h"
 
 // Every mouse and key event goes to the view before Slate routes it.
 class FJsuiInputProcessor : public IInputProcessor
@@ -125,17 +126,17 @@ FString SJsuiView::GetRendererName() const
 	            : FString::Printf(TEXT("CPU raster · Texture2D · %s"), Rhi);
 }
 
-FVector2D SJsuiView::AbsoluteToUi(const FVector2D& Absolute) const
+FVector2D SJsuiView::AbsoluteToUi(const FVector2D& Screen) const
 {
 	if (!bHasGeometry) return FVector2D::ZeroVector;
-	// Local Slate units -> device px -> logical px.
-	return LastGeometry.AbsoluteToLocal(Absolute) * LastGeometry.Scale / Ratio;
+	// Desktop -> Slate absolute -> local Slate units -> device px -> logical px.
+	return LastGeometry.AbsoluteToLocal(Screen + WindowOffset) * LastGeometry.Scale / Ratio;
 }
 
-bool SJsuiView::InsideView(const FVector2D& Absolute) const
+bool SJsuiView::InsideView(const FVector2D& Screen) const
 {
 	if (!bHasGeometry) return false;
-	const FVector2D P = LastGeometry.AbsoluteToLocal(Absolute);
+	const FVector2D P = LastGeometry.AbsoluteToLocal(Screen + WindowOffset);
 	const FVector2D S = LastGeometry.GetLocalSize();
 	return P.X >= 0 && P.Y >= 0 && P.X < S.X && P.Y < S.Y;
 }
@@ -147,11 +148,48 @@ void SJsuiView::Tick(const FGeometry& AllottedGeometry, const double InCurrentTi
 	if (!Host) return;
 	LastGeometry = AllottedGeometry;
 	bHasGeometry = true;
+	UpdateWindowOffset();
 	UpdateViewport(AllottedGeometry);
 	if (!bLoaded) Load();
 	jsui_tick(Runtime(), FPlatformTime::Seconds() * 1000.0);
 	DrainQueues();
 	Paint();
+}
+
+// Pointer events carry desktop positions; the view's geometry is in Slate's
+// absolute space, which is the desktop offset by where Slate has cached the
+// window's position. That cache can be wrong: on macOS, UE 5.8 places a
+// WindowedFullscreen window at FMacWindow::GetFullScreenInfo's position,
+// (0, 2 x screen height - 1) for the main display, while Cocoa puts the
+// window at the screen's origin, so every pointer position misses the view.
+// A fullscreen window covers exactly one monitor, so map through that
+// monitor's origin instead.
+void SJsuiView::UpdateWindowOffset()
+{
+	WindowOffset = FVector2D::ZeroVector;
+	if (!FSlateApplication::IsInitialized()) return;
+	FSlateApplication& Slate = FSlateApplication::Get();
+	TSharedPtr<SWindow> W = Window.Pin();
+	if (!W)
+	{
+		W = Slate.FindWidgetWindow(AsShared());
+		Window = W;
+	}
+	if (!W || !W->GetNativeWindow() || W->GetWindowMode() == EWindowMode::Windowed) return;
+	const FVector2D Cached = W->GetPositionInScreen();
+	const FVector2D Size = W->GetSizeInScreen();
+	const FVector2D Cursor = Slate.GetCursorPos();
+	const FPlatformRect* Best = nullptr;
+	for (const FMonitorInfo& M : Slate.GetCachedDisplayMetricsByRef().MonitorInfo)
+	{
+		const FPlatformRect& R = M.DisplayRect;
+		if (R.Right - R.Left != FMath::RoundToInt(Size.X) || R.Bottom - R.Top != FMath::RoundToInt(Size.Y)) continue;
+		if (R.Left == FMath::RoundToInt(Cached.X) && R.Top == FMath::RoundToInt(Cached.Y)) return;  // the cache is right
+		// Of same-sized monitors, the one under the pointer.
+		const bool bUnderCursor = Cursor.X >= R.Left && Cursor.X < R.Right && Cursor.Y >= R.Top && Cursor.Y < R.Bottom;
+		if (!Best || bUnderCursor) Best = &R;
+	}
+	if (Best) WindowOffset = Cached - FVector2D(Best->Left, Best->Top);
 }
 
 void SJsuiView::Load()
@@ -179,7 +217,7 @@ void SJsuiView::UpdateViewport(const FGeometry& Geometry)
 	float R = RequestedRatio;
 	if (R <= 0)
 	{
-		const FVector2D At = Geometry.GetAbsolutePosition();
+		const FVector2D At = Geometry.GetAbsolutePosition() - WindowOffset;  // on the desktop
 		R = FMath::Max(1.f, FPlatformApplicationMisc::GetDPIScaleFactorAtPoint(At.X, At.Y));
 	}
 	const int32 W = FMath::Max(1, FMath::RoundToInt(PixelWidth / R));
