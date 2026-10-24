@@ -63,9 +63,11 @@ test('HostBuffer.get: typed array over host storage, reused while it stays put, 
 test('hooks: useHostBuffer re-renders per change, the selector only when its result changes, listeners never', async () => {
   const renders = { all: 0, count: 0, listen: 0 };
   const heard = [];
+  const views = [];
   function All() {
     renders.all++;
     const b = useHostBuffer('enemies');
+    if (b && views[views.length - 1] !== b) views.push(b);
     return h(Text, { nativeID: 'all' }, b ? Array.from(b).join(',') : 'none');
   }
   function Count() {
@@ -98,6 +100,9 @@ test('hooks: useHostBuffer re-renders per change, the selector only when its res
   assert.equal(renders.count, r1.count, 'same count: no re-render');
   assert.equal(renders.listen, 1, 'listeners do not re-render');
   assert.deepEqual(heard, [[1, 2, 3, 4], [5, 6, 7, 8]]);
+  // A new object per version (memoized code sees the change), over the same memory.
+  assert.equal(views.length, 2);
+  assert.equal(views[0].buffer, views[1].buffer);
 
   mock.setHostBuffer('enemies', new Float32Array([1, 1, 2, 2, 3, 3]));
   mock.tickBuffers();

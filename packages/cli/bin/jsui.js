@@ -14,7 +14,8 @@ import { skillCommand, SKILL_USAGE } from '../src/skill.js';
 
 const USAGE = `usage:
   jsui build <entry> [-o dist/bundle.js] [--minify] [--sourcemap] [--dev]
-  jsui dev <entry> [--port 5173] [--host 127.0.0.1] [--no-hmr]
+     [--react-compiler [--compiler-report]]
+  jsui dev <entry> [--port 5173] [--host 127.0.0.1] [--no-hmr] [--react-compiler]
      [--headless [view options]]
      Every runtime that loads the bundle in dev mode joins the server's shared
      session: http://127.0.0.1:5173/shared in a browser, the native viewer
@@ -47,6 +48,11 @@ ${SKILL_USAGE}
 'react-native' imports are aliased to @orktes/jsui-react; JSX works in .js/.jsx/.tsx.
 jsui dev hot-updates edited components in place (React Fast Refresh, state is
 kept); --no-hmr reloads the whole bundle on every change instead.
+--react-compiler runs React Compiler on the app's sources (not node_modules):
+components and hooks are memoized automatically (build, dev, screenshot /
+inspect / run; --no-react-compiler is the default). Components it cannot
+compile (they break the Rules of React) run as written: --compiler-report
+lists them.
 screenshot / inspect / run render with the CPU WebAssembly runtime in Node
 (deterministic; no browser or GPU). 'jsui run --help' lists the script steps.`;
 
@@ -80,6 +86,13 @@ function num(v, name, fallback) {
 
 class UsageError extends Error {}
 
+// --react-compiler / --no-react-compiler; undefined keeps the default.
+function reactCompilerOption(values) {
+  if (values['no-react-compiler']) return false;
+  if (values['react-compiler']) return true;
+  return undefined;
+}
+
 function json(v, name) {
   try {
     return JSON.parse(v);
@@ -112,6 +125,7 @@ function viewOptions(values, entry) {
     props: values.props ? json(values.props, 'props') : undefined,
     state,
     dev: !!values.dev,
+    reactCompiler: reactCompilerOption(values),
     onLog: (level, text) => {
       if (level >= 2) process.stderr.write((level >= 3 ? 'error: ' : 'warn: ') + text + '\n');
     },
@@ -229,6 +243,9 @@ async function main(argv) {
       port: { type: 'string', short: 'p' },
       host: { type: 'string' },
       'no-hmr': { type: 'boolean' },
+      'react-compiler': { type: 'boolean' },
+      'no-react-compiler': { type: 'boolean' },
+      'compiler-report': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       ...VIEW_OPTIONS,
     },
@@ -295,8 +312,14 @@ async function main(argv) {
         minify: !!values.minify,
         sourcemap: !!values.sourcemap,
         mode: values.dev ? 'development' : 'production',
+        reactCompiler: reactCompilerOption(values),
       });
-      console.log(`jsui: wrote ${r.outfile} (${(r.bytes / 1024).toFixed(1)} KiB, ${r.assets.length} assets) in ${Date.now() - t0} ms`);
+      const rc = r.reactCompiler;
+      const compiled = rc ? `, React Compiler: ${rc.functions} functions in ${rc.files} files${rc.skipped.length ? `, ${rc.skipped.length} skipped` : ''}` : '';
+      console.log(`jsui: wrote ${r.outfile} (${(r.bytes / 1024).toFixed(1)} KiB, ${r.assets.length} assets${compiled}) in ${Date.now() - t0} ms`);
+      if (rc && values['compiler-report']) {
+        for (const s of rc.skipped) console.log(`  skipped ${s.name || '(anonymous)'} (${s.where}${s.line ? `, line ${s.line}` : ''}): ${s.reason}`);
+      }
       return 0;
     } catch (e) {
       console.error('jsui: build failed\n' + (e && e.message ? e.message : e));
@@ -315,7 +338,7 @@ async function main(argv) {
         const v = viewOptions(values, entry);
         headlessView = { width: v.width, height: v.height, scale: v.scale, fps: v.fps, component: v.component, props: v.props, state: v.state };
       }
-      const server = await dev({ entry, port, host: values.host || '127.0.0.1', hmr: !values['no-hmr'], headless: headlessView });
+      const server = await dev({ entry, port, host: values.host || '127.0.0.1', hmr: !values['no-hmr'], reactCompiler: reactCompilerOption(values), headless: headlessView });
       const stop = async () => {
         await server.close();
         process.exit(0);

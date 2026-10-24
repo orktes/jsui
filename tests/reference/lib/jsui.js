@@ -73,7 +73,11 @@ export async function buildJsuiBundle(entry, outFile) {
   try {
     const kind = await jsuiBuilderKind();
     if (kind === 'cli') {
-      await (await loadCliBuild())({ entry: bootstrap, outfile: outFile, minify: false, sourcemap: false });
+      // JSUI_REF_REACT_COMPILER=0|1 overrides the CLI's default (React
+      // Compiler on/off), e.g. to check that both render the same pixels.
+      const rc = process.env.JSUI_REF_REACT_COMPILER;
+      const reactCompiler = rc === undefined || rc === '' ? undefined : rc !== '0';
+      await (await loadCliBuild())({ entry: bootstrap, outfile: outFile, minify: false, sourcemap: false, reactCompiler });
       return { kind };
     }
     const target = kind === 'package' ? '@orktes/jsui-react' : FALLBACK_RN;

@@ -5,7 +5,7 @@
 //              [--paint incremental|full|none] [--mouse-sweep X,Y0,Y1,FRAMES]
 //              [--patch-state KEY,N] [--surfaces N[,changing|same|one|resize]]
 //              [--markers N,json|buffer|native] [--wheel X,Y,DY[,FRAMES]]
-//              [--react-stats] [--name NAME] [--json out.json]
+//              [--react-stats] [--name NAME] [--json out.json] [--dump out.pam]
 //   jsui-bench --suite DIR [--json out.json] [--compare baseline.json]
 //
 // --suite runs the standard scenarios from DIR (built by tools/jsui-bench/run.sh):
@@ -40,6 +40,8 @@
 // into JS (jsCalls) and microtasks run (jsJobs), messages JS posted to the
 // host, ... --react-stats adds React commits and the components each commit
 // rendered (through React's DevTools hook, so it costs JS time itself).
+// --dump writes the last frame (fully repainted, plus each surface's) as a
+// binary PAM (RGBA) image, to compare two builds of a bundle pixel by pixel.
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -165,6 +167,7 @@ struct Options {
   float wheelX = 0, wheelY = 0, wheelDy = 12;
   int wheelFrames = 60;
   bool reactStats = false;
+  std::string dump;
 };
 
 // Columns of the report.
@@ -451,6 +454,21 @@ bool run(const Options& o, Result* out) {
     out->extra[6] = messages.reactCommits / f;
     out->extra[7] = messages.reactRenders / f;
   }
+  if (!o.dump.empty()) {
+    // The main surface, then each surface below it, in one image.
+    int h2 = o.height + int(surfaces.size()) * kPlateH;
+    std::vector<uint32_t> img(size_t(o.width) * size_t(h2), 0);
+    jsui_render_rgba(h, img.data(), o.width, o.height, rowBytes);
+    for (size_t i = 0; i < surfaces.size(); i++) {
+      jsui_render_rgba(surfaces[i], platePx[i].data(), kPlateW, kPlateH, kPlateW * 4);
+      for (int y = 0; y < kPlateH; y++)
+        std::copy_n(platePx[i].data() + size_t(y) * kPlateW, std::min(kPlateW, o.width),
+                    img.data() + (size_t(o.height) + i * kPlateH + y) * o.width);
+    }
+    std::ofstream f(o.dump, std::ios::binary);
+    f << "P7\nWIDTH " << o.width << "\nHEIGHT " << h2 << "\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n";
+    f.write(reinterpret_cast<const char*>(img.data()), std::streamsize(img.size() * 4));
+  }
   if (const char* err = jsui_last_error(h); err && *err) std::fprintf(stderr, "[bench] %s: last error: %s\n", o.name.c_str(), err);
   jsui_destroy(h);
   return true;
@@ -645,13 +663,15 @@ int main(int argc, char** argv) {
       o.wheelFrames = std::max(1, o.wheelFrames);
     } else if (a == "--react-stats") {
       o.reactStats = true;
+    } else if (a == "--dump") {
+      o.dump = next();
     } else if (a == "-h" || a == "--help") {
       std::printf(
           "usage: jsui-bench <bundle.js> [--frames N] [--warmup N] [--width W] [--height H]\n"
           "                  [--paint incremental|full|none] [--mouse-sweep X,Y0,Y1,FRAMES]\n"
           "                  [--patch-state KEY,SLOTS] [--surfaces N[,changing|same|one|resize]]\n"
           "                  [--markers N,json|buffer|native] [--wheel X,Y,DY[,FRAMES]]\n"
-          "                  [--react-stats] [--name NAME] [--json out.json]\n"
+          "                  [--react-stats] [--name NAME] [--json out.json] [--dump out.pam]\n"
           "       jsui-bench --suite DIR [--json out.json] [--compare baseline.json]\n");
       return 0;
     } else o.bundle = a;

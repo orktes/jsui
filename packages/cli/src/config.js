@@ -3,6 +3,7 @@
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { assetPlugin } from './assets.js';
+import { reactCompilerPlugin } from './react-compiler.js';
 
 const require = createRequire(import.meta.url);
 
@@ -23,7 +24,7 @@ const SHIMS = {
 
 // These must resolve to the single copy @orktes/jsui-react was built against, or
 // hooks break (two Reacts) and the reconciler/react versions mismatch.
-const SINGLETONS = /^(react|react\/jsx-runtime|react\/jsx-dev-runtime|react-reconciler|react-reconciler\/constants|scheduler)$/;
+const SINGLETONS = /^(react|react\/jsx-runtime|react\/jsx-dev-runtime|react\/compiler-runtime|react-reconciler|react-reconciler\/constants|scheduler)$/;
 
 function aliasPlugin() {
   return {
@@ -55,6 +56,10 @@ function aliasPlugin() {
  * @param {boolean} [o.minify]
  * @param {boolean|'inline'} [o.sourcemap]
  * @param {Map<string, Buffer>} o.assets
+ * @param {boolean} [o.reactCompiler]  run React Compiler on the app's sources
+ * @param {object} [o.compilerReport]  filled with what it compiled and skipped
+ * @param {boolean} [o.compilerHmr]  compile for hot updates (jsui dev with HMR)
+ * @param {(msg: string) => void} [o.log]
  */
 export function esbuildOptions(o) {
   const dev = o.mode === 'development';
@@ -88,7 +93,11 @@ export function esbuildOptions(o) {
     // Libraries sometimes read process.* beyond NODE_ENV.
     banner: { js: `var process = globalThis.process || { env: { NODE_ENV: ${JSON.stringify(o.mode)} }, platform: "jsui", nextTick: function (f) { Promise.resolve().then(f); } };` },
     logLevel: 'silent',
-    plugins: [aliasPlugin(), assetPlugin(o.assets)],
+    plugins: [
+      aliasPlugin(),
+      assetPlugin(o.assets),
+      ...(o.reactCompiler ? [reactCompilerPlugin({ reactDir: jsuiReactDir(), sourcemap: !!o.sourcemap, hmr: !!o.compilerHmr, report: o.compilerReport, log: o.log })] : []),
+    ],
     metafile: true,
   };
 }
