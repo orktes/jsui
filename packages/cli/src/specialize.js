@@ -8,6 +8,8 @@
 // (esbuild's minifySyntax then drops the dead branches), and the fragment
 // ref bookkeeping, which our host config makes a no-op (createFragmentInstance
 // returns null, so no fiber ever holds a fragment instance), is removed.
+// One more patch is a pure speedup of React's lazy context propagation for
+// an interpreter (see the patch list).
 //
 // Only renderer.js's import is specialized: any other importer of
 // react-reconciler (an app's own custom renderer) gets it as published.
@@ -58,6 +60,22 @@ function patches() {
     '',
     1,
   ]);
+  // Lazy context propagation (propagateParentContextChanges): a fiber that
+  // bails out walks its ancestors up to one already walked this render
+  // (DidPropagateContext, 262144), looking for providers whose value
+  // changed. Siblings never stop early, so 500 memo rows that bail out walk
+  // the whole ancestor chain 500 times. When the walk found no changed
+  // provider, the parent's own walk (the same chain, minus this fiber) finds
+  // none either, so the parent is marked: siblings stop there. The walk from
+  // a sibling inside a propagation bailout (NeedsPropagation) ignores the
+  // mark, as before. Provider values are fixed for the render, and the flag
+  // is cleared with the others in createWorkInProgress.
+  list.push([
+    'context propagation: mark the parent',
+    /\n    workInProgress\.flags \|= 262144;\n    return null !== current;\n/g,
+    '\n    workInProgress.flags |= 262144;\n    null === current && null !== workInProgress.return && (workInProgress.return.flags |= 262144);\n    return null !== current;\n',
+    1,
+  ]);
   return list;
 }
 
@@ -93,6 +111,8 @@ export function specializePlugin({ reactDir, log }) {
   return {
     name: 'jsui-specialize-reconciler',
     setup(build) {
+      // JSUI_REACT_PATCHES=0: bundle react-reconciler as published (A/B measurements).
+      if (process.env.JSUI_REACT_PATCHES === '0') return;
       build.onResolve({ filter: /^react-reconciler$/ }, async (args) => {
         if (args.importer !== renderer || (args.pluginData && args.pluginData.jsuiSpecialize)) return undefined;
         const r = await build.resolve('react-reconciler/cjs/react-reconciler.production.js', {
