@@ -5,6 +5,7 @@
 //
 //   node web/test/browser.test.mjs            (needs web/dist from the wasm build)
 //   JSUI_WEB_STRICT=1 node web/test/browser.test.mjs
+//   JSUI_WEB_REAL_GPU=1 node web/test/browser.test.mjs   (installed Chrome, headed, real GPU)
 //   JSUI_JS=host node web/test/browser.test.mjs    (bundles run on the page's own
 //       JS engine: createJsui({ js: 'host' }), docs/ARCHITECTURE.md "Host JS engine")
 //   JSUI_WEB_DIST=dist-webgl node web/test/browser.test.mjs   (the GPU module,
@@ -47,6 +48,11 @@ setDevColor('#ff8800');
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
+  // Headed Chrome (JSUI_WEB_REAL_GPU) asks for a favicon: not a page error.
+  if (url.pathname === '/favicon.ico') {
+    res.writeHead(204);
+    return res.end();
+  }
   if (url.pathname === '/__jsui/version') {
     res.writeHead(200, { 'content-type': 'text/plain', 'cache-control': 'no-store' });
     return res.end(dev.version);
@@ -102,13 +108,21 @@ const JS = process.env.JSUI_JS || '';
 const PAGE = `${ORIGIN}/test/page.html${JS ? '?js=' + encodeURIComponent(JS) : ''}`;
 
 // ------------------------------------------------------------------ harness
-const browser = await chromium.launch({
-  args: ['--enable-unsafe-swiftshader', '--use-angle=swiftshader', '--ignore-gpu-blocklist',
-    '--force-color-profile=srgb',
-    // WebGPU on SwiftShader; Vulkan-backed so canvas presentation works headless
-    // (without it the device breaks once a canvas texture is used).
-    '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-vulkan=swiftshader'],
-});
+// JSUI_WEB_REAL_GPU=1: the installed Google Chrome, headed, on the machine's
+// GPU (WebGL on ANGLE / the platform API, WebGPU on the real adapter).
+const browser = process.env.JSUI_WEB_REAL_GPU
+  ? await chromium.launch({ channel: 'chrome', headless: false,
+    args: ['--ignore-gpu-blocklist', '--force-color-profile=srgb', '--enable-unsafe-webgpu',
+      // Every test opens a window; those behind it must keep their rAF running.
+      '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding',
+      '--disable-background-timer-throttling'] })
+  : await chromium.launch({
+    args: ['--enable-unsafe-swiftshader', '--use-angle=swiftshader', '--ignore-gpu-blocklist',
+      '--force-color-profile=srgb',
+      // WebGPU on SwiftShader; Vulkan-backed so canvas presentation works headless
+      // (without it the device breaks once a canvas texture is used).
+      '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-vulkan=swiftshader'],
+  });
 
 class Skip extends Error {}
 const skip = (why, soft = false) => { const e = new Skip(why); e.soft = soft; throw e; };
@@ -128,6 +142,9 @@ const fmt = (px) => `(${Array.from(px).join(',')})`;
 
 async function newPage(ctxOpts) {
   const context = await browser.newContext({ viewport: { width: 800, height: 600 }, deviceScaleFactor: 1, ...ctxOpts });
+  // Headed Chrome opens its native context menu on an unhandled right click
+  // (passThrough tests), which swallows the mouse until dismissed.
+  if (process.env.JSUI_WEB_REAL_GPU) await context.addInitScript(() => window.addEventListener('contextmenu', (e) => e.preventDefault()));
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
@@ -645,7 +662,10 @@ test("default renderer 'auto' uses the GPU when the module has it", async ({ pag
     const M = window.hosts.ui.module;
     return !!M._jsui_gpu_create_gl && !!M.GL && webglAvailable(true);
   });
-  if (hasGpu) assert(info.renderer.startsWith('gpu-webgl'), `auto with the GPU module: ${info.renderer}`);
+  // On a hardware WebGPU adapter (JSUI_WEB_REAL_GPU) 'auto' prefers WebGPU;
+  // SwiftShader's software adapter is skipped, so WebGL there.
+  if (info.renderer === 'webgpu') assert(process.env.JSUI_WEB_REAL_GPU, 'auto picked WebGPU on a software adapter');
+  else if (hasGpu) assert(info.renderer.startsWith('gpu-webgl'), `auto with the GPU module: ${info.renderer}`);
   else assert(info.renderer.startsWith('webgl'), `auto with the CPU module: ${info.renderer}`);
   const px = await screenPixels(page, '#ui', BANDS);
   [RED, GREEN].forEach((want, i) => assert(near(px[i], want), `band ${i}: ${fmt(px[i])}`));
