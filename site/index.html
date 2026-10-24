@@ -270,10 +270,16 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
           if (load()) video.play().catch(() => {});
           else publish();
         });
-        // The poster (an <img>, another texture source) until the first frame.
+        // The poster (an <img>, another texture source) until the first frame:
+        // set unless the video has a frame the browser lets us upload (WebKit
+        // refuses this one as cross-origin). setTexture is a Promise in worker mode.
         const img = new Image();
         img.crossOrigin = 'anonymous';
-        img.onload = () => { if (open && video && video.readyState < 2) jsui.setTexture('trailer', img); };
+        img.onload = async () => {
+          if (!open || !video) return;
+          if (video.readyState >= 2 && await jsui.setTexture('trailer', video)) return;
+          if (open) jsui.setTexture('trailer', img);
+        };
         img.src = POSTER;
         load();
       };

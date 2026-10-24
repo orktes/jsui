@@ -58,11 +58,16 @@ export const corsWarning = (name) => `host texture "${name}": the source is cros
 // once per display frame where there is none. Playwright WebKit 26 on macOS
 // loses every WebGL context of the page within half a second of a frame
 // callback on a playing video (restored ~40 ms later; the video's play()
-// is aborted). A WebGL context loss within RVFC_SUSPECT_MS of play() on a
-// video with a frame callback (videoFramesContextLost) switches
-// every bound video of the page to polling, and later binds start there.
+// is aborted), or, with the runtime in a worker, presents nothing for ~6 s
+// and then loses them. So WebKit (navigator.vendor: Safari and every iOS
+// browser) polls from the start. Elsewhere a WebGL context loss within
+// RVFC_SUSPECT_MS of play() on a video with a frame callback
+// (videoFramesContextLost) switches every bound video of the page to
+// polling, and later binds start there.
 const RVFC_SUSPECT_MS = 1000;
+const COUNT_TICKS = 3, COUNT_STALL_S = 1 / 15;  // polling: when the frame count decides (below)
 let rvfcOff = false;
+const webkit = () => globalThis.navigator?.vendor === 'Apple Computer, Inc.';
 const frameWatches = new Set();
 
 /** Calls `onFrame` for each new frame of `video` (see above). Returns a
@@ -70,18 +75,37 @@ const frameWatches = new Set();
 export function watchVideoFrames(video, onFrame) {
   const frames = () => video.getVideoPlaybackQuality?.().totalVideoFrames ?? -1;
   // The frame showing now is the caller's (bindVideo uploads it right away).
-  const w = { mode: 'poll', handle: 0, raf: 0, armed: -Infinity, time: video.currentTime, frames: frames(), stopped: false };
+  const w = { mode: 'poll', handle: 0, raf: 0, armed: -Infinity, time: video.currentTime, frames: frames(), ticks: 0, stopped: false };
   const abort = has('AbortController') ? new AbortController() : null;
   const fire = () => {
     w.time = video.currentTime;
     w.frames = frames();
     onFrame();
   };
-  // Polling uploads only when the playback position or the decoded frame count moved.
+  // Polling uploads only when the decoded frame count or the playback
+  // position moved. The position moves every display frame while playing.
+  // The count ticks once per video frame in Chrome for a visible video, but
+  // in jumps of up to ~7 for a tiny hidden one (the showcase's), and WebKit's
+  // (H.264) jumps ~45 frames about every 1.5 s. So the count decides alone
+  // while playing (one upload per video frame, not per display frame) only
+  // after COUNT_TICKS ticks of one or two frames in a row, and only until
+  // the position moves COUNT_STALL_S without a tick. Paused, a seek uploads.
   const poll = () => {
     if (w.stopped) return;
     w.raf = requestAnimationFrame(poll);
-    if (video.readyState >= 2 && (video.currentTime !== w.time || frames() !== w.frames)) fire();
+    if (video.readyState < 2) return;
+    const f = frames(), t = video.currentTime;
+    if (f !== w.frames) {
+      const d = f - w.frames;
+      w.ticks = d >= 1 && d <= 2 ? w.ticks + 1 : 0;
+      fire();
+    } else if (t !== w.time) {
+      if (w.ticks >= COUNT_TICKS && video.paused === false) {
+        if (Math.abs(t - w.time) < COUNT_STALL_S) return;
+        w.ticks = 0;
+      }
+      fire();
+    }
   };
   const callback = () => {
     if (w.stopped || w.mode !== 'rvfc') return;
@@ -94,7 +118,7 @@ export function watchVideoFrames(video, onFrame) {
     w.mode = 'poll';
     w.raf = requestAnimationFrame(poll);
   };
-  if (!rvfcOff && typeof video.requestVideoFrameCallback === 'function') {
+  if (!rvfcOff && !webkit() && typeof video.requestVideoFrameCallback === 'function') {
     w.mode = 'rvfc';
     // Armed from play() on: WebKit loses the context before 'playing' (and
     // then aborts the play()).
