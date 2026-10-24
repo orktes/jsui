@@ -642,6 +642,49 @@ to render into RenderingDevice textures (integrations/godot/README.md,
   also runs the demo on Vulkan (lavapipe) and compares the GPU frame with
   the CPU raster. Metal compiles in the macOS CI job but is not run there.
 
+### Direct3D 12 / 11 (Skia Ganesh, Windows)
+
+`jsui_gpu_create_d3d12(device, queue)` / `jsui_gpu_create_d3d11(device)`
+with `jsui_render_gpu_target` (`src/render/gpu_d3d.cpp`, CMake option
+`JSUI_D3D`) draw with Skia **Ganesh** on Direct3D 12 (Graphite has no
+Direct3D backend) for D3D hosts: Unreal and Godot on D3D12, Unity on D3D11
+or D3D12. `JsuiGpuTarget.texture` is an `ID3D12Resource*` /
+`ID3D11Texture2D*`, `format` a `DXGI_FORMAT` (0: the resource's own),
+`layout` / `final_layout` D3D12 resource states.
+
+* **D3D12: the host's device and queue.** Ganesh runs on the host's
+  `ID3D12Device` and DIRECT queue (adapter found by the device's LUID).
+  The target is wrapped per frame in its entry state; Ganesh records and
+  tracks its own transitions but cannot end in a state of the caller's
+  choosing (its flush ignores a new `MutableTextureState` on D3D), so after
+  Skia's submit the render executes one command list of its own on the
+  queue with the transition from the state Skia left it in to
+  `final_layout`, and those returning sampled host textures to their home
+  state (`JsuiTexture.usage`, 0: `PIXEL_SHADER_RESOURCE`; Godot's mirror
+  textures live in `COPY_DEST`). No CPU wait; its lists are recycled on a
+  fence of its own.
+* **Frames.** With `JSUI_GPU_INCREMENTAL` the target is the retained frame
+  (as on Graphite); without it small damage goes into a retained frame of
+  the context's, drawn into the target whole, as in the GL backend.
+* **D3D11: a D3D12 device beside the host's.** The context creates a D3D12
+  device on the D3D11 device's adapter and its own queue. Each runtime
+  draws into a shared texture (D3D12 `HEAP_FLAG_SHARED` +
+  `ALLOW_SIMULTANEOUS_ACCESS`, opened with `OpenSharedResource1`), which is
+  also its retained frame, ordered by one shared fence (D3D11 signal ->
+  D3D12 wait, Skia's work, after which the texture decays to `COMMON`, D3D12 signal
+  -> D3D11 wait) and copied into the host's texture on the immediate
+  context (`CopySubresourceRegion`; just the damage with
+  `JSUI_GPU_INCREMENTAL`). The host texture needs no special flags.
+* **Build.** `scripts/build-skia-desktop.sh` on Windows builds m157 with
+  `skia_use_direct3d`; `JSUI_D3D` then defaults on and links `d3d12`,
+  `d3d11`, `dxgi`, `dxguid`.
+* **Tests.** `tests/native/d3d_test.cpp` uses WARP (no GPU needed): D3D12
+  incremental and retained-frame frames compared with the CPU raster, a
+  host texture kept in `COPY_DEST`, and the D3D11 path on a WARP D3D11
+  device (incremental, full, `JSUI_GPU_NO_CLEAR`). With the D3D12 debug
+  layer installed it also fails on debug-layer errors.
+  `JSUI_D3D_TEST_REQUIRE=1` (the Windows CI job) turns skips into failures.
+
 ### Dawn native (Skia Graphite on a host's Dawn)
 
 `jsui_gpu_create_dawn_procs(wgpu_get_proc_address, instance, device, queue)`
@@ -954,12 +997,13 @@ const size = useHostTexture('trailer');   // { width, height } once set, else nu
   `SkImage`, so every renderer shows it, the CPU raster included; GPU
   backends upload it like any image) or a GPU texture of the device the
   runtime renders with (`jsui_set_texture` with a `JsuiTexture`: a GL
-  texture name, `WGPUTexture`, `VkImage` or `id<MTLTexture>`), sampled in
+  texture name, `WGPUTexture`, `VkImage`, `id<MTLTexture>` or
+  `ID3D12Resource*`), sampled in
   place with no copy. The description stays the host's: each GPU backend
   wraps it as an `SkImage` of its own device inside its render
   (`TextureWrapper`, made current by a thread-local `TextureScope` around
   the frame, like `LayerCacheScope`): `SkImages::BorrowTextureFrom` on
-  Ganesh GL / Metal, `SkImages::WrapTexture` on Graphite (Vulkan in
+  Ganesh GL / Metal / D3D12, `SkImages::WrapTexture` on Graphite (Vulkan in
   `SHADER_READ_ONLY_OPTIMAL`, Metal, Dawn / browser WebGPU). The painter
   only asks `HostTextures::image()`, so it stays backend independent. A
   canvas that cannot sample a kind (the CPU raster for a GPU texture, a GL

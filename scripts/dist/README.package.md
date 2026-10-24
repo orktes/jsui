@@ -51,8 +51,9 @@ See the repository's `docs/ARCHITECTURE.md` and `integrations/` for hosts
 - Linux: built on Ubuntu 24.04 (glibc 2.39 or newer). Needs
   `libfontconfig1` at run time. GPU: Ganesh on OpenGL / EGL, Graphite on
   Vulkan (`jsui_gpu_create_vulkan`) and on a host's Dawn.
-- Windows: x64, static C runtime inside the DLL. GPU: Ganesh on OpenGL. Uses
-  Skia m124 (the other platforms use m157), which has no Graphite yet.
+- Windows: x64, static C runtime inside the DLL. GPU: Skia Ganesh on
+  Direct3D 12 (`jsui_gpu_create_d3d12`, and `jsui_gpu_create_d3d11` for D3D11
+  hosts), Graphite on Vulkan (`jsui_gpu_create_vulkan`), Ganesh on OpenGL.
 
 Licenses: JSUI is MIT (`LICENSE`); the bundled third-party code is listed in
 `THIRD_PARTY_NOTICES.md`; the embedded Inter font is OFL (`Inter-LICENSE.txt`).
