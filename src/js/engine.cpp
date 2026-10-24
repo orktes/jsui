@@ -325,6 +325,13 @@ void JsEngine::Impl::dropPending(uint64_t id) {
 
 namespace {
 
+// Garbage collection between frames (QuickJsEngine::collectIdle): time per
+// young collection slice, and the longest a deferred young (in ticks) or
+// full collection waits for a light / idle tick.
+constexpr double kGcSliceMs = 2.0;
+constexpr int kGcMaxWaitTicks = 8;
+constexpr int kGcFullMaxWaitTicks = 120;
+
 // ------------------------------------------------------------- timers
 
 JSValue js_setTimer(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv, int repeat) {
@@ -538,7 +545,7 @@ class QuickJsEngine final : public JsEngine {
   void beginBatch() override;
   void endBatch() override;
   size_t memoryUsage() const override;
-  bool collectIdle(bool light) override;
+  bool collectIdle(bool light, bool idle) override;
   GcStats gcStats(bool reset) override;
 
  private:
@@ -577,6 +584,9 @@ QuickJsEngine::QuickJsEngine(Runtime& rt) : impl_(std::make_unique<Impl>(rt)) {
   // Runtime::tick runs them between frames (collectIdle).
   JS_SetGCGenerational(impl.jrt, true);
   JS_SetGCDeferred(impl.jrt, true, 0);
+  // A page mount leaves tens of thousands of new objects: they are scanned
+  // over several light ticks, the oldest first, about 2 ms at a time.
+  JS_SetGCYoungBudget(impl.jrt, kGcSliceMs);
   JS_SetInterruptHandler(impl.jrt, interruptHandler, &impl);
   JS_SetHostPromiseRejectionTracker(impl.jrt, rejectionTracker, &impl);
   impl.ctx = JS_NewContext(impl.jrt);
@@ -880,18 +890,27 @@ void QuickJsEngine::endBatch() { impl_->leave(); }
 
 size_t QuickJsEngine::memoryUsage() const { return JS_GetMallocSize(impl_->jrt); }
 
-bool QuickJsEngine::collectIdle(bool light) {
+bool QuickJsEngine::collectIdle(bool light, bool idle) {
   Impl& impl = *impl_;
   if (impl.depth > 0) return false;
-  if (!JS_HasPendingGC(impl.jrt)) {
+  if (JS_HasPendingGC(impl.jrt)) {
+    if (!light && ++impl.gcWaitTicks < kGcMaxWaitTicks) return false;
     impl.gcWaitTicks = 0;
-    // A full collection that came due waits for a light tick (the engine
-    // runs it anyway once the heap reaches 2.5x the last full one).
-    return light && JS_RunIdleGC(impl.jrt);
+    JS_RunPendingGC(impl.jrt);
+    return true;
   }
-  if (!light && ++impl.gcWaitTicks < 8) return false;
   impl.gcWaitTicks = 0;
-  return JS_RunIdleGC(impl.jrt);
+  if (!JS_IsFullGCDue(impl.jrt)) {
+    impl.gcFullWaitTicks = 0;
+    return false;
+  }
+  // A full collection scans the whole heap (about 1 ms per MB) in one go:
+  // when nothing moves, or at the latest after a while on a light tick (the
+  // engine runs one anyway once the heap reaches 2.5x the last full one).
+  if (!idle && !(light && ++impl.gcFullWaitTicks >= kGcFullMaxWaitTicks)) return false;
+  impl.gcFullWaitTicks = 0;
+  JS_RunGC(impl.jrt);
+  return true;
 }
 
 JsEngine::GcStats QuickJsEngine::gcStats(bool reset) {

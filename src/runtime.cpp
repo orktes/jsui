@@ -615,11 +615,14 @@ void Runtime::tick(double nowMs) {
   deliverUiCallResults();
   // Shared-session commands run last, on the frame this tick produced.
   if (session) session->tick(devOrigin_);
-  // Cycle collections the engine deferred while JS ran: now, between frames,
-  // if this tick was light (no commit to speak of), else within a few ticks.
+  // Cycle collections the engine deferred while JS ran run between frames:
+  // young ones in light ticks (no commit to speak of), full ones while
+  // nothing moves (see JsEngine::collectIdle).
   if (js) {
     double tickMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tickStart).count();
-    js->collectIdle(tickMs < kLightTickMs);
+    bool idle = !wantsFrame();
+    for (auto& s : surfaces_) idle = idle && !s->needsRedraw();
+    js->collectIdle(tickMs < kLightTickMs, idle);
   }
 }
 

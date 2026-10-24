@@ -107,11 +107,13 @@ class JsEngine {
   // the engine cannot tell).
   virtual size_t memoryUsage() const = 0;
   // Garbage collection between frames. The QuickJS engine collects cycles
-  // generationally and defers collections that come due while JS runs:
-  // collectIdle(light) runs one that is waiting (or a full one that is due)
-  // when the tick was light, or once one has waited a few ticks. Returns
-  // whether it collected.
-  virtual bool collectIdle(bool light) { return false; }
+  // generationally and defers collections that come due while JS runs.
+  // After each tick: a waiting young collection runs (a slice of it) when
+  // the tick was `light` or it has waited a few ticks; a full collection
+  // that came due runs when the runtime is `idle` (nothing to animate or
+  // repaint), or after a long wait on a light tick. Returns whether it
+  // collected.
+  virtual bool collectIdle(bool light, bool idle) { return false; }
   struct GcStats {
     uint64_t collections = 0, full = 0;
     double us = 0, maxUs = 0;

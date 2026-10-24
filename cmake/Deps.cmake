@@ -36,6 +36,8 @@ file(GLOB _qjs_jsui_patches ${CMAKE_CURRENT_LIST_DIR}/../third_party/quickjs-jsu
 list(SORT _qjs_patches)
 list(SORT _qjs_jsui_patches)
 list(APPEND _qjs_patches ${_qjs_jsui_patches})
+# Editing a patch re-runs the configure step (and so applies the patches again).
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_qjs_patches})
 set(_qjs_sum "${quickjs_SOURCE_DIR}")
 foreach(_p IN LISTS _qjs_patches)
   file(SHA256 ${_p} _h)

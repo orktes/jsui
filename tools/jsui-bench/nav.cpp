@@ -39,17 +39,33 @@ int main(int argc, char** argv) {
   std::vector<uint32_t> px(size_t(pw) * ph);
   double t = 0;
   std::vector<double> frames;
+  bool verbose = getenv("JSUI_NAV_VERBOSE") != nullptr;
+  unsigned long long gcSeen = 0;
+  double gcUsSeen = 0;
   auto frame = [&](bool record) {
     double t0 = nowMs();
     jsui_tick(rt, t);
+    double t1 = nowMs();
     JsuiRect d;
     jsui_render_rgba_incremental(rt, px.data(), pw, ph, size_t(pw) * 4, &d);
-    if (record) frames.push_back(nowMs() - t0);
+    double ms = nowMs() - t0;
+    if (record) frames.push_back(ms);
+    if (verbose) {
+      JsuiPerf p;
+      jsui_get_perf(rt, &p, 0);
+      if (p.gc_collections != gcSeen)
+        printf("  frame %zu: tick %.2f render %.2f ms, %llu gc %.2f ms\n", frames.size(), t1 - t0, ms - (t1 - t0),
+               p.gc_collections - gcSeen, (p.gc_us - gcUsSeen) / 1000);
+      gcSeen = p.gc_collections;
+      gcUsSeen = p.gc_us;
+    }
     t += 16.667;
   };
   for (int i = 0; i < 240; i++) frame(false);
   JsuiPerf p;
   jsui_get_perf(rt, &p, 1);
+  gcSeen = 0;
+  gcUsSeen = 0;
   const char* routes[] = {"/screens", "/motion", "/interactions", "/input", "/playground", "/", "/screens", "/motion"};
   for (int round = 0; round < 3; round++)
     for (const char* r : routes) {
