@@ -703,6 +703,76 @@ TEST(render_sprites_match_direct_and_are_reused) {
   }
 }
 
+// A shadowed box springing like a hovered menu button (a sub-pixel
+// translation and a scale every frame, a translucent background, so the box
+// is cut out of the mask) draws its shadow from cached masks while it moves
+// (painter.cpp PaintMotion): after the first frames no mask is blurred
+// again (PaintStats::shadowRenders; one per quantized scale at most, where
+// every frame rendered one before), each frame is within a few levels of the
+// same state painted exactly from scratch, and once it stops the next frame
+// repaints it exactly (incremental == full).
+TEST(render_moving_shadow_reuses_its_mask) {
+  const char* box = R"J({"style":{"position":"absolute","left":40,"top":30,"width":180,"height":52,"borderRadius":10,
+    "backgroundColor":"rgba(26,36,64,0.9)","borderWidth":1,"borderColor":"rgba(148,170,255,0.32)",
+    "boxShadow":"0 4px 12px rgba(0,0,0,0.5)"}})J";
+  // A damped spring towards +14 px and 1.05x (overshooting).
+  auto spring = [](int i) {
+    float k = 1 - std::exp(-float(i) * 0.12f) * std::cos(float(i) * 0.5f);
+    return "{\"transform\":[{\"translateX\":" + std::to_string(14 * k) + "},{\"scale\":" +
+           std::to_string(1 + 0.05f * k) + "}]}";
+  };
+  for (float dpr : {1.f, 1.5f}) {
+    Scene s(320, 140, dpr);
+    Node* n = s.add(box);
+    int dw = s.dw(), dh = s.dh();
+    std::vector<uint32_t> inc(size_t(dw) * dh), full(inc.size());
+    s.doc().layout();
+    s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);
+    int renders = 0, draws = 0, approximate = 0, worst = 0;
+    size_t differ = 0, worstOver = 0;
+    const int frames = 40;
+    for (int i = 1; i <= frames; i++) {
+      patch(n, spring(i));
+      s.doc().layout();
+      s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);
+      PaintStats st = lastPaintStats(s.doc());
+      if (i > 2) renders += st.shadowRenders;  // the first moving frames: the exact mask, then phase 0
+      draws += st.shadowDraws;
+      approximate += s.doc().exactRepaintPending();
+      Scene e(320, 140, dpr);  // the same state, painted exactly
+      patch(e.add(box), spring(i));
+      e.render();
+      PixelDiff d = pixelDiff(inc, e.px);
+      size_t over = 0;  // pixels off by more than 4 levels
+      for (size_t k = 0; k < inc.size(); k++)
+        for (int ch = 0; ch < 4; ch++)
+          if (std::abs(int((inc[k] >> (ch * 8)) & 255) - int((e.px[k] >> (ch * 8)) & 255)) > 4) {
+            over++;
+            break;
+          }
+      worstOver = std::max(worstOver, over);
+      worst = std::max(worst, d.max);
+      differ = std::max(differ, d.count);
+    }
+    std::printf("  dpr %g: %d masks blurred in %d moving frames (%d shadow draws, %d approximate), "
+                "at most %zu pixels differ from exact (%zu by more than 4 levels), by at most %d\n",
+                dpr, renders, frames - 2, draws, approximate, differ, worstOver, worst);
+    CHECK(renders <= 2);
+    CHECK(draws >= frames);
+    CHECK(approximate >= frames - 2);
+    CHECK(worst <= 6);
+    // At rest: the next frame repaints it exactly.
+    CHECK(s.doc().exactRepaintPending());
+    s.doc().layout();
+    s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);
+    CHECK(!s.doc().exactRepaintPending());
+    s.rt->render(full.data(), dw, dh, size_t(dw) * 4);
+    PixelDiff d = pixelDiff(inc, full);
+    if (!matchesFull(d, inc.size())) std::fprintf(stderr, "  dpr %g at rest: %zu pixels differ, max %d\n", dpr, d.count, d.max);
+    CHECK(matchesFull(d, inc.size()));
+  }
+}
+
 // Scrolling by whole device pixels moves the viewport's pixels instead of
 // repainting them (scroll blit): every frame must still match a full
 // repaint, with rounded, bordered, shadowed and clipped cards, images, text
