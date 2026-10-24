@@ -45,8 +45,13 @@ The player takes the examples' options after Unity's own: `--selftest`,
 renderer even where the GPU path works) and `--dev` (with
 `npx jsui dev integrations/shared/ui/app.jsx` and `--bundle
 http://127.0.0.1:5173/bundle.js` for hot reload). `--selftest` is the same
-pass-through check as the other examples (see
-[../README.md](../README.md#build-and-run)) and logs `selftest: ok`.
+pass-through and selection check as the other examples (see
+[../README.md](../README.md#build-and-run)) and logs `selftest: ok`. Its
+clicks go through `JsuiView.HandlePointer`, the entry point Unity's `Input`
+feeds each frame; only the Input Manager itself (OS events to `Input`) is
+skipped, as the legacy input system cannot be injected. `--frame-stats` logs
+real frame times every 10 s (mean, buckets per display refresh, and the
+main thread's waits for JSUI's GPU renders).
 
 ## How it works
 
@@ -106,9 +111,11 @@ pass-through check as the other examples (see
 * **Input pass-through.** `JsuiView` sends mouse input (polled in its
   `Update`, which runs before other scripts) and keyboard and text input (IMGUI
   events, which carry key repeats and typed characters) to the UI first. What
-  the UI did not consume is raised as `PassedMouseDown`, `PassedWheel` and
-  `PassedKeyDown`; the game listens to those instead of `Input`. In the
-  example: drag empty space to orbit, wheel to zoom, Space spawns, Esc pauses.
+  the UI did not consume is raised as `PassedMouseDown` (and its release as
+  `PassedMouseUp`), `PassedWheel` and `PassedKeyDown`; the game listens to
+  those instead of `Input`. The mouse goes through `HandlePointer`, which
+  other input sources can call too. In the example: click a unit to select it,
+  drag empty space to orbit, wheel to zoom, Space spawns, Esc pauses.
   It uses the legacy Input Manager (`Active Input Handling` must be "Input
   Manager (Old)" or "Both"). No gamepad yet.
 * **Game <-> UI.** `OnMessage` delivers `Host.postMessage` calls;

@@ -48,6 +48,9 @@ public:
 	/** A mouse press the UI did not consume (position in UI px). */
 	UPROPERTY(BlueprintAssignable, Category = "JSUI")
 	FJsuiMouseEvent PassedMouseDown;
+	/** The release of a press the UI did not consume (position in UI px). */
+	UPROPERTY(BlueprintAssignable, Category = "JSUI")
+	FJsuiMouseEvent PassedMouseUp;
 	/** A wheel movement the UI did not consume (notches). */
 	UPROPERTY(BlueprintAssignable, Category = "JSUI")
 	FJsuiWheelEvent PassedWheel;
@@ -58,6 +61,7 @@ public:
 	/** Native versions of the events above (no UFUNCTION needed). */
 	TMulticastDelegate<void(const FString&, const FString&)> OnMessageNative;
 	TMulticastDelegate<void(const FKey&, const FVector2D&)> PassedMouseDownNative;
+	TMulticastDelegate<void(const FKey&, const FVector2D&)> PassedMouseUpNative;
 	TMulticastDelegate<void(float)> PassedWheelNative;
 	TMulticastDelegate<void(const FKey&)> PassedKeyDownNative;
 

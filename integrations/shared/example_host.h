@@ -1,9 +1,11 @@
 // What the engine examples (integrations/raylib, sdl3, sokol) share besides
 // the engine glue: command line, the game <-> UI contract of
 // integrations/shared/ui/app.jsx (messages, the `game` state, the `entities`
-// frame data) and the --selftest input script.
+// frame data), click-vs-drag selection, a ray-vs-box test for picking units
+// and the --selftest input script.
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -89,6 +91,7 @@ struct HudState {
   int fps = 0;
   int entities = 0;
   bool paused = false;
+  int selected = -1;                             // index of the selected unit, -1 for none
   int clicks = 0, wheel = 0, keys = 0, pad = 0;  // passed through to the game
 
   // jsui_set_state is a no-op when the text is unchanged, so calling this
@@ -97,9 +100,9 @@ struct HudState {
     char json[512];
     std::snprintf(json, sizeof(json),
                   "{\"engine\":\"%s\",\"renderer\":\"%s\",\"fps\":%d,\"entities\":%d,\"paused\":%s,"
-                  "\"passed\":{\"clicks\":%d,\"wheel\":%d,\"keys\":%d,\"pad\":%d}}",
-                  engine.c_str(), renderer.c_str(), fps, entities, paused ? "true" : "false", clicks, wheel, keys,
-                  pad);
+                  "\"selected\":%d,\"passed\":{\"clicks\":%d,\"wheel\":%d,\"keys\":%d,\"pad\":%d}}",
+                  engine.c_str(), renderer.c_str(), fps, entities, paused ? "true" : "false", selected, clicks, wheel,
+                  keys, pad);
     jsui_set_state(rt, "game", json);
   }
 };
@@ -127,13 +130,80 @@ struct FpsCounter {
   }
 };
 
-// --selftest: once the UI has reported where its Spawn button is, sends
-// synthetic input straight to the runtime and checks the pass-through
-// contract every host relies on:
-//   1. a click on empty space (the middle of the screen) is not consumed,
-//      and jsui_hit_test says nothing is there;
+// Selection by click: a left press the UI passed on to the game, released
+// within a few px of where it went down, is a click (pick the unit under it,
+// or clear the selection on empty ground); anything longer is a camera drag.
+struct ClickTracker {
+  static constexpr float kSlop = 4.f;  // logical px
+  bool down = false;
+  float x0 = 0, y0 = 0, travel = 0;
+  void press(float x, float y) {
+    down = true;
+    x0 = x;
+    y0 = y;
+    travel = 0;
+  }
+  void move(float x, float y) {
+    if (down) travel = std::fmax(travel, std::hypot(x - x0, y - y0));
+  }
+  // On the left release: whether the press was a click.
+  bool release(float x, float y) {
+    move(x, y);
+    bool click = down && travel <= kSlop;
+    down = false;
+    return click;
+  }
+};
+
+// Ray (origin o, direction d) against a box of half extent h around c,
+// turned by `yaw` radians around the vertical axis (y). Returns the distance
+// along d to the first hit, or a negative number for a miss.
+inline float rayBox(const float o[3], const float d[3], const float c[3], const float h[3], float yaw = 0) {
+  // Into the box's frame: translate, then rotate by -yaw around y.
+  float cs = std::cos(yaw), sn = std::sin(yaw);
+  float px = o[0] - c[0], py = o[1] - c[1], pz = o[2] - c[2];
+  float lo[3] = {px * cs + pz * sn, py, -px * sn + pz * cs};
+  float ld[3] = {d[0] * cs + d[2] * sn, d[1], -d[0] * sn + d[2] * cs};
+  float tmin = -1e30f, tmax = 1e30f;
+  for (int a = 0; a < 3; a++) {
+    if (std::fabs(ld[a]) < 1e-8f) {
+      if (lo[a] < -h[a] || lo[a] > h[a]) return -1;
+      continue;
+    }
+    float t1 = (-h[a] - lo[a]) / ld[a], t2 = (h[a] - lo[a]) / ld[a];
+    if (t1 > t2) std::swap(t1, t2);
+    tmin = std::fmax(tmin, t1);
+    tmax = std::fmin(tmax, t2);
+    if (tmin > tmax) return -1;
+  }
+  if (tmax < 0) return -1;
+  return tmin >= 0 ? tmin : tmax;
+}
+
+// What --selftest drives in the host: its own input handling, as real
+// events reach it, and its picking.
+class SelfTestHost {
+ public:
+  virtual ~SelfTestHost() = default;
+  // A left click at (x, y) (logical px): pointer move, press, release, through
+  // the same code the host runs for real mouse events.
+  virtual void click(float x, float y) = 0;
+  // The unit a click at (x, y) selects, or -1.
+  virtual int pick(float x, float y) = 0;
+  // Unit `i`'s centre on screen (logical px); false when it is off screen.
+  virtual bool unitOnScreen(int i, float* x, float* y) = 0;
+};
+
+// --selftest: once the UI has reported where its Spawn button is, clicks
+// through the host's input handling (SelfTestHost::click) and checks the
+// pass-through contract every host relies on:
+//   1. a click on empty space (the middle of the screen) is not consumed:
+//      jsui_hit_test says nothing is there and the game counts the click;
 //   2. a click on the Spawn button is consumed, and its game:spawn message
-//      reaches the host, which adds a unit.
+//      reaches the host, which adds a unit;
+//   3. a click on a unit selects it, and the UI reports the selection back
+//      (ui:selected); a click on empty ground clears it; another click
+//      selects again (so --screenshot shows a selected unit).
 // Prints "selftest: ok" (exit 0) or what failed (exit 1).
 class SelfTest {
  public:
@@ -143,12 +213,16 @@ class SelfTest {
       spawnX_ = float(jsonNumber(json, "x") + jsonNumber(json, "width") / 2);
       spawnY_ = float(jsonNumber(json, "y") + jsonNumber(json, "height") / 2);
       anchors_ = true;
+    } else if (std::strcmp(name, "ui:selected") == 0) {
+      reported_ = int(jsonNumber(json, "index", -1));
+      reports_++;
     }
   }
 
-  // Call once per frame after jsui_tick. `w`, `h`: viewport (logical px).
+  // Call once per frame after jsui_tick. `w`, `h`: viewport (logical px);
+  // `hud`: the game's state (units, selection, pass-through counters).
   // Returns 0 while running, 1 when passed, -1 when failed.
-  int step(JsuiRuntime* rt, float w, float h, int entities) {
+  int step(JsuiRuntime* rt, SelfTestHost& host, float w, float h, const HudState& hud) {
     frame_++;
     switch (phase_) {
       case 0:  // wait for the UI and a few frames of layout
@@ -158,10 +232,9 @@ class SelfTest {
       case 1: {
         float x = w * 0.5f, y = h * 0.45f;
         if (jsui_hit_test(rt, x, y) != 0) return fail("jsui_hit_test reports UI over the empty middle of the screen");
-        jsui_send_mouse_move(rt, x, y);
-        int down = jsui_send_mouse_button(rt, x, y, JSUI_MOUSE_LEFT, 1, 0);
-        int up = jsui_send_mouse_button(rt, x, y, JSUI_MOUSE_LEFT, 0, 0);
-        if (down || up) return fail("a click on empty space was consumed");
+        int clicks = hud.clicks;
+        host.click(x, y);
+        if (hud.clicks != clicks + 1) return fail("a click on empty space did not reach the game");
         std::printf("selftest: empty-space click passed through to the game\n");
         phase_ = 2;
         return 0;
@@ -169,29 +242,59 @@ class SelfTest {
       case 2: {
         if (!(jsui_hit_test(rt, spawnX_, spawnY_) & JSUI_HIT_POINTER))
           return fail("jsui_hit_test misses the Spawn button");
-        before_ = entities;
-        jsui_send_mouse_move(rt, spawnX_, spawnY_);
-        int down = jsui_send_mouse_button(rt, spawnX_, spawnY_, JSUI_MOUSE_LEFT, 1, 0);
-        int up = jsui_send_mouse_button(rt, spawnX_, spawnY_, JSUI_MOUSE_LEFT, 0, 0);
-        if (!down || !up) return fail("the click on the Spawn button was not consumed");
-        jsui_send_mouse_leave(rt);
+        before_ = hud.entities;
+        int clicks = hud.clicks;
+        host.click(spawnX_, spawnY_);
+        if (hud.clicks != clicks) return fail("the click on the Spawn button was passed to the game");
         std::printf("selftest: Spawn button click consumed by the UI\n");
         phase_ = 3;
         wait_ = frame_;
         return 0;
       }
       case 3:
-        if (entities == before_ + 1) {
-          std::printf("selftest: game:spawn reached the game (%d -> %d units)\n", before_, entities);
+        if (hud.entities == before_ + 1) {
+          std::printf("selftest: game:spawn reached the game (%d -> %d units)\n", before_, hud.entities);
           phase_ = 4;
-          wait_ = frame_;
           return 0;
         }
         if (frame_ - wait_ > 120) return fail("game:spawn never arrived");
         return 0;
+      case 4: {  // select a unit, clear, select again
+        float x = 0, y = 0;
+        int want = -1;
+        if (round_ == 1) {
+          if (!emptyGround(rt, host, w, h, &x, &y)) return fail("no empty ground to click");
+        } else {
+          want = clickableUnit(rt, host, hud.entities, w, h, &x, &y);
+          if (want < 0) return fail("no unit on screen to click");
+        }
+        host.click(x, y);
+        if (hud.selected != want) {
+          std::fprintf(stderr, "selftest: clicked (%.0f, %.0f): selected %d, expected %d\n", x, y, hud.selected, want);
+          return fail(want < 0 ? "a click on empty ground did not clear the selection" : "a click on a unit did not select it");
+        }
+        expect_ = want;
+        reportsBefore_ = reports_;
+        phase_ = 5;
+        wait_ = frame_;
+        return 0;
+      }
+      case 5:
+        if (reports_ > reportsBefore_ && reported_ == expect_) {
+          if (expect_ >= 0) std::printf("selftest: a click on unit %d selected it; the UI reports it\n", expect_);
+          else std::printf("selftest: a click on empty ground cleared the selection; the UI reports it\n");
+          if (++round_ < 3) {
+            phase_ = 4;
+          } else {
+            phase_ = 6;
+            wait_ = frame_;
+          }
+          return 0;
+        }
+        if (frame_ - wait_ > 120) return fail("the UI never reported the selection (ui:selected)");
+        return 0;
       default:
-        // A few more frames so the nameplate of the new unit is on screen
-        // for --screenshot.
+        // A few more frames so the selection is on screen for --screenshot.
         if (frame_ - wait_ < 20) return 0;
         std::printf("selftest: ok\n");
         return 1;
@@ -199,13 +302,35 @@ class SelfTest {
   }
 
  private:
+  // A unit whose centre is on screen, away from the edges, not under the UI,
+  // and picked there (not hidden behind another one). The newest first.
+  int clickableUnit(JsuiRuntime* rt, SelfTestHost& host, int count, float w, float h, float* x, float* y) {
+    for (int i = count - 1; i >= 0; i--) {
+      if (!host.unitOnScreen(i, x, y)) continue;
+      if (*x < 40 || *y < 40 || *x > w - 40 || *y > h - 40) continue;
+      if (jsui_hit_test(rt, *x, *y) != 0) continue;
+      if (host.pick(*x, *y) == i) return i;
+    }
+    return -1;
+  }
+  // A point with neither UI nor a unit under it.
+  bool emptyGround(JsuiRuntime* rt, SelfTestHost& host, float w, float h, float* x, float* y) {
+    for (int gy = 2; gy < 10; gy++)
+      for (int gx = 1; gx < 16; gx++) {
+        *x = w * gx / 16.f;
+        *y = h * gy / 12.f;
+        if (jsui_hit_test(rt, *x, *y) == 0 && host.pick(*x, *y) < 0) return true;
+      }
+    return false;
+  }
   int fail(const char* what) {
     std::fprintf(stderr, "selftest: FAILED: %s\n", what);
     return -1;
   }
   bool anchors_ = false;
   float spawnX_ = 0, spawnY_ = 0;
-  int phase_ = 0, before_ = 0;
+  int phase_ = 0, before_ = 0, round_ = 0, expect_ = -1;
+  int reported_ = -1, reports_ = 0, reportsBefore_ = 0;
   long frame_ = 0, wait_ = 0;
 };
 

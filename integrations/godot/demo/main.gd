@@ -431,7 +431,9 @@ func _run_self_test() -> void:
 			if not _anchors.has(a):
 				return false
 		return ui.get_pending_loads() == 0
-	var have_anchors := await _wait_for(anchors_ready, 8.0)
+	# Generous: under Vulkan sync validation on llvmpipe (CI) the first frames
+	# of the entrance take seconds each on a hosted 4-vCPU runner.
+	var have_anchors := await _wait_for(anchors_ready, 20.0)
 	_check("anchors", have_anchors, "missing: %s" % [need.filter(func(a): return not _anchors.has(a))])
 	if not have_anchors:
 		_finish()

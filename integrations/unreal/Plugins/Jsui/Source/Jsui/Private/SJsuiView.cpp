@@ -390,7 +390,9 @@ bool SJsuiView::HandleMouseButton(const FPointerEvent& Event, bool bDown)
 	if (ButtonsDown.Remove(Key) == 0) return false;
 	jsui_send_mouse_button(Runtime(), P.X, P.Y, Button, 0, Mods(Event.GetModifierKeys()));
 	if (Key == EKeys::LeftMouseButton) bPointerCaptured = false;
-	return ButtonsConsumed.Remove(Key) > 0;
+	if (ButtonsConsumed.Remove(Key) > 0) return true;
+	OnPassedMouseUp.Broadcast(Key, P);
+	return false;
 }
 
 bool SJsuiView::HandleWheel(const FPointerEvent& Event)

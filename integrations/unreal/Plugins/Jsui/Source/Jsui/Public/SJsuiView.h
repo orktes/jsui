@@ -85,6 +85,8 @@ public:
 	TMulticastDelegate<void(const FString& /*Name*/, const FString& /*Json*/)> OnMessage;
 	/** A mouse press the UI did not consume: the button and its position (logical px). */
 	TMulticastDelegate<void(const FKey& /*Button*/, const FVector2D& /*Position*/)> OnPassedMouseDown;
+	/** The release of a press the UI did not consume (OnPassedMouseDown): the button and its position (logical px). */
+	TMulticastDelegate<void(const FKey& /*Button*/, const FVector2D& /*Position*/)> OnPassedMouseUp;
 	/** A wheel movement the UI did not consume (notches, positive away from the user). */
 	TMulticastDelegate<void(float /*Delta*/)> OnPassedWheel;
 	/** A key press (not a repeat) the UI did not consume. */
