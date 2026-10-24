@@ -114,7 +114,6 @@ const Toast = memo(function Toast({ t, active, onRemove, onAccept }) {
   const shine = useRef(new Animated.Value(0)).current;
   const leaving = useRef(false);
   const [state, setState] = useState('open'); // open | accepted | declined
-  const [secs, setSecs] = useState(Math.round(DURATION.invite / 1000));
 
   const dismiss = useCallback(() => {
     if (leaving.current) return;
@@ -136,12 +135,13 @@ const Toast = memo(function Toast({ t, active, onRemove, onAccept }) {
     l.start();
     return () => l.stop();
   }, [active]);
-  // Invite countdown (text only; the bar is native).
-  useEffect(() => {
-    if (t.kind !== 'invite' || state !== 'open' || !active) return undefined;
-    const id = setInterval(() => setSecs(Math.max(0, Math.ceil(timer.left.__getValue() * DURATION.invite / 1000))), 500);
-    return () => clearInterval(id);
-  }, [state, active]);
+  // Invite countdown: seconds left of the native timer, formatted natively.
+  const left = timer.left;
+  const secs = useMemo(() => {
+    if (t.kind !== 'invite') return null;
+    const total = DURATION.invite / 1000;
+    return Animated.format(Animated.derive([left], (l) => Math.max(0, Math.ceil(l * total))), { decimals: 0, minDigits: 2, prefix: '0:' });
+  }, [left]);
   useEffect(() => {
     if (t.respond) respond(t.respond);
   }, [t.respond]);
@@ -169,7 +169,7 @@ const Toast = memo(function Toast({ t, active, onRemove, onAccept }) {
   if (t.kind === 'online') {
     return (
       <Animated.View style={[{ alignSelf: 'flex-end' }, anim]}>
-        <Pressable onPress={dismiss} onHoverIn={timer.pause} onHoverOut={timer.resume} style={({ hovered, focused }) => [styles.mini, (hovered || focused) && styles.hot]}>
+        <Pressable onPress={dismiss} onHoverIn={timer.pause} onHoverOut={timer.resume} style={styles.mini} hoveredStyle={styles.hot} focusedStyle={styles.hot}>
           <View style={styles.onlineDot} />
           <Image source={t.data.crest} style={styles.miniAvatar} />
           <Text style={styles.miniText}>
@@ -214,15 +214,15 @@ const Toast = memo(function Toast({ t, active, onRemove, onAccept }) {
                 <Text style={{ color: colors.cyan }}>{t.data.name}</Text> invited you to a party
               </Text>
               <View style={styles.actions}>
-                <Pressable onPress={() => respond(true)} style={({ hovered, focused, pressed }) => [styles.action, styles.accept, (hovered || focused) && styles.acceptHot, pressed && { transform: [{ scale: 0.95 }] }]}>
+                <Pressable onPress={() => respond(true)} style={[styles.action, styles.accept]} hoveredStyle={styles.acceptHot} focusedStyle={styles.acceptHot} pressedStyle={styles.pressed95}>
                   <Text style={styles.acceptText}>Accept</Text>
                   <Text style={styles.actionGlyph}>X</Text>
                 </Pressable>
-                <Pressable onPress={() => respond(false)} style={({ hovered, focused, pressed }) => [styles.action, (hovered || focused) && styles.declineHot, pressed && { transform: [{ scale: 0.95 }] }]}>
+                <Pressable onPress={() => respond(false)} style={styles.action} hoveredStyle={styles.declineHot} focusedStyle={styles.declineHot} pressedStyle={styles.pressed95}>
                   <Text style={styles.declineText}>Decline</Text>
                   <Text style={[styles.actionGlyph, { color: colors.textMute }]}>Y</Text>
                 </Pressable>
-                <Text style={styles.timeout}>0:{String(secs).padStart(2, '0')}</Text>
+                <Animated.Text style={styles.timeout} text={secs} />
               </View>
             </>
           ) : (
@@ -247,8 +247,12 @@ const Toast = memo(function Toast({ t, active, onRemove, onAccept }) {
     );
 
   const kindStyle = t.data.host ? styles.hostToast : t.kind === 'achievement' ? styles.achievement : t.kind === 'loot' ? [styles.loot, { borderColor: accent + '88', borderLeftColor: accent }] : t.kind === 'system' ? styles.system : null;
-  const inner = (hovered, focused) => (
-    <View style={[styles.toast, { borderLeftColor: accent }, kindStyle, state === 'accepted' && styles.accepted, (hovered || focused) && styles.hot]}>
+  const inner = (focusable) => (
+    <View
+      style={[styles.toast, { borderLeftColor: accent }, kindStyle, state === 'accepted' && styles.accepted]}
+      groupHoveredStyle={styles.hot}
+      groupFocusedStyle={focusable ? styles.hot : undefined}
+    >
       {t.kind === 'loot' && t.data.r === 'legendary' ? (
         <Animated.View pointerEvents="none" style={[styles.legendGlow, { opacity: glow }]} />
       ) : null}
@@ -265,12 +269,12 @@ const Toast = memo(function Toast({ t, active, onRemove, onAccept }) {
   return (
     <Animated.View style={anim}>
       {t.kind === 'invite' ? (
-        <Pressable focusable={false} onHoverIn={timer.pause} onHoverOut={timer.resume} style={{ cursor: 'default' }}>
-          {({ hovered }) => inner(hovered, false)}
+        <Pressable focusable={false} group onHoverIn={timer.pause} onHoverOut={timer.resume} style={{ cursor: 'default' }}>
+          {inner(false)}
         </Pressable>
       ) : (
-        <Pressable onPress={dismiss} onHoverIn={timer.pause} onHoverOut={timer.resume} onFocus={timer.pause} onBlur={timer.resume} style={{ cursor: 'pointer' }}>
-          {({ hovered, focused }) => inner(hovered, focused)}
+        <Pressable onPress={dismiss} group onHoverIn={timer.pause} onHoverOut={timer.resume} onFocus={timer.pause} onBlur={timer.resume} style={{ cursor: 'pointer' }}>
+          {inner(true)}
         </Pressable>
       )}
     </Animated.View>
@@ -297,6 +301,33 @@ const FeedRow = memo(function FeedRow({ f, index }) {
       {f.headshot ? <View style={styles.headshot} /> : null}
       <Text style={[styles.feedName, { color: '#ff7f8f' }]}>{f.b}</Text>
     </Animated.View>
+  );
+});
+
+/** Owns its rows, so a new kill re-renders only the feed, not the screen. */
+const KillFeed = memo(function KillFeed({ active }) {
+  const [feed, setFeed] = useState([]);
+  useEffect(() => {
+    if (!active) return undefined;
+    let n = 0;
+    const tick = () => {
+      n++;
+      const a = KILLERS[(n * 3) % KILLERS.length];
+      let b = KILLERS[(n * 5 + 1) % KILLERS.length];
+      if (b === a) b = KILLERS[(n * 5 + 2) % KILLERS.length];
+      stackAnim();
+      setFeed((cur) => [{ id: n, a, b, weapon: WEAPONS[n % 3], mine: a === 'Valkyrie_07', headshot: n % 3 === 0 }, ...cur].slice(0, 4));
+    };
+    tick();
+    const id = setInterval(tick, 2600);
+    return () => clearInterval(id);
+  }, [active]);
+  return (
+    <View style={styles.feed} pointerEvents="none">
+      {feed.map((f, i) => (
+        <FeedRow key={f.id} f={f} index={i} />
+      ))}
+    </View>
   );
 });
 
@@ -385,25 +416,25 @@ const DOCK = [
   { kind: 'area', label: 'Area', color: colors.goldLight },
 ];
 
-function DockButton({ d, n, onPress }) {
+const DockButton = memo(function DockButton({ d, n, onSpawn }) {
+  const hot = useMemo(() => ({ borderColor: d.color, backgroundColor: d.color + '22' }), [d.color]);
   return (
-    <Pressable onPress={onPress} style={{ cursor: 'pointer' }}>
-      {({ hovered, focused, pressed }) => (
-        <View style={[styles.dockBtn, (hovered || focused) && { borderColor: d.color, backgroundColor: d.color + '22' }, pressed && { transform: [{ scale: 0.94 }] }]}>
-          <View style={[styles.dockDot, { backgroundColor: d.color }]} />
-          <Text style={[styles.dockText, (hovered || focused) && { color: '#fff' }]}>{d.label}</Text>
-          <Text style={styles.dockKey}>{n}</Text>
-        </View>
-      )}
+    <Pressable onPress={() => onSpawn(d.kind)} group style={{ cursor: 'pointer' }}>
+      <View style={styles.dockBtn} groupHoveredStyle={hot} groupFocusedStyle={hot} groupPressedStyle={styles.pressed94}>
+        <View style={[styles.dockDot, { backgroundColor: d.color }]} />
+        <Text style={styles.dockText} groupHoveredStyle={styles.white} groupFocusedStyle={styles.white}>
+          {d.label}
+        </Text>
+        <Text style={styles.dockKey}>{n}</Text>
+      </View>
     </Pressable>
   );
-}
+});
 
 // --- screen -------------------------------------------------------------------------------
 
 export default function Notifications({ active = true }) {
   const [toasts, setToasts] = useState([]);
-  const [feed, setFeed] = useState([]);
   const [banner, setBanner] = useState(null);
   const [auto, setAuto] = useState(true);
   const [party, setParty] = useState([]);
@@ -491,21 +522,6 @@ export default function Notifications({ active = true }) {
     const id = setInterval(() => spawn(order[i++ % order.length]), 4200);
     return () => clearInterval(id);
   }, [active, auto]);
-  useEffect(() => {
-    if (!active) return undefined;
-    let n = 0;
-    const tick = () => {
-      n++;
-      const a = KILLERS[(n * 3) % KILLERS.length];
-      let b = KILLERS[(n * 5 + 1) % KILLERS.length];
-      if (b === a) b = KILLERS[(n * 5 + 2) % KILLERS.length];
-      stackAnim();
-      setFeed((cur) => [{ id: n, a, b, weapon: WEAPONS[n % 3], mine: a === 'Valkyrie_07', headshot: n % 3 === 0 }, ...cur].slice(0, 4));
-    };
-    tick();
-    const id = setInterval(tick, 2600);
-    return () => clearInterval(id);
-  }, [active]);
 
   const handled = (e) => {
     e.preventDefault();
@@ -530,11 +546,7 @@ export default function Notifications({ active = true }) {
 
       <Compass active={active} />
 
-      <View style={styles.feed} pointerEvents="none">
-        {feed.map((f, i) => (
-          <FeedRow key={f.id} f={f} index={i} />
-        ))}
-      </View>
+      <KillFeed active={active} />
 
       <View style={styles.bridge} pointerEvents="none">
         <Text style={styles.bridgeTitle}>Host bridge</Text>
@@ -573,18 +585,18 @@ export default function Notifications({ active = true }) {
       <View style={styles.dock}>
         <Text style={styles.dockTitle}>Trigger</Text>
         {DOCK.map((d, i) => (
-          <DockButton key={d.kind} d={d} n={i + 1} onPress={() => spawn(d.kind)} />
+          <DockButton key={d.kind} d={d} n={i + 1} onSpawn={spawn} />
         ))}
         <View style={styles.dockSep} />
-        <Pressable onPress={() => setAuto((a) => !a)} style={{ cursor: 'pointer' }} autoFocus={active}>
-          {({ hovered, focused }) => (
-            <View style={[styles.dockBtn, (hovered || focused) && { borderColor: colors.cyan }]}>
-              <View style={[styles.autoSwitch, auto && styles.autoOn]}>
-                <View style={[styles.autoKnob, auto && { transform: [{ translateX: 12 }], backgroundColor: '#fff' }]} />
-              </View>
-              <Text style={[styles.dockText, (hovered || focused) && { color: '#fff' }]}>Auto</Text>
+        <Pressable onPress={() => setAuto((a) => !a)} group style={{ cursor: 'pointer' }} autoFocus={active}>
+          <View style={styles.dockBtn} groupHoveredStyle={styles.autoHot} groupFocusedStyle={styles.autoHot}>
+            <View style={[styles.autoSwitch, auto && styles.autoOn]}>
+              <View style={[styles.autoKnob, auto && { transform: [{ translateX: 12 }], backgroundColor: '#fff' }]} />
             </View>
-          )}
+            <Text style={styles.dockText} groupHoveredStyle={styles.white} groupFocusedStyle={styles.white}>
+              Auto
+            </Text>
+          </View>
         </Pressable>
       </View>
     </View>
@@ -638,6 +650,10 @@ const styles = StyleSheet.create({
     boxShadow: '0 12px 30px rgba(0,0,0,0.55)',
     overflow: 'hidden',
   },
+  pressed95: { transform: [{ scale: 0.95 }] },
+  pressed94: { transform: [{ scale: 0.94 }] },
+  white: { color: '#fff' },
+  autoHot: { borderColor: colors.cyan },
   hot: { boxShadow: '0 12px 30px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.35)' },
   timerTrack: { position: 'absolute', left: 0, right: 0, bottom: 0, height: 3, backgroundColor: 'rgba(255,255,255,0.06)' },
   timerFill: { position: 'absolute', left: 0, top: 0, bottom: 0, right: 0, transformOrigin: 'left', opacity: 0.85 },
