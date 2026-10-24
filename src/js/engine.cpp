@@ -118,6 +118,71 @@ Value toValue(JSContext* ctx, JSValueConst v, int depth) {
   return Value();
 }
 
+void writeString(JSContext* ctx, JSValueConst v, CommandBuffer::Writer& w) {
+  size_t len = 0;
+  const char* s = JS_ToCStringLen(ctx, &len, v);
+  if (!s) {
+    JS_FreeValue(ctx, JS_GetException(ctx));  // as toStdString: ""
+    w.string("", 0);
+    return;
+  }
+  w.string(s, len);
+  JS_FreeCString(ctx, s);
+}
+
+// toValue, written into a command payload (the reader builds the same Value).
+void writeValue(JSContext* ctx, JSValueConst v, CommandBuffer::Writer& w, int depth) {
+  if (depth > 32) return w.null();
+  if (JS_IsBool(v)) return w.boolean(JS_ToBool(ctx, v));
+  if (JS_IsNumber(v)) {
+    double d = 0;
+    JS_ToFloat64(ctx, &d, v);
+    return w.number(d);
+  }
+  if (JS_IsString(v)) return writeString(ctx, v, w);
+  if (JS_IsArray(v)) {
+    runtimeOf(ctx).doc.perf.counters.valueConversions++;
+    int64_t len = 0;
+    if (JS_GetLength(ctx, v, &len)) {
+      JS_FreeValue(ctx, JS_GetException(ctx));
+      return w.null();
+    }
+    int64_t n = std::min<int64_t>(std::max<int64_t>(len, 0), 1 << 20);
+    w.beginArray(uint32_t(n));
+    for (int64_t i = 0; i < n; i++) {
+      JSValue e = JS_GetPropertyInt64(ctx, v, i);
+      writeValue(ctx, e, w, depth + 1);
+      JS_FreeValue(ctx, e);
+    }
+    return;
+  }
+  if (JS_IsObject(v) && !JS_IsFunction(ctx, v)) {
+    runtimeOf(ctx).doc.perf.counters.valueConversions++;
+    w.beginObject();
+    JSPropertyEnum* props = nullptr;
+    uint32_t n = 0;
+    if (JS_GetOwnPropertyNames(ctx, &props, &n, v, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
+      for (uint32_t i = 0; i < n; i++) {
+        JSValue e = JS_GetProperty(ctx, v, props[i].atom);
+        if (JS_IsException(e)) {
+          JS_FreeValue(ctx, JS_GetException(ctx));  // throwing getter: skip the key
+        } else if (!JS_IsUndefined(e) && !JS_IsFunction(ctx, e)) {
+          if (const std::string* k = implOf(ctx).atomName(props[i].atom)) {
+            w.key(*k);
+            writeValue(ctx, e, w, depth + 1);
+          }
+        }
+        JS_FreeValue(ctx, e);
+      }
+      JS_FreePropertyEnum(ctx, props, n);
+    } else {
+      JS_FreeValue(ctx, JS_GetException(ctx));
+    }
+    return w.endObject();
+  }
+  w.null();
+}
+
 JSValue fromValue(JSContext* ctx, const Value& v) {
   if (v.isBool()) return JS_NewBool(ctx, v.asBool());
   if (v.isNumber()) return JS_NewFloat64(ctx, v.asNumber());
@@ -217,11 +282,18 @@ void JsEngine::Impl::leave() {
   if (--depth == 0 && !draining) drain();
 }
 
+void JsEngine::Impl::applyCommands() {
+  Perf::Scope scope(rt.doc.perf, Phase::Commit);
+  commands.apply(rt);
+}
+
 JSValue JsEngine::Impl::call(JSValueConst fn, JSValueConst thisVal, int argc, JSValueConst* argv) {
   Perf::Scope scope(rt.doc.perf, Phase::Js);
   rt.doc.perf.counters.jsCalls++;
   enter();
   JSValue r = JS_Call(ctx, fn, thisVal, argc, argv);
+  // Native code runs next (the caller, or the next call of a batch).
+  syncPoint();
   if (JS_IsException(r)) {
     reportException();
     r = JS_EXCEPTION;
@@ -249,6 +321,7 @@ void JsEngine::Impl::drain() {
   interrupted = false;
   for (int round = 0; round < 64; round++) {
     runJobsRaw();
+    syncPoint();
     if (!rejections.empty()) {
       auto list = std::move(rejections);
       rejections.clear();
@@ -271,6 +344,7 @@ void JsEngine::Impl::drain() {
       JS_SetPropertyStr(ctx, args[1], "height", JS_NewFloat64(ctx, e.h));
       rt.doc.perf.counters.jsCalls++;
       JSValue r = JS_Call(ctx, fn, JS_UNDEFINED, 2, args);
+      syncPoint();
       if (JS_IsException(r)) reportException();
       JS_FreeValue(ctx, r);
       JS_FreeValue(ctx, args[1]);
@@ -279,6 +353,9 @@ void JsEngine::Impl::drain() {
     JS_FreeValue(ctx, fn);
     JS_FreeValue(ctx, global);
   }
+  // The task is over (its microtasks and the onLayout handlers they led to
+  // ran): what it recorded reaches the native tree.
+  publish();
   depth--;
   draining = false;
 }
@@ -637,6 +714,7 @@ QuickJsEngine::~QuickJsEngine() {
   if (impl.inspector) impl.inspector->detach(ctx);  // holds values of this context
 #endif
   impl.alive.reset();  // loader callbacks still queued become no-ops
+  impl.commands.clear();
   for (auto& [id, p] : impl.pending) {
     impl.rt.loader.cancel(id);
     JS_FreeValue(ctx, p.resolve);
@@ -715,6 +793,7 @@ bool QuickJsEngine::eval(const std::string& source, const std::string& name) {
 #endif
     r = evalSource(impl.ctx, source, name);
   }
+  impl.syncPoint();
   bool ok = !JS_IsException(r);
   if (!ok) impl.reportException();
   JS_FreeValue(impl.ctx, r);

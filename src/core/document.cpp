@@ -14,7 +14,7 @@
 
 namespace jsui {
 
-Document::Document(uint32_t* sharedNextId, Perf* sharedPerf) : perf(sharedPerf ? *sharedPerf : ownPerf_) {
+Document::Document(std::atomic<uint32_t>* sharedNextId, Perf* sharedPerf) : perf(sharedPerf ? *sharedPerf : ownPerf_) {
   if (sharedNextId) idCounter_ = sharedNextId;
   // Layout stays fractional like CSS (no Yoga pixel rounding); the painter
   // snaps box edges to device pixels the way Chrome does.
@@ -37,8 +37,10 @@ Document::~Document() {
   YGConfigFree(yogaConfig_);
 }
 
-Node* Document::createNode(NodeType type) {
-  uint32_t id = (*idCounter_)++;
+Node* Document::createNode(NodeType type) { return createNode(type, idCounter_->fetch_add(1)); }
+
+Node* Document::createNode(NodeType type, uint32_t id) {
+  if (id == 0 || nodes_.count(id)) return nullptr;
   auto node = std::make_unique<Node>(this, id, type);
   Node* raw = node.get();
   nodes_[id] = std::move(node);

@@ -1,6 +1,7 @@
 // The object behind the JsuiRuntime C handle.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -102,6 +103,10 @@ class Runtime {
   Surface& surfaceOf(const Document* doc) const;
   // A node of any surface.
   Node* findNode(uint32_t id) const;
+  // An id for a node created later (the bridge's Create command,
+  // js/command_buffer.h). It comes from the counter all surfaces number
+  // their nodes with, so ids keep creation order across native and JS.
+  uint32_t allocNodeId() { return nextNodeId_.fetch_add(1); }
   // Every surface repaints on the next render (errors, reloads).
   void redrawAll();
 
@@ -176,7 +181,8 @@ class Runtime {
 
  private:
   // Node ids are unique across the surfaces (JS addresses nodes by id alone).
-  uint32_t nextNodeId_ = 1;
+  // Atomic: the bridge takes ids for the nodes its commands create.
+  std::atomic<uint32_t> nextNodeId_{1};
   std::vector<std::unique_ptr<Surface>> surfaces_;  // [0]: the main surface
   // Destroyed while JS was on the stack: freed at the start of the next tick.
   std::vector<std::unique_ptr<Surface>> doomed_;

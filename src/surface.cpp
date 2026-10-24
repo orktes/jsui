@@ -19,7 +19,7 @@ namespace {
 
 }  // namespace
 
-Surface::Surface(Runtime& r, uint32_t* nextNodeId, Perf* perf) : rt(r), doc(nextNodeId, perf) {}
+Surface::Surface(Runtime& r, std::atomic<uint32_t>* nextNodeId, Perf* perf) : rt(r), doc(nextNodeId, perf) {}
 
 bool Surface::needsRedraw() const {
   return redraw_ || doc.paintDirty() || (doc.exactRepaintPending() && !rt.animatingFrames(*this)) ||

@@ -259,8 +259,12 @@ export class HostInstance {
       this.propCount = -1;
       if (NATIVE_PROPS) {
         // The style keeps what patchStyle wrote: only the other props move.
+        // keepStyle (the 4th argument): native keeps the node's style as it
+        // is when the update is applied, without reading it back here
+        // (runtimes before the command buffer: read back with getProps).
         bridgeCalls++;
-        native.updateProps(this.id, Object.assign({}, this.props, { style: (native.getProps(this.id) || {}).style }), this.hidden);
+        if (native.updatePropsKeepsStyle) native.updateProps(this.id, this.props, this.hidden, true);
+        else native.updateProps(this.id, Object.assign({}, this.props, { style: (native.getProps(this.id) || {}).style }), this.hidden);
       } else {
         const next = toNativeProps(Object.assign({}, this.props, { style: this.nativeProps.style }), this.hidden);
         this.nativeProps = next;
@@ -312,13 +316,19 @@ export class HostInstance {
 
   scrollToEnd(options) {
     const content = this._content;
+    const horizontal = !!this.props.horizontal;
+    const animated = !options || options.animated !== false;
+    if (typeof native.scrollToEnd === 'function') {
+      // The same math, measured natively when the command is applied.
+      native.scrollToEnd(this.id, content ? content.id : 0, horizontal, animated);
+      return;
+    }
     const self = measureNode(this.id);
     const inner = content ? measureNode(content.id) : self;
-    const horizontal = !!this.props.horizontal;
     this.scrollTo({
       x: horizontal ? Math.max(0, inner.width - self.width) : 0,
       y: horizontal ? 0 : Math.max(0, inner.height - self.height),
-      animated: !options || options.animated !== false,
+      animated,
     });
   }
 

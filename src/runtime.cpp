@@ -53,7 +53,7 @@ std::string lower(std::string s) {
 }  // namespace
 
 namespace {
-Document& mainDocument(std::vector<std::unique_ptr<Surface>>& surfaces, Runtime& rt, uint32_t* nextNodeId) {
+Document& mainDocument(std::vector<std::unique_ptr<Surface>>& surfaces, Runtime& rt, std::atomic<uint32_t>* nextNodeId) {
   surfaces.push_back(std::make_unique<Surface>(rt, nextNodeId));
   return surfaces.back()->doc;
 }
