@@ -256,6 +256,11 @@ if(JSUI_BUILD_SHARED AND NOT EMSCRIPTEN AND NOT IOS)
   set_target_properties(jsui_shared PROPERTIES OUTPUT_NAME jsui LINKER_LANGUAGE CXX
     C_VISIBILITY_PRESET hidden CXX_VISIBILITY_PRESET hidden)
   if(WIN32)
+    # jsui.dll's import library is jsui.lib: the static library takes
+    # another name, or the two overwrite each other in the same directory
+    # (and whatever links the static one after jsui_shared gets the import
+    # library).
+    set_target_properties(jsui PROPERTIES OUTPUT_NAME jsui_static)
     # The functions are compiled dllexport into the static library (which
     # the tools still link statically); consumers define JSUI_SHARED too.
     target_compile_definitions(jsui PRIVATE JSUI_SHARED)
