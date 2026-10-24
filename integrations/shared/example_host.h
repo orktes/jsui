@@ -104,19 +104,26 @@ struct HudState {
   }
 };
 
-// Counts frames per second over half-second windows.
+// Frames per second over the last 60 frames, skipping the first 10 (window
+// creation, bundle load, first pipeline compiles), so short --frames /
+// --selftest runs show the real rate too. The shown value changes at most
+// every 250 ms, so the HUD does not re-render for it every frame.
 struct FpsCounter {
-  double windowStart = -1;
-  int frames = 0;
+  static constexpr int kWindow = 60, kWarmup = 10;
+  double times[kWindow] = {};
+  long seen = 0;
+  double shownAt = -1;
   int fps = 0;
   void frame(double nowMs) {
-    if (windowStart < 0) windowStart = nowMs;
-    frames++;
-    if (nowMs - windowStart >= 500) {
-      fps = int(std::lround(frames * 1000.0 / (nowMs - windowStart)));
-      frames = 0;
-      windowStart = nowMs;
-    }
+    if (seen++ < kWarmup) return;
+    long n = seen - kWarmup;  // frames in the ring, up to kWindow
+    times[(n - 1) % kWindow] = nowMs;
+    if (n < 20) return;
+    double oldest = times[n < kWindow ? 0 : n % kWindow];
+    long count = n < kWindow ? n : kWindow;
+    if (nowMs <= oldest || (shownAt >= 0 && nowMs - shownAt < 250)) return;
+    fps = int(std::lround((count - 1) * 1000.0 / (nowMs - oldest)));
+    shownAt = nowMs;
   }
 };
 
