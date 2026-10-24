@@ -379,10 +379,12 @@ export class HeadlessApp {
     if (load.url) {
       this._withStrings([load.url], (u) => M._jsui_load_bundle_url(this.rt, u));
     } else {
-      const src = readFileSync(load.path, 'utf8');
-      const len = M.lengthBytesUTF8(src);
+      // Bytes as is: a `jsui build` bundle may be precompiled (binary).
+      const src = readFileSync(load.path);
+      const len = src.length;
       const sp = M._malloc(len + 1);
-      M.stringToUTF8(src, sp, len + 1);
+      M.HEAPU8.set(src, sp);
+      M.HEAPU8[sp + len] = 0;
       const r = this._withStrings([this.bundleUrl], (n) => M._jsui_load_bundle_source(this.rt, sp, len, n));
       M._free(sp);
       this._checkError();

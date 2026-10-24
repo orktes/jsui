@@ -55,6 +55,9 @@ class JsEngine {
   virtual ~JsEngine() = default;
 
   virtual bool eval(const std::string& source, const std::string& name) = 0;
+  // False when precompiled bundles (js/bytecode.h) never run as bytecode
+  // here (the host engine): containers run their source.
+  virtual bool runsBytecode() const { return true; }
 
   // Runs due timers, then pending jobs (promises). Called from tick.
   virtual void runTimers(double nowMs) = 0;

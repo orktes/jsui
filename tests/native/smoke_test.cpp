@@ -25,6 +25,8 @@ TEST(resolve_urls) {
            std::string("http://localhost:5173/b.png"));
   CHECK_EQ(ResourceLoader::resolve("/x/y/bundle.js", "../a.ttf"), std::string("/x/a.ttf"));
   CHECK_EQ(ResourceLoader::resolve("bundle.js", "a.png"), std::string("a.png"));
+  CHECK_EQ(ResourceLoader::resolve("C:\\ui\\bundle.js", "a.png"), std::string("C:\\ui\\a.png"));
+  CHECK_EQ(ResourceLoader::resolve("http://localhost:5173/", "C:\\ui\\a.png"), std::string("C:\\ui\\a.png"));
 }
 
 TEST(layout_basic) {

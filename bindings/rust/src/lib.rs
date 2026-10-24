@@ -313,9 +313,13 @@ impl Context {
 
     /// Evaluates a bundle (`npx jsui build app.jsx`); `name` shows in stack traces.
     pub fn load_bundle_source(&self, source: &str, name: &str) -> Result<(), Error> {
+        self.load_bundle_bytes(source.as_bytes(), name)
+    }
+    /// Evaluates a bundle given as bytes: JS source or a precompiled `jsui build` bundle (bytecode).
+    pub fn load_bundle_bytes(&self, bundle: &[u8], name: &str) -> Result<(), Error> {
         let name = cstring(name);
         let r =
-            unsafe { sys::jsui_load_bundle_source(self.as_ptr(), source.as_ptr().cast(), source.len(), name.as_ptr()) };
+            unsafe { sys::jsui_load_bundle_source(self.as_ptr(), bundle.as_ptr().cast(), bundle.len(), name.as_ptr()) };
         if r == 0 {
             Ok(())
         } else {
@@ -325,9 +329,10 @@ impl Context {
     /// Reads and evaluates a bundle file; relative URLs then resolve next to it.
     pub fn load_bundle_file(&self, path: impl AsRef<Path>) -> Result<(), Error> {
         let path = path.as_ref();
-        let source = std::fs::read_to_string(path).map_err(|e| Error(format!("{}: {e}", path.display())))?;
+        // Bytes, not a String: `jsui build` bundles are precompiled (binary).
+        let bundle = std::fs::read(path).map_err(|e| Error(format!("{}: {e}", path.display())))?;
         let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        self.load_bundle_source(&source, &format!("file://{}", abs.display()))
+        self.load_bundle_bytes(&bundle, &format!("file://{}", abs.display()))
     }
     /// Loads a bundle through the loader (file path, file:// or http:// URL, e.g. `jsui dev`).
     pub fn load_bundle_url(&self, url: &str) -> Result<(), Error> {

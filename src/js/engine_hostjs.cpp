@@ -39,6 +39,7 @@
 #include "dev_session.h"
 #include "include/effects/SkRuntimeEffect.h"
 #include "input/input.h"
+#include "js/bytecode.h"
 #include "js/engine.h"
 #include "js/engine_impl.h"
 #include "platform/loader.h"
@@ -152,9 +153,23 @@ class HostJsEngine final : public JsEngine {
 
   int id() const { return int(reinterpret_cast<intptr_t>(this)); }
 
+  bool runsBytecode() const override { return false; }
+
   bool eval(const std::string& source, const std::string& name) override {
     Perf::Scope scope(rt.doc.perf, Phase::Js);
-    return hjs_eval(id(), source.data(), int(source.size()), name.data(), int(name.size())) != 0;
+    // A precompiled bundle (`jsui build`): QuickJS bytecode means nothing
+    // here, run its embedded source (Runtime::loadSource fetches a split one).
+    std::string_view js = source;
+    BundleParts parts;
+    if (isBundleContainer(source)) {
+      if (!parseBundleContainer(source, parts) || parts.source.empty()) {
+        rt.reportError(name + ": precompiled bundle has no source for the host JS engine; build it with "
+                              "`jsui build --format combo` (the default) or `--format source`");
+        return false;
+      }
+      js = parts.source;
+    }
+    return hjs_eval(id(), js.data(), int(js.size()), name.data(), int(name.size())) != 0;
   }
 
   void runTimers(double nowMs) override {

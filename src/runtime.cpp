@@ -14,6 +14,7 @@
 #include "include/core/SkPictureRecorder.h"
 #include "include/core/SkSurface.h"
 #include "input/input.h"
+#include "js/bytecode.h"
 #include "js/engine.h"
 #include "render/image_cache.h"
 #include "render/lottie.h"
@@ -405,6 +406,17 @@ void Runtime::endCalls(const std::vector<uint64_t>& hostCalls, const char* reaso
 }
 
 bool Runtime::loadSource(const std::string& source, const std::string& name) {
+  // A precompiled bundle for another QuickJS whose source is a separate file
+  // (`jsui build --format split`): run that file instead.
+  BundleParts parts;
+  if (parseBundleContainer(source, parts) && (parts.key != bytecodeKey() || !js->runsBytecode()) && parts.source.empty() &&
+      !parts.sourceUrl.empty()) {
+    std::string url = ResourceLoader::resolve(name, std::string(parts.sourceUrl));
+    log(JSUI_LOG_WARN, name + ": bytecode was compiled for another JSUI runtime (" + std::string(parts.key) +
+                           "), loading its source " + url + " instead; rebuild it with this version's jsui CLI");
+    loadUrl(url);
+    return true;
+  }
   bundleSource = source;
   bundleName = name;
   if (baseUrl.empty()) baseUrl = name;

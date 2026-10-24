@@ -2,7 +2,9 @@
 
 The UI is one JS bundle (`npx jsui build app.jsx -o ui/dist/bundle.js`)
 plus its `assets/` folder. Hosts load it, tick it once per frame, forward
-input and draw the result.
+input and draw the result. `jsui build` precompiles the bundle to QuickJS
+bytecode (binary, with the source inside as a fallback): load it by URL/path
+or pass its bytes to `jsui_load_bundle_source`, never as text.
 
 ## Godot 4 (GDExtension `JsuiView`)
 

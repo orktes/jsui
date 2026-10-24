@@ -13,7 +13,8 @@ npx @orktes/jsui-cli skill install            # -> .claude/skills/jsui/ (--globa
 In a project with `npm install --save-dev @orktes/jsui-cli`:
 
 ```sh
-npx jsui build app.jsx -o dist/bundle.js [--minify] [--sourcemap] [--dev] [--react-compiler [--compiler-report]]
+npx jsui build app.jsx -o dist/bundle.js [--minify] [--sourcemap] [--dev] [--format combo|bytecode|source|split]
+     [--react-compiler [--compiler-report]]
 npx jsui dev app.jsx [--port 5173] [--host 127.0.0.1] [--no-hmr] [--react-compiler]
 npx jsui screenshot app.jsx -o shot.png [--width 1280 --height 720 --scale 2 --wait 1000]
 npx jsui inspect app.jsx [--find '#play'] [--json]
@@ -31,6 +32,28 @@ npx jsui log --attach http://127.0.0.1:5173 [--since N] [--follow]
 
 * One IIFE script (ES2020, UTF-8) suitable for QuickJS: no top-level
   `import`/`export`, no runtime `require`.
+* Precompiled to QuickJS bytecode by default: the runtime skips parsing
+  (loading the shared demo app: 19.8 ms -> 3.7 ms on an M1 Ultra) and keeps no
+  function source in memory. Compiling uses the WebAssembly runtime from
+  `@orktes/jsui-web`, the same patched QuickJS as the native runtimes of that
+  version; without it the bundle stays plain JS. Bytecode only runs on the
+  QuickJS that compiled it: a runtime of another JSUI version runs the source
+  instead and logs a warning. `--format` picks what goes in:
+
+  | `--format` | writes | size (vs the JS) | other JSUI versions |
+  | --- | --- | --- | --- |
+  | `combo` (default) | bytecode + the source inside | ~2.2x | run the source |
+  | `bytecode` | bytecode only | ~1.25x | fail to load |
+  | `split` | bytecode in `bundle.js`, the source in `bundle.source.js` | ~1.25x + the JS file, read only as the fallback | load `bundle.source.js` |
+  | `source` | plain JS (browser JS engines, other tools) | 1x | run it |
+
+  Every JSUI host loads all of them (the file is binary: hosts load it by
+  path / URL or pass its bytes, never as text). Function source is stripped
+  (`Function.prototype.toString()` gives `[native code]`) and stack traces
+  name the bundle by its file name (`bundle.js:12:5`). The format is in
+  `src/js/bytecode.h`; `readPrecompiled(bytes)` / `bundleSource(bytes)` from
+  this package read it, and `compileBundle(source, { keepSource, sourceUrl })`
+  / `jsui_compile_bundle()` (C API) precompile a JS bundle.
 * `react-native` (and deep `react-native/...` paths) → `@orktes/jsui-react`.
   `react`, `react/jsx-runtime`, `react-reconciler` and `scheduler` always
   resolve to the copy `@orktes/jsui-react` was built against (one React per bundle).

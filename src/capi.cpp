@@ -13,6 +13,7 @@
 #include "include/encode/SkPngEncoder.h"
 #include "dev_session.h"
 #include "input/input.h"
+#include "js/bytecode.h"
 #include "js/engine.h"
 #include "jsui/jsui.h"
 #include "render/gpu.h"
@@ -229,6 +230,33 @@ int jsui_load_bundle_url(JsuiRuntime* rt, const char* url) {
   rt->rt->loadUrl(url);
   return 0;
 }
+
+int jsui_compile_bundle(const char* source, size_t size, const char* name, int keepSource, const char* sourceUrl,
+                        void** outData, size_t* outSize, char** outError) {
+  if (outData) *outData = nullptr;
+  if (outSize) *outSize = 0;
+  if (outError) *outError = nullptr;
+  std::string out, error;
+  if (!source || !outData || !outSize) {
+    error = "jsui_compile_bundle: missing argument";
+  } else if (jsui::compileBundle(std::string_view(source, size), name ? name : "bundle.js", keepSource != 0,
+                                 sourceUrl ? sourceUrl : "", out, error)) {
+    *outData = std::malloc(out.size() ? out.size() : 1);
+    if (*outData) {
+      std::memcpy(*outData, out.data(), out.size());
+      *outSize = out.size();
+      return 0;
+    }
+    error = "out of memory";
+  }
+  if (outError) {
+    *outError = static_cast<char*>(std::malloc(error.size() + 1));
+    if (*outError) std::memcpy(*outError, error.c_str(), error.size() + 1);
+  }
+  return -1;
+}
+
+const char* jsui_bytecode_key(void) { return jsui::bytecodeKey(); }
 
 void jsui_reload(JsuiRuntime* rt) {
   if (jsui::DevSession* s = rt->rt->session.get(); s && s->reporting()) s->userInput("reload", {});

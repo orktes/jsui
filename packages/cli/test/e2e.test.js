@@ -12,7 +12,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { build, dev } from '../src/index.js';
+import { build, dev, findWasmDir } from '../src/index.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..', '..');
@@ -21,22 +21,26 @@ const binary = process.env.JSUI_TESTS || path.join(repo, 'build', 'jsui-tests');
 for (const mode of ['production', 'development']) {
   test(`native runtime e2e (${mode} React)`, { skip: !existsSync(binary) && `no ${binary}` }, async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'jsui-e2e-'));
+    // Production bundles run as precompiled bytecode when the WebAssembly
+    // runtime is around to compile them (jsui build's default).
+    const bytecode = mode === 'production' && !!findWasmDir();
+    const format = bytecode ? 'combo' : 'source';
     const outfile = path.join(dir, 'bundle.js');
     const scrollfile = path.join(dir, 'scroll.js');
     const interactionsfile = path.join(dir, 'interactions.js');
     const nativeAnimatedFile = path.join(dir, 'native_animated.js');
-    await build({ entry: path.join(here, 'e2e', 'app.jsx'), outfile, mode });
-    await build({ entry: path.join(here, 'e2e', 'scroll.jsx'), outfile: scrollfile, mode });
-    await build({ entry: path.join(here, 'e2e', 'interactions.jsx'), outfile: interactionsfile, mode });
-    await build({ entry: path.join(here, 'e2e', 'native_animated.jsx'), outfile: nativeAnimatedFile, mode });
+    await build({ entry: path.join(here, 'e2e', 'app.jsx'), outfile, mode, format });
+    await build({ entry: path.join(here, 'e2e', 'scroll.jsx'), outfile: scrollfile, mode, format });
+    await build({ entry: path.join(here, 'e2e', 'interactions.jsx'), outfile: interactionsfile, mode, format });
+    await build({ entry: path.join(here, 'e2e', 'native_animated.jsx'), outfile: nativeAnimatedFile, mode, format });
     const hostDataFile = path.join(dir, 'host_data.js');
-    await build({ entry: path.join(here, 'e2e', 'host_data.jsx'), outfile: hostDataFile, mode });
+    await build({ entry: path.join(here, 'e2e', 'host_data.jsx'), outfile: hostDataFile, mode, format });
     const imagesFile = path.join(dir, 'images.js');
-    await build({ entry: path.join(here, 'e2e', 'images.jsx'), outfile: imagesFile, mode });
+    await build({ entry: path.join(here, 'e2e', 'images.jsx'), outfile: imagesFile, mode, format });
     const surfacesFile = path.join(dir, 'surfaces.js');
-    await build({ entry: path.join(here, 'e2e', 'surfaces.jsx'), outfile: surfacesFile, mode });
+    await build({ entry: path.join(here, 'e2e', 'surfaces.jsx'), outfile: surfacesFile, mode, format });
     const hostBuffersFile = path.join(dir, 'host_buffers.js');
-    await build({ entry: path.join(here, 'e2e', 'host_buffers.jsx'), outfile: hostBuffersFile, mode });
+    await build({ entry: path.join(here, 'e2e', 'host_buffers.jsx'), outfile: hostBuffersFile, mode, format });
     const tests = [
       'react_e2e',
       'react_interactions_e2e',
@@ -46,7 +50,7 @@ for (const mode of ['production', 'development']) {
       'react_surfaces_e2e',
       'react_host_buffers_e2e',
     ];
-    const { stdout } = await promisify(execFile)(binary, tests, {
+    const { stdout, stderr } = await promisify(execFile)(binary, tests, {
       env: Object.assign({}, process.env, {
         JSUI_REACT_E2E_BUNDLE: outfile,
         JSUI_REACT_E2E_SCROLL_BUNDLE: scrollfile,
@@ -73,6 +77,9 @@ for (const mode of ['production', 'development']) {
     assert.match(stdout, /PASS react_host_buffers_e2e/);
     if (process.env.JSUI_E2E_VERBOSE) console.log(stdout);
     assert.doesNotMatch(stdout, /skipped/);
+    // The WebAssembly runtime compiled the bytecode: a native runtime built
+    // from the same QuickJS sources must run it, not the fallback source.
+    if (bytecode) assert.doesNotMatch(stderr, /running the bundle's source instead/, 'web/dist and the native build use different QuickJS sources: rebuild one');
   });
 
   // Virtualized FlatList (10,000 rows): windowing, focus navigation, wheel,
@@ -80,8 +87,10 @@ for (const mode of ['production', 'development']) {
   test(`native runtime list e2e (${mode} React)`, { skip: !existsSync(binary) && `no ${binary}` }, async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'jsui-e2e-list-'));
     const outfile = path.join(dir, 'bundle.js');
-    await build({ entry: path.join(here, 'e2e', 'list.jsx'), outfile, mode });
-    const { stdout } = await promisify(execFile)(binary, ['react_list_e2e'], {
+    const bytecode = mode === 'production' && !!findWasmDir();
+    const format = bytecode ? 'split' : 'source';
+    await build({ entry: path.join(here, 'e2e', 'list.jsx'), outfile, mode, format });
+    const { stdout, stderr } = await promisify(execFile)(binary, ['react_list_e2e'], {
       env: Object.assign({}, process.env, { JSUI_REACT_LIST_BUNDLE: outfile }),
       cwd: repo,
     }).catch((e) => {
@@ -90,6 +99,7 @@ for (const mode of ['production', 'development']) {
     if (process.env.JSUI_E2E_VERBOSE) console.log(stdout);
     assert.match(stdout, /PASS react_list_e2e/);
     assert.doesNotMatch(stdout, /skipped/);
+    if (bytecode) assert.doesNotMatch(stderr, /running the bundle's source instead/);
   });
 }
 
