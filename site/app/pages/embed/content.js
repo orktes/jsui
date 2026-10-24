@@ -385,7 +385,7 @@ const UNITY = {
   facts: [
     ['Unity', '6000.3 LTS'],
     ['Plugin', 'C API · P/Invoke'],
-    ['UI on screen', 'Texture2D'],
+    ['UI on screen', 'Metal · RenderTexture'],
     ['Self-test', 'in the player'],
   ],
   blocks: [
@@ -395,7 +395,8 @@ const UNITY = {
       title: 'build and run',
       code: `
 npx jsui build integrations/shared/ui/app.jsx -o integrations/shared/ui/dist/bundle.js
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DJSUI_BUILD_UNITY=ON
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DJSUI_BUILD_UNITY=ON \\
+      -DJSUI_SKIA_DIR=third_party/skia-desktop   # Graphite: the GPU path
 cmake --build build --target jsui_unity     # -> package/Plugins/<platform>/
 
 Unity -batchmode -nographics -projectPath integrations/unity/project \\
@@ -449,7 +450,7 @@ void Update() {
     {
       kind: 'note',
       color: colors.blue,
-      text: 'The UI is rasterised on the CPU, repainted only where it changed and uploaded into a premultiplied Texture2D when anything did, so it runs on every graphics API Unity supports. JS messages and logs are queued inside jsui_tick and drained by C# afterwards, so no native code calls back into managed code (IL2CPP friendly). macOS and Linux today.',
+      text: 'On Metal, Skia Graphite draws the UI straight into a RenderTexture on Unity\'s own device and command queue, in a render job on Unity\'s render thread (GL.IssuePluginEvent), repainting only what changed. On other graphics APIs, or with forceCpu, it is rasterised on the CPU and uploaded into a Texture2D. JS messages and logs are queued inside jsui_tick and drained by C# afterwards, so no native code calls back into managed code (IL2CPP friendly). macOS and Linux today.',
     },
   ],
 };

@@ -8,6 +8,33 @@ add_library(jsui_unity MODULE native/jsui_unity.cpp)
 target_link_libraries(jsui_unity PRIVATE jsui)
 set_target_properties(jsui_unity PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
 
+# GPU path (native/jsui_unity_metal.mm): the plugin is also a Unity native
+# rendering plugin and Skia Graphite draws into a RenderTexture on Unity's
+# own Metal device. It needs Unity's plugin API headers (not vendored: they
+# come with every editor, in Unity.app/Contents/PluginAPI) and a jsui built
+# with JSUI_GRAPHITE_METAL. Without either the plugin is CPU-only.
+set(_unity_api_default "")
+if(APPLE)
+  file(GLOB _unity_api_dirs /Applications/Unity/Hub/Editor/*/Unity.app/Contents/PluginAPI)
+  if(_unity_api_dirs)
+    list(SORT _unity_api_dirs COMPARE NATURAL ORDER DESCENDING)
+    list(GET _unity_api_dirs 0 _unity_api_default)
+  endif()
+endif()
+set(JSUI_UNITY_PLUGIN_API_DIR "${_unity_api_default}" CACHE PATH
+    "Unity's native plugin API headers (Unity.app/Contents/PluginAPI), for the GPU path")
+if(APPLE AND JSUI_GRAPHITE_METAL AND EXISTS "${JSUI_UNITY_PLUGIN_API_DIR}/IUnityGraphicsMetal.h")
+  target_sources(jsui_unity PRIVATE native/jsui_unity_metal.mm)
+  target_include_directories(jsui_unity PRIVATE ${JSUI_UNITY_PLUGIN_API_DIR})
+  target_compile_definitions(jsui_unity PRIVATE JSUI_UNITY_GPU=1)
+  set_source_files_properties(native/jsui_unity_metal.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+  target_link_libraries(jsui_unity PRIVATE "-framework Metal" "-framework Foundation")
+  message(STATUS "jsui_unity: GPU path (Metal), Unity plugin API from ${JSUI_UNITY_PLUGIN_API_DIR}")
+else()
+  target_compile_definitions(jsui_unity PRIVATE JSUI_UNITY_GPU=0)
+  message(STATUS "jsui_unity: CPU only (needs macOS, JSUI_GRAPHITE_METAL and JSUI_UNITY_PLUGIN_API_DIR)")
+endif()
+
 if(APPLE)
   set(_unity_platform macOS)
   # A loadable bundle (jsui_unity.bundle/Contents/MacOS/jsui_unity), which is

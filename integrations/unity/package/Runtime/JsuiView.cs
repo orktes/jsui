@@ -4,12 +4,19 @@
 // with a RawImage showing the UI texture, loads the bundle, forwards mouse
 // and keyboard input and ticks the runtime once per frame.
 //
-// Rendering. The runtime rasterises on the CPU into the plugin's buffer
-// (jsui_render_rgba_incremental: only what changed is repainted) and the
-// view uploads it into a Texture2D when anything changed. The texture is
-// premultiplied RGBA; the RawImage draws it with a premultiplied-alpha
-// shader (Resources/JsuiPremultiplied.shader), flipped, since the rows are
-// top-down and Unity textures are bottom-up.
+// Rendering. On Metal (and a plugin built with the GPU path) Skia Graphite
+// draws the UI straight into a RenderTexture on Unity's own device and
+// command queue: after each tick the view queues a render job with
+// GL.IssuePluginEvent, which runs on Unity's render thread before the frame
+// draws (jsui_unity.cpp: only what changed is repainted, and the main thread
+// waits for the job before it touches the runtime again, see Rt). Elsewhere,
+// or with forceCpu, the runtime rasterises on the CPU into the plugin's
+// buffer (jsui_render_rgba_incremental) and the view uploads it into a
+// Texture2D when anything changed. Either texture is premultiplied RGBA
+// holding sRGB-encoded values in a non-sRGB format; the RawImage draws it
+// with a premultiplied-alpha shader (Resources/JsuiPremultiplied.shader,
+// which decodes in Linear projects), flipped, since the rows are top-down
+// and Unity textures are bottom-up.
 //
 // Input pass-through. Every mouse and keyboard event goes to the UI first;
 // jsui_send_* says whether the UI consumed it. Events the UI did not consume
@@ -24,6 +31,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEngine.UI;
 
 namespace Jsui
@@ -41,6 +49,8 @@ namespace Jsui
         public int sortingOrder = 100;
         [Tooltip("Forward mouse and keyboard input to the UI")]
         public bool forwardInput = true;
+        [Tooltip("Rasterise on the CPU even where the GPU path is available")]
+        public bool forceCpu;
 
         /// <summary>Host.postMessage(name, payload) from JS: name and the payload as JSON.</summary>
         public event Action<string, string> OnMessage;
@@ -51,7 +61,12 @@ namespace Jsui
         /// <summary>A key press the UI did not consume.</summary>
         public event Action<KeyCode> PassedKeyDown;
 
-        public IntPtr Runtime => rt_;
+        /// <summary>The runtime, for direct jsui_* calls (waits for a queued GPU render first).</summary>
+        public IntPtr Runtime => Rt;
+        /// <summary>How the UI is drawn, e.g. for a stats overlay.</summary>
+        public string RendererName => gpu_
+            ? "Skia Graphite · " + SystemInfo.graphicsDeviceType + " · RenderTexture"
+            : "CPU raster · Texture2D · " + SystemInfo.graphicsDeviceType;
         /// <summary>Viewport size in logical px.</summary>
         public Vector2 Size => new Vector2(width_, height_);
         public float PixelRatio => ratio_;
@@ -62,6 +77,9 @@ namespace Jsui
         Canvas canvas_;
         RawImage image_;
         Texture2D texture_;
+        RenderTexture target_;
+        bool gpu_;
+        IntPtr renderEvent_;
         Material material_;
         int width_, height_;
         float ratio_ = 1;
@@ -91,9 +109,12 @@ namespace Jsui
         {
             // Load after every Awake, so the game's first SetState calls are
             // in place when the bundle's first render runs.
+            gpu_ = !forceCpu && SystemInfo.graphicsDeviceType == GraphicsDeviceType.Metal &&
+                   JsuiNative.jsuiu_gpu_available() != 0;
+            if (gpu_) renderEvent_ = JsuiNative.jsuiu_render_event_func();
             var url = ResolveBundle(bundle);
-            if (JsuiNative.LoadBundleUrl(rt_, url) != 0)
-                Debug.LogError($"JSUI: failed to load {url}: {JsuiNative.LastError(rt_)}");
+            if (JsuiNative.LoadBundleUrl(Rt, url) != 0)
+                Debug.LogError($"JSUI: failed to load {url}: {JsuiNative.LastError(Rt)}");
         }
 
         void OnDestroy()
@@ -101,6 +122,7 @@ namespace Jsui
             if (plugin_ != IntPtr.Zero) JsuiNative.jsuiu_destroy(plugin_);
             plugin_ = rt_ = IntPtr.Zero;
             if (texture_) Destroy(texture_);
+            if (target_) Destroy(target_);
             if (material_) Destroy(material_);
             if (canvas_) Destroy(canvas_.gameObject);
         }
@@ -133,18 +155,29 @@ namespace Jsui
             else Debug.LogWarning("JSUI: JsuiPremultiplied shader missing; edges will look dark");
         }
 
+        // The runtime for a call from the main thread: on the GPU path a render
+        // job queued last frame may still be using it on the render thread.
+        IntPtr Rt
+        {
+            get
+            {
+                if (gpu_) JsuiNative.jsuiu_wait_render(plugin_);
+                return rt_;
+            }
+        }
+
         // ------------------------------------------------------------ API
 
-        public void SetState(string key, string json) => JsuiNative.SetState(rt_, key, json);
-        public void PostMessage(string name, string json) => JsuiNative.PostMessage(rt_, name, json);
+        public void SetState(string key, string json) => JsuiNative.SetState(Rt, key, json);
+        public void PostMessage(string name, string json) => JsuiNative.PostMessage(Rt, name, json);
 
         /// <summary>Writes `values` into the frame buffer `key` (Float32Array in JS) and commits it.</summary>
         public unsafe void SetBuffer(string key, float[] values, int count)
         {
-            var p = (float*)JsuiNative.MapBuffer(rt_, key, JsuiNative.BufferF32, count);
+            var p = (float*)JsuiNative.MapBuffer(Rt, key, JsuiNative.BufferF32, count);
             if (p == null) return;
             for (int i = 0; i < count; i++) p[i] = values[i];
-            JsuiNative.CommitBuffer(rt_, key);
+            JsuiNative.CommitBuffer(Rt, key);
         }
 
         /// <summary>Screen position (pixels, bottom-left origin) to UI coordinates (logical px, top-left origin).</summary>
@@ -168,7 +201,7 @@ namespace Jsui
         void LateUpdate()
         {
             if (rt_ == IntPtr.Zero) return;
-            JsuiNative.jsui_tick(rt_, Time.realtimeSinceStartupAsDouble * 1000.0);
+            JsuiNative.jsui_tick(Rt, Time.realtimeSinceStartupAsDouble * 1000.0);
             DrainQueues();
             Paint();
         }
@@ -180,7 +213,7 @@ namespace Jsui
             if (w == width_ && h == height_) return;
             width_ = w;
             height_ = h;
-            JsuiNative.jsui_set_viewport(rt_, w, h, ratio_);
+            JsuiNative.jsui_set_viewport(Rt, w, h, ratio_);
         }
 
         void DrainQueues()
@@ -200,20 +233,61 @@ namespace Jsui
         {
             int pw = Mathf.Max(1, Mathf.RoundToInt(width_ * ratio_));
             int ph = Mathf.Max(1, Mathf.RoundToInt(height_ * ratio_));
+            if (gpu_ && JsuiNative.jsuiu_gpu_failed(plugin_) != 0)
+            {
+                Debug.LogWarning("JSUI: the GPU renderer failed; using the CPU renderer");
+                gpu_ = false;
+                if (target_) Destroy(target_);
+                target_ = null;
+                forceRepaint_ = true;
+            }
+            if (gpu_) PaintGpu(pw, ph);
+            else PaintCpu(pw, ph);
+        }
+
+        void PaintGpu(int pw, int ph)
+        {
+            if (target_ == null || target_.width != pw || target_.height != ph || !target_.IsCreated())
+            {
+                if (target_ == null || target_.width != pw || target_.height != ph)
+                {
+                    if (target_) Destroy(target_);
+                    // Not sRGB: the UI's sRGB-encoded values are stored as they
+                    // are (the shader decodes them in Linear projects).
+                    target_ = new RenderTexture(pw, ph, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear)
+                    {
+                        name = "JSUI",
+                        filterMode = FilterMode.Bilinear,
+                        wrapMode = TextureWrapMode.Clamp,
+                        useMipMap = false,
+                    };
+                }
+                target_.Create();  // also after Unity dropped its contents (IsCreated false)
+                image_.texture = target_;
+                JsuiNative.jsuiu_set_target(plugin_, target_.GetNativeTexturePtr(), pw, ph);
+                forceRepaint_ = true;
+            }
+            if (forceRepaint_) JsuiNative.jsuiu_invalidate_target(plugin_);
+            else if (JsuiNative.jsui_needs_redraw(Rt) == 0) return;
+            forceRepaint_ = false;
+            GL.IssuePluginEvent(renderEvent_, JsuiNative.jsuiu_queue_render(plugin_));
+        }
+
+        void PaintCpu(int pw, int ph)
+        {
             if (texture_ == null || texture_.width != pw || texture_.height != ph)
             {
                 if (texture_) Destroy(texture_);
-                // sRGB texture: in Linear projects the sampler decodes the
-                // UI's sRGB colours; in Gamma projects nothing converts.
-                texture_ = new Texture2D(pw, ph, TextureFormat.RGBA32, false, false)
+                // Not sRGB, like the GPU path's RenderTexture.
+                texture_ = new Texture2D(pw, ph, TextureFormat.RGBA32, false, true)
                 {
                     name = "JSUI",
                     filterMode = FilterMode.Bilinear,
                     wrapMode = TextureWrapMode.Clamp,
                 };
-                image_.texture = texture_;
                 forceRepaint_ = true;
             }
+            image_.texture = texture_;
             if (JsuiNative.jsuiu_render(plugin_, pw, ph, forceRepaint_ ? 1 : 0, out JsuiRect dirty, out IntPtr pixels) == 0)
                 return;
             forceRepaint_ = false;
@@ -247,12 +321,12 @@ namespace Jsui
             var p = ScreenToUi(screen);
             if (inside && p != mouse_)
             {
-                JsuiNative.jsui_send_mouse_move(rt_, p.x, p.y);
+                JsuiNative.jsui_send_mouse_move(Rt, p.x, p.y);
                 mouse_ = p;
             }
             else if (!inside && mouseInside_ && !buttonDown_[0] && !buttonDown_[1] && !buttonDown_[2])
             {
-                JsuiNative.jsui_send_mouse_leave(rt_);
+                JsuiNative.jsui_send_mouse_leave(Rt);
                 mouse_ = new Vector2(float.NaN, float.NaN);
             }
             mouseInside_ = inside;
@@ -262,14 +336,14 @@ namespace Jsui
                 if (Input.GetMouseButtonDown(b) && inside)
                 {
                     buttonDown_[b] = true;
-                    bool consumed = JsuiNative.jsui_send_mouse_button(rt_, p.x, p.y, kButtons[b], 1, Mods()) != 0;
+                    bool consumed = JsuiNative.jsui_send_mouse_button(Rt, p.x, p.y, kButtons[b], 1, Mods()) != 0;
                     if (b == 0) PointerCaptured = consumed;
                     if (!consumed) PassedMouseDown?.Invoke(b, p);
                 }
                 if (Input.GetMouseButtonUp(b) && buttonDown_[b])
                 {
                     buttonDown_[b] = false;
-                    JsuiNative.jsui_send_mouse_button(rt_, p.x, p.y, kButtons[b], 0, Mods());
+                    JsuiNative.jsui_send_mouse_button(Rt, p.x, p.y, kButtons[b], 0, Mods());
                     if (b == 0) PointerCaptured = false;
                 }
             }
@@ -278,7 +352,7 @@ namespace Jsui
             if (inside && wheel != Vector2.zero)
             {
                 // DOM: positive deltaY scrolls down, ~40 px per notch.
-                if (JsuiNative.jsui_send_mouse_wheel(rt_, p.x, p.y, -wheel.x * 40f, -wheel.y * 40f) == 0)
+                if (JsuiNative.jsui_send_mouse_wheel(Rt, p.x, p.y, -wheel.x * 40f, -wheel.y * 40f) == 0)
                     PassedWheel?.Invoke(wheel);
             }
         }
@@ -296,18 +370,18 @@ namespace Jsui
                     bool repeat = !keysDown_.Add(e.keyCode);
                     var code = JsuiKeys.DomCode(e.keyCode);
                     var key = JsuiKeys.DomKey(e.keyCode, e.shift);
-                    bool consumed = JsuiNative.SendKey(rt_, key, code, true, repeat, Mods()) != 0;
+                    bool consumed = JsuiNative.SendKey(Rt, key, code, true, repeat, Mods()) != 0;
                     if (!consumed && !repeat) PassedKeyDown?.Invoke(e.keyCode);
                 }
                 // Typed text (a separate event with keyCode None on most
                 // platforms); control characters are keys, not text.
                 if (e.character != '\0' && !char.IsControl(e.character))
-                    JsuiNative.SendText(rt_, e.character.ToString());
+                    JsuiNative.SendText(Rt, e.character.ToString());
             }
             else if (e.type == EventType.KeyUp && e.keyCode != KeyCode.None)
             {
                 keysDown_.Remove(e.keyCode);
-                JsuiNative.SendKey(rt_, JsuiKeys.DomKey(e.keyCode, e.shift), JsuiKeys.DomCode(e.keyCode), false, false, Mods());
+                JsuiNative.SendKey(Rt, JsuiKeys.DomKey(e.keyCode, e.shift), JsuiKeys.DomCode(e.keyCode), false, false, Mods());
             }
         }
 
@@ -316,7 +390,7 @@ namespace Jsui
             if (focused || rt_ == IntPtr.Zero) return;
             // Keys held when focus left never see their KeyUp.
             foreach (var k in keysDown_)
-                JsuiNative.SendKey(rt_, JsuiKeys.DomKey(k, false), JsuiKeys.DomCode(k), false, false, 0);
+                JsuiNative.SendKey(Rt, JsuiKeys.DomKey(k, false), JsuiKeys.DomCode(k), false, false, 0);
             keysDown_.Clear();
         }
     }

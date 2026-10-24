@@ -20,7 +20,10 @@ yet (the plugin's exports need a `JSUI_SHARED` build of the library).
 npm install
 npx jsui build integrations/shared/ui/app.jsx -o integrations/shared/ui/dist/bundle.js
 # the native plugin -> integrations/unity/package/Plugins/<platform>/
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DJSUI_BUILD_UNITY=ON
+# (JSUI_SKIA_DIR: a Skia with Graphite, from scripts/build-skia-desktop.sh,
+# for the GPU path; without it the plugin is CPU-only)
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DJSUI_BUILD_UNITY=ON \
+      -DJSUI_SKIA_DIR=third_party/skia-desktop
 cmake --build build --target jsui_unity
 # the player -> build/unity/JSUI Example.app (macOS)
 Unity -batchmode -nographics -projectPath integrations/unity/project \
@@ -35,7 +38,8 @@ the player, Play runs `Assets/Example/Example.unity` (after **JSUI > Copy
 Bundle + Save Example Scene** has copied the bundle into StreamingAssets).
 
 The player takes the examples' options after Unity's own: `--selftest`,
-`--frames N --screenshot out.png`, `--bundle path-or-url` and `--dev` (with
+`--frames N --screenshot out.png`, `--bundle path-or-url`, `--cpu` (the CPU
+renderer even on Metal) and `--dev` (with
 `npx jsui dev integrations/shared/ui/app.jsx` and `--bundle
 http://127.0.0.1:5173/bundle.js` for hot reload). `--selftest` is the same
 pass-through check as the other examples (see
@@ -51,14 +55,29 @@ pass-through check as the other examples (see
   lines are queued inside `jsui_tick` and drained by C# afterwards (no native
   to managed callbacks, which IL2CPP restricts), and the CPU frame is kept
   between frames so `jsui_render_rgba_incremental` repaints only what changed.
-* **Rendering** ([JsuiView.cs](package/Runtime/JsuiView.cs)): the UI is
-  rasterised on the CPU and, on frames where it changed, uploaded into a
-  `Texture2D` (`LoadRawTextureData`) shown by a `RawImage` on a Screen Space -
-  Overlay canvas. The texture is premultiplied and drawn with
-  [a premultiplied-alpha shader](package/Runtime/Resources/JsuiPremultiplied.shader),
-  flipped (the rows are top-down). It works on every graphics API Unity runs
-  on. A GPU path (Skia on Unity's Metal / Vulkan device through a native
-  rendering plugin) would skip the upload; it is not built yet.
+  It is also a Unity native rendering plugin (`UnityPluginLoad`,
+  [native/jsui_unity_metal.mm](native/jsui_unity_metal.mm)) when built with
+  Unity's plugin API headers (`JSUI_UNITY_PLUGIN_API_DIR`, by default the
+  newest editor's `Unity.app/Contents/PluginAPI`) and a Graphite Skia.
+* **Rendering** ([JsuiView.cs](package/Runtime/JsuiView.cs)). On Metal, Skia
+  Graphite draws the UI straight into a `RenderTexture` on Unity's own
+  `MTLDevice` and `MTLCommandQueue`: after `jsui_tick` in `LateUpdate` the
+  view queues a render job with `GL.IssuePluginEvent`, which runs on Unity's
+  render thread before the frame draws, commits what Unity recorded so far
+  and then Skia's work to the same queue, repainting only what changed
+  (`JSUI_GPU_INCREMENTAL`). The job uses the runtime, so the main thread waits
+  for it (`jsuiu_wait_render`, usually already done) before its next runtime
+  call; `JsuiView.Runtime` does that for game code. Elsewhere (other graphics
+  APIs, a CPU-only plugin, `forceCpu` / `--cpu`, or a failed GPU render) the
+  UI is rasterised on the CPU and, on frames where it changed, uploaded into a
+  `Texture2D`. Either texture is premultiplied, holds sRGB-encoded values in a
+  non-sRGB format and is shown by a `RawImage` on a Screen Space - Overlay
+  canvas with [a premultiplied-alpha shader](package/Runtime/Resources/JsuiPremultiplied.shader)
+  (which decodes to linear in Linear projects), flipped (the rows are
+  top-down), so both paths look the same. In the example on a Mac Studio (Apple silicon),
+  uncapped: about 2700 fps on the GPU path, 1100 on the CPU path. Vulkan and
+  Direct3D would need their own `jsuiu_gpu_*` side (Graphite has Vulkan; there
+  is no D3D backend).
 * **Input pass-through.** `JsuiView` sends mouse input (polled in its
   `Update`, which runs before other scripts) and keyboard and text input (IMGUI
   events, which carry key repeats and typed characters) to the UI first. What

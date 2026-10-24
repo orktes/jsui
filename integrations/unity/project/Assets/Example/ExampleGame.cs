@@ -16,7 +16,7 @@
 // counters go to the `game` shared state.
 //
 // Command line (players): --selftest, --frames N, --screenshot out.png,
-// --bundle path-or-url, --dev.
+// --bundle path-or-url, --dev, --cpu (the CPU renderer even on Metal).
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -81,6 +81,7 @@ public class ExampleGame : MonoBehaviour
 
         view_ = gameObject.AddComponent<JsuiView>();
         view_.forwardInput = !selftest_;
+        view_.forceCpu = cpu_;
         if (bundleOverride_ != null) view_.bundle = bundleOverride_;
         view_.devMode = dev_;
         view_.OnMessage += OnUiMessage;
@@ -108,7 +109,7 @@ public class ExampleGame : MonoBehaviour
     }
 
     string bundleOverride_;
-    bool dev_;
+    bool dev_, cpu_;
 
     void ParseArgs()
     {
@@ -122,6 +123,7 @@ public class ExampleGame : MonoBehaviour
             else if (a == "--screenshot") screenshot_ = Next();
             else if (a == "--bundle") bundleOverride_ = Next();
             else if (a == "--dev") dev_ = true;
+            else if (a == "--cpu") cpu_ = true;
         }
         if (!string.IsNullOrEmpty(screenshot_) && frames_ < 0 && !selftest_) frames_ = 120;
     }
@@ -283,7 +285,7 @@ public class ExampleGame : MonoBehaviour
         var json = string.Format(CultureInfo.InvariantCulture,
             "{{\"engine\":\"Unity {0}\",\"renderer\":\"{1}\",\"fps\":{2},\"entities\":{3},\"paused\":{4}," +
             "\"passed\":{{\"clicks\":{5},\"wheel\":{6},\"keys\":{7},\"pad\":0}}}}",
-            Application.unityVersion, "CPU raster · Texture2D · " + SystemInfo.graphicsDeviceType, fps_, units_.Count,
+            Application.unityVersion, view_.RendererName, fps_, units_.Count,
             paused_ ? "true" : "false", clicks_, wheel_, keys_);
         if (json == lastState_) return;
         lastState_ = json;

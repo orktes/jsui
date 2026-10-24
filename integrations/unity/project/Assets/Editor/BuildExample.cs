@@ -62,6 +62,9 @@ public static class BuildExample
         PlayerSettings.resizableWindow = true;
         PlayerSettings.runInBackground = true;
         PlayerSettings.usePlayerLog = true;
+        // Unity's splash fades out over the first frames, which would dim
+        // short --frames / --selftest screenshots (Unity 6 lets any plan turn it off).
+        PlayerSettings.SplashScreen.show = false;
 
         var target = Application.platform switch
         {

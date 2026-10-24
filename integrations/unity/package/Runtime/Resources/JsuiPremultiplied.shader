@@ -1,5 +1,6 @@
-// The JSUI texture is premultiplied RGBA: composite it with
-// ONE, ONE_MINUS_SRC_ALPHA. Used by JsuiView's RawImage; it lives in a
+// The JSUI texture is premultiplied RGBA holding sRGB-encoded values in a
+// non-sRGB format: composite it with ONE, ONE_MINUS_SRC_ALPHA, decoding the
+// colour to linear first in Linear projects. Used by JsuiView's RawImage; it lives in a
 // Resources folder so players include it.
 Shader "Hidden/JSUI/Premultiplied"
 {
@@ -41,8 +42,12 @@ Shader "Hidden/JSUI/Premultiplied"
             fixed4 frag(v2f i) : SV_Target
             {
                 // The Graphic's colour tints; its alpha fades the whole UI.
-                fixed4 c = tex2D(_MainTex, i.uv);
-                return fixed4(c.rgb * i.color.rgb, c.a) * i.color.a;
+                float4 c = tex2D(_MainTex, i.uv);
+            #if !defined(UNITY_COLORSPACE_GAMMA)
+                // Unpremultiply, decode, premultiply.
+                if (c.a > 0) c.rgb = GammaToLinearSpace(c.rgb / c.a) * c.a;
+            #endif
+                return float4(c.rgb * i.color.rgb, c.a) * i.color.a;
             }
             ENDCG
         }
