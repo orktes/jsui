@@ -24,14 +24,22 @@ needs from its UI layer:
 * **Input pass-through.** Every event goes to the UI first. `jsui_send_*`
   returns whether the UI consumed it (a handler, a responder, a focused
   element), not merely whether the point was over painted UI. What it did not
-  consume drives the game: drag empty space to orbit or pan, wheel to zoom,
-  Space spawns a unit, Esc / Start pauses. The counters in the HUD's panel show
-  what reached the game.
+  consume drives the game: click a unit to select it, drag empty space to
+  orbit or pan, wheel to zoom, Space spawns a unit, Esc / Start pauses. The
+  counters in the HUD's panel show what reached the game.
+* **Selection.** A left press the UI passed on and released within 4 px is a
+  click: the game picks the unit under it with its own raycast (raylib
+  `GetRayCollisionBox`, sokol `jsui_example::rayBox` in
+  [shared/example_host.h](shared/example_host.h), a distance test in SDL3's
+  2D arena; Unity and Unreal their own rays) and highlights it, or clears the
+  selection on empty ground. It tells the UI with `game.selected` (an index
+  into `entities`, -1 for none); the HUD styles that unit's nameplate, shows
+  its name in the panel and answers with `ui:selected {index}`.
 * **Per-frame data.** Each frame the game projects its units to the screen and
   writes `x, y, visible, hue` per unit into the `entities` frame buffer
   (`jsui_map_buffer` / `jsui_commit_buffer`). The nameplates follow them with
   `useHostBufferValue`, moved by the runtime with no JS per frame. Slower data
-  (fps, unit count, paused) goes to the `game` shared state (`jsui_set_state`),
+  (fps, unit count, paused, selected) goes to the `game` shared state (`jsui_set_state`),
   and the HUD's buttons answer with `Host.postMessage('game:spawn' | 'game:clear'
   | 'game:pause' | 'game:quit')`.
 * **Getting pixels on screen**, a different way in each:
@@ -72,11 +80,13 @@ Every example takes the same options:
 | `--frames N --screenshot out.png` | run N frames, save the composed frame (scene + UI), exit |
 | `--selftest` | scripted check of the pass-through contract (below), then exit |
 
-`--selftest` waits for the HUD to report where its Spawn button is, then sends
-input straight to the runtime: a click on empty space must not be consumed
-(and `jsui_hit_test` must report nothing there), and a click on Spawn must be
-consumed and its `game:spawn` message must add a unit. It prints
-`selftest: ok` and exits 0. CI runs it for each example under Xvfb, on Mesa's
+`--selftest` waits for the HUD to report where its Spawn button is, then
+clicks through the host's own mouse handling (the code real events run): a
+click on empty space must reach the game (and `jsui_hit_test` must report
+nothing there), a click on Spawn must be consumed and its `game:spawn` message
+must add a unit, a click on a unit must select it, one on empty ground must
+clear the selection, and another must select again, each time answered by the
+HUD's `ui:selected`. It prints `selftest: ok` and exits 0. CI runs it for each example under Xvfb, on Mesa's
 GL and on the CPU path (the `engines` job in `.github/workflows/ci.yml`).
 
 ### Using one in your engine
