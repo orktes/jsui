@@ -24,22 +24,23 @@ for (const mode of ['production', 'development']) {
     // Production bundles run as precompiled bytecode when the WebAssembly
     // runtime is around to compile them (jsui build's default).
     const bytecode = mode === 'production' && !!findWasmDir();
+    const format = bytecode ? 'combo' : 'source';
     const outfile = path.join(dir, 'bundle.js');
     const scrollfile = path.join(dir, 'scroll.js');
     const interactionsfile = path.join(dir, 'interactions.js');
     const nativeAnimatedFile = path.join(dir, 'native_animated.js');
-    await build({ entry: path.join(here, 'e2e', 'app.jsx'), outfile, mode, bytecode });
-    await build({ entry: path.join(here, 'e2e', 'scroll.jsx'), outfile: scrollfile, mode, bytecode });
-    await build({ entry: path.join(here, 'e2e', 'interactions.jsx'), outfile: interactionsfile, mode, bytecode });
-    await build({ entry: path.join(here, 'e2e', 'native_animated.jsx'), outfile: nativeAnimatedFile, mode, bytecode });
+    await build({ entry: path.join(here, 'e2e', 'app.jsx'), outfile, mode, format });
+    await build({ entry: path.join(here, 'e2e', 'scroll.jsx'), outfile: scrollfile, mode, format });
+    await build({ entry: path.join(here, 'e2e', 'interactions.jsx'), outfile: interactionsfile, mode, format });
+    await build({ entry: path.join(here, 'e2e', 'native_animated.jsx'), outfile: nativeAnimatedFile, mode, format });
     const hostDataFile = path.join(dir, 'host_data.js');
-    await build({ entry: path.join(here, 'e2e', 'host_data.jsx'), outfile: hostDataFile, mode, bytecode });
+    await build({ entry: path.join(here, 'e2e', 'host_data.jsx'), outfile: hostDataFile, mode, format });
     const imagesFile = path.join(dir, 'images.js');
-    await build({ entry: path.join(here, 'e2e', 'images.jsx'), outfile: imagesFile, mode, bytecode });
+    await build({ entry: path.join(here, 'e2e', 'images.jsx'), outfile: imagesFile, mode, format });
     const surfacesFile = path.join(dir, 'surfaces.js');
-    await build({ entry: path.join(here, 'e2e', 'surfaces.jsx'), outfile: surfacesFile, mode, bytecode });
+    await build({ entry: path.join(here, 'e2e', 'surfaces.jsx'), outfile: surfacesFile, mode, format });
     const hostBuffersFile = path.join(dir, 'host_buffers.js');
-    await build({ entry: path.join(here, 'e2e', 'host_buffers.jsx'), outfile: hostBuffersFile, mode, bytecode });
+    await build({ entry: path.join(here, 'e2e', 'host_buffers.jsx'), outfile: hostBuffersFile, mode, format });
     const tests = [
       'react_e2e',
       'react_interactions_e2e',
@@ -87,7 +88,8 @@ for (const mode of ['production', 'development']) {
     const dir = await mkdtemp(path.join(tmpdir(), 'jsui-e2e-list-'));
     const outfile = path.join(dir, 'bundle.js');
     const bytecode = mode === 'production' && !!findWasmDir();
-    await build({ entry: path.join(here, 'e2e', 'list.jsx'), outfile, mode, bytecode });
+    const format = bytecode ? 'split' : 'source';
+    await build({ entry: path.join(here, 'e2e', 'list.jsx'), outfile, mode, format });
     const { stdout, stderr } = await promisify(execFile)(binary, ['react_list_e2e'], {
       env: Object.assign({}, process.env, { JSUI_REACT_LIST_BUNDLE: outfile }),
       cwd: repo,

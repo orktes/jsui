@@ -13,13 +13,16 @@ import { answerOf, parseInlineSteps, runSteps, STEP_HELP } from '../src/script.j
 import { skillCommand, SKILL_USAGE } from '../src/skill.js';
 
 const USAGE = `usage:
-  jsui build <entry> [-o dist/bundle.js] [--minify] [--sourcemap] [--dev] [--no-bytecode]
-     [--no-source-fallback]
-     Precompiles to QuickJS bytecode (faster startup, less memory; the source
-     stays inside as a fallback for runtimes of other JSUI versions).
-     --no-source-fallback leaves it out (file ~1.25x the JS instead of ~2.2x;
-     only runtimes of this JSUI version can load it). --no-bytecode writes
-     plain JS (browser JS engines, other tools).
+  jsui build <entry> [-o dist/bundle.js] [--minify] [--sourcemap] [--dev]
+     [--format combo|bytecode|source|split]
+     What goes in the bundle (all load in every JSUI runtime of this version):
+       combo     (default) QuickJS bytecode (faster startup, less memory) with
+                 the source inside as the fallback for other JSUI versions;
+                 ~2.2x the size of the JS
+       bytecode  bytecode only: ~1.25x the JS, only this JSUI version loads it
+       source    plain JS (browser JS engines, other tools)
+       split     bytecode in <out>, the source next to it in
+                 <name>.source.js; the runtime reads it only as the fallback
   jsui dev <entry> [--port 5173] [--host 127.0.0.1] [--no-hmr]
      [--headless [view options]]
      Every runtime that loads the bundle in dev mode joins the server's shared
@@ -235,8 +238,7 @@ async function main(argv) {
       port: { type: 'string', short: 'p' },
       host: { type: 'string' },
       'no-hmr': { type: 'boolean' },
-      'no-bytecode': { type: 'boolean' },
-      'no-source-fallback': { type: 'boolean' },
+      format: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
       ...VIEW_OPTIONS,
     },
@@ -303,12 +305,12 @@ async function main(argv) {
         minify: !!values.minify,
         sourcemap: !!values.sourcemap,
         mode: values.dev ? 'development' : 'production',
-        bytecode: !values['no-bytecode'],
-        sourceFallback: !values['no-source-fallback'],
+        format: values.format || 'combo',
       });
-      const kind = r.bytecode !== true ? 'source' : values['no-source-fallback'] ? 'bytecode' : `bytecode + ${(r.sourceBytes / 1024).toFixed(1)} KiB source`;
+      const kind =
+        r.format === 'combo' ? `bytecode + ${(r.sourceBytes / 1024).toFixed(1)} KiB source` : r.format === 'split' ? `bytecode, source in ${path.basename(r.sourceFile)}` : r.format;
       console.log(`jsui: wrote ${r.outfile} (${(r.bytes / 1024).toFixed(1)} KiB, ${kind}, ${r.assets.length} assets) in ${Date.now() - t0} ms`);
-      if (typeof r.bytecode === 'string') console.warn(`jsui: not precompiled (${r.bytecode}); pass --no-bytecode to silence this`);
+      if (typeof r.bytecode === 'string') console.warn(`jsui: not precompiled (${r.bytecode}); pass --format source to silence this`);
       return 0;
     } catch (e) {
       console.error('jsui: build failed\n' + (e && e.message ? e.message : e));

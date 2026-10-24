@@ -49,13 +49,13 @@ bool isBundleContainer(std::string_view data) {
 bool parseBundleContainer(std::string_view data, BundleParts& parts) {
   if (!isBundleContainer(data)) return false;
   data.remove_prefix(sizeof(kMagic));
-  if (!getBlock(data, parts.key) || !getBlock(data, parts.bytecode)) return false;
+  if (!getBlock(data, parts.key) || !getBlock(data, parts.bytecode) || !getBlock(data, parts.sourceUrl)) return false;
   parts.source = data;
   return true;
 }
 
-bool compileBundle(std::string_view source, const std::string& name, bool keepSource, std::string& out,
-                   std::string& error) {
+bool compileBundle(std::string_view source, const std::string& name, bool keepSource, std::string_view sourceUrl,
+                   std::string& out, std::string& error) {
   JSRuntime* rt = JS_NewRuntime();
   JSContext* ctx = rt ? JS_NewContext(rt) : nullptr;
   if (!ctx) {
@@ -74,12 +74,14 @@ bool compileBundle(std::string_view source, const std::string& name, bool keepSo
     if (bc) {
       const char* key = bytecodeKey();
       out.clear();
-      out.reserve(sizeof(kMagic) + 8 + std::strlen(key) + size + (keepSource ? source.size() : 0));
+      out.reserve(sizeof(kMagic) + 12 + std::strlen(key) + size + sourceUrl.size() + (keepSource ? source.size() : 0));
       out.append(kMagic, sizeof(kMagic));
       putU32(out, uint32_t(std::strlen(key)));
       out.append(key);
       putU32(out, uint32_t(size));
       out.append(reinterpret_cast<const char*>(bc), size);
+      putU32(out, uint32_t(sourceUrl.size()));
+      out.append(sourceUrl);
       if (keepSource) out.append(source);
       js_free(ctx, bc);
     } else {

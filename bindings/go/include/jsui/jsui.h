@@ -488,17 +488,20 @@ JSUI_API int jsui_load_bundle_source(JsuiRuntime* rt, const char* source, size_t
 /* Load and evaluate a bundle via the loader (async; result visible after ticks). */
 JSUI_API int jsui_load_bundle_url(JsuiRuntime* rt, const char* url);
 /* Precompiled bundles. `jsui build` writes the bundle as QuickJS bytecode in
- * a small container (with the source as fallback), which both load functions
- * accept as is: no parsing at startup and less memory. Bytecode only runs on
- * the QuickJS build that compiled it (jsui_bytecode_key()); any other
- * runtime runs the embedded source instead and logs a warning.
+ * a small container, which both load functions accept as is: no parsing at
+ * startup and less memory. Bytecode only runs on the QuickJS build that
+ * compiled it (jsui_bytecode_key()); any other runtime runs the source
+ * instead and logs a warning: the source inside the container (`jsui build`'s
+ * default "combo"), else the separate source file it names ("split", loaded
+ * through the loader relative to the bundle's name / URL).
  * jsui_compile_bundle compiles `source` (a global script, e.g. a `jsui build
- * --no-bytecode` bundle) into such a container; `keep_source` = 0 leaves the
- * fallback out. Returns 0 and the container in *out_data (free with
- * jsui_free()), or -1 with the syntax error in *out_error (jsui_free()) when
- * out_error is not NULL. Needs no runtime. */
-JSUI_API int jsui_compile_bundle(const char* source, size_t size, const char* name, int keep_source, void** out_data,
-                                 size_t* out_size, char** out_error);
+ * --format source` bundle) into such a container; `keep_source` = 0 leaves
+ * the source out, `source_url` (may be NULL) names the separate source file.
+ * Returns 0 and the container in *out_data (free with jsui_free()), or -1
+ * with the syntax error in *out_error (jsui_free()) when out_error is not
+ * NULL. Needs no runtime. */
+JSUI_API int jsui_compile_bundle(const char* source, size_t size, const char* name, int keep_source,
+                                 const char* source_url, void** out_data, size_t* out_size, char** out_error);
 /* The QuickJS build's bytecode identity (version + JSUI patches). */
 JSUI_API const char* jsui_bytecode_key(void);
 /* Tear down the JS context and reload the last bundle (dev mode does this automatically). */

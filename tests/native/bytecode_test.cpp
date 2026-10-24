@@ -1,9 +1,14 @@
 // Precompiled bundles (src/js/bytecode.h): jsui_compile_bundle output loads
 // like source, a bundle from another QuickJS falls back to its source, and
 // broken containers fail cleanly.
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "js/bytecode.h"
@@ -21,11 +26,11 @@ std::string paintBundle(const char* color) {
          color + "'); n.appendChild(n.rootId, v);";
 }
 
-std::string compile(const std::string& src, int keepSource = 1) {
+std::string compile(const std::string& src, int keepSource = 1, const char* sourceUrl = nullptr) {
   void* data = nullptr;
   size_t size = 0;
   char* err = nullptr;
-  int r = jsui_compile_bundle(src.data(), src.size(), "bc.js", keepSource, &data, &size, &err);
+  int r = jsui_compile_bundle(src.data(), src.size(), "bc.js", keepSource, sourceUrl, &data, &size, &err);
   CHECK_EQ(r, 0);
   CHECK(err == nullptr);
   std::string out(static_cast<const char*>(data), size);
@@ -48,7 +53,9 @@ struct Rt {
     rt = jsui_create(&cfg);
   }
   ~Rt() { jsui_destroy(rt); }
-  int load(const std::string& bundle) { return jsui_load_bundle_source(rt, bundle.data(), bundle.size(), "bc.js"); }
+  int load(const std::string& bundle, const char* name = "bc.js") {
+    return jsui_load_bundle_source(rt, bundle.data(), bundle.size(), name);
+  }
   // RGBA of the top-left pixel.
   std::vector<int> pixel() {
     jsui_tick(rt, 0);
@@ -143,10 +150,44 @@ TEST(bytecode_compile_reports_syntax_errors) {
   void* data = reinterpret_cast<void*>(1);
   size_t size = 1;
   char* err = nullptr;
-  CHECK_EQ(jsui_compile_bundle(src, std::strlen(src), "broken.js", 1, &data, &size, &err), -1);
+  CHECK_EQ(jsui_compile_bundle(src, std::strlen(src), "broken.js", 1, nullptr, &data, &size, &err), -1);
   CHECK(data == nullptr);
   CHECK(err != nullptr);
   CHECK(std::string(err).find("SyntaxError") != std::string::npos);
   CHECK(std::string(err).find("broken.js") != std::string::npos);
   jsui_free(err);
+}
+
+TEST(bytecode_split_source_file) {
+  namespace fs = std::filesystem;
+  fs::path dir = fs::temp_directory_path() / "jsui-bytecode-split";
+  fs::create_directories(dir);
+  std::string src = paintBundle("#0000ff");
+  std::ofstream(dir / "bundle.source.js", std::ios::binary) << src;
+  std::string bc = compile(src, 0, "bundle.source.js");
+  jsui::BundleParts parts;
+  CHECK(jsui::parseBundleContainer(bc, parts));
+  CHECK_EQ(std::string(parts.sourceUrl), std::string("bundle.source.js"));
+  CHECK(parts.source.empty());
+  std::string name = (dir / "bundle.js").string();
+  {
+    // Same runtime: the bytecode runs, the source file is never read.
+    Rt t;
+    CHECK_EQ(t.load(bc, name.c_str()), 0);
+    CHECK_EQ(t.pixel()[2], 255);
+    CHECK(t.warnings.empty());
+  }
+  // Another runtime's bytecode: the separate source file runs.
+  Rt t;
+  CHECK_EQ(t.load(withForeignKey(bc), name.c_str()), 0);
+  std::vector<int> px;
+  for (int i = 0; i < 3000; i++) {  // the loader reads the file asynchronously
+    px = t.pixel();
+    if (px[2] == 255) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  CHECK_EQ(px[2], 255);
+  CHECK_EQ(t.warnings.size(), size_t(1));
+  CHECK(t.warnings[0].find("bundle.source.js") != std::string::npos);
+  fs::remove_all(dir);
 }

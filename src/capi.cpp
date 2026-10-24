@@ -231,16 +231,16 @@ int jsui_load_bundle_url(JsuiRuntime* rt, const char* url) {
   return 0;
 }
 
-int jsui_compile_bundle(const char* source, size_t size, const char* name, int keepSource, void** outData,
-                        size_t* outSize, char** outError) {
+int jsui_compile_bundle(const char* source, size_t size, const char* name, int keepSource, const char* sourceUrl,
+                        void** outData, size_t* outSize, char** outError) {
   if (outData) *outData = nullptr;
   if (outSize) *outSize = 0;
   if (outError) *outError = nullptr;
   std::string out, error;
   if (!source || !outData || !outSize) {
     error = "jsui_compile_bundle: missing argument";
-  } else if (jsui::compileBundle(std::string_view(source, size), name ? name : "bundle.js", keepSource != 0, out,
-                                 error)) {
+  } else if (jsui::compileBundle(std::string_view(source, size), name ? name : "bundle.js", keepSource != 0,
+                                 sourceUrl ? sourceUrl : "", out, error)) {
     *outData = std::malloc(out.size() ? out.size() : 1);
     if (*outData) {
       std::memcpy(*outData, out.data(), out.size());

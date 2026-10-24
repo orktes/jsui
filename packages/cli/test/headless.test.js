@@ -11,7 +11,7 @@ import zlib from 'node:zlib';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { attach, bundleSource, compileBundle, dev, isPrecompiled, launch, findWasmDir, parseInlineSteps, parseSelector, SKILL_DIR } from '../src/index.js';
+import { attach, bundleSource, compileBundle, dev, isPrecompiled, readPrecompiled, launch, findWasmDir, parseInlineSteps, parseSelector, SKILL_DIR } from '../src/index.js';
 import { loadModule } from '../src/headless.js';
 import { LiveApp } from '../src/shared.js';
 
@@ -204,7 +204,7 @@ AppRegistry.registerComponent('main', () => () => <View style={{ flex: 1, backgr
   assert.deepEqual(firstPixel(await readFile(shot)), [0x12, 0x34, 0x56, 255]);
 
   const plain = path.join(dir, 'out', 'plain.js');
-  await exec(process.execPath, [BIN, 'build', path.join(dir, 'reg.jsx'), '-o', plain, '--no-bytecode']);
+  await exec(process.execPath, [BIN, 'build', path.join(dir, 'reg.jsx'), '-o', plain, '--format', 'source']);
   const src = await readFile(plain);
   assert.ok(!isPrecompiled(src));
   assert.equal(bundleSource(src), src.toString('utf8'));
@@ -216,6 +216,23 @@ AppRegistry.registerComponent('main', () => () => <View style={{ flex: 1, backgr
   await exec(process.execPath, [BIN, 'screenshot', lean, '--bundle', '-o', shot, '--width', '64', '--height', '32']);
   assert.deepEqual(firstPixel(await readFile(shot)), [0x12, 0x34, 0x56, 255]);
 
+  // split: bytecode without the source, which sits next to it.
+  const split = path.join(dir, 'out', 'split.js');
+  const rs = await exec(process.execPath, [BIN, 'build', path.join(dir, 'reg.jsx'), '-o', split, '--format', 'split']);
+  assert.match(rs.stdout, /source in split\.source\.js/);
+  const parts = readPrecompiled(await readFile(split));
+  assert.equal(parts.sourceUrl, 'split.source.js');
+  assert.equal(parts.source, '');
+  assert.match(await readFile(path.join(dir, 'out', 'split.source.js'), 'utf8'), /registerComponent/);
+  await exec(process.execPath, [BIN, 'screenshot', split, '--bundle', '-o', shot, '--width', '64', '--height', '32']);
+  assert.deepEqual(firstPixel(await readFile(shot)), [0x12, 0x34, 0x56, 255]);
+
+  // bytecode only.
+  const only = path.join(dir, 'out', 'only.js');
+  await exec(process.execPath, [BIN, 'build', path.join(dir, 'reg.jsx'), '-o', only, '--format', 'bytecode']);
+  assert.equal(bundleSource(await readFile(only)), '');
+
+  await assert.rejects(exec(process.execPath, [BIN, 'build', path.join(dir, 'reg.jsx'), '-o', only, '--format', 'nope']), /unknown bundle format/);
   await assert.rejects(compileBundle('let x = ;', { name: 'broken.js' }), /SyntaxError[\s\S]*broken\.js/);
 });
 
