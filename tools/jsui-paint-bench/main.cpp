@@ -490,18 +490,21 @@ std::vector<Sample> runPass(const Options& o, const Scenario& sc, const std::str
 #endif
 
 #if BENCH_METAL
-  // graphite: Skia Graphite on Metal (jsui_gpu_create_metal, incremental);
+  // graphite: Skia Graphite on Metal (jsui_gpu_create_metal), full repaint;
+  // graphite-incr: the same with JSUI_GPU_INCREMENTAL once the texture holds
+  // the last frame (as the SDL3 / Unity / Unreal / Godot hosts do);
   // metal: Skia Ganesh on Metal (jsui_metal_create, full repaint).
   void *mdev = nullptr, *mq = nullptr, *mtex = nullptr;
   JsuiGpuContext* gctx = nullptr;
   JsuiMetalContext* mctx = nullptr;
-  if (backend == "graphite" || backend == "metal") {
+  bool holdsFrame = false;
+  if (backend == "graphite" || backend == "graphite-incr" || backend == "metal") {
     if (!bench_mtl_init(&mdev, &mq)) {
       *error = "no Metal device";
       return out;
     }
     mtex = bench_mtl_texture(mdev, w, h);
-    if (backend == "graphite") gctx = jsui::graphite_gpu::createMetal(mdev, mq);
+    if (backend.rfind("graphite", 0) == 0) gctx = jsui::graphite_gpu::createMetal(mdev, mq);
     else mctx = jsui::metal::create(mdev, mq);
     if (!gctx && !mctx) {
       *error = "Metal context creation failed";
@@ -538,8 +541,10 @@ std::vector<Sample> runPass(const Options& o, const Scenario& sc, const std::str
           target.texture = mtex;
           target.width = w;
           target.height = h;
+          if (holdsFrame && backend == "graphite-incr") target.flags = JSUI_GPU_INCREMENTAL;
           JsuiRect dirty{};
           rc = jsui::graphite_gpu::render(rt->main(), gctx, target, &dirty);
+          holdsFrame = rc == 0;
         } else {
           rc = jsui::metal::render(rt->main(), mctx, mtex, 70 /* RGBA8Unorm */, w, h, 0);
         }
@@ -697,7 +702,7 @@ int main(int argc, char** argv) {
     else if (a == "--no-count") o.count = false;
     else if (a == "-h" || a == "--help") {
       std::printf("usage: jsui-paint-bench [--frames N] [--warmup N] [--settle-ms MS] [--width W] [--height H] "
-                  "[--scale S] [--backends cpu,cpu-full,gl,gl-direct,graphite,metal] [--json out.json] name=bundle.js[@hover] ...\n");
+                  "[--scale S] [--backends cpu,cpu-full,gl,gl-direct,graphite,graphite-incr,metal] [--json out.json] name=bundle.js[@hover] ...\n");
       return 0;
     } else {
       Scenario sc;
