@@ -140,6 +140,8 @@ public class ExampleGame : MonoBehaviour
         light.type = LightType.Directional;
         light.intensity = 1.1f;
         light.transform.rotation = Quaternion.Euler(50, -30, 0);
+        // Flat ambient (the default, Skybox, ignores ambientLight and greys the dark ground).
+        RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Flat;
         RenderSettings.ambientLight = new Color(0.25f, 0.28f, 0.38f);
 
         Material Mat(Color c, float gloss = 0.35f)
