@@ -1804,7 +1804,24 @@ names.
 * **QuickJS.** `cmake/Deps.cmake` compiles a patched copy of quickjs.c:
   `JS_FreeValue` / `JS_DupValue` are inlined (quickjs-ng exports them out of
   line, a call per value the interpreter pops) and `===` / `!==` decide
-  objects, symbols, booleans, null and undefined inline. `JSUI_QUICKJS_FLAGS`
+  objects, symbols, booleans, null, undefined, mismatched types and string
+  pairs inline. Further named patches (each a whole-text replace that is
+  left out with a warning if quickjs.c changed under it, and that
+  `-DJSUI_QUICKJS_PATCHES_OFF="name;..."` leaves out for bisecting):
+  `object-keys` (`Object.keys` of an ordinary object builds its array in one
+  pass over the shape), `own-names` (the same for the string keys of
+  `JS_GetOwnPropertyNames` on non-exotic objects), `for-in` (the iterator
+  keeps its key table instead of building a dictionary object, and skips
+  prototypes with no enumerable string keys without listing them),
+  `define-field` (object literal fields go straight to `add_property`) and
+  `shape-transitions` (adding a property named in the code, by an object
+  literal or `obj.name = v`, keeps the old shape as the parent of the new
+  one up to 32 properties, so literals and constructors built the same way
+  share one hashed shape chain instead of each owning a private shape;
+  computed keys keep upstream's in-place shape update, so maps used as
+  dictionaries do not grow memory). Together they take 5-11% of the
+  instructions out of the React scenarios in `jsui-bench`, for 3 KB of
+  code; none changes the bytecode. `JSUI_QUICKJS_FLAGS`
   adds compile flags for QuickJS alone (profile-guided optimization with
   `-fprofile-instr-generate` / `-fprofile-instr-use=` measured 6-9% less JS
   time on React-heavy scenarios on an M1 Ultra).
