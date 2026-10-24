@@ -66,7 +66,7 @@ what CI tested:
 | `jsui-X.Y.Z-windows-x64.zip` | same with `bin/jsui.dll`, `bin/icudtl.dat`, `lib/jsui.lib` | `dist-windows` (ClangCL, static CRT), prebuilt Skia m124 |
 | `jsui-X.Y.Z-ios-xcframework.zip` | `JSUI.xcframework`: static library (JSUI + QuickJS + Yoga + Skia) + header, device and simulator arm64 | `dist-ios` (advisory: left out when it failed) |
 | `jsui-godot-X.Y.Z.zip` | `addons/jsui/`: `jsui.gdextension` + the GDExtension library of every platform above | all `dist-*` desktop jobs |
-| `com.orktes.jsui-X.Y.Z.tgz` | the Unity package (`integrations/unity/package`) with `Plugins/macOS/jsui_unity.bundle` and `Plugins/Linux/x86_64/libjsui_unity.so` and their `.meta` import settings | `dist-macos`, `dist-linux` |
+| `com.orktes.jsui-X.Y.Z.tgz` | the Unity package (`integrations/unity/package`) with `Plugins/macOS/jsui_unity.bundle`, `Plugins/Linux/x86_64/libjsui_unity.so` and `Plugins/Windows/x86_64/jsui_unity.dll` (+ `icudtl.dat`) and their `.meta` import settings | `dist-macos`, `dist-linux`, `dist-windows` |
 | `jsui-unreal-X.Y.Z.zip` | `Jsui/`: the Unreal plugin (`integrations/unreal/Plugins/Jsui`) with the shared library of macOS, Win64 and Linux x86_64 in `Source/ThirdParty/JsuiLibrary` | `dist-macos`, `dist-windows`, `dist-linux` |
 | `SHA256SUMS.txt` | checksums of the above | |
 
@@ -85,7 +85,7 @@ CI artifacts for other packaging (the Unity and Unreal plugins): per platform
 `jsui-native-<platform>` (`shared/`, `viewer/`, `godot/`, `unity/`),
 `jsui-shared-<platform>` (the shared library package alone) and
 `jsui-unity-<platform>` (the Unity plugin: `jsui_unity.bundle` on macOS,
-`libjsui_unity.so` on Linux; not built on Windows yet). Platforms:
+`libjsui_unity.so` on Linux, `jsui_unity.dll` + `icudtl.dat` on Windows). Platforms:
 `linux-x64`, `linux-arm64`, `macos-universal`, `windows-x64`.
 
 `scripts/dist/assemble-engines.sh` makes the Unity and Unreal archives (run

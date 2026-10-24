@@ -4,19 +4,23 @@
 // with a RawImage showing the UI texture, loads the bundle, forwards mouse
 // and keyboard input and ticks the runtime once per frame.
 //
-// Rendering. On Metal (and a plugin built with the GPU path) Skia Graphite
-// draws the UI straight into a RenderTexture on Unity's own device and
-// command queue: after each tick the view queues a render job with
-// GL.IssuePluginEvent, which runs on Unity's render thread before the frame
-// draws (jsui_unity.cpp: only what changed is repainted, and the main thread
-// waits for the job before it touches the runtime again, see Rt). Elsewhere,
-// or with forceCpu, the runtime rasterises on the CPU into the plugin's
-// buffer (jsui_render_rgba_incremental) and the view uploads it into a
-// Texture2D when anything changed. Either texture is premultiplied RGBA
-// holding sRGB-encoded values in a non-sRGB format; the RawImage draws it
-// with a premultiplied-alpha shader (Resources/JsuiPremultiplied.shader,
-// which decodes in Linear projects), flipped, since the rows are top-down
-// and Unity textures are bottom-up.
+// Rendering. The GPU path is the default: on Metal (macOS), Vulkan (Linux,
+// Windows) and Direct3D 11 / 12 (Windows) Skia draws the UI straight into a
+// RenderTexture on Unity's own graphics device (Graphite on Metal and
+// Vulkan, Ganesh on Direct3D; native/jsui_unity_gpu.h): after each tick the
+// view queues a render job with two GL.IssuePluginEvent calls, which runs
+// where Unity lets a plugin use its device before the frame draws
+// (jsui_unity.cpp: only what changed is repainted, and the main thread waits
+// for the job before it touches the runtime again, see Rt). The CPU path is
+// the fallback: with another graphics API (OpenGL), a plugin built without
+// the GPU path, forceCpu, or after a failed GPU render, the runtime
+// rasterises on the CPU into the plugin's buffer
+// (jsui_render_rgba_incremental) and the view uploads it into a Texture2D
+// when anything changed. Either texture is premultiplied RGBA8 holding
+// sRGB-encoded values in a non-sRGB format; the RawImage draws it with a
+// premultiplied-alpha shader (Resources/JsuiPremultiplied.shader, which
+// decodes in Linear projects), flipped, since the rows are top-down and
+// Unity textures are bottom-up.
 //
 // Input pass-through. Every mouse and keyboard event goes to the UI first;
 // jsui_send_* says whether the UI consumed it. Events the UI did not consume
@@ -31,7 +35,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
-using UnityEngine.Rendering;
+using UnityEngine.Experimental.Rendering;
 using UnityEngine.UI;
 
 namespace Jsui
@@ -65,7 +69,7 @@ namespace Jsui
         public IntPtr Runtime => Rt;
         /// <summary>How the UI is drawn, e.g. for a stats overlay.</summary>
         public string RendererName => gpu_
-            ? "Skia Graphite · " + SystemInfo.graphicsDeviceType + " · RenderTexture"
+            ? (JsuiNative.FromUtf8(JsuiNative.jsuiu_gpu_backend_name()) ?? "GPU") + " · RenderTexture"
             : "CPU raster · Texture2D · " + SystemInfo.graphicsDeviceType;
         /// <summary>Viewport size in logical px.</summary>
         public Vector2 Size => new Vector2(width_, height_);
@@ -109,8 +113,9 @@ namespace Jsui
         {
             // Load after every Awake, so the game's first SetState calls are
             // in place when the bundle's first render runs.
-            gpu_ = !forceCpu && SystemInfo.graphicsDeviceType == GraphicsDeviceType.Metal &&
-                   JsuiNative.jsuiu_gpu_available() != 0;
+            // The plugin knows whether it has a backend for Unity's graphics
+            // API (native/jsui_unity_plugin.cpp).
+            gpu_ = !forceCpu && JsuiNative.jsuiu_gpu_available() != 0;
             if (gpu_) renderEvent_ = JsuiNative.jsuiu_render_event_func();
             var url = ResolveBundle(bundle);
             if (JsuiNative.LoadBundleUrl(Rt, url) != 0)
@@ -235,7 +240,8 @@ namespace Jsui
             int ph = Mathf.Max(1, Mathf.RoundToInt(height_ * ratio_));
             if (gpu_ && JsuiNative.jsuiu_gpu_failed(plugin_) != 0)
             {
-                Debug.LogWarning("JSUI: the GPU renderer failed; using the CPU renderer");
+                var why = JsuiNative.FromUtf8(JsuiNative.jsuiu_gpu_error(plugin_));
+                Debug.LogWarning("JSUI: the GPU renderer failed (" + (why ?? "unknown") + "); using the CPU renderer");
                 gpu_ = false;
                 if (target_) Destroy(target_);
                 target_ = null;
@@ -252,14 +258,23 @@ namespace Jsui
                 if (target_ == null || target_.width != pw || target_.height != ph)
                 {
                     if (target_) Destroy(target_);
-                    // Not sRGB: the UI's sRGB-encoded values are stored as they
-                    // are (the shader decodes them in Linear projects).
-                    target_ = new RenderTexture(pw, ph, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear)
+                    // RGBA8 UNorm, not sRGB: the UI's sRGB-encoded values are
+                    // stored as they are (the shader decodes them in Linear
+                    // projects). A RenderTexture is a colour attachment on
+                    // every API, which Skia draws into (Vulkan: also an input
+                    // attachment; D3D12: ALLOW_RENDER_TARGET); one sample, no
+                    // mips, no depth.
+                    var desc = new RenderTextureDescriptor(pw, ph, GraphicsFormat.R8G8B8A8_UNorm, 0)
+                    {
+                        msaaSamples = 1,
+                        useMipMap = false,
+                        autoGenerateMips = false,
+                    };
+                    target_ = new RenderTexture(desc)
                     {
                         name = "JSUI",
                         filterMode = FilterMode.Bilinear,
                         wrapMode = TextureWrapMode.Clamp,
-                        useMipMap = false,
                     };
                 }
                 target_.Create();  // also after Unity dropped its contents (IsCreated false)
@@ -269,8 +284,13 @@ namespace Jsui
             }
             if (forceRepaint_) JsuiNative.jsuiu_invalidate_target(plugin_);
             else if (JsuiNative.jsui_needs_redraw(Rt) == 0) return;
+            int id = JsuiNative.jsuiu_queue_render(plugin_);
+            if (id == 0) return;  // the next Paint sees jsuiu_gpu_failed
             forceRepaint_ = false;
-            GL.IssuePluginEvent(renderEvent_, JsuiNative.jsuiu_queue_render(plugin_));
+            // A job is two events: prepare (e.g. the texture's barrier in
+            // Unity's command buffer), then render (jsui_unity_gpu.h).
+            GL.IssuePluginEvent(renderEvent_, id);
+            GL.IssuePluginEvent(renderEvent_, id + 1);
         }
 
         void PaintCpu(int pw, int ph)
