@@ -1,7 +1,13 @@
 #include "core/document.h"
 
+#include <yoga/event/event.h>
+#include <yoga/node/Node.h>
+
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstring>
+#include <mutex>
 
 #include "text/font_manager.h"
 #include "text/text_layout.h"
@@ -138,6 +144,31 @@ void Document::setViewport(float width, float height, float pixelRatio) {
   markLayoutDirty();
 }
 
+namespace {
+// The Yoga pass running on this thread (0 outside Document::layout), and
+// Yoga's report of each node it lays out in it: whether the node's layout
+// was computed or taken from its cache. A cached layout does not visit the
+// node's subtree, so afterLayout can skip its children (a list of 2000 rows
+// next to a changing counter). Ghosts laid out on their own are not passes.
+thread_local uint64_t tYogaPass = 0;
+std::atomic<uint64_t> gYogaPasses{0};
+
+void watchYogaLayouts() {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    namespace yg = facebook::yoga;
+    yg::Event::subscribe([](YGNodeConstRef y, yg::Event::Type type, yg::Event::Data data) {
+      if (type != yg::Event::NodeLayout || !tYogaPass) return;
+      auto* n = static_cast<Node*>(YGNodeGetContext(y));
+      if (!n) return;
+      yg::LayoutType t = data.get<yg::Event::NodeLayout>().layoutType;
+      if (t == yg::LayoutType::kLayout) n->yogaLaidOut = tYogaPass;
+      else if (t == yg::LayoutType::kCachedLayout) n->yogaCached = tYogaPass;
+    });
+  });
+}
+}  // namespace
+
 bool Document::layout() {
   // A newly registered font changes text metrics everywhere.
   if (fonts && fonts->generation != fontGeneration_) {
@@ -159,7 +190,10 @@ bool Document::layout() {
   else YGNodeStyleSetWidth(root_->yoga(), w);
   if (autoHeight_) YGNodeStyleSetHeightAuto(root_->yoga());
   else YGNodeStyleSetHeight(root_->yoga(), h);
+  watchYogaLayouts();
+  tYogaPass = yogaPass_ = ++gYogaPasses;
   YGNodeCalculateLayout(root_->yoga(), w, h, YGDirectionLTR);
+  tYogaPass = 0;
   if (autoWidth_) width_ = YGNodeLayoutGetWidth(root_->yoga());
   if (autoHeight_) height_ = YGNodeLayoutGetHeight(root_->yoga());
   if (animate) {
@@ -174,17 +208,36 @@ bool Document::layout() {
 // Visits only what this pass laid out: Yoga flags every node it lays out
 // (hasNewLayout), and a node it did not reach (its parent's layout came from
 // the cache) cannot have a flagged descendant, so unflagged subtrees are
-// skipped (React Native does the same). A node whose frame moved dirties the
-// hit-test bounds of its ancestors; onLayout listeners are told about it.
+// skipped (React Native does the same). Yoga flags a node whose layout it
+// took from its cache too, but leaves its subtree as it was: its children
+// are not visited (Yoga reports which, see watchYogaLayouts). A node whose
+// frame moved dirties the hit-test bounds of its ancestors; onLayout
+// listeners are told about it. Only a node whose frame, padding or border
+// changed is marked for the painter (a flagged node keeping its layout
+// would make the painter walk all of its children).
 void Document::afterLayout(Node* node, bool report) {
   if (!node->yoga() || !YGNodeGetHasNewLayout(node->yoga())) return;
-  YGNodeSetHasNewLayout(node->yoga(), false);
-  node->markPaintTree();  // padding, border or content size may have changed too
+  YGNodeRef y = node->yoga();
+  YGNodeSetHasNewLayout(y, false);
+  perf.counters.layoutVisits++;
   Rect r = node->layoutRect();
   const Rect& b = node->boundsLayout;
   if (b.x != r.x || b.y != r.y || b.width != r.width || b.height != r.height) {
     node->boundsLayout = r;
-    node->markBoundsDirty();
+    node->markBoundsDirty();  // marks the paint tree too
+  }
+  // Physical edges (left, top, right, bottom), as YGNodeLayoutGetPadding /
+  // YGNodeLayoutGetBorder read them, without their per-call checks.
+  namespace yg = facebook::yoga;
+  const yg::LayoutResults& l = yg::resolveRef(y)->getLayout();
+  float edges[8];
+  for (int i = 0; i < 4; i++) {
+    edges[i] = l.padding(yg::PhysicalEdge(i));
+    edges[4 + i] = l.border(yg::PhysicalEdge(i));
+  }
+  if (std::memcmp(edges, node->edgesLayout, sizeof edges) != 0) {
+    std::memcpy(node->edgesLayout, edges, sizeof edges);
+    node->markPaintTree();
   }
   if (report && (node->propFlags() & Node::kListensLayout)) {
     auto& prev = reportedLayout_[node->id()];
@@ -193,6 +246,8 @@ void Document::afterLayout(Node* node, bool report) {
       onLayout(node, r);
     }
   }
+  // Laid out only from the cache in this pass: nothing below it changed.
+  if (node->yogaCached == yogaPass_ && node->yogaLaidOut != yogaPass_) return;
   for (Node* c : node->children()) afterLayout(c, report);
 }
 

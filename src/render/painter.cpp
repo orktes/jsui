@@ -1363,6 +1363,12 @@ struct NodeRecord : Node::Cache {
   SkMatrix inMatrix, inSnap;
   SkIRect inClip = SkIRect::MakeEmpty();
   uint32_t curvedBegin = 0, curvedEnd = 0, rasterBegin = 0, rasterEnd = 0;
+  // The pass that last walked the node itself (its children brought up to
+  // date), and where its entries began in that pass' lists: while it is
+  // skipped its children keep that pass and those positions, which its
+  // copied entries still hold at the same offsets (see updateRecords).
+  uint64_t walkedPass = 0;
+  uint32_t walkedCurved = 0, walkedRaster = 0;
 };
 
 // A node with anti-aliased curved or diagonal outlines, in device pixels.
@@ -2448,6 +2454,30 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
           childDamage = &scan->sub;
         }
       }
+      // The node's box in device space, which clips what its children add
+      // to `full` (computed once: a list visits thousands of them).
+      SkIRect box = SkIRect::MakeEmpty();
+      const bool clips = clipsChildren(n);
+      if (clips) box = deviceBounds(m, SkRect::MakeWH(w, h));
+      // Skipped (with its subtree) since a pass that walked it: its children
+      // were last brought up to date then, and their entries are in the
+      // previous pass' lists at the same offsets from the node's own as in
+      // that pass. Moved there, the children can be skipped again; else a
+      // list left alone for a while would walk all of its rows once one of
+      // them changes.
+      if (tSkip && tSkip->enabled && tSkip->prev && rec->pass == tSkip->prev && rec->walkedPass &&
+          rec->walkedPass != rec->pass) {
+        const uint32_t dc = rec->curvedBegin - rec->walkedCurved, dr = rec->rasterBegin - rec->walkedRaster;
+        for (Node* ch : n->children()) {
+          auto* cr = static_cast<NodeRecord*>(ch->paintCache.get());
+          if (!cr || cr->pass != rec->walkedPass) continue;
+          cr->pass = tSkip->prev;
+          cr->curvedBegin += dc;
+          cr->curvedEnd += dc;
+          cr->rasterBegin += dr;
+          cr->rasterEnd += dr;
+        }
+      }
       auto visit = [&](Node* ch) {
         auto* cr = static_cast<NodeRecord*>(ch->paintCache.get());
         SkipState* sk = tSkip;
@@ -2467,9 +2497,15 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
             // comes into view.
             float dx = cm.getTranslateX() - cr->inMatrix.getTranslateX(),
                   dy = cm.getTranslateY() - cr->inMatrix.getTranslateY();
-            SkRect moved = SkRect::Make(cr->subtreeFull).makeOffset(dx, dy);
-            childFull = cr->subtreeFull.isEmpty() ? cr->subtreeFull : moved.roundOut();
-            hidden = skip = !SkIRect::Intersects(moved.makeOutset(2, 2).roundOut(), childClip);
+            if (dx == 0 && dy == 0) {
+              // Not moved (a static list's rows out of view): the same rects
+              // in whole pixels.
+              hidden = skip = !SkIRect::Intersects(cr->subtreeFull.makeOutset(2, 2), childClip);
+            } else {
+              SkRect moved = SkRect::Make(cr->subtreeFull).makeOffset(dx, dy);
+              childFull = cr->subtreeFull.isEmpty() ? cr->subtreeFull : moved.roundOut();
+              hidden = skip = !SkIRect::Intersects(moved.makeOutset(2, 2).roundOut(), childClip);
+            }
           }
         }
         if (skip) {
@@ -2508,7 +2544,7 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
           subtreeNodes += cr->subtreeNodes;
           isolatable &= cr->isolatable;
           SkIRect cf = skip ? childFull : cr->subtreeFull;
-          if (!clipsChildren(n) || cf.intersect(deviceBounds(m, SkRect::MakeWH(w, h)))) full.join(cf);
+          if (!clips || cf.intersect(box)) full.join(cf);
         }
       };
       for (Node* ch : n->ghosts) visit(ch);
@@ -2627,7 +2663,9 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
   rec->quiet = quietKids && !rec->relChanged && !rec->moved && !rec->scaling && !rec->resizing &&
                rec->stableFrames >= 1 && !caret && !n->layoutAnim && !rec->shadowInexact && !rec->layerInexact &&
                !(n->type() == NodeType::TextInput && n->editState);
-  rec->pass = tSkip ? tSkip->pass : 0;
+  rec->pass = rec->walkedPass = tSkip ? tSkip->pass : 0;
+  rec->walkedCurved = uint32_t(curvedStart);
+  rec->walkedRaster = uint32_t(rasterStart);
   rec->inMatrix = parent;
   rec->inSnap = parentSnap;
   rec->inClip = clip;

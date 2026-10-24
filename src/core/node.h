@@ -175,6 +175,13 @@ class Node {
   }
   // layoutRect() as of the last post-layout pass (Document::afterLayout).
   Rect boundsLayout{-1, -1, -1, -1};
+  // Its resolved padding and border (left, top, right, bottom each) as of
+  // that pass: with the frame, all of a node's layout the painter reads.
+  float edgesLayout[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+  // The Yoga passes (Document::layout) that last laid this node out and
+  // that last took its layout from Yoga's cache (which leaves its subtree
+  // as it was); see Document::afterLayout.
+  uint64_t yogaLaidOut = 0, yogaCached = 0;
 
   // Painter culling (render/painter.cpp, updateRecords): a node is dirty
   // when anything that can change what its subtree paints changed since the

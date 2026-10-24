@@ -1652,7 +1652,12 @@ changed rather than to the tree size:
   same in place, without copying the props.
 * **Layout.** Yoga only reruns when something layout-affecting changed; the
   post-layout walk (`Document::afterLayout`) visits only nodes Yoga flagged
-  (`hasNewLayout`). Text measurement reuses the paragraph's intrinsic layout.
+  (`hasNewLayout`), and not the children of a node whose layout Yoga took
+  from its cache (it reports which through its `NodeLayout` event: a 2000-row
+  list next to a changing counter is one visit, not 2000). Only a node whose
+  frame, padding or border changed is marked for the painter
+  (`PerfCounters::layoutVisits` counts the visits). Text measurement reuses
+  the paragraph's intrinsic layout.
   Yoga's `PixelGrid.cpp` is patched at configure time (`cmake/Deps.cmake`) to
   skip pixel rounding when the point scale factor is 0, and `CalculateLayout.cpp`
   to check for baseline alignment once per node per pass, not once per flex line.
@@ -1735,9 +1740,14 @@ the expensive per-pixel work is done once:
   the same matrices and clip keeps its records, its curved outlines and
   raster candidates carried over. A clean child out of view (scrolled out
   of its scroll view) is skipped as long as a translation keeps it out;
-  its records keep the old placement until it comes back. A steady
+  its records keep the old placement until it comes back. When a skipped
+  subtree is walked again (one of its rows changed), its clean children are
+  skipped again: their entries in the lists moved with the copies the
+  skipped parent made (`NodeRecord::walkedPass`), so the walk does not
+  fall back to every node below. A steady
   showcase frame walks the 19 nodes on the paths to what animates instead
-  of the whole tree. `PaintStats::nodesUpdated` counts the walked nodes;
+  of the whole tree, and jsui-bench `list` (20k nodes, one counter) the 5
+  nodes on the counter's path. `PaintStats::nodesUpdated` counts the walked nodes;
   `setRecordSkipping(false)` walks them all, which the tests compare with
   (also for two surfaces of one runtime: each document has its own
   records and passes). Skia does not
