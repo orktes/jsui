@@ -162,6 +162,9 @@ rm -rf "$DAWN_GEN"
 cp -R "$DAWN_SRC/include/." "$DAWN_GEN/include/"
 
 # ------------------------------------------------------------------ build
+# gn wants native paths (Git Bash's /d/a/... would become d/a/...).
+DAWN_GEN_GN="$DAWN_GEN/include"
+[ "$os" = win ] && DAWN_GEN_GN="$(cygpath -m "$DAWN_GEN_GN")"
 COMMON_ARGS="
 is_debug=false
 is_official_build=true
@@ -174,7 +177,7 @@ skia_use_gl=true
 skia_use_angle=false
 skia_enable_graphite=true
 skia_use_dawn=true
-skia_dawn_header_only_include_dir=\"$DAWN_GEN/include\"
+skia_dawn_header_only_include_dir=\"$DAWN_GEN_GN\"
 
 skia_use_icu=true
 skia_use_client_icu=false
