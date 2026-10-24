@@ -114,6 +114,18 @@ fi
 # The wasm Graphite build patches these in the same checkout: build pristine.
 git checkout -q -- src include third_party/dawn modules/skcms gn
 git apply "$DAWN_PATCH"
+
+# ICU data: the trimmed set Skia's wasm build (and our Windows build, as
+# icudtl.dat) uses, ~0.85 MB instead of the ~10 MB common set that would be
+# linked into every library. It has everything SkUnicode / SkParagraph use:
+# char / word / line break rules (with the Thai, Lao, Khmer and Burmese
+# dictionaries), NFKC, emoji and layout properties. Left out: collation,
+# locale data, converters, time zones and the CJK word dictionary (CJK line
+# breaking is per character and stays correct).
+git checkout -q -- third_party/icu/BUILD.gn
+sed -e 's|data_dir += "common"|data_dir += "flutter"|' third_party/icu/BUILD.gn > third_party/icu/BUILD.gn.jsui
+mv third_party/icu/BUILD.gn.jsui third_party/icu/BUILD.gn
+grep -q 'data_dir += "common"' third_party/icu/BUILD.gn && { echo "ICU data patch did not apply" >&2; exit 1; }
 grep -q "third_party/externals/dawn\".*dawn.git@$DAWN_REVISION\"" DEPS || {
   echo "Skia's DEPS does not pin Dawn $DAWN_REVISION: update DAWN_REVISION (and the host's Dawn)" >&2; exit 1; }
 
