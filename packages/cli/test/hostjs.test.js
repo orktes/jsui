@@ -5,7 +5,7 @@
 // JSUI_HOST_JS; skipped without it unless JSUI_HEADLESS_STRICT=1.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -196,6 +196,43 @@ test('events, host calls, host data, timers and native Animated match', { skip }
   assert.deepEqual(r.host.tree, r.quickjs.tree);
   assert.deepEqual(r.host.extra, r.quickjs.extra);
   assert.deepEqual(r.host.errors, []);
+});
+
+test('Lottie and shader events, compileShader and precompileShaders match', { skip }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'jsui-hostjs-test-'));
+  await writeFile(path.join(dir, 'coin.json'), await readFile(path.join(ROOT, 'examples', 'assets', 'lottie', 'coin.json')));
+  await writeFile(path.join(dir, 'app.jsx'), `import React, { useEffect, useState } from 'react';
+import { AppRegistry, LottieView, ShaderView, Text, View, compileShader, precompileShaders } from 'react-native';
+import coin from './coin.json';
+const GOOD = 'uniform float2 resolution; uniform float glow; half4 main(float2 p) { return half4(p.x / resolution.x, glow, 0.5, 1); }';
+const BAD = 'half4 main(float2 p) { return nope; }';
+function App() {
+  const [log, setLog] = useState([]);
+  const add = (s) => setLog((l) => [...l, s]);
+  useEffect(() => {
+    add('info ' + JSON.stringify(compileShader(GOOD).uniforms.map((u) => u.name)));
+    add('bad ' + !!compileShader(BAD).error);
+    precompileShaders([GOOD]).then((r) => add('pre ' + r.length));
+  }, []);
+  return (
+    <View style={{ flex: 1, padding: 10, gap: 10, backgroundColor: '#123' }}>
+      <LottieView source={coin} autoPlay loop={false} speed={4} style={{ width: 80, height: 80 }}
+        onAnimationLoaded={() => add('loaded')} onAnimationFinish={(c) => add('finish ' + c)} />
+      <ShaderView source={GOOD} uniforms={{ glow: 0.25 }} style={{ width: 100, height: 40 }} />
+      <ShaderView source={BAD} style={{ width: 100, height: 40, backgroundColor: '#444' }} onError={(e) => add('error ' + !!e.nativeEvent.error)} />
+      <Text testID="log" style={{ color: '#fff' }}>{log.join(', ')}</Text>
+    </View>
+  );
+}
+AppRegistry.registerComponent('main', () => App);
+`);
+  const r = await both({ entry: path.join(dir, 'app.jsx'), width: 400, height: 300 }, async (app) => {
+    await app.wait(2000);
+    return (await app.find('#log')).text.split(', ').sort();
+  });
+  assertSame(r, 'lottie / shader');
+  // (precompileShaders waits for a GPU warm-up frame the CPU module never runs: same on both.)
+  assert.deepEqual(r.quickjs.extra.filter((s) => !s.startsWith('pre ')), ['bad true', 'error true', 'finish false', 'info ["resolution","glow"]', 'loaded']);
 });
 
 test('errors: a throwing handler and an unhandled rejection are reported', { skip }, async () => {
