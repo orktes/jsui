@@ -43,7 +43,7 @@ namespace {
 
 void jsuiLog(void*, JsuiLogLevel level, const char* message) {
   static const int prio[] = {ANDROID_LOG_DEBUG, ANDROID_LOG_INFO, ANDROID_LOG_WARN, ANDROID_LOG_ERROR};
-  __android_log_print(prio[level < 4 ? level : 3], "jsui", "%s", message);
+  __android_log_print(prio[int(level) < 4 ? int(level) : 3], "jsui", "%s", message);
 }
 
 // CLOCK_MONOTONIC: the clock of AMotionEvent / AKeyEvent times (uptime).
