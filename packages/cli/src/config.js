@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { assetPlugin } from './assets.js';
 import { reactCompilerPlugin } from './react-compiler.js';
+import { derivePlugin } from './derive.js';
 import { schedulerPlugin, specializePlugin } from './specialize.js';
 
 const require = createRequire(import.meta.url);
@@ -151,6 +152,8 @@ export function esbuildOptions(o) {
       aliasPlugin({ facades: !dev }),
       assetPlugin(o.assets),
       ...(o.reactCompiler ? [reactCompilerPlugin({ reactDir: jsuiReactDir(), sourcemap: !!o.sourcemap, hmr: !!o.compilerHmr, report: o.compilerReport, log: o.log })] : []),
+      // After the React Compiler (which applies the same transform first).
+      derivePlugin({ reactDir: jsuiReactDir() }),
     ],
     metafile: true,
   };

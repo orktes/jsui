@@ -10,6 +10,9 @@ import {
   AnimatedColor,
   AnimatedInterpolation,
   AnimatedHostBuffer,
+  AnimatedDerived,
+  AnimatedExpression,
+  AnimatedClock,
   add,
   subtract,
   multiply,
@@ -149,6 +152,11 @@ export const Animated = {
   modulo,
   diffClamp,
   hostBuffer: (key, index) => new AnimatedHostBuffer(key, index),
+  // Values computed from other values by a pure-math function, evaluated
+  // natively every frame (expression.js); meta is added by jsui build.
+  derive: (inputs, fn, meta) => new AnimatedDerived(inputs, fn, meta),
+  expr: (fn, meta) => new AnimatedExpression(fn, meta),
+  clock: () => new AnimatedClock(),
   createAnimatedComponent,
   attachNativeEvent,
   forkEvent: (event1, listener) => {

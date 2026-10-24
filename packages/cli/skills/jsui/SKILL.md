@@ -45,6 +45,11 @@ Packages: `@orktes/jsui-cli` (bundler, dev server, headless tools, this skill),
 7. **Per-frame game data never goes through React state.** Use frame-data
    buffers (`useHostBufferValue` / `Animated.hostBuffer`) for positions and
    bars; use shared state (`useHostState`) for things that change now and then.
+   Values computed from them (clamped to the screen, faded by distance,
+   conditional offsets) are `Animated.derive(inputs, fn)` expressions, which
+   the runtime evaluates natively every frame: never `addListener` →
+   compute → `setValue`/`setState`. See
+   [references/native-first.md](references/native-first.md).
 8. **Give important elements a `testID`** so you (and tests) can find, click
    and check them with `jsui inspect` / `jsui run`.
 9. **Always look at what you built.** With `jsui dev` running and a runtime
@@ -219,6 +224,7 @@ Read the reference that matches the task:
 | --- | --- |
 | Components, props, styles, images, fonts (loading, weights, fallbacks, variable fonts), what's not supported | [references/components-and-styles.md](references/components-and-styles.md) |
 | Focus, gamepad, keyboard, pointer, scrolling, modals, input pass-through | [references/input-and-focus.md](references/input-and-focus.md) |
+| Native-first patterns: keep JS off the frame (`Animated.derive`, `Animated.clock`, host-buffer values, what to use instead of state) | [references/native-first.md](references/native-first.md) |
 | `Animated` (native driver), springs, `LayoutAnimation`, performance | [references/animation-and-performance.md](references/animation-and-performance.md) |
 | Game data: shared state, calls, messages, per-frame buffers, several root views | [references/game-data.md](references/game-data.md) |
 | Host textures (video, render targets), LottieView, ShaderView / SkSL | [references/media-and-effects.md](references/media-and-effects.md) |
