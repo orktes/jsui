@@ -1,0 +1,22 @@
+{
+	"FileVersion": 3,
+	"EngineAssociation": "5.8",
+	"Category": "",
+	"Description": "The JSUI engine examples' game (integrations/shared/ui/app.jsx over a small 3D scene) in Unreal.",
+	"Modules": [
+		{
+			"Name": "JsuiExample",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "Jsui",
+			"Enabled": true
+		}
+	],
+	"AdditionalPluginDirectories": [
+		"../Plugins"
+	]
+}
