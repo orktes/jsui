@@ -32,7 +32,7 @@ HostTextures::~HostTextures() = default;
 int HostTextures::set(const std::string& key, const JsuiTexture* desc) {
   if (!desc) return remove(key) ? 1 : 0;
   if (!desc->handle || desc->width <= 0 || desc->height <= 0 || desc->kind <= JSUI_TEXTURE_PIXELS ||
-      desc->kind > JSUI_TEXTURE_METAL)
+      desc->kind > JSUI_TEXTURE_D3D12)
     return -1;
   auto it = entries_.find(key);
   if (it != entries_.end() && !it->second.pixels && sameDesc(it->second.desc, *desc)) return 0;
@@ -160,7 +160,8 @@ sk_sp<SkImage> HostTextures::image(const std::string& key) {
   sk_sp<SkImage> img = tWrapper ? tWrapper->wrap(e) : nullptr;
   if (!img && !e.warned) {
     e.warned = true;
-    static const char* const kKinds[] = {"pixels", "GL", "WebGPU", "Vulkan", "Metal"};
+    static const char* const kKinds[] = {"pixels", "GL", "WebGPU", "Vulkan", "Metal", "D3D12"};
+    static_assert(sizeof(kKinds) / sizeof(kKinds[0]) == JSUI_TEXTURE_D3D12 + 1, "a name per JsuiTextureKind");
     if (log)
       log(JSUI_LOG_WARN, "host texture \"" + key + "\" (" + kKinds[e.desc.kind] +
                              (tWrapper ? ", format " + std::to_string(e.desc.format) + ") cannot be drawn by this GPU context"

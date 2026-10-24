@@ -389,6 +389,8 @@ endif()
 if(NOT JSUI_SKIA_LIB_DIR AND NOT EMSCRIPTEN AND NOT IOS)
   if(APPLE)
     set(_skia_desktop_os macos)
+  elseif(WIN32)
+    set(_skia_desktop_os win)
   else()
     set(_skia_desktop_os linux)
   endif()
@@ -397,7 +399,8 @@ if(NOT JSUI_SKIA_LIB_DIR AND NOT EMSCRIPTEN AND NOT IOS)
   else()
     set(_skia_desktop_cpu x64)
   endif()
-  if(EXISTS ${JSUI_SKIA_DIR}/out/${_skia_desktop_os}-${_skia_desktop_cpu}/libskia.a)
+  if(EXISTS ${JSUI_SKIA_DIR}/out/${_skia_desktop_os}-${_skia_desktop_cpu}/libskia.a OR
+     EXISTS ${JSUI_SKIA_DIR}/out/${_skia_desktop_os}-${_skia_desktop_cpu}/skia.lib)
     set(JSUI_SKIA_LIB_DIR ${JSUI_SKIA_DIR}/out/${_skia_desktop_os}-${_skia_desktop_cpu})
   endif()
 endif()
@@ -452,7 +455,11 @@ if(JSUI_SKIA_SOURCE_BUILT AND NOT IOS)
   file(STRINGS "${JSUI_SKIA_LIB_DIR}/defines.txt" _jsui_skia_defs)
   target_compile_definitions(jsui_skia INTERFACE ${_jsui_skia_defs})
   file(GLOB _jsui_skia_libs "${JSUI_SKIA_LIB_DIR}/lib*.a")
-  if(APPLE)
+  if(WIN32)
+    # link.exe / lld-link resolve archives regardless of order.
+    file(GLOB _jsui_skia_libs "${JSUI_SKIA_LIB_DIR}/*.lib")
+    target_link_libraries(jsui_skia INTERFACE ${_jsui_skia_libs})
+  elseif(APPLE)
     target_link_libraries(jsui_skia INTERFACE ${_jsui_skia_libs})
   else()
     # GNU ld resolves archives in order: one group for the whole set.
@@ -491,6 +498,15 @@ elseif(APPLE)
   endif()
 elseif(WIN32)
   target_link_libraries(jsui_skia INTERFACE user32 gdi32 ole32 opengl32 usp10)
+  if(JSUI_SKIA_SOURCE_BUILT)
+    # DirectWrite fonts (FontSub, OleAut32), ICU's registry lookups (Advapi32)
+    # and, with skia_use_direct3d, Ganesh's Direct3D 12.
+    target_link_libraries(jsui_skia INTERFACE oleaut32 fontsub advapi32)
+    file(READ "${JSUI_SKIA_LIB_DIR}/args.gn" _jsui_skia_win_gn)
+    if(_jsui_skia_win_gn MATCHES "skia_use_direct3d *= *true")
+      target_link_libraries(jsui_skia INTERFACE d3d12 dxgi d3dcompiler)
+    endif()
+  endif()
 endif()
 
 # On Windows the prebuilt Skia's ICU loads its data from icudtl.dat next to
@@ -509,8 +525,10 @@ endfunction()
 
 # The prebuilt Skia's FreeType (ftgzip) needs zlib's unprefixed inflate*
 # symbols. Use the system zlib where there is one (Linux, macOS SDK) and
-# build it from source elsewhere (Windows).
-if(NOT EMSCRIPTEN)
+# build it from source elsewhere (Windows). A source-built Skia
+# (scripts/build-skia-desktop.sh) links its own zlib and has no FreeType on
+# Windows: nothing to add there.
+if(NOT EMSCRIPTEN AND NOT (WIN32 AND JSUI_SKIA_SOURCE_BUILT))
   find_package(ZLIB QUIET)
   if(ZLIB_FOUND)
     target_link_libraries(jsui_skia INTERFACE ZLIB::ZLIB)

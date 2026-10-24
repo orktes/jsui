@@ -35,7 +35,9 @@ namespace Jsui
         [DllImport(Lib)] public static extern int jsuiu_render(IntPtr u, int width, int height, int force, out JsuiRect dirty, out IntPtr pixels);
         // GPU path (see jsui_unity.cpp): render jobs on Unity's render thread.
         [DllImport(Lib)] public static extern int jsuiu_gpu_available();
+        [DllImport(Lib)] public static extern IntPtr jsuiu_gpu_backend_name();
         [DllImport(Lib)] public static extern int jsuiu_gpu_failed(IntPtr u);
+        [DllImport(Lib)] public static extern IntPtr jsuiu_gpu_error(IntPtr u);
         [DllImport(Lib)] public static extern void jsuiu_set_target(IntPtr u, IntPtr texture, int width, int height);
         [DllImport(Lib)] public static extern void jsuiu_invalidate_target(IntPtr u);
         [DllImport(Lib)] public static extern int jsuiu_queue_render(IntPtr u);

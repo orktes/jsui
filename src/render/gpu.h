@@ -8,6 +8,10 @@
 //   * Graphite: Skia Graphite on an embedder's Vulkan / Metal device
 //     (jsui_gpu_create_vulkan / _metal, jsui_render_gpu_target), compiled in
 //     when JSUI_VULKAN / JSUI_GRAPHITE_METAL is defined (gpu_graphite.cpp).
+//   * D3D: Skia Ganesh on Direct3D 12, on an embedder's D3D12 device or on
+//     one beside an embedder's D3D11 device (jsui_gpu_create_d3d12 / _d3d11,
+//     jsui_render_gpu_target), compiled in when JSUI_D3D is defined
+//     (gpu_d3d.cpp).
 //
 // Without a backend its entry points exist but always fail, so hosts fall
 // back to the next backend / the CPU path.
@@ -20,7 +24,7 @@ class Precompiler;
 }
 
 struct JsuiGpuContext {
-  enum class Kind { GL, WebGPU, Graphite };
+  enum class Kind { GL, WebGPU, Graphite, D3D };
   explicit JsuiGpuContext(Kind k) : kind(k) {}
   virtual ~JsuiGpuContext() = default;
   const Kind kind;
@@ -84,4 +88,18 @@ void purge(JsuiGpuContext* gpu, size_t cacheBytes);
 int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& target, JsuiRect* dirty);
 
 }  // namespace graphite_gpu
+
+namespace d3d {
+
+// True when this build has the Direct3D (Ganesh D3D12) backend.
+bool available();
+JsuiGpuContext* create12(void* device, void* queue);
+JsuiGpuContext* create11(void* device);
+bool owns(JsuiGpuContext* gpu);  // a D3D12 / D3D11 context
+void destroy(JsuiGpuContext* gpu);
+void purge(JsuiGpuContext* gpu, size_t cacheBytes);
+// 0 on success, -1 on failure; `dirty` (optional) gets the repainted rect.
+int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& target, JsuiRect* dirty);
+
+}  // namespace d3d
 }  // namespace jsui

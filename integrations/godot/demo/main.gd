@@ -654,6 +654,16 @@ func _check_render_hand_off(badge: JsuiView) -> void:
 		extra.append(v)
 	var surfaces: Array = [badge] + extra
 	var up := await _wait_for(func(): return extra.all(func(v): return v.get_render_stats().renders > 0))
+	# Steady state: a view's first frames, on a new texture pair, render
+	# without a hand-off (the pair is promoted by its next repaint), so
+	# repaint the new surfaces until each has handed a frame over.
+	var warm := [0]  # lambdas capture by value: count in an array
+	var handed := await _wait_for(func():
+		warm[0] += 1
+		for v in extra:
+			v.initial_props = {"label": "W%d" % warm[0]}
+		return extra.all(func(v): return v.get_render_stats().gpu_jobs > 0))
+	up = up and handed
 	var views: Array = [ui] + surfaces
 	var signals := []  # frame_rendered per view
 	var counters := []
@@ -697,8 +707,8 @@ func _check_render_hand_off(badge: JsuiView) -> void:
 	var thread_jobs: int = s1[0].render_thread_jobs - s0[0].render_thread_jobs
 	ok = ok and thread_jobs == (frames if separate else 0)
 	_check("render hand-off", ok and waits_total <= _max_render_waits,
-		"%d frames, one runtime, %d views: %d render-thread jobs (%s); %s; limit %d waits" % [
-			frames, views.size(), thread_jobs, "separate render thread" if separate else "rendering on the main thread",
+		"%d frames, one runtime, %d views (new surfaces %s): %d render-thread jobs (%s); %s; limit %d waits" % [
+			frames, views.size(), "up" if up else "never handed a frame over", thread_jobs, "separate render thread" if separate else "rendering on the main thread",
 			"; ".join(parts), _max_render_waits])
 	if _max_viewport_diff >= 0.0 and _capture != "":
 		# Mid-animation: the last frames were all handed over without a wait.

@@ -1,6 +1,7 @@
 // JsuiView's GPU renderer: Skia Graphite on Godot's own RenderingDevice
 // (Vulkan on Linux / Windows, Metal on macOS, and Dawn under the WebGPU
-// rendering driver of the godot-aw3 fork), see jsui_view.h.
+// rendering driver of the godot-aw3 fork), or Skia Ganesh on its Direct3D 12
+// device (Windows; Graphite has no D3D backend), see jsui_view.h.
 //
 // The views of one runtime (the runtime view and its surface views, see
 // jsui_view.h) share one Skia context, the runtime view's: one image cache and
@@ -16,7 +17,8 @@
 //        only its damage bounds (jsui_render_gpu_target with
 //        JSUI_GPU_INCREMENTAL). Godot only ever uses it as a copy source, so
 //        its RD tracker stays in COPY_FROM: on Vulkan the image is in
-//        TRANSFER_SRC_OPTIMAL between frames, and JSUI leaves it there.
+//        TRANSFER_SRC_OPTIMAL between frames (D3D12: COPY_SOURCE), and JSUI
+//        leaves it there.
 //   dst  SAMPLING | CAN_COPY_TO | CAN_UPDATE | CAN_COPY_FROM
 //        What the canvas item draws (a Texture2DRD). Godot copies the damaged
 //        rect src -> dst with RenderingDevice.texture_copy in its frame, so
@@ -32,7 +34,9 @@
 // which also order it after the previous frame that may still be copying from
 // src. On Metal both use the same MTLCommandQueue and tracked resources. On
 // WebGPU (godot-aw3) both use Godot's WGPUQueue, whose submissions run in
-// order, and Dawn tracks the textures' usage.
+// order, and Dawn tracks the textures' usage. On D3D12 both use Godot's
+// DIRECT ID3D12CommandQueue, whose command lists run in order, and Ganesh's
+// own command lists move src COPY_SOURCE -> RENDER_TARGET -> COPY_SOURCE.
 //
 // Backend choice (chooseRenderer), at run time, so one binary serves stock
 // Godot and the fork:
@@ -44,8 +48,8 @@
 //      JSUI links no Dawn of its own) and renders into the WGPUTexture
 //      get_driver_resource(DRIVER_RESOURCE_TEXTURE) returns. A different
 //      revision has a different webgpu.h ABI: one warning, CPU renderer.
-//   2. Otherwise Vulkan or Metal through get_driver_resource, as above.
-//   3. Otherwise (Compatibility, headless, D3D12, ...) the CPU renderer.
+//   2. Otherwise Vulkan, Metal or D3D12 through get_driver_resource, as above.
+//   3. Otherwise (Compatibility, headless, ...) the CPU renderer.
 //
 // New textures (first frame, resize) are created with zeroed initial data and
 // primed with one copy, and first rendered into on the next frame: by then
@@ -145,7 +149,9 @@ void* driverResource(RenderingDevice* rd, RenderingDevice::DriverResource what, 
   return reinterpret_cast<void*>(uintptr_t(rd->get_driver_resource(what, rid, 0)));
 }
 
-enum class TargetKind { Vulkan, WebGPU, Metal };
+enum class TargetKind { Vulkan, WebGPU, Metal, D3D12 };
+
+constexpr int kD3D12ResourceStateCopySource = 0x800;  // D3D12_RESOURCE_STATE_COPY_SOURCE
 
 // What jsui_render_gpu_target needs about src, but its handle.
 JsuiGpuTarget targetFor(TargetKind kind, int w, int h, int flags) {
@@ -159,6 +165,9 @@ JsuiGpuTarget targetFor(TargetKind kind, int w, int h, int flags) {
     t.layout = t.final_layout = kVkImageLayoutTransferSrcOptimal;
   } else if (kind == TargetKind::WebGPU) {
     t.format = 0;  // the texture's own: WGPUTextureFormat_RGBA8Unorm (DATA_FORMAT_R8G8B8A8_UNORM)
+  } else if (kind == TargetKind::D3D12) {
+    t.format = 0;  // the resource's own: DXGI_FORMAT_R8G8B8A8_UNORM
+    t.layout = t.final_layout = kD3D12ResourceStateCopySource;
   } else {
     t.format = kMTLPixelFormatRGBA8Unorm;
   }
@@ -301,6 +310,7 @@ void JsuiView::chooseRenderer() {
                   : !why.is_empty()    ? Renderer::Cpu  // WebGPUInterop is there but unusable
                   : driver == "vulkan" ? Renderer::Vulkan
                   : driver == "metal"  ? Renderer::Metal
+                  : driver == "d3d12"  ? Renderer::D3D12
                                        : Renderer::Cpu;
   if (want == Renderer::Cpu) {
     if (!why.is_empty()) {
@@ -343,6 +353,10 @@ bool JsuiView::createGpuContext(Renderer want, const String& driver, Object* int
       gpu_ = jsui_gpu_create_dawn_procs(interopPointer(interop, "get_proc_address"),
                                         interopPointer(interop, "get_instance"), interopPointer(interop, "get_device"),
                                         interopPointer(interop, "get_queue"));
+    } else if (want == Renderer::D3D12) {
+      // ID3D12Device and Godot's DIRECT ID3D12CommandQueue.
+      gpu_ = jsui_gpu_create_d3d12(driverResource(rd, RenderingDevice::DRIVER_RESOURCE_LOGICAL_DEVICE),
+                                   driverResource(rd, RenderingDevice::DRIVER_RESOURCE_COMMAND_QUEUE));
     } else {
       gpu_ = jsui_gpu_create_metal(driverResource(rd, RenderingDevice::DRIVER_RESOURCE_LOGICAL_DEVICE),
                                    driverResource(rd, RenderingDevice::DRIVER_RESOURCE_COMMAND_QUEUE));
@@ -351,6 +365,7 @@ bool JsuiView::createGpuContext(Renderer want, const String& driver, Object* int
   if (!gpu_) {
     UtilityFunctions::print("JsuiView: no Skia GPU context on '" + driver + "' (" +
                             String(want == Renderer::Vulkan   ? "built without JSUI_VULKAN or Skia rejected the device"
+                                   : want == Renderer::D3D12  ? "built without JSUI_D3D or Skia rejected the device"
                                    : want == Renderer::WebGPU ? String(kWebGPUInterop) +
                                                                     " did not resolve every Dawn entry point, returned "
                                                                     "no device or Skia rejected the device"
@@ -359,8 +374,11 @@ bool JsuiView::createGpuContext(Renderer want, const String& driver, Object* int
     return false;
   }
   gpu_api_ = want;
-  UtilityFunctions::print("JsuiView: rendering with Skia Graphite on " + driver);
-  setupPipelineCache(want == Renderer::Vulkan ? "vulkan" : want == Renderer::Metal ? "metal" : "webgpu");
+  UtilityFunctions::print("JsuiView: rendering with Skia " + String(want == Renderer::D3D12 ? "Ganesh" : "Graphite") +
+                          " on " + driver);
+  // Ganesh (D3D12) has no pipeline cache.
+  if (want != Renderer::D3D12)
+    setupPipelineCache(want == Renderer::Vulkan ? "vulkan" : want == Renderer::Metal ? "metal" : "webgpu");
   return true;
 }
 
@@ -402,6 +420,7 @@ bool JsuiView::renderGpu() {
   const int w = pixel_w_, h = pixel_h_;
   const TargetKind kind = renderer_ == Renderer::Vulkan   ? TargetKind::Vulkan
                           : renderer_ == Renderer::WebGPU ? TargetKind::WebGPU
+                          : renderer_ == Renderer::D3D12  ? TargetKind::D3D12
                                                           : TargetKind::Metal;
   // Steady state: the textures on screen fit and no new pair is pending.
   if (gpu_cur_.valid() && gpu_cur_.w == w && gpu_cur_.h == h && !gpu_next_.valid()) {
@@ -703,10 +722,14 @@ void JsuiView::releaseGpu() {
 // latency: JSUI renders before Godot submits the frame holding the copy).
 // Metal: the mirror is our own tracked MTLTexture (as src above), so Metal
 // orders Godot's copy into it and Skia's sampling on the shared queue.
+// D3D12: no layout pass; the mirror stays in COPY_DEST, where Godot's tracker
+// leaves it, and JSUI is told so (JsuiTexture.usage): its render transitions
+// it for sampling and back within its own command lists on the shared queue.
 
 namespace {
 
 constexpr unsigned kVkFormatR8G8B8A8Unorm = 37, kVkFormatB8G8R8A8Unorm = 44;
+constexpr unsigned kDxgiFormatR8G8B8A8Unorm = 28, kDxgiFormatB8G8R8A8Unorm = 87;
 constexpr unsigned kMTLPixelFormatBGRA8Unorm = 80;
 
 // The compute shader of the Vulkan layout pass: samples the texture, so the
@@ -843,9 +866,10 @@ void JsuiView::doTextureWork() {
     if (!m.rd.is_valid()) return TextureMirror{};
     m.handle = driverResource(rd, RenderingDevice::DRIVER_RESOURCE_TEXTURE, m.rd);
     const bool bgra = format == RenderingDevice::DATA_FORMAT_B8G8R8A8_UNORM;
-    m.format = vulkan ? (bgra ? kVkFormatB8G8R8A8Unorm : kVkFormatR8G8B8A8Unorm)
+    m.format = vulkan  ? (bgra ? kVkFormatB8G8R8A8Unorm : kVkFormatR8G8B8A8Unorm)
                : metal ? (bgra ? kMTLPixelFormatBGRA8Unorm : kMTLPixelFormatRGBA8Unorm)
-                       : 0;  // WebGPU: the texture's own
+               : gpu_api_ == Renderer::D3D12 ? (bgra ? kDxgiFormatB8G8R8A8Unorm : kDxgiFormatR8G8B8A8Unorm)
+                                             : 0;  // WebGPU: the texture's own
     m.data_format = format;
     m.w = w;
     m.h = h;

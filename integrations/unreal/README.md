@@ -18,9 +18,10 @@ Two parts:
 ## Build and run
 
 Needs Unreal Engine 5 (tested with 5.8.4 from the Epic Games Launcher, on
-macOS with Xcode 26) and, for the GPU path, a Skia with Graphite
-(`scripts/build-skia-desktop.sh`). macOS today; the plugin is wired for Win64
-and Linux (the library's release artifacts) but not tested there yet.
+macOS with Xcode 26) and, for the GPU path, a Skia with Graphite / Direct3D
+(`scripts/build-skia-desktop.sh`). Tested on macOS; the plugin is wired for
+Win64 and Linux (the library's release artifacts, GPU paths included) but has
+not been built or run there yet (see [GPU paths](#gpu-paths)).
 
 ```sh
 npm install
@@ -58,7 +59,7 @@ copied bundle are not committed (`.gitignore`): run steps 1 and 2 first.
 The game takes the examples' options, with values after `=` (Unreal reads a
 bare argument as a map to open): `--selftest`, `--frames=N
 --screenshot=out.png`, `--bundle=path-or-url`, `--cpu` (the CPU renderer even
-on Metal) and `--dev` (with `npx jsui dev integrations/shared/ui/app.jsx` and
+where the GPU path is available) and `--dev` (with `npx jsui dev integrations/shared/ui/app.jsx` and
 `--bundle=http://127.0.0.1:5173/bundle.js` for hot reload). `--selftest` is
 the same pass-through check as the other examples (see
 [../README.md](../README.md#build-and-run)): it logs `selftest: ok` and exits
@@ -91,28 +92,31 @@ either path: the engine's frame, not the UI, sets the pace.
   `include/jsui/jsui.h`, `lib/libjsui.dylib` (universal), `lib/libjsui.so`,
   `bin/jsui.dll` + `lib/jsui.lib` (+ `bin/icudtl.dat`).
 * **Rendering** ([JsuiHost.cpp](Plugins/Jsui/Source/Jsui/Private/JsuiHost.cpp)).
-  On the Metal RHI, Skia Graphite draws the UI straight into a
-  `UTextureRenderTarget2D` on the RHI's own `MTLDevice` and `MTLCommandQueue`.
-  `SJsuiView::Tick` (Slate's tick, after the world's) ticks the runtime and,
-  when the UI changed, queues a render command; on the render thread it hands
-  a job to `IMetalDynamicRHI::RHIRunOnQueue`, which the RHI runs on its
-  submission side with its direct queue, in order with the command buffers of
-  the command lists submitted before it. Graphite commits its frame to that
-  queue (repainting only what changed, `JSUI_GPU_INCREMENTAL`); this frame's
-  Slate draw, which samples the texture, is queued later on the render thread,
-  so it is committed after Graphite's work on the same queue and the GPU runs
-  them in that order (like the Unity and Godot Metal paths). The job uses the
-  runtime, so the game thread waits for it before its next runtime call
-  (`SJsuiView::Runtime`, usually already done). The Metal RHI has no native
-  queue getter (`RHIGetNativeGraphicsQueue` is null there): `RHIRunOnQueue`
-  is the way onto its queue, and the plugin only makes virtual calls into the
-  RHI, so nothing of MetalRHI is linked. On any other RHI, with `bForceCpu` /
-  `--cpu`, or after a failed GPU render, the UI is rasterised on the CPU and
-  the changed rectangle is uploaded into a `UTexture2D`. Either texture is
-  premultiplied, holds sRGB-encoded values in a non-sRGB format and is drawn by
-  Slate with `ESlateDrawEffect::PreMultipliedAlpha | NoGamma`, so both paths
-  look the same. Vulkan and D3D12 would need their own job (Graphite has
-  Vulkan; there is no D3D backend).
+  GPU by default: Skia draws the UI straight into a `UTextureRenderTarget2D`
+  on the RHI's own device, ordered with the RHI's own work on its graphics
+  queue (per RHI below). `SJsuiView::Tick` (Slate's tick, after the world's)
+  ticks the runtime and, when the UI changed, queues a render command; on
+  the render thread the RHI's path hands a job to the RHI where it submits
+  GPU work (`RHIRunOnQueue` on Metal, Vulkan and D3D12: the RHI's submission
+  side, with its graphics queue, after the command lists submitted before;
+  on D3D11 a command list lambda, where the immediate context is used). The
+  job renders, repainting only what changed (`JSUI_GPU_INCREMENTAL`), and
+  Skia submits its work to the queue before it returns; this frame's Slate
+  draw, which samples the texture, is recorded later on the render thread,
+  so the GPU runs it after Skia's work. The job uses the runtime, so the game
+  thread waits for it before its next runtime call (`SJsuiView::Runtime`,
+  usually already done). The GPU context is created once, by a job of its
+  own on the first paint, shared by every view and freed at engine pre-exit
+  (before the RHI's device goes). The plugin only makes virtual calls into
+  the RHIs' public interfaces (`IMetalDynamicRHI`, `IVulkanDynamicRHI`,
+  `ID3D12DynamicRHI`, `ID3D11DynamicRHI`). On any other RHI (OpenGL, Null),
+  with `bForceCpu` / `--cpu`, if the library has no backend for the RHI or
+  Skia rejects its device, or after a failed GPU render, the UI is
+  rasterised on the CPU and the changed rectangle is uploaded into a
+  `UTexture2D`. Either texture is premultiplied, holds sRGB-encoded values in
+  a non-sRGB format (BGRA8) and is drawn by Slate with
+  `ESlateDrawEffect::PreMultipliedAlpha | NoGamma`, so both paths look the
+  same.
 * **Input pass-through**
   ([SJsuiView.cpp](Plugins/Jsui/Source/Jsui/Private/SJsuiView.cpp)). An
   `IInputProcessor` sees every mouse and key event before Slate routes it and
@@ -127,6 +131,90 @@ either path: the engine's frame, not the UI, sets the pace.
   buffer read with `useHostBufferValue` (the example projects each unit with
   this frame's camera and writes its screen position, so the nameplates move
   with no JS per frame). Each has a Blueprint version on `UJsuiWidget`.
+
+## GPU paths
+
+| RHI | Platforms | Skia backend | Draws into | Verified |
+|---|---|---|---|---|
+| Metal | macOS | Graphite, the RHI's `MTLDevice` + queue | the render target | yes (UE 5.8.4, M1 Ultra) |
+| D3D12 | Windows (default) | Ganesh, the RHI's `ID3D12Device` + direct queue | the render target | no |
+| D3D11 | Windows (`-d3d11`) | Ganesh on a D3D12 device on the same adapter, copied in by the RHI's immediate context | the render target | no |
+| Vulkan | Linux (default), Windows (`-vulkan`) | Graphite, the RHI's `VkDevice` + graphics queue | an image of the plugin's, copied into the render target | no |
+
+What each path does to stay in order with Unreal's own GPU work and in step
+with the state Unreal tracks for the texture (each file's header has the
+details):
+
+* **Metal** ([JsuiGpuMetal.cpp](Plugins/Jsui/Source/Jsui/Private/JsuiGpuMetal.cpp)).
+  `IMetalDynamicRHI::RHIRunOnQueue`; Metal's hazard tracking orders Slate's
+  sampling after Graphite's command buffer on the same queue. A new render
+  target's clear is flushed first (`FlushRHIThread`). The Metal RHI has no
+  native queue getter, so `RHIRunOnQueue` is the way onto its queue.
+* **D3D12** ([JsuiGpuD3D12.cpp](Plugins/Jsui/Source/Jsui/Private/JsuiGpuD3D12.cpp)).
+  The render thread transitions the render target `Unknown -> RTV` (so it is
+  in `D3D12_RESOURCE_STATE_RENDER_TARGET`, whatever state Unreal had it in),
+  makes it resident and flushes the barriers, then flushes the immediate
+  command list to the GPU (`FlushRHIThread`) and queues the job with
+  `ID3D12DynamicRHI::RHIRunOnQueue(Graphics)`. Ganesh takes the resource in
+  `RENDER_TARGET` and leaves it there, executing its command lists on the
+  direct queue during the job; the transition back `RTV -> SRVMask` and
+  Slate's draw are recorded after it, so they execute after Ganesh's work in
+  queue order.
+* **D3D11** ([JsuiGpuD3D11.cpp](Plugins/Jsui/Source/Jsui/Private/JsuiGpuD3D11.cpp)).
+  The job is an `EnqueueLambda` on the immediate command list, so it runs on
+  the thread that owns the immediate context, in order with the RHI's own
+  commands. The library draws on its own D3D12 device and copies the frame
+  into the render target with the immediate context behind a shared fence
+  (jsui.h); D3D11 has no resource states to keep in step.
+* **Vulkan** ([JsuiGpuVulkan.cpp](Plugins/Jsui/Source/Jsui/Private/JsuiGpuVulkan.cpp)).
+  Graphite renders only into images with `INPUT_ATTACHMENT` usage, which a
+  `UTextureRenderTarget2D`'s image does not have, so it draws into an RHI
+  texture of the plugin's (`RenderTargetable | ShaderResource |
+  InputAttachmentRead`, created in `CopySrc`). Unreal keeps that image in
+  `CopySrc` (`TRANSFER_SRC_OPTIMAL`); Graphite takes it in that layout
+  (`UNDEFINED`, a full repaint, when new) and leaves it there. Per render:
+  flush the immediate command list (`FlushRHIThread`), queue the job with
+  `IVulkanDynamicRHI::RHIRunOnQueue(Graphics)` (the graphics queue is held
+  during it; Graphite's submission is bracketed by full pipeline barriers),
+  then record `Unknown -> CopyDest`, the copy into the render target and
+  `CopyDest -> SRVMask`: the render target's layout is only ever changed by
+  the RHI. Unlike D3D12, the Vulkan RHI runs the callback while it is still
+  collecting the batch it is in and submits the batch afterwards
+  (`FVulkanQueue::SubmitPayloads`), so Graphite's work can reach the queue
+  before command buffers Unreal recorded earlier. The one earlier write that
+  matters is the RHI's clear of a newly created image, so renders into a new
+  image wait until a marker payload queued after its creation reports its
+  batch submitted (`RHIRunOnQueue` with `bWaitForSubmission`, from a
+  background task); meanwhile the render target keeps what it has, for a
+  frame or two after the view is created or resized. A previous frame's copy
+  out of the image that runs after a render copies the newer frame, in the
+  same layout, behind the render's trailing barrier. The context gets the RHI's instance, devices, graphics
+  queue family, API version, `vkGetInstanceProcAddr` and loaded device
+  extensions; the RHI does not expose its enabled instance extensions or
+  feature chain, so Skia assumes no optional features.
+
+Not verified yet: none of the Windows / Linux paths has been compiled or run.
+They were written against the UE 5.8 RHI sources, which confirm:
+
+* D3D12: `RHIRunOnQueue` queues behind the payloads submitted before it, and
+  the submission thread executes the command lists batched so far before the
+  callback (`D3D12Submission.cpp`). Legacy resource barriers are the default
+  (`r.D3D12.PreferredBarrierImplementation=1`), the same kind Ganesh issues;
+  the enhanced-barrier mode is untested. The residency / barrier-flush calls
+  need the executing command list (hence `EnqueueLambda`).
+* Vulkan: `InputAttachmentRead` on a `RenderTargetable` texture adds
+  `INPUT_ATTACHMENT`, and every image gets `TRANSFER_SRC | TRANSFER_DST |
+  SAMPLED` (`VulkanTexture.cpp`). `CopySrc` / `CopyDest` are
+  `TRANSFER_SRC_OPTIMAL` / `TRANSFER_DST_OPTIMAL` (`VulkanBarriers.cpp`).
+  `RHIRunOnQueue` queues behind the payloads submitted before it
+  (`VulkanSubmission.cpp`), but its callback may run before they are
+  submitted (`VulkanQueue.cpp`), which the path above allows for; submission
+  events fire after the whole batch is submitted.
+
+Still to check: that the validation layer reports no layout or hazard
+errors. Each render on Vulkan / D3D12
+waits for the RHI thread to catch up (`FlushRHIThread`), which costs the
+render thread some parallelism on frames where the UI changed.
 
 ## Using it in your game
 

@@ -284,7 +284,7 @@ class JsuiView : public godot::Control {
   void renderCpu();
   // GPU path (jsui_gpu_render.cpp). renderGpu returns false when the GPU
   // path failed and the view must fall back to the CPU.
-  enum class Renderer { Unknown, Cpu, Vulkan, Metal, WebGPU };
+  enum class Renderer { Unknown, Cpu, Vulkan, Metal, WebGPU, D3D12 };
   void chooseRenderer();
   // On the runtime view: its Skia context, which its surface views share
   // (created on first use; false when there is none).

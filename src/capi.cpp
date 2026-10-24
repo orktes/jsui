@@ -319,6 +319,7 @@ bool isWebGPU(JsuiGpuContext* gpu) { return gpu && gpu->kind == JsuiGpuContext::
 
 void jsui_gpu_destroy(JsuiGpuContext* gpu) {
   if (jsui::graphite_gpu::owns(gpu)) jsui::graphite_gpu::destroy(gpu);
+  else if (jsui::d3d::owns(gpu)) jsui::d3d::destroy(gpu);
   else if (isWebGPU(gpu)) jsui::webgpu::destroy(gpu);
   else jsui::gpu::destroy(gpu);
 }
@@ -331,6 +332,7 @@ void jsui_gpu_context_lost(JsuiGpuContext* gpu) {
 }
 void jsui_gpu_purge(JsuiGpuContext* gpu, size_t cacheBytes) {
   if (jsui::graphite_gpu::owns(gpu)) jsui::graphite_gpu::purge(gpu, cacheBytes);
+  else if (jsui::d3d::owns(gpu)) jsui::d3d::purge(gpu, cacheBytes);
   else if (isWebGPU(gpu)) jsui::webgpu::purge(gpu, cacheBytes);
   else jsui::gpu::purge(gpu, cacheBytes);
 }
@@ -357,6 +359,8 @@ JsuiGpuContext* jsui_gpu_create_dawn_procs(void* wgpu_get_proc_address, void* in
   return jsui::graphite_gpu::createDawnProcs(wgpu_get_proc_address, instance, device, queue);
 }
 const char* jsui_dawn_revision(void) { return jsui::graphite_gpu::dawnRevision(); }
+JsuiGpuContext* jsui_gpu_create_d3d12(void* device, void* queue) { return jsui::d3d::create12(device, queue); }
+JsuiGpuContext* jsui_gpu_create_d3d11(void* device) { return jsui::d3d::create11(device); }
 
 int jsui_render_gpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiGpuTarget* target, JsuiRect* dirty) {
   if (!rt || !target) {
@@ -364,6 +368,7 @@ int jsui_render_gpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiGpuTa
     return -1;
   }
   JSUI_PAINT_SCOPE(rt);
+  if (jsui::d3d::owns(gpu)) return jsui::d3d::render(*rt->surface, gpu, *target, dirty);
   return jsui::graphite_gpu::render(*rt->surface, gpu, *target, dirty);
 }
 

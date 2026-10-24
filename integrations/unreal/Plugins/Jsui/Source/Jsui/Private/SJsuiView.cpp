@@ -121,7 +121,7 @@ void SJsuiView::SetBuffer(const FString& Key, const float* Values, int32 Count) 
 FString SJsuiView::GetRendererName() const
 {
 	const TCHAR* Rhi = GDynamicRHI ? GDynamicRHI->GetName() : TEXT("no RHI");
-	return bGpu ? FString::Printf(TEXT("Skia Graphite · %s · RenderTarget2D"), Rhi)
+	return bGpu ? FString::Printf(TEXT("%s · %s · RenderTarget2D"), FJsuiHost::GpuRendererName(), Rhi)
 	            : FString::Printf(TEXT("CPU raster · Texture2D · %s"), Rhi);
 }
 
@@ -232,6 +232,10 @@ void SJsuiView::Paint()
 
 void SJsuiView::PaintGpu(int32 PixelWidth, int32 PixelHeight)
 {
+	// The first time: the GPU context is created by a job of its own; paint
+	// once it exists (bRepaint stays set; Paint() switches to the CPU if
+	// creating it failed).
+	if (!Host->GpuReady()) return;
 	if (!Target || Target->SizeX != PixelWidth || Target->SizeY != PixelHeight)
 	{
 		if (!Target)
@@ -246,6 +250,7 @@ void SJsuiView::PaintGpu(int32 PixelWidth, int32 PixelHeight)
 		Target->UpdateResourceImmediate(true);
 		bRepaint = true;
 	}
+	if (Host->TakeGpuRepaint()) bRepaint = true;
 	if (!bRepaint && !jsui_needs_redraw(Runtime())) return;
 	Host->QueueGpuRender(Target->GameThread_GetRenderTargetResource(), PixelWidth, PixelHeight, bRepaint);
 	bRepaint = false;

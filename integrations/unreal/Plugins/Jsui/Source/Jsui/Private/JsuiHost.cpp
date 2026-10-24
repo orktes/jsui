@@ -1,42 +1,45 @@
 #include "JsuiHost.h"
 
+#include "HAL/PlatformProcess.h"
+#include "HAL/PlatformTime.h"
 #include "JsuiLog.h"
-#include "RenderingThread.h"
+#include "RHI.h"
 #include "RHICommandList.h"
+#include "RenderingThread.h"
 #include "TextureResource.h"
 
 #if JSUI_UE_METAL
-#include "IMetalDynamicRHI.h"
+#include "IMetalDynamicRHI.h"  // IsRHIMetal
 #endif
 
-// GPU path. Skia Graphite draws into the render target on the Metal RHI's own
-// MTLDevice and MTLCommandQueue, so no copy and no cross-queue sync:
+// GPU path. Skia draws the UI straight into the view's render target on the
+// RHI's own device, ordered with Unreal's GPU work on the RHI's own queue:
 //
 //  - SJsuiView::Tick (game thread, Slate's tick, after the world ticked and
 //    before Slate paints) queues a render command;
-//  - on the render thread it hands a job to IMetalDynamicRHI::RHIRunOnQueue,
-//    which the RHI runs on its submission side with the direct queue, in
-//    order with the command buffers of every RHI command list submitted
-//    before it;
-//  - the job creates the Graphite context on that queue (first time) and
-//    renders; Graphite commits its command buffer to the queue before
-//    jsui_render_gpu_target returns.
+//  - on the render thread, the RHI's path (JsuiGpu<RHI>.cpp) hands a job to
+//    the RHI where it submits GPU work: RHIRunOnQueue (Metal, Vulkan, D3D12),
+//    which runs it on the RHI's submission side with the graphics queue, in
+//    order with the command lists submitted before it; on D3D11 a command
+//    list lambda, which runs where the immediate context is used;
+//  - the job creates the shared context on that device and queue (first
+//    time, a job of its own: GpuReady) and renders; Skia submits its work to
+//    the queue before jsui_render_gpu_target returns.
 //
-// Ordering: this frame's Slate draw, which samples the render target, is
-// queued on the render thread after our command, so its command buffers are
-// committed to the same queue after Graphite's, and Metal's hazard tracking
-// (the RHI's textures are tracked on Apple GPUs) makes the GPU run them in
-// that order. The RHI has no native graphics queue getter on Metal
-// (RHIGetNativeGraphicsQueue is null there), so RHIRunOnQueue is the one way
-// onto its queue.
+// This frame's Slate draw, which samples the render target, is recorded on
+// the render thread after our command, so it reaches the GPU after Skia's
+// work. How each RHI orders it and keeps the texture's state in step with
+// what Unreal tracks is described in its file.
 //
-// The Graphite context is shared by every view and lives as long as the
-// process (the RHI's device does too); only the jobs touch it, and they run
-// one at a time.
+// The context is shared by every view: only jobs touch it (they run one at a
+// time, all in the same place), the game thread only checks whether it
+// exists. It lives until the engine's pre-exit (ReleaseGpu, from
+// JsuiModule.cpp), so it never outlives the RHI's device.
 namespace
 {
-JsuiGpuContext* GGpu = nullptr;
-bool GGpuUnavailable = false;  // context creation failed on this device
+std::atomic<JsuiGpuContext*> GGpu{nullptr};
+std::atomic<bool> GGpuUnavailable{false};  // creation failed (or the context was released)
+bool GGpuCreateQueued = false;             // game thread
 }  // namespace
 
 TSharedPtr<FJsuiHost, ESPMode::ThreadSafe> FJsuiHost::Create(int32 Width, int32 Height, float PixelRatio, bool bDevMode)
@@ -87,8 +90,11 @@ void FJsuiHost::WaitRender()
 	if (Done >= Queued) return;
 	if (!JobDone.wait_for(Lock, std::chrono::seconds(2), [this] { return Done >= Queued; }))
 	{
-		UE_LOG(LogJsui, Warning, TEXT("a render job did not run within 2 s; going on without it"));
+		UE_LOG(LogJsui, Warning, TEXT("a render job did not run within 2 s; going on without it (CPU renderer)"));
 		Done = Queued;
+		// The RHI is not running our jobs: stop queueing them.
+		bGpuFailed = true;
+		if (!GGpu.load()) GGpuUnavailable = true;
 	}
 }
 
@@ -97,6 +103,12 @@ void FJsuiHost::Shutdown()
 	WaitRender();
 	if (Rt) jsui_destroy(Rt);
 	Rt = nullptr;
+	if (GpuApi() == EGpuApi::Vulkan)
+	{
+		// Render-thread state: let it go there, while the RHI is up.
+		TSharedPtr<FJsuiHost, ESPMode::ThreadSafe> Self = AsShared();
+		ENQUEUE_RENDER_COMMAND(JsuiReleaseTarget)([Self](FRHICommandListImmediate&) { Self->VulkanTarget.SafeRelease(); });
+	}
 }
 
 void FJsuiHost::TakeMessages(TArray<FMessage>& Out)
@@ -115,99 +127,157 @@ void FJsuiHost::TakeLogs(TArray<FLog>& Out)
 
 // ------------------------------------------------------------ GPU path
 
+FJsuiHost::EGpuApi FJsuiHost::GpuApi()
+{
+	if (!GDynamicRHI) return EGpuApi::None;
+#if JSUI_UE_METAL
+	// The Metal RHI's own test (as before this file had other RHIs).
+	if (IsRHIMetal()) return EGpuApi::Metal;
+#endif
+	switch (GDynamicRHI->GetInterfaceType())
+	{
+#if JSUI_UE_VULKAN
+	case ERHIInterfaceType::Vulkan: return EGpuApi::Vulkan;
+#endif
+#if JSUI_UE_D3D12
+	case ERHIInterfaceType::D3D12: return EGpuApi::D3D12;
+#endif
+#if JSUI_UE_D3D11
+	case ERHIInterfaceType::D3D11: return EGpuApi::D3D11;
+#endif
+	default: return EGpuApi::None;
+	}
+}
+
 bool FJsuiHost::GpuSupported()
 {
+	return GpuApi() != EGpuApi::None && !GGpuUnavailable;
+}
+
+const TCHAR* FJsuiHost::GpuRendererName()
+{
+	const EGpuApi Api = GpuApi();
+	// Skia Graphite has no Direct3D backend: Ganesh on Direct3D 12.
+	return Api == EGpuApi::D3D12 || Api == EGpuApi::D3D11 ? TEXT("Skia Ganesh (Direct3D 12)") : TEXT("Skia Graphite");
+}
+
+bool FJsuiHost::GpuReady()
+{
+	if (GGpu.load()) return true;
+	if (GGpuUnavailable || GGpuCreateQueued) return false;
+	GGpuCreateQueued = true;
+	QueueJob();
+	TSharedPtr<FJsuiHost, ESPMode::ThreadSafe> Self = AsShared();
+	const EGpuApi Api = GpuApi();
+	ENQUEUE_RENDER_COMMAND(JsuiCreateGpu)(
+		[Self, Api](FRHICommandListImmediate& RHICmdList)
+		{
+			switch (Api)
+			{
 #if JSUI_UE_METAL
-	return IsRHIMetal() && !GGpuUnavailable;
-#else
-	return false;
+			case EGpuApi::Metal: Self->InitMetal(RHICmdList); break;
 #endif
+#if JSUI_UE_VULKAN
+			case EGpuApi::Vulkan: Self->InitVulkan(RHICmdList); break;
+#endif
+#if JSUI_UE_D3D12
+			case EGpuApi::D3D12: Self->InitD3D12(RHICmdList); break;
+#endif
+#if JSUI_UE_D3D11
+			case EGpuApi::D3D11: Self->InitD3D11(RHICmdList); break;
+#endif
+			default:
+				GGpuUnavailable = true;
+				Self->FinishJob();
+				break;
+			}
+		});
+	return false;
 }
 
 bool FJsuiHost::GpuFailed()
 {
 	WaitRender();
-	return bGpuFailed;
+	return bGpuFailed || GGpuUnavailable;
 }
 
 void FJsuiHost::QueueGpuRender(FTextureRenderTargetResource* Target, int32 Width, int32 Height, bool bRepaint)
 {
-#if JSUI_UE_METAL
-	{
-		std::lock_guard<std::mutex> Lock(JobMutex);
-		Queued++;
-	}
+	const EGpuApi Api = GpuApi();
+	if (Api == EGpuApi::None) return;
+	QueueJob();
 	TSharedPtr<FJsuiHost, ESPMode::ThreadSafe> Self = AsShared();
 	ENQUEUE_RENDER_COMMAND(JsuiRender)(
-		[Self, Target, Width, Height, bRepaint](FRHICommandListImmediate& RHICmdList)
+		[Self, Api, Target, Width, Height, bRepaint](FRHICommandListImmediate& RHICmdList)
 		{
 			FRHITexture* Texture = Target ? Target->TextureRHI.GetReference() : nullptr;
-			void* Native = Texture ? Texture->GetNativeResource() : nullptr;
-			if (!Native)
+			if (!Texture || Self->bGpuFailed || !GGpu.load())
 			{
 				Self->FinishJob();
 				return;
 			}
-			if (bRepaint)
+			switch (Api)
 			{
-				// A new render target: the RHI's initial clear of it is in a
-				// command list that may not be submitted yet. Submit it first,
-				// or it would land after Graphite's frame and wipe it.
-				RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThread);
-			}
-			void* Device = GDynamicRHI->RHIGetNativeDevice();
-			GetIMetalDynamicRHI()->RHIRunOnQueue(
-				[Self, Device, Native, Width, Height, bRepaint](MTL::CommandQueue* Queue)
-				{ Self->RenderJob(Device, Queue, Native, Width, Height, bRepaint); },
-				false);
-		});
+#if JSUI_UE_METAL
+			case EGpuApi::Metal: Self->RenderMetal(RHICmdList, Texture, Width, Height, bRepaint); break;
 #endif
+#if JSUI_UE_VULKAN
+			case EGpuApi::Vulkan: Self->RenderVulkan(RHICmdList, Texture, Width, Height, bRepaint); break;
+#endif
+#if JSUI_UE_D3D12
+			case EGpuApi::D3D12: Self->RenderD3D12(RHICmdList, Texture, Width, Height, bRepaint); break;
+#endif
+#if JSUI_UE_D3D11
+			case EGpuApi::D3D11: Self->RenderD3D11(RHICmdList, Texture, Width, Height, bRepaint); break;
+#endif
+			default: Self->FinishJob(); break;
+			}
+		});
 }
 
-void FJsuiHost::RenderJob(void* Device, void* Queue, void* Texture, int32 Width, int32 Height, bool bRepaint)
+void FJsuiHost::CreateJob(TFunctionRef<JsuiGpuContext*()> Create)
 {
-#if JSUI_UE_METAL
-	if (Rt && !bGpuFailed)
+	if (!GGpu.load() && !GGpuUnavailable)
 	{
-		if (!GGpu && !GGpuUnavailable)
+		if (JsuiGpuContext* Gpu = Create())
 		{
-			GGpu = jsui_gpu_create_metal(Device, Queue);
-			if (GGpu)
-			{
-				UE_LOG(LogJsui, Log, TEXT("GPU: Skia Graphite on the Metal RHI's device (%s)"),
-				       UTF8_TO_TCHAR(static_cast<MTL::Device*>(Device)->name()->utf8String()));
-			}
-			else
-			{
-				GGpuUnavailable = true;
-			}
-		}
-		if (!GGpu)
-		{
-			bGpuFailed = true;
+			GGpu = Gpu;
+			UE_LOG(LogJsui, Log, TEXT("GPU: %s on the %s RHI's device"), GpuRendererName(), GDynamicRHI->GetName());
 		}
 		else
 		{
-			JsuiGpuTarget Target{};
-			Target.texture = Texture;
-			Target.format = unsigned(static_cast<MTL::Texture*>(Texture)->pixelFormat());
-			Target.width = Width;
-			Target.height = Height;
-			Target.flags = (!bRepaint && HeldTexture == Texture) ? JSUI_GPU_INCREMENTAL : 0;
-			JsuiRect Dirty;
-			if (jsui_render_gpu_target(Rt, GGpu, &Target, &Dirty) == 0)
-			{
-				HeldTexture = Texture;
-			}
-			else
-			{
-				HeldTexture = nullptr;
-				bGpuFailed = true;
-			}
+			GGpuUnavailable = true;
+			UE_LOG(LogJsui, Warning, TEXT("GPU: no %s context on the %s RHI's device (the library was built without it, or Skia rejected the device)"),
+			       GpuRendererName(), GDynamicRHI->GetName());
 		}
 	}
-#endif
 	FinishJob();
+}
+
+void FJsuiHost::RenderJob(JsuiGpuTarget Target, bool bRepaint)
+{
+	JsuiGpuContext* Gpu = GGpu.load();
+	if (Rt && !bGpuFailed && Target.texture)
+	{
+		Target.flags = (!bRepaint && HeldTexture == Target.texture) ? JSUI_GPU_INCREMENTAL : 0;
+		JsuiRect Dirty;
+		if (Gpu && jsui_render_gpu_target(Rt, Gpu, &Target, &Dirty) == 0)
+		{
+			HeldTexture = Target.texture;
+		}
+		else
+		{
+			HeldTexture = nullptr;
+			bGpuFailed = true;
+		}
+	}
+	FinishJob();
+}
+
+void FJsuiHost::QueueJob()
+{
+	std::lock_guard<std::mutex> Lock(JobMutex);
+	Queued++;
 }
 
 void FJsuiHost::FinishJob()
@@ -215,6 +285,43 @@ void FJsuiHost::FinishJob()
 	std::lock_guard<std::mutex> Lock(JobMutex);
 	Done++;
 	JobDone.notify_all();
+}
+
+void FJsuiHost::ReleaseGpu()
+{
+	const EGpuApi Api = GpuApi();
+	// Metal: the context holds references to the RHI's device and queue and
+	// is freed with the process.
+	if (!GGpu.load() || Api == EGpuApi::None || Api == EGpuApi::Metal) return;
+	GGpuUnavailable = true;  // views that still render fall back to the CPU
+	TSharedRef<std::atomic<bool>, ESPMode::ThreadSafe> Released = MakeShared<std::atomic<bool>, ESPMode::ThreadSafe>(false);
+	ENQUEUE_RENDER_COMMAND(JsuiReleaseGpu)(
+		[Api, Released](FRHICommandListImmediate& RHICmdList)
+		{
+			TFunction<void()> Job = [Released]
+			{
+				if (JsuiGpuContext* Gpu = GGpu.exchange(nullptr)) jsui_gpu_destroy(Gpu);
+				*Released = true;
+			};
+			switch (Api)
+			{
+#if JSUI_UE_VULKAN
+			case EGpuApi::Vulkan: ReleaseVulkan(RHICmdList, MoveTemp(Job)); break;
+#endif
+#if JSUI_UE_D3D12
+			case EGpuApi::D3D12: ReleaseD3D12(RHICmdList, MoveTemp(Job)); break;
+#endif
+#if JSUI_UE_D3D11
+			case EGpuApi::D3D11: ReleaseD3D11(RHICmdList, MoveTemp(Job)); break;
+#endif
+			default: break;
+			}
+		});
+	FlushRenderingCommands();
+	// The job runs on the RHI's submission side; give it a moment (an RHI that
+	// stopped never runs it: the context then goes with the process).
+	const double Until = FPlatformTime::Seconds() + 2.0;
+	while (!*Released && FPlatformTime::Seconds() < Until) FPlatformProcess::Sleep(0.001f);
 }
 
 // ------------------------------------------------------------ CPU path
