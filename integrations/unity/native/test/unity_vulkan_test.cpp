@@ -21,8 +21,12 @@
 //
 // Every frame's pixels are compared with the CPU raster of the same frame
 // (the plugin's own jsui_render_rgba in a second runtime), including
-// incremental frames. Then a texture without INPUT_ATTACHMENT usage, which
-// Graphite cannot draw into, must turn the view to the CPU path with a reason.
+// incremental frames, both for a texture Graphite draws into directly
+// (colour + input attachment) and for one it cannot (no INPUT_ATTACHMENT
+// usage, as many of Unity's RenderTextures), where the plugin draws into an
+// image of its own and copies the repainted rect into Unity's. Then a
+// texture that is neither (no TRANSFER_DST either) must turn the view to the
+// CPU path with a reason.
 //
 //   jsui-unity-vulkan-test [<libjsui_unity.so>]
 //
@@ -535,16 +539,18 @@ struct Readback {
 
 // Six frames of kBundle through the plugin's GPU path, each compared with
 // the CPU raster. `deferred`: AccessQueue callbacks run at the end of the
-// frame on another thread.
-void runFrames(Plugin& p, FakeUnity& unity, bool deferred) {
+// frame on another thread. `inputAttachment`: the texture has
+// INPUT_ATTACHMENT usage (Skia draws into it directly; else the copy path).
+void runFrames(Plugin& p, FakeUnity& unity, bool deferred, bool inputAttachment) {
   const int W = 240, H = 160;
-  std::printf("%s queue access\n", deferred ? "deferred" : "synchronous");
+  std::printf("%s, %s queue access\n", inputAttachment ? "direct (input attachment)" : "copy (no input attachment)",
+              deferred ? "deferred" : "synchronous");
   unity.deferQueueAccess = deferred;
   FakeTexture tex;
   CHECK(unity.makeTexture(tex, W, H,
-                          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT |
-                              VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                              VK_IMAGE_USAGE_TRANSFER_DST_BIT));
+                          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                              VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                              (inputAttachment ? VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT : 0)));
   Readback rb(unity.vk, W, H);
 
   void* view = p.jsuiu_create(W, H, 1, 0);
@@ -635,10 +641,11 @@ int main(int argc, char** argv) {
   std::printf("backend: %s\n", backend ? backend : "(none)");
   CHECK(backend && std::strstr(backend, "Vulkan"));
 
-  runFrames(p, unity, false);
-  runFrames(p, unity, true);
+  for (bool inputAttachment : {true, false})
+    for (bool deferred : {false, true}) runFrames(p, unity, deferred, inputAttachment);
 
-  // A texture Graphite cannot draw into: the view must fall back, with a reason.
+  // A texture the plugin can neither draw nor copy into: the view must fall
+  // back, with a reason.
   {
     FakeTexture tex;
     CHECK(unity.makeTexture(tex, 64, 64, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT));
@@ -653,8 +660,8 @@ int main(int argc, char** argv) {
     unity.afterFrame();
     CHECK(p.jsuiu_gpu_failed(view) == 1);
     const char* err = p.jsuiu_gpu_error(view);
-    std::printf("no INPUT_ATTACHMENT usage: %s\n", err ? err : "(no reason)");
-    CHECK(err && std::strstr(err, "INPUT_ATTACHMENT"));
+    std::printf("no INPUT_ATTACHMENT / TRANSFER_DST usage: %s\n", err ? err : "(no reason)");
+    CHECK(err && std::strstr(err, "transfer destination"));
     CHECK(p.jsuiu_queue_render(view) == 0);
     p.jsuiu_destroy(view);
     unity.freeTexture(tex);

@@ -29,6 +29,7 @@ struct JsuiUnityJob {
   void* image = nullptr;  // e.g. the VkImage behind `texture`
   unsigned format = 0, usage = 0;
   int layout = 0;
+  bool copy = false;  // Vulkan: draw into a plugin-owned image and copy (the texture is no input attachment)
   bool prepared = false;
   const char* error = nullptr;  // why the job failed (static string), for the view's log
   int eventId = 0;              // the render event's id
@@ -46,6 +47,9 @@ struct JsuiUnityBackend {
   void (*render)(JsuiUnityJob* job);
   // Device shutdown: frees the Skia context.
   void (*shutdown)();
+  // Optional (main thread, no job of the view queued): the view `owner` is
+  // going away; frees what the backend keeps for it once the GPU is done.
+  void (*forget)(void* owner);
 };
 
 // jsui_unity_plugin.cpp: the backend of the current device (NULL: none, CPU
