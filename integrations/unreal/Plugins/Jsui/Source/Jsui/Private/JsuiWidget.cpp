@@ -25,6 +25,12 @@ TSharedRef<SWidget> UJsuiWidget::RebuildWidget()
 		Self->PassedMouseDownNative.Broadcast(Button, Position);
 		Self->PassedMouseDown.Broadcast(Button, Position);
 	});
+	View->OnPassedMouseUp.AddLambda([Self](const FKey& Button, const FVector2D& Position)
+	{
+		if (!Self.IsValid()) return;
+		Self->PassedMouseUpNative.Broadcast(Button, Position);
+		Self->PassedMouseUp.Broadcast(Button, Position);
+	});
 	View->OnPassedWheel.AddLambda([Self](float Delta)
 	{
 		if (!Self.IsValid()) return;

@@ -139,11 +139,20 @@ void AJsuiExampleGame::BeginPlay()
 	Ui->bDevMode = bDev;
 	if (!BundleOverride.IsEmpty()) Ui->Bundle = BundleOverride;
 	Ui->OnMessageNative.AddUObject(this, &AJsuiExampleGame::OnUiMessage);
-	Ui->PassedMouseDownNative.AddLambda([this](const FKey& Button, const FVector2D&)
+	Ui->PassedMouseDownNative.AddLambda([this](const FKey& Button, const FVector2D& Position)
 	{
 		if (Button != EKeys::LeftMouseButton) return;
-		bDragging = true;  // the press is the game's: orbit while held
+		bDragging = true;  // the press is the game's: orbit while held, select if it was a click
+		PressAt = LastMouse = Position;
+		Travel = 0;
 		Clicks++;
+	});
+	Ui->PassedMouseUpNative.AddLambda([this](const FKey& Button, const FVector2D& Position)
+	{
+		if (Button != EKeys::LeftMouseButton || !bDragging) return;
+		bDragging = false;
+		Travel = FMath::Max(Travel, float(FVector2D::Distance(Position, PressAt)));
+		if (Travel <= 4.f) Select(Pick(Position));  // a click, not a drag
 	});
 	Ui->PassedWheelNative.AddLambda([this](float Delta)
 	{
@@ -240,14 +249,95 @@ void AJsuiExampleGame::BuildScene()
 	AddMesh(PlaneMesh, Material(FColor(14, 19, 34)), World(0, 0, 0), FVector(40, 40, 1));
 	AddMesh(CylinderMesh, Material(FColor(26, 36, 64)), World(0, 1.1f, 0), FVector(2.1f, 2.1f, 2.2f));
 	for (const FColor& C : kHues) Hues.Add(Material(C));
+
+	// Selection: the selected cube gets a material of its own, lit towards
+	// white and pulsing, and a glowing disc under it.
+	SelectedMaterial = Material(FColor::White);
+	RingMaterial = Material(FColor::White);
+	Ring = AddMesh(CylinderMesh, RingMaterial, FVector::ZeroVector, FVector(1));
+	Ring->SetVisibility(false);
+}
+
+void AJsuiExampleGame::Select(int32 Index)
+{
+	if (Index != Selected)
+	{
+		JsuiExampleSay(Index >= 0 ? *FString::Printf(TEXT("selected: UNIT %02d"), Index + 1) : TEXT("selection cleared"));
+	}
+	if (Units.IsValidIndex(Selected)) Units[Selected].Body->SetMaterial(0, Hues[Units[Selected].Hue]);
+	Selected = Index;
+	if (Units.IsValidIndex(Selected))
+	{
+		Units[Selected].Body->SetMaterial(0, SelectedMaterial);
+		const FLinearColor C = FLinearColor::FromSRGBColor(kHues[Units[Selected].Hue]);
+		RingMaterial->SetVectorParameterValue(TEXT("Color"), FMath::Lerp(C, FLinearColor::White, 0.25f));
+	}
+	Ring->SetVisibility(Units.IsValidIndex(Selected));
+}
+
+// The unit under `Ui` (UI px), nearest first: the click deprojected with this
+// frame's camera, against each cube in its component's (rotated, scaled)
+// space, where the engine's cube mesh spans -50..50 cm.
+int32 AJsuiExampleGame::Pick(const FVector2D& At) const
+{
+	FMatrix ViewProj;
+	FIntRect Rect;
+	ViewProjection(ViewProj, Rect);
+	FVector Origin, Direction;
+	FSceneView::DeprojectScreenToWorld(At * Ui->GetUiPixelRatio(), Rect, ViewProj.InverseFast(), Origin, Direction);
+	int32 Best = -1;
+	double BestDistance = 0;
+	for (int32 I = 0; I < Units.Num(); I++)
+	{
+		const FTransform T = Units[I].Body->GetComponentTransform();
+		const FVector O = T.InverseTransformPosition(Origin), D = T.InverseTransformVector(Direction);
+		double Near = -1e30, Far = 1e30;
+		bool bHit = true;
+		for (int32 A = 0; A < 3 && bHit; A++)
+		{
+			if (FMath::Abs(D[A]) < 1e-9)
+			{
+				bHit = FMath::Abs(O[A]) <= 50.0;
+				continue;
+			}
+			double T1 = (-50.0 - O[A]) / D[A], T2 = (50.0 - O[A]) / D[A];
+			if (T1 > T2) Swap(T1, T2);
+			Near = FMath::Max(Near, T1);
+			Far = FMath::Min(Far, T2);
+			bHit = Near <= Far && Far >= 0;
+		}
+		if (!bHit) continue;
+		const double HitDistance = FVector::Distance(Origin, T.TransformPosition(O + D * FMath::Max(Near, 0.0)));
+		if (Best < 0 || HitDistance < BestDistance)
+		{
+			Best = I;
+			BestDistance = HitDistance;
+		}
+	}
+	return Best;
+}
+
+bool AJsuiExampleGame::UnitOnScreen(int32 Index, FVector2D& UiPos) const
+{
+	if (!Units.IsValidIndex(Index)) return false;
+	FMatrix ViewProj;
+	FIntRect Rect;
+	ViewProjection(ViewProj, Rect);
+	FVector2D Screen;
+	if (!FSceneView::ProjectWorldToScreen(Units[Index].Body->GetComponentLocation(), Rect, ViewProj, Screen)) return false;
+	UiPos = Ui->ViewportToUi(Screen);
+	const FVector2D Size = Ui->GetUiSize();
+	return UiPos.X >= 0 && UiPos.Y >= 0 && UiPos.X < Size.X && UiPos.Y < Size.Y;
 }
 
 void AJsuiExampleGame::Spawn()
 {
 	if (Units.Num() >= kMaxUnits)
 	{
+		if (Selected == 0) Select(-1);
 		Units[0].Body->DestroyComponent();
 		Units.RemoveAt(0);
+		if (Selected > 0) Selected--;
 	}
 	FUnit U;
 	U.Angle = FMath::FRandRange(0.f, 6.28f);
@@ -263,6 +353,7 @@ void AJsuiExampleGame::Spawn()
 
 void AJsuiExampleGame::Clear()
 {
+	Select(-1);
 	for (FUnit& U : Units) U.Body->DestroyComponent();
 	Units.Reset();
 }
@@ -289,6 +380,7 @@ void AJsuiExampleGame::Tick(float DeltaSeconds)
 		const FVector2D D = Mouse - LastMouse;
 		Yaw -= D.X * 0.006f;
 		Pitch += D.Y * 0.006f;
+		Travel = FMath::Max(Travel, float(FVector2D::Distance(Mouse, PressAt)));
 	}
 	LastMouse = Mouse;
 
@@ -303,6 +395,16 @@ void AJsuiExampleGame::Tick(float DeltaSeconds)
 	{
 		U.Body->SetWorldLocationAndRotation(UnitPos(U), FRotator(0.f, -FMath::RadiansToDegrees(U.Angle), 0.f));
 	}
+	if (Units.IsValidIndex(Selected))
+	{
+		const FUnit& U = Units[Selected];
+		const FLinearColor C = FLinearColor::FromSRGBColor(kHues[U.Hue]);
+		SelectedMaterial->SetVectorParameterValue(TEXT("Color"), FMath::Lerp(C, FLinearColor::White, 0.35f + 0.15f * FMath::Sin(Time * 6.f)));
+		const FVector At = UnitPos(U);
+		const float R = U.Size * (2.1f + 0.15f * FMath::Sin(Time * 4.f));
+		Ring->SetWorldLocation(FVector(At.X, At.Y, 1.f));
+		Ring->SetWorldScale3D(FVector(R, R, 0.01f));
+	}
 
 	PublishFrameData();
 	CountFrame(FPlatformTime::Seconds());
@@ -316,7 +418,7 @@ void AJsuiExampleGame::Tick(float DeltaSeconds)
 	Frame++;
 	if (Test && View)
 	{
-		const int32 R = Test->Step(*View, Units.Num(), Clicks);
+		const int32 R = Test->Step(*View, *this);
 		if (R != 0)
 		{
 			Test.Reset();
@@ -356,16 +458,23 @@ void AJsuiExampleGame::CountFrame(double Now)
 // Unit screen positions for the nameplates: x, y, visible, hue (UI px). The
 // projection is this frame's camera (the player camera manager's view is a
 // frame behind at this point).
-void AJsuiExampleGame::PublishFrameData()
+void AJsuiExampleGame::ViewProjection(FMatrix& Out, FIntRect& Rect) const
 {
 	FVector2D Viewport(1, 1);
 	if (GEngine && GEngine->GameViewport) GEngine->GameViewport->GetViewportSize(Viewport);
 	FMinimalViewInfo ViewInfo;
 	Camera->GetCameraView(0.f, ViewInfo);
 	ViewInfo.AspectRatio = Viewport.X / FMath::Max(1.0, Viewport.Y);
-	FMatrix ViewMatrix, ProjectionMatrix, ViewProjection;
-	UGameplayStatics::GetViewProjectionMatrix(ViewInfo, ViewMatrix, ProjectionMatrix, ViewProjection);
-	const FIntRect Rect(0, 0, FMath::RoundToInt(Viewport.X), FMath::RoundToInt(Viewport.Y));
+	FMatrix ViewMatrix, ProjectionMatrix;
+	UGameplayStatics::GetViewProjectionMatrix(ViewInfo, ViewMatrix, ProjectionMatrix, Out);
+	Rect = FIntRect(0, 0, FMath::RoundToInt(Viewport.X), FMath::RoundToInt(Viewport.Y));
+}
+
+void AJsuiExampleGame::PublishFrameData()
+{
+	FMatrix ViewProj;
+	FIntRect Rect;
+	ViewProjection(ViewProj, Rect);
 	const FVector2D Size = Ui->GetUiSize();
 
 	Entities.SetNumUninitialized(Units.Num() * 4);
@@ -374,7 +483,7 @@ void AJsuiExampleGame::PublishFrameData()
 		const FUnit& U = Units[I];
 		const FVector Head = UnitPos(U) + FVector(0, 0, (U.Size * 0.5f + 0.35f) * 100.f);
 		FVector2D Screen;
-		bool bVisible = FSceneView::ProjectWorldToScreen(Head, Rect, ViewProjection, Screen);
+		bool bVisible = FSceneView::ProjectWorldToScreen(Head, Rect, ViewProj, Screen);
 		const FVector2D S = Ui->ViewportToUi(Screen);
 		bVisible = bVisible && S.X > -60 && S.Y > -60 && S.X < Size.X + 60 && S.Y < Size.Y + 60;
 		Entities[I * 4 + 0] = FMath::RoundToFloat(S.X);
@@ -389,9 +498,9 @@ void AJsuiExampleGame::PublishState()
 {
 	const FString Json = FString::Printf(
 		TEXT("{\"engine\":\"Unreal %s\",\"renderer\":\"%s\",\"fps\":%d,\"entities\":%d,\"paused\":%s,"
-		     "\"passed\":{\"clicks\":%d,\"wheel\":%d,\"keys\":%d,\"pad\":0}}"),
+		     "\"selected\":%d,\"passed\":{\"clicks\":%d,\"wheel\":%d,\"keys\":%d,\"pad\":0}}"),
 		*FEngineVersion::Current().ToString(EVersionComponent::Patch), *Ui->GetRendererName(), Fps, Units.Num(),
-		bPaused ? TEXT("true") : TEXT("false"), Clicks, Wheel, Keys);
+		bPaused ? TEXT("true") : TEXT("false"), Selected, Clicks, Wheel, Keys);
 	if (Json == LastState) return;
 	LastState = Json;
 	Ui->SetState(TEXT("game"), Json);

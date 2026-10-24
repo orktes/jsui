@@ -1,10 +1,18 @@
 // --selftest: the C# port of SelfTest in integrations/shared/example_host.h.
-// Once the UI has reported where its Spawn button is, it sends synthetic
-// input straight to the runtime and checks the pass-through contract:
-//   1. a click on empty space (the middle of the screen) is not consumed,
-//      and jsui_hit_test says nothing is there;
+// Once the UI has reported where its Spawn button is, it clicks through
+// JsuiView.HandlePointer, the entry point Unity's Input goes through each
+// frame (IHost.Click), so the clicks take the view's own path: mapping to UI
+// px, jsui_send_*, the Passed* events and the game's handlers. What it skips
+// is Unity's Input Manager itself (OS events -> Input.mousePosition /
+// GetMouseButtonDown), which has no way to inject input. It checks the
+// pass-through contract:
+//   1. a click on empty space (the middle of the screen) is not consumed:
+//      jsui_hit_test says nothing is there and the game counts the click;
 //   2. a click on the Spawn button is consumed, and its game:spawn message
-//      reaches the game, which adds a unit.
+//      reaches the game, which adds a unit;
+//   3. a click on a unit selects it, and the UI reports the selection back
+//      (ui:selected); a click on empty ground clears it; another click
+//      selects again (so --screenshot shows a selected unit).
 // Logs "selftest: ok" (exit 0) or what failed (exit 1).
 using System;
 using System.Globalization;
@@ -13,9 +21,24 @@ using UnityEngine;
 
 public class SelfTest
 {
+    // What the test drives in the game.
+    public interface IHost
+    {
+        int Entities { get; }
+        int Selected { get; }
+        int Clicks { get; }  // presses the UI passed on to the game
+        // A left click at `ui` (logical px) through the game's input path.
+        void Click(Vector2 ui);
+        // The unit a click at `ui` selects, or -1.
+        int Pick(Vector2 ui);
+        // Unit `i`'s centre on screen (logical px); false when off screen.
+        bool UnitOnScreen(int i, out Vector2 ui);
+    }
+
     bool anchors_;
     float spawnX_, spawnY_;
-    int phase_, before_;
+    int phase_, before_, round_, expect_ = -1;
+    int reported_ = -1, reports_, reportsBefore_;
     long frame_, wait_;
 
     // The number after "key": in a flat JSON object (messages of app.jsx are
@@ -34,15 +57,22 @@ public class SelfTest
 
     public void OnMessage(string name, string json)
     {
-        if (name != "ui:anchors") return;
-        spawnX_ = (float)(JsonNumber(json, "x") + JsonNumber(json, "width") / 2);
-        spawnY_ = (float)(JsonNumber(json, "y") + JsonNumber(json, "height") / 2);
-        anchors_ = true;
+        if (name == "ui:anchors")
+        {
+            spawnX_ = (float)(JsonNumber(json, "x") + JsonNumber(json, "width") / 2);
+            spawnY_ = (float)(JsonNumber(json, "y") + JsonNumber(json, "height") / 2);
+            anchors_ = true;
+        }
+        else if (name == "ui:selected")
+        {
+            reported_ = (int)JsonNumber(json, "index", -1);
+            reports_++;
+        }
     }
 
     // Once per frame after jsui_tick. w, h: viewport (logical px).
     // Returns 0 while running, 1 when passed, -1 when failed.
-    public int Step(IntPtr rt, float w, float h, int entities)
+    public int Step(IntPtr rt, IHost host, float w, float h)
     {
         frame_++;
         switch (phase_)
@@ -53,12 +83,11 @@ public class SelfTest
                 return 0;
             case 1:
             {
-                float x = w * 0.5f, y = h * 0.45f;
-                if (JsuiNative.jsui_hit_test(rt, x, y) != 0) return Fail("jsui_hit_test reports UI over the empty middle of the screen");
-                JsuiNative.jsui_send_mouse_move(rt, x, y);
-                int down = JsuiNative.jsui_send_mouse_button(rt, x, y, JsuiNative.MouseLeft, 1, 0);
-                int up = JsuiNative.jsui_send_mouse_button(rt, x, y, JsuiNative.MouseLeft, 0, 0);
-                if (down != 0 || up != 0) return Fail("a click on empty space was consumed");
+                var p = new Vector2(w * 0.5f, h * 0.45f);
+                if (JsuiNative.jsui_hit_test(rt, p.x, p.y) != 0) return Fail("jsui_hit_test reports UI over the empty middle of the screen");
+                int clicks = host.Clicks;
+                host.Click(p);
+                if (host.Clicks != clicks + 1) return Fail("a click on empty space did not reach the game");
                 Debug.Log("selftest: empty-space click passed through to the game");
                 phase_ = 2;
                 return 0;
@@ -67,34 +96,103 @@ public class SelfTest
             {
                 if ((JsuiNative.jsui_hit_test(rt, spawnX_, spawnY_) & JsuiNative.HitPointer) == 0)
                     return Fail("jsui_hit_test misses the Spawn button");
-                before_ = entities;
-                JsuiNative.jsui_send_mouse_move(rt, spawnX_, spawnY_);
-                int down = JsuiNative.jsui_send_mouse_button(rt, spawnX_, spawnY_, JsuiNative.MouseLeft, 1, 0);
-                int up = JsuiNative.jsui_send_mouse_button(rt, spawnX_, spawnY_, JsuiNative.MouseLeft, 0, 0);
-                if (down == 0 || up == 0) return Fail("the click on the Spawn button was not consumed");
-                JsuiNative.jsui_send_mouse_leave(rt);
+                before_ = host.Entities;
+                int clicks = host.Clicks;
+                host.Click(new Vector2(spawnX_, spawnY_));
+                if (host.Clicks != clicks) return Fail("the click on the Spawn button was passed to the game");
                 Debug.Log("selftest: Spawn button click consumed by the UI");
                 phase_ = 3;
                 wait_ = frame_;
                 return 0;
             }
             case 3:
-                if (entities == before_ + 1)
+                if (host.Entities == before_ + 1)
                 {
-                    Debug.Log($"selftest: game:spawn reached the game ({before_} -> {entities} units)");
+                    Debug.Log($"selftest: game:spawn reached the game ({before_} -> {host.Entities} units)");
                     phase_ = 4;
-                    wait_ = frame_;
                     return 0;
                 }
                 if (frame_ - wait_ > 120) return Fail("game:spawn never arrived");
                 return 0;
+            case 4:  // select a unit, clear, select again
+            {
+                Vector2 p;
+                int want = -1;
+                if (round_ == 1)
+                {
+                    if (!EmptyGround(rt, host, w, h, out p)) return Fail("no empty ground to click");
+                }
+                else
+                {
+                    want = ClickableUnit(rt, host, w, h, out p);
+                    if (want < 0) return Fail("no unit on screen to click");
+                }
+                host.Click(p);
+                if (host.Selected != want)
+                {
+                    Debug.LogError($"selftest: clicked ({p.x:0}, {p.y:0}): selected {host.Selected}, expected {want}");
+                    return Fail(want < 0 ? "a click on empty ground did not clear the selection" : "a click on a unit did not select it");
+                }
+                expect_ = want;
+                reportsBefore_ = reports_;
+                phase_ = 5;
+                wait_ = frame_;
+                return 0;
+            }
+            case 5:
+                if (reports_ > reportsBefore_ && reported_ == expect_)
+                {
+                    Debug.Log(expect_ >= 0
+                        ? $"selftest: a click on unit {expect_} selected it; the UI reports it"
+                        : "selftest: a click on empty ground cleared the selection; the UI reports it");
+                    if (++round_ < 3)
+                    {
+                        phase_ = 4;
+                    }
+                    else
+                    {
+                        phase_ = 6;
+                        wait_ = frame_;
+                    }
+                    return 0;
+                }
+                if (frame_ - wait_ > 120) return Fail("the UI never reported the selection (ui:selected)");
+                return 0;
             default:
-                // A few more frames so the new unit's nameplate is on screen
-                // for --screenshot.
+                // A few more frames so the selection is on screen for
+                // --screenshot.
                 if (frame_ - wait_ < 20) return 0;
                 Debug.Log("selftest: ok");
                 return 1;
         }
+    }
+
+    // A unit whose centre is on screen, away from the edges, not under the
+    // UI, and picked there (not hidden behind another one). The newest first.
+    static int ClickableUnit(IntPtr rt, IHost host, float w, float h, out Vector2 p)
+    {
+        for (int i = host.Entities - 1; i >= 0; i--)
+        {
+            if (!host.UnitOnScreen(i, out p)) continue;
+            if (p.x < 40 || p.y < 40 || p.x > w - 40 || p.y > h - 40) continue;
+            if (JsuiNative.jsui_hit_test(rt, p.x, p.y) != 0) continue;
+            if (host.Pick(p) == i) return i;
+        }
+        p = Vector2.zero;
+        return -1;
+    }
+
+    // A point with neither UI nor a unit under it.
+    static bool EmptyGround(IntPtr rt, IHost host, float w, float h, out Vector2 p)
+    {
+        for (int gy = 2; gy < 10; gy++)
+            for (int gx = 1; gx < 16; gx++)
+            {
+                p = new Vector2(w * gx / 16f, h * gy / 12f);
+                if (JsuiNative.jsui_hit_test(rt, p.x, p.y) == 0 && host.Pick(p) < 0) return true;
+            }
+        p = Vector2.zero;
+        return false;
     }
 
     static int Fail(string what)

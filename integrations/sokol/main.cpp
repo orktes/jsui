@@ -15,14 +15,16 @@
 // composited with a premultiplied sokol_gl quad.
 //
 // Input pass-through. sokol_app events go to the UI first; jsui_send_*
-// returns whether the UI consumed one. The rest drives the game: drag empty
+// returns whether the UI consumed one. The rest drives the game: click a
+// unit to select it (a ray from the camera against each spinning cube,
+// jsui_example::rayBox) or empty ground to clear the selection, drag empty
 // space to orbit, wheel to zoom, Space spawns a unit, Esc pauses.
 // sokol_app has no gamepad API, so this host forwards none.
 //
 // Per-frame data. Each frame the game projects every unit to the screen and
 // writes x, y, visible, hue into the `entities` frame buffer, which moves the
-// nameplates without JS; fps, unit count and the pass-through counters go to
-// the `game` shared state.
+// nameplates without JS; fps, unit count, the selected unit and the
+// pass-through counters go to the `game` shared state.
 #include "sokol_app.h"
 #include "sokol_gfx.h"
 #include "sokol_glue.h"
@@ -109,7 +111,7 @@ struct Unit {
 const uint8_t kHues[7][3] = {{242, 195, 91}, {79, 209, 255}, {178, 107, 255}, {74, 222, 128},
                              {255, 154, 60}, {79, 140, 255}, {255, 77, 106}};
 
-class Game {
+class Game : public jsui_example::SelfTestHost {
  public:
   Options opt;
 
@@ -193,7 +195,7 @@ class Game {
     hud_.publish(rt_);
     jsui_tick(rt_, now);
     if (opt.selftest) {
-      int r = selftest_.step(rt_, logicalW_, logicalH_, int(units_.size()));
+      int r = selftest_.step(rt_, *this, logicalW_, logicalH_, hud_);
       if (r != 0) {
         exitCode_ = r > 0 ? 0 : 1;
         quit_ = true;
@@ -257,27 +259,14 @@ class Game {
                ((e->modifiers & SAPP_MODIFIER_SUPER) ? JSUI_MOD_META : 0);
     switch (e->type) {
       case SAPP_EVENTTYPE_MOUSE_MOVE:
-        jsui_send_mouse_move(rt_, x, y);
-        if (dragging_) {
-          yaw_ += e->mouse_dx / s * 0.006f;
-          pitch_ += e->mouse_dy / s * 0.006f;
-        }
+        mouseMove(x, y, e->mouse_dx / s, e->mouse_dy / s);
         break;
       case SAPP_EVENTTYPE_MOUSE_DOWN:
       case SAPP_EVENTTYPE_MOUSE_UP: {
         JsuiMouseButton b = e->mouse_button == SAPP_MOUSEBUTTON_RIGHT    ? JSUI_MOUSE_RIGHT
                             : e->mouse_button == SAPP_MOUSEBUTTON_MIDDLE ? JSUI_MOUSE_MIDDLE
                                                                          : JSUI_MOUSE_LEFT;
-        bool down = e->type == SAPP_EVENTTYPE_MOUSE_DOWN;
-        int consumed = jsui_send_mouse_button(rt_, x, y, b, down, mods);
-        if (b == JSUI_MOUSE_LEFT) {
-          if (down && !consumed) {
-            dragging_ = true;  // the press is the game's: orbit while held
-            hud_.clicks++;
-          } else if (!down) {
-            dragging_ = false;
-          }
-        }
+        mouseButton(x, y, b, e->type == SAPP_EVENTTYPE_MOUSE_DOWN, mods);
         break;
       }
       case SAPP_EVENTTYPE_MOUSE_SCROLL:
@@ -325,6 +314,77 @@ class Game {
   int exitCode() const { return exitCode_; }
 
  private:
+  // Mouse input, from sokol_app events or the self-test.
+  void mouseMove(float x, float y, float dx, float dy) {
+    jsui_send_mouse_move(rt_, x, y);
+    if (dragging_) {
+      yaw_ += dx * 0.006f;
+      pitch_ += dy * 0.006f;
+      click_.move(x, y);
+    }
+    mouse_[0] = x;
+    mouse_[1] = y;
+  }
+
+  void mouseButton(float x, float y, JsuiMouseButton b, bool down, int mods) {
+    int consumed = jsui_send_mouse_button(rt_, x, y, b, down, mods);
+    if (b != JSUI_MOUSE_LEFT) return;
+    if (down && !consumed) {
+      dragging_ = true;  // the press is the game's: orbit while held, select if it was a click
+      click_.press(x, y);
+      hud_.clicks++;
+    } else if (!down && dragging_) {
+      dragging_ = false;
+      if (click_.release(x, y)) hud_.selected = pick(x, y);
+    }
+  }
+
+  // SelfTestHost.
+  void click(float x, float y) override {
+    mouseMove(x, y, x - mouse_[0], y - mouse_[1]);
+    mouseButton(x, y, JSUI_MOUSE_LEFT, true, 0);
+    mouseButton(x, y, JSUI_MOUSE_LEFT, false, 0);
+  }
+
+  // The unit under (x, y), nearest first: the camera ray through that point
+  // against each unit's cube (turned by its spin).
+  int pick(float x, float y) override {
+    float tanHalf = std::tan(kFovy * 0.5f), aspect = logicalW_ / std::max(1.f, logicalH_);
+    float nx = (x / logicalW_ * 2 - 1) * tanHalf * aspect, ny = (1 - y / logicalH_ * 2) * tanHalf;
+    Vec3 d = normalize({forward_.x + side_.x * nx + up_.x * ny, forward_.y + side_.y * nx + up_.y * ny,
+                        forward_.z + side_.z * nx + up_.z * ny});
+    const float o[3] = {eye_.x, eye_.y, eye_.z}, dir[3] = {d.x, d.y, d.z};
+    int best = -1;
+    float bestT = 0;
+    for (size_t i = 0; i < units_.size(); i++) {
+      Vec3 p = unitPos(units_[i]);
+      float sz = units_[i].size;
+      const float c[3] = {p.x, p.y, p.z}, h[3] = {sz, sz, sz};
+      float t = jsui_example::rayBox(o, dir, c, h, time_ * units_[i].spin);
+      if (t >= 0 && (best < 0 || t < bestT)) {
+        best = int(i);
+        bestT = t;
+      }
+    }
+    return best;
+  }
+
+  bool unitOnScreen(int i, float* x, float* y) override {
+    if (i < 0 || i >= int(units_.size())) return false;
+    return project(unitPos(units_[i]), x, y) && *x >= 0 && *y >= 0 && *x < logicalW_ && *y < logicalH_;
+  }
+
+  // World -> logical px; false behind the camera.
+  bool project(Vec3 p, float* x, float* y) const {
+    Mat4 vp = mul(proj_, view_);
+    float cx = vp.m[0] * p.x + vp.m[4] * p.y + vp.m[8] * p.z + vp.m[12];
+    float cy = vp.m[1] * p.x + vp.m[5] * p.y + vp.m[9] * p.z + vp.m[13];
+    float cw = vp.m[3] * p.x + vp.m[7] * p.y + vp.m[11] * p.z + vp.m[15];
+    *x = (cx / cw * 0.5f + 0.5f) * logicalW_;
+    *y = (1 - (cy / cw * 0.5f + 0.5f)) * logicalH_;
+    return cw > 0.1f;
+  }
+
   void resize() {
     pixelW_ = sapp_width();
     pixelH_ = sapp_height();
@@ -414,6 +474,7 @@ class Game {
       for (int i = 0; i < n; i++) spawn();
     } else if (!std::strcmp(name, "game:clear")) {
       units_.clear();
+      hud_.selected = -1;
     } else if (!std::strcmp(name, "game:pause")) {
       hud_.paused = jsui_example::jsonBool(json, "paused");
     } else if (!std::strcmp(name, "game:quit")) {
@@ -424,7 +485,10 @@ class Game {
   float rnd(float a, float b) { return std::uniform_real_distribution<float>(a, b)(rng_); }
 
   void spawn() {
-    if (units_.size() >= 48) units_.erase(units_.begin());
+    if (units_.size() >= 48) {
+      units_.erase(units_.begin());
+      if (hud_.selected >= 0) hud_.selected--;  // -1 if it was the one removed
+    }
     Unit u;
     u.angle = rnd(0, 6.283f);
     u.radius = rnd(3.f, 9.f);
@@ -448,10 +512,14 @@ class Game {
       for (auto& u : units_) u.angle += u.speed * dt;
     }
     pitch_ = std::clamp(pitch_, 0.15f, 1.35f);
-    Vec3 eye{std::cos(yaw_) * std::cos(pitch_) * distance_, std::sin(pitch_) * distance_,
-             std::sin(yaw_) * std::cos(pitch_) * distance_};
-    view_ = lookAt(eye, {0, 1, 0}, {0, 1, 0});
-    proj_ = perspective(50.f * 3.14159265f / 180.f, float(pixelW_) / float(std::max(1, pixelH_)), 0.1f, 200.f);
+    eye_ = {std::cos(yaw_) * std::cos(pitch_) * distance_, std::sin(pitch_) * distance_,
+            std::sin(yaw_) * std::cos(pitch_) * distance_};
+    view_ = lookAt(eye_, {0, 1, 0}, {0, 1, 0});
+    proj_ = perspective(kFovy, float(pixelW_) / float(std::max(1, pixelH_)), 0.1f, 200.f);
+    // The camera's basis, for picking rays (as lookAt builds it).
+    forward_ = normalize(sub({0, 1, 0}, eye_));
+    side_ = normalize(cross(forward_, {0, 1, 0}));
+    up_ = cross(side_, forward_);
   }
 
   void cube(Vec3 c, float h, float rot, uint8_t r, uint8_t g, uint8_t b) {
@@ -505,7 +573,48 @@ class Game {
     sgl_end();
     sgl_begin_quads();
     cube({0, 1.1f, 0}, 1.1f, time_ * 0.3f, 40, 56, 100);
-    for (auto& u : units_) cube(unitPos(u), u.size, time_ * u.spin, u.r, u.g, u.b);
+    for (size_t i = 0; i < units_.size(); i++) {
+      const Unit& u = units_[i];
+      if (int(i) == hud_.selected) {
+        // Selected: lit towards white, pulsing.
+        float k = 0.35f + 0.15f * std::sin(time_ * 6.f);
+        auto lit = [&](uint8_t c) { return uint8_t(c + (255 - c) * k); };
+        cube(unitPos(u), u.size, time_ * u.spin, lit(u.r), lit(u.g), lit(u.b));
+      } else {
+        cube(unitPos(u), u.size, time_ * u.spin, u.r, u.g, u.b);
+      }
+    }
+    sgl_end();
+    if (hud_.selected >= 0 && hud_.selected < int(units_.size())) drawSelection(units_[hud_.selected]);
+  }
+
+  // A white outline box around the selected unit and rings on the ground
+  // under it.
+  void drawSelection(const Unit& u) {
+    Vec3 c = unitPos(u);
+    float h = u.size * 1.2f, rot = time_ * u.spin, cs = std::cos(rot), sn = std::sin(rot);
+    auto p = [&](float x, float y, float z) {
+      return Vec3{c.x + (x * cs - z * sn) * h, c.y + y * h, c.z + (x * sn + z * cs) * h};
+    };
+    sgl_begin_lines();
+    const float e[12][2][3] = {{{-1, -1, -1}, {1, -1, -1}}, {{1, -1, -1}, {1, -1, 1}},   {{1, -1, 1}, {-1, -1, 1}},
+                               {{-1, -1, 1}, {-1, -1, -1}}, {{-1, 1, -1}, {1, 1, -1}},   {{1, 1, -1}, {1, 1, 1}},
+                               {{1, 1, 1}, {-1, 1, 1}},     {{-1, 1, 1}, {-1, 1, -1}},   {{-1, -1, -1}, {-1, 1, -1}},
+                               {{1, -1, -1}, {1, 1, -1}},   {{1, -1, 1}, {1, 1, 1}},     {{-1, -1, 1}, {-1, 1, 1}}};
+    for (auto& edge : e)
+      for (auto& v : edge) {
+        Vec3 q = p(v[0], v[1], v[2]);
+        sgl_v3f_c4b(q.x, q.y, q.z, 255, 255, 255, 255);
+      }
+    float r0 = u.size * (1.9f + 0.15f * std::sin(time_ * 4.f));
+    for (int ring = 0; ring < 3; ring++) {
+      float r = r0 + ring * 0.06f;
+      for (int i = 0; i < 64; i++) {
+        float a0 = i * 6.2831853f / 64, a1 = (i + 1) * 6.2831853f / 64;
+        sgl_v3f_c4b(c.x + std::cos(a0) * r, 0.02f, c.z + std::sin(a0) * r, u.r, u.g, u.b, 255);
+        sgl_v3f_c4b(c.x + std::cos(a1) * r, 0.02f, c.z + std::sin(a1) * r, u.r, u.g, u.b, 255);
+      }
+    }
     sgl_end();
   }
 
@@ -557,10 +666,14 @@ class Game {
   int pixelW_ = 0, pixelH_ = 0;
   uint32_t fbo_ = 0;  // sokol_app's GL framebuffer for this frame
   float logicalW_ = 0, logicalH_ = 0;
+  static constexpr float kFovy = 50.f * 3.14159265f / 180.f;
   Mat4 view_{}, proj_{};
+  Vec3 eye_{}, forward_{}, side_{}, up_{};  // the camera, for picking
   jsui_example::HudState hud_;
   jsui_example::FpsCounter fps_;
   jsui_example::SelfTest selftest_;
+  jsui_example::ClickTracker click_;
+  float mouse_[2] = {-1, -1};
   std::vector<Unit> units_;
   size_t spawned_ = 0;
   std::mt19937 rng_{7};

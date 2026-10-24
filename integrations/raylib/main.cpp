@@ -12,13 +12,16 @@
 //
 // Input pass-through. Every mouse, wheel, key and gamepad event goes to the
 // UI first; jsui_send_* returns whether the UI consumed it. What it did not
-// consume drives the game: drag empty space to orbit the camera, wheel to
-// zoom, Space spawns a unit, Esc / Start pauses, the right stick orbits.
+// consume drives the game: click a unit to select it (a ray from the camera,
+// GetRayCollisionBox) or empty ground to clear the selection, drag empty
+// space to orbit the camera, wheel to zoom, Space spawns a unit, Esc / Start
+// pauses, the right stick orbits.
 //
 // Per-frame data. The game projects every unit to the screen each frame and
 // writes x, y, visible, hue into the `entities` frame buffer
 // (jsui_map_buffer), which moves the nameplates without running JS; fps,
-// unit count and the pass-through counters go to the `game` shared state.
+// unit count, the selected unit and the pass-through counters go to the
+// `game` shared state.
 #include <raylib.h>
 #include <raymath.h>
 #include <rlgl.h>
@@ -116,7 +119,7 @@ int standardButton(int b) {
   }
 }
 
-class Game {
+class Game : public jsui_example::SelfTestHost {
  public:
   explicit Game(const Options& o) : opt_(o) {}
 
@@ -172,7 +175,7 @@ class Game {
 
       jsui_tick(rt_, now);
       if (opt_.selftest) {
-        int r = selftest_.step(rt_, float(GetScreenWidth()), float(GetScreenHeight()), int(units_.size()));
+        int r = selftest_.step(rt_, *this, float(GetScreenWidth()), float(GetScreenHeight()), hud_);
         if (r != 0) {
           result = r > 0 ? 0 : 1;
           quit_ = true;
@@ -306,6 +309,7 @@ class Game {
       for (int i = 0; i < n; i++) spawn();
     } else if (!std::strcmp(name, "game:clear")) {
       units_.clear();
+      hud_.selected = -1;
     } else if (!std::strcmp(name, "game:pause")) {
       hud_.paused = jsui_example::jsonBool(json, "paused");
     } else if (!std::strcmp(name, "game:quit")) {
@@ -314,7 +318,10 @@ class Game {
   }
 
   void spawn() {
-    if (units_.size() >= 48) units_.erase(units_.begin());
+    if (units_.size() >= 48) {
+      units_.erase(units_.begin());
+      if (hud_.selected >= 0) hud_.selected--;  // -1 if it was the one removed
+    }
     int i = int(spawned_++);
     Unit u;
     u.angle = float(GetRandomValue(0, 628)) / 100.f;
@@ -352,11 +359,22 @@ class Game {
     DrawGrid(40, 1.0f);
     DrawCylinder({0, 0, 0}, 0.9f, 1.2f, 2.2f, 24, {26, 36, 64, 255});
     DrawCylinderWires({0, 0, 0}, 0.9f, 1.2f, 2.2f, 24, {79, 209, 255, 120});
-    for (auto& u : units_) {
+    for (size_t i = 0; i < units_.size(); i++) {
+      const Unit& u = units_[i];
       Vector3 p = unitPos(u);
-      DrawCube(p, u.size, u.size, u.size, u.color);
+      bool selected = int(i) == hud_.selected;
+      // The selected unit glows (lit towards white), with a bright outline
+      // and a pulsing ring on the ground under it.
+      Color c = selected ? ColorLerp(u.color, WHITE, 0.35f + 0.15f * std::sin(time_ * 6.f)) : u.color;
+      DrawCube(p, u.size, u.size, u.size, c);
       DrawCubeWires(p, u.size, u.size, u.size, {255, 255, 255, 90});
       DrawCircle3D({p.x, 0.01f, p.z}, u.size * 0.6f, {1, 0, 0}, 90, {0, 0, 0, 90});
+      if (selected) {
+        float s = u.size * 1.18f;
+        DrawCubeWires(p, s, s, s, WHITE);
+        float r = u.size * (1.1f + 0.08f * std::sin(time_ * 4.f));
+        for (int k = 0; k < 3; k++) DrawCircle3D({p.x, 0.02f, p.z}, r + k * 0.03f, {1, 0, 0}, 90, u.color);
+      }
     }
     EndMode3D();
   }
@@ -379,6 +397,65 @@ class Game {
       b[i * 4 + 3] = float(i % 7);
     }
     jsui_commit_buffer(rt_, "entities");
+  }
+
+  // SelfTestHost: the unit under (x, y), nearest first; the ray from the
+  // camera through that point against each unit's (axis-aligned) cube.
+  int pick(float x, float y) override {
+    Ray ray = GetScreenToWorldRay({x, y}, camera_);
+    int best = -1;
+    float bestDistance = 0;
+    for (size_t i = 0; i < units_.size(); i++) {
+      Vector3 p = unitPos(units_[i]);
+      float h = units_[i].size * 0.5f;
+      RayCollision hit = GetRayCollisionBox(ray, {{p.x - h, p.y - h, p.z - h}, {p.x + h, p.y + h, p.z + h}});
+      if (hit.hit && (best < 0 || hit.distance < bestDistance)) {
+        best = int(i);
+        bestDistance = hit.distance;
+      }
+    }
+    return best;
+  }
+
+  bool unitOnScreen(int i, float* x, float* y) override {
+    if (i < 0 || i >= int(units_.size())) return false;
+    Vector3 p = unitPos(units_[i]);
+    if (Vector3Transform(p, GetCameraMatrix(camera_)).z > -0.1f) return false;  // behind the camera
+    Vector2 s = GetWorldToScreen(p, camera_);
+    *x = s.x;
+    *y = s.y;
+    return s.x >= 0 && s.y >= 0 && s.x < GetScreenWidth() && s.y < GetScreenHeight();
+  }
+
+  void click(float x, float y) override {
+    mouseMove(x, y);
+    mouseButton(x, y, MOUSE_BUTTON_LEFT, JSUI_MOUSE_LEFT, true);
+    mouseButton(x, y, MOUSE_BUTTON_LEFT, JSUI_MOUSE_LEFT, false);
+  }
+
+  // Mouse input, from forwardInput (raylib's state) or the self-test.
+  void mouseMove(float x, float y) {
+    if (x == mouse_.x && y == mouse_.y) return;
+    jsui_send_mouse_move(rt_, x, y);
+    if (dragging_) {
+      yaw_ += (x - mouse_.x) * 0.006f;
+      pitch_ += (y - mouse_.y) * 0.006f;
+      click_.move(x, y);
+    }
+    mouse_ = {x, y};
+  }
+
+  void mouseButton(float x, float y, int button, int jsuiButton, bool down) {
+    int consumed = jsui_send_mouse_button(rt_, x, y, JsuiMouseButton(jsuiButton), down, mods());
+    if (button != MOUSE_BUTTON_LEFT) return;
+    if (down && !consumed) {
+      dragging_ = true;  // the press is the game's: orbit while held, select if it was a click
+      click_.press(x, y);
+      hud_.clicks++;
+    } else if (!down && dragging_) {
+      dragging_ = false;
+      if (click_.release(x, y)) hud_.selected = pick(x, y);
+    }
   }
 
   int mods() const {
@@ -405,29 +482,13 @@ class Game {
   // runtime's events.
   void forwardInput() {
     Vector2 m = GetMousePosition();
-    if (m.x != mouse_.x || m.y != mouse_.y) {
-      jsui_send_mouse_move(rt_, m.x, m.y);
-      if (dragging_) {
-        yaw_ += (m.x - mouse_.x) * 0.006f;
-        pitch_ += (m.y - mouse_.y) * 0.006f;
-      }
-      mouse_ = m;
-    }
+    mouseMove(m.x, m.y);
     const int buttons[3][2] = {{MOUSE_BUTTON_LEFT, JSUI_MOUSE_LEFT},
                                {MOUSE_BUTTON_MIDDLE, JSUI_MOUSE_MIDDLE},
                                {MOUSE_BUTTON_RIGHT, JSUI_MOUSE_RIGHT}};
     for (auto& b : buttons) {
-      if (IsMouseButtonPressed(b[0])) {
-        int consumed = jsui_send_mouse_button(rt_, m.x, m.y, JsuiMouseButton(b[1]), 1, mods());
-        if (!consumed && b[0] == MOUSE_BUTTON_LEFT) {
-          dragging_ = true;  // the press is the game's: orbit while held
-          hud_.clicks++;
-        }
-      }
-      if (IsMouseButtonReleased(b[0])) {
-        jsui_send_mouse_button(rt_, m.x, m.y, JsuiMouseButton(b[1]), 0, mods());
-        if (b[0] == MOUSE_BUTTON_LEFT) dragging_ = false;
-      }
+      if (IsMouseButtonPressed(b[0])) mouseButton(m.x, m.y, b[0], b[1], true);
+      if (IsMouseButtonReleased(b[0])) mouseButton(m.x, m.y, b[0], b[1], false);
     }
     Vector2 wheel = GetMouseWheelMoveV();
     if (wheel.x != 0 || wheel.y != 0) {
@@ -530,6 +591,7 @@ class Game {
   jsui_example::HudState hud_;
   jsui_example::FpsCounter fps_;
   jsui_example::SelfTest selftest_;
+  jsui_example::ClickTracker click_;
   std::vector<Unit> units_;
   size_t spawned_ = 0;
   float time_ = 0;
