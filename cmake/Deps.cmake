@@ -34,6 +34,30 @@ set(_qjs_defs
   "JSValue JS_DupValue(JSContext *ctx, JSValueConst v)\n{"
   "JSValue JS_DupValueRT(JSRuntime *rt, JSValueConst v)\n{")
 set(_qjs_ok TRUE)
+# jsui_qjs_patch(<name> <old1> <new1> [<old2> <new2> ...]): replaces each
+# <old> in _qjs with its <new>. Every <old> must occur exactly once, or the
+# whole patch is skipped with a warning. Use bracket arguments ([=[ ... ]=])
+# so the C text needs no escaping.
+set(JSUI_QUICKJS_PATCHES_OFF "" CACHE STRING
+  "QuickJS hot-path patches to leave out (names from cmake/Deps.cmake), for bisecting")
+function(jsui_qjs_patch name)
+  if(name IN_LIST JSUI_QUICKJS_PATCHES_OFF)
+    return()
+  endif()
+  math(EXPR _last "${ARGC} - 1")
+  set(_src "${_qjs}")
+  foreach(_i RANGE 1 ${_last} 2)
+    math(EXPR _j "${_i} + 1")
+    string(FIND "${_src}" "${ARGV${_i}}" _first)
+    string(FIND "${_src}" "${ARGV${_i}}" _lastpos REVERSE)
+    if(_first LESS 0 OR NOT _first EQUAL _lastpos)
+      message(WARNING "quickjs.c changed: building it without the ${name} patch")
+      return()
+    endif()
+    string(REPLACE "${ARGV${_i}}" "${ARGV${_j}}" _src "${_src}")
+  endforeach()
+  set(_qjs "${_src}" PARENT_SCOPE)
+endfunction()
 string(FIND "${_qjs}" "${_qjs_anchor}" _qjs_at)
 if(_qjs_at LESS 0)
   set(_qjs_ok FALSE)
@@ -84,6 +108,16 @@ jsui_inline JSValue jsui_dup_value(JSValueConst v) {
   string(FIND "${_qjs}" "${_qjs_eq_ops}" _qjs_at2)
   if(_qjs_at1 GREATER -1 AND _qjs_at2 GREATER -1)
     string(REPLACE "${_qjs_eq_anchor}" "/* jsui: strict equality without a call for the common tags. */
+/* Tags whose values can be strictly equal to each other share a class. */
+jsui_inline int jsui_eq_class(int tag)
+{
+    switch (tag) {
+    case JS_TAG_FLOAT64: return JS_TAG_INT;
+    case JS_TAG_STRING_ROPE: return JS_TAG_STRING;
+    case JS_TAG_BIG_INT: return JS_TAG_SHORT_BIG_INT;
+    default: return tag;
+    }
+}
 jsui_inline int jsui_strict_eq(JSContext *ctx, JSValue *sp, bool is_neq)
 {
     JSValue a = sp[-2], b = sp[-1];
@@ -95,6 +129,11 @@ jsui_inline int jsui_strict_eq(JSContext *ctx, JSValue *sp, bool is_neq)
         res = ta == tb;
     else if (ta == JS_TAG_BOOL && tb == JS_TAG_BOOL)
         res = JS_VALUE_GET_INT(a) == JS_VALUE_GET_INT(b);
+    else if (ta == JS_TAG_STRING && tb == JS_TAG_STRING)
+        res = JS_VALUE_GET_PTR(a) == JS_VALUE_GET_PTR(b) ||
+              js_string_eq(JS_VALUE_GET_STRING(a), JS_VALUE_GET_STRING(b));
+    else if (jsui_eq_class(ta) != jsui_eq_class(tb))
+        res = false; /* e.g. a string and an object: never strictly equal */
     else
         return js_strict_eq_slow(ctx, sp, is_neq);
     JS_FreeValue(ctx, a);
@@ -110,6 +149,280 @@ ${_qjs_eq_anchor}" _qjs "${_qjs}")
   else()
     message(WARNING "quickjs.c changed: building it without the strict equality fast path")
   endif()
+  # ---- Further hot-path patches. Each one is all-or-nothing: if any of its
+  # anchors is missing or not unique (upstream changed), it is skipped with a
+  # warning and QuickJS stays correct, only slower.
+
+  # Object.keys on an ordinary object with string keys only (props, style
+  # and state objects): one pass over the shape into a fast array, instead
+  # of collecting a sorted property table, re-checking each key and
+  # defining each array element through JS_DefinePropertyValue.
+  jsui_qjs_patch(object-keys
+[=[static JSValue js_object_keys(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv, int kind)
+{
+]=]
+[=[/* jsui: Object.keys() of a non-exotic object; JS_UNINITIALIZED when the
+   object has integer-like keys (which sort first) or is not ordinary. */
+static JSValue jsui_object_keys_fast(JSContext *ctx, JSObject *p)
+{
+    JSShape *sh = p->shape;
+    JSShapeProperty *prs;
+    JSValue r;
+    JSObject *pr;
+    uint32_t i, n = 0, val;
+
+    if (p->is_exotic || p->fast_array)
+        return JS_UNINITIALIZED;
+    for (i = 0, prs = get_shape_prop(sh); i < sh->prop_count; i++, prs++) {
+        JSAtom atom = prs->atom;
+        JSAtomStruct *ap;
+        if (atom == JS_ATOM_NULL || !(prs->flags & JS_PROP_ENUMERABLE))
+            continue;
+        if (__JS_AtomIsTaggedInt(atom))
+            return JS_UNINITIALIZED;
+        ap = ctx->rt->atom_array[atom];
+        if (ap->atom_type != JS_ATOM_TYPE_STRING)
+            continue; /* symbols and private names are not keys */
+        if ((prs->flags & JS_PROP_TMASK) == JS_PROP_VARREF ||
+            (is_num_string(&val, ap) && val != -1))
+            return JS_UNINITIALIZED;
+        n++;
+    }
+    r = js_allocate_fast_array(ctx, n);
+    if (JS_IsException(r) || n == 0)
+        return r;
+    pr = JS_VALUE_GET_OBJ(r);
+    n = 0;
+    for (i = 0, prs = get_shape_prop(sh); i < sh->prop_count; i++, prs++) {
+        JSAtom atom = prs->atom;
+        JSAtomStruct *ap;
+        if (atom == JS_ATOM_NULL || !(prs->flags & JS_PROP_ENUMERABLE))
+            continue;
+        ap = ctx->rt->atom_array[atom];
+        if (ap->atom_type != JS_ATOM_TYPE_STRING)
+            continue;
+        pr->u.array.u.values[n++] = js_dup(JS_MKPTR(JS_TAG_STRING, ap));
+    }
+    return r;
+}
+
+static JSValue js_object_keys(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv, int kind)
+{
+    if (kind == JS_ITERATOR_KIND_KEY &&
+        JS_VALUE_GET_TAG(argv[0]) == JS_TAG_OBJECT) {
+        JSValue r = jsui_object_keys_fast(ctx, JS_VALUE_GET_OBJ(argv[0]));
+        if (!JS_IsUninitialized(r))
+            return r;
+    }
+]=])
+
+  # Own property names of an ordinary object with string keys only (one pass
+  # to count, one to fill, no per-key kind lookups through function calls).
+  # Integer-like keys, which must be sorted first, take the general path.
+  jsui_qjs_patch(own-names
+[=[    /* clear pointer for consistency in case of failure */
+    *ptab = NULL;
+    *plen = 0;
+
+    /* compute the number of returned properties */
+]=]
+[=[    /* clear pointer for consistency in case of failure */
+    *ptab = NULL;
+    *plen = 0;
+
+    /* jsui: ordinary objects whose keys are all non-index strings */
+    if (!p->is_exotic && !(flags & (JS_GPN_SYMBOL_MASK | JS_GPN_PRIVATE_MASK)) &&
+        (flags & JS_GPN_STRING_MASK)) {
+        uint32_t n = 0, val;
+        sh = p->shape;
+        for (i = 0, prs = get_shape_prop(sh); i < sh->prop_count; i++, prs++) {
+            JSAtomStruct *ap;
+            atom = prs->atom;
+            if (atom == JS_ATOM_NULL ||
+                ((flags & JS_GPN_ENUM_ONLY) && !(prs->flags & JS_PROP_ENUMERABLE)))
+                continue;
+            if (__JS_AtomIsTaggedInt(atom))
+                goto jsui_general;
+            ap = ctx->rt->atom_array[atom];
+            if (ap->atom_type != JS_ATOM_TYPE_STRING)
+                continue;
+            if ((prs->flags & JS_PROP_TMASK) == JS_PROP_VARREF ||
+                (is_num_string(&val, ap) && val != -1))
+                goto jsui_general;
+            n++;
+        }
+        tab_atom = js_malloc(ctx, sizeof(tab_atom[0]) * max_int(n, 1));
+        if (!tab_atom)
+            return -1;
+        j = 0;
+        for (i = 0, prs = get_shape_prop(sh); i < sh->prop_count; i++, prs++) {
+            atom = prs->atom;
+            if (atom == JS_ATOM_NULL ||
+                ((flags & JS_GPN_ENUM_ONLY) && !(prs->flags & JS_PROP_ENUMERABLE)))
+                continue;
+            if (ctx->rt->atom_array[atom]->atom_type != JS_ATOM_TYPE_STRING)
+                continue;
+            tab_atom[j].atom = JS_DupAtom(ctx, atom);
+            tab_atom[j].is_enumerable = (prs->flags & JS_PROP_ENUMERABLE) != 0;
+            j++;
+        }
+        *ptab = tab_atom;
+        *plen = n;
+        return 0;
+    }
+ jsui_general:
+
+    /* compute the number of returned properties */
+]=])
+
+  # for-in: prototypes without enumerable string keys (Object.prototype) are
+  # recognised by a scan of their shape instead of a property-name table, and
+  # the keys of the object itself are kept as a table in the iterator instead
+  # of being defined one by one as properties of the iterator object.
+  jsui_qjs_patch(for-in
+[=[typedef struct JSForInIterator {
+    JSValue obj;
+    bool is_array;
+    uint32_t array_length;
+    uint32_t idx;
+} JSForInIterator;]=]
+[=[typedef struct JSForInIterator {
+    JSValue obj;
+    bool is_array;
+    uint32_t array_length;
+    uint32_t idx;
+    JSPropertyEnum *tab; /* jsui: keys of the normal case, or NULL */
+    uint32_t tab_count;
+} JSForInIterator;]=]
+[=[    JSForInIterator *it = p->u.for_in_iterator;
+    JS_FreeValueRT(rt, it->obj);
+    js_free_rt(rt, it);]=]
+[=[    JSForInIterator *it = p->u.for_in_iterator;
+    JS_FreeValueRT(rt, it->obj);
+    if (it->tab) {
+        uint32_t i;
+        for (i = 0; i < it->tab_count; i++)
+            JS_FreeAtomRT(rt, it->tab[i].atom);
+        js_free_rt(rt, it->tab);
+    }
+    js_free_rt(rt, it);]=]
+[=[    it->is_array = false;
+    it->obj = obj;
+    it->idx = 0;
+    p = JS_VALUE_GET_OBJ(enum_obj);]=]
+[=[    it->is_array = false;
+    it->obj = obj;
+    it->idx = 0;
+    it->tab = NULL;
+    it->tab_count = 0;
+    p = JS_VALUE_GET_OBJ(enum_obj);]=]
+[=[        if (JS_IsException(obj1))
+            goto fail;
+        if (JS_GetOwnPropertyNamesInternal(ctx, &tab_atom, &tab_atom_count,
+                                           JS_VALUE_GET_OBJ(obj1),
+                                           JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY)) {
+            JS_FreeValue(ctx, obj1);
+            goto fail;
+        }
+        js_free_prop_enum(ctx, tab_atom, tab_atom_count);
+        if (tab_atom_count != 0) {]=]
+[=[        if (JS_IsException(obj1))
+            goto fail;
+        if (jsui_no_enumerable_string_keys(ctx, JS_VALUE_GET_OBJ(obj1))) {
+            tab_atom_count = 0;
+        } else if (JS_GetOwnPropertyNamesInternal(ctx, &tab_atom, &tab_atom_count,
+                                                  JS_VALUE_GET_OBJ(obj1),
+                                                  JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY)) {
+            JS_FreeValue(ctx, obj1);
+            goto fail;
+        } else {
+            js_free_prop_enum(ctx, tab_atom, tab_atom_count);
+        }
+        if (tab_atom_count != 0) {]=]
+[=[        for(i = 0; i < tab_atom_count; i++) {
+            JS_SetPropertyInternal(ctx, enum_obj, tab_atom[i].atom, JS_NULL, 0);
+        }
+        js_free_prop_enum(ctx, tab_atom, tab_atom_count);
+    }
+    return enum_obj;]=]
+[=[        it->tab = tab_atom;
+        it->tab_count = tab_atom_count;
+    }
+    return enum_obj;]=]
+[=[static JSValue build_for_in_iterator(JSContext *ctx, JSValue obj)
+{]=]
+[=[/* jsui: true when an ordinary object has no enumerable string-keyed own
+   property, i.e. its JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY name list is empty. */
+static bool jsui_no_enumerable_string_keys(JSContext *ctx, JSObject *p)
+{
+    JSShape *sh = p->shape;
+    JSShapeProperty *prs;
+    int i;
+    if (p->is_exotic || p->fast_array)
+        return false;
+    for (i = 0, prs = get_shape_prop(sh); i < sh->prop_count; i++, prs++) {
+        if (prs->atom != JS_ATOM_NULL && (prs->flags & JS_PROP_ENUMERABLE) &&
+            JS_AtomGetKind(ctx, prs->atom) == JS_ATOM_KIND_STRING)
+            return false;
+    }
+    return true;
+}
+
+static JSValue build_for_in_iterator(JSContext *ctx, JSValue obj)
+{]=]
+[=[        } else {
+            JSShape *sh = p->shape;
+            JSShapeProperty *prs;
+            if (it->idx >= sh->prop_count)
+                goto done;]=]
+[=[        } else if (it->tab) {
+            if (it->idx >= it->tab_count)
+                goto done;
+            prop = it->tab[it->idx++].atom;
+        } else {
+            JSShape *sh = p->shape;
+            JSShapeProperty *prs;
+            if (it->idx >= sh->prop_count)
+                goto done;]=])
+
+  # Object literal fields ({a: x}) on a plain object that does not have the
+  # property yet: add it straight to the shape. Anything else (existing key,
+  # arrays, exotic or non-extensible objects) takes JS_DefinePropertyValue.
+  jsui_qjs_patch(define-field
+[=[                ret = JS_DefinePropertyValue(ctx, sp[-2], atom, sp[-1],
+                                             JS_PROP_C_W_E | JS_PROP_THROW);
+                sp--;
+                if (unlikely(ret < 0))
+                    goto exception;
+            }
+            BREAK;
+
+        CASE(OP_set_name):]=]
+[=[                {
+                    JSObject *p = JS_VALUE_GET_OBJ(sp[-2]);
+                    JSProperty *pr;
+                    if (likely(JS_VALUE_GET_TAG(sp[-2]) == JS_TAG_OBJECT &&
+                               !p->is_exotic && !p->fast_array && p->extensible &&
+                               !find_own_property(&pr, p, atom))) {
+                        pr = add_property(ctx, p, atom, JS_PROP_C_W_E);
+                        if (unlikely(!pr))
+                            goto exception;
+                        pr->u.value = sp[-1];
+                        sp--;
+                        BREAK;
+                    }
+                }
+                ret = JS_DefinePropertyValue(ctx, sp[-2], atom, sp[-1],
+                                             JS_PROP_C_W_E | JS_PROP_THROW);
+                sp--;
+                if (unlikely(ret < 0))
+                    goto exception;
+            }
+            BREAK;
+
+        CASE(OP_set_name):]=])
   set(_qjs_c ${CMAKE_BINARY_DIR}/quickjs-patched/quickjs.c)
   file(CONFIGURE OUTPUT ${_qjs_c} CONTENT "${_qjs}" @ONLY)
 else()
