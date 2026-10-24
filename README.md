@@ -191,6 +191,16 @@ NativeActivity app rendering with Skia on OpenGL ES (`RUN=1
 scripts/build-android.sh` builds the APK and runs it on a device or emulator).
 Both forward touch, hardware keys and gamepads and publish the safe area.
 
+## Rust, Go and other languages
+
+JSUI is a C library, so any language with a C FFI can host a React UI.
+[bindings/rust](bindings/rust/README.md) (a crate) and
+[bindings/go](bindings/go/README.md) (a cgo package) are thin bindings over the
+C API, and each comes with the same desktop app: a quest log whose data and
+rules live in Rust or Go while the UI is React, drawn by Skia on the GPU into a
+GLFW window. The program publishes shared state, the UI asks for changes with
+`Host.call`, and the program answers. See [bindings/README.md](bindings/README.md).
+
 ## raylib, SDL3, sokol, Unity and Unreal
 
 `integrations/raylib`, `integrations/sdl3` and `integrations/sokol` run one
