@@ -241,7 +241,7 @@ const ENGINES = {
   lead: 'Small, complete hosts of the same game HUD (integrations/shared/ui/app.jsx): input goes to the UI first and what it does not consume moves the camera, per-frame unit positions drive nameplates with no JS per frame, and each one shows a different way to get the UI onto the screen.',
   facts: [
     ['raylib', '6.2 · GL texture'],
-    ['SDL3', '3.4 · any backend'],
+    ['SDL3', '3.4 · Metal / Vulkan / GL'],
     ['sokol', 'GL · swapchain'],
     ['Self-test', 'in CI'],
   ],
@@ -257,7 +257,7 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \\
 cmake --build build --target jsui-raylib jsui-sdl3 jsui-sokol
 
 ./build/jsui-raylib                 # --cpu: CPU raster + UpdateTextureRec
-./build/jsui-sdl3                   # --renderer metal|vulkan|direct3d12|opengl|software
+./build/jsui-sdl3                   # --cpu, --renderer metal|vulkan|opengl|software
 ./build/jsui-sokol                  # --cpu: CPU raster into a transient sg_image
 ./build/jsui-raylib --dev http://127.0.0.1:5173/bundle.js   # with npx jsui dev
 `,
@@ -323,16 +323,20 @@ sg_commit();
         {
           kind: 'code',
           lang: 'c',
-          title: 'SDL3: any backend, dirty rectangles only',
+          title: 'SDL3: Skia into SDL\'s own texture (the GL path)',
           code: `
 SDL_Texture* ui = SDL_CreateTexture(r,
-    SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING, pw, ph);
+    SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, pw, ph);
 SDL_SetTextureBlendMode(ui, SDL_BLENDMODE_BLEND_PREMULTIPLIED);
+GLuint tex = SDL_GetNumberProperty(SDL_GetTextureProperties(ui),
+    SDL_PROP_TEXTURE_OPENGL_TEXTURE_NUMBER, 0);
 
-JsuiRect d;   /* pixels kept between frames */
-if (jsui_render_rgba_incremental(rt, pixels, pw, ph, pw * 4, &d))
-    SDL_UpdateTexture(ui, &(SDL_Rect){d.x, d.y, d.width, d.height},
-                      pixels + (d.y * pw + d.x) * 4, pw * 4);
+if (jsui_needs_redraw(rt)) {
+    SDL_FlushRenderer(r);   /* SDL's queued draws out, its cache dirty */
+    JsuiGLTarget t = { .texture = tex, .width = pw, .height = ph,
+                       .flags = JSUI_GL_TOP_LEFT_ORIGIN };
+    jsui_render_gl_target(rt, gpu, &t);
+}
 SDL_RenderTexture(r, ui, NULL, NULL);
 `,
         },
@@ -363,7 +367,7 @@ case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
       head: ['HOST', 'INPUT', 'UI ON SCREEN'],
       rows: [
         ['raylib', 'polled · gamepad', 'Skia Ganesh draws into a RenderTexture2D only when the UI changed and raylib composites it (premultiplied). --cpu: dirty-rect UpdateTextureRec.'],
-        ['SDL3', 'events · gamepad', 'CPU raster into a streaming texture, only the damaged rectangle uploaded, on whichever SDL_Renderer backend SDL picks: Metal, Direct3D, Vulkan or OpenGL.'],
+        ['SDL3', 'events · gamepad', 'Skia straight into the SDL_Texture on SDL\'s own GPU API: Graphite on Metal (IOSurface textures) or Vulkan, Ganesh on OpenGL. CPU raster with dirty-rect uploads on other renderers or with --cpu.'],
         ['sokol', 'events', 'Skia over the sokol_gfx pass in the swapchain\'s GL framebuffer, then sg_reset_state_cache(). --cpu: a transient sg_image. sokol_app has no gamepad API.'],
       ],
     },

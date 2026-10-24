@@ -1,17 +1,19 @@
 // JSUI in SDL3: a 2D arena drawn with SDL_Renderer and the shared HUD
 // (integrations/shared/ui/app.jsx) on top.
 //
-//   jsui-sdl3 [--dev] [--renderer metal|direct3d12|vulkan|opengl|software]
+//   jsui-sdl3 [--cpu] [--dev] [--renderer metal|vulkan|opengl|direct3d12|software|...]
 //             [bundle.js | http://127.0.0.1:5173/bundle.js]
 //
-// Rendering. SDL_Renderer picks the platform's GPU API (Metal, Direct3D,
-// Vulkan or OpenGL) and JSUI does not need to know which: the UI is
-// rasterised on the CPU into a buffer that is kept between frames
-// (jsui_render_rgba_incremental), only the damaged rectangle is uploaded to
-// a streaming texture, and SDL composites it over the arena with
-// premultiplied alpha. When nothing in the UI changed, nothing is painted or
-// uploaded. (For a GL window, tools/jsui-viewer shows the GPU path:
-// jsui_render_gl into SDL's GL context.)
+// Rendering. Skia draws the UI on the GPU, straight into the SDL_Texture that
+// SDL_Renderer composites over the arena with premultiplied alpha (gpu.h):
+// Graphite on SDL's Metal device on macOS, Graphite on SDL's Vulkan device
+// elsewhere, or Ganesh in SDL's OpenGL context when the library has no
+// Graphite backend. The example asks SDL for that render driver unless
+// --renderer names one. On other renderers (software, Direct3D, SDL's GPU
+// renderer), with --cpu, or if the GPU path fails, the UI is rasterised on
+// the CPU into a buffer kept between frames (jsui_render_rgba_incremental)
+// and only the damaged rectangle is uploaded to a streaming texture. Either
+// way the UI is repainted only when something in it changed.
 //
 // Input pass-through. Events go to the UI first; jsui_send_* returns whether
 // the UI consumed one. The rest drives the game: drag empty space to pan,
@@ -34,6 +36,7 @@
 #include <vector>
 
 #include "example_host.h"
+#include "gpu.h"
 #include "jsui/jsui.h"
 
 namespace {
@@ -208,8 +211,9 @@ class Game {
     if (rt_) jsui_destroy(rt_);
     for (auto& [id, p] : pads_) SDL_CloseGamepad(p.gamepad);
     for (auto& [k, c] : cursors_) SDL_DestroyCursor(c);
+    gpu_.reset();
     if (ui_) SDL_DestroyTexture(ui_);
-    if (renderer_) SDL_DestroyRenderer(renderer_);
+    if (renderer_) sdl3_gpu::destroyRenderer(renderer_);
     if (window_) SDL_DestroyWindow(window_);
     SDL_Quit();
   }
@@ -227,7 +231,13 @@ class Game {
       std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
       return 1;
     }
-    renderer_ = SDL_CreateRenderer(window_, rendererName_.empty() ? nullptr : rendererName_.c_str());
+    // The GPU path's render driver, unless --renderer (or --cpu) says otherwise.
+    const char* preferred = sdl3_gpu::preferredDriver();
+    if (rendererName_.empty() && !opt_.cpu && preferred) {
+      renderer_ = sdl3_gpu::createRenderer(window_, preferred);
+      if (!renderer_) std::fprintf(stderr, "warning: SDL's %s renderer failed (%s); using SDL's default\n", preferred, SDL_GetError());
+    }
+    if (!renderer_) renderer_ = sdl3_gpu::createRenderer(window_, rendererName_.empty() ? nullptr : rendererName_.c_str());
     if (!renderer_) {
       std::fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
       return 1;
@@ -238,7 +248,13 @@ class Game {
     std::printf("SDL renderer: %s\n", backend ? backend : "?");
     hud_.engine = "SDL " + std::to_string(SDL_MAJOR_VERSION) + "." + std::to_string(SDL_MINOR_VERSION) + "." +
                   std::to_string(SDL_MICRO_VERSION);
-    hud_.renderer = std::string("SDL_Renderer (") + (backend ? backend : "?") + ") · CPU raster, dirty-rect upload";
+    backend_ = backend ? backend : "?";
+    if (!opt_.cpu) {
+      gpu_ = sdl3_gpu::createTarget(renderer_);
+      if (gpu_) std::printf("GPU: %s (%s)\n", gpu_->describe().c_str(), gpu_->device().c_str());
+      else std::fprintf(stderr, "note: no GPU path for SDL's %s renderer; the UI is rasterised on the CPU\n", backend_.c_str());
+    }
+    setRendererName();
 
     JsuiConfig cfg;
     jsui_config_init(&cfg);
@@ -297,7 +313,8 @@ class Game {
       SDL_SetRenderScale(renderer_, ratio_, ratio_);  // draw in logical px
       drawScene();
       SDL_FRect dst{0, 0, float(logicalW_), float(logicalH_)};
-      SDL_RenderTexture(renderer_, ui_, nullptr, &dst);
+      SDL_RenderTexture(renderer_, gpu_ ? gpu_->texture() : ui_, nullptr, &dst);
+      if (gpu_) gpu_->beforePresent();
       frame++;
       bool lastFrame = quit_ || (opt_.frames >= 0 && frame >= opt_.frames);
       if (lastFrame && !opt_.screenshot.empty()) screenshot(opt_.screenshot);
@@ -320,19 +337,45 @@ class Game {
     logicalH_ = lh;
     ratio_ = float(pw) / float(lw);
     jsui_set_viewport(rt_, lw, lh, ratio_);
-    if (ui_ && pw == pixelW_ && ph == pixelH_) return;
+    if ((ui_ || gpu_) && pw == pixelW_ && ph == pixelH_) return;
     pixelW_ = pw;
     pixelH_ = ph;
-    pixels_.assign(size_t(pw) * ph * 4, 0);
+    createUiTexture();
+  }
+
+  void createUiTexture() {
+    uiFresh_ = true;
+    if (gpu_) {
+      if (gpu_->resize(pixelW_, pixelH_)) return;
+      fallBackToCpu("could not create the GPU path's texture");
+      return;
+    }
+    pixels_.assign(size_t(pixelW_) * pixelH_ * 4, 0);
     if (ui_) SDL_DestroyTexture(ui_);
     // RGBA bytes in memory, premultiplied, as the runtime paints them.
-    ui_ = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING, pw, ph);
+    ui_ = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING, pixelW_, pixelH_);
     SDL_SetTextureBlendMode(ui_, SDL_BLENDMODE_BLEND_PREMULTIPLIED);
     SDL_SetTextureScaleMode(ui_, SDL_SCALEMODE_LINEAR);
-    uiFresh_ = true;
+  }
+
+  void fallBackToCpu(const char* why) {
+    std::fprintf(stderr, "warning: %s; falling back to the CPU renderer\n", why);
+    gpu_.reset();
+    setRendererName();
+    createUiTexture();
+  }
+
+  void setRendererName() {
+    hud_.renderer = "SDL_Renderer (" + backend_ + ") · " +
+                    (gpu_ ? gpu_->describe() : std::string("CPU raster · dirty-rect upload"));
   }
 
   void paintUi() {
+    if (gpu_) {
+      if (gpu_->paint(rt_, uiFresh_)) uiFresh_ = false;
+      else fallBackToCpu("the GPU render failed");
+      if (gpu_) return;
+    }
     if (!ui_ || (!jsui_needs_redraw(rt_) && !uiFresh_)) return;
     size_t row = size_t(pixelW_) * 4;
     JsuiRect dirty;
@@ -623,7 +666,9 @@ class Game {
   std::string rendererName_;
   SDL_Window* window_ = nullptr;
   SDL_Renderer* renderer_ = nullptr;
-  SDL_Texture* ui_ = nullptr;
+  SDL_Texture* ui_ = nullptr;  // the CPU path's texture
+  std::unique_ptr<sdl3_gpu::UiTarget> gpu_;
+  std::string backend_;
   JsuiRuntime* rt_ = nullptr;
   std::vector<uint8_t> pixels_;
   bool uiFresh_ = true;

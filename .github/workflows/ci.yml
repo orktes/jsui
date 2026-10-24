@@ -60,6 +60,8 @@ jobs:
             godot:
               - *core
               - 'integrations/godot/**'
+              - 'integrations/sdl3/**'
+              - 'integrations/shared/**'
               - 'scripts/build-skia-desktop.sh'
               - 'scripts/patches/skia-m157-dawn-header-only.patch'
               - 'tools/dawn-shim/**'
@@ -236,8 +238,11 @@ jobs:
           grep -q '^GPU: ' engines/sokol.log && grep -q 'selftest: ok' engines/sokol.log
           x ./build/jsui-sokol --cpu --selftest --screenshot engines/sokol-cpu.png | tee engines/sokol-cpu.log
           grep -q 'selftest: ok' engines/sokol-cpu.log
+          # Prebuilt Skia (Ganesh GL, no Graphite): SDL's opengl renderer, Skia into its texture.
           x ./build/jsui-sdl3 --selftest --screenshot engines/sdl3.png | tee engines/sdl3.log
-          grep -q 'selftest: ok' engines/sdl3.log
+          grep -q '^GPU: Skia Ganesh GL' engines/sdl3.log && grep -q 'selftest: ok' engines/sdl3.log
+          x ./build/jsui-sdl3 --cpu --selftest --screenshot engines/sdl3-cpu.png | tee engines/sdl3-cpu.log
+          ! grep -q '^GPU: ' engines/sdl3-cpu.log && grep -q 'selftest: ok' engines/sdl3-cpu.log
           SDL_VIDEO_DRIVER=dummy ./build/jsui-sdl3 --renderer software --selftest --screenshot engines/sdl3-software.png | tee engines/sdl3-software.log
           grep -q 'selftest: ok' engines/sdl3-software.log
           for f in engines/*.png; do test -s "$f"; done
@@ -274,7 +279,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ninja-build clang libfontconfig1-dev zlib1g-dev python3 unzip rsync \
             libvulkan1 mesa-vulkan-drivers vulkan-validationlayers xvfb xauth libegl1 libegl-mesa0 libgl1-mesa-dri \
-            libgl-dev libegl-dev libgles-dev libx11-dev libvulkan-dev
+            libgl-dev libegl-dev libgles-dev libx11-dev libvulkan-dev \
+            libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxinerama-dev libxfixes-dev
       - name: Cache desktop Skia (m157, Graphite + Vulkan + Dawn headers)
         id: skia-desktop
         uses: actions/cache@v4
@@ -302,10 +308,10 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
           -DJSUI_SKIA_DIR=third_party/skia-desktop -DJSUI_VULKAN=ON -DJSUI_GRAPHITE_DAWN=ON
-          -DJSUI_BUILD_TESTS=ON -DJSUI_BUILD_VIEWER=OFF -DJSUI_BUILD_GODOT=ON
+          -DJSUI_BUILD_TESTS=ON -DJSUI_BUILD_VIEWER=OFF -DJSUI_BUILD_GODOT=ON -DJSUI_BUILD_SDL3=ON
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Build GDExtension + native tests
-        run: cmake --build build -j "$(nproc)" --target jsui_godot jsui-tests
+        run: cmake --build build -j "$(nproc)" --target jsui_godot jsui-tests jsui-sdl3
       - name: Native tests against Skia m157 (incl. Graphite on Vulkan / lavapipe)
         # vulkan_test renders through jsui_gpu_create_vulkan on its own
         # lavapipe device and compares with the CPU raster; require it.
@@ -316,6 +322,25 @@ jobs:
         run: |
           if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
           npx jsui build integrations/godot/demo/ui/app.jsx -o integrations/godot/demo/ui/dist/bundle.js
+      - name: SDL3 example on Vulkan (lavapipe) - Skia Graphite into the SDL_Texture's VkImage on SDL's queue, under sync validation
+        # The engines job runs the GL and CPU paths with the prebuilt Skia;
+        # this one has Graphite on Vulkan. Any validation error (a hazard
+        # between JSUI's render and SDL's frames on the shared image, a
+        # layout SDL does not expect) fails the step.
+        run: |
+          npx jsui build integrations/shared/ui/app.jsx -o integrations/shared/ui/dist/bundle.js
+          vkdir="$(mktemp -d)"
+          printf '%s\n' \
+            'khronos_validation.enables = VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT' \
+            'khronos_validation.report_flags = error' \
+            'khronos_validation.debug_action = VK_DBG_LAYER_ACTION_LOG_MSG' \
+            "khronos_validation.log_filename = $vkdir/validation.log" \
+            'khronos_validation.message_id_filter = VUID-vkGetPhysicalDeviceFormatProperties-format-parameter' \
+            > "$vkdir/vk_layer_settings.txt"
+          VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation VK_LAYER_SETTINGS_PATH="$vkdir" xvfb-run -a -s "-screen 0 1600x1000x24" \
+            ./build/jsui-sdl3 --selftest --screenshot build/sdl3-vulkan.png | tee build/sdl3-vulkan.log
+          grep -q '^GPU: Skia Graphite Vulkan' build/sdl3-vulkan.log && grep -q 'selftest: ok' build/sdl3-vulkan.log
+          if [ -s "$vkdir/validation.log" ]; then cat "$vkdir/validation.log"; exit 1; fi
       - name: Run the demo in Godot 4.7.2 (headless, input self-test at 1x and 2x) and capture frames
         run: integrations/godot/smoke-test.sh build/godot-smoke.png
       - name: Run it in Godot 4.3 too (compatibility_minimum)
@@ -365,6 +390,7 @@ jobs:
             integrations/godot/demo/bin/
             build/godot-smoke*.png
             build/godot-vulkan*.png
+            build/sdl3-vulkan.png
           if-no-files-found: warn
 
   # --------------------------------------- Godot GDExtension (macOS), advisory
