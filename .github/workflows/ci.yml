@@ -1063,7 +1063,7 @@ jobs:
           npm install --no-package-lock --no-audit --no-fund
           npx playwright install chromium
           JSUI_WEB_STRICT=1 npm run test:browser
-          JSUI_WEB_STRICT=1 JSUI_JS=host npm run test:browser
+          JSUI_WEB_STRICT=1 JSUI_JS=quickjs npm run test:browser
       - uses: actions/upload-artifact@v4
         with:
           name: jsui-wasm

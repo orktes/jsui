@@ -1424,10 +1424,15 @@ was `preventDefault()`-ed.
 In the WASM build the bundle (React and the app's code) can run on the JS
 engine of whatever loaded `jsui.wasm`, i.e. V8, JavaScriptCore or
 SpiderMonkey in a page or worker and V8 in Node, instead of QuickJS
-compiled to WASM: `createJsui({ js: 'host' })` on the web,
+compiled to WASM. On the web it is `createJsui`'s default (`js: 'host'`;
+`js: 'quickjs'` opts out); a thread that may not eval (a
+Content-Security-Policy without `'unsafe-eval'`) runs QuickJS instead. In
+the CLI it is opt-in, so headless screenshots match native runtimes:
 `jsui screenshot|inspect|run|dev --headless --js host` and
-`launch({ js: 'host' })` in the CLI (`JSUI_JS=host` makes it the default
-there). Everything else stays in WASM: the document, Yoga, Skia, input,
+`launch({ js: 'host' })` (`JSUI_JS=host` makes it the default there). A
+precompiled bundle (`jsui build`'s default `combo` format) runs its
+embedded source on the host engine; a `bytecode`-only one cannot run there,
+and a `split` one loads its source file. Everything else stays in WASM: the document, Yoga, Skia, input,
 native Animated, host data, fonts, resources and the renderers. Native
 builds keep QuickJS. `jsui.jsEngine` / `app.hostJs` say which engine runs.
 A module built without it (`-DJSUI_HOST_JS=OFF`; on by default in every

@@ -11,7 +11,7 @@
 <body>
   <script type="module">
     import { createJsui } from '../jsui-web.js';
-    // page.html?js=host: every runtime's default JS engine (createJsui's `js`).
+    // page.html?js=quickjs|host: every runtime's default JS engine (createJsui's `js`).
     const js = new URLSearchParams(location.search).get('js');
     window.createJsui = js ? (opts) => createJsui({ js, ...opts }) : createJsui;
     window.testReady = true;

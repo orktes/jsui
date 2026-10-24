@@ -6,8 +6,9 @@
 //   node web/test/browser.test.mjs            (needs web/dist from the wasm build)
 //   JSUI_WEB_STRICT=1 node web/test/browser.test.mjs
 //   JSUI_WEB_REAL_GPU=1 node web/test/browser.test.mjs   (installed Chrome, headed, real GPU)
-//   JSUI_JS=host node web/test/browser.test.mjs    (bundles run on the page's own
-//       JS engine: createJsui({ js: 'host' }), docs/ARCHITECTURE.md "Host JS engine")
+//   JSUI_JS=quickjs node web/test/browser.test.mjs (bundles run on QuickJS in the
+//       WASM module instead of the page's own JS engine, createJsui's default;
+//       docs/ARCHITECTURE.md "Host JS engine")
 //   JSUI_WEB_DIST=dist-webgl node web/test/browser.test.mjs   (the GPU module,
 //       WEBGL=1 scripts/build-wasm.sh: every test runs against it, and the
 //       'gpu' tests draw through Skia on WebGL instead of SKIPping)
@@ -103,7 +104,7 @@ function toneWav(ms) {
 }
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const ORIGIN = `http://127.0.0.1:${server.address().port}`;
-// JSUI_JS=host: page.html makes js: 'host' every createJsui()'s default.
+// JSUI_JS=quickjs|host: page.html makes it every createJsui()'s default.
 const JS = process.env.JSUI_JS || '';
 const PAGE = `${ORIGIN}/test/page.html${JS ? '?js=' + encodeURIComponent(JS) : ''}`;
 
@@ -576,6 +577,12 @@ test('js option: QuickJS and the host engine', async ({ page }) => {
     assert(JSON.stringify(r[1]) === JSON.stringify([['engine', want]]), `${js}: ${JSON.stringify(r[1])}`);
     const [px] = await screenPixels(page, '#' + js, [[10, 50]]);
     assert(near(px, [0, 128, 128, 255]), `${js}: ${fmt(px)}`);
+  }
+  // Without `js` (and no JSUI_JS override) the bundle runs on the host engine.
+  if (!JS) {
+    await mount(page, { id: 'default', jsui: { bundleSource: src } });
+    await frames(page, 2);
+    assert((await page.evaluate(() => window.hosts.default.jsEngine)) === 'host', 'default engine is host');
   }
   const bad = await page.evaluate((dist) => window.createJsui({ canvas: document.createElement('canvas'), renderer: 'cpu',
     moduleUrl: new URL(`../${dist}/jsui.js`, location.href), js: 'v8' }).then(() => 'ok', (e) => e.message), DIST);
