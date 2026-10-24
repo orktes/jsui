@@ -18,6 +18,7 @@
 #include "render/gpu.h"
 #include "render/gpu_metal.h"
 #include "render/pipeline_cache.h"
+#include "render/shader_view.h"
 #include "runtime.h"
 
 // A runtime handle (jsui_create: owns the runtime, shows its main surface)
@@ -402,6 +403,15 @@ int jsui_gpu_save_pipelines(JsuiGpuContext* gpu, void** outData, size_t* outSize
 
 int jsui_gpu_precompile_step(JsuiGpuContext* gpu, double budgetMs) {
   return gpu && gpu->pipelines ? gpu->pipelines->step(budgetMs) : 0;
+}
+
+int jsui_precompile_shader(JsuiRuntime* rt, const char* sksl, const char* imagesJson) {
+  if (!rt || !sksl) return -1;
+  jsui::Value images = imagesJson && *imagesJson ? jsui::Value::parseJson(imagesJson) : jsui::Value();
+  auto prog = rt->rt->shaders->preload(sksl, images);
+  if (prog->effect) return 0;
+  rt->rt->log(JSUI_LOG_WARN, "jsui_precompile_shader: " + prog->error);
+  return -1;
 }
 
 void jsui_gpu_get_pipeline_stats(JsuiGpuContext* gpu, JsuiPipelineStats* out) {

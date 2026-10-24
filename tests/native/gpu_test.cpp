@@ -20,6 +20,7 @@
 #include "include/core/SkBitmap.h"
 #include "include/core/SkData.h"
 #include "render/gpu.h"
+#include "render/shader_view.h"
 #include "render_util.h"
 #include "test.h"
 
@@ -496,6 +497,11 @@ void buildScene(Scene& s, const std::string& png) {
   s.add(R"J({"type":"ShaderView","props":{"source":"uniform shader content; uniform float2 resolution; half4 main(float2 p) { return content.eval(float2(resolution.x - p.x, p.y)).brga; }"},
             "style":{"position":"absolute","left":292,"top":204,"width":26,"height":30},
             "children":[{"style":{"width":10,"height":30,"backgroundColor":"#ff8800"}}]})J");
+  // A preloaded shader no view uses yet: its warm-up draws (off-screen, in
+  // the first frame on Ganesh) leave the frame as the CPU paints it.
+  CHECK(s.rt->shaders->preload("uniform shader img; uniform float k; half4 main(float2 p) { return img.eval(p) * half(k); }",
+                               jsui::Value::parseJson(R"({"img":{"uri":"x.png","tile":"mirror"}})"))
+            ->effect);
 }
 
 // Runs fn(ctx, api) once per GL API that works here; SKIP when none does.

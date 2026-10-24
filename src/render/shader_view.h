@@ -23,6 +23,12 @@
 // Coordinates are px with (0, 0) at the top-left of the padding box (fill)
 // or the border box (content). Compile errors are reported once per view as
 // an `error` event; such a view paints nothing of its own.
+//
+// Preloading (precompileShaders() in JS, jsui_precompile_shader): a source
+// is compiled ahead of use and drawn once off-screen in the next GPU frame,
+// the way a ShaderView would draw it, so the GPU builds its pipelines then
+// (Graphite on Metal / Vulkan / Dawn / WebGPU, Ganesh on GL / WebGL) rather
+// than in the frame where a view first shows it: no hitch on first use.
 #pragma once
 
 #include <cstdint>
@@ -63,6 +69,21 @@ class ShaderEffects {
   // Compiles `sksl` on first use; later calls share the result.
   std::shared_ptr<const Program> get(const std::string& sksl);
 
+  // Compiles `sksl` now and queues its warm-up draw. `images` is what the
+  // view's `images` prop will be (which children are images, their fit and
+  // tile mode), so the warm-up samples the same kind of child.
+  std::shared_ptr<const Program> preload(const std::string& sksl, const Value& images = Value());
+  // Warm-up draws still queued (one per frame painted).
+  size_t warmPending() const { return warm_.size(); }
+  // The surfaces call it with the canvas of each frame they paint. On a GPU
+  // canvas it draws the next queued warm-up draw (every combination of
+  // geometry, clip and loaded children a view may draw the shader with)
+  // into a small off-screen surface of the canvas's format (nothing shows);
+  // the frame's flush then builds the pipelines. A raster canvas has
+  // nothing to warm: the queue is dropped.
+  // Returns whether it drew (the frame must reach the GPU).
+  bool warm(SkCanvas* canvas);
+
   // Repaints the views whose shader runs on the clock and queues compile
   // errors. Runs every tick.
   void tick(double nowMs);
@@ -84,6 +105,15 @@ class ShaderEffects {
   std::unordered_map<std::string, std::shared_ptr<const Program>> programs_;
   std::unordered_set<Node*> views_;
   double now_ = 0;
+  static constexpr int kWarmVariants = 8;
+  struct Warm {
+    std::shared_ptr<const Program> program;
+    Value images;  // as preloaded
+    Value loaded;  // the image children drawn as images (the others: not loaded yet)
+    int variant = 0;
+  };
+  void warmDraw(SkCanvas* canvas, const Warm& w);
+  std::vector<Warm> warm_;
 };
 
 namespace shader {

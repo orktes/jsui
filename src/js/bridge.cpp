@@ -262,22 +262,18 @@ JSValue js_lottieCommand(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
   return JS_NewBool(ctx, lottie::command(n, toStdString(ctx, argv[1]), a, b));
 }
 
-// shaderInfo(sksl) -> {error} | {uniforms: [{name, type, count, color}], children: [name]}:
-// compiles an SkSL shader (ShaderView source) like the view does, so JS can
-// report errors or list what the shader takes.
-JSValue js_shaderInfo(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  if (argc < 1 || !JS_IsString(argv[0])) return JS_ThrowTypeError(ctx, "shaderInfo: expected an SkSL string");
-  auto prog = runtimeOf(ctx).shaders->get(toStdString(ctx, argv[0]));
+// {error} | {uniforms: [{name, type, count, color}], children: [name]}.
+JSValue shaderInfoOf(JSContext* ctx, const ShaderEffects::Program& prog) {
   JSValue out = JS_NewObject(ctx);
-  if (!prog->effect) {
-    JS_SetPropertyStr(ctx, out, "error", JS_NewString(ctx, prog->error.c_str()));
+  if (!prog.effect) {
+    JS_SetPropertyStr(ctx, out, "error", JS_NewString(ctx, prog.error.c_str()));
     return out;
   }
   static const char* const kTypes[] = {"float",    "float2",   "float3", "float4", "float2x2", "float3x3",
                                        "float4x4", "int",      "int2",   "int3",   "int4"};
   JSValue uniforms = JS_NewArray(ctx);
   uint32_t i = 0;
-  for (const SkRuntimeEffect::Uniform& u : prog->effect->uniforms()) {
+  for (const SkRuntimeEffect::Uniform& u : prog.effect->uniforms()) {
     JSValue o = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, o, "name", JS_NewStringLen(ctx, u.name.data(), u.name.size()));
     JS_SetPropertyStr(ctx, o, "type", JS_NewString(ctx, kTypes[int(u.type)]));
@@ -287,11 +283,34 @@ JSValue js_shaderInfo(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
   }
   JSValue children = JS_NewArray(ctx);
   i = 0;
-  for (const SkRuntimeEffect::Child& c : prog->effect->children())
+  for (const SkRuntimeEffect::Child& c : prog.effect->children())
     JS_SetPropertyUint32(ctx, children, i++, JS_NewStringLen(ctx, c.name.data(), c.name.size()));
   JS_SetPropertyStr(ctx, out, "uniforms", uniforms);
   JS_SetPropertyStr(ctx, out, "children", children);
   return out;
+}
+
+// shaderInfo(sksl) -> shaderInfoOf: compiles an SkSL shader (ShaderView
+// source) like the view does, so JS can report errors or list what the
+// shader takes.
+JSValue js_shaderInfo(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  if (argc < 1 || !JS_IsString(argv[0])) return JS_ThrowTypeError(ctx, "shaderInfo: expected an SkSL string");
+  return shaderInfoOf(ctx, *runtimeOf(ctx).shaders->get(toStdString(ctx, argv[0])));
+}
+
+// shaderPreload(sksl, images?) -> shaderInfoOf: compiles it and warms its
+// GPU pipelines in the next frame (ShaderEffects::preload; `images` as the
+// view's prop will be).
+JSValue js_shaderPreload(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  if (argc < 1 || !JS_IsString(argv[0])) return JS_ThrowTypeError(ctx, "shaderPreload: expected an SkSL string");
+  Value images = argc > 1 && JS_IsObject(argv[1]) ? toValue(ctx, argv[1]) : Value();
+  return shaderInfoOf(ctx, *runtimeOf(ctx).shaders->preload(toStdString(ctx, argv[0]), images));
+}
+
+// shadersWarming() -> the number of preloaded shaders still waiting for
+// their warm-up frame.
+JSValue js_shadersWarming(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+  return JS_NewInt32(ctx, int(runtimeOf(ctx).shaders->warmPending()));
 }
 
 // flashScrollIndicators(id): shows the overlay scroll indicators briefly.
@@ -571,6 +590,8 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
              {"configureLayoutAnimation", js_configureLayoutAnimation, 1},
              {"lottieData", js_lottieData, 1},     {"lottieCommand", js_lottieCommand, 4},
              {"shaderInfo", js_shaderInfo, 1},
+             {"shaderPreload", js_shaderPreload, 2},
+             {"shadersWarming", js_shadersWarming, 0},
              {"loadFontData", js_loadFontData, 4}, {"unloadFont", js_unloadFont, 1},
              {"getFontFamilies", js_getFontFamilies, 0},
              {"setFontFallbacks", js_setFontFallbacks, 1},

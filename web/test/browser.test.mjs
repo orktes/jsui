@@ -57,6 +57,10 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'audio/wav' });
     return res.end(toneWav(parseInt(url.pathname.slice(12), 10) || 100));
   }
+  if (url.pathname === '/__red.svg') {  // an image, loaded cross-origin (localhost) without CORS
+    res.writeHead(200, { 'content-type': 'image/svg+xml' });
+    return res.end('<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="red"/></svg>');
+  }
   if (url.pathname === '/slow/solid.js') {  // delayed response for destroy-during-load tests
     return setTimeout(() => {
       res.writeHead(200, { 'content-type': 'text/javascript' });
@@ -1760,11 +1764,202 @@ for (const renderer of ['cpu', 'webgpu']) test(`host textures: ImageData, canvas
   assert(near(px, [255, 255, 255, 255]), `after removeTexture ${fmt(px)}`);
 }, {}, { worker: true });
 
+// Playwright WebKit 26 on macOS loses every WebGL context of the page right
+// after a frame callback on a playing video. Simulated: the first
+// requestVideoFrameCallback loses the view's context (in the worker, in
+// worker mode). bindVideo then polls the video once per display frame, and
+// the texture keeps following it.
+test('bindVideo: a WebGL context lost right after a video frame callback switches to polled frames', async ({ page }) => {
+  const info = await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js', renderer: 'webgl' } });
+  skipNoBackend('webgl', info.renderer);
+  const at = async () => {
+    await frames(page, 3);
+    await idle(page);
+    return (await screenPixels(page, '#ui', [[50, 50]]))[0];
+  };
+  const r = await page.evaluate(async (worker) => {
+    const j = window.hosts.ui;
+    window.__logs = [];
+    j.on('log', (level, text) => window.__logs.push(text));
+    const c = document.createElement('canvas');
+    c.width = c.height = 32;
+    const g = c.getContext('2d');
+    window.__color = '#ff0000';
+    window.__paint = setInterval(() => { g.fillStyle = window.__color; g.fillRect(0, 0, 32, 32); }, 20);
+    const v = document.createElement('video');
+    Object.assign(v, { muted: true, playsInline: true, srcObject: c.captureStream(30) });
+    Object.assign(v.style, { position: 'fixed', left: '0px', top: '300px', width: '4px', height: '4px' });
+    document.body.appendChild(v);
+    try { await v.play(); } catch (e) { return `play: ${e}`; }
+    for (let i = 0; i < 100 && v.readyState < 2; i++) await new Promise((r) => setTimeout(r, 20));
+    if (typeof v.requestVideoFrameCallback !== 'function') return 'no requestVideoFrameCallback';
+    const rvfc = v.requestVideoFrameCallback.bind(v);
+    window.__rvfc = 0;
+    v.requestVideoFrameCallback = (cb) => {
+      if (window.__rvfc++ === 0) {
+        if (worker) j._debug('loseGL');
+        else {
+          const ext = j._gl.getExtension('WEBGL_lose_context');
+          ext.loseContext();
+          setTimeout(() => ext.restoreContext(), 50);
+        }
+      }
+      return rvfc(cb);
+    };
+    j.bindVideo('tex', v);
+    await new Promise((r) => setTimeout(r, 600));
+    return v.readyState;
+  }, WORKER);
+  if (typeof r === 'string' || r < 2) skip(`no video playback in this browser (${r})`, true);
+  const logs = await page.evaluate(() => window.__logs);
+  assert(logs.some((l) => /bound videos: frames polled/.test(l)), `no switch to polling: ${JSON.stringify(logs)}`);
+  const calls = await page.evaluate(() => window.__rvfc);
+  let px = await at();
+  assert(near(px, RED, 24), `video texture after the restore ${fmt(px)}`);
+  await page.evaluate(() => { window.__color = '#00ff00'; });
+  await page.waitForTimeout(200);
+  px = await at();
+  assert(near(px, GREEN, 24), `video texture, polled, after the video changed ${fmt(px)}`);
+  await page.evaluate(() => { window.__color = '#0000ff'; });
+  await page.waitForTimeout(200);
+  px = await at();
+  assert(near(px, BLUE, 24), `video texture, polled, after the video changed again ${fmt(px)}`);
+  const later = await page.evaluate(() => { clearInterval(window.__paint); return window.__rvfc; });
+  assert(later === calls && calls <= 3, `frame callbacks after the switch: ${calls} then ${later}`);
+}, {}, { worker: true });
+
+// A host texture set while the context is lost, before the loss was handled
+// (WebKit: the poster arrived 0.26 s in, right after the loss): kept, and
+// shown once the context is back. The source is an ImageBitmap of the
+// caller's, so in worker mode only the worker's copy can bring it back.
+test('setTexture while the WebGL context is lost (its event not handled yet): shown after the restore', async ({ page }) => {
+  const info = await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js', renderer: 'webgl' } });
+  skipNoBackend('webgl', info.renderer);
+  const r = await page.evaluate(async (worker) => {
+    const j = window.hosts.ui;
+    const logs = [];
+    let restored = false;
+    j.on('log', (level, text) => {
+      if (level >= 2) logs.push(text);
+      if (/WebGL context restored/.test(text)) restored = true;
+    });
+    const c = document.createElement('canvas');
+    c.width = c.height = 8;
+    const g = c.getContext('2d');
+    g.fillStyle = '#00ff00';
+    g.fillRect(0, 0, 8, 8);
+    const bitmap = await createImageBitmap(c);
+    let ok;
+    if (worker) {
+      // Lost in the worker right before this texture is set there.
+      if (!(await j._debug('loseGL', { onTexture: true }))) return null;
+      ok = await j.setTexture('tex', bitmap);
+    } else {
+      const gl = j._gl, ext = gl?.getExtension('WEBGL_lose_context');
+      if (!ext) return null;
+      const CREATE = ['createProgram', 'createShader', 'createTexture'];
+      ext.loseContext();
+      for (const k of CREATE) gl[k] = () => null;  // as in WebKit
+      ok = j.setTexture('tex', bitmap);
+      for (const k of CREATE) delete gl[k];
+      setTimeout(() => ext.restoreContext(), 50);
+    }
+    for (let i = 0; i < 100 && !restored; i++) await new Promise((res) => setTimeout(res, 10));
+    for (let i = 0; i < 2; i++) await new Promise(requestAnimationFrame);
+    await j.whenIdle();
+    return { ok, restored, logs };
+  }, WORKER);
+  if (!r) skip('WEBGL_lose_context unavailable');
+  assert(r.ok === false, `setTexture on the lost context: ${r.ok}`);
+  assert(r.restored && !r.logs.length, `restore: ${JSON.stringify(r)}`);
+  const [px] = await screenPixels(page, '#ui', [[50, 50]]);
+  assert(near(px, GREEN), `texture after the restore ${fmt(px)}`);
+}, {}, { worker: true });
+
+// A cross-origin image without CORS: one warning, the same in both modes, and
+// not tried again until its URL changes (in worker mode not even sent). In
+// worker mode its ImageBitmap cannot be posted: the ops sent with it still go.
+test('a cross-origin <img> without CORS: one warning, not tried again; other textures unaffected', async ({ page }) => {
+  await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js' } });
+  const r = await page.evaluate(async (port) => {
+    const j = window.hosts.ui;
+    const logs = [];
+    j.on('log', (level, text) => logs.push([level, text]));
+    const img = new Image();
+    img.src = `http://localhost:${port}/__red.svg`;
+    await img.decode();
+    const ok = [await j.setTexture('tex', img), await j.setTexture('tex', img)];
+    // In one batch: an ImageBitmap of it, and a texture that is fine.
+    const bitmap = await createImageBitmap(img);
+    const d = new ImageData(4, 4);
+    for (let i = 0; i < d.data.length; i += 4) d.data.set([0, 255, 0, 255], i);
+    const both = await Promise.all([j.setTexture('other', bitmap), j.setTexture('tex', d)]);
+    for (let i = 0; i < 2; i++) await new Promise(requestAnimationFrame);
+    await j.whenIdle();
+    return { ok, both, logs };
+  }, server.address().port);
+  assert(r.ok.every((v) => v === false), `setTexture(<img>): ${JSON.stringify(r.ok)}`);
+  assert(r.both[0] === false && r.both[1] === true, `setTexture(ImageBitmap), setTexture(ImageData): ${JSON.stringify(r.both)}`);
+  const cors = /^host texture "(\w+)": the source is cross-origin and not CORS-enabled .* not uploaded until its URL changes$/;
+  assert(r.logs.length === 2 && r.logs.every(([level, t]) => level === 2 && cors.test(t)) &&
+    r.logs.map(([, t]) => t.match(cors)[1]).join() === 'tex,other', `logs: ${JSON.stringify(r.logs)}`);
+  const [px] = await screenPixels(page, '#ui', [[50, 50]]);
+  assert(near(px, GREEN), `texture sent with the cross-origin one ${fmt(px)}`);
+}, {}, { worker: true });
+
+// WebKit (Playwright 26, macOS): an ImageBitmap made before the GPU process
+// was lost uploads blank after the restore, without an error. Worker mode
+// keeps ImageBitmaps (of <img> and canvases, made on the page): simulated
+// with 'loseGL' blankBitmaps. The page captures its <img> again once the
+// worker placed its textures anew; for a caller's ImageBitmap, which the page
+// cannot make again, it logs once that it may be blank.
+test('worker: a GPU reset that blanks the kept ImageBitmaps: the page sends its <img> again', async ({ page }) => {
+  const info = await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js', renderer: 'webgl', worker: true } });
+  skipNoBackend('webgl', info.renderer);
+  const r = await page.evaluate(async () => {
+    const j = window.hosts.ui;
+    const logs = window.__logs = [];
+    j.on('log', (level, text) => logs.push([level, text]));
+    const c = document.createElement('canvas');
+    c.width = c.height = 8;
+    const g = c.getContext('2d');
+    g.fillStyle = '#ff0000';
+    g.fillRect(0, 0, 8, 8);
+    const img = new Image();
+    img.src = c.toDataURL();
+    await img.decode();
+    const ok = [await j.setTexture('tex', img), await j.setTexture('other', await createImageBitmap(c))];
+    for (let i = 0; i < 2; i++) await new Promise(requestAnimationFrame);
+    await j.whenIdle();
+    return { ok, lost: await j._debug('loseGL', { blankBitmaps: true }) };
+  });
+  assert(r.ok.every((v) => v === true), `setTexture before the loss: ${JSON.stringify(r.ok)}`);
+  if (!r.lost) skip('WEBGL_lose_context unavailable');
+  let px;
+  for (let i = 0; i < 20; i++) {
+    await frames(page, 2);
+    await idle(page);
+    [px] = await screenPixels(page, '#ui', [[50, 50]]);
+    if (near(px, RED)) break;
+  }
+  const logs = await page.evaluate(() => window.__logs);
+  assert(logs.some(([, t]) => /WebGL context restored/.test(t)), `no restore: ${JSON.stringify(logs)}`);
+  assert(near(px, RED), `<img> texture after the reset ${fmt(px)}`);
+  const blank = logs.filter(([, t]) => /host texture "other": the GPU was reset/.test(t));
+  const tex = logs.filter(([, t]) => /host texture "tex"/.test(t));
+  const warnings = logs.filter(([level]) => level >= 2);
+  assert(blank.length === 1 && !tex.length && !warnings.length, `logs: ${JSON.stringify(logs)}`);
+});
+
 // The wheel scrolls a ScrollView and a click lands on the row under it.
 // Worker mode: also how long after an input the page's hit map shows its
 // effect (the pass-through / preventDefault answers come from it).
 test('scroll: the wheel scrolls a ScrollView, clicks land on the scrolled rows', async ({ page }) => {
   await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js' } });
+  // Worker mode: the first hitTest() asks the worker for the hit map, which comes with the next frame.
+  await page.evaluate(() => window.hosts.ui.hitTest(0, 0));
+  await frames(page, 2);
+  await idle(page);
   const hits = await page.evaluate(() => [130, 50, 335].map((x) => window.hosts.ui.hitTest(x, 10)));
   assert(hits.join() === '3,0,0', `hitTest over a row, the texture, nothing: ${hits}`);
   await page.mouse.move(200, 100);
@@ -1832,6 +2027,96 @@ test('scroll: the wheel scrolls a ScrollView, clicks land on the scrolled rows',
   }
 }, {}, { worker: true });
 
+// A lost WebGL context can be noticed before its webglcontextlost event (a
+// later task): WebKit, switching the showcase to its video, lost the context
+// and a frame and a texture upload ran on it first (in worker mode: a failed
+// shader compile, then emscripten's glCreateProgram threw on the null program,
+// then the upload's createTexture). Same here with WEBGL_lose_context: GL
+// work in the task that lost it, then the restore. Nothing may throw or log,
+// and the restored frame equals one that was never lost.
+// 'before': lost before the frame, its event not delivered yet. 'mid': lost
+// in the middle of the frame, at its first shader compile, as WebKit does
+// when a GL call finds its GPU process gone (Skia's next glCreateProgram /
+// glCreateShader then get null from WebGL: web/native/jsui_webgl_lost.js).
+for (const when of ['before', 'mid']) test(`WebGL context lost ${when === 'mid' ? 'in the middle of a frame' : 'before its event'}: no throw, everything back right after the restore`, async ({ page }) => {
+  const info = await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js', renderer: 'webgl' } });
+  skipNoBackend('webgl', info.renderer);
+  await mount(page, { id: 'ref', width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js', renderer: 'webgl' } });
+  const r = await page.evaluate(async ({ worker, mid }) => {
+    const j = window.hosts.ui, ref = window.hosts.ref;
+    const logs = [], renderers = [];
+    let restoredAt = 0;
+    j.on('log', (level, text) => {
+      // A throw the frame's guard took for the loss counts too: the GL glue must not throw.
+      if (level >= 2 || /during a frame/.test(text)) logs.push(text);
+      if (/WebGL context restored/.test(text)) restoredAt = performance.now();
+    });
+    j.on('renderer', (name, reason) => renderers.push([name, reason]));
+    const t0 = performance.now();
+    let res;
+    if (worker) {
+      res = await j._debug('loseGL', { work: true, mid });
+    } else {
+      const gl = j._gl, ext = gl?.getExtension('WEBGL_lose_context');
+      if (!ext) return null;
+      // As the worker's 'loseGL' hook: WebKit's create* calls return null once lost.
+      const CREATE = ['createProgram', 'createShader', 'createTexture'];
+      const lose = () => {
+        ext.loseContext();
+        for (const k of CREATE) gl[k] = () => null;
+      };
+      let fired = !mid;
+      if (mid) {
+        gl.compileShader = function (sh) {
+          delete gl.compileShader;
+          fired = true;
+          lose();
+          return gl.compileShader(sh);
+        };
+      } else {
+        lose();
+      }
+      res = { error: null, fired };
+      try {
+        j.postMessage('fx', null);
+        const img = new ImageData(8, 8);
+        img.data.fill(255);
+        j.setTexture('tex', img);
+        j.frame();
+      } catch (e) {
+        res.error = String(e?.stack ?? e);
+      }
+      delete gl.compileShader;
+      for (const k of CREATE) delete gl[k];
+      res.fired = fired;
+      if (fired) setTimeout(() => ext.restoreContext(), 50);
+    }
+    if (!res) return null;
+    // The reference gets the same, without a loss.
+    ref.postMessage('fx', null);
+    const img = new ImageData(8, 8);
+    img.data.fill(255);
+    await ref.setTexture('tex', img);
+    for (let i = 0; i < 100 && !restoredAt; i++) await new Promise((r) => setTimeout(r, 10));
+    // Right after the restore: two frames, then the canvas must be back.
+    for (let i = 0; i < 2; i++) await new Promise(requestAnimationFrame);
+    await Promise.all([j.whenIdle(), ref.whenIdle()]);
+    return { ...res, logs, renderers, renderer: j.renderer, restored: restoredAt ? restoredAt - t0 : null };
+  }, { worker: WORKER, mid: when === 'mid' });
+  if (!r) skip('WEBGL_lose_context unavailable');
+  assert(r.fired, `the frame compiled no shader: nothing was lost (${JSON.stringify(r)})`);
+  assert(!r.error, `GL work on the lost context threw: ${r.error}`);
+  assert(!r.logs.length, `logged: ${JSON.stringify(r.logs)}`);
+  assert(r.restored != null, `no restore logged: ${JSON.stringify(r)}`);
+  assert(!r.renderers.length && r.renderer === info.renderer, `renderer changed: ${JSON.stringify(r)}`);
+  // On screen first (frameDiff's read-back draws a frame of its own).
+  const [tex, fx] = await screenPixels(page, '#ui', [[50, 50], [85, 145]]);
+  assert(near(tex, [255, 255, 255, 255]), `texture after the restore ${fmt(tex)}`);
+  assert(!near(fx, [255, 255, 255, 255]) && fx[3] > 200, `'fx' after the restore ${fmt(fx)}`);
+  const d = await frameDiff(page, ['ui', 'ref']);
+  assert(!d.missing && !d.size && d.max === 0, `restored frame vs never lost: ${JSON.stringify(d)}`);
+}, {}, { worker: true });
+
 // -------------------------------------------------------------- worker mode
 // The same frame as main mode, pixel for pixel (text included: measured and
 // shaped in the worker).
@@ -1846,6 +2131,37 @@ for (const renderer of ['cpu', 'webgl', 'webgpu']) test(`worker: pixels equal ma
   const pts = [[20, 20], [100, 60], [240, 160], [400, 280], [60, 250]];
   const [pa, pb] = [await screenPixels(page, '#a', pts), await screenPixels(page, '#b', pts)];
   pts.forEach((_, i) => assert(near(pa[i], pb[i], 1), `screen at ${pts[i]}: main ${fmt(pa[i])}, worker ${fmt(pb[i])}`));
+});
+
+// The hit map (jsui_hit_regions, most of the worker frame's extras) is
+// computed only while the page needs it: a pointer over the canvas (wheel
+// events ask it), hitTest() called, or pass-through.
+test('worker: the hit map is computed only while the page needs it', async ({ page }) => {
+  await page.mouse.move(700, 500);  // away from the canvas
+  await mount(page, { width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js', worker: true } });
+  const step = (fn) => page.evaluate(async (fn) => {
+    const j = window.hosts.ui;
+    if (fn === 'fx') j.postMessage('fx', null);  // a repaint
+    if (fn === 'hitTest') j.hitTest(10, 10);
+    for (let i = 0; i < 3; i++) await new Promise(requestAnimationFrame);
+    await j.whenIdle();
+    return { calls: (await j._debug('info')).hitCalls, updates: j.hitMapStats.updates };
+  }, fn);
+  const idle = await step('fx');
+  assert(idle.calls === 0 && idle.updates === 0, `computed without a consumer: ${JSON.stringify(idle)}`);
+  await page.mouse.move(100, 100);  // over the canvas
+  const over = await step('fx');
+  assert(over.calls > 0 && over.updates > 0, `pointer over the canvas: ${JSON.stringify(over)}`);
+  await page.mouse.move(700, 500);
+  const left = await step('fx');
+  const later = await step('fx');
+  assert(later.calls === left.calls, `computed after the pointer left: ${JSON.stringify([left, later])}`);
+  const asked = await step('hitTest');
+  const kept = await step('fx');
+  assert(asked.calls > later.calls && kept.calls > asked.calls, `after hitTest(): ${JSON.stringify([later, asked, kept])}`);
+  await mount(page, { id: 'pt', width: 340, height: 200, jsui: { bundleUrl: 'fixtures/data.js', worker: true, passThrough: true } });
+  const pt = await page.evaluate(async () => (await window.hosts.pt._debug('info')).hitCalls);
+  assert(pt > 0, `passThrough: ${pt} hit map computations`);
 });
 
 test('worker: WebGL context loss: restored, then lost for good (CPU on a fresh canvas)', async ({ page }) => {

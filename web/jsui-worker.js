@@ -23,9 +23,11 @@
 //  - What the UI captures under the pointer (pass-through routing, which
 //    events to preventDefault): the worker posts a hit map, the rects of
 //    jsui_hit_regions, whenever it changes (after a repaint, a resize, or
-//    every 30 frames), and the page answers hitTest() and its input
-//    listeners' "consumed?" from the last one (hitMapStats measures how old
-//    it gets). The worker reports predictions the runtime disagreed with.
+//    every 30 frames) while the page needs one (pass-through, a pointer over
+//    the canvas, a touch screen, hitTest() called), and the page answers hitTest() and its
+//    input listeners' "consumed?" from the last one (hitMapStats measures
+//    how old it gets). The worker reports predictions the runtime disagreed
+//    with.
 //  - Keys: the last answer the runtime gave for that key and modifiers
 //    (navigation keys are assumed consumed until it answered).
 //  - Everything else that returns a runtime answer returns a Promise of it
@@ -104,7 +106,9 @@ export async function startWorkerHost(I, opts) {
 
 function definePage(I) {
   const { DomView, HIT_POINTER, HIT_SCROLL, NAV_KEYS, bufferType, sourceSize, defaultOpaque, isVideoFrame, fontArgs,
-    fontList } = I;
+    fontList, corsWarning, taintKey, videoFramesContextLost, watchVideoFrames } = I;
+  const textureWarning = (name, e) => (e?.name === 'SecurityError' ? corsWarning(name)
+    : `host texture "${name}": capture failed: ${msgOf(e)}`);
 
   // Options as the worker gets them: cloneable, URLs absolute (a worker
   // resolves relative URLs against its own script).
@@ -139,6 +143,7 @@ function definePage(I) {
       this._hits = null;           // Float32Array: x, y, w, h, flags per region, bottom to top
       this._keyUsed = new Map();   // key|mods -> the runtime's last answer
       this._keyDown = new Map();   // code -> whether its press was predicted consumed
+      this._hitsWant = new Set();  // why the page needs the hit map (_wantHits)
       this._touchUsed = new Map(); // touch id -> prediction for its begin
       this._press = 0;
       this._evT = undefined;
@@ -167,19 +172,21 @@ function definePage(I) {
 
     _inTime(t) { this._evT = t; }
     _inButton(x, y, b, down, mods) {
-      const p = down ? +((this.hitTest(x, y) & HIT_POINTER) !== 0) : this._press;
+      if (down) this._pointerSeen();
+      const p = down ? +((this._hitAt(x, y) & HIT_POINTER) !== 0) : this._press;
       if (down) this._press = p;
       this._post(this._stamp({ op: 'button', x, y, b, down, mods, p }));
       return p;
     }
     _inMove(x, y) {
       this._post(this._stamp({ op: 'move', x, y }));
-      return +((this.hitTest(x, y) & HIT_POINTER) !== 0);
+      return +((this._hitAt(x, y) & HIT_POINTER) !== 0);
     }
     _inTouch(id, phase, x, y) {
       let p;
       if (phase === 0) {
-        p = +(this.hitTest(x, y) !== 0);
+        this._pointerSeen();
+        p = +(this._hitAt(x, y) !== 0);
         this._touchUsed.set(id, p);
       } else {
         p = this._touchUsed.get(id) ?? 0;
@@ -189,7 +196,8 @@ function definePage(I) {
       return p;
     }
     _inWheel(x, y, dx, dy) {
-      const p = +((this.hitTest(x, y) & HIT_SCROLL) !== 0);
+      this._pointerSeen();
+      const p = +((this._hitAt(x, y) & HIT_SCROLL) !== 0);
       this._post(this._stamp({ op: 'wheel', x, y, dx, dy, p }));
       return p;
     }
@@ -225,8 +233,15 @@ function definePage(I) {
     }
 
     /** What the UI captures at (x, y) (HIT_POINTER / HIT_SCROLL flags), from
-     * the worker's last hit map: synchronous, possibly a frame or two old. */
+     * the worker's last hit map: synchronous, possibly a frame or two old.
+     * The worker keeps the map current from the first call on (before it,
+     * only while pass-through or the pointer over the canvas need it). */
     hitTest(x, y) {
+      this._wantHits('api', true);
+      return this._hitAt(x, y);
+    }
+
+    _hitAt(x, y) {
       const r = this._hits;
       this._hostOf().hitMapStats.lookups++;
       if (!r) return 0;
@@ -234,6 +249,32 @@ function definePage(I) {
         if (x >= r[i] && y >= r[i + 1] && x < r[i] + r[i + 2] && y < r[i + 1] + r[i + 3]) return r[i + 4];
       }
       return 0;
+    }
+
+    // The worker computes and posts the hit map (jsui_hit_regions, the
+    // costliest part of its frame's extras) only while something here needs
+    // it: 'pass' (pass-through routes every press by it), 'pointer' (over the
+    // canvas: presses and wheels ask it whether to preventDefault), 'touch'
+    // (a touch screen: no hover fetches the map before a touch) or 'api'
+    // (the page called hitTest()).
+    _wantHits(reason, on) {
+      const was = this._hitsWant.size > 0;
+      if (on) this._hitsWant.add(reason);
+      else this._hitsWant.delete(reason);
+      const now = this._hitsWant.size > 0;
+      if (now !== was && !this._destroyed) this._post({ op: 'hits', on: now });
+    }
+
+    _pointerOver(on) { this._wantHits('pointer', on); }
+
+    // Input from the canvas without a pointerenter before it (the canvas
+    // appeared under the mouse).
+    _pointerSeen() { if (!this._hitsWant.has('pointer')) this._pointerOver(true); }
+
+    _installDom() {
+      super._installDom();
+      if (this.opts.passThrough) this._wantHits('pass', true);
+      if (globalThis.navigator?.maxTouchPoints > 0) this._wantHits('touch', true);
     }
 
     _cursorNow() { return this._remoteCursor; }
@@ -351,7 +392,9 @@ function definePage(I) {
     _debug(what, arg) { return this._call({ op: 'debug', what, arg }, null, null); }
 
     // web/test/frame-bench.mjs: the worker records its next warmup + n
-    // frames (rAF times on the page's clock, frame() CPU ms, repaints).
+    // frames (rAF times on the page's clock, frame() CPU ms and its parts:
+    // input, core (tick + paint), after (hit map, page events), post (the
+    // frame's postMessage); repaints).
     _bench({ n, warmup = 0 }) { return this._call({ op: 'bench', n, warmup }, null, null); }
   }
 
@@ -368,7 +411,7 @@ function definePage(I) {
       this._replies = new Map();
       this._nextReply = 1;
       this._out = [];
-      this._outTransfer = [];
+      this._outTransfer = [];  // per op of _out: its transferables (or null)
       this._flushQueued = false;
       this._live = false;      // events wait in _backlog until createJsui's caller could subscribe
       this._backlog = [];
@@ -377,6 +420,8 @@ function definePage(I) {
       this._maps = new Map();      // mapBuffer arrays
       this._texSeq = new Map();    // name -> setTexture / video frame sequence (newest wins)
       this._bindings = new Map();  // bindVideo
+      this._texSources = new Map();  // name -> { source, options } setTexture can capture again (_texturesReset)
+      this._tainted = new WeakMap();  // source -> taintKey() when the browser refused it (SecurityError)
       this._padsUsed = [];
       this._padView = null;
       this._warned = new Set();
@@ -453,7 +498,7 @@ function definePage(I) {
         }
       }
       q.push(op);
-      if (transfer) for (const t of transfer) if (t) this._outTransfer.push(t);
+      this._outTransfer.push(transfer?.length ? transfer.filter(Boolean) : null);
       if (!this._flushQueued) {
         this._flushQueued = true;
         queueMicrotask(() => this._flush());
@@ -463,14 +508,37 @@ function definePage(I) {
     _flush() {
       this._flushQueued = false;
       if (!this._out.length || this._dead) return;
-      const list = this._out, transfer = this._outTransfer;
+      const list = this._out, transfers = this._outTransfer;
       this._out = [];
       this._outTransfer = [];
       try {
-        this.worker.postMessage({ t: 'ops', list }, transfer);
-      } catch (e) {
-        console.error('[jsui] worker postMessage failed:', e);
+        this.worker.postMessage({ t: 'ops', list }, transfers.flat().filter(Boolean));
+      } catch {
+        // One op could not be cloned (an ImageBitmap of a cross-origin <img>
+        // without CORS cannot be sent): one by one, so only that op fails.
+        list.forEach((op, i) => {
+          try {
+            this.worker.postMessage({ t: 'ops', list: [op] }, transfers[i] ?? []);
+          } catch (e) {
+            this._unsent(op, transfers[i] ?? [], e);
+          }
+        });
       }
+    }
+
+    // An op postMessage refused: its reply settles, a bound video's frame
+    // slot is freed.
+    _unsent(op, transfer, e) {
+      // A picture that cannot be cloned has no origin-clean flag (a detached one has no size).
+      const tainted = op.op === 'texture' && e?.name === 'DataCloneError' && !!sourceSize(op.source);
+      for (const t of transfer) t?.close?.();
+      if (tainted) this._warnOnce(corsWarning(op.name));
+      else console.error('[jsui] worker postMessage failed:', e);
+      if (op.ack) this._bindings.get(op.name)?.ack();
+      const r = op.id && this._replies.get(op.id);
+      if (!r) return;
+      this._replies.delete(op.id);
+      r.resolve(tainted ? 'tainted' : r.dflt);
     }
 
     // An op the worker answers: a Promise of its answer (`dflt` once destroyed).
@@ -521,6 +589,13 @@ function definePage(I) {
         case 'padsUsed': this._padsUsed = ev.pads; return;
         case 'texAck': this._bindings.get(ev.name)?.ack(); return;
         case 'audio': this.audio.command(ev.cmd); return;
+        case 'texReset': this._texturesReset(); return;
+        case 'glLost': {
+          // A WebGL context in the worker was lost (see JsuiHost._contextLost).
+          const switched = videoFramesContextLost();
+          if (switched) this._log(1, switched);
+          return;
+        }
         case 'started': this._armWatchdog(); return;
         case 'raf':
           this._sawRaf = true;
@@ -648,33 +723,73 @@ function definePage(I) {
       name = String(name);
       if (source == null) return this.removeTexture(name);
       if (!sourceSize(source)) return Promise.resolve(false);
+      // Cross-origin without CORS: not tried again until its URL changes (as in main mode).
+      if (this._tainted.get(source) === taintKey(source)) return Promise.resolve(false);
       const opts = { ...(options ?? {}) };
       const transfer = !!opts.transfer;
       delete opts.transfer;
       if (opts.opaque === undefined) opts.opaque = defaultOpaque(source);
       const seq = this._nextSeq(name);
+      this._keepSource(name, source, options);
+      const taint = (e) => {
+        if (e?.name === 'SecurityError') this._tainted.set(source, taintKey(source));
+        this._warnOnce(textureWarning(name, e));
+        return false;
+      };
       const send = (src, list) => {
         if (this._texSeq.get(name) !== seq || this._destroyed) {
           for (const t of list) t?.close?.();
           return false;
         }
-        return this._request({ op: 'texture', name, source: src, options: opts }, list, false);
+        // 'tainted': the worker's upload threw SecurityError (and logged it).
+        return this._request({ op: 'texture', name, source: src, options: opts }, list, false).then((ok) => {
+          if (ok !== 'tainted') return ok;
+          this._tainted.set(source, taintKey(source));
+          return false;
+        });
       };
       let r;
       try {
         r = this._textureSource(name, source, transfer);
       } catch (e) {
-        this._warnOnce(textureWarning(name, e));
-        return Promise.resolve(false);
+        return Promise.resolve(taint(e));
       }
       if (!r) return Promise.resolve(false);
-      if (r instanceof Promise) {
-        return r.then((x) => (x ? send(x.src, x.transfer) : false), (e) => {
-          this._warnOnce(textureWarning(name, e));
-          return false;
-        });
-      }
+      if (r instanceof Promise) return r.then((x) => (x ? send(x.src, x.transfer) : false), taint);
       return send(r.src, r.transfer);
+    }
+
+    // What the page captures again once the worker placed its textures anew
+    // after a GPU loss (_texturesReset). The worker re-uploads its own copies
+    // first, but an ImageBitmap made before WebKit lost its GPU process
+    // uploads blank after the restore (texImage2D succeeds, the pixels are
+    // zero; a bitmap made afterwards is fine). So <img>, canvases and <video>
+    // are captured again here. ImageData and raw pixels are not: the worker
+    // holds them in CPU memory. VideoFrames are dropped on such a change, as
+    // in main mode.
+    _keepSource(name, source, options) {
+      if (isVideoFrame(source) || (typeof ImageData !== 'undefined' && source instanceof ImageData) ||
+        ArrayBuffer.isView(source.data)) {
+        this._texSources.delete(name);
+      } else if (typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap) {
+        this._texSources.set(name, { bitmap: true });  // the caller's: not ours to capture again
+      } else {
+        this._texSources.set(name, { source, options });
+      }
+    }
+
+    // The worker placed its textures again after a GPU loss (see _keepSource).
+    _texturesReset() {
+      if (this._destroyed) return;
+      for (const [name, k] of [...this._texSources]) {
+        if (!k.bitmap) this.setTexture(name, k.source, k.options);
+        else if (!this._warned.has(`reset ${name}`)) {
+          this._warned.add(`reset ${name}`);
+          this._log(1, `host texture "${name}": the GPU was reset, and an ImageBitmap source may come back blank ` +
+            '(WebKit): set it again');
+        }
+      }
+      for (const b of this._bindings.values()) b.push();  // a paused video's frame too
     }
 
     _nextSeq(name) {
@@ -708,6 +823,7 @@ function definePage(I) {
       if (this._destroyed) return Promise.resolve(false);
       name = String(name);
       this._bindings.get(name)?.unbind();
+      this._texSources.delete(name);
       this._nextSeq(name);  // drops conversions still under way
       return this._request({ op: 'removeTexture', name }, null, false);
     }
@@ -720,14 +836,15 @@ function definePage(I) {
       if (this._destroyed) throw new Error('bindVideo: runtime destroyed');
       name = String(name);
       this._bindings.get(name)?.unbind();
+      this._texSources.delete(name);  // the binding sends its frames (and again after a GPU loss)
       const opts = { ...(options ?? {}) };
       if (opts.opaque === undefined) opts.opaque = defaultOpaque(video);
-      const b = { inflight: 0, again: false, stopped: false };
-      let handle = 0, raf = 0, lastTime = -1;
+      const b = { inflight: 0, again: false, stopped: false, tainted: null };
       const abort = new AbortController();
       const push = () => {
         if (b.stopped || this._destroyed || !(video.readyState >= 2)) return;
-        lastTime = video.currentTime;
+        // Cross-origin without CORS: not captured again until its URL changes.
+        if (b.tainted === taintKey(video)) return;
         if (b.inflight >= MAX_VIDEO_FRAMES) {
           b.again = true;  // sent when the worker is done with one
           return;
@@ -737,6 +854,7 @@ function definePage(I) {
         try {
           if (typeof VideoFrame === 'function') frame = new VideoFrame(video);
         } catch (e) {
+          if (e?.name === 'SecurityError') b.tainted = taintKey(video);
           this._warnOnce(textureWarning(name, e));
           return;
         }
@@ -750,8 +868,15 @@ function definePage(I) {
           this._send({ op: 'texture', name, source: src, options: opts, ack: true }, [src]);
         };
         if (frame) send(frame);
-        else createImageBitmap(video).then(send, (e) => { b.inflight--; this._warnOnce(textureWarning(name, e)); });
+        else {
+          createImageBitmap(video).then(send, (e) => {
+            b.inflight--;
+            if (e?.name === 'SecurityError') b.tainted = taintKey(video);
+            this._warnOnce(textureWarning(name, e));
+          });
+        }
       };
+      b.push = push;
       b.ack = () => {
         b.inflight = Math.max(0, b.inflight - 1);
         if (b.again) {
@@ -759,29 +884,15 @@ function definePage(I) {
           push();
         }
       };
-      if (typeof video.requestVideoFrameCallback === 'function') {
-        const onFrame = () => {
-          if (b.stopped) return;
-          handle = video.requestVideoFrameCallback(onFrame);
-          push();
-        };
-        handle = video.requestVideoFrameCallback(onFrame);
-      } else {
-        const loop = () => {
-          if (b.stopped) return;
-          raf = requestAnimationFrame(loop);
-          if (video.readyState >= 2 && video.currentTime !== lastTime) push();
-        };
-        raf = requestAnimationFrame(loop);
-      }
+      // Frame callbacks, or polling once per display frame (web/jsui-textures.js).
+      const stopFrames = watchVideoFrames(video, push);
       // A paused video presents frames for these too (first frame, seeks, a new src).
       for (const type of ['loadeddata', 'seeked', 'resize']) video.addEventListener(type, push, { signal: abort.signal });
       if (video.readyState >= 2) push();
       b.unbind = () => {
         if (b.stopped) return;
         b.stopped = true;
-        if (handle && typeof video.cancelVideoFrameCallback === 'function') video.cancelVideoFrameCallback(handle);
-        if (raf) cancelAnimationFrame(raf);
+        stopFrames();
         abort.abort();
         if (this._bindings.get(name) === b) this._bindings.delete(name);
       };
@@ -947,9 +1058,22 @@ function definePage(I) {
 
     /** Whether the UI consumed the current press of gamepad `pad`'s `button`
      * (as the worker last reported it: up to a frame behind). */
-    gamepadConsumed(pad, button) { return !!this._padsUsed[pad]?.used[button]; }
+    // The worker reports what the UI took from the pads from the first call on.
+    gamepadConsumed(pad, button) {
+      this._wantPadsUsed();
+      return !!this._padsUsed[pad]?.used[button];
+    }
 
-    gamepadAxisConsumed(pad, axis) { return !!this._padsUsed[pad]?.axisUsed[axis]; }
+    gamepadAxisConsumed(pad, axis) {
+      this._wantPadsUsed();
+      return !!this._padsUsed[pad]?.axisUsed[axis];
+    }
+
+    _wantPadsUsed() {
+      if (this._padsWanted || this._destroyed) return;
+      this._padsWanted = true;
+      this._send({ op: 'padsUsed' });
+    }
 
     // ---------------------------------------------------- hit map stats
 
@@ -971,6 +1095,7 @@ function definePage(I) {
     destroy() {
       if (this._destroyed) return;
       for (const b of [...this._bindings.values()]) b.unbind();
+      this._texSources.clear();
       for (const s of this._surfaces) s._destroyLocal();
       this._surfaces.clear();
       this._mainTicks(false);
@@ -1079,13 +1204,6 @@ function definePage(I) {
   return { ProxyView, WorkerHost, WorkerSurface };
 }
 
-function textureWarning(name, e) {
-  return e?.name === 'SecurityError'
-    ? `host texture "${name}": the source is cross-origin and not CORS-enabled (set crossOrigin = 'anonymous' ` +
-      'on the <video> / <img> and serve it with Access-Control-Allow-Origin)'
-    : `host texture "${name}": capture failed: ${msgOf(e)}`;
-}
-
 // Latency samples: count, mean, max and the last 512 for percentiles.
 function newSeries() { return { n: 0, mean: 0, max: 0, samples: [] }; }
 function addSample(s, v) {
@@ -1122,7 +1240,9 @@ export function serve(I, early) {
     const list = out.list, transfer = out.transfer;
     out.list = [];
     out.transfer = [];
+    const b = host?._bench, t0 = b ? performance.now() : 0;
     globalThis.postMessage({ t: 'evs', list }, transfer);
+    if (b) b.postMs += performance.now() - t0;
   };
   const reply = (id, ok, value, transfer) => {
     if (!id) return;
@@ -1132,24 +1252,28 @@ export function serve(I, early) {
   const now = () => performance.now() + OFF;  // the page's clock
 
   // Input the page coalesced is applied at the start of the next frame (moves
-  // and wheels of one frame become one), or before any other op.
-  let pendIn = new Map();
+  // and wheels of one frame become one), or before any other op. A few ops
+  // at most: a short array, no keys built per event.
+  let pendIn = [];
   const queueIn = (op) => {
-    const key = `${op.op}:${op.v}:${op.id ?? ''}`;
-    const prev = pendIn.get(key);
-    if (prev && op.op === 'wheel') {
-      op.dx += prev.dx;
-      op.dy += prev.dy;
+    for (let i = pendIn.length - 1; i >= 0; i--) {
+      const prev = pendIn[i];
+      if (prev.op !== op.op || prev.v !== op.v || prev.id !== op.id) continue;
+      if (op.op === 'wheel') {
+        op.dx += prev.dx;
+        op.dy += prev.dy;
+      }
+      if (op.t === undefined) op.t = prev.t;
+      pendIn.splice(i, 1);  // the merged one goes last: arrival order
+      break;
     }
-    if (prev && op.t === undefined) op.t = prev.t;
-    pendIn.delete(key);  // keep arrival order
-    pendIn.set(key, op);
+    pendIn.push(op);
     if (host && !host._raf) queueMicrotask(flushIn);
   };
   const flushIn = () => {
-    if (!pendIn.size) return;
-    const list = [...pendIn.values()];
-    pendIn = new Map();
+    if (!pendIn.length) return;
+    const list = pendIn;
+    pendIn = [];
     for (const op of list) applyInput(op);
   };
 
@@ -1244,9 +1368,10 @@ export function serve(I, early) {
       this._canvasWait = null;
       then?.();
     }
-    // Posts the hit map when it may have changed and did.
+    // Posts the hit map when the page needs it (op 'hits'), it may have
+    // changed and did.
     _postHits(frameT) {
-      if (!this.rt || this._destroyed || !this.canvas) return;
+      if (!this._hitsOn || !this.rt || this._destroyed || !this.canvas) return;
       const st = this.stats;
       if (this._hitRenders === st.renders && !this._hitSized && ++this._hitAge < HIT_REFRESH_FRAMES) return;
       this._hitRenders = st.renders;
@@ -1254,6 +1379,7 @@ export function serve(I, early) {
       this._hitAge = 0;
       const M = this.module;
       if (!M._jsui_hit_regions) return;
+      host._hitCalls = (host._hitCalls ?? 0) + 1;  // _debug('info'): tests check the gating
       let n = M._jsui_hit_regions(this.rt, this._hitBuf ?? 0, this._hitCap ?? 0);
       if (n > (this._hitCap ?? 0)) {
         if (this._hitBuf) M._free(this._hitBuf);
@@ -1282,6 +1408,18 @@ export function serve(I, early) {
   class RemoteHost extends remote(JsuiHost) {
     _makeSurface(target, options) { return new RemoteSurface(this, target, options); }
 
+    // The page binds the videos (see JsuiHost._contextLost). The textures
+    // tell the page once they are placed again (_texturesReset), also when
+    // none has arrived yet: the page's may be on the way, made before the loss.
+    _contextLost() {
+      post({ ev: 'glLost' });
+      if (!this._destroyed) this._textureSet()._reset = true;
+    }
+
+    // The textures were placed again after a GPU loss: the page captures
+    // its sources again (WorkerHost._keepSource).
+    _texturesReset() { post({ ev: 'texReset' }); }
+
     _onCall(id, name, json) { post({ ev: 'call', id, name, json }); }
 
     _checkError() {
@@ -1295,6 +1433,7 @@ export function serve(I, early) {
 
     _pollGamepads(pads = this._padSnap ?? []) {
       super._pollGamepads(pads);
+      if (!this._padsWanted) return;  // nobody asked gamepadConsumed() yet
       const used = this._pads.map((s) => (s ? { used: Array.from(s.used), axisUsed: Array.from(s.axisUsed) } : null));
       const key = JSON.stringify(used);
       if (key !== this._padsUsedKey) {
@@ -1312,23 +1451,36 @@ export function serve(I, early) {
         post({ ev: 'ticks', on: true });
         return;
       }
-      let first = true;
+      // Two callbacks per frame: the frame, then what it tells the page (hit
+      // map, texture backend, replies). A microtask checkpoint runs between
+      // them, which flushes the frame's WebGPU commands to the GPU process
+      // before the OffscreenCanvas frame is committed after the second, so
+      // they get a head start on the compositor (which waits for them).
+      let first = true, ft = 0;
       const loop = (t) => {
         this._raf = requestAnimationFrame(loop);
+        this._raf2 = requestAnimationFrame(after);
         if (first) {
           first = false;
           post({ ev: 'raf' });
         }
-        this.frame(t + OFF);
+        ft = t + OFF;
+        this._frameCore(ft);
       };
+      const after = () => this._frameAfter(ft);
       this._raf = requestAnimationFrame(loop);
+      this._raf2 = requestAnimationFrame(after);
       post({ ev: 'started' });
     }
 
     stop() {
-      if (this._raf > 0) cancelAnimationFrame(this._raf);
-      else if (this._raf === -1) post({ ev: 'ticks', on: false });
-      this._raf = 0;
+      if (this._raf > 0) {
+        cancelAnimationFrame(this._raf);
+        cancelAnimationFrame(this._raf2);
+      } else if (this._raf === -1) {
+        post({ ev: 'ticks', on: false });
+      }
+      this._raf = this._raf2 = 0;
     }
 
     _useTicks() {
@@ -1338,28 +1490,68 @@ export function serve(I, early) {
       if (running) this.start();
     }
 
+    /** One frame (the rAF loop splits it in two, see start()). */
     frame(t = now()) {
+      this._frameCore(t);
+      this._frameAfter(t);
+    }
+
+    // Input since the last frame, the tick and the paint (WebGPU: submitted).
+    _frameCore(t) {
       if (this._destroyed) return;
-      flushIn();
       const b = this._bench;
       const t0 = b ? performance.now() : 0;
+      flushIn();
+      const t1 = b ? performance.now() : 0;
       super.frame(t);
+      this._inFrame = this._raf > 0;  // until _frameAfter (not if the frame stopped the loop)
+      if (b) {
+        b.inMs = t1 - t0;
+        b.coreMs = performance.now() - t1;
+      }
+    }
+
+    // Runs `fn` once the current frame told the page everything (its hit
+    // map included), or now between frames.
+    _afterFrame(fn) {
+      if (this._inFrame) (this._afterFns ??= []).push(fn);
+      else fn();
+    }
+
+    // What the frame tells the page.
+    _frameAfter(t) {
+      this._inFrame = false;
       if (this._destroyed) return;
+      const b = this._bench;
+      const t0 = b ? performance.now() : 0;
       for (const v of views.values()) v._postHits(t);
       const backend = this.textureBackend;
       if (backend !== this._backend) {
         this._backend = backend;
         post({ ev: 'backend', value: backend });
       }
-      if (b) {
-        b.stamps.push(t);
-        b.cpu.push(performance.now() - t0);
-        if (b.stamps.length === b.warmup) b.r0 = this.stats.renders;
-        if (b.stamps.length >= b.n + b.warmup) {
-          this._bench = null;
-          reply(b.id, true, { stamps: b.stamps.slice(b.warmup), cpu: b.cpu.slice(b.warmup),
-            renders: this.stats.renders - (b.r0 ?? 0) });
-        }
+      if (this._afterFns) {
+        const fns = this._afterFns;
+        this._afterFns = null;
+        for (const fn of fns) fn();
+      }
+      if (b) this._benchFrame(b, t, performance.now() - t0);
+    }
+
+    // web/test/frame-bench.mjs: records the frame (ms). A frame's events go
+    // out after _frameAfter: the postMessage time since the last frame is
+    // the previous one's.
+    _benchFrame(b, t, afterMs) {
+      if (b.stamps.length) b.parts[b.parts.length - 1].post = b.postMs;
+      b.postMs = 0;
+      b.stamps.push(t);
+      b.cpu.push(b.inMs + b.coreMs + afterMs);
+      b.parts.push({ input: b.inMs, core: b.coreMs, after: afterMs, post: 0 });
+      if (b.stamps.length === b.warmup) b.r0 = this.stats.renders;
+      if (b.stamps.length >= b.n + b.warmup) {
+        this._bench = null;
+        reply(b.id, true, { stamps: b.stamps.slice(b.warmup), cpu: b.cpu.slice(b.warmup),
+          parts: b.parts.slice(b.warmup), renders: this.stats.renders - b.r0 });
       }
     }
 
@@ -1429,6 +1621,13 @@ export function serve(I, early) {
         if (op.on) view._remoteListens.add(op.type);
         else view._remoteListens.delete(op.type);
         return;
+      case 'hits':
+        // The page needs the hit map (or no longer): computed from the next frame on.
+        if (!view) return;
+        view._hitsOn = !!op.on;
+        view._hitSized = true;
+        return;
+      case 'padsUsed': host._padsWanted = true; host._padsUsedKey = null; return;
       case 'canvas': view?._gotCanvas(op.canvas); return;
       case 'padView': if (view) host._focusPads(view); return;
       case 'releasePads': host._releasePads(); return;
@@ -1462,7 +1661,9 @@ export function serve(I, early) {
       case 'removeBuffer': reply(op.id, true, host.removeBuffer(op.key)); return;
       case 'texture': {
         const src = op.source;
-        const ok = host.setTexture(op.name, src, op.options);
+        let ok = host.setTexture(op.name, src, op.options);
+        // Cross-origin (SecurityError, logged): the page does not send it again until its URL changes.
+        if (!ok && host._textures?._tainted.has(src)) ok = 'tainted';
         host._bitmaps ??= new Map();
         const prev = host._bitmaps.get(op.name);
         if (typeof ImageBitmap !== 'undefined' && src instanceof ImageBitmap) {
@@ -1530,10 +1731,11 @@ export function serve(I, early) {
       case 'fontFallbacks': host.setFontFallbacks(op.list); return;
       case 'defaultFontFamily': host.setDefaultFontFamily(op.family); return;
       case 'idle':
-        host.whenIdle().then(() => {
+        // After the frame's hit map: the page's view is current once this resolves.
+        host.whenIdle().then(() => host._afterFrame(() => {
           post({ ev: 'stats', stats: host._statsOf() });
           reply(op.id, true, null);
-        });
+        }));
         return;
       case 'profiling': view?.setProfiling(op.on); return;
       case 'perf': reply(op.id, true, view ? view.getPerf(op.reset) : null); return;
@@ -1544,7 +1746,11 @@ export function serve(I, early) {
           reply(op.id, true, px, px ? [px.data.buffer] : []);
         }, (e) => reply(op.id, false, e));
         return;
-      case 'bench': host._bench = { id: op.id, n: op.n, warmup: op.warmup ?? 0, stamps: [], cpu: [] }; return;
+      case 'bench':
+        // r0: the renders before the recorded frames (after the warmup ones, see _benchFrame).
+        host._bench = { id: op.id, n: op.n, warmup: op.warmup ?? 0, stamps: [], cpu: [], parts: [],
+          r0: host.stats.renders, inMs: 0, coreMs: 0, postMs: 0 };
+        return;
       case 'debug': reply(op.id, true, debug(view, op.what, op.arg)); return;
       case 'destroy':
         host.destroy();
@@ -1556,7 +1762,7 @@ export function serve(I, early) {
 
   // Test hooks (ProxyView._debug).
   let spyCalls = null;
-  const debug = (view, what) => {
+  const debug = (view, what, arg) => {
     const M = host.module;
     switch (what) {
       case 'spy': {
@@ -1582,9 +1788,73 @@ export function serve(I, early) {
         const gl = view?._gl ?? view?._sgl?.gl;
         const ext = gl?.getExtension('WEBGL_lose_context');
         if (!ext) return false;
-        ext.loseContext();
-        if (what === 'loseGL') setTimeout(() => ext.restoreContext(), 50);
-        return true;
+        // Lost as in WebKit, whose create* calls then return null (Chromium's
+        // return objects). arg.mid: in the middle of the frame below, at its
+        // first shader compile (WebKit notices a lost GPU process in a GL call).
+        const CREATE = ['createProgram', 'createShader', 'createTexture'];
+        const lose = () => {
+          ext.loseContext();
+          for (const k of CREATE) gl[k] = () => null;
+        };
+        // arg.blankBitmaps: the kept ImageBitmaps lose their pixels, as
+        // WebKit's do with its GPU process (re-uploaded blank after the restore).
+        if (arg?.blankBitmaps) {
+          for (const e of host._textures?.entries.values() ?? []) {
+            if (!(e.source instanceof ImageBitmap)) continue;
+            const c = new OffscreenCanvas(e.source.width, e.source.height);
+            c.getContext('2d');
+            const blank = c.transferToImageBitmap();
+            if (host._bitmaps?.get(e.name) === e.source) host._bitmaps.set(e.name, blank);
+            e.source.close();
+            e.source = blank;
+          }
+        }
+        // arg.onTexture: lost when the next host texture arrives, right before
+        // it is set (isContextLost() true, the event not handled yet).
+        if (arg?.onTexture) {
+          const set = host.setTexture;
+          host.setTexture = function (...a) {
+            delete host.setTexture;
+            lose();
+            try {
+              return set.apply(this, a);
+            } finally {
+              for (const k of CREATE) delete gl[k];
+              setTimeout(() => ext.restoreContext(), 50);
+            }
+          };
+          return true;
+        }
+        let fired = !arg?.mid;
+        if (arg?.mid) {
+          gl.compileShader = function (sh) {
+            delete gl.compileShader;
+            fired = true;
+            lose();
+            return gl.compileShader(sh);
+          };
+        } else {
+          lose();
+        }
+        // arg.work: GL work in the same task, before the webglcontextlost
+        // event (as when a lost GPU process is noticed first, as WebKit
+        // does): new shaders, a texture upload, a frame.
+        let error = null;
+        if (arg?.work) {
+          try {
+            host.postMessage('fx', null);
+            const img = new ImageData(8, 8);
+            img.data.fill(255);
+            host.setTexture('tex', img);
+            host.frame(now());
+          } catch (e) {
+            error = String(e?.stack ?? e);
+          }
+        }
+        delete gl.compileShader;
+        for (const k of CREATE) delete gl[k];
+        if (what === 'loseGL' && fired) setTimeout(() => ext.restoreContext(), 50);
+        return arg?.work ? { error, fired } : true;
       }
       case 'destroyDevice':
         if (!view?._wgpu) return false;
@@ -1593,6 +1863,7 @@ export function serve(I, early) {
       case 'info': {
         const gl = view?._gl, ext = gl?.getExtension('WEBGL_debug_renderer_info');
         return { renderer: view?.renderer, backend: host.textureBackend, rafs: typeof requestAnimationFrame === 'function',
+          hitCalls: host._hitCalls ?? 0,
           ticks: !!host._ticks, offset: OFF, adapter: view?._webgpu?.description ?? null,
           gl: gl ? gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER) : null };
       }

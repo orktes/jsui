@@ -1083,6 +1083,26 @@ paints a view, on every renderer (the CPU raster runs SkSL too):
   `error` event (`onError`, `nativeEvent.error` = Skia's message).
   `__jsui_native.shaderInfo(src)` compiles synchronously and returns
   `{error}` or `{uniforms: [{name, type, count, color}], children}`.
+* Preloading: a GPU compiles a shader's pipelines the first time a frame
+  draws it (cold: 130-250 ms per runtime-effect pipeline on WebGPU / WebGL
+  on a Mac Studio). `ShaderEffects::preload` (JS `precompileShaders()` /
+  `__jsui_native.shaderPreload(src, images?)`, C `jsui_precompile_shader`)
+  compiles the source and queues warm-up draws: one per pipeline-key
+  variant a view may produce (aligned / AA rect, rect / rounded own clip,
+  with / without a parent's rounded clip (AnalyticClip), and each
+  combination of loaded / not-yet-loaded image children; `content` shaders
+  as the layer's image filter). Frames painted on a GPU
+  (`Surface::finishCanvasTracked` / `renderCanvas`) draw one queued draw
+  each into a small off-screen surface of the target's format, so each
+  frame builds at most one new pipeline. Views place the shader by
+  translating the canvas, never with a local matrix (part of the key, which
+  the warm-up's draws would not match). A queued warm-up keeps
+  `needsRedraw()` true; a raster frame drops the queue (the CPU has nothing
+  to warm). `__jsui_native.shadersWarming()` counts the queued draws.
+  vulkan_test checks that mounting preloaded views compiles no pipeline;
+  site/test/first-visit.mjs measures a screen's first-visit hitch (Rift,
+  cold Metal cache: WebGPU 801 → 150 ms, WebGL 517 → 100 ms; what remains
+  is ordinary image / clip pipelines).
 * Cost: SkSL compilation and SkRuntimeEffect were already linked (Skottie
   and the GPU backends use them), so ShaderView adds almost nothing to
   `jsui.wasm`.
@@ -1112,6 +1132,7 @@ Native globals (installed by `JsEngine`):
 | `lottieData(json) → key` | hands an inline Lottie composition to native once; LottieViews use the key (content hash) as their `source`. `lottie`: `true` when the build plays Lottie |
 | `lottieCommand(id, cmd, a, b) → bool` | LottieView `play` (frames `a`–`b`, undefined: the whole composition) / `pause` / `resume` / `reset` |
 | `shaderInfo(sksl) → {error} \| {uniforms, children}` | compiles a ShaderView source (shared with the views using it) |
+| `shaderPreload(sksl, images?) → like shaderInfo` / `shadersWarming() → n` | compiles it and warms its GPU pipelines in the next frame (see "Shaders") / warm-ups still queued |
 | `postMessage(name, json)` | to the embedder's `on_message`. A string is passed through as the JSON text; any other value is `JSON.stringify`-ed |
 | `getState(key) → json \| undefined`, `stateVersion(key) → number`, `stateKeys() → [key]` | shared host state (see "Game data"); version 0 = unset |
 | `statePatches(key, sinceVersion) → [json] \| undefined` | the merge patches (JSON texts) that took `key` from `sinceVersion` to its current version, oldest first; `undefined` when the bounded log (64 patches / 64 KB since the last `set`) cannot cover the gap. `@orktes/jsui-react` applies them to its cached value instead of re-parsing the whole state after each `jsui_patch_state` |

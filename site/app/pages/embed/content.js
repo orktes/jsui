@@ -232,6 +232,149 @@ if (!jsui_wants_frame(rt)) wait_for_input();
   ],
 };
 
+const ENGINES = {
+  id: 'engines',
+  label: 'raylib · SDL3 · sokol',
+  eyebrow: 'Engine examples · integrations/raylib, sdl3, sokol',
+  color: colors.purple,
+  title: 'Three game loops, one HUD',
+  lead: 'Small, complete hosts of the same game HUD (integrations/shared/ui/app.jsx): input goes to the UI first and what it does not consume moves the camera, per-frame unit positions drive nameplates with no JS per frame, and each one shows a different way to get the UI onto the screen.',
+  facts: [
+    ['raylib', '6.2 · GL texture'],
+    ['SDL3', '3.4 · any backend'],
+    ['sokol', 'GL · swapchain'],
+    ['Self-test', 'in CI'],
+  ],
+  blocks: [
+    {
+      kind: 'code',
+      lang: 'sh',
+      title: 'build and run',
+      code: `
+npx jsui build integrations/shared/ui/app.jsx -o integrations/shared/ui/dist/bundle.js
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \\
+  -DJSUI_BUILD_RAYLIB=ON -DJSUI_BUILD_SDL3=ON -DJSUI_BUILD_SOKOL=ON
+cmake --build build --target jsui-raylib jsui-sdl3 jsui-sokol
+
+./build/jsui-raylib                 # --cpu: CPU raster + UpdateTextureRec
+./build/jsui-sdl3                   # --renderer metal|vulkan|direct3d12|opengl|software
+./build/jsui-sokol                  # --cpu: CPU raster into a transient sg_image
+./build/jsui-raylib --dev http://127.0.0.1:5173/bundle.js   # with npx jsui dev
+`,
+    },
+    {
+      kind: 'pair',
+      items: [
+        {
+          kind: 'code',
+          lang: 'c',
+          title: 'raylib: the UI as a texture',
+          code: `
+int w = GetRenderWidth(), h = GetRenderHeight();
+RenderTexture2D ui = LoadRenderTexture(w, h);
+/* get_proc: rlGetProcAddress, raylib's GL loader */
+JsuiGpuContext* gpu = jsui_gpu_create_gl(get_proc, NULL);
+
+/* per frame, before BeginDrawing() */
+jsui_tick(rt, GetTime() * 1000.0);
+if (jsui_needs_redraw(rt)) {
+    rlDrawRenderBatchActive();
+    JsuiGLTarget t = {0};
+    t.texture = ui.texture.id;          /* Skia draws into it */
+    t.width = ui.texture.width; t.height = ui.texture.height;
+    jsui_render_gl_target(rt, gpu, &t);
+    restore_raylib_gl_state();
+}
+BeginDrawing();
+draw_scene();
+BeginBlendMode(BLEND_ALPHA_PREMULTIPLY);
+Rectangle flip = {0, 0, w, -h};       /* GL is bottom-up */
+DrawTexturePro(ui.texture, flip, screen, (Vector2){0}, 0, WHITE);
+EndBlendMode();
+EndDrawing();
+`,
+        },
+        {
+          kind: 'code',
+          lang: 'c',
+          title: 'sokol: straight into the swapchain',
+          code: `
+sg_swapchain sc = sglue_swapchain();   /* once per frame */
+sg_begin_pass(&(sg_pass){ .swapchain = sc });
+draw_scene();
+sgl_draw();
+sg_end_pass();
+
+JsuiGLTarget t = {0};
+t.fbo = sc.gl.framebuffer;
+t.width = sapp_width(); t.height = sapp_height();
+t.stencil_bits = 8;
+t.flags = JSUI_GL_NO_CLEAR;            /* over the scene */
+jsui_render_gl_target(rt, gpu, &t);
+sg_reset_state_cache();                /* GL changed behind sokol */
+sg_commit();
+`,
+        },
+      ],
+    },
+    {
+      kind: 'pair',
+      items: [
+        {
+          kind: 'code',
+          lang: 'c',
+          title: 'SDL3: any backend, dirty rectangles only',
+          code: `
+SDL_Texture* ui = SDL_CreateTexture(r,
+    SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING, pw, ph);
+SDL_SetTextureBlendMode(ui, SDL_BLENDMODE_BLEND_PREMULTIPLIED);
+
+JsuiRect d;   /* pixels kept between frames */
+if (jsui_render_rgba_incremental(rt, pixels, pw, ph, pw * 4, &d))
+    SDL_UpdateTexture(ui, &(SDL_Rect){d.x, d.y, d.width, d.height},
+                      pixels + (d.y * pw + d.x) * 4, pw * 4);
+SDL_RenderTexture(r, ui, NULL, NULL);
+`,
+        },
+        {
+          kind: 'code',
+          lang: 'c',
+          title: 'input pass-through (all three)',
+          code: `
+case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    if (!jsui_send_mouse_button(rt, x, y, JSUI_MOUSE_LEFT, 1, mods))
+        start_camera_drag();           /* the UI did not take it */
+    break;
+case SDL_EVENT_MOUSE_WHEEL:
+    if (!jsui_send_mouse_wheel(rt, x, y, dx * 40, -dy * 40))
+        zoom_camera(dy);
+    break;
+case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+    if (!jsui_send_gamepad_button(rt, pad, b, 1, 1.0f) && b == 9)
+        toggle_pause();                /* Start */
+    break;
+`,
+        },
+      ],
+    },
+    {
+      kind: 'table',
+      title: 'What each example shows',
+      head: ['HOST', 'INPUT', 'UI ON SCREEN'],
+      rows: [
+        ['raylib', 'polled · gamepad', 'Skia Ganesh draws into a RenderTexture2D only when the UI changed and raylib composites it (premultiplied). --cpu: dirty-rect UpdateTextureRec.'],
+        ['SDL3', 'events · gamepad', 'CPU raster into a streaming texture, only the damaged rectangle uploaded, on whichever SDL_Renderer backend SDL picks: Metal, Direct3D, Vulkan or OpenGL.'],
+        ['sokol', 'events', 'Skia over the sokol_gfx pass in the swapchain\'s GL framebuffer, then sg_reset_state_cache(). --cpu: a transient sg_image. sokol_app has no gamepad API.'],
+      ],
+    },
+    {
+      kind: 'note',
+      color: colors.purple,
+      text: 'The game side of the contract is the same in all three: game state goes to useHostState(\'game\') with jsui_set_state, unit positions to the entities frame buffer with jsui_map_buffer every frame, and the HUD answers with Host.postMessage(\'game:spawn\' | \'game:pause\' | ...). --selftest clicks empty space (must pass through) and the Spawn button (must be consumed and reach the game).',
+    },
+  ],
+};
+
 const DATA = {
   id: 'data',
   label: 'Game data',
@@ -612,4 +755,4 @@ WEBGL=1 scripts/build-wasm.sh                         # -> web/dist-webgl/ (Skia
   ],
 };
 
-export const TARGETS = [GODOT, CAPI, DATA, WEB, DEV, BUILD];
+export const TARGETS = [GODOT, CAPI, ENGINES, DATA, WEB, DEV, BUILD];

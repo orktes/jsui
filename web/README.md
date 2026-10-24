@@ -112,7 +112,19 @@ const size = useHostTexture('trailer');            // { width, height } once set
 - `bindVideo(name, video, options)` keeps a texture current from a video
   element (`requestVideoFrameCallback`, else polled per display frame,
   paused frames and seeks included) and returns a function that stops it.
+  Polling uploads when the decoded frame count or `currentTime` moved.
+  While playing, a count that ticks frame by frame (Chrome for a visible
+  video; a tiny hidden one jumps a few frames at a time, and WebKit's H.264
+  count ~45 frames every 1.5 s) decides alone: one upload per video frame,
+  not per display frame.
   Playback (`play()`, `pause()`, `muted`, `currentTime`) stays on the element.
+  Playwright WebKit 26 on macOS loses every WebGL context of the page right
+  after a frame callback on a playing video (with the runtime in a worker it
+  can first present nothing for about 6 s), so WebKit (`navigator.vendor`:
+  Safari and every iOS browser) always polls. Elsewhere, if one of the
+  runtime's WebGL contexts is lost within a second of a bound video starting
+  to play, every bound video of the page switches to polling, and later binds
+  start there (logged once).
 - `removeTexture(name)`; `textureBackend` says where textures go now.
 - Textures belong to the runtime: every surface can show them, and they
   survive bundle reloads.
@@ -126,6 +138,8 @@ const size = useHostTexture('trailer');            // { width, height } once set
   them back).
 - GPU uploads of a cross-origin video or image need CORS: set
   `crossOrigin = 'anonymous'` and serve it with `Access-Control-Allow-Origin`.
+  A source the browser refuses (`SecurityError`) is logged once and not tried
+  again until its URL changes; a texture uploaded before it (a poster) stays.
   Browsers only autoplay muted video; unmute after a click.
 
 ## Audio (Web Audio)
@@ -318,10 +332,24 @@ Raw pixels are copied. With `{ transfer: true }` the source itself is
 transferred, and the caller's object is unusable afterwards. A `<video>`
 becomes `new VideoFrame(video)`, and `<img>` / canvases become an
 `ImageBitmap`. `bindVideo` captures on the page's thread: it uses
-`requestVideoFrameCallback`, or polls every display frame where that is
-missing. Each presented frame goes to the worker as a transferred `VideoFrame`,
+`requestVideoFrameCallback`, or polls every display frame on WebKit, where
+that is missing, or after the context loss above (the worker tells the page
+about its losses). Each presented frame goes to the worker as a transferred `VideoFrame`,
 with at most two in flight, so a busy worker skips frames rather than queueing
-them. The worker closes each frame after the upload. The same CORS rules apply.
+them. The worker closes each frame after the upload. The same CORS rules apply,
+with the same warning and the same rule: a refused source is not tried again
+until its URL changes.
+
+After a GPU loss (a restored WebGL context, a CPU fallback, a new WebGPU
+device), the worker uploads its copies again and then tells the page, which
+captures its `<img>`, canvas and `<video>` sources again and sends them, plus
+the current frame of each bound video. WebKit needs this: an `ImageBitmap`
+made before its GPU process was lost uploads blank after the restore,
+without an error. `ImageData` and raw pixels stay in the worker's memory and
+come back by themselves. An `ImageBitmap` you passed yourself cannot be made
+again by the page, so a reset logs once (info) that you should set it again.
+As in main mode, a texture set while the context is lost is kept and shown
+after the restore.
 
 **Input and pass-through.** The page's listeners post pointer, wheel, touch,
 key, IME and focus events with their timestamps. Moves and wheels are
@@ -330,8 +358,12 @@ to `preventDefault()` an event and, with `passThrough`, whether it reaches the
 page below. It decides from a **hit map**: the worker posts the rects of what
 the UI captures (`jsui_hit_regions`) whenever they change (after a repaint, a
 resize, and at least every 30 frames), and `hitTest(x, y)` answers from the
-last one. The map is the one from the last frame that changed what is under
-the pointer, delivered one `postMessage` later. It reaches the page about when
+last one. The worker computes and posts it only while the page needs it: with
+`passThrough`, while the pointer is over the canvas, on touch screens
+(`navigator.maxTouchPoints > 0`), and from the first `hitTest()` call on
+(that call answers from the last map, or an empty one, until the next
+frame's arrives). The map is the one from the last frame that changed what is
+under the pointer, delivered one `postMessage` later. It reaches the page about when
 that frame's pixels do, and about one frame after the input that changed it.
 In headless Chromium at 60 Hz, the page has the new map a median 16 ms after
 a wheel event, and 1.5 ms after the start of the frame that made it.
@@ -350,20 +382,40 @@ the runtime disagreed (`misses`), and keeps latency samples. Things to know:
   because the previous Tab moved focus inside the UI. The next Tab moves page
   focus on. Focusing the UI again resets this.
 - `gamepadConsumed` / `gamepadAxisConsumed` answer for the last frame the
-  worker ran, one frame behind main-thread mode.
+  worker ran, one frame behind main-thread mode. The worker starts reporting
+  them on the first call, so that call answers `false`.
 
 **Frame loop.** The worker's own `requestAnimationFrame` times frames. If the
 worker has none, or its callbacks never come (checked for one second while
 the page is visible), the page's rAF posts each frame instead.
 `workerLoop: 'main'` forces that. Frame times and event timestamps are on the
-page's clock in both cases.
+page's clock in both cases. A frame is two callbacks in a row: the first
+applies the queued input, ticks, paints and submits; the second computes the
+hit map and posts the frame's events and replies, so the frame's GPU commands
+leave the worker before that work runs.
+
+**In traces.** The GPU process can look busier in worker mode: at 1080p @2x on
+an M1 Ultra (Chrome, WebGPU), 1.2 ms per frame against 0.54 ms on the main
+thread. Most of the difference is
+`IOSurfaceImageBacking::WaitForCommandsToBeScheduled` (0.6 ms per frame, 0.003
+ms on the main thread): the OffscreenCanvas frame reaches the compositor right
+after the worker submitted it, and the compositor waits until Metal has
+scheduled those commands before it uses the frame. That time is a blocking
+wait on the GPU process' thread, not CPU work.
 
 **Renderers.** Worker mode uses the same order as main-thread mode: WebGPU in
 the worker, then Skia on WebGL on the OffscreenCanvas, then the CPU raster.
 GPU-loss handling also stays the same. A lost WebGL context is restored, or
 the view falls back to the CPU on a fresh canvas, which the page clones and
-transfers. A lost WebGPU device is replaced. The no-GPU warning is logged as
-before. Text is measured and drawn by Skia in the WASM module, so it works
+transfers. In both modes, no GL work runs once the context reports itself
+lost, even before its `webglcontextlost` event arrives (WebKit lets a frame
+run in between). WebKit can also notice the loss in the middle of a frame,
+when a GL call finds its GPU process gone, and WebGL then returns `null`
+from `createProgram` / `createShader`. JSUI's GL glue returns 0 for those, as
+GL does, so the frame fails quietly and the context is restored as above.
+Context checks run at the start of each frame, so a restore repaints in
+that frame, textures included. A lost WebGPU device is replaced. The no-GPU
+warning is logged as before. Text is measured and drawn by Skia in the WASM module, so it works
 the same in the worker.
 
 **Browser support.** Chrome and Edge: everything (OffscreenCanvas with WebGL

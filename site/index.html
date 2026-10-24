@@ -79,6 +79,8 @@
       <li><strong>Godot 4</strong>: the <code>JsuiView</code> GDExtension, rendering on Godot's own Vulkan or Metal device.</li>
       <li><strong>The web</strong>: the WebAssembly build with <code>@orktes/jsui-web</code>, on WebGPU, WebGL or the CPU.</li>
       <li><strong>iOS</strong>: a UIKit host rendering with Skia on Metal, with touch, keyboards and game controllers.</li>
+      <li><strong>raylib, SDL3 and sokol</strong>: example game loops with the same HUD, on raylib's OpenGL context,
+        any SDL_Renderer backend and sokol_gfx (<code>integrations/raylib</code>, <code>sdl3</code>, <code>sokol</code>).</li>
       <li><strong>Custom engines</strong>: any C or C++ engine through the C API.</li>
       <li><strong>Standalone</strong>: <code>jsui-viewer</code>, a windowed SDL2 host with dev mode.</li>
     </ul>
@@ -294,10 +296,16 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
           if (load()) video.play().catch(() => {});
           else publish();
         });
-        // The poster (an <img>, another texture source) until the first frame.
+        // The poster (an <img>, another texture source) until the first frame:
+        // set unless the video has a frame the browser lets us upload (WebKit
+        // refuses this one as cross-origin). setTexture is a Promise in worker mode.
         const img = new Image();
         img.crossOrigin = 'anonymous';
-        img.onload = () => { if (open && video && video.readyState < 2) jsui.setTexture('trailer', img); };
+        img.onload = async () => {
+          if (!open || !video) return;
+          if (video.readyState >= 2 && await jsui.setTexture('trailer', video)) return;
+          if (open) jsui.setTexture('trailer', img);
+        };
         img.src = POSTER;
         load();
       };

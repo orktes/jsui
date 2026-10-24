@@ -36,8 +36,10 @@
 // web/jsui-worker.js): the frame loop runs on the worker's own rAF, so
 // interval and frame CPU are the worker's (recorded there), and threads adds
 // the worker's busy time next to the page's main thread, which now only
-// forwards input and DOM state. finish / gpu calls / gpu time need the
-// renderer on the page's thread and are skipped.
+// forwards input and DOM state. The worker's frame is also split into input
+// (queued page events applied), tick + paint (up to the frame's submit), hit
+// map + events (after it) and the frame's postMessage. finish / gpu calls /
+// gpu time need the renderer on the page's thread and are skipped.
 //
 // Renderers: webgpu, webgl, cpu (JSUI's web host), and chrome: the same app
 // bundled with react-native-web (as the reference tests do) and rendered by
@@ -52,7 +54,7 @@
 //   node web/test/frame-bench.mjs [--dist dist-gpu] [--frames 120] [--renderers webgpu,webgl,cpu,chrome]
 //                                 [--width 1280 --height 720 --dpr 1] [--real-gpu] [--scenario steady]
 //                                 [--settle 3000] [--no-counts] [--no-gpu-timing] [--no-trace]
-//                                 [--webgl-sync readpixels|fence|finish] [--worker]
+//                                 [--webgl-sync readpixels|fence|finish] [--worker] [--phases]
 //                                 [--json out.json] [app.jsx]
 //
 // Default: headless Chromium from Playwright, where WebGL runs on SwiftShader
@@ -63,6 +65,10 @@
 // visible and in front while it runs (hidden windows get throttled rAF).
 // Both run with --enable-webgpu-developer-features so GPU timestamps are not
 // quantized to 100 us.
+//
+// --phases: after the steady loop, another --frames frames with
+// setProfiling(true), printed as getPerf()'s time per repaint by phase (js,
+// paint, gpu_submit, ...), e.g. to compare the page's thread with a worker's.
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -73,7 +79,7 @@ import { build } from '@orktes/jsui-cli';
 const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ROOT = path.resolve(WEB, '..');
 const args = process.argv.slice(2);
-const FLAGS = new Set(['--real-gpu', '--no-counts', '--no-gpu-timing', '--no-trace', '--worker']);
+const FLAGS = new Set(['--real-gpu', '--no-counts', '--no-gpu-timing', '--no-trace', '--worker', '--phases']);
 const opt = (name, def) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : def; };
 const DIST = opt('--dist', 'dist-gpu');
 const N = Number(opt('--frames', 120));
@@ -84,6 +90,7 @@ const COUNTS = !args.includes('--no-counts');
 const GPU_TIMING = !args.includes('--no-gpu-timing');
 const TRACE = !args.includes('--no-trace');
 const WORKER = args.includes('--worker');
+const PHASES = args.includes('--phases');
 const SCENARIO = opt('--scenario', 'steady');
 // How the finish metric waits for a WebGL frame: readpixels (default) a
 // 1-pixel read-back; fence a fenceSync polled from short tasks (no read-back,
@@ -279,6 +286,7 @@ const avg = (a) => a.reduce((x, y) => x + y, 0) / Math.max(1, a.length);
 const pct = (s, p) => s[Math.min(s.length - 1, Math.floor(s.length * p))];
 const stats = (a) => { const s = sorted(a); return { mean: avg(a), p50: pct(s, 0.5), p95: pct(s, 0.95), p99: pct(s, 0.99), max: s[s.length - 1] }; };
 const f2 = (v) => (v == null || Number.isNaN(v) ? '-' : v.toFixed(2));
+const f3 = (v) => (v == null || Number.isNaN(v) ? '-' : v.toFixed(3));
 
 const results = [];
 for (const renderer of RENDERERS) {
@@ -295,7 +303,7 @@ for (const renderer of RENDERERS) {
       // The worker's own loop, recorded there (frame CPU is the worker's).
       const r = await window.j._bench({ n: n + 1, warmup });
       const iv = r.stamps.slice(1).map((t, k) => t - r.stamps[k]);
-      return { intervals: iv, cpu: r.cpu.slice(1), gpuDone: [], renders: r.renders, frames: n,
+      return { intervals: iv, cpu: r.cpu.slice(1), parts: r.parts.slice(1), gpuDone: [], renders: r.renders, frames: n,
         window: r.stamps[r.stamps.length - 1] - r.stamps[0] };
     }
     if (chrome) {
@@ -314,10 +322,10 @@ for (const renderer of RENDERERS) {
     const j = window.j;
     const frame = j.frame.bind(j);
     const dev = j._wgpu?.device;
-    const r0 = j.stats.renders;
+    let r0 = 0;
     await new Promise((resolve) => {
       j.frame = (now) => {
-        if (i === warmup) t0 = performance.now();
+        if (i === warmup) { t0 = performance.now(); r0 = j.stats.renders; }
         const a = performance.now();
         frame(now);
         const b = performance.now();
@@ -351,6 +359,27 @@ for (const renderer of RENDERERS) {
     const share = steady.window / total;
     threads = Object.fromEntries(THREADS.map(([k, label]) => [label, ((busy[k] ?? 0) * share) / frames]));
   }
+
+  // --phases: the runtime's own phase times (getPerf) over n more frames,
+  // after the trace (which they would add to).
+  const wheel2 = PHASES && !isChrome ? wheelLoop(page) : null;
+  const phases = wheel2 ? await page.evaluate(async ({ n, worker }) => {
+    const j = window.j;
+    j.setProfiling(true);
+    await j.getPerf(true);
+    let frames;
+    if (worker) {
+      frames = (await j._bench({ n, warmup: 0 })).renders;
+    } else {
+      const r0 = j.stats.renders;
+      for (let i = 0; i < n; i++) await new Promise((r) => requestAnimationFrame(r));
+      frames = j.stats.renders - r0;
+    }
+    const perf = await j.getPerf(true);
+    j.setProfiling(false);
+    return { frames, perf };
+  }, { n: N, worker: WORKER }) : null;
+  await wheel2?.stop();
 
   // 2. The old metric: frames stepped by hand, each awaited until the GPU finished it.
   const finish = isChrome || WORKER ? null : await page.evaluate(async ({ n, gpuTiming, webglSync }) => {
@@ -497,6 +526,22 @@ for (const renderer of RENDERERS) {
     (cpu ? `; ${WORKER && !isChrome ? 'worker frame' : 'main thread'} mean ${f2(cpu.mean)}, p95 ${f2(cpu.p95)}` : '') +
     (gpu ? `; GPU done after mean ${f2(gpu.mean)}, p95 ${f2(gpu.p95)}` : '') +
     (steady.renders != null ? `; ${steady.renders} repaints` : ''));
+  // Worker mode: where the worker's frame goes (input flush, tick + paint,
+  // hit map + page events, the frame's postMessage).
+  let parts = null;
+  if (steady.parts?.length) {
+    parts = {};
+    for (const k of ['input', 'core', 'after', 'post']) parts[k] = steady.parts.reduce((a, p) => a + p[k], 0) / steady.parts.length;
+    console.log(`    worker    ms per frame: input ${f3(parts.input)}, tick + paint ${f3(parts.core)}, ` +
+      `hit map + events ${f3(parts.after)}, postMessage ${f3(parts.post)}`);
+  }
+  let phaseMs = null;
+  if (phases?.frames) {
+    phaseMs = Object.fromEntries(Object.entries(phases.perf).filter(([k]) => k.endsWith('_us'))
+      .map(([k, v]) => [k.slice(0, -3), v / phases.frames / 1000]));
+    console.log(`    phases    ms per repaint (${phases.frames}): ` +
+      Object.entries(phaseMs).filter(([, v]) => v > 0).map(([k, v]) => `${k} ${f3(v)}`).join(', '));
+  }
   if (threads) {
     console.log(`    threads   busy ms per frame: ${THREADS.map(([, l]) => `${l} ${f2(threads[l])}`).join(', ')}`);
   }
@@ -550,7 +595,7 @@ for (const renderer of RENDERERS) {
     }
   }
   results.push({ renderer, worker: WORKER && !isChrome, name: info.name, adapter: where, interval: iv, late,
-    [WORKER && !isChrome ? 'workerFrame' : 'mainThread']: cpu, gpuDone: gpu, threads,
+    [WORKER && !isChrome ? 'workerFrame' : 'mainThread']: cpu, workerParts: parts, phases: phaseMs, gpuDone: gpu, threads,
     finish: fin, finishMainThread: finCpu, repaints: steady.renders, counts,
     gpuTime: gpuTime ?? (finish?.gpuMs?.length ? { total: stats(finish.gpuMs) } : null) });
 }

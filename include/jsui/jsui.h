@@ -1074,6 +1074,17 @@ JSUI_API int jsui_gpu_save_pipelines(JsuiGpuContext* gpu, void** out_data, size_
 JSUI_API int jsui_gpu_precompile_step(JsuiGpuContext* gpu, double budget_ms);
 JSUI_API void jsui_gpu_get_pipeline_stats(JsuiGpuContext* gpu, JsuiPipelineStats* out);
 
+/* ShaderView sources compiled and warmed ahead of use (precompileShaders()
+ * in JS does the same): compiles `sksl` (UTF-8) now and draws it once
+ * off-screen in the next frame rendered on a GPU, so the GPU builds its
+ * pipelines in that frame instead of the one where a ShaderView first shows
+ * it. Call it while loading or idle. `images_json` (NULL: none) is the
+ * view's `images` prop as JSON (which children are images or textures, and
+ * their fit / tile), so the same kind of child is sampled. jsui_needs_redraw
+ * stays 1 until that frame. Returns 0, or -1 when the shader does not
+ * compile (logged as a warning). */
+JSUI_API int jsui_precompile_shader(JsuiRuntime* rt, const char* sksl, const char* images_json);
+
 /* ------------------------------------------------------------- GPU (Metal)
  *
  * Skia Ganesh on Metal: draws the frame straight into a Metal texture (a

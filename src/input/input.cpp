@@ -386,6 +386,17 @@ unsigned InputManager::capturesAt(float x, float y) {
   return r;
 }
 
+// The innermost emitted rect a node's box lies in (its nearest ancestor that
+// emitted one) and where the output stood after it: a node with the same
+// flags inside it adds nothing if no rect emitted since overlaps it (the
+// lookup, last to first, reaches the cover's rect with the same answer).
+struct InputManager::RegionCover {
+  float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+  unsigned flags = 0;
+  size_t end = 0;  // floats in the output after the cover's rect
+  bool valid = false;
+};
+
 // hitNode's walk over the whole tree, bottom to top: every node it could
 // return emits its (clipped, bounding) box with the flags capturesAt would
 // give there. `mask`: the listeners of the node's ancestors (consumes()),
@@ -396,17 +407,34 @@ struct InputManager::RegionWalk {
   // captures nothing only matters over them.
   float fx0 = 0, fy0 = 0, fx1 = 0, fy1 = 0;
   bool any = false;
-  void emit(float x0, float y0, float x1, float y1, unsigned flags) {
-    if (!(x1 > x0 && y1 > y0)) return;
+  // Whether a rect would change any lookup (see RegionCover). Rects emitted
+  // since the cover are checked up to a bound, past which it says yes.
+  bool needed(float x0, float y0, float x1, float y1, unsigned flags, const RegionCover& c) const {
+    if (!c.valid || flags != c.flags || x0 < c.x0 || y0 < c.y0 || x1 > c.x1 || y1 > c.y1) return true;
+    const std::vector<float>& o = *out;
+    if (o.size() - c.end > 64 * 5) return true;
+    for (size_t i = c.end; i < o.size(); i += 5) {
+      if (o[i] < x1 && o[i + 1] < y1 && o[i] + o[i + 2] > x0 && o[i + 1] + o[i + 3] > y0) return true;
+    }
+    return false;
+  }
+  // Emits the rect if it matters; the cover for the node's children.
+  RegionCover emit(float x0, float y0, float x1, float y1, unsigned flags, const RegionCover& cover) {
+    if (!(x1 > x0 && y1 > y0)) return cover;
     if (!flags) {
-      if (!any || x1 <= fx0 || x0 >= fx1 || y1 <= fy0 || y0 >= fy1) return;
-    } else if (!any) {
-      fx0 = x0, fy0 = y0, fx1 = x1, fy1 = y1;
-      any = true;
-    } else {
-      fx0 = std::min(fx0, x0), fy0 = std::min(fy0, y0), fx1 = std::max(fx1, x1), fy1 = std::max(fy1, y1);
+      if (!any || x1 <= fx0 || x0 >= fx1 || y1 <= fy0 || y0 >= fy1) return cover;
+    }
+    if (!needed(x0, y0, x1, y1, flags, cover)) return cover;
+    if (flags) {
+      if (!any) {
+        fx0 = x0, fy0 = y0, fx1 = x1, fy1 = y1;
+        any = true;
+      } else {
+        fx0 = std::min(fx0, x0), fy0 = std::min(fy0, y0), fx1 = std::max(fx1, x1), fy1 = std::max(fy1, y1);
+      }
     }
     out->insert(out->end(), {x0, y0, x1 - x0, y1 - y0, float(flags)});
+    return {x0, y0, x1, y1, flags, out->size(), true};
   }
 };
 
@@ -418,11 +446,19 @@ void InputManager::hitRegions(std::vector<float>* out) {
   if (!finiteRect(r)) return;
   RegionWalk w{out};
   // Points outside the root box are outside the view.
-  hitRegionsOf(root, Affine{}, {r.x, r.y, r.width, r.height}, 0, false, w);
+  hitRegionsOf(root, Affine{}, {r.x, r.y, r.width, r.height}, 0, false, w, RegionCover{});
+}
+
+// The listeners of a node's descendants (a Text's spans, which textHitTest
+// finds in its box).
+static unsigned spanMask(const Node* n) {
+  unsigned m = 0;
+  for (const Node* c : n->children()) m |= listenMask(c) | spanMask(c);
+  return m;
 }
 
 void InputManager::hitRegionsOf(Node* n, const Affine& parent, const Rect& clip, unsigned mask, bool scroll,
-                                RegionWalk& w) {
+                                RegionWalk& w, const RegionCover& cover) {
   if (!n->yoga()) return;
   const ComputedStyle& s = n->style();
   if (!s.display) return;
@@ -447,18 +483,13 @@ void InputManager::hitRegionsOf(Node* n, const Affine& parent, const Rect& clip,
   const bool text = n->type() == NodeType::Text;
   if (text) {
     // A leaf here; its spans' handlers (textHitTest) count for its box.
-    std::vector<const Node*> stack(kids.begin(), kids.end());
-    while (!stack.empty()) {
-      const Node* c = stack.back();
-      stack.pop_back();
-      mask |= listenMask(c);
-      stack.insert(stack.end(), c->children().begin(), c->children().end());
-    }
+    for (const Node* c : kids) mask |= listenMask(c) | spanMask(c);
   }
+  RegionCover inner_cover = cover;
   if (pe != PointerEvents::BoxNone) {
     unsigned flags = ((mask & kPointer) ? JSUI_HIT_POINTER : 0) | ((mask & kWheel) || scroll ? JSUI_HIT_SCROLL : 0);
-    w.emit(std::max(x0, clip.x), std::max(y0, clip.y), std::min(x1, clip.x + clip.width),
-           std::min(y1, clip.y + clip.height), flags);
+    inner_cover = w.emit(std::max(x0, clip.x), std::max(y0, clip.y), std::min(x1, clip.x + clip.width),
+                         std::min(y1, clip.y + clip.height), flags, cover);
   }
   if (pe == PointerEvents::BoxOnly || text || kids.empty()) return;
   Rect inner = clip;
@@ -473,14 +504,14 @@ void InputManager::hitRegionsOf(Node* n, const Affine& parent, const Rect& clip,
   for (Node* c : kids)
     if (c->style().zIndex != 0) zSorted = true;
   if (!zSorted) {
-    for (Node* c : kids) hitRegionsOf(c, cm, inner, mask, scroll, w);
+    for (Node* c : kids) hitRegionsOf(c, cm, inner, mask, scroll, w, inner_cover);
     return;
   }
   // Paint order, as hitNode sorts it (topmost last).
   std::vector<Node*> order(kids.begin(), kids.end());
   std::stable_sort(order.begin(), order.end(),
                    [](Node* a, Node* b) { return a->style().zIndex < b->style().zIndex; });
-  for (Node* c : order) hitRegionsOf(c, cm, inner, mask, scroll, w);
+  for (Node* c : order) hitRegionsOf(c, cm, inner, mask, scroll, w, inner_cover);
 }
 
 bool InputManager::consumes(const Node* hit, unsigned mask) const {

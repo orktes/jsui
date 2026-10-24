@@ -136,7 +136,11 @@ the clock. `images` gives child shaders (`uniform shader name;`): an image
 source or `{ texture: 'name' }` (a host texture), with `fit` and `tile`. A
 child named `content` that `images` leaves out is the view's own painting,
 for post-processing. `onError` reports compile errors; `compileShader(src)`
-returns `{ error }` or `{ uniforms, children }`.
+returns `{ error }` or `{ uniforms, children }`. A GPU builds a shader's
+pipelines the first time it draws it, which can drop a frame:
+`precompileShaders([src, { source, images }])` (also `ShaderView.preload`)
+compiles them now and warms the GPU in the next frame, off-screen. Call it
+on a loading screen or when idle; it resolves once that frame ran.
 
 Focus props on any element: `focusable`, `autoFocus`, `hasTVPreferredFocus`,
 `onFocus`, `onBlur`, `onKeyDown` / `onKeyUp` (RN-web style: `e.key`,
