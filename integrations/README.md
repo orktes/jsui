@@ -7,6 +7,7 @@
 | [raylib](raylib/README.md) | raylib 6.2 game loop; Skia draws the UI into a `RenderTexture2D` on raylib's GL context |
 | [sdl3](sdl3/README.md) | SDL3 game loop on `SDL_Renderer` (Metal, Direct3D, Vulkan, GL); dirty-rect CPU upload |
 | [sokol](sokol/README.md) | sokol_app + sokol_gfx (GL backend); Skia draws the UI straight into the swapchain framebuffer |
+| [unity](unity/README.md) | Unity 6 package (`com.orktes.jsui`): native plugin over the C API + a `JsuiView` component, with the same example game |
 
 ## The engine examples
 
@@ -105,5 +106,8 @@ before `jsui_render_gl*` and re-apply what the engine caches afterwards
 (raylib: see `restoreRaylibState` in raylib/main.cpp; sokol:
 `sg_reset_state_cache()`).
 
-Unity, Unreal and Bevy would be plugins rather than examples (a native
-rendering plugin over the same C API); they are not in the tree yet.
+[unity](unity/README.md) is the same game as a Unity project, on a Unity
+package whose native plugin exports the C API to C# (P/Invoke) and whose
+`JsuiView` component does the forwarding, ticking and compositing above.
+Unreal and Bevy would be plugins along the same lines; they are not in the
+tree yet.

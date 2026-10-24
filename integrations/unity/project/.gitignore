@@ -1,0 +1,14 @@
+# Unity's generated folders
+/Library/
+/Temp/
+/Logs/
+/obj/
+/UserSettings/
+/MemoryCaptures/
+*.csproj
+*.sln
+# Copied by BuildExample.Prepare from integrations/shared/ui/dist
+/Assets/StreamingAssets/
+/Assets/StreamingAssets.meta
+/.vscode/
+*.slnx

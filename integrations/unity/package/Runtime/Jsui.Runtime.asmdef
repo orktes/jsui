@@ -1,0 +1,12 @@
+{
+    "name": "Jsui.Runtime",
+    "rootNamespace": "Jsui",
+    "references": [
+        "Unity.ugui"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "autoReferenced": true,
+    "noEngineReferences": false
+}

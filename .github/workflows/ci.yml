@@ -82,6 +82,7 @@ jobs:
               - 'integrations/raylib/**'
               - 'integrations/sdl3/**'
               - 'integrations/sokol/**'
+              - 'integrations/unity/**'
               - 'integrations/shared/**'
               - 'packages/**'
               - 'examples/theme.js'
@@ -181,7 +182,7 @@ jobs:
   # on the GPU path (Mesa llvmpipe GL) and on the CPU path, and saves the
   # composed frame.
   engines:
-    name: engine examples (raylib, SDL3, sokol)
+    name: engine examples (raylib, SDL3, sokol, Unity plugin)
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.engines == 'true'
@@ -218,9 +219,11 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DJSUI_BUILD_TESTS=OFF -DJSUI_BUILD_VIEWER=OFF
-          -DJSUI_BUILD_RAYLIB=ON -DJSUI_BUILD_SDL3=ON -DJSUI_BUILD_SOKOL=ON
+          -DJSUI_BUILD_RAYLIB=ON -DJSUI_BUILD_SDL3=ON -DJSUI_BUILD_SOKOL=ON -DJSUI_BUILD_UNITY=ON
       - name: Build
-        run: cmake --build build -j "$(nproc)" --target jsui-raylib jsui-sdl3 jsui-sokol
+        run: cmake --build build -j "$(nproc)" --target jsui-raylib jsui-sdl3 jsui-sokol jsui_unity
+      - name: Unity plugin smoke (its C exports through ctypes; Unity itself needs a license)
+        run: python3 integrations/unity/native/smoke.py integrations/unity/package/Plugins/Linux/x86_64/libjsui_unity.so integrations/shared/ui/dist/bundle.js
       - name: Self-tests and frames
         run: |
           mkdir -p engines

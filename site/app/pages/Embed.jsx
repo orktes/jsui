@@ -1,6 +1,6 @@
 // Embed: how to ship a JSUI UI: Godot, the C API, the engine examples, the browser, dev mode and
 // production builds. Everything here mirrors the real APIs in the tree
-// (include/jsui/jsui.h, web/jsui-web.js, integrations/godot, integrations/raylib|sdl3|sokol, packages/cli).
+// (include/jsui/jsui.h, web/jsui-web.js, integrations/godot, integrations/raylib|sdl3|sokol|unity, packages/cli).
 import React, { useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { Card, Column, Eyebrow, Pill, Reveal, SectionHead, useLayout } from '../components/ui.jsx';
@@ -139,7 +139,7 @@ export function EmbedPage() {
         <SectionHead
           eyebrow="Embed"
           title="Ship it inside your game."
-          lead="JSUI is a static library with a C API. The same runtime that draws this page runs in a Godot node, in raylib, SDL3 or sokol, in your own engine's loop, or on a canvas in the browser. Pick a target."
+          lead="JSUI is a static library with a C API. The same runtime that draws this page runs in a Godot node, in raylib, SDL3, sokol or Unity, in your own engine's loop, or on a canvas in the browser. Pick a target."
         />
       </Reveal>
       <Reveal delay={60}>
@@ -147,6 +147,7 @@ export function EmbedPage() {
           <Pill color={colors.gold}>C API · include/jsui/jsui.h</Pill>
           <Pill color={colors.cyan}>Godot 4.3+ GDExtension</Pill>
           <Pill color={colors.orange}>raylib · SDL3 · sokol examples</Pill>
+          <Pill color={colors.blue}>Unity 6 package</Pill>
           <Pill color={colors.purple}>WebAssembly · CPU or WebGL</Pill>
           <Pill color={colors.green}>Live reload over HTTP</Pill>
         </View>

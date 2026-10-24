@@ -21,6 +21,7 @@ option(JSUI_AUDIO "Build the built-in miniaudio audio backend" ${_jsui_audio_def
 option(JSUI_BUILD_RAYLIB "Build the raylib example host in integrations/raylib (downloads raylib)" OFF)
 option(JSUI_BUILD_SDL3 "Build the SDL3 example host in integrations/sdl3 (downloads SDL3)" OFF)
 option(JSUI_BUILD_SOKOL "Build the sokol example host in integrations/sokol (downloads the sokol headers)" OFF)
+option(JSUI_BUILD_UNITY "Build the Unity native plugin into integrations/unity/package/Plugins" OFF)
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 include(Deps)
@@ -281,6 +282,10 @@ if(NOT EMSCRIPTEN AND NOT IOS)
   endif()
   if(JSUI_BUILD_SOKOL)
     add_subdirectory(integrations/sokol)
+  endif()
+  # The Unity package's native plugin (the example is a Unity project).
+  if(JSUI_BUILD_UNITY)
+    add_subdirectory(integrations/unity)
   endif()
 endif()
 
