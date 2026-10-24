@@ -123,6 +123,10 @@ function mayDiffer(a, b) {
   return n !== 0;
 }
 
+// Runtimes with __jsui_native.updateProps build and diff the native props
+// themselves (src/js/bridge.cpp); older ones get them built here.
+const NATIVE_PROPS = typeof native.updateProps === 'function' && typeof native.getProps === 'function';
+
 let bridgeCalls = 0;
 /**
  * Number of setProps + patchStyle bridge calls so far, and of live host
@@ -139,10 +143,17 @@ export class HostInstance {
     this.props = props;
     this.parent = null;
     this.hidden = false;
-    this.nativeProps = toNativeProps(props, false);
-    this.styleOwned = false;  // nativeProps.style is a private copy we may mutate
     this.responderState = null;
     bridgeCalls++;
+    if (NATIVE_PROPS) {
+      // The runtime builds and diffs what it sees from the React props
+      // (__jsui_native.updateProps); nativeProps is then not kept here.
+      this.nativeProps = null;
+      native.updateProps(id, props, false);
+      return;
+    }
+    this.nativeProps = toNativeProps(props, false);
+    this.styleOwned = false;  // nativeProps.style is a private copy we may mutate
     native.setProps(id, this.nativeProps);
   }
 
@@ -155,6 +166,11 @@ export class HostInstance {
     const old = this.props;
     this.props = props;
     if (!mayDiffer(old, props)) return;
+    if (NATIVE_PROPS) {
+      bridgeCalls++;
+      native.updateProps(this.id, props, this.hidden);
+      return;
+    }
     const next = toNativeProps(props, this.hidden);
     if (nativePropsChanged(next, this.nativeProps)) {
       this.nativeProps = next;
@@ -167,9 +183,13 @@ export class HostInstance {
   setHidden(hidden) {
     if (this.hidden === hidden) return;
     this.hidden = hidden;
+    bridgeCalls++;
+    if (NATIVE_PROPS) {
+      native.updateProps(this.id, this.props, hidden);
+      return;
+    }
     this.nativeProps = toNativeProps(this.props, hidden);
     this.styleOwned = false;
-    bridgeCalls++;
     native.setProps(this.id, this.nativeProps);
   }
 
@@ -178,6 +198,12 @@ export class HostInstance {
    * setNativeProps). Uses the bridge's patchStyle when available.
    */
   patchStyle(partial) {
+    if (NATIVE_PROPS) {
+      // Native compares the partial with the current style itself.
+      bridgeCalls++;
+      native.patchStyle(this.id, partial);
+      return;
+    }
     const cur = this.nativeProps.style;
     let changed = false;
     for (const k in partial) {
@@ -212,11 +238,17 @@ export class HostInstance {
     if (rest) {
       // Non-style props: merge into the React props so later diffs agree.
       this.props = Object.assign({}, this.props, rest);
-      const next = toNativeProps(Object.assign({}, this.props, { style: this.nativeProps.style }), this.hidden);
-      this.nativeProps = next;
-      this.styleOwned = false;
-      bridgeCalls++;
-      native.setProps(this.id, next);
+      if (NATIVE_PROPS) {
+        // The style keeps what patchStyle wrote: only the other props move.
+        bridgeCalls++;
+        native.updateProps(this.id, Object.assign({}, this.props, { style: (native.getProps(this.id) || {}).style }), this.hidden);
+      } else {
+        const next = toNativeProps(Object.assign({}, this.props, { style: this.nativeProps.style }), this.hidden);
+        this.nativeProps = next;
+        this.styleOwned = false;
+        bridgeCalls++;
+        native.setProps(this.id, next);
+      }
     }
     if (props.style) this.patchStyle(flatten(props.style) || {});
   }

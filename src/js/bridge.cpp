@@ -3,6 +3,9 @@
 // path (patchStyle), host messages, fonts and reload.
 #include <algorithm>
 #include <limits>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "core/document.h"
 #include "input/input.h"
@@ -60,6 +63,165 @@ JSValue js_setProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
   if (argc < 2) return JS_UNDEFINED;
   if (Node* n = nodeArg(ctx, argv[0])) n->setProps(toValue(ctx, argv[1]));
   return JS_UNDEFINED;
+}
+
+// ---- updateProps(id, reactProps, hidden): the host config's prop path
+// done natively. Builds what native sees from the React props (functions
+// become props.__events tokens, symbols / children / ref / key are dropped,
+// the style is flattened, pointerEvents moves into the style, hidden adds
+// display: none) and hands it to Node::setProps, which diffs it against the
+// current props. Same result as @orktes/jsui-react's toNativeProps +
+// nativePropsChanged, without interpreting either in JS.
+
+// React prop -> props.__events tokens (packages/react/src/instances.js
+// EVENT_TOKENS; "...Capture" variants map like the bubbling prop, except for
+// the responder props).
+const std::vector<std::string>* eventTokens(const std::string& key) {
+  static const std::unordered_map<std::string, std::vector<std::string>> table = [] {
+    const std::vector<std::string> responder = {"responder", "pointerMove"};
+    std::unordered_map<std::string, std::vector<std::string>> t = {
+        {"onClick", {"click"}},
+        {"onPress", {"press"}},
+        {"onPointerDown", {"pointerDown"}},
+        {"onPointerUp", {"pointerUp"}},
+        {"onPointerMove", {"pointerMove"}},
+        {"onPointerCancel", {"pointerCancel"}},
+        {"onPointerEnter", {"hoverIn", "pointerEnter"}},
+        {"onPointerLeave", {"hoverOut", "pointerLeave"}},
+        {"onMouseEnter", {"hoverIn", "pointerEnter"}},
+        {"onMouseLeave", {"hoverOut", "pointerLeave"}},
+        {"onWheel", {"wheel"}},
+        {"onKeyDown", {"keyDown"}},
+        {"onKeyUp", {"keyUp"}},
+        {"onFocus", {"focus"}},
+        {"onBlur", {"blur"}},
+        {"onScroll", {"scroll"}},
+        {"onTextInput", {"textInput"}},
+        {"onChange", {"change"}},
+        {"onSelectionChange", {"selectionChange"}},
+        {"onGamepadButton", {"gamepadButton"}},
+        {"onGamepadAxis", {"gamepadAxis"}},
+        {"onLayout", {"layout"}},
+        {"onLoad", {"load"}},
+        {"onError", {"error"}},
+        {"onProgress", {"progress"}},
+        {"onAnimationFinish", {"animationFinish"}},
+    };
+    std::vector<std::pair<std::string, std::vector<std::string>>> capture;
+    for (auto& [k, v] : t) capture.push_back({k + "Capture", v});
+    for (auto& c : capture) t.insert(std::move(c));
+    for (const char* k : {"onStartShouldSetResponder", "onMoveShouldSetResponder", "onStartShouldSetResponderCapture",
+                          "onMoveShouldSetResponderCapture", "onResponderGrant", "onResponderMove",
+                          "onResponderRelease"})
+      t[k] = responder;
+    return t;
+  }();
+  auto it = table.find(key);
+  return it == table.end() ? nullptr : &it->second;
+}
+
+// StyleSheet.flatten into `out`: nested arrays, falsy entries skipped, later
+// objects win, undefined values ignored. Returns how many objects it merged.
+int flattenStyle(JSContext* ctx, JSValueConst s, Value::Object& out, int depth) {
+  if (depth > 32 || !JS_IsObject(s) || JS_IsFunction(ctx, s)) return 0;
+  if (JS_IsArray(s)) {
+    int64_t len = 0;
+    if (JS_GetLength(ctx, s, &len)) {
+      JS_FreeValue(ctx, JS_GetException(ctx));
+      return 0;
+    }
+    int n = 0;
+    for (int64_t i = 0; i < len && i < (1 << 20); i++) {
+      JSValue e = JS_GetPropertyInt64(ctx, s, i);
+      n += flattenStyle(ctx, e, out, depth + 1);
+      JS_FreeValue(ctx, e);
+    }
+    return n;
+  }
+  runtimeOf(ctx).doc.perf.counters.valueConversions++;
+  JSPropertyEnum* props = nullptr;
+  uint32_t count = 0;
+  if (JS_GetOwnPropertyNames(ctx, &props, &count, s, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) != 0) {
+    JS_FreeValue(ctx, JS_GetException(ctx));
+    return 0;
+  }
+  JsEngine::Impl& impl = implOf(ctx);
+  for (uint32_t i = 0; i < count; i++) {
+    JSValue e = JS_GetProperty(ctx, s, props[i].atom);
+    if (JS_IsException(e)) {
+      JS_FreeValue(ctx, JS_GetException(ctx));
+    } else if (!JS_IsUndefined(e) && !JS_IsFunction(ctx, e)) {
+      if (const std::string* k = impl.atomName(props[i].atom)) out.insert_or_assign(*k, toValue(ctx, e, depth + 1));
+    }
+    JS_FreeValue(ctx, e);
+  }
+  JS_FreePropertyEnum(ctx, props, count);
+  return 1;
+}
+
+JSValue js_updateProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  JSUI_COMMIT_SCOPE;
+  if (argc < 2 || !JS_IsObject(argv[1])) return JS_UNDEFINED;
+  Node* n = nodeArg(ctx, argv[0]);
+  if (!n) return JS_UNDEFINED;
+  bool hidden = argc > 2 && JS_ToBool(ctx, argv[2]);
+  JsEngine::Impl& impl = implOf(ctx);
+  Value::Object out;
+  Value::Array events;
+  JSValue style = JS_UNDEFINED, pointerEvents = JS_UNDEFINED;
+  JSPropertyEnum* keys = nullptr;
+  uint32_t count = 0;
+  if (JS_GetOwnPropertyNames(ctx, &keys, &count, argv[1], JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) != 0)
+    return JS_EXCEPTION;
+  for (uint32_t i = 0; i < count; i++) {
+    const std::string* k = impl.atomName(keys[i].atom);
+    if (!k || *k == "children" || *k == "ref" || *k == "key") continue;
+    JSValue v = JS_GetProperty(ctx, argv[1], keys[i].atom);
+    if (JS_IsException(v)) {
+      JS_FreeValue(ctx, JS_GetException(ctx));
+      continue;
+    }
+    if (*k == "style") {
+      style = v;
+      continue;
+    }
+    if (JS_IsFunction(ctx, v)) {
+      if (const auto* toks = eventTokens(*k))
+        for (const std::string& t : *toks)
+          if (std::none_of(events.begin(), events.end(), [&](const Value& e) { return e.asString() == t; }))
+            events.push_back(Value(t));
+    } else if (!JS_IsUndefined(v) && !JS_IsSymbol(v)) {
+      if (*k == "pointerEvents") pointerEvents = JS_DupValue(ctx, v);
+      out.insert_or_assign(*k, toValue(ctx, v, 1));
+    }
+    JS_FreeValue(ctx, v);
+  }
+  JS_FreePropertyEnum(ctx, keys, count);
+  Value::Object flat;
+  bool hasStyle = flattenStyle(ctx, style, flat, 1) > 0;
+  JS_FreeValue(ctx, style);
+  // RN accepts pointerEvents as a prop; native reads it from the style.
+  if (JS_ToBool(ctx, pointerEvents) && !flat.count("pointerEvents")) {
+    flat.insert_or_assign("pointerEvents", toValue(ctx, pointerEvents, 1));
+    hasStyle = true;
+  }
+  JS_FreeValue(ctx, pointerEvents);
+  if (hidden) {
+    flat.insert_or_assign("display", Value("none"));
+    hasStyle = true;
+  }
+  if (hasStyle) out.insert_or_assign("style", Value(std::move(flat)));
+  if (!events.empty()) out.insert_or_assign("__events", Value(std::move(events)));
+  n->setProps(Value(std::move(out)));
+  return JS_UNDEFINED;
+}
+
+// getProps(id): the props native holds for a node (what updateProps built
+// from the React props, with patchStyle's writes), or undefined.
+JSValue js_getProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  if (argc < 1) return JS_UNDEFINED;
+  Node* n = nodeArg(ctx, argv[0]);
+  return n && n->props().isObject() ? fromValue(ctx, n->props()) : JS_UNDEFINED;
 }
 
 // patchStyle(id, partial): merges keys into props.style; null/undefined
@@ -575,6 +737,8 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
     JSCFunction* fn;
     int len;
   } fns[] = {{"createNode", js_createNode, 1},     {"setProps", js_setProps, 2},
+             {"updateProps", js_updateProps, 3},
+             {"getProps", js_getProps, 1},
              {"patchStyle", js_patchStyle, 2},     {"setText", js_setText, 2},
              {"appendChild", js_appendChild, 2},   {"insertBefore", js_insertBefore, 3},
              {"removeChild", js_removeChild, 2},   {"destroyNode", js_destroyNode, 1},

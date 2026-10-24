@@ -5,6 +5,12 @@
 #include "js/engine.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <unordered_map>
+#include <vector>
 #include <cmath>
 
 #include "core/document.h"
@@ -382,8 +388,74 @@ JSValue js_now(JSContext* ctx, JSValueConst, int, JSValueConst*) { return JS_New
 
 // ------------------------------------------------------- QuickJS hooks
 
+// JSUI_JS_PROFILE=path: a sampling JS profiler for benchmarks. QuickJS calls
+// the interrupt handler every ~10000 bytecode ops (calls and backward
+// jumps); each call samples the JS stack, and the self / inclusive sample
+// counts per function are written to `path` at exit.
+struct JsProfile {
+  std::string path;
+  std::unordered_map<std::string, uint64_t> self, incl;
+  uint64_t samples = 0;
+  ~JsProfile() {
+    if (path.empty() || !samples) return;
+    FILE* f = std::fopen(path.c_str(), "w");
+    if (!f) return;
+    auto dump = [&](const char* title, const std::unordered_map<std::string, uint64_t>& m) {
+      std::vector<std::pair<uint64_t, std::string>> v;
+      for (auto& [k, n] : m) v.push_back({n, k});
+      std::sort(v.rbegin(), v.rend());
+      std::fprintf(f, "== %s (%llu samples)\n", title, (unsigned long long)samples);
+      for (size_t i = 0; i < v.size() && i < 80; i++)
+        std::fprintf(f, "%6.2f%%  %s\n", 100.0 * double(v[i].first) / double(samples), v[i].second.c_str());
+    };
+    dump("self", self);
+    dump("inclusive", incl);
+    std::fclose(f);
+  }
+};
+JsProfile* jsProfile() {
+  static JsProfile* p = [] {
+    const char* e = std::getenv("JSUI_JS_PROFILE");
+    if (!e || !*e) return (JsProfile*)nullptr;
+    static JsProfile prof;
+    prof.path = e;
+    return &prof;
+  }();
+  return p;
+}
+void sampleJs(JSContext* ctx, JsProfile& prof) {
+  JSValue err = JS_NewError(ctx);
+  JSValue st = JS_GetPropertyStr(ctx, err, "stack");
+  const char* s = JS_ToCString(ctx, st);
+  if (s) {
+    prof.samples++;
+    std::vector<std::string> seen;
+    bool leaf = true;
+    for (const char* p = s; *p;) {
+      const char* nl = std::strchr(p, '\n');
+      std::string line(p, nl ? size_t(nl - p) : std::strlen(p));
+      p = nl ? nl + 1 : p + line.size();
+      size_t a = line.find("at ");
+      if (a == std::string::npos) continue;
+      std::string fr = line.substr(a + 3);
+      // "fn (file:line:col)" -> "fn file:line"
+      size_t col = fr.rfind(':');
+      if (std::getenv("JSUI_JS_PROFILE_LINES")) { if (col != std::string::npos && fr.back() == ')') fr = fr.substr(0, col) + ")"; } else if (size_t sp = fr.find(' '); sp != std::string::npos) fr = fr.substr(0, sp);
+      if (leaf) prof.self[fr]++, leaf = false;
+      if (std::find(seen.begin(), seen.end(), fr) == seen.end()) {
+        seen.push_back(fr);
+        prof.incl[fr]++;
+      }
+    }
+    JS_FreeCString(ctx, s);
+  }
+  JS_FreeValue(ctx, st);
+  JS_FreeValue(ctx, err);
+}
+
 int interruptHandler(JSRuntime*, void* opaque) {
   auto* impl = static_cast<JsEngine::Impl*>(opaque);
+  if (JsProfile* prof = jsProfile(); prof && impl->depth > 0 && impl->ctx) sampleJs(impl->ctx, *prof);
   if (impl->depth == 0 || impl->timeoutMs <= 0) return 0;
   if (Clock::now() < impl->deadline) return 0;
   impl->interrupted = true;
