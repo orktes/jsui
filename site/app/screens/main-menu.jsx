@@ -3,7 +3,7 @@
 // rising embers, staggered entrance, a menu stack whose selection follows
 // hover / focus (keyboard, gamepad D-pad) with a sliding focus bar, an
 // auto-advancing news carousel, toasts and a quit confirmation.
-import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, Image, LayoutAnimation, Pressable, StyleSheet, Text, View } from 'react-native';
 import { colors, font, type } from '../../../examples/theme.js';
 
@@ -228,92 +228,88 @@ function NewsCard({ active, enter }) {
           }
         }}
         style={{ cursor: 'pointer' }}
+        group
       >
-        {({ focused }) => (
-          <Animated.View
-            style={[
-              styles.news,
-              focused && styles.newsFocused,
-              { transform: [{ translateY: hover.interpolate({ inputRange: [0, 1], outputRange: [0, -4] }) }] },
-            ]}
-          >
-            <View style={styles.newsArtClip}>
+        <Animated.View
+          style={[styles.news, { transform: [{ translateY: hover.interpolate({ inputRange: [0, 1], outputRange: [0, -4] }) }] }]}
+          groupFocusedStyle={styles.newsFocused}
+        >
+          <View style={styles.newsArtClip}>
+            {NEWS.map((it, i) => {
+              const range = [i - 4, i - 3, i - 2, i - 1, i, i + 1, i + 2, i + 3, i + 4];
+              return (
+                <Animated.View
+                  key={i}
+                  style={[
+                    StyleSheet.absoluteFill,
+                    {
+                      opacity: pos.interpolate({ inputRange: range, outputRange: [0, 1, 0, 0, 1, 0, 0, 1, 0] }),
+                      transform: [
+                        { translateX: pos.interpolate({ inputRange: range, outputRange: [-60, 0, 60, 60, 0, -60, -60, 0, 60] }) },
+                        { scale: hover.interpolate({ inputRange: [0, 1], outputRange: [1.04, 1.1] }) },
+                      ],
+                    },
+                  ]}
+                >
+                  <Image source={it.art} style={styles.newsArt} resizeMode="cover" />
+                </Animated.View>
+              );
+            })}
+            <View style={styles.newsArtFade} />
+            <View style={[styles.newsTag, { backgroundColor: NEWS[idx].tint }]}>
+              <Text style={styles.newsTagText}>{NEWS[idx].tag}</Text>
+            </View>
+            <View style={styles.newsCount}>
+              <Text style={styles.newsCountText}>
+                {idx + 1} / {n}
+              </Text>
+            </View>
+          </View>
+          <View style={styles.newsBody}>
+            <View style={{ height: 102 }}>
               {NEWS.map((it, i) => {
                 const range = [i - 4, i - 3, i - 2, i - 1, i, i + 1, i + 2, i + 3, i + 4];
                 return (
                   <Animated.View
                     key={i}
+                    pointerEvents="none"
                     style={[
                       StyleSheet.absoluteFill,
                       {
                         opacity: pos.interpolate({ inputRange: range, outputRange: [0, 1, 0, 0, 1, 0, 0, 1, 0] }),
-                        transform: [
-                          { translateX: pos.interpolate({ inputRange: range, outputRange: [-60, 0, 60, 60, 0, -60, -60, 0, 60] }) },
-                          { scale: hover.interpolate({ inputRange: [0, 1], outputRange: [1.04, 1.1] }) },
-                        ],
+                        transform: [{ translateX: pos.interpolate({ inputRange: range, outputRange: [-24, 0, 24, 24, 0, -24, -24, 0, 24] }) }],
                       },
                     ]}
                   >
-                    <Image source={it.art} style={styles.newsArt} resizeMode="cover" />
+                    <Text style={[styles.newsKicker, { color: it.tint }]}>{it.kicker}</Text>
+                    <Text style={styles.newsTitle}>{it.title}</Text>
+                    <Text style={styles.newsText} numberOfLines={2}>
+                      {it.text}
+                    </Text>
                   </Animated.View>
                 );
               })}
-              <View style={styles.newsArtFade} />
-              <View style={[styles.newsTag, { backgroundColor: NEWS[idx].tint }]}>
-                <Text style={styles.newsTagText}>{NEWS[idx].tag}</Text>
-              </View>
-              <View style={styles.newsCount}>
-                <Text style={styles.newsCountText}>
-                  {idx + 1} / {n}
-                </Text>
-              </View>
             </View>
-            <View style={styles.newsBody}>
-              <View style={{ height: 102 }}>
-                {NEWS.map((it, i) => {
-                  const range = [i - 4, i - 3, i - 2, i - 1, i, i + 1, i + 2, i + 3, i + 4];
-                  return (
-                    <Animated.View
-                      key={i}
-                      pointerEvents="none"
-                      style={[
-                        StyleSheet.absoluteFill,
-                        {
-                          opacity: pos.interpolate({ inputRange: range, outputRange: [0, 1, 0, 0, 1, 0, 0, 1, 0] }),
-                          transform: [{ translateX: pos.interpolate({ inputRange: range, outputRange: [-24, 0, 24, 24, 0, -24, -24, 0, 24] }) }],
-                        },
-                      ]}
-                    >
-                      <Text style={[styles.newsKicker, { color: it.tint }]}>{it.kicker}</Text>
-                      <Text style={styles.newsTitle}>{it.title}</Text>
-                      <Text style={styles.newsText} numberOfLines={2}>
-                        {it.text}
-                      </Text>
-                    </Animated.View>
-                  );
-                })}
-              </View>
-              <View style={styles.pips}>
-                {NEWS.map((it, i) => (
-                  <Pressable key={i} focusable={false} onPress={() => goTo(i, i > idx ? 1 : -1)} hitSlop={6} style={{ cursor: 'pointer' }}>
-                    <View style={[styles.pip, i === idx && styles.pipActive]}>
-                      {i === idx ? (
-                        <Animated.View
-                          style={[
-                            styles.pipFill,
-                            { backgroundColor: NEWS[idx].tint, transform: [{ scaleX: paused || !active ? 1 : timer }] },
-                          ]}
-                        />
-                      ) : null}
-                    </View>
-                  </Pressable>
-                ))}
-                <View style={{ flex: 1 }} />
-                <Text style={styles.newsMore}>{paused ? 'Paused' : 'Read more'}</Text>
-              </View>
+            <View style={styles.pips}>
+              {NEWS.map((it, i) => (
+                <Pressable key={i} focusable={false} onPress={() => goTo(i, i > idx ? 1 : -1)} hitSlop={6} style={{ cursor: 'pointer' }}>
+                  <View style={[styles.pip, i === idx && styles.pipActive]}>
+                    {i === idx ? (
+                      <Animated.View
+                        style={[
+                          styles.pipFill,
+                          { backgroundColor: NEWS[idx].tint, transform: [{ scaleX: paused || !active ? 1 : timer }] },
+                        ]}
+                      />
+                    ) : null}
+                  </View>
+                </Pressable>
+              ))}
+              <View style={{ flex: 1 }} />
+              <Text style={styles.newsMore}>{paused ? 'Paused' : 'Read more'}</Text>
             </View>
-          </Animated.View>
-        )}
+          </View>
+        </Animated.View>
       </Pressable>
     </Animated.View>
   );
@@ -392,22 +388,18 @@ function QuitDialog({ onCancel, onQuit }) {
 
 function DialogButton({ label, glyph, glyphColor, onPress, autoFocus, danger }) {
   return (
-    <Pressable autoFocus={autoFocus} onPress={onPress} style={{ flex: 1, cursor: 'pointer' }}>
-      {({ hovered, focused, pressed }) => (
-        <View
-          style={[
-            styles.dialogBtn,
-            danger && styles.dialogBtnDanger,
-            (hovered || focused) && (danger ? styles.dialogBtnDangerHot : styles.dialogBtnHot),
-            pressed && { transform: [{ scale: 0.96 }] },
-          ]}
-        >
-          <View style={[styles.keyGlyph, { borderColor: glyphColor, width: 22, height: 22 }]}>
-            <Text style={[styles.keyGlyphText, { color: glyphColor }]}>{glyph}</Text>
-          </View>
-          <Text style={styles.dialogBtnText}>{label}</Text>
+    <Pressable autoFocus={autoFocus} onPress={onPress} group style={{ flex: 1, cursor: 'pointer' }}>
+      <View
+        style={[styles.dialogBtn, danger && styles.dialogBtnDanger]}
+        groupHoveredStyle={danger ? styles.dialogBtnDangerHot : styles.dialogBtnHot}
+        groupFocusedStyle={danger ? styles.dialogBtnDangerHot : styles.dialogBtnHot}
+        groupPressedStyle={styles.pressed96}
+      >
+        <View style={[styles.keyGlyph, { borderColor: glyphColor, width: 22, height: 22 }]}>
+          <Text style={[styles.keyGlyphText, { color: glyphColor }]}>{glyph}</Text>
         </View>
-      )}
+        <Text style={styles.dialogBtnText}>{label}</Text>
+      </View>
     </Pressable>
   );
 }
@@ -418,7 +410,11 @@ export default function MainMenu({ active = true }) {
   const [sel, setSel] = useState(0);
   const [toast, setToast] = useState(null);
   const [confirm, setConfirm] = useState(false);
-  const [ping, setPing] = useState(38);
+  // The ping readout is a native value: a new reading every 2.4 s is a
+  // setValue, not a render of the whole screen.
+  const ping = useRef(new Animated.Value(38, { useNativeDriver: true })).current;
+  const pingText = useMemo(() => Animated.format(ping, { decimals: 0, prefix: 'v4.2.0 · EU-West · ', suffix: ' ms' }), [ping]);
+  const pingColor = useMemo(() => ping.interpolate({ inputRange: [40, 41], outputRange: [colors.green, colors.orange], extrapolate: 'clamp' }), [ping]);
 
   const intro = useValue(active ? 0 : 1);
   const items = useRef(ITEMS.map(() => new Animated.Value(active ? 0 : 1))).current;
@@ -461,7 +457,7 @@ export default function MainMenu({ active = true }) {
       ),
     ];
     loops.forEach((l) => l.start());
-    const id = setInterval(() => setPing(34 + Math.round(Math.random() * 9)), 2400);
+    const id = setInterval(() => ping.setValue(34 + Math.round(Math.random() * 9)), 2400);
     return () => {
       loops.forEach((l) => l.stop());
       clearInterval(id);
@@ -545,25 +541,23 @@ export default function MainMenu({ active = true }) {
       ))}
 
       <Animated.View style={[styles.topBar, { opacity: intro, transform: [{ translateY: intro.interpolate({ inputRange: [0, 1], outputRange: [-20, 0] }) }] }]}>
-        <Pressable onPress={() => setToast({ text: 'Opening profile · Valkyrie_07', at: Date.now() })} focusable={false} style={{ cursor: 'pointer' }}>
-          {({ hovered }) => (
-            <View style={[styles.profile, hovered && styles.profileHot]}>
-              <Image source={require('../../../examples/assets/crest-wolf.png')} style={styles.crest} />
-              <View>
-                <Text style={styles.profileName}>Valkyrie_07</Text>
-                <Text style={styles.profileLevel}>Level 42 · Vanguard</Text>
-              </View>
-              <View style={styles.divider} />
-              <View style={styles.currency}>
-                <View style={[styles.coin, { experimental_backgroundImage: 'radial-gradient(circle at 35% 35%, #fff2c2 0%, #f2c35b 45%, #a8741f 100%)' }]} />
-                <Text style={styles.currencyText}>12,480</Text>
-              </View>
-              <View style={styles.currency}>
-                <View style={[styles.coin, { borderRadius: 3, transform: [{ rotate: '45deg' }], experimental_backgroundImage: 'linear-gradient(135deg, #d6b8ff 0%, #8a4dff 100%)' }]} />
-                <Text style={styles.currencyText}>860</Text>
-              </View>
+        <Pressable onPress={() => setToast({ text: 'Opening profile · Valkyrie_07', at: Date.now() })} focusable={false} group style={{ cursor: 'pointer' }}>
+          <View style={styles.profile} groupHoveredStyle={styles.profileHot}>
+            <Image source={require('../../../examples/assets/crest-wolf.png')} style={styles.crest} />
+            <View>
+              <Text style={styles.profileName}>Valkyrie_07</Text>
+              <Text style={styles.profileLevel}>Level 42 · Vanguard</Text>
             </View>
-          )}
+            <View style={styles.divider} />
+            <View style={styles.currency}>
+              <View style={[styles.coin, { experimental_backgroundImage: 'radial-gradient(circle at 35% 35%, #fff2c2 0%, #f2c35b 45%, #a8741f 100%)' }]} />
+              <Text style={styles.currencyText}>12,480</Text>
+            </View>
+            <View style={styles.currency}>
+              <View style={[styles.coin, { borderRadius: 3, transform: [{ rotate: '45deg' }], experimental_backgroundImage: 'linear-gradient(135deg, #d6b8ff 0%, #8a4dff 100%)' }]} />
+              <Text style={styles.currencyText}>860</Text>
+            </View>
+          </View>
         </Pressable>
       </Animated.View>
 
@@ -618,8 +612,8 @@ export default function MainMenu({ active = true }) {
         <KeyHint glyph="B" label="Back" color="#ff6b81" flash={flash.B} />
         <KeyHint glyph="Y" label="Patch Notes" color="#ffd36b" flash={flash.Y} />
         <View style={{ flex: 1 }} />
-        <View style={[styles.pingDot, { backgroundColor: ping > 40 ? colors.orange : colors.green }]} />
-        <Text style={styles.version}>v4.2.0 · EU-West · {ping} ms</Text>
+        <Animated.View style={[styles.pingDot, { backgroundColor: pingColor }]} />
+        <Animated.Text style={styles.version} text={pingText} />
       </Animated.View>
 
       <Toast toast={toast} />
@@ -818,6 +812,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.lineStrong,
   },
+  pressed96: { transform: [{ scale: 0.96 }] },
   dialogBtnHot: { borderColor: colors.goldLight, backgroundColor: 'rgba(242,195,91,0.16)', boxShadow: '0 0 20px rgba(242,195,91,0.35)' },
   dialogBtnDanger: { borderColor: 'rgba(255,77,106,0.4)' },
   dialogBtnDangerHot: { borderColor: colors.red, backgroundColor: 'rgba(255,77,106,0.18)', boxShadow: '0 0 20px rgba(255,77,106,0.4)' },
