@@ -213,3 +213,29 @@ test('navigating between pages and back keeps the live node count stable', async
   // Every JS instance has a live native node behind it.
   assert.equal(live(), mock.nodes.size - 1);
 });
+
+test('host updates: unchanged props skip the bridge, a removed prop does not', () => {
+  let set;
+  const handler = () => {};
+  function App() {
+    const [p, s] = useState({ nativeID: 'a', testID: 't' });
+    set = (v) => flushSync(() => s(v));
+    // A new handler per render when `fresh` is set: not a change either.
+    return h(View, Object.assign({ style: styles.box, onPointerDown: p.fresh ? () => {} : handler }, p), h(Text, null, 'x'));
+  }
+  render(h(App));
+  const view = () => mock.tree()[2][1];
+  mock.reset();
+  set({ nativeID: 'a', testID: 't' }); // the same values
+  set({ nativeID: 'a', testID: 't', fresh: 1 });
+  assert.equal(mock.count('setProps'), 1, 'only for the new `fresh` prop');
+  set({ nativeID: 'a', testID: 't', fresh: 1 });
+  set({ nativeID: 'a', fresh: 1 }); // testID removed, everything else the same
+  assert.equal(mock.count('setProps'), 2);
+  assert.equal(view().testID, undefined);
+  set({ nativeID: 'a', fresh: 1 });
+  set({ nativeID: 'b', fresh: 1 });
+  assert.equal(mock.count('setProps'), 3);
+  assert.equal(view().nativeID, 'b');
+  render(null);
+});

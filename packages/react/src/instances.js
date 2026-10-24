@@ -108,13 +108,18 @@ export function nativePropsChanged(a, b) {
 
 // Cheap pre-check on the React props: identical values (or a handler swapped
 // for another handler) cannot change what native sees, so most re-renders
-// skip building and diffing native props entirely.
-function mayDiffer(a, b) {
+// skip building and diffing native props entirely. `inst.propCount` is the
+// number of keys of inst.props when known (-1 otherwise): the for-in over
+// the old props that the key count needs is paid only when it is not.
+function mayDiffer(inst, a, b) {
   // The style is the prop that changes most (a new array or object per
   // render): answer from it before paying for a for-in over the props.
   const sb = b.style;
   const sa = a.style;
-  if (sb !== sa && !(typeof sb === 'function' && typeof sa === 'function')) return true;
+  if (sb !== sa && !(typeof sb === 'function' && typeof sa === 'function')) {
+    inst.propCount = -1;
+    return true;
+  }
   let n = 0;
   for (const k in b) {
     n++;
@@ -122,10 +127,16 @@ function mayDiffer(a, b) {
     const y = a[k];
     if (x === y || k === 'children') continue;
     if (typeof x === 'function' && typeof y === 'function') continue;
+    inst.propCount = -1;
     return true;
   }
-  for (const k in a) n--;
-  return n !== 0;
+  let m = inst.propCount;
+  if (m < 0) {
+    m = 0;
+    for (const k in a) m++;
+  }
+  inst.propCount = n;
+  return n !== m;
 }
 
 // Runtimes with __jsui_native.updateProps build and diff the native props
@@ -146,6 +157,7 @@ export class HostInstance {
     this.id = id;
     this.type = type;
     this.props = props;
+    this.propCount = -1;  // keys in props, when known (mayDiffer)
     this.parent = null;
     this.hidden = false;
     this.responderState = null;
@@ -171,7 +183,7 @@ export class HostInstance {
   update(props) {
     const old = this.props;
     this.props = props;
-    if (!mayDiffer(old, props)) return;
+    if (!mayDiffer(this, old, props)) return;
     if (NATIVE_PROPS) {
       bridgeCalls++;
       native.updateProps(this.id, props, this.hidden);
@@ -244,6 +256,7 @@ export class HostInstance {
     if (rest) {
       // Non-style props: merge into the React props so later diffs agree.
       this.props = Object.assign({}, this.props, rest);
+      this.propCount = -1;
       if (NATIVE_PROPS) {
         // The style keeps what patchStyle wrote: only the other props move.
         bridgeCalls++;

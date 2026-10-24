@@ -177,6 +177,7 @@ export const hostConfig = {
   hideInstance: (inst) => inst.setHidden(true),
   unhideInstance(inst, props) {
     inst.props = props;
+    inst.propCount = -1;
     inst.setHidden(false);
   },
   hideTextInstance: (ti) => native.setText(ti.id, ''),
