@@ -16,6 +16,7 @@
 #include "core/document.h"
 #include "js/bytecode.h"
 #include "js/engine_impl.h"
+#include "js/inspector.h"
 #include "runtime.h"
 
 namespace jsui {
@@ -284,6 +285,9 @@ void JsEngine::Impl::drain() {
 
 void JsEngine::Impl::reportValue(JSValueConst exc, const char* prefix) {
   std::string msg = prefix + formatError(ctx, exc);
+#if JSUI_DEBUGGER
+  if (inspector) inspector->exception(exc, std::string(prefix) + "Uncaught");
+#endif
   if (interrupted) {
     msg = "Script timed out: a single JS call ran longer than " + std::to_string(int(timeoutMs)) +
           " ms and was interrupted (js_timeout_ms).\n" + msg;
@@ -612,6 +616,9 @@ QuickJsEngine::QuickJsEngine(Runtime& rt) : impl_(std::make_unique<Impl>(rt)) {
 QuickJsEngine::~QuickJsEngine() {
   Impl& impl = *impl_;
   JSContext* ctx = impl.ctx;
+#if JSUI_DEBUGGER
+  if (impl.inspector) impl.inspector->detach(ctx);  // holds values of this context
+#endif
   impl.alive.reset();  // loader callbacks still queued become no-ops
   for (auto& [id, p] : impl.pending) {
     impl.rt.loader.cancel(id);
@@ -678,6 +685,17 @@ bool QuickJsEngine::eval(const std::string& source, const std::string& name) {
                               name.c_str(), int(parts.key.size()), parts.key.data());
     }
   } else {
+#if JSUI_DEBUGGER
+    // The debugger first: only code parsed after it is attached can stop.
+    if (const std::shared_ptr<Inspector>& ins = impl.rt.inspector) {
+      if (!impl.inspector) {
+        ins->attach(impl.ctx);
+        impl.inspector = ins;
+        impl.timeoutMs = 0;  // a breakpoint is not a hung script
+      }
+      ins->scriptLoaded(name, source);
+    }
+#endif
     r = evalSource(impl.ctx, source, name);
   }
   bool ok = !JS_IsException(r);

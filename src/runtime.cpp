@@ -17,6 +17,7 @@
 #include "input/input.h"
 #include "js/bytecode.h"
 #include "js/engine.h"
+#include "js/inspector.h"
 #include "render/image_cache.h"
 #include "render/lottie.h"
 #include "render/shader_view.h"
@@ -452,13 +453,28 @@ void Runtime::loadUrl(const std::string& url) {
     }
     // A dev server may stamp the bundle with its version so a change between
     // this response and the first poll is not missed.
-    bool session = false;
+    bool session = false, inspect = false;
     for (auto& [k, v] : res.headers) {
       if (lower(k) == "x-jsui-version") devVersion_ = trimmed(v);
       if (lower(k) == "x-jsui-session") session = true;
+      if (lower(k) == "x-jsui-inspect") inspect = true;
     }
     sessionOffered_ = session;
     if (this->session) this->session->setOffered(session);
+#if JSUI_DEBUGGER
+    // The dev server debugs: the JS context gets the debugger before the
+    // bundle is parsed (QuickJS, over the built-in HTTP client).
+    if (inspect && config.dev_mode && !devOrigin_.empty() && devOrigin_.rfind("http://", 0) == 0 && js->runsBytecode()) {
+      if (!inspector || inspector->origin() != devOrigin_)
+        inspector = std::make_shared<Inspector>(devOrigin_, this->session ? this->session->id() : std::string("jsui"),
+                                                this->session ? this->session->displayName() : std::string("JSUI"));
+      inspector->setTitle(bundleUrl);
+    } else {
+      inspector.reset();
+    }
+#else
+    (void)inspect;
+#endif
     loadSource(res.text(), bundleUrl);
   });
 }
@@ -562,6 +578,9 @@ double Runtime::wallMs() {
 void Runtime::tick(double nowMs) {
   now = nowMs;
   tickWallStart = wallMs();
+#if JSUI_DEBUGGER
+  if (inspector) inspector->poll();  // DevTools requests made while JS was idle
+#endif
   doomed_.clear();
   for (auto& s : surfaces_) s->doc.now = nowMs;
   if (reloadRequested_) reload();

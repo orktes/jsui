@@ -33,6 +33,7 @@ class ShaderEffects;
 class NativeAnimated;
 
 class DevSession;
+class Inspector;
 
 class Runtime {
  public:
@@ -159,6 +160,10 @@ class Runtime {
   ResourceLoader loader;
   // Dev mode: this runtime's side of the dev server's shared session.
   std::unique_ptr<DevSession> session;
+  // Dev mode with a debugging dev server: the JS debugger (js/inspector.h;
+  // null in builds without JSUI_DEBUGGER). Outlives the JS contexts, so
+  // DevTools stays attached across reloads.
+  std::shared_ptr<Inspector> inspector;
   std::unique_ptr<ImageCache> images;
   // Lottie sources and playing LottieViews (render/lottie.h).
   std::unique_ptr<LottieCache> lotties;

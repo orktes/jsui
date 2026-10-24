@@ -16,6 +16,7 @@ npx @orktes/jsui-cli skill install            # -> .claude/skills/jsui/ (--globa
   optional Skia Ganesh GPU backend (`jsui_render_gl`).
 * Native and **WebAssembly** builds from one codebase.
 * Dev mode: point the runtime at `jsui dev` and edits hot-update in place (React Fast Refresh keeps component state), with an error overlay for build and runtime errors.
+* JS debugging from Chrome DevTools or VS Code in every native runtime (breakpoints in your JSX, stepping, scopes, console), through `jsui dev`. See [docs/DEBUGGING.md](docs/DEBUGGING.md).
 * Reference tests compare every example pixel-by-pixel with the same code
   rendered by react-native-web in headless Chrome.
 

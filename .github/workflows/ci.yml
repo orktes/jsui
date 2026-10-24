@@ -47,6 +47,7 @@ jobs:
               - 'cmake/**'
               - 'CMakeLists.txt'
               - 'assets/**'
+              - 'third_party/quickjs-*/**'
               - '.github/workflows/**'
             native:
               - *core
@@ -1359,6 +1360,10 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Reference tests
         run: npm run test:reference
+      - name: JS debugger end to end (jsui dev + a dev-mode native runtime)
+        env:
+          JSUI_RENDER: build/jsui-render
+        run: node --test packages/cli/test/inspect-native.test.js
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4

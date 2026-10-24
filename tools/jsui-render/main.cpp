@@ -1,10 +1,13 @@
 // jsui-render: run a bundle headlessly and write the frame as PNG.
 //
 //   jsui-render bundle.js -o out.png [--width 800] [--height 600] [--scale 1]
-//               [--wait-ms 200] [--font Family=path.ttf ...]
+//               [--wait-ms 200] [--font Family=path.ttf ...] [--dev]
 //
 // Time is simulated: the runtime is ticked in 16ms steps until --wait-ms has
 // elapsed and there are no in-flight resource loads (images, fonts, fetch).
+// --dev runs in dev mode and in real time instead (a headless runtime for
+// `jsui dev`: hot updates, the shared session, the JS debugger).
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -29,6 +32,7 @@ int main(int argc, char** argv) {
   int width = 800, height = 600;
   float scale = 1;
   double waitMs = 200;
+  bool dev = false;
   std::vector<std::pair<std::string, std::string>> fonts;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -44,6 +48,7 @@ int main(int argc, char** argv) {
     else if (a == "--height") height = std::atoi(next().c_str());
     else if (a == "--scale") scale = float(std::atof(next().c_str()));
     else if (a == "--wait-ms") waitMs = std::atof(next().c_str());
+    else if (a == "--dev") dev = true;
     else if (a == "--font") {
       std::string v = next();
       auto eq = v.find('=');
@@ -54,7 +59,7 @@ int main(int argc, char** argv) {
       fonts.emplace_back(v.substr(0, eq), v.substr(eq + 1));
     } else if (a == "-h" || a == "--help") {
       std::printf("usage: jsui-render <bundle.js|url> -o out.png [--width W] [--height H] [--scale S] "
-                  "[--wait-ms MS] [--font Family=path]\n");
+                  "[--wait-ms MS] [--font Family=path] [--dev]\n");
       return 0;
     } else bundle = a;
   }
@@ -69,6 +74,7 @@ int main(int argc, char** argv) {
   cfg.width = width;
   cfg.height = height;
   cfg.pixel_ratio = scale;
+  cfg.dev_mode = dev ? 1 : 0;
   JsuiRuntime* rt = jsui_create(&cfg);
   // Simulated time: no wall-clock frame budget, so what a frame shows does
   // not depend on how fast this machine is (transitions render whole).
@@ -94,7 +100,14 @@ int main(int argc, char** argv) {
   };
   jsui_tick(rt, t);
   settle();  // the bundle
+  auto start = std::chrono::steady_clock::now();
   for (int i = 0; t <= waitMs || i < 2; i++, t += 16) {
+    if (dev) {
+      std::this_thread::sleep_until(start + std::chrono::milliseconds(int64_t(t)));
+      // A breakpoint stops the clock: carry on from the real time.
+      t = std::max(t, double(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - start).count()));
+    }
     jsui_tick(rt, t);
     if (jsui_pending_loads(rt) > 0) settle();  // images, fonts, fetch()
   }

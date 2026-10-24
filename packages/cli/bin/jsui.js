@@ -23,14 +23,18 @@ const USAGE = `usage:
        source    plain JS (browser JS engines, other tools)
        split     bytecode in <out>, the source next to it in
                  <name>.source.js; the runtime reads it only as the fallback
-  jsui dev <entry> [--port 5173] [--host 127.0.0.1] [--no-hmr] [--react-compiler]
-     [--headless [view options]]
+  jsui dev <entry> [--port 5173] [--host 127.0.0.1] [--no-hmr] [--no-inspect]
+     [--react-compiler] [--headless [view options]]
      Every runtime that loads the bundle in dev mode joins the server's shared
      session: http://127.0.0.1:5173/shared in a browser, the native viewer
      (jsui-viewer --dev <url>/bundle.js), a Godot JsuiView in dev mode, ...
      Agents (--attach) drive the live one: the last to join, or --client.
      --headless also runs one inside the server (no window needed), streamed
      to /shared.
+     Debug the app's JS (breakpoints in your JSX/TS, via source maps) from
+     Chrome (chrome://inspect -> Configure... -> add 127.0.0.1:5173) or
+     VS Code (launch.json: {"type": "node", "request": "attach", "port": 5173});
+     the runtime must be built with the debugger. --no-inspect turns it off.
 
   jsui screenshot <entry> [-o screenshot.png] [--wait 1000] [view options]
   jsui inspect <entry> [--wait 1000] [--find <selector>] [--json] [view options]
@@ -261,6 +265,7 @@ async function main(argv) {
       port: { type: 'string', short: 'p' },
       host: { type: 'string' },
       'no-hmr': { type: 'boolean' },
+      'no-inspect': { type: 'boolean' },
       format: { type: 'string' },
       'react-compiler': { type: 'boolean' },
       'no-react-compiler': { type: 'boolean' },
@@ -361,7 +366,7 @@ async function main(argv) {
         const v = viewOptions(values, entry);
         headlessView = { width: v.width, height: v.height, scale: v.scale, fps: v.fps, component: v.component, props: v.props, state: v.state, js: v.js };
       }
-      const server = await dev({ entry, port, host: values.host || '127.0.0.1', hmr: !values['no-hmr'], reactCompiler: reactCompilerOption(values), headless: headlessView });
+      const server = await dev({ entry, port, host: values.host || '127.0.0.1', hmr: !values['no-hmr'], inspect: !values['no-inspect'], reactCompiler: reactCompilerOption(values), headless: headlessView });
       const stop = async () => {
         await server.close();
         process.exit(0);
