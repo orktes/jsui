@@ -948,7 +948,8 @@ void JsuiView::setupPipelineCache(const String& renderer) {
 void JsuiView::render() {
   if (pixel_w_ <= 0 || pixel_h_ <= 0) return;
   render_pending_ = false;
-  const bool gpuRenderer = renderer_ == Renderer::Vulkan || renderer_ == Renderer::Metal || renderer_ == Renderer::WebGPU;
+  const bool gpuRenderer = renderer_ == Renderer::Vulkan || renderer_ == Renderer::Metal ||
+                           renderer_ == Renderer::WebGPU || renderer_ == Renderer::D3D12;
   // Also when the runtime's Skia context is not there (yet): a surface view
   // that moved to another runtime view, or one that dropped its context.
   if (renderer_ == Renderer::Unknown || (gpuRenderer && !runtimeView()->gpu_)) chooseRenderer();
@@ -957,7 +958,7 @@ void JsuiView::render() {
   // every other render queues the frames batched so far first, since it may
   // run the game's code (frame_rendered, the texture's `changed`) and that
   // must not see views in an unqueued batch (they could go meanwhile).
-  if (renderer_ == Renderer::Vulkan || renderer_ == Renderer::Metal || renderer_ == Renderer::WebGPU) {
+  if (gpuRenderer) {
     if (!renderGpu()) {
       gpuFailed();
       runtimeView()->queueFrameJob();
@@ -1087,6 +1088,7 @@ String JsuiView::get_renderer() const {
     case Renderer::Vulkan: return "vulkan";
     case Renderer::Metal: return "metal";
     case Renderer::WebGPU: return "webgpu";
+    case Renderer::D3D12: return "d3d12";
     case Renderer::Cpu: return "cpu";
     default: return "";
   }
@@ -1770,13 +1772,17 @@ void JsuiView::syncTextures() {
       JsuiTexture t{};
       t.kind = gpu_api_ == Renderer::Vulkan  ? JSUI_TEXTURE_VULKAN
                : gpu_api_ == Renderer::Metal ? JSUI_TEXTURE_METAL
+               : gpu_api_ == Renderer::D3D12 ? JSUI_TEXTURE_D3D12
                                              : JSUI_TEXTURE_WEBGPU;
       t.handle = e.cur.handle;
       t.format = e.cur.format;
       t.width = e.cur.w;
       t.height = e.cur.h;
       t.flags = e.flags;
-      t.usage = 0;  // Vulkan: sampled + transfer src / dst, as the mirror is created
+      // Vulkan: sampled + transfer src / dst, as the mirror is created. D3D12:
+      // the state the mirror is in when JSUI renders, COPY_DEST (Godot's
+      // tracker leaves it there after the copy; JSUI transitions it back).
+      t.usage = gpu_api_ == Renderer::D3D12 ? 0x400u : 0u;
       e.gpu_set = jsui_set_texture(rt, e.key.c_str(), &t) >= 0;
       e.gpu_flags = e.flags;
       e.pixels_set = false;

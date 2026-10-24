@@ -55,8 +55,10 @@ npx jsui build integrations/godot/demo/ui/app.jsx -o integrations/godot/demo/ui/
 That build uses the prebuilt Skia m124, which has no Vulkan, Metal or
 Graphite: the view then always uses the CPU renderer. For the GPU renderer,
 build Skia m157 from source first (Linux: Graphite + Vulkan; macOS:
-Graphite + Metal; both also Graphite + Dawn for the godot-aw3 fork; about
-25 minutes on 4 cores, done once) and point CMake at it:
+Graphite + Metal; Windows, from Git Bash with LLVM's clang-cl: Graphite +
+Vulkan and Ganesh + Direct3D 12; all also Graphite + Dawn for the godot-aw3
+fork; about 25 minutes on 4 cores, done once) and point CMake at it (the
+release's Windows `.dll` is built this way):
 
 ```sh
 scripts/build-skia-desktop.sh            # -> third_party/skia-desktop
@@ -323,7 +325,7 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | `get_texture()` | the `Texture2D` being drawn (premultiplied RGBA): a `Texture2DRD` with the GPU renderer, an `ImageTexture` with the CPU one |
 | `get_frame_image()` | CPU copy of the last frame, straight alpha, works with `--headless` (with the GPU renderer it reads the texture back: slow, for tests and screenshots) |
 | `get_cpu_frame_image()` | the current frame painted by the CPU raster, straight alpha, whatever the renderer (to compare with `get_frame_image()`) |
-| `get_renderer()` | `"vulkan"`, `"metal"` or `"cpu"` (`""` before the first frame) |
+| `get_renderer()` | `"vulkan"`, `"metal"`, `"d3d12"`, `"webgpu"` or `"cpu"` (`""` before the first frame) |
 | `get_render_stats()` | Dictionary: `renderer`, `renders`, `render_usec_total` / `_last` / `_max` (time in the view's render call, CPU side), `dirty_pixels_total`, `tick_usec_last` (the last `jsui_tick`); GPU renderer: `gpu_jobs` (the view's frames handed to the render thread without waiting), `render_thread_jobs` (the render-thread jobs those went in: one per frame for all the views of a runtime; the runtime view's count), `gpu_frame_in_flight` (the last frame handed over is not painted yet), `blocking_waits` / `main_wait_usec_total` (times the main thread waited for the render thread, and for how long), `gpu_job_usec_total` / `jsui_render_usec_total` (render-thread time of the view's GPU renders, and of `jsui_render_gpu_target` in them); `pipelines` (the runtime's pipeline cache, `jsui_gpu_get_pipeline_stats`: `mode` `"thread"` / `"sliced"`, `queued`, `precompiled`, `failed`, `compiled` on demand, `added` to the file, `unserializable`, `known`, and the `file`) |
 | `get_perf(reset = true)` | Dictionary (`jsui_get_perf`) since the last reset: exclusive time per phase in µs (`js_us`, `commit_us`, `animated_us`, `style_us`, `layout_us`, `input_us`, `paint_us`, `gpu_submit_us`, `other_us`; with `profiling` on) and counters (`image_decodes`, `image_decode_us`, `pipeline_compiles`, `paragraph_builds`, `text_measures`, `layout_passes`, `bridge_calls`) |
 | `get_pending_loads()` | bundle/image/font/fetch loads in flight |
@@ -570,7 +572,8 @@ Surface views (`runtime_view`) play through their runtime view, whose
   | godot-aw3's `webgpu` driver (`WebGPUInterop` singleton, same Dawn revision) | `webgpu`: Skia Graphite on Godot's `WGPUDevice` and queue ([below](#webgpu-dawn-on-the-godot-aw3-fork)) |
   | Forward+ / Mobile on Vulkan (Linux, Windows) | `vulkan`: Skia Graphite on Godot's `VkDevice` and main queue |
   | Forward+ / Mobile on Metal (macOS, Apple Silicon) | `metal`: Skia Graphite on Godot's `MTLDevice` and command queue |
-  | Compatibility (OpenGL), headless, D3D12, `force_cpu` | `cpu`: CPU raster + `ImageTexture` upload |
+  | Forward+ / Mobile on Direct3D 12 (Windows) | `d3d12`: Skia Ganesh on Godot's `ID3D12Device` and DIRECT queue (Graphite has no D3D backend; no pipeline cache) |
+  | Compatibility (OpenGL), headless, `force_cpu` | `cpu`: CPU raster + `ImageTexture` upload |
 
   It also falls back to `cpu` (with a warning) when the library was built
   against a Skia without that backend, when Skia rejects the device, when
@@ -758,8 +761,14 @@ imported copies (`ResourceLoader`).
   synchronously when it is a `res://` / `user://` file (preload big ones).
 * The macOS library is named `.universal` but a source-built Skia is for the
   host architecture only.
-* Built and tested on Linux x86_64 (CI: headless, OpenGL and Vulkan via
-  lavapipe). Windows (Vulkan / D3D12) is not built or tested.
+* Tested in Godot on Linux x86_64 (CI: headless, OpenGL and Vulkan via
+  lavapipe). Windows is built in CI with the Vulkan and Direct3D 12 GPU
+  paths, and the library's Vulkan and D3D12 backends are tested there
+  (lavapipe, WARP), but the GDExtension has not been run in Godot on
+  Windows yet. D3D12: src stays in `COPY_SOURCE` between frames (as on
+  Vulkan); Ganesh's legacy resource barriers assume Godot's tracked state
+  for it is that, which should hold in both of Godot's barrier modes
+  (legacy states and enhanced barriers) but is unverified.
 
 ## Verifying Metal on a Mac
 
