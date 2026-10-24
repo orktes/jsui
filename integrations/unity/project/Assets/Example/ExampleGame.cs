@@ -55,8 +55,13 @@ public class ExampleGame : MonoBehaviour
     bool paused_, dragging_;
     Vector2 lastMouse_;
     int clicks_, wheel_, keys_;
-    float fpsWindow_ = -1;
-    int fpsFrames_, fps_;
+    // FPS over the last 60 frames after a 10-frame warm-up, shown at most
+    // every 250 ms (FpsCounter in integrations/shared/example_host.h).
+    const int kFpsWindow = 60, kFpsWarmup = 10;
+    readonly double[] frameTimes_ = new double[60];
+    long framesSeen_;
+    double fpsShownAt_ = -1;
+    int fps_;
     string lastState_;
 
     // Command line.
@@ -235,16 +240,7 @@ public class ExampleGame : MonoBehaviour
         }
 
         PublishFrameData();
-        float now = Time.realtimeSinceStartup;
-        if (fpsWindow_ < 0) fpsWindow_ = now;
-        fpsFrames_++;
-        if (fps_ == 0 && now > fpsWindow_) fps_ = Mathf.RoundToInt(fpsFrames_ / (now - fpsWindow_));  // until the first window closes
-        if (now - fpsWindow_ >= 0.5f)
-        {
-            fps_ = Mathf.RoundToInt(fpsFrames_ / (now - fpsWindow_));
-            fpsFrames_ = 0;
-            fpsWindow_ = now;
-        }
+        CountFrame(Time.realtimeSinceStartupAsDouble);
         PublishState();
     }
 
@@ -259,6 +255,19 @@ public class ExampleGame : MonoBehaviour
             if (r != 0) Finish(r > 0 ? 0 : 1);
         }
         if (frames_ >= 0 && frame_ >= frames_) Finish(0);
+    }
+
+    void CountFrame(double now)
+    {
+        if (framesSeen_++ < kFpsWarmup) return;
+        long n = framesSeen_ - kFpsWarmup;  // frames in the ring, up to kFpsWindow
+        frameTimes_[(n - 1) % kFpsWindow] = now;
+        if (n < 20) return;
+        double oldest = frameTimes_[n < kFpsWindow ? 0 : n % kFpsWindow];
+        long count = n < kFpsWindow ? n : kFpsWindow;
+        if (now <= oldest || (fpsShownAt_ >= 0 && now - fpsShownAt_ < 0.25)) return;
+        fps_ = (int)Math.Round((count - 1) / (now - oldest));
+        fpsShownAt_ = now;
     }
 
     // Unit screen positions for the nameplates: x, y, visible, hue (logical px).
