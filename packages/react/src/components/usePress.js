@@ -375,11 +375,26 @@ export const PRESS_PROPS = [
   'rejectResponderTermination',
 ];
 
+// Omit list (a module constant) -> its keys as a lookup object: a property
+// read per prop instead of an indexOf scan of the list.
+const keySets = new WeakMap();
+function keySet(list) {
+  let set = keySets.get(list);
+  if (!set) {
+    set = Object.create(null);
+    for (let i = 0; i < list.length; i++) set[list[i]] = true;
+    keySets.set(list, set);
+  }
+  return set;
+}
+
 /** Copies `props` minus `omit` keys (array) into a new object. */
 export function omit(props, omitList, extra) {
+  const a = keySet(omitList);
+  const b = extra ? keySet(extra) : null;
   const out = {};
   for (const k in props) {
-    if (omitList.indexOf(k) >= 0 || (extra && extra.indexOf(k) >= 0)) continue;
+    if (a[k] === true || (b !== null && b[k] === true)) continue;
     out[k] = props[k];
   }
   return out;
