@@ -10,30 +10,38 @@ set_target_properties(jsui_unity PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBIL
 
 # GPU path (native/jsui_unity_metal.mm): the plugin is also a Unity native
 # rendering plugin and Skia Graphite draws into a RenderTexture on Unity's
-# own Metal device. It needs Unity's plugin API headers (not vendored: they
-# come with every editor, in Unity.app/Contents/PluginAPI) and a jsui built
-# with JSUI_GRAPHITE_METAL. Without either the plugin is CPU-only.
-set(_unity_api_default "")
-if(APPLE)
-  file(GLOB _unity_api_dirs /Applications/Unity/Hub/Editor/*/Unity.app/Contents/PluginAPI)
-  if(_unity_api_dirs)
-    list(SORT _unity_api_dirs COMPARE NATURAL ORDER DESCENDING)
-    list(GET _unity_api_dirs 0 _unity_api_default)
-  endif()
-endif()
-set(JSUI_UNITY_PLUGIN_API_DIR "${_unity_api_default}" CACHE PATH
-    "Unity's native plugin API headers (Unity.app/Contents/PluginAPI), for the GPU path")
-if(APPLE AND JSUI_GRAPHITE_METAL AND EXISTS "${JSUI_UNITY_PLUGIN_API_DIR}/IUnityGraphicsMetal.h")
+# own Metal device. On by default on macOS with a jsui built with
+# JSUI_GRAPHITE_METAL. The plugin API it calls is declared in
+# native/unity_api/jsui_unity_api.h, so no Unity install is needed; set
+# JSUI_UNITY_PLUGIN_API_DIR (an editor's Unity.app/Contents/PluginAPI) to build
+# against Unity's own headers instead, which also compiles a check that ours
+# match them (native/unity_api/check_unity_api.mm).
+set(JSUI_UNITY_PLUGIN_API_DIR "" CACHE PATH
+    "Optional: Unity's native plugin API headers (Unity.app/Contents/PluginAPI) to build the GPU path against")
+target_include_directories(jsui_unity PRIVATE native/unity_api)
+if(APPLE AND JSUI_GRAPHITE_METAL)
   enable_language(OBJCXX)  # per directory: another subdirectory enabling it does not count here
   target_sources(jsui_unity PRIVATE native/jsui_unity_metal.mm)
-  target_include_directories(jsui_unity PRIVATE ${JSUI_UNITY_PLUGIN_API_DIR})
   target_compile_definitions(jsui_unity PRIVATE JSUI_UNITY_GPU=1)
   set_source_files_properties(native/jsui_unity_metal.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
   target_link_libraries(jsui_unity PRIVATE "-framework Metal" "-framework Foundation")
-  message(STATUS "jsui_unity: GPU path (Metal), Unity plugin API from ${JSUI_UNITY_PLUGIN_API_DIR}")
+  if(JSUI_UNITY_PLUGIN_API_DIR)
+    if(NOT EXISTS "${JSUI_UNITY_PLUGIN_API_DIR}/IUnityGraphicsMetal.h")
+      message(FATAL_ERROR "JSUI_UNITY_PLUGIN_API_DIR: no IUnityGraphicsMetal.h in ${JSUI_UNITY_PLUGIN_API_DIR}")
+    endif()
+    target_include_directories(jsui_unity PRIVATE ${JSUI_UNITY_PLUGIN_API_DIR})
+    target_compile_definitions(jsui_unity PRIVATE JSUI_UNITY_SDK_HEADERS=1)
+    # Not linked into anything: it only has to compile.
+    add_library(jsui_unity_api_check OBJECT native/unity_api/check_unity_api.mm)
+    target_include_directories(jsui_unity_api_check PRIVATE native/unity_api ${JSUI_UNITY_PLUGIN_API_DIR})
+    add_dependencies(jsui_unity jsui_unity_api_check)
+    message(STATUS "jsui_unity: GPU path (Metal), Unity's plugin API from ${JSUI_UNITY_PLUGIN_API_DIR}")
+  else()
+    message(STATUS "jsui_unity: GPU path (Metal), plugin API from native/unity_api")
+  endif()
 else()
   target_compile_definitions(jsui_unity PRIVATE JSUI_UNITY_GPU=0)
-  message(STATUS "jsui_unity: CPU only (needs macOS, JSUI_GRAPHITE_METAL and JSUI_UNITY_PLUGIN_API_DIR)")
+  message(STATUS "jsui_unity: CPU only (the GPU path needs macOS and JSUI_GRAPHITE_METAL)")
 endif()
 
 if(APPLE)
