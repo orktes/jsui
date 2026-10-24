@@ -1766,6 +1766,11 @@ names.
   profile-guided optimization: 6-9% less JS time on React-heavy scenarios
   (also ones outside the training set) and 2-3% on light ones on an M1 Ultra
   with Apple clang; -O2 vs -O3 and frame-pointer flags made no difference.
+  On Linux x86-64 (shared cloud cores, so timing is noisy: medians of 10
+  interleaved suite runs) JS time dropped 2-3% with clang 18 and GCC 13
+  alike, and callgrind counts 3-4% (clang) / 8-9% (GCC) fewer instructions
+  per whole frame on `inventory`, `markers-json-100` and `surfaces-props`
+  (`menu`, with almost no JS, is unchanged).
   `scripts/pgo-quickjs.sh BUILD_DIR [cmake args]` does both stages in one
   build directory: it configures `-DJSUI_QUICKJS_PGO=generate`, builds an
   instrumented jsui-bench and jsui-render, trains on jsui-bench `markers`
