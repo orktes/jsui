@@ -19,7 +19,7 @@ jobs:
   # manual runs build everything). CI config changes run everything.
   changes:
     name: changes
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
+    runs-on: ubuntu-24.04
     # paths-filter lists the PR's files through the API.
     permissions:
       contents: read
@@ -138,7 +138,7 @@ jobs:
   # ------------------------------------------------------------ native (Linux)
   native:
     name: native (ubuntu, clang)
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
+    runs-on: ubuntu-24.04
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.native == 'true'
     steps:
@@ -219,7 +219,7 @@ jobs:
   # composed frame.
   engines:
     name: engine examples (raylib, SDL3, sokol, Unity plugin)
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
+    runs-on: ubuntu-24.04
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.engines == 'true'
     steps:
@@ -292,7 +292,7 @@ jobs:
   # self-test on Mesa's GL under Xvfb.
   bindings:
     name: bindings (Rust, Go)
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
+    runs-on: ubuntu-24.04
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.bindings == 'true'
     steps:
@@ -381,7 +381,7 @@ jobs:
   # without the main thread waiting).
   godot:
     name: godot (GDExtension, ubuntu)
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
+    runs-on: ubuntu-24.04
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.godot == 'true'
     timeout-minutes: 90
@@ -688,7 +688,7 @@ jobs:
       matrix:
         include:
           - arch: x64
-            runner: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
+            runner: ubuntu-24.04
           - arch: arm64
             runner: ubuntu-24.04-arm
     steps:
@@ -1010,7 +1010,7 @@ jobs:
   # --------------------------------------------------------------------- wasm
   wasm:
     name: wasm (emscripten + browser)
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
+    runs-on: ubuntu-24.04
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.wasm == 'true'
     steps:
@@ -1073,7 +1073,7 @@ jobs:
   # on SwiftShader WebGL and compare with the CPU path).
   wasm-webgl:
     name: wasm webgl (emscripten + browser, GPU)
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
+    runs-on: ubuntu-24.04
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.wasm == 'true'
     steps:
@@ -1146,7 +1146,7 @@ jobs:
   # the Skia patch tracks an API Skia does not support upstream yet.
   wasm-webgpu:
     name: wasm webgpu (emscripten + browser, Graphite, advisory)
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
+    runs-on: ubuntu-24.04
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.wasm == 'true'
     continue-on-error: true
@@ -1203,7 +1203,7 @@ jobs:
   # ----------------------------------------------------------------------- js
   js:
     name: js packages
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
+    runs-on: ubuntu-24.04
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.js == 'true'
     steps:
@@ -1240,7 +1240,7 @@ jobs:
   # ---------------------------------------------------------------- reference
   reference:
     name: reference (jsui vs react-native-web)
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'avrea-ubuntu-latest-4-vcpu' }}
+    runs-on: ubuntu-24.04
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.reference == 'true'
     steps:
