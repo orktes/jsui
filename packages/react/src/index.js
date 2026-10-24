@@ -24,8 +24,9 @@ import {
   DrawerLayoutAndroid,
   ProgressBarAndroid,
 } from './components/misc.js';
-import { Animated, makeAnimated, useAnimatedValue, useHostBufferValue } from './animated/index.js';
+import { Animated, makeAnimated, useAnimatedValue, useHostBufferValue, useInteraction } from './animated/index.js';
 import { Easing } from './animated/Easing.js';
+import { Expr, clamp, lerp, step, smoothstep, fract, wrap } from './animated/expression.js';
 import { StyleSheet } from './StyleSheet.js';
 import { processColor } from './color.js';
 import { PanResponder } from './PanResponder.js';
@@ -98,6 +99,15 @@ export {
   processColor,
   useAnimatedValue,
   useHostBufferValue,
+  useInteraction,
+  // Animated.derive expression helpers (animated/expression.js)
+  Expr,
+  clamp,
+  lerp,
+  step,
+  smoothstep,
+  fract,
+  wrap,
   // jsui renderer API
   render,
   unmount,

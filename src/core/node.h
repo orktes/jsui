@@ -15,6 +15,7 @@
 namespace jsui {
 
 class Document;
+struct StateStyles;
 
 enum class NodeType : uint8_t {
   View,        // "View"
@@ -60,6 +61,11 @@ class Node {
   // `props["__events"] = ["press", "pointerMove", ...]` used for hit testing.
   void setProps(const Value& props);
   const Value& props() const { return props_; }
+  // hoveredStyle / pressedStyle / ... / group / interaction (core/state_style.h):
+  // props() holds the blended style; this, the React props and the weights.
+  std::unique_ptr<StateStyles> stateStyles;
+  // Re-applies the state overlays at their current weights (InputManager::tickStates).
+  bool applyStateStyles();
   // Merges `partial` into props().style (a null value removes the key), like
   // setProps with the merged style but without copying the props: when only
   // paint keys change, the style object is updated in place (copy-on-write)
@@ -208,6 +214,7 @@ class Node {
   void clearPaintTree() { paintTreeDirty_ = false; }
 
  private:
+  void applyProps(const Value& props);
   void updatePropFlags();
   // patchStyle's paint-only tail: re-resolves `groups` from the (already
   // merged) style, props_["style"], and invalidates what they affect.

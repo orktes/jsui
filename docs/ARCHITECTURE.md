@@ -1712,12 +1712,30 @@ Native's API and both of its drivers:
     `nativeEvent` map onto native values (`addEventMapping`), applied by
     `InputManager::dispatch` before the event reaches JS (a JS `listener`
     still runs). `Animated.attachNativeEvent` does the same for a ref.
-  * React Native's rules: a native value stays native and a JS-driven
-    animation on it throws; only paint-only style keys can be driven
-    (`opacity`, `transform`, colors, border radii, `shadowOpacity` /
-    `shadowRadius`, ...) and transforms; layout keys throw `Style property
-    'width' is not supported by native animated module`, animated non-style
-    props throw too. `Animated.ValueXY` is native through its channels.
+  * React Native's rules, mostly: a native value stays native and a
+    JS-driven animation on it throws; animated non-style props throw.
+    Unlike React Native, every style key can be driven: paint-only keys
+    (`opacity`, `transform`, colors, border radii, ...) only repaint, and
+    layout keys (`width`, `top`, `margin`, `flex`, ...) take
+    `Node::patchStyle`'s general path and relay out in the same tick
+    (also under `jsui_tick_native`). `Animated.ValueXY` is native through
+    its channels.
+  * Composites: `sequence` / `parallel` / `stagger` / `loop` (and `delay`)
+    whose steps are all native-driven animations run as one native `group`
+    animation (`__nativeSpec()` in animations.js; `NativeAnimated::runStep`):
+    leaf, wait, sequence, parallel (stopTogether) and loop steps (resetting
+    the values to their starting values before each iteration). A step
+    starts on the frame the previous one ended, as the JS composites' end
+    callbacks would, so frames match the JS-orchestrated version; only the
+    group's end reaches JS. Any step that needs JS (a JS-driven animation,
+    `toValue` tracking) keeps the JS composite. A value's `stopAnimation` or
+    a new animation on it stops the whole group.
+  * Text: `<Animated.Text text={node} />` sets the Text's content from an
+    Animated node (`Animated.format(node, {decimals, grouping, prefix,
+    suffix, minDigits})` for numbers): natively a `format` node feeds the
+    props node's `text` input, which sets the view's first RawText child,
+    and React keeps the children it rendered when the view went native, so
+    it never writes stale text. On the JS driver the component re-renders.
   * Writes go through `Node::patchStyle` (paint-only, so no relayout; the
     incremental renderer damages just the node's old and new rects). Each
     `style` node keeps its keys with their paint groups, resolved once when
@@ -1741,10 +1759,71 @@ Native's API and both of its drivers:
     (`FinalizationRegistry`). A reload clears the native graph.
   * Without `__jsui_native.animated` (Node tests, other hosts)
     `useNativeDriver` falls back to the JS driver.
+  * Derived values: `Animated.derive(inputs, fn)` (and `Animated.expr(fn)`
+    to define one up front) compiles `fn`'s body, a pure-math subset of JS
+    (`packages/react/src/animated/expression.js`), into a stack program
+    (`expression` node: constants, inputs, locals, arithmetic, comparisons,
+    `&&` / `||` / `?:` as eager selects, `Math.*` and GLSL-style helpers).
+    The native node validates the program once (ops, operand ranges, stack
+    balance) and runs it without allocating; the JS driver runs the same
+    program, so both agree bit for bit
+    (`tests/native/react_derive_e2e_test.cpp`). Bytecode bundles have no
+    function source, so `jsui build` (`packages/cli/src/derive.js`) rewrites
+    inline `derive(..., fn)` / `.expr(fn)` calls to pass `{source, scope}`:
+    a text pass (strings, comments and template text masked) that uses the
+    runtime's own parser to find the function's end and its free names.
+    Free names are captured at call time: numbers become constants,
+    Animated nodes extra inputs. Functions outside the subset are build
+    warnings and run only on the JS driver (making them native throws).
+  * `Animated.clock()`: a `clock` node, the runtime clock in seconds. Clock
+    nodes with dependents are marked dirty in every `NativeAnimated::tick`
+    and count as animating (`jsui_wants_frame`).
+  * `Animated.interaction()` / `useInteraction()`: `interaction` nodes
+    (`{key, state}`) read the eased 0..1 weight of one state of the element
+    whose `interaction` prop carries `key` (see "State styles"); marked dirty
+    when the weight moved.
   * Not native (yet): `toValue` bound to another Animated node (RN's
     `tracking` node) restarts native animations from JS when the target
     changes; scroll physics (and so `Animated.event` from flings) only
     advance in `jsui_tick`, not in `jsui_tick_native`.
+
+## State styles
+
+Hover / press / focus feedback without JS (`src/core/state_style.*`,
+`src/input/state_styles.cpp`). Host props, on any element:
+`hoveredStyle`, `pressedStyle`, `focusedStyle`, `focusVisibleStyle`,
+`disabledStyle`; `group` (`true` or a name) and, on descendants,
+`groupHoveredStyle` / `groupPressedStyle` / `groupFocusedStyle` /
+`groupFocusVisibleStyle` (+ `groupName`); `transition` (ms or `{duration,
+easing, delay, <state>: ...}`); `interaction` (`{key}`, from
+`useInteraction`).
+
+* `Node::setProps` keeps the React props (`StateStyles::raw`, what it diffs
+  against) and their style as the base; `props()["style"]` is the base with
+  the overlays at their current weights, so re-renders keep the active
+  states.
+* `InputManager::tickStates`, every `jsui_tick` (after input and JS) and
+  `jsui_tick_native`, before native Animated: for each element in
+  `Document::stateNodes`, which states hold (hovered: id on the mouse's
+  hover chain; pressed: a primary pointer press that began on it or a
+  descendant while the pointer is inside its visual rect and not scrolling,
+  an activation key / gamepad A held on it while focused, or a press since
+  the last frame; focused / focusVisible: `focused_`, with keyboard modality;
+  group: the same for the nearest `group` ancestor-or-self, focus within;
+  disabled: the `disabled` prop, which turns hovered / pressed off). Each
+  state's weight eases toward 0 / 1 over its transition (starting a frame
+  back: the input came during the last frame), and changed weights write the
+  overlay keys through `patchStyle` (paint keys re-resolve their groups,
+  layout keys relayout).
+* Blend: per overlay key, from the base value through the states in order
+  (group hovered / focused / focusVisible / pressed, hovered, focused,
+  focusVisible, pressed, disabled), mixing numbers, colors (alpha-weighted,
+  a missing base is the target color transparent), transforms of the same
+  functions (angles in degrees, a missing base is identity) and numeric
+  objects; anything else switches at 0.5. A key the base lacks returns to
+  absent at weight 0.
+* The first frame an element is seen takes its states without a
+  transition; `disabledStyle` already applies at mount.
 
 ## LayoutAnimation
 
@@ -2026,6 +2105,13 @@ changed rather than to the tree size:
     the frames before the commit (`Runtime::prepareText`, up to twice the
     budget per tick): the same paragraph build and first layout the measure
     would do, so pixels are unchanged.
+  Tearing down the old page is spread out the same way. The bundled
+  reconciler queues React's per-fiber detach of a deleted subtree
+  (`detachFiberAfterEffects`) and runs it at idle priority in budget-sized
+  slices. Each field it nulls frees what it held, which took 4-8 ms of the
+  frame after a navigation commit. The runtime takes destroyed nodes out of
+  the document at once, but frees them in each tick's spare time
+  (`Runtime::freeDestroyedNodes`, at least 256 per tick).
   Offline tools on simulated time (jsui-render, jsui-record, jsui-bench, the
   CLI's headless runtime) turn the budget off, so a frame's content does not
   depend on the machine's speed.

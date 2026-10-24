@@ -50,8 +50,12 @@ class Document {
 
   Node* createNode(NodeType type);
   Node* get(uint32_t id) const;
-  // Destroys a detached node and its subtree.
+  // Destroys a detached node and its subtree. The nodes leave the document
+  // at once; their memory is released by freeDestroyed().
   void destroyNode(Node* node);
+  // Frees up to `max` destroyed nodes; true while more are waiting.
+  bool freeDestroyed(size_t max);
+  bool hasDestroyed() const { return !graveyard_.empty(); }
   // Destroys everything except the root (used on reload).
   void clear();
 
@@ -134,6 +138,11 @@ class Document {
   // Ids of Text nodes created since they were last looked at: shaped ahead
   // of their first layout in spare frame time (Runtime::prepareText).
   std::vector<uint32_t> newTexts;
+  // Nodes with state styles, `group` or `interaction` (Node::stateStyles),
+  // walked by InputManager::tickStates; dead ids are dropped there.
+  std::vector<uint32_t> stateNodes;
+  // `interaction` key -> the node that carries it (Animated.interaction).
+  std::unordered_map<std::string, uint32_t> interactionNodes;
   // Live nodes with an onLayout listener (Node::kListensLayout). Without
   // any, layout passes skip the onLayout walk.
   int layoutListeners = 0;
@@ -162,6 +171,7 @@ class Document {
 
   std::vector<Node*> focusHints_;
   std::unordered_map<uint32_t, std::unique_ptr<Node>> nodes_;
+  std::vector<std::unique_ptr<Node>> graveyard_;  // destroyed, not yet freed
   std::unordered_map<uint32_t, Rect> reportedLayout_;
   uint64_t yogaPass_ = 0;  // the last layout() pass (see afterLayout)
   Node* root_ = nullptr;

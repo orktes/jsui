@@ -25,8 +25,9 @@ export const animated = {
   end(id, finished, value) {
     const a = animations.get(id);
     animations.delete(id);
-    if (a && value !== undefined) nodes.get(a.tag).value = value;
-    globalThis.__jsui_onAnimatedEnd(id, finished, value !== undefined ? value : a ? nodes.get(a.tag).value : 0);
+    const node = a && nodes.get(a.tag);  // none for a group
+    if (node && value !== undefined) node.value = value;
+    globalThis.__jsui_onAnimatedEnd(id, finished, value !== undefined ? value : node ? node.value : 0);
   },
   /** Simulates a native frame moving value node `tag` (listeners hear it). */
   frame(tag, value) {

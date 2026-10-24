@@ -6,6 +6,7 @@ import { now, requestFrame } from '../native.js';
 import { Easing } from './Easing.js';
 import { AnimatedValue, AnimatedValueXY, AnimatedColor, AnimatedNode, batch, colorChannels } from './nodes.js';
 import {
+  NativeAnimatedAPI,
   shouldUseNativeDriver,
   generateNewAnimationId,
   startAnimatingNode,
@@ -31,6 +32,61 @@ function schedule() {
   if (frameRequested) return;
   frameRequested = true;
   requestFrame(frame);
+}
+
+// --- native composites --------------------------------------------------------
+// A sequence / parallel / stagger / loop whose steps are all native-driven
+// animations (or delays) runs as one native group: the runtime advances its
+// steps on the frames they end, with no JS between them (so they keep going
+// while JS is busy). Built from the composites' __nativeSpec().
+
+function specOf(animation) {
+  return animation && typeof animation.__nativeSpec === 'function' ? animation.__nativeSpec() : null;
+}
+
+function nativeChildren(animations) {
+  if (!NativeAnimatedAPI || animations.length === 0) return null;
+  const specs = [];
+  const values = [];
+  let native = false;
+  for (const a of animations) {
+    const r = specOf(a);
+    if (!r) return null;
+    specs.push(r.spec);
+    values.push(...r.values);
+    if (r.spec.type !== 'wait') native = true;
+  }
+  return native || specs.length ? { specs, values, native } : null;
+}
+
+// Starts a group; returns its stop().
+function startNativeGroup(root, values, callback) {
+  const id = generateNewAnimationId();
+  let done = false;
+  const stopper = {
+    stop() {
+      if (done) return;
+      done = true;
+      stopNativeAnimation(id);
+      release();
+      if (callback) callback({ finished: false });
+    },
+  };
+  const release = () => {
+    for (const v of values) if (v._animation === stopper) v._animation = null;
+  };
+  // value.stopAnimation() / a new animation on one of its values stops the group.
+  for (const v of values) {
+    if (v._animation && v._animation !== stopper) v._animation.stop();
+    v._animation = stopper;
+  }
+  startAnimatingNode(id, 0, { type: 'group', root }, (finished) => {
+    if (done) return;
+    done = true;
+    release();
+    if (callback) callback({ finished });
+  });
+  return () => stopper.stop();
 }
 
 class Animation {
@@ -362,6 +418,17 @@ function single(value, makeAnimationDriver, config) {
       value.resetAnimation();
     },
     _isUsingNativeDriver: () => useNative,
+    // As one step of a composite the runtime runs as a whole (null: this
+    // animation needs JS).
+    __nativeSpec() {
+      if (!useNative || !(value instanceof AnimatedValue) || config.toValue instanceof AnimatedNode) return null;
+      const anim = makeAnimation(config);
+      const iterations = config.iterations !== undefined ? config.iterations : 1;
+      value.__makeNative();
+      const c = anim.__getNativeAnimationConfig();
+      c.iterations = iterations === 0 ? 1 : iterations;
+      return { spec: { type: 'leaf', tag: value.__getNativeTag(), config: c }, values: [value] };
+    },
     // Animated.loop of a native animation: the runtime repeats it (RN).
     _startNativeLoop(iterations, callback) {
       value.stopTracking();
@@ -381,10 +448,20 @@ export const decay = (value, config) => single(value, (c) => new DecayAnimation(
 export function sequence(animations) {
   let index = 0;
   let stopped = false;
+  let stopNative = null;
   return {
+    __nativeSpec() {
+      const r = nativeChildren(animations);
+      return r && { spec: { type: 'sequence', children: r.specs }, values: r.values };
+    },
     start(callback) {
       stopped = false;
       index = 0;
+      const n = this.__nativeSpec();
+      if (n && n.values.length) {
+        stopNative = startNativeGroup(n.spec, n.values, callback);
+        return;
+      }
       const next = (result) => {
         if (!result.finished || stopped) {
           if (callback) callback(result);
@@ -403,9 +480,16 @@ export function sequence(animations) {
     },
     stop() {
       stopped = true;
+      if (stopNative) {
+        const s = stopNative;
+        stopNative = null;
+        s();
+        return;
+      }
       if (index < animations.length) animations[index].stop();
     },
     reset() {
+      if (stopNative) this.stop();
       for (const a of animations) a.reset();
       index = 0;
     },
@@ -418,10 +502,20 @@ export function parallel(animations, config) {
   let finishedCount = 0;
   let hasEnded = [];
   let doneAll = false;
+  let stopNative = null;
   const result = {
+    __nativeSpec() {
+      const r = nativeChildren(animations);
+      return r && { spec: { type: 'parallel', children: r.specs, stopTogether }, values: r.values };
+    },
     start(callback) {
       finishedCount = 0;
       doneAll = false;
+      const n = result.__nativeSpec();
+      if (n && n.values.length) {
+        stopNative = startNativeGroup(n.spec, n.values, callback);
+        return;
+      }
       hasEnded = animations.map(() => false);
       if (animations.length === 0) {
         if (callback) callback({ finished: true });
@@ -441,11 +535,18 @@ export function parallel(animations, config) {
       });
     },
     stop() {
+      if (stopNative) {
+        const s = stopNative;
+        stopNative = null;
+        s();
+        return;
+      }
       animations.forEach((a, i) => {
         if (!hasEnded[i]) a.stop();
       });
     },
     reset() {
+      if (stopNative) result.stop();
       for (const a of animations) a.reset();
     },
     _isUsingNativeDriver: () => false,
@@ -454,7 +555,10 @@ export function parallel(animations, config) {
 }
 
 export function delay(time) {
-  return timing(new AnimatedValue(0), { toValue: 0, delay: time, duration: 0 });
+  const a = timing(new AnimatedValue(0), { toValue: 0, delay: time, duration: 0 });
+  // Inside a native composite: a plain wait.
+  a.__nativeSpec = () => ({ spec: { type: 'wait', duration: Math.max(0, +time || 0) }, values: [] });
+  return a;
 }
 
 export function stagger(time, animations) {
@@ -466,10 +570,27 @@ export function loop(animation, config) {
   const resetBeforeIteration = !(config && config.resetBeforeIteration === false);
   let stopped = false;
   let count = 0;
+  let stopNative = null;
+  const nativeSpec = () => {
+    if (!NativeAnimatedAPI || !animation || !animation.__nativeSpec) return null;
+    const r = animation.__nativeSpec();
+    if (!r || !r.values.length) return null;
+    // resetBeforeIteration: the values go back to their starting values.
+    const resets = resetBeforeIteration ? r.values.map((v) => [v.__getNativeTag(), v._startingValue]) : [];
+    return { spec: { type: 'loop', iterations, child: r.spec, resets }, values: r.values };
+  };
   return {
+    __nativeSpec: nativeSpec,
     start(callback) {
       stopped = false;
       count = 0;
+      if (animation && iterations !== 0 && typeof animation.__nativeSpec === 'function' && !animation._startNativeLoop) {
+        const n = nativeSpec();
+        if (n) {
+          stopNative = startNativeGroup(n.spec, n.values, callback);
+          return;
+        }
+      }
       const restart = (result = { finished: true }) => {
         if (stopped || count === iterations || result.finished === false) {
           if (callback) callback(result);
@@ -487,9 +608,16 @@ export function loop(animation, config) {
     },
     stop() {
       stopped = true;
+      if (stopNative) {
+        const s = stopNative;
+        stopNative = null;
+        s();
+        return;
+      }
       animation.stop();
     },
     reset() {
+      if (stopNative) this.stop();
       count = 0;
       stopped = false;
       animation.reset();

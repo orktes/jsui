@@ -725,6 +725,7 @@ bool InputManager::animating() const {
       return true;
   }
   if (mouseInside_ && hoverDirty_) return true;  // a hover refresh waits for scrolling to pause
+  if (statesMoving_ || !pressFlash_.empty()) return true;  // a state style transition
   for (const Pad& p : pads_) {
     if (p.dpad.dir >= 0 || p.stick.dir >= 0 || p.stickScrollId) return true;
     if (!p.rightBlocked && std::hypot(p.axes[2], p.axes[3]) > kScrollStickDeadzone) return true;

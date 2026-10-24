@@ -78,7 +78,10 @@ g.__jsui_onAnimatedValueUpdate = (tag, value) => {
 };
 
 // --- what the native driver may animate ----------------------------------------
-// Paint-only keys, as React Native's SUPPORTED_STYLES: no layout props.
+// Every style key. These paint-only ones (React Native's SUPPORTED_STYLES)
+// only repaint; any other key (width, top, margin, flex, ...) is animated
+// natively too (unlike React Native) and relays out the tree each frame it
+// changes, so prefer transforms where they do the job.
 export const SUPPORTED_STYLES = new Set([
   'opacity',
   'transform',
@@ -136,10 +139,7 @@ export const SUPPORTED_TRANSFORMS = new Set([
 ]);
 
 export function validateStyle(key) {
-  // ShaderView uniforms (packages/react/src/shader.js): paint-only.
-  if (!SUPPORTED_STYLES.has(key) && !key.startsWith('uniform:')) {
-    throw new Error(`Style property '${key}' is not supported by native animated module`);
-  }
+  if (typeof key !== 'string' || !key) throw new Error(`Style property '${key}' is not supported by native animated module`);
 }
 
 export function validateTransform(property) {
