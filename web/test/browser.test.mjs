@@ -5,6 +5,8 @@
 //
 //   node web/test/browser.test.mjs            (needs web/dist from the wasm build)
 //   JSUI_WEB_STRICT=1 node web/test/browser.test.mjs
+//   JSUI_JS=host node web/test/browser.test.mjs    (bundles run on the page's own
+//       JS engine: createJsui({ js: 'host' }), docs/ARCHITECTURE.md "Host JS engine")
 //   JSUI_WEB_DIST=dist-webgl node web/test/browser.test.mjs   (the GPU module,
 //       WEBGL=1 scripts/build-wasm.sh: every test runs against it, and the
 //       'gpu' tests draw through Skia on WebGL instead of SKIPping)
@@ -95,7 +97,9 @@ function toneWav(ms) {
 }
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const ORIGIN = `http://127.0.0.1:${server.address().port}`;
-const PAGE = `${ORIGIN}/test/page.html`;
+// JSUI_JS=host: page.html makes js: 'host' every createJsui()'s default.
+const JS = process.env.JSUI_JS || '';
+const PAGE = `${ORIGIN}/test/page.html${JS ? '?js=' + encodeURIComponent(JS) : ''}`;
 
 // ------------------------------------------------------------------ harness
 const browser = await chromium.launch({
