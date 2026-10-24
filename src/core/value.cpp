@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "core/number.h"
+
 namespace jsui {
 
 bool Value::equals(const Value& b) const {
@@ -233,10 +235,10 @@ struct JsonParser {
       out = Value();
       return true;
     }
-    char* end = nullptr;
-    double d = std::strtod(s.c_str() + i, &end);
-    if (end == s.c_str() + i) return fail("unexpected character");
-    i = size_t(end - s.c_str());
+    double d = 0;
+    const char* end = parseNumber(s.data() + i, s.data() + s.size(), &d);
+    if (!end) return fail("unexpected character");
+    i = size_t(end - s.data());
     out = Value(d);
     return true;
   }
@@ -274,9 +276,8 @@ void write(std::string& out, const Value& v) {
     if (!std::isfinite(d)) {
       out += "null";
     } else {
-      char buf[32];
-      std::snprintf(buf, sizeof buf, "%.17g", d);
-      out += buf;
+      char buf[kNumberBufSize];
+      out.append(buf, formatNumber(d, buf));
     }
   } else if (v.isString()) {
     writeString(out, v.asString());
