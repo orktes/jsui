@@ -15,7 +15,7 @@ In a project with `npm install --save-dev @orktes/jsui-cli`:
 ```sh
 npx jsui build app.jsx -o dist/bundle.js [--minify] [--sourcemap] [--dev] [--format combo|bytecode|source|split]
      [--react-compiler [--compiler-report]]
-npx jsui dev app.jsx [--port 5173] [--host 127.0.0.1] [--no-hmr] [--react-compiler]
+npx jsui dev app.jsx [--port 5173] [--host 127.0.0.1] [--no-hmr] [--no-inspect] [--react-compiler]
 npx jsui screenshot app.jsx -o shot.png [--width 1280 --height 720 --scale 2 --wait 1000]
 npx jsui inspect app.jsx [--find '#play'] [--json]
 npx jsui run app.jsx steps.json|script.mjs
@@ -110,11 +110,12 @@ is where the frame goes, and check the result with `jsui-bench --react-stats`.
 | Path | |
 | --- | --- |
 | `/bundle.js` | last successful build (errors keep the previous one); the hot-updating dev bundle unless `--no-hmr` |
-| `/bundle.js.map` | its source map (`--no-hmr` only) |
+| `/bundle.js.map` | its source map (sources are `file://` URLs of your files, with their contents) |
 | `/assets/*` | emitted assets |
 | `/__jsui/version` | plain-text opaque token; changes on every successful rebuild (with `?hmr=1`, failed builds too). `?since=<token>` long-polls (~25 s) until it differs |
 | `/__jsui/hmr?from=<token>` | the hot update script from that version to the current one |
 | `/__jsui/error` | current build error text (empty when OK) |
+| `/json`, `/json/list`, `/json/version`, `/__jsui/inspect/*` | the JS debugger (below; off with `--no-inspect`) |
 | `/` | index page (links the WASM web host if `web/` is built) |
 | anything else | static files from the entry's directory |
 
@@ -142,6 +143,38 @@ Saving a file updates the running UI without losing its state:
   and `invalidate()` for modules with side effects to clean up.
 
 `--no-hmr` serves the plain bundle and reloads it on every change.
+
+### Debugging
+
+Set breakpoints in your JSX/TS files, step, and inspect variables in the
+running app, from Chrome DevTools or VS Code. The native runtimes (viewer,
+game engines; built with the debugger) connect to the dev server when it
+offers one; debuggers attach to the dev server's own port (no other port):
+
+* **Chrome**: open `chrome://inspect`, *Configure...*, add `127.0.0.1:5173`.
+  The app shows under *Remote Target*; click *inspect*.
+* **VS Code** (`.vscode/launch.json`):
+
+  ```json
+  { "type": "node", "request": "attach", "name": "JSUI", "address": "127.0.0.1", "port": 5173,
+    "resolveSourceMapLocations": null }
+  ```
+
+  `resolveSourceMapLocations: null` lets VS Code use the source maps the dev
+  server serves over http (by default it only reads maps inside the workspace).
+
+`jsui dev` prints both on startup, and logs when a runtime or a debugger
+connects. The bundle and every hot update come with source maps that point
+at your files on disk (`file://` URLs, contents included), so breakpoints set
+in the editor land in the right place, also after hot updates (each update is
+a script of its own, `/__jsui/hmr/<version>.js`). Each runtime connected to
+the server is one target (`/json/list`). `--no-inspect` turns the debugger
+off. The headless runtime (`--headless`, the WebAssembly module in Node)
+cannot pause and is not a debug target.
+
+Only clients without an `Origin` header (VS Code) and DevTools
+(`devtools://`) may open a debugger connection, and only through
+`localhost` or an IP address, so web pages cannot attach to your app.
 
 ## Shared session: `jsui dev` and `--attach`
 

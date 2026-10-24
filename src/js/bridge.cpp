@@ -11,6 +11,7 @@
 #include "input/input.h"
 #include "dev_session.h"
 #include "js/engine_impl.h"
+#include "js/inspector.h"
 #include "render/lottie.h"
 #include "render/shader_view.h"
 #include "include/effects/SkRuntimeEffect.h"
@@ -719,6 +720,9 @@ JSValue js_evalScript(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
   const char* src = JS_ToCStringLen(ctx, &len, argv[0]);
   if (!src) return JS_EXCEPTION;
   std::string name = argc > 1 ? toStdString(ctx, argv[1]) : std::string("<eval>");
+#if JSUI_DEBUGGER
+  if (JsEngine::Impl& impl = implOf(ctx); impl.inspector) impl.inspector->scriptLoaded(name, std::string(src, len));
+#endif
   JSValue r = JS_Eval(ctx, src, len, name.c_str(), JS_EVAL_TYPE_GLOBAL);
   JS_FreeCString(ctx, src);
   return r;

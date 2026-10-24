@@ -274,8 +274,23 @@
     showError('Build failed:\n' + text);
   }
 
-  function evalUpdate(code) {
-    var name = 'jsui-hot-update-' + (updates + 1) + '.js';
+  // The update script's URL, as debuggers list it: <origin>/__jsui/hmr/<version>.js
+  // (unique per update; its inline source map points at the app's files).
+  var names = Object.create(null);
+  function updateName(v) {
+    var base = '/__jsui/hmr/' + encodeURIComponent(v || 'update');
+    var name = base + '.js';
+    for (var n = 2; names[name]; n++) name = base + '-' + n + '.js';
+    names[name] = true;
+    try {
+      return new URL(name, G.location.href).href;
+    } catch (e) {
+      return name;
+    }
+  }
+
+  function evalUpdate(code, v) {
+    var name = updateName(v);
     if (native.evalScript) native.evalScript(code, name);
     else (0, eval)(code);
   }
@@ -290,11 +305,14 @@
     G.fetch(url, { cache: 'no-store' })
       .then(function (res) {
         if (!res.ok) throw new Error('GET ' + url + ': status ' + res.status);
-        return res.text();
+        var v = res.headers && res.headers.get ? res.headers.get('X-Jsui-Version') : null;
+        return res.text().then(function (code) {
+          return { code: code, version: v };
+        });
       })
-      .then(function (code) {
+      .then(function (r) {
         busy = false;
-        evalUpdate(code);
+        evalUpdate(r.code, r.version);
         if (wanted) pump();
       })
       .catch(function (e) {

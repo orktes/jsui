@@ -75,6 +75,7 @@ function runtime(base) {
     logs: [],
     devErrors: [],
     reloads: 0,
+    evalNames: [],
     setTimeout,
     clearTimeout,
     reportError: (e) => ctx.devErrors.push('Uncaught ' + e.message),
@@ -116,6 +117,7 @@ function runtime(base) {
         ctx.devErrors.push(text);
       },
       evalScript(code, name) {
+        ctx.evalNames.push(name);
         return vm.runInContext(code, ctx, { filename: name });
       },
     },
@@ -171,6 +173,8 @@ test('hot updates keep component state; non-component edits propagate; entry edi
     assert.equal(text('badge'), 'b1 1');
     assert.equal(ctx.reloads, 0);
     assert.equal(ctx.__jsui_hmr.version, server.state.version);
+    // Debuggers list each update script by this name.
+    assert.equal(ctx.evalNames.at(-1), `${base}/__jsui/hmr/${server.state.version}.js`);
 
     await edit('Badge.js', badge('b2'));
     await until(() => text('badge') === 'b2 1', 'hot update of Badge');
@@ -217,6 +221,8 @@ test('hot updates keep component state; non-component edits propagate; entry edi
     await edit('index.js', `import { AppRegistry } from 'react-native';\nimport App from './App';\nAppRegistry.registerComponent('main', () => App);\n// edited\n`);
     await until(() => ctx.reloads === 1, 'full reload for an entry edit');
     assert.deepEqual(ctx.errors, []);
+
+    assert.equal(new Set(ctx.evalNames).size, ctx.evalNames.length, 'update script names are unique');
 
     // Unknown versions (a restarted server) reload too.
     assert.match(await (await fetch(base + '/__jsui/hmr?from=nope')).text(), /__jsui_hmr\.reload\(/);

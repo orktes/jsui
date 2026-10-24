@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "js/engine_impl.h"
+#include "js/inspector.h"
 #include "runtime.h"
 
 namespace jsui {
@@ -18,8 +19,30 @@ JSValue js_log(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   return JS_UNDEFINED;
 }
 
+// consoleApi(type, args): console.* with its arguments, for the debugger
+// (Runtime.consoleAPICalled: DevTools shows them as live objects).
+JSValue js_consoleApi(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+#if JSUI_DEBUGGER
+  JsEngine::Impl& impl = implOf(ctx);
+  if (!impl.inspector || argc < 2) return JS_UNDEFINED;
+  std::string type = toStdString(ctx, argv[0]);
+  int64_t n = 0;
+  JS_GetLength(ctx, argv[1], &n);
+  std::vector<JSValue> args;
+  for (int64_t i = 0; i < n && i < 64; i++) args.push_back(JS_GetPropertyInt64(ctx, argv[1], i));
+  impl.inspector->console(type.c_str(), args.data(), int(args.size()));
+  for (JSValue v : args) JS_FreeValue(ctx, v);
+#else
+  (void)ctx, (void)argc, (void)argv;
+#endif
+  return JS_UNDEFINED;
+}
+
 JSValue js_reportError(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   std::string prefix = argc > 1 && JS_IsString(argv[1]) ? toStdString(ctx, argv[1]) : "";
+#if JSUI_DEBUGGER
+  if (JsEngine::Impl& impl = implOf(ctx); impl.inspector && argc > 0) impl.inspector->exception(argv[0], prefix + "Uncaught");
+#endif
   runtimeOf(ctx).reportError(prefix + (argc > 0 ? formatError(ctx, argv[0]) : std::string("undefined")));
   return JS_UNDEFINED;
 }
@@ -224,6 +247,9 @@ void installHostApi(JsEngine::Impl& impl, JSValue global, JSValue host) {
              {"fetch", js_fetch, 6},       {"cancel", js_cancel, 1}};
   for (auto& f : fns) JS_SetPropertyStr(ctx, host, f.name, JS_NewCFunction(ctx, f.fn, f.name, f.len));
   JS_SetPropertyStr(ctx, host, "devMode", JS_NewBool(ctx, impl.rt.config.dev_mode != 0));
+#if JSUI_DEBUGGER
+  if (impl.rt.config.dev_mode) JS_SetPropertyStr(ctx, host, "consoleApi", JS_NewCFunction(ctx, js_consoleApi, "consoleApi", 2));
+#endif
   (void)global;
 }
 

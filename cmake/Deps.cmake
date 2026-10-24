@@ -20,12 +20,51 @@ FetchContent_GetProperties(quickjs)
 if(NOT quickjs_POPULATED)
   FetchContent_Populate(quickjs)
 endif()
+# Engine patches from react-native-quickjs (third_party/quickjs-rnq, applied
+# in file name order with `git apply`) go onto a copy of the sources in the
+# build tree, which is what gets compiled; the fetched checkout stays pristine.
+set(_qjs_src ${CMAKE_BINARY_DIR}/quickjs-patched)
+file(GLOB _qjs_patches ${CMAKE_CURRENT_LIST_DIR}/../third_party/quickjs-rnq/*.patch)
+list(SORT _qjs_patches)
+set(_qjs_stamp_text "")
+foreach(_p IN LISTS _qjs_patches)
+  file(SHA256 ${_p} _h)
+  string(APPEND _qjs_stamp_text "${_h}\n")
+endforeach()
+file(GLOB _qjs_top LIST_DIRECTORIES false ${quickjs_SOURCE_DIR}/*.c ${quickjs_SOURCE_DIR}/*.h)
+foreach(_f IN LISTS _qjs_top)
+  file(SHA256 ${_f} _h)
+  string(APPEND _qjs_stamp_text "${_h}\n")
+endforeach()
+set(_qjs_stamp ${_qjs_src}/.jsui-patches)
+set(_qjs_old_stamp "")
+if(EXISTS ${_qjs_stamp})
+  file(READ ${_qjs_stamp} _qjs_old_stamp)
+endif()
+if(NOT _qjs_old_stamp STREQUAL _qjs_stamp_text)
+  find_package(Git REQUIRED)
+  file(REMOVE_RECURSE ${_qjs_src})
+  file(MAKE_DIRECTORY ${_qjs_src})
+  file(COPY ${_qjs_top} DESTINATION ${_qjs_src})
+  # Its own (empty) repository, so `git apply` resolves the patch paths here
+  # even when the build tree is inside another checkout.
+  execute_process(COMMAND ${GIT_EXECUTABLE} init -q WORKING_DIRECTORY ${_qjs_src} RESULT_VARIABLE _r)
+  foreach(_p IN LISTS _qjs_patches)
+    execute_process(COMMAND ${GIT_EXECUTABLE} apply --whitespace=nowarn ${_p}
+      WORKING_DIRECTORY ${_qjs_src} RESULT_VARIABLE _r ERROR_VARIABLE _e)
+    if(NOT _r EQUAL 0)
+      message(FATAL_ERROR "QuickJS patch ${_p} does not apply:\n${_e}")
+    endif()
+  endforeach()
+  file(REMOVE_RECURSE ${_qjs_src}/.git)
+  file(WRITE ${_qjs_stamp} "${_qjs_stamp_text}")
+endif()
 # quickjs-ng exports JS_FreeValue / JS_DupValue (and the RT variants) as
 # out-of-line functions, so every value the interpreter pops or copies costs
 # a call (12% of the instructions of a React commit). The patched copy in the
 # build tree defines inline versions right after the refcount accessors and
 # uses them throughout quickjs.c; the exported functions stay for embedders.
-set(_qjs_c ${quickjs_SOURCE_DIR}/quickjs.c)
+set(_qjs_c ${_qjs_src}/quickjs.c)
 file(READ ${_qjs_c} _qjs)
 set(_qjs_anchor "#define JS_GC_MARK(p)   (js_rc(p)->mark)\n")
 set(_qjs_defs
@@ -592,17 +631,29 @@ static JSProperty *add_property2(JSContext *ctx, JSObject *p, JSAtom prop,
             BREAK;
 
         CASE(OP_set_name):]=])
-  set(_qjs_c ${CMAKE_BINARY_DIR}/quickjs-patched/quickjs.c)
+  set(_qjs_c ${CMAKE_BINARY_DIR}/quickjs-jsui/quickjs.c)
   file(CONFIGURE OUTPUT ${_qjs_c} CONTENT "${_qjs}" @ONLY)
 else()
   message(WARNING "quickjs.c changed: building it without the inline refcount patch")
 endif()
 add_library(jsui_quickjs STATIC
-  ${quickjs_SOURCE_DIR}/dtoa.c
-  ${quickjs_SOURCE_DIR}/libregexp.c
-  ${quickjs_SOURCE_DIR}/libunicode.c
+  ${_qjs_src}/dtoa.c
+  ${_qjs_src}/libregexp.c
+  ${_qjs_src}/libunicode.c
   ${_qjs_c})
-target_include_directories(jsui_quickjs PUBLIC ${quickjs_SOURCE_DIR})
+target_include_directories(jsui_quickjs PUBLIC ${_qjs_src} ${quickjs_SOURCE_DIR})
+# The debugger hooks of the engine patches (0003-0005): compiled only into
+# builds with JSUI_DEBUGGER; without them the parser never emits a trap.
+if(JSUI_DEBUGGER)
+  target_compile_definitions(jsui_quickjs PUBLIC JS_ENABLE_DEBUGGER=1)
+  # The Chrome DevTools Protocol agent (vendored from react-native-quickjs).
+  target_sources(jsui_quickjs PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../third_party/quickjs-cdp/quickjs-cdp.c)
+  target_include_directories(jsui_quickjs PUBLIC ${CMAKE_CURRENT_LIST_DIR}/../third_party/quickjs-cdp)
+  find_package(Threads REQUIRED)
+  target_link_libraries(jsui_quickjs PUBLIC Threads::Threads)
+else()
+  target_compile_definitions(jsui_quickjs PUBLIC JS_ENABLE_DEBUGGER=0)
+endif()
 target_compile_definitions(jsui_quickjs PRIVATE _GNU_SOURCE)
 # Extra compile flags for QuickJS alone.
 set(JSUI_QUICKJS_FLAGS "" CACHE STRING "Extra compile flags for QuickJS")
