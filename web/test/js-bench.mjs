@@ -22,6 +22,7 @@
 //
 //   node web/test/js-bench.mjs [--frames 300] [--warm 60] [--runs 3] [--only node|chromium]
 //                              [--scenarios markers,inventory,surfaces,mount] [--dist dist] [--json out.json]
+//                              [--real-gpu] [--renderer cpu|webgpu|webgl]
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -39,6 +40,10 @@ const WARM = +opt('--warm', 60);
 const RUNS = +opt('--runs', 3);
 const ONLY = opt('--only', '');
 const DIST = opt('--dist', 'dist');
+// --real-gpu: the installed Chrome, headed, on the machine's GPU; --renderer
+// cpu (default) | webgpu | webgl (with a module that has it, e.g. --dist dist-gpu).
+const REAL_GPU = args.includes('--real-gpu');
+const RENDERER = opt('--renderer', 'cpu');
 const SCENARIOS = opt('--scenarios', 'markers,inventory,surfaces,mount').split(',');
 const W = 1280, H = 720;
 
@@ -209,8 +214,10 @@ if (ONLY !== 'node') {
     fs.createReadStream(file).pipe(res);
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  const browser = await chromium.launch();
-  console.log(`headless Chromium ${browser.version()}, CPU renderer ${W}x${H}: ${N} frames after ${WARM}, median of ${RUNS} runs`);
+  const browser = REAL_GPU
+    ? await chromium.launch({ channel: 'chrome', headless: false, args: ['--enable-unsafe-webgpu', '--ignore-gpu-blocklist'] })
+    : await chromium.launch();
+  console.log(`${REAL_GPU ? "Chrome (real GPU)" : "headless Chromium"} ${browser.version()}, ${RENDERER} renderer ${W}x${H}: ${N} frames after ${WARM}, median of ${RUNS} runs`);
   for (const scenario of SCENARIOS) {
     for (const js of ['quickjs', 'host']) {
       const runs = [];
@@ -220,13 +227,13 @@ if (ONLY !== 'node') {
         page.on('pageerror', (e) => errors.push(e.message));
         await page.goto(`http://127.0.0.1:${server.address().port}/bench.html`);
         await page.waitForFunction(() => window.ready);
-        runs.push(await page.evaluate(async ({ coreSrc, scenario, js, n, warm, src, boot, dist, w, h }) => {
+        runs.push(await page.evaluate(async ({ coreSrc, scenario, js, n, warm, src, boot, dist, w, h, renderer }) => {
           const core = (0, eval)('(' + coreSrc + ')');
           const c = document.createElement('canvas');
           c.style.width = w + 'px';
           c.style.height = h + 'px';
           document.body.appendChild(c);
-          const j = await window.createJsui({ canvas: c, renderer: 'cpu', js, bundleSource: boot, moduleUrl: new URL(`/${dist}/jsui.js`, location.href) });
+          const j = await window.createJsui({ canvas: c, renderer, js, bundleSource: boot, moduleUrl: new URL(`/${dist}/jsui.js`, location.href) });
           await Promise.race([j.whenIdle(), new Promise((res) => setTimeout(res, 3000))]);
           if (j.jsEngine !== js) throw new Error('engine ' + j.jsEngine);
           j.stop();
@@ -238,7 +245,7 @@ if (ONLY !== 'node') {
           j.destroy();
           return out;
         }, { coreSrc: core.toString(), scenario, js, n: N, warm: WARM, src: bundles[scenario],
-          boot: scenario === 'mount' ? EMPTY : bundles[scenario], dist: DIST, w: W, h: H }));
+          boot: scenario === 'mount' ? EMPTY : bundles[scenario], dist: DIST, w: W, h: H, renderer: RENDERER }));
         if (errors.length) throw new Error(`${scenario}/${js}: ${errors.join('\n')}`);
         await page.close();
       }
