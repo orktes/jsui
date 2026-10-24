@@ -77,6 +77,22 @@ string(REPLACE ";" "," _jsui_exports_csv "${_jsui_exports}")
 
 add_executable(jsui-wasm web/native/jsui_web.cpp)
 target_link_libraries(jsui-wasm PRIVATE jsui)
+target_include_directories(jsui-wasm PRIVATE src)
+
+# The host JS engine (src/js/engine_hostjs.cpp + web/native/jsui_hostjs.js):
+# the same module can run the bundle on the JS engine that loaded it (V8,
+# JavaScriptCore, SpiderMonkey) instead of QuickJS, picked per runtime
+# (jsui_web_create's `js`, createJsui({ js: 'host' })). QuickJS stays in the
+# module either way.
+option(JSUI_HOST_JS "WASM: let runtimes run their bundle on the host's JS engine" ON)
+if(JSUI_HOST_JS)
+  target_compile_definitions(jsui PRIVATE JSUI_HOST_JS=1)
+  target_compile_definitions(jsui-wasm PRIVATE JSUI_HOST_JS=1)
+  set(_jsui_hostjs "${CMAKE_SOURCE_DIR}/web/native/jsui_hostjs.js")
+  target_link_options(jsui-wasm PRIVATE "--pre-js=${_jsui_hostjs}")
+  set_property(TARGET jsui-wasm APPEND PROPERTY LINK_DEPENDS "${_jsui_hostjs}")
+endif()
+message(STATUS "JSUI_HOST_JS: ${JSUI_HOST_JS}")
 if(JSUI_WASM_SIMD)
   target_compile_options(jsui-wasm PRIVATE -msimd128 $<$<BOOL:${_jsui_sse41}>:-msse4.1>)
   target_link_options(jsui-wasm PRIVATE -msimd128)
@@ -101,7 +117,7 @@ target_link_options(jsui-wasm PRIVATE
 # The heap views are not exported by default since emscripten 4.
 # stackSave / stackRestore: the host puts the stack pointer back after a
 # throw that unwound through WASM frames (web/jsui-web.js, guardGL).
-set(_jsui_runtime_methods UTF8ToString,stringToUTF8,lengthBytesUTF8,HEAPU8,HEAP32,stackSave,stackRestore)
+set(_jsui_runtime_methods UTF8ToString,stringToUTF8,lengthBytesUTF8,HEAPU8,HEAP32,HEAPU32,HEAPF64,stackSave,stackRestore)
 if(JSUI_WEBGPU)
   # Skia Graphite on WebGPU: the JS host imports its GPUDevice / the canvas
   # texture through Emdawnwebgpu's WebGPU object (web/jsui-webgpu.js).

@@ -262,6 +262,9 @@ let nextHostId = 0x4a5000;
  * @param {boolean} [o.dev]      development React build (better errors)
  * @param {boolean} [o.reactCompiler] React Compiler on the app sources (default off)
  * @param {string} [o.wasmDir]   directory with jsui.js + jsui.wasm (CPU build)
+ * @param {'quickjs'|'host'} [o.js] the JS engine: QuickJS in WASM (default) or Node's own V8
+ *                               (the bundle's globals still follow the simulated clock).
+ *                               Default: the JSUI_JS environment variable, else 'quickjs'
  * @param {(level: number, text: string) => void} [o.onLog]
  */
 export async function launch(o = {}) {
@@ -355,8 +358,15 @@ export class HeadlessApp {
     });
     this.bundleUrl = load.url || pathToFileURL(load.path).href;
     this._baseUrlPtr = this._str(this.bundleUrl);
+    // The JS engine: QuickJS in WASM, or V8 itself (a module that has it, see
+    // docs/ARCHITECTURE.md "Host JS engine").
+    const js = o.js ?? process.env.JSUI_JS ?? 'quickjs';
+    if (js !== 'quickjs' && js !== 'host') throw new Error(`jsui: js must be 'quickjs' or 'host', got ${js}`);
+    this.hostJs = js === 'host' && !!(M._jsui_web_host_js && M._jsui_web_host_js());
+    if (js === 'host' && !this.hostJs) console.warn('[jsui] this jsui.wasm has no host JS engine: using QuickJS');
     // Audio off (no Web Audio in Node): every Sound.play() ends 'failed', preloads reject.
-    this.rt = M._jsui_web_create(this.hostId, this.width, this.height, this.scale, o.devMode ? 1 : 0, this._baseUrlPtr, 0);
+    this.rt = M._jsui_web_create(this.hostId, this.width, this.height, this.scale, o.devMode ? 1 : 0, this._baseUrlPtr, 0,
+      this.hostJs ? 1 : 0);
     if (!this.rt) throw new Error('jsui: runtime creation failed');
     // Dev mode joins the dev server's shared session only with devSession
     // (the dev server registers its own headless runtime directly).
@@ -431,6 +441,14 @@ export class HeadlessApp {
     await new Promise((r) => setImmediate(r));
   }
 
+  // With the host JS engine the bundle's own promises (async functions,
+  // fetch().then) settle on Node's microtask queue, which only runs between
+  // tasks: every frame yields to it, so they settle before the next tick as
+  // they do inside the tick with QuickJS.
+  get _yieldEveryFrame() {
+    return this.hostJs;
+  }
+
   // Runs frames until nothing is loading (bundle, images, fonts), then a few more.
   async _settle(maxMs = 10000) {
     const start = Date.now();
@@ -442,6 +460,7 @@ export class HeadlessApp {
         await this._yield();
       } else {
         quiet++;
+        if (this._yieldEveryFrame) await this._yield();
       }
     }
   }
@@ -458,7 +477,7 @@ export class HeadlessApp {
     const end = this.time + Math.max(0, ms);
     while (this.time + this.frameMs <= end + 1e-6) {
       this._tick();
-      if (this._answering || this.M._jsui_pending_loads(this.rt) > 0) await this._yield();
+      if (this._answering || this._yieldEveryFrame || this.M._jsui_pending_loads(this.rt) > 0) await this._yield();
     }
     return this;
   }
@@ -477,7 +496,7 @@ export class HeadlessApp {
     while (quiet < 2 && this.time < end) {
       this._tick();
       const loading = this._answering > 0 || this.M._jsui_pending_loads(this.rt) > 0;
-      if (loading) await this._yield();
+      if (loading || this._yieldEveryFrame) await this._yield();
       quiet = !loading && !this.M._jsui_wants_frame(this.rt) ? quiet + 1 : 0;
     }
     return this;

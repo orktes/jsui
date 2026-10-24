@@ -22,7 +22,7 @@ import { jsx } from 'react/jsx-runtime';
 import { ScrollView } from './basic.js';
 import { instances } from '../instances.js';
 import { addGlobalListener } from '../events.js';
-import { warnOnce } from '../native.js';
+import { queueMicrotask, warnOnce } from '../native.js';
 
 // --- helpers -------------------------------------------------------------------
 
@@ -901,7 +901,7 @@ export class VirtualizedList extends Component {
     ps.last = offset;
     ps.tries--;
     // Defer: we are inside a layout callback.
-    Promise.resolve().then(() => {
+    queueMicrotask(() => {
       if (this._pendingScroll === ps) this._scrollToRaw(offset, false);
     });
   }

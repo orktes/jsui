@@ -1,7 +1,8 @@
 # @orktes/jsui-web
 
 Runs the JSUI game-UI runtime (QuickJS + Yoga + Skia, compiled to
-WebAssembly) on a `<canvas>`. Pair it with `@orktes/jsui-cli`, which bundles your
+WebAssembly) on a `<canvas>`, with the app's JS on QuickJS or on the page's
+own engine (`js: 'host'`). Pair it with `@orktes/jsui-cli`, which bundles your
 React Native–style app into the single script this host loads.
 
 ```sh
@@ -250,6 +251,39 @@ jsui.unregisterFont('Display');
   none (`'Inter'` until you change it).
 - The UI can also load fonts itself (`Fonts.load(family, url)` in the bundle,
   URLs relative to the bundle); both kinds end up in the same registry.
+
+## The page's own JS engine
+
+By default the bundle runs on QuickJS, compiled into `jsui.wasm` next to the
+rest of the runtime. `js: 'host'` runs it on the JS engine of the page (or of
+the worker, in worker mode) instead: V8, JavaScriptCore or SpiderMonkey,
+JIT-compiled. In the jsui-bench scenarios a steady-state frame spends 6 to 17
+times less time in JS; a first mount, mostly cold code, gains 1.1 to 1.4x.
+Layout, painting, input, native Animated and host data stay in WASM, and the
+app sees the same API and globals.
+
+```js
+const jsui = await createJsui({ canvas, bundleUrl: './bundle.js', js: 'host' });
+jsui.jsEngine; // 'host' ('quickjs' when the module was built without it)
+```
+
+The bundle still gets the runtime's own globals: `setTimeout`,
+`requestAnimationFrame`, `performance.now()` and `queueMicrotask` follow the
+runtime's clock (`jsui.frame(now)`), and the page's DOM, `window` and
+`WebAssembly` are hidden from it. What differs from QuickJS:
+
+- Promise callbacks (`async` / `await`, `.then`) run at the browser's own
+  microtask checkpoint, after the frame that resolved them, rather than
+  within it. `queueMicrotask` keeps QuickJS's timing.
+- There is no watchdog or JS memory limit: a script stuck in a loop blocks
+  its thread like any other script.
+- The page must allow `eval` (a Content-Security-Policy without
+  `'unsafe-eval'` blocks it).
+- `Intl` is the browser's (QuickJS has none).
+
+The CLI takes the same choice: `jsui screenshot|inspect|run|dev --headless
+--js host` (or `JSUI_JS=host`) runs bundles on Node's V8. See "Host JS engine"
+in `docs/ARCHITECTURE.md`.
 
 ## Worker mode
 

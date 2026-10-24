@@ -5,6 +5,9 @@
 //
 //   node web/test/browser.test.mjs            (needs web/dist from the wasm build)
 //   JSUI_WEB_STRICT=1 node web/test/browser.test.mjs
+//   JSUI_WEB_REAL_GPU=1 node web/test/browser.test.mjs   (installed Chrome, headed, real GPU)
+//   JSUI_JS=host node web/test/browser.test.mjs    (bundles run on the page's own
+//       JS engine: createJsui({ js: 'host' }), docs/ARCHITECTURE.md "Host JS engine")
 //   JSUI_WEB_DIST=dist-webgl node web/test/browser.test.mjs   (the GPU module,
 //       WEBGL=1 scripts/build-wasm.sh: every test runs against it, and the
 //       'gpu' tests draw through Skia on WebGL instead of SKIPping)
@@ -45,6 +48,11 @@ setDevColor('#ff8800');
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
+  // Headed Chrome (JSUI_WEB_REAL_GPU) asks for a favicon: not a page error.
+  if (url.pathname === '/favicon.ico') {
+    res.writeHead(204);
+    return res.end();
+  }
   if (url.pathname === '/__jsui/version') {
     res.writeHead(200, { 'content-type': 'text/plain', 'cache-control': 'no-store' });
     return res.end(dev.version);
@@ -95,16 +103,26 @@ function toneWav(ms) {
 }
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const ORIGIN = `http://127.0.0.1:${server.address().port}`;
-const PAGE = `${ORIGIN}/test/page.html`;
+// JSUI_JS=host: page.html makes js: 'host' every createJsui()'s default.
+const JS = process.env.JSUI_JS || '';
+const PAGE = `${ORIGIN}/test/page.html${JS ? '?js=' + encodeURIComponent(JS) : ''}`;
 
 // ------------------------------------------------------------------ harness
-const browser = await chromium.launch({
-  args: ['--enable-unsafe-swiftshader', '--use-angle=swiftshader', '--ignore-gpu-blocklist',
-    '--force-color-profile=srgb',
-    // WebGPU on SwiftShader; Vulkan-backed so canvas presentation works headless
-    // (without it the device breaks once a canvas texture is used).
-    '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-vulkan=swiftshader'],
-});
+// JSUI_WEB_REAL_GPU=1: the installed Google Chrome, headed, on the machine's
+// GPU (WebGL on ANGLE / the platform API, WebGPU on the real adapter).
+const browser = process.env.JSUI_WEB_REAL_GPU
+  ? await chromium.launch({ channel: 'chrome', headless: false,
+    args: ['--ignore-gpu-blocklist', '--force-color-profile=srgb', '--enable-unsafe-webgpu',
+      // Every test opens a window; those behind it must keep their rAF running.
+      '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding',
+      '--disable-background-timer-throttling'] })
+  : await chromium.launch({
+    args: ['--enable-unsafe-swiftshader', '--use-angle=swiftshader', '--ignore-gpu-blocklist',
+      '--force-color-profile=srgb',
+      // WebGPU on SwiftShader; Vulkan-backed so canvas presentation works headless
+      // (without it the device breaks once a canvas texture is used).
+      '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-vulkan=swiftshader'],
+  });
 
 class Skip extends Error {}
 const skip = (why, soft = false) => { const e = new Skip(why); e.soft = soft; throw e; };
@@ -124,6 +142,9 @@ const fmt = (px) => `(${Array.from(px).join(',')})`;
 
 async function newPage(ctxOpts) {
   const context = await browser.newContext({ viewport: { width: 800, height: 600 }, deviceScaleFactor: 1, ...ctxOpts });
+  // Headed Chrome opens its native context menu on an unhandled right click
+  // (passThrough tests), which swallows the mouse until dismissed.
+  if (process.env.JSUI_WEB_REAL_GPU) await context.addInitScript(() => window.addEventListener('contextmenu', (e) => e.preventDefault()));
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
@@ -537,6 +558,30 @@ test('bundleSource option and loadSource()', async ({ page }) => {
   assert(near(px, [0, 128, 128, 255]), `bundleSource: ${fmt(px)}`);
 }, {}, { worker: true });
 
+// The bundle's engine (createJsui's `js`): the host's own engine has Intl,
+// QuickJS has none; both see the runtime's globals, not the page's.
+test('js option: QuickJS and the host engine', async ({ page }) => {
+  const src = fs.readFileSync(path.join(WEB, 'test/fixtures/solid.js'), 'utf8') +
+    `;setTimeout(() => __jsui_native.postMessage('engine', JSON.stringify({ intl: typeof Intl,
+      window: typeof window === 'object' && window === globalThis, document: typeof document, process: typeof process,
+      wasm: typeof WebAssembly, raf: typeof requestAnimationFrame })), 50);`;
+  for (const js of ['quickjs', 'host']) {
+    await mount(page, { id: js, jsui: { bundleSource: src, js } });
+    await frames(page, 6);
+    await page.waitForTimeout(100);
+    const r = await page.evaluate((id) => [window.hosts[id].jsEngine, window.hosts[id].messages], js);
+    assert(r[0] === js, `${js}: jsEngine ${r[0]}`);
+    const want = { intl: js === 'host' ? 'object' : 'undefined', window: true, document: 'undefined', process: 'object',
+      wasm: 'undefined', raf: 'function' };
+    assert(JSON.stringify(r[1]) === JSON.stringify([['engine', want]]), `${js}: ${JSON.stringify(r[1])}`);
+    const [px] = await screenPixels(page, '#' + js, [[10, 50]]);
+    assert(near(px, [0, 128, 128, 255]), `${js}: ${fmt(px)}`);
+  }
+  const bad = await page.evaluate((dist) => window.createJsui({ canvas: document.createElement('canvas'), renderer: 'cpu',
+    moduleUrl: new URL(`../${dist}/jsui.js`, location.href), js: 'v8' }).then(() => 'ok', (e) => e.message), DIST);
+  assert(/js must be/.test(bad), `js: 'v8': ${bad}`);
+}, {}, { worker: true });
+
 test('fonts: registerFont, loadFont, unregisterFont, fallbacks, default family', async ({ page }) => {
   await mount(page, { jsui: { bundleUrl: 'fixtures/solid.js' } });
   const r = await page.evaluate(async () => {
@@ -617,7 +662,10 @@ test("default renderer 'auto' uses the GPU when the module has it", async ({ pag
     const M = window.hosts.ui.module;
     return !!M._jsui_gpu_create_gl && !!M.GL && webglAvailable(true);
   });
-  if (hasGpu) assert(info.renderer.startsWith('gpu-webgl'), `auto with the GPU module: ${info.renderer}`);
+  // On a hardware WebGPU adapter (JSUI_WEB_REAL_GPU) 'auto' prefers WebGPU;
+  // SwiftShader's software adapter is skipped, so WebGL there.
+  if (info.renderer === 'webgpu') assert(process.env.JSUI_WEB_REAL_GPU, 'auto picked WebGPU on a software adapter');
+  else if (hasGpu) assert(info.renderer.startsWith('gpu-webgl'), `auto with the GPU module: ${info.renderer}`);
   else assert(info.renderer.startsWith('webgl'), `auto with the CPU module: ${info.renderer}`);
   const px = await screenPixels(page, '#ui', BANDS);
   [RED, GREEN].forEach((want, i) => assert(near(px[i], want), `band ${i}: ${fmt(px[i])}`));

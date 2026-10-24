@@ -498,7 +498,61 @@ void setFn(JSContext* ctx, JSValueConst obj, const char* name, JSCFunction* fn, 
 
 // ------------------------------------------------------------- JsEngine
 
-JsEngine::JsEngine(Runtime& rt) : impl_(std::make_unique<Impl>(rt)) {
+JsEngine::Kind JsEngine::nextKind = JsEngine::Kind::QuickJs;
+
+void JsEngine::callWithKeys(const char* fn, const std::vector<std::string>& keys) {
+  if (keys.empty()) return;
+  Value::Array list;
+  list.reserve(keys.size());
+  for (auto& k : keys) list.emplace_back(k);
+  Value arg(std::move(list));
+  callGlobal(fn, &arg, 1);
+}
+
+#if !(defined(__EMSCRIPTEN__) && defined(JSUI_HOST_JS))
+bool JsEngine::hostAvailable() { return false; }
+std::unique_ptr<JsEngine> makeHostJsEngine(Runtime&) { return nullptr; }
+#endif
+
+namespace {
+
+class QuickJsEngine final : public JsEngine {
+ public:
+  explicit QuickJsEngine(Runtime& rt);
+  ~QuickJsEngine() override;
+  bool eval(const std::string& source, const std::string& name) override;
+  void runTimers(double nowMs) override;
+  void runAnimationFrame(double nowMs) override;
+  void runJobs() override;
+  bool hasPendingWork(double nowMs) const override;
+  int dispatchEvent(const Value& event) override;
+  void hostMessage(const std::string& name, const std::string& json) override;
+  void layoutEvent(uint32_t id, float x, float y, float w, float h) override;
+  bool callGlobal(const char* name, const Value* args, int argc) override;
+  void releaseBuffer(const std::string& key) override;
+  bool hasCall(uint64_t id) const override;
+  bool settleCall(uint64_t id, bool ok, const std::string& payload) override;
+  bool dropCall(uint64_t id) override;
+  std::vector<uint64_t> pendingCalls() const override;
+  bool inCall() const override;
+  void beginBatch() override;
+  void endBatch() override;
+  size_t memoryUsage() const override;
+
+ private:
+  std::unique_ptr<Impl> impl_;
+};
+
+}  // namespace
+
+std::unique_ptr<JsEngine> JsEngine::create(Runtime& rt, Kind kind) {
+  if (kind == Kind::Host)
+    if (auto e = makeHostJsEngine(rt)) return e;
+  return std::make_unique<QuickJsEngine>(rt);
+}
+
+
+QuickJsEngine::QuickJsEngine(Runtime& rt) : impl_(std::make_unique<Impl>(rt)) {
   Impl& impl = *impl_;
   impl.alive = std::make_shared<Impl*>(&impl);
   const JsuiConfig& cfg = rt.config;
@@ -555,7 +609,7 @@ JsEngine::JsEngine(Runtime& rt) : impl_(std::make_unique<Impl>(rt)) {
   JS_FreeValue(ctx, global);
 }
 
-JsEngine::~JsEngine() {
+QuickJsEngine::~QuickJsEngine() {
   Impl& impl = *impl_;
   JSContext* ctx = impl.ctx;
   impl.alive.reset();  // loader callbacks still queued become no-ops
@@ -595,7 +649,7 @@ static JSValue evalSource(JSContext* ctx, const std::string& source, const std::
 }
 
 // Runs a bundle: JS source, or a `jsui build` container (js/bytecode.h).
-bool JsEngine::eval(const std::string& source, const std::string& name) {
+bool QuickJsEngine::eval(const std::string& source, const std::string& name) {
   Impl& impl = *impl_;
   Perf::Scope scope(impl.rt.doc.perf, Phase::Js);
   impl.enter();
@@ -633,14 +687,14 @@ bool JsEngine::eval(const std::string& source, const std::string& name) {
   return ok;
 }
 
-void JsEngine::runJobs() {
+void QuickJsEngine::runJobs() {
   if (impl_->depth == 0) {
     impl_->enter();
     impl_->leave();  // drains
   }
 }
 
-void JsEngine::runTimers(double nowMs) {
+void QuickJsEngine::runTimers(double nowMs) {
   Impl& impl = *impl_;
   JSContext* ctx = impl.ctx;
   // Zero-delay timers queued by callbacks (MessageChannel, setImmediate,
@@ -682,7 +736,7 @@ void JsEngine::runTimers(double nowMs) {
   }
 }
 
-void JsEngine::runAnimationFrame(double nowMs) {
+void QuickJsEngine::runAnimationFrame(double nowMs) {
   Impl& impl = *impl_;
   if (impl.rafs.empty()) return;
   JSContext* ctx = impl.ctx;
@@ -701,11 +755,11 @@ void JsEngine::runAnimationFrame(double nowMs) {
   impl.rafsRunning.clear();
 }
 
-bool JsEngine::hasPendingWork(double nowMs) const {
+bool QuickJsEngine::hasPendingWork(double nowMs) const {
   return impl_->earliestDue <= nowMs || !impl_->rafs.empty() || JS_IsJobPending(impl_->jrt);
 }
 
-int JsEngine::dispatchEvent(const Value& event) {
+int QuickJsEngine::dispatchEvent(const Value& event) {
   Impl& impl = *impl_;
   JSContext* ctx = impl.ctx;
   JSValue global = JS_GetGlobalObject(ctx);
@@ -724,7 +778,7 @@ int JsEngine::dispatchEvent(const Value& event) {
   return flags;
 }
 
-bool JsEngine::callGlobal(const char* name, const Value* args, int argc) {
+bool QuickJsEngine::callGlobal(const char* name, const Value* args, int argc) {
   Impl& impl = *impl_;
   JSContext* ctx = impl.ctx;
   JSValue global = JS_GetGlobalObject(ctx);
@@ -742,33 +796,6 @@ bool JsEngine::callGlobal(const char* name, const Value* args, int argc) {
   return found;
 }
 
-void JsEngine::stateChanged(const std::vector<std::string>& keys) {
-  if (keys.empty()) return;
-  Value::Array list;
-  list.reserve(keys.size());
-  for (auto& k : keys) list.emplace_back(k);
-  Value arg(std::move(list));
-  callGlobal("__jsui_onHostState", &arg, 1);
-}
-
-void JsEngine::buffersChanged(const std::vector<std::string>& keys) {
-  if (keys.empty()) return;
-  Value::Array list;
-  list.reserve(keys.size());
-  for (auto& k : keys) list.emplace_back(k);
-  Value arg(std::move(list));
-  callGlobal("__jsui_onHostBuffer", &arg, 1);
-}
-
-void JsEngine::texturesChanged(const std::vector<std::string>& keys) {
-  if (keys.empty()) return;
-  Value::Array list;
-  list.reserve(keys.size());
-  for (auto& k : keys) list.emplace_back(k);
-  Value arg(std::move(list));
-  callGlobal("__jsui_onHostTexture", &arg, 1);
-}
-
 void JsEngine::Impl::releaseBuffer(const std::string& key) {
   auto it = bufferViews.find(key);
   if (it == bufferViews.end()) return;
@@ -777,11 +804,11 @@ void JsEngine::Impl::releaseBuffer(const std::string& key) {
   bufferViews.erase(it);
 }
 
-void JsEngine::releaseBuffer(const std::string& key) { impl_->releaseBuffer(key); }
+void QuickJsEngine::releaseBuffer(const std::string& key) { impl_->releaseBuffer(key); }
 
-bool JsEngine::hasCall(uint64_t id) const { return impl_->hostCalls.count(id) > 0; }
+bool QuickJsEngine::hasCall(uint64_t id) const { return impl_->hostCalls.count(id) > 0; }
 
-bool JsEngine::settleCall(uint64_t id, bool ok, const std::string& payload) {
+bool QuickJsEngine::settleCall(uint64_t id, bool ok, const std::string& payload) {
   Impl& impl = *impl_;
   auto it = impl.hostCalls.find(id);
   if (it == impl.hostCalls.end()) return false;
@@ -795,7 +822,7 @@ bool JsEngine::settleCall(uint64_t id, bool ok, const std::string& payload) {
   return true;
 }
 
-bool JsEngine::dropCall(uint64_t id) {
+bool QuickJsEngine::dropCall(uint64_t id) {
   auto it = impl_->hostCalls.find(id);
   if (it == impl_->hostCalls.end()) return false;
   JS_FreeValue(impl_->ctx, it->second);
@@ -803,7 +830,7 @@ bool JsEngine::dropCall(uint64_t id) {
   return true;
 }
 
-std::vector<uint64_t> JsEngine::pendingCalls() const {
+std::vector<uint64_t> QuickJsEngine::pendingCalls() const {
   std::vector<uint64_t> ids;
   ids.reserve(impl_->hostCalls.size());
   for (auto& [id, fn] : impl_->hostCalls) ids.push_back(id);
@@ -811,7 +838,7 @@ std::vector<uint64_t> JsEngine::pendingCalls() const {
   return ids;
 }
 
-void JsEngine::hostMessage(const std::string& name, const std::string& json) {
+void QuickJsEngine::hostMessage(const std::string& name, const std::string& json) {
   Impl& impl = *impl_;
   JSContext* ctx = impl.ctx;
   JSValue global = JS_GetGlobalObject(ctx);
@@ -827,7 +854,7 @@ void JsEngine::hostMessage(const std::string& name, const std::string& json) {
   JS_FreeValue(ctx, global);
 }
 
-void JsEngine::layoutEvent(uint32_t id, float x, float y, float w, float h) {
+void QuickJsEngine::layoutEvent(uint32_t id, float x, float y, float w, float h) {
   Impl& impl = *impl_;
   impl.layoutQueue.push_back({id, x, y, w, h});
   // Outside JS, deliver right away; otherwise drain() delivers once JS unwinds.
@@ -837,13 +864,13 @@ void JsEngine::layoutEvent(uint32_t id, float x, float y, float w, float h) {
   }
 }
 
-bool JsEngine::inCall() const { return impl_->depth > 0; }
+bool QuickJsEngine::inCall() const { return impl_->depth > 0; }
 
-void JsEngine::beginBatch() { impl_->enter(); }
+void QuickJsEngine::beginBatch() { impl_->enter(); }
 
-void JsEngine::endBatch() { impl_->leave(); }
+void QuickJsEngine::endBatch() { impl_->leave(); }
 
-size_t JsEngine::memoryUsage() const {
+size_t QuickJsEngine::memoryUsage() const {
   JSMemoryUsage u;
   JS_ComputeMemoryUsage(impl_->jrt, &u);
   return size_t(u.malloc_size);

@@ -167,6 +167,12 @@
  *   workerLoop?: 'raf'|'main',   // worker mode's frame clock: 'raf' (default) the worker's own
  *                                // requestAnimationFrame, 'main' this thread's rAF posting each
  *                                // frame (used anyway when the worker has none)
+ *   js?: 'quickjs'|'host',       // the JS engine the bundle runs on: 'quickjs' (default) QuickJS
+ *                                // compiled into jsui.wasm; 'host' this page's / worker's own engine
+ *                                // (V8, JavaScriptCore, SpiderMonkey), with the native core still in
+ *                                // WASM (docs/ARCHITECTURE.md "Host JS engine"). Needs eval (no CSP
+ *                                // without 'unsafe-eval'); falls back to QuickJS, with a warning, on
+ *                                // a module built without it. jsui.jsEngine says which one runs.
  * }} JsuiOptions */
 
 import { SharedWebGPU, WebGPURenderer, requestWebGPU } from './jsui-webgpu.js';
@@ -1744,8 +1750,15 @@ class JsuiHost extends CanvasView {
     this._bundleUrl = opts.bundleUrl ? new URL(opts.bundleUrl, pageUrl).href : null;
     // Lives as long as the runtime (JsuiConfig keeps the pointer).
     this._baseUrlPtr = this._bundleUrl ? this._newString(this._bundleUrl) : 0;
+    // The JS engine: QuickJS in WASM, or this thread's own (the module's
+    // jsui_web_host_js says whether it was built with it).
+    const js = opts.js ?? 'quickjs';
+    if (js !== 'quickjs' && js !== 'host') throw new TypeError(`createJsui: js must be 'quickjs' or 'host', got ${js}`);
+    /** 'quickjs' | 'host': the engine the bundle runs on. */
+    this.jsEngine = js === 'host' && M._jsui_web_host_js?.() ? 'host' : 'quickjs';
+    if (js !== this.jsEngine) console.warn('[jsui] this jsui.wasm has no host JS engine: running the bundle on QuickJS');
     this.rt = M._jsui_web_create(this.hostId, this.width, this.height, this.pixelRatio, opts.devMode ? 1 : 0,
-      this._baseUrlPtr, this.audio.enabled ? 1 : 0);
+      this._baseUrlPtr, this.audio.enabled ? 1 : 0, this.jsEngine === 'host' ? 1 : 0);
     if (!this.rt) throw new Error('jsui_web_create failed');
     if (opts.devMode && M._jsui_set_dev_session) {
       this._withStrings([opts.devName ?? null], (n) => M._jsui_set_dev_session(this.rt, n, opts.devSession === false ? 0 : 1));

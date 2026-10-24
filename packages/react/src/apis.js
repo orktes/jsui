@@ -1,7 +1,7 @@
 // Non-component React Native APIs.
 
 import { Component, createElement as h, useContext, useEffect, useState, useSyncExternalStore } from 'react';
-import { native, readViewport, warnOnce } from './native.js';
+import { native, queueMicrotask, readViewport, warnOnce } from './native.js';
 import { LayoutAnimation } from './layoutAnimation.js';
 import { addGlobalListener } from './events.js';
 import {
@@ -257,10 +257,13 @@ export const AppRegistry = {
     for (const [rootTag, w] of Array.from(waiting)) if (w.appKey === appKey) runSurface(rootTag, appKey, w.initialProps);
     // RN native starts the registered app automatically. Do it at the end of
     // bundle evaluation (microtask), so a later explicit runApplication call
-    // (react-native-web style) or other registrations still win.
+    // (react-native-web style) or other registrations still win. The
+    // runtime's queueMicrotask, not a promise: on the host JS engine
+    // (docs/ARCHITECTURE.md) promise jobs wait for the host's own microtask
+    // checkpoint, the runtime's queue drains when the bundle has run.
     if (!autoStartScheduled) {
       autoStartScheduled = true;
-      Promise.resolve().then(() => {
+      queueMicrotask(() => {
         if (!started && registry.has(appKey) && !hostPicksMain()) AppRegistry.runApplication(appKey, {});
       });
     }

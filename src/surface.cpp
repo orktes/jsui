@@ -17,42 +17,6 @@ namespace jsui {
 
 namespace {
 
-int64_t area(const SkIRect& r) { return int64_t(r.width()) * r.height(); }
-
-// The damage as a few rects that cover it (each one scissor rect and one
-// paint pass on the GPU): greedily join the pair whose join adds the least
-// area while there are more than kMaxRects, or while a join adds little
-// (a pass costs a tree walk and the draws it crosses again).
-std::vector<SkIRect> coverRects(const SkRegion& damage) {
-  constexpr size_t kMaxRects = 4, kMaxInput = 48;
-  constexpr int64_t kCheapJoin = 64 * 64;
-  std::vector<SkIRect> rects;
-  for (SkRegion::Iterator it(damage); !it.done(); it.next()) {
-    if (rects.size() == kMaxInput) return {damage.getBounds()};
-    rects.push_back(it.rect());
-  }
-  while (rects.size() > 1) {
-    size_t bi = 0, bj = 1;
-    int64_t best = std::numeric_limits<int64_t>::max();
-    for (size_t i = 0; i < rects.size(); i++)
-      for (size_t j = i + 1; j < rects.size(); j++) {
-        SkIRect u = rects[i];
-        u.join(rects[j]);
-        int64_t cost = area(u) - area(rects[i]) - area(rects[j]);
-        if (cost < best) best = cost, bi = i, bj = j;
-      }
-    if (rects.size() <= kMaxRects && best > kCheapJoin) break;
-    rects[bi].join(rects[bj]);
-    rects.erase(rects.begin() + bj);
-  }
-  // Several passes only when they save a good part of the bounds' area
-  // (passes split the draws: more state changes, less batching).
-  int64_t sum = 0;
-  for (const SkIRect& r : rects) sum += area(r);
-  if (rects.size() > 1 && sum * 3 > area(damage.getBounds()) * 2) return {damage.getBounds()};
-  return rects;
-}
-
 }  // namespace
 
 Surface::Surface(Runtime& r, uint32_t* nextNodeId, Perf* perf) : rt(r), doc(nextNodeId, perf) {}

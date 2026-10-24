@@ -39,6 +39,8 @@ const USAGE = `usage:
      view options: [--width 1280] [--height 720] [--scale 1] [--fps 60]
        [--component Name] [--props '{"json":1}'] [--state key='json' ...]
        [--bundle] (entry is a built bundle.js) [--dev] (development React)
+       [--js quickjs|host] (the JS engine: QuickJS in WASM, the default, or
+       Node's own V8; JSUI_JS=host sets the default)
 
   jsui screenshot|inspect|run --attach http://127.0.0.1:5173 ...  (no <entry>)
      [--client <name|id>]
@@ -73,6 +75,7 @@ const VIEW_OPTIONS = {
   props: { type: 'string' },
   state: { type: 'string', multiple: true },
   bundle: { type: 'boolean' },
+  js: { type: 'string' },
   wait: { type: 'string' },
   find: { type: 'string' },
   json: { type: 'boolean' },
@@ -109,6 +112,12 @@ function json(v, name) {
   }
 }
 
+function jsEngine(v) {
+  if (v == null) return undefined;
+  if (v !== 'host' && v !== 'quickjs') throw new UsageError(`--js takes quickjs or host, got ${v}`);
+  return v;
+}
+
 function viewOptions(values, entry) {
   const state = {};
   for (const kv of values.state || []) {
@@ -134,6 +143,7 @@ function viewOptions(values, entry) {
     state,
     dev: !!values.dev,
     reactCompiler: reactCompilerOption(values),
+    js: jsEngine(values.js),
     onLog: (level, text) => {
       if (level >= 2) process.stderr.write((level >= 3 ? 'error: ' : 'warn: ') + text + '\n');
     },
@@ -349,7 +359,7 @@ async function main(argv) {
       let headlessView = null;
       if (values.headless || values.shared) {
         const v = viewOptions(values, entry);
-        headlessView = { width: v.width, height: v.height, scale: v.scale, fps: v.fps, component: v.component, props: v.props, state: v.state };
+        headlessView = { width: v.width, height: v.height, scale: v.scale, fps: v.fps, component: v.component, props: v.props, state: v.state, js: v.js };
       }
       const server = await dev({ entry, port, host: values.host || '127.0.0.1', hmr: !values['no-hmr'], reactCompiler: reactCompilerOption(values), headless: headlessView });
       const stop = async () => {

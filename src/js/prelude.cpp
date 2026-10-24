@@ -15,11 +15,6 @@ namespace jsui {
 
 namespace {
 
-struct PreludePiece {
-  const char* name;
-  const char* source;
-};
-
 // clang-format off
 const PreludePiece kPrelude[] = {
 {"jsui:prelude/console.js",
@@ -904,6 +899,11 @@ R"JSUI((function (host) {
 // clang-format on
 
 }  // namespace
+
+const PreludePiece* preludePieces(size_t* count) {
+  *count = sizeof(kPrelude) / sizeof(kPrelude[0]);
+  return kPrelude;
+}
 
 bool runPrelude(JsEngine::Impl& impl, JSValue host) {
   JSContext* ctx = impl.ctx;

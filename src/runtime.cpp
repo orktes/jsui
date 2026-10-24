@@ -74,6 +74,7 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
   input = main().input.get();
   doc.setViewport(float(cfg.width), float(cfg.height), cfg.pixel_ratio > 0 ? cfg.pixel_ratio : 1.f);
   if (cfg.dev_mode) session = std::make_unique<DevSession>(*this);
+  jsKind_ = JsEngine::nextKind;
   resetEngine();
 }
 
@@ -261,7 +262,7 @@ void Runtime::resetEngine() {
   animated->clear();
   for (auto& s : surfaces_) s->doc.clear();
   // Shared state outlives the context (the new bundle reads it as it starts).
-  js = std::make_unique<JsEngine>(*this);
+  js = JsEngine::create(*this, jsKind_);
   redrawAll();
   endCalls(calls, "the UI was reloaded");
 }
@@ -408,7 +409,7 @@ bool Runtime::loadSource(const std::string& source, const std::string& name) {
   // A precompiled bundle for another QuickJS whose source is a separate file
   // (`jsui build --format split`): run that file instead.
   BundleParts parts;
-  if (parseBundleContainer(source, parts) && parts.key != bytecodeKey() && parts.source.empty() &&
+  if (parseBundleContainer(source, parts) && (parts.key != bytecodeKey() || !js->runsBytecode()) && parts.source.empty() &&
       !parts.sourceUrl.empty()) {
     std::string url = ResourceLoader::resolve(name, std::string(parts.sourceUrl));
     log(JSUI_LOG_WARN, name + ": bytecode was compiled for another JSUI runtime (" + std::string(parts.key) +

@@ -54,7 +54,7 @@
 //   node web/test/frame-bench.mjs [--dist dist-gpu] [--frames 120] [--renderers webgpu,webgl,cpu,chrome]
 //                                 [--width 1280 --height 720 --dpr 1] [--real-gpu] [--scenario steady]
 //                                 [--settle 3000] [--no-counts] [--no-gpu-timing] [--no-trace]
-//                                 [--webgl-sync readpixels|fence|finish] [--worker] [--phases]
+//                                 [--webgl-sync readpixels|fence|finish] [--worker] [--phases] [--js host|quickjs]
 //                                 [--json out.json] [app.jsx]
 //
 // Default: headless Chromium from Playwright, where WebGL runs on SwiftShader
@@ -92,6 +92,9 @@ const TRACE = !args.includes('--no-trace');
 const WORKER = args.includes('--worker');
 const PHASES = args.includes('--phases');
 const SCENARIO = opt('--scenario', 'steady');
+// --js host: JSUI runs the bundle on the page's (or worker's) own JS engine
+// (createJsui({ js: 'host' }) through page.html?js=); default quickjs.
+const JS_ENGINE = opt('--js', '');
 // How the finish metric waits for a WebGL frame: readpixels (default) a
 // 1-pixel read-back; fence a fenceSync polled from short tasks (no read-back,
 // but the polling competes for the CPU with SwiftShader: +35% there); finish
@@ -192,7 +195,7 @@ async function open(renderer, { init = [], stepped = false } = {}) {
     if (SETTLE) await page.waitForTimeout(SETTLE);
     return { context, page, info: { name: 'chrome', gl: 'react-native-web' } };
   }
-  await page.goto(`${ORIGIN}/test/page.html`);
+  await page.goto(`${ORIGIN}/test/page.html${JS_ENGINE ? `?js=${JS_ENGINE}` : ''}`);
   await page.waitForFunction(() => window.testReady);
   await page.bringToFront();
   const fromMount = stepped && SCENARIO === 'entrance';
