@@ -78,6 +78,6 @@ notices "$godot"
 zipdir "$OUT/jsui-godot-$VERSION.zip" "$WORK/godot" addons
 
 sum() { if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
-(cd "$OUT" && shopt -s nullglob && files=(*.tar.gz *.zip) && sum "${files[@]}" > SHA256SUMS.txt)
+(cd "$OUT" && shopt -s nullglob && files=(*.tar.gz *.tgz *.zip) && sum "${files[@]}" > SHA256SUMS.txt)
 echo "Platforms: ${platforms[*]}"
 ls -l "$OUT"

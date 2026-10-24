@@ -171,6 +171,9 @@ jobs:
           for p in linux-x64 linux-arm64 macos-universal windows-x64; do
             [ -d "artifacts/jsui-native-$p" ] || { echo "::error::the CI run has no jsui-native-$p artifact"; exit 1; }
           done
+          # The Unity package and the Unreal plugin first: the release script's
+          # SHA256SUMS.txt covers them.
+          scripts/dist/assemble-engines.sh "${{ steps.version.outputs.version }}" artifacts release upm
           scripts/dist/assemble-release.sh "${{ steps.version.outputs.version }}" artifacts release
       - name: Create or update the release
         env:
@@ -184,3 +187,29 @@ jobs:
             gh release create "$tag" -R "$GITHUB_REPOSITORY" --verify-tag --title "JSUI $VERSION" --generate-notes $pre
           fi
           gh release upload "$tag" -R "$GITHUB_REPOSITORY" --clobber release/*
+      # Unity's git URL install, https://github.com/orktes/jsui.git#upm (or
+      # #upm/vX.Y.Z for a fixed version): the package tree with the prebuilt
+      # plugins, one commit per release on the orphan branch `upm`.
+      - name: Update the upm branch
+        if: ${{ !contains(steps.version.outputs.version, '-') }}
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --tags origin "refs/tags/upm/v$VERSION" >/dev/null; then
+            echo "upm/v$VERSION exists already (a re-run): leaving the upm branch as it is"; exit 0
+          fi
+          dir="$RUNNER_TEMP/upm-branch"
+          if git fetch --depth 1 origin upm 2>/dev/null; then
+            git worktree add "$dir" FETCH_HEAD
+            git -C "$dir" switch -c upm
+          else
+            git worktree add --orphan -b upm "$dir"
+          fi
+          git -C "$dir" rm -rq --ignore-unmatch .
+          cp -R upm/. "$dir/"
+          git -C "$dir" add -A
+          git -C "$dir" commit -qm "com.orktes.jsui $VERSION" --allow-empty
+          git -C "$dir" tag "upm/v$VERSION"
+          git -C "$dir" push origin upm "upm/v$VERSION"
