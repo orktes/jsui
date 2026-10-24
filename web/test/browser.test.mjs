@@ -29,6 +29,8 @@ import { chromium } from 'playwright';
 const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STRICT = !!process.env.JSUI_WEB_STRICT;
 const ONLY = process.env.JSUI_WEB_ONLY;  // substring filter on test names
+// 'i/n': run every n-th test from the i-th (1-based), so CI can split the suite across jobs.
+const [SHARD, SHARDS] = (process.env.JSUI_WEB_SHARD || '1/1').split('/').map(Number);
 const DIST = process.env.JSUI_WEB_DIST || 'dist';  // module directory under web/
 const FONTS = path.join(WEB, '../assets/fonts');
 
@@ -2302,7 +2304,8 @@ test('worker: without Worker, createJsui({ worker: true }) runs on the main thre
 
 // -------------------------------------------------------------------- run
 let failed = 0, skipped = 0, passed = 0;
-for (const t of tests) {
+for (const [i, t] of tests.entries()) {
+  if (i % SHARDS !== SHARD - 1) continue;
   if (ONLY && !t.name.includes(ONLY)) continue;
   WORKER = t.worker;
   const { page, context, errors } = await newPage(t.ctxOpts);

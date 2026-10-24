@@ -1200,6 +1200,31 @@ jobs:
         run: GPU=1 JOBS=$(nproc) scripts/build-wasm.sh Release
       - name: Node smoke test (WebGPU module, CPU path)
         run: JSUI_WEB_DIST=dist-gpu node web/test/node-smoke.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-wasm-gpu
+          path: web/dist-gpu
+
+  # The WebGPU module's browser tests, split in three (JSUI_WEB_SHARD) so they
+  # run in parallel with each other and with the site check below.
+  wasm-webgpu-test:
+    name: wasm webgpu browser tests (${{ matrix.shard }}/3, advisory)
+    runs-on: ubuntu-24.04
+    needs: wasm-webgpu
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: jsui-wasm-gpu
+          path: web/dist-gpu
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
@@ -1212,14 +1237,36 @@ jobs:
         run: npm ci --no-audit --no-fund
       - name: Browser tests against the WebGPU module (Playwright / Chromium)
         working-directory: web
+        env:
+          JSUI_WEB_SHARD: ${{ matrix.shard }}/3
         run: |
           npm install --no-package-lock --no-audit --no-fund
           npx playwright install chromium
           JSUI_WEB_STRICT=1 JSUI_WEB_DIST=dist-gpu npm run test:browser
-      - uses: actions/upload-artifact@v4
+
+  wasm-webgpu-site:
+    name: wasm webgpu site smoke test (advisory)
+    runs-on: ubuntu-24.04
+    needs: wasm-webgpu
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/download-artifact@v4
         with:
           name: jsui-wasm-gpu
           path: web/dist-gpu
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json', 'web/package.json') }}
+      - name: Install workspace packages
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install chromium
       - name: Site (build + smoke test on WebGPU)
         run: |
           node site/scripts/build.mjs --wasm web/dist-gpu --wasm-webgl web/dist-gpu --wasm-gpu web/dist-gpu
