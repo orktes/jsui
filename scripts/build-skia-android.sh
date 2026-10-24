@@ -78,6 +78,18 @@ if [ "$(git rev-parse HEAD)" != "$SKIA_COMMIT" ]; then
   git checkout -q --force "$SKIA_COMMIT"
 fi
 
+# ICU data: the trimmed set Skia's wasm build (and our Windows build, as
+# icudtl.dat) uses, ~0.85 MB instead of the ~10 MB android set that would be
+# linked into every library. It has everything SkUnicode / SkParagraph use:
+# char / word / line break rules (with the Thai, Lao, Khmer and Burmese
+# dictionaries), NFKC, emoji and layout properties. Left out: collation,
+# locale data, converters, time zones and the CJK word dictionary (CJK line
+# breaking is per character and stays correct).
+git checkout -q -- third_party/icu/BUILD.gn
+sed -e 's|data_dir += "android"|data_dir += "flutter"|' third_party/icu/BUILD.gn > third_party/icu/BUILD.gn.jsui
+mv third_party/icu/BUILD.gn.jsui third_party/icu/BUILD.gn
+grep -q 'data_dir += "android"' third_party/icu/BUILD.gn && { echo "ICU data patch did not apply" >&2; exit 1; }
+
 # Only sync the third-party repos this configuration compiles.
 python3 - <<'PY'
 keep = {"brotli", "expat", "freetype", "harfbuzz", "icu", "libjpeg-turbo", "libpng", "libwebp", "wuffs", "zlib"}
