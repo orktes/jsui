@@ -28,15 +28,17 @@ endif()
 
 set(JSUI_UNITY_PLUGIN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/package/Plugins/${_unity_platform} CACHE PATH
     "Where the jsui_unity plugin is copied (the Unity package's Plugins folder)")
-add_custom_command(TARGET jsui_unity POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E make_directory ${JSUI_UNITY_PLUGIN_DIR}
-  COMMAND ${CMAKE_COMMAND} -E rm -rf ${JSUI_UNITY_PLUGIN_DIR}/${_unity_plugin_name}
-  COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different ${_unity_plugin} ${JSUI_UNITY_PLUGIN_DIR}/${_unity_plugin_name}
-  VERBATIM)
-if(NOT APPLE)
-  # A single file, not a directory.
+if(APPLE)
+  # A directory (the .bundle).
   add_custom_command(TARGET jsui_unity POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${JSUI_UNITY_PLUGIN_DIR}
     COMMAND ${CMAKE_COMMAND} -E rm -rf ${JSUI_UNITY_PLUGIN_DIR}/${_unity_plugin_name}
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${_unity_plugin} ${JSUI_UNITY_PLUGIN_DIR}/${_unity_plugin_name}
+    VERBATIM)
+else()
+  # A single file.
+  add_custom_command(TARGET jsui_unity POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${JSUI_UNITY_PLUGIN_DIR}
     COMMAND ${CMAKE_COMMAND} -E copy ${_unity_plugin} ${JSUI_UNITY_PLUGIN_DIR}/${_unity_plugin_name}
     VERBATIM)
 endif()
