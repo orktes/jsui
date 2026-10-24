@@ -653,8 +653,15 @@ jobs:
           JSUI_VULKAN_TEST_REQUIRE: 1
           JSUI_D3D_TEST_REQUIRE: 1
         run: |
-          export VK_DRIVER_FILES="$(cygpath -w /c/lavapipe/share/vulkan/icd.d/lvp_icd.x86_64.json)"
-          vulkaninfo --summary 2>/dev/null | head -40 || true
+          # The loader (vulkan-1.dll) and lavapipe's ICD, wherever the action put them.
+          sdk="$(cygpath -u "$VULKAN_SDK")"
+          loader="$( (find "$sdk" /c/Windows/System32 -maxdepth 3 -iname vulkan-1.dll 2>/dev/null || true) | head -1)"
+          icd="$( (find /c/lavapipe "$sdk" -iname 'lvp_icd*.json' 2>/dev/null || true) | head -1)"
+          echo "loader: $loader, lavapipe ICD: $icd"
+          [ -n "$loader" ] && [ -n "$icd" ]
+          export PATH="$(dirname "$loader"):$sdk/Bin:$PATH"
+          export VK_DRIVER_FILES="$(cygpath -w "$icd")"
+          vulkaninfo --summary 2>&1 | head -40 || true
           ./build/Release/jsui-tests.exe
 
   # ---------------------------------------------------- release binaries (dist)
