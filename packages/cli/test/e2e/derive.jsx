@@ -9,7 +9,7 @@
 //   evaluator and the native one agree.
 // - A clock-driven box; a function outside the subset fails to go native.
 import React, { useEffect, useMemo } from 'react';
-import { AppRegistry, View, Animated } from 'react-native';
+import { AppRegistry, View, Animated, Text } from 'react-native';
 import { Host, useHostMessage, useHostBufferValue, clamp, Expr } from '@orktes/jsui-react';
 
 const post = (name, value) => Host.postMessage(name, value);
@@ -67,7 +67,10 @@ function Nameplate({ offset }) {
   );
 }
 
+let renders = 0;
 function App() {
+  renders++;
+  useHostMessage('renders', () => post('renders', renders));
   const offset = useMemo(() => new Animated.Value(5, { useNativeDriver: true }), []);
   const native = useMemo(() => [0, 1].map(() => [new Animated.Value(0, { useNativeDriver: true }), new Animated.Value(0, { useNativeDriver: true })]), []);
   const js = useMemo(() => [0, 1].map(() => [new Animated.Value(0), new Animated.Value(0)]), []);
@@ -81,6 +84,34 @@ function App() {
     for (const k in reg) ids[k] = reg[k] && reg[k]._nativeTag;
     post('ids', ids);
   }, []);
+  // A native composite: steps advance without JS.
+  const seqV = useMemo(() => new Animated.Value(0, { useNativeDriver: true }), []);
+  const stagA = useMemo(() => new Animated.Value(0, { useNativeDriver: true }), []);
+  const stagB = useMemo(() => new Animated.Value(0, { useNativeDriver: true }), []);
+  useHostMessage('seq', () => {
+    const lin = { easing: (t) => t, useNativeDriver: true };
+    Animated.parallel([
+      Animated.sequence([
+        Animated.timing(seqV, { toValue: 96, duration: 48, ...lin }),
+        Animated.delay(32),
+        Animated.timing(seqV, { toValue: 0, duration: 48, ...lin }),
+      ]),
+      Animated.stagger(32, [
+        Animated.timing(stagA, { toValue: 10, duration: 32, ...lin }),
+        Animated.timing(stagB, { toValue: 10, duration: 32, ...lin }),
+      ]),
+    ]).start(({ finished }) => post('seqEnd', finished));
+  });
+  // Animated text: the runtime formats the number and sets the text.
+  const score = useMemo(() => new Animated.Value(0, { useNativeDriver: true }), []);
+  const jsScore = useMemo(() => new Animated.Value(0), []);
+  const fmt = { decimals: 0, grouping: ',', prefix: 'XP ', suffix: '!' };
+  const scoreText = useMemo(() => Animated.format(score, fmt), [score]);
+  const jsText = useMemo(() => Animated.format(jsScore, { decimals: 2, minDigits: 3 }), [jsScore]);
+  useHostMessage('score', (v) => {
+    Animated.timing(score, { toValue: v, duration: 64, easing: (t) => t, useNativeDriver: true }).start();
+    jsScore.setValue(v / 1000);
+  });
   useHostMessage('offset', (v) => offset.setValue(v));
   useHostMessage('notNative', () => {
     const v = new Animated.Value(1, { useNativeDriver: true });
@@ -99,6 +130,9 @@ function App() {
       <View>
         <Twins values={native} />
       </View>
+      <Animated.Text ref={(r) => (reg.score = r)} text={scoreText} style={{ position: 'absolute', top: 100, color: '#fff' }} />
+      <Animated.Text ref={(r) => (reg.jsScore = r)} text={jsText} style={{ position: 'absolute', top: 130, color: '#fff' }} />
+      <Animated.View ref={(r) => (reg.seq = r)} style={{ position: 'absolute', width: 4, height: 4, transform: [{ translateX: seqV }, { translateY: stagA }, { scaleX: stagB }] }} />
       <Animated.View ref={(r) => (reg.clock = r)} style={{ position: 'absolute', width: 4, height: 4, transform: [{ translateX: clockX }] }} />
       <JsTwins js={js} />
     </View>

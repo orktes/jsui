@@ -1712,12 +1712,30 @@ Native's API and both of its drivers:
     `nativeEvent` map onto native values (`addEventMapping`), applied by
     `InputManager::dispatch` before the event reaches JS (a JS `listener`
     still runs). `Animated.attachNativeEvent` does the same for a ref.
-  * React Native's rules: a native value stays native and a JS-driven
-    animation on it throws; only paint-only style keys can be driven
-    (`opacity`, `transform`, colors, border radii, `shadowOpacity` /
-    `shadowRadius`, ...) and transforms; layout keys throw `Style property
-    'width' is not supported by native animated module`, animated non-style
-    props throw too. `Animated.ValueXY` is native through its channels.
+  * React Native's rules, mostly: a native value stays native and a
+    JS-driven animation on it throws; animated non-style props throw.
+    Unlike React Native, every style key can be driven: paint-only keys
+    (`opacity`, `transform`, colors, border radii, ...) only repaint, and
+    layout keys (`width`, `top`, `margin`, `flex`, ...) take
+    `Node::patchStyle`'s general path and relay out in the same tick
+    (also under `jsui_tick_native`). `Animated.ValueXY` is native through
+    its channels.
+  * Composites: `sequence` / `parallel` / `stagger` / `loop` (and `delay`)
+    whose steps are all native-driven animations run as one native `group`
+    animation (`__nativeSpec()` in animations.js; `NativeAnimated::runStep`):
+    leaf, wait, sequence, parallel (stopTogether) and loop steps (resetting
+    the values to their starting values before each iteration). A step
+    starts on the frame the previous one ended, as the JS composites' end
+    callbacks would, so frames match the JS-orchestrated version; only the
+    group's end reaches JS. Any step that needs JS (a JS-driven animation,
+    `toValue` tracking) keeps the JS composite. A value's `stopAnimation` or
+    a new animation on it stops the whole group.
+  * Text: `<Animated.Text text={node} />` sets the Text's content from an
+    Animated node (`Animated.format(node, {decimals, grouping, prefix,
+    suffix, minDigits})` for numbers): natively a `format` node feeds the
+    props node's `text` input, which sets the view's first RawText child,
+    and React keeps the children it rendered when the view went native, so
+    it never writes stale text. On the JS driver the component re-renders.
   * Writes go through `Node::patchStyle` (paint-only, so no relayout; the
     incremental renderer damages just the node's old and new rects). Each
     `style` node keeps its keys with their paint groups, resolved once when

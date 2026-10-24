@@ -12,6 +12,7 @@ import {
   AnimatedHostBuffer,
   AnimatedDerived,
   AnimatedExpression,
+  AnimatedFormat,
   AnimatedClock,
   add,
   subtract,
@@ -157,6 +158,8 @@ export const Animated = {
   derive: (inputs, fn, meta) => new AnimatedDerived(inputs, fn, meta),
   expr: (fn, meta) => new AnimatedExpression(fn, meta),
   clock: () => new AnimatedClock(),
+  // A number as text for Animated.Text's `text` prop (set natively, no re-render).
+  format: (node, options) => new AnimatedFormat(node, options),
   createAnimatedComponent,
   attachNativeEvent,
   forkEvent: (event1, listener) => {

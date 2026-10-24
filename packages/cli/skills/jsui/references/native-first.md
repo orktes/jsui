@@ -13,6 +13,26 @@ default; use React state only for things that change now and then.
 | A value **computed** from animated / game values (clamp to screen, distance fade, conditional offsets) | `Animated.derive(inputs, fn)` | `addListener` → compute → `setValue` / `setState` (one frame late, JS every frame) |
 | Procedural motion (bob, pulse, orbit) without an animation | `Animated.derive([Animated.clock()], (t) => ...)` | a JS timer |
 | Scroll-linked effects | `Animated.event` with `useNativeDriver: true` + `interpolate` / `derive` | `onScroll` → `setState` |
+| Numbers that count up / tick (scores, XP, timers, ammo) | `<Animated.Text text={Animated.format(value, {...})} />` | `addListener` → `setState` → re-render |
+| Choreography: sequence / parallel / stagger / loop | `Animated.sequence(...)` etc. with every step `useNativeDriver: true` (delays too): runs as one native group | mixing JS-driven steps in (the whole composite then hops through JS between steps) |
+| Animating size / position (`width`, `height`, `top`, `flex`) | the native driver works for layout keys too (relayout per frame); prefer transforms when they do the job | JS-driven layout animation |
+
+## Animated.Text with a live number
+
+```jsx
+const xp = useAnimatedValue(0, { useNativeDriver: true });
+const label = useMemo(() => Animated.format(xp, { decimals: 0, grouping: ',', prefix: 'XP ' }), [xp]);
+useEffect(() => {
+  Animated.timing(xp, { toValue: 25000, duration: 1200, useNativeDriver: true }).start();
+}, []);
+return <Animated.Text style={styles.xp} text={label} />;  // "XP 0" ... "XP 25,000", no re-renders
+```
+
+`text` takes any Animated node: `Animated.format` (`decimals` (default:
+shortest), `grouping` (thousands separator), `prefix`, `suffix`,
+`minDigits` (zero padding: `minDigits: 2` for clocks)) or a plain numeric
+node. Combine with `Animated.derive` for computed numbers, e.g. a countdown:
+`Animated.format(Animated.derive([t], (s) => Math.ceil(s)), { suffix: 's' })`.
 
 ## Animated.derive
 
