@@ -11,6 +11,7 @@ import {
   TouchableNativeFeedback,
   Button,
 } from './components/pressables.js';
+import { Group, Visibility, useGroupState } from './components/group.js';
 import { FlatList, SectionList, VirtualizedList } from './components/lists.js';
 import {
   ActivityIndicator,
@@ -24,7 +25,7 @@ import {
   DrawerLayoutAndroid,
   ProgressBarAndroid,
 } from './components/misc.js';
-import { Animated, makeAnimated, useAnimatedValue, useHostBufferValue, useInteraction } from './animated/index.js';
+import { Animated, makeAnimated, useAnimatedValue, useHostBufferValue, useInteraction, useHostStateBind } from './animated/index.js';
 import { Easing } from './animated/Easing.js';
 import { Expr, clamp, lerp, step, smoothstep, fract, wrap } from './animated/expression.js';
 import { StyleSheet } from './StyleSheet.js';
@@ -100,6 +101,10 @@ export {
   useAnimatedValue,
   useHostBufferValue,
   useInteraction,
+  useHostStateBind,
+  useGroupState,
+  Group,
+  Visibility,
   // Animated.derive expression helpers (animated/expression.js)
   Expr,
   clamp,

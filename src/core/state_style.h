@@ -32,6 +32,7 @@ enum StateSlot : uint8_t {
   kFocusVisible,
   kPressed,
   kDisabled,
+  kHidden,  // <Visibility> / `visible`: fades / scales out, then display none
   kStateSlots
 };
 
@@ -51,12 +52,15 @@ struct StateStyles {
   double start[kStateSlots] = {};
   bool seen = false;  // weights were set once (the first frame does not transition)
   uint64_t pass = 0;  // InputManager::tickStates pass that last visited it
-  double lastMs = 0;  // the frame the weights were last stepped at
+  double lastMs = 0;   // the frame the weights were last stepped at
+  double frameMs = 0;  // the frame interval before it (at most a 60 Hz frame)
   bool isGroup = false;     // `group`: descendants' group*Style follow this element
   std::string groupKey;     // `group="name"`
   std::string groupName;    // `groupName`: the group this element follows (empty: nearest)
   std::string interaction;  // `interaction` key (Animated.interaction values read this element)
   bool disabled = false;
+  bool hidden = false;  // `visible` false (a prop, or written by native Animated: Node::setHidden)
+  Value hiddenEnd;      // keys set once fully hidden (display / pointerEvents)
   bool hasTransition = false;  // its own `transition` (else group states take the group's)
   bool hasOverlays() const { return !keys.empty(); }
   bool hasGroupOverlays() const;

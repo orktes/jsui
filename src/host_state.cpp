@@ -20,6 +20,7 @@ HostState::Result HostState::set(const std::string& key, std::string_view json, 
   e.jsonValid = true;
   e.version = nextVersion_++;
   if (!fromUi) markDirty(key);
+  if (onChange) onChange(key);
   return Result::Changed;
 }
 
@@ -49,12 +50,19 @@ HostState::Result HostState::patch(const std::string& key, std::string_view json
     e.patchBytes = 0;
   }
   if (!fromUi) markDirty(key);
+  if (onChange) onChange(key);
   return Result::Changed;
+}
+
+const Json* HostState::value(const std::string& key) const {
+  auto it = entries_.find(key);
+  return it == entries_.end() ? nullptr : &it->second.value;
 }
 
 bool HostState::remove(const std::string& key, bool fromUi) {
   if (!entries_.erase(key)) return false;
   if (!fromUi) markDirty(key);
+  if (onChange) onChange(key);
   return true;
 }
 

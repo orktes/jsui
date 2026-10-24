@@ -51,7 +51,10 @@ Packages: `@orktes/jsui-cli` (bundler, dev server, headless tools, this skill),
    Values computed from them (clamped to the screen, faded by distance,
    conditional offsets) are `Animated.derive(inputs, fn)` expressions, which
    the runtime evaluates natively every frame: never `addListener` →
-   compute → `setValue`/`setState`. See
+   compute → `setValue`/`setState`. Fields of shared state shown as
+   they change (health, ammo) bind natively with `useHostStateBind`;
+   things that appear with data or hover use `<Visibility visible={node}>`
+   and `useGroupState()`. See
    [references/native-first.md](references/native-first.md).
 8. **Give important elements a `testID`** so you (and tests) can find, click
    and check them with `jsui inspect` / `jsui run`.
@@ -227,7 +230,7 @@ Read the reference that matches the task:
 | --- | --- |
 | Components, props, styles, images, fonts (loading, weights, fallbacks, variable fonts), what's not supported | [references/components-and-styles.md](references/components-and-styles.md) |
 | Focus, gamepad, keyboard, pointer, scrolling, modals, input pass-through | [references/input-and-focus.md](references/input-and-focus.md) |
-| Native-first patterns: keep JS off the frame (`Animated.derive`, `Animated.clock`, host-buffer values, state styles `hoveredStyle` / `pressedStyle` / group styles, `useInteraction`, what to use instead of state) | [references/native-first.md](references/native-first.md) |
+| Native-first patterns: keep JS off the frame (`Animated.derive`, `Animated.clock`, host-buffer values, state styles `hoveredStyle` / `pressedStyle` / group styles, `useInteraction`, `useGroupState`, `Visibility`, hover popouts, `useHostStateBind`, what to use instead of state) | [references/native-first.md](references/native-first.md) |
 | `Animated` (native driver), springs, `LayoutAnimation`, performance | [references/animation-and-performance.md](references/animation-and-performance.md) |
 | Game data: shared state, calls, messages, per-frame buffers, several root views | [references/game-data.md](references/game-data.md) |
 | Host textures (video, render targets), LottieView, ShaderView / SkSL | [references/media-and-effects.md](references/media-and-effects.md) |

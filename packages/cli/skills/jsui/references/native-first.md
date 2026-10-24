@@ -18,6 +18,9 @@ default; use React state only for things that change now and then.
 | Hover / press / focus feedback (highlight, press-down scale, focus ring) | `hoveredStyle` / `pressedStyle` / `focusedStyle` / `focusVisibleStyle` / `disabledStyle` + `transition` on any element (Pressable, View, Text, Image): swapped by the runtime on input | `style={({pressed, hovered}) => ...}` or `onHoverIn` → `setState` (a JS round trip and a re-render per change) |
 | Children reacting to the parent's hover / press / focus (card hover lights up its title and icon) | `group` on the parent, `groupHoveredStyle` / `groupPressedStyle` / `groupFocusedStyle` / `groupFocusVisibleStyle` on descendants | passing hover state down through props |
 | Driving anything else from interaction (a glow's intensity, an icon's rotation, a derive) | `useInteraction()` → `interaction={ix}` on the element, then `ix.hovered` / `ix.pressed` / `ix.focused` (native 0..1 values) | listeners → `setState` |
+| A descendant reading its group's state (tooltips, popouts, reveal-on-hover buttons) | `useGroupState(name?)` under a `<Group>` or `<Pressable group>`: the same native values, plus `.instant.hovered` (0 / 1 at once) | prop drilling `hovered` + re-renders |
+| Showing / hiding without a render (popouts, warnings, HUD pieces that toggle with game data) | `<Visibility visible={node or bool} transition={120}>` | `{cond && <X/>}` driven by per-frame data |
+| UI bound to a field of shared host state (health, ammo, name) that must update on the frame the game sets it | `useHostStateBind('player', 'health.current')`: a native value for styles, `Animated.Text`, `derive`, `Visibility` | `useHostState` → render (waits for the next JS tick, re-renders) |
 | Animating size / position (`width`, `height`, `top`, `flex`) | the native driver works for layout keys too (relayout per frame); prefer transforms when they do the job | JS-driven layout animation |
 
 ## State styles: hover, press, focus without JS
@@ -77,6 +80,73 @@ const glow = useMemo(() => ix.hovered.interpolate({ inputRange: [0, 1], outputRa
 `useInteraction()` values follow the element's `transition` and work
 anywhere a native Animated node does (styles, `interpolate`,
 `Animated.derive`); they read 0 on the JS driver.
+
+## Group state, Visibility and popouts
+
+```jsx
+import { Group, Visibility, useGroupState, Animated } from 'react-native';
+
+function Tooltip({ item }) {
+  const slot = useGroupState();  // the nearest <Group> / <Pressable group>
+  return (
+    <Visibility
+      visible={slot.instant.hovered}         // any Animated node: nonzero shows
+      transition={{ duration: 120, easing: 'easeOut' }}
+      effect="scale"                         // 'fade' (default with a transition) | 'scale' | 'none'
+      style={styles.tooltip}                 // position: 'absolute' next to the slot
+    >
+      <Text style={styles.tipTitle}>{item.name}</Text>
+      <Text style={styles.tipBody}>{item.description}</Text>
+    </Visibility>
+  );
+}
+
+function Slot({ item }) {
+  return (
+    <Pressable group onPress={() => equip(item)} style={styles.slot} hoveredStyle={styles.slotHover} transition={100}>
+      <Image source={item.icon} style={styles.icon} />
+      <Tooltip item={item} />
+    </Pressable>
+  );
+}
+```
+
+- `useGroupState(name?)` returns `{ hovered, pressed, focused,
+  focusVisible, disabled }`: native values, 0..1 eased by the group's
+  `transition`. `.instant.hovered` etc. switch 0 / 1 on the frame the state
+  changes: use them for `Visibility` (the Visibility has its own
+  transition) and the eased ones to drive styles directly
+  (`opacity: slot.hovered`, `slot.hovered.interpolate(...)`,
+  `Animated.derive([slot.hovered], ...)`). With a name it finds an outer
+  `<Group name="...">` / `<Pressable group="...">`.
+- `<Group name? transition? style>` is a View that is a group, for when the
+  group itself is not pressable.
+- `<Visibility visible mode effect scale transition style>`: `visible` is a
+  boolean or an Animated node; the runtime applies it on the frame it
+  changes. `mode="remove"` (default) takes it out of layout, paint and hit
+  testing once hidden (like `display: 'none'`), `mode="hide"` keeps its
+  layout. The children stay mounted (state kept, no mount cost on show).
+- Popouts are drawn inside their parent: a parent with `overflow: 'hidden'`
+  (ScrollView, clipped panels) clips them. Put the slot's popout outside the
+  clipping container, or give the container room.
+
+## Host state bound natively
+
+```jsx
+const hp = useHostStateBind('player', 'health.current');  // jsui_set_state("player", ...)
+const name = useHostStateBind('player', 'name');
+const low = useMemo(() => Animated.derive([hp], (h) => h > 0 && h < 25), [hp]);
+<Animated.View style={[styles.bar, { width: hp }]} />
+<Animated.Text text={name} />
+<Visibility visible={low}><Text style={styles.warn}>LOW HEALTH</Text></Visibility>
+```
+
+The runtime re-reads the field the moment the host calls `jsui_set_state`
+/ `jsui_patch_state` (also under `jsui_tick_native`), so the UI shows the
+value in the frame the game set it, with no JS tick and no render.
+Numbers, booleans (1 / 0) and strings (for `text`) bind; the path is
+`'a.b.0.c'` or an array. JS still sees the state through `useHostState`.
+Use frame-data buffers instead for values that change every frame.
 
 ## Animated.Text with a live number
 

@@ -57,6 +57,7 @@ bool InputManager::statePressed(const Node* n) const {
 
 void InputManager::tickStates(double nowMs) {
   statesMoving_ = false;
+  doc_.statesKick = false;
   auto& list = doc_.stateNodes;
   if (keyPressId_ && !alive(keyPressId_)) keyPressId_ = 0;
   static uint64_t passes = 0;
@@ -76,6 +77,7 @@ void InputManager::tickStates(double nowMs) {
     t[kFocused] = focused_ == n;
     t[kFocusVisible] = t[kFocused] && keyboardModality_;
     t[kDisabled] = s.disabled;
+    t[kHidden] = s.hidden;
     if (s.hasGroupOverlays()) {
       if (Node* g = groupOf(n, s.groupName)) {
         inheritGroupTransition(s, *g->stateStyles);

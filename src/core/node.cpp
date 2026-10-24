@@ -188,6 +188,18 @@ void Node::setProps(const Value& props) {
   applyProps(props);
 }
 
+void Node::setHidden(bool hidden) {
+  StateStyles* s = stateStyles.get();
+  if (!s || s->hidden == hidden) return;
+  s->hidden = hidden;
+  bool t[kStateSlots];
+  std::copy(s->target, s->target + kStateSlots, t);
+  t[kHidden] = hidden;
+  bool moving = false;
+  if (stepStateWeights(*s, t, doc_ ? doc_->now : 0, &moving)) applyStateStyles();
+  if (moving && doc_) doc_->statesKick = true;
+}
+
 bool Node::applyStateStyles() {
   if (!stateStyles || !stateStyles->hasOverlays()) return false;
   return patchStyle(blendStateKeys(*stateStyles));
