@@ -22,8 +22,9 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=jsui");
     let target = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target != "windows" {
-        println!("cargo:rustc-link-arg-examples=-Wl,-rpath,{}", dir.display());
-        println!("cargo:rustc-link-arg-tests=-Wl,-rpath,{}", dir.display());
+        // All of this package's linked targets: examples, tests/ and the
+        // lib's own unit-test binary (which -tests does not cover).
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", dir.display());
     }
     // For the example's "Rust 1.xx" label.
     let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".into());

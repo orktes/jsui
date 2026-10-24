@@ -315,7 +315,7 @@ fn main() {
         frame += 1;
 
         if opt.selftest {
-            match selftest.step(&rt, &app.borrow(), frame) {
+            match selftest.step(&rt, &app, frame) {
                 Some(Ok(())) => {
                     println!("selftest: ok ({passed_clicks} click(s) passed through to the app)");
                     break;
@@ -422,11 +422,14 @@ struct SelfTest {
 }
 
 impl SelfTest {
-    fn step(&mut self, rt: &Context, app: &App, frame: u32) -> Option<Result<(), String>> {
+    fn step(&mut self, rt: &Context, app: &RefCell<App>, frame: u32) -> Option<Result<(), String>> {
+        // A click calls back into the app (on_call borrows it mutably), so no
+        // borrow is held across one.
+        let a = app.borrow().anchors.clone();
+        let quests = app.borrow().quests.len() as u64;
         if frame > 900 {
-            return Some(Err(format!("timed out in stage {} (anchors: {})", self.stage, app.anchors)));
+            return Some(Err(format!("timed out in stage {} (anchors: {a})", self.stage)));
         }
-        let a = &app.anchors;
         let center = |name: &str| -> Option<(f32, f32)> {
             let r = a.get(name)?;
             let f = |k: &str| r.get(k).and_then(Value::as_f64).unwrap_or(0.0) as f32;
@@ -452,13 +455,14 @@ impl SelfTest {
                 self.count = count;
                 self.stage = 1;
             }
-            1 if count == self.count + 1 && app.quests.len() as u64 == count => {
+            1 if count == self.count + 1 && quests == count => {
                 if done != 0 || !click(center("toggle")?) {
                     return Some(Err("could not tick the first quest".into()));
                 }
                 self.stage = 2;
             }
             2 if done == 1 => {
+                let app = app.borrow();
                 if app.xp != 50 || !app.quests[0].done {
                     return Some(Err(format!("expected 50 XP, have {}", app.xp)));
                 }

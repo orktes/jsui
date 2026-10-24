@@ -19,11 +19,13 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 png = "0.18.1"
 
 # The example's window and GL context. GLFW is built from the crate's bundled
-# sources (no system GLFW, no download).
+# sources (no system GLFW, no download). On macOS and Windows the glfw crate
+# always compiles its native-handle getters (glfwGetCocoaWindow, ...), which
+# glfw-sys only declares with `native-handles`.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 glfw = { version = "0.63.0", default-features = false, features = ["src-build", "x11"] }
 [target.'cfg(not(target_os = "linux"))'.dev-dependencies]
-glfw = { version = "0.63.0", default-features = false, features = ["src-build"] }
+glfw = { version = "0.63.0", default-features = false, features = ["src-build", "native-handles"] }
 
 [[example]]
 name = "quests"
