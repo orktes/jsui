@@ -29,6 +29,10 @@ namespace jsui {
 
 namespace {
 
+// A tick shorter than this leaves the frame room for a deferred cycle
+// collection.
+constexpr double kLightTickMs = 4.0;
+
 // "http://host:port/a/b.js?x" -> "http://host:port"; empty if not http.
 std::string httpOrigin(const std::string& url) {
   if (url.rfind("http://", 0) != 0) return {};
@@ -641,6 +645,15 @@ void Runtime::tick(double nowMs) {
   deliverUiCallResults();
   // Shared-session commands run last, on the frame this tick produced.
   if (session) session->tick(devOrigin_);
+  // Cycle collections the engine deferred while JS ran run between frames,
+  // in light ticks (no commit to speak of) or while nothing moves (see
+  // JsEngine::collectIdle).
+  if (js) {
+    double tickMs = wallMs() - tickWallStart;
+    bool idle = !wantsFrame();
+    for (auto& s : surfaces_) idle = idle && !s->needsRedraw();
+    js->collectIdle(tickMs < kLightTickMs, idle);
+  }
   prepareText();
 }
 

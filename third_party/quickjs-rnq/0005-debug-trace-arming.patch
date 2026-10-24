@@ -1,12 +1,46 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: a <a@b>
-Date: Sat, 24 Oct 2026 19:49:11 +0000
-Subject: [PATCH 05/72] 0005-debug-trace-arming.patch
+Subject: turn the debugger's per-statement callback on and off cheaply
 
----
- quickjs.c | 32 +++++++++++++++++++++++++++++++-
- quickjs.h | 10 ++++++++++
- 2 files changed, 41 insertions(+), 1 deletion(-)
+What this does
+  Adds a switch that decides whether the per-statement debugger callback
+  actually runs. Installing a handler still decides whether the traps exist in
+  the compiled code at all; this decides whether they do anything.
+
+Why we need it
+  A debugger has to install its handler before any script is parsed, because
+  that is what puts the traps into the compiled code, and it cannot be undone
+  afterwards. So a debugger stays installed for the whole session -- including
+  the long stretches where it has no breakpoints and nothing to stop on.
+
+  Without a switch, those stretches are expensive. Measured on one of our
+  workloads, per statement:
+
+      no handler installed                      546 ns
+      handler installed but switched off        578 ns
+      handler installed and running             4,040 ns
+
+  Almost all of the cost is the engine working out which source line it is on,
+  which it redoes from the start of the function every single time. An
+  attached but idle DevTools window is the normal state for a whole day of
+  development, so it must not cost anything.
+
+What it adds
+  JS_SetDebugTraceArmed()  - switch the callback on or off.
+
+Needs a bytecode version bump
+  No.
+
+Notes
+  A `debugger;` statement still reaches the handler even when switched off. It
+  has to keep working in an attached-but-idle session, and it is free to keep:
+  those traps exist only where the programmer wrote the keyword, unlike
+  ordinary statement traps which are on every statement.
+
+  Switching ON may be done from any thread, and has to be: a pause request
+  arrives on the debugger's own thread and must interrupt a runtime that is
+  already running. The flag is atomic and read without ordering, so a late read
+  costs at most one extra statement before the pause -- which an asynchronous
+  pause is allowed to do anyway. Switching OFF is only safe from the JavaScript
+  thread. Only this flag is thread-safe; the context as a whole is not.
 
 diff --git a/quickjs.c b/quickjs.c
 index 85e2179..e732a95 100644

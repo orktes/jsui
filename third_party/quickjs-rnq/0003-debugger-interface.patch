@@ -1,13 +1,45 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: a <a@b>
-Date: Sat, 24 Oct 2026 19:49:11 +0000
-Subject: [PATCH 03/72] 0003-debugger-interface.patch
+Subject: let a debugger pause code, read variables and evaluate expressions
 
----
- quickjs-opcode.h |   8 +
- quickjs.c        | 475 ++++++++++++++++++++++++++++++++++++++++++++++-
- quickjs.h        |  91 +++++++++
- 3 files changed, 573 insertions(+), 1 deletion(-)
+What this does
+  Adds the hooks a debugger needs to work at all:
+
+    - a callback the engine invokes at each statement boundary, so a debugger
+      can stop on a line and can tell when it stopped because the script said
+      `debugger;`
+    - a way to walk the call stack and read the arguments, locals and captured
+      variables of any frame on it
+    - a way to change one of those variables
+    - a way to evaluate an expression as if it were running inside a chosen
+      frame, so typing a variable name in a debugger console shows its value
+
+Why we need it
+  Without these, no debugger can attach to an app running on this engine.
+  There is no way to pause, no way to see a variable, and `debugger;` in the
+  source does nothing at all.
+
+  Statement boundaries are only instrumented in code parsed *after* a handler
+  is installed, so an app that never attaches a debugger never pays for it.
+
+What it adds
+  JS_SetDebugTraceHandler()      - install the per-statement callback.
+  JS_GetStackDepth()             - how many frames are on the call stack.
+  JS_GetLocalVariablesAtLevel()  - the variables visible in one frame.
+  JS_FreeLocalVariables()        - release what the call above returned.
+  JS_SetVariableAtLevel()        - change a variable in one frame.
+  JS_EvalInStackFrame()          - evaluate an expression inside one frame.
+
+  Two opcodes: a parse-time marker, and the trap the interpreter runs.
+
+Needs a bytecode version bump
+  Yes - it adds an opcode. The new opcode goes on the end, so bytecode built
+  before this change still loads. Bytecode built after it would confuse an
+  older engine, which is what the bump is for. The bump itself is in
+  9999-bc-version-bump.
+
+Notes
+  The trap opcode is defined whether or not JS_ENABLE_DEBUGGER is set, so that
+  opcode numbering never depends on a build flag. With the flag off, only the
+  handling is compiled out.
 
 diff --git a/quickjs-opcode.h b/quickjs-opcode.h
 index ec2a5ad..722a53d 100644

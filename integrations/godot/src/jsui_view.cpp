@@ -1176,6 +1176,10 @@ Dictionary JsuiView::get_perf(bool reset) {
   d["text_measures"] = int64_t(p.text_measures);
   d["layout_passes"] = int64_t(p.layout_passes);
   d["bridge_calls"] = int64_t(p.bridge_calls);
+  d["gc_collections"] = int64_t(p.gc_collections);
+  d["gc_full_collections"] = int64_t(p.gc_full_collections);
+  d["gc_us"] = p.gc_us;
+  d["gc_max_us"] = p.gc_max_us;
   return d;
 }
 

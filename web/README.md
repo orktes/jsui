@@ -475,6 +475,8 @@ returns what the frames since the last reset cost, the same numbers as
   `layout_us`, `input_us`, `paint_us`, `gpu_submit_us`, `other_us`;
 - work counters: `bridge_calls`, `layout_passes`, `text_measures`,
   `paragraph_builds`, `image_decodes` / `image_decode_us`, `pipeline_compiles`.
+- JS garbage collection: `gc_collections`, `gc_full_collections`, `gc_us`,
+  `gc_max_us` (the longest pause).
 
 A runtime's surfaces share its switch and totals. Browsers round
 `performance.now()` to about 100 µs on pages that are not cross-origin

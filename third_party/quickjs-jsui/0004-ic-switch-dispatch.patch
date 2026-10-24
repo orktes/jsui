@@ -1,0 +1,90 @@
+Subject: Fix the IC hit paths under switch dispatch (wasm, MSVC)
+
+What this does
+  The inline-cache probes rnq added (0015, 0016) end a hit with BREAK inside
+  a `for` over the cache entries. With computed-goto dispatch BREAK jumps
+  to the next opcode, but where quickjs falls back to a `switch`
+  (DIRECT_DISPATCH 0: Emscripten and MSVC/clang-cl) it is a plain `break`
+  that only leaves the loop, so the hit falls through into the slow path and
+  the opcode runs twice. A method call through a warm IC then sees the
+  wrong `this` ("RegExp object expected") and refcounts go wrong.
+
+  Those BREAKs become BREAK_LOOP, which jumps to the end of the dispatch
+  loop body in switch mode and is BREAK otherwise.
+
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -20291,6 +20291,9 @@
+ #define CASE(op)        case op
+ #define DEFAULT         default
+ #define BREAK           break
++/* JSUI: BREAK from inside a loop in a handler (the IC probes): a plain
++   break would leave only the loop and fall into the slow path. */
++#define BREAK_LOOP      goto next_opcode
+ #else
+     /* Dispatch is byte-indexed and the IC opcode set fills all 256 entries. */
+     _Static_assert(OP_COUNT <= 256, "opcode space exceeds one-byte dispatch");
+@@ -20304,6 +20307,7 @@
+ #define CASE(op)        case_ ## op
+ #define DEFAULT         case_default
+ #define BREAK           SWITCH(pc)
++#define BREAK_LOOP      SWITCH(pc)
+ #endif
+ 
+     if (js_poll_interrupts(caller_ctx))
+@@ -21407,7 +21411,7 @@
+                             }
+                             *sp++ = val;
+                             QJS_ICSTAT_INC(qjs_ic_hits);
+-                            BREAK;
++                            BREAK_LOOP;
+                             }
+                         }
+ #endif
+@@ -22292,7 +22296,7 @@
+                             JS_FreeValue(ctx, sp[-1]);
+                             sp[-1] = val;
+                             QJS_ICSTAT_INC(qjs_ic_hits);
+-                            BREAK;
++                            BREAK_LOOP;
+                         }
+                     }
+ #endif
+@@ -22434,7 +22438,7 @@
+                             }
+                             *sp++ = val;
+                             QJS_ICSTAT_INC(qjs_ic_hits);
+-                            BREAK;
++                            BREAK_LOOP;
+                         }
+                     }
+ #endif
+@@ -22569,7 +22573,7 @@
+                                 p->prop[off].u.value = sp[-1]; /* fresh slot: transfer */
+                                 JS_FreeValue(ctx, obj);
+                                 sp -= 2;
+-                                BREAK;
++                                BREAK_LOOP;
+                             }
+                             goto put_field_ic_slow; /* guard failed: generic + re-fill */
+                         }
+@@ -22577,7 +22581,7 @@
+                         set_value(ctx, &p->prop[ic[k].offset].u.value, sp[-1]);
+                         JS_FreeValue(ctx, obj);
+                         sp -= 2;
+-                        BREAK;
++                        BREAK_LOOP;
+                     }
+ #endif
+                     prs = find_own_property(&pr, p, atom);
+@@ -24018,6 +24022,9 @@
+                                   (int)(pc - b->byte_code_buf - 1), opcode);
+             goto exception;
+         }
++#if !DIRECT_DISPATCH
++    next_opcode: ;
++#endif
+     }
+  exception:
+     if (needs_backtrace(rt->current_exception)

@@ -1,0 +1,426 @@
+Subject: generational cycle collection, deferred collections run between frames
+
+What this does
+  Collects cycles generationally. A young collection scans only the objects
+  allocated since the last collection, the oldest first, optionally in
+  slices of a time budget; the survivors move to an old list, and old
+  objects act as roots. A full collection (JS_RunGC, or when the heap left
+  after collections has grown enough) scans everything. Builds on 0002: the
+  collections deferred while JS runs are what the embedder runs between
+  frames, a slice at a time.
+
+Why we need it
+  The stop-the-world cycle collector costs about 1 ms per MB of heap, every
+  object every time. A UI heap of 15-30 MB paused 15-30 ms in the middle of
+  navigation frames. Most of that heap is long-lived (the mounted screens,
+  modules, shapes) and is rescanned on every collection for nothing.
+
+What it adds
+  JS_SetGCGenerational()  - turn generational collection on (off by default:
+                            stock behaviour)
+  JS_SetGCYoungChunk()    - objects per deferred young collection
+  JS_SetGCYoungBudget()   - or a time per slice; sized from the last one
+  JS_FinishPendingGC()    - run a deferred collection in one go
+  JS_RunIdleGC()          - the waiting collection, else a due full one
+  JS_IsFullGCDue()        - whether the heap grew enough for a full one
+  JS_GetGCStats()         - collections, full ones, total and longest time
+
+Needs a bytecode version bump
+  No.
+
+Notes
+  Trial deletion over a subset of the heap is sound: objects outside it
+  count as roots, so nothing reachable is freed; garbage cycles that span
+  the boundary wait for a later (full) collection. Two places learn about
+  objects outside the collection (mark 0): gc_scan_incref_child leaves them
+  where they are, and an old object that only young garbage referenced is
+  freed with the cycle (js_free_value_rt, REMOVE_CYCLES). JS_SetGCDeferred's
+  ceiling becomes dynamic when 0: twice the heap when a collection is first
+  deferred, at least 16 MB more.
+
+diff --git a/quickjs.c b/quickjs.c
+index 9faa0c6..8111d3d 100644
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -450,7 +450,17 @@ struct JSRuntime {
+     size_t malloc_gc_threshold;
+     bool gc_deferred; /* see JS_SetGCDeferred */
+     bool gc_pending;
+-    size_t gc_deferred_limit;
++    size_t gc_deferred_limit; /* 0: gc_pending_limit, set when one is deferred */
++    size_t gc_pending_limit;
++    /* generational cycle collection (JS_SetGCGenerational) */
++    bool gc_generational;
++    bool gc_full_due; /* the heap grew enough for a full collection */
++    size_t gc_full_base; /* heap size after the last full collection */
++    size_t gc_old_size; /* heap size after the last collection */
++    size_t gc_young_chunk; /* objects per deferred young collection, 0: all */
++    uint64_t gc_young_budget_ns; /* or: aim for this long (JS_SetGCYoungBudget) */
++    struct list_head gc_old_obj_list; /* objects that survived a collection */
++    JSGCStats gc_stats;
+ #ifdef ENABLE_DUMPS // JS_DUMP_LEAKS
+     struct list_head string_list; /* list of JSString.link */
+ #endif
+@@ -1945,33 +1955,47 @@ JSValue JS_DupValueRT(JSRuntime *rt, JSValueConst v)
+     return js_dup(v);
+ }
+ 
++static void gc_collect_auto(JSRuntime *rt, size_t chunk);
++
++static inline size_t gc_max_size(size_t a, size_t b)
++{
++    return a > b ? a : b;
++}
++
++static inline size_t gc_min_size(size_t a, size_t b)
++{
++    return a < b ? a : b;
++}
++
+ static void js_trigger_gc(JSRuntime *rt, size_t size)
+ {
+     bool force_gc;
++    size_t heap = rt->malloc_state.malloc_size + size;
+ #ifdef FORCE_GC_AT_MALLOC
+     force_gc = true;
+ #else
+-    force_gc = ((rt->malloc_state.malloc_size + size) >
+-                rt->malloc_gc_threshold);
++    force_gc = heap > rt->malloc_gc_threshold;
+ #endif
+     if (force_gc) {
+-        /* deferred: collect at the next safepoint, not under running JS */
+-        if (rt->gc_deferred && rt->current_stack_frame != NULL &&
+-            (rt->malloc_state.malloc_size + size) < rt->gc_deferred_limit) {
+-            rt->gc_pending = true;
+-            rt->malloc_gc_threshold = rt->malloc_state.malloc_size +
+-                (rt->malloc_state.malloc_size >> 1);
+-            return;
++        /* deferred: collect at the next safepoint, not under running JS,
++           unless the heap outgrows the ceiling meanwhile */
++        if (rt->gc_deferred && rt->current_stack_frame != NULL) {
++            if (!rt->gc_pending) {
++                rt->gc_pending = true;
++                rt->gc_pending_limit = heap + gc_max_size(heap, 16 << 20);
++            }
++            if (heap < (rt->gc_deferred_limit ? rt->gc_deferred_limit
++                                              : rt->gc_pending_limit)) {
++                rt->malloc_gc_threshold = heap + (heap >> 1);
++                return;
++            }
+         }
+ #ifdef ENABLE_DUMPS // JS_DUMP_GC
+         if (check_dump_flag(rt, JS_DUMP_GC)) {
+             printf("GC: size=%zd\n", rt->malloc_state.malloc_size);
+         }
+ #endif
+-        JS_RunGC(rt);
+-        rt->gc_pending = false;
+-        rt->malloc_gc_threshold = rt->malloc_state.malloc_size +
+-            (rt->malloc_state.malloc_size >> 1);
++        gc_collect_auto(rt, 0);
+     }
+ }
+ 
+@@ -2613,6 +2637,7 @@ JSRuntime *JS_NewRuntime2(const JSMallocFunctions *mf, void *opaque)
+ 
+     init_list_head(&rt->context_list);
+     init_list_head(&rt->gc_obj_list);
++    init_list_head(&rt->gc_old_obj_list);
+     init_list_head(&rt->gc_zero_ref_count_list);
+     rt->gc_phase = JS_GC_PHASE_NONE;
+ 
+@@ -8532,6 +8557,13 @@ static void js_free_value_rt(JSRuntime *rt, JSValue v)
+                 if (rt->gc_phase == JS_GC_PHASE_NONE) {
+                     free_zero_refcount(rt);
+                 }
++            } else if (JS_GC_MARK(p) == 0) {
++                /* an object outside the collection (old, in a young
++                   collection) only a freed cycle referenced: free it
++                   with the cycle */
++                list_del(&p->link);
++                list_add_tail(&p->link, &rt->tmp_obj_list);
++                JS_GC_MARK(p) = 1;
+             }
+         }
+         break;
+@@ -8782,7 +8814,8 @@ static void gc_decref(JSRuntime *rt)
+ static void gc_scan_incref_child(JSRuntime *rt, JSGCObjectHeader *p)
+ {
+     JS_REF_COUNT(p)++;
+-    if (JS_REF_COUNT(p) == 1) {
++    /* mark 0: an old object outside a young collection, it stays put */
++    if (JS_REF_COUNT(p) == 1 && JS_GC_MARK(p) == 1) {
+         /* ref_count was 0: remove from tmp_obj_list and add at the
+            end of gc_obj_list */
+         list_del(&p->link);
+@@ -8867,17 +8900,148 @@ static void gc_free_cycles(JSRuntime *rt)
+     init_list_head(&rt->gc_zero_ref_count_list);
+ }
+ 
++/* The objects a collection scans: gc_obj_list. A full collection first
++   moves the old objects there. With generational collection on, the
++   survivors then move to gc_old_obj_list, so an automatic (young)
++   collection scans only the objects created since the last one. Old
++   objects act as roots: a young object they reference keeps a non-zero
++   count through that reference and survives, and an old object only young
++   garbage referenced is freed with it (js_free_value_rt). Cycles among old
++   objects wait for a full collection, which runs once the heap has grown by
++   a quarter since the last one (JS_RunIdleGC first, gc_collect_auto at the
++   latest at 2x), counting the heap left after collections only. */
++static void gc_list_splice_tail(struct list_head *from, struct list_head *to)
++{
++    if (list_empty(from))
++        return;
++    from->next->prev = to->prev;
++    to->prev->next = from->next;
++    from->prev->next = to;
++    to->prev = from->prev;
++    init_list_head(from);
++}
++
++static void gc_run(JSRuntime *rt)
++{
++    /* decrement the reference of the children of each object. mark =
++       1 after this pass. */
++    gc_decref(rt);
++
++    /* keep the GC objects with a non zero refcount and their childs */
++    gc_scan(rt);
++
++    /* free the GC objects in a cycle */
++    gc_free_cycles(rt);
++}
++
++/* `chunk` > 0 (young collections): only the `chunk` oldest young objects;
++   the newer ones count as roots like the old objects, and wait in the young
++   list for the next collection (gc_pending stays set). */
++static void gc_collect(JSRuntime *rt, bool full, size_t chunk)
++{
++    size_t heap, young, n = 0;
++    uint64_t t0 = js__hrtime_ns(), ns;
++    struct list_head rest, *el;
++
++    init_list_head(&rest);
++    if (full) {
++        gc_list_splice_tail(&rt->gc_old_obj_list, &rt->gc_obj_list);
++    } else if (chunk > 0 && rt->gc_generational) {
++        list_for_each(el, &rt->gc_obj_list) {
++            if (++n > chunk) {
++                /* move el .. the end of the list to `rest` */
++                rest.next = el;
++                rest.prev = rt->gc_obj_list.prev;
++                rt->gc_obj_list.prev->next = &rest;
++                rt->gc_obj_list.prev = el->prev;
++                el->prev->next = &rt->gc_obj_list;
++                el->prev = &rest;
++                break;
++            }
++        }
++    }
++    gc_run(rt);
++    ns = js__hrtime_ns() - t0;
++    /* a time budget: size the next slice from this one's cost per object */
++    if (!full && chunk > 0 && rt->gc_young_budget_ns && n >= 1000) {
++        uint64_t next = rt->gc_young_budget_ns * gc_min_size(n, chunk) / (ns ? ns : 1);
++        rt->gc_young_chunk = next < 1000 ? 1000 : next > 200000 ? 200000 : next;
++    }
++    rt->gc_stats.count++;
++    if (full)
++        rt->gc_stats.full_count++;
++    rt->gc_stats.total_ns += ns;
++    if (ns > rt->gc_stats.max_ns)
++        rt->gc_stats.max_ns = ns;
++    rt->gc_pending = false;
++    heap = rt->malloc_state.malloc_size;
++    if (!list_empty(&rest)) {
++        gc_list_splice_tail(&rt->gc_obj_list, &rt->gc_old_obj_list);
++        gc_list_splice_tail(&rest, &rt->gc_obj_list);
++        rt->gc_pending = true;
++        return;
++    }
++    if (!rt->gc_generational || rt->in_free) {
++        rt->malloc_gc_threshold = heap + (heap >> 1);
++        return;
++    }
++    gc_list_splice_tail(&rt->gc_obj_list, &rt->gc_old_obj_list);
++    if (full || rt->gc_full_base == 0)
++        rt->gc_full_base = heap;
++    /* what survives young collections (and old garbage) grows the heap
++       left after a collection: a full one is due at 1.25x, plus 1 MB so a
++       small heap does not collect fully all the time */
++    rt->gc_old_size = heap;
++    rt->gc_full_due = heap > rt->gc_full_base + (rt->gc_full_base >> 2) + (1 << 20);
++    /* the next young collection: after a quarter of the heap, at least
++       1 MB of allocations */
++    young = gc_max_size(heap >> 2, 1 << 20);
++    rt->malloc_gc_threshold = heap + young;
++}
++
++static void gc_collect_auto(JSRuntime *rt, size_t chunk)
++{
++    /* full at the latest when the heap left after collections reached 2x
++       the one after the last full collection (plus 2 MB) */
++    gc_collect(rt, !rt->gc_generational || rt->gc_full_base == 0 ||
++               rt->gc_old_size > rt->gc_full_base * 2 + (2 << 20), chunk);
++}
++
++void JS_RunGC(JSRuntime *rt)
++{
++    gc_collect(rt, true, 0);
++}
++
++void JS_SetGCYoungChunk(JSRuntime *rt, size_t objects)
++{
++    rt->gc_young_chunk = objects;
++    rt->gc_young_budget_ns = 0;
++}
++
++void JS_SetGCYoungBudget(JSRuntime *rt, double ms)
++{
++    rt->gc_young_budget_ns = ms > 0 ? (uint64_t)(ms * 1e6) : 0;
++    if (rt->gc_young_budget_ns && !rt->gc_young_chunk)
++        rt->gc_young_chunk = 10000;
++}
++
++void JS_SetGCGenerational(JSRuntime *rt, bool generational)
++{
++    rt->gc_generational = generational;
++    if (!generational) {
++        gc_list_splice_tail(&rt->gc_old_obj_list, &rt->gc_obj_list);
++        rt->gc_full_base = 0;
++        rt->gc_full_due = false;
++    }
++}
++
+ void JS_SetGCDeferred(JSRuntime *rt, bool deferred, size_t limit)
+ {
+     rt->gc_deferred = deferred;
+-    /* 0: derive a ceiling from the current threshold */
+-    rt->gc_deferred_limit = limit != 0 ? limit : rt->malloc_gc_threshold * 4;
+-    if (!deferred && rt->gc_pending) {
+-        rt->gc_pending = false;
+-        JS_RunGC(rt);
+-        rt->malloc_gc_threshold = rt->malloc_state.malloc_size +
+-            (rt->malloc_state.malloc_size >> 1);
+-    }
++    /* 0: twice the heap when a collection is deferred, at least 16 MB more */
++    rt->gc_deferred_limit = limit;
++    if (!deferred && rt->gc_pending)
++        gc_collect_auto(rt, 0);
+ }
+ 
+ bool JS_HasPendingGC(JSRuntime *rt)
+@@ -8890,30 +9054,50 @@ void JS_RunPendingGC(JSRuntime *rt)
+     if (!rt->gc_pending)
+         return;
+     assert(rt->current_stack_frame == NULL);
+-    rt->gc_pending = false;
+-    JS_RunGC(rt);
+-    rt->malloc_gc_threshold = rt->malloc_state.malloc_size +
+-        (rt->malloc_state.malloc_size >> 1);
++    gc_collect_auto(rt, rt->gc_young_chunk);
+ }
+ 
+-size_t JS_GetMallocSize(JSRuntime *rt)
++void JS_GetGCStats(JSRuntime *rt, JSGCStats *stats, bool reset)
+ {
+-    return rt->malloc_state.malloc_size;
++    *stats = rt->gc_stats;
++    if (reset)
++        memset(&rt->gc_stats, 0, sizeof(rt->gc_stats));
+ }
+ 
+-void JS_RunGC(JSRuntime *rt)
++void JS_FinishPendingGC(JSRuntime *rt)
+ {
+-    /* decrement the reference of the children of each object. mark =
+-       1 after this pass. */
+-    gc_decref(rt);
++    if (!rt->gc_pending)
++        return;
++    assert(rt->current_stack_frame == NULL);
++    gc_collect_auto(rt, 0);
++}
+ 
+-    /* keep the GC objects with a non zero refcount and their childs */
+-    gc_scan(rt);
++bool JS_IsFullGCDue(JSRuntime *rt)
++{
++    return rt->gc_full_due;
++}
+ 
+-    /* free the GC objects in a cycle */
+-    gc_free_cycles(rt);
++bool JS_RunIdleGC(JSRuntime *rt)
++{
++    if (rt->current_stack_frame != NULL)
++        return false;
++    if (rt->gc_pending) {
++        gc_collect_auto(rt, rt->gc_young_chunk);
++        return true;
++    }
++    if (rt->gc_full_due) {
++        gc_collect(rt, true, 0);
++        return true;
++    }
++    return false;
+ }
+ 
++size_t JS_GetMallocSize(JSRuntime *rt)
++{
++    return rt->malloc_state.malloc_size;
++}
++
++
+ /* Return false if not an object or if the object has already been
+    freed (zombie objects are visible in finalizers when freeing
+    cycles). */
+@@ -9019,6 +9203,8 @@ void JS_ComputeMemoryUsage(JSRuntime *rt, JSMemoryUsage *s)
+     JSMemoryUsage_helper mem = { 0 }, *hp = &mem;
+ 
+     memset(s, 0, sizeof(*s));
++    /* the statistics walk gc_obj_list */
++    gc_list_splice_tail(&rt->gc_old_obj_list, &rt->gc_obj_list);
+     s->malloc_count = rt->malloc_state.malloc_count;
+     s->malloc_size = rt->malloc_state.malloc_size;
+     s->malloc_limit = rt->malloc_state.malloc_limit;
+diff --git a/quickjs.h b/quickjs.h
+index 4380257..caf4c1f 100644
+--- a/quickjs.h
++++ b/quickjs.h
+@@ -542,6 +542,34 @@ JS_EXTERN void JS_SetGCDeferred(JSRuntime *rt, bool deferred, size_t limit);
+ JS_EXTERN bool JS_HasPendingGC(JSRuntime *rt);
+ /* Must be called with an empty JS stack. */
+ JS_EXTERN void JS_RunPendingGC(JSRuntime *rt);
++/* A deferred collection if one is waiting, else a full collection if one is
++   due (JS_SetGCGenerational). For the embedder's idle time, with no JS on the
++   stack. Returns whether a collection ran. */
++JS_EXTERN bool JS_RunIdleGC(JSRuntime *rt);
++/* Generational: whether the heap grew enough for a full collection (JS_RunGC
++   or JS_RunIdleGC). */
++JS_EXTERN bool JS_IsFullGCDue(JSRuntime *rt);
++/* Generational cycle collection: automatic collections scan only the objects
++   created since the last one; JS_RunGC, JS_RunIdleGC and heap growth (2x
++   the heap after the last full collection) run full ones. Off by default. */
++JS_EXTERN void JS_SetGCGenerational(JSRuntime *rt, bool generational);
++/* Generational: deferred young collections (JS_RunPendingGC, JS_RunIdleGC)
++   take at most `objects` of the oldest young objects at a time, to bound
++   the pause; the rest wait for the next call (JS_HasPendingGC). 0: all. */
++JS_EXTERN void JS_SetGCYoungChunk(JSRuntime *rt, size_t objects);
++/* Like JS_SetGCYoungChunk, but sizes the slices to take about `ms` each,
++   from the cost per object of the previous one. 0: off. */
++JS_EXTERN void JS_SetGCYoungBudget(JSRuntime *rt, double ms);
++/* Runs a deferred collection in one go, ignoring the slice size. */
++JS_EXTERN void JS_FinishPendingGC(JSRuntime *rt);
++typedef struct JSGCStats {
++    uint64_t count;      /* cycle collections */
++    uint64_t full_count; /* ... of which full */
++    uint64_t total_ns;   /* time spent in them */
++    uint64_t max_ns;     /* the longest */
++} JSGCStats;
++/* Collections since the runtime was created or the last reset. */
++JS_EXTERN void JS_GetGCStats(JSRuntime *rt, JSGCStats *stats, bool reset);
+ JS_EXTERN bool JS_IsLiveObject(JSRuntime *rt, JSValueConst obj);
+ 
+ JS_EXTERN JSContext *JS_NewContext(JSRuntime *rt);

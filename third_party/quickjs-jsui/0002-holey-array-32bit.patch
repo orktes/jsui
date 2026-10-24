@@ -1,0 +1,26 @@
+Subject: Allow the holey-array union growth on 32-bit targets
+
+What this does
+  rnq's 0042-holey-fast-arrays adds hole_count to JSObject.u.array and pins
+  u.array <= u.func with a static assert. That holds on 64-bit (24 vs 24
+  bytes) but not on wasm32, where u.array becomes 16 bytes against u.func's
+  12. The assert now only applies to 64-bit targets; on 32-bit, JSObject
+  grows by 4 bytes.
+
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -1471,8 +1471,13 @@
+     /* byte sizes: 40/48/72 */
+ };
+ 
++/* JSUI: on 32-bit targets (wasm32) hole_count makes u.array 16 bytes
++   against u.func's 12, so JSObject grows by 4 bytes there; 64-bit keeps
++   its size. */
++#if INTPTR_MAX > INT32_MAX
+ _Static_assert(sizeof(((JSObject *)0)->u.array) <= sizeof(((JSObject *)0)->u.func),
+                "u.array outgrew u.func");
++#endif
+ 
+ typedef struct JSCallSiteData {
+     JSValue filename;

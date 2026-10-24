@@ -1,12 +1,33 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: a <a@b>
-Date: Sat, 24 Oct 2026 19:49:11 +0000
-Subject: [PATCH 04/72] 0004-debugger-frame-info.patch
+Subject: let the debugger ask where each stack frame is
 
----
- quickjs.c | 63 +++++++++++++++++++++++++++++++++++++++++++++++++++++++
- quickjs.h | 17 +++++++++++++++
- 2 files changed, 80 insertions(+)
+What this does
+  Adds a way to ask the engine, for any frame on the call stack, which file
+  and line it is currently at, what the function is called, and whether the
+  frame is native code rather than JavaScript.
+
+Why we need it
+  When a debugger pauses, Chrome DevTools shows the whole call stack, not just
+  the innermost frame. The engine could already report where it stopped and
+  could list a frame's variables, but there was no way to ask where a frame
+  is, so the debugger had nothing to fill the rest of the list with.
+
+What it adds
+  JS_GetFrameInfoAtLevel()  - file, line, column, function name, and whether
+                              the frame is native. Level 0 is the frame that
+                              is running right now.
+
+Needs a bytecode version bump
+  No.
+
+Notes
+  Returns -1 for a level that does not exist, and zero-fills the struct first,
+  so a caller that forgets to check the return value reads -1 and empty names
+  rather than stack garbage. It never throws.
+
+  The line number can be -1 for a real JavaScript frame. The engine only
+  records a frame's position at points where it might re-enter itself, so a
+  frame that has not called anything yet, and is not the frame that stopped,
+  genuinely does not know where it is.
 
 diff --git a/quickjs.c b/quickjs.c
 index 0cb35bf..85e2179 100644

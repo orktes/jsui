@@ -20,12 +20,24 @@ FetchContent_GetProperties(quickjs)
 if(NOT quickjs_POPULATED)
   FetchContent_Populate(quickjs)
 endif()
-# Engine patches from react-native-quickjs (third_party/quickjs-rnq, applied
-# in file name order with `git apply`) go onto a copy of the sources in the
-# build tree, which is what gets compiled; the fetched checkout stays pristine.
+# Engine patches go onto a copy of the sources in the build tree, which is
+# what gets compiled; the fetched checkout stays pristine. Applied with
+# `git apply`, in file name order:
+#   third_party/quickjs-rnq   react-native-quickjs's patches (MIT; what each
+#                             does and why: UPSTREAM-README.md there): inline
+#                             caches, object literal shape templates, fused
+#                             opcodes, dense arrays with holes, string caches,
+#                             deferred GC, the debugger interface
+#   third_party/quickjs-jsui  JSUI's, on top of those: generational cycle
+#                             collection (JsEngine collects between frames)
 set(_qjs_src ${CMAKE_BINARY_DIR}/quickjs-patched)
 file(GLOB _qjs_patches ${CMAKE_CURRENT_LIST_DIR}/../third_party/quickjs-rnq/*.patch)
+file(GLOB _qjs_jsui_patches ${CMAKE_CURRENT_LIST_DIR}/../third_party/quickjs-jsui/*.patch)
 list(SORT _qjs_patches)
+list(SORT _qjs_jsui_patches)
+list(APPEND _qjs_patches ${_qjs_jsui_patches})
+# Editing a patch re-runs the configure step (and so applies the patches again).
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_qjs_patches})
 set(_qjs_stamp_text "")
 foreach(_p IN LISTS _qjs_patches)
   file(SHA256 ${_p} _h)
@@ -44,8 +56,8 @@ endif()
 if(NOT _qjs_old_stamp STREQUAL _qjs_stamp_text)
   find_package(Git REQUIRED)
   file(REMOVE_RECURSE ${_qjs_src})
-  file(MAKE_DIRECTORY ${_qjs_src})
-  file(COPY ${_qjs_top} DESTINATION ${_qjs_src})
+  # The whole tree: a few patches also touch its tests and generated files.
+  file(COPY ${quickjs_SOURCE_DIR}/ DESTINATION ${_qjs_src} PATTERN .git EXCLUDE)
   # Its own (empty) repository, so `git apply` resolves the patch paths here
   # even when the build tree is inside another checkout.
   execute_process(COMMAND ${GIT_EXECUTABLE} init -q WORKING_DIRECTORY ${_qjs_src} RESULT_VARIABLE _r)
@@ -426,170 +438,8 @@ static JSValue build_for_in_iterator(JSContext *ctx, JSValue obj)
             if (it->idx >= sh->prop_count)
                 goto done;]=])
 
-  # Shape transitions that outlive the object that made them. Upstream adds a
-  # property to an unshared shape in place, so every {a, b, c} literal (or
-  # constructor filling `this`) builds and grows a shape of its own and only
-  # meets the shared one at the last step. For properties named in the code
-  # (object literal fields and `o.name = v` stores) a shape with fewer than
-  # JSUI_SHAPE_TRANSITIONS properties is cloned instead, and the clone keeps a
-  # reference to the shape it came from: the next object built the same way
-  # finds every step in the shape hash table. The number of such shapes is
-  # bounded by the code; computed keys (dictionaries) still grow in place.
-  jsui_qjs_patch(shape-transitions
-[=[    JSShape *shape_hash_next; /* in JSRuntime.shape_hash[h] list */
-    JSObject *proto;
-]=]
-[=[    JSShape *shape_hash_next; /* in JSRuntime.shape_hash[h] list */
-    JSObject *proto;
-    JSShape *jsui_parent; /* jsui: the shape this one was derived from, or NULL */
-]=]
-[=[    sh->prop_size = prop_size;
-    sh->prop_count = 0;
-    sh->deleted_prop_count = 0;
-    sh->is_hashed = false;
-    return sh;
-]=]
-[=[    sh->prop_size = prop_size;
-    sh->prop_count = 0;
-    sh->deleted_prop_count = 0;
-    sh->is_hashed = false;
-    sh->jsui_parent = NULL;
-    return sh;
-]=]
-[=[    add_gc_object(ctx->rt, &sh->header, JS_GC_OBJ_TYPE_SHAPE);
-    sh->is_hashed = false;
-    if (sh->proto) {]=]
-[=[    add_gc_object(ctx->rt, &sh->header, JS_GC_OBJ_TYPE_SHAPE);
-    sh->is_hashed = false;
-    sh->jsui_parent = NULL;
-    if (sh->proto) {]=]
-[=[    remove_gc_object(&sh->header);
-    js_free_rt(rt, get_alloc_from_shape(sh));
-}]=]
-[=[    remove_gc_object(&sh->header);
-    {
-        JSShape *parent = sh->jsui_parent;
-        js_free_rt(rt, get_alloc_from_shape(sh));
-        if (parent)
-            js_free_shape(rt, parent);
-    }
-}]=]
-[=[            JSShape *sh = (JSShape *)gp;
-            if (sh->proto != NULL) {
-                mark_func(rt, &sh->proto->header);
-            }]=]
-[=[            JSShape *sh = (JSShape *)gp;
-            if (sh->proto != NULL) {
-                mark_func(rt, &sh->proto->header);
-            }
-            if (sh->jsui_parent != NULL)
-                mark_func(rt, &sh->jsui_parent->header);]=]
-[=[        } else if (JS_REF_COUNT(sh) != 1) {
-            /* if the shape is shared, clone it */
-            new_sh = js_clone_shape(ctx, sh);
-            if (!new_sh)
-                return NULL;
-            /* hash the cloned shape */
-            new_sh->is_hashed = true;
-            js_shape_hash_link(ctx->rt, new_sh);
-            js_free_shape(ctx->rt, p->shape);
-            p->shape = new_sh;
-        }]=]
-[=[        } else if (JS_REF_COUNT(sh) != 1 || (keep && sh->prop_count < JSUI_SHAPE_TRANSITIONS)) {
-            /* if the shape is shared, clone it */
-            new_sh = js_clone_shape(ctx, sh);
-            if (!new_sh)
-                return NULL;
-            /* hash the cloned shape */
-            new_sh->is_hashed = true;
-            js_shape_hash_link(ctx->rt, new_sh);
-            if (keep && sh->prop_count < JSUI_SHAPE_TRANSITIONS)
-                new_sh->jsui_parent = sh; /* takes the object's reference */
-            else
-                js_free_shape(ctx->rt, p->shape);
-            p->shape = new_sh;
-        }]=]
-[=[        } else {
-            js_shape_hash_unlink(ctx->rt, sh);
-            sh->is_hashed = false;
-        }
-    }
-    return 0;
-}]=]
-[=[        } else {
-            js_shape_hash_unlink(ctx->rt, sh);
-            sh->is_hashed = false;
-            /* no longer a transition target: let its ancestors go */
-            if (sh->jsui_parent) {
-                js_free_shape(ctx->rt, sh->jsui_parent);
-                sh->jsui_parent = NULL;
-            }
-        }
-    }
-    return 0;
-}]=]
-[=[#define JS_PROP_INITIAL_SIZE 2
-]=]
-[=[#define JS_PROP_INITIAL_SIZE 2
-#ifndef JSUI_SHAPE_TRANSITIONS
-#define JSUI_SHAPE_TRANSITIONS 32 /* jsui: see cmake/Deps.cmake */
-#endif
-/* jsui: JS_SetPropertyInternal2 flag: the key is named in the code */
-#define JSUI_PROP_STATIC_KEY (1 << 30)
-]=]
-[=[static JSProperty *add_property(JSContext *ctx,
-                                JSObject *p, JSAtom prop, int prop_flags)
-{
-    JSShape *sh, *new_sh;
-]=]
-[=[static JSProperty *add_property2(JSContext *ctx, JSObject *p, JSAtom prop,
-                                 int prop_flags, bool keep);
-static JSProperty *add_property(JSContext *ctx,
-                                JSObject *p, JSAtom prop, int prop_flags)
-{
-    return add_property2(ctx, p, prop, prop_flags, false);
-}
-
-/* keep: the key is named in the code (see JSUI_SHAPE_TRANSITIONS) */
-static JSProperty *add_property2(JSContext *ctx, JSObject *p, JSAtom prop,
-                                 int prop_flags, bool keep)
-{
-    JSShape *sh, *new_sh;
-]=]
-[=[    JSPropertyDescriptor desc;
-    int desc_flags;
-    int ret;
-
-    switch(JS_VALUE_GET_TAG(this_obj)) {]=]
-[=[    JSPropertyDescriptor desc;
-    int desc_flags;
-    int ret;
-    bool jsui_static_key = (flags & JSUI_PROP_STATIC_KEY) != 0;
-
-    flags &= ~JSUI_PROP_STATIC_KEY;
-    switch(JS_VALUE_GET_TAG(this_obj)) {]=]
-[=[        } else {
-            pr = add_property(ctx, p, prop, JS_PROP_C_W_E);
-            if (!pr)
-                goto fail;
-            pr->u.value = val;
-            return true;
-        }]=]
-[=[        } else {
-            pr = add_property2(ctx, p, prop, JS_PROP_C_W_E, jsui_static_key);
-            if (!pr)
-                goto fail;
-            pr->u.value = val;
-            return true;
-        }]=]
-[=[                put_field_slow_path:
-                    sf->cur_pc = pc;
-                    ret = JS_SetPropertyInternal2(ctx, obj, atom, sp[-1], obj,
-                                                  JS_PROP_THROW_STRICT);]=]
-[=[                put_field_slow_path:
-                    sf->cur_pc = pc;
-                    ret = JS_SetPropertyInternal2(ctx, obj, atom, sp[-1], obj,
-                                                  JS_PROP_THROW_STRICT | JSUI_PROP_STATIC_KEY);]=])
+  # (Shape transitions that outlive the object that made them: the
+  # react-native-quickjs patch 0051 does this now.)
 
   # Object literal fields ({a: x}) on a plain object that does not have the
   # property yet: add it straight to the shape. Anything else (existing key,
