@@ -160,7 +160,8 @@ sk_sp<SkImage> HostTextures::image(const std::string& key) {
   sk_sp<SkImage> img = tWrapper ? tWrapper->wrap(e) : nullptr;
   if (!img && !e.warned) {
     e.warned = true;
-    static const char* const kKinds[] = {"pixels", "GL", "WebGPU", "Vulkan", "Metal"};
+    static const char* const kKinds[] = {"pixels", "GL", "WebGPU", "Vulkan", "Metal", "D3D12"};
+    static_assert(sizeof(kKinds) / sizeof(kKinds[0]) == JSUI_TEXTURE_D3D12 + 1, "a name per JsuiTextureKind");
     if (log)
       log(JSUI_LOG_WARN, "host texture \"" + key + "\" (" + kKinds[e.desc.kind] +
                              (tWrapper ? ", format " + std::to_string(e.desc.format) + ") cannot be drawn by this GPU context"
