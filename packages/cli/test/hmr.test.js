@@ -238,3 +238,53 @@ test('--no-hmr serves the plain bundle', async () => {
     await server.close();
   }
 });
+
+// React Compiler memoizes the JSX on `n` only (LABEL is a module constant);
+// a hot update must not serve the previous version's cached elements (the compiler's source hash check
+// resets the memo cache), and state still survives.
+test('hot updates with React Compiler reset its memo caches and keep state', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'jsui-hmr-rc-'));
+  const counter = (label) => `import React, { useEffect, useState } from 'react';
+import { View, Text } from 'react-native';
+const LABEL = ${JSON.stringify(label)};
+export default function App() {
+  const [n, setN] = useState(0);
+  useEffect(() => {
+    globalThis.bump = () => setN((x) => x + 1);
+  }, []);
+  return (
+    <View>
+      <Text nativeID="title">{LABEL}{' '}{n}</Text>
+    </View>
+  );
+}
+`;
+  await writeFile(path.join(dir, 'App.js'), counter('v1'));
+  await writeFile(path.join(dir, 'index.js'), `import { AppRegistry } from 'react-native';\nimport App from './App';\nAppRegistry.registerComponent('main', () => App);\n`);
+  const server = await dev({ entry: path.join(dir, 'index.js'), port: 0, log: () => {}, reactCompiler: true });
+  const base = `http://127.0.0.1:${server.port}`;
+  try {
+    const code = await (await fetch(base + '/bundle.js')).text();
+    assert.match(code, /useMemoCache/);
+    const { ctx, text } = runtime(base);
+    vm.runInContext(code, ctx, { filename: 'bundle.js' });
+    await until(() => text('title') === 'v1 0', 'first render');
+    ctx.bump();
+    ctx.bump();
+    await until(() => text('title') === 'v1 2', 'state update');
+    await sleep(150);
+    const before = server.state.version;
+    await writeFile(path.join(dir, 'App.js'), counter('v2'));
+    await until(() => server.state.version !== before, 'rebuild');
+    await sleep(300);  // let duplicate fs events settle
+    // The updated module checks its source hash against the memo cache's.
+    const update = await (await fetch(base + '/__jsui/hmr?from=' + ctx.__jsui_hmr.version)).text();
+    assert.match(update, /if \(\$\[0\] !== "[0-9a-f]{64}"\)/);
+    ctx.__jsui_onDevUpdate(await (await fetch(base + '/__jsui/version?hmr=1')).text());
+    await until(() => text('title') === 'v2 2', 'hot update past the memo cache');
+    assert.equal(ctx.reloads, 0);
+    assert.deepEqual(ctx.errors, []);
+  } finally {
+    await server.close();
+  }
+});

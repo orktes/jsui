@@ -7,8 +7,9 @@
 //   vendor   every module outside the app (node_modules, @orktes/jsui-react,
 //            assets), bundled once by esbuild and exposed by resolved path;
 //            rebuilt only when that set or one of its files changes
-//   app      each app source file, run through react-refresh's Babel plugin
-//            and esbuild's transform (to CommonJS), wrapped in
+//   app      each app source file, run through React Compiler (unless off,
+//            see react-compiler.js), react-refresh's Babel plugin and
+//            esbuild's transform (to CommonJS), wrapped in
 //            __jsui_hmr.define(id, deps, factory)
 //   runtime  hmr-runtime.js, the module registry and update logic
 //
@@ -25,6 +26,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { esbuildOptions, jsuiReactDir } from './config.js';
+import { compileSource } from './react-compiler.js';
 
 const require = createRequire(import.meta.url);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -62,6 +64,10 @@ function loaderFor(file) {
  * @param {string} o.entry  absolute path of the entry module
  * @param {'development'|'production'} [o.mode]
  * @param {Map<string, Buffer>} o.assets
+ * @param {boolean} [o.reactCompiler]  compile app modules with React Compiler
+ *   (the bundle build of dev.js runs it too, with compilerHmr: its metafile
+ *   lists the modules' imports, react/compiler-runtime among them, and both
+ *   share one compile per file version)
  * @param {(msg: string) => void} [o.log]
  */
 export function createHmr(o) {
@@ -92,10 +98,20 @@ export function createHmr(o) {
     if (hit && hit.hash === hash) return hit;
     const loader = loaderFor(abs);
     let code = source;
+    if (loader !== 'json' && o.reactCompiler) {
+      // First, as React Compiler expects to see the source as written. It
+      // adds a source hash check that resets the components' memo caches
+      // when the file is hot-updated.
+      try {
+        code = (await compileSource(source, abs, { hmr: true })).code;
+      } catch (e) {
+        o.log?.(`[jsui] hmr: React Compiler skipped ${key}: ${e.message.split('\n')[0]}`);
+      }
+    }
     if (loader !== 'json') {
       const plugins = loader === 'ts' ? ['typescript'] : loader === 'tsx' ? ['typescript', 'jsx'] : ['jsx'];
       try {
-        const r = await transformAsync(source, {
+        const r = await transformAsync(code, {
           filename: abs,
           babelrc: false,
           configFile: false,

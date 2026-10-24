@@ -5,6 +5,7 @@
 //   const x = useHostBufferValue('enemies', i * 4);   // Animated node: the runtime moves the view, no JS per frame
 //                                                      // (Animated.hostBuffer, animated/index.js)
 //   const b = useHostBuffer('enemies');                // Float32Array, re-renders on every change
+//                                                      // (a new view object per change: memo-safe)
 //   useHostBufferListener('enemies', (b) => ...);      // per change, no re-render
 //   HostBuffer.get(key) / version(key) / subscribe(key, cb) / keys()
 //
@@ -136,13 +137,26 @@ export const HostBuffer = {
   },
 };
 
-/** The typed array of `key` (undefined while unset); re-renders on every change. */
+/**
+ * The typed array of `key` (undefined while unset); re-renders on every change.
+ * Each version comes as a new typed array object (a view of the same memory,
+ * not a copy), so code that memoizes on it (useMemo, React.memo props, React
+ * Compiler) sees the change; HostBuffer.get() keeps one object per storage.
+ */
 export function useHostBuffer(key) {
   key = String(key);
   const subscribe = useCallback((cb) => HostBuffer.subscribe(key, cb), [key]);
   const read = () => readVersion(key);
-  useSyncExternalStore(subscribe, read, read);
-  return getView(key);
+  const version = useSyncExternalStore(subscribe, read, read);
+  const view = getView(key);
+  const last = useRef(null);
+  const m = last.current;
+  if (view === undefined) return undefined;
+  if (m && m.version === version && m.base === view) return m.view;
+  // The first version can hand out the cached view itself.
+  const out = m ? new view.constructor(view.buffer, view.byteOffset, view.length) : view;
+  last.current = { version, base: view, view: out };
+  return out;
 }
 
 /**

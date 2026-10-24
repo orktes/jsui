@@ -1766,7 +1766,9 @@ every frame), `--patch-state KEY,SLOTS` (one `jsui_patch_state` per frame),
 what the host does to them every frame), `--wheel X,Y,DY[,FRAMES]` (a wheel
 delta at X,Y every frame, reversing every FRAMES), `--react-stats` (installs
 a React DevTools hook and adds `reactCommits` / `reactRenders`: commits and
-function / memo / forwardRef components rendered per frame). Besides the
+function / memo / forwardRef components rendered per frame), `--dump
+out.pam` (the last frame, fully repainted, as an RGBA PAM image, to diff two
+builds of a bundle). Besides the
 phase times, the JS work is counted: `events` (events sent to JS), `jsCalls`
 (native → JS calls: events, timers, frame callbacks, layout callbacks,
 messages), `jsJobs` (promise jobs) and `hostMessages` (`postMessage` to the
@@ -1838,6 +1840,44 @@ names.
   in: profiles are tied to the compiler version and the patched quickjs.c,
   so they are generated where they are used. Dev and test builds leave
   `JSUI_QUICKJS_PGO` empty. Which release builds use it: docs/RELEASING.md.
+* **React Compiler** (opt-in: `jsui build|dev --react-compiler`,
+  `packages/cli/src/react-compiler.js`). An esbuild `onLoad` plugin runs
+  `babel-plugin-react-compiler` 1.0.0 (target 19, `react/compiler-runtime`
+  resolved to the singleton React) over the app's own files, not
+  `node_modules` or `@orktes/jsui-react/src`, on up to 4 worker threads. It
+  runs on Babel 7 (`babel-core-7`, an npm alias of `@babel/core` 7): under
+  Babel 8 the compiler skips every function with a defaulted destructured
+  parameter (`function App({ size = 1 })`). Functions it cannot compile
+  (Rules of React violations) are left as written and listed by
+  `--compiler-report` (`build()` returns them as `reactCompiler.skipped`).
+  Instructions per measured frame (callgrind, `--paint none`, 120 frames),
+  uncompiled → compiled:
+
+  | scenario | React renders / frame | Ir / frame |
+  | --- | --- | --- |
+  | `interactions` | 5.1 → 1.3 | 2.61M → 1.23M (−53%) |
+  | `interactions-wheel` | 6.1 → 2.3 | 3.93M → 2.71M (−31%) |
+  | `surfaces-props` | 120 → 60 | 27.1M → 19.8M (−27%) |
+  | `inventory` | 4 → 3 | 31.3M → 31.1M (−0.5%) |
+  | `list`, `menu`, `idle`, `surfaces-same-props`, `spring-wiggle` | same | ±0.3% |
+  | `markers-{json,buffer}-{30,100}` | same | +10-11% |
+
+  The gains come from elements the compiler caches: a parent's re-render
+  hands React the same child elements, so their subtrees bail out. The
+  markers lose because every `React.memo` marker gets new props each frame,
+  so the memo cache is pure overhead, and React 19.3 copies each compiled
+  component's cache on every render (`useMemoCache` without
+  `enableNoCloningMemoCache`). `packages/react/bench/commit-bench.jsx`
+  (500 cells, only `Cell` compiles): an unchanged re-render of plain cells
+  sends 0 instead of 500 bridge calls, a re-render where all cells change
+  takes ~50% longer. It stays off by default for that, for build time (4-25x:
+  the site 0.3 s → 7 s; the compiler needs ~25 ms per KB of source on one
+  thread) and because memoized code can keep a stale value read during
+  render outside props, state and hooks (`Font.isLoaded()`, a mutable
+  object). `useHostBuffer` returns a new view object per version so it
+  memoizes correctly. Bundles grow 2-9%. Compiled and uncompiled bundles
+  render identical pixels for every reference case and bench scenario
+  (`JSUI_REF_REACT_COMPILER=1`, `jsui-bench --dump`).
 
 ## Paint performance
 
@@ -1980,7 +2020,9 @@ Point any host at it (`jsui-viewer --dev http://localhost:5173/bundle.js`, or
 * **Hot updates (React Fast Refresh).** `jsui dev` (unless `--no-hmr`) serves
   a module-per-function bundle (`packages/cli/src/hmr.js`): the vendor part
   (node_modules, `@orktes/jsui-react`, assets) bundled once by esbuild, then
-  each app file run through react-refresh's Babel plugin and esbuild's
+  each app file run through React Compiler (with `--react-compiler`; its
+  per-file source hash resets a component's memo cache when the file is
+  hot-updated), react-refresh's Babel plugin and esbuild's
   CommonJS transform, wrapped in `__jsui_hmr.define(id, deps, factory)`, and
   the client (`hmr-runtime.js`). On a change the client fetches
   `/__jsui/hmr?from=<its version>`, a script with the changed modules and

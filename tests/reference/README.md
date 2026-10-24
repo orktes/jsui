@@ -34,6 +34,7 @@ Environment:
 | --- | --- | --- |
 | `JSUI_RENDER` | `build/jsui-render` | renderer binary |
 | `JSUI_REF_BUILDER` | auto | force `cli`, `package` (esbuild + `@orktes/jsui-react`) or `fallback` |
+| `JSUI_REF_REACT_COMPILER` | CLI default | `0` / `1`: build the JSUI bundles without / with React Compiler (`cli` builder) |
 | `JSUI_REF_OUTPUT` | `tests/reference/output` | where results go |
 | `PLAYWRIGHT_BROWSERS_PATH` | (Playwright default) | Chromium location; never run `playwright install` here |
 
