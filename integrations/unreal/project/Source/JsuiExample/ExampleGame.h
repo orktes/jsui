@@ -24,6 +24,8 @@
 #include "GameFramework/GameModeBase.h"
 #include "SelfTest.h"
 
+#include <atomic>
+
 #include "ExampleGame.generated.h"
 
 class UCameraComponent;
@@ -66,7 +68,9 @@ private:
 	void CountFrame(double Now);
 	void OnUiMessage(const FString& Name, const FString& Json);
 	void Finish(int32 Code);
-	bool SaveScreenshot();
+	void Quit(int32 Code);
+	void StartCapture();
+	void PollCapture();
 
 	UPROPERTY()
 	TObjectPtr<UJsuiWidget> Ui;
@@ -106,6 +110,19 @@ private:
 	FString Screenshot, BundleOverride;
 	TUniquePtr<FJsuiSelfTest> Test;
 	bool bFinishing = false;
+	int32 ExitCode = 0;
+
+	// --screenshot readback (filled on the render thread).
+	struct FCapture
+	{
+		FCriticalSection Mutex;
+		std::atomic<bool> bDone{false};
+		TArray<FColor> Pixels;
+		FIntPoint Size;
+	};
+	TSharedPtr<FCapture, ESPMode::ThreadSafe> Capture;
+	FDelegateHandle CaptureHandle;
+	int32 CaptureWait = 0;
 };
 
 UCLASS()

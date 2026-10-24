@@ -22,6 +22,9 @@
 #include "SceneView.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Widgets/SWindow.h"
+#include "RHICommandList.h"
+#include "Rendering/SlateRenderer.h"
+#include "Slate/SlateViewportProvider.h"
 
 #if PLATFORM_WINDOWS
 #include <stdlib.h>
@@ -323,6 +326,7 @@ void AJsuiExampleGame::Tick(float DeltaSeconds)
 		}
 	}
 	if (Frames >= 0 && Frame >= Frames) Finish(0);
+	PollCapture();
 }
 
 void AJsuiExampleGame::UpdateCamera()
@@ -423,7 +427,17 @@ void AJsuiExampleGame::Finish(int32 Code)
 {
 	if (bFinishing) return;
 	bFinishing = true;
-	if (!Screenshot.IsEmpty() && !SaveScreenshot()) Code = 1;
+	ExitCode = Code;
+	if (!Screenshot.IsEmpty())
+	{
+		StartCapture();  // Tick quits once the frame is read back
+		return;
+	}
+	Quit(Code);
+}
+
+void AJsuiExampleGame::Quit(int32 Code)
+{
 	if (Code == 0)
 	{
 		FPlatformMisc::RequestExit(false);
@@ -436,34 +450,71 @@ void AJsuiExampleGame::Finish(int32 Code)
 	_exit(Code);
 }
 
-// The composed frame (scene + UI overlay): Slate renders the game window,
-// viewport and JSUI view included, and reads it back.
-bool AJsuiExampleGame::SaveScreenshot()
+// --screenshot: the frame as presented, scene + UI, read back from the
+// window's back buffer when Slate has drawn into it (render thread).
+// (FSlateApplication::TakeScreenshot redraws the window instead, over the
+// game viewport's image, which is the back buffer still holding an earlier
+// frame's UI: moving nameplates got ghosts.)
+void AJsuiExampleGame::StartCapture()
 {
-	TSharedPtr<SWindow> Window = GEngine && GEngine->GameViewport ? GEngine->GameViewport->GetWindow() : nullptr;
-	TArray<FColor> Pixels;
-	FIntVector Size;
-	if (!Window || !FSlateApplication::Get().TakeScreenshot(Window.ToSharedRef(), Pixels, Size) || Pixels.Num() == 0)
+	Capture = MakeShared<FCapture, ESPMode::ThreadSafe>();
+	TSharedPtr<FCapture, ESPMode::ThreadSafe> C = Capture;
+	CaptureHandle = FSlateApplication::Get().GetRenderer()->OnBackBufferReadyToPresent().AddLambda(
+		[C](SWindow&, ISlateViewportProvider& Provider)
+		{
+			if (C->bDone) return;
+			FRHITexture* BackBuffer = Provider.GetBackBufferResource();
+			if (!BackBuffer) return;
+			const FIntPoint Size = BackBuffer->GetSizeXY();
+			TArray<FColor> Pixels;
+			FRHICommandListImmediate::Get().ReadSurfaceData(BackBuffer, FIntRect(FIntPoint::ZeroValue, Size), Pixels, FReadSurfaceDataFlags());
+			FScopeLock Lock(&C->Mutex);
+			C->Pixels = MoveTemp(Pixels);
+			C->Size = Size;
+			C->bDone = true;
+		});
+	CaptureWait = 0;
+}
+
+void AJsuiExampleGame::PollCapture()
+{
+	if (!Capture) return;
+	if (!Capture->bDone)
 	{
-		JsuiExampleSay(TEXT("screenshot failed: could not read the window back"), true);
-		return false;
+		if (++CaptureWait > 300)
+		{
+			JsuiExampleSay(TEXT("screenshot failed: no frame was presented"), true);
+			Capture.Reset();
+			Quit(1);
+		}
+		return;
 	}
-	for (FColor& C : Pixels) C.A = 255;
+	FSlateApplication::Get().GetRenderer()->OnBackBufferReadyToPresent().Remove(CaptureHandle);
+	TArray<FColor> Pixels;
+	FIntPoint Size;
+	{
+		FScopeLock Lock(&Capture->Mutex);
+		Pixels = MoveTemp(Capture->Pixels);
+		Size = Capture->Size;
+	}
+	Capture.Reset();
+	for (FColor& Px : Pixels) Px.A = 255;
 	TArray64<uint8> Png;
 	FImageUtils::PNGCompressImageArray(Size.X, Size.Y, Pixels, Png);
 	// Plain stdio: the packaged game's file layer refuses paths outside the
 	// game (e.g. /tmp).
 	const FString Path = FPaths::ConvertRelativePathToFull(Screenshot);
-	FILE* File = fopen(TCHAR_TO_UTF8(*Path), "wb");
+	FILE* File = Png.Num() ? fopen(TCHAR_TO_UTF8(*Path), "wb") : nullptr;
 	const bool bWritten = File && fwrite(Png.GetData(), 1, size_t(Png.Num()), File) == size_t(Png.Num());
 	if (File) fclose(File);
 	if (!bWritten)
 	{
 		JsuiExampleSay(*FString::Printf(TEXT("screenshot failed: could not write %s"), *Path), true);
-		return false;
+		Quit(1);
+		return;
 	}
 	JsuiExampleSay(*FString::Printf(TEXT("screenshot: %s (%dx%d)"), *Path, Size.X, Size.Y));
-	return true;
+	Quit(ExitCode);
 }
 
 // ------------------------------------------------------------ game mode
