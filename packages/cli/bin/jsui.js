@@ -323,7 +323,7 @@ async function main(argv) {
       let headlessView = null;
       if (values.headless || values.shared) {
         const v = viewOptions(values, entry);
-        headlessView = { width: v.width, height: v.height, scale: v.scale, fps: v.fps, component: v.component, props: v.props, state: v.state };
+        headlessView = { width: v.width, height: v.height, scale: v.scale, fps: v.fps, component: v.component, props: v.props, state: v.state, js: v.js };
       }
       const server = await dev({ entry, port, host: values.host || '127.0.0.1', hmr: !values['no-hmr'], headless: headlessView });
       const stop = async () => {

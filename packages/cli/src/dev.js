@@ -87,7 +87,7 @@ function safeJoin(root, rel) {
 
 /**
  * `headless`: null, or the options of the in-process runtime ({width, height,
- * scale, fps, component, props, state}). `waitMs`: how long agent commands
+ * scale, fps, component, props, state, js}). `waitMs`: how long agent commands
  * wait for a runtime to join the session.
  */
 export async function dev({ entry, port = 5173, host = '127.0.0.1', log = console.log, minify = false, hmr = true, headless = null, waitMs }) {

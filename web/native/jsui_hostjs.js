@@ -50,6 +50,15 @@ var jsuiHostJs = (function () {
   const IDENT = /^[A-Za-z_$][\w$]*$/;
   // Bytes per element of each JsuiBufferType.
   const ELEMENT_SIZES = [4, 8, 4, 4, 2, 2, 1, 1];
+  // The host's own global names (window's prototype chain included), once.
+  let hostNames = null;
+  function hostGlobalNames() {
+    if (hostNames) return hostNames;
+    const s = new Set();
+    for (let o = realGlobal; o && o !== Object.prototype; o = Object.getPrototypeOf(o))
+      for (const n of Object.getOwnPropertyNames(o)) s.add(n);
+    return (hostNames = [...s]);
+  }
   const define = (obj, name, value) =>
     Object.defineProperty(obj, name, { value, writable: true, configurable: true, enumerable: false });
 
@@ -518,9 +527,14 @@ var jsuiHostJs = (function () {
     }
 
     // --------------------------------------------- scripts and scope
-    // The global names a script sees as parameters: G's own properties.
+    // The global names a script sees as parameters: G's own properties, and
+    // every other global of the host (window's DOM, Node's process /
+    // setImmediate, WebAssembly, ...) as undefined, so that feature checks
+    // (React's scheduler prefers setImmediate) see what QuickJS has.
     shadowNames() {
-      return Object.getOwnPropertyNames(this.G).filter((n) => IDENT.test(n) && !RESERVED.has(n));
+      const names = new Set(Object.getOwnPropertyNames(this.G));
+      for (const n of hostGlobalNames()) names.add(n);
+      return [...names].filter((n) => IDENT.test(n) && !RESERVED.has(n));
     }
 
     live(name, sink) {
