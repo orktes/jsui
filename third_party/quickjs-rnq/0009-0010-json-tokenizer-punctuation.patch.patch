@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: a <a@b>
+Date: Sat, 24 Oct 2026 19:49:12 +0000
+Subject: [PATCH 09/72] 0010-json-tokenizer-punctuation.patch
+
+---
+ quickjs.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/quickjs.c b/quickjs.c
+index fc0b535..2d186bb 100644
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -24573,6 +24573,21 @@ static __exception int json_next_token(JSParseState *s)
+     p = s->last_ptr = s->buf_ptr;
+     s->last_line_num = s->token.line_num;
+     s->last_col_num = s->token.col_num;
++    /* Fast path: JSON structural punctuation carries no value, so it needs no
++       token-state bookkeeping (line/col/mark/eol) -- error positions are
++       recomputed from the source buffer by json_parse_error. Return the
++       punctuation directly; value tokens keep the full slow path. */
++    {
++        uint8_t c0 = *p;
++        if (c0 == 0x5b || c0 == 0x5d || c0 == 0x7b || c0 == 0x7d ||
++            c0 == 0x3a || c0 == 0x2c) {   /* [ ] { } : , */
++            s->token.val = c0;
++            s->token.ptr = p;
++            s->token.line_start = s->line_start;
++            s->buf_ptr = p + 1;
++            return 0;
++        }
++    }
+  redo:
+     s->token.line_num = s->line_num;
+     s->token.col_num = s->col_num;

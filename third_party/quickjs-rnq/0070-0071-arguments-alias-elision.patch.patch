@@ -1,0 +1,198 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: a <a@b>
+Date: Sat, 24 Oct 2026 19:49:21 +0000
+Subject: [PATCH 70/72] 0071-arguments-alias-elision.patch
+
+---
+ quickjs.c | 119 ++++++++++++++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 112 insertions(+), 7 deletions(-)
+
+diff --git a/quickjs.c b/quickjs.c
+index d61b92d..897f1fa 100644
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -39170,8 +39170,73 @@ enum {
+     JS_ARGS_KIND_LENGTH,
+     JS_ARGS_KIND_ELEM,
+     JS_ARGS_KIND_APPLY,
++    /* `var a = arguments;`: the site emits nothing and swallows the adjacent
++       put_loc into a local whose every read is itself an approved consumer. */
++    JS_ARGS_KIND_ALIAS,
+ };
+ 
++/* Find `var a = arguments;` and prove that the store dominates every read of
++   the alias. Dominance is by construction: the store must sit in the function's
++   entry basic block, so [0, store) must contain no label, no label-carrying
++   branch, no exception-region opener and no block terminator. Positional order
++   is not dominance -- `function f(x){ if (x) {} else { var a = arguments; }
++   return a.length; }` stores before the read in position but not in execution,
++   and rewriting that read would return argc instead of throwing. The other two
++   conditions -- the alias is written once and every read of it is an approved
++   consumer -- are checked by the main scan, which visits every OP_FMT_loc site. */
++static int js_args_alias_find(JSFunctionDef *s, const uint8_t *bc_buf, int bc_len,
++                              int A, int *pstore_pos)
++{
++    int pos, op, len, fmt, B;
++
++    for (pos = 0; pos < bc_len; pos += len) {
++        op = bc_buf[pos];
++        len = opcode_info[op].size;
++        if (len <= 0 || pos + len > bc_len)
++            return -1;
++        fmt = opcode_info[op].fmt;
++        switch (fmt) {
++        case OP_FMT_label:      case OP_FMT_label8:
++        case OP_FMT_label16:    case OP_FMT_label_u16:
++        case OP_FMT_atom_label_u8: case OP_FMT_atom_label_u16:
++            return -1;          /* a branch: the entry block ends here */
++        default:
++            break;
++        }
++        switch (op) {
++        case OP_label:
++        case OP_catch:          case OP_nip_catch:
++        case OP_gosub:          case OP_ret:
++        case OP_for_of_start:   case OP_for_await_of_start:
++        case OP_iterator_close:
++        case OP_with_get_var:   case OP_with_delete_var:
++        case OP_with_make_ref:  case OP_with_get_ref:
++        case OP_with_get_ref_undef: case OP_with_put_var:
++        case OP_return:         case OP_return_undef:
++        case OP_return_async:   case OP_throw: case OP_throw_error:
++            return -1;
++        default:
++            break;
++        }
++        if (fmt != OP_FMT_loc || op != OP_get_loc)
++            continue;
++        if (get_u16(bc_buf + pos + 1) != A)
++            continue;
++        /* get_loc(A) put_loc(B), adjacent: `var a = arguments` is a single
++           assignment expression statement. */
++        if (pos + len + 3 > bc_len || bc_buf[pos + len] != OP_put_loc)
++            return -1;
++        B = get_u16(bc_buf + pos + len + 1);
++        if (B == A || B < 0 || B >= s->var_count)
++            return -1;
++        if (s->vars[B].is_captured)
++            return -1;
++        *pstore_pos = pos + len;   /* the put_loc, which is what the main scan sees */
++        return B;
++    }
++    return -1;
++}
++
+ static int js_args_find_elem_load(const uint8_t *bc_buf, int bc_len, int pos_next)
+ {
+     int pos, op, len, depth = 1;
+@@ -39222,9 +39287,15 @@ static int js_args_find_elem_load(const uint8_t *bc_buf, int bc_len, int pos_nex
+     return -1;
+ }
+ 
+-static int js_args_site_kind(CodeContext *cc, int pos_next, bool mapped, int *pel)
++static int js_args_site_kind(CodeContext *cc, int pos_next, bool mapped,
++                             int alias_idx, int *pel)
+ {
+     int el;
++    /* The alias store. Checked first because put_loc is otherwise a hard
++       refusal; only the one store js_args_alias_find() located is admitted, and
++       the scan rejects any second write to the same local. */
++    if (alias_idx >= 0 && code_match(cc, pos_next, OP_put_loc, alias_idx, -1))
++        return JS_ARGS_KIND_ALIAS;
+     if (code_match(cc, pos_next, OP_get_field, -1))
+         return cc->atom == JS_ATOM_length ? JS_ARGS_KIND_LENGTH
+                                           : JS_ARGS_KIND_NONE;
+@@ -39241,10 +39312,11 @@ static int js_args_site_kind(CodeContext *cc, int pos_next, bool mapped, int *pe
+ }
+ 
+ static int js_args_elide_scan(JSFunctionDef *s, uint8_t *bc_buf, int bc_len,
+-                              bool mapped, bool mark)
++                              bool mapped, bool mark, int *palias)
+ {
+     CodeContext cc;
+     int pos, op, len, fmt, A, kinds = 0;
++    int alias, alias_store_pos = -1, idx;
+ 
+     A = s->arguments_var_idx;
+     if (A < 0 || A >= s->var_count)
+@@ -39258,6 +39330,8 @@ static int js_args_elide_scan(JSFunctionDef *s, uint8_t *bc_buf, int bc_len,
+     }
+     cc.bc_buf = bc_buf;
+     cc.bc_len = bc_len;
++    alias = js_args_alias_find(s, bc_buf, bc_len, A, &alias_store_pos);
++    *palias = alias;
+     for (pos = 0; pos < bc_len; pos += len) {
+         int kind, el = -1;
+         op = bc_buf[pos];
+@@ -39269,11 +39343,27 @@ static int js_args_elide_scan(JSFunctionDef *s, uint8_t *bc_buf, int bc_len,
+             return -1;
+         if (fmt != OP_FMT_loc)
+             continue;
+-        if (get_u16(bc_buf + pos + 1) != A)
++        idx = get_u16(bc_buf + pos + 1);
++        if (idx == alias) {
++            if (op == OP_put_loc) {
++                if (pos != alias_store_pos)
++                    return -1;      /* a second write to the alias */
++                continue;           /* consumed by the ALIAS site before it */
++            }
++            if (op != OP_get_loc)
++                return -1;          /* a write or an escape of the alias */
++        } else if (idx != A) {
+             continue;
+-        if (op != OP_get_loc)
++        } else if (op != OP_get_loc) {
++            /* Any other opcode naming the slot -- put_loc, set_loc, close_loc,
++               make_loc_ref, the _check variants -- is a write or an escape. */
+             return -1;
+-        kind = js_args_site_kind(&cc, pos + len, mapped, &el);
++        }
++        /* A read of the alias may not itself be re-aliased: `var a = arguments;
++           var b = a;` would need a second alias slot, and admitting the store
++           form here would mark a put_loc nobody swallows. */
++        kind = js_args_site_kind(&cc, pos + len, mapped,
++                                 idx == A ? alias : -1, &el);
+         if (kind == JS_ARGS_KIND_NONE)
+             return -1;
+         kinds |= 1 << kind;
+@@ -39382,6 +39472,8 @@ static __exception int resolve_labels(JSContext *ctx, JSFunctionDef *s)
+     int objlit_live_count = 0;
+     int objlit_template_index;
+     int args_elide_kinds = -1;
++    /* the local that `var a = arguments` stores into, or -1 */
++    int args_alias_idx = -1;
+     D3Ev *d3_ev = NULL;
+     int d3_n = 0, d3_k = 0;
+ 
+@@ -39412,9 +39504,10 @@ static __exception int resolve_labels(JSContext *ctx, JSFunctionDef *s)
+     if (s->arguments_var_idx >= 0) {
+         bool mapped = !s->is_strict_mode && s->has_simple_parameter_list;
+         args_elide_kinds = js_args_elide_scan(s, (uint8_t *)bc_buf, bc_len,
+-                                              mapped, false);
++                                              mapped, false, &args_alias_idx);
+         if (args_elide_kinds >= 0) {
+-            js_args_elide_scan(s, (uint8_t *)bc_buf, bc_len, mapped, true);
++            js_args_elide_scan(s, (uint8_t *)bc_buf, bc_len, mapped, true,
++                               &args_alias_idx);
+             if (mapped && (args_elide_kinds &
+                            ((1 << JS_ARGS_KIND_ELEM) |
+                             (1 << JS_ARGS_KIND_APPLY)))) {
+@@ -40170,6 +40263,18 @@ static __exception int resolve_labels(JSContext *ctx, JSFunctionDef *s)
+                     break;
+                 case JS_ARGS_KIND_ELEM:
+                     break;
++                case JS_ARGS_KIND_ALIAS:
++                    /* `var a = arguments;` -- emit nothing and swallow the
++                       adjacent put_loc as well. The alias local keeps its
++                       frame-setup value and every read of it was marked as a
++                       site of its own, so nothing observes it. */
++                    if (args_alias_idx < 0 ||
++                        !code_match(&cc, pos_next, OP_put_loc, args_alias_idx, -1))
++                        goto args_elide_desync;
++                    if (cc.line_num >= 0) line_num = cc.line_num;
++                    if (cc.col_num >= 0) col_num = cc.col_num;
++                    pos_next = cc.pos;
++                    break;
+                 default:
+                 args_elide_desync:
+                     JS_ThrowInternalError(ctx, "arguments elision desync (kind=%d, pos=%d)",

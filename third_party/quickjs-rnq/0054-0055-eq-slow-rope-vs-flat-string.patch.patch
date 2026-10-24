@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: a <a@b>
+Date: Sat, 24 Oct 2026 19:49:18 +0000
+Subject: [PATCH 54/72] 0055-eq-slow-rope-vs-flat-string.patch
+
+---
+ quickjs.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/quickjs.c b/quickjs.c
+index 5dbf1b6..18208ee 100644
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -17692,7 +17692,8 @@ static no_inline __exception int js_eq_slow(JSContext *ctx, JSValue *sp,
+             if (res < 0)
+                 goto exception;
+         }
+-    } else if (tag1 == tag2) {
++    } else if (tag1 == tag2 ||
++               (tag_is_string(tag1) && tag_is_string(tag2))) {
+         res = js_strict_eq2(ctx, op1, op2, JS_EQ_STRICT);
+         JS_FreeValue(ctx, op1);
+         JS_FreeValue(ctx, op2);

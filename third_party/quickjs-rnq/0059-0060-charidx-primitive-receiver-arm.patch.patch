@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: a <a@b>
+Date: Sat, 24 Oct 2026 19:49:19 +0000
+Subject: [PATCH 59/72] 0060-charidx-primitive-receiver-arm.patch
+
+---
+ quickjs.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/quickjs.c b/quickjs.c
+index 03bfdb1..e046fa2 100644
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -52129,6 +52129,14 @@ static JSValue js_string_charCodeAt(JSContext *ctx, JSValueConst this_val,
+     JSString *p;
+     int idx, c;
+ 
++    if (JS_VALUE_GET_TAG(this_val) == JS_TAG_STRING &&
++        JS_VALUE_GET_TAG(argv[0]) == JS_TAG_INT) {
++        p = JS_VALUE_GET_STRING(this_val);
++        if (likely((uint32_t)JS_VALUE_GET_INT(argv[0]) < p->len))
++            return js_int32(string_get(p, JS_VALUE_GET_INT(argv[0])));
++        return JS_NAN;
++    }
++
+     val = JS_ToStringCheckObject(ctx, this_val);
+     if (JS_IsException(val))
+         return val;
+@@ -52154,6 +52162,15 @@ static JSValue js_string_charAt(JSContext *ctx, JSValueConst this_val,
+     JSString *p;
+     int idx, c;
+ 
++    if (JS_VALUE_GET_TAG(this_val) == JS_TAG_STRING &&
++        JS_VALUE_GET_TAG(argv[0]) == JS_TAG_INT) {
++        p = JS_VALUE_GET_STRING(this_val);
++        if (likely((uint32_t)JS_VALUE_GET_INT(argv[0]) < p->len))
++            return js_new_string_char(ctx,
++                       string_get(p, JS_VALUE_GET_INT(argv[0])));
++        return js_empty_string(ctx->rt);
++    }
++
+     val = JS_ToStringCheckObject(ctx, this_val);
+     if (JS_IsException(val))
+         return val;

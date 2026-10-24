@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: a <a@b>
+Date: Sat, 24 Oct 2026 19:49:15 +0000
+Subject: [PATCH 31/72] 0032-borrowed-lazy-bytecode-input.patch
+
+---
+ quickjs.c | 16 +++++++++++++---
+ quickjs.h |  4 ++++
+ 2 files changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/quickjs.c b/quickjs.c
+index c1274ae..f3084b0 100644
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -1055,8 +1055,9 @@ typedef struct JSFunctionBytecode {
+  * freed) releases the blob. */
+ typedef struct JSLazySource {
+     int ref_count;
+-    const uint8_t *buf; /* engine-owned copy of the serialized payload */
++    const uint8_t *buf; /* payload; owned unless borrow_buf */
+     size_t buf_len;
++    bool borrow_buf; /* caller keeps borrowed payload alive */
+     /* Interned atoms, one reference held per populated entry. */
+     JSAtom *idx_to_atom;
+     uint32_t idx_to_atom_count;
+@@ -43905,7 +43906,8 @@ static void js_lazy_source_free(JSRuntime *rt, JSLazySource *src)
+             JS_FreeAtomRT(rt, src->idx_to_atom[i]);
+         js_free_rt(rt, src->idx_to_atom);
+     }
+-    js_free_rt(rt, (uint8_t *)src->buf);
++    if (!src->borrow_buf)
++        js_free_rt(rt, (uint8_t *)src->buf);
+     js_free_rt(rt, src);
+ }
+ 
+@@ -44018,6 +44020,11 @@ JSValue JS_ReadObject2(JSContext *ctx, const uint8_t *buf, size_t buf_len,
+     s->allow_bytecode = ((flags & JS_READ_OBJ_BYTECODE) != 0);
+     s->allow_sab = ((flags & JS_READ_OBJ_SAB) != 0);
+     s->allow_reference = ((flags & JS_READ_OBJ_REFERENCE) != 0);
++    if ((flags & JS_READ_OBJ_BORROW) && !(flags & JS_READ_OBJ_LAZY)) {
++        JS_ThrowTypeError(ctx, "JS_READ_OBJ_BORROW requires JS_READ_OBJ_LAZY");
++        obj = JS_EXCEPTION;
++        goto done;
++    }
+     if ((flags & JS_READ_OBJ_LAZY) && !s->allow_bytecode) {
+         JS_ThrowTypeError(ctx, "JS_READ_OBJ_LAZY requires JS_READ_OBJ_BYTECODE");
+         obj = JS_EXCEPTION;
+@@ -44056,7 +44063,10 @@ JSValue JS_ReadObject2(JSContext *ctx, const uint8_t *buf, size_t buf_len,
+             obj = JS_EXCEPTION;
+             goto done;
+         }
+-        {
++        if (flags & JS_READ_OBJ_BORROW) {
++            src->buf = buf;
++            src->borrow_buf = true;
++        } else {
+             uint8_t *copy = js_malloc(ctx, buf_len);
+             if (!copy) {
+                 js_free(ctx, src);
+diff --git a/quickjs.h b/quickjs.h
+index dd793d0..b765e69 100644
+--- a/quickjs.h
++++ b/quickjs.h
+@@ -1415,6 +1415,10 @@ JS_EXTERN uint8_t *JS_WriteObject2(JSContext *ctx, size_t *psize, JSValueConst o
+    so `buf` need not outlive the call. Requires JS_READ_OBJ_BYTECODE and is
+    incompatible with JS_READ_OBJ_REFERENCE and JS_READ_OBJ_SAB. */
+ #define JS_READ_OBJ_LAZY      (1 << 4)
++/* Borrow the serialized payload instead of copying it. The caller must keep
++   it alive and unchanged until all values and runtimes created from it are
++   freed. Requires JS_READ_OBJ_LAZY; invalid combinations are rejected. */
++#define JS_READ_OBJ_BORROW    (1 << 5)
+ JS_EXTERN JSValue JS_ReadObject(JSContext *ctx, const uint8_t *buf, size_t buf_len, int flags);
+ JS_EXTERN JSValue JS_ReadObject2(JSContext *ctx, const uint8_t *buf, size_t buf_len,
+                                  int flags, JSSABTab *psab_tab);

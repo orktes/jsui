@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: a <a@b>
+Date: Sat, 24 Oct 2026 19:49:16 +0000
+Subject: [PATCH 39/72] 0040-cfunction-frame-arg-buf.patch
+
+---
+ quickjs.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/quickjs.c b/quickjs.c
+index d265a9f..428f91d 100644
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -7762,6 +7762,7 @@ static JSValue js_call_c_function_data(JSContext *ctx, JSValueConst func_obj,
+     sf->is_constructor = (flags & JS_CALL_FLAG_CONSTRUCTOR) != 0;
+     sf->cur_func = unsafe_unconst(func_obj);
+     sf->arg_count = argc;
++    sf->arg_buf = (JSValue *)arg_buf;
+     ret = s->func(ctx, this_val, argc, arg_buf, s->magic, vc(s->data));
+     rt->current_stack_frame = sf->prev_frame;
+     return ret;
+@@ -7888,6 +7889,7 @@ static JSValue js_call_c_closure(JSContext *ctx, JSValueConst func_obj,
+     sf->is_constructor = (flags & JS_CALL_FLAG_CONSTRUCTOR) != 0;
+     sf->cur_func = unsafe_unconst(func_obj);
+     sf->arg_count = argc;
++    sf->arg_buf = (JSValue *)arg_buf;
+     ret = s->func(ctx, this_val, argc, arg_buf, s->magic, s->opaque);
+     rt->current_stack_frame = sf->prev_frame;
+ 

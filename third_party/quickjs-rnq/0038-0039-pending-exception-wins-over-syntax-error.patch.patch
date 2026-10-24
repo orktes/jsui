@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: a <a@b>
+Date: Sat, 24 Oct 2026 19:49:16 +0000
+Subject: [PATCH 38/72] 0039-pending-exception-wins-over-syntax-error.patch
+
+---
+ quickjs.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/quickjs.c b/quickjs.c
+index f50dc05..d265a9f 100644
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -40599,6 +40599,11 @@ static __exception int js_parse_function_decl2(JSParseState *s,
+                     }
+                 }
+             } else {
++                /* A pending exception (stack overflow, interrupt, OOM) set while
++                   reading this token is the real error; reporting a syntax error
++                   here would replace it and hide what actually happened. */
++                if (JS_HasException(s->ctx))
++                    goto fail;
+                 js_parse_error(s, "missing formal parameter");
+                 goto fail;
+             }
