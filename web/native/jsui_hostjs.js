@@ -227,11 +227,14 @@ var jsuiHostJs = (function () {
       });
     } else if (typeof realGlobal.process === 'object' && typeof realGlobal.process.on === 'function') {
       // Node: rejections that are not a runtime's keep Node's default (an
-      // uncaught exception).
-      realGlobal.process.on('unhandledRejection', (reason) => {
+      // uncaught exception) unless the process listens for them itself.
+      // Other listeners also see the runtimes' rejections (Node has no
+      // preventDefault).
+      const proc = realGlobal.process;
+      proc.on('unhandledRejection', (reason) => {
         const eng = ownerOf(reason);
         if (eng) report(eng, reason);
-        else realGlobal.process.nextTick(() => { throw reason; });
+        else if (proc.listenerCount('unhandledRejection') === 1) proc.nextTick(() => { throw reason; });
       });
     }
   }
