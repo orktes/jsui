@@ -86,8 +86,9 @@ for (const mode of ['production', 'development']) {
   test(`native runtime list e2e (${mode} React)`, { skip: !existsSync(binary) && `no ${binary}` }, async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'jsui-e2e-list-'));
     const outfile = path.join(dir, 'bundle.js');
+    const bytecode = mode === 'production' && !!findWasmDir();
     await build({ entry: path.join(here, 'e2e', 'list.jsx'), outfile, mode, bytecode });
-    const { stdout } = await promisify(execFile)(binary, ['react_list_e2e'], {
+    const { stdout, stderr } = await promisify(execFile)(binary, ['react_list_e2e'], {
       env: Object.assign({}, process.env, { JSUI_REACT_LIST_BUNDLE: outfile }),
       cwd: repo,
     }).catch((e) => {
@@ -96,6 +97,7 @@ for (const mode of ['production', 'development']) {
     if (process.env.JSUI_E2E_VERBOSE) console.log(stdout);
     assert.match(stdout, /PASS react_list_e2e/);
     assert.doesNotMatch(stdout, /skipped/);
+    if (bytecode) assert.doesNotMatch(stderr, /running the bundle's source instead/);
   });
 }
 
