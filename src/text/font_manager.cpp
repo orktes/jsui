@@ -22,6 +22,9 @@
 #include "include/ports/SkFontMgr_mac_ct.h"
 #elif defined(_WIN32)
 #include "include/ports/SkTypeface_win.h"
+#elif defined(__ANDROID__)
+#include "include/ports/SkFontMgr_android.h"
+#include "include/ports/SkFontScanner_FreeType.h"
 #else
 #include "include/ports/SkFontMgr_empty.h"
 #if !defined(__EMSCRIPTEN__)
@@ -210,6 +213,9 @@ static sk_sp<SkFontMgr> makeSystemFontMgr() {
   return SkFontMgr_New_CoreText(nullptr);
 #elif defined(_WIN32)
   return SkFontMgr_New_DirectWrite();
+#elif defined(__ANDROID__)
+  // /system/etc/fonts.xml: Roboto, Noto (CJK, emoji, scripts) as fallbacks.
+  return SkFontMgr_New_Android(nullptr, SkFontScanner_Make_FreeType());
 #elif defined(__EMSCRIPTEN__)
   // No system fonts in the browser; FreeType-backed manager so makeFromData works.
   return SkFontMgr_New_Custom_Empty();
@@ -223,9 +229,10 @@ static sk_sp<SkFontMgr> makeSystemFontMgr() {
 }
 
 // FreeType from memory on Linux/WASM (same rasteriser Chrome uses on Linux,
-// which keeps reference renders close); the platform manager elsewhere.
+// which keeps reference renders close); the platform manager elsewhere
+// (Android's is FreeType too).
 static sk_sp<SkFontMgr> makeDataFontMgr(const sk_sp<SkFontMgr>& system) {
-#if defined(__APPLE__) || defined(_WIN32)
+#if defined(__APPLE__) || defined(_WIN32) || defined(__ANDROID__)
   return system;
 #else
   (void)system;
