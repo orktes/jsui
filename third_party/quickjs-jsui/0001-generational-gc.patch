@@ -5,12 +5,12 @@ Subject: [PATCH] Generational cycle collection, deferred collections run in
  idle time
 
 ---
- quickjs.c | 252 ++++++++++++++++++++++++++++++++++++++++++++++--------
- quickjs.h |  26 ++++++
- 2 files changed, 241 insertions(+), 37 deletions(-)
+ quickjs.c | 260 ++++++++++++++++++++++++++++++++++++++++++++++--------
+ quickjs.h |  28 ++++++
+ 2 files changed, 251 insertions(+), 37 deletions(-)
 
 diff --git a/quickjs.c b/quickjs.c
-index 9faa0c6..c08603d 100644
+index 9faa0c6..8111d3d 100644
 --- a/quickjs.c
 +++ b/quickjs.c
 @@ -450,7 +450,17 @@ struct JSRuntime {
@@ -137,8 +137,8 @@ index 9faa0c6..c08603d 100644
 +   count through that reference and survives, and an old object only young
 +   garbage referenced is freed with it (js_free_value_rt). Cycles among old
 +   objects wait for a full collection, which runs once the heap has grown by
-+   half since the last one (JS_RunIdleGC first, gc_collect_auto at the latest
-+   at 2.5x), counting the heap left after collections only. */
++   a quarter since the last one (JS_RunIdleGC first, gc_collect_auto at the
++   latest at 2x), counting the heap left after collections only. */
 +static void gc_list_splice_tail(struct list_head *from, struct list_head *to)
 +{
 +    if (list_empty(from))
@@ -218,10 +218,10 @@ index 9faa0c6..c08603d 100644
 +    if (full || rt->gc_full_base == 0)
 +        rt->gc_full_base = heap;
 +    /* what survives young collections (and old garbage) grows the heap
-+       left after a collection: a full one is due at 1.5x, plus 1 MB so a
++       left after a collection: a full one is due at 1.25x, plus 1 MB so a
 +       small heap does not collect fully all the time */
 +    rt->gc_old_size = heap;
-+    rt->gc_full_due = heap > rt->gc_full_base + (rt->gc_full_base >> 1) + (1 << 20);
++    rt->gc_full_due = heap > rt->gc_full_base + (rt->gc_full_base >> 2) + (1 << 20);
 +    /* the next young collection: after a quarter of the heap, at least
 +       1 MB of allocations */
 +    young = gc_max_size(heap >> 2, 1 << 20);
@@ -230,10 +230,10 @@ index 9faa0c6..c08603d 100644
 +
 +static void gc_collect_auto(JSRuntime *rt, size_t chunk)
 +{
-+    /* full at the latest when the heap left after collections reached 2.5x
-+       the one after the last full collection (plus 4 MB) */
++    /* full at the latest when the heap left after collections reached 2x
++       the one after the last full collection (plus 2 MB) */
 +    gc_collect(rt, !rt->gc_generational || rt->gc_full_base == 0 ||
-+               rt->gc_old_size > rt->gc_full_base * 5 / 2 + (4 << 20), chunk);
++               rt->gc_old_size > rt->gc_full_base * 2 + (2 << 20), chunk);
 +}
 +
 +void JS_RunGC(JSRuntime *rt)
@@ -282,7 +282,7 @@ index 9faa0c6..c08603d 100644
  }
  
  bool JS_HasPendingGC(JSRuntime *rt)
-@@ -8890,30 +9054,42 @@ void JS_RunPendingGC(JSRuntime *rt)
+@@ -8890,30 +9054,50 @@ void JS_RunPendingGC(JSRuntime *rt)
      if (!rt->gc_pending)
          return;
      assert(rt->current_stack_frame == NULL);
@@ -303,16 +303,26 @@ index 9faa0c6..c08603d 100644
  }
  
 -void JS_RunGC(JSRuntime *rt)
-+bool JS_IsFullGCDue(JSRuntime *rt)
++void JS_FinishPendingGC(JSRuntime *rt)
  {
 -    /* decrement the reference of the children of each object. mark =
 -       1 after this pass. */
 -    gc_decref(rt);
-+    return rt->gc_full_due;
++    if (!rt->gc_pending)
++        return;
++    assert(rt->current_stack_frame == NULL);
++    gc_collect_auto(rt, 0);
 +}
  
 -    /* keep the GC objects with a non zero refcount and their childs */
 -    gc_scan(rt);
++bool JS_IsFullGCDue(JSRuntime *rt)
++{
++    return rt->gc_full_due;
++}
+ 
+-    /* free the GC objects in a cycle */
+-    gc_free_cycles(rt);
 +bool JS_RunIdleGC(JSRuntime *rt)
 +{
 +    if (rt->current_stack_frame != NULL)
@@ -326,20 +336,18 @@ index 9faa0c6..c08603d 100644
 +        return true;
 +    }
 +    return false;
-+}
+ }
  
--    /* free the GC objects in a cycle */
--    gc_free_cycles(rt);
 +size_t JS_GetMallocSize(JSRuntime *rt)
 +{
 +    return rt->malloc_state.malloc_size;
- }
- 
++}
++
 +
  /* Return false if not an object or if the object has already been
     freed (zombie objects are visible in finalizers when freeing
     cycles). */
-@@ -9019,6 +9195,8 @@ void JS_ComputeMemoryUsage(JSRuntime *rt, JSMemoryUsage *s)
+@@ -9019,6 +9203,8 @@ void JS_ComputeMemoryUsage(JSRuntime *rt, JSMemoryUsage *s)
      JSMemoryUsage_helper mem = { 0 }, *hp = &mem;
  
      memset(s, 0, sizeof(*s));
@@ -349,10 +357,10 @@ index 9faa0c6..c08603d 100644
      s->malloc_size = rt->malloc_state.malloc_size;
      s->malloc_limit = rt->malloc_state.malloc_limit;
 diff --git a/quickjs.h b/quickjs.h
-index 4380257..bbf0f0e 100644
+index 4380257..caf4c1f 100644
 --- a/quickjs.h
 +++ b/quickjs.h
-@@ -542,6 +542,32 @@ JS_EXTERN void JS_SetGCDeferred(JSRuntime *rt, bool deferred, size_t limit);
+@@ -542,6 +542,34 @@ JS_EXTERN void JS_SetGCDeferred(JSRuntime *rt, bool deferred, size_t limit);
  JS_EXTERN bool JS_HasPendingGC(JSRuntime *rt);
  /* Must be called with an empty JS stack. */
  JS_EXTERN void JS_RunPendingGC(JSRuntime *rt);
@@ -364,7 +372,7 @@ index 4380257..bbf0f0e 100644
 +   or JS_RunIdleGC). */
 +JS_EXTERN bool JS_IsFullGCDue(JSRuntime *rt);
 +/* Generational cycle collection: automatic collections scan only the objects
-+   created since the last one; JS_RunGC, JS_RunIdleGC and heap growth (2.5x
++   created since the last one; JS_RunGC, JS_RunIdleGC and heap growth (2x
 +   the heap after the last full collection) run full ones. Off by default. */
 +JS_EXTERN void JS_SetGCGenerational(JSRuntime *rt, bool generational);
 +/* Generational: deferred young collections (JS_RunPendingGC, JS_RunIdleGC)
@@ -374,6 +382,8 @@ index 4380257..bbf0f0e 100644
 +/* Like JS_SetGCYoungChunk, but sizes the slices to take about `ms` each,
 +   from the cost per object of the previous one. 0: off. */
 +JS_EXTERN void JS_SetGCYoungBudget(JSRuntime *rt, double ms);
++/* Runs a deferred collection in one go, ignoring the slice size. */
++JS_EXTERN void JS_FinishPendingGC(JSRuntime *rt);
 +typedef struct JSGCStats {
 +    uint64_t count;      /* cycle collections */
 +    uint64_t full_count; /* ... of which full */

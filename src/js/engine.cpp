@@ -326,11 +326,13 @@ void JsEngine::Impl::dropPending(uint64_t id) {
 namespace {
 
 // Garbage collection between frames (QuickJsEngine::collectIdle): time per
-// young collection slice, and the longest a deferred young (in ticks) or
-// full collection waits for a light / idle tick.
+// young collection slice, and how many ticks a deferred young collection
+// waits for a light tick, a due full one for an idle tick (then it takes a
+// light one) and at most.
 constexpr double kGcSliceMs = 2.0;
-constexpr int kGcMaxWaitTicks = 8;
-constexpr int kGcFullMaxWaitTicks = 120;
+constexpr int kGcMaxWaitTicks = 3;
+constexpr int kGcFullLightWaitTicks = 10;
+constexpr int kGcFullMaxWaitTicks = 30;
 
 // ------------------------------------------------------------- timers
 
@@ -894,9 +896,15 @@ bool QuickJsEngine::collectIdle(bool light, bool idle) {
   Impl& impl = *impl_;
   if (impl.depth > 0) return false;
   if (JS_HasPendingGC(impl.jrt)) {
-    if (!light && ++impl.gcWaitTicks < kGcMaxWaitTicks) return false;
+    // Light ticks take a slice; a run of heavy ticks (mounting screen after
+    // screen) would outpace slices, so after a few it collects in one go.
+    if (light) {
+      JS_RunPendingGC(impl.jrt);
+    } else {
+      if (++impl.gcWaitTicks < kGcMaxWaitTicks) return false;
+      JS_FinishPendingGC(impl.jrt);
+    }
     impl.gcWaitTicks = 0;
-    JS_RunPendingGC(impl.jrt);
     return true;
   }
   impl.gcWaitTicks = 0;
@@ -905,9 +913,13 @@ bool QuickJsEngine::collectIdle(bool light, bool idle) {
     return false;
   }
   // A full collection scans the whole heap (about 1 ms per MB) in one go:
-  // when nothing moves, or at the latest after a while on a light tick (the
-  // engine runs one anyway once the heap reaches 2.5x the last full one).
-  if (!idle && !(light && ++impl.gcFullWaitTicks >= kGcFullMaxWaitTicks)) return false;
+  // when nothing moves, else on a light tick, else after a while on any
+  // tick (old garbage piles up meanwhile; the engine runs one anyway once
+  // the heap reaches 2x the last full one).
+  ++impl.gcFullWaitTicks;
+  if (!idle && !(light && impl.gcFullWaitTicks >= kGcFullLightWaitTicks) &&
+      impl.gcFullWaitTicks < kGcFullMaxWaitTicks)
+    return false;
   impl.gcFullWaitTicks = 0;
   JS_RunGC(impl.jrt);
   return true;
