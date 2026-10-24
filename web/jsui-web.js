@@ -1959,11 +1959,21 @@ class JsuiHost extends CanvasView {
     this._withStrings([abs], (u) => this.module._jsui_load_bundle_url(this.rt, u));
   }
 
+  /** Evaluates a bundle: JS source (string) or the bytes of a `jsui build` bundle (precompiled bytecode). */
   loadSource(source, name = 'bundle.js') {
     const M = this.module;
-    const len = M.lengthBytesUTF8(source);
-    const src = M._malloc(len + 1);
-    M.stringToUTF8(source, src, len + 1);
+    let len, src;
+    if (typeof source === 'string') {
+      len = M.lengthBytesUTF8(source);
+      src = M._malloc(len + 1);
+      M.stringToUTF8(source, src, len + 1);
+    } else {
+      const bytes = source instanceof Uint8Array ? source : new Uint8Array(source);
+      len = bytes.length;
+      src = M._malloc(len + 1);
+      M.HEAPU8.set(bytes, src);
+      M.HEAPU8[src + len] = 0;
+    }
     const r = this._withStrings([name], (n) => M._jsui_load_bundle_source(this.rt, src, len, n));
     M._free(src);
     return r === 0;

@@ -14,7 +14,15 @@ import { skillCommand, SKILL_USAGE } from '../src/skill.js';
 
 const USAGE = `usage:
   jsui build <entry> [-o dist/bundle.js] [--minify] [--sourcemap] [--dev]
-     [--react-compiler [--compiler-report]]
+     [--format combo|bytecode|source|split] [--react-compiler [--compiler-report]]
+     What goes in the bundle (all load in every JSUI runtime of this version):
+       combo     (default) QuickJS bytecode (faster startup, less memory) with
+                 the source inside as the fallback for other JSUI versions;
+                 ~2.2x the size of the JS
+       bytecode  bytecode only: ~1.25x the JS, only this JSUI version loads it
+       source    plain JS (browser JS engines, other tools)
+       split     bytecode in <out>, the source next to it in
+                 <name>.source.js; the runtime reads it only as the fallback
   jsui dev <entry> [--port 5173] [--host 127.0.0.1] [--no-hmr] [--react-compiler]
      [--headless [view options]]
      Every runtime that loads the bundle in dev mode joins the server's shared
@@ -243,6 +251,7 @@ async function main(argv) {
       port: { type: 'string', short: 'p' },
       host: { type: 'string' },
       'no-hmr': { type: 'boolean' },
+      format: { type: 'string' },
       'react-compiler': { type: 'boolean' },
       'no-react-compiler': { type: 'boolean' },
       'compiler-report': { type: 'boolean' },
@@ -312,11 +321,15 @@ async function main(argv) {
         minify: !!values.minify,
         sourcemap: !!values.sourcemap,
         mode: values.dev ? 'development' : 'production',
+        format: values.format || 'combo',
         reactCompiler: reactCompilerOption(values),
       });
       const rc = r.reactCompiler;
       const compiled = rc ? `, React Compiler: ${rc.functions} functions in ${rc.files} files${rc.skipped.length ? `, ${rc.skipped.length} skipped` : ''}` : '';
-      console.log(`jsui: wrote ${r.outfile} (${(r.bytes / 1024).toFixed(1)} KiB, ${r.assets.length} assets${compiled}) in ${Date.now() - t0} ms`);
+      const kind =
+        r.format === 'combo' ? `bytecode + ${(r.sourceBytes / 1024).toFixed(1)} KiB source` : r.format === 'split' ? `bytecode, source in ${path.basename(r.sourceFile)}` : r.format;
+      console.log(`jsui: wrote ${r.outfile} (${(r.bytes / 1024).toFixed(1)} KiB, ${kind}, ${r.assets.length} assets${compiled}) in ${Date.now() - t0} ms`);
+      if (typeof r.bytecode === 'string') console.warn(`jsui: not precompiled (${r.bytecode}); pass --format source to silence this`);
       if (rc && values['compiler-report']) {
         for (const s of rc.skipped) console.log(`  skipped ${s.name || '(anonymous)'} (${s.where}${s.line ? `, line ${s.line}` : ''}): ${s.reason}`);
       }

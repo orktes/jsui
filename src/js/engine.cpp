@@ -14,6 +14,7 @@
 #include <cmath>
 
 #include "core/document.h"
+#include "js/bytecode.h"
 #include "js/engine_impl.h"
 #include "runtime.h"
 
@@ -588,12 +589,43 @@ JsEngine::~JsEngine() {
   JS_FreeRuntime(impl.jrt);
 }
 
+static JSValue evalSource(JSContext* ctx, const std::string& source, const std::string& name) {
+  // JS_Eval needs a NUL-terminated buffer; std::string guarantees one.
+  return JS_Eval(ctx, source.c_str(), source.size(), name.c_str(), JS_EVAL_TYPE_GLOBAL);
+}
+
+// Runs a bundle: JS source, or a `jsui build` container (js/bytecode.h).
 bool JsEngine::eval(const std::string& source, const std::string& name) {
   Impl& impl = *impl_;
   Perf::Scope scope(impl.rt.doc.perf, Phase::Js);
   impl.enter();
-  // JS_Eval needs a NUL-terminated buffer; std::string guarantees one.
-  JSValue r = JS_Eval(impl.ctx, source.c_str(), source.size(), name.c_str(), JS_EVAL_TYPE_GLOBAL);
+  JSValue r = JS_UNDEFINED;
+  BundleParts parts;
+  if (isBundleContainer(source)) {
+    if (!parseBundleContainer(source, parts)) {
+      r = JS_ThrowSyntaxError(impl.ctx, "%s: truncated precompiled bundle", name.c_str());
+    } else if (parts.key == bytecodeKey() && !parts.bytecode.empty()) {
+      // JS_ReadObject checks the bytecode's own version and checksum too.
+      JSValue fn = JS_ReadObject(impl.ctx, reinterpret_cast<const uint8_t*>(parts.bytecode.data()),
+                                 parts.bytecode.size(), JS_READ_OBJ_BYTECODE);
+      if (JS_IsException(fn) && !parts.source.empty()) {
+        JS_FreeValue(impl.ctx, JS_GetException(impl.ctx));
+        impl.rt.log(JSUI_LOG_WARN, name + ": unreadable bytecode, running the bundle's source instead");
+        r = evalSource(impl.ctx, std::string(parts.source), name);
+      } else {
+        r = JS_IsException(fn) ? fn : JS_EvalFunction(impl.ctx, fn);  // takes fn
+      }
+    } else if (!parts.source.empty()) {
+      impl.rt.log(JSUI_LOG_WARN, name + ": bytecode was compiled for another JSUI runtime (" + std::string(parts.key) +
+                                     "), running the bundle's source instead; rebuild it with this version's jsui CLI");
+      r = evalSource(impl.ctx, std::string(parts.source), name);
+    } else {
+      r = JS_ThrowSyntaxError(impl.ctx, "%s: bytecode was compiled for another JSUI runtime (%.*s) and has no source",
+                              name.c_str(), int(parts.key.size()), parts.key.data());
+    }
+  } else {
+    r = evalSource(impl.ctx, source, name);
+  }
   bool ok = !JS_IsException(r);
   if (!ok) impl.reportException();
   JS_FreeValue(impl.ctx, r);

@@ -2,6 +2,7 @@
 #include "platform/loader_emscripten.h"
 
 #include <algorithm>
+#include <cctype>
 #include <condition_variable>
 #include <cstdio>
 #include <deque>
@@ -251,6 +252,11 @@ std::string ResourceLoader::resolve(const std::string& base, const std::string& 
   if (url.empty()) return base;
   if (url.find("://") != std::string::npos || url.rfind("data:", 0) == 0) return url;
   if (base.empty()) return url;
+  // Absolute Windows paths (C:\ui\a.png, C:/ui/a.png, \\server\share).
+  if ((url.size() > 2 && std::isalpha(static_cast<unsigned char>(url[0])) && url[1] == ':' &&
+       (url[2] == '\\' || url[2] == '/')) ||
+      url.rfind("\\\\", 0) == 0)
+    return url;
   if (url.rfind("//", 0) == 0) {
     auto p = base.find("://");
     return (p == std::string::npos ? std::string("http:") : base.substr(0, p + 1)) + url;
@@ -273,7 +279,9 @@ std::string ResourceLoader::resolve(const std::string& base, const std::string& 
     query = rel.substr(q);
     rel = rel.substr(0, q);
   }
-  std::string dir = rel[0] == '/' ? "" : path.substr(0, path.rfind('/') + 1);
+  // A file path base may use Windows separators (C:\ui\bundle.js).
+  size_t sep = scheme == std::string::npos ? path.find_last_of("/\\") : path.rfind('/');
+  std::string dir = rel[0] == '/' ? "" : path.substr(0, sep + 1);
   std::string joined = dir + rel;
   // Normalize ./ and ../ segments.
   std::vector<std::string> segs;
