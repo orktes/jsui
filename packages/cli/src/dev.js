@@ -1,4 +1,4 @@
-// `jsui dev <entry> [--port 5173] [--host 127.0.0.1] [--no-hmr]`
+// `jsui dev <entry> [--port 5173] [--host 127.0.0.1] [--no-hmr] [--react-compiler]`
 //
 // Rebuilds on change and serves (contract with the runtime's dev mode):
 //   GET /bundle.js            last good bundle (build errors keep it served).
@@ -33,6 +33,7 @@ import path from 'node:path';
 import { esbuildOptions } from './config.js';
 import { formatErrors } from './build.js';
 import { createHmr } from './hmr.js';
+import { REACT_COMPILER_DEFAULT } from './react-compiler.js';
 import { createShared } from './shared.js';
 import { createRequire } from 'node:module';
 
@@ -90,12 +91,12 @@ function safeJoin(root, rel) {
  * scale, fps, component, props, state}). `waitMs`: how long agent commands
  * wait for a runtime to join the session.
  */
-export async function dev({ entry, port = 5173, host = '127.0.0.1', log = console.log, minify = false, hmr = true, headless = null, waitMs }) {
+export async function dev({ entry, port = 5173, host = '127.0.0.1', log = console.log, minify = false, hmr = true, reactCompiler = REACT_COMPILER_DEFAULT, headless = null, waitMs }) {
   const absEntry = path.resolve(entry);
   const entryDir = path.dirname(absEntry);
   const webDir = findWebHost(entryDir) || findWebHost(process.cwd()) || webPackageDir();
   const state = { bundle: null, map: null, assets: new Map(), version: '0', error: '', builds: 0, failures: 0 };
-  const hot = hmr ? createHmr({ entry: absEntry, mode: 'development', assets: state.assets, log }) : null;
+  const hot = hmr ? createHmr({ entry: absEntry, mode: 'development', assets: state.assets, reactCompiler, log }) : null;
   // The token runtimes poll with hmr=1: a failed build changes it too.
   const hotToken = () => (hot && state.error ? `${state.version}!${state.failures}` : state.version);
   const waiters = new Set();
@@ -147,7 +148,7 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
     },
   };
 
-  const opts = esbuildOptions({ entry: absEntry, outfile, mode: 'development', minify, sourcemap: true, assets: state.assets });
+  const opts = esbuildOptions({ entry: absEntry, outfile, mode: 'development', minify, sourcemap: true, assets: state.assets, reactCompiler, compilerHmr: hmr, log });
   opts.plugins.push(reporter);
   const ctx = await esbuild.context(opts);
   await ctx.rebuild().catch(() => {});  // errors are reported by onEnd

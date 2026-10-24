@@ -32,10 +32,21 @@ function textOutsideText(text) {
 
 function attach(parent, child) {
   child.parent = parent;
+  // React only detaches host components (detachDeletedInstance), never raw
+  // text, so each host instance remembers its text children to forget them
+  // with it.
+  if (child instanceof TextInstance) {
+    if (!parent.texts) parent.texts = [child];
+    else if (parent.texts.indexOf(child) < 0) parent.texts.push(child);
+  }
   if (parent.type === 'ScrollView' && !parent._content) parent._content = child;
 }
 
 const noop = () => {};
+
+function forget(inst) {
+  if (instances.get(inst.id) === inst) instances.delete(inst.id);
+}
 
 const hostConfig = {
   rendererPackageName: '@orktes/jsui-react',
@@ -123,22 +134,33 @@ const hostConfig = {
     native.destroyNode(child.id);
     child.parent = null;
     if (parent._content === child) parent._content = null;
+    if (child instanceof TextInstance) {
+      forget(child);
+      const i = parent.texts ? parent.texts.indexOf(child) : -1;
+      if (i >= 0) parent.texts.splice(i, 1);
+    }
   },
   removeChildFromContainer(container, child) {
     native.removeChild(container.id, child.id);
     native.destroyNode(child.id);
     const i = container.children.indexOf(child);
     if (i >= 0) container.children.splice(i, 1);
+    if (child instanceof TextInstance) forget(child);
   },
   clearContainer(container) {
     for (const child of container.children) {
       native.removeChild(container.id, child.id);
       native.destroyNode(child.id);
+      if (child instanceof TextInstance) forget(child);
     }
     container.children.length = 0;
   },
   detachDeletedInstance(inst) {
-    if (instances.get(inst.id) === inst) instances.delete(inst.id);
+    forget(inst);
+    if (inst.texts) {
+      for (const t of inst.texts) forget(t);
+      inst.texts = null;
+    }
   },
 
   commitUpdate(inst, _type, _oldProps, newProps) {

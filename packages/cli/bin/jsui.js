@@ -14,7 +14,7 @@ import { skillCommand, SKILL_USAGE } from '../src/skill.js';
 
 const USAGE = `usage:
   jsui build <entry> [-o dist/bundle.js] [--minify] [--sourcemap] [--dev]
-     [--format combo|bytecode|source|split]
+     [--format combo|bytecode|source|split] [--react-compiler [--compiler-report]]
      What goes in the bundle (all load in every JSUI runtime of this version):
        combo     (default) QuickJS bytecode (faster startup, less memory) with
                  the source inside as the fallback for other JSUI versions;
@@ -23,7 +23,7 @@ const USAGE = `usage:
        source    plain JS (browser JS engines, other tools)
        split     bytecode in <out>, the source next to it in
                  <name>.source.js; the runtime reads it only as the fallback
-  jsui dev <entry> [--port 5173] [--host 127.0.0.1] [--no-hmr]
+  jsui dev <entry> [--port 5173] [--host 127.0.0.1] [--no-hmr] [--react-compiler]
      [--headless [view options]]
      Every runtime that loads the bundle in dev mode joins the server's shared
      session: http://127.0.0.1:5173/shared in a browser, the native viewer
@@ -56,6 +56,11 @@ ${SKILL_USAGE}
 'react-native' imports are aliased to @orktes/jsui-react; JSX works in .js/.jsx/.tsx.
 jsui dev hot-updates edited components in place (React Fast Refresh, state is
 kept); --no-hmr reloads the whole bundle on every change instead.
+--react-compiler runs React Compiler on the app's sources (not node_modules):
+components and hooks are memoized automatically (build, dev, screenshot /
+inspect / run; --no-react-compiler is the default). Components it cannot
+compile (they break the Rules of React) run as written: --compiler-report
+lists them.
 screenshot / inspect / run render with the CPU WebAssembly runtime in Node
 (deterministic; no browser or GPU). 'jsui run --help' lists the script steps.`;
 
@@ -89,6 +94,13 @@ function num(v, name, fallback) {
 
 class UsageError extends Error {}
 
+// --react-compiler / --no-react-compiler; undefined keeps the default.
+function reactCompilerOption(values) {
+  if (values['no-react-compiler']) return false;
+  if (values['react-compiler']) return true;
+  return undefined;
+}
+
 function json(v, name) {
   try {
     return JSON.parse(v);
@@ -121,6 +133,7 @@ function viewOptions(values, entry) {
     props: values.props ? json(values.props, 'props') : undefined,
     state,
     dev: !!values.dev,
+    reactCompiler: reactCompilerOption(values),
     onLog: (level, text) => {
       if (level >= 2) process.stderr.write((level >= 3 ? 'error: ' : 'warn: ') + text + '\n');
     },
@@ -239,6 +252,9 @@ async function main(argv) {
       host: { type: 'string' },
       'no-hmr': { type: 'boolean' },
       format: { type: 'string' },
+      'react-compiler': { type: 'boolean' },
+      'no-react-compiler': { type: 'boolean' },
+      'compiler-report': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       ...VIEW_OPTIONS,
     },
@@ -306,11 +322,17 @@ async function main(argv) {
         sourcemap: !!values.sourcemap,
         mode: values.dev ? 'development' : 'production',
         format: values.format || 'combo',
+        reactCompiler: reactCompilerOption(values),
       });
+      const rc = r.reactCompiler;
+      const compiled = rc ? `, React Compiler: ${rc.functions} functions in ${rc.files} files${rc.skipped.length ? `, ${rc.skipped.length} skipped` : ''}` : '';
       const kind =
         r.format === 'combo' ? `bytecode + ${(r.sourceBytes / 1024).toFixed(1)} KiB source` : r.format === 'split' ? `bytecode, source in ${path.basename(r.sourceFile)}` : r.format;
-      console.log(`jsui: wrote ${r.outfile} (${(r.bytes / 1024).toFixed(1)} KiB, ${kind}, ${r.assets.length} assets) in ${Date.now() - t0} ms`);
+      console.log(`jsui: wrote ${r.outfile} (${(r.bytes / 1024).toFixed(1)} KiB, ${kind}, ${r.assets.length} assets${compiled}) in ${Date.now() - t0} ms`);
       if (typeof r.bytecode === 'string') console.warn(`jsui: not precompiled (${r.bytecode}); pass --format source to silence this`);
+      if (rc && values['compiler-report']) {
+        for (const s of rc.skipped) console.log(`  skipped ${s.name || '(anonymous)'} (${s.where}${s.line ? `, line ${s.line}` : ''}): ${s.reason}`);
+      }
       return 0;
     } catch (e) {
       console.error('jsui: build failed\n' + (e && e.message ? e.message : e));
@@ -329,7 +351,7 @@ async function main(argv) {
         const v = viewOptions(values, entry);
         headlessView = { width: v.width, height: v.height, scale: v.scale, fps: v.fps, component: v.component, props: v.props, state: v.state };
       }
-      const server = await dev({ entry, port, host: values.host || '127.0.0.1', hmr: !values['no-hmr'], headless: headlessView });
+      const server = await dev({ entry, port, host: values.host || '127.0.0.1', hmr: !values['no-hmr'], reactCompiler: reactCompilerOption(values), headless: headlessView });
       const stop = async () => {
         await server.close();
         process.exit(0);

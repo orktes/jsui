@@ -1766,7 +1766,9 @@ every frame), `--patch-state KEY,SLOTS` (one `jsui_patch_state` per frame),
 what the host does to them every frame), `--wheel X,Y,DY[,FRAMES]` (a wheel
 delta at X,Y every frame, reversing every FRAMES), `--react-stats` (installs
 a React DevTools hook and adds `reactCommits` / `reactRenders`: commits and
-function / memo / forwardRef components rendered per frame). Besides the
+function / memo / forwardRef components rendered per frame), `--dump
+out.pam` (the last frame, fully repainted, as an RGBA PAM image, to diff two
+builds of a bundle). Besides the
 phase times, the JS work is counted: `events` (events sent to JS), `jsCalls`
 (native → JS calls: events, timers, frame callbacks, layout callbacks,
 messages), `jsJobs` (promise jobs) and `hostMessages` (`postMessage` to the
@@ -1805,9 +1807,77 @@ names.
   `JS_FreeValue` / `JS_DupValue` are inlined (quickjs-ng exports them out of
   line, a call per value the interpreter pops) and `===` / `!==` decide
   objects, symbols, booleans, null and undefined inline. `JSUI_QUICKJS_FLAGS`
-  adds compile flags for QuickJS alone (profile-guided optimization with
-  `-fprofile-instr-generate` / `-fprofile-instr-use=` measured 6-9% less JS
-  time on React-heavy scenarios on an M1 Ultra).
+  adds compile flags for QuickJS alone.
+* **QuickJS PGO.** Release binaries compile QuickJS (and only QuickJS) with
+  profile-guided optimization: 6-9% less JS time on React-heavy scenarios
+  (also ones outside the training set) and 2-3% on light ones on an M1 Ultra
+  with Apple clang; -O2 vs -O3 and frame-pointer flags made no difference.
+  On Linux x86-64 (shared cloud cores, so timing is noisy: medians of 10
+  interleaved suite runs) JS time dropped 2-3% with clang 18 and GCC 13
+  alike, and callgrind counts 3-4% (clang) / 8-9% (GCC) fewer instructions
+  per whole frame on `inventory`, `markers-json-100` and `surfaces-props`
+  (`menu`, with almost no JS, is unchanged).
+  `scripts/pgo-quickjs.sh BUILD_DIR [cmake args]` does both stages in one
+  build directory: it configures `-DJSUI_QUICKJS_PGO=generate`, builds an
+  instrumented jsui-bench and jsui-render, trains on jsui-bench `markers`
+  (100, buffer and JSON), `inventory`, `surfaces-props`,
+  `interactions-wheel`, `list` and `packages/react/bench/commit-bench.jsx`
+  (jsui-render), merges the profile (`llvm-profdata merge`, `xcrun
+  llvm-profdata` with Apple clang; GCC keeps its `.gcda` directory) and
+  reconfigures with `-DJSUI_QUICKJS_PGO=use -DJSUI_QUICKJS_PROFILE=...`.
+  Only QuickJS's four C files change flags, so the real build afterwards
+  reuses every other object and the stage costs an instrumented QuickJS, two
+  tool links and about a minute of training. `cmake/QuickJSPGO.cmake`
+  makes every failure soft: a missing profile, one the compiler cannot read
+  (checked with a test compile; another LLVM's format) or no PGO support
+  (MSVC / clang-cl) is a configure warning and a build without PGO; stale
+  or unprofiled functions are not diagnosed (`-Wno-profile-instr-*`; GCC:
+  `-Wno-missing-profile`, `-Wno-error=coverage-mismatch`,
+  `-fprofile-partial-training`, and `-fprofile-prefix-path` so the
+  `.gcda` names do not depend on the build directory). The script itself
+  falls back to a normal configuration with a warning when training or
+  merging fails (`PGO_STRICT=1` makes that an error). No profile is checked
+  in: profiles are tied to the compiler version and the patched quickjs.c,
+  so they are generated where they are used. Dev and test builds leave
+  `JSUI_QUICKJS_PGO` empty. Which release builds use it: docs/RELEASING.md.
+* **React Compiler** (opt-in: `jsui build|dev --react-compiler`,
+  `packages/cli/src/react-compiler.js`). An esbuild `onLoad` plugin runs
+  `babel-plugin-react-compiler` 1.0.0 (target 19, `react/compiler-runtime`
+  resolved to the singleton React) over the app's own files, not
+  `node_modules` or `@orktes/jsui-react/src`, on up to 4 worker threads. It
+  runs on Babel 7 (`babel-core-7`, an npm alias of `@babel/core` 7): under
+  Babel 8 the compiler skips every function with a defaulted destructured
+  parameter (`function App({ size = 1 })`). Functions it cannot compile
+  (Rules of React violations) are left as written and listed by
+  `--compiler-report` (`build()` returns them as `reactCompiler.skipped`).
+  Instructions per measured frame (callgrind, `--paint none`, 120 frames),
+  uncompiled → compiled:
+
+  | scenario | React renders / frame | Ir / frame |
+  | --- | --- | --- |
+  | `interactions` | 5.1 → 1.3 | 2.61M → 1.23M (−53%) |
+  | `interactions-wheel` | 6.1 → 2.3 | 3.93M → 2.71M (−31%) |
+  | `surfaces-props` | 120 → 60 | 27.1M → 19.8M (−27%) |
+  | `inventory` | 4 → 3 | 31.3M → 31.1M (−0.5%) |
+  | `list`, `menu`, `idle`, `surfaces-same-props`, `spring-wiggle` | same | ±0.3% |
+  | `markers-{json,buffer}-{30,100}` | same | +10-11% |
+
+  The gains come from elements the compiler caches: a parent's re-render
+  hands React the same child elements, so their subtrees bail out. The
+  markers lose because every `React.memo` marker gets new props each frame,
+  so the memo cache is pure overhead, and React 19.3 copies each compiled
+  component's cache on every render (`useMemoCache` without
+  `enableNoCloningMemoCache`). `packages/react/bench/commit-bench.jsx`
+  (500 cells, only `Cell` compiles): an unchanged re-render of plain cells
+  sends 0 instead of 500 bridge calls, a re-render where all cells change
+  takes ~50% longer. It stays off by default for that, for build time (4-25x:
+  the site 0.3 s → 7 s; the compiler needs ~25 ms per KB of source on one
+  thread) and because memoized code can keep a stale value read during
+  render outside props, state and hooks (`Font.isLoaded()`, a mutable
+  object). `useHostBuffer` returns a new view object per version so it
+  memoizes correctly. Bundles grow 2-9%. Compiled and uncompiled bundles
+  render identical pixels for every reference case and bench scenario
+  (`JSUI_REF_REACT_COMPILER=1`, `jsui-bench --dump`).
 
 ## Paint performance
 
@@ -1853,11 +1923,24 @@ the expensive per-pixel work is done once:
   and sub-pixel phase and blitted at whole-pixel offsets afterwards
   (`drawSprite`, 48 MB per document), so static art at a fractional
   position is cached too. While a node keeps moving by sub-pixels or
-  scaling (it changed in this frame and the one before, `PaintMotion`) its
-  sprites are drawn directly instead, as a new sprite every frame would
-  cost more, and the node is repainted from the sprite a frame after it
-  stops (`NodeRecord::approximate`, `Document::markExactRepaint`): static
-  frames and frames at rest paint exactly the pixels of a full repaint.
+  scaling (it changed in this frame and the one before, `PaintMotion`) a
+  sprite per phase would be a new sprite every frame: a gradient moving by sub-pixels (the showcase's drifting glow) is
+  then resampled from its sprite of phase 0 (`resampleMask`, within ~5
+  levels of an exact paint, at its anti-aliased edge), images and scaling
+  content are drawn directly, and the node is repainted from the sprite a
+  frame after it stops (`NodeRecord::approximate`,
+  `Document::markExactRepaint`): static frames and frames at rest paint
+  exactly the pixels of a full repaint.
+* **Blits.** Sprite and shadow-mask blits on a raster target bypass Skia's
+  drawImage (`blitSprite`): an SSE2 src-over of premultiplied 8888 rows
+  over the clip's pixel rects (a region; anti-aliased clips are left to
+  Skia), with transparent and opaque runs skipped or copied. It uses the
+  arithmetic of Skia's 8-bit raster pipeline and is only used after a check
+  at first use that it paints Skia's pixels on this build and CPU
+  (`fastSpriteBlits()`; elsewhere, NEON included, Skia draws). Skia draws
+  such a blit through its generic pipeline at ~20 instructions a pixel,
+  and a game UI repaints its full-screen backdrop and art sprites under
+  whatever animates (~45% of the CPU frame of the interactions showcase).
 * **Shadows.** Blurred shadows and inset shadows are cached masks, blurred
   once per device size, sigma, sub-pixel phase, radii and colour
   (`ShadowCache`) and blitted at whole-pixel offsets; only the ring around
@@ -1887,11 +1970,12 @@ the expensive per-pixel work is done once:
 
 `PaintStats` (`lastPaintStats()`) reports per paint the nodes painted and
 culled, the pixels and rects repainted, sprite draws and renders, shadow
-mask draws and renders (blurs), blitted pixels and, with `setPaintCounting()`, the canvas draw calls, text / image
-draws, layers and clips. `tests/native/render_test.cpp` and `gpu_test.cpp`
-assert on these (incremental frames equal full ones; perf guards on
-pixels repainted, passes, sprite re-renders, shadow blurs while a shadow
-moves, layers).
+mask draws and renders (blurs), blitted pixels and, with
+`setPaintCounting()`, the canvas draw calls, text / image draws, layers and
+clips. `tests/native/render_test.cpp` and `gpu_test.cpp` assert on these
+(incremental frames equal full ones; perf guards on pixels repainted,
+passes, sprite re-renders, also while a gradient moves, shadow blurs while
+a shadow moves, layers).
 
 `tools/jsui-paint-bench` renders bundles headless on a simulated 60 Hz
 clock and times only the paint call, per backend: `cpu`
@@ -1950,7 +2034,9 @@ Point any host at it (`jsui-viewer --dev http://localhost:5173/bundle.js`, or
 * **Hot updates (React Fast Refresh).** `jsui dev` (unless `--no-hmr`) serves
   a module-per-function bundle (`packages/cli/src/hmr.js`): the vendor part
   (node_modules, `@orktes/jsui-react`, assets) bundled once by esbuild, then
-  each app file run through react-refresh's Babel plugin and esbuild's
+  each app file run through React Compiler (with `--react-compiler`; its
+  per-file source hash resets a component's memo cache when the file is
+  hot-updated), react-refresh's Babel plugin and esbuild's
   CommonJS transform, wrapped in `__jsui_hmr.define(id, deps, factory)`, and
   the client (`hmr-runtime.js`). On a change the client fetches
   `/__jsui/hmr?from=<its version>`, a script with the changed modules and

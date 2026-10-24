@@ -679,6 +679,70 @@ TEST(render_incremental_rounded_boxes_cut_anywhere) {
 // sprites) up to rounding, incremental frames match full ones (matchesFull), and
 // later frames reuse the sprites. Perf guards: no sprite re-rendered while
 // only an unrelated probe moves; the folded opacity takes no layer.
+// A gradient that keeps moving by sub-pixels (the showcase's drifting glow)
+// is resampled from its sprite of phase 0 instead of a sprite per frame or a
+// direct draw: no sprite is rendered after the first frames, each frame is
+// within a few levels of the same state painted exactly, and once it stops
+// the next frame repaints it exactly.
+TEST(render_moving_gradient_reuses_its_sprite) {
+  const char* back = R"J({"style":{"position":"absolute","left":0,"top":0,"width":380,"height":240,
+    "backgroundColor":"#101828"}})J";
+  const char* glow = R"J({"style":{"position":"absolute","left":30,"top":20,"width":300,"height":180,"borderRadius":90,
+    "opacity":0.7,"experimental_backgroundImage":"radial-gradient(circle at 50% 50%, rgba(242,195,91,0.6) 0%, rgba(79,140,255,0.3) 45%, rgba(5,7,16,0) 70%)"}})J";
+  auto drift = [](int i) {
+    return "{\"transform\":[{\"translateX\":" + std::to_string(20 * (1 - std::cos(float(i) * 0.15f)) + 0.37f * float(i)) +
+           "},{\"translateY\":" + std::to_string(0.21f * float(i)) + "}]}";
+  };
+  for (float dpr : {1.f, 1.5f}) {
+    Scene s(380, 240, dpr);
+    s.add(back);
+    Node* n = s.add(glow);
+    int dw = s.dw(), dh = s.dh();
+    std::vector<uint32_t> inc(size_t(dw) * dh), full(inc.size());
+    s.doc().layout();
+    s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);
+    int renders = 0, draws = 0, approximate = 0, worst = 0;
+    const int frames = 40;
+    for (int i = 1; i <= frames; i++) {
+      patch(n, drift(i));
+      s.doc().layout();
+      s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);
+      PaintStats st = lastPaintStats(s.doc());
+      if (i > 2) renders += st.spriteRenders;  // the first moving frame: the sprite of phase 0
+      draws += st.spriteDraws;
+      approximate += s.doc().exactRepaintPending();
+      Scene e(380, 240, dpr);  // the same state, painted exactly
+      e.add(back);
+      patch(e.add(glow), drift(i));
+      e.render();
+      worst = std::max(worst, pixelDiff(inc, e.px).max);
+    }
+    std::printf("  dpr %g: %d sprites rendered in %d moving frames (%d sprite draws, %d approximate), "
+                "at most %d levels from exact\n",
+                dpr, renders, frames - 2, draws, approximate, worst);
+    CHECK_EQ(renders, 0);
+    CHECK(draws >= frames);
+    CHECK(approximate >= frames - 2);
+    CHECK(worst <= 6);  // its anti-aliased edge, resampled
+    // At rest: the next frame repaints it exactly.
+    CHECK(s.doc().exactRepaintPending());
+    s.doc().layout();
+    s.rt->renderIncremental(inc.data(), dw, dh, size_t(dw) * 4);
+    CHECK(!s.doc().exactRepaintPending());
+    s.rt->render(full.data(), dw, dh, size_t(dw) * 4);
+    CHECK(matchesFull(pixelDiff(inc, full), inc.size()));
+  }
+}
+
+// Raster sprite blits bypass Skia where they paint its pixels (checked at
+// first use, see blitSprite): on SSE2 that is always.
+TEST(render_sprite_blits_bypass_skia) {
+#if defined(__SSE2__) || defined(_M_X64)
+  CHECK(fastSpriteBlits());
+#endif
+  std::printf("  fast sprite blits: %s\n", fastSpriteBlits() ? "on" : "off");
+}
+
 TEST(render_sprites_match_direct_and_are_reused) {
   for (float dpr : {1.f, 1.5f}) {
     Scene s(320, 240, dpr);
