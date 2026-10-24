@@ -1,14 +1,18 @@
 // FJsuiHost: one JSUI runtime and what its renders share across threads.
 //
 // Threads. The game thread owns the runtime: SJsuiView ticks it, feeds it
-// input, state and buffers. On the GPU path a render job paints it on the
-// Metal RHI's submission side (IMetalDynamicRHI::RHIRunOnQueue, see
-// JsuiHost.cpp), so the game thread must not touch the runtime until that job
-// has run: Runtime() waits for every queued job first. Usually the job has
-// run long before the next frame's first runtime call and the wait is free.
+// input, state and buffers. On the GPU path a render job paints it where the
+// RHI submits its GPU work (Metal / Vulkan / D3D12: the RHI's submission side
+// through RHIRunOnQueue; D3D11: the thread that owns the immediate context;
+// see JsuiHost.cpp and JsuiGpu*.cpp), so the game thread must not touch the
+// runtime until that job has run: Runtime() waits for every queued job
+// first. Usually the job has run long before the next frame's first runtime
+// call and the wait is free.
 #pragma once
 
 #include "CoreMinimal.h"
+#include "RHIResources.h"
+#include "Templates/Function.h"
 
 THIRD_PARTY_INCLUDES_START
 #include "jsui/jsui.h"
@@ -18,6 +22,7 @@ THIRD_PARTY_INCLUDES_END
 #include <condition_variable>
 #include <mutex>
 
+class FRHICommandListImmediate;
 class FTextureRenderTargetResource;
 
 class FJsuiHost : public TSharedFromThis<FJsuiHost, ESPMode::ThreadSafe>
@@ -51,12 +56,33 @@ public:
 
 	// ---------------------------------------------------------- GPU path
 
-	// Whether the GPU path can be used: the plugin has it (macOS) and the RHI
-	// is Metal.
+	// The RHIs with a GPU path: Metal (macOS), Vulkan (Linux, Windows with
+	// -vulkan), D3D12 and D3D11 (Windows).
+	enum class EGpuApi : uint8
+	{
+		None,
+		Metal,
+		Vulkan,
+		D3D12,
+		D3D11
+	};
+	// The running RHI if the plugin has a GPU path for it (built for this
+	// platform), else None.
+	static EGpuApi GpuApi();
+	// Whether the GPU path can be used: GpuApi() is not None and creating the
+	// GPU context has not failed.
 	static bool GpuSupported();
+	// What draws the UI on the GPU path, e.g. "Skia Graphite".
+	static const TCHAR* GpuRendererName();
+	// Whether the GPU context exists. If not, queues its creation (once, as a
+	// job of this host) and returns false: paint on a later tick. Game thread.
+	bool GpuReady();
 	// Whether a render job found the GPU path unusable (no Skia context on
 	// this device, a failed render): switch to the CPU path.
 	bool GpuFailed();
+	// Frees the shared GPU context before the RHI goes away (engine pre-exit;
+	// game thread). Later renders fail and views fall back to the CPU.
+	static void ReleaseGpu();
 	// Queues a render of the runtime into `Target` (a render target resource
 	// of Width x Height device px). bRepaint: the texture does not hold the
 	// last frame (new, or its contents were lost): paint it in full.
@@ -72,8 +98,33 @@ public:
 
 private:
 	FJsuiHost() = default;
-	void RenderJob(void* Device, void* Queue, void* Texture, int32 Width, int32 Height, bool bRepaint);
+
+	// Job bodies, run where the RHI submits GPU work; each ends the job.
+	// Creates the shared context with Create() unless it exists or failed.
+	void CreateJob(TFunctionRef<JsuiGpuContext*()> Create);
+	// Paints the runtime into Target (flags are set here: incremental when
+	// Target.texture still holds this runtime's last frame and !bRepaint).
+	void RenderJob(JsuiGpuTarget Target, bool bRepaint);
 	void FinishJob();
+	void QueueJob();  // counts a job that will end with FinishJob()
+
+	// Per RHI (JsuiGpuMetal.cpp, JsuiGpuVulkan.cpp, JsuiGpuD3D12.cpp,
+	// JsuiGpuD3D11.cpp), on the render thread: queue a CreateJob / a
+	// RenderJob into Texture (Width x Height device px) ordered with the
+	// RHI's own work, leaving Texture in the state Unreal tracks for it.
+	void InitMetal(FRHICommandListImmediate& RHICmdList);
+	void RenderMetal(FRHICommandListImmediate& RHICmdList, FRHITexture* Texture, int32 Width, int32 Height, bool bRepaint);
+	void InitVulkan(FRHICommandListImmediate& RHICmdList);
+	void RenderVulkan(FRHICommandListImmediate& RHICmdList, FRHITexture* Texture, int32 Width, int32 Height, bool bRepaint);
+	void InitD3D12(FRHICommandListImmediate& RHICmdList);
+	void RenderD3D12(FRHICommandListImmediate& RHICmdList, FRHITexture* Texture, int32 Width, int32 Height, bool bRepaint);
+	void InitD3D11(FRHICommandListImmediate& RHICmdList);
+	void RenderD3D11(FRHICommandListImmediate& RHICmdList, FRHITexture* Texture, int32 Width, int32 Height, bool bRepaint);
+	// Per RHI, render thread: runs Job (which frees the shared context) where
+	// the RHI submits its work, after everything recorded so far.
+	static void ReleaseVulkan(FRHICommandListImmediate& RHICmdList, TFunction<void()>&& Job);
+	static void ReleaseD3D12(FRHICommandListImmediate& RHICmdList, TFunction<void()>&& Job);
+	static void ReleaseD3D11(FRHICommandListImmediate& RHICmdList, TFunction<void()>&& Job);
 
 	JsuiRuntime* Rt = nullptr;
 
@@ -89,6 +140,11 @@ private:
 	// Render job state (only the job touches these).
 	void* HeldTexture = nullptr;  // the texture holding this runtime's last frame
 	std::atomic<bool> bGpuFailed{false};
+
+	// Vulkan (render thread only): the image Graphite draws into, copied into
+	// the view's render target (Graphite needs INPUT_ATTACHMENT usage, which
+	// a UTextureRenderTarget2D's image does not have).
+	FTextureRHIRef VulkanTarget;
 
 	// CPU path.
 	TArray<uint8> CpuPixels;

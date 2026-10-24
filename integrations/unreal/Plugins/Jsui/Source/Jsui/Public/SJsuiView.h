@@ -5,11 +5,13 @@
 // runtime once per Slate tick and draws the UI texture with premultiplied
 // alpha.
 //
-// Rendering. On the Metal RHI, Skia Graphite draws the UI straight into a
-// UTextureRenderTarget2D on the RHI's own MTLDevice and command queue,
-// repainting only what changed (JsuiHost.cpp). Elsewhere, or with
-// bForceCpu, the runtime rasterises on the CPU (jsui_render_rgba_incremental)
-// and the changed rectangle is uploaded into a UTexture2D. Either texture is
+// Rendering. On the GPU, by default: Skia draws the UI into a
+// UTextureRenderTarget2D on the RHI's own device and queue, repainting only
+// what changed (JsuiHost.cpp): Graphite on Metal (macOS) and Vulkan (Linux,
+// Windows with -vulkan), Ganesh on D3D12 and D3D11 (Windows). On any other
+// RHI, with bForceCpu, or after the GPU path failed, the runtime rasterises
+// on the CPU (jsui_render_rgba_incremental) and the changed rectangle is
+// uploaded into a UTexture2D. Either texture is
 // premultiplied RGBA holding sRGB-encoded values in a non-sRGB format, drawn
 // with ESlateDrawEffect::PreMultipliedAlpha | NoGamma.
 //
