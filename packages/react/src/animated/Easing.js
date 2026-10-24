@@ -45,6 +45,38 @@ function bezier(x1, y1, x2, y2) {
 
 let easeFn;
 
+// Every function this module returns is pure, and the factories hand out the
+// same function for the same arguments (Easing.inOut(Easing.quad) twice is
+// one function). The native driver samples an easing into a curve per
+// animation start (sampleCurve, NativeAnimatedHelper.js); for these
+// functions the samples are cached by identity, so screens that start the
+// same timing animations on every mount (or loops of sequences, restarted
+// from JS each iteration) sample each curve once.
+const pure = new WeakSet();
+function mark(fn) {
+  pure.add(fn);
+  return fn;
+}
+/** True for functions made by Easing: pure, so their samples can be cached. */
+export function isPureEasing(fn) {
+  return pure.has(fn);
+}
+// One memoized result per argument (an easing function or a number).
+function memo1(make) {
+  const byFn = new WeakMap();
+  const byValue = new Map();
+  return (arg) => {
+    const m = typeof arg === 'function' ? byFn : byValue;
+    let fn = m.get(arg);
+    if (fn === undefined) {
+      fn = mark(make(arg));
+      m.set(arg, fn);
+    }
+    return fn;
+  };
+}
+const bezierCache = new Map();
+
 export const Easing = {
   step0: (n) => (n > 0 ? 1 : 0),
   step1: (n) => (n >= 1 ? 1 : 0),
@@ -55,16 +87,15 @@ export const Easing = {
   },
   quad: (t) => t * t,
   cubic: (t) => t * t * t,
-  poly: (n) => (t) => Math.pow(t, n),
+  poly: memo1((n) => (t) => Math.pow(t, n)),
   sin: (t) => 1 - Math.cos((t * Math.PI) / 2),
   circle: (t) => 1 - Math.sqrt(1 - t * t),
   exp: (t) => Math.pow(2, 10 * (t - 1)),
   elastic(bounciness = 1) {
-    const p = bounciness * Math.PI;
-    return (t) => 1 - Math.pow(Math.cos((t * Math.PI) / 2), 3) * Math.cos(t * p);
+    return elastic(bounciness);
   },
   back(s = 1.70158) {
-    return (t) => t * t * ((s + 1) * t - s);
+    return back(s);
   },
   bounce(t) {
     if (t < 1 / 2.75) return 7.5625 * t * t;
@@ -79,10 +110,30 @@ export const Easing = {
     const t2 = t - 2.625 / 2.75;
     return 7.5625 * t2 * t2 + 0.984375;
   },
-  bezier,
+  bezier(x1, y1, x2, y2) {
+    const key = x1 + ',' + y1 + ',' + x2 + ',' + y2;
+    let fn = bezierCache.get(key);
+    if (fn === undefined) {
+      fn = mark(bezier(x1, y1, x2, y2));
+      bezierCache.set(key, fn);
+    }
+    return fn;
+  },
   in: (easing) => easing,
-  out: (easing) => (t) => 1 - easing(1 - t),
-  inOut: (easing) => (t) => (t < 0.5 ? easing(t * 2) / 2 : 1 - easing((1 - t) * 2) / 2),
+  // The wrappers are pure only around pure easings; others get a fresh,
+  // unmarked function as before.
+  out: (easing) => (pure.has(easing) ? out(easing) : (t) => 1 - easing(1 - t)),
+  inOut: (easing) => (pure.has(easing) ? inOut(easing) : (t) => (t < 0.5 ? easing(t * 2) / 2 : 1 - easing((1 - t) * 2) / 2)),
 };
+
+const elastic = memo1((bounciness) => {
+  const p = bounciness * Math.PI;
+  return (t) => 1 - Math.pow(Math.cos((t * Math.PI) / 2), 3) * Math.cos(t * p);
+});
+const back = memo1((s) => (t) => t * t * ((s + 1) * t - s));
+const out = memo1((easing) => (t) => 1 - easing(1 - t));
+const inOut = memo1((easing) => (t) => (t < 0.5 ? easing(t * 2) / 2 : 1 - easing((1 - t) * 2) / 2));
+
+for (const k of ['step0', 'step1', 'linear', 'ease', 'quad', 'cubic', 'sin', 'circle', 'exp', 'bounce']) mark(Easing[k]);
 
 export default Easing;

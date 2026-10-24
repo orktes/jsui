@@ -2,7 +2,8 @@
 // render time and afterwards applies value changes as direct style patches
 // on the host node (__jsui_native.patchStyle), without re-rendering React.
 
-import { createElement, useCallback, useLayoutEffect, useReducer, useRef } from 'react';
+import { useCallback, useLayoutEffect, useReducer, useRef } from 'react';
+import { jsx } from 'react/jsx-runtime';
 import { flatten } from '../StyleSheet.js';
 import { AnimatedNode } from './nodes.js';
 import {
@@ -12,27 +13,6 @@ import {
   validateTransform,
   eventTypeOfProp,
 } from './NativeAnimatedHelper.js';
-
-function containsAnimated(v, depth) {
-  if (v instanceof AnimatedNode) return true;
-  if (depth > 4 || v === null || typeof v !== 'object') return false;
-  if (Array.isArray(v)) {
-    for (let i = 0; i < v.length; i++) if (containsAnimated(v[i], depth + 1)) return true;
-    return false;
-  }
-  for (const k in v) if (containsAnimated(v[k], depth + 1)) return true;
-  return false;
-}
-
-function collectNodes(v, out, depth) {
-  if (v instanceof AnimatedNode) {
-    if (out.indexOf(v) < 0) out.push(v);
-    return;
-  }
-  if (depth > 4 || v === null || typeof v !== 'object') return;
-  if (Array.isArray(v)) for (let i = 0; i < v.length; i++) collectNodes(v[i], out, depth + 1);
-  else for (const k in v) collectNodes(v[k], out, depth + 1);
-}
 
 /** Replaces Animated nodes with their current values (deep, small objects only). */
 export function resolveAnimated(v, depth = 0) {
@@ -55,6 +35,41 @@ export function resolveAnimated(v, depth = 0) {
     if (out) out[k] = r;
   }
   return out || v;
+}
+
+// The render path's single walk over a prop or style value (it used to be
+// three: contains / collect / resolve): returns `v` with Animated nodes
+// replaced by their values (arrays and plain objects copied on write; other
+// objects searched but kept, as resolveAnimated keeps them), adds each node
+// to `out` once, and sets `found` when it met one.
+let found = false;
+function resolveCollect(v, out, depth, copy) {
+  if (v instanceof AnimatedNode) {
+    found = true;
+    if (out.indexOf(v) < 0) out.push(v);
+    return copy ? v.__getValue() : v;
+  }
+  if (depth > 4 || v === null || typeof v !== 'object') return v;
+  if (Array.isArray(v)) {
+    let res = null;
+    for (let i = 0; i < v.length; i++) {
+      const r = resolveCollect(v[i], out, depth + 1, copy);
+      if (r !== v[i] && !res) res = v.slice(0, i);
+      if (res) res.push(r);
+    }
+    return res || v;
+  }
+  if (copy) {
+    const proto = Object.getPrototypeOf(v);
+    if (proto !== Object.prototype && proto !== null) copy = false;
+  }
+  let res = null;
+  for (const k in v) {
+    const r = resolveCollect(v[k], out, depth + 1, copy);
+    if (r !== v[k] && !res) res = Object.assign({}, v);
+    if (res) res[k] = r;
+  }
+  return res || v;
 }
 
 // One per mounted animated component: the subscriber that Animated nodes
@@ -232,10 +247,11 @@ export function createAnimatedComponent(Component) {
         if (v.__hasListener) next[k] = v;
         continue;
       }
-      if (typeof v === 'object' && v !== null && k !== 'children' && containsAnimated(v, 0)) {
-        collectNodes(v, nodes, 0);
-        next[k] = resolveAnimated(v);
-        propsAnimated = true;
+      if (typeof v === 'object' && v !== null && k !== 'children') {
+        found = false;
+        const r = resolveCollect(v, nodes, 0, true);
+        next[k] = found ? r : v;
+        if (found) propsAnimated = true;
       } else {
         next[k] = v;
       }
@@ -246,11 +262,13 @@ export function createAnimatedComponent(Component) {
       let resolved = null;
       for (const k in style) {
         const v = style[k];
-        if (typeof v === 'object' && v !== null && containsAnimated(v, 0)) {
+        if (typeof v === 'object' && v !== null) {
+          found = false;
+          const r = resolveCollect(v, nodes, 0, true);
+          if (!found) continue;
           keys.push(k);
-          collectNodes(v, nodes, 0);
           if (!resolved) resolved = Object.assign({}, style);
-          resolved[k] = resolveAnimated(v);
+          resolved[k] = r;
         }
       }
       next.style = resolved || props.style;
@@ -278,7 +296,8 @@ export function createAnimatedComponent(Component) {
     });
     useLayoutEffect(() => () => sub.detach(), []);
 
-    return createElement(Component, next);
+    // jsx() keeps `next` as the props (createElement would copy it).
+    return jsx(Component, next);
   }
   const name = typeof Component === 'string' ? Component : Component.displayName || Component.name || 'Component';
   AnimatedComponent.displayName = 'Animated(' + name + ')';

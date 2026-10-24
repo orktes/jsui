@@ -12,30 +12,43 @@ const absoluteFillObject = Object.freeze({ position: 'absolute', left: 0, right:
 export function flatten(style) {
   if (style == null || style === false || style === true || style === '') return undefined;
   if (!Array.isArray(style)) return typeof style === 'object' ? style : undefined;
-  let out;
-  let single;  // avoid copying when only one entry is set
-  let count = 0;
-  const visit = (s) => {
-    if (s == null || s === false || s === true || s === '') return;
+  // Module state instead of a closure per call (saved, in case a style
+  // getter flattens too).
+  const c = flatCount, s1 = flatSingle, o = flatOut;
+  flatCount = 0;
+  flatSingle = flatOut = undefined;
+  flattenArray(style);
+  const result = flatCount === 0 ? undefined : flatCount === 1 ? flatSingle : flatOut;
+  flatCount = c;
+  flatSingle = s1;
+  flatOut = o;
+  return result;
+}
+
+let flatCount = 0;
+let flatSingle;  // avoid copying when only one entry is set
+let flatOut;
+function flattenArray(arr) {
+  for (let i = 0; i < arr.length; i++) {
+    const s = arr[i];
+    if (s == null || s === false || s === true || s === '') continue;
     if (Array.isArray(s)) {
-      for (let i = 0; i < s.length; i++) visit(s[i]);
-      return;
+      flattenArray(s);
+      continue;
     }
-    if (typeof s !== 'object') return;
-    count++;
-    if (count === 1) {
-      single = s;
-      return;
+    if (typeof s !== 'object') continue;
+    flatCount++;
+    if (flatCount === 1) {
+      flatSingle = s;
+      continue;
     }
-    if (count === 2) out = Object.assign({}, single);
+    if (flatCount === 2) flatOut = Object.assign({}, flatSingle);
+    const out = flatOut;
     for (const k in s) {
       const v = s[k];
       if (v !== undefined) out[k] = v;
     }
-  };
-  visit(style);
-  if (count === 0) return undefined;
-  return count === 1 ? single : out;
+  }
 }
 
 /** Structural equality for JSON-like values (styles, sources, ...). */

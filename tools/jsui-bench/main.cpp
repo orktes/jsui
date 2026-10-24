@@ -16,6 +16,8 @@
 //   menu          hover springs; the mouse sweeps over the buttons
 //   inventory     500 slots, one jsui_patch_state per frame
 //   idle          the inventory with no updates (should do no work)
+//   mount         the interactions screen unmounted and mounted again every
+//                 frame (scenarios/mount.jsx): a real app's largest commit
 //   surfaces-*    30 root views (jsui_surface_create) of one bundle: static,
 //                 every surface's props changing every frame, the same props
 //                 pushed every frame, one surface's props changing per frame,
@@ -589,6 +591,8 @@ std::vector<Options> suite(const std::string& dir, const Options& base) {
   // The inventory with nothing changing: an idle frame should cost ~nothing.
   Options& idle = add("idle");
   idle.bundle = dir + "/inventory.js";
+  // The showcase screen mounted from scratch every frame (scenarios/mount.jsx).
+  add("mount");
   for (auto [name, props] : {std::pair{"surfaces-static", Options::SurfaceProps::None},
                              std::pair{"surfaces-props", Options::SurfaceProps::Changing},
                              std::pair{"surfaces-same-props", Options::SurfaceProps::Same},

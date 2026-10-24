@@ -200,7 +200,9 @@ AppRegistry.registerComponent('main', () => App);
   assert.match(r.reactCompiler.skipped.find((s) => s.name === 'Bad').reason, /ref/i);
   assert.ok(r.reactCompiler.functions >= 1, 'Row compiles');
   const code = await readFile(out, 'utf8');
-  assert.match(code, /function Row\(t0\) \{\n\s*const \$ = \(0, import_compiler_runtime\.c\)\(\d+\);/);
+  // (production bundles are syntax-minified: `let $ = ..., {...} = t0, ...`,
+  // and import React's ESM facade: `c` is a direct binding)
+  assert.match(code, /function Row\(t0\) \{\n\s*(?:const|let) \$ = (?:\(0, import_compiler_runtime\.c\)|c\d*)\(\d+\)[;,]/);
   assert.match(code, /function LibLabel\(\{ s \}\) \{\n\s*return/, 'node_modules as written');
   const { nodes, ctx, timers } = runBundle(code);
   await new Promise((res) => setImmediate(res));
