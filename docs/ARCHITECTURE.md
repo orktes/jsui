@@ -2026,6 +2026,13 @@ changed rather than to the tree size:
     the frames before the commit (`Runtime::prepareText`, up to twice the
     budget per tick): the same paragraph build and first layout the measure
     would do, so pixels are unchanged.
+  Tearing down the old page is spread out the same way. The bundled
+  reconciler queues React's per-fiber detach of a deleted subtree
+  (`detachFiberAfterEffects`) and runs it at idle priority in budget-sized
+  slices. Each field it nulls frees what it held, which took 4-8 ms of the
+  frame after a navigation commit. The runtime takes destroyed nodes out of
+  the document at once, but frees them in each tick's spare time
+  (`Runtime::freeDestroyedNodes`, at least 256 per tick).
   Offline tools on simulated time (jsui-render, jsui-record, jsui-bench, the
   CLI's headless runtime) turn the budget off, so a frame's content does not
   depend on the machine's speed.

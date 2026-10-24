@@ -50,8 +50,12 @@ class Document {
 
   Node* createNode(NodeType type);
   Node* get(uint32_t id) const;
-  // Destroys a detached node and its subtree.
+  // Destroys a detached node and its subtree. The nodes leave the document
+  // at once; their memory is released by freeDestroyed().
   void destroyNode(Node* node);
+  // Frees up to `max` destroyed nodes; true while more are waiting.
+  bool freeDestroyed(size_t max);
+  bool hasDestroyed() const { return !graveyard_.empty(); }
   // Destroys everything except the root (used on reload).
   void clear();
 
@@ -162,6 +166,7 @@ class Document {
 
   std::vector<Node*> focusHints_;
   std::unordered_map<uint32_t, std::unique_ptr<Node>> nodes_;
+  std::vector<std::unique_ptr<Node>> graveyard_;  // destroyed, not yet freed
   std::unordered_map<uint32_t, Rect> reportedLayout_;
   uint64_t yogaPass_ = 0;  // the last layout() pass (see afterLayout)
   Node* root_ = nullptr;
