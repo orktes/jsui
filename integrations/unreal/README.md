@@ -173,12 +173,22 @@ details):
   InputAttachmentRead`, created in `CopySrc`). Unreal keeps that image in
   `CopySrc` (`TRANSFER_SRC_OPTIMAL`); Graphite takes it in that layout
   (`UNDEFINED`, a full repaint, when new) and leaves it there. Per render:
-  flush the immediate command list to the GPU (`FlushRHIThread`), queue the
-  job with `IVulkanDynamicRHI::RHIRunOnQueue(Graphics)` (the graphics queue
-  is held during it; Graphite's submission is bracketed by full pipeline
-  barriers), then record `Unknown -> CopyDest`, the copy into the render
-  target and `CopyDest -> SRVMask`: the render target's layout is only ever
-  changed by the RHI. The context gets the RHI's instance, devices, graphics
+  flush the immediate command list (`FlushRHIThread`), queue the job with
+  `IVulkanDynamicRHI::RHIRunOnQueue(Graphics)` (the graphics queue is held
+  during it; Graphite's submission is bracketed by full pipeline barriers),
+  then record `Unknown -> CopyDest`, the copy into the render target and
+  `CopyDest -> SRVMask`: the render target's layout is only ever changed by
+  the RHI. Unlike D3D12, the Vulkan RHI runs the callback while it is still
+  collecting the batch it is in and submits the batch afterwards
+  (`FVulkanQueue::SubmitPayloads`), so Graphite's work can reach the queue
+  before command buffers Unreal recorded earlier. The one earlier write that
+  matters is the RHI's clear of a newly created image, so renders into a new
+  image wait until a marker payload queued after its creation reports its
+  batch submitted (`RHIRunOnQueue` with `bWaitForSubmission`, from a
+  background task); meanwhile the render target keeps what it has, for a
+  frame or two after the view is created or resized. A previous frame's copy
+  out of the image that runs after a render copies the newer frame, in the
+  same layout, behind the render's trailing barrier. The context gets the RHI's instance, devices, graphics
   queue family, API version, `vkGetInstanceProcAddr` and loaded device
   extensions; the RHI does not expose its enabled instance extensions or
   feature chain, so Skia assumes no optional features.
@@ -197,11 +207,12 @@ They were written against the UE 5.8 RHI sources, which confirm:
   SAMPLED` (`VulkanTexture.cpp`). `CopySrc` / `CopyDest` are
   `TRANSFER_SRC_OPTIMAL` / `TRANSFER_DST_OPTIMAL` (`VulkanBarriers.cpp`).
   `RHIRunOnQueue` queues behind the payloads submitted before it
-  (`VulkanSubmission.cpp`).
+  (`VulkanSubmission.cpp`), but its callback may run before they are
+  submitted (`VulkanQueue.cpp`), which the path above allows for; submission
+  events fire after the whole batch is submitted.
 
-Still to check: whether the Vulkan queue submits the payloads batched before
-the callback, as D3D12 does (`FVulkanQueue::SubmitQueuedPayloads`), and that
-the validation layer reports no layout errors. Each render on Vulkan / D3D12
+Still to check: that the validation layer reports no layout or hazard
+errors. Each render on Vulkan / D3D12
 waits for the RHI thread to catch up (`FlushRHIThread`), which costs the
 render thread some parallelism on frames where the UI changed.
 

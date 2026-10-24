@@ -87,6 +87,8 @@ public:
 	// of Width x Height device px). bRepaint: the texture does not hold the
 	// last frame (new, or its contents were lost): paint it in full.
 	void QueueGpuRender(FTextureRenderTargetResource* Target, int32 Width, int32 Height, bool bRepaint);
+	// Whether a job skipped its render and wants another one (clears it).
+	bool TakeGpuRepaint() { return bGpuWantsRepaint.exchange(false); }
 
 	// ---------------------------------------------------------- CPU path
 
@@ -145,6 +147,13 @@ private:
 	// the view's render target (Graphite needs INPUT_ATTACHMENT usage, which
 	// a UTextureRenderTarget2D's image does not have).
 	FTextureRHIRef VulkanTarget;
+	// Set (by a background task) once VulkanTarget's creation is certainly on
+	// the GPU queue (JsuiGpuVulkan.cpp); renders into it wait for that.
+	TSharedPtr<std::atomic<bool>, ESPMode::ThreadSafe> VulkanTargetSubmitted;
+	bool bVulkanTargetFresh = false;  // not rendered into yet
+	// A render job skipped its render (the target was not ready): the view
+	// queues another one even if the UI did not change.
+	std::atomic<bool> bGpuWantsRepaint{false};
 
 	// CPU path.
 	TArray<uint8> CpuPixels;

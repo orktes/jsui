@@ -250,6 +250,7 @@ void SJsuiView::PaintGpu(int32 PixelWidth, int32 PixelHeight)
 		Target->UpdateResourceImmediate(true);
 		bRepaint = true;
 	}
+	if (Host->TakeGpuRepaint()) bRepaint = true;
 	if (!bRepaint && !jsui_needs_redraw(Runtime())) return;
 	Host->QueueGpuRender(Target->GameThread_GetRenderTargetResource(), PixelWidth, PixelHeight, bRepaint);
 	bRepaint = false;

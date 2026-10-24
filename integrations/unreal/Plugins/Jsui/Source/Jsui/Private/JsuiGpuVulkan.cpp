@@ -17,27 +17,48 @@
 // VulkanTexture.cpp: a CopySrc initial state is TRANSFER_SRC_OPTIMAL, after the
 // RHI's initial clear on its upload context, submitted with the command list.)
 //
-// RHIRunOnQueue (VulkanSubmission.cpp) queues a payload on the graphics
-// queue's pending list behind every payload submitted before it; the
-// callback runs when the queue reaches it (FVulkanQueue::SubmitQueuedPayloads).
+// Ordering. RHIRunOnQueue (VulkanSubmission.cpp) queues a payload on the
+// graphics queue's pending list behind every payload submitted before it,
+// but the callback does not come after their vkQueueSubmit:
+// FVulkanQueue::SubmitPayloads (VulkanQueue.cpp) takes every payload that is
+// ready in one batch, runs each one's PreExecute (our callback) while it
+// collects their VkSubmitInfos, and submits the batch at the end (with
+// timeline semaphores; without them each payload is submitted as it goes).
+// So Graphite's work can reach the queue before command buffers Unreal
+// recorded earlier, when both are in the same batch. What that means here:
 //
-// Ordering, per render:
-//  1. the render thread flushes the immediate command list to the GPU
-//     (FlushRHIThread: translated and submitted), so everything recorded
-//     before, including VulkanTarget's initial transition and last frame's
-//     copy out of it, is submitted;
+//  - VulkanTarget's creation (the RHI clears it and moves it to
+//    TRANSFER_SRC_OPTIMAL on its upload context) must be on the queue before
+//    our first render into it, or the clear would wipe that frame (and every
+//    incremental frame after it would build on the wipe). So after creating
+//    it we flush, and a background task waits on a marker payload queued
+//    after the flush (RHIRunOnQueue with bWaitForSubmission): its submission
+//    event fires only after its whole batch was submitted (VulkanQueue.cpp,
+//    the loop after the last Submit), so every payload before it, the
+//    creation included, is then on the queue. Until then the view's render
+//    target keeps what it has (renders are skipped and asked for again).
+//  - A previous frame's copy out of VulkanTarget that is still batched may
+//    run after our render: it then copies the newer frame, which is fine (the
+//    image is in TRANSFER_SRC_OPTIMAL before and after our render, and our
+//    trailing full barrier orders it after Graphite's writes).
+//  - The render target is only touched by commands recorded after the job
+//    (the copy into it), which are queued after it.
+//
+// Per render, once VulkanTarget is on the queue:
+//  1. the render thread flushes the immediate command list (FlushRHIThread);
 //  2. IVulkanDynamicRHI::RHIRunOnQueue(Graphics) runs the job on the RHI's
-//     submission side, after those submissions, with the graphics queue held
-//     (Vulkan queues need external synchronisation). jsui_render_gpu_target
-//     submits a full barrier, Graphite's command buffer and another full
-//     barrier to that queue before it returns;
-//  3. the copy into the render target, recorded on the render thread after
-//     the job was queued, is submitted to the same queue after it, behind the
-//     render's trailing full barrier; this frame's Slate draw comes later still.
+//     submission side with the graphics queue held (Vulkan queues need
+//     external synchronisation). jsui_render_gpu_target submits a full
+//     barrier, Graphite's command buffer and another full barrier to that
+//     queue before it returns;
+//  3. the copy into the render target, recorded after the job was queued, is
+//     submitted after it, behind the render's trailing full barrier; this
+//     frame's Slate draw comes later still.
 #include "JsuiHost.h"
 
 #if JSUI_UE_VULKAN
 
+#include "Async/Async.h"
 #include "IVulkanDynamicRHI.h"
 #include "RHICommandList.h"
 
@@ -88,7 +109,6 @@ void FJsuiHost::InitVulkan(FRHICommandListImmediate& RHICmdList)
 void FJsuiHost::RenderVulkan(FRHICommandListImmediate& RHICmdList, FRHITexture* Texture, int32 Width, int32 Height, bool bRepaint)
 {
 	IVulkanDynamicRHI* Rhi = GetIVulkanDynamicRHI();
-	bool bNew = false;
 	if (!VulkanTarget || VulkanTarget->GetSizeXY() != FIntPoint(Width, Height) || VulkanTarget->GetFormat() != Texture->GetFormat())
 	{
 		const FRHITextureCreateDesc Desc =
@@ -97,7 +117,26 @@ void FJsuiHost::RenderVulkan(FRHICommandListImmediate& RHICmdList, FRHITexture* 
 				          ETextureCreateFlags::InputAttachmentRead)
 				.SetInitialState(ERHIAccess::CopySrc);
 		VulkanTarget = RHICmdList.CreateTexture(Desc);
-		bNew = true;
+		bVulkanTargetFresh = true;
+		// The creation (and the RHI's clear of the image) to the submission
+		// side, then a marker behind it: once the marker's batch has been
+		// submitted, so has the creation.
+		RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThread);
+		TSharedRef<std::atomic<bool>, ESPMode::ThreadSafe> Submitted = MakeShared<std::atomic<bool>, ESPMode::ThreadSafe>(false);
+		VulkanTargetSubmitted = Submitted;
+		AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
+			[Submitted]
+			{
+				GetIVulkanDynamicRHI()->RHIRunOnQueue(EVulkanRHIRunOnQueueType::Graphics, [](VkQueue) {}, true);
+				*Submitted = true;
+			});
+	}
+	if (!VulkanTargetSubmitted || !*VulkanTargetSubmitted)
+	{
+		// Not on the queue yet: render on a later tick.
+		bGpuWantsRepaint = true;
+		FinishJob();
+		return;
 	}
 	const VkImage Image = Rhi->RHIGetVkImage(VulkanTarget);
 	const VkFormat Format = Rhi->RHIGetViewVkFormat(VulkanTarget);
@@ -106,8 +145,13 @@ void FJsuiHost::RenderVulkan(FRHICommandListImmediate& RHICmdList, FRHITexture* 
 		FinishJob();
 		return;
 	}
+	// The first render into a new image discards it (UNDEFINED: a full
+	// repaint); it is in TRANSFER_SRC_OPTIMAL (CopySrc) after the RHI's clear
+	// and after every render.
+	const bool bFresh = bVulkanTargetFresh;
+	bVulkanTargetFresh = false;
 
-	// 1. Everything recorded so far reaches the queue before the job.
+	// 1. Everything recorded so far to the submission side.
 	RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThread);
 
 	// 2. The render, on the submission side with the graphics queue.
@@ -115,7 +159,7 @@ void FJsuiHost::RenderVulkan(FRHICommandListImmediate& RHICmdList, FRHITexture* 
 	FTextureRHIRef Keep = VulkanTarget;  // alive until the job ran
 	Rhi->RHIRunOnQueue(
 		EVulkanRHIRunOnQueueType::Graphics,
-		[Self, Keep, Image, Format, Width, Height, bRepaint, bNew](VkQueue)
+		[Self, Keep, Image, Format, Width, Height, bRepaint, bFresh](VkQueue)
 		{
 			JsuiGpuTarget Target{};
 			Target.texture = (void*)Image;
@@ -123,9 +167,9 @@ void FJsuiHost::RenderVulkan(FRHICommandListImmediate& RHICmdList, FRHITexture* 
 			Target.width = Width;
 			Target.height = Height;
 			Target.usage = kTargetUsage;
-			Target.layout = bNew ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+			Target.layout = bFresh ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 			Target.final_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;  // = ERHIAccess::CopySrc
-			Self->RenderJob(Target, bRepaint || bNew);
+			Self->RenderJob(Target, bRepaint || bFresh);
 		},
 		false);
 
