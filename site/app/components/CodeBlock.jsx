@@ -9,6 +9,8 @@ const KEYWORDS = {
   gd: 'extends func var const if elif else for while return signal class_name and or not in true false null self await pass match',
   sh: 'npx npm node cmake git cd export',
   cpp: 'auto void int int32 int64 float double bool const static struct class enum return if else for while new delete true false nullptr this switch case break continue include define TEXT',
+  rs: 'fn let mut move match if else for while loop return use struct enum impl pub self Self true false Some None Ok Err as ref',
+  go: 'func var const type struct map package import return if else for range switch case break continue defer go nil true false string int bool any',
   cs: 'var void int float double bool string new return if else for foreach while using public private static class struct readonly true false null this switch case break continue out ref',
 };
 

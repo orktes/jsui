@@ -11,6 +11,9 @@
 | [unity](unity/README.md) | Unity 6 package (`com.orktes.jsui`): native plugin over the C API + a `JsuiView` component, with the same example game |
 | [unreal](unreal/README.md) | Unreal Engine 5 plugin: `UJsuiWidget` (UMG) / `SJsuiView` (Slate) over the JSUI shared library, Skia Graphite on the Metal RHI's queue, with the same example game |
 
+Programs in other languages use the C API through [bindings](../bindings/README.md)
+(Rust and Go so far, each with a GPU desktop example app).
+
 ## The engine examples
 
 `raylib`, `sdl3` and `sokol` are small, complete hosts of one shared HUD,

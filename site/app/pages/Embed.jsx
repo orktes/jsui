@@ -139,7 +139,7 @@ export function EmbedPage() {
         <SectionHead
           eyebrow="Embed"
           title="Ship it inside your game."
-          lead="JSUI is a static library with a C API. The same runtime that draws this page runs in a Godot node, in raylib, SDL3, sokol, Unity or Unreal, in your own engine's loop, or on a canvas in the browser. Pick a target."
+          lead="JSUI is a static library with a C API. The same runtime that draws this page runs in a Godot node, in raylib, SDL3, sokol, Unity or Unreal, in a Rust or Go program, in your own engine's loop, or on a canvas in the browser. Pick a target."
         />
       </Reveal>
       <Reveal delay={60}>
@@ -149,6 +149,7 @@ export function EmbedPage() {
           <Pill color={colors.orange}>raylib · SDL3 · sokol examples</Pill>
           <Pill color={colors.blue}>Unity 6 package</Pill>
           <Pill color={colors.purple}>Unreal Engine 5 plugin</Pill>
+          <Pill color={colors.orange}>Rust · Go bindings</Pill>
           <Pill color={colors.purple}>WebAssembly · CPU or WebGL</Pill>
           <Pill color={colors.green}>Live reload over HTTP</Pill>
         </View>

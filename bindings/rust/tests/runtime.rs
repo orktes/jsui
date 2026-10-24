@@ -11,7 +11,14 @@ fn runtime() -> Runtime {
     Runtime::new(Config { width: 640, height: 480, audio_disabled: true, ..Default::default() }).unwrap()
 }
 
+// One test: the runtimes of a process are meant to live on one thread, and
+// the test harness would run separate tests on separate threads.
 #[test]
+fn runtime_round_trips() {
+    state_round_trip();
+    example_ui_runs();
+}
+
 fn state_round_trip() {
     let rt = runtime();
     assert!(rt.set_state("player", r#"{"gold":10}"#));
@@ -22,7 +29,6 @@ fn state_round_trip() {
     assert_eq!(rt.get_state("player"), None);
 }
 
-#[test]
 fn example_ui_runs() {
     let rt = runtime();
     let messages = Rc::new(RefCell::new(Vec::<String>::new()));
