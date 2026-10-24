@@ -21,6 +21,7 @@
 #include "core/node.h"
 #include "core/value.h"
 #include "host_buffers.h"
+#include "host_state.h"
 
 namespace jsui {
 
@@ -35,6 +36,7 @@ class NativeAnimated {
   std::function<Node*(uint32_t)> findView;
   // Frame data read by hostBuffer nodes (the runtime's).
   const HostBuffers* buffers = nullptr;
+  const HostState* state = nullptr;
 
   // ---- graph (tags are chosen by JS) ---------------------------------
   // config.type: value {value, offset} | interpolation {inputRange,
@@ -43,9 +45,17 @@ class NativeAnimated {
   // addition | subtraction | multiplication | division {input: [a, b]} |
   // modulus {input, modulus} | diffclamp {input, min, max} |
   // color {r, g, b, a} | hostBuffer {key, index} (element `index` of a
-  // frame data buffer, 0 when out of range) | transform {transforms:
+  // frame data buffer, 0 when out of range) | clock (the frame clock in
+  // seconds) | hostState {key, path: [...]} (a value inside shared host
+  // state: number, bool as 1 / 0, string for text) | interaction {key, instant, state: hovered|pressed|focused|
+  // focusVisible|disabled} (that state's 0..1 weight on the element with
+  // that `interaction` key, core/state_style.h) | format {input, decimals (-1: shortest), grouping, prefix,
+  // suffix, minDigits} (a number as text) | expression {input: [tags], code: [...], slots} (a stack
+  // program compiled by @orktes/jsui-react's animated/expression.js from an
+  // Animated.derive function; ops below) | transform {transforms:
   // [{property, nodeTag} | {property, value}]} | style {style: {key: tag}} |
-  // props {props: {style: tag}}.
+  // props {props: {style: tag, text: tag}} (text: the content of the
+  // view's first RawText child, for Animated.Text's `text` prop).
   // Returns false (and sets *error) for an unknown type.
   bool createNode(int tag, const Value& config, std::string* error = nullptr);
   void connectNodes(int parent, int child);
@@ -79,17 +89,27 @@ class NativeAnimated {
   // decay {velocity, deceleration, delay}; all take iterations (-1: forever).
   // Starts at `nowMs` (the runtime clock when JS started it). A running
   // animation on the same node is stopped (its end is reported unfinished).
+  // config.type group {root: step} runs a whole composite natively (tag is
+  // ignored): step = {type: leaf, tag, config} | {type: wait, duration} |
+  // {type: sequence | parallel, children: [step], stopTogether} |
+  // {type: loop, child: step, iterations, resets: [[tag, value]]} (the
+  // values set before each iteration, resetBeforeIteration). Steps advance
+  // on the frame they end, like the JS composites' end callbacks; only the
+  // group's own end is reported.
   bool startAnimation(int id, int tag, const Value& config, double nowMs, std::string* error = nullptr);
   // Stops an animation (no end event: the caller reports it). Returns false
   // when it was not running. *lastVelocity: a spring's velocity (units/s),
   // which a spring started next on the same value continues with.
   bool stopAnimation(int id, double* lastVelocity = nullptr);
-  bool animating() const { return !animations_.empty(); }
+  // Running animations, or a clock node something depends on.
+  bool animating() const { return !animations_.empty() || liveClocks() > 0; }
   size_t animationCount() const { return animations_.size(); }
 
   // Buffer `key` has new contents: its hostBuffer nodes are re-evaluated at
   // the next flush (tick).
   void bufferChanged(const std::string& key);
+  // Host state `key` changed: its hostState nodes re-read it.
+  void stateChanged(const std::string& key);
 
   // ---- events (Animated.event with useNativeDriver) ------------------------
   // `eventType` is the native event type ("scroll", ...), `path` the keys
@@ -128,7 +148,20 @@ class NativeAnimated {
  private:
   enum class Type : uint8_t {
     Value, Interpolation, Addition, Subtraction, Multiplication, Division, Modulus, DiffClamp,
-    Color, HostBuffer, Transform, Style, Props
+    Color, HostBuffer, HostState, Clock, Interaction, Expression, Format, Transform, Style, Props
+  };
+  // Expression ops (packages/react/src/animated/expression.js OP).
+  enum class Op : uint8_t {
+    Const = 0, Input = 1, Load = 2, Store = 3,
+    Add = 10, Sub = 11, Mul = 12, Div = 13, Mod = 14, Pow = 15, Neg = 16, Not = 17,
+    Lt = 20, Le = 21, Gt = 22, Ge = 23, Eq = 24, Ne = 25, And = 26, Or = 27, Select = 28,
+    Call = 40,
+  };
+  struct Instr {
+    Op op;
+    uint8_t fn = 0;  // Call: function id
+    uint32_t index = 0;  // Input / Load / Store
+    double k = 0;  // Const
   };
   enum class Extrapolate : uint8_t { Extend, Clamp, Identity };
   enum class OutKind : uint8_t { Number, Color, String };
@@ -165,6 +198,21 @@ class NativeAnimated {
     size_t bufferIndex = 0;
     const HostBuffers::Entry* bufferEntry = nullptr;
     uint64_t bufferGen = 0;
+    // interaction: the element's `interaction` key and the StateSlot read
+    std::string interactionKey;
+    int slot = 0;
+    // format
+    int decimals = -1, minDigits = 0;
+    std::string grouping, prefix, suffix;
+    // props: the text input (0: none)
+    int textTag = 0;
+    int visibleTag = 0;  // props: Visibility's `visible` (0: hidden)
+    // hostState
+    std::vector<std::string> statePath;
+    bool instant = false;  // interaction: the state itself (0 / 1), not its eased weight
+    // expression
+    std::vector<Instr> code;
+    uint32_t slots = 0, stackSize = 0;
     // transform / style
     std::vector<TransformEntry> transforms;
     std::vector<StyleEntry> style;
@@ -186,7 +234,7 @@ class NativeAnimated {
     bool notifyQueued = false; // in dirtyNotify_
   };
   struct Anim {
-    enum class Kind : uint8_t { Frames, Spring, Decay } kind = Kind::Frames;
+    enum class Kind : uint8_t { Frames, Spring, Decay, Wait } kind = Kind::Frames;
     int id = 0, tag = 0;
     double start = 0, delay = 0;
     int iterations = 1, iteration = 0;
@@ -223,6 +271,42 @@ class NativeAnimated {
   // Advances one animation; returns true when it finished (all iterations).
   bool step(Anim& a, double nowMs);
   void stopAnimationsOf(int tag, bool report);
+  bool compileExpression(ANode& n, const Value& config, std::string* error);
+  bool parseAnim(Anim& a, const Value& config, std::string* error);
+  // Composite groups. A leaf's animation has a negative id (leafDone_ holds
+  // what happens when it ends).
+  struct Step {
+    enum class Kind : uint8_t { Leaf, Wait, Sequence, Parallel, Loop } kind = Kind::Leaf;
+    int tag = 0;
+    Value config;
+    double wait = 0;
+    bool stopTogether = true;
+    int iterations = 1;
+    std::vector<std::pair<int, double>> resets;
+    std::vector<Step> children;
+  };
+  struct Group {
+    int id = 0;
+    Step root;
+    std::vector<int> leaves;  // running leaf animation ids
+    bool done = false;
+    int zeroRounds = 0;       // iterations ended without time passing (runaway guard)
+    double lastRound = -1;
+  };
+  bool parseStep(Step& s, const Value& c, std::string* error);
+  using Done = std::function<void(bool finished, double nowMs)>;
+  void runStep(Group& g, const Step& s, double nowMs, Done done);
+  void endGroup(int id, bool finished);
+  void leafEnded(int leafId, bool finished, double nowMs);
+  Group* group(int id);
+  void purgeGroups();
+  std::vector<std::unique_ptr<Group>> groups_;
+  std::unordered_map<int, Done> leafDone_;
+  std::unordered_map<int, int> leafGroup_;  // leaf id -> group id
+  int nextLeafId_ = -1;
+  double runExpression(ANode& n);
+  void formatNumber(ANode& n, double v);
+  size_t liveClocks() const;
 
   Document& doc_;
   std::unordered_map<int, ANode> nodes_;
@@ -243,6 +327,12 @@ class NativeAnimated {
   std::vector<int> dirtyValues_;  // nodes changed since the last flush (ANode::queued)
   std::vector<int> dirtyNotify_;  // values changed natively (listener updates; ANode::notifyQueued)
   std::unordered_map<std::string, std::vector<int>> bufferNodes_;  // key -> hostBuffer node tags
+  std::unordered_map<std::string, std::vector<int>> stateNodes_;   // key -> hostState node tags
+  std::vector<int> clockNodes_;  // tags of the Clock nodes
+  std::vector<int> interactionNodes_;  // tags of the Interaction nodes
+  double interactionWeight(const ANode& n) const;
+  double clockMs_ = 0;           // the last tick's time
+  std::vector<double> exprStack_, exprSlots_;  // runExpression scratch
   uint64_t gen_ = 1;
 };
 

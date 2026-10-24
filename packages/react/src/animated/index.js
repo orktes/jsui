@@ -10,6 +10,12 @@ import {
   AnimatedColor,
   AnimatedInterpolation,
   AnimatedHostBuffer,
+  AnimatedDerived,
+  AnimatedExpression,
+  AnimatedFormat,
+  AnimatedClock,
+  Interaction,
+  AnimatedHostState,
   add,
   subtract,
   multiply,
@@ -112,6 +118,28 @@ export function useHostBufferValue(key, index) {
   return useMemo(() => new AnimatedHostBuffer(key, index), [key, index]);
 }
 
+/**
+ * A stable Animated.interaction() for this component: pass it as the
+ * `interaction` prop of the element to follow, read `.hovered` / `.pressed`
+ * / `.focused` / `.focusVisible` / `.disabled` (native 0..1 values).
+ */
+export function useInteraction() {
+  return useMemo(() => new Interaction(), []);
+}
+
+/**
+ * A native-bound value inside shared host state: useHostStateBind('player',
+ * 'health.current'). The runtime updates the views that use it the moment
+ * the host calls jsui_set_state / jsui_patch_state, without a JS tick or a
+ * re-render; works in styles, interpolate, Animated.derive, Animated.Text
+ * (strings too) and Visibility. JS still sees the state through
+ * useHostState on its tick.
+ */
+export function useHostStateBind(key, path) {
+  const p = Array.isArray(path) ? path.join('.') : path;
+  return useMemo(() => new AnimatedHostState(key, p), [key, p]);
+}
+
 // Called once by the package index with the base components (avoids an
 // import cycle between Animated and the components that use it).
 export function makeAnimated(base) {
@@ -149,6 +177,17 @@ export const Animated = {
   modulo,
   diffClamp,
   hostBuffer: (key, index) => new AnimatedHostBuffer(key, index),
+  // Values computed from other values by a pure-math function, evaluated
+  // natively every frame (expression.js); meta is added by jsui build.
+  derive: (inputs, fn, meta) => new AnimatedDerived(inputs, fn, meta),
+  expr: (fn, meta) => new AnimatedExpression(fn, meta),
+  clock: () => new AnimatedClock(),
+  // An element's hover / press / focus state as native 0..1 values.
+  interaction: () => new Interaction(),
+  // A value inside shared host state, updated natively when the host sets it.
+  hostState: (key, path) => new AnimatedHostState(key, path),
+  // A number as text for Animated.Text's `text` prop (set natively, no re-render).
+  format: (node, options) => new AnimatedFormat(node, options),
   createAnimatedComponent,
   attachNativeEvent,
   forkEvent: (event1, listener) => {

@@ -41,6 +41,12 @@ for (const mode of ['production', 'development']) {
     await build({ entry: path.join(here, 'e2e', 'surfaces.jsx'), outfile: surfacesFile, mode, format });
     const hostBuffersFile = path.join(dir, 'host_buffers.js');
     await build({ entry: path.join(here, 'e2e', 'host_buffers.jsx'), outfile: hostBuffersFile, mode, format });
+    const deriveFile = path.join(dir, 'derive.js');
+    await build({ entry: path.join(here, 'e2e', 'derive.jsx'), outfile: deriveFile, mode, format });
+    const stateStylesFile = path.join(dir, 'state_styles.js');
+    await build({ entry: path.join(here, 'e2e', 'state-styles.jsx'), outfile: stateStylesFile, mode, format });
+    const groupVisibilityFile = path.join(dir, 'group_visibility.js');
+    await build({ entry: path.join(here, 'e2e', 'group-visibility.jsx'), outfile: groupVisibilityFile, mode, format });
     const tests = [
       'react_e2e',
       'react_interactions_e2e',
@@ -49,6 +55,9 @@ for (const mode of ['production', 'development']) {
       'react_images_e2e',
       'react_surfaces_e2e',
       'react_host_buffers_e2e',
+      'react_derive_e2e',
+      'react_state_styles_e2e',
+      'react_group_visibility_e2e',
     ];
     const { stdout, stderr } = await promisify(execFile)(binary, tests, {
       env: Object.assign({}, process.env, {
@@ -60,6 +69,9 @@ for (const mode of ['production', 'development']) {
         JSUI_REACT_IMAGES_BUNDLE: imagesFile,
         JSUI_REACT_SURFACES_BUNDLE: surfacesFile,
         JSUI_REACT_HOST_BUFFERS_BUNDLE: hostBuffersFile,
+        JSUI_REACT_DERIVE_BUNDLE: deriveFile,
+        JSUI_REACT_STATE_STYLES_BUNDLE: stateStylesFile,
+        JSUI_REACT_GROUP_VISIBILITY_BUNDLE: groupVisibilityFile,
       }),
       cwd: repo,
     }).catch((e) => {
@@ -75,6 +87,9 @@ for (const mode of ['production', 'development']) {
     assert.match(stdout, /PASS react_surfaces_e2e_host_picks_main/);
     assert.match(stdout, /PASS react_surfaces_e2e_error_isolation/);
     assert.match(stdout, /PASS react_host_buffers_e2e/);
+    assert.match(stdout, /PASS react_derive_e2e/);
+    assert.match(stdout, /PASS react_state_styles_e2e/);
+    assert.match(stdout, /PASS react_group_visibility_e2e/);
     if (process.env.JSUI_E2E_VERBOSE) console.log(stdout);
     assert.doesNotMatch(stdout, /skipped/);
     // The WebAssembly runtime compiled the bytecode: a native runtime built

@@ -702,7 +702,10 @@ bool InputManager::pointerDown(PointerState& p, uint32_t hitId, int button) {
     p.jsOwns = false;
     p.owned = false;
   }
-  if (button == 0) p.downId = hitId;
+  if (button == 0) {
+    p.downId = hitId;
+    pressFlash_.push_back(hitId);
+  }
   Node* target = alive(p.captureId) ? alive(p.captureId) : alive(hitId);
   if (button == 0) selectedOnFocusId_ = 0;  // set again if this press focuses a selectTextOnFocus input
   lastFlags_ = 0;
@@ -1182,6 +1185,17 @@ bool InputManager::keyAction(const char* keyName, const char* code, bool down, b
   mods_ = mods;
   keyboardModality_ = true;
   std::string k = keyName ? keyName : "";
+  if (!down && keyPressId_ && padPress_ < 0 && k == keyPressKey_) keyPressId_ = 0;
+  // State styles: an activation key on a focused element presses it until
+  // the key goes up, whether JS handles the key (Pressable does) or native
+  // activates it.
+  if (down && !repeat && (k == "Enter" || k == " " || k == "Spacebar") && focusedUsable() &&
+      focused_->type() != NodeType::TextInput) {
+    keyPressId_ = focused_->id();
+    keyPressKey_ = k;
+    padPress_ = -1;
+    pressFlash_.push_back(keyPressId_);
+  }
   Value::Object ev = baseEvent(down ? "keydown" : "keyup", focused_);
   ev["key"] = Value(k);
   ev["code"] = Value(code ? code : "");
@@ -1267,6 +1281,11 @@ bool InputManager::gamepadButtonAction(int pad, int button, bool down, float val
     if (down) ps->buttons |= 1u << button;
     else ps->buttons &= ~(1u << button);
   }
+  if (button == 0 && down && !wasDown && focusedUsable()) {  // pressed (state styles) until A goes up
+    keyPressId_ = focused_->id();
+    padPress_ = pad;
+    pressFlash_.push_back(keyPressId_);
+  }
   Value::Object ev = baseEvent("gamepadbutton", focused_);
   ev["gamepad"] = Value(pad);
   ev["buttonIndex"] = Value(button);
@@ -1276,6 +1295,10 @@ bool InputManager::gamepadButtonAction(int pad, int button, bool down, float val
   bool handled = dispatch(std::move(ev));
   bool edge = down != wasDown || !ps;
   if (!edge) return handled;
+  if (button == 0 && !down && padPress_ == pad) {
+    keyPressId_ = 0;
+    padPress_ = -1;
+  }
   // D-pad: 12 up, 13 down, 14 left, 15 right.
   int dir = button == 12 ? 0 : button == 13 ? 1 : button == 14 ? 2 : button == 15 ? 3 : -1;
   if (dir >= 0) {

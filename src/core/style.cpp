@@ -14,6 +14,8 @@
 #include <cstring>
 #include <string_view>
 
+#include "core/number.h"
+
 namespace jsui {
 
 const char* const kBlendModeNames[] = {"normal",     "multiply",   "screen",      "overlay",    "darken",
@@ -99,12 +101,11 @@ bool splitFunction(std::string_view s, std::string_view* name, std::string_view*
 bool parseNumberUnit(std::string_view s, float* num, std::string* unit) {
   s = trim(s);
   if (s.empty()) return false;
-  std::string tmp(s);
-  char* end = nullptr;
-  double d = std::strtod(tmp.c_str(), &end);
-  if (end == tmp.c_str() || !std::isfinite(d)) return false;
+  double d = 0;
+  const char* end = parseNumber(s.data(), s.data() + s.size(), &d);
+  if (!end || !std::isfinite(d)) return false;
   *num = float(d);
-  *unit = lower(trim(std::string_view(end)));
+  *unit = lower(trim(s.substr(size_t(end - s.data()))));
   return true;
 }
 

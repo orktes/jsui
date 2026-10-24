@@ -13,6 +13,21 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Size: one section per function / data item, and the linkers drop what
+# nothing reaches (--gc-sections; -dead_strip on Apple, where sections split
+# per symbol anyway; MSVC's release /OPT:REF) in every library and program:
+# the shared library, the engine plugins (most of godot-cpp's bindings, the
+# Skia an engine never calls) and the tools. Skia's own archives are compiled
+# this way too.
+if(MSVC)
+  add_compile_options(/Gy /Gw)
+elseif(APPLE)
+  add_link_options(LINKER:-dead_strip)
+elseif(NOT EMSCRIPTEN AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  add_compile_options(-ffunction-sections -fdata-sections)
+  add_link_options(LINKER:--gc-sections)
+endif()
+
 option(JSUI_BUILD_TOOLS "Build jsui-render and the viewer" ON)
 option(JSUI_BUILD_TESTS "Build native tests" ON)
 option(JSUI_BUILD_VIEWER "Build tools/jsui-viewer (downloads and builds SDL2)" ON)
@@ -336,6 +351,10 @@ if(JSUI_BUILD_TOOLS AND NOT EMSCRIPTEN)
   # Showcase navigation: frame times and GC pauses over page changes.
   add_executable(jsui-nav tools/jsui-bench/nav.cpp)
   target_link_libraries(jsui-nav PRIVATE jsui)
+  if(APPLE)
+    target_sources(jsui-nav PRIVATE tools/jsui-paint-bench/metal_helper.mm)
+    target_link_libraries(jsui-nav PRIVATE "-framework Metal" "-framework Foundation")
+  endif()
   jsui_copy_icu_data(jsui-nav)
   # Paint benchmark: CPU raster (incremental / full) and headless Ganesh GL.
   add_executable(jsui-paint-bench tools/jsui-paint-bench/main.cpp)

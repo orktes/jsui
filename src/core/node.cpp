@@ -4,6 +4,7 @@
 #include <optional>
 
 #include "core/document.h"
+#include "core/state_style.h"
 #include "render/image_node.h"
 #include "render/lottie.h"
 #include "render/shader_view.h"
@@ -157,6 +158,54 @@ struct HitShape {
 // Paint-only updates (opacity, transform, colors, shadows, ...) - e.g. every
 // frame of an Animated transform - therefore never re-run Yoga.
 void Node::setProps(const Value& props) {
+  if (stateStyles || wantsStateStyles(props)) {
+    // React's style is the base; props_ gets it with the state overlays.
+    if (stateStyles && yoga_ && stateStyles->raw.equals(props)) {
+      if (doc_) {
+        doc_->perf.counters.setProps++;
+        doc_->perf.counters.setPropsSkipped++;
+      }
+      return;
+    }
+    if (!wantsStateStyles(props)) {
+      stateStyles.reset();
+      applyProps(props);
+      return;
+    }
+    if (!stateStyles) {
+      stateStyles = std::make_unique<StateStyles>();
+      if (doc_) doc_->stateNodes.push_back(id_);
+    }
+    parseStateStyles(props, stateStyles.get());
+    if (doc_ && !stateStyles->interaction.empty()) doc_->interactionNodes[stateStyles->interaction] = id_;
+    Value eff = props;
+    Value style = blendStateStyle(*stateStyles);
+    if (style.isNull()) eff.mutableObject().erase("style");
+    else eff.mutableObject().insert_or_assign("style", std::move(style));
+    applyProps(eff);
+    return;
+  }
+  applyProps(props);
+}
+
+void Node::setHidden(bool hidden) {
+  StateStyles* s = stateStyles.get();
+  if (!s || s->hidden == hidden) return;
+  s->hidden = hidden;
+  bool t[kStateSlots];
+  std::copy(s->target, s->target + kStateSlots, t);
+  t[kHidden] = hidden;
+  bool moving = false;
+  if (stepStateWeights(*s, t, doc_ ? doc_->now : 0, &moving)) applyStateStyles();
+  if (moving && doc_) doc_->statesKick = true;
+}
+
+bool Node::applyStateStyles() {
+  if (!stateStyles || !stateStyles->hasOverlays()) return false;
+  return patchStyle(blendStateKeys(*stateStyles));
+}
+
+void Node::applyProps(const Value& props) {
   // React re-renders often send identical props: nothing to do (and nothing
   // to repaint).
   if (doc_) {
@@ -277,7 +326,7 @@ bool Node::patchStyle(const Value::Object& partial) {
       else style.insert_or_assign(k, v);
     }
     props.insert_or_assign(kStyleKey, Value(std::move(style)));
-    setProps(Value(std::move(props)));
+    applyProps(Value(std::move(props)));  // not setProps: state styles keep React's props as their base
     return true;
   }
   doc_->perf.counters.setProps++;

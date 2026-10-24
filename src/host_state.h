@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -38,6 +39,11 @@ class HostState {
   // Current JSON text of `key` (serialized lazily after patches), or nullptr.
   const std::string* json(const std::string& key);
   std::vector<std::string> keys() const;
+  // The parsed value of `key`, or nullptr (valid until the next change).
+  const Json* value(const std::string& key) const;
+  // Called after every change of a key, by the embedder or by JS (native
+  // Animated host-state bindings follow it).
+  std::function<void(const std::string&)> onChange;
 
   // The merge patches that took `key` from version `since` to its current
   // version, oldest first, or false when they are not all known (the key

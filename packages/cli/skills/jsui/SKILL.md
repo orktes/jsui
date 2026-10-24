@@ -38,13 +38,24 @@ Packages: `@orktes/jsui-cli` (bundler, dev server, headless tools, this skill),
    style functions), and give each screen an initial focus
    (`hasTVPreferredFocus` or `autoFocus`). Modals trap focus; B / Escape calls
    `onRequestClose`.
-6. **Animate with `Animated` and `useNativeDriver: true`** for transforms,
-   opacity and colors (no JS per frame). Layout keys (`width`, `top`, ...)
-   can't use the native driver: animate a transform instead, or use
-   `LayoutAnimation`.
+6. **Animate with `Animated` and `useNativeDriver: true`** (no JS per
+   frame), composites (`sequence` / `parallel` / `stagger` / `loop`) too.
+   Layout keys (`width`, `top`, ...) work on the native driver but relayout
+   every frame: prefer a transform when it does the job. Hover / press /
+   focus feedback is `hoveredStyle` / `pressedStyle` / `focusVisibleStyle`
+   (+ `transition`, `group` / `groupHoveredStyle` for children), not
+   `style={({pressed}) => ...}` or `onHoverIn` → `setState`.
 7. **Per-frame game data never goes through React state.** Use frame-data
    buffers (`useHostBufferValue` / `Animated.hostBuffer`) for positions and
    bars; use shared state (`useHostState`) for things that change now and then.
+   Values computed from them (clamped to the screen, faded by distance,
+   conditional offsets) are `Animated.derive(inputs, fn)` expressions, which
+   the runtime evaluates natively every frame: never `addListener` →
+   compute → `setValue`/`setState`. Fields of shared state shown as
+   they change (health, ammo) bind natively with `useHostStateBind`;
+   things that appear with data or hover use `<Visibility visible={node}>`
+   and `useGroupState()`. See
+   [references/native-first.md](references/native-first.md).
 8. **Give important elements a `testID`** so you (and tests) can find, click
    and check them with `jsui inspect` / `jsui run`.
 9. **Always look at what you built.** With `jsui dev` running and a runtime
@@ -219,6 +230,7 @@ Read the reference that matches the task:
 | --- | --- |
 | Components, props, styles, images, fonts (loading, weights, fallbacks, variable fonts), what's not supported | [references/components-and-styles.md](references/components-and-styles.md) |
 | Focus, gamepad, keyboard, pointer, scrolling, modals, input pass-through | [references/input-and-focus.md](references/input-and-focus.md) |
+| Native-first patterns: keep JS off the frame (`Animated.derive`, `Animated.clock`, host-buffer values, state styles `hoveredStyle` / `pressedStyle` / group styles, `useInteraction`, `useGroupState`, `Visibility`, hover popouts, `useHostStateBind`, what to use instead of state) | [references/native-first.md](references/native-first.md) |
 | `Animated` (native driver), springs, `LayoutAnimation`, performance | [references/animation-and-performance.md](references/animation-and-performance.md) |
 | Game data: shared state, calls, messages, per-frame buffers, several root views | [references/game-data.md](references/game-data.md) |
 | Host textures (video, render targets), LottieView, ShaderView / SkSL | [references/media-and-effects.md](references/media-and-effects.md) |
