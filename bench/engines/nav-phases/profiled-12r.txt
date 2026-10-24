@@ -1,0 +1,35 @@
+backend graphite (+gpu wait), 2560x1600 px
+frames 19200  p50 0.99  p95 3.95  p99 9.16  max 25.94 ms
+frames over 16.7 ms: 28
+
+phase       total ms   mean   p95    slowest-5% mean
+js            2987.3  0.156  0.552    2.242
+commit         401.4  0.021  0.022    0.383
+animated       367.8  0.019  0.058    0.035
+style          220.8  0.012  0.014    0.162
+layout         362.5  0.019  0.088    0.236
+input            9.3  0.000  0.001    0.002
+paint         7224.7  0.376  1.333    2.303
+submit        1680.2  0.088  0.250    0.225
+other          633.0  0.033  0.006    0.616
+gpu wait     12957.0  0.675  1.614    1.483
+counters: 18508 paragraph builds, 18413 text measures, 1817 layout passes, 38 pipeline compiles, 13 image decodes
+
+route          transition p95 / max     steady p95 / max
+/screens           8.54 /  25.94         2.15 /   5.62
+/motion            8.97 /  13.37         1.37 /   7.76
+/interactions      8.37 /  22.73         3.02 /   4.47
+/input             9.72 /  17.11         1.44 /   3.81
+/playground       13.42 /  24.03         1.98 /  12.79
+/                 12.72 /  16.04         3.33 /   9.97
+/screens           8.54 /  25.94         2.15 /   5.62
+/motion            8.97 /  13.37         1.37 /   7.76
+
+slowest frames (ms): route+frame  total = js commit anim style layout input paint submit other gpu | gc decode | para meas layouts bridge pipes
+/screens+1    25.94 =  5.79  1.32  0.00  0.32   2.02  0.00  13.96  0.22  0.01  2.30 |  0.00  0.00 | 70 121 1 913 0
+/screens+1    24.11 =  5.51  1.49  0.00  0.22   2.27  0.00  11.47  0.18  0.01  2.96 |  0.00  0.00 | 61 121 1 717 0
+/playground+4    24.03 =  4.81  1.04  0.01  0.01   0.72  0.00   0.86  0.15 15.31  1.13 | 15.29  0.00 | 2 158 1 58 0
+/playground+4    23.84 =  5.12  1.09  0.01  0.10   1.56  0.00   0.57  0.17 14.46  0.77 | 14.46  0.00 | 18 158 1 253 0
+/screens+1    23.78 =  5.14  1.56  0.00  0.18   2.11  0.00  11.22  0.20  0.01  3.35 |  0.00  0.00 | 41 121 1 543 0
+
+gc: 14 collections, 151.8 ms total, worst frame's gc 15.41 ms

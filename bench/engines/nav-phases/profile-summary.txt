@@ -1,0 +1,48 @@
+main thread samples: 19147
+top self:
+  9483  49.5%  __psynch_cvwait  (in libsystem_kernel.dylib)
+  1326   6.9%  JS_CallInternal  (in jsui-nav)
+   328   1.7%  _platform_memmove  (in libsystem_platform.dylib)
+   293   1.5%  SkMaskBlurFilter::blur(SkMask const&, SkMaskBuilder*) const  (in jsui-nav)
+   222   1.2%  <deduplicated_symbol>  (in jsui-nav)
+   204   1.1%  neon::blit_row_color32(unsigned int*, int, unsigned int)  (in jsui-nav)
+   184   1.0%  neon::blit_mask_d32_a8(unsigned int*, unsigned long, unsigned char const*, unsigned long, unsigned int, int, int)  (in jsui-nav)
+   131   0.7%  sktext::gpu::TextBlob::Key::operator==(sktext::gpu::TextBlob::Key const&) const  (in jsui-nav)
+   125   0.7%  _xzm_free  (in libsystem_malloc.dylib)
+    93   0.5%  jsui::(anonymous namespace)::paintContent(jsui::Node*, SkCanvas*, jsui::(anonymous namespace)::Ctx&, SkPoint, float, float)  (in jsui-nav)
+    93   0.5%  _platform_memcmp  (in libsystem_platform.dylib)
+    92   0.5%  SkScalerContext_Mac::generateImage(SkGlyph const&, void*)  (in jsui-nav)
+    88   0.5%  _platform_memset  (in libsystem_platform.dylib)
+    75   0.4%  (anonymous namespace)::can_use_direct(SkMatrix const&, SkMatrix const&)  (in jsui-nav)
+    74   0.4%  js_strict_eq2  (in jsui-nav)
+    71   0.4%  jsui::(anonymous namespace)::updateRecords(jsui::Node*, SkMatrix const&, SkMatrix const&, SkIRect const&, unsigned int, SkRegion*, std::vect
+    70   0.4%  mach_continuous_time  (in libsystem_kernel.dylib)
+    65   0.3%  mach_msg2_trap  (in libsystem_kernel.dylib)
+    65   0.3%  __bzero  (in libsystem_platform.dylib)
+    64   0.3%  gc_collect  (in jsui-nav)
+    61   0.3%  skgpu::RectanizerSkyline::addRect(int, int, SkIPoint16*)  (in jsui-nav)
+    61   0.3%  AGX::RenderContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::CommandEncoding>::encodeAndEmitRenderState(AGX::G1
+    60   0.3%  jsui::NativeAnimated::flush()  (in jsui-nav)
+    57   0.3%  _xzm_xzone_malloc_tiny  (in libsystem_malloc.dylib)
+    55   0.3%  neon::rect_memset32(unsigned int*, unsigned int, int, unsigned long, int)  (in jsui-nav)
+    53   0.3%  CGSColorMaskCopyARGB8888  (in CoreGraphics)
+    53   0.3%  iokit_user_client_trap  (in IOKit)
+    52   0.3%  kevent_id  (in libsystem_kernel.dylib)
+    49   0.3%  jsui::(anonymous namespace)::updateRecords(jsui::Node*, SkMatrix const&, SkMatrix const&, SkIRect const&, unsigned int, SkRegion*, std::vect
+    48   0.3%  SkStrike::digestFor(skglyph::ActionType, SkPackedGlyphID)  (in jsui-nav)
+    48   0.3%  js_free_rt  (in jsui-nav)
+    44   0.2%  sktext::GlyphRunBuilder::blobToGlyphRunList(SkTextBlob const&, SkPoint)  (in jsui-nav)
+non-waiting samples: 9664
+inclusive buckets (outermost match, % of main-thread samples):
+  2435  12.7%  QuickJS (JS_CallInternal)
+  3385  17.7%  jsui tick (Runtime::tick)
+  6229  32.5%  jsui paint (jsui_render_gpu_target / painter)
+   357   1.9%  Graphite submit/flush (Recorder snap, insertRecording, submit)
+  4112  21.5%  Skia/Graphite (any skgpu::graphite)
+  2240  11.7%  Text: SkParagraph / shaping
+  1693   8.8%  Text: glyph rasterization (SkScalerContext / strikes)
+   279   1.5%  Yoga
+   122   0.6%  GC (gc_collect / JS_RunGC)
+  9554  49.9%  GPU wait (waitUntilCompleted / checkForFinishedWork)
+   891   4.7%  Metal driver (AGX / IOGPU)
+   352   1.8%  mask blur (SkMaskBlurFilter)
