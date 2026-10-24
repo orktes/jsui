@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "jsui/jsui.h"
@@ -283,6 +284,11 @@ struct D3D12 {
       auto* m = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
       if (FAILED(q->GetMessage(i, m, &len))) continue;
       if (m->Severity > D3D12_MESSAGE_SEVERITY_ERROR) continue;
+      // Skia's GrD3DDescriptorHeap asks every heap for its GPU start, also
+      // the CPU-only ones (it only uses the result for shader-visible heaps).
+      if (std::string_view(m->pDescription, m->DescriptionByteLength).find("GetGPUDescriptorHandleForHeapStart") !=
+          std::string_view::npos)
+        continue;
       errors++;
       std::printf("  D3D12 debug layer: %.*s\n", int(m->DescriptionByteLength), m->pDescription);
     }
@@ -369,6 +375,7 @@ TEST(d3d12_ganesh_matches_cpu) {
   JsuiGpuContext* gpu = jsui_gpu_create_d3d12(d.device.Get(), d.queue.Get());
   CHECK(gpu != nullptr);
   if (!gpu) return;
+  int layout = D3D12_RESOURCE_STATE_COMMON;  // the target's state, across both passes
   for (int pass = 0; pass < 2; pass++) {
     const bool incremental = pass == 0;
     const char* what = incremental ? "incremental" : "retained";
@@ -377,7 +384,6 @@ TEST(d3d12_ganesh_matches_cpu) {
     JsuiRuntime* g = makeRuntime(W, H);
     JsuiRuntime* c = makeRuntime(W, H);
     std::vector<uint32_t> cpu(size_t(W) * H);
-    int layout = D3D12_RESOURCE_STATE_COMMON;
     int smallFrames = 0;
     for (int frame = 0; frame < 8; frame++) {
       const double now = frame * 16.0 + 1;

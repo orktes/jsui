@@ -140,6 +140,10 @@ GrBackendTexture wrapResource(ID3D12Resource* res, int w, int h, DXGI_FORMAT for
   info.fResourceState = state;
   info.fFormat = format;
   info.fSampleCount = 1;
+  // The resource's own (0 for single-sampled); the default is
+  // DXGI_STANDARD_MULTISAMPLE_QUALITY_PATTERN, which then goes into Skia's
+  // pipelines and mismatches the render target view.
+  info.fSampleQualityPattern = res->GetDesc().SampleDesc.Quality;
   info.fLevelCount = levels ? levels : 1;
   return GrBackendTextures::MakeD3D(w, h, info);
 }
