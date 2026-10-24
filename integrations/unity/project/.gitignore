@@ -10,3 +10,5 @@
 # Copied by BuildExample.Prepare from integrations/shared/ui/dist
 /Assets/StreamingAssets/
 /Assets/StreamingAssets.meta
+/.vscode/
+*.slnx
