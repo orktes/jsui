@@ -14,3 +14,8 @@ npx esbuild bench/engines/react-commit.jsx --bundle --format=iife --target=es201
   --alias:react=./node_modules/react --alias:react-reconciler=./node_modules/react-reconciler \
   --outfile=bench/engines/out/react-commit.js --log-level=warning \
   --banner:js="$BANNER" --footer:js="$FOOTER"
+npx esbuild bench/engines/gc-bench.jsx --bundle --format=iife --target=es2017 \
+  --define:process.env.NODE_ENV='"production"' --jsx=automatic \
+  --alias:react=./node_modules/react --alias:react-reconciler=./node_modules/react-reconciler \
+  --outfile=bench/engines/out/gc-bench.js --log-level=warning \
+  --banner:js="$BANNER" --footer:js="$FOOTER"

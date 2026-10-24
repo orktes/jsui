@@ -1,0 +1,40 @@
+{
+ "Hermes .hbc": {
+  "speed": {
+   "init": 0.0,
+   "mount 500 views": 1.45,
+   "update plain (none)": 1.2,
+   "update plain (tenth)": 1.21,
+   "update plain (all)": 1.2,
+   "update memo (none)": 0.68,
+   "update memo (tenth)": 0.84,
+   "update memo (all)": 1.38,
+   "total": 710.0
+  },
+  "start_init": 8.477125084027648,
+  "start_init_min": 8.26237490400672,
+  "start_trivial": 7.672874955460429,
+  "rss_full": 35.015625,
+  "rss_init": 8.9375,
+  "rss_trivial": 8.484375
+ },
+ "Hermes .hbc + JIT (-Xjit=on)": {
+  "speed": {
+   "init": 0.0,
+   "mount 500 views": 0.95,
+   "update plain (none)": 0.6,
+   "update plain (tenth)": 0.6,
+   "update plain (all)": 0.6,
+   "update memo (none)": 0.39,
+   "update memo (tenth)": 0.47,
+   "update memo (all)": 0.73,
+   "total": 379.0
+  },
+  "start_init": 8.643083041533828,
+  "start_init_min": 8.717291988432407,
+  "start_trivial": 8.38462496176362,
+  "rss_full": 37.484375,
+  "rss_init": 9.09375,
+  "rss_trivial": 8.5625
+ }
+}

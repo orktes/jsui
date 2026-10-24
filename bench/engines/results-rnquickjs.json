@@ -1,0 +1,154 @@
+{
+ "QuickJS-ng (JSUI patched)": {
+  "speed": {
+   "init": 0.164,
+   "mount 500 views": 3.685,
+   "update plain (none)": 2.613,
+   "update plain (tenth)": 2.657,
+   "update plain (all)": 2.644,
+   "update memo (none)": 1.391,
+   "update memo (tenth)": 1.723,
+   "update memo (all)": 2.988,
+   "total": 1545.5
+  },
+  "start_init": 39.96487497352064,
+  "start_init_min": 32.753540901467204,
+  "start_trivial": 4.611042095348239,
+  "rss_full": 13.265625,
+  "rss_init": 8.15625,
+  "rss_trivial": 2.46875
+ },
+ "QuickJS-ng bytecode exe (qjs -c)": {
+  "speed": {
+   "init": 0.158,
+   "mount 500 views": 3.641,
+   "update plain (none)": 2.636,
+   "update plain (tenth)": 2.653,
+   "update plain (all)": 2.648,
+   "update memo (none)": 1.389,
+   "update memo (tenth)": 1.723,
+   "update memo (all)": 2.968,
+   "total": 1548.9
+  },
+  "start_init": 6.19745790027082,
+  "start_init_min": 6.050459109246731,
+  "start_trivial": 4.636208061128855,
+  "rss_full": 6.796875,
+  "rss_init": 3.484375,
+  "rss_trivial": 2.40625
+ },
+ "QuickJS-ng (stock v0.17.0)": {
+  "speed": {
+   "init": 0.17,
+   "mount 500 views": 3.716,
+   "update plain (none)": 2.694,
+   "update plain (tenth)": 2.721,
+   "update plain (all)": 2.718,
+   "update memo (none)": 1.433,
+   "update memo (tenth)": 1.773,
+   "update memo (all)": 3.065,
+   "total": 1588.8
+  },
+  "start_init": 39.705083006992936,
+  "start_init_min": 32.53895789384842,
+  "start_trivial": 4.68345801346004,
+  "rss_full": 11.171875,
+  "rss_init": 8.84375,
+  "rss_trivial": 2.53125
+ },
+ "QuickJS-ng df836d1 (rnq base, unpatched)": {
+  "speed": {
+   "init": 0.161,
+   "mount 500 views": 3.804,
+   "update plain (none)": 2.722,
+   "update plain (tenth)": 2.756,
+   "update plain (all)": 2.755,
+   "update memo (none)": 1.45,
+   "update memo (tenth)": 1.786,
+   "update memo (all)": 3.095,
+   "total": 1606.6
+  },
+  "start_init": 40.923332795500755,
+  "start_init_min": 33.267208840698004,
+  "start_trivial": 4.7224159352481365,
+  "rss_full": 13.296875,
+  "rss_init": 8.140625,
+  "rss_trivial": 2.5
+ },
+ "QuickJS-ng rnq (react-native-quickjs c8102d4)": {
+  "speed": {
+   "init": 0.141,
+   "mount 500 views": 2.932,
+   "update plain (none)": 2.398,
+   "update plain (tenth)": 2.422,
+   "update plain (all)": 2.417,
+   "update memo (none)": 1.241,
+   "update memo (tenth)": 1.528,
+   "update memo (all)": 2.683,
+   "total": 1383.0
+  },
+  "start_init": 42.35087498091161,
+  "start_init_min": 34.239042084664106,
+  "start_trivial": 4.710291977971792,
+  "rss_full": 13.453125,
+  "rss_init": 10.046875,
+  "rss_trivial": 2.640625
+ },
+ "QuickJS-ng rnq + JSUI patches": {
+  "speed": {
+   "init": 0.153,
+   "mount 500 views": 2.847,
+   "update plain (none)": 2.349,
+   "update plain (tenth)": 2.358,
+   "update plain (all)": 2.342,
+   "update memo (none)": 1.214,
+   "update memo (tenth)": 1.489,
+   "update memo (all)": 2.637,
+   "total": 1357.0
+  },
+  "start_init": 41.71645804308355,
+  "start_init_min": 34.212667029350996,
+  "start_trivial": 4.4682498555630445,
+  "rss_full": 13.453125,
+  "rss_init": 8.203125,
+  "rss_trivial": 2.625
+ },
+ "QuickJS-ng rnq17 + JSUI patches (v0.17.0 port)": {
+  "speed": {
+   "init": 0.152,
+   "mount 500 views": 2.829,
+   "update plain (none)": 2.335,
+   "update plain (tenth)": 2.349,
+   "update plain (all)": 2.343,
+   "update memo (none)": 1.212,
+   "update memo (tenth)": 1.498,
+   "update memo (all)": 2.646,
+   "total": 1349.9
+  },
+  "start_init": 41.8033751193434,
+  "start_init_min": 33.931625075638294,
+  "start_trivial": 4.557041916996241,
+  "rss_full": 13.453125,
+  "rss_init": 8.234375,
+  "rss_trivial": 2.609375
+ },
+ "QuickJS-ng rnq17 + JSUI bytecode exe (qjs -c)": {
+  "speed": {
+   "init": 0.148,
+   "mount 500 views": 2.832,
+   "update plain (none)": 2.352,
+   "update plain (tenth)": 2.341,
+   "update plain (all)": 2.335,
+   "update memo (none)": 1.218,
+   "update memo (tenth)": 1.516,
+   "update memo (all)": 2.646,
+   "total": 1358.3
+  },
+  "start_init": 6.690958049148321,
+  "start_init_min": 6.824999814853072,
+  "start_trivial": 4.832125036045909,
+  "rss_full": 7.28125,
+  "rss_init": 3.71875,
+  "rss_trivial": 2.515625
+ }
+}
