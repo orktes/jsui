@@ -23,6 +23,7 @@
 namespace jsui {
 
 class Runtime;
+class Inspector;
 
 struct JsEngine::Impl {
   Runtime& rt;
@@ -102,6 +103,10 @@ struct JsEngine::Impl {
   };
   std::unordered_map<std::string, BufferView> bufferViews;
   void releaseBuffer(const std::string& key);
+
+  // The runtime's debugger once it is attached to this context (null in
+  // builds without JSUI_DEBUGGER).
+  std::shared_ptr<Inspector> inspector;
 
   // Cached atoms for hot callbacks.
   JSAtom atomDispatch = 0, atomHostMessage = 0, atomOnLayout = 0;

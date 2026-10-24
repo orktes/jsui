@@ -2471,6 +2471,15 @@ the shared session").
   update clears it with `devError(null)` and retries what failed. A render
   error unmounts the root as usual; the fix mounts it again. `module.hot`
   offers `accept()`, `dispose(cb)`, `data`, `decline()` and `invalidate()`.
+* **JS debugger.** Dev-mode runtimes built with `JSUI_DEBUGGER` (the native
+  default) debug from Chrome DevTools and VS Code through the dev server:
+  `X-Jsui-Inspect: 1` on the bundle makes the runtime attach a CDP agent
+  (`third_party/quickjs-cdp`, on the engine's debug traps) to each JS
+  context before the bundle is parsed, and tunnel CDP over HTTP long-polls
+  to `/__jsui/inspect/*` on threads of its own (`src/js/inspector.cpp`), so
+  it answers while JS is paused. `jsui dev` lists the runtimes in
+  `/json/list` and relays each frontend's WebSocket. See
+  [DEBUGGING.md](DEBUGGING.md).
 * **Reload** tears down the JS context, the Document, in-flight loads and the
   image cache, then reloads the bundle URL. The last good frame (recorded as
   an `SkPicture` before teardown) stays on screen until the new bundle renders,

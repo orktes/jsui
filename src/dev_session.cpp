@@ -109,6 +109,8 @@ void DevSession::reset() {
   pushing_ = false;
 }
 
+std::string DevSession::displayName() const { return name.empty() ? std::string("JSUI (") + platformName() + ")" : name; }
+
 Value::Object DevSession::info() const {
   Value::Object o;
   Document& d = rt_.doc;

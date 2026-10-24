@@ -154,23 +154,30 @@ R"JSUI((function (host) {
   const counts = new Map();
   const timers = new Map();
   const emit = (level, text) => host.log(level, indent ? indent + text.replace(/\n/g, '\n' + indent) : text);
+  // Dev builds with the JS debugger: the arguments themselves go to DevTools.
+  const cdp = host.consoleApi;
   const console = {
-    log: (...a) => emit(INFO, format(a)),
-    info: (...a) => emit(INFO, format(a)),
-    debug: (...a) => emit(DEBUG, format(a)),
-    warn: (...a) => emit(WARN, format(a)),
-    error: (...a) => emit(ERROR, format(a)),
+    log: (...a) => { if (cdp) cdp('log', a); emit(INFO, format(a)); },
+    info: (...a) => { if (cdp) cdp('info', a); emit(INFO, format(a)); },
+    debug: (...a) => { if (cdp) cdp('debug', a); emit(DEBUG, format(a)); },
+    warn: (...a) => { if (cdp) cdp('warning', a); emit(WARN, format(a)); },
+    error: (...a) => { if (cdp) cdp('error', a); emit(ERROR, format(a)); },
     trace: (...a) => {
+      if (cdp) cdp('trace', a);
       const st = (new Error().stack || '').split('\n').slice(1).join('\n');
       emit(INFO, 'Trace' + (a.length ? ': ' + format(a) : '') + '\n' + st);
     },
-    dir: (v) => emit(INFO, inspect(v, 4, [])),
-    dirxml: (...a) => emit(INFO, format(a)),
-    table: (v) => emit(INFO, inspect(v, 3, [])),
-    assert: (cond, ...a) => { if (!cond) emit(ERROR, 'Assertion failed' + (a.length ? ': ' + format(a) : '')); },
-    group: (...a) => { if (a.length) emit(INFO, format(a)); indent += '  '; },
-    groupCollapsed: (...a) => { if (a.length) emit(INFO, format(a)); indent += '  '; },
-    groupEnd: () => { indent = indent.slice(2); },
+    dir: (v) => { if (cdp) cdp('dir', [v]); emit(INFO, inspect(v, 4, [])); },
+    dirxml: (...a) => { if (cdp) cdp('dirxml', a); emit(INFO, format(a)); },
+    table: (v) => { if (cdp) cdp('table', [v]); emit(INFO, inspect(v, 3, [])); },
+    assert: (cond, ...a) => {
+      if (cond) return;
+      if (cdp) cdp('assert', a);
+      emit(ERROR, 'Assertion failed' + (a.length ? ': ' + format(a) : ''));
+    },
+    group: (...a) => { if (cdp) cdp('startGroup', a); if (a.length) emit(INFO, format(a)); indent += '  '; },
+    groupCollapsed: (...a) => { if (cdp) cdp('startGroupCollapsed', a); if (a.length) emit(INFO, format(a)); indent += '  '; },
+    groupEnd: () => { if (cdp) cdp('endGroup', []); indent = indent.slice(2); },
     count: (label = 'default') => { const n = (counts.get(label) || 0) + 1; counts.set(label, n); emit(INFO, label + ': ' + n); },
     countReset: (label = 'default') => { counts.delete(label); },
     time: (label = 'default') => { timers.set(label, performance.now()); },

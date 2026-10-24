@@ -156,9 +156,10 @@ export async function compileInProcess(source, file, o = {}) {
     }]],
     compact: false,
     retainLines: false,
-    sourceMaps: o.sourcemap ? 'inline' : false,
+    sourceMaps: o.sourcemap ? 'inline' : o.map ? true : false,
+    ...(o.map && !o.sourcemap ? { sourceFileName: file } : {}),
   });
-  return { code: r.code, functions, skipped };
+  return { code: r.code, map: o.map && !o.sourcemap ? r.map || null : null, functions, skipped };
 }
 
 // --- worker pool ----------------------------------------------------------
@@ -208,12 +209,14 @@ const results = new Map();  // file + options -> { hash, promise } (jsui dev reb
  * @param {boolean} [o.hmr]  reset a component's memo cache when its file is
  *   hot-updated (the compiler adds a source hash check)
  * @param {boolean} [o.sourcemap]  append an inline source map
- * @returns {Promise<{code: string, functions: number, skipped: {name: string|null, where: string, line: number|null, reason: string}[]}>}
+ * @param {boolean} [o.map]  return the source map as `map` (an object; sources
+ *   are the absolute path of `file`) instead
+ * @returns {Promise<{code: string, map: object|null, functions: number, skipped: {name: string|null, where: string, line: number|null, reason: string}[]}>}
  *   rejects on syntax Babel does not know
  */
 export function compileSource(source, file, o = {}) {
-  const opts = { hmr: !!o.hmr, sourcemap: !!o.sourcemap };
-  const key = `${file}\0${opts.hmr}\0${opts.sourcemap}`;
+  const opts = { hmr: !!o.hmr, sourcemap: !!o.sourcemap, map: !!o.map && !o.sourcemap };
+  const key = `${file}\0${opts.hmr}\0${opts.sourcemap}\0${opts.map}`;
   const hash = createHash('sha1').update(source).digest('hex');
   const hit = results.get(key);
   if (hit && hit.hash === hash) return hit.promise;
@@ -248,7 +251,9 @@ export function reactCompilerPlugin(o) {
         const source = await readFile(args.path, 'utf8');
         let hit;
         try {
-          hit = await compileSource(source, args.path, { hmr: o.hmr, sourcemap: o.sourcemap && !o.hmr });
+          // With hmr, hmr.js compiles the same files and asks for their maps
+          // (the same options share one compile).
+          hit = await compileSource(source, args.path, { hmr: o.hmr, sourcemap: o.sourcemap && !o.hmr, map: o.hmr && o.sourcemap });
         } catch (e) {
           // Syntax Babel does not know: esbuild loads the file as written
           // (and reports real syntax errors itself).

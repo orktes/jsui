@@ -1,10 +1,11 @@
-// `jsui dev <entry> [--port 5173] [--host 127.0.0.1] [--no-hmr] [--react-compiler]`
+// `jsui dev <entry> [--port 5173] [--host 127.0.0.1] [--no-hmr] [--no-inspect] [--react-compiler]`
 //
 // Rebuilds on change and serves (contract with the runtime's dev mode):
 //   GET /bundle.js            last good bundle (build errors keep it served).
 //                             With HMR (the default) it is the module-per-
 //                             function dev bundle of hmr.js.
-//   GET /bundle.js.map        its source map (without HMR)
+//   GET /bundle.js.map        its source map (sources are file:// URLs of
+//                             the files on disk, with sourcesContent)
 //   GET /assets/*             emitted images / fonts
 //   GET /__jsui/version       plain-text opaque token, changes on every
 //                             successful rebuild. `?since=<token>` long-polls:
@@ -24,6 +25,10 @@
 //                             `headless`, one more runtime runs in this process.
 //   /web/*                    the WASM web host (the repo's web/ or the
 //                             installed @orktes/jsui-web)
+//   /json, /json/list, /json/version, /__jsui/inspect/*
+//                             the JS debugger relay (inspect.js; off with
+//                             inspect: false): DevTools / VS Code attach to
+//                             the runtimes' CDP agents through it.
 // Anything else is served from the entry's directory (for fetch('./data.json')).
 
 import * as esbuild from 'esbuild';
@@ -35,9 +40,12 @@ import { formatErrors } from './build.js';
 import { createHmr } from './hmr.js';
 import { REACT_COMPILER_DEFAULT } from './react-compiler.js';
 import { createShared } from './shared.js';
+import { createInspector } from './inspect.js';
+import { prepareMap, concatMaps } from './sourcemap.js';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
+const CLI_VERSION = require('../package.json').version;
 
 const TYPES = {
   '.js': 'text/javascript; charset=utf-8',
@@ -91,12 +99,12 @@ function safeJoin(root, rel) {
  * scale, fps, component, props, state, js}). `waitMs`: how long agent commands
  * wait for a runtime to join the session.
  */
-export async function dev({ entry, port = 5173, host = '127.0.0.1', log = console.log, minify = false, hmr = true, reactCompiler = REACT_COMPILER_DEFAULT, headless = null, waitMs }) {
+export async function dev({ entry, port = 5173, host = '127.0.0.1', log = console.log, minify = false, hmr = true, inspect = true, reactCompiler = REACT_COMPILER_DEFAULT, headless = null, waitMs }) {
   const absEntry = path.resolve(entry);
   const entryDir = path.dirname(absEntry);
   const webDir = findWebHost(entryDir) || findWebHost(process.cwd()) || webPackageDir();
   const state = { bundle: null, map: null, assets: new Map(), version: '0', error: '', builds: 0, failures: 0 };
-  const hot = hmr ? createHmr({ entry: absEntry, mode: 'development', assets: state.assets, reactCompiler, log }) : null;
+  const hot = hmr ? createHmr({ entry: absEntry, mode: 'development', assets: state.assets, reactCompiler, sourcemap: true, log }) : null;
   // The token runtimes poll with hmr=1: a failed build changes it too.
   const hotToken = () => (hot && state.error ? `${state.version}!${state.failures}` : state.version);
   const waiters = new Set();
@@ -126,7 +134,9 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
         let bundle = null;
         let map = null;
         for (const f of result.outputFiles || []) {
-          if (f.path.endsWith('.map')) map = Buffer.from(f.contents);
+          // esbuild's sources are relative to the outfile (.jsui-dev/), which
+          // the map's URL (/bundle.js.map) is not: make them file:// URLs.
+          if (f.path.endsWith('.map')) map = hot ? null : Buffer.from(JSON.stringify(concatMaps([{ line: 0, map: prepareMap(f.text, path.dirname(outfile)) }], 'bundle.js')));
           else if (f.path.endsWith('.js')) bundle = Buffer.from(f.contents);
         }
         if (hot) {
@@ -154,18 +164,27 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
   await ctx.rebuild().catch(() => {});  // errors are reported by onEnd
   await ctx.watch();
 
-  // Runtimes join the shared session only when the server offers one.
-  const offer = { 'X-Jsui-Session': '1', 'Access-Control-Expose-Headers': 'X-Jsui-Version, X-Jsui-Session' };
+  // Runtimes join the shared session only when the server offers one, and
+  // their debugger agent connects only when it sees X-Jsui-Inspect.
+  const offer = inspect
+    ? { 'X-Jsui-Session': '1', 'X-Jsui-Inspect': '1', 'Access-Control-Expose-Headers': 'X-Jsui-Version, X-Jsui-Session, X-Jsui-Inspect' }
+    : { 'X-Jsui-Session': '1', 'Access-Control-Expose-Headers': 'X-Jsui-Version, X-Jsui-Session' };
   const send = (res, status, type, body, extra) => {
     res.writeHead(status, Object.assign({ 'Content-Type': type, 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' }, extra));
     res.end(body);
   };
 
   let sharedView = null;
+  let origin = `http://127.0.0.1:${port}`;  // set once listening
+  // Before listening: a runtime that finds no relay (404) stops trying.
+  const inspector = inspect ? createInspector({ origin: () => origin, hosts: [host], version: CLI_VERSION, log }) : null;
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
     if (sharedView && sharedView.handle(req, res, url)) return undefined;
+    if (inspector && inspector.handle(req, res, url)) return undefined;
     const p = decodeURIComponent(url.pathname);
+    // With --no-inspect (inspector null) the debugger's routes are unknown.
+    if (p.startsWith('/__jsui/inspect/')) return send(res, 404, 'text/plain', 'not found (jsui dev --no-inspect)');
     if (req.method === 'OPTIONS') return send(res, 204, 'text/plain', '', { 'Access-Control-Allow-Methods': 'GET', 'Access-Control-Allow-Headers': '*' });
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'text/plain', 'method not allowed');
     if (p === '/bundle.js') {
@@ -174,7 +193,10 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
       // that landed between loading the bundle and its first poll.
       return send(res, 200, TYPES['.js'], state.bundle, { 'X-Jsui-Version': state.version, ...offer });
     }
-    if (p === '/bundle.js.map') return state.map ? send(res, 200, TYPES['.map'], state.map) : send(res, 404, 'text/plain', 'no map');
+    if (p === '/bundle.js.map') {
+      const map = hot ? hot.sourceMap() : state.map;
+      return map ? send(res, 200, TYPES['.map'], map) : send(res, 404, 'text/plain', 'no map');
+    }
     if (p === '/__jsui/version') {
       const token = url.searchParams.get('hmr') === '1' ? hotToken : () => state.version;
       const since = url.searchParams.get('since');
@@ -198,7 +220,8 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
     }
     if (p === '/__jsui/hmr') {
       if (!hot) return send(res, 200, TYPES['.js'], '__jsui_hmr.reload("hot updates are off (jsui dev --no-hmr)");\n');
-      return send(res, 200, TYPES['.js'], hot.update(url.searchParams.get('from') || '', state.error));
+      // The runtime names the update script after the version (DevTools lists it).
+      return send(res, 200, TYPES['.js'], hot.update(url.searchParams.get('from') || '', state.error), { 'X-Jsui-Version': state.version, 'Access-Control-Expose-Headers': 'X-Jsui-Version' });
     }
     if (p === '/__jsui/error') return send(res, 200, 'text/plain; charset=utf-8', state.error);
     if (p.startsWith('/assets/')) {
@@ -227,6 +250,10 @@ ${state.error ? `<pre style="color:#f88">${state.error.replace(/[<&]/g, (c) => (
     }
     return send(res, 404, 'text/plain', 'not found');
   });
+  server.on('upgrade', (req, socket, head) => {
+    if (inspector && inspector.upgrade(req, socket, head)) return;
+    socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+  });
 
   await new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -236,7 +263,7 @@ ${state.error ? `<pre style="color:#f88">${state.error.replace(/[<&]/g, (c) => (
   log(`[jsui] dev server: http://${host}:${actualPort}/bundle.js  (version endpoint /__jsui/version)`);
   // The runtimes fetch the bundle (and hot updates) from this server.
   const local = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host.includes(':') ? `[${host}]` : host;
-  const origin = `http://${local}:${actualPort}`;
+  origin = `http://${local}:${actualPort}`;
   try {
     sharedView = await createShared({
       ...(headless || {}),
@@ -251,16 +278,28 @@ ${state.error ? `<pre style="color:#f88">${state.error.replace(/[<&]/g, (c) => (
     });
   } catch (e) {
     await ctx.dispose();
+    if (inspector) inspector.close();
     await new Promise((r) => server.close(r));
     throw e;
   }
   log(`[jsui] shared session: ${origin}/shared  (agents: jsui run --attach ${origin} steps.json)`);
+  if (inspect) {
+    const at = `${local}:${actualPort}`;
+    // resolveSourceMapLocations: null lets js-debug use maps served over
+    // http (its default only allows maps under the workspace folder).
+    const address = local.replace(/^\[|\]$/g, '');
+    log(`[jsui] debugger: chrome://inspect -> Configure... -> add ${at}; VS Code launch.json: {"type":"node","request":"attach","name":"JSUI","address":"${address}","port":${actualPort},"resolveSourceMapLocations":null}  (off: --no-inspect)`);
+  }
   return {
     port: actualPort,
     state,
     shared: sharedView,
+    get inspector() {
+      return inspector;
+    },
     async close() {
       notify();
+      if (inspector) inspector.close();
       if (sharedView) await sharedView.close();
       await ctx.dispose();
       await new Promise((r) => server.close(r));

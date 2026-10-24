@@ -59,6 +59,10 @@ class DevSession {
   // Joined, and not running a command: the host's input is the person's.
   bool reporting() const { return joined_ && !injecting_; }
   bool joined() const { return joined_; }
+  // This runtime's id in the session (the debugger's target id too).
+  const std::string& id() const { return id_; }
+  // The host's name for it, or the platform's ("macOS", ...).
+  std::string displayName() const;
 
   // What happened in this runtime; dropped unless the session is joined.
   void event(Value::Object ev);
