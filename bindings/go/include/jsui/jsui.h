@@ -696,6 +696,13 @@ typedef struct JsuiPerf {
     unsigned long long text_measures;     /* text measured for layout */
     unsigned long long layout_passes;
     unsigned long long bridge_calls;      /* React -> native mutation calls */
+    /* JS garbage collection (cycle collections; QuickJS frees everything
+       else by reference counting as it goes). Always measured; the time is
+       also inside the phase that ran it. */
+    unsigned long long gc_collections;
+    unsigned long long gc_full_collections; /* ... that scanned the whole heap */
+    double gc_us;
+    double gc_max_us;                     /* the longest pause */
 } JsuiPerf;
 
 /* Turns the per-phase timing on (non-zero) or off. Off by default. */

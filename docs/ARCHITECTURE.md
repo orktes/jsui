@@ -2171,7 +2171,33 @@ names.
   Layout and allocator effects move such numbers by about ±1%, so compare
   several scenarios before trusting a small change. Pixels are identical
   (reference suite and `jsui-bench --dump` on every scenario).
-* **QuickJS.** `cmake/Deps.cmake` compiles a patched copy of quickjs.c:
+* **QuickJS engine patches.** `cmake/Deps.cmake` applies two patch series
+  (`git apply`, in file name order) to a copy of the QuickJS-ng sources in
+  the build tree. `third_party/quickjs-rnq` is react-native-quickjs's engine
+  work (MIT; rebased from their quickjs-ng base onto v0.17.0, what each patch
+  does: `UPSTREAM-README.md` there): inline caches for property reads and
+  stores, object literal shape templates, fused opcodes for prop-diff code,
+  dense arrays with holes, string caches, faster JSON and RegExp, deferred
+  GC and the debugger interface. On an M1 Ultra they take 8-24% off the JS
+  time of every jsui-bench scenario (mount 24%, React commits about 11%) for
+  about 100 KB more code (56 KB gzipped), with the same memory.
+  `third_party/quickjs-jsui` holds JSUI's own, on top of those:
+  * *Generational cycle collection.* QuickJS frees by reference counting
+    and collects cycles with a stop-the-world pass over every GC object
+    (about 1 ms per MB of heap), which landed 15-30 ms pauses in the middle
+    of navigation frames. With the patch, collections that come due while
+    JS runs are deferred (react-native-quickjs's 0002), and a young
+    collection scans only the objects allocated since the last one, the
+    oldest first, in slices sized to about 2 ms; survivors move to an old
+    list that acts as roots. `Runtime::tick` runs them at the end of a tick
+    (`JsEngine::collectIdle`): a slice on a light tick, the whole young
+    generation after 3 heavy ones. Old garbage (an unmounted screen) needs
+    a full collection: it comes due when the heap left after collections
+    grew by a quarter since the last full one and runs when the runtime is
+    idle (nothing to animate or repaint), else on a light tick after 10
+    ticks, at the latest after 30 (and in the engine at 2x). `jsui_get_perf`
+    reports collections and pauses (`gc_*`).
+* **QuickJS.** On top of the patch series, `cmake/Deps.cmake` patches quickjs.c further:
   `JS_FreeValue` / `JS_DupValue` are inlined (quickjs-ng exports them out of
   line, a call per value the interpreter pops) and `===` / `!==` decide
   objects, symbols, booleans, null, undefined, mismatched types and string
@@ -2183,15 +2209,11 @@ names.
   `JS_GetOwnPropertyNames` on non-exotic objects), `for-in` (the iterator
   keeps its key table instead of building a dictionary object, and skips
   prototypes with no enumerable string keys without listing them),
-  `define-field` (object literal fields go straight to `add_property`) and
-  `shape-transitions` (adding a property named in the code, by an object
-  literal or `obj.name = v`, keeps the old shape as the parent of the new
-  one up to 32 properties, so literals and constructors built the same way
-  share one hashed shape chain instead of each owning a private shape;
-  computed keys keep upstream's in-place shape update, so maps used as
-  dictionaries do not grow memory). Together they take 5-11% of the
-  instructions out of the React scenarios in `jsui-bench`, for 3 KB of
-  code; none changes the bytecode. `JSUI_QUICKJS_FLAGS`
+  and `define-field` (object literal fields go straight to
+  `add_property`). Together with the former `shape-transitions` patch
+  (now react-native-quickjs's 0051) they took 5-11% of the instructions out
+  of the React scenarios in `jsui-bench`, for 3 KB of code; none changes
+  the bytecode. `JSUI_QUICKJS_FLAGS`
   adds compile flags for QuickJS alone.
 * **QuickJS PGO.** Release binaries compile QuickJS (and only QuickJS) with
   profile-guided optimization: 6-9% less JS time on React-heavy scenarios

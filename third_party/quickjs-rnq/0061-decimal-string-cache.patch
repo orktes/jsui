@@ -1,0 +1,109 @@
+Subject: Cache Canonical Decimal Strings For Small Integers
+
+What this does
+  JS_ToStringInternal's JS_TAG_INT case answers from a runtime-owned table of
+  canonical decimal strings for 0..255 instead of running i32toa and allocating.
+
+Why we need it
+  Number-to-string conversion is dominated by small non-negative integers that
+  repeat constantly, and each conversion runs i32toa and allocates a fresh string
+  for a result that is identical for every occurrence of the same value.
+
+What it adds
+  Only number-to-string conversion is served, so numeric-index atoms and
+  radix-specific output are unchanged. Each non-NULL entry holds one permanent
+  reference, dropped in JS_FreeRuntime.
+
+Needs a bytecode version bump
+  No
+
+diff --git a/quickjs.c b/quickjs.c
+index e046fa2..e92e811 100644
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -403,6 +403,8 @@ typedef struct JSClass {
+     const JSClassExoticMethods *exotic;
+ } JSClass;
+ 
++#define JS_INTSTR_MAX 256
++
+ struct JSRuntime {
+     JSMallocFunctions mf;
+     JSMallocState malloc_state;
+@@ -422,6 +424,10 @@ struct JSRuntime {
+        entry holds ONE permanent reference, dropped in JS_FreeRuntime. */
+     JSAtomStruct *onechar[256];
+ 
++    /* Canonical decimal strings for small non-negative ints.  Each non-NULL
++       entry holds ONE permanent reference, dropped in JS_FreeRuntime. */
++    JSAtomStruct *intstr[JS_INTSTR_MAX];
++
+     JSClassID js_class_id_alloc; /* counter for user defined classes */
+     int class_count;    /* size of class_array */
+     JSClass *class_array;
+@@ -2999,6 +3005,12 @@ void JS_FreeRuntime(JSRuntime *rt)
+             rt->onechar[oc] = NULL;
+         }
+     }
++    for (int iv = 0; iv < JS_INTSTR_MAX; iv++) {
++        if (rt->intstr[iv] != NULL) {
++            JS_FreeValueRT(rt, JS_MKPTR(JS_TAG_STRING, rt->intstr[iv]));
++            rt->intstr[iv] = NULL;
++        }
++    }
+ 
+ #ifdef ENABLE_DUMPS // JS_DUMP_ATOM_LEAKS
+     /* only the atoms defined in JS_InitAtoms() should be left */
+@@ -5012,6 +5024,33 @@ static inline JSValue js_empty_string(JSRuntime *rt)
+     return js_dup(JS_MKPTR(JS_TAG_STRING, p));
+ }
+ 
++static JSValue js_int_to_string(JSContext *ctx, int32_t v)
++{
++    char buf[16];
++    size_t len = i32toa(buf, v);
++
++    if ((uint32_t)v < JS_INTSTR_MAX) {
++        JSRuntime *rt = ctx->rt;
++        JSString *p = rt->intstr[v];
++
++        if (likely(p != NULL)) {
++            JS_REF_COUNT(p)++;
++            return JS_MKPTR(JS_TAG_STRING, p);
++        }
++        {
++            JSValue s = js_new_string8_len(ctx, buf, len);
++
++            if (unlikely(JS_IsException(s)))
++                return s;
++            p = JS_VALUE_GET_STRING(s);
++            rt->intstr[v] = p;
++            JS_REF_COUNT(p)++; /* the table's permanent reference */
++            return s;
++        }
++    }
++    return js_new_string8_len(ctx, buf, len);
++}
++
+ // XXX: `buf` contains raw 8-bit data, no UTF-8 decoding is performed
+ // XXX: no special case for len == 0
+ static JSValue js_new_string8_len(JSContext *ctx, const char *buf, int len)
+@@ -16189,8 +16228,6 @@ static JSValue JS_ToStringInternal(JSContext *ctx, JSValueConst val,
+                                    int flags)
+ {
+     uint32_t tag;
+-    char buf[32];
+-    size_t len;
+ 
+     tag = JS_VALUE_GET_NORM_TAG(val);
+     switch(tag) {
+@@ -16199,8 +16236,7 @@ static JSValue JS_ToStringInternal(JSContext *ctx, JSValueConst val,
+     case JS_TAG_STRING_ROPE:
+         return js_linearize_string_rope(ctx, val);
+     case JS_TAG_INT:
+-        len = i32toa(buf, JS_VALUE_GET_INT(val));
+-        return js_new_string8_len(ctx, buf, len);
++        return js_int_to_string(ctx, JS_VALUE_GET_INT(val));
+     case JS_TAG_BOOL:
+         return JS_AtomToString(ctx, JS_VALUE_GET_BOOL(val) ?
+                           JS_ATOM_true : JS_ATOM_false);

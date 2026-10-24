@@ -78,6 +78,9 @@ struct JsEngine::Impl {
   double timeoutMs = 5000;  // <= 0: no watchdog
   std::chrono::steady_clock::time_point deadline;
   bool interrupted = false;
+  // Ticks a deferred young / due full cycle collection has waited
+  // (QuickJsEngine::collectIdle).
+  int gcWaitTicks = 0, gcFullWaitTicks = 0;
 
   // onLayout events raised while JS is on the stack are queued until it unwinds.
   struct LayoutEvt {

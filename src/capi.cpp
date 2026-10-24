@@ -529,6 +529,13 @@ void jsui_get_perf(JsuiRuntime* rt, JsuiPerf* out, int reset) {
   out->text_measures = c.textMeasures;
   out->layout_passes = c.layoutPasses;
   out->bridge_calls = c.bridgeCalls;
+  if (rt->rt->js) {
+    jsui::JsEngine::GcStats gc = rt->rt->js->gcStats(reset != 0);
+    out->gc_collections = gc.collections;
+    out->gc_full_collections = gc.full;
+    out->gc_us = gc.us;
+    out->gc_max_us = gc.maxUs;
+  }
   if (reset) p.reset();
 }
 

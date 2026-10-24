@@ -8,7 +8,7 @@ named here; the full license texts are in the projects' repositories (linked).
 | --- | --- | --- |
 | [Skia](https://skia.org) (m157; m124 on Windows) | 2D rendering | BSD-3-Clause |
 | [QuickJS-ng](https://github.com/quickjs-ng/quickjs) | JavaScript engine | MIT |
-| [react-native-quickjs](https://github.com/react-native-quickjs/quickjs) | QuickJS debugger patches and Chrome DevTools Protocol agent (builds with `JSUI_DEBUGGER`) | MIT |
+| [react-native-quickjs](https://github.com/react-native-quickjs/quickjs) | QuickJS engine patches (`third_party/quickjs-rnq`, compiled into every build) and the Chrome DevTools Protocol agent (builds with `JSUI_DEBUGGER`) | MIT |
 | [Yoga](https://github.com/facebook/yoga) | flexbox layout | MIT |
 | [HarfBuzz](https://github.com/harfbuzz/harfbuzz) | text shaping (in Skia) | MIT ("Old MIT") |
 | [ICU](https://github.com/unicode-org/icu) | Unicode, line breaking (in Skia) | Unicode License v3 |

@@ -1,6 +1,7 @@
 #include "runtime.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -26,6 +27,10 @@
 namespace jsui {
 
 namespace {
+
+// A tick shorter than this leaves the frame room for a deferred cycle
+// collection (young ones take well under a millisecond).
+constexpr double kLightTickMs = 4.0;
 
 // "http://host:port/a/b.js?x" -> "http://host:port"; empty if not http.
 std::string httpOrigin(const std::string& url) {
@@ -569,6 +574,7 @@ void Runtime::devPoll() {
 }
 
 void Runtime::tick(double nowMs) {
+  auto tickStart = std::chrono::steady_clock::now();
   now = nowMs;
 #if JSUI_DEBUGGER
   if (inspector) inspector->poll();  // DevTools requests made while JS was idle
@@ -628,6 +634,15 @@ void Runtime::tick(double nowMs) {
   deliverUiCallResults();
   // Shared-session commands run last, on the frame this tick produced.
   if (session) session->tick(devOrigin_);
+  // Cycle collections the engine deferred while JS ran run between frames:
+  // young ones in light ticks (no commit to speak of), full ones while
+  // nothing moves (see JsEngine::collectIdle).
+  if (js) {
+    double tickMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tickStart).count();
+    bool idle = !wantsFrame();
+    for (auto& s : surfaces_) idle = idle && !s->needsRedraw();
+    js->collectIdle(tickMs < kLightTickMs, idle);
+  }
 }
 
 void Runtime::tickNative(double nowMs) {
