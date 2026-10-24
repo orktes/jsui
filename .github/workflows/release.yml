@@ -184,7 +184,11 @@ jobs:
           if ! gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             pre=""
             case "$VERSION" in *-*) pre="--prerelease" ;; esac
-            gh release create "$tag" -R "$GITHUB_REPOSITORY" --verify-tag --title "JSUI $VERSION" --generate-notes $pre
+            # docs/releases/X.Y.Z.md (hand-written notes) goes above the
+            # generated list of merged PRs when it exists.
+            notes=()
+            [ -f "docs/releases/$VERSION.md" ] && notes=(--notes-file "docs/releases/$VERSION.md")
+            gh release create "$tag" -R "$GITHUB_REPOSITORY" --verify-tag --title "JSUI $VERSION" "${notes[@]}" --generate-notes $pre
           fi
           gh release upload "$tag" -R "$GITHUB_REPOSITORY" --clobber release/*
       # Unity's git URL install, https://github.com/orktes/jsui.git#upm (or

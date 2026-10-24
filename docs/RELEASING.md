@@ -33,12 +33,44 @@ succeeded with all three, including the advisory WebGPU job.
    WASM modules, runs the JS tests, and publishes `@orktes/jsui-react`, then
    `@orktes/jsui-web`, then `@orktes/jsui-cli` (which depends on both). Versions already on npm are skipped, so a
    failed run can simply be re-run.
-4. In parallel it creates the GitHub Release `vX.Y.Z` (notes generated from
-   the merged PRs; prerelease for `-rc` versions) and uploads the native
+4. In parallel it creates the GitHub Release `vX.Y.Z` (notes from
+   `docs/releases/X.Y.Z.md` when it exists, followed by the list generated
+   from the merged PRs; prerelease for `-rc` versions) and uploads the native
    binaries. Re-running replaces them.
 
 Prerelease versions (`0.2.0-rc.1`) are published under the `next` dist-tag;
 everything else goes to `latest`.
+
+## Follow-up releases (the quick path)
+
+Releases are cut whenever something meaningful lands (a feature, a
+noticeable perf win, a user-visible fix); there is no schedule.
+
+1. Pick the version: patch (`0.5.1`) for fixes only, minor (`0.6.0`) for new
+   features or behaviour changes (while we are on 0.x, breaking changes are
+   minor bumps too; call them out in the notes).
+2. On a branch from `main`:
+   `node scripts/set-version.mjs 0.5.1 && npm install`, and write the notes
+   in `docs/releases/0.5.1.md` (a short summary, then Highlights /
+   Performance / Fixes as needed; `git log --format=%s v0.5.0..origin/main`
+   lists what merged). The workflow puts this file above GitHub's generated
+   list of merged PRs; without it the release gets the generated list alone.
+3. Merge the PR and wait for the CI run of the merge commit on `main` to
+   succeed (the release takes that run's WASM and native artifacts, so a red
+   or cancelled run on that exact commit blocks the release; a later push to
+   `main` cancels it).
+4. `git fetch origin main && git tag v0.5.1 origin/main && git push origin v0.5.1`
+   (tag the merge commit itself, not a later one whose CI has not finished).
+5. Check: the Release workflow run is green;
+   `npm view @orktes/jsui-react version` (and `-cli`, `-web`) shows the new
+   version; the GitHub Release has the archives listed under
+   [Native binaries](#native-binaries) plus `SHA256SUMS.txt`; the `upm`
+   branch has a `com.orktes.jsui X.Y.Z` commit and the tag `upm/vX.Y.Z`.
+
+If the workflow fails, fix the cause on `main` and either re-run the failed
+jobs (when the fix is outside the tagged commit, e.g. npm settings) or cut
+the next patch version (when the tagged commit itself is wrong). Do not move
+a published tag.
 
 ## Trusted publisher setup (once per package)
 
@@ -60,7 +92,7 @@ what CI tested:
 
 | Release asset | Contents | Built by |
 | --- | --- | --- |
-| `jsui-X.Y.Z-linux-x64.tar.gz` | `include/jsui/jsui.h`, `lib/libjsui.so`, `lib/cmake/jsui/` (`find_package(jsui)`), `bin/jsui-viewer` | `dist-linux` (Jaakko's runner), Skia m157 |
+| `jsui-X.Y.Z-linux-x64.tar.gz` | `include/jsui/jsui.h`, `lib/libjsui.so`, `lib/cmake/jsui/` (`find_package(jsui)`), `bin/jsui-viewer` | `dist-linux` (`ubuntu-24.04`), Skia m157 |
 | `jsui-X.Y.Z-linux-arm64.tar.gz` | same | `dist-linux` (`ubuntu-24.04-arm`), Skia m157 |
 | `jsui-X.Y.Z-macos-universal.tar.gz` | same with `lib/libjsui.dylib` (arm64 + x86_64, macOS 13+) | `dist-macos`, Skia m157 built for both CPUs, merged with `lipo` |
 | `jsui-X.Y.Z-windows-x64.zip` | same with `bin/jsui.dll`, `bin/icudtl.dat`, `lib/jsui.lib` | `dist-windows` (ClangCL, static CRT), Skia m157 |
