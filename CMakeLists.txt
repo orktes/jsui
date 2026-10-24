@@ -336,6 +336,10 @@ if(JSUI_BUILD_TOOLS AND NOT EMSCRIPTEN)
   # Showcase navigation: frame times and GC pauses over page changes.
   add_executable(jsui-nav tools/jsui-bench/nav.cpp)
   target_link_libraries(jsui-nav PRIVATE jsui)
+  if(APPLE)
+    target_sources(jsui-nav PRIVATE tools/jsui-paint-bench/metal_helper.mm)
+    target_link_libraries(jsui-nav PRIVATE "-framework Metal" "-framework Foundation")
+  endif()
   jsui_copy_icu_data(jsui-nav)
   # Paint benchmark: CPU raster (incremental / full) and headless Ganesh GL.
   add_executable(jsui-paint-bench tools/jsui-paint-bench/main.cpp)
