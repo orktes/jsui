@@ -16,7 +16,7 @@
 // counters go to the `game` shared state.
 //
 // Command line (players): --selftest, --frames N, --screenshot out.png,
-// --bundle path-or-url, --dev, --cpu (the CPU renderer even on Metal).
+// --bundle path-or-url, --dev, --cpu (the CPU renderer even where the GPU path works).
 using System;
 using System.Collections;
 using System.Collections.Generic;

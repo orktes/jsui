@@ -64,6 +64,8 @@ jobs:
               - 'integrations/godot/**'
               - 'integrations/sdl3/**'
               - 'integrations/shared/**'
+              - 'integrations/unity/native/**'
+              - 'integrations/unity/CMakeLists.txt'
               - 'scripts/build-skia-desktop.sh'
               - 'scripts/patches/skia-m157-dawn-header-only.patch'
               - 'tools/dawn-shim/**'
@@ -101,6 +103,7 @@ jobs:
               - 'tools/jsui-viewer/**'
               - 'integrations/godot/CMakeLists.txt'
               - 'integrations/unity/CMakeLists.txt'
+              - 'integrations/unity/native/**'
               - 'integrations/unity/package/**'
               - 'integrations/unreal/Plugins/**'
               - 'scripts/build-skia-desktop.sh'
@@ -333,15 +336,38 @@ jobs:
           -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
           -DJSUI_SKIA_DIR=third_party/skia-desktop -DJSUI_VULKAN=ON -DJSUI_GRAPHITE_DAWN=ON
           -DJSUI_BUILD_TESTS=ON -DJSUI_BUILD_VIEWER=OFF -DJSUI_BUILD_GODOT=ON -DJSUI_BUILD_SDL3=ON
+          -DJSUI_BUILD_UNITY=ON -DJSUI_UNITY_PLUGIN_DIR=$PWD/build/unity
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Build GDExtension + native tests
-        run: cmake --build build -j "$(nproc)" --target jsui_godot jsui-tests jsui-sdl3
+        run: cmake --build build -j "$(nproc)" --target jsui_godot jsui-tests jsui-sdl3 jsui_unity jsui-unity-vulkan-test
       - name: Native tests against Skia m157 (incl. Graphite on Vulkan / lavapipe)
         # vulkan_test renders through jsui_gpu_create_vulkan on its own
         # lavapipe device and compares with the CPU raster; require it.
         env:
           JSUI_VULKAN_TEST_REQUIRE: 1
         run: ./build/jsui-tests
+      - name: Unity plugin on Vulkan (lavapipe) without Unity - a stand-in for Unity's plugin API drives the GPU path, under sync validation
+        # integrations/unity/native/test/unity_vulkan_test.cpp loads the
+        # built plugin, plays Unity's part (IUnityGraphicsVulkanV2, a frame
+        # recorded into command buffers submitted at its end, AccessQueue
+        # callbacks run synchronously and from a submission thread) and
+        # compares the frames with the CPU raster. Any validation error (a
+        # layout Unity's tracking does not expect, a hazard between the
+        # plugin's render and "Unity's" work on the texture) fails the step.
+        env:
+          JSUI_VULKAN_TEST_REQUIRE: 1
+        run: |
+          vkdir="$(mktemp -d)"
+          printf '%s\n' \
+            'khronos_validation.enables = VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT' \
+            'khronos_validation.report_flags = error' \
+            'khronos_validation.debug_action = VK_DBG_LAYER_ACTION_LOG_MSG' \
+            "khronos_validation.log_filename = $vkdir/validation.log" \
+            'khronos_validation.message_id_filter = VUID-vkGetPhysicalDeviceFormatProperties-format-parameter' \
+            > "$vkdir/vk_layer_settings.txt"
+          VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation VK_LAYER_SETTINGS_PATH="$vkdir" \
+            ./build/integrations/unity/jsui-unity-vulkan-test build/integrations/unity/libjsui_unity.so
+          if [ -s "$vkdir/validation.log" ]; then cat "$vkdir/validation.log"; exit 1; fi
       - name: Demo bundle
         run: |
           if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
@@ -752,12 +778,26 @@ jobs:
           -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DJSUI_SKIA_DIR=third_party/skia-desktop
           -DJSUI_BUILD_SHARED=ON -DJSUI_BUILD_TESTS=OFF
           -DJSUI_BUILD_GODOT=ON -DJSUI_GODOT_OUTPUT_DIR="$(pwd -W)/build/godot"
+          -DJSUI_BUILD_UNITY=ON -DJSUI_UNITY_PLUGIN_DIR="$(pwd -W)/build/unity"
       - name: Build
-        run: cmake --build build --config Release -j 4 --target jsui_shared jsui-viewer jsui_godot
+        run: cmake --build build --config Release -j 4 --target jsui_shared jsui-viewer jsui_godot jsui_unity
       - name: Stage
         run: scripts/dist/stage-native.sh windows-x64 dist build
       - name: Check the shared library (a host build against the package)
         run: scripts/dist/check-shared.sh dist/shared
+      - name: Check the Unity plugin (loads; exports the plugin entry points, the C API and the helpers)
+        # Built with the GPU path (Vulkan, Direct3D 11 / 12); Unity itself
+        # cannot run here.
+        run: |
+          grep -q 'JSUI_VULKAN:BOOL=ON' build/CMakeCache.txt && grep -q 'JSUI_D3D:BOOL=ON' build/CMakeCache.txt
+          test -f dist/unity/icudtl.dat
+          python -c "
+          import ctypes, sys
+          d = ctypes.CDLL(sys.argv[1])
+          for f in ['UnityPluginLoad', 'UnityPluginUnload', 'jsui_create', 'jsui_render_gpu_target', 'jsuiu_create', 'jsuiu_gpu_available', 'jsuiu_render_event_func']:
+              getattr(d, f)
+          print('jsui_unity.dll: ok')
+          " "$(cygpath -w dist/unity/jsui_unity.dll)"
       - uses: actions/upload-artifact@v4
         with:
           name: jsui-native-windows-x64
@@ -767,6 +807,11 @@ jobs:
         with:
           name: jsui-shared-windows-x64
           path: dist/shared/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-unity-windows-x64
+          path: dist/unity/
           if-no-files-found: error
 
   # Advisory, like the iOS job: the release attaches the xcframework when this
@@ -830,7 +875,10 @@ jobs:
           unzip -l jsui-*-windows-x64.zip | grep -q 'bin/jsui.dll'
           tar -tzf com.orktes.jsui-*.tgz | tee unity.txt
           for f in package.json Plugins/macOS/jsui_unity.bundle/Contents/MacOS/jsui_unity Plugins/macOS/jsui_unity.bundle.meta \
-                   Plugins/Linux/x86_64/libjsui_unity.so Plugins/Linux/x86_64/libjsui_unity.so.meta; do grep -qx "package/$f" unity.txt; done
+                   Plugins/Linux/x86_64/libjsui_unity.so Plugins/Linux/x86_64/libjsui_unity.so.meta \
+                   Plugins/Windows/x86_64/jsui_unity.dll Plugins/Windows/x86_64/jsui_unity.dll.meta \
+                   Plugins/Windows/x86_64/icudtl.dat Plugins/Windows/x86_64/icudtl.dat.meta \
+                   Editor/JsuiBuildPostprocess.cs Editor/Jsui.Editor.asmdef; do grep -qx "package/$f" unity.txt; done
           # An immutable package needs a .meta for every entry (the .bundle's insides aside).
           grep -v '\.meta$' unity.txt | grep -v '^package/$' | grep -v '\.bundle/' | sed 's|/$||' | while read -r e; do
             grep -qx "$e.meta" unity.txt || { echo "::error::$e has no .meta"; exit 1; }

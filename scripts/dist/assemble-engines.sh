@@ -5,8 +5,9 @@
 #   com.orktes.jsui-<version>.tgz
 #       The Unity package (integrations/unity/package) with the native plugin
 #       for every platform built (Plugins/macOS/jsui_unity.bundle,
-#       Plugins/Linux/x86_64/libjsui_unity.so) and their .meta import
-#       settings. Package Manager > + > Install package from tarball.
+#       Plugins/Linux/x86_64/libjsui_unity.so, Plugins/Windows/x86_64/
+#       jsui_unity.dll + icudtl.dat) and their .meta import settings.
+#       Package Manager > + > Install package from tarball.
 #       With <upm dir>, the same tree is also left there (the `upm` git branch).
 #   jsui-unreal-<version>.zip
 #       Jsui/, the Unreal plugin (integrations/unreal/Plugins/Jsui) with the
@@ -57,6 +58,18 @@ text_meta() {  # text_meta <package dir> <relative file>
 fileFormatVersion: 2
 guid: $(guid "$2")
 TextScriptImporter:
+  externalObjects: {}
+  userData:
+  assetBundleName:
+  assetBundleVariant:
+EOF
+}
+
+default_meta() {  # default_meta <package dir> <relative file>: a plain asset (data file)
+  cat > "$1/$2.meta" <<EOF
+fileFormatVersion: 2
+guid: $(guid "$2")
+DefaultImporter:
   externalObjects: {}
   userData:
   assetBundleName:
@@ -136,6 +149,18 @@ if [ -f "$ART/jsui-native-linux-x64/unity/libjsui_unity.so" ]; then
   folder_meta "$upm" Plugins/Linux/x86_64
   plugin_meta "$upm" Plugins/Linux/x86_64/libjsui_unity.so Linux x86_64 Linux64
   unity+=(linux-x64)
+fi
+if [ -f "$ART/jsui-native-windows-x64/unity/jsui_unity.dll" ]; then
+  mkdir -p "$upm/Plugins/Windows/x86_64"
+  cp "$ART/jsui-native-windows-x64/unity/jsui_unity.dll" "$upm/Plugins/Windows/x86_64/"
+  # Skia's ICU data, read from beside the DLL (the package's
+  # Editor/JsuiBuildPostprocess.cs copies it into Windows players).
+  cp "$ART/jsui-native-windows-x64/unity/icudtl.dat" "$upm/Plugins/Windows/x86_64/"
+  folder_meta "$upm" Plugins/Windows
+  folder_meta "$upm" Plugins/Windows/x86_64
+  plugin_meta "$upm" Plugins/Windows/x86_64/jsui_unity.dll Windows x86_64 Win64
+  default_meta "$upm" Plugins/Windows/x86_64/icudtl.dat
+  unity+=(windows-x64)
 fi
 [ ${#unity[@]} -gt 0 ] || { echo "assemble-engines: no Unity plugin in $ART/jsui-native-*/unity" >&2; exit 1; }
 cp "$ROOT/LICENSE" "$upm/LICENSE.md"

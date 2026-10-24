@@ -10,8 +10,9 @@
 #   <out>/viewer/jsui-viewer[.exe]           the desktop viewer (+ icudtl.dat on Windows)
 #   <out>/godot/libjsui_godot.<os>.<arch>.*  the Godot GDExtension library
 #   <out>/unity/<plugin>                     the Unity package's native plugin
+#                                            (Windows: jsui_unity.dll + icudtl.dat)
 #
-# A build tree that lacks a target (Unity on Windows) just leaves that part out.
+# A build tree that lacks the Unity plugin just leaves that part out.
 #
 #   scripts/dist/stage-native.sh <platform> <out> <build> [<build-x64>]
 #
@@ -58,12 +59,14 @@ case "$PLATFORM" in
     viewer="$(win jsui-viewer.exe tools/jsui-viewer)"
     cp "$viewer" "$OUT/viewer/"
     cp "$BUILD"/godot/libjsui_godot.windows.*.dll "$OUT/godot/"
+    [ ! -f "$BUILD/unity/jsui_unity.dll" ] || cp "$BUILD/unity/jsui_unity.dll" "$OUT/unity/"
     # The prebuilt Skia's ICU reads its data from the module's directory.
     icu="$(dirname "$viewer")/icudtl.dat"
     if [ -f "$icu" ]; then
       cp "$icu" "$OUT/shared/bin/"
       cp "$icu" "$OUT/viewer/"
       cp "$icu" "$OUT/godot/"
+      [ ! -f "$OUT/unity/jsui_unity.dll" ] || cp "$icu" "$OUT/unity/"
     else
       echo "stage-native: no icudtl.dat next to the viewer" >&2; exit 1
     fi
