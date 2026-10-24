@@ -237,6 +237,14 @@ TEST(react_state_styles_e2e) {
   t.tickNative();
   CHECK_NEAR(t.scale("card"), 1, 1e-9);
   t.tick();
+  // Blurring eases the layout key back to the base (2 px).
+  jsui_send_mouse_button(t.rt, 300, 250, JSUI_MOUSE_LEFT, 1, 0);
+  jsui_send_mouse_button(t.rt, 300, 250, JSUI_MOUSE_LEFT, 0, 0);
+  for (int f = 0; f < 8; f++) t.tick();
+  CHECK_NEAR(t.style("card", "borderWidth").asNumber(), 2, 1e-9);
+  CHECK_NEAR(t.channel("card", "borderColor", 0), 0, 1e-6);
+  CHECK_NEAR(t.channel("card", "borderColor", 1), 0, 1e-6);
+  CHECK_NEAR(t.node("dot")->layoutRect().x, 2, 1e-3);
 
   // None of it rendered React again (only the explicit re-render did).
   CHECK_EQ(t.renders(), renders0 + 1);

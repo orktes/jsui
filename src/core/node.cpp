@@ -314,7 +314,7 @@ bool Node::patchStyle(const Value::Object& partial) {
       else style.insert_or_assign(k, v);
     }
     props.insert_or_assign(kStyleKey, Value(std::move(style)));
-    setProps(Value(std::move(props)));
+    applyProps(Value(std::move(props)));  // not setProps: state styles keep React's props as their base
     return true;
   }
   doc_->perf.counters.setProps++;
