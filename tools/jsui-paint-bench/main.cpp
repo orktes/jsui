@@ -38,6 +38,7 @@
 #include "input/input.h"
 #include "jsui/jsui.h"
 #include "render/gpu.h"
+#include "render/gpu_metal.h"
 #include "render/painter.h"
 #include "runtime.h"
 
@@ -48,6 +49,16 @@
 #define GL_SILENCE_DEPRECATION 1
 #include <OpenGL/OpenGL.h>
 #endif
+#endif
+
+#if defined(__APPLE__)
+#define BENCH_METAL 1
+extern "C" {
+int bench_mtl_init(void** device, void** queue);
+void* bench_mtl_texture(void* device, int w, int h);
+void bench_mtl_wait(void* queue);
+void bench_mtl_release(void* obj);
+}
 #endif
 
 namespace {
@@ -478,6 +489,27 @@ std::vector<Sample> runPass(const Options& o, const Scenario& sc, const std::str
   }
 #endif
 
+#if BENCH_METAL
+  // graphite: Skia Graphite on Metal (jsui_gpu_create_metal, incremental);
+  // metal: Skia Ganesh on Metal (jsui_metal_create, full repaint).
+  void *mdev = nullptr, *mq = nullptr, *mtex = nullptr;
+  JsuiGpuContext* gctx = nullptr;
+  JsuiMetalContext* mctx = nullptr;
+  if (backend == "graphite" || backend == "metal") {
+    if (!bench_mtl_init(&mdev, &mq)) {
+      *error = "no Metal device";
+      return out;
+    }
+    mtex = bench_mtl_texture(mdev, w, h);
+    if (backend == "graphite") gctx = jsui::graphite_gpu::createMetal(mdev, mq);
+    else mctx = jsui::metal::create(mdev, mq);
+    if (!gctx && !mctx) {
+      *error = "Metal context creation failed";
+      return out;
+    }
+  }
+#endif
+
   for (int i = 0; i < o.warmup + o.frames; i++) {
     t += 1000.0 / 60;
     if (sc.hover) hoverAt(*rt, i, o);
@@ -496,6 +528,34 @@ std::vector<Sample> runPass(const Options& o, const Scenario& sc, const std::str
       s.paint = std::chrono::duration<double, std::milli>(b - a).count();
       s.painted = true;
     }
+#if BENCH_METAL
+    else if (gctx || mctx) {
+      if (rt->needsRedraw()) {
+        auto a = Clock::now();
+        int rc;
+        if (gctx) {
+          JsuiGpuTarget target{};
+          target.texture = mtex;
+          target.width = w;
+          target.height = h;
+          JsuiRect dirty{};
+          rc = jsui::graphite_gpu::render(rt->main(), gctx, target, &dirty);
+        } else {
+          rc = jsui::metal::render(rt->main(), mctx, mtex, 70 /* RGBA8Unorm */, w, h, 0);
+        }
+        auto b = Clock::now();
+        bench_mtl_wait(mq);
+        auto c = Clock::now();
+        if (rc != 0) {
+          *error = "Metal render failed";
+          break;
+        }
+        s.paint = std::chrono::duration<double, std::milli>(b - a).count();
+        s.gpu = std::chrono::duration<double, std::milli>(c - a).count();
+        s.painted = true;
+      }
+    }
+#endif
 #if BENCH_GL
     else if (backend.rfind("gl", 0) == 0) {
       if (rt->needsRedraw()) {
@@ -537,6 +597,13 @@ std::vector<Sample> runPass(const Options& o, const Scenario& sc, const std::str
     }
     if (i >= o.warmup) out.push_back(s);
   }
+#if BENCH_METAL
+  if (gctx) jsui::graphite_gpu::destroy(gctx);
+  if (mctx) jsui::metal::destroy(mctx);
+  bench_mtl_release(mtex);
+  bench_mtl_release(mq);
+  bench_mtl_release(mdev);
+#endif
 #if BENCH_GL
   if (gpu) {
     jsui::gpu::destroy(gpu);
@@ -630,7 +697,7 @@ int main(int argc, char** argv) {
     else if (a == "--no-count") o.count = false;
     else if (a == "-h" || a == "--help") {
       std::printf("usage: jsui-paint-bench [--frames N] [--warmup N] [--settle-ms MS] [--width W] [--height H] "
-                  "[--scale S] [--backends cpu,cpu-full,gl,gl-direct] [--json out.json] name=bundle.js[@hover] ...\n");
+                  "[--scale S] [--backends cpu,cpu-full,gl,gl-direct,graphite,metal] [--json out.json] name=bundle.js[@hover] ...\n");
       return 0;
     } else {
       Scenario sc;
