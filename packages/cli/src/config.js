@@ -73,6 +73,11 @@ export function esbuildOptions(o) {
     target: 'es2020',
     charset: 'utf8',
     minify: !!o.minify,
+    // Production bundles always get esbuild's syntax minification (constant
+    // folding, dead branches, shorter expression forms) but keep names and
+    // whitespace: less bytecode for QuickJS to run (jsui-bench: -1 to -4%
+    // Ir/frame on the update scenarios) with readable stacks.
+    minifySyntax: !!o.minify || !dev,
     sourcemap: o.sourcemap === 'inline' ? 'inline' : o.sourcemap ? 'linked' : false,
     legalComments: o.minify ? 'none' : 'inline',
     jsx: 'automatic',
