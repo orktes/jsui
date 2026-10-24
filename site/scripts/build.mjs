@@ -6,8 +6,8 @@
 //
 // Layout of the output:
 //   index.html, jsui-web.js         page + browser host (web/jsui-web.js,
-//   jsui-webgpu.js, jsui-textures.js and its WebGPU renderer, host textures and
-//   jsui-worker.js                  worker mode; jsui-web.js is also the worker's entry)
+//   jsui-webgpu.js, jsui-textures.js, and its WebGPU renderer, host textures,
+//   jsui-worker.js, jsui-audio.js   worker mode and Web Audio; jsui-web.js is also the worker's entry)
 //   jsui/dist/jsui.{js,wasm}        CPU module (required)
 //   jsui/dist-webgl/jsui.{js,wasm}  WebGL module (optional; used when present)
 //   jsui/dist-gpu/jsui.{js,wasm}    WebGPU + WebGL + CPU module (optional; preferred when
@@ -22,8 +22,8 @@
 // another build: "Importing a module script failed"). Every URL the page
 // loads besides index.html itself is therefore versioned with a content
 // hash, ?v=<hash>: jsui-web.js (imported by index.html, and the worker's
-// script in worker mode), jsui-webgpu.js, jsui-textures.js and jsui-worker.js
-// (imported by jsui-web.js, rewritten here), each module's jsui.js and its
+// script in worker mode), jsui-webgpu.js, jsui-textures.js, jsui-worker.js and
+// jsui-audio.js (imported by jsui-web.js, rewritten here), each module's jsui.js and its
 // jsui.wasm (one hash over both; the host passes the module URL's query on to
 // the wasm, see locateIn() in web/jsui-web.js) and app/bundle.js. index.html
 // gets the module versions inline (no modules.json fetch to go stale).
@@ -97,11 +97,14 @@ const webgpuJs = fs.readFileSync(path.join(ROOT, 'web/jsui-webgpu.js'));
 fs.writeFileSync(path.join(out, 'jsui-webgpu.js'), webgpuJs);
 const texturesJs = fs.readFileSync(path.join(ROOT, 'web/jsui-textures.js'));
 fs.writeFileSync(path.join(out, 'jsui-textures.js'), texturesJs);
+const audioJs = fs.readFileSync(path.join(ROOT, 'web/jsui-audio.js'));
+fs.writeFileSync(path.join(out, 'jsui-audio.js'), audioJs);
 const workerJs = fs.readFileSync(path.join(ROOT, 'web/jsui-worker.js'));
 fs.writeFileSync(path.join(out, 'jsui-worker.js'), workerJs);
 let webJs = fs.readFileSync(path.join(ROOT, 'web/jsui-web.js'), 'utf8');
 webJs = replaceAll(webJs, "from './jsui-webgpu.js'", `from './jsui-webgpu.js?v=${hash(webgpuJs)}'`, 'web/jsui-web.js');
 webJs = replaceAll(webJs, "from './jsui-textures.js'", `from './jsui-textures.js?v=${hash(texturesJs)}'`, 'web/jsui-web.js');
+webJs = replaceAll(webJs, "from './jsui-audio.js'", `from './jsui-audio.js?v=${hash(audioJs)}'`, 'web/jsui-web.js');
 webJs = replaceAll(webJs, "import('./jsui-worker.js')", `import('./jsui-worker.js?v=${hash(workerJs)}')`, 'web/jsui-web.js');
 fs.writeFileSync(path.join(out, 'jsui-web.js'), webJs);
 let html = fs.readFileSync(path.join(SITE, 'index.html'), 'utf8');

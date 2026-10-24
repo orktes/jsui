@@ -12,14 +12,18 @@ bridges game data both ways: shared state
 (`set_state` → `useHostState`), calls (`Host.call` → `call_requested` →
 `resolve_call`, and `call_ui` → `Host.handle`) and messages, and shows
 Godot's own textures in the UI (`set_texture` → `<HostTexture>`: a video, a
-SubViewport, any `Texture2D`; see [Host textures](#host-textures)).
+SubViewport, any `Texture2D`; see [Host textures](#host-textures)). It plays
+the UI's sounds (`Sound.play`, `useMusic`, `<UISounds>`) with
+`AudioStreamPlayer`s on Godot's audio buses, so they follow the game's volume
+settings and effects (see [Audio](#audio)).
 
 ```
 integrations/godot/
   CMakeLists.txt        GDExtension target (jsui_godot), fetches godot-cpp
-  src/                  JsuiView, key/gamepad mapping, entry point
+  src/                  JsuiView, its audio handler (jsui_audio.*), key/gamepad mapping, entry point
   demo/                 Godot 4.7 project: main.tscn + main.gd + jsui.gdextension
   demo/ui/app.jsx       demo UI: examples/showcase/interactions.jsx + a bridge strip
+  demo/ui/sounds/       the demo's UI sounds and music loop (make-sounds.py synthesizes them)
   demo/cinema/          host textures demo: a VideoStreamPlayer TV and a
                         SubViewport preview inside a JSUI UI (ui/cinema.jsx);
                         fetch-video.sh downloads the clip
@@ -133,6 +137,11 @@ chip updates. The self-test calls into the UI with `call_ui('ui.flash',
 ...)`, which shows a toast. Clicks the UI does not handle fall through to
 `_unhandled_input`. F5 reloads the bundle (the state survives it).
 
+The UI has sound: `<UISounds>` gives every pressable a tick on hover / focus
+and a chime on press (bus `ui`), and `useMusic` loops a quiet pad (bus
+`music`) that the strip's "Music" button mutes. They play on the "UI" and
+"Music" buses of the demo's `default_bus_layout.tres`.
+
 Headless check (no GPU needed). This is what CI runs. `main.gd --self-test`
 drives the UI through Godot's own input pipeline (`Input.parse_input_event`):
 hover, click (and checks that JSUI saw exactly the logical point it aimed
@@ -140,7 +149,12 @@ at), gamepad D-pad focus + A, wheel and trackpad-pan scrolling, click to
 focus + typing + Enter in the TextInput, the Ping call, `call_ui`, host
 textures (`set_texture` in a probe view of its own: set before start,
 replaced, kept across a restart, removed; with a renderer also updated in
-place and a live SubViewport; on Vulkan this is the GPU copy path) and an
+place and a live SubViewport; on Vulkan this is the GPU copy path), UI
+audio (the demo's music and interaction sounds, then a probe view driven
+with `call_ui`: players on the mapped buses with the voice's pitch and volume,
+the UI's bus volume, ramps, STOP with a fade, loops, pause, `stop_all_sounds`,
+sounds that play to the end, WAV / MP3 / Ogg decoded from `user://` bytes, a
+missing file and `audio_enabled` off, each checked against what JS saw) and an
 unhandled click. The UI reports what happened as `showcase:event` messages
 and the script prints `PASS` / `FAIL` per check. It runs at a 1280x720 window
 (content scale 1) and at 2560x1440 (content scale 2, like a Retina Mac).
@@ -276,6 +290,9 @@ CLI's README.
 | `auto_size` | bool | `false` | size the view to the component's content: the view's minimum size follows the laid-out size |
 | `profiling` | bool | `false` | time every frame phase (`jsui_set_profiling`), read with `get_perf()` |
 | `pipeline_cache_path` | String | `"user://jsui-pipelines.bin"` | the GPU pipeline cache of the runtime's Skia context (the renderer's name goes before the extension); empty: none. Applies when the context is created; a surface view uses its runtime view's. See [Rendering](#rendering) |
+| `audio_enabled` | bool | `true` | play the UI's sounds; off: nothing plays and every voice ends as failed (voices playing stop) |
+| `audio_bus` | String | `"Master"` | the Godot bus for JSUI buses that have no Godot bus of their own (see [Audio](#audio)) |
+| `audio_bus_map` | Dictionary | `{}` | JSUI bus → Godot bus, e.g. `{"sfx": "Effects"}`; wins over the same-name match |
 | `fonts` | Array[Font] | `[]` | `FontFile`s registered on every new runtime, family / weight / style from the file (see [Fonts](#fonts)). Assigning the array registers the fonts it adds on a running runtime; fonts it drops stay until the next `start()` |
 | `fixed_fps` | int | `0` | `0`: the runtime's clock (animations, timers, scrolling) is the wall clock. `N`: every frame advances it by 1/N s however long frames take, so the UI draws the frames of a machine running at N fps on any machine (tests, recording a pipeline list). The runtime view's applies |
 
@@ -314,6 +331,9 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | `get_effective_pixel_ratio()` | the ratio actually used |
 | `get_root_tag()` | the React Native root tag of the view's surface (1: a runtime's main surface, 0: not running) |
 | `is_running()` | |
+| `stop_all_sounds(bus = "", fade_ms = 0)` | stops the UI's voices of one JSUI bus (`""`: all), fading out over `fade_ms`; JS sees them end as `stopped` |
+| `get_audio_voices() -> Array` | the UI's voices now: Dictionaries with `voice`, `url`, `bus` (JSUI), `godot_bus`, `player` (its `AudioStreamPlayer`, null while the sound loads), `volume` (voice × fade × the UI's bus volume), `pitch`, `loop`, `paused`, `loading` |
+| `resolve_audio_bus(bus) -> String` | the Godot bus JSUI bus `bus` plays on now |
 
 | Signal | |
 | --- | --- |
@@ -323,6 +343,8 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | `call_cancelled(id: int)` | a call ended unanswered (JS timeout / abort, reload, `stop()`): drop its work |
 | `ui_call_completed(id: int, ok: bool, result: Variant)` | a `call_ui` call settled (also when the runtime stopped first) |
 | `js_error(message: String)` | a new uncaught JS error |
+| `sound_played(voice: int, url: String, bus: String)` | a UI sound started playing (`bus`: the JSUI bus; `get_audio_voices()` has its player) |
+| `sound_ended(voice: int, status: int)` | a UI voice ended: `SOUND_FINISHED` (0), `SOUND_STOPPED` (1) or `SOUND_FAILED` (-1), as JS hears it |
 | `frame_rendered(dirty_rect: Rect2i)` | the texture was updated. The rect is in device pixels. With a separate render thread and the GPU renderer it comes at the start of the next frame's processing of the runtime view (the render ran on that thread before the frame was drawn) |
 
 Signals are emitted after the runtime returns (after the tick or the input
@@ -473,6 +495,52 @@ targets with a transparent background hold premultiplied colour).
 Host textures belong to the runtime: on a surface view (`runtime_view`) they
 are set on the runtime view and every surface can show them. The view keeps
 the `Texture2D` referenced until `remove_texture` or until the view is freed.
+
+### Audio
+
+The UI asks for sounds (`Sound.play(require('./confirm.wav'), { bus: 'ui' })`,
+`useMusic`, `<UISounds>` / `sounds` on pressables; see `include/jsui/jsui.h`
+"Audio") and JsuiView plays them through Godot: each voice is an
+`AudioStreamPlayer`, an internal child of the runtime view (pooled, not shared
+with other views), on one of Godot's buses. UI sounds thus go through the
+game's mixer, effects and volume settings like any other sound, and the
+library's own audio backend stays out of the way.
+
+* **Buses.** A JSUI bus (`ui`, `sfx`, `music`, any name) plays on the Godot bus
+  `audio_bus_map` names for it, else on the Godot bus with the same name
+  (case-insensitive: `music` → `Music`), else on `audio_bus` (default
+  `"Master"`). The UI's own bus volume and mute (`Sound.setBusVolume`,
+  `setBusMuted`) scale its voices; JsuiView never changes `AudioServer` bus
+  volumes, so a game's settings menu stays in charge of those.
+* **Loading.** `res://` and `user://` sounds load with `ResourceLoader` when
+  Godot imported them (the editor imports the bundle's `.wav` / `.ogg` /
+  `.mp3` files in `ui/dist/assets/`; an exported game has only the imported
+  copies), otherwise as bytes through `FileAccess`. Other URLs (a dev
+  server's `http://`) are read through the runtime's loader (`jsui_fetch`).
+  Bytes are decoded by their header: WAV (PCM 8 / 16 / 24 / 32-bit, float;
+  mono or stereo), Ogg Vorbis, MP3. Loaded streams are cached per URL, so
+  `Sound.preload` / `useSound` make the first play instant; a play that comes
+  while its sound loads starts when it is there.
+* **Voices.** Volume (× fade × the UI's bus volume) is `volume_db`, pitch is
+  `pitch_scale`, the start offset `play(from_position)`. A looping voice plays
+  a copy of the stream with its loop flag on. Fades (fade in, fade out on
+  stop, `setVolume` / bus ramps) advance every frame. Pause / resume use
+  `stream_paused`. A voice has finished when its player stops on its own; JS
+  hears every end (`finished`, `stopped`, `failed`) on the next tick.
+* **The game's side.** `sound_played` / `sound_ended` report the UI's voices,
+  `get_audio_voices()` lists them with their players, `stop_all_sounds()`
+  stops them (e.g. when pausing the game) and `audio_enabled = false` silences
+  the UI entirely.
+
+```gdscript
+ui.audio_bus = "SFX"                          # buses the game has no match for
+ui.audio_bus_map = {"ui": "Interface"}        # explicit JSUI -> Godot buses
+ui.sound_played.connect(func(voice, url, bus): print("UI sound ", url, " on ", bus))
+ui.stop_all_sounds("music", 300)              # fade the UI's music out
+```
+
+Surface views (`runtime_view`) play through their runtime view, whose
+`audio_*` properties apply.
 
 ### Rendering
 
@@ -656,7 +724,8 @@ When exporting, add the bundle folder to the preset's non-resource filter
 (Export → Resources → "Filters to export non-resource files", e.g.
 `ui/dist/*`). This ships the raw `.js` and image files and not only Godot's
 imported copies. A shipped pipeline list needs the filter too
-(`jsui-pipelines.*.bin`).
+(`jsui-pipelines.*.bin`). Sounds need no filter: JsuiView loads their
+imported copies (`ResourceLoader`).
 
 ## Limitations
 
@@ -682,6 +751,11 @@ imported copies. A shipped pipeline list needs the filter too
   renderer keeps no image updates and renders no viewports, so there only
   static `ImageTexture`s show (the self-test checks the rest with a
   renderer).
+* Audio: `pan` is not applied (an `AudioStreamPlayer` has no pan, and a bus
+  per voice costs more than UI sounds are worth). FLAC and Ogg Opus files
+  are not supported (Godot has no streams for them), nor ADPCM WAVs given as
+  bytes (an imported one plays). A sound's first play loads it
+  synchronously when it is a `res://` / `user://` file (preload big ones).
 * The macOS library is named `.universal` but a source-built Skia is for the
   host architecture only.
 * Built and tested on Linux x86_64 (CI: headless, OpenGL and Vulkan via

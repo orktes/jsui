@@ -200,6 +200,20 @@ int jsui_texture_updated(JsuiRuntime* rt, const char* key) { return key && rt->r
 
 int jsui_remove_texture(JsuiRuntime* rt, const char* key) { return key && rt->rt->textures.remove(key) ? 1 : 0; }
 
+void jsui_audio_voice_ended(JsuiRuntime* rt, uint64_t voice, int status) {
+  if (rt) rt->rt->audio->voiceEnded(voice, status);
+}
+void jsui_audio_sound_loaded(JsuiRuntime* rt, const char* sound, int ok, double duration_s) {
+  if (rt && sound) rt->rt->audio->soundLoaded(sound, ok != 0, duration_s);
+}
+void jsui_fetch(JsuiRuntime* rt, const char* url, JsuiFetchFn done, void* user) {
+  if (!rt || !url || !done) return;
+  jsui::Runtime* r = rt->rt;
+  r->loader.load(jsui::ResourceLoader::resolve(r->baseUrl, url), [done, user](jsui::Resource res) {
+    done(user, res.status, res.contentType.c_str(), res.data.data(), res.data.size());
+  });
+}
+
 int jsui_resolve_call(JsuiRuntime* rt, uint64_t id, const char* json) { return rt->rt->resolveCall(id, json); }
 int jsui_reject_call(JsuiRuntime* rt, uint64_t id, const char* message) { return rt->rt->rejectCall(id, message); }
 

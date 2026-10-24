@@ -48,6 +48,18 @@ EM_JS(void, jsui_web_js_call_result, (int hostId, double id, int ok, const char*
   if (h && h.onCallResult) h.onCallResult(id, ok, UTF8ToString(result));
 });
 
+// UI audio (jsui.h "Audio"): every JsuiAudioCommand goes to the host's
+// onAudio (web/jsui-audio.js plays it with Web Audio). The voice id is a
+// double like the call ids; the strings are copied (valid only during the
+// call).
+EM_JS(void, jsui_web_js_audio, (int hostId, int op, double voice, const char* sound, const char* bus, float volume,
+                                float pitch, float pan, float fadeMs, double offsetS, int loop, int muted), {
+  var h = Module.__jsuiHosts && Module.__jsuiHosts.get(hostId);
+  if (h && h.onAudio) h.onAudio({ op: op, voice: voice, sound: sound ? UTF8ToString(sound) : null,
+    bus: bus ? UTF8ToString(bus) : null, volume: volume, pitch: pitch, pan: pan, fadeMs: fadeMs, offset: offsetS,
+    loop: !!loop, muted: !!muted });
+});
+
 namespace {
 
 int hostIdOf(void* user) { return int(reinterpret_cast<intptr_t>(user)); }
@@ -72,14 +84,21 @@ void messageTrampoline(void* user, const char* name, const char* json) {
   jsui_web_js_message(hostIdOf(user), name ? name : "", json ? json : "null");
 }
 
+void audioTrampoline(void* user, const JsuiAudioCommand* c) {
+  jsui_web_js_audio(hostIdOf(user), int(c->op), double(c->voice), c->sound, c->bus, c->volume, c->pitch, c->pan,
+                    c->fade_ms, c->offset_s, c->loop, c->muted);
+}
+
 }  // namespace
 
 extern "C" {
 
 // Creates a runtime whose log / on_message callbacks go to JS host `hostId`.
 // `baseUrl` may be NULL (relative URLs then resolve against the bundle URL).
+// `audio` 1: sounds go to the host's onAudio; 0 (also when the argument is
+// left out, as headless Node hosts do): audio_disabled, every voice fails.
 EMSCRIPTEN_KEEPALIVE JsuiRuntime* jsui_web_create(int hostId, int width, int height, float pixelRatio, int devMode,
-                                                  const char* baseUrl) {
+                                                  const char* baseUrl, int audio) {
   JsuiConfig cfg;
   jsui_config_init(&cfg);
   cfg.width = width;
@@ -97,6 +116,12 @@ EMSCRIPTEN_KEEPALIVE JsuiRuntime* jsui_web_create(int hostId, int width, int hei
   cfg.on_call = callTrampoline;
   cfg.on_call_cancel = callCancelTrampoline;
   cfg.call_user = user;
+  if (audio) {
+    cfg.on_audio = audioTrampoline;
+    cfg.audio_user = user;
+  } else {
+    cfg.audio_disabled = 1;
+  }
   return jsui_create(&cfg);
 }
 
@@ -111,6 +136,11 @@ EMSCRIPTEN_KEEPALIVE int jsui_web_resolve_call(JsuiRuntime* rt, double id, const
 }
 EMSCRIPTEN_KEEPALIVE int jsui_web_reject_call(JsuiRuntime* rt, double id, const char* message) {
   return jsui_reject_call(rt, uint64_t(id), message);
+}
+
+// jsui_audio_voice_ended with a double voice id (no BigInt on the JS side).
+EMSCRIPTEN_KEEPALIVE void jsui_web_audio_voice_ended(JsuiRuntime* rt, double voice, int status) {
+  jsui_audio_voice_ended(rt, uint64_t(voice), status);
 }
 
 #if defined(JSUI_WEBGPU)

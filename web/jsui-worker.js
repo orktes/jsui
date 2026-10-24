@@ -115,7 +115,7 @@ function definePage(I) {
   const workerOpts = (opts) => {
     const o = {};
     for (const [k, v] of Object.entries(opts)) {
-      if (k === 'canvas' || k === 'worker' || k.startsWith('_') || typeof v === 'function') continue;
+      if (k === 'canvas' || k === 'worker' || k === 'audio' || k.startsWith('_') || typeof v === 'function') continue;
       o[k] = v instanceof URL ? v.href : v;
     }
     const base = location.href;
@@ -125,6 +125,11 @@ function definePage(I) {
     o.autoFocus = false;
     return o;
   };
+
+  // Audio plays on the page (Web Audio needs the page's thread and its user
+  // gestures): the worker's runtime hands every command over ('audio'
+  // events) and gets the voice-ended / sound-loaded reports back
+  // ('audioReports' ops).
 
   // A view as the page sees it: DomView's listeners, size and cursor, input
   // posted to the worker, hitTest() from the worker's last hit map.
@@ -424,6 +429,8 @@ function definePage(I) {
        * is ms from the start of the frame whose layout it shows until it is
        * here, `transit` the postMessage part of that. */
       this.hitMapStats = { updates: 0, regions: 0, lookups: 0, misses: 0, latency: newSeries(), transit: newSeries() };
+      this.audio = new I.JsuiAudio(this, opts.audio);
+      this.audio.sink = (list) => this._send({ op: 'audioReports', list });
       worker.onmessage = (e) => this._onMessage(e.data);
       worker.onerror = (e) => {
         e.preventDefault?.();
@@ -439,6 +446,7 @@ function definePage(I) {
       const off = this.canvas ? this._transfer() : null;
       const p = new Promise((resolve, reject) => { this._starting = { resolve, reject }; });
       const opts = workerOpts(this.opts);
+      opts.audio = this.audio.enabled;
       this.worker.postMessage({ t: 'init', opts, canvas: off, size: this._size(), timeOrigin: performance.timeOrigin },
         off ? [off] : []);
       return p.then((r) => {
@@ -580,6 +588,7 @@ function definePage(I) {
         case 'backend': this._backend = ev.value; return;
         case 'padsUsed': this._padsUsed = ev.pads; return;
         case 'texAck': this._bindings.get(ev.name)?.ack(); return;
+        case 'audio': this.audio.command(ev.cmd); return;
         case 'texReset': this._texturesReset(); return;
         case 'glLost': {
           // A WebGL context in the worker was lost (see JsuiHost._contextLost).
@@ -1093,6 +1102,7 @@ function definePage(I) {
       if (this._padRaf) cancelAnimationFrame(this._padRaf);
       clearTimeout(this._watchdog);
       this._destroyDom();
+      this.audio.destroy();
       const replies = [...this._replies.values()];
       this._replies.clear();
       // The worker frees the runtime, then goes; terminated anyway after 2 s.
@@ -1557,7 +1567,8 @@ export function serve(I, early) {
       const webgpu = await I.webgpuFor(opts);
       const M = await I.loadModuleFor(opts, webgpu);
       host = new RemoteHost(M, m.canvas, { ...opts, _webgpu: webgpu, _size: m.size, _v: 0, gamepads: false,
-        autoStart: false, autoFocus: false });
+        autoStart: false, autoFocus: false,
+        audio: opts.audio === false ? false : (cmd) => post({ ev: 'audio', cmd }) });
       if (opts.workerLoop === 'main') host._ticks = true;
     } catch (e) {
       post({ ev: 'initError', message: msgOf(e) });
@@ -1701,6 +1712,12 @@ export function serve(I, early) {
         return;
       }
       case 'destroySurface': view?.destroy(); return;
+      case 'audioReports':
+        for (const r of op.list) {
+          if (r[0] === 0) host.audio.voiceEnded(r[1], r[2]);
+          else host.audio.soundLoaded(r[1], r[2], r[3]);
+        }
+        return;
       case 'loadUrl': host.loadUrl(op.url); return;
       case 'loadSource': reply(op.id, true, host.loadSource(op.source, op.name)); return;
       case 'reload': host.reload(); return;

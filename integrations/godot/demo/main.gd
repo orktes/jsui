@@ -15,7 +15,8 @@ extends Control
 ##                       TextInput, gamepad focus, the Ping button, clicks
 ##                       that pass through the UI to the game and to a
 ##                       control behind it, a call_ui and host textures
-##                       (set_texture: an ImageTexture and a live SubViewport). Prints PASS / FAIL
+##                       (set_texture: an ImageTexture and a live SubViewport) and UI
+##                       sounds (AudioStreamPlayers on Godot's buses). Prints PASS / FAIL
 ##                       per check and fails the run on any FAIL
 ##   --force-cpu         JsuiView.force_cpu: CPU raster + texture upload even
 ##                       when Godot runs on Vulkan / Metal
@@ -124,6 +125,7 @@ var _failures := 0
 var _testing := false
 var _fake_interop: Object = null
 var _badge_events: Array = []  # "mount:<label>", "render:<label>", "press:<label>", "unmount:<label>"
+var _ui_sounds: Array = []  # the demo UI's sound_played: [voice, url, bus]
 
 
 ## The WebGPUInterop contract (integrations/godot/README.md) with null handles.
@@ -242,6 +244,7 @@ func _ready() -> void:
 	ui.message_received.connect(_on_ui_message)
 	ui.call_requested.connect(_on_ui_call)
 	ui.js_error.connect(func(msg): printerr("[jsui error] ", msg))
+	ui.sound_played.connect(func(voice: int, url: String, bus: String): _ui_sounds.append([voice, url, bus]))
 	ui.grab_focus()  # keyboard / gamepad go to the UI
 	print("JsuiView running=%s bundle=%s dev=%s" % [ui.is_running(), ui.bundle_url, ui.dev_mode])
 	if _bench > 0:
@@ -543,6 +546,7 @@ func _run_self_test() -> void:
 	await _test_host_textures()
 	await _test_lottie()
 	await _test_shaders()
+	await _test_audio()
 
 	if _tour:
 		await _run_tour()
@@ -960,6 +964,161 @@ func _test_shaders() -> void:
 	_check("shader clock", await _wait_for(ticking, 10.0), "time advanced on its own: %d distinct frames" % reds.size())
 	clock.queue_free()
 	await get_tree().process_frame
+
+
+## UI audio: JsuiView plays its runtime's sounds with AudioStreamPlayers of
+## its own on Godot's buses. First the demo UI's (useMusic on 'music', which
+## plays on the "Music" bus of default_bus_layout.tres; <UISounds> ticks on
+## 'ui' from the hovers and clicks above), then an AudioProbe (ui/
+## audio-probe.jsx) of a runtime of its own, driven with call_ui: players on
+## the mapped buses with the voice's pitch and volume, the UI's bus volume,
+## fades, loops, pause, STOP and stop_all_sounds, sounds that play to the end,
+## WAV / MP3 / Ogg decoded from bytes (user:// files: not imported), a
+## missing file and audio_enabled off. JS hears each voice end (`ended`).
+## Headless Godot mixes with its Dummy audio driver, which still advances
+## playback, so sounds finish on their own there too.
+func _test_audio() -> void:
+	var music: Array = ui.get_audio_voices().filter(func(v): return v.bus == "music")
+	_check("music", music.size() == 1 and music[0].godot_bus == "Music" and music[0].loop \
+			and music[0].player is AudioStreamPlayer and music[0].player.playing and music[0].player.bus == "Music",
+		"useMusic: %s" % [music])
+	var ui_buses := {}
+	for s in _ui_sounds:
+		ui_buses[s[2]] = true
+	_check("ui sounds", ui_buses.has("ui") and ui.resolve_audio_bus("ui") == "UI",
+		"<UISounds> played %d sounds (buses %s) on %s" % [_ui_sounds.size(), ui_buses.keys(), ui.resolve_audio_bus("ui")])
+
+	var probe := JsuiView.new()
+	probe.bundle_url = ui.bundle_url
+	probe.component = "AudioProbe"
+	probe.auto_size = true
+	probe.pipeline_cache_path = ""
+	probe.audio_bus_map = {"sfx": "UI"}
+	probe.position = Vector2(16, 160)
+	var ready := [false]
+	var ended := {}  # voice -> reason, as JS saw it (the voice's `ended`)
+	var statuses := {}  # voice -> status (sound_ended)
+	var played := {}  # voice -> bus (sound_played)
+	probe.message_received.connect(func(name: String, data, _json):
+		if name == "audio:ready":
+			ready[0] = true
+		elif name == "audio:ended":
+			ended[int(data.id)] = data.reason)
+	probe.sound_played.connect(func(voice: int, _url: String, bus: String): played[voice] = bus)
+	probe.sound_ended.connect(func(voice: int, status: int): statuses[voice] = status)
+	add_child(probe)
+	if not await _wait_for(func(): return ready[0], 10.0):
+		_check("audio probe", false, "AudioProbe did not mount")
+		probe.queue_free()
+		return
+	var voice_of := func(id: int) -> Dictionary:
+		for v in probe.get_audio_voices():
+			if v.voice == id:
+				return v
+		return {}
+
+	# A voice: an internal AudioStreamPlayer of the view, on the bus
+	# audio_bus_map names, with the voice's pitch and volume.
+	var r = await _ui_call(probe, "audio.play", {"sound": "loop", "bus": "sfx", "volume": 0.5, "pitch": 1.5})
+	var id: int = r.id if r else 0
+	await _wait_for(func(): return played.has(id))
+	var v: Dictionary = voice_of.call(id)
+	var p: AudioStreamPlayer = v.get("player")
+	_check("audio player", p != null and p.get_parent() == probe and not probe.get_children().has(p) \
+			and p.bus == "UI" and _near(p.pitch_scale, 1.5, 0.001) and _near(p.volume_db, linear_to_db(0.5)) \
+			and p.playing and not p.stream.has_loop() and played.get(id) == "sfx",
+		"bus %s, pitch %s, volume_db %s, playing %s" % [p.bus, p.pitch_scale, p.volume_db, p.playing] if p else "no player: %s" % [v])
+	# The UI's own bus volume scales the voice; Godot's bus stays as it is.
+	var ui_bus := AudioServer.get_bus_index("UI")
+	var ui_db := AudioServer.get_bus_volume_db(ui_bus)
+	await _ui_call(probe, "audio.bus", {"bus": "sfx", "volume": 0.25})
+	_check("audio bus volume", await _wait_for(func(): return p and _near(p.volume_db, linear_to_db(0.125))) \
+			and AudioServer.get_bus_volume_db(ui_bus) == ui_db,
+		"voice 0.5 x bus 0.25: volume_db %s" % [p.volume_db if p else null])
+	await _ui_call(probe, "audio.set", {"id": id, "volume": 1.0, "fade": 200})
+	var ramped := await _wait_for(func(): return p and _near(p.volume_db, linear_to_db(0.25)))
+	_check("audio set", ramped, "ramped to 1.0 x bus 0.25: volume_db %s" % [p.volume_db if p else null])
+	# STOP with a fade out: ends after it, as `stopped`.
+	var t0 := Time.get_ticks_msec()
+	await _ui_call(probe, "audio.stop", {"id": id, "fade": 300})
+	var stopped := await _wait_for(func(): return ended.has(id))
+	var took := Time.get_ticks_msec() - t0
+	_check("audio stop", stopped and ended[id] == "stopped" and statuses.get(id) == JsuiView.SOUND_STOPPED and took >= 250,
+		"ended %s after %d ms (fade 300)" % [ended.get(id), took])
+
+	# Played to the end: `finished`. 'ui' plays on the "UI" bus (same name).
+	r = await _ui_call(probe, "audio.play", {"sound": "tick", "bus": "ui"})
+	id = r.id if r else 0
+	var finished := await _wait_for(func(): return ended.has(id))
+	_check("audio finished", finished and ended[id] == "finished" and statuses.get(id) == JsuiView.SOUND_FINISHED \
+			and probe.resolve_audio_bus("ui") == "UI" and probe.resolve_audio_bus("voice") == "Master",
+		"tick.wav ended %s (status %s)" % [ended.get(id), statuses.get(id)])
+
+	# A loop (a copy of the stream with its loop flag on) keeps playing past
+	# its end (4 s at pitch 4: 1 s); pause / resume; stop_all_sounds from Godot.
+	r = await _ui_call(probe, "audio.play", {"sound": "loop", "bus": "music", "loop": true, "pitch": 4.0, "fadeIn": 200})
+	id = r.id if r else 0
+	await _wait_for(func(): return played.has(id))
+	v = voice_of.call(id)
+	p = v.get("player")
+	var fading_in: bool = p != null and p.volume_db < -1.0
+	await _wait(1.6)
+	_check("audio loop", p != null and fading_in and p.playing and p.stream.has_loop() and p.bus == "Music" \
+			and not ended.has(id) and _near(p.volume_db, 0.0),
+		"after 1.6 s: playing %s, loop %s, bus %s, volume_db %s" % [p.playing, p.stream.has_loop(), p.bus, p.volume_db] if p else "no player")
+	await _ui_call(probe, "audio.pause", {"id": id, "paused": true})
+	var paused: bool = p != null and p.stream_paused
+	await _wait(0.3)
+	var kept := not ended.has(id)
+	await _ui_call(probe, "audio.pause", {"id": id, "paused": false})
+	_check("audio pause", paused and kept and p.playing and not p.stream_paused,
+		"stream_paused while paused, playing again after resume")
+	probe.stop_all_sounds("music")
+	_check("stop_all_sounds", await _wait_for(func(): return ended.get(id) == "stopped"), "loop ended %s" % [ended.get(id)])
+
+	# Bytes: user:// files are not imported, so they load through FileAccess
+	# and decode here (MP3, 8-bit WAV, Ogg Vorbis).
+	DirAccess.make_dir_recursive_absolute("user://jsui-audio-selftest")
+	for f in ["blip.mp3", "back.wav", "menu-loop.ogg"]:
+		var out := FileAccess.open("user://jsui-audio-selftest/" + f, FileAccess.WRITE)
+		out.store_buffer(FileAccess.get_file_as_bytes("res://ui/sounds/" + f))
+		out.close()
+	var base := "user://jsui-audio-selftest/"
+	var ids := []
+	for f in ["blip.mp3", "back.wav"]:
+		r = await _ui_call(probe, "audio.play", {"url": base + f, "bus": "ui"})
+		ids.append(int(r.id) if r else 0)
+	var decoded := await _wait_for(func(): return ids.all(func(i): return ended.get(i) == "finished"))
+	var pre = await _ui_call(probe, "audio.preload", {"url": base + "menu-loop.ogg"})
+	_check("audio decode", decoded and pre and pre.ok and _near(pre.duration, 4.0, 0.1),
+		"mp3 / wav ended %s; ogg preload %s" % [ids.map(func(i): return ended.get(i)), pre])
+
+	# A missing file fails (PLAY and PRELOAD); so does every voice with
+	# audio_enabled off.
+	r = await _ui_call(probe, "audio.play", {"url": "sounds/missing.wav"})
+	id = r.id if r else 0
+	pre = await _ui_call(probe, "audio.preload", {"url": "sounds/missing.wav"})
+	_check("audio missing", await _wait_for(func(): return ended.get(id) == "failed") and pre and not pre.ok,
+		"play %s, preload %s" % [ended.get(id), pre])
+	probe.audio_enabled = false
+	r = await _ui_call(probe, "audio.play", {"sound": "tick"})
+	id = r.id if r else 0
+	_check("audio disabled", await _wait_for(func(): return ended.get(id) == "failed") and statuses.get(id) == JsuiView.SOUND_FAILED,
+		"ended %s" % [ended.get(id)])
+	probe.queue_free()
+	await get_tree().process_frame
+
+
+func _near(a: float, b: float, eps := 0.05) -> bool:
+	return absf(a - b) <= eps
+
+
+## call_ui on `view`, awaited: the handler's result, or null.
+func _ui_call(view: JsuiView, name: String, args: Dictionary):
+	var box := []
+	view.call_ui(name, args, func(ok: bool, result): box.append(result if ok else null))
+	await _wait_for(func(): return box.size() > 0, 5.0)
+	return box[0] if box.size() > 0 else null
 
 
 ## An 8x4 image: `left` in its left half, `right` in its right half.

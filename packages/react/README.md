@@ -106,6 +106,16 @@ resizeMode="contain" style={...} />` shows texture `name` like an `Image`
 keys / subscribe` read the same. New contents repaint the view without any
 JS.
 
+Audio (played by the host: Godot's audio buses, Web Audio in the browser,
+the built-in miniaudio backend natively; see docs/AUDIO.md):
+`Sound.play(source, { bus, volume, pitch, pan, loop, fadeIn, offset })`
+returns a voice (`stop({ fade })`, `pause()`, `resume()`, `setVolume(v, {
+fade })`, `ended` promise), `Sound.preload`, `Sound.setBusVolume / setBusMuted /
+stopAll`, `useSound(source)` (a preloaded player), `useMusic(source, { fadeIn,
+fadeOut, volume })` (plays while mounted, crossfades), and interaction sounds:
+`<UISounds sounds={{ hoverIn, focus, press }}>` for every pressable element
+inside, or a `sounds` prop per Pressable / Touchable.
+
 Lottie: `<LottieView source={require('./anim.json')} autoPlay loop />` with
 lottie-react-native's props (`source` as an object, JSON text or `{uri}`,
 `progress` (also an `Animated` value, on the native driver too), `speed`,

@@ -272,6 +272,7 @@ bool run(const Options& o, Result* out) {
   BenchMessages messages;
   JsuiConfig cfg;
   jsui_config_init(&cfg);
+  cfg.audio_disabled = 1;  // headless: no sound device
   cfg.width = o.width;
   cfg.height = o.height;
   cfg.js_timeout_ms = -1;

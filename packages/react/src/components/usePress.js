@@ -18,8 +18,9 @@
 // Handlers are created once per component and read the latest props through
 // a ref, so re-renders do not change host props (no bridge traffic).
 
-import { useEffect, useRef, useState } from 'react';
+import { useContext, useEffect, useRef, useState } from 'react';
 import { now } from '../native.js';
+import { UISoundsContext, playUISound } from '../sound.js';
 
 const DEFAULT_LONG_PRESS_MS = 500;
 const DEFAULT_MIN_PRESS_MS = 130;
@@ -36,6 +37,11 @@ export const IDLE_STATE = STATES[0];
 function isActivationKey(e) {
   const k = e.key;
   return k === 'Enter' || k === ' ' || k === 'Spacebar' || k === 'NumpadEnter';
+}
+
+function pointerType(e) {
+  const ne = e && (e.nativeEvent || e);
+  return ne ? ne.pointerType : undefined;
 }
 
 function delayOf(v, fallback = 0) {
@@ -59,6 +65,7 @@ class PressController {
     this.longFired = false;
     this.lastEnd = -1e9;
     this.setBits = null;  // React state setter, or null when not tracked
+    this.soundCtx = null;  // UISounds defaults
     this.mounted = true;
     const self = this;
     this.handlers = {
@@ -106,6 +113,14 @@ class PressController {
     return !!this.props.disabled;
   }
 
+  // Interaction sound `event` (props.sounds, else the UISounds defaults for
+  // elements that do something when pressed).
+  sound(event) {
+    const p = this.props;
+    if (p.sounds === undefined && !this.soundCtx) return;
+    playUISound(event, p.sounds, this.soundCtx, !!(p.onPress || p.onLongPress || p.onPressIn));
+  }
+
   // Delivers a pending (delayed) onPressOut right away.
   flushPressOut() {
     if (!this.pressOutTimer) return;
@@ -142,6 +157,7 @@ class PressController {
         if (!this.source || !this.mounted) return;
         if (!this.active) this.activate(e);
         this.longFired = true;
+        this.sound('longPress');
         if (this.props.onLongPress) this.props.onLongPress(e);
       }, ms);
     }
@@ -151,6 +167,7 @@ class PressController {
     this.active = true;
     this.activatedAt = now();
     this.set(PRESSED, true);
+    this.sound('pressIn');
     if (this.props.onPressIn) this.props.onPressIn(e);
   }
 
@@ -186,7 +203,10 @@ class PressController {
     } else {
       out();
     }
-    if (activate && !this.longFired && p.onPress) p.onPress(e);
+    if (activate && !this.longFired) {
+      this.sound('press');
+      if (p.onPress) p.onPress(e);
+    }
   }
 
   pointerDown(e) {
@@ -216,6 +236,7 @@ class PressController {
     if (this.disabled()) return;
     if (!!(this.bits & HOVERED) === on) return;
     this.set(HOVERED, on);
+    if (on && pointerType(e) !== 'touch') this.sound('hoverIn');
     const pending = this.hoverPending;
     clearTimeout(this.hoverTimer);
     this.hoverTimer = null;
@@ -277,8 +298,13 @@ class PressController {
 
   focus(on, e) {
     const p = this.props;
+    const was = !!(this.bits & FOCUSED);
     this.set(FOCUSED, on);
     if (!on && this.source === 'key') this.end(e, false);
+    // Focus moved by keyboard / gamepad navigation from another element (not
+    // a click, not the first focus of a screen).
+    const ne = e && (e.nativeEvent || e);
+    if (on && !was && ne && ne.focusVisible && ne.relatedTarget != null && !this.disabled()) this.sound('focus');
     const f = on ? p.onFocus : p.onBlur;
     if (f) f(e);
   }
@@ -304,6 +330,7 @@ export function usePress(props, trackState) {
   if (ref.current === null) ref.current = new PressController();
   const c = ref.current;
   c.props = props;
+  c.soundCtx = useContext(UISoundsContext);
   const [bits, setBits] = useState(0);
   c.setBits = trackState ? setBits : null;
   useEffect(() => {
@@ -343,6 +370,7 @@ export const PRESS_PROPS = [
   'android_disableSound',
   'cancelable',
   'testOnly_pressed',
+  'sounds',
   'touchSoundDisabled',
   'rejectResponderTermination',
 ];

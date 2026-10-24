@@ -53,6 +53,10 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'text/javascript', 'cache-control': 'no-store' });
     return res.end(dev.bundle);
   }
+  if (url.pathname.startsWith('/audio/tone-')) {  // /audio/tone-<ms>.wav: a 440 Hz sine WAV
+    res.writeHead(200, { 'content-type': 'audio/wav' });
+    return res.end(toneWav(parseInt(url.pathname.slice(12), 10) || 100));
+  }
   if (url.pathname === '/__red.svg') {  // an image, loaded cross-origin (localhost) without CORS
     res.writeHead(200, { 'content-type': 'image/svg+xml' });
     return res.end('<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="red"/></svg>');
@@ -80,6 +84,15 @@ const server = http.createServer((req, res) => {
   res.writeHead(200, { 'content-type': MIME[path.extname(file)] || 'application/octet-stream' });
   fs.createReadStream(file).pipe(res);
 });
+function toneWav(ms) {
+  const rate = 22050, n = Math.round((rate * ms) / 1000), data = Buffer.alloc(n * 2);
+  for (let i = 0; i < n; i++) data.writeInt16LE(Math.round(Math.sin((2 * Math.PI * 440 * i) / rate) * 8000), i * 2);
+  const h = Buffer.alloc(44);
+  h.write('RIFF', 0); h.writeUInt32LE(36 + data.length, 4); h.write('WAVEfmt ', 8); h.writeUInt32LE(16, 16);
+  h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22); h.writeUInt32LE(rate, 24); h.writeUInt32LE(rate * 2, 28);
+  h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34); h.write('data', 36); h.writeUInt32LE(data.length, 40);
+  return Buffer.concat([h, data]);
+}
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const ORIGIN = `http://127.0.0.1:${server.address().port}`;
 const PAGE = `${ORIGIN}/test/page.html`;
@@ -448,6 +461,61 @@ test('several runtimes on one page are independent', async ({ page }) => {
   await frames(page, 2);
   const [p2] = await screenPixels(page, '#a', [BANDS[2]]);
   assert(near(p2, [255, 255, 0, 255]), `a keeps running after b destroyed: ${fmt(p2)}`);
+}, {}, { worker: true });
+
+// UI audio on real Web Audio (web/jsui-audio.js): locked until a gesture
+// (one-shots end failed, loops wait), a click unlocks it, voices finish /
+// stop, preloads report their duration, and destroy closes the context.
+test('audio: autoplay lock, unlock by a click, voices end, preload, destroy', async ({ page }) => {
+  // Playwright's evaluate() is a user activation (navigator.userActivation
+  // .hasBeenActive turns true, and the host would start audio at once): hide it.
+  await page.addInitScript(() => Object.defineProperty(navigator, 'userActivation', { value: { hasBeenActive: false } }));
+  await page.reload();
+  await page.waitForFunction(() => window.testReady);
+  await mount(page, { jsui: { bundleUrl: 'fixtures/audio.js' } });
+  const msgs = (name) => page.evaluate((n) => window.hosts.ui.messages.filter(([m]) => m === n).map(([, d]) => d), name);
+  const send = (name, data) => page.evaluate(([n, d]) => window.hosts.ui.postMessage(n, d), [name, data]);
+  const reports = async () => (await msgs('audio')).flat();
+  const waitFor = async (fn, what, ms = 5000) => {
+    for (const end = Date.now() + ms; Date.now() < end; await page.waitForTimeout(50)) if (await fn()) return;
+    throw new Error('timed out: ' + what + ' ' + JSON.stringify(await reports()));
+  };
+  // Worker mode: the UI's answer arrives a message later.
+  const voiceOf = async (tag) => {
+    const find = async () => (await msgs('voice')).find((v) => v.tag === tag);
+    await waitFor(find, 'voice ' + tag);
+    return (await find()).voice;
+  };
+  const url = (ms) => `${ORIGIN}/audio/tone-${ms}.wav`;
+  assert(!(await page.evaluate(() => window.hosts.ui.audio.unlocked)), 'locked before a gesture');
+  await send('play', { tag: 'early', url: url(100), bus: 'ui' });
+  await send('play', { tag: 'music', url: url(1000), bus: 'music', loop: true, fade: 200 });
+  await send('preload', { url: url(250) });
+  const early = await voiceOf('early'), music = await voiceOf('music');
+  await waitFor(async () => (await reports()).some((r) => r[0] === 0 && r[1] === early), 'early one-shot ended');
+  assert((await reports()).find((r) => r[1] === early)[2] === -1, 'a locked one-shot ends FAILED');
+  await waitFor(async () => (await reports()).some((r) => r[0] === 1), 'preload reported');
+  const loaded = (await reports()).find((r) => r[0] === 1);
+  assert(loaded[2] === 1 && Math.abs(loaded[3] - 0.25) < 0.01, `preload decoded while locked: ${JSON.stringify(loaded)}`);
+
+  await page.mouse.click(10, 10);  // a user activation
+  await page.waitForFunction(() => window.hosts.ui.audio.unlocked && window.hosts.ui.audio.context.state === 'running');
+  await waitFor(() => page.evaluate(() => window.hosts.ui.audio.stats.playing === 1), 'the waiting loop started');
+  await send('play', { tag: 'shot', url: url(150), bus: 'ui' });
+  const shot = await voiceOf('shot');
+  await waitFor(async () => (await reports()).some((r) => r[0] === 0 && r[1] === shot), 'one-shot finished');
+  assert((await reports()).find((r) => r[1] === shot)[2] === 0, 'one-shot ends FINISHED');
+  await send('bus', { bus: 'music', volume: 0.3, muted: true });
+  await send('stop', { voice: music, fade: 100 });
+  await waitFor(async () => (await reports()).some((r) => r[0] === 0 && r[1] === music), 'loop stopped');
+  assert((await reports()).find((r) => r[1] === music)[2] === 1, 'stopped loop ends STOPPED');
+  const state = await page.evaluate(async () => {
+    const a = window.hosts.ui.audio, ctx = a.context;
+    window.hosts.ui.destroy();
+    await new Promise((r) => setTimeout(r, 50));
+    return ctx.state;
+  });
+  assert(state === 'closed', `context closed with the last runtime: ${state}`);
 }, {}, { worker: true });
 
 test('moduleVersions: only deployed modules are tried, jsui.js and jsui.wasm carry the version', async ({ page }) => {

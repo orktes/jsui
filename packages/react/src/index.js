@@ -38,6 +38,7 @@ import { installHostBuffer } from './hostBuffer.js';
 import { installHostTexture, HostTexture } from './hostTexture.js';
 import { LottieView } from './lottie.js';
 import { ShaderView, sksl, compileShader, precompileShaders } from './shader.js';
+import { Sound, SoundInstance, SoundEndReason, useSound, useMusic, UISounds, UISoundsContext, useUISound } from './sound.js';
 import { installInspector, inspect } from './inspect.js';
 
 installGlobals();
@@ -58,6 +59,14 @@ export {
   HostTexture,
   LottieView,
   ShaderView,
+  Sound,
+  SoundInstance,
+  SoundEndReason,
+  useSound,
+  useMusic,
+  UISounds,
+  UISoundsContext,
+  useUISound,
   sksl,
   compileShader,
   precompileShaders,

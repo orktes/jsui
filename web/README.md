@@ -20,6 +20,7 @@ jsui.setBuffer('enemies', new Float32Array(positions));      // every frame, no 
 const view = jsui.mapBuffer('enemies', Float32Array, 90);    // or write in place (zero copy) ...
 jsui.commitBuffer('enemies');                                // ... then publish
 jsui.bindVideo('trailer', videoElement);                     // <HostTexture name="trailer" /> in the UI
+jsui.audio.setVolume(0.8);                                   // Sound.play / useMusic / <UISounds> play through Web Audio
 ```
 
 ## Several root views (surfaces)
@@ -140,6 +141,45 @@ const size = useHostTexture('trailer');            // { width, height } once set
   A source the browser refuses (`SecurityError`) is logged once and not tried
   again until its URL changes; a texture uploaded before it (a poster) stays.
   Browsers only autoplay muted video; unmute after a click.
+
+## Audio (Web Audio)
+
+The UI's sounds (`Sound.play`, `useSound`, `useMusic`, `<UISounds>`,
+Pressable `sounds`; see [docs/AUDIO.md](../docs/AUDIO.md)) play through Web
+Audio (`jsui-audio.js`): one `AudioContext` for the page, a gain per bus,
+decoded sounds cached by URL, long files (over 2 MiB) streamed through an
+`<audio>` element.
+
+```js
+jsui.audio.unlocked;                          // false until the first click / tap / key press
+jsui.on('audiounlock', () => hideSoundHint());
+jsui.audio.setVolume(0.5, { fade: 300 });     // the runtime's master volume
+jsui.audio.muted = true;
+jsui.audio.unlock();                          // from your own gesture handler ("Press any key")
+jsui.audio.context;                           // the AudioContext (null before the first gesture)
+
+createJsui({ canvas, bundleUrl, audio: false });                       // no sound
+createJsui({ canvas, bundleUrl, audio: { context: myAudioContext } }); // into your own context
+createJsui({ canvas, bundleUrl, audio: (cmd, audio) => {               // your own player
+  // cmd: { op, voice, sound, bus, volume, pitch, pan, fadeMs, offset, loop, muted } (AudioOp)
+  // every PLAY ends with audio.voiceEnded(cmd.voice, AudioStatus.FINISHED | STOPPED | FAILED);
+  // every PRELOAD with audio.soundLoaded(cmd.sound, ok, durationSeconds)
+} });
+```
+
+- **Autoplay**: browsers keep audio silent until a user gesture. The host
+  creates / resumes the context on the first `pointerdown`, `pointerup`,
+  `mousedown`, `keydown`, `touchend` or `click` anywhere on the page, and
+  again when the page becomes visible. Until then one-shot sounds are dropped
+  (their `ended` resolves `{ reason: 'failed' }`; those the unlocking click
+  itself triggers, such as its press sound, still play), looping ones (music) wait
+  and start with their fade-in once audio unlocks. **Gamepad buttons are not
+  a user activation** in any browser: show a "press any key / click to
+  enable sound" hint for controller players.
+- Formats are whatever the browser's `decodeAudioData` takes (WAV, MP3, Ogg
+  Vorbis / Opus except older Safari, AAC). Cross-origin sounds need CORS.
+- In Node (`@orktes/jsui-cli` headless) the runtime is made with audio off:
+  sounds end `'failed'`, preloads reject, nothing throws.
 
 ## Input pass-through (HUD over a game)
 

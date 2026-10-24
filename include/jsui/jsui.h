@@ -333,6 +333,101 @@ JSUI_API int jsui_texture_updated(JsuiRuntime* rt, const char* key);
  * it existed. */
 JSUI_API int jsui_remove_texture(JsuiRuntime* rt, const char* key);
 
+/* ------------------------------------------------------------------ Audio
+ *
+ * UI sounds (hover, press, focus moves, confirm / back), music and ambience.
+ * The UI asks for sounds; the host plays them. In JS:
+ *
+ *     Sound.play(require('./ui/confirm.wav'), { bus: 'ui', volume: 0.8 });
+ *     useMusic(require('./menu.ogg'), { fadeIn: 1500 });        // plays while mounted
+ *     <Pressable sounds={{ hoverIn: tick, press: confirm }} />  // or <UISounds> for a whole screen
+ *
+ * Every request becomes a JsuiAudioCommand passed to the audio handler
+ * (JsuiConfig.on_audio). A game engine routes them through its own mixer
+ * (Godot: AudioStreamPlayers on its audio buses), so UI sounds follow the
+ * game's volume settings and effects. Without a handler the runtime plays
+ * them itself: the native library's built-in backend (miniaudio, built when
+ * JSUI_AUDIO is ON, the default on desktop platforms) and, in the browser,
+ * Web Audio in web/jsui-web.js. JsuiConfig.audio_disabled = 1 turns sound
+ * off (headless tools, tests). The built-in backend opens the output device
+ * on the first PLAY / PRELOAD; JSUI_AUDIO_BACKEND=null (environment) makes
+ * it play to a null device (CI without sound hardware). See docs/AUDIO.md.
+ *
+ * Sounds are URLs resolved against the base URL (the bundler emits imported
+ * .wav / .ogg / .mp3 / .flac files next to the bundle). A handler loads them
+ * as it likes; jsui_fetch() reads them through the runtime's own loader (dev
+ * server, file system, a custom JsuiLoadFn).
+ *
+ * Voices: every PLAY carries a new voice id (never 0). The handler reports
+ * the end of each voice exactly once with jsui_audio_voice_ended(): it
+ * played to the end, it was stopped (after the fade out), or it could not
+ * load / play. A looping voice ends only when stopped. Commands for a voice
+ * that has ended are ignored by the handler.
+ *
+ * Buses are named groups of voices ("ui", "sfx", "music", "voice", ... any
+ * name): the UI's own volume / mute per group, multiplied with each voice's
+ * volume. Handlers that map buses to an engine's buses keep the engine's
+ * bus volumes separate (the game's settings stay the game's).
+ *
+ * Volumes are linear gains (1: unchanged, 0: silent). pitch is the playback
+ * rate (1: normal; changes pitch and speed together). pan: -1 left .. 1
+ * right. fade_ms ramps volume changes (PLAY: fade in from silence; STOP:
+ * fade out, then end; SET / BUS: ramp to the new value).
+ */
+typedef enum JsuiAudioOp {
+    JSUI_AUDIO_PRELOAD = 0,  /* sound: load / decode ahead so a later PLAY starts at once. Answer with
+                                jsui_audio_sound_loaded() (now or later). */
+    JSUI_AUDIO_UNLOAD = 1,   /* sound: no longer needed (voices playing it may finish) */
+    JSUI_AUDIO_PLAY = 2,     /* voice, sound, bus, volume, pitch, pan, loop, fade_ms (fade in), offset_s */
+    JSUI_AUDIO_STOP = 3,     /* voice, fade_ms (fade out, then end) */
+    JSUI_AUDIO_PAUSE = 4,    /* voice */
+    JSUI_AUDIO_RESUME = 5,   /* voice */
+    JSUI_AUDIO_SET = 6,      /* voice: volume, pitch, pan (ramped over fade_ms) */
+    JSUI_AUDIO_BUS = 7,      /* bus: volume (ramped over fade_ms), muted. Buses start at volume 1, unmuted. */
+    JSUI_AUDIO_STOP_ALL = 8  /* bus (NULL: every voice), fade_ms. Sent with bus NULL and fade 0 when the JS
+                                context goes away (jsui_reload, dev reloads, jsui_destroy). */
+} JsuiAudioOp;
+
+typedef struct JsuiAudioCommand {
+    JsuiAudioOp op;
+    uint64_t voice;     /* PLAY, STOP, PAUSE, RESUME, SET */
+    const char* sound;  /* PRELOAD, UNLOAD, PLAY: absolute URL */
+    const char* bus;    /* PLAY, BUS: never NULL; STOP_ALL: NULL for every bus */
+    float volume;       /* PLAY, SET, BUS */
+    float pitch;        /* PLAY, SET */
+    float pan;          /* PLAY, SET */
+    float fade_ms;      /* PLAY, STOP, SET, BUS, STOP_ALL */
+    double offset_s;    /* PLAY: start this far into the sound */
+    int loop;           /* PLAY */
+    int muted;          /* BUS */
+} JsuiAudioCommand;
+
+/* Called synchronously (usually while JS runs) on the runtime's thread. The
+ * command and its strings are valid only during the call. */
+typedef void (*JsuiAudioFn)(void* user, const JsuiAudioCommand* cmd);
+
+enum {
+    JSUI_AUDIO_FINISHED = 0, /* played to the end */
+    JSUI_AUDIO_STOPPED = 1,  /* STOP / STOP_ALL */
+    JSUI_AUDIO_FAILED = -1   /* the sound could not be loaded, decoded or played */
+};
+/* Voice `voice` ended (JSUI_AUDIO_FINISHED / _STOPPED / _FAILED). Call it
+ * exactly once per PLAY, also from inside the handler; JS hears about it in
+ * the next jsui_tick(). Unknown or already ended voices are ignored. */
+JSUI_API void jsui_audio_voice_ended(JsuiRuntime* rt, uint64_t voice, int status);
+/* Sound `sound` (the URL from the command) finished loading: ok 1 with its
+ * duration in seconds (< 0: unknown), or ok 0. Resolves JS's
+ * Sound.preload() promises for it. */
+JSUI_API void jsui_audio_sound_loaded(JsuiRuntime* rt, const char* sound, int ok, double duration_s);
+
+/* Reads `url` (relative URLs resolve against the base URL) through the
+ * runtime's loader, the same way the bundle and images are read. `done` runs
+ * once on the runtime's thread inside a later jsui_tick() with an HTTP-like
+ * status (200 ok, 404 missing, 0 network error) and the bytes (valid only
+ * during the call). It never runs if the runtime is destroyed first. */
+typedef void (*JsuiFetchFn)(void* user, int status, const char* content_type, const void* data, size_t size);
+JSUI_API void jsui_fetch(JsuiRuntime* rt, const char* url, JsuiFetchFn done, void* user);
+
 /* ---------------------------------------------------------------- Config */
 
 typedef struct JsuiConfig {
@@ -360,6 +455,10 @@ typedef struct JsuiConfig {
     int js_memory_limit_mb; /* default 256 */
     int js_stack_size_kb;   /* default 1024 (512 on Windows, whose threads get 1 MB stacks) */
     int js_timeout_ms;      /* default 5000 */
+
+    JsuiAudioFn on_audio;   /* plays the UI's sounds (see "Audio"); NULL: the built-in backend */
+    void* audio_user;
+    int audio_disabled;     /* 1: no sound at all (every voice fails, preloads fail) */
 } JsuiConfig;
 
 JSUI_API void jsui_config_init(JsuiConfig* cfg);

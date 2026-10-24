@@ -33,6 +33,7 @@
     ".": "./jsui-web.js",
     "./jsui-webgpu.js": "./jsui-webgpu.js",
     "./jsui-textures.js": "./jsui-textures.js",
+    "./jsui-audio.js": "./jsui-audio.js",
     "./jsui-worker.js": "./jsui-worker.js",
     "./dist/*": "./dist/*",
     "./dist-webgl/*": "./dist-webgl/*",
@@ -43,6 +44,7 @@
     "jsui-web.js",
     "jsui-webgpu.js",
     "jsui-textures.js",
+    "jsui-audio.js",
     "jsui-worker.js",
     "dist/jsui.js",
     "dist/jsui.wasm",
@@ -58,7 +60,7 @@
   "scripts": {
     "test:web": "node test/node-smoke.mjs && node test/browser.test.mjs",
     "test:node": "node test/node-smoke.mjs",
-    "test:unit": "node --test test/textures.test.mjs",
+    "test:unit": "node --test test/textures.test.mjs test/audio.test.mjs",
     "test:browser": "node test/browser.test.mjs",
     "serve": "node test/serve.mjs",
     "prepack": "node scripts/check-dist.mjs"

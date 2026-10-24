@@ -95,6 +95,19 @@
 // OffscreenCanvases; this thread keeps the DOM side (input listeners, sizes,
 // cursor, gamepad polling, video frame capture). Same API, but calls that
 // answer from the runtime return Promises there (see web/README.md).
+//
+// UI audio (include/jsui/jsui.h "Audio", docs/AUDIO.md): the sounds the UI
+// plays (Sound.play, useMusic, <UISounds>, Pressable `sounds`) go through
+// Web Audio (web/jsui-audio.js): one AudioContext per page, a gain per bus,
+// decoded sounds cached by URL. Browsers allow sound only after a user
+// gesture: the host unlocks audio on the first click / tap / key press;
+// until then one-shot sounds are dropped (they end as 'failed') and music
+// (looping voices) starts once audio unlocks. Gamepad buttons do not count.
+//
+//   jsui.audio.unlocked; jsui.on('audiounlock', () => ...);
+//   jsui.audio.setVolume(0.5, { fade: 300 }); jsui.audio.muted = true;
+//   createJsui({ ..., audio: false })                  // silence
+//   createJsui({ ..., audio: (cmd, audio) => ... })    // your own player (like JsuiConfig.on_audio)
 
 /** @typedef {{
  *   canvas?: HTMLCanvasElement,  // the main surface's canvas; null / omitted: not shown (a page
@@ -140,6 +153,10 @@
  *   autoStart?: boolean,         // start the frame loop immediately (default true)
  *   trapTab?: boolean,           // keep Tab inside the UI even if unhandled (default true, false
  *                                // with passThrough; false lets an unhandled Tab move page focus on)
+ *   audio?: boolean|object|Function, // UI sounds (web/jsui-audio.js): true / omitted: Web Audio
+ *                                // ({ context, streamBytes } options as an object); false: none;
+ *                                // a function (cmd, jsui.audio) plays the commands itself and
+ *                                // reports with jsui.audio.voiceEnded / soundLoaded
  *   passThrough?: boolean,       // the canvas is a layer over the page (a game's canvas): input the
  *                                // UI doesn't capture reaches what is under it, consumed input
  *                                // doesn't (default false). Turns autoFocus / trapTab off by default.
@@ -155,8 +172,10 @@
 import { SharedWebGPU, WebGPURenderer, requestWebGPU } from './jsui-webgpu.js';
 import { HostTextureSet, corsWarning, defaultOpaque, isVideoFrame, sourceSize, taintKey, videoFramesContextLost,
   watchVideoFrames } from './jsui-textures.js';
+import { JsuiAudio } from './jsui-audio.js';
 
 export { requestWebGPU, webgpuSupported } from './jsui-webgpu.js';
+export { AudioOp, AudioStatus } from './jsui-audio.js';
 
 const modules = new Map();  // module URL -> Promise<Module>
 
@@ -274,7 +293,7 @@ function replaceCanvas(old) {
 // so the worker's copy of this file and the page's stay one module graph each).
 function internals() {
   return { DomView, CanvasView, JsuiHost, JsuiSurface, HIT_POINTER, HIT_SCROLL, NAV_KEYS, webgpuFor, loadModuleFor,
-    bufferType, BUFFER_TYPES, sourceSize, defaultOpaque, isVideoFrame, transferred, replaceCanvas, fontArgs, fontList,
+    bufferType, BUFFER_TYPES, sourceSize, defaultOpaque, isVideoFrame, transferred, replaceCanvas, fontArgs, fontList, JsuiAudio,
     corsWarning, taintKey, videoFramesContextLost, watchVideoFrames, hostUrl: import.meta.url, workerName: WORKER_NAME };
 }
 const WORKER_NAME = 'jsui-host';
@@ -422,7 +441,8 @@ class DomView {
 
   /** Subscribe: 'message' (name, data), 'state' (key, value: HostState.set in the UI),
    * 'call' (id, name, args: Host.call without a handle() handler), 'callCancel' (id),
-   * 'error' (message), 'log' (level, text), 'frame' (stats), 'renderer' (name, reason). */
+   * 'error' (message), 'log' (level, text), 'frame' (stats), 'renderer' (name, reason),
+   * 'audiounlock' (sound can play now). */
   on(type, cb) {
     let set = this.listeners.get(type);
     if (!set) this.listeners.set(type, (set = new Set()));
@@ -1682,6 +1702,8 @@ class JsuiHost extends CanvasView {
     this._uiCalls = new Map();   // callUi id -> {resolve, reject}
     this._textures = null;       // HostTextureSet (setTexture), made on first use
     this.rootTag = 1;
+    /** UI audio (web/jsui-audio.js): unlocked, unlock(), setVolume(), muted, context. */
+    this.audio = new JsuiAudio(this, opts.audio);
 
     (M.__jsuiHosts ??= new Map()).set(this.hostId, {
       onMessage: (name, json) => {
@@ -1708,6 +1730,7 @@ class JsuiHost extends CanvasView {
         }
         try { p.resolve(JSON.parse(payload)); } catch (e) { p.reject(e); }
       },
+      onAudio: (cmd) => this.audio.command(cmd),
       onLog: (level, text) => {
         if (!this._emit('log', level, text)) {
           (level >= 3 ? console.error : level === 2 ? console.warn : level === 0 ? console.debug : console.log)(
@@ -1722,7 +1745,7 @@ class JsuiHost extends CanvasView {
     // Lives as long as the runtime (JsuiConfig keeps the pointer).
     this._baseUrlPtr = this._bundleUrl ? this._newString(this._bundleUrl) : 0;
     this.rt = M._jsui_web_create(this.hostId, this.width, this.height, this.pixelRatio, opts.devMode ? 1 : 0,
-      this._baseUrlPtr);
+      this._baseUrlPtr, this.audio.enabled ? 1 : 0);
     if (!this.rt) throw new Error('jsui_web_create failed');
     if (opts.devMode && M._jsui_set_dev_session) {
       this._withStrings([opts.devName ?? null], (n) => M._jsui_set_dev_session(this.rt, n, opts.devSession === false ? 0 : 1));
@@ -2164,9 +2187,11 @@ class JsuiHost extends CanvasView {
     }
     this._destroyView();
     const M = this.module;
-    M._jsui_destroy(this.rt);
+    M._jsui_destroy(this.rt);  // stops every voice (STOP_ALL)
     this.rt = 0;
     M.__jsuiHosts.delete(this.hostId);
+    // Voices, nodes; the page's AudioContext closes with the last runtime.
+    this.audio.destroy();
     if (this._baseUrlPtr) M._free(this._baseUrlPtr);
     this._baseUrlPtr = 0;
     if (this._stage) M._free(this._stage);

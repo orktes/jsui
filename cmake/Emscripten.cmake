@@ -63,6 +63,7 @@ target_compile_definitions(jsui_quickjs PRIVATE EMSCRIPTEN=1)
 file(READ "${CMAKE_SOURCE_DIR}/include/jsui/jsui.h" _jsui_h)
 string(REGEX MATCHALL "JSUI_API[^;(]*[ *](jsui_[a-z0-9_]+)[ ]*\\(" _jsui_decls "${_jsui_h}")
 set(_jsui_exports _malloc _free _jsui_web_create _jsui_web_call_ui _jsui_web_resolve_call _jsui_web_reject_call
+    _jsui_web_audio_voice_ended
     _jsui_emscripten_fetch_begin _jsui_emscripten_fetch_end)
 foreach(_d ${_jsui_decls})
   string(REGEX REPLACE ".*[ *](jsui_[a-z0-9_]+)[ ]*\\($" "_\\1" _name "${_d}")

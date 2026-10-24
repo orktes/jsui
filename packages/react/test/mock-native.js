@@ -25,6 +25,8 @@ function detach(n) {
 
 const TYPES = new Set(['View', 'Text', 'RawText', 'Image', 'ScrollView', 'TextInput', 'LottieView', 'ShaderView']);
 
+const mockResolve = (url) => (/^[a-z]+:/.test(url) ? url : 'http://bundle/' + url.replace(/^\.\//, ''));
+
 export const mock = {
   nodes,
   calls,
@@ -261,6 +263,32 @@ globalThis.__jsui_native = {
   bufferKeys() {
     return Array.from(hostBuffers.keys());
   },
+  // Audio (src/js/bridge_audio.cpp): records commands in mock.audio.
+  audioPlay(url, bus, volume, pitch, pan, loop, fadeMs, offset) {
+    const id = mock.nextVoice++;
+    mock.audio.push(['play', { id, url: mockResolve(url), bus, volume, pitch, pan, loop, fadeMs, offset }]);
+    return id;
+  },
+  audioVoice(op, voice, volume, pitch, pan, fadeMs) {
+    mock.audio.push(['voice', { op, voice, volume, pitch, pan, fadeMs }]);
+  },
+  audioBus(bus, volume, muted, fadeMs) {
+    mock.audio.push(['bus', { bus, volume, muted, fadeMs }]);
+  },
+  audioStopAll(bus, fadeMs) {
+    mock.audio.push(['stopAll', { bus, fadeMs }]);
+  },
+  audioPreload(url) {
+    mock.audio.push(['preload', mockResolve(url)]);
+    return mockResolve(url);
+  },
+  audioUnload(url) {
+    mock.audio.push(['unload', mockResolve(url)]);
+    return mockResolve(url);
+  },
+  audioResolve(url) {
+    return mockResolve(url);
+  },
   // Host textures (src/render/host_textures.cpp): [width, height, version].
   texture(key) {
     const e = hostTextures.get(key);
@@ -351,6 +379,16 @@ Object.assign(mock, {
     mock.dirtyTextures.add(key);
   },
   dirtyTextures: new Set(),
+  /** Audio commands the UI sent: [kind, args]. */
+  audio: [],
+  nextVoice: 1,
+  /** Embedder side: jsui_audio_voice_ended / jsui_audio_sound_loaded, delivered at once (a tick). */
+  audioEnded(voice, status = 0) {
+    globalThis.__jsui_onAudio([[0, voice, status]]);
+  },
+  audioLoaded(url, ok = 1, duration = -1) {
+    globalThis.__jsui_onAudio([[1, mockResolve(url), ok, duration]]);
+  },
   tickTextures() {
     const keys = Array.from(mock.dirtyTextures);
     mock.dirtyTextures.clear();

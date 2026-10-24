@@ -13,7 +13,7 @@ const { default: createJsuiModule } = await import(pathToFileURL(path.join(WEB, 
 const M = await createJsuiModule();
 
 const W = 1920, H = 1080;
-const rt = M._jsui_web_create(0, W, H, 1, 0, 0);
+const rt = M._jsui_web_create(0, W, H, 1, 0, 0, 0);
 const src = fs.readFileSync(bundle, 'utf8');
 const n = M.lengthBytesUTF8(src);
 const p = M._malloc(n + 1);

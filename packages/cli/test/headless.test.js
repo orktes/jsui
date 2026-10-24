@@ -158,6 +158,36 @@ test('launch: render, inspect, focus, input, state, buffers, calls', { skip }, a
   }
 });
 
+// Node has no Web Audio: the headless runtime is made with audio off, so
+// sounds end 'failed' at once, preloads reject, and nothing throws.
+test('launch: audio is off headless (voices fail, preloads reject, no errors)', { skip }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'jsui-headless-audio-'));
+  await writeFile(path.join(dir, 'sound.jsx'), `import React, { useEffect } from 'react';
+import { Text } from 'react-native';
+import { Host, Sound, UISounds, useMusic } from '@orktes/jsui-react';
+export default function Screen() {
+  const music = useMusic('music.ogg', { fadeIn: 500 });
+  useEffect(() => {
+    Sound.play('tick.wav', { bus: 'ui' }).ended.then((e) => Host.postMessage('ended', e.reason));
+    Sound.preload('tick.wav').then(() => Host.postMessage('preload', 'ok'), () => Host.postMessage('preload', 'rejected'));
+    Sound.setBusVolume('music', 0.5, { fade: 200 });
+    Sound.stopAll({ fade: 100 });
+  }, []);
+  return <UISounds sounds={{ press: 'tick.wav' }}><Text testID="t">sound</Text></UISounds>;
+}
+`);
+  const app = await launch({ entry: path.join(dir, 'sound.jsx'), width: 100, height: 100 });
+  try {
+    await app.ready();
+    await app.wait(50);
+    const got = Object.fromEntries(app.messages.map((m) => [m.name, m.data]));
+    assert.deepEqual(got, { ended: 'failed', preload: 'rejected' });
+    assert.deepEqual(app.errors, []);
+  } finally {
+    app.close();
+  }
+});
+
 test('cli: screenshot, inspect, run (json + js), default-export screens', { skip }, async () => {
   const dir = await fixture();
   const shot = path.join(dir, 'shots', 'a.png');

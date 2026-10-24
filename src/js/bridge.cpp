@@ -565,6 +565,7 @@ JSValue js_evalScript(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
 }  // namespace
 
 void installAnimatedBridge(JsEngine::Impl& impl, JSValue native);  // bridge_animated.cpp
+void installAudioBridge(JsEngine::Impl& impl, JSValue native);     // bridge_audio.cpp
 
 void installBridge(JsEngine::Impl& impl, JSValue global) {
   JSContext* ctx = impl.ctx;
@@ -604,6 +605,7 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
   JS_SetPropertyStr(ctx, native, "devMode", JS_NewBool(ctx, impl.rt.config.dev_mode != 0));
   installAnimatedBridge(impl, native);
   installHostDataBridge(impl, native);
+  installAudioBridge(impl, native);
   JS_SetPropertyStr(ctx, global, "__jsui_native", native);
 }
 

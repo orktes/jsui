@@ -353,7 +353,8 @@ export class HeadlessApp {
     });
     this.bundleUrl = load.url || pathToFileURL(load.path).href;
     this._baseUrlPtr = this._str(this.bundleUrl);
-    this.rt = M._jsui_web_create(this.hostId, this.width, this.height, this.scale, o.devMode ? 1 : 0, this._baseUrlPtr);
+    // Audio off (no Web Audio in Node): every Sound.play() ends 'failed', preloads reject.
+    this.rt = M._jsui_web_create(this.hostId, this.width, this.height, this.scale, o.devMode ? 1 : 0, this._baseUrlPtr, 0);
     if (!this.rt) throw new Error('jsui: runtime creation failed');
     // Dev mode joins the dev server's shared session only with devSession
     // (the dev server registers its own headless runtime directly).

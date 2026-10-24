@@ -57,6 +57,7 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
   images = std::make_unique<ImageCache>(*this);
   lotties = std::make_unique<LottieCache>(*this);
   shaders = std::make_unique<ShaderEffects>(*this);
+  audio = std::make_unique<Audio>(*this);
   animated = std::make_unique<NativeAnimated>(doc);
   animated->findView = [this](uint32_t id) { return findNode(id); };
   animated->buffers = &buffers;
@@ -76,6 +77,8 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
 }
 
 Runtime::~Runtime() {
+  audio->contextEnded();
+  audio.reset();
   loader.cancelAll();
   std::vector<uint64_t> calls = js ? js->pendingCalls() : std::vector<uint64_t>();
   js.reset();
@@ -251,6 +254,7 @@ void Runtime::reportError(const std::string& msg) {
 
 void Runtime::resetEngine() {
   std::vector<uint64_t> calls = js ? js->pendingCalls() : std::vector<uint64_t>();
+  audio->contextEnded();
   js.reset();
   bundleRan_ = false;
   animated->clear();
@@ -296,6 +300,19 @@ void Runtime::deliverBufferChanges() {
   if (!buffers.hasDirty()) return;
   std::vector<std::string> keys = buffers.takeDirty();
   js->buffersChanged(keys);
+}
+
+void Runtime::deliverAudioEvents() {
+  if (!audio->hasEvents()) return;
+  Value::Array list;
+  for (auto& e : audio->takeEvents()) {
+    if (e.loaded)
+      list.emplace_back(Value::Array{Value(1), Value(e.url), Value(e.status), Value(e.duration)});
+    else
+      list.emplace_back(Value::Array{Value(0), Value(double(e.voice)), Value(e.status)});
+  }
+  Value arg(std::move(list));
+  js->callGlobal("__jsui_onAudio", &arg, 1);
 }
 
 void Runtime::deliverTextureChanges() {
@@ -538,6 +555,8 @@ void Runtime::tick(double nowMs) {
   deliverStateChanges();
   deliverBufferChanges();
   deliverTextureChanges();
+  audio->update();
+  deliverAudioEvents();
   js->runTimers(nowMs);
   js->runAnimationFrame(nowMs);
   js->runJobs();
@@ -735,7 +754,7 @@ bool Runtime::wantsFrame() const {
   // A pending repaint alone is not a reason to tick: the host paints after
   // the tick it already ran.
   if (reloadRequested_ || loader.pending() > 0 || (js && js->hasPendingWork(now + 17)) || animated->animating() ||
-      !animated->ends.empty() || lotties->animating() || shaders->animating() || state.hasDirty() || buffers.hasDirty() || textures.hasDirty() || !uiResults_.empty() || !doomed_.empty())
+      !animated->ends.empty() || lotties->animating() || shaders->animating() || state.hasDirty() || buffers.hasDirty() || textures.hasDirty() || audio->hasEvents() || audio->busy() || !uiResults_.empty() || !doomed_.empty())
     return true;
   for (const auto& s : surfaces_)
     if (s->input->animating() || s->doc.layoutAnimating() || imageEventsReady(s->doc) ||

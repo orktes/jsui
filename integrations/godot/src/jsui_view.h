@@ -39,6 +39,14 @@
 // texture of the view's own, which Skia samples (jsui_gpu_render.cpp); with
 // the CPU renderer its pixels go through get_image().
 //
+// Audio (jsui_audio.h): the runtime view plays its runtime's UI sounds
+// (Sound.play, useMusic, <UISounds>, ...) with AudioStreamPlayers of its own
+// on Godot's audio buses, so they follow the game's volume settings and
+// effects. A JSUI bus plays on the Godot bus `audio_bus_map` names for it,
+// else on the Godot bus of the same name, else on `audio_bus`. The UI's own
+// bus volumes scale its voices, never Godot's buses. `audio_enabled` off
+// plays nothing (every voice fails).
+//
 // GPU pipeline cache (jsui_gpu_set_pipeline_cache): the runtime's Skia
 // context records every GPU pipeline it creates in the runtime view's
 // `pipeline_cache_path`, with the renderer's name before the extension
@@ -72,6 +80,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -80,6 +89,8 @@
 #include "jsui/jsui.h"
 
 namespace jsui_godot {
+
+class ViewAudio;
 
 class JsuiView : public godot::Control {
   GDCLASS(JsuiView, godot::Control)
@@ -121,6 +132,13 @@ class JsuiView : public godot::Control {
   // any machine (tests, recording a pipeline list). The runtime view's applies.
   void set_fixed_fps(int fps) { fixed_fps_ = fps > 0 ? fps : 0; }
   int get_fixed_fps() const { return fixed_fps_; }
+  // Audio (the runtime view's apply; see the top of this file).
+  void set_audio_enabled(bool on);
+  bool get_audio_enabled() const { return audio_enabled_; }
+  void set_audio_bus(const godot::String& bus) { audio_bus_ = bus; }
+  godot::String get_audio_bus() const { return audio_bus_; }
+  void set_audio_bus_map(const godot::Dictionary& map) { audio_bus_map_ = map; }
+  godot::Dictionary get_audio_bus_map() const { return audio_bus_map_; }
   // Fonts registered (family from the file) on every new runtime. Assigning
   // the property registers the fonts it adds on a running one; fonts it
   // drops stay registered until the next start().
@@ -169,6 +187,14 @@ class JsuiView : public godot::Control {
   int remove_texture(const godot::String& name);  // 1 if it existed
   int update_texture(const godot::String& name);  // new contents: 1, or -1 for an unknown name
 
+  // Audio: stops the UI's voices (of one JSUI bus, or all for ""), fading
+  // out over fade_ms; the UI hears they were stopped. get_audio_voices lists
+  // the playing ones (voice, url, bus, godot_bus, player, volume, pitch,
+  // loop, paused, loading). resolve_audio_bus: the Godot bus a JSUI bus
+  // plays on now.
+  void stop_all_sounds(const godot::String& bus, float fade_ms);
+  godot::Array get_audio_voices() const;
+  godot::String resolve_audio_bus(const godot::String& bus) const;
   // Fonts (jsui_register_font and friends), for the runtime (every view of
   // it). `font`: a FontFile (or a FontVariation of one; its data), a
   // PackedByteArray, or a path (res://, user://, absolute) of a TTF / OTF /
@@ -215,6 +241,10 @@ class JsuiView : public godot::Control {
   int hit_test(const godot::Vector2& position) const;
   static constexpr int HIT_POINTER = JSUI_HIT_POINTER;
   static constexpr int HIT_SCROLL = JSUI_HIT_SCROLL;
+  // sound_ended's status (jsui_audio_voice_ended).
+  static constexpr int SOUND_FINISHED = JSUI_AUDIO_FINISHED;
+  static constexpr int SOUND_STOPPED = JSUI_AUDIO_STOPPED;
+  static constexpr int SOUND_FAILED = JSUI_AUDIO_FAILED;
 
   void _gui_input(const godot::Ref<godot::InputEvent>& event) override;
   // With input_pass_through, only points where the UI captures input are
@@ -342,6 +372,11 @@ class JsuiView : public godot::Control {
   godot::String pipeline_cache_path_ = "user://jsui-pipelines.bin";
   int fixed_fps_ = 0;
   godot::String pipeline_file_;  // the runtime view's cache file in use (an OS path), "" for none
+  bool audio_enabled_ = true;
+  godot::String audio_bus_ = "Master";
+  godot::Dictionary audio_bus_map_;
+  // The runtime's audio handler (runtime views; made with the first runtime).
+  std::unique_ptr<ViewAudio> audio_;
 
   // The runtime handle this view renders and sends input to: the runtime it
   // owns (its main surface), or a surface of host_'s runtime. A GPU render
