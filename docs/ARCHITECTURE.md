@@ -1782,6 +1782,13 @@ Native's API and both of its drivers:
     (`{key, state}`) read the eased 0..1 weight of one state of the element
     whose `interaction` prop carries `key` (see "State styles"); marked dirty
     when the weight moved.
+  * `Animated.hostState(key, path)` / `useHostStateBind`: `hostState` nodes
+    read a field of shared host state (`HostState::value`; numbers, booleans
+    as 1 / 0, strings as text). `HostState::onChange` marks them dirty on
+    every change, by the embedder or by JS, so the next native tick (also
+    `jsui_tick_native`) shows it without JS.
+  * Props nodes take `visible` (Visibility's `visible={node}`):
+    `Node::setHidden(value == 0)`, see "State styles".
   * Not native (yet): `toValue` bound to another Animated node (RN's
     `tracking` node) restarts native animations from JS when the target
     changes; scroll physics (and so `Animated.event` from flings) only
@@ -1824,6 +1831,18 @@ easing, delay, <state>: ...}`); `interaction` (`{key}`, from
   absent at weight 0.
 * The first frame an element is seen takes its states without a
   transition; `disabledStyle` already applies at mount.
+* Visibility: `visibility` (`{mode, effect, scale}`) makes an element's
+  hidden state the last slot. Its overlay is the effect (`opacity: 0`, plus
+  a `scale` transform); once the weight reaches 1 the end keys apply
+  (`display: 'none'` for `remove`, `pointerEvents: 'none'` (and opacity 0)
+  for `hide`). `visible` comes from the props (a boolean) or from native
+  Animated (`Node::setHidden`, which steps the weights at once, starting a
+  frame back like input does).
+* Group context (`packages/react/src/components/group.js`): `<Group>` and
+  `<Pressable group>` give their element an `interaction` key and provide
+  it through `GroupContext`; `useGroupState(name?)` returns its
+  `interaction` Animated nodes (`instant: true` reads the state's target
+  instead of its eased weight).
 
 ## LayoutAnimation
 

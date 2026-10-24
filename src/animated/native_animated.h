@@ -21,6 +21,7 @@
 #include "core/node.h"
 #include "core/value.h"
 #include "host_buffers.h"
+#include "host_state.h"
 
 namespace jsui {
 
@@ -35,6 +36,7 @@ class NativeAnimated {
   std::function<Node*(uint32_t)> findView;
   // Frame data read by hostBuffer nodes (the runtime's).
   const HostBuffers* buffers = nullptr;
+  const HostState* state = nullptr;
 
   // ---- graph (tags are chosen by JS) ---------------------------------
   // config.type: value {value, offset} | interpolation {inputRange,
@@ -44,7 +46,8 @@ class NativeAnimated {
   // modulus {input, modulus} | diffclamp {input, min, max} |
   // color {r, g, b, a} | hostBuffer {key, index} (element `index` of a
   // frame data buffer, 0 when out of range) | clock (the frame clock in
-  // seconds) | interaction {key, state: hovered|pressed|focused|
+  // seconds) | hostState {key, path: [...]} (a value inside shared host
+  // state: number, bool as 1 / 0, string for text) | interaction {key, instant, state: hovered|pressed|focused|
   // focusVisible|disabled} (that state's 0..1 weight on the element with
   // that `interaction` key, core/state_style.h) | format {input, decimals (-1: shortest), grouping, prefix,
   // suffix, minDigits} (a number as text) | expression {input: [tags], code: [...], slots} (a stack
@@ -105,6 +108,8 @@ class NativeAnimated {
   // Buffer `key` has new contents: its hostBuffer nodes are re-evaluated at
   // the next flush (tick).
   void bufferChanged(const std::string& key);
+  // Host state `key` changed: its hostState nodes re-read it.
+  void stateChanged(const std::string& key);
 
   // ---- events (Animated.event with useNativeDriver) ------------------------
   // `eventType` is the native event type ("scroll", ...), `path` the keys
@@ -143,7 +148,7 @@ class NativeAnimated {
  private:
   enum class Type : uint8_t {
     Value, Interpolation, Addition, Subtraction, Multiplication, Division, Modulus, DiffClamp,
-    Color, HostBuffer, Clock, Interaction, Expression, Format, Transform, Style, Props
+    Color, HostBuffer, HostState, Clock, Interaction, Expression, Format, Transform, Style, Props
   };
   // Expression ops (packages/react/src/animated/expression.js OP).
   enum class Op : uint8_t {
@@ -201,6 +206,10 @@ class NativeAnimated {
     std::string grouping, prefix, suffix;
     // props: the text input (0: none)
     int textTag = 0;
+    int visibleTag = 0;  // props: Visibility's `visible` (0: hidden)
+    // hostState
+    std::vector<std::string> statePath;
+    bool instant = false;  // interaction: the state itself (0 / 1), not its eased weight
     // expression
     std::vector<Instr> code;
     uint32_t slots = 0, stackSize = 0;
@@ -318,6 +327,7 @@ class NativeAnimated {
   std::vector<int> dirtyValues_;  // nodes changed since the last flush (ANode::queued)
   std::vector<int> dirtyNotify_;  // values changed natively (listener updates; ANode::notifyQueued)
   std::unordered_map<std::string, std::vector<int>> bufferNodes_;  // key -> hostBuffer node tags
+  std::unordered_map<std::string, std::vector<int>> stateNodes_;   // key -> hostState node tags
   std::vector<int> clockNodes_;  // tags of the Clock nodes
   std::vector<int> interactionNodes_;  // tags of the Interaction nodes
   double interactionWeight(const ANode& n) const;

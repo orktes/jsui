@@ -14,6 +14,7 @@ import {
   sampleCurve,
 } from './NativeAnimatedHelper.js';
 import { HostBuffer } from '../hostBuffer.js';
+import { HostState } from '../hostData.js';
 import { now, requestFrame, cancelFrame } from '../native.js';
 import { compileExpression, evaluateExpression, ExpressionError } from './expression.js';
 
@@ -779,17 +780,18 @@ export class AnimatedClock extends AnimatedNode {
 // the element's `transition`, computed by the runtime from input
 // (core/state_style.h). Native only: a JS-driven consumer sees 0.
 export class AnimatedInteraction extends AnimatedNode {
-  constructor(key, state) {
+  constructor(key, state, instant) {
     super();
     this._key = key;
     this._state = state;
+    this._instant = !!instant;
     if (NativeAnimatedAPI) this._isNative = true;
   }
   __getValue() {
     return 0;
   }
   __getNativeConfig() {
-    return { type: 'interaction', key: this._key, state: this._state };
+    return { type: 'interaction', key: this._key, state: this._state, instant: this._instant };
   }
   __detach() {
     this.__dropNative();
@@ -809,9 +811,25 @@ export class Interaction {
   constructor() {
     this.key = 'ix' + ++interactionKeys;
     Object.defineProperty(this, '_values', { value: {}, enumerable: false });
+    Object.defineProperty(this, '_instant', { value: null, writable: true, enumerable: false });
   }
-  _value(state) {
-    return this._values[state] || (this._values[state] = new AnimatedInteraction(this.key, state));
+  _value(state, instant) {
+    const k = instant ? state + '!' : state;
+    return this._values[k] || (this._values[k] = new AnimatedInteraction(this.key, state, instant));
+  }
+  /** The states themselves, 0 or 1 the frame they change (no transition). */
+  get instant() {
+    if (!this._instant) {
+      const ix = this;
+      this._instant = {
+        get hovered() { return ix._value('hovered', true); },
+        get pressed() { return ix._value('pressed', true); },
+        get focused() { return ix._value('focused', true); },
+        get focusVisible() { return ix._value('focusVisible', true); },
+        get disabled() { return ix._value('disabled', true); },
+      };
+    }
+    return this._instant;
   }
   get hovered() {
     return this._value('hovered');
@@ -827,6 +845,44 @@ export class Interaction {
   }
   get disabled() {
     return this._value('disabled');
+  }
+}
+
+// Animated.hostState(key, path) / useHostStateBind: a value inside shared
+// host state (jsui_set_state), e.g. ('player', 'health.current'). Native:
+// the runtime re-reads it the moment the host changes the key, before any
+// JS runs. Numbers as is, booleans as 1 / 0, strings (for Animated.Text's
+// `text`) as is, anything else 0.
+function readPath(value, path) {
+  let v = value;
+  for (let i = 0; i < path.length && v != null; i++) v = typeof v === 'object' ? v[path[i]] : undefined;
+  if (typeof v === 'number') return v === v ? v : 0;
+  if (typeof v === 'boolean') return v ? 1 : 0;
+  if (typeof v === 'string') return v;
+  return 0;
+}
+
+export class AnimatedHostState extends AnimatedNode {
+  constructor(key, path) {
+    super();
+    this._key = String(key);
+    this._path = path == null || path === '' ? [] : Array.isArray(path) ? path.map(String) : String(path).split('.');
+    this._sub = null;
+    if (NativeAnimatedAPI) this._isNative = true;
+  }
+  __getValue() {
+    return readPath(HostState.get(this._key), this._path);
+  }
+  __getNativeConfig() {
+    return { type: 'hostState', key: this._key, path: this._path };
+  }
+  __attach() {
+    if (!this._isNative) this._sub = HostState.subscribe(this._key, () => batch(() => this.__changed()));
+  }
+  __detach() {
+    if (this._sub) this._sub();
+    this._sub = null;
+    this.__dropNative();
   }
 }
 

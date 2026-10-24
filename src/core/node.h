@@ -66,6 +66,9 @@ class Node {
   std::unique_ptr<StateStyles> stateStyles;
   // Re-applies the state overlays at their current weights (InputManager::tickStates).
   bool applyStateStyles();
+  // <Visibility visible={node}>: native Animated sets the hidden state; it
+  // starts its transition (or applies) at once.
+  void setHidden(bool hidden);
   // Merges `partial` into props().style (a null value removes the key), like
   // setProps with the merged style but without copying the props: when only
   // paint keys change, the style object is updated in place (copy-on-write)

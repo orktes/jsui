@@ -75,6 +75,9 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
   };
   // Animated.hostBuffer nodes follow their buffer (also in jsui_tick_native).
   buffers.onChange = [this](const std::string& key) { animated->bufferChanged(key); };
+  // Animated.hostState / useHostStateBind nodes follow their key at once.
+  animated->state = &state;
+  state.onChange = [this](const std::string& key) { animated->stateChanged(key); };
   textures.log = [this](JsuiLogLevel level, const std::string& msg) { log(level, msg); };
   main().handle = h;
   attach(main());
