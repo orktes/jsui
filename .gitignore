@@ -25,3 +25,20 @@ node_modules/
 /integrations/ios/build-ui/
 /third_party/skia-desktop/
 /integrations/shared/ui/dist/
+/third_party/skia-android/
+/third_party/skia-src-android/
+/integrations/android/build-ui/
+# Unreal (integrations/unreal): build outputs, the staged JSUI library and the
+# copied UI bundle.
+/integrations/unreal/**/Binaries/
+/integrations/unreal/**/Intermediate/
+/integrations/unreal/**/Saved/
+/integrations/unreal/**/DerivedDataCache/
+/integrations/unreal/Plugins/Jsui/Source/ThirdParty/JsuiLibrary/*/
+/integrations/unreal/project/Content/Jsui/
+/integrations/unreal/project/Build/*
+!/integrations/unreal/project/Build/Mac/
+/integrations/unreal/project/Build/Mac/*
+!/integrations/unreal/project/Build/Mac/Resources/
+/integrations/unreal/project/Build/Mac/Resources/*
+!/integrations/unreal/project/Build/Mac/Resources/Unsandboxed.entitlements

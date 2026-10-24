@@ -182,7 +182,16 @@ what the deterministic tools (`jsui-render`, `jsui-record`) and reference tests 
 project. Build it with `-DJSUI_BUILD_GODOT=ON` (it is off by default). See
 [integrations/godot/README.md](integrations/godot/README.md).
 
-## raylib, SDL3, sokol and Unity
+## iOS and Android
+
+[integrations/ios](integrations/ios/README.md) is a UIKit app rendering with
+Skia on Metal (`RUN=1 scripts/build-ios.sh` builds it and runs it in the
+simulator). [integrations/android](integrations/android/README.md) is an NDK
+NativeActivity app rendering with Skia on OpenGL ES (`RUN=1
+scripts/build-android.sh` builds the APK and runs it on a device or emulator).
+Both forward touch, hardware keys and gamepads and publish the safe area.
+
+## raylib, SDL3, sokol, Unity and Unreal
 
 `integrations/raylib`, `integrations/sdl3` and `integrations/sokol` run one
 shared game HUD in three game loops through the C API: input pass-through
@@ -198,4 +207,7 @@ The same game also runs in Unity 6: [integrations/unity](integrations/unity/READ
 is a Unity package (a native plugin exporting the C API to C#, and a
 `JsuiView` component that composites the UI as a uGUI overlay and passes on
 the input it did not consume) and an example project built from the command
-line.
+line. [integrations/unreal](integrations/unreal/README.md) is the same for
+Unreal Engine 5: a plugin (`UJsuiWidget` / `SJsuiView`, drawing with Skia
+Graphite on the Metal RHI's own queue) over JSUI as a shared library with just
+the C API, and a C++ example project packaged headlessly with RunUAT.
