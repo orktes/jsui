@@ -86,6 +86,10 @@ struct PaintStats {
   // scaled images), and of those the ones rendered this paint (misses).
   int spriteDraws = 0;
   int spriteRenders = 0;
+  // Always counted: blurred shadows (outer and inset) drawn from cached
+  // masks, and of those the ones rendered (blurred on the CPU) this paint.
+  int shadowDraws = 0;
+  int shadowRenders = 0;
   int64_t blitPixels = 0;  // pixels moved by a scroll blit instead of repainted
   // Always counted: opacity layers composited from a LayerCache, and of
   // those the ones rendered this paint (misses).
