@@ -9,6 +9,7 @@
 #include <cstdint>
 
 #include "jsui/jsui.h"
+#include "js/engine.h"  // JsEngine::nextKind
 
 #if defined(JSUI_WEBGPU)
 #include <webgpu/webgpu.h>
@@ -97,8 +98,11 @@ extern "C" {
 // `baseUrl` may be NULL (relative URLs then resolve against the bundle URL).
 // `audio` 1: sounds go to the host's onAudio; 0 (also when the argument is
 // left out, as headless Node hosts do): audio_disabled, every voice fails.
+// `js` 1: the bundle runs on the host's own JS engine (V8 / JSC /
+// SpiderMonkey, src/js/engine_hostjs.cpp) when the module has it; 0 (also
+// when left out): QuickJS.
 EMSCRIPTEN_KEEPALIVE JsuiRuntime* jsui_web_create(int hostId, int width, int height, float pixelRatio, int devMode,
-                                                  const char* baseUrl, int audio) {
+                                                  const char* baseUrl, int audio, int js) {
   JsuiConfig cfg;
   jsui_config_init(&cfg);
   cfg.width = width;
@@ -122,8 +126,14 @@ EMSCRIPTEN_KEEPALIVE JsuiRuntime* jsui_web_create(int hostId, int width, int hei
   } else {
     cfg.audio_disabled = 1;
   }
-  return jsui_create(&cfg);
+  jsui::JsEngine::nextKind = js == 1 ? jsui::JsEngine::Kind::Host : jsui::JsEngine::Kind::QuickJs;
+  JsuiRuntime* rt = jsui_create(&cfg);
+  jsui::JsEngine::nextKind = jsui::JsEngine::Kind::QuickJs;
+  return rt;
 }
+
+// 1 when this module can run bundles on the host's JS engine (jsui_web_create's `js`).
+EMSCRIPTEN_KEEPALIVE int jsui_web_host_js() { return jsui::JsEngine::hostAvailable() ? 1 : 0; }
 
 // jsui_call_ui with the result delivered to JS host `hostId` (onCallResult).
 EMSCRIPTEN_KEEPALIVE double jsui_web_call_ui(JsuiRuntime* rt, int hostId, const char* name, const char* argsJson) {
