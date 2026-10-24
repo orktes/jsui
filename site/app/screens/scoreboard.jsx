@@ -4,7 +4,7 @@
 // LayoutAnimation, score deltas pop, the MVP badge follows the top player and
 // the first team to 5 captures wins the round. Column headers (or LB / RB)
 // change the sort; rows expand on press to show the player's details.
-import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, Image, LayoutAnimation, Pressable, StyleSheet, Text, View } from 'react-native';
 import { colors, font } from '../../../examples/theme.js';
 
@@ -67,6 +67,30 @@ const useValue = (v) => useRef(new Animated.Value(v)).current;
 const fmt = (n) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 const kfmt = (n) => (n / 1000).toFixed(1) + 'k';
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+// A seconds counter that runs natively while `running`: one long linear
+// timing (no JS per second); stopping it keeps the value for the resume.
+const DAY = 24 * 3600;
+function useSecondsClock(start, running) {
+  const v = useValue(start);
+  useEffect(() => {
+    if (!running) return undefined;
+    const from = v.__getValue();
+    Animated.timing(v, { toValue: from + DAY, duration: DAY * 1000, easing: Easing.linear, useNativeDriver: ND }).start();
+    return () => v.stopAnimation();
+  }, [running]);
+  return v;
+}
+// mm:ss of a seconds value, formatted by the runtime.
+function useClockText(secs) {
+  return useMemo(
+    () => ({
+      mm: Animated.format(Animated.derive([secs], (s) => Math.floor(s / 60)), { decimals: 0, minDigits: 2 }),
+      ss: Animated.format(Animated.derive([secs], (s) => Math.floor(s % 60)), { decimals: 0, minDigits: 2 }),
+    }),
+    [secs],
+  );
+}
+
 const spring = { duration: 520, update: { type: 'spring', springDamping: 0.75 }, create: { type: 'easeInEaseOut', property: 'opacity' }, delete: { type: 'easeInEaseOut', property: 'opacity' } };
 
 // ---------------------------------------------------------------------------
@@ -106,84 +130,85 @@ const Row = memo(function Row({ p, rank, mvp, alt, expanded, sortKey, onToggle, 
   }, [mvp]);
   const hl = (key) => (sortKey === key ? styles.cellSorted : null);
   return (
-    <Pressable ref={rowRef} autoFocus={autoFocus} onPress={() => onToggle(p.name)} style={{ cursor: 'pointer' }}>
-      {({ hovered, focused }) => (
-        <View
-          style={[
-            styles.row,
-            alt && styles.rowAlt,
-            p.me && [styles.rowMe, { borderColor: team.accent, experimental_backgroundImage: `linear-gradient(90deg, ${team.soft} 0%, rgba(0,0,0,0) 80%)` }],
-            hovered && styles.rowHover,
-            focused && [styles.rowFocus, { borderColor: team.light }],
-            p.disconnected && { opacity: 0.45 },
-          ]}
-        >
-          <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: team.accent, opacity: flash.interpolate({ inputRange: [0, 1], outputRange: [0, 0.22] }) }]} />
-          <View style={styles.rowMain}>
-            <Text style={[styles.rank, { width: 28 }, rank === 1 && { color: team.light }]}>{rank}</Text>
-            <View style={styles.playerCell}>
-              <Image source={crest[p.crest]} style={styles.avatar} />
-              <Text style={[styles.player, p.me && { color: '#fff' }]} numberOfLines={1}>
-                {p.name}
-              </Text>
-              {mvp ? (
-                <Animated.View style={[styles.mvp, { transform: [{ scale: badge }] }]}>
-                  <Text style={styles.mvpText}>MVP</Text>
-                </Animated.View>
-              ) : null}
-              {p.streak >= 3 ? (
-                <View style={styles.streak}>
-                  <Text style={styles.streakText}>{p.streak} streak</Text>
-                </View>
-              ) : null}
-              {p.disconnected ? <Text style={styles.dc}>Disconnected</Text> : null}
-            </View>
-            <Text style={[styles.cell, styles.num, { color: '#fff' }, hl('k')]}>{p.k}</Text>
-            <Text style={[styles.cell, styles.num, hl('d')]}>{p.d}</Text>
-            <Text style={[styles.cell, styles.num, hl('a')]}>{p.a}</Text>
-            <Text style={[styles.cell, styles.wide, hl('dmg')]}>{kfmt(p.dmg)}</Text>
-            <View style={styles.wide}>
-              <Text style={[styles.cell, { textAlign: 'right', color: '#fff', fontWeight: '700' }, hl('score')]}>{fmt(p.score)}</Text>
-              <Animated.Text
-                pointerEvents="none"
-                style={[
-                  styles.gain,
-                  {
-                    opacity: delta.interpolate({ inputRange: [0, 0.1, 0.7, 1], outputRange: [0, 1, 1, 0] }),
-                    transform: [{ translateY: delta.interpolate({ inputRange: [0, 1], outputRange: [4, -16] }) }],
-                  },
-                ]}
-              >
-                +{gain}
-              </Animated.Text>
-            </View>
-            <View style={{ width: 30, alignItems: 'flex-end' }}>
-              <Ping level={p.disconnected ? 0 : p.ping} />
-            </View>
-          </View>
-          {expanded ? (
-            <View style={styles.details}>
-              <Image source={WEAPON[p.weapon]} style={styles.detailIcon} />
-              <View style={{ width: 150 }}>
-                <Text style={styles.detailLabel}>Favourite weapon</Text>
-                <Text style={styles.detailValue} numberOfLines={1}>
-                  {WEAPON_NAMES[p.weapon]}
-                </Text>
-              </View>
-              <View style={{ width: 70 }}>
-                <Text style={styles.detailLabel}>K / D</Text>
-                <Text style={styles.detailValue}>{(p.k / Math.max(1, p.d)).toFixed(2)}</Text>
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.detailLabel}>Damage share</Text>
-                <View style={styles.detailTrack}>
-                  <View style={[styles.detailFill, { width: `${Math.min(100, (p.dmg / 60000) * 100)}%`, backgroundColor: team.accent }]} />
-                </View>
-              </View>
+    // Hover / focus are state styles: the runtime applies them, no re-render.
+    <Pressable
+      ref={rowRef}
+      autoFocus={autoFocus}
+      onPress={() => onToggle(p.name)}
+      style={[
+        styles.row,
+        { cursor: 'pointer' },
+        alt && styles.rowAlt,
+        p.me && [styles.rowMe, { borderColor: team.accent, experimental_backgroundImage: `linear-gradient(90deg, ${team.soft} 0%, rgba(0,0,0,0) 80%)` }],
+        p.disconnected && { opacity: 0.45 },
+      ]}
+      hoveredStyle={styles.rowHover}
+      focusedStyle={[styles.rowFocus, { borderColor: team.light }]}
+    >
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: team.accent, opacity: flash.interpolate({ inputRange: [0, 1], outputRange: [0, 0.22] }) }]} />
+      <View style={styles.rowMain}>
+        <Text style={[styles.rank, { width: 28 }, rank === 1 && { color: team.light }]}>{rank}</Text>
+        <View style={styles.playerCell}>
+          <Image source={crest[p.crest]} style={styles.avatar} />
+          <Text style={[styles.player, p.me && { color: '#fff' }]} numberOfLines={1}>
+            {p.name}
+          </Text>
+          {mvp ? (
+            <Animated.View style={[styles.mvp, { transform: [{ scale: badge }] }]}>
+              <Text style={styles.mvpText}>MVP</Text>
+            </Animated.View>
+          ) : null}
+          {p.streak >= 3 ? (
+            <View style={styles.streak}>
+              <Text style={styles.streakText}>{p.streak} streak</Text>
             </View>
           ) : null}
+          {p.disconnected ? <Text style={styles.dc}>Disconnected</Text> : null}
         </View>
-      )}
+        <Text style={[styles.cell, styles.num, { color: '#fff' }, hl('k')]}>{p.k}</Text>
+        <Text style={[styles.cell, styles.num, hl('d')]}>{p.d}</Text>
+        <Text style={[styles.cell, styles.num, hl('a')]}>{p.a}</Text>
+        <Text style={[styles.cell, styles.wide, hl('dmg')]}>{kfmt(p.dmg)}</Text>
+        <View style={styles.wide}>
+          <Text style={[styles.cell, { textAlign: 'right', color: '#fff', fontWeight: '700' }, hl('score')]}>{fmt(p.score)}</Text>
+          <Animated.Text
+            pointerEvents="none"
+            style={[
+              styles.gain,
+              {
+                opacity: delta.interpolate({ inputRange: [0, 0.1, 0.7, 1], outputRange: [0, 1, 1, 0] }),
+                transform: [{ translateY: delta.interpolate({ inputRange: [0, 1], outputRange: [4, -16] }) }],
+              },
+            ]}
+          >
+            +{gain}
+          </Animated.Text>
+        </View>
+        <View style={{ width: 30, alignItems: 'flex-end' }}>
+          <Ping level={p.disconnected ? 0 : p.ping} />
+        </View>
+      </View>
+      {expanded ? (
+        <View style={styles.details}>
+          <Image source={WEAPON[p.weapon]} style={styles.detailIcon} />
+          <View style={{ width: 150 }}>
+            <Text style={styles.detailLabel}>Favourite weapon</Text>
+            <Text style={styles.detailValue} numberOfLines={1}>
+              {WEAPON_NAMES[p.weapon]}
+            </Text>
+          </View>
+          <View style={{ width: 70 }}>
+            <Text style={styles.detailLabel}>K / D</Text>
+            <Text style={styles.detailValue}>{(p.k / Math.max(1, p.d)).toFixed(2)}</Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.detailLabel}>Damage share</Text>
+            <View style={styles.detailTrack}>
+              <View style={[styles.detailFill, { width: `${Math.min(100, (p.dmg / 60000) * 100)}%`, backgroundColor: team.accent }]} />
+            </View>
+          </View>
+        </View>
+      ) : null}
     </Pressable>
   );
 });
@@ -203,13 +228,16 @@ function Team({ id, players, score, won, sortKey, onSort, expanded, onToggle, mv
         <Text style={[styles.th, { width: 28 }]}>#</Text>
         <Text style={[styles.th, { flex: 1 }]}>Player</Text>
         {[['k', 'K', styles.num], ['d', 'D', styles.num], ['a', 'A', styles.num], ['dmg', 'Damage', styles.wide], ['score', 'Score', styles.wide]].map(([k, l, w]) => (
-          <Pressable key={k} focusable={false} onPress={() => onSort(k)} style={[w, { cursor: 'pointer' }]}>
-            {({ hovered }) => (
-              <View>
-                <Text style={[styles.th, { textAlign: w === styles.num ? 'center' : 'right' }, (hovered || sortKey === k) && { color: sortKey === k ? colors.goldLight : colors.text }]}>{l}</Text>
-                {sortKey === k ? <View style={[styles.sortBar, w === styles.num ? { alignSelf: 'center' } : { alignSelf: 'flex-end' }]} /> : null}
-              </View>
-            )}
+          <Pressable key={k} group focusable={false} onPress={() => onSort(k)} style={[w, { cursor: 'pointer' }]}>
+            <View>
+              <Text
+                style={[styles.th, { textAlign: w === styles.num ? 'center' : 'right' }, sortKey === k && { color: colors.goldLight }]}
+                groupHoveredStyle={sortKey === k ? undefined : { color: colors.text }}
+              >
+                {l}
+              </Text>
+              {sortKey === k ? <View style={[styles.sortBar, w === styles.num ? { alignSelf: 'center' } : { alignSelf: 'flex-end' }]} /> : null}
+            </View>
           </Pressable>
         ))}
         <View style={{ width: 30 }} />
@@ -240,7 +268,8 @@ export default function Scoreboard({ active = true }) {
   const [sortKey, setSortKey] = useState('score');
   const [expanded, setExpanded] = useState(null);
   const [paused, setPaused] = useState(false);
-  const [clock, setClock] = useState(18 * 60 + 42);
+  const clock = useSecondsClock(18 * 60 + 42, active && !paused);
+  const clockText = useClockText(clock);
   const [event, setEvent] = useState({ text: 'Aurora captured the Ember Gate', color: TEAMS.aurora.light, id: 0 });
   const [winner, setWinner] = useState(null);
   const [ready, setReady] = useState(false);
@@ -273,19 +302,28 @@ export default function Scoreboard({ active = true }) {
   // The match: one event every ~1.5 s while active and not paused.
   useEffect(() => {
     if (!active || paused) return undefined;
-    const tick = setInterval(() => setClock((c) => c + 1), 1000);
     const id = setInterval(() => {
       const s = state.current;
       if (s.winner) return;
       s.n += 1;
-      const ps = s.players.map((p) => Object.assign({}, p));
+      // Copy only the players this event changes, so the other rows (memo)
+      // skip their render.
+      const ps = s.players.slice();
+      const own = new Set();
+      const mut = (p) => {
+        if (own.has(p)) return p;
+        const c = Object.assign({}, p);
+        ps[ps.indexOf(p)] = c;
+        own.add(c);
+        return c;
+      };
       const live = (team) => ps.filter((p) => p.team === team && !p.disconnected);
       const killTeam = Math.random() < 0.56 ? 'aurora' : 'ember';
       const other = killTeam === 'aurora' ? 'ember' : 'aurora';
       // Better players get more kills.
       const pool = live(killTeam).flatMap((p) => Array(Math.max(1, Math.round(p.k / 5))).fill(p));
-      const killer = pick(pool);
-      const victim = pick(live(other));
+      const killer = mut(pick(pool));
+      const victim = mut(pick(live(other)));
       killer.k += 1;
       killer.streak += 1;
       killer.score += 150 + (killer.streak >= 3 ? 50 : 0);
@@ -294,17 +332,18 @@ export default function Scoreboard({ active = true }) {
       victim.streak = 0;
       const helpers = live(killTeam).filter((p) => p !== killer);
       if (Math.random() < 0.65 && helpers.length) {
-        const h = pick(helpers);
+        const h = mut(pick(helpers));
         h.a += 1;
         h.score += 50;
         h.dmg += 300 + Math.round(Math.random() * 400);
       }
       if (Math.random() < 0.3) {
         const p = pick(ps);
-        if (!p.disconnected) p.ping = Math.max(1, Math.min(4, p.ping + (Math.random() < 0.5 ? -1 : 1)));
+        if (!p.disconnected) mut(p).ping = Math.max(1, Math.min(4, p.ping + (Math.random() < 0.5 ? -1 : 1)));
       }
-      const grim = ps.find((p) => p.name === 'GRIMWALD');
+      let grim = ps.find((p) => p.name === 'GRIMWALD');
       if (s.n === 4 && grim.disconnected) {
+        grim = mut(grim);
         grim.disconnected = false;
         grim.ping = 3;
       }
@@ -339,7 +378,6 @@ export default function Scoreboard({ active = true }) {
     }, 1500);
     return () => {
       clearInterval(id);
-      clearInterval(tick);
     };
   }, [active, paused]);
 
@@ -383,7 +421,6 @@ export default function Scoreboard({ active = true }) {
   };
 
   const me = players.find((p) => p.me);
-  const pad = (n) => String(n).padStart(2, '0');
   const perf = [
     ['Accuracy', `${(38 + me.k * 0.15).toFixed(1)}%`, (38 + me.k * 0.15) / 100, colors.cyan],
     ['Kills / deaths', (me.k / Math.max(1, me.d)).toFixed(2), Math.min(1, me.k / Math.max(1, me.d) / 5), colors.gold],
@@ -409,7 +446,7 @@ export default function Scoreboard({ active = true }) {
               <Text style={[styles.result, styles.resultLive]}>First to {WIN}</Text>
             )}
             <Text style={styles.duration}>
-              {pad(Math.floor(clock / 60))}:{pad(clock % 60)}
+              <Animated.Text text={clockText.mm} />:<Animated.Text text={clockText.ss} />
             </Text>
           </View>
           <Animated.Text style={[styles.big, { color: '#ff7f8f', transform: [{ scale: bigE }] }]}>{score.ember}</Animated.Text>
@@ -435,18 +472,21 @@ export default function Scoreboard({ active = true }) {
             </View>
           </View>
         ))}
-        <Pressable focusable onPress={() => setReady((r) => !r)} style={{ cursor: 'pointer' }}>
-          {({ hovered, focused, pressed }) => (
-            <View style={[styles.continueBtn, ready && styles.readyBtn, (hovered || focused) && styles.continueHot, pressed && { transform: [{ scale: 0.97 }] }]}>
-              <View>
-                <Text style={[styles.continueText, ready && { color: colors.green }]}>{ready ? 'Ready' : 'Ready up'}</Text>
-                <Text style={[styles.readyCount, ready && { color: colors.textDim }]}>{ready ? '8 / 10 players ready' : '7 / 10 players ready'}</Text>
-              </View>
-              <View style={styles.continueKey}>
-                <Text style={styles.continueKeyText}>X</Text>
-              </View>
+        <Pressable focusable group onPress={() => setReady((r) => !r)} style={{ cursor: 'pointer' }}>
+          <View
+            style={[styles.continueBtn, ready && styles.readyBtn]}
+            groupHoveredStyle={styles.continueHot}
+            groupFocusedStyle={styles.continueHot}
+            groupPressedStyle={styles.pressedSmall}
+          >
+            <View>
+              <Text style={[styles.continueText, ready && { color: colors.green }]}>{ready ? 'Ready' : 'Ready up'}</Text>
+              <Text style={[styles.readyCount, ready && { color: colors.textDim }]}>{ready ? '8 / 10 players ready' : '7 / 10 players ready'}</Text>
             </View>
-          )}
+            <View style={styles.continueKey}>
+              <Text style={styles.continueKeyText}>X</Text>
+            </View>
+          </View>
         </Pressable>
       </View>
     </View>
@@ -544,6 +584,7 @@ const styles = StyleSheet.create({
     experimental_backgroundImage: 'linear-gradient(180deg, #ffe29a 0%, #f2c35b 50%, #c9902d 100%)',
     boxShadow: '0 10px 24px rgba(242,195,91,0.3), inset 0 1px 0 rgba(255,255,255,0.6)',
   },
+  pressedSmall: { transform: [{ scale: 0.97 }] },
   continueHot: { boxShadow: '0 12px 30px rgba(242,195,91,0.5), 0 0 0 3px rgba(255,243,207,0.6), inset 0 1px 0 rgba(255,255,255,0.7)' },
   readyBtn: { experimental_backgroundImage: 'none', backgroundColor: 'rgba(74,222,128,0.12)', borderColor: 'rgba(74,222,128,0.6)', boxShadow: '0 0 20px rgba(74,222,128,0.25)' },
   continueText: { fontFamily: font, fontWeight: '700', fontSize: 17, letterSpacing: 1.5, textTransform: 'uppercase', color: '#2a1a03' },
