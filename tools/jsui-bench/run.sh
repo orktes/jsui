@@ -16,7 +16,7 @@ mkdir -p "$out"
 jsui="$repo/packages/cli/bin/jsui.js"
 read -r -a flags <<< "${JSUI_BUILD_FLAGS:-}"
 node "$jsui" build "$repo/examples/showcase/interactions.jsx" -o "$out/interactions.js" ${flags[@]+"${flags[@]}"} >/dev/null
-for s in list menu inventory surfaces markers; do
+for s in list menu inventory surfaces markers mount; do
   node "$jsui" build "$repo/tools/jsui-bench/scenarios/$s.jsx" -o "$out/$s.js" ${flags[@]+"${flags[@]}"} >/dev/null
 done
 exec "$build/jsui-bench" --suite "$out" "$@"
