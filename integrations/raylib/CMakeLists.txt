@@ -17,6 +17,10 @@ set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(PLATFORM Desktop CACHE STRING "" FORCE)
 set(OPENGL_VERSION 3.3 CACHE STRING "" FORCE)  # what Skia's GL backend wants (core profile on macOS)
+# JSUI ships its own miniaudio (src/audio), so raylib's copy in raudio.c would clash at link time.
+# CUSTOMIZE_BUILD seeds every other SUPPORT_* option from raylib's config.h defaults.
+set(CUSTOMIZE_BUILD ON CACHE BOOL "" FORCE)
+set(SUPPORT_MODULE_RAUDIO OFF CACHE BOOL "" FORCE)
 # raylib's CMake treats warnings of its own sources as its business.
 set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 add_subdirectory(${_raylib_src} ${CMAKE_BINARY_DIR}/_deps/raylib-build EXCLUDE_FROM_ALL)
