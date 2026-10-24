@@ -103,7 +103,7 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
   const absEntry = path.resolve(entry);
   const entryDir = path.dirname(absEntry);
   const webDir = findWebHost(entryDir) || findWebHost(process.cwd()) || webPackageDir();
-  const state = { bundle: null, map: null, assets: new Map(), version: '0', error: '', builds: 0, failures: 0 };
+  const state = { bundle: null, map: null, assets: new Map(), version: '0', error: '', builds: 0, failures: 0, started: 0, ended: 0 };
   const hot = hmr ? createHmr({ entry: absEntry, mode: 'development', assets: state.assets, reactCompiler, sourcemap: true, log }) : null;
   // The token runtimes poll with hmr=1: a failed build changes it too.
   const hotToken = () => (hot && state.error ? `${state.version}!${state.failures}` : state.version);
@@ -121,8 +121,16 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
       let t0 = 0;
       b.onStart(() => {
         t0 = Date.now();
+        state.started++;
       });
       b.onEnd(async (result) => {
+        try {
+          await finish(result);
+        } finally {
+          state.ended++;
+        }
+      });
+      const finish = async (result) => {
         const fail = (text) => {
           state.error = text;
           state.failures++;
@@ -154,7 +162,7 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
         state.version = version;
         log(`[jsui] built ${path.relative(process.cwd(), absEntry)} in ${Date.now() - t0} ms (${(state.bundle.length / 1024).toFixed(0)} KiB${hot ? ', hot' : ''}) -> version ${state.version}`);
         notify();
-      });
+      };
     },
   };
 
