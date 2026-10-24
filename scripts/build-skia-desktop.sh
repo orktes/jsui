@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Builds Skia (chrome/m157, pinned) for desktop Linux / macOS with Graphite on
-# Vulkan (Linux) or Metal (macOS) and on Dawn (WebGPU, header-only, see
-# below), plus Ganesh (GL; Metal on macOS) and the CPU raster, and installs
+# Builds Skia (chrome/m157, pinned) for desktop Linux / macOS / Windows with
+# Graphite on Vulkan (Linux, Windows) or Metal (macOS) and on Dawn (WebGPU,
+# header-only, see below), plus Ganesh (GL; Metal on macOS, Direct3D 12 on
+# Windows) and the CPU raster, and installs
 # headers + static libraries into third_party/skia-desktop in the layout
 # cmake/Deps.cmake expects:
 #
@@ -11,7 +12,7 @@
 #   third_party/skia-desktop/third_party/externals/...    harfbuzz / icu headers
 #   third_party/skia-desktop/dawn/include/...             Dawn's webgpu.h / webgpu_cpp.h (generated)
 #   third_party/skia-desktop/dawn/REVISION                the Dawn commit those headers are from
-#   third_party/skia-desktop/out/<os>-<cpu>/lib*.a        static libraries
+#   third_party/skia-desktop/out/<os>-<cpu>/lib*.a        static libraries (*.lib on Windows)
 #   third_party/skia-desktop/out/<os>-<cpu>/args.gn       the gn args used
 #   third_party/skia-desktop/out/<os>-<cpu>/defines.txt   defines consumers must compile with
 #
@@ -23,6 +24,12 @@
 #   Linux: Graphite + Vulkan, Ganesh + GL (+ Vulkan), fontconfig + bundled
 #          FreeType (as the prebuilt), bundled ICU + HarfBuzz.
 #   macOS: Graphite + Metal, Ganesh + GL + Metal, CoreText fonts.
+#   Windows (x64, Git Bash; clang-cl from LLVM, MSVC + Windows SDK found by
+#          gn): Graphite + Vulkan, Ganesh + GL + Direct3D 12 (Graphite has no
+#          D3D backend), DirectWrite fonts, static CRT (/MT, clang-cl's
+#          default). ICU loads icudtl.dat from beside the executable at run
+#          time (SkLoadICU): the build installs it under
+#          third_party/externals/icu/flutter/, where cmake/Deps.cmake finds it.
 #   Both:  Graphite + Dawn (header-only). PNG / JPEG / WebP / GIF decode, PNG
 #          encode; Skottie (Lottie); no PDF / SVG.
 #   Vulkan headers are Skia's own (include/third_party/vulkan) and memory is
@@ -49,6 +56,7 @@
 #              reset to pristine first)
 #   JOBS       ninja parallelism (default: all cores)
 #   CC / CXX   compilers (Linux default clang / clang++)
+#   CLANG_WIN  Windows: the LLVM install with clang-cl (default C:/Program Files/LLVM)
 #   SKIA_DESKTOP_OUT  install dir (default third_party/skia-desktop)
 set -euo pipefail
 
@@ -64,7 +72,8 @@ OUT_DIR="${SKIA_DESKTOP_OUT:-$ROOT/third_party/skia-desktop}"
 case "$(uname -s)" in
   Linux) os=linux; JOBS="${JOBS:-$(nproc)}" ;;
   Darwin) os=macos; JOBS="${JOBS:-$(sysctl -n hw.ncpu)}" ;;
-  *) echo "build-skia-desktop.sh supports Linux and macOS" >&2; exit 1 ;;
+  MINGW*|MSYS*|CYGWIN*) os=win; JOBS="${JOBS:-${NUMBER_OF_PROCESSORS:-4}}" ;;
+  *) echo "build-skia-desktop.sh supports Linux, macOS and Windows (Git Bash)" >&2; exit 1 ;;
 esac
 case "$(uname -m)" in
   x86_64|amd64) cpu=x64 ;;
@@ -74,10 +83,19 @@ esac
 CPU="${SKIA_CPU:-$cpu}"
 slice="$os-$CPU"
 dest="$OUT_DIR/out/$slice"
+if [ "$os" = win ]; then
+  lib_main=skia.lib
+  CLANG_WIN="${CLANG_WIN:-C:/Program Files/LLVM}"
+  NM="$CLANG_WIN/bin/llvm-nm.exe"
+else
+  lib_main=libskia.a
+  NM=nm
+fi
+PYTHON="${PYTHON:-$(command -v python3 || command -v python)}"
 
 hash_cmd() { if command -v sha256sum >/dev/null; then sha256sum; else shasum -a 256; fi; }
 STAMP_VALUE="$(cat "$ROOT/scripts/build-skia-desktop.sh" "$DAWN_PATCH" | hash_cmd | cut -d' ' -f1)"
-if [ -f "$dest/.stamp" ] && [ "$(cat "$dest/.stamp")" = "$STAMP_VALUE" ] && [ -f "$dest/libskia.a" ] && [ -d "$OUT_DIR/include" ] \
+if [ -f "$dest/.stamp" ] && [ "$(cat "$dest/.stamp")" = "$STAMP_VALUE" ] && [ -f "$dest/$lib_main" ] && [ -d "$OUT_DIR/include" ] \
    && [ -f "$OUT_DIR/dawn/include/dawn/webgpu.h" ]; then
   echo "skia-desktop $slice is up to date"
   exit 0
@@ -101,9 +119,12 @@ grep -q "third_party/externals/dawn\".*dawn.git@$DAWN_REVISION\"" DEPS || {
 
 # Only the third-party repos this configuration compiles (Dawn and its code
 # generator's jinja2 / markupsafe for the headers).
-python3 - <<'PY'
+"$PYTHON" - "$os" <<'PY'
+import sys
 keep = {"brotli", "freetype", "harfbuzz", "icu", "libjpeg-turbo", "libpng", "libwebp", "wuffs", "zlib",
         "vulkanmemoryallocator", "dawn", "jinja2", "markupsafe"}
+if sys.argv[1] == "win":  # Ganesh Direct3D: its allocator, and SPIRV-Cross for HLSL
+    keep |= {"d3d12allocator", "spirv-cross"}
 d = {}
 with open("DEPS") as f:
     exec("def Var(x): return vars[x]\n" + f.read(), d)
@@ -115,8 +136,8 @@ with open("DEPS.jsui-desktop", "w") as f:
     f.write("deps = " + repr(deps) + "\n")
 PY
 GIT_SYNC_DEPS_PATH="$SKIA_SRC/DEPS.jsui-desktop" GIT_SYNC_DEPS_SKIP_EMSDK=1 GIT_SYNC_DEPS_QUIET=1 \
-  python3 tools/git-sync-deps
-[ -x bin/gn ] || python3 bin/fetch-gn
+  "$PYTHON" tools/git-sync-deps
+[ -x bin/gn ] || [ -f bin/gn.exe ] || "$PYTHON" bin/fetch-gn
 command -v ninja >/dev/null || { echo "ninja not found" >&2; exit 1; }
 
 # ------------------------------------------------------------ Dawn headers
@@ -126,7 +147,7 @@ command -v ninja >/dev/null || { echo "ninja not found" >&2; exit 1; }
 DAWN_SRC="$SKIA_SRC/third_party/externals/dawn"
 DAWN_GEN="$SKIA_SRC/out/jsui-dawn-headers-$slice"
 rm -rf "$DAWN_GEN"
-python3 "$DAWN_SRC/generator/dawn_json_generator.py" \
+"$PYTHON" "$DAWN_SRC/generator/dawn_json_generator.py" \
   --template-dir "$DAWN_SRC/generator/templates" \
   --root-dir "$DAWN_SRC" \
   --dawn-json "$DAWN_SRC/src/dawn/dawn.json" \
@@ -193,7 +214,17 @@ skia_enable_spirv_validation=false
 skia_use_partition_alloc=false
 skia_use_perfetto=false
 "
-if [ "$os" = linux ]; then
+if [ "$os" = win ]; then
+  OS_ARGS="
+clang_win=\"$CLANG_WIN\"
+skia_use_vulkan=true
+skia_use_direct3d=true
+skia_enable_direct3d_debug_layer=false
+skia_use_metal=false
+skia_use_fontconfig=false
+skia_use_freetype=false
+"
+elif [ "$os" = linux ]; then
   OS_ARGS="
 cc=\"${CC:-clang}\"
 cxx=\"${CXX:-clang++}\"
@@ -217,14 +248,14 @@ ARGS="$(printf '%s\n%s\n' "$COMMON_ARGS" "$OS_ARGS" | sed '/^$/d' | tr '\n' ' ')
 echo "[$slice] gn args: $ARGS"
 bin/gn gen "$BUILD_DIR" --args="$ARGS"
 # Archives are copied by glob below: drop stale ones (ninja re-archives).
-rm -f "$BUILD_DIR"/lib*.a
+rm -f "$BUILD_DIR"/lib*.a "$BUILD_DIR"/*.lib
 TARGETS="skia skparagraph skshaper skunicode skottie sksg"
 # shellcheck disable=SC2086
 nice ninja -C "$BUILD_DIR" -j "$JOBS" $TARGETS
 
 rm -rf "$dest"
 mkdir -p "$dest"
-find "$BUILD_DIR" -maxdepth 1 -name 'lib*.a' -exec cp {} "$dest/" \;
+find "$BUILD_DIR" -maxdepth 1 \( -name 'lib*.a' -o -name '*.lib' \) -exec cp {} "$dest/" \;
 cp "$BUILD_DIR/args.gn" "$dest/args.gn"
 # Defines dependents get in gn (public + all-dependent configs: SK_GANESH,
 # SK_GRAPHITE, SK_VULKAN, SK_METAL, SK_DAWN, SK_GL,
@@ -235,13 +266,13 @@ for target in //:skia //modules/skshaper:skshaper //modules/skunicode:skunicode 
   for config in $(bin/gn desc "$BUILD_DIR" "$target" public_configs) \
                 $(bin/gn desc "$BUILD_DIR" "$target" all_dependent_configs); do
     { bin/gn desc "$BUILD_DIR" "$config" defines 2>/dev/null || true; } \
-      | grep -E '^[A-Za-z_][A-Za-z0-9_]*(=.*)?$' >> "$dest/defines.txt" || true
+      | tr -d '\r' | grep -E '^[A-Za-z_][A-Za-z0-9_]*(=.*)?$' >> "$dest/defines.txt" || true
   done
 done
 sort -u -o "$dest/defines.txt" "$dest/defines.txt"
 echo "[$slice] public defines:"; cat "$dest/defines.txt"
 # No Dawn library may be linked: the archives must not define wgpu* entry points.
-wgpu_defs="$(nm -g --defined-only "$dest"/lib*.a 2>/dev/null | grep -E ' T _?wgpu[A-Z]' || true)"
+wgpu_defs="$("$NM" -g --defined-only "$dest"/*.a "$dest"/*.lib 2>/dev/null | grep -E ' T _?wgpu[A-Z]' || true)"
 if [ -n "$wgpu_defs" ]; then
   echo "$wgpu_defs" | head -5 >&2
   echo "[$slice] a Skia archive defines wgpu* entry points (Dawn implementation linked in)" >&2; exit 1
@@ -249,11 +280,18 @@ fi
 
 # ---------------------------------------------------------------- headers
 rm -rf "$OUT_DIR/include" "$OUT_DIR/src" "$OUT_DIR/modules" "$OUT_DIR/third_party" "$OUT_DIR/dawn"
-copy_headers() {  # copy_headers <src dir> (relative to SKIA_SRC)
+copy_headers() {  # copy_headers <src dir> (relative to SKIA_SRC); no rsync on Windows
   [ -d "$1" ] || return 0
-  mkdir -p "$OUT_DIR/$1"
-  rsync -a --prune-empty-dirs --include='*/' --include='*.h' --include='*.hpp' --include='*.inc' --exclude='*' \
-    "$1/" "$OUT_DIR/$1/"
+  "$PYTHON" - "$1" "$OUT_DIR/$1" <<'PY'
+import os, shutil, sys
+src, dst = sys.argv[1], sys.argv[2]
+for d, _, files in os.walk(src):
+    for f in files:
+        if f.endswith((".h", ".hpp", ".inc")):
+            out = os.path.join(dst, os.path.relpath(d, src))
+            os.makedirs(out, exist_ok=True)
+            shutil.copy2(os.path.join(d, f), out)
+PY
 }
 copy_headers include
 copy_headers src
@@ -262,6 +300,12 @@ copy_headers third_party/externals/harfbuzz/src
 copy_headers third_party/externals/icu/source/common/unicode
 copy_headers third_party/externals/icu/source/i18n/unicode
 cp LICENSE "$OUT_DIR/"
+if [ "$os" = win ]; then
+  # The ICU data SkLoadICU reads at run time (the small Flutter set, as the
+  # m124 prebuilt shipped): hosts copy it beside their executable.
+  mkdir -p "$OUT_DIR/third_party/externals/icu/flutter"
+  cp third_party/externals/icu/flutter/icudtl.dat "$OUT_DIR/third_party/externals/icu/flutter/"
+fi
 mkdir -p "$OUT_DIR/dawn"
 cp -R "$DAWN_GEN/include" "$OUT_DIR/dawn/include"
 cp "$DAWN_SRC/LICENSE" "$OUT_DIR/dawn/LICENSE"

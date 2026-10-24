@@ -223,6 +223,22 @@ if(JSUI_METAL)
 endif()
 message(STATUS "JSUI_METAL: ${JSUI_METAL}")
 
+# Direct3D backend (Skia Ganesh on Direct3D 12, jsui_gpu_create_d3d12 /
+# _d3d11, jsui_render_gpu_target): on by default on Windows with a Skia built
+# with skia_use_direct3d (scripts/build-skia-desktop.sh; not the m124
+# prebuilt). Graphite has no Direct3D backend.
+set(_jsui_d3d_default OFF)
+if(WIN32 AND _jsui_skia_gn MATCHES "skia_use_direct3d *= *true")
+  set(_jsui_d3d_default ON)
+endif()
+option(JSUI_D3D "Build the Skia Ganesh Direct3D 12 backend (jsui_gpu_create_d3d12 / _d3d11)" ${_jsui_d3d_default})
+if(JSUI_D3D)
+  target_compile_definitions(jsui PUBLIC JSUI_D3D=1)
+  target_compile_definitions(jsui_skia INTERFACE SK_GANESH SK_DIRECT3D)
+  target_link_libraries(jsui PUBLIC d3d12 d3d11 dxgi dxguid)
+endif()
+message(STATUS "JSUI_D3D: ${JSUI_D3D}")
+
 # jsui_shared: the prebuilt release library (libjsui.so / libjsui.dylib /
 # jsui.dll) for hosts that load JSUI as a plain C library (Unity, Unreal, a
 # game built with another toolchain). The static library is linked into it

@@ -32,7 +32,7 @@ HostTextures::~HostTextures() = default;
 int HostTextures::set(const std::string& key, const JsuiTexture* desc) {
   if (!desc) return remove(key) ? 1 : 0;
   if (!desc->handle || desc->width <= 0 || desc->height <= 0 || desc->kind <= JSUI_TEXTURE_PIXELS ||
-      desc->kind > JSUI_TEXTURE_METAL)
+      desc->kind > JSUI_TEXTURE_D3D12)
     return -1;
   auto it = entries_.find(key);
   if (it != entries_.end() && !it->second.pixels && sameDesc(it->second.desc, *desc)) return 0;

@@ -456,6 +456,92 @@ jobs:
           name: jsui-godot-macos
           path: integrations/godot/demo/bin/
 
+  # ------------------------------------------------- Windows (Skia m157, GPU)
+  # Skia m157 for Windows built from source (scripts/build-skia-desktop.sh:
+  # Graphite + Vulkan, Ganesh + GL + Direct3D 12, clang-cl, /MT), cached on
+  # the hash of the script and its patch. A cache hit only looks the key up;
+  # the jobs below restore it.
+  skia-windows:
+    name: Skia m157 (windows-x64)
+    runs-on: windows-2022
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.native == 'true' || needs.changes.outputs.godot == 'true' || needs.changes.outputs.dist == 'true'
+    timeout-minutes: 240
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache key
+        id: key
+        run: echo "key=skia-desktop-${{ runner.os }}-x64-${{ hashFiles('scripts/build-skia-desktop.sh', 'scripts/patches/skia-m157-dawn-header-only.patch') }}" >> "$GITHUB_OUTPUT"
+      - name: Cache desktop Skia (m157)
+        id: skia
+        uses: actions/cache@v4
+        with:
+          path: third_party/skia-desktop
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
+      - name: Skia m157 for Windows (cache miss only)
+        if: steps.skia.outputs.cache-hit != 'true'
+        run: |
+          pip install ninja==1.13.0
+          git config --global core.longpaths true
+          JOBS=4 scripts/build-skia-desktop.sh
+          rm -rf third_party/skia-src-m157  # not cached
+
+  # Native tests on Windows against Skia m157, with the GPU backends required:
+  # Graphite on Vulkan (Mesa lavapipe) and Ganesh on Direct3D 12 / 11 (WARP,
+  # the runner has no GPU); each is compared with the CPU raster.
+  windows:
+    name: native (windows, Skia m157 + Vulkan / D3D12)
+    runs-on: windows-2022
+    needs: [changes, skia-windows]
+    if: ${{ !cancelled() && needs.skia-windows.result == 'success' && (github.event_name != 'pull_request' || needs.changes.outputs.native == 'true' || needs.changes.outputs.godot == 'true') }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Desktop Skia m157 (built by skia-windows)
+        uses: actions/cache/restore@v4
+        with:
+          path: third_party/skia-desktop
+          key: ${{ needs.skia-windows.outputs.key }}
+          fail-on-cache-miss: true
+      - name: Vulkan loader + Mesa lavapipe
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          vulkan_version: 1.4.328.1
+          install_runtime: true
+          install_lavapipe: true
+          cache: true
+          stripdown: true
+      - name: Cache FetchContent sources
+        uses: actions/cache@v4
+        with:
+          path: build/_deps/*-src
+          key: windows-deps-m157-${{ hashFiles('cmake/*.cmake', 'integrations/godot/CMakeLists.txt', 'tools/jsui-viewer/CMakeLists.txt') }}
+          restore-keys: windows-deps-m157-
+      - name: Configure
+        run: >
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -T ClangCL
+          -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DJSUI_SKIA_DIR=third_party/skia-desktop
+          -DJSUI_BUILD_TESTS=ON -DJSUI_BUILD_GODOT=ON
+      - name: Build
+        run: cmake --build build --config Release -j 4 --target jsui-tests jsui-viewer jsui_godot
+      - name: Native tests (GPU backends required)
+        env:
+          JSUI_VULKAN_TEST_REQUIRE: 1
+          JSUI_D3D_TEST_REQUIRE: 1
+        run: |
+          export VK_DRIVER_FILES="$(cygpath -w /c/lavapipe/share/vulkan/icd.d/lvp_icd.x86_64.json)"
+          vulkaninfo --summary 2>/dev/null | head -40 || true
+          ./build/Release/jsui-tests.exe
+
   # ---------------------------------------------------- release binaries (dist)
   # The prebuilt native binaries every release attaches (release.yml takes
   # these artifacts from the CI run on main for the tagged commit, as it
@@ -466,7 +552,8 @@ jobs:
   # their own (jsui-shared-*, jsui-unity-*) for the engine plugin packaging.
   # Each package is checked like a host would use it
   # (scripts/dist/check-shared.sh). Desktop Skia m157 on Linux and macOS
-  # (Graphite on Vulkan / Metal), the m124 prebuilt on Windows.
+  # (Graphite on Vulkan / Metal), and on Windows (Graphite on Vulkan, Ganesh
+  # on Direct3D 12 / GL; skia-windows).
   dist-linux:
     name: dist (linux-${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
@@ -638,27 +725,31 @@ jobs:
   dist-windows:
     name: dist (windows-x64)
     runs-on: windows-2022
-    needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.dist == 'true'
+    needs: [changes, skia-windows]
+    if: ${{ !cancelled() && needs.skia-windows.result == 'success' && (github.event_name != 'pull_request' || needs.changes.outputs.dist == 'true') }}
     timeout-minutes: 90
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-      - name: Cache prebuilt Skia + FetchContent sources
+      - name: Desktop Skia m157 (Graphite + Vulkan, Ganesh + GL + D3D12; built by skia-windows)
+        uses: actions/cache/restore@v4
+        with:
+          path: third_party/skia-desktop
+          key: ${{ needs.skia-windows.outputs.key }}
+          fail-on-cache-miss: true
+      - name: Cache FetchContent sources
         uses: actions/cache@v4
         with:
-          path: |
-            third_party/skia-prebuilt
-            build/_deps/*-src
-          key: dist-deps-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'integrations/godot/CMakeLists.txt', 'tools/jsui-viewer/CMakeLists.txt') }}
-          restore-keys: dist-deps-${{ runner.os }}-
+          path: build/_deps/*-src
+          key: dist-deps-m157-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'integrations/godot/CMakeLists.txt', 'tools/jsui-viewer/CMakeLists.txt') }}
+          restore-keys: dist-deps-m157-${{ runner.os }}-
       - name: Configure
-        # ClangCL and the static C runtime, as the prebuilt Skia is built.
+        # ClangCL and the static C runtime, as Skia is built.
         run: >
           cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -T ClangCL
-          -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DJSUI_SKIA_DIR=third_party/skia-desktop
           -DJSUI_BUILD_SHARED=ON -DJSUI_BUILD_TESTS=OFF
           -DJSUI_BUILD_GODOT=ON -DJSUI_GODOT_OUTPUT_DIR="$(pwd -W)/build/godot"
       - name: Build
@@ -1088,7 +1179,7 @@ jobs:
           path: tests/reference/output
           if-no-files-found: warn
 
-  # ------------------------------------------- native (macOS / Windows), advisory
+  # ----------------------------------------------- native (macOS, prebuilt), advisory
   native-other:
     name: native (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -1098,7 +1189,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-2022]
+        os: [macos-14]
     steps:
       - uses: actions/checkout@v4
       - name: Cache prebuilt Skia
@@ -1109,9 +1200,6 @@ jobs:
       - name: Configure (macOS)
         if: runner.os == 'macOS'
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-      - name: Configure (Windows)
-        if: runner.os == 'Windows'
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -T ClangCL -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
       - name: Build
         run: cmake --build build --config Release -j 4
       - name: Native tests (macOS)
@@ -1128,9 +1216,6 @@ jobs:
             --frames 10 --screenshot bands-gpu.png web/test/fixtures/bands.js | tee viewer-gpu.log
           grep -q '^GPU: ' viewer-gpu.log  # not the CPU fallback
           test -s bands-gpu.png
-      - name: Native tests (Windows)
-        if: runner.os == 'Windows'
-        run: ./build/Release/jsui-tests.exe
 
   # ------------------------------------------------------ Android, advisory
   # Compile + package: Skia for Android (Ganesh on GLES) is built from source
