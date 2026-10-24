@@ -401,10 +401,15 @@ TEST(render_incremental_matches_full) {
   Node* other = s.add(R"J({"style":{"position":"absolute","left":240,"top":30,"width":60,"height":60,"borderRadius":30,"backgroundColor":"#b26bff","opacity":0.8}})J");
   // A fixed-size text whose padding is a percentage of its parent's width,
   // and a clipped column of rows below a counter (rows laid out from Yoga's
-  // cache when the counter changes).
-  Node* padBox = s.add(R"J({"style":{"position":"absolute","left":10,"top":190,"width":100,"height":40,"backgroundColor":"#26304f"},"children":[
+  // cache when the counter changes). Their damage (a text's ink bounds reach
+  // ~13 px beyond its box) stays clear of the panel's rounded outline: damage
+  // touching it repaints the whole panel under a non-rectangular clip, which
+  // Skia on macOS arm64 blends a level apart from the full frame on a few
+  // edge pixels (see kExactUnderClip; render_incremental_rounded_boxes_*
+  // covers that case).
+  Node* padBox = s.add(R"J({"style":{"position":"absolute","left":10,"top":200,"width":100,"height":36,"backgroundColor":"#26304f"},"children":[
     {"type":"Text","style":{"width":80,"height":30,"paddingLeft":"20%","color":"#fff","fontSize":12},"text":"Pad"}]})J");
-  Node* column = s.add(R"J({"style":{"position":"absolute","left":130,"top":186,"width":100,"height":52,"overflow":"hidden"},"children":[
+  Node* column = s.add(R"J({"style":{"position":"absolute","left":240,"top":110,"width":70,"height":60,"overflow":"hidden"},"children":[
     {"style":{"flexDirection":"row"},"children":[{"type":"Text","style":{"color":"#fff","fontSize":10},"text":"Frame 1"}]},
     {"style":{"height":12,"backgroundColor":"#4ade80"}},{"style":{"height":12,"backgroundColor":"#4fd1ff"}},
     {"style":{"height":12,"backgroundColor":"#b26bff"}},{"style":{"height":12,"backgroundColor":"#f2c35b"}}]})J");
@@ -413,9 +418,10 @@ TEST(render_incremental_matches_full) {
   Node* scroll = panel->children()[3];
   std::vector<uint32_t> inc(320 * 240), full(320 * 240);
   int step = 0;
+  SkIRect damage;
   auto check = [&](const char* what) {
     s.doc().layout();
-    SkIRect damage = s.rt->renderIncremental(inc.data(), 320, 240, 320 * 4);
+    damage = s.rt->renderIncremental(inc.data(), 320, 240, 320 * 4);
     // Painted where updateDamage placed each node, without placing it again.
     CHECK_EQ(lastPaintStats(s.doc()).placements, 0);
     s.rt->render(full.data(), 320, 240, 320 * 4);
@@ -451,13 +457,17 @@ TEST(render_incremental_matches_full) {
   panel->removeChild(scroll);
   check("remove");
   // The text keeps its frame; only its padding (from its parent) changes.
+  const SkIRect panelBox = SkIRect::MakeLTRB(19, 19, 221, 181);
   patch(padBox, R"J({"width":180})J");
   check("percent padding");
+  CHECK(!damage.isEmpty() && !SkIRect::Intersects(damage, panelBox));
   column->children()[0]->children()[0]->children()[0]->setText("Frame 22");
   check("counter over cached rows");
+  CHECK(!damage.isEmpty() && !SkIRect::Intersects(damage, panelBox));
   // The counter's row grows: the rows below move.
   patch(column->children()[0], R"J({"height":20})J");
   check("rows move");
+  CHECK(!damage.isEmpty() && !SkIRect::Intersects(damage, panelBox));
   // Nothing changed: nothing repainted.
   s.doc().layout();
   SkIRect r = s.rt->renderIncremental(inc.data(), 320, 240, 320 * 4);
