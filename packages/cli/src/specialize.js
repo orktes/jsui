@@ -133,3 +133,38 @@ export function specializePlugin({ reactDir, log }) {
     },
   };
 }
+
+// React's scheduler measures its time slices with performance.now(), which
+// in JSUI is the frame clock: it does not move within a tick, so concurrent
+// work (startTransition) would never yield and a whole transition would
+// render in one frame. The bundled scheduler asks the runtime instead
+// (__jsui_native.shouldYield: this tick's JS budget, Runtime::jsSliceMs).
+// Dev and production builds alike; a scheduler that does not match is
+// bundled as published (with a warning).
+const SCHEDULER = /scheduler[\\/]cjs[\\/]scheduler(\.native)?\.(production|development)\.js$/;
+const SHOULD_YIELD = /function shouldYieldToHost\(\) \{\n(\s*)return needsPaint(?=[\s?])/g;
+
+export function patchScheduler(source) {
+  const n = (source.match(SHOULD_YIELD) || []).length;
+  if (n !== 1) return { code: source, ok: false };
+  const code = source.replace(
+    SHOULD_YIELD,
+    'function shouldYieldToHost() {\n$1var jsui = globalThis.__jsui_native;\n$1if (jsui && jsui.shouldYield) return needsPaint || jsui.shouldYield();\n$1return needsPaint',
+  );
+  return { code, ok: true };
+}
+
+/** esbuild plugin: React's scheduler yields on the runtime's frame budget. */
+export function schedulerPlugin({ log }) {
+  return {
+    name: 'jsui-scheduler-yield',
+    setup(build) {
+      build.onLoad({ filter: SCHEDULER }, async (args) => {
+        const source = await readFile(args.path, 'utf8');
+        const { code, ok } = patchScheduler(source);
+        if (!ok && log) log(`jsui: scheduler bundled unpatched (shouldYieldToHost not found in ${path.basename(args.path)}): transitions will not be time-sliced`);
+        return { contents: code, loader: 'js', resolveDir: path.dirname(args.path) };
+      });
+    },
+  };
+}

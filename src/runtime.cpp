@@ -1,6 +1,7 @@
 #include "runtime.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -21,6 +22,7 @@
 #include "render/shader_view.h"
 #include "render/image_node.h"
 #include "render/painter.h"
+#include "text/text_layout.h"
 
 namespace jsui {
 
@@ -552,8 +554,14 @@ void Runtime::devPoll() {
   });
 }
 
+double Runtime::wallMs() {
+  using namespace std::chrono;
+  return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+}
+
 void Runtime::tick(double nowMs) {
   now = nowMs;
+  tickWallStart = wallMs();
   doomed_.clear();
   for (auto& s : surfaces_) s->doc.now = nowMs;
   if (reloadRequested_) reload();
@@ -598,17 +606,51 @@ void Runtime::tick(double nowMs) {
   // ShaderViews whose shader reads `time` repaint on the same clock.
   shaders->tick(nowMs);
   deliverShaderEvents();
+  // The onLayout events of this tick's layout passes reach JS together, with
+  // one microtask drain after them: state set by several handlers renders in
+  // one React pass instead of one per event.
+  if (js) js->beginBatch();
   for (auto& s : surfaces_) {
     s->doc.layout();
     s->doc.tickLayoutAnimations(nowMs);
     // A LayoutAnimation applies to the commit that armed it only.
     s->doc.disarmLayoutAnimation();
   }
+  if (js) js->endBatch();
   devPoll();
   // jsui_call_ui results settled during this tick (or since the last one).
   deliverUiCallResults();
   // Shared-session commands run last, on the frame this tick produced.
   if (session) session->tick(devOrigin_);
+  prepareText();
+}
+
+// A time-sliced render (startTransition) creates its Text nodes frames before
+// it commits them; their paragraphs are shaped now, in this frame's spare
+// time, instead of all in the frame that commits and lays them out. Text
+// nested in another Text is part of that one's paragraph; a Text not attached
+// to anything yet may still become nested, so it waits.
+void Runtime::prepareText() {
+  if (jsSliceMs <= 0) return;
+  double until = tickWallStart + 2 * jsSliceMs;
+  for (auto& s : surfaces_) {
+    auto& list = s->doc.newTexts;
+    size_t keep = 0, i = 0;
+    for (; i < list.size(); i++) {
+      if (wallMs() >= until) break;
+      Node* n = s->doc.get(list[i]);
+      if (!n || n->type() != NodeType::Text) continue;
+      Node* p = n->parent();
+      if (!p) {
+        list[keep++] = list[i];
+        continue;
+      }
+      if (p->type() == NodeType::Text) continue;
+      text::prepareText(n);
+    }
+    for (; i < list.size(); i++) list[keep++] = list[i];
+    list.resize(keep);
+  }
 }
 
 void Runtime::tickNative(double nowMs) {
@@ -617,10 +659,12 @@ void Runtime::tickNative(double nowMs) {
   animated->tick(nowMs);  // end events stay queued until the next tick()
   lotties->tick(nowMs);   // so do LottieView events
   shaders->tick(nowMs);   // and ShaderView errors
+  if (js) js->beginBatch();
   for (auto& s : surfaces_) {
     s->doc.layout();
     s->doc.tickLayoutAnimations(nowMs);
   }
+  if (js) js->endBatch();
 }
 
 void Runtime::deliverAnimatedEvents() {

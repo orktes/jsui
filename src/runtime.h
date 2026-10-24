@@ -119,6 +119,15 @@ class Runtime {
   void* clipboardUser = nullptr;
   std::string clipboard;
   double now = 0;
+  // Wall clock (steady, ms) when the current tick began, and how much JS
+  // work a tick may do before React's scheduler yields to the next frame
+  // (__jsui_native.shouldYield): concurrent renders (startTransition) are
+  // time-sliced across frames instead of blocking one.
+  double tickWallStart = 0;
+  double jsSliceMs = 5;  // jsui_set_js_frame_budget; <= 0: no limit
+  static double wallMs();
+  void prepareText();
+  bool jsShouldYield() const { return jsSliceMs > 0 && wallMs() - tickWallStart >= jsSliceMs; }
 
   // Shared host state (jsui_set_state / HostState in JS). Lives as long as
   // the runtime, across JS contexts.

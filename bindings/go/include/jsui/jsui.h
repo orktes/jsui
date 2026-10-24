@@ -623,6 +623,17 @@ JSUI_API void jsui_tick(JsuiRuntime* rt, double now_ms);
  * already spent, a hitch while loading) but keep native animations smooth.
  * now_ms is on the same clock as jsui_tick(). */
 JSUI_API void jsui_tick_native(JsuiRuntime* rt, double now_ms);
+/* How much wall time (ms) the JS of one jsui_tick() may take before
+ * React's scheduler yields to the next frame (default 5). Concurrent
+ * renders (startTransition, useDeferredValue) are then time-sliced: each
+ * tick renders part of the new tree while the current UI stays live, and
+ * the commit, passive effects and zero-delay timers queued past the budget
+ * follow in later ticks. Synchronous updates (a plain setState in an event
+ * handler) still render in one go. <= 0 removes the limit (a transition
+ * renders in the tick it starts). Applies to every surface of the runtime;
+ * performance.now() stays the runtime clock either way. */
+JSUI_API void jsui_set_js_frame_budget(JsuiRuntime* rt, double ms);
+JSUI_API double jsui_get_js_frame_budget(JsuiRuntime* rt);
 /* Number of resource loads (bundle, fetch, images, fonts) still in flight.
  * Headless hosts keep ticking until this reaches 0 before capturing. */
 JSUI_API int jsui_pending_loads(JsuiRuntime* rt);

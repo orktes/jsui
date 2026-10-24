@@ -408,6 +408,9 @@ var jsuiHostJs = (function () {
     // callbacks run in later passes of the same tick (at most 8).
     runTimers(now) {
       for (let pass = 0; pass < 8 && this.earliestDue <= now; pass++) {
+        // Later passes wait for the next tick once its JS budget is spent
+        // (as engine.cpp's runTimers).
+        if (pass > 0 && X.should_yield(this.e) !== 0) break;
         const due = [];
         let later = Infinity;
         for (const [id, t] of this.timers) {
@@ -684,6 +687,11 @@ var jsuiHostJs = (function () {
         // ---- node tree (@orktes/jsui-react's host config). No updateProps /
         // getProps: the package builds and diffs native props in JS then
         // (instances.js), and only changed props cross, as JSON.
+        // React's scheduler: true once this tick's JS budget is spent
+        // (Runtime::jsShouldYield; performance.now() is the frame clock).
+        shouldYield() {
+          return !D.dead && X.should_yield(e) !== 0;
+        },
         createNode(type, rootTag) {
           if (D.dead) return 0;
           const t = arguments.length > 0 ? text(type) : '';

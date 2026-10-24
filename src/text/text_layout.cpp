@@ -922,6 +922,17 @@ void installMeasure(Node* node) {
   }
 }
 
+bool prepareText(Node* node) {
+  Document* doc = node->document();
+  FontManager* fm = doc ? doc->fonts : nullptr;
+  if (!fm) return false;
+  auto* cache = static_cast<TextCache*>(node->textCache.get());
+  if (cache && cache->fontGeneration == fm->generation && cache->laidOutWidth >= 0) return false;
+  TextCache* c = ensureCache(node);
+  if (c && c->laidOutWidth < 0) layoutAt(c, kInf);
+  return true;
+}
+
 tl::Paragraph* layoutParagraph(Node* node, float width) {
   TextCache* c = ensureCache(node);
   if (!c || !c->paragraph) return nullptr;

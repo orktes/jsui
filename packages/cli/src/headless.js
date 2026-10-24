@@ -368,6 +368,9 @@ export class HeadlessApp {
     this.rt = M._jsui_web_create(this.hostId, this.width, this.height, this.scale, o.devMode ? 1 : 0, this._baseUrlPtr, 0,
       this.hostJs ? 1 : 0);
     if (!this.rt) throw new Error('jsui: runtime creation failed');
+    // Simulated time: no wall-clock frame budget, so what a frame shows does
+    // not depend on how fast this machine is (transitions render whole).
+    if (M._jsui_set_js_frame_budget) M._jsui_set_js_frame_budget(this.rt, 0);
     // Dev mode joins the dev server's shared session only with devSession
     // (the dev server registers its own headless runtime directly).
     if (o.devMode && M._jsui_set_dev_session) {

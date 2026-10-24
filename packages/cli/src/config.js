@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { assetPlugin } from './assets.js';
 import { reactCompilerPlugin } from './react-compiler.js';
-import { specializePlugin } from './specialize.js';
+import { schedulerPlugin, specializePlugin } from './specialize.js';
 
 const require = createRequire(import.meta.url);
 
@@ -145,6 +145,7 @@ export function esbuildOptions(o) {
     banner: { js: `var process = globalThis.process || { env: { NODE_ENV: ${JSON.stringify(o.mode)} }, platform: "jsui", nextTick: function (f) { Promise.resolve().then(f); } };` },
     logLevel: 'silent',
     plugins: [
+      schedulerPlugin({ log: o.log }),
       // Before the alias plugin: it claims renderer.js's react-reconciler import.
       ...(dev ? [] : [specializePlugin({ reactDir: jsuiReactDir(), log: o.log })]),
       aliasPlugin({ facades: !dev }),
