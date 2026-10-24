@@ -130,8 +130,7 @@ the same output as `qjs-df836d1`, except for the test_bjson corpus version above
 
 The JSUI commit bench (`packages/react/bench/commit-bench.jsx`) imports `react-native` and needs the native
 bridge, so it can't run under plain qjs. `out/react-commit.js` is the plain-JS version of the same scenarios
-(the tables above). Running it in `jsui-render` needs a JSUI build with the patched engine. See the
-`claude/wip-rnquickjs` comparison, if it has been added below.
+(the tables above). Running it in `jsui-render` needs a JSUI build with the patched engine. See "In JSUI" below.
 
 ## GC pauses: navigation bench (`gc-bench.jsx`)
 
@@ -150,27 +149,50 @@ re-derived after every collection the way rnq's runtime does with `deferredGCLim
 frame boundary instead of waiting for 120 ms of idle, and it is called from JS, so there is a stack frame
 (the `assert` in `JS_RunPendingGC` is compiled out by `-DNDEBUG`; the collection itself is the same one `std.gc()` runs).
 
+The host-driven rows use `gc-driver.c`, which runs the same bundle frame by frame from C (`__gcFrame(f)`),
+so collections can run between frames with an empty JS stack, the way JSUI's runtime does it. `JS_RunIdleGC`
+refuses to run under JS. They are built from a JSUI build tree's patched QuickJS (`build/quickjs-patched/quickjs.c` +
+`build/quickjs-src`, same flags as the others): main a6c34a4 (v0.17.0 + #93; it has no GC stats API), and
+`claude/wip-rnquickjs` 45b7f07 (rnq patches + `third_party/quickjs-jsui/0001-generational-gc.patch` + #93's
+string patches). Modes:
+- `gen`: `JS_SetGCGenerational(rt, true)` only.
+- `gen-deferred`: also `JS_SetGCDeferred(rt, true, 0)`, with one `JS_RunIdleGC` between frames.
+- `+ 2 ms young slices`: also `JS_SetGCYoungBudget(rt, 2.0)`.
+- `JSUI runtime policy`: the WIP's settings plus `QuickJsEngine::collectIdle` between frames, ported as is. A light frame
+  is a tick under 4 ms, and none is idle. Every frame here is heavy (about 27 ms), so a pending young collection
+  finishes (`JS_FinishPendingGC`) after 3 frames, and a due full one (`JS_RunGC`) runs after 30.
+
 Hermes has no high-resolution clock in its CLI, so its frame times are whole milliseconds (`Date.now`).
-Hermes's own GC stats (`-gc-print-stats`) are given beside them. Median of 3 runs:
+Hermes's own GC stats (`-gc-print-stats`) are given beside them. Median of 3 runs, taken under the shared bench
+lock at load 5 to 8 (2026-10-25). The rows match an earlier run within 2%:
 
-| Engine | frame p50 | p95 | p99 | max | mean | between-frame GC (p99 / max / total) | GC stats | max RSS (MiB) |
-|---|---|---|---|---|---|---|---|---|
-| QuickJS JSUI v0.17.0 (`qjs`) | 35.6 | 36.9 | 73.5 | 75.0 | 36.2 | | 4 cycle collections inside frames, 28 to 40 ms each | 79.6 |
-| QuickJS rnq17 + JSUI, default GC | 27.1 | 28.3 | 61.7 | 63.8 | 27.7 | | 4 inside frames, 27 to 36 ms each | 82.0 |
-| **QuickJS rnq17 + JSUI, deferred GC** | **26.9** | **27.9** | **28.3** | **30.5** | 27.0 | 21.1 / 23.0 / 205 ms | none inside frames; about 10 between frames, about 21 ms each | 66.4 |
-| Hermes .hbc (interpreter) | 15 | 18 | 20 | 20 to 22 | 15.5 | | 824 collections, 0.72 s total, max pause 3.6 to 4.0 ms | 69.2 |
-| Hermes .hbc + JIT | 10 | 12 | 13 | 13 | 10.2 | | 838 collections, 0.62 s total, max pause 2.7 to 3.0 ms | 67.6 |
+| Engine / mode | frame p50 | p95 | p99 | max | between-frame GC (p99 / max / total ms) | collections, GC time, longest pause | max RSS (MiB) |
+|---|---|---|---|---|---|---|---|
+| QuickJS JSUI v0.17.0 (`qjs`) | 35.7 | 37.0 | 74.2 | 78.4 | | 4 inside frames, 28 to 40 ms each | 81.7 |
+| QuickJS rnq17 + JSUI, default GC | 27.0 | 28.0 | 61.5 | 62.9 | | 4 inside frames, 27 to 36 ms each | 83.1 |
+| QuickJS rnq17 + JSUI, deferred GC (rnq-style ceiling, `__runPendingGC`) | 27.1 | 28.1 | 29.8 | 31.8 | 21.7 / 22.4 / 210 | about 10 between frames, about 21 ms each | 68.3 |
+| host-driven: main (v0.17.0 + #93), default GC | 33.4 | 34.5 | 71.2 | 72.0 | | (no stats API on main) | 78.2 |
+| host-driven: WIP 45b7f07, default GC | 26.7 | 27.6 | 60.5 | 62.4 | | 4 full, 136 ms, 35.2 ms | 79.6 |
+| host-driven: WIP 45b7f07, `gen` | 26.8 | 28.0 | 53.7 | 54.8 | | 8 young, 200 ms, 27.3 ms (inside frames) | 82.7 |
+| host-driven: WIP 45b7f07, `gen-deferred` | 26.7 | 27.6 | 28.0 | 28.1 | 24.8 / 25.4 / 988 | 147 (8 full), 988 ms, 25.4 ms | 67.0 |
+| host-driven: WIP 45b7f07, `gen-deferred` + 2 ms young slices | 26.9 | 27.8 | 31.1 | 41.5 | 3.1 / 64.3 / 705 | 302 (2 full), 734 ms, 64.3 ms | 114.8 |
+| **host-driven: WIP 45b7f07, JSUI runtime policy (`collectIdle`)** | **26.8** | **27.7** | **29.0** | **30.9** | 24.6 / 27.1 / 631 | 45 (3 full), 631 ms, 27.1 ms | 73.7 |
+| Hermes .hbc (interpreter) | 15 | 18 | 19 | 21 | | 822, 0.72 s, max pause 3.6 to 3.8 ms | 69.0 |
+| Hermes .hbc + JIT | 10 | 12 | 12 | 13 | | 838, 0.61 s, max pause 2.8 to 2.9 ms | 67.3 |
 
-- QuickJS's refcounting frees almost everything as it goes. The cycle collector runs about once every 75 frames,
-  and each run is a 27 to 40 ms pause, on top of a frame that already takes 27 to 36 ms. With deferral that pause moves
-  out of the frame (p99 61.7 → 28.3 ms). Between frames it runs more often (about 10 times, because the
-  threshold resets to 1.5x the live heap after each run) but for less time (about 21 ms; 205 ms in total) and
-  at a lower peak RSS. An
-  embedder still has to find idle time for it. rnq waits for a 120 ms quiet gap, or forces it after 2 s.
+- QuickJS's refcounting frees almost everything as it goes. With stock timing the cycle collector runs about once
+  every 75 frames, and each run is a 27 to 40 ms pause on top of a 27 to 36 ms frame. Any deferral moves it out of the
+  frame: in-frame p99 falls from 60 to 62 ms to 28 to 30 ms, and peak RSS is 10 to 15 MiB lower.
+- Generational collection doesn't pay off in this bench. Each frame's new screen survives 3 more frames, so
+  young collections mostly scan live objects. Total GC time is 3 to 5x the full-only deferred run (631 to 988 ms vs
+  136 to 210 ms), and the longest between-frame pause is about the same (25 to 27 ms vs 22 ms). With 2 ms slices and
+  only one slice per frame, collection can't keep up with a full screen per frame: RSS reaches 115 MiB and one 64 ms
+  catch-up runs. JSUI's policy avoids that by finishing in one go after 3 heavy frames. Real navigation has light
+  frames between mounts (see jsui-nav below), which is the case the slices are built for.
 - Hermes (Hades, concurrent old-gen marking) collects about 2.6 times per frame, but no pause exceeds 4 ms.
   Its frame times have no GC tail.
-- Peak RSS is about the same here (66 to 82 MiB). QuickJS's advantage in the smaller benches comes from its small heap and
-  bytecode, not from this kind of churn.
+- Peak RSS is about the same here (67 to 83 MiB). QuickJS's advantage in the smaller benches comes from its
+  small heap and bytecode, not from this kind of churn.
 
 Exploratory, single runs: the first version of the bench didn't memoize the kept screens, so every frame
 re-rendered all four mounted screens (8,000 views). QuickJS rnq17: p50 49.2 / p99 85 / max 88 ms.
@@ -191,11 +213,11 @@ desktop and Android.
 | mount 500 views (ms) | 2.83 | 1.45 (1.95x) | 0.95 (3.0x) |
 | update plain none / tenth / all | 2.33 / 2.35 / 2.34 | 1.20 / 1.21 / 1.20 (1.95x) | 0.60 / 0.60 / 0.60 (3.9x) |
 | update memo none / tenth / all | 1.21 / 1.50 / 2.65 | 0.68 / 0.84 / 1.38 (1.8x) | 0.39 / 0.47 / 0.73 (3.2x) |
-| GC bench frame p50 / p99 / max | 26.9 / 28.3 / 30.5 deferred (27.1 / 61.7 / 63.8 default) | 15 / 20 / 20 | 10 / 13 / 13 |
-| longest GC pause | 36 ms inside a frame (default); 23 ms between frames (deferred) | 4 ms | 3 ms |
+| GC bench frame p50 / p99 / max | 26.8 / 29.0 / 30.9 JSUI WIP policy; 27.1 / 29.8 / 31.8 rnq-style deferred; 27.0 / 61.5 / 62.9 default | 15 / 19 / 21 | 10 / 12 / 13 |
+| longest GC pause | 35 ms inside a frame (default); 22 to 27 ms between frames (deferred) | 4 ms | 3 ms |
 | startup, bytecode: trivial / bundle load+init / cost over trivial (ms) | 4.8 / 6.7 / 1.9 | 7.7 / 8.5 / 0.8 | 8.4 / 8.6 / 0.2 |
 | peak RSS, React bench (bytecode) | 7.3 MiB | 35.0 MiB | 37.5 MiB |
-| peak RSS, GC bench | 66 MiB (deferred) / 82 MiB (default) | 69 MiB | 68 MiB |
+| peak RSS, GC bench | 68 to 74 MiB (deferred) / 83 MiB (default) | 69 MiB | 67 MiB |
 | engine, stripped (bytes) | 1,130,728 (542 KB gz), compiler included | `libhermesvmlean` 1,872,216 (804 KB gz), no compiler; `libhermesvm` 3,198,496 | lean 2,137,712; full 3,480,432 |
 | runtime deps | libSystem only | libc++ (shared on Android unless the app already ships it), CoreFoundation on Apple | same |
 | bytecode payload (this bundle) | 205,598 | 252,486 | same |
@@ -203,12 +225,107 @@ desktop and Android.
 Summary:
 - rnq's patches close about 10 to 20% of the gap. Hermes's interpreter is still about 2x faster than the best
   QuickJS build on React commits (was 2.2x), and the JIT about 3 to 4x.
-- On GC behaviour Hermes is clearly better for short pauses (4 ms vs 21 to 36 ms) under heavy navigation churn.
+- On GC behaviour Hermes is clearly better for short pauses (4 ms vs 22 to 35 ms) under heavy navigation churn.
   QuickJS's deferred GC removes the pause from frames, but it still needs an idle slot. Hermes in turn degrades badly
   (GC-bound, 100+ ms frames) when big retained trees re-render every frame, unless its heap is tuned.
 - QuickJS stays far smaller in memory for normal UIs (7 MiB vs 35 MiB for the React bench), starts as fast from
   bytecode, is ~0.75 MB smaller stripped (1.13 vs 1.87 MB lean), compiles source at runtime (eval, no build
   step needed), and has no C++ runtime dependency.
+
+## In JSUI: main vs `claude/wip-rnquickjs`
+
+Two worktrees with separate Release build dirs (Ninja, no PGO, `JSUI_QUICKJS_FLAGS` empty, Godot off):
+main a6c34a4 (0.5.0; QuickJS v0.17.0 + #93's patches) and the WIP branch with the rnq patches applied by Deps.cmake.
+The bundles are identical and built with `--format source` on both, because the CLI's bytecode comes from the
+WebAssembly build, which the WIP doesn't rebuild. With bytecode, the WIP runtime would fall back to source anyway.
+
+Found on the way and fixed on the branch (690342b): with the build dir inside a git checkout, `git apply` silently
+skipped every patch, so the "WIP" build was stock v0.17.0. With rnq applied, #93's `shape-transitions` string
+patch no longer matched; 45b7f07 drops it as superseded by rnq 0051.
+
+### jsui-bench (`tools/jsui-bench/run.sh`, all scenarios), WIP 690342b
+
+Five runs of each build, alternated (main, WIP, main, ...), with the median of each scenario's per-frame mean, in µs.
+These ran at load ~6, before the lock rule, while nothing else was building. Every counter except allocs is
+identical between the builds.
+
+| scenario | JS mean main | JS mean WIP | Δ JS | total mean main | total mean WIP | Δ total | total p95 main | total p95 WIP |
+|---|---|---|---|---|---|---|---|---|
+| interactions | 12.9 | 12.3 | n/a | 2091.4 | 2071.4 | -1.0% | 2483.9 | 2501.7 |
+| interactions-wheel | 139.8 | 127.7 | -8.6% | 2375.6 | 2363.0 | -0.5% | 3131.0 | 3122.0 |
+| list | 181.6 | 162.3 | -10.6% | 269.3 | 245.1 | -9.0% | 357.8 | 354.9 |
+| menu | 4.6 | 3.6 | n/a | 443.7 | 439.7 | -0.9% | 579.6 | 570.6 |
+| inventory | 1534.6 | 1359.0 | -11.4% | 1832.3 | 1655.6 | -9.6% | 2138.4 | 1955.0 |
+| idle | 0.0 | 0.0 | n/a | 0.1 | 0.1 | +4.1% | 0.1 | 0.1 |
+| mount | 11064.5 | 8372.4 | -24.3% | 14916.3 | 12189.5 | -18.3% | 28799.0 | 13943.8 |
+| surfaces-static | 0.0 | 0.0 | n/a | 1.1 | 1.1 | -1.5% | 1.3 | 1.2 |
+| surfaces-props | 1922.8 | 1668.8 | -13.2% | 2329.8 | 2061.3 | -11.5% | 2643.7 | 2349.3 |
+| surfaces-same-props | 12.6 | 12.6 | n/a | 13.7 | 13.7 | -0.3% | 14.2 | 14.2 |
+| surfaces-one-props | 215.5 | 194.0 | -10.0% | 246.9 | 224.4 | -9.1% | 313.9 | 282.3 |
+| surfaces-resize | 1609.8 | 1377.7 | -14.4% | 2138.8 | 1909.9 | -10.7% | 2443.6 | 2192.7 |
+| markers-json-30 | 429.2 | 378.9 | -11.7% | 523.6 | 473.4 | -9.6% | 643.8 | 593.8 |
+| markers-buffer-30 | 393.0 | 357.6 | -9.0% | 471.0 | 435.5 | -7.5% | 581.7 | 540.1 |
+| markers-native-30 | 3.3 | 2.9 | n/a | 20.7 | 20.6 | -0.6% | 21.3 | 21.0 |
+| markers-json-100 | 1289.2 | 1145.1 | -11.2% | 1617.3 | 1472.3 | -9.0% | 1854.2 | 1710.1 |
+| markers-buffer-100 | 1184.7 | 1078.9 | -8.9% | 1456.6 | 1352.3 | -7.2% | 1693.4 | 1587.3 |
+| markers-native-100 | 3.5 | 3.1 | n/a | 60.6 | 60.3 | -0.5% | 63.8 | 65.0 |
+| markers-json-1000 | 12799.7 | 11433.2 | -10.7% | 16255.4 | 14946.1 | -8.1% | 17014.0 | 15702.7 |
+| markers-buffer-1000 | 11775.9 | 10828.5 | -8.0% | 14670.9 | 13859.2 | -5.5% | 15317.7 | 14585.2 |
+| markers-native-1000 | 10.0 | 9.3 | n/a | 862.8 | 863.3 | +0.1% | 1129.0 | 1156.5 |
+
+- JS time is 8 to 14% lower in every JS-bound scenario, and 24% lower for `mount` (11.1 → 8.4 ms). Frame totals are
+  5.5 to 11.5% lower. The `mount` total falls 18%, and its p95 falls from 28.8 to 13.9 ms, because the cycle collection
+  no longer lands inside a mount. Paint-bound and idle scenarios are unchanged (within ±1%).
+- Peak RSS for the whole suite: main 289.7 to 293.9 MiB, WIP 314.8 to 327.2 MiB (+25 to 35 MiB, 690342b's GC policy).
+  The 45b7f07 mount runs below look at this per variant.
+
+| | main | WIP |
+|---|---|---|
+| `libjsui_quickjs.a` | 1,321,224 | 1,460,304 |
+| `quickjs.c.o` file / `__text` / `__TEXT` | 1,173,272 / 792,588 / 827,710 | 1,300,392 / 895,232 / 932,670 |
+| archive `__TEXT` total (quickjs + libregexp + libunicode + dtoa) | 937,006 | 1,047,779 |
+| `jsui-tests` | 253 tests, 0 failed | 254 tests, 0 failed (690342b, 39e1b82 and 45b7f07) |
+
+### Showcase navigation (`jsui-nav`) and GC variants, WIP 45b7f07
+
+`jsui-nav` (from the WIP's `tools/jsui-bench/nav.cpp`; main's copy has the `gc_*` printf `#ifdef`ed out) loads the
+site bundle (`node packages/cli/bin/jsui.js build site/app/index.jsx --minify --format source`). It ticks 240
+warm-up frames, then runs 3 rounds of 8 route changes with 200 tick + incremental 1280x800 CPU renders each
+(4,800 frames). Variants of the WIP are local, uncommitted edits to the `QuickJsEngine` constructor:
+- (a) as is: generational + deferred, collectIdle.
+- (b) `JS_SetGCGenerational(impl.jrt, false)`: deferred full collections only.
+- (c) both lines removed: stock GC timing on the patched engine.
+
+Five rounds of main/a/b/c with the order rotated each round, under the bench lock at load 5 to 8 (up to 10.8 in
+the last round). Medians:
+
+| Build | p50 | p95 | p99 | max | frames > 16.7 ms | gc (collections, full, total, longest) | peak RSS (MiB) |
+|---|---|---|---|---|---|---|---|
+| main | 2.76 | 8.03 | 10.42 | 27.6 | 21 | (no stats) | 264.1 |
+| WIP (a) generational + deferred | 2.79 | 8.05 | 10.54 | 26.3 | 21 | 23 (2 full), 45.7 ms, 8.0 ms | 257.5 |
+| WIP (b) deferred, full only | 2.75 | 7.96 | 10.52 | 26.7 | 21 | 6 (6 full), 31.1 ms, 7.0 ms | 260.6 |
+| WIP (c) stock GC timing | 2.77 | 8.05 | 10.36 | 27.3 | 20 | 4 (4 full), 31.1 ms, 12.6 ms | 267.7 |
+
+Max across runs was 27.2 to 28.5 ms for main, 25.5 to 27.7 for (b) and (c), and 25.5 to 27.6 for (a), plus one
+133 ms frame in its first run.
+Showcase navigation is paint/layout-bound at this size: the engine and GC policy don't move the frame
+distribution, and GC is 31 to 46 ms over 4,800 frames. Stock timing (c) gives the longest single pause (12.6 ms),
+deferral halves it, and generational (a) spends 50% more GC time in more, smaller collections. An earlier set of runs
+(690342b, during another session's emscripten build at load 24 to 29) showed 90 to 196 ms tails on both builds.
+Those are superseded by these.
+
+`jsui-bench mount.js --frames 300` (`tools/jsui-bench/scenarios/mount.jsx`, `--format source`), median of 3:
+
+| Build | peak RSS (MiB) | JS mean / p50 / p95 (ms) | total mean / p50 / p95 (ms) |
+|---|---|---|---|
+| main | 100.8 | 10.37 / 8.98 / 24.04 | 14.15 / 12.71 / 27.91 |
+| WIP (a) generational + deferred | 105.8 | 7.74 / 7.76 / 8.61 | 11.47 / 11.44 / 12.79 |
+| WIP (b) deferred, full only | 100.6 | 7.60 / 7.59 / 8.41 | 11.28 / 11.26 / 12.44 |
+| WIP (c) stock GC timing | 99.8 | 8.99 / 7.75 / 20.86 | 12.74 / 11.45 / 24.57 |
+
+The p95 spike on main and (c) is the cycle collection inside a mount. Deferring it (a, b) removes it. (b) is
+slightly faster than (a) and uses 5 MiB less, so on these two workloads deferral alone gets the whole benefit
+and generational adds GC work and memory.
 
 ## Reproduce
 
@@ -217,4 +334,7 @@ Sources are under `~/Development/engine-bench/src` (`rnquickjs` at c8102d4 with 
 patched copies are under `qjs-build/<name>/`, and the binaries are in `bin/`. JSUI's patch is applied with
 `cmake -DIN=quickjs.c -DOUT=out/quickjs.c -P jsui-patch.cmake` (the Deps.cmake block, verbatim). In `run/`,
 `*.rnq17.qjsexe` = `qjs-rnq17-jsui -c`, `gc.js` = `out/gc-bench.js`, and `gc.hbc` = `hermesc -O -Xes6-block-scoping -emit-binary`.
-Then run `python3 bench/engines/run.py QuickJS` and `python3 bench/engines/gc-run.py`.
+Then run `python3 bench/engines/run.py QuickJS` and `python3 bench/engines/gc-run.py`. `gc-driver.c` is built from a JSUI build
+dir: `cc <flags> -DHAVE_YOUNG_BUDGET -DHAVE_JSUI_POLICY -I build/quickjs-src build/quickjs-patched/quickjs.c build/quickjs-src/{libregexp,libunicode,dtoa}.c gc-driver.c`
+(main: without those defines, with the GC calls removed). `qjs-gc-hook.patch` is the `__runPendingGC` hook in `qjs.c`, and
+`build-qjs.sh` / `jsui-patch.cmake` build the qjs binaries. jsui-bench raw JSON is in `jsui-ab/`.

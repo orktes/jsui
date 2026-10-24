@@ -6,6 +6,7 @@
 // 20 warm-up frames, then 300 measured frames. Prints per-frame percentiles.
 // If the host defines __runPendingGC (qjs-gc build with QJS_GC_DEFERRED=1: JS_SetGCDeferred),
 // it is called between frames and timed separately, as an embedder would after presenting a frame.
+// With a global __gcDriven, the script only defines __gcFrame(f) and the host runs the frames.
 // Build: bench/engines/build.sh  ->  bench/engines/out/gc-bench.js
 import React, { useState, useCallback } from 'react';
 import Reconciler from 'react-reconciler';
@@ -93,6 +94,10 @@ const Stack = ({ top }) => {
   return <view>{screens}</view>;
 };
 
+// Driven by a host (gc-driver.c): it calls __gcFrame(f) per frame and collects between calls.
+if (typeof __gcDriven !== 'undefined') globalThis.__gcFrame = (f) => render(<Stack top={f} />);
+else run();
+function run() {
 const pendingGC = typeof __runPendingGC === 'function' ? __runPendingGC : null;
 const frames = [], gcs = [];
 const t0 = now();
@@ -111,3 +116,4 @@ log(`[gc] frame ms: ${st(frames)}`);
 log(`[gc] worst frames: ${frames.map((t, i) => [t, i]).sort((a, b) => b[0] - a[0]).slice(0, 5).map(([t, i]) => `#${i}:${t.toFixed(1)}`).join(' ')}`);
 if (pendingGC) log(`[gc] between-frame GC ms: ${st(gcs)} total=${sum(gcs).toFixed(1)}`);
 log(`[gc] total ${total.toFixed(1)} ms for ${WARM + FRAMES} frames, host nodes created ${nodes}, mounted at end ${container.children.length ? container.children[0].children.length : 0} screens`);
+}

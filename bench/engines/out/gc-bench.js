@@ -10081,32 +10081,35 @@
     for (let s = Math.max(0, top - KEEP); s <= top; s++) screens.push(/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Screen, { id: s, active: s === top }, s));
     return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("view", { children: screens });
   };
-  var pendingGC = typeof __runPendingGC === "function" ? __runPendingGC : null;
-  var frames = [];
-  var gcs = [];
-  var t0 = now();
-  for (let f = 0; f < WARM + FRAMES; f++) {
-    const s = now();
-    render(/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Stack, { top: f }));
-    const e = now();
-    if (f >= WARM) frames.push(e - s);
-    if (pendingGC) {
-      const g0 = now();
-      pendingGC();
-      if (f >= WARM) gcs.push(now() - g0);
+  if (typeof __gcDriven !== "undefined") globalThis.__gcFrame = (f) => render(/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Stack, { top: f }));
+  else run();
+  function run() {
+    const pendingGC = typeof __runPendingGC === "function" ? __runPendingGC : null;
+    const frames = [], gcs = [];
+    const t0 = now();
+    for (let f = 0; f < WARM + FRAMES; f++) {
+      const s = now();
+      render(/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Stack, { top: f }));
+      const e = now();
+      if (f >= WARM) frames.push(e - s);
+      if (pendingGC) {
+        const g0 = now();
+        pendingGC();
+        if (f >= WARM) gcs.push(now() - g0);
+      }
     }
+    const total = now() - t0;
+    const pct = (a, p) => {
+      const b = a.slice().sort((x, y) => x - y);
+      return b[Math.min(b.length - 1, Math.floor(p / 100 * b.length))];
+    };
+    const sum = (a) => a.reduce((x, y) => x + y, 0);
+    const st = (a) => `p50=${pct(a, 50).toFixed(2)} p95=${pct(a, 95).toFixed(2)} p99=${pct(a, 99).toFixed(2)} max=${Math.max(...a).toFixed(2)} mean=${(sum(a) / a.length).toFixed(2)}`;
+    log(`[gc] frame ms: ${st(frames)}`);
+    log(`[gc] worst frames: ${frames.map((t, i) => [t, i]).sort((a, b) => b[0] - a[0]).slice(0, 5).map(([t, i]) => `#${i}:${t.toFixed(1)}`).join(" ")}`);
+    if (pendingGC) log(`[gc] between-frame GC ms: ${st(gcs)} total=${sum(gcs).toFixed(1)}`);
+    log(`[gc] total ${total.toFixed(1)} ms for ${WARM + FRAMES} frames, host nodes created ${nodes}, mounted at end ${container.children.length ? container.children[0].children.length : 0} screens`);
   }
-  var total = now() - t0;
-  var pct = (a, p) => {
-    const b = a.slice().sort((x, y) => x - y);
-    return b[Math.min(b.length - 1, Math.floor(p / 100 * b.length))];
-  };
-  var sum = (a) => a.reduce((x, y) => x + y, 0);
-  var st = (a) => `p50=${pct(a, 50).toFixed(2)} p95=${pct(a, 95).toFixed(2)} p99=${pct(a, 99).toFixed(2)} max=${Math.max(...a).toFixed(2)} mean=${(sum(a) / a.length).toFixed(2)}`;
-  log(`[gc] frame ms: ${st(frames)}`);
-  log(`[gc] worst frames: ${frames.map((t, i) => [t, i]).sort((a, b) => b[0] - a[0]).slice(0, 5).map(([t, i]) => `#${i}:${t.toFixed(1)}`).join(" ")}`);
-  if (pendingGC) log(`[gc] between-frame GC ms: ${st(gcs)} total=${sum(gcs).toFixed(1)}`);
-  log(`[gc] total ${total.toFixed(1)} ms for ${WARM + FRAMES} frames, host nodes created ${nodes}, mounted at end ${container.children.length ? container.children[0].children.length : 0} screens`);
 })();
 /*! Bundled license information:
 

@@ -1,0 +1,35 @@
+--- a/qjs.c
++++ b/qjs.c
+@@ -227,6 +227,21 @@
+ };
+ 
+ /* also used to initialize the worker context */
++/* engine-bench: deferred-GC hook (QJS_GC_DEFERRED=1) */
++static JSValue js_run_pending_gc(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
++{
++    JSRuntime *rt = JS_GetRuntime(ctx);
++    bool pending = JS_HasPendingGC(rt);
++    JS_RunPendingGC(rt);
++    /* re-derive the ceiling like react-native-quickjs's runtime (deferredGCLimit 0):
++       live + clamp(live, 48 MiB, 256 MiB) */
++    size_t live = JS_GetMallocSize(rt), slack = live;
++    if (slack < 48u << 20) slack = 48u << 20;
++    if (slack > 256u << 20) slack = 256u << 20;
++    JS_SetGCDeferred(rt, true, live + slack);
++    return JS_NewBool(ctx, pending);
++}
++
+ static JSContext *JS_NewCustomContext(JSRuntime *rt)
+ {
+     JSContext *ctx;
+@@ -247,6 +262,10 @@
+     }
+     JS_SetPropertyStr(ctx, global, "execArgv", args);
+     JS_SetPropertyStr(ctx, global, "argv0", JS_NewString(ctx, qjs__argv[0]));
++    if (getenv("QJS_GC_DEFERRED")) {
++        JS_SetGCDeferred(rt, true, JS_GetMallocSize(rt) + (48u << 20));
++        JS_SetPropertyStr(ctx, global, "__runPendingGC", JS_NewCFunction(ctx, js_run_pending_gc, "__runPendingGC", 0));
++    }
+     JSValue navigator_proto = JS_NewObject(ctx);
+     JS_SetPropertyFunctionList(ctx, navigator_proto, navigator_proto_funcs, countof(navigator_proto_funcs));
+     JSValue navigator = JS_NewObjectProto(ctx, navigator_proto);
