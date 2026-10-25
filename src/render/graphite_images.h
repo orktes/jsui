@@ -9,6 +9,7 @@
 #include "include/gpu/graphite/Image.h"
 #include "include/gpu/graphite/ImageProvider.h"
 #include "include/gpu/graphite/Recorder.h"
+#include "render/host_textures.h"
 
 namespace jsui {
 namespace graphite_support {
@@ -26,6 +27,8 @@ class CachingImageProvider final : public graphite::ImageProvider {
   sk_sp<SkImage> findOrCreate(graphite::Recorder* recorder, const SkImage* image,
                               SkImage::RequiredProperties props) override {
     if (image->isTextureBacked()) return sk_ref_sp(const_cast<SkImage*>(image));
+    // A host texture's placeholder in a recorded frame: its wrap (never cached here).
+    if (sk_sp<SkImage> texture = resolveDeferredTexture(image)) return texture;
     uint64_t key = (uint64_t(image->uniqueID()) << 1) | (props.fMipmapped ? 1 : 0);
     auto it = entries_.find(key);
     if (it != entries_.end()) {

@@ -60,6 +60,7 @@ if(EMSCRIPTEN)
     src/register_types.cpp
     src/jsui_view.cpp
     src/jsui_gpu_render.cpp
+    src/jsui_ui_thread.cpp
     src/keymap.cpp
     src/jsui_audio.cpp)
   target_link_libraries(jsui_godot PRIVATE jsui godot::cpp)
@@ -112,6 +113,7 @@ add_library(jsui_godot SHARED
   src/register_types.cpp
   src/jsui_view.cpp
   src/jsui_gpu_render.cpp
+  src/jsui_ui_thread.cpp
   src/keymap.cpp
   src/jsui_audio.cpp)
 target_link_libraries(jsui_godot PRIVATE jsui godot::cpp)

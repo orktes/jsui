@@ -199,7 +199,8 @@ difference above `VIEWPORT_MAX_DIFF` (default 2); both are saved as
 
 `main.gd` takes a few more arguments for checking the renderer by hand:
 `--js-thread on|off|lockstep` (sets `js_thread`; `JS_THREAD=off` in
-`smoke-test.sh`),
+`smoke-test.sh`), `--ui-thread off|lockstep|pipelined` (sets `ui_thread`;
+`UI_THREAD=` in `smoke-test.sh`),
 `--force-cpu` (sets `force_cpu`), `--expect-renderer vulkan|metal|cpu`,
 `--max-gpu-diff D` (with `--capture`: compare the GPU frame with the CPU
 raster), `--max-viewport-diff D` (with `--capture` and a display: compare
@@ -320,6 +321,61 @@ What changes for the game:
 The demo's self-test starts with `debug_stall_js(400)` and requires
 Godot's frames to go on meanwhile (`PASS js stall`).
 
+## UI thread
+
+With `ui_thread` on, the runtime's per-frame work leaves the main thread
+too. The runtime view's process hands the frame to a thread of the
+runtime's own (`UI_THREAD_*`), which ticks the runtime (input, native
+`Animated`, styles, layout, what JS committed), tracks the damage and
+records each view's paint (`jsui_record_gpu_frame`). The main thread then
+only replays the recordings into the views' textures: Graphite's draw
+recording, `snap()` and submit, which stay with the GPU device's thread.
+
+* `UI_THREAD_OFF` (default): everything in the view's process, as above.
+* `UI_THREAD_LOCKSTEP`: the frame shown is this frame's, with this frame's
+  input and `set_buffer` data. The main thread takes the frames back as late
+  as Godot allows and waits there if the UI thread is still busy: on
+  godot-aw3's WebGPU driver with `WebGPUInterop.add_frame_submit_callback`,
+  right before Godot submits its frame (the signals then follow in the next
+  process); everywhere else in `RenderingServer.frame_pre_draw`, right after
+  process, which leaves the UI thread almost nothing to overlap with.
+* `UI_THREAD_PIPELINED`: the frames are taken back in the next frame's
+  process, so the main thread does not wait. The UI, its signals and
+  `frame_rendered` come one frame later.
+
+What it needs and what changes for the game:
+
+* The GPU renderer on Vulkan, Metal or WebGPU (Graphite), Godot rendering
+  on the main thread (its default), and JS on its own thread. Frames that
+  cannot go to the UI thread (the first ones, a resize, the CPU renderer,
+  `auto_size` views, a separate render thread, `JS_THREAD_OFF`) are ticked
+  and painted on the main thread as without it.
+* Set buffers and state before the runtime view's process (its
+  `process_priority` / tree order): a call into the runtime while the UI
+  thread has it (`set_buffer`, `set_state`, input, `hit_test`, ...) first
+  waits for the UI thread. That keeps the runtime with one thread at a
+  time; nothing in the frame is lost or reordered.
+* The runtime's callbacks run on the UI thread during the tick. Messages,
+  state, calls and sounds queue for the main thread as before; resource
+  loads (`FileAccess`) and sound commands are queued for it too.
+* Host textures draw at replay: the recording holds a placeholder for each,
+  resolved to the GPU copy when the main thread replays it.
+
+What it saves on the web is in
+[Where the UI's main-thread time goes](#where-the-uis-main-thread-time-goes-on-the-web):
+about 0.15 ms of the ~0.85 ms the UI costs per frame. The rest is Graphite
+recording, encoding and submitting on the device's thread. Natively (Metal,
+60 fps, `--perf-log`) the main thread's render goes from about 0.6 to 0.4 ms
+per frame with `UI_THREAD_PIPELINED`.
+
+The demo takes `--ui-thread lockstep|pipelined` (`UI_THREAD=` in
+`smoke-test.sh`); its self-test then requires that the frames went through
+the UI thread (`PASS ui thread`). CI runs it on Vulkan under synchronization
+validation in both modes, and a ThreadSanitizer build runs
+`react_ui_thread_e2e` (`tests/native/react_ui_thread_e2e_test.cpp`): main
+thread input, buffers, state and hit tests, a second thread ticking and
+recording, the main thread replaying, frame for frame equal to one thread.
+
 ## JsuiView reference
 
 | Property | Type | Default | |
@@ -331,6 +387,7 @@ Godot's frames to go on meanwhile (`PASS js stall`).
 | `forward_gamepad` | bool | `true` | forward joypad events received while focused |
 | `force_cpu` | bool | `false` | always use the CPU renderer, also on Vulkan / Metal |
 | `js_thread` | int | `JS_THREAD_ON` | where the bundle's JS runs: `JS_THREAD_ON` on a thread of its own (React Native's JS thread: frames never wait for JS), `JS_THREAD_OFF` inside the tick on the main thread, `JS_THREAD_LOCKSTEP` on its thread but waited for every tick (the frames of off). Applies on `start()`; the runtime view's counts. See [JS thread](#js-thread) |
+| `ui_thread` | int | `UI_THREAD_OFF` | `UI_THREAD_LOCKSTEP` / `UI_THREAD_PIPELINED`: tick and paint the runtime on a thread of its own, the main thread only replays the frames into the textures. Applies on `start()`; the runtime view's counts. See [UI thread](#ui-thread) |
 | `runtime_view` | NodePath | empty | show a surface of that JsuiView's runtime instead of running a bundle of its own (see [Several views, one runtime](#several-views-one-runtime)) |
 | `component` | String | `""` | the `AppRegistry` key this view shows. On a runtime view: the main surface's component (empty: the bundle's first registered one) |
 | `initial_props` | Dictionary | `{}` | the component's props; changing them re-renders it with the new props (state kept) |
@@ -355,6 +412,7 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | `sync_js_next_frame()` | the next tick waits for JS (`JSUI_TICK_SYNC_JS`, up to 250 ms): what the game set before it (state, messages, input) shows on that frame. For scene cuts, screenshots, state that must not lag |
 | `debug_stall_js(ms)` | keeps JS busy for `ms` (`jsui_debug_stall_js`), as a long commit or a collection would: with the thread the game's frames go on, without it this call takes `ms` |
 | `get_active_js_thread() -> int` | the `JS_THREAD_*` mode the runtime runs in (`JS_THREAD_OFF` while not running, or where the build has no threads) |
+| `get_active_ui_thread() -> int` | the `UI_THREAD_*` mode the runtime runs in (`UI_THREAD_OFF` while not running, or with `JS_THREAD_OFF`) |
 | `set_state(key, value) -> int` | shared state (`jsui_set_state`): `value` (Dictionary, Array, number, String…) is JSON-encoded, `null` removes the key. JS reads it with `useHostState(key)` and re-renders on change. Returns 1 changed, 0 unchanged, -1 invalid |
 | `patch_state(key, patch) -> int` | RFC 7386 merge patch of a key (`jsui_patch_state`): Dictionaries merge, `null` members delete. Keep big collections as Dictionaries keyed by id |
 | `get_state(key) -> Variant` | current value (also keys the UI set with `HostState.set`) |
@@ -375,7 +433,7 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | `get_frame_image()` | CPU copy of the last frame, straight alpha, works with `--headless` (with the GPU renderer it reads the texture back: slow, for tests and screenshots) |
 | `get_cpu_frame_image()` | the current frame painted by the CPU raster, straight alpha, whatever the renderer (to compare with `get_frame_image()`) |
 | `get_renderer()` | `"vulkan"`, `"metal"`, `"d3d12"`, `"webgpu"` or `"cpu"` (`""` before the first frame) |
-| `get_render_stats()` | Dictionary: `renderer`, `renders`, `render_usec_total` / `_last` / `_max` (time in the view's render call, CPU side), `dirty_pixels_total`, `tick_usec_last` (the last `jsui_tick`); GPU renderer: `gpu_jobs` (the view's frames handed to the render thread without waiting), `render_thread_jobs` (the render-thread jobs those went in: one per frame for all the views of a runtime; the runtime view's count), `gpu_frame_in_flight` (the last frame handed over is not painted yet), `blocking_waits` / `main_wait_usec_total` (times the main thread waited for the render thread, and for how long), `gpu_job_usec_total` / `jsui_render_usec_total` (render-thread time of the view's GPU renders, and of `jsui_render_gpu_target` in them); `pipelines` (the runtime's pipeline cache, `jsui_gpu_get_pipeline_stats`: `mode` `"thread"` / `"sliced"`, `queued`, `precompiled`, `failed`, `compiled` on demand, `added` to the file, `unserializable`, `known`, and the `file`) |
+| `get_render_stats()` | Dictionary: `renderer`, `renders`, `render_usec_total` / `_last` / `_max` (time in the view's render call, CPU side), `dirty_pixels_total`, `tick_usec_last` (the last `jsui_tick`); GPU renderer: `gpu_jobs` (the view's frames handed to the render thread without waiting), `render_thread_jobs` (the render-thread jobs those went in: one per frame for all the views of a runtime; the runtime view's count), `gpu_frame_in_flight` (the last frame handed over is not painted yet), `blocking_waits` / `main_wait_usec_total` (times the main thread waited for the render thread, and for how long), `gpu_job_usec_total` / `jsui_render_usec_total` (render-thread time of the view's GPU renders, and of `jsui_render_gpu_target` in them); `ui_thread` (the mode in use), `ui_frames` (frames the runtime's UI thread ticked and recorded), `ui_waits` / `ui_wait_usec_total` (times the main thread waited for it, and for how long), `ui_tick_usec_total` / `ui_record_usec_total` (its tick and recording time), `ui_replay_usec_total` (the main thread's time replaying the frames); `pipelines` (the runtime's pipeline cache, `jsui_gpu_get_pipeline_stats`: `mode` `"thread"` / `"sliced"`, `queued`, `precompiled`, `failed`, `compiled` on demand, `added` to the file, `unserializable`, `known`, and the `file`) |
 | `get_perf(reset = true)` | Dictionary (`jsui_get_perf`) since the last reset: exclusive time per phase in µs (`js_us`, `commit_us`, `animated_us`, `style_us`, `layout_us`, `input_us`, `paint_us`, `gpu_submit_us`, `other_us`; with `profiling` on) and counters (`image_decodes`, `image_decode_us`, `pipeline_compiles`, `paragraph_builds`, `text_measures`, `layout_passes`, `bridge_calls`) and JS garbage collection (`gc_collections`, `gc_full_collections`, `gc_us`, `gc_max_us`); with the JS thread: `js_busy_ms` (JS thread time in tasks), `js_batches_applied`, `js_apply_ms` (main-thread time applying them), `js_lag_frames` (ticks since JS last delivered while it had work), `js_sync_ms` (time waiting in syncs) |
 | `get_pending_loads()` | bundle/image/font/fetch loads in flight |
 | `get_last_error()` | last uncaught JS error, or `""` |
@@ -897,6 +955,7 @@ partial fallback.
 | `get_device() -> int` | the RenderingDevice's `WGPUDevice` |
 | `get_queue() -> int` | the `WGPUQueue` Godot submits its frames to |
 | `get_dawn_revision() -> String` | the 40-character Dawn commit hash the engine links (lower case; surrounding whitespace is ignored) |
+| `add_frame_submit_callback(callable)` / `remove_frame_submit_callback(callable)` | optional: Callables the driver runs on the render thread right before it submits a frame that presents, after Godot recorded all of it. `UI_THREAD_LOCKSTEP` replays its frames there (with its own texture copies, `jsui_gpu_copy_texture`); without them it uses `frame_pre_draw`. Not in godot-aw3 yet (a local commit on `jsui-web-ui-thread`) |
 
 All methods take no arguments. Pointer values are returned as `int`
 (int64). The methods are called on Godot's render thread, so they must be
@@ -1061,19 +1120,22 @@ What was run (Chrome 155, headed, Apple M1 Ultra, Metal through Dawn):
   `audio decode`, which needs the raw sound files in the pack.
 * `--hud` runs the shared HUD over the orbiting units, with `webgpu` in its
   panel.
+* With `--ui-thread lockstep` and `pipelined` the same checks pass, and
+  `ui thread` too (lockstep: the main thread waited for the UI thread in 9 %
+  of the frames, 0.6 ms each).
 * Frame cost of the UI: the main-thread time of Godot's
-  `requestAnimationFrame` callback, at 60 fps, 1200 frames per run, two
-  rounds. With `--hud` it is 1.64 / 1.91 ms mean (p90 2.8 / 3.0 ms). With
-  `--hud --no-ui` it is 0.87 / 0.91 ms (p90 1.3 / 1.4 ms). So the UI adds
-  about 0.9 ms per frame on the main thread; JS runs on its own thread.
-  Where that goes is below.
+  `requestAnimationFrame` callback at 60 fps, `--hud` minus `--hud --no-ui`:
+  about 0.85 ms per frame (1.70 against 0.85 ms mean, the median of ten
+  rounds); JS runs on its own thread. Where that goes, and what the UI
+  thread saves, is below.
 
 #### Where the UI's main-thread time goes on the web
 
 Everything Godot renders on the web runs on the browser's main thread: the
 WebGPU device lives there, and every WebGPU call from WASM goes through
-Emdawnwebgpu's JS glue into Blink. JSUI's JS thread is a pthread, but its
-tick, paint and GPU submit run in `JsuiView`'s process, on that thread.
+Emdawnwebgpu's JS glue into Blink. JSUI's JS thread is a pthread, but by
+default its tick, paint and GPU submit run in `JsuiView`'s process, on that
+thread (see the [UI thread](#ui-thread) below for what moves).
 
 Per frame of `--hud` at 60 fps, from a V8 CPU profile of the main thread
 (Chrome DevTools Protocol `Profiler`, 50 µs sampling, 600 frames, the
@@ -1108,30 +1170,62 @@ every per-frame cost. Chrome without the frame limit
 (`--disable-frame-rate-limit --disable-gpu-vsync`) puts JSUI's render on
 the web at about 0.2 ms per render, as native. So WASM is not the cost. The
 web-specific part is the WebGPU calls through JS (about a quarter of
-JSUI's time), and that nothing runs off the main thread.
+JSUI's time), and that all of it runs on the main thread by default.
 
-Two fixes from this profile:
+With the [UI thread](#ui-thread), what the game pays per frame of `--hud`
+(main-thread time of Godot's `requestAnimationFrame` callback at 60 fps,
+UI on minus `--no-ui`, 1200 frames per run):
 
-* Graphite wraps a render target the host keeps (`JSUI_GPU_INCREMENTAL`)
-  once, not every frame (Dawn and Metal; `gpu_graphite.cpp`
-  `GraphiteGpu::targets`).
-* `coverRects` keeps its pair costs between joins (O(n²) instead of O(n³)
-  joins; the same result, `cover_rects_test`).
+| `ui_thread` | UI cost, mean (median of 10 rounds) | rAF p50 / p90 | profiled (steady clocks, 2 rounds) | UI shows |
+|---|---|---|---|---|
+| `UI_THREAD_OFF` (default) | 0.85 ms | 1.25 / 2.91 ms | 0.71 ms | this frame |
+| `UI_THREAD_PIPELINED` | 0.66 ms | 1.13 / 2.57 ms | 0.58 ms | one frame later |
+| `UI_THREAD_LOCKSTEP` (godot-aw3 with the frame-submit callback) | 0.87 ms | 1.11 / 3.36 ms | 0.57 ms | this frame |
+| `--no-ui` (Godot alone: 0.85 ms mean) | | 0.64 / 1.40 ms | | |
 
-The demo's `hud_game.gd` also builds its state JSON only when the state
-changed. With the profiler running (it keeps the core's clock steady, so the
-rounds agree), the UI's cost went from 0.87 to 0.76 ms, and JsuiView's render
-from 0.72 to 0.60 ms (`get_render_stats`). Without the profiler, 60 fps
-rounds vary by ±0.15 ms, more than this change.
+Rounds were interleaved (off, lockstep, pipelined, no-ui, ten times); the
+same build serves all modes. Unprofiled runs vary by about ±0.1 ms from
+round to round, so the per-round differences are what counts: pipelined
+saves 0.13-0.19 ms in each of three sets of rounds.
 
-What could move off the main thread: JSUI's tick, damage tracking and paint
-recording need no GPU calls (about 0.4 ms of the 0.8). A worker thread could
-record each frame into an `SkPicture`, and the main thread would replay it
-into Graphite, snap and submit. Graphite's `snap()`, command encoding and
-submit stay on the main thread, because the browser's `GPUDevice` and its
-objects live there (Emdawnwebgpu's handles belong to the thread that made
-them). Estimate: about 0.3 ms less per frame at 60 fps, about 0.1 ms at
-full clock. The cost is a frame of latency, or a wait for the worker.
+Where the main thread's UI time goes with the UI thread (profiled, ms per
+frame; the off column is the table above in short):
+
+| | `UI_THREAD_OFF` | UI thread (lockstep / pipelined) |
+|---|---|---|
+| JSUI tick | 0.04 | on the UI thread |
+| damage tracking | 0.09 | on the UI thread |
+| tree walk | ~0.01 | on the UI thread |
+| Graphite draw recording | 0.18 (inside the paint) | 0.18 (replaying the recording) |
+| Graphite `snap()`, encoding, submit, the target | 0.27 | 0.24-0.28 |
+| **JsuiView's render on the main thread** | **0.58** | **0.41-0.48** |
+
+So about 0.15 ms moves off the main thread, not the 0.4 ms the paint's
+share suggested: of the paint, the tree walk is cheap, and almost all of
+it is Graphite recording its draws (paints, geometry, clips into its draw
+lists), which belongs to the `Recorder` and stays with the device's thread
+here (recording can upload, and the browser's `GPUDevice` lives on the main
+thread). The UI thread's own work is about 0.3 ms (tick 0.07, record 0.2-0.3
+at 60 fps clocks).
+
+What each mode costs the game:
+
+* `UI_THREAD_PIPELINED` is the only mode that is cheaper in every
+  measurement (mean, p50, p90): the main thread never waits, at the price
+  of one frame of UI latency (input, `set_buffer` nameplates and signals
+  show a frame later).
+* `UI_THREAD_LOCKSTEP` needs the frames back before Godot submits its own.
+  With godot-aw3's `WebGPUInterop.add_frame_submit_callback` (a local
+  addition to the fork, see [the contract](#the-webgpuinterop-contract-what-the-fork-provides))
+  that point is after Godot recorded its whole frame, and the typical frame
+  is as cheap as pipelined (p50 1.11 ms against 1.25 ms off). But when the
+  UI thread is slow to start or runs on a slow core, the main thread waits
+  for it (in the self-test about 7 % of frames, 0.7 ms each), so p90 and
+  the mean get worse. Without the callback (stock godot-aw3, Metal,
+  Vulkan) the frames come back in `frame_pre_draw`, right after process,
+  and lockstep saves nothing: the main thread waits there about as long as
+  the work it handed over.
+* Hence `ui_thread` stays off by default, also on the web.
 
 Limits of the web build:
 

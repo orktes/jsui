@@ -2,6 +2,7 @@
 // hold for the elements that declare hoveredStyle / pressedStyle / ... or
 // group*Style, and their blended styles.
 #include <algorithm>
+#include <atomic>
 
 #include "core/document.h"
 #include "core/state_style.h"
@@ -60,8 +61,9 @@ void InputManager::tickStates(double nowMs) {
   doc_.statesKick = false;
   auto& list = doc_.stateNodes;
   if (keyPressId_ && !alive(keyPressId_)) keyPressId_ = 0;
-  static uint64_t passes = 0;
-  uint64_t pass = ++passes;
+  // Shared by every runtime, which may tick on threads of their own.
+  static std::atomic<uint64_t> passes{0};
+  uint64_t pass = passes.fetch_add(1, std::memory_order_relaxed) + 1;
   size_t keep = 0;
   for (size_t i = 0; i < list.size(); i++) {
     Node* n = doc_.get(list[i]);

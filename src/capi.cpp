@@ -433,6 +433,52 @@ int jsui_render_gpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiGpuTa
   return jsui::graphite_gpu::render(*rt->surface, gpu, *target, dirty);
 }
 
+struct JsuiGpuFrame {
+  std::unique_ptr<jsui::Surface::RecordedFrame> frame;
+  JsuiGpuTarget target{};  // the one it was recorded for
+  jsui::Surface* surface = nullptr;
+};
+
+int jsui_record_gpu_frame(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiGpuTarget* target, JsuiGpuFrame** frame) {
+  if (frame) *frame = nullptr;
+  if (!rt || !target || !frame || jsui::d3d::owns(gpu)) return -1;
+  JSUI_PAINT_SCOPE(rt);
+  std::unique_ptr<jsui::Surface::RecordedFrame> f;
+  int rc = jsui::graphite_gpu::record(*rt->surface, gpu, *target, &f);
+  if (rc <= 0 || !f) return rc;
+  auto* out = new JsuiGpuFrame;
+  out->frame = std::move(f);
+  out->target = *target;
+  out->surface = rt->surface;
+  *frame = out;
+  return 1;
+}
+
+int jsui_render_gpu_frame(JsuiRuntime* rt, JsuiGpuContext* gpu, JsuiGpuFrame* frame, const JsuiGpuTarget* target,
+                          JsuiRect* dirty) {
+  std::unique_ptr<JsuiGpuFrame> owned(frame);
+  if (!rt || !target || (frame && frame->surface != rt->surface)) {
+    if (dirty) *dirty = JsuiRect{0, 0, 0, 0};
+    if (frame && rt && frame->surface == rt->surface) rt->surface->discardFrame(*frame->frame);
+    return -1;
+  }
+  JSUI_PAINT_SCOPE(rt);
+  const JsuiGpuTarget& r = frame ? frame->target : *target;
+  const bool same = r.texture == target->texture && r.width == target->width && r.height == target->height &&
+                    r.flags == target->flags && r.format == target->format && r.layout == target->layout &&
+                    r.final_layout == target->final_layout;
+  if (frame && !same) {
+    rt->surface->discardFrame(*frame->frame);
+    frame = nullptr;
+  }
+  return jsui::graphite_gpu::render(*rt->surface, gpu, *target, dirty, frame ? frame->frame.get() : nullptr);
+}
+
+void jsui_discard_gpu_frame(JsuiRuntime* rt, JsuiGpuFrame* frame) {
+  std::unique_ptr<JsuiGpuFrame> owned(frame);
+  if (rt && frame && frame->surface == rt->surface) rt->surface->discardFrame(*frame->frame);
+}
+
 int jsui_render_vulkan(JsuiRuntime* rt, JsuiGpuContext* gpu, void* image, int width, int height, int flags) {
   JsuiGpuTarget t{};
   t.texture = image;
@@ -441,6 +487,10 @@ int jsui_render_vulkan(JsuiRuntime* rt, JsuiGpuContext* gpu, void* image, int wi
   t.flags = flags;
   t.layout = t.final_layout = 5;  // VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
   return jsui_render_gpu_target(rt, gpu, &t, nullptr);
+}
+
+int jsui_gpu_copy_texture(JsuiGpuContext* gpu, void* src, void* dst, const JsuiRect* rect) {
+  return rect ? jsui::graphite_gpu::copyTexture(gpu, src, dst, *rect) : -1;
 }
 
 int jsui_gpu_prepare_target(JsuiGpuContext* gpu, unsigned format) {

@@ -59,6 +59,7 @@
 # time. NO_WORLD=1 leaves the demo's 3D scene out (main.gd --no-world): the
 # same UI in faster frames.
 #
+# UI_THREAD=off|lockstep|pipelined sets JsuiView.ui_thread (main.gd --ui-thread).
 # JS_THREAD=off|lockstep sets JsuiView.js_thread (main.gd --js-thread); by
 # default the demo's JS runs on its own thread, and the self-test's first
 # check stalls it (JsuiView.debug_stall_js) and requires Godot's frames to
@@ -160,6 +161,7 @@ fi
 [[ -n "${NO_WORLD:-}" ]] && checks+=(--no-world)
 [[ -n "${FIXED_FPS:-}" ]] && checks+=(--ui-fixed-fps "$FIXED_FPS")
 [[ -n "${JS_THREAD:-}" ]] && checks+=(--js-thread "$JS_THREAD")
+[[ -n "${UI_THREAD:-}" ]] && checks+=(--ui-thread "$UI_THREAD")
 log="$(mktemp)"
 vkdir=""
 trap 'rm -f "$log"; if [[ -n "$vkdir" ]]; then rm -rf "$vkdir"; fi' EXIT
@@ -211,7 +213,7 @@ run() {
     rm -f "$png"
   fi
   if [[ -n "$vkdir" ]]; then rm -f "$vkdir/validation.log"; fi
-  echo "== Godot $GODOT_VERSION, window $size${GODOT_RENDER_THREAD:+, render thread $GODOT_RENDER_THREAD}${VK_VALIDATION:+, Vulkan $VK_VALIDATION validation}${JS_THREAD:+, JS thread $JS_THREAD}"
+  echo "== Godot $GODOT_VERSION, window $size${GODOT_RENDER_THREAD:+, render thread $GODOT_RENDER_THREAD}${VK_VALIDATION:+, Vulkan $VK_VALIDATION validation}${JS_THREAD:+, JS thread $JS_THREAD}${UI_THREAD:+, UI thread $UI_THREAD}"
   "$GODOT" "${display[@]}" --path "$demo" --resolution "$size" -- "${mode[@]}" --window "$size" "${checks[@]}" 2>&1 | tee "$log"
   local status=${PIPESTATUS[0]}
   if (( status != 0 )); then

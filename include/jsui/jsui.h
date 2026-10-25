@@ -1148,6 +1148,58 @@ JSUI_API int jsui_render_gpu_target(JsuiRuntime* rt, JsuiGpuContext* gpu, const 
  * VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL before and after the call. */
 JSUI_API int jsui_render_vulkan(JsuiRuntime* rt, JsuiGpuContext* gpu, void* image, int width, int height, int flags);
 
+/* Recorded frames: a UI thread (Graphite contexts: Vulkan, Metal, Dawn).
+ * The CPU half of a jsui_render_gpu_target() (layout, damage tracking and
+ * the paint: the tree walk and every draw call) is recorded on the thread
+ * that ticks the runtime, without touching the GPU context; the thread that
+ * owns the context then only replays the recording into the target, which
+ * is the GPU half (Graphite's recording, snap and submit). A host whose
+ * GPU device is bound to one thread (the browser's WebGPU device on the web)
+ * can run its tick and the paint on another:
+ *
+ *     // UI thread, after the frame's input / set_buffer / set_state:
+ *     jsui_tick(rt, now_ms);
+ *     JsuiGpuFrame* frame = NULL;
+ *     if (jsui_needs_redraw(rt)) jsui_record_gpu_frame(rt, gpu, &target, &frame);
+ *     // render thread, once the UI thread is done:
+ *     if (frame) jsui_render_gpu_frame(rt, gpu, frame, &target, &dirty);
+ *
+ * jsui_record_gpu_frame: `target` as jsui_render_gpu_target() will get it
+ * (its texture is only compared, never used). Returns 1 with *frame set,
+ * 0 when nothing changed and the target holds the frame already (*frame
+ * NULL), -1 when this context cannot record (D3D, GL, NULL; the host
+ * renders with jsui_render_gpu_target() as usual). Every recorded frame
+ * goes to exactly one jsui_render_gpu_frame() or jsui_discard_gpu_frame()
+ * call before the runtime's next recording or render.
+ *
+ * jsui_render_gpu_frame: like jsui_render_gpu_target() for that frame; a
+ * target other than the recorded one (another texture, size or flags)
+ * paints the current state afresh instead. Frees the frame.
+ * jsui_discard_gpu_frame: frees a frame that will not be rendered; the
+ * runtime's next render repaints fully.
+ *
+ * Threads: the runtime itself is not thread safe. Its calls (input,
+ * jsui_set_state / _set_buffer, hit tests, the tick, recording, rendering,
+ * ...) may come from different threads, but never at the same time: the
+ * host hands the runtime from one thread to the other (a mutex, a join),
+ * the GPU context stays with its thread. JS must run on its own thread
+ * (JsuiConfig.js_thread JSUI_JS_THREAD_ON / _LOCKSTEP): without one, JS
+ * runs inside whichever call needs it. Host textures are drawn at replay
+ * (the recording holds a placeholder per texture). The embedder's
+ * callbacks run on the thread that ticks. */
+typedef struct JsuiGpuFrame JsuiGpuFrame;
+JSUI_API int jsui_record_gpu_frame(JsuiRuntime* rt, JsuiGpuContext* gpu, const JsuiGpuTarget* target,
+                                   JsuiGpuFrame** frame);
+JSUI_API int jsui_render_gpu_frame(JsuiRuntime* rt, JsuiGpuContext* gpu, JsuiGpuFrame* frame,
+                                   const JsuiGpuTarget* target, JsuiRect* dirty);
+JSUI_API void jsui_discard_gpu_frame(JsuiRuntime* rt, JsuiGpuFrame* frame);
+/* Dawn contexts: copies `rect` of WGPUTexture `src` into the same rect of
+ * `dst` (CopySrc / CopyDst usage, same format) in a command buffer of its
+ * own, submitted to the context's queue now. For a host that cannot record
+ * the copy into its own frame at that point (godot-aw3's frame-submit
+ * callback). 0, or -1 for another kind of context. */
+JSUI_API int jsui_gpu_copy_texture(JsuiGpuContext* gpu, void* src, void* dst, const JsuiRect* rect);
+
 /* ------------------------------------- GPU (Direct3D 12 / 11, Windows; Ganesh)
  *
  * Skia Graphite has no Direct3D backend, so on Direct3D hosts (Unreal and

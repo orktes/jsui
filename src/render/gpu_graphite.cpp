@@ -793,7 +793,53 @@ void purge(JsuiGpuContext* gpu, size_t cacheBytes) {
 #endif
 }
 
-int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* dirty) {
+namespace {
+
+// Whether a render into `t` repaints only the damage (`*key`: the retained
+// target) and clears first; `discard`: the target's contents are undefined.
+void retainedTarget(Api api, const JsuiGpuTarget& t, const void** key, bool* clear, bool* discard) {
+  *discard = false;
+#if defined(JSUI_VULKAN)
+  if (api == Api::Vulkan) *discard = VkImageLayout(t.layout) == VK_IMAGE_LAYOUT_UNDEFINED;
+#else
+  (void)api;
+#endif
+  const bool incremental = (t.flags & JSUI_GPU_INCREMENTAL) && !*discard;
+  *key = incremental ? t.texture : nullptr;
+  *clear = !(t.flags & JSUI_GPU_NO_CLEAR) || *discard;
+}
+
+// The frame for target `t`, as the render below chooses it: always into the
+// target; it holds just our frame afterwards (so the next frame may be
+// incremental) unless the frame was composited over it. Scattered damage
+// (several small animations) as a few scissored passes rather than their
+// bounding box (CanvasChoice::splitDamage).
+Surface::CanvasChoice targetChoice(SkCanvas* canvas, const JsuiGpuTarget& t, bool clear) {
+  Surface::CanvasChoice c{canvas, clear ? t.texture : nullptr, clear};
+  c.splitDamage = true;
+  return c;
+}
+
+}  // namespace
+
+int record(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, std::unique_ptr<Surface::RecordedFrame>* out) {
+  out->reset();
+  // Only what never changes after creation is read here (this may be
+  // another thread than the context's).
+  GraphiteGpu* g = asGraphite(gpu);
+  if (!g || !g->ctx || !t.texture || t.width <= 0 || t.height <= 0) return -1;
+  const void* key;
+  bool clear, discard;
+  retainedTarget(g->api, t, &key, &clear, &discard);
+  *out = rt.recordFrame(key, t.width, t.height, targetChoice(nullptr, t, clear), /*growCurves=*/true, /*gpu=*/true);
+  if ((*out)->painted.isEmpty() && key) {
+    out->reset();
+    return 0;  // the target holds the frame already
+  }
+  return 1;
+}
+
+int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* dirty, Surface::RecordedFrame* frame) {
   if (dirty) *dirty = JsuiRect{0, 0, 0, 0};
   GraphiteGpu* g = asGraphite(gpu);
   if (!g || !g->ctx || !t.texture || t.width <= 0 || t.height <= 0) return -1;
@@ -881,19 +927,23 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* d
   // The target is the retained frame when the host says it still holds our
   // last one; the key is the texture handle (the host drops the flag after
   // recreating a texture, which may reuse a handle).
-  const bool incremental = (t.flags & JSUI_GPU_INCREMENTAL) && !discard;
-  const void* key = incremental ? t.texture : nullptr;
-  const bool clear = !(t.flags & JSUI_GPU_NO_CLEAR) || discard;
+  const void* key;
+  bool clear, discardTarget;
+  retainedTarget(g->api, t, &key, &clear, &discardTarget);
+  (void)discardTarget;  // == discard
+  const bool incremental = key != nullptr;
   jsui::TextureScope textureScope(&g->textures);
-  SkIRect painted = rt.renderCanvasTracked(key, t.width, t.height, [&](const SkIRect&, bool) -> Surface::CanvasChoice {
-    // Always into the target. It holds just our frame afterwards (so the
-    // next frame may be incremental) unless the frame was composited over it.
-    // Scattered damage (several small animations) as a few scissored passes
-    // rather than their bounding box (CanvasChoice::splitDamage).
-    Surface::CanvasChoice c{surface->getCanvas(), clear ? t.texture : nullptr, clear};
-    c.splitDamage = true;
-    return c;
-  });
+  SkIRect painted;
+  if (frame && frame->key == (clear ? t.texture : nullptr) && frame->width == t.width && frame->height == t.height &&
+      !discard) {
+    // Recorded for this target (jsui_record_gpu_frame): replay it.
+    painted = rt.replayFrame(*frame, surface->getCanvas());
+  } else {
+    if (frame) rt.discardFrame(*frame);  // recorded for another target: paint afresh
+    painted = rt.renderCanvasTracked(key, t.width, t.height, [&](const SkIRect&, bool) {
+      return targetChoice(surface->getCanvas(), t, clear);
+    });
+  }
   // Nothing changed and the target is retained: no GPU work at all (unless
   // the image must still move to another layout).
   if (painted.isEmpty() && incremental && !needsTransition) {
@@ -920,6 +970,25 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* d
   g->precompiler->afterFrame();
   if (dirty) *dirty = JsuiRect{painted.x(), painted.y(), painted.width(), painted.height()};
   return 0;
+}
+
+int copyTexture(JsuiGpuContext* gpu, void* src, void* dst, const JsuiRect& r) {
+  GraphiteGpu* g = asGraphite(gpu);
+  if (!g || g->api != Api::Dawn || !src || !dst || r.width <= 0 || r.height <= 0) return -1;
+#if defined(JSUI_GRAPHITE_DAWN)
+  wgpu::CommandEncoder enc = g->dawnDevice.CreateCommandEncoder();
+  wgpu::TexelCopyTextureInfo from{}, to{};
+  from.texture = wgpu::Texture(static_cast<WGPUTexture>(src));
+  to.texture = wgpu::Texture(static_cast<WGPUTexture>(dst));
+  from.origin = to.origin = wgpu::Origin3D{uint32_t(r.x), uint32_t(r.y), 0};
+  wgpu::Extent3D size{uint32_t(r.width), uint32_t(r.height), 1};
+  enc.CopyTextureToTexture(&from, &to, &size);
+  wgpu::CommandBuffer cmd = enc.Finish();
+  g->dawnQueue.Submit(1, &cmd);
+  return 0;
+#else
+  return -1;
+#endif
 }
 
 int prepareTarget(JsuiGpuContext* gpu, unsigned format) {
@@ -967,11 +1036,16 @@ const char* dawnRevision() { return nullptr; }
 bool owns(JsuiGpuContext* gpu) { return gpu && gpu->kind == JsuiGpuContext::Kind::Graphite; }
 void destroy(JsuiGpuContext*) {}
 void purge(JsuiGpuContext*, size_t) {}
-int render(Surface&, JsuiGpuContext*, const JsuiGpuTarget&, JsuiRect* dirty) {
+int record(Surface&, JsuiGpuContext*, const JsuiGpuTarget&, std::unique_ptr<Surface::RecordedFrame>* out) {
+  out->reset();
+  return -1;
+}
+int render(Surface&, JsuiGpuContext*, const JsuiGpuTarget&, JsuiRect* dirty, Surface::RecordedFrame*) {
   if (dirty) *dirty = JsuiRect{0, 0, 0, 0};
   return -1;
 }
 int prepareTarget(JsuiGpuContext*, unsigned) { return -1; }
+int copyTexture(JsuiGpuContext*, void*, void*, const JsuiRect&) { return -1; }
 }  // namespace graphite_gpu
 }  // namespace jsui
 

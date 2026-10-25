@@ -731,7 +731,12 @@ ShadowCache& shadowCache(RootRecord* root);
 // the frame): it is drawn from the mask at phase 0, resampled at its
 // position (resampleMask), and repainted exactly once it stops
 // (NodeRecord::approximate), like the approximate sizes below.
-bool gpuMasks(SkCanvas* c) { return c->recorder() != nullptr || c->recordingContext() != nullptr; }
+bool gpuMasks(SkCanvas* c) {
+  if (c->recorder() != nullptr || c->recordingContext() != nullptr) return true;
+  // A frame recorded for a GPU backend (DeferredGpuScope): its recording
+  // canvas (no pixels), not the raster canvases the painter makes itself.
+  return deferredGpuPaint() && c->imageInfo().colorType() == kUnknown_SkColorType;
+}
 
 // While a node's scale animates (a pulsing dot, a button springing) or its
 // size does (a progress bar's fill), its shadow's device size changes every
@@ -2460,7 +2465,12 @@ struct LayerCache::Impl {
 
 namespace {
 thread_local LayerCache* tLayerCache = nullptr;
+thread_local bool tDeferredGpu = false;
 }  // namespace
+
+DeferredGpuScope::DeferredGpuScope(bool on) : prev_(tDeferredGpu) { tDeferredGpu = on; }
+DeferredGpuScope::~DeferredGpuScope() { tDeferredGpu = prev_; }
+bool deferredGpuPaint() { return tDeferredGpu; }
 
 LayerCache::LayerCache(size_t budgetBytes) : impl(std::make_unique<Impl>()) { impl->budget = budgetBytes; }
 LayerCache::~LayerCache() = default;

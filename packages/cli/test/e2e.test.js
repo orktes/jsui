@@ -70,6 +70,7 @@ for (const mode of ['production', 'development']) {
       'react_overlay_e2e',
       'react_js_thread_e2e_stall',
       'react_js_thread_e2e_sync',
+      'react_ui_thread_e2e',
     ];
     const bundles = {
         JSUI_REACT_E2E_BUNDLE: outfile,
@@ -95,7 +96,7 @@ for (const mode of ['production', 'development']) {
     });
     // The same with JS on its own thread in lockstep (JSUI_JS_THREAD_LOCKSTEP),
     // which must give what single-threaded mode gives, frame for frame.
-    const lockstepTests = tests.filter((t) => !t.startsWith('react_host_data_e2e_js_thread') && !t.startsWith('react_js_thread'));
+    const lockstepTests = tests.filter((t) => !t.startsWith('react_host_data_e2e_js_thread') && !t.startsWith('react_js_thread') && !t.startsWith('react_ui_thread'));
     const lockstep = await promisify(execFile)(binary, lockstepTests, {
       env: Object.assign({}, process.env, bundles, { JSUI_TEST_JS_THREAD: 'lockstep' }),
       cwd: repo,
@@ -124,6 +125,7 @@ for (const mode of ['production', 'development']) {
     assert.match(stdout, /PASS react_overlay_e2e/);
     assert.match(stdout, /PASS react_js_thread_e2e_stall/);
     assert.match(stdout, /PASS react_js_thread_e2e_sync/);
+    assert.match(stdout, /PASS react_ui_thread_e2e/);
     if (process.env.JSUI_E2E_VERBOSE) console.log(stdout);
     assert.doesNotMatch(stdout, /skipped/);
     // The WebAssembly runtime compiled the bytecode: a native runtime built

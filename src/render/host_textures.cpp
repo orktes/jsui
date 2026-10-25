@@ -6,6 +6,7 @@
 #include "core/document.h"
 #include "core/node.h"
 #include "include/core/SkData.h"
+#include "include/core/SkImageGenerator.h"
 #include "include/core/SkImageInfo.h"
 
 namespace jsui {
@@ -13,6 +14,23 @@ namespace jsui {
 namespace {
 
 thread_local TextureWrapper* tWrapper = nullptr;
+thread_local DeferredTextures* tRecording = nullptr;
+thread_local const DeferredTextures* tReplay = nullptr;
+
+// A recorded frame's stand-in for a GPU texture: its size, no pixels.
+class PlaceholderGenerator final : public SkImageGenerator {
+ public:
+  explicit PlaceholderGenerator(const SkImageInfo& info) : SkImageGenerator(info) {}
+};
+
+sk_sp<SkImage> placeholderFor(HostTextures::Entry& e) {
+  if (!e.placeholder || e.placeholderVersion != e.contentVersion) {
+    SkImageInfo info = SkImageInfo::Make(e.desc.width, e.desc.height, kRGBA_8888_SkColorType, textureAlphaType(e.desc));
+    e.placeholder = SkImages::DeferredFromGenerator(std::make_unique<PlaceholderGenerator>(info));
+    e.placeholderVersion = e.contentVersion;
+  }
+  return e.placeholder;
+}
 
 bool sameDesc(const JsuiTexture& a, const JsuiTexture& b) {
   return a.kind == b.kind && a.handle == b.handle && a.format == b.format && a.width == b.width &&
@@ -177,6 +195,19 @@ sk_sp<SkImage> HostTextures::image(const std::string& key) {
   if (it == entries_.end()) return nullptr;
   Entry& e = it->second;
   if (e.pixels) return e.pixels;
+  if (tRecording) {
+    sk_sp<SkImage> p = placeholderFor(e);
+    if (!p) return nullptr;
+    auto& items = tRecording->items;
+    if (std::none_of(items.begin(), items.end(), [&](const DeferredTextures::Item& i) { return i.imageId == p->uniqueID(); })) {
+      DeferredTextures::Item item;
+      item.imageId = p->uniqueID();
+      item.entry = e;
+      item.entry.placeholder = nullptr;  // the frame holds it already
+      items.push_back(std::move(item));
+    }
+    return p;
+  }
   sk_sp<SkImage> img = tWrapper ? tWrapper->wrap(e) : nullptr;
   if (!img && !e.warned) {
     e.warned = true;
@@ -209,6 +240,18 @@ void TextureWrapper::endFrame() {
     if (it->second.lastUsed + 1 < frame_) it = cache_.erase(it);
     else ++it;
   }
+}
+
+DeferredTextures::Recording::Recording(DeferredTextures* into) : prev_(tRecording) { tRecording = into; }
+DeferredTextures::Recording::~Recording() { tRecording = prev_; }
+DeferredTextures::Replay::Replay(const DeferredTextures* from) : prev_(tReplay) { tReplay = from; }
+DeferredTextures::Replay::~Replay() { tReplay = prev_; }
+
+sk_sp<SkImage> resolveDeferredTexture(const SkImage* image) {
+  if (!tReplay || !image || tReplay->items.empty()) return nullptr;
+  for (const DeferredTextures::Item& i : tReplay->items)
+    if (i.imageId == image->uniqueID()) return tWrapper ? tWrapper->wrap(i.entry) : nullptr;
+  return nullptr;
 }
 
 TextureScope::TextureScope(TextureWrapper* wrapper) : prev_(tWrapper) { tWrapper = wrapper; }
