@@ -86,8 +86,9 @@ class HostBuffers {
   // JS reads `key`: publish() copies it from now on.
   void subscribe(const std::string& key);
   // Owner thread: copies the subscribed buffers whose contents changed since
-  // their last copy (a copy no reader holds any more is rewritten in place)
-  // and records every key's version for publishedVersion / publishedKeys.
+  // their last copy (a copy no reader has taken is rewritten in place; one
+  // handed out never changes) and records every key's version for
+  // publishedVersion / publishedKeys.
   void publish();
   // The last copy of `key` (nullptr: not subscribed / published, or unset).
   // The copy stays valid while the pointer is held.
@@ -113,6 +114,9 @@ class HostBuffers {
   mutable std::mutex copiesMutex_;
   std::unordered_set<std::string> subscribed_;
   std::unordered_map<std::string, std::shared_ptr<Copy>> copies_;
+  // Copies published() handed out: never rewritten (a reader dropping its
+  // reference does not order its reads before the owner's next write).
+  mutable std::unordered_set<const Copy*> handedOut_;
   std::unordered_map<std::string, uint64_t> versions_;
 };
 

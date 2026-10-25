@@ -301,15 +301,21 @@ TEST(host_buffers_published_copies) {
   CHECK(d != c);
   CHECK_EQ(reinterpret_cast<const float*>(c->bytes.data())[0], 1.0f);
   CHECK_EQ(reinterpret_cast<const float*>(d->bytes.data())[0], 9.0f);
-  // A copy nobody holds is rewritten in place.
-  const void* where = d.get();
+  // A copy a reader took is not rewritten even once dropped (dropping it
+  // does not order the reader's reads before the owner's write); one nobody
+  // took is (two publishes without a read in between).
   c.reset();
   d.reset();
   a[1] = 7;
   b.set("p", JSUI_BUFFER_F32, a, 3);
   b.publish();
-  CHECK(b.published("p").get() == where);
-  CHECK_EQ(reinterpret_cast<const float*>(b.published("p")->bytes.data())[1], 7.0f);
+  a[2] = 5;
+  b.set("p", JSUI_BUFFER_F32, a, 3);
+  b.publish();
+  std::shared_ptr<const jsui::HostBuffers::Copy> e = b.published("p");
+  CHECK_EQ(reinterpret_cast<const float*>(e->bytes.data())[1], 7.0f);
+  CHECK_EQ(reinterpret_cast<const float*>(e->bytes.data())[2], 5.0f);
+  e.reset();
   CHECK_EQ(b.publishedKeys().size(), size_t(1));
   b.remove("p");
   CHECK(b.published("p") != nullptr);

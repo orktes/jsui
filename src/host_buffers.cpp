@@ -143,14 +143,17 @@ void HostBuffers::publish() {
     const Entry* e = find(key);
     auto it = copies_.find(key);
     if (!e) {
-      if (it != copies_.end()) copies_.erase(it);
+      if (it != copies_.end()) {
+        handedOut_.erase(it->second.get());
+        copies_.erase(it);
+      }
       continue;
     }
     if (it != copies_.end() && it->second->version == e->version) continue;
     std::shared_ptr<Copy>& c = copies_[key];
-    // Readers hold their own reference: a copy only the table holds is
-    // rewritten in place instead of reallocated.
-    if (!c || c.use_count() > 1) c = std::make_shared<Copy>();
+    // A copy no reader ever took is rewritten in place instead of
+    // reallocated (a buffer JS does not read every frame).
+    if (!c || handedOut_.erase(c.get())) c = std::make_shared<Copy>();
     c->type = e->type;
     c->count = e->count;
     c->version = e->version;
@@ -161,7 +164,9 @@ void HostBuffers::publish() {
 std::shared_ptr<const HostBuffers::Copy> HostBuffers::published(const std::string& key) const {
   std::lock_guard<std::mutex> lock(copiesMutex_);
   auto it = copies_.find(key);
-  return it == copies_.end() ? nullptr : it->second;
+  if (it == copies_.end()) return nullptr;
+  handedOut_.insert(it->second.get());
+  return it->second;
 }
 
 uint64_t HostBuffers::publishedVersion(const std::string& key) const {

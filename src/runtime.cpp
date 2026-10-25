@@ -107,6 +107,9 @@ Runtime::~Runtime() {
     s->doc.onNodeDestroyed = nullptr;
     s->doc.onLayout = nullptr;
   }
+  // The others count into the main surface's perf (Document::perf): it
+  // goes last.
+  while (!surfaces_.empty()) surfaces_.pop_back();
 }
 
 void Runtime::attach(Surface& s) {
