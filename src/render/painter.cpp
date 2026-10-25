@@ -769,6 +769,9 @@ void drawMask(SkCanvas* c, ShadowCache& cache, const SkImage* img, float x0, flo
   if (!cache.raster) {
     // One rect (four parts): each part is a draw of its own on GPU canvases.
     // Scaled, the ring would still be four stretched draws: one is cheaper.
+    // Unscaled, keep the four parts: drawing the whole mask once measured
+    // more WebGPU draws (Graphite batches by pipeline only draws that do not
+    // overlap, and a whole mask overlaps everything on the box; #153).
     if (!post.isIdentity() || !skip.tall.intersect(skip.wide)) skip.tall.setEmpty();
     if (skip.tall.width() < 16 || skip.tall.height() < 16) skip.tall.setEmpty();
     skip.wide = skip.tall;
