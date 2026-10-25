@@ -256,6 +256,7 @@ void Node::setProps(const Value& props) {
     }
     if (!wantsStateStyles(props)) {
       stateStyles.reset();
+      if (doc_) doc_->stateVersion++;
       applyProps(props);
       return;
     }
@@ -264,6 +265,7 @@ void Node::setProps(const Value& props) {
       if (doc_) doc_->stateNodes.push_back(id_);
     }
     parseStateStyles(props, stateStyles.get());
+    if (doc_) doc_->stateVersion++;
     if (doc_ && !stateStyles->interaction.empty()) doc_->interactionNodes[stateStyles->interaction] = id_;
     Value eff = props;
     Value style = blendStateStyle(*stateStyles);

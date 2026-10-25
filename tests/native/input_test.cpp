@@ -433,6 +433,73 @@ TEST(input_cursor) {
   (void)field;
 }
 
+// State styles: frames where no target can have changed step only the
+// elements still transitioning, with the same weights as stepping them all.
+TEST(input_state_styles_step_only_transitions) {
+  Fixture f;
+  Node* root = f.doc().root();
+  const char* hover = R"({"hoveredStyle":{"opacity":0.5},"transition":{"duration":100,"easing":"linear"}})";
+  Node* a = f.box(root, 0, 0, 100, 100, hover);
+  Node* b = f.box(root, 100, 0, 100, 100, hover);
+  Node* card = f.box(root, 200, 0, 100, 100, R"({"group":true})");
+  Node* label = f.box(card, 0, 0, 50, 20,
+                      R"({"groupHoveredStyle":{"opacity":0.25},"transition":{"duration":100,"easing":"linear"}})");
+  f.layout();
+  f.rt->tick(16);  // mount: every element, nothing moves
+  CHECK_EQ(f.in().statesStepped(), size_t(3));
+  f.rt->tick(32);  // nothing changed
+  CHECK_EQ(f.in().statesStepped(), size_t(0));
+
+  f.in().mouseMove(50, 50);
+  f.rt->tick(48);  // the hover: every target derived again, the transition starts a frame back
+  CHECK_EQ(f.in().statesStepped(), size_t(3));
+  CHECK_NEAR(a->style().opacity, 1 - 0.5 * 0.16, 1e-5);
+  f.rt->tick(64);
+  CHECK_EQ(f.in().statesStepped(), size_t(1));  // a alone
+  CHECK_NEAR(a->style().opacity, 1 - 0.5 * 0.32, 1e-5);
+  for (double ms = 80; ms <= 160; ms += 16) f.rt->tick(ms);
+  CHECK_NEAR(a->style().opacity, 0.5, 1e-6);
+  f.rt->tick(176);
+  CHECK_EQ(f.in().statesStepped(), size_t(0));  // settled
+  CHECK_NEAR(b->style().opacity, 1, 1e-6);
+
+  // A group's state reaches its members; a still mouse over moved content
+  // changes the hover (the chain), which derives the targets again.
+  f.in().mouseMove(250, 50);
+  f.rt->tick(192);
+  CHECK_NEAR(label->style().opacity, 1 - 0.75 * 0.16, 1e-5);
+  f.rt->tick(208);
+  CHECK_EQ(f.in().statesStepped(), size_t(2));  // a leaving, label entering
+  f.place(card, 0, 200, 100, 100);  // the card moves away from under the mouse
+  for (double ms = 224; ms <= 400; ms += 16) f.rt->tick(ms);
+  CHECK_NEAR(label->style().opacity, 1, 1e-6);
+  CHECK_NEAR(a->style().opacity, 1, 1e-6);
+
+  // New state props apply without any input.
+  f.rt->tick(416);
+  CHECK_EQ(f.in().statesStepped(), size_t(0));
+  b->setProps(Value::parseJson(
+      R"({"hoveredStyle":{"opacity":0.5},"disabled":true,"disabledStyle":{"opacity":0.2},"transition":0})"));
+  f.rt->tick(432);
+  CHECK_NEAR(b->style().opacity, 0.2, 1e-6);
+
+  // A press holds while the button is down; its release (nothing else
+  // changed) ends it on the next frame.
+  Node* p = f.box(root, 0, 300 - 50, 50, 50, R"({"pressedStyle":{"opacity":0.3},"transition":0})");
+  f.layout();
+  f.in().mouseMove(25, 275);
+  f.in().mouseButton(25, 275, 0, true, 0);
+  f.rt->tick(448);
+  CHECK_NEAR(p->style().opacity, 0.3, 1e-6);
+  f.rt->tick(464);
+  CHECK_NEAR(p->style().opacity, 0.3, 1e-6);
+  f.in().mouseButton(25, 275, 0, false, 0);
+  f.rt->tick(480);
+  CHECK_NEAR(p->style().opacity, 1, 1e-6);
+  f.rt->tick(496);
+  CHECK_EQ(f.in().statesStepped(), size_t(0));
+}
+
 TEST(input_hover_refresh_after_layout) {
   Fixture f;
   Node* root = f.doc().root();
