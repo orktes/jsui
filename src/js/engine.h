@@ -144,8 +144,8 @@ class JsEngine {
   // jsui_resolve_call / jsui_reject_call: whether call `id` is pending, and
   // it is not answerable again (a JS thread settles it later).
   virtual bool takeCall(uint64_t id) { return hasCall(id); }
-  // For the thread's loop: the earliest timer's due time, whether rAF
-  // callbacks wait for a frame, and the debugger.
+  // For the thread's loop (and jsui_next_timer): the earliest timer's due
+  // time, whether rAF callbacks wait for a frame, and the debugger.
   virtual double nextTimer() const { return 1e300; }
   virtual bool wantsFrame() const { return false; }
   virtual bool debuggerAttached() const { return false; }

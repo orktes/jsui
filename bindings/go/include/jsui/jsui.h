@@ -736,6 +736,12 @@ JSUI_API int jsui_needs_redraw(JsuiRuntime* rt);
  * last tick. Hosts that sleep when idle keep calling
  * jsui_tick at display rate while this is set. */
 JSUI_API int jsui_wants_frame(JsuiRuntime* rt);
+/* When JS next has a timer due, in the clock of jsui_tick's now_ms (it may
+ * be early: a timer may have been cleared since), or INFINITY when none is
+ * pending. A host that stops ticking while jsui_wants_frame is 0 ticks
+ * again at this time, on input, and after any call that changes the
+ * runtime (state, messages, props, sizes). */
+JSUI_API double jsui_next_timer(JsuiRuntime* rt);
 /* Paint into a caller-owned RGBA8888 premultiplied buffer of
  * width*height device pixels. The buffer is cleared to transparent first. */
 JSUI_API void jsui_render_rgba(JsuiRuntime* rt, void* pixels, int width, int height, size_t row_bytes);

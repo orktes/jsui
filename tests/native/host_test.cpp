@@ -1,5 +1,6 @@
 // Tests for the JS host (globals, timers, rAF, errors, bridge, host messages,
 // fonts, watchdog) and the resource loader (files, data:, http, dev reload).
+#include <cmath>
 #include <chrono>
 #include <cstring>
 #include <functional>
@@ -114,6 +115,19 @@ TEST(host_timers_order_and_args) {
   const std::string* m = h.message("order");
   CHECK(m != nullptr);
   if (m) CHECK_EQ(*m, std::string("t0,t5,iv,nested0,t20:xy,iv"));
+}
+
+TEST(host_next_timer) {
+  Host h;
+  h.tick();
+  CHECK(std::isinf(jsui_next_timer(h.rt)));
+  h.load("globalThis.tm = setTimeout(() => __jsui_native.postMessage('fired', '1'), 500);");
+  // The JS thread may still be running the load: its timer shows once done.
+  CHECK(h.until([&] { return !std::isinf(jsui_next_timer(h.rt)); }));
+  double due = jsui_next_timer(h.rt);
+  CHECK(due > h.t && due <= h.t + 500);
+  CHECK(h.until([&] { return h.message("fired") != nullptr; }, 5000));
+  CHECK(h.until([&] { return std::isinf(jsui_next_timer(h.rt)); }));
 }
 
 TEST(host_raf_and_microtasks) {
