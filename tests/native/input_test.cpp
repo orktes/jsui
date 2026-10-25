@@ -1317,6 +1317,186 @@ TEST(input_late_answer_wheel_and_gamepad) {
   CHECK(!f.in().statePressed(other));
 }
 
+// Declared default actions (docs/ARCHITECTURE.md "Input routing details"):
+// what the committed tree declares needs no answer from JS. A handler
+// marked passive (`__passive`) never vetoes, preventDefaultKeys /
+// preventDefaultButtons veto without asking; JS still gets every event.
+TEST(input_late_answer_declared_keys) {
+  Fixture f;
+  Node* root = f.doc().root();
+  // A Pressable as @orktes/jsui-react renders it: a passive keyDown, its
+  // activation keys declared.
+  Node* a = f.box(root, 0, 0, 50, 20,
+                  R"({"__events":["press","keyDown","keyUp"],"__passive":["keyDown"],)"
+                  R"("preventDefaultKeys":["Enter"," ","Spacebar","NumpadEnter"]})");
+  // A keyDown handler that may veto (no hints).
+  Node* b = f.box(root, 0, 50, 50, 20, R"({"__events":["press","keyDown"]})");
+  Node* c = f.box(root, 0, 100, 50, 20, R"({"__events":["press"]})");
+  f.layout();
+  f.rt->tick(0);
+  f.in().focus(a);
+  f.events();
+  f.rt->inbound.replyDelayMs = 500;  // JS stalled: anything that waits shows
+  // Enter is declared: prevented at once (no click), reported consumed, and
+  // nothing is left waiting.
+  CHECK(f.in().key("Enter", "Enter", true, false, 0));
+  CHECK(f.in().key("Enter", "Enter", false, false, 0));
+  CHECK(f.in().key(" ", "Space", true, false, 0));  // by `key`
+  CHECK_EQ(f.rt->inbound.awaiting(), size_t(0));
+  // Tab is not declared, and the passive keyDown cannot veto it: it moves
+  // focus at once.
+  CHECK(f.in().key("Tab", "Tab", true, false, 0));
+  CHECK_EQ(f.in().focused(), b);
+  CHECK_EQ(f.events(), ev("keydown", a) + " " + ev("keyup", a) + " " + ev("keydown", a) + " " + ev("keydown", a) +
+                           " " + ev("blur", a) + " " + ev("focus", b));
+  // b's keyDown may veto: Tab waits for its answer as before.
+  CHECK(f.in().key("Tab", "Tab", true, false, 0));
+  CHECK_EQ(f.in().focused(), b);
+  CHECK(f.in().animating());
+  f.rt->tick(99);
+  CHECK_EQ(f.in().focused(), b);
+  f.rt->tick(100);  // the deadline
+  CHECK_EQ(f.in().focused(), c);
+  f.events();
+  f.logs.clear();
+  // A declaration on b (also for a code) makes that key immediate there,
+  // and stays prevented whatever JS answers.
+  b->setProps(Value::parseJson(R"({"__events":["press","keyDown"],"preventDefaultKeys":["Tab","NumpadEnter"]})"));
+  f.in().focus(b);
+  f.events();
+  CHECK(f.in().key("Tab", "Tab", true, false, 0));
+  CHECK(f.in().key("Enter", "NumpadEnter", true, false, 0));
+  CHECK_EQ(f.in().focused(), b);
+  CHECK_EQ(f.rt->inbound.awaiting(), size_t(0));
+  CHECK_EQ(f.events(), ev("keydown", b, "keydown", b));
+  // Single-threaded the same: JS answers "not prevented", the declaration
+  // still prevents (no focus move, no click).
+  f.rt->inbound.replyDelayMs = 0;
+  CHECK(f.in().key("Tab", "Tab", true, false, 0));
+  CHECK_EQ(f.in().focused(), b);
+  CHECK_EQ(f.events(), ev("keydown", b));
+  // Declarations of ancestors count (the key bubbles to them).
+  root->setProps(Value::parseJson(R"({"preventDefaultKeys":["ArrowDown"]})"));
+  f.in().focus(a);
+  f.in().key("ArrowDown", "ArrowDown", true, false, 0);
+  CHECK_EQ(f.in().focused(), a);
+  root->setProps(Value::parseJson("{}"));
+  f.in().key("ArrowDown", "ArrowDown", true, false, 0);
+  CHECK_EQ(f.in().focused(), b);
+}
+
+TEST(input_late_answer_declared_scope_and_globals) {
+  Fixture f;
+  Node* root = f.doc().root();
+  Node* a = f.box(root, 0, 0, 50, 20, R"({"__events":["press"]})");
+  Node* b = f.box(root, 0, 50, 50, 20, R"({"__events":["press"]})");
+  f.layout();
+  f.rt->tick(0);
+  f.rt->inbound.replyDelayMs = 500;
+  // A global keydown listener that may veto only some keys (BackHandler,
+  // modals: listenGlobal(type, true, keys)): the others run at once.
+  f.js("__jsui_native.listenGlobal('keydown', true, ['Escape', 'GoBack']);");
+  CHECK(f.rt->listensGlobally("keydown"));
+  CHECK(f.in().key("Tab", "Tab", true, false, 0));
+  CHECK_EQ(f.in().focused(), a);
+  CHECK_EQ(f.rt->inbound.awaiting(), size_t(0));
+  // Escape waits (it may be the UI's), reported consumed meanwhile.
+  CHECK(f.in().key("Escape", "Escape", true, false, 0));
+  CHECK(f.in().animating());
+  f.rt->tick(100);
+  CHECK_EQ(f.rt->inbound.awaiting(), size_t(0));
+  // Without keys: any key may be vetoed, so Tab waits again.
+  f.js("__jsui_native.listenGlobal('keydown', true);");
+  f.in().key("Tab", "Tab", true, false, 0);
+  CHECK_EQ(f.in().focused(), a);
+  f.rt->tick(200);
+  CHECK_EQ(f.in().focused(), b);
+  f.js("__jsui_native.listenGlobal('keydown', false);");
+  CHECK(!f.rt->listensGlobally("keydown"));
+  f.js("__jsui_native.listenGlobal('keydown', true, []);");  // vetoes nothing
+  CHECK(!f.rt->listensGlobally("keydown"));
+  // Gamepad: a global listener for B only (button 1) leaves the D-pad
+  // alone; one for every button makes it wait.
+  f.js("__jsui_native.listenGlobal('gamepadbutton', true, [1]);");
+  f.in().focus(a);
+  CHECK(f.in().gamepadButton(0, 13, true, 1));
+  CHECK_EQ(f.in().focused(), b);
+  f.in().gamepadButton(0, 13, false, 0);
+  f.js("__jsui_native.listenGlobal('gamepadbutton', true);");
+  f.in().gamepadButton(0, 12, true, 1);
+  CHECK_EQ(f.in().focused(), b);
+  f.rt->tick(300);
+  CHECK_EQ(f.in().focused(), a);
+  f.in().gamepadButton(0, 12, false, 0);
+  f.js("__jsui_native.listenGlobal('gamepadbutton', false);");
+  // A modal with nothing focusable declares its close keys: with nothing
+  // focused they are looked up from the active focus scope, prevented and
+  // consumed at once.
+  Node* dialog = f.box(root, 150, 0, 200, 200,
+                       R"({"accessibilityViewIsModal":true,"preventDefaultKeys":["Escape"],)"
+                       R"("preventDefaultButtons":[1]})");
+  f.rt->tick(400);
+  CHECK(f.in().focused() == nullptr);
+  f.js("__jsui_native.listenGlobal('keydown', true, ['Escape']);");
+  f.events();
+  CHECK(f.in().key("Escape", "Escape", true, false, 0));
+  CHECK_EQ(f.rt->inbound.awaiting(), size_t(0));
+  CHECK(f.in().gamepadButton(0, 1, true, 1));
+  CHECK_EQ(f.rt->inbound.awaiting(), size_t(0));
+  f.in().gamepadButton(0, 1, false, 0);
+  CHECK_EQ(f.events(), ev("keydown", root) + " " + ev("gamepadbutton", root) + " " + ev("gamepadbutton", root));
+  (void)dialog;
+}
+
+TEST(input_late_answer_passive_gamepad_and_wheel) {
+  Fixture f;
+  Node* root = f.doc().root();
+  Node* sv = f.box(root, 0, 0, 100, 100, "{}", NodeType::ScrollView);
+  Fixture::style(sv).overflow = Overflow::Scroll;
+  Node* content = f.box(sv, 0, 0, 100, 300, R"({"__events":["wheel"],"__passive":["wheel"]})");
+  Node* a = f.box(root, 150, 0, 50, 20,
+                  R"({"__events":["press","gamepadButton","gamepadAxis"],"__passive":["gamepadButton","gamepadAxis"]})");
+  Node* b = f.box(root, 150, 50, 50, 20, R"({"__events":["press"]})");
+  f.layout();
+  f.in().smoothWheel = false;
+  f.rt->tick(0);
+  f.rt->inbound.replyDelayMs = 500;
+  // A passive onWheel: JS gets the wheel, the ScrollView scrolls at once.
+  f.events();
+  CHECK(f.in().mouseWheel(50, 50, 0, 30));
+  CHECK_NEAR(sv->scrollY, 30, 1e-4);
+  CHECK(f.events().find(ev("wheel", content)) != std::string::npos);
+  // Passive gamepad handlers: D-pad and stick navigate at once, A clicks.
+  f.in().focus(a);
+  f.events();
+  CHECK(f.in().gamepadButton(0, 13, true, 1));
+  CHECK_EQ(f.in().focused(), b);
+  f.in().gamepadButton(0, 13, false, 0);
+  f.in().focus(a);
+  CHECK(f.in().gamepadAxis(0, 1, 1));
+  CHECK_EQ(f.in().focused(), b);
+  f.in().gamepadAxis(0, 1, 0);
+  f.in().focus(a);
+  f.events();
+  f.in().gamepadButton(0, 0, true, 1);
+  CHECK_EQ(f.events(), ev("gamepadbutton", a, "click", a));
+  f.in().gamepadButton(0, 0, false, 0);
+  // A declared A (preventDefaultButtons): no click, nothing waits.
+  a->setProps(Value::parseJson(R"({"__events":["press","gamepadButton"],"preventDefaultButtons":[0]})"));
+  f.events();
+  CHECK(f.in().gamepadButton(0, 0, true, 1));
+  CHECK_EQ(f.rt->inbound.awaiting(), size_t(0));
+  CHECK_EQ(f.events(), ev("gamepadbutton", a));
+  f.in().gamepadButton(0, 0, false, 0);
+  // Not passive any more: the D-pad waits for the answer.
+  f.events();
+  f.in().gamepadButton(0, 13, true, 1);
+  CHECK_EQ(f.in().focused(), a);
+  f.rt->tick(100);
+  CHECK_EQ(f.in().focused(), b);
+  CHECK_EQ(f.rt->inbound.awaiting(), size_t(0));
+}
+
 namespace {
 // Touch fixture: a ScrollView whose content is a JS responder. The JS side
 // answers each event type with the flags in globalThis.flags
@@ -1495,6 +1675,33 @@ TEST(input_responder_hints_from_handlers) {
   CHECK(!b->props()["__blocksNative"].asBool(false));
   CHECK(!b->props()["__keepsGesture"].asBool(false));
   CHECK(!c->props()["__blocksNative"].asBool(false) && !c->props()["__keepsGesture"].asBool(false));
+}
+
+TEST(input_passive_hint_from_handlers) {
+  // updateProps derives __passive from handlers marked `__passive = true`
+  // (passive(fn) in @orktes/jsui-react): a token goes there when all of its
+  // handlers (bubble and capture) are passive.
+  Fixture f;
+  f.js("const N = __jsui_native; globalThis.ids = [N.createNode('View'), N.createNode('View'), N.createNode('View')];"
+       "const p = (fn) => (fn.__passive = true, fn);"
+       "N.updateProps(ids[0], {onKeyDown: p(() => {}), onWheel: p(() => {}), onTextInput: () => {},"
+       "  onGamepadButtonCapture: p(() => {}), onGamepadAxis: p(() => {}), onKeyUp: () => {}});"
+       "N.updateProps(ids[1], {onKeyDown: p(() => {}), onKeyDownCapture: () => {}, preventDefaultKeys: ['Enter']});"
+       "N.updateProps(ids[2], {onPress: p(() => {})});"
+       "globalThis.idText = ids.join(',');");
+  int ids[3] = {0, 0, 0};
+  f.js("console.log(idText)");
+  CHECK(std::sscanf(f.logs.back().c_str(), "%d,%d,%d", &ids[0], &ids[1], &ids[2]) == 3);
+  Node* a = f.rt->findNode(uint32_t(ids[0]));
+  Node* b = f.rt->findNode(uint32_t(ids[1]));
+  Node* c = f.rt->findNode(uint32_t(ids[2]));
+  CHECK(a && b && c);
+  std::string passive;
+  for (const Value& t : a->props()["__passive"].asArray()) passive += t.asString() + " ";
+  CHECK_EQ(passive, std::string("keyDown gamepadButton gamepadAxis wheel "));
+  CHECK(b->props()["__passive"].isNull());
+  CHECK_EQ(b->props()["preventDefaultKeys"].asArray().size(), size_t(1));
+  CHECK(c->props()["__passive"].isNull());
 }
 
 // ------------------------------------------------------------ performance

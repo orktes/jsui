@@ -18,6 +18,8 @@ import {
   useWindowDimensions,
   Button,
   Switch,
+  BackHandler,
+  passive,
 } from '../src/index.js';
 
 const byNativeID = (id) => mock.find((n) => n.props.nativeID === id);
@@ -598,4 +600,83 @@ test('host message state updates commit in the same tick (microtask, no timer)',
   await Promise.resolve();
   assert.equal(mock.text(byNativeID('hp').id), '42');
   render(null);
+});
+
+test('declared default actions: passive handlers, preventDefaultKeys, global veto filters', async () => {
+  // Gamepad state tracking (useGamepad's store) is passive: nothing reported.
+  assert.equal(mock.globals.has('gamepadbutton'), false);
+  assert.equal(mock.globals.has('gamepadaxis'), false);
+  const onKey = passive(() => {});
+  let setOwn;
+  function App() {
+    const [own, so] = useState(null);
+    setOwn = so;
+    return h(
+      View,
+      null,
+      h(View, { nativeID: 'p', onKeyDown: onKey, onWheel: passive(() => {}), onGamepadButton: () => {} }),
+      h(View, { nativeID: 'mixed', onKeyDown: onKey, onKeyDownCapture: () => {} }),
+      h(Pressable, { nativeID: 'btn', onPress: () => {}, onKeyDown: own || undefined, preventDefaultKeys: ['Tab'] }),
+      h(Pressable, { nativeID: 'off', onPress: () => {}, disabled: true }),
+    );
+  }
+  render(h(App));
+  await wait();
+  assert.deepEqual(byNativeID('p').props.__passive, ['keyDown', 'wheel']);
+  assert.equal(byNativeID('mixed').props.__passive, undefined, 'a non-passive capture handler may veto');
+  // Pressable declares its activation keys and its keyDown is passive.
+  const btn = () => byNativeID('btn');
+  assert.deepEqual(btn().props.preventDefaultKeys, ['Enter', ' ', 'Spacebar', 'NumpadEnter', 'Tab']);
+  assert.deepEqual(btn().props.__passive, ['keyDown']);
+  assert.equal(byNativeID('off').props.preventDefaultKeys, undefined);
+  // Its JS activation still runs (and still answers preventDefault).
+  assert.equal(mock.dispatch({ type: 'keydown', target: btn().id, key: 'Enter', code: 'Enter' }), 3);
+  mock.dispatch({ type: 'keyup', target: btn().id, key: 'Enter', code: 'Enter' });
+  // The element's own onKeyDown may veto: not passive any more (the swap of
+  // handler identities still reaches native).
+  setOwn(() => () => {});
+  await wait();
+  assert.equal(btn().props.__passive, undefined);
+  setOwn(() => passive(() => {}));
+  await wait();
+  assert.deepEqual(btn().props.__passive, ['keyDown']);
+  render(null);
+
+  // Global listeners report only what they may veto.
+  const sub = BackHandler.addEventListener('hardwareBackPress', () => true);
+  assert.deepEqual(mock.globals.get('keydown'), ['GoBack', 'BrowserBack']);
+  assert.deepEqual(mock.globals.get('gamepadbutton'), ['1']);
+  // A modal adds Escape to the keys and declares its close keys on itself.
+  render(h(Modal, { visible: true, onRequestClose: () => {} }, h(Text, { nativeID: 'mt' }, 'x')));
+  await wait();
+  assert.deepEqual(mock.globals.get('keydown'), ['GoBack', 'BrowserBack', 'Escape']);
+  const modal = mock.nodes.get(byNativeID('mt').parent);
+  assert.deepEqual(modal.props.preventDefaultKeys, ['Escape', 'GoBack', 'BrowserBack']);
+  assert.deepEqual(modal.props.preventDefaultButtons, [1]);
+  render(null);
+  await wait();
+  assert.deepEqual(mock.globals.get('keydown'), ['GoBack', 'BrowserBack']);
+  // useGamepad: callbacks may veto any button unless passive / narrowed.
+  let opts = { onButton: () => {} };
+  let rerender;
+  function Pad() {
+    const [, set] = useState(0);
+    rerender = () => set((n) => n + 1);
+    useGamepad(opts);
+    return null;
+  }
+  render(h(Pad));
+  await wait();
+  assert.equal(mock.globals.get('gamepadbutton'), '*');
+  assert.equal(mock.globals.has('gamepadaxis'), false, 'no onAxis: passive');
+  opts = { onButton: () => {}, vetoes: [9] };
+  rerender();
+  await wait();
+  assert.deepEqual(mock.globals.get('gamepadbutton'), ['1', '9']);
+  opts = { onButton: () => {}, passive: true };
+  rerender();
+  await wait();
+  assert.deepEqual(mock.globals.get('gamepadbutton'), ['1']);
+  render(null);
+  sub.remove();
 });

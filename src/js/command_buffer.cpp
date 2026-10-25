@@ -287,8 +287,15 @@ void CommandBuffer::applyOne(Runtime& rt, const Command& cmd) {
     }
     case Op::ListenGlobal: {
       std::string type = readString(at);
-      if (cmd.a) rt.globalListeners.insert(std::move(type));
-      else rt.globalListeners.erase(type);
+      Value keys = readValue(at);
+      std::vector<std::string> only;
+      for (const Value& k : keys.asArray()) {
+        if (k.isString()) only.push_back(k.asString());
+        else if (k.isNumber()) only.push_back(std::to_string(int64_t(k.asNumber())));
+      }
+      // A list without keys: its listeners veto nothing (passive).
+      if (!cmd.a || (keys.isArray() && only.empty())) rt.globalListeners.erase(type);
+      else rt.globalListeners[std::move(type)].only = std::move(only);
       return;
     }
     case Op::AnimCreate: {

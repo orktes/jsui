@@ -10,6 +10,7 @@
 // frame snapshot or a proxy call instead, and embedder callbacks are queued
 // for the tick (Runtime::toHost).
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <unordered_map>
@@ -216,6 +217,12 @@ JSValue js_updateProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
   // Static responder hints (docs/ARCHITECTURE.md "Input routing details"):
   // native decides with them when JS's answer to a touch is late.
   bool blocksNative = false, keepsGesture = false;
+  // Handlers of events whose default action JS could veto, and those of
+  // them not marked passive (`fn.__passive = true`): a token whose handlers
+  // are all passive goes to `__passive`, so native need not wait for them.
+  static const char* const kVetoTokens[] = {"keyDown", "textInput", "gamepadButton", "gamepadAxis", "wheel"};
+  constexpr int kVetoCount = 5;
+  unsigned vetoHas = 0, vetoActive = 0;
   JSPropertyEnum* keys = nullptr;
   uint32_t count = 0;
   if (JS_GetOwnPropertyNames(ctx, &keys, &count, argv[1], JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) != 0)
@@ -247,6 +254,12 @@ JSValue js_updateProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
       // unless the PanResponder has no onPanResponderTerminationRequest.
       if (*k == "onResponderGrant") blocksNative = handlerHint(ctx, v, "__blocksNative") == 1;
       else if (*k == "onResponderTerminationRequest") keepsGesture = handlerHint(ctx, v, "__keepsGesture") != 0;
+      if (const auto* toks = eventTokens(*k); toks && toks->size() == 1)
+        for (int t = 0; t < kVetoCount; t++)
+          if ((*toks)[0] == kVetoTokens[t]) {
+            vetoHas |= 1u << t;
+            if (handlerHint(ctx, v, "__passive") != 1) vetoActive |= 1u << t;
+          }
     } else if (!JS_IsUndefined(v) && !JS_IsSymbol(v)) {
       if (*k == "pointerEvents") pointerEvents = JS_DupValue(ctx, v);
       w.key(*k);
@@ -288,6 +301,14 @@ JSValue js_updateProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
   if (keepsGesture) {
     w.key("__keepsGesture", 14);
     w.boolean(true);
+  }
+  if (unsigned passive = vetoHas & ~vetoActive) {
+    w.key("__passive", 9);
+    uint32_t n = 0;
+    for (int t = 0; t < kVetoCount; t++) n += (passive >> t) & 1u;
+    w.beginArray(n);
+    for (int t = 0; t < kVetoCount; t++)
+      if (passive & (1u << t)) w.string(kVetoTokens[t], std::strlen(kVetoTokens[t]));
   }
   if (eventCount) {
     w.key("__events", 8);
@@ -372,14 +393,17 @@ JSValue js_setText(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   return JS_UNDEFINED;
 }
 
-// listenGlobal(type, on): the bundle has (on) or no longer has global
-// listeners for events of `type` (addGlobalListener). Input asks
-// Runtime::listensGlobally whether a late keydown may still be vetoed.
+// listenGlobal(type, on, keys?): the bundle has (on) or no longer has
+// global listeners for events of `type` (addGlobalListener) that may call
+// preventDefault(); `keys` (key names / codes, gamepad button or axis
+// indices) narrows that to those events, absent: any. Input asks
+// Runtime::globalVetoes whether a late keydown may still be vetoed.
 JSValue js_listenGlobal(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   if (argc < 2) return JS_UNDEFINED;
   CommandBuffer& cmds = commands(ctx);
   CommandBuffer::Writer w = cmds.begin();
   writeString(ctx, argv[0], w);
+  writeValue(ctx, argc > 2 && JS_IsArray(argv[2]) ? argv[2] : JS_UNDEFINED, w);
   cmds.end(Op::ListenGlobal, JS_ToBool(ctx, argv[1]) ? 1 : 0);
   return JS_UNDEFINED;
 }

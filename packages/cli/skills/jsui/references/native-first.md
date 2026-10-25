@@ -54,11 +54,44 @@ threaded, same frames). With the thread:
   on the very frame, bind it natively (`useHostStateBind`, a host buffer)
   instead.
 - **Default actions JS may veto** (Tab / Enter / arrows with a `keyDown`
-  listener, wheel with an `onWheel`) wait up to 100 ms for JS's answer; keep
-  those handlers quick, or leave them off the focused path.
+  listener, wheel with an `onWheel`, D-pad with an `onGamepadButton` or
+  `useGamepad({ onButton })`) wait up to 100 ms for JS's answer, unless you
+  declare it (next section).
 
 Check with a stall: the viewer's F7 (or `jsui_debug_stall_js(rt, 200)`)
 keeps JS busy; everything above the second bullet must keep moving.
+
+## Input without waiting on JS
+
+A handler that *could* call `e.preventDefault()` makes the runtime wait for
+JS before it moves focus, presses, types or scrolls. Say what the handler
+does instead, and the runtime acts at once while the handler still runs
+(later, for its side effects):
+
+| The handler... | Declare | Effect |
+|---|---|---|
+| only observes (logging, sounds, analytics, a hotkey that is not a navigation key) | `onKeyDown={passive(fn)}` (also `onTextInput`, `onGamepadButton`, `onGamepadAxis`, `onWheel`; `import { passive } from '@orktes/jsui-react'`) | Tab / arrows / D-pad / wheel never wait |
+| always takes certain keys (a menu that handles arrows itself, a field that eats Tab) | `preventDefaultKeys={['ArrowLeft', 'ArrowRight']}` (`key` or `code`; the element and its descendants) | those keys' default actions never run, at once; others are untouched |
+| always takes certain gamepad buttons (LB / RB tab switching) | `preventDefaultButtons={[4, 5]}` | same, for button indices |
+| uses `useGamepad` callbacks | `useGamepad({ onButton, passive: true })` or `vetoes: [4, 5]` (only those buttons may be vetoed) | D-pad navigation never waits |
+| needs to decide at runtime (`if (canClose) e.preventDefault()`) | nothing: it waits (keep it quick) | |
+
+```jsx
+import { passive } from '@orktes/jsui-react';
+
+<View focusable onKeyDown={passive((e) => log(e.key))} />           // never vetoes
+<View preventDefaultKeys={['ArrowLeft', 'ArrowRight']}                // the carousel owns left / right
+      onKeyDown={passive((e) => step(e.key === 'ArrowLeft' ? -1 : 1))} />
+```
+
+Built in: Pressables (Enter / Space press without waiting; Tab and
+arrows move on), TextInput (typing, Backspace, caret keys; Enter when it
+submits), Modal (Escape / Back / B with `onRequestClose`), `BackHandler`
+(waits for the back key / B only), and the gamepad state behind
+`useGamepad`. An `onKeyDown` you pass to a Pressable or TextInput makes it
+wait again unless it is `passive(...)`. Focus traps (`Modal`,
+`accessibilityViewIsModal`), `nextFocusUp/Down/Left/Right` and `focusable`
+are native already.
 
 ## State styles: hover, press, focus without JS
 

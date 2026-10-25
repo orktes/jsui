@@ -63,7 +63,10 @@ Packages: `@orktes/jsui-cli` (bundler, dev server, headless tools, this skill),
    On native hosts JS runs **on its own thread** (as in React Native): the
    frame never waits for it, so what is native keeps the UI right while JS
    is busy, and what JS renders lands a frame or more later (see "JS
-   thread" there).
+   thread" there). Input waits for JS only when a handler might
+   `preventDefault()`: mark observers `passive(fn)` and declare owned keys
+   with `preventDefaultKeys` / `preventDefaultButtons` (see "Input without
+   waiting on JS" there).
 8. **Give important elements a `testID`** so you (and tests) can find, click
    and check them with `jsui inspect` / `jsui run`.
 9. **Always look at what you built.** With `jsui dev` running and a runtime

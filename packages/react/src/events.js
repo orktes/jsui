@@ -43,20 +43,75 @@ const TYPES = {
   gamepadaxis: ['onGamepadAxis', true, false],
 };
 
+/**
+ * Marks an event handler passive: it never calls preventDefault(), so the
+ * runtime runs the default action (focus moves, activation, editing,
+ * scrolling) without waiting for JS when JS runs on its own thread; the
+ * handler still runs. For onKeyDown, onTextInput, onGamepadButton,
+ * onGamepadAxis and onWheel (and their Capture forms). Returns `fn`.
+ */
+export function passive(fn) {
+  if (typeof fn === 'function') fn.__passive = true;
+  return fn;
+}
+
 // Global listeners for events that are not tied to one node (gamepad, keys
-// for modals / BackHandler, resize).
+// for modals / BackHandler, resize): type -> Map(fn -> what it may veto:
+// null any event, an array only those keys / button indices, [] nothing).
 const globalListeners = new Map();
-/** Subscribes to every dispatched event of `type`; returns unsubscribe. */
-export function addGlobalListener(type, fn) {
+// type -> the veto filter last reported to native ('*': any), absent: none.
+const globalReported = new Map();
+
+// Native asks whether a global listener may veto an event when JS answers
+// it late (a global keydown listener may veto the key's default action):
+// it hears the union of what the listeners may veto; passive ones are left
+// out.
+function reportGlobal(type) {
+  if (!native.listenGlobal) return;
+  const set = globalListeners.get(type);
+  let any = false;
+  let keys = null;
+  if (set) {
+    for (const v of set.values()) {
+      if (v === null) {
+        any = true;
+        break;
+      }
+      for (let i = 0; i < v.length; i++) {
+        const k = String(v[i]);
+        if (!keys) keys = [];
+        if (keys.indexOf(k) < 0) keys.push(k);
+      }
+    }
+  }
+  const next = any ? '*' : keys ? keys.join('\n') : undefined;
+  if (next === globalReported.get(type)) return;
+  if (next === undefined) {
+    globalReported.delete(type);
+    native.listenGlobal(type, false);
+    return;
+  }
+  globalReported.set(type, next);
+  if (any) native.listenGlobal(type, true);
+  else native.listenGlobal(type, true, keys);
+}
+
+/**
+ * Subscribes to every dispatched event of `type`; returns unsubscribe.
+ * `options.passive`: the listener never calls preventDefault();
+ * `options.vetoes`: the only keys (`key` or `code`) or gamepad button / axis
+ * indices whose events it may preventDefault(). Either lets the runtime run
+ * the other events' default actions without waiting for JS.
+ */
+export function addGlobalListener(type, fn, options) {
   let set = globalListeners.get(type);
-  if (!set) globalListeners.set(type, (set = new Set()));
-  set.add(fn);
-  // Native asks whether anyone listens when JS answers an event late (a
-  // global keydown listener may veto the key's default action).
-  if (set.size === 1 && native.listenGlobal) native.listenGlobal(type, true);
+  if (!set) globalListeners.set(type, (set = new Map()));
+  const vetoes = options && options.passive ? [] : options && Array.isArray(options.vetoes) ? options.vetoes.slice() : null;
+  set.set(fn, vetoes);
+  reportGlobal(type);
   return () => {
     const had = set.delete(fn);
-    if (had && set.size === 0 && native.listenGlobal) native.listenGlobal(type, false);
+    if (had) reportGlobal(type);
     return had;
   };
 }
@@ -65,7 +120,7 @@ function emitGlobal(type, syn) {
   const set = globalListeners.get(type);
   if (!set || set.size === 0) return false;
   let ran = false;
-  for (const fn of Array.from(set)) {
+  for (const fn of Array.from(set.keys())) {
     fn(syn);
     ran = true;
   }

@@ -6,8 +6,8 @@ import { createElement as h, useImperativeHandle, useRef, useState, useLayoutEff
 import { jsx } from 'react/jsx-runtime';
 import { flatten } from '../StyleSheet.js';
 import { native, warnOnce } from '../native.js';
-import { usePress, PRESS_PROPS, omit } from './usePress.js';
-import { createSyntheticEvent } from '../events.js';
+import { usePress, PRESS_PROPS, omit, declarePressKeys } from './usePress.js';
+import { createSyntheticEvent, passive } from '../events.js';
 
 // View is the host element itself: no wrapper fiber, which halves the fiber
 // count of typical trees. `<View>` therefore costs exactly one host node.
@@ -23,6 +23,7 @@ function PressableText(props) {
   const rest = omit(props, PRESS_PROPS);
   Object.assign(rest, handlers);
   if (rest.focusable === undefined) rest.focusable = !props.disabled;
+  declarePressKeys(props, rest);
   return jsx('Text', rest);
 }
 
@@ -234,6 +235,7 @@ const TEXTINPUT_OMIT = [
 ];
 
 let focusedInput = null;
+const SUBMIT_KEYS = ['Enter'];
 
 function selectionOf(sel) {
   if (!sel || typeof sel.start !== 'number') return null;
@@ -392,6 +394,20 @@ export function TextInput(props) {
       commit(deleteLastCodePoint(latest.current.current));
     }
   };
+  if (nativeEditing) {
+    // Native edits: these handlers only veto what the props declare (Enter
+    // when it submits), so native types, deletes and moves the caret
+    // without waiting for JS unless the owner's handlers may veto.
+    const pass = (f) => !f || f.__passive === true;
+    if (pass(props.onTextInput)) passive(rest.onTextInput);
+    if (pass(props.onKeyDown) && pass(props.onKeyPress)) passive(rest.onKeyDown);
+  }
+  // Enter submits (or adds the JS fallback's newline): prevented natively
+  // without waiting for keyDown's answer.
+  if (submitBehaviorOf(props) !== 'newline' || (!nativeEditing && canEdit)) {
+    const own = props.preventDefaultKeys;
+    rest.preventDefaultKeys = Array.isArray(own) && own.length ? ['Enter'].concat(own) : SUBMIT_KEYS;
+  }
   return h('TextInput', rest);
 }
 TextInput.displayName = 'TextInput';

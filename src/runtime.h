@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -283,11 +284,27 @@ class Runtime {
   // is always there at once).
   double eventDeadlineMs = 100;
   // Event types the bundle listens to globally (addGlobalListener: modals,
-  // BackHandler, gamepad hooks), reported by __jsui_native.listenGlobal.
-  // Input asks it when an answer is late: a global keydown listener may
-  // veto the key's default action like one on the focused path.
-  std::unordered_set<std::string> globalListeners;
+  // BackHandler, gamepad hooks) with a listener that may preventDefault(),
+  // reported by __jsui_native.listenGlobal. Input asks it when an answer is
+  // late: a global keydown listener may veto the key's default action like
+  // one on the focused path. `only` (when not empty): the keys (`key` or
+  // `code`) / gamepad button or axis indices the listeners may veto; empty:
+  // any. Passive listeners are not reported.
+  struct GlobalListen {
+    std::vector<std::string> only;
+  };
+  std::unordered_map<std::string, GlobalListen> globalListeners;
   bool listensGlobally(const char* type) const { return globalListeners.count(type) > 0; }
+  // A global listener of `type` may veto the event of `key` / `code`.
+  bool globalVetoes(const char* type, std::string_view key, std::string_view code = {}) const {
+    auto it = globalListeners.find(type);
+    if (it == globalListeners.end()) return false;
+    const auto& only = it->second.only;
+    if (only.empty()) return true;
+    for (const std::string& k : only)
+      if (k == key || (!code.empty() && k == code)) return true;
+    return false;
+  }
   // Animated graphs driven natively (useNativeDriver: true).
   std::unique_ptr<NativeAnimated> animated;
 

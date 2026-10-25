@@ -21,6 +21,7 @@
 import { useContext, useEffect, useRef, useState } from 'react';
 import { now } from '../native.js';
 import { UISoundsContext, playUISound } from '../sound.js';
+import { passive } from '../events.js';
 
 const DEFAULT_LONG_PRESS_MS = 500;
 const DEFAULT_MIN_PRESS_MS = 130;
@@ -37,6 +38,21 @@ export const IDLE_STATE = STATES[0];
 function isActivationKey(e) {
   const k = e.key;
   return k === 'Enter' || k === ' ' || k === 'Spacebar' || k === 'NumpadEnter';
+}
+
+// The activation keys, declared prevented on the host element
+// (preventDefaultKeys): native never synthesizes a click for them, and does
+// not wait for keyDown's answer to know that (keyDown below activates).
+const ACTIVATION_KEYS = ['Enter', ' ', 'Spacebar', 'NumpadEnter'];
+
+/**
+ * Adds the press element's declared keys to its host props `rest` (unless
+ * disabled): the activation keys, plus the element's own preventDefaultKeys.
+ */
+export function declarePressKeys(props, rest) {
+  if (props.disabled) return;
+  const own = props.preventDefaultKeys;
+  rest.preventDefaultKeys = Array.isArray(own) && own.length ? ACTIVATION_KEYS.concat(own) : ACTIVATION_KEYS;
 }
 
 function pointerType(e) {
@@ -87,9 +103,7 @@ class PressController {
       onClick(e) {
         self.click(e);
       },
-      onKeyDown(e) {
-        self.keyDown(e);
-      },
+      onKeyDown: null,  // keyDownPassive or keyDownActive (usePress)
       onKeyUp(e) {
         self.keyUp(e);
       },
@@ -100,6 +114,16 @@ class PressController {
         self.focus(false, e);
       },
     };
+    // keyDown never vetoes a native default action itself (its activation
+    // keys are declared, see declarePressKeys): passive unless the
+    // element's own onKeyDown may call preventDefault().
+    this.keyDownPassive = passive(function onKeyDown(e) {
+      self.keyDown(e);
+    });
+    this.keyDownActive = function onKeyDown(e) {
+      self.keyDown(e);
+    };
+    this.handlers.onKeyDown = this.keyDownPassive;
   }
 
   set(bit, on) {
@@ -330,6 +354,8 @@ export function usePress(props, trackState) {
   if (ref.current === null) ref.current = new PressController();
   const c = ref.current;
   c.props = props;
+  const ownKeyDown = props.onKeyDown;
+  c.handlers.onKeyDown = !ownKeyDown || ownKeyDown.__passive === true ? c.keyDownPassive : c.keyDownActive;
   c.soundCtx = useContext(UISoundsContext);
   const [bits, setBits] = useState(0);
   c.setBits = trackState ? setBits : null;
@@ -358,6 +384,7 @@ export const PRESS_PROPS = [
   'onKeyUp',
   'onFocus',
   'onBlur',
+  'preventDefaultKeys',
   'disabled',
   'delayPressIn',
   'delayPressOut',
