@@ -34,25 +34,27 @@ interleaved 8 s rounds' mean frame time, after a warm-up.
 |---|---|---|---|---|
 | Unity 6.3 | Skia Graphite on Unity's Metal device, into a RenderTexture | 0.293 ms (3413 fps) | 0.334 ms (2994 fps) | **+0.04 ms** |
 | Unreal 5.8 (1280x720, exclusive fullscreen) | Skia Graphite on Unreal's Metal device, into a RenderTarget2D | 2.94 ms (340 fps) | 3.02 ms (332 fps) | **+0.08 ms** |
-| Godot (godot-aw3, Forward+ Metal) | Skia Graphite on Godot's Metal device | 3.96 ms (252 fps) | 4.45 ms (225 fps) | **+0.48 ms** (rounds: +0.01 to +0.67) |
+| Godot 4.7 (godot-aw3, Forward+ Metal) | Skia Graphite on Godot's Metal device | 2.96 ms (338 fps) | 2.97 ms (336 fps) | **+0.01 ms** (rounds: -0.37 to +0.23, below this scene's noise) |
 | raylib 6.2 (OpenGL) | Skia Ganesh GL into a RenderTexture2D | 0.45 ms (2224 fps) | 0.83 ms (1199 fps) | **+0.38 ms** |
 | sokol (OpenGL) | Skia Ganesh GL into the swapchain | 0.78 ms\* | 1.44 ms\* | **+0.66 ms** |
 
 What the scenes do:
 
-- **Unity, Unreal, raylib, sokol** run the same HUD
-  (`integrations/shared/ui/app.jsx`) over 8-9 orbiting units, with
+- **Every engine** runs the same game and HUD
+  (`integrations/shared/ui/app.jsx`): 8-9 units orbiting a tower, with
   nameplates following the units every frame through a host buffer. The UI
   repaints every frame, so this is a moving-HUD worst case, not an idle
-  screen.
-- **Godot** runs its own demo (the showcase UI over a 3D world), mostly idle
-  apart from stats updating once a second. Its delta is noisy on a 3.9 ms
-  frame (p99 is ~15 ms with or without the UI).
+  screen. In Godot it is the demo's `--hud` scene.
+- **Godot**'s frame times vary more than the UI costs: the mean of an 8 s
+  round moves by up to 0.3 ms with or without the UI, and p99 is ~15.5 ms
+  either way. The UI's cost there is too small to separate from that.
 
 How to read it:
 
 - On the Metal Graphite paths that Unity and Unreal use, a full moving HUD
   costs the game **0.04-0.08 ms per frame**: under 0.5% of a 60 fps frame.
+  Godot uses the same path, and its cost is below its scene's frame-to-frame
+  noise.
 - The OpenGL examples cost more (0.4-0.7 ms). On macOS, OpenGL runs on
   Apple's GL-on-Metal layer, and these examples composite a full-frame UI
   texture every frame. We expect most of that cost to come from that layer,
