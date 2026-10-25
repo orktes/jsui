@@ -37,11 +37,18 @@
 // The same thread-safe devices also get a small compile thread pool
 // (ContextOptions::fExecutor): the new pipelines a frame needs compile in
 // parallel, and precompiles queue behind them.
+//
+// Vulkan also keeps the driver's VkPipelineCache in a file (driver_cache.h,
+// ContextOptions::fPersistentPipelineStorage): loaded when the context is
+// made, saved by a thread of the context while pipelines appear, on
+// jsui_gpu_purge and when the context is destroyed. The precompiles of the
+// pipeline cache then hit the driver's cache rather than compile again.
 #include "render/gpu.h"
 
 #if defined(JSUI_VULKAN) || defined(JSUI_GRAPHITE_METAL) || defined(JSUI_GRAPHITE_DAWN)
 
 #include <algorithm>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -60,6 +67,7 @@
 #include "include/gpu/graphite/Recorder.h"
 #include "include/gpu/graphite/Recording.h"
 #include "include/gpu/graphite/Surface.h"
+#include "render/driver_cache.h"
 #include "render/graphite_images.h"
 #include "render/host_textures.h"
 #include "render/painter.h"
@@ -182,6 +190,10 @@ struct GraphiteGpu final : JsuiGpuContext {
                           : jsui::pipeline_cache::Backend::Dawn);
   // Outlives ctx too (Graphite's compile tasks; see makeCompileExecutor).
   std::unique_ptr<SkExecutor> compileExecutor;
+#if defined(JSUI_VULKAN)
+  // And this (ContextOptions::fPersistentPipelineStorage); Vulkan only.
+  std::unique_ptr<jsui::driver_cache::Storage> driverStorage;
+#endif
   std::unique_ptr<graphite::Context> ctx;
   std::unique_ptr<graphite::Recorder> recorder;
   std::unique_ptr<graphite::Recorder> warmRecorder;  // warmShaders' (never played back)
@@ -321,6 +333,13 @@ struct GraphiteGpu final : JsuiGpuContext {
     if (!recorder) return false;
     precompiler->attach(ctx.get(), precompileMode(), compileExecutor.get());
     pipelines = precompiler.get();
+#if defined(JSUI_VULKAN)
+    if (driverStorage) {
+      Precompiler* p = precompiler.get();
+      driverStorage->start(ctx.get(), [p] { return p->pipelinesCreated(); });
+      driverCache = driverStorage.get();
+    }
+#endif
     return true;
   }
 
@@ -334,6 +353,11 @@ struct GraphiteGpu final : JsuiGpuContext {
       // Wait for everything submitted (Graphite needs its work finished
       // before it frees its resources).
       ctx->submit(graphite::SyncToCpu::kYes);
+#if defined(JSUI_VULKAN)
+      // The last save (the device is still the host's to destroy after this).
+      if (driverStorage) driverStorage->finish();
+      driverCache = nullptr;
+#endif
       ctx.reset();
     }
 #if defined(JSUI_VULKAN)
@@ -542,6 +566,18 @@ JsuiGpuContext* createVulkan(const JsuiVulkanDevice& d) {
 
   graphite::ContextOptions opts;
   g->configure(opts);
+  // The driver's pipeline cache of an earlier launch on this device and
+  // driver (driver_cache.h), read by Graphite while it makes the context.
+  jsui::driver_cache::DeviceId id;
+  id.vendorID = props.vendorID;
+  id.deviceID = props.deviceID;
+  id.driverVersion = props.driverVersion;
+  static_assert(sizeof(id.uuid) == VK_UUID_SIZE, "pipelineCacheUUID");
+  std::memcpy(id.uuid, props.pipelineCacheUUID, VK_UUID_SIZE);
+  if (std::string file = jsui::driver_cache::defaultFile(id); !file.empty()) {
+    g->driverStorage = std::make_unique<jsui::driver_cache::Storage>(std::move(file), id);
+    opts.fPersistentPipelineStorage = g->driverStorage.get();
+  }
   g->ctx = graphite::ContextFactory::MakeVulkan(backend, opts);
   if (!g->finishInit(opts)) return nullptr;
   if (!g->initBarrier()) return nullptr;
@@ -649,6 +685,11 @@ void purge(JsuiGpuContext* gpu, size_t cacheBytes) {
   g->images->clear();
   g->recorder->freeGpuResources();
   g->ctx->freeGpuResources();
+#if defined(JSUI_VULKAN)
+  // Hosts purge when the app goes to the background, where it may be
+  // killed without a shutdown: save the driver's cache now.
+  if (g->driverStorage) g->driverStorage->sync();
+#endif
 }
 
 int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* dirty) {

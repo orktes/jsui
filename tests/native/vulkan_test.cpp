@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "jsui/jsui.h"
+#include "render/driver_cache.h"
 #include "render/gpu.h"
 #include "render/pipeline_cache.h"
 #include "test.h"
@@ -720,6 +721,123 @@ TEST(vulkan_pipeline_cache_warms_the_next_context) {
   CHECK_EQ(pipelineStats(gpu).failed, 0ull);
   CHECK_EQ(renderFrames(vk, gpu), 0ull);
   jsui_gpu_destroy(gpu);
+  std::remove(path.c_str());
+#endif
+}
+
+// The driver's VkPipelineCache in a file (driver_cache.h): a context saves
+// what its frames compiled (jsui_gpu_purge, its teardown); the next context
+// on the device hands it to the driver at creation. A file of another driver
+// version or a damaged one is ignored and replaced; one that is not a driver
+// cache is left alone.
+TEST(vulkan_driver_cache_persists) {
+#if !JSUI_VULKAN_TESTS
+  skip("vulkan_driver_cache_persists", "built without JSUI_VULKAN");
+#else
+  Vk vk;
+  std::string why = vk.init(240, 160);
+  if (!why.empty()) {
+    skip("vulkan_driver_cache_persists", why.c_str());
+    return;
+  }
+  using namespace jsui::driver_cache;
+  JsuiVulkanDevice d = vk.desc();
+  auto getProps =
+      reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(vk.gipa(vk.instance, "vkGetPhysicalDeviceProperties"));
+  VkPhysicalDeviceProperties props{};
+  getProps(vk.phys, &props);
+  DeviceId id;
+  id.vendorID = props.vendorID;
+  id.deviceID = props.deviceID;
+  id.driverVersion = props.driverVersion;
+  std::memcpy(id.uuid, props.pipelineCacheUUID, sizeof(id.uuid));
+  const std::string path = (std::filesystem::temp_directory_path() / "jsui-test-vkdriver.bin").string();
+  std::remove(path.c_str());
+  auto readAll = [](const std::string& p) {
+    std::string s;
+    if (FILE* f = std::fopen(p.c_str(), "rb")) {
+      char buf[4096];
+      size_t n;
+      while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) s.append(buf, n);
+      std::fclose(f);
+    }
+    return s;
+  };
+  auto writeAll = [](const std::string& p, const std::string& s) {
+    FILE* f = std::fopen(p.c_str(), "wb");
+    std::fwrite(s.data(), 1, s.size(), f);
+    std::fclose(f);
+  };
+
+  // Without a file (tests run without default files): no storage at all.
+  JsuiGpuContext* gpu = jsui_gpu_create_vulkan(&d);
+  CHECK(gpu != nullptr);
+  if (!gpu) return;
+  CHECK(gpu->driverCache == nullptr);
+  jsui_gpu_destroy(gpu);
+
+  setFileForTest(path);
+  // First launch: nothing to load; the frames compile; purge saves.
+  gpu = jsui_gpu_create_vulkan(&d);
+  CHECK(gpu && gpu->driverCache);
+  if (!gpu || !gpu->driverCache) {
+    resetFileForTest();
+    return;
+  }
+  CHECK_EQ(gpu->driverCache->stats().loadedBytes, size_t(0));
+  CHECK(renderFrames(vk, gpu) > 0);
+  jsui_gpu_purge(gpu, 0);
+  Storage::Stats st = gpu->driverCache->stats();
+  std::printf("  first context: %llu saves, %zu bytes of driver data\n", (unsigned long long)st.saves, st.savedBytes);
+  CHECK(st.saves >= 1);
+  CHECK(st.savedBytes >= 32);  // at least the Vulkan header
+  jsui_gpu_destroy(gpu);
+  std::string bytes = readAll(path);
+  Decoded r = decode(bytes.data(), bytes.size(), id);
+  CHECK_EQ(int(r.status), int(Decoded::Ok));
+  const size_t saved = r.size;
+  CHECK(saved >= 32);
+
+  // Second launch: the driver gets it at creation.
+  gpu = jsui_gpu_create_vulkan(&d);
+  CHECK_EQ(gpu->driverCache->stats().loadedBytes, saved);
+  renderFrames(vk, gpu);
+  jsui_gpu_destroy(gpu);
+  bytes = readAll(path);
+  r = decode(bytes.data(), bytes.size(), id);
+  CHECK_EQ(int(r.status), int(Decoded::Ok));
+
+  // A driver update: the old data is ignored (not handed to the driver) and
+  // replaced by this driver's on the next save.
+  DeviceId older = id;
+  older.driverVersion ^= 1;
+  writeAll(path, encode(older, r.payload, r.size));
+  gpu = jsui_gpu_create_vulkan(&d);
+  CHECK_EQ(gpu->driverCache->stats().loadedBytes, size_t(0));
+  CHECK(renderFrames(vk, gpu) > 0);
+  jsui_gpu_destroy(gpu);
+  bytes = readAll(path);
+  CHECK_EQ(int(decode(bytes.data(), bytes.size(), id).status), int(Decoded::Ok));
+
+  // Damaged (a flipped payload byte): ignored, replaced.
+  bytes[bytes.size() - 1] ^= 0x55;
+  writeAll(path, bytes);
+  gpu = jsui_gpu_create_vulkan(&d);
+  CHECK_EQ(gpu->driverCache->stats().loadedBytes, size_t(0));
+  renderFrames(vk, gpu);
+  jsui_gpu_destroy(gpu);
+  bytes = readAll(path);
+  CHECK_EQ(int(decode(bytes.data(), bytes.size(), id).status), int(Decoded::Ok));
+
+  // Someone else's file at that path: never overwritten.
+  writeAll(path, "not a driver cache");
+  gpu = jsui_gpu_create_vulkan(&d);
+  renderFrames(vk, gpu);
+  jsui_gpu_purge(gpu, 0);
+  jsui_gpu_destroy(gpu);
+  CHECK(readAll(path) == "not a driver cache");
+
+  resetFileForTest();
   std::remove(path.c_str());
 #endif
 }
