@@ -220,6 +220,56 @@ struct GraphiteGpu final : JsuiGpuContext {
   // Host textures drawn in this context's frames (wrapTexture).
   jsui::TextureWrapper textures{[this](const JsuiTexture& t) { return wrapTexture(t); }};
 
+  // Render targets the host keeps across frames (JSUI_GPU_INCREMENTAL), as
+  // wrapped in an earlier render: wrapping one is a Graphite texture with
+  // its views, a Device and an SkSurface, made and dropped again every frame
+  // (in the browser each view is a WebGPU call through JS). Dawn and Metal
+  // only: their wrappers hold a reference to the texture, so a handle found
+  // here is still the same texture (a VkImage handle may be reused).
+  struct Target {
+    const void* handle = nullptr;
+    int width = 0, height = 0;
+    unsigned format = 0;
+    uint64_t lastUse = 0;
+    sk_sp<SkSurface> surface;
+  };
+  static constexpr size_t kMaxTargets = 4;
+  static constexpr uint64_t kTargetIdleRenders = 120;  // a target unused this long goes (and its texture with it)
+  std::vector<Target> targets;
+  uint64_t renders = 0;
+
+  // The surface wrapping t's texture in an earlier render, if it is still
+  // usable for t; drops what the host no longer keeps.
+  sk_sp<SkSurface> findTarget(const JsuiGpuTarget& t) {
+    renders++;
+    sk_sp<SkSurface> found;
+    for (size_t i = 0; i < targets.size();) {
+      Target& e = targets[i];
+      const bool same = e.handle == t.texture;
+      if (same && (t.flags & JSUI_GPU_INCREMENTAL) && e.width == t.width && e.height == t.height &&
+          e.format == t.format) {
+        e.lastUse = renders;
+        found = e.surface;
+      } else if (same || e.lastUse + kTargetIdleRenders < renders) {
+        targets.erase(targets.begin() + long(i));
+        continue;
+      }
+      i++;
+    }
+    if (found) found->getCanvas()->restoreToCount(1);
+    return found;
+  }
+
+  void keepTarget(const JsuiGpuTarget& t, const sk_sp<SkSurface>& surface) {
+    if (!(t.flags & JSUI_GPU_INCREMENTAL) || api == Api::Vulkan) return;
+    if (targets.size() >= kMaxTargets) {
+      auto oldest = std::min_element(targets.begin(), targets.end(),
+                                     [](const Target& a, const Target& b) { return a.lastUse < b.lastUse; });
+      targets.erase(oldest);
+    }
+    targets.push_back(Target{t.texture, t.width, t.height, t.format, renders, surface});
+  }
+
 #if defined(JSUI_VULKAN)
   VkFns vk;
   VkInstance instance = VK_NULL_HANDLE;
@@ -368,6 +418,7 @@ struct GraphiteGpu final : JsuiGpuContext {
   }
 
   void release() {
+    targets.clear();  // before the recorder
     if (precompiler) precompiler->shutdown();  // its PrecompileContext holds the device
     if (images) images->clear();
     textures.clear();
@@ -732,6 +783,7 @@ void purge(JsuiGpuContext* gpu, size_t cacheBytes) {
     g->images->setBudget(cacheBytes / 2);
   }
   g->images->clear();
+  g->targets.clear();
   g->recorder->freeGpuResources();
   g->ctx->freeGpuResources();
 #if defined(JSUI_VULKAN)
@@ -752,8 +804,12 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* d
   bool discard = false;      // the target's contents are undefined: full repaint
   bool needsTransition = false;  // Vulkan: `layout` != the final layout
   std::unique_ptr<skgpu::MutableTextureState> finalState;
+  SkSurfaceProps props = jsui::surfaceProps();
+  sk_sp<SkSurface> surface = g->api == Api::Vulkan ? nullptr : g->findTarget(t);
 
-  if (g->api == Api::Vulkan) {
+  if (surface) {
+    // Wrapped in an earlier render (GraphiteGpu::targets).
+  } else if (g->api == Api::Vulkan) {
 #if defined(JSUI_VULKAN)
     VkFormat vf;
     if (!vkColorType(t.format, &vf, &cs)) return -1;
@@ -811,11 +867,12 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* d
     return -1;
 #endif
   }
-  if (!backendTex.isValid()) return -1;
-
-  SkSurfaceProps props = jsui::surfaceProps();
-  sk_sp<SkSurface> surface = SkSurfaces::WrapBackendTexture(g->recorder.get(), backendTex, cs, &props);
-  if (!surface) return -1;
+  if (!surface) {
+    if (!backendTex.isValid()) return -1;
+    surface = SkSurfaces::WrapBackendTexture(g->recorder.get(), backendTex, cs, &props);
+    if (!surface) return -1;
+    g->keepTarget(t, surface);
+  }
   if (rt.rt.shaders) g->warmShaders(*rt.rt.shaders, surface->imageInfo().colorType(), props);
   // The first frame on a target format hands the common pipelines to the
   // pool (pipeline_cache.h); this frame's own go ahead of them.

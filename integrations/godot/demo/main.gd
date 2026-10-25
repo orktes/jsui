@@ -65,6 +65,9 @@ extends Control
 ##                       after a warm-up (--bench-warmup S, default 3), print
 ##                       one `bench:` line (as the engine examples' --bench)
 ##                       and quit
+##   --perf-log S        JsuiView profiling on; every S seconds print one
+##                       `perf:` line, the per-frame averages of get_perf()
+##                       (JSUI's phases, ms) and get_render_stats() over them
 ##   --first-scroll      measure the armory list's first scroll: the worst
 ##                       frame (wall time) and the worst JsuiView render while
 ##                       it scrolls, and the GPU pipelines that compiled
@@ -132,6 +135,10 @@ var _bench_warmup := 3.0
 var _bench_ms := PackedFloat32Array()
 var _bench_last := -1
 var _bench_from := 0
+var _perf_log := 0.0
+var _perf_at := -1
+var _perf_frames := 0
+var _perf_stats := {}
 var _first_scroll := false
 var _hud := false
 var _hud_game: Node3D = null
@@ -226,6 +233,9 @@ func _enter_tree() -> void:
 				i += 1
 			"--bench-warmup":
 				_bench_warmup = float(v)
+				i += 1
+			"--perf-log":
+				_perf_log = float(v)
 				i += 1
 			"--hud":
 				_hud = true
@@ -383,6 +393,8 @@ func _process(delta: float) -> void:
 		_bench_frame()
 	if ui == null:
 		return
+	if _perf_log > 0:
+		_perf_frame()
 	if _hud:
 		if _capture != "":
 			_frame += 1
@@ -398,6 +410,40 @@ func _process(delta: float) -> void:
 		_frame += 1
 		if _frame >= _frames and ui.get_pending_loads() == 0:
 			_save_capture()
+
+
+## --perf-log: JSUI's per-phase times (get_perf, reset each line) and the
+## render stats' deltas, per frame, every _perf_log seconds.
+func _perf_frame() -> void:
+	var now := Time.get_ticks_usec()
+	_perf_frames += 1
+	if _perf_at < 0:
+		ui.profiling = true
+		ui.get_perf(true)
+		_perf_at = now
+		_perf_frames = 0
+		_perf_stats = ui.get_render_stats()
+		return
+	if now - _perf_at < int(_perf_log * 1e6):
+		return
+	var p: Dictionary = ui.get_perf(true)
+	var r: Dictionary = ui.get_render_stats()
+	var n := float(maxi(_perf_frames, 1))
+	var parts := PackedStringArray()
+	for k in ["js", "commit", "animated", "style", "layout", "input", "paint", "gpu_submit", "other"]:
+		parts.append("%s %.3f" % [k, p[k + "_us"] / n / 1000.0])
+	for k in ["render_usec_total", "jsui_render_usec_total", "gpu_job_usec_total"]:
+		parts.append("%s %.3f" % [k.trim_suffix("_usec_total"), (r[k] - _perf_stats[k]) / n / 1000.0])
+	parts.append("tick %.3f" % (r.tick_usec_last / 1000.0))
+	parts.append("renders %d" % (r.renders - _perf_stats.renders))
+	parts.append("js_busy %.3f js_apply %.3f js_sync %.3f batches %d" % [
+		p.js_busy_ms / n, p.js_apply_ms / n, p.js_sync_ms / n, p.js_batches_applied])
+	parts.append("bridge %d layouts %d text %d paragraphs %d compiles %d" % [
+		p.bridge_calls, p.layout_passes, p.text_measures, p.paragraph_builds, p.pipeline_compiles])
+	print("perf: frames %d (ms/frame) %s" % [_perf_frames, " ".join(parts)])
+	_perf_at = now
+	_perf_frames = 0
+	_perf_stats = r
 
 
 ## --bench-seconds: frame-to-frame times over a wall-clock window after the

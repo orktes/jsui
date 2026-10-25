@@ -9,7 +9,7 @@ extends Node3D
 ## and written as x, y, visible, hue into the `entities` frame buffer
 ## (set_buffer), which moves the nameplates without running JS; fps, unit
 ## count, the selected unit and the pass-through counters go to the `game`
-## shared state (set_state_json, only when the text changes).
+## shared state (set_state_json, only when one of them changes).
 ##
 ## Input the UI did not consume (_unhandled_input): click a unit to select it
 ## or empty ground to clear the selection, drag to orbit the camera, wheel to
@@ -53,7 +53,7 @@ var _clicks := 0
 var _wheel := 0
 var _keys := 0
 var _engine := ""
-var _last_state := ""
+var _last_state := []
 # FPS over the last 60 frames after a 10-frame warm-up, shown at most every
 # 250 ms (FpsCounter in integrations/shared/example_host.h).
 var _frame_times := PackedFloat64Array()
@@ -263,19 +263,23 @@ func _count_frame(now_ms: float) -> void:
 
 
 func _publish_state() -> void:
-	var json := JSON.stringify({
+	# The JSON only when something in it changed (it is built every frame
+	# otherwise: a Dictionary and JSON.stringify are most of this script's
+	# per-frame cost on the web).
+	var renderer: String = view.get_renderer()
+	var key := [renderer, _fps, _units.size(), _paused, _selected, _clicks, _wheel, _keys]
+	if key == _last_state:
+		return
+	_last_state = key
+	view.set_state_json("game", JSON.stringify({
 		"engine": _engine,
-		"renderer": view.get_renderer(),
+		"renderer": renderer,
 		"fps": _fps,
 		"entities": _units.size(),
 		"paused": _paused,
 		"selected": _selected,
 		"passed": {"clicks": _clicks, "wheel": _wheel, "keys": _keys, "pad": 0},
-	})
-	if json == _last_state:
-		return
-	_last_state = json
-	view.set_state_json("game", json)
+	}))
 
 
 func _on_ui_message(name: String, data, _json: String) -> void:
