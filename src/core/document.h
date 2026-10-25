@@ -11,6 +11,8 @@
 #include "core/node.h"
 #include "core/perf.h"
 
+class SkMatrix;
+
 namespace jsui {
 
 class FontManager;
@@ -182,7 +184,8 @@ class Document {
   void runYoga();
   void syncOverlays();
   bool placeOverlays();
-  bool placeOverlay(Node* n);
+  // layerInv: the overlay layer's viewport matrix, inverted.
+  bool placeOverlay(Node* n, const SkMatrix& layerInv);
   void placeArrows(Node* n);
   void dropOverlay(Node* n);
   void afterLayout(Node* node, bool report);

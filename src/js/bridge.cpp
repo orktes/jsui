@@ -468,15 +468,34 @@ JSValue rectObject(JSContext* ctx, const Rect& r, const Rect& a) {
 }
 
 // measure(id) -> rect | null. JS-thread mode: the layout of the last frame
-// (FrameSnapshot::layouts; null for a node not attached then).
+// (FrameSnapshot::layouts; null for a node not attached then). Snapshots
+// carry layouts only once JS has measured (Runtime::snapshotLayouts): the
+// first read is a proxy read of the owner thread's tree.
 JSValue js_measure(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   JsEngine::Impl& impl = implOf(ctx);
   if (impl.threaded) {
     uint32_t id = idArg(ctx, argc, argv, 0);
-    std::shared_ptr<const FrameSnapshot> snap = impl.rt.snapshots.current();
-    if (!id || !snap) return JS_NULL;
-    auto it = snap->layouts.find(id);
-    return it == snap->layouts.end() ? JS_NULL : rectObject(ctx, it->second.local, it->second.page);
+    Runtime& rt = impl.rt;
+    if (!id) return JS_NULL;
+    if (!rt.snapshotLayouts.exchange(true, std::memory_order_relaxed)) {
+      Rect local, page;
+      bool found = false;
+      if (!rt.proxy([&] {
+            if (Node* n = rt.findNode(id); n && n->document() && n->document()->root()) {
+              n->document()->layout();
+              local = n->layoutRect();
+              page = n->absoluteRect();
+              found = true;
+            }
+          }) ||
+          !found)
+        return JS_NULL;
+      return rectObject(ctx, local, page);
+    }
+    std::shared_ptr<const FrameSnapshot> snap = rt.snapshots.current();
+    if (!snap) return JS_NULL;
+    const FrameSnapshot::Layout* l = snap->layouts->find(id);
+    return l ? rectObject(ctx, l->local, l->page) : JS_NULL;
   }
   Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
   if (!n) return JS_NULL;
@@ -505,8 +524,8 @@ JSValue js_viewport(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
   Runtime& rt = runtimeOf(ctx);
   if (implOf(ctx).threaded) {  // the surface table of the snapshot
     std::shared_ptr<const FrameSnapshot> snap = rt.snapshots.current();
-    if (!snap || snap->surfaces.empty()) return JS_UNDEFINED;
-    const FrameSnapshot::SurfaceInfo* s = &snap->surfaces[0];
+    if (!snap || snap->surfaces->empty()) return JS_UNDEFINED;
+    const FrameSnapshot::SurfaceInfo* s = &(*snap->surfaces)[0];
     uint32_t tag = 0;
     if (argc > 0 && JS_IsNumber(argv[0]) && !JS_ToUint32(ctx, &tag, argv[0]))
       if (const FrameSnapshot::SurfaceInfo* t = snap->surface(tag)) s = t;

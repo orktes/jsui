@@ -283,16 +283,38 @@ void Document::syncOverlays() {
   }
 }
 
+namespace {
+
+// Nothing to draw or hit: an empty box whose children are all out of layout
+// (a <Visibility> popout while hidden). Placed once that changes, by the
+// layout pass that changes it.
+bool emptyOverlay(const Node* n) {
+  Rect box = n->layoutRect();
+  if (box.width > 0 || box.height > 0) return false;
+  for (const Node* c : n->children())
+    if (c->style().display) return false;
+  return true;
+}
+
+}  // namespace
+
 bool Document::placeOverlays() {
   bool resized = false;
-  for (Node* n : overlays_)
-    if (placeOverlay(n)) resized = true;
+  bool layerInverted = false;
+  SkMatrix layerInv;
+  for (Node* n : overlays_) {
+    if (!n->overlay->active || emptyOverlay(n)) continue;
+    if (!layerInverted) {
+      layerInverted = true;
+      if (!viewMatrix(overlayLayer_, nullptr).invert(&layerInv)) layerInv.reset();
+    }
+    if (placeOverlay(n, layerInv)) resized = true;
+  }
   return resized;
 }
 
-bool Document::placeOverlay(Node* n) {
+bool Document::placeOverlay(Node* n, const SkMatrix& layerInv) {
   OverlayState& st = *n->overlay;
-  if (!st.active) return false;
   Node* host = st.host;
   Node* p = n->parent();
   const OverlayConfig& cfg = st.config;
@@ -395,8 +417,6 @@ bool Document::placeOverlay(Node* n) {
     // The host in the layer: the parent's matrix, then the box at (x, y).
     SkMatrix hm = pm;
     hm.preTranslate(x - box.x, y - box.y);
-    SkMatrix layerInv;
-    if (!viewMatrix(overlayLayer_, nullptr).invert(&layerInv)) layerInv.reset();
     hm.postConcat(layerInv);
     float lin[4] = {hm.getScaleX(), hm.getSkewY(), hm.getSkewX(), hm.getScaleY()};
     bool same = true;
