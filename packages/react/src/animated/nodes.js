@@ -12,6 +12,9 @@ import {
   startListening,
   stopListening,
   sampleCurve,
+  generateNewAnimationId,
+  startAnimatingNode,
+  stopAnimation as stopNativeAnimationById,
 } from './NativeAnimatedHelper.js';
 import { HostBuffer } from '../hostBuffer.js';
 import { HostState } from '../hostData.js';
@@ -773,6 +776,178 @@ export class AnimatedClock extends AnimatedNode {
     if (this._raf != null) cancelFrame(this._raf);
     this._raf = null;
     this.__dropNative();
+  }
+}
+
+// Animated.clock({start, speed, paused, running}): a clock you control, an
+// Animated.Value counting seconds (times `speed`) from `start`. pause(),
+// resume(), reset(t) and setSpeed(x) are single commands: natively the
+// runtime runs it as a "clock" animation on the value (no JS per frame),
+// and a paused clock, or one nothing reads, does not keep the host ticking.
+// `running`: an Animated node (host state bind, interaction, value, ...)
+// that holds the clock while it is 0, natively too. With the JS driver it
+// follows requestAnimationFrame while something reads it.
+export class AnimatedClockValue extends AnimatedValue {
+  constructor(options) {
+    const o = options || {};
+    const start = typeof o.start === 'number' && o.start === o.start ? o.start : 0;
+    super(start);
+    this._clockStart = start;
+    this._speed = typeof o.speed === 'number' && o.speed === o.speed ? o.speed : 1;
+    this._paused = !!o.paused;
+    this._running = o.running instanceof AnimatedNode ? o.running : o.running != null ? new AnimatedValue(o.running ? 1 : 0) : null;
+    this._run = null;  // {id, stop} while counting
+    this._held = false;  // JS driver: `running` is 0
+    this._v0 = start;
+    this._t0 = 0;
+    this._raf = null;
+    this._rafToken = null;
+    this._gate = null;
+    if (NativeAnimatedAPI) this.__makeNative();
+    if (!this._paused) this._go();
+  }
+  /** Stops counting; the value stays where it is (natively: the last frame's). */
+  pause() {
+    this._paused = true;
+    this._stopRun();
+  }
+  /** Counts on from where it was paused. */
+  resume() {
+    if (!this._paused) return;
+    this._paused = false;
+    this._go();
+  }
+  /** Sets the time (seconds; default: the start time); keeps running or paused. */
+  reset(t) {
+    const v = typeof t === 'number' && t === t ? t : this._clockStart;
+    this._stopRun();
+    if (this._nativeTag != null) NativeAnimatedAPI.setValue(this._nativeTag, v);
+    this._v0 = v;
+    this._updateValue(v, true);
+    if (!this._paused) this._go();
+  }
+  /** Seconds per second from now on (0 holds, negative counts down). */
+  setSpeed(speed) {
+    const s = +speed;
+    if (!(s === s) || s === this._speed) return;
+    if (this._run) {
+      this._stopRun();
+      this._speed = s;
+      this._go();
+    } else {
+      this._speed = s;
+    }
+  }
+  isPaused() {
+    return this._paused;
+  }
+  getSpeed() {
+    return this._speed;
+  }
+  setValue(value) {
+    this.reset(+value);
+  }
+  __getValue() {
+    if (this._nativeTag == null && this._run) this._value = this._jsTime();
+    return super.__getValue();
+  }
+  _jsTime() {
+    return this._held ? this._v0 : this._v0 + ((now() - this._t0) / 1000) * this._speed;
+  }
+  _go() {
+    if (this._run) return;
+    const run = { id: null, stop: () => this.pause() };
+    // An animation running on the value (Animated.timing(clock, ...)) stops.
+    if (this._animation && this._animation !== run) this._animation.stop();
+    this._run = run;
+    this._animation = run;
+    if (this._isNative) {
+      const id = generateNewAnimationId();
+      run.id = id;
+      const config = { type: 'clock', speed: this._speed };
+      if (this._running) {
+        this._running.__makeNative();
+        config.running = this._running.__getNativeTag();
+      }
+      startAnimatingNode(id, this.__getNativeTag(), config, (finished, raw) => {
+        // Stopped by the runtime (a native setValue, another animation).
+        if (this._run !== run) return;
+        this._run = null;
+        this._paused = true;
+        this._value = raw;
+        if (this._animation === run) this._animation = null;
+      });
+      return;
+    }
+    this._v0 = this._value;
+    this._t0 = now();
+    this._held = false;
+    if (this._running) {
+      if (!this._gate) {
+        this._gate = { __changed: () => this._syncGate(), __makeNative() {} };
+        this._running.__addChild(this._gate);
+      }
+      this._held = !+this._running.__getValue();
+    }
+    this._kick();
+  }
+  _stopRun() {
+    const run = this._run;
+    if (!run) return;
+    this._run = null;
+    if (this._animation === run) this._animation = null;
+    if (run.id != null) {
+      stopNativeAnimationById(run.id);
+      this.__getValue();
+      return;
+    }
+    const v = this._jsTime();
+    this._held = false;
+    this._cancelFrame();
+    this._v0 = v;
+    this._updateValue(v, true);
+  }
+  // JS driver: `running` changed (an Animated node notifies its dependents).
+  _syncGate() {
+    if (!this._run || this._isNative) return;
+    const on = !!+this._running.__getValue();
+    if (!on && !this._held) {
+      this._v0 = this._jsTime();
+      this._held = true;
+      this._updateValue(this._v0, true);
+    } else if (on && this._held) {
+      this._held = false;
+      this._t0 = now();
+      this._kick();
+    }
+  }
+  _kick() {
+    if (this._raf != null || !this._run || this._held || this._isNative) return;
+    if (!this.__getChildren().length && !this.hasListeners()) return;  // read lazily
+    const token = (this._rafToken = {});
+    const loop = () => {
+      if (this._rafToken !== token) return;  // cancelled
+      this._raf = this._rafToken = null;
+      if (!this._run || this._held) return;
+      this._updateValue(this._jsTime(), true);
+      this._kick();
+    };
+    this._raf = requestFrame(loop);
+  }
+  _cancelFrame() {
+    if (this._raf != null) cancelFrame(this._raf);
+    this._raf = this._rafToken = null;
+  }
+  __attach() {
+    this._kick();
+  }
+  __detach() {
+    this._cancelFrame();
+  }
+  addListener(callback) {
+    const id = super.addListener(callback);
+    this._kick();
+    return id;
   }
 }
 
