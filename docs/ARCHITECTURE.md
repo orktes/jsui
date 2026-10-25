@@ -2921,27 +2921,32 @@ names.
 `node web/test/js-bench.mjs` runs jsui-bench scenarios on QuickJS (in
 `jsui.wasm`) and on the host JS engine ([Host JS engine](#host-js-engine)),
 in Node (the CLI's headless runtime, no paint) and in headless Chromium (the
-web host's CPU renderer, painting every frame). Per frame (mean of 300
-after 60 warm-up frames, median of 3 runs), on a 4-core shared Linux VM with
-Node 22 and Chromium 153. `js` is the profiler's `js` phase, `core` adds
-commit, Animated, style and layout, `wall` is the frame's wall time
-(Chromium: with the CPU paint and blit). Mount is
+web host's CPU renderer, painting every frame); `--real-gpu --renderer
+webgpu` runs the Chromium half in the installed Chrome on the machine's GPU.
+Per frame (mean of 300 after 60 warm-up frames, median of 3 runs) on an M1
+Ultra with Node 26, headless Chromium 141 and Chrome 155 (Metal). `js` is
+the profiler's `js` phase, `core` adds commit, Animated, style and layout,
+`wall` is the frame's wall time (Chromium: with the paint). Mount is
 `examples/showcase/interactions.jsx` loaded into a running runtime: the
 bundle's evaluation and its first 10 frames in one total, each run compiling
-source the engine has not seen (median of 9).
+source the engine has not seen.
 
 | Scenario | Where | js QuickJS → host | core QuickJS → host | wall QuickJS → host |
 | --- | --- | --- | --- | --- |
-| markers, 100, buffer feed | Node | 4.81 → 0.81 ms | 5.93 → 1.96 ms | 5.99 → 1.98 ms |
-| | Chromium | 6.12 → 1.02 ms | 7.65 → 2.67 ms | 20.3 → 15.2 ms |
-| inventory (one slot patched) | Node | 4.92 → 0.40 ms | 5.69 → 0.90 ms | 5.80 → 0.93 ms |
-| | Chromium | 6.43 → 0.41 ms | 7.28 → 1.00 ms | 8.23 → 1.56 ms |
-| surfaces (30, props every frame) | Node | 5.99 → 0.43 ms | 6.71 → 0.96 ms | 6.90 → 1.06 ms |
-| | Chromium | 6.65 → 0.38 ms | 7.42 → 0.94 ms | 7.70 → 1.05 ms |
-| mount interactions.jsx | Node | 100 → 88 ms | 133 → 115 ms | 137 → 122 ms |
-| | Chromium | 244 → 172 ms | 392 → 283 ms | 802 → 613 ms |
+| markers, 100, buffer feed | Node | 1.74 → 0.23 ms | 2.19 → 0.71 ms | 2.20 → 0.72 ms |
+| | Chromium, CPU paint | 1.84 → 0.28 ms | 2.41 → 0.84 ms | 3.64 → 2.12 ms |
+| | Chrome, WebGPU | 1.74 → 0.25 ms | 2.28 → 0.79 ms | 2.94 → 1.42 ms |
+| inventory (one slot patched) | Node | 2.18 → 0.09 ms | 2.39 → 0.30 ms | 2.41 → 0.31 ms |
+| | Chromium, CPU paint | 2.28 → 0.10 ms | 2.50 → 0.32 ms | 2.72 → 0.46 ms |
+| | Chrome, WebGPU | 2.19 → 0.11 ms | 2.42 → 0.33 ms | 2.78 → 0.59 ms |
+| surfaces (30, props every frame) | Node | 2.48 → 0.14 ms | 2.68 → 0.33 ms | 2.75 → 0.37 ms |
+| | Chromium, CPU paint | 2.47 → 0.13 ms | 2.70 → 0.34 ms | 2.79 → 0.39 ms |
+| | Chrome, WebGPU | 2.43 → 0.12 ms | 2.64 → 0.32 ms | 2.74 → 0.38 ms |
+| mount interactions.jsx | Node | 44 → 37 ms | 54 → 47 ms | 57 → 49 ms |
+| | Chromium, CPU paint | 54 → 52 ms | 122 → 89 ms | 187 → 152 ms |
+| | Chrome, WebGPU | 55 → 52 ms | 138 → 93 ms | 182 → 135 ms |
 
-Steady-state frames spend 6 to 17 times less time in JS once V8 has
+Steady-state frames spend 7 to 20 times less time in JS once V8 has
 compiled the hot paths. The core figure also counts the boundary on the
 host engine: JSON props and events, and JS-side prop diffing in place of
 QuickJS's native `updateProps`. A mount gains much less: it is mostly
