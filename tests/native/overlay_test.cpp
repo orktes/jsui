@@ -406,3 +406,39 @@ TEST(overlay_incremental_repaint_matches_full) {
   both([&](rtest::Scene& s) { patchStyle(child(sv(s), 1), R"({"display":"flex"})"); });
   check(10);
 }
+
+TEST(overlay_incremental_repaint_of_fading_content) {
+  // A hover popout: content-sized overlay above its anchor whose content
+  // fades and scales out, then leaves layout (<Visibility>), and back.
+  const char* tree = R"J({"style":{"position":"absolute","left":0,"top":0,"width":240,"height":200,"backgroundColor":"#101820"},"children":[
+    {"style":{"position":"absolute","left":40,"top":120,"width":60,"height":40,"overflow":"hidden","backgroundColor":"#4080ff"},"children":[
+      {"props":{"overlay":{"placement":"top","offset":8}},"style":{"pointerEvents":"none"},"children":[
+        {"style":{"width":120,"paddingVertical":10},"children":[
+          {"props":{"overlayArrow":true},"style":{"position":"absolute","width":10,"height":10,"borderWidth":1,"borderColor":"#ffffff","backgroundColor":"#302010","transform":[{"rotate":"45deg"}]}},
+          {"style":{"height":40,"borderRadius":8,"borderWidth":1,"borderColor":"#f0c040","backgroundColor":"#302010","boxShadow":"0 8px 16px rgba(0,0,0,0.7)"}}]}]}]}]})J";
+  rtest::Scene a(240, 200), b(240, 200);
+  a.add(tree);
+  b.add(tree);
+  std::vector<uint32_t> inc(size_t(240) * 200, 0);
+  auto check = [&](int step) {
+    a.rt->tick(0);
+    a.rt->renderIncremental(inc.data(), 240, 200, 240 * 4);
+    b.render();
+    int diff = 0;
+    for (size_t i = 0; i < inc.size(); i++) diff += inc[i] != b.px[i];
+    if (diff) std::fprintf(stderr, "  step %d: %d pixels differ\n", step, diff);
+    CHECK_EQ(diff, 0);
+  };
+  check(0);
+  auto content = [](rtest::Scene& s) { return child(child(child(child(s.doc().root(), 0), 0), 0), 0); };
+  const char* steps[] = {R"({"opacity":0.8,"transform":[{"scale":0.98}]})", R"({"opacity":0.4,"transform":[{"scale":0.95}]})",
+                         R"({"opacity":0.1,"transform":[{"scale":0.92}]})", R"({"opacity":0,"display":"none"})",
+                         R"({"opacity":0.3,"display":"flex","transform":[{"scale":0.94}]})",
+                         R"({"opacity":1,"transform":null})", R"({"display":"none"})"};
+  int i = 1;
+  for (const char* st : steps) {
+    patchStyle(content(a), st);
+    patchStyle(content(b), st);
+    check(i++);
+  }
+}
