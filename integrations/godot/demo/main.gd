@@ -978,6 +978,7 @@ func _test_host_textures() -> void:
 	probe.pixel_ratio = 1.0  # the frame is the probe's 64x32 px exactly
 	probe.pipeline_cache_path = ""
 	probe.position = Vector2(16, 112)
+	_hide_probe(probe)
 	var sizes := []  # what useHostTexture reported
 	probe.message_received.connect(func(name: String, data, _json):
 		if name == "probe:size":
@@ -1051,6 +1052,7 @@ func _test_lottie() -> void:
 		v.pixel_ratio = 1.0
 		v.pipeline_cache_path = ""
 		v.position = Vector2(96, y)
+		_hide_probe(v)
 		add_child(v)
 		return v
 	var held: JsuiView = make.call({"progress": 0.5}, 112)
@@ -1092,6 +1094,7 @@ func _test_shaders() -> void:
 		v.pixel_ratio = 1.0
 		v.pipeline_cache_path = ""
 		v.position = Vector2(176, 112)
+		_hide_probe(v)
 		return v
 	var red := Color8(220, 40, 60)
 	var green := Color8(30, 200, 90)
@@ -1153,6 +1156,7 @@ func _test_audio() -> void:
 	probe.pipeline_cache_path = ""
 	probe.audio_bus_map = {"sfx": "UI"}
 	probe.position = Vector2(16, 160)
+	_hide_probe(probe)
 	var ready := [false]
 	var ended := {}  # voice -> reason, as JS saw it (the voice's `ended`)
 	var statuses := {}  # voice -> status (sound_ended)
@@ -1292,6 +1296,16 @@ func _two_colour_texture(left: Color, right: Color) -> ImageTexture:
 
 
 ## The probe's frame shows `left` / `right` at the middle of each half.
+## The probes (texture, Lottie, shader, audio) are checked through their own
+## frames (get_frame_image) and calls, never on screen: drawn fully
+## transparent, so a visible self-test run does not paint their test colours
+## over the demo UI. They still render (JsuiView renders while visible in the
+## tree; modulate only changes how Godot composites the frame).
+func _hide_probe(probe: JsuiView) -> void:
+	probe.modulate = Color(1, 1, 1, 0)
+	probe.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+
 func _probe_shows(probe: JsuiView, left: Color, right: Color) -> bool:
 	var img: Image = probe.get_frame_image()
 	if img == null or img.get_size() != PROBE_SIZE:
