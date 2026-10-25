@@ -57,13 +57,13 @@ void Surface::dispatchResize() {
 }
 
 bool Surface::frozen() const {
-  return rt.config.dev_mode && lastGoodFrame_ && (!rt.lastError.empty() || doc.root()->children().empty());
+  return rt.config.dev_mode && lastGoodFrame_ && (!rt.lastError.empty() || doc.root()->logicalChildren().empty());
 }
 
 bool Surface::overlay() const { return rt.config.dev_mode && !rt.lastError.empty(); }
 
 void Surface::snapshotFrame() {
-  if (!rt.lastError.empty() || doc.root()->children().empty()) return;
+  if (!rt.lastError.empty() || doc.root()->logicalChildren().empty()) return;
   doc.layout();
   float pr = doc.pixelRatio();
   SkPictureRecorder rec;

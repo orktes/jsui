@@ -1087,4 +1087,63 @@ TEST(gpu_scaling_shadow_exact_after_animation) {
   });
 }
 
+// The overlay layer (core/overlay.h) on the GPU: a popout escaping a
+// clipping ScrollView follows its anchor while the list scrolls and the
+// stage around it scales; the retained frame (damage only) matches drawing
+// the whole frame, and both match the CPU.
+TEST(gpu_overlay_retained_matches_direct) {
+  forEachContext("gpu_overlay_retained_matches_direct", [](GLContext& c, JsuiGpuContext* gpu, Api api) {
+    const char* tree = R"J({"style":{"position":"absolute","left":0,"top":0,"width":320,"height":240,"backgroundColor":"#101820","transformOrigin":"left top"},"children":[
+      {"type":"ScrollView","style":{"position":"absolute","left":20,"top":20,"width":140,"height":150,"backgroundColor":"#203040"},"children":[
+        {"style":{"height":60}},
+        {"style":{"height":24,"width":80,"marginLeft":20,"borderRadius":4,"backgroundColor":"#4080ff"},"children":[
+          {"props":{"overlay":{"placement":"right","offset":6}},"style":{"width":90,"height":50,"borderRadius":8,"backgroundColor":"#f0c040","boxShadow":"0 4px 10px rgba(0,0,0,0.6)"},"children":[
+            {"props":{"overlayArrow":true},"style":{"width":10,"height":10,"backgroundColor":"#f0c040","transform":[{"rotate":"45deg"}]}},
+            {"style":{"margin":10,"height":10,"backgroundColor":"#802020"}}]}]},
+        {"style":{"height":400}}]}]})J";
+    Scene a(320, 240), b(320, 240), cpu(320, 240);
+    Scene* scenes[3] = {&a, &b, &cpu};
+    for (Scene* s : scenes) {
+      s->add(tree);
+      s->render();
+    }
+    RenderTexture ta(c.gl, 320, 240), tb(c.gl, 320, 240);
+    JsuiGLTarget t{};
+    t.width = 320;
+    t.height = 240;
+    int worst = 0;
+    double over = 0, cpuMean = 0;
+    for (int i = 0; i < 16; i++) {
+      for (Scene* s : scenes) {
+        jsui::Node* stage = s->doc().root()->children()[0];
+        jsui::Node* sv = stage->logicalChildren()[0];
+        sv->scrollY = float(i * 5);
+        sv->markBoundsDirty();
+        if (i >= 8) patchStyle(stage, "{\"transform\":[{\"scale\":" + std::to_string(1 - (i - 7) * 0.03) + "}]}");
+      }
+      t.texture = ta.tex;
+      t.flags = JSUI_GL_TOP_LEFT_ORIGIN;
+      CHECK_EQ(jsui::gpu::render(a.rt->main(), gpu, t), 0);
+      t.texture = tb.tex;
+      t.flags = JSUI_GL_TOP_LEFT_ORIGIN | JSUI_GL_NO_RETAIN;
+      b.doc().markPaintDirty();
+      CHECK_EQ(jsui::gpu::render(b.rt->main(), gpu, t), 0);
+      std::vector<uint32_t> ra = ta.read(false), rb = tb.read(false);
+      Diff d = compare(ra, rb, 2);
+      worst = std::max(worst, d.maxDiff);
+      over = std::max(over, d.over);
+      cpu.render();
+      cpuMean = std::max(cpuMean, compare(rb, cpu.px, 24).mean);
+      if (i == 15) {
+        savePng((std::string("gpu_overlay_") + apiName(api)).c_str(), ra, 320, 240);
+        cpu.save((std::string("gpu_overlay_cpu_") + apiName(api)).c_str());
+      }
+    }
+    std::printf("  [%s] overlay retained vs direct: max %d, >2: %.4f%%; direct vs CPU mean %.3f\n", apiName(api), worst,
+                over * 100, cpuMean);
+    CHECK(over < 0.0005);
+    CHECK(cpuMean < 1.0);
+  });
+}
+
 #endif  // JSUI_GPU_TESTS
