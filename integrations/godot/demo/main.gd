@@ -722,6 +722,9 @@ func _check_render_hand_off(badge: JsuiView) -> void:
 		_mouse_move(_center(targets[(f / 6) % targets.size()]) + Vector2(float((f % 6) * 8 - 20), 0))
 		for i in surfaces.size():
 			surfaces[i].initial_props = {"label": "%d.%d" % [i, f]}
+		# The new labels render this frame also with JS on its own thread
+		# (a sync tick), so every surface has damage every frame.
+		ui.sync_js_next_frame()
 		await get_tree().process_frame
 	var s1: Array = views.map(func(v): return v.get_render_stats())
 	for i in views.size():
