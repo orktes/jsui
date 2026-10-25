@@ -7,8 +7,10 @@
 // "Inbound messages").
 //
 // Single-threaded, post() delivers at once, so every caller behaves as when
-// it called the engine itself. On a JS thread the messages will queue for
-// it instead, and what native needs back arrives later as a reply:
+// it called the engine itself. In JS-thread mode (js/js_thread.h) the
+// messages queue for the JS thread instead, which delivers them in order,
+// and what native needs back arrives later as a reply, applied with the
+// batch of the task that answered (Runtime::applyJs):
 //
 // * Events posted with a reply (Inbound::event(ev, true)) get a sequence
 //   number; JS's answer (JsEngine::DispatchFlags) is stored under it until
@@ -32,6 +34,7 @@
 
 namespace jsui {
 
+class JsEngine;
 class Runtime;
 
 class Inbound {
@@ -62,6 +65,9 @@ class Inbound {
     };
     Kind kind;
     bool ok = false;
+    // The runtime clock when it was posted: what JS reads (performance.now,
+    // new timers) while it handles the message on a JS thread.
+    double now = 0;
     Missing missing = Missing::Ignore;
     uint32_t seq = 0;
     uint64_t id = 0;
@@ -75,7 +81,8 @@ class Inbound {
 
   explicit Inbound(Runtime& rt) : rt_(rt) {}
 
-  // ---- posting (single-threaded: delivered before these return)
+  // ---- posting (single-threaded: delivered before these return; JS
+  // thread: queued, and in lockstep mode waited for outside a batch)
   // An event for __jsui_dispatchEvent. `reply`: the poster wants JS's
   // DispatchFlags; returns the sequence number to take() them under (0
   // without a reply).
@@ -94,8 +101,13 @@ class Inbound {
   void endBatch();
   void post(Message&& m);
 
+  // Delivers a message to `js` (single-threaded at once; a JS thread for
+  // each message it takes from its queue).
+  void deliver(Message& m, JsEngine& js);
+
   // ---- replies
-  // JS's answer to message `seq` (the engine's return, single-threaded).
+  // JS's answer to message `seq` (the engine's return single-threaded, the
+  // applied batch on a JS thread).
   void reply(uint32_t seq, int flags, bool event);
   // Takes the answer to `seq` when it is there (and, with replyDelayMs, due).
   bool take(uint32_t seq, int* flags);
@@ -104,6 +116,8 @@ class Inbound {
   void forget(uint32_t seq);
   // Answers waited for (tests).
   size_t awaiting() const { return replies_.size(); }
+  // The JS context went away: no answer will come.
+  void clearReplies() { replies_.clear(); }
 
   // Test hook ("late replies"): event replies become visible this long
   // after they were posted, on the runtime clock (Runtime::now), as if JS
@@ -111,7 +125,6 @@ class Inbound {
   double replyDelayMs = 0;
 
  private:
-  void deliver(Message& m);
   void noHandler(const Message& m);
   uint32_t nextSeq() { return ++seq_ ? seq_ : ++seq_; }
 
@@ -124,6 +137,7 @@ class Inbound {
   Runtime& rt_;
   uint32_t seq_ = 0;
   std::vector<Reply> replies_;  // in post order; a handful at most
+  int batchDepth_ = 0;          // BeginBatch / EndBatch posted (lockstep waits outside)
 };
 
 }  // namespace jsui

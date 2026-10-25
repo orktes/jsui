@@ -19,6 +19,7 @@
 
 #include "dev_session.h"
 #include "js/engine_impl.h"
+#include "js/js_thread.h"
 #include "runtime.h"
 
 namespace jsui {
@@ -98,7 +99,7 @@ JSValue js_writeState(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
     std::string json;
     bool set = rt.state.jsonCopy(key, &json);
     Runtime* r = &rt;
-    rt.hostQueue.post([r, key, json = std::move(json), set] {
+    rt.toHost([r, key, json = std::move(json), set] {
       if (r->state.onChange) r->state.onChange(key);
       r->uiStateChanged(key, set ? &json : nullptr);
     });
@@ -125,7 +126,7 @@ JSValue publishedBuffer(JSContext* ctx, JsEngine::Impl& impl, const std::string&
   std::shared_ptr<const HostBuffers::Copy> copy = buffers.published(key);
   if (!copy && buffers.publishedVersion(key)) {
     buffers.subscribe(key);
-    impl.rt.hostQueue.call([&] { buffers.publish(); }, Runtime::kProxyTimeoutMs);
+    impl.rt.proxy([&] { buffers.publish(); });
     copy = buffers.published(key);
   }
   if (!copy) return JS_UNDEFINED;
@@ -221,17 +222,25 @@ JSValue js_hostCall(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
   auto& impl = implOf(ctx);
   Runtime& rt = impl.rt;
   if (argc < 3 || !JS_IsFunction(ctx, argv[2])) return JS_ThrowTypeError(ctx, "hostCall(name, json, settle)");
-  if (!rt.config.on_call && !(rt.session && rt.session->joined())) return JS_NewInt32(ctx, 0);
+  // The dev session is the owner thread's: on a JS thread only on_call
+  // decides, and the session hears of the call in the tick.
+  bool session = !impl.threaded && rt.session && rt.session->joined();
+  if (!rt.config.on_call && !session && !impl.threaded) return JS_NewInt32(ctx, 0);
   std::string name = toStdString(ctx, argv[0]);
   std::string json = JS_IsUndefined(argv[1]) ? "null" : toStdString(ctx, argv[1]);
-  if (rt.session && rt.session->joined())
-    rt.session->uiEvent("call", {{"name", Value(name)}, {"args", Value::parseJson(json)}});
+  Runtime* r = &rt;
+  if (session) rt.session->uiEvent("call", {{"name", Value(name)}, {"args", Value::parseJson(json)}});
+  else if (impl.threaded)
+    rt.toHost([r, name, json] {
+      if (r->session && r->session->joined())
+        r->session->uiEvent("call", {{"name", Value(name)}, {"args", Value::parseJson(json)}});
+    });
   if (!rt.config.on_call) return JS_NewInt32(ctx, 0);
   uint64_t id = rt.newCallId();
   // Registered before on_call runs, so the embedder may answer from inside it.
   impl.hostCalls[id] = JS_DupValue(ctx, argv[2]);
+  if (impl.thread) impl.thread->callStarted(id);
   if (!impl.threaded) impl.syncPoint();
-  Runtime* r = &rt;
   rt.toHost([r, id, name = std::move(name), json = std::move(json)] {
     r->config.on_call(r->config.call_user, id, name.c_str(), json.c_str());
   });
@@ -239,9 +248,14 @@ JSValue js_hostCall(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
 }
 
 JSValue js_cancelCall(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  Runtime& rt = runtimeOf(ctx);
+  JsEngine::Impl& impl = implOf(ctx);
+  Runtime& rt = impl.rt;
   uint64_t id = argc > 0 ? toId(ctx, argv[0]) : 0;
-  if (!id || !rt.js->dropCall(id)) return JS_FALSE;
+  auto it = id ? impl.hostCalls.find(id) : impl.hostCalls.end();
+  if (it == impl.hostCalls.end()) return JS_FALSE;
+  JS_FreeValue(ctx, it->second);
+  impl.hostCalls.erase(it);
+  if (impl.thread) impl.thread->callEnded(id);
   Runtime* r = &rt;
   rt.toHost([r, id] { r->hostCallCancelled(id); });
   return JS_TRUE;

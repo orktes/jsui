@@ -295,6 +295,8 @@ void CommandBuffer::applyOne(Runtime& rt, const Command& cmd) {
       Value config = readValue(at);
       result_.error.clear();
       result_.ok = rt.animated->createNode(tagOf(cmd.a), config, &result_.error);
+      // JS-thread mode: nobody waits for the answer (no TypeError in JS).
+      if (!result_.ok && rt.jsThreadMode()) rt.log(JSUI_LOG_ERROR, "Animated (native): " + result_.error);
       return;
     }
     case Op::AnimConnect:
@@ -326,10 +328,12 @@ void CommandBuffer::applyOne(Runtime& rt, const Command& cmd) {
       rt.animated->extractOffset(tagOf(cmd.a));
       return;
     case Op::AnimStart: {
-      // Starts on the runtime clock now (single-threaded: the time JS called).
+      // Starts on the runtime clock now (single-threaded: the time JS called;
+      // on a JS thread: the frame that applies it).
       Value config = readValue(at);
       result_.error.clear();
       result_.ok = rt.animated->startAnimation(tagOf(cmd.a), tagOf(cmd.b), config, rt.now, &result_.error);
+      if (!result_.ok && rt.jsThreadMode()) rt.log(JSUI_LOG_ERROR, "Animated (native): " + result_.error);
       return;
     }
     case Op::AnimStop:

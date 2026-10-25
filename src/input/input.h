@@ -105,6 +105,12 @@ class InputManager {
   void nodeRemoved(Node* n);
   // Per-tick work (stick repeat, hover refresh after layout changes).
   void tick(double nowMs);
+  // JS answers arrived outside the tick (a JS thread's batch applied by
+  // jsui_sync): the default actions and gestures waiting for them go on.
+  void answersArrived();
+  // The JS context went away: nothing it was asked will be answered (the
+  // pending default actions are dropped, gestures stop waiting).
+  void forgetAnswers();
   // Interaction state styles (core/state_style.h): which states hold for
   // each element that asks, the weights' transitions and the blended styles
   // (state_styles.cpp). After tick() and JS, before native Animated.

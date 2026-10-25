@@ -35,13 +35,15 @@ uint32_t tagArg(JSContext* ctx, int argc, JSValueConst* argv, int i) { return ui
 
 // Graph changes are commands (js/command_buffer.h), applied in call order
 // with the node tree's. createNode and startAnimation apply at once
-// single-threaded: they throw on a bad config.
+// single-threaded: they throw on a bad config. (On a JS thread they go with
+// the batch; a bad config is logged when it is applied.)
 JSValue js_createNode(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   CommandBuffer& cmds = commands(ctx);
   CommandBuffer::Writer w = cmds.begin();
   if (argc > 1) writeValue(ctx, argv[1], w);
   else w.null();
   cmds.end(Op::AnimCreate, tagArg(ctx, argc, argv, 0));
+  if (implOf(ctx).threaded) return JS_UNDEFINED;
   const CommandBuffer::Result& r = implOf(ctx).applyNow();
   if (!r.ok) return JS_ThrowTypeError(ctx, "Animated (native): %s", r.error.c_str());
   return JS_UNDEFINED;
@@ -141,7 +143,10 @@ JSValue js_startAnimation(JSContext* ctx, JSValueConst, int argc, JSValueConst* 
   cmds.end(Op::AnimStart, tagArg(ctx, argc, argv, 0), tagArg(ctx, argc, argv, 1));
   JsEngine::Impl& impl = implOf(ctx);
   // JS-thread mode: running from this batch on (stopAnimation below).
-  if (impl.threaded) impl.animStarts[intArg(ctx, argc, argv, 0)] = impl.publishedBatches + 1;
+  if (impl.threaded) {
+    impl.animStarts[intArg(ctx, argc, argv, 0)] = impl.publishedBatches + 1;
+    return JS_UNDEFINED;
+  }
   const CommandBuffer::Result& r = impl.applyNow();
   if (!r.ok) return JS_ThrowTypeError(ctx, "Animated (native): %s", r.error.c_str());
   return JS_UNDEFINED;

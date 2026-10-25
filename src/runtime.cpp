@@ -18,6 +18,7 @@
 #include "js/bytecode.h"
 #include "js/engine.h"
 #include "js/inspector.h"
+#include "js/js_thread.h"
 #include "render/image_cache.h"
 #include "render/lottie.h"
 #include "render/shader_view.h"
@@ -85,11 +86,13 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
   input = main().input.get();
   doc.setViewport(float(cfg.width), float(cfg.height), cfg.pixel_ratio > 0 ? cfg.pixel_ratio : 1.f);
   if (cfg.dev_mode) session = std::make_unique<DevSession>(*this);
+  if (cfg.js_event_deadline_ms > 0) eventDeadlineMs = cfg.js_event_deadline_ms;
   jsKind_ = JsEngine::nextKind;
   resetEngine();
 }
 
 Runtime::~Runtime() {
+  if (js) js->stop();  // a JS thread ends (and frees its engine) first
   hostQueue.clear();  // callbacks JS queued do not reach an embedder tearing down
   audio->contextEnded();
   audio.reset();
@@ -259,48 +262,150 @@ void Runtime::reportError(const std::string& msg) {
 }
 
 void Runtime::resetEngine() {
-  // What the old context asked of the embedder still reaches it, before the
-  // cancellations below.
+  // A JS thread stops first (interrupting a running script); what it
+  // published still applies, and what the old context asked of the
+  // embedder still reaches it, before the cancellations below.
+  if (js) js->stop();
+  if (jsThread_) applyJs();
   hostQueue.drain();
   measureRequests.clear();  // their callbacks die with the context
   std::vector<uint64_t> calls = js ? js->pendingCalls() : std::vector<uint64_t>();
   audio->contextEnded();
+  jsThread_ = nullptr;
   js.reset();
+  // Nothing the old context was asked will be answered.
+  inbound.clearReplies();
+  for (auto& s : surfaces_) s->input->forgetAnswers();
   bundleRan_ = false;
   globalListeners.clear();
   animated->clear();
   for (auto& s : surfaces_) s->doc.clear();
   // Shared state outlives the context (the new bundle reads it as it starts).
-  js = JsEngine::create(*this, jsKind_);
+  if (jsThreadMode_) {
+    auto t = std::make_unique<JsThread>(*this);
+    t->setLockstep(jsLockstep_);
+    jsThread_ = t.get();
+    js = std::move(t);
+  } else {
+    js = JsEngine::create(*this, jsKind_);
+  }
   redrawAll();
   endCalls(calls, "the UI was reloaded");
 }
 
 // ------------------------------------------------- JS on its own thread
 
-bool Runtime::setJsThreadMode(bool on) {
-  if (on == jsThreadMode_) return true;
+bool Runtime::setJsThreadMode(bool on, bool lockstep) {
+  lockstep = on && lockstep;
+  if (on == jsThreadMode_) {
+    if (!on) return true;
+    jsLockstep_ = lockstep;
+    if (jsThread_) jsThread_->setLockstep(lockstep);
+    return true;
+  }
   if (bundleRan_ || !bundleSource.empty() || !bundleUrl.empty()) return false;
+  if (on && (!JsThread::available() || jsKind_ != JsEngine::Kind::QuickJs)) return false;
   jsThreadMode_ = on;
+  jsLockstep_ = lockstep;
   state.deferUiChanges = on;
   snapshots.clear();
   resetEngine();
   return true;
 }
 
+bool Runtime::jsBusy() const { return jsThread_ && jsThread_->busy(); }
+
 void Runtime::toHost(std::function<void()> fn) {
-  if (jsThreadMode_) hostQueue.post(std::move(fn));
+  if (JsThread* t = JsThread::current()) t->hostItem(std::move(fn));  // with the task's batch
+  else if (jsThreadMode_) hostQueue.post(std::move(fn));
   else fn();
 }
 
 void Runtime::jsLog(JsuiLogLevel level, const std::string& msg) {
   if (!jsThreadMode_) return log(level, msg);
-  hostQueue.post([this, level, msg] { log(level, msg); });
+  toHost([this, level, msg] { log(level, msg); });
 }
 
 void Runtime::jsReportError(const std::string& msg) {
   if (!jsThreadMode_) return reportError(msg);
-  hostQueue.post([this, msg] { reportError(msg); });
+  toHost([this, msg] { reportError(msg); });
+}
+
+bool Runtime::proxy(const std::function<void()>& fn) {
+  JsThread* t = JsThread::current();
+  if (!t) return hostQueue.call(fn, kProxyTimeoutMs);  // drains first: FIFO
+  t->flushHost();
+  return hostQueue.call(
+      [&] {
+        applyJs();
+        fn();
+      },
+      kProxyTimeoutMs);
+}
+
+int Runtime::applyJs() {
+  JsThread* t = jsThread_;
+  if (!t || !t->hasBatches()) return 0;
+  double t0 = wallMs();
+  int n = 0;
+  bool replies = false;
+  JsBatch b;
+  // Host callbacks may reload or destroy surfaces: deferred meanwhile
+  // (JsEngine::inCall).
+  t->applying++;
+  while (t->takeBatch(&b)) {
+    {
+      Perf::Scope scope(doc.perf, Phase::Commit);
+      b.commands.apply(*this);
+    }
+    if (b.counted) appliedBatches.fetch_add(1, std::memory_order_release);
+    for (const JsBatch::Reply& r : b.replies) inbound.reply(r.seq, r.flags, r.event);
+    replies = replies || !b.replies.empty();
+    for (auto& fn : b.host) fn();
+    b.replies.clear();
+    b.host.clear();
+    t->recycle(std::move(b));
+    b = JsBatch();
+    n++;
+  }
+  t->applying--;
+  jsStats.batches += uint64_t(n);
+  jsStats.applyUs += (wallMs() - t0) * 1000;
+  // Outside the tick, what waited for these answers goes on now (in the
+  // tick, InputManager::tick does it).
+  if (replies && syncDepth_ > 0)
+    for (auto& s : surfaces_) s->input->answersArrived();
+  return n;
+}
+
+bool Runtime::syncJs(double timeoutMs, bool layoutEach) {
+  JsThread* t = jsThread_;
+  if (!t) return true;
+  double t0 = wallMs();
+  syncDepth_++;
+  t->setSyncing(true);
+  bool drained = false;
+  for (int round = 0; round < 8; round++) {
+    double left = timeoutMs < 0 ? -1 : std::max(0.0, timeoutMs - (wallMs() - t0));
+    bool idle = t->waitIdle(left, [this] { hostQueue.drain(); });
+    applyJs();
+    hostQueue.drain();
+    if (layoutEach) {
+      // The onLayout events and measure callbacks of what was applied.
+      inbound.beginBatch();
+      for (auto& s : surfaces_) s->doc.layout();
+      answerMeasures();
+      inbound.endBatch();
+    }
+    if (!idle) break;
+    if (t->idle() && !t->hasBatches()) {
+      drained = true;
+      break;
+    }
+  }
+  if (--syncDepth_ == 0) t->setSyncing(false);
+  jsStats.syncUs += (wallMs() - t0) * 1000;
+  return drained;
 }
 
 void Runtime::drainHost() {
@@ -393,7 +498,7 @@ void Runtime::deliverTextureChanges() {
 }
 
 int Runtime::resolveCall(uint64_t id, const char* json) {
-  if (!js || !js->hasCall(id)) return -1;
+  if (!js || !js->takeCall(id)) return -1;
   std::string text = json ? json : "null";
   std::string error;
   if (!Json::parse(text, nullptr, &error)) {
@@ -407,7 +512,7 @@ int Runtime::resolveCall(uint64_t id, const char* json) {
 }
 
 int Runtime::rejectCall(uint64_t id, const char* message) {
-  if (!js || !js->hasCall(id)) return -1;
+  if (!js || !js->takeCall(id)) return -1;
   inbound.settleCall(id, false, message ? message : "rejected");
   return 0;
 }
@@ -500,7 +605,13 @@ bool Runtime::loadSource(const std::string& source, const std::string& name) {
     publishSnapshot();
   }
   int ran = 0;
-  inbound.take(inbound.eval(source, name), &ran);
+  uint32_t seq = inbound.eval(source, name);
+  // A JS thread evaluates the bundle while this waits (serving its proxied
+  // reads), so the result and the first render are there as single-threaded.
+  if (!inbound.take(seq, &ran) && jsThread_) {
+    syncJs(-1, false);
+    if (!inbound.take(seq, &ran)) inbound.forget(seq);  // the thread is gone
+  }
   bool ok = ran != 0;
   if (jsThreadMode_) drainHost();
   // Surfaces run their apps once the bundle registered its components (a
@@ -647,17 +758,24 @@ double Runtime::wallMs() {
   return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
 }
 
-void Runtime::tick(double nowMs) {
+void Runtime::tick(double nowMs, bool sync) {
   now = nowMs;
   tickWallStart = wallMs();
 #if JSUI_DEBUGGER
-  if (inspector) inspector->poll();  // DevTools requests made while JS was idle
+  // DevTools requests made while JS was idle (a JS thread polls itself).
+  if (inspector && !jsThread_) inspector->poll();
 #endif
   doomed_.clear();
   for (auto& s : surfaces_) s->doc.now = nowMs;
-  // JS-thread mode: what JS asked of the embedder since the last tick (a
-  // reload among it).
-  if (jsThreadMode_) drainHost();
+  // JS-thread mode: what JS did and asked of the embedder since the last
+  // tick (a reload among it).
+  if (jsThreadMode_) {
+    int applied = applyJs();
+    drainHost();
+    // Frames JS had work and published nothing (jsui_get_perf js_lag_frames).
+    if (applied == 0 && jsThread_ && !jsThread_->idle()) jsStats.lagFrames++;
+    else if (applied > 0) jsStats.lagFrames = 0;
+  }
   if (reloadRequested_) reload();
   for (auto& s : surfaces_) {
     s->doc.frame++;
@@ -678,7 +796,12 @@ void Runtime::tick(double nowMs) {
   deliverTextureChanges();
   audio->update();
   deliverAudioEvents();
+  publishedNow.store(nowMs, std::memory_order_release);
   inbound.frame(nowMs);
+  // JSUI_TICK_SYNC_JS: this frame's JS (and what it did) lands on this frame.
+  double syncTimeout = config.js_sync_timeout_ms > 0 ? config.js_sync_timeout_ms : 250;
+  double syncStart = wallMs();
+  if (sync && jsThread_ && !jsLockstep_) syncJs(syncTimeout, false);
   // JS-thread mode: its host-state writes reach native Animated bindings
   // before they tick (HostState::deferUiChanges), its calls the embedder.
   if (jsThreadMode_) drainHost();
@@ -725,6 +848,8 @@ void Runtime::tick(double nowMs) {
   // that asked is laid out), with the onLayout events.
   answerMeasures();
   inbound.endBatch();
+  // ... and the onLayout handlers' and measure callbacks' work.
+  if (sync && jsThread_ && !jsLockstep_) syncJs(std::max(0.0, syncTimeout - (wallMs() - syncStart)), false);
   if (jsThreadMode_) {
     publishSnapshot();
     drainHost();  // before the call results below: callResult is queued
@@ -737,7 +862,7 @@ void Runtime::tick(double nowMs) {
   // Cycle collections the engine deferred while JS ran run between frames,
   // in light ticks (no commit to speak of) or while nothing moves (see
   // JsEngine::collectIdle).
-  if (js) {
+  if (js && !jsThread_) {  // a JS thread collects on its own
     double tickMs = wallMs() - tickWallStart;
     bool idle = !wantsFrame();
     for (auto& s : surfaces_) idle = idle && !s->needsRedraw();
@@ -794,6 +919,8 @@ void Runtime::freeDestroyedNodes() {
 
 void Runtime::tickNative(double nowMs) {
   now = nowMs;
+  // What a JS thread published is applied (its JS still waits for a tick).
+  if (jsThread_) applyJs();
   for (auto& s : surfaces_) {
     s->doc.now = nowMs;
     s->input->tickStates(nowMs);  // state styles follow input without JS too

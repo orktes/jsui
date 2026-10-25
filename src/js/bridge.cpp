@@ -33,11 +33,19 @@ namespace {
 // conversion; applying it is timed in the same phase).
 #define JSUI_COMMIT_SCOPE                                    \
   implOf(ctx).counters->bridgeCalls++;                       \
-  Perf::Scope commitScope(runtimeOf(ctx).doc.perf, Phase::Commit)
+  Perf::Scope commitScope(implOf(ctx).perf(), Phase::Commit)
 
 using Op = CommandBuffer::Op;
 
 CommandBuffer& commands(JSContext* ctx) { return implOf(ctx).commands; }
+
+// An op of CommandBuffer::appliesAtOnce: applied now single-threaded (its
+// events reach JS inside the call); on a JS thread with the batch (they
+// arrive as messages later).
+void applyAtOnce(JSContext* ctx) {
+  JsEngine::Impl& impl = implOf(ctx);
+  if (!impl.threaded) impl.applyNow();
+}
 
 // A node id argument (0, which no node has, when it is not a number).
 // Whether the node exists is checked when the command is applied.
@@ -298,7 +306,7 @@ JSValue js_updateProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
 // next frame. performance.now() is the frame clock and never advances
 // within a tick, so the scheduler's own check would never yield.
 JSValue js_shouldYield(JSContext* ctx, JSValueConst, int, JSValueConst*) {
-  return JS_NewBool(ctx, runtimeOf(ctx).jsShouldYield());
+  return JS_NewBool(ctx, implOf(ctx).shouldYield());
 }
 
 // getProps(id): the props native holds for a node (what updateProps built
@@ -312,11 +320,9 @@ JSValue js_getProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
     uint32_t id = idArg(ctx, argc, argv, 0);
     Runtime& rt = impl.rt;
     Value props;
-    if (!id || !rt.hostQueue.call(
-                   [&] {
-                     if (Node* n = rt.findNode(id)) props = n->props();
-                   },
-                   Runtime::kProxyTimeoutMs))
+    if (!id || !rt.proxy([&] {
+          if (Node* n = rt.findNode(id)) props = n->props();
+        }))
       return JS_UNDEFINED;
     return props.isObject() ? fromValue(ctx, props) : JS_UNDEFINED;
   }
@@ -504,7 +510,7 @@ JSValue js_viewport(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
 JSValue js_focus(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   if (uint32_t id = idArg(ctx, argc, argv, 0)) {
     commands(ctx).push(Op::Focus, id);
-    implOf(ctx).applyNow();
+    applyAtOnce(ctx);
   }
   return JS_UNDEFINED;
 }
@@ -512,7 +518,7 @@ JSValue js_focus(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
 JSValue js_blur(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   if (uint32_t id = idArg(ctx, argc, argv, 0)) {
     commands(ctx).push(Op::Blur, id);
-    implOf(ctx).applyNow();
+    applyAtOnce(ctx);
   }
   return JS_UNDEFINED;
 }
@@ -528,7 +534,7 @@ JSValue js_scrollTo(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
   if (argc > 2) JS_ToFloat64(ctx, &y, argv[2]);
   bool animated = argc > 3 && JS_ToBool(ctx, argv[3]) > 0;
   commands(ctx).pushXY(Op::ScrollTo, id, x, y, animated ? CommandBuffer::kAnimated : 0);
-  implOf(ctx).applyNow();
+  applyAtOnce(ctx);
   return JS_UNDEFINED;
 }
 
@@ -542,7 +548,7 @@ JSValue js_scrollToEnd(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
   uint8_t flags = (argc > 2 && JS_ToBool(ctx, argv[2]) > 0 ? CommandBuffer::kHorizontal : 0) |
                   (argc > 3 && JS_ToBool(ctx, argv[3]) > 0 ? CommandBuffer::kAnimated : 0);
   commands(ctx).push(Op::ScrollToEnd, id, idArg(ctx, argc, argv, 1), 0, flags);
-  implOf(ctx).applyNow();
+  applyAtOnce(ctx);
   return JS_UNDEFINED;
 }
 
@@ -567,7 +573,14 @@ JSValue js_lottieCommand(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
   CommandBuffer::Writer w = cmds.begin();
   writeString(ctx, argv[1], w);
   cmds.end(Op::LottieCommand, id, 0, 0, a, b);
-  return JS_NewBool(ctx, implOf(ctx).applyNow().ok);
+  JsEngine::Impl& impl = implOf(ctx);
+  if (impl.threaded) {
+    // Applied with the batch: whether the view exists is not known yet;
+    // the command name is (lottie::command).
+    std::string cmd = toStdString(ctx, argv[1]);
+    return JS_NewBool(ctx, cmd == "play" || cmd == "pause" || cmd == "resume" || cmd == "reset");
+  }
+  return JS_NewBool(ctx, impl.applyNow().ok);
 }
 
 // {error} | {uniforms: [{name, type, count, color}], children: [name]}.
@@ -625,7 +638,7 @@ JSValue js_shadersWarming(JSContext* ctx, JSValueConst, int, JSValueConst*) {
 JSValue js_flashScrollIndicators(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   if (uint32_t id = idArg(ctx, argc, argv, 0)) {
     commands(ctx).push(Op::FlashScrollIndicators, id);
-    implOf(ctx).applyNow();
+    applyAtOnce(ctx);
   }
   return JS_UNDEFINED;
 }
@@ -640,7 +653,7 @@ JSValue js_setTextInputSelection(JSContext* ctx, JSValueConst, int argc, JSValue
   end = start;
   if (argc > 2 && !JS_IsUndefined(argv[2]) && !JS_IsNull(argv[2])) JS_ToFloat64(ctx, &end, argv[2]);
   commands(ctx).pushXY(Op::SetSelection, id, start, end);
-  implOf(ctx).applyNow();
+  applyAtOnce(ctx);
   return JS_UNDEFINED;
 }
 
@@ -651,7 +664,7 @@ JSValue js_setTextInputSelection(JSContext* ctx, JSValueConst, int argc, JSValue
 JSValue js_getClipboard(JSContext* ctx, JSValueConst, int, JSValueConst*) {
   Runtime& rt = runtimeOf(ctx);
   std::string t;
-  rt.hostQueue.call([&] { t = rt.clipboardText(); }, Runtime::kProxyTimeoutMs);
+  rt.proxy([&] { t = rt.clipboardText(); });
   return JS_NewStringLen(ctx, t.data(), t.size());
 }
 
@@ -699,15 +712,21 @@ void fontLoaded(JsEngine::Impl& impl, uint64_t id, Resource& res, const std::str
   if (!res.ok()) {
     error = "loadFont: failed to load " + res.url + " (status " + std::to_string(res.status) +
             (res.error.empty() ? "" : ", " + res.error) + ")";
-  } else if (std::string why; !rt.fonts.registerFont(family, res.data.data(), res.data.size(), weight, italic, &why)) {
-    error = "loadFont: " + res.url + ": " + why;
+  } else {
+    // The FontManager is the owner thread's (layout measures with it).
+    std::string why = "the runtime did not answer in time";
+    bool registered = false;
+    impl.onOwner([&] {
+      registered = rt.fonts.registerFont(family, res.data.data(), res.data.size(), weight, italic, &why);
+      if (registered) rt.fontsChanged();
+    });
+    if (!registered) error = "loadFont: " + res.url + ": " + why;
   }
   if (error.empty()) {
-    rt.fontsChanged();
     JSValue ok = JS_TRUE;
     JS_FreeValue(ctx, impl.call(resolve, JS_UNDEFINED, 1, &ok));
   } else {
-    rt.log(JSUI_LOG_WARN, error);
+    rt.jsLog(JSUI_LOG_WARN, error);
     JSValue err = JS_NewError(ctx);
     JS_SetPropertyStr(ctx, err, "message", JS_NewStringLen(ctx, error.data(), error.size()));
     JS_FreeValue(ctx, impl.call(reject, JS_UNDEFINED, 1, &err));
@@ -760,34 +779,45 @@ JSValue js_loadFont(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
 
 // loadFontData(family, bytes, weight, italic) -> true; throws on bad data.
 // `bytes`: ArrayBuffer / typed array / DataView. Empty family = the file's.
+// Font registration runs where the FontManager lives (Impl::onOwner: after
+// what JS recorded single-threaded, so fontsChanged() re-measures the text
+// JS set before; a proxied call on a JS thread).
 JSValue js_loadFontData(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   Runtime& rt = runtimeOf(ctx);
-  implOf(ctx).syncPoint();  // fontsChanged() re-measures the text JS set before
   std::string family = argc > 0 && JS_IsString(argv[0]) ? toStdString(ctx, argv[0]) : "";
   std::vector<uint8_t> data;
   if (argc < 2 || JS_IsString(argv[1]) || !bytesOf(ctx, argv[1], &data) || data.empty())
     return JS_ThrowTypeError(ctx, "loadFontData(family, bytes): bytes must be an ArrayBuffer or typed array");
   int weight, italic;
   fontHints(ctx, argc, argv, 2, &weight, &italic);
-  std::string why;
-  if (!rt.fonts.registerFont(family, data.data(), data.size(), weight, italic, &why))
-    return JS_ThrowTypeError(ctx, "loadFontData: %s", why.c_str());
-  rt.fontsChanged();
+  std::string why = "the runtime did not answer in time";
+  bool ok = false;
+  implOf(ctx).onOwner([&] {
+    ok = rt.fonts.registerFont(family, data.data(), data.size(), weight, italic, &why);
+    if (ok) rt.fontsChanged();
+  });
+  if (!ok) return JS_ThrowTypeError(ctx, "loadFontData: %s", why.c_str());
   return JS_TRUE;
 }
 
 // unloadFont(family) -> boolean
 JSValue js_unloadFont(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   Runtime& rt = runtimeOf(ctx);
-  implOf(ctx).syncPoint();
-  bool ok = argc > 0 && rt.fonts.unregisterFamily(toStdString(ctx, argv[0]));
-  if (ok) rt.fontsChanged();
+  if (argc < 1) return JS_FALSE;
+  std::string family = toStdString(ctx, argv[0]);
+  bool ok = false;
+  implOf(ctx).onOwner([&] {
+    ok = rt.fonts.unregisterFamily(family);
+    if (ok) rt.fontsChanged();
+  });
   return JS_NewBool(ctx, ok);
 }
 
 // getFontFamilies() -> string[] (registration order, built-in Inter first)
 JSValue js_getFontFamilies(JSContext* ctx, JSValueConst, int, JSValueConst*) {
-  auto names = runtimeOf(ctx).fonts.familyNames();
+  Runtime& rt = runtimeOf(ctx);
+  std::vector<std::string> names;
+  implOf(ctx).onOwner([&] { names = rt.fonts.familyNames(); });
   JSValue arr = JS_NewArray(ctx);
   for (size_t i = 0; i < names.size(); i++)
     JS_SetPropertyUint32(ctx, arr, uint32_t(i), JS_NewStringLen(ctx, names[i].data(), names[i].size()));
@@ -797,7 +827,6 @@ JSValue js_getFontFamilies(JSContext* ctx, JSValueConst, int, JSValueConst*) {
 // setFontFallbacks(families: string[] | "A, B")
 JSValue js_setFontFallbacks(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   Runtime& rt = runtimeOf(ctx);
-  implOf(ctx).syncPoint();
   std::vector<std::string> list;
   auto addList = [&](const std::string& csv) {
     size_t i = 0;
@@ -821,19 +850,24 @@ JSValue js_setFontFallbacks(JSContext* ctx, JSValueConst, int argc, JSValueConst
   } else if (argc > 0 && JS_IsString(argv[0])) {
     addList(toStdString(ctx, argv[0]));
   }
-  uint32_t gen = rt.fonts.generation;
-  rt.fonts.setFallbackFamilies(std::move(list));
-  if (rt.fonts.generation != gen) rt.fontsChanged();
+  implOf(ctx).onOwner([&] {
+    uint32_t gen = rt.fonts.generation;
+    rt.fonts.setFallbackFamilies(std::move(list));
+    if (rt.fonts.generation != gen) rt.fontsChanged();
+  });
   return JS_UNDEFINED;
 }
 
 // setDefaultFontFamily(family): the family of text whose style names none.
 JSValue js_setDefaultFontFamily(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   Runtime& rt = runtimeOf(ctx);
-  implOf(ctx).syncPoint();
-  uint32_t gen = rt.fonts.generation;
-  if (argc > 0 && JS_IsString(argv[0])) rt.fonts.setDefaultFamily(toStdString(ctx, argv[0]));
-  if (rt.fonts.generation != gen) rt.fontsChanged();
+  if (argc < 1 || !JS_IsString(argv[0])) return JS_UNDEFINED;
+  std::string family = toStdString(ctx, argv[0]);
+  implOf(ctx).onOwner([&] {
+    uint32_t gen = rt.fonts.generation;
+    rt.fonts.setDefaultFamily(family);
+    if (rt.fonts.generation != gen) rt.fontsChanged();
+  });
   return JS_UNDEFINED;
 }
 
