@@ -14,12 +14,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
 #include "include/core/SkBitmap.h"
 #include "include/core/SkData.h"
 #include "render/gpu.h"
+#include "render/shader_cache.h"
 #include "render/shader_view.h"
 #include "render_util.h"
 #include "test.h"
@@ -954,6 +956,49 @@ TEST(gpu_capi_bundle) {
     CHECK(buf == cpu);
     jsui_destroy(rt);
     jsui_gpu_destroy(gpu);
+  });
+}
+
+// The shader cache (render/shader_cache.h): the programs a first context
+// compiles are stored in the file; a second context on the same file loads
+// them all and compiles nothing new.
+TEST(gpu_shader_cache_file) {
+  forEachContext("gpu_shader_cache_file", [](GLContext& c, JsuiGpuContext*, Api api) {
+    const std::string path =
+        (std::filesystem::temp_directory_path() / ("jsui-test-gl-shaders-" + std::to_string(int(api)) + ".bin"))
+            .string();
+    std::remove(path.c_str());
+    auto frame = [&](JsuiGpuContext* gpu) {
+      Scene s(160, 120);
+      buildScene(s, quadPngUri());
+      s.render();
+      RenderTexture rtex(c.gl, 160, 120);
+      JsuiGLTarget t{};
+      t.texture = rtex.tex;
+      t.width = 160;
+      t.height = 120;
+      t.flags = JSUI_GL_TOP_LEFT_ORIGIN;
+      CHECK_EQ(jsui::gpu::render(s.rt->main(), gpu, t), 0);
+      rtex.read(false);  // finishes the frame
+    };
+    JsuiGpuContext* first = jsui_gpu_create_gl(nullptr, nullptr);
+    CHECK(first != nullptr);
+    if (!first) return;
+    CHECK_EQ(jsui_gpu_set_pipeline_cache(first, path.c_str()), 0);
+    frame(first);
+    const auto stored = first->shaders->stats().stored;
+    CHECK(stored > 0);
+    jsui_gpu_destroy(first);
+
+    JsuiGpuContext* second = jsui_gpu_create_gl(nullptr, nullptr);
+    CHECK(second != nullptr);
+    if (!second) return;
+    CHECK_EQ(jsui_gpu_set_pipeline_cache(second, path.c_str()), int(stored));
+    frame(second);
+    CHECK(second->shaders->stats().hits > 0);
+    CHECK_EQ(second->shaders->stats().stored, 0ull);
+    jsui_gpu_destroy(second);
+    std::remove(path.c_str());
   });
 }
 

@@ -1162,9 +1162,19 @@ JSUI_API JsuiGpuContext* jsui_gpu_create_d3d11(void* device);
  *   skipped (counted as failed).
  * - These calls are thread safe (they do not use the device), except
  *   jsui_gpu_precompile_step: call it on the thread that renders.
+ * - Ganesh contexts (GL, Direct3D, jsui_render_metal) have no pipeline
+ *   keys to precompile; they keep Skia's shader cache in a file instead:
+ *   GL program binaries (or GLSL where the driver has none), Direct3D HLSL,
+ *   Metal shader source. From the second launch on a shader the first one
+ *   compiled is loaded from it rather than generated (and, with program
+ *   binaries, compiled) again in the frame. The default file is
+ *   shaders-<program>-<backend>.bin beside the pipeline files, opened with
+ *   the first shader; jsui_gpu_set_pipeline_cache on a GL or Direct3D
+ *   context names another (returns the number of shaders in it). Not in
+ *   the browser (WebGL: the browser caches).
  * - Development: the environment variable JSUI_PIPELINE_CACHE names a file
  *   that every Graphite context uses in place of the host's ("off": none,
- *   not even the default);
+ *   not even the default, Ganesh's included);
  *   JSUI_LOG_PIPELINES=1 logs every pipeline a context creates,
  *   JSUI_LOG_PIPELINES=compiled only those a frame compiled (new: not in
  *   the cache yet; known: still queued for the precompile).
@@ -1192,7 +1202,8 @@ typedef struct JsuiPipelineStats {
  * it, including those the context created before the call. NULL / "" stops
  * recording. Returns the number of pipelines queued, -1 when the file cannot
  * be created / read or is not a pipeline cache, or `gpu` has no pipeline
- * cache (GL, a WASM build: no file system). */
+ * cache (WebGL, a WASM build: no file system). On GL and Direct3D contexts:
+ * the shader cache file (above), the number of shaders in it. */
 JSUI_API int jsui_gpu_set_pipeline_cache(JsuiGpuContext* gpu, const char* path);
 /* Hands the common pipelines (rects, rounded rects, text, images, gradients,
  * shadows, paths) for render targets of `format` (as JsuiGpuTarget.format) to
