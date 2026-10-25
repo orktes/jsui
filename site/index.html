@@ -161,7 +161,9 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
     // i.e. Skia on WebGPU, else on WebGL, else the CPU raster, when a GPU
     // module is deployed), ?stats=1 logs frame timings, ?dev=<bundle url>
     // runs a `jsui dev` bundle with live reload inside this page, ?worker=1
-    // runs the runtime and its rendering in a Worker (worker mode).
+    // runs the runtime and its rendering in a Worker (worker mode),
+    // ?js=quickjs runs the app on QuickJS in the WASM module instead of the
+    // browser's own JS engine (createJsui's default, ?js=host).
     const q = new URLSearchParams(location.search);
     const err = document.getElementById('err');
     const splash = document.getElementById('splash');
@@ -198,6 +200,7 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
         // Big canvases at 3x cost a lot of fill for little gain.
         pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
         worker: q.get('worker') === '1',
+        ...(q.get('js') ? { js: q.get('js') } : {}),
       });
       window.jsui = jsui;
       jsui.on('error', showError);

@@ -92,8 +92,9 @@ const TRACE = !args.includes('--no-trace');
 const WORKER = args.includes('--worker');
 const PHASES = args.includes('--phases');
 const SCENARIO = opt('--scenario', 'steady');
-// --js host: JSUI runs the bundle on the page's (or worker's) own JS engine
-// (createJsui({ js: 'host' }) through page.html?js=); default quickjs.
+// --js host|quickjs: the JS engine JSUI runs the bundle on (createJsui's `js`,
+// through page.html?js=); default createJsui's own: host, the page's (or
+// worker's) engine.
 const JS_ENGINE = opt('--js', '');
 // How the finish metric waits for a WebGL frame: readpixels (default) a
 // 1-pixel read-back; fence a fenceSync polled from short tasks (no read-back,
