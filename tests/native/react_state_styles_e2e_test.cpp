@@ -5,7 +5,7 @@
 //   children and the useInteraction value follow the same weight.
 // - pressedStyle (instant transition) holds while the button is down, a
 //   click shorter than a frame still shows for one frame, keyboard and
-//   gamepad activation press too.
+//   gamepad activation press too; over a natively animated transform.
 // - focusedStyle vs focusVisibleStyle (pointer vs keyboard focus), a layout
 //   key (borderWidth) included; group focus within.
 // - disabledStyle from mount, no hover on a disabled element.
@@ -245,6 +245,21 @@ TEST(react_state_styles_e2e) {
   CHECK_NEAR(t.channel("card", "borderColor", 0), 0, 1e-6);
   CHECK_NEAR(t.channel("card", "borderColor", 1), 0, 1e-6);
   CHECK_NEAR(t.node("dot")->layoutRect().x, 2, 1e-3);
+
+  // ---- a natively animated transform under pressedStyle: the press wins,
+  // writes while pressed land in the base, which shows again on release.
+  t.post("grow", "2");
+  t.tick();
+  CHECK_NEAR(t.scale("knob"), 2, 1e-9);
+  jsui_send_mouse_button(t.rt, 220, 120, JSUI_MOUSE_LEFT, 1, 0);
+  t.tickNative();
+  CHECK_NEAR(t.scale("knob"), 0.5, 1e-9);
+  t.post("grow", "3");
+  t.tick();
+  CHECK_NEAR(t.scale("knob"), 0.5, 1e-9);
+  jsui_send_mouse_button(t.rt, 220, 120, JSUI_MOUSE_LEFT, 0, 0);
+  t.tickNative();
+  CHECK_NEAR(t.scale("knob"), 3, 1e-9);
 
   // None of it rendered React again (only the explicit re-render did).
   CHECK_EQ(t.renders(), renders0 + 1);

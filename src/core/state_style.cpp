@@ -341,8 +341,6 @@ Value mixStyleValue(const std::string& key, const Value& a0, const Value& b, flo
   return w >= 0.5f ? b : a0;
 }
 
-namespace {
-
 Value blendKey(const StateStyles& s, const std::string& key) {
   Value v = s.base[key];
   for (int i = 0; i < kStateSlots; i++) {
@@ -353,8 +351,6 @@ Value blendKey(const StateStyles& s, const std::string& key) {
   if (s.weight[kHidden] >= 1 && s.hiddenEnd.has(key)) v = s.hiddenEnd[key];
   return v;
 }
-
-}  // namespace
 
 Value blendStateStyle(const StateStyles& s) {
   bool any = s.weight[kHidden] >= 1 && s.hiddenEnd.isObject();

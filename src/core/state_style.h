@@ -82,6 +82,9 @@ bool stepStateWeights(StateStyles& s, const bool targets[kStateSlots], double no
 // element's.
 void inheritGroupTransition(StateStyles& s, const StateStyles& group);
 
+// One key of the base style with the overlays at their weights.
+Value blendKey(const StateStyles& s, const std::string& key);
+
 // One style value between `a` (null: the key's resting default) and `b`.
 // Numbers, colors, transforms with the same functions and objects of
 // numbers interpolate; anything else switches at the halfway point.

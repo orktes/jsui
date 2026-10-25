@@ -5,7 +5,7 @@
 // a consumable, Y salvages, X compares with what is equipped, LB / RB (Q / E)
 // switch categories with an animated reflow, LT / RT (1-4) switch tabs.
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, Image, LayoutAnimation, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, Easing, Image, LayoutAnimation, Pressable, StyleSheet, Text, View, Visibility, useGroupState, useInteraction } from 'react-native';
 import { colors, font, rarity } from '../../../examples/theme.js';
 
 export const feature = {
@@ -133,24 +133,61 @@ const useValue = (v) => useRef(new Animated.Value(v)).current;
 
 // ---------------------------------------------------------------------------
 
-function Ticker({ value, style, format = fmt, duration = 700 }) {
-  const v = useValue(value);
-  const [shown, setShown] = useState(value);
+/** A number that counts to its new value: the runtime animates and formats
+ * it (Animated.Text + Animated.format), no listener or re-render per frame. */
+function Ticker({ value, style, duration = 700 }) {
+  const v = useRef(new Animated.Value(value, { useNativeDriver: ND })).current;
+  const text = useMemo(() => Animated.format(v, { decimals: 0, grouping: ',' }), [v]);
   useEffect(() => {
-    const id = v.addListener(({ value: x }) => setShown(x));
-    return () => v.removeListener(id);
-  }, []);
-  useEffect(() => {
-    Animated.timing(v, { toValue: value, duration, easing: Easing.out(Easing.cubic), useNativeDriver: false }).start();
+    Animated.timing(v, { toValue: value, duration, easing: Easing.out(Easing.cubic), useNativeDriver: ND }).start();
   }, [value]);
-  return <Text style={style}>{format(shown)}</Text>;
+  return <Animated.Text style={style} text={text} />;
 }
+
+/** The hover popout of a grid slot: shown by the runtime from the slot's
+ * group state (useGroupState().instant.hovered), no render on hover. */
+const SlotPopout = memo(function SlotPopout({ itemId, count, below }) {
+  const slot = useGroupState();
+  const d = DB[itemId];
+  const k = KIND[d.kind];
+  const r = rarity[d.tier];
+  const amount = k.cat === 'Materials' || d.kind === 'scroll' ? '×' + (count || d.main) : fmt(d.main);
+  return (
+    <Visibility
+      visible={slot.instant.hovered}
+      transition={{ duration: 120, easing: 'easeOut' }}
+      effect="scale"
+      scale={0.92}
+      pointerEvents="none"
+      style={[styles.popout, below ? styles.popoutBelow : styles.popoutAbove, { borderColor: r.color + '8c', borderTopColor: r.color }]}
+    >
+      <Text style={[styles.popName, { color: r.color }]} numberOfLines={1}>
+        {d.name}
+      </Text>
+      <Text style={styles.popType} numberOfLines={1}>
+        {d.typeName}
+      </Text>
+      <View style={styles.popRule} />
+      <View style={styles.popRow}>
+        <Text style={styles.popValue}>{amount}</Text>
+        <Text style={styles.popLabel} numberOfLines={1}>
+          {k.main}
+        </Text>
+      </View>
+      <View style={[styles.popArrow, below ? styles.popArrowBelow : styles.popArrowAbove, { borderColor: r.color + '8c' }]} />
+    </Visibility>
+  );
+});
 
 const Slot = memo(function Slot({ item, index, selected, onSelect, onActivate, autoFocus, pulse, slotRef }) {
   const s = useValue(selected ? 1 : 0);
   useEffect(() => {
     Animated.spring(s, { toValue: selected ? 1 : 0, stiffness: 380, damping: 18, useNativeDriver: ND }).start();
   }, [selected]);
+  // Hover and press come from the runtime: state styles, and the press
+  // folded into the selection scale (1 / 1.06, minus 0.06 while pressed).
+  const ix = useInteraction();
+  const scale = useMemo(() => Animated.derive([s, ix.pressed], (a, p) => 1 + 0.06 * a - 0.06 * p), [s, ix]);
   const d = item && DB[item.id];
   const r = d && rarity[d.tier];
   return (
@@ -160,31 +197,34 @@ const Slot = memo(function Slot({ item, index, selected, onSelect, onActivate, a
       onHoverIn={() => onSelect(index)}
       onFocus={() => onSelect(index)}
       onPress={() => onActivate(index)}
+      group
+      interaction={ix}
       style={{ cursor: item ? 'pointer' : 'default' }}
+      // The hovered slot draws over its neighbours, so its popout does too.
+      hoveredStyle={styles.slotOnTop}
     >
-      {({ hovered, pressed }) => (
-        <Animated.View
-          style={[
-            styles.slot,
-            !item && styles.slotEmpty,
-            item && {
-              borderColor: r.color,
-              boxShadow: `inset 0 0 14px ${r.glow}, 0 0 ${d.tier === 'legendary' ? 14 : 6}px ${r.glow}`,
-              experimental_backgroundImage: `radial-gradient(circle at 50% 35%, ${r.glow} 0%, rgba(10,14,26,0) 70%)`,
-            },
-            !item && hovered && { borderColor: 'rgba(148,170,255,0.3)' },
-            selected && (item ? styles.slotSelected : styles.slotSelectedEmpty),
-            { transform: [{ scale: s.interpolate({ inputRange: [0, 1], outputRange: [pressed ? 0.94 : 1, pressed ? 1 : 1.06] }) }] },
-          ]}
-        >
-          {item && d.tier === 'legendary' ? (
-            <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.legendGlow, { opacity: pulse }]} />
-          ) : null}
-          {item ? <Image source={icon[d.kind]} style={styles.itemIcon} /> : null}
-          {item && item.count ? <Text style={styles.count}>{item.count}</Text> : null}
-          {item ? <View style={[styles.rarityPip, { backgroundColor: r.color }]} /> : null}
-        </Animated.View>
-      )}
+      <Animated.View
+        style={[
+          styles.slot,
+          !item && styles.slotEmpty,
+          item && {
+            borderColor: r.color,
+            boxShadow: `inset 0 0 14px ${r.glow}, 0 0 ${d.tier === 'legendary' ? 14 : 6}px ${r.glow}`,
+            experimental_backgroundImage: `radial-gradient(circle at 50% 35%, ${r.glow} 0%, rgba(10,14,26,0) 70%)`,
+          },
+          selected && (item ? styles.slotSelected : styles.slotSelectedEmpty),
+          { transform: [{ scale }] },
+        ]}
+        groupHoveredStyle={!item && !selected ? styles.slotEmptyHover : undefined}
+      >
+        {item && d.tier === 'legendary' ? (
+          <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.legendGlow, { opacity: pulse }]} />
+        ) : null}
+        {item ? <Image source={icon[d.kind]} style={styles.itemIcon} /> : null}
+        {item && item.count ? <Text style={styles.count}>{item.count}</Text> : null}
+        {item ? <View style={[styles.rarityPip, { backgroundColor: r.color }]} /> : null}
+      </Animated.View>
+      {item ? <SlotPopout itemId={item.id} count={item.count} below={index < 6} /> : null}
     </Pressable>
   );
 });
@@ -305,15 +345,15 @@ function Tooltip({ itemId, count, equippedId, compare, anim, isEquipped }) {
 
 function HintButton({ k, label, color, onPress, flash }) {
   return (
-    <Pressable focusable={false} onPress={onPress} style={{ cursor: 'pointer' }}>
-      {({ hovered }) => (
-        <View style={[styles.hint, hovered && { opacity: 1 }]}>
-          <Animated.View style={[styles.hintKey, { backgroundColor: color, transform: [{ scale: flash.interpolate({ inputRange: [0, 1], outputRange: [1, 1.3] }) }] }]}>
-            <Text style={styles.hintKeyText}>{k}</Text>
-          </Animated.View>
-          <Text style={[styles.hintText, hovered && { color: colors.text }]}>{label}</Text>
-        </View>
-      )}
+    <Pressable focusable={false} onPress={onPress} group style={{ cursor: 'pointer' }}>
+      <View style={styles.hint} groupHoveredStyle={styles.opaque}>
+        <Animated.View style={[styles.hintKey, { backgroundColor: color, transform: [{ scale: flash.interpolate({ inputRange: [0, 1], outputRange: [1, 1.3] }) }] }]}>
+          <Text style={styles.hintKeyText}>{k}</Text>
+        </Animated.View>
+        <Text style={styles.hintText} groupHoveredStyle={styles.hintTextHot}>
+          {label}
+        </Text>
+      </View>
     </Pressable>
   );
 }
@@ -536,8 +576,10 @@ export default function Inventory({ active = true }) {
           <View style={styles.tabs}>
             <Animated.View style={[styles.tabActive, { width: TAB_WIDTHS[tab], transform: [{ translateX: tabX }] }]} />
             {TABS.map((t, i) => (
-              <Pressable key={t} focusable={false} onPress={() => setTabAnimated(i)} style={[styles.tab, { width: TAB_WIDTHS[i] }]}>
-                {({ hovered }) => <Text style={[styles.tabText, (i === tab || hovered) && styles.tabTextActive]}>{t}</Text>}
+              <Pressable key={t} focusable={false} onPress={() => setTabAnimated(i)} group style={[styles.tab, { width: TAB_WIDTHS[i] }]}>
+                <Text style={[styles.tabText, i === tab && styles.tabTextActive]} groupHoveredStyle={styles.tabTextActive}>
+                  {t}
+                </Text>
               </Pressable>
             ))}
           </View>
@@ -581,12 +623,10 @@ export default function Inventory({ active = true }) {
               </View>
               <Animated.View style={[styles.filterActiveBg, { width: FILTER_WIDTHS[filter], transform: [{ translateX: filterX }] }]} />
               {FILTERS.map((f, i) => (
-                <Pressable key={f} focusable={false} onPress={() => setFilterAnimated(i)} style={{ cursor: 'pointer' }}>
-                  {({ hovered }) => (
-                    <View style={[styles.filter, { width: FILTER_WIDTHS[i] }, i === filter && styles.filterActive, hovered && i !== filter && styles.filterHover]}>
-                      <Text style={[styles.filterText, i === filter && { color: '#1a1206' }]}>{f}</Text>
-                    </View>
-                  )}
+                <Pressable key={f} focusable={false} onPress={() => setFilterAnimated(i)} group style={{ cursor: 'pointer' }}>
+                  <View style={[styles.filter, { width: FILTER_WIDTHS[i] }, i === filter && styles.filterActive]} groupHoveredStyle={i !== filter ? styles.filterHover : undefined}>
+                    <Text style={[styles.filterText, i === filter && { color: '#1a1206' }]}>{f}</Text>
+                  </View>
                 </Pressable>
               ))}
               <View style={styles.bumper}>
@@ -718,6 +758,32 @@ const styles = StyleSheet.create({
     boxShadow: '0 0 0 3px rgba(255,178,63,0.35), 0 0 24px rgba(255,178,63,0.75), inset 0 0 18px rgba(255,178,63,0.5)',
     zIndex: 2,
   },
+  slotEmptyHover: { borderColor: 'rgba(148,170,255,0.3)' },
+  slotOnTop: { zIndex: 10 },
+  popout: {
+    position: 'absolute',
+    left: (71 - 220) / 2,
+    width: 220,
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    paddingBottom: 11,
+    borderRadius: 10,
+    backgroundColor: 'rgba(16,12,8,0.97)',
+    borderWidth: 1,
+    borderTopWidth: 2,
+    boxShadow: '0 14px 34px rgba(0,0,0,0.7)',
+  },
+  popoutAbove: { bottom: 71 + 12 },
+  popoutBelow: { top: 71 + 12 },
+  popName: { fontFamily: font, fontWeight: '700', fontSize: 14, lineHeight: 18 },
+  popType: { fontFamily: font, fontWeight: '500', fontSize: 11, color: colors.textDim, marginTop: 2 },
+  popRule: { height: 1, backgroundColor: 'rgba(255,178,63,0.22)', marginVertical: 8 },
+  popRow: { flexDirection: 'row', alignItems: 'baseline', gap: 8 },
+  popValue: { fontFamily: font, fontWeight: '700', fontSize: 20, color: '#fff', letterSpacing: -0.3 },
+  popLabel: { flexShrink: 1, fontFamily: font, fontWeight: '600', fontSize: 10, letterSpacing: 0.8, textTransform: 'uppercase', color: colors.textMute },
+  popArrow: { position: 'absolute', left: 110 - 6, width: 12, height: 12, backgroundColor: 'rgba(16,12,8,0.97)', transform: [{ rotate: '45deg' }] },
+  popArrowAbove: { bottom: -7, borderRightWidth: 1, borderBottomWidth: 1 },
+  popArrowBelow: { top: -7, borderLeftWidth: 1, borderTopWidth: 1 },
   slotSelectedEmpty: { borderColor: 'rgba(255,243,207,0.5)', boxShadow: '0 0 0 2px rgba(255,178,63,0.2)', zIndex: 2 },
   legendGlow: { borderRadius: 9, boxShadow: 'inset 0 0 20px rgba(255,178,63,0.55)' },
   itemIcon: { width: 50, height: 50 },
@@ -763,6 +829,8 @@ const styles = StyleSheet.create({
   hint: { flexDirection: 'row', alignItems: 'center', gap: 8, opacity: 0.95 },
   hintKey: { width: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   hintKeyText: { fontFamily: font, fontWeight: '700', fontSize: 11, color: '#0b0f1a' },
+  opaque: { opacity: 1 },
+  hintTextHot: { color: colors.text },
   hintText: { fontFamily: font, fontWeight: '500', fontSize: 13, color: colors.textDim },
 
   flight: { position: 'absolute', left: 0, top: 0, width: 71, height: 71, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(10,14,26,0.6)' },
