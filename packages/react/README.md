@@ -147,6 +147,16 @@ Focus props on any element: `focusable`, `autoFocus`, `hasTVPreferredFocus`,
 `e.code`, modifiers), `nextFocusUp/Down/Left/Right`. Pressables are focusable
 by default; Enter / Space and gamepad A press the focused one.
 
+With JS on its own thread, a key / gamepad / wheel default action that a
+handler could `preventDefault()` waits for JS's answer (up to 100 ms).
+Declare instead, and it never waits: `passive(fn)` marks an `onKeyDown` /
+`onTextInput` / `onGamepadButton` / `onGamepadAxis` / `onWheel` handler that
+never calls `preventDefault()`; `preventDefaultKeys={['Tab']}` (key or code)
+and `preventDefaultButtons={[9]}` (gamepad buttons) prevent those keys'
+default actions on the element and its descendants without asking JS (the
+handlers still run); `useGamepad({ onButton, passive: true })` or `vetoes:
+[9]`. Pressables, TextInput, Modal and BackHandler already declare theirs.
+
 ### Fonts
 
 Inter (400-700, italic) is built in. Other fonts (TTF, OTF, TTC, WOFF,

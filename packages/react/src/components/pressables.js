@@ -2,7 +2,7 @@
 
 import { createElement as h, cloneElement, isValidElement, Children, useRef, useEffect } from 'react';
 import { jsx } from 'react/jsx-runtime';
-import { usePress, PRESS_PROPS, omit } from './usePress.js';
+import { usePress, PRESS_PROPS, omit, declarePressKeys } from './usePress.js';
 import { flatten, StyleSheet } from '../StyleSheet.js';
 import { Text } from './basic.js';
 import { AnimatedValue } from '../animated/nodes.js';
@@ -18,6 +18,7 @@ function hostProps(props, handlers, extraOmit) {
   Object.assign(rest, handlers);
   // Interactive elements are focus targets for keyboard / gamepad navigation.
   if (rest.focusable === undefined) rest.focusable = !props.disabled;
+  declarePressKeys(props, rest);
   if (props.disabled) {
     rest.disabled = true;  // native: not pressable, not focusable
     rest.accessibilityState = Object.assign({ disabled: true }, props.accessibilityState);

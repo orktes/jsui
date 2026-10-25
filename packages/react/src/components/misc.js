@@ -119,15 +119,28 @@ function requestCloseTop(e) {
   if (e) e.preventDefault();
 }
 
+// What closes a modal; also declared on the modal (preventDefaultKeys /
+// preventDefaultButtons) when it has onRequestClose, so native knows the
+// key is the UI's without waiting for JS.
+const CLOSE_KEYS = ['Escape', 'GoBack', 'BrowserBack'];
+const CLOSE_BUTTONS = [1];  // standard mapping: button 1 is B / Circle
+
 function ensureListeners() {
   if (removeKeyListener) return;
-  removeKeyListener = addGlobalListener('keydown', (e) => {
-    if (!e.isDefaultPrevented() && (e.key === 'Escape' || e.key === 'GoBack' || e.key === 'BrowserBack')) requestCloseTop(e);
-  });
-  // Standard mapping: button 1 is B / Circle.
-  removePadListener = addGlobalListener('gamepadbutton', (e) => {
-    if (!e.isDefaultPrevented() && e.buttonIndex === 1 && e.pressed) requestCloseTop(e);
-  });
+  removeKeyListener = addGlobalListener(
+    'keydown',
+    (e) => {
+      if (!e.isDefaultPrevented() && CLOSE_KEYS.indexOf(e.key) >= 0) requestCloseTop(e);
+    },
+    { vetoes: CLOSE_KEYS },
+  );
+  removePadListener = addGlobalListener(
+    'gamepadbutton',
+    (e) => {
+      if (!e.isDefaultPrevented() && e.buttonIndex === 1 && e.pressed) requestCloseTop(e);
+    },
+    { vetoes: CLOSE_BUTTONS },
+  );
 }
 
 function releaseListeners() {
@@ -172,6 +185,8 @@ function ModalContent(props) {
         // Native focus scope: Tab / gamepad navigation stays inside the modal.
         accessibilityViewIsModal: true,
         pointerEvents: 'auto',
+        preventDefaultKeys: props.onRequestClose ? CLOSE_KEYS : undefined,
+        preventDefaultButtons: props.onRequestClose ? CLOSE_BUTTONS : undefined,
       },
       props.children,
     ),

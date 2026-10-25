@@ -64,7 +64,7 @@ class CommandBuffer {
     SetSelection,        // a = id, x = start, y = end (UTF-16 indices)
     LottieCommand,       // a = id, payload = command, x / y = frames (NaN: whole composition)
     Measure,             // a = id, b = measureAsync request (answered after the next layout)
-    ListenGlobal,        // a = 1 / 0 (listening or not), payload = event type
+    ListenGlobal,        // a = 1 / 0 (listening or not), payload = event type, keys it may veto (null: any)
     // ---- native Animated (a, b: tags as int32 bits)
     AnimCreate,          // a = tag, payload = config
     AnimConnect,         // a = parent, b = child

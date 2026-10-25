@@ -453,6 +453,8 @@ export const AppState = {
 // BackHandler: Escape / gamepad B (when nothing else handled it). Modals first.
 const backListeners = [];
 let backInstalled = false;
+const BACK_KEYS = ['GoBack', 'BrowserBack'];
+const BACK_BUTTONS = [1];
 function fireBack() {
   if (modalHandlesBack()) return true;
   for (let i = backListeners.length - 1; i >= 0; i--) if (backListeners[i]()) return true;
@@ -467,20 +469,30 @@ export const BackHandler = {
     backListeners.push(handler);
     if (!backInstalled) {
       backInstalled = true;
-      addGlobalListener('keydown', (e) => {
-        if (!e.isDefaultPrevented() && (e.key === 'GoBack' || e.key === 'BrowserBack') && fireBack()) e.preventDefault();
-      });
-      addGlobalListener('gamepadbutton', (e) => {
-        // Modals handle B themselves; only plain back handlers here.
-        if (!e.isDefaultPrevented() && e.buttonIndex === 1 && e.pressed) {
-          for (let i = backListeners.length - 1; i >= 0; i--) {
-            if (backListeners[i]()) {
-              e.preventDefault();
-              break;
+      // Only the back keys / B wait for JS's answer (whether a handler took
+      // them); every other key's default action runs without waiting.
+      addGlobalListener(
+        'keydown',
+        (e) => {
+          if (!e.isDefaultPrevented() && (e.key === 'GoBack' || e.key === 'BrowserBack') && fireBack()) e.preventDefault();
+        },
+        { vetoes: BACK_KEYS },
+      );
+      addGlobalListener(
+        'gamepadbutton',
+        (e) => {
+          // Modals handle B themselves; only plain back handlers here.
+          if (!e.isDefaultPrevented() && e.buttonIndex === 1 && e.pressed) {
+            for (let i = backListeners.length - 1; i >= 0; i--) {
+              if (backListeners[i]()) {
+                e.preventDefault();
+                break;
+              }
             }
           }
-        }
-      });
+        },
+        { vetoes: BACK_BUTTONS },
+      );
     }
     return {
       remove() {
@@ -1000,29 +1012,44 @@ addGlobalListener('gamepadconnected', (e) => {
   pads.set(p.index, Object.assign({}, p, { connected: ne.connected !== false, id: ne.id || p.id }));
   padChanged();
 });
-addGlobalListener('gamepadbutton', (e) => {
-  const p = padState(e.gamepad || 0);
-  const buttons = p.buttons.slice();
-  buttons[e.buttonIndex] = e.value != null ? +e.value : e.pressed ? 1 : 0;
-  pads.set(p.index, Object.assign({}, p, { connected: true, buttons }));
-  padChanged();
-});
-addGlobalListener('gamepadaxis', (e) => {
-  const p = padState(e.gamepad || 0);
-  const axes = p.axes.slice();
-  axes[e.axis] = +e.value || 0;
-  pads.set(p.index, Object.assign({}, p, { connected: true, axes }));
-  padChanged();
-});
+// Gamepad state tracking only reads the events (passive: focus navigation
+// never waits for it).
+addGlobalListener(
+  'gamepadbutton',
+  (e) => {
+    const p = padState(e.gamepad || 0);
+    const buttons = p.buttons.slice();
+    buttons[e.buttonIndex] = e.value != null ? +e.value : e.pressed ? 1 : 0;
+    pads.set(p.index, Object.assign({}, p, { connected: true, buttons }));
+    padChanged();
+  },
+  { passive: true },
+);
+addGlobalListener(
+  'gamepadaxis',
+  (e) => {
+    const p = padState(e.gamepad || 0);
+    const axes = p.axes.slice();
+    axes[e.axis] = +e.value || 0;
+    pads.set(p.index, Object.assign({}, p, { connected: true, axes }));
+    padChanged();
+  },
+  { passive: true },
+);
 
 /**
- * useGamepad({ index = 0, onButton, onAxis }) -> { connected, id, buttons, axes }
+ * useGamepad({ index = 0, onButton, onAxis, passive, vetoes })
+ *   -> { connected, id, buttons, axes }
  * onButton(e) / onAxis(e) receive the synthetic event (buttonIndex, value,
  * pressed / axis, value); call e.preventDefault() to stop the default focus
- * navigation / activation for that event.
+ * navigation / activation for that event. With JS on its own thread the
+ * runtime then waits for the answer before navigating; `passive: true`
+ * (the callbacks never call preventDefault()) or `vetoes: [buttonIndex...]`
+ * (onButton may only for those buttons) let the rest go on without waiting.
  */
 export function useGamepad(options) {
   const index = (options && options.index) || 0;
+  const vetoKey = options && options.passive ? 'passive' : options && Array.isArray(options.vetoes) ? options.vetoes.join(',') : '';
   const cbs = useLatest(options || {});
   const state = useSyncExternalStore(
     (cb) => {
@@ -1032,17 +1059,28 @@ export function useGamepad(options) {
     () => padState(index),
   );
   useEffect(() => {
-    const offB = addGlobalListener('gamepadbutton', (e) => {
-      if ((e.gamepad || 0) === index && cbs.current.onButton) cbs.current.onButton(e);
-    });
-    const offA = addGlobalListener('gamepadaxis', (e) => {
-      if ((e.gamepad || 0) === index && cbs.current.onAxis) cbs.current.onAxis(e);
-    });
+    // Only listeners with a callback can veto anything.
+    const veto = (has, buttons) =>
+      !has || vetoKey === 'passive' ? { passive: true } : buttons && vetoKey ? { vetoes: vetoKey.split(',').map(Number) } : undefined;
+    const offB = addGlobalListener(
+      'gamepadbutton',
+      (e) => {
+        if ((e.gamepad || 0) === index && cbs.current.onButton) cbs.current.onButton(e);
+      },
+      veto(!!cbs.current.onButton, true),
+    );
+    const offA = addGlobalListener(
+      'gamepadaxis',
+      (e) => {
+        if ((e.gamepad || 0) === index && cbs.current.onAxis) cbs.current.onAxis(e);
+      },
+      veto(!!cbs.current.onAxis, false),
+    );
     return () => {
       offB();
       offA();
     };
-  }, [index, cbs]);
+  }, [index, cbs, vetoKey, !(options && options.onButton), !(options && options.onAxis)]);
   return state;
 }
 export function getGamepadVersion() {

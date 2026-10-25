@@ -82,17 +82,34 @@ enum Listen : unsigned {
   kWheel = 16,   // wants wheel
   kScroll = 32,  // wants scroll (a ScrollView's onScroll)
   // Listeners that can preventDefault() a default action; only asked when
-  // JS's answer is late (InputManager::settle).
-  kKey = 64,       // keydown / keyup
-  kGamepad = 128,  // gamepadbutton / gamepadaxis
-  kText = 256,     // textinput
+  // JS's answer is late (InputManager::settle). Handlers marked passive
+  // (`__passive`) never do.
+  kKey = 64,          // keydown
+  kPadButton = 128,   // gamepadbutton
+  kText = 256,        // textinput
+  kPadAxis = 512,     // gamepadaxis
+  kWheelVeto = 1024,  // wheel (kWheel: JS gets wheel events at all)
 };
+
+// The veto bits an __events / __passive token names.
+unsigned vetoBits(std::string_view s) {
+  unsigned m = 0;
+  if (icontains(s, "keydown")) m |= kKey;
+  if (icontains(s, "gamepad"))
+    m |= icontains(s, "axis") ? kPadAxis : icontains(s, "button") ? kPadButton : kPadButton | kPadAxis;
+  if (icontains(s, "textinput")) m |= kText;
+  if (icontains(s, "wheel")) m |= kWheelVeto;
+  return m;
+}
 
 unsigned readListenMask(const Node* n) {
   unsigned m = 0;
   for (auto& e : n->props()["__events"].asArray()) {
     std::string_view s = e.asString();
-    if (s == "*") return ~0u;
+    if (s == "*") {
+      m = ~0u;
+      break;
+    }
     if (icontains(s, "press") || icontains(s, "click")) m |= kPress | kPointer;
     if (icontains(s, "pointer") || icontains(s, "mouse") || icontains(s, "touch")) m |= kPointer;
     if (icontains(s, "responder") || icontains(s, "drag") || icontains(s, "pan")) m |= kPointer | kMove;
@@ -102,11 +119,45 @@ unsigned readListenMask(const Node* n) {
       m |= kHover | kPointer;
     if (icontains(s, "wheel")) m |= kWheel | kPointer;
     if (icontains(s, "scroll")) m |= kScroll;
-    if (icontains(s, "key")) m |= kKey;
-    if (icontains(s, "gamepad")) m |= kGamepad;
-    if (icontains(s, "textinput")) m |= kText;
+    m |= vetoBits(s);
   }
+  // Passive handlers (`passive(fn)` in @orktes/jsui-react) run, but native
+  // need not wait for their answer (docs/ARCHITECTURE.md "Input routing
+  // details").
+  for (auto& e : n->props()["__passive"].asArray()) m &= ~vetoBits(e.asString());
   return m;
+}
+
+// A node from `n` up declares the default action of the key `key` / `code`
+// (preventDefaultKeys) prevented: native skips it without asking JS. A
+// focused TextInput keeps its keys (its JS handler stops them): only its
+// own declaration counts.
+bool declaresKey(const Node* n, std::string_view key, std::string_view code) {
+  static const std::string kProp = "preventDefaultKeys";
+  bool input = n && n->type() == NodeType::TextInput;
+  for (; n; n = input ? nullptr : n->parent()) {
+    const auto& obj = n->props().asObject();
+    auto it = obj.find(kProp);
+    if (it == obj.end()) continue;
+    for (const Value& k : it->second.asArray()) {
+      const std::string& s = k.asString();
+      if (!s.empty() && (s == key || s == code)) return true;
+    }
+  }
+  return false;
+}
+
+// Same for a gamepad button (preventDefaultButtons: button indices).
+bool declaresButton(const Node* n, int button) {
+  static const std::string kProp = "preventDefaultButtons";
+  for (; n; n = n->parent()) {
+    const auto& obj = n->props().asObject();
+    auto it = obj.find(kProp);
+    if (it == obj.end()) continue;
+    for (const Value& b : it->second.asArray())
+      if (b.isNumber() && b.asNumber() == button) return true;
+  }
+  return false;
 }
 
 // Hot (every hit-test path, wheel and scroll event): cached on the node.
@@ -886,9 +937,10 @@ bool InputManager::mouseWheel(float x, float y, float dx, float dy) {
     if (js) answered = ask(std::move(ev), &flags, &seq);
     else deliver(std::move(ev), false);
   }
-  // The default action (wheelDefault) waits for an onWheel on the path.
+  // The default action (wheelDefault) waits for an onWheel on the path
+  // that is not passive.
   d.hitAgain = js;
-  return settle(answered, flags, seq, std::move(d), js);
+  return settle(answered, flags, seq, std::move(d), js && pathListens(target, kWheelVeto));
 }
 
 bool InputManager::wheelDefault(const Deferred& d, bool prevented) {
@@ -1355,18 +1407,25 @@ bool InputManager::keyAction(const char* keyName, const char* code, bool down, b
     padPress_ = -1;
     pressFlash_.push_back(keyPressId_);
   }
+  std::string_view codeName = code ? code : "";
+  // Declared on the tree as it is now (preventDefaultKeys: a Pressable's
+  // Enter / Space, a TextInput's submit, a modal's Escape): prevented
+  // without waiting for JS, whose handlers still run.
+  bool declared = down && declaresKey(declScope(), k, codeName);
   Value::Object ev = baseEvent(down ? "keydown" : "keyup", focused_);
   ev["key"] = Value(k);
-  ev["code"] = Value(code ? code : "");
+  ev["code"] = Value(std::string(codeName));
   ev["repeat"] = Value(repeat);
   addModifiers(ev);
   int flags = 0;
   uint32_t seq = 0;
   bool answered = ask(std::move(ev), &flags, &seq);
+  if (declared) declare(&answered, &flags, seq);
   // A keydown listener on the focused path (Pressable's, a TextInput's) or
-  // a global one (modals, BackHandler) may veto Tab, Enter, arrows, editing.
+  // a global one (modals, BackHandler) may veto Tab, Enter, arrows, editing;
+  // passive ones (and global ones for other keys) cannot.
   bool vetoable = !answered && down &&
-                  (pathListens(focused_ ? focused_ : doc_.root(), kKey) || rt_.listensGlobally("keydown"));
+                  (pathListens(focused_ ? focused_ : doc_.root(), kKey) || rt_.globalVetoes("keydown", k, codeName));
   Deferred d{Deferred::Kind::Key};
   d.text = std::move(k);
   d.down = down;
@@ -1416,7 +1475,7 @@ bool InputManager::text(const char* utf8) {
   uint32_t seq = 0;
   bool answered = ask(std::move(ev), &flags, &seq);
   bool vetoable = !answered &&
-                  (pathListens(focused_ ? focused_ : doc_.root(), kText) || rt_.listensGlobally("textinput"));
+                  (pathListens(focused_ ? focused_ : doc_.root(), kText) || rt_.globalVetoes("textinput", utf8));
   Deferred d{Deferred::Kind::Text};
   d.text = utf8;
   return settle(answered, flags, seq, std::move(d), vetoable);
@@ -1429,6 +1488,14 @@ bool InputManager::textDefault(const Deferred& d, bool prevented) {
 }
 
 // ------------------------------------------------------- default actions
+
+Node* InputManager::declScope() const { return focused_ ? focused_ : modalScope(); }
+
+void InputManager::declare(bool* answered, int* flags, uint32_t seq) {
+  if (!*answered) rt_.inbound.forget(seq);
+  *answered = true;
+  *flags |= JsEngine::kHandled | JsEngine::kDefaultPrevented;
+}
 
 bool InputManager::settle(bool answered, int flags, uint32_t seq, Deferred&& d, bool vetoable) {
   if (!answered && !vetoable) {
@@ -1546,6 +1613,9 @@ bool InputManager::gamepadButtonAction(int pad, int button, bool down, float val
     padPress_ = pad;
     pressFlash_.push_back(keyPressId_);
   }
+  // Declared on the tree (preventDefaultButtons): prevented without
+  // waiting for JS.
+  bool declared = down && declaresButton(declScope(), button);
   Value::Object ev = baseEvent("gamepadbutton", focused_);
   ev["gamepad"] = Value(pad);
   ev["buttonIndex"] = Value(button);
@@ -1555,6 +1625,7 @@ bool InputManager::gamepadButtonAction(int pad, int button, bool down, float val
   int flags = 0;
   uint32_t seq = 0;
   bool answered = ask(std::move(ev), &flags, &seq);
+  if (declared) declare(&answered, &flags, seq);
   bool edge = down != wasDown || !ps;
   if (edge && button == 0 && !down && padPress_ == pad) {
     keyPressId_ = 0;
@@ -1563,7 +1634,8 @@ bool InputManager::gamepadButtonAction(int pad, int button, bool down, float val
   // D-pad: 12 up, 13 down, 14 left, 15 right.
   int dir = button == 12 ? 0 : button == 13 ? 1 : button == 14 ? 2 : button == 15 ? 3 : -1;
   bool vetoable = !answered && edge && down && (dir >= 0 || button == 0) &&
-                  (pathListens(focused_ ? focused_ : doc_.root(), kGamepad) || rt_.listensGlobally("gamepadbutton"));
+                  (pathListens(focused_ ? focused_ : doc_.root(), kPadButton) ||
+                   rt_.globalVetoes("gamepadbutton", std::to_string(button)));
   Deferred d{Deferred::Kind::PadButton};
   d.pad = pad;
   d.index = button;
@@ -1621,7 +1693,8 @@ bool InputManager::gamepadAxis(int pad, int axis, float value) {
   uint32_t seq = 0;
   bool answered = ask(std::move(ev), &flags, &seq);
   bool vetoable = !answered &&
-                  (pathListens(focused_ ? focused_ : doc_.root(), kGamepad) || rt_.listensGlobally("gamepadaxis"));
+                  (pathListens(focused_ ? focused_ : doc_.root(), kPadAxis) ||
+                   rt_.globalVetoes("gamepadaxis", std::to_string(axis)));
   Deferred d{Deferred::Kind::PadAxis};
   d.pad = pad;
   d.index = axis;
