@@ -111,8 +111,8 @@ class NativeAnimated {
   // For the frame snapshot (frame_snapshot.h): the raw value of every
   // value node, and the velocity of every running animation by id (a
   // spring's, else 0; a composite group's: 0).
-  void snapshotValues(std::unordered_map<int, double>* out) const;
-  void snapshotAnimations(std::unordered_map<int, double>* out) const;
+  void snapshotValues(std::vector<std::pair<int, double>>* out) const;
+  void snapshotAnimations(std::vector<std::pair<int, double>>* out) const;
   // Running animations (but a held clock, or one nothing reads), or a clock
   // node something depends on.
   bool animating() const;

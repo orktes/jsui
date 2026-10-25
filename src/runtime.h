@@ -202,6 +202,10 @@ class Runtime {
   bool proxy(const std::function<void()>& fn);
   // What JS reads synchronously in JS-thread mode (frame_snapshot.h).
   SnapshotStore snapshots;
+  FrameSnapshot::Scratch snapshotScratch;  // owner thread (publishSnapshot)
+  // Whether snapshots carry layouts: set by JS's first sync measure (most
+  // bundles never make one; measureAsync answers from the live tree).
+  std::atomic<bool> snapshotLayouts{false};
   // Command batches applied (the engine bumps it; FrameSnapshot::appliedBatches).
   std::atomic<uint64_t> appliedBatches{0};
   // measureAsync requests the engine's commands handed over; answered after

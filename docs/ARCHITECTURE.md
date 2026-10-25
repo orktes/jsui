@@ -1431,7 +1431,14 @@ behaves exactly as before.
   as set until a snapshot includes the batch that carried it; an animation
   JS started after the snapshot stops with `{velocity: 0}`;
   `flattenOffset` / `extractOffset` fall back to the snapshot. These answers
-  are one frame old at most.
+  are one frame old at most. Taking one allocates nothing while nothing
+  changed: each table (surfaces, layouts, values, animation velocities) is
+  collected into a reused buffer, compared with what was collected for the
+  last snapshot and shared with it when equal; a tick where nothing changed
+  publishes no snapshot, one where only native Animated moved copies the
+  value table alone. Layouts are collected only once JS has made a sync
+  `measure` (`Runtime::snapshotLayouts`; React's measure is async in this
+  mode): that first read is a proxy read of the owner thread's tree.
 * **Host-callback queue** (`src/host_queue.h`). In JS-thread mode the
   embedder's callbacks JS makes are posted (`Runtime::toHost`, `jsLog`,
   `jsReportError`) and run in order on the owner thread: at the start of
@@ -2275,7 +2282,10 @@ collisionPadding, boundary, matchWidth, hideWhenClipped}`; `anchor` and
   (and LayoutAnimation fades), and raises the layer's zIndex. After Yoga,
   on every call (not only when layout was dirty: a scroll or an Animated
   transform moves an anchor without relayout), `placeOverlays` runs in
-  tree order (an outer overlay is placed before one nested in it):
+  tree order (an outer overlay is placed before one nested in it). An
+  overlay with nothing to show (an empty box whose children are all
+  `display: none`, as a hidden `<Visibility>` popout) is skipped: the
+  layout pass that shows its content places it. Each placed one gets:
   - the logical parent's full matrix to the viewport (`viewMatrix`: layout,
     ancestors' scroll offsets, transforms and LayoutAnimation scales, as
     the painter places them), the anchor's box (the parent, or the

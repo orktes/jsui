@@ -127,8 +127,8 @@ JSValue js_getValue(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
     }
     if (!snap) return JS_NewFloat64(ctx, 0);
     sweepWrites(impl, *snap);
-    auto v = snap->values.find(tag);
-    return JS_NewFloat64(ctx, v == snap->values.end() ? 0 : v->second);
+    const double* v = snap->values->find(tag);
+    return JS_NewFloat64(ctx, v ? *v : 0);
   }
   impl.syncPoint();
   return JS_NewFloat64(ctx, na(ctx).getValue(tag));
@@ -171,9 +171,9 @@ JSValue js_stopAnimation(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
     if (st != impl.animStarts.end()) impl.animStarts.erase(st);
     if (!unseen) {
       if (!snap) return JS_NULL;
-      auto a = snap->animations.find(id);
-      if (a == snap->animations.end()) return JS_NULL;
-      velocity = a->second;
+      const double* a = snap->animations->find(id);
+      if (!a) return JS_NULL;
+      velocity = *a;
     }
   } else {
     const CommandBuffer::Result& r = impl.applyNow();

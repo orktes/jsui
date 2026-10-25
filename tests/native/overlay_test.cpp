@@ -440,3 +440,31 @@ TEST(overlay_incremental_repaint_of_fading_content) {
     check(i++);
   }
 }
+
+TEST(overlay_with_hidden_content_is_placed_when_shown) {
+  // A popout whose content is out of layout (<Visibility> hidden) is not
+  // placed while its anchor moves; the layout that shows it places it.
+  rtest::Scene s(400, 300);
+  Node* a = s.add(R"J({"style":{"position":"absolute","left":100,"top":100,"width":40,"height":20},"children":[
+    {"props":{"overlay":{"placement":"bottom","offset":4}},"children":[
+      {"style":{"width":60,"height":30,"display":"none","backgroundColor":"#ff0000"}}]}]})J");
+  Node* o = child(a, 0);
+  Node* content = child(o, 0);
+  frame(s);
+  Rect before = visual(s, o);
+  patchStyle(a, R"({"left":200,"top":150})");
+  frame(s);
+  CHECK_NEAR(visual(s, o).x, before.x, 0.01);  // not followed while empty
+  patchStyle(content, R"({"display":"flex"})");
+  frame(s);
+  Rect r = visual(s, o);
+  CHECK_NEAR(r.x, 200 + 20 - 30, 0.01);
+  CHECK_NEAR(r.y, 150 + 20 + 4, 0.01);
+  CHECK_EQ(s.rt->input->hitTest(220, 190), content);
+  // An overlay with only absolutely positioned content (an empty box) is
+  // still placed.
+  patchStyle(content, R"({"position":"absolute"})");
+  patchStyle(a, R"({"left":50})");
+  frame(s);
+  CHECK_NEAR(visual(s, content).x, 50 + 20, 0.01);
+}

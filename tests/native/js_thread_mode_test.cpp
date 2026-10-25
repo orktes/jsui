@@ -223,6 +223,18 @@ TEST(js_thread_mode_measure) {
   CHECK(h.load(kBundle));
   h.tick();
   h.take();
+  // Snapshots carry no layouts until JS measures, and a tick that changed
+  // nothing publishes none (the last one stands).
+  auto snap = h.runtime().snapshots.current();
+  CHECK(snap && snap->layouts->rows.empty());
+  h.tick();
+  CHECK(h.runtime().snapshots.current() == snap);
+  // The first measure is a proxy read of the tree; the snapshots have the
+  // layouts from then on.
+  h.post("measure");
+  h.tick();
+  CHECK_EQ(h.take(), std::string(R"(measure={"x":10,"y":20,"width":30,"height":40,"pageX":10,"pageY":20})"));
+  CHECK(!h.runtime().snapshots.current()->layouts->rows.empty());
   // The last frame's layout (snapshot).
   h.post("measure");
   h.tick();

@@ -416,7 +416,10 @@ void Runtime::drainHost() {
   if (js) js->mergePerf(doc.perf.counters);
 }
 
-void Runtime::publishSnapshot() { snapshots.publish(FrameSnapshot::take(*this)); }
+void Runtime::publishSnapshot() {
+  // Unchanged since the last one: that one stands (only the owner thread publishes).
+  if (auto s = FrameSnapshot::take(*this, snapshots.current().get(), snapshotScratch)) snapshots.publish(std::move(s));
+}
 
 void Runtime::answerMeasures() {
   if (measureRequests.empty() || !js) return;
