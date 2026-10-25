@@ -93,7 +93,10 @@ void Inbound::post(Message&& m) { deliver(m); }
 
 void Inbound::deliver(Message& m) {
   JsEngine* js = rt_.js.get();
-  if (!js) return;
+  if (!js) {
+    if (m.seq) forget(m.seq);  // no answer will come
+    return;
+  }
   using Kind = Message::Kind;
   switch (m.kind) {
     case Kind::Event: {
