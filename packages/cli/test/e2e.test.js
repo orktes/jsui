@@ -61,8 +61,7 @@ for (const mode of ['production', 'development']) {
       'react_state_styles_e2e',
       'react_group_visibility_e2e',
     ];
-    const { stdout, stderr } = await promisify(execFile)(binary, tests, {
-      env: Object.assign({}, process.env, {
+    const bundles = {
         JSUI_REACT_E2E_BUNDLE: outfile,
         JSUI_REACT_E2E_SCROLL_BUNDLE: scrollfile,
         JSUI_REACT_INTERACTIONS_BUNDLE: interactionsfile,
@@ -74,11 +73,25 @@ for (const mode of ['production', 'development']) {
         JSUI_REACT_DERIVE_BUNDLE: deriveFile,
         JSUI_REACT_STATE_STYLES_BUNDLE: stateStylesFile,
         JSUI_REACT_GROUP_VISIBILITY_BUNDLE: groupVisibilityFile,
-      }),
+    };
+    const { stdout, stderr } = await promisify(execFile)(binary, tests, {
+      env: Object.assign({}, process.env, bundles),
       cwd: repo,
     }).catch((e) => {
       throw new Error(`jsui-tests failed:\n${e.stdout}\n${e.stderr}`);
     });
+    // The same with JS on its own thread in lockstep (JSUI_JS_THREAD_LOCKSTEP),
+    // which must give what single-threaded mode gives, frame for frame.
+    const lockstepTests = tests.filter((t) => !t.startsWith('react_host_data_e2e_js_thread'));
+    const lockstep = await promisify(execFile)(binary, lockstepTests, {
+      env: Object.assign({}, process.env, bundles, { JSUI_TEST_JS_THREAD: 'lockstep' }),
+      cwd: repo,
+    }).catch((e) => {
+      throw new Error(`jsui-tests failed in lockstep:\n${e.stdout}\n${e.stderr}`);
+    });
+    if (process.env.JSUI_E2E_VERBOSE) console.log(lockstep.stdout);
+    for (const t of lockstepTests) assert.match(lockstep.stdout, new RegExp(`PASS ${t}$`, 'm'), `${t} in lockstep`);
+    assert.doesNotMatch(lockstep.stdout, /FAIL|skipped/);
     assert.match(stdout, /PASS react_e2e$/m);
     assert.match(stdout, /PASS react_e2e_scroll/);
     assert.match(stdout, /PASS react_interactions_e2e/);

@@ -31,6 +31,7 @@ struct BuffersE2E {
   BuffersE2E() {
     JsuiConfig cfg;
     jsui_config_init(&cfg);
+    cfg.js_thread = jsui_test::jsThreadMode();
     cfg.width = 400;
     cfg.height = 300;
     cfg.on_message = [](void* u, const char* name, const char* json) {

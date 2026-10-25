@@ -4,6 +4,8 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <sstream>
 #include <string>
@@ -17,6 +19,16 @@ struct Case {
 inline std::vector<Case>& registry() {
   static std::vector<Case> r;
   return r;
+}
+// JSUI_TEST_JS_THREAD=on|lockstep: the React e2e fixtures create their
+// runtime with that JsuiConfig.js_thread (packages/cli/test/e2e.test.js runs
+// them again in lockstep, which must give what single-threaded gives).
+inline int jsThreadMode() {
+  const char* e = std::getenv("JSUI_TEST_JS_THREAD");
+  if (!e) return 0;
+  if (std::strcmp(e, "lockstep") == 0) return 2;  // JSUI_JS_THREAD_LOCKSTEP
+  if (std::strcmp(e, "on") == 0) return 1;        // JSUI_JS_THREAD_ON
+  return 0;
 }
 inline int& failures() {
   static int f = 0;

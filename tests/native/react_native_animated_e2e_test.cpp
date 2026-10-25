@@ -52,6 +52,7 @@ struct NativeAnimatedE2E {
     std::string src((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     JsuiConfig cfg;
     jsui_config_init(&cfg);
+    cfg.js_thread = jsui_test::jsThreadMode();
     cfg.width = W;
     cfg.height = H;
     cfg.on_message = [](void* u, const char* name, const char* json) {
