@@ -168,6 +168,18 @@ struct ComputedStyle {
   // the view plays on its own.
   float lottieProgress = -1;
 
+  // Text reveal (typewriter, the textReveal* style keys; @orktes/jsui-react's
+  // <Text reveal revealMode revealFade revealFraction>): a paragraph-root Text
+  // paints only its first `textReveal` units (graphemes, or words), laid out
+  // as if all of it showed. Paint only: no relayout as it changes, so native
+  // Animated can drive it every frame. < 0: everything (no reveal).
+  float textReveal = -1;
+  // Units over which each one fades in (0: each appears at once, when the
+  // reveal passes its start).
+  float textRevealFade = 0;
+  uint8_t textRevealMode = 0;       // 0 graphemes ("chars"), 1 words
+  bool textRevealFraction = false;  // textReveal is 0..1 of the whole text
+
   TextStyle text;
 
   // Added by the render area:

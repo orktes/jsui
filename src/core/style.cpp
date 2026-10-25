@@ -1584,8 +1584,9 @@ enum PaintGroup : uint32_t {
   kGroupText = 1u << 18,
   kGroupLottie = 1u << 19,
   kGroupShader = 1u << 20,  // ShaderView uniforms ("uniform:<name>"), read when painting
+  kGroupReveal = 1u << 21,  // textReveal*: which part of a paragraph paints
 };
-constexpr uint32_t kAllPaintGroups = (1u << 21) - 1;
+constexpr uint32_t kAllPaintGroups = (1u << 22) - 1;
 
 struct PaintKey {
   const char* key;
@@ -1654,6 +1655,10 @@ constexpr PaintKey kPaintKeys[] = {
     {"textDecorationColor", kGroupText},
     {"textDecorationLine", kGroupText},
     {"textDecorationStyle", kGroupText},
+    {"textReveal", kGroupReveal},
+    {"textRevealFade", kGroupReveal},
+    {"textRevealFraction", kGroupReveal},
+    {"textRevealMode", kGroupReveal},
     {"textShadow", kGroupText},
     {"textShadowColor", kGroupText},
     {"textShadowOffset", kGroupText},
@@ -1820,6 +1825,22 @@ void applyPaintGroups(const StyleMap& s, uint32_t groups, ComputedStyle* out, fl
       double p = s["lottieProgress"].asNumber();
       if (p == p) out->lottieProgress = float(std::clamp(p, 0.0, 1.0));
     }
+  }
+  if (groups & kGroupReveal) {
+    out->textReveal = kDefault.textReveal;
+    out->textRevealFade = kDefault.textRevealFade;
+    out->textRevealMode = 0;
+    out->textRevealFraction = false;
+    const Value& r = s["textReveal"];
+    if (r.isNumber()) {
+      // Given: a reveal (NaN, negative: nothing shows yet).
+      double v = r.asNumber();
+      out->textReveal = v > 0 ? float(std::min(v, 1e9)) : 0.f;
+    }
+    const Value& f = s["textRevealFade"];
+    if (f.isNumber() && f.asNumber() > 0) out->textRevealFade = float(std::min(f.asNumber(), 1e6));
+    out->textRevealMode = s["textRevealMode"].isString() && s["textRevealMode"].asString() == "words" ? 1 : 0;
+    out->textRevealFraction = s["textRevealFraction"].asBool();
   }
 }
 

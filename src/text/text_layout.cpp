@@ -18,6 +18,7 @@
 #include "include/core/SkFontStyle.h"
 #include "modules/skparagraph/include/FontCollection.h"
 #include "include/core/SkMaskFilter.h"
+#include "include/core/SkPathBuilder.h"
 #include "include/core/SkBlurTypes.h"
 #include "include/core/SkTextBlob.h"
 #include "modules/skparagraph/include/Paragraph.h"
@@ -361,6 +362,12 @@ struct TextCache : Node::Cache {
   std::u16string display;
   std::vector<int> v2d;
   bool placeholder = false;
+  // Text: the paragraph's text as shaped (UTF-8) and, built on the first
+  // revealed paint, the UTF-16 start of each reveal unit plus the end
+  // (graphemes [0], words [1]; see paintRevealed).
+  std::string content;
+  std::vector<uint32_t> units[2];
+  bool unitsReady[2] = {false, false};
 };
 
 // skparagraph shapes with slight hinting; Chrome (Linux, headless) draws
@@ -376,27 +383,30 @@ class ChromeLikePainter : public tl::ParagraphPainter {
     if (layoutSpace) layout_.push_back(*layoutSpace);
   }
 
+  // Multiplies the alpha of everything drawn (a fading reveal unit).
+  void setAlpha(float a) { alpha_ = a; }
+
   void drawTextBlob(const sk_sp<SkTextBlob>& blob, SkScalar x, SkScalar y, const SkPaintOrID& paint) override {
-    if (const SkPaint* p = std::get_if<SkPaint>(&paint)) c_->drawTextBlob(prepared(blob, x, &y), x, y, *p);
+    if (const SkPaint* p = std::get_if<SkPaint>(&paint)) c_->drawTextBlob(prepared(blob, x, &y), x, y, faded(*p));
   }
   void drawTextShadow(const sk_sp<SkTextBlob>& blob, SkScalar x, SkScalar y, SkColor color, SkScalar sigma) override {
     SkPaint p;
     p.setColor(color);
     p.setAntiAlias(true);
     if (sigma > 0) p.setMaskFilter(SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, sigma, false));
-    c_->drawTextBlob(prepared(blob, x, &y), x, y, p);
+    c_->drawTextBlob(prepared(blob, x, &y), x, y, faded(p));
   }
   void drawRect(const SkRect& r, const SkPaintOrID& paint) override {
-    if (const SkPaint* p = std::get_if<SkPaint>(&paint)) c_->drawRect(r, *p);
+    if (const SkPaint* p = std::get_if<SkPaint>(&paint)) c_->drawRect(r, faded(*p));
   }
   void drawFilledRect(const SkRect& r, const DecorationStyle& d) override {
     SkPaint p(d.skPaint());
     p.setStroke(false);
-    c_->drawRect(r, p);
+    c_->drawRect(r, faded(p));
   }
-  void drawPath(const SkPath& path, const DecorationStyle& d) override { c_->drawPath(path, d.skPaint()); }
+  void drawPath(const SkPath& path, const DecorationStyle& d) override { c_->drawPath(path, faded(d.skPaint())); }
   void drawLine(SkScalar x0, SkScalar y0, SkScalar x1, SkScalar y1, const DecorationStyle& d) override {
-    c_->drawLine(x0, y0, x1, y1, d.skPaint());
+    c_->drawLine(x0, y0, x1, y1, faded(d.skPaint()));
   }
   void clipRect(const SkRect& r) override { c_->clipRect(r); }
   void translate(SkScalar dx, SkScalar dy) override {
@@ -413,6 +423,13 @@ class ChromeLikePainter : public tl::ParagraphPainter {
   }
 
  private:
+  const SkPaint& faded(const SkPaint& p) {
+    if (alpha_ >= 1) return p;
+    scratch_ = p;
+    scratch_.setAlphaf(p.getAlphaf() * alpha_);
+    return scratch_;
+  }
+
   // The blob to draw at (x, *y). Under a transform the baseline snaps in
   // layout space (where boxes snap, see place() in painter.cpp) and the
   // glyphs are then placed with subpixel precision on both axes, so text
@@ -464,6 +481,8 @@ class ChromeLikePainter : public tl::ParagraphPainter {
   SkCanvas* c_;
   TextCache* cache_;
   bool transformed_;
+  float alpha_ = 1;
+  SkPaint scratch_;
   std::vector<SkMatrix> layout_;  // canvas coords -> layout-space device px, per save level
 };
 
@@ -659,6 +678,7 @@ TextCache* ensureCache(Node* n) {
     addChildren(n, base, st);
   }
   builder->pop();
+  if (!isInput) fresh->content = st.content;
   fresh->empty = st.content.empty();
   if (!fresh->empty) {
     fresh->paragraph = builder->Build();
@@ -940,12 +960,163 @@ tl::Paragraph* layoutParagraph(Node* node, float width) {
   return c->paragraph.get();
 }
 
+// ------------------------------------------------------------- text reveal
+
+namespace {
+
+bool revealSpace(uint32_t cp) {
+  return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r' || cp == 0x0B || cp == 0x0C || cp == 0x85 ||
+         cp == 0xA0 || cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200A) || cp == 0x2028 || cp == 0x2029 ||
+         cp == 0x202F || cp == 0x205F || cp == 0x3000;
+}
+
+// Scripts written without spaces between words (CJK, Thai, ...): their
+// words are the dictionary words ICU finds.
+bool unspacedScript(uint32_t cp) {
+  return (cp >= 0x0E00 && cp <= 0x0EFF) || (cp >= 0x1000 && cp <= 0x109F) || (cp >= 0x1780 && cp <= 0x17FF) ||
+         (cp >= 0x2E80 && cp <= 0x9FFF) || (cp >= 0xAC00 && cp <= 0xD7AF) || (cp >= 0xF900 && cp <= 0xFAFF) ||
+         (cp >= 0xFF00 && cp <= 0xFFEF) || (cp >= 0x20000 && cp <= 0x3FFFF);
+}
+
+// The UTF-16 start of each reveal unit of the paragraph, then its end.
+// mode 0: graphemes (user-perceived characters: a base letter with its
+// combining marks, an emoji sequence; spaces and line breaks count too).
+// mode 1: words: a unit runs from a word's start to the next one's (the
+// spaces after a word go with it; spaces before the first word with it).
+const std::vector<uint32_t>& revealUnits(TextCache* c, int mode, FontManager* fm) {
+  std::vector<uint32_t>& out = c->units[mode];
+  if (c->unitsReady[mode]) return out;
+  c->unitsReady[mode] = true;
+  out.clear();
+  const std::string& s = c->content;
+  SkUnicode* u = fm ? fm->unicode() : nullptr;
+  skia_private::TArray<SkUnicode::CodeUnitFlags, true> flags;
+  if (u && !s.empty()) {
+    std::string copy = s;
+    if (!u->computeCodeUnitFlags(copy.data(), int(copy.size()), false, &flags) || flags.size() < int(s.size())) flags.clear();
+  }
+  // Word boundaries (UTF-16), for the unspaced scripts.
+  std::vector<SkUnicode::Position> words;
+  if (mode == 1 && u && !s.empty()) u->getWords(s.data(), int(s.size()), nullptr, &words);
+  size_t wi = 0;
+  uint32_t at16 = 0;
+  bool prevSpace = true, prevUnspaced = false, any = false;
+  size_t i = 0;
+  while (i < s.size()) {
+    size_t start = i;
+    uint32_t cp = nextUtf8(s, &i);
+    bool grapheme = flags.empty() || (flags[int(start)] & SkUnicode::kGraphemeStart);
+    if (grapheme) {
+      bool space = revealSpace(cp);
+      bool unspaced = unspacedScript(cp);
+      bool begins;
+      if (mode == 0) {
+        begins = true;
+      } else {
+        while (wi < words.size() && words[wi] < at16) wi++;
+        bool wordBreak = wi < words.size() && words[wi] == at16;
+        begins = !space && (prevSpace || ((unspaced || prevUnspaced) && (wordBreak || words.empty())));
+        prevSpace = space;
+        prevUnspaced = unspaced;
+      }
+      // The first unit starts at 0 whatever comes first.
+      if (!any) out.push_back(0), any = true;
+      else if (begins) out.push_back(at16);
+    }
+    at16 += cp >= 0x10000 ? 2 : 1;
+  }
+  if (any) out.push_back(at16);
+  return out;
+}
+
+// The clip that shows the paragraph's text before UTF-16 index `end`: the
+// lines before the last one it reaches whole (so glyph overhang, shadows
+// and decorations past the boxes still show), and on that last line the
+// boxes of the text up to `end`, open towards the line's start.
+void addPrefixClip(tl::Paragraph* p, uint32_t end, bool rtl, float x, float y, SkPathBuilder* path) {
+  constexpr float kBig = 1e5f;
+  std::vector<tl::TextBox> boxes = p->getRectsForRange(0, end, tl::RectHeightStyle::kMax, tl::RectWidthStyle::kTight);
+  if (boxes.empty()) return;
+  float firstTop = boxes[0].rect.fTop, lastTop = boxes[0].rect.fTop;
+  for (const tl::TextBox& b : boxes) {
+    firstTop = std::min(firstTop, b.rect.fTop);
+    lastTop = std::max(lastTop, b.rect.fTop);
+  }
+  for (const tl::TextBox& b : boxes) {
+    SkRect r = b.rect;
+    if (r.fTop < lastTop - 0.5f) {
+      r.fLeft = -kBig;
+      r.fRight = kBig;
+    } else if (rtl) {
+      r.fRight = kBig;
+    } else {
+      r.fLeft = -kBig;
+    }
+    if (r.fTop <= firstTop + 0.5f) r.fTop = -kBig;
+    path->addRect(r.makeOffset(x, y));
+  }
+}
+
+// Paints the revealed part of a paragraph (ComputedStyle::textReveal). With
+// a fade of f units, unit k's alpha is clamp((reveal - k) / f, 0, 1);
+// without, unit k shows once reveal > k (so a whole number n shows n units).
+void paintRevealed(Node* node, TextCache* c, tl::Paragraph* p, ChromeLikePainter& painter, SkCanvas* canvas, float x,
+                   float y) {
+  const ComputedStyle& st = node->style();
+  Document* doc = node->document();
+  const std::vector<uint32_t>& b = revealUnits(c, st.textRevealMode, doc ? doc->fonts : nullptr);
+  size_t n = b.empty() ? 0 : b.size() - 1;
+  double fade = st.textRevealFade;
+  double r = st.textReveal;
+  if (st.textRevealFraction) r *= fade > 0 ? double(n) - 1 + fade : double(n);
+  auto clampUnits = [&](double v) { return v <= 0 ? size_t(0) : v >= double(n) ? n : size_t(v); };
+  size_t full = fade > 0 ? clampUnits(std::floor(r - fade) + 1) : clampUnits(std::ceil(r));
+  size_t shown = clampUnits(std::ceil(r));
+  if (full >= n) {
+    p->paint(&painter, x, y);
+    return;
+  }
+  if (full > 0) {
+    SkPathBuilder clip;
+    addPrefixClip(p, b[full], c->rtl, x, y, &clip);
+    canvas->save();
+    canvas->clipPath(clip.detach(), true);
+    p->paint(&painter, x, y);
+    canvas->restore();
+  }
+  for (size_t k = full; k < shown; k++) {
+    float alpha = float(std::clamp((r - double(k)) / fade, 0.0, 1.0));
+    if (alpha <= 0) continue;
+    std::vector<tl::TextBox> boxes = p->getRectsForRange(b[k], b[k + 1], tl::RectHeightStyle::kMax, tl::RectWidthStyle::kTight);
+    if (boxes.empty()) continue;
+    SkPathBuilder clip;
+    for (const tl::TextBox& box : boxes) clip.addRect(box.rect.makeOffset(x, y));
+    canvas->save();
+    canvas->clipPath(clip.detach(), true);
+    painter.setAlpha(alpha);
+    p->paint(&painter, x, y);
+    painter.setAlpha(1);
+    canvas->restore();
+  }
+}
+
+}  // namespace
+
+int revealUnitCount(Node* node) {
+  Document* doc = node ? node->document() : nullptr;
+  TextCache* c = node ? ensureCache(node) : nullptr;
+  if (!c) return 0;
+  const std::vector<uint32_t>& b = revealUnits(c, node->style().textRevealMode, doc ? doc->fonts : nullptr);
+  return b.empty() ? 0 : int(b.size()) - 1;
+}
+
 void paintText(Node* node, SkCanvas* canvas, float x, float y, float width, float height, const SkMatrix* layoutSpace) {
   (void)height;
   if (tl::Paragraph* p = layoutParagraph(node, width)) {
     auto* c = static_cast<TextCache*>(node->textCache.get());
     ChromeLikePainter painter(canvas, c, layoutSpace);
-    p->paint(&painter, x, y + c->paintDy);
+    if (node->style().textReveal >= 0) paintRevealed(node, c, p, painter, canvas, x, y + c->paintDy);
+    else p->paint(&painter, x, y + c->paintDy);
   }
 }
 
