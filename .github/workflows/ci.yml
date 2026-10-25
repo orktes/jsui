@@ -212,6 +212,59 @@ jobs:
             bands-gpu.png
             bands-gpu-core.png
 
+  # ---------------------------- JS thread under ThreadSanitizer (Linux)
+  # The suites that run JS on its own thread (JsThread, the host-callback
+  # queue, published host buffers) and the React e2e bundles (on the JS
+  # thread, in lockstep and single-threaded) in a -fsanitize=thread build.
+  # Timing checks are off under the sanitizer.
+  native-tsan:
+    name: native (ubuntu, clang, ThreadSanitizer)
+    runs-on: ubuntu-24.04
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.native == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build clang libfontconfig1-dev zlib1g-dev
+      - name: Cache prebuilt Skia + FetchContent sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/skia-prebuilt
+            build/_deps/*-src
+          key: native-tsan-deps-${{ runner.os }}-${{ hashFiles('cmake/*.cmake', 'tools/**/CMakeLists.txt') }}
+          restore-keys: native-tsan-deps-${{ runner.os }}-
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: native-tsan-${{ runner.os }}
+          max-size: 500M
+      - name: Install workspace packages
+        run: npm ci --no-audit --no-fund
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DCMAKE_C_FLAGS=-fsanitize=thread -DCMAKE_CXX_FLAGS=-fsanitize=thread
+          -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=thread -DJSUI_BUILD_VIEWER=OFF -DJSUI_BUILD_TOOLS=OFF
+      - name: Build
+        run: cmake --build build -j "$(nproc)" --target jsui-tests
+      - name: Threaded native tests
+        env:
+          TSAN_OPTIONS: halt_on_error=1 second_deadlock_stack=1
+        run: ./build/jsui-tests js_thread host_queue host_buffers
+      - name: React e2e (JS thread, lockstep, single-threaded)
+        working-directory: packages/cli
+        env:
+          TSAN_OPTIONS: halt_on_error=1 second_deadlock_stack=1
+          JSUI_TESTS: ${{ github.workspace }}/build/jsui-tests
+        run: node --test test/e2e.test.js
+
   # ------------------------------------------- engine examples (Linux, Xvfb)
   # integrations/raylib, sdl3 and sokol: the shared HUD in three game loops.
   # Each runs its --selftest (an empty-space click passes through to the game,

@@ -1304,10 +1304,10 @@ mutation call (`createNode`, `setProps` / `updateProps`, `patchStyle`,
 `setTextInputSelection`, `lottieCommand`, `listenGlobal` and the whole
 `animated.*` graph API) converts its arguments and records a command in
 `JsEngine::Impl::commands` (`src/js/command_buffer.h`); `CommandBuffer::apply`
-(`command_buffer.cpp`) does the native work later, in call order. This is
-the first step of running JS on a thread of its own (the owner thread
-applies what the JS thread published); today everything is still
-single-threaded and behaves exactly as when each call applied at once:
+(`command_buffer.cpp`) does the native work later, in call order. With JS
+on its own thread (see "JS thread") the owner thread applies what the JS
+thread published; single-threaded (the default) everything behaves exactly
+as when each call applied at once:
 
 * **Publication.** A JS task (one native → JS entry with its microtask
   drain, `Impl::drain`) publishes what it recorded as one batch
@@ -1329,7 +1329,10 @@ single-threaded and behaves exactly as when each call applied at once:
   applied as soon as they are recorded, with everything before them:
   focus / blur / scroll / selection run JS event handlers inside the call,
   `lottieCommand` returns a bool, `animated.createNode` / `startAnimation`
-  throw on a bad config and `stopAnimation` returns the velocity.
+  throw on a bad config and `stopAnimation` returns the velocity. On a JS
+  thread they go with the task's batch like any other command: the focus
+  events arrive as events, `lottieCommand` answers whether the command name
+  is known, and Animated config errors are logged when applied.
 * **Ids.** `createNode` takes the id from the runtime's atomic node counter
   (`Runtime::allocNodeId`, the counter every surface numbers its nodes with)
   and records `Create(id, type, rootTag)` (`Document::createNode(type, id)`
@@ -1379,8 +1382,9 @@ read in place, so the same code works once JS answers from its own thread:
 `Inbound::replyDelayMs` is a test hook: event replies become visible that
 long after they were posted, on the runtime clock, as from a busy JS thread
 (`tests/native/input_test.cpp` "late JS answers", `text_input_test.cpp`).
-Not routed yet: the inspector's `poll()`, `releaseBuffer` (host buffers) and
-the host JS engine's own loader completions.
+Not routed: `releaseBuffer` (host buffers; a JS thread reads published
+copies) and the host JS engine's own loader completions (it has no JS
+thread). With a JS thread the inspector is polled there.
 
 ### Shared state
 
@@ -1388,8 +1392,9 @@ The third step towards a JS thread: everything JS shares with the owner
 thread (the thread calling `jsui_tick`) is made safe to share, and a
 **JS-thread mode** (`Runtime::setJsThreadMode`, before the first bundle
 load; off by default, the C API comes with the thread itself) makes JS
-reach the runtime only the ways a JS thread will. JS still runs on the
-owner thread; the default mode behaves exactly as before.
+reach the runtime only the ways a JS thread will (since "JS thread",
+JS also runs on a thread of its own in that mode); the default mode
+behaves exactly as before.
 
 * **Locks.** `HostState` takes a (recursive) lock in every member; members
   that hand out pointers into the store (`json`, `value`, `patchesSince`)
@@ -1411,8 +1416,9 @@ owner thread; the default mode behaves exactly as before.
   `bufferVersion` / `bufferKeys` read the version table of the same
   publish. The ArrayBuffer holds a reference to its copy, so a view JS keeps
   keeps its frame instead of being detached when the storage moves; a copy
-  no reader holds is rewritten in place. Native Animated `hostBuffer` nodes
-  keep reading the live storage (no lag).
+  no reader has taken is rewritten in place (one handed out never
+  changes). Native Animated `hostBuffer` nodes keep reading the live
+  storage (no lag).
 * **Frame snapshot** (`src/frame_snapshot.h`). Taken on the owner thread
   after the tick's layout (and at the start of a tick whose surface table
   changed, after `jsui_tick_native`, and before a bundle evaluates) and
@@ -1454,10 +1460,12 @@ owner thread; the default mode behaves exactly as before.
   on the owner thread (`JsEngine::mergePerf`: in the tick and in
   `jsui_get_perf`). Phase times stay on the document's `Perf`.
 
-Still direct, behind the command buffer's sync points: font registration
-(`loadFontData`, `unloadFont`, fallbacks, the default family), shader
-preloads and Lottie data hand-off (now thread-safe), and the calls that
-apply at once (`CommandBuffer::appliesAtOnce`).
+Single-threaded these stay direct, behind the command buffer's sync
+points: font registration (`loadFontData`, `unloadFont`, fallbacks, the
+default family) and the calls that apply at once
+(`CommandBuffer::appliesAtOnce`); on a JS thread the font calls are proxy
+calls (`Impl::onOwner`). Shader preloads and the Lottie data hand-off are
+thread-safe either way.
 
 Standard globals (`src/js/prelude.cpp` + `host_api.cpp`):
 
@@ -1517,6 +1525,69 @@ Callbacks the bundle installs (all optional):
 * `__jsui_onLayout(id, {x, y, width, height})` — for `onLayout` listeners.
 * `__jsui_onAnimatedEnd(id, finished, value)` / `__jsui_onAnimatedValueUpdate(tag, value)`
   — native Animated ends and value-listener updates, after each tick.
+
+### JS thread
+
+As in React Native, the bundle can run on a thread of its own
+(`src/js/js_thread.h`): `JsuiConfig.js_thread` or `jsui_set_js_thread`
+(before the first bundle load) with `JSUI_JS_THREAD_ON`. Off by default;
+the host JS engine (WebAssembly) has none. The **owner thread** (the one
+calling `jsui_tick`, every `jsui_*` call) keeps the documents, Yoga,
+input, native Animated, scrolling, fonts and paint; the **JS thread**
+creates, runs and frees QuickJS (its stack is `js_stack_size_kb` plus
+headroom for the C++ around the engine). The owner never runs JS and never
+waits for it, except in a sync the host asks for.
+
+* **Owner → JS.** `JsThread` is the runtime's `JsEngine`: `Inbound::post`
+  queues each message to it, stamped with the runtime clock it was posted
+  at (`Message::now`: what `performance.now()` and new timers see while it
+  runs). The thread delivers them in order, one task each (its microtask
+  drain included); a thread that fell behind runs the latest `Frame` only.
+  A `BeginBatch` goes out with the batch's first message, and an empty
+  batch is dropped (it would wake JS for nothing).
+* **JS → owner.** Each task publishes one `JsBatch`: the commands it
+  recorded, the replies to what it answered and the host callbacks it made
+  (`Runtime::toHost`). The tick applies the published batches at its start
+  (`Runtime::applyJs`), whole and in order, so a React commit is never
+  seen in parts; a proxied read (`Runtime::proxy`) first publishes the
+  task's replies and callbacks so far, and the owner applies what came
+  before it, keeping FIFO order.
+* **Its own work.** Between messages the thread runs the timers due at the
+  last frame's time (`Runtime::publishedNow`, set before the tick posts its
+  `Frame`; at most 64 passes per frame), so React's scheduler goes on
+  between frames, and collects garbage while it has nothing else to do.
+  `jsui_set_js_frame_budget` is the slice after which React yields
+  (`JsThread::shouldYield`, from the start of the task).
+* **What the owner sees.** `jsui_wants_frame` / `hasPendingWork` read what
+  the thread published (`nextTimer`, `wantsFrame`, a running task, batches
+  waiting). `Runtime::jsBusy` is true while JS runs a task. `JsuiPerf`
+  adds `js_busy_ms`, `js_batches_applied`, `js_apply_ms`, `js_lag_frames`
+  and `js_sync_ms`.
+* **Syncs.** `jsui_sync(rt, timeout_ms)` waits for JS to go idle (serving
+  proxied reads), applies, lays out and delivers the onLayout events and
+  measure callbacks that leads to, up to 8 rounds; 0 when the time ran out
+  (what finished is applied, commits whole). `jsui_tick_ex(...,
+  JSUI_TICK_SYNC_JS)` does that inside the tick, after posting the frame
+  and after layout (`js_sync_timeout_ms`, default 250): state the host set
+  before the tick shows on that frame. A default action JS may veto (Tab,
+  Enter, wheel) waits for JS's answer up to `js_event_deadline_ms`.
+* **Lockstep** (`JSUI_JS_THREAD_LOCKSTEP`: tests and tools). Every
+  top-level post waits for JS (`syncJs`), and the thread runs no timers of
+  its own, which gives single-threaded frames: the React e2e suites run a
+  second time in lockstep (`JSUI_TEST_JS_THREAD`).
+* **Lifetime.** `JsThread::stop` (reload, destroy, a mode change) makes
+  the interrupt handler end running JS, serves proxied reads until the
+  thread is out, frees the engine there and joins. Reloads and surface
+  destruction asked for by a host callback wait until the batch is applied
+  (`JsEngine::inCall`). `jsui_resolve_call` checks the call against the
+  set of calls JS has not settled (`JsThread::takeCall`).
+
+`tests/native/react_js_thread_e2e_test.cpp` (bundle `stall.jsx`) holds it
+to that: 32 host-buffer markers (an interpolation and an `Animated.derive`
+among them) equal each frame's buffer while JS is stalled for 80 ms twice
+and collects garbage, a fling keeps going, and the owner's tick + render
+stays under 4 ms (p95) and 8 ms (max); a sync tick shows state set before
+it, and `jsui_sync` gives up on busy JS without splitting a commit.
 
 ### Event objects
 
