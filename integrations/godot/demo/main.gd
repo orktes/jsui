@@ -54,6 +54,13 @@ extends Control
 ##                       times), print them and quit
 ##   --no-world          leave the 3D scene out (benchmarks: the UI only)
 ##   --no-ui             leave the JsuiView out (the 3D scene without JSUI)
+##   --hud               the engine examples' game instead of the showcase:
+##                       units orbiting a tower (hud/hud_game.gd) under the
+##                       shared HUD (integrations/shared/ui/app.jsx, built to
+##                       integrations/shared/ui/dist/bundle.js), with
+##                       nameplates following the units every frame through
+##                       the `entities` buffer. With --no-ui the same game
+##                       without JSUI; with --bench-seconds what the UI costs it
 ##   --bench-seconds S   vsync and the frame cap off, time S seconds of frames
 ##                       after a warm-up (--bench-warmup S, default 3), print
 ##                       one `bench:` line (as the engine examples' --bench)
@@ -99,6 +106,8 @@ extends Control
 
 @onready var ui = get_node_or_null("JsuiView")
 
+const HudGame := preload("res://hud/hud_game.gd")
+
 const PING_REWARD := 120
 const VIEWPORT_BACKDROP := Color8(40, 150, 110)  # --max-viewport-diff
 const HAND_OFF_SURFACES := 4  # --max-render-waits: surface views of ui's runtime
@@ -121,6 +130,8 @@ var _bench_ms := PackedFloat32Array()
 var _bench_last := -1
 var _bench_from := 0
 var _first_scroll := false
+var _hud := false
+var _hud_game: Node3D = null
 var _tour := false
 var _expect_warm := false
 var _fixed_fps := 0
@@ -213,6 +224,8 @@ func _enter_tree() -> void:
 			"--bench-warmup":
 				_bench_warmup = float(v)
 				i += 1
+			"--hud":
+				_hud = true
 			"--no-ui":
 				if view:
 					remove_child(view)
@@ -248,6 +261,9 @@ func _enter_tree() -> void:
 					_window_size = Vector2i(int(wh[0]), int(wh[1]))
 				i += 1
 		i += 1
+	if _hud:
+		_start_hud(view)
+		return
 	if view == null:
 		return
 	# Shared state can be set before the view starts: the UI renders it on
@@ -255,6 +271,22 @@ func _enter_tree() -> void:
 	view.set_state("godot.stats", _stats())
 	view.set_state("player", _player)
 	view.set_state("godot.scene", true)
+
+
+## --hud: the engine examples' game in place of the 3D world, and the shared
+## HUD bundle in the view (unless --bundle / --dev chose one).
+func _start_hud(view) -> void:
+	var world := get_node_or_null("World")
+	if world:
+		remove_child(world)
+		world.free()
+	_hud_game = HudGame.new()
+	_hud_game.name = "HudGame"
+	_hud_game.view = view
+	add_child(_hud_game)
+	move_child(_hud_game, 0)  # behind the view
+	if view and view.bundle_url == "res://ui/dist/bundle.js":
+		view.bundle_url = ProjectSettings.globalize_path("res://").path_join("../../shared/ui/dist/bundle.js").simplify_path()
 
 
 func _exit_tree() -> void:
@@ -276,6 +308,11 @@ func _ready() -> void:
 		Engine.max_fps = 0
 	if ui == null:
 		print("UI: off (--no-ui)")
+		return
+	if _hud:
+		ui.js_error.connect(func(msg): printerr("[jsui error] ", msg))
+		ui.grab_focus()
+		print("JsuiView running=%s bundle=%s (--hud)" % [ui.is_running(), ui.bundle_url])
 		return
 	ui.message_received.connect(_on_ui_message)
 	ui.call_requested.connect(_on_ui_call)
@@ -337,6 +374,12 @@ func _process(delta: float) -> void:
 	if _bench_seconds > 0:
 		_bench_frame()
 	if ui == null:
+		return
+	if _hud:
+		if _capture != "":
+			_frame += 1
+			if _frame >= _frames and ui.get_pending_loads() == 0:
+				_save_capture()
 		return
 	# Once a second; of UI time with --ui-fixed-fps (the same frames each run).
 	_stats_timer -= delta if _fixed_fps == 0 else 1.0 / _fixed_fps
@@ -1640,6 +1683,8 @@ func _run_first_scroll() -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if _hud:
+		return  # the game's (hud/hud_game.gd)
 	# Input the UI did not consume reaches the game.
 	if event is InputEventMouseButton and event.pressed:
 		_unhandled_clicks += 1
