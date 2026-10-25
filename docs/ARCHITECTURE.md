@@ -1257,7 +1257,7 @@ Native globals (installed by `JsEngine`):
 | `createNode(type, rootTag?) → id` | `type` ∈ `View`, `Text`, `RawText`, `Image`, `ScrollView`, `TextInput`, `LottieView`, `ShaderView`; created in the document of surface `rootTag` (default: the main one; see "Surfaces"). The id is taken at once; the node exists natively when the command is applied (see "Command buffer") |
 | `viewport(rootTag?) → {width, height, scale}` | logical size of a surface (default: the main one) |
 | `surfaceApp(rootTag) → {appKey, initialProps} \| null` | the app the host picked for a surface |
-| `updateProps(id, reactProps, hidden, keepStyle?)` / `getProps(id)` | the host config's prop path, done natively: builds what native sees from the React props (event handlers → `__events`, the responder hints `__blocksNative` / `__keepsGesture` (see "Input routing details"), flattened style, `pointerEvents` / hidden into it) and diffs it in `Node::setProps` (see "Performance: Props"); `getProps` returns what native holds (the inspector reads it). `keepStyle` (`setNativeProps` of non-style props; `updatePropsKeepsStyle: true` says the runtime has it): `reactProps.style` is ignored and the node keeps the style it has when the command is applied, `patchStyle` and native Animated writes included. The host JS engine has neither (`@orktes/jsui-react` then diffs in JS and calls `setProps`) |
+| `updateProps(id, reactProps, hidden, keepStyle?)` / `getProps(id)` | the host config's prop path, done natively: builds what native sees from the React props (event handlers → `__events`, the responder hints `__blocksNative` / `__keepsGesture` and `__passive` (see "Input routing details"), flattened style, `pointerEvents` / hidden into it) and diffs it in `Node::setProps` (see "Performance: Props"); `getProps` returns what native holds (the inspector reads it). `keepStyle` (`setNativeProps` of non-style props; `updatePropsKeepsStyle: true` says the runtime has it): `reactProps.style` is ignored and the node keeps the style it has when the command is applied, `patchStyle` and native Animated writes included. The host JS engine has neither (`@orktes/jsui-react` then diffs in JS and calls `setProps`) |
 | `setProps(id, props)` | replaces all props; `props.style` is a **flattened** style object; functions are dropped; `props.__events` lists event names the element listens to (e.g. `["press","pointerMove","layout"]`) |
 | `patchStyle(id, partialStyle)` | animation fast path: merges keys into the node's current `props.style` (a `null`/`undefined` value removes the key) and keeps all other props (`Node::patchStyle`). When only paint keys such as `transform`, `opacity`, colors changed, the style is updated in place and only those keys' style groups are re-resolved, with no relayout; a layout key takes the `setProps` path. Use it per frame from `requestAnimationFrame` instead of re-rendering through React. |
 | `setText(id, string)` | content of a `RawText` |
@@ -1293,7 +1293,7 @@ Native globals (installed by `JsEngine`):
 | `textEditing` | `true`: TextInput text is edited natively (see "TextInput editing") |
 | `setTextInputSelection(id, start, end)` | TextInput selection (UTF-16 indices, clamped; no event) |
 | `getClipboard() → string`, `setClipboard(text)` | the embedder's clipboard (`jsui_set_clipboard_callbacks`) or the runtime's in-process one |
-| `listenGlobal(type, on)` | the bundle has (no longer has) global listeners for events of `type` (`addGlobalListener`: modals, `BackHandler`, gamepad hooks); input asks it when JS answers an event late (see "Input routing details") |
+| `listenGlobal(type, on, keys?)` | the bundle has (no longer has) global listeners for events of `type` that may call `preventDefault()` (`addGlobalListener`: modals, `BackHandler`, gamepad hooks; passive ones are not reported); `keys` (key names / codes, gamepad button or axis indices) narrows it to those events, `[]`: none. Input asks it when JS answers an event late (see "Input routing details") |
 
 ### Command buffer
 
@@ -1572,7 +1572,9 @@ waits for it, except in a sync the host asks for.
   JSUI_TICK_SYNC_JS)` does that inside the tick, after posting the frame
   and after layout (`js_sync_timeout_ms`, default 250): state the host set
   before the tick shows on that frame. A default action JS may veto (Tab,
-  Enter, wheel) waits for JS's answer up to `js_event_deadline_ms`.
+  Enter, wheel) waits for JS's answer up to `js_event_deadline_ms`, unless
+  the tree declares the answer (see "Input routing details": declared
+  default actions).
 * **Lockstep** (`JSUI_JS_THREAD_LOCKSTEP`: tests and tools). Every
   top-level post waits for JS (`syncJs`), and the thread runs no timers of
   its own, which gives single-threaded frames: the React e2e suites run a
@@ -1613,10 +1615,11 @@ ctypes smoke runs on, off and lockstep. CI runs each with the thread on
 frame (a scene cut, a screenshot) go through the sync tick; everything else
 shows a tick or more later, as in React Native.
 
-Not done yet: default actions JS may veto still wait for the event's
-generic reply (up to `js_event_deadline_ms`); a typed reply channel per
-event kind (answering only `defaultPrevented` early, before the listener's
-task ends) would shorten that wait.
+Not done yet: a default action an undeclared, non-passive listener may
+veto still waits for the event's generic reply (up to
+`js_event_deadline_ms`); a typed reply channel per event kind (answering
+only `defaultPrevented` early, before the listener's task ends) would
+shorten that wait.
 
 `tests/native/react_js_thread_e2e_test.cpp` (bundle `stall.jsx`) holds it
 to that: 32 host-buffer markers (an interpolation and an `Animated.derive`
@@ -1672,7 +1675,7 @@ that before letting go has none. ScrollView drag velocity uses the same clock.
 `pointerenter`/`pointerleave` are dispatched per node (no bubbling), like the DOM.
 Gamepad D-pad / stick moves focus spatially between `focusable` nodes and A
 activates the focused node (dispatched as `click`), unless the gamepad event
-was `preventDefault()`-ed.
+was `preventDefault()`-ed (or declared so, see "Input routing details").
 
 ### Input routing details (`src/input/`)
 
@@ -1682,6 +1685,32 @@ was `preventDefault()`-ed.
   default prevented (a boolean `true` is treated as `3` for compatibility).
   A JS Pressable that handles Enter/Space/A itself prevents the default so no
   extra `click` follows. Exception: focus-on-press always happens.
+* **Declared default actions.** Props on the committed tree say what JS
+  would answer, so native decides without its answer (single-threaded the
+  same way: a declaration wins over the answer):
+  * `preventDefaultKeys` (`key` or `code` names) / `preventDefaultButtons`
+    (gamepad button indices) on the focused node or an ancestor (the active
+    focus scope's path when nothing is focused): that keydown / button
+    press is prevented at once, consumed, and JS still gets the event. A
+    focused TextInput only honours its own (its JS handler stops the keys it
+    handles). Modifiers are not part of the match.
+  * `__passive` (the `__events` tokens `keyDown`, `textInput`,
+    `gamepadButton`, `gamepadAxis`, `wheel`): that node's handlers of those
+    events never call `preventDefault()`. `updateProps` derives it from
+    handlers marked `fn.__passive = true` (`passive(fn)` in
+    `@orktes/jsui-react`); a token goes there only when every handler for it
+    (bubble and capture) is passive.
+  * A global listener's `listenGlobal(type, true, keys)`: it may veto only
+    those keys / buttons / axes.
+
+  `@orktes/jsui-react` declares its own: Pressables (and pressable Text)
+  `preventDefaultKeys` Enter / Space / NumpadEnter with a passive keyDown
+  (unless the element's own `onKeyDown` is not passive), TextInput a passive
+  keyDown / textInput (native editing; unless the owner's handlers are not)
+  and Enter when it submits, Modal its close keys and B (with
+  `onRequestClose`), `BackHandler` / Modal global listeners only for those
+  keys / B, the gamepad state store passive, `useGamepad({ passive })` /
+  `vetoes`.
 * **Touch drags vs. ScrollView** follow React Native's host responder rules.
   A drag past the slop inside a ScrollView starts scrolling (the target gets
   `pointercancel`) unless a JS responder holds the touch and either blocks
@@ -1698,18 +1727,24 @@ was `preventDefault()`-ed.
   * A default action JS could veto (Tab, Enter / Space / A → `click`,
     arrows / D-pad / stick navigation, keyboard scrolling, TextInput
     editing, wheel scrolling) waits for the reply only when a listener could
-    `preventDefault()` it: `keyDown` on the focused path or a global
-    `keydown` listener for keys, `textInput` for text, `gamepadButton` /
-    `gamepadAxis` (or global ones) for the gamepad, `wheel` on the path for
-    the wheel (global listeners are reported with `listenGlobal`). The
-    action then waits in `InputManager::deferred_`, in event order (an
-    event with nothing to wait for queues behind a waiting one), and runs
-    when the reply comes without `preventDefault()`, or when
-    `Runtime::eventDeadlineMs` (100) passes, with a warning. Plain focus
-    navigation without key listeners stays instant; a Pressable's Enter
-    activation runs in JS anyway. Meanwhile `jsui_send_*` reports a key or
-    press with a pending action as consumed, a pointer by the hit test
-    alone. State styles (`pressedStyle` by Enter / A) do not wait.
+    `preventDefault()` it and nothing declares the answer (see "Declared
+    default actions"): a `keyDown` on the focused path that is not passive,
+    or a global `keydown` listener that may veto that key, for keys;
+    `textInput` for text; `gamepadButton` / `gamepadAxis` (or global ones
+    for that button / axis) for the gamepad; a non-passive `wheel` on the
+    path for the wheel (global listeners are reported with `listenGlobal`).
+    A declared `preventDefaultKeys` / `preventDefaultButtons` key never
+    waits. The action then waits in `InputManager::deferred_`, in event
+    order (an event with nothing to wait for queues behind a waiting one),
+    and runs when the reply comes without `preventDefault()`, or when
+    `Runtime::eventDeadlineMs` (100) passes, with a warning. With the
+    `@orktes/jsui-react` components, focus navigation, Pressable activation,
+    typing in a TextInput, modal close keys and gamepad navigation (with or
+    without `useGamepad`'s store) do not wait; an app's own non-passive
+    `onKeyDown` / `onGamepadButton` / `onWheel` / global listener does.
+    Meanwhile `jsui_send_*` reports a key or press with a pending action as
+    consumed, a pointer by the hit test alone. State styles (`pressedStyle`
+    by Enter / A) do not wait.
   * A touch dragged past the slop while a reply of its gesture is out and
     a node on the path can be a JS responder (`responder` / `pointerMove`
     in `__events`) is **held**: the ScrollView does not scroll yet, the

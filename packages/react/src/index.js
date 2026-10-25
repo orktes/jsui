@@ -1,7 +1,7 @@
 // @orktes/jsui-react: React Native's public API on the JSUI runtime.
 // The CLI aliases 'react-native' to this module.
 
-import { installGlobals } from './events.js';
+import { installGlobals, passive } from './events.js';
 import { View, Text, Image, ImageBackground, ScrollView, TextInput, TextAncestorContext, unsupportedComponent } from './components/basic.js';
 import {
   Pressable,
@@ -98,6 +98,7 @@ export {
   Easing,
   StyleSheet,
   PanResponder,
+  passive,
   processColor,
   useAnimatedValue,
   useHostBufferValue,

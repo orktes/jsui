@@ -590,3 +590,39 @@ TEST(text_input_late_answers) {
   t.type("yz");
   CHECK_EQ(t.value(n), std::string("yzx"));
 }
+
+// A TextInput as @orktes/jsui-react renders it with native editing: its
+// keyDown / textInput handlers are passive and Enter is declared when it
+// submits, so typing never waits for a late JS answer (input_test.cpp
+// "Declared default actions").
+TEST(text_input_declared_no_wait) {
+  TI t;
+  Node* n = t.input(0, 0, 300, 60, R"("fontSize":16)", R"("multiline":true)");
+  t.setProps(n, R"({"__events":["change","selectionChange","keyDown","textInput"],"__passive":["keyDown","textInput"]})");
+  // An ancestor declaring Enter does not reach into the focused TextInput.
+  t.doc().root()->setProps(Value::parseJson(R"({"preventDefaultKeys":["Enter"]})"));
+  t.in().focus(n);
+  t.tick(16);
+  t.events();
+  t.rt->inbound.replyDelayMs = 500;  // JS stalled
+  t.type("ab");
+  t.key("Backspace");
+  CHECK(t.in().key("x", "KeyX", true, false, 0));
+  t.type("x");
+  t.in().key("x", "KeyX", false, false, 0);
+  t.key("Enter");  // multiline: a newline
+  t.type("c");
+  CHECK_EQ(t.value(n), std::string("ax\nc"));
+  CHECK(!t.in().animating());
+  // Declared on the input itself (submit): no newline, still no wait.
+  t.setProps(n, R"({"preventDefaultKeys":["Enter"]})");
+  t.key("Enter");
+  CHECK_EQ(t.value(n), std::string("ax\nc"));
+  CHECK(!t.in().animating());
+  // Handlers that may veto (no __passive): keys and text wait again.
+  t.setProps(n, R"({"__passive":[]})");
+  t.type("d");
+  CHECK_EQ(t.value(n), std::string("ax\nc"));
+  t.tick(100);
+  CHECK_EQ(t.value(n), std::string("ax\ncd"));
+}

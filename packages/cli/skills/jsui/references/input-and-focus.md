@@ -100,7 +100,11 @@ Buttons: 0 A, 1 B, 2 X, 3 Y, 4 LB, 5 RB, 6 LT, 7 RT, 8 Back/View, 9
 Start/Menu, 10 LS, 11 RS, 12 Up, 13 Down, 14 Left, 15 Right, 16 Home.
 `preventDefault()` stops the default action (focus move, activation,
 scrolling) for that event. Any element can also take `onGamepadButton` /
-`onGamepadAxis` props (focused element and its ancestors).
+`onGamepadAxis` props (focused element and its ancestors). With JS on its
+own thread a callback that might `preventDefault()` makes D-pad navigation
+wait for JS: pass `passive: true` / `vetoes: [4, 5]` to `useGamepad`, or
+declare `preventDefaultButtons={[4, 5]}` on the element (native-first.md,
+"Input without waiting on JS").
 
 * B: open `Modal`s get `onRequestClose`; otherwise
   `BackHandler.addEventListener('hardwareBackPress', fn)` handlers run (return
@@ -113,7 +117,9 @@ scrolling) for that event. Any element can also take `onGamepadButton` /
 `onKeyDown` / `onKeyUp` on any element (bubbling from the focused element;
 RN-web shape: `e.nativeEvent.key`, `code`, `shiftKey`, `ctrlKey`, `altKey`,
 `metaKey`, `repeat`). `e.preventDefault()` stops the default action. With no
-TextInput focused, PageUp / PageDown / Home / End / Space scroll.
+TextInput focused, PageUp / PageDown / Home / End / Space scroll. A handler
+that never prevents: `onKeyDown={passive(fn)}`; keys an element always
+owns: `preventDefaultKeys={['ArrowLeft']}` (then focus never waits for JS).
 
 ## Pointer and touch
 

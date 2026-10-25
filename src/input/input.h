@@ -421,6 +421,13 @@ class InputManager {
   // runs in turn as unprevented). Returns the action's result, or the
   // prediction (true: consumed) while it is pending.
   bool settle(bool answered, int flags, uint32_t seq, Deferred&& d, bool vetoable);
+  // Where key / gamepad declarations (preventDefaultKeys /
+  // preventDefaultButtons) are looked up from: the focused node, else the
+  // active focus scope.
+  Node* declScope() const;
+  // The event's default action is declared prevented: JS's answer (forgotten
+  // when still out) no longer matters.
+  void declare(bool* answered, int* flags, uint32_t seq);
   bool runDefault(const Deferred& d, int flags);
   // Runs the pending defaults whose answer came (or whose deadline passed).
   void runDeferred();

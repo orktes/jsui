@@ -57,6 +57,13 @@ for (const k of Object.keys(EVENT_TOKENS)) {
 // Props that never cross the bridge.
 const SKIP = { children: 1, style: 1, ref: 1, key: 1 };
 
+// Tokens of events whose default action a handler could veto with
+// preventDefault(): a token whose handlers are all passive (passive(fn))
+// goes to `__passive`, so native need not wait for JS's answer
+// (docs/ARCHITECTURE.md "Input routing details"; the native updateProps
+// derives the same).
+const VETO_TOKENS = { keyDown: 1, textInput: 1, gamepadButton: 1, gamepadAxis: 1, wheel: 1 };
+
 /**
  * Builds the props object sent to native: functions removed, style
  * flattened, __events list attached.
@@ -64,6 +71,7 @@ const SKIP = { children: 1, style: 1, ref: 1, key: 1 };
 export function toNativeProps(props, hidden) {
   const out = {};
   let events = null;
+  let vetoes = null;  // token -> true when a handler is not passive
   for (const key in props) {
     if (SKIP[key] === 1) continue;
     const v = props[key];
@@ -77,6 +85,10 @@ export function toNativeProps(props, hidden) {
       // Static responder hints (the native updateProps derives the same).
       if (key === 'onResponderGrant' && v.__blocksNative === true) out.__blocksNative = true;
       else if (key === 'onResponderTerminationRequest' && v.__keepsGesture !== false) out.__keepsGesture = true;
+      if (toks && toks.length === 1 && VETO_TOKENS[toks[0]] === 1) {
+        if (!vetoes) vetoes = {};
+        vetoes[toks[0]] = vetoes[toks[0]] === true || v.__passive !== true;
+      }
       continue;
     }
     if (typeof v === 'symbol') continue;
@@ -90,6 +102,11 @@ export function toNativeProps(props, hidden) {
   if (hidden) style = Object.assign({}, style, { display: 'none' });
   if (style !== undefined) out.style = style;
   if (events) out.__events = events;
+  if (vetoes) {
+    let passive = null;
+    for (const t in VETO_TOKENS) if (vetoes[t] === false) (passive || (passive = [])).push(t);
+    if (passive) out.__passive = passive;
+  }
   return out;
 }
 
@@ -129,7 +146,8 @@ function mayDiffer(inst, a, b) {
     const x = b[k];
     const y = a[k];
     if (x === y || k === 'children') continue;
-    if (typeof x === 'function' && typeof y === 'function') continue;
+    // A handler swapped for a passive one (or back) changes __passive.
+    if (typeof x === 'function' && typeof y === 'function' && x.__passive === y.__passive) continue;
     inst.propCount = -1;
     return true;
   }
