@@ -153,8 +153,9 @@ int jsui_patch_state(JsuiRuntime* rt, const char* key, const char* json) {
 
 const char* jsui_get_state(JsuiRuntime* rt, const char* key) {
   if (!key) return nullptr;
-  const std::string* json = rt->rt->state.json(key);
-  return json ? json->c_str() : nullptr;
+  // A copy: JS on its own thread may change the key while the host reads it.
+  jsui::Runtime& r = *rt->rt;
+  return r.state.jsonCopy(key, &r.stateText) ? r.stateText.c_str() : nullptr;
 }
 
 int jsui_set_buffer(JsuiRuntime* rt, const char* key, JsuiBufferType type, const void* data, size_t count) {
@@ -512,6 +513,7 @@ void jsui_set_profiling(JsuiRuntime* rt, int on) { rt->surface->doc.perf.setProf
 
 void jsui_get_perf(JsuiRuntime* rt, JsuiPerf* out, int reset) {
   jsui::Perf& p = rt->surface->doc.perf;
+  if (rt->rt->js) rt->rt->js->mergePerf(p.counters);  // JS-thread mode: what JS counted since the tick
   auto us = [&](jsui::Phase ph) { return p.us[size_t(ph)]; };
   const jsui::PerfCounters& c = p.counters;
   *out = JsuiPerf{};

@@ -6,6 +6,8 @@
 //   audioPreload(url) -> absolute url                   audioUnload(url)
 //   audioResolve(url) -> absolute url
 // Reports arrive in globalThis.__jsui_onAudio([[0, voice, status] | [1, url, ok, duration], ...]).
+// Requests reach the Audio (and the embedder's on_audio) through
+// Runtime::toHost: in the tick in JS-thread mode. Voice ids are taken now.
 #include <string>
 
 #include "js/engine_impl.h"
@@ -37,9 +39,13 @@ JSValue js_audioPlay(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
   std::string bus = str(ctx, argc, argv, 1);
   if (bus.empty()) bus = "sfx";
   bool loop = argc > 5 && JS_ToBool(ctx, argv[5]);
-  uint64_t id = rt.audio->play(resolved(ctx, url), bus, float(num(ctx, argc, argv, 2, 1)),
-                               float(num(ctx, argc, argv, 3, 1)), float(num(ctx, argc, argv, 4, 0)), loop,
-                               float(num(ctx, argc, argv, 6, 0)), num(ctx, argc, argv, 7, 0));
+  uint64_t id = rt.audio->reserveVoice();
+  Runtime* r = &rt;
+  rt.toHost([r, id, url = resolved(ctx, url), bus, loop, volume = float(num(ctx, argc, argv, 2, 1)),
+             pitch = float(num(ctx, argc, argv, 3, 1)), pan = float(num(ctx, argc, argv, 4, 0)),
+             fade = float(num(ctx, argc, argv, 6, 0)), offset = num(ctx, argc, argv, 7, 0)] {
+    r->audio->play(url, bus, volume, pitch, pan, loop, fade, offset, id);
+  });
   return JS_NewFloat64(ctx, double(id));
 }
 
@@ -48,9 +54,12 @@ JSValue js_audioVoice(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
   double voice = num(ctx, argc, argv, 1, 0);
   if (voice < 1 || (op != JSUI_AUDIO_STOP && op != JSUI_AUDIO_PAUSE && op != JSUI_AUDIO_RESUME && op != JSUI_AUDIO_SET))
     return JS_UNDEFINED;
-  runtimeOf(ctx).audio->voice(JsuiAudioOp(op), uint64_t(voice), float(num(ctx, argc, argv, 2, 1)),
-                              float(num(ctx, argc, argv, 3, 1)), float(num(ctx, argc, argv, 4, 0)),
-                              float(num(ctx, argc, argv, 5, 0)));
+  Runtime* r = &runtimeOf(ctx);
+  r->toHost([r, op, voice = uint64_t(voice), volume = float(num(ctx, argc, argv, 2, 1)),
+             pitch = float(num(ctx, argc, argv, 3, 1)), pan = float(num(ctx, argc, argv, 4, 0)),
+             fade = float(num(ctx, argc, argv, 5, 0))] {
+    r->audio->voice(JsuiAudioOp(op), voice, volume, pitch, pan, fade);
+  });
   return JS_UNDEFINED;
 }
 
@@ -58,12 +67,16 @@ JSValue js_audioBus(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
   std::string bus = str(ctx, argc, argv, 0);
   if (bus.empty()) return JS_UNDEFINED;
   bool muted = argc > 2 && JS_ToBool(ctx, argv[2]);
-  runtimeOf(ctx).audio->bus(bus, float(num(ctx, argc, argv, 1, 1)), muted, float(num(ctx, argc, argv, 3, 0)));
+  Runtime* r = &runtimeOf(ctx);
+  r->toHost([r, bus, muted, volume = float(num(ctx, argc, argv, 1, 1)), fade = float(num(ctx, argc, argv, 3, 0))] {
+    r->audio->bus(bus, volume, muted, fade);
+  });
   return JS_UNDEFINED;
 }
 
 JSValue js_audioStopAll(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  runtimeOf(ctx).audio->stopAll(str(ctx, argc, argv, 0), float(num(ctx, argc, argv, 1, 0)));
+  Runtime* r = &runtimeOf(ctx);
+  r->toHost([r, bus = str(ctx, argc, argv, 0), fade = float(num(ctx, argc, argv, 1, 0))] { r->audio->stopAll(bus, fade); });
   return JS_UNDEFINED;
 }
 
@@ -72,8 +85,9 @@ JSValue js_audioSound(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
   std::string url = str(ctx, argc, argv, 0);
   if (url.empty()) return JS_UNDEFINED;
   std::string abs = resolved(ctx, url);
-  if (magic == 0) runtimeOf(ctx).audio->preload(abs);
-  else if (magic == 1) runtimeOf(ctx).audio->unload(abs);
+  Runtime* r = &runtimeOf(ctx);
+  if (magic == 0) r->toHost([r, abs] { r->audio->preload(abs); });
+  else if (magic == 1) r->toHost([r, abs] { r->audio->unload(abs); });
   return JS_NewStringLen(ctx, abs.data(), abs.size());
 }
 

@@ -5,7 +5,9 @@
 // cancelled by a reload), HostState.set reaching on_state, jsui_call_ui
 // answered by Host.handle / useHostHandler, and state surviving a reload.
 // Built and run by the @orktes/jsui-cli test suite with
-// JSUI_REACT_HOST_DATA_BUNDLE=<path>; skipped without it.
+// JSUI_REACT_HOST_DATA_BUNDLE=<path>; skipped without it. Runs twice: as is,
+// and in the runtime's JS-thread mode (the embedder's callbacks arrive inside
+// the next tick instead of while JS runs; Runtime::jsThreadMode).
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -15,6 +17,7 @@
 #include <vector>
 
 #include "jsui/jsui.h"
+#include "runtime.h"
 #include "test.h"
 
 namespace {
@@ -25,6 +28,8 @@ struct HostDataE2E {
   std::vector<uint64_t> cancelled;
   JsuiRuntime* rt = nullptr;
   double now = 0;
+
+  bool jsThreadMode = false;
 
   bool load(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
@@ -48,6 +53,7 @@ struct HostDataE2E {
     cfg.on_call_cancel = [](void* u, uint64_t id) { static_cast<HostDataE2E*>(u)->cancelled.push_back(id); };
     cfg.call_user = this;
     rt = jsui_create(&cfg);
+    if (jsThreadMode && !jsui::internalRuntime(rt)->setJsThreadMode(true)) return false;
     // The game's data exists before the UI does.
     jsui_set_state(rt, "gold", "100");
     jsui_set_state(rt, "inventory", R"({"items":{"sword":{"count":1},"potion":{"count":2}}})");
@@ -70,10 +76,14 @@ struct HostDataE2E {
     messages.clear();
     return s;
   }
+  // Embedder callbacks the click's handlers made before the tick ran.
+  size_t callbacksBeforeTick = 0;
   void click(float x, float y) {
+    size_t before = calls.size() + uiState.size();
     jsui_send_mouse_move(rt, x, y);
     jsui_send_mouse_button(rt, x, y, JSUI_MOUSE_LEFT, 1, 0);
     jsui_send_mouse_button(rt, x, y, JSUI_MOUSE_LEFT, 0, 0);
+    callbacksBeforeTick = calls.size() + uiState.size() - before;
     tick(16);
   }
 };
@@ -93,13 +103,14 @@ bool has(const std::string& s, const std::string& needle) { return s.find(needle
 
 }  // namespace
 
-TEST(react_host_data_e2e) {
+static void runHostData(bool jsThreadMode) {
   const char* path = std::getenv("JSUI_REACT_HOST_DATA_BUNDLE");
   if (!path) {
     std::printf("  (skipped: set JSUI_REACT_HOST_DATA_BUNDLE, see packages/cli/test)\n");
     return;
   }
   HostDataE2E t;
+  t.jsThreadMode = jsThreadMode;
   CHECK(t.load(path));
   const char* err = jsui_last_error(t.rt);
   if (err) std::fprintf(stderr, "  js error: %s\n", err);
@@ -129,6 +140,7 @@ TEST(react_host_data_e2e) {
   // Host.call answered on a later frame.
   t.click(20, 20);
   CHECK_EQ(t.calls.size(), size_t(1));
+  CHECK_EQ(t.callbacksBeforeTick, size_t(jsThreadMode ? 0 : 1));  // on_call: in the tick / at once
   if (t.calls.size() != 1) return;
   CHECK_EQ(t.calls[0].second, std::string(R"(shop.buy {"item":"potion"})"));
   t.tick(100);
@@ -144,6 +156,7 @@ TEST(react_host_data_e2e) {
   // UI-owned state reaches on_state and jsui_get_state.
   t.click(20, 60);
   CHECK_EQ(t.uiState.size(), size_t(1));
+  CHECK_EQ(t.callbacksBeforeTick, size_t(jsThreadMode ? 0 : 1));
   if (!t.uiState.empty()) CHECK_EQ(t.uiState[0].second, std::string(R"({"volume":0.25})"));
   const char* settings = jsui_get_state(t.rt, "settings");
   CHECK(settings && std::string(settings) == R"({"volume":0.25})");
@@ -185,3 +198,9 @@ TEST(react_host_data_e2e) {
   if (err) std::fprintf(stderr, "  js error: %s\n", err);
   CHECK(err == nullptr);
 }
+
+TEST(react_host_data_e2e) { runHostData(false); }
+
+// The same, with the embedder's callbacks (on_message, on_state, on_call,
+// on_call_cancel, Host.handle results) queued for the tick.
+TEST(react_host_data_e2e_js_thread_mode) { runHostData(true); }

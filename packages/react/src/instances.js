@@ -280,13 +280,15 @@ export class HostInstance {
   }
 
   measure(callback) {
-    const m = measureNode(this.id);
-    if (callback) callback(m.x, m.y, m.width, m.height, m.pageX, m.pageY);
+    measureLater(this.id, (m) => {
+      if (callback) callback(m.x, m.y, m.width, m.height, m.pageX, m.pageY);
+    });
   }
 
   measureInWindow(callback) {
-    const m = measureNode(this.id);
-    if (callback) callback(m.pageX, m.pageY, m.width, m.height);
+    measureLater(this.id, (m) => {
+      if (callback) callback(m.pageX, m.pageY, m.width, m.height);
+    });
   }
 
   measureLayout(relativeTo, onSuccess, onFail) {
@@ -295,9 +297,14 @@ export class HostInstance {
       if (onFail) onFail();
       return;
     }
-    const a = measureNode(this.id);
-    const b = measureNode(other);
-    if (onSuccess) onSuccess(a.pageX - b.pageX, a.pageY - b.pageY, a.width, a.height);
+    // Both answers arrive together, in request order.
+    let a = null;
+    measureLater(this.id, (m) => {
+      a = m;
+    });
+    measureLater(other, (b) => {
+      if (onSuccess) onSuccess(a.pageX - b.pageX, a.pageY - b.pageY, a.width, a.height);
+    });
   }
 
   focus() {
@@ -363,6 +370,18 @@ export class TextInstance {
 }
 
 const ZERO = { x: 0, y: 0, width: 0, height: 0, pageX: 0, pageY: 0 };
+
+// The callback forms of measure (React Native's semantics): `cb(layout)`
+// right away, or, when JS runs on a thread of its own (native.asyncMeasure),
+// after the layout that follows the current commit (__jsui_native.measureAsync).
+export function measureLater(id, cb) {
+  if (native.asyncMeasure && typeof native.measureAsync === 'function') {
+    native.measureAsync(id, (m) => cb(m || ZERO));
+    return;
+  }
+  cb(measureNode(id));
+}
+
 export function measureNode(id) {
   if (typeof native.measure !== 'function') {
     warnOnce('measure', '[jsui] __jsui_native.measure is not available');

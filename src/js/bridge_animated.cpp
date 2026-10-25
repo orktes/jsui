@@ -1,7 +1,9 @@
 // __jsui_native.animated: the native Animated driver's bridge (React
 // Native's NativeAnimatedModule surface), used by @orktes/jsui-react when an
 // animation runs with useNativeDriver: true. See animated/native_animated.h.
-// Graph changes are recorded as commands (js/command_buffer.h).
+// Graph changes are recorded as commands (js/command_buffer.h). In the
+// runtime's JS-thread mode getValue and stopAnimation's velocity come from
+// the frame snapshot (frame_snapshot.h), or from what JS itself wrote since.
 #include "animated/native_animated.h"
 #include "js/engine_impl.h"
 #include "runtime.h"
@@ -71,7 +73,11 @@ JSValue js_dropNode(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
 }
 
 JSValue js_setValue(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  commands(ctx).pushXY(Op::AnimSetValue, tagArg(ctx, argc, argv, 0), numArg(ctx, argc, argv, 1), 0);
+  uint32_t tag = tagArg(ctx, argc, argv, 0);
+  double v = numArg(ctx, argc, argv, 1);
+  commands(ctx).pushXY(Op::AnimSetValue, tag, v, 0);
+  JsEngine::Impl& impl = implOf(ctx);
+  if (impl.threaded) impl.animWrites[int(int32_t(tag))] = {v, impl.publishedBatches + 1};
   return JS_UNDEFINED;
 }
 
@@ -80,20 +86,50 @@ JSValue js_setOffset(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
   return JS_UNDEFINED;
 }
 
+// Flattening / extracting moves the raw value by the offset, which JS-thread
+// mode does not follow: getValue answers from the snapshot again (one frame
+// behind until the command is applied).
 JSValue js_flattenOffset(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   commands(ctx).push(Op::AnimFlattenOffset, tagArg(ctx, argc, argv, 0));
+  implOf(ctx).animWrites.erase(intArg(ctx, argc, argv, 0));
   return JS_UNDEFINED;
 }
 
 JSValue js_extractOffset(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   commands(ctx).push(Op::AnimExtractOffset, tagArg(ctx, argc, argv, 0));
+  implOf(ctx).animWrites.erase(intArg(ctx, argc, argv, 0));
   return JS_UNDEFINED;
 }
 
-// A read: what JS recorded is applied first.
+// JS-thread mode: drops the bookkeeping of writes and starts the snapshot
+// `snap` includes (only now and then: it is only a bound on memory).
+void sweepWrites(JsEngine::Impl& impl, const FrameSnapshot& snap) {
+  if (impl.animWrites.size() + impl.animStarts.size() < 256) return;
+  for (auto it = impl.animWrites.begin(); it != impl.animWrites.end();)
+    it = it->second.batch <= snap.appliedBatches ? impl.animWrites.erase(it) : std::next(it);
+  for (auto it = impl.animStarts.begin(); it != impl.animStarts.end();)
+    it = it->second <= snap.appliedBatches ? impl.animStarts.erase(it) : std::next(it);
+}
+
+// A read: what JS recorded is applied first. JS-thread mode: the value JS
+// set last, unless the snapshot is newer than that write.
 JSValue js_getValue(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  implOf(ctx).syncPoint();
-  return JS_NewFloat64(ctx, na(ctx).getValue(intArg(ctx, argc, argv, 0)));
+  JsEngine::Impl& impl = implOf(ctx);
+  int tag = intArg(ctx, argc, argv, 0);
+  if (impl.threaded) {
+    std::shared_ptr<const FrameSnapshot> snap = impl.rt.snapshots.current();
+    auto w = impl.animWrites.find(tag);
+    if (w != impl.animWrites.end()) {
+      if (!snap || snap->appliedBatches < w->second.batch) return JS_NewFloat64(ctx, w->second.value);
+      impl.animWrites.erase(w);
+    }
+    if (!snap) return JS_NewFloat64(ctx, 0);
+    sweepWrites(impl, *snap);
+    auto v = snap->values.find(tag);
+    return JS_NewFloat64(ctx, v == snap->values.end() ? 0 : v->second);
+  }
+  impl.syncPoint();
+  return JS_NewFloat64(ctx, na(ctx).getValue(tag));
 }
 
 // startAnimation(id, valueTag, config): starts on the runtime clock now.
@@ -103,19 +139,44 @@ JSValue js_startAnimation(JSContext* ctx, JSValueConst, int argc, JSValueConst* 
   if (argc > 2) writeValue(ctx, argv[2], w);
   else w.null();
   cmds.end(Op::AnimStart, tagArg(ctx, argc, argv, 0), tagArg(ctx, argc, argv, 1));
-  const CommandBuffer::Result& r = implOf(ctx).applyNow();
+  JsEngine::Impl& impl = implOf(ctx);
+  // JS-thread mode: running from this batch on (stopAnimation below).
+  if (impl.threaded) impl.animStarts[intArg(ctx, argc, argv, 0)] = impl.publishedBatches + 1;
+  const CommandBuffer::Result& r = impl.applyNow();
   if (!r.ok) return JS_ThrowTypeError(ctx, "Animated (native): %s", r.error.c_str());
   return JS_UNDEFINED;
 }
 
 // stopAnimation(id) -> {velocity} if it was running, else null. The caller
 // reads the value with getValue and reports the end itself.
+//
+// JS-thread mode: the stop is applied with the batch; the answer comes from
+// the snapshot (whether it ran on the last frame, and its velocity then), or
+// {velocity: 0} for an animation started after it. One frame's
+// approximation: the final value still arrives through __jsui_onAnimatedEnd.
 JSValue js_stopAnimation(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   commands(ctx).push(Op::AnimStop, tagArg(ctx, argc, argv, 0));
-  const CommandBuffer::Result& r = implOf(ctx).applyNow();
-  if (!r.ok) return JS_NULL;
+  JsEngine::Impl& impl = implOf(ctx);
+  double velocity = 0;
+  if (impl.threaded) {
+    int id = intArg(ctx, argc, argv, 0);
+    std::shared_ptr<const FrameSnapshot> snap = impl.rt.snapshots.current();
+    auto st = impl.animStarts.find(id);
+    bool unseen = st != impl.animStarts.end() && (!snap || snap->appliedBatches < st->second);
+    if (st != impl.animStarts.end()) impl.animStarts.erase(st);
+    if (!unseen) {
+      if (!snap) return JS_NULL;
+      auto a = snap->animations.find(id);
+      if (a == snap->animations.end()) return JS_NULL;
+      velocity = a->second;
+    }
+  } else {
+    const CommandBuffer::Result& r = impl.applyNow();
+    if (!r.ok) return JS_NULL;
+    velocity = r.number;
+  }
   JSValue o = JS_NewObject(ctx);
-  JS_SetPropertyStr(ctx, o, "velocity", JS_NewFloat64(ctx, r.number));
+  JS_SetPropertyStr(ctx, o, "velocity", JS_NewFloat64(ctx, velocity));
   return o;
 }
 

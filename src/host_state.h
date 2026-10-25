@@ -5,10 +5,17 @@
 // Every change bumps a runtime-wide version counter, so a key's version is
 // unique for its lifetime and JS can cache its parsed value by version (a
 // key that was never set or was removed has version 0).
+//
+// Thread safety: JS on its own thread reads and writes keys while the owner
+// thread does too (jsui_set_state, native Animated host-state nodes), so
+// every member takes the store's lock. Members returning pointers into the
+// store (json, value, patchesSince) need the caller to hold lock() for as
+// long as it uses them. onChange runs outside the lock.
 #pragma once
 
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -34,16 +41,27 @@ class HostState {
   // Removes the key. Returns true if it existed.
   bool remove(const std::string& key, bool fromUi = false);
 
+  // Held while a pointer from json() / value() / patchesSince() is used
+  // (recursive: the other members may be called meanwhile).
+  std::unique_lock<std::recursive_mutex> lock() const { return std::unique_lock<std::recursive_mutex>(mutex_); }
+
   // 0 when the key does not exist.
   uint64_t version(const std::string& key) const;
-  // Current JSON text of `key` (serialized lazily after patches), or nullptr.
+  // Current JSON text of `key` (serialized lazily after patches), or nullptr
+  // (valid until the next change; see lock()).
   const std::string* json(const std::string& key);
+  // Copies the JSON text of `key` into *out. False when it is unset.
+  bool jsonCopy(const std::string& key, std::string* out);
   std::vector<std::string> keys() const;
-  // The parsed value of `key`, or nullptr (valid until the next change).
+  // The parsed value of `key`, or nullptr (valid until the next change; see
+  // lock()).
   const Json* value(const std::string& key) const;
   // Called after every change of a key, by the embedder or by JS (native
-  // Animated host-state bindings follow it).
+  // Animated host-state bindings follow it), on the thread that changed it.
   std::function<void(const std::string&)> onChange;
+  // JS on its own thread: its changes (fromUi) do not call onChange; the
+  // runtime calls it for them on the owner thread (Runtime::jsThreadMode).
+  bool deferUiChanges = false;
 
   // The merge patches that took `key` from version `since` to its current
   // version, oldest first, or false when they are not all known (the key
@@ -54,7 +72,7 @@ class HostState {
   // Keys changed by the embedder since the last call (deduplicated, in
   // order of first change). The runtime hands them to JS once per tick.
   std::vector<std::string> takeDirty();
-  bool hasDirty() const { return !dirty_.empty(); }
+  bool hasDirty() const;
 
  private:
   struct Patch {
@@ -72,6 +90,9 @@ class HostState {
     size_t patchBytes = 0;
   };
   void markDirty(const std::string& key);
+  // After a change: onChange, unless JS changed it and defers (unlocked).
+  void changed(const std::string& key, bool fromUi);
+  mutable std::recursive_mutex mutex_;
   std::unordered_map<std::string, Entry> entries_;
   std::vector<std::string> dirty_;
   std::unordered_set<std::string> dirtySet_;

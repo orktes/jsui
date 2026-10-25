@@ -359,7 +359,12 @@ uint64_t ResourceLoader::load(const std::string& url, Callback cb) {
 }
 
 uint64_t ResourceLoader::load(LoadRequest req, Callback cb) {
-  uint64_t id = nextId_++;
+  uint64_t id = reserveId();
+  load(id, std::move(req), std::move(cb));
+  return id;
+}
+
+void ResourceLoader::load(uint64_t id, LoadRequest req, Callback cb) {
   pending_[id] = {std::move(cb), req.url, req.background};
   if (req.background) background_++;
   if (req.url.rfind("data:", 0) == 0) {
@@ -373,7 +378,6 @@ uint64_t ResourceLoader::load(LoadRequest req, Callback cb) {
   } else {
     builtinLoad(id, std::move(req));
   }
-  return id;
 }
 
 #if defined(__EMSCRIPTEN__)

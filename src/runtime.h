@@ -11,7 +11,9 @@
 
 #include "audio/audio.h"
 #include "core/document.h"
+#include "frame_snapshot.h"
 #include "host_buffers.h"
+#include "host_queue.h"
 #include "js/engine.h"
 #include "js/inbound.h"
 #include "host_state.h"
@@ -138,13 +140,51 @@ class Runtime {
   void freeDestroyedNodes();
   bool jsShouldYield() const { return jsSliceMs > 0 && wallMs() - tickWallStart >= jsSliceMs; }
 
+  // ---- JS on its own thread (docs/ARCHITECTURE.md "Shared state")
+  // JS-thread mode: JS reaches the runtime only the ways a JS thread will
+  // (JS still runs on the owner thread for now). The embedder's callbacks
+  // JS makes are queued for the tick (hostQueue), sync reads come from the
+  // frame snapshot (snapshots) or a proxy call, host buffers from published
+  // copies, measure callbacks after the next layout, perf counters through
+  // the engine's own block. Off by default.
+  bool jsThreadMode() const { return jsThreadMode_; }
+  // Switches the mode, which rebuilds the JS engine: before the first
+  // bundle load only (false afterwards).
+  bool setJsThreadMode(bool on);
+  // The embedder callbacks JS made, run in order inside the tick (and after
+  // a bundle evaluates).
+  HostQueue hostQueue;
+  // From JS: runs `fn` now, or on the owner thread in the next drain of
+  // hostQueue in JS-thread mode.
+  void toHost(std::function<void()> fn);
+  // How long a proxied read (HostQueue::call) waits for the owner thread.
+  static constexpr double kProxyTimeoutMs = 250;
+  // What JS reads synchronously in JS-thread mode (frame_snapshot.h).
+  SnapshotStore snapshots;
+  // Command batches applied (the engine bumps it; FrameSnapshot::appliedBatches).
+  std::atomic<uint64_t> appliedBatches{0};
+  // measureAsync requests the engine's commands handed over; answered after
+  // this tick's layout, in order.
+  struct MeasureRequest {
+    uint64_t req;
+    uint32_t id;
+  };
+  std::vector<MeasureRequest> measureRequests;
+  // log / reportError on behalf of JS (queued in JS-thread mode).
+  void jsLog(JsuiLogLevel level, const std::string& msg);
+  void jsReportError(const std::string& msg);
+
   // Shared host state (jsui_set_state / HostState in JS). Lives as long as
   // the runtime, across JS contexts.
   HostState state;
   // jsui_set_state / jsui_patch_state (json NULL removes). Logs invalid JSON.
   int setState(const char* key, const char* json, bool patch);
-  // A JS-originated change of `key`: tells the embedder (on_state).
+  // A JS-originated change of `key`: tells the embedder (on_state). `json`:
+  // the key's text as JS left it (nullptr: removed), else read now.
   void uiStateChanged(const std::string& key);
+  void uiStateChanged(const std::string& key, const std::string* json);
+  // jsui_get_state's answer (valid until the next call into the runtime).
+  std::string stateText;
 
   // Frame data (jsui_set_buffer / jsui_map_buffer; HostBuffer in JS). Lives
   // as long as the runtime; JS views point into it (declared before js).
@@ -155,7 +195,7 @@ class Runtime {
 
   // Calls: Host.call <-> on_call / jsui_resolve_call, and
   // jsui_call_ui <-> Host.handle.
-  uint64_t newCallId() { return nextCallId_++; }
+  uint64_t newCallId() { return nextCallId_.fetch_add(1); }
   int resolveCall(uint64_t id, const char* json);
   int rejectCall(uint64_t id, const char* message);
   // A Host.call ended unanswered on the JS side (timeout): tells the embedder.
@@ -226,6 +266,14 @@ class Runtime {
   void resetEngine();
   // Hands native animation end events / value updates to JS.
   void deliverAnimatedEvents();
+  // JS-thread mode: runs the queued host callbacks and merges the engine's
+  // perf counters.
+  void drainHost();
+  // JS-thread mode: takes and publishes a frame snapshot.
+  void publishSnapshot();
+  // Answers measureRequests (after layout).
+  void answerMeasures();
+  bool jsThreadMode_ = false;
   // Image onLoad / onError / onProgress for images that settled (React
   // Native: always asynchronous, also for cached images and data URIs).
   void deliverImageEvents(Document& doc);
@@ -251,7 +299,7 @@ class Runtime {
   // taken from the engine before it is destroyed) and fails the unsettled
   // jsui_call_ui calls with `reason`.
   void endCalls(const std::vector<uint64_t>& hostCalls, const char* reason);
-  uint64_t nextCallId_ = 1;
+  std::atomic<uint64_t> nextCallId_{1};
   struct UiCall {
     JsuiCallResultFn done;
     void* user;

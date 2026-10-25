@@ -204,7 +204,23 @@ LottieCache::~LottieCache() = default;
 
 LottieCache::Entry* LottieCache::find(const std::string& url) {
   auto it = entries_.find(url);
-  return it == entries_.end() ? nullptr : it->second.get();
+  if (it != entries_.end()) return it->second.get();
+  if (url.rfind("lottie:", 0) != 0) return nullptr;
+  // Inline data JS handed over (addData) becomes an entry on first use.
+  std::string json;
+  {
+    std::lock_guard<std::mutex> lock(inlineMutex_);
+    auto in = inline_.find(url);
+    if (in == inline_.end() || !in->second) return nullptr;
+    json = std::move(*in->second);
+    in->second.reset();  // the key stays known; the entry has the JSON now
+  }
+  auto e = std::make_unique<Entry>();
+  e->inline_ = true;
+  e->json = std::move(json);
+  e->state = available() ? State::Ready : State::Failed;
+  if (!available()) e->error = "Lottie is not available in this build (JSUI_LOTTIE off)";
+  return entries_.emplace(url, std::move(e)).first->second.get();
 }
 
 const LottieCache::Entry* LottieCache::find(const std::string& url) const {
@@ -220,14 +236,10 @@ std::string LottieCache::addData(std::string json) {
   char buf[48];
   std::snprintf(buf, sizeof buf, "lottie:%016llx-%zx", static_cast<unsigned long long>(h), json.size());
   std::string key = buf;
-  if (!find(key)) {
-    auto e = std::make_unique<Entry>();
-    e->inline_ = true;
-    e->json = std::move(json);
-    e->state = available() ? State::Ready : State::Failed;
-    if (!available()) e->error = "Lottie is not available in this build (JSUI_LOTTIE off)";
-    entries_.emplace(key, std::move(e));
-  }
+  // Kept aside under a lock (JS may call this on its own thread); the owner
+  // thread makes the entry when a view asks for the key (find).
+  std::lock_guard<std::mutex> lock(inlineMutex_);
+  if (!inline_.count(key)) inline_.emplace(key, std::make_unique<std::string>(std::move(json)));
   return key;
 }
 

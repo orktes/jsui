@@ -1265,7 +1265,8 @@ Native globals (installed by `JsEngine`):
 | `animated.*` | the native Animated driver (React Native's NativeAnimatedModule): `createNode(tag, config)`, `connect` / `disconnect(parent, child)`, `connectToView` / `disconnectFromView(propsTag, id)`, `dropNode`, `setValue` / `setOffset` / `flattenOffset` / `extractOffset` / `getValue(tag)`, `startAnimation(id, tag, config)`, `stopAnimation(id) → {velocity} \| null`, `addEventMapping(id, eventType, path, tag)` / `removeEventMapping`, `startListening` / `stopListening(tag)`. See "Animated" |
 | `configureLayoutAnimation(config)` | arms a LayoutAnimation (`{duration, create, update, delete}`) for the layout pass after the commit in progress; `@orktes/jsui-react` calls it from `prepareForCommit` after `LayoutAnimation.configureNext` |
 | `destroyNode(id)` | free a detached subtree |
-| `measure(id) → {x, y, width, height, pageX, pageY}` | layout of a node (synchronous; runs a pending layout first). `null` for unknown ids |
+| `measure(id) → {x, y, width, height, pageX, pageY}` | layout of a node (synchronous; runs a pending layout first). `null` for unknown ids. In JS-thread mode: the last frame's layout (see "Shared state") |
+| `measureAsync(id, callback)` / `asyncMeasure` | React Native's measure: `callback({x, y, width, height, pageX, pageY} \| null)` after the layout that follows the commit in progress (a `Measure` command, answered by `Runtime::answerMeasures` with the onLayout events). `asyncMeasure` is `true` in JS-thread mode, where `HostInstance.measure*` and `UIManager.measure*` use it |
 | `focus(id)`, `blur(id)` | `InputManager::focus` / `blur` |
 | `scrollTo(id, x, y, animated)` | `InputManager::scrollTo` (clamped, dispatches `scroll`). `animated`: eases there on the runtime clock; otherwise immediate (and stops a running fling) |
 | `scrollToEnd(id, contentId, horizontal, animated)` | scrolls to the content container's laid-out size minus the ScrollView's on the scroll axis (`contentId` 0: the ScrollView itself), measured when the command is applied; `HostInstance.scrollToEnd` uses it when present |
@@ -1321,8 +1322,9 @@ single-threaded and behaves exactly as when each call applied at once:
 * **Reads and host callbacks** apply what is recorded first: `measure`,
   `getProps` and `animated.getValue` answer from the tree JS built, and
   `postMessage`, `setState` / `patchState`, `hostCall` and the font calls
-  (which re-measure text) see it too. On a JS thread these reads will come
-  from a snapshot of the last frame instead.
+  (which re-measure text) see it too. In JS-thread mode these reads come
+  from the frame snapshot instead and the callbacks are queued (see
+  "Shared state").
 * **Ops that answer or call back** (`CommandBuffer::appliesAtOnce`) are
   applied as soon as they are recorded, with everything before them:
   focus / blur / scroll / selection run JS event handlers inside the call,
@@ -1379,6 +1381,83 @@ long after they were posted, on the runtime clock, as from a busy JS thread
 (`tests/native/input_test.cpp` "late JS answers", `text_input_test.cpp`).
 Not routed yet: the inspector's `poll()`, `releaseBuffer` (host buffers) and
 the host JS engine's own loader completions.
+
+### Shared state
+
+The third step towards a JS thread: everything JS shares with the owner
+thread (the thread calling `jsui_tick`) is made safe to share, and a
+**JS-thread mode** (`Runtime::setJsThreadMode`, before the first bundle
+load; off by default, the C API comes with the thread itself) makes JS
+reach the runtime only the ways a JS thread will. JS still runs on the
+owner thread; the default mode behaves exactly as before.
+
+* **Locks.** `HostState` takes a (recursive) lock in every member; members
+  that hand out pointers into the store (`json`, `value`, `patchesSince`)
+  are used under `HostState::lock()` (the bridge's `getState`, native
+  Animated `hostState` nodes). `jsui_get_state` returns a copy
+  (`Runtime::stateText`). The host texture **size table**
+  (`HostTextures::size` / `keys`) has its own lock; owner-side reads of the
+  entries stay unlocked. `ShaderEffects` locks its program cache and warm-up
+  queue (sources compile outside the lock); `LottieCache::addData` keeps
+  inline JSON aside under a lock until the owner thread's `find` makes the
+  entry. Loader request ids, Audio voice ids and call ids come from atomic
+  counters (`ResourceLoader::reserveId`, `Audio::reserveVoice`), so JS names
+  a request before the owner thread starts it.
+* **Host buffers: copy-on-publish.** A JS thread cannot view storage the
+  owner thread rewrites. In JS-thread mode `buffer(key)` subscribes the key
+  (`HostBuffers::subscribe`) and reads the copy `HostBuffers::publish`
+  made: at the start of each tick (before `__jsui_onHostBuffer`) for keys
+  whose version changed, plus a proxy call the first time a key is read.
+  `bufferVersion` / `bufferKeys` read the version table of the same
+  publish. The ArrayBuffer holds a reference to its copy, so a view JS keeps
+  keeps its frame instead of being detached when the storage moves; a copy
+  no reader holds is rewritten in place. Native Animated `hostBuffer` nodes
+  keep reading the live storage (no lag).
+* **Frame snapshot** (`src/frame_snapshot.h`). Taken on the owner thread
+  after the tick's layout (and at the start of a tick whose surface table
+  changed, after `jsui_tick_native`, and before a bundle evaluates) and
+  swapped under a lock (`SnapshotStore`): per-surface viewport, app key and
+  props, every attached node's layout (local and page rect), every Animated
+  value node's raw value and every running animation's velocity, and the
+  number of command batches applied before it. In JS-thread mode
+  `measure`, `viewport`, `surfaceApp`, `animated.getValue` and
+  `stopAnimation`'s velocity read it. A value JS set (`setValue`) reads back
+  as set until a snapshot includes the batch that carried it; an animation
+  JS started after the snapshot stops with `{velocity: 0}`;
+  `flattenOffset` / `extractOffset` fall back to the snapshot. These answers
+  are one frame old at most.
+* **Host-callback queue** (`src/host_queue.h`). In JS-thread mode the
+  embedder's callbacks JS makes are posted (`Runtime::toHost`, `jsLog`,
+  `jsReportError`) and run in order on the owner thread: at the start of
+  the tick, after the tick's JS (so JS host-state writes reach native
+  Animated `hostState` bindings, `HostState::deferUiChanges`, before they
+  tick), after layout (before `jsui_call_ui` results), after a bundle
+  evaluates, and before a reload's cancellations. That covers `on_message`,
+  `on_state` (with the text JS wrote), `on_call` / `on_call_cancel`,
+  Host.handle results, audio requests (`on_audio`), `log` / errors /
+  `devError`, `reload`, resource loads (`fetch`, `loadFont`; a custom
+  `JsuiLoadFn` runs on the owner thread) and cancels, and the clipboard
+  setter. Reads only the owner thread can answer are **proxy calls**
+  (`HostQueue::call`): `getClipboard`, `getProps` (the native tree as of
+  the last applied batch) and a buffer's first copy. From another thread
+  the caller waits until the owner thread ran it (`kProxyTimeoutMs`); on
+  the owner thread it drains the queue first, so the order stays FIFO.
+* **Async measure.** `measureAsync(id, cb)` records a `Measure` command; the
+  owner thread answers after the next layout, in the same batch as the
+  onLayout events (`JsEngine::measured`). In JS-thread mode
+  `HostInstance.measure` / `measureInWindow` / `measureLayout` and
+  `UIManager.measure*` use it (`native.asyncMeasure`): React Native's
+  semantics, one frame later than the synchronous form.
+* **JS perf block.** Counters JS bumps (`bridgeCalls`, `valueConversions`,
+  `jsCalls`, `jsJobs`) go through `Impl::counters`: the main document's, or
+  in JS-thread mode a block of the engine's own, merged into the document's
+  on the owner thread (`JsEngine::mergePerf`: in the tick and in
+  `jsui_get_perf`). Phase times stay on the document's `Perf`.
+
+Still direct, behind the command buffer's sync points: font registration
+(`loadFontData`, `unloadFont`, fallbacks, the default family), shader
+preloads and Lottie data hand-off (now thread-safe), and the calls that
+apply at once (`CommandBuffer::appliesAtOnce`).
 
 Standard globals (`src/js/prelude.cpp` + `host_api.cpp`):
 

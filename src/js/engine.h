@@ -38,6 +38,7 @@
 namespace jsui {
 
 class Runtime;
+struct PerfCounters;
 
 // The engine behind the bundle. Two implementations: QuickJsEngine
 // (engine.cpp, every platform) and, in WASM builds with JSUI_HOST_JS, the
@@ -96,6 +97,19 @@ class JsEngine {
   virtual bool dropCall(uint64_t id) = 0;
   // Ids of the pending calls (the engine is going away).
   virtual std::vector<uint64_t> pendingCalls() const = 0;
+
+  // Answers of measureAsync requests (Runtime::measureRequests), after
+  // layout: each request's callback gets {x, y, width, height, pageX,
+  // pageY}, or null for a node that is gone.
+  struct MeasureResult {
+    uint64_t req = 0;
+    bool found = false;
+    float x = 0, y = 0, width = 0, height = 0, pageX = 0, pageY = 0;
+  };
+  virtual void measured(const std::vector<MeasureResult>& results) {}
+  // JS-thread mode: adds the perf counters JS counted since the last call
+  // (its own block) into `into`.
+  virtual void mergePerf(PerfCounters& into) {}
 
   // True while JS is on the stack (native code called from JS). Destroying
   // the engine then is not allowed; Runtime defers reloads instead.

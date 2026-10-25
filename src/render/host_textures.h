@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -52,9 +53,12 @@ class HostTextures {
   // jsui_texture_updated. False for an unknown key.
   bool updated(const std::string& key);
   bool remove(const std::string& key);
+  // Owner thread.
   const Entry* find(const std::string& key) const;
   // 0: unset; changes whenever the texture's size or handle does.
   uint64_t version(const std::string& key) const;
+  // Any thread (JS reads them on its own thread): the size table.
+  bool size(const std::string& key, int* width, int* height, uint64_t* version) const;
   std::vector<std::string> keys() const;
 
   // Keys whose description changed since the last take (JS: useHostTexture).
@@ -77,7 +81,17 @@ class HostTextures {
   // New contents (and, with `layout`, a new size): repaint / relayout users.
   void touch(const std::string& key, bool layout);
 
+  // Records the size of `key` (nullptr: removed) in the size table.
+  void setSize(const std::string& key, const Entry* e);
+
   std::unordered_map<std::string, Entry> entries_;
+  // What JS may read of entries_ (sizesMutex_).
+  struct Size {
+    int width = 0, height = 0;
+    uint64_t version = 0;
+  };
+  mutable std::mutex sizesMutex_;
+  std::unordered_map<std::string, Size> sizes_;
   std::unordered_map<std::string, std::unordered_set<Node*>> users_;
   std::unordered_set<std::string> dirtySet_;
   std::vector<std::string> dirty_;

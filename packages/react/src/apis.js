@@ -629,16 +629,25 @@ export const TurboModuleRegistry = {
     throw new Error(`TurboModuleRegistry.getEnforcing(...): '${name}' could not be found (not available in JSUI)`);
   },
 };
+// UIManager.measure*: null for unknown nodes; after the next layout when JS
+// runs on a thread of its own (native.asyncMeasure).
+function measureRaw(id, cb) {
+  if (native.asyncMeasure && typeof native.measureAsync === 'function') native.measureAsync(id, cb);
+  else cb(typeof native.measure === 'function' ? native.measure(id) : null);
+}
+
 export const UIManager = {
   getViewManagerConfig: () => null,
   hasViewManagerConfig: () => false,
   measure(id, cb) {
-    const m = typeof native.measure === 'function' ? native.measure(id) : null;
-    if (m && cb) cb(m.x, m.y, m.width, m.height, m.pageX, m.pageY);
+    measureRaw(id, (m) => {
+      if (m && cb) cb(m.x, m.y, m.width, m.height, m.pageX, m.pageY);
+    });
   },
   measureInWindow(id, cb) {
-    const m = typeof native.measure === 'function' ? native.measure(id) : null;
-    if (m && cb) cb(m.pageX, m.pageY, m.width, m.height);
+    measureRaw(id, (m) => {
+      if (m && cb) cb(m.pageX, m.pageY, m.width, m.height);
+    });
   },
   setLayoutAnimationEnabledExperimental() {},
   configureNextLayoutAnimation(config, onEnd, onFail) {

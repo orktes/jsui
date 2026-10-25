@@ -11,12 +11,20 @@
 // Storage only moves when a buffer grows past its capacity or is removed;
 // `onRelease` then runs first, so JS views over the old memory are detached
 // before it is freed.
+//
+// JS on its own thread cannot view the storage the owner thread rewrites.
+// It reads published copies instead (copy-on-publish): a key JS asked for
+// (subscribe) is copied by publish() on the owner thread, once per tick and
+// only when its version changed; the copies and the version table are
+// shared under a lock. Native Animated hostBuffer nodes keep reading the
+// live storage on the owner thread (no lag).
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -68,6 +76,26 @@ class HostBuffers {
   // Bumped whenever an entry is removed (cached Entry pointers are stale).
   uint64_t generation() const { return generation_; }
 
+  // ---- published copies (JS on its own thread; any thread unless noted)
+  struct Copy {
+    JsuiBufferType type = JSUI_BUFFER_F32;
+    size_t count = 0;
+    uint64_t version = 0;
+    std::vector<uint8_t> bytes;  // count elements
+  };
+  // JS reads `key`: publish() copies it from now on.
+  void subscribe(const std::string& key);
+  // Owner thread: copies the subscribed buffers whose contents changed since
+  // their last copy (a copy no reader holds any more is rewritten in place)
+  // and records every key's version for publishedVersion / publishedKeys.
+  void publish();
+  // The last copy of `key` (nullptr: not subscribed / published, or unset).
+  // The copy stays valid while the pointer is held.
+  std::shared_ptr<const Copy> published(const std::string& key) const;
+  // The version of `key` as of the last publish() (0: unset).
+  uint64_t publishedVersion(const std::string& key) const;
+  std::vector<std::string> publishedKeys() const;
+
   // The storage of `key` is about to be freed (grown or removed).
   std::function<void(const std::string& key)> onRelease;
   // `key` has new contents (set / commit / remove).
@@ -81,6 +109,11 @@ class HostBuffers {
   std::unordered_set<std::string> dirtySet_;
   uint64_t nextVersion_ = 1;
   uint64_t generation_ = 1;
+  // Published copies and versions (copiesMutex_).
+  mutable std::mutex copiesMutex_;
+  std::unordered_set<std::string> subscribed_;
+  std::unordered_map<std::string, std::shared_ptr<Copy>> copies_;
+  std::unordered_map<std::string, uint64_t> versions_;
 };
 
 }  // namespace jsui

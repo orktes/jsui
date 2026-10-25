@@ -69,9 +69,10 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
   animated = std::make_unique<NativeAnimated>(doc);
   animated->findView = [this](uint32_t id) { return findNode(id); };
   animated->buffers = &buffers;
-  // JS views over storage that is about to be freed are detached first.
+  // JS views over storage that is about to be freed are detached first
+  // (JS-thread mode: JS views published copies, which stay).
   buffers.onRelease = [this](const std::string& key) {
-    if (js) js->releaseBuffer(key);
+    if (js && !jsThreadMode_) js->releaseBuffer(key);
   };
   // Animated.hostBuffer nodes follow their buffer (also in jsui_tick_native).
   buffers.onChange = [this](const std::string& key) { animated->bufferChanged(key); };
@@ -89,6 +90,7 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
 }
 
 Runtime::~Runtime() {
+  hostQueue.clear();  // callbacks JS queued do not reach an embedder tearing down
   audio->contextEnded();
   audio.reset();
   loader.cancelAll();
@@ -257,6 +259,10 @@ void Runtime::reportError(const std::string& msg) {
 }
 
 void Runtime::resetEngine() {
+  // What the old context asked of the embedder still reaches it, before the
+  // cancellations below.
+  hostQueue.drain();
+  measureRequests.clear();  // their callbacks die with the context
   std::vector<uint64_t> calls = js ? js->pendingCalls() : std::vector<uint64_t>();
   audio->contextEnded();
   js.reset();
@@ -268,6 +274,65 @@ void Runtime::resetEngine() {
   js = JsEngine::create(*this, jsKind_);
   redrawAll();
   endCalls(calls, "the UI was reloaded");
+}
+
+// ------------------------------------------------- JS on its own thread
+
+bool Runtime::setJsThreadMode(bool on) {
+  if (on == jsThreadMode_) return true;
+  if (bundleRan_ || !bundleSource.empty() || !bundleUrl.empty()) return false;
+  jsThreadMode_ = on;
+  state.deferUiChanges = on;
+  snapshots.clear();
+  resetEngine();
+  return true;
+}
+
+void Runtime::toHost(std::function<void()> fn) {
+  if (jsThreadMode_) hostQueue.post(std::move(fn));
+  else fn();
+}
+
+void Runtime::jsLog(JsuiLogLevel level, const std::string& msg) {
+  if (!jsThreadMode_) return log(level, msg);
+  hostQueue.post([this, level, msg] { log(level, msg); });
+}
+
+void Runtime::jsReportError(const std::string& msg) {
+  if (!jsThreadMode_) return reportError(msg);
+  hostQueue.post([this, msg] { reportError(msg); });
+}
+
+void Runtime::drainHost() {
+  hostQueue.drain();
+  if (js) js->mergePerf(doc.perf.counters);
+}
+
+void Runtime::publishSnapshot() { snapshots.publish(FrameSnapshot::take(*this)); }
+
+void Runtime::answerMeasures() {
+  if (measureRequests.empty() || !js) return;
+  std::vector<JsEngine::MeasureResult> results;
+  results.reserve(measureRequests.size());
+  for (const MeasureRequest& m : measureRequests) {
+    JsEngine::MeasureResult r;
+    r.req = m.req;
+    if (Node* n = findNode(m.id)) {
+      n->document()->layout();
+      Rect l = n->layoutRect(), a = n->absoluteRect();
+      r.found = true;
+      r.x = l.x;
+      r.y = l.y;
+      r.width = l.width;
+      r.height = l.height;
+      r.pageX = a.x;
+      r.pageY = a.y;
+    }
+    results.push_back(r);
+  }
+  measureRequests.clear();
+  JsEngine* engine = js.get();
+  inbound.task([engine, results = std::move(results)] { engine->measured(results); });
 }
 
 // ------------------------------------------------------------ game data
@@ -289,7 +354,12 @@ int Runtime::setState(const char* key, const char* json, bool patch) {
 }
 
 void Runtime::uiStateChanged(const std::string& key) {
-  const std::string* json = state.json(key);
+  std::string json;
+  bool set = state.jsonCopy(key, &json);
+  uiStateChanged(key, set ? &json : nullptr);
+}
+
+void Runtime::uiStateChanged(const std::string& key, const std::string* json) {
   if (session && session->joined()) session->uiEvent("state", {{"key", Value(key)}, {"value", json ? Value::parseJson(*json) : Value()}});
   if (!config.on_state) return;
   config.on_state(config.state_user, key.c_str(), json ? json->c_str() : nullptr);
@@ -425,9 +495,14 @@ bool Runtime::loadSource(const std::string& source, const std::string& name) {
   state.takeDirty();
   buffers.takeDirty();
   textures.takeDirty();
+  if (jsThreadMode_) {  // what the bundle reads as it starts
+    buffers.publish();
+    publishSnapshot();
+  }
   int ran = 0;
   inbound.take(inbound.eval(source, name), &ran);
   bool ok = ran != 0;
+  if (jsThreadMode_) drainHost();
   // Surfaces run their apps once the bundle registered its components (a
   // component registered later starts its surface then, see AppRegistry).
   bundleRan_ = true;
@@ -580,10 +655,19 @@ void Runtime::tick(double nowMs) {
 #endif
   doomed_.clear();
   for (auto& s : surfaces_) s->doc.now = nowMs;
+  // JS-thread mode: what JS asked of the embedder since the last tick (a
+  // reload among it).
+  if (jsThreadMode_) drainHost();
   if (reloadRequested_) reload();
   for (auto& s : surfaces_) {
     s->doc.frame++;
     s->input->setEventTime(std::numeric_limits<double>::quiet_NaN());  // jsui_set_event_time lasts until a tick
+  }
+  if (jsThreadMode_) {
+    // What JS reads this tick: the surfaces as they are now (new ones, new
+    // sizes) and the buffers the embedder set since the last tick.
+    if (FrameSnapshot::surfacesChanged(*this, snapshots.current().get())) publishSnapshot();
+    buffers.publish();
   }
   loader.pump();
   // Shared state the embedder changed since the last tick: subscribers
@@ -595,6 +679,9 @@ void Runtime::tick(double nowMs) {
   audio->update();
   deliverAudioEvents();
   inbound.frame(nowMs);
+  // JS-thread mode: its host-state writes reach native Animated bindings
+  // before they tick (HostState::deferUiChanges), its calls the embedder.
+  if (jsThreadMode_) drainHost();
   // Surfaces created or destroyed by callbacks below are picked up next tick.
   std::vector<Surface*> list;
   for (auto& s : surfaces_) list.push_back(s.get());
@@ -634,7 +721,14 @@ void Runtime::tick(double nowMs) {
     // A LayoutAnimation applies to the commit that armed it only.
     s->doc.disarmLayoutAnimation();
   }
+  // measureAsync callbacks get this layout (RN's measure: after the commit
+  // that asked is laid out), with the onLayout events.
+  answerMeasures();
   inbound.endBatch();
+  if (jsThreadMode_) {
+    publishSnapshot();
+    drainHost();  // before the call results below: callResult is queued
+  }
   devPoll();
   // jsui_call_ui results settled during this tick (or since the last one).
   deliverUiCallResults();
@@ -713,6 +807,7 @@ void Runtime::tickNative(double nowMs) {
     s->doc.tickLayoutAnimations(nowMs);
   }
   inbound.endBatch();
+  if (jsThreadMode_) publishSnapshot();  // what native Animated and layout did
 }
 
 void Runtime::deliverAnimatedEvents() {
@@ -854,7 +949,8 @@ bool Runtime::wantsFrame() const {
   // A pending repaint alone is not a reason to tick: the host paints after
   // the tick it already ran.
   if (reloadRequested_ || loader.pending() > 0 || (js && js->hasPendingWork(now + 17)) || animated->animating() ||
-      !animated->ends.empty() || lotties->animating() || shaders->animating() || state.hasDirty() || buffers.hasDirty() || textures.hasDirty() || audio->hasEvents() || audio->busy() || !uiResults_.empty() || !doomed_.empty())
+      !animated->ends.empty() || lotties->animating() || shaders->animating() || state.hasDirty() || buffers.hasDirty() || textures.hasDirty() || audio->hasEvents() || audio->busy() || !uiResults_.empty() || !doomed_.empty() ||
+      !hostQueue.empty() || !measureRequests.empty())
     return true;
   for (const auto& s : surfaces_)
     if (s->doc.hasDestroyed() || s->input->animating() || s->doc.layoutAnimating() || imageEventsReady(s->doc) ||

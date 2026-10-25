@@ -44,9 +44,13 @@ ShaderEffects::ShaderEffects(Runtime&) {}
 ShaderEffects::~ShaderEffects() = default;
 
 std::shared_ptr<const ShaderEffects::Program> ShaderEffects::get(const std::string& sksl) {
-  auto it = programs_.find(sksl);
-  if (it != programs_.end()) return it->second;
-  if (programs_.size() >= kMaxPrograms) programs_.clear();  // generated sources: start over
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = programs_.find(sksl);
+    if (it != programs_.end()) return it->second;
+  }
+  // Compiled outside the lock (SkRuntimeEffect::MakeForShader is
+  // thread-safe); a source compiled on two threads at once keeps the first.
   auto p = std::make_shared<Program>();
   SkRuntimeEffect::Result r = SkRuntimeEffect::MakeForShader(SkString(sksl.c_str()));
   if (!r.effect) {
@@ -59,13 +63,15 @@ std::shared_ptr<const ShaderEffects::Program> ShaderEffects::get(const std::stri
     const SkRuntimeEffect::Child* c = p->effect->findChild("content");
     p->content = c && c->type == SkRuntimeEffect::ChildType::kShader;
   }
-  programs_.emplace(sksl, p);
-  return p;
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (programs_.size() >= kMaxPrograms) programs_.clear();  // generated sources: start over
+  return programs_.emplace(sksl, p).first->second;
 }
 
 std::shared_ptr<const ShaderEffects::Program> ShaderEffects::preload(const std::string& sksl, const Value& images) {
   std::shared_ptr<const Program> p = get(sksl);
   if (!p->effect) return p;
+  std::lock_guard<std::mutex> lock(mutex_);
   for (const Warm& w : warm_)
     if (w.program == p && styleValueEquals(w.images, images)) return p;
   // Image children (`content` as the view's own painting is not one): each
@@ -441,20 +447,33 @@ void ShaderEffects::warmDraw(SkCanvas* c, const Warm& w) {
   c->restore();
 }
 
+size_t ShaderEffects::warmPending() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return warm_.size();
+}
+
 void ShaderEffects::warmAll(SkCanvas* canvas) {
-  for (const Warm& w : warm_) warmDraw(canvas, w);
-  warm_.clear();
+  std::vector<Warm> batch;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    batch.swap(warm_);
+  }
+  for (const Warm& w : batch) warmDraw(canvas, w);
 }
 
 bool ShaderEffects::warm(SkCanvas* canvas) {
-  if (warm_.empty() || !canvas) return false;
-  if (!canvas->recorder() && !canvas->recordingContext()) {  // raster: compiled is all there is
-    warm_.clear();
-    return false;
+  std::vector<Warm> batch;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (warm_.empty() || !canvas) return false;
+    if (!canvas->recorder() && !canvas->recordingContext()) {  // raster: compiled is all there is
+      warm_.clear();
+      return false;
+    }
+    size_t n = std::min<size_t>(warm_.size(), kWarmPerFrame);
+    batch.assign(warm_.begin(), warm_.begin() + n);
+    warm_.erase(warm_.begin(), warm_.begin() + n);
   }
-  size_t n = std::min<size_t>(warm_.size(), kWarmPerFrame);
-  std::vector<Warm> batch(warm_.begin(), warm_.begin() + n);
-  warm_.erase(warm_.begin(), warm_.begin() + n);
   SkImageInfo info = canvas->imageInfo().makeWH(kWarmSize, kWarmSize);
   if (info.colorType() == kUnknown_SkColorType) return false;
   SkSurfaceProps props = canvas->getBaseProps();

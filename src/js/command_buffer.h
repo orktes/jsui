@@ -62,6 +62,7 @@ class CommandBuffer {
     FlashScrollIndicators,  // a = id
     SetSelection,        // a = id, x = start, y = end (UTF-16 indices)
     LottieCommand,       // a = id, payload = command, x / y = frames (NaN: whole composition)
+    Measure,             // a = id, b = measureAsync request (answered after the next layout)
     ListenGlobal,        // a = 1 / 0 (listening or not), payload = event type
     // ---- native Animated (a, b: tags as int32 bits)
     AnimCreate,          // a = tag, payload = config

@@ -101,6 +101,11 @@ class NativeAnimated {
   // when it was not running. *lastVelocity: a spring's velocity (units/s),
   // which a spring started next on the same value continues with.
   bool stopAnimation(int id, double* lastVelocity = nullptr);
+  // For the frame snapshot (frame_snapshot.h): the raw value of every
+  // value node, and the velocity of every running animation by id (a
+  // spring's, else 0; a composite group's: 0).
+  void snapshotValues(std::unordered_map<int, double>* out) const;
+  void snapshotAnimations(std::unordered_map<int, double>* out) const;
   // Running animations, or a clock node something depends on.
   bool animating() const { return !animations_.empty() || liveClocks() > 0; }
   size_t animationCount() const { return animations_.size(); }
