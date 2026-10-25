@@ -31,6 +31,7 @@ export const mock = {
   nodes,
   calls,
   focused: null,
+  globals: new Map(), // listenGlobal: type -> the keys its listeners may veto, or '*'
   layouts: new Map(),
   messages: [],
   lottieData: new Map(), // key -> JSON
@@ -135,6 +136,11 @@ globalThis.__jsui_native = {
   },
   measure(id) {
     return mock.layouts.get(id) || { x: 0, y: 0, width: 100, height: 50, pageX: 10, pageY: 20 };
+  },
+  listenGlobal(type, on, keys) {
+    if (on) mock.globals.set(type, Array.isArray(keys) ? keys.slice() : '*');
+    else mock.globals.delete(type);
+    calls.push(['listenGlobal', type, on, keys]);
   },
   focus(id) {
     mock.focused = id;

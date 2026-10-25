@@ -4,7 +4,7 @@ import { mock } from './mock-native-editing.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement as h, useState, createRef } from 'react';
-import { TextInput, Clipboard, render } from '../src/index.js';
+import { TextInput, Clipboard, render, passive } from '../src/index.js';
 
 const byNativeID = (id) => mock.find((n) => n.props.nativeID === id);
 const wait = (ms = 0) => new Promise((r) => setTimeout(r, ms));
@@ -177,5 +177,31 @@ test('onKeyPress, host props and Clipboard', async () => {
   Clipboard.setString('copied');
   assert.equal(globalThis.__jsui_native.getClipboard(), 'copied');
   assert.equal(await Clipboard.getString(), 'copied');
+  render(null);
+});
+
+test('declared default actions: native edits without waiting for JS', async () => {
+  render(
+    h(
+      'View',
+      null,
+      h(TextInput, { nativeID: 'one' }),
+      h(TextInput, { nativeID: 'multi', multiline: true }),
+      h(TextInput, { nativeID: 'submitMulti', multiline: true, submitBehavior: 'submit' }),
+      h(TextInput, { nativeID: 'own', onKeyPress: () => {} }),
+      h(TextInput, { nativeID: 'ownPassive', onKeyDown: passive(() => {}), onTextInput: () => {} }),
+    ),
+  );
+  await wait();
+  // Its own handlers never veto native editing: passive; Enter submits, so
+  // it is declared prevented.
+  assert.deepEqual(byNativeID('one').props.__passive, ['keyDown', 'textInput']);
+  assert.deepEqual(byNativeID('one').props.preventDefaultKeys, ['Enter']);
+  // A multiline input inserts the newline natively.
+  assert.equal(byNativeID('multi').props.preventDefaultKeys, undefined);
+  assert.deepEqual(byNativeID('submitMulti').props.preventDefaultKeys, ['Enter']);
+  // The owner's handlers may veto unless marked passive.
+  assert.deepEqual(byNativeID('own').props.__passive, ['textInput']);
+  assert.deepEqual(byNativeID('ownPassive').props.__passive, ['keyDown']);
   render(null);
 });
