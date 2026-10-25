@@ -153,7 +153,7 @@ What can make a frame long, and what JSUI does about it:
 |---|---|
 | React commit (opening a screen, a big list) | None on native hosts (JS thread). In single-threaded hosts (web), React renders in ~5 ms slices across frames (`jsui_set_js_frame_budget`, default 5 ms); only the final commit is one piece. |
 | JS garbage collection | None on native hosts. Full collections are deferred to idle time between frames; an idle HUD makes no garbage and collects nothing. |
-| GPU pipeline compiles on first use | Once per pipeline per machine. JSUI compiles on a background pool, precompiles its common pipelines before the first frame (`jsui_gpu_prepare_target`), and keeps a cache file so later launches compile almost nothing. |
+| GPU pipeline compiles on first use | Once per pipeline per machine. JSUI compiles on a background pool, precompiles its common pipelines before the first frame (`jsui_gpu_prepare_target`), and keeps a cache file of the pipelines used so later launches build them before the frames need them. What a later launch's rebuild costs depends on the backend: Metal finds them in the system's shader cache; Vulkan in the driver's own pipeline cache, which JSUI saves to disk per GPU and driver (a driver update starts it over); Dawn, GL and Direct3D in the driver's or JSUI's shader cache. |
 | Text shaping for a new screen | Done in spare time before the commit when the screen renders in slices. |
 
 First launch on a cold Metal shader cache, navigating the showcase:

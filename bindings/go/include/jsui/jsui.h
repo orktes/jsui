@@ -1276,9 +1276,23 @@ JSUI_API JsuiGpuContext* jsui_gpu_create_d3d11(void* device);
  *   the first shader; jsui_gpu_set_pipeline_cache on a GL or Direct3D
  *   context names another (returns the number of shaders in it). Not in
  *   the browser (WebGL: the browser caches).
+ * - Vulkan contexts also keep the driver's pipeline cache (VkPipelineCache
+ *   data: the compiled pipelines themselves) in a file, so the precompiles
+ *   of a later launch are driver cache lookups rather than compiles:
+ *   vkdriver-<program>-<vendor>-<device>.bin beside the default pipeline
+ *   file (whatever file the host names), read when the context is created.
+ *   A thread of the context saves it while new pipelines appear,
+ *   jsui_gpu_purge saves it (call it when the app goes to the background)
+ *   and jsui_gpu_destroy saves it a last time; each save replaces the file
+ *   atomically. A file of another GPU, driver version or pipeline cache
+ *   UUID, or a damaged one, is ignored (one log line) and replaced. Nothing
+ *   to do for the host, whose VkDevice it is; JSUI_PIPELINE_CACHE=off turns
+ *   it off. Metal needs no such file (the system keeps compiled Metal
+ *   pipelines per app); Dawn's is the host device's blob cache.
  * - Development: the environment variable JSUI_PIPELINE_CACHE names a file
- *   that every Graphite context uses in place of the host's ("off": none,
- *   not even the default, Ganesh's included);
+ *   that every Graphite context uses in place of the host's (Vulkan's
+ *   driver cache: that name + ".vkdriver"; "off": none, not even the
+ *   default, Ganesh's included);
  *   JSUI_LOG_PIPELINES=1 logs every pipeline a context creates,
  *   JSUI_LOG_PIPELINES=compiled only those a frame compiled (new: not in
  *   the cache yet; known: still queued for the precompile).
