@@ -121,6 +121,8 @@ for (let r = 0; r < 4; r++) for (let c = 0; c < 6; c++) order.push(r * 6 + (r % 
 async function open(renderer) {
   const context = await browser.newContext({ viewport: { width: W, height: H }, deviceScaleFactor: DPR });
   const page = await context.newPage();
+  // A page that threw (a module that failed to mount) measures nothing.
+  page.on('pageerror', (e) => { throw new Error(`${renderer}: uncaught error on the page: ${e.message}`); });
   if (renderer === 'css') {
     await page.goto(`${ORIGIN}/test/bench-apps/hover-grid.html`);
     await page.evaluate(() => document.fonts.ready);
