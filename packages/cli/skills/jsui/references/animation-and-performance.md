@@ -33,13 +33,16 @@ function Glow({ focused, children }) {
   `interpolate` (numbers, colors, `'45deg'` strings, `extrapolate`),
   `Animated.event` (also native, e.g. `onScroll` parallax),
   `createAnimatedComponent`, `Animated.View/Text/Image/ScrollView/FlatList`.
-* **Native driver rules (same as RN):** only paint keys: `transform`,
-  `opacity`, colors (`backgroundColor`, `borderColor`, `color`, `tintColor`,
-  ...), border radii, `shadowOpacity` / `shadowRadius`, LottieView
-  `progress`, ShaderView uniforms. Layout keys (`width`, `height`, `top`,
-  `left`, `margin`, `flex`) throw "not supported by native animated module".
-  Animate `transform: [{ scaleX }]` for a bar fill (with `transformOrigin:
-  'left'`) instead of `width`, or use the JS driver for layout.
+* **Native driver keys:** every style key, unlike RN. Paint keys
+  (`transform`, `opacity`, colors such as `backgroundColor`, `borderColor`,
+  `color` and `tintColor`, border radii, `shadowOpacity` / `shadowRadius`,
+  LottieView `progress`, ShaderView uniforms) only repaint. Layout keys
+  (`width`, `height`, `top`, `left`, `margin`, `flex`) work too but relayout
+  the tree each frame they change, so prefer `transform: [{ scaleX }]` for
+  a bar fill (with `transformOrigin: 'left'`) where it does the job. More
+  native-first patterns (`Animated.derive`, `Animated.clock({...})`,
+  `Animated.format`, typewriter `reveal`, state styles, `Visibility`,
+  `<Overlay>`): [native-first.md](native-first.md).
 * A value used by a native animation stays native; don't also start a JS
   animation on it.
 * Native animations run on the runtime clock, so `jsui screenshot --wait` /
