@@ -377,8 +377,12 @@ bool JsuiView::createGpuContext(Renderer want, const String& driver, Object* int
   UtilityFunctions::print("JsuiView: rendering with Skia " + String(want == Renderer::D3D12 ? "Ganesh" : "Graphite") +
                           " on " + driver);
   // Ganesh (D3D12) has no pipeline cache.
-  if (want != Renderer::D3D12)
+  if (want != Renderer::D3D12) {
     setupPipelineCache(want == Renderer::Vulkan ? "vulkan" : want == Renderer::Metal ? "metal" : "webgpu");
+    // The views' targets are RGBA8 (targetFor): start their common pipelines
+    // compiling now, so the first frames do not wait on them.
+    jsui_gpu_prepare_target(gpu_, want == Renderer::Metal ? kMTLPixelFormatRGBA8Unorm : 0);
+  }
   return true;
 }
 
