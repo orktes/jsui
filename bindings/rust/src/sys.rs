@@ -35,7 +35,7 @@ pub type JsuiCallResultFn =
 pub type JsuiAudioFn = *const c_void;
 /// `JsuiJsReadyFn`: runs on the JS thread (see the header's "JS thread").
 pub type JsuiJsReadyFn = Option<unsafe extern "C" fn(user: *mut c_void)>;
-pub type JsuiGLGetProcFn =Option<unsafe extern "C" fn(user: *mut c_void, name: *const c_char) -> *mut c_void>;
+pub type JsuiGLGetProcFn = Option<unsafe extern "C" fn(user: *mut c_void, name: *const c_char) -> *mut c_void>;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
