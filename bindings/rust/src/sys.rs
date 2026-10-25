@@ -69,6 +69,11 @@ pub struct JsuiConfig {
     pub js_ready_user: *mut c_void,
 }
 
+pub const JSUI_JS_THREAD_OFF: c_int = 0;
+pub const JSUI_JS_THREAD_ON: c_int = 1;
+pub const JSUI_JS_THREAD_LOCKSTEP: c_int = 2;
+pub const JSUI_TICK_SYNC_JS: c_int = 1;
+
 pub type JsuiBufferType = c_int;
 pub const JSUI_BUFFER_F32: JsuiBufferType = 0;
 pub const JSUI_BUFFER_F64: JsuiBufferType = 1;
@@ -187,6 +192,11 @@ extern "C" {
 
     pub fn jsui_set_viewport(rt: *mut JsuiRuntime, width: c_int, height: c_int, pixel_ratio: c_float);
     pub fn jsui_tick(rt: *mut JsuiRuntime, now_ms: c_double);
+    pub fn jsui_tick_ex(rt: *mut JsuiRuntime, now_ms: c_double, flags: c_int);
+    pub fn jsui_set_js_thread(rt: *mut JsuiRuntime, mode: c_int) -> c_int;
+    pub fn jsui_js_thread(rt: *mut JsuiRuntime) -> c_int;
+    pub fn jsui_sync(rt: *mut JsuiRuntime, timeout_ms: c_double) -> c_int;
+    pub fn jsui_debug_stall_js(rt: *mut JsuiRuntime, ms: c_double);
     pub fn jsui_pending_loads(rt: *mut JsuiRuntime) -> c_int;
     pub fn jsui_needs_redraw(rt: *mut JsuiRuntime) -> c_int;
     pub fn jsui_wants_frame(rt: *mut JsuiRuntime) -> c_int;

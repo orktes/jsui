@@ -420,8 +420,15 @@ jobs:
           x() { xvfb-run -a -s "-screen 0 1600x1000x24" "$@"; }
           x bindings/rust/target/release/examples/quests --selftest --screenshot bindings-out/rust.png | tee bindings-out/rust.log
           grep -q '^GPU: Skia Ganesh GL' bindings-out/rust.log && grep -q 'selftest: ok' bindings-out/rust.log
+          grep -q '^JS thread: on' bindings-out/rust.log
           x build/quests-go --selftest --screenshot bindings-out/go.png | tee bindings-out/go.log
           grep -q '^GPU: Skia Ganesh GL' bindings-out/go.log && grep -q 'selftest: ok' bindings-out/go.log
+          grep -q '^JS thread: on' bindings-out/go.log
+          # The examples run JS on its own thread by default; once more with it off.
+          x bindings/rust/target/release/examples/quests --js-thread off --selftest | tee bindings-out/rust-js-off.log
+          grep -q '^JS thread: off' bindings-out/rust-js-off.log && grep -q 'selftest: ok' bindings-out/rust-js-off.log
+          x build/quests-go --js-thread off --selftest | tee bindings-out/go-js-off.log
+          grep -q '^JS thread: off' bindings-out/go-js-off.log && grep -q 'selftest: ok' bindings-out/go-js-off.log
           for f in bindings-out/*.png; do test -s "$f"; done
       - uses: actions/upload-artifact@v4
         if: always()

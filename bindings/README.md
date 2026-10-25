@@ -56,6 +56,7 @@ Both examples take the same options:
 | `bundle.js` or a URL | the UI to run (default: the bundle built above) |
 | `--dev` | the bundle is a `jsui dev` URL: `npx jsui dev bindings/ui/app.jsx`, then `--dev http://127.0.0.1:5173/bundle.js`; edits hot-update in place |
 | `--width W --height H` | window size in logical px (default 900 x 760) |
+| `--js-thread on\|off\|lockstep` | where the UI's JS runs (default `on`: a thread of its own, as in React Native, so the window's frames never wait for JS; `off`: inside the tick; `lockstep`: its own thread, waited for every tick). The libraries' own default is off, as in the C API |
 | `--frames N --screenshot out.png` | run N frames, save what the GPU drew, exit |
 | `--selftest` | scripted round trip, then exit: a click on empty space must pass through, Add must create a quest in the program, ticking the first quest must give 50 XP and the UI must show it. Prints `selftest: ok`. |
 

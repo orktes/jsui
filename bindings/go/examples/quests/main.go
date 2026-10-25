@@ -146,6 +146,7 @@ func main() {
 	frames := flag.Int("frames", 0, "exit after N frames")
 	width := flag.Int("width", 900, "window width (logical px)")
 	height := flag.Int("height", 760, "window height (logical px)")
+	jsThread := flag.String("js-thread", "on", "where the UI's JS runs: `on` (its own thread, as in React Native), off or lockstep")
 	flag.Parse()
 	bundle := defaultBundle
 	if flag.NArg() > 0 {
@@ -188,11 +189,25 @@ func main() {
 		fw, _ := win.GetFramebufferSize()
 		return float32(fw) / float32(max(w, 1))
 	}
-	rt, err := jsui.New(jsui.Config{Width: w, Height: h, PixelRatio: pixelRatio(), DevMode: *dev})
+	mode := jsui.JSThreadOn
+	switch *jsThread {
+	case "off":
+		mode = jsui.JSThreadOff
+	case "lockstep":
+		mode = jsui.JSThreadLockstep
+	}
+	rt, err := jsui.New(jsui.Config{
+		Width: w, Height: h, PixelRatio: pixelRatio(), DevMode: *dev,
+		// JS on its own thread (React Native's model); it wakes the idle
+		// wait below when it has something for the next tick.
+		JSThread:  mode,
+		OnJSReady: glfw.PostEmptyEvent,
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer rt.Close()
+	fmt.Println("JS thread:", rt.JSThread())
 
 	app := NewApp()
 	rt.OnCall = func(c jsui.Call) {
@@ -321,7 +336,7 @@ func main() {
 	if *screenshot != "" {
 		// Settle animations, then read back what the GPU drew.
 		for i := 0; i < 30; i++ {
-			rt.Tick(jsui.NowMs() + 1000)
+			rt.TickSync(jsui.NowMs() + 1000)
 		}
 		fw, fh := win.GetFramebufferSize()
 		rt.RenderGL(gpu, 0, fw, fh, 0)

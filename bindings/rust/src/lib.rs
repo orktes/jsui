@@ -22,9 +22,13 @@
 //! }
 //! ```
 //!
-//! The runtime is single threaded: a [`Runtime`] is neither `Send` nor
-//! `Sync`, and every call (and every callback) happens on the thread that
-//! made it. Values cross the boundary as JSON text; use serde_json (or any
+//! The runtime is driven from one thread: a [`Runtime`] is neither `Send`
+//! nor `Sync`, and every call (and every callback but
+//! [`Config::on_js_ready`]) happens on the thread that made it. With
+//! [`Config::js_thread`] = [`JsThread::On`] the bundle's JS runs on a
+//! thread of its own inside the runtime, as React Native's does: ticks never
+//! wait for it, and what JS does shows a tick or more later
+//! ([`Context::tick_sync`] / [`Context::sync`] when it must not). Values cross the boundary as JSON text; use serde_json (or any
 //! JSON library) on top. Callbacks run while the runtime is inside a call
 //! (usually [`Context::tick`]) and get a [`Context`] to answer through.
 //! A panic inside a callback aborts the process (it cannot unwind into C).
@@ -65,12 +69,51 @@ pub struct Config {
     pub dev_mode: bool,
     /// No sound at all (the built-in audio backend stays off).
     pub audio_disabled: bool,
+    /// Where the bundle's JS runs. `Off` by default, as in the C API; a
+    /// windowed app usually wants `On`.
+    pub js_thread: JsThread,
+    /// With `js_thread` `On`: called **on the JS thread** when JS has work
+    /// for the next tick, to wake a loop that sleeps while idle (e.g.
+    /// `glfwPostEmptyEvent`). Must be thread safe and must not panic.
+    pub on_js_ready: Option<fn()>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { width: 1280, height: 720, pixel_ratio: 1.0, base_url: None, dev_mode: false, audio_disabled: false }
+        Config {
+            width: 1280,
+            height: 720,
+            pixel_ratio: 1.0,
+            base_url: None,
+            dev_mode: false,
+            audio_disabled: false,
+            js_thread: JsThread::Off,
+            on_js_ready: None,
+        }
     }
+}
+
+impl std::fmt::Display for JsThread {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            JsThread::Off => "off",
+            JsThread::On => "on",
+            JsThread::Lockstep => "lockstep",
+        })
+    }
+}
+
+/// Where the bundle's JS runs ([`Config::js_thread`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JsThread {
+    /// On the thread that ticks: a tick runs the frame's JS before it returns.
+    #[default]
+    Off,
+    /// On a thread of its own, as in React Native: ticks never wait for JS;
+    /// native animations, scrolling and input go on while it is busy.
+    On,
+    /// On its own thread, but every tick waits for it: the frames of `Off` (tests).
+    Lockstep,
 }
 
 /// Log severity of [`Context::on_log`].
@@ -237,6 +280,12 @@ unsafe extern "C" fn on_log_c(user: *mut c_void, level: sys::JsuiLogLevel, messa
     }
 }
 
+unsafe extern "C" fn js_ready_c(user: *mut c_void) {
+    // `user` is the `fn()` of Config::on_js_ready.
+    let f = std::mem::transmute::<*mut c_void, fn()>(user);
+    f();
+}
+
 type CallUiDone = Box<dyn FnOnce(Result<&str, &str>)>;
 
 unsafe extern "C" fn call_ui_done_c(user: *mut c_void, _id: u64, ok: c_int, result: *const c_char) {
@@ -262,6 +311,15 @@ impl Runtime {
         cfg.base_url = base_url.as_ref().map_or(ptr::null(), |s| s.as_ptr());
         cfg.dev_mode = config.dev_mode as c_int;
         cfg.audio_disabled = config.audio_disabled as c_int;
+        cfg.js_thread = match config.js_thread {
+            JsThread::Off => sys::JSUI_JS_THREAD_OFF,
+            JsThread::On => sys::JSUI_JS_THREAD_ON,
+            JsThread::Lockstep => sys::JSUI_JS_THREAD_LOCKSTEP,
+        };
+        if let Some(f) = config.on_js_ready {
+            cfg.on_js_ready = Some(js_ready_c);
+            cfg.js_ready_user = f as *const () as *mut c_void;
+        }
         cfg.log = Some(on_log_c);
         cfg.log_user = user;
         cfg.on_message = Some(on_message_c);
@@ -439,6 +497,32 @@ impl Context {
     /// animation frames, layout. Callbacks run in here.
     pub fn tick(&self, now_ms: f64) {
         unsafe { sys::jsui_tick(self.as_ptr(), now_ms) }
+    }
+    /// A tick whose JS lands on this frame (`JSUI_TICK_SYNC_JS`): with JS on
+    /// its own thread it waits (up to 250 ms) for JS to handle the frame and
+    /// what was sent before it. Scene cuts, screenshots, state that must not lag.
+    pub fn tick_sync(&self, now_ms: f64) {
+        unsafe { sys::jsui_tick_ex(self.as_ptr(), now_ms, sys::JSUI_TICK_SYNC_JS) }
+    }
+    /// With JS on its own thread: waits up to `timeout_ms` (negative: no
+    /// limit) for JS to handle what was sent to it, applies it and lays out
+    /// (callbacks run in here). `true` when JS is left idle, `false` on
+    /// timeout. Without the thread: `true` at once.
+    pub fn sync(&self, timeout_ms: f64) -> bool {
+        unsafe { sys::jsui_sync(self.as_ptr(), timeout_ms) != 0 }
+    }
+    /// The mode the runtime runs in (`Off` where the build has no threads).
+    pub fn js_thread(&self) -> JsThread {
+        match unsafe { sys::jsui_js_thread(self.as_ptr()) } {
+            sys::JSUI_JS_THREAD_ON => JsThread::On,
+            sys::JSUI_JS_THREAD_LOCKSTEP => JsThread::Lockstep,
+            _ => JsThread::Off,
+        }
+    }
+    /// Debugging: keeps JS busy for `ms` (`jsui_debug_stall_js`). With the JS
+    /// thread the ticks go on meanwhile; without, this call takes `ms`.
+    pub fn debug_stall_js(&self, ms: f64) {
+        unsafe { sys::jsui_debug_stall_js(self.as_ptr(), ms) }
     }
     /// The last tick changed what the UI would paint.
     pub fn needs_redraw(&self) -> bool {

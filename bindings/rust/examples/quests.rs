@@ -15,7 +15,7 @@ use std::ffi::{c_void, CStr, CString};
 use std::rc::Rc;
 
 use glfw::{Action, Context as _, Key, StandardCursor, WindowEvent};
-use jsui::{Call, Config, Context, GpuContext, MouseButton, Runtime};
+use jsui::{Call, Config, Context, GpuContext, JsThread, MouseButton, Runtime};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -110,6 +110,7 @@ struct Options {
     frames: u32,
     width: u32,
     height: u32,
+    js_thread: JsThread,
 }
 
 fn parse_args() -> Options {
@@ -121,6 +122,7 @@ fn parse_args() -> Options {
         frames: 0,
         width: 900,
         height: 760,
+        js_thread: JsThread::On,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -133,6 +135,13 @@ fn parse_args() -> Options {
             "--frames" => o.frames = num(&a),
             "--width" => o.width = num(&a),
             "--height" => o.height = num(&a),
+            "--js-thread" => {
+                o.js_thread = match args.next().as_deref() {
+                    Some("off") => JsThread::Off,
+                    Some("lockstep") => JsThread::Lockstep,
+                    _ => JsThread::On,
+                }
+            }
             _ if a.starts_with("--") => panic!("unknown option {a}"),
             _ => o.bundle = a,
         }
@@ -174,9 +183,14 @@ fn main() {
         height: h,
         pixel_ratio: fw as f32 / w.max(1) as f32,
         dev_mode: opt.dev,
+        // JS on its own thread (React Native's model); it wakes the idle
+        // wait below when it has something for the next tick.
+        js_thread: opt.js_thread,
+        on_js_ready: Some(|| unsafe { glfw::ffi::glfwPostEmptyEvent() }),
         ..Default::default()
     })
     .expect("jsui runtime");
+    println!("JS thread: {}", rt.js_thread());
 
     let app = Rc::new(RefCell::new(App::new()));
     {
@@ -333,7 +347,7 @@ fn main() {
     if let Some(path) = &opt.screenshot {
         // Settle animations, then read back what the GPU drew.
         for _ in 0..30 {
-            rt.tick(jsui::now_ms() + 1000.0);
+            rt.tick_sync(jsui::now_ms() + 1000.0);
         }
         let (fw, fh) = window.get_framebuffer_size();
         rt.render_gl(&gpu, 0, fw, fh, 0);
