@@ -746,7 +746,12 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* d
   });
   // Nothing changed and the target is retained: no GPU work at all (unless
   // the image must still move to another layout).
-  if (painted.isEmpty() && incremental && !needsTransition) return 0;
+  if (painted.isEmpty() && incremental && !needsTransition) {
+    // Pipelines the compile pool finished since the last frame (shader
+    // warm-ups) count here, not in the next frame that paints.
+    rt.doc.perf.counters.pipelineCompiles += g->precompiler->takeCompiles();
+    return 0;
+  }
 
 #if defined(JSUI_VULKAN)
   if (g->api == Api::Vulkan && !g->submitBarrier()) return -1;
