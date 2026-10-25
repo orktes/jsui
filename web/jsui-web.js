@@ -326,6 +326,16 @@ const ALL_MODULE = './dist-gpu/jsui.js';  // WebGPU + WebGL + CPU
 function webgpuFor(opts) {
   const mode = opts.renderer ?? 'auto';
   if (mode !== 'auto' && mode !== 'gpu' && mode !== 'webgpu') return null;
+  // Only dist-gpu/ draws with WebGPU: when moduleVersions leaves it out, no
+  // device is needed. Say so, since the page then silently renders on WebGL.
+  if (!opts.moduleUrl && opts.moduleVersions && opts.moduleVersions[ALL_MODULE.split('/')[1]] == null) {
+    if (typeof navigator !== 'undefined' && navigator.gpu) {
+      console.warn('[jsui] this browser has WebGPU, but dist-gpu/ is not deployed (moduleVersions), so the '
+        + 'UI renders with WebGL. Deploy dist-gpu/jsui.{js,wasm} from @orktes/jsui-web and list it in '
+        + 'moduleVersions to render with Skia Graphite on WebGPU.');
+    }
+    return null;
+  }
   return requestWebGPU({ allowSoftware: mode !== 'auto' });
 }
 
