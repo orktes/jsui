@@ -1,6 +1,6 @@
 {
   "name": "@orktes/jsui-react",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "React Native compatible renderer for the JSUI game UI runtime (QuickJS + Yoga + Skia).",
   "author": "Jaakko Lukkari",
   "license": "MIT",
