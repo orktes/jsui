@@ -15,7 +15,7 @@ how the runtime works inside is in
 
 | Cost to the game | Measured |
 |---|---|
-| Frame time added in Godot, Unity, Unreal (max FPS with vs without JSUI) | [being measured](#frame-time-in-godot-unity-and-unreal) |
+| Frame time added by a moving game HUD, Unity / Unreal (Metal) | **+0.04 / +0.08 ms** ([all engines](#frame-time-in-game-engines)) |
 | JS per frame, demo game HUD at rest (1080p) | **5 µs** (0.03% of a 16.67 ms frame) |
 | JS per frame, every showcase game screen at rest | **~0** (JS runs only on discrete events) |
 | Long React work (screen mount, GC) on a native host | **not on the frame**: JS runs on its own thread |
@@ -24,12 +24,47 @@ how the runtime works inside is in
 | Disk, `libjsui` linux-x64 | **15.8 MB** |
 | Worst first-launch frame (cold Metal shader cache) | **~200 ms** once at startup, then no frame over 30 ms |
 
-## Frame time in Godot, Unity and Unreal
+## Frame time in game engines
 
-> **Pending.** Max FPS and frame time of the Godot, Unity and Unreal
-> examples with the JSUI HUD off vs on (same scene, vsync off, GPU path,
-> Mac Studio) are being measured now. This section will give the added
-> milliseconds per frame on the game's threads and the FPS change.
+The same game with the UI off and on, measured in each engine example on a
+Mac Studio (M1 Ultra, macOS 26), vsync off. Each number is the median of 3
+interleaved 8 s rounds' mean frame time, after a warm-up.
+
+| Engine | How JSUI draws | UI off | UI on | Added per frame |
+|---|---|---|---|---|
+| Unity 6.3 | Skia Graphite on Unity's Metal device, into a RenderTexture | 0.293 ms (3413 fps) | 0.334 ms (2994 fps) | **+0.04 ms** |
+| Unreal 5.8 (1280x720, exclusive fullscreen) | Skia Graphite on Unreal's Metal device, into a RenderTarget2D | 2.94 ms (340 fps) | 3.02 ms (332 fps) | **+0.08 ms** |
+| Godot (godot-aw3, Forward+ Metal) | Skia Graphite on Godot's Metal device | 3.96 ms (252 fps) | 4.45 ms (225 fps) | **+0.48 ms** (rounds: +0.01 to +0.67) |
+| raylib 6.2 (OpenGL) | Skia Ganesh GL into a RenderTexture2D | 0.45 ms (2224 fps) | 0.83 ms (1199 fps) | **+0.38 ms** |
+| sokol (OpenGL) | Skia Ganesh GL into the swapchain | 0.78 ms\* | 1.44 ms\* | **+0.66 ms** |
+
+What the scenes do:
+
+- **Unity, Unreal, raylib, sokol** run the same HUD
+  (`integrations/shared/ui/app.jsx`) over 8-9 orbiting units, with
+  nameplates following the units every frame through a host buffer. The UI
+  repaints every frame, so this is a moving-HUD worst case, not an idle
+  screen.
+- **Godot** runs its own demo (the showcase UI over a 3D world), mostly idle
+  apart from stats updating once a second. Its delta is noisy on a 3.9 ms
+  frame (p99 is ~15 ms with or without the UI).
+
+How to read it:
+
+- On the Metal Graphite paths that Unity and Unreal use, a full moving HUD
+  costs the game **0.04-0.08 ms per frame**: under 0.5% of a 60 fps frame.
+- The OpenGL examples cost more (0.4-0.7 ms). On macOS, OpenGL runs on
+  Apple's GL-on-Metal layer, and these examples composite a full-frame UI
+  texture every frame. We expect most of that cost to come from that layer,
+  but haven't confirmed it.
+- Running JS on its own thread or on the main thread made no measurable
+  difference here. The HUD's JS is idle between state updates; the
+  per-frame work (nameplates, paint) is native either way. The JS thread
+  matters for spikes (below), not for the steady frame.
+
+\* macOS paces sokol's GL view at the display refresh whatever the swap
+interval, so sokol's numbers are each frame's work (CPU plus `glFinish`),
+not frame-to-frame time.
 
 ## Where JSUI runs in your frame
 
