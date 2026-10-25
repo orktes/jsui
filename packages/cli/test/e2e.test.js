@@ -47,6 +47,8 @@ for (const mode of ['production', 'development']) {
     await build({ entry: path.join(here, 'e2e', 'state-styles.jsx'), outfile: stateStylesFile, mode, format });
     const groupVisibilityFile = path.join(dir, 'group_visibility.js');
     await build({ entry: path.join(here, 'e2e', 'group-visibility.jsx'), outfile: groupVisibilityFile, mode, format });
+    const overlayFile = path.join(dir, 'overlay.js');
+    await build({ entry: path.join(here, 'e2e', 'overlay.jsx'), outfile: overlayFile, mode, format });
     const stallFile = path.join(dir, 'stall.js');
     await build({ entry: path.join(here, 'e2e', 'stall.jsx'), outfile: stallFile, mode, format });
     const tests = [
@@ -62,6 +64,7 @@ for (const mode of ['production', 'development']) {
       'react_derive_e2e',
       'react_state_styles_e2e',
       'react_group_visibility_e2e',
+      'react_overlay_e2e',
       'react_js_thread_e2e_stall',
       'react_js_thread_e2e_sync',
     ];
@@ -77,6 +80,7 @@ for (const mode of ['production', 'development']) {
         JSUI_REACT_DERIVE_BUNDLE: deriveFile,
         JSUI_REACT_STATE_STYLES_BUNDLE: stateStylesFile,
         JSUI_REACT_GROUP_VISIBILITY_BUNDLE: groupVisibilityFile,
+        JSUI_REACT_OVERLAY_BUNDLE: overlayFile,
         JSUI_REACT_STALL_BUNDLE: stallFile,
     };
     const { stdout, stderr } = await promisify(execFile)(binary, tests, {
@@ -112,6 +116,7 @@ for (const mode of ['production', 'development']) {
     assert.match(stdout, /PASS react_derive_e2e/);
     assert.match(stdout, /PASS react_state_styles_e2e/);
     assert.match(stdout, /PASS react_group_visibility_e2e/);
+    assert.match(stdout, /PASS react_overlay_e2e/);
     assert.match(stdout, /PASS react_js_thread_e2e_stall/);
     assert.match(stdout, /PASS react_js_thread_e2e_sync/);
     if (process.env.JSUI_E2E_VERBOSE) console.log(stdout);

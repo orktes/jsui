@@ -12,6 +12,7 @@ import {
   Button,
 } from './components/pressables.js';
 import { Group, Visibility, useGroupState } from './components/group.js';
+import { Overlay, OverlayArrow } from './components/overlay.js';
 import { FlatList, SectionList, VirtualizedList } from './components/lists.js';
 import {
   ActivityIndicator,
@@ -105,6 +106,8 @@ export {
   useGroupState,
   Group,
   Visibility,
+  Overlay,
+  OverlayArrow,
   // Animated.derive expression helpers (animated/expression.js)
   Expr,
   clamp,
