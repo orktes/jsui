@@ -43,6 +43,15 @@ const char* kSpans = R"J({"type":"Text","style":{"alignSelf":"flex-start","fontS
 
 }  // namespace
 
+TEST(text_reveal_style_keys_are_paint_only) {
+  // (The paint key table is binary searched: every key must be found.)
+  for (const char* k : {"textReveal", "textRevealFade", "textRevealFraction", "textRevealMode", "fontFeatureSettings",
+                        "fontVariationSettings", "fontFamily", "fontSize", "textShadow", "lottieProgress"})
+    CHECK(paintStyleGroup(k) != 0);
+  CHECK(paintStyleGroup("textReveal") != paintStyleGroup("color"));
+  CHECK_EQ(paintStyleGroup("width"), 0u);
+}
+
 TEST(text_reveal_nested_spans) {
   Scene s(320, 60);
   Node* t = s.add(kSpans);
