@@ -2089,6 +2089,48 @@ Native's API and both of its drivers:
   * `Animated.clock()`: a `clock` node, the runtime clock in seconds. Clock
     nodes with dependents are marked dirty in every `NativeAnimated::tick`
     and count as animating (`jsui_wants_frame`).
+  * `Animated.clock({start, speed, paused, running})`
+    (`AnimatedClockValue` in nodes.js): a value node plus, while it runs, a
+    `clock` animation on it (`{type: 'clock', speed, running}`):
+    `value = from + (t - start) / 1000 * speed`, never ending. So the
+    controls are the existing commands: `pause()` is `stopAnimation` (the
+    clock first counts up to the runtime time the stop was issued at, so
+    pausing and `setSpeed` lose no time between frames), `resume()` a new
+    clock animation from where the value is, `reset(t)` stop + `setValue` +
+    start, `setSpeed(x)` stop + start. `running` is a node tag read every
+    tick (`gen_` is bumped first, so it is this frame's output): while it is
+    0 the clock is held at the time of the frame that saw it, and goes on
+    from there when it is not (it is checked at start too). A held clock,
+    and a clock animation on a value nothing depends on or listens to, do
+    not count in `NativeAnimated::animating()`, so a paused clock does not
+    keep `jsui_wants_frame` on (an unread one is computed from the time
+    whenever a frame comes). The JS driver mirrors it: a
+    `requestAnimationFrame` loop while something reads the clock, the value
+    computed from `now()` when read, `running` followed through its change
+    notifications (`packages/react/test/reveal-clock.test.js`).
+  * Text reveal (typewriter): `<Text reveal revealMode revealFade
+    revealFraction>` becomes the `textReveal` / `textRevealMode` /
+    `textRevealFade` / `textRevealFraction` style keys (Text's
+    `__animatedStyleProps` maps an animated `reveal` to `textReveal`, as
+    LottieView's `progress`), a paint-only style group (`kGroupReveal`), so
+    an Animated value drives it through `patchStyle` (JS driver) or a
+    `style` node (native driver) with no reshaping and no relayout. The
+    paragraph root lays out and shapes its whole text; `text::paintText`
+    then paints only its first N units (`paintRevealed` in
+    `src/text/text_layout.cpp`): units are ICU grapheme clusters
+    (`SkUnicode::computeCodeUnitFlags`) or words (whitespace-delimited, ICU
+    dictionary words inside unspaced scripts), counted over the text as
+    shaped (all spans), as UTF-16 starts cached in the `TextCache`. The
+    fully revealed prefix is drawn under a clip: whole lines before the last
+    line it reaches (so overhang, shadows and decorations show) and, on
+    that line, `getRectsForRange` boxes up to the reveal, open towards the
+    line's start. With `revealFade` = f, unit k's alpha is
+    `clamp((reveal - k) / f, 0, 1)` (in units, not time: stateless, so it
+    scrubs and reverses); the few fading units are painted again under
+    their own boxes with the painter's alpha multiplier. `revealFraction`
+    scales 0..1 to `n` units (`n - 1 + f` with a fade, so 1 is fully
+    shown). Fully revealed paints exactly what no reveal paints
+    (`tests/native/text_reveal_test.cpp`, `react_reveal_e2e_test.cpp`).
   * `Animated.interaction()` / `useInteraction()`: `interaction` nodes
     (`{key, state}`) read the eased 0..1 weight of one state of the element
     whose `interaction` prop carries `key` (see "State styles"); marked dirty

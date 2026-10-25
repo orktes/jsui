@@ -8,7 +8,7 @@ generally runs unchanged. This is what is supported and how it differs.
 | Component | Notes |
 | --- | --- |
 | `View` | The host element. All style keys below, `pointerEvents`, `onLayout`, focus props, `testID` / `nativeID`. |
-| `Text` | Nested Texts inherit text styles. `numberOfLines`, `ellipsizeMode`, `onPress` (pressable text). Strings outside `<Text>` throw (whitespace is tolerated). |
+| `Text` | Nested Texts inherit text styles. `numberOfLines`, `ellipsizeMode`, `onPress` (pressable text), `reveal` / `revealMode` / `revealFade` / `revealFraction` (typewriter: paints only the first N graphemes or words, laid out whole; animate it with `Animated.Text`, see native-first.md). Strings outside `<Text>` throw (whitespace is tolerated). |
 | `Image` | `source`: `require('./a.png')` (sizes itself from the file; `a@2x.png` is half size), `{ uri }`, an array, a number. `resizeMode` (`cover` / `contain` / `stretch` / `center` / `repeat`), `tintColor` (blur with `filter: 'blur(4px)'`), `onLoad` / `onError` / `onLoadStart` / `onLoadEnd`. `Image.getSize`, `Image.prefetch`. |
 | `ImageBackground` | `source`, `resizeMode`, `imageStyle`, children on top. |
 | `ScrollView` | `horizontal`, `contentContainerStyle`, `onScroll` (+ `scrollEventThrottle`), `pagingEnabled`, `snapToInterval` / `snapToOffsets` / `snapToAlignment`, `decelerationRate`, `stickyHeaderIndices`, `showsVertical/HorizontalScrollIndicator`, `scrollEnabled`, `contentOffset`; ref `scrollTo({x, y, animated})`, `scrollToEnd`. Mouse wheel, trackpad, touch flings, keyboard and gamepad (right stick) all scroll it; focus moves scroll the focused item into view. |

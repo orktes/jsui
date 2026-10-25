@@ -14,6 +14,8 @@ default; use React state only for things that change now and then.
 | Procedural motion (bob, pulse, orbit) without an animation | `Animated.derive([Animated.clock()], (t) => ...)` | a JS timer |
 | Scroll-linked effects | `Animated.event` with `useNativeDriver: true` + `interpolate` / `derive` | `onScroll` → `setState` |
 | Numbers that count up / tick (scores, XP, timers, ammo) | `<Animated.Text text={Animated.format(value, {...})} />` | `addListener` → `setState` → re-render |
+| Typewriter / text revealed character by character (dialogue, subtitles, quest text), styled spans included | `<Animated.Text reveal={value} revealFraction revealFade={2}>` + a native `Animated.timing` | slicing the string and re-rendering per character (relayouts, words jump lines) |
+| A timer / clock that pauses, resumes, rewinds or runs at another speed (match timer, slow motion, game-paused HUD) | `Animated.clock({ paused, speed, running })` with `pause()` / `resume()` / `reset(t)` / `setSpeed(x)` | stopping and restarting timings by hand, a JS interval |
 | Choreography: sequence / parallel / stagger / loop | `Animated.sequence(...)` etc. with every step `useNativeDriver: true` (delays too): runs as one native group | mixing JS-driven steps in (the whole composite then hops through JS between steps) |
 | Hover / press / focus feedback (highlight, press-down scale, focus ring) | `hoveredStyle` / `pressedStyle` / `focusedStyle` / `focusVisibleStyle` / `disabledStyle` + `transition` on any element (Pressable, View, Text, Image): swapped by the runtime on input | `style={({pressed, hovered}) => ...}` or `onHoverIn` → `setState` (a JS round trip and a re-render per change) |
 | Children reacting to the parent's hover / press / focus (card hover lights up its title and icon) | `group` on the parent, `groupHoveredStyle` / `groupPressedStyle` / `groupFocusedStyle` / `groupFocusVisibleStyle` on descendants | passing hover state down through props |
@@ -217,8 +219,84 @@ useEffect(() => {
 return <Animated.Text text={label} />;  // "5:00" ... "0:00"
 ```
 
-A timer that has to pause: `left.stopAnimation()` and start a new timing
-from where it stopped (`Animated.clock()` cannot pause).
+A timer that has to pause: use a controllable clock (below), or
+`left.stopAnimation()` and start a new timing from where it stopped.
+
+## Clocks you control: Animated.clock({...})
+
+`Animated.clock()` is the shared frame clock (always running). Pass options
+and you get a clock of your own: an Animated value counting seconds times
+`speed` from `start`, run natively (no JS per frame). `pause()`,
+`resume()`, `reset(t)` (default: `start`; keeps running or paused) and
+`setSpeed(x)` (0 holds, negative counts down) are one command each. A
+paused clock, or one nothing reads, does not keep the host ticking
+(`jsui_wants_frame`).
+
+```jsx
+// A match timer counting down from 5:00 that pauses with the game menu.
+const clock = useMemo(() => Animated.clock({ start: 300, speed: -1 }), []);
+const label = useMemo(() => Animated.format(clock, { time: 'm:ss' }), [clock]);
+useHostMessage('menu', (open) => (open ? clock.pause() : clock.resume()));
+return <Animated.Text text={label} />;
+```
+
+`running`: an Animated node that holds the clock while it is 0, natively:
+the frame the host changes it, without JS. A HUD clock that stops whenever
+the game sets `game.playing` to false:
+
+```jsx
+const playing = useHostStateBind('game', 'playing');  // true / false from the host
+const t = useMemo(() => Animated.clock({ running: playing }), [playing]);
+const spin = useMemo(() => Animated.derive([t], (s) => (s * 90) % 360), [t]);
+```
+
+Options: `start` (seconds, default 0), `speed` (default 1), `paused`
+(start paused), `running` (an Animated node, e.g. `useHostStateBind`,
+`ix.hovered`, a value). It is an `Animated.Value` otherwise: use it in
+styles, `interpolate`, `derive`, `Animated.format`; `setValue(t)` is
+`reset(t)`, and running `Animated.timing` on it pauses the clock. Pausing
+keeps the time at the moment JS paused it.
+
+## Typewriter: Animated.Text reveal
+
+`reveal` shows only the first N graphemes (user-perceived characters:
+spaces count, an emoji or a letter with its accents is one) of a Text and
+its nested spans. The paragraph is laid out once with all of its text, so
+nothing re-wraps or moves while it types, and a change only repaints (no
+React render, no relayout). Drive it with a native timing:
+
+```jsx
+const shown = useMemo(() => new Animated.Value(0, { useNativeDriver: true }), []);
+useEffect(() => {
+  const a = Animated.timing(shown, { toValue: 1, duration: 3000, easing: Easing.linear, useNativeDriver: true });
+  a.start(({ finished }) => finished && setTyped(true));  // completion: the timing's callback
+  return () => a.stop();
+}, []);
+return (
+  <Animated.Text style={styles.line} reveal={shown} revealFraction revealFade={2}>
+    The gate did not fall. It was <Text style={styles.em}>opened</Text>.
+  </Animated.Text>
+);
+// Skip: shown.setValue(1)
+```
+
+- `reveal`: how many units show (a number or an Animated node). A fraction
+  rounds up (2.3 shows 3); 0 shows nothing; `null` / leaving it out shows
+  everything.
+- `revealFraction`: `reveal` is 0..1 of the whole text instead, so the
+  timing needs no character count (and a language switch keeps its place).
+  Time it from the text length, e.g. `duration: text.length * 18`.
+- `revealMode="words"`: units are words (a word with the spaces after it;
+  CJK and other unspaced scripts by dictionary words).
+- `revealFade={n}`: each unit fades in over `n` units of reveal (unit k's
+  opacity is `clamp((reveal - k) / n, 0, 1)`): a soft typing edge. It is in
+  units, not milliseconds, so it scrubs and reverses with the value.
+- Works on a plain `<Text reveal={n}>` too (a re-render per change), and on
+  the JS driver (patched without a render). Only the outermost Text of a
+  paragraph reveals; spans inside follow it.
+- Per character sounds or effects: listen on the value only if you must
+  (`addListener` costs JS per frame); `Animated.timing` completion is the
+  usual hook.
 
 ## Animated.derive
 
@@ -270,4 +348,5 @@ function Nameplate({ i, offset /* Animated.Value */ }) {
   value, a host buffer, the clock). Otherwise the JS driver evaluates the
   same program (identical results).
 - `Animated.clock()` is the frame clock in seconds; a mounted clock keeps
-  the host ticking (`jsui_wants_frame`).
+  the host ticking (`jsui_wants_frame`). For one that pauses or runs at
+  another speed: `Animated.clock({...})` (above).
