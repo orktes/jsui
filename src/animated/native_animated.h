@@ -104,8 +104,10 @@ class NativeAnimated {
   bool startAnimation(int id, int tag, const Value& config, double nowMs, std::string* error = nullptr);
   // Stops an animation (no end event: the caller reports it). Returns false
   // when it was not running. *lastVelocity: a spring's velocity (units/s),
-  // which a spring started next on the same value continues with.
-  bool stopAnimation(int id, double* lastVelocity = nullptr);
+  // which a spring started next on the same value continues with. `nowMs`
+  // (the runtime clock when JS stopped it): a clock animation first counts
+  // up to then, so pausing and changing speed lose no time.
+  bool stopAnimation(int id, double* lastVelocity = nullptr, double nowMs = -1);
   // For the frame snapshot (frame_snapshot.h): the raw value of every
   // value node, and the velocity of every running animation by id (a
   // spring's, else 0; a composite group's: 0).

@@ -734,7 +734,7 @@ EMSCRIPTEN_KEEPALIVE const char* jsui_hjs_a_start_animation(int e, int id, int t
 // stopAnimation(id) -> its velocity, NaN if it was not running.
 EMSCRIPTEN_KEEPALIVE double jsui_hjs_a_stop_animation(int e, int id) {
   double velocity = 0;
-  if (!R(e).animated->stopAnimation(id, &velocity)) return std::numeric_limits<double>::quiet_NaN();
+  if (!R(e).animated->stopAnimation(id, &velocity, R(e).now)) return std::numeric_limits<double>::quiet_NaN();
   return velocity;
 }
 

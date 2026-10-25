@@ -483,6 +483,11 @@ TEST(native_animated_clock_animation) {
   CHECK(na.startAnimation(3, 1, json(R"({"type":"clock"})"), 8000));
   na.tick(8250);
   CHECK_NEAR(na.getValue(1), 0.25, 1e-12);
+  // Stopped at a time between frames (when JS paused it): counted up to then.
+  CHECK(na.stopAnimation(3, nullptr, 8350));
+  CHECK_NEAR(na.getValue(1), 0.35, 1e-12);
+  CHECK_NEAR(na.nodeOutput(3), 0.35, 1e-12);
+  CHECK(na.startAnimation(3, 1, json(R"({"type":"clock"})"), 8350));
 
   // running: held while node 4 is 0 (no frames wanted), on from where it
   // stopped when it is not.

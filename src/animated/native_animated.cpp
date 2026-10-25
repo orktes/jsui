@@ -696,6 +696,10 @@ bool NativeAnimated::startAnimation(int id, int tag, const Value& c, double nowM
   stopAnimationsOf(tag, true);
   a.from = n->value;
   beginIteration(a, nowMs);
+  if (a.kind == Anim::Kind::Clock && a.runningTag) {
+    gen_++;
+    a.held = evalNum(a.runningTag) == 0;  // gated from the start
+  }
   animations_.push_back(std::move(a));
   // A zero-length timing applies at once; its end is still reported (with
   // the other ends, after the tick), so a sequence or loop it is part of
@@ -963,7 +967,7 @@ void NativeAnimated::beginIteration(Anim& a, double nowMs) {
   a.last = a.from;
 }
 
-bool NativeAnimated::stopAnimation(int id, double* lastVelocity) {
+bool NativeAnimated::stopAnimation(int id, double* lastVelocity, double nowMs) {
   if (Group* g = group(id)) {
     // The caller reports the end: drop the group's leaves quietly.
     if (lastVelocity) *lastVelocity = 0;
@@ -976,6 +980,11 @@ bool NativeAnimated::stopAnimation(int id, double* lastVelocity) {
   for (size_t i = 0; i < animations_.size(); i++) {
     if (animations_[i].id == id) {
       if (lastVelocity) *lastVelocity = animations_[i].kind == Anim::Kind::Spring ? animations_[i].lastVelocity : 0;
+      if (animations_[i].kind == Anim::Kind::Clock && nowMs >= animations_[i].start) {
+        gen_++;
+        step(animations_[i], nowMs);
+        flush();
+      }
       animations_.erase(animations_.begin() + long(i));
       return true;
     }
