@@ -312,14 +312,21 @@ jobs:
           -DJSUI_BUILD_RAYLIB=ON -DJSUI_BUILD_SDL3=ON -DJSUI_BUILD_SOKOL=ON -DJSUI_BUILD_UNITY=ON
       - name: Build
         run: cmake --build build -j "$(nproc)" --target jsui-raylib jsui-sdl3 jsui-sokol jsui_unity
-      - name: Unity plugin smoke (its C exports through ctypes; Unity itself needs a license)
-        run: python3 integrations/unity/native/smoke.py integrations/unity/package/Plugins/Linux/x86_64/libjsui_unity.so integrations/shared/ui/dist/bundle.js
+      - name: Unity plugin smoke (its C exports through ctypes; Unity itself needs a license) - JS thread on (one stall frame) and off
+        run: |
+          python3 integrations/unity/native/smoke.py integrations/unity/package/Plugins/Linux/x86_64/libjsui_unity.so integrations/shared/ui/dist/bundle.js on
+          python3 integrations/unity/native/smoke.py integrations/unity/package/Plugins/Linux/x86_64/libjsui_unity.so integrations/shared/ui/dist/bundle.js off
       - name: Self-tests and frames
         run: |
           mkdir -p engines
           x() { xvfb-run -a -s "-screen 0 1600x1000x24" "$@"; }
+          # JS on its own thread (the default): the selftest's JS stall must not hold a frame.
           x ./build/jsui-raylib --selftest --screenshot engines/raylib.png | tee engines/raylib.log
           grep -q '^GPU: ' engines/raylib.log && grep -q 'selftest: ok' engines/raylib.log
+          grep -q '^JS thread: on' engines/raylib.log && grep -q 'selftest: JS thread on: ' engines/raylib.log
+          # ... and on the game's thread (--js-thread off): the stall holds it.
+          x ./build/jsui-raylib --js-thread off --selftest | tee engines/raylib-js-off.log
+          grep -q 'selftest: JS thread off: ' engines/raylib-js-off.log && grep -q 'selftest: ok' engines/raylib-js-off.log
           x ./build/jsui-raylib --cpu --selftest --screenshot engines/raylib-cpu.png | tee engines/raylib-cpu.log
           ! grep -q '^GPU: ' engines/raylib-cpu.log && grep -q 'selftest: ok' engines/raylib-cpu.log
           x ./build/jsui-sokol --selftest --screenshot engines/sokol.png | tee engines/sokol.log
@@ -538,6 +545,8 @@ jobs:
         run: integrations/godot/smoke-test.sh build/godot-smoke.png
       - name: Run it in Godot 4.3 too (compatibility_minimum)
         run: GODOT_VERSION=4.3-stable integrations/godot/smoke-test.sh build/godot-smoke-4.3.png
+      - name: Run it with JS on the main thread (js_thread off; the other runs use the JS thread, the default)
+        run: JS_THREAD=off SIZES=1280x720 integrations/godot/smoke-test.sh build/godot-smoke-js-off.png
       - name: Backend choice with a stand-in godot-aw3 WebGPUInterop of another Dawn revision (one warning, CPU)
         run: |
           FAKE_WEBGPU_INTEROP=0000000000000000000000000000000000000000 EXPECT_LOG="Dawn revision mismatch" SIZES=1280x720 \
