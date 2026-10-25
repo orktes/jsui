@@ -9,7 +9,10 @@
 
 #include "runtime.h"
 
-#if defined(__EMSCRIPTEN__)
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+// The browser modules (web/dist*) are single threaded. A threaded
+// Emscripten build (-pthread, JSUI_WASM_THREADS: e.g. the Godot integration
+// linked into a threaded web export) runs JS on a pthread like native.
 #define JSUI_NO_JS_THREAD 1
 #elif defined(_WIN32)
 #if !defined(NOMINMAX)

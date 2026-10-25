@@ -107,6 +107,9 @@ extends Control
 @onready var ui = get_node_or_null("JsuiView")
 
 const HudGame := preload("res://hud/hud_game.gd")
+## --hud's bundle when the project carries a copy (exports that cannot reach
+## integrations/shared/ui/dist/bundle.js on disk, i.e. the web).
+const HUD_BUNDLE_IN_PROJECT := "res://hud/ui/bundle.js"
 
 const PING_REWARD := 120
 const VIEWPORT_BACKDROP := Color8(40, 150, 110)  # --max-viewport-diff
@@ -286,7 +289,12 @@ func _start_hud(view) -> void:
 	add_child(_hud_game)
 	move_child(_hud_game, 0)  # behind the view
 	if view and view.bundle_url == "res://ui/dist/bundle.js":
-		view.bundle_url = ProjectSettings.globalize_path("res://").path_join("../../shared/ui/dist/bundle.js").simplify_path()
+		if FileAccess.file_exists(HUD_BUNDLE_IN_PROJECT):
+			# An export that carries the shared bundle (the web export, whose
+			# files are all in the pack: README, "Threaded web build").
+			view.bundle_url = HUD_BUNDLE_IN_PROJECT
+		else:
+			view.bundle_url = ProjectSettings.globalize_path("res://").path_join("../../shared/ui/dist/bundle.js").simplify_path()
 
 
 func _exit_tree() -> void:

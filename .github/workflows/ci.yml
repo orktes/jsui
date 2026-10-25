@@ -64,6 +64,9 @@ jobs:
             godot:
               - *core
               - 'integrations/godot/**'
+              - 'scripts/build-godot-web.sh'
+              - 'scripts/build-skia-wasm-mt.sh'
+              - 'tools/wasm-localize/**'
               - 'integrations/sdl3/**'
               - 'integrations/shared/**'
               - 'integrations/unity/native/**'
@@ -1274,6 +1277,36 @@ jobs:
         with:
           name: jsui-wasm-gpu
           path: web/dist-gpu
+
+  # The Godot integration's threaded web build (for the godot-aw3 fork's
+  # threaded web export template, integrations/godot/README.md "Threaded web
+  # build"): threaded Skia (emsdk 4.0.20 + its Emdawnwebgpu, -pthread), JSUI
+  # with the JS thread, one relocatable object with local symbols, and a link
+  # check against a program with its own copies of Skia's libraries. The fork
+  # itself is not built here.
+  godot-web:
+    name: godot web (threaded wasm library, advisory)
+    runs-on: ubuntu-24.04
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.wasm == 'true' || needs.changes.outputs.godot == 'true'
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build rsync
+      - name: Cache threaded Skia for WASM + its emsdk
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/skia-wasm-mt
+            third_party/emsdk-4.0.20
+          key: skia-wasm-mt-${{ runner.os }}-${{ hashFiles('scripts/build-skia-wasm-mt.sh', 'scripts/setup-emsdk.sh', 'scripts/patches/skia-m157-emdawnwebgpu.patch') }}
+      - name: Build libjsui_godot.web.threads.wasm32.a + link check (builds Skia on a cache miss)
+        run: JOBS=$(nproc) scripts/build-godot-web.sh Release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsui-godot-web-threads
+          path: integrations/godot/demo/bin/libjsui_godot.web.threads.wasm32.a
 
   # The WebGPU module's browser tests, split in three (JSUI_WEB_SHARD) so they
   # run in parallel with each other and with the site check below.

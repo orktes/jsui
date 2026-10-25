@@ -1115,6 +1115,11 @@ Ref<Image> JsuiView::get_frame_image() {
   // renderer has it in memory (so this works with --headless); the GPU one
   // reads the texture back (a GPU sync: not for every frame).
   if (gpu_cur_.valid()) {
+#if defined(__EMSCRIPTEN__)
+    // Browser WebGPU cannot read a texture back synchronously (the fork's
+    // texture_get_data returns nothing there): the CPU raster of the frame.
+    return get_cpu_frame_image();
+#endif
     PackedByteArray px = readGpuFrame();
     if (px.size() < int64_t(gpu_cur_.w) * gpu_cur_.h * 4) return Ref<Image>();
     return unpremultipliedImage(px.ptr(), gpu_cur_.w, gpu_cur_.h);
