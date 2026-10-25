@@ -64,7 +64,9 @@ const EMPTY = fs.readFileSync(path.join(WEB, 'test/fixtures/solid.js'), 'utf8');
 async function core(env, scenario, n, warm, src) {
   const { M, rt } = env;
   const cstr = (s) => { const k = M.lengthBytesUTF8(s) + 1; const p = M._malloc(k); M.stringToUTF8(s, p, k); return p; };
-  const pp = M._malloc(128);
+  // jsui_get_perf fills a whole JsuiPerf (include/jsui/jsui.h: 200 bytes with
+  // the GC and JS-thread fields); room to spare for fields added later.
+  const pp = M._malloc(512);
   const perf = () => {
     M._jsui_get_perf(rt, pp, 1);
     const f = new Float64Array(M.HEAPU8.buffer, pp, 8);

@@ -60,6 +60,7 @@
   "scripts": {
     "test:web": "node test/node-smoke.mjs && node test/browser.test.mjs",
     "test:web:host": "JSUI_JS=host node test/node-smoke.mjs && JSUI_JS=host node test/browser.test.mjs",
+    "test:web:quickjs": "JSUI_JS=quickjs node test/node-smoke.mjs && JSUI_JS=quickjs node test/browser.test.mjs",
     "test:node": "node test/node-smoke.mjs",
     "test:unit": "node --test test/textures.test.mjs test/audio.test.mjs",
     "test:browser": "node test/browser.test.mjs",

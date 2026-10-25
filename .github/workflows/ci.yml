@@ -1337,10 +1337,12 @@ jobs:
         run: |
           npm ci --no-audit --no-fund
           npx playwright install chromium
+      # On the browser's own JS engine (the default), then on QuickJS (?js=quickjs).
       - name: Site (build + smoke test on WebGPU)
         run: |
           node site/scripts/build.mjs --wasm web/dist-gpu --wasm-webgl web/dist-gpu --wasm-gpu web/dist-gpu
           SITE_WEBGPU=1 SITE_EXPECT_RENDERER=webgpu node site/test/smoke.mjs
+          SITE_JS=quickjs SITE_WEBGPU=1 SITE_EXPECT_RENDERER=webgpu node site/test/smoke.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:

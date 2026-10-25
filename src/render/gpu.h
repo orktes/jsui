@@ -25,6 +25,9 @@ class Precompiler;
 namespace jsui::shader_cache {
 class Cache;
 }
+namespace jsui::driver_cache {
+class Storage;
+}
 
 struct JsuiGpuContext {
   enum class Kind { GL, WebGPU, Graphite, D3D };
@@ -36,6 +39,9 @@ struct JsuiGpuContext {
   // Ganesh contexts (GL, Direct3D): their shader cache (shader_cache.h);
   // null on Graphite and WebGL.
   jsui::shader_cache::Cache* shaders = nullptr;
+  // Graphite Vulkan contexts: the driver's VkPipelineCache in a file
+  // (driver_cache.h); null elsewhere and without a file.
+  jsui::driver_cache::Storage* driverCache = nullptr;
 };
 
 namespace jsui {
