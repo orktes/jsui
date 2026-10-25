@@ -3,19 +3,35 @@
 #include "render/pipeline_cache.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <map>
 
+#include "include/core/SkExecutor.h"
 #include "include/core/SkMilestone.h"
 #include "include/core/SkTypes.h"
 
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 #include <cerrno>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
+#endif
+#if defined(_WIN32)
+#include <direct.h>
+#if !defined(NOMINMAX)
+#define NOMINMAX
+#endif
+#if !defined(WIN32_LEAN_AND_MEAN)
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #endif
 
 #if defined(JSUI_VULKAN) || defined(JSUI_GRAPHITE_METAL) || defined(JSUI_GRAPHITE_DAWN) || defined(JSUI_WEBGPU)
@@ -75,6 +91,7 @@ const char* backendName(uint32_t b) {
 }
 
 std::atomic<bool> gForceSliced{false};
+std::atomic<bool> gNoDefaultFile{false};
 
 }  // namespace
 
@@ -208,6 +225,88 @@ Parsed parse(const void* data, size_t size, Backend backend) {
 }
 
 void setForceSliced(bool on) { gForceSliced = on; }
+bool forceSliced() { return gForceSliced; }
+void setNoDefaultFile(bool on) { gNoDefaultFile = on; }
+
+#if SK_MILESTONE >= 140  // SkExecutor work lists, ContextOptions::fExecutor
+namespace {
+
+// Work list 0 (Graphite's pipelines a frame waits for) before work list 1
+// (precompiles).
+class CompileExecutor final : public SkExecutor {
+ public:
+  explicit CompileExecutor(int threads) {
+    for (int i = 0; i < threads; i++) threads_.emplace_back([this] { run(); });
+  }
+  ~CompileExecutor() override {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stopping_ = true;
+    }
+    cv_.notify_all();
+    for (std::thread& t : threads_) t.join();
+  }
+  void add(std::function<void(void)> fn, int workList) override {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      lists_[workList > 0 ? 1 : 0].push_back(std::move(fn));
+    }
+    cv_.notify_one();
+  }
+  void add(std::function<void(void)> fn) override { add(std::move(fn), 0); }
+  int pending(int workList) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return int(lists_[workList].size()) + running_[workList];
+  }
+
+ private:
+  void run() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    for (;;) {
+      cv_.wait(lock, [this] { return stopping_ || !lists_[0].empty() || !lists_[1].empty(); });
+      // Graphite waits for its tasks before the Context goes: none are left.
+      if (stopping_) return;
+      const int i = lists_[0].empty() ? 1 : 0;
+      std::function<void(void)> fn = std::move(lists_[i].front());
+      lists_[i].pop_front();
+      running_[i]++;
+      lock.unlock();
+      fn();
+      lock.lock();
+      running_[i]--;
+    }
+  }
+
+  mutable std::mutex mutex_;
+  std::condition_variable cv_;
+  std::deque<std::function<void(void)>> lists_[2];
+  int running_[2] = {0, 0};
+  std::vector<std::thread> threads_;
+  bool stopping_ = false;
+};
+
+}  // namespace
+
+std::unique_ptr<SkExecutor> makeCompileExecutor() {
+  // Compiling is CPU work on the driver's side too: leave cores to the game.
+  const int cores = int(std::thread::hardware_concurrency());
+  return std::make_unique<CompileExecutor>(std::clamp(cores / 2, 1, 4));
+}
+
+int pendingPrecompiles(const SkExecutor* executor) {
+  return executor ? static_cast<const CompileExecutor*>(executor)->pending(1) : 0;
+}
+
+int pendingCompiles(const SkExecutor* executor) {
+  if (!executor) return 0;
+  auto* e = static_cast<const CompileExecutor*>(executor);
+  return e->pending(0) + e->pending(1);
+}
+#else
+std::unique_ptr<SkExecutor> makeCompileExecutor() { return nullptr; }
+int pendingPrecompiles(const SkExecutor*) { return 0; }
+int pendingCompiles(const SkExecutor*) { return 0; }
+#endif
 
 // ---------------------------------------------------------------- Files
 
@@ -471,7 +570,83 @@ void Precompiler::configure(skgpu::graphite::ContextOptions& opts) {
 #endif
 }
 
-void Precompiler::attach(skgpu::graphite::Context* ctx, Mode mode) {
+namespace {
+
+// The program's file name, for the default cache file's name.
+std::string programName() {
+  std::string name;
+#if defined(_WIN32)
+  char buf[MAX_PATH];
+  DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+  if (n > 0 && n < MAX_PATH) name.assign(buf, n);
+#elif defined(__APPLE__)
+  if (const char* p = getprogname()) name = p;
+#elif defined(__linux__)
+  char buf[4096];
+  ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
+  if (n > 0) name.assign(buf, size_t(n));
+#endif
+  size_t slash = name.find_last_of("/\\");
+  if (slash != std::string::npos) name = name.substr(slash + 1);
+  if (name.size() > 4 && (name.compare(name.size() - 4, 4, ".exe") == 0 || name.compare(name.size() - 4, 4, ".EXE") == 0))
+    name.resize(name.size() - 4);
+  for (char& ch : name)
+    if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '-'))
+      ch = '_';
+  return name.empty() ? std::string("app") : name;
+}
+
+bool makeDir(const std::string& path) {
+#if defined(_WIN32)
+  return _mkdir(path.c_str()) == 0 || errno == EEXIST;
+#elif defined(__EMSCRIPTEN__)
+  (void)path;
+  return false;
+#else
+  return mkdir(path.c_str(), 0755) == 0 || errno == EEXIST;
+#endif
+}
+
+}  // namespace
+
+std::string defaultFile(Backend backend) {
+  if (backend == Backend::BrowserWebGPU) return {};
+  const char* env = std::getenv("JSUI_PIPELINE_CACHE");
+  if (env && (!std::strcmp(env, "off") || !std::strcmp(env, "0"))) return {};
+  std::string dir;
+#if defined(_WIN32)
+  if (const char* l = std::getenv("LOCALAPPDATA"); l && *l) dir = l;
+  if (dir.empty()) return {};
+  dir += "\\jsui";
+  if (!makeDir(dir)) return {};
+  dir += "\\";
+#elif defined(__APPLE__)
+  // macOS and iOS (HOME is the app's container there).
+  const char* home = std::getenv("HOME");
+  if (!home || !*home) return {};
+  dir = std::string(home) + "/Library/Caches";
+  if (!makeDir(dir) || !makeDir(dir += "/jsui")) return {};
+  dir += "/";
+#elif defined(__linux__) && !defined(__ANDROID__)
+  if (const char* x = std::getenv("XDG_CACHE_HOME"); x && *x == '/') {
+    dir = x;
+  } else if (const char* home = std::getenv("HOME"); home && *home) {
+    dir = std::string(home) + "/.cache";
+  } else {
+    return {};
+  }
+  if (!makeDir(dir) || !makeDir(dir += "/jsui")) return {};
+  dir += "/";
+#else
+  return {};
+#endif
+  std::string b = backendName(uint32_t(backend));
+  for (char& ch : b) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+  return dir + "pipelines-" + programName() + "-" + b + ".bin";
+}
+
+void Precompiler::attach(skgpu::graphite::Context* ctx, Mode mode, const SkExecutor* executor) {
+  executor_ = executor;
 #if defined(JSUI_PRECOMPILE)
   if (mode != Mode::None && gForceSliced) mode = Mode::Sliced;
   auto c = std::make_unique<Compiler>();
@@ -489,9 +664,13 @@ void Precompiler::attach(skgpu::graphite::Context* ctx, Mode mode) {
     kickLocked();
   }
   const char* env = std::getenv("JSUI_PIPELINE_CACHE");
-  if (env && *env) {
+  if (env && *env && std::strcmp(env, "off") && std::strcmp(env, "0")) {
     openFile(env);
     envFile_ = env;
+  } else if (mode != Mode::None && !gNoDefaultFile) {
+    // Until the host names its own (jsui_gpu_set_pipeline_cache).
+    std::string path = defaultFile(backend_);
+    if (!path.empty()) openFile(path);
   }
 #else
   (void)ctx;
@@ -589,6 +768,15 @@ void Precompiler::doneLocked() {
 void Precompiler::run() {
   std::unique_lock<std::mutex> lock(mutex_);
   while (!stopping_ && !queue_.empty()) {
+    // Keys go to the executor a few at a time: Graphite compiles everything
+    // handed over before the Context goes, so a context destroyed early
+    // waits for a few compiles, not the whole list.
+    while (!stopping_ && pendingPrecompiles(executor_) >= 4) {
+      lock.unlock();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      lock.lock();
+    }
+    if (stopping_) break;
     Entry e = std::move(queue_.front());
     queue_.pop_front();
     inFlight_ = 1;
@@ -662,7 +850,7 @@ Stats Precompiler::stats() {
   std::lock_guard<std::mutex> lock(mutex_);
   Stats s = stats_;
   s.mode = int(mode_);
-  s.queued = int(queue_.size()) + inFlight_;
+  s.queued = int(queue_.size()) + inFlight_ + pendingPrecompiles(executor_);
   s.known = entries_.size();
   return s;
 }
@@ -701,7 +889,7 @@ void Precompiler::onPipelineAdded(const std::string& label, bool fromPrecompile,
       file = file_;
     }
   }
-  if (log_) SkDebugf("jsui: pipeline compiled in a frame (%s): %s\n", what, label.c_str());
+  if (log_) SkDebugf("jsui: pipeline compiled on demand by a frame or a shader warm-up (%s): %s\n", what, label.c_str());
   if (file) file->append(e);
 }
 

@@ -452,6 +452,15 @@ size_t ShaderEffects::warmPending() const {
   return warm_.size();
 }
 
+void ShaderEffects::warmAll(SkCanvas* canvas) {
+  std::vector<Warm> batch;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    batch.swap(warm_);
+  }
+  for (const Warm& w : batch) warmDraw(canvas, w);
+}
+
 bool ShaderEffects::warm(SkCanvas* canvas) {
   std::vector<Warm> batch;
   {

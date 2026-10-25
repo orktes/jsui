@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "render/pipeline_cache.h"
 #include "test.h"
 
 #if defined(_WIN32)
@@ -73,6 +74,8 @@ int main(int argc, char** argv) {
 #if defined(_WIN32)
   SetUnhandledExceptionFilter(onCrash);
 #endif
+  // Tests count the pipelines they compile: no cache from earlier runs.
+  jsui::pipeline_cache::setNoDefaultFile(true);
   // Arguments are name filters (substring match; a test runs if any matches).
   int ran = 0, failed = 0;
   for (auto& c : jsui_test::registry()) {
