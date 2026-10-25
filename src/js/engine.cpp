@@ -17,6 +17,7 @@
 #include "js/bytecode.h"
 #include "js/engine_impl.h"
 #include "js/inspector.h"
+#include "js/js_thread.h"
 #include "runtime.h"
 
 namespace jsui {
@@ -289,8 +290,29 @@ void JsEngine::Impl::applyCommands() {
   rt.appliedBatches.fetch_add(1, std::memory_order_release);
 }
 
+void JsEngine::Impl::publish() {
+  if (!threaded) {
+    if (!commands.empty()) applyCommands();
+    return;
+  }
+  // Counted as the owner thread will count it applied (FrameSnapshot::
+  // appliedBatches), one for one.
+  if (thread && thread->publish(commands)) publishedBatches++;
+}
+
+double JsEngine::Impl::now() const { return thread ? thread->now() : rt.now; }
+
+bool JsEngine::Impl::shouldYield() const { return thread ? thread->shouldYield() : rt.jsShouldYield(); }
+
+bool JsEngine::Impl::onOwner(const std::function<void()>& fn) {
+  if (threaded) return rt.proxy(fn);
+  syncPoint();
+  fn();
+  return true;
+}
+
 JSValue JsEngine::Impl::call(JSValueConst fn, JSValueConst thisVal, int argc, JSValueConst* argv) {
-  Perf::Scope scope(rt.doc.perf, Phase::Js);
+  Perf::Scope scope(perf(), Phase::Js);
   counters->jsCalls++;
   enter();
   JSValue r = JS_Call(ctx, fn, thisVal, argc, argv);
@@ -315,7 +337,7 @@ void JsEngine::Impl::runJobsRaw() {
 }
 
 void JsEngine::Impl::drain() {
-  Perf::Scope scope(rt.doc.perf, Phase::Js);
+  Perf::Scope scope(perf(), Phase::Js);
   draining = true;
   depth++;
   // Microtasks get a fresh watchdog budget of their own.
@@ -363,6 +385,7 @@ void JsEngine::Impl::drain() {
 }
 
 void JsEngine::Impl::reportValue(JSValueConst exc, const char* prefix) {
+  if (thread && thread->stopping()) return;  // interrupted by the reload / teardown
   std::string msg = prefix + formatError(ctx, exc);
 #if JSUI_DEBUGGER
   if (inspector) inspector->exception(exc, std::string(prefix) + "Uncaught");
@@ -404,7 +427,7 @@ uint64_t JsEngine::Impl::startLoad(LoadRequest req, std::function<void(uint64_t,
     rt.loader.load(id, std::move(req), std::move(cb));
     return id;
   }
-  rt.hostQueue.post([r, id, req = std::move(req), cb = std::move(cb)]() mutable {
+  rt.toHost([r, id, req = std::move(req), cb = std::move(cb)]() mutable {
     r->loader.load(id, std::move(req), std::move(cb));
   });
   return id;
@@ -440,7 +463,7 @@ JSValue js_setTimer(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv, 
   if (impl.nextTimer <= 0) impl.nextTimer = 1;
   std::vector<JSValue> args;
   for (int i = 2; i < argc; i++) args.push_back(JS_DupValue(ctx, argv[i]));
-  impl.addTimer(id, impl.rt.now + ms, repeat ? ms : -1.0, JS_DupValue(ctx, argv[0]), std::move(args));
+  impl.addTimer(id, impl.now() + ms, repeat ? ms : -1.0, JS_DupValue(ctx, argv[0]), std::move(args));
   return JS_NewInt32(ctx, id);
 }
 
@@ -487,7 +510,7 @@ JSValue js_cancelAnimationFrame(JSContext* ctx, JSValueConst, int argc, JSValueC
   return JS_UNDEFINED;
 }
 
-JSValue js_now(JSContext* ctx, JSValueConst, int, JSValueConst*) { return JS_NewFloat64(ctx, runtimeOf(ctx).now); }
+JSValue js_now(JSContext* ctx, JSValueConst, int, JSValueConst*) { return JS_NewFloat64(ctx, implOf(ctx).now()); }
 
 // ------------------------------------------------------- QuickJS hooks
 
@@ -567,8 +590,11 @@ void sampleJs(JSContext* ctx, JsProfile& prof) {
 int interruptHandler(JSRuntime*, void* opaque) {
   auto* impl = static_cast<JsEngine::Impl*>(opaque);
   // Only while the runtime profiles its frames (jsui-bench's measured ones).
-  if (JsProfile* prof = jsProfile(); prof && impl->depth > 0 && impl->ctx && impl->rt.doc.perf.profiling)
+  if (JsProfile* prof = jsProfile(); prof && impl->depth > 0 && impl->ctx && impl->perf().profiling)
     sampleJs(impl->ctx, *prof);
+  // The runtime is reloading or going away: the JS thread's running script
+  // stops (JsThread::stop).
+  if (impl->thread && impl->thread->stopping()) return 1;
   if (impl->depth == 0 || impl->timeoutMs <= 0) return 0;
   if (Clock::now() < impl->deadline) return 0;
   impl->interrupted = true;
@@ -644,6 +670,15 @@ class QuickJsEngine final : public JsEngine {
   GcStats gcStats(bool reset) override;
   void measured(const std::vector<MeasureResult>& results) override;
   void mergePerf(PerfCounters& into) override;
+  void collectNow() override { JS_RunGC(impl_->jrt); }
+  double nextTimer() const override { return impl_->earliestDue; }
+  bool wantsFrame() const override { return !impl_->rafs.empty(); }
+#if JSUI_DEBUGGER
+  bool debuggerAttached() const override { return impl_->inspector != nullptr; }
+  void pollDebugger() override {
+    if (impl_->inspector) impl_->inspector->poll();
+  }
+#endif
 
  private:
   std::unique_ptr<Impl> impl_;
@@ -662,20 +697,24 @@ QuickJsEngine::QuickJsEngine(Runtime& rt) : impl_(std::make_unique<Impl>(rt)) {
   Impl& impl = *impl_;
   impl.alive = std::make_shared<Impl*>(&impl);
   impl.threaded = rt.jsThreadMode();
+  impl.thread = JsThread::current();
   impl.counters = impl.threaded ? &impl.jsCounters : &rt.doc.perf.counters;
+  impl.phases = impl.threaded ? &impl.jsPerf : &rt.doc.perf;
   // Batch numbers continue the runtime's count (snapshots of an earlier
   // context are older than anything this one records).
   impl.publishedBatches = rt.appliedBatches.load();
   const JsuiConfig& cfg = rt.config;
   impl.timeoutMs = cfg.js_timeout_ms == 0 ? 5000.0 : double(cfg.js_timeout_ms);
+  if (impl.thread) impl.jsPerf.setProfiling(false);
 
   impl.jrt = JS_NewRuntime();
   JS_SetRuntimeOpaque(impl.jrt, &impl);
   JS_SetMemoryLimit(impl.jrt, size_t(cfg.js_memory_limit_mb > 0 ? cfg.js_memory_limit_mb : 256) << 20);
   // Windows threads default to a 1 MB stack, so the JS limit must leave room
   // for the native frames below and above it or recursion overflows for real.
+  // A JS thread's stack is sized for the limit (JsThread).
 #ifdef _WIN32
-  constexpr int kDefaultStackKb = 512;
+  const int kDefaultStackKb = impl.thread ? 1024 : 512;
 #else
   constexpr int kDefaultStackKb = 1024;
 #endif
@@ -776,7 +815,7 @@ static JSValue evalSource(JSContext* ctx, const std::string& source, const std::
 // Runs a bundle: JS source, or a `jsui build` container (js/bytecode.h).
 bool QuickJsEngine::eval(const std::string& source, const std::string& name) {
   Impl& impl = *impl_;
-  Perf::Scope scope(impl.rt.doc.perf, Phase::Js);
+  Perf::Scope scope(impl.perf(), Phase::Js);
   impl.enter();
   JSValue r = JS_UNDEFINED;
   BundleParts parts;
@@ -841,7 +880,7 @@ void QuickJsEngine::runTimers(double nowMs) {
   // continues a time-sliced render, and runs passive effects, next frame.
   constexpr int kMaxPasses = 8;
   for (int pass = 0; pass < kMaxPasses && impl.earliestDue <= nowMs; pass++) {
-    if (pass > 0 && impl.rt.jsShouldYield()) break;
+    if (pass > 0 && impl.shouldYield()) break;
     impl.dueScratch.clear();
     double later = 1e300;
     for (auto& [id, t] : impl.timers) {
@@ -955,6 +994,7 @@ bool QuickJsEngine::settleCall(uint64_t id, bool ok, const std::string& payload)
   JSContext* ctx = impl.ctx;
   JSValue fn = it->second;
   impl.hostCalls.erase(it);
+  if (impl.thread) impl.thread->callEnded(id);
   JSValue args[2] = {JS_NewBool(ctx, ok), JS_NewStringLen(ctx, payload.data(), payload.size())};
   JS_FreeValue(ctx, impl.call(fn, JS_UNDEFINED, 2, args));
   JS_FreeValue(ctx, args[1]);
@@ -967,6 +1007,7 @@ bool QuickJsEngine::dropCall(uint64_t id) {
   if (it == impl_->hostCalls.end()) return false;
   JS_FreeValue(impl_->ctx, it->second);
   impl_->hostCalls.erase(it);
+  if (impl_->thread) impl_->thread->callEnded(id);
   return true;
 }
 

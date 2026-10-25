@@ -5,9 +5,10 @@
 // cancelled by a reload), HostState.set reaching on_state, jsui_call_ui
 // answered by Host.handle / useHostHandler, and state surviving a reload.
 // Built and run by the @orktes/jsui-cli test suite with
-// JSUI_REACT_HOST_DATA_BUNDLE=<path>; skipped without it. Runs twice: as is,
-// and in the runtime's JS-thread mode (the embedder's callbacks arrive inside
-// the next tick instead of while JS runs; Runtime::jsThreadMode).
+// JSUI_REACT_HOST_DATA_BUNDLE=<path>; skipped without it. Runs three times:
+// as is, with JS on its own thread (the embedder's callbacks arrive inside
+// the next tick instead of while JS runs; the ticks sync, JSUI_TICK_SYNC_JS)
+// and in lockstep (JSUI_JS_THREAD_LOCKSTEP: as single-threaded).
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -29,7 +30,7 @@ struct HostDataE2E {
   JsuiRuntime* rt = nullptr;
   double now = 0;
 
-  bool jsThreadMode = false;
+  int jsThread = JSUI_JS_THREAD_OFF;
 
   bool load(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
@@ -53,7 +54,7 @@ struct HostDataE2E {
     cfg.on_call_cancel = [](void* u, uint64_t id) { static_cast<HostDataE2E*>(u)->cancelled.push_back(id); };
     cfg.call_user = this;
     rt = jsui_create(&cfg);
-    if (jsThreadMode && !jsui::internalRuntime(rt)->setJsThreadMode(true)) return false;
+    if (jsui_set_js_thread(rt, jsThread) != 0) return false;
     // The game's data exists before the UI does.
     jsui_set_state(rt, "gold", "100");
     jsui_set_state(rt, "inventory", R"({"items":{"sword":{"count":1},"potion":{"count":2}}})");
@@ -67,7 +68,7 @@ struct HostDataE2E {
   void tick(double ms) {
     for (double end = now + ms; now < end;) {
       now += 16;
-      jsui_tick(rt, now);
+      jsui_tick_ex(rt, now, JSUI_TICK_SYNC_JS);
     }
   }
   std::string take() {
@@ -103,14 +104,15 @@ bool has(const std::string& s, const std::string& needle) { return s.find(needle
 
 }  // namespace
 
-static void runHostData(bool jsThreadMode) {
+static void runHostData(int jsThread) {
+  bool queued = jsThread == JSUI_JS_THREAD_ON;  // embedder callbacks wait for the tick
   const char* path = std::getenv("JSUI_REACT_HOST_DATA_BUNDLE");
   if (!path) {
     std::printf("  (skipped: set JSUI_REACT_HOST_DATA_BUNDLE, see packages/cli/test)\n");
     return;
   }
   HostDataE2E t;
-  t.jsThreadMode = jsThreadMode;
+  t.jsThread = jsThread;
   CHECK(t.load(path));
   const char* err = jsui_last_error(t.rt);
   if (err) std::fprintf(stderr, "  js error: %s\n", err);
@@ -140,7 +142,7 @@ static void runHostData(bool jsThreadMode) {
   // Host.call answered on a later frame.
   t.click(20, 20);
   CHECK_EQ(t.calls.size(), size_t(1));
-  CHECK_EQ(t.callbacksBeforeTick, size_t(jsThreadMode ? 0 : 1));  // on_call: in the tick / at once
+  CHECK_EQ(t.callbacksBeforeTick, size_t(queued ? 0 : 1));  // on_call: in the tick / at once
   if (t.calls.size() != 1) return;
   CHECK_EQ(t.calls[0].second, std::string(R"(shop.buy {"item":"potion"})"));
   t.tick(100);
@@ -156,7 +158,7 @@ static void runHostData(bool jsThreadMode) {
   // UI-owned state reaches on_state and jsui_get_state.
   t.click(20, 60);
   CHECK_EQ(t.uiState.size(), size_t(1));
-  CHECK_EQ(t.callbacksBeforeTick, size_t(jsThreadMode ? 0 : 1));
+  CHECK_EQ(t.callbacksBeforeTick, size_t(queued ? 0 : 1));
   if (!t.uiState.empty()) CHECK_EQ(t.uiState[0].second, std::string(R"({"volume":0.25})"));
   const char* settings = jsui_get_state(t.rt, "settings");
   CHECK(settings && std::string(settings) == R"({"volume":0.25})");
@@ -199,8 +201,11 @@ static void runHostData(bool jsThreadMode) {
   CHECK(err == nullptr);
 }
 
-TEST(react_host_data_e2e) { runHostData(false); }
+TEST(react_host_data_e2e) { runHostData(JSUI_JS_THREAD_OFF); }
 
-// The same, with the embedder's callbacks (on_message, on_state, on_call,
-// on_call_cancel, Host.handle results) queued for the tick.
-TEST(react_host_data_e2e_js_thread_mode) { runHostData(true); }
+// The same with JS on its own thread: the embedder's callbacks (on_message,
+// on_state, on_call, on_call_cancel, Host.handle results) arrive in the tick.
+TEST(react_host_data_e2e_js_thread_mode) { runHostData(JSUI_JS_THREAD_ON); }
+
+// ... and in lockstep, where everything happens when it does single-threaded.
+TEST(react_host_data_e2e_js_thread_lockstep) { runHostData(JSUI_JS_THREAD_LOCKSTEP); }

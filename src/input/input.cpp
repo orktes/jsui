@@ -1479,6 +1479,24 @@ void InputManager::runDeferred() {
   }
 }
 
+void InputManager::answersArrived() {
+  if (!deferred_.empty()) runDeferred();
+  if (!mouse_.awaiting.empty() || mouse_.releaseSeq) absorbAnswers(mouse_);
+  for (PointerState& p : touches_)
+    if (!p.awaiting.empty() || p.releaseSeq) absorbAnswers(p);
+}
+
+void InputManager::forgetAnswers() {
+  deferred_.clear();
+  auto forget = [](PointerState& p) {
+    p.awaiting.clear();
+    p.releaseSeq = 0;
+    p.holdUntil = -1;
+  };
+  forget(mouse_);
+  for (PointerState& p : touches_) forget(p);
+}
+
 void InputManager::lateWarning(const char* what) {
   rt_.log(JSUI_LOG_WARN, std::string("input: JS did not answer a ") + what + " event within " +
                              std::to_string(int(rt_.eventDeadlineMs)) + " ms; its default action ran");

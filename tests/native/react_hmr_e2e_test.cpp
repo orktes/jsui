@@ -30,6 +30,7 @@ struct HmrE2E {
   explicit HmrE2E(const char* url) {
     JsuiConfig cfg;
     jsui_config_init(&cfg);
+    cfg.js_thread = jsui_test::jsThreadMode();
     cfg.width = 320;
     cfg.height = 120;
     cfg.dev_mode = 1;

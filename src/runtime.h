@@ -31,6 +31,7 @@ class SkCanvas;
 namespace jsui {
 
 class JsEngine;
+class JsThread;
 class InputManager;
 class ImageCache;
 class LottieCache;
@@ -65,7 +66,10 @@ class Runtime {
   // Returns true if the key was consumed.
   bool devKey(const char* key, bool down);
 
-  void tick(double nowMs);
+  // `syncJs` (JSUI_TICK_SYNC_JS): on a JS thread, waits for JS to handle
+  // this frame (up to config.js_sync_timeout_ms) and applies what it did
+  // before native Animated and layout, and again for the onLayout events.
+  void tick(double nowMs, bool syncJs = false);
   // Advances only what runs natively on the runtime clock (native-driven
   // Animated animations, LayoutAnimations, layout) without running JS:
   // timers, rAF, events and animation end callbacks wait for the next tick().
@@ -134,31 +138,67 @@ class Runtime {
   // (__jsui_native.shouldYield): concurrent renders (startTransition) are
   // time-sliced across frames instead of blocking one.
   double tickWallStart = 0;
-  double jsSliceMs = 5;  // jsui_set_js_frame_budget; <= 0: no limit
+  // jsui_set_js_frame_budget; <= 0: no limit. On a JS thread: the slice of
+  // a task (atomic: the thread reads it).
+  std::atomic<double> jsSliceMs{5};
   static double wallMs();
   void prepareText();
   void freeDestroyedNodes();
   bool jsShouldYield() const { return jsSliceMs > 0 && wallMs() - tickWallStart >= jsSliceMs; }
 
-  // ---- JS on its own thread (docs/ARCHITECTURE.md "Shared state")
-  // JS-thread mode: JS reaches the runtime only the ways a JS thread will
-  // (JS still runs on the owner thread for now). The embedder's callbacks
-  // JS makes are queued for the tick (hostQueue), sync reads come from the
-  // frame snapshot (snapshots) or a proxy call, host buffers from published
-  // copies, measure callbacks after the next layout, perf counters through
-  // the engine's own block. Off by default.
+  // ---- JS on its own thread (docs/ARCHITECTURE.md "JS thread", "Shared
+  // state")
+  // JS-thread mode: JS runs on a thread of its own (jsThread()) and reaches
+  // the runtime only the ways a JS thread can. Its commands, replies and
+  // the embedder's callbacks it makes come back in batches applied inside
+  // the tick (applyJs); sync reads come from the frame snapshot
+  // (snapshots) or a proxy call, host buffers from published copies,
+  // measure callbacks after the next layout, perf counters through the
+  // engine's own block. Off by default.
   bool jsThreadMode() const { return jsThreadMode_; }
   // Switches the mode, which rebuilds the JS engine: before the first
-  // bundle load only (false afterwards).
-  bool setJsThreadMode(bool on);
+  // bundle load only (false afterwards, or where there are no threads or
+  // the host's JS engine runs the bundle). `lockstep`: every message to JS
+  // is waited for (tests and tools: the frames of single-threaded mode).
+  bool setJsThreadMode(bool on, bool lockstep = false);
+  bool jsLockstep() const { return jsThreadMode_ && jsLockstep_; }
+  JsThread* jsThread() const { return jsThread_; }
+  // JS is running a task on its thread.
+  bool jsBusy() const;
+  // The time of the last frame JS was given (Frame messages): what the JS
+  // thread's own timer passes run at between frames.
+  std::atomic<double> publishedNow{0};
+  // Applies what the JS thread published (commands, replies, host
+  // callbacks), batch by batch. Returns how many.
+  int applyJs();
+  // Waits until the JS thread is idle (serving its proxied reads), applies
+  // what it published and repeats while that gave JS more to do (at most
+  // 8 rounds); `layout`: lays the surfaces out and delivers onLayout and
+  // measure results each round (jsui_sync). timeoutMs < 0: no limit.
+  // Returns true when JS was left idle, false on timeout; batches are
+  // applied whole either way.
+  bool syncJs(double timeoutMs, bool layout);
+  // jsui_get_perf's js_* fields.
+  struct JsThreadStats {
+    double applyUs = 0, syncUs = 0;
+    uint64_t batches = 0;
+    int lagFrames = 0;  // frames since JS last published while it had work
+  };
+  JsThreadStats jsStats;
   // The embedder callbacks JS made, run in order inside the tick (and after
-  // a bundle evaluates).
+  // a bundle evaluates). On a JS thread most travel with its batches; this
+  // queue keeps proxied reads and what the owner thread posts.
   HostQueue hostQueue;
-  // From JS: runs `fn` now, or on the owner thread in the next drain of
-  // hostQueue in JS-thread mode.
+  // From JS: runs `fn` now, or on the owner thread in JS-thread mode (with
+  // the batch of the JS task, or in the next drain of hostQueue).
   void toHost(std::function<void()> fn);
   // How long a proxied read (HostQueue::call) waits for the owner thread.
   static constexpr double kProxyTimeoutMs = 250;
+  // A read only the owner thread can answer (getClipboard, getProps, font
+  // registration, a buffer's first copy): runs `fn` there and returns once
+  // it ran, false when it did not run in time. From a JS thread the host
+  // callbacks the task made before it and what JS published run first.
+  bool proxy(const std::function<void()>& fn);
   // What JS reads synchronously in JS-thread mode (frame_snapshot.h).
   SnapshotStore snapshots;
   // Command batches applied (the engine bumps it; FrameSnapshot::appliedBatches).
@@ -273,7 +313,10 @@ class Runtime {
   void publishSnapshot();
   // Answers measureRequests (after layout).
   void answerMeasures();
-  bool jsThreadMode_ = false;
+  bool jsThreadMode_ = false, jsLockstep_ = false;
+  JsThread* jsThread_ = nullptr;  // js, in JS-thread mode
+  int syncDepth_ = 0;
+  uint64_t lagBatches_ = 0;  // jsStats.batches at the last lag check
   // Image onLoad / onError / onProgress for images that settled (React
   // Native: always asynchronous, also for cached images and data URIs).
   void deliverImageEvents(Document& doc);

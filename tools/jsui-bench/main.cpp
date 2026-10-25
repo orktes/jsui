@@ -6,6 +6,7 @@
 //              [--patch-state KEY,N] [--surfaces N[,changing|same|one|resize]]
 //              [--markers N,json|buffer|native] [--wheel X,Y,DY[,FRAMES]]
 //              [--react-stats] [--name NAME] [--json out.json] [--dump out.pam]
+//              [--js-thread on|lockstep] [--js-stall MS[,EVERY]]
 //   jsui-bench --suite DIR [--json out.json] [--compare baseline.json]
 //
 // --suite runs the standard scenarios from DIR (built by tools/jsui-bench/run.sh):
@@ -44,6 +45,12 @@
 // rendered (through React's DevTools hook, so it costs JS time itself).
 // --dump writes the last frame (fully repainted, plus each surface's) as a
 // binary PAM (RGBA) image, to compare two builds of a bundle pixel by pixel.
+// `wall` is the owner thread's wall time per frame (the host's work, the
+// tick and the paint), with its maximum. --js-thread runs the bundle on its
+// own thread (JsuiConfig.js_thread; the js phase is then the owner thread's
+// share: none): the frames do not wait for JS. --js-stall keeps JS busy for
+// MS ms every EVERY frames (default 60), as a long task or a collection
+// would: with --js-thread the owner's frames go on meanwhile.
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -56,6 +63,7 @@
 #include <new>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <yoga/event/event.h>
@@ -170,6 +178,9 @@ struct Options {
   int wheelFrames = 60;
   bool reactStats = false;
   std::string dump;
+  int jsThread = JSUI_JS_THREAD_OFF;
+  double jsStallMs = 0;
+  int jsStallEvery = 60;
 };
 
 // Columns of the report.
@@ -235,7 +246,7 @@ struct BenchMessages {
 };
 
 struct Stat {
-  double mean = 0, p50 = 0, p95 = 0;
+  double mean = 0, p50 = 0, p95 = 0, max = 0;
 };
 
 Stat summarize(std::vector<double> v) {
@@ -248,6 +259,7 @@ Stat summarize(std::vector<double> v) {
   auto pct = [&](double p) { return v[std::min(v.size() - 1, size_t(p * double(v.size() - 1) + 0.5))]; };
   s.p50 = pct(0.5);
   s.p95 = pct(0.95);
+  s.max = v.back();
   return s;
 }
 
@@ -258,6 +270,7 @@ struct Result {
   Stat phase[kPhaseCount];
   Stat host;  // the host's own work (see the header)
   Stat total;
+  Stat wall;  // the owner thread's wall time per frame
   double counters[kCounterCount] = {};
   double extra[kExtraCount] = {};
 };
@@ -282,6 +295,7 @@ bool run(const Options& o, Result* out) {
   cfg.width = o.width;
   cfg.height = o.height;
   cfg.js_timeout_ms = -1;
+  cfg.js_thread = o.jsThread;
   cfg.log = [](void*, JsuiLogLevel level, const char* msg) {
     if (level >= JSUI_LOG_WARN) std::fprintf(stderr, "[bench] %s\n", msg);
   };
@@ -361,6 +375,10 @@ bool run(const Options& o, Result* out) {
     else jsui_set_buffer(h, "enemies", JSUI_BUFFER_F32, enemyData.data(), enemyData.size());
   };
   if (o.wheel) jsui_send_mouse_move(h, o.wheelX, o.wheelY);
+  // A JS thread does the warm-up frames' JS in them (JSUI_TICK_SYNC_JS): the
+  // measured frames start from the rendered UI, not from one JS is still
+  // building.
+  bool warming = true;
   auto step = [&]() {
     now += 1000.0 / 60.0;
     if (o.markers > 0) pushMarkers();
@@ -394,7 +412,7 @@ bool run(const Options& o, Result* out) {
         jsui_surface_set_props(surfaces[i], plateProps(int(i), changes ? frame : 0).c_str());
       }
     }
-    jsui_tick(h, now);
+    jsui_tick_ex(h, now, warming && o.jsThread == JSUI_JS_THREAD_ON ? JSUI_TICK_SYNC_JS : 0);
     if (o.paint != PaintMode::None && jsui_needs_redraw(h)) {
       jsui::Perf::Scope paint(perf, jsui::Phase::Paint);
       if (o.paint == PaintMode::Full) jsui_render_rgba(h, px.data(), o.width, o.height, rowBytes);
@@ -408,11 +426,21 @@ bool run(const Options& o, Result* out) {
     }
     frame++;
   };
+  auto stall = [&]() {
+    // Busy JS (on its thread, or on this one single-threaded).
+    double ms = o.jsStallMs;
+    rt->inbound.task([ms] {
+      auto end = std::chrono::steady_clock::now() + std::chrono::microseconds(int64_t(ms * 1000));
+      while (std::chrono::steady_clock::now() < end) std::this_thread::yield();
+    });
+  };
   for (int i = 0; i < o.warmup; i++) step();
-  if (o.reactStats) rt->js->eval("__jsuiBenchReact.commits = __jsuiBenchReact.renders = 0;", "bench");
+  warming = false;
+  if (o.reactStats) jsui_sync(h, -1);
+  if (o.reactStats) rt->inbound.task([rt] { rt->js->eval("__jsuiBenchReact.commits = __jsuiBenchReact.renders = 0;", "bench"); });
   uint64_t messages0 = messages.count;
 
-  std::vector<double> phase[kPhaseCount], host, total;
+  std::vector<double> phase[kPhaseCount], host, total, wall;
   for (auto& v : phase) v.reserve(size_t(o.frames));
   perf.profiling = true;
   perf.reset();
@@ -421,7 +449,10 @@ bool run(const Options& o, Result* out) {
   double prevUs[size_t(jsui::Phase::Count)] = {};
   CALLGRIND_START_INSTRUMENTATION;
   for (int i = 0; i < o.frames; i++) {
+    auto w0 = std::chrono::steady_clock::now();
+    if (o.jsStallMs > 0 && i % std::max(1, o.jsStallEvery) == 0) stall();
     step();
+    wall.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - w0).count());
     double sum = 0;
     for (int p = 0; p < kPhaseCount; p++) {
       size_t idx = size_t(kPhases[p]);
@@ -443,6 +474,7 @@ bool run(const Options& o, Result* out) {
   for (int p = 0; p < kPhaseCount; p++) out->phase[p] = summarize(phase[p]);
   out->host = summarize(host);
   out->total = summarize(total);
+  out->wall = summarize(wall);
   double f = double(o.frames);
   for (int c = 0; c < kCounterCount; c++) out->counters[c] = double(kCounters[c].get(perf.counters)) / f;
   out->extra[0] = double(gYoga.layouts - y0.layouts) / f;
@@ -452,9 +484,14 @@ bool run(const Options& o, Result* out) {
   out->extra[4] = double(allocs) / f;
   out->extra[5] = double(messages.count - messages0) / f;
   if (o.reactStats) {
-    rt->js->eval("__jsui_native.postMessage('__jsui_bench:react', "
-                 "JSON.stringify([__jsuiBenchReact.commits, __jsuiBenchReact.renders]));",
-                 "bench");
+    jsui_sync(h, -1);
+    rt->inbound.task([rt] {
+      rt->js->eval("__jsui_native.postMessage('__jsui_bench:react', "
+                   "JSON.stringify([__jsuiBenchReact.commits, __jsuiBenchReact.renders]));",
+                   "bench");
+    });
+    jsui_sync(h, -1);
+    if (o.jsThread != JSUI_JS_THREAD_OFF) jsui_tick(h, now);  // the message arrives in a tick
     out->extra[6] = messages.reactCommits / f;
     out->extra[7] = messages.reactRenders / f;
   }
@@ -485,6 +522,7 @@ void print(const Result& r) {
     std::printf("  %-10s %10.1f %10.1f %10.1f\n", kPhaseNames[p], r.phase[p].mean, r.phase[p].p50, r.phase[p].p95);
   if (r.host.p95 > 0) std::printf("  %-10s %10.1f %10.1f %10.1f\n", "host", r.host.mean, r.host.p50, r.host.p95);
   std::printf("  %-10s %10.1f %10.1f %10.1f\n", "total", r.total.mean, r.total.p50, r.total.p95);
+  std::printf("  %-10s %10.1f %10.1f %10.1f  max %.1f\n", "wall", r.wall.mean, r.wall.p50, r.wall.p95, r.wall.max);
   std::printf("  per frame:");
   int col = 0;
   auto item = [&](const char* n, double v) {
@@ -503,11 +541,13 @@ std::string toJson(const std::vector<Result>& results) {
     const Result& r = results[i];
     s << "  \"" << r.name << "\": {\"frames\": " << r.frames << ", \"nodes\": " << r.nodes;
     auto stat = [&](const char* n, const Stat& st) {
-      s << ", \"" << n << "\": {\"mean\": " << st.mean << ", \"p50\": " << st.p50 << ", \"p95\": " << st.p95 << "}";
+      s << ", \"" << n << "\": {\"mean\": " << st.mean << ", \"p50\": " << st.p50 << ", \"p95\": " << st.p95
+        << ", \"max\": " << st.max << "}";
     };
     for (int p = 0; p < kPhaseCount; p++) stat(kPhaseNames[p], r.phase[p]);
     stat("host", r.host);
     stat("total", r.total);
+    stat("wall", r.wall);
     s << ", \"counters\": {";
     for (int c = 0; c < kCounterCount; c++) s << (c ? ", " : "") << "\"" << kCounters[c].name << "\": " << r.counters[c];
     for (int c = 0; c < kExtraCount; c++) s << ", \"" << kExtraNames[c] << "\": " << r.extra[c];
@@ -638,6 +678,14 @@ int main(int argc, char** argv) {
     else if (a == "--height") o.height = std::atoi(next().c_str());
     else if (a == "--name") o.name = next();
     else if (a == "--json") jsonPath = next();
+    else if (a == "--js-thread") {
+      std::string m = next();
+      o.jsThread = m == "lockstep" ? JSUI_JS_THREAD_LOCKSTEP : m == "on" ? JSUI_JS_THREAD_ON : JSUI_JS_THREAD_OFF;
+    } else if (a == "--js-stall") {
+      std::string v = next();
+      o.jsStallMs = std::atof(v.c_str());
+      if (size_t c = v.find(','); c != std::string::npos) o.jsStallEvery = std::max(1, std::atoi(v.c_str() + c + 1));
+    }
     else if (a == "--compare") comparePath = next();
     else if (a == "--suite") suiteDir = next();
     else if (a == "--paint") {
@@ -678,6 +726,7 @@ int main(int argc, char** argv) {
           "                  [--patch-state KEY,SLOTS] [--surfaces N[,changing|same|one|resize]]\n"
           "                  [--markers N,json|buffer|native] [--wheel X,Y,DY[,FRAMES]]\n"
           "                  [--react-stats] [--name NAME] [--json out.json] [--dump out.pam]\n"
+          "                  [--js-thread on|lockstep] [--js-stall MS[,EVERY]]\n"
           "       jsui-bench --suite DIR [--json out.json] [--compare baseline.json]\n");
       return 0;
     } else o.bundle = a;

@@ -33,6 +33,8 @@ pub type JsuiCallResultFn =
     Option<unsafe extern "C" fn(user: *mut c_void, call_id: u64, ok: c_int, result: *const c_char)>;
 /// `JsuiAudioFn` (see the header's Audio section); not wrapped yet.
 pub type JsuiAudioFn = *const c_void;
+/// `JsuiJsReadyFn`: runs on the JS thread (see the header's "JS thread").
+pub type JsuiJsReadyFn = Option<unsafe extern "C" fn(user: *mut c_void)>;
 pub type JsuiGLGetProcFn = Option<unsafe extern "C" fn(user: *mut c_void, name: *const c_char) -> *mut c_void>;
 
 #[repr(C)]
@@ -60,6 +62,11 @@ pub struct JsuiConfig {
     pub on_audio: JsuiAudioFn,
     pub audio_user: *mut c_void,
     pub audio_disabled: c_int,
+    pub js_thread: c_int,
+    pub js_event_deadline_ms: c_int,
+    pub js_sync_timeout_ms: c_int,
+    pub on_js_ready: JsuiJsReadyFn,
+    pub js_ready_user: *mut c_void,
 }
 
 pub type JsuiBufferType = c_int;

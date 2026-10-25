@@ -15,6 +15,7 @@
 #include "input/input.h"
 #include "js/bytecode.h"
 #include "js/engine.h"
+#include "js/js_thread.h"
 #include "jsui/jsui.h"
 #include "render/gpu.h"
 #include "render/gpu_metal.h"
@@ -72,7 +73,24 @@ JsuiRuntime* jsui_create(const JsuiConfig* cfg) {
   h->owned = std::make_unique<jsui::Runtime>(c, h);
   h->rt = h->owned.get();
   h->surface = &h->rt->main();
+  if (c.js_thread && jsui_set_js_thread(h, c.js_thread) != 0)
+    h->rt->log(JSUI_LOG_WARN, "js_thread: this build runs JS on the owner thread");
   return h;
+}
+
+int jsui_set_js_thread(JsuiRuntime* rt, int mode) {
+  if (!rt || mode < JSUI_JS_THREAD_OFF || mode > JSUI_JS_THREAD_LOCKSTEP) return -1;
+  return rt->rt->setJsThreadMode(mode != JSUI_JS_THREAD_OFF, mode == JSUI_JS_THREAD_LOCKSTEP) ? 0 : -1;
+}
+
+int jsui_js_thread(JsuiRuntime* rt) {
+  if (!rt || !rt->rt->jsThreadMode()) return JSUI_JS_THREAD_OFF;
+  return rt->rt->jsLockstep() ? JSUI_JS_THREAD_LOCKSTEP : JSUI_JS_THREAD_ON;
+}
+
+int jsui_sync(JsuiRuntime* rt, double timeoutMs) {
+  if (!rt) return 0;
+  return rt->rt->syncJs(timeoutMs, true) ? 1 : 0;
 }
 
 void jsui_destroy(JsuiRuntime* rt) {
@@ -317,6 +335,7 @@ void jsui_set_viewport(JsuiRuntime* rt, int width, int height, float pixelRatio)
 }
 
 void jsui_tick(JsuiRuntime* rt, double nowMs) { rt->rt->tick(nowMs); }
+void jsui_tick_ex(JsuiRuntime* rt, double nowMs, int flags) { rt->rt->tick(nowMs, (flags & JSUI_TICK_SYNC_JS) != 0); }
 void jsui_tick_native(JsuiRuntime* rt, double nowMs) { rt->rt->tickNative(nowMs); }
 void jsui_set_js_frame_budget(JsuiRuntime* rt, double ms) { rt->rt->jsSliceMs = ms; }
 double jsui_get_js_frame_budget(JsuiRuntime* rt) { return rt->rt->jsSliceMs; }
@@ -546,7 +565,17 @@ void jsui_get_perf(JsuiRuntime* rt, JsuiPerf* out, int reset) {
     out->gc_us = gc.us;
     out->gc_max_us = gc.maxUs;
   }
-  if (reset) p.reset();
+  jsui::Runtime::JsThreadStats& js = rt->rt->jsStats;
+  if (jsui::JsThread* t = rt->rt->jsThread()) out->js_busy_ms = t->busyUs(reset != 0) / 1000;
+  out->js_batches_applied = js.batches;
+  out->js_apply_ms = js.applyUs / 1000;
+  out->js_lag_frames = js.lagFrames;
+  out->js_sync_ms = js.syncUs / 1000;
+  if (reset) {
+    p.reset();
+    js.batches = 0;
+    js.applyUs = js.syncUs = 0;
+  }
 }
 
 void jsui_set_event_time(JsuiRuntime* rt, double time_ms) { rt->surface->input->setEventTime(time_ms); }

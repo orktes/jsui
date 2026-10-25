@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "js/engine.h"
+#include "js/js_thread.h"
 #include "runtime.h"
 
 namespace jsui {
@@ -88,20 +89,57 @@ void Inbound::beginBatch() { post(Message{Message::Kind::BeginBatch}); }
 
 void Inbound::endBatch() { post(Message{Message::Kind::EndBatch}); }
 
-// Single-threaded: delivered at once.
-void Inbound::post(Message&& m) { deliver(m); }
-
-void Inbound::deliver(Message& m) {
+// Single-threaded: delivered at once. JS thread: queued for it; in
+// lockstep mode the owner waits for JS to handle it (and applies what JS
+// did), as single-threaded, except inside a batch (the batch is waited for
+// as a whole).
+void Inbound::post(Message&& m) {
   JsEngine* js = rt_.js.get();
   if (!js) {
     if (m.seq) forget(m.seq);  // no answer will come
     return;
   }
+  if (JsThread* t = rt_.jsThread()) {
+    // A batch goes out with its first message: one with none (a layout
+    // without onLayout events) is dropped, so JS stays idle (syncJs).
+    if (m.kind == Message::Kind::BeginBatch) {
+      batchDepth_++;
+      heldBegins_++;
+      return;
+    }
+    if (m.kind == Message::Kind::EndBatch) {
+      if (batchDepth_ > 0) batchDepth_--;
+      if (heldBegins_ > 0) {
+        heldBegins_--;
+        return;
+      }
+    }
+    for (; heldBegins_ > 0; heldBegins_--) {
+      Message begin{Message::Kind::BeginBatch};
+      begin.now = rt_.now;
+      t->post(std::move(begin));
+    }
+    m.now = rt_.now;
+    t->post(std::move(m));
+    if (t->lockstep() && batchDepth_ == 0) rt_.syncJs(-1, false);
+    return;
+  }
+  deliver(m, *js);
+}
+
+// On a JS thread, an answer goes out with the batch of the task.
+static void answer(Inbound& in, uint32_t seq, int flags, bool event) {
+  if (JsThread* t = JsThread::current()) t->reply(seq, flags, event);
+  else in.reply(seq, flags, event);
+}
+
+void Inbound::deliver(Message& m, JsEngine& engine) {
+  JsEngine* js = &engine;
   using Kind = Message::Kind;
   switch (m.kind) {
     case Kind::Event: {
       int flags = js->dispatchEvent(m.value);
-      if (m.seq) reply(m.seq, flags, true);
+      if (m.seq) answer(*this, m.seq, flags, true);
       break;
     }
     case Kind::HostMessage: js->hostMessage(m.name, m.text); break;
@@ -122,7 +160,7 @@ void Inbound::deliver(Message& m) {
       break;
     case Kind::Eval: {
       bool ok = js->eval(m.text, m.name);
-      reply(m.seq, ok ? 1 : 0, false);
+      answer(*this, m.seq, ok ? 1 : 0, false);
       break;
     }
     case Kind::Task:
@@ -133,8 +171,18 @@ void Inbound::deliver(Message& m) {
   }
 }
 
-// What a "no handler" reply does (single-threaded: right after the call).
+// What a "no handler" reply does (single-threaded: right after the call; JS
+// thread: on the owner thread, with the task's batch).
 void Inbound::noHandler(const Message& m) {
+  if (JsThread::current() && m.missing != Missing::Ignore) {
+    Runtime* rt = &rt_;
+    Message copy{m.kind};
+    copy.missing = m.missing;
+    copy.id = m.id;
+    copy.value = m.value;
+    rt->toHost([rt, copy = std::move(copy)] { rt->inbound.noHandler(copy); });
+    return;
+  }
   switch (m.missing) {
     case Missing::Ignore: break;
     case Missing::WarnNoAppRegistry:
@@ -147,7 +195,7 @@ void Inbound::noHandler(const Message& m) {
                         "no UI handler for \"" + name + "\" (the bundle has not registered Host.handle)");
       break;
     }
-    case Missing::Reload: rt_.reload(); break;
+    case Missing::Reload: rt_.reload(); break;  // deferred while JS (or its batch) runs
   }
 }
 

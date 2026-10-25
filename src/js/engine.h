@@ -134,6 +134,22 @@ class JsEngine {
   };
   // Collections since the last call with reset.
   virtual GcStats gcStats(bool reset) { return {}; }
+  // A full collection now (tests).
+  virtual void collectNow() {}
+
+  // ---- JS on its own thread (js/js_thread.h)
+  // Ends the engine's thread before the engine goes away (no-op without
+  // one): the runtime then reads pendingCalls().
+  virtual void stop() {}
+  // jsui_resolve_call / jsui_reject_call: whether call `id` is pending, and
+  // it is not answerable again (a JS thread settles it later).
+  virtual bool takeCall(uint64_t id) { return hasCall(id); }
+  // For the thread's loop: the earliest timer's due time, whether rAF
+  // callbacks wait for a frame, and the debugger.
+  virtual double nextTimer() const { return 1e300; }
+  virtual bool wantsFrame() const { return false; }
+  virtual bool debuggerAttached() const { return false; }
+  virtual void pollDebugger() {}
 
   // QuickJS state shared by engine.cpp and the bridge files (engine_impl.h).
   struct Impl;

@@ -31,6 +31,7 @@ struct E2E {
     std::string src((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     JsuiConfig cfg;
     jsui_config_init(&cfg);
+    cfg.js_thread = jsui_test::jsThreadMode();
     cfg.width = 400;
     cfg.height = 300;
     cfg.on_message = [](void* u, const char* name, const char* json) {
@@ -162,6 +163,20 @@ TEST(react_e2e) {
 
 namespace {
 
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer) || __has_feature(address_sanitizer)
+#define JSUI_SLOW_BUILD 1
+#endif
+#endif
+#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__)
+#define JSUI_SLOW_BUILD 1
+#endif
+#ifdef JSUI_SLOW_BUILD
+constexpr int kSlowFrames = 120;
+#else
+constexpr int kSlowFrames = 1;
+#endif
+
 int statInt(const std::string& s, const char* key) {
   std::string k = std::string("\"") + key + "\":";
   size_t p = s.rfind(k);
@@ -178,7 +193,16 @@ struct ListE2E : E2E {
   }
   void frame() { jsui_render_rgba(rt, px.data(), 400, 300, 400 * 4); }
   // Every row band on screen has its row's colour (no blank spacer showing).
+  // React renders the rows in slices on a wall-clock frame budget, so a
+  // sanitizer build (several times slower) gets more frames to fill them.
   bool rowsMatch(int offset) {
+    for (int extra = 1; extra < kSlowFrames; extra++) {
+      if (rowsMatchNow(offset, false)) return true;
+      tick(16);
+    }
+    return rowsMatchNow(offset, true);
+  }
+  bool rowsMatchNow(int offset, bool report) {
     frame();
     for (int y = 0; y < 300; y += 7) {
       int within = (y + offset) % 30;
@@ -188,7 +212,7 @@ struct ListE2E : E2E {
       bool odd = row % 2;
       bool ok = odd ? (p[0] > 200 && p[2] < 50) : (p[2] > 200 && p[0] < 50);
       if (!ok) {
-        std::fprintf(stderr, "  row %d at y=%d (offset %d): rgb %d,%d,%d\n", row, y, offset, p[0], p[1], p[2]);
+        if (report) std::fprintf(stderr, "  row %d at y=%d (offset %d): rgb %d,%d,%d\n", row, y, offset, p[0], p[1], p[2]);
         return false;
       }
     }

@@ -17,8 +17,10 @@
  *     }
  *     jsui_destroy(rt);
  *
- * All functions must be called from the thread that created the runtime.
- * Coordinates are in logical pixels (CSS px / React Native dp); the runtime
+ * All functions must be called from the thread that created the runtime
+ * (the owner thread), also with JS on its own thread (see "JS thread"),
+ * which is internal: every callback but JsuiConfig.on_js_ready runs on the
+ * owner thread. Coordinates are in logical pixels (CSS px / React Native dp); the runtime
  * multiplies by pixel_ratio when rasterising.
  */
 #ifndef JSUI_H
@@ -135,7 +137,8 @@ JSUI_API const char* jsui_get_state(JsuiRuntime* rt, const char* key);
  * `HostState.patch(key, patch)`, for UI-owned data such as settings). `json`
  * is the key's full new JSON text, NULL when JS removed it. Not called for the
  * embedder's own jsui_set_state / jsui_patch_state. Runs synchronously while
- * JS is on the stack (jsui_get_state / jsui_set_state are fine inside). */
+ * JS is on the stack (jsui_get_state / jsui_set_state are fine inside); with
+ * JS on its own thread, inside the next jsui_tick / jsui_sync instead. */
 typedef void (*JsuiStateFn)(void* user, const char* key, const char* json);
 
 /* ------------------------------------------------------- Calls
@@ -417,8 +420,9 @@ typedef struct JsuiAudioCommand {
     int muted;          /* BUS */
 } JsuiAudioCommand;
 
-/* Called synchronously (usually while JS runs) on the runtime's thread. The
- * command and its strings are valid only during the call. */
+/* Called synchronously (usually while JS runs) on the runtime's thread; with
+ * JS on its own thread, inside the next jsui_tick / jsui_sync. The command
+ * and its strings are valid only during the call. */
 typedef void (*JsuiAudioFn)(void* user, const JsuiAudioCommand* cmd);
 
 enum {
@@ -444,6 +448,9 @@ typedef void (*JsuiFetchFn)(void* user, int status, const char* content_type, co
 JSUI_API void jsui_fetch(JsuiRuntime* rt, const char* url, JsuiFetchFn done, void* user);
 
 /* ---------------------------------------------------------------- Config */
+
+/* JsuiConfig.on_js_ready (see "JS thread"). */
+typedef void (*JsuiJsReadyFn)(void* user);
 
 typedef struct JsuiConfig {
     int width;              /* viewport size in logical px */
@@ -474,6 +481,15 @@ typedef struct JsuiConfig {
     JsuiAudioFn on_audio;   /* plays the UI's sounds (see "Audio"); NULL: the built-in backend */
     void* audio_user;
     int audio_disabled;     /* 1: no sound at all (every voice fails, preloads fail) */
+
+    /* JS on its own thread (see "JS thread"). */
+    int js_thread;             /* JSUI_JS_THREAD_OFF (default), _ON or _LOCKSTEP */
+    int js_event_deadline_ms;  /* how long a default action JS may veto waits for JS's answer
+                                  (Tab, Enter, wheel scrolling, ...); default 100 */
+    int js_sync_timeout_ms;    /* JSUI_TICK_SYNC_JS's wait; default 250 */
+    JsuiJsReadyFn on_js_ready; /* optional: JS published work for the next tick. Runs on the JS
+                                  thread (must be thread safe): wakes a host that sleeps */
+    void* js_ready_user;
 } JsuiConfig;
 
 JSUI_API void jsui_config_init(JsuiConfig* cfg);
@@ -634,6 +650,71 @@ JSUI_API void jsui_tick_native(JsuiRuntime* rt, double now_ms);
  * performance.now() stays the runtime clock either way. */
 JSUI_API void jsui_set_js_frame_budget(JsuiRuntime* rt, double ms);
 JSUI_API double jsui_get_js_frame_budget(JsuiRuntime* rt);
+
+/* ------------------------------------------------------------- JS thread
+ *
+ * Opt-in (JsuiConfig.js_thread or jsui_set_js_thread): the bundle runs on a
+ * thread of its own, as in React Native. jsui_tick and the renders never
+ * wait for JS: timers, requestAnimationFrame, events, React's renders and
+ * commits and garbage collection run on the JS thread, while each tick
+ * applies what JS finished since the last one (a React commit whole, never
+ * in parts) and runs native Animated (host buffers included), scrolling,
+ * LayoutAnimations, input hit testing, layout and paint every frame, also
+ * while JS is busy for 50 ms. Every jsui_* call stays on the owner thread.
+ *
+ * What changes with it:
+ * - JS sees a frame later what it did not wait for: what JS does in a tick
+ *   lands in a later one (or in this one with JSUI_TICK_SYNC_JS / jsui_sync).
+ * - on_message, on_state, on_call, on_call_cancel, on_audio, log and a
+ *   JsuiLoadFn run inside a later jsui_tick (or jsui_sync), not while JS is
+ *   on the stack; jsui_post_message and jsui_call_ui only queue.
+ * - jsui_send_* return what native predicts (a pointer listener, a
+ *   TextInput, a scrollable, a default action waiting for JS's answer),
+ *   not whether a handler called preventDefault(). A key on a view with a
+ *   key handler waits for JS's answer up to js_event_deadline_ms (then its
+ *   default action runs anyway); plain focus navigation stays instant.
+ * - Synchronous measure (__jsui_native.measure) reads the last frame's
+ *   layout; React Native's callback forms (ref.measure, UIManager.measure)
+ *   answer after the next layout, as in React Native. Animated
+ *   createNode / startAnimation config errors are logged instead of thrown.
+ * - jsui_set_js_frame_budget is the slice after which React's scheduler
+ *   lets events in between (input latency vs throughput), no longer a share
+ *   of the frame.
+ * - jsui_wants_frame is also set while JS works or has work for the next
+ *   tick; or wake on on_js_ready.
+ * Lockstep (JSUI_JS_THREAD_LOCKSTEP, tests and tools): JS still runs on its
+ * thread but everything native posts to it is waited for, which gives the
+ * frames of single-threaded mode. The host JS engine (WebAssembly) has no
+ * JS thread. */
+enum {
+    JSUI_JS_THREAD_OFF = 0,
+    JSUI_JS_THREAD_ON = 1,
+    JSUI_JS_THREAD_LOCKSTEP = 2
+};
+/* Before the first bundle load only (the engine is rebuilt): 0, or -1
+ * afterwards, for an unknown mode, or where the build has no threads. */
+JSUI_API int jsui_set_js_thread(JsuiRuntime* rt, int mode);
+/* The JSUI_JS_THREAD_* mode. */
+JSUI_API int jsui_js_thread(JsuiRuntime* rt);
+/* Waits until JS has handled everything posted to it (input, messages,
+ * state changes, the frame), applies what it did, lays out and delivers
+ * the onLayout events and measure callbacks that leads to, repeating while
+ * JS gets more to do (8 rounds at most). Proxied reads JS makes meanwhile
+ * are served. Returns 1 when JS is left idle, 0 when `timeout_ms` passed
+ * first (< 0: no limit); what JS finished by then is applied, commits
+ * whole. Does not wait for network or resource loads. Without a JS thread:
+ * returns 1 at once. Between ticks: scene cuts, screenshots, tests. */
+JSUI_API int jsui_sync(JsuiRuntime* rt, double timeout_ms);
+enum {
+    /* jsui_tick_ex: this frame's JS lands on this frame. The tick waits (up
+     * to JsuiConfig.js_sync_timeout_ms) for JS to run this frame's timers,
+     * rAF and events and applies what it did before native Animated and
+     * layout, then once more for the onLayout handlers. Right after
+     * jsui_set_state of data the frame must show, for example. */
+    JSUI_TICK_SYNC_JS = 1
+};
+/* jsui_tick with JSUI_TICK_* flags. */
+JSUI_API void jsui_tick_ex(JsuiRuntime* rt, double now_ms, int flags);
 /* Number of resource loads (bundle, fetch, images, fonts) still in flight.
  * Headless hosts keep ticking until this reaches 0 before capturing. */
 JSUI_API int jsui_pending_loads(JsuiRuntime* rt);
@@ -714,6 +795,13 @@ typedef struct JsuiPerf {
     unsigned long long gc_full_collections; /* ... that scanned the whole heap */
     double gc_us;
     double gc_max_us;                     /* the longest pause */
+    /* JS on its own thread (0 without). Always measured. */
+    double js_busy_ms;                    /* JS thread time in tasks (events, timers, frames, commits, GC
+                                             excluded); js_us is then the owner thread's share (none) */
+    unsigned long long js_batches_applied; /* JS tasks' results applied by ticks */
+    double js_apply_ms;                   /* owner thread time applying them (also in commit_us) */
+    int js_lag_frames;                    /* ticks since JS last delivered while it had work (now) */
+    double js_sync_ms;                    /* owner thread time waiting in syncs (jsui_sync, SYNC_JS, lockstep) */
 } JsuiPerf;
 
 /* Turns the per-phase timing on (non-zero) or off. Off by default. */

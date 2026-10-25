@@ -28,20 +28,33 @@ namespace jsui {
 
 class Runtime;
 class Inspector;
+class JsThread;
 
 struct JsEngine::Impl {
   Runtime& rt;
   JSRuntime* jrt = nullptr;
   JSContext* ctx = nullptr;
   // Runtime::jsThreadMode when the engine was made (switching rebuilds it):
-  // JS reaches the runtime only the ways a JS thread can (see the reads
-  // below and Runtime::toHost).
+  // the engine runs on `thread` (js/js_thread.h) and reaches the runtime
+  // only the ways a JS thread can (see the reads below and Runtime::toHost).
   bool threaded = false;
+  JsThread* thread = nullptr;
 
   // ---- perf counters JS bumps: the main document's, or in JS-thread mode
   // a block of its own that the owner thread merges in (mergePerf).
   PerfCounters jsCounters;
   PerfCounters* counters = nullptr;
+  // Phase times: the main document's; on a JS thread its own (never
+  // profiled: the owner's phases add up to its own frame time).
+  Perf jsPerf;
+  Perf* phases = nullptr;  // set as the engine is made
+  Perf& perf() { return *phases; }
+  // The runtime clock as JS sees it (performance.now, timers): the tick's
+  // time, or on a JS thread the time of the message it handles.
+  double now() const;
+  // React's scheduler yields (__jsui_native.shouldYield, zero-delay timer
+  // passes): the tick's JS budget, or on a JS thread the task's slice.
+  bool shouldYield() const;
 
   // ---- timers (setTimeout / setInterval / setImmediate / MessageChannel)
   struct Timer {
@@ -149,27 +162,32 @@ struct JsEngine::Impl {
   // The end of a JS task: the microtasks have drained (drain()). The
   // commands JS recorded are published as one batch, so a React commit is
   // applied whole. (Single-threaded, the sync points below have applied
-  // them already.)
-  void publish() {
-    if (!commands.empty()) applyCommands();
-  }
+  // them already; on a JS thread the batch goes to the owner thread, with
+  // the task's replies and host callbacks: JsThread::publish.)
+  void publish();
   // JS returned to native code inside a task (a call() that is part of a
   // batch, a microtask round, a script's evaluation), or a bridge call is
   // about to read or affect native state (measure, getProps, Animated
   // getValue, host callbacks, fonts). Single-threaded, everything recorded
   // so far is applied here, so native never sees the tree behind JS. (On a
-  // JS thread, reads would come from a snapshot of the last frame instead
-  // and only publish() would apply.)
+  // JS thread nothing happens: reads come from the frame snapshot or a
+  // proxy, and only publish() hands commands over.)
   void syncPoint() {
-    if (!commands.empty()) applyCommands();
+    if (!threaded && !commands.empty()) applyCommands();
   }
   // For an op of CommandBuffer::appliesAtOnce that was just recorded:
-  // applies it with everything before it and returns its answer.
+  // applies it with everything before it and returns its answer
+  // (single-threaded only: on a JS thread it is applied with its batch and
+  // answers what it can without waiting, see the bridge functions).
   const CommandBuffer::Result& applyNow() {
-    assert(!commands.empty() && CommandBuffer::appliesAtOnce(commands.last()));
+    assert(!threaded && !commands.empty() && CommandBuffer::appliesAtOnce(commands.last()));
     applyCommands();
     return commands.result();
   }
+  // Runs `fn` against the owner thread's state: single-threaded after what
+  // JS recorded is applied, on a JS thread as a proxied call (false when
+  // the owner thread did not run it in time).
+  bool onOwner(const std::function<void()>& fn);
 
   // Cached atoms for hot callbacks.
   JSAtom atomDispatch = 0, atomHostMessage = 0, atomOnLayout = 0;

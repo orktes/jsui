@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -211,6 +212,9 @@ class CommandBuffer {
   // native runs them (focus / blur / scroll / selection events) or answer
   // the caller (lottieCommand's bool, Animated create / start errors,
   // stopAnimation's velocity). Every other op waits for the publish point.
+  // On a JS thread they go with the batch like the rest: their events
+  // arrive as messages later, the answers are what JS can tell itself, and
+  // Animated config errors are logged when applied.
   static bool appliesAtOnce(Op op) {
     switch (op) {
       case Op::Focus:
@@ -239,6 +243,14 @@ class CommandBuffer {
   const Result& result() const { return result_; }
   // Forgets what is recorded (the engine is going away).
   void clear();
+  // Hands what is recorded to `o` and takes `o`'s (empty, cleared) arrays
+  // instead: a JS thread publishes a task's commands this way
+  // (js/js_thread.h), keeping the arrays' capacity in use.
+  void swapRecorded(CommandBuffer& o) {
+    std::swap(cmds_, o.cmds_);
+    std::swap(bytes_, o.bytes_);
+    std::swap(next_, o.next_);
+  }
 
  private:
   enum : uint8_t { kNull, kFalse, kTrue, kNumber, kString, kArray, kObject, kKey, kEnd };
