@@ -222,7 +222,9 @@ struct GraphiteGpu final : JsuiGpuContext {
   void configure(graphite::ContextOptions& opts) {
     precompiler->configure(opts);
 #if SK_MILESTONE >= 140
-    if (precompileMode() == Precompiler::Mode::Thread) {
+    // Not when the tests force sliced precompiles: those compile on the
+    // render thread, where a pool would make them asynchronous.
+    if (precompileMode() == Precompiler::Mode::Thread && !jsui::pipeline_cache::forceSliced()) {
       compileExecutor = jsui::pipeline_cache::makeCompileExecutor();
       opts.fExecutor = compileExecutor.get();
     }

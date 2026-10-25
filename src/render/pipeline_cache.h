@@ -115,9 +115,13 @@ std::unique_ptr<SkExecutor> makeCompileExecutor();
 // Precompiles that executor has queued or is running (Graphite hands them
 // over and returns: they finish there).
 int pendingPrecompiles(const SkExecutor* executor);
+// Every compile that executor has queued or is running (frames' and
+// shader warm-ups' too).
+int pendingCompiles(const SkExecutor* executor);
 
 // Tests only: precompile in slices (Mode::Sliced) whatever the backend.
 void setForceSliced(bool on);
+bool forceSliced();
 // Tests only: contexts start without the default cache file.
 void setNoDefaultFile(bool on);
 // The cache file a context uses until the host names one (jsui.h): in the
@@ -189,6 +193,8 @@ class Precompiler {
   // that picks the other one. Empty when the key has no depth/stencil
   // attachment or the precompiler is not attached.
   std::string swapDepthStencilForTest(const std::string& key);
+  // Tests only: compiles still on the context's compile pool.
+  int poolPendingForTest() const { return pendingCompiles(executor_); }
 
  private:
   struct Compiler;  // the PrecompileContext (Graphite builds only)

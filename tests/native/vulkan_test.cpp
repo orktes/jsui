@@ -541,6 +541,10 @@ unsigned long long shaderFrames(Vk& vk, JsuiGpuContext* gpu, bool preload) {
     JsuiPerf p;
     jsui_get_perf(rt, &p, 1);
     compiles[now >= 600] += p.pipeline_compiles;
+    // The warm-ups compile on the context's pool, off the frames: give them
+    // the time the 600 ms before the mount would (lavapipe is slow).
+    for (int i = 0; preload && frame == 0 && i < 6000 && gpu->pipelines->poolPendingForTest() > 0; i++)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   CHECK(jsui_last_error(rt) == nullptr || !*jsui_last_error(rt));
   std::vector<uint32_t> out = vk.read();

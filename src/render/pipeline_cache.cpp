@@ -225,6 +225,7 @@ Parsed parse(const void* data, size_t size, Backend backend) {
 }
 
 void setForceSliced(bool on) { gForceSliced = on; }
+bool forceSliced() { return gForceSliced; }
 void setNoDefaultFile(bool on) { gNoDefaultFile = on; }
 
 #if SK_MILESTONE >= 140  // SkExecutor work lists, ContextOptions::fExecutor
@@ -295,9 +296,16 @@ std::unique_ptr<SkExecutor> makeCompileExecutor() {
 int pendingPrecompiles(const SkExecutor* executor) {
   return executor ? static_cast<const CompileExecutor*>(executor)->pending(1) : 0;
 }
+
+int pendingCompiles(const SkExecutor* executor) {
+  if (!executor) return 0;
+  auto* e = static_cast<const CompileExecutor*>(executor);
+  return e->pending(0) + e->pending(1);
+}
 #else
 std::unique_ptr<SkExecutor> makeCompileExecutor() { return nullptr; }
 int pendingPrecompiles(const SkExecutor*) { return 0; }
+int pendingCompiles(const SkExecutor*) { return 0; }
 #endif
 
 // ---------------------------------------------------------------- Files
