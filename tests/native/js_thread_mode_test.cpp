@@ -345,3 +345,31 @@ TEST(js_thread_lifecycle) {
   delete h;
   CHECK(nowMs() - t0 < 1000);
 }
+
+// jsui_debug_stall_js keeps JS busy: on a JS thread the owner's ticks go on
+// meanwhile and jsui_sync waits it out; single-threaded the call itself
+// takes that long.
+TEST(js_thread_debug_stall) {
+  if (!jsui::JsThread::available()) return;
+  {
+    ModeHost h(true);
+    CHECK(h.load(kLifecycleBundle));
+    h.tick();
+    double t0 = nowMs();
+    jsui_debug_stall_js(h.rt, 150);
+    CHECK(nowMs() - t0 < 50);
+    for (int i = 0; i < 2000 && !h.runtime().jsBusy(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(h.runtime().jsBusy());
+    double t1 = nowMs();
+    jsui_tick(h.rt, h.t += 16);
+    CHECK(nowMs() - t1 < 50);
+    CHECK_EQ(jsui_sync(h.rt, -1), 1);
+    CHECK(nowMs() - t0 >= 140);
+    CHECK(!h.runtime().jsBusy());
+  }
+  ModeHost h(false);
+  CHECK(h.load(kLifecycleBundle));
+  double t0 = nowMs();
+  jsui_debug_stall_js(h.rt, 60);
+  CHECK(nowMs() - t0 >= 55);
+}

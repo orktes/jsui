@@ -715,6 +715,12 @@ enum {
 };
 /* jsui_tick with JSUI_TICK_* flags. */
 JSUI_API void jsui_tick_ex(JsuiRuntime* rt, double now_ms, int flags);
+/* Debugging and demos: keeps JS busy for `ms` (a busy loop, as a long task
+ * or a garbage collection would), queued behind what was posted before.
+ * With a JS thread the host's frames go on meanwhile; without one (or in
+ * lockstep) the call itself takes that long. A viewer's "stall JS" key and
+ * the integrations' smoke tests use it. */
+JSUI_API void jsui_debug_stall_js(JsuiRuntime* rt, double ms);
 /* Number of resource loads (bundle, fetch, images, fonts) still in flight.
  * Headless hosts keep ticking until this reaches 0 before capturing. */
 JSUI_API int jsui_pending_loads(JsuiRuntime* rt);
