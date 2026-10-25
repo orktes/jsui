@@ -888,13 +888,17 @@ void Precompiler::precompileCommon(SkColorType ct, const sk_sp<SkColorSpace>& cs
     pc = compiler_->pc.get();
   }
 
-  // What the painter draws on the frame's target: one sample, a depth buffer
-  // (Graphite orders draws with it), no stencil.
-  RenderPassProperties rpp;
-  rpp.fDSFlags = DepthStencilFlags::kDepth;
-  rpp.fDstCT = ct;
-  rpp.fDstCS = cs;
-  const RenderPassProperties passes[] = {rpp};
+  // The frame's target as the painter's draws use it: one sample and a
+  // depth buffer (Graphite orders draws with it). A frame that also fills a
+  // path Graphite tessellates (SVG icons, arbitrary shapes) draws the whole
+  // pass multisampled, with stencil: the same set again for that, after.
+  RenderPassProperties single;
+  single.fDSFlags = DepthStencilFlags::kDepth;
+  single.fDstCT = ct;
+  single.fDstCS = cs;
+  RenderPassProperties msaa = single;
+  msaa.fDSFlags = DepthStencilFlags::kDepthStencil;
+  msaa.fRequiresMSAA = true;
 
   // Images as the image cache uploads them (premultiplied RGBA in the
   // target's color space, clamped, no mipmaps); gradients of up to 4 stops,
@@ -913,34 +917,44 @@ void Precompiler::precompileCommon(SkColorType ct, const sk_sp<SkColorSpace>& cs
   const auto rect = DrawTypeFlags::kNonAAFillRect, rrect = DrawTypeFlags::kAnalyticRRect,
              quad = DrawTypeFlags::kPerEdgeAAQuad;
   // The pool takes them in this order (a first launch's first frames race
-  // it): everything unclipped first, then the same inside an analytic clip
-  // (rounded overflow, scroll views).
-  for (DrawTypeFlags clip : {DrawTypeFlags::kNone, DrawTypeFlags::kAnalyticClip}) {
-    auto precompile = [&](std::initializer_list<sk_sp<PrecompileShader>> shaders, SkBlendMode blend, bool opaque,
-                          DrawTypeFlags draws) {
-      PaintOptions o;
-      std::vector<sk_sp<PrecompileShader>> list(shaders);
-      o.setShaders(list);
-      o.setBlendModes({&blend, 1});
-      o.setPaintColorIsOpaque(opaque);
-      Precompile(pc, o, DrawTypeFlags(draws | clip), passes);
-    };
-    // Clears (every frame's first draw; also of damage rects): never clipped.
-    if (clip == DrawTypeFlags::kNone) precompile({}, SkBlendMode::kSrc, true, rect);
-    // Solid fills (no shader: the paint's color) and text; a plain rect's
-    // pipeline differs for an opaque and a translucent color.
-    precompile({}, SkBlendMode::kSrcOver, true, DrawTypeFlags(rect | rrect | DrawTypeFlags::kBitmapText_Mask));
-    precompile({}, SkBlendMode::kSrcOver, false, rect);
-    // Images (also as AA quads: drawImageRect) and gradients.
-    precompile({image}, SkBlendMode::kSrcOver, true, DrawTypeFlags(rect | rrect | quad));
-    precompile({linear, radial}, SkBlendMode::kSrcOver, true, DrawTypeFlags(rect | rrect));
-    // The same under a translucent paint (opacity): the shader times the
-    // paint's alpha.
-    precompile({image, radial}, SkBlendMode::kSrcOver, false, DrawTypeFlags(rect | rrect | quad));
-    // Blurred rrects (box shadows the GPU draws analytically).
-    Precompile(pc, PaintOptions(), DrawTypeFlags(DrawTypeFlags::kDropShadows | clip), passes);
-    // Copies.
-    if (clip == DrawTypeFlags::kNone) precompile({image, linear}, SkBlendMode::kSrc, true, rect);
+  // it): single-sampled before multisampled; in each, everything unclipped
+  // first, then the same inside an analytic clip (rounded overflow, scroll
+  // views).
+  for (const RenderPassProperties& rpp : {single, msaa}) {
+    const RenderPassProperties passes[] = {rpp};
+    const bool multisampled = rpp.fRequiresMSAA;
+    for (DrawTypeFlags clip : {DrawTypeFlags::kNone, DrawTypeFlags::kAnalyticClip}) {
+      auto precompile = [&](std::initializer_list<sk_sp<PrecompileShader>> shaders, SkBlendMode blend, bool opaque,
+                            DrawTypeFlags draws) {
+        PaintOptions o;
+        std::vector<sk_sp<PrecompileShader>> list(shaders);
+        o.setShaders(list);
+        o.setBlendModes({&blend, 1});
+        o.setPaintColorIsOpaque(opaque);
+        Precompile(pc, o, DrawTypeFlags(draws | clip), passes);
+      };
+      // Clears (every frame's first draw; also of damage rects): never clipped.
+      if (clip == DrawTypeFlags::kNone) precompile({}, SkBlendMode::kSrc, true, rect);
+      // Solid fills (no shader: the paint's color) and text; a plain rect's
+      // pipeline differs for an opaque and a translucent color.
+      precompile({}, SkBlendMode::kSrcOver, true, DrawTypeFlags(rect | rrect | DrawTypeFlags::kBitmapText_Mask));
+      precompile({}, SkBlendMode::kSrcOver, false, rect);
+      // Images (also as AA quads: drawImageRect) and gradients.
+      precompile({image}, SkBlendMode::kSrcOver, true, DrawTypeFlags(rect | rrect | quad));
+      precompile({linear, radial}, SkBlendMode::kSrcOver, true, DrawTypeFlags(rect | rrect));
+      // The same under a translucent paint (opacity): the shader times the
+      // paint's alpha.
+      precompile({image, radial}, SkBlendMode::kSrcOver, false, DrawTypeFlags(rect | rrect | quad));
+      // Blurred rrects (box shadows the GPU draws analytically).
+      Precompile(pc, PaintOptions(), DrawTypeFlags(DrawTypeFlags::kDropShadows | clip), passes);
+      // Copies.
+      if (clip == DrawTypeFlags::kNone) precompile({image, linear}, SkBlendMode::kSrc, true, rect);
+      // The paths themselves (stencil, then cover).
+      if (multisampled) {
+        precompile({}, SkBlendMode::kSrcOver, true, DrawTypeFlags::kNonSimpleShape);
+        precompile({}, SkBlendMode::kSrcOver, false, DrawTypeFlags::kNonSimpleShape);
+      }
+    }
   }
   if (log_ == 1) SkDebugf("jsui: common pipelines handed to the compile pool (color type %d)\n", int(ct));
 #else
