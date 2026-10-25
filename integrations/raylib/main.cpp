@@ -127,12 +127,20 @@ class Game : public jsui_example::SelfTestHost {
     unsigned flags = FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI | FLAG_VSYNC_HINT | FLAG_MSAA_4X_HINT;
     // Fixed-frame runs (CI under Xvfb) go as fast as they can, on any visual.
     if (opt_.frames >= 0 || opt_.selftest) flags &= ~(FLAG_VSYNC_HINT | FLAG_MSAA_4X_HINT);
+    if (opt_.bench > 0) flags &= ~FLAG_VSYNC_HINT;  // uncapped
     SetConfigFlags(flags);
     SetTraceLogLevel(LOG_WARNING);
     InitWindow(opt_.width, opt_.height, "JSUI + raylib");
     if (!IsWindowReady()) return 1;
     SetExitKey(KEY_NULL);  // Esc belongs to the UI / the pause menu
 
+    bench_.seconds = opt_.bench;
+    bench_.warmup = opt_.benchWarmup;
+    if (opt_.noUi) {
+      std::printf("UI: off (--no-ui)\n");
+      for (int i = 0; i < 8; i++) spawn();
+      return runWithoutUi();
+    }
     if (!opt_.cpu && !initGpu()) {
       std::fprintf(stderr, "warning: GPU renderer unavailable, falling back to the CPU renderer\n");
       opt_.cpu = true;
@@ -165,7 +173,7 @@ class Game : public jsui_example::SelfTestHost {
     while (!quit_ && !WindowShouldClose()) {
       double now = GetTime() * 1000.0;
       if (IsWindowResized()) resize();
-      if (!opt_.selftest) forwardInput();
+      if (!opt_.selftest && !bench_.active()) forwardInput();
       float dt = GetFrameTime();
       if (opt_.frames >= 0 || opt_.selftest) dt = 1.f / 60.f;  // deterministic runs
       update(dt);
@@ -202,7 +210,9 @@ class Game : public jsui_example::SelfTestHost {
       if (last && !opt_.screenshot.empty()) screenshot(opt_.screenshot);
       EndDrawing();
       if (opt_.frames >= 0 && frame >= opt_.frames) break;
+      if (bench_.active() && bench_.frame()) break;
     }
+    if (bench_.active()) bench_.report(opt_.cpu ? "ui cpu" : "ui gpu");
 
     const char* err = jsui_last_error(rt_);
     if (err) std::fprintf(stderr, "JS error: %s\n", err);
@@ -214,6 +224,27 @@ class Game : public jsui_example::SelfTestHost {
   }
 
  private:
+  // --no-ui: the same scene and update, no runtime.
+  int runWithoutUi() {
+    long frame = 0;
+    while (!quit_ && !WindowShouldClose()) {
+      float dt = GetFrameTime();
+      if (opt_.frames >= 0) dt = 1.f / 60.f;
+      update(dt);
+      BeginDrawing();
+      ClearBackground({9, 12, 22, 255});
+      drawScene();
+      frame++;
+      if (opt_.frames >= 0 && frame >= opt_.frames && !opt_.screenshot.empty()) screenshot(opt_.screenshot);
+      EndDrawing();
+      if (opt_.frames >= 0 && frame >= opt_.frames) break;
+      if (bench_.active() && bench_.frame()) break;
+    }
+    if (bench_.active()) bench_.report("no-ui");
+    CloseWindow();
+    return 0;
+  }
+
   bool initGpu() {
     if (!gl_.load()) return false;
     // raylib loaded GL through GLFW; Skia resolves it the same way.
@@ -592,6 +623,7 @@ class Game : public jsui_example::SelfTestHost {
   std::vector<uint8_t> pixels_, rect_;
   jsui_example::HudState hud_;
   jsui_example::FpsCounter fps_;
+  jsui_example::BenchTimer bench_;
   jsui_example::SelfTest selftest_;
   jsui_example::ClickTracker click_;
   std::vector<Unit> units_;

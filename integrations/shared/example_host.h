@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "jsui/jsui.h"
 
@@ -36,12 +37,16 @@ struct Options {
   std::string screenshot;                    // write the last frame here (with --frames)
   bool selftest = false;                     // scripted input check (see SelfTest), then exit
   int jsThread = JSUI_JS_THREAD_ON;          // --js-thread on|off|lockstep (JsuiConfig.js_thread)
+  bool noUi = false;                         // --no-ui: the same game without JSUI (no runtime at all)
+  double bench = 0;                          // --bench S: vsync off, time S seconds of frames, print, exit
+  double benchWarmup = 3;                    // --bench-warmup S: seconds before timing starts
 };
 
 inline void usage(const char* exe) {
   std::printf(
       "usage: %s [--dev] [--cpu] [--width W] [--height H] [--frames N] [--screenshot out.png] [--selftest]\n"
-      "          [--js-thread on|off|lockstep] [bundle.js | http://127.0.0.1:5173/bundle.js]\n"
+      "          [--js-thread on|off|lockstep] [--no-ui] [--bench S [--bench-warmup S]]\n"
+      "          [bundle.js | http://127.0.0.1:5173/bundle.js]\n"
       "  default bundle: %s (npx jsui build integrations/shared/ui/app.jsx -o ...)\n"
       "  --js-thread: on (default) runs the UI's JS on its own thread; off on the game's thread\n",
       exe, JSUI_EXAMPLE_BUNDLE);
@@ -68,6 +73,9 @@ inline bool parseOptions(int argc, char** argv, Options* o) {
     else if (a == "--height") o->height = std::atoi(value());
     else if (a == "--frames") o->frames = std::atol(value());
     else if (a == "--screenshot") o->screenshot = value();
+    else if (a == "--no-ui") o->noUi = true;
+    else if (a == "--bench") o->bench = std::atof(value());
+    else if (a == "--bench-warmup") o->benchWarmup = std::atof(value());
     else if (a == "--js-thread") {
       std::string m = value();
       if (m == "on") o->jsThread = JSUI_JS_THREAD_ON;
@@ -150,6 +158,52 @@ struct FpsCounter {
     if (nowMs <= oldest || (shownAt >= 0 && nowMs - shownAt < 250)) return;
     fps = int(std::lround((count - 1) * 1000.0 / (nowMs - oldest)));
     shownAt = nowMs;
+  }
+};
+
+// --bench: frame-to-frame times over a fixed wall-clock window after a
+// warm-up, then one line: `bench: frames N mean X ms (Y fps) p50 p90 p99 max`.
+// Engines with and without the UI print the same line, so the cost of the
+// UI is the difference of the means.
+struct BenchTimer {
+  using Clock = std::chrono::steady_clock;
+  double warmup = 3, seconds = 0;
+  Clock::time_point start = Clock::now(), last{}, measureFrom{};
+  std::vector<float> ms;
+  bool active() const { return seconds > 0; }
+  // Call once per presented frame; true once the window is over.
+  bool frame() {
+    auto now = Clock::now();
+    double since = std::chrono::duration<double>(now - start).count();
+    if (since >= warmup) {
+      if (last != Clock::time_point{}) ms.push_back(float(std::chrono::duration<double, std::milli>(now - last).count()));
+      else measureFrom = now;
+      last = now;
+      return std::chrono::duration<double>(now - measureFrom).count() >= seconds;
+    }
+    return false;
+  }
+  // For hosts whose present is paced by the OS whatever they ask (sokol's GL
+  // view on macOS): the frame's own work, measured by the host (CPU + a
+  // glFinish), instead of the frame-to-frame time.
+  bool sample(double workMs) {
+    auto now = Clock::now();
+    if (std::chrono::duration<double>(now - start).count() < warmup) return false;
+    if (measureFrom == Clock::time_point{}) measureFrom = now;
+    ms.push_back(float(workMs));
+    return std::chrono::duration<double>(now - measureFrom).count() >= seconds;
+  }
+  void report(const char* label) {
+    if (ms.empty()) return;
+    double sum = 0;
+    for (float v : ms) sum += v;
+    double mean = sum / double(ms.size());
+    std::vector<float> s = ms;
+    std::sort(s.begin(), s.end());
+    auto q = [&](double f) { return s[std::min(s.size() - 1, size_t(f * double(s.size())))]; };
+    std::printf("bench: %s frames %zu mean %.4f ms (%.1f fps) p50 %.4f p90 %.4f p99 %.4f max %.4f\n", label, ms.size(),
+                mean, 1000.0 / mean, q(0.5), q(0.9), q(0.99), s.back());
+    std::fflush(stdout);
   }
 };
 

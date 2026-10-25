@@ -103,6 +103,9 @@ void AJsuiExampleGame::ParseArgs()
 		else if (A == TEXT("bundle")) BundleOverride = Value;
 		else if (A == TEXT("dev")) bDev = true;
 		else if (A == TEXT("cpu")) bCpu = true;
+		else if (A == TEXT("no-ui")) bNoUi = true;
+		else if (A == TEXT("bench")) Bench = FCString::Atod(*Value);
+		else if (A == TEXT("bench-warmup")) BenchWarmup = FCString::Atod(*Value);
 		else if (A == TEXT("js-thread"))
 			JsThread = uint8(Value == TEXT("off") ? 0 : Value == TEXT("lockstep") ? 2 : 1);
 	}
@@ -117,7 +120,7 @@ void AJsuiExampleGame::BeginPlay()
 	{
 		// Uncapped for deterministic runs (measuring), 120 otherwise (VSync
 		// is off in DefaultEngine.ini: on macOS it only applies at startup).
-		const bool bUncapped = Frames >= 0 || bSelfTest;
+		const bool bUncapped = Frames >= 0 || bSelfTest || Bench > 0;
 		GEngine->Exec(GetWorld(), bUncapped ? TEXT("t.MaxFPS 0") : TEXT("t.MaxFPS 120"));
 	}
 	// Matte, like the other examples: BasicShapeMaterial has no roughness
@@ -136,6 +139,12 @@ void AJsuiExampleGame::BeginPlay()
 		Pc->SetInputMode(Mode);
 	}
 
+	if (bNoUi)
+	{
+		JsuiExampleSay(TEXT("UI: off (--no-ui)"));
+		for (int32 I = 0; I < 8; I++) Spawn();
+		return;
+	}
 	Ui = NewObject<UJsuiWidget>(this);
 	Ui->bForceCpu = bCpu;
 	Ui->bDevMode = bDev;
@@ -371,8 +380,9 @@ FVector AJsuiExampleGame::UnitPos(const FUnit& U) const
 void AJsuiExampleGame::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
-	if (!Ui) return;
-	TSharedPtr<SJsuiView> View = Ui->GetView();
+	if (Bench > 0) BenchFrame();
+	if (!Ui && !bNoUi) return;
+	TSharedPtr<SJsuiView> View = Ui ? Ui->GetView() : nullptr;
 
 	// Orbit while a press the UI passed on is held (UI px).
 	FSlateApplication& Slate = FSlateApplication::Get();
@@ -409,6 +419,7 @@ void AJsuiExampleGame::Tick(float DeltaSeconds)
 		Ring->SetWorldScale3D(FVector(R, R, 0.01f));
 	}
 
+	if (!Ui) return;
 	PublishFrameData();
 	CountFrame(FPlatformTime::Seconds());
 	PublishState();
@@ -544,6 +555,31 @@ void AJsuiExampleGame::Finish(int32 Code)
 		return;
 	}
 	Quit(Code);
+}
+
+// --bench: frame-to-frame times over a wall-clock window after a warm-up,
+// then the same `bench:` line as the other engine examples (BenchTimer in
+// integrations/shared/example_host.h).
+void AJsuiExampleGame::BenchFrame()
+{
+	const double Now = FPlatformTime::Seconds();
+	if (BenchStart < 0) BenchStart = Now;
+	if (Now - BenchStart < BenchWarmup) return;
+	if (BenchLast < 0) BenchFrom = Now;
+	else BenchMs.Add(float((Now - BenchLast) * 1000.0));
+	BenchLast = Now;
+	if (Now - BenchFrom < Bench || BenchMs.Num() == 0) return;
+	TArray<float> S = BenchMs;
+	S.Sort();
+	double Sum = 0;
+	for (float V : BenchMs) Sum += V;
+	const double Mean = Sum / BenchMs.Num();
+	auto Q = [&](double F) { return S[FMath::Min(S.Num() - 1, int32(F * S.Num()))]; };
+	const FString Label = Ui ? Ui->GetRendererName() : FString(TEXT("no-ui"));
+	JsuiExampleSay(*FString::Printf(TEXT("bench: %s frames %d mean %.4f ms (%.1f fps) p50 %.4f p90 %.4f p99 %.4f max %.4f"),
+		*Label, BenchMs.Num(), Mean, 1000.0 / Mean, Q(0.5), Q(0.9), Q(0.99), S.Last()));
+	Bench = 0;
+	Quit(0);
 }
 
 void AJsuiExampleGame::Quit(int32 Code)

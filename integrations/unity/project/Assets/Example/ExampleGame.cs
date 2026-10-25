@@ -20,7 +20,10 @@
 // Command line (players): --selftest, --frames N, --screenshot out.png,
 // --bundle path-or-url, --dev, --cpu (the CPU renderer even where the GPU path works),
 // --js-thread on|off|lockstep (JsuiView.jsThread; on by default),
-// --frame-stats (log a histogram of frame times every 10 s).
+// --frame-stats (log a histogram of frame times every 10 s),
+// --no-ui (the same game without JsuiView: no runtime at all),
+// --bench S [--bench-warmup S] (vSync off, time S seconds of frames after a
+// warm-up, log one `bench:` line, quit).
 //
 // Frame pacing: interactive runs sync to the display (vSyncCount 1, no
 // targetFrameRate), as a game would; --selftest and --frames run uncapped.
@@ -89,7 +92,7 @@ public class ExampleGame : MonoBehaviour, SelfTest.IHost
     void Awake()
     {
         ParseArgs();
-        if (frames_ >= 0 || selftest_)
+        if (frames_ >= 0 || selftest_ || bench_ > 0)
         {
             QualitySettings.vSyncCount = 0;
             Application.targetFrameRate = -1;
@@ -104,6 +107,12 @@ public class ExampleGame : MonoBehaviour, SelfTest.IHost
             Debug.Log($"frame-stats: vSyncCount {QualitySettings.vSyncCount}, targetFrameRate {Application.targetFrameRate}, " +
                       $"refresh {Screen.currentResolution.refreshRateRatio.value:0.##} Hz");
         BuildScene();
+        if (noUi_)
+        {
+            Debug.Log("UI: off (--no-ui)");
+            for (int i = 0; i < 8; i++) Spawn();
+            return;
+        }
 
         view_ = gameObject.AddComponent<JsuiView>();
         view_.forwardInput = !selftest_;
@@ -145,7 +154,8 @@ public class ExampleGame : MonoBehaviour, SelfTest.IHost
     }
 
     string bundleOverride_;
-    bool dev_, cpu_, frameStats_;
+    bool dev_, cpu_, frameStats_, noUi_;
+    double bench_, benchWarmup_ = 3;
     JsuiView.JsThreadMode jsThread_ = JsuiView.JsThreadMode.On;
 
     void ParseArgs()
@@ -162,6 +172,9 @@ public class ExampleGame : MonoBehaviour, SelfTest.IHost
             else if (a == "--dev") dev_ = true;
             else if (a == "--cpu") cpu_ = true;
             else if (a == "--frame-stats") frameStats_ = true;
+            else if (a == "--no-ui") noUi_ = true;
+            else if (a == "--bench") bench_ = double.Parse(Next(), CultureInfo.InvariantCulture);
+            else if (a == "--bench-warmup") benchWarmup_ = double.Parse(Next(), CultureInfo.InvariantCulture);
             else if (a == "--js-thread")
             {
                 var m = Next();
@@ -305,7 +318,7 @@ public class ExampleGame : MonoBehaviour, SelfTest.IHost
     void Update()
     {
         // Orbit while a press the UI passed on is held (UI px, y down).
-        if (dragging_)
+        if (dragging_ && view_ != null)
         {
             var p = view_.PointerPosition;
             yaw_ -= (p.x - lastPointer_.x) * 0.006f;
@@ -338,10 +351,40 @@ public class ExampleGame : MonoBehaviour, SelfTest.IHost
             ring_.localScale = new Vector3(r, 0.01f, r);
         }
 
+        if (bench_ > 0) BenchFrame();
+        if (view_ == null) return;
         PublishFrameData();
         CountFrame(Time.realtimeSinceStartupAsDouble);
         if (frameStats_) FrameStats();
         PublishState();
+    }
+
+    // --bench: frame-to-frame times over a wall-clock window after a warm-up,
+    // then the same `bench:` line as the other engine examples
+    // (BenchTimer in integrations/shared/example_host.h).
+    readonly List<float> benchMs_ = new List<float>(1 << 16);
+    double benchLast_ = -1, benchFrom_;
+
+    void BenchFrame()
+    {
+        double now = Time.realtimeSinceStartupAsDouble;
+        if (now < benchWarmup_) return;
+        if (benchLast_ < 0) benchFrom_ = now;
+        else benchMs_.Add((float)((now - benchLast_) * 1000));
+        benchLast_ = now;
+        if (now - benchFrom_ < bench_ || benchMs_.Count == 0) return;
+        var s = new List<float>(benchMs_);
+        s.Sort();
+        double sum = 0;
+        foreach (var v in benchMs_) sum += v;
+        double mean = sum / benchMs_.Count;
+        float Q(double f) => s[Math.Min(s.Count - 1, (int)(f * s.Count))];
+        string label = view_ == null ? "no-ui" : (view_.RendererName ?? "ui");
+        Debug.Log(string.Format(CultureInfo.InvariantCulture,
+            "bench: {0} frames {1} mean {2:0.0000} ms ({3:0.0} fps) p50 {4:0.0000} p90 {5:0.0000} p99 {6:0.0000} max {7:0.0000}",
+            label, benchMs_.Count, mean, 1000 / mean, Q(0.5), Q(0.9), Q(0.99), s[s.Count - 1]));
+        bench_ = 0;
+        Quit(0);
     }
 
     // --frame-stats: every 10 s, real (not smoothed) frame times bucketed by
@@ -389,7 +432,7 @@ public class ExampleGame : MonoBehaviour, SelfTest.IHost
     void LateUpdate()
     {
         frame_++;
-        if (test_ != null)
+        if (test_ != null && view_ != null)
         {
             var size = view_.Size;
             int r = test_.Step(view_.Runtime, this, size.x, size.y);
