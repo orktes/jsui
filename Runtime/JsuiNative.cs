@@ -49,6 +49,16 @@ namespace Jsui
         [DllImport(Lib)] static extern int jsui_load_bundle_url(IntPtr rt, byte[] url);
         public static int LoadBundleUrl(IntPtr rt, string url) => jsui_load_bundle_url(rt, Utf8(url));
         [DllImport(Lib)] public static extern void jsui_tick(IntPtr rt, double nowMs);
+
+        // ---- JS thread (jsui.h "JS thread")
+
+        public const int JsThreadOff = 0, JsThreadOn = 1, JsThreadLockstep = 2;
+        public const int TickSyncJs = 1;  // JSUI_TICK_SYNC_JS
+        [DllImport(Lib)] public static extern int jsui_set_js_thread(IntPtr rt, int mode);
+        [DllImport(Lib)] public static extern int jsui_js_thread(IntPtr rt);
+        [DllImport(Lib)] public static extern int jsui_sync(IntPtr rt, double timeoutMs);
+        [DllImport(Lib)] public static extern void jsui_tick_ex(IntPtr rt, double nowMs, int flags);
+        [DllImport(Lib)] public static extern void jsui_debug_stall_js(IntPtr rt, double ms);
         [DllImport(Lib)] public static extern int jsui_needs_redraw(IntPtr rt);
         [DllImport(Lib)] public static extern int jsui_wants_frame(IntPtr rt);
         [DllImport(Lib)] public static extern void jsui_set_viewport(IntPtr rt, int width, int height, float pixelRatio);

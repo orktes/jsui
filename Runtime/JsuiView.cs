@@ -34,6 +34,18 @@
 // Game <-> UI. Messages from JS (Host.postMessage) arrive as OnMessage after
 // each tick; SetState / PostMessage / MapBuffer + CommitBuffer feed the UI
 // (useHostState, Host.addListener, useHostBufferValue).
+//
+// JS thread. By default the bundle runs on a thread of its own, as in React
+// Native (jsThread = On; JsuiConfig.js_thread): LateUpdate's tick never
+// waits for JS, so a long React commit or a garbage collection does not
+// cost the game a frame, and what native does every frame (Animated values
+// driven by MapBuffer data, scrolling, hover and press styles) keeps going
+// meanwhile. What JS does lands a frame or more later. When a change must
+// show on this very frame (a scene cut, a screenshot, critical state just
+// set), call SyncJsNextFrame() (the next tick waits for JS, up to 250 ms) or
+// SyncJs() (waits now). Off runs JS inside the tick on the main thread;
+// Lockstep on its thread but waited for every tick (the frames of Off).
+// OnMessage and the logs still arrive on the main thread, after the tick.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -59,6 +71,10 @@ namespace Jsui
         [Tooltip("Rasterise on the CPU even where the GPU path is available")]
         public bool forceCpu;
 
+        public enum JsThreadMode { Off = JsuiNative.JsThreadOff, On = JsuiNative.JsThreadOn, Lockstep = JsuiNative.JsThreadLockstep }
+        [Tooltip("Run the UI's JS on its own thread (On, as in React Native: frames never wait for JS), on the main thread inside the tick (Off), or on its thread but waited for every tick (Lockstep). Applies when the view starts.")]
+        public JsThreadMode jsThread = JsThreadMode.On;
+
         /// <summary>Host.postMessage(name, payload) from JS: name and the payload as JSON.</summary>
         public event Action<string, string> OnMessage;
         /// <summary>A mouse press the UI did not consume: button (0 left, 1 right, 2 middle as in Unity) and position (logical px, top-left origin).</summary>
@@ -76,6 +92,8 @@ namespace Jsui
         public string RendererName => gpu_
             ? (JsuiNative.FromUtf8(JsuiNative.jsuiu_gpu_backend_name()) ?? "GPU") + " · RenderTexture"
             : "CPU raster · Texture2D · " + SystemInfo.graphicsDeviceType;
+        /// <summary>The JS thread mode the runtime runs in (jsThread once started; Off where the build has no threads).</summary>
+        public JsThreadMode ActiveJsThread => rt_ != IntPtr.Zero ? (JsThreadMode)JsuiNative.jsui_js_thread(Rt) : jsThread;
         /// <summary>Viewport size in logical px.</summary>
         public Vector2 Size => new Vector2(width_, height_);
         public float PixelRatio => ratio_;
@@ -136,6 +154,9 @@ namespace Jsui
             // API (native/jsui_unity_plugin.cpp).
             gpu_ = !forceCpu && JsuiNative.jsuiu_gpu_available() != 0;
             if (gpu_) renderEvent_ = JsuiNative.jsuiu_render_event_func();
+            // Before the bundle loads (state set in Awake stays).
+            if (JsuiNative.jsui_set_js_thread(Rt, (int)jsThread) != 0)
+                Debug.LogWarning($"JSUI: JS thread mode {jsThread} unavailable in this build; JS runs on the main thread");
             var url = ResolveBundle(bundle);
             if (JsuiNative.LoadBundleUrl(Rt, url) != 0)
                 Debug.LogError($"JSUI: failed to load {url}: {JsuiNative.LastError(Rt)}");
@@ -209,6 +230,32 @@ namespace Jsui
         public void SetState(string key, string json) => JsuiNative.SetState(Rt, key, json);
         public void PostMessage(string name, string json) => JsuiNative.PostMessage(Rt, name, json);
 
+        /// <summary>
+        /// With JS on its own thread: waits (up to timeoutMs; negative: no
+        /// limit) until JS has handled everything sent to it, applies what it
+        /// did and lays out, so the next paint shows it; raises OnMessage for
+        /// what JS posted meanwhile. True when JS is left idle, false on
+        /// timeout (what JS finished is applied, commits whole). Without a
+        /// JS thread it returns true at once.
+        /// </summary>
+        public bool SyncJs(double timeoutMs = 250)
+        {
+            if (rt_ == IntPtr.Zero) return true;
+            bool idle = JsuiNative.jsui_sync(Rt, timeoutMs) != 0;
+            DrainQueues();
+            return idle;
+        }
+
+        /// <summary>The next tick waits for JS (JSUI_TICK_SYNC_JS): what the game set before it (SetState, PostMessage, input) shows on that frame.</summary>
+        public void SyncJsNextFrame() => syncJsNextFrame_ = true;
+
+        /// <summary>Debugging: keeps JS busy for ms (jsui_debug_stall_js), as a long commit would. With the JS thread the game's frames go on.</summary>
+        public void DebugStallJs(double ms)
+        {
+            if (rt_ != IntPtr.Zero) JsuiNative.jsui_debug_stall_js(Rt, ms);
+        }
+        bool syncJsNextFrame_;
+
         /// <summary>Writes `values` into the frame buffer `key` (Float32Array in JS) and commits it.</summary>
         public unsafe void SetBuffer(string key, float[] values, int count)
         {
@@ -239,7 +286,8 @@ namespace Jsui
         void LateUpdate()
         {
             if (rt_ == IntPtr.Zero) return;
-            JsuiNative.jsui_tick(Rt, Time.realtimeSinceStartupAsDouble * 1000.0);
+            JsuiNative.jsui_tick_ex(Rt, Time.realtimeSinceStartupAsDouble * 1000.0, syncJsNextFrame_ ? JsuiNative.TickSyncJs : 0);
+            syncJsNextFrame_ = false;
             DrainQueues();
             Paint();
         }
