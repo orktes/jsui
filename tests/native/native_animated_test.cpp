@@ -446,3 +446,68 @@ TEST(native_animated_expression) {
   na.dropNode(6);
   CHECK(!na.animating());
 }
+
+// Animated.clock({...}): a "clock" animation on a value counts seconds times
+// its speed from where the value is; stopping it pauses (the value stays),
+// a new one resumes; a `running` node holds it while 0. Only a clock
+// something reads, and that is not held, keeps the host ticking.
+TEST(native_animated_clock_animation) {
+  Document doc;
+  NativeAnimated na(doc);
+  CHECK(na.createNode(1, json(R"({"type":"value","value":10})")));
+  CHECK(na.startAnimation(1, 1, json(R"({"type":"clock","speed":2})"), 1000));
+  CHECK(!na.animating());  // nothing reads it yet
+  CHECK(na.createNode(2, json(R"({"type":"value","value":0})")));
+  CHECK(na.createNode(3, json(R"({"type":"addition","input":[1,2]})")));
+  na.connectNodes(1, 3);
+  na.connectNodes(2, 3);
+  CHECK(na.animating());
+  na.tick(1500);
+  CHECK_NEAR(na.getValue(1), 11, 1e-12);
+  CHECK_NEAR(na.nodeOutput(3), 11, 1e-12);
+  na.tick(2000);
+  CHECK_NEAR(na.getValue(1), 12, 1e-12);
+  // Pause: the value stays where the last frame put it.
+  CHECK(na.stopAnimation(1));
+  CHECK(!na.animating());
+  na.tick(5000);
+  CHECK_NEAR(na.getValue(1), 12, 1e-12);
+  CHECK(na.ends.empty());
+  // Resume at a new speed from there; reset is setValue + a new clock.
+  CHECK(na.startAnimation(2, 1, json(R"({"type":"clock","speed":0.5})"), 6000));
+  na.tick(8000);
+  CHECK_NEAR(na.getValue(1), 13, 1e-12);
+  na.setValue(1, 0);  // stops it (reported unfinished)
+  CHECK(na.ends.size() == 1 && na.ends[0].id == 2 && !na.ends[0].finished);
+  na.ends.clear();
+  CHECK(na.startAnimation(3, 1, json(R"({"type":"clock"})"), 8000));
+  na.tick(8250);
+  CHECK_NEAR(na.getValue(1), 0.25, 1e-12);
+  // Stopped at a time between frames (when JS paused it): counted up to then.
+  CHECK(na.stopAnimation(3, nullptr, 8350));
+  CHECK_NEAR(na.getValue(1), 0.35, 1e-12);
+  CHECK_NEAR(na.nodeOutput(3), 0.35, 1e-12);
+  CHECK(na.startAnimation(3, 1, json(R"({"type":"clock"})"), 8350));
+
+  // running: held while node 4 is 0 (no frames wanted), on from where it
+  // stopped when it is not.
+  CHECK(na.stopAnimation(3));
+  CHECK(na.createNode(4, json(R"({"type":"value","value":1})")));
+  na.setValue(1, 0);
+  CHECK(na.startAnimation(4, 1, json(R"({"type":"clock","running":4})"), 10000));
+  na.tick(11000);
+  CHECK_NEAR(na.getValue(1), 1, 1e-12);
+  na.setValue(4, 0);
+  na.tick(11500);  // held at this frame's time
+  CHECK_NEAR(na.getValue(1), 1.5, 1e-12);
+  CHECK(!na.animating());
+  na.tick(13000);
+  CHECK_NEAR(na.getValue(1), 1.5, 1e-12);
+  na.setValue(4, 1);
+  na.tick(13500);  // resumes from this frame
+  CHECK_NEAR(na.getValue(1), 1.5, 1e-12);
+  CHECK(na.animating());
+  na.tick(14500);
+  CHECK_NEAR(na.getValue(1), 2.5, 1e-12);
+  CHECK(na.ends.empty());  // a clock never ends on its own
+}

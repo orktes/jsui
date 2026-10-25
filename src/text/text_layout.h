@@ -40,6 +40,9 @@ bool prepareText(Node* node);
 // boxes pixel-snap in), and the baseline then snaps there, not on the device.
 void paintText(Node* node, SkCanvas* canvas, float x, float y, float width, float height,
                const SkMatrix* layoutSpace = nullptr);
+// The number of reveal units (ComputedStyle::textRevealMode: graphemes or
+// words) in a paragraph-root Text's text; 0 without text.
+int revealUnitCount(Node* node);
 // Paints a TextInput's value (or placeholder) inside its content box.
 void paintTextInput(Node* node, SkCanvas* canvas, float x, float y, float width, float height,
                     const SkMatrix* layoutSpace = nullptr);

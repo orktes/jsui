@@ -27,11 +27,42 @@ function PressableText(props) {
   return jsx('Text', rest);
 }
 
+// Typewriter reveal: <Text reveal={n} revealMode="chars" | "words"
+// revealFade={units} revealFraction>. The paragraph is laid out whole and
+// paints only its first `reveal` graphemes (or words), across nested spans;
+// they become the textReveal* style keys, which only repaint. Animated.Text
+// with reveal={node} drives it without re-rendering (natively with the
+// native driver).
+const REVEAL_KEYS = { reveal: 'textReveal', revealMode: 'textRevealMode', revealFade: 'textRevealFade', revealFraction: 'textRevealFraction' };
+
+function withReveal(props) {
+  const out = {};
+  let extra = null;
+  for (const k in props) {
+    const key = REVEAL_KEYS[k];
+    if (key === undefined) {
+      out[k] = props[k];
+      continue;
+    }
+    const v = props[k];
+    if (v == null || v === false) continue;
+    if (!extra) extra = {};
+    extra[key] = k === 'revealFraction' ? true : v;
+  }
+  if (extra) out.style = props.style ? [props.style, extra] : extra;
+  return out;
+}
+
 export function Text(props) {
+  if (props.reveal !== undefined || props.revealMode !== undefined || props.revealFade !== undefined || props.revealFraction !== undefined) {
+    props = withReveal(props);
+  }
   if (props.onPress || props.onPressIn || props.onPressOut || props.onLongPress) return jsx(PressableText, props);
   return jsx('Text', props);
 }
 Text.displayName = 'Text';
+// Animated.Text: an animated `reveal` is driven as the textReveal style key.
+Text.__animatedStyleProps = { reveal: 'textReveal' };
 
 // --- Image -------------------------------------------------------------------
 

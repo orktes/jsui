@@ -655,6 +655,12 @@ bool NativeAnimated::parseAnim(Anim& a, const Value& c, std::string* error) {
     a.kind = Anim::Kind::Decay;
     a.velocity = c["velocity"].asNumber();
     a.deceleration = c["deceleration"].asNumber(0.998);
+  } else if (type == "clock") {
+    a.kind = Anim::Kind::Clock;
+    a.speed = c["speed"].asNumber(1);
+    if (a.speed != a.speed) a.speed = 0;
+    a.runningTag = c["running"].isNumber() ? int(c["running"].asNumber()) : 0;
+    a.iterations = 1;
   } else {
     if (error) *error = "unsupported animation type '" + type + "'";
     return false;
@@ -690,6 +696,10 @@ bool NativeAnimated::startAnimation(int id, int tag, const Value& c, double nowM
   stopAnimationsOf(tag, true);
   a.from = n->value;
   beginIteration(a, nowMs);
+  if (a.kind == Anim::Kind::Clock && a.runningTag) {
+    gen_++;
+    a.held = evalNum(a.runningTag) == 0;  // gated from the start
+  }
   animations_.push_back(std::move(a));
   // A zero-length timing applies at once; its end is still reported (with
   // the other ends, after the tick), so a sequence or loop it is part of
@@ -957,7 +967,7 @@ void NativeAnimated::beginIteration(Anim& a, double nowMs) {
   a.last = a.from;
 }
 
-bool NativeAnimated::stopAnimation(int id, double* lastVelocity) {
+bool NativeAnimated::stopAnimation(int id, double* lastVelocity, double nowMs) {
   if (Group* g = group(id)) {
     // The caller reports the end: drop the group's leaves quietly.
     if (lastVelocity) *lastVelocity = 0;
@@ -970,6 +980,11 @@ bool NativeAnimated::stopAnimation(int id, double* lastVelocity) {
   for (size_t i = 0; i < animations_.size(); i++) {
     if (animations_[i].id == id) {
       if (lastVelocity) *lastVelocity = animations_[i].kind == Anim::Kind::Spring ? animations_[i].lastVelocity : 0;
+      if (animations_[i].kind == Anim::Kind::Clock && nowMs >= animations_[i].start) {
+        gen_++;
+        step(animations_[i], nowMs);
+        flush();
+      }
       animations_.erase(animations_.begin() + long(i));
       return true;
     }
@@ -1051,6 +1066,28 @@ bool NativeAnimated::step(Anim& a, double t) {
       break;
     }
     case Anim::Kind::Wait: break;
+    case Anim::Kind::Clock: {
+      // Gated by a node: it stops where this frame's time puts it and
+      // starts again from there.
+      if (a.runningTag) {
+        bool run = evalNum(a.runningTag) != 0;
+        if (!run && a.held) return false;
+        if (!run) {
+          a.held = true;
+          value = a.from + (t - a.start) / 1000 * a.speed;
+          a.from = value;
+          a.start = t;
+          break;
+        }
+        if (a.held) {
+          a.held = false;
+          a.from = n->value;
+          a.start = t;
+        }
+      }
+      value = a.from + (t - a.start) / 1000 * a.speed;
+      break;
+    }
     case Anim::Kind::Decay: {
       double kd = 1 - a.deceleration;
       value = a.from + (a.velocity / kd) * (1 - std::exp(-kd * (t - a.start)));
@@ -1085,6 +1122,7 @@ void NativeAnimated::tick(double nowMs) {
     for (int tag : interactionNodes_)
       if (ANode* n = node(tag); n && !n->children.empty() && interactionWeight(*n) != n->num) markDirty(*n);
   }
+  gen_++;  // clocks gated by a node read this frame's output
   std::vector<int> leaves;  // group steps that ended: they go on after this walk
   for (size_t i = 0; i < animations_.size();) {
     Anim& a = animations_[i];
@@ -1372,6 +1410,19 @@ double NativeAnimated::interactionWeight(const ANode& n) const {
   const StateStyles* s = v ? v->stateStyles.get() : nullptr;
   if (!s || s->interaction != n.interactionKey) return 0;
   return n.instant ? (s->target[n.slot] ? 1 : 0) : double(s->weight[n.slot]);
+}
+
+bool NativeAnimated::animating() const {
+  for (const Anim& a : animations_) {
+    if (a.kind != Anim::Kind::Clock) return true;
+    if (a.held) continue;
+    // A clock animation nothing reads (no dependents, no JS listener) does
+    // not need frames: its value is computed from the time whenever a frame
+    // comes.
+    auto it = nodes_.find(a.tag);
+    if (it != nodes_.end() && (!it->second.children.empty() || listening_.count(a.tag))) return true;
+  }
+  return liveClocks() > 0;
 }
 
 size_t NativeAnimated::liveClocks() const {

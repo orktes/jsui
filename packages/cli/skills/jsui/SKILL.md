@@ -56,7 +56,12 @@ Packages: `@orktes/jsui-cli` (bundler, dev server, headless tools, this skill),
    things that appear with data or hover use `<Visibility visible={node}>`
    and `useGroupState()`; popouts, tooltips and dropdowns go in an
    `<Overlay placement="top">` (drawn above everything and outside clips,
-   placed against the anchor natively, never a `zIndex` hack). See
+   placed against the anchor natively, never a `zIndex` hack). Typewriter
+   text (dialogue, subtitles) is
+   `<Animated.Text reveal={value} revealFraction>` driven by a native
+   timing, never a re-render per character; timers that pause or change
+   speed are `Animated.clock({...})` (`pause()` / `resume()` / `reset()` /
+   `setSpeed()`, or `running: node`). See
    [references/native-first.md](references/native-first.md).
    On native hosts JS runs **on its own thread** (as in React Native): the
    frame never waits for it, so what is native keeps the UI right while JS
@@ -239,7 +244,7 @@ Read the reference that matches the task:
 | --- | --- |
 | Components, props, styles, images, fonts (loading, weights, fallbacks, variable fonts), what's not supported | [references/components-and-styles.md](references/components-and-styles.md) |
 | Focus, gamepad, keyboard, pointer, scrolling, modals, input pass-through | [references/input-and-focus.md](references/input-and-focus.md) |
-| Native-first patterns: keep JS off the frame (`Animated.derive`, `Animated.clock`, host-buffer values, state styles `hoveredStyle` / `pressedStyle` / group styles, `useInteraction`, `useGroupState`, `Visibility`, hover popouts and `<Overlay>`, `useHostStateBind`, what to use instead of state); the JS thread (what runs where, `measure`, same-frame syncs) | [references/native-first.md](references/native-first.md) |
+| Native-first patterns: keep JS off the frame (`Animated.derive`, `Animated.clock` and pausable `Animated.clock({...})`, typewriter `Animated.Text reveal`, host-buffer values, state styles `hoveredStyle` / `pressedStyle` / group styles, `useInteraction`, `useGroupState`, `Visibility`, hover popouts and `<Overlay>`, `useHostStateBind`, what to use instead of state); the JS thread (what runs where, `measure`, same-frame syncs) | [references/native-first.md](references/native-first.md) |
 | `Animated` (native driver), springs, `LayoutAnimation`, performance | [references/animation-and-performance.md](references/animation-and-performance.md) |
 | Game data: shared state, calls, messages, per-frame buffers, several root views | [references/game-data.md](references/game-data.md) |
 | Host textures (video, render targets), LottieView, ShaderView / SkSL | [references/media-and-effects.md](references/media-and-effects.md) |

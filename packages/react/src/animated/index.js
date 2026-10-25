@@ -14,6 +14,7 @@ import {
   AnimatedExpression,
   AnimatedFormat,
   AnimatedClock,
+  AnimatedClockValue,
   Interaction,
   AnimatedHostState,
   add,
@@ -181,7 +182,10 @@ export const Animated = {
   // natively every frame (expression.js); meta is added by jsui build.
   derive: (inputs, fn, meta) => new AnimatedDerived(inputs, fn, meta),
   expr: (fn, meta) => new AnimatedExpression(fn, meta),
-  clock: () => new AnimatedClock(),
+  // Animated.clock(): the shared frame clock in seconds (always running).
+  // Animated.clock({start, speed, paused, running}): a clock of your own with
+  // pause() / resume() / reset(t) / setSpeed(x), run natively.
+  clock: (options) => (options && typeof options === 'object' ? new AnimatedClockValue(options) : new AnimatedClock()),
   // An element's hover / press / focus state as native 0..1 values.
   interaction: () => new Interaction(),
   // A value inside shared host state, updated natively when the host sets it.

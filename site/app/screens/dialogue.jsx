@@ -1,7 +1,8 @@
 // Dialogue (interactive). Feature spotlight: rich text and i18n.
 //
 // A branching conversation with Seren Ashvale. Lines are nested <Text> runs
-// (italic, keyword, place-name spans) revealed by a typewriter (A / Enter /
+// (italic, keyword, place-name spans) revealed by a native typewriter
+// (Animated.Text reveal: no React render per character) (A / Enter /
 // click skips). Choices slide in and are picked with focus (D-pad / arrows /
 // mouse / 1-4), skill checks roll a d20, trust moves with your answers, the
 // portrait swaps when you talk, and the conversation loops when it ends.
@@ -15,7 +16,7 @@ import { colors, font } from '../../../examples/theme.js';
 export const feature = {
   title: 'Rich text & i18n',
   points: [
-    'Every line is nested <Text> runs (italic, keyword and place spans) revealed by a typewriter',
+    'Every line is nested <Text> runs (italic, keyword and place spans) typed on natively: laid out once, revealed without a re-render per character',
     'Switch to Arabic (AR) for right-to-left: the layout mirrors, bidi text flows right to left and Arabic letters join and shape',
     'Japanese (JA) too: the Noto fonts for both load on demand with Fonts.load and fall back per glyph from Inter',
     'Branching choices with d20 skill checks, a trust meter and swapping portraits',
@@ -155,47 +156,46 @@ function parse(src) {
 const spanStyle = (k) => (k === 'em' ? styles.em : k === 'key' ? styles.keyword : k === 'place' ? styles.place : null);
 const lengthOf = (spans) => spans.reduce((n, s) => n + (typeof s === 'string' ? s.length : s[1].length), 0);
 
-/** Renders the first `count` characters of a span list as nested Text runs. */
-const RichLine = memo(function RichLine({ spans, count, family }) {
-  let left = count;
-  const out = [];
-  spans.forEach((s, i) => {
-    if (left <= 0) return;
-    const [k, t] = typeof s === 'string' ? [null, s] : s;
-    const part = t.slice(0, left);
-    left -= part.length;
-    out.push(k ? <Text key={i} style={spanStyle(k)}>{part}</Text> : part);
-  });
-  return <Text style={[styles.line, { fontFamily: family }]}>{out}</Text>;
+/** A span list as nested Text runs, laid out whole and revealed natively:
+ * `reveal` (0..1 of the line's graphemes) only changes what paints. */
+const RichLine = memo(function RichLine({ spans, reveal, family }) {
+  return (
+    <Animated.Text style={[styles.line, { fontFamily: family }]} reveal={reveal} revealFraction revealFade={2}>
+      {spans.map((s, i) => (typeof s === 'string' ? s : <Text key={i} style={spanStyle(s[0])}>{s[1]}</Text>))}
+    </Animated.Text>
+  );
 });
 
-/** Typewriter: owns its char counter so ticks re-render only this subtree.
- * Time based (not per tick) so slow frames never slow the text down. */
+/** Typewriter: a native timing of the reveal (Animated.Text reveal), so the
+ * line types on without a React render or a relayout per character and
+ * keeps going while JS is busy; each character fades in over two. Time
+ * based: slow frames never slow the text down. Pausing (inactive screen)
+ * stops it where it is; a language switch goes on from the same fraction. */
 const CPS = 55; // characters per second
 function Typewriter({ spans, skip, active, onDone, family }) {
   const total = useMemo(() => lengthOf(spans), [spans]);
-  const [count, setCount] = useState(0);
+  const shown = useMemo(() => new Animated.Value(0, { useNativeDriver: true }), []);
   const done = useRef(false);
-  const t0 = useRef(Date.now());
+  const finish = useRef(null);
+  finish.current = () => {
+    if (done.current) return;
+    done.current = true;
+    onDone();
+  };
   useEffect(() => {
-    if (skip && !done.current) setCount(total);
-  }, [skip, total]);
+    if (!active || done.current) return undefined;
+    const from = Math.min(1, shown.__getValue());
+    const anim = Animated.timing(shown, { toValue: 1, duration: ((1 - from) * total * 1000) / CPS, easing: Easing.linear, useNativeDriver: true });
+    anim.start(({ finished }) => finished && finish.current());
+    return () => anim.stop();
+  }, [active, total]);
   useEffect(() => {
-    if (count >= total) {
-      if (!done.current) {
-        done.current = true;
-        onDone();
-      }
-      return undefined;
+    if (skip && !done.current) {
+      shown.setValue(1);
+      finish.current();
     }
-    if (!active) {
-      t0.current = Date.now() - (count * 1000) / CPS;
-      return undefined;
-    }
-    const t = setTimeout(() => setCount(Math.min(total, Math.max(count + 1, Math.floor(((Date.now() - t0.current) * CPS) / 1000)))), 33);
-    return () => clearTimeout(t);
-  }, [count, total, active]);
-  return <RichLine spans={spans} count={count} family={family} />;
+  }, [skip]);
+  return <RichLine spans={spans} reveal={shown} family={family} />;
 }
 
 function useLoop(active, make) {

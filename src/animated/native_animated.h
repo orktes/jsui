@@ -86,7 +86,12 @@ class NativeAnimated {
   // config.type: frames {frames: [eased progress samples], duration, toValue,
   // delay} | spring {stiffness, damping, mass, initialVelocity, toValue,
   // overshootClamping, restDisplacementThreshold, restSpeedThreshold, delay} |
-  // decay {velocity, deceleration, delay}; all take iterations (-1: forever).
+  // decay {velocity, deceleration, delay}; all take iterations (-1: forever)
+  // | clock {speed, running} (Animated.clock({...})): the value counts
+  // seconds times `speed` from where it is, until stopped (never ends);
+  // `running`: a node tag whose output, while 0, holds it (it then neither
+  // moves nor keeps the host ticking: animating() leaves it out, as it does
+  // a clock nothing reads).
   // Starts at `nowMs` (the runtime clock when JS started it). A running
   // animation on the same node is stopped (its end is reported unfinished).
   // config.type group {root: step} runs a whole composite natively (tag is
@@ -99,15 +104,18 @@ class NativeAnimated {
   bool startAnimation(int id, int tag, const Value& config, double nowMs, std::string* error = nullptr);
   // Stops an animation (no end event: the caller reports it). Returns false
   // when it was not running. *lastVelocity: a spring's velocity (units/s),
-  // which a spring started next on the same value continues with.
-  bool stopAnimation(int id, double* lastVelocity = nullptr);
+  // which a spring started next on the same value continues with. `nowMs`
+  // (the runtime clock when JS stopped it): a clock animation first counts
+  // up to then, so pausing and changing speed lose no time.
+  bool stopAnimation(int id, double* lastVelocity = nullptr, double nowMs = -1);
   // For the frame snapshot (frame_snapshot.h): the raw value of every
   // value node, and the velocity of every running animation by id (a
   // spring's, else 0; a composite group's: 0).
   void snapshotValues(std::unordered_map<int, double>* out) const;
   void snapshotAnimations(std::unordered_map<int, double>* out) const;
-  // Running animations, or a clock node something depends on.
-  bool animating() const { return !animations_.empty() || liveClocks() > 0; }
+  // Running animations (but a held clock, or one nothing reads), or a clock
+  // node something depends on.
+  bool animating() const;
   size_t animationCount() const { return animations_.size(); }
 
   // Buffer `key` has new contents: its hostBuffer nodes are re-evaluated at
@@ -239,7 +247,7 @@ class NativeAnimated {
     bool notifyQueued = false; // in dirtyNotify_
   };
   struct Anim {
-    enum class Kind : uint8_t { Frames, Spring, Decay, Wait } kind = Kind::Frames;
+    enum class Kind : uint8_t { Frames, Spring, Decay, Wait, Clock } kind = Kind::Frames;
     int id = 0, tag = 0;
     double start = 0, delay = 0;
     int iterations = 1, iteration = 0;
@@ -253,6 +261,10 @@ class NativeAnimated {
     double lastVelocity = 0;
     // decay
     double velocity = 0, deceleration = 0.998, last = 0;
+    // clock: value = from + (t - start) / 1000 * speed while not held
+    double speed = 1;
+    int runningTag = 0;  // holds the clock while its output is 0 (0: none)
+    bool held = false;
   };
   struct Mapping {
     uint32_t view;

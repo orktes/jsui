@@ -345,7 +345,7 @@ void CommandBuffer::applyOne(Runtime& rt, const Command& cmd) {
     }
     case Op::AnimStop:
       result_.number = 0;
-      result_.ok = rt.animated->stopAnimation(tagOf(cmd.a), &result_.number);
+      result_.ok = rt.animated->stopAnimation(tagOf(cmd.a), &result_.number, rt.now);
       return;
     case Op::AnimAddEventMapping: {
       Value keys = readValue(at);
