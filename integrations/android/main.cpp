@@ -13,7 +13,12 @@
 // Intent extras (adb shell am start -n com.orktes.jsui.demo/android.app.NativeActivity ...):
 //   --es jsui_url http://10.0.2.2:5173/bundle.js   load from `jsui dev` (dev mode: live reload)
 //   --es jsui_renderer cpu                          force the CPU path
+//   --es jsui_js_thread off                         run JS on the frame thread (default: on, its own
+//                                                   thread as in React Native; or lockstep)
 // Without jsui_url the app loads ui/bundle.js from its APK assets.
+// JS runs on its own thread by default (JsuiConfig.js_thread): the vsync
+// frames never wait for it. They are scheduled every vsync anyway, so no
+// on_js_ready wake-up is needed.
 
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
@@ -362,6 +367,8 @@ void createRuntime(Host& h) {
   cfg.pixel_ratio = h.scale;
   cfg.log = jsuiLog;
   cfg.dev_mode = !url.empty();
+  std::string jsThread = intentExtra(h, "jsui_js_thread");
+  cfg.js_thread = jsThread == "off" ? JSUI_JS_THREAD_OFF : jsThread == "lockstep" ? JSUI_JS_THREAD_LOCKSTEP : JSUI_JS_THREAD_ON;
   if (url.empty()) {
     // Built-in loader for http:// (dev servers); APK assets otherwise.
     cfg.load = assetLoad;

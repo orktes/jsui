@@ -31,7 +31,9 @@ npx jsui dev integrations/godot/demo/ui/app.jsx --host 0.0.0.0
 xcrun simctl launch booted com.orktes.jsui.demo -JsuiURL http://localhost:5173/bundle.js
 ```
 
-`-JsuiRenderer cpu` forces the CPU path.
+`-JsuiRenderer cpu` forces the CPU path. The bundle's JS runs on a thread of
+its own, as in React Native, so a long commit never drops a frame;
+`-JsuiJsThread off` runs it on the main thread instead.
 
 ## Embedding
 

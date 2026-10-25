@@ -49,7 +49,10 @@ adb shell am start -n com.orktes.jsui.demo/android.app.NativeActivity --es jsui_
 ```
 
 (`10.0.2.2` is the host machine from the emulator; use the computer's LAN
-address on a device.) `--es jsui_renderer cpu` forces the CPU path.
+address on a device.) `--es jsui_renderer cpu` forces the CPU path. The
+bundle's JS runs on a thread of its own, as in React Native, so a long
+commit never drops a frame; `--es jsui_js_thread off` runs it on the frame
+thread instead.
 
 ## Embedding
 
