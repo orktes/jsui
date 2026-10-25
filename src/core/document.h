@@ -149,6 +149,9 @@ class Document {
   // Nodes with state styles, `group` or `interaction` (Node::stateStyles),
   // walked by InputManager::tickStates; dead ids are dropped there.
   std::vector<uint32_t> stateNodes;
+  // Bumped when a node's state props change (set, parsed again or removed):
+  // InputManager::tickStates then derives every target again.
+  uint64_t stateVersion = 0;
   // `interaction` key -> the node that carries it (Animated.interaction).
   std::unordered_map<std::string, uint32_t> interactionNodes;
   // A state transition started outside InputManager::tickStates (Node::setHidden).
