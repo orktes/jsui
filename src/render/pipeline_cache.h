@@ -204,6 +204,9 @@ class Precompiler {
   void precompileCommon(SkColorType ct, const sk_sp<SkColorSpace>& cs);
   // Pipelines compiled on demand since the last call (Perf counters).
   uint64_t takeCompiles();
+  // Every pipeline Graphite created so far (frames', precompiles', any
+  // thread): driver_cache::Storage saves while it grows.
+  uint64_t pipelinesCreated() const { return createdCount_.load(); }
 
   // From Graphite's pipeline callback (any thread): a pipeline was created.
   void onPipelineAdded(const std::string& label, bool fromPrecompile, const void* data, size_t size);
@@ -249,7 +252,7 @@ class Precompiler {
   Stats stats_;
   double precompileMs_ = 0;
   bool reported_ = false;
-  std::atomic<uint64_t> compiles_{0}, compilesTaken_{0};
+  std::atomic<uint64_t> compiles_{0}, compilesTaken_{0}, createdCount_{0};
   std::vector<std::pair<SkColorType, uint32_t>> common_;  // precompileCommon's targets (type, color space hash)
 };
 

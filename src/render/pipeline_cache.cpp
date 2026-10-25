@@ -974,6 +974,7 @@ uint64_t Precompiler::takeCompiles() {
 }
 
 void Precompiler::onPipelineAdded(const std::string& label, bool fromPrecompile, const void* data, size_t size) {
+  createdCount_++;
   if (fromPrecompile) {  // its key came from a list or file
     if (log_ == 1) SkDebugf("jsui: pipeline precompiled: %s\n", label.c_str());
     return;
