@@ -375,6 +375,10 @@ bool run(const Options& o, Result* out) {
     else jsui_set_buffer(h, "enemies", JSUI_BUFFER_F32, enemyData.data(), enemyData.size());
   };
   if (o.wheel) jsui_send_mouse_move(h, o.wheelX, o.wheelY);
+  // A JS thread does the warm-up frames' JS in them (JSUI_TICK_SYNC_JS): the
+  // measured frames start from the rendered UI, not from one JS is still
+  // building.
+  bool warming = true;
   auto step = [&]() {
     now += 1000.0 / 60.0;
     if (o.markers > 0) pushMarkers();
@@ -408,7 +412,7 @@ bool run(const Options& o, Result* out) {
         jsui_surface_set_props(surfaces[i], plateProps(int(i), changes ? frame : 0).c_str());
       }
     }
-    jsui_tick(h, now);
+    jsui_tick_ex(h, now, warming && o.jsThread == JSUI_JS_THREAD_ON ? JSUI_TICK_SYNC_JS : 0);
     if (o.paint != PaintMode::None && jsui_needs_redraw(h)) {
       jsui::Perf::Scope paint(perf, jsui::Phase::Paint);
       if (o.paint == PaintMode::Full) jsui_render_rgba(h, px.data(), o.width, o.height, rowBytes);
@@ -431,6 +435,7 @@ bool run(const Options& o, Result* out) {
     });
   };
   for (int i = 0; i < o.warmup; i++) step();
+  warming = false;
   if (o.reactStats) jsui_sync(h, -1);
   if (o.reactStats) rt->inbound.task([rt] { rt->js->eval("__jsuiBenchReact.commits = __jsuiBenchReact.renders = 0;", "bench"); });
   uint64_t messages0 = messages.count;
@@ -444,8 +449,8 @@ bool run(const Options& o, Result* out) {
   double prevUs[size_t(jsui::Phase::Count)] = {};
   CALLGRIND_START_INSTRUMENTATION;
   for (int i = 0; i < o.frames; i++) {
-    if (o.jsStallMs > 0 && i % std::max(1, o.jsStallEvery) == 0) stall();
     auto w0 = std::chrono::steady_clock::now();
+    if (o.jsStallMs > 0 && i % std::max(1, o.jsStallEvery) == 0) stall();
     step();
     wall.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - w0).count());
     double sum = 0;
