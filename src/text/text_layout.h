@@ -74,6 +74,12 @@ bool inputCaretVisible(Node* n);
 // (border-box coords, empty when hidden) and records the new state.
 bool inputCaretDamage(Node* n, SkRect* before, SkRect* after);
 
+// Whether the paragraph of Text root `n` (already built) can follow a change
+// of its own `color` alone without being rebuilt: no span sets a color of its
+// own, so every run was built with the root's. The painter then draws it in
+// the current color (a hover / state color transition reshapes nothing).
+bool recolorable(Node* n);
+
 // Drops every cached paragraph under `root` and re-dirties Text measurement
 // (after fonts were registered).
 void invalidateAll(Node* root);

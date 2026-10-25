@@ -951,3 +951,45 @@ TEST(render_scroll_blit_matches_full) {
     CHECK(blitRepaint / std::max(1, blits) < vpArea * 0.6);
   }
 }
+
+TEST(render_text_color_change_keeps_the_paragraph) {
+  // A color-only change (a hover / state color transition) repaints in the
+  // new color without building the paragraph again, pixel for pixel what a
+  // paragraph built in that color paints.
+  const char* kText = R"J({"type":"Text","style":{"alignSelf":"flex-start","fontSize":24,"color":"%s",
+      "textDecorationLine":"underline"},"children":["Hello ",{"type":"Text","style":{"fontWeight":"bold"},"text":"JSUI"}]})J";
+  auto json = [&](const char* c) {
+    char buf[512];
+    std::snprintf(buf, sizeof buf, kText, c);
+    return std::string(buf);
+  };
+  Scene s(300, 60);
+  Node* t = s.add(json("#ff0000").c_str());
+  s.render();
+  uint64_t builds = s.doc().perf.counters.paragraphBuilds;
+  t->patchStyle(Value::parseJson(R"({"color":"#2040ff"})").asObject());
+  s.render();
+  CHECK_EQ(s.doc().perf.counters.paragraphBuilds, builds);
+  Scene fresh(300, 60);
+  fresh.add(json("#2040ff").c_str());
+  fresh.render();
+  CHECK(s.px == fresh.px);
+
+  // A span with a color of its own keeps it: the root's change rebuilds.
+  Scene sp(300, 60);
+  Node* r = sp.add(R"J({"type":"Text","style":{"fontSize":20,"color":"red"},"children":["Red ",
+      {"type":"Text","style":{"color":"blue"},"text":"Blue"}]})J");
+  sp.render();
+  builds = sp.doc().perf.counters.paragraphBuilds;
+  r->patchStyle(Value::parseJson(R"({"color":"#00ff00"})").asObject());
+  sp.render();
+  CHECK_EQ(sp.doc().perf.counters.paragraphBuilds, builds + 1);
+  int blue = 0, red = 0;
+  for (int y = 0; y < 30; y++)
+    for (int x = 0; x < 300; x++) {
+      if (sp.a(x, y) > 200 && sp.b(x, y) > 200 && sp.r(x, y) < 40) blue++;
+      if (sp.a(x, y) > 200 && sp.r(x, y) > 200 && sp.g(x, y) < 40) red++;
+    }
+  CHECK(blue > 40);
+  CHECK_EQ(red, 0);
+}

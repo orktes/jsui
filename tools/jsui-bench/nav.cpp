@@ -263,6 +263,9 @@ int main(int argc, char** argv) {
       if (!painted) idle += frames.back().ms, idleN++;
     }
     printf("  idle frame (tick only): %.3f ms\n", idleN ? idle / idleN : 0);
+    unsigned long long builds = 0;
+    for (auto& f : frames) builds += f.paragraphs;
+    printf("  paragraph builds per hover: %.2f\n", double(builds) / hovers);
     if (profile) {
       printf("phase means per frame (ms):");
       for (auto& ph : kPhases) {
