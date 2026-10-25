@@ -59,10 +59,11 @@ copied bundle are not committed (`.gitignore`): run steps 1 and 2 first.
 The game takes the examples' options, with values after `=` (Unreal reads a
 bare argument as a map to open): `--selftest`, `--frames=N
 --screenshot=out.png`, `--bundle=path-or-url`, `--cpu` (the CPU renderer even
-where the GPU path is available) and `--dev` (with `npx jsui dev integrations/shared/ui/app.jsx` and
-`--bundle=http://127.0.0.1:5173/bundle.js` for hot reload). `--selftest` is
+where the GPU path is available), `--dev` (with `npx jsui dev integrations/shared/ui/app.jsx` and
+`--bundle=http://127.0.0.1:5173/bundle.js` for hot reload) and
+`--js-thread=on|off|lockstep` (`UJsuiWidget::JsThread`). `--selftest` is
 the same pass-through check as the other examples (see
-[../README.md](../README.md#build-and-run)): it logs `selftest: ok` and exits
+[../README.md](../README.md#build-and-run)), JS stall included: it logs `selftest: ok` and exits
 0, or logs what failed and exits 1. Its clicks go through
 `FSlateApplication`'s platform message handler at desktop coordinates, the
 path real clicks take (and it moves the cursor); run it both windowed and
@@ -136,6 +137,18 @@ either path: the engine's frame, not the UI, sets the pace.
   buffer read with `useHostBufferValue` (the example projects each unit with
   this frame's camera and writes its screen position, so the nameplates move
   with no JS per frame). Each has a Blueprint version on `UJsuiWidget`.
+* **JS thread.** `UJsuiWidget::JsThread` (`EJsuiJsThread::On` by default,
+  read when the widget is built) runs the bundle's JS on a thread of its
+  own, as React Native does: `SJsuiView::Tick` never waits for JS, so a
+  long React commit or a garbage collection costs the game no frame, while
+  the nameplates, hover styles, scrolling and input hit testing keep running
+  natively. `OnMessage` and the other events still fire on the game thread,
+  from the tick; what JS does in answer to the game shows a frame or more
+  later. When it must show on this frame (a scene cut, a screenshot), call
+  `SyncJsNextFrame()` (that tick waits for JS, up to 250 ms) or `SyncJs()`
+  (waits now). `DebugStallJs(Ms)` keeps JS busy to see it; `Off` runs JS
+  inside the tick, `Lockstep` on its thread but waited for every tick. All
+  are Blueprint callable.
 
 ## GPU paths
 

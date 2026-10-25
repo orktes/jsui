@@ -8,7 +8,7 @@ orbiting a pillar, an orbit camera, and a nameplate per unit.
 npx jsui build integrations/shared/ui/app.jsx -o integrations/shared/ui/dist/bundle.js
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DJSUI_BUILD_RAYLIB=ON
 cmake --build build --target jsui-raylib
-./build/jsui-raylib            # --cpu, --dev <url>, --selftest, --frames N --screenshot out.png
+./build/jsui-raylib            # --cpu, --dev <url>, --selftest, --frames N --screenshot out.png, --js-thread off
 ```
 
 * **Rendering.** `jsui_gpu_create_gl(rlGetProcAddress)` makes a Skia Ganesh

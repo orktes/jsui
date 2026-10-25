@@ -42,6 +42,11 @@ needs from its UI layer:
   (fps, unit count, paused, selected) goes to the `game` shared state (`jsui_set_state`),
   and the HUD's buttons answer with `Host.postMessage('game:spawn' | 'game:clear'
   | 'game:pause' | 'game:quit')`.
+* **JS on its own thread**, as in React Native (`cfg.js_thread =
+  JSUI_JS_THREAD_ON`, the examples' default): the game's frames never wait
+  for the HUD's JS. The nameplates (a host buffer), hover styles, scrolling
+  and hit testing run natively every frame; what JS renders lands a frame or
+  more later. `--js-thread off` runs JS inside `jsui_tick` instead.
 * **Getting pixels on screen**, a different way in each:
 
   | Example | Default | `--cpu` |
@@ -79,6 +84,7 @@ Every example takes the same options:
 | `--width W --height H` | window size in logical px (default 1280 x 720) |
 | `--frames N --screenshot out.png` | run N frames, save the composed frame (scene + UI), exit |
 | `--selftest` | scripted check of the pass-through contract (below), then exit |
+| `--js-thread on\|off\|lockstep` | where the HUD's JS runs (default `on`: its own thread; `off`: inside `jsui_tick`; `lockstep`: its own thread, waited for every tick); printed at start as `JS thread: ...` |
 
 `--selftest` waits for the HUD to report where its Spawn button is, then
 clicks through the host's own mouse handling (the code real events run): a
@@ -86,7 +92,11 @@ click on empty space must reach the game (and `jsui_hit_test` must report
 nothing there), a click on Spawn must be consumed and its `game:spawn` message
 must add a unit, a click on a unit must select it, one on empty ground must
 clear the selection, and another must select again, each time answered by the
-HUD's `ui:selected`. It prints `selftest: ok` and exits 0. CI runs it for each example under Xvfb, on Mesa's
+HUD's `ui:selected`. Before the clicks it stalls JS for 300 ms
+(`jsui_debug_stall_js`): with the JS thread the game must keep drawing (no
+frame longer than half the stall, `selftest: JS thread on: N game frames
+during a 300 ms JS stall`) and `jsui_sync` must finish after it; with
+`--js-thread off` the stall must hold the frame. It prints `selftest: ok` and exits 0. CI runs it for each example under Xvfb, on Mesa's
 GL and on the CPU path (the `engines` job in `.github/workflows/ci.yml`).
 
 ### Using one in your engine
@@ -98,6 +108,7 @@ JsuiConfig cfg;
 jsui_config_init(&cfg);
 cfg.width = window_w; cfg.height = window_h; cfg.pixel_ratio = dpi_scale;
 cfg.on_message = on_ui_message;                 /* Host.postMessage(name, data) */
+cfg.js_thread = JSUI_JS_THREAD_ON;              /* JS on its own thread: frames never wait for it */
 JsuiRuntime* rt = jsui_create(&cfg);
 jsui_load_bundle_url(rt, "ui/bundle.js");
 
@@ -114,6 +125,13 @@ for (;;) {
     draw_scene(); composite_ui(); present();
 }
 ```
+
+With the JS thread, what the game sets (state, buffers, messages) reaches JS
+at the next tick and what JS does with it shows a tick or more later. When a
+change must show on this frame (a scene cut, a screenshot) tick with
+`jsui_tick_ex(rt, now_ms, JSUI_TICK_SYNC_JS)`. A loop that sleeps while idle
+sets `cfg.on_js_ready` (called on the JS thread) to wake itself; one that
+ticks every vsync needs nothing.
 
 GL hosts: Skia leaves its own GL state behind (blend, scissor, bound
 framebuffer / program / vertex array, pixel store). Flush the engine's batch

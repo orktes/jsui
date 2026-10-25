@@ -1530,7 +1530,9 @@ Callbacks the bundle installs (all optional):
 
 As in React Native, the bundle can run on a thread of its own
 (`src/js/js_thread.h`): `JsuiConfig.js_thread` or `jsui_set_js_thread`
-(before the first bundle load) with `JSUI_JS_THREAD_ON`. Off by default;
+(before the first bundle load) with `JSUI_JS_THREAD_ON`. Off in
+`jsui_config_init` (so tests, tools and the libraries' own defaults keep
+single-threaded frames); the native hosts turn it on (see "Hosts" below);
 the host JS engine (WebAssembly) has none. The **owner thread** (the one
 calling `jsui_tick`, every `jsui_*` call) keeps the documents, Yoga,
 input, native Animated, scrolling, fonts and paint; the **JS thread**
@@ -1581,6 +1583,40 @@ waits for it, except in a sync the host asks for.
   destruction asked for by a host callback wait until the batch is applied
   (`JsEngine::inCall`). `jsui_resolve_call` checks the call against the
   set of calls JS has not settled (`JsThread::takeCall`).
+
+**Hosts.** JS on its own thread is React Native's model, and the native
+hosts default to it; the defaults are per host, not in the C API:
+
+| Host | Default | Switch | Wake-up while idle |
+| --- | --- | --- | --- |
+| Viewer (`tools/jsui-viewer`) | on | `--js-thread on\|off\|lockstep`, F6 cycles (restarts the runtime), F7 stalls JS 200 ms | `on_js_ready` pushes an SDL user event |
+| raylib, SDL3, sokol examples | on | `--js-thread ...` | none needed (they tick every vsync) |
+| Godot `JsuiView` | on | `js_thread` property (`JS_THREAD_*`, applies on `start()`) | none needed (`_process` every frame) |
+| Unity `JsuiView` | on | `jsThread` field (applied in `Start`) | none needed |
+| Unreal `UJsuiWidget` | on | `JsThread` property (`EJsuiJsThread`) | none needed |
+| Android, iOS examples | on | `--es jsui_js_thread off` / `-JsuiJsThread off` | none needed (vsync / MTKView) |
+| Rust, Go examples | on (libraries: off) | `--js-thread ...`; `Config::js_thread` / `Config.JSThread` | `on_js_ready` → `glfwPostEmptyEvent` |
+| Browser (`web/`), CLI, `jsui-tests`, bench, ctests | off | `jsui-bench --js-thread`, `JSUI_TEST_JS_THREAD` | n/a |
+
+The engine plugins add the same small surface: a sync for this frame
+(`SyncJsNextFrame` / `sync_js_next_frame()`, a `JSUI_TICK_SYNC_JS` tick)
+and right away (`SyncJs` / `sync_js()`, `jsui_sync` plus the host's
+callback delivery), and `DebugStallJs` / `debug_stall_js()`
+(`jsui_debug_stall_js`: a busy loop queued on JS, which without a thread
+blocks the call instead). Their smoke tests stall JS once: the shared
+example SelfTest (raylib, SDL3, sokol, Unreal, Unity) stalls 300 ms and,
+with the thread, requires frames to go on (none longer than half the
+stall) and a sync to finish after; with it off, that the stall held the
+frame. The Godot demo checks `PASS js stall` (400 ms), the Unity plugin's
+ctypes smoke runs on, off and lockstep. CI runs each with the thread on
+(the default) and once off. Things the host sets that must show on the same
+frame (a scene cut, a screenshot) go through the sync tick; everything else
+shows a tick or more later, as in React Native.
+
+Not done yet: default actions JS may veto still wait for the event's
+generic reply (up to `js_event_deadline_ms`); a typed reply channel per
+event kind (answering only `defaultPrevented` early, before the listener's
+task ends) would shorten that wait.
 
 `tests/native/react_js_thread_e2e_test.cpp` (bundle `stall.jsx`) holds it
 to that: 32 host-buffer markers (an interpolation and an `Animated.derive`
@@ -2228,8 +2264,8 @@ skparagraph's asset font manager and Skottie's. Fonts are runtime-wide.
   `tools/jsui-viewer` downloads SDL 2.30.12 (SHA-256 checked) and links it
   statically; `-DJSUI_BUILD_VIEWER=OFF` skips it, `-DJSUI_SDL_DIR=` uses a
   local SDL2 source tree, and a failed download only skips the viewer.
-  `jsui-viewer [--dev] [--cpu | --gl-core] [--width W --height H] <bundle path or URL>`; F5
-  reloads; `--frames N --screenshot out.png` runs headless (GPU by default,
+  `jsui-viewer [--dev] [--cpu | --gl-core] [--width W --height H] [--js-thread on|off|lockstep] <bundle path or URL>`; F5
+  reloads, F6 cycles the JS thread mode (on by default), F7 stalls JS for 200 ms; `--frames N --screenshot out.png` runs headless (GPU by default,
   which needs a GL-capable display, e.g. `xvfb-run` with Mesa; `--cpu` with
   `SDL_VIDEODRIVER=dummy`). `-DJSUI_GPU=OFF` builds without the GPU backend.
 * WASM: `scripts/build-skia-wasm.sh` (once), then `emcmake cmake -S . -B build-wasm`.
@@ -2341,6 +2377,10 @@ walks through the pattern.
 | Android | [integrations/android](../integrations/android/README.md) (NDK NativeActivity) | Ganesh on GLES 3 |
 | iOS | [integrations/ios](../integrations/ios/README.md) (UIKit) | Ganesh on Metal |
 | Rust, Go | [bindings/](../bindings/README.md) over `libjsui` | Ganesh GL (GLFW window) |
+
+The native hosts run the bundle's JS on a thread of its own by default, as
+React Native does; the browser, the CLI and the tests keep it on the
+ticking thread (see "JS thread" for the table and each host's switch).
 
 ## Agent tools and the shared session
 

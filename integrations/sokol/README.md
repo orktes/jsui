@@ -9,7 +9,7 @@ ring floor, an orbit camera, and a nameplate per unit.
 npx jsui build integrations/shared/ui/app.jsx -o integrations/shared/ui/dist/bundle.js
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DJSUI_BUILD_SOKOL=ON
 cmake --build build --target jsui-sokol
-./build/jsui-sokol             # --cpu, --dev <url>, --selftest, --frames N --screenshot out.png
+./build/jsui-sokol             # --cpu, --dev <url>, --selftest, --frames N --screenshot out.png, --js-thread off
 ```
 
 * **Rendering.** After the scene's swapchain pass (`sg_end_pass()`), Skia draws

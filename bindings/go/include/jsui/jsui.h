@@ -653,8 +653,10 @@ JSUI_API double jsui_get_js_frame_budget(JsuiRuntime* rt);
 
 /* ------------------------------------------------------------- JS thread
  *
- * Opt-in (JsuiConfig.js_thread or jsui_set_js_thread): the bundle runs on a
- * thread of its own, as in React Native. jsui_tick and the renders never
+ * JsuiConfig.js_thread or jsui_set_js_thread: the bundle runs on a thread of
+ * its own, as in React Native. Off in jsui_config_init (tests and tools keep
+ * single-threaded frames); a windowed host usually wants it on, and the
+ * engine integrations and examples default to it. jsui_tick and the renders never
  * wait for JS: timers, requestAnimationFrame, events, React's renders and
  * commits and garbage collection run on the JS thread, while each tick
  * applies what JS finished since the last one (a React commit whole, never

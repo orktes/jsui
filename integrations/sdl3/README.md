@@ -12,7 +12,7 @@ npx jsui build integrations/shared/ui/app.jsx -o integrations/shared/ui/dist/bun
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DJSUI_BUILD_SDL3=ON \
       -DJSUI_SKIA_DIR=third_party/skia-desktop
 cmake --build build --target jsui-sdl3
-./build/jsui-sdl3              # --cpu, --renderer metal|vulkan|opengl|direct3d12|software, --dev <url>, --selftest
+./build/jsui-sdl3              # --cpu, --renderer metal|vulkan|opengl|direct3d12|software, --dev <url>, --selftest, --js-thread off
 ```
 
 * **Rendering** ([gpu.h](gpu.h)). Skia draws the UI on the GPU straight into
