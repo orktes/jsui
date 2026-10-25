@@ -377,10 +377,14 @@ void Node::applyProps(const Value& props) {
 void Node::textStyleChanged(const TextStyle& oldText, bool propsMetrics, bool propsPaint, bool* relayout) {
   bool metrics = propsMetrics || !textMetricsEqual(oldText, style_.text);
   if (!(metrics || propsPaint || !(oldText == style_.text))) return;
-  // The paragraph (owned by the paragraph root) bakes in colors too.
+  // The paragraph (owned by the paragraph root) bakes in colors too, except
+  // a root's own color when no span has another: painted in the current one.
   Node* root = type_ == NodeType::Text ? paragraphRoot() : this;
   if (!root) return;
-  root->textCache.reset();
+  TextStyle colorless = oldText;
+  colorless.color = style_.text.color;
+  bool recolor = !metrics && !propsPaint && root == this && colorless == style_.text && text::recolorable(this);
+  if (!recolor) root->textCache.reset();
   root->paintVersion++;
   root->contentVersion++;
   root->markPaintTree();
