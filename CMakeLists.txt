@@ -83,9 +83,10 @@ if(JSUI_AUDIO)
   target_link_libraries(jsui PRIVATE jsui_miniaudio)
 endif()
 message(STATUS "JSUI_AUDIO: ${JSUI_AUDIO}")
-# Subclass Skia classes (a canvas, Skottie observers, the font manager): Skia is built
-# without RTTI, so are these files.
-set_source_files_properties(src/render/paint_counter.cpp src/render/lottie.cpp src/text/font_manager.cpp PROPERTIES COMPILE_OPTIONS
+# Subclass Skia classes (a canvas, Skottie observers, the font manager, the pipeline
+# compile executor): Skia is built without RTTI, so are these files.
+set_source_files_properties(src/render/paint_counter.cpp src/render/lottie.cpp src/text/font_manager.cpp
+  src/render/pipeline_cache.cpp PROPERTIES COMPILE_OPTIONS
   "$<IF:$<CXX_COMPILER_ID:MSVC>,/GR-,-fno-rtti>")
 include(EmbedFonts)
 jsui_embed_fonts(jsui)

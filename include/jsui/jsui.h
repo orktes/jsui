@@ -1137,6 +1137,12 @@ JSUI_API JsuiGpuContext* jsui_gpu_create_d3d11(void* device);
  *   schedules it with jsui_gpu_precompile_step (e.g. while idle). A frame
  *   that needs a pipeline before its turn compiles it as it would without
  *   the cache.
+ * - On those thread-safe devices (Vulkan, Metal, Dawn with
+ *   ImplicitDeviceSynchronization) the context also compiles pipelines on a
+ *   small pool of worker threads: the new pipelines a frame needs compile in
+ *   parallel (the frame waits for the slowest, not their sum), and preloaded
+ *   shaders (jsui_precompile_shader, precompileShaders) are warmed there
+ *   without any frame waiting for them.
  * - Files and lists hold Skia's serialized pipeline keys behind a header
  *   naming the Skia build and the backend. A file of another Skia build or
  *   backend is started afresh, a damaged tail (a crash while appending) is
