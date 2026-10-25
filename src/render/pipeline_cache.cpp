@@ -3,6 +3,8 @@
 #include "render/pipeline_cache.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -18,7 +20,12 @@
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 #include <cerrno>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
+#endif
+#if defined(_WIN32)
+#include <direct.h>
+#include <windows.h>
 #endif
 
 #if defined(JSUI_VULKAN) || defined(JSUI_GRAPHITE_METAL) || defined(JSUI_GRAPHITE_DAWN) || defined(JSUI_WEBGPU)
@@ -78,6 +85,7 @@ const char* backendName(uint32_t b) {
 }
 
 std::atomic<bool> gForceSliced{false};
+std::atomic<bool> gNoDefaultFile{false};
 
 }  // namespace
 
@@ -211,7 +219,9 @@ Parsed parse(const void* data, size_t size, Backend backend) {
 }
 
 void setForceSliced(bool on) { gForceSliced = on; }
+void setNoDefaultFile(bool on) { gNoDefaultFile = on; }
 
+#if SK_MILESTONE >= 140  // SkExecutor work lists, ContextOptions::fExecutor
 namespace {
 
 // Work list 0 (Graphite's pipelines a frame waits for) before work list 1
@@ -279,6 +289,10 @@ std::unique_ptr<SkExecutor> makeCompileExecutor() {
 int pendingPrecompiles(const SkExecutor* executor) {
   return executor ? static_cast<const CompileExecutor*>(executor)->pending(1) : 0;
 }
+#else
+std::unique_ptr<SkExecutor> makeCompileExecutor() { return nullptr; }
+int pendingPrecompiles(const SkExecutor*) { return 0; }
+#endif
 
 // ---------------------------------------------------------------- Files
 
@@ -542,6 +556,81 @@ void Precompiler::configure(skgpu::graphite::ContextOptions& opts) {
 #endif
 }
 
+namespace {
+
+// The program's file name, for the default cache file's name.
+std::string programName() {
+  std::string name;
+#if defined(_WIN32)
+  char buf[MAX_PATH];
+  DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+  if (n > 0 && n < MAX_PATH) name.assign(buf, n);
+#elif defined(__APPLE__)
+  if (const char* p = getprogname()) name = p;
+#elif defined(__linux__)
+  char buf[4096];
+  ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
+  if (n > 0) name.assign(buf, size_t(n));
+#endif
+  size_t slash = name.find_last_of("/\\");
+  if (slash != std::string::npos) name = name.substr(slash + 1);
+  if (name.size() > 4 && (name.compare(name.size() - 4, 4, ".exe") == 0 || name.compare(name.size() - 4, 4, ".EXE") == 0))
+    name.resize(name.size() - 4);
+  for (char& ch : name)
+    if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '-'))
+      ch = '_';
+  return name.empty() ? std::string("app") : name;
+}
+
+bool makeDir(const std::string& path) {
+#if defined(_WIN32)
+  return _mkdir(path.c_str()) == 0 || errno == EEXIST;
+#elif defined(__EMSCRIPTEN__)
+  (void)path;
+  return false;
+#else
+  return mkdir(path.c_str(), 0755) == 0 || errno == EEXIST;
+#endif
+}
+
+}  // namespace
+
+std::string defaultFile(Backend backend) {
+  if (backend == Backend::BrowserWebGPU) return {};
+  const char* env = std::getenv("JSUI_PIPELINE_CACHE");
+  if (env && (!std::strcmp(env, "off") || !std::strcmp(env, "0"))) return {};
+  std::string dir;
+#if defined(_WIN32)
+  if (const char* l = std::getenv("LOCALAPPDATA"); l && *l) dir = l;
+  if (dir.empty()) return {};
+  dir += "\\jsui";
+  if (!makeDir(dir)) return {};
+  dir += "\\";
+#elif defined(__APPLE__)
+  // macOS and iOS (HOME is the app's container there).
+  const char* home = std::getenv("HOME");
+  if (!home || !*home) return {};
+  dir = std::string(home) + "/Library/Caches";
+  if (!makeDir(dir) || !makeDir(dir += "/jsui")) return {};
+  dir += "/";
+#elif defined(__linux__) && !defined(__ANDROID__)
+  if (const char* x = std::getenv("XDG_CACHE_HOME"); x && *x == '/') {
+    dir = x;
+  } else if (const char* home = std::getenv("HOME"); home && *home) {
+    dir = std::string(home) + "/.cache";
+  } else {
+    return {};
+  }
+  if (!makeDir(dir) || !makeDir(dir += "/jsui")) return {};
+  dir += "/";
+#else
+  return {};
+#endif
+  std::string b = backendName(uint32_t(backend));
+  for (char& ch : b) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+  return dir + "pipelines-" + programName() + "-" + b + ".bin";
+}
+
 void Precompiler::attach(skgpu::graphite::Context* ctx, Mode mode, const SkExecutor* executor) {
   executor_ = executor;
 #if defined(JSUI_PRECOMPILE)
@@ -561,9 +650,13 @@ void Precompiler::attach(skgpu::graphite::Context* ctx, Mode mode, const SkExecu
     kickLocked();
   }
   const char* env = std::getenv("JSUI_PIPELINE_CACHE");
-  if (env && *env) {
+  if (env && *env && std::strcmp(env, "off") && std::strcmp(env, "0")) {
     openFile(env);
     envFile_ = env;
+  } else if (mode != Mode::None && !gNoDefaultFile) {
+    // Until the host names its own (jsui_gpu_set_pipeline_cache).
+    std::string path = defaultFile(backend_);
+    if (!path.empty()) openFile(path);
   }
 #else
   (void)ctx;

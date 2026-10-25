@@ -118,6 +118,12 @@ int pendingPrecompiles(const SkExecutor* executor);
 
 // Tests only: precompile in slices (Mode::Sliced) whatever the backend.
 void setForceSliced(bool on);
+// Tests only: contexts start without the default cache file.
+void setNoDefaultFile(bool on);
+// The cache file a context uses until the host names one (jsui.h): in the
+// user's cache directory, per program and backend; empty where there is
+// none (Android, the browser) or JSUI_PIPELINE_CACHE=off.
+std::string defaultFile(Backend backend);
 
 struct Stats {
   int mode = 0;            // Mode

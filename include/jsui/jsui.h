@@ -1128,6 +1128,14 @@ JSUI_API JsuiGpuContext* jsui_gpu_create_d3d11(void* device);
  *     jsui_gpu_set_pipeline_cache(gpu, "<app data>/jsui-pipelines.vulkan.bin");
  *     ... render as usual: new pipelines are appended to the file as they appear
  *
+ * - Until the host names a file, a context uses a default one in the user's
+ *   cache directory, per program and backend: pipelines-<program>-<backend>.bin
+ *   in ~/Library/Caches/jsui/ (macOS, iOS), $XDG_CACHE_HOME/jsui/ or
+ *   ~/.cache/jsui/ (Linux), %LOCALAPPDATA%\jsui\ (Windows). So
+ *   from the second launch on, the pipelines are built ahead of the frames
+ *   even when the host does nothing. Naming a file switches to it (the
+ *   pipelines already queued stay queued); JSUI_PIPELINE_CACHE=off turns the
+ *   default off. None on Android or in the browser.
  * - Precompiling never blocks a frame. Vulkan and Metal precompile on a
  *   worker thread of the context, as does Dawn when the device was created
  *   with WGPUFeatureName_ImplicitDeviceSynchronization (Dawn then locks the
@@ -1155,7 +1163,8 @@ JSUI_API JsuiGpuContext* jsui_gpu_create_d3d11(void* device);
  * - These calls are thread safe (they do not use the device), except
  *   jsui_gpu_precompile_step: call it on the thread that renders.
  * - Development: the environment variable JSUI_PIPELINE_CACHE names a file
- *   that every Graphite context uses in place of the host's;
+ *   that every Graphite context uses in place of the host's ("off": none,
+ *   not even the default);
  *   JSUI_LOG_PIPELINES=1 logs every pipeline a context creates,
  *   JSUI_LOG_PIPELINES=compiled only those a frame compiled (new: not in
  *   the cache yet; known: still queued for the precompile).
