@@ -5,8 +5,12 @@
 // surviving reloads, and hostBuffer native Animated nodes moving a view
 // without JS (jsui_tick_native). The @orktes/jsui-react layer is covered by
 // packages/react/test/hostbuffer.test.js and the react_host_buffers_e2e test.
+// JS-thread mode: published copies (copy-on-publish), read from another
+// thread while the owner keeps writing, and the JS view of them.
+#include <atomic>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "host_buffers.h"
@@ -20,7 +24,7 @@ struct BufHost {
   JsuiRuntime* rt = nullptr;
   std::vector<std::string> messages, errors;
   double t = 0;
-  BufHost() {
+  explicit BufHost(bool jsThreadMode = false) {
     JsuiConfig cfg;
     jsui_config_init(&cfg);
     cfg.width = 200;
@@ -34,6 +38,7 @@ struct BufHost {
     };
     cfg.log_user = this;
     rt = jsui_create(&cfg);
+    if (jsThreadMode) jsui::internalRuntime(rt)->setJsThreadMode(true);
   }
   ~BufHost() { jsui_destroy(rt); }
   bool load(const char* src) { return jsui_load_bundle_source(rt, src, std::strlen(src), "buf.js") == 0; }
@@ -60,6 +65,7 @@ const char* kReadBundle = R"JS(
     if (name === 'read') { const v = view('pos'); N.postMessage('pos', JSON.stringify(v ? [v.constructor.name, Array.from(v), N.bufferVersion('pos') > 0] : null)); }
     if (name === 'keep') { keep = view('pos'); keepBuffer = N.buffer('pos')[0]; }
     if (name === 'kept') N.postMessage('kept', JSON.stringify([keep.length, N.buffer('pos') ? N.buffer('pos')[0] === keepBuffer : null]));
+    if (name === 'keptValues') N.postMessage('keptValues', JSON.stringify(Array.from(keep)));
     if (name === 'keys') N.postMessage('keys', JSON.stringify(N.bufferKeys().sort()));
   };
 )JS";
@@ -255,4 +261,134 @@ TEST(host_buffers_native_animated) {
   jsui_set_buffer(h.rt, "enemies", JSUI_BUFFER_F32, data, 8);
   h.tick();
   CHECK(tx(0)["translateX"].asNumber() != 99.0);
+}
+
+TEST(host_buffers_published_copies) {
+  jsui::HostBuffers b;
+  float a[3] = {1, 2, 3};
+  b.set("p", JSUI_BUFFER_F32, a, 3);
+  CHECK(b.published("p") == nullptr);
+  CHECK_EQ(b.publishedVersion("p"), uint64_t(0));
+  // Versions are published for every key; contents only for subscribed ones.
+  b.publish();
+  CHECK_EQ(b.publishedVersion("p"), b.version("p"));
+  CHECK(b.published("p") == nullptr);
+  b.subscribe("p");
+  b.publish();
+  std::shared_ptr<const jsui::HostBuffers::Copy> c = b.published("p");
+  CHECK(c != nullptr);
+  if (!c) return;
+  CHECK_EQ(c->count, size_t(3));
+  CHECK_EQ(c->bytes.size(), size_t(12));
+  CHECK_EQ(reinterpret_cast<const float*>(c->bytes.data())[2], 3.0f);
+  b.publish();  // unchanged: the same copy
+  CHECK(b.published("p") == c);
+  // A change is published at the next publish(); a copy a reader holds keeps
+  // its contents.
+  a[0] = 9;
+  b.set("p", JSUI_BUFFER_F32, a, 3);
+  CHECK(b.publishedVersion("p") < b.version("p"));
+  CHECK(b.published("p") == c);
+  b.publish();
+  std::shared_ptr<const jsui::HostBuffers::Copy> d = b.published("p");
+  CHECK(d != c);
+  CHECK_EQ(reinterpret_cast<const float*>(c->bytes.data())[0], 1.0f);
+  CHECK_EQ(reinterpret_cast<const float*>(d->bytes.data())[0], 9.0f);
+  // A copy nobody holds is rewritten in place.
+  const void* where = d.get();
+  c.reset();
+  d.reset();
+  a[1] = 7;
+  b.set("p", JSUI_BUFFER_F32, a, 3);
+  b.publish();
+  CHECK(b.published("p").get() == where);
+  CHECK_EQ(reinterpret_cast<const float*>(b.published("p")->bytes.data())[1], 7.0f);
+  CHECK_EQ(b.publishedKeys().size(), size_t(1));
+  b.remove("p");
+  CHECK(b.published("p") != nullptr);
+  b.publish();
+  CHECK(b.published("p") == nullptr);
+  CHECK_EQ(b.publishedVersion("p"), uint64_t(0));
+  CHECK(b.publishedKeys().empty());
+}
+
+// A reader on another thread (what the JS thread will be) takes copies while
+// the owner thread keeps rewriting, growing and publishing the buffer: every
+// copy it sees is one whole frame of data.
+TEST(host_buffers_snapshot_reader) {
+  jsui::HostBuffers b;
+  b.subscribe("m");
+  std::atomic<bool> stop{false};
+  std::atomic<int> reads{0}, torn{0};
+  std::thread reader([&] {
+    uint64_t last = 0;
+    while (!stop.load()) {
+      std::shared_ptr<const jsui::HostBuffers::Copy> c = b.published("m");
+      if (!c) continue;
+      reads++;
+      const float* f = reinterpret_cast<const float*>(c->bytes.data());
+      int frame = int(f[0]);
+      if (c->count != size_t(frame % 64 + 1) || c->bytes.size() != c->count * 4 || c->version < last) torn++;
+      for (size_t i = 0; i < c->count; i++)
+        if (f[i] != float(frame)) torn++;
+      last = c->version;
+    }
+  });
+  for (int frame = 1; frame <= 3000; frame++) {
+    std::vector<float> data(size_t(frame % 64 + 1), float(frame));
+    b.set("m", JSUI_BUFFER_F32, data.data(), data.size());
+    b.publish();
+  }
+  // Let the reader see the last frame too.
+  while (reads.load() == 0) std::this_thread::yield();
+  stop = true;
+  reader.join();
+  CHECK_EQ(torn.load(), 0);
+  CHECK(reads.load() > 0);
+  std::shared_ptr<const jsui::HostBuffers::Copy> last = b.published("m");
+  CHECK(last && reinterpret_cast<const float*>(last->bytes.data())[0] == 3000.0f);
+}
+
+// The JS side of JS-thread mode: JS reads the copy published at the start of
+// the tick (a change waits for the next one), and a view JS keeps holds its
+// frame instead of being detached when the storage moves.
+TEST(host_buffers_js_thread_mode) {
+  BufHost h(true);
+  float pos[2] = {1, 2};
+  jsui_set_buffer(h.rt, "pos", JSUI_BUFFER_F32, pos, 2);
+  CHECK(h.load(kReadBundle));
+  h.tick();
+  CHECK_EQ(h.take(), std::string());
+  h.post("read");
+  CHECK_EQ(h.take(), std::string());  // on_message runs in the tick
+  h.tick();
+  CHECK_EQ(h.take(), std::string(R"(pos=["Float32Array",[1,2],true])"));
+  h.post("keep");
+  pos[0] = 5;
+  pos[1] = 6;
+  jsui_set_buffer(h.rt, "pos", JSUI_BUFFER_F32, pos, 2);
+  h.post("read");  // before the tick publishes it: the last frame's copy
+  h.tick();
+  CHECK_EQ(h.take(), std::string(R"(pos=["Float32Array",[1,2],true] changed=["pos"])"));
+  h.post("kept");
+  h.post("keptValues");
+  h.post("read");
+  h.tick();
+  CHECK_EQ(h.take(), std::string(R"(kept=[2,false] keptValues=[1,2] pos=["Float32Array",[5,6],true])"));
+  // Growing moves the storage; the kept copy is not detached.
+  std::vector<float> big(5000, 1.f);
+  jsui_set_buffer(h.rt, "pos", JSUI_BUFFER_F32, big.data(), big.size());
+  h.tick();
+  h.take();
+  h.post("keptValues");
+  h.post("keys");
+  h.tick();
+  CHECK_EQ(h.take(), std::string(R"(keptValues=[1,2] keys=["pos"])"));
+  jsui_remove_buffer(h.rt, "pos");
+  h.tick();
+  CHECK_EQ(h.take(), std::string(R"(changed=["pos"])"));
+  h.post("read");
+  h.tick();
+  CHECK_EQ(h.take(), std::string("pos=null"));
+  CHECK(h.errors.empty());
 }

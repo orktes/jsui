@@ -313,6 +313,20 @@ double NativeAnimated::getValue(int tag) const {
   return it == nodes_.end() ? 0 : it->second.value;
 }
 
+void NativeAnimated::snapshotValues(std::unordered_map<int, double>* out) const {
+  out->clear();
+  for (auto& [tag, n] : nodes_)
+    if (n.type == Type::Value) out->emplace(tag, n.value);
+}
+
+void NativeAnimated::snapshotAnimations(std::unordered_map<int, double>* out) const {
+  out->clear();
+  for (const Anim& a : animations_)
+    if (a.id >= 0) out->emplace(a.id, a.kind == Anim::Kind::Spring ? a.lastVelocity : 0);
+  for (const auto& g : groups_)
+    if (!g->done) out->emplace(g->id, 0);
+}
+
 double NativeAnimated::nodeOutput(int tag) {
   gen_++;
   return evalNum(tag);
@@ -388,6 +402,9 @@ void NativeAnimated::evaluate(ANode& n) {
       break;
     }
     case Type::HostState: {
+      // The store's lock while `j` points into it (JS may write on its thread).
+      std::unique_lock<std::recursive_mutex> stateLock;
+      if (state) stateLock = state->lock();
       const Json* j = state ? state->value(n.bufferKey) : nullptr;
       for (size_t i = 0; j && i < n.statePath.size(); i++) {
         const std::string& seg = n.statePath[i];

@@ -3,6 +3,7 @@
 // and the voice-ended / sound-loaded reports that go back to JS.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -40,9 +41,13 @@ class Audio {
   ~Audio();
 
   // ---- requests (from JS)
-  // Starts a voice of `url` (absolute). Returns its id (never 0).
+  // Starts a voice of `url` (absolute). Returns its id (never 0): `id`, one
+  // reserveVoice() handed out (JS on its own thread names the voice before
+  // the request reaches the owner thread), or a new one when 0.
   uint64_t play(const std::string& url, const std::string& bus, float volume, float pitch, float pan, bool loop,
-                float fadeMs, double offsetS);
+                float fadeMs, double offsetS, uint64_t id = 0);
+  // A voice id for a later play() (any thread).
+  uint64_t reserveVoice() { return nextVoice_.fetch_add(1); }
   // STOP / PAUSE / RESUME / SET of a live voice (ignored for ended ones).
   void voice(JsuiAudioOp op, uint64_t voice, float volume, float pitch, float pan, float fadeMs);
   void bus(const std::string& bus, float volume, bool muted, float fadeMs);
@@ -84,7 +89,7 @@ class Audio {
   bool disabled_ = false;
   bool builtinTried_ = false;
   std::unique_ptr<AudioBackend> builtin_;
-  uint64_t nextVoice_ = 1;
+  std::atomic<uint64_t> nextVoice_{1};
   std::unordered_set<uint64_t> live_;
   std::vector<Event> events_;
 };

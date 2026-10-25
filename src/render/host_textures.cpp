@@ -44,6 +44,7 @@ int HostTextures::set(const std::string& key, const JsuiTexture* desc) {
   e.descVersion++;
   e.contentVersion++;
   e.warned = false;
+  setSize(key, &e);
   if (dirtySet_.insert(key).second) dirty_.push_back(key);
   touch(key, resized);
   return 1;
@@ -84,6 +85,7 @@ int HostTextures::setPixels(const std::string& key, const void* rgba, int width,
   if (descChanged) {
     e.descVersion++;
     e.warned = false;
+    setSize(key, &e);
     if (dirtySet_.insert(key).second) dirty_.push_back(key);
   }
   touch(key, resized);
@@ -100,6 +102,7 @@ bool HostTextures::updated(const std::string& key) {
 
 bool HostTextures::remove(const std::string& key) {
   if (!entries_.erase(key)) return false;
+  setSize(key, nullptr);
   if (dirtySet_.insert(key).second) dirty_.push_back(key);
   touch(key, true);
   return true;
@@ -115,10 +118,27 @@ uint64_t HostTextures::version(const std::string& key) const {
   return e ? e->descVersion : 0;
 }
 
+void HostTextures::setSize(const std::string& key, const Entry* e) {
+  std::lock_guard<std::mutex> lock(sizesMutex_);
+  if (e) sizes_[key] = Size{e->desc.width, e->desc.height, e->descVersion};
+  else sizes_.erase(key);
+}
+
+bool HostTextures::size(const std::string& key, int* width, int* height, uint64_t* version) const {
+  std::lock_guard<std::mutex> lock(sizesMutex_);
+  auto it = sizes_.find(key);
+  if (it == sizes_.end()) return false;
+  *width = it->second.width;
+  *height = it->second.height;
+  *version = it->second.version;
+  return true;
+}
+
 std::vector<std::string> HostTextures::keys() const {
+  std::lock_guard<std::mutex> lock(sizesMutex_);
   std::vector<std::string> out;
-  out.reserve(entries_.size());
-  for (auto& [k, e] : entries_) out.push_back(k);
+  out.reserve(sizes_.size());
+  for (auto& [k, e] : sizes_) out.push_back(k);
   std::sort(out.begin(), out.end());
   return out;
 }

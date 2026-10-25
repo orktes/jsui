@@ -29,8 +29,8 @@ void Audio::send(const JsuiAudioCommand& cmd) {
 }
 
 uint64_t Audio::play(const std::string& url, const std::string& bus, float volume, float pitch, float pan, bool loop,
-                     float fadeMs, double offsetS) {
-  uint64_t id = nextVoice_++;
+                     float fadeMs, double offsetS, uint64_t id) {
+  if (!id) id = reserveVoice();
   live_.insert(id);
   if (!available()) {
     voiceEnded(id, JSUI_AUDIO_FAILED);

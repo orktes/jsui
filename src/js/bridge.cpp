@@ -5,7 +5,10 @@
 // Mutations are not applied here: each call converts its arguments and
 // records a command (js/command_buffer.h), which the engine applies when JS
 // returns to native. Calls that read native state (measure, getProps) or
-// reach the embedder (postMessage, fonts) apply what is recorded first.
+// reach the embedder (postMessage, fonts) apply what is recorded first. In
+// the runtime's JS-thread mode (Runtime::jsThreadMode) reads come from the
+// frame snapshot or a proxy call instead, and embedder callbacks are queued
+// for the tick (Runtime::toHost).
 #include <algorithm>
 #include <limits>
 #include <string>
@@ -29,9 +32,8 @@ namespace {
 // Recording side of a tree / prop mutation from the reconciler (the
 // conversion; applying it is timed in the same phase).
 #define JSUI_COMMIT_SCOPE                                    \
-  Document& commitDoc = runtimeOf(ctx).doc;                  \
-  commitDoc.perf.counters.bridgeCalls++;                     \
-  Perf::Scope commitScope(commitDoc.perf, Phase::Commit)
+  implOf(ctx).counters->bridgeCalls++;                       \
+  Perf::Scope commitScope(runtimeOf(ctx).doc.perf, Phase::Commit)
 
 using Op = CommandBuffer::Op;
 
@@ -156,7 +158,7 @@ int flattenStyle(JSContext* ctx, JSValueConst s, CommandBuffer::Writer& w, int d
     }
     return n;
   }
-  runtimeOf(ctx).doc.perf.counters.valueConversions++;
+  implOf(ctx).counters->valueConversions++;
   JSPropertyEnum* props = nullptr;
   uint32_t count = 0;
   if (JS_GetOwnPropertyNames(ctx, &props, &count, s, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) != 0) {
@@ -279,6 +281,20 @@ JSValue js_shouldYield(JSContext* ctx, JSValueConst, int, JSValueConst*) {
 // for the inspector (setNativeProps uses updateProps' keepStyle instead).
 JSValue js_getProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   if (argc < 1) return JS_UNDEFINED;
+  JsEngine::Impl& impl = implOf(ctx);
+  if (impl.threaded) {
+    // The owner thread's tree (as of the last batch applied): a proxy read.
+    uint32_t id = idArg(ctx, argc, argv, 0);
+    Runtime& rt = impl.rt;
+    Value props;
+    if (!id || !rt.hostQueue.call(
+                   [&] {
+                     if (Node* n = rt.findNode(id)) props = n->props();
+                   },
+                   Runtime::kProxyTimeoutMs))
+      return JS_UNDEFINED;
+    return props.isObject() ? fromValue(ctx, props) : JS_UNDEFINED;
+  }
   Node* n = nodeArg(ctx, argv[0]);
   return n && n->props().isObject() ? fromValue(ctx, n->props()) : JS_UNDEFINED;
 }
@@ -372,13 +388,8 @@ JSValue js_destroyNode(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
   return JS_UNDEFINED;
 }
 
-JSValue js_measure(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
-  if (!n) return JS_NULL;
-  // Layout may be stale mid-commit; onLayout events it raises are queued
-  // until JS unwinds (see JsEngine::layoutEvent).
-  n->document()->layout();
-  Rect r = n->layoutRect(), a = n->absoluteRect();
+// {x, y, width, height, pageX, pageY}
+JSValue rectObject(JSContext* ctx, const Rect& r, const Rect& a) {
   JSValue o = JS_NewObject(ctx);
   JS_SetPropertyStr(ctx, o, "x", JS_NewFloat64(ctx, r.x));
   JS_SetPropertyStr(ctx, o, "y", JS_NewFloat64(ctx, r.y));
@@ -389,11 +400,55 @@ JSValue js_measure(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   return o;
 }
 
+// measure(id) -> rect | null. JS-thread mode: the layout of the last frame
+// (FrameSnapshot::layouts; null for a node not attached then).
+JSValue js_measure(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  JsEngine::Impl& impl = implOf(ctx);
+  if (impl.threaded) {
+    uint32_t id = idArg(ctx, argc, argv, 0);
+    std::shared_ptr<const FrameSnapshot> snap = impl.rt.snapshots.current();
+    if (!id || !snap) return JS_NULL;
+    auto it = snap->layouts.find(id);
+    return it == snap->layouts.end() ? JS_NULL : rectObject(ctx, it->second.local, it->second.page);
+  }
+  Node* n = argc > 0 ? nodeArg(ctx, argv[0]) : nullptr;
+  if (!n) return JS_NULL;
+  // Layout may be stale mid-commit; onLayout events it raises are queued
+  // until JS unwinds (see JsEngine::layoutEvent).
+  n->document()->layout();
+  return rectObject(ctx, n->layoutRect(), n->absoluteRect());
+}
+
+// measureAsync(id, callback): React Native's measure. callback(rect | null)
+// runs after the layout that follows the commit in progress (the request is
+// a command; Runtime::answerMeasures), so it sees the committed tree.
+JSValue js_measureAsync(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  if (argc < 2 || !JS_IsFunction(ctx, argv[1])) return JS_ThrowTypeError(ctx, "measureAsync(id, callback)");
+  JsEngine::Impl& impl = implOf(ctx);
+  uint32_t req = impl.nextMeasure++;
+  impl.measureCallbacks[req] = JS_DupValue(ctx, argv[1]);
+  commands(ctx).push(Op::Measure, idArg(ctx, argc, argv, 0), req);
+  return JS_UNDEFINED;
+}
+
 // viewport(rootTag?) -> {width, height, scale}: logical viewport size of a
 // surface (the main one by default; Dimensions). An auto-sized axis reports
 // its laid-out size.
 JSValue js_viewport(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   Runtime& rt = runtimeOf(ctx);
+  if (implOf(ctx).threaded) {  // the surface table of the snapshot
+    std::shared_ptr<const FrameSnapshot> snap = rt.snapshots.current();
+    if (!snap || snap->surfaces.empty()) return JS_UNDEFINED;
+    const FrameSnapshot::SurfaceInfo* s = &snap->surfaces[0];
+    uint32_t tag = 0;
+    if (argc > 0 && JS_IsNumber(argv[0]) && !JS_ToUint32(ctx, &tag, argv[0]))
+      if (const FrameSnapshot::SurfaceInfo* t = snap->surface(tag)) s = t;
+    JSValue o = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, o, "width", JS_NewFloat64(ctx, s->width));
+    JS_SetPropertyStr(ctx, o, "height", JS_NewFloat64(ctx, s->height));
+    JS_SetPropertyStr(ctx, o, "scale", JS_NewFloat64(ctx, s->scale));
+    return o;
+  }
   const Document* d = &rt.doc;
   uint32_t tag = 0;
   if (argc > 0 && JS_IsNumber(argv[0]) && !JS_ToUint32(ctx, &tag, argv[0]))
@@ -554,19 +609,26 @@ JSValue js_setTextInputSelection(JSContext* ctx, JSValueConst, int argc, JSValue
 
 // getClipboard() -> string, setClipboard(text): the embedder's clipboard
 // (jsui_set_clipboard_callbacks) or the runtime's in-process one.
+// JS-thread mode: the embedder's getter runs on the owner thread (a proxy
+// read, after the clipboard writes queued before it); the setter is queued.
 JSValue js_getClipboard(JSContext* ctx, JSValueConst, int, JSValueConst*) {
-  std::string t = runtimeOf(ctx).clipboardText();
+  Runtime& rt = runtimeOf(ctx);
+  std::string t;
+  rt.hostQueue.call([&] { t = rt.clipboardText(); }, Runtime::kProxyTimeoutMs);
   return JS_NewStringLen(ctx, t.data(), t.size());
 }
 
 JSValue js_setClipboard(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  runtimeOf(ctx).setClipboardText(argc > 0 ? toStdString(ctx, argv[0]) : std::string());
+  Runtime* rt = &runtimeOf(ctx);
+  rt->toHost([rt, text = argc > 0 ? toStdString(ctx, argv[0]) : std::string()] { rt->setClipboardText(text); });
   return JS_UNDEFINED;
 }
 
 JSValue js_postMessage(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   Runtime& rt = runtimeOf(ctx);
-  implOf(ctx).syncPoint();  // the embedder's on_message may look at the tree
+  // The embedder's on_message may look at the tree. (JS-thread mode: it runs
+  // in the tick, after this batch is applied.)
+  if (!implOf(ctx).threaded) implOf(ctx).syncPoint();
   std::string name = argc > 0 ? toStdString(ctx, argv[0]) : "";
   std::string json = "null";
   if (argc > 1) {
@@ -579,9 +641,12 @@ JSValue js_postMessage(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
       JS_FreeValue(ctx, j);
     }
   }
-  if (rt.session && rt.session->joined())
-    rt.session->uiEvent("message", {{"name", Value(name)}, {"data", json.empty() ? Value() : Value::parseJson(json)}});
-  if (rt.config.on_message) rt.config.on_message(rt.config.message_user, name.c_str(), json.c_str());
+  Runtime* r = &rt;
+  rt.toHost([r, name = std::move(name), json = std::move(json)] {
+    if (r->session && r->session->joined())
+      r->session->uiEvent("message", {{"name", Value(name)}, {"data", json.empty() ? Value() : Value::parseJson(json)}});
+    if (r->config.on_message) r->config.on_message(r->config.message_user, name.c_str(), json.c_str());
+  });
   return JS_UNDEFINED;
 }
 
@@ -741,16 +806,29 @@ JSValue js_setDefaultFontFamily(JSContext* ctx, JSValueConst, int argc, JSValueC
 JSValue js_surfaceApp(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   uint32_t tag = 0;
   if (argc < 1 || !JS_IsNumber(argv[0]) || JS_ToUint32(ctx, &tag, argv[0])) return JS_NULL;
-  Surface* s = runtimeOf(ctx).surfaceByTag(tag);
-  if (!s || s->appKey.empty()) return JS_NULL;
+  const std::string* appKey = nullptr;
+  const std::string* props = nullptr;
+  std::shared_ptr<const FrameSnapshot> snap;
+  if (implOf(ctx).threaded) {  // the surface table of the snapshot
+    snap = runtimeOf(ctx).snapshots.current();
+    if (const FrameSnapshot::SurfaceInfo* s = snap ? snap->surface(tag) : nullptr) {
+      appKey = &s->appKey;
+      props = &s->propsJson;
+    }
+  } else if (Surface* s = runtimeOf(ctx).surfaceByTag(tag)) {
+    appKey = &s->appKey;
+    props = &s->propsJson;
+  }
+  if (!appKey || appKey->empty()) return JS_NULL;
   JSValue o = JS_NewObject(ctx);
-  JS_SetPropertyStr(ctx, o, "appKey", JS_NewStringLen(ctx, s->appKey.data(), s->appKey.size()));
-  JS_SetPropertyStr(ctx, o, "initialProps", JS_ParseJSON(ctx, s->propsJson.data(), s->propsJson.size(), "<props>"));
+  JS_SetPropertyStr(ctx, o, "appKey", JS_NewStringLen(ctx, appKey->data(), appKey->size()));
+  JS_SetPropertyStr(ctx, o, "initialProps", JS_ParseJSON(ctx, props->data(), props->size(), "<props>"));
   return o;
 }
 
 JSValue js_reload(JSContext* ctx, JSValueConst, int, JSValueConst*) {
-  runtimeOf(ctx).requestReload();
+  Runtime* rt = &runtimeOf(ctx);
+  rt->toHost([rt] { rt->requestReload(); });
   return JS_UNDEFINED;
 }
 
@@ -758,15 +836,17 @@ JSValue js_reload(JSContext* ctx, JSValueConst, int, JSValueConst*) {
 // devError(null) clears it. Hot updates (jsui dev) report build and update
 // errors through this.
 JSValue js_devError(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  Runtime& rt = runtimeOf(ctx);
+  Runtime* rt = &runtimeOf(ctx);
   if (argc < 1 || JS_IsNull(argv[0]) || JS_IsUndefined(argv[0])) {
-    if (!rt.lastError.empty()) {
-      rt.lastError.clear();
-      rt.redrawAll();
-    }
+    rt->toHost([rt] {
+      if (!rt->lastError.empty()) {
+        rt->lastError.clear();
+        rt->redrawAll();
+      }
+    });
     return JS_UNDEFINED;
   }
-  rt.reportError(toStdString(ctx, argv[0]));
+  rt->jsReportError(toStdString(ctx, argv[0]));
   return JS_UNDEFINED;
 }
 
@@ -806,6 +886,7 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
              {"appendChild", js_appendChild, 2},   {"insertBefore", js_insertBefore, 3},
              {"removeChild", js_removeChild, 2},   {"destroyNode", js_destroyNode, 1},
              {"measure", js_measure, 1},           {"focus", js_focus, 1},
+             {"measureAsync", js_measureAsync, 2},
              {"blur", js_blur, 1},                 {"scrollTo", js_scrollTo, 4},
              {"scrollToEnd", js_scrollToEnd, 4},
              {"postMessage", js_postMessage, 2},   {"loadFont", js_loadFont, 4},
@@ -834,6 +915,9 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
   // LottieView plays (the build has Skottie).
   JS_SetPropertyStr(ctx, native, "lottie", JS_NewBool(ctx, LottieCache::available()));
   JS_SetPropertyStr(ctx, native, "devMode", JS_NewBool(ctx, impl.rt.config.dev_mode != 0));
+  // JS-thread mode: measure reads the last frame; the RN-style callback
+  // forms (HostInstance.measure*, UIManager.measure*) use measureAsync.
+  JS_SetPropertyStr(ctx, native, "asyncMeasure", JS_NewBool(ctx, impl.threaded));
   installAnimatedBridge(impl, native);
   installHostDataBridge(impl, native);
   installAudioBridge(impl, native);

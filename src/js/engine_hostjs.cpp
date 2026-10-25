@@ -756,6 +756,7 @@ EMSCRIPTEN_KEEPALIVE void jsui_hjs_a_event_mapping(int e, double view, const cha
 
 // getState(key) -> JSON text; null pointer: unset.
 EMSCRIPTEN_KEEPALIVE const char* jsui_hjs_get_state(int e, const char* key, int len) {
+  auto lock = R(e).state.lock();
   const std::string* json = R(e).state.json(str(key, len));
   return json ? retString(*json) : nullptr;
 }
@@ -770,6 +771,7 @@ EMSCRIPTEN_KEEPALIVE const char* jsui_hjs_state_keys(int e) { return retString(k
 EMSCRIPTEN_KEEPALIVE const char* jsui_hjs_state_patches(int e, const char* key, int len, double since) {
   if (!(since >= 1 && since < 9007199254740992.0)) return nullptr;
   std::vector<const std::string*> patches;
+  auto lock = R(e).state.lock();
   if (!R(e).state.patchesSince(str(key, len), uint64_t(since), &patches)) return nullptr;
   Value::Array a;
   a.reserve(patches.size());

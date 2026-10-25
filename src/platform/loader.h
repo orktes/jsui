@@ -63,6 +63,11 @@ class ResourceLoader {
   // Starts a load; `cb` runs on the runtime thread during pump().
   uint64_t load(const std::string& url, Callback cb);
   uint64_t load(LoadRequest req, Callback cb);
+  // An id for a load started later with it (any thread: JS on its own
+  // thread names its request before the owner thread starts it).
+  uint64_t reserveId() { return nextId_.fetch_add(1); }
+  // load() under a reserveId() id.
+  void load(uint64_t id, LoadRequest req, Callback cb);
   // Called by the embedder (jsui_resource_complete) or the built-in backend.
   // Thread-safe.
   void complete(uint64_t id, Resource res);
@@ -84,7 +89,7 @@ class ResourceLoader {
   JsuiRuntime* rt_;
   JsuiLoadFn custom_;
   void* customUser_;
-  uint64_t nextId_ = 1;
+  std::atomic<uint64_t> nextId_{1};
   struct PendingLoad {
     Callback cb;
     std::string url;

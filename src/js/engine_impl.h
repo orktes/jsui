@@ -18,6 +18,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "core/perf.h"
 #include "core/value.h"
 #include "js/command_buffer.h"
 #include "js/engine.h"
@@ -32,6 +33,15 @@ struct JsEngine::Impl {
   Runtime& rt;
   JSRuntime* jrt = nullptr;
   JSContext* ctx = nullptr;
+  // Runtime::jsThreadMode when the engine was made (switching rebuilds it):
+  // JS reaches the runtime only the ways a JS thread can (see the reads
+  // below and Runtime::toHost).
+  bool threaded = false;
+
+  // ---- perf counters JS bumps: the main document's, or in JS-thread mode
+  // a block of its own that the owner thread merges in (mergePerf).
+  PerfCounters jsCounters;
+  PerfCounters* counters = nullptr;
 
   // ---- timers (setTimeout / setInterval / setImmediate / MessageChannel)
   struct Timer {
@@ -100,8 +110,26 @@ struct JsEngine::Impl {
   // Pending Host.calls: call id -> the settle(ok, payload) function JS passed.
   std::unordered_map<uint64_t, JSValue> hostCalls;
 
+  // measureAsync callbacks by request id (answered by JsEngine::measured).
+  std::unordered_map<uint64_t, JSValue> measureCallbacks;
+  uint32_t nextMeasure = 1;
+
+  // ---- JS-thread mode: native Animated reads come from the frame snapshot
+  // (Runtime::snapshots), unless JS wrote the value in a batch the snapshot
+  // does not include yet. Batches are counted as they are published
+  // (single-threaded, applied: Runtime::appliedBatches keeps step).
+  uint64_t publishedBatches = 0;
+  struct AnimWrite {
+    double value;
+    uint64_t batch;  // the batch that carries the write
+  };
+  std::unordered_map<int, AnimWrite> animWrites;  // value tag -> setValue
+  std::unordered_map<int, uint64_t> animStarts;   // animation id -> its startAnimation's batch
+
   // Frame data: one ArrayBuffer per host buffer, over the runtime's storage
-  // (not owned by QuickJS), reused while the storage stays where it is.
+  // (not owned by QuickJS), reused while the storage stays where it is. In
+  // JS-thread mode, over a published copy (HostBuffers::Copy), which the
+  // ArrayBuffer keeps alive.
   struct BufferView {
     JSValue buffer = JS_UNDEFINED;
     const void* data = nullptr;

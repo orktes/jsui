@@ -45,6 +45,27 @@ struct PerfCounters {
   uint64_t imageDecodes = 0;     // encoded images decoded (ImageCache)
   double imageDecodeUs = 0;      // ... and the time that took (timed even without profiling)
   uint64_t pipelineCompiles = 0; // GPU pipelines compiled on demand during this runtime's renders
+
+  PerfCounters& operator+=(const PerfCounters& o) {
+    bridgeCalls += o.bridgeCalls;
+    setProps += o.setProps;
+    setPropsSkipped += o.setPropsSkipped;
+    styleResolves += o.styleResolves;
+    valueConversions += o.valueConversions;
+    layoutPasses += o.layoutPasses;
+    layoutVisits += o.layoutVisits;
+    textMeasures += o.textMeasures;
+    paragraphBuilds += o.paragraphBuilds;
+    animatedWrites += o.animatedWrites;
+    events += o.events;
+    jsCalls += o.jsCalls;
+    jsJobs += o.jsJobs;
+    hitNodes += o.hitNodes;
+    imageDecodes += o.imageDecodes;
+    imageDecodeUs += o.imageDecodeUs;
+    pipelineCompiles += o.pipelineCompiles;
+    return *this;
+  }
 };
 
 // Paragraph::layout runs (process-wide: the text cache has no document).

@@ -78,7 +78,7 @@ Value toValue(JSContext* ctx, JSValueConst v, int depth) {
   }
   if (JS_IsString(v)) return Value(toStdString(ctx, v));
   if (JS_IsArray(v)) {
-    runtimeOf(ctx).doc.perf.counters.valueConversions++;
+    implOf(ctx).counters->valueConversions++;
     Value::Array arr;
     int64_t len = 0;
     if (JS_GetLength(ctx, v, &len)) {
@@ -94,7 +94,7 @@ Value toValue(JSContext* ctx, JSValueConst v, int depth) {
     return Value(std::move(arr));
   }
   if (JS_IsObject(v) && !JS_IsFunction(ctx, v)) {
-    runtimeOf(ctx).doc.perf.counters.valueConversions++;
+    implOf(ctx).counters->valueConversions++;
     Value::Object obj;
     JSPropertyEnum* props = nullptr;
     uint32_t n = 0;
@@ -141,7 +141,7 @@ void writeValue(JSContext* ctx, JSValueConst v, CommandBuffer::Writer& w, int de
   }
   if (JS_IsString(v)) return writeString(ctx, v, w);
   if (JS_IsArray(v)) {
-    runtimeOf(ctx).doc.perf.counters.valueConversions++;
+    implOf(ctx).counters->valueConversions++;
     int64_t len = 0;
     if (JS_GetLength(ctx, v, &len)) {
       JS_FreeValue(ctx, JS_GetException(ctx));
@@ -157,7 +157,7 @@ void writeValue(JSContext* ctx, JSValueConst v, CommandBuffer::Writer& w, int de
     return;
   }
   if (JS_IsObject(v) && !JS_IsFunction(ctx, v)) {
-    runtimeOf(ctx).doc.perf.counters.valueConversions++;
+    implOf(ctx).counters->valueConversions++;
     w.beginObject();
     JSPropertyEnum* props = nullptr;
     uint32_t n = 0;
@@ -284,12 +284,14 @@ void JsEngine::Impl::leave() {
 
 void JsEngine::Impl::applyCommands() {
   Perf::Scope scope(rt.doc.perf, Phase::Commit);
+  publishedBatches++;
   commands.apply(rt);
+  rt.appliedBatches.fetch_add(1, std::memory_order_release);
 }
 
 JSValue JsEngine::Impl::call(JSValueConst fn, JSValueConst thisVal, int argc, JSValueConst* argv) {
   Perf::Scope scope(rt.doc.perf, Phase::Js);
-  rt.doc.perf.counters.jsCalls++;
+  counters->jsCalls++;
   enter();
   JSValue r = JS_Call(ctx, fn, thisVal, argc, argv);
   // Native code runs next (the caller, or the next call of a batch).
@@ -307,7 +309,7 @@ void JsEngine::Impl::runJobsRaw() {
   for (int guard = 0; guard < 10000000; guard++) {
     int r = JS_ExecutePendingJob(jrt, &pctx);
     if (r == 0) break;
-    rt.doc.perf.counters.jsJobs++;
+    counters->jsJobs++;
     if (r < 0) reportException();
   }
 }
@@ -342,7 +344,7 @@ void JsEngine::Impl::drain() {
       JS_SetPropertyStr(ctx, args[1], "y", JS_NewFloat64(ctx, e.y));
       JS_SetPropertyStr(ctx, args[1], "width", JS_NewFloat64(ctx, e.w));
       JS_SetPropertyStr(ctx, args[1], "height", JS_NewFloat64(ctx, e.h));
-      rt.doc.perf.counters.jsCalls++;
+      counters->jsCalls++;
       JSValue r = JS_Call(ctx, fn, JS_UNDEFINED, 2, args);
       syncPoint();
       if (JS_IsException(r)) reportException();
@@ -370,7 +372,7 @@ void JsEngine::Impl::reportValue(JSValueConst exc, const char* prefix) {
           " ms and was interrupted (js_timeout_ms).\n" + msg;
     interrupted = false;
   }
-  rt.reportError(msg);
+  rt.jsReportError(msg);
 }
 
 void JsEngine::Impl::reportException() {
@@ -386,13 +388,22 @@ void JsEngine::Impl::addTimer(int id, double due, double interval, JSValue fn, s
 
 uint64_t JsEngine::Impl::startLoad(LoadRequest req, std::function<void(uint64_t, Resource&)> onDone) {
   std::weak_ptr<Impl*> weak = alive;
-  auto idBox = std::make_shared<uint64_t>(0);
-  uint64_t id = rt.loader.load(std::move(req), [weak, idBox, onDone = std::move(onDone)](Resource res) {
+  // The id is known before the load starts: in JS-thread mode the owner
+  // thread starts it (an embedder's JsuiLoadFn runs there).
+  uint64_t id = rt.loader.reserveId();
+  ResourceLoader::Callback cb = [weak, id, onDone = std::move(onDone)](Resource res) {
     auto strong = weak.lock();
     if (!strong) return;
-    onDone(*idBox, res);
+    onDone(id, res);
+  };
+  if (!threaded) {
+    rt.loader.load(id, std::move(req), std::move(cb));
+    return id;
+  }
+  Runtime* r = &rt;
+  rt.hostQueue.post([r, id, req = std::move(req), cb = std::move(cb)]() mutable {
+    r->loader.load(id, std::move(req), std::move(cb));
   });
-  *idBox = id;
   return id;
 }
 
@@ -628,6 +639,8 @@ class QuickJsEngine final : public JsEngine {
   size_t memoryUsage() const override;
   bool collectIdle(bool light, bool idle) override;
   GcStats gcStats(bool reset) override;
+  void measured(const std::vector<MeasureResult>& results) override;
+  void mergePerf(PerfCounters& into) override;
 
  private:
   std::unique_ptr<Impl> impl_;
@@ -645,6 +658,11 @@ std::unique_ptr<JsEngine> JsEngine::create(Runtime& rt, Kind kind) {
 QuickJsEngine::QuickJsEngine(Runtime& rt) : impl_(std::make_unique<Impl>(rt)) {
   Impl& impl = *impl_;
   impl.alive = std::make_shared<Impl*>(&impl);
+  impl.threaded = rt.jsThreadMode();
+  impl.counters = impl.threaded ? &impl.jsCounters : &rt.doc.perf.counters;
+  // Batch numbers continue the runtime's count (snapshots of an earlier
+  // context are older than anything this one records).
+  impl.publishedBatches = rt.appliedBatches.load();
   const JsuiConfig& cfg = rt.config;
   impl.timeoutMs = cfg.js_timeout_ms == 0 ? 5000.0 : double(cfg.js_timeout_ms);
 
@@ -734,6 +752,8 @@ QuickJsEngine::~QuickJsEngine() {
   impl.rejections.clear();
   for (auto& [id, fn] : impl.hostCalls) JS_FreeValue(ctx, fn);
   impl.hostCalls.clear();
+  for (auto& [id, fn] : impl.measureCallbacks) JS_FreeValue(ctx, fn);
+  impl.measureCallbacks.clear();
   for (auto& [key, view] : impl.bufferViews) JS_FreeValue(ctx, view.buffer);
   impl.bufferViews.clear();
   for (auto& [a, name] : impl.atomNames) JS_FreeAtom(ctx, a);
@@ -766,13 +786,13 @@ bool QuickJsEngine::eval(const std::string& source, const std::string& name) {
                                  parts.bytecode.size(), JS_READ_OBJ_BYTECODE);
       if (JS_IsException(fn) && !parts.source.empty()) {
         JS_FreeValue(impl.ctx, JS_GetException(impl.ctx));
-        impl.rt.log(JSUI_LOG_WARN, name + ": unreadable bytecode, running the bundle's source instead");
+        impl.rt.jsLog(JSUI_LOG_WARN, name + ": unreadable bytecode, running the bundle's source instead");
         r = evalSource(impl.ctx, std::string(parts.source), name);
       } else {
         r = JS_IsException(fn) ? fn : JS_EvalFunction(impl.ctx, fn);  // takes fn
       }
     } else if (!parts.source.empty()) {
-      impl.rt.log(JSUI_LOG_WARN, name + ": bytecode was compiled for another JSUI runtime (" + std::string(parts.key) +
+      impl.rt.jsLog(JSUI_LOG_WARN, name + ": bytecode was compiled for another JSUI runtime (" + std::string(parts.key) +
                                      "), running the bundle's source instead; rebuild it with this version's jsui CLI");
       r = evalSource(impl.ctx, std::string(parts.source), name);
     } else {
@@ -982,6 +1002,39 @@ void QuickJsEngine::layoutEvent(uint32_t id, float x, float y, float w, float h)
 }
 
 bool QuickJsEngine::inCall() const { return impl_->depth > 0; }
+
+void QuickJsEngine::measured(const std::vector<MeasureResult>& results) {
+  Impl& impl = *impl_;
+  JSContext* ctx = impl.ctx;
+  // One batch: state the callbacks set renders in one pass.
+  impl.enter();
+  for (const MeasureResult& m : results) {
+    auto it = impl.measureCallbacks.find(m.req);
+    if (it == impl.measureCallbacks.end()) continue;
+    JSValue fn = it->second;
+    impl.measureCallbacks.erase(it);
+    JSValue arg = JS_NULL;
+    if (m.found) {
+      arg = JS_NewObject(ctx);
+      JS_SetPropertyStr(ctx, arg, "x", JS_NewFloat64(ctx, m.x));
+      JS_SetPropertyStr(ctx, arg, "y", JS_NewFloat64(ctx, m.y));
+      JS_SetPropertyStr(ctx, arg, "width", JS_NewFloat64(ctx, m.width));
+      JS_SetPropertyStr(ctx, arg, "height", JS_NewFloat64(ctx, m.height));
+      JS_SetPropertyStr(ctx, arg, "pageX", JS_NewFloat64(ctx, m.pageX));
+      JS_SetPropertyStr(ctx, arg, "pageY", JS_NewFloat64(ctx, m.pageY));
+    }
+    JS_FreeValue(ctx, impl.call(fn, JS_UNDEFINED, 1, &arg));
+    JS_FreeValue(ctx, arg);
+    JS_FreeValue(ctx, fn);
+  }
+  impl.leave();
+}
+
+void QuickJsEngine::mergePerf(PerfCounters& into) {
+  if (!impl_->threaded) return;
+  into += impl_->jsCounters;
+  impl_->jsCounters = PerfCounters();
+}
 
 void QuickJsEngine::beginBatch() { impl_->enter(); }
 

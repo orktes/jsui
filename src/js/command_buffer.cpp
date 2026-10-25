@@ -262,6 +262,9 @@ void CommandBuffer::applyOne(Runtime& rt, const Command& cmd) {
       inputOf(rt, n).scrollTo(n, float(x), float(y), (cmd.flags & kAnimated) != 0);
       return;
     }
+    case Op::Measure:
+      rt.measureRequests.push_back({cmd.b, cmd.a});
+      return;
     case Op::FlashScrollIndicators: {
       Node* n = rt.findNode(cmd.a);
       if (!n) return;

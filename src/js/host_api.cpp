@@ -15,7 +15,7 @@ JSValue js_log(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   int level = JSUI_LOG_INFO;
   if (argc > 0) JS_ToInt32(ctx, &level, argv[0]);
   std::string msg = argc > 1 ? toStdString(ctx, argv[1]) : "";
-  runtimeOf(ctx).log(JsuiLogLevel(level & 3), msg);
+  runtimeOf(ctx).jsLog(JsuiLogLevel(level & 3), msg);
   return JS_UNDEFINED;
 }
 
@@ -43,7 +43,7 @@ JSValue js_reportError(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
 #if JSUI_DEBUGGER
   if (JsEngine::Impl& impl = implOf(ctx); impl.inspector && argc > 0) impl.inspector->exception(argv[0], prefix + "Uncaught");
 #endif
-  runtimeOf(ctx).reportError(prefix + (argc > 0 ? formatError(ctx, argv[0]) : std::string("undefined")));
+  runtimeOf(ctx).jsReportError(prefix + (argc > 0 ? formatError(ctx, argv[0]) : std::string("undefined")));
   return JS_UNDEFINED;
 }
 
@@ -229,7 +229,8 @@ JSValue js_cancel(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   if (argc < 1 || JS_ToFloat64(ctx, &d, argv[0]) || d <= 0) return JS_UNDEFINED;
   auto& impl = implOf(ctx);
   uint64_t id = uint64_t(d);
-  impl.rt.loader.cancel(id);
+  Runtime* r = &impl.rt;
+  r->toHost([r, id] { r->loader.cancel(id); });
   impl.dropPending(id);
   return JS_UNDEFINED;
 }

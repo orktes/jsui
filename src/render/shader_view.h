@@ -33,6 +33,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -66,7 +67,9 @@ class ShaderEffects {
     bool usesTime = false;          // declares `uniform float time`
     bool content = false;           // declares `uniform shader content`
   };
-  // Compiles `sksl` on first use; later calls share the result.
+  // Compiles `sksl` on first use; later calls share the result. get,
+  // preload and warmPending may be called from any thread (JS compiles on
+  // its own thread); the rest belongs to the owner thread.
   std::shared_ptr<const Program> get(const std::string& sksl);
 
   // Compiles `sksl` now and queues its warm-up draw. `images` is what the
@@ -74,7 +77,7 @@ class ShaderEffects {
   // tile mode), so the warm-up samples the same kind of child.
   std::shared_ptr<const Program> preload(const std::string& sksl, const Value& images = Value());
   // Warm-up draws still queued (one per frame painted).
-  size_t warmPending() const { return warm_.size(); }
+  size_t warmPending() const;
   // The surfaces call it with the canvas of each frame they paint. On a GPU
   // canvas it draws the next queued warm-up draw (every combination of
   // geometry, clip and loaded children a view may draw the shader with)
@@ -102,6 +105,7 @@ class ShaderEffects {
   void removeView(Node* node);
 
  private:
+  mutable std::mutex mutex_;  // programs_ and warm_
   std::unordered_map<std::string, std::shared_ptr<const Program>> programs_;
   std::unordered_set<Node*> views_;
   double now_ = 0;

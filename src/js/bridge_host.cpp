@@ -9,6 +9,12 @@
 //   buffer(key) -> [ArrayBuffer, type, count, version] | undefined
 //   bufferVersion(key) -> number (0: unset)      bufferKeys() -> [key]
 //   texture(key) -> [width, height, version] | undefined   textureKeys() -> [key]
+//
+// The stores are shared with the owner thread (a JS thread reads and writes
+// them while the embedder does): HostState and the texture size table lock;
+// buffers are read through published copies in JS-thread mode; the
+// embedder's on_state / on_call / on_call_cancel are queued for the tick
+// there (Runtime::toHost).
 #include <string>
 
 #include "dev_session.h"
@@ -31,7 +37,9 @@ uint64_t toId(JSContext* ctx, JSValueConst v) {
 
 JSValue js_getState(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   if (argc < 1) return JS_UNDEFINED;
-  const std::string* json = runtimeOf(ctx).state.json(toStdString(ctx, argv[0]));
+  HostState& state = runtimeOf(ctx).state;
+  auto lock = state.lock();
+  const std::string* json = state.json(toStdString(ctx, argv[0]));
   return json ? JS_NewStringLen(ctx, json->data(), json->size()) : JS_UNDEFINED;
 }
 
@@ -43,7 +51,9 @@ JSValue js_statePatches(JSContext* ctx, JSValueConst, int argc, JSValueConst* ar
   if (JS_ToFloat64(ctx, &since, argv[1]) < 0) return JS_EXCEPTION;
   if (!(since >= 1 && since < 9007199254740992.0)) return JS_UNDEFINED;
   std::vector<const std::string*> patches;
-  if (!runtimeOf(ctx).state.patchesSince(toStdString(ctx, argv[0]), uint64_t(since), &patches)) return JS_UNDEFINED;
+  HostState& state = runtimeOf(ctx).state;
+  auto lock = state.lock();
+  if (!state.patchesSince(toStdString(ctx, argv[0]), uint64_t(since), &patches)) return JS_UNDEFINED;
   JSValue arr = JS_NewArray(ctx);
   for (size_t i = 0; i < patches.size(); i++)
     JS_SetPropertyUint32(ctx, arr, uint32_t(i), JS_NewStringLen(ctx, patches[i]->data(), patches[i]->size()));
@@ -81,12 +91,67 @@ JSValue js_writeState(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
   }
   // JS notifies its own subscribers (the key is not queued for JS); the
   // embedder is told here (with the tree JS built so far applied: on_state
-  // may look at it).
-  if (changed) {
+  // may look at it). JS-thread mode: in the tick, with the text JS left;
+  // native Animated host-state bindings follow the key there too
+  // (HostState::deferUiChanges).
+  if (changed && implOf(ctx).threaded) {
+    std::string json;
+    bool set = rt.state.jsonCopy(key, &json);
+    Runtime* r = &rt;
+    rt.hostQueue.post([r, key, json = std::move(json), set] {
+      if (r->state.onChange) r->state.onChange(key);
+      r->uiStateChanged(key, set ? &json : nullptr);
+    });
+  } else if (changed) {
     implOf(ctx).syncPoint();
     rt.uiStateChanged(key);
   }
   return JS_NewFloat64(ctx, double(rt.state.version(key)));
+}
+
+// Backing store of an ArrayBuffer over a published buffer copy: the
+// ArrayBuffer holds a reference to the copy (dropped when it is freed).
+void* copyBuffer(JSRuntime*, void* opaque, void*, size_t size) {
+  if (size == 0) delete static_cast<std::shared_ptr<const HostBuffers::Copy>*>(opaque);
+  return nullptr;  // never resized
+}
+
+// JS-thread mode: buffer(key) over the copy the owner thread published
+// (HostBuffers::publish). A key read for the first time is subscribed and
+// copied at once (a proxy call), then once per tick while it changes. A new
+// copy is a new ArrayBuffer; one JS still holds keeps its contents.
+JSValue publishedBuffer(JSContext* ctx, JsEngine::Impl& impl, const std::string& key) {
+  HostBuffers& buffers = impl.rt.buffers;
+  std::shared_ptr<const HostBuffers::Copy> copy = buffers.published(key);
+  if (!copy && buffers.publishedVersion(key)) {
+    buffers.subscribe(key);
+    impl.rt.hostQueue.call([&] { buffers.publish(); }, Runtime::kProxyTimeoutMs);
+    copy = buffers.published(key);
+  }
+  if (!copy) return JS_UNDEFINED;
+  auto it = impl.bufferViews.find(key);
+  if (it == impl.bufferViews.end() || it->second.data != copy.get()) {
+    if (it != impl.bufferViews.end()) {
+      JS_FreeValue(ctx, it->second.buffer);
+      impl.bufferViews.erase(it);
+    }
+    JSValue ab;
+    if (copy->bytes.empty()) {
+      ab = JS_NewArrayBufferCopy(ctx, nullptr, 0);
+    } else {
+      auto* ref = new std::shared_ptr<const HostBuffers::Copy>(copy);
+      ab = JS_NewArrayBuffer(ctx, const_cast<uint8_t*>(copy->bytes.data()), copy->bytes.size(), 0, copyBuffer, ref,
+                             false);
+    }
+    if (JS_IsException(ab)) return ab;
+    it = impl.bufferViews.emplace(key, JsEngine::Impl::BufferView{ab, copy.get(), copy->bytes.size()}).first;
+  }
+  JSValue arr = JS_NewArray(ctx);
+  JS_SetPropertyUint32(ctx, arr, 0, JS_DupValue(ctx, it->second.buffer));
+  JS_SetPropertyUint32(ctx, arr, 1, JS_NewInt32(ctx, int32_t(copy->type)));
+  JS_SetPropertyUint32(ctx, arr, 2, JS_NewFloat64(ctx, double(copy->count)));
+  JS_SetPropertyUint32(ctx, arr, 3, JS_NewFloat64(ctx, double(copy->version)));
+  return arr;
 }
 
 // Frame data. The ArrayBuffer spans the buffer's storage (its capacity: JS
@@ -96,6 +161,7 @@ JSValue js_buffer(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   if (argc < 1) return JS_UNDEFINED;
   auto& impl = implOf(ctx);
   std::string key = toStdString(ctx, argv[0]);
+  if (impl.threaded) return publishedBuffer(ctx, impl, key);
   const HostBuffers::Entry* e = impl.rt.buffers.find(key);
   if (!e) return JS_UNDEFINED;
   auto it = impl.bufferViews.find(key);
@@ -115,11 +181,14 @@ JSValue js_buffer(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
 
 JSValue js_bufferVersion(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   if (argc < 1) return JS_NewInt32(ctx, 0);
-  return JS_NewFloat64(ctx, double(runtimeOf(ctx).buffers.version(toStdString(ctx, argv[0]))));
+  const HostBuffers& b = runtimeOf(ctx).buffers;
+  std::string key = toStdString(ctx, argv[0]);
+  return JS_NewFloat64(ctx, double(implOf(ctx).threaded ? b.publishedVersion(key) : b.version(key)));
 }
 
 JSValue js_bufferKeys(JSContext* ctx, JSValueConst, int, JSValueConst*) {
-  auto keys = runtimeOf(ctx).buffers.keys();
+  const HostBuffers& b = runtimeOf(ctx).buffers;
+  auto keys = implOf(ctx).threaded ? b.publishedKeys() : b.keys();
   JSValue arr = JS_NewArray(ctx);
   for (size_t i = 0; i < keys.size(); i++)
     JS_SetPropertyUint32(ctx, arr, uint32_t(i), JS_NewStringLen(ctx, keys[i].data(), keys[i].size()));
@@ -130,12 +199,13 @@ JSValue js_bufferKeys(JSContext* ctx, JSValueConst, int, JSValueConst*) {
 // never reach JS.
 JSValue js_texture(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   if (argc < 1) return JS_UNDEFINED;
-  const HostTextures::Entry* e = runtimeOf(ctx).textures.find(toStdString(ctx, argv[0]));
-  if (!e) return JS_UNDEFINED;
+  int width = 0, height = 0;
+  uint64_t version = 0;
+  if (!runtimeOf(ctx).textures.size(toStdString(ctx, argv[0]), &width, &height, &version)) return JS_UNDEFINED;
   JSValue arr = JS_NewArray(ctx);
-  JS_SetPropertyUint32(ctx, arr, 0, JS_NewInt32(ctx, e->desc.width));
-  JS_SetPropertyUint32(ctx, arr, 1, JS_NewInt32(ctx, e->desc.height));
-  JS_SetPropertyUint32(ctx, arr, 2, JS_NewFloat64(ctx, double(e->descVersion)));
+  JS_SetPropertyUint32(ctx, arr, 0, JS_NewInt32(ctx, width));
+  JS_SetPropertyUint32(ctx, arr, 1, JS_NewInt32(ctx, height));
+  JS_SetPropertyUint32(ctx, arr, 2, JS_NewFloat64(ctx, double(version)));
   return arr;
 }
 
@@ -160,8 +230,11 @@ JSValue js_hostCall(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
   uint64_t id = rt.newCallId();
   // Registered before on_call runs, so the embedder may answer from inside it.
   impl.hostCalls[id] = JS_DupValue(ctx, argv[2]);
-  impl.syncPoint();
-  rt.config.on_call(rt.config.call_user, id, name.c_str(), json.c_str());
+  if (!impl.threaded) impl.syncPoint();
+  Runtime* r = &rt;
+  rt.toHost([r, id, name = std::move(name), json = std::move(json)] {
+    r->config.on_call(r->config.call_user, id, name.c_str(), json.c_str());
+  });
   return JS_NewFloat64(ctx, double(id));
 }
 
@@ -169,7 +242,8 @@ JSValue js_cancelCall(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
   Runtime& rt = runtimeOf(ctx);
   uint64_t id = argc > 0 ? toId(ctx, argv[0]) : 0;
   if (!id || !rt.js->dropCall(id)) return JS_FALSE;
-  rt.hostCallCancelled(id);
+  Runtime* r = &rt;
+  rt.toHost([r, id] { r->hostCallCancelled(id); });
   return JS_TRUE;
 }
 
@@ -178,7 +252,8 @@ JSValue js_callResult(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
   if (!id) return JS_UNDEFINED;
   bool ok = argc > 1 && JS_ToBool(ctx, argv[1]);
   std::string payload = argc > 2 && !JS_IsUndefined(argv[2]) ? toStdString(ctx, argv[2]) : (ok ? "null" : "");
-  runtimeOf(ctx).uiCallSettled(id, ok, std::move(payload));
+  Runtime* r = &runtimeOf(ctx);
+  r->toHost([r, id, ok, payload = std::move(payload)]() mutable { r->uiCallSettled(id, ok, std::move(payload)); });
   return JS_UNDEFINED;
 }
 

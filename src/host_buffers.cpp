@@ -127,4 +127,55 @@ std::vector<std::string> HostBuffers::takeDirty() {
   return out;
 }
 
+// ------------------------------------------------------- published copies
+
+void HostBuffers::subscribe(const std::string& key) {
+  std::lock_guard<std::mutex> lock(copiesMutex_);
+  subscribed_.insert(key);
+}
+
+void HostBuffers::publish() {
+  std::lock_guard<std::mutex> lock(copiesMutex_);
+  versions_.clear();
+  for (auto& [k, e] : entries_)
+    if (e.version) versions_.emplace(k, e.version);
+  for (const std::string& key : subscribed_) {
+    const Entry* e = find(key);
+    auto it = copies_.find(key);
+    if (!e) {
+      if (it != copies_.end()) copies_.erase(it);
+      continue;
+    }
+    if (it != copies_.end() && it->second->version == e->version) continue;
+    std::shared_ptr<Copy>& c = copies_[key];
+    // Readers hold their own reference: a copy only the table holds is
+    // rewritten in place instead of reallocated.
+    if (!c || c.use_count() > 1) c = std::make_shared<Copy>();
+    c->type = e->type;
+    c->count = e->count;
+    c->version = e->version;
+    c->bytes.assign(e->data(), e->data() + e->bytes());
+  }
+}
+
+std::shared_ptr<const HostBuffers::Copy> HostBuffers::published(const std::string& key) const {
+  std::lock_guard<std::mutex> lock(copiesMutex_);
+  auto it = copies_.find(key);
+  return it == copies_.end() ? nullptr : it->second;
+}
+
+uint64_t HostBuffers::publishedVersion(const std::string& key) const {
+  std::lock_guard<std::mutex> lock(copiesMutex_);
+  auto it = versions_.find(key);
+  return it == versions_.end() ? 0 : it->second;
+}
+
+std::vector<std::string> HostBuffers::publishedKeys() const {
+  std::lock_guard<std::mutex> lock(copiesMutex_);
+  std::vector<std::string> out;
+  out.reserve(versions_.size());
+  for (auto& [k, v] : versions_) out.push_back(k);
+  return out;
+}
+
 }  // namespace jsui

@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -47,7 +48,8 @@ class LottieCache {
   static bool available();
 
   // Inline composition JSON (from JS): returns the source key views use for
-  // it ("lottie:<hash>"). The same JSON gives the same key.
+  // it ("lottie:<hash>"). The same JSON gives the same key. Any thread; the
+  // rest of the cache belongs to the owner thread.
   std::string addData(std::string json);
   // Resolves a source URI against the runtime's base URL (data: URIs and
   // addData keys are returned as they are).
@@ -106,6 +108,9 @@ class LottieCache {
 
   Runtime& rt_;
   std::unordered_map<std::string, std::unique_ptr<Entry>> entries_;
+  // addData's JSON by key until find() moves it into an entry (null after).
+  std::mutex inlineMutex_;
+  std::unordered_map<std::string, std::unique_ptr<std::string>> inline_;
   std::unordered_set<Node*> views_;
   double now_ = 0;
 };
