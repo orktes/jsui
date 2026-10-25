@@ -61,6 +61,31 @@
 
 namespace graphite = skgpu::graphite;
 
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/em_js.h>
+
+namespace skgpu::graphite {
+extern bool gWasmStorageBuffers;  // our Skia patch (src/gpu/graphite/dawn/DawnCaps.h)
+}
+
+// Whether the browser's WebGPU runs on a backend where Graphite's storage
+// buffers pay off. Skia leaves them off in the browser because it cannot tell
+// the backend and Dawn native keeps them off on Vulkan (slower there). Apple
+// platforms (Metal) and Windows (D3D12) are never on Vulkan; with them
+// a hover frame makes ~40% fewer WebGPU calls (one bind group per pipeline
+// change instead of per draw, and instanced draws). globalThis
+// .jsuiWebGPUStorageBuffers = true / false overrides the guess (A/B runs).
+EM_JS(int, jsui_webgpu_storage_buffers, (), {
+  const o = globalThis.jsuiWebGPUStorageBuffers;
+  if (typeof o === 'boolean') return o ? 1 : 0;
+  const n = globalThis.navigator;
+  if (!n) return 0;
+  const p = String(n.userAgentData?.platform || n.platform || '');
+  if (/android|linux|cros/i.test(p) || /Android|CrOS/.test(n.userAgent || '')) return 0;
+  return /mac|iphone|ipad|ipod|win/i.test(p) ? 1 : 0;
+});
+#endif
+
 namespace {
 
 using jsui::graphite_support::CachingImageProvider;
@@ -162,6 +187,7 @@ struct WebGPUGpu final : JsuiGpuContext {
     // Paths are rasterised into Graphite's (cached) path atlas instead, with
     // the CPU raster's anti-aliasing.
     opts.fInternalMultisampleCount = graphite::SampleCount::k1;
+    graphite::gWasmStorageBuffers = jsui_webgpu_storage_buffers() != 0;
 #endif
     precompiler->configure(opts);  // the pipeline cache's callback
     ctx = graphite::ContextFactory::MakeDawn(backend, opts);
