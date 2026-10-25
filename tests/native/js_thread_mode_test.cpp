@@ -373,3 +373,16 @@ TEST(js_thread_debug_stall) {
   jsui_debug_stall_js(h.rt, 60);
   CHECK(nowMs() - t0 >= 55);
 }
+
+// A host that sets state, then picks the mode (Unity's JsuiView: the game's
+// Awake sets state, the view's Start the mode, then loads): the bundle sees
+// the state.
+TEST(js_thread_mode_after_state) {
+  if (!jsui::JsThread::available()) return;
+  ModeHost h(false);
+  CHECK_EQ(jsui_set_state(h.rt, "game", R"({"hp":3})"), 1);
+  CHECK_EQ(jsui_set_js_thread(h.rt, JSUI_JS_THREAD_ON), 0);
+  CHECK(h.load("__jsui_native.postMessage('game', __jsui_native.getState('game'));"));
+  h.tick();
+  CHECK_EQ(h.take(), std::string(R"(game={"hp":3})"));
+}

@@ -1,11 +1,15 @@
 // --selftest: the C# port of SelfTest in integrations/shared/example_host.h.
-// Once the UI has reported where its Spawn button is, it clicks through
-// JsuiView.HandlePointer, the entry point Unity's Input goes through each
-// frame (IHost.Click), so the clicks take the view's own path: mapping to UI
-// px, jsui_send_*, the Passed* events and the game's handlers. What it skips
-// is Unity's Input Manager itself (OS events -> Input.mousePosition /
-// GetMouseButtonDown), which has no way to inject input. It checks the
-// pass-through contract:
+// Once the UI has reported where its Spawn button is, it stalls JS for a
+// moment, then clicks through JsuiView.HandlePointer, the entry point Unity's
+// Input goes through each frame (IHost.Click), so the clicks take the view's
+// own path: mapping to UI px, jsui_send_*, the Passed* events and the game's
+// handlers. What it skips is Unity's Input Manager itself (OS events ->
+// Input.mousePosition / GetMouseButtonDown), which has no way to inject
+// input. It checks:
+//   0. with JS on its own thread (JsuiView.jsThread On, the default), a JS
+//      stall (jsui_debug_stall_js) holds no game frame: the frames go on
+//      meanwhile and JS catches up after it;
+// and the pass-through contract:
 //   1. a click on empty space (the middle of the screen) is not consumed:
 //      jsui_hit_test says nothing is there and the game counts the click;
 //   2. a click on the Spawn button is consumed, and its game:spawn message
@@ -40,6 +44,12 @@ public class SelfTest
     int phase_, before_, round_, expect_ = -1;
     int reported_ = -1, reports_, reportsBefore_;
     long frame_, wait_;
+    // The stall phase.
+    const int kStall = 100;
+    const double kStallMs = 300;
+    int stallFrames_;
+    double stallStart_, lastFrame_, maxGap_;
+    static double NowMs() => System.Diagnostics.Stopwatch.GetTimestamp() * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
 
     // The number after "key": in a flat JSON object (messages of app.jsx are
     // tiny and fixed; a real game would use its JSON library).
@@ -78,9 +88,15 @@ public class SelfTest
         switch (phase_)
         {
             case 0:  // wait for the UI and a few frames of layout
-                if (anchors_ && frame_ > 30) phase_ = 1;
+                if (anchors_ && frame_ > 30) phase_ = kStall;
                 else if (frame_ > 900) return Fail("the UI never reported ui:anchors");
                 return 0;
+            case kStall:
+            {
+                int r = StallStep(rt);
+                if (r > 0) phase_ = 1;
+                return r < 0 ? -1 : 0;
+            }
             case 1:
             {
                 var p = new Vector2(w * 0.5f, h * 0.45f);
@@ -165,6 +181,45 @@ public class SelfTest
                 Debug.Log("selftest: ok");
                 return 1;
         }
+    }
+
+    // One JS stall of kStallMs, stepped once per game frame: 1 when done,
+    // -1 when it failed. With a JS thread, posting it returns at once, no gap
+    // between two game frames comes near the stall while it runs, and
+    // jsui_sync sees JS idle again after it. Off or in lockstep the post
+    // itself holds the game for the stall.
+    int StallStep(IntPtr rt)
+    {
+        double now = NowMs();
+        if (stallFrames_ == 0)
+        {
+            int mode = JsuiNative.jsui_js_thread(rt);
+            JsuiNative.jsui_debug_stall_js(rt, kStallMs);
+            double held = NowMs() - now;
+            if (mode != JsuiNative.JsThreadOn)
+            {
+                if (held < kStallMs * 0.9) return Fail("jsui_debug_stall_js did not keep JS busy");
+                Debug.Log($"selftest: JS thread {(JsuiView.JsThreadMode)mode}: a {kStallMs:0} ms JS stall held the game for {held:0} ms");
+                return 1;
+            }
+            if (held > kStallMs / 4) return Fail("posting a JS stall waited for the JS thread");
+            stallStart_ = lastFrame_ = NowMs();
+            stallFrames_ = 1;
+            return 0;
+        }
+        double gap = now - lastFrame_;
+        lastFrame_ = now;
+        maxGap_ = Math.Max(maxGap_, gap);
+        if (now - stallStart_ < kStallMs)
+        {
+            if (gap > kStallMs / 2) return Fail("a game frame waited for the busy JS thread");
+            stallFrames_++;
+            return 0;
+        }
+        if (stallFrames_ < 3) return Fail("too few game frames while JS was busy");
+        if (JsuiNative.jsui_sync(rt, 2000) != 1) return Fail("JS did not come back from its stall");
+        Debug.Log($"selftest: JS thread On: {stallFrames_} game frames during a {kStallMs:0} ms JS stall, the longest {maxGap_:0.0} ms");
+        return 1;
     }
 
     // A unit whose centre is on screen, away from the edges, not under the
