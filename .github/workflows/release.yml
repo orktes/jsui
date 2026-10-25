@@ -113,9 +113,13 @@ jobs:
         run: |
           dir="$RUNNER_TEMP/npx-smoke"
           mkdir -p "$dir" && cd "$dir"
-          for i in $(seq 60); do  # new versions take minutes to show up
-            npm view "@orktes/jsui-cli@$VERSION" version >/dev/null 2>&1 && break
-            sleep 10
+          # New versions take minutes to show up, and each package on its own
+          # schedule: wait for all three (the CLI installs the other two).
+          for pkg in jsui-react jsui-web jsui-cli; do
+            for i in $(seq 60); do
+              npm view "@orktes/$pkg@$VERSION" version >/dev/null 2>&1 && break
+              sleep 10
+            done
           done
           npx --yes "@orktes/jsui-cli@$VERSION" skill install
           test -s .claude/skills/jsui/SKILL.md
