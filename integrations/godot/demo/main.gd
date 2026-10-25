@@ -770,6 +770,7 @@ func _check_render_hand_off(badge: JsuiView) -> void:
 		await get_tree().process_frame
 		var queued: int = badge.get_render_stats().gpu_jobs
 		badge.initial_props = {"label": "Fence " + side}
+		ui.sync_js_next_frame()  # rendered this frame with JS on its own thread too
 		await get_tree().create_timer(0.0).timeout
 		var caller: JsuiView = ui if side == "view" else badge
 		var w0: int = caller.get_render_stats().blocking_waits
