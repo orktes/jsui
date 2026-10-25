@@ -28,6 +28,16 @@ thread_local bool tCountAllocs = false;
 thread_local uint64_t tAllocs = 0;
 }  // namespace
 
+// Sanitizer runtimes replace operator new themselves (the counts then stay 0).
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer) || __has_feature(address_sanitizer)
+#define JSUI_NO_NEW_COUNT 1
+#endif
+#endif
+#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__)
+#define JSUI_NO_NEW_COUNT 1
+#endif
+#ifndef JSUI_NO_NEW_COUNT
 void* operator new(size_t n) {
   if (tCountAllocs) tAllocs++;
   if (void* p = std::malloc(n ? n : 1)) return p;
@@ -35,6 +45,7 @@ void* operator new(size_t n) {
 }
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete(void* p, size_t) noexcept { std::free(p); }
+#endif
 
 namespace {
 
