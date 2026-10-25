@@ -727,6 +727,9 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* d
   sk_sp<SkSurface> surface = SkSurfaces::WrapBackendTexture(g->recorder.get(), backendTex, cs, &props);
   if (!surface) return -1;
   if (rt.rt.shaders) g->warmShaders(*rt.rt.shaders, surface->imageInfo().colorType(), props);
+  // The first frame on a target format hands the common pipelines to the
+  // pool (pipeline_cache.h); this frame's own go ahead of them.
+  g->precompiler->precompileCommon(surface->imageInfo().colorType(), surface->imageInfo().refColorSpace());
 
   // The target is the retained frame when the host says it still holds our
   // last one; the key is the texture handle (the host drops the flag after

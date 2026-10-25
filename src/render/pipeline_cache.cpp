@@ -46,6 +46,16 @@
 #include "src/gpu/graphite/RenderPassDesc.h"
 #include "src/gpu/graphite/SerializationUtils.h"
 #include "src/gpu/graphite/TextureFormat.h"
+#if SK_MILESTONE >= 140
+#define JSUI_PRECOMPILE_COMMON 1
+#include "include/core/SkBlendMode.h"
+#include "include/core/SkColorSpace.h"
+#include "include/core/SkImageInfo.h"
+#include "include/gpu/graphite/precompile/PaintOptions.h"
+#include "include/gpu/graphite/precompile/Precompile.h"
+#include "include/gpu/graphite/precompile/PrecompileMaskFilter.h"
+#include "include/gpu/graphite/precompile/PrecompileShader.h"
+#endif
 #endif
 
 namespace jsui {
@@ -91,6 +101,7 @@ const char* backendName(uint32_t b) {
 }
 
 std::atomic<bool> gForceSliced{false};
+std::atomic<bool> gNoCommon{false};
 std::atomic<bool> gNoDefaultFile{false};
 
 }  // namespace
@@ -227,6 +238,7 @@ Parsed parse(const void* data, size_t size, Backend backend) {
 void setForceSliced(bool on) { gForceSliced = on; }
 bool forceSliced() { return gForceSliced; }
 void setNoDefaultFile(bool on) { gNoDefaultFile = on; }
+void setNoCommonPrecompile(bool on) { gNoCommon = on; }
 
 #if SK_MILESTONE >= 140  // SkExecutor work lists, ContextOptions::fExecutor
 namespace {
@@ -853,6 +865,88 @@ Stats Precompiler::stats() {
   s.queued = int(queue_.size()) + inFlight_ + pendingPrecompiles(executor_);
   s.known = entries_.size();
   return s;
+}
+
+void Precompiler::precompileCommon(SkColorType ct, const sk_sp<SkColorSpace>& cs) {
+#if defined(JSUI_PRECOMPILE_COMMON)
+  using namespace skgpu::graphite;
+  if (!executor_ || ct == kUnknown_SkColorType || gNoCommon) return;
+  static const bool off = [] {
+    const char* v = std::getenv("JSUI_PRECOMPILE_COMMON");
+    return v && (std::strcmp(v, "off") == 0 || std::strcmp(v, "0") == 0);
+  }();
+  if (off) return;
+  // The render thread's (shutdown runs there too): pc outlives this call.
+  PrecompileContext* pc = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (mode_ != Mode::Thread || !compiler_ || stopping_) return;
+    const std::pair<SkColorType, uint32_t> target{ct, cs ? cs->hash() : 0};
+    for (const auto& t : common_)
+      if (t == target) return;
+    common_.push_back(target);
+    pc = compiler_->pc.get();
+  }
+
+  // What the painter draws on the frame's target: one sample, a depth buffer
+  // (Graphite orders draws with it), no stencil.
+  RenderPassProperties rpp;
+  rpp.fDSFlags = DepthStencilFlags::kDepth;
+  rpp.fDstCT = ct;
+  rpp.fDstCS = cs;
+  const RenderPassProperties passes[] = {rpp};
+
+  // Images as the image cache uploads them (premultiplied RGBA in the
+  // target's color space, clamped, no mipmaps); gradients of up to 4 stops,
+  // interpolated premultiplied like the painter's.
+  const SkColorInfo imageInfo(kRGBA_8888_SkColorType, kPremul_SkAlphaType, cs);
+  SkGradient::Interpolation interp;
+  interp.fInPremul = SkGradient::Interpolation::InPremul::kYes;
+  const auto small = PrecompileShaders::GradientShaderFlags::kSmall;
+  // Hardware sampling only (no tile modes): the painter's images are
+  // clamped textures, never shader-tiled.
+  sk_sp<PrecompileShader> image =
+      PrecompileShaders::Image(PrecompileShaders::ImageShaderFlags::kNone, {&imageInfo, 1}, {});
+  sk_sp<PrecompileShader> linear = PrecompileShaders::LinearGradient(small, interp);
+  sk_sp<PrecompileShader> radial = PrecompileShaders::RadialGradient(small, interp);
+
+  const auto rect = DrawTypeFlags::kNonAAFillRect, rrect = DrawTypeFlags::kAnalyticRRect,
+             quad = DrawTypeFlags::kPerEdgeAAQuad;
+  // The pool takes them in this order (a first launch's first frames race
+  // it): everything unclipped first, then the same inside an analytic clip
+  // (rounded overflow, scroll views).
+  for (DrawTypeFlags clip : {DrawTypeFlags::kNone, DrawTypeFlags::kAnalyticClip}) {
+    auto precompile = [&](std::initializer_list<sk_sp<PrecompileShader>> shaders, SkBlendMode blend, bool opaque,
+                          DrawTypeFlags draws) {
+      PaintOptions o;
+      std::vector<sk_sp<PrecompileShader>> list(shaders);
+      o.setShaders(list);
+      o.setBlendModes({&blend, 1});
+      o.setPaintColorIsOpaque(opaque);
+      Precompile(pc, o, DrawTypeFlags(draws | clip), passes);
+    };
+    // Clears (every frame's first draw; also of damage rects): never clipped.
+    if (clip == DrawTypeFlags::kNone) precompile({}, SkBlendMode::kSrc, true, rect);
+    // Solid fills (no shader: the paint's color) and text; a plain rect's
+    // pipeline differs for an opaque and a translucent color.
+    precompile({}, SkBlendMode::kSrcOver, true, DrawTypeFlags(rect | rrect | DrawTypeFlags::kBitmapText_Mask));
+    precompile({}, SkBlendMode::kSrcOver, false, rect);
+    // Images (also as AA quads: drawImageRect) and gradients.
+    precompile({image}, SkBlendMode::kSrcOver, true, DrawTypeFlags(rect | rrect | quad));
+    precompile({linear, radial}, SkBlendMode::kSrcOver, true, DrawTypeFlags(rect | rrect));
+    // The same under a translucent paint (opacity): the shader times the
+    // paint's alpha.
+    precompile({image, radial}, SkBlendMode::kSrcOver, false, DrawTypeFlags(rect | rrect | quad));
+    // Blurred rrects (box shadows the GPU draws analytically).
+    Precompile(pc, PaintOptions(), DrawTypeFlags(DrawTypeFlags::kDropShadows | clip), passes);
+    // Copies.
+    if (clip == DrawTypeFlags::kNone) precompile({image, linear}, SkBlendMode::kSrc, true, rect);
+  }
+  if (log_ == 1) SkDebugf("jsui: common pipelines handed to the compile pool (color type %d)\n", int(ct));
+#else
+  (void)ct;
+  (void)cs;
+#endif
 }
 
 uint64_t Precompiler::takeCompiles() {
