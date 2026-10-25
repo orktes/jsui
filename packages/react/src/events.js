@@ -51,7 +51,14 @@ export function addGlobalListener(type, fn) {
   let set = globalListeners.get(type);
   if (!set) globalListeners.set(type, (set = new Set()));
   set.add(fn);
-  return () => set.delete(fn);
+  // Native asks whether anyone listens when JS answers an event late (a
+  // global keydown listener may veto the key's default action).
+  if (set.size === 1 && native.listenGlobal) native.listenGlobal(type, true);
+  return () => {
+    const had = set.delete(fn);
+    if (had && set.size === 0 && native.listenGlobal) native.listenGlobal(type, false);
+    return had;
+  };
 }
 
 function emitGlobal(type, syn) {

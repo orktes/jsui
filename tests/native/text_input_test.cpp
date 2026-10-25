@@ -543,3 +543,50 @@ TEST(text_input_c_api_clipboard) {
   CHECK(jsui_last_error(rt) == nullptr);
   jsui_destroy(rt);
 }
+
+// Late JS answers (Inbound::replyDelayMs; input_test.cpp "late JS answers"):
+// with a keydown listener on the TextInput (every @orktes/jsui-react
+// TextInput has one) a key edits once its answer is in, and text typed with
+// it waits behind it; a prevented key never edits.
+TEST(text_input_late_answers) {
+  TI t;
+  Node* n = t.input(0, 0, 300, 30, R"("fontSize":16)");
+  t.setProps(n, R"({"__events":["change","selectionChange","keyDown"]})");
+  t.in().focus(n);
+  t.type("ab");
+  t.tick(16);
+  t.events();
+  t.rt->inbound.replyDelayMs = 30;
+  CHECK(t.in().key("x", "KeyX", true, false, 0));
+  CHECK(t.in().text("x"));
+  t.in().key("x", "KeyX", false, false, 0);
+  t.key("ArrowLeft");
+  CHECK_EQ(t.value(n), std::string("ab"));
+  CHECK_EQ(t.events(), std::string());
+  t.tick(30);
+  CHECK_EQ(t.value(n), std::string("abx"));
+  CHECK_EQ(t.sel(n), std::string("2,2"));  // the ArrowLeft after it ran too, in order
+  CHECK_EQ(t.events(), std::string("change=abx#2 sel=3,3 sel=2,2"));
+  // preventDefault() in the late answer: no edit.
+  t.js("prevent.keydown = true;");
+  t.key("Backspace");
+  t.tick(30);
+  CHECK_EQ(t.value(n), std::string("abx"));
+  t.js("prevent.keydown = false;");
+  t.key("Backspace");
+  CHECK_EQ(t.value(n), std::string("abx"));
+  t.tick(30);
+  CHECK_EQ(t.value(n), std::string("ax"));
+  // No answer within the deadline: the edit happens anyway.
+  t.rt->inbound.replyDelayMs = 1000;
+  t.key("Backspace");
+  t.tick(99);
+  CHECK_EQ(t.value(n), std::string("ax"));
+  t.tick(1);
+  CHECK_EQ(t.value(n), std::string("x"));
+  CHECK(t.events().find("did not answer a key event") != std::string::npos);
+  // Without a keydown listener typing never waits.
+  t.setProps(n, R"({"__events":["change","selectionChange"]})");
+  t.type("yz");
+  CHECK_EQ(t.value(n), std::string("yzx"));
+}

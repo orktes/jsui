@@ -81,6 +81,11 @@ enum Listen : unsigned {
   kPress = 8,    // pressable (focusable by default, "pointer" cursor)
   kWheel = 16,   // wants wheel
   kScroll = 32,  // wants scroll (a ScrollView's onScroll)
+  // Listeners that can preventDefault() a default action; only asked when
+  // JS's answer is late (InputManager::settle).
+  kKey = 64,       // keydown / keyup
+  kGamepad = 128,  // gamepadbutton / gamepadaxis
+  kText = 256,     // textinput
 };
 
 unsigned readListenMask(const Node* n) {
@@ -97,6 +102,9 @@ unsigned readListenMask(const Node* n) {
       m |= kHover | kPointer;
     if (icontains(s, "wheel")) m |= kWheel | kPointer;
     if (icontains(s, "scroll")) m |= kScroll;
+    if (icontains(s, "key")) m |= kKey;
+    if (icontains(s, "gamepad")) m |= kGamepad;
+    if (icontains(s, "textinput")) m |= kText;
   }
   return m;
 }
@@ -561,36 +569,39 @@ void InputManager::addModifiers(Value::Object& ev) const {
   ev["metaKey"] = Value((mods_ & JSUI_MOD_META) != 0);
 }
 
-bool InputManager::dispatch(Value::Object&& ev) { return deliver(std::move(ev), true); }
-
-bool InputManager::deliver(Value::Object&& ev, bool toJs) {
-  if (!rt_.js) return false;
+void InputManager::deliver(Value::Object&& ev, bool toJs) {
+  if (!rt_.js) return;
   Value event(std::move(ev));
   // Animated.event(..., {useNativeDriver: true}) mappings apply natively,
   // before (and independently of) JS.
   rt_.animated->handleEvent(event);
-  if (!toJs) return false;
+  if (!toJs) return;
   doc_.perf.counters.events++;
-  // Only preventDefault() suppresses the default action; a handler that
-  // merely observes the event (flag 1) lets it proceed, like the DOM.
-  lastFlags_ = rt_.js->dispatchEvent(event);
-  return (lastFlags_ & JsEngine::kDefaultPrevented) != 0;
+  rt_.inbound.event(std::move(event), false);
 }
 
-bool InputManager::jsReleasesGesture(const PointerState& p, Node* target) {
+bool InputManager::ask(Value::Object&& ev, int* flags, uint32_t* seq) {
+  *flags = 0;
+  *seq = 0;
   if (!rt_.js) return true;
-  Value::Object ev = baseEvent("responderterminationrequest", target);
-  ev["x"] = Value(double(p.x));
-  ev["y"] = Value(double(p.y));
-  ev["pointerId"] = Value(p.pointerId);
-  ev["pointerType"] = Value(p.touch ? "touch" : "mouse");
-  ev["buttons"] = Value(p.buttons);
-  return !dispatch(std::move(ev));
+  Value event(std::move(ev));
+  rt_.animated->handleEvent(event);
+  doc_.perf.counters.events++;
+  uint32_t s = rt_.inbound.event(std::move(event), true);
+  if (rt_.inbound.take(s, flags)) return true;
+  *seq = s;
+  return false;
 }
 
-bool InputManager::dispatchPointer(const char* type, Node* target, const PointerState& p, int button, float x,
-                                   float y) {
-  if (!target) return false;
+namespace {
+// Only preventDefault() suppresses the default action; a handler that
+// merely observes the event (flag 1) lets it proceed, like the DOM. -1 (the
+// answer comes later) is not prevented.
+bool prevented(int flags) { return flags > 0 && (flags & JsEngine::kDefaultPrevented) != 0; }
+}  // namespace
+
+Value::Object InputManager::pointerEvent(const char* type, Node* target, const PointerState& p, int button, float x,
+                                         float y) const {
   Value::Object ev = baseEvent(type, target);
   float lx = 0, ly = 0;
   toLocal(target, x, y, &lx, &ly);
@@ -603,7 +614,51 @@ bool InputManager::dispatchPointer(const char* type, Node* target, const Pointer
   ev["button"] = Value(button);
   ev["buttons"] = Value(p.buttons);
   addModifiers(ev);
-  return dispatch(std::move(ev));
+  return ev;
+}
+
+void InputManager::postPointer(const char* type, Node* target, const PointerState& p, int button, float x, float y) {
+  if (target) post(pointerEvent(type, target, p, button, x, y));
+}
+
+int InputManager::askPointer(const char* type, Node* target, PointerState& p, int button, float x, float y,
+                             bool track, bool down) {
+  if (!target) return 0;
+  int flags = 0;
+  uint32_t seq = 0;
+  if (ask(pointerEvent(type, target, p, button, x, y), &flags, &seq)) return flags;
+  if (track) p.awaiting.push_back({seq, down});
+  else rt_.inbound.forget(seq);
+  return -1;
+}
+
+void InputManager::absorbAnswers(PointerState& p) {
+  size_t taken = 0;
+  for (; taken < p.awaiting.size(); taken++) {
+    int f = 0;
+    if (!rt_.inbound.take(p.awaiting[taken].seq, &f)) break;  // answers come in order
+    p.jsOwns |= (f & JsEngine::kBlocksNative) != 0;
+    p.jsResponder = (f & JsEngine::kResponder) != 0;
+    if (p.awaiting[taken].down) p.owned |= prevented(f);
+    else p.movePrevented = prevented(f);
+  }
+  p.awaiting.erase(p.awaiting.begin(), p.awaiting.begin() + std::ptrdiff_t(taken));
+  int f = 0;
+  if (p.releaseSeq && rt_.inbound.take(p.releaseSeq, &f)) {
+    p.releaseSeq = 0;
+    if (prevented(f)) p.jsOwns = true;  // the responder refused
+    else p.released = true;
+  }
+}
+
+void InputManager::endGesture(PointerState& p) {
+  for (const auto& a : p.awaiting) rt_.inbound.forget(a.seq);
+  p.awaiting.clear();
+  if (p.releaseSeq) rt_.inbound.forget(p.releaseSeq);
+  p.releaseSeq = 0;
+  p.released = false;
+  p.movePrevented = false;
+  p.holdUntil = -1;
 }
 
 // ------------------------------------------------------------------ hover
@@ -622,11 +677,11 @@ void InputManager::updateHover(PointerState& p, Node* hit) {
   // DOM order: leave bottom-up on the old path, then enter top-down.
   for (size_t i = old.size(); i-- > common;) {
     Node* n = doc_.get(old[i]);
-    if (n && (listenMask(n) & kHover)) dispatchPointer("pointerleave", n, p, -1, p.x, p.y);
+    if (n && (listenMask(n) & kHover)) postPointer("pointerleave", n, p, -1, p.x, p.y);
   }
   for (size_t i = common; i < next.size(); i++) {
     Node* n = doc_.get(next[i]);
-    if (n && (listenMask(n) & kHover)) dispatchPointer("pointerenter", n, p, -1, p.x, p.y);
+    if (n && (listenMask(n) & kHover)) postPointer("pointerenter", n, p, -1, p.x, p.y);
   }
 }
 
@@ -672,7 +727,7 @@ bool InputManager::mouseMove(float x, float y) {
   // pointermove is the hottest event: only cross into JS when someone on the
   // propagation path listens to moves.
   if (moved && alive(targetId) && consumes(alive(targetId), kMove))
-    handled = dispatchPointer("pointermove", alive(targetId), mouse_, -1, x, y);
+    handled = prevented(askPointer("pointermove", alive(targetId), mouse_, -1, x, y, false));
   // While a button is held the whole gesture belongs to whoever got the press.
   if (mouse_.buttons) return handled || mouse_.owned;
   return handled || consumes(alive(hitId), kPointer);
@@ -701,6 +756,7 @@ bool InputManager::pointerDown(PointerState& p, uint32_t hitId, int button) {
     p.startY = p.y;
     p.jsOwns = false;
     p.owned = false;
+    endGesture(p);
   }
   if (button == 0) {
     p.downId = hitId;
@@ -708,10 +764,14 @@ bool InputManager::pointerDown(PointerState& p, uint32_t hitId, int button) {
   }
   Node* target = alive(p.captureId) ? alive(p.captureId) : alive(hitId);
   if (button == 0) selectedOnFocusId_ = 0;  // set again if this press focuses a selectTextOnFocus input
-  lastFlags_ = 0;
-  bool handled = dispatchPointer("pointerdown", target, p, button, p.x, p.y);
-  p.jsOwns |= (lastFlags_ & JsEngine::kBlocksNative) != 0;
-  p.jsResponder = (lastFlags_ & JsEngine::kResponder) != 0;
+  // A late answer is taken later (absorbAnswers); until then the press is
+  // the UI's when it would consume it (below).
+  int flags = askPointer("pointerdown", target, p, button, p.x, p.y, true, true);
+  bool handled = prevented(flags);
+  if (flags >= 0) {
+    p.jsOwns |= (flags & JsEngine::kBlocksNative) != 0;
+    p.jsResponder = (flags & JsEngine::kResponder) != 0;
+  }
   // Focus follows the press even when JS handled pointerdown: the bridge
   // reports "handled" and "preventDefault" alike, and a Pressable always
   // handles it.
@@ -735,16 +795,18 @@ bool InputManager::pointerUp(PointerState& p, uint32_t hitId, int button, bool c
   p.buttons &= ~domButtonBit(button);
   uint32_t targetId = alive(p.captureId) ? p.captureId : hitId;
   bool handled = false;
+  // What the release reports (a late answer: not prevented).
   if (cancel) {
-    handled = dispatchPointer("pointercancel", alive(targetId), p, button, p.x, p.y);
+    handled = prevented(askPointer("pointercancel", alive(targetId), p, button, p.x, p.y, false));
   } else if (!p.scrollingId) {
-    handled = dispatchPointer("pointerup", alive(targetId), p, button, p.x, p.y);
+    handled = prevented(askPointer("pointerup", alive(targetId), p, button, p.x, p.y, false));
     if (button == 0 && p.downId) {
       // DOM rule: click goes to the nearest common ancestor of the down and
-      // up targets. Re-hit: pointerup handlers may have changed the tree.
+      // up targets. Re-hit: pointerup handlers may have changed the tree
+      // (with a late answer: the tree as of now; JS's changes land later).
       Node* down = alive(p.downId);
       Node* up = hitTest(p.x, p.y);
-      if (Node* ct = commonAncestor(down, up)) handled |= dispatchPointer("click", ct, p, 0, p.x, p.y);
+      if (Node* ct = commonAncestor(down, up)) handled |= prevented(askPointer("click", ct, p, 0, p.x, p.y, false));
     }
   }
   if (button == 0) p.downId = 0;
@@ -755,6 +817,7 @@ bool InputManager::pointerUp(PointerState& p, uint32_t hitId, int button, bool c
     p.captureId = 0;
     p.scrollingId = 0;
     p.owned = false;
+    endGesture(p);
   }
   // The release goes with its press: consumed when the UI consumed the press.
   return handled || owned;
@@ -799,6 +862,15 @@ bool InputManager::mouseWheel(float x, float y, float dx, float dy) {
   // Like pointer moves, wheel events reach JS only when a node on the path
   // listens (onWheel); native Animated.event mappings see them regardless.
   bool js = pathListens(target, kWheel);
+  Deferred d{Deferred::Kind::Wheel};
+  d.x = x;
+  d.y = y;
+  d.dx = dx;
+  d.dy = dy;
+  d.index = int(target->id());
+  int flags = 0;
+  uint32_t seq = 0;
+  bool answered = true;
   if (js || rt_.animated->hasEventMapping(target->id(), "wheel")) {
     Value::Object ev = baseEvent("wheel", target);
     float lx = 0, ly = 0;
@@ -811,12 +883,20 @@ bool InputManager::mouseWheel(float x, float y, float dx, float dy) {
     ev["deltaY"] = Value(double(dy));
     ev["pointerType"] = Value("mouse");
     addModifiers(ev);
-    if (deliver(std::move(ev), js)) return true;
-    if (js) target = hitTest(x, y);  // handlers may have changed the tree
+    if (js) answered = ask(std::move(ev), &flags, &seq);
+    else deliver(std::move(ev), false);
   }
-  Node* hit = target;
+  // The default action (wheelDefault) waits for an onWheel on the path.
+  d.hitAgain = js;
+  return settle(answered, flags, seq, std::move(d), js);
+}
+
+bool InputManager::wheelDefault(const Deferred& d, bool prevented) {
+  if (prevented) return true;
+  // Handlers may have changed the tree.
+  Node* hit = d.hitAgain ? hitTest(d.x, d.y) : alive(uint32_t(d.index));
   // Default action: scroll the nearest ScrollView that can move this way.
-  if (wheelScroll(hit, dx, dy)) return true;
+  if (wheelScroll(hit, d.dx, d.dy)) return true;
   return consumes(alive(idOf(hit)), kWheel);
 }
 
@@ -851,6 +931,7 @@ bool InputManager::touch(int id, int phase, float x, float y) {
       p.scrollingId = svId;
       p.dragStarted = false;
       p.owned = true;
+      endGesture(p);
       ScrollState& st = scrollState(alive(svId));
       st.dragging = true;
       st.sampleCount = 0;
@@ -869,36 +950,19 @@ bool InputManager::touch(int id, int phase, float x, float y) {
       return true;
     }
     updateHover(p, alive(hitId));
+    absorbAnswers(p);
     uint32_t targetId = alive(p.captureId) ? p.captureId : hitId;
     bool handled = false;
     if (Node* t = alive(targetId); t && consumes(t, kMove)) {
-      lastFlags_ = 0;
-      handled = dispatchPointer("pointermove", t, p, -1, x, y);
-      p.jsOwns |= (lastFlags_ & JsEngine::kBlocksNative) != 0;
-      p.jsResponder = (lastFlags_ & JsEngine::kResponder) != 0;
-    }
-    // Drag past the slop inside a ScrollView turns into scrolling (the
-    // pressable under the finger gets pointercancel), like touch-action:auto.
-    // A JS responder that blocks native gestures (PanResponder's default) or
-    // refuses the termination request keeps the touch, like React Native.
-    float ddx = x - p.startX, ddy = y - p.startY;
-    if (!handled && !p.jsOwns && p.buttons && (std::fabs(ddx) > kTouchSlop || std::fabs(ddy) > kTouchSlop)) {
-      Node* from = alive(targetId) ? alive(targetId) : alive(hitId);
-      if (Node* sv = scrollableAncestor(from, -ddx, -ddy)) {
-        uint32_t svId = sv->id();
-        if (p.jsResponder && (!jsReleasesGesture(p, sv) || !alive(svId))) {
-          p.jsOwns = true;
-          return true;
-        }
-        dispatchPointer("pointercancel", alive(targetId), p, 0, x, y);
-        p.scrollingId = svId;
-        p.owned = true;
-        p.downId = 0;
-        if ((sv = alive(svId))) beginDrag(p, sv);
-        if ((sv = alive(svId))) dragTo(p, sv, x, y);
-        return true;
+      int flags = askPointer("pointermove", t, p, -1, x, y, true);
+      if (flags >= 0) {
+        handled = prevented(flags);
+        p.movePrevented = handled;
+        p.jsOwns |= (flags & JsEngine::kBlocksNative) != 0;
+        p.jsResponder = (flags & JsEngine::kResponder) != 0;
       }
     }
+    if (!handled && slopScroll(p, targetId, hitId, x, y)) return true;
     return handled || p.owned;
   }
   // End / cancel.
@@ -909,6 +973,101 @@ bool InputManager::touch(int id, int phase, float x, float y) {
   leaveAll(p);
   touches_.erase(touches_.begin() + std::ptrdiff_t(index));
   return r || wasScrolling;
+}
+
+// Drag past the slop inside a ScrollView turns into scrolling (the
+// pressable under the finger gets pointercancel), like touch-action:auto.
+// A JS responder that blocks native gestures (PanResponder's default) or
+// refuses the termination request keeps the touch, like React Native.
+//
+// With late JS answers (js/inbound.h) the ScrollView holds the touch (no
+// scrolling, the drag start stays where it is) while an answer of this
+// gesture is out and a JS responder on the path may claim it, until the
+// answers arrive or Runtime::eventDeadlineMs passes; then the static hints
+// decide (tickHeld).
+bool InputManager::slopScroll(PointerState& p, uint32_t targetId, uint32_t hitId, float x, float y) {
+  float ddx = x - p.startX, ddy = y - p.startY;
+  if (p.jsOwns || !p.buttons || !(std::fabs(ddx) > kTouchSlop || std::fabs(ddy) > kTouchSlop)) return false;
+  Node* from = alive(targetId) ? alive(targetId) : alive(hitId);
+  Node* sv = scrollableAncestor(from, -ddx, -ddy);
+  if (!sv) return false;
+  if (p.releaseSeq || (!p.awaiting.empty() && pathListens(from, kMove))) {
+    if (p.holdUntil < 0) p.holdUntil = rt_.now + rt_.eventDeadlineMs;
+    return true;
+  }
+  uint32_t svId = sv->id();
+  if (p.jsResponder && !p.released) {
+    // Asks the JS responder to let the ScrollView take the touch over
+    // (RN onResponderTerminationRequest; preventDefault: it refuses).
+    Value::Object ev = baseEvent("responderterminationrequest", sv);
+    ev["x"] = Value(double(p.x));
+    ev["y"] = Value(double(p.y));
+    ev["pointerId"] = Value(p.pointerId);
+    ev["pointerType"] = Value(p.touch ? "touch" : "mouse");
+    ev["buttons"] = Value(p.buttons);
+    int flags = 0;
+    uint32_t seq = 0;
+    if (!ask(std::move(ev), &flags, &seq)) {
+      p.releaseSeq = seq;
+      if (p.holdUntil < 0) p.holdUntil = rt_.now + rt_.eventDeadlineMs;
+      return true;
+    }
+    if (prevented(flags) || !alive(svId)) {
+      p.jsOwns = true;
+      return true;
+    }
+  }
+  p.holdUntil = -1;
+  postPointer("pointercancel", alive(targetId), p, 0, x, y);
+  p.scrollingId = svId;
+  p.owned = true;
+  p.downId = 0;
+  if ((sv = alive(svId))) beginDrag(p, sv);
+  if ((sv = alive(svId))) dragTo(p, sv, x, y);
+  return true;
+}
+
+namespace {
+// Static responder hints the bridge derives from the handlers
+// (docs/ARCHITECTURE.md "Input routing details"): `__blocksNative` (a
+// PanResponder that blocks native gestures without asking
+// onShouldBlockNativeResponder), `__keepsGesture` (an
+// onResponderTerminationRequest that may refuse).
+bool pathHint(const Node* n, const char* key) {
+  for (; n; n = n->parent())
+    if (truthy(n->props()[key])) return true;
+  return false;
+}
+}  // namespace
+
+void InputManager::tickHeld(PointerState& p) {
+  if (p.holdUntil < 0) return;
+  if (!p.buttons || p.scrollingId) {
+    p.holdUntil = -1;
+    return;
+  }
+  absorbAnswers(p);
+  uint32_t hitId = idOf(hitTest(p.x, p.y));
+  uint32_t targetId = alive(p.captureId) ? p.captureId : hitId;
+  bool waiting = !p.awaiting.empty() || p.releaseSeq;
+  if (waiting) {
+    if (rt_.now < p.holdUntil) return;
+    // No answer in time: the hints decide, the late answers are dropped.
+    Node* from = alive(targetId) ? alive(targetId) : alive(hitId);
+    for (const auto& a : p.awaiting) rt_.inbound.forget(a.seq);
+    p.awaiting.clear();
+    if (p.releaseSeq) {
+      rt_.inbound.forget(p.releaseSeq);
+      p.releaseSeq = 0;
+      if (pathHint(from, "__keepsGesture")) p.jsOwns = true;
+      else p.released = true;
+    } else if (pathHint(from, "__blocksNative")) {
+      p.jsOwns = true;
+    }
+    lateWarning("pointer");
+  }
+  p.holdUntil = -1;
+  if (!p.movePrevented) slopScroll(p, targetId, hitId, p.x, p.y);
 }
 
 // ------------------------------------------------------------------ focus
@@ -939,7 +1098,7 @@ void InputManager::setFocus(Node* n) {
     // DOM order: blur the old element first (nothing is focused meanwhile).
     Value::Object ev = baseEvent("blur", old);
     ev["relatedTarget"] = newId ? Value(double(newId)) : Value();
-    dispatch(std::move(ev));
+    post(std::move(ev));
     // The blur handler may have moved focus elsewhere or destroyed `n`.
     if (focused_) return;
   }
@@ -955,7 +1114,7 @@ void InputManager::setFocus(Node* n) {
   Value::Object ev = baseEvent("focus", n);
   ev["focusVisible"] = Value(keyboardModality_);
   ev["relatedTarget"] = alive(oldId) ? Value(double(oldId)) : Value();
-  dispatch(std::move(ev));
+  post(std::move(ev));
 }
 
 void InputManager::nodeRemoved(Node* n) {
@@ -1201,15 +1360,31 @@ bool InputManager::keyAction(const char* keyName, const char* code, bool down, b
   ev["code"] = Value(code ? code : "");
   ev["repeat"] = Value(repeat);
   addModifiers(ev);
-  bool handled = dispatch(std::move(ev));
-  if (handled) return true;
+  int flags = 0;
+  uint32_t seq = 0;
+  bool answered = ask(std::move(ev), &flags, &seq);
+  // A keydown listener on the focused path (Pressable's, a TextInput's) or
+  // a global one (modals, BackHandler) may veto Tab, Enter, arrows, editing.
+  bool vetoable = !answered && down &&
+                  (pathListens(focused_ ? focused_ : doc_.root(), kKey) || rt_.listensGlobally("keydown"));
+  Deferred d{Deferred::Kind::Key};
+  d.text = std::move(k);
+  d.down = down;
+  d.repeat = repeat;
+  d.mods = mods;
+  return settle(answered, flags, seq, std::move(d), vetoable);
+}
+
+bool InputManager::keyDefault(const Deferred& d, bool prevented) {
+  if (prevented) return true;
+  const std::string& k = d.text;
   bool inTextInput = focused_ && focused_->type() == NodeType::TextInput;
-  if (!down) return inTextInput;
+  if (!d.down) return inTextInput;
   if (k == "Tab") {
-    return focusNext((mods & JSUI_MOD_SHIFT) != 0);
+    return focusNext((d.mods & JSUI_MOD_SHIFT) != 0);
   }
-  if (inTextInput && editKey(focused_, k, mods)) return true;
-  if ((k == "Enter" || k == " " || k == "Spacebar") && !repeat && focusedUsable() && !inTextInput) {
+  if (inTextInput && editKey(focused_, k, d.mods)) return true;
+  if ((k == "Enter" || k == " " || k == "Spacebar") && !d.repeat && focusedUsable() && !inTextInput) {
     Node* f = focused_;
     Rect r = visualRect(f);
     Value::Object click = baseEvent("click", f);
@@ -1220,13 +1395,13 @@ bool InputManager::keyAction(const char* keyName, const char* code, bool down, b
     click["button"] = Value(0);
     click["buttons"] = Value(0);
     click["pointerType"] = Value("keyboard");
-    dispatch(std::move(click));
+    post(std::move(click));
     return true;
   }
   if (!inTextInput) {
     // PageUp/PageDown/Home/End/Space scroll; arrows navigate focus and
     // scroll once there is nothing further to focus that way.
-    if (keyboardScroll(k, mods)) return true;
+    if (keyboardScroll(k, d.mods)) return true;
     int dir = k == "ArrowUp" ? 0 : k == "ArrowDown" ? 1 : k == "ArrowLeft" ? 2 : k == "ArrowRight" ? 3 : -1;
     if (dir >= 0) return (arrowKeyNavigation && navigate(NavDirection(dir))) || scrollStep(dir);
   }
@@ -1237,9 +1412,76 @@ bool InputManager::text(const char* utf8) {
   if (!utf8 || !*utf8) return false;
   Value::Object ev = baseEvent("textinput", focused_);
   ev["text"] = Value(utf8);
-  bool handled = dispatch(std::move(ev));
-  if (!handled && focused_ && focused_->type() == NodeType::TextInput) return editText(focused_, utf8);
-  return handled || (focused_ && focused_->type() == NodeType::TextInput);
+  int flags = 0;
+  uint32_t seq = 0;
+  bool answered = ask(std::move(ev), &flags, &seq);
+  bool vetoable = !answered &&
+                  (pathListens(focused_ ? focused_ : doc_.root(), kText) || rt_.listensGlobally("textinput"));
+  Deferred d{Deferred::Kind::Text};
+  d.text = utf8;
+  return settle(answered, flags, seq, std::move(d), vetoable);
+}
+
+bool InputManager::textDefault(const Deferred& d, bool prevented) {
+  bool input = focused_ && focused_->type() == NodeType::TextInput;
+  if (!prevented && input) return editText(focused_, d.text.c_str());
+  return prevented || input;
+}
+
+// ------------------------------------------------------- default actions
+
+bool InputManager::settle(bool answered, int flags, uint32_t seq, Deferred&& d, bool vetoable) {
+  if (!answered && !vetoable) {
+    // Nothing can preventDefault() it: it runs (in turn) as unprevented.
+    rt_.inbound.forget(seq);
+    answered = true;
+    flags = 0;
+  }
+  if (answered && deferred_.empty()) return runDefault(d, flags);
+  d.seq = answered ? 0 : seq;
+  d.flags = flags;
+  d.deadline = rt_.now + rt_.eventDeadlineMs;
+  // What the embedder hears meanwhile: a press or key with a default action
+  // pending is the UI's (the game does not act on it as well).
+  bool consumed = true;
+  if (d.kind == Deferred::Kind::Key) consumed = d.down;
+  else if (d.kind == Deferred::Kind::PadButton) consumed = d.down && d.edge;
+  deferred_.push_back(std::move(d));
+  return consumed;
+}
+
+bool InputManager::runDefault(const Deferred& d, int flags) {
+  bool p = prevented(flags);
+  switch (d.kind) {
+    case Deferred::Kind::Key: return keyDefault(d, p);
+    case Deferred::Kind::Text: return textDefault(d, p);
+    case Deferred::Kind::PadButton: return padButtonDefault(d, p);
+    case Deferred::Kind::PadAxis: return padAxisDefault(d, p);
+    case Deferred::Kind::Wheel: return wheelDefault(d, p);
+  }
+  return p;
+}
+
+void InputManager::runDeferred() {
+  static const char* kNames[] = {"key", "textinput", "gamepadbutton", "gamepadaxis", "wheel"};
+  while (!deferred_.empty()) {
+    Deferred& front = deferred_.front();
+    int flags = front.flags;
+    if (front.seq && !rt_.inbound.take(front.seq, &flags)) {
+      if (rt_.now < front.deadline) return;
+      rt_.inbound.forget(front.seq);
+      flags = 0;
+      lateWarning(kNames[int(front.kind)]);
+    }
+    Deferred d = std::move(front);
+    deferred_.pop_front();
+    runDefault(d, flags);
+  }
+}
+
+void InputManager::lateWarning(const char* what) {
+  rt_.log(JSUI_LOG_WARN, std::string("input: JS did not answer a ") + what + " event within " +
+                             std::to_string(int(rt_.eventDeadlineMs)) + " ms; its default action ran");
 }
 
 // ---------------------------------------------------------------- gamepad
@@ -1292,17 +1534,33 @@ bool InputManager::gamepadButtonAction(int pad, int button, bool down, float val
   ev["value"] = Value(double(value));
   ev["pressed"] = Value(down);
   ev["repeat"] = Value(down && wasDown);
-  bool handled = dispatch(std::move(ev));
+  int flags = 0;
+  uint32_t seq = 0;
+  bool answered = ask(std::move(ev), &flags, &seq);
   bool edge = down != wasDown || !ps;
-  if (!edge) return handled;
-  if (button == 0 && !down && padPress_ == pad) {
+  if (edge && button == 0 && !down && padPress_ == pad) {
     keyPressId_ = 0;
     padPress_ = -1;
   }
   // D-pad: 12 up, 13 down, 14 left, 15 right.
   int dir = button == 12 ? 0 : button == 13 ? 1 : button == 14 ? 2 : button == 15 ? 3 : -1;
+  bool vetoable = !answered && edge && down && (dir >= 0 || button == 0) &&
+                  (pathListens(focused_ ? focused_ : doc_.root(), kGamepad) || rt_.listensGlobally("gamepadbutton"));
+  Deferred d{Deferred::Kind::PadButton};
+  d.pad = pad;
+  d.index = button;
+  d.down = down;
+  d.edge = edge;
+  return settle(answered, flags, seq, std::move(d), vetoable);
+}
+
+bool InputManager::padButtonDefault(const Deferred& d, bool handled) {
+  if (!d.edge) return handled;
+  Pad* ps = (d.pad >= 0 && d.pad < int(pads_.size())) ? &pads_[size_t(d.pad)] : nullptr;
+  int button = d.index;
+  int dir = button == 12 ? 0 : button == 13 ? 1 : button == 14 ? 2 : button == 15 ? 3 : -1;
   if (dir >= 0) {
-    if (!down) {
+    if (!d.down) {
       if (ps && ps->dpad.dir == dir) ps->dpad.dir = -1;
       return handled;
     }
@@ -1311,7 +1569,7 @@ bool InputManager::gamepadButtonAction(int pad, int button, bool down, float val
     // Nothing to move focus to or scroll: the D-pad is the game's.
     return navStep(dir);
   }
-  if (button == 0 && down && !handled && focusedUsable()) {
+  if (button == 0 && d.down && !handled && focusedUsable()) {
     Node* f = focused_;
     Rect r = visualRect(f);
     Value::Object click = baseEvent("click", f);
@@ -1322,8 +1580,8 @@ bool InputManager::gamepadButtonAction(int pad, int button, bool down, float val
     click["button"] = Value(0);
     click["buttons"] = Value(0);
     click["pointerType"] = Value("gamepad");
-    click["gamepad"] = Value(pad);
-    dispatch(std::move(click));
+    click["gamepad"] = Value(d.pad);
+    post(std::move(click));
     return true;
   }
   return handled;
@@ -1341,17 +1599,35 @@ bool InputManager::gamepadAxis(int pad, int axis, float value) {
   ev["gamepad"] = Value(pad);
   ev["axis"] = Value(axis);
   ev["value"] = Value(double(value));
-  bool handled = dispatch(std::move(ev));
+  int flags = 0;
+  uint32_t seq = 0;
+  bool answered = ask(std::move(ev), &flags, &seq);
+  bool vetoable = !answered &&
+                  (pathListens(focused_ ? focused_ : doc_.root(), kGamepad) || rt_.listensGlobally("gamepadaxis"));
+  Deferred d{Deferred::Kind::PadAxis};
+  d.pad = pad;
+  d.index = axis;
+  if (ps) {  // the sticks as of this event
+    d.x = ps->axes[0];
+    d.y = ps->axes[1];
+    d.dx = ps->axes[2];
+    d.dy = ps->axes[3];
+  }
+  return settle(answered, flags, seq, std::move(d), vetoable);
+}
+
+bool InputManager::padAxisDefault(const Deferred& d, bool handled) {
+  Pad* ps = (d.pad >= 0 && d.pad < int(pads_.size())) ? &pads_[size_t(d.pad)] : nullptr;
+  int axis = d.index;
   if (ps && (axis == 2 || axis == 3)) {
     // Right stick: continuous scrolling of the focused / hovered ScrollView
     // (tickSticks), unless JS took the stick.
     ps->rightBlocked = handled;
-    return handled || (std::hypot(ps->axes[2], ps->axes[3]) > kScrollStickDeadzone &&
-                       (scrollTarget(false) || scrollTarget(true)));
+    return handled || (std::hypot(d.dx, d.dy) > kScrollStickDeadzone && (scrollTarget(false) || scrollTarget(true)));
   }
   if (!ps || (axis != 0 && axis != 1)) return handled;
   // Left stick -> direction of the dominant axis beyond the deadzone.
-  float lx = ps->axes[0], ly = ps->axes[1];
+  float lx = d.x, ly = d.y;
   int dir = -1;
   if (std::fabs(lx) >= std::fabs(ly)) {
     if (std::fabs(lx) > kStickDeadzone) dir = lx > 0 ? 3 : 2;
@@ -1389,7 +1665,7 @@ void InputManager::gamepadConnected(int pad, bool connected, const char* id) {
   ev["gamepad"] = Value(pad);
   ev["connected"] = Value(connected);
   ev["id"] = Value(id ? id : "");
-  dispatch(std::move(ev));
+  post(std::move(ev));
 }
 
 // ------------------------------------------------------------------- tick
@@ -1398,6 +1674,14 @@ void InputManager::tick(double nowMs) {
   Perf::Scope perfScope(doc_.perf, Phase::Input);
   double dt = lastTick_ < 0 ? 0 : std::clamp(nowMs - lastTick_, 0.0, 100.0);
   lastTick_ = nowMs;
+  // Late JS answers (js/inbound.h): the default actions waiting for them,
+  // then the gestures (a held touch may start scrolling now).
+  if (!deferred_.empty()) runDeferred();
+  if (!mouse_.awaiting.empty()) absorbAnswers(mouse_);
+  for (PointerState& p : touches_) {
+    if (!p.awaiting.empty() || p.releaseSeq) absorbAnswers(p);
+    tickHeld(p);
+  }
   // Held D-pad / stick repeat: first after kRepeatDelayMs, then every
   // kRepeatIntervalMs. A long frame fires once (no bursts).
   for (Pad& p : pads_) {

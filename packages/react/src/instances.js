@@ -74,6 +74,9 @@ export function toNativeProps(props, hidden) {
         if (!events) events = [];
         for (let i = 0; i < toks.length; i++) if (events.indexOf(toks[i]) < 0) events.push(toks[i]);
       }
+      // Static responder hints (the native updateProps derives the same).
+      if (key === 'onResponderGrant' && v.__blocksNative === true) out.__blocksNative = true;
+      else if (key === 'onResponderTerminationRequest' && v.__keepsGesture !== false) out.__keepsGesture = true;
       continue;
     }
     if (typeof v === 'symbol') continue;

@@ -387,10 +387,14 @@ void JsEngine::Impl::addTimer(int id, double due, double interval, JSValue fn, s
 uint64_t JsEngine::Impl::startLoad(LoadRequest req, std::function<void(uint64_t, Resource&)> onDone) {
   std::weak_ptr<Impl*> weak = alive;
   auto idBox = std::make_shared<uint64_t>(0);
-  uint64_t id = rt.loader.load(std::move(req), [weak, idBox, onDone = std::move(onDone)](Resource res) {
-    auto strong = weak.lock();
-    if (!strong) return;
-    onDone(*idBox, res);
+  Runtime* r = &rt;
+  uint64_t id = rt.loader.load(std::move(req), [r, weak, idBox, onDone = std::move(onDone)](Resource res) {
+    if (!weak.lock()) return;
+    // The completion runs JS: a message to it (Inbound::Message::Kind::Task).
+    auto shared = std::make_shared<Resource>(std::move(res));
+    r->inbound.task([weak, idBox, onDone, shared] {
+      if (weak.lock()) onDone(*idBox, *shared);
+    });
   });
   *idBox = id;
   return id;

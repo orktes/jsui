@@ -4,6 +4,7 @@
 // paint/hit styles on ComputedStyle (through a test-only const_cast) so the
 // tests don't depend on the style parser.
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -1150,6 +1151,350 @@ TEST(input_capi_hit_test) {
   CHECK(jsui_send_mouse_button(rt, 150, 150, JSUI_MOUSE_LEFT, 1, 0) == 0);
   CHECK(jsui_send_mouse_button(rt, 150, 150, JSUI_MOUSE_LEFT, 0, 0) == 0);
   jsui_destroy(rt);
+}
+
+// ------------------------------------------------------- late JS answers
+//
+// Inbound::replyDelayMs holds JS's answers to events back on the runtime
+// clock, as a JS thread busy elsewhere would: JS still runs the handlers at
+// once, native sees what they answered (preventDefault, responder flags)
+// only later. Default actions JS may veto wait for it, the rest runs at
+// once (docs/ARCHITECTURE.md "Input routing details").
+
+TEST(input_late_answer_tab_and_enter) {
+  Fixture f;
+  Node* root = f.doc().root();
+  Node* a = f.box(root, 0, 0, 50, 20, R"({"__events":["press"]})");
+  Node* b = f.box(root, 0, 50, 50, 20, R"({"__events":["press","keyDown"]})");
+  Node* c = f.box(root, 0, 100, 50, 20, R"({"__events":["press"]})");
+  f.layout();
+  f.rt->tick(0);
+  f.rt->inbound.replyDelayMs = 30;
+  // No keydown listener on the path: focus moves at once.
+  CHECK(f.in().key("Tab", "Tab", true, false, 0));
+  CHECK_EQ(f.in().focused(), a);
+  CHECK(f.in().key("Tab", "Tab", true, false, 0));
+  CHECK_EQ(f.in().focused(), b);
+  CHECK_EQ(f.events(), ev("keydown", root) + " " + ev("focus", a) + " " + ev("keydown", a) + " " + ev("blur", a) +
+                           " " + ev("focus", b));
+  // b listens to keydown: Tab and Enter wait for its answer (in order) and
+  // report consumed meanwhile.
+  CHECK(f.in().key("Enter", "Enter", true, false, 0));
+  CHECK(f.in().key("Tab", "Tab", true, false, 0));
+  CHECK_EQ(f.events(), ev("keydown", b, "keydown", b));
+  CHECK_EQ(f.in().focused(), b);
+  CHECK(f.in().animating());  // hosts keep ticking until the answers come
+  f.rt->tick(29);
+  CHECK_EQ(f.in().focused(), b);
+  CHECK_EQ(f.events(), std::string());
+  f.rt->tick(30);
+  CHECK_EQ(f.events(), ev("click", b) + " " + ev("blur", b) + " " + ev("focus", c));
+  CHECK_EQ(f.in().focused(), c);
+  CHECK_EQ(f.rt->inbound.awaiting(), size_t(0));
+  // A prevented keydown (Pressable handling Enter itself): no native click
+  // or focus move once the answer says so.
+  f.in().focus(b);
+  f.events();
+  f.js("prevent.keydown = true;");
+  f.in().key("Enter", "Enter", true, false, 0);
+  f.in().key("Tab", "Tab", true, false, 0);
+  f.rt->tick(100);
+  CHECK_EQ(f.events(), ev("keydown", b, "keydown", b));
+  CHECK_EQ(f.in().focused(), b);
+  f.js("prevent.keydown = false;");
+  // A key without a listener waits behind a pending one (event order).
+  f.in().key("ArrowDown", "ArrowDown", true, false, 0);  // b listens: waits
+  f.in().focus(a);  // JS moves focus meanwhile
+  f.events();
+  f.in().key("Tab", "Tab", true, false, 0);  // a has no listener, but runs after ArrowDown
+  CHECK_EQ(f.in().focused(), a);
+  f.rt->tick(130);
+  // ArrowDown from a (focused when it ran) lands on b, then Tab moves on to c.
+  CHECK_EQ(f.in().focused(), c);
+  CHECK(f.events().find("did not answer") == std::string::npos);
+  // Single-threaded answers (no delay) run everything at once.
+  f.rt->inbound.replyDelayMs = 0;
+  f.in().focus(b);
+  f.in().key("Tab", "Tab", true, false, 0);
+  CHECK_EQ(f.in().focused(), c);
+}
+
+TEST(input_late_answer_deadline) {
+  Fixture f;
+  Node* root = f.doc().root();
+  Node* a = f.box(root, 0, 0, 50, 20, R"({"__events":["press","keyDown"]})");
+  Node* b = f.box(root, 0, 50, 50, 20, R"({"__events":["press"]})");
+  f.layout();
+  f.rt->tick(1000);
+  f.in().focus(a);
+  f.events();
+  f.rt->inbound.replyDelayMs = 500;  // JS stalled
+  f.in().key("Tab", "Tab", true, false, 0);
+  f.rt->tick(1099);
+  CHECK_EQ(f.in().focused(), a);
+  CHECK_EQ(f.rt->eventDeadlineMs, 100.0);
+  // The deadline passed: the default action runs without the answer, and
+  // a warning says so.
+  f.rt->tick(1100);
+  CHECK_EQ(f.in().focused(), b);
+  bool warned = false;
+  for (auto& l : f.logs) warned |= l.find("did not answer a key event within 100 ms") != std::string::npos;
+  CHECK(warned);
+  CHECK_EQ(f.rt->inbound.awaiting(), size_t(0));  // the late answer is dropped
+  // Even an answer that says preventDefault comes too late.
+  f.in().focus(a);
+  f.js("prevent.keydown = true;");
+  f.rt->eventDeadlineMs = 50;
+  f.in().key("Tab", "Tab", true, false, 0);
+  f.rt->tick(1149);
+  CHECK_EQ(f.in().focused(), a);
+  f.rt->tick(1150);
+  CHECK_EQ(f.in().focused(), b);
+  f.rt->tick(1600);
+  CHECK_EQ(f.in().focused(), b);
+  CHECK(!f.in().animating());
+}
+
+TEST(input_late_answer_global_listener) {
+  Fixture f;
+  Node* root = f.doc().root();
+  Node* a = f.box(root, 0, 0, 50, 20, R"({"__events":["press"]})");
+  f.layout();
+  f.rt->tick(0);
+  // A global keydown listener (addGlobalListener -> listenGlobal) may veto
+  // any key, so keys wait for the answer even without a listener on the path.
+  f.js("__jsui_native.listenGlobal('keydown', true);");
+  CHECK(f.rt->listensGlobally("keydown"));
+  f.rt->inbound.replyDelayMs = 20;
+  f.in().key("Tab", "Tab", true, false, 0);
+  CHECK(f.in().focused() == nullptr);
+  f.rt->tick(20);
+  CHECK_EQ(f.in().focused(), a);
+  f.js("__jsui_native.listenGlobal('keydown', false);");
+  CHECK(!f.rt->listensGlobally("keydown"));
+  f.in().key("Tab", "Tab", true, false, 0);  // wraps around at once
+  CHECK_EQ(f.in().focused(), a);
+  CHECK_EQ(f.events(), ev("keydown", root) + " " + ev("focus", a) + " " + ev("keydown", a));
+}
+
+TEST(input_late_answer_wheel_and_gamepad) {
+  Fixture f;
+  Node* root = f.doc().root();
+  Node* sv = f.box(root, 0, 0, 100, 100, "{}", NodeType::ScrollView);
+  Fixture::style(sv).overflow = Overflow::Scroll;
+  Node* content = f.box(sv, 0, 0, 100, 300, R"({"__events":["wheel"]})");
+  Node* other = f.box(root, 150, 0, 100, 100, R"({"__events":["press","gamepadButton"]})");
+  f.layout();
+  f.in().smoothWheel = false;
+  f.rt->tick(0);
+  f.rt->inbound.replyDelayMs = 16;
+  // onWheel on the path: the wheel scrolls once JS's answer is in.
+  CHECK(f.in().mouseWheel(50, 50, 0, 30));
+  CHECK_NEAR(sv->scrollY, 0, 1e-4);
+  f.rt->tick(16);
+  CHECK_NEAR(sv->scrollY, 30, 1e-4);
+  f.js("prevent.wheel = true;");
+  f.in().mouseWheel(50, 50, 0, 30);
+  f.rt->tick(32);
+  CHECK_NEAR(sv->scrollY, 30, 1e-4);
+  f.js("prevent.wheel = false;");
+  // No onWheel: scrolls at once.
+  content->setProps(Value::parseJson("{}"));
+  f.place(content, 0, 0, 100, 300);
+  f.layout();
+  f.in().mouseWheel(50, 50, 0, 10);
+  CHECK_NEAR(sv->scrollY, 40, 1e-4);
+  // A on a focused element with a gamepadbutton listener clicks once the
+  // answer is in; the press state style holds meanwhile.
+  f.in().focus(other);
+  f.events();
+  CHECK(f.in().gamepadButton(0, 0, true, 1));
+  CHECK(f.in().statePressed(other));
+  CHECK_EQ(f.events(), ev("gamepadbutton", other));
+  f.rt->tick(48);
+  CHECK_EQ(f.events(), ev("click", other));
+  f.in().gamepadButton(0, 0, false, 0);
+  CHECK(!f.in().statePressed(other));
+}
+
+namespace {
+// Touch fixture: a ScrollView whose content is a JS responder. The JS side
+// answers each event type with the flags in globalThis.flags
+// (JsEngine::DispatchFlags: 8 responder, 4 blocks native, 2 preventDefault).
+struct TouchFixture {
+  Fixture f;
+  Node* sv;
+  Node* pan;
+  explicit TouchFixture(const char* panProps) {
+    Node* root = f.doc().root();
+    sv = f.box(root, 0, 0, 100, 100, R"({"__events":["scroll"]})", NodeType::ScrollView);
+    Node* content = f.box(sv, 0, 0, 100, 300);
+    pan = f.box(content, 0, 0, 100, 100, panProps);
+    f.layout();
+    f.js("globalThis.flags = {};"
+         "globalThis.__jsui_dispatchEvent = e => {"
+         "  console.log(e.type + ':' + e.target); return flags[e.type] || 0; };");
+    f.rt->tick(0);
+    f.logs.clear();
+  }
+  void drag(double t) {
+    f.in().touch(0, 0, 10, 60);
+    f.in().touch(0, 1, 10, 40);  // past the slop
+    f.rt->tick(t);
+  }
+};
+const char* kPan = R"({"__events":["responder","pointerMove"]})";
+}  // namespace
+
+TEST(input_late_answer_responder_holds_scrollview) {
+  {
+    // The JS responder blocks native gestures (PanResponder's default): the
+    // ScrollView holds the touch while the answers are out, then gives up.
+    TouchFixture t(kPan);
+    t.f.js("flags.pointerdown = 12; flags.pointermove = 12;");
+    t.f.rt->inbound.replyDelayMs = 30;
+    t.drag(10);
+    CHECK_NEAR(t.sv->scrollY, 0, 1e-4);
+    CHECK(t.f.in().animating());  // held
+    t.f.rt->tick(30);
+    t.f.in().touch(0, 1, 10, 0);
+    t.f.rt->tick(70);
+    CHECK_NEAR(t.sv->scrollY, 0, 1e-4);
+    t.f.in().touch(0, 2, 10, 0);
+    std::string events = t.f.events();
+    CHECK(events.find("pointermove:" + std::to_string(t.pan->id())) != std::string::npos);
+    CHECK(events.find("pointercancel") == std::string::npos && events.find("scroll") == std::string::npos);
+  }
+  {
+    // Nobody took the touch: once the answers say so the ScrollView scrolls
+    // to where the finger is (no samples lost while it held).
+    TouchFixture t(kPan);
+    t.f.rt->inbound.replyDelayMs = 30;
+    t.drag(10);
+    CHECK_NEAR(t.sv->scrollY, 0, 1e-4);
+    t.f.rt->tick(30);
+    CHECK_NEAR(t.sv->scrollY, 20, 1e-4);
+    t.f.in().touch(0, 1, 10, 30);
+    CHECK_NEAR(t.sv->scrollY, 30, 1e-4);
+    t.f.in().touch(0, 2, 10, 30);
+  }
+  {
+    // A responder that does not block is asked to let go
+    // (responderterminationrequest); its late refusal keeps the touch.
+    TouchFixture t(kPan);
+    t.f.js("flags.pointerdown = 8; flags.pointermove = 8; flags.responderterminationrequest = 2;");
+    t.f.rt->inbound.replyDelayMs = 30;
+    t.drag(10);
+    t.f.rt->tick(30);  // answers in: asks for the touch, held again
+    CHECK_NEAR(t.sv->scrollY, 0, 1e-4);
+    CHECK(t.f.events().find("responderterminationrequest") != std::string::npos);
+    t.f.rt->tick(60);  // refused
+    t.f.in().touch(0, 1, 10, 0);
+    t.f.rt->tick(100);
+    CHECK_NEAR(t.sv->scrollY, 0, 1e-4);
+    t.f.in().touch(0, 2, 10, 0);
+    // It lets go: the ScrollView takes over.
+    t.f.js("flags.responderterminationrequest = 0;");
+    t.drag(110);
+    t.f.rt->tick(140);
+    CHECK_NEAR(t.sv->scrollY, 0, 1e-4);
+    t.f.rt->tick(170);
+    CHECK_NEAR(t.sv->scrollY, 20, 1e-4);
+    t.f.in().touch(0, 2, 10, 40);
+  }
+  {
+    // No responder on the path: plain scrolling never waits.
+    TouchFixture t(R"({"__events":["press"]})");
+    t.f.rt->inbound.replyDelayMs = 30;
+    t.drag(10);
+    CHECK_NEAR(t.sv->scrollY, 20, 1e-4);
+    t.f.in().touch(0, 2, 10, 40);
+  }
+}
+
+TEST(input_late_answer_responder_deadline_hints) {
+  {
+    // No answer within the deadline: a static __blocksNative hint (a
+    // PanResponder without onShouldBlockNativeResponder) keeps the touch.
+    TouchFixture t(R"({"__events":["responder","pointerMove"],"__blocksNative":true})");
+    t.f.rt->inbound.replyDelayMs = 500;
+    t.drag(10);
+    t.f.rt->tick(99);
+    CHECK_NEAR(t.sv->scrollY, 0, 1e-4);
+    t.f.rt->tick(100);
+    t.f.in().touch(0, 1, 10, 0);
+    t.f.rt->tick(600);
+    CHECK_NEAR(t.sv->scrollY, 0, 1e-4);
+    t.f.in().touch(0, 2, 10, 0);
+    CHECK(t.f.events().find("did not answer a pointer event") != std::string::npos);
+  }
+  {
+    // Without the hint the ScrollView takes the touch at the deadline.
+    TouchFixture t(kPan);
+    t.f.js("flags.pointerdown = 12;");  // what JS would answer, too late
+    t.f.rt->inbound.replyDelayMs = 500;
+    t.drag(10);
+    t.f.rt->tick(100);
+    CHECK_NEAR(t.sv->scrollY, 20, 1e-4);
+    t.f.in().touch(0, 2, 10, 40);
+    t.f.rt->tick(600);
+    CHECK_EQ(t.f.rt->inbound.awaiting(), size_t(0));
+  }
+  {
+    // A termination request unanswered by the deadline: __keepsGesture (an
+    // onResponderTerminationRequest that may refuse) keeps the touch.
+    TouchFixture t(R"({"__events":["responder","pointerMove"],"__keepsGesture":true})");
+    t.f.js("flags.pointerdown = 8; flags.pointermove = 8;");
+    t.f.rt->inbound.replyDelayMs = 30;
+    t.drag(10);
+    t.f.rt->inbound.replyDelayMs = 500;  // the request's answer will be late
+    t.f.rt->tick(30);  // the answers so far are in: the request goes out, held until 130
+    CHECK(t.f.events().find("responderterminationrequest") != std::string::npos);
+    t.f.rt->tick(129);
+    CHECK_NEAR(t.sv->scrollY, 0, 1e-4);
+    t.f.rt->tick(130);
+    t.f.in().touch(0, 1, 10, 30);
+    t.f.rt->tick(140);
+    CHECK_NEAR(t.sv->scrollY, 0, 1e-4);
+    t.f.in().touch(0, 2, 10, 30);
+  }
+  {
+    // Without __keepsGesture the responder lets go at the deadline.
+    TouchFixture t(kPan);
+    t.f.js("flags.pointerdown = 8; flags.pointermove = 8;");
+    t.f.rt->inbound.replyDelayMs = 30;
+    t.drag(10);
+    t.f.rt->inbound.replyDelayMs = 500;
+    t.f.rt->tick(30);
+    t.f.rt->tick(130);
+    CHECK_NEAR(t.sv->scrollY, 20, 1e-4);
+    t.f.in().touch(0, 2, 10, 40);
+  }
+}
+
+TEST(input_responder_hints_from_handlers) {
+  // updateProps derives the static hints from the handlers' marks (as
+  // PanResponder sets them).
+  Fixture f;
+  f.js("const N = __jsui_native; globalThis.ids = [N.createNode('View'), N.createNode('View'), N.createNode('View')];"
+       "const grant = () => true; grant.__blocksNative = true;"
+       "const req = () => true; req.__keepsGesture = false;"
+       "N.updateProps(ids[0], {onResponderGrant: grant, onResponderTerminationRequest: () => false});"
+       "N.updateProps(ids[1], {onResponderGrant: () => true, onResponderTerminationRequest: req});"
+       "N.updateProps(ids[2], {onPress: () => {}});"
+       "globalThis.idText = ids.join(',');");
+  int ids[3] = {0, 0, 0};
+  f.js("console.log(idText)");
+  CHECK(std::sscanf(f.logs.back().c_str(), "%d,%d,%d", &ids[0], &ids[1], &ids[2]) == 3);
+  Node* a = f.rt->findNode(uint32_t(ids[0]));
+  Node* b = f.rt->findNode(uint32_t(ids[1]));
+  Node* c = f.rt->findNode(uint32_t(ids[2]));
+  CHECK(a && b && c);
+  CHECK(a->props()["__blocksNative"].asBool(false));
+  CHECK(a->props()["__keepsGesture"].asBool(false));
+  CHECK(!b->props()["__blocksNative"].asBool(false));
+  CHECK(!b->props()["__keepsGesture"].asBool(false));
+  CHECK(!c->props()["__blocksNative"].asBool(false) && !c->props()["__keepsGesture"].asBool(false));
 }
 
 // ------------------------------------------------------------ performance
