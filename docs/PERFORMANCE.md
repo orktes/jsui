@@ -191,18 +191,30 @@ engine is the better trade for a game.
 On the web, JSUI renders a page's UI into a canvas with WebGPU (falling
 back to WebGL, then CPU) and runs the bundle on the browser's own JS
 engine. Against Chrome rendering the same React app with react-native-web
-(1280x720, real Chrome on the GPU, main-thread ms per frame):
+(1280x720, Chrome 155 on an M1 Ultra's GPU, main-thread ms per frame,
+median of 3 runs):
 
-| App | JSUI | Chrome (react-native-web) |
-|---|---|---|
-| 100 moving markers | 2.45 | 2.16 |
-| 300 moving markers | 5.34 | 5.20 |
-| Inventory screen | 1.56 | 1.43 |
+| App | JSUI | JSUI on QuickJS | Chrome (react-native-web) |
+|---|---|---|---|
+| 100 moving markers | 1.90 | 3.29 | 1.86 |
+| 300 moving markers | 4.48 | 8.49 | 4.59 |
+| Inventory screen | 1.17 | 3.18 | 1.06 |
 
-Total CPU across Chrome's processes is within ±7% of Chrome's own
+Total CPU across Chrome's processes is within ±10% of Chrome's own
 rendering. With `createJsui({ worker: true })` the runtime moves to a
 worker and the page's main thread spends 0.17 ms per frame (Chrome: 0.89).
 Download (WebGPU build, gzip): 5.4 MB of WebAssembly.
+
+`js: 'quickjs'` (and pages whose Content-Security-Policy blocks `eval`,
+which fall back to it) runs the bundle on QuickJS compiled into the
+WebAssembly instead: the same UI, but 7 to 20 times the JS time per frame,
+which makes UIs that re-render every frame cost two to three times as
+much on the main thread. UIs driven by native animation barely notice
+(the showcase's interactions screen: 0.76 ms either way, Chrome 0.63
+ms). The apps are in
+`web/test/bench-apps/`; `node web/test/frame-bench.mjs --real-gpu
+--renderers webgpu,chrome [--js quickjs] web/test/bench-apps/markers.jsx`
+measures one.
 
 ## Measuring your own UI
 

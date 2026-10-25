@@ -7,6 +7,10 @@
 // plays through Web Audio without errors.
 //
 //   node site/test/smoke.mjs [--dir site/dist] [route filters...]
+//   SITE_JS=quickjs node site/test/smoke.mjs     (the app on QuickJS in the WASM
+//       module, ?js=quickjs; default: the browser's own JS engine)
+//   SITE_REAL_GPU=1 node site/test/smoke.mjs     (the installed Google Chrome,
+//       headed, on the machine's GPU)
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -61,10 +65,13 @@ const ORIGIN = `http://127.0.0.1:${server.address().port}`;
 // Vulkan-backed so canvas presentation works headless.
 const WEBGPU_FLAGS = ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-vulkan=swiftshader'];
 
-const browser = await chromium.launch({
-  args: ['--enable-unsafe-swiftshader', '--use-angle=swiftshader', '--ignore-gpu-blocklist', '--force-color-profile=srgb',
-    ...(process.env.SITE_WEBGPU ? WEBGPU_FLAGS : [])],
-});
+const JS = process.env.SITE_JS || '';
+const browser = process.env.SITE_REAL_GPU
+  ? await chromium.launch({ channel: 'chrome', headless: false, args: ['--force-color-profile=srgb'] })
+  : await chromium.launch({
+    args: ['--enable-unsafe-swiftshader', '--use-angle=swiftshader', '--ignore-gpu-blocklist', '--force-color-profile=srgb',
+      ...(process.env.SITE_WEBGPU ? WEBGPU_FLAGS : [])],
+  });
 let failed = 0;
 for (const size of SIZES) {
   const ctx = await browser.newContext({ viewport: { width: size.width, height: size.height }, deviceScaleFactor: size.scale });
@@ -80,7 +87,7 @@ for (const size of SIZES) {
   // autoplay=0: the cinematic screen streams its trailer only once played
   // (CI has no business fetching video, and a playing video never goes idle):
   // it must look finished with its own poster art.
-  await page.goto(`${ORIGIN}/index.html?autoplay=0`);
+  await page.goto(`${ORIGIN}/index.html?autoplay=0${JS ? '&js=' + encodeURIComponent(JS) : ''}`);
   await page.waitForFunction(() => window.jsui, null, { timeout: 60000 });
   // Every script, module, wasm and JSON the page loads is versioned (?v=<hash>,
   // site/scripts/build.mjs), so caches cannot mix files of two deploys.
@@ -102,6 +109,12 @@ for (const size of SIZES) {
     failed++;
     console.log(`  FAIL  ${size.name}: renderer is ${renderer}, expected ${want || 'a GPU renderer'}`);
   } else console.log(`  ${size.name}: renderer ${renderer}`);
+  // The browser's own JS engine unless SITE_JS asks for another.
+  const engine = await page.evaluate(() => window.jsui.jsEngine);
+  if (engine !== (JS || 'host')) {
+    failed++;
+    console.log(`  FAIL  ${size.name}: JS engine is ${engine}, expected ${JS || 'host'}`);
+  } else console.log(`  ${size.name}: JS engine ${engine}`);
   for (const route of ROUTES) {
     const name = `${size.name} ${route}`;
     logs.length = 0;

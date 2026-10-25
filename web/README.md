@@ -258,8 +258,10 @@ By default the bundle runs on the JS engine of the page (or of the worker,
 in worker mode): V8, JavaScriptCore or SpiderMonkey, JIT-compiled.
 `js: 'quickjs'` runs it on QuickJS instead, compiled into `jsui.wasm` next to
 the rest of the runtime, as native builds do. A page whose
-Content-Security-Policy blocks `eval` gets QuickJS automatically. In the jsui-bench scenarios a steady-state frame spends 6 to 17
-times less time in JS; a first mount, mostly cold code, gains 1.1 to 1.4x.
+Content-Security-Policy blocks `eval` gets QuickJS automatically. In the
+jsui-bench scenarios a steady-state frame spends 7 to 20 times less time in
+JS (`web/test/js-bench.mjs`); a first mount, mostly cold code, is 1.2 to
+1.5x faster.
 Layout, painting, input, native Animated and host data stay in WASM, and the
 app sees the same API and globals.
 
