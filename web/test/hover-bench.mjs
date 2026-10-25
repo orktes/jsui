@@ -10,10 +10,11 @@
 //               main thread and viz (Chrome's own work for CSS lands on the
 //               compositor / raster / GPU threads, JSUI's on the main thread).
 //   frame       JSUI only: jsui.frame() main-thread time per painted frame
-//               (mean / p95 / max), and painted frames per hover.
+//               (mean / p95 / max), painted frames per hover, and frame loop
+//               calls per hover (painted or not: an idle loop sleeps).
 //
 //   node web/test/hover-bench.mjs [--real-gpu] [--renderers webgpu,webgl,css] [--hovers 24] [--dwell 300]
-//                                 [--dpr 2] [--dist dist-gpu] [--json out.json]
+//                                 [--dpr 2] [--dist dist-gpu] [--json out.json] [--no-idle-sleep]
 //
 // Default: headless Chromium on SwiftShader (as frame-bench.mjs); --real-gpu
 // the installed Chrome, headed, on the machine's GPU. Keep its window in front.
@@ -35,6 +36,7 @@ const DWELL = Number(opt('--dwell', 300));
 const DPR = Number(opt('--dpr', 2));
 const DIST = opt('--dist', 'dist-gpu');
 const JSON_OUT = opt('--json', null);
+const IDLE_SLEEP = !args.includes('--no-idle-sleep');
 const W = 1280, H = 720;
 
 const OUT = path.join(WEB, 'test/output/hover-bench');
@@ -129,18 +131,18 @@ async function open(renderer) {
   } else {
     await page.goto(`${ORIGIN}/test/page.html`);
     await page.waitForFunction(() => window.testReady);
-    const name = await page.evaluate(async ({ renderer, dist, w, h }) => {
+    const name = await page.evaluate(async ({ renderer, dist, w, h, idleSleep }) => {
       document.body.style.background = '#0d1322';
       const c = document.createElement('canvas');
       c.style.width = `${w}px`;
       c.style.height = `${h}px`;
       document.body.appendChild(c);
       const j = window.j = await window.createJsui({ canvas: c, bundleUrl: 'output/hover-bench/bundle.js', renderer,
-        autoFocus: false, moduleUrl: new URL(`../${dist}/jsui.js`, location.href) });
+        autoFocus: false, idleSleep, moduleUrl: new URL(`../${dist}/jsui.js`, location.href) });
       j.on('log', () => {});
       await Promise.race([j.whenIdle(), new Promise((r) => setTimeout(r, 8000))]);
       return j.renderer;
-    }, { renderer, dist: DIST, w: W, h: H });
+    }, { renderer, dist: DIST, w: W, h: H, idleSleep: IDLE_SLEEP });
     if (name !== renderer) console.log(`  (asked for ${renderer}, got ${name})`);
   }
   await page.bringToFront();
@@ -158,8 +160,10 @@ for (const renderer of RENDERERS) {
     await page.evaluate(() => {
       const j = window.j, frame = j.frame.bind(j);
       window.__cpu = [];
+      window.__calls = 0;
       window.__on = false;
       j.frame = (now) => {
+        if (window.__on) window.__calls++;
         const r0 = j.stats.renders, a = performance.now();
         frame(now);
         if (window.__on && j.stats.renders !== r0) window.__cpu.push(performance.now() - a);
@@ -185,7 +189,8 @@ for (const renderer of RENDERERS) {
     await page.waitForTimeout(DWELL);
   }
   const ms = Date.now() - t0;
-  const frames = isCss ? null : await page.evaluate(() => { window.__on = false; return window.__cpu; });
+  const [frames, calls] = isCss ? [null, 0]
+    : await page.evaluate(() => { window.__on = false; return [window.__cpu, window.__calls]; });
   const busy = threadBusy((await browser.stopTracing()).toString());
   const threads = Object.fromEntries(THREADS.map(([k, label]) => [label, (busy[k] ?? 0) / HOVERS]));
   const total = Object.values(threads).reduce((a, b) => a + b, 0);
@@ -193,7 +198,7 @@ for (const renderer of RENDERERS) {
   if (frames) {
     const s = sorted(frames);
     r.frames = { perHover: frames.length / HOVERS, mean: avg(frames), p95: pct(s, 0.95), max: s[s.length - 1],
-      perHoverMs: frames.reduce((a, b) => a + b, 0) / HOVERS };
+      perHoverMs: frames.reduce((a, b) => a + b, 0) / HOVERS, callsPerHover: calls / HOVERS };
   }
   results.push(r);
   await context.close();
@@ -209,7 +214,8 @@ if (jsui.length) {
   console.log('\nJSUI jsui.frame() per painted frame (ms):');
   for (const r of jsui)
     console.log(`  ${r.renderer.padEnd(9)} frames/hover ${f2(r.frames.perHover)}  mean ${f2(r.frames.mean)}  ` +
-      `p95 ${f2(r.frames.p95)}  max ${f2(r.frames.max)}  sum/hover ${f2(r.frames.perHoverMs)}`);
+      `p95 ${f2(r.frames.p95)}  max ${f2(r.frames.max)}  sum/hover ${f2(r.frames.perHoverMs)}  ` +
+      `loop calls/hover ${f2(r.frames.callsPerHover)}`);
 }
 if (JSON_OUT) fs.writeFileSync(JSON_OUT, JSON.stringify({ realGpu: REAL_GPU, dpr: DPR, results }, null, 2));
 await browser.close();

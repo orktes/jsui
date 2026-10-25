@@ -152,6 +152,10 @@
  *   autoFocus?: boolean,         // focus the keyboard sink on start (default true)
  *   gamepads?: boolean,          // poll the Gamepad API (default true)
  *   autoStart?: boolean,         // start the frame loop immediately (default true)
+ *   idleSleep?: boolean,         // pause the frame loop while nothing moves or waits to paint, and
+ *                                // resume on input, any call that changes the runtime and its next
+ *                                // timer (default true; off in dev mode). Idle frames cost the page
+ *                                // a rAF task each; false keeps one every display frame.
  *   trapTab?: boolean,           // keep Tab inside the UI even if unhandled (default true, false
  *                                // with passThrough; false lets an unhandled Tab move page focus on)
  *   audio?: boolean|object|Function, // UI sounds (web/jsui-audio.js): true / omitted: Web Audio
@@ -200,6 +204,28 @@ function locateIn(moduleUrl) {
     if (!u.search) u.search = new URL(moduleUrl).search;
     return u.href;
   };
+}
+
+// Exports that change what a runtime does next (input, state, messages,
+// props, sizes, fonts, textures, loads): calling one resumes the frame loop
+// of every host on the module that paused it while idle (idleSleep). Reads
+// and the frame's own calls (tick, render, needs_redraw) are left out.
+const WAKING_EXPORT = new RegExp('^_jsui_(send_|set_(?!profiling)|patch_|post_|surface_(run|create|destroy)|' +
+  'register_|unregister_|commit_buffer|remove_|texture_|audio_|web_audio_|web_resolve_|web_reject_|' +
+  'web_call_ui|reload|load_bundle|dev_update|gpu_context_lost|debug_)');
+function wakeOnCalls(M) {
+  if (M.__jsuiWake) return M.__jsuiWake;
+  const hosts = M.__jsuiWake = new Set();
+  for (const k of Object.keys(M)) {
+    const f = M[k];
+    if (typeof f !== 'function' || !WAKING_EXPORT.test(k)) continue;
+    M[k] = function (...args) {
+      const r = f.apply(this, args);
+      for (const h of hosts) h._wake();
+      return r;
+    };
+  }
+  return hosts;
 }
 
 function loadModule(moduleUrl) {
@@ -431,6 +457,14 @@ export function webglAvailable(hardware = false) {
 // module, worker mode's proxy views (web/jsui-worker.js) post them to the
 // worker and answer from its last hit map.
 class DomView {
+  // A new size or context means a repaint: an idle frame loop resumes.
+  get _sizeChanged() { return this.__sizeChanged ?? false; }
+  set _sizeChanged(v) {
+    this.__sizeChanged = v;
+    if (v) this._wakeLoop();
+  }
+  _wakeLoop() {}
+
   constructor(canvas, opts) {
     this.canvas = canvas;
     this.opts = opts;
@@ -1747,6 +1781,10 @@ class JsuiHost extends CanvasView {
     this.rootTag = 1;
     /** UI audio (web/jsui-audio.js): unlocked, unlock(), setVolume(), muted, context. */
     this.audio = new JsuiAudio(this, opts.audio);
+    this._idleSleep = opts.idleSleep !== false && !opts.devMode;
+    this._wakeTimer = 0;
+    this._loop = null;
+    wakeOnCalls(M).add(this);
 
     (M.__jsuiHosts ??= new Map()).set(this.hostId, {
       onMessage: (name, json) => {
@@ -2120,18 +2158,55 @@ class JsuiHost extends CanvasView {
   }
 
   start() {
-    if (this._raf || this._destroyed) return;
-    const loop = (t) => {
+    if (this._loop || this._destroyed) return;
+    const loop = this._loop = (t) => {
       this._raf = requestAnimationFrame(loop);
       this.frame(t);
+      if (this._loop === loop && this._idleSleep && this._idle()) this._sleep();
     };
     this._raf = requestAnimationFrame(loop);
   }
 
   stop() {
     if (this._raf) cancelAnimationFrame(this._raf);
-    this._raf = 0;
+    clearTimeout(this._wakeTimer);
+    this._raf = this._wakeTimer = 0;
+    this._loop = null;
   }
+
+  /** Whether the frame loop runs (start() and not paused while idle). */
+  get running() { return !!this._raf; }
+
+  // Nothing to tick or paint until input, a call into the runtime or a timer
+  // (see idleSleep): no animation, JS work, load, pending paint, resize,
+  // polled gamepad or per-frame listener.
+  _idle() {
+    const M = this.module, rt = this.rt;
+    if (!rt || M._jsui_wants_frame(rt) || this._wantsPaint() || this._sizeChanged || this._padsActive ||
+        this._autoW || this._autoH || this._listens('frame') || this._idleWaiters?.length || this._anyContextLost())
+      return false;
+    for (const s of this._surfaces)
+      if (s._wantsPaint() || s._sizeChanged || s._autoW || s._autoH) return false;
+    return true;
+  }
+
+  // Pauses the loop until _wake(): at the next JS timer, and once a second
+  // anyway (a safety net: a change that reached the runtime some other way).
+  _sleep() {
+    cancelAnimationFrame(this._raf);
+    this._raf = 0;
+    const due = this.module._jsui_next_timer(this.rt) - performance.now();
+    this._wakeTimer = setTimeout(() => this._wake(), Math.max(0, Math.min(due, 1000)));
+  }
+
+  _wake() {
+    if (this._raf || !this._loop || this._destroyed) return;
+    clearTimeout(this._wakeTimer);
+    this._wakeTimer = 0;
+    this._raf = requestAnimationFrame(this._loop);
+  }
+
+  _wakeLoop() { this._wake(); }
 
   // ------------------------------------------------------------- surfaces
 
@@ -2257,6 +2332,7 @@ class JsuiHost extends CanvasView {
     M._jsui_destroy(this.rt);  // stops every voice (STOP_ALL)
     this.rt = 0;
     M.__jsuiHosts.delete(this.hostId);
+    M.__jsuiWake?.delete(this);
     // Voices, nodes; the page's AudioContext closes with the last runtime.
     this.audio.destroy();
     if (this._baseUrlPtr) M._free(this._baseUrlPtr);
@@ -2280,8 +2356,9 @@ class JsuiHost extends CanvasView {
     if (typeof navigator === 'undefined' || !navigator.getGamepads) return;
     // Some browsers only expose pads to pages that listen for these events.
     const signal = this._abort.signal;
-    addEventListener('gamepadconnected', () => { this._padsActive = true; }, { signal });
-    addEventListener('gamepaddisconnected', () => { this._padsActive = true; }, { signal });
+    const poll = () => { this._padsActive = true; this._wake(); };
+    addEventListener('gamepadconnected', poll, { signal });
+    addEventListener('gamepaddisconnected', poll, { signal });
     this._padsActive = Array.from(navigator.getGamepads()).some(Boolean);
   }
 
@@ -2419,6 +2496,8 @@ class JsuiHost extends CanvasView {
 
 // A further root view of a runtime (JsuiHost.createSurface).
 class JsuiSurface extends CanvasView {
+  _wakeLoop() { this.host?._wake(); }
+
   constructor(host, target, opts) {
     if (!opts.component) throw new Error('createSurface: component is required');
     if (!target) throw new Error('createSurface: a canvas or element is required');

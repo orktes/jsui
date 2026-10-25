@@ -1092,6 +1092,11 @@ bool Runtime::wantsFrame() const {
   return false;
 }
 
+double Runtime::nextTimer() const {
+  double due = js ? js->nextTimer() : 1e300;
+  return due >= 1e300 ? std::numeric_limits<double>::infinity() : due;
+}
+
 bool Runtime::animatingFrames(const Surface& s) const {
   return s.input->animating() || s.doc.layoutAnimating() || animated->animating() || !animated->ends.empty() ||
          lotties->animating() || shaders->animating() ||

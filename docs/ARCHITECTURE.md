@@ -148,6 +148,14 @@ LayoutAnimations, native-driven Animated animations and their pending end
 callbacks, held gamepad sticks or D-pad) and the host should keep ticking at
 display rate. JS-driven Animated animations run on `requestAnimationFrame`,
 so an endless `Animated.loop` keeps it set without any input either way.
+While it is clear, `jsui_next_timer()` says when the next JS timer is due,
+so the host can sleep until then (or until input). The web host does this
+by default (`idleSleep`): once a frame leaves nothing to tick or paint, it
+cancels its `requestAnimationFrame` loop and resumes on a timeout at the
+next timer, on any wasm export that changes the runtime (input, state,
+messages, sizes; `wakeOnCalls` in web/jsui-web.js), and when the host JS
+engine queues work outside a tick (a native promise's continuation). An
+idle page then runs no rAF tasks at all instead of one per display frame.
 
 Everything is single-threaded except resource I/O, which completes onto a
 queue drained in `jsui_tick`, Graphite's pipeline precompiles on Vulkan and

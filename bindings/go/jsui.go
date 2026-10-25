@@ -472,6 +472,10 @@ func (r *Runtime) NeedsRedraw() bool { return b(C.jsui_needs_redraw(r.rt)) }
 // rate even without input.
 func (r *Runtime) WantsFrame() bool { return b(C.jsui_wants_frame(r.rt)) }
 
+// NextTimer is when JS next has a timer due, in the clock of Tick's nowMs
+// (+Inf: none): when an idle host (WantsFrame false) ticks again.
+func (r *Runtime) NextTimer() float64 { return float64(C.jsui_next_timer(r.rt)) }
+
 // PendingLoads is the number of resource loads still in flight.
 func (r *Runtime) PendingLoads() int { return int(C.jsui_pending_loads(r.rt)) }
 
