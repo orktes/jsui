@@ -782,17 +782,22 @@ TEST(render_sprites_match_direct_and_are_reused) {
 // again (PaintStats::shadowRenders; one per quantized scale at most, where
 // every frame rendered one before), each frame is within a few levels of the
 // same state painted exactly from scratch, and once it stops the next frame
-// repaints it exactly (incremental == full).
+// repaints it exactly (incremental == full). The same for an inset shadow
+// (a glowing inventory slot springing when selected).
 TEST(render_moving_shadow_reuses_its_mask) {
-  const char* box = R"J({"style":{"position":"absolute","left":40,"top":30,"width":180,"height":52,"borderRadius":10,
+  const char* outer = R"J({"style":{"position":"absolute","left":40,"top":30,"width":180,"height":52,"borderRadius":10,
     "backgroundColor":"rgba(26,36,64,0.9)","borderWidth":1,"borderColor":"rgba(148,170,255,0.32)",
     "boxShadow":"0 4px 12px rgba(0,0,0,0.5)"}})J";
+  const char* inset = R"J({"style":{"position":"absolute","left":40,"top":30,"width":72,"height":72,"borderRadius":10,
+    "backgroundColor":"rgba(10,14,26,0.9)","borderWidth":1.5,"borderColor":"#ffb23f",
+    "boxShadow":"inset 0 0 18px rgba(255,178,63,0.5)"}})J";
   // A damped spring towards +14 px and 1.05x (overshooting).
   auto spring = [](int i) {
     float k = 1 - std::exp(-float(i) * 0.12f) * std::cos(float(i) * 0.5f);
     return "{\"transform\":[{\"translateX\":" + std::to_string(14 * k) + "},{\"scale\":" +
            std::to_string(1 + 0.05f * k) + "}]}";
   };
+  for (const char* box : {outer, inset})
   for (float dpr : {1.f, 1.5f}) {
     Scene s(320, 140, dpr);
     Node* n = s.add(box);
@@ -826,9 +831,9 @@ TEST(render_moving_shadow_reuses_its_mask) {
       worst = std::max(worst, d.max);
       differ = std::max(differ, d.count);
     }
-    std::printf("  dpr %g: %d masks blurred in %d moving frames (%d shadow draws, %d approximate), "
+    std::printf("  %s dpr %g: %d masks blurred in %d moving frames (%d shadow draws, %d approximate), "
                 "at most %zu pixels differ from exact (%zu by more than 4 levels), by at most %d\n",
-                dpr, renders, frames - 2, draws, approximate, differ, worstOver, worst);
+                box == inset ? "inset" : "outer", dpr, renders, frames - 2, draws, approximate, differ, worstOver, worst);
     CHECK(renders <= 2);
     CHECK(draws >= frames);
     CHECK(approximate >= frames - 2);
