@@ -853,7 +853,9 @@ JSUI_API void jsui_get_perf(JsuiRuntime* rt, JsuiPerf* out, int reset);
  *   JsuiGpuContext (one per runtime), only the damage is repainted into it
  *   and it is drawn into the target with one draw; when most of the frame
  *   changed, the frame is painted straight into the target. JSUI_GL_NO_RETAIN
- *   and MSAA targets always paint the whole frame into the target.
+ *   and MSAA targets always paint the whole frame into the target. A texture
+ *   target the host keeps between frames can be the retained frame itself
+ *   (JSUI_GL_INCREMENTAL): only the damage is repainted into it, no copy.
  */
 typedef struct JsuiGpuContext JsuiGpuContext;
 
@@ -899,7 +901,13 @@ enum {
      * the runtime keeps its last frame in a texture of the JsuiGpuContext,
      * repaints only what changed into it and draws it into the target with
      * one draw (so the target's previous contents need not be kept). */
-    JSUI_GL_NO_RETAIN = 1 << 2
+    JSUI_GL_NO_RETAIN = 1 << 2,
+    /* Texture targets (single-sampled): the texture still holds the frame
+     * this runtime last rendered into it (the host keeps it between frames
+     * and nothing else draws into it), so only what changed is repainted,
+     * straight into it, with no copy. Drop the flag for the first render
+     * into a new texture. Like JSUI_GPU_INCREMENTAL. */
+    JSUI_GL_INCREMENTAL = 1 << 3
 };
 
 typedef struct JsuiGLTarget {

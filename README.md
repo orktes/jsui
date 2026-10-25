@@ -209,8 +209,8 @@ shared game HUD in three game loops through the C API: input pass-through
 (what the UI does not consume moves the camera), per-frame unit positions
 driving nameplates with no JS per frame, and three ways to get the UI on
 screen (Skia GL into a raylib `RenderTexture2D`, Skia into SDL's own texture on
-its Metal, Vulkan or GL renderer, Skia GL straight into sokol's swapchain
-framebuffer).
+its Metal, Vulkan or GL renderer, Skia into an image on sokol_gfx's Metal
+device on macOS and straight into sokol's GL swapchain framebuffer elsewhere).
 Build them with `-DJSUI_BUILD_RAYLIB=ON -DJSUI_BUILD_SDL3=ON
 -DJSUI_BUILD_SOKOL=ON`. See [integrations/README.md](integrations/README.md).
 
