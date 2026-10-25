@@ -93,7 +93,7 @@ Node* InputManager::scrollableAncestor(Node* n, float dx, float dy) const {
 
 // --------------------------------------------------------------- events
 
-bool InputManager::dispatchScrollEvent(const char* type, Node* sv, float vx, float vy, const float* target,
+void InputManager::dispatchScrollEvent(const char* type, Node* sv, float vx, float vy, const float* target,
                                        bool toJs) {
   ScrollMetrics m = scrollMetrics(sv);
   Value::Object ev = baseEvent(type, sv);
@@ -106,7 +106,7 @@ bool InputManager::dispatchScrollEvent(const char* type, Node* sv, float vx, flo
   ev["zoomScale"] = Value(1.0);
   ev["velocity"] = Value(pair(vx, vy, "x", "y"));
   if (target) ev["targetContentOffset"] = Value(pair(target[0], target[1], "x", "y"));
-  return deliver(std::move(ev), toJs);
+  deliver(std::move(ev), toJs);
 }
 
 namespace {
@@ -125,9 +125,9 @@ double scrollThrottle(const Node* sv) {
 // held back and sent from tick() once it is due (with the offset then), so
 // JS always gets the final position. Native Animated.event mappings see
 // every change.
-bool InputManager::dispatchScroll(Node* sv) {
+void InputManager::dispatchScroll(Node* sv) {
   bool js = listensForScroll(sv);
-  if (!js && !rt_.animated->hasEventMapping(sv->id(), "scroll")) return false;
+  if (!js && !rt_.animated->hasEventMapping(sv->id(), "scroll")) return;
   if (js) {
     ScrollState& st = scrollState(sv);
     double throttle = scrollThrottle(sv), t = eventTime();
@@ -142,7 +142,7 @@ bool InputManager::dispatchScroll(Node* sv) {
       js = false;
     }
   }
-  return dispatchScrollEvent("scroll", sv, 0, 0, nullptr, js);
+  dispatchScrollEvent("scroll", sv, 0, 0, nullptr, js);
 }
 
 void InputManager::flushOwedScroll(uint32_t id, double now) {
@@ -726,6 +726,9 @@ bool InputManager::animating() const {
   }
   if (mouseInside_ && hoverDirty_) return true;  // a hover refresh waits for scrolling to pause
   if (statesMoving_ || doc_.statesKick || !pressFlash_.empty()) return true;  // a state style transition
+  if (!deferred_.empty()) return true;  // a default action waits for a late JS answer
+  for (const PointerState& p : touches_)
+    if (p.holdUntil >= 0) return true;  // a touch held for JS
   for (const Pad& p : pads_) {
     if (p.dpad.dir >= 0 || p.stick.dir >= 0 || p.stickScrollId) return true;
     if (!p.rightBlocked && std::hypot(p.axes[2], p.axes[3]) > kScrollStickDeadzone) return true;

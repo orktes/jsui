@@ -183,6 +183,15 @@ int flattenStyle(JSContext* ctx, JSValueConst s, CommandBuffer::Writer& w, int d
   return 1;
 }
 
+// A responder handler's static hint for input routing (a PanResponder marks
+// its handlers): 1 when `fn[key] === true`, 0 when false, -1 when unset.
+int handlerHint(JSContext* ctx, JSValueConst fn, const char* key) {
+  JSValue v = JS_GetPropertyStr(ctx, fn, key);
+  int r = JS_IsBool(v) ? (JS_ToBool(ctx, v) ? 1 : 0) : -1;
+  JS_FreeValue(ctx, v);
+  return r;
+}
+
 JSValue js_updateProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   JSUI_COMMIT_SCOPE;
   if (argc < 2 || !JS_IsObject(argv[1])) return JS_UNDEFINED;
@@ -196,6 +205,9 @@ JSValue js_updateProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
   const std::string* events[kMaxEvents];
   int eventCount = 0;
   JSValue style = JS_UNDEFINED, pointerEvents = JS_UNDEFINED;
+  // Static responder hints (docs/ARCHITECTURE.md "Input routing details"):
+  // native decides with them when JS's answer to a touch is late.
+  bool blocksNative = false, keepsGesture = false;
   JSPropertyEnum* keys = nullptr;
   uint32_t count = 0;
   if (JS_GetOwnPropertyNames(ctx, &keys, &count, argv[1], JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) != 0)
@@ -222,6 +234,11 @@ JSValue js_updateProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
           if (eventCount < kMaxEvents &&
               std::none_of(events, events + eventCount, [&](const std::string* e) { return *e == t; }))
             events[eventCount++] = &t;
+      // A PanResponder blocks native gestures unless it asks
+      // onShouldBlockNativeResponder; a termination request may refuse
+      // unless the PanResponder has no onPanResponderTerminationRequest.
+      if (*k == "onResponderGrant") blocksNative = handlerHint(ctx, v, "__blocksNative") == 1;
+      else if (*k == "onResponderTerminationRequest") keepsGesture = handlerHint(ctx, v, "__keepsGesture") != 0;
     } else if (!JS_IsUndefined(v) && !JS_IsSymbol(v)) {
       if (*k == "pointerEvents") pointerEvents = JS_DupValue(ctx, v);
       w.key(*k);
@@ -256,6 +273,14 @@ JSValue js_updateProps(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
   }
   JS_FreeValue(ctx, style);
   JS_FreeValue(ctx, pointerEvents);
+  if (blocksNative) {
+    w.key("__blocksNative", 14);
+    w.boolean(true);
+  }
+  if (keepsGesture) {
+    w.key("__keepsGesture", 14);
+    w.boolean(true);
+  }
   if (eventCount) {
     w.key("__events", 8);
     w.beginArray(uint32_t(eventCount));
@@ -338,6 +363,18 @@ JSValue js_setText(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   CommandBuffer::Writer w = cmds.begin();
   writeString(ctx, argv[1], w);
   cmds.end(Op::SetText, idArg(ctx, argc, argv, 0));
+  return JS_UNDEFINED;
+}
+
+// listenGlobal(type, on): the bundle has (on) or no longer has global
+// listeners for events of `type` (addGlobalListener). Input asks
+// Runtime::listensGlobally whether a late keydown may still be vetoed.
+JSValue js_listenGlobal(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  if (argc < 2) return JS_UNDEFINED;
+  CommandBuffer& cmds = commands(ctx);
+  CommandBuffer::Writer w = cmds.begin();
+  writeString(ctx, argv[0], w);
+  cmds.end(Op::ListenGlobal, JS_ToBool(ctx, argv[1]) ? 1 : 0);
   return JS_UNDEFINED;
 }
 
@@ -904,7 +941,8 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
              {"loadFontData", js_loadFontData, 4}, {"unloadFont", js_unloadFont, 1},
              {"getFontFamilies", js_getFontFamilies, 0},
              {"setFontFallbacks", js_setFontFallbacks, 1},
-             {"setDefaultFontFamily", js_setDefaultFontFamily, 1}};
+             {"setDefaultFontFamily", js_setDefaultFontFamily, 1},
+             {"listenGlobal", js_listenGlobal, 2}};
   for (auto& f : fns) JS_SetPropertyStr(ctx, native, f.name, JS_NewCFunction(ctx, f.fn, f.name, f.len));
   JS_SetPropertyStr(ctx, native, "rootId", JS_NewUint32(ctx, impl.rt.doc.root()->id()));
   // updateProps(id, props, hidden, true) keeps the node's current style

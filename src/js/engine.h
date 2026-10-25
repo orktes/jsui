@@ -12,7 +12,8 @@
 //   __jsui_native.devError(text | null)       .evalScript(source, name)
 //   console, setTimeout/Interval, requestAnimationFrame, queueMicrotask,
 //   performance.now, fetch/Response/Headers, TextEncoder/TextDecoder, URL.
-// Callbacks the bundle installs:
+// Callbacks the bundle installs (the runtime reaches them through its
+// Inbound messages, js/inbound.h):
 //   globalThis.__jsui_dispatchEvent(event) -> number (1 handled | 2 defaultPrevented)
 //   globalThis.__jsui_onHostMessage(name, json)
 //   globalThis.__jsui_onLayout(id, {x,y,width,height})

@@ -388,19 +388,22 @@ void JsEngine::Impl::addTimer(int id, double due, double interval, JSValue fn, s
 
 uint64_t JsEngine::Impl::startLoad(LoadRequest req, std::function<void(uint64_t, Resource&)> onDone) {
   std::weak_ptr<Impl*> weak = alive;
+  uint64_t id = rt.loader.reserveId();
+  Runtime* r = &rt;
+  ResourceLoader::Callback cb = [r, weak, id, onDone = std::move(onDone)](Resource res) {
+    if (!weak.lock()) return;
+    // The completion runs JS: a message to it (Inbound::Message::Kind::Task).
+    auto shared = std::make_shared<Resource>(std::move(res));
+    r->inbound.task([weak, id, onDone, shared] {
+      if (weak.lock()) onDone(id, *shared);
+    });
+  };
   // The id is known before the load starts: in JS-thread mode the owner
   // thread starts it (an embedder's JsuiLoadFn runs there).
-  uint64_t id = rt.loader.reserveId();
-  ResourceLoader::Callback cb = [weak, id, onDone = std::move(onDone)](Resource res) {
-    auto strong = weak.lock();
-    if (!strong) return;
-    onDone(id, res);
-  };
   if (!threaded) {
     rt.loader.load(id, std::move(req), std::move(cb));
     return id;
   }
-  Runtime* r = &rt;
   rt.hostQueue.post([r, id, req = std::move(req), cb = std::move(cb)]() mutable {
     r->loader.load(id, std::move(req), std::move(cb));
   });

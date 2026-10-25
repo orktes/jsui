@@ -124,9 +124,9 @@ and the same core compiles to WebAssembly.
 The embedder owns the loop (see `jsui.h`):
 
 1. Forward input with `jsui_send_*`. The InputManager hit-tests against the
-   last layout and calls `__jsui_dispatchEvent` synchronously. Each call
-   returns whether the UI consumed the event, so the game gets the rest
-   (see "Input routing details").
+   last layout and posts the event to `__jsui_dispatchEvent` (see "Inbound
+   messages"; delivered at once). Each call returns whether the UI consumed
+   the event, so the game gets the rest (see "Input routing details").
 2. `jsui_tick(now)`: deliver finished resource loads, run due timers, run
    `requestAnimationFrame` callbacks, drain promise jobs, advance scroll
    physics, evaluate native-driven Animated animations (then deliver their
@@ -1257,7 +1257,7 @@ Native globals (installed by `JsEngine`):
 | `createNode(type, rootTag?) → id` | `type` ∈ `View`, `Text`, `RawText`, `Image`, `ScrollView`, `TextInput`, `LottieView`, `ShaderView`; created in the document of surface `rootTag` (default: the main one; see "Surfaces"). The id is taken at once; the node exists natively when the command is applied (see "Command buffer") |
 | `viewport(rootTag?) → {width, height, scale}` | logical size of a surface (default: the main one) |
 | `surfaceApp(rootTag) → {appKey, initialProps} \| null` | the app the host picked for a surface |
-| `updateProps(id, reactProps, hidden, keepStyle?)` / `getProps(id)` | the host config's prop path, done natively: builds what native sees from the React props (event handlers → `__events`, flattened style, `pointerEvents` / hidden into it) and diffs it in `Node::setProps` (see "Performance: Props"); `getProps` returns what native holds (the inspector reads it). `keepStyle` (`setNativeProps` of non-style props; `updatePropsKeepsStyle: true` says the runtime has it): `reactProps.style` is ignored and the node keeps the style it has when the command is applied, `patchStyle` and native Animated writes included. The host JS engine has neither (`@orktes/jsui-react` then diffs in JS and calls `setProps`) |
+| `updateProps(id, reactProps, hidden, keepStyle?)` / `getProps(id)` | the host config's prop path, done natively: builds what native sees from the React props (event handlers → `__events`, the responder hints `__blocksNative` / `__keepsGesture` (see "Input routing details"), flattened style, `pointerEvents` / hidden into it) and diffs it in `Node::setProps` (see "Performance: Props"); `getProps` returns what native holds (the inspector reads it). `keepStyle` (`setNativeProps` of non-style props; `updatePropsKeepsStyle: true` says the runtime has it): `reactProps.style` is ignored and the node keeps the style it has when the command is applied, `patchStyle` and native Animated writes included. The host JS engine has neither (`@orktes/jsui-react` then diffs in JS and calls `setProps`) |
 | `setProps(id, props)` | replaces all props; `props.style` is a **flattened** style object; functions are dropped; `props.__events` lists event names the element listens to (e.g. `["press","pointerMove","layout"]`) |
 | `patchStyle(id, partialStyle)` | animation fast path: merges keys into the node's current `props.style` (a `null`/`undefined` value removes the key) and keeps all other props (`Node::patchStyle`). When only paint keys such as `transform`, `opacity`, colors changed, the style is updated in place and only those keys' style groups are re-resolved, with no relayout; a layout key takes the `setProps` path. Use it per frame from `requestAnimationFrame` instead of re-rendering through React. |
 | `setText(id, string)` | content of a `RawText` |
@@ -1293,6 +1293,7 @@ Native globals (installed by `JsEngine`):
 | `textEditing` | `true`: TextInput text is edited natively (see "TextInput editing") |
 | `setTextInputSelection(id, start, end)` | TextInput selection (UTF-16 indices, clamped; no event) |
 | `getClipboard() → string`, `setClipboard(text)` | the embedder's clipboard (`jsui_set_clipboard_callbacks`) or the runtime's in-process one |
+| `listenGlobal(type, on)` | the bundle has (no longer has) global listeners for events of `type` (`addGlobalListener`: modals, `BackHandler`, gamepad hooks); input asks it when JS answers an event late (see "Input routing details") |
 
 ### Command buffer
 
@@ -1300,8 +1301,8 @@ The QuickJS bridge does not change the native side while JS runs. Every
 mutation call (`createNode`, `setProps` / `updateProps`, `patchStyle`,
 `setText`, the tree edits, `destroyNode`, `configureLayoutAnimation`,
 `focus` / `blur`, `scrollTo` / `scrollToEnd`, `flashScrollIndicators`,
-`setTextInputSelection`, `lottieCommand` and the whole `animated.*` graph
-API) converts its arguments and records a command in
+`setTextInputSelection`, `lottieCommand`, `listenGlobal` and the whole
+`animated.*` graph API) converts its arguments and records a command in
 `JsEngine::Impl::commands` (`src/js/command_buffer.h`); `CommandBuffer::apply`
 (`command_buffer.cpp`) does the native work later, in call order. This is
 the first step of running JS on a thread of its own (the owner thread
@@ -1350,9 +1351,40 @@ single-threaded and behaves exactly as when each call applied at once:
 * **Perf.** Recording and applying both count as the `Commit` phase;
   `bridgeCalls` counts recorded mutation calls as before.
 
+### Inbound messages
+
+The other direction: every call native makes into the bundle is an
+`Inbound::Message` (`src/js/inbound.h`) posted to `Runtime::inbound`, in
+the order the calls were made: input and view events (`__jsui_dispatchEvent`,
+from `InputManager`, surface resizes, image / Lottie / shader events),
+`jsui_post_message`, `onLayout`, the frame's timers + rAF + jobs (`Frame`),
+host state / buffer / texture changes, Animated value updates and ends,
+audio reports, `Host.call` settlements, `jsui_call_ui`, surface starts and
+stops, dev-mode hot updates, loader completions that run JS (`fetch`,
+`loadFont`: a `Task`), the bundle's evaluation and the batches that share
+one microtask drain (`BeginBatch` / `EndBatch`). Single-threaded,
+`post()` delivers at once, so everything behaves as when native called the
+engine itself. What native needs back is a **reply**, never a return value
+read in place, so the same code works once JS answers from its own thread:
+
+* An event posted with `reply` gets a sequence number; JS's answer (the
+  `DispatchFlags` of `__jsui_dispatchEvent`) is stored under it until the
+  poster `take`s it (or `forget`s it once its deadline passed). Input
+  decides default actions with it (see "Input routing details").
+* A `Call` names what a missing global means (`Inbound::Missing`): warn
+  (no `AppRegistry`), fail the `jsui_call_ui` call ("no UI handler") or
+  reload (no hot-update hook).
+* `Eval` replies whether the script ran without an exception.
+
+`Inbound::replyDelayMs` is a test hook: event replies become visible that
+long after they were posted, on the runtime clock, as from a busy JS thread
+(`tests/native/input_test.cpp` "late JS answers", `text_input_test.cpp`).
+Not routed yet: the inspector's `poll()`, `releaseBuffer` (host buffers) and
+the host JS engine's own loader completions.
+
 ### Shared state
 
-The second step towards a JS thread: everything JS shares with the owner
+The third step towards a JS thread: everything JS shares with the owner
 thread (the thread calling `jsui_tick`) is made safe to share, and a
 **JS-thread mode** (`Runtime::setJsThreadMode`, before the first bundle
 load; off by default, the C API comes with the thread itself) makes JS
@@ -1551,6 +1583,42 @@ was `preventDefault()`-ed.
   `responderterminationrequest` native sends first
   (`onResponderTerminationRequest` → `false`). `preventDefault()` on
   `pointermove` keeps the touch too, like `touch-action: none`.
+* **Late answers.** Native never reads JS's answer to an event in place:
+  it posts the event (see "Inbound messages") and acts on the reply.
+  Single-threaded the reply is there as soon as the event is posted, so
+  nothing below changes what happens; it matters once JS answers later (a
+  JS thread; in tests, `Inbound::replyDelayMs`):
+  * A default action JS could veto (Tab, Enter / Space / A → `click`,
+    arrows / D-pad / stick navigation, keyboard scrolling, TextInput
+    editing, wheel scrolling) waits for the reply only when a listener could
+    `preventDefault()` it: `keyDown` on the focused path or a global
+    `keydown` listener for keys, `textInput` for text, `gamepadButton` /
+    `gamepadAxis` (or global ones) for the gamepad, `wheel` on the path for
+    the wheel (global listeners are reported with `listenGlobal`). The
+    action then waits in `InputManager::deferred_`, in event order (an
+    event with nothing to wait for queues behind a waiting one), and runs
+    when the reply comes without `preventDefault()`, or when
+    `Runtime::eventDeadlineMs` (100) passes, with a warning. Plain focus
+    navigation without key listeners stays instant; a Pressable's Enter
+    activation runs in JS anyway. Meanwhile `jsui_send_*` reports a key or
+    press with a pending action as consumed, a pointer by the hit test
+    alone. State styles (`pressedStyle` by Enter / A) do not wait.
+  * A touch dragged past the slop while a reply of its gesture is out and
+    a node on the path can be a JS responder (`responder` / `pointerMove`
+    in `__events`) is **held**: the ScrollView does not scroll yet, the
+    drag start stays put, and it decides when the replies are in (the
+    `responderterminationrequest` is asked the same way) or at the
+    deadline. Then the static hints decide: `__blocksNative` (an
+    `onResponderGrant` marked `__blocksNative = true`: a PanResponder
+    without `onShouldBlockNativeResponder`) keeps the touch for JS, as does
+    `__keepsGesture` for an unanswered termination request (an
+    `onResponderTerminationRequest` not marked `__keepsGesture = false`:
+    PanResponder marks it so without `onPanResponderTerminationRequest`).
+    Without hints the ScrollView takes it. A touch with no possible JS
+    responder on its path scrolls at once.
+  * The `click` after `pointerup` hits the tree as it is when it is sent,
+    without JS's changes from a late `pointerup` handler (the DOM order for
+    asynchronous handlers).
 * **`__events` drives native decisions.** Names are matched case-insensitively
   by substring: `press`/`click` = pressable (focusable by default, `pointer`
   cursor); `move`/`responder`/`pan`/`drag` = wants `pointermove` (moves are not

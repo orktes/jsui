@@ -119,9 +119,7 @@ void Runtime::attach(Surface& s) {
     in->nodeRemoved(n);
     animated->viewDestroyed(n->id());
   };
-  d.onLayout = [this](Node* n, const Rect& r) {
-    if (js) js->layoutEvent(n->id(), r.x, r.y, r.width, r.height);
-  };
+  d.onLayout = [this](Node* n, const Rect& r) { inbound.layout(n->id(), r.x, r.y, r.width, r.height); };
 }
 
 // ------------------------------------------------------------ surfaces
@@ -167,10 +165,7 @@ void Runtime::destroySurface(Surface* s) {
   auto it = std::find_if(surfaces_.begin(), surfaces_.end(), [s](const auto& p) { return p.get() == s; });
   if (it == surfaces_.end()) return;
   // Unmount first, while JS can still reach the surface's nodes.
-  if (js && bundleRan_) {
-    Value arg(double(s->tag()));
-    js->callGlobal("__jsui_stopSurface", &arg, 1);
-  }
+  if (js && bundleRan_) inbound.call("__jsui_stopSurface", {Value(double(s->tag()))});
   it = std::find_if(surfaces_.begin(), surfaces_.end(), [s](const auto& p) { return p.get() == s; });
   if (it == surfaces_.end()) return;
   std::unique_ptr<Surface> owned = std::move(*it);
@@ -217,14 +212,11 @@ void Runtime::flushSurfaces(bool all) {
   if (batch.empty() && resized.empty()) return;
   // One microtask drain for everything: React commits the resizes and the
   // new props together.
-  js->beginBatch();
+  inbound.beginBatch();
   for (Surface* s : resized) s->dispatchResize();
-  if (!batch.empty()) {
-    Value arg(std::move(batch));
-    if (!js->callGlobal("__jsui_runSurfaces", &arg, 1))
-      log(JSUI_LOG_WARN, "surfaces: the bundle has no AppRegistry (import AppRegistry from 'react-native')");
-  }
-  js->endBatch();
+  if (!batch.empty())
+    inbound.call("__jsui_runSurfaces", {Value(std::move(batch))}, Inbound::Missing::WarnNoAppRegistry);
+  inbound.endBatch();
 }
 
 Surface* Runtime::surfaceByTag(uint32_t tag) const {
@@ -275,6 +267,7 @@ void Runtime::resetEngine() {
   audio->contextEnded();
   js.reset();
   bundleRan_ = false;
+  globalListeners.clear();
   animated->clear();
   for (auto& s : surfaces_) s->doc.clear();
   // Shared state outlives the context (the new bundle reads it as it starts).
@@ -338,7 +331,8 @@ void Runtime::answerMeasures() {
     results.push_back(r);
   }
   measureRequests.clear();
-  js->measured(results);
+  JsEngine* engine = js.get();
+  inbound.task([engine, results = std::move(results)] { engine->measured(results); });
 }
 
 // ------------------------------------------------------------ game data
@@ -373,14 +367,12 @@ void Runtime::uiStateChanged(const std::string& key, const std::string* json) {
 
 void Runtime::deliverStateChanges() {
   if (!state.hasDirty()) return;
-  std::vector<std::string> keys = state.takeDirty();
-  js->stateChanged(keys);
+  inbound.keysChanged(Inbound::Message::Kind::StateChanged, state.takeDirty());
 }
 
 void Runtime::deliverBufferChanges() {
   if (!buffers.hasDirty()) return;
-  std::vector<std::string> keys = buffers.takeDirty();
-  js->buffersChanged(keys);
+  inbound.keysChanged(Inbound::Message::Kind::BuffersChanged, buffers.takeDirty());
 }
 
 void Runtime::deliverAudioEvents() {
@@ -392,14 +384,12 @@ void Runtime::deliverAudioEvents() {
     else
       list.emplace_back(Value::Array{Value(0), Value(double(e.voice)), Value(e.status)});
   }
-  Value arg(std::move(list));
-  js->callGlobal("__jsui_onAudio", &arg, 1);
+  inbound.call("__jsui_onAudio", {Value(std::move(list))});
 }
 
 void Runtime::deliverTextureChanges() {
   if (!textures.hasDirty()) return;
-  std::vector<std::string> keys = textures.takeDirty();
-  js->texturesChanged(keys);
+  inbound.keysChanged(Inbound::Message::Kind::TexturesChanged, textures.takeDirty());
 }
 
 int Runtime::resolveCall(uint64_t id, const char* json) {
@@ -409,16 +399,16 @@ int Runtime::resolveCall(uint64_t id, const char* json) {
   if (!Json::parse(text, nullptr, &error)) {
     std::string msg = "jsui_resolve_call: invalid JSON result (" + error + ")";
     log(JSUI_LOG_ERROR, msg);
-    js->settleCall(id, false, msg);
+    inbound.settleCall(id, false, msg);
     return -2;
   }
-  js->settleCall(id, true, text);
+  inbound.settleCall(id, true, std::move(text));
   return 0;
 }
 
 int Runtime::rejectCall(uint64_t id, const char* message) {
   if (!js || !js->hasCall(id)) return -1;
-  js->settleCall(id, false, message ? message : "rejected");
+  inbound.settleCall(id, false, message ? message : "rejected");
   return 0;
 }
 
@@ -440,9 +430,8 @@ uint64_t Runtime::callUi(const char* name, const char* argsJson, JsuiCallResultF
     uiCallSettled(id, false, "jsui_call_ui(\"" + n + "\"): invalid JSON arguments (" + error + ")");
     return id;
   }
-  Value argv[3] = {Value(double(id)), Value(n), Value(args)};
-  if (!js->callGlobal("__jsui_onCall", argv, 3))
-    uiCallSettled(id, false, "no UI handler for \"" + n + "\" (the bundle has not registered Host.handle)");
+  inbound.call("__jsui_onCall", {Value(double(id)), Value(n), Value(std::move(args))}, Inbound::Missing::FailUiCall,
+               id);
   return id;
 }
 
@@ -510,7 +499,9 @@ bool Runtime::loadSource(const std::string& source, const std::string& name) {
     buffers.publish();
     publishSnapshot();
   }
-  bool ok = js->eval(source, name);
+  int ran = 0;
+  inbound.take(inbound.eval(source, name), &ran);
+  bool ok = ran != 0;
   if (jsThreadMode_) drainHost();
   // Surfaces run their apps once the bundle registered its components (a
   // component registered later starts its surface then, see AppRegistry).
@@ -600,11 +591,11 @@ void Runtime::reload() {
 }
 
 void Runtime::devUpdate() {
-  if (js && !reloadRequested_ && bundleRan_) {
-    Value token(devVersion_);
-    if (js->callGlobal("__jsui_onDevUpdate", &token, 1)) return;
-  }
-  reload();
+  // A bundle without the hook reloads (Inbound::Missing::Reload).
+  if (js && !reloadRequested_ && bundleRan_)
+    inbound.call("__jsui_onDevUpdate", {Value(devVersion_)}, Inbound::Missing::Reload);
+  else
+    reload();
 }
 
 bool Runtime::devKey(const char* key, bool down) {
@@ -687,9 +678,7 @@ void Runtime::tick(double nowMs) {
   deliverTextureChanges();
   audio->update();
   deliverAudioEvents();
-  js->runTimers(nowMs);
-  js->runAnimationFrame(nowMs);
-  js->runJobs();
+  inbound.frame(nowMs);
   // JS-thread mode: its host-state writes reach native Animated bindings
   // before they tick (HostState::deferUiChanges), its calls the embedder.
   if (jsThreadMode_) drainHost();
@@ -725,7 +714,7 @@ void Runtime::tick(double nowMs) {
   // The onLayout events of this tick's layout passes reach JS together, with
   // one microtask drain after them: state set by several handlers renders in
   // one React pass instead of one per event.
-  if (js) js->beginBatch();
+  inbound.beginBatch();
   for (auto& s : surfaces_) {
     s->doc.layout();
     s->doc.tickLayoutAnimations(nowMs);
@@ -735,7 +724,7 @@ void Runtime::tick(double nowMs) {
   // measureAsync callbacks get this layout (RN's measure: after the commit
   // that asked is laid out), with the onLayout events.
   answerMeasures();
-  if (js) js->endBatch();
+  inbound.endBatch();
   if (jsThreadMode_) {
     publishSnapshot();
     drainHost();  // before the call results below: callResult is queued
@@ -812,12 +801,12 @@ void Runtime::tickNative(double nowMs) {
   animated->tick(nowMs);  // end events stay queued until the next tick()
   lotties->tick(nowMs);   // so do LottieView events
   shaders->tick(nowMs);   // and ShaderView errors
-  if (js) js->beginBatch();
+  inbound.beginBatch();
   for (auto& s : surfaces_) {
     s->doc.layout();
     s->doc.tickLayoutAnimations(nowMs);
   }
-  if (js) js->endBatch();
+  inbound.endBatch();
   if (jsThreadMode_) publishSnapshot();  // what native Animated and layout did
 }
 
@@ -831,16 +820,10 @@ void Runtime::deliverAnimatedEvents() {
     // Value updates first (listeners see the final value), then end callbacks.
     auto updates = std::move(animated->updates);
     animated->updates.clear();
-    for (auto& u : updates) {
-      Value args[2] = {Value(u.tag), Value(u.value)};
-      js->callGlobal("__jsui_onAnimatedValueUpdate", args, 2);
-    }
+    for (auto& u : updates) inbound.call("__jsui_onAnimatedValueUpdate", {Value(u.tag), Value(u.value)});
     auto ends = std::move(animated->ends);
     animated->ends.clear();
-    for (auto& e : ends) {
-      Value args[3] = {Value(e.id), Value(e.finished), Value(e.value)};
-      js->callGlobal("__jsui_onAnimatedEnd", args, 3);
-    }
+    for (auto& e : ends) inbound.call("__jsui_onAnimatedEnd", {Value(e.id), Value(e.finished), Value(e.value)});
   }
 }
 
@@ -866,7 +849,7 @@ void Runtime::deliverLottieEvents() {
     Value::Object ev{{"type", Value(type)}, {"target", Value(double(e.node))}};
     if (e.kind == LottieCache::Event::Kind::Failed) ev.emplace("error", Value(e.error));
     if (e.kind == LottieCache::Event::Kind::Finished) ev.emplace("isCancelled", Value(e.cancelled));
-    js->dispatchEvent(Value(std::move(ev)));
+    inbound.event(Value(std::move(ev)), false);
   }
 }
 
@@ -877,7 +860,8 @@ void Runtime::deliverShaderEvents() {
   for (const ShaderEffects::Event& e : events) {
     Node* n = findNode(e.node);
     if (!n || n->type() != NodeType::Shader || !listensFor(n, "error")) continue;
-    js->dispatchEvent(Value(Value::Object{{"type", Value("error")}, {"target", Value(double(e.node))}, {"error", Value(e.error)}}));
+    Value::Object ev{{"type", Value("error")}, {"target", Value(double(e.node))}, {"error", Value(e.error)}};
+    inbound.event(Value(std::move(ev)), false);
   }
 }
 
@@ -923,18 +907,18 @@ void Runtime::deliverImageEvents(Document& doc) {
                          {"target", Value(id)},
                          {"loaded", Value(double(info.bytes))},
                          {"total", Value(double(info.bytes))}};
-        js->dispatchEvent(Value(std::move(ev)));
+        inbound.event(Value(std::move(ev)), false);
       }
       if (listensFor(n, "load")) {
         Value::Object source{{"uri", Value(c->url)},
                              {"width", Value(double(info.image->width()))},
                              {"height", Value(double(info.image->height()))}};
         Value::Object ev{{"type", Value("load")}, {"target", Value(id)}, {"source", Value(std::move(source))}};
-        js->dispatchEvent(Value(std::move(ev)));
+        inbound.event(Value(std::move(ev)), false);
       }
     } else if (listensFor(n, "error")) {
       Value::Object ev{{"type", Value("error")}, {"target", Value(id)}, {"error", Value(info.error)}};
-      js->dispatchEvent(Value(std::move(ev)));
+      inbound.event(Value(std::move(ev)), false);
     }
   }
   // Entries queued by the handlers stay behind the ones still waiting.

@@ -1,10 +1,15 @@
 // Turns embedder input into DOM-like events: hit testing, pointer capture,
 // hover (enter/leave), focus, keyboard routing and gamepad focus navigation.
 //
-// Events are plain objects (docs/ARCHITECTURE.md "Event objects") handed to
-// JsEngine::dispatchEvent(); the JS side does capture/bubble. Native decides
-// the target and runs the default actions (focus moves, scrolling, click
-// synthesis) unless the dispatch reported handled / preventDefault().
+// Events are plain objects (docs/ARCHITECTURE.md "Event objects") posted to
+// JS through the runtime's Inbound (js/inbound.h); the JS side does
+// capture/bubble. Native decides the target and runs the default actions
+// (focus moves, scrolling, click synthesis) unless JS's answer says
+// preventDefault(). A default action JS could veto waits for that answer:
+// single-threaded it is there as soon as the event is posted; when it comes
+// later the action is kept pending (Deferred) until it does, or until
+// Runtime::eventDeadlineMs passes (docs/ARCHITECTURE.md "Input routing
+// details").
 //
 // Nodes are tracked by id across dispatches: JS handlers may destroy any node
 // while we iterate, and ids are never reused within a Document.
@@ -12,6 +17,7 @@
 
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <limits>
 #include <string>
@@ -210,6 +216,20 @@ class InputManager {
     bool jsResponder = false; // a JS responder held it at the last dispatch
     bool owned = false;       // the UI consumed the press: its moves / release are consumed too
     std::vector<uint32_t> chain;  // hovered path, root first
+    // JS answers still to come for this gesture (Inbound::take): the
+    // pointerdown / pointermove dispatches whose flags set jsOwns /
+    // jsResponder / owned, and a responderterminationrequest. While one is
+    // out and a JS responder may want the touch, a ScrollView holds it
+    // (no scrolling) until the answers or holdUntil come.
+    struct Await {
+      uint32_t seq;
+      bool down;  // pointerdown (else pointermove)
+    };
+    std::vector<Await> awaiting;
+    uint32_t releaseSeq = 0;
+    bool released = false;       // the JS responder let the touch go (or its answer timed out)
+    bool movePrevented = false;  // the last pointermove answered preventDefault()
+    double holdUntil = -1;       // holding for JS until then (-1: not holding)
   };
   struct Repeat {
     int dir = -1;  // NavDirection or -1
@@ -271,16 +291,22 @@ class InputManager {
   bool visible(const Node* n) const;  // attached and no display:none on the path
   Affine localToViewport(const Node* n) const;
 
-  // Returns true when JS called preventDefault(). The full JsEngine flags
-  // land in lastFlags_.
-  bool dispatch(Value::Object&& ev);
-  // dispatch(), or only the native Animated.event mappings when !toJs.
-  bool deliver(Value::Object&& ev, bool toJs);
-  // Asks the JS responder (if any) to let a native gesture take the touch
-  // over; false when it refuses (RN onResponderTerminationRequest).
-  bool jsReleasesGesture(const PointerState& p, Node* target);
+  // Sends an event JS's answer does not matter for.
+  void post(Value::Object&& ev) { deliver(std::move(ev), true); }
+  // post(), or only the native Animated.event mappings when !toJs.
+  void deliver(Value::Object&& ev, bool toJs);
+  // Sends an event and returns true with JS's answer (JsEngine flags) in
+  // *flags when it is already there (always, single-threaded); false: it
+  // comes later under *seq (Inbound::take).
+  bool ask(Value::Object&& ev, int* flags, uint32_t* seq);
   Value::Object baseEvent(const char* type, const Node* target) const;
-  bool dispatchPointer(const char* type, Node* target, const PointerState& p, int button, float x, float y);
+  Value::Object pointerEvent(const char* type, Node* target, const PointerState& p, int button, float x,
+                             float y) const;
+  void postPointer(const char* type, Node* target, const PointerState& p, int button, float x, float y);
+  // Pointer event whose answer the caller reads: the flags, or -1 when they
+  // come later (then `track`ed in p.awaiting, `down`: a pointerdown).
+  int askPointer(const char* type, Node* target, PointerState& p, int button, float x, float y, bool track,
+                 bool down = false);
   void updateHover(PointerState& p, Node* hit);
   void leaveAll(PointerState& p);
   void updateCursor(Node* hit);
@@ -290,13 +316,23 @@ class InputManager {
   bool listensForScroll(const Node* sv) const;
   bool pointerDown(PointerState& p, uint32_t hitId, int button);
   bool pointerUp(PointerState& p, uint32_t hitId, int button, bool cancel);
+  // A touch dragged past the slop inside a ScrollView turns into scrolling
+  // unless a JS responder keeps it; true when the touch is taken (scrolling,
+  // kept by JS, or held for JS's answers).
+  bool slopScroll(PointerState& p, uint32_t targetId, uint32_t hitId, float x, float y);
+  // Takes the JS answers of p's gesture that arrived.
+  void absorbAnswers(PointerState& p);
+  // A held touch: decides once the answers are in or holdUntil passed.
+  void tickHeld(PointerState& p);
+  // Forgets the answers p's gesture still waits for.
+  void endGesture(PointerState& p);
   Node* alive(uint32_t id) const;
   void addModifiers(Value::Object& ev) const;
   Node* commonAncestor(Node* a, Node* b) const;
   void focusFromPointer(Node* hit);
   void setFocus(Node* n);
   Node* scrollableAncestor(Node* n, float dx, float dy) const;
-  bool dispatchScroll(Node* sv);
+  void dispatchScroll(Node* sv);
 
   // TextInput editing (text_editing.cpp). The focused TextInput gets keys
   // and text after JS saw them (unless prevented); see text/text_edit.h.
@@ -315,7 +351,7 @@ class InputManager {
   bool editable(const Node* input) const;
 
   // Scrolling internals (src/input/scroll.cpp).
-  bool dispatchScrollEvent(const char* type, Node* sv, float vx = 0, float vy = 0, const float* target = nullptr,
+  void dispatchScrollEvent(const char* type, Node* sv, float vx = 0, float vy = 0, const float* target = nullptr,
                            bool toJs = true);
   // Sends the trailing 'scroll' a throttle held back once it is due.
   void flushOwedScroll(uint32_t svId, double now);
@@ -355,6 +391,41 @@ class InputManager {
   bool keyAction(const char* key, const char* code, bool down, bool repeat, int mods);
   bool gamepadButtonAction(int pad, int button, bool down, float value);
 
+  // A default action JS may veto with preventDefault(), run once JS's
+  // answer to its event is there. Single-threaded that is right after the
+  // event; a late answer keeps it in deferred_ (in event order) until the
+  // answer or `deadline` comes.
+  struct Deferred {
+    enum class Kind : uint8_t { Key, Text, PadButton, PadAxis, Wheel };
+    Kind kind;
+    bool down = false, repeat = false;   // key / button
+    bool edge = true;                    // PadButton: pressed or released (not a repeat)
+    bool hitAgain = false;               // Wheel: JS saw it, hit test again
+    int mods = 0;
+    int pad = 0, index = 0;              // gamepad, button / axis; Wheel: the hit node
+    float x = 0, y = 0, dx = 0, dy = 0;  // wheel point and deltas; stick axes
+    std::string text;                    // key / text
+    uint32_t seq = 0;                    // answer waited for (0: `flags` known)
+    int flags = 0;
+    double deadline = 0;
+  };
+  // Runs `d` with JS's answer when it is there and nothing is pending before
+  // it; otherwise queues it (`vetoable`: a listener on the path, or a global
+  // one, may preventDefault() the event, so it waits for the answer; else it
+  // runs in turn as unprevented). Returns the action's result, or the
+  // prediction (true: consumed) while it is pending.
+  bool settle(bool answered, int flags, uint32_t seq, Deferred&& d, bool vetoable);
+  bool runDefault(const Deferred& d, int flags);
+  // Runs the pending defaults whose answer came (or whose deadline passed).
+  void runDeferred();
+  bool keyDefault(const Deferred& d, bool prevented);
+  bool textDefault(const Deferred& d, bool prevented);
+  bool padButtonDefault(const Deferred& d, bool prevented);
+  bool padAxisDefault(const Deferred& d, bool prevented);
+  bool wheelDefault(const Deferred& d, bool prevented);
+  // A late answer missed its deadline: the default ran anyway.
+  void lateWarning(const char* what);
+
   Node* modalScope() const;
   void collectFocusable(Node* scope, std::vector<Node*>* out) const;
   Node* preferredFocus(Node* scope) const;
@@ -390,7 +461,6 @@ class InputManager {
   std::unordered_map<uint32_t, ScrollState> scrolls_;
   double lastTick_ = -1;
   double eventTime_ = std::numeric_limits<double>::quiet_NaN();
-  int lastFlags_ = 0;
   mutable double lastEventTime_ = -std::numeric_limits<double>::infinity();
   bool pointerFocus_ = false;  // focus change caused by a press: no scroll into view
   // State styles: the element an activation key / gamepad A holds pressed,
@@ -402,6 +472,8 @@ class InputManager {
   int padPress_ = -1;
   std::vector<uint32_t> pressFlash_;
   bool statesMoving_ = false;
+  // Default actions waiting for a late JS answer, in event order.
+  std::deque<Deferred> deferred_;
 
   // TextInput pointer selection: drag target, granularity (0 characters,
   // 1 words, 2 everything) and the word the drag started on.
