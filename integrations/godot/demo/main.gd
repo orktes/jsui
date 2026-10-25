@@ -53,6 +53,11 @@ extends Control
 ##                       list scrolling (JsuiView.get_render_stats, frame
 ##                       times), print them and quit
 ##   --no-world          leave the 3D scene out (benchmarks: the UI only)
+##   --no-ui             leave the JsuiView out (the 3D scene without JSUI)
+##   --bench-seconds S   vsync and the frame cap off, time S seconds of frames
+##                       after a warm-up (--bench-warmup S, default 3), print
+##                       one `bench:` line (as the engine examples' --bench)
+##                       and quit
 ##   --first-scroll      measure the armory list's first scroll: the worst
 ##                       frame (wall time) and the worst JsuiView render while
 ##                       it scrolls, and the GPU pipelines that compiled
@@ -92,7 +97,7 @@ extends Control
 ## `godot.ping` a call from the UI (call_requested -> resolve_call, which pays
 ## out credits with patch_state), `ui.flash` a call into the UI (call_ui).
 
-@onready var ui = $JsuiView
+@onready var ui = get_node_or_null("JsuiView")
 
 const PING_REWARD := 120
 const VIEWPORT_BACKDROP := Color8(40, 150, 110)  # --max-viewport-diff
@@ -110,6 +115,11 @@ var _max_gpu_diff := -1.0
 var _max_viewport_diff := -1.0
 var _max_render_waits := -1
 var _bench := 0
+var _bench_seconds := 0.0
+var _bench_warmup := 3.0
+var _bench_ms := PackedFloat32Array()
+var _bench_last := -1
+var _bench_from := 0
 var _first_scroll := false
 var _tour := false
 var _expect_warm := false
@@ -197,6 +207,17 @@ func _enter_tree() -> void:
 			"--bench":
 				_bench = int(v)
 				i += 1
+			"--bench-seconds":
+				_bench_seconds = float(v)
+				i += 1
+			"--bench-warmup":
+				_bench_warmup = float(v)
+				i += 1
+			"--no-ui":
+				if view:
+					remove_child(view)
+					view.free()
+					view = null
 			"--first-scroll":
 				_first_scroll = true
 			"--tour":
@@ -227,6 +248,8 @@ func _enter_tree() -> void:
 					_window_size = Vector2i(int(wh[0]), int(wh[1]))
 				i += 1
 		i += 1
+	if view == null:
+		return
 	# Shared state can be set before the view starts: the UI renders it on
 	# its first frame.
 	view.set_state("godot.stats", _stats())
@@ -248,6 +271,12 @@ func _ready() -> void:
 	# real layout and scale, e.g. 2560x1440 for a Retina-like 2x.
 	if _window_size != Vector2i.ZERO:
 		get_window().size = _window_size
+	if _bench_seconds > 0:
+		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
+		Engine.max_fps = 0
+	if ui == null:
+		print("UI: off (--no-ui)")
+		return
 	ui.message_received.connect(_on_ui_message)
 	ui.call_requested.connect(_on_ui_call)
 	ui.js_error.connect(func(msg): printerr("[jsui error] ", msg))
@@ -305,6 +334,10 @@ func _send_stats() -> void:
 
 
 func _process(delta: float) -> void:
+	if _bench_seconds > 0:
+		_bench_frame()
+	if ui == null:
+		return
 	# Once a second; of UI time with --ui-fixed-fps (the same frames each run).
 	_stats_timer -= delta if _fixed_fps == 0 else 1.0 / _fixed_fps
 	if _stats_timer <= 0.0:
@@ -314,6 +347,33 @@ func _process(delta: float) -> void:
 		_frame += 1
 		if _frame >= _frames and ui.get_pending_loads() == 0:
 			_save_capture()
+
+
+## --bench-seconds: frame-to-frame times over a wall-clock window after the
+## warm-up, then the engine examples' `bench:` line.
+func _bench_frame() -> void:
+	var now := Time.get_ticks_usec()
+	if now < int(_bench_warmup * 1e6):
+		return
+	if _bench_last < 0:
+		_bench_from = now
+	else:
+		_bench_ms.append((now - _bench_last) / 1000.0)
+	_bench_last = now
+	if now - _bench_from < int(_bench_seconds * 1e6) or _bench_ms.is_empty():
+		return
+	var s := _bench_ms.duplicate()
+	s.sort()
+	var sum := 0.0
+	for v in _bench_ms:
+		sum += v
+	var mean := sum / _bench_ms.size()
+	var q := func(f: float) -> float: return s[mini(s.size() - 1, int(f * s.size()))]
+	var label: String = "no-ui" if ui == null else ui.get_renderer()
+	print("bench: %s frames %d mean %.4f ms (%.1f fps) p50 %.4f p90 %.4f p99 %.4f max %.4f" % [
+		label, _bench_ms.size(), mean, 1000.0 / mean, q.call(0.5), q.call(0.9), q.call(0.99), s[s.size() - 1]])
+	_bench_seconds = 0
+	get_tree().quit(0)
 
 
 func _on_flash_answer(ok: bool, result) -> void:

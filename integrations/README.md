@@ -85,6 +85,8 @@ Every example takes the same options:
 | `--frames N --screenshot out.png` | run N frames, save the composed frame (scene + UI), exit |
 | `--selftest` | scripted check of the pass-through contract (below), then exit |
 | `--js-thread on\|off\|lockstep` | where the HUD's JS runs (default `on`: its own thread; `off`: inside `jsui_tick`; `lockstep`: its own thread, waited for every tick); printed at start as `JS thread: ...` |
+| `--no-ui` | the same game without JSUI (no runtime): the baseline for measuring the UI's cost |
+| `--bench S [--bench-warmup S]` | vsync off, time S seconds of frames after a warm-up (default 3 s), print `bench: ... mean X ms (Y fps) p50 p90 p99 max`, exit. sokol on macOS times each frame's work (CPU + `glFinish`), as the OS paces its GL view at the display refresh |
 
 `--selftest` waits for the HUD to report where its Spawn button is, then
 clicks through the host's own mouse handling (the code real events run): a

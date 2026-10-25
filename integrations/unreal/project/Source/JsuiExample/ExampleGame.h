@@ -128,6 +128,13 @@ private:
 
 	// Command line.
 	bool bSelfTest = false, bDev = false, bCpu = false;
+	// --no-ui: the same game without the widget (no runtime at all).
+	// --bench=S [--bench-warmup=S]: uncapped, time S seconds of frames after
+	// a warm-up, print one `bench:` line, quit.
+	bool bNoUi = false;
+	double Bench = 0, BenchWarmup = 3, BenchLast = -1, BenchFrom = 0, BenchStart = -1;
+	TArray<float> BenchMs;
+	void BenchFrame();
 	uint8 JsThread = 1;  // --js-thread=on|off|lockstep: EJsuiJsThread
 	int64 Frames = -1, Frame = 0;
 	FString Screenshot, BundleOverride;
