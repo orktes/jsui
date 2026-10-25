@@ -739,9 +739,16 @@ TEST(vulkan_common_pipelines_precompiled) {
     return;
   }
   JsuiVulkanDevice d = vk.desc();
-  setenv("JSUI_LOG_PIPELINES", "compiled", 1);  // names any the frames still compile
+  // Names any pipeline the frames still compile.
+#if defined(_WIN32)
+  _putenv_s("JSUI_LOG_PIPELINES", "compiled");
+  JsuiGpuContext* gpu = jsui_gpu_create_vulkan(&d);
+  _putenv_s("JSUI_LOG_PIPELINES", "");
+#else
+  setenv("JSUI_LOG_PIPELINES", "compiled", 1);
   JsuiGpuContext* gpu = jsui_gpu_create_vulkan(&d);
   unsetenv("JSUI_LOG_PIPELINES");
+#endif
   CHECK(gpu != nullptr);
   if (!gpu) return;
   {
