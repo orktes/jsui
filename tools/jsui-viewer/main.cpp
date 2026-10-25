@@ -16,6 +16,15 @@
 // CPU path. --cpu forces the CPU raster + SDL texture path (deterministic
 // output; what CI's CPU steps use). --gpu is accepted as a no-op alias of the
 // default.
+// JS runs on its own thread by default, as in React Native (--js-thread
+// on; JsuiConfig.js_thread): the window keeps animating, scrolling and
+// following input while the bundle is busy. --js-thread off runs it on the
+// window's thread, lockstep on its thread but waited for (the frames of
+// off). F6 switches between the three (restarting the runtime), F7 keeps JS
+// busy for 200 ms (jsui_debug_stall_js) to show the difference: with the
+// thread, native Animated, scrolling and hover go on; without, the window
+// freezes. A screenshot runs one sync frame first (JSUI_TICK_SYNC_JS), so
+// it shows what JS rendered by then.
 // --gl-core asks for an OpenGL 3.2 core, forward-compatible context. It is
 // the default on macOS, where SDL otherwise gets a legacy 2.1 context whose
 // GLSL 1.20 Skia's shaders cannot use ("undeclared gl_VertexID"); elsewhere
@@ -51,18 +60,26 @@ struct Options {
   int width = 1280, height = 720;
   long frames = -1;
   std::string screenshot;
+  int jsThread = JSUI_JS_THREAD_ON;  // --js-thread on|off|lockstep
 };
+
+const char* jsThreadName(int mode) {
+  return mode == JSUI_JS_THREAD_ON ? "on" : mode == JSUI_JS_THREAD_LOCKSTEP ? "lockstep" : "off";
+}
 
 void usage() {
   std::printf(
       "usage: jsui-viewer [--dev] [--cpu | --gl-core] [--width W] [--height H] [--frames N] [--screenshot out.png]\n"
-      "                   <bundle.js|url>\n"
+      "                   [--js-thread on|off|lockstep] <bundle.js|url>\n"
       "  --dev        poll the dev server and reload on change, show errors on screen\n"
       "  --cpu        render with the CPU rasteriser + an SDL texture (default: Skia Ganesh on OpenGL,\n"
       "               falling back to the CPU path when GL is unavailable)\n"
       "  --gpu        accepted for compatibility: the GPU renderer is the default\n"
       "  --gl-core    request an OpenGL 3.2 core profile context (always on macOS)\n"
-      "  F5 reloads the bundle, Esc dismisses the error overlay (dev mode)\n");
+      "  --js-thread  on (default): JS on its own thread; off: on the window's thread; lockstep: on its\n"
+      "               thread, waited for every frame\n"
+      "  F5 reloads the bundle, Esc dismisses the error overlay (dev mode)\n"
+      "  F6 switches --js-thread (restarts the runtime), F7 keeps JS busy for 200 ms\n");
 }
 
 bool parseArgs(int argc, char** argv, Options* o) {
@@ -73,7 +90,7 @@ bool parseArgs(int argc, char** argv, Options* o) {
     else if (a == "--gpu") o->gpu = true;  // the default; kept as an alias
     else if (a == "--cpu") o->gpu = false;
     else if (a == "--gl-core") o->glCore = true;
-    else if (a == "--width" || a == "--height" || a == "--frames" || a == "--screenshot") {
+    else if (a == "--width" || a == "--height" || a == "--frames" || a == "--screenshot" || a == "--js-thread") {
       const char* v = next();
       if (!v) {
         std::fprintf(stderr, "missing value for %s\n", a.c_str());
@@ -82,7 +99,16 @@ bool parseArgs(int argc, char** argv, Options* o) {
       if (a == "--width") o->width = std::atoi(v);
       else if (a == "--height") o->height = std::atoi(v);
       else if (a == "--frames") o->frames = std::atol(v);
-      else o->screenshot = v;
+      else if (a == "--js-thread") {
+        std::string m = v;
+        if (m == "on") o->jsThread = JSUI_JS_THREAD_ON;
+        else if (m == "off") o->jsThread = JSUI_JS_THREAD_OFF;
+        else if (m == "lockstep") o->jsThread = JSUI_JS_THREAD_LOCKSTEP;
+        else {
+          std::fprintf(stderr, "--js-thread takes on, off or lockstep\n");
+          return false;
+        }
+      } else o->screenshot = v;
     } else if (a == "-h" || a == "--help") {
       usage();
       std::exit(0);
@@ -214,29 +240,8 @@ class Viewer {
     premul_ = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
                                          SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
 
-    JsuiConfig cfg;
-    jsui_config_init(&cfg);
-    cfg.width = opt_.width;
-    cfg.height = opt_.height;
-    cfg.dev_mode = opt_.dev ? 1 : 0;
-    cfg.on_message = [](void*, const char* name, const char* json) {
-      std::printf("[message] %s %s\n", name, json);
-    };
-    rt_ = jsui_create(&cfg);
-    // TextInput copy / paste use the system clipboard.
-    jsui_set_clipboard_callbacks(
-        rt_,
-        [](void* u) -> const char* {
-          auto* self = static_cast<Viewer*>(u);
-          char* t = SDL_GetClipboardText();
-          self->clipboard_ = t ? t : "";
-          SDL_free(t);
-          return self->clipboard_.c_str();
-        },
-        [](void*, const char* text) { SDL_SetClipboardText(text); }, this);
-    updateViewport();
-    jsui_set_dev_session(rt_, "jsui-viewer", 1);  // dev mode: joins `jsui dev`'s shared session
-    jsui_load_bundle_url(rt_, opt_.bundle.c_str());
+    wakeEvent_ = SDL_RegisterEvents(1);
+    createRuntime();
     SDL_StartTextInput();
 
     start_ = SDL_GetPerformanceCounter();
@@ -254,7 +259,16 @@ class Viewer {
       }
       if (opt_.frames >= 0 && ++frame >= opt_.frames) break;
       // Without vsync (software / dummy driver) or when idle, don't spin.
-      if (!drew) SDL_WaitEventTimeout(nullptr, 4);
+      // Idle (nothing moving or loading) it waits longer: JS on its thread
+      // wakes it when it has something for the next tick (on_js_ready).
+      if (!drew) SDL_WaitEventTimeout(nullptr, jsui_wants_frame(rt_) || jsui_pending_loads(rt_) > 0 ? 4 : 32);
+    }
+    if (!opt_.screenshot.empty()) {
+      // A JS thread runs behind the frames: one more frame, whose JS (timers
+      // due by now included) lands in it, so the shot shows what
+      // single-threaded mode would.
+      double now = double(SDL_GetPerformanceCounter() - start_) * 1000.0 / double(SDL_GetPerformanceFrequency());
+      jsui_tick_ex(rt_, now, JSUI_TICK_SYNC_JS);
     }
     if (!opt_.screenshot.empty() && opt_.gpu) {
       if (!gpuScreenshot(opt_.screenshot)) std::fprintf(stderr, "screenshot failed\n");
@@ -274,6 +288,51 @@ class Viewer {
   }
 
  private:
+  // (Re)creates the runtime in opt_.jsThread mode and loads the bundle.
+  void createRuntime() {
+    if (rt_) jsui_destroy(rt_);
+    JsuiConfig cfg;
+    jsui_config_init(&cfg);
+    cfg.width = opt_.width;
+    cfg.height = opt_.height;
+    cfg.dev_mode = opt_.dev ? 1 : 0;
+    cfg.on_message = [](void*, const char* name, const char* json) {
+      std::printf("[message] %s %s\n", name, json);
+    };
+    cfg.js_thread = opt_.jsThread;
+    // Runs on the JS thread: wakes the event wait (SDL_PushEvent is thread safe).
+    cfg.js_ready_user = this;
+    cfg.on_js_ready = [](void* u) {
+      Uint32 type = static_cast<Viewer*>(u)->wakeEvent_;
+      if (type == Uint32(-1)) return;  // SDL_RegisterEvents ran out
+      SDL_Event e{};
+      e.type = type;
+      SDL_PushEvent(&e);
+    };
+    rt_ = jsui_create(&cfg);
+    // TextInput copy / paste use the system clipboard.
+    jsui_set_clipboard_callbacks(
+        rt_,
+        [](void* u) -> const char* {
+          auto* self = static_cast<Viewer*>(u);
+          char* t = SDL_GetClipboardText();
+          self->clipboard_ = t ? t : "";
+          SDL_free(t);
+          return self->clipboard_.c_str();
+        },
+        [](void*, const char* text) { SDL_SetClipboardText(text); }, this);
+    updateViewport();
+    for (auto& [id, p] : pads_) {
+      const char* name = SDL_GameControllerName(p.controller);
+      jsui_set_gamepad_connected(rt_, p.index, 1, name ? name : "SDL GameController");
+    }
+    jsui_set_dev_session(rt_, "jsui-viewer", 1);  // dev mode: joins `jsui dev`'s shared session
+    jsui_load_bundle_url(rt_, opt_.bundle.c_str());
+    cursorName_.clear();
+    presented_ = false;
+    std::printf("JS thread: %s\n", jsThreadName(jsui_js_thread(rt_)));
+  }
+
   bool initGpu() {
     glContext_ = SDL_GL_CreateContext(window_);
     if (!glContext_) {
@@ -466,6 +525,21 @@ class Viewer {
           if (down && !e.key.repeat) jsui_reload(rt_);
           break;
         }
+        if (e.key.keysym.sym == SDLK_F6) {  // off -> on -> lockstep -> off
+          if (down && !e.key.repeat) {
+            opt_.jsThread = (opt_.jsThread + 1) % 3;
+            createRuntime();
+          }
+          break;
+        }
+        if (e.key.keysym.sym == SDLK_F7) {
+          if (down && !e.key.repeat) {
+            std::printf("stalling JS for 200 ms (JS thread: %s)\n", jsThreadName(jsui_js_thread(rt_)));
+            std::fflush(stdout);
+            jsui_debug_stall_js(rt_, 200);
+          }
+          break;
+        }
         std::string key = viewer::domKey(e.key.keysym.sym, e.key.keysym.mod);
         jsui_send_key(rt_, key.c_str(), viewer::domCode(e.key.keysym.scancode), down, e.key.repeat != 0,
                       viewer::jsuiMods(e.key.keysym.mod));
@@ -548,6 +622,7 @@ class Viewer {
   bool presented_ = false;
   SDL_BlendMode premul_ = SDL_BLENDMODE_BLEND;
   JsuiRuntime* rt_ = nullptr;
+  Uint32 wakeEvent_ = 0;  // pushed by on_js_ready
   std::string clipboard_;
   std::vector<uint8_t> pixels_;
   int pixelW_ = 0, pixelH_ = 0, logicalW_ = 0, logicalH_ = 0;
