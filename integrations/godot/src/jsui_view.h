@@ -54,6 +54,20 @@
 // next start precompiles them, plus a list shipped at the same path under
 // res:// (res://jsui-pipelines.vulkan.bin), off the frame.
 //
+// JS thread (`js_thread`, JsuiConfig.js_thread): by default the bundle runs
+// on a thread of its own, as in React Native (JS_THREAD_ON). The tick in
+// NOTIFICATION_PROCESS never waits for JS: a long React commit or a garbage
+// collection costs the game no frame, and what native does every frame
+// (Animated values driven by set_buffer data, scrolling, hover and press
+// styles, LayoutAnimations) goes on meanwhile. What JS does lands a frame
+// or more later, its signals (message_received, call_requested, ...) still
+// on the main thread after a tick. sync_js_next_frame() makes the next tick
+// wait for JS (up to 250 ms), so what the game set before it shows on that
+// frame (a scene cut, a screenshot, state that must not lag); sync_js()
+// waits now. JS_THREAD_OFF runs JS inside the tick on the main thread,
+// JS_THREAD_LOCKSTEP on its thread but waited for every tick (the frames
+// of OFF). The runtime view's applies (on start()).
+//
 // Fonts (register_font, jsui_register_font): FontFile resources, bytes or
 // font files the UI's fontFamily can name. Like host textures they belong to
 // the runtime: the runtime view registers the `fonts` property and every
@@ -116,6 +130,9 @@ class JsuiView : public godot::Control {
   bool get_input_pass_through() const { return input_pass_through_; }
   void set_force_cpu(bool on);
   bool get_force_cpu() const { return force_cpu_; }
+  // JS_THREAD_OFF / _ON (default) / _LOCKSTEP; applies on the next start().
+  void set_js_thread(int mode) { js_thread_ = mode >= JSUI_JS_THREAD_OFF && mode <= JSUI_JS_THREAD_LOCKSTEP ? mode : JSUI_JS_THREAD_ON; }
+  int get_js_thread() const { return js_thread_; }
   void set_runtime_view(const godot::NodePath& path);
   godot::NodePath get_runtime_view() const { return runtime_view_; }
   void set_component(const godot::String& key);
@@ -154,6 +171,20 @@ class JsuiView : public godot::Control {
   bool is_running() const { return rt_.unsynced() != nullptr; }
   void post_message(const godot::String& name, const godot::Variant& data);
   void post_message_json(const godot::String& name, const godot::String& json);
+  // JS thread (see the top of this file). sync_js: jsui_sync now, then the
+  // signals for what JS did and a repaint on the next frame; true when JS
+  // is left idle, false after timeout_ms (< 0: no limit). Without a JS
+  // thread: true at once. sync_js_next_frame: the next tick is a
+  // JSUI_TICK_SYNC_JS one. debug_stall_js: keeps JS busy for ms
+  // (jsui_debug_stall_js; demos, tests). get_active_js_thread: the mode the
+  // runtime runs in (OFF where the build has no threads or not running).
+  bool sync_js(double timeout_ms);
+  void sync_js_next_frame();
+  void debug_stall_js(double ms);
+  int get_active_js_thread() const;
+  static constexpr int JS_THREAD_OFF = JSUI_JS_THREAD_OFF;
+  static constexpr int JS_THREAD_ON = JSUI_JS_THREAD_ON;
+  static constexpr int JS_THREAD_LOCKSTEP = JSUI_JS_THREAD_LOCKSTEP;
 
   // Shared state (jsui_set_state / jsui_patch_state / jsui_get_state). Values
   // are JSON-encoded; null removes the key. Kept across start()/stop():
@@ -367,6 +398,8 @@ class JsuiView : public godot::Control {
   bool input_pass_through_ = true;
   int mouse_buttons_ = 0;  // buttons whose press reached the UI (DOM bits)
   bool force_cpu_ = false;
+  int js_thread_ = JSUI_JS_THREAD_ON;
+  bool sync_js_next_frame_ = false;
   godot::NodePath runtime_view_;
   godot::String component_;
   godot::Dictionary initial_props_;

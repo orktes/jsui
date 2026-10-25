@@ -20,6 +20,10 @@ extends Control
 ##                       per check and fails the run on any FAIL
 ##   --force-cpu         JsuiView.force_cpu: CPU raster + texture upload even
 ##                       when Godot runs on Vulkan / Metal
+##   --js-thread M       JsuiView.js_thread: on (the default: JS on its own
+##                       thread), off (inside the tick) or lockstep. The
+##                       self-test starts with one JS stall (debug_stall_js):
+##                       with the thread, frames go on while JS is busy
 ##   --expect-renderer R fail the run unless JsuiView rendered with R
 ##                       ("vulkan", "metal", "webgpu" or "cpu")
 ##   --max-gpu-diff D    with --capture on a GPU renderer: also paint the same
@@ -175,6 +179,9 @@ func _enter_tree() -> void:
 				_self_test = true
 			"--force-cpu":
 				view.force_cpu = true
+			"--js-thread":
+				view.js_thread = {"off": JsuiView.JS_THREAD_OFF, "lockstep": JsuiView.JS_THREAD_LOCKSTEP}.get(v, JsuiView.JS_THREAD_ON)
+				i += 1
 			"--expect-renderer":
 				_expect_renderer = v
 				i += 1
@@ -456,6 +463,8 @@ func _run_self_test() -> void:
 	_check("frame size", img != null and img.get_size() == want,
 		"frame %s, want view %s x ratio %.2f = %s" % [img.get_size() if img else null, ui.size, ratio, want])
 
+	await _test_js_stall()
+
 	# Hover: motion over a menu button fires its onHoverIn.
 	var mark := _events.size()
 	_mouse_move(_center("menu-1") + Vector2(-60, 0))
@@ -563,6 +572,36 @@ func _run_self_test() -> void:
 
 ## Input pass-through: what nothing in the UI captures goes to the game,
 ## painted UI or not, and to Godot controls behind the view.
+## One JS stall (debug_stall_js). With JS on its own thread (js_thread On,
+## the default) posting it returns at once, Godot's frames go on while it
+## runs (none comes near the stall) and sync_js finds JS idle after it, so
+## the rest of the self-test runs against a JS thread that just caught up.
+## Without the thread (Off, Lockstep) the stall holds the main thread.
+func _test_js_stall() -> void:
+	var mode: int = ui.get_active_js_thread()
+	var stall := 400.0
+	var t0 := Time.get_ticks_usec()
+	ui.debug_stall_js(stall)
+	var held := (Time.get_ticks_usec() - t0) / 1000.0
+	if mode != JsuiView.JS_THREAD_ON:
+		_check("js stall", held >= stall * 0.9, "JS thread %s: the stall held the main thread %.0f ms" % [
+			"lockstep" if mode == JsuiView.JS_THREAD_LOCKSTEP else "off", held])
+		return
+	var frames := 0
+	var worst := 0.0
+	var last := Time.get_ticks_usec()
+	while (Time.get_ticks_usec() - t0) / 1000.0 < stall:
+		await get_tree().process_frame
+		var now := Time.get_ticks_usec()
+		worst = maxf(worst, (now - last) / 1000.0)
+		last = now
+		frames += 1
+	var idle: bool = ui.sync_js(2000.0)
+	_check("js stall", held < stall / 4 and frames >= 3 and worst < stall / 2 and idle,
+		"JS thread on: %d frames during a %.0f ms JS stall, the longest %.1f ms (posting it: %.1f ms, idle after: %s)" % [
+			frames, stall, worst, held, idle])
+
+
 func _test_pass_through() -> void:
 	var open_space := Vector2(200, 620)  # below the season card
 	# The bridge pill's "GODOT" label: painted, but nothing in it handles input.

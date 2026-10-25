@@ -183,6 +183,15 @@ void JsuiView::_bind_methods() {
   BIND_CONSTANT(HIT_SCROLL);
   ClassDB::bind_method(D_METHOD("set_force_cpu", "enabled"), &JsuiView::set_force_cpu);
   ClassDB::bind_method(D_METHOD("get_force_cpu"), &JsuiView::get_force_cpu);
+  ClassDB::bind_method(D_METHOD("set_js_thread", "mode"), &JsuiView::set_js_thread);
+  ClassDB::bind_method(D_METHOD("get_js_thread"), &JsuiView::get_js_thread);
+  ClassDB::bind_method(D_METHOD("sync_js", "timeout_ms"), &JsuiView::sync_js, DEFVAL(250.0));
+  ClassDB::bind_method(D_METHOD("sync_js_next_frame"), &JsuiView::sync_js_next_frame);
+  ClassDB::bind_method(D_METHOD("debug_stall_js", "ms"), &JsuiView::debug_stall_js);
+  ClassDB::bind_method(D_METHOD("get_active_js_thread"), &JsuiView::get_active_js_thread);
+  BIND_CONSTANT(JS_THREAD_OFF);
+  BIND_CONSTANT(JS_THREAD_ON);
+  BIND_CONSTANT(JS_THREAD_LOCKSTEP);
   ClassDB::bind_method(D_METHOD("set_runtime_view", "path"), &JsuiView::set_runtime_view);
   ClassDB::bind_method(D_METHOD("get_runtime_view"), &JsuiView::get_runtime_view);
   ClassDB::bind_method(D_METHOD("set_component", "app_key"), &JsuiView::set_component);
@@ -263,6 +272,9 @@ void JsuiView::_bind_methods() {
                "set_js_frame_budget_ms", "get_js_frame_budget_ms");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "input_pass_through"), "set_input_pass_through", "get_input_pass_through");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "force_cpu"), "set_force_cpu", "get_force_cpu");
+  // Where the bundle's JS runs (see jsui_view.h); applies on start().
+  ADD_PROPERTY(PropertyInfo(Variant::INT, "js_thread", PROPERTY_HINT_ENUM, "Off,On,Lockstep"), "set_js_thread",
+               "get_js_thread");
   ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "runtime_view", PROPERTY_HINT_NODE_PATH_VALID_TYPES, "JsuiView"),
                "set_runtime_view", "get_runtime_view");
   ADD_PROPERTY(PropertyInfo(Variant::STRING, "component"), "set_component", "get_component");
@@ -570,6 +582,7 @@ void JsuiView::start() {
   cfg.call_user = this;
   cfg.log = &JsuiView::onLog;
   cfg.log_user = this;
+  cfg.js_thread = js_thread_;
   // res:// and user:// live in Godot's virtual file system (and in .pck
   // files once exported), so those bundles load through FileAccess. Other
   // URLs (http:// dev servers, absolute file paths) use the built-in loader.
@@ -867,6 +880,32 @@ void JsuiView::set_js_frame_budget_ms(double ms) {
   if (rt_) jsui_set_js_frame_budget(rt_, ms);
 }
 
+bool JsuiView::sync_js(double timeout_ms) {
+  JsuiView* rv = runtimeView();
+  if (!rv->rt_) return true;
+  bool idle = jsui_sync(rv->rt_, timeout_ms) != 0;
+  rv->flushMessages();
+  if (!rv->rt_) return idle;  // a signal handler stopped it
+  rv->reportErrors();
+  std::vector<JsuiView*> views{rv};  // signal handlers may detach views
+  views.insert(views.end(), rv->surfaces_.begin(), rv->surfaces_.end());
+  for (JsuiView* v : views)
+    if (rv->showsOurRuntime(v)) v->afterTick();
+  return idle;
+}
+
+void JsuiView::sync_js_next_frame() { runtimeView()->sync_js_next_frame_ = true; }
+
+void JsuiView::debug_stall_js(double ms) {
+  JsuiView* rv = runtimeView();
+  if (rv->rt_) jsui_debug_stall_js(rv->rt_, ms);
+}
+
+int JsuiView::get_active_js_thread() const {
+  const JsuiView* rv = host_ ? host_ : this;
+  return rv->rt_.unsynced() ? jsui_js_thread(rv->rt_.unsynced()) : JSUI_JS_THREAD_OFF;
+}
+
 void JsuiView::process() {
   if (attach_wanted_ && !host_) attachToRuntimeView();  // the runtime view was not there yet
   if (host_) return;  // the runtime view ticks the runtime and paints us
@@ -889,7 +928,8 @@ void JsuiView::process() {
   }
   const uint64_t tick0 = Time::get_singleton()->get_ticks_usec();
   // One tick for every surface of the runtime, then each paints.
-  jsui_tick(rt_, clockMs());
+  jsui_tick_ex(rt_, clockMs(), sync_js_next_frame_ ? JSUI_TICK_SYNC_JS : 0);
+  sync_js_next_frame_ = false;
   tick_usec_last_ = Time::get_singleton()->get_ticks_usec() - tick0;
   flushMessages();
   if (!rt_) return;  // a message handler stopped the view
@@ -1180,6 +1220,11 @@ Dictionary JsuiView::get_perf(bool reset) {
   d["gc_full_collections"] = int64_t(p.gc_full_collections);
   d["gc_us"] = p.gc_us;
   d["gc_max_us"] = p.gc_max_us;
+  d["js_busy_ms"] = p.js_busy_ms;
+  d["js_batches_applied"] = int64_t(p.js_batches_applied);
+  d["js_apply_ms"] = p.js_apply_ms;
+  d["js_lag_frames"] = int64_t(p.js_lag_frames);
+  d["js_sync_ms"] = p.js_sync_ms;
   return d;
 }
 
