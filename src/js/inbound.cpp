@@ -100,8 +100,25 @@ void Inbound::post(Message&& m) {
     return;
   }
   if (JsThread* t = rt_.jsThread()) {
-    if (m.kind == Message::Kind::BeginBatch) batchDepth_++;
-    if (m.kind == Message::Kind::EndBatch && batchDepth_ > 0) batchDepth_--;
+    // A batch goes out with its first message: one with none (a layout
+    // without onLayout events) is dropped, so JS stays idle (syncJs).
+    if (m.kind == Message::Kind::BeginBatch) {
+      batchDepth_++;
+      heldBegins_++;
+      return;
+    }
+    if (m.kind == Message::Kind::EndBatch) {
+      if (batchDepth_ > 0) batchDepth_--;
+      if (heldBegins_ > 0) {
+        heldBegins_--;
+        return;
+      }
+    }
+    for (; heldBegins_ > 0; heldBegins_--) {
+      Message begin{Message::Kind::BeginBatch};
+      begin.now = rt_.now;
+      t->post(std::move(begin));
+    }
     m.now = rt_.now;
     t->post(std::move(m));
     if (t->lockstep() && batchDepth_ == 0) rt_.syncJs(-1, false);

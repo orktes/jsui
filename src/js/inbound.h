@@ -138,6 +138,7 @@ class Inbound {
   uint32_t seq_ = 0;
   std::vector<Reply> replies_;  // in post order; a handful at most
   int batchDepth_ = 0;          // BeginBatch / EndBatch posted (lockstep waits outside)
+  int heldBegins_ = 0;          // BeginBatch not posted yet: an empty batch never wakes JS
 };
 
 }  // namespace jsui

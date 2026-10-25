@@ -47,6 +47,8 @@ for (const mode of ['production', 'development']) {
     await build({ entry: path.join(here, 'e2e', 'state-styles.jsx'), outfile: stateStylesFile, mode, format });
     const groupVisibilityFile = path.join(dir, 'group_visibility.js');
     await build({ entry: path.join(here, 'e2e', 'group-visibility.jsx'), outfile: groupVisibilityFile, mode, format });
+    const stallFile = path.join(dir, 'stall.js');
+    await build({ entry: path.join(here, 'e2e', 'stall.jsx'), outfile: stallFile, mode, format });
     const tests = [
       'react_e2e',
       'react_interactions_e2e',
@@ -60,6 +62,8 @@ for (const mode of ['production', 'development']) {
       'react_derive_e2e',
       'react_state_styles_e2e',
       'react_group_visibility_e2e',
+      'react_js_thread_e2e_stall',
+      'react_js_thread_e2e_sync',
     ];
     const bundles = {
         JSUI_REACT_E2E_BUNDLE: outfile,
@@ -73,6 +77,7 @@ for (const mode of ['production', 'development']) {
         JSUI_REACT_DERIVE_BUNDLE: deriveFile,
         JSUI_REACT_STATE_STYLES_BUNDLE: stateStylesFile,
         JSUI_REACT_GROUP_VISIBILITY_BUNDLE: groupVisibilityFile,
+        JSUI_REACT_STALL_BUNDLE: stallFile,
     };
     const { stdout, stderr } = await promisify(execFile)(binary, tests, {
       env: Object.assign({}, process.env, bundles),
@@ -82,7 +87,7 @@ for (const mode of ['production', 'development']) {
     });
     // The same with JS on its own thread in lockstep (JSUI_JS_THREAD_LOCKSTEP),
     // which must give what single-threaded mode gives, frame for frame.
-    const lockstepTests = tests.filter((t) => !t.startsWith('react_host_data_e2e_js_thread'));
+    const lockstepTests = tests.filter((t) => !t.startsWith('react_host_data_e2e_js_thread') && !t.startsWith('react_js_thread'));
     const lockstep = await promisify(execFile)(binary, lockstepTests, {
       env: Object.assign({}, process.env, bundles, { JSUI_TEST_JS_THREAD: 'lockstep' }),
       cwd: repo,
@@ -107,6 +112,8 @@ for (const mode of ['production', 'development']) {
     assert.match(stdout, /PASS react_derive_e2e/);
     assert.match(stdout, /PASS react_state_styles_e2e/);
     assert.match(stdout, /PASS react_group_visibility_e2e/);
+    assert.match(stdout, /PASS react_js_thread_e2e_stall/);
+    assert.match(stdout, /PASS react_js_thread_e2e_sync/);
     if (process.env.JSUI_E2E_VERBOSE) console.log(stdout);
     assert.doesNotMatch(stdout, /skipped/);
     // The WebAssembly runtime compiled the bytecode: a native runtime built
