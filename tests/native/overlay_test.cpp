@@ -378,10 +378,9 @@ TEST(overlay_incremental_repaint_matches_full) {
     a.rt->tick(0);
     a.rt->renderIncremental(inc.data(), 240, 200, 240 * 4);
     b.render();
-    int diff = 0;
-    for (size_t i = 0; i < inc.size(); i++) diff += inc[i] != b.px[i];
-    if (diff) std::fprintf(stderr, "  step %d: %d pixels differ\n", step, diff);
-    CHECK_EQ(diff, 0);
+    rtest::PixelDiff d = rtest::pixelDiff(inc, b.px);
+    if (d.count) std::fprintf(stderr, "  step %d: %zu pixels differ, by at most %d\n", step, d.count, d.max);
+    CHECK(rtest::matchesFull(d, inc.size()));
   };
   check(0);
   auto both = [&](auto&& fn) {
@@ -424,10 +423,9 @@ TEST(overlay_incremental_repaint_of_fading_content) {
     a.rt->tick(0);
     a.rt->renderIncremental(inc.data(), 240, 200, 240 * 4);
     b.render();
-    int diff = 0;
-    for (size_t i = 0; i < inc.size(); i++) diff += inc[i] != b.px[i];
-    if (diff) std::fprintf(stderr, "  step %d: %d pixels differ\n", step, diff);
-    CHECK_EQ(diff, 0);
+    rtest::PixelDiff d = rtest::pixelDiff(inc, b.px);
+    if (d.count) std::fprintf(stderr, "  step %d: %zu pixels differ, by at most %d\n", step, d.count, d.max);
+    CHECK(rtest::matchesFull(d, inc.size()));
   };
   check(0);
   auto content = [](rtest::Scene& s) { return child(child(child(child(s.doc().root(), 0), 0), 0), 0); };

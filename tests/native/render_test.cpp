@@ -335,40 +335,10 @@ void patch(Node* n, const std::string& json) {
   n->setProps(Value(props));
 }
 
-// Damage-only repaints must match full repaints. The x86 Skia build
-// rasterizes an anti-aliased edge identically under the damage clip, and is
-// checked to the bit. The macOS arm64 build blends some edge pixels of a
-// node painted whole inside the damage region a level or two apart from the
-// full frame (CI, M1: e.g. a rounded box's corners, 40-70 px per frame at
-// most 2 levels), so there a frame passes within that: at most 4 levels on
-// at most a quarter percent of the pixels. Stale or missing paint differs
-// by far more.
-#if defined(__x86_64__) || defined(_M_X64)
-constexpr bool kExactUnderClip = true;
-#else
-constexpr bool kExactUnderClip = false;
-#endif
-
-struct PixelDiff {
-  size_t count = 0;  // pixels that differ at all
-  int max = 0;       // largest channel difference
-};
-
-PixelDiff pixelDiff(const std::vector<uint32_t>& a, const std::vector<uint32_t>& b) {
-  PixelDiff d;
-  for (size_t k = 0; k < a.size(); k++) {
-    if (a[k] == b[k]) continue;
-    d.count++;
-    for (int ch = 0; ch < 4; ch++)
-      d.max = std::max(d.max, std::abs(int((a[k] >> (ch * 8)) & 255) - int((b[k] >> (ch * 8)) & 255)));
-  }
-  return d;
-}
-
-bool matchesFull(const PixelDiff& d, size_t pixels) {
-  if (kExactUnderClip) return d.count == 0;
-  return d.max <= 4 && d.count * 400 <= pixels;
-}
+using rtest::kExactUnderClip;
+using rtest::matchesFull;
+using rtest::PixelDiff;
+using rtest::pixelDiff;
 
 // Failure details for frames that should match: the repainted bounds and
 // the first few differing pixels (RGBA, incremental vs full), so a CI log
