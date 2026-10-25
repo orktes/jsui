@@ -413,6 +413,10 @@ int jsui_render_vulkan(JsuiRuntime* rt, JsuiGpuContext* gpu, void* image, int wi
   return jsui_render_gpu_target(rt, gpu, &t, nullptr);
 }
 
+int jsui_gpu_prepare_target(JsuiGpuContext* gpu, unsigned format) {
+  return jsui::graphite_gpu::prepareTarget(gpu, format);
+}
+
 int jsui_gpu_set_pipeline_cache(JsuiGpuContext* gpu, const char* path) {
   if (!gpu || !gpu->pipelines) return -1;
   return gpu->pipelines->setFile(path ? path : "");

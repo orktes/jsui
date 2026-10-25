@@ -1194,6 +1194,14 @@ typedef struct JsuiPipelineStats {
  * be created / read or is not a pipeline cache, or `gpu` has no pipeline
  * cache (GL, a WASM build: no file system). */
 JSUI_API int jsui_gpu_set_pipeline_cache(JsuiGpuContext* gpu, const char* path);
+/* Hands the common pipelines (rects, rounded rects, text, images, gradients,
+ * shadows, paths) for render targets of `format` (as JsuiGpuTarget.format) to
+ * the background compile pool now, ahead of the first frame, so that frame
+ * does not wait on them. The first render into a target does the same on its
+ * own; call this right after creating the context when the target format is
+ * known. Graphite only. Returns 0, -1 when `gpu` has no compile pool or the
+ * format is not one jsui_render_gpu_target takes. */
+JSUI_API int jsui_gpu_prepare_target(JsuiGpuContext* gpu, unsigned format);
 /* Queues the pipelines of a list (the bytes of a cache file, or of
  * jsui_gpu_save_pipelines) that the context does not know yet. Returns the
  * number queued, -1 when the list is not one for this Skia build and backend. */

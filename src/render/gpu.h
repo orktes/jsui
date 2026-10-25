@@ -86,6 +86,8 @@ void destroy(JsuiGpuContext* gpu);
 void purge(JsuiGpuContext* gpu, size_t cacheBytes);
 // 0 on success, -1 on failure; `dirty` (optional) gets the repainted rect.
 int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& target, JsuiRect* dirty);
+// jsui_gpu_prepare_target.
+int prepareTarget(JsuiGpuContext* gpu, unsigned format);
 
 }  // namespace graphite_gpu
 

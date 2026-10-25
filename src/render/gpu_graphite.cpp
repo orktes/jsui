@@ -775,6 +775,35 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* d
   return 0;
 }
 
+int prepareTarget(JsuiGpuContext* gpu, unsigned format) {
+  GraphiteGpu* g = asGraphite(gpu);
+  if (!g || !g->compileExecutor) return -1;
+  // The colour type and space a render into a target of `format` draws with
+  // (render() above).
+  sk_sp<SkColorSpace> cs;
+  bool bgra = false;
+  if (g->api == Api::Vulkan) {
+#if defined(JSUI_VULKAN)
+    VkFormat vf;
+    if (!vkColorType(format, &vf, &cs)) return -1;
+    bgra = vf == VK_FORMAT_B8G8R8A8_UNORM || vf == VK_FORMAT_B8G8R8A8_SRGB;
+#endif
+  } else if (g->api == Api::Dawn) {
+#if defined(JSUI_GRAPHITE_DAWN)
+    const wgpu::TextureFormat f = format ? wgpu::TextureFormat(format) : wgpu::TextureFormat::RGBA8Unorm;
+    if (!dawnColorSpace(f, &cs)) return -1;
+    bgra = f == wgpu::TextureFormat::BGRA8Unorm || f == wgpu::TextureFormat::BGRA8UnormSrgb;
+#endif
+  } else {
+#if defined(JSUI_GRAPHITE_METAL)
+    if (!mtlColorSpace(format, &cs)) return -1;
+    bgra = format == kMTLPixelFormatBGRA8Unorm || format == kMTLPixelFormatBGRA8Unorm_sRGB;
+#endif
+  }
+  g->precompiler->precompileCommon(bgra ? kBGRA_8888_SkColorType : kRGBA_8888_SkColorType, cs);
+  return 0;
+}
+
 }  // namespace graphite_gpu
 }  // namespace jsui
 
@@ -795,6 +824,7 @@ int render(Surface&, JsuiGpuContext*, const JsuiGpuTarget&, JsuiRect* dirty) {
   if (dirty) *dirty = JsuiRect{0, 0, 0, 0};
   return -1;
 }
+int prepareTarget(JsuiGpuContext*, unsigned) { return -1; }
 }  // namespace graphite_gpu
 }  // namespace jsui
 
