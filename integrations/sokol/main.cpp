@@ -143,6 +143,14 @@ class Game : public jsui_example::SelfTestHost {
     smp.wrap_v = SG_WRAP_CLAMP_TO_EDGE;
     sampler_ = sg_make_sampler(&smp);
 
+    bench_.seconds = opt.bench;
+    bench_.warmup = opt.benchWarmup;
+    if (opt.noUi) {  // the same scene and update, no runtime
+      std::printf("UI: off (--no-ui)\n");
+      for (int i = 0; i < 9; i++) spawn();
+      resize();
+      return;
+    }
     if (!opt.cpu) {
       gpu_ = jsui_gpu_create_gl(nullptr, nullptr);  // the platform's GL loader, sokol_app's context is current
       if (!gpu_) {
@@ -180,6 +188,7 @@ class Game : public jsui_example::SelfTestHost {
   }
 
   void frame() {
+    auto frameStart = jsui_example::BenchTimer::Clock::now();
     double now = double(frameCount_) * 1000.0 / 60.0;
     bool deterministic = opt.frames >= 0 || opt.selftest;
     float dt = deterministic ? 1.f / 60.f : float(sapp_frame_duration());
@@ -190,21 +199,23 @@ class Game : public jsui_example::SelfTestHost {
     if (pixelW_ != sapp_width() || pixelH_ != sapp_height()) resize();
     update(dt);
     Mat4 viewProj = mul(proj_, view_);
-    publishFrameData(viewProj);
-    fps_.frame(now);
-    hud_.fps = fps_.fps;
-    hud_.entities = int(units_.size());
-    hud_.publish(rt_);
-    jsui_tick(rt_, now);
-    if (opt.selftest) {
+    if (rt_) {
+      publishFrameData(viewProj);
+      fps_.frame(now);
+      hud_.fps = fps_.fps;
+      hud_.entities = int(units_.size());
+      hud_.publish(rt_);
+      jsui_tick(rt_, now);
+    }
+    if (rt_ && opt.selftest) {
       int r = selftest_.step(rt_, *this, logicalW_, logicalH_, hud_);
       if (r != 0) {
         exitCode_ = r > 0 ? 0 : 1;
         quit_ = true;
       }
     }
-    updateCursor();
-    if (opt.cpu) paintUiCpu();
+    if (rt_) updateCursor();
+    if (rt_ && opt.cpu) paintUiCpu();
 
     // The scene, in sokol's swapchain pass.
     sg_pass pass{};
@@ -215,12 +226,12 @@ class Game : public jsui_example::SelfTestHost {
     fbo_ = pass.swapchain.gl.framebuffer;
     sg_begin_pass(&pass);
     drawScene();
-    if (opt.cpu) drawUiQuad();
+    if (rt_ && opt.cpu) drawUiQuad();
     sgl_draw();
     sg_end_pass();
 
     // The UI, by Skia, over the scene in the same framebuffer.
-    if (!opt.cpu) {
+    if (rt_ && !opt.cpu) {
       JsuiGLTarget t{};
       t.fbo = fbo_;
       t.width = pixelW_;
@@ -236,16 +247,26 @@ class Game : public jsui_example::SelfTestHost {
     bool last = quit_ || (opt.frames >= 0 && long(frameCount_) >= opt.frames);
     if (last && !opt.screenshot.empty()) screenshot(opt.screenshot);
     sg_commit();
+    // macOS paces sokol's GL view at the display refresh whatever the swap
+    // interval, so --bench times the frame's work (CPU + glFinish) there.
+    if (bench_.active() && !last) {
+      glFinish();
+      double work = std::chrono::duration<double, std::milli>(jsui_example::BenchTimer::Clock::now() - frameStart).count();
+      if (bench_.sample(work)) {
+        bench_.report(!rt_ ? "no-ui work" : opt.cpu ? "ui cpu work" : "ui gpu work");
+        last = true;
+      }
+    }
     if (last) sapp_quit();
   }
 
   void cleanup() {
-    const char* err = jsui_last_error(rt_);
+    const char* err = rt_ ? jsui_last_error(rt_) : nullptr;
     if (err) {
       std::fprintf(stderr, "JS error: %s\n", err);
       if (exitCode_ == 0) exitCode_ = 1;
     }
-    jsui_destroy(rt_);
+    if (rt_) jsui_destroy(rt_);
     if (gpu_) jsui_gpu_destroy(gpu_);  // GL context still current
     sgl_shutdown();
     sg_shutdown();
@@ -393,7 +414,7 @@ class Game : public jsui_example::SelfTestHost {
     float s = sapp_dpi_scale();
     logicalW_ = float(pixelW_) / s;
     logicalH_ = float(pixelH_) / s;
-    jsui_set_viewport(rt_, int(std::lround(logicalW_)), int(std::lround(logicalH_)), s);
+    if (rt_) jsui_set_viewport(rt_, int(std::lround(logicalW_)), int(std::lround(logicalH_)), s);
     if (!opt.cpu) return;
     if (uiImage_.id) {
       sg_destroy_view(uiView_);
@@ -673,6 +694,7 @@ class Game : public jsui_example::SelfTestHost {
   Vec3 eye_{}, forward_{}, side_{}, up_{};  // the camera, for picking
   jsui_example::HudState hud_;
   jsui_example::FpsCounter fps_;
+  jsui_example::BenchTimer bench_;
   jsui_example::SelfTest selftest_;
   jsui_example::ClickTracker click_;
   float mouse_[2] = {-1, -1};
@@ -713,7 +735,8 @@ sapp_desc sokol_main(int argc, char* argv[]) {
   d.window_title = "JSUI + sokol";
   d.enable_clipboard = true;
   d.clipboard_size = 64 * 1024;
-  d.swap_interval = (g.opt.frames >= 0 || g.opt.selftest) ? 0 : 1;
+  d.swap_interval = (g.opt.frames >= 0 || g.opt.selftest || g.opt.bench > 0) ? 0 : 1;
+  d.disable_vsync = g.opt.bench > 0;
   d.logger.func = slog_func;
   return d;
 }
