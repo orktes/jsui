@@ -900,44 +900,46 @@ void Precompiler::precompileCommon(SkColorType ct, const sk_sp<SkColorSpace>& cs
   // target's color space, clamped, no mipmaps); gradients of up to 4 stops,
   // interpolated premultiplied like the painter's.
   const SkColorInfo imageInfo(kRGBA_8888_SkColorType, kPremul_SkAlphaType, cs);
-  const SkTileMode clamp[] = {SkTileMode::kClamp};
   SkGradient::Interpolation interp;
   interp.fInPremul = SkGradient::Interpolation::InPremul::kYes;
   const auto small = PrecompileShaders::GradientShaderFlags::kSmall;
+  // Hardware sampling only (no tile modes): the painter's images are
+  // clamped textures, never shader-tiled.
   sk_sp<PrecompileShader> image =
-      PrecompileShaders::Image(PrecompileShaders::ImageShaderFlags::kNone, {&imageInfo, 1}, clamp);
+      PrecompileShaders::Image(PrecompileShaders::ImageShaderFlags::kNone, {&imageInfo, 1}, {});
   sk_sp<PrecompileShader> linear = PrecompileShaders::LinearGradient(small, interp);
   sk_sp<PrecompileShader> radial = PrecompileShaders::RadialGradient(small, interp);
 
-  auto precompile = [&](std::initializer_list<sk_sp<PrecompileShader>> shaders, SkBlendMode blend, bool opaque,
-                        DrawTypeFlags draws) {
-    PaintOptions o;
-    std::vector<sk_sp<PrecompileShader>> list(shaders);
-    o.setShaders(list);
-    o.setBlendModes({&blend, 1});
-    o.setPaintColorIsOpaque(opaque);
-    for (DrawTypeFlags clip : {DrawTypeFlags::kNone, DrawTypeFlags::kAnalyticClip})
-      Precompile(pc, o, DrawTypeFlags(draws | clip), passes);
-  };
   const auto rect = DrawTypeFlags::kNonAAFillRect, rrect = DrawTypeFlags::kAnalyticRRect,
              quad = DrawTypeFlags::kPerEdgeAAQuad;
-  // Solid fills (no shader: the paint's color), images and gradients on
-  // rects and rrects; images also as AA quads (drawImageRect).
-  precompile({}, SkBlendMode::kSrcOver, true, DrawTypeFlags(rect | rrect));
-  precompile({image, linear, radial}, SkBlendMode::kSrcOver, true, DrawTypeFlags(rect | rrect));
-  precompile({image}, SkBlendMode::kSrcOver, true, quad);
-  // The same under a translucent paint (opacity): the shader times the
-  // paint's alpha.
-  precompile({image, radial}, SkBlendMode::kSrcOver, false, DrawTypeFlags(rect | rrect | quad));
-  // Text.
-  precompile({}, SkBlendMode::kSrcOver, true, DrawTypeFlags::kBitmapText_Mask);
-  // Clears and the damage rects' clears; copies.
-  precompile({}, SkBlendMode::kSrc, true, rect);
-  precompile({image, linear}, SkBlendMode::kSrc, true, rect);
-  // Blurred rrects (box shadows the GPU draws analytically).
-  PaintOptions blur;
-  for (DrawTypeFlags clip : {DrawTypeFlags::kNone, DrawTypeFlags::kAnalyticClip})
-    Precompile(pc, blur, DrawTypeFlags(DrawTypeFlags::kDropShadows | clip), passes);
+  // The pool takes them in this order (a first launch's first frames race
+  // it): everything unclipped first, then the same inside an analytic clip
+  // (rounded overflow, scroll views).
+  for (DrawTypeFlags clip : {DrawTypeFlags::kNone, DrawTypeFlags::kAnalyticClip}) {
+    auto precompile = [&](std::initializer_list<sk_sp<PrecompileShader>> shaders, SkBlendMode blend, bool opaque,
+                          DrawTypeFlags draws) {
+      PaintOptions o;
+      std::vector<sk_sp<PrecompileShader>> list(shaders);
+      o.setShaders(list);
+      o.setBlendModes({&blend, 1});
+      o.setPaintColorIsOpaque(opaque);
+      Precompile(pc, o, DrawTypeFlags(draws | clip), passes);
+    };
+    // Clears (every frame's first draw; also of damage rects): never clipped.
+    if (clip == DrawTypeFlags::kNone) precompile({}, SkBlendMode::kSrc, true, rect);
+    // Solid fills (no shader: the paint's color) and text.
+    precompile({}, SkBlendMode::kSrcOver, true, DrawTypeFlags(rect | rrect | DrawTypeFlags::kBitmapText_Mask));
+    // Images (also as AA quads: drawImageRect) and gradients.
+    precompile({image}, SkBlendMode::kSrcOver, true, DrawTypeFlags(rect | rrect | quad));
+    precompile({linear, radial}, SkBlendMode::kSrcOver, true, DrawTypeFlags(rect | rrect));
+    // The same under a translucent paint (opacity): the shader times the
+    // paint's alpha.
+    precompile({image, radial}, SkBlendMode::kSrcOver, false, DrawTypeFlags(rect | rrect | quad));
+    // Blurred rrects (box shadows the GPU draws analytically).
+    Precompile(pc, PaintOptions(), DrawTypeFlags(DrawTypeFlags::kDropShadows | clip), passes);
+    // Copies.
+    if (clip == DrawTypeFlags::kNone) precompile({image, linear}, SkBlendMode::kSrc, true, rect);
+  }
   if (log_ == 1) SkDebugf("jsui: common pipelines handed to the compile pool (color type %d)\n", int(ct));
 #else
   (void)ct;
