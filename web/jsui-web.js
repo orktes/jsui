@@ -138,7 +138,8 @@
  *                                // (content hashes), e.g. { 'dist': 'a1b2', 'dist-gpu': 'c3d4' }:
  *                                // others are not tried, and each URL is loaded as
  *                                // jsui.js?v=<version> (its jsui.wasm too). A query on moduleUrl
- *                                // is likewise passed on to its jsui.wasm.
+ *                                // is likewise passed on to its jsui.wasm. Default: the
+ *                                // modules `jsui build --web` deployed next to this file
  *   renderer?: 'auto'|'gpu'|'webgpu'|'webgl'|'cpu'|'2d',
  *                                // 'auto' (default): Skia on WebGPU, else Skia on WebGL (hardware
  *                                // implementations only), else the CPU raster. 'gpu': the same,
@@ -321,6 +322,11 @@ function evalAllowed() {
 const CPU_MODULE = './dist/jsui.js';
 const GPU_MODULE = './dist-webgl/jsui.js';
 const ALL_MODULE = './dist-gpu/jsui.js';  // WebGPU + WebGL + CPU
+// The modules deployed next to this file, {dir: version}, when `jsui build
+// --web` wrote it (packages/cli/src/web.js sets this line): moduleVersions'
+// default unless the page names its own moduleBase.
+const DEPLOYED_MODULES = null;
+const moduleVersionsOf = (opts) => opts.moduleVersions ?? (opts.moduleBase == null ? DEPLOYED_MODULES : null);
 
 // The WebGPU device the renderer may use, or null (web/jsui-webgpu.js).
 function webgpuFor(opts) {
@@ -328,7 +334,8 @@ function webgpuFor(opts) {
   if (mode !== 'auto' && mode !== 'gpu' && mode !== 'webgpu') return null;
   // Only dist-gpu/ draws with WebGPU: when moduleVersions leaves it out, no
   // device is needed. Say so, since the page then silently renders on WebGL.
-  if (!opts.moduleUrl && opts.moduleVersions && opts.moduleVersions[ALL_MODULE.split('/')[1]] == null) {
+  const versions = moduleVersionsOf(opts);
+  if (!opts.moduleUrl && versions && versions[ALL_MODULE.split('/')[1]] == null) {
     if (typeof navigator !== 'undefined' && navigator.gpu) {
       console.warn('[jsui] this browser has WebGPU, but dist-gpu/ is not deployed (moduleVersions), so the '
         + 'UI renders with WebGL. Deploy dist-gpu/jsui.{js,wasm} from @orktes/jsui-web and list it in '
@@ -354,7 +361,7 @@ async function loadModuleFor(opts, webgpu) {
   else order.push(ALL_MODULE);
   // moduleVersions: {dir: version} of the deployed modules; the others are
   // skipped, and each URL gets ?v=<version>.
-  const versions = opts.moduleVersions;
+  const versions = moduleVersionsOf(opts);
   const errors = [];
   for (const m of order) {
     const dir = m.split('/')[1];

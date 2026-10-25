@@ -67,8 +67,13 @@ const hud = await createJsui({ canvas: hudCanvas, bundleUrl: './hud.js', passThr
 const w = jsui.createSurface(el, { component: 'Clock', initialProps: {}, autoSize: true });
 ```
 
-Serve `node_modules/@orktes/jsui-web/` (the `dist*/` WASM folders) as static
-files; `.wasm` as `application/wasm`. `?dev=1` on the package's demo page
+To ship a web app, run `npx jsui build app.jsx --web site/` and deploy
+`site/`: it holds the bundle, the host, every WASM build (`dist-gpu/` for
+WebGPU, `dist-webgl/`, `dist/`; all needed for the best renderer) and an
+editable `index.html`. Don't copy the `dist*/` folders by hand or pass
+`moduleVersions` yourself: a missing `dist-gpu/` silently drops WebGPU.
+Otherwise serve `node_modules/@orktes/jsui-web/` as static files, all
+`dist*/` folders included; `.wasm` as `application/wasm`. `?dev=1` on the package's demo page
 live-reloads from `jsui dev`.
 
 ## C / C++ (`include/jsui/jsui.h`)

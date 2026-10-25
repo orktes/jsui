@@ -15,6 +15,7 @@ In a project with `npm install --save-dev @orktes/jsui-cli`:
 ```sh
 npx jsui build app.jsx -o dist/bundle.js [--minify] [--sourcemap] [--dev] [--format combo|bytecode|source|split]
      [--react-compiler [--compiler-report]]
+npx jsui build app.jsx --web site/   # a deployable static site, see Web export
 npx jsui dev app.jsx [--port 5173] [--host 127.0.0.1] [--no-hmr] [--no-inspect] [--react-compiler]
 npx jsui screenshot app.jsx -o shot.png [--width 1280 --height 720 --scale 2 --wait 1000]
 npx jsui inspect app.jsx [--find '#play'] [--json]
@@ -104,6 +105,29 @@ is where the frame goes, and check the result with `jsui-bench --react-stats`.
   (`useHostBuffer`, `useHostState`, `useFonts`, ...) instead.
 * `jsui dev` compiles hot-updated modules too, and the compiler's
   per-file source hash resets a component's memo cache when its file changes.
+
+## Web export
+
+```sh
+npx jsui build app.jsx --web site/ [--html page.html] [--title "My game"] [--minify]
+```
+
+writes a static folder you can upload to any static host (Vercel, Netlify,
+GitHub Pages, S3, ...):
+
+| Path                                     | What                                                        |
+| ---------------------------------------- | ----------------------------------------------------------- |
+| `index.html`                             | a full-window page that runs the app                        |
+| `app/bundle.js`, `app/assets/*`          | the app (`--format source` by default: browsers run it on their own JS engine) |
+| `jsui-web.js` and its scripts            | the browser host from `@orktes/jsui-web`                    |
+| `dist-gpu/`, `dist-webgl/`, `dist/`      | every WASM build: Skia Graphite on WebGPU, Skia on WebGL, CPU |
+
+The browser picks the best module it can use, so WebGPU works with no setup
+(`window.jsui.renderer` says which one runs). Every URL besides `index.html`
+carries a content hash, so a CDN never mixes files of two deploys.
+`index.html` is yours to edit: later builds keep it and only update the
+versioned `./jsui-web.js` and `./app/bundle.js` URLs in it. `--html <file>`
+uses a page of your own instead.
 
 ## Dev server
 
