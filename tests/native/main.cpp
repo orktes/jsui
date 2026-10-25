@@ -76,6 +76,7 @@ int main(int argc, char** argv) {
 #endif
   // Tests count the pipelines they compile: no cache from earlier runs.
   jsui::pipeline_cache::setNoDefaultFile(true);
+  jsui::pipeline_cache::setNoCommonPrecompile(true);
   // Arguments are name filters (substring match; a test runs if any matches).
   int ran = 0, failed = 0;
   for (auto& c : jsui_test::registry()) {

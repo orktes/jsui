@@ -724,6 +724,52 @@ TEST(vulkan_pipeline_cache_warms_the_next_context) {
 #endif
 }
 
+// The common pipelines (Precompiler::precompileCommon), handed to the pool
+// by the first frame on a target: once built, kBundle's frames (gradient,
+// rounded card with border, shadow and text, an opaque and a translucent
+// box) compile nothing.
+TEST(vulkan_common_pipelines_precompiled) {
+#if !JSUI_VULKAN_TESTS
+  skip("vulkan_common_pipelines_precompiled", "built without JSUI_VULKAN");
+#else
+  Vk vk;
+  std::string why = vk.init(240, 160);
+  if (!why.empty()) {
+    skip("vulkan_common_pipelines_precompiled", why.c_str());
+    return;
+  }
+  JsuiVulkanDevice d = vk.desc();
+  setenv("JSUI_LOG_PIPELINES", "compiled", 1);  // names any the frames still compile
+  JsuiGpuContext* gpu = jsui_gpu_create_vulkan(&d);
+  unsetenv("JSUI_LOG_PIPELINES");
+  CHECK(gpu != nullptr);
+  if (!gpu) return;
+  {
+    // An empty frame on the target: its format's common pipelines go to the pool.
+    jsui::pipeline_cache::setNoCommonPrecompile(false);
+    JsuiConfig cfg;
+    jsui_config_init(&cfg);
+    cfg.width = vk.w;
+    cfg.height = vk.h;
+    JsuiRuntime* rt = jsui_create(&cfg);
+    JsuiGpuTarget t{};
+    t.texture = vk.image;
+    t.width = vk.w;
+    t.height = vk.h;
+    t.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    t.final_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    CHECK_EQ(jsui_render_gpu_target(rt, gpu, &t, nullptr), 0);
+    jsui_destroy(rt);
+    jsui::pipeline_cache::setNoCommonPrecompile(true);
+  }
+  CHECK(gpu->pipelines->poolPendingForTest() > 10);
+  for (int i = 0; i < 6000 && gpu->pipelines->poolPendingForTest() > 0; i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  CHECK_EQ(renderFrames(vk, gpu), 0ull);
+  jsui_gpu_destroy(gpu);
+#endif
+}
+
 // Host textures (JSUI_TEXTURE_VULKAN): an engine's sampled image drawn in
 // place by Graphite, new contents shown after jsui_texture_updated, the
 // image still usable by the host (SHADER_READ_ONLY_OPTIMAL) afterwards.

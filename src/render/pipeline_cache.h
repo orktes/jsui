@@ -53,7 +53,12 @@
 #include <string>
 #include <thread>
 #include <unordered_set>
+#include <utility>
 #include <vector>
+
+#include "include/core/SkColorSpace.h"
+#include "include/core/SkColorType.h"
+#include "include/core/SkRefCnt.h"
 
 class SkExecutor;
 
@@ -124,6 +129,8 @@ void setForceSliced(bool on);
 bool forceSliced();
 // Tests only: contexts start without the default cache file.
 void setNoDefaultFile(bool on);
+// Tests only: no precompileCommon (frames compile everything they draw).
+void setNoCommonPrecompile(bool on);
 // The cache file a context uses until the host names one (jsui.h): in the
 // user's cache directory, per program and backend; empty where there is
 // none (Android, the browser) or JSUI_PIPELINE_CACHE=off.
@@ -182,6 +189,14 @@ class Precompiler {
   // most one per frame's worth of time, whatever the number of surfaces).
   void afterFrame();
   Stats stats();
+  // The pipelines most UIs draw with (JSUI's painter: solid fills, images
+  // and small gradients, plain and with a translucent paint, bitmap text,
+  // blurred rrects; each with and without an analytic clip), handed to the
+  // compile pool for targets of `ct` / `cs` at a low priority, so a first
+  // launch does not compile them in the frames that first draw them. Once
+  // per target format; only with the pool (a frame would wait otherwise).
+  // JSUI_PRECOMPILE_COMMON=off turns it off.
+  void precompileCommon(SkColorType ct, const sk_sp<SkColorSpace>& cs);
   // Pipelines compiled on demand since the last call (Perf counters).
   uint64_t takeCompiles();
 
@@ -230,6 +245,7 @@ class Precompiler {
   double precompileMs_ = 0;
   bool reported_ = false;
   std::atomic<uint64_t> compiles_{0}, compilesTaken_{0};
+  std::vector<std::pair<SkColorType, uint32_t>> common_;  // precompileCommon's targets (type, color space hash)
 };
 
 }  // namespace pipeline_cache
