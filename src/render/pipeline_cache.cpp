@@ -927,8 +927,10 @@ void Precompiler::precompileCommon(SkColorType ct, const sk_sp<SkColorSpace>& cs
     };
     // Clears (every frame's first draw; also of damage rects): never clipped.
     if (clip == DrawTypeFlags::kNone) precompile({}, SkBlendMode::kSrc, true, rect);
-    // Solid fills (no shader: the paint's color) and text.
+    // Solid fills (no shader: the paint's color) and text; a plain rect's
+    // pipeline differs for an opaque and a translucent color.
     precompile({}, SkBlendMode::kSrcOver, true, DrawTypeFlags(rect | rrect | DrawTypeFlags::kBitmapText_Mask));
+    precompile({}, SkBlendMode::kSrcOver, false, rect);
     // Images (also as AA quads: drawImageRect) and gradients.
     precompile({image}, SkBlendMode::kSrcOver, true, DrawTypeFlags(rect | rrect | quad));
     precompile({linear, radial}, SkBlendMode::kSrcOver, true, DrawTypeFlags(rect | rrect));
