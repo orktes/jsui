@@ -16,6 +16,7 @@ node_modules/
 /site/test/output/
 /third_party/skia-src-m157/
 /third_party/skia-wasm-gpu/
+/third_party/skia-wasm-mt/
 /third_party/emsdk-*/
 /third_party/emdawnwebgpu/
 /web/dist-gpu/

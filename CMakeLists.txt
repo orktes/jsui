@@ -28,6 +28,23 @@ elseif(NOT EMSCRIPTEN AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   add_link_options(LINKER:--gc-sections)
 endif()
 
+# Threaded WebAssembly (scripts/build-godot-web.sh): everything is compiled
+# with -pthread (atomics + bulk memory, so it links into a program with
+# shared memory, e.g. a threaded Godot web export) and with
+# -sSUPPORT_LONGJMP=wasm and -fno-exceptions as Godot's web build (with wasm
+# longjmp, Emscripten links no C++ throw support: a __cxa_throw anywhere
+# fails the program's link), against a Skia built the same way
+# (scripts/build-skia-wasm-mt.sh, checked in cmake/Emscripten.cmake). JS
+# then runs on a pthread of its own (JsThread). The npm web modules
+# (scripts/build-wasm.sh) are single threaded and leave this OFF.
+if(EMSCRIPTEN)
+  option(JSUI_WASM_THREADS "WASM: compile with -pthread, -sSUPPORT_LONGJMP=wasm, -fno-exceptions (threaded programs)" OFF)
+  if(JSUI_WASM_THREADS)
+    add_compile_options(-pthread -sSUPPORT_LONGJMP=wasm $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions>)
+    add_link_options(-pthread -sSUPPORT_LONGJMP=wasm)
+  endif()
+endif()
+
 option(JSUI_BUILD_TOOLS "Build jsui-render and the viewer" ON)
 option(JSUI_BUILD_TESTS "Build native tests" ON)
 option(JSUI_BUILD_VIEWER "Build tools/jsui-viewer (downloads and builds SDL2)" ON)
@@ -143,12 +160,14 @@ if(EMSCRIPTEN AND EXISTS "${JSUI_SKIA_LIB_DIR}/args.gn")
   endif()
 endif()
 option(JSUI_WEBGPU "Build the Skia Graphite WebGPU backend (jsui_render_webgpu)" ${_jsui_webgpu_default})
+# A port file, or a port name the emsdk knows (`emdawnwebgpu`: the emsdk's own
+# bundled release, as the threaded build for godot-aw3 uses).
 set(JSUI_EMDAWNWEBGPU_PORT "${CMAKE_SOURCE_DIR}/third_party/emdawnwebgpu/emdawnwebgpu_pkg/emdawnwebgpu.port.py"
-    CACHE FILEPATH "Emdawnwebgpu port file (WASM + JSUI_WEBGPU)")
+    CACHE STRING "Emdawnwebgpu port file or name (WASM + JSUI_WEBGPU)")
 if(JSUI_WEBGPU)
   target_compile_definitions(jsui PUBLIC JSUI_WEBGPU=1)
   if(EMSCRIPTEN)
-    if(NOT EXISTS "${JSUI_EMDAWNWEBGPU_PORT}")
+    if(JSUI_EMDAWNWEBGPU_PORT MATCHES "/" AND NOT EXISTS "${JSUI_EMDAWNWEBGPU_PORT}")
       message(FATAL_ERROR "Emdawnwebgpu not found at ${JSUI_EMDAWNWEBGPU_PORT}: run scripts/setup-emdawnwebgpu.sh")
     endif()
     target_compile_options(jsui PUBLIC "--use-port=${JSUI_EMDAWNWEBGPU_PORT}")
@@ -208,11 +227,32 @@ if(NOT EMSCRIPTEN AND _jsui_skia_gn MATCHES "skia_use_dawn *= *true")
   if(EXISTS "${JSUI_SKIA_DIR}/dawn/REVISION")
     file(STRINGS "${JSUI_SKIA_DIR}/dawn/REVISION" _jsui_dawn_revision LIMIT_COUNT 1)
   endif()
+elseif(EMSCRIPTEN AND JSUI_WEBGPU AND JSUI_WASM_THREADS)
+  # Threaded WASM (the Godot integration inside godot-aw3's web export): the
+  # host's "Dawn" is Emdawnwebgpu, linked into the same program. Skia and JSUI
+  # call its wgpu* functions directly (no shim, nothing resolved at run time);
+  # the revision is the Dawn commit of that Emdawnwebgpu release
+  # (scripts/build-skia-wasm-mt.sh records it), which the engine reports too.
+  set(_jsui_graphite_dawn_default ON)
+  if(EXISTS "${JSUI_SKIA_LIB_DIR}/emdawnwebgpu-version.txt")
+    file(READ "${JSUI_SKIA_LIB_DIR}/emdawnwebgpu-version.txt" _v)
+    string(REGEX MATCH "dawn/\\+log/([0-9a-f]+)" _m "${_v}")
+    set(_jsui_dawn_revision "${CMAKE_MATCH_1}")
+  endif()
 endif()
 option(JSUI_GRAPHITE_DAWN "Build the Skia Graphite Dawn backend on the host's Dawn (jsui_gpu_create_dawn_procs)" ${_jsui_graphite_dawn_default})
 set(JSUI_DAWN_INCLUDE_DIR "${_jsui_dawn_include}" CACHE PATH "Dawn include dir (dawn/webgpu.h, webgpu/webgpu_cpp.h) the Skia was built against")
 set(JSUI_DAWN_REVISION "${_jsui_dawn_revision}" CACHE STRING "Dawn revision of JSUI_DAWN_INCLUDE_DIR (jsui_dawn_revision(); the host's Dawn must match)")
-if(JSUI_GRAPHITE_DAWN)
+if(JSUI_GRAPHITE_DAWN AND EMSCRIPTEN)
+  if(NOT JSUI_WEBGPU)
+    message(FATAL_ERROR "JSUI_GRAPHITE_DAWN on WASM needs a Skia with Graphite + WebGPU (JSUI_WEBGPU)")
+  endif()
+  if(NOT JSUI_DAWN_REVISION MATCHES "^[0-9a-f]+$")
+    message(FATAL_ERROR "JSUI_GRAPHITE_DAWN needs JSUI_DAWN_REVISION (the Emdawnwebgpu's Dawn revision; got '${JSUI_DAWN_REVISION}')")
+  endif()
+  target_compile_definitions(jsui PUBLIC JSUI_GRAPHITE_DAWN=1)
+  target_compile_definitions(jsui PRIVATE JSUI_DAWN_DIRECT=1 JSUI_DAWN_REVISION_STR="${JSUI_DAWN_REVISION}")
+elseif(JSUI_GRAPHITE_DAWN)
   if(NOT EXISTS "${JSUI_DAWN_INCLUDE_DIR}/dawn/webgpu.h")
     message(FATAL_ERROR "JSUI_GRAPHITE_DAWN needs JSUI_DAWN_INCLUDE_DIR (no dawn/webgpu.h in '${JSUI_DAWN_INCLUDE_DIR}')")
   endif()
@@ -389,7 +429,12 @@ if(JSUI_BUILD_TESTS AND NOT EMSCRIPTEN)
   add_test(NAME jsui-tests COMMAND jsui-tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 
-if(JSUI_BUILD_GODOT AND NOT EMSCRIPTEN)
+# On WASM (threaded only): a static library to link into a Godot web export
+# template (integrations/godot/README.md, "Threaded web build").
+if(JSUI_BUILD_GODOT)
+  if(EMSCRIPTEN AND NOT JSUI_WASM_THREADS)
+    message(FATAL_ERROR "JSUI_BUILD_GODOT on WASM needs JSUI_WASM_THREADS (scripts/build-godot-web.sh)")
+  endif()
   add_subdirectory(integrations/godot)
 endif()
 

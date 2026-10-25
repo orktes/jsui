@@ -55,8 +55,29 @@ if(JSUI_WASM_SIMD)
   endif()
 endif()
 
-# QuickJS-ng: no threads / atomics in the browser build.
+# QuickJS-ng: no threads / atomics in the browser build. (In a threaded build
+# the engine still runs on one thread, the JS thread: this only leaves out
+# QuickJS's own Atomics / worker support.)
 target_compile_definitions(jsui_quickjs PRIVATE EMSCRIPTEN=1)
+
+# Threaded builds (JSUI_WASM_THREADS) need a Skia compiled the same way
+# (scripts/build-skia-wasm-mt.sh): wasm-ld refuses objects without atomics in
+# a shared-memory program, and the two longjmp ABIs do not mix.
+set(_jsui_skia_threads OFF)
+if(DEFINED _jsui_skia_args AND _jsui_skia_args MATCHES "-pthread")
+  set(_jsui_skia_threads ON)
+endif()
+if(JSUI_WASM_THREADS AND NOT _jsui_skia_threads)
+  message(FATAL_ERROR "JSUI_WASM_THREADS needs a threaded Skia (scripts/build-skia-wasm-mt.sh); ${JSUI_SKIA_LIB_DIR} is not one")
+elseif(_jsui_skia_threads AND NOT JSUI_WASM_THREADS)
+  message(FATAL_ERROR "${JSUI_SKIA_LIB_DIR} is a threaded Skia: configure with -DJSUI_WASM_THREADS=ON")
+endif()
+message(STATUS "JSUI_WASM_THREADS: ${JSUI_WASM_THREADS}")
+if(JSUI_WASM_THREADS)
+  # No browser module (web/dist*) in this configuration: the library is
+  # linked into another program (integrations/godot, jsui_godot_web).
+  return()
+endif()
 
 # Exported C API: every JSUI_API function declared in jsui.h, plus the web
 # glue and the allocator the JS host uses to pass strings and frame buffers.

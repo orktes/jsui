@@ -32,6 +32,8 @@ integrations/godot/
                         GODOT_RENDERING=vulkan runs it on Vulkan (GPU renderer)
   record-pipelines.sh   records demo/jsui-pipelines.vulkan.bin, the GPU pipeline
                         list the demo ships (see Rendering)
+  web-link-check.c      link check of the threaded web library (see
+                        "Threaded web build")
 ```
 
 ## Build
@@ -944,3 +946,139 @@ To move to another Dawn, the Skia pin and the fork's Dawn must move
 together. Bump `SKIA_COMMIT` / `DAWN_REVISION` in
 `scripts/build-skia-desktop.sh`, which fails if Skia's DEPS pin a different
 Dawn, and rebuild the fork against the new revision.
+
+### Threaded web build
+
+The fork's web export runs Forward+ on browser WebGPU (Emdawnwebgpu) in a
+threaded build (`variant/thread_support=true`). It has no GDExtension side
+modules (`variant/extensions_support=false`, as AW3's preset uses). So on the
+web the integration is **linked into the export template**. The fork's
+`modules/jsui` registers it at startup, and JsuiView then renders with Skia
+Graphite on Godot's `WGPUDevice` (`get_renderer()` is `"webgpu"`). JS runs on
+its own pthread (`get_active_js_thread()` is `JS_THREAD_ON`).
+
+Static linking was chosen over a side module for two reasons. The template
+needs no dynamic linking (`dlink_enabled`, which costs size and forbids
+`proxy_to_pthread`). And one link checks every symbol at build time. Its
+problem is that the engine and Skia both bring HarfBuzz, FreeType, ICU,
+libpng, zlib, libwebp and libjpeg-turbo, at other versions. JSUI's side is
+therefore linked into **one relocatable object whose symbols are all local**,
+except the entry point and Emscripten's EM_JS markers
+(`tools/wasm-localize`: `wasm-ld -r`, then the object's symbol table is
+rewritten; neither `wasm-ld` nor `llvm-objcopy` can localize wasm symbols).
+The two sets of libraries then neither clash nor bind to each other.
+Undefined references (libc, libc++, Emscripten's runtime, the engine's
+`wgpu*`) resolve against the engine.
+
+```sh
+scripts/build-godot-web.sh
+# -> integrations/godot/demo/bin/libjsui_godot.web.threads.wasm32.a (~31 MB, one object)
+```
+
+`scripts/build-godot-web.sh` does the following:
+
+* Sets up emsdk **4.0.20**, the fork's (`misc/web-export/wasm.sh`
+  `EMSDK_VERSION`), in `third_party/emsdk-4.0.20`. The library and the engine
+  must share one compiler and libc++.
+* Builds Skia m157 threaded with `scripts/build-skia-wasm-mt.sh` into
+  `third_party/skia-wasm-mt`: Graphite on WebGPU plus CPU raster. It uses the
+  same pin and `skia-m157-emdawnwebgpu.patch` as the browser module's build,
+  against that emsdk's **own** Emdawnwebgpu port (`--use-port=emdawnwebgpu`,
+  Dawn release v20251002.162335 / `01940842b667`), the `webgpu.h` the fork
+  compiles its driver against. Everything is compiled with `-pthread`,
+  `-sSUPPORT_LONGJMP=wasm` and `-fno-exceptions`, as Godot's web build is:
+  wasm-ld refuses objects without atomics in a shared-memory program, the
+  longjmp ABIs do not mix, and with wasm longjmp Emscripten links no C++
+  throw support. The build takes about 4 minutes on 16 cores.
+* Configures JSUI with `-DJSUI_WASM_THREADS=ON -DJSUI_BUILD_GODOT=ON
+  -DJSUI_HOST_JS=OFF -DJSUI_EMDAWNWEBGPU_PORT=emdawnwebgpu`. On threaded
+  Emscripten:
+  * `JsThread` uses pthreads (`JSUI_NO_JS_THREAD` only without
+    `__EMSCRIPTEN_PTHREADS__`).
+  * `JSUI_GRAPHITE_DAWN` calls `wgpu*` directly. There is no shim, and
+    `jsui_gpu_create_dawn_procs` ignores the proc address.
+    `jsui_dawn_revision()` is the port's Dawn revision.
+  * Graphite gets no tick function (the browser cannot block on the GPU) and
+    no internal MSAA. Pipeline precompiles are sliced on the render thread,
+    since no other thread touches the device.
+  * The non-threaded npm modules (`scripts/build-wasm.sh`) are unchanged.
+* Links the archive (`jsui_godot_web` target) and runs a link check
+  (`web-link-check.c`). The check is a threaded program with its own
+  `hb_*` / `FT_*` / `png_*` / `inflate` symbols that links the library with
+  Godot's flags, and its calls must still reach its own copies. CI's
+  `godot-web` job runs the whole script.
+
+In the fork (branch `jsui-web-threads`, `modules/jsui/README.md`), the
+library is linked into the template with the same emsdk on `PATH`:
+
+```sh
+scons platform=web target=template_release webgpu=yes threads=yes \
+  module_jsui_enabled=yes jsui_lib=$JSUI/integrations/godot/demo/bin/libjsui_godot.web.threads.wasm32.a
+```
+
+The module passes `jsui_godot_init` to
+`GDExtensionManager::add_builtin_extension("res://jsui.gdextension", ...)`
+(added there). `load_extensions()` loads built-in extensions ahead of the
+project's extension list, so the project keeps its `.gdextension` and the
+list finds it loaded. `WebGPUInterop.get_dawn_revision()` reports the port's
+Dawn revision on the web, which JsuiView checks as on native.
+
+Exporting the demo for the web:
+
+* `project.godot` has `renderer/rendering_method.web="forward_plus"`, so the
+  export sets `renderingDriver: "webgpu"`.
+* Use a Web preset with `custom_template/*` set to the fork's
+  `godot.web.template_release.wasm32.zip`, `variant/thread_support=true`,
+  `variant/extensions_support=false` and `threads/emscripten_pool_size=16`.
+  JSUI needs one pool thread for its JS thread: the thread starts while the
+  main thread waits for it, so it must come from the pool.
+* Set the non-resource filter to `ui/dist/*,hud/ui/*,*.bin`.
+* Give the bundle's images (`ui/dist/assets/*.png|jpg`) the "Keep File"
+  import mode (`importer="keep"` in their `.import`). JSUI reads them raw
+  through `FileAccess`, and an imported image is exported only as its
+  `.ctex`.
+* For `--hud`, copy `integrations/shared/ui/dist/bundle.js` to
+  `hud/ui/bundle.js`. An export cannot reach the repository path `--hud`
+  uses, and `main.gd` takes the copy when it exists.
+* Serve the export with COOP/COEP (`misc/web-export/wasm.sh serve`, or any
+  server that sends `Cross-Origin-Opener-Policy: same-origin` and
+  `Cross-Origin-Embedder-Policy: require-corp`). Godot's command-line user
+  args go in `GODOT_CONFIG.args` after a `"--"`.
+
+What was run (Chrome 155, headed, Apple M1 Ultra, Metal through Dawn):
+
+* The demo shows the showcase over the 3D world at 60 fps, with
+  `JsuiView: rendering with Skia Graphite on webgpu (Dawn 01940842b667)`.
+* Real browser input works (Playwright mouse and keyboard on the canvas):
+  hover, the Ping button (`Host.call` → `resolve_call`, credits update),
+  typing plus Enter in the TextInput (a new chip), and wheel scrolling the
+  armory list.
+* `--self-test`: 49 checks pass, among them hover, click, mapping, gamepad,
+  wheel, pan, typing, ping, `call_ui`, hit testing, pass-through, surfaces,
+  Lottie, shaders and audio, and `js stall`: "JS thread on: 26 frames during
+  a 400 ms JS stall, the longest 17.5 ms". 8 fail, for the reasons in the
+  limits below: the 7 host-texture checks, which read the frame back, and
+  `audio decode`, which needs the raw sound files in the pack.
+* `--hud` runs the shared HUD over the orbiting units, with `webgpu` in its
+  panel.
+* Frame cost of the UI: the main-thread time of Godot's
+  `requestAnimationFrame` callback, at 60 fps, 1200 frames per run, two
+  rounds. With `--hud` it is 1.64 / 1.91 ms mean (p90 2.8 / 3.0 ms). With
+  `--hud --no-ui` it is 0.87 / 0.91 ms (p90 1.3 / 1.4 ms). So the UI adds
+  about 0.9 ms per frame on the main thread; JS runs on its own thread.
+
+Limits of the web build:
+
+* `get_frame_image()` returns the CPU raster of the frame: browser WebGPU
+  cannot read a texture back synchronously, and the fork's
+  `texture_get_data` returns nothing there. Host textures (GPU-only) are
+  missing from that image. Whether they draw on the web GPU path has not
+  been checked.
+* There is no pipeline cache file. Pipelines compile on first use, and the
+  shipped `jsui-pipelines.webgpu.bin` (native Dawn) is ignored with one
+  warning.
+* Dev mode and `http://` bundles have not been tried. The browser loader's
+  `fetch()` glue would run on the JS thread's worker.
+* Only `template_release` without Mono has been built. AW3's Mono template
+  needs the same `module_jsui_enabled` / `jsui_lib` flags in
+  `TEMPLATE_FLAGS`.

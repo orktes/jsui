@@ -107,6 +107,19 @@
 
 #include "include/gpu/graphite/dawn/DawnBackendContext.h"
 #include "include/gpu/graphite/dawn/DawnGraphiteTypes.h"
+#if defined(JSUI_DAWN_DIRECT)
+// Threaded WASM inside a program that links Emdawnwebgpu (godot-aw3's web
+// export): wgpu* are ordinary functions of the same program, so there is no
+// table to fill. The browser cannot block on the GPU, and the device belongs
+// to the thread that drives the engine's renderer: Graphite gets no tick
+// function and no compile threads (see makeDawn), as gpu_webgpu.cpp.
+namespace {
+int jsui_dawn_proc_count() { return 1; }
+int jsui_dawn_fill_from_get_proc(void*) { return 1; }
+int jsui_dawn_fill_from_process() { return 1; }
+const char* jsui_dawn_header_revision() { return JSUI_DAWN_REVISION_STR; }
+}  // namespace
+#else
 // tools/dawn-shim (generated): the table behind the wgpu* trampolines.
 extern "C" {
 int jsui_dawn_proc_count(void);
@@ -114,6 +127,7 @@ int jsui_dawn_fill_from_get_proc(void* get_proc);
 int jsui_dawn_fill_from_process(void);
 const char* jsui_dawn_header_revision(void);
 }
+#endif
 #endif
 
 namespace graphite = skgpu::graphite;
@@ -187,7 +201,11 @@ struct GraphiteGpu final : JsuiGpuContext {
   std::unique_ptr<Precompiler> precompiler = std::make_unique<Precompiler>(
       api == Api::Vulkan  ? jsui::pipeline_cache::Backend::Vulkan
       : api == Api::Metal ? jsui::pipeline_cache::Backend::Metal
+#if defined(__EMSCRIPTEN__)
+                          : jsui::pipeline_cache::Backend::BrowserWebGPU);
+#else
                           : jsui::pipeline_cache::Backend::Dawn);
+#endif
   // Outlives ctx too (Graphite's compile tasks; see makeCompileExecutor).
   std::unique_ptr<SkExecutor> compileExecutor;
 #if defined(JSUI_VULKAN)
@@ -222,9 +240,15 @@ struct GraphiteGpu final : JsuiGpuContext {
 
   Precompiler::Mode precompileMode() {
 #if defined(JSUI_GRAPHITE_DAWN)
+#if defined(__EMSCRIPTEN__)
+    // The browser's device is used from one thread only (other threads
+    // would each need their own import of it).
+    if (api == Api::Dawn) return Precompiler::Mode::Sliced;
+#else
     if (api == Api::Dawn)
       return dawnDevice.HasFeature(wgpu::FeatureName::ImplicitDeviceSynchronization) ? Precompiler::Mode::Thread
                                                                                      : Precompiler::Mode::Sliced;
+#endif
 #endif
     return Precompiler::Mode::Thread;
   }
@@ -350,9 +374,22 @@ struct GraphiteGpu final : JsuiGpuContext {
     warmRecorder.reset();
     recorder.reset();
     if (ctx) {
+#if defined(__EMSCRIPTEN__)
+      // No tick function: Graphite cannot wait for the GPU here (it aborts
+      // if work is outstanding when it is destroyed). Collect what finished;
+      // if some is still in flight, leak the context rather than abort (its
+      // GPU objects go with the device).
+      ctx->checkAsyncWorkCompletion();
+      if (ctx->hasUnfinishedGpuWork() && !ctx->isDeviceLost()) {
+        SkDebugf("jsui: WebGPU context destroyed with GPU work in flight; leaking it\n");
+        (void)ctx.release();
+        return;
+      }
+#else
       // Wait for everything submitted (Graphite needs its work finished
       // before it frees its resources).
       ctx->submit(graphite::SyncToCpu::kYes);
+#endif
 #if defined(JSUI_VULKAN)
       // The last save (the device is still the host's to destroy after this).
       if (driverStorage) driverStorage->finish();
@@ -620,8 +657,15 @@ JsuiGpuContext* makeDawn(void* instance, void* device, void* queue) {
   backend.fInstance = g->dawnInstance;
   backend.fDevice = g->dawnDevice;
   backend.fQueue = g->dawnQueue;
-  backend.fTick = graphite::DawnNativeProcessEventsFunction;
   graphite::ContextOptions opts;
+#if defined(__EMSCRIPTEN__)
+  backend.fTick = nullptr;  // the browser cannot block on the GPU
+  // No internal MSAA: browser WebGPU lacks what makes it cheap (see
+  // gpu_webgpu.cpp); paths go through the path atlas.
+  opts.fInternalMultisampleCount = graphite::SampleCount::k1;
+#else
+  backend.fTick = graphite::DawnNativeProcessEventsFunction;
+#endif
   g->configure(opts);
   g->ctx = graphite::ContextFactory::MakeDawn(backend, opts);
   if (!g->finishInit(opts)) return nullptr;
@@ -645,7 +689,12 @@ JsuiGpuContext* createDawn(void* instance, void* device, void* queue) {
 
 JsuiGpuContext* createDawnProcs(void* getProcAddress, void* instance, void* device, void* queue) {
 #if defined(JSUI_GRAPHITE_DAWN)
+#if defined(JSUI_DAWN_DIRECT)
+  (void)getProcAddress;  // linked directly; nothing to resolve
+  if (!device) return nullptr;
+#else
   if (!getProcAddress || !instance || !device) return nullptr;
+#endif
   const int resolved = jsui_dawn_fill_from_get_proc(getProcAddress);
   if (resolved != jsui_dawn_proc_count()) {
     SkDebugf("jsui: the host's wgpuGetProcAddress resolved %d of %d Dawn entry points (JSUI is built against Dawn %s)\n",

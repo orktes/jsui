@@ -44,6 +44,70 @@ set(GODOTCPP_SYSTEM_HEADERS ON CACHE BOOL "" FORCE)
 set(GODOTCPP_API_VERSION ${JSUI_GODOT_API_VERSION} CACHE STRING "" FORCE)
 add_subdirectory(${_godot_cpp_src} ${CMAKE_BINARY_DIR}/_deps/godot-cpp-build EXCLUDE_FROM_ALL)
 
+if(EMSCRIPTEN)
+  # Threaded web build: a static library linked into a Godot web export
+  # template (README, "Threaded web build"), not a side module. godot-cpp's
+  # web setup compiles for one (-sSIDE_MODULE=1, i.e. -fPIC + dynamic
+  # linking glue); take that out.
+  foreach(_prop COMPILE_OPTIONS INTERFACE_COMPILE_OPTIONS)
+    get_target_property(_opts godot-cpp ${_prop})
+    if(_opts)
+      list(REMOVE_ITEM _opts -sSIDE_MODULE=1)
+      set_target_properties(godot-cpp PROPERTIES ${_prop} "${_opts}")
+    endif()
+  endforeach()
+  add_library(jsui_godot STATIC
+    src/register_types.cpp
+    src/jsui_view.cpp
+    src/jsui_gpu_render.cpp
+    src/keymap.cpp
+    src/jsui_audio.cpp)
+  target_link_libraries(jsui_godot PRIVATE jsui godot::cpp)
+
+  # jsui_godot_web: everything (the integration, godot-cpp, JSUI, QuickJS,
+  # Yoga, Skia and its HarfBuzz / FreeType / ICU / libpng / zlib / ...)
+  # linked into ONE relocatable object whose symbols are all local except the
+  # entry point jsui_godot_init (tools/wasm-localize), in an archive. The
+  # engine links its own copies of several of those libraries at other
+  # versions; with local symbols the two sets neither clash nor bind to each
+  # other. Undefined references (libc, libc++, Emscripten's runtime, wgpu* of
+  # the engine's Emdawnwebgpu) resolve against the engine.
+  set(_web_name libjsui_godot.web.threads.wasm32.a)
+  set(_web_dir ${CMAKE_CURRENT_BINARY_DIR}/web)
+  set(_web_lib ${_web_dir}/${_web_name})
+  # The archives a program using jsui_godot links, in link order, as CMake
+  # computes them (Skia's, WebFonts' WOFF / WOFF2 decoders, ...): a stand-in
+  # program whose "linker" only records its inputs.
+  set(_web_rsp ${_web_dir}/inputs.txt)
+  file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/web_inputs_main.cpp "int main() { return 0; }\n")
+  add_executable(jsui_godot_web_inputs ${CMAKE_CURRENT_BINARY_DIR}/web_inputs_main.cpp)
+  target_link_libraries(jsui_godot_web_inputs PRIVATE jsui_godot)
+  set_target_properties(jsui_godot_web_inputs PROPERTIES CXX_LINKER_LAUNCHER
+    "python3;${CMAKE_SOURCE_DIR}/tools/wasm-localize/capture_link.py;${_web_rsp};libjsui_godot.a")
+  find_program(JSUI_WASM_LD wasm-ld HINTS "$ENV{EMSDK}/upstream/bin" "${EMSCRIPTEN_ROOT_PATH}/../bin" REQUIRED)
+  find_program(JSUI_EMAR emar HINTS "${EMSCRIPTEN_ROOT_PATH}" REQUIRED)
+  add_custom_command(OUTPUT ${_web_lib}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${_web_dir}
+    COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/wasm-localize/link_relocatable.py
+            --wasm-ld ${JSUI_WASM_LD} --inputs ${_web_rsp} --entry jsui_godot_init
+            # The browser loader's fetch() glue calls these (the engine's link
+            # must export them: the fork's modules/jsui does).
+            --keep jsui_emscripten_fetch_begin --keep jsui_emscripten_fetch_end
+            --output ${_web_dir}/jsui_godot.o
+    COMMAND ${CMAKE_COMMAND} -E rm -f ${_web_lib}
+    COMMAND ${JSUI_EMAR} rcs ${_web_lib} ${_web_dir}/jsui_godot.o
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${JSUI_GODOT_OUTPUT_DIR}
+    COMMAND ${CMAKE_COMMAND} -E copy ${_web_lib} ${JSUI_GODOT_OUTPUT_DIR}/${_web_name}
+    DEPENDS jsui_godot_web_inputs
+            ${CMAKE_SOURCE_DIR}/tools/wasm-localize/wasm_localize.py
+            ${CMAKE_SOURCE_DIR}/tools/wasm-localize/link_relocatable.py
+    COMMENT "Linking ${_web_name} (one object, local symbols)"
+    VERBATIM)
+  add_custom_target(jsui_godot_web ALL DEPENDS ${_web_lib})
+  message(STATUS "jsui_godot_web: ${JSUI_GODOT_OUTPUT_DIR}/${_web_name}")
+  return()
+endif()
+
 add_library(jsui_godot SHARED
   src/register_types.cpp
   src/jsui_view.cpp
