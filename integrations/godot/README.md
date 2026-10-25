@@ -196,6 +196,8 @@ difference above `VIEWPORT_MAX_DIFF` (default 2); both are saved as
 `<out>-shown.png` / `<out>-expected.png`.
 
 `main.gd` takes a few more arguments for checking the renderer by hand:
+`--js-thread on|off|lockstep` (sets `js_thread`; `JS_THREAD=off` in
+`smoke-test.sh`),
 `--force-cpu` (sets `force_cpu`), `--expect-renderer vulkan|metal|cpu`,
 `--max-gpu-diff D` (with `--capture`: compare the GPU frame with the CPU
 raster), `--max-viewport-diff D` (with `--capture` and a display: compare
@@ -276,6 +278,39 @@ http://127.0.0.1:5173`) then drive and screenshot the UI inside the running
 game, and see what you click and press in it (`jsui log --attach`). See the
 CLI's README.
 
+## JS thread
+
+By default the bundle's JS runs on a thread of its own, as React Native's
+does (`js_thread` = `JS_THREAD_ON`). The view still ticks in
+`NOTIFICATION_PROCESS` on the main thread, but the tick never waits for
+JS: timers, events, React's renders and commits and garbage collection run
+on the JS thread, and each tick applies what JS finished since the last one
+(a commit whole, never half). What native does every frame keeps going
+while JS is busy: `Animated` values driven by `set_buffer` data
+(`useHostBufferValue` nameplates), scrolling and flings, hover / press
+styles, LayoutAnimations, hit testing, layout and paint. A 50 ms commit or
+a collection costs the game no frame.
+
+What changes for the game:
+
+* What JS does in answer to the game shows a frame or more later. Signals
+  (`message_received`, `state_changed`, `call_requested`, ...) still come on
+  the main thread, from the view's `_process`.
+* When a change must show on this very frame (a scene cut, a screenshot,
+  state the UI must not show late), call `sync_js_next_frame()` before the
+  view's next process: that tick waits for JS (up to 250 ms). `sync_js()`
+  waits right away.
+* `input_pass_through` and the input the UI consumes are decided natively
+  (the hit test, listeners the bundle declared), never by waiting for JS; a
+  key whose default action JS may veto (Tab, Enter) waits for JS's answer up
+  to 100 ms.
+* `JS_THREAD_OFF` runs JS inside the tick (the main thread waits for it);
+  `JS_THREAD_LOCKSTEP` runs it on its thread but waits every tick, which
+  gives the frames of off (tests). Both apply on `start()`.
+
+The demo's self-test starts with `debug_stall_js(400)` and requires
+Godot's frames to go on meanwhile (`PASS js stall`).
+
 ## JsuiView reference
 
 | Property | Type | Default | |
@@ -286,6 +321,7 @@ CLI's README.
 | `autostart` | bool | `true` | start in `_ready` (otherwise call `start()`) |
 | `forward_gamepad` | bool | `true` | forward joypad events received while focused |
 | `force_cpu` | bool | `false` | always use the CPU renderer, also on Vulkan / Metal |
+| `js_thread` | int | `JS_THREAD_ON` | where the bundle's JS runs: `JS_THREAD_ON` on a thread of its own (React Native's JS thread: frames never wait for JS), `JS_THREAD_OFF` inside the tick on the main thread, `JS_THREAD_LOCKSTEP` on its thread but waited for every tick (the frames of off). Applies on `start()`; the runtime view's counts. See [JS thread](#js-thread) |
 | `runtime_view` | NodePath | empty | show a surface of that JsuiView's runtime instead of running a bundle of its own (see [Several views, one runtime](#several-views-one-runtime)) |
 | `component` | String | `""` | the `AppRegistry` key this view shows. On a runtime view: the main surface's component (empty: the bundle's first registered one) |
 | `initial_props` | Dictionary | `{}` | the component's props; changing them re-renders it with the new props (state kept) |
@@ -306,6 +342,10 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | `reload()` | re-evaluate the bundle (same runtime) |
 | `post_message(name, data = null)` | send to JS: `data` is JSON-encoded. JS receives it with `useHostMessage(name, cb)` / `Host.onMessage` |
 | `post_message_json(name, json)` | same with a JSON string |
+| `sync_js(timeout_ms = 250) -> bool` | with JS on its own thread: waits until JS has handled everything sent to it (`jsui_sync`), applies it and lays out, emits the signals for what it did, and repaints on the next frame. `true` when JS is left idle, `false` after `timeout_ms` (negative: no limit). Without the thread: `true` at once |
+| `sync_js_next_frame()` | the next tick waits for JS (`JSUI_TICK_SYNC_JS`, up to 250 ms): what the game set before it (state, messages, input) shows on that frame. For scene cuts, screenshots, state that must not lag |
+| `debug_stall_js(ms)` | keeps JS busy for `ms` (`jsui_debug_stall_js`), as a long commit or a collection would: with the thread the game's frames go on, without it this call takes `ms` |
+| `get_active_js_thread() -> int` | the `JS_THREAD_*` mode the runtime runs in (`JS_THREAD_OFF` while not running, or where the build has no threads) |
 | `set_state(key, value) -> int` | shared state (`jsui_set_state`): `value` (Dictionary, Array, number, String…) is JSON-encoded, `null` removes the key. JS reads it with `useHostState(key)` and re-renders on change. Returns 1 changed, 0 unchanged, -1 invalid |
 | `patch_state(key, patch) -> int` | RFC 7386 merge patch of a key (`jsui_patch_state`): Dictionaries merge, `null` members delete. Keep big collections as Dictionaries keyed by id |
 | `get_state(key) -> Variant` | current value (also keys the UI set with `HostState.set`) |
@@ -327,7 +367,7 @@ Changing `bundle_url` or `dev_mode` on a running view restarts it.
 | `get_cpu_frame_image()` | the current frame painted by the CPU raster, straight alpha, whatever the renderer (to compare with `get_frame_image()`) |
 | `get_renderer()` | `"vulkan"`, `"metal"`, `"d3d12"`, `"webgpu"` or `"cpu"` (`""` before the first frame) |
 | `get_render_stats()` | Dictionary: `renderer`, `renders`, `render_usec_total` / `_last` / `_max` (time in the view's render call, CPU side), `dirty_pixels_total`, `tick_usec_last` (the last `jsui_tick`); GPU renderer: `gpu_jobs` (the view's frames handed to the render thread without waiting), `render_thread_jobs` (the render-thread jobs those went in: one per frame for all the views of a runtime; the runtime view's count), `gpu_frame_in_flight` (the last frame handed over is not painted yet), `blocking_waits` / `main_wait_usec_total` (times the main thread waited for the render thread, and for how long), `gpu_job_usec_total` / `jsui_render_usec_total` (render-thread time of the view's GPU renders, and of `jsui_render_gpu_target` in them); `pipelines` (the runtime's pipeline cache, `jsui_gpu_get_pipeline_stats`: `mode` `"thread"` / `"sliced"`, `queued`, `precompiled`, `failed`, `compiled` on demand, `added` to the file, `unserializable`, `known`, and the `file`) |
-| `get_perf(reset = true)` | Dictionary (`jsui_get_perf`) since the last reset: exclusive time per phase in µs (`js_us`, `commit_us`, `animated_us`, `style_us`, `layout_us`, `input_us`, `paint_us`, `gpu_submit_us`, `other_us`; with `profiling` on) and counters (`image_decodes`, `image_decode_us`, `pipeline_compiles`, `paragraph_builds`, `text_measures`, `layout_passes`, `bridge_calls`) and JS garbage collection (`gc_collections`, `gc_full_collections`, `gc_us`, `gc_max_us`) |
+| `get_perf(reset = true)` | Dictionary (`jsui_get_perf`) since the last reset: exclusive time per phase in µs (`js_us`, `commit_us`, `animated_us`, `style_us`, `layout_us`, `input_us`, `paint_us`, `gpu_submit_us`, `other_us`; with `profiling` on) and counters (`image_decodes`, `image_decode_us`, `pipeline_compiles`, `paragraph_builds`, `text_measures`, `layout_passes`, `bridge_calls`) and JS garbage collection (`gc_collections`, `gc_full_collections`, `gc_us`, `gc_max_us`); with the JS thread: `js_busy_ms` (JS thread time in tasks), `js_batches_applied`, `js_apply_ms` (main-thread time applying them), `js_lag_frames` (ticks since JS last delivered while it had work), `js_sync_ms` (time waiting in syncs) |
 | `get_pending_loads()` | bundle/image/font/fetch loads in flight |
 | `get_last_error()` | last uncaught JS error, or `""` |
 | `get_effective_pixel_ratio()` | the ratio actually used |

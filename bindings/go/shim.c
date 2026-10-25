@@ -36,6 +36,15 @@ void gojsui_set_callbacks(JsuiConfig* cfg, uintptr_t handle) {
     cfg->call_user = user;
 }
 
+static void on_js_ready(void* user) {
+    goJsuiJSReady((uintptr_t)user);
+}
+
+void gojsui_set_js_ready(JsuiConfig* cfg, uintptr_t handle) {
+    cfg->on_js_ready = on_js_ready;
+    cfg->js_ready_user = (void*)handle;
+}
+
 uint64_t gojsui_call_ui(JsuiRuntime* rt, const char* name, const char* args_json, uintptr_t handle) {
     return jsui_call_ui(rt, name, args_json, on_call_ui_done, (void*)handle);
 }

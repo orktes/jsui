@@ -38,8 +38,10 @@ public:
 		FString Text;
 	};
 
-	// A runtime of Width x Height logical px at PixelRatio device px per px.
-	static TSharedPtr<FJsuiHost, ESPMode::ThreadSafe> Create(int32 Width, int32 Height, float PixelRatio, bool bDevMode);
+	// A runtime of Width x Height logical px at PixelRatio device px per px,
+	// its JS in JsThread mode (JSUI_JS_THREAD_*).
+	static TSharedPtr<FJsuiHost, ESPMode::ThreadSafe> Create(int32 Width, int32 Height, float PixelRatio, bool bDevMode,
+	                                                         int32 JsThread);
 	~FJsuiHost();
 
 	// The runtime for a game-thread call (waits for a queued render job).

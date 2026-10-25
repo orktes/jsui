@@ -3,9 +3,16 @@
 // integrations/shared/ui/app.jsx (messages, the `game` state, the `entities`
 // frame data), click-vs-drag selection, a ray-vs-box test for picking units
 // and the --selftest input script.
+//
+// JS runs on its own thread (JsuiConfig.js_thread = JSUI_JS_THREAD_ON, as in
+// React Native) unless --js-thread off / lockstep says otherwise: the game's
+// frames never wait for the HUD's JS, and the nameplates (host buffer ->
+// native Animated) follow the units every frame even while JS is busy. The
+// examples tick every frame, so they need no on_js_ready wake-up.
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -28,14 +35,20 @@ struct Options {
   long frames = -1;                          // run N frames, then exit
   std::string screenshot;                    // write the last frame here (with --frames)
   bool selftest = false;                     // scripted input check (see SelfTest), then exit
+  int jsThread = JSUI_JS_THREAD_ON;          // --js-thread on|off|lockstep (JsuiConfig.js_thread)
 };
 
 inline void usage(const char* exe) {
   std::printf(
       "usage: %s [--dev] [--cpu] [--width W] [--height H] [--frames N] [--screenshot out.png] [--selftest]\n"
-      "          [bundle.js | http://127.0.0.1:5173/bundle.js]\n"
-      "  default bundle: %s (npx jsui build integrations/shared/ui/app.jsx -o ...)\n",
+      "          [--js-thread on|off|lockstep] [bundle.js | http://127.0.0.1:5173/bundle.js]\n"
+      "  default bundle: %s (npx jsui build integrations/shared/ui/app.jsx -o ...)\n"
+      "  --js-thread: on (default) runs the UI's JS on its own thread; off on the game's thread\n",
       exe, JSUI_EXAMPLE_BUNDLE);
+}
+
+inline const char* jsThreadName(int mode) {
+  return mode == JSUI_JS_THREAD_ON ? "on" : mode == JSUI_JS_THREAD_LOCKSTEP ? "lockstep" : "off";
 }
 
 inline bool parseOptions(int argc, char** argv, Options* o) {
@@ -55,6 +68,16 @@ inline bool parseOptions(int argc, char** argv, Options* o) {
     else if (a == "--height") o->height = std::atoi(value());
     else if (a == "--frames") o->frames = std::atol(value());
     else if (a == "--screenshot") o->screenshot = value();
+    else if (a == "--js-thread") {
+      std::string m = value();
+      if (m == "on") o->jsThread = JSUI_JS_THREAD_ON;
+      else if (m == "off") o->jsThread = JSUI_JS_THREAD_OFF;
+      else if (m == "lockstep") o->jsThread = JSUI_JS_THREAD_LOCKSTEP;
+      else {
+        std::fprintf(stderr, "--js-thread takes on, off or lockstep\n");
+        return false;
+      }
+    }
     else if (a == "-h" || a == "--help") {
       usage(argv[0]);
       std::exit(0);
@@ -194,9 +217,13 @@ class SelfTestHost {
   virtual bool unitOnScreen(int i, float* x, float* y) = 0;
 };
 
-// --selftest: once the UI has reported where its Spawn button is, clicks
-// through the host's input handling (SelfTestHost::click) and checks the
-// pass-through contract every host relies on:
+// --selftest: once the UI has reported where its Spawn button is, stalls JS
+// for a moment and then clicks through the host's input handling
+// (SelfTestHost::click), checking:
+//   0. with JS on its own thread, a JS stall (jsui_debug_stall_js) holds no
+//      host frame: the frames go on meanwhile and JS catches up after it
+//      (without the thread the stall holds the host, as expected);
+// and the pass-through contract every host relies on:
 //   1. a click on empty space (the middle of the screen) is not consumed:
 //      jsui_hit_test says nothing is there and the game counts the click;
 //   2. a click on the Spawn button is consumed, and its game:spawn message
@@ -226,9 +253,14 @@ class SelfTest {
     frame_++;
     switch (phase_) {
       case 0:  // wait for the UI and a few frames of layout
-        if (anchors_ && frame_ > 30) phase_ = 1;
+        if (anchors_ && frame_ > 30) phase_ = kStall;
         else if (frame_ > 900) return fail("the UI never reported ui:anchors");
         return 0;
+      case kStall: {
+        int r = stallStep(rt);
+        if (r > 0) phase_ = 1;
+        return r < 0 ? -1 : 0;
+      }
       case 1: {
         float x = w * 0.5f, y = h * 0.45f;
         if (jsui_hit_test(rt, x, y) != 0) return fail("jsui_hit_test reports UI over the empty middle of the screen");
@@ -302,6 +334,48 @@ class SelfTest {
   }
 
  private:
+  static constexpr int kStall = 100;        // the stall phase
+  static constexpr double kStallMs = 300;  // how long JS is kept busy
+  using Clock = std::chrono::steady_clock;
+  static double ms(Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); }
+
+  // One JS stall of kStallMs, stepped once per host frame: 1 when done, -1
+  // when it failed. With a JS thread, posting it returns at once, no gap
+  // between two host frames comes near the stall while it runs, and
+  // jsui_sync sees JS idle again after it. Off or in lockstep the post
+  // itself holds the host for the stall.
+  int stallStep(JsuiRuntime* rt) {
+    Clock::time_point now = Clock::now();
+    if (stallFrames_ == 0) {
+      int mode = jsui_js_thread(rt);
+      jsui_debug_stall_js(rt, kStallMs);
+      double held = ms(Clock::now() - now);
+      if (mode != JSUI_JS_THREAD_ON) {
+        if (held < kStallMs * 0.9) return fail("jsui_debug_stall_js did not keep JS busy");
+        std::printf("selftest: JS thread %s: a %.0f ms JS stall held the game for %.0f ms\n", jsThreadName(mode),
+                    kStallMs, held);
+        return 1;
+      }
+      if (held > kStallMs / 4) return fail("posting a JS stall waited for the JS thread");
+      stallStart_ = lastFrame_ = Clock::now();
+      stallFrames_ = 1;
+      return 0;
+    }
+    double gap = ms(now - lastFrame_);
+    lastFrame_ = now;
+    maxGap_ = std::max(maxGap_, gap);
+    if (ms(now - stallStart_) < kStallMs) {
+      if (gap > kStallMs / 2) return fail("a game frame waited for the busy JS thread");
+      stallFrames_++;
+      return 0;
+    }
+    if (stallFrames_ < 3) return fail("too few game frames while JS was busy");
+    if (jsui_sync(rt, 2000) != 1) return fail("JS did not come back from its stall");
+    std::printf("selftest: JS thread on: %d game frames during a %.0f ms JS stall, the longest %.1f ms\n",
+                stallFrames_, kStallMs, maxGap_);
+    return 1;
+  }
+
   // A unit whose centre is on screen, away from the edges, not under the UI,
   // and picked there (not hidden behind another one). The newest first.
   int clickableUnit(JsuiRuntime* rt, SelfTestHost& host, int count, float w, float h, float* x, float* y) {
@@ -332,6 +406,9 @@ class SelfTest {
   int phase_ = 0, before_ = 0, round_ = 0, expect_ = -1;
   int reported_ = -1, reports_ = 0, reportsBefore_ = 0;
   long frame_ = 0, wait_ = 0;
+  int stallFrames_ = 0;
+  double maxGap_ = 0;
+  Clock::time_point stallStart_, lastFrame_;
 };
 
 }  // namespace jsui_example

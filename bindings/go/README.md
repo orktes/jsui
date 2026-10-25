@@ -35,6 +35,13 @@ for !win.ShouldClose() {
   marshal with `encoding/json`; the plain variants take JSON text.
 * `NewGPUContextGL` and `RenderGL` draw with Skia on the program's OpenGL
   context; `RenderRGBA` / `RenderPNG` on the CPU.
+* `Config.JSThread = jsui.JSThreadOn` runs the bundle's JS on a thread of its
+  own (React Native's model; the default is `JSThreadOff`, as in the C API):
+  `Tick` never waits for JS, `Config.OnJSReady` (called on the JS thread)
+  wakes a loop that sleeps while idle (the example calls
+  `glfw.PostEmptyEvent`), and `TickSync` / `Sync` wait for JS when a change
+  must show on this frame. `DebugStallJS` keeps JS busy, to see the frames
+  go on.
 * `include/jsui/jsui.h` is a copy of the repository's header (so the module
   builds on its own); CI checks they match.
 

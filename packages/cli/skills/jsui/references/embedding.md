@@ -77,6 +77,7 @@ live-reloads from `jsui dev`.
 JsuiConfig cfg; jsui_config_init(&cfg);
 cfg.width = 1280; cfg.height = 720; cfg.pixel_ratio = 2;
 cfg.on_message = on_message; cfg.on_call = on_call;  cfg.on_state = on_state;
+cfg.js_thread = JSUI_JS_THREAD_ON;                    // JS on its own thread, as in React Native
 JsuiRuntime* rt = jsui_create(&cfg);
 jsui_load_bundle_url(rt, "ui/dist/bundle.js");       // or jsui_load_bundle_source
 
@@ -99,6 +100,15 @@ TTC / WOFF / WOFF2; weight 0 and italic -1 read the file),
 `jsui_unregister_font`, `jsui_set_font_fallbacks(rt, "Noto Color Emoji,
 Noto Sans JP")`, `jsui_set_default_font_family`. Errors: `jsui_last_error`. `cfg.dev_mode = 1` polls the
 dev server and shows an error overlay.
+
+JS thread (`cfg.js_thread`, off in `jsui_config_init`; the engine plugins
+default to on): `jsui_tick` never waits for JS, callbacks still arrive
+inside the tick on the calling thread, and what JS does shows a tick or
+more later. `jsui_tick_ex(rt, now, JSUI_TICK_SYNC_JS)` waits for JS so state
+set before it shows on that frame; `jsui_sync(rt, ms)` waits now;
+`cfg.on_js_ready` (called on the JS thread) wakes a loop that sleeps while
+idle; `jsui_debug_stall_js(rt, ms)` keeps JS busy to check that the frames
+go on. Godot: `js_thread`, `sync_js()`, `sync_js_next_frame()`.
 
 Native tools in the repo: `jsui-viewer bundle.js` (window, `--dev URL`),
 `jsui-render bundle.js -o frame.png` and `jsui-record` (scripted video). For

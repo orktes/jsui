@@ -24,6 +24,15 @@ func goJsuiLog(h C.uintptr_t, level C.int, msg *C.char) {
 	fmt.Fprintln(os.Stderr, "[jsui]", goString(msg))
 }
 
+// goJsuiJSReady runs on the JS thread (Config.OnJSReady).
+//
+//export goJsuiJSReady
+func goJsuiJSReady(h C.uintptr_t) {
+	if f := runtimeOf(h).onJSReady; f != nil {
+		f()
+	}
+}
+
 //export goJsuiMessage
 func goJsuiMessage(h C.uintptr_t, name, payload *C.char) {
 	if r := runtimeOf(h); r.OnMessage != nil {

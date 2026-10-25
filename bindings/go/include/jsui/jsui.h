@@ -653,8 +653,10 @@ JSUI_API double jsui_get_js_frame_budget(JsuiRuntime* rt);
 
 /* ------------------------------------------------------------- JS thread
  *
- * Opt-in (JsuiConfig.js_thread or jsui_set_js_thread): the bundle runs on a
- * thread of its own, as in React Native. jsui_tick and the renders never
+ * JsuiConfig.js_thread or jsui_set_js_thread: the bundle runs on a thread of
+ * its own, as in React Native. Off in jsui_config_init (tests and tools keep
+ * single-threaded frames); a windowed host usually wants it on, and the
+ * engine integrations and examples default to it. jsui_tick and the renders never
  * wait for JS: timers, requestAnimationFrame, events, React's renders and
  * commits and garbage collection run on the JS thread, while each tick
  * applies what JS finished since the last one (a React commit whole, never
@@ -715,6 +717,12 @@ enum {
 };
 /* jsui_tick with JSUI_TICK_* flags. */
 JSUI_API void jsui_tick_ex(JsuiRuntime* rt, double now_ms, int flags);
+/* Debugging and demos: keeps JS busy for `ms` (a busy loop, as a long task
+ * or a garbage collection would), queued behind what was posted before.
+ * With a JS thread the host's frames go on meanwhile; without one (or in
+ * lockstep) the call itself takes that long. A viewer's "stall JS" key and
+ * the integrations' smoke tests use it. */
+JSUI_API void jsui_debug_stall_js(JsuiRuntime* rt, double ms);
 /* Number of resource loads (bundle, fetch, images, fonts) still in flight.
  * Headless hosts keep ticking until this reaches 0 before capturing. */
 JSUI_API int jsui_pending_loads(JsuiRuntime* rt);

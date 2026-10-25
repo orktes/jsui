@@ -59,6 +59,11 @@
 # time. NO_WORLD=1 leaves the demo's 3D scene out (main.gd --no-world): the
 # same UI in faster frames.
 #
+# JS_THREAD=off|lockstep sets JsuiView.js_thread (main.gd --js-thread); by
+# default the demo's JS runs on its own thread, and the self-test's first
+# check stalls it (JsuiView.debug_stall_js) and requires Godot's frames to
+# go on meanwhile.
+#
 # FAKE_WEBGPU_INTEROP=<rev> registers a stand-in for the godot-aw3 fork's
 # WebGPUInterop singleton (main.gd --fake-webgpu-interop) that reports Dawn
 # revision <rev> and null handles. Whatever the driver, JsuiView must then
@@ -154,6 +159,7 @@ fi
 [[ -n "${TOUR:-}" ]] && checks+=(--tour)
 [[ -n "${NO_WORLD:-}" ]] && checks+=(--no-world)
 [[ -n "${FIXED_FPS:-}" ]] && checks+=(--ui-fixed-fps "$FIXED_FPS")
+[[ -n "${JS_THREAD:-}" ]] && checks+=(--js-thread "$JS_THREAD")
 log="$(mktemp)"
 vkdir=""
 trap 'rm -f "$log"; if [[ -n "$vkdir" ]]; then rm -rf "$vkdir"; fi' EXIT
@@ -205,7 +211,7 @@ run() {
     rm -f "$png"
   fi
   if [[ -n "$vkdir" ]]; then rm -f "$vkdir/validation.log"; fi
-  echo "== Godot $GODOT_VERSION, window $size${GODOT_RENDER_THREAD:+, render thread $GODOT_RENDER_THREAD}${VK_VALIDATION:+, Vulkan $VK_VALIDATION validation}"
+  echo "== Godot $GODOT_VERSION, window $size${GODOT_RENDER_THREAD:+, render thread $GODOT_RENDER_THREAD}${VK_VALIDATION:+, Vulkan $VK_VALIDATION validation}${JS_THREAD:+, JS thread $JS_THREAD}"
   "$GODOT" "${display[@]}" --path "$demo" --resolution "$size" -- "${mode[@]}" --window "$size" "${checks[@]}" 2>&1 | tee "$log"
   local status=${PIPESTATUS[0]}
   if (( status != 0 )); then
@@ -230,6 +236,10 @@ run() {
   else
     if ! grep -q "^PASS mapping" "$log"; then
       echo "the input self-test did not run ($size)" >&2
+      exit 1
+    fi
+    if ! grep -q "^PASS js stall" "$log"; then
+      echo "the JS stall check did not run ($size)" >&2
       exit 1
     fi
     if [[ ! -s "$png" ]]; then

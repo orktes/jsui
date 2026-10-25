@@ -11,7 +11,8 @@ TSharedRef<SWidget> UJsuiWidget::RebuildWidget()
 		.bDevMode(bDevMode)
 		.bForceCpu(bForceCpu)
 		.bForwardInput(bForwardInput)
-		.PixelRatio(PixelRatio);
+		.PixelRatio(PixelRatio)
+		.JsThread(int32(JsThread));
 	TWeakObjectPtr<UJsuiWidget> Self(this);
 	View->OnMessage.AddLambda([Self](const FString& Name, const FString& Json)
 	{
@@ -67,6 +68,23 @@ void UJsuiWidget::SetBuffer(const FString& Key, const TArray<float>& Values) { S
 void UJsuiWidget::SetBuffer(const FString& Key, const float* Values, int32 Count)
 {
 	if (View) View->SetBuffer(Key, Values, Count);
+}
+
+bool UJsuiWidget::SyncJs(float TimeoutMs) { return View ? View->SyncJs(TimeoutMs) : true; }
+
+void UJsuiWidget::SyncJsNextFrame()
+{
+	if (View) View->SyncJsNextFrame();
+}
+
+void UJsuiWidget::DebugStallJs(float Ms)
+{
+	if (View) View->DebugStallJs(Ms);
+}
+
+EJsuiJsThread UJsuiWidget::GetActiveJsThread() const
+{
+	return View ? EJsuiJsThread(View->GetJsThread()) : JsThread;
 }
 
 FVector2D UJsuiWidget::GetUiSize() const { return View ? View->GetUiSize() : FVector2D::ZeroVector; }

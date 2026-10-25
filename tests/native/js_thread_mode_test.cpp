@@ -345,3 +345,44 @@ TEST(js_thread_lifecycle) {
   delete h;
   CHECK(nowMs() - t0 < 1000);
 }
+
+// jsui_debug_stall_js keeps JS busy: on a JS thread the owner's ticks go on
+// meanwhile and jsui_sync waits it out; single-threaded the call itself
+// takes that long.
+TEST(js_thread_debug_stall) {
+  if (!jsui::JsThread::available()) return;
+  {
+    ModeHost h(true);
+    CHECK(h.load(kLifecycleBundle));
+    h.tick();
+    double t0 = nowMs();
+    jsui_debug_stall_js(h.rt, 150);
+    CHECK(nowMs() - t0 < 50);
+    for (int i = 0; i < 2000 && !h.runtime().jsBusy(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(h.runtime().jsBusy());
+    double t1 = nowMs();
+    jsui_tick(h.rt, h.t += 16);
+    CHECK(nowMs() - t1 < 50);
+    CHECK_EQ(jsui_sync(h.rt, -1), 1);
+    CHECK(nowMs() - t0 >= 140);
+    CHECK(!h.runtime().jsBusy());
+  }
+  ModeHost h(false);
+  CHECK(h.load(kLifecycleBundle));
+  double t0 = nowMs();
+  jsui_debug_stall_js(h.rt, 60);
+  CHECK(nowMs() - t0 >= 55);
+}
+
+// A host that sets state, then picks the mode (Unity's JsuiView: the game's
+// Awake sets state, the view's Start the mode, then loads): the bundle sees
+// the state.
+TEST(js_thread_mode_after_state) {
+  if (!jsui::JsThread::available()) return;
+  ModeHost h(false);
+  CHECK_EQ(jsui_set_state(h.rt, "game", R"({"hp":3})"), 1);
+  CHECK_EQ(jsui_set_js_thread(h.rt, JSUI_JS_THREAD_ON), 0);
+  CHECK(h.load("__jsui_native.postMessage('game', __jsui_native.getState('game'));"));
+  h.tick();
+  CHECK_EQ(h.take(), std::string(R"(game={"hp":3})"));
+}

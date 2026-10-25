@@ -30,6 +30,12 @@ loop {
 * Values are JSON text; the example uses serde_json.
 * `GpuContext::gl()` / `gl_with_loader(...)` and `render_gl` draw with Skia on
   the program's OpenGL context; `render_rgba` / `render_png` on the CPU.
+* `Config::js_thread` = `JsThread::On` runs the bundle's JS on a thread of its
+  own (React Native's model; the default is `Off`, as in the C API): `tick`
+  never waits for JS, `Config::on_js_ready` wakes a loop that sleeps while
+  idle (the example posts a GLFW empty event), and `tick_sync` / `sync` wait
+  for JS when a change must show on this frame. `debug_stall_js` keeps JS
+  busy, to see the frames go on.
 
 `build.rs` links `libjsui` from `JSUI_LIB_DIR`, or from `../../build` (this
 repository built with `-DJSUI_BUILD_SHARED=ON`), and puts that directory in the

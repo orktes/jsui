@@ -42,7 +42,8 @@ std::atomic<bool> GGpuUnavailable{false};  // creation failed (or the context wa
 bool GGpuCreateQueued = false;             // game thread
 }  // namespace
 
-TSharedPtr<FJsuiHost, ESPMode::ThreadSafe> FJsuiHost::Create(int32 Width, int32 Height, float PixelRatio, bool bDevMode)
+TSharedPtr<FJsuiHost, ESPMode::ThreadSafe> FJsuiHost::Create(int32 Width, int32 Height, float PixelRatio, bool bDevMode,
+                                                         int32 JsThread)
 {
 	TSharedPtr<FJsuiHost, ESPMode::ThreadSafe> Host(new FJsuiHost());
 	JsuiConfig Cfg;
@@ -51,8 +52,11 @@ TSharedPtr<FJsuiHost, ESPMode::ThreadSafe> FJsuiHost::Create(int32 Width, int32 
 	Cfg.height = FMath::Max(1, Height);
 	Cfg.pixel_ratio = PixelRatio;
 	Cfg.dev_mode = bDevMode ? 1 : 0;
-	// Called inside jsui_tick / jsui_send_* on the game thread (and maybe a
-	// log line from a render job): queued, drained by SJsuiView after the tick.
+	Cfg.js_thread = JsThread;
+	// Called inside jsui_tick / jsui_sync / jsui_send_* on the game thread
+	// (also with JS on its own thread: its callbacks are delivered in the
+	// tick; maybe a log line from a render job): queued, drained by SJsuiView
+	// after the tick.
 	Cfg.message_user = Host.Get();
 	Cfg.on_message = [](void* User, const char* Name, const char* Json)
 	{

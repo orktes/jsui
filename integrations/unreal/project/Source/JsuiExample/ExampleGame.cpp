@@ -103,6 +103,8 @@ void AJsuiExampleGame::ParseArgs()
 		else if (A == TEXT("bundle")) BundleOverride = Value;
 		else if (A == TEXT("dev")) bDev = true;
 		else if (A == TEXT("cpu")) bCpu = true;
+		else if (A == TEXT("js-thread"))
+			JsThread = uint8(Value == TEXT("off") ? 0 : Value == TEXT("lockstep") ? 2 : 1);
 	}
 	if (!Screenshot.IsEmpty() && Frames < 0 && !bSelfTest) Frames = 120;
 }
@@ -137,6 +139,7 @@ void AJsuiExampleGame::BeginPlay()
 	Ui = NewObject<UJsuiWidget>(this);
 	Ui->bForceCpu = bCpu;
 	Ui->bDevMode = bDev;
+	Ui->JsThread = EJsuiJsThread(JsThread);
 	if (!BundleOverride.IsEmpty()) Ui->Bundle = BundleOverride;
 	Ui->OnMessageNative.AddUObject(this, &AJsuiExampleGame::OnUiMessage);
 	Ui->PassedMouseDownNative.AddLambda([this](const FKey& Button, const FVector2D& Position)

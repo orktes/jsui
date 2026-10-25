@@ -44,9 +44,11 @@ The player takes the examples' options after Unity's own: `--selftest`,
 `--frames N --screenshot out.png`, `--bundle path-or-url`, `--cpu` (the CPU
 renderer even where the GPU path works) and `--dev` (with
 `npx jsui dev integrations/shared/ui/app.jsx` and `--bundle
-http://127.0.0.1:5173/bundle.js` for hot reload). `--selftest` is the same
+http://127.0.0.1:5173/bundle.js` for hot reload) and `--js-thread
+on|off|lockstep` (`JsuiView.jsThread`). `--selftest` is the same
 pass-through and selection check as the other examples (see
-[../README.md](../README.md#build-and-run)) and logs `selftest: ok`. Its
+[../README.md](../README.md#build-and-run)), JS stall included, and logs
+`selftest: ok`. Its
 clicks go through `JsuiView.HandlePointer`, the entry point Unity's `Input`
 feeds each frame; only the Input Manager itself (OS events to `Input`) is
 skipped, as the legacy input system cannot be injected. `--frame-stats` logs
@@ -123,6 +125,19 @@ main thread's waits for JSUI's GPU renders).
   frame buffer read with `useHostBufferValue` (the example writes each unit's
   screen position, from `WorldToUi`, so the nameplates move with no JS per
   frame).
+* **JS thread.** `JsuiView.jsThread` (`On` by default, applied in `Start`)
+  runs the bundle's JS on a thread of its own, as React Native does:
+  `LateUpdate`'s tick never waits for JS, so a long React commit or a
+  garbage collection costs the game no frame, while the nameplates, hover
+  styles, scrolling and input hit testing keep running natively. Messages
+  and state changes from JS still arrive on the main thread, from the tick;
+  what JS does in answer to the game shows a frame or more later. When it
+  must show on this frame (a scene cut, a screenshot), call
+  `SyncJsNextFrame()` (that tick waits for JS, up to 250 ms) or `SyncJs()`
+  (waits now). `DebugStallJs(ms)` keeps JS busy to see it; `Off` runs JS
+  inside the tick, `Lockstep` on its thread but waited for every tick. The
+  ctypes smoke ([native/smoke.py](native/smoke.py)) checks a 300 ms stall in
+  each mode.
 
 ## Using it in your game
 

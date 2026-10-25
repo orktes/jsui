@@ -23,6 +23,41 @@ default; use React state only for things that change now and then.
 | UI bound to a field of shared host state (health, ammo, name) that must update on the frame the game sets it | `useHostStateBind('player', 'health.current')`: a native value for styles, `Animated.Text`, `derive`, `Visibility` | `useHostState` → render (waits for the next JS tick, re-renders) |
 | Animating size / position (`width`, `height`, `top`, `flex`) | the native driver works for layout keys too (relayout per frame); prefer transforms when they do the job | JS-driven layout animation |
 
+## JS thread: what runs where
+
+On native hosts (the engine plugins, the viewer, the examples, mobile) the
+bundle's JS runs on a thread of its own, as React Native's does; the
+browser, the CLI tools and the tests run it inside the tick (single
+threaded, same frames). With the thread:
+
+- **Every frame, natively, also while JS is busy** (a big commit, a GC, a
+  slow handler): native-driven `Animated` (composites, springs, `derive`,
+  `clock`), host-buffer values, `useHostStateBind`, state styles and group
+  styles, `Visibility`, scrolling and flings, `LayoutAnimation`, focus
+  movement, hit testing, layout and paint. Build the parts that must never
+  hitch from these; that is what this page is about.
+- **On the JS thread, a frame or more later:** renders and commits, effects,
+  timers, `requestAnimationFrame`, event handlers (`onPress`, `onScroll`
+  without `Animated.event`), `useHostState` re-renders, JS-driven animations.
+  A commit applies whole on the next tick, never half.
+- **`measure` is async-ish.** `ref.measure` / `measureInWindow` /
+  `measureLayout` answer through their callback after the layout that
+  follows the current commit (as in React Native), not inside the call; the
+  synchronous `measure` read returns the last frame's layout. Use
+  `onLayout` or the callback; never read layout right after `setState`.
+- **Same-frame host → UI changes** (a scene cut that swaps the HUD, a
+  screenshot) are the host's job: it ticks with `JSUI_TICK_SYNC_JS`
+  (`jsui_tick_ex`), or calls `jsui_sync` / `SyncJs()` / `sync_js()`, which
+  waits for JS to finish what was sent. For a field that must follow the game
+  on the very frame, bind it natively (`useHostStateBind`, a host buffer)
+  instead.
+- **Default actions JS may veto** (Tab / Enter / arrows with a `keyDown`
+  listener, wheel with an `onWheel`) wait up to 100 ms for JS's answer; keep
+  those handlers quick, or leave them off the focused path.
+
+Check with a stall: the viewer's F7 (or `jsui_debug_stall_js(rt, 200)`)
+keeps JS busy; everything above the second bullet must keep moving.
+
 ## State styles: hover, press, focus without JS
 
 ```jsx

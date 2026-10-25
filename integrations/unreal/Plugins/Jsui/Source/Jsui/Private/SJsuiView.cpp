@@ -66,7 +66,7 @@ void SJsuiView::Construct(const FArguments& InArgs)
 	RequestedRatio = InArgs._PixelRatio;
 
 	// The viewport size is known at the first tick (UpdateViewport).
-	Host = FJsuiHost::Create(1, 1, 1.f, bDevMode);
+	Host = FJsuiHost::Create(1, 1, 1.f, bDevMode, InArgs._JsThread);
 	if (!Host)
 	{
 		UE_LOG(LogJsui, Error, TEXT("jsui_create failed"));
@@ -119,6 +119,26 @@ void SJsuiView::SetBuffer(const FString& Key, const float* Values, int32 Count) 
 	jsui_commit_buffer(Rt, K.Get());
 }
 
+bool SJsuiView::SyncJs(double TimeoutMs)
+{
+	JsuiRuntime* Rt = Runtime();
+	if (!Rt) return true;
+	const bool bIdle = jsui_sync(Rt, TimeoutMs) != 0;
+	DrainQueues();
+	return bIdle;
+}
+
+void SJsuiView::DebugStallJs(double Ms) const
+{
+	if (JsuiRuntime* Rt = Runtime()) jsui_debug_stall_js(Rt, Ms);
+}
+
+int32 SJsuiView::GetJsThread() const
+{
+	JsuiRuntime* Rt = Runtime();
+	return Rt ? jsui_js_thread(Rt) : JSUI_JS_THREAD_OFF;
+}
+
 FString SJsuiView::GetRendererName() const
 {
 	const TCHAR* Rhi = GDynamicRHI ? GDynamicRHI->GetName() : TEXT("no RHI");
@@ -151,7 +171,8 @@ void SJsuiView::Tick(const FGeometry& AllottedGeometry, const double InCurrentTi
 	UpdateWindowOffset();
 	UpdateViewport(AllottedGeometry);
 	if (!bLoaded) Load();
-	jsui_tick(Runtime(), FPlatformTime::Seconds() * 1000.0);
+	jsui_tick_ex(Runtime(), FPlatformTime::Seconds() * 1000.0, bSyncJsNextFrame ? JSUI_TICK_SYNC_JS : 0);
+	bSyncJsNextFrame = false;
 	DrainQueues();
 	Paint();
 }

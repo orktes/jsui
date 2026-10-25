@@ -21,11 +21,17 @@
 //		}
 //	}
 //
-// The runtime is single threaded: call it (and create it) from one
-// goroutine, locked to its OS thread (runtime.LockOSThread) like any GL or
-// windowing code. Callbacks run on that goroutine while the runtime is
-// inside a call, usually Tick. Values cross the boundary as JSON text; the
-// *Value helpers marshal with encoding/json.
+// The runtime is driven from one goroutine: call it (and create it) from
+// one goroutine, locked to its OS thread (runtime.LockOSThread) like any GL
+// or windowing code. Callbacks run on that goroutine while the runtime is
+// inside a call, usually Tick (Config.OnJSReady is the exception). Values
+// cross the boundary as JSON text; the *Value helpers marshal with
+// encoding/json.
+//
+// With Config.JSThread = JSThreadOn the bundle's JS runs on a thread of its
+// own inside the runtime, as React Native's does: Tick never waits for it,
+// and what JS does shows a tick or more later (TickSync / Sync when it must
+// not).
 //
 // Linking: libjsui (libjsui.so / libjsui.dylib) is looked up in the
 // repository's build/ directory (cmake -B build -DJSUI_BUILD_SHARED=ON) with
@@ -59,6 +65,40 @@ type Config struct {
 	BaseURL       string  // resolves relative URLs; default: the bundle's URL
 	DevMode       bool    // poll the `jsui dev` server and hot-update on change
 	AudioDisabled bool    // no sound at all
+
+	// JSThread is where the bundle's JS runs: JSThreadOff by default, as in
+	// the C API; a windowed app usually wants JSThreadOn.
+	JSThread JSThread
+	// OnJSReady, with JSThreadOn, is called on the JS thread (not the
+	// runtime's goroutine) when JS has work for the next tick, to wake a loop
+	// that sleeps while idle (e.g. glfw.PostEmptyEvent). Keep it short and
+	// thread safe.
+	OnJSReady func()
+}
+
+// JSThread is where the bundle's JS runs (Config.JSThread).
+type JSThread int
+
+const (
+	// JSThreadOff: on the runtime's thread, inside Tick.
+	JSThreadOff JSThread = C.JSUI_JS_THREAD_OFF
+	// JSThreadOn: on a thread of its own, as in React Native: Tick never
+	// waits for JS; native animations, scrolling and input go on while it is
+	// busy.
+	JSThreadOn JSThread = C.JSUI_JS_THREAD_ON
+	// JSThreadLockstep: on its own thread, but every tick waits for it: the
+	// frames of JSThreadOff (tests).
+	JSThreadLockstep JSThread = C.JSUI_JS_THREAD_LOCKSTEP
+)
+
+func (m JSThread) String() string {
+	switch m {
+	case JSThreadOn:
+		return "on"
+	case JSThreadLockstep:
+		return "lockstep"
+	}
+	return "off"
 }
 
 // LogLevel is the severity passed to Runtime.OnLog.
@@ -116,8 +156,9 @@ const (
 // surface. Set the On* handlers any time; nil ones are skipped (calls
 // without OnCall are rejected, logs without OnLog go to stderr).
 type Runtime struct {
-	rt     *C.JsuiRuntime
-	handle cgo.Handle
+	rt        *C.JsuiRuntime
+	handle    cgo.Handle
+	onJSReady func()
 
 	OnMessage    func(name, payload string)       // Host.postMessage(name, payload); payload is JSON
 	OnState      func(key string, value *string)  // the UI changed shared state (nil: removed)
@@ -152,7 +193,12 @@ func New(cfg Config) (*Runtime, error) {
 	if cfg.AudioDisabled {
 		c.audio_disabled = 1
 	}
+	c.js_thread = C.int(cfg.JSThread)
 	C.gojsui_set_callbacks(&c, C.uintptr_t(r.handle))
+	if cfg.OnJSReady != nil {
+		r.onJSReady = cfg.OnJSReady
+		C.gojsui_set_js_ready(&c, C.uintptr_t(r.handle))
+	}
 	r.rt = C.jsui_create(&c)
 	if r.rt == nil {
 		r.handle.Delete()
@@ -397,6 +443,27 @@ func (r *Runtime) SetViewport(width, height int, pixelRatio float32) {
 // Tick advances to nowMs (monotonic, e.g. NowMs): timers, loads, animation
 // frames, layout. Handlers run in here.
 func (r *Runtime) Tick(nowMs float64) { C.jsui_tick(r.rt, C.double(nowMs)) }
+
+// TickSync is a Tick whose JS lands on this frame (JSUI_TICK_SYNC_JS): with
+// JS on its own thread it waits (up to 250 ms) for JS to handle the frame and
+// what was sent before it. Scene cuts, screenshots, state that must not lag.
+func (r *Runtime) TickSync(nowMs float64) {
+	C.jsui_tick_ex(r.rt, C.double(nowMs), C.JSUI_TICK_SYNC_JS)
+}
+
+// Sync, with JS on its own thread, waits up to timeoutMs (negative: no
+// limit) for JS to handle what was sent to it, applies it and lays out
+// (handlers run in here). True when JS is left idle, false on timeout.
+// Without the thread: true at once.
+func (r *Runtime) Sync(timeoutMs float64) bool { return b(C.jsui_sync(r.rt, C.double(timeoutMs))) }
+
+// JSThread is the mode the runtime runs in (JSThreadOff where the build has
+// no threads).
+func (r *Runtime) JSThread() JSThread { return JSThread(C.jsui_js_thread(r.rt)) }
+
+// DebugStallJS keeps JS busy for ms (jsui_debug_stall_js): with the JS
+// thread the ticks go on meanwhile; without, this call takes ms.
+func (r *Runtime) DebugStallJS(ms float64) { C.jsui_debug_stall_js(r.rt, C.double(ms)) }
 
 // NeedsRedraw reports whether the last tick changed what the UI would paint.
 func (r *Runtime) NeedsRedraw() bool { return b(C.jsui_needs_redraw(r.rt)) }

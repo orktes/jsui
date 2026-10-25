@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use jsui::{Config, Runtime};
+use jsui::{Config, JsThread, Runtime};
 
 fn runtime() -> Runtime {
     Runtime::new(Config { width: 640, height: 480, audio_disabled: true, ..Default::default() }).unwrap()
@@ -17,6 +17,7 @@ fn runtime() -> Runtime {
 fn runtime_round_trips() {
     state_round_trip();
     example_ui_runs();
+    js_thread_runs();
 }
 
 fn state_round_trip() {
@@ -56,4 +57,31 @@ fn example_ui_runs() {
     assert!(px.chunks(4).any(|p| p[3] == 255), "the frame is painted");
     let png = rt.render_png().unwrap();
     assert_eq!(&png[1..4], b"PNG");
+}
+
+// The bundle's JS on a thread of its own: a JS stall holds no tick, and a
+// sync brings in what JS did.
+fn js_thread_runs() {
+    let config =
+        Config { width: 640, height: 480, audio_disabled: true, js_thread: JsThread::On, ..Default::default() };
+    let rt = Runtime::new(config).unwrap();
+    assert_eq!(rt.js_thread(), JsThread::On);
+    let messages = Rc::new(RefCell::new(Vec::<String>::new()));
+    {
+        let messages = messages.clone();
+        rt.on_message(move |_, name, _| messages.borrow_mut().push(name.to_owned()));
+    }
+    rt.set_state("quests", r#"{"items":[{"id":1,"title":"Test quest","done":false}]}"#);
+    rt.load_bundle_file(concat!(env!("CARGO_MANIFEST_DIR"), "/../ui/dist/bundle.js")).unwrap();
+    rt.tick_sync(0.0);
+    assert!(rt.sync(2000.0));
+
+    rt.debug_stall_js(300.0);
+    let start = std::time::Instant::now();
+    for i in 1..=5 {
+        rt.tick(i as f64 * 16.0);
+    }
+    assert!(start.elapsed().as_millis() < 150, "the ticks waited for JS: {:?}", start.elapsed());
+    assert!(rt.sync(2000.0));
+    assert!(messages.borrow().iter().any(|m| m == "ui:anchors"), "{:?}", messages.borrow());
 }

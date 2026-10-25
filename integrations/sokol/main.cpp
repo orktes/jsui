@@ -164,9 +164,11 @@ class Game : public jsui_example::SelfTestHost {
     cfg.height = int(sapp_heightf() / sapp_dpi_scale());
     cfg.pixel_ratio = sapp_dpi_scale();
     cfg.dev_mode = opt.dev;
+    cfg.js_thread = opt.jsThread;
     cfg.message_user = this;
     cfg.on_message = [](void* u, const char* name, const char* json) { static_cast<Game*>(u)->onMessage(name, json); };
     rt_ = jsui_create(&cfg);
+    std::printf("JS thread: %s\n", jsui_example::jsThreadName(jsui_js_thread(rt_)));
     jsui_set_clipboard_callbacks(
         rt_, [](void*) -> const char* { return sapp_get_clipboard_string(); },
         [](void*, const char* text) { sapp_set_clipboard_string(text); }, nullptr);

@@ -1,9 +1,11 @@
 // C API: thin wrappers over jsui::Runtime.
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "include/core/SkData.h"
@@ -336,6 +338,14 @@ void jsui_set_viewport(JsuiRuntime* rt, int width, int height, float pixelRatio)
 
 void jsui_tick(JsuiRuntime* rt, double nowMs) { rt->rt->tick(nowMs); }
 void jsui_tick_ex(JsuiRuntime* rt, double nowMs, int flags) { rt->rt->tick(nowMs, (flags & JSUI_TICK_SYNC_JS) != 0); }
+
+void jsui_debug_stall_js(JsuiRuntime* rt, double ms) {
+  if (!rt || !(ms > 0)) return;
+  rt->rt->inbound.task([ms] {
+    auto end = std::chrono::steady_clock::now() + std::chrono::microseconds(int64_t(ms * 1000));
+    while (std::chrono::steady_clock::now() < end) std::this_thread::yield();
+  });
+}
 void jsui_tick_native(JsuiRuntime* rt, double nowMs) { rt->rt->tickNative(nowMs); }
 void jsui_set_js_frame_budget(JsuiRuntime* rt, double ms) { rt->rt->jsSliceMs = ms; }
 double jsui_get_js_frame_budget(JsuiRuntime* rt) { return rt->rt->jsSliceMs; }

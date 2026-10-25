@@ -10,7 +10,12 @@
 // Launch arguments (NSUserDefaults argument domain):
 //   -JsuiURL http://<mac>:5173/bundle.js   load from `jsui dev` (dev mode: live reload)
 //   -JsuiRenderer cpu                       force the CPU path
+//   -JsuiJsThread off                       run JS on the main thread (default: on, its own thread
+//                                           as in React Native; or lockstep)
 // Without -JsuiURL the app loads ui/bundle.js from its own bundle.
+// JS runs on its own thread by default (JsuiConfig.js_thread): the
+// MTKView's frames never wait for it. The view draws every display frame,
+// so no on_js_ready wake-up is needed.
 
 #import <GameController/GameController.h>
 #import <Metal/Metal.h>
@@ -156,6 +161,10 @@ struct PadState {
   cfg.pixel_ratio = _scale;
   cfg.log = jsuiLog;
   cfg.dev_mode = url.length > 0;
+  NSString* jsThread = [args stringForKey:@"JsuiJsThread"];
+  cfg.js_thread = [jsThread isEqualToString:@"off"]        ? JSUI_JS_THREAD_OFF
+                  : [jsThread isEqualToString:@"lockstep"] ? JSUI_JS_THREAD_LOCKSTEP
+                                                           : JSUI_JS_THREAD_ON;
   _rt = jsui_create(&cfg);
   [self publishSafeArea];
   jsui_set_clipboard_callbacks(

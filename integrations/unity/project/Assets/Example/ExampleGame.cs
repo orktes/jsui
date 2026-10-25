@@ -19,6 +19,7 @@
 //
 // Command line (players): --selftest, --frames N, --screenshot out.png,
 // --bundle path-or-url, --dev, --cpu (the CPU renderer even where the GPU path works),
+// --js-thread on|off|lockstep (JsuiView.jsThread; on by default),
 // --frame-stats (log a histogram of frame times every 10 s).
 //
 // Frame pacing: interactive runs sync to the display (vSyncCount 1, no
@@ -109,6 +110,7 @@ public class ExampleGame : MonoBehaviour, SelfTest.IHost
         view_.forceCpu = cpu_;
         if (bundleOverride_ != null) view_.bundle = bundleOverride_;
         view_.devMode = dev_;
+        view_.jsThread = jsThread_;  // read in the view's Start
         view_.OnMessage += OnUiMessage;
         view_.PassedMouseDown += (button, p) =>
         {
@@ -144,6 +146,7 @@ public class ExampleGame : MonoBehaviour, SelfTest.IHost
 
     string bundleOverride_;
     bool dev_, cpu_, frameStats_;
+    JsuiView.JsThreadMode jsThread_ = JsuiView.JsThreadMode.On;
 
     void ParseArgs()
     {
@@ -159,6 +162,13 @@ public class ExampleGame : MonoBehaviour, SelfTest.IHost
             else if (a == "--dev") dev_ = true;
             else if (a == "--cpu") cpu_ = true;
             else if (a == "--frame-stats") frameStats_ = true;
+            else if (a == "--js-thread")
+            {
+                var m = Next();
+                jsThread_ = m == "off" ? JsuiView.JsThreadMode.Off
+                    : m == "lockstep" ? JsuiView.JsThreadMode.Lockstep
+                    : JsuiView.JsThreadMode.On;
+            }
         }
         if (!string.IsNullOrEmpty(screenshot_) && frames_ < 0 && !selftest_) frames_ = 120;
     }
