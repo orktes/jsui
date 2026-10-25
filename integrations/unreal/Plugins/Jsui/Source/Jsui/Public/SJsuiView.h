@@ -25,6 +25,14 @@
 // Game <-> UI. Messages from JS (Host.postMessage) arrive as OnMessage after
 // each tick; SetState / PostMessage / SetBuffer feed the UI (useHostState,
 // Host.addListener, useHostBufferValue).
+//
+// JS thread. By default the bundle runs on a thread of its own, as in React
+// Native (JsThread = JSUI_JS_THREAD_ON): the Slate tick never waits for JS,
+// and what native does every frame (Animated values driven by SetBuffer
+// data, scrolling, press styles) goes on while JS is busy. What JS does
+// lands a frame or more later; SyncJsNextFrame() / SyncJs() when a change
+// must show on this frame. OnMessage still fires on the game thread, after
+// the tick (or SyncJs).
 #pragma once
 
 #include "CoreMinimal.h"
@@ -43,7 +51,7 @@ class JSUI_API SJsuiView : public SLeafWidget, public FGCObject
 {
 public:
 	SLATE_BEGIN_ARGS(SJsuiView)
-		: _Bundle(TEXT("Jsui/bundle.js")), _bDevMode(false), _bForceCpu(false), _bForwardInput(true), _PixelRatio(0.f)
+		: _Bundle(TEXT("Jsui/bundle.js")), _bDevMode(false), _bForceCpu(false), _bForwardInput(true), _PixelRatio(0.f), _JsThread(1)
 	{}
 		/** Bundle path relative to the project's Content dir, an absolute path, or an http:// URL (jsui dev). */
 		SLATE_ARGUMENT(FString, Bundle)
@@ -55,6 +63,8 @@ public:
 		SLATE_ARGUMENT(bool, bForwardInput)
 		/** Device pixels per logical px; 0: the screen's DPI scale (2 on Retina). */
 		SLATE_ARGUMENT(float, PixelRatio)
+		/** JSUI_JS_THREAD_OFF (0), _ON (1, the default) or _LOCKSTEP (2). */
+		SLATE_ARGUMENT(int32, JsThread)
 	SLATE_END_ARGS()
 
 	void Construct(const FArguments& InArgs);
@@ -68,6 +78,15 @@ public:
 	void PostMessage(const FString& Name, const FString& Json) const;
 	/** Writes `Count` floats into the frame buffer `Key` (Float32Array in JS) and commits it. */
 	void SetBuffer(const FString& Key, const float* Values, int32 Count) const;
+	/** jsui_sync: waits up to TimeoutMs (negative: no limit) for JS to handle what was sent to it and applies it;
+	 *  broadcasts the messages JS posted meanwhile. True when JS is left idle. */
+	bool SyncJs(double TimeoutMs = 250.0);
+	/** The next tick is a JSUI_TICK_SYNC_JS one: what JS does for it lands on that frame. */
+	void SyncJsNextFrame() { bSyncJsNextFrame = true; }
+	/** jsui_debug_stall_js: keeps JS busy for Ms (demos, tests). */
+	void DebugStallJs(double Ms) const;
+	/** The JSUI_JS_THREAD_* mode the runtime runs in. */
+	int32 GetJsThread() const;
 
 	/** Viewport size in logical px (valid after the first tick). */
 	FVector2D GetUiSize() const { return FVector2D(Width, Height); }
@@ -134,6 +153,7 @@ private:
 	bool bDevMode = false, bForceCpu = false, bForwardInput = true;
 	float RequestedRatio = 0.f;
 	bool bLoaded = false;
+	bool bSyncJsNextFrame = false;
 
 	FGeometry LastGeometry;
 	bool bHasGeometry = false;

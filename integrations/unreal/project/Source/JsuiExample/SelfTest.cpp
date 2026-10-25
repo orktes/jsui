@@ -71,9 +71,15 @@ int32 FJsuiSelfTest::Step(SJsuiView& View, const IHost& Host)
 	switch (Phase)
 	{
 	case 0:  // wait for the UI and a few frames of layout
-		if (bAnchors && Frame > 30) Phase = 1;
+		if (bAnchors && Frame > 30) Phase = KStall;
 		else if (Frame > 900) return Fail(TEXT("the UI never reported ui:anchors"));
 		return 0;
+	case KStall:
+	{
+		const int32 R = StallStep(Rt);
+		if (R > 0) Phase = 1;
+		return R < 0 ? -1 : 0;
+	}
 	case 1:
 	{
 		const FVector2D P(Size.X * 0.5f, Size.Y * 0.45f);
@@ -187,6 +193,45 @@ bool FJsuiSelfTest::EmptyGround(JsuiRuntime* Rt, const IHost& Host, const FVecto
 		}
 	}
 	return false;
+}
+
+// With a JS thread, posting the stall returns at once, no gap between two
+// game frames comes near it while it runs, and jsui_sync finds JS idle after
+// it. Off or in lockstep the post itself holds the game for the stall.
+int32 FJsuiSelfTest::StallStep(JsuiRuntime* Rt)
+{
+	const double Now = FPlatformTime::Seconds() * 1000.0;
+	if (StallFrames == 0)
+	{
+		const int32 Mode = jsui_js_thread(Rt);
+		jsui_debug_stall_js(Rt, KStallMs);
+		const double Held = FPlatformTime::Seconds() * 1000.0 - Now;
+		if (Mode != JSUI_JS_THREAD_ON)
+		{
+			if (Held < KStallMs * 0.9) return Fail(TEXT("jsui_debug_stall_js did not keep JS busy"));
+			JsuiExampleSay(*FString::Printf(TEXT("selftest: JS thread %s: a %.0f ms JS stall held the game for %.0f ms"),
+			       Mode == JSUI_JS_THREAD_LOCKSTEP ? TEXT("lockstep") : TEXT("off"), KStallMs, Held));
+			return 1;
+		}
+		if (Held > KStallMs / 4) return Fail(TEXT("posting a JS stall waited for the JS thread"));
+		StallStart = LastFrame = FPlatformTime::Seconds() * 1000.0;
+		StallFrames = 1;
+		return 0;
+	}
+	const double Gap = Now - LastFrame;
+	LastFrame = Now;
+	MaxGap = FMath::Max(MaxGap, Gap);
+	if (Now - StallStart < KStallMs)
+	{
+		if (Gap > KStallMs / 2) return Fail(TEXT("a game frame waited for the busy JS thread"));
+		StallFrames++;
+		return 0;
+	}
+	if (StallFrames < 3) return Fail(TEXT("too few game frames while JS was busy"));
+	if (jsui_sync(Rt, 2000) != 1) return Fail(TEXT("JS did not come back from its stall"));
+	JsuiExampleSay(*FString::Printf(TEXT("selftest: JS thread on: %d game frames during a %.0f ms JS stall, the longest %.1f ms"),
+	       StallFrames, KStallMs, MaxGap));
+	return 1;
 }
 
 int32 FJsuiSelfTest::Fail(const TCHAR* What)

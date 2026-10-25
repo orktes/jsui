@@ -18,7 +18,8 @@
 // the pass-through counters go to the `game` shared state.
 //
 // Command line: --selftest, --frames=N, --screenshot=out.png,
-// --bundle=path-or-url, --dev, --cpu (the CPU renderer even on Metal).
+// --bundle=path-or-url, --dev, --cpu (the CPU renderer even on Metal),
+// --js-thread=on|off|lockstep (UJsuiWidget::JsThread; on by default).
 #pragma once
 
 #include "CoreMinimal.h"
@@ -127,6 +128,7 @@ private:
 
 	// Command line.
 	bool bSelfTest = false, bDev = false, bCpu = false;
+	uint8 JsThread = 1;  // --js-thread=on|off|lockstep: EJsuiJsThread
 	int64 Frames = -1, Frame = 0;
 	FString Screenshot, BundleOverride;
 	TUniquePtr<FJsuiSelfTest> Test;
