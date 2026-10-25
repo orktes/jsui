@@ -3559,20 +3559,40 @@ std::vector<SkIRect> coverRects(const SkRegion& damage) {
     if (rects.size() == kMaxInput) return {damage.getBounds()};
     rects.push_back(it.rect());
   }
-  while (rects.size() > 1) {
+  // What joining each pair adds, kept per pair of input slots: a join only
+  // changes the costs of the rect that grew (O(n^2) joins in all instead of
+  // O(n^3); this runs every frame something moves).
+  const size_t n = rects.size();
+  auto joinCost = [](const SkIRect& a, const SkIRect& b) {
+    SkIRect u = a;
+    u.join(b);
+    return rectArea_(u) - rectArea_(a) - rectArea_(b);
+  };
+  std::vector<int64_t> cost(n * n);
+  for (size_t i = 0; i < n; i++)
+    for (size_t j = i + 1; j < n; j++) cost[i * n + j] = joinCost(rects[i], rects[j]);
+  std::vector<size_t> live(n);  // the slots still in play, in order
+  for (size_t i = 0; i < n; i++) live[i] = i;
+  while (live.size() > 1) {
     size_t bi = 0, bj = 1;
     int64_t best = std::numeric_limits<int64_t>::max();
-    for (size_t i = 0; i < rects.size(); i++)
-      for (size_t j = i + 1; j < rects.size(); j++) {
-        SkIRect u = rects[i];
-        u.join(rects[j]);
-        int64_t cost = rectArea_(u) - rectArea_(rects[i]) - rectArea_(rects[j]);
-        if (cost < best) best = cost, bi = i, bj = j;
+    for (size_t i = 0; i < live.size(); i++)
+      for (size_t j = i + 1; j < live.size(); j++) {
+        int64_t c = cost[live[i] * n + live[j]];
+        if (c < best) best = c, bi = i, bj = j;
       }
-    if (rects.size() <= kMaxRects && best > kCheapJoin) break;
-    rects[bi].join(rects[bj]);
-    rects.erase(rects.begin() + bj);
+    if (live.size() <= kMaxRects && best > kCheapJoin) break;
+    const size_t grown = live[bi];
+    rects[grown].join(rects[live[bj]]);
+    live.erase(live.begin() + long(bj));
+    for (size_t other : live) {
+      if (other == grown) continue;
+      const size_t lo = std::min(grown, other), hi = std::max(grown, other);
+      cost[lo * n + hi] = joinCost(rects[lo], rects[hi]);
+    }
   }
+  for (size_t i = 0; i < live.size(); i++) rects[i] = rects[live[i]];
+  rects.resize(live.size());
   // Several passes only when they save a good part of the bounds' area
   // (passes split the draws: more state changes, less batching).
   int64_t sum = 0;

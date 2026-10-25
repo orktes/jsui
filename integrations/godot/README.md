@@ -1066,6 +1066,72 @@ What was run (Chrome 155, headed, Apple M1 Ultra, Metal through Dawn):
   rounds. With `--hud` it is 1.64 / 1.91 ms mean (p90 2.8 / 3.0 ms). With
   `--hud --no-ui` it is 0.87 / 0.91 ms (p90 1.3 / 1.4 ms). So the UI adds
   about 0.9 ms per frame on the main thread; JS runs on its own thread.
+  Where that goes is below.
+
+#### Where the UI's main-thread time goes on the web
+
+Everything Godot renders on the web runs on the browser's main thread: the
+WebGPU device lives there, and every WebGPU call from WASM goes through
+Emdawnwebgpu's JS glue into Blink. JSUI's JS thread is a pthread, but its
+tick, paint and GPU submit run in `JsuiView`'s process, on that thread.
+
+Per frame of `--hud` at 60 fps, from a V8 CPU profile of the main thread
+(Chrome DevTools Protocol `Profiler`, 50 µs sampling, 600 frames, the
+template linked with `linkflags="--profiling-funcs --emit-symbol-map"`)
+and `--perf-log 5` (`get_perf()`), UI on minus UI off:
+
+| Part | ms | of which WebGPU calls through JS |
+|---|---|---|
+| JSUI paint recording (tree walk + Graphite draw recording) | 0.20 | - |
+| JSUI damage tracking (`updateDamage`, `coverRects`) | 0.11 | - |
+| Graphite `snap()` (draw passes, uniforms, buffer unmaps) | 0.09 | 0.03 |
+| Graphite command encoding (render passes, bind groups) | 0.10 | 0.08 |
+| Graphite submit and finished-work callbacks | 0.08 | 0.06 |
+| Wrapping the target texture (views, Device, SkSurface) | 0.05 | 0.02 |
+| Clears, `texture_copy` into the shown texture, clocks, signal | 0.10 | 0.02 |
+| JSUI tick (Animated from the `entities` buffer, layout, posting to JS) | 0.09 | 0.02 |
+| `hud_game.gd` feeding the UI (projecting units, `set_buffer`, state JSON) | 0.12 | - |
+| **Total** | **~0.94** | **~0.22** |
+
+Nothing waits on the JS thread: `js_sync_ms` is 0 and locks are about
+0.01 ms (posting to the JS thread). Godot drawing the UI's canvas
+item adds about 0.02 ms.
+
+Compared with native Godot on Metal (`--hud`, the PERFORMANCE.md row of
++0.01 ms): the work is the same, the measurement is not. The native number
+is the frame interval with vsync off at ~340 fps, where the CPU work hides
+behind waiting for the GPU. JSUI's native main-thread work there is about
+0.25 ms (tick 0.03, render 0.23 by `--perf-log`). At 60 fps with vsync,
+native Godot's JsuiView render is 0.6-1.1 ms per frame, as on the web: at 60
+fps the M1's cores run at low clocks between frames, which roughly triples
+every per-frame cost. Chrome without the frame limit
+(`--disable-frame-rate-limit --disable-gpu-vsync`) puts JSUI's render on
+the web at about 0.2 ms per render, as native. So WASM is not the cost. The
+web-specific part is the WebGPU calls through JS (about a quarter of
+JSUI's time), and that nothing runs off the main thread.
+
+Two fixes from this profile:
+
+* Graphite wraps a render target the host keeps (`JSUI_GPU_INCREMENTAL`)
+  once, not every frame (Dawn and Metal; `gpu_graphite.cpp`
+  `GraphiteGpu::targets`).
+* `coverRects` keeps its pair costs between joins (O(n²) instead of O(n³)
+  joins; the same result, `cover_rects_test`).
+
+The demo's `hud_game.gd` also builds its state JSON only when the state
+changed. With the profiler running (it keeps the core's clock steady, so the
+rounds agree), the UI's cost went from 0.87 to 0.76 ms, and JsuiView's render
+from 0.72 to 0.60 ms (`get_render_stats`). Without the profiler, 60 fps
+rounds vary by ±0.15 ms, more than this change.
+
+What could move off the main thread: JSUI's tick, damage tracking and paint
+recording need no GPU calls (about 0.4 ms of the 0.8). A worker thread could
+record each frame into an `SkPicture`, and the main thread would replay it
+into Graphite, snap and submit. Graphite's `snap()`, command encoding and
+submit stay on the main thread, because the browser's `GPUDevice` and its
+objects live there (Emdawnwebgpu's handles belong to the thread that made
+them). Estimate: about 0.3 ms less per frame at 60 fps, about 0.1 ms at
+full clock. The cost is a frame of latency, or a wait for the worker.
 
 Limits of the web build:
 
