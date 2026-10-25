@@ -1,5 +1,7 @@
 #include "render/gpu_metal.h"
 
+#include <memory>
+
 #if defined(JSUI_METAL)
 
 #include "include/core/SkCanvas.h"
@@ -27,6 +29,7 @@
 #include "include/gpu/ganesh/mtl/GrMtlDirectContext.h"
 #include "render/host_textures.h"
 #include "render/painter.h"
+#include "render/shader_cache.h"
 #include "runtime.h"
 
 namespace {
@@ -69,6 +72,8 @@ bool colorTypeFor(unsigned format, SkColorType* ct, sk_sp<SkColorSpace>* cs) {
 }  // namespace
 
 struct JsuiMetalContext {
+  // Metal shader source across launches (shader_cache.h). Outlives ctx.
+  std::unique_ptr<jsui::shader_cache::Cache> shaders;
   sk_sp<GrDirectContext> ctx;
   // Host textures (JSUI_TEXTURE_METAL) drawn in this context's frames.
   jsui::TextureWrapper textures{[this](const JsuiTexture& t) -> sk_sp<SkImage> {
@@ -95,10 +100,13 @@ JsuiMetalContext* create(void* device, void* queue) {
   GrMtlBackendContext backend;
   backend.fDevice.retain(static_cast<GrMTLHandle>(device));
   backend.fQueue.retain(static_cast<GrMTLHandle>(queue));
+  auto shaders = std::make_unique<jsui::shader_cache::Cache>("metal-ganesh");
   GrContextOptions opts;
+  opts.fPersistentCache = shaders.get();
   sk_sp<GrDirectContext> ctx = GrDirectContexts::MakeMetal(backend, opts);
   if (!ctx) return nullptr;
   auto* m = new JsuiMetalContext;
+  m->shaders = std::move(shaders);
   m->ctx = std::move(ctx);
   return m;
 }

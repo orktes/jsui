@@ -127,14 +127,19 @@ int pendingCompiles(const SkExecutor* executor);
 // Tests only: precompile in slices (Mode::Sliced) whatever the backend.
 void setForceSliced(bool on);
 bool forceSliced();
-// Tests only: contexts start without the default cache file.
+// Tests only: contexts start without the default cache file (pipelines and
+// Ganesh shaders).
 void setNoDefaultFile(bool on);
+bool noDefaultFile();
 // Tests only: no precompileCommon (frames compile everything they draw).
 void setNoCommonPrecompile(bool on);
 // The cache file a context uses until the host names one (jsui.h): in the
 // user's cache directory, per program and backend; empty where there is
 // none (Android, the browser) or JSUI_PIPELINE_CACHE=off.
 std::string defaultFile(Backend backend);
+// `<user cache dir>/jsui/<kind>-<program>-<tag>.bin` (the directories
+// made), empty where there is no such directory (Android, the browser).
+std::string cacheFile(const std::string& kind, const std::string& tag);
 
 struct Stats {
   int mode = 0;            // Mode
