@@ -208,7 +208,14 @@ main-thread waits on the render thread, and must queue exactly one
 render-thread job per frame; the Vulkan smoke runs pass 0),
 `--bench N` (N frames of hover
 springs, then of list scrolling, with vsync off; prints frame and render
-times) and `--no-world` (no 3D scene). For the pipeline cache:
+times) and `--no-world` (no 3D scene). `--hud` runs the engine examples'
+game instead of the showcase: units orbiting a tower under the shared HUD
+(`integrations/shared/ui/app.jsx`, built to
+`integrations/shared/ui/dist/bundle.js`), with nameplates following the units
+every frame through the `entities` buffer. `--no-ui` runs the same game without
+JSUI, and `--bench-seconds S` (vsync off, `--bench-warmup S`) prints the same
+`bench:` line as the other engines' `--bench`, so the two give the UI's frame
+cost. For the pipeline cache:
 `--pipeline-cache P` (sets `pipeline_cache_path`; a path outside `user://`
 leaves the shipped list out), `--tour` (with `--self-test`: also clicks
 through the tabs, the carousel and the deploy panel and scrolls the list),
