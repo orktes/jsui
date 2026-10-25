@@ -13,8 +13,12 @@
 //               (mean / p95 / max), painted frames per hover, and frame loop
 //               calls per hover (painted or not: an idle loop sleeps).
 //
+// --worker: JSUI in worker mode (createJsui({ worker: true })): its frames
+// run on a worker thread ("worker" next to the page's main thread, which only
+// forwards input); frame is not recorded then (the loop runs in the worker).
+//
 //   node web/test/hover-bench.mjs [--real-gpu] [--renderers webgpu,webgl,css] [--hovers 24] [--dwell 300]
-//                                 [--dpr 2] [--dist dist-gpu] [--json out.json] [--no-idle-sleep]
+//                                 [--dpr 2] [--dist dist-gpu] [--json out.json] [--no-idle-sleep] [--worker]
 //
 // Default: headless Chromium on SwiftShader (as frame-bench.mjs); --real-gpu
 // the installed Chrome, headed, on the machine's GPU. Keep its window in front.
@@ -37,6 +41,7 @@ const DPR = Number(opt('--dpr', 2));
 const DIST = opt('--dist', 'dist-gpu');
 const JSON_OUT = opt('--json', null);
 const IDLE_SLEEP = !args.includes('--no-idle-sleep');
+const WORKER = args.includes('--worker');
 const W = 1280, H = 720;
 
 const OUT = path.join(WEB, 'test/output/hover-bench');
@@ -106,7 +111,8 @@ function threadBusy(json) {
   }
   return out;
 }
-const THREADS = [['CrRendererMain', 'main'], ['Compositor', 'compositor'], ['CompositorTileWorker', 'raster'],
+const THREADS = [['CrRendererMain', 'main'], ['DedicatedWorker thread', 'worker'], ['Compositor', 'compositor'],
+  ['CompositorTileWorker', 'raster'],
   ['GPU CrGpuMain', 'gpu-main'], ['GPU VizCompositorThread', 'viz']];
 
 const sorted = (a) => [...a].sort((x, y) => x - y);
@@ -131,18 +137,19 @@ async function open(renderer) {
   } else {
     await page.goto(`${ORIGIN}/test/page.html`);
     await page.waitForFunction(() => window.testReady);
-    const name = await page.evaluate(async ({ renderer, dist, w, h, idleSleep }) => {
+    const name = await page.evaluate(async ({ renderer, dist, w, h, idleSleep, worker }) => {
       document.body.style.background = '#0d1322';
       const c = document.createElement('canvas');
       c.style.width = `${w}px`;
       c.style.height = `${h}px`;
       document.body.appendChild(c);
       const j = window.j = await window.createJsui({ canvas: c, bundleUrl: 'output/hover-bench/bundle.js', renderer,
-        autoFocus: false, idleSleep, moduleUrl: new URL(`../${dist}/jsui.js`, location.href) });
+        autoFocus: false, idleSleep, worker, moduleUrl: new URL(`../${dist}/jsui.js`, location.href) });
+      if (worker && !j.worker) throw new Error('worker mode fell back to the main thread');
       j.on('log', () => {});
       await Promise.race([j.whenIdle(), new Promise((r) => setTimeout(r, 8000))]);
       return j.renderer;
-    }, { renderer, dist: DIST, w: W, h: H, idleSleep: IDLE_SLEEP });
+    }, { renderer, dist: DIST, w: W, h: H, idleSleep: IDLE_SLEEP, worker: WORKER });
     if (name !== renderer) console.log(`  (asked for ${renderer}, got ${name})`);
   }
   await page.bringToFront();
@@ -155,7 +162,8 @@ const results = [];
 for (const renderer of RENDERERS) {
   const { context, page } = await open(renderer);
   const isCss = renderer === 'css';
-  if (!isCss) {
+  const timed = !isCss && !WORKER;
+  if (timed) {
     // jsui.frame() main-thread time of every painted frame.
     await page.evaluate(() => {
       const j = window.j, frame = j.frame.bind(j);
@@ -181,7 +189,7 @@ for (const renderer of RENDERERS) {
   await page.waitForTimeout(500);
 
   await browser.startTracing(page, { categories: TRACE_CATEGORIES });
-  if (!isCss) await page.evaluate(() => { window.__on = true; });
+  if (timed) await page.evaluate(() => { window.__on = true; });
   const t0 = Date.now();
   for (let k = 0; k < HOVERS; k++) {
     const p = centre(order[k % order.length]);
@@ -189,12 +197,13 @@ for (const renderer of RENDERERS) {
     await page.waitForTimeout(DWELL);
   }
   const ms = Date.now() - t0;
-  const [frames, calls] = isCss ? [null, 0]
+  const [frames, calls] = !timed ? [null, 0]
     : await page.evaluate(() => { window.__on = false; return [window.__cpu, window.__calls]; });
   const busy = threadBusy((await browser.stopTracing()).toString());
   const threads = Object.fromEntries(THREADS.map(([k, label]) => [label, (busy[k] ?? 0) / HOVERS]));
   const total = Object.values(threads).reduce((a, b) => a + b, 0);
-  const r = { renderer, hovers: HOVERS, windowMs: ms, perHover: threads, totalPerHover: total };
+  const r = { renderer: !isCss && WORKER ? `${renderer}+w` : renderer, hovers: HOVERS, windowMs: ms, perHover: threads,
+    totalPerHover: total };
   if (frames) {
     const s = sorted(frames);
     r.frames = { perHover: frames.length / HOVERS, mean: avg(frames), p95: pct(s, 0.95), max: s[s.length - 1],
