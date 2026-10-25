@@ -1,9 +1,11 @@
 // The runtime's JS-thread mode (Runtime::jsThreadMode, docs/ARCHITECTURE.md
-// "Shared state"), still on one thread: the host-callback queue and proxy
-// calls (HostQueue, also across real threads), the frame snapshot behind
-// measure / viewport / Animated getValue / stopAnimation, measureAsync, the
-// clipboard proxy, host state written by JS and the JS perf block. Plain JS
-// bundles on the raw __jsui_native bridge.
+// "Shared state", "JS thread"): the host-callback queue and proxy calls
+// (HostQueue, also across real threads), the frame snapshot behind measure /
+// viewport / Animated getValue / stopAnimation, measureAsync, the clipboard
+// proxy, host state written by JS and the JS perf block. Plain JS bundles on
+// the raw __jsui_native bridge. JS runs on its thread: a post waits until JS
+// handled it (without applying what it did), a tick syncs
+// (JSUI_TICK_SYNC_JS), so what JS did lands in that tick.
 #include <atomic>
 #include <cstring>
 #include <string>
@@ -12,6 +14,7 @@
 
 #include "core/perf.h"
 #include "host_queue.h"
+#include "js/js_thread.h"
 #include "jsui/jsui.h"
 #include "runtime.h"
 #include "test.h"
@@ -48,7 +51,7 @@ struct ModeHost {
   jsui::Runtime& runtime() { return *jsui::internalRuntime(rt); }
   bool load(const char* src) { return jsui_load_bundle_source(rt, src, std::strlen(src), "mode.js") == 0; }
   void tick(int n = 1) {
-    for (int i = 0; i < n; i++) jsui_tick(rt, t += 16);
+    for (int i = 0; i < n; i++) jsui_tick_ex(rt, t += 16, JSUI_TICK_SYNC_JS);
   }
   std::string take() {
     std::string s;
@@ -56,7 +59,16 @@ struct ModeHost {
     messages.clear();
     return s;
   }
-  void post(const char* name) { jsui_post_message(rt, name, "null"); }
+  // Until the JS thread handled what was posted (serving its proxied reads;
+  // what it did is applied by the next tick).
+  void waitJs() {
+    jsui::Runtime& r = runtime();
+    if (jsui::JsThread* js = r.jsThread()) js->waitIdle(-1, [&r] { r.hostQueue.drain(); });
+  }
+  void post(const char* name) {
+    jsui_post_message(rt, name, "null");
+    waitJs();
+  }
 };
 
 const char* kBundle = R"JS(

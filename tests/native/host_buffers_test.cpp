@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "host_buffers.h"
+#include "js/js_thread.h"
 #include "jsui/jsui.h"
 #include "runtime.h"
 #include "test.h"
@@ -43,7 +44,7 @@ struct BufHost {
   ~BufHost() { jsui_destroy(rt); }
   bool load(const char* src) { return jsui_load_bundle_source(rt, src, std::strlen(src), "buf.js") == 0; }
   void tick(int n = 1) {
-    for (int i = 0; i < n; i++) jsui_tick(rt, t += 16);
+    for (int i = 0; i < n; i++) jsui_tick_ex(rt, t += 16, JSUI_TICK_SYNC_JS);
   }
   std::string take() {
     std::string s;
@@ -51,7 +52,13 @@ struct BufHost {
     messages.clear();
     return s;
   }
-  void post(const char* name) { jsui_post_message(rt, name, "null"); }
+  // A post is handled before it returns (JS thread: waited for, without
+  // applying what JS did; that waits for the tick).
+  void post(const char* name) {
+    jsui_post_message(rt, name, "null");
+    jsui::Runtime& r = *jsui::internalRuntime(rt);
+    if (jsui::JsThread* js = r.jsThread()) js->waitIdle(-1, [&r] { r.hostQueue.drain(); });
+  }
 };
 
 // read(key) posts [type, contents, version > 0]; deliveries are logged.

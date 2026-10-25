@@ -53,6 +53,7 @@ for (const mode of ['production', 'development']) {
       'react_native_animated_e2e',
       'react_host_data_e2e',
       'react_host_data_e2e_js_thread_mode',
+      'react_host_data_e2e_js_thread_lockstep',
       'react_images_e2e',
       'react_surfaces_e2e',
       'react_host_buffers_e2e',
@@ -84,6 +85,7 @@ for (const mode of ['production', 'development']) {
     assert.match(stdout, /PASS react_native_animated_e2e/);
     assert.match(stdout, /PASS react_host_data_e2e$/m);
     assert.match(stdout, /PASS react_host_data_e2e_js_thread_mode/);
+    assert.match(stdout, /PASS react_host_data_e2e_js_thread_lockstep/);
     assert.match(stdout, /PASS react_images_e2e/);
     assert.match(stdout, /PASS react_surfaces_e2e$/m);
     assert.match(stdout, /PASS react_surfaces_e2e_host_picks_main/);
