@@ -261,9 +261,11 @@ class Game : public jsui_example::SelfTestHost {
     cfg.width = opt_.width;
     cfg.height = opt_.height;
     cfg.dev_mode = opt_.dev;
+    cfg.js_thread = opt_.jsThread;
     cfg.message_user = this;
     cfg.on_message = [](void* u, const char* name, const char* json) { static_cast<Game*>(u)->onMessage(name, json); };
     rt_ = jsui_create(&cfg);
+    std::printf("JS thread: %s\n", jsui_example::jsThreadName(jsui_js_thread(rt_)));
     jsui_set_clipboard_callbacks(
         rt_,
         [](void* u) -> const char* {
