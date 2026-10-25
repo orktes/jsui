@@ -17,7 +17,10 @@ export function Footer() {
             compiled to WebAssembly and drawn into a single canvas.
           </Text>
         </View>
-        <Button small kind="ghost" label="View source" href={GITHUB + '/tree/main/site'} />
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          <Button small kind="ghost" label="Performance" href={GITHUB + '/blob/main/docs/PERFORMANCE.md'} />
+          <Button small kind="ghost" label="View source" href={GITHUB + '/tree/main/site'} />
+        </View>
       </Column>
     </View>
   );

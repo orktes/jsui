@@ -53,6 +53,7 @@ npx jsui skill                                   # print the skill
 
 - [README](https://github.com/orktes/jsui/blob/main/README.md): overview, game data, host textures, Lottie, shaders, building.
 - [Architecture](https://github.com/orktes/jsui/blob/main/docs/ARCHITECTURE.md): runtime design, rendering, input, game data.
+- [Performance](https://github.com/orktes/jsui/blob/main/docs/PERFORMANCE.md): what JSUI costs a game: frame time, JS per frame, spikes, memory, binary size.
 - [Agent skill](https://github.com/orktes/jsui/blob/main/packages/cli/skills/jsui/SKILL.md): the skill coding agents load.
 - [C API header](https://github.com/orktes/jsui/blob/main/include/jsui/jsui.h): the embedding API.
 - [Godot integration](https://github.com/orktes/jsui/blob/main/integrations/godot/README.md): the GDExtension and demo project.
