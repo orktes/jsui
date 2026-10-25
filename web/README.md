@@ -502,6 +502,14 @@ Bundlers must copy them as static files rather than inline them: serve
 `jsui-web.js`), or set `moduleBase` to wherever you host them. The `.wasm`
 files should be served as `application/wasm`.
 
+`npx jsui build app.jsx --web site/` (@orktes/jsui-cli) does all of this:
+it writes a deployable folder with every module, versioned. By hand,
+deploy `dist-gpu/` too if the UI should render with WebGPU: without it the
+runtime falls back to WebGL even in browsers that have WebGPU. With
+`moduleVersions`, only the directories listed there are loaded, so list
+`dist-gpu` as well (the console warns when WebGPU is available but
+`dist-gpu` is left out).
+
 `renderer` (`'auto'`, `'gpu'`, `'webgpu'`, `'webgl'`, `'cpu'`, `'2d'`) forces
 a backend; the chosen one is `jsui.renderer`. All options are documented on
 `JsuiOptions` at the top of `jsui-web.js`.

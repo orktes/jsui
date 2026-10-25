@@ -1,4 +1,5 @@
 export { build, BUNDLE_FORMATS, splitSourcePath } from './build.js';
+export { writeWebHost, webPackageDir, WEB_MODULES } from './web.js';
 export { compileBundle, bundleSource, isPrecompiled, readPrecompiled } from './bytecode.js';
 export { dev } from './dev.js';
 export { esbuildOptions, jsuiReactDir } from './config.js';

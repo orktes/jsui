@@ -6,6 +6,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { build } from '../src/build.js';
+import { writeWebHost } from '../src/web.js';
 import { dev } from '../src/dev.js';
 import { elementSummary, formatTree, launch } from '../src/headless.js';
 import { attach, sessionClients } from '../src/attach.js';
@@ -23,6 +24,13 @@ const USAGE = `usage:
        source    plain JS (browser JS engines, other tools)
        split     bytecode in <out>, the source next to it in
                  <name>.source.js; the runtime reads it only as the fallback
+  jsui build <entry> --web <dir> [--html page.html] [--title T] [build options]
+     A static site ready to deploy (Vercel, Netlify, GitHub Pages, ...): the
+     bundle in <dir>/app/ (--format source by default: browsers run it on
+     their own JS engine), the browser host and every WASM build (WebGPU,
+     WebGL, CPU; the browser picks the best), all content-hashed, and an
+     index.html that runs the app (your own with --html, or the one <dir>
+     already has).
   jsui dev <entry> [--port 5173] [--host 127.0.0.1] [--no-hmr] [--no-inspect]
      [--react-compiler] [--headless [view options]]
      Every runtime that loads the bundle in dev mode joins the server's shared
@@ -267,6 +275,9 @@ async function main(argv) {
       'no-hmr': { type: 'boolean' },
       'no-inspect': { type: 'boolean' },
       format: { type: 'string' },
+      web: { type: 'string' },
+      html: { type: 'string' },
+      title: { type: 'string' },
       'react-compiler': { type: 'boolean' },
       'no-react-compiler': { type: 'boolean' },
       'compiler-report': { type: 'boolean' },
@@ -330,13 +341,14 @@ async function main(argv) {
   if (cmd === 'build') {
     const t0 = Date.now();
     try {
+      if (values.web != null && values.out) throw new Error('--web writes the bundle to <dir>/app/bundle.js; leave out -o');
       const r = await build({
         entry,
-        outfile: values.out || 'dist/bundle.js',
+        outfile: values.web != null ? path.join(values.web, 'app/bundle.js') : values.out || 'dist/bundle.js',
         minify: !!values.minify,
         sourcemap: !!values.sourcemap,
         mode: values.dev ? 'development' : 'production',
-        format: values.format || 'combo',
+        format: values.format || (values.web != null ? 'source' : 'combo'),
         reactCompiler: reactCompilerOption(values),
       });
       const rc = r.reactCompiler;
@@ -344,6 +356,12 @@ async function main(argv) {
       const kind =
         r.format === 'combo' ? `bytecode + ${(r.sourceBytes / 1024).toFixed(1)} KiB source` : r.format === 'split' ? `bytecode, source in ${path.basename(r.sourceFile)}` : r.format;
       console.log(`jsui: wrote ${r.outfile} (${(r.bytes / 1024).toFixed(1)} KiB, ${kind}, ${r.assets.length} assets${compiled}) in ${Date.now() - t0} ms`);
+      if (values.web != null) {
+        const w = await writeWebHost({ outDir: path.resolve(values.web), bundle: path.join('app', 'bundle.js'), html: values.html, title: values.title });
+        const page = w.index === 'written' ? 'index.html written' : w.index === 'kept' ? 'kept its index.html' : `index.html from ${values.html}`;
+        console.log(`jsui: ${values.web} is ready to deploy (modules: ${Object.keys(w.modules).join(', ')}; ${page})`);
+        if (!w.modules['dist-gpu']) console.warn('jsui: this @orktes/jsui-web has no dist-gpu/ module, so the site cannot render with WebGPU');
+      }
       if (typeof r.bytecode === 'string') console.warn(`jsui: not precompiled (${r.bytecode}); pass --format source to silence this`);
       if (rc && values['compiler-report']) {
         for (const s of rc.skipped) console.log(`  skipped ${s.name || '(anonymous)'} (${s.where}${s.line ? `, line ${s.line}` : ''}): ${s.reason}`);
