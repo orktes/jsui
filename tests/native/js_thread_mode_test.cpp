@@ -7,6 +7,7 @@
 // handled it (without applying what it did), a tick syncs
 // (JSUI_TICK_SYNC_JS), so what JS did lands in that tick.
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -289,4 +290,58 @@ TEST(js_thread_mode_perf_block) {
   h.post("move");
   h.tick();
   CHECK_EQ(h.runtime().doc.perf.counters.bridgeCalls, uint64_t(1));  // merged by the tick
+}
+
+namespace {
+
+const char* kLifecycleBundle = R"JS(
+  const N = __jsui_native;
+  N.postMessage('loaded', 'true');
+  const depth = (n) => (n ? depth(n - 1) + 1 : 0);
+  globalThis.__jsui_onHostMessage = (name) => {
+    if (name === 'spin') for (;;) {}
+    if (name === 'deep') {
+      try {
+        depth(1e7);
+        N.postMessage('deep', '"no limit"');
+      } catch (e) {
+        N.postMessage('deep', JSON.stringify(e.name));
+      }
+    }
+  };
+)JS";
+
+double nowMs() {
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+}  // namespace
+
+// The thread's lifetime: JS recursing past its stack limit gets a
+// RangeError (the thread's stack is js_stack_size_kb plus headroom), a
+// reload runs the bundle again on a new engine, and destroying the runtime
+// while JS spins interrupts it at once (not after js_timeout_ms).
+TEST(js_thread_lifecycle) {
+  if (!jsui::JsThread::available()) return;
+  {
+    ModeHost h(true);
+    CHECK(h.load(kLifecycleBundle));
+    h.tick();
+    CHECK_EQ(h.take(), std::string("loaded=true"));
+    h.post("deep");
+    h.tick();
+    CHECK_EQ(h.take(), std::string("deep=\"RangeError\""));
+    jsui_reload(h.rt);
+    h.tick(2);
+    CHECK_EQ(h.take(), std::string("loaded=true"));
+    CHECK(h.runtime().jsThread() != nullptr);
+  }
+  auto* h = new ModeHost(true);
+  CHECK(h->load(kLifecycleBundle));
+  jsui_post_message(h->rt, "spin", "null");
+  for (int i = 0; i < 2000 && !h->runtime().jsBusy(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  CHECK(h->runtime().jsBusy());
+  double t0 = nowMs();
+  delete h;
+  CHECK(nowMs() - t0 < 1000);
 }
