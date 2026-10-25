@@ -20,7 +20,7 @@ npx @orktes/jsui-cli skill install            # -> .claude/skills/jsui/ (--globa
 * Reference tests compare every example pixel-by-pixel with the same code
   rendered by react-native-web in headless Chrome.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design. For keeping per-frame work off JS (native animation, state styles, overlays, host-state binds), see [docs/NATIVE_FIRST.md](docs/NATIVE_FIRST.md).
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design. For keeping per-frame work off JS (native animation, state styles, overlays, host-state binds), see [docs/NATIVE_FIRST.md](docs/NATIVE_FIRST.md). For what JSUI costs a game (frame time, JS per frame, spikes, memory and size), see [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
 **Showcase: [orktes.github.io/jsui](https://orktes.github.io/jsui/)**, a site
 rendered entirely by the JSUI WebAssembly build into one canvas: interactive
