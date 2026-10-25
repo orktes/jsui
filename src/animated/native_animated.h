@@ -208,7 +208,7 @@ class NativeAnimated {
     int slot = 0;
     // format
     int decimals = -1, minDigits = 0;
-    std::string grouping, prefix, suffix;
+    std::string grouping, prefix, suffix, timePattern;
     // props: the text input (0: none)
     int textTag = 0;
     int visibleTag = 0;  // props: Visibility's `visible` (0: hidden)

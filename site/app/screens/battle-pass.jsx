@@ -4,8 +4,8 @@
 // (snapToInterval) with momentum, and both drive parallax art through
 // Animated.event on the native driver. Unlocked tiers can be claimed with a
 // reward burst, XP keeps trickling in from challenges and levels the pass.
-import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
-import { Animated, Easing, Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Animated, Easing, Image, Pressable, StyleSheet, Text, View, useInteraction } from 'react-native';
 import { colors, font, rarity } from '../../../examples/theme.js';
 
 export const feature = {
@@ -115,6 +115,9 @@ const OfferCard = memo(function OfferCard({ o, index, scrollX, state, onPress, g
   const r = rarity[o.tier];
   const lift = useValue(0);
   const shake = useValue(0);
+  // Press feedback from the runtime's interaction state (no re-render).
+  const ix = useInteraction();
+  const pressScale = useMemo(() => ix.pressed.interpolate({ inputRange: [0, 1], outputRange: [1, 0.97] }), [ix]);
   const x0 = Math.floor(index / 4) * PAGE_W + (index % 4) * (CARD_W + 20) - 48;
   const owned = state === 'owned';
   const confirming = state === 'confirm';
@@ -136,97 +139,97 @@ const OfferCard = memo(function OfferCard({ o, index, scrollX, state, onPress, g
       onFocus={() => Animated.spring(lift, { toValue: 1, stiffness: 300, damping: 20, useNativeDriver: ND }).start()}
       onBlur={() => Animated.spring(lift, { toValue: 0, stiffness: 300, damping: 20, useNativeDriver: ND }).start()}
       onPress={press}
+      group
+      interaction={ix}
       style={{ flex: 1, cursor: 'pointer' }}
     >
-      {({ focused, pressed }) => (
-        <Animated.View
-          style={[
-            styles.card,
-            { borderColor: r.color, boxShadow: `0 16px 36px rgba(0,0,0,0.55), 0 0 22px ${r.glow}` },
-            focused && { boxShadow: `0 16px 36px rgba(0,0,0,0.55), 0 0 0 3px rgba(255,243,207,0.85), 0 0 30px ${r.glow}` },
-            {
-              transform: [
-                { translateY: lift.interpolate({ inputRange: [0, 1], outputRange: [0, -6] }) },
-                { translateX: shake },
-                { scale: pressed ? 0.97 : 1 },
-              ],
-            },
-          ]}
-        >
-          <View style={styles.cardArt}>
-            <Animated.Image
-              source={ASSET[o.art]}
-              resizeMode="cover"
-              style={[
-                styles.cardArtImg,
-                {
-                  transform: [
-                    { translateX: scrollX.interpolate({ inputRange: [x0 - PAGE_W, x0 + PAGE_W], outputRange: [60, -60] }) },
-                    { scale: lift.interpolate({ inputRange: [0, 1], outputRange: [1, 1.06] }) },
-                  ],
-                },
-              ]}
-            />
-            <View style={styles.artFade} />
-            <Animated.Image
-              source={ICONS[o.icon]}
-              style={[
-                styles.cardIcon,
-                {
-                  transform: [
-                    { translateX: scrollX.interpolate({ inputRange: [x0 - PAGE_W, x0 + PAGE_W], outputRange: [-24, 24] }) },
-                    { translateY: lift.interpolate({ inputRange: [0, 1], outputRange: [0, -6] }) },
-                    { rotate: lift.interpolate({ inputRange: [0, 1], outputRange: ['-8deg', '-2deg'] }) },
-                  ],
-                },
-              ]}
-            />
-            {o.tag ? (
-              <View style={[styles.tag, { backgroundColor: o.tag === 'Daily' ? colors.cyan : o.tag === 'Limited' ? colors.purple : colors.gold }]}>
-                <Text style={styles.tagText}>{o.tag}</Text>
-              </View>
-            ) : null}
-            {o.discount ? (
-              <View style={styles.ribbonWrap}>
-                <View style={styles.ribbon}>
-                  <Text style={styles.ribbonText}>{o.discount}</Text>
-                </View>
-              </View>
-            ) : null}
-          </View>
-          <View style={styles.cardBody}>
-            <Text style={[styles.cardRarity, { color: r.color }]}>{r.label}</Text>
-            <Text style={styles.cardName} numberOfLines={1}>
-              {o.name}
-            </Text>
-            {owned ? (
-              <View style={[styles.priceBtn, styles.ownedBtn]}>
-                <View style={styles.tick} />
-                <Text style={[styles.priceText, { color: colors.green }]}>Owned</Text>
-              </View>
-            ) : confirming ? (
-              <View style={[styles.priceBtn, gemsOk ? styles.confirmBtn : styles.denyBtn]}>
-                <Text style={[styles.priceText, { color: gemsOk ? '#2a1500' : '#fff' }]}>{gemsOk ? `Confirm · ${fmt(o.price)}` : 'Not enough gems'}</Text>
-              </View>
-            ) : (
-              <View style={styles.priceBtn}>
-                <View style={styles.gemSmall} />
-                <Text style={styles.priceText}>{fmt(o.price)}</Text>
-                {o.old ? <Text style={styles.oldPrice}>{fmt(o.old)}</Text> : null}
-              </View>
-            )}
-          </View>
-          {o.locked ? (
-            <View style={styles.lockOverlay}>
-              <View style={styles.lockBody}>
-                <View style={styles.lockShackle} />
-              </View>
-              <Text style={styles.lockText}>{o.locked}</Text>
+      <Animated.View
+        style={[
+          styles.card,
+          { borderColor: r.color, boxShadow: `0 16px 36px rgba(0,0,0,0.55), 0 0 22px ${r.glow}` },
+          {
+            transform: [
+              { translateY: lift.interpolate({ inputRange: [0, 1], outputRange: [0, -6] }) },
+              { translateX: shake },
+              { scale: pressScale },
+            ],
+          },
+        ]}
+        groupFocusedStyle={{ boxShadow: `0 16px 36px rgba(0,0,0,0.55), 0 0 0 3px rgba(255,243,207,0.85), 0 0 30px ${r.glow}` }}
+      >
+        <View style={styles.cardArt}>
+          <Animated.Image
+            source={ASSET[o.art]}
+            resizeMode="cover"
+            style={[
+              styles.cardArtImg,
+              {
+                transform: [
+                  { translateX: scrollX.interpolate({ inputRange: [x0 - PAGE_W, x0 + PAGE_W], outputRange: [60, -60] }) },
+                  { scale: lift.interpolate({ inputRange: [0, 1], outputRange: [1, 1.06] }) },
+                ],
+              },
+            ]}
+          />
+          <View style={styles.artFade} />
+          <Animated.Image
+            source={ICONS[o.icon]}
+            style={[
+              styles.cardIcon,
+              {
+                transform: [
+                  { translateX: scrollX.interpolate({ inputRange: [x0 - PAGE_W, x0 + PAGE_W], outputRange: [-24, 24] }) },
+                  { translateY: lift.interpolate({ inputRange: [0, 1], outputRange: [0, -6] }) },
+                  { rotate: lift.interpolate({ inputRange: [0, 1], outputRange: ['-8deg', '-2deg'] }) },
+                ],
+              },
+            ]}
+          />
+          {o.tag ? (
+            <View style={[styles.tag, { backgroundColor: o.tag === 'Daily' ? colors.cyan : o.tag === 'Limited' ? colors.purple : colors.gold }]}>
+              <Text style={styles.tagText}>{o.tag}</Text>
             </View>
           ) : null}
-          {state === 'owned-new' || owned ? (state === 'owned-new' ? <Burst color={r.color} /> : null) : null}
-        </Animated.View>
-      )}
+          {o.discount ? (
+            <View style={styles.ribbonWrap}>
+              <View style={styles.ribbon}>
+                <Text style={styles.ribbonText}>{o.discount}</Text>
+              </View>
+            </View>
+          ) : null}
+        </View>
+        <View style={styles.cardBody}>
+          <Text style={[styles.cardRarity, { color: r.color }]}>{r.label}</Text>
+          <Text style={styles.cardName} numberOfLines={1}>
+            {o.name}
+          </Text>
+          {owned ? (
+            <View style={[styles.priceBtn, styles.ownedBtn]}>
+              <View style={styles.tick} />
+              <Text style={[styles.priceText, { color: colors.green }]}>Owned</Text>
+            </View>
+          ) : confirming ? (
+            <View style={[styles.priceBtn, gemsOk ? styles.confirmBtn : styles.denyBtn]}>
+              <Text style={[styles.priceText, { color: gemsOk ? '#2a1500' : '#fff' }]}>{gemsOk ? `Confirm · ${fmt(o.price)}` : 'Not enough gems'}</Text>
+            </View>
+          ) : (
+            <View style={styles.priceBtn}>
+              <View style={styles.gemSmall} />
+              <Text style={styles.priceText}>{fmt(o.price)}</Text>
+              {o.old ? <Text style={styles.oldPrice}>{fmt(o.old)}</Text> : null}
+            </View>
+          )}
+        </View>
+        {o.locked ? (
+          <View style={styles.lockOverlay}>
+            <View style={styles.lockBody}>
+              <View style={styles.lockShackle} />
+            </View>
+            <Text style={styles.lockText}>{o.locked}</Text>
+          </View>
+        ) : null}
+        {state === 'owned-new' || owned ? (state === 'owned-new' ? <Burst color={r.color} /> : null) : null}
+      </Animated.View>
     </Pressable>
   );
 });
@@ -255,33 +258,61 @@ const TierCol = memo(function TierCol({ t, state, current, burstKey, pulse, onPr
   const claimed = state === 'claimed';
   const claimable = state === 'claimable';
   return (
-    <Pressable autoFocus={autoFocus} onPress={() => onPress(t.n)} style={{ width: COL, cursor: 'pointer' }}>
-      {({ hovered, focused, pressed }) => (
-        <View style={[styles.tierCol, current && styles.tierColCurrent, (hovered || focused) && styles.tierColHot, focused && styles.tierColFocus, pressed && { transform: [{ scale: 0.96 }] }]}>
-          <View style={[styles.claimPill, !claimable && { opacity: 0 }]}>
-            <Text style={styles.claimPillText}>Claim</Text>
-          </View>
-          <Reward name={t.free} claimed={claimed} claimable={claimable} pulse={pulse} />
-          <Reward name={t.prem} premium claimed={claimed} claimable={claimable} pulse={pulse} />
-          <View style={[styles.tierNode, claimed && styles.tierNodeDone, claimable && styles.tierNodeReady, current && styles.tierNodeCurrent, t.milestone && styles.tierNodeMilestone]}>
-            <Text style={[styles.tierNodeText, (current || claimed || claimable) && { color: '#1a1206' }]}>{t.n}</Text>
-          </View>
-          {burstKey ? <Burst key={burstKey} color={colors.gold} /> : null}
+    <Pressable autoFocus={autoFocus} onPress={() => onPress(t.n)} group style={{ width: COL, cursor: 'pointer' }}>
+      <View
+        style={[styles.tierCol, current && styles.tierColCurrent]}
+        groupHoveredStyle={styles.tierColHot}
+        groupFocusedStyle={[styles.tierColHot, styles.tierColFocus]}
+        groupPressedStyle={styles.pressed96}
+      >
+        <View style={[styles.claimPill, !claimable && { opacity: 0 }]}>
+          <Text style={styles.claimPillText}>Claim</Text>
         </View>
-      )}
+        <Reward name={t.free} claimed={claimed} claimable={claimable} pulse={pulse} />
+        <Reward name={t.prem} premium claimed={claimed} claimable={claimable} pulse={pulse} />
+        <View style={[styles.tierNode, claimed && styles.tierNodeDone, claimable && styles.tierNodeReady, current && styles.tierNodeCurrent, t.milestone && styles.tierNodeMilestone]}>
+          <Text style={[styles.tierNodeText, (current || claimed || claimable) && { color: '#1a1206' }]}>{t.n}</Text>
+        </View>
+        {burstKey ? <Burst key={burstKey} color={colors.gold} /> : null}
+      </View>
     </Pressable>
   );
 });
 
+/** "Refreshes in hh:mm:ss": a native seconds value counting down (one
+ * linear timing per day), formatted by the runtime. */
 function Countdown({ active, start }) {
-  const [s, setS] = useState(start);
+  const v = useValue(start);
   useEffect(() => {
     if (!active) return undefined;
-    const id = setInterval(() => setS((x) => (x > 0 ? x - 1 : 24 * 3600)), 1000);
-    return () => clearInterval(id);
+    let anim = null;
+    const run = () => {
+      const from = v.__getValue();
+      anim = Animated.timing(v, { toValue: 0, duration: from * 1000, easing: Easing.linear, useNativeDriver: ND });
+      anim.start(({ finished }) => {
+        if (!finished) return;
+        v.setValue(24 * 3600);
+        run();
+      });
+    };
+    run();
+    return () => anim && anim.stop();
   }, [active]);
-  const p = (n) => String(n).padStart(2, '0');
-  return <Text style={styles.refresh}>Refreshes in {p(Math.floor(s / 3600))}:{p(Math.floor(s / 60) % 60)}:{p(s % 60)}</Text>;
+  const t = useMemo(() => {
+    // Whole seconds left, as the 1 s ticks showed them.
+    const secs = Animated.derive([v], (x) => Math.ceil(x - 1e-6));
+    const two = { decimals: 0, minDigits: 2 };
+    return {
+      h: Animated.format(Animated.derive([secs], (x) => Math.floor(x / 3600)), two),
+      m: Animated.format(Animated.derive([secs], (x) => Math.floor(x / 60) % 60), two),
+      s: Animated.format(Animated.derive([secs], (x) => x % 60), two),
+    };
+  }, [v]);
+  return (
+    <Text style={styles.refresh}>
+      Refreshes in <Animated.Text text={t.h} />:<Animated.Text text={t.m} />:<Animated.Text text={t.s} />
+    </Text>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -296,7 +327,6 @@ export default function BattlePass({ active = true }) {
   const [offerState, setOfferState] = useState({ verdant: 'owned' });
   const [page, setPage] = useState(0);
   const [toast, setToast] = useState(null);
-  const [range, setRange] = useState([31, 42]);
 
   const offersX = useValue(0);
   const trackX = useValue((37 - 4) * COL);
@@ -363,8 +393,13 @@ export default function BattlePass({ active = true }) {
 
   const burst = (n) => setBursts((b) => Object.assign({}, b, { [n]: Date.now() + Math.random() }));
 
+  // One stable handler for all 60 tier columns (they are memo): it reads the
+  // latest state through a ref, so an XP tick does not re-render the track.
+  const latest = useRef(null);
+  latest.current = { stateOf, tier, xp };
   const onTier = useCallback(
     (n) => {
+      const { stateOf, tier, xp } = latest.current;
       const st = stateOf(n);
       if (st === 'claimable') {
         setExtraClaimed((c) => Object.assign({}, c, { [n]: true }));
@@ -374,7 +409,7 @@ export default function BattlePass({ active = true }) {
       } else if (st === 'claimed') say(`Tier ${n} already claimed`, colors.textDim);
       else say(`Tier ${n} unlocks in ${fmt((n - tier) * XP_PER_TIER - xp)} XP`, colors.textDim);
     },
-    [claimed, extraClaimed, tier, xp],
+    [],
   );
 
   const claimAll = () => {
@@ -457,17 +492,16 @@ export default function BattlePass({ active = true }) {
     e.preventDefault();
   };
 
-  // Visible tier range: a listener on the (native) scroll value, state only when it changes.
-  const firstRef = useRef(31);
-  useEffect(() => {
-    const id = trackX.addListener(({ value }) => {
-      const first = Math.max(1, Math.round(value / COL) + 1);
-      if (first === firstRef.current) return;
-      firstRef.current = first;
-      setRange([first, Math.min(60, first + Math.floor(TRACK_W / COL) - 1)]);
-    });
-    return () => trackX.removeListener(id);
-  }, []);
+  // Visible tier range: derived natively from the scroll value (no listener,
+  // no render while scrolling).
+  const range = useMemo(() => {
+    const first = Animated.derive([trackX], (x) => Math.max(1, Math.round(x / COL) + 1));
+    const span = Math.floor(TRACK_W / COL) - 1;
+    return {
+      first: Animated.format(first, { decimals: 0 }),
+      last: Animated.format(Animated.derive([first], (f) => Math.min(60, f + span)), { decimals: 0 }),
+    };
+  }, [trackX]);
   const onTrackSettle = () => {};
 
   const claimableCount = TIERS.filter((t) => stateOf(t.n) === 'claimable').length;
@@ -550,7 +584,7 @@ export default function BattlePass({ active = true }) {
       <View style={styles.sectionRow}>
         <Text style={styles.section}>Rewards Track</Text>
         <Text style={styles.rangeText}>
-          Tiers {range[0]}–{range[1]}
+          Tiers <Animated.Text text={range.first} />–<Animated.Text text={range.last} />
         </Text>
         <View style={{ flex: 1 }} />
         <SmallBtn glyph="X" color="#6bb8ff" label="Current tier" onPress={() => jumpTo(tier)} />
@@ -631,27 +665,23 @@ export default function BattlePass({ active = true }) {
 
 function PagerBtn({ label, onPress, disabled }) {
   return (
-    <Pressable focusable={false} onPress={onPress} disabled={disabled} style={{ cursor: 'pointer' }}>
-      {({ hovered }) => (
-        <View style={[styles.pagerBtn, hovered && styles.pagerBtnHot, disabled && { opacity: 0.35 }]}>
-          <Text style={styles.pagerText}>{label}</Text>
-        </View>
-      )}
+    <Pressable focusable={false} onPress={onPress} disabled={disabled} group style={{ cursor: 'pointer' }}>
+      <View style={[styles.pagerBtn, disabled && { opacity: 0.35 }]} groupHoveredStyle={styles.pagerBtnHot}>
+        <Text style={styles.pagerText}>{label}</Text>
+      </View>
     </Pressable>
   );
 }
 
 function SmallBtn({ glyph, color, label, onPress, hot }) {
   return (
-    <Pressable focusable={false} onPress={onPress} style={{ cursor: 'pointer' }}>
-      {({ hovered, pressed }) => (
-        <View style={[styles.smallBtn, hot && styles.smallBtnHot, hovered && styles.smallBtnHover, pressed && { transform: [{ scale: 0.96 }] }]}>
-          <View style={[styles.glyph, { backgroundColor: color }]}>
-            <Text style={styles.glyphText}>{glyph}</Text>
-          </View>
-          <Text style={styles.smallBtnText}>{label}</Text>
+    <Pressable focusable={false} onPress={onPress} group style={{ cursor: 'pointer' }}>
+      <View style={[styles.smallBtn, hot && styles.smallBtnHot]} groupHoveredStyle={styles.smallBtnHover} groupPressedStyle={styles.pressed96}>
+        <View style={[styles.glyph, { backgroundColor: color }]}>
+          <Text style={styles.glyphText}>{glyph}</Text>
         </View>
-      )}
+        <Text style={styles.smallBtnText}>{label}</Text>
+      </View>
     </Pressable>
   );
 }
@@ -734,6 +764,7 @@ const styles = StyleSheet.create({
   lineFill: { position: 'absolute', left: -COL / 2, top: 0, bottom: 0, width: CONTENT_W, transformOrigin: 'left', experimental_backgroundImage: 'linear-gradient(90deg, #a8741f, #ffd36b)' },
   tierCol: { marginHorizontal: 4, alignItems: 'center', gap: 8, paddingVertical: 6, borderRadius: 10, borderWidth: 1, borderColor: 'transparent' },
   tierColCurrent: { backgroundColor: 'rgba(242,195,91,0.10)', borderColor: 'rgba(242,195,91,0.45)' },
+  pressed96: { transform: [{ scale: 0.96 }] },
   tierColHot: { backgroundColor: 'rgba(255,255,255,0.05)' },
   tierColFocus: { borderColor: '#fff3cf', boxShadow: '0 0 0 2px rgba(255,178,63,0.35), 0 0 18px rgba(255,178,63,0.4)' },
   claimPill: { height: 18, paddingHorizontal: 8, borderRadius: 9, backgroundColor: colors.gold, justifyContent: 'center', boxShadow: '0 0 10px rgba(242,195,91,0.6)' },

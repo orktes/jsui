@@ -9,7 +9,7 @@
 // English, Arabic (right-to-left: mirrored layout, bidi text, Arabic shaping)
 // or Japanese; the Noto fonts for those load on demand with Fonts.load.
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, Fonts, Image, ImageBackground, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, Easing, Fonts, Image, ImageBackground, Pressable, StyleSheet, Text, View, useInteraction } from 'react-native';
 import { colors, font } from '../../../examples/theme.js';
 
 export const feature = {
@@ -211,6 +211,10 @@ const Choice = memo(function Choice({ c, i, index, onPick, focusRef, shake, lang
   const hot = useRef(new Animated.Value(0)).current;
   const enter = useRef(new Animated.Value(0)).current;
   const jolt = useRef(new Animated.Value(0)).current;
+  // Hover / focus / press come from the runtime (state styles and the
+  // interaction's pressed value): no re-render per input change.
+  const ix = useInteraction();
+  const pressScale = useMemo(() => ix.pressed.interpolate({ inputRange: [0, 1], outputRange: [1, 0.98] }), [ix]);
   useEffect(() => {
     Animated.timing(enter, { toValue: 1, duration: 360, delay: 70 * i, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
   }, []);
@@ -245,24 +249,32 @@ const Choice = memo(function Choice({ c, i, index, onPick, focusRef, shake, lang
         to(0);
         onFocusIn(false);
       }}
+      group
+      interaction={ix}
       style={{ cursor: 'pointer' }}
     >
-      {({ hovered, focused, pressed }) => {
-        const on = hovered || focused;
-        return (
-          <Animated.View style={[styles.choice, on && (rtl ? styles.choiceFocusedRtl : styles.choiceFocused), c.locked && styles.choiceLocked, { opacity: enter, transform: [{ translateX: tx }, { scale: pressed ? 0.98 : 1 }] }]}>
-            <View style={[styles.choiceNum, on && styles.choiceNumFocused]}>
-              <Text style={[styles.choiceNumText, on && { color: '#1a1206' }]}>{index}</Text>
-            </View>
-            <Text style={[styles.choiceText, { fontFamily: family }, c.leave && { color: colors.textMute }, on && { color: '#fff' }]} numberOfLines={1}>
-              {c.check ? <Text style={[styles.check, c.locked && { color: colors.red }]}>[{u[c.check.skill]} {c.check.dc}] </Text> : null}
-              {c.leave ? <Text style={styles.leave}>[{u.leave}] </Text> : null}
-              {c.text[lang]}
-            </Text>
-            {c.locked ? <Text style={[styles.lock, { fontFamily: family }]}>{u.locked}</Text> : null}
-          </Animated.View>
-        );
-      }}
+      <Animated.View
+        style={[styles.choice, c.locked && styles.choiceLocked, { opacity: enter, transform: [{ translateX: tx }, { scale: pressScale }] }]}
+        groupHoveredStyle={rtl ? styles.choiceFocusedRtl : styles.choiceFocused}
+        groupFocusedStyle={rtl ? styles.choiceFocusedRtl : styles.choiceFocused}
+      >
+        <View style={styles.choiceNum} groupHoveredStyle={styles.choiceNumFocused} groupFocusedStyle={styles.choiceNumFocused}>
+          <Text style={styles.choiceNumText} groupHoveredStyle={styles.onGold} groupFocusedStyle={styles.onGold}>
+            {index}
+          </Text>
+        </View>
+        <Text
+          style={[styles.choiceText, { fontFamily: family }, c.leave && { color: colors.textMute }]}
+          groupHoveredStyle={styles.white}
+          groupFocusedStyle={styles.white}
+          numberOfLines={1}
+        >
+          {c.check ? <Text style={[styles.check, c.locked && { color: colors.red }]}>[{u[c.check.skill]} {c.check.dc}] </Text> : null}
+          {c.leave ? <Text style={styles.leave}>[{u.leave}] </Text> : null}
+          {c.text[lang]}
+        </Text>
+        {c.locked ? <Text style={[styles.lock, { fontFamily: family }]}>{u.locked}</Text> : null}
+      </Animated.View>
     </Pressable>
   );
 });
@@ -272,12 +284,10 @@ function LangSwitch({ lang, loading, onPick }) {
     <View style={styles.langs}>
       <Text style={styles.langHint}>L / Y</Text>
       {LANGS.map((l) => (
-        <Pressable key={l.id} focusable={false} onPress={() => onPick(l.id)} style={{ cursor: 'pointer' }}>
-          {({ hovered }) => (
-            <View style={[styles.lang, lang === l.id && styles.langOn, hovered && lang !== l.id && styles.langHot]}>
-              <Text style={[styles.langText, { fontFamily: FAMILY[l.id] }, lang === l.id && { color: '#1a1206' }]}>{loading === l.id ? '…' : l.label}</Text>
-            </View>
-          )}
+        <Pressable key={l.id} focusable={false} onPress={() => onPick(l.id)} group style={{ cursor: 'pointer' }}>
+          <View style={[styles.lang, lang === l.id && styles.langOn]} groupHoveredStyle={lang !== l.id ? styles.langHot : undefined}>
+            <Text style={[styles.langText, { fontFamily: FAMILY[l.id] }, lang === l.id && { color: '#1a1206' }]}>{loading === l.id ? '…' : l.label}</Text>
+          </View>
         </Pressable>
       ))}
     </View>
@@ -366,7 +376,7 @@ export default function Dialogue({ active = true }) {
     if (!d) return;
     setTrust((t) => {
       const n = Math.max(0, Math.min(100, t + d));
-      Animated.spring(trustV, { toValue: n / 100, stiffness: 120, damping: 16, useNativeDriver: false }).start();
+      Animated.spring(trustV, { toValue: n / 100, stiffness: 120, damping: 16, useNativeDriver: true }).start();
       return n;
     });
     setDelta(d);
@@ -508,69 +518,68 @@ export default function Dialogue({ active = true }) {
           onPress={advance}
           onFocus={() => (focusInside.current = true)}
           onBlur={() => (focusInside.current = false)}
+          group
           style={styles.boxHit}
         >
-          {({ focused, hovered }) => (
-            <View style={[styles.box, rtl && { direction: 'rtl' }, (focused || hovered) && styles.boxHot]}>
-              <View style={styles.boxGlow} />
-              <Animated.View
-                style={[
-                  styles.portraitFrame,
-                  beat.who === 'you' && styles.portraitYou,
-                  {
-                    opacity: swap,
-                    transform: [
-                      { translateY: Animated.add(swap.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }), bob.interpolate({ inputRange: [0, 1], outputRange: [0, -2] })) },
-                      { rotate: (beat.who === 'you') !== rtl ? '2deg' : '-2deg' },
-                    ],
-                  },
-                ]}
-              >
-                <Image source={sp.img} style={styles.portrait} />
-              </Animated.View>
-              <View style={styles.textCol}>
-                <View style={styles.namePlate}>
-                  <Text style={[styles.name, ff, { color: sp.color, textShadowColor: sp.glow }]}>{sp.name[lang]}</Text>
-                  <Text style={[styles.title, ff]}>{sp.title[lang]}</Text>
-                  <View style={{ flex: 1 }} />
-                  {roll ? (
-                    <View style={[styles.roll, { borderColor: roll.ok ? colors.green : colors.red }]}>
-                      <Text style={[styles.rollText, ff]}>
-                        {u[roll.skill]} · d20 {roll.die}
-                        {roll.bonus ? ` + ${roll.bonus}` : ''} = {roll.total} / {roll.dc}
-                      </Text>
-                      <Text style={[styles.rollVerdict, ff, { color: roll.ok ? colors.green : colors.red }]}>{roll.ok ? u.success : u.failed}</Text>
-                    </View>
-                  ) : null}
-                </View>
-                <Typewriter key={beat.key} spans={spans} skip={skip} active={active} family={family} onDone={() => setTyped(true)} />
-                <View style={styles.footerRow}>
-                  <View style={styles.affinity}>
-                    <Text style={[styles.affinityLabel, ff]}>{u.trust}</Text>
-                    <View style={styles.affinityTrack}>
-                      <Animated.View style={[styles.affinityFill, { width: trustV.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }) }]} />
-                    </View>
-                    <Text style={styles.affinityNum}>{trust}</Text>
-                    <Animated.Text
-                      style={[
-                        styles.delta,
-                        ff,
-                        { color: delta < 0 ? colors.red : colors.green },
-                        { opacity: deltaV.interpolate({ inputRange: [0, 0.15, 0.7, 1], outputRange: [0, 1, 1, 0] }), transform: [{ translateY: deltaV.interpolate({ inputRange: [0, 1], outputRange: [6, -16] }) }] },
-                      ]}
-                    >
-                      {(delta > 0 ? '+' : '') + delta + ' ' + u.trust}
-                    </Animated.Text>
+          <View style={[styles.box, rtl && { direction: 'rtl' }]} groupHoveredStyle={styles.boxHot} groupFocusedStyle={styles.boxHot}>
+            <View style={styles.boxGlow} />
+            <Animated.View
+              style={[
+                styles.portraitFrame,
+                beat.who === 'you' && styles.portraitYou,
+                {
+                  opacity: swap,
+                  transform: [
+                    { translateY: Animated.add(swap.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }), bob.interpolate({ inputRange: [0, 1], outputRange: [0, -2] })) },
+                    { rotate: (beat.who === 'you') !== rtl ? '2deg' : '-2deg' },
+                  ],
+                },
+              ]}
+            >
+              <Image source={sp.img} style={styles.portrait} />
+            </Animated.View>
+            <View style={styles.textCol}>
+              <View style={styles.namePlate}>
+                <Text style={[styles.name, ff, { color: sp.color, textShadowColor: sp.glow }]}>{sp.name[lang]}</Text>
+                <Text style={[styles.title, ff]}>{sp.title[lang]}</Text>
+                <View style={{ flex: 1 }} />
+                {roll ? (
+                  <View style={[styles.roll, { borderColor: roll.ok ? colors.green : colors.red }]}>
+                    <Text style={[styles.rollText, ff]}>
+                      {u[roll.skill]} · d20 {roll.die}
+                      {roll.bonus ? ` + ${roll.bonus}` : ''} = {roll.total} / {roll.dc}
+                    </Text>
+                    <Text style={[styles.rollVerdict, ff, { color: roll.ok ? colors.green : colors.red }]}>{roll.ok ? u.success : u.failed}</Text>
                   </View>
-                  <View style={{ flex: 1 }} />
-                  <Text style={[styles.skip, ff]}>A / Enter · {hint}</Text>
-                  {typed && !showChoices ? (
-                    <Animated.View style={[styles.next, { transform: [{ translateY: bob.interpolate({ inputRange: [0, 1], outputRange: [-2, 3] }) }, { rotate: '45deg' }] }]} />
-                  ) : null}
+                ) : null}
+              </View>
+              <Typewriter key={beat.key} spans={spans} skip={skip} active={active} family={family} onDone={() => setTyped(true)} />
+              <View style={styles.footerRow}>
+                <View style={styles.affinity}>
+                  <Text style={[styles.affinityLabel, ff]}>{u.trust}</Text>
+                  <View style={styles.affinityTrack}>
+                    <Animated.View style={[styles.affinityFill, { width: trustV.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }) }]} />
+                  </View>
+                  <Text style={styles.affinityNum}>{trust}</Text>
+                  <Animated.Text
+                    style={[
+                      styles.delta,
+                      ff,
+                      { color: delta < 0 ? colors.red : colors.green },
+                      { opacity: deltaV.interpolate({ inputRange: [0, 0.15, 0.7, 1], outputRange: [0, 1, 1, 0] }), transform: [{ translateY: deltaV.interpolate({ inputRange: [0, 1], outputRange: [6, -16] }) }] },
+                    ]}
+                  >
+                    {(delta > 0 ? '+' : '') + delta + ' ' + u.trust}
+                  </Animated.Text>
                 </View>
+                <View style={{ flex: 1 }} />
+                <Text style={[styles.skip, ff]}>A / Enter · {hint}</Text>
+                {typed && !showChoices ? (
+                  <Animated.View style={[styles.next, { transform: [{ translateY: bob.interpolate({ inputRange: [0, 1], outputRange: [-2, 3] }) }, { rotate: '45deg' }] }]} />
+                ) : null}
               </View>
             </View>
-          )}
+          </View>
         </Pressable>
 
         {toast ? (
@@ -628,6 +637,8 @@ const styles = StyleSheet.create({
     boxShadow: '0 0 20px rgba(242,195,91,0.25)',
   },
   choiceLocked: { opacity: 0.55 },
+  onGold: { color: '#1a1206' },
+  white: { color: '#fff' },
   choiceNum: { width: 24, height: 24, borderRadius: 6, borderWidth: 1, borderColor: colors.lineStrong, alignItems: 'center', justifyContent: 'center' },
   choiceNumFocused: { backgroundColor: colors.gold, borderColor: colors.gold },
   choiceNumText: { fontFamily: font, fontWeight: '700', fontSize: 12, color: colors.textDim },

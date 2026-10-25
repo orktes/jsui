@@ -108,6 +108,8 @@ function App() {
   const fmt = { decimals: 0, grouping: ',', prefix: 'XP ', suffix: '!' };
   const scoreText = useMemo(() => Animated.format(score, fmt), [score]);
   const jsText = useMemo(() => Animated.format(jsScore, { decimals: 2, minDigits: 3 }), [jsScore]);
+  const timeText = useMemo(() => Animated.format(score, { time: 'h:mm:ss', prefix: 'T ' }), [score]);
+  const jsTimeText = useMemo(() => Animated.format(jsScore, { time: 'mm:ss' }), [jsScore]);
   useHostMessage('score', (v) => {
     Animated.timing(score, { toValue: v, duration: 64, easing: (t) => t, useNativeDriver: true }).start();
     jsScore.setValue(v / 1000);
@@ -132,6 +134,8 @@ function App() {
       </View>
       <Animated.Text ref={(r) => (reg.score = r)} text={scoreText} style={{ position: 'absolute', top: 100, color: '#fff' }} />
       <Animated.Text ref={(r) => (reg.jsScore = r)} text={jsText} style={{ position: 'absolute', top: 130, color: '#fff' }} />
+      <Animated.Text ref={(r) => (reg.time = r)} text={timeText} style={{ position: 'absolute', top: 160, color: '#fff' }} />
+      <Animated.Text ref={(r) => (reg.jsTime = r)} text={jsTimeText} style={{ position: 'absolute', top: 190, color: '#fff' }} />
       <Animated.View ref={(r) => (reg.seq = r)} style={{ position: 'absolute', width: 4, height: 4, transform: [{ translateX: seqV }, { translateY: stagA }, { scaleX: stagB }] }} />
       <Animated.View ref={(r) => (reg.clock = r)} style={{ position: 'absolute', width: 4, height: 4, transform: [{ translateX: clockX }] }} />
       <JsTwins js={js} />

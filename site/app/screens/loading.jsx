@@ -8,7 +8,7 @@
 // the native Animated driver. When the zone is ready, any key travels to the
 // next zone, which loads again.
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, Image, ImageBackground, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, Easing, Image, ImageBackground, Pressable, StyleSheet, Text, View, Visibility } from 'react-native';
 
 export const feature = {
   title: 'Native driver & image loading',
@@ -149,13 +149,13 @@ function Tips({ index, onStep, accent }) {
         </Animated.View>
       </View>
       <View style={styles.tipNav}>
-        <Pressable focusable={false} onPress={() => onStep(-1)} style={({ hovered }) => [styles.tipArrow, hovered && styles.tipArrowHot]}>
+        <Pressable focusable={false} onPress={() => onStep(-1)} style={styles.tipArrow} hoveredStyle={styles.tipArrowHot}>
           <Text style={styles.tipArrowText}>‹</Text>
         </Pressable>
         <Text style={styles.tipCount}>
           {index + 1}/{TIPS.length}
         </Text>
-        <Pressable focusable={false} onPress={() => onStep(1)} style={({ hovered }) => [styles.tipArrow, hovered && styles.tipArrowHot]}>
+        <Pressable focusable={false} onPress={() => onStep(1)} style={styles.tipArrow} hoveredStyle={styles.tipArrowHot}>
           <Text style={styles.tipArrowText}>›</Text>
         </Pressable>
       </View>
@@ -214,64 +214,139 @@ const Embers = memo(function Embers({ active }) {
   );
 });
 
-const Bar = memo(function Bar({ lit, ready, accent }) {
+// Phase geometry: where each phase starts / ends on the 0..1 bar.
+const PHASE_AT = [];
+{
+  let acc = 0;
+  for (let i = 0; i < SHARE.length; i++) {
+    PHASE_AT.push([acc, acc + SHARE[i]]);
+    acc += SHARE[i];
+  }
+}
+// One step every 100 ms: the pace of the old 90 ms setTimeout chain, which
+// landed on every sixth 60 Hz frame.
+const STEP_MS = 100;
+
+/** The simulated loading steps from `from` up to `cap` (or 1): irregular
+ * jumps, with a stall during shaders. */
+function simulate(from, cap) {
+  const out = [];
+  let p = from;
+  while (p < cap) {
+    const stall = p > 0.55 && p < 0.6 ? 0.25 : 1;
+    p = Math.min(1, p + (0.004 + Math.random() * 0.018) * stall);
+    p = Math.min(p, cap);
+    out.push(p);
+  }
+  return out;
+}
+
+/** Plays the steps natively: one timing whose easing is the step curve, so
+ * the bar, percentage and phase counters update without JS. */
+function playSteps(v, from, steps, onEnd) {
+  const n = steps.length;
+  const to = steps[n - 1];
+  const span = to - from || 1;
+  const easing = (x) => {
+    const k = Math.min(n, Math.floor(x * n + 1e-9));
+    return k <= 0 ? 0 : (steps[k - 1] - from) / span;
+  };
+  const anim = Animated.timing(v, { toValue: to, duration: n * STEP_MS, easing, useNativeDriver: true });
+  anim.start(({ finished }) => finished && onEnd());
+  return anim;
+}
+
+const Bar = memo(function Bar({ progress, ready, accent }) {
+  // Lit segments and the glowing head follow the native progress value: one
+  // derived segment count, read by each segment through an interpolation.
+  const count = useMemo(() => Animated.derive([progress], (p) => Math.floor(p * SEGS)), [progress]);
+  const segs = useMemo(() => {
+    const on = ready ? accent : '#e0a85c';
+    return Array.from({ length: SEGS }, (_, i) => ({
+      color: count.interpolate({ inputRange: [i, i + 1], outputRange: ['rgba(255,255,255,0.10)', on], extrapolate: 'clamp' }),
+      head: count.interpolate({ inputRange: [i - 1, i, i + 1], outputRange: [0, 1, 0], extrapolate: 'clamp' }),
+    }));
+  }, [count, ready, accent]);
   return (
     <View style={styles.track}>
-      {Array.from({ length: SEGS }, (_, i) => (
-        <View key={i} style={[styles.seg, i < lit && { backgroundColor: ready ? accent : '#e0a85c' }, i === lit && !ready && styles.segHead]} />
+      {segs.map((sg, i) => (
+        <Animated.View key={i} style={[styles.seg, { backgroundColor: sg.color }]}>
+          {ready ? null : <Animated.View style={[StyleSheet.absoluteFill, styles.segHead, { opacity: sg.head }]} />}
+        </Animated.View>
       ))}
     </View>
   );
 });
 
-/** Owns the progress state so its 10 Hz ticks re-render only this panel. */
+/** Label and counter of one phase, shown natively while the bar is in it. */
+const PhaseStatus = memo(function PhaseStatus({ i, progress, loaded }) {
+  const ph = PHASES[i];
+  const [start, end] = PHASE_AT[i];
+  const n = useMemo(() => {
+    const share = SHARE[i];
+    const total = ph.total;
+    return {
+      // The last phase also covers p = 1 (until React shows "Ready").
+      visible: i === PHASES.length - 1 ? Animated.derive([progress], (p) => p >= start) : Animated.derive([progress], (p) => p >= start && p < end),
+      count: Animated.format(Animated.derive([progress], (p) => Math.floor(((p - start) / share) * total)), { decimals: 0 }),
+    };
+  }, [progress]);
+  return (
+    <Visibility visible={n.visible} style={styles.statusPhase}>
+      <Text style={styles.status}>{ph.label}</Text>
+      {ph.total > 1 ? (
+        <Text style={styles.statusCount}>
+          {ph.real ? <Text>{loaded}</Text> : <Animated.Text text={n.count} />} / {ph.total} {ph.unit}
+        </Text>
+      ) : null}
+    </Visibility>
+  );
+});
+
+/** Owns the loading state. The simulated phases run natively (one timing
+ * each); only the real texture phase (image onLoad) goes through React. */
 function ProgressPanel({ active, paused, accent, onReady }) {
-  const [progress, setProgress] = useState(0); // 0..1
+  const progress = useRef(new Animated.Value(0)).current;
+  const [stage, setStage] = useState(0); // 0: connecting, 1: textures, 2: the rest, 3: ready
   const [mounted, setMounted] = useState(0); // texture tiles requested
   const [loaded, setLoaded] = useState(0); // texture tiles whose onLoad fired
-  const ready = progress >= 1;
+  const ready = stage === 3;
   const texStart = SHARE[0];
   const texEnd = SHARE[0] + SHARE[1];
-  const inTextures = progress >= texStart && loaded < TEXTURES.length;
-  // Simulated phases: irregular steps (with a stall during shaders).
+  const run = active && !paused;
+  // Simulated phases: precomputed irregular steps, played natively.
+  const plan = useRef(null);
   useEffect(() => {
-    if (!active || ready || paused || inTextures) return undefined;
-    const id = setTimeout(() => {
-      setProgress((p) => {
-        const stall = p > 0.55 && p < 0.6 ? 0.25 : 1;
-        const n = Math.min(1, p + (0.004 + Math.random() * 0.018) * stall);
-        return p < texStart ? Math.min(n, texStart) : n;
-      });
-    }, 90);
-    return () => clearTimeout(id);
-  }, [active, progress, ready, paused, inTextures]);
+    if (!run || stage === 1 || ready) return undefined;
+    const from = progress.__getValue();
+    const cap = stage === 0 ? texStart : 1;
+    if (!plan.current || plan.current.stage !== stage) plan.current = { stage, steps: simulate(from, cap) };
+    // Resume after a pause: only the steps not shown yet.
+    const steps = plan.current.steps.filter((x) => x > from);
+    if (!steps.length) {
+      setStage(stage + 1);
+      return undefined;
+    }
+    const anim = playSteps(progress, from, steps, () => setStage((st) => st + 1));
+    return () => anim.stop();
+  }, [run, stage]);
   // Real phase: mount the next image every 160 ms; the bar follows onLoad.
   useEffect(() => {
-    if (!active || paused || !inTextures || mounted >= TEXTURES.length) return undefined;
+    if (!run || stage !== 1 || mounted >= TEXTURES.length) return undefined;
     const id = setTimeout(() => setMounted((m) => m + 1), 160);
     return () => clearTimeout(id);
-  }, [active, paused, inTextures, mounted]);
+  }, [run, stage, mounted]);
   const onTile = useCallback(() => setLoaded((n) => n + 1), []);
   useEffect(() => {
-    if (loaded) setProgress(texStart + (texEnd - texStart) * (loaded / TEXTURES.length));
+    if (!loaded) return;
+    progress.setValue(texStart + (texEnd - texStart) * (loaded / TEXTURES.length));
+    if (loaded >= TEXTURES.length) setStage(2);
   }, [loaded]);
   useEffect(() => {
     if (ready) onReady();
   }, [ready]);
+  const pct = useMemo(() => Animated.format(Animated.derive([progress], (p) => Math.floor(p * 100)), { decimals: 0, suffix: '%' }), [progress]);
 
-  let acc = 0;
-  let phase = PHASES.length - 1;
-  let within = 1;
-  for (let i = 0; i < SHARE.length; i++) {
-    if (progress < acc + SHARE[i]) {
-      phase = i;
-      within = (progress - acc) / SHARE[i];
-      break;
-    }
-    acc += SHARE[i];
-  }
-  const ph = PHASES[phase];
-  const count = ph.real ? loaded : Math.floor(within * ph.total);
   return (
     <View style={{ flex: 1 }}>
       <View style={styles.tiles} pointerEvents="none">
@@ -281,16 +356,15 @@ function ProgressPanel({ active, paused, accent, onReady }) {
         </View>
       </View>
       <View style={styles.statusRow}>
-        <Text style={styles.status}>{ready ? 'Ready' : ph.label}</Text>
-        {!ready && ph.total > 1 ? (
-          <Text style={styles.statusCount}>
-            {count} / {ph.total} {ph.unit}
-          </Text>
-        ) : null}
+        {ready ? (
+          <Text style={styles.status}>Ready</Text>
+        ) : (
+          PHASES.map((ph, i) => <PhaseStatus key={i} i={i} progress={progress} loaded={ph.real ? loaded : 0} />)
+        )}
         <View style={{ flex: 1 }} />
-        <Text style={[styles.pct, { color: accent }]}>{Math.floor(progress * 100)}%</Text>
+        <Animated.Text style={[styles.pct, { color: accent }]} text={pct} />
       </View>
-      <Bar lit={Math.floor(progress * SEGS)} ready={ready} accent={accent} />
+      <Bar progress={progress} ready={ready} accent={accent} />
     </View>
   );
 }
@@ -508,6 +582,7 @@ const styles = StyleSheet.create({
   },
   spinnerCore: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#fff3d6', boxShadow: '0 0 12px rgba(255,220,160,0.9)' },
   statusRow: { flexDirection: 'row', alignItems: 'baseline', gap: 10, marginBottom: 10 },
+  statusPhase: { flexDirection: 'row', alignItems: 'baseline', gap: 10 },
   status: { fontFamily: font, fontWeight: '600', fontSize: 14, color: colors.text },
   statusCount: { fontFamily: font, fontWeight: '500', fontSize: 12, color: colors.textMute },
   pct: { fontFamily: font, fontWeight: '700', fontSize: 22 },

@@ -113,6 +113,7 @@ bool NativeAnimated::createNode(int tag, const Value& c, std::string* error) {
     n.grouping = c["grouping"].asString();
     n.prefix = c["prefix"].asString();
     n.suffix = c["suffix"].asString();
+    n.timePattern = c["time"].asString();
     n.outKind = OutKind::String;
   } else if (type == "clock") {
     n.type = Type::Clock;
@@ -1079,8 +1080,11 @@ void NativeAnimated::tick(double nowMs) {
       if (ANode* n = node(tag); n && !n->children.empty()) markDirty(*n);
   }
   // Interaction weights moved by this frame's input (InputManager::tickStates).
-  for (int tag : interactionNodes_)
-    if (ANode* n = node(tag); n && !n->children.empty() && interactionWeight(*n) != n->num) markDirty(*n);
+  if (doc_.interactionsMoved) {
+    doc_.interactionsMoved = false;
+    for (int tag : interactionNodes_)
+      if (ANode* n = node(tag); n && !n->children.empty() && interactionWeight(*n) != n->num) markDirty(*n);
+  }
   std::vector<int> leaves;  // group steps that ended: they go on after this walk
   for (size_t i = 0; i < animations_.size();) {
     Anim& a = animations_[i];
@@ -1114,6 +1118,33 @@ void NativeAnimated::tick(double nowMs) {
 void NativeAnimated::formatNumber(ANode& n, double v) {
   std::string& s = n.str;
   s.assign(n.prefix);
+  if (!n.timePattern.empty()) {
+    // time: h / m / s fields of whole seconds (formatTime in nodes.js).
+    const std::string& p = n.timePattern;
+    double total = std::isfinite(v) && v > 0 ? std::floor(v) : 0;
+    bool hasH = p.find('h') != std::string::npos, hasM = p.find('m') != std::string::npos;
+    double h = std::floor(total / 3600);
+    double m = hasH ? std::fmod(std::floor(total / 60), 60) : std::floor(total / 60);
+    double sec = hasM ? std::fmod(total, 60) : total;
+    for (size_t i = 0; i < p.size();) {
+      char c = p[i];
+      if (c == 'h' || c == 'm' || c == 's') {
+        size_t j = i;
+        while (j < p.size() && p[j] == c) j++;
+        char buf[48];
+        std::snprintf(buf, sizeof buf, "%.0f", c == 'h' ? h : c == 'm' ? m : sec);
+        size_t len = std::strlen(buf);
+        if (len < j - i) s.append(j - i - len, '0');
+        s += buf;
+        i = j;
+      } else {
+        s += c;
+        i++;
+      }
+    }
+    s += n.suffix;
+    return;
+  }
   if (!std::isfinite(v)) {
     s += formatAnimatedNumber(v);
     s += n.suffix;
