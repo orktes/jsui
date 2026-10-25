@@ -22,6 +22,9 @@
 namespace jsui::pipeline_cache {
 class Precompiler;
 }
+namespace jsui::shader_cache {
+class Cache;
+}
 
 struct JsuiGpuContext {
   enum class Kind { GL, WebGPU, Graphite, D3D };
@@ -30,6 +33,9 @@ struct JsuiGpuContext {
   const Kind kind;
   // Graphite contexts: their pipeline cache (pipeline_cache.h); null on GL.
   jsui::pipeline_cache::Precompiler* pipelines = nullptr;
+  // Ganesh contexts (GL, Direct3D): their shader cache (shader_cache.h);
+  // null on Graphite and WebGL.
+  jsui::shader_cache::Cache* shaders = nullptr;
 };
 
 namespace jsui {
@@ -86,6 +92,8 @@ void destroy(JsuiGpuContext* gpu);
 void purge(JsuiGpuContext* gpu, size_t cacheBytes);
 // 0 on success, -1 on failure; `dirty` (optional) gets the repainted rect.
 int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& target, JsuiRect* dirty);
+// jsui_gpu_prepare_target.
+int prepareTarget(JsuiGpuContext* gpu, unsigned format);
 
 }  // namespace graphite_gpu
 

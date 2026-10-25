@@ -22,6 +22,7 @@
 #include "render/gpu.h"
 #include "render/gpu_metal.h"
 #include "render/pipeline_cache.h"
+#include "render/shader_cache.h"
 #include "render/shader_view.h"
 #include "runtime.h"
 
@@ -442,7 +443,12 @@ int jsui_render_vulkan(JsuiRuntime* rt, JsuiGpuContext* gpu, void* image, int wi
   return jsui_render_gpu_target(rt, gpu, &t, nullptr);
 }
 
+int jsui_gpu_prepare_target(JsuiGpuContext* gpu, unsigned format) {
+  return jsui::graphite_gpu::prepareTarget(gpu, format);
+}
+
 int jsui_gpu_set_pipeline_cache(JsuiGpuContext* gpu, const char* path) {
+  if (gpu && gpu->shaders) return gpu->shaders->setFile(path ? path : "");
   if (!gpu || !gpu->pipelines) return -1;
   return gpu->pipelines->setFile(path ? path : "");
 }
