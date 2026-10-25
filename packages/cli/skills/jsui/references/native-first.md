@@ -20,6 +20,7 @@ default; use React state only for things that change now and then.
 | Driving anything else from interaction (a glow's intensity, an icon's rotation, a derive) | `useInteraction()` → `interaction={ix}` on the element, then `ix.hovered` / `ix.pressed` / `ix.focused` (native 0..1 values) | listeners → `setState` |
 | A descendant reading its group's state (tooltips, popouts, reveal-on-hover buttons) | `useGroupState(name?)` under a `<Group>` or `<Pressable group>`: the same native values, plus `.instant.hovered` (0 / 1 at once) | prop drilling `hovered` + re-renders |
 | Showing / hiding without a render (popouts, warnings, HUD pieces that toggle with game data) | `<Visibility visible={node or bool} transition={120}>` | `{cond && <X/>}` driven by per-frame data |
+| Popouts, tooltips, dropdowns that must not be clipped by a ScrollView / `overflow: 'hidden'` panel or covered by later siblings | `<Overlay placement="top" offset={8}>` around the popout (placed natively against its parent or `anchor` ref, flips / shifts on screen) | `zIndex` on the hovered item, `measure` + absolute coordinates, rendering the popout at the screen root by hand |
 | UI bound to a field of shared host state (health, ammo, name) that must update on the frame the game sets it | `useHostStateBind('player', 'health.current')`: a native value for styles, `Animated.Text`, `derive`, `Visibility` | `useHostState` → render (waits for the next JS tick, re-renders) |
 | Animating size / position (`width`, `height`, `top`, `flex`) | the native driver works for layout keys too (relayout per frame); prefer transforms when they do the job | JS-driven layout animation |
 
@@ -164,9 +165,73 @@ function Slot({ item }) {
   changes. `mode="remove"` (default) takes it out of layout, paint and hit
   testing once hidden (like `display: 'none'`), `mode="hide"` keeps its
   layout. The children stay mounted (state kept, no mount cost on show).
-- Popouts are drawn inside their parent: a parent with `overflow: 'hidden'`
-  (ScrollView, clipped panels) clips them. Put the slot's popout outside the
-  clipping container, or give the container room.
+- A Visibility is drawn inside its parent: a parent with `overflow:
+  'hidden'` (ScrollView, clipped panels) clips it and later siblings cover
+  it. For popouts, wrap it in an `<Overlay>` (next section).
+
+## Overlays: popouts above everything, placed natively
+
+```jsx
+import { Overlay, OverlayArrow, Visibility, useGroupState } from 'react-native';
+
+function SlotPopout({ item }) {
+  const slot = useGroupState();
+  return (
+    // Placed above the slot (its parent) by the runtime every frame; flips
+    // below it when there is no room, slides sideways to stay on screen.
+    <Overlay placement="top" offset={10} collisionPadding={8} pointerEvents="none">
+      <Visibility visible={slot.instant.hovered} transition={120} effect="scale">
+        <OverlayArrow style={styles.arrow} />  {/* first: the body covers its inner half */}
+        <View style={styles.popout}>
+          <Text style={styles.name}>{item.name}</Text>
+        </View>
+      </Visibility>
+    </Overlay>
+  );
+}
+
+function Inventory({ items }) {
+  return (
+    <ScrollView style={styles.grid}>  {/* clips its content: not the popouts */}
+      {items.map((it) => (
+        <Pressable key={it.id} group style={styles.slot} onPress={() => equip(it)}>
+          <Image source={it.icon} style={styles.icon} />
+          <SlotPopout item={it} />
+        </Pressable>
+      ))}
+    </ScrollView>
+  );
+}
+```
+
+- `<Overlay>`'s children are drawn in the surface's overlay layer: above
+  every other view (zIndex of the rest does not matter, a `Modal` included)
+  and outside every clip. For everything else it stays where it is
+  rendered: hover / press chains go through its parent (the pointer on the
+  popout keeps the slot's group hovered, so an interactive popout stays
+  open while the pointer moves onto it, as long as there is no gap: use
+  `offset={0}` and padding, or a hover transition), events bubble to the
+  parent's handlers, context and `useGroupState` work, Tab order follows
+  the anchor, and it takes its parent's transform and opacity (a scaled
+  stage scales its popouts; a fading screen fades them).
+- The runtime places it every frame after layout, with no JS: it follows
+  scrolling, `Animated` transforms of the anchor or its ancestors and
+  layout changes. `anchor`: `'parent'` (default) or a ref / node id;
+  `placement`: `top` / `bottom` / `left` / `right` / `center` / `auto`,
+  with `-start` / `-end` to align an edge (`'bottom-start'` for a
+  dropdown); `offset` (gap) and `crossOffset`; `flip` (default on) and
+  `collision="shift"` (default) with `collisionPadding` keep it inside the
+  viewport, or inside `boundary` (a ref, e.g. the screen root of a stage
+  shown scaled in a page); `matchWidth` (`true` / `'min'`) sizes a dropdown
+  to its anchor; `hideWhenClipped` (default on) hides it while the anchor is
+  scrolled out of view. It is not shown while its parent is hidden
+  (`display: 'none'`, `<Visibility mode="remove">`).
+- `<OverlayArrow style>`: a view the runtime moves to the edge facing the
+  anchor, centred on it after flips and shifts (a 45-degree rotated square
+  with borders, drawn before the body).
+- The overlay sizes to its content (up to the viewport width); give the
+  popout a width. Without `pointerEvents="none"` it takes hits like any
+  view (a tooltip that should let the pointer through needs it).
 
 ## Host state bound natively
 
