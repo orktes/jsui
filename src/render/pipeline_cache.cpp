@@ -238,6 +238,7 @@ Parsed parse(const void* data, size_t size, Backend backend) {
 void setForceSliced(bool on) { gForceSliced = on; }
 bool forceSliced() { return gForceSliced; }
 void setNoDefaultFile(bool on) { gNoDefaultFile = on; }
+bool noDefaultFile() { return gNoDefaultFile; }
 void setNoCommonPrecompile(bool on) { gNoCommon = on; }
 
 #if SK_MILESTONE >= 140  // SkExecutor work lists, ContextOptions::fExecutor
@@ -621,10 +622,7 @@ bool makeDir(const std::string& path) {
 
 }  // namespace
 
-std::string defaultFile(Backend backend) {
-  if (backend == Backend::BrowserWebGPU) return {};
-  const char* env = std::getenv("JSUI_PIPELINE_CACHE");
-  if (env && (!std::strcmp(env, "off") || !std::strcmp(env, "0"))) return {};
+std::string cacheFile(const std::string& kind, const std::string& tag) {
   std::string dir;
 #if defined(_WIN32)
   if (const char* l = std::getenv("LOCALAPPDATA"); l && *l) dir = l;
@@ -652,9 +650,16 @@ std::string defaultFile(Backend backend) {
 #else
   return {};
 #endif
+  return dir + kind + "-" + programName() + "-" + tag + ".bin";
+}
+
+std::string defaultFile(Backend backend) {
+  if (backend == Backend::BrowserWebGPU) return {};
+  const char* env = std::getenv("JSUI_PIPELINE_CACHE");
+  if (env && (!std::strcmp(env, "off") || !std::strcmp(env, "0"))) return {};
   std::string b = backendName(uint32_t(backend));
   for (char& ch : b) ch = char(std::tolower(static_cast<unsigned char>(ch)));
-  return dir + "pipelines-" + programName() + "-" + b + ".bin";
+  return cacheFile("pipelines", b);
 }
 
 void Precompiler::attach(skgpu::graphite::Context* ctx, Mode mode, const SkExecutor* executor) {

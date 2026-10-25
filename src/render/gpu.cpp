@@ -32,6 +32,7 @@
 #endif
 #include "render/host_textures.h"
 #include "render/painter.h"
+#include "render/shader_cache.h"
 #include "runtime.h"
 
 #if defined(__linux__) && !defined(__ANDROID__)
@@ -179,6 +180,11 @@ struct GLGpu final : JsuiGpuContext {
   jsui::TextureWrapper textures;
   JsuiGLGetProcFn getProc = nullptr;
   void* user = nullptr;
+#if !defined(__EMSCRIPTEN__)
+  // Program binaries across launches (the browser keeps its own). Outlives
+  // ctx.
+  jsui::shader_cache::Cache shaderCache{"gl"};
+#endif
   sk_sp<GrDirectContext> ctx;
   bool lost = false;
   size_t cacheBytes = 0;
@@ -291,6 +297,9 @@ struct GLGpu final : JsuiGpuContext {
     opts.fReduceOpsTaskSplitting = GrContextOptions::Enable::kYes;
 #if defined(__EMSCRIPTEN__)
     opts.fShaderErrorHandler = &webglShaderErrors;
+#else
+    opts.fPersistentCache = &shaderCache;
+    shaders = &shaderCache;
 #endif
     ctx = GrDirectContexts::MakeGL(std::move(iface), opts);
     if (ctx && cacheBytes) ctx->setResourceCacheLimit(cacheBytes);

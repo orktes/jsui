@@ -83,6 +83,7 @@
 #include "include/gpu/ganesh/d3d/GrD3DTypes.h"
 #include "render/host_textures.h"
 #include "render/painter.h"
+#include "render/shader_cache.h"
 #include "runtime.h"
 
 namespace {
@@ -266,6 +267,8 @@ struct D3DGpu final : JsuiGpuContext {
   const bool d3d11;  // jsui_gpu_create_d3d11: a D3D12 device of our own
   gr_cp<ID3D12Device> device;
   gr_cp<ID3D12CommandQueue> queue;
+  // HLSL across launches. Outlives ctx.
+  jsui::shader_cache::Cache shaderCache{"d3d"};
   sk_sp<GrDirectContext> ctx;
   Transitions transitions;
   bool lost = false;
@@ -445,6 +448,8 @@ struct D3DGpu final : JsuiGpuContext {
     // Layers (opacity, filters, blend modes) otherwise split the frame's
     // render pass at each one (as on GL).
     opts.fReduceOpsTaskSplitting = GrContextOptions::Enable::kYes;
+    opts.fPersistentCache = &shaderCache;
+    shaders = &shaderCache;
     ctx = GrDirectContexts::MakeD3D(backend, opts);
     if (!ctx) {
       SkDebugf("jsui: %s: Skia rejected the Direct3D 12 device\n", what);

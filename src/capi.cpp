@@ -19,6 +19,7 @@
 #include "render/gpu.h"
 #include "render/gpu_metal.h"
 #include "render/pipeline_cache.h"
+#include "render/shader_cache.h"
 #include "render/shader_view.h"
 #include "runtime.h"
 
@@ -418,6 +419,7 @@ int jsui_gpu_prepare_target(JsuiGpuContext* gpu, unsigned format) {
 }
 
 int jsui_gpu_set_pipeline_cache(JsuiGpuContext* gpu, const char* path) {
+  if (gpu && gpu->shaders) return gpu->shaders->setFile(path ? path : "");
   if (!gpu || !gpu->pipelines) return -1;
   return gpu->pipelines->setFile(path ? path : "");
 }

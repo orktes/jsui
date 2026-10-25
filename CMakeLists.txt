@@ -84,9 +84,9 @@ if(JSUI_AUDIO)
 endif()
 message(STATUS "JSUI_AUDIO: ${JSUI_AUDIO}")
 # Subclass Skia classes (a canvas, Skottie observers, the font manager, the pipeline
-# compile executor): Skia is built without RTTI, so are these files.
+# compile executor, the shader cache): Skia is built without RTTI, so are these files.
 set_source_files_properties(src/render/paint_counter.cpp src/render/lottie.cpp src/text/font_manager.cpp
-  src/render/pipeline_cache.cpp PROPERTIES COMPILE_OPTIONS
+  src/render/pipeline_cache.cpp src/render/shader_cache.cpp PROPERTIES COMPILE_OPTIONS
   "$<IF:$<CXX_COMPILER_ID:MSVC>,/GR-,-fno-rtti>")
 include(EmbedFonts)
 jsui_embed_fonts(jsui)
