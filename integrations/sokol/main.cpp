@@ -1,18 +1,29 @@
-// JSUI in sokol: a 3D scene drawn with sokol_gfx (through sokol_gl) on the
-// GL backend, and the shared HUD (integrations/shared/ui/app.jsx) on top.
+// JSUI in sokol: a 3D scene drawn with sokol_gfx (through sokol_gl), and the
+// shared HUD (integrations/shared/ui/app.jsx) on top.
 //
 //   jsui-sokol [--dev] [bundle.js | http://127.0.0.1:5173/bundle.js]
 //
-// Rendering. After the scene's sokol pass, Skia (Ganesh) draws the UI over
-// it straight into sokol_app's framebuffer (the swapchain's gl.framebuffer) with
-// JSUI_GL_NO_CLEAR, on sokol's GL context; sg_reset_state_cache() then tells
-// sokol_gfx that GL state changed behind its back. The runtime keeps its last
-// frame in a texture of its own and repaints only what changed, so a frame
-// where the UI is idle costs one textured draw. --cpu draws the UI from a CPU
-// raster instead: jsui_render_rgba_incremental keeps a buffer up to date, it
-// is written into a write-transient sg_image each frame (sokol_gfx's
-// transient images do not keep their contents between frames) and
-// composited with a premultiplied sokol_gl quad.
+// Rendering, Metal (macOS, when JSUI has Skia Graphite Metal; see
+// CMakeLists.txt). Graphite draws the UI on sokol_gfx's own MTLDevice into
+// an sg_image the game keeps (a color-attachment image, so its MTLTexture is
+// a render target): incrementally (JSUI_GPU_INCREMENTAL, only what changed),
+// and not at all on frames where nothing changed. The render commits to
+// sokol_gfx's command queue before the frame's pass begins, so the GPU runs
+// it before sokol's frame, which composites the image over the scene with a
+// premultiplied sokol_gl quad.
+//
+// Rendering, OpenGL (other platforms). After the scene's sokol pass, Skia
+// (Ganesh) draws the UI over it straight into sokol_app's framebuffer (the
+// swapchain's gl.framebuffer) with JSUI_GL_NO_CLEAR, on sokol's GL context;
+// sg_reset_state_cache() then tells sokol_gfx that GL state changed behind
+// its back. The runtime keeps its last frame in a texture of its own and
+// repaints only what changed, so a frame where the UI is idle costs one
+// textured draw.
+//
+// --cpu draws the UI from a CPU raster instead (either backend):
+// jsui_render_rgba_incremental keeps a buffer up to date, it is written into
+// a write-transient sg_image each frame (sokol_gfx's transient images do not
+// keep their contents between frames) and composited with the same quad.
 //
 // Input pass-through. sokol_app events go to the UI first; jsui_send_*
 // returns whether the UI consumed one. The rest drives the game: click a
@@ -31,7 +42,9 @@
 #include "sokol_log.h"
 #include "util/sokol_gl.h"
 
-#if defined(__APPLE__)
+#if defined(SOKOL_METAL)
+#include "sokol_extra.h"
+#elif defined(__APPLE__)
 #include <OpenGL/gl3.h>
 #elif defined(_WIN32)
 #include <windows.h>
@@ -59,6 +72,22 @@
 namespace {
 
 using jsui_example::Options;
+
+#if defined(SOKOL_METAL)
+constexpr bool kMetal = true;
+constexpr unsigned kMTLPixelFormatRGBA8Unorm = 70;
+#else
+constexpr bool kMetal = false;
+#endif
+
+// Waits for the GPU to finish the frame (for --bench).
+void gpuFinish() {
+#if defined(SOKOL_METAL)
+  example_gpu_finish();
+#else
+  glFinish();
+#endif
+}
 
 // ---------------------------------------------------- a little matrix math
 // Column-major 4x4, as sokol_gl's sgl_load_matrix takes them.
@@ -152,19 +181,31 @@ class Game : public jsui_example::SelfTestHost {
       return;
     }
     if (!opt.cpu) {
+#if defined(SOKOL_METAL)
+      // Graphite on sokol_gfx's device and queue (both retained).
+      gpu_ = jsui_gpu_create_metal(const_cast<void*>(sg_mtl_device()), const_cast<void*>(sg_mtl_command_queue()));
+      if (gpu_) std::printf("GPU: Metal / Skia Graphite on sokol_gfx's MTLDevice\n");
+#else
       gpu_ = jsui_gpu_create_gl(nullptr, nullptr);  // the platform's GL loader, sokol_app's context is current
-      if (!gpu_) {
-        std::fprintf(stderr, "warning: GPU renderer unavailable, falling back to the CPU renderer\n");
-        opt.cpu = true;
-      } else {
+      if (gpu_) {
         const GLubyte* r = glGetString(GL_RENDERER);
         const GLubyte* v = glGetString(GL_VERSION);
         std::printf("GPU: %s / %s\n", r ? (const char*)r : "?", v ? (const char*)v : "?");
       }
+#endif
+      if (!gpu_) {
+        std::fprintf(stderr, "warning: GPU renderer unavailable, falling back to the CPU renderer\n");
+        opt.cpu = true;
+      }
     }
+#if defined(SOKOL_METAL)
+    if (!opt.screenshot.empty()) example_framebuffer_readable();
+#endif
     hud_.engine = "sokol";
-    hud_.renderer = opt.cpu ? "sokol_gfx GL · CPU raster into a dynamic sg_image"
-                            : "sokol_gfx GL · Skia Ganesh into the swapchain framebuffer";
+    hud_.renderer = opt.cpu ? (kMetal ? "sokol_gfx Metal · CPU raster into a dynamic sg_image"
+                                      : "sokol_gfx GL · CPU raster into a dynamic sg_image")
+                            : (kMetal ? "sokol_gfx Metal · Skia Graphite into an sg_image"
+                                      : "sokol_gfx GL · Skia Ganesh into the swapchain framebuffer");
 
     JsuiConfig cfg;
     jsui_config_init(&cfg);
@@ -216,6 +257,7 @@ class Game : public jsui_example::SelfTestHost {
     }
     if (rt_) updateCursor();
     if (rt_ && opt.cpu) paintUiCpu();
+    else if (rt_ && kMetal) paintUiGpu();  // before the frame's pass: committed ahead of sokol's frame
 
     // The scene, in sokol's swapchain pass.
     sg_pass pass{};
@@ -223,13 +265,18 @@ class Game : public jsui_example::SelfTestHost {
     pass.action.colors[0].clear_value = {9 / 255.f, 12 / 255.f, 22 / 255.f, 1};
     pass.swapchain = sglue_swapchain();  // acquires the swapchain: once per frame
     if (pass.swapchain.invalid) return;
+#if defined(SOKOL_METAL)
+    drawable_ = pass.swapchain.metal.current_drawable;
+#else
     fbo_ = pass.swapchain.gl.framebuffer;
+#endif
     sg_begin_pass(&pass);
     drawScene();
-    if (rt_ && opt.cpu) drawUiQuad();
+    if (rt_ && (opt.cpu || kMetal)) drawUiQuad();
     sgl_draw();
     sg_end_pass();
 
+#if !defined(SOKOL_METAL)
     // The UI, by Skia, over the scene in the same framebuffer.
     if (rt_ && !opt.cpu) {
       JsuiGLTarget t{};
@@ -242,15 +289,18 @@ class Game : public jsui_example::SelfTestHost {
       jsui_render_gl_target(rt_, gpu_, &t);
       sg_reset_state_cache();  // Skia changed GL state behind sokol_gfx's back
     }
+#endif
 
     frameCount_++;
     bool last = quit_ || (opt.frames >= 0 && long(frameCount_) >= opt.frames);
-    if (last && !opt.screenshot.empty()) screenshot(opt.screenshot);
+    bool shot = last && !opt.screenshot.empty() && screenshotBegin();
     sg_commit();
-    // macOS paces sokol's GL view at the display refresh whatever the swap
-    // interval, so --bench times the frame's work (CPU + glFinish) there.
+    if (shot) screenshotEnd(opt.screenshot);
+    // macOS paces sokol's view at the display refresh whatever the swap
+    // interval (GL) or display sync (Metal: a CADisplayLink drives frames),
+    // so --bench times the frame's work there: CPU + waiting for the GPU.
     if (bench_.active() && !last) {
-      glFinish();
+      gpuFinish();
       double work = std::chrono::duration<double, std::milli>(jsui_example::BenchTimer::Clock::now() - frameStart).count();
       if (bench_.sample(work)) {
         bench_.report(!rt_ ? "no-ui work" : opt.cpu ? "ui cpu work" : "ui gpu work");
@@ -415,7 +465,7 @@ class Game : public jsui_example::SelfTestHost {
     logicalW_ = float(pixelW_) / s;
     logicalH_ = float(pixelH_) / s;
     if (rt_) jsui_set_viewport(rt_, int(std::lround(logicalW_)), int(std::lround(logicalH_)), s);
-    if (!opt.cpu) return;
+    if (!rt_ || (!opt.cpu && !kMetal)) return;
     if (uiImage_.id) {
       sg_destroy_view(uiView_);
       sg_destroy_image(uiImage_);
@@ -424,14 +474,35 @@ class Game : public jsui_example::SelfTestHost {
     id.width = pixelW_;
     id.height = pixelH_;
     id.pixel_format = SG_PIXELFORMAT_RGBA8;
-    id.usage.write_transient = true;
+    if (opt.cpu) id.usage.write_transient = true;
+    else id.usage.color_attachment = true;  // Metal: a render target Graphite draws into, kept between frames
     uiImage_ = sg_make_image(&id);
     sg_view_desc vd{};
     vd.texture.image = uiImage_;
     uiView_ = sg_make_view(&vd);
-    pixels_.assign(size_t(pixelW_) * pixelH_ * 4, 0);
+    if (opt.cpu) pixels_.assign(size_t(pixelW_) * pixelH_ * 4, 0);
     uiFresh_ = true;
   }
+
+#if defined(SOKOL_METAL)
+  // Graphite into the kept sg_image: only what changed since the last
+  // render, nothing when nothing did. jsui_render_gpu_target commits the
+  // work to sokol_gfx's queue before it returns.
+  void paintUiGpu() {
+    if (!uiFresh_ && !jsui_needs_redraw(rt_)) return;
+    sg_mtl_image_info info = sg_mtl_query_image_info(uiImage_);
+    JsuiGpuTarget t{};
+    t.texture = const_cast<void*>(info.tex[info.active_slot]);
+    t.format = kMTLPixelFormatRGBA8Unorm;
+    t.width = pixelW_;
+    t.height = pixelH_;
+    t.flags = uiFresh_ ? 0 : JSUI_GPU_INCREMENTAL;  // a new image holds nothing yet
+    JsuiRect dirty;
+    if (jsui_render_gpu_target(rt_, gpu_, &t, &dirty) == 0) uiFresh_ = false;
+  }
+#else
+  void paintUiGpu() {}
+#endif
 
   // --cpu: repaint the damaged part of the kept buffer, then hand the whole
   // buffer to this frame's transient image.
@@ -463,8 +534,25 @@ class Game : public jsui_example::SelfTestHost {
     sgl_end();
   }
 
-  void screenshot(const std::string& path) {
+  // --screenshot: the composed frame. Metal copies the drawable in the
+  // frame's command buffer (before sg_commit presents it) and reads the copy
+  // afterwards; GL reads the framebuffer back right away.
+  bool screenshotBegin() {
+#if defined(SOKOL_METAL)
+    if (example_capture_framebuffer(drawable_, pixelW_, pixelH_)) return true;
+    std::fprintf(stderr, "screenshot failed: the drawable cannot be read\n");
+    return false;
+#else
+    return true;
+#endif
+  }
+
+  void screenshotEnd(const std::string& path) {
     std::vector<uint8_t> px(size_t(pixelW_) * pixelH_ * 4);
+    size_t row = size_t(pixelW_) * 4;
+#if defined(SOKOL_METAL)
+    if (!example_read_capture(px.data())) return;
+#else
     glFinish();
 #if defined(_WIN32)
     // Windows' gl.h is GL 1.1: glBindFramebuffer comes from the driver.
@@ -476,7 +564,6 @@ class Game : public jsui_example::SelfTestHost {
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(0, 0, pixelW_, pixelH_, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
     sg_reset_state_cache();
-    size_t row = size_t(pixelW_) * 4;
     std::vector<uint8_t> tmp(row);
     for (int y = 0; y < pixelH_ / 2; y++) {  // GL rows are bottom-up
       uint8_t* a = px.data() + size_t(y) * row;
@@ -485,6 +572,7 @@ class Game : public jsui_example::SelfTestHost {
       std::memcpy(a, b, row);
       std::memcpy(b, tmp.data(), row);
     }
+#endif
     SkPixmap pm(SkImageInfo::Make(pixelW_, pixelH_, kRGBA_8888_SkColorType, kOpaque_SkAlphaType), px.data(), row);
     SkFILEWStream f(path.c_str());
     if (!f.isValid() || !SkPngEncoder::Encode(&f, pm, {})) std::fprintf(stderr, "screenshot failed: %s\n", path.c_str());
@@ -687,7 +775,8 @@ class Game : public jsui_example::SelfTestHost {
   std::vector<uint8_t> pixels_;
   bool uiFresh_ = true;
   int pixelW_ = 0, pixelH_ = 0;
-  uint32_t fbo_ = 0;  // sokol_app's GL framebuffer for this frame
+  uint32_t fbo_ = 0;                // GL: sokol_app's framebuffer for this frame
+  const void* drawable_ = nullptr;  // Metal: this frame's CAMetalDrawable
   float logicalW_ = 0, logicalH_ = 0;
   static constexpr float kFovy = 50.f * 3.14159265f / 180.f;
   Mat4 view_{}, proj_{};

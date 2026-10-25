@@ -649,11 +649,12 @@ struct RetainedRun {
 };
 
 // Runs the probes over the scene with jsui::gpu::setRetainedDebug(debug):
-// scene a through the retained frame, b direct, and a CPU copy as the
-// reference. On the first step off by more than rounding, prints where,
+// scene a through the retained frame (or, with JSUI_GL_INCREMENTAL in
+// `flags`, incrementally into its own texture), b direct, and a CPU copy as
+// the reference. On the first step off by more than rounding, prints where,
 // how the frame was painted and which of the two GPU frames left the CPU
 // reference there (saved as PNGs with JSUI_TEST_OUT).
-RetainedRun runRetained(GLContext& c, JsuiGpuContext* gpu, Api api, unsigned debug) {
+RetainedRun runRetained(GLContext& c, JsuiGpuContext* gpu, Api api, unsigned debug, int flags = 0) {
   jsui::gpu::setRetainedDebug(debug);
   std::string png = quadPngUri();
   Scene a(320, 240), b(320, 240), cpu(320, 240);  // a: retained, b: direct, cpu: reference
@@ -692,7 +693,7 @@ RetainedRun runRetained(GLContext& c, JsuiGpuContext* gpu, Api api, unsigned deb
       if (i % 4 == 0) patchStyle(probes[k][1], p1);
     }
     t.texture = ta.tex;
-    t.flags = JSUI_GL_TOP_LEFT_ORIGIN;
+    t.flags = JSUI_GL_TOP_LEFT_ORIGIN | flags;
     CHECK_EQ(jsui::gpu::render(a.rt->main(), gpu, t), 0);
     jsui::PaintStats st = jsui::lastPaintStats(a.doc());
     run.repainted += double(st.repaintedPixels);
@@ -767,6 +768,18 @@ TEST(gpu_retained_frame_matches_direct) {
       std::printf("  [%s] debug %u (1 one rect, 2 flush first, 4 full repaints): max %d, >2: %.4f%%\n", apiName(api),
                   debug, v.worst, v.over * 100);
     }
+  });
+}
+
+// JSUI_GL_INCREMENTAL: the host's texture is the retained frame, repainted
+// only where it changed (no copy), and matches drawing the whole frame.
+TEST(gpu_incremental_texture_matches_direct) {
+  forEachContext("gpu_incremental_texture_matches_direct", [](GLContext& c, JsuiGpuContext* gpu, Api api) {
+    RetainedRun r = runRetained(c, gpu, api, 0, JSUI_GL_INCREMENTAL);
+    std::printf("  [%s] incremental texture vs direct: max %d, >2: %.4f%%; repainted %.0f px per frame in %.2f passes\n",
+                apiName(api), r.worst, r.over * 100, r.repainted / r.steps, r.passes / r.steps);
+    CHECK(r.over < 0.0005);
+    CHECK(r.repainted / r.steps < 320 * 240 / 4);  // never the whole frame
   });
 }
 

@@ -35,8 +35,8 @@ interleaved 8 s rounds' mean frame time, after a warm-up.
 | Unity 6.3 | Skia Graphite on Unity's Metal device, into a RenderTexture | 0.293 ms (3413 fps) | 0.334 ms (2994 fps) | **+0.04 ms** |
 | Unreal 5.8 (1280x720, exclusive fullscreen) | Skia Graphite on Unreal's Metal device, into a RenderTarget2D | 2.94 ms (340 fps) | 3.02 ms (332 fps) | **+0.08 ms** |
 | Godot (godot-aw3, Forward+ Metal) | Skia Graphite on Godot's Metal device | 3.96 ms (252 fps) | 4.45 ms (225 fps) | **+0.48 ms** (rounds: +0.01 to +0.67) |
-| raylib 6.2 (OpenGL) | Skia Ganesh GL into a RenderTexture2D | 0.45 ms (2224 fps) | 0.83 ms (1199 fps) | **+0.38 ms** |
-| sokol (OpenGL) | Skia Ganesh GL into the swapchain | 0.78 ms\* | 1.44 ms\* | **+0.66 ms** |
+| raylib 6.2 (OpenGL) | Skia Ganesh GL, only what changed, into a RenderTexture2D | 0.42 ms (2408 fps) | 0.60 ms (1655 fps) | **+0.19 ms** |
+| sokol (Metal) | Skia Graphite on sokol_gfx's Metal device, into an sg_image | 1.01 ms\* | 1.52 ms\* | **+0.51 ms** |
 
 What the scenes do:
 
@@ -53,18 +53,28 @@ How to read it:
 
 - On the Metal Graphite paths that Unity and Unreal use, a full moving HUD
   costs the game **0.04-0.08 ms per frame**: under 0.5% of a 60 fps frame.
-- The OpenGL examples cost more (0.4-0.7 ms). On macOS, OpenGL runs on
-  Apple's GL-on-Metal layer, and these examples composite a full-frame UI
-  texture every frame. We expect most of that cost to come from that layer,
-  but haven't confirmed it.
+- raylib and sokol run their whole frame on one thread, so everything JSUI
+  does lands in the frame time: recording the moving HUD's paint is about
+  0.15 ms of the raylib delta, the GPU work about 0.05 ms. Unity and Unreal
+  record and submit the UI on their render thread, alongside the game
+  thread, which is why their delta is smaller. In a single-threaded loop,
+  budget about 0.2 ms for a HUD that moves every frame; an idle UI costs one
+  textured draw.
+- On macOS, OpenGL runs on Apple's GL-on-Metal layer, which makes the same
+  UI cost more: sokol on OpenGL adds 0.8-1.2 ms where it adds 0.5 ms on
+  Metal. Draw the UI on the engine's Metal device when it has one. On
+  OpenGL, render into a texture you keep and pass `JSUI_GL_INCREMENTAL`, so
+  only what changed is repainted and nothing is copied.
 - Running JS on its own thread or on the main thread made no measurable
   difference here. The HUD's JS is idle between state updates; the
   per-frame work (nameplates, paint) is native either way. The JS thread
   matters for spikes (below), not for the steady frame.
 
-\* macOS paces sokol's GL view at the display refresh whatever the swap
-interval, so sokol's numbers are each frame's work (CPU plus `glFinish`),
-not frame-to-frame time.
+\* macOS paces sokol's view at the display refresh, so sokol's numbers are
+each frame's work (CPU plus waiting for the GPU), not frame-to-frame time.
+Between paced frames the CPU clocks down, so the same work takes longer
+than in raylib's uncapped loop. raylib and sokol were built against the
+Skia from `scripts/build-skia-desktop.sh`.
 
 ## Where JSUI runs in your frame
 

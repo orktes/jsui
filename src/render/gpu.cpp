@@ -441,6 +441,26 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGLTarget& t) {
   sk_sp<SkSurface> surface = g->surfaceFor(t);
   if (!surface) return -1;
   bool clear = (t.flags & JSUI_GL_NO_CLEAR) == 0;
+  jsui::TextureScope textureScope(&g->textures);
+  // A texture the host keeps (JSUI_GL_INCREMENTAL): it is the retained
+  // frame, so only the damage is repainted, straight into it, and nothing
+  // is copied. Its key is the texture name, shifted into the even,
+  // not-4-aligned values (never a retained surface's odd key nor a CPU frame
+  // buffer's address); the first render with the flag repaints it whole.
+  if ((t.flags & JSUI_GL_INCREMENTAL) && t.texture && t.samples <= 1) {
+    const void* texKey = reinterpret_cast<const void*>((uintptr_t(t.texture) << 2) | 2);
+    for (auto& e : g->retained)  // this runtime's retained frame is not needed
+      if (e.rt == &rt) e.surface.reset();
+    rt.renderCanvasTracked(texKey, t.width, t.height, [&](const SkIRect&, bool) -> Surface::CanvasChoice {
+      // Composited over the target's contents, it holds more than our frame.
+      Surface::CanvasChoice c{surface->getCanvas(), clear ? texKey : nullptr, clear};
+      c.splitDamage = !(retainedDebug & kRetainedOneRect);
+      return c;
+    });
+    g->ctx->flushAndSubmit(GrSyncCpu::kNo);
+    g->textures.endFrame();
+    return g->ctx->abandoned() ? -1 : 0;
+  }
   // Where the frame is painted (Surface::renderCanvasTracked), like the
   // WebGPU backend:
   //   * Small damage (a spinner, a hover, a caret): only the damage, as a
@@ -454,7 +474,6 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGLTarget& t) {
   // MSAA targets and JSUI_GL_NO_RETAIN always take the direct path (the
   // retained frame is single-sampled).
   constexpr int kRetainAfter = 3, kFreeRetainedAfter = 300;
-  jsui::TextureScope textureScope(&g->textures);
   const SkImageInfo info = surface->imageInfo();
   bool allowRetain = !(t.flags & JSUI_GL_NO_RETAIN) && t.samples <= 1;
   GLGpu::Retained* r = allowRetain ? g->retainedEntry(&rt) : nullptr;

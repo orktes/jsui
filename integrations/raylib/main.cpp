@@ -5,8 +5,9 @@
 //
 // Rendering. By default Skia draws the UI with OpenGL (Ganesh) straight into
 // the texture of a raylib RenderTexture2D, on raylib's own GL context, only
-// when the UI changed; raylib then composites that texture over the scene
-// with premultiplied alpha like any other texture. --cpu rasterises the UI on
+// when the UI changed and only what changed (JSUI_GL_INCREMENTAL: the
+// texture keeps the last frame); raylib then composites that texture over
+// the scene with premultiplied alpha like any other texture. --cpu rasterises the UI on
 // the CPU instead (jsui_render_rgba_incremental) and uploads only the damaged
 // rectangle with UpdateTextureRec.
 //
@@ -289,6 +290,8 @@ class Game : public jsui_example::SelfTestHost {
       t.texture = ui_.texture.id;  // Skia renders into it (an FBO of its own)
       t.width = w;
       t.height = h;
+      // The texture still holds the last frame: repaint only what changed.
+      if (!uiFresh_) t.flags = JSUI_GL_INCREMENTAL;
       if (jsui_render_gl_target(rt_, gpu_, &t) == 0) uiFresh_ = false;
       restoreRaylibState();
       return;

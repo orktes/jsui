@@ -14,7 +14,9 @@ cmake --build build --target jsui-raylib
 * **Rendering.** `jsui_gpu_create_gl(rlGetProcAddress)` makes a Skia Ganesh
   context on raylib's own GL 3.3 context. When `jsui_needs_redraw()` says the
   UI changed, Skia draws it into the texture of a `RenderTexture2D`
-  (`JsuiGLTarget.texture`), after `rlDrawRenderBatchActive()`; then
+  (`JsuiGLTarget.texture`), after `rlDrawRenderBatchActive()`. The texture
+  keeps the last frame, so with `JSUI_GL_INCREMENTAL` only what changed is
+  repainted into it (no full-frame copy); then
   `restoreRaylibState()` puts back the GL state raylib assumes. Each frame raylib
   draws that texture over the scene with `BLEND_ALPHA_PREMULTIPLY` (flipped:
   GL textures are bottom-up). An idle UI costs one textured quad.

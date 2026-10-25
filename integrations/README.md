@@ -7,7 +7,7 @@
 | [ios](ios/README.md) | UIKit app, Skia on Metal, touch, keyboards and game controllers |
 | [raylib](raylib/README.md) | raylib 6.2 game loop; Skia draws the UI into a `RenderTexture2D` on raylib's GL context |
 | [sdl3](sdl3/README.md) | SDL3 game loop on `SDL_Renderer`; Skia into SDL's own texture on Metal, Vulkan or GL (CPU dirty-rect upload elsewhere) |
-| [sokol](sokol/README.md) | sokol_app + sokol_gfx (GL backend); Skia draws the UI straight into the swapchain framebuffer |
+| [sokol](sokol/README.md) | sokol_app + sokol_gfx (Metal on macOS with Graphite Metal, GL elsewhere); Skia draws the UI into a kept `sg_image` (Metal) or straight into the swapchain framebuffer (GL) |
 | [unity](unity/README.md) | Unity 6 package (`com.orktes.jsui`): native plugin over the C API + a `JsuiView` component, with the same example game |
 | [unreal](unreal/README.md) | Unreal Engine 5 plugin: `UJsuiWidget` (UMG) / `SJsuiView` (Slate) over the JSUI shared library, Skia Graphite on the Metal RHI's queue, with the same example game |
 
@@ -51,9 +51,9 @@ needs from its UI layer:
 
   | Example | Default | `--cpu` |
   | --- | --- | --- |
-  | raylib | Skia Ganesh (GL) into the texture of a `RenderTexture2D`, only when the UI changed; raylib composites it with `BLEND_ALPHA_PREMULTIPLY` | `jsui_render_rgba_incremental`, the dirty rectangle through `UpdateTextureRec` |
+  | raylib | Skia Ganesh (GL) into the texture of a `RenderTexture2D`, only when the UI changed and only what changed (`JSUI_GL_INCREMENTAL`); raylib composites it with `BLEND_ALPHA_PREMULTIPLY` | `jsui_render_rgba_incremental`, the dirty rectangle through `UpdateTextureRec` |
   | sdl3 | Skia into the `SDL_Texture` SDL composites (`SDL_BLENDMODE_BLEND_PREMULTIPLIED`), on SDL's renderer API: Graphite on Metal (IOSurface textures) or Vulkan (our `VkImage`), Ganesh on OpenGL, after `SDL_FlushRenderer`; CPU upload on other renderers | the dirty rectangle into a streaming `SDL_Texture` |
-  | sokol | Skia Ganesh over the sokol_gfx pass in the swapchain's GL framebuffer (`JSUI_GL_NO_CLEAR`), then `sg_reset_state_cache()` | the kept CPU buffer into a write-transient `sg_image`, drawn with a premultiplied sokol_gl quad |
+  | sokol | Metal (macOS): Skia Graphite on sokol_gfx's device into a kept `sg_image` (`JSUI_GPU_INCREMENTAL`), committed before the frame's pass, drawn with a premultiplied sokol_gl quad. GL: Skia Ganesh over the sokol_gfx pass in the swapchain's GL framebuffer (`JSUI_GL_NO_CLEAR`), then `sg_reset_state_cache()` | the kept CPU buffer into a write-transient `sg_image`, drawn with a premultiplied sokol_gl quad |
 
 ### Build and run
 

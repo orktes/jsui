@@ -225,10 +225,10 @@ target. Which one a host uses:
 
 | Backend | Skia | C API | CMake option | Used by |
 | --- | --- | --- | --- | --- |
-| OpenGL / GLES / WebGL | Ganesh | `jsui_gpu_create_gl`, `jsui_render_gl[_target]` | `JSUI_GPU` | jsui-viewer, raylib, sokol, SDL3 on GL, Rust / Go examples, Android (GLES 3), the browser's WebGL fallback |
+| OpenGL / GLES / WebGL | Ganesh | `jsui_gpu_create_gl`, `jsui_render_gl[_target]` | `JSUI_GPU` | jsui-viewer, raylib, sokol off macOS, SDL3 on GL, Rust / Go examples, Android (GLES 3), the browser's WebGL fallback |
 | Browser WebGPU | Graphite (Dawn backend on Emdawnwebgpu) | `jsui_gpu_create_webgpu`, `jsui_render_webgpu[_target]` | `JSUI_WEBGPU` | the web host's first choice |
 | Vulkan | Graphite | `jsui_gpu_create_vulkan`, `jsui_render_gpu_target` | `JSUI_VULKAN` | Godot, Unity, Unreal and SDL3 on Linux, and on Windows when the engine runs on Vulkan |
-| Metal (desktop) | Graphite | `jsui_gpu_create_metal`, `jsui_render_gpu_target` | `JSUI_GRAPHITE_METAL` | Godot, Unity, Unreal and SDL3 on macOS |
+| Metal (desktop) | Graphite | `jsui_gpu_create_metal`, `jsui_render_gpu_target` | `JSUI_GRAPHITE_METAL` | Godot, Unity, Unreal, SDL3 and sokol on macOS |
 | Metal (iOS) | Ganesh | `jsui_metal_create`, `jsui_render_metal` | `JSUI_METAL` | the iOS example |
 | Direct3D 12 / 11 | Ganesh on D3D12 | `jsui_gpu_create_d3d12` / `_d3d11`, `jsui_render_gpu_target` | `JSUI_D3D` | Godot, Unity and Unreal on Windows |
 | Dawn native | Graphite | `jsui_gpu_create_dawn_procs`, `jsui_render_gpu_target` | `JSUI_GRAPHITE_DAWN` | Godot's `webgpu` driver on the godot-aw3 fork |
@@ -268,7 +268,10 @@ jsui_render_gl_target(rt, gpu, &t);
     The retained frame is repainted fully once the damage stayed small for
     3 frames, and freed after 300 direct frames.
   `JSUI_GL_NO_RETAIN` and MSAA targets always paint the whole frame into the
-  target. Each frame ends with one `flushAndSubmit` and no CPU wait. A later
+  target. A texture target the host keeps between frames
+  (`JSUI_GL_INCREMENTAL`, e.g. raylib's `RenderTexture2D`) is the retained
+  frame itself: only the damage is repainted into it and nothing is copied.
+  Each frame ends with one `flushAndSubmit` and no CPU wait. A later
   `jsui_render_rgba_incremental()` repaints fully. `jsui_needs_redraw()`
   still says when a frame is needed.
 * **Effects.** Everything the painter uses is plain Skia: blurred shadows
@@ -2550,7 +2553,7 @@ walks through the pattern.
 | Godot 4 | [integrations/godot](../integrations/godot/README.md) (GDExtension, `JsuiView`) | Graphite on Godot's Vulkan / Metal device, Ganesh D3D12, Dawn on the godot-aw3 fork |
 | Unity 6 | [integrations/unity](../integrations/unity/README.md) (`com.orktes.jsui`) | Graphite Metal / Vulkan, Ganesh D3D11 / D3D12 |
 | Unreal Engine 5 | [integrations/unreal](../integrations/unreal/README.md) (`UJsuiWidget` / `SJsuiView`) | Graphite Metal / Vulkan, Ganesh D3D12 / D3D11 |
-| raylib, SDL3, sokol | [integrations/raylib](../integrations/raylib/README.md), [sdl3](../integrations/sdl3/README.md), [sokol](../integrations/sokol/README.md) | Ganesh GL (SDL3: Graphite on Metal / Vulkan) |
+| raylib, SDL3, sokol | [integrations/raylib](../integrations/raylib/README.md), [sdl3](../integrations/sdl3/README.md), [sokol](../integrations/sokol/README.md) | Ganesh GL (SDL3: Graphite on Metal / Vulkan; sokol: Graphite on Metal on macOS) |
 | Android | [integrations/android](../integrations/android/README.md) (NDK NativeActivity) | Ganesh on GLES 3 |
 | iOS | [integrations/ios](../integrations/ios/README.md) (UIKit) | Ganesh on Metal |
 | Rust, Go | [bindings/](../bindings/README.md) over `libjsui` | Ganesh GL (GLFW window) |
