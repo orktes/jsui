@@ -1,0 +1,41 @@
+<!doctype html>
+<!-- Hover benchmark (web/test/hover-bench.mjs): hover-grid.jsx as plain HTML
+     + CSS, hover feedback by :hover and transitions only (no script), for
+     Chrome itself. Same sizes, colors, shadows and timing as the JSX. -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>hover grid (CSS)</title>
+<style>
+  @font-face { font-family: Inter; src: url(/__fonts/Inter-Regular.ttf); font-weight: 400; }
+  @font-face { font-family: Inter; src: url(/__fonts/Inter-Bold.ttf); font-weight: 700; }
+  html, body { margin: 0; background: #0d1322; }
+  body { width: 1280px; height: 720px; box-sizing: border-box; padding: 40px; font-family: Inter, sans-serif; overflow: hidden; }
+  .grid { display: flex; flex-wrap: wrap; gap: 18px; width: 990px; }
+  .card { width: 150px; height: 170px; box-sizing: border-box; border-radius: 12px; border: 1.5px solid var(--c); background: #141b2e;
+          display: flex; flex-direction: column; align-items: center; padding-top: 22px;
+          box-shadow: 0 0 8px rgba(79,140,255,0.35);
+          transition: transform 120ms, border-color 120ms, box-shadow 120ms; }
+  .card:hover { transform: scale(1.06); border-color: #ffb23f;
+                box-shadow: 0 0 0 3px rgba(255,178,63,0.35), 0 0 24px rgba(255,178,63,0.75); }
+  .icon { width: 64px; height: 64px; border-radius: 10px; }
+  .name { margin-top: 16px; font-size: 15px; font-weight: 700; color: #c9d2e8; transition: color 120ms; }
+  .card:hover .name { color: #ffffff; }
+  .sub { margin-top: 4px; font-size: 12px; color: #7d88a6; }
+</style>
+</head>
+<body>
+<div class="grid" id="grid"></div>
+<!-- The markup is static once built; the script only writes it. -->
+<script>
+  const COLORS = ['#9aa3b8', '#4ade80', '#4f8cff', '#b26bff', '#ff9a3c'];
+  let html = '';
+  for (let i = 0; i < 24; i++) {
+    const c = COLORS[i % 5];
+    html += `<div class="card" style="--c:${c}"><div class="icon" style="background:${c}"></div>` +
+      `<div class="name">Item ${i + 1}</div><div class="sub">Rare item</div></div>`;
+  }
+  document.getElementById('grid').innerHTML = html;
+</script>
+</body>
+</html>
