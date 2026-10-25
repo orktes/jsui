@@ -513,7 +513,7 @@ Node* InputManager::scrollTarget(bool horizontal, uint32_t preferId) {
     if (!n->yoga() || !n->style().display) continue;
     if (eligible(n)) return n;
     if (n->type() == NodeType::Text) continue;
-    for (size_t i = n->children().size(); i-- > 0;) stack.push_back(n->children()[i]);
+    for (size_t i = n->logicalChildren().size(); i-- > 0;) stack.push_back(n->logicalChildren()[i]);
   }
   return nullptr;
 }
@@ -743,7 +743,8 @@ void InputManager::scrollIntoView(Node* n, bool animated, float margin) {
   uint32_t id = n->id();
   // Where the node will be once the inner ScrollViews reach their targets.
   float shiftX = 0, shiftY = 0;
-  for (Node* p = n->parent(); p; p = p->parent()) {
+  // Render ancestors: an overlay is not inside its anchor's ScrollViews.
+  for (Node* p = n->renderParent(); p; p = p->renderParent()) {
     if (p->type() != NodeType::ScrollView) continue;
     Node* cur = alive(id);
     if (!cur) return;

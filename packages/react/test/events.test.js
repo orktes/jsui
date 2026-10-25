@@ -24,6 +24,18 @@ import {
 
 const byNativeID = (id) => mock.find((n) => n.props.nativeID === id);
 const wait = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+// Retries an assertion until a re-render's passive effects have run (one
+// macrotask is not always enough under load).
+async function eventually(check) {
+  for (let i = 0; ; i++) {
+    try {
+      return check();
+    } catch (e) {
+      if (i >= 100) throw e;
+      await wait(5);
+    }
+  }
+}
 
 test('capture then bubble with stopPropagation and synthetic event shape', () => {
   const log = [];
@@ -671,12 +683,10 @@ test('declared default actions: passive handlers, preventDefaultKeys, global vet
   assert.equal(mock.globals.has('gamepadaxis'), false, 'no onAxis: passive');
   opts = { onButton: () => {}, vetoes: [9] };
   rerender();
-  await wait();
-  assert.deepEqual(mock.globals.get('gamepadbutton'), ['1', '9']);
+  await eventually(() => assert.deepEqual(mock.globals.get('gamepadbutton'), ['1', '9']));
   opts = { onButton: () => {}, passive: true };
   rerender();
-  await wait();
-  assert.deepEqual(mock.globals.get('gamepadbutton'), ['1']);
+  await eventually(() => assert.deepEqual(mock.globals.get('gamepadbutton'), ['1']));
   render(null);
   sub.remove();
 });

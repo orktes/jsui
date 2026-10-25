@@ -16,6 +16,7 @@ namespace jsui {
 
 class Document;
 struct StateStyles;
+struct OverlayState;
 
 enum class NodeType : uint8_t {
   View,        // "View"
@@ -47,13 +48,38 @@ class Node {
   uint32_t id() const { return id_; }
   NodeType type() const { return type_; }
   Document* document() const { return doc_; }
+  // Two trees share the nodes (see core/overlay.h). The logical tree is the
+  // one React builds: parent() and logicalChildren(). The render tree is
+  // what layout, painting and hit testing walk: children() and
+  // renderParent(). They are the same except around overlays: an overlay
+  // (a node with the `overlay` prop) stays the logical child of its React
+  // parent (hover chains, groups, focus order, events follow it there) but
+  // renders as the child of a native host in the document's overlay layer,
+  // above the rest of the tree and outside its clips.
   Node* parent() const { return parent_; }
-  const std::vector<Node*>& children() const { return children_; }
+  const std::vector<Node*>& logicalChildren() const { return children_; }
+  const std::vector<Node*>& children() const { return render_ ? *render_ : children_; }
+  Node* renderParent() const { return renderParent_; }
 
-  // Tree mutation. A child is detached from its previous parent first.
+  // Tree mutation (logical). A child is detached from its previous parent first.
   void appendChild(Node* child);
   void insertBefore(Node* child, Node* before);  // before == nullptr: append
   void removeChild(Node* child);
+  // Native render children after the logical ones (minus overlays): the
+  // overlay layer on the root, hosts on the layer, an overlay on its host.
+  void setRenderExtras(std::vector<Node*> extras);
+  const std::vector<Node*>& renderExtras() const { return extras_; }
+  // Rebuilds the render children (logical minus overlays, plus extras) and
+  // the Yoga children from them (a node's overlay state changed).
+  void syncRender();
+  // `overlay` prop (core/overlay.h): set while this node is an overlay.
+  std::unique_ptr<OverlayState> overlay;
+  bool overlayArrow = false;  // `overlayArrow` prop: placed by its overlay
+  bool nativeOnly = false;    // created by the runtime (overlay layer / host), not React
+  // Added to the layout position (overlay placement): set natively after
+  // layout, without relayout.
+  float offsetX = 0, offsetY = 0;
+  void setOffset(float x, float y);
 
   // Replaces all props. `props` is an object; `props["style"]` is the
   // already-flattened style object. Event handlers are not passed here; the
@@ -110,9 +136,10 @@ class Node {
   // Closest ancestor-or-self Text that is not inline (the paragraph root).
   Node* paragraphRoot();
 
-  // Layout results in logical px. `layoutRect` is relative to the parent's
-  // border box origin; `absoluteRect` to the viewport, ignoring transforms
-  // but including scroll offsets of ancestors.
+  // Layout results in logical px. `layoutRect` is relative to the render
+  // parent's border box origin (plus offsetX / offsetY); `absoluteRect` to
+  // the viewport, ignoring transforms but including scroll offsets of
+  // ancestors.
   Rect layoutRect() const;
   Rect absoluteRect() const;
   // Where the node is drawn and hit-tested: layoutRect(), or the in-between
@@ -185,7 +212,7 @@ class Node {
   // node's children are always clean, so marking stops at the first dirty
   // ancestor.
   void markBoundsDirty() {
-    for (Node* n = this; n && !n->boundsDirty_; n = n->parent_) n->boundsDirty_ = true;
+    for (Node* n = this; n && !n->boundsDirty_; n = n->renderParent_) n->boundsDirty_ = true;
     markPaintTree();
   }
   bool boundsDirty() const { return boundsDirty_; }
@@ -210,9 +237,11 @@ class Node {
   // indicators, LayoutAnimation frames, caret). The painter skips a clean
   // subtree whose placement is unchanged. Like the bounds flag, a clean
   // node's descendants are clean, so marking stops at the first dirty
-  // ancestor; a ghost's ancestor is the node painting it.
+  // ancestor; a ghost's ancestor is the node painting it. Both flags follow
+  // the render tree.
   void markPaintTree() {
-    for (Node* n = this; n && !n->paintTreeDirty_; n = n->parent_ ? n->parent_ : n->ghostOf) n->paintTreeDirty_ = true;
+    for (Node* n = this; n && !n->paintTreeDirty_; n = n->renderParent_ ? n->renderParent_ : n->ghostOf)
+      n->paintTreeDirty_ = true;
   }
   bool paintTreeDirty() const { return paintTreeDirty_; }
   void clearPaintTree() { paintTreeDirty_ = false; }
@@ -227,12 +256,17 @@ class Node {
   void textStyleChanged(const TextStyle& oldText, bool propsMetrics, bool propsPaint, bool* relayout);
   void attachYoga(Node* child, size_t index);
   void detachYoga(Node* child);
+  void rebuildYoga();
+  void updateOverlayProps(const Value& old);
 
   Document* doc_;
   uint32_t id_;
   NodeType type_;
   Node* parent_ = nullptr;
   std::vector<Node*> children_;
+  Node* renderParent_ = nullptr;
+  std::unique_ptr<std::vector<Node*>> render_;  // set when it differs from children_
+  std::vector<Node*> extras_;
   YGNodeRef yoga_ = nullptr;
   Value props_;
   uint8_t propFlags_ = 0;

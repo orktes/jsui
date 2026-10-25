@@ -67,12 +67,15 @@ void Document::destroyRecursive(Node* node) {
     node->ghostOf->markPaintDirty();
     node->ghostOf = nullptr;
   }
-  while (!node->children().empty()) {
-    Node* c = node->children().back();
+  while (!node->logicalChildren().empty()) {
+    Node* c = node->logicalChildren().back();
     node->removeChild(c);
     destroyRecursive(c);
   }
   if (node->parent()) node->parent()->removeChild(node);
+  if (node->overlay) dropOverlay(node);
+  if (node->overlayArrow) setOverlayArrow(node, false);
+  if (node == overlayLayer_) overlayLayer_ = nullptr;
   if (onNodeDestroyed) onNodeDestroyed(node);
   if (node->propFlags() & (Node::kAutoFocus | Node::kModal)) setFocusHint(node, false);
   if (node->propFlags() & Node::kListensLayout) layoutListeners--;
@@ -118,8 +121,8 @@ void Document::queueImageEvents(uint32_t node, bool cached) {
 
 void Document::clear() {
   imageEvents.clear();
-  while (!root_->children().empty()) {
-    Node* c = root_->children().back();
+  while (!root_->logicalChildren().empty()) {
+    Node* c = root_->logicalChildren().back();
     destroyNode(c);
   }
   while (!root_->ghosts.empty()) {
@@ -189,7 +192,23 @@ bool Document::layout() {
     text::invalidateAll(root_);
     layoutDirty_ = paintDirty_ = true;
   }
-  if (!layoutDirty_) return false;
+  // Overlays: which are displayed, in which order (before Yoga), and where
+  // (after it, every call: their anchors move without relayout).
+  if (overlayLayer_) syncOverlays();
+  bool changed = false;
+  if (layoutDirty_) {
+    runYoga();
+    changed = true;
+  }
+  // Placement may resize a host (matchWidth): lay it out again, once.
+  if (overlayLayer_ && placeOverlays() && layoutDirty_) {
+    runYoga();
+    placeOverlays();
+  }
+  return changed;
+}
+
+void Document::runYoga() {
   Perf::Scope scope(perf, Phase::Layout);
   perf.counters.layoutPasses++;
   layoutDirty_ = false;
@@ -215,7 +234,6 @@ bool Document::layout() {
   }
   afterLayout(root_, onLayout && layoutListeners > 0);
   paintDirty_ = true;
-  return true;
 }
 
 // Visits only what this pass laid out: Yoga flags every node it lays out

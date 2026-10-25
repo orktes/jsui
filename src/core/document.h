@@ -158,6 +158,16 @@ class Document {
   // any, layout passes skip the onLayout walk.
   int layoutListeners = 0;
 
+  // Overlay layer (core/overlay.h). setOverlay: `config` is the node's
+  // `overlay` prop, null when it is no longer an overlay.
+  void setOverlay(Node* n, const Value* config);
+  void setOverlayArrow(Node* n, bool on);
+  Node* overlayLayer() const { return overlayLayer_; }
+  // Overlay nodes, in logical tree order as of the last layout().
+  const std::vector<Node*>& overlays() const { return overlays_; }
+  // Bumped by every logical insert / remove (overlay order).
+  uint64_t treeVersion = 0;
+
   // Work counters and (when profiling) phase times; see core/perf.h.
   // Surfaces report into the main surface's.
   Perf ownPerf_;
@@ -169,6 +179,12 @@ class Document {
 
  private:
   void destroyRecursive(Node* node);
+  void runYoga();
+  void syncOverlays();
+  bool placeOverlays();
+  bool placeOverlay(Node* n);
+  void placeArrows(Node* n);
+  void dropOverlay(Node* n);
   void afterLayout(Node* node, bool report);
   void snapshotLayout(Node* node, std::vector<std::pair<Node*, Rect>>* out);
   void startLayoutAnimations(const std::vector<std::pair<Node*, Rect>>& before);
@@ -193,6 +209,12 @@ class Document {
   bool layoutDirty_ = true, paintDirty_ = true, exactRepaint_ = false;
   uint32_t fontGeneration_ = 0;  // FontManager::generation the text caches were built with
   YGConfigRef yogaConfig_ = nullptr;
+  Node* overlayLayer_ = nullptr;
+  std::vector<Node*> overlays_;
+  std::vector<Node*> arrows_;
+  uint64_t overlayTreeVersion_ = ~uint64_t(0);
+  bool overlaysChanged_ = false;
+  int layerZ_ = 0;
 };
 
 }  // namespace jsui

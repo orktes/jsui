@@ -4,8 +4,8 @@
 // equips (the icon flies to the paper doll and the gear score ticks) or uses
 // a consumable, Y salvages, X compares with what is equipped, LB / RB (Q / E)
 // switch categories with an animated reflow, LT / RT (1-4) switch tabs.
-import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, Image, LayoutAnimation, Pressable, StyleSheet, Text, View, Visibility, useGroupState, useInteraction } from 'react-native';
+import React, { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { Animated, Easing, Image, LayoutAnimation, Overlay, OverlayArrow, Pressable, StyleSheet, Text, View, Visibility, useGroupState, useInteraction } from 'react-native';
 import { colors, font, rarity } from '../../../examples/theme.js';
 
 export const feature = {
@@ -144,38 +144,43 @@ function Ticker({ value, style, duration = 700 }) {
   return <Animated.Text style={style} text={text} />;
 }
 
+// The screen's root view: popouts stay inside it (their collision boundary).
+const ScreenContext = createContext(null);
+
 /** The hover popout of a grid slot: shown by the runtime from the slot's
- * group state (useGroupState().instant.hovered), no render on hover. */
-const SlotPopout = memo(function SlotPopout({ itemId, count, below }) {
+ * group state (useGroupState().instant.hovered), no render on hover. It is
+ * an <Overlay>: drawn above the other slots and panels and outside their
+ * clips, placed above the slot by the runtime (flipped below it when there
+ * is no room, shifted to stay on screen), its arrow on the slot's centre. */
+const SlotPopout = memo(function SlotPopout({ itemId, count }) {
   const slot = useGroupState();
+  const screen = useContext(ScreenContext);
   const d = DB[itemId];
   const k = KIND[d.kind];
   const r = rarity[d.tier];
   const amount = k.cat === 'Materials' || d.kind === 'scroll' ? '×' + (count || d.main) : fmt(d.main);
   return (
-    <Visibility
-      visible={slot.instant.hovered}
-      transition={{ duration: 120, easing: 'easeOut' }}
-      effect="scale"
-      scale={0.92}
-      pointerEvents="none"
-      style={[styles.popout, below ? styles.popoutBelow : styles.popoutAbove, { borderColor: r.color + '8c', borderTopColor: r.color }]}
-    >
-      <Text style={[styles.popName, { color: r.color }]} numberOfLines={1}>
-        {d.name}
-      </Text>
-      <Text style={styles.popType} numberOfLines={1}>
-        {d.typeName}
-      </Text>
-      <View style={styles.popRule} />
-      <View style={styles.popRow}>
-        <Text style={styles.popValue}>{amount}</Text>
-        <Text style={styles.popLabel} numberOfLines={1}>
-          {k.main}
-        </Text>
-      </View>
-      <View style={[styles.popArrow, below ? styles.popArrowBelow : styles.popArrowAbove, { borderColor: r.color + '8c' }]} />
-    </Visibility>
+    <Overlay placement="top" offset={12} boundary={screen} collisionPadding={8} pointerEvents="none">
+      <Visibility visible={slot.instant.hovered} transition={{ duration: 120, easing: 'easeOut' }} effect="scale" scale={0.92}>
+        {/* Before the body, which covers its inner half. */}
+        <OverlayArrow style={[styles.popArrow, { borderColor: r.color + '8c' }]} />
+        <View style={[styles.popout, { borderColor: r.color + '8c', borderTopColor: r.color }]}>
+          <Text style={[styles.popName, { color: r.color }]} numberOfLines={1}>
+            {d.name}
+          </Text>
+          <Text style={styles.popType} numberOfLines={1}>
+            {d.typeName}
+          </Text>
+          <View style={styles.popRule} />
+          <View style={styles.popRow}>
+            <Text style={styles.popValue}>{amount}</Text>
+            <Text style={styles.popLabel} numberOfLines={1}>
+              {k.main}
+            </Text>
+          </View>
+        </View>
+      </Visibility>
+    </Overlay>
   );
 });
 
@@ -200,8 +205,6 @@ const Slot = memo(function Slot({ item, index, selected, onSelect, onActivate, a
       group
       interaction={ix}
       style={{ cursor: item ? 'pointer' : 'default' }}
-      // The hovered slot draws over its neighbours, so its popout does too.
-      hoveredStyle={styles.slotOnTop}
     >
       <Animated.View
         style={[
@@ -224,7 +227,7 @@ const Slot = memo(function Slot({ item, index, selected, onSelect, onActivate, a
         {item && item.count ? <Text style={styles.count}>{item.count}</Text> : null}
         {item ? <View style={[styles.rarityPip, { backgroundColor: r.color }]} /> : null}
       </Animated.View>
-      {item ? <SlotPopout itemId={item.id} count={item.count} below={index < 6} /> : null}
+      {item ? <SlotPopout itemId={item.id} count={item.count} /> : null}
     </Pressable>
   );
 });
@@ -360,7 +363,16 @@ function HintButton({ k, label, color, onPress, flash }) {
 
 // ---------------------------------------------------------------------------
 
-export default function Inventory({ active = true }) {
+export default function Inventory(props) {
+  const screenRef = useRef(null);
+  return (
+    <ScreenContext.Provider value={screenRef}>
+      <InventoryScreen {...props} screenRef={screenRef} />
+    </ScreenContext.Provider>
+  );
+}
+
+function InventoryScreen({ active = true, screenRef }) {
   const [grid, setGrid] = useState(() => START_GRID.map(makeItem));
   const [equip, setEquip] = useState(START_EQUIP);
   const [filter, setFilter] = useState(0);
@@ -569,7 +581,7 @@ export default function Inventory({ active = true }) {
   const aLabel = tab !== 0 ? 'Inspect' : selDef && KIND[selDef.kind].slot ? 'Equip' : selDef && KIND[selDef.kind].cat === 'Consumables' ? 'Use' : 'Inspect';
 
   return (
-    <View style={styles.root} onKeyDown={onKeyDown} onGamepadButton={onGamepadButton}>
+    <View ref={screenRef} style={styles.root} onKeyDown={onKeyDown} onGamepadButton={onGamepadButton}>
       <Animated.View style={{ flex: 1, opacity: enter, transform: [{ scale: enter.interpolate({ inputRange: [0, 1], outputRange: [0.97, 1] }) }] }}>
         <View style={styles.header}>
           <Text style={styles.screenTitle}>Inventory</Text>
@@ -759,10 +771,7 @@ const styles = StyleSheet.create({
     zIndex: 2,
   },
   slotEmptyHover: { borderColor: 'rgba(148,170,255,0.3)' },
-  slotOnTop: { zIndex: 10 },
   popout: {
-    position: 'absolute',
-    left: (71 - 220) / 2,
     width: 220,
     paddingHorizontal: 12,
     paddingTop: 10,
@@ -773,17 +782,13 @@ const styles = StyleSheet.create({
     borderTopWidth: 2,
     boxShadow: '0 14px 34px rgba(0,0,0,0.7)',
   },
-  popoutAbove: { bottom: 71 + 12 },
-  popoutBelow: { top: 71 + 12 },
   popName: { fontFamily: font, fontWeight: '700', fontSize: 14, lineHeight: 18 },
   popType: { fontFamily: font, fontWeight: '500', fontSize: 11, color: colors.textDim, marginTop: 2 },
   popRule: { height: 1, backgroundColor: 'rgba(255,178,63,0.22)', marginVertical: 8 },
   popRow: { flexDirection: 'row', alignItems: 'baseline', gap: 8 },
   popValue: { fontFamily: font, fontWeight: '700', fontSize: 20, color: '#fff', letterSpacing: -0.3 },
   popLabel: { flexShrink: 1, fontFamily: font, fontWeight: '600', fontSize: 10, letterSpacing: 0.8, textTransform: 'uppercase', color: colors.textMute },
-  popArrow: { position: 'absolute', left: 110 - 6, width: 12, height: 12, backgroundColor: 'rgba(16,12,8,0.97)', transform: [{ rotate: '45deg' }] },
-  popArrowAbove: { bottom: -7, borderRightWidth: 1, borderBottomWidth: 1 },
-  popArrowBelow: { top: -7, borderLeftWidth: 1, borderTopWidth: 1 },
+  popArrow: { width: 12, height: 12, borderWidth: 1, backgroundColor: 'rgba(16,12,8,0.97)', transform: [{ rotate: '45deg' }] },
   slotSelectedEmpty: { borderColor: 'rgba(255,243,207,0.5)', boxShadow: '0 0 0 2px rgba(255,178,63,0.2)', zIndex: 2 },
   legendGlow: { borderRadius: 9, boxShadow: 'inset 0 0 20px rgba(255,178,63,0.55)' },
   itemIcon: { width: 50, height: 50 },

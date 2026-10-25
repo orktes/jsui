@@ -2085,7 +2085,7 @@ ShadowCache& shadowCache(RootRecord* root) { return root->shadows; }
 SpriteCache& spriteCache(RootRecord* root) { return root->sprites; }
 
 NodeRecord* record(Node* n) {
-  if (!n->paintCache) n->paintCache = n->parent() ? std::make_unique<NodeRecord>() : std::make_unique<RootRecord>();
+  if (!n->paintCache) n->paintCache = n->renderParent() ? std::make_unique<NodeRecord>() : std::make_unique<RootRecord>();
   return static_cast<NodeRecord*>(n->paintCache.get());
 }
 
@@ -3485,7 +3485,7 @@ bool blitSurroundings(const BlitScan& scan, SkRegion* extra) {
     SkIRect b;
     if (b.intersect(rec->bars, vp)) extra->op(b, SkRegion::kUnion_Op);
   }
-  for (Node* a = c->parent(); a; c = a, a = a->parent()) {
+  for (Node* a = c->renderParent(); a; c = a, a = a->renderParent()) {
     const auto* ar = static_cast<const NodeRecord*>(a->paintCache.get());
     if (!ar || !ar->valid || !ar->painted) return false;
     const ComputedStyle& s = a->style();

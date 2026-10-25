@@ -89,7 +89,7 @@ and the same core compiles to WebAssembly.
 | Path | What |
 | --- | --- |
 | `include/jsui/jsui.h` | Public C API (embedding, input, resources, rendering, host data, textures, audio, fonts, surfaces) |
-| `src/core/` | `Value`, `Node`, `Document`, style parsing (`style.cpp`), JSON, scrolling geometry, LayoutAnimation, perf counters |
+| `src/core/` | `Value`, `Node`, `Document`, style parsing (`style.cpp`), JSON, scrolling geometry, LayoutAnimation, the overlay layer (`overlay.*`), perf counters |
 | `src/render/` | Skia painter, image cache, host textures, Lottie, ShaderView, pipeline cache, GPU backends (`gpu.cpp` Ganesh GL, `gpu_metal.cpp` Ganesh Metal, `gpu_d3d.cpp` Ganesh D3D12 / D3D11, `gpu_graphite.cpp` Graphite Vulkan / Metal / Dawn, `gpu_webgpu.cpp` Graphite on browser WebGPU) |
 | `src/text/` | Font manager and decoding (WOFF / WOFF2 / TTC), paragraph building and Yoga measure for `Text`, TextInput editing |
 | `src/js/` | `JsEngine`: the QuickJS host and bridge globals (`bridge*.cpp`), the mutation command buffer (`command_buffer.*`), bytecode bundles (`bytecode.cpp`), and the host JS engine's native half (`engine_hostjs.cpp`) |
@@ -2231,6 +2231,96 @@ easing, delay, <state>: ...}`); `interaction` (`{key}`, from
   it through `GroupContext`; `useGroupState(name?)` returns its
   `interaction` Animated nodes (`instant: true` reads the state's target
   instead of its eased weight).
+
+## Overlay layer
+
+Popouts, tooltips and dropdowns that escape the clips (`overflow`,
+ScrollView) and the z-order of their ancestors while staying attached to an
+anchor (`src/core/overlay.*`; React: `<Overlay>` / `<OverlayArrow>` in
+`packages/react/src/components/overlay.js`). Host props: `overlay`
+(`{anchor, placement, offset, crossOffset, flip, collision,
+collisionPadding, boundary, matchWidth, hideWhenClipped}`; `anchor` and
+`boundary` are node ids, -1 for a ref not attached yet) on a View, and
+`overlayArrow` on a view inside one.
+
+* Two trees over the same nodes. The logical tree is React's:
+  `Node::parent()` / `logicalChildren()`; the reconciler's inserts and
+  removes, destruction, hover / press chains (`chainBuild_`), group state,
+  focus order (`collectFocusable`, modal scopes) and event bubbling follow
+  it (`measure` gives an overlay's `x` / `y` in its host, `pageX` / `pageY`
+  in the viewport). The render tree is what layout,
+  painting, damage and hit testing walk: `children()` / `renderParent()`,
+  and `markPaintTree` / `markBoundsDirty` / `absoluteRect` / the input's
+  `localToViewport` climb it. They are the same vectors except around
+  overlays (`Node::render_` exists only on a node whose render list
+  differs: a parent of an overlay, the root, the layer, a host), so
+  nothing else pays for the split and the painter and hit testing have no
+  overlay cases.
+* `Document` creates, with the first overlay, the overlay layer: a native
+  View (`nativeOnly`, no React instance) appended to the root's render list
+  after its React children (`setRenderExtras`), absolutely filling the
+  viewport, `pointerEvents: box-none`, its `zIndex` raised above the root's
+  other children (a `Modal` is one, at 10000). Each overlay node gets a
+  host in the layer (also native, `box-none`): the overlay leaves its
+  parent's render list and Yoga children and becomes the host's only
+  render child; the hosts are kept in logical tree order (re-sorted when
+  `Document::treeVersion` moved), so a later overlay, a nested one
+  included, paints and hits above an earlier one. A host is an absolutely
+  positioned box in the viewport-sized layer, so the overlay in it sizes
+  to its content (up to the viewport's width).
+* `Document::layout()`: before Yoga, `syncOverlays` sets each host
+  `display: none` while a logical ancestor of its overlay is undisplayed or
+  it is detached (a `<Visibility mode="remove">` around a popout's anchor
+  hides the popout), takes the product of the logical ancestors' opacity
+  (and LayoutAnimation fades), and raises the layer's zIndex. After Yoga,
+  on every call (not only when layout was dirty: a scroll or an Animated
+  transform moves an anchor without relayout), `placeOverlays` runs in
+  tree order (an outer overlay is placed before one nested in it):
+  - the logical parent's full matrix to the viewport (`viewMatrix`: layout,
+    ancestors' scroll offsets, transforms and LayoutAnimation scales, as
+    the painter places them), the anchor's box (the parent, or the
+    `anchor` node mapped into the parent's space) and the boundary (the
+    viewport or the `boundary` node, inset by `collisionPadding`) in it;
+  - the side: `placement`'s, or the opposite one when it does not fit and
+    the opposite fits or has more room (`flip`); `auto` takes the first of
+    bottom, top, right, left with room. The box goes `offset` away from the
+    anchor on that side, aligned (`-start` / centre / `-end`) plus
+    `crossOffset` along it, and is clamped along the anchor's edge into
+    the boundary (`collision: 'shift'`);
+  - the host: the parent's matrix times that position, relative to the
+    layer: its translation is `Node::offsetX/Y`, which `layoutRect()` adds
+    to Yoga's position (no relayout; pixel snapping as for any box), and
+    its linear part, when not the identity, a `transform: [{matrix}]`
+    about the top-left corner. So the popout of a slot on a stage scaled
+    to the window is scaled with it, and rotates with a rotated parent;
+  - `hideWhenClipped`: when the anchor's box lies outside the clips of its
+    render ancestors (or the viewport), the host gets `opacity: 0` and
+    `pointerEvents: none` until it is back; otherwise the host's opacity
+    is the ancestors' product;
+  - `matchWidth` writes the anchor's width as the host's `width` (or
+    `minWidth`) and lays out once more;
+  - `overlayArrow` views whose nearest logical overlay ancestor is this
+    one get an offset that puts their centre on the edge facing the
+    anchor, at the anchor's centre clamped to the box (transforms between
+    the overlay and the arrow are not followed).
+  Values are written only when they change, so a still popout costs a
+  matrix walk per frame and no repaint.
+* Hit testing finds the topmost node in the render tree as usual (the
+  layer last); the hover chain built from the hit node climbs the logical
+  tree, so the pointer on a popout rendered inside a `group` keeps that
+  group (and every logical ancestor) hovered: an interactive popout stays
+  open while the pointer moves onto it (without a gap between them). Wheel
+  and scroll chains also climb the logical tree (a wheel over a popout
+  scrolls the list its anchor is in); `scrollIntoView` climbs the render
+  tree (an overlay is not inside its anchor's ScrollViews).
+* Everything runs on the thread that owns the document, in single-threaded
+  and JS-thread modes alike, after the tick's input, JS commands and native
+  Animated; the CPU raster and GPU paths, incremental damage, the scroll
+  blit and layer caches see the hosts as ordinary absolutely positioned,
+  maybe transformed Views. A LayoutAnimation does not animate host frames;
+  an overlay removed while a delete animation is armed is not ghosted.
+* `Modal` stays a portal to the surface's root with zIndex 10000; the layer
+  goes above it, so popouts inside a modal show over it.
 
 ## LayoutAnimation
 

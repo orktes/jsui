@@ -4,6 +4,7 @@
 #include <optional>
 
 #include "core/document.h"
+#include "core/overlay.h"
 #include "core/state_style.h"
 #include "render/image_node.h"
 #include "render/lottie.h"
@@ -103,6 +104,16 @@ void Node::insertBefore(Node* child, Node* before) {
   size_t index = size_t(it - children_.begin());
   children_.insert(it, child);
   child->parent_ = this;
+  if (doc_) doc_->treeVersion++;
+  if (child->overlay || render_) {
+    // An overlay renders in its host; a node with a render list of its own
+    // rebuilds it.
+    if (!child->overlay) child->renderParent_ = this;
+    syncRender();
+    markDirty();
+    return;
+  }
+  child->renderParent_ = this;
   attachYoga(child, index);
   markBoundsDirty();
   markDirty();
@@ -111,11 +122,87 @@ void Node::insertBefore(Node* child, Node* before) {
 void Node::removeChild(Node* child) {
   auto it = std::find(children_.begin(), children_.end(), child);
   if (it == children_.end()) return;
+  if (doc_) doc_->treeVersion++;
+  if (child->overlay || render_) {
+    children_.erase(it);
+    child->parent_ = nullptr;
+    if (!child->overlay) child->renderParent_ = nullptr;
+    syncRender();
+    markDirty();
+    return;
+  }
   detachYoga(child);
   children_.erase(it);
   child->parent_ = nullptr;
+  child->renderParent_ = nullptr;
   markBoundsDirty();
   markDirty();
+}
+
+void Node::setRenderExtras(std::vector<Node*> extras) {
+  if (extras == extras_) return;
+  for (Node* e : extras_)
+    if (e->renderParent_ == this && std::find(extras.begin(), extras.end(), e) == extras.end()) e->renderParent_ = nullptr;
+  extras_ = std::move(extras);
+  syncRender();
+}
+
+void Node::syncRender() {
+  bool needed = !extras_.empty();
+  for (Node* c : children_) needed |= c->overlay != nullptr;
+  if (!needed) {
+    if (!render_) return;
+    render_.reset();
+  } else {
+    std::vector<Node*> list;
+    list.reserve(children_.size() + extras_.size());
+    for (Node* c : children_)
+      if (!c->overlay) list.push_back(c);
+    list.insert(list.end(), extras_.begin(), extras_.end());
+    if (render_ && *render_ == list) return;
+    if (!render_) render_ = std::make_unique<std::vector<Node*>>();
+    *render_ = std::move(list);
+  }
+  for (Node* c : children()) c->renderParent_ = this;
+  rebuildYoga();
+  markBoundsDirty();
+  paintVersion++;
+  contentVersion++;
+  markPaintTree();
+  if (doc_) doc_->markLayoutDirty();
+}
+
+void Node::rebuildYoga() {
+  if (!yoga_ || !hasYogaChildren(this)) return;
+  const auto& kids = children();
+  // Already in order (the common case of a list that only lost an overlay).
+  size_t yi = 0, count = YGNodeGetChildCount(yoga_);
+  bool same = true;
+  for (Node* c : kids) {
+    if (!c->yoga_) continue;
+    if (yi >= count || YGNodeGetChild(yoga_, yi) != c->yoga_) {
+      same = false;
+      break;
+    }
+    yi++;
+  }
+  if (same && yi == count) return;
+  YGNodeRemoveAllChildren(yoga_);
+  yi = 0;
+  for (Node* c : kids) {
+    if (!c->yoga_) continue;
+    if (YGNodeRef owner = YGNodeGetOwner(c->yoga_)) YGNodeRemoveChild(owner, c->yoga_);
+    if (YGNodeHasMeasureFunc(yoga_)) YGNodeSetMeasureFunc(yoga_, nullptr);
+    YGNodeInsertChild(yoga_, c->yoga_, yi++);
+  }
+}
+
+void Node::setOffset(float x, float y) {
+  if (x == offsetX && y == offsetY) return;
+  offsetX = x;
+  offsetY = y;
+  markBoundsDirty();
+  if (doc_) doc_->markPaintDirty();
 }
 
 namespace {
@@ -225,6 +312,7 @@ void Node::applyProps(const Value& props) {
   Value old = std::move(props_);
   props_ = props;
   updatePropFlags();
+  updateOverlayProps(old);
   bool relayout = false;
   HitShape shape(style_);
   if (yoga_) {
@@ -452,6 +540,18 @@ void Node::updatePropFlags() {
   if (doc_ && listens != listened) doc_->layoutListeners += listens ? 1 : -1;
 }
 
+void Node::updateOverlayProps(const Value& old) {
+  if (!doc_ || nativeOnly || !yoga_ || !props_.isObject()) return;
+  const Value& ov = props_["overlay"];
+  if (ov.isObject() && (type_ == NodeType::View || type_ == NodeType::ScrollView)) {
+    if (!overlay || !valueEquals(old["overlay"], ov)) doc_->setOverlay(this, &ov);
+  } else if (overlay) {
+    doc_->setOverlay(this, nullptr);
+  }
+  bool arrow = truthyProp(props_["overlayArrow"]);
+  if (arrow != overlayArrow) doc_->setOverlayArrow(this, arrow);
+}
+
 void Node::restyle() {
   Value p = std::move(props_);
   props_ = Value();
@@ -475,7 +575,7 @@ Node* Node::paragraphRoot() {
 
 Rect Node::layoutRect() const {
   if (!yoga_) return {};
-  return {YGNodeLayoutGetLeft(yoga_), YGNodeLayoutGetTop(yoga_), YGNodeLayoutGetWidth(yoga_),
+  return {YGNodeLayoutGetLeft(yoga_) + offsetX, YGNodeLayoutGetTop(yoga_) + offsetY, YGNodeLayoutGetWidth(yoga_),
           YGNodeLayoutGetHeight(yoga_)};
 }
 
@@ -486,7 +586,7 @@ Rect Node::visualRect() const {
 
 Rect Node::absoluteRect() const {
   Rect r = layoutRect();
-  for (const Node* p = parent_; p; p = p->parent_) {
+  for (const Node* p = renderParent_; p; p = p->renderParent_) {
     Rect pr = p->layoutRect();
     r.x += pr.x - p->scrollX;
     r.y += pr.y - p->scrollY;

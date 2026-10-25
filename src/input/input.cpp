@@ -265,8 +265,8 @@ bool InputManager::visible(const Node* n) const {
 }
 
 Affine InputManager::localToViewport(const Node* n) const {
-  if (!n->parent()) return nodeLocalToParent(n);
-  const Node* p = n->parent();
+  if (!n->renderParent()) return nodeLocalToParent(n);
+  const Node* p = n->renderParent();
   return localToViewport(p) * Affine::translate(-p->scrollX, -p->scrollY) * nodeLocalToParent(n);
 }
 
@@ -277,7 +277,7 @@ bool InputManager::toLocal(const Node* n, float x, float y, float* lx, float* ly
     return false;
   }
   float px = x, py = y;
-  if (const Node* p = n->parent()) {
+  if (const Node* p = n->renderParent()) {
     if (!toLocal(p, x, y, &px, &py)) return false;
     px += p->scrollX;
     py += p->scrollY;
@@ -1187,7 +1187,7 @@ bool displayedPath(const Node* root, const Node* n, bool skipTextChildren, std::
     const Node* p = c->parent();
     if (!p || !c->yoga() || !c->style().display) return false;
     if (skipTextChildren && p->type() == NodeType::Text) return false;
-    const auto& kids = p->children();
+    const auto& kids = p->logicalChildren();
     path->push_back(uint32_t(std::find(kids.begin(), kids.end(), c) - kids.begin()));
   }
   if (!root->yoga() || !root->style().display) return false;
@@ -1232,7 +1232,8 @@ void InputManager::collectFocusable(Node* scope, std::vector<Node*>* out) const 
     stack.pop_back();
     if (!n->yoga() || !n->style().display) continue;
     if (isFocusable(n)) out->push_back(n);
-    for (size_t i = n->children().size(); i-- > 0;) stack.push_back(n->children()[i]);
+    // Logical order: an overlay's focusables follow its anchor's.
+    for (size_t i = n->logicalChildren().size(); i-- > 0;) stack.push_back(n->logicalChildren()[i]);
   }
 }
 

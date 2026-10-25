@@ -105,7 +105,7 @@ void Document::startLayoutAnimations(const std::vector<std::pair<Node*, Rect>>& 
     if (!n->yoga()) continue;
     auto it = old.find(n);
     if (it != old.end()) {
-      if (cfg.update.enabled && differs(it->second, n->layoutRect())) startAnim(n, Node::LayoutAnim::Kind::Update, cfg.update, it->second);
+      if (cfg.update.enabled && !n->nativeOnly && differs(it->second, n->layoutRect())) startAnim(n, Node::LayoutAnim::Kind::Update, cfg.update, it->second);
       if (n->type() == NodeType::Text || n->type() == NodeType::TextInput) continue;
       for (size_t i = n->children().size(); i-- > 0;) stack.push_back(n->children()[i]);
     } else if (cfg.create.enabled && n->parent() && old.count(n->parent()) && finite(n->layoutRect())) {
@@ -193,7 +193,7 @@ void Document::tickLayoutAnimations(double nowMs) {
 }
 
 void Document::removeChild(Node* parent, Node* child) {
-  bool ghost = armedSet_ && armed_.remove.enabled && child->parent() == parent && child->yoga() &&
+  bool ghost = armedSet_ && armed_.remove.enabled && child->parent() == parent && child->yoga() && !child->overlay &&
                parent->type() != NodeType::Text && parent->type() != NodeType::TextInput &&
                finite(child->layoutRect()) && child->style().display;
   if (!ghost) {
