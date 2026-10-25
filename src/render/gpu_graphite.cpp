@@ -238,7 +238,14 @@ struct GraphiteGpu final : JsuiGpuContext {
   // (ShaderEffects::warm), each frame building one pipeline itself.
   void warmShaders(jsui::ShaderEffects& shaders, SkColorType ct, const SkSurfaceProps& props) {
     if (!compileExecutor || !shaders.warmPending()) return;
-    if (!warmRecorder) warmRecorder = ctx->makeRecorder();
+    if (!warmRecorder) {
+      // Its own image provider: the warm-up's image children are raster
+      // images, uploaded through it (Graphite's default provider uploads
+      // nothing, and the draw would be dropped).
+      graphite::RecorderOptions ropts;
+      ropts.fImageProvider = sk_make_sp<CachingImageProvider>();
+      warmRecorder = ctx->makeRecorder(ropts);
+    }
     if (!warmRecorder) return;
     sk_sp<SkSurface> s = SkSurfaces::RenderTarget(
         warmRecorder.get(), SkImageInfo::Make(64, 64, ct, kPremul_SkAlphaType), skgpu::Mipmapped::kNo, &props);
