@@ -2362,7 +2362,12 @@ for (const variant of ['no Worker', 'createImageBitmap fails']) {
   test(`large images without a decode Worker (${variant})`, async ({ page }) => {
     await page.evaluate((variant) => {
       window.Worker = undefined;
-      if (variant !== 'no Worker') window.createImageBitmap = () => Promise.reject(new Error('cannot'));
+      // Only the decoder's (untyped) Blobs fail: screenPixels needs it too.
+      const real = window.createImageBitmap;
+      if (variant !== 'no Worker') {
+        window.createImageBitmap = (src, ...a) => (src instanceof Blob && !src.type
+          ? Promise.reject(new Error('cannot')) : real(src, ...a));
+      }
     }, variant);
     await mount(page, { width: 600, height: 300, jsui: { bundleSource: IMAGES(ORIGIN) } });
     const st = await checkImages(page);
