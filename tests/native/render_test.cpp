@@ -997,3 +997,55 @@ TEST(render_text_color_change_keeps_the_paragraph) {
   CHECK(blue > 40);
   CHECK_EQ(red, 0);
 }
+
+// Raster cache (updateRasterCache): an ancestor of a card in a hover
+// transition is reached by the card's damage in every frame of it, but its
+// subtree changes in each. When the transition settles it must not switch
+// its raster cache on (a repaint of its whole subtree) in the settling
+// frame: only damaged frames in which it was unchanged count. Two of those
+// in a row do switch it on, and its next change switches it off.
+TEST(render_raster_cache_waits_for_unchanged_frames) {
+  Scene s(320, 240);
+  Node* wrap = s.add(R"J({"style":{"width":320,"height":240},"children":[
+    {"style":{"position":"absolute","left":20,"top":20,"width":200,"height":160,"backgroundColor":"#26304f"},"children":[
+      {"style":{"position":"absolute","left":10,"top":10,"width":40,"height":40,"backgroundColor":"#ff4d6a"}},
+      {"style":{"position":"absolute","left":60,"top":10,"width":40,"height":40,"backgroundColor":"#4fd1ff"}},
+      {"style":{"position":"absolute","left":110,"top":10,"width":40,"height":40,"backgroundColor":"#4ade80"}},
+      {"style":{"position":"absolute","left":10,"top":60,"width":40,"height":40,"backgroundColor":"#f2c35b"}}]},
+    {"style":{"position":"absolute","left":150,"top":150,"width":30,"height":30,"backgroundColor":"#b26bff"}}]})J");
+  Node* card = wrap->children()[0]->children()[0];  // animated, inside the container
+  Node* over = wrap->children()[1];                 // drawn over the container's corner
+  const SkIRect container = SkIRect::MakeXYWH(20, 20, 200, 160);
+  LayerCache cache;
+  LayerCacheScope scope(&cache);
+  auto frame = [&] {
+    s.doc().layout();
+    return updateDamage(s.doc(), 320, 240);
+  };
+  auto color = [](Node* n, int i) {
+    static const char* c[] = {"#ff0000", "#00ff00", "#0000ff", "#ffffff"};
+    Value::Object partial;
+    partial["backgroundColor"] = Value(c[i % 4]);
+    CHECK(n->patchStyle(partial));
+  };
+  frame();  // the first records
+  // The card's transition: the container changes in every frame.
+  for (int i = 0; i < 6; i++) {
+    color(card, i);
+    CHECK(!frame().contains(container));
+  }
+  // Settled; damage from above reaches the container, now unchanged: the
+  // first such frame repaints that damage only.
+  color(over, 0);
+  SkRegion settle = frame();
+  CHECK(!settle.isEmpty());
+  CHECK(!settle.contains(container));
+  // The second one switches the container's texture on: repainted whole.
+  color(over, 1);
+  CHECK(frame().contains(container));
+  color(over, 2);
+  CHECK(!frame().contains(container));  // drawn from it
+  // The next hover changes it: off again, repainted whole.
+  color(card, 0);
+  CHECK(frame().contains(container));
+}
