@@ -6,8 +6,10 @@
 // The page (site/index.html) plays them with Web Audio and reports through
 // HostState 'audio': { unlocked, muted }. Browsers keep audio locked until
 // the first click / tap / key press (gamepad buttons do not count), so the
-// nav bar's sound button says so until then.
-import { Sound, useHostState } from 'react-native';
+// nav bar's sound button says so until then. A native host has no page: it
+// sets HostState 'audio' { native: true } (jsui-viewer --state) and the UI
+// mutes its own buses, silent until "Enable sound" like a locked browser.
+import { Host, HostState, Sound, useHostState } from 'react-native';
 
 export const SFX = {
   hover: require('./assets/sounds/hover.wav'),
@@ -65,8 +67,21 @@ export function applyMix(next, fade = 120) {
     // Perceived loudness is roughly logarithmic: square the slider value.
     const v = (m * mix[bus]) / 100;
     Sound.setBusVolume(bus, v * v, { fade });
-    Sound.setBusMuted(bus, !!mix.muteAll, { fade });
+    Sound.setBusMuted(bus, !!mix.muteAll || nativeMuted(), { fade });
   }
+}
+
+function nativeMuted() {
+  const a = HostState.get('audio');
+  return !!(a && a.native && (a.muted || !a.unlocked));
+}
+
+/** The nav bar's sound switch: the page mutes its output, natively the UI does. */
+export function setSoundMuted(muted) {
+  const a = HostState.get('audio');
+  if (!a || !a.native) return Host.postMessage('sound', { muted });
+  HostState.patch('audio', { unlocked: true, muted: !!muted });
+  applyMix({}, 200);
 }
 
 /** { unlocked, muted } from the page (site/index.html). */

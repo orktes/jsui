@@ -65,6 +65,9 @@ void viewer_mtl_release(void* obj);
 #else
 #define VIEWER_METAL 0
 #endif
+#if defined(__APPLE__)
+extern "C" void viewer_mac_watch_wheel(void (*cb)(void* user, float dx, float dy), void* user);
+#endif
 
 namespace {
 
@@ -295,6 +298,19 @@ class Viewer {
                                          SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
 
     wakeEvent_ = SDL_RegisterEvents(1);
+#if defined(__APPLE__)
+    // Pixel deltas with the trackpad's momentum, as browsers get them
+    // (SDL_MOUSEWHEEL is ignored on macOS).
+    viewer_mac_watch_wheel(
+        [](void* u, float dx, float dy) {
+          auto* self = static_cast<Viewer*>(u);
+          if (!self->rt_ || (dx == 0 && dy == 0)) return;
+          int mx = 0, my = 0;
+          SDL_GetMouseState(&mx, &my);
+          jsui_send_mouse_wheel(self->rt_, float(mx), float(my), dx, dy);
+        },
+        this);
+#endif
     createRuntime();
     SDL_StartTextInput();
 
@@ -623,15 +639,14 @@ class Viewer {
         break;
       }
       case SDL_MOUSEWHEEL: {
+#if !defined(__APPLE__)  // macOS: viewer_mac_watch_wheel
         int mx = 0, my = 0;
         SDL_GetMouseState(&mx, &my);
-        float dx = e.wheel.preciseX, dy = e.wheel.preciseY;
-        if (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) {
-          dx = -dx;
-          dy = -dy;
-        }
-        // DOM: positive deltaY scrolls down; ~40 px per notch like browsers.
-        jsui_send_mouse_wheel(rt_, float(mx), float(my), dx * 40.f, -dy * 40.f);
+        // SDL's deltas already follow the system's scroll direction setting
+        // (SDL_MOUSEWHEEL_FLIPPED only says it is "natural"), as DOM wheel
+        // deltas do. DOM: positive deltaY scrolls down; ~40 px per notch.
+        jsui_send_mouse_wheel(rt_, float(mx), float(my), e.wheel.preciseX * 40.f, -e.wheel.preciseY * 40.f);
+#endif
         break;
       }
       case SDL_FINGERDOWN:

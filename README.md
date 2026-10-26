@@ -27,8 +27,9 @@ rendered entirely by the JSUI WebAssembly build into one canvas: interactive
 game screens, input, motion, a live-code playground and embedding guides. Its
 source is ordinary React Native in [site/](site/) (`node site/scripts/build.mjs`,
 then `node site/scripts/serve.mjs`). The same bundle runs natively in the viewer:
-`jsui-viewer --state 'intro={"play":true}' site/dist/app/bundle.js` (the state
-stands in for the page's go-ahead for the intro).
+`jsui-viewer --state 'intro={"play":true}' --state 'audio={"native":true}' site/dist/app/bundle.js`
+(the states stand in for the page: the intro's go-ahead, and the UI owning the
+sound switch).
 
 ## Game data
 

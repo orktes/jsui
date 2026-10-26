@@ -1,10 +1,10 @@
 // Fixed top bar: wordmark, page links (horizontally scrollable on phones),
 // the sound switch and GitHub.
 import React from 'react';
-import { Host, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { colors, font, site } from '../theme.js';
 import { segments, useRouter } from '../router.js';
-import { useAudioState } from '../sound.js';
+import { setSoundMuted, useAudioState } from '../sound.js';
 import { Button, GITHUB, useLayout } from './ui.jsx';
 
 export const NAV_HEIGHT = 64;
@@ -54,7 +54,7 @@ function SoundSwitch({ compact }) {
   const label = muted ? 'Sound off' : unlocked ? 'Sound on' : 'Enable sound';
   return (
     <Pressable
-      onPress={() => Host.postMessage('sound', { muted: unlocked ? !muted : false })}
+      onPress={() => setSoundMuted(unlocked ? !muted : false)}
       accessibilityRole="switch"
       accessibilityLabel={label}
       accessibilityState={{ checked: on }}
