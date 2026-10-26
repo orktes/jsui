@@ -424,6 +424,25 @@ test('touch input is forwarded', async ({ page }) => {
   assert(touches[0][3] === 30 && touches[0][4] === 130, `touch pos ${JSON.stringify(touches[0])}`);
 }, { hasTouch: true }, { worker: true });
 
+// iOS Safari restored focus to the keyboard sink when the page came back
+// (bfcache, tab switch) and popped the on-screen keyboard up.
+test('keyboard sink raises no virtual keyboard and lets go of focus on pagehide', async ({ page }) => {
+  await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
+  const sink = () => page.evaluate(() => {
+    const t = document.querySelector('textarea');
+    return { mode: t?.getAttribute('inputmode'), focused: document.activeElement === t };
+  });
+  let s = await sink();
+  assert(s.mode === 'none', `sink inputmode ${s.mode}`);
+  assert(s.focused, 'sink focused on start');
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true })));
+  s = await sink();
+  assert(!s.focused, 'sink blurred on pagehide');
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })));
+  s = await sink();
+  assert(s.focused, 'sink refocused on pageshow with a fine pointer');
+});
+
 test('gamepad buttons / axes / connection are forwarded', async ({ page }) => {
   await page.evaluate(() => {
     const mk = (pressed, axis) => ({ id: 'Test Pad (STANDARD GAMEPAD)', index: 0, connected: true, mapping: 'standard',
