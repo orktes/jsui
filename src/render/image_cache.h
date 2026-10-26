@@ -2,15 +2,18 @@
 // ResourceLoader; when an image arrives the document is re-laid out (images
 // without explicit size use their intrinsic size) and repainted.
 //
-// Large images decode on a small worker pool (native) instead of the
-// runtime's thread, so a full-screen background never costs a frame its
-// decode time: the entry stays Loading until a later tick publishes it.
+// Large images decode off the runtime's thread, so a full-screen background
+// never costs a frame its decode time: natively on a small worker pool, on
+// the web by the browser (createImageBitmap in a Worker). The entry stays
+// Loading until a later tick publishes it.
 #pragma once
 
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
+#include "include/core/SkData.h"
 #include "include/core/SkImage.h"
 #include "include/core/SkRefCnt.h"
 
@@ -47,10 +50,10 @@ class ImageCache {
   uint32_t generation = 0;
 
   // On the runtime thread each tick (after the loader's pump): publishes the
-  // images the pool has decoded since. Returns how many.
+  // images the pool (or the browser) has decoded since. Returns how many.
   int pump();
-  // Decodes handed to the pool and not yet published (jsui_pending_loads
-  // counts them: headless hosts wait for them like for loads).
+  // Decodes handed off and not yet published (jsui_pending_loads counts
+  // them: headless hosts wait for them like for loads).
   int pendingDecodes() const { return decoding_; }
   // Tests. waitDecodes blocks until the pool is idle (decoded images still
   // wait for a tick to publish them); finishDecodes then publishes them.
@@ -63,13 +66,26 @@ class ImageCache {
   // proportional: ~3.5 ns/px measured on an M-series Mac, so 256k px is
   // about 1 ms). Images decode inline while the tick's budget lasts, where
   // the hand-over would only cost a frame of pop-in; the rest (a screen of
-  // card art, any image larger than the budget) go to the pool. No pool on
-  // the web: there everything decodes inline.
+  // card art, any image larger than the budget) go off the thread: to the
+  // pool natively, to the browser on the web, where the codec in wasm is a
+  // few times slower and the budget a quarter. Without createImageBitmap
+  // (Node: the headless CLI) everything decodes inline.
+#ifdef __EMSCRIPTEN__
+  int64_t inlineBudgetPixels = 64 * 1024;
+#else
   int64_t inlineBudgetPixels = 256 * 1024;
+#endif
   // Before the tick's loads complete: a new inline budget.
   void beginTick() { inlineSpent_ = 0; }
-  // Decodes the pool ran so far (tests: proves the work left this thread).
+  // Decodes done off the thread so far (tests: proves the work left it).
   uint64_t asyncDecodes = 0;
+
+  // Web: the browser's result for decode `job` (jsui_emscripten_image_*).
+  // begin returns where `w` x `h` premultiplied RGBA pixels go (nullptr:
+  // the job is gone); end hands them over (ok false: the browser failed,
+  // the codec decodes the bytes instead).
+  void* webDecodeBegin(uint32_t job, int w, int h);
+  void webDecodeEnd(uint32_t job, bool ok, bool opaque, double ms);
 
  private:
   struct Entry {
@@ -86,14 +102,35 @@ class ImageCache {
   void decodeInto(const std::string& url, Entry& e, const void* data, size_t size, const std::string& what);
   void fail(const std::string& url, Entry& e, std::string error);
   void count(double us);
+  // A decode that finished off the thread, waiting for pump().
+  struct Decoded {
+    std::string url;
+    uint32_t epoch;
+    sk_sp<SkImage> image;   // nullptr: failed
+    double us;
+    sk_sp<SkData> encoded;  // web: the bytes, for the codec if the browser failed
+  };
+  bool decodeOnWeb(const std::string& url, const void* data, size_t size);
 
   struct Pool;
+  struct WebJob {
+    std::string url;
+    uint32_t epoch;
+    sk_sp<SkData> encoded;
+    sk_sp<SkData> pixels;
+    int w = 0, h = 0;
+  };
   Runtime& rt_;
   std::unordered_map<std::string, Entry> entries_;
   std::unique_ptr<Pool> pool_;  // started on the first large image
-  uint32_t epoch_ = 0;          // clear() drops decodes still on the pool
+  uint32_t epoch_ = 0;          // clear() drops decodes still in flight
   int decoding_ = 0;
   int64_t inlineSpent_ = 0;     // pixels decoded inline this tick
+  // Web decodes in flight (by job id) and finished ones.
+  std::unordered_map<uint32_t, WebJob> webJobs_;
+  std::vector<Decoded> webDone_;
+  uint32_t nextWebJob_ = 1;
+  uint32_t webToken_ = 0;  // this cache in the browser glue (0: not yet)
 };
 
 // Decodes encoded image bytes into a raster image (nullptr on failure).

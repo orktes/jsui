@@ -3399,11 +3399,26 @@ card art (31 images, 6.3 ms on one cold frame of the showcase's inventory
 before) never costs a frame more than about the budget. A pool image's
 entry stays `Loading` until `jsui_tick` publishes the raster image (after
 the loader's completions), then `generation` is bumped and Images sized by
-it are re-measured, as for any load. `data:` URIs follow the same rule. `jsui_pending_loads()` and `jsui_wants_frame()` count the decodes on the
-pool, so `jsui-render`, `jsui-record` and the reference tests wait for them.
-On the web everything still decodes inline (no pool in wasm yet;
-`createImageBitmap` is the planned route). `image_decodes` /
-`image_decode_us` count pool decodes on the tick that publishes them.
+it are re-measured, as for any load. `data:` URIs follow the same rule.
+`jsui_pending_loads()` and `jsui_wants_frame()` count the decodes in flight,
+so `jsui-render`, `jsui-record` and the reference tests wait for them.
+On the web the budget is 64k px (the codec in wasm is a few times slower)
+and the browser decodes the rest instead of a pool: the wasm glue
+(`jsui_js_image_decode` in `image_cache.cpp`, so page and worker mode alike)
+posts the bytes to one or two decode Workers made from a Blob URL, which run
+`createImageBitmap`, read the pixels back through an `OffscreenCanvas` 2D
+context and premultiply them; the runtime's thread only copies the RGBA into
+the `SkData` a raster `SkImage` wraps (`jsui_emscripten_image_begin` /
+`_end`), and the next tick publishes it like a pool decode. Without Workers
+(or a CSP that refuses blob: workers) the same runs on the runtime's thread
+between ticks, the decode itself still off it; when the browser cannot
+decode an image, Skia's codec does it at publish time; without
+`createImageBitmap` (Node: the headless CLI) images decode inline as before.
+The result is always a raster image, so the CPU raster, layout, ShaderView
+and recorded frames see it like any other; on WebGPU Graphite uploads it once
+through its image provider. `image_decodes` / `image_decode_us` count these
+decodes on the tick that publishes them (the time the pool thread or the
+browser took).
 
 ## Reference tests
 
