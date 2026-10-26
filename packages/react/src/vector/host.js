@@ -19,8 +19,7 @@
 // (useNativeDriver), so they animate with no React render and no
 // re-serialization; the VectorView paints them over the element's props.
 
-import { useRef } from 'react';
-import { jsx } from 'react/jsx-runtime';
+import { createElement, useRef } from 'react';
 import { HostInstance } from '../instances.js';
 import { flatten } from '../StyleSheet.js';
 import { warnOnce } from '../native.js';
@@ -336,7 +335,8 @@ export function drawComponent(type, displayName, normalize) {
       if ((anim || nested) && !AnimatedHost) AnimatedHost = createAnimatedComponent(type);
     }
     if (normalize) out = normalize(out);
-    return jsx(anim || nested ? AnimatedHost : type, out);
+    // createElement, not jsx: React's dev-only `key` getter on props would warn.
+    return createElement(anim || nested ? AnimatedHost : type, out);
   }
   DrawComponent.displayName = displayName;
   // Animated.createAnimatedComponent(Circle): its animated props become this

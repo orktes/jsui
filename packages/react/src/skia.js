@@ -947,7 +947,7 @@ function effects(n, out, ctx) {
     if (SHADERS[name] === 1) out.shader = shaderOf(c);
     else if (name === 'BlurMask') {
       const p = c.props;
-      out.maskFilter = { blur: p.blur, style: enumName(p.style, BLUR_NAMES), respectCTM: p.respectCTM !== false };
+      out.maskFilter = { blur: p.blur, style: enumName(p.paintStyle != null ? p.paintStyle : p.style, BLUR_NAMES), respectCTM: p.respectCTM !== false };
     } else if (IMAGE_FILTERS[name] === 1) (out.imageFilter || (out.imageFilter = [])).push(imageFilterOf(c));
     else if (COLOR_FILTERS[name] === 1) (out.colorFilter || (out.colorFilter = [])).push(colorFilterOf(c));
     else if (PATH_EFFECTS[name] === 1) {

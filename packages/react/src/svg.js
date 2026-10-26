@@ -24,7 +24,7 @@
 // Filter primitives, ForeignObject, per-shape touch events (put onPress on
 // the Svg), and text on a path.
 
-import { createElement, useEffect, useState } from 'react';
+import { createContext, createElement, useContext, useEffect, useState } from 'react';
 import { jsx } from 'react/jsx-runtime';
 import { flatten } from './StyleSheet.js';
 import { resolveAssetSource } from './components/basic.js';
@@ -81,7 +81,12 @@ const VIEW_PROPS = {
   accessible: 1, accessibilityLabel: 1, accessibilityRole: 1, 'aria-label': 1, focusable: 1, hitSlop: 1,
 };
 
+// Inside an <Svg>: a nested <Svg> is a drawing element (a viewport), not a view.
+const InSvg = createContext(false);
+const NestedSvg = drawComponent(P + 'Svg', 'Svg');
+
 export function Svg(props) {
+  if (useContext(InSvg)) return createElement(NestedSvg, props);
   const flat = flatten(props.style) || {};
   let width = props.width != null ? props.width : flat.width;
   let height = props.height != null ? props.height : flat.height;
@@ -97,7 +102,7 @@ export function Svg(props) {
   root.height = height;
   const style = [{ overflow: 'hidden' }, props.style, { width: cssLength(width), height: cssLength(height) }];
   if (props.opacity != null) style.push({ opacity: +props.opacity });
-  const out = { mode: 'svg', root, style, children: props.children };
+  const out = { mode: 'svg', root, style, children: jsx(InSvg.Provider, { value: true, children: props.children }) };
   for (const k in props) {
     if (k === 'style' || k === 'children' || k === 'width' || k === 'height' || k === 'viewBox') continue;
     if (VIEW_PROPS[k] === 1 || typeof props[k] === 'function') out[k] = props[k];
