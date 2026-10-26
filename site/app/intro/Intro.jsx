@@ -15,6 +15,12 @@
 //   before the timeline starts, so a cold shader cache does not eat the
 //   first frames. Until then the overlay is the page's background color,
 //   under the HTML splash.
+// - Then, still under the splash, the whole intro is drawn once through at
+//   WARM_STEPS points of its timeline, one per frame: the flying UI's draws
+//   (shadows, gradients, scaled and rotated text, the shader under them)
+//   create their GPU pipelines there, not in the frames that play. With a
+//   cold browser shader cache (a first visit, a new browser version) those
+//   compiles took the intro's first second down to a few frames.
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, Host, Pressable, ShaderView, StyleSheet, Text, View, compileShader, precompileShaders, sksl, useHostMessage, useWindowDimensions } from 'react-native';
 import { colors, font, rarity, site } from '../theme.js';
@@ -24,6 +30,8 @@ const DURATION = 3400;
 const REVEAL = 0.72;
 // No answer from the page (another host, an older index.html): give up.
 const WAIT_MS = 2500;
+// Timeline points drawn under the splash before the intro plays (above).
+const WARM_STEPS = 12;
 
 // --------------------------------------------------------------- shader
 
@@ -404,7 +412,7 @@ function Wordmark({ p, phone }) {
  * settle into place during the reveal; it ends at 1 either way.
  */
 export function Intro({ p }) {
-  const [phase, setPhase] = useState('wait');  // wait -> play -> done
+  const [phase, setPhase] = useState('wait');  // wait -> warm -> play -> done
   const { width, height } = useWindowDimensions();
   const ended = useRef(false);
   const answered = useRef(false);
@@ -425,13 +433,30 @@ export function Intro({ p }) {
       if (ended.current) return;
       const res = compileShader(INTRO_SHADER);
       if (res.error) return finish();
-      setPhase('play');
-      Host.postMessage('intro', { state: 'play' });
-      // ?intro=<p> (a number): hold the timeline there (screenshots, tuning).
-      if (typeof data.hold === 'number') return p.setValue(data.hold);
-      Animated.timing(p, { toValue: 1, duration: DURATION, easing: Easing.linear, useNativeDriver: true }).start(({ finished }) => finished && finish());
+      setPhase('warm');
+      // One timeline point per frame (requestAnimationFrame callbacks run
+      // before the frame paints).
+      let step = 0;
+      const next = () => {
+        if (ended.current) return;
+        if (step < WARM_STEPS) {
+          p.setValue(0.04 + (0.9 * step++) / (WARM_STEPS - 1));
+          return requestAnimationFrame(next);
+        }
+        p.setValue(0);
+        play(data);
+      };
+      requestAnimationFrame(next);
     });
   });
+
+  const play = (data) => {
+    setPhase('play');
+    Host.postMessage('intro', { state: 'play' });
+    // ?intro=<p> (a number): hold the timeline there (screenshots, tuning).
+    if (typeof data.hold === 'number') return p.setValue(data.hold);
+    Animated.timing(p, { toValue: 1, duration: DURATION, easing: Easing.linear, useNativeDriver: true }).start(({ finished }) => finished && finish());
+  };
 
   useEffect(() => {
     const t = setTimeout(() => !answered.current && finish(), WAIT_MS);
@@ -462,7 +487,7 @@ export function Intro({ p }) {
       onGamepadButton={(e) => e.pressed && skip(e)}
       style={[StyleSheet.absoluteFill, phase === 'wait' && { backgroundColor: site.bg }]}
     >
-      {phase === 'play' ? (
+      {phase === 'warm' || phase === 'play' ? (
         <>
           <ShaderView source={INTRO_SHADER} uniforms={{ p }} style={StyleSheet.absoluteFill} />
           <FlyingUI p={p} reach={Math.min(width, height * 1.4) * 0.5} />
