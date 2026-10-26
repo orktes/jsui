@@ -219,6 +219,24 @@ export class HostInstance {
     }
   }
 
+  /** Sends `props` as they are (VectorHost: React props + commands). */
+  replaceProps(props) {
+    this.props = props;
+    this.propCount = -1;
+    if (NATIVE_PROPS) {
+      bridgeCalls++;
+      native.updateProps(this.id, props, this.hidden);
+      return;
+    }
+    const next = toNativeProps(props, this.hidden);
+    if (nativePropsChanged(next, this.nativeProps)) {
+      this.nativeProps = next;
+      this.styleOwned = false;
+      bridgeCalls++;
+      native.setProps(this.id, next);
+    }
+  }
+
   setHidden(hidden) {
     if (this.hidden === hidden) return;
     this.hidden = hidden;

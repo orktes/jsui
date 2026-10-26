@@ -1585,8 +1585,9 @@ enum PaintGroup : uint32_t {
   kGroupLottie = 1u << 19,
   kGroupShader = 1u << 20,  // ShaderView uniforms ("uniform:<name>"), read when painting
   kGroupReveal = 1u << 21,  // textReveal*: which part of a paragraph paints
+  kGroupDraw = 1u << 22,    // VectorView animated drawing props ("draw:<k>.<prop>"), read when painting
 };
-constexpr uint32_t kAllPaintGroups = (1u << 22) - 1;
+constexpr uint32_t kAllPaintGroups = (1u << 23) - 1;
 
 struct PaintKey {
   const char* key;
@@ -1673,6 +1674,7 @@ constexpr PaintKey kPaintKeys[] = {
 
 uint32_t paintGroupOf(const std::string& key) {
   if (key.compare(0, 8, "uniform:") == 0) return kGroupShader;
+  if (key.compare(0, 5, "draw:") == 0) return kGroupDraw;
   size_t lo = 0, hi = sizeof(kPaintKeys) / sizeof(kPaintKeys[0]);
   while (lo < hi) {
     size_t mid = (lo + hi) / 2;

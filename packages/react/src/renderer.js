@@ -6,6 +6,7 @@ import Reconciler from 'react-reconciler';
 import { native, queueMicrotask } from './native.js';
 import { instances, HostInstance, TextInstance } from './instances.js';
 import { armPendingLayoutAnimation } from './layoutAnimation.js';
+import { DRAW_CONTEXT, DrawNode, DrawText, VectorHost, drawInsert, drawRemove, flushVectors, forgetOwner } from './vector/host.js';
 
 export const DiscreteEventPriority = 2;
 export const ContinuousEventPriority = 8;
@@ -70,18 +71,23 @@ export const hostConfig = {
   scheduleMicrotask: queueMicrotask,
 
   getRootHostContext: () => ROOT_CONTEXT,
-  getChildHostContext: (_parent, type) => (type === 'Text' ? TEXT_CONTEXT : ROOT_CONTEXT),
+  // Inside a VectorView (Svg / Canvas): drawing elements, which have no
+  // native node (vector/host.js).
+  getChildHostContext: (parent, type) =>
+    parent.draw === true || type === 'VectorView' ? DRAW_CONTEXT : type === 'Text' ? TEXT_CONTEXT : ROOT_CONTEXT,
   getPublicInstance: (instance) => instance,
   shouldSetTextContent: () => false,
 
   // The root container picks the surface (document) the node belongs to.
-  createInstance(type, props, root) {
+  createInstance(type, props, root, hostContext) {
+    if (hostContext.draw === true) return new DrawNode(type, props);
     const id = native.createNode(type, root.id);
-    const inst = new HostInstance(id, type, props);
+    const inst = type === 'VectorView' ? new VectorHost(id, type, props) : new HostInstance(id, type, props);
     instances.set(id, inst);
     return inst;
   },
   createTextInstance(text, root, hostContext) {
+    if (hostContext.draw === true) return new DrawText(text);
     // Like RN: a string outside <Text> is an error (whitespace is tolerated
     // because it is invisible and very common in hand-written JSX).
     if (!hostContext.inText && text.trim() !== '') throw textOutsideText(text);
@@ -92,6 +98,7 @@ export const hostConfig = {
     return inst;
   },
   appendInitialChild(parent, child) {
+    if (child.draw === true) return drawInsert(parent, child, null);
     native.appendChild(parent.id, child.id);
     attach(parent, child);
   },
@@ -104,10 +111,12 @@ export const hostConfig = {
     armPendingLayoutAnimation();
     return null;
   },
-  resetAfterCommit: noop,
+  // Svg / Canvas whose drawing elements changed send their commands.
+  resetAfterCommit: flushVectors,
   preparePortalMount: noop,
 
   appendChild(parent, child) {
+    if (child.draw === true) return drawInsert(parent, child, null);
     native.appendChild(parent.id, child.id);
     attach(parent, child);
   },
@@ -119,6 +128,7 @@ export const hostConfig = {
     container.children.push(child);
   },
   insertBefore(parent, child, before) {
+    if (child.draw === true) return drawInsert(parent, child, before);
     native.insertBefore(parent.id, child.id, before.id);
     attach(parent, child);
   },
@@ -133,6 +143,7 @@ export const hostConfig = {
   // React only removes host children when deleting them (moves use
   // insertBefore/appendChild), so the native subtree is freed right here.
   removeChild(parent, child) {
+    if (child.draw === true) return drawRemove(parent, child);
     native.removeChild(parent.id, child.id);
     native.destroyNode(child.id);
     child.parent = null;
@@ -159,6 +170,8 @@ export const hostConfig = {
     container.children.length = 0;
   },
   detachDeletedInstance(inst) {
+    if (inst.draw === true) return;
+    forgetOwner(inst);
     forget(inst);
     if (inst.texts) {
       for (const t of inst.texts) forget(t);
@@ -170,18 +183,24 @@ export const hostConfig = {
     inst.update(newProps);
   },
   commitTextUpdate(ti, _old, text) {
+    if (ti.draw === true) return ti.setText(text);
     ti.text = text;
     native.setText(ti.id, text);
   },
   resetTextContent: noop,
   hideInstance: (inst) => inst.setHidden(true),
   unhideInstance(inst, props) {
+    if (inst.draw === true || inst instanceof VectorHost) return inst.setHidden(false);
     inst.props = props;
     inst.propCount = -1;
     inst.setHidden(false);
   },
-  hideTextInstance: (ti) => native.setText(ti.id, ''),
+  hideTextInstance: (ti) => (ti.draw === true ? ti.setHidden(true) : native.setText(ti.id, '')),
   unhideTextInstance(ti, text) {
+    if (ti.draw === true) {
+      ti.text = text;
+      return ti.setHidden(false);
+    }
     ti.text = text;
     native.setText(ti.id, text);
   },

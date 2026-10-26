@@ -33,6 +33,8 @@
     "./shims/*": "./src/shims/*.js",
     "./lottie": "./src/lottie.js",
     "./shader": "./src/shader.js",
+    "./svg": "./src/svg.js",
+    "./skia": "./src/skia.js",
     "./package.json": "./package.json"
   },
   "files": [
