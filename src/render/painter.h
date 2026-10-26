@@ -75,6 +75,7 @@ struct PaintStats {
   int nodesPainted = 0;       // nodes drawn
   int nodesCulled = 0;        // subtrees skipped (outside the damage)
   int nodesOccluded = 0;      // subtrees, or nodes' own drawing, skipped (covered by a later opaque node)
+  int occluders = 0;          // opaque rects that could cover earlier nodes (0: occlusion costs nothing per node)
   int nodesUpdated = 0;       // nodes the last updateDamage() walked (not in skipped, unchanged subtrees)
   int64_t damagedPixels = 0;  // area of the damage bounds (0: full repaint)
   int64_t repaintedPixels = 0;  // area of the damage region (full repaint: the canvas)

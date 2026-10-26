@@ -295,3 +295,50 @@ TEST(occlusion_can_be_turned_off) {
   CHECK_EQ(lastPaintStats(s.doc()).nodesOccluded, 0);
   setOcclusionCulling(true);
 }
+
+// The occluders come from the records (updateRecords keeps each subtree's
+// largest): a paint with none that could cover anything it repaints does
+// no per-node work at all (PaintStats::occluders 0).
+TEST(occlusion_costs_nothing_without_occluders) {
+  Scene s(320, 240);
+  // Translucent backdrop and panels, an opaque box inside a fading panel.
+  s.add(R"J({"style":{"position":"absolute","left":0,"top":0,"width":320,"height":240,"backgroundColor":"rgba(11,16,32,0.9)"},
+    "children":[{"style":{"position":"absolute","left":20,"top":20,"width":200,"height":160,"opacity":0.9},"children":[
+      {"style":{"width":180,"height":100,"backgroundColor":"#1d2442"}}]},
+    {"style":{"position":"absolute","left":240,"top":20,"width":60,"height":60,"backgroundColor":"rgba(255,255,255,0.5)"}}]})J");
+  Node* badge = s.add(R"J({"style":{"position":"absolute","left":250,"top":200,"width":40,"height":20,"backgroundColor":"rgba(242,195,91,0.5)"}})J");
+  s.render();
+  Checker c(s);
+  c.frame("translucent UI");
+  CHECK_EQ(c.lastFull.occluders, 0);
+  CHECK_EQ(c.lastFull.nodesOccluded, 0);
+  // An opaque badge: an occluder for full repaints, not for a damage away
+  // from it.
+  patch(badge, R"J({"left":240,"backgroundColor":"#f2c35b"})J");
+  c.frame("badge moves");
+  CHECK_EQ(c.lastFull.occluders, 1);
+  patch(s.doc().root()->children()[0]->children()[1], R"J({"backgroundColor":"rgba(255,0,0,0.5)"})J");
+  c.frame("change away from the badge");
+  CHECK_EQ(c.lastInc.occluders, 0);
+}
+
+// An occluder inside a subtree skipped as covered (or culled) is behind
+// what paints after that subtree: it must not cull it.
+TEST(occlusion_skipped_occluders_are_behind) {
+  Scene s(320, 240);
+  // zIndex (paint order is not document order there) keeps the inner
+  // occluder in the list though the cover contains it.
+  Node* box = s.add(R"J({"style":{"position":"absolute","left":0,"top":0,"width":320,"height":240},"children":[
+    {"style":{"position":"absolute","left":40,"top":40,"width":140,"height":140,"backgroundColor":"#101426","zIndex":1}},
+    {"style":{"position":"absolute","left":80,"top":80,"width":20,"height":20,"backgroundColor":"#ff4d6a","zIndex":2}},
+    {"style":{"position":"absolute","left":50,"top":50,"width":100,"height":100},"children":[
+      {"style":{"position":"absolute","left":10,"top":10,"width":80,"height":80,"backgroundColor":"#4fd1ff"}}]}]})J");
+  // Painted last, inside the inner occluder (painted first).
+  Node* x = box->children()[1];
+  s.render();
+  Checker c(s);
+  c.frame("over");
+  CHECK(c.lastFull.nodesOccluded >= 1);  // the first subtree
+  patch(x, R"J({"backgroundColor":"#ff0000"})J");
+  c.frame("change on top");
+}

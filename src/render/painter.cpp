@@ -1997,6 +1997,37 @@ bool isPainted(const Node* n) {
   return n->yoga() && s.display && s.opacity > 0 && !(s.backfaceHidden && backfaceFlipped(s));
 }
 
+// An opaque rect a node paints (occlusion culling, see Occlusion).
+constexpr int kMaxOccluders = 4;
+struct OccCandidate {
+  SkIRect rect;
+  Node* node;
+};
+
+// Adds a candidate to a list of at most kMaxOccluders, which keeps the
+// largest. `later`: it paints after all of the list, so those it contains
+// are dropped (it covers whatever they would).
+void addOccluder(OccCandidate* list, uint8_t* count, const SkIRect& r, Node* node, bool later) {
+  if (r.isEmpty()) return;
+  auto area = [](const SkIRect& a) { return int64_t(a.width()) * a.height(); };
+  int n = *count;
+  if (later) {
+    int k = 0;
+    for (int i = 0; i < n; i++)
+      if (!r.contains(list[i].rect)) list[k++] = list[i];
+    n = k;
+  }
+  if (n < kMaxOccluders) {
+    list[n++] = {r, node};
+  } else {
+    int smallest = 0;
+    for (int i = 1; i < n; i++)
+      if (area(list[i].rect) < area(list[smallest].rect)) smallest = i;
+    if (area(list[smallest].rect) < area(r)) list[smallest] = {r, node};
+  }
+  *count = uint8_t(n);
+}
+
 // What the previous frame painted for a node, in device pixels. Comparing
 // it with the current frame gives the damaged region (incremental repaint).
 struct NodeRecord : Node::Cache {
@@ -2088,11 +2119,11 @@ struct NodeRecord : Node::Cache {
   // copied entries still hold at the same offsets (see updateRecords).
   uint64_t walkedPass = 0;
   uint32_t walkedCurved = 0, walkedRaster = 0;
-  // Occlusion culling (see collectOccluders): the paint whose occluder walk
-  // reached the node, and the sequence numbers of the occluders that paint
-  // after its own drawing (`occOwn`) and after its whole subtree (`occAfter`).
-  uint64_t occPass = 0;
-  uint32_t occOwn = 0, occAfter = 0;
+  // Occlusion culling (see Occlusion): the subtree's largest opaque rects
+  // that may occlude what paints before them (device pixels, cut by the
+  // clips inside the subtree), as updateRecords last found them.
+  OccCandidate occ[kMaxOccluders];
+  uint8_t occCount = 0;
 };
 
 // A node with anti-aliased curved or diagonal outlines, in device pixels.
@@ -2173,6 +2204,7 @@ const Box& boxOf(Node* n, float w, float h, Box* scratch) {
 }
 
 struct Occlusion;
+void occlusionPass(Occlusion* o, const Node* n, const SkIRect& bounds);
 
 struct Ctx {
   Document& doc;
@@ -2195,10 +2227,10 @@ struct Ctx {
   bool backdropRender = false;
   size_t backdropDepth = 0;
   int backdropFirst = -1;
-  // Occluders of this paint (see collectOccluders; null: no occlusion
-  // culling), and whether paintContent leaves out the node's own drawing
-  // (covered; its children, outline and scroll indicators are painted).
-  const Occlusion* occlusion = nullptr;
+  // Occluders of this paint (see Occlusion; null: no occlusion culling),
+  // and whether paintContent leaves out the node's own drawing (covered;
+  // its children, outline and scroll indicators are painted).
+  Occlusion* occlusion = nullptr;
   bool ownOccluded = false;
 };
 
@@ -2378,6 +2410,10 @@ void paintChildren(Node* n, SkCanvas* c, Ctx& ctx) {
 void paintBackdropChildren(Node* n, SkCanvas* c, Ctx& ctx, size_t first) {
   const auto& kids = n->children();
   if (!ctx.backdropRender) {
+    // Those before it are in the backdrop's texture: painted.
+    if (ctx.occlusion)
+      for (size_t i = 0; i < first && i < kids.size(); i++)
+        if (auto* r = static_cast<const NodeRecord*>(kids[i]->paintCache.get())) occlusionPass(ctx.occlusion, kids[i], r->subtree);
     for (size_t i = first; i < kids.size(); i++) paintNode(kids[i], c, ctx);
     return;
   }
@@ -2801,19 +2837,23 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
 
 // ------------------------------------------------------- occlusion culling
 
-// Opaque rects that later nodes paint, in device pixels. Before a paint,
-// collectOccluders walks the tree in paint order over the records
-// updateDamage left (nothing is placed again) and notes, for each node with
-// a solid opaque background whose pixels reach the target as they are, the
-// pixels that background is sure to cover: its border box (inside rounded
-// corners) clipped by its ancestors' clips. Each gets a sequence number in
-// paint order, and each node reached the numbers of the occluders that
-// paint after its own drawing and after its subtree. paintNode then skips a
-// subtree, or a node's own drawing, whose bounds (the records' `subtree` /
-// `own`, as damage culling uses) lie inside an occluder that paints after
-// it: those pixels end up covered, so the frame is the same, without their
-// draws (CPU recording, GPU encoding and overdraw). A full-screen menu or a
-// modal card over a live HUD then records nothing beneath it.
+// Opaque rects that later nodes paint, in device pixels. updateRecords
+// keeps, in each node's record, the largest opaque rects of its subtree
+// (kMaxOccluders, OccCandidate): for each node with a solid opaque
+// background whose pixels reach the target as they are, the pixels that
+// background is sure to cover (its border box inside rounded corners, cut
+// by the clips of the ancestors in the subtree). Unchanged subtrees keep
+// theirs with their records, so this costs nothing per frame beyond the
+// nodes updateRecords walks anyway, and the root's list is the frame's.
+// A paint takes those of the root's that reach its damage (none: nothing
+// to do per node) and, as it walks the tree in paint order, marks each one
+// reached once paintNode gets to it or skips the subtree holding it.
+// paintNode then skips a subtree whose `subtree` bounds lie inside an
+// occluder not reached and not inside the subtree, or only a node's own
+// drawing whose `own` bounds lie inside one not reached: those pixels end
+// up covered, so the frame is the same, without their draws (CPU
+// recording, GPU encoding and overdraw). A full-screen menu or a modal
+// card over a live HUD then records nothing beneath it.
 //
 // What qualifies as an occluder: a background colour at full alpha, opacity
 // 1 (its own and every ancestor's), no blend mode, filter or content shader
@@ -2821,9 +2861,10 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
 // its pixels), and an axis-aligned device matrix (scale and translation, or
 // quarter turns; a rotation or skew paints a quad the rect would not
 // describe). Its rect is rounded inwards to whole pixels, inset by a pixel
-// more for rounded corners (anti-aliasing), and only the kMaxOccluders
-// largest are kept (an occluder that a later one contains is dropped: the
-// later one covers whatever it would).
+// more for rounded corners (anti-aliasing). Of a subtree's, the largest are
+// kept; one that a later one contains is dropped (the later one covers
+// whatever it would). Inside a raster-cached subtree that moves (drawn from
+// its texture at the nearest whole pixel) none is used.
 //
 // What is never culled: nodes inside a filter or content-shader layer (the
 // layer moves pixels, so a covered one can still show outside the cover;
@@ -2838,46 +2879,77 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
 // what was painted below it (no backdrop filters); an effect that does must
 // end the occluders' reach at itself (nodes before it cannot be culled by
 // occluders after it).
-constexpr int kMaxOccluders = 8;
-struct Occlusion {
-  uint64_t pass = 0;
-  uint32_t seq = 0;  // occluders seen so far (paint order)
-  int count = 0;
-  struct Rect {
-    SkIRect rect;
-    uint32_t seq;
-  } rects[kMaxOccluders];
-  const SkRegion* damage = nullptr;
-  bool raster = false;  // raster-cached subtrees are drawn from textures
-  std::vector<Node*>* order = nullptr;
+Node* paintParent(const Node* n) { return n->renderParent() ? n->renderParent() : n->ghostOf; }
 
-  void add(const SkIRect& r) {
-    uint32_t s = seq++;
-    int64_t area = int64_t(r.width()) * r.height();
-    // Drop the ones it contains (earlier: it covers all they would).
-    int k = 0;
-    for (int i = 0; i < count; i++)
-      if (!r.contains(rects[i].rect)) rects[k++] = rects[i];
-    count = k;
-    if (count < kMaxOccluders) {
-      rects[count++] = {r, s};
-      return;
+// Whether `n` is `ancestor` or inside it.
+bool within(const Node* n, const Node* ancestor) {
+  for (; n; n = paintParent(n))
+    if (n == ancestor) return true;
+  return false;
+}
+
+struct Occlusion {
+  struct Cand {
+    SkIRect rect;
+    Node* node;
+    bool reached;
+  } cands[kMaxOccluders];
+  int count = 0;
+  int unreached = 0;
+
+  // The root's candidates that this paint can use. False: none.
+  bool start(const NodeRecord* root, const SkRegion* damage, const SkIRect& screen, bool raster) {
+    for (int i = 0; i < root->occCount; i++) {
+      const OccCandidate& oc = root->occ[i];
+      SkIRect r;
+      // Outside the damage it covers nothing painted (what it would cover
+      // lies inside it).
+      if (!r.intersect(oc.rect, screen) || (damage && !damage->intersects(r))) continue;
+      bool inexact = false;
+      for (const Node* a = oc.node; a && raster && !inexact; a = paintParent(a)) {
+        const auto* ar = static_cast<const NodeRecord*>(a->paintCache.get());
+        inexact = ar && ar->rasterOn && ar->moved;
+      }
+      if (!inexact) cands[count++] = {r, oc.node, false};
     }
-    int smallest = 0;
-    for (int i = 1; i < count; i++)
-      if (int64_t(rects[i].rect.width()) * rects[i].rect.height() <
-          int64_t(rects[smallest].rect.width()) * rects[smallest].rect.height())
-        smallest = i;
-    if (int64_t(rects[smallest].rect.width()) * rects[smallest].rect.height() < area) rects[smallest] = {r, s};
+    unreached = count;
+    return count > 0;
   }
-  // Whether `bounds` lie inside an occluder numbered `from` or later.
-  bool covers(const SkIRect& bounds, uint32_t from) const {
-    if (bounds.isEmpty()) return false;
+  // paintNode got to `n`.
+  void enter(const Node* n) {
+    for (int i = 0; i < count && unreached; i++)
+      if (cands[i].node == n && !cands[i].reached) {
+        cands[i].reached = true;
+        unreached--;
+      }
+  }
+  // The subtree of `n` (device bounds `bounds`) was painted or skipped as a
+  // whole: the occluders in it are reached.
+  void pass(const Node* n, const SkIRect& bounds) {
+    for (int i = 0; i < count && unreached; i++)
+      if (!cands[i].reached && bounds.contains(cands[i].rect) && within(cands[i].node, n)) {
+        cands[i].reached = true;
+        unreached--;
+      }
+  }
+  // Whether an occluder painted after the subtree of `n` covers it.
+  bool coversSubtree(const Node* n, const SkIRect& bounds) const {
+    if (!unreached || bounds.isEmpty()) return false;
     for (int i = 0; i < count; i++)
-      if (rects[i].seq >= from && rects[i].rect.contains(bounds)) return true;
+      if (!cands[i].reached && cands[i].rect.contains(bounds) && !within(cands[i].node, n)) return true;
+    return false;
+  }
+  // Whether an occluder painted after the node's own drawing (the node is
+  // entered) covers it.
+  bool coversOwn(const SkIRect& bounds) const {
+    if (!unreached || bounds.isEmpty()) return false;
+    for (int i = 0; i < count; i++)
+      if (!cands[i].reached && cands[i].rect.contains(bounds)) return true;
     return false;
   }
 };
+
+void occlusionPass(Occlusion* o, const Node* n, const SkIRect& bounds) { o->pass(n, bounds); }
 
 bool gOcclusion = true;  // setOcclusionCulling
 
@@ -2928,47 +3000,22 @@ SkIRect opaquePixels(const SkMatrix& m, const SkRRect& rr) {
   return out.isEmpty() ? SkIRect::MakeEmpty() : out;
 }
 
-// See Occlusion. `clip`: the device pixels the ancestors' clips leave
-// fully visible; `cull`: the node may be culled (not inside a layer that
-// moves pixels); `solid`: its opaque pixels reach the target unchanged.
-void collectOccluders(Node* n, Occlusion& o, const SkIRect& clip, bool cull, bool solid) {
-  if (!n->yoga() || !isPainted(n)) return;
-  auto* rec = static_cast<NodeRecord*>(n->paintCache.get());
-  // No record of this frame's placement: nothing in it occludes or is
-  // culled (its ancestors' bounds hold it, they still can be).
-  if (!rec || !rec->valid || !rec->painted || rec->subtree.isEmpty()) return;
-  // Culled by the damage (paintNode): not painted.
-  if (o.damage && !o.damage->intersects(rec->subtree)) return;
+// Whether what the node's subtree paints reaches the target as it is: no
+// layer of its own that blends, fades, filters or reshades it.
+bool passesOpaque(Node* n) {
   const ComputedStyle& s = n->style();
-  const float opacity = s.opacity * animOpacity(n);
-  if (opacity * 255 < 0.5f) return;  // not painted (paintNode)
-  const bool moves = !s.filters.empty() || (n->type() == NodeType::Shader && shader::wantsContent(n));
-  solid = solid && opacity >= 1 && !moves && !s.blendMode;
-  // Drawn from its texture at the nearest whole pixel while it moves.
-  if (o.raster && rec->rasterOn && rec->moved) solid = false;
-  const SkMatrix& m = rec->matrix;
+  return s.opacity * animOpacity(n) >= 1 && !s.blendMode && s.filters.empty() &&
+         !(n->type() == NodeType::Shader && shader::wantsContent(n));
+}
+
+// The node's own occluder (see Occlusion) under device matrix `m` at the
+// snapped size w x h, within `clip`; empty when it has none.
+SkIRect ownOccluder(Node* n, const SkMatrix& m, float w, float h, const SkIRect& clip) {
+  const ComputedStyle& s = n->style();
+  if (s.backgroundColor.a < 1 || !m.rectStaysRect() || !passesOpaque(n)) return SkIRect::MakeEmpty();
   Box scratch;
-  const Box* b = nullptr;
-  if (solid && s.backgroundColor.a >= 1 && m.rectStaysRect()) {
-    b = &boxOf(n, rec->w, rec->h, &scratch);
-    SkIRect r;
-    if (r.intersect(opaquePixels(m, b->outer), clip)) o.add(r);
-  }
-  if (cull) {
-    rec->occPass = o.pass;
-    rec->occOwn = o.seq;
-  }
-  if (paintsChildren(n) && (!n->children().empty() || !n->ghosts.empty())) {
-    SkIRect childClip = clip;
-    if (clipsChildren(n)) {
-      if (!b) b = &boxOf(n, rec->w, rec->h, &scratch);
-      if (!childClip.intersect(opaquePixels(m, b->inner))) childClip.setEmpty();
-    }
-    // Under an empty clip nothing occludes, but the nodes still get their
-    // numbers (they may be culled).
-    forPaintOrder(n, *o.order, [&](Node* ch) { collectOccluders(ch, o, childClip, cull && !moves, solid); });
-  }
-  if (cull) rec->occAfter = o.seq;
+  SkIRect r = opaquePixels(m, boxOf(n, w, h, &scratch).outer);
+  return r.intersect(clip) ? r : SkIRect::MakeEmpty();
 }
 
 void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
@@ -2983,17 +3030,21 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   const auto* rec = static_cast<const NodeRecord*>(n->paintCache.get());
   if (ctx.damage && rec && rec->valid && !ctx.damage->intersects(rec->subtree)) {
     ctx.stats.nodesCulled++;
+    if (ctx.occlusion) ctx.occlusion->pass(n, rec->subtree);
     return;
   }
   // Occlusion culling: covered by an opaque node painted after it, the whole
   // subtree, or only its own drawing (see Occlusion).
   bool ownOccluded = false;
-  if (ctx.occlusion && rec && rec->occPass == ctx.occlusion->pass) {
-    if (ctx.occlusion->covers(rec->subtree, rec->occAfter)) {
+  Occlusion* const occlusion = ctx.occlusion;
+  if (occlusion && rec && rec->valid) {
+    if (occlusion->coversSubtree(n, rec->subtree)) {
       ctx.stats.nodesOccluded++;
+      occlusion->pass(n, rec->subtree);
       return;
     }
-    ownOccluded = drawsItself(n) && ctx.occlusion->covers(rec->own, rec->occOwn);
+    occlusion->enter(n);
+    ownOccluded = drawsItself(n) && occlusion->coversOwn(rec->own);
   }
   const ComputedStyle& s = n->style();
   // Where updateRecords placed it, when that was for this snap space and
@@ -3044,6 +3095,8 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
     ctx.snapSpace = parentSnap;
     ctx.transformed = parentTransformed;
     if (drawn) {
+      // From its texture: what it holds is painted now.
+      if (occlusion && rec) occlusion->pass(n, rec->subtree);
       c->restoreToCount(saveCount);
       return;
     }
@@ -3071,7 +3124,11 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   ctx.backdropFirst = first;
   ctx.ownOccluded = ownOccluded;
   if (ownOccluded) ctx.stats.nodesOccluded++;
+  // A layer that moves pixels: nothing in it is culled (it holds no
+  // occluders either, see occluderOf).
+  if (!s.filters.empty() || contentShader) ctx.occlusion = nullptr;
   paintContent(n, c, ctx, p.snap, p.w, p.h);
+  ctx.occlusion = occlusion;
   ctx.alpha = 1;
   ctx.snapSpace = parentSnap;
   ctx.transformed = parentTransformed;
@@ -3443,6 +3500,8 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
   SkMatrix local;
   SkVector snap = {0, 0};
   bool below = false;  // a descendant's painting changed in its parent's space
+  OccCandidate occ[kMaxOccluders];  // the subtree's occluders (see Occlusion)
+  uint8_t occCount = 0;
   uint32_t subtreeNodes = painted ? 1 : 0;
   bool isolatable = true;
   SkIRect full = SkIRect::MakeEmpty();  // `sub` without the clips of ancestors
@@ -3514,6 +3573,7 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
     }
     sub = own;
     checkContent();
+    addOccluder(occ, &occCount, ownOccluder(n, m, w, h, clip), n, false);
     if (paintsChildren(n) && (!n->children().empty() || !n->ghosts.empty())) {
       SkIRect childClip = clip;
       if (clipsChildren(n) && !childClip.intersect(deviceBounds(m, SkRect::MakeWH(w, h)))) childClip.setEmpty();
@@ -3536,6 +3596,13 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
       SkIRect box = SkIRect::MakeEmpty();
       const bool clips = clipsChildren(n);
       if (clips) box = deviceBounds(m, SkRect::MakeWH(w, h));
+      // The children's occluders, in paint order unless zIndex reorders
+      // them, cut by this node's clip (inside its rounded corners).
+      const bool kidsOcclude = passesOpaque(n);
+      bool zSorted = false;
+      for (Node* ch : n->children()) zSorted |= ch->style().hasZIndex && ch->style().zIndex != 0;
+      SkIRect occClip = SkIRect::MakeEmpty();
+      bool occClipDone = !clips;
       // Skipped (with its subtree) since a pass that walked it: its children
       // were last brought up to date then, and their entries are in the
       // previous pass' lists at the same offsets from the node's own as in
@@ -3622,6 +3689,18 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
           isolatable &= cr->isolatable;
           SkIRect cf = skip ? childFull : cr->subtreeFull;
           if (!clips || cf.intersect(box)) full.join(cf);
+        }
+        if (kidsOcclude && cr && cr->occCount && !cr->subtree.isEmpty()) {
+          if (!occClipDone) {
+            Box scratch;
+            occClip = opaquePixels(m, boxOf(n, w, h, &scratch).inner);
+            occClipDone = true;
+          }
+          for (int i = 0; i < cr->occCount; i++) {
+            SkIRect r = cr->occ[i].rect;
+            if (clips && !r.intersect(occClip)) continue;
+            addOccluder(occ, &occCount, r, cr->occ[i].node, !zSorted);
+          }
         }
       };
       for (Node* ch : n->ghosts) visit(ch);
@@ -3725,6 +3804,8 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
   rec->barAlpha = barAlpha;
   rec->own = own;
   rec->subtree = sub;
+  std::copy(occ, occ + occCount, rec->occ);
+  rec->occCount = occCount;
   rec->matrix = m;
   rec->children = kids;
   rec->version = n->paintVersion;
@@ -4137,17 +4218,12 @@ void paintDocumentOver(Document& doc, SkCanvas* canvas, const SkRegion* damage, 
   // updateDamage: none when a node changed since (the root is marked) or the
   // canvas maps the document elsewhere than the records do.
   Occlusion occlusion;
-  const auto* rootRec = static_cast<const NodeRecord*>(doc.root()->paintCache.get());
-  if (occlusionEnabled() && rootRec && rootRec->valid && !doc.root()->paintTreeDirty() &&
-      rootRec->inMatrix == ctx.snapSpace) {
-    static std::atomic<uint64_t> passes{0};
-    occlusion.pass = ++passes;
-    occlusion.damage = damage;
-    occlusion.raster = ctx.layers && ctx.layers->impl->raster;
-    occlusion.order = &root->order;
-    collectOccluders(doc.root(), occlusion, SkIRect::MakeSize(canvas->getBaseLayerSize()), true, true);
-    if (occlusion.count) ctx.occlusion = &occlusion;
-  }
+  if (occlusionEnabled() && root->valid && root->occCount && !doc.root()->paintTreeDirty() &&
+      root->inMatrix == ctx.snapSpace &&
+      occlusion.start(root, damage, SkIRect::MakeSize(canvas->getBaseLayerSize()),
+                      ctx.layers && ctx.layers->impl->raster))
+    ctx.occlusion = &occlusion;
+  ctx.stats.occluders = occlusion.count;
   paintNode(doc.root(), canvas, ctx);
   canvas->restore();
   if (counter) counter->restore();
@@ -4264,6 +4340,7 @@ void paintDocumentRects(Document& doc, SkCanvas* canvas, const std::vector<SkIRe
     sum.nodesPainted += s.nodesPainted;
     sum.nodesCulled += s.nodesCulled;
     sum.nodesOccluded += s.nodesOccluded;
+    sum.occluders = std::max(sum.occluders, s.occluders);
     sum.damagedPixels += s.damagedPixels;
     sum.repaintedPixels += s.repaintedPixels;
     sum.damageRects += s.damageRects;

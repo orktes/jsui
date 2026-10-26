@@ -3217,34 +3217,41 @@ the expensive per-pixel work is done once:
   rrects analytically and, patched, applies a whole-pixel damage rect as a
   scissor (see WebGPU).
 * **Occlusion.** What a later opaque node covers is not painted
-  (`Occlusion`, `collectOccluders`). Before each paint (and each damage
-  rect's pass) a walk in paint order over the records `updateDamage` left
-  notes the device pixels that qualifying nodes are sure to cover: a solid
-  background colour at full alpha, opacity 1 (inherited too), no blend
-  mode, filter or content shader on the node or an ancestor, an
-  axis-aligned device matrix (scale, translation, quarter turns); the
-  border box inside the rounded corners' arcs, clipped by the ancestors'
-  clips (inside their rounded corners too), rounded inwards to whole
-  pixels. The 8 largest are kept, each with its position in paint order
-  (one a later one contains is dropped). `paintNode` skips a subtree whose
-  `subtree` bounds lie inside an occluder that paints after it, or only a
-  node's own drawing (background, borders, shadows, text, image) when its
-  `own` bounds do; covered pixels are painted over anyway, so the frame is
-  the same, and a modal card or a full-screen menu over a live HUD records
-  nothing below it. Not culled: what is inside a filter or content-shader
-  layer (it spreads pixels past the cover; the layer node itself is culled
-  whole, its bounds include the spread), and nothing while the textures
-  of the LayerCache (opacity layers, raster-cached subtrees, the static
-  backdrop) are rendered, since they are drawn again under other covers. A
-  paint after a change that `updateDamage` has not seen (the root is
-  marked), or on a canvas that maps the document elsewhere, culls nothing.
-  The damage is computed as before (covered nodes keep their records), so
-  a cover moving away repaints what was under it. `PaintStats::nodesOccluded`
-  counts the skips; `setOcclusionCulling(false)` or `JSUI_OCCLUSION=off`
-  paints everything, for A/B runs (`tests/native/occlusion_test.cpp`
-  compares the two). Nothing in the painter reads what was painted below
-  it (no backdrop filters); such an effect would have to end the
-  occluders' reach at itself.
+  (`Occlusion`). `updateRecords` keeps in each record the 4 largest opaque
+  rects of its subtree (`OccCandidate`): the device pixels that a node with
+  a solid background colour at full alpha, opacity 1, no blend mode, filter
+  or content shader (its own or an ancestor's: a parent with any of them
+  drops its children's) and an axis-aligned device matrix (scale,
+  translation, quarter turns) is sure to cover, its border box inside the
+  rounded corners' arcs, cut by the clips in the subtree (inside their
+  rounded corners too), rounded inwards to whole pixels. One that a later
+  one contains is dropped. Unchanged subtrees keep theirs with their
+  records, so it costs nothing beyond the nodes the update walks anyway,
+  and the root's list is the frame's. A paint (each damage rect's pass)
+  takes those of the root's that reach its damage; with none it does no
+  per-node work (`PaintStats::occluders`). Walking in paint order it marks
+  each one reached when it gets to it or skips the subtree holding it (culled,
+  covered, drawn from a texture, in the static backdrop), and `paintNode`
+  skips a subtree whose `subtree` bounds lie inside one not reached and not
+  inside the subtree, or only a node's own drawing (background, borders,
+  shadows, text, image) when its `own` bounds lie inside one not reached;
+  covered pixels are painted over anyway, so the frame is the same, and a
+  modal card or a full-screen menu over a live HUD records nothing below
+  it. Not culled: what is inside a filter or content-shader layer (it
+  spreads pixels past the cover; the layer node itself is culled whole, its
+  bounds include the spread), and nothing while the textures of the
+  LayerCache (opacity layers, raster-cached subtrees, the static backdrop)
+  are rendered, since they are drawn again under other covers; an occluder
+  inside a raster-cached subtree that moves (drawn at the nearest whole
+  pixel) is not used. A paint after a change that `updateDamage` has not
+  seen (the root is marked), or on a canvas that maps the document
+  elsewhere, culls nothing. The damage is computed as before (covered nodes
+  keep their records), so a cover moving away repaints what was under it.
+  `PaintStats::nodesOccluded` counts the skips; `setOcclusionCulling(false)`
+  or `JSUI_OCCLUSION=off` paints everything, for A/B runs
+  (`tests/native/occlusion_test.cpp` compares the two to the bit). Nothing
+  in the painter reads what was painted below it (no backdrop filters);
+  such an effect would have to end the occluders' reach at itself.
 * **Scroll blit.** When a ScrollView's content only scrolled by whole device
   pixels over a uniform backdrop, the CPU path moves the viewport's pixels
   and repaints only what the scroll exposed, what is painted above the
