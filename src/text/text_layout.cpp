@@ -1144,6 +1144,23 @@ void paintText(Node* node, SkCanvas* canvas, float x, float y, float width, floa
   }
 }
 
+bool paintBounds(Node* node, float x, float y, float width, SkRect* out) {
+  tl::Paragraph* p = layoutParagraph(node, width);
+  if (!p || node->style().textReveal >= 0) return false;
+  auto* c = static_cast<TextCache*>(node->textCache.get());
+  Resolved r;
+  merge(&r, node->style().text);
+  // Glyph ink past the line boxes (italics, accents, swashes): half a line.
+  const float h = p->getHeight();
+  float pad = h / float(std::max<size_t>(1, p->lineNumber())) * 0.5f + 2;
+  for (const Shadow& sh : r.shadows)
+    pad = std::max(pad, std::max(std::fabs(sh.offsetX), std::fabs(sh.offsetY)) + sh.blur * 1.5f + 2);
+  // A line wider than the box (an unbreakable word) overflows on either side.
+  const float over = std::max(0.f, p->getLongestLine() - width);
+  *out = SkRect::MakeLTRB(x - over, y + c->paintDy, x + width + over, y + c->paintDy + h).makeOutset(pad, pad);
+  return true;
+}
+
 bool recolorable(Node* n) {
   auto* c = n->type() == NodeType::Text ? static_cast<TextCache*>(n->textCache.get()) : nullptr;
   return c && c->oneColor;

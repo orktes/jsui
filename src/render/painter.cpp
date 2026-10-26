@@ -537,6 +537,7 @@ struct SpriteCache {
   SkColorType colorType = kUnknown_SkColorType;
   sk_sp<SkColorSpace> colorSpace;
   int draws = 0, renders = 0;  // this paint's sprite draws / of which rendered
+  int textSnaps = 0;           // this paint's scaling-text textures rendered (drawScalingText)
   std::vector<uint32_t> scratch;  // a resampled sprite
   static constexpr size_t kMaxBytes = 48u << 20;
   static constexpr int64_t kMinPixels = 128 * 128;  // smaller draws are cheap enough directly
@@ -2032,6 +2033,17 @@ struct NodeRecord : Node::Cache {
   // The cached layer was last drawn at a whole-pixel offset from where the
   // node is (while it moved); repainted exactly once it stops.
   mutable bool layerInexact = false;
+  // A Text node's paint while its scale animates (drawScalingText): the
+  // texture, the device matrix it was rendered at, its device origin, and
+  // the layerStamp / GPU recorder it belongs to.
+  struct TextSnap {
+    sk_sp<SkImage> image;
+    SkMatrix matrix;
+    SkIPoint origin = {0, 0};
+    uint64_t stamp = 0;
+    const void* owner = nullptr;
+  };
+  mutable std::shared_ptr<TextSnap> textSnap;
   // Raster cache (see updateRasterCache): painted nodes in the subtree,
   // whether it paints the same into a texture of its own (no blend modes),
   // and its state: drawn from its texture (rasterOn), the consecutive
@@ -2392,6 +2404,73 @@ SkIRect scrollIndicatorBounds(Node* n, const SkMatrix& m, float w, float h, cons
 // Draws the node's own decorations, content and children in its border-box
 // coordinate space. `snap` is the offset from the layout position to the
 // pixel-snapped one (already applied to the canvas); `w`, `h` the snapped size.
+// Text whose scale animates (a card springing on hover) would be drawn at a
+// new device size every frame: its glyphs rasterized again, uploaded to the
+// atlas and laid out into new sub-runs each time (on the web the larger part
+// of such a frame's text cost). Like a compositor, it is drawn instead from a
+// texture of its paint at the scale the animation started at, scaled with
+// bilinear filtering, and repainted exactly once the scale settles
+// (NodeRecord::approximate). GPU canvases only (a raster canvas draws glyphs
+// from its strike cache cheaply). False: draw it directly.
+bool drawScalingText(Node* n, SkCanvas* c, SpriteCache& sc, const NodeRecord& rec, float x, float y, float w,
+                     float h, const SkMatrix* layoutSpace) {
+  const void* owner = c->recorder() ? static_cast<const void*>(c->recorder())
+                                    : static_cast<const void*>(c->recordingContext());
+  const SkMatrix m = c->getTotalMatrix();
+  if (!owner || !m.isScaleTranslate() || m.getScaleX() <= 0 || m.getScaleY() <= 0) return false;
+  auto& snap = rec.textSnap;
+  // Scaled up past a quarter the texture would blur visibly: rendered again.
+  auto near = [](float a, float b) { return a <= b * 1.25f && b <= a * 1.25f; };
+  bool hit = snap && snap->image && snap->stamp == rec.layerStamp && snap->owner == owner &&
+             snap->image->colorType() == c->imageInfo().colorType() &&
+             near(m.getScaleX(), snap->matrix.getScaleX()) && near(m.getScaleY(), snap->matrix.getScaleY());
+  if (!hit) {
+    snap.reset();
+    // Text changing as well (a color transition) would need a texture every
+    // frame; and a whole screen zooming in must not render one per label in
+    // a single frame.
+    constexpr int kMaxSnapsPerPaint = 16;
+    if (rec.stableFrames < 1 || sc.textSnaps >= kMaxSnapsPerPaint) return false;
+    SkRect local;
+    if (!text::paintBounds(n, x, y, w, &local)) return false;
+    SkIRect area = m.mapRect(local).roundOut();
+    constexpr int kMaxSide = 2048;
+    if (area.isEmpty() || area.width() > kMaxSide || area.height() > kMaxSide) return false;
+    SkImageInfo info = c->imageInfo().makeWH(area.width(), area.height()).makeAlphaType(kPremul_SkAlphaType);
+    SkSurfaceProps props = surfaceProps();
+    sk_sp<SkSurface> surf = c->makeSurface(info, &props);
+    if (!surf) return false;
+    SkCanvas* oc = surf->getCanvas();
+    oc->clear(SK_ColorTRANSPARENT);
+    oc->translate(float(-area.left()), float(-area.top()));
+    oc->concat(m);
+    text::paintText(n, oc, x, y, w, h, layoutSpace);
+#if defined(JSUI_GRAPHITE_AS_IMAGE)
+    sk_sp<SkImage> image = oc->recorder() ? SkSurfaces::AsImage(surf) : surf->makeImageSnapshot();
+#else
+    sk_sp<SkImage> image = surf->makeImageSnapshot();
+#endif
+    if (!image) return false;
+    snap = std::make_shared<NodeRecord::TextSnap>();
+    snap->image = std::move(image);
+    snap->matrix = m;
+    snap->origin = {area.left(), area.top()};
+    snap->stamp = rec.layerStamp;
+    snap->owner = owner;
+    sc.textSnaps++;
+  }
+  // The texture's device space -> this frame's.
+  SkMatrix inv, t;
+  if (!snap->matrix.invert(&inv)) return false;
+  t.setConcat(m, inv);
+  c->save();
+  c->setMatrix(t);
+  c->drawImage(snap->image.get(), float(snap->origin.fX), float(snap->origin.fY),
+               SkSamplingOptions(SkFilterMode::kLinear));
+  c->restore();
+  return true;
+}
+
 void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float h) {
   const ComputedStyle& s = n->style();
   // On the static backdrop's path (see Backdrop): only its part of the node
@@ -2427,8 +2506,16 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
     SkMatrix layoutSpace = ctx.snapSpace;
     layoutSpace.preTranslate(snap.fX, snap.fY);
     const SkMatrix* ls = ctx.transformed ? &layoutSpace : nullptr;
-    if (n->type() == NodeType::Text) text::paintText(n, c, x, y, cw, ch, ls);
-    else text::paintTextInput(n, c, x, y, cw, ch, ls);
+    const auto* rec = static_cast<const NodeRecord*>(n->paintCache.get());
+    if (n->type() == NodeType::Text) {
+          if (rec && motion.scaling && drawScalingText(n, c, spriteCache(ctx.root), *rec, x, y, cw, ch, ls))
+        inexact = true;
+      else
+        text::paintText(n, c, x, y, cw, ch, ls);
+      if (rec && !motion.scaling) rec->textSnap.reset();
+    } else {
+      text::paintTextInput(n, c, x, y, cw, ch, ls);
+    }
   }
   if (n->type() == NodeType::Image) {
     SpriteKey key;
@@ -3769,7 +3856,7 @@ void paintDocumentOver(Document& doc, SkCanvas* canvas, const SkRegion* damage, 
   root->shadows.draws = root->shadows.renders = 0;
   SpriteCache& sprites = root->sprites;
   sprites.frame++;
-  sprites.draws = sprites.renders = 0;
+  sprites.draws = sprites.renders = sprites.textSnaps = 0;
   {
     SkImageInfo info = canvas->imageInfo();
     sprites.raster = !canvas->recordingContext() && !canvas->recorder() &&
