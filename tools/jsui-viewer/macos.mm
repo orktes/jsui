@@ -50,27 +50,47 @@ void viewer_mac_titlebar_overlay(void* nswindow, float header, float* controls) 
   NSSize b = close.frame.size;
   CGFloat inset = std::floor((header - b.height) / 2), spacing = 20;
   CGFloat left = std::max<CGFloat>(12, inset);
+  // AppKit lays the title bar out again whenever it likes (showing the
+  // window, key changes, resizes, full screen), so the buttons are placed
+  // again after every frame change of the title bar or a button.
+  __block bool placing = false;
+  NSView* container = close.superview.superview;  // NSTitlebarContainerView
   void (^place)(void) = ^{
-    NSView* container = close.superview.superview;  // NSTitlebarContainerView
-    if (!container || (w.styleMask & NSWindowStyleMaskFullScreen)) return;
-    NSRect r = container.frame;
-    r.size.height = header;
-    r.origin.y = w.frame.size.height - header;
-    container.frame = r;
+    if (placing || !container || (w.styleMask & NSWindowStyleMaskFullScreen)) return;
+    placing = true;
+    // Only as wide as the buttons: the rest of the header is the UI's (its
+    // clicks, and drags through the hit test in main.cpp).
+    NSRect r = NSMakeRect(0, w.frame.size.height - header, left + 2 * spacing + b.width + left, header);
+    if (!NSEqualRects(container.frame, r)) container.frame = r;
+    NSView* bar = close.superview;  // NSTitlebarView
+    NSRect br = NSMakeRect(0, 0, r.size.width, header);
+    if (!NSEqualRects(bar.frame, br)) bar.frame = br;
     NSWindowButton kinds[] = {NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton};
     for (int i = 0; i < 3; i++) {
       NSButton* button = [w standardWindowButton:kinds[i]];
-      [button setFrameOrigin:NSMakePoint(left + i * spacing, std::floor((header - b.height) / 2))];
+      NSPoint o = NSMakePoint(left + i * spacing, inset);
+      if (!NSEqualPoints(button.frame.origin, o)) [button setFrameOrigin:o];
     }
+    placing = false;
   };
   place();
-  for (NSNotificationName n in @[ NSWindowDidResizeNotification, NSWindowDidExitFullScreenNotification ])
-    [[NSNotificationCenter defaultCenter] addObserverForName:n
-                                                      object:w
-                                                       queue:nil
-                                                  usingBlock:^(NSNotification*) { place(); }];
+  NSNotificationCenter* nc = [NSNotificationCenter defaultCenter];
+  for (NSNotificationName n in @[ NSWindowDidResizeNotification, NSWindowDidExitFullScreenNotification,
+                                  NSWindowDidBecomeKeyNotification, NSWindowDidResignKeyNotification ])
+    [nc addObserverForName:n object:w queue:nil usingBlock:^(NSNotification*) { place(); }];
+  NSMutableArray<NSView*>* watched = [NSMutableArray arrayWithObjects:container, close.superview, nil];
+  for (NSWindowButton k : {NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton})
+    [watched addObject:[w standardWindowButton:k]];
+  for (NSView* v in watched) {
+    v.postsFrameChangedNotifications = YES;
+    [nc addObserverForName:NSViewFrameDidChangeNotification
+                    object:v
+                     queue:nil
+                usingBlock:^(NSNotification*) { dispatch_async(dispatch_get_main_queue(), place); }];
+  }
+  dispatch_async(dispatch_get_main_queue(), place);
   controls[0] = float(left);
-  controls[1] = float(std::floor((header - b.height) / 2));
+  controls[1] = float(inset);
   controls[2] = float(2 * spacing + b.width);
   controls[3] = float(b.height);
 }

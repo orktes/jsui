@@ -436,7 +436,7 @@ export function Intro({ p }) {
   const earlyGo = useRef(false);
   // The page's answer: a host message in the browser (site/index.html), or
   // host state a native host set before the bundle loaded (jsui-viewer
-  // --state 'intro={"play":true}'), since no page answers there.
+  // --state 'intro={"play":true,"warmup":false}'), since no page answers there.
   useHostMessage('intro', (data) => answer(data));
   useEffect(() => {
     const native = HostState.get('intro');
@@ -459,6 +459,8 @@ export function Intro({ p }) {
       if (ended.current) return;
       const res = compileShader(INTRO_SHADER);
       if (res.error) return finish();
+      // No splash to hide the warm-up behind (a native host): play straight away.
+      if (data.warmup === false) return play(data);
       setPhase('warm');
       // One timeline point per frame (requestAnimationFrame callbacks run
       // before the frame paints).
