@@ -162,10 +162,21 @@ index 40ae5ea..10fb0f1 100644
              isWrite ? wgpu::MapMode::Write : wgpu::MapMode::Read,
              0,
 diff --git a/src/gpu/graphite/dawn/DawnCaps.cpp b/src/gpu/graphite/dawn/DawnCaps.cpp
-index e87ba05..350e457 100644
+index e87ba05..75e7576 100644
 --- a/src/gpu/graphite/dawn/DawnCaps.cpp
 +++ b/src/gpu/graphite/dawn/DawnCaps.cpp
-@@ -294,11 +294,15 @@ void DawnCaps::initCaps(const DawnBackendContext& backendContext, const ContextO
+@@ -34,6 +34,10 @@
+ 
+ namespace skgpu::graphite {
+ 
++#if defined(__EMSCRIPTEN__)
++bool gWasmStorageBuffers = false;  // jsui (DawnCaps.h)
++#endif
++
+ namespace {
+ 
+ skgpu::UniqueKey::Domain get_pipeline_domain() {
+@@ -294,11 +298,15 @@ void DawnCaps::initCaps(const DawnBackendContext& backendContext, const ContextO
  #endif
  #endif // defined(__EMSCRIPTEN__)
  
@@ -182,6 +193,36 @@ index e87ba05..350e457 100644
  #else
      wgpu::CompatibilityModeLimits compatLimits;
      wgpu::Limits limits{.nextInChain = &compatLimits};
+@@ -366,7 +374,10 @@ void DawnCaps::initCaps(const DawnBackendContext& backendContext, const ContextO
+     // WASM doesn't provide a way to query the backend, so can't tell if we are on a backend that
+     // needs to have SSBOs disabled. Pessimistically assume we could be. Once the above conditions
+     // go away in Dawn-native, then we can assume SSBOs are always supported in pure WebGPU too.
+-    fStorageBufferSupport = false;
++    // jsui: unless the embedder knows the browser's backend is not Vulkan (Metal on Apple
++    // platforms, D3D12 on Windows) and sets gWasmStorageBuffers before making the Context.
++    fStorageBufferSupport = gWasmStorageBuffers &&
++                            limits.maxStorageBuffersPerShaderStage >= 4;
+ #endif
+ 
+     fDrawBufferCanBeMapped = false;
+diff --git a/src/gpu/graphite/dawn/DawnCaps.h b/src/gpu/graphite/dawn/DawnCaps.h
+index 7772f84..c81be8b 100644
+--- a/src/gpu/graphite/dawn/DawnCaps.h
++++ b/src/gpu/graphite/dawn/DawnCaps.h
+@@ -16,6 +16,13 @@
+ #include <array>
+ 
+ namespace skgpu::graphite {
++
++#if defined(__EMSCRIPTEN__)
++// jsui: Contexts made from now on use storage buffers (fewer bind group changes and draws) when
++// the device allows 4 per stage. Off by default: the browser's backend may be Vulkan, where
++// Dawn native leaves them off for performance.
++extern bool gWasmStorageBuffers;
++#endif
+ struct ContextOptions;
+ 
+ struct DawnBackendContext;
 diff --git a/src/gpu/graphite/dawn/DawnCommandBuffer.cpp b/src/gpu/graphite/dawn/DawnCommandBuffer.cpp
 index 64edfc3..0cade21 100644
 --- a/src/gpu/graphite/dawn/DawnCommandBuffer.cpp

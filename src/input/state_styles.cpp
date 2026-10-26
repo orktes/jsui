@@ -56,11 +56,60 @@ bool InputManager::statePressed(const Node* n) const {
   return false;
 }
 
+InputManager::StateInputs InputManager::stateInputs() const {
+  StateInputs in;
+  in.valid = true;
+  in.mouseInside = mouseInside_;
+  in.chain = mouse_.chain;
+  in.focusedId = focused_ ? focused_->id() : 0;
+  in.keyboardModality = keyboardModality_;
+  in.keyPressId = keyPressId_;
+  in.treeVersion = doc_.treeVersion;
+  in.stateVersion = doc_.stateVersion;
+  return in;
+}
+
 void InputManager::tickStates(double nowMs) {
   statesMoving_ = false;
-  doc_.statesKick = false;
-  auto& list = doc_.stateNodes;
   if (keyPressId_ && !alive(keyPressId_)) keyPressId_ = 0;
+  // Steps `s` toward `t`. An element not stepped in the frames since it
+  // settled starts its transition one frame back, as if it had been.
+  std::vector<uint32_t> animating;
+  statesStepped_ = 0;
+  auto step = [&](Node* n, StateStyles& s, const bool t[kStateSlots]) {
+    statesStepped_++;
+    if (s.seen && s.lastMs < statesLastMs_) s.lastMs = statesLastMs_;
+    bool moving = false;
+    if (stepStateWeights(s, t, nowMs, &moving)) {
+      n->applyStateStyles();
+      if (!s.interaction.empty()) doc_.interactionsMoved = true;
+    }
+    if (moving) animating.push_back(n->id());
+    statesMoving_ |= moving;
+  };
+  // A press under way follows the pointer and the layout under it (and a
+  // press flash lasts one frame): every target is derived again then.
+  bool pressing = (mouse_.buttons & 1) || !pressFlash_.empty() || keyPressId_;
+  for (const PointerState& p : touches_) pressing |= (p.buttons & 1) != 0;
+  StateInputs in = stateInputs();
+  in.pressing = pressing;
+  if (!doc_.statesKick && in == stateInputs_) {
+    // Nothing a target depends on changed: only the transitions under way move.
+    for (uint32_t id : statesAnimating_) {
+      Node* n = doc_.get(id);
+      if (!n || !n->stateStyles) continue;
+      StateStyles& s = *n->stateStyles;
+      bool t[kStateSlots];
+      std::copy(s.target, s.target + kStateSlots, t);
+      step(n, s, t);
+    }
+    statesAnimating_ = std::move(animating);
+    statesLastMs_ = nowMs;
+    return;
+  }
+  doc_.statesKick = false;
+  stateInputs_ = std::move(in);
+  auto& list = doc_.stateNodes;
   // Shared by every runtime, which may tick on threads of their own.
   static std::atomic<uint64_t> passes{0};
   uint64_t pass = passes.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -89,15 +138,12 @@ void InputManager::tickStates(double nowMs) {
         t[kGroupFocusVisible] = t[kGroupFocused] && keyboardModality_;
       }
     }
-    bool moving = false;
-    if (stepStateWeights(s, t, nowMs, &moving)) {
-      n->applyStateStyles();
-      if (!s.interaction.empty()) doc_.interactionsMoved = true;
-    }
-    statesMoving_ |= moving;
+    step(n, s, t);
   }
   list.resize(keep);
   pressFlash_.clear();
+  statesAnimating_ = std::move(animating);
+  statesLastMs_ = nowMs;
 }
 
 }  // namespace jsui

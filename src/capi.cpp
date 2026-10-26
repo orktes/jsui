@@ -352,6 +352,7 @@ double jsui_get_js_frame_budget(JsuiRuntime* rt) { return rt->rt->jsSliceMs; }
 int jsui_pending_loads(JsuiRuntime* rt) { return int(rt->rt->loader.pending()); }
 int jsui_needs_redraw(JsuiRuntime* rt) { return rt->surface->needsRedraw() ? 1 : 0; }
 int jsui_wants_frame(JsuiRuntime* rt) { return rt->rt->wantsFrame() ? 1 : 0; }
+double jsui_next_timer(JsuiRuntime* rt) { return rt->rt->nextTimer(); }
 
 // Every render is the Paint phase (jsui_set_profiling); layout and image
 // decodes inside it book to their own phases, Graphite's submit to Gpu.

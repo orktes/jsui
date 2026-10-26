@@ -200,6 +200,7 @@ extern "C" {
     pub fn jsui_pending_loads(rt: *mut JsuiRuntime) -> c_int;
     pub fn jsui_needs_redraw(rt: *mut JsuiRuntime) -> c_int;
     pub fn jsui_wants_frame(rt: *mut JsuiRuntime) -> c_int;
+    pub fn jsui_next_timer(rt: *mut JsuiRuntime) -> c_double;
     pub fn jsui_render_rgba(rt: *mut JsuiRuntime, pixels: *mut c_void, width: c_int, height: c_int, row_bytes: usize);
     pub fn jsui_render_rgba_incremental(
         rt: *mut JsuiRuntime,

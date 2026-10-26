@@ -125,6 +125,7 @@ class JsThread final : public JsEngine {
   void runAnimationFrame(double nowMs) override;
   void runJobs() override;
   bool hasPendingWork(double nowMs) const override;
+  double nextTimer() const override { return nextDue_.load(std::memory_order_relaxed); }
   int dispatchEvent(const Value& event) override;
   void hostMessage(const std::string& name, const std::string& json) override;
   void layoutEvent(uint32_t id, float x, float y, float w, float h) override;

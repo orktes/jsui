@@ -782,17 +782,22 @@ TEST(render_sprites_match_direct_and_are_reused) {
 // again (PaintStats::shadowRenders; one per quantized scale at most, where
 // every frame rendered one before), each frame is within a few levels of the
 // same state painted exactly from scratch, and once it stops the next frame
-// repaints it exactly (incremental == full).
+// repaints it exactly (incremental == full). The same for an inset shadow
+// (a glowing inventory slot springing when selected).
 TEST(render_moving_shadow_reuses_its_mask) {
-  const char* box = R"J({"style":{"position":"absolute","left":40,"top":30,"width":180,"height":52,"borderRadius":10,
+  const char* outer = R"J({"style":{"position":"absolute","left":40,"top":30,"width":180,"height":52,"borderRadius":10,
     "backgroundColor":"rgba(26,36,64,0.9)","borderWidth":1,"borderColor":"rgba(148,170,255,0.32)",
     "boxShadow":"0 4px 12px rgba(0,0,0,0.5)"}})J";
+  const char* inset = R"J({"style":{"position":"absolute","left":40,"top":30,"width":72,"height":72,"borderRadius":10,
+    "backgroundColor":"rgba(10,14,26,0.9)","borderWidth":1.5,"borderColor":"#ffb23f",
+    "boxShadow":"inset 0 0 18px rgba(255,178,63,0.5)"}})J";
   // A damped spring towards +14 px and 1.05x (overshooting).
   auto spring = [](int i) {
     float k = 1 - std::exp(-float(i) * 0.12f) * std::cos(float(i) * 0.5f);
     return "{\"transform\":[{\"translateX\":" + std::to_string(14 * k) + "},{\"scale\":" +
            std::to_string(1 + 0.05f * k) + "}]}";
   };
+  for (const char* box : {outer, inset})
   for (float dpr : {1.f, 1.5f}) {
     Scene s(320, 140, dpr);
     Node* n = s.add(box);
@@ -826,9 +831,9 @@ TEST(render_moving_shadow_reuses_its_mask) {
       worst = std::max(worst, d.max);
       differ = std::max(differ, d.count);
     }
-    std::printf("  dpr %g: %d masks blurred in %d moving frames (%d shadow draws, %d approximate), "
+    std::printf("  %s dpr %g: %d masks blurred in %d moving frames (%d shadow draws, %d approximate), "
                 "at most %zu pixels differ from exact (%zu by more than 4 levels), by at most %d\n",
-                dpr, renders, frames - 2, draws, approximate, differ, worstOver, worst);
+                box == inset ? "inset" : "outer", dpr, renders, frames - 2, draws, approximate, differ, worstOver, worst);
     CHECK(renders <= 2);
     CHECK(draws >= frames);
     CHECK(approximate >= frames - 2);
@@ -945,4 +950,46 @@ TEST(render_scroll_blit_matches_full) {
                 blitRepaint / std::max(1, blits), vpArea);
     CHECK(blitRepaint / std::max(1, blits) < vpArea * 0.6);
   }
+}
+
+TEST(render_text_color_change_keeps_the_paragraph) {
+  // A color-only change (a hover / state color transition) repaints in the
+  // new color without building the paragraph again, pixel for pixel what a
+  // paragraph built in that color paints.
+  const char* kText = R"J({"type":"Text","style":{"alignSelf":"flex-start","fontSize":24,"color":"%s",
+      "textDecorationLine":"underline"},"children":["Hello ",{"type":"Text","style":{"fontWeight":"bold"},"text":"JSUI"}]})J";
+  auto json = [&](const char* c) {
+    char buf[512];
+    std::snprintf(buf, sizeof buf, kText, c);
+    return std::string(buf);
+  };
+  Scene s(300, 60);
+  Node* t = s.add(json("#ff0000").c_str());
+  s.render();
+  uint64_t builds = s.doc().perf.counters.paragraphBuilds;
+  t->patchStyle(Value::parseJson(R"({"color":"#2040ff"})").asObject());
+  s.render();
+  CHECK_EQ(s.doc().perf.counters.paragraphBuilds, builds);
+  Scene fresh(300, 60);
+  fresh.add(json("#2040ff").c_str());
+  fresh.render();
+  CHECK(s.px == fresh.px);
+
+  // A span with a color of its own keeps it: the root's change rebuilds.
+  Scene sp(300, 60);
+  Node* r = sp.add(R"J({"type":"Text","style":{"fontSize":20,"color":"red"},"children":["Red ",
+      {"type":"Text","style":{"color":"blue"},"text":"Blue"}]})J");
+  sp.render();
+  builds = sp.doc().perf.counters.paragraphBuilds;
+  r->patchStyle(Value::parseJson(R"({"color":"#00ff00"})").asObject());
+  sp.render();
+  CHECK_EQ(sp.doc().perf.counters.paragraphBuilds, builds + 1);
+  int blue = 0, red = 0;
+  for (int y = 0; y < 30; y++)
+    for (int x = 0; x < 300; x++) {
+      if (sp.a(x, y) > 200 && sp.b(x, y) > 200 && sp.r(x, y) < 40) blue++;
+      if (sp.a(x, y) > 200 && sp.r(x, y) > 200 && sp.g(x, y) < 40) red++;
+    }
+  CHECK(blue > 40);
+  CHECK_EQ(red, 0);
 }

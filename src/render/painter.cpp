@@ -774,6 +774,9 @@ void drawMask(SkCanvas* c, ShadowCache& cache, const SkImage* img, float x0, flo
   if (!cache.raster) {
     // One rect (four parts): each part is a draw of its own on GPU canvases.
     // Scaled, the ring would still be four stretched draws: one is cheaper.
+    // Unscaled, keep the four parts: drawing the whole mask once measured
+    // more WebGPU draws (Graphite batches by pipeline only draws that do not
+    // overlap, and a whole mask overlaps everything on the box; #153).
     if (!post.isIdentity() || !skip.tall.intersect(skip.wide)) skip.tall.setEmpty();
     if (skip.tall.width() < 16 || skip.tall.height() < 16) skip.tall.setEmpty();
     skip.wide = skip.tall;
@@ -1079,7 +1082,10 @@ bool drawCachedShadow(SkCanvas* c, const SkRRect& shape, const SkRRect* hole, co
       if (inexact) *inexact = true;
     }
   }
-  const bool roundKey = !post.isIdentity();
+  // GPU masks are keyed by size in whole 1/64 px too: a box moving by
+  // fractions of a pixel (a panel sliding in) has a device width that differs
+  // in its last bits from frame to frame, a new mask every frame otherwise.
+  const bool roundKey = !post.isIdentity() || gpu;
   const SkRect& r = dev.rect();
   ShadowKey key{};
   key.w = r.width();
@@ -1190,8 +1196,23 @@ bool drawCachedShadow(SkCanvas* c, const SkRRect& shape, const SkRRect* hole, co
 // axis-aligned (the caller blurs directly then).
 bool drawCachedInsetShadow(SkCanvas* c, const SkRRect& inner, const SkRRect& frame, const SkRRect& hole, float blur,
                            const SkColor4f& col, ShadowCache& cache, const PaintMotion& motion) {
-  const SkMatrix& m = c->getTotalMatrix();
+  SkMatrix m = c->getTotalMatrix();
   if (!m.isScaleTranslate() || m.getScaleX() <= 0 || m.getScaleY() <= 0) return false;
+  const bool gpu = gpuMasks(c), phaseFree = gpu || motion.moving;
+  // While the scale animates, the mask of the nearest quantized scale,
+  // scaled to the node (see quantizedScale), as for outer shadows.
+  SkMatrix post = SkMatrix::I();
+  if (motion.scaling && phaseFree) {
+    float sx = m.getScaleX(), sy = m.getScaleY(), qx = quantizedScale(sx), qy = quantizedScale(sy);
+    if (qx != sx || qy != sy) {
+      float tx = m.getTranslateX(), ty = m.getTranslateY();
+      m = SkMatrix::MakeAll(qx, 0, tx, 0, qy, ty, 0, 0, 1);
+      post = SkMatrix::Translate(tx, ty);
+      post.preScale(sx / qx, sy / qy);
+      post.preTranslate(-tx, -ty);
+      if (motion.inexact) *motion.inexact = true;
+    }
+  }
   SkRRect dev, devHole;
   if (!inner.transform(m, &dev)) return false;
   if (!hole.isEmpty() && !hole.transform(m, &devHole)) return false;
@@ -1201,7 +1222,6 @@ bool drawCachedInsetShadow(SkCanvas* c, const SkRRect& inner, const SkRRect& fra
   key.w = r.width();
   key.h = r.height();
   key.sigma = blur / 2 * std::max(m.getScaleX(), m.getScaleY());
-  const bool gpu = gpuMasks(c), phaseFree = gpu || motion.moving;
   float ox = phaseFree ? r.left() : std::floor(r.left()), oy = phaseFree ? r.top() : std::floor(r.top());
   if (!gpu && phaseFree && motion.inexact && (ox != std::floor(ox) || oy != std::floor(oy))) *motion.inexact = true;
   key.fx = r.left() - ox;
@@ -1226,6 +1246,17 @@ bool drawCachedInsetShadow(SkCanvas* c, const SkRRect& inner, const SkRRect& fra
   key.color[1] = col.fG;
   key.color[2] = col.fB;
   key.color[3] = col.fA;
+  if (!post.isIdentity() || gpu) {  // see roundKey in drawCachedShadow
+    for (float* v : {&key.w, &key.h, &key.sigma}) *v = keyRound(*v);
+    for (float& v : key.radii) v = keyRound(v);
+    for (float& v : key.hole) v = keyRound(v);
+    for (float& v : key.holeRadii) v = keyRound(v);
+  }
+  // A scaled mask's anti-aliased edge at the padding box would be resampled
+  // (off by up to ~30 levels): it is left unclipped and clipped to the box
+  // where it is drawn instead.
+  const bool clipLater = !post.isIdentity();
+  if (clipLater) key.inset = 2;
   constexpr int kMargin = 1;  // anti-aliased clip edge
   auto it = cache.masks.find(key);
   if (it == cache.masks.end()) {
@@ -1242,7 +1273,7 @@ bool drawCachedInsetShadow(SkCanvas* c, const SkRRect& inner, const SkRRect& fra
     p.setAntiAlias(true);
     p.setColor4f(col);
     p.setMaskFilter(SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, blur / 2));
-    clipRRect(sc, inner);
+    if (!clipLater) clipRRect(sc, inner);
     if (hole.isEmpty()) sc->drawRRect(frame, p);
     else sc->drawDRRect(frame, hole, p);
     ShadowMask sm;
@@ -1252,7 +1283,12 @@ bool drawCachedInsetShadow(SkCanvas* c, const SkRRect& inner, const SkRRect& fra
   }
   it->second.lastUsed = cache.frame;
   cache.draws++;
-  drawMask(c, cache, it->second.image.get(), ox - kMargin, oy - kMargin, SkMatrix::I(), MaskSkip(), SkPaint());
+  if (clipLater) {
+    c->save();
+    clipRRect(c, inner);
+  }
+  drawMask(c, cache, it->second.image.get(), ox - kMargin, oy - kMargin, post, MaskSkip(), SkPaint());
+  if (clipLater) c->restore();
   return true;
 }
 

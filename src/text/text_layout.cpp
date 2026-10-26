@@ -352,6 +352,10 @@ struct TextCache : Node::Cache {
   float maxIntrinsic = 0;
   bool rtl = false;
   float paintDy = 0;  // baseline correction of the root style (see chromeLineMetrics)
+  // Text: the root color the runs were built with, and whether no span sets
+  // its own (recolorable(): the painter swaps it for the current color).
+  SkColor builtColor = 0;
+  bool oneColor = false;
   // Unhinted copies of the paragraph's text blobs, keyed by blob id << 1 |
   // transformed variant (see ChromeLikePainter). Cleared whenever the
   // paragraph is laid out again.
@@ -385,6 +389,13 @@ class ChromeLikePainter : public tl::ParagraphPainter {
 
   // Multiplies the alpha of everything drawn (a fading reveal unit).
   void setAlpha(float a) { alpha_ = a; }
+  // Draws paints of color `from` (the color the paragraph was built with) in
+  // `to` instead (recolorable()).
+  void recolor(SkColor from, SkColor to) {
+    recolor_ = from != to;
+    from_ = from;
+    to_ = to;
+  }
 
   void drawTextBlob(const sk_sp<SkTextBlob>& blob, SkScalar x, SkScalar y, const SkPaintOrID& paint) override {
     if (const SkPaint* p = std::get_if<SkPaint>(&paint)) c_->drawTextBlob(prepared(blob, x, &y), x, y, faded(*p));
@@ -394,7 +405,7 @@ class ChromeLikePainter : public tl::ParagraphPainter {
     p.setColor(color);
     p.setAntiAlias(true);
     if (sigma > 0) p.setMaskFilter(SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, sigma, false));
-    c_->drawTextBlob(prepared(blob, x, &y), x, y, faded(p));
+    c_->drawTextBlob(prepared(blob, x, &y), x, y, faded(p, false));
   }
   void drawRect(const SkRect& r, const SkPaintOrID& paint) override {
     if (const SkPaint* p = std::get_if<SkPaint>(&paint)) c_->drawRect(r, faded(*p));
@@ -423,10 +434,12 @@ class ChromeLikePainter : public tl::ParagraphPainter {
   }
 
  private:
-  const SkPaint& faded(const SkPaint& p) {
-    if (alpha_ >= 1) return p;
+  const SkPaint& faded(const SkPaint& p, bool recolor = true) {
+    bool swap = recolor && recolor_ && p.getColor() == from_;
+    if (alpha_ >= 1 && !swap) return p;
     scratch_ = p;
-    scratch_.setAlphaf(p.getAlphaf() * alpha_);
+    if (swap) scratch_.setColor(to_);
+    if (alpha_ < 1) scratch_.setAlphaf(scratch_.getAlphaf() * alpha_);
     return scratch_;
   }
 
@@ -483,6 +496,8 @@ class ChromeLikePainter : public tl::ParagraphPainter {
   bool transformed_;
   float alpha_ = 1;
   SkPaint scratch_;
+  bool recolor_ = false;
+  SkColor from_ = 0, to_ = 0;
   std::vector<SkMatrix> layout_;  // canvas coords -> layout-space device px, per save level
 };
 
@@ -638,11 +653,15 @@ TextCache* ensureCache(Node* n) {
     st.content = inputText;
   } else {
     // Content first, for dir="auto" detection (react-native-web sets it on Text).
+    fresh->builtColor = toSk(base.color);
+    // (An explicit decoration color equal to the text's must not follow it.)
+    fresh->oneColor = !(base.decorationColor && toSk(*base.decorationColor) == fresh->builtColor);
     std::vector<Node*> stack{n};
     while (!stack.empty()) {
       Node* c = stack.back();
       stack.pop_back();
       if (c->type() == NodeType::RawText) st.content += c->text();
+      else if (c != n && c->style().text.color) fresh->oneColor = false;
       for (auto it = c->children().rbegin(); it != c->children().rend(); ++it) stack.push_back(*it);
     }
   }
@@ -1115,9 +1134,19 @@ void paintText(Node* node, SkCanvas* canvas, float x, float y, float width, floa
   if (tl::Paragraph* p = layoutParagraph(node, width)) {
     auto* c = static_cast<TextCache*>(node->textCache.get());
     ChromeLikePainter painter(canvas, c, layoutSpace);
+    if (c->oneColor) {
+      Resolved r;
+      merge(&r, node->style().text);
+      painter.recolor(c->builtColor, toSk(r.color));
+    }
     if (node->style().textReveal >= 0) paintRevealed(node, c, p, painter, canvas, x, y + c->paintDy);
     else p->paint(&painter, x, y + c->paintDy);
   }
+}
+
+bool recolorable(Node* n) {
+  auto* c = n->type() == NodeType::Text ? static_cast<TextCache*>(n->textCache.get()) : nullptr;
+  return c && c->oneColor;
 }
 
 void paintTextInput(Node* node, SkCanvas* canvas, float x, float y, float width, float height,

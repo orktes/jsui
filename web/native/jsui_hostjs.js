@@ -59,6 +59,9 @@ var jsuiHostJs = (function () {
       for (const n of Object.getOwnPropertyNames(o)) s.add(n);
     return (hostNames = [...s]);
   }
+  // Work queued outside a tick (a native promise's continuation, a host
+  // task) resumes the frame loops web/jsui-web.js paused while idle.
+  const wakeHosts = () => Module.__jsuiWake?.forEach((h) => h._wake());
   const define = (obj, name, value) =>
     Object.defineProperty(obj, name, { value, writable: true, configurable: true, enumerable: false });
 
@@ -364,6 +367,7 @@ var jsuiHostJs = (function () {
             lastActive = this;
             this.leave();
           }
+          wakeHosts();
         });
       }
     }
@@ -397,6 +401,7 @@ var jsuiHostJs = (function () {
       const due = this.now() + ms;
       this.timers.set(id, { due, interval: repeat ? ms : -1, seq: this.timerSeq++, fn, args });
       if (due < this.earliestDue) this.earliestDue = due;
+      if (this.depth === 0) wakeHosts();
       return id;
     }
 
@@ -440,6 +445,7 @@ var jsuiHostJs = (function () {
       const id = this.nextRaf++;
       if (this.nextRaf > 0x7fffffff) this.nextRaf = 1;
       this.rafs.push({ id, fn });
+      if (this.depth === 0) wakeHosts();
       return id;
     }
 

@@ -115,6 +115,9 @@ class InputManager {
   // each element that asks, the weights' transitions and the blended styles
   // (state_styles.cpp). After tick() and JS, before native Animated.
   void tickStates(double nowMs);
+  // Elements the last tickStates stepped (all with state styles when a target
+  // may have changed, else only those still transitioning). For tests.
+  size_t statesStepped() const { return statesStepped_; }
   // Whether `n` is hovered / pressed / focused for state styles.
   bool stateHovered(const Node* n) const;
   bool statePressed(const Node* n) const;
@@ -485,6 +488,29 @@ class InputManager {
   int padPress_ = -1;
   std::vector<uint32_t> pressFlash_;
   bool statesMoving_ = false;
+  // What the last full tickStates pass derived the targets from (hover,
+  // focus, tree and state props). While these hold and no press is under
+  // way, only the elements still transitioning are stepped.
+  struct StateInputs {
+    bool valid = false;
+    bool pressing = false;  // a press was under way (its end derives the targets again too)
+    bool mouseInside = false;
+    std::vector<uint32_t> chain;
+    uint32_t focusedId = 0;
+    bool keyboardModality = false;
+    uint32_t keyPressId = 0;
+    uint64_t treeVersion = 0, stateVersion = 0;
+    bool operator==(const StateInputs& o) const {
+      return valid && o.valid && !pressing && !o.pressing && mouseInside == o.mouseInside && chain == o.chain && focusedId == o.focusedId &&
+             keyboardModality == o.keyboardModality && keyPressId == o.keyPressId && treeVersion == o.treeVersion &&
+             stateVersion == o.stateVersion;
+    }
+  };
+  StateInputs stateInputs() const;
+  StateInputs stateInputs_;
+  std::vector<uint32_t> statesAnimating_;  // ids whose weights were still moving
+  double statesLastMs_ = -1;               // the previous tickStates frame
+  size_t statesStepped_ = 0;
   // Default actions waiting for a late JS answer, in event order.
   std::deque<Deferred> deferred_;
 

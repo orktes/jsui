@@ -66,6 +66,7 @@ EM_JS(void, hjs_run_timers, (int e, double now), { jsuiHostJs.engine(e).runTimer
 EM_JS(void, hjs_run_raf, (int e, double now), { jsuiHostJs.engine(e).runAnimationFrame(now); });
 EM_JS(void, hjs_run_jobs, (int e), { jsuiHostJs.engine(e).runJobs(); });
 EM_JS(int, hjs_pending, (int e, double now), { return jsuiHostJs.engine(e).hasPendingWork(now) ? 1 : 0; });
+EM_JS(double, hjs_next_timer, (int e), { return jsuiHostJs.engine(e).earliestDue; });
 EM_JS(int, hjs_dispatch, (int e, const char* json, int len), {
   return jsuiHostJs.engine(e).dispatchEvent(jsuiHostJs.str(json, len));
 });
@@ -188,6 +189,7 @@ class HostJsEngine final : public JsEngine {
   }
 
   bool hasPendingWork(double nowMs) const override { return hjs_pending(id(), nowMs) != 0; }
+  double nextTimer() const override { return std::min(hjs_next_timer(id()), 1e300); }
 
   int dispatchEvent(const Value& event) override {
     Perf::Scope scope(rt.doc.perf, Phase::Js);

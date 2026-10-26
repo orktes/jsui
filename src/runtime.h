@@ -79,6 +79,8 @@ class Runtime {
   bool needsRedraw() const;
   // Animations / timers / held input want another tick soon (jsui_wants_frame).
   bool wantsFrame() const;
+  // When JS next has a timer due (jsui_next_timer), infinity when none.
+  double nextTimer() const;
   // Animations, scroll physics or JS frame callbacks drive the next frames
   // of surface `s` (Surface::needsRedraw).
   bool animatingFrames(const Surface& s) const;

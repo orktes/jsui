@@ -532,6 +532,11 @@ impl Context {
     pub fn wants_frame(&self) -> bool {
         unsafe { sys::jsui_wants_frame(self.as_ptr()) != 0 }
     }
+    /// When JS next has a timer due, in the clock of `tick`'s `now_ms`
+    /// (infinity: none): when an idle host (`wants_frame` false) ticks again.
+    pub fn next_timer(&self) -> f64 {
+        unsafe { sys::jsui_next_timer(self.as_ptr()) }
+    }
     /// Resource loads still in flight (bundle, images, fonts, fetch).
     pub fn pending_loads(&self) -> i32 {
         unsafe { sys::jsui_pending_loads(self.as_ptr()) }

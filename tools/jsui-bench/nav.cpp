@@ -12,6 +12,13 @@
 //             frames jsui_needs_redraw() says are unchanged (like the hosts);
 //             --gpu-wait also waits for the GPU each frame (counted as "gpu")
 //
+// --hover-grid instead hovers the cards of web/test/bench-apps/hover-grid.jsx
+// (a 1280x720 viewport; the bundle is that file built), one card every
+// --dwell frames (default 18: 300 ms) in the zigzag order of
+// web/test/hover-bench.mjs, and prints the CPU per hover against that
+// benchmark's Chrome CSS numbers: frames whose jsui_needs_redraw() is clear
+// skip the render, as a host's would.
+//
 // JSUI_NAV_VERBOSE prints the frames GC ran on.
 #include <jsui/jsui.h>
 
@@ -70,8 +77,8 @@ int main(int argc, char** argv) {
   const char* bundle = nullptr;
   float pr = 1.0f;
   std::string backend = "cpu";
-  bool gpuWait = false, profile = true;
-  int rounds = 3, perRoute = 200, worstN = 12;
+  bool gpuWait = false, profile = true, hoverGrid = false;
+  int rounds = 3, perRoute = 200, worstN = 12, dwell = 18;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     auto next = [&]() { return i + 1 < argc ? argv[++i] : ""; };
@@ -81,15 +88,17 @@ int main(int argc, char** argv) {
     else if (a == "--frames") perRoute = std::max(1, atoi(next()));
     else if (a == "--worst") worstN = std::max(0, atoi(next()));
     else if (a == "--no-profile") profile = false;
+    else if (a == "--hover-grid") hoverGrid = true;
+    else if (a == "--dwell") dwell = std::max(1, atoi(next()));
     else if (!bundle) bundle = argv[i];
     else pr = float(atof(argv[i]));
   }
   if (!bundle) {
     fprintf(stderr, "usage: jsui-nav <bundle> [pixel_ratio] [--backend cpu|graphite] [--gpu-wait] [--rounds N]\n"
-                    "                [--frames N] [--worst N] [--no-profile]\n");
+                    "                [--frames N] [--worst N] [--no-profile] [--hover-grid [--dwell N]]\n");
     return 2;
   }
-  int W = 1280, H = 800;
+  int W = 1280, H = hoverGrid ? 720 : 800;
   JsuiConfig cfg;
   jsui_config_init(&cfg);
   cfg.audio_disabled = 1;
@@ -133,7 +142,9 @@ int main(int argc, char** argv) {
   bool verbose = getenv("JSUI_NAV_VERBOSE") != nullptr;
   const char* route = "/";
   int sinceRoute = 0;
+  bool painted = false;  // the last frame rendered
   auto frame = [&](bool record) {
+    painted = false;
     double t0 = nowMs();
     jsui_tick(rt, t);
     double t1 = nowMs();
@@ -147,11 +158,13 @@ int main(int argc, char** argv) {
         target.flags = holdsFrame ? JSUI_GPU_INCREMENTAL : 0;
         JsuiRect d;
         if (jsui_render_gpu_target(rt, gpu, &target, &d) == 0) holdsFrame = true;
+        painted = true;
       }
 #endif
-    } else {
+    } else if (!holdsFrame || jsui_needs_redraw(rt)) {
       JsuiRect d;
       jsui_render_rgba_incremental(rt, px.data(), pw, ph, size_t(pw) * 4, &d);
+      holdsFrame = painted = true;
     }
     double t2 = nowMs();
 #ifdef __APPLE__
@@ -197,6 +210,80 @@ int main(int argc, char** argv) {
     t += 16.667;
   };
   for (int i = 0; i < 240; i++) frame(false);
+  if (hoverGrid) {
+    // Card centres (40 px padding, 150x170 cards, 18 px gaps, 6 per row),
+    // neighbour to neighbour.
+    std::vector<std::pair<float, float>> pts;
+    for (int r = 0; r < 4; r++)
+      for (int c = 0; c < 6; c++) {
+        int i = r * 6 + (r % 2 ? 5 - c : c);
+        pts.push_back({40.f + (i % 6) * 168 + 75, 40.f + (i / 6) * 188 + 85});
+      }
+    auto hover = [&](size_t k, bool record, std::vector<std::vector<double>>* byFrame, double* busy, int* paints) {
+      auto [x, y] = pts[k % pts.size()];
+      double t0 = nowMs();
+      jsui_send_mouse_move(rt, x, y);
+      double input = nowMs() - t0;
+      if (busy) *busy += input;
+      int n = 0;
+      for (int i = 0; i < dwell; i++) {
+        frame(record);
+        if (!record) continue;
+        *busy += frames.back().ms;
+        if (painted) {
+          if (byFrame && n < int(byFrame->size())) (*byFrame)[n].push_back(frames.back().ms + (n ? 0 : input));
+          n++;
+        }
+      }
+      if (paints) *paints += n;
+    };
+    jsui_send_mouse_move(rt, 8, 8);
+    for (size_t k = 0; k < 6; k++) hover(k, false, nullptr, nullptr, nullptr);  // warm masks, glyphs, pipelines
+    jsui_send_mouse_move(rt, 8, 8);
+    for (int i = 0; i < 30; i++) frame(false);
+    int hovers = rounds * int(pts.size()), paints = 0;
+    double busy = 0;
+    std::vector<std::vector<double>> byFrame(4);
+    for (int k = 0; k < hovers; k++) hover(size_t(k), true, &byFrame, &busy, &paints);
+    printf("hover-grid %s%s, %dx%d px, %d hovers every %d frames\n", backend.c_str(),
+           gpu && gpuWait ? " (+gpu wait)" : "", pw, ph, hovers, dwell);
+    printf("CPU per hover: %.2f ms (tick + render of every frame, input included), %.2f painted frames\n",
+           busy / hovers, double(paints) / hovers);
+    auto mean = [](const std::vector<double>& v) {
+      double s = 0;
+      for (double x : v) s += x;
+      return v.empty() ? 0 : s / v.size();
+    };
+    for (size_t i = 0; i < byFrame.size(); i++)
+      printf("  painted frame %zu: mean %.3f  p95 %.3f ms\n", i + 1, mean(byFrame[i]), pct(byFrame[i], 0.95));
+    double idle = 0;
+    int idleN = 0;
+    for (int i = 0; i < 60; i++) {
+      frame(true);
+      if (!painted) idle += frames.back().ms, idleN++;
+    }
+    printf("  idle frame (tick only): %.3f ms\n", idleN ? idle / idleN : 0);
+    unsigned long long builds = 0;
+    for (auto& f : frames) builds += f.paragraphs;
+    printf("  paragraph builds per hover: %.2f\n", double(builds) / hovers);
+    if (profile) {
+      printf("phase means per frame (ms):");
+      for (auto& ph : kPhases) {
+        double sum = 0;
+        for (auto& f : frames) sum += f.*ph.field;
+        printf(" %s %.3f", ph.name, sum / frames.size());
+      }
+      printf("\n");
+    }
+    jsui_destroy(rt);
+    if (gpu) jsui_gpu_destroy(gpu);
+#ifdef __APPLE__
+    bench_mtl_release(mtex);
+    bench_mtl_release(mq);
+    bench_mtl_release(mdev);
+#endif
+    return 0;
+  }
   const char* routes[] = {"/screens", "/motion", "/interactions", "/input", "/playground", "/", "/screens", "/motion"};
   for (int round = 0; round < rounds; round++)
     for (const char* r : routes) {
