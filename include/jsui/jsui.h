@@ -1380,12 +1380,14 @@ JSUI_API JsuiGpuContext* jsui_gpu_create_d3d11(void* device);
  *
  * - Until the host names a file, a context uses a default one in the user's
  *   cache directory, per program and backend: pipelines-<program>-<backend>.bin
+ *   in the directory jsui_set_cache_dir named, else
  *   in ~/Library/Caches/jsui/ (macOS, iOS), $XDG_CACHE_HOME/jsui/ or
  *   ~/.cache/jsui/ (Linux), %LOCALAPPDATA%\jsui\ (Windows). So
  *   from the second launch on, the pipelines are built ahead of the frames
  *   even when the host does nothing. Naming a file switches to it (the
  *   pipelines already queued stay queued); JSUI_PIPELINE_CACHE=off turns the
- *   default off. None on Android or in the browser.
+ *   default off. None in the browser, nor on Android unless the host
+ *   called jsui_set_cache_dir.
  * - Precompiling never blocks a frame. Vulkan and Metal precompile on a
  *   worker thread of the context, as does Dawn when the device was created
  *   with WGPUFeatureName_ImplicitDeviceSynchronization (Dawn then locks the
@@ -1461,6 +1463,15 @@ typedef struct JsuiPipelineStats {
     unsigned long long known;         /* distinct pipelines recorded and queued */
 } JsuiPipelineStats;
 
+/* The directory JSUI keeps its cache files in when the host names none:
+ * the default pipeline and shader cache files and the Vulkan driver cache
+ * (`dir`: UTF-8, made when missing; NULL / "": the platform's again).
+ * Process-wide; call it before creating GPU contexts. Platform defaults:
+ * ~/Library/Caches/jsui (macOS, iOS), $XDG_CACHE_HOME/jsui or ~/.cache/jsui
+ * (Linux), %LOCALAPPDATA%\jsui (Windows). Android has none: without this
+ * call nothing is cached there (pass the app's cache directory,
+ * Context.getCacheDir()). */
+JSUI_API void jsui_set_cache_dir(const char* dir);
 /* Loads the cache file at `path` (UTF-8; created when missing), queues its
  * pipelines for precompiling, and from now on appends every new pipeline to
  * it, including those the context created before the call. NULL / "" stops

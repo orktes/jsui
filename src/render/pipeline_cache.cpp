@@ -622,8 +622,27 @@ bool makeDir(const std::string& path) {
 
 }  // namespace
 
+namespace {
+std::mutex gCacheDirMutex;
+std::string gCacheDir;  // jsui_set_cache_dir
+}  // namespace
+
+void setCacheDir(const std::string& dir) {
+  std::lock_guard<std::mutex> lock(gCacheDirMutex);
+  gCacheDir = dir;
+}
+
 std::string cacheFile(const std::string& kind, const std::string& tag) {
   std::string dir;
+  {
+    std::lock_guard<std::mutex> lock(gCacheDirMutex);
+    dir = gCacheDir;
+  }
+  if (!dir.empty()) {
+    if (!makeDir(dir)) return {};
+    if (dir.back() != '/' && dir.back() != '\\') dir += "/";
+    return dir + kind + "-" + programName() + "-" + tag + ".bin";
+  }
 #if defined(_WIN32)
   if (const char* l = std::getenv("LOCALAPPDATA"); l && *l) dir = l;
   if (dir.empty()) return {};
