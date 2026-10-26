@@ -2810,7 +2810,7 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
                                     : static_cast<const void*>(c->recordingContext());
   // A raster canvas (tests; the CPU paths have no LayerCache) shares its
   // textures with every raster canvas. Not a canvas without pixels of its
-  // own (the counting canvas).
+  // own (the counting canvas forwards its target's).
   SkPixmap pm;
   if (!owner && c->peekPixels(&pm)) owner = &lc;
   if (!owner) return false;
@@ -4358,8 +4358,8 @@ void paintDocumentOver(Document& doc, SkCanvas* canvas, const SkRegion* damage, 
     }
   }
   Ctx ctx{doc, root, damage, {}, {}};
-  // Composited layers on GPU canvases only (a raster canvas has no recorder
-  // or context, and the counting canvas none either).
+  // Composited layers on GPU canvases (and raster ones in tests); the
+  // counting canvas stands in for its target (paint_counter.cpp).
   ctx.layers = tLayerCache;
   ctx.backdrop = over;
   std::unique_ptr<SkCanvas> counter;

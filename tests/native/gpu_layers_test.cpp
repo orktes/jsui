@@ -31,3 +31,44 @@ TEST(gpu_layer_caches_on_raster) {
   jsui::setGpuLayerCaches(true);
   CHECK(caches.of(nullptr) != nullptr);
 }
+
+// Paint counting (setPaintCounting, the benchmarks' draw counts) paints
+// through a counting canvas that stands in for the target: the LayerCache
+// works through it as on the target itself (it used to see a canvas without
+// pixels, recorder or context and paint every layer and subtree directly,
+// so a counted GPU frame never cached anything), with the same pixels.
+TEST(gpu_layer_caches_while_counting) {
+  auto run = [](bool counting, int* layerDraws, int* layerRenders, int* motionDraws, int* draws) {
+    jsui::GpuLayerCaches caches(256u << 20);
+    gpu_layer_scene::LayerScene g;
+    jsui::setPaintCounting(g.s.doc(), counting);
+    std::vector<uint32_t> px(size_t(240) * 160);
+    std::vector<std::vector<uint32_t>> frames;
+    *layerDraws = *layerRenders = *motionDraws = *draws = 0;
+    for (int i = 0; i < 36; i++) {
+      g.step(i);
+      g.s.rt->tick(0);
+      jsui::GpuLayerFrame frame(caches.of(&g.s.rt->main()));
+      g.s.rt->main().renderIncremental(px.data(), 240, 160, 240 * 4);
+      jsui::PaintStats st = jsui::lastPaintStats(g.s.doc());
+      *layerDraws += st.layerDraws;
+      *layerRenders += st.layerRenders;
+      *motionDraws += st.motionDraws;
+      *draws += st.draws;
+      frames.push_back(px);
+    }
+    return frames;
+  };
+  int ld, lr, md, dr, cld, clr, cmd, cdr;
+  auto plain = run(false, &ld, &lr, &md, &dr);
+  auto counted = run(true, &cld, &clr, &cmd, &cdr);
+  std::printf("  layer draws %d / %d (rendered %d / %d, in motion %d / %d), %d draws counted\n", ld, cld, lr, clr, md,
+              cmd, cdr);
+  CHECK(ld > 0);
+  CHECK_EQ(cld, ld);
+  CHECK_EQ(clr, lr);
+  CHECK_EQ(cmd, md);
+  CHECK_EQ(dr, 0);
+  CHECK(cdr > 0);
+  for (size_t i = 0; i < plain.size(); i++) CHECK(plain[i] == counted[i]);
+}

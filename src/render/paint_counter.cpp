@@ -5,6 +5,7 @@
 #include "render/paint_counter.h"
 
 #if !defined(__EMSCRIPTEN__)
+#include "include/core/SkSurface.h"
 #include "include/utils/SkNWayCanvas.h"
 
 namespace jsui {
@@ -13,14 +14,29 @@ namespace {
 // Forwards everything to one canvas and counts the calls (setPaintCounting).
 // The base SkCanvas quick-rejects draws against its own clip first, so with
 // the target's clip replicated the counts are the draws that reach it.
+// It stands in for the target to the painter too: the target's recorder or
+// context, pixels, image info and offscreen surfaces. Without them a GPU
+// frame painted while counting took the CPU-canvas paths (no cached opacity
+// layers, raster-cached subtrees or motion layers: the LayerCache needs the
+// canvas' recorder), so counted frames painted, and counted, something else
+// than the frames they measure. Draws into a cached layer's texture are the
+// texture's canvas', not counted; drawing the texture is one image draw.
 class CountingCanvas : public SkNWayCanvas {
  public:
   CountingCanvas(SkCanvas* target, PaintStats* stats)
-      : SkNWayCanvas(target->imageInfo().width(), target->imageInfo().height()), s_(stats) {
+      : SkNWayCanvas(target->imageInfo().width(), target->imageInfo().height()), target_(target), s_(stats) {
     this->addCanvas(target);
   }
 
+  GrRecordingContext* recordingContext() const override { return target_->recordingContext(); }
+  skgpu::graphite::Recorder* recorder() const override { return target_->recorder(); }
+
  protected:
+  sk_sp<SkSurface> onNewSurface(const SkImageInfo& info, const SkSurfaceProps& props) override {
+    return target_->makeSurface(info, &props);
+  }
+  bool onPeekPixels(SkPixmap* pixmap) override { return target_->peekPixels(pixmap); }
+  SkImageInfo onImageInfo() const override { return target_->imageInfo(); }
   SaveLayerStrategy getSaveLayerStrategy(const SaveLayerRec& r) override {
     s_->saveLayers++;
     return SkNWayCanvas::getSaveLayerStrategy(r);
@@ -119,6 +135,7 @@ class CountingCanvas : public SkNWayCanvas {
   }
 
  private:
+  SkCanvas* target_;
   PaintStats* s_;
 };
 
