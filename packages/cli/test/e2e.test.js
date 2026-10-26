@@ -53,6 +53,8 @@ for (const mode of ['production', 'development']) {
     await build({ entry: path.join(here, 'e2e', 'reveal.jsx'), outfile: revealFile, mode, format });
     const stallFile = path.join(dir, 'stall.js');
     await build({ entry: path.join(here, 'e2e', 'stall.jsx'), outfile: stallFile, mode, format });
+    const workletsFile = path.join(dir, 'worklets.js');
+    await build({ entry: path.join(here, 'e2e', 'worklets.jsx'), outfile: workletsFile, mode, format });
     const vectorFile = path.join(dir, 'vector.js');
     await build({ entry: path.join(here, 'e2e', 'vector.jsx'), outfile: vectorFile, mode, format });
     const tests = [
@@ -74,6 +76,8 @@ for (const mode of ['production', 'development']) {
       'react_js_thread_e2e_stall',
       'react_js_thread_e2e_sync',
       'react_ui_thread_e2e',
+      'react_worklets_e2e',
+      'react_worklets_e2e_js_thread',
     ];
     const bundles = {
         JSUI_REACT_E2E_BUNDLE: outfile,
@@ -90,6 +94,7 @@ for (const mode of ['production', 'development']) {
         JSUI_REACT_GROUP_VISIBILITY_BUNDLE: groupVisibilityFile,
         JSUI_REACT_OVERLAY_BUNDLE: overlayFile,
         JSUI_REACT_STALL_BUNDLE: stallFile,
+        JSUI_REACT_WORKLETS_BUNDLE: workletsFile,
         JSUI_REACT_VECTOR_BUNDLE: vectorFile,
     };
     const { stdout, stderr } = await promisify(execFile)(binary, tests, {
@@ -100,7 +105,7 @@ for (const mode of ['production', 'development']) {
     });
     // The same with JS on its own thread in lockstep (JSUI_JS_THREAD_LOCKSTEP),
     // which must give what single-threaded mode gives, frame for frame.
-    const lockstepTests = tests.filter((t) => !t.startsWith('react_host_data_e2e_js_thread') && !t.startsWith('react_js_thread') && !t.startsWith('react_ui_thread'));
+    const lockstepTests = tests.filter((t) => !t.startsWith('react_host_data_e2e_js_thread') && !t.startsWith('react_js_thread') && !t.startsWith('react_ui_thread') && t !== 'react_worklets_e2e_js_thread');
     const lockstep = await promisify(execFile)(binary, lockstepTests, {
       env: Object.assign({}, process.env, bundles, { JSUI_TEST_JS_THREAD: 'lockstep' }),
       cwd: repo,
@@ -131,6 +136,8 @@ for (const mode of ['production', 'development']) {
     assert.match(stdout, /PASS react_js_thread_e2e_stall/);
     assert.match(stdout, /PASS react_js_thread_e2e_sync/);
     assert.match(stdout, /PASS react_ui_thread_e2e/);
+    assert.match(stdout, /PASS react_worklets_e2e$/m);
+    assert.match(stdout, /PASS react_worklets_e2e_js_thread/);
     if (process.env.JSUI_E2E_VERBOSE) console.log(stdout);
     assert.doesNotMatch(stdout, /skipped/);
     // The WebAssembly runtime compiled the bytecode: a native runtime built

@@ -24,6 +24,7 @@ default; use React state only for things that change now and then.
 | Showing / hiding without a render (popouts, warnings, HUD pieces that toggle with game data) | `<Visibility visible={node or bool} transition={120}>` | `{cond && <X/>}` driven by per-frame data |
 | Popouts, tooltips, dropdowns that must not be clipped by a ScrollView / `overflow: 'hidden'` panel or covered by later siblings | `<Overlay placement="top" offset={8}>` around the popout (placed natively against its parent or `anchor` ref, flips / shifts on screen) | `zIndex` on the hovered item, `measure` + absolute coordinates, rendering the popout at the screen root by hand |
 | UI bound to a field of shared host state (health, ammo, name) that must update on the frame the game sets it | `useHostStateBind('player', 'health.current')`: a native value for styles, `Animated.Text`, `derive`, `Visibility` | `useHostState` → render (waits for the next JS tick, re-renders) |
+| Per-frame logic that is more than a math expression (game-feel loops, small physics, state machines) writing Animated values | a worklet from `react-native-worklets`: `runOnUI(() => { ... requestAnimationFrame(step) ... })()` calling `value.setValue(x)` on captured `Animated.Value`s (see "Worklets") | a JS rAF loop calling `setValue` |
 | Animating size / position (`width`, `height`, `top`, `flex`) | the native driver works for layout keys too (relayout per frame); prefer transforms when they do the job | JS-driven layout animation |
 
 ## JS thread: what runs where
@@ -448,3 +449,49 @@ function Nameplate({ i, offset /* Animated.Value */ }) {
 - `Animated.clock()` is the frame clock in seconds; a mounted clock keeps
   the host ticking (`jsui_wants_frame`). For one that pauses or runs at
   another speed: `Animated.clock({...})` (above).
+
+## Worklets (react-native-worklets)
+
+`react-native-worklets` works as in React Native (the CLI aliases it; no
+install needed beyond the import). A worklet runs in a separate JS runtime
+on the UI thread, every frame if it asks, with no JS-thread round trip.
+
+```jsx
+import { runOnUI, runOnJS, runOnUISync, createSynchronizable } from 'react-native-worklets';
+
+const shake = new Animated.Value(0);  // used in a style: transform: [{ translateX: shake }]
+
+function onHit(done) {
+  runOnUI(() => {
+    const t0 = performance.now();
+    const step = (t) => {
+      const k = (t - t0) / 300;
+      shake.setValue(k < 1 ? Math.sin(k * 40) * 8 * (1 - k) : 0);
+      if (k < 1) requestAnimationFrame(step);
+      else runOnJS(done)();
+    };
+    requestAnimationFrame(step);
+  })();
+}
+```
+
+- `'worklet'` directive functions and callbacks passed straight to
+  `runOnUI` / `scheduleOnUI` / `runOnUIAsync` / `runOnUISync` /
+  `runOnRuntime` are transformed by `jsui build` / `jsui dev`. They capture
+  values by copy: numbers, strings, plain objects / arrays, Map / Set,
+  typed arrays, other worklets. Other functions become remote: call them
+  with `runOnJS(fn)(...)` / `scheduleOnRN(fn, ...)`, never directly.
+- A captured `Animated.Value` is made native and becomes a handle:
+  `setValue`, `setOffset`, `getValue()` / `.value` act on the native node
+  at once (the views, `derive`s, interpolations and `ShaderView`
+  `uniform:<name>` keys fed by it), with no React commit. It keeps
+  moving while JS is busy.
+- The UI runtime has `requestAnimationFrame`, `setTimeout` / `setInterval`
+  and `performance.now()` (the frame clock); no React, no components, no
+  `fetch`. `runOnUISync` returns the worklet's result (avoid it in
+  per-frame code). `createSynchronizable(v)` is a value both sides read and
+  write synchronously; `createWorkletRuntime(name)` makes another runtime
+  (on JSUI it also runs on the UI thread).
+- A worklet that throws is reported with its file and line (dev builds).
+  Prefer `Animated` / `derive` / `clock` when they can express it: they
+  cost less than a JS runtime entry per frame.
