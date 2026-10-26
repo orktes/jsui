@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds Skia (chrome/m157, pinned) for Android (Ganesh on GLES, CPU raster)
+# Builds Skia (chrome/m157, pinned) for Android (Graphite on Vulkan, Ganesh on
+# GLES as the fallback, CPU raster)
 # with the NDK and installs headers + static libraries into
 # third_party/skia-android in the layout cmake/Deps.cmake expects:
 #
@@ -14,8 +15,10 @@
 # CPUs (CPUS, space separated, default "arm64"): arm64 (arm64-v8a: devices and
 # the emulator on Apple silicon), x64 (x86_64: the emulator on Intel hosts).
 #
-# Configuration: Ganesh + GL (GLES through EGL), no Vulkan / Graphite yet;
-# the Android font manager (/system/etc/fonts.xml, FreeType + expat, all
+# Configuration: Graphite + Vulkan (Skia's own Vulkan headers, memory through
+# the bundled VulkanMemoryAllocator; nothing Vulkan is linked: libvulkan.so is
+# opened at run time), Ganesh + GL (GLES through EGL; Vulkan devices without
+# what Graphite needs fall back to it); the Android font manager (/system/etc/fonts.xml, FreeType + expat, all
 # bundled); bundled ICU + HarfBuzz for skparagraph shaping (ICU data is linked
 # into libicu); PNG / JPEG / WebP / GIF decode, PNG encode; Skottie. Works on
 # Linux and macOS hosts.
@@ -92,7 +95,8 @@ grep -q 'data_dir += "android"' third_party/icu/BUILD.gn && { echo "ICU data pat
 
 # Only sync the third-party repos this configuration compiles.
 python3 - <<'PY'
-keep = {"brotli", "expat", "freetype", "harfbuzz", "icu", "libjpeg-turbo", "libpng", "libwebp", "wuffs", "zlib"}
+keep = {"brotli", "expat", "freetype", "harfbuzz", "icu", "libjpeg-turbo", "libpng", "libwebp", "wuffs", "zlib",
+        "vulkanmemoryallocator"}
 d = {}
 with open("DEPS") as f:
     exec("def Var(x): return vars[x]\n" + f.read(), d)
@@ -121,9 +125,9 @@ ndk_api=$ANDROID_API
 skia_enable_ganesh=true
 skia_use_gl=true
 skia_use_egl=true
-skia_enable_graphite=false
+skia_enable_graphite=true
 skia_use_dawn=false
-skia_use_vulkan=false
+skia_use_vulkan=true
 skia_use_angle=false
 
 skia_enable_fontmgr_android=true
@@ -186,7 +190,7 @@ target_cpu=\"$cpu\"
   mkdir -p "$dest"
   find "$BUILD_DIR" -maxdepth 1 -name 'lib*.a' -exec cp {} "$dest/" \;
   cp "$BUILD_DIR/args.gn" "$dest/args.gn"
-  # Defines dependents get in gn (public + all-dependent configs: SK_GANESH, SK_GL,
+  # Defines dependents get in gn (public + all-dependent configs: SK_GANESH, SK_GL, SK_GRAPHITE, SK_VULKAN,
   # SK_SHAPER_HARFBUZZ_AVAILABLE, ...). They change public headers, so
   # consumers must compile with exactly these.
   : > "$dest/defines.txt"

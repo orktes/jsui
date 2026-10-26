@@ -21,6 +21,7 @@
 #include "jsui/jsui.h"
 #include "render/gpu.h"
 #include "render/gpu_metal.h"
+#include "render/image_cache.h"
 #include "render/pipeline_cache.h"
 #include "render/shader_cache.h"
 #include "render/shader_view.h"
@@ -352,7 +353,8 @@ void jsui_debug_stall_js(JsuiRuntime* rt, double ms) {
 void jsui_tick_native(JsuiRuntime* rt, double nowMs) { rt->rt->tickNative(nowMs); }
 void jsui_set_js_frame_budget(JsuiRuntime* rt, double ms) { rt->rt->jsSliceMs = ms; }
 double jsui_get_js_frame_budget(JsuiRuntime* rt) { return rt->rt->jsSliceMs; }
-int jsui_pending_loads(JsuiRuntime* rt) { return int(rt->rt->loader.pending()); }
+// Decodes on the image pool count too: an image is not there until published.
+int jsui_pending_loads(JsuiRuntime* rt) { return int(rt->rt->loader.pending()) + rt->rt->images->pendingDecodes(); }
 int jsui_needs_redraw(JsuiRuntime* rt) { return rt->surface->needsRedraw() ? 1 : 0; }
 int jsui_wants_frame(JsuiRuntime* rt) { return rt->rt->wantsFrame() ? 1 : 0; }
 double jsui_next_timer(JsuiRuntime* rt) { return rt->rt->nextTimer(); }
@@ -500,6 +502,8 @@ int jsui_gpu_copy_texture(JsuiGpuContext* gpu, void* src, void* dst, const JsuiR
 int jsui_gpu_prepare_target(JsuiGpuContext* gpu, unsigned format) {
   return jsui::graphite_gpu::prepareTarget(gpu, format);
 }
+
+void jsui_set_cache_dir(const char* dir) { jsui::pipeline_cache::setCacheDir(dir ? dir : ""); }
 
 int jsui_gpu_set_pipeline_cache(JsuiGpuContext* gpu, const char* path) {
   if (gpu && gpu->shaders) return gpu->shaders->setFile(path ? path : "");

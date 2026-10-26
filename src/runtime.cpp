@@ -808,7 +808,9 @@ void Runtime::tick(double nowMs, bool sync) {
     if (FrameSnapshot::surfacesChanged(*this, snapshots.current().get())) publishSnapshot();
     buffers.publish();
   }
+  images->beginTick();
   loader.pump();
+  images->pump();  // images the decode pool finished since the last tick
   // Shared state the embedder changed since the last tick: subscribers
   // re-render in one batch before this tick's timers and frame callbacks.
   flushSurfaces();
@@ -1106,7 +1108,7 @@ bool Runtime::needsRedraw() const {
 bool Runtime::wantsFrame() const {
   // A pending repaint alone is not a reason to tick: the host paints after
   // the tick it already ran.
-  if (reloadRequested_ || loader.pending() > 0 || (js && js->hasPendingWork(now + 17)) || animated->animating() ||
+  if (reloadRequested_ || loader.pending() > 0 || images->pendingDecodes() > 0 || (js && js->hasPendingWork(now + 17)) || animated->animating() ||
       !animated->ends.empty() || lotties->animating() || shaders->animating() || state.hasDirty() || buffers.hasDirty() || textures.hasDirty() || audio->hasEvents() || audio->busy() || video->hasEvents() || !uiResults_.empty() || !doomed_.empty() ||
       !hostQueue.empty() || !measureRequests.empty() || worklets->wantsFrame() || worklets->nextTimer() <= now + 17)
     return true;

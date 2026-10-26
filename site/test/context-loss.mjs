@@ -5,7 +5,8 @@
 // variant in a fresh page for --seconds and reports every webglcontextlost /
 // webglcontextrestored, with the trailer's state:
 //
-//   site-poster      the showcase on /screens/cinematic, ?autoplay=0 (poster only)
+//   site-poster      the showcase on /screens/cinematic, ?autoplay=0 (poster only),
+//                    on the page's main thread (?worker=0)
 //   site-video       the same, playing the trailer (1080p VP9 on the GPU paths)
 //   site-worker      the same in worker mode (?worker=1)
 //   bare-video       no JSUI: a WebGL2 canvas, texImage2D(<video>) per presented frame (rVFC)
@@ -190,7 +191,7 @@ for (const variant of VARIANTS) {
   await page.addInitScript(watch);
   let result = '';
   if (variant.startsWith('site')) {
-    const q = { 'site-poster': 'autoplay=0', 'site-video': '', 'site-worker': 'worker=1' }[variant] + '&intro=0';
+    const q = { 'site-poster': 'autoplay=0&worker=0', 'site-video': 'worker=0', 'site-worker': 'worker=1' }[variant] + '&intro=0';
     await page.goto(`${ORIGIN}/index.html?${q}#/screens/cinematic`);
     await page.waitForFunction(() => window.jsui, null, { timeout: 60000 });
     await page.waitForTimeout(SECONDS * 1000);

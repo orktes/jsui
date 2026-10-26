@@ -302,8 +302,13 @@ rendering in a dedicated Worker. The canvas is handed over with
 `requestAnimationFrame`. The page's main thread keeps only the work that needs
 the DOM: input listeners, canvas size and `devicePixelRatio`, the cursor,
 gamepad polling and video capture. A page whose own main-thread work (a game,
-a React app) competes with the UI for frame time gets that time back. The
-showcase takes `?worker=1`.
+a React app) competes with the UI for frame time gets that time back.
+`createJsui` stays on the main thread unless you pass `worker: true`. The
+showcase (site/) turns worker mode on by default where the worker can draw
+with WebGPU (Worker, OffscreenCanvas and `navigator.gpu` in a worker), and
+`?worker=0` / `?worker=1` force either mode. On a Mac Studio (Chrome, WebGPU)
+that cut the showcase's main-thread time by about 95% and its median
+input-to-paint latency, for 8-17% more total CPU (issue #158).
 
 ```js
 const jsui = await createJsui({ canvas, bundleUrl: './bundle.js', worker: true });
