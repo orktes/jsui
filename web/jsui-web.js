@@ -2449,6 +2449,9 @@ class JsuiHost extends CanvasView {
     const loop = this._loop = (t) => {
       this._raf = requestAnimationFrame(loop);
       this.frame(t);
+      // Warm-up frames (beginWarmup) are not shown: no reason to wait for the
+      // display between them. Same clock (JS callbacks run, time stands still).
+      for (let i = 1; i < 8 && this._wgpu?.warm && !this._destroyed; i++) this.frame(t);
       if (this._loop === loop && this._idleSleep && this._idle()) this._sleep();
     };
     this._raf = requestAnimationFrame(loop);
