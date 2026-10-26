@@ -2058,6 +2058,16 @@ struct NodeRecord : Node::Cache {
   uint64_t layerStamp = 0;
   uint32_t stableFrames = 0;
   bool relChanged = true;                  // this frame: its painting changed in its parent's space
+  // The same up to pixel snapping (motion layers, see motionTransform): a
+  // subtree scaling snaps its boxes and text differently at every scale,
+  // which changes `layerStamp` every frame though nothing in it changed.
+  // `motionStamp` follows the layout (unsnapped positions and sizes, and
+  // transforms: `layout`, `layoutW` x `layoutH`) instead.
+  uint64_t motionStamp = 0;
+  uint32_t motionStableFrames = 0;
+  bool motionRelChanged = true;
+  SkMatrix layout;
+  float layoutW = -1, layoutH = -1;
   bool moved = false;                      // this frame: the device matrix changed
   bool scaling = false;                    // this frame: the device matrix' scale / skew changed
   bool resizing = false;                   // this frame: its size changed
@@ -2346,6 +2356,7 @@ SkVector snapBox(const SkMatrix& m, const Rect& r, float* w, float* h) {
 // inside its box during spring animations.
 struct Placement {
   SkMatrix local;      // parent coords -> the node's snapped border-box coords
+  SkMatrix layout;     // the same unsnapped (layout position and transform)
   SkMatrix snapSpace;  // snap space of the node's children (unsnapped origin)
   SkVector snap;       // offset to undo the snap, in the node's local units
   float w, h;          // snapped border-box size
@@ -2373,6 +2384,8 @@ Placement place(const Node* n, const SkMatrix& parentSnap) {
   p.snap = inv.mapVector(pre.fX, pre.fY);
   p.local = SkMatrix::Translate(r.x + pre.fX, r.y + pre.fY);
   p.local.preConcat(t);
+  p.layout = SkMatrix::Translate(r.x, r.y);
+  p.layout.preConcat(t);
   return p;
 }
 
@@ -2648,6 +2661,7 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
 struct LayerCache::Impl {
   struct Entry {
     uint64_t stamp = 0;
+    uint64_t motionStamp = 0;  // NodeRecord::motionStamp (motion layers)
     sk_sp<SkImage> image;
     SkIRect rect;          // device rect of the image when rendered
     bool whole = false;    // the image holds the whole layer (not cut at the canvas edge)
@@ -2722,6 +2736,48 @@ const SkRect& stampedVisualBounds(Node* n, const NodeRecord* rec) {
   return rec->vb;
 }
 
+// Motion layers: a cached layer or raster-cached subtree (see LayerCache,
+// updateRasterCache) whose device matrix keeps changing in more than its
+// translation (a button springing in scale, a card rotating in) while
+// nothing in it changes is drawn from the texture it was last rendered
+// into, mapped by the change of matrix since (resampled bilinearly, as a
+// compositor animates a layer), instead of being rendered into a new
+// texture at every scale, or painted node by node. When it pays:
+// - it moved in this frame and the one before (NodeRecord::changing: an
+//   animation, not a one-off jump), and scales or rotates (`scaling`);
+// - the texture holds the whole layer (not cut at the canvas edge, where
+//   the motion could bring the missing part into view);
+// - the change scales by 1/2 to 5/4: beyond, a fresh texture at the
+//   current scale (one per such step, a few over a whole pop-in), so a
+//   shrinking layer does not alias and a growing one blurs at most by a
+//   quarter. Text in it is resampled with the rest, soft by at most that
+//   much while the motion lasts.
+// Like a sub-pixel translation (layerInexact), the node is repainted
+// exactly the frame after it comes to rest. PaintStats::motionDraws counts
+// the draws; setMotionLayers(false) or JSUI_MOTION_LAYERS=off turns them
+// off (a texture per frame of the motion again, as before).
+bool gMotionLayers = true;  // setMotionLayers
+bool motionLayersEnabled() {
+  static const bool off = [] {
+    const char* v = std::getenv("JSUI_MOTION_LAYERS");
+    return v && (std::strcmp(v, "off") == 0 || std::strcmp(v, "0") == 0);
+  }();
+  return gMotionLayers && !off;
+}
+
+// The device-to-device matrix that takes a texture rendered under `then`
+// to where the layer is under `now`, when it may be drawn so (see above).
+bool motionTransform(const NodeRecord* rec, const SkMatrix& then, const SkMatrix& now, SkMatrix* out) {
+  if (!motionLayersEnabled() || !rec->scaling || !rec->changing || !rec->moved) return false;
+  if (now.hasPerspective() || then.hasPerspective()) return false;
+  SkMatrix inv;
+  if (!then.invert(&inv)) return false;
+  *out = SkMatrix::Concat(now, inv);
+  SkScalar mm[2];
+  if (!out->getMinMaxScales(mm)) return false;
+  return mm[0] >= 0.5f && mm[1] <= 1.25f;
+}
+
 // Paints node `n` (its canvas already at the node's local space, ctx set up
 // as paintNode does) through its cached layer: draws the cached texture at
 // `opacity`, rendering it first when it is stale. False when the layer
@@ -2734,6 +2790,11 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
   if (!rec || !rec->valid || !rec->layerStamp) return false;
   const void* owner = c->recorder() ? static_cast<const void*>(c->recorder())
                                     : static_cast<const void*>(c->recordingContext());
+  // A raster canvas (tests; the CPU paths have no LayerCache) shares its
+  // textures with every raster canvas. Not a canvas without pixels of its
+  // own (the counting canvas).
+  SkPixmap pm;
+  if (!owner && c->peekPixels(&pm)) owner = &lc;
   if (!owner) return false;
   const SkMatrix m = c->getTotalMatrix();
   if (m.hasPerspective()) return false;
@@ -2761,14 +2822,32 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
     inexact = std::fabs(fx - float(dx)) >= 1e-4f || std::fabs(fy - float(dy)) >= 1e-4f;
     if (inexact && !rec->moved) hit = false;
   }
+  // Motion layer: scaling or rotating (see motionTransform), the texture
+  // drawn under the change of matrix since it was rendered.
+  SkMatrix motion;
+  bool moving = false;
+  if (!hit && it != lc.entries.end()) {
+    const auto& e = it->second;
+    moving = e.motionStamp == rec->motionStamp && e.owner == owner && e.image &&
+             e.image->colorType() == c->imageInfo().colorType() && e.whole &&
+             motionTransform(rec, e.matrix, m, &motion);
+    if (moving) {
+      hit = inexact = true;
+      dx = dy = 0;
+    }
+  }
   if (!hit) {
     // Content that keeps changing (a spinner inside a fading panel): a
     // texture of the whole layer every frame would cost more than a layer
     // clipped to the damage.
-    if (rec->stableFrames < 1) return false;
+    // In motion (see motionTransform), unchanged up to snapping.
+    const bool inMotion = motionLayersEnabled() && rec->scaling && rec->changing;
+    if ((inMotion ? rec->motionStableFrames : rec->stableFrames) < 1) return false;
     // A subtree scaling (a button springing): painting it directly costs
-    // less than a texture of it at every scale.
-    if (raster && rec->scaling) return false;
+    // less than a texture of it at every scale, unless it keeps scaling and
+    // the texture is drawn again under the next frames' matrices (a motion
+    // layer, see motionTransform).
+    if (raster && rec->scaling && !inMotion) return false;
     // The whole layer when it fits, so it can move into view without
     // being rendered again.
     if (full.width() <= kMaxSide && full.height() <= kMaxSide &&
@@ -2794,6 +2873,7 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
     ctx.stats.nodesPainted += sub.stats.nodesPainted;
     ctx.stats.layerDraws += sub.stats.layerDraws;
     ctx.stats.layerRenders += sub.stats.layerRenders;
+    ctx.stats.motionDraws += sub.stats.motionDraws;
     ctx.stats.placements += sub.stats.placements;
 #if defined(JSUI_GRAPHITE_AS_IMAGE)
     sk_sp<SkImage> image = oc->recorder() ? SkSurfaces::AsImage(surf) : surf->makeImageSnapshot();
@@ -2806,6 +2886,7 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
     if (it != lc.entries.end()) lc.erase(it);
     LayerCache::Impl::Entry e;
     e.stamp = rec->layerStamp;
+    e.motionStamp = rec->motionStamp;
     e.image = std::move(image);
     e.rect = need;
     e.whole = need == full;
@@ -2825,12 +2906,14 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
   }
   it->second.lastUsed = lc.frame;
   ctx.stats.layerDraws++;
+  if (moving) ctx.stats.motionDraws++;
   SkPaint lp;
   lp.setAlphaf(opacity);
   c->save();
-  c->resetMatrix();
+  if (moving) c->setMatrix(motion);
+  else c->resetMatrix();
   c->drawImage(it->second.image.get(), float(it->second.rect.left() + dx), float(it->second.rect.top() + dy),
-               SkSamplingOptions(), &lp);
+               moving ? SkSamplingOptions(SkFilterMode::kLinear) : SkSamplingOptions(), &lp);
   c->restore();
   return true;
 }
@@ -3277,8 +3360,10 @@ void updateRasterCache(RootRecord* root, SkRegion* damage, const SkIRect& screen
     // being painted. That is a scrolling list's content at 2x (48 rows of 60
     // px are taller than a texture can be): its part on the screen is about
     // its viewport, and it moves in every frame that damages it.
-    bool eligible = visible && !rec->scaling && (whole || !rec->moved);
-    bool stable = eligible && rec->stableFrames >= 1;
+    // Scaling, only as a motion layer (see motionTransform), which needs
+    // the whole subtree in its texture.
+    bool eligible = visible && (!rec->scaling || (whole && motionLayersEnabled())) && (whole || !rec->moved);
+    bool stable = eligible && (rec->scaling ? rec->motionStableFrames : rec->stableFrames) >= 1;
     bool hit = base.intersects(rec->subtree);
     if (hit) {
       rec->rasterHits = rec->rasterLast + 1 == frame ? uint8_t(std::min(rec->rasterHits + 1, 255)) : 1;
@@ -3502,6 +3587,9 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
   bool below = false;  // a descendant's painting changed in its parent's space
   OccCandidate occ[kMaxOccluders];  // the subtree's occluders (see Occlusion)
   uint8_t occCount = 0;
+  bool belowMotion = false;  // the same up to snapping (motionStamp)
+  SkMatrix layout;
+  float layoutW = 0, layoutH = 0;
   uint32_t subtreeNodes = painted ? 1 : 0;
   bool isolatable = true;
   SkIRect full = SkIRect::MakeEmpty();  // `sub` without the clips of ancestors
@@ -3529,6 +3617,9 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
     w = p.w;
     h = p.h;
     local = p.local;
+    layout = p.layout;
+    layoutW = n->visualRect().width;
+    layoutH = n->visualRect().height;
     snap = p.snap;
     rec->childSnap = p.snapSpace;
     rec->transformed = p.transformed;
@@ -3668,7 +3759,7 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
           }
           cr->pass = sk->pass;
           // Out of view: nothing in it changed relative to this node.
-          if (hidden) cr->relChanged = false;
+          if (hidden) cr->relChanged = cr->motionRelChanged = false;
         } else if (ch->ghostOf && sk && sk->enabled) {
           sk->enabled = false;
           sub.join(updateRecords(ch, cm, cs, childClip, imageGen, childDamage, curved, scan));
@@ -3678,6 +3769,7 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
         }
         cr = static_cast<NodeRecord*>(ch->paintCache.get());
         below |= !cr || cr->relChanged;
+        belowMotion |= !cr || cr->motionRelChanged;
         // A child left out of view is quiet: while this node is visited with
         // the same arguments it stays out of view, unchanged (a change marks
         // it dirty, which brings it back). Not counting it kept every
@@ -3778,6 +3870,24 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
     rec->stableFrames++;
   }
   rec->relChanged = selfChanged || below || rec->version != n->paintVersion || rec->local != local;
+  // Up to snapping: the layout size instead of the snapped one, no snap
+  // offset, scroll indicators by their fade only (their device rects scale).
+  bool motionChanged = !rec->valid || rec->contentVersion != n->contentVersion || rec->painted != painted ||
+                       rec->layoutW != layoutW || rec->layoutH != layoutH || rec->children != kids ||
+                       rec->imageGen != gen || caret || rec->barAlpha != barAlpha || rec->scrollX != n->scrollX ||
+                       rec->scrollY != n->scrollY;
+  if (motionChanged || belowMotion || !rec->motionStamp) {
+    static std::atomic<uint64_t> stamps{0};
+    rec->motionStamp = ++stamps;
+    rec->motionStableFrames = 0;
+  } else if (rec->motionStableFrames < 1000000) {
+    rec->motionStableFrames++;
+  }
+  rec->motionRelChanged =
+      motionChanged || belowMotion || rec->version != n->paintVersion || rec->layout != layout;
+  rec->layout = layout;
+  rec->layoutW = layoutW;
+  rec->layoutH = layoutH;
   rec->changing = rec->moved || rec->scaling || rec->resizing;
   rec->moved = rec->valid && rec->matrix != m;
   rec->scaling = rec->valid && (rec->matrix.getScaleX() != m.getScaleX() || rec->matrix.getScaleY() != m.getScaleY() ||
@@ -4355,6 +4465,7 @@ void paintDocumentRects(Document& doc, SkCanvas* canvas, const std::vector<SkIRe
     sum.shadowRenders += s.shadowRenders;
     sum.layerDraws += s.layerDraws;
     sum.layerRenders += s.layerRenders;
+    sum.motionDraws += s.motionDraws;
     sum.placements += s.placements;
   }
   sum.nodesUpdated = rootRecord(doc)->nodesUpdated;
@@ -4366,6 +4477,8 @@ void setPaintCounting(Document& doc, bool on) { rootRecord(doc)->counting = on; 
 void setRecordSkipping(bool on) { gRecordSkip = on; }
 
 void setOcclusionCulling(bool on) { gOcclusion = on; }
+
+void setMotionLayers(bool on) { gMotionLayers = on; }
 
 SkSurfaceProps surfaceProps() { return SkSurfaceProps(0, kUnknown_SkPixelGeometry, 0.2f, 1.2f); }
 

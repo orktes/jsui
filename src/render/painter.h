@@ -100,6 +100,9 @@ struct PaintStats {
   // those the ones rendered this paint (misses).
   int layerDraws = 0;
   int layerRenders = 0;
+  // Of the layer draws, those drawn under a change of scale or rotation
+  // since the texture was rendered (motion layers, see paintCachedLayer).
+  int motionDraws = 0;
   // Always counted: painted nodes placed again (see place() in painter.cpp)
   // instead of where their records say (none after an update).
   int placements = 0;
@@ -187,5 +190,12 @@ void setRecordSkipping(bool on);
 // painted later covers (see Occlusion in painter.cpp), which must give the
 // same pixels. Off here or with JSUI_OCCLUSION=off, everything is painted.
 void setOcclusionCulling(bool on);
+
+// Motion layers (on by default): a cached layer or raster-cached subtree
+// that keeps scaling or rotating is drawn from its texture under the change
+// of matrix, and repainted exactly at rest (see motionTransform in
+// painter.cpp). Off here or with JSUI_MOTION_LAYERS=off, it gets a new
+// texture (or a direct paint) every frame of the motion.
+void setMotionLayers(bool on);
 
 }  // namespace jsui
