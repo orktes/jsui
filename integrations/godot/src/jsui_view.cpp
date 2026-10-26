@@ -34,6 +34,7 @@
 #include <cstring>
 
 #include "jsui_audio.h"
+#include "jsui_ui_thread.h"
 #include "keymap.h"
 
 using namespace godot;
@@ -192,6 +193,12 @@ void JsuiView::_bind_methods() {
   BIND_CONSTANT(JS_THREAD_OFF);
   BIND_CONSTANT(JS_THREAD_ON);
   BIND_CONSTANT(JS_THREAD_LOCKSTEP);
+  ClassDB::bind_method(D_METHOD("set_ui_thread", "mode"), &JsuiView::set_ui_thread);
+  ClassDB::bind_method(D_METHOD("get_ui_thread"), &JsuiView::get_ui_thread);
+  ClassDB::bind_method(D_METHOD("get_active_ui_thread"), &JsuiView::get_active_ui_thread);
+  BIND_CONSTANT(UI_THREAD_OFF);
+  BIND_CONSTANT(UI_THREAD_LOCKSTEP);
+  BIND_CONSTANT(UI_THREAD_PIPELINED);
   ClassDB::bind_method(D_METHOD("set_runtime_view", "path"), &JsuiView::set_runtime_view);
   ClassDB::bind_method(D_METHOD("get_runtime_view"), &JsuiView::get_runtime_view);
   ClassDB::bind_method(D_METHOD("set_component", "app_key"), &JsuiView::set_component);
@@ -275,6 +282,9 @@ void JsuiView::_bind_methods() {
   // Where the bundle's JS runs (see jsui_view.h); applies on start().
   ADD_PROPERTY(PropertyInfo(Variant::INT, "js_thread", PROPERTY_HINT_ENUM, "Off,On,Lockstep"), "set_js_thread",
                "get_js_thread");
+  // Tick and paint on a thread of the runtime's own (see jsui_view.h); applies on start().
+  ADD_PROPERTY(PropertyInfo(Variant::INT, "ui_thread", PROPERTY_HINT_ENUM, "Off,Lockstep,Pipelined"), "set_ui_thread",
+               "get_ui_thread");
   ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "runtime_view", PROPERTY_HINT_NODE_PATH_VALID_TYPES, "JsuiView"),
                "set_runtime_view", "get_runtime_view");
   ADD_PROPERTY(PropertyInfo(Variant::STRING, "component"), "set_component", "get_component");
@@ -331,6 +341,14 @@ JsuiView::JsuiView() {
 JsuiView::~JsuiView() {
   stop();
   detachFromRuntimeView();
+  if (submit_connected_ && Engine::get_singleton()->has_singleton("WebGPUInterop") &&
+      Engine::get_singleton()->get_singleton("WebGPUInterop") == submit_interop_)
+    submit_interop_->call("remove_frame_submit_callback", callable_mp(this, &JsuiView::onFrameSubmit));
+  if (pre_draw_connected_ && RenderingServer::get_singleton()) {
+    Callable cb = callable_mp(this, &JsuiView::onFramePreDraw);
+    if (RenderingServer::get_singleton()->is_connected("frame_pre_draw", cb))
+      RenderingServer::get_singleton()->disconnect("frame_pre_draw", cb);
+  }
   // Surface views of our runtime (stop() freed their surfaces) look for a
   // runtime view again.
   for (JsuiView* v : surfaces_) v->host_ = nullptr;
@@ -545,6 +563,7 @@ void JsuiView::destroySurface() {
 }
 
 void JsuiView::surfaceGone() {
+  if (host_) host_->forgetUiView(this);  // our part of the UI thread's frame
   rt_ = nullptr;  // waits for the renders queued on the runtime (ours among them)
   // Our queued frame has run; its result goes with the surface.
   gpu_job_pending_ = false;
@@ -587,7 +606,7 @@ void JsuiView::start() {
   // files once exported), so those bundles load through FileAccess. Other
   // URLs (http:// dev servers, absolute file paths) use the built-in loader.
   if (isGodotPath(bundle_url_)) {
-    cfg.load = &JsuiView::onLoad;
+    cfg.load = &JsuiView::onLoadAny;
     cfg.load_user = this;
   }
   // The UI's sounds play through Godot's audio (jsui_audio.h).
@@ -595,14 +614,16 @@ void JsuiView::start() {
     audio_ = std::make_unique<ViewAudio>(*this);
     audio_->setEnabled(audio_enabled_);
   }
-  cfg.on_audio = &ViewAudio::onAudio;
-  cfg.audio_user = audio_.get();
+  cfg.on_audio = &JsuiView::onAudioAny;
+  cfg.audio_user = this;
   rt_ = jsui_create(&cfg);
   if (!rt_) {
     UtilityFunctions::push_error("JsuiView: jsui_create failed");
     return;
   }
   audio_->attach(rt_.unsynced());
+  // The UI thread needs JS on a thread of its own (jsui_record_gpu_frame).
+  ui_mode_ = jsui_js_thread(rt_.unsynced()) == JSUI_JS_THREAD_OFF ? UI_THREAD_OFF : ui_thread_;
   if (profiling_) jsui_set_profiling(rt_, 1);
   start_usec_ = Time::get_singleton()->get_ticks_usec();
   clock_ms_ = clock_wall_ms_ = 0;
@@ -648,8 +669,10 @@ void JsuiView::stop() {
     return;
   }
   if (!rt_) return;
+  stopUiThread();  // the frame in flight (its recordings) goes first
   JsuiRuntime* rt = rt_;
   rt_ = nullptr;
+  ui_mode_ = UI_THREAD_OFF;
   // jsui_destroy frees the surface handles of our surface views too.
   for (JsuiView* v : surfaces_) v->surfaceGone();
   // Open Host.calls are cancelled and open call_ui calls fail here; their
@@ -882,6 +905,7 @@ void JsuiView::set_js_frame_budget_ms(double ms) {
 
 bool JsuiView::sync_js(double timeout_ms) {
   JsuiView* rv = runtimeView();
+  rv->completeUiFrame();
   if (!rv->rt_) return true;
   bool idle = jsui_sync(rv->rt_, timeout_ms) != 0;
   rv->flushMessages();
@@ -909,6 +933,9 @@ int JsuiView::get_active_js_thread() const {
 void JsuiView::process() {
   if (attach_wanted_ && !host_) attachToRuntimeView();  // the runtime view was not there yet
   if (host_) return;  // the runtime view ticks the runtime and paints us
+  // The UI thread's frame frame_pre_draw did not take (UI_THREAD_PIPELINED:
+  // last frame's, shown now).
+  completeUiFrame();
   // The frames queued on a separate render thread last frame, ours and our
   // surface views': they have run (Godot syncs with that thread every
   // frame), take their results.
@@ -925,6 +952,13 @@ void JsuiView::process() {
   if (audio_) {
     audio_->update(rt_);
     if (!rt_) return;
+  }
+  // The tick and the paint on the UI thread (jsui_ui_thread.cpp); this
+  // frame's host texture copies first.
+  if (uiFrameReady()) {
+    queueTextureJob();
+    kickUiFrame();
+    return;
   }
   const uint64_t tick0 = Time::get_singleton()->get_ticks_usec();
   // One tick for every surface of the runtime, then each paints.
@@ -1111,6 +1145,7 @@ Ref<Texture2D> JsuiView::get_texture() const {
 }
 
 Ref<Image> JsuiView::get_frame_image() {
+  runtimeView()->completeUiFrame();
   // Copy of the last frame, un-premultiplied (screenshots / tests). The CPU
   // renderer has it in memory (so this works with --headless); the GPU one
   // reads the texture back (a GPU sync: not for every frame).
@@ -1129,6 +1164,7 @@ Ref<Image> JsuiView::get_frame_image() {
 }
 
 Ref<Image> JsuiView::get_cpu_frame_image() {
+  runtimeView()->completeUiFrame();
   if (!rt_ || pixel_w_ <= 0 || pixel_h_ <= 0) return Ref<Image>();
   // Bring the shown frame up to date first, so both describe the same state.
   if ((render_pending_ || jsui_needs_redraw(rt_)) && is_visible_in_tree()) render();
@@ -1175,6 +1211,16 @@ Dictionary JsuiView::get_render_stats() const {
   d["gpu_job_usec_total"] = int64_t(gpu_job_usec_total_.load(std::memory_order_relaxed));
   d["jsui_render_usec_total"] = int64_t(jsui_render_usec_total_.load(std::memory_order_relaxed));
   d["tick_usec_last"] = int64_t(tick_usec_last_);
+  // The UI thread (the runtime view's): the mode in use, frames it ran, the
+  // main thread's waits for it, its tick and record time, and the main
+  // thread's time replaying the frames into the textures.
+  d["ui_thread"] = get_active_ui_thread();
+  d["ui_frames"] = int64_t((host_ ? host_ : this)->ui_frames_);
+  d["ui_waits"] = int64_t((host_ ? host_ : this)->ui_waits_);
+  d["ui_wait_usec_total"] = int64_t((host_ ? host_ : this)->ui_wait_usec_total_);
+  d["ui_tick_usec_total"] = int64_t((host_ ? host_ : this)->ui_tick_usec_total_);
+  d["ui_record_usec_total"] = int64_t((host_ ? host_ : this)->ui_record_usec_total_);
+  d["ui_replay_usec_total"] = int64_t((host_ ? host_ : this)->ui_replay_usec_total_);
   // The runtime's pipeline cache (its Skia context is the runtime view's).
   const JsuiView* rv = host_ ? host_ : this;
   if (renderer_ != Renderer::Cpu && renderer_ != Renderer::Unknown && rv->gpu_) {

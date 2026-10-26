@@ -155,6 +155,23 @@ class LayerCacheScope {
   LayerCache* prev_;
 };
 
+// While in scope, paintDocument() records a frame that a GPU backend will
+// replay (Surface::recordFrame, jsui_record_gpu_frame): into a recording
+// canvas, painted as into that backend's canvas (shadow masks as on the
+// GPU). Host textures become placeholders the backend resolves when it
+// replays (host_textures.h, DeferredTextures).
+class DeferredGpuScope {
+ public:
+  explicit DeferredGpuScope(bool on);
+  ~DeferredGpuScope();
+  DeferredGpuScope(const DeferredGpuScope&) = delete;
+  DeferredGpuScope& operator=(const DeferredGpuScope&) = delete;
+
+ private:
+  bool prev_;
+};
+bool deferredGpuPaint();
+
 // Benchmarks / perf tests: count the canvas calls of each paintDocument()
 // (see PaintStats). Off by default; it wraps the canvas, which costs a
 // little per call.

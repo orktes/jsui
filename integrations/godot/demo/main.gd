@@ -24,6 +24,9 @@ extends Control
 ##                       thread), off (inside the tick) or lockstep. The
 ##                       self-test starts with one JS stall (debug_stall_js):
 ##                       with the thread, frames go on while JS is busy
+##   --ui-thread M       JsuiView.ui_thread: off, lockstep (the tick and the
+##                       paint on the runtime's UI thread, shown this frame)
+##                       or pipelined (shown the next frame, no wait)
 ##   --expect-renderer R fail the run unless JsuiView rendered with R
 ##                       ("vulkan", "metal", "webgpu" or "cpu")
 ##   --max-gpu-diff D    with --capture on a GPU renderer: also paint the same
@@ -213,6 +216,10 @@ func _enter_tree() -> void:
 			"--js-thread":
 				view.js_thread = {"off": JsuiView.JS_THREAD_OFF, "lockstep": JsuiView.JS_THREAD_LOCKSTEP}.get(v, JsuiView.JS_THREAD_ON)
 				i += 1
+			"--ui-thread":
+				if view:
+					view.ui_thread = {"lockstep": JsuiView.UI_THREAD_LOCKSTEP, "pipelined": JsuiView.UI_THREAD_PIPELINED}.get(v, JsuiView.UI_THREAD_OFF)
+				i += 1
 			"--expect-renderer":
 				_expect_renderer = v
 				i += 1
@@ -330,14 +337,14 @@ func _ready() -> void:
 	if _hud:
 		ui.js_error.connect(func(msg): printerr("[jsui error] ", msg))
 		ui.grab_focus()
-		print("JsuiView running=%s bundle=%s (--hud)" % [ui.is_running(), ui.bundle_url])
+		print("JsuiView running=%s bundle=%s ui_thread=%d (--hud)" % [ui.is_running(), ui.bundle_url, ui.get_active_ui_thread()])
 		return
 	ui.message_received.connect(_on_ui_message)
 	ui.call_requested.connect(_on_ui_call)
 	ui.js_error.connect(func(msg): printerr("[jsui error] ", msg))
 	ui.sound_played.connect(func(voice: int, url: String, bus: String): _ui_sounds.append([voice, url, bus]))
 	ui.grab_focus()  # keyboard / gamepad go to the UI
-	print("JsuiView running=%s bundle=%s dev=%s" % [ui.is_running(), ui.bundle_url, ui.dev_mode])
+	print("JsuiView running=%s bundle=%s dev=%s ui_thread=%d" % [ui.is_running(), ui.bundle_url, ui.dev_mode, ui.get_active_ui_thread()])
 	if _bench > 0:
 		_run_bench()
 	elif _first_scroll:
@@ -432,7 +439,8 @@ func _perf_frame() -> void:
 	var parts := PackedStringArray()
 	for k in ["js", "commit", "animated", "style", "layout", "input", "paint", "gpu_submit", "other"]:
 		parts.append("%s %.3f" % [k, p[k + "_us"] / n / 1000.0])
-	for k in ["render_usec_total", "jsui_render_usec_total", "gpu_job_usec_total"]:
+	for k in ["render_usec_total", "jsui_render_usec_total", "gpu_job_usec_total", "ui_tick_usec_total",
+			"ui_record_usec_total", "ui_replay_usec_total", "ui_wait_usec_total"]:
 		parts.append("%s %.3f" % [k.trim_suffix("_usec_total"), (r[k] - _perf_stats[k]) / n / 1000.0])
 	parts.append("tick %.3f" % (r.tick_usec_last / 1000.0))
 	parts.append("renders %d" % (r.renders - _perf_stats.renders))
@@ -1492,6 +1500,14 @@ func _save_capture() -> void:
 			var vpath := path.get_basename() + "-viewport.png"
 			shot.save_png(vpath)
 			print("capture: viewport %dx%d -> %s" % [shot.get_width(), shot.get_height(), vpath])
+	if _self_test and ui.ui_thread != JsuiView.UI_THREAD_OFF and ui.get_renderer() != "cpu":
+		# --ui-thread: the frames between the checks went through the UI thread.
+		var st: Dictionary = ui.get_render_stats()
+		_check("ui thread", ui.get_active_ui_thread() == ui.ui_thread and st.ui_frames > 0,
+			"mode %d: %d frames ticked and recorded on the UI thread (%.3f ms tick + %.3f ms record each), replayed in %.3f ms each; the main thread waited for it %d times (%.3f ms)" % [
+				ui.get_active_ui_thread(), st.ui_frames, st.ui_tick_usec_total / 1000.0 / maxi(1, st.ui_frames),
+				st.ui_record_usec_total / 1000.0 / maxi(1, st.ui_frames), st.ui_replay_usec_total / 1000.0 / maxi(1, st.ui_frames),
+				st.ui_waits, st.ui_wait_usec_total / 1000.0])
 	if _self_test:
 		print("self-test: %d failed (pongs=%d ui_answers=%d unhandled_clicks=%d)" % [_failures, _pongs, _ui_answers, _unhandled_clicks])
 		if _failures > 0:

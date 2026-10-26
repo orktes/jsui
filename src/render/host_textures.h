@@ -39,6 +39,10 @@ class HostTextures {
     uint64_t descVersion = 0;     // bumped when handle / size / format / flags change
     uint64_t contentVersion = 0;  // bumped on every new contents (and desc change)
     bool warned = false;          // "cannot draw this texture here" was logged
+    // Recorded frames (DeferredTextures): the placeholder drawn for these
+    // contents (placeholderVersion: their contentVersion).
+    sk_sp<SkImage> placeholder;
+    uint64_t placeholderVersion = 0;
   };
 
   HostTextures();
@@ -97,6 +101,45 @@ class HostTextures {
   std::vector<std::string> dirty_;
   uint64_t nextId_ = 1;
 };
+
+// Host textures in a recorded frame (Surface::recordFrame, a frame painted
+// on one thread and replayed into the GPU on another). While a
+// DeferredTextures is being recorded into (Recording scope), HostTextures::
+// image() returns, for a GPU texture, a placeholder: a lazy image of the
+// texture's size with no pixels, noted with a copy of the texture's entry.
+// While it is replayed (Replay scope, under the backend's TextureScope), the
+// backend's image provider draws the TextureWrapper's wrap of that entry in
+// the placeholder's place (resolveDeferredTexture).
+struct DeferredTextures {
+  struct Item {
+    uint32_t imageId = 0;  // the placeholder's uniqueID
+    HostTextures::Entry entry;
+  };
+  std::vector<Item> items;
+  class Recording {
+   public:
+    explicit Recording(DeferredTextures* into);
+    ~Recording();
+    Recording(const Recording&) = delete;
+    Recording& operator=(const Recording&) = delete;
+
+   private:
+    DeferredTextures* prev_;
+  };
+  class Replay {
+   public:
+    explicit Replay(const DeferredTextures* from);
+    ~Replay();
+    Replay(const Replay&) = delete;
+    Replay& operator=(const Replay&) = delete;
+
+   private:
+    const DeferredTextures* prev_;
+  };
+};
+// While a frame with DeferredTextures is replayed: the wrap to draw for
+// `image` when it is one of its placeholders, else nullptr.
+sk_sp<SkImage> resolveDeferredTexture(const SkImage* image);
 
 // A GPU backend's way to sample host textures in its frames. `make` wraps a
 // description as an SkImage of the backend's device (nullptr: this backend

@@ -110,6 +110,7 @@
 #include <godot_cpp/variant/typed_array.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <condition_variable>
@@ -283,6 +284,8 @@ void JsuiView::runOnRenderThread(const std::function<void()>& job) {
 }
 
 void JsuiView::waitRender() {
+  // The UI thread's frame (jsui_ui_thread.cpp) uses the runtime too.
+  waitUi();
   // Every job on the runtime: a surface view's render uses the shared
   // runtime as much as the runtime view's own.
   Fence& f = runtimeFence();
@@ -575,6 +578,63 @@ bool JsuiView::renderGpu() {
       });
     }
     if (!adopted) return false;
+  }
+  finishGpuFrame(dirty);
+  return true;
+}
+
+bool JsuiView::uiTarget(JsuiGpuTarget* t) {
+  if ((renderer_ != Renderer::Vulkan && renderer_ != Renderer::Metal && renderer_ != Renderer::WebGPU) ||
+      !runtimeView()->gpu_ || !gpu_cur_.valid() || gpu_cur_.w != pixel_w_ || gpu_cur_.h != pixel_h_ ||
+      gpu_next_.valid())
+    return false;
+  RenderingServer* rs = RenderingServer::get_singleton();
+  RenderingDevice* rd = rs ? rs->get_rendering_device() : nullptr;
+  if (!rd) return false;
+  const TargetKind kind = renderer_ == Renderer::Vulkan   ? TargetKind::Vulkan
+                          : renderer_ == Renderer::WebGPU ? TargetKind::WebGPU
+                                                          : TargetKind::Metal;
+  *t = targetFor(kind, pixel_w_, pixel_h_, gpu_retained_ ? JSUI_GPU_INCREMENTAL : 0);
+  t->texture = driverResource(rd, RenderingDevice::DRIVER_RESOURCE_TEXTURE, gpu_cur_.src);
+  return t->texture != nullptr;
+}
+
+void* JsuiView::dstTexture() {
+  RenderingServer* rs = RenderingServer::get_singleton();
+  RenderingDevice* rd = rs ? rs->get_rendering_device() : nullptr;
+  return rd && gpu_cur_.dst.is_valid() ? driverResource(rd, RenderingDevice::DRIVER_RESOURCE_TEXTURE, gpu_cur_.dst) : nullptr;
+}
+
+bool JsuiView::replayGpuFrame(JsuiGpuFrame* frame, const JsuiGpuTarget& t, void* rawDst, JsuiRect* dirtyOut) {
+  // Inside the frame-submit callback (rawDst) the RenderingDevice is not
+  // touched at all.
+  RenderingServer* rs = RenderingServer::get_singleton();
+  RenderingDevice* rd = rawDst ? nullptr : rs ? rs->get_rendering_device() : nullptr;
+  JsuiGpuContext* gpu = runtimeView()->gpu_;
+  if ((!rd && !rawDst) || !gpu) {
+    jsui_discard_gpu_frame(rt_.unsynced(), frame);
+    return false;
+  }
+  const uint64_t t0 = usecNow();
+  JsuiRect dirty{0, 0, 0, 0};
+  const int rc = jsui_render_gpu_frame(rt_.unsynced(), gpu, frame, &t, &dirty);
+  const uint64_t dt = usecNow() - t0;
+  jsui_render_usec_total_.fetch_add(dt, std::memory_order_relaxed);
+  render_usec_last_ = dt;
+  render_usec_total_ += dt;
+  render_usec_max_ = std::max(render_usec_max_, dt);
+  gpu_jobs_++;
+  if (rc != 0) return false;
+  gpu_retained_ = true;
+  if (rawDst) {
+    if (dirty.width > 0 && dirty.height > 0 && jsui_gpu_copy_texture(gpu, t.texture, rawDst, &dirty) != 0) return false;
+    if (dirtyOut) *dirtyOut = dirty;
+    return true;
+  }
+  if (dirty.width > 0 && dirty.height > 0) {
+    Vector3 pos(float(dirty.x), float(dirty.y), 0);
+    rd->texture_copy(gpu_cur_.src, gpu_cur_.dst, pos, pos, Vector3(float(dirty.width), float(dirty.height), 1), 0, 0, 0,
+                     0);
   }
   finishGpuFrame(dirty);
   return true;

@@ -4,6 +4,7 @@
 
 #include "dev_overlay.h"
 #include "include/core/SkCanvas.h"
+#include "include/core/SkDrawable.h"
 #include "include/core/SkPicture.h"
 #include "include/core/SkPictureRecorder.h"
 #include "include/core/SkSurface.h"
@@ -113,7 +114,7 @@ SkIRect Surface::beginCanvasTracked(const void* key, int width, int height, bool
 }
 
 SkIRect Surface::finishCanvasTracked(const CanvasChoice& c, int width, int height, bool keyValid,
-                                     const SkIRect& damage) {
+                                     const SkIRect& damage, bool deferWarm, bool* warm) {
   doc.clearPaintDirty();
   redraw_ = false;
   lastTargetW_ = width;
@@ -128,7 +129,8 @@ SkIRect Surface::finishCanvasTracked(const CanvasChoice& c, int width, int heigh
   // Preloaded shaders (ShaderEffects::preload): drawn off-screen, so this
   // frame builds their pipelines. A frame with nothing else to paint still
   // reports a pixel, so the backend flushes it.
-  bool warmed = rt.shaders->warm(canvas);
+  bool warmed = deferWarm ? rt.shaders->warmPending() > 0 : rt.shaders->warm(canvas);
+  if (warm) *warm = warmed;
   if (c.key && keyValid && c.key == trackedKey_) {
     if (damage.isEmpty()) return warmed ? SkIRect::MakeWH(1, 1) : SkIRect::MakeEmpty();
     if (c.splitDamage) {
@@ -150,6 +152,41 @@ SkIRect Surface::finishCanvasTracked(const CanvasChoice& c, int width, int heigh
   if (c.clear || c.key) canvas->clear(SK_ColorTRANSPARENT);
   paintFrame(canvas, trackedFrozen_, trackedOverlay_);
   return SkIRect::MakeWH(width, height);
+}
+
+std::unique_ptr<Surface::RecordedFrame> Surface::recordFrame(const void* key, int width, int height,
+                                                               CanvasChoice choice, bool growCurves, bool gpu) {
+  auto f = std::make_unique<RecordedFrame>();
+  bool keyValid = false;
+  SkIRect damage = beginCanvasTracked(key, width, height, &keyValid, growCurves);
+  SkPictureRecorder rec;
+  choice.canvas = rec.beginRecording(SkRect::MakeIWH(width, height));
+  {
+    DeferredGpuScope deferred(gpu);
+    DeferredTextures::Recording textures(&f->textures);
+    f->painted = finishCanvasTracked(choice, width, height, keyValid, damage, /*deferWarm=*/true, &f->warm);
+  }
+  f->key = choice.key;
+  f->width = width;
+  f->height = height;
+  if (!f->painted.isEmpty()) f->drawable = rec.finishRecordingAsDrawable();
+  return f;
+}
+
+SkIRect Surface::replayFrame(RecordedFrame& f, SkCanvas* canvas) {
+  if (f.warm) rt.shaders->warm(canvas);
+  if (f.drawable) {
+    DeferredTextures::Replay textures(&f.textures);
+    f.drawable->draw(canvas);
+  }
+  return f.painted;
+}
+
+void Surface::discardFrame(const RecordedFrame& f) {
+  // The target never got it: the records describe pixels it may not hold.
+  (void)f;
+  lastTarget_ = nullptr;
+  redraw_ = true;
 }
 
 SkIRect Surface::paintTracked(SkCanvas* canvas, const void* pixels, int width, int height, size_t rowBytes,

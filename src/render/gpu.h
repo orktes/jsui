@@ -17,7 +17,10 @@
 // back to the next backend / the CPU path.
 #pragma once
 
+#include <memory>
+
 #include "jsui/jsui.h"
+#include "surface.h"
 
 namespace jsui::pipeline_cache {
 class Precompiler;
@@ -97,7 +100,15 @@ bool owns(JsuiGpuContext* gpu);  // a Graphite (Vulkan / Metal / Dawn) context
 void destroy(JsuiGpuContext* gpu);
 void purge(JsuiGpuContext* gpu, size_t cacheBytes);
 // 0 on success, -1 on failure; `dirty` (optional) gets the repainted rect.
-int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& target, JsuiRect* dirty);
+// With `frame` (recorded by record() for this target) it is replayed
+// instead of painting the surface (a frame for another target is discarded).
+int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& target, JsuiRect* dirty,
+           Surface::RecordedFrame* frame = nullptr);
+// jsui_record_gpu_frame: 1 with *frame to render, 0 when the target holds
+// the frame already, -1 when this context cannot (not a Graphite one).
+int record(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& target, std::unique_ptr<Surface::RecordedFrame>* frame);
+// jsui_gpu_copy_texture.
+int copyTexture(JsuiGpuContext* gpu, void* src, void* dst, const JsuiRect& rect);
 // jsui_gpu_prepare_target.
 int prepareTarget(JsuiGpuContext* gpu, unsigned format);
 

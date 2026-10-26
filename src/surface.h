@@ -13,10 +13,12 @@
 #include <vector>
 
 #include "core/document.h"
+#include "include/core/SkDrawable.h"
 #include "include/core/SkRect.h"
 #include "include/core/SkRefCnt.h"
 #include "include/core/SkRegion.h"
 #include "jsui/jsui.h"
+#include "render/host_textures.h"
 
 class SkCanvas;
 class SkPicture;
@@ -116,6 +118,31 @@ class Surface {
     return finishCanvasTracked(choose(damage, keyValid), width, height, keyValid, damage);
   }
 
+  // Deferred frames (jsui_record_gpu_frame: a UI thread ticks and paints,
+  // the thread that owns the GPU context only replays). recordFrame does
+  // what renderCanvasTracked(key, width, height, choose, growCurves) would,
+  // with `choose` returning `choice` (its canvas ignored): layout, damage
+  // tracking and the paint, recorded into a picture instead of drawn. With
+  // `gpu` the paint is the one for a GPU canvas (DeferredGpuScope; host
+  // textures as placeholders, DeferredTextures). replayFrame draws it into
+  // the canvas `choice` stood for (shader warm-ups included) and returns the
+  // repainted rect; discardFrame drops one that was not drawn, and the next
+  // render repaints fully. The runtime is not thread safe: calls into it
+  // (ticks, input, recording, replaying) must not overlap, whichever thread
+  // makes them.
+  struct RecordedFrame {
+    const void* key = nullptr;  // the retained surface the frame repaints (choice.key)
+    int width = 0, height = 0;
+    SkIRect painted = SkIRect::MakeEmpty();  // empty: nothing to draw
+    bool warm = false;                       // shader warm-ups are due (drawn at replay)
+    sk_sp<SkDrawable> drawable;              // the paint (null when nothing is painted)
+    DeferredTextures textures;
+  };
+  std::unique_ptr<RecordedFrame> recordFrame(const void* key, int width, int height, CanvasChoice choice,
+                                             bool growCurves, bool gpu);
+  SkIRect replayFrame(RecordedFrame& frame, SkCanvas* canvas);
+  void discardFrame(const RecordedFrame& frame);
+
   // Dev mode reload: keeps the current frame on screen until the new bundle
   // renders (and while it is broken).
   void snapshotFrame();
@@ -131,7 +158,10 @@ class Surface {
   bool overlay() const;
   // renderCanvasTracked(): layout + damage (the bounds, or empty), then the paint.
   SkIRect beginCanvasTracked(const void* key, int width, int height, bool* keyValid, bool growCurves);
-  SkIRect finishCanvasTracked(const CanvasChoice& c, int width, int height, bool keyValid, const SkIRect& damage);
+  // `deferWarm` (recordFrame): shader warm-ups are left for the replay;
+  // *warm says whether some are due.
+  SkIRect finishCanvasTracked(const CanvasChoice& c, int width, int height, bool keyValid, const SkIRect& damage,
+                              bool deferWarm = false, bool* warm = nullptr);
   bool trackedFrozen_ = false, trackedOverlay_ = false;
   const void* trackedKey_ = nullptr;
   SkRegion trackedDamage_;

@@ -68,6 +68,29 @@
 // JS_THREAD_LOCKSTEP on its thread but waited for every tick (the frames
 // of OFF). The runtime view's applies (on start()).
 //
+// UI thread (`ui_thread`, jsui_record_gpu_frame; jsui_ui_thread.cpp): with
+// the GPU renderer and JS on its own thread, the runtime view's process
+// hands the frame to a thread of the runtime's own, which ticks the runtime
+// (input, native Animated, styles, layout, what JS committed), tracks the
+// damage and records each view's paint, while the main thread goes on with
+// the game's frame. The main thread then only replays the recordings into
+// the views' textures (Graphite's recording, snap and submit, which stay
+// with the GPU device's thread) and emits the signals.
+// UI_THREAD_LOCKSTEP (the frame shown is this frame's) takes the frames
+// back as late as Godot allows, waiting there if the UI thread is still
+// busy: on godot-aw3's WebGPU driver in WebGPUInterop's frame-submit
+// callback, right before Godot submits its frame (the signals follow in the
+// next process), elsewhere in RenderingServer.frame_pre_draw, which comes
+// right after process and so saves next to nothing. UI_THREAD_PIPELINED
+// takes them in the next frame's process, so the main thread never waits
+// and the UI shows one frame later. Every call into
+// the runtime from the main thread (input, set_buffer, set_state, hit
+// tests, ...) first waits for the UI thread (RuntimeRef), so the runtime is
+// only ever used by one thread at a time; a frame that cannot go to the UI
+// thread (the first ones, a resize, the CPU renderer, auto_size, a separate
+// render thread, JS without its own thread) is ticked and painted on the
+// main thread as before. The runtime view's applies (on start()).
+//
 // Fonts (register_font, jsui_register_font): FontFile resources, bytes or
 // font files the UI's fontFamily can name. Like host textures they belong to
 // the runtime: the runtime view registers the `fonts` property and every
@@ -133,6 +156,10 @@ class JsuiView : public godot::Control {
   // JS_THREAD_OFF / _ON (default) / _LOCKSTEP; applies on the next start().
   void set_js_thread(int mode) { js_thread_ = mode >= JSUI_JS_THREAD_OFF && mode <= JSUI_JS_THREAD_LOCKSTEP ? mode : JSUI_JS_THREAD_ON; }
   int get_js_thread() const { return js_thread_; }
+  // UI_THREAD_OFF (the default) / _LOCKSTEP / _PIPELINED (see the top of
+  // this file); applies on the next start().
+  void set_ui_thread(int mode) { ui_thread_ = mode >= UI_THREAD_OFF && mode <= UI_THREAD_PIPELINED ? mode : UI_THREAD_OFF; }
+  int get_ui_thread() const { return ui_thread_; }
   void set_runtime_view(const godot::NodePath& path);
   godot::NodePath get_runtime_view() const { return runtime_view_; }
   void set_component(const godot::String& key);
@@ -185,6 +212,12 @@ class JsuiView : public godot::Control {
   static constexpr int JS_THREAD_OFF = JSUI_JS_THREAD_OFF;
   static constexpr int JS_THREAD_ON = JSUI_JS_THREAD_ON;
   static constexpr int JS_THREAD_LOCKSTEP = JSUI_JS_THREAD_LOCKSTEP;
+  // The UI thread mode the runtime runs in (OFF where it cannot: no
+  // threads, JS without its own thread, not running).
+  int get_active_ui_thread() const;
+  static constexpr int UI_THREAD_OFF = 0;
+  static constexpr int UI_THREAD_LOCKSTEP = 1;
+  static constexpr int UI_THREAD_PIPELINED = 2;
 
   // Shared state (jsui_set_state / jsui_patch_state / jsui_get_state). Values
   // are JSON-encoded; null removes the key. Kept across start()/stop():
@@ -297,8 +330,42 @@ class JsuiView : public godot::Control {
   static void onCallResult(void* user, uint64_t id, int ok, const char* result);
   static void onLog(void* user, JsuiLogLevel level, const char* message);
   static void onLoad(void* user, JsuiRuntime* rt, uint64_t id, const char* url);
+  // The runtime's loader / audio handler: on the UI thread they are queued
+  // for the main thread (FileAccess, AudioStreamPlayers).
+  static void onLoadAny(void* user, JsuiRuntime* rt, uint64_t id, const char* url);
+  static void onAudioAny(void* user, const JsuiAudioCommand* cmd);
 
   void process();
+  // UI thread (jsui_ui_thread.cpp), on the runtime view. uiFrameReady: this
+  // frame can go to the UI thread (every view of the runtime is a visible
+  // GPU view in steady state, or hidden); kickUiFrame hands it over;
+  // completeUiFrame waits for it, replays the recorded frames and emits what
+  // the tick queued (nothing to do without a frame in flight); waitUi only
+  // waits (any thread but the UI thread; RuntimeRef). forgetUiView: a view
+  // leaving the runtime drops its part of the frame.
+  bool uiFrameReady();
+  void kickUiFrame();
+  void completeUiFrame();
+  void waitUi();
+  void forgetUiView(JsuiView* view);
+  void onFramePreDraw();
+  void onFrameSubmit();
+  // Replays the frame's recordings into the views' textures: Godot copies
+  // the damage into dst (texture_copy), or with `rawCopy` (inside the
+  // frame-submit callback, where the RenderingDevice takes no more work)
+  // JSUI does (jsui_gpu_copy_texture) and frame_rendered waits.
+  void replayUiFrames(bool rawCopy);
+  void stopUiThread();  // the runtime goes: drops the frame in flight and the queues
+  bool onUiThread() const;
+  // GPU side of a UI-thread frame (jsui_gpu_render.cpp): uiTarget fills this
+  // view's steady-state target (false when it has none: no texture pair of
+  // its size, a pair pending); replayGpuFrame renders `frame` (recorded for
+  // `t`) into src and copies the damage into dst (false: the GPU path failed).
+  bool uiTarget(JsuiGpuTarget* t);
+  // With `rawDst` (dst's texture) JSUI copies the damage (jsui_gpu_copy_texture)
+  // and frame_rendered is left to the caller (*dirty).
+  bool replayGpuFrame(JsuiGpuFrame* frame, const JsuiGpuTarget& t, void* rawDst = nullptr, JsuiRect* dirty = nullptr);
+  void* dstTexture();  // gpu_cur_.dst's driver texture
   // After the runtime's tick: cursor, auto size and whether the frame changed
   // (process() then paints the views that changed).
   void afterTick();
@@ -399,6 +466,58 @@ class JsuiView : public godot::Control {
   int mouse_buttons_ = 0;  // buttons whose press reached the UI (DOM bits)
   bool force_cpu_ = false;
   int js_thread_ = JSUI_JS_THREAD_ON;
+  int ui_thread_ = UI_THREAD_OFF;
+  // UI thread state, on the runtime view (jsui_ui_thread.cpp).
+  class UiWorker;
+  int ui_mode_ = UI_THREAD_OFF;  // the mode of the running runtime
+  std::unique_ptr<UiWorker> ui_worker_;
+  struct UiViewJob {
+    JsuiView* view = nullptr;  // null once it left the runtime (forgetUiView)
+    JsuiRuntime* rt = nullptr;
+    bool visible = false;
+    bool pending = false;  // render_pending_ when handed over
+    JsuiGpuTarget target{};
+    godot::RID src;  // the texture target.texture is
+    bool redraw = false;            // the UI thread found something to paint
+    int rc = 0;                     // jsui_record_gpu_frame
+    JsuiGpuFrame* frame = nullptr;  // to replay (owned until replayed / discarded)
+    void* dst = nullptr;            // dst's texture (the frame-submit copy)
+    // Replayed in the frame-submit callback: frame_rendered is due (dirty),
+    // or the GPU path failed (!ok).
+    bool replayed = false, ok = true;
+    JsuiRect dirty{0, 0, 0, 0};
+  };
+  struct UiFrameJob {
+    double now = 0;
+    int flags = 0;
+    JsuiGpuContext* gpu = nullptr;
+    std::vector<UiViewJob> views;
+    uint64_t tick_usec = 0, record_usec = 0;
+  };
+  UiFrameJob ui_job_;
+  bool ui_job_pending_ = false;  // handed over, not completed (main thread)
+  bool ui_job_replayed_ = false;  // its frames are in the textures already (frame-submit callback)
+  bool pre_draw_connected_ = false;
+  // LOCKSTEP on godot-aw3's WebGPU driver with WebGPUInterop's frame-submit
+  // callback: the frames are replayed there, right before Godot submits the
+  // frame (after it recorded all of it), the rest in the next process.
+  godot::Object* submit_interop_ = nullptr;
+  bool submit_connected_ = false;
+  struct QueuedAudio {
+    JsuiAudioCommand cmd{};
+    std::string sound, bus;
+    bool bus_null = false;
+  };
+  std::vector<QueuedAudio> ui_audio_;  // audio commands the UI thread queued
+  struct QueuedLoad {
+    JsuiRuntime* rt;
+    uint64_t id;
+    std::string url;
+  };
+  std::vector<QueuedLoad> ui_loads_;  // loads the UI thread queued
+  std::mutex ui_queue_m_;             // ui_audio_ / ui_loads_
+  uint64_t ui_frames_ = 0, ui_waits_ = 0, ui_wait_usec_total_ = 0, ui_tick_usec_total_ = 0, ui_record_usec_total_ = 0,
+           ui_replay_usec_total_ = 0;
   bool sync_js_next_frame_ = false;
   godot::NodePath runtime_view_;
   godot::String component_;

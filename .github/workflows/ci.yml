@@ -218,7 +218,9 @@ jobs:
   # ---------------------------- JS thread under ThreadSanitizer (Linux)
   # The suites that run JS on its own thread (JsThread, the host-callback
   # queue, published host buffers) and the React e2e bundles (on the JS
-  # thread, in lockstep and single-threaded) in a -fsanitize=thread build.
+  # thread, in lockstep and single-threaded; react_ui_thread_e2e: a second
+  # thread ticking and recording frames, the main thread replaying them) in
+  # a -fsanitize=thread build.
   # Timing checks are off under the sanitizer.
   native-tsan:
     name: native (ubuntu, clang, ThreadSanitizer)
@@ -590,6 +592,14 @@ jobs:
         run: |
           VK_VALIDATION=sync GODOT_RENDERING=vulkan GODOT_RENDER_THREAD=separate SIZES=1280x720 xvfb-run -a -s "-screen 0 1920x1080x24" \
             integrations/godot/smoke-test.sh build/godot-vulkan-separate.png
+      - name: Vulkan with the UI thread (ui_thread lockstep and pipelined) - the tick and paint recorded on the runtime's thread, replayed into the texture on the main thread
+        # Under synchronization validation too; the self-test's `ui thread`
+        # check requires the frames to have gone through the UI thread.
+        run: |
+          for mode in lockstep pipelined; do
+            VK_VALIDATION=sync GODOT_RENDERING=vulkan UI_THREAD=$mode SIZES=1280x720 xvfb-run -a -s "-screen 0 1920x1080x24" \
+              integrations/godot/smoke-test.sh build/godot-vulkan-ui-$mode.png
+          done
       - name: Vulkan in Godot 4.3 too
         run: |
           GODOT_VERSION=4.3-stable GODOT_RENDERING=vulkan SIZES=1280x720 xvfb-run -a -s "-screen 0 1920x1080x24" \
