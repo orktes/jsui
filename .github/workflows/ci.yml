@@ -1239,12 +1239,13 @@ jobs:
           path: web/dist-webgl
       # The showcase site (site/, deployed by pages.yml) runs on this module
       # with the GPU renderer: build it and open every route in Chromium (no
-      # runtime errors, nothing blank).
+      # runtime errors, nothing blank). No WebGPU module here, so the page
+      # keeps the runtime on its main thread (its default without WebGPU).
       - name: Site (build + smoke test, GPU module)
         run: |
           npm ci --no-audit --no-fund
           node site/scripts/build.mjs --wasm web/dist-webgl --wasm-webgl web/dist-webgl
-          node site/test/smoke.mjs
+          SITE_EXPECT_WORKER=0 node site/test/smoke.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -1380,12 +1381,15 @@ jobs:
         run: |
           npm ci --no-audit --no-fund
           npx playwright install chromium
-      # On the browser's own JS engine (the default), then on QuickJS (?js=quickjs).
+      # In worker mode (the page's default with WebGPU) on the browser's own JS
+      # engine, then on QuickJS (?js=quickjs), then on the page's main thread
+      # (?worker=0).
       - name: Site (build + smoke test on WebGPU)
         run: |
           node site/scripts/build.mjs --wasm web/dist-gpu --wasm-webgl web/dist-gpu --wasm-gpu web/dist-gpu
-          SITE_WEBGPU=1 SITE_EXPECT_RENDERER=webgpu node site/test/smoke.mjs
-          SITE_JS=quickjs SITE_WEBGPU=1 SITE_EXPECT_RENDERER=webgpu node site/test/smoke.mjs
+          SITE_WEBGPU=1 SITE_EXPECT_RENDERER=webgpu SITE_EXPECT_WORKER=1 node site/test/smoke.mjs
+          SITE_JS=quickjs SITE_WEBGPU=1 SITE_EXPECT_RENDERER=webgpu SITE_EXPECT_WORKER=1 node site/test/smoke.mjs
+          SITE_WORKER=0 SITE_WEBGPU=1 SITE_EXPECT_RENDERER=webgpu SITE_EXPECT_WORKER=0 node site/test/smoke.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
