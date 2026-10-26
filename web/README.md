@@ -519,11 +519,17 @@ await jsui.whenPipelinesReady();  // e.g. before hiding the splash
   `jsui.savePipelines()` after using the app and saving the bytes.
   A list of another Skia build is skipped (one log line), a missing file
   (404) is ignored, keys the device cannot build are counted as `failed`.
-- Lists are queued at startup and built a few at a time, each batch followed
-  by a wait for the GPU process, until done or `pipelineTimeout` ms (default
-  5000) passed. `whenPipelinesReady()` resolves then, with `pipelineStats()`.
-  Whatever is left, or queued later with `addPipelines(list)`, is built one
-  per frame after frames.
+- Lists are queued at startup. Graphite only uses the blocking
+  `createRenderPipeline`, which stalls the GPU process (and every frame) for
+  the whole compile, so the host first has a throwaway Skia context on the
+  same device precompile the list with `createRenderPipelineAsync` (the
+  browser compiles those on worker threads, several at once, into the same
+  caches), then creates them on the real context a few at a time, each from
+  a warm cache. `whenPipelinesReady()` resolves when they are made or after
+  `pipelineTimeout` ms (default 5000), with `pipelineStats()`; after a
+  timeout the rest are still made in the background as their compiles
+  finish. Lists queued later with `addPipelines(list)` are built one per
+  frame after frames, unless you call `precompilePipelines()`.
 - A frame that needs a pipeline before its turn still builds it itself.
   Pipelines of ShaderView effects are not in lists (no stable key):
   `precompileShaders` warms those.

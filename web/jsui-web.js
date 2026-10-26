@@ -331,6 +331,21 @@ const transferred = new WeakSet();  // canvases given to a worker (transferContr
 // `{format}` replaced by the canvas' texture format (a list recorded on a
 // bgra8unorm canvas, macOS and Windows, builds other pipelines than one of
 // an rgba8unorm canvas, Android and Linux). A missing file (404) is no list.
+// What _warmBrowserCache hands Skia's throwaway context for each pipeline
+// (never drawn with): one trivial pipeline per device.
+const standIns = new WeakMap();
+function standInPipeline(dev) {
+  let p = standIns.get(dev);
+  if (!p) {
+    const module = dev.createShaderModule({ code: '@vertex fn v() -> @builtin(position) vec4f { return vec4f(0.0); }\n'
+      + '@fragment fn f() -> @location(0) vec4f { return vec4f(0.0); }' });
+    p = dev.createRenderPipeline({ layout: 'auto', vertex: { module, entryPoint: 'v' },
+      fragment: { module, entryPoint: 'f', targets: [{ format: 'rgba8unorm' }] } });
+    standIns.set(dev, p);
+  }
+  return p;
+}
+
 async function pipelineList(src, format) {
   if (typeof src !== 'string' && !(src instanceof URL)) return src;
   const url = String(src).replace('{format}', format ?? 'bgra8unorm');
@@ -1196,15 +1211,7 @@ class CanvasView extends DomView {
 
   _queuePipelines(bytes) {
     const gpu = this._pipelineGpu();
-    if (!gpu || !bytes.length) return 0;
-    const M = this.module;
-    const p = M._malloc(bytes.length);
-    try {
-      M.HEAPU8.set(bytes, p);
-      return M._jsui_gpu_precompile_pipelines(gpu, p, bytes.length);
-    } finally {
-      M._free(p);
-    }
+    return gpu && bytes.length ? this._queuePipelinesOn(gpu, bytes) : 0;
   }
 
   /** Every pipeline the WebGPU context has created or queued, as a list for
@@ -1237,33 +1244,95 @@ class CanvasView extends DomView {
     return out;
   }
 
-  /** Builds the queued pipelines (addPipelines) now: a few at a time, each
-   * batch followed by a wait for the GPU process to have compiled it, so the
-   * page stays responsive (a splash keeps animating). Resolves with
+  /** Builds the queued pipelines (addPipelines) now, without stalling the
+   * page: the GPU process first compiles them all in parallel, off its main
+   * thread (warmBrowserCache), then the context creates them, a few at a
+   * time, each from the browser's now warm cache. Resolves with
    * pipelineStats() once the queue is empty, `timeoutMs` passed or the
-   * context went away. What is queued after it (or left over) is built one
-   * per frame, after frames. */
+   * context went away; after a timeout the rest is still created in the
+   * background as its compiles finish. */
   async precompilePipelines({ timeoutMs = Infinity, batch = 4 } = {}) {
-    const t0 = performance.now();
-    const M = this.module;
-    for (;;) {
-      const gpu = this._pipelineGpu(), wgpu = this._wgpu;
-      if (!gpu || this._destroyed) break;
-      let left = 0;
-      // A budget of 0 builds one pipeline per call. The JS side of a
-      // pipeline costs next to nothing; its compile happens in the GPU
-      // process, which the wait below lets finish.
-      for (let i = 0; i < batch; i++) if (!(left = M._jsui_gpu_precompile_step(gpu, 0))) break;
-      try {
-        await wgpu.device.queue.onSubmittedWorkDone();
-      } catch {}
-      if (!left || performance.now() - t0 >= timeoutMs) {
-        // Keys queued later (or left over) go back to the slices after frames.
-        if (this._pipelineGpu() === gpu) M._jsui_gpu_precompile_step(gpu, -1);
-        break;
-      }
-    }
+    const gpu = this._pipelineGpu();
+    if (!gpu) return null;
+    const queued = this.pipelineStats()?.queued ?? 0;
+    const warm = this._warmBrowserCache(gpu);
+    // The warm-ups also cover the pipelines the context has already: the
+    // i-th queued one is at most that many places further on.
+    const done = this._createWarmed(gpu, warm, batch, Math.max(0, warm.length - queued));
+    if (timeoutMs !== Infinity) await Promise.race([done, new Promise((r) => setTimeout(r, timeoutMs))]);
+    else await done;
     return this.pipelineStats();
+  }
+
+  // The browser compiles a pipeline in its GPU process: createRenderPipeline
+  // blocks that process (and every frame) until it is done, tens of ms each
+  // with a cold shader cache, hundreds on a cold Metal cache.
+  // createRenderPipelineAsync compiles on worker threads, several at once,
+  // and fills the same caches. Graphite only calls the blocking one, so the
+  // queued keys are first precompiled by a throwaway Skia context on the
+  // same device whose createRenderPipeline only starts the async compile of
+  // the same descriptor (and hands Skia a stand-in it never draws with).
+  // Resolves with the compiles' promises, in order.
+  _warmBrowserCache(gpu) {
+    const M = this.module, wgpu = this._wgpu;
+    const queued = this.pipelineStats()?.queued ?? 0;
+    if (!queued || !wgpu?.webgpu) return [];
+    const list = this.savePipelines();
+    const dev = wgpu.device;
+    let probe = null;
+    const started = [];
+    try {
+      probe = SharedWebGPU.create(M, wgpu.webgpu, (t) => this._log(1, t));
+      if (!probe) return [];
+      const n = list ? this._queuePipelinesOn(probe.gpu, list) : 0;
+      if (n <= 0) return [];
+      const standIn = standInPipeline(dev);
+      dev.createRenderPipeline = (desc) => {
+        started.push(dev.createRenderPipelineAsync(desc).catch(() => null));
+        return standIn;
+      };
+      while (M._jsui_gpu_precompile_step(probe.gpu, 1000) > 0);
+    } catch (e) {
+      this._log(1, `pipelines: warming the browser cache failed: ${e?.message ?? e}`);
+    } finally {
+      delete dev.createRenderPipeline;  // the prototype's again
+      probe?.unref();
+    }
+    return started;
+  }
+
+  _queuePipelinesOn(gpu, bytes) {
+    const M = this.module;
+    const p = M._malloc(bytes.length);
+    try {
+      M.HEAPU8.set(bytes, p);
+      return M._jsui_gpu_precompile_pipelines(gpu, p, bytes.length);
+    } finally {
+      M._free(p);
+    }
+  }
+
+  // Creates the queued pipelines on the context, `batch` at a time, each
+  // batch once its warm-up compiles have finished (the queue and the
+  // warm-ups are in the same order, `ahead` more of the latter) and
+  // followed by a wait for the GPU process. Then the slices after frames
+  // take over again.
+  async _createWarmed(gpu, warm, batch, ahead) {
+    const M = this.module;
+    let made = 0;
+    for (;;) {
+      if (this._pipelineGpu() !== gpu || this._destroyed) return;
+      await Promise.all(warm.slice(0, made + batch + ahead));
+      if (this._pipelineGpu() !== gpu || this._destroyed) return;
+      let left = 0;
+      // A budget of 0 creates one pipeline per call.
+      for (let i = 0; i < batch; i++, made++) if (!(left = M._jsui_gpu_precompile_step(gpu, 0))) break;
+      try {
+        await this._wgpu.device.queue.onSubmittedWorkDone();
+      } catch {}
+      if (!left) break;
+    }
+    if (this._pipelineGpu() === gpu) M._jsui_gpu_precompile_step(gpu, -1);
   }
 
   // ---------------------------------------------------------------- helpers

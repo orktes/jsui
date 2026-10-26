@@ -31,8 +31,10 @@ const REVEAL = 0.72;
 // No answer from the page (another host, an older index.html): give up. The
 // page answers once the GPU pipelines are built (index.html, at most ~5 s).
 const WAIT_MS = 7000;
-// Timeline points drawn under the splash before the intro plays (above).
-const WARM_STEPS = 12;
+// Timeline points drawn under the splash before the intro plays (above):
+// 0.17 apart, so each flying piece (on screen for 0.25 of it) is drawn at
+// least once. Their ShaderView pipelines are in no list (index.html).
+const WARM_STEPS = 6;
 
 // --------------------------------------------------------------- shader
 
