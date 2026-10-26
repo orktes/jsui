@@ -468,3 +468,36 @@ TEST(overlay_with_hidden_content_is_placed_when_shown) {
   frame(s);
   CHECK_NEAR(visual(s, content).x, 50 + 20, 0.01);
 }
+
+TEST(overlay_mount_under_layout_animation_keeps_the_rest_shown) {
+  // The first overlay adds the overlay layer to the root's render children,
+  // and an overlay leaves its parent's Yoga children: Node::rebuildYoga
+  // detaches their Yoga children, and Yoga forgets their layout. A
+  // LayoutAnimation armed for that commit (React Native's configureNext,
+  // here from an unrelated timer) must not take those nodes for new ones:
+  // the whole page faded in from opacity 0 (a blank first frame).
+  rtest::Scene s(200, 100);
+  Node* page = s.add(R"J({"style":{"flex":1,"backgroundColor":"#3050ff"},"children":[
+    {"style":{"width":40,"height":20,"backgroundColor":"#00ff00"}}]})J");
+  s.render();
+  CHECK_EQ(s.a(150, 80), 255);
+  CHECK_EQ(s.g(10, 10), 255);
+  LayoutAnimConfig cfg;
+  for (LayoutAnimSpec* sp : {&cfg.create, &cfg.update, &cfg.remove}) {
+    sp->enabled = true;
+    sp->curve = LayoutAnimCurve::Linear;
+    sp->property = LayoutAnimProperty::Opacity;
+    sp->duration = 260;
+  }
+  s.doc().armLayoutAnimation(cfg);
+  Node* o = rtest::build(s.doc(), Value::parseJson(R"J({"props":{"overlay":{"placement":"bottom"}},
+    "style":{"width":30,"height":10,"backgroundColor":"#ff0000"}})J"));
+  page->appendChild(o);
+  s.render();
+  CHECK(s.doc().overlayLayer() != nullptr);
+  CHECK(page->layoutAnim == nullptr);
+  CHECK(child(page, 0)->layoutAnim == nullptr);
+  CHECK_EQ(s.a(150, 80), 255);  // the page, at full opacity
+  CHECK_EQ(s.b(150, 80), 255);
+  CHECK_EQ(s.g(10, 10), 255);   // its first child too
+}
