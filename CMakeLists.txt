@@ -51,7 +51,8 @@ option(JSUI_BUILD_VIEWER "Build tools/jsui-viewer (downloads and builds SDL2)" O
 option(JSUI_BUILD_GODOT "Build the Godot 4 GDExtension in integrations/godot (fetches godot-cpp, needs python3)" OFF)
 # The built-in audio backend (src/audio/audio_builtin.cpp) for hosts without
 # an audio handler: desktop only. The browser host plays sounds with Web Audio
-# (web/jsui-web.js) and iOS embedders bring their own handler.
+# (web/jsui-web.js) and iOS embedders bring their own handler (the iOS example
+# app, integrations/ios, turns it on: scripts/build-ios.sh).
 set(_jsui_audio_default ON)
 if(EMSCRIPTEN OR IOS OR ANDROID)
   set(_jsui_audio_default OFF)
