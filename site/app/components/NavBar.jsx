@@ -1,7 +1,7 @@
 // Fixed top bar: wordmark, page links (horizontally scrollable on phones),
 // the sound switch and GitHub.
 import React from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View, useHostState } from 'react-native';
 import { colors, font, site } from '../theme.js';
 import { segments, useRouter } from '../router.js';
 import { setSoundMuted, useAudioState } from '../sound.js';
@@ -83,8 +83,12 @@ export function NavBar() {
   const { path, go } = useRouter();
   const { tablet, phone, gutter } = useLayout();
   const head = '/' + (segments(path)[0] || '');
+  // A native window whose buttons sit in this bar (jsui-viewer
+  // --titlebar-overlay): the wordmark starts after them.
+  const controls = useHostState('jsui.windowControls', null);
+  const left = controls ? Math.max(gutter, controls.x + controls.width + 20) : gutter;
   return (
-    <View style={[styles.bar, { paddingHorizontal: gutter }]}>
+    <View style={[styles.bar, { paddingHorizontal: gutter, paddingLeft: left }]}>
       <Pressable onPress={() => go('/')} style={{ cursor: 'pointer' }} focusable={false}>
         <Logo size={phone ? 18 : 20} />
       </Pressable>

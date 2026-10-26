@@ -36,6 +36,7 @@
 // that is blitted into the window's CAMetalLayer. --gl picks Ganesh on GL;
 // when Metal fails the viewer falls back to GL, then to the CPU.
 #include <SDL.h>
+#include <SDL_syswm.h>
 
 #include <algorithm>
 #include <cmath>
@@ -69,6 +70,7 @@ void viewer_mtl_release(void* obj);
 extern "C" {
 struct ViewerVideo;
 void viewer_mac_init(void);
+void viewer_mac_titlebar_overlay(void* nswindow, float header, float* controls);
 ViewerVideo* viewer_video_create(const char* spec, void* device, void* queue);
 const char* viewer_video_channel(ViewerVideo* v);
 void viewer_video_attach(ViewerVideo* v, JsuiRuntime* rt);
@@ -97,6 +99,7 @@ struct Options {
   int jsThread = JSUI_JS_THREAD_ON;  // --js-thread on|off|lockstep
   std::vector<std::pair<std::string, std::string>> state;  // --state key=json
   std::vector<std::string> videos;                          // --video channel:texture=url (macOS)
+  int titlebarOverlay = 0;                                  // --titlebar-overlay H (macOS): header height
 };
 
 const char* jsThreadName(int mode) {
@@ -116,6 +119,9 @@ void usage() {
       "  --js-thread  on (default): JS on its own thread; off: on the window's thread; lockstep: on its\n"
       "               thread, waited for every frame\n"
       "  --state      sets host state `key` (HostState) to the JSON value before the bundle loads\n"
+      "  --titlebar-overlay H  (macOS) the UI fills the window under a transparent title bar, the window\n"
+      "               buttons centred in its top H px (HostState jsui.windowControls: their box); the\n"
+      "               UI's empty spots up there drag the window\n"
       "  --video      channel:texture=url (macOS): plays the video (AVFoundation) into host texture `texture`,\n"
       "               controlled with `channel` messages (see tools/jsui-viewer/video.mm)\n"
       "  F5 reloads the bundle, Esc dismisses the error overlay (dev mode)\n"
@@ -139,6 +145,13 @@ bool parseArgs(int argc, char** argv, Options* o) {
         return false;
       }
       o->state.emplace_back(std::string(v, eq), std::string(eq + 1));
+    } else if (a == "--titlebar-overlay") {
+      const char* v = next();
+      if (!v || std::atoi(v) <= 0) {
+        std::fprintf(stderr, "--titlebar-overlay takes the header height in px\n");
+        return false;
+      }
+      o->titlebarOverlay = std::atoi(v);
     } else if (a == "--video") {
       const char* v = next();
       if (!v) {
@@ -324,6 +337,7 @@ class Viewer {
                                          SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
 
     wakeEvent_ = SDL_RegisterEvents(1);
+    if (opt_.titlebarOverlay > 0) titlebarOverlay();
 #if defined(__APPLE__)
     for (const std::string& spec : opt_.videos) {
 #if VIEWER_METAL
@@ -427,6 +441,7 @@ class Viewer {
 #if defined(__APPLE__)
     for (ViewerVideo* v : videos_) viewer_video_attach(v, rt_);
 #endif
+    if (!windowControls_.empty()) jsui_set_state(rt_, "jsui.windowControls", windowControls_.c_str());
     for (auto& [key, json] : opt_.state)
       if (jsui_set_state(rt_, key.c_str(), json.c_str()) < 0)
         std::fprintf(stderr, "warning: --state %s: not valid JSON\n", key.c_str());
@@ -454,6 +469,31 @@ class Viewer {
     mtlFresh_ = true;  // the retained frame was the old runtime's
 #endif
     std::printf("JS thread: %s\n", jsThreadName(jsui_js_thread(rt_)));
+  }
+
+  // --titlebar-overlay: the window buttons over the UI's header, whose empty
+  // spots (nothing there takes the pointer) drag the window.
+  void titlebarOverlay() {
+#if defined(__APPLE__)
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (!SDL_GetWindowWMInfo(window_, &info) || info.subsystem != SDL_SYSWM_COCOA) return;
+    float c[4] = {0, 0, 0, 0};
+    viewer_mac_titlebar_overlay((void*)info.info.cocoa.window, float(opt_.titlebarOverlay), c);
+    char json[160];
+    std::snprintf(json, sizeof json, "{\"x\":%g,\"y\":%g,\"width\":%g,\"height\":%g}", c[0], c[1], c[2], c[3]);
+    windowControls_ = json;
+    SDL_SetWindowHitTest(
+        window_,
+        [](SDL_Window*, const SDL_Point* p, void* u) {
+          auto* self = static_cast<Viewer*>(u);
+          if (p->y >= self->opt_.titlebarOverlay || !self->rt_) return SDL_HITTEST_NORMAL;
+          return jsui_hit_test(self->rt_, float(p->x), float(p->y)) == 0 ? SDL_HITTEST_DRAGGABLE : SDL_HITTEST_NORMAL;
+        },
+        this);
+#else
+    std::fprintf(stderr, "warning: --titlebar-overlay needs macOS\n");
+#endif
   }
 
   // The messages of the last tick to the videos, then their frames. True
@@ -841,6 +881,7 @@ class Viewer {
   std::map<int, SDL_Cursor*> cursors_;
   std::string cursorName_;
   std::vector<std::pair<std::string, std::string>> messages_;  // name, JSON (this tick's)
+  std::string windowControls_;  // --titlebar-overlay: HostState jsui.windowControls
 #if defined(__APPLE__)
   std::vector<ViewerVideo*> videos_;
 #endif
