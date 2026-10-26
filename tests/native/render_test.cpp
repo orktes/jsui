@@ -568,13 +568,17 @@ TEST(render_skipped_subtrees_damage_like_a_full_walk) {
 // Damage cutting through rounded boxes at random places (a small box moving
 // over them, also translucent and under a scale) must still repaint exactly
 // like a full frame. Perf guards: damage inside a rounded box's padding box
-// repaints only itself; crossing edges repaints the boxes crossed, never
-// the frame.
+// repaints only itself, also when the box has a ring around it (a sharp
+// `0 0 0 1px` shadow, an outline: the site's framed stage, where a pulse in
+// it repainted the whole stage every frame, #160); crossing edges repaints
+// the boxes crossed, never the frame.
 TEST(render_incremental_rounded_boxes_cut_anywhere) {
   for (float dpr : {1.f, 1.5f}) {
     Scene s(400, 260, dpr);
     s.add(R"J({"style":{"position":"absolute","left":10,"top":10,"width":130,"height":80,"borderRadius":18,"borderWidth":1.5,
-      "borderColor":"#8fa0ff","backgroundColor":"rgba(30,40,80,0.9)","overflow":"hidden"},"children":[
+      "borderColor":"#8fa0ff","backgroundColor":"rgba(30,40,80,0.9)","overflow":"hidden",
+      "boxShadow":"0 0 0 1px rgba(0,0,0,0.6), 0 10px 24px rgba(0,0,0,0.5)","outlineWidth":1,"outlineColor":"#f2c35b",
+      "outlineOffset":2},"children":[
       {"style":{"position":"absolute","left":-10,"top":40,"width":200,"height":30,"backgroundColor":"#f2c35b"}}]})J");
     s.add(R"J({"style":{"position":"absolute","left":150,"top":12.5,"width":120,"height":70,"borderTopLeftRadius":30,
       "borderBottomRightRadius":"40%","experimental_backgroundImage":"linear-gradient(90deg, #ff4d6a, #4fd1ff)"}})J");
