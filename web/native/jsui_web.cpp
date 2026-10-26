@@ -7,6 +7,8 @@
 #include <emscripten/emscripten.h>
 
 #include <cstdint>
+#include <cstdio>
+#include <string>
 
 #include "jsui/jsui.h"
 #include "js/engine.h"  // JsEngine::nextKind
@@ -61,6 +63,18 @@ EM_JS(void, jsui_web_js_audio, (int hostId, int op, double voice, const char* so
     loop: !!loop, muted: !!muted });
 });
 
+// <Video> (jsui.h "Video"): every JsuiVideoCommand goes to the host's
+// onVideo (web/jsui-web.js plays it with a <video> element). Video ids are
+// doubles like the voice ids.
+// `sources`: OPEN's alternatives as JSON ([{ url, type }]).
+EM_JS(void, jsui_web_js_video, (int hostId, int op, double video, const char* sources, const char* texture,
+                                double timeS, float volume, float rate, int paused, int muted, int loop), {
+  var h = Module.__jsuiHosts && Module.__jsuiHosts.get(hostId);
+  if (h && h.onVideo) h.onVideo({ op: op, video: video, sources: sources ? JSON.parse(UTF8ToString(sources)) : null,
+    texture: texture ? UTF8ToString(texture) : null, time: timeS, volume: volume, rate: rate, paused: !!paused,
+    muted: !!muted, loop: !!loop });
+});
+
 namespace {
 
 int hostIdOf(void* user) { return int(reinterpret_cast<intptr_t>(user)); }
@@ -88,6 +102,46 @@ void messageTrampoline(void* user, const char* name, const char* json) {
 void audioTrampoline(void* user, const JsuiAudioCommand* c) {
   jsui_web_js_audio(hostIdOf(user), int(c->op), double(c->voice), c->sound, c->bus, c->volume, c->pitch, c->pan,
                     c->fade_ms, c->offset_s, c->loop, c->muted);
+}
+
+void appendJsonString(std::string& out, const char* s) {
+  if (!s) {
+    out += "null";
+    return;
+  }
+  out += '"';
+  for (; *s; s++) {
+    unsigned char ch = static_cast<unsigned char>(*s);
+    if (ch == '"' || ch == '\\') {
+      out += '\\';
+      out += char(ch);
+    } else if (ch < 0x20) {
+      char buf[8];
+      std::snprintf(buf, sizeof buf, "\\u%04x", ch);
+      out += buf;
+    } else {
+      out += char(ch);
+    }
+  }
+  out += '"';
+}
+
+void videoTrampoline(void* user, const JsuiVideoCommand* c) {
+  std::string sources;
+  if (c->op == JSUI_VIDEO_OPEN) {
+    sources = "[";
+    for (int i = 0; i < c->source_count; i++) {
+      if (i) sources += ',';
+      sources += "{\"url\":";
+      appendJsonString(sources, c->sources[i]);
+      sources += ",\"type\":";
+      appendJsonString(sources, c->source_types ? c->source_types[i] : nullptr);
+      sources += '}';
+    }
+    sources += ']';
+  }
+  jsui_web_js_video(hostIdOf(user), int(c->op), double(c->video), sources.empty() ? nullptr : sources.c_str(),
+                    c->texture, c->time_s, c->volume, c->rate, c->paused, c->muted, c->loop);
 }
 
 }  // namespace
@@ -126,6 +180,8 @@ EMSCRIPTEN_KEEPALIVE JsuiRuntime* jsui_web_create(int hostId, int width, int hei
   } else {
     cfg.audio_disabled = 1;
   }
+  cfg.on_video = videoTrampoline;
+  cfg.video_user = user;
   jsui::JsEngine::nextKind = js == 1 ? jsui::JsEngine::Kind::Host : jsui::JsEngine::Kind::QuickJs;
   JsuiRuntime* rt = jsui_create(&cfg);
   jsui::JsEngine::nextKind = jsui::JsEngine::Kind::QuickJs;
@@ -151,6 +207,21 @@ EMSCRIPTEN_KEEPALIVE int jsui_web_reject_call(JsuiRuntime* rt, double id, const 
 // jsui_audio_voice_ended with a double voice id (no BigInt on the JS side).
 EMSCRIPTEN_KEEPALIVE void jsui_web_audio_voice_ended(JsuiRuntime* rt, double voice, int status) {
   jsui_audio_voice_ended(rt, uint64_t(voice), status);
+}
+
+// jsui_video_status with a double video id; `error` may be NULL.
+EMSCRIPTEN_KEEPALIVE void jsui_web_video_status(JsuiRuntime* rt, double video, int state, double duration,
+                                                double position, double buffered, int width, int height,
+                                                const char* error) {
+  JsuiVideoStatus s{};
+  s.state = state;
+  s.duration_s = duration;
+  s.position_s = position;
+  s.buffered_s = buffered;
+  s.width = width;
+  s.height = height;
+  s.error = error;
+  jsui_video_status(rt, uint64_t(video), &s);
 }
 
 #if defined(JSUI_WEBGPU)

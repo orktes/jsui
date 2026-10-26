@@ -39,6 +39,7 @@ import { Host } from './apis.js';
 import { installHostData } from './hostData.js';
 import { installHostBuffer } from './hostBuffer.js';
 import { installHostTexture, HostTexture } from './hostTexture.js';
+import { Video, VideoState } from './video.js';
 import { LottieView } from './lottie.js';
 import { ShaderView, sksl, compileShader, precompileShaders } from './shader.js';
 import { Sound, SoundInstance, SoundEndReason, useSound, useMusic, UISounds, UISoundsContext, useUISound } from './sound.js';
@@ -60,6 +61,8 @@ export {
   Image,
   ImageBackground,
   HostTexture,
+  Video,
+  VideoState,
   LottieView,
   ShaderView,
   Sound,

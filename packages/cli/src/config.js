@@ -22,6 +22,7 @@ const SHIMS = {
   'expo-linear-gradient': 'linear-gradient',
   'react-native-linear-gradient': 'linear-gradient',
   'lottie-react-native': 'lottie-react-native',
+  'react-native-video': 'react-native-video',
   'expo-font': 'expo-font',
 };
 

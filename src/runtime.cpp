@@ -67,6 +67,7 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
   lotties = std::make_unique<LottieCache>(*this);
   shaders = std::make_unique<ShaderEffects>(*this);
   audio = std::make_unique<Audio>(*this);
+  video = std::make_unique<Video>(*this);
   animated = std::make_unique<NativeAnimated>(doc);
   animated->findView = [this](uint32_t id) { return findNode(id); };
   animated->buffers = &buffers;
@@ -96,6 +97,7 @@ Runtime::~Runtime() {
   hostQueue.clear();  // callbacks JS queued do not reach an embedder tearing down
   audio->contextEnded();
   audio.reset();
+  video->contextEnded();
   loader.cancelAll();
   std::vector<uint64_t> calls = js ? js->pendingCalls() : std::vector<uint64_t>();
   js.reset();
@@ -274,6 +276,7 @@ void Runtime::resetEngine() {
   measureRequests.clear();  // their callbacks die with the context
   std::vector<uint64_t> calls = js ? js->pendingCalls() : std::vector<uint64_t>();
   audio->contextEnded();
+  video->contextEnded();
   jsThread_ = nullptr;
   js.reset();
   // Nothing the old context was asked will be answered.
@@ -496,6 +499,15 @@ void Runtime::deliverAudioEvents() {
       list.emplace_back(Value::Array{Value(0), Value(double(e.voice)), Value(e.status)});
   }
   inbound.call("__jsui_onAudio", {Value(std::move(list))});
+}
+
+void Runtime::deliverVideoEvents() {
+  if (!video->hasEvents()) return;
+  Value::Array list;
+  for (auto& e : video->takeEvents())
+    list.emplace_back(Value::Array{Value(double(e.id)), Value(e.state), Value(e.duration), Value(e.position),
+                                   Value(e.buffered), Value(e.width), Value(e.height), Value(e.error)});
+  inbound.call("__jsui_onVideo", {Value(std::move(list))});
 }
 
 void Runtime::deliverTextureChanges() {
@@ -802,6 +814,7 @@ void Runtime::tick(double nowMs, bool sync) {
   deliverTextureChanges();
   audio->update();
   deliverAudioEvents();
+  deliverVideoEvents();
   publishedNow.store(nowMs, std::memory_order_release);
   inbound.frame(nowMs);
   // JSUI_TICK_SYNC_JS: this frame's JS (and what it did) lands on this frame.
@@ -1082,7 +1095,7 @@ bool Runtime::wantsFrame() const {
   // A pending repaint alone is not a reason to tick: the host paints after
   // the tick it already ran.
   if (reloadRequested_ || loader.pending() > 0 || (js && js->hasPendingWork(now + 17)) || animated->animating() ||
-      !animated->ends.empty() || lotties->animating() || shaders->animating() || state.hasDirty() || buffers.hasDirty() || textures.hasDirty() || audio->hasEvents() || audio->busy() || !uiResults_.empty() || !doomed_.empty() ||
+      !animated->ends.empty() || lotties->animating() || shaders->animating() || state.hasDirty() || buffers.hasDirty() || textures.hasDirty() || audio->hasEvents() || audio->busy() || video->hasEvents() || !uiResults_.empty() || !doomed_.empty() ||
       !hostQueue.empty() || !measureRequests.empty())
     return true;
   for (const auto& s : surfaces_)

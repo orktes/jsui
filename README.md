@@ -29,9 +29,8 @@ source is ordinary React Native in [site/](site/) (`node site/scripts/build.mjs`
 then `node site/scripts/serve.mjs`). The same bundle runs natively in the viewer:
 `jsui-viewer --titlebar-overlay 64 --state 'intro={"play":true,"warmup":false}' --state 'audio={"native":true}'
 site/dist/app/bundle.js` (the states stand in for the page: the intro's go-ahead and the UI
-owning the sound switch; the nav bar holds the window buttons). The trailer plays there too:
-the screen asks its host for video with `video` messages naming the sources, and the viewer
-decodes the first it can play with AVFoundation on macOS, as the page does with a `<video>`.
+owning the sound switch; the nav bar holds the window buttons). Its trailer's `<Video>` plays
+there too, with AVFoundation on macOS.
 
 ## Game data
 
@@ -108,6 +107,16 @@ lottie-react-native's API:
 ```jsx
 import LottieView from 'lottie-react-native';
 <LottieView source={require('./victory.json')} autoPlay loop style={{ width: 200, height: 200 }} />
+```
+
+Video with react-native-video's API: the host plays it (a `<video>` element in the
+browser, AVFoundation in the macOS viewer, the engine's own player in a game) into a host
+texture the view samples, so frames cost no JS. Hosts implement `JsuiConfig.on_video`:
+
+```jsx
+import Video from 'react-native-video';
+<Video source={{ uri: 'https://example.com/trailer.m3u8' }} paused={!playing} muted repeat
+       resizeMode="cover" style={{ width: 640, aspectRatio: 16 / 9 }} onEnd={next} />
 ```
 
 Custom shaders: your own SkSL (Skia runtime effects) paint a view on every

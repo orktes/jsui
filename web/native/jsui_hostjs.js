@@ -903,6 +903,7 @@ var jsuiHostJs = (function () {
       };
       hostDataBridge(D, N);
       audioBridge(D, N);
+      videoBridge(D, N);
       return N;
     }
   }
@@ -1082,6 +1083,41 @@ var jsuiHostJs = (function () {
   }
 
   // UI audio (bridge_audio.cpp).
+  // <Video> (src/js/bridge_video.cpp's natives).
+  function videoBridge(D, N) {
+    const e = D.e;
+    const n = (v, fallback) => {
+      if (v === undefined) return fallback;
+      let d;
+      try { d = Number(v); } catch (_) { return fallback; }
+      return d === d ? d : fallback;
+    };
+    const s = (v) => (v === undefined || v === null ? '' : text(v));
+    N.videoOpen = function (urls, types, texture, paused, muted, volume, loop, rate, progressMs) {
+      const list = Array.isArray(urls) ? urls : [urls];
+      const ts = Array.isArray(types) ? types : [types];
+      // "url\ntype\n" per alternative (jsui_hjs_video_open).
+      const u = list.map((x, i) => (s(x) ? s(x) + '\n' + s(ts[i]).replace(/\n/g, ' ') + '\n' : '')).join('');
+      const t = s(texture);
+      if (!u || !t) throw new TypeError('videoOpen: no source or texture');
+      if (D.dead) return 0;
+      reset();
+      const up = put(u), ul = L;
+      const tp = put(t), tl = L;
+      return X.video_open(e, up, ul, tp, tl, paused ? 1 : 0, muted ? 1 : 0, n(volume, 1), loop ? 1 : 0, n(rate, 1),
+        n(progressMs, 250));
+    };
+    N.videoSet = function (video, paused, muted, volume, loop, rate) {
+      if (!D.dead) X.video_set(e, n(video, 0), paused ? 1 : 0, muted ? 1 : 0, n(volume, 1), loop ? 1 : 0, n(rate, 1));
+    };
+    N.videoSeek = function (video, timeS) {
+      if (!D.dead) X.video_seek(e, n(video, 0), n(timeS, 0));
+    };
+    N.videoClose = function (video) {
+      if (!D.dead) X.video_close(e, n(video, 0));
+    };
+  }
+
   function audioBridge(D, N) {
     const e = D.e;
     const n = (v, fallback) => {

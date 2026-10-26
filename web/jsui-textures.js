@@ -624,3 +624,130 @@ export class HostTextureSet {
     this.host._log(2, text);
   }
 }
+
+// ------------------------------------------------------------- <Video>
+// The runtime's video handler (include/jsui/jsui.h "Video"): every
+// JsuiVideoCommand the UI's <Video> views send ({ op, video, sources: [{ url,
+// type }], texture, time, volume, rate, paused, muted, loop }) is played with
+// a <video> (the first source canPlayType accepts, the next when one fails)
+// element bound to its host texture (bindVideo), and its status goes back
+// through `report(video, state, duration, position, buffered, width, height,
+// error)` (jsui_video_status). `host` has bindVideo / removeTexture: the page's
+// JsuiHost, or in worker mode the page's proxy of the worker's runtime.
+export const VideoOp = Object.freeze({ OPEN: 0, SET: 1, SEEK: 2, CLOSE: 3 });
+export const VideoState = Object.freeze({ LOADING: 0, PAUSED: 1, PLAYING: 2, BUFFERING: 3, ENDED: 4, FAILED: -1 });
+
+export class JsuiVideo {
+  constructor(host, report) {
+    this.host = host;
+    this.report = report;
+    this.videos = new Map();  // video id -> { el, texture, unbind, raf, last }
+  }
+
+  command(c) {
+    if (c.op === VideoOp.OPEN) return this._open(c);
+    const v = this.videos.get(c.video);
+    if (!v) return;
+    if (c.op === VideoOp.SET) this._apply(v, c);
+    else if (c.op === VideoOp.SEEK) {
+      const d = isFinite(v.el.duration) ? v.el.duration : 0;
+      v.el.currentTime = d ? Math.max(0, Math.min(c.time, d)) : Math.max(0, c.time);
+    } else if (c.op === VideoOp.CLOSE) this._close(c.video, v);
+  }
+
+  destroy() {
+    for (const [id, v] of this.videos) this._close(id, v);
+  }
+
+  _open(c) {
+    if (typeof document === 'undefined') {
+      this.report(c.video, VideoState.FAILED, 0, 0, 0, 0, 0, 'no document to play video in');
+      return;
+    }
+    const el = document.createElement('video');
+    Object.assign(el, { crossOrigin: 'anonymous', playsInline: true, preload: 'auto' });
+    el.setAttribute('aria-hidden', 'true');
+    // In the document (some browsers stop decoding detached or invisible videos), out of sight.
+    Object.assign(el.style, { position: 'fixed', left: '0', top: '0', width: '2px', height: '2px', opacity: '0.01',
+      pointerEvents: 'none', zIndex: '-1' });
+    document.body.appendChild(el);
+    const v = { id: c.video, el, texture: c.texture, unbind: null, raf: 0, last: '', tried: [],
+      sources: c.sources || [], play: false };
+    this.videos.set(c.video, v);
+    const publish = () => this._publish(c.video, v);
+    for (const e of ['loadedmetadata', 'loadeddata', 'canplay', 'play', 'playing', 'pause', 'waiting', 'ended',
+      'durationchange', 'seeked', 'resize', 'error', 'progress']) {
+      el.addEventListener(e, publish);
+    }
+    // The position every display frame while it plays (the runtime passes
+    // it on at the view's progress rate, and to "<texture>.time" every time).
+    const tick = () => {
+      v.raf = !el.paused && !el.ended ? requestAnimationFrame(tick) : 0;
+      publish();
+    };
+    el.addEventListener('playing', () => { if (!v.raf) v.raf = requestAnimationFrame(tick); });
+    // The next playable alternative when one fails to load.
+    el.addEventListener('error', () => { if (this._load(v) && v.play) el.play().catch(() => {}); });
+    if (!this._load(v)) {
+      this.report(c.video, VideoState.FAILED, 0, 0, 0, 0, 0, 'no source this browser can play');
+      return;
+    }
+    v.unbind = this.host.bindVideo(c.texture, el);
+    this._apply(v, c);
+    publish();
+  }
+
+  _next(v) {
+    return v.sources.find((s) => s && s.url && (!s.type || v.el.canPlayType(s.type)) && !v.tried.includes(s));
+  }
+
+  _load(v) {
+    const s = this._next(v);
+    if (!s) return false;
+    v.tried.push(s);
+    v.el.src = s.url;
+    return true;
+  }
+
+  _apply(v, c) {
+    const el = v.el;
+    el.muted = !!c.muted;
+    el.volume = Math.max(0, Math.min(1, c.volume));
+    el.loop = !!c.loop;
+    if (c.rate > 0) el.playbackRate = c.rate;
+    v.play = !c.paused;
+    if (c.paused) el.pause();
+    // Refused without a user gesture (sound on): stays paused, reported so.
+    else if (el.paused || el.ended) el.play().catch(() => this._publish(v.id, v));
+  }
+
+  _publish(id, v) {
+    if (this.videos.get(id) !== v) return;
+    const el = v.el;
+    // A failed source with another to try is still loading (the error
+    // listener moves on to it).
+    const state = el.error ? (this._next(v) ? VideoState.LOADING : VideoState.FAILED) : el.ended ? VideoState.ENDED
+      : el.readyState < 1 ? VideoState.LOADING : el.paused ? VideoState.PAUSED
+      : el.readyState < 3 ? VideoState.BUFFERING : VideoState.PLAYING;
+    const d = isFinite(el.duration) ? el.duration : 0;
+    const b = el.buffered.length ? el.buffered.end(el.buffered.length - 1) : 0;
+    const err = el.error ? (el.error.message || `media error ${el.error.code}`) : '';
+    const key = `${state} ${d} ${el.currentTime} ${b} ${el.videoWidth} ${el.videoHeight} ${err}`;
+    if (key === v.last) return;
+    v.last = key;
+    this.report(id, state, d, el.currentTime, b, el.videoWidth, el.videoHeight, err);
+  }
+
+  _close(id, v) {
+    this.videos.delete(id);
+    cancelAnimationFrame(v.raf);
+    v.unbind?.();
+    v.el.pause();
+    v.el.removeAttribute('src');
+    v.el.load();
+    v.el.remove();
+    // Also the runtime's job; in worker mode this orders the removal after
+    // frames still on their way.
+    this.host.removeTexture(v.texture);
+  }
+}

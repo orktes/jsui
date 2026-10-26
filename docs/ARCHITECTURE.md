@@ -1121,6 +1121,38 @@ const size = useHostTexture('trailer');   // { width, height } once set, else nu
   passes the RenderingDevice texture behind any `Texture2D` (or its pixels
   on the CPU path).
 
+
+### Video
+
+`<Video>` (`packages/react/src/video.js`, react-native-video's API; the CLI
+aliases `react-native-video` to it) is a host texture with a player behind
+it. JSUI still decodes nothing: the runtime (`src/video/video.*`,
+`src/js/bridge_video.cpp`) hands the view's requests to the host's video
+handler, `JsuiConfig.on_video`, which plays the video into the view's
+texture (`textureName`, default one per view) like any host texture:
+
+* Commands (`JsuiVideoCommand`): `OPEN` (video id, the `source`
+  alternatives as absolute URLs with their MIME types, the texture key, and
+  the whole playback state: paused, muted, volume, loop, rate), `SET` (the
+  playback state again whenever a prop changes), `SEEK`, `CLOSE` (unmount,
+  a new source, and every open video when the JS context goes away; the
+  runtime then removes the texture). The host plays the first source it can
+  (the browser: `canPlayType`; AVFoundation: `isPlayableExtendedMIMEType`).
+* Reports: `jsui_video_status(state, duration, position, buffered, size,
+  error)` whenever something changed, as often as every frame. JS hears state
+  changes at once and the position at the view's `progressUpdateInterval`
+  (`onLoad`, `onProgress`, `onBuffer`, `onPlaybackStateChanged`, `onEnd`,
+  `onError`, `onReadyForDisplay`); every report also goes to host buffer
+  `<texture>.time` (`[position / duration, buffered / duration, position]`)
+  for `Animated.hostBuffer` progress bars that run without JS.
+* Hosts: the browser host (`web/jsui-textures.js` `JsuiVideo`: a `<video>`
+  per video, `bindVideo` to its texture; in worker mode the page plays it
+  for the worker's runtime), jsui-viewer on macOS (`tools/jsui-viewer/video.mm`:
+  AVFoundation, frames blitted into a Metal texture on the Graphite queue, or
+  uploaded as pixels on the other renderers). Without a handler every video
+  fails (`onError`). Other `HostTexture` views may show the same texture by
+  name (the showcase's cinematic screen samples one video five times).
+
 ### Lottie (LottieView)
 
 Lottie (Bodymovin JSON) animations play natively with Skia's Skottie

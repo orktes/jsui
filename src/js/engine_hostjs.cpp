@@ -907,6 +907,44 @@ EMSCRIPTEN_KEEPALIVE const char* jsui_hjs_audio_sound(int e, const char* url, in
   return retString(abs);
 }
 
+// ---------------------------------------------------------------- video
+
+// `sources`: "url\ntype\n" per alternative (type empty: unknown).
+EMSCRIPTEN_KEEPALIVE double jsui_hjs_video_open(int e, const char* sources, int srcLen, const char* texture,
+                                                int texLen, int paused, int muted, double volume, int loop,
+                                                double rate, double progressMs) {
+  Runtime& rt = R(e);
+  std::vector<std::string> urls, types;
+  std::string all = str(sources, srcLen);
+  for (size_t at = 0; at < all.size();) {
+    size_t a = all.find('\n', at), b = a == std::string::npos ? a : all.find('\n', a + 1);
+    if (b == std::string::npos) break;
+    std::string u = all.substr(at, a - at);
+    if (!u.empty()) {
+      urls.push_back(ResourceLoader::resolve(rt.baseUrl, u));
+      types.push_back(all.substr(a + 1, b - a - 1));
+    }
+    at = b + 1;
+  }
+  uint64_t id = rt.video->reserve();
+  rt.video->open(id, urls, types, str(texture, texLen), paused != 0, muted != 0, float(volume), loop != 0,
+                 float(rate), progressMs);
+  return double(id);
+}
+
+EMSCRIPTEN_KEEPALIVE void jsui_hjs_video_set(int e, double video, int paused, int muted, double volume, int loop,
+                                             double rate) {
+  if (video >= 1) R(e).video->set(uint64_t(video), paused != 0, muted != 0, float(volume), loop != 0, float(rate));
+}
+
+EMSCRIPTEN_KEEPALIVE void jsui_hjs_video_seek(int e, double video, double timeS) {
+  if (video >= 1) R(e).video->seek(uint64_t(video), timeS);
+}
+
+EMSCRIPTEN_KEEPALIVE void jsui_hjs_video_close(int e, double video) {
+  if (video >= 1) R(e).video->close(uint64_t(video));
+}
+
 }  // extern "C"
 
 #endif  // __EMSCRIPTEN__ && JSUI_HOST_JS

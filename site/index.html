@@ -250,12 +250,13 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
           document.title = 'JSUI · ' + (data === '/' ? 'React Native game UI, everywhere' : data.split('/')[1].replace(/^\w/, (c) => c.toUpperCase()));
         } else if (name === 'jsui:openURL') window.open(data.url, '_blank', 'noopener');
         else if (name === 'title') document.title = data;
-        else if (name === 'video') videos(data);
         else if (name === 'sound') sound.setMuted(data.muted);
         else if (name === 'copy') navigator.clipboard?.writeText(String(data)).catch(() => {});
       });
       const sound = soundSwitch(jsui);
-      const videos = videoHost(jsui, { autoplay: q.get('autoplay') !== '0' });
+      // The cinematic screen's <Video> (played by jsui-web.js) waits for a
+      // press with ?autoplay=0 (the smoke test: nothing streams).
+      jsui.setState('autoplay', q.get('autoplay') !== '0');
       addEventListener('popstate', () => jsui.postMessage('route', route()));
       addEventListener('hashchange', () => jsui.postMessage('route', route()));
       if (q.get('stats') === '1') {
@@ -297,134 +298,6 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
       };
     }
 
-    // Video for the UI (the /screens/cinematic trailer). JSUI plays no video:
-    // the UI asks with 'video' messages { id, cmd } ('open' names the host
-    // texture, the sources and a poster), and this page plays each id in a
-    // <video>, keeps its texture current with jsui.bindVideo() and reports
-    // playback through HostState `id` ({ status, muted, duration, backend,
-    // quality }) and frame data `id.time` ([fraction, buffered fraction,
-    // seconds]). tools/jsui-viewer/video.mm is the same protocol natively.
-    // ?autoplay=0: start paused and fetch nothing until play is pressed.
-    function videoHost(jsui, opts) {
-      const players = new Map();
-      return (data) => {
-        if (!data || typeof data.id !== 'string') return;
-        if (!players.has(data.id)) players.set(data.id, videoPlayer(jsui, data.id, opts));
-        players.get(data.id)(data);
-      };
-    }
-
-    function videoPlayer(jsui, id, { autoplay }) {
-      let sources = [], texture = null, poster = null;
-      let video = null, unbind = null, raf = 0, open = false, tried = [], last = '';
-      const state = (patch) => jsui.patchState(id, { backend: jsui.textureBackend, ...patch });
-      const status = () => (!video ? 'idle' : video.error ? 'error' : video.ended ? 'ended'
-        : video.paused ? 'paused' : video.readyState < 3 ? 'loading' : 'playing');
-      const publish = () => state({ status: status(), muted: video ? video.muted : true,
-        duration: video && isFinite(video.duration) ? video.duration : 0 });
-      // Playback position as frame data, only when it moved (a paused page stays idle).
-      const tick = () => {
-        raf = open ? requestAnimationFrame(tick) : 0;
-        if (!video) return;
-        const d = isFinite(video.duration) && video.duration > 0 ? video.duration : 0, t = video.currentTime;
-        const b = video.buffered.length ? video.buffered.end(video.buffered.length - 1) : 0;
-        const key = `${t.toFixed(2)} ${b.toFixed(1)} ${d}`;
-        if (key === last) return;
-        last = key;
-        jsui.setBuffer(id + '.time', Float32Array.of(d ? t / d : 0, d ? b / d : 0, t));
-      };
-      // The sources this browser can play, in the UI's order on the GPU paths;
-      // the CPU path copies every frame, so the smallest first there (each
-      // falls back to the next when it does not load).
-      const pick = () => {
-        const ok = sources.filter((s) => s && s.url && (!s.type || video.canPlayType(s.type)) && !tried.includes(s));
-        if (jsui.textureBackend === 'pixels') ok.sort((a, b) => (a.height || 0) - (b.height || 0));
-        return ok[0];
-      };
-      const load = () => {
-        const s = pick();
-        if (!s) return false;
-        tried.push(s);
-        video.src = s.url;
-        state({ quality: s.quality || null });
-        return true;
-      };
-      const create = () => {
-        video = document.createElement('video');
-        Object.assign(video, { crossOrigin: 'anonymous', muted: true, playsInline: true, preload: 'auto' });
-        video.setAttribute('aria-hidden', 'true');
-        // In the document (some browsers stop decoding detached or invisible videos), out of sight.
-        Object.assign(video.style, { position: 'fixed', left: '0', top: '0', width: '2px', height: '2px', opacity: '0.01', pointerEvents: 'none', zIndex: '-1' });
-        document.body.appendChild(video);
-        for (const e of ['play', 'playing', 'pause', 'waiting', 'canplay', 'ended', 'volumechange', 'durationchange', 'seeked']) {
-          video.addEventListener(e, publish);
-        }
-        video.addEventListener('error', () => {
-          if (load()) video.play().catch(() => {});
-          else publish();
-        });
-        // The poster (an <img>, another texture source) until the first frame:
-        // set unless the video has a frame the browser lets us upload (WebKit
-        // refuses this one as cross-origin). setTexture is a Promise in worker mode.
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        img.onload = async () => {
-          if (!open || !video) return;
-          if (video.readyState >= 2 && await jsui.setTexture(texture, video)) return;
-          if (open) jsui.setTexture(texture, img);
-        };
-        if (poster) img.src = poster;
-        load();
-      };
-      const bind = () => { unbind ??= jsui.bindVideo(texture, video); };
-      const play = () => {
-        if (!video) create();
-        bind();
-        if (video.error) {
-          tried = [];
-          load();
-        }
-        state({ status: 'loading' });
-        video.play().catch(() => publish());  // autoplay refused: stays paused
-      };
-      jsui.on('renderer', () => state({}));
-      return ({ id: _, cmd, ...a }) => {
-        if (cmd === 'open') {
-          if (typeof a.texture === 'string' && a.texture !== texture) {
-            unbind?.();
-            unbind = null;
-            if (texture) jsui.removeTexture(texture);
-            texture = a.texture;
-          }
-          if (Array.isArray(a.sources)) sources = a.sources;
-          if (typeof a.poster === 'string') poster = a.poster;
-          if (!texture) return;
-          open = true;
-          if (!raf) raf = requestAnimationFrame(tick);
-          if (autoplay) play();
-          else if (video) bind();
-          publish();
-        } else if (cmd === 'close') {
-          open = false;
-          video?.pause();
-          unbind?.();
-          unbind = null;
-          if (texture) jsui.removeTexture(texture);
-        } else if (cmd === 'play') {
-          if (video?.ended) video.currentTime = 0;
-          play();
-        } else if (cmd === 'pause') video?.pause();
-        else if (cmd === 'mute') {
-          if (video) video.muted = !!a.muted;  // from a click in the UI: a user activation
-          publish();
-        } else if (cmd === 'seek' && video) {
-          const d = isFinite(video.duration) ? video.duration : 0;
-          const to = a.fraction != null ? a.fraction * d : a.to;
-          if (to >= 0) video.currentTime = d ? Math.min(to, d - 0.1) : to;
-          if (a.play && video.paused) play();
-        } else if (cmd === 'seek' && a.play) play();
-      };
-    }
   </script>
 </body>
 </html>

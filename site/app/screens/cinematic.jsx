@@ -1,21 +1,18 @@
 // Cinematic (interactive). Feature spotlight: host textures.
 //
-// A game-style trailer player. JSUI does not play video: the screen asks its
-// host for one with a host message naming the sources (below), and the host
-// decodes it into a host texture: in the browser the page's <video>
-// (jsui.bindVideo('trailer', video), web/jsui-textures.js), natively
-// jsui-viewer with AVFoundation (tools/jsui-viewer/video.mm). This screen only
-// shows that texture by name, five times over: the player, a blurred
-// backdrop, a picture-in-picture view, a close-up and a night-vision feed. Each
-// video frame is uploaded once and every view samples it in place; no JS
-// runs per frame.
+// A game-style trailer player. JSUI decodes no video: the screen's <Video>
+// (react-native-video's API) asks the host to play it, and the host draws the
+// frames into host texture 'trailer': in the browser a <video> element
+// (web/jsui-textures.js JsuiVideo), natively jsui-viewer with AVFoundation
+// (tools/jsui-viewer/video.mm). The player is that <Video>; four more views
+// show the same texture by name (a blurred backdrop, a picture-in-picture
+// view, a close-up and a night-vision feed). Each video frame is uploaded
+// once and every view samples it in place; no JS runs per frame.
 //
 // Everything around the picture is JSUI: the frame, the custom progress bar
-// (driven by frame data, Animated.hostBuffer, no re-render per frame), the
-// play / pause and mute buttons, the scene list. Commands go to the host with
-// Host.postMessage('video', { id: 'cinematic', cmd }); it answers through
-// HostState 'cinematic' ({ status, muted, duration, backend, quality }) and
-// HostBuffer 'cinematic.time' ([fraction, buffered fraction, seconds]).
+// (frame data 'trailer.time' the runtime keeps current, Animated.hostBuffer,
+// no re-render per frame), the play / pause and mute buttons (the <Video>'s
+// paused / muted props), the scene list (ref.seek()).
 //
 // Without a network (or before the first play when autoplay is off) the
 // screen shows its own poster art instead of the texture.
@@ -23,7 +20,6 @@ import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from '
 import {
   Animated,
   Easing,
-  Host,
   HostTexture,
   ImageBackground,
   PanResponder,
@@ -35,22 +31,24 @@ import {
   useHostBufferValue,
   useHostState,
   useHostTexture,
+  Video,
 } from 'react-native';
 import { colors, font } from '../../../examples/theme.js';
 
 export const feature = {
   title: 'Host textures',
   points: [
-    'The page plays a <video> and hands each frame to the runtime with jsui.bindVideo(): one upload per frame, into a GPU texture on WebGPU / WebGL',
-    '<HostTexture name="trailer"> shows it like an Image: rounded corners, resizeMode, transforms, filters. Five views here sample the same texture',
-    'The progress bar follows frame data (Animated.hostBuffer) and play / pause / seek / mute are host messages: no JS runs per video frame',
-    'JSUI never decodes anything: a 3D viewport, a webcam or a canvas works the same way',
+    '<Video source={...} paused muted textureName="trailer" /> with react-native-video\'s API: the host plays it (a <video> on the web, AVFoundation in the native viewer) into a host texture',
+    '<HostTexture name="trailer"> shows the same frames like an Image: rounded corners, resizeMode, transforms, filters. Five views here sample one texture',
+    'The progress bar follows frame data (Animated.hostBuffer): no JS runs per video frame',
+    'JSUI never decodes anything: a 3D viewport, a webcam or a canvas works the same way through host textures',
   ],
   keys: ['Space / K / A: play / pause', '← → / D-pad: seek 10 s', 'M / X: mute', '1–5: jump to a scene', 'Click the picture: unmute'],
 };
 
 const TEXTURE = 'trailer';
-const DURATION = 596.5; // until the page reports the real one
+const TIME = TEXTURE + '.time'; // [position / duration, buffered / duration, position s]
+const DURATION = 596.5; // until the host reports the real one
 const SCENES = [
   { t: 0, title: 'Morning in the meadow' },
   { t: 112, title: 'Uninvited guests' },
@@ -61,65 +59,101 @@ const SCENES = [
 const PLAYER_W = 832;
 const PLAYER_H = 468;
 const TRACK_W = 470;
-const BACKEND = {
-  webgpu: 'WebGPU · sampled in place',
-  gl: 'WebGL · GPU texture',
-  pixels: 'CPU pixels',
-  metal: 'Metal · sampled in place',
-};
 const POSTER = require('../../../examples/assets/bg-menu.jpg');
 
-// The trailer, as the host is asked to play it: the first source it can play
-// (the browser: WebM / VP9; jsui-viewer on macOS, AVFoundation: HLS / H.264).
-// Big Buck Bunny (c) 2008 Blender Foundation, peach.blender.org, CC BY 3.0,
-// from Wikimedia Commons (CORS-enabled, so GPU uploads may read it) and
-// Mux's public HLS test stream.
+// The trailer: the host plays the first source it can (the browser: WebM /
+// VP9; jsui-viewer on macOS, AVFoundation: HLS / H.264). Big Buck Bunny (c)
+// 2008 Blender Foundation, peach.blender.org, CC BY 3.0, from Wikimedia
+// Commons (CORS-enabled, so GPU uploads may read it) and Mux's public HLS
+// test stream.
 const WIKIMEDIA = 'https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.';
 const SOURCES = [
-  { url: WIKIMEDIA + '1080p.vp9.webm', type: 'video/webm; codecs="vp9"', height: 1080, quality: '1080p VP9' },
-  { url: WIKIMEDIA + '480p.vp9.webm', type: 'video/webm; codecs="vp9"', height: 480, quality: '480p VP9' },
-  { url: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8', type: 'application/vnd.apple.mpegurl', height: 1080, quality: 'HLS H.264 · 1080p' },
+  { uri: WIKIMEDIA + '1080p.vp9.webm', type: 'video/webm; codecs="vp9"' },
+  { uri: WIKIMEDIA + '480p.vp9.webm', type: 'video/webm; codecs="vp9"' },
+  { uri: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8', type: 'application/vnd.apple.mpegurl' },
 ];
-const POSTER_URL = 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c0/Big_Buck_Bunny_4K.webm/1280px--Big_Buck_Bunny_4K.webm.jpg';
-// The host's video protocol (site/index.html on the web, tools/jsui-viewer/
-// video.mm natively): 'video' messages for this id; it answers through
-// HostState 'cinematic' and HostBuffer 'cinematic.time'.
-const send = (cmd, extra) => Host.postMessage('video', { id: 'cinematic', cmd, ...extra });
 const pad2 = (n) => String(n).padStart(2, '0');
 const fmt = (s) => {
   s = Math.max(0, Math.floor(s || 0));
   return `${pad2(Math.floor(s / 60))}:${pad2(s % 60)}`;
 };
-const IDLE = { status: 'idle', muted: true, duration: 0, backend: null, quality: null };
-
 export default function Cinematic({ active }) {
-  const st = useHostState('cinematic', IDLE) || IDLE;
+  // The page's ?autoplay=0 (site/index.html): nothing streams until play is pressed.
+  const autoplay = useHostState('autoplay', true) !== false;
+  const [started, setStarted] = useState(autoplay);
+  const [paused, setPaused] = useState(!autoplay);
+  const [muted, setMuted] = useState(true);
+  const [attempt, setAttempt] = useState(0); // a new <Video> per retry
+  const [st, setSt] = useState({ status: autoplay ? 'loading' : 'idle', duration: 0 });
+  const video = useRef(null);
   const tex = useHostTexture(TEXTURE);
-  const secs = useHostBufferSelector('cinematic.time', (b) => Math.floor(b[2] || 0), 0);
+  const secs = useHostBufferSelector(TIME, (b) => Math.floor(b[2] || 0), 0);
   const duration = st.duration > 0 ? st.duration : DURATION;
   const playing = st.status === 'playing';
   const scene = SCENES.reduce((cur, s, i) => (secs >= s.t ? i : cur), 0);
-
-  // The page opens the trailer while the screen is shown (and pauses it after).
-  useEffect(() => {
-    if (!active) return undefined;
-    send('open', { texture: TEXTURE, sources: SOURCES, poster: POSTER_URL });
-    return () => send('close');
-  }, [active]);
+  const ctl = useMemo(() => ({
+    play: () => {
+      if (st.status === 'error') setAttempt((a) => a + 1);
+      if (st.status === 'ended') video.current?.seek(0);
+      setStarted(true);
+      setPaused(false);
+    },
+    pause: () => setPaused(true),
+    seek: (to, play) => {
+      video.current?.seek(to);
+      if (play) {
+        setStarted(true);
+        setPaused(false);
+      }
+    },
+    mute: setMuted,
+  }), [st.status]);
+  // The screen's commands (one function for its whole life: memoized parts keep it).
+  const live = useRef(null);
+  live.current = { ctl, duration };
+  const send = useCallback((cmd, a = {}) => {
+    const { ctl: c, duration: d } = live.current;
+    if (cmd === 'play') c.play();
+    else if (cmd === 'pause') c.pause();
+    else if (cmd === 'mute') c.mute(a.muted);
+    else if (cmd === 'seek') c.seek(a.fraction != null ? a.fraction * d : a.to, a.play);
+  }, []);
+  // The player: the trailer's <Video>, while the screen is shown.
+  const player = active && started ? (
+    <Video
+      key={attempt}
+      ref={video}
+      source={SOURCES}
+      textureName={TEXTURE}
+      paused={paused}
+      muted={muted}
+      resizeMode="cover"
+      style={StyleSheet.absoluteFill}
+      onLoadStart={() => setSt((s) => ({ ...s, status: 'loading' }))}
+      onLoad={({ duration: d }) => setSt((s) => ({ ...s, duration: d }))}
+      onBuffer={({ isBuffering }) => setSt((s) => (s.status === 'error' ? s : { ...s, status: isBuffering ? 'loading' : paused ? 'paused' : 'playing' }))}
+      onPlaybackStateChanged={({ isPlaying }) => setSt((s) => (s.status === 'error' || s.status === 'ended' ? s : { ...s, status: isPlaying ? 'playing' : 'paused' }))}
+      onEnd={() => {
+        setPaused(true);
+        setSt((s) => ({ ...s, status: 'ended' }));
+      }}
+      onError={() => setSt((s) => ({ ...s, status: 'error' }))}
+    />
+  ) : null;
 
   const intro = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     Animated.timing(intro, { toValue: 1, duration: 900, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
   }, []);
 
-  const toggle = useCallback(() => send(playing ? 'pause' : 'play'), [playing]);
+  const toggle = useCallback(() => (playing ? ctl.pause() : ctl.play()), [playing, ctl]);
   const seekBy = (d) => send('seek', { to: Math.max(0, Math.min(duration - 1, secs + d)) });
   const onKeyDown = (e) => {
     const k = e.key;
     let used = true;
     if (k === ' ' || k === 'k' || k === 'K' || k === 'Enter') toggle();
     else if (k === 'ArrowLeft' || k === 'ArrowRight') seekBy(k === 'ArrowLeft' ? -10 : 10);
-    else if (k === 'm' || k === 'M') send('mute', { muted: !st.muted });
+    else if (k === 'm' || k === 'M') send('mute', { muted: !muted });
     else if (k >= '1' && k <= String(SCENES.length)) send('seek', { to: SCENES[+k - 1].t, play: true });
     else used = false;
     if (used) {
@@ -132,7 +166,7 @@ export default function Cinematic({ active }) {
     const b = e.buttonIndex;
     let used = true;
     if (b === 0) toggle();
-    else if (b === 2) send('mute', { muted: !st.muted });
+    else if (b === 2) send('mute', { muted: !muted });
     else if (b === 14 || b === 15) seekBy(b === 14 ? -10 : 10);
     else used = false;
     if (used) {
@@ -145,7 +179,6 @@ export default function Cinematic({ active }) {
     opacity: intro.interpolate({ inputRange: [d, 1], outputRange: [0, 1], extrapolate: 'clamp' }),
     transform: [{ translateY: intro.interpolate({ inputRange: [0, 1], outputRange: [from, 0] }) }],
   });
-  const backend = st.backend ? BACKEND[st.backend] || st.backend : null;
 
   return (
     <View focusable autoFocus={active} onKeyDown={onKeyDown} onGamepadButton={onPad} style={styles.root}>
@@ -154,7 +187,7 @@ export default function Cinematic({ active }) {
         <HostTexture
           name={TEXTURE}
           resizeMode="cover"
-          style={[StyleSheet.absoluteFill, { opacity: 0.42, transform: [{ scale: 1.15 }] }, st.backend !== 'pixels' && { filter: 'blur(36px) saturate(1.4)' }]}
+          style={[StyleSheet.absoluteFill, { opacity: 0.42, transform: [{ scale: 1.15 }], filter: 'blur(36px) saturate(1.4)' }]}
         />
       ) : (
         <ImageBackground source={POSTER} resizeMode="cover" style={[StyleSheet.absoluteFill, { opacity: 0.3 }]} />
@@ -172,18 +205,18 @@ export default function Cinematic({ active }) {
           <Text style={styles.subtitle}>A short film from the Blender Institute · 2008 · 9 min 56 s</Text>
         </View>
         <View style={styles.headerRight}>
-          <Pill label="Host texture" value={backend || 'waiting for the first frame'} accent={colors.cyan} />
-          <Pill label="Source" value={tex ? `${st.quality || 'video'} · ${tex.width}×${tex.height}` : '<video> on the page'} accent={colors.gold} />
+          <Pill label="Host texture" value={tex ? `"${TEXTURE}" · ${tex.width}×${tex.height}` : 'waiting for the first frame'} accent={colors.cyan} />
+          <Pill label="Played by" value="the host's video player" accent={colors.gold} />
         </View>
       </Animated.View>
 
       <Animated.View style={[styles.playerWrap, rise(16, 0.1)]}>
-        <Player st={st} tex={tex} secs={secs} duration={duration} toggle={toggle} active={active} />
+        <Player st={st} muted={muted} picture={player} tex={tex} secs={secs} duration={duration} toggle={toggle} send={send} active={active} />
       </Animated.View>
 
       <Animated.View style={[styles.scenes, rise(20, 0.25)]}>
         {SCENES.map((s, i) => (
-          <SceneChip key={s.t} i={i} s={s} current={i === scene} next={SCENES[i + 1] ? SCENES[i + 1].t : duration} secs={secs} />
+          <SceneChip key={s.t} i={i} s={s} current={i === scene} next={SCENES[i + 1] ? SCENES[i + 1].t : duration} secs={secs} send={send} />
         ))}
       </Animated.View>
 
@@ -192,7 +225,7 @@ export default function Cinematic({ active }) {
         <View style={styles.info}>
           <Text style={styles.infoTitle}>One texture, five views</Text>
           <Text style={styles.infoBody}>
-            The page uploads each video frame once. The player, backdrop and the three feeds all sample that one texture: no JS runs per frame.
+            The host uploads each video frame once. The player, backdrop and the three feeds all sample that one texture: no JS runs per frame.
           </Text>
           <View style={styles.statRow}>
             <Stat k="Views" v="5" />
@@ -211,25 +244,24 @@ export default function Cinematic({ active }) {
 
 // --- the player ------------------------------------------------------------------------
 
-const Player = memo(function Player({ st, tex, secs, duration, toggle, active }) {
+const Player = memo(function Player({ st, muted, picture, tex, secs, duration, toggle, send, active }) {
   const status = st.status;
   const playing = status === 'playing';
   const loading = status === 'loading';
   const failed = status === 'error';
   const onPicture = () => {
     // The first click on a muted autoplaying trailer turns the sound on.
-    if (playing && st.muted) send('mute', { muted: false });
+    if (playing && muted) send('mute', { muted: false });
     else toggle();
   };
   return (
     <View style={styles.player}>
-      {tex ? (
-        <HostTexture name={TEXTURE} resizeMode="cover" style={StyleSheet.absoluteFill} />
-      ) : (
+      {tex ? null : (
         <ImageBackground source={POSTER} resizeMode="cover" style={StyleSheet.absoluteFill}>
           <View style={styles.posterShade} />
         </ImageBackground>
       )}
+      {picture}
       <Pressable onPress={onPicture} focusable={false} style={[StyleSheet.absoluteFill, { cursor: 'pointer' }]}>
         <View pointerEvents="none" style={styles.topShade} />
         <View pointerEvents="none" style={styles.bottomShade} />
@@ -238,7 +270,7 @@ const Player = memo(function Player({ st, tex, secs, duration, toggle, active })
       <View pointerEvents="none" style={styles.tagRow}>
         <LiveTag status={status} />
       </View>
-      {playing && st.muted ? (
+      {playing && muted ? (
         <Pressable onPress={() => send('mute', { muted: false })} focusable={false} style={styles.unmuteWrap}>
           {({ hovered }) => (
             <View style={[styles.unmute, hovered && styles.unmuteHot]}>
@@ -273,16 +305,16 @@ const Player = memo(function Player({ st, tex, secs, duration, toggle, active })
           {fmt(secs)}
           <Text style={styles.timeDim}> / {fmt(duration)}</Text>
         </Text>
-        <Scrubber duration={duration} />
-        <Pressable onPress={() => send('mute', { muted: !st.muted })} focusable={false} style={{ cursor: 'pointer' }}>
+        <Scrubber duration={duration} send={send} />
+        <Pressable onPress={() => send('mute', { muted: !muted })} focusable={false} style={{ cursor: 'pointer' }}>
           {({ hovered }) => (
             <View style={[styles.iconButton, hovered && styles.iconButtonHot]}>
-              <SpeakerIcon muted={st.muted} />
+              <SpeakerIcon muted={muted} />
             </View>
           )}
         </Pressable>
         <View style={styles.hd}>
-          <Text style={styles.hdText}>{st.quality && /1080|720/.test(st.quality) ? 'HD' : 'SD'}</Text>
+          <Text style={styles.hdText}>{tex && tex.height >= 720 ? 'HD' : 'SD'}</Text>
         </View>
       </View>
     </View>
@@ -382,9 +414,9 @@ function Spinner({ active }) {
 
 // --- progress bar: follows frame data, scrubs with a drag ---------------------------------
 
-function Scrubber({ duration }) {
-  const progress = useHostBufferValue('cinematic.time', 0);
-  const buffered = useHostBufferValue('cinematic.time', 1);
+function Scrubber({ duration, send }) {
+  const progress = useHostBufferValue(TIME, 0);
+  const buffered = useHostBufferValue(TIME, 1);
   const drag = useRef(new Animated.Value(0)).current;
   const [dragging, setDragging] = useState(false);
   const [hover, setHover] = useState(false);
@@ -433,7 +465,7 @@ function Scrubber({ duration }) {
 
 // --- scenes --------------------------------------------------------------------------------
 
-const SceneChip = memo(function SceneChip({ s, i, current, next, secs }) {
+const SceneChip = memo(function SceneChip({ s, i, current, next, secs, send }) {
   const p = current ? Math.max(0, Math.min(1, (secs - s.t) / Math.max(1, next - s.t))) : 0;
   return (
     <Pressable onPress={() => send('seek', { to: s.t, play: true })} focusable={false} style={{ flex: 1, cursor: 'pointer' }}>

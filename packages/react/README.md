@@ -106,6 +106,16 @@ resizeMode="contain" style={...} />` shows texture `name` like an `Image`
 keys / subscribe` read the same. New contents repaint the view without any
 JS.
 
+Video: `<Video source={{ uri }} paused muted repeat rate volume resizeMode />`
+with react-native-video's props and callbacks (`onLoad`, `onProgress` at
+`progressUpdateInterval`, `onBuffer`, `onPlaybackStateChanged`, `onEnd`,
+`onError`, `onReadyForDisplay`, `poster`) and ref methods (`seek(t)`,
+`pause`, `resume`). The host plays it (JsuiConfig.on_video: a `<video>` in
+the browser, AVFoundation in the macOS viewer, a game engine's own player)
+into a host texture (`textureName`, which other `HostTexture` views can show
+too); `source` may list `{ uri, type }` alternatives for the host to pick
+from. `import Video from 'react-native-video'` works too (the CLI aliases it).
+
 Audio (played by the host: Godot's audio buses, Web Audio in the browser,
 the built-in miniaudio backend natively; see docs/AUDIO.md):
 `Sound.play(source, { bus, volume, pitch, pan, loop, fadeIn, offset })`

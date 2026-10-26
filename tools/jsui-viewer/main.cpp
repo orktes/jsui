@@ -26,8 +26,9 @@
 // freezes. A screenshot runs one sync frame first (JSUI_TICK_SYNC_JS), so
 // it shows what JS rendered by then.
 // --state key=json sets host state (HostState) before the bundle loads.
-// On macOS 'video' host messages play videos into host textures
-// (AVFoundation, tools/jsui-viewer/video.mm): the viewer as an example host.
+// On macOS the UI's <Video> views play with AVFoundation into their host
+// textures (JsuiConfig.on_video, tools/jsui-viewer/video.mm): the viewer
+// playing the host's part.
 // --gl-core asks for an OpenGL 3.2 core, forward-compatible context. It is
 // the default on macOS, where SDL otherwise gets a legacy 2.1 context whose
 // GLSL 1.20 Skia's shaders cannot use ("undeclared gl_VertexID"); elsewhere
@@ -75,7 +76,7 @@ void viewer_mac_init(void);
 void viewer_mac_titlebar_overlay(void* nswindow, float header, float* controls);
 ViewerVideos* viewer_videos_create(void* device, void* queue);
 void viewer_videos_attach(ViewerVideos* vs, JsuiRuntime* rt);
-void viewer_videos_message(ViewerVideos* vs, const char* json);
+void viewer_videos_command(void* user, const JsuiVideoCommand* c);
 int viewer_videos_tick(ViewerVideos* vs);
 void viewer_videos_destroy(ViewerVideos* vs);
 }
@@ -122,7 +123,7 @@ void usage() {
       "  --titlebar-overlay H  (macOS) the UI fills the window under a transparent title bar, the window\n"
       "               buttons centred in its top H px (HostState jsui.windowControls: their box); the\n"
       "               UI's empty spots up there drag the window\n"
-      "  'video' host messages play videos into host textures (macOS, AVFoundation; tools/jsui-viewer/video.mm)\n"
+      "  <Video> views play with AVFoundation on macOS (tools/jsui-viewer/video.mm)\n"
       "  F5 reloads the bundle, Esc dismisses the error overlay (dev mode)\n"
       "  F6 switches --js-thread (restarts the runtime), F7 keeps JS busy for 200 ms\n");
 }
@@ -422,6 +423,10 @@ class Viewer {
       e.type = type;
       SDL_PushEvent(&e);
     };
+#if defined(__APPLE__)
+    cfg.on_video = viewer_videos_command;
+    cfg.video_user = videos_;
+#endif
     rt_ = jsui_create(&cfg);
     messages_.clear();
 #if defined(__APPLE__)
@@ -482,15 +487,13 @@ class Viewer {
 #endif
   }
 
-  // The messages of the last tick (Linking.openURL, the videos), then the
-  // videos' frames. True while a video plays.
+  // The messages of the last tick (Linking.openURL), then the videos'
+  // frames. True while a video plays.
   bool afterTick() {
     bool playing = false;
     for (auto& [name, json] : messages_)
       if (name == "jsui:openURL") openURL(json);
 #if defined(__APPLE__)
-    for (auto& [name, json] : messages_)
-      if (name == "video") viewer_videos_message(videos_, json.c_str());
     playing = viewer_videos_tick(videos_) != 0;
 #endif
     messages_.clear();
