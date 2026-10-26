@@ -374,7 +374,7 @@ class Viewer {
       while (SDL_PollEvent(&e)) handle(e);
       double now = double(SDL_GetPerformanceCounter() - start_) * 1000.0 / double(SDL_GetPerformanceFrequency());
       jsui_tick(rt_, now);
-      bool video = tickVideos();
+      bool video = afterTick();
       updateCursor();
       bool drew = false;
       if (jsui_needs_redraw(rt_) || (opt_.gpu ? !presented_ : texture_ == nullptr)) {
@@ -423,7 +423,7 @@ class Viewer {
     cfg.message_user = this;
     cfg.on_message = [](void* u, const char* name, const char* json) {
       std::printf("[message] %s %s\n", name, json);
-      // Runs inside jsui_tick: handled after it (tickVideos).
+      // Runs inside jsui_tick: handled after it (afterTick).
       static_cast<Viewer*>(u)->messages_.emplace_back(name, json);
     };
     cfg.js_thread = opt_.jsThread;
@@ -496,10 +496,12 @@ class Viewer {
 #endif
   }
 
-  // The messages of the last tick to the videos, then their frames. True
-  // while a video plays.
-  bool tickVideos() {
+  // The messages of the last tick (Linking.openURL, the videos), then the
+  // videos' frames. True while a video plays.
+  bool afterTick() {
     bool playing = false;
+    for (auto& [name, json] : messages_)
+      if (name == "jsui:openURL") openURL(json);
 #if defined(__APPLE__)
     for (auto& [name, json] : messages_)
       for (ViewerVideo* v : videos_)
@@ -508,6 +510,26 @@ class Viewer {
 #endif
     messages_.clear();
     return playing;
+  }
+
+  // Linking.openURL: web and mail links open in the system's browser / mail app.
+  static void openURL(const std::string& json) {
+    // {"url":"..."}: the string value, JSON escapes undone (\uXXXX aside, which
+    // a URL does not need).
+    size_t k = json.find("\"url\"");
+    size_t q = k == std::string::npos ? k : json.find('"', json.find(':', k));
+    if (q == std::string::npos) return;
+    std::string url;
+    for (size_t i = q + 1; i < json.size() && json[i] != '"'; i++) {
+      if (json[i] == '\\' && i + 1 < json.size()) {
+        if (json[++i] == 'u') return;
+      }
+      url += json[i];
+    }
+    if (url.rfind("https://", 0) == 0 || url.rfind("http://", 0) == 0 || url.rfind("mailto:", 0) == 0)
+      SDL_OpenURL(url.c_str());
+    else
+      std::fprintf(stderr, "warning: not opening %s (only http, https and mailto links)\n", url.c_str());
   }
 
   bool initGpu() {
