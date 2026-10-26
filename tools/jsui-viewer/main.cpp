@@ -66,6 +66,7 @@ void viewer_mtl_release(void* obj);
 #define VIEWER_METAL 0
 #endif
 #if defined(__APPLE__)
+extern "C" void viewer_mac_init(void);
 extern "C" void viewer_mac_watch_wheel(void (*cb)(void* user, float dx, float dy), void* user);
 #endif
 
@@ -228,6 +229,9 @@ class Viewer {
     SDL_SetMainReady();
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");  // touch is forwarded as touch
     SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
+#if defined(__APPLE__)
+    viewer_mac_init();
+#endif
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS) != 0) {
       std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
       return 1;
