@@ -3216,6 +3216,35 @@ the expensive per-pixel work is done once:
   (dashed or dotted edges, outlines over 1024 device px): it draws solid
   rrects analytically and, patched, applies a whole-pixel damage rect as a
   scissor (see WebGPU).
+* **Occlusion.** What a later opaque node covers is not painted
+  (`Occlusion`, `collectOccluders`). Before each paint (and each damage
+  rect's pass) a walk in paint order over the records `updateDamage` left
+  notes the device pixels that qualifying nodes are sure to cover: a solid
+  background colour at full alpha, opacity 1 (inherited too), no blend
+  mode, filter or content shader on the node or an ancestor, an
+  axis-aligned device matrix (scale, translation, quarter turns); the
+  border box inside the rounded corners' arcs, clipped by the ancestors'
+  clips (inside their rounded corners too), rounded inwards to whole
+  pixels. The 8 largest are kept, each with its position in paint order
+  (one a later one contains is dropped). `paintNode` skips a subtree whose
+  `subtree` bounds lie inside an occluder that paints after it, or only a
+  node's own drawing (background, borders, shadows, text, image) when its
+  `own` bounds do; covered pixels are painted over anyway, so the frame is
+  the same, and a modal card or a full-screen menu over a live HUD records
+  nothing below it. Not culled: what is inside a filter or content-shader
+  layer (it spreads pixels past the cover; the layer node itself is culled
+  whole, its bounds include the spread), and nothing while the textures
+  of the LayerCache (opacity layers, raster-cached subtrees, the static
+  backdrop) are rendered, since they are drawn again under other covers. A
+  paint after a change that `updateDamage` has not seen (the root is
+  marked), or on a canvas that maps the document elsewhere, culls nothing.
+  The damage is computed as before (covered nodes keep their records), so
+  a cover moving away repaints what was under it. `PaintStats::nodesOccluded`
+  counts the skips; `setOcclusionCulling(false)` or `JSUI_OCCLUSION=off`
+  paints everything, for A/B runs (`tests/native/occlusion_test.cpp`
+  compares the two). Nothing in the painter reads what was painted below
+  it (no backdrop filters); such an effect would have to end the
+  occluders' reach at itself.
 * **Scroll blit.** When a ScrollView's content only scrolled by whole device
   pixels over a uniform backdrop, the CPU path moves the viewport's pixels
   and repaints only what the scroll exposed, what is painted above the
@@ -3270,8 +3299,8 @@ the expensive per-pixel work is done once:
 * **Text.** Paragraphs keep one layout: painting and the painter's overflow
   bounds lay out at the same content width.
 
-`PaintStats` (`lastPaintStats()`) reports per paint the nodes painted and
-culled, the pixels and rects repainted, sprite draws and renders, shadow
+`PaintStats` (`lastPaintStats()`) reports per paint the nodes painted,
+culled and occluded, the pixels and rects repainted, sprite draws and renders, shadow
 mask draws and renders (blurs), blitted pixels and, with
 `setPaintCounting()`, the canvas draw calls, text / image draws, layers and
 clips. `tests/native/render_test.cpp` and `gpu_test.cpp` assert on these
