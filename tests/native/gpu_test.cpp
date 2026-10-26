@@ -1100,6 +1100,103 @@ TEST(gpu_scaling_shadow_exact_after_animation) {
   });
 }
 
+// Text in a box whose scale animates is drawn from a texture of its paint at
+// the scale the animation started at (painter.cpp drawScalingText), close to
+// drawing it directly, also while its color changes with the scale (a hover:
+// a white mask tinted), and repainted exactly in the frame after the scale
+// settles: the retained frame then equals a full repaint of the end state.
+TEST(gpu_scaling_text_exact_after_animation) {
+  forEachContext("gpu_scaling_text_exact_after_animation", [](GLContext& c, JsuiGpuContext* gpu, Api api) {
+   for (bool recolor : {false, true}) {
+    const char* src = R"JS(
+      const N = __jsui_native, A = N.animated;
+      const box = N.createNode('View');
+      N.setProps(box, { style: { position: 'absolute', left: 30, top: 25, width: 140, height: 50,
+        backgroundColor: '#223' } });
+      const t = N.createNode('Text');
+      N.setProps(t, { style: { color: '#fff', fontSize: 18, margin: 10 } });
+      const raw = N.createNode('RawText');
+      N.setText(raw, 'Legendary sword');
+      N.appendChild(t, raw);
+      N.appendChild(box, t);
+      N.appendChild(N.rootId, box);
+      A.createNode(1, { type: 'value', value: 1, offset: 0 });
+      A.createNode(2, { type: 'transform', transforms: [{ property: 'scale', nodeTag: 1 }] });
+      A.connect(1, 2);
+      A.createNode(3, { type: 'style', style: { transform: 2 } });
+      A.connect(2, 3);
+      A.createNode(4, { type: 'props', props: { style: 3 } });
+      A.connect(3, 4);
+      A.connectToView(4, box);
+      let k = 0;
+      globalThis.__jsui_onHostMessage = (name) => {
+        if (name === 'color') N.setProps(t, { style: { color: `rgb(255, ${255 - 12 * ++k}, 255)`, fontSize: 18, margin: 10 } });
+        else A.startAnimation(5, 1, { type: 'frames', frames: [0, 0.25, 0.5, 0.75, 1], duration: 160, toValue: 1.08, iterations: 1 });
+      };
+    )JS";
+    // `rt` paints each frame once (the text from its texture while it
+    // scales); `ref` paints each frame twice, the second time with the scale
+    // unchanged since the first: directly.
+    JsuiConfig cfg;
+    jsui_config_init(&cfg);
+    cfg.width = 200;
+    cfg.height = 100;
+    JsuiRuntime* rt = jsui_create(&cfg);
+    JsuiRuntime* ref = jsui_create(&cfg);
+    for (JsuiRuntime* x : {rt, ref}) CHECK_EQ(jsui_load_bundle_source(x, src, std::strlen(src), "text.js"), 0);
+    jsui::Runtime& r = *jsui::internalRuntime(rt);
+    RenderTexture rtex(c.gl, 200, 100), direct(c.gl, 200, 100);
+    JsuiGLTarget t{};
+    t.texture = rtex.tex;
+    t.width = 200;
+    t.height = 100;
+    t.flags = JSUI_GL_TOP_LEFT_ORIGIN;
+    JsuiGLTarget dt = t;
+    dt.texture = direct.tex;
+    double now = 0;
+    auto step = [&](bool render) {
+      now += 16;
+      if (recolor && render && now > 32 && now < 160) {
+        jsui_post_message(rt, "color", "null");
+        jsui_post_message(ref, "color", "null");
+      }
+      jsui_tick(rt, now);
+      jsui_tick(ref, now);
+      if (!render) return;
+      CHECK_EQ(jsui_render_gl_target(rt, gpu, &t), 0);
+      CHECK_EQ(jsui_render_gl_target(ref, gpu, &dt), 0);
+      CHECK_EQ(jsui_render_gl_target(ref, gpu, &dt), 0);
+    };
+    step(true);
+    jsui_post_message(rt, "start", "null");
+    jsui_post_message(ref, "start", "null");
+    int frames = 0, approximate = 0, textured = 0;
+    double worst = 0, differs = 0;
+    while (frames < 30 && (jsui_wants_frame(rt) || jsui_needs_redraw(rt))) {
+      frames++;
+      step(jsui_needs_redraw(rt) || jsui_wants_frame(rt));
+      if (!r.doc.exactRepaintPending()) continue;
+      approximate++;
+      Diff d = compare(rtex.read(false), direct.read(false), 96);
+      worst = std::max(worst, d.over);
+      differs = std::max(differs, d.mean);
+      if (d.mean > 0) textured++;
+    }
+    std::printf("  [%s]%s %d frames, %d from the texture: at most %.2f%% of pixels far from direct (mean %.3f)\n",
+                apiName(api), recolor ? " recolored:" : "", frames, approximate, worst * 100, differs);
+    CHECK(approximate > 0);
+    CHECK(differs > 0);  // drawn from the texture, not directly
+    CHECK(textured >= approximate - 1);  // from the first frame of the animation on (that one: rendered there)
+    CHECK(worst < 0.01);
+    CHECK(frames < 30 && !jsui_needs_redraw(rt));
+    Diff d = compare(rtex.read(false), direct.read(false), 2);
+    CHECK(d.over < 0.0005);
+    jsui_destroy(rt);
+    jsui_destroy(ref);
+   }
+  });
+}
+
 // The overlay layer (core/overlay.h) on the GPU: a popout escaping a
 // clipping ScrollView follows its anchor while the list scrolls and the
 // stage around it scales; the retained frame (damage only) matches drawing
