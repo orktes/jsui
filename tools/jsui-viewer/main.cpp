@@ -1,6 +1,6 @@
 // jsui-viewer: run a JSUI bundle in a window.
 //
-//   jsui-viewer [--dev] [--cpu | --gl-core] [--width W] [--height H]
+//   jsui-viewer [--dev] [--cpu | --gl | --gl-core] [--width W] [--height H] [--state key=json]
 //               <bundle path or URL> [--frames N] [--screenshot out.png]
 //
 // --dev polls the dev server (`jsui dev`) and reloads on change; JS errors
@@ -25,10 +25,16 @@
 // thread, native Animated, scrolling and hover go on; without, the window
 // freezes. A screenshot runs one sync frame first (JSUI_TICK_SYNC_JS), so
 // it shows what JS rendered by then.
+// --state key=json sets host state (HostState) before the bundle loads.
 // --gl-core asks for an OpenGL 3.2 core, forward-compatible context. It is
 // the default on macOS, where SDL otherwise gets a legacy 2.1 context whose
 // GLSL 1.20 Skia's shaders cannot use ("undeclared gl_VertexID"); elsewhere
 // the driver's default (compatibility) context is used unless it is given.
+// On macOS with a library built with JSUI_GRAPHITE_METAL (a Skia from
+// scripts/build-skia-desktop.sh) the GPU renderer is Skia Graphite on Metal
+// instead: the UI is painted into a retained texture (incremental repaints)
+// that is blitted into the window's CAMetalLayer. --gl picks Ganesh on GL;
+// when Metal fails the viewer falls back to GL, then to the CPU.
 #include <SDL.h>
 
 #include <algorithm>
@@ -46,12 +52,27 @@
 #include "jsui/jsui.h"
 #include "keymap.h"
 
+#if defined(__APPLE__) && defined(JSUI_GRAPHITE_METAL)
+#define VIEWER_METAL 1
+extern "C" {
+int viewer_mtl_init(void* layer, float r, float g, float b, void** device, void** queue);
+const char* viewer_mtl_name(void* device);
+void* viewer_mtl_texture(void* device, int w, int h);
+int viewer_mtl_present(void* layer, void* queue, void* texture);
+int viewer_mtl_read(void* device, void* queue, void* texture, int w, int h, uint8_t* out);
+void viewer_mtl_release(void* obj);
+}
+#else
+#define VIEWER_METAL 0
+#endif
+
 namespace {
 
 struct Options {
   std::string bundle;
   bool dev = false;
   bool gpu = true;  // --cpu turns it off
+  bool metal = VIEWER_METAL;  // GPU: Graphite on Metal (--gl: Ganesh on GL)
 #if defined(__APPLE__)
   bool glCore = true;
 #else
@@ -61,6 +82,7 @@ struct Options {
   long frames = -1;
   std::string screenshot;
   int jsThread = JSUI_JS_THREAD_ON;  // --js-thread on|off|lockstep
+  std::vector<std::pair<std::string, std::string>> state;  // --state key=json
 };
 
 const char* jsThreadName(int mode) {
@@ -69,15 +91,17 @@ const char* jsThreadName(int mode) {
 
 void usage() {
   std::printf(
-      "usage: jsui-viewer [--dev] [--cpu | --gl-core] [--width W] [--height H] [--frames N] [--screenshot out.png]\n"
-      "                   [--js-thread on|off|lockstep] <bundle.js|url>\n"
+      "usage: jsui-viewer [--dev] [--cpu | --gl | --gl-core] [--width W] [--height H] [--frames N] [--screenshot out.png]\n"
+      "                   [--js-thread on|off|lockstep] [--state key=json ...] <bundle.js|url>\n"
       "  --dev        poll the dev server and reload on change, show errors on screen\n"
-      "  --cpu        render with the CPU rasteriser + an SDL texture (default: Skia Ganesh on OpenGL,\n"
-      "               falling back to the CPU path when GL is unavailable)\n"
+      "  --cpu        render with the CPU rasteriser + an SDL texture (default: Skia Graphite on Metal on\n"
+      "               macOS when the library has it, else Ganesh on OpenGL; falling back to the CPU path)\n"
+      "  --gl         render with Skia Ganesh on OpenGL even when Graphite on Metal is available\n"
       "  --gpu        accepted for compatibility: the GPU renderer is the default\n"
       "  --gl-core    request an OpenGL 3.2 core profile context (always on macOS)\n"
       "  --js-thread  on (default): JS on its own thread; off: on the window's thread; lockstep: on its\n"
       "               thread, waited for every frame\n"
+      "  --state      sets host state `key` (HostState) to the JSON value before the bundle loads\n"
       "  F5 reloads the bundle, Esc dismisses the error overlay (dev mode)\n"
       "  F6 switches --js-thread (restarts the runtime), F7 keeps JS busy for 200 ms\n");
 }
@@ -89,8 +113,17 @@ bool parseArgs(int argc, char** argv, Options* o) {
     if (a == "--dev") o->dev = true;
     else if (a == "--gpu") o->gpu = true;  // the default; kept as an alias
     else if (a == "--cpu") o->gpu = false;
+    else if (a == "--gl") o->metal = false;
     else if (a == "--gl-core") o->glCore = true;
-    else if (a == "--width" || a == "--height" || a == "--frames" || a == "--screenshot" || a == "--js-thread") {
+    else if (a == "--state") {
+      const char* v = next();
+      const char* eq = v ? std::strchr(v, '=') : nullptr;
+      if (!eq || eq == v) {
+        std::fprintf(stderr, "--state takes key=json\n");
+        return false;
+      }
+      o->state.emplace_back(std::string(v, eq), std::string(eq + 1));
+    } else if (a == "--width" || a == "--height" || a == "--frames" || a == "--screenshot" || a == "--js-thread") {
       const char* v = next();
       if (!v) {
         std::fprintf(stderr, "missing value for %s\n", a.c_str());
@@ -173,6 +206,12 @@ class Viewer {
   ~Viewer() {
     if (rt_) jsui_destroy(rt_);
     if (gpu_) jsui_gpu_destroy(gpu_);  // GL context still current
+#if VIEWER_METAL
+    viewer_mtl_release(mtlTexture_);
+    viewer_mtl_release(mtlQueue_);
+    viewer_mtl_release(mtlDevice_);
+    if (metalView_) SDL_Metal_DestroyView(metalView_);
+#endif
     if (glContext_) SDL_GL_DeleteContext(glContext_);
     for (auto& [id, p] : pads_) SDL_GameControllerClose(p.controller);
     for (auto& [k, c] : cursors_) SDL_FreeCursor(c);
@@ -191,6 +230,16 @@ class Viewer {
       return 1;
     }
     std::string title = "JSUI - " + opt_.bundle;
+    if (!opt_.gpu) opt_.metal = false;
+    if (opt_.metal) {
+      window_ = SDL_CreateWindow(title.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, opt_.width, opt_.height,
+                                 SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_METAL);
+      if (window_ && initMetal()) return loop();
+      std::fprintf(stderr, "warning: Graphite on Metal unavailable, falling back to OpenGL (--gl skips the attempt)\n");
+      opt_.metal = false;
+      if (window_) SDL_DestroyWindow(window_);
+      window_ = nullptr;
+    }
     Uint32 windowFlags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
     if (opt_.gpu) {
       // Ganesh can use a stencil buffer for some paths; no depth / MSAA needed.
@@ -236,6 +285,11 @@ class Viewer {
         return 1;
       }
     }
+    return loop();
+  }
+
+ private:
+  int loop() {
     // The runtime produces premultiplied RGBA.
     premul_ = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
                                          SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
@@ -271,7 +325,8 @@ class Viewer {
       jsui_tick_ex(rt_, now, JSUI_TICK_SYNC_JS);
     }
     if (!opt_.screenshot.empty() && opt_.gpu) {
-      if (!gpuScreenshot(opt_.screenshot)) std::fprintf(stderr, "screenshot failed\n");
+      if (!(opt_.metal ? metalScreenshot(opt_.screenshot) : gpuScreenshot(opt_.screenshot)))
+        std::fprintf(stderr, "screenshot failed\n");
     } else if (!opt_.screenshot.empty()) {
       void* png = nullptr;
       size_t size = 0;
@@ -287,7 +342,6 @@ class Viewer {
     return err ? 1 : 0;
   }
 
- private:
   // (Re)creates the runtime in opt_.jsThread mode and loads the bundle.
   void createRuntime() {
     if (rt_) jsui_destroy(rt_);
@@ -310,6 +364,9 @@ class Viewer {
       SDL_PushEvent(&e);
     };
     rt_ = jsui_create(&cfg);
+    for (auto& [key, json] : opt_.state)
+      if (jsui_set_state(rt_, key.c_str(), json.c_str()) < 0)
+        std::fprintf(stderr, "warning: --state %s: not valid JSON\n", key.c_str());
     // TextInput copy / paste use the system clipboard.
     jsui_set_clipboard_callbacks(
         rt_,
@@ -330,6 +387,9 @@ class Viewer {
     jsui_load_bundle_url(rt_, opt_.bundle.c_str());
     cursorName_.clear();
     presented_ = false;
+#if VIEWER_METAL
+    mtlFresh_ = true;  // the retained frame was the old runtime's
+#endif
     std::printf("JS thread: %s\n", jsThreadName(jsui_js_thread(rt_)));
   }
 
@@ -356,6 +416,59 @@ class Viewer {
     std::printf("GPU: %s / %s\n", r ? reinterpret_cast<const char*>(r) : "?", v ? reinterpret_cast<const char*>(v) : "?");
     return true;
   }
+
+#if VIEWER_METAL
+  bool initMetal() {
+    metalView_ = SDL_Metal_CreateView(window_);
+    if (!metalView_) return false;
+    metalLayer_ = SDL_Metal_GetLayer(metalView_);
+    if (!metalLayer_ || !viewer_mtl_init(metalLayer_, 24 / 255.f, 24 / 255.f, 28 / 255.f, &mtlDevice_, &mtlQueue_))
+      return false;
+    gpu_ = jsui_gpu_create_metal(mtlDevice_, mtlQueue_);
+    if (!gpu_) return false;
+    std::printf("GPU: %s / Skia Graphite on Metal\n", viewer_mtl_name(mtlDevice_));
+    return true;
+  }
+
+  // Paints the frame into the retained texture (only the damage once it holds
+  // one) and presents it.
+  void presentMetal() {
+    if (pixelW_ <= 0 || pixelH_ <= 0) return;
+    if (!mtlTexture_) {
+      mtlTexture_ = viewer_mtl_texture(mtlDevice_, pixelW_, pixelH_);
+      mtlFresh_ = true;
+      if (!mtlTexture_) return;
+    }
+    if (!renderMetal()) return;
+    presented_ = viewer_mtl_present(metalLayer_, mtlQueue_, mtlTexture_) != 0;
+  }
+
+  bool renderMetal() {
+    JsuiGpuTarget t{};
+    t.texture = mtlTexture_;
+    t.format = 80;  // MTLPixelFormatBGRA8Unorm
+    t.width = pixelW_;
+    t.height = pixelH_;
+    t.flags = mtlFresh_ ? 0 : JSUI_GPU_INCREMENTAL;
+    if (jsui_render_gpu_target(rt_, gpu_, &t, nullptr) != 0) return false;
+    mtlFresh_ = false;
+    return true;
+  }
+
+  bool metalScreenshot(const std::string& path) {
+    if (!mtlTexture_ || !renderMetal()) return false;
+    std::vector<uint8_t> px(size_t(pixelW_) * pixelH_ * 4);
+    if (!viewer_mtl_read(mtlDevice_, mtlQueue_, mtlTexture_, pixelW_, pixelH_, px.data())) return false;
+    SkPixmap pm(SkImageInfo::Make(pixelW_, pixelH_, kRGBA_8888_SkColorType, kPremul_SkAlphaType), px.data(),
+                size_t(pixelW_) * 4);
+    SkFILEWStream f(path.c_str());
+    return f.isValid() && SkPngEncoder::Encode(&f, pm, {});
+  }
+#else
+  bool initMetal() { return false; }
+  void presentMetal() {}
+  bool metalScreenshot(const std::string&) { return false; }
+#endif
 
   // Draws the frame into the default framebuffer. `backdrop`: clear to the
   // viewer's background colour and composite the UI over it (else: clear to
@@ -404,6 +517,10 @@ class Viewer {
   void updateViewport() {
     int lw = 0, lh = 0, pw = 0, ph = 0;
     SDL_GetWindowSize(window_, &lw, &lh);
+#if VIEWER_METAL
+    if (opt_.metal) SDL_Metal_GetDrawableSize(window_, &pw, &ph);
+    else
+#endif
     if (opt_.gpu) SDL_GL_GetDrawableSize(window_, &pw, &ph);
     else SDL_GetRendererOutputSize(renderer_, &pw, &ph);
     if (lw <= 0 || lh <= 0) return;
@@ -413,6 +530,12 @@ class Viewer {
     jsui_set_viewport(rt_, lw, lh, ratio_);
     int dw = int(std::lround(lw * ratio_)), dh = int(std::lround(lh * ratio_));
     if (opt_.gpu) {
+#if VIEWER_METAL
+      if (mtlTexture_ && (dw != pixelW_ || dh != pixelH_)) {
+        viewer_mtl_release(mtlTexture_);
+        mtlTexture_ = nullptr;  // presentMetal makes one of the new size
+      }
+#endif
       pixelW_ = dw;
       pixelH_ = dh;
       presented_ = false;
@@ -429,6 +552,7 @@ class Viewer {
   }
 
   void present() {
+    if (opt_.metal) return presentMetal();
     if (opt_.gpu) {
       // Full repaint every frame: the default framebuffer is not preserved
       // across swaps.
@@ -619,6 +743,14 @@ class Viewer {
   JsuiGpuContext* gpu_ = nullptr;
   ViewerGL gl_;
   int stencilBits_ = 0;
+#if VIEWER_METAL
+  SDL_MetalView metalView_ = nullptr;
+  void* metalLayer_ = nullptr;  // CAMetalLayer
+  void* mtlDevice_ = nullptr;   // id<MTLDevice>
+  void* mtlQueue_ = nullptr;    // id<MTLCommandQueue>
+  void* mtlTexture_ = nullptr;  // id<MTLTexture>, the retained frame
+  bool mtlFresh_ = true;        // mtlTexture_ holds no frame yet
+#endif
   bool presented_ = false;
   SDL_BlendMode premul_ = SDL_BLENDMODE_BLEND;
   JsuiRuntime* rt_ = nullptr;

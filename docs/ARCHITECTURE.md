@@ -233,10 +233,10 @@ target. Which one a host uses:
 
 | Backend | Skia | C API | CMake option | Used by |
 | --- | --- | --- | --- | --- |
-| OpenGL / GLES / WebGL | Ganesh | `jsui_gpu_create_gl`, `jsui_render_gl[_target]` | `JSUI_GPU` | jsui-viewer, raylib, sokol off macOS, SDL3 on GL, Rust / Go examples, Android (GLES 3), the browser's WebGL fallback |
+| OpenGL / GLES / WebGL | Ganesh | `jsui_gpu_create_gl`, `jsui_render_gl[_target]` | `JSUI_GPU` | jsui-viewer (off macOS, or `--gl`), raylib, sokol off macOS, SDL3 on GL, Rust / Go examples, Android (GLES 3), the browser's WebGL fallback |
 | Browser WebGPU | Graphite (Dawn backend on Emdawnwebgpu) | `jsui_gpu_create_webgpu`, `jsui_render_webgpu[_target]` | `JSUI_WEBGPU` | the web host's first choice |
 | Vulkan | Graphite | `jsui_gpu_create_vulkan`, `jsui_render_gpu_target` | `JSUI_VULKAN` | Godot, Unity, Unreal and SDL3 on Linux, and on Windows when the engine runs on Vulkan |
-| Metal (desktop) | Graphite | `jsui_gpu_create_metal`, `jsui_render_gpu_target` | `JSUI_GRAPHITE_METAL` | Godot, Unity, Unreal, SDL3 and sokol on macOS |
+| Metal (desktop) | Graphite | `jsui_gpu_create_metal`, `jsui_render_gpu_target` | `JSUI_GRAPHITE_METAL` | Godot, Unity, Unreal, SDL3, sokol and jsui-viewer on macOS |
 | Metal (iOS) | Ganesh | `jsui_metal_create`, `jsui_render_metal` | `JSUI_METAL` | the iOS example |
 | Direct3D 12 / 11 | Ganesh on D3D12 | `jsui_gpu_create_d3d12` / `_d3d11`, `jsui_render_gpu_target` | `JSUI_D3D` | Godot, Unity and Unreal on Windows |
 | Dawn native | Graphite | `jsui_gpu_create_dawn_procs`, `jsui_render_gpu_target` | `JSUI_GRAPHITE_DAWN` | Godot's `webgpu` driver on the godot-aw3 fork |
@@ -328,7 +328,10 @@ jsui_render_gl_target(rt, gpu, &t);
   window's default framebuffer (`--screenshot` reads it back, and fails if
   the frame is blank); if the GL window, GL context or Skia GPU context
   cannot be created it prints a warning and uses the CPU raster + SDL
-  texture. `--cpu` forces the CPU path, `--gpu` is accepted as a no-op
+  texture. On macOS with a `JSUI_GRAPHITE_METAL` library it uses Skia
+  Graphite on Metal instead (falling back to GL): the frame is painted
+  incrementally into a retained texture that is blitted into the window's
+  CAMetalLayer; `--gl` picks GL. `--cpu` forces the CPU path, `--gpu` is accepted as a no-op
   alias. `jsui-render` / `jsui-record` stay CPU (deterministic output).
   On macOS it asks SDL for a 3.2 core, forward-compatible
   profile (`--gl-core`, default there): the default legacy 2.1 context only
@@ -2452,7 +2455,8 @@ skparagraph's asset font manager and Skottie's. Fonts are runtime-wide.
   `tools/jsui-viewer` downloads SDL 2.30.12 (SHA-256 checked) and links it
   statically; `-DJSUI_BUILD_VIEWER=OFF` skips it, `-DJSUI_SDL_DIR=` uses a
   local SDL2 source tree, and a failed download only skips the viewer.
-  `jsui-viewer [--dev] [--cpu | --gl-core] [--width W --height H] [--js-thread on|off|lockstep] <bundle path or URL>`; F5
+  `jsui-viewer [--dev] [--cpu | --gl | --gl-core] [--width W --height H] [--js-thread on|off|lockstep] [--state key=json] <bundle path or URL>`
+  (`--state` sets host state before the bundle loads); F5
   reloads, F6 cycles the JS thread mode (on by default), F7 stalls JS for 200 ms; `--frames N --screenshot out.png` runs headless (GPU by default,
   which needs a GL-capable display, e.g. `xvfb-run` with Mesa; `--cpu` with
   `SDL_VIDEODRIVER=dummy`). `-DJSUI_GPU=OFF` builds without the GPU backend.
@@ -2555,7 +2559,7 @@ walks through the pattern.
 
 | Host | Where | Rendering |
 | --- | --- | --- |
-| Native viewer | `tools/jsui-viewer` (SDL2) | Ganesh GL, CPU fallback |
+| Native viewer | `tools/jsui-viewer` (SDL2) | Graphite Metal on macOS (with `JSUI_GRAPHITE_METAL`), Ganesh GL, CPU fallback |
 | Browser | `web/` (`@orktes/jsui-web`), [web/README.md](../web/README.md) | WebGPU → WebGL → CPU; on the main thread or in a worker |
 | CLI / Node | `packages/cli` (`@orktes/jsui-cli`), [README](../packages/cli/README.md) | CPU raster of the WASM module (deterministic) |
 | Godot 4 | [integrations/godot](../integrations/godot/README.md) (GDExtension, `JsuiView`) | Graphite on Godot's Vulkan / Metal device, Ganesh D3D12, Dawn on the godot-aw3 fork |
