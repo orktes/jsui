@@ -1241,6 +1241,11 @@ class CanvasView extends DomView {
     if (!gpu) return null;
     const queued = this.pipelineStats()?.queued ?? 0;
     const warm = this._warmBrowserCache(gpu);
+    // A browser whose caches already hold these pipelines answers every
+    // warm-up at once; a cold one takes seconds (pipelineCacheWarm()).
+    this._cacheWarm ??= warm.length
+      ? Promise.race([Promise.all(warm).then(() => true), new Promise((r) => setTimeout(() => r(false), 250))])
+      : null;
     // The warm-ups also cover the pipelines the context has already: the
     // i-th queued one is at most that many places further on.
     const done = this._createWarmed(gpu, warm, batch, Math.max(0, warm.length - queued));
@@ -2090,7 +2095,8 @@ class JsuiHost extends CanvasView {
     // Without a canvas the main surface is not shown (a page of createSurface() widgets).
     if (canvas) this._initView(this._mode, this._webgpu);
     if (opts.gamepads !== false) this._installGamepads();
-    this._pipelinesReady = this._loadPipelines(opts);
+    this._pipelinesQueued = new Promise((r) => { this._queuedDone = r; });
+    this._pipelinesReady = this._loadPipelines(opts).finally(() => this._queuedDone());
 
     if (opts.bundleSource != null) this.loadSource(opts.bundleSource, this._bundleUrl ?? 'bundle.js');
     else if (this._bundleUrl) this.loadUrl(this._bundleUrl);
@@ -2403,6 +2409,15 @@ class JsuiHost extends CanvasView {
    * rest is then built one per frame. */
   whenPipelinesReady() { return this._pipelinesReady; }
 
+  /** Whether the browser's shader caches already held the pipelines of
+   * createJsui's lists (all compiled within 250 ms of asking): true, false,
+   * or null without lists or WebGPU. A warm-up (beginWarmup) can be skipped
+   * when true: what it would compile is most likely cached too. */
+  async pipelineCacheWarm() {
+    await this._pipelinesQueued;
+    return (await this._cacheWarm) ?? null;
+  }
+
   // createJsui({ pipelines, rememberPipelines, pipelineKey, pipelineTimeout }):
   // queues the shipped list and the one remembered from this browser's
   // earlier visits, builds them, then keeps the remembered list up to date.
@@ -2422,7 +2437,9 @@ class JsuiHost extends CanvasView {
       if (list && this.addPipelines(list) < 0) this._log(1, 'pipelines: a list of another JSUI build, skipped');
     }
     if (remember) this._rememberPipelines(key);
-    return this.precompilePipelines({ timeoutMs: opts.pipelineTimeout ?? 5000 });
+    const ready = this.precompilePipelines({ timeoutMs: opts.pipelineTimeout ?? 5000 });
+    this._queuedDone();
+    return ready;
   }
 
   // Saves the pipelines this browser built (savePipelines) under `key` when

@@ -218,10 +218,16 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
           introPending = playIntro(jsui);
           // On WebGPU the intro's warm-up frames go to jsui.beginWarmup(): the
           // browser compiles every pipeline they need in parallel, under the
-          // splash; 'warmed' then waits for that and the pipeline lists.
-          Promise.resolve(introPending && jsui.beginWarmup()).then((warm) => {
-            jsui.postMessage('intro', { play: introPending, warm: !!warm, hold: /^0\.\d+$/.test(q.get('intro')) ? +q.get('intro') : undefined });
-          });
+          // splash; 'warmed' then waits for that and the pipeline lists. Not
+          // when the browser's caches already held the pipeline list (a
+          // repeat visit): the intro's own pipelines are most likely cached
+          // too, and the warm-up would only hold the splash ~300 ms longer.
+          const answer = async () => {
+            const cached = introPending && (await Promise.resolve(jsui.pipelineCacheWarm()).catch(() => null)) === true;
+            const warm = introPending && !cached && !!(await jsui.beginWarmup());
+            jsui.postMessage('intro', { play: introPending, warm, cached, hold: /^0\.\d+$/.test(q.get('intro')) ? +q.get('intro') : undefined });
+          };
+          answer();
         } else if (name === 'intro') {
           if (data.state === 'warmed') {
             const go = () => jsui.postMessage('intro', { go: true });

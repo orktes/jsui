@@ -446,6 +446,9 @@ export function Intro({ p }) {
       if (ended.current) return;
       const res = compileShader(INTRO_SHADER);
       if (res.error) return finish();
+      // The browser's caches already hold the site's pipelines (the page
+      // says so): play right away.
+      if (data.cached) return play(data);
       setPhase('warm');
       // One timeline point per frame (requestAnimationFrame callbacks run
       // before the frame paints).
