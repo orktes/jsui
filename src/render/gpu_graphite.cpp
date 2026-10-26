@@ -654,6 +654,12 @@ JsuiGpuContext* createVulkan(const JsuiVulkanDevice& d) {
 
   graphite::ContextOptions opts;
   g->configure(opts);
+  // MoltenVK (Apple's vendor ID: macOS, and the Android emulator on Apple
+  // silicon, whose gfxstream Vulkan runs on it): Graphite's internal MSAA
+  // loads garbage into scissored passes that repaint part of a retained
+  // target (incremental frames). Paths go through the atlas instead, as on
+  // browser WebGPU.
+  if (props.vendorID == 0x106B) opts.fInternalMultisampleCount = graphite::SampleCount::k1;
   // The driver's pipeline cache of an earlier launch on this device and
   // driver (driver_cache.h), read by Graphite while it makes the context.
   jsui::driver_cache::DeviceId id;

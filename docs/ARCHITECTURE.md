@@ -233,9 +233,9 @@ target. Which one a host uses:
 
 | Backend | Skia | C API | CMake option | Used by |
 | --- | --- | --- | --- | --- |
-| OpenGL / GLES / WebGL | Ganesh | `jsui_gpu_create_gl`, `jsui_render_gl[_target]` | `JSUI_GPU` | jsui-viewer (off macOS, or `--gl`), raylib, sokol off macOS, SDL3 on GL, Rust / Go examples, Android (GLES 3), the browser's WebGL fallback |
+| OpenGL / GLES / WebGL | Ganesh | `jsui_gpu_create_gl`, `jsui_render_gl[_target]` | `JSUI_GPU` | jsui-viewer (off macOS, or `--gl`), raylib, sokol off macOS, SDL3 on GL, Rust / Go examples, Android without usable Vulkan (GLES 3), the browser's WebGL fallback |
 | Browser WebGPU | Graphite (Dawn backend on Emdawnwebgpu) | `jsui_gpu_create_webgpu`, `jsui_render_webgpu[_target]` | `JSUI_WEBGPU` | the web host's first choice |
-| Vulkan | Graphite | `jsui_gpu_create_vulkan`, `jsui_render_gpu_target` | `JSUI_VULKAN` | Godot, Unity, Unreal and SDL3 on Linux, and on Windows when the engine runs on Vulkan |
+| Vulkan | Graphite | `jsui_gpu_create_vulkan`, `jsui_render_gpu_target` | `JSUI_VULKAN` | Godot, Unity, Unreal and SDL3 on Linux, and on Windows when the engine runs on Vulkan; Android |
 | Metal (desktop) | Graphite | `jsui_gpu_create_metal`, `jsui_render_gpu_target` | `JSUI_GRAPHITE_METAL` | Godot, Unity, Unreal, SDL3, sokol and jsui-viewer on macOS |
 | Metal (iOS) | Ganesh | `jsui_metal_create`, `jsui_render_metal` | `JSUI_METAL` | the iOS example |
 | Direct3D 12 / 11 | Ganesh on D3D12 | `jsui_gpu_create_d3d12` / `_d3d11`, `jsui_render_gpu_target` | `JSUI_D3D` | Godot, Unity and Unreal on Windows |
@@ -2779,7 +2779,7 @@ walks through the pattern.
 | Unity 6 | [integrations/unity](../integrations/unity/README.md) (`com.orktes.jsui`) | Graphite Metal / Vulkan, Ganesh D3D11 / D3D12 |
 | Unreal Engine 5 | [integrations/unreal](../integrations/unreal/README.md) (`UJsuiWidget` / `SJsuiView`) | Graphite Metal / Vulkan, Ganesh D3D12 / D3D11 |
 | raylib, SDL3, sokol | [integrations/raylib](../integrations/raylib/README.md), [sdl3](../integrations/sdl3/README.md), [sokol](../integrations/sokol/README.md) | Ganesh GL (SDL3: Graphite on Metal / Vulkan; sokol: Graphite on Metal on macOS) |
-| Android | [integrations/android](../integrations/android/README.md) (NDK NativeActivity) | Ganesh on GLES 3 |
+| Android | [integrations/android](../integrations/android/README.md) (NDK NativeActivity) | Graphite on Vulkan, Ganesh on GLES 3 as the fallback |
 | iOS | [integrations/ios](../integrations/ios/README.md) (UIKit) | Ganesh on Metal |
 | Rust, Go | [bindings/](../bindings/README.md) over `libjsui` | Ganesh GL (GLFW window) |
 

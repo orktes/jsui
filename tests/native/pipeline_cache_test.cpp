@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "jsui/jsui.h"
 #include "render/pipeline_cache.h"
 #include "test.h"
 
@@ -284,4 +285,23 @@ TEST(pipeline_cache_lists) {
   pc.onPipelineAdded("listed", false, k1.data(), k1.size());
   CHECK_EQ(pc.stats().added, uint64_t(0));
   CHECK_EQ(pc.stats().compiled, uint64_t(1));
+}
+
+// jsui_set_cache_dir: the default files go into the host's directory (made
+// when missing), back to the platform's with "".
+TEST(pipeline_cache_host_cache_dir) {
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "jsui-cache-dir-test";
+  fs::remove_all(dir);
+  jsui_set_cache_dir(dir.string().c_str());
+  std::string file = cacheFile("pipelines", "vulkan");
+  CHECK(!file.empty());
+  CHECK(fs::path(file).parent_path() == dir);
+  CHECK(fs::is_directory(dir));
+  CHECK(fs::path(file).filename().string().rfind("pipelines-", 0) == 0);
+  jsui_set_cache_dir((dir.string() + "/").c_str());  // a trailing separator is fine
+  CHECK(fs::path(cacheFile("pipelines", "vulkan")).parent_path() == dir);
+  jsui_set_cache_dir(nullptr);
+  CHECK(cacheFile("pipelines", "vulkan").find("jsui-cache-dir-test") == std::string::npos);
+  fs::remove_all(dir);
 }
