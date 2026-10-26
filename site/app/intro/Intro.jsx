@@ -433,11 +433,16 @@ export function Intro({ p }) {
 
   // The page's go-ahead after the warm-up (when it asked for one).
   const go = useRef(null);
+  const earlyGo = useRef(false);
   useHostMessage('intro', (data) => {
     if (data && data.go) {
+      // After 'warmed', or during the warm-up: then it stops early (the
+      // browser's caches turned out warm).
       const start = go.current;
       go.current = null;
-      return start && start();
+      if (start) return start();
+      earlyGo.current = true;
+      return;
     }
     if (phase !== 'wait' || ended.current || answered.current) return;
     answered.current = true;
@@ -446,21 +451,18 @@ export function Intro({ p }) {
       if (ended.current) return;
       const res = compileShader(INTRO_SHADER);
       if (res.error) return finish();
-      // The browser's caches already hold the site's pipelines (the page
-      // says so): play right away.
-      if (data.cached) return play(data);
       setPhase('warm');
       // One timeline point per frame (requestAnimationFrame callbacks run
       // before the frame paints).
       let step = 0;
       const next = () => {
         if (ended.current) return;
-        if (step < WARM_STEPS) {
+        if (step < WARM_STEPS && !earlyGo.current) {
           p.setValue(0.04 + (0.9 * step++) / (WARM_STEPS - 1));
           return requestAnimationFrame(next);
         }
         p.setValue(0);
-        if (!data.warm) return play(data);
+        if (!data.warm || earlyGo.current) return play(data);
         // The page compiles what the warm-up drew, then says go.
         go.current = () => !ended.current && play(data);
         Host.postMessage('intro', { state: 'warmed' });
