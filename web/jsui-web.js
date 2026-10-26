@@ -877,6 +877,11 @@ class DomView {
     sink.setAttribute('autocomplete', 'off');
     sink.setAttribute('autocapitalize', 'off');
     sink.setAttribute('spellcheck', 'false');
+    // No on-screen keyboard for the sink: touch never focuses it, but iOS
+    // Safari restores focus to it when the page comes back (bfcache, tab
+    // switch) and would pop the keyboard up with nothing to type into.
+    // Hardware keyboards and IMEs still deliver keys and text.
+    sink.setAttribute('inputmode', 'none');
     sink.tabIndex = 0;
     Object.assign(sink.style, { position: 'fixed', left: '0px', top: '0px', width: '1px', height: '1px',
       opacity: '0', padding: '0', border: '0', margin: '0', resize: 'none', overflow: 'hidden',
@@ -935,6 +940,23 @@ class DomView {
       this._inLeave();
       this._hostOf()._releasePads();
     }, opt);
+    // Leaving the page (bfcache, tab switch) drops the sink's focus so the
+    // browser has nothing to restore when the page returns; it comes back
+    // only where focusing it can't raise a virtual keyboard (a fine pointer).
+    let refocus = false;
+    const leave = () => {
+      if (document.activeElement !== sink) return;
+      refocus = true;
+      sink.blur();
+    };
+    const back = () => {
+      if (!refocus) return;
+      refocus = false;
+      if (!matchMedia('(pointer: coarse)').matches && document.activeElement === document.body) focusSink();
+    };
+    addEventListener('pagehide', leave, opt);
+    addEventListener('pageshow', back, opt);
+    document.addEventListener('visibilitychange', () => (document.hidden ? leave() : back()), opt);
     if (this.opts.autoFocus ?? !this.opts.passThrough) focusSink();
   }
 
