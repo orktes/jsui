@@ -3224,12 +3224,21 @@ the expensive per-pixel work is done once:
   drops its children's) and an axis-aligned device matrix (scale,
   translation, quarter turns) is sure to cover, its border box inside the
   rounded corners' arcs, cut by the clips in the subtree (inside their
-  rounded corners too), rounded inwards to whole pixels. One that a later
-  one contains is dropped. Unchanged subtrees keep theirs with their
-  records, so it costs nothing beyond the nodes the update walks anyway,
-  and the root's list is the frame's. A paint (each damage rect's pass)
-  takes those of the root's that reach its damage; with none it does no
-  per-node work (`PaintStats::occluders`). Walking in paint order it marks
+  rounded corners too), rounded inwards to whole pixels. Only large ones
+  count (at least 65536 device pixels, or an eighth of a smaller canvas;
+  `tMinOccluderArea`): a small opaque button or badge cannot save more
+  than the checks it costs every node painted before it, so screens made of
+  them pay nothing. One that a later one contains is dropped, and one with
+  nothing painted before it overlapping it (a screen's own opaque
+  background) is marked so and never used. Records keep a list only when
+  they have one (`OccList`), and a node works out its own rect only when
+  its background is opaque and large enough, its children's only when one
+  has some. Unchanged subtrees keep theirs with their records, so it costs
+  nothing beyond the nodes the update walks anyway, and the root's list is
+  the frame's. A paint (each damage rect's pass) takes those of the root's
+  that reach its damage and are at least a tenth of its area; with none it
+  does no per-node work (`PaintStats::occluders`), and once all are reached
+  it stops checking. Walking in paint order it marks
   each one reached when it gets to it or skips the subtree holding it (culled,
   covered, drawn from a texture, in the static backdrop), and `paintNode`
   skips a subtree whose `subtree` bounds lie inside one not reached and not
