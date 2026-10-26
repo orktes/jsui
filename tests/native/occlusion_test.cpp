@@ -1,7 +1,7 @@
 // Occlusion culling (painter.cpp, Occlusion): what a later opaque node
-// covers is not painted. Every frame must equal a full repaint without
-// culling (setOcclusionCulling(false)): full repaints with culling to the
-// bit, incremental ones as render_incremental_* compares them.
+// covers is not painted. Every frame, full or damage-only into a retained
+// buffer, must equal the same paint without culling
+// (setOcclusionCulling(false)) to the bit.
 #include <string>
 #include <vector>
 
@@ -39,59 +39,77 @@ std::string hud() {
          rows + "]}";
 }
 
-// Paints the scene three ways and compares: incrementally with culling (the
-// retained buffer `inc`, painted last frame), fully with culling, fully
-// without (the reference). Returns the stats of the incremental frame.
+// Paints each frame four ways, from one updateDamage: into two retained
+// buffers, only the damage, with and without culling, and fully with and
+// without culling. With culling must equal without, to the bit, on every
+// platform: the same draws under the same clip, less those whose pixels
+// the occluder replaces. The retained buffers are never repainted fully,
+// so damage lost under a cover that moved away would stay in `incOn`.
+// (Damage-only frames against full ones are render_incremental_*'s
+// subject; on macOS arm64 they differ by a level on edge pixels.)
 struct Checker {
   Scene& s;
-  std::vector<uint32_t> inc, on, off;
+  std::vector<uint32_t> incOn, incOff, on, off;
   int step = 0;
-  bool failed = false;
+  PaintStats lastInc;   // the incremental frame with culling
+  PaintStats lastFull;  // the full repaint with culling
   explicit Checker(Scene& sc) : s(sc) {
     size_t n = size_t(s.dw()) * s.dh();
-    inc.assign(n, 0);
+    incOn.assign(n, 0);
+    incOff.assign(n, 0);
     on.assign(n, 0);
     off.assign(n, 0);
+    // The retained buffers start from a full frame (the scene was rendered).
+    paint(incOn, nullptr, true);
+    paint(incOff, nullptr, false);
   }
   static size_t diff(const std::vector<uint32_t>& a, const std::vector<uint32_t>& b) {
     size_t d = 0;
     for (size_t i = 0; i < a.size(); i++) d += a[i] != b[i];
     return d;
   }
-  PaintStats frame(const char* what) {
+  // As Surface's retained-buffer path: clip to the damage, clear, paint.
+  PaintStats paint(std::vector<uint32_t>& px, const SkRegion* damage, bool cull) {
     const int w = s.dw(), h = s.dh();
-    const size_t rb = size_t(w) * 4;
-    s.doc().layout();
-    s.rt->renderIncremental(inc.data(), w, h, rb);
-    PaintStats st = lastPaintStats(s.doc());
-    s.rt->render(on.data(), w, h, rb);
-    PaintStats full = lastPaintStats(s.doc());
-    setOcclusionCulling(false);
-    s.rt->render(off.data(), w, h, rb);
-    CHECK_EQ(lastPaintStats(s.doc()).nodesOccluded, 0);
+    SkImageInfo info = SkImageInfo::Make(w, h, kRGBA_8888_SkColorType, kPremul_SkAlphaType);
+    SkSurfaceProps props = surfaceProps();
+    auto surface = SkSurfaces::WrapPixels(info, px.data(), size_t(w) * 4, &props);
+    SkCanvas* c = surface->getCanvas();
+    setOcclusionCulling(cull);
+    c->save();
+    if (damage) c->clipRegion(*damage);
+    c->clear(SK_ColorTRANSPARENT);
+    paintDocument(s.doc(), c, damage);
+    c->restore();
     setOcclusionCulling(true);
-    size_t dFull = diff(on, off);
-    rtest::PixelDiff dInc = rtest::pixelDiff(inc, off);
-    if (dFull || !rtest::matchesFull(dInc, inc.size())) {
-      std::fprintf(stderr, "  step %d (%s): full repaint %zu pixels differ, incremental %zu (max %d)\n", step, what, dFull,
-                   dInc.count, dInc.max);
+    return lastPaintStats(s.doc());
+  }
+  void frame(const char* what) {
+    s.doc().layout();
+    SkRegion damage = updateDamage(s.doc(), s.dw(), s.dh());
+    lastInc = PaintStats{};
+    if (!damage.isEmpty()) {
+      lastInc = paint(incOn, &damage, true);
+      CHECK_EQ(paint(incOff, &damage, false).nodesOccluded, 0);
+    }
+    lastFull = paint(on, nullptr, true);
+    CHECK_EQ(paint(off, nullptr, false).nodesOccluded, 0);
+    size_t dFull = diff(on, off), dInc = diff(incOn, incOff);
+    if (dFull || dInc) {
+      std::fprintf(stderr, "  step %d (%s): %zu pixels differ in the full repaint, %zu in the retained buffer\n", step,
+                   what, dFull, dInc);
+      const int w = s.dw();
       for (size_t i = 0, shown = 0; i < on.size() && shown < 4; i++)
-        if (on[i] != off[i] || inc[i] != off[i]) {
-          std::fprintf(stderr, "    (%d,%d) full %08x inc %08x reference %08x\n", int(i % w), int(i / w), on[i], inc[i],
-                       off[i]);
+        if (on[i] != off[i] || incOn[i] != incOff[i]) {
+          std::fprintf(stderr, "    (%d,%d) full %08x / %08x, retained %08x / %08x (with / without culling)\n",
+                       int(i % w), int(i / w), on[i], off[i], incOn[i], incOff[i]);
           shown++;
         }
-      failed = true;
     }
     CHECK_EQ(dFull, size_t(0));
-    CHECK(rtest::matchesFull(dInc, inc.size()));
-    // render() painted elsewhere: bring `inc` back in step (a full repaint).
-    s.rt->renderIncremental(inc.data(), w, h, rb);
+    CHECK_EQ(dInc, size_t(0));
     step++;
-    lastFull = full;
-    return st;
   }
-  PaintStats lastFull;  // the full repaint with culling of the last frame
 };
 
 }  // namespace
@@ -121,8 +139,8 @@ TEST(occlusion_modal_over_content) {
   // A row under the card changes: damaged, but covered.
   Node* row = bg->children()[2];
   patch(row->children()[0], R"J({"backgroundColor":"#ff0000"})J");
-  PaintStats st = c.frame("change under the card");
-  CHECK(st.nodesOccluded > 0);
+  c.frame("change under the card");
+  CHECK(c.lastInc.nodesOccluded > 0);
   row->children()[1]->children()[0]->setText("Row 2 changed");
   c.frame("text under the card");
   // The card moves partly off the rows, then away: what it covered repaints.
@@ -135,7 +153,7 @@ TEST(occlusion_modal_over_content) {
   patch(row->children()[0], R"J({"backgroundColor":"#00ff00"})J");
   c.frame("change, uncovered");
   patch(modal, R"J({"display":"flex","left":8})J");
-  st = c.frame("card opens");
+  c.frame("card opens");
   CHECK(c.lastFull.nodesOccluded > 0);
 }
 
