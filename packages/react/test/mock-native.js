@@ -23,7 +23,7 @@ function detach(n) {
   }
 }
 
-const TYPES = new Set(['View', 'Text', 'RawText', 'Image', 'ScrollView', 'TextInput', 'LottieView', 'ShaderView']);
+const TYPES = new Set(['View', 'Text', 'RawText', 'Image', 'ScrollView', 'TextInput', 'LottieView', 'ShaderView', 'VectorView']);
 
 const mockResolve = (url) => (/^[a-z]+:/.test(url) ? url : 'http://bundle/' + url.replace(/^\.\//, ''));
 

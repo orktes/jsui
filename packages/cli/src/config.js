@@ -24,6 +24,9 @@ const SHIMS = {
   'lottie-react-native': 'lottie-react-native',
   'expo-font': 'expo-font',
   'react-native-worklets': 'react-native-worklets',
+  'react-native-svg': 'react-native-svg',
+  'react-native-svg/css': 'react-native-svg',
+  '@shopify/react-native-skia': 'react-native-skia',
 };
 
 // These must resolve to the single copy @orktes/jsui-react was built against, or

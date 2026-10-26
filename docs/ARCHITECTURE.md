@@ -1245,6 +1245,63 @@ paints a view, on every renderer (the CPU raster runs SkSL too):
   and the GPU backends use them), so ShaderView adds almost nothing to
   `jsui.wasm`.
 
+### Vector drawing (Svg, Canvas)
+
+`react-native-svg` and `@shopify/react-native-skia` work unchanged (the CLI
+aliases both, plus `react-native-svg/css`, to `@orktes/jsui-react/svg` and
+`@orktes/jsui-react/skia`). Both are one host node, `VectorView`
+(`NodeType::Vector`, render/vector_view.h), per `<Svg>` / `<Canvas>`:
+
+* **JS side** (packages/react/src/vector/host.js): inside a VectorView the
+  reconciler switches to a drawing host context. `<Circle>`, `<G>`,
+  `<LinearGradient>`, `<Blur>`... create `DrawNode`s (strings: `DrawText`)
+  that never reach the bridge; custom components, hooks, keys and
+  conditional rendering inside work as anywhere else. A commit that touched
+  any of them marks the owning `VectorHost` dirty and `resetAfterCommit`
+  serializes its subtree once (`registerSerializer('svg' | 'skia')`, in
+  svg.js / skia.js) into the `commands` prop: one `setProps` per changed
+  view per commit. SVG references (`url(#id)` gradients with `href`
+  inheritance, `clipPath`, `mask`, `<Use>` / `<Symbol>`, percentages
+  against the viewBox, string / array / prop transforms) are resolved there;
+  Skia's effect children (shaders, mask / image / color filters, path
+  effects, extra `<Paint>`s, `layer`, `<Mask>`) are folded into their
+  parent's paint.
+* **Native side**: `vector::propsChanged` parses `commands` into an element
+  tree (paths from SVG strings via `SkParsePath`) cached in the node's
+  `imageCache`, re-parsed only when the value differs. `vector::paint`
+  walks it into the content box (clipped like `overflow: hidden`) with
+  core Skia only (`SkPath`, `SkPaint`, `SkShaders`, `SkImageFilters`, path
+  effects incl. `SkTrimPathEffect`; no SVG / Paragraph module), so every
+  backend and the CPU raster draw it the same. Text runs use the font
+  collection (`drawSimpleText`, `textAnchor`, `letterSpacing`), images the
+  `ImageCache`, `<Shader>` the `ShaderEffects` sources of ShaderView. It
+  builds against the aseprite m124 prebuilt and m157 (gradient / dash APIs
+  switch on `__has_include(SkGradient.h)`).
+* **Semantics** follow the mode: `svg` inherits fill / stroke / font
+  props, `opacity` on a group is one layer, rotations are degrees,
+  `currentColor` comes from `color`; `skia` inherits the paint (`color`,
+  `style`, `strokeWidth`, `blendMode`...), `opacity` multiplies, rotations
+  are radians, `origin` pivots transforms.
+* **Animated**: a drawing element given Animated values (directly, in its
+  `transform`, or via `Animated.createAnimatedComponent(Circle)`) gets a key
+  `k`; the values are style keys `draw:<k>.<prop>` on the VectorView, a
+  paint-only style group (`kGroupDraw`). The JS driver writes them with
+  `patchStyle`, the native driver connects its props node to the
+  VectorView, so a running animation neither renders React nor re-parses
+  commands; only the view's rect is damaged. Animated values nested deeper
+  (uniform objects, gradient colors) re-render the element (JS driver).
+* **Not supported** (accepted, not drawn; most warn once): SVG filters
+  (`<Filter>`, `fe*`), `<Pattern>`, `<Marker>`, `<ForeignObject>`,
+  per-shape touch events (`<TextPath>` draws its text without the path);
+  Skia `Paragraph`, `Glyphs`, `TextPath`, `TextBlob`, `Picture`, `Atlas`,
+  `Vertices`, `Patch`, `Box` / `BoxShadow`, backdrop filters, path ops,
+  `makeImageSnapshot`, Reanimated shared values.
+  `Skia.Font` measures approximately (the real font is matched natively).
+* Cost: about +38 KB of native code (`jsui-render` text, Release).
+  Tests: tests/native/vector_test.cpp, react_vector_e2e_test.cpp,
+  packages/react/test/vector.test.js, reference case
+  examples/features/svg.jsx (Chromium parity).
+
 ### Audio
 
 The UI asks for sounds; the host plays them (`src/audio/`,
@@ -1268,7 +1325,7 @@ Native globals (installed by `JsEngine`):
 | --- | --- |
 | `__jsui_native.rootId` | id of the root container node |
 | `__jsui_native.devMode` | `true` when the runtime runs with `cfg.dev_mode` |
-| `createNode(type, rootTag?) → id` | `type` ∈ `View`, `Text`, `RawText`, `Image`, `ScrollView`, `TextInput`, `LottieView`, `ShaderView`; created in the document of surface `rootTag` (default: the main one; see "Surfaces"). The id is taken at once; the node exists natively when the command is applied (see "Command buffer") |
+| `createNode(type, rootTag?) → id` | `type` ∈ `View`, `Text`, `RawText`, `Image`, `ScrollView`, `TextInput`, `LottieView`, `ShaderView`, `VectorView`; created in the document of surface `rootTag` (default: the main one; see "Surfaces"). The id is taken at once; the node exists natively when the command is applied (see "Command buffer") |
 | `viewport(rootTag?) → {width, height, scale}` | logical size of a surface (default: the main one) |
 | `surfaceApp(rootTag) → {appKey, initialProps} \| null` | the app the host picked for a surface |
 | `updateProps(id, reactProps, hidden, keepStyle?)` / `getProps(id)` | the host config's prop path, done natively: builds what native sees from the React props (event handlers → `__events`, the responder hints `__blocksNative` / `__keepsGesture` and `__passive` (see "Input routing details"), flattened style, `pointerEvents` / hidden into it) and diffs it in `Node::setProps` (see "Performance: Props"); `getProps` returns what native holds (the inspector reads it). `keepStyle` (`setNativeProps` of non-style props; `updatePropsKeepsStyle: true` says the runtime has it): `reactProps.style` is ignored and the node keeps the style it has when the command is applied, `patchStyle` and native Animated writes included. The host JS engine has neither (`@orktes/jsui-react` then diffs in JS and calls `setProps`) |
