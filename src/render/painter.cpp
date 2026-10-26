@@ -2975,11 +2975,15 @@ bool startBlitScan(Node* n, const NodeRecord* rec, const SkMatrix& m, float w, f
 // however much of the frame it covers (the retained frame equals a full
 // repaint), the state follows the damage only, never what was painted: a
 // subtree is drawn from its texture once damage reached it in two
-// consecutive damaged frames, its stamp unchanged in the second (a one-off
+// consecutive damaged frames with its stamp unchanged in both (a one-off
 // repaint does not pay for a texture; a row of a scrolling list that just
 // changed, entering the viewport or hovered, is drawn from one from the
-// next frame on), until its stamp changes or no damage reached it for a
-// while, and it is repainted whole whenever that switches.
+// second frame after on), until its stamp changes or no damage reached it
+// for a while, and it is repainted whole whenever that switches. Frames
+// that changed it do not count: the ancestors of a card whose hover
+// transition just settled (damage reached them in every frame of it) would
+// otherwise switch on in the settling frame, a repaint of most of the
+// screen, and off again with the next hover, another one.
 constexpr uint32_t kRasterMinNodes = 4;
 constexpr uint32_t kRasterIdleFrames = 120;  // damaged frames without reaching it
 thread_local std::vector<NodeRecord*>* tRasterCandidates = nullptr;
@@ -3026,8 +3030,8 @@ void updateRasterCache(RootRecord* root, SkRegion* damage, const SkIRect& screen
       damage->op(rec->rasterBounds, SkRegion::kUnion_Op);
       rec->rasterOn = on;
     }
-    // A frame that changed it counts: damage reached it then too.
-    if (!eligible) rec->rasterHits = 0;
+    // Only damage that reached it unchanged counts.
+    if (!stable) rec->rasterHits = 0;
     rec->rasterBounds = on ? rec->subtree : SkIRect::MakeEmpty();
   }
 }
