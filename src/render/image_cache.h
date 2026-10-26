@@ -52,8 +52,13 @@ class ImageCache {
   // Decodes handed to the pool and not yet published (jsui_pending_loads
   // counts them: headless hosts wait for them like for loads).
   int pendingDecodes() const { return decoding_; }
-  // Blocks until the pool is idle, then publishes (tests).
+  // Tests. waitDecodes blocks until the pool is idle (decoded images still
+  // wait for a tick to publish them); finishDecodes then publishes them.
+  // holdDecodes(true) keeps queued decodes from starting until released, so
+  // a test can look at the frames before an image lands.
+  void waitDecodes();
   void finishDecodes();
+  void holdDecodes(bool on);
   // Images of at least this many pixels decode on the pool; smaller ones
   // (icons) inline, where handing over would only cost a frame of pop-in.
   // No pool on the web: there everything decodes inline.

@@ -117,16 +117,25 @@ struct ImageCache::Pool {
     std::lock_guard<std::mutex> lock(mutex_);
     out->swap(done_);
   }
+  // Until nothing runs and nothing queued can run.
   void waitIdle() {
     std::unique_lock<std::mutex> lock(mutex_);
-    idle_.wait(lock, [this] { return jobs_.empty() && running_ == 0; });
+    idle_.wait(lock, [this] { return running_ == 0 && (jobs_.empty() || held_); });
+  }
+  void hold(bool on) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      held_ = on;
+    }
+    cv_.notify_all();
+    idle_.notify_all();
   }
 
  private:
   void run() {
     std::unique_lock<std::mutex> lock(mutex_);
     for (;;) {
-      cv_.wait(lock, [this] { return stopping_ || !jobs_.empty(); });
+      cv_.wait(lock, [this] { return stopping_ || (!held_ && !jobs_.empty()); });
       if (stopping_) return;  // queued jobs die with the cache
       Job job = std::move(jobs_.front());
       jobs_.pop_front();
@@ -139,7 +148,7 @@ struct ImageCache::Pool {
       lock.lock();
       done_.push_back({std::move(job.url), job.epoch, std::move(image), us});
       running_--;
-      if (jobs_.empty() && running_ == 0) idle_.notify_all();
+      if (running_ == 0 && (jobs_.empty() || held_)) idle_.notify_all();
     }
   }
 
@@ -150,6 +159,7 @@ struct ImageCache::Pool {
   int running_ = 0;
   std::vector<std::thread> threads_;
   bool stopping_ = false;
+  bool held_ = false;
 };
 
 ImageCache::ImageCache(Runtime& rt) : rt_(rt) {}
@@ -217,9 +227,22 @@ int ImageCache::pump() {
   return n;
 }
 
-void ImageCache::finishDecodes() {
+void ImageCache::waitDecodes() {
   if (pool_) pool_->waitIdle();
+}
+
+void ImageCache::finishDecodes() {
+  waitDecodes();
   pump();
+}
+
+void ImageCache::holdDecodes(bool on) {
+#if !defined(__EMSCRIPTEN__)
+  if (!pool_) pool_ = std::make_unique<Pool>();
+  pool_->hold(on);
+#else
+  (void)on;
+#endif
 }
 
 std::string ImageCache::resolve(const std::string& uri) const {

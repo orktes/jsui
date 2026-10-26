@@ -1,8 +1,5 @@
 // Painter tests: build trees from JSON, paint, check pixels at key points.
 // Set JSUI_TEST_OUT=/some/dir to also write the frames as PNGs.
-#include <chrono>
-#include <thread>
-
 #include "include/core/SkBitmap.h"
 #include "include/core/SkData.h"
 #include "include/core/SkImage.h"
@@ -315,6 +312,9 @@ TEST(render_image_decodes_off_the_frame_thread) {
   Scene s(600, 300);
   ImageCache& images = *s.rt->images;
   CHECK(int64_t(512) * 256 >= images.asyncMinPixels);
+  // Held: the decode cannot finish before the frames below look at it (a
+  // fast machine decodes this between setProps and the first tick).
+  images.holdDecodes(true);
   Node* img = s.add(R"J({"type":"Image","style":{"alignSelf":"flex-start"},"props":{"source":{"uri":")J" + uri + R"J("}}})J");
   s.render();
   ImageCache::Info info;
@@ -328,14 +328,18 @@ TEST(render_image_decodes_off_the_frame_thread) {
   images.get(uri);
   CHECK_EQ(images.pendingDecodes(), 1);
   uint32_t gen = images.generation;
-  for (int i = 0; i < 5000 && images.pendingDecodes() > 0; i++) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    s.render();
-  }
+  // Decoded on the pool: still not there until a tick publishes it.
+  images.holdDecodes(false);
+  images.waitDecodes();
+  CHECK(images.peek(uri, &info));
+  CHECK(info.state == ImageCache::State::Loading);
+  CHECK_EQ(images.pendingDecodes(), 1);
+  CHECK_EQ(images.asyncDecodes, 0u);
+  CHECK(images.generation == gen);
+  s.render();
   CHECK_EQ(images.pendingDecodes(), 0);
   CHECK_EQ(images.asyncDecodes, 1u);
   CHECK(images.generation != gen);
-  s.render();
   CHECK(images.peek(uri, &info));
   CHECK(info.state == ImageCache::State::Ready);
   CHECK_NEAR(img->layoutRect().width, 512, 0.01);
