@@ -1,4 +1,4 @@
-# Host textures, Lottie and shaders
+# Host textures, Lottie, shaders and vector drawing
 
 ## HostTexture: pictures the engine draws
 
@@ -107,3 +107,45 @@ SkSL gotchas:
 * Loops need constant bounds.
 * A shader reading `time` repaints its view every frame; pass a fixed `time`
   uniform or `paused` when it should stay still.
+
+## Vector drawing: react-native-svg and react-native-skia
+
+Both libraries work unchanged (the CLI aliases them). Each `<Svg>` /
+`<Canvas>` is one native view; its shapes are serialized once per commit, so
+custom components and hooks inside are fine. Use them for icons, charts,
+gauges, progress rings and decorative shapes; use plain Views for layout.
+
+```jsx
+import Svg, { Circle, Path, Defs, LinearGradient, Stop } from 'react-native-svg';
+import { Canvas, Group, RoundedRect, LinearGradient as SkGradient, Shadow, vec } from '@shopify/react-native-skia';
+
+<Svg width={24} height={24} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={2}>
+  <Path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z" />
+</Svg>
+
+<Canvas style={{ width: 200, height: 80 }}>
+  <RoundedRect x={8} y={8} width={184} height={64} r={12}>
+    <SkGradient start={vec(0, 0)} end={vec(200, 0)} colors={['#f0a', '#0af']} />
+    <Shadow dx={0} dy={4} blur={8} color="#0008" />
+  </RoundedRect>
+</Canvas>
+```
+
+* Animate drawing props with `Animated` values, native driver included:
+  `<Circle r={anim} />`, `const AC = Animated.createAnimatedComponent(Circle)`,
+  a Skia `<Path end={progress} />` for a progress ring, `<Group
+  transform={[{ rotate: angle }]} origin={vec(50, 50)}>`. These do not
+  re-render React. `useClock()` is milliseconds since mount (native).
+* SVG: shapes, `Text` / `TSpan`, gradients, `ClipPath`, `Mask`, `Use` /
+  `Symbol`, nested `Svg`, `viewBox` / `preserveAspectRatio`, string or prop
+  transforms, `SvgXml` / `SvgCss` / `SvgUri`. Not drawn: filters, patterns,
+  markers, per-shape `onPress` (wrap the Svg in a Pressable).
+* Skia: shapes, `Path` (`Skia.Path`, SVG strings, `start` / `end`), `Image`
+  (`useImage(require(...))`), `Text` (`matchFont`), gradients, SkSL
+  `<Shader source={Skia.RuntimeEffect.Make(sksl)} uniforms={...}>`, noise,
+  `Blur`, `BlurMask`, `Shadow` (also `inner`), `ColorMatrix`, path effects,
+  `Paint` children, `Mask`, `Group layer`. Not drawn: `Paragraph`,
+  `Glyphs`, `Atlas`, `Vertices`, `Picture`, backdrop filters; no Reanimated
+  shared values (use `Animated`), no `makeImageSnapshot`.
+* Skia rotations are radians and `opacity` multiplies down the tree; SVG
+  rotations are degrees. Check the result with `jsui screenshot`.

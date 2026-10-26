@@ -92,7 +92,7 @@ and the same core compiles to WebAssembly.
 | `src/core/` | `Value`, `Node`, `Document`, style parsing (`style.cpp`), JSON, scrolling geometry, LayoutAnimation, the overlay layer (`overlay.*`), perf counters |
 | `src/render/` | Skia painter, image cache, host textures, Lottie, ShaderView, pipeline cache, GPU backends (`gpu.cpp` Ganesh GL, `gpu_metal.cpp` Ganesh Metal, `gpu_d3d.cpp` Ganesh D3D12 / D3D11, `gpu_graphite.cpp` Graphite Vulkan / Metal / Dawn, `gpu_webgpu.cpp` Graphite on browser WebGPU) |
 | `src/text/` | Font manager and decoding (WOFF / WOFF2 / TTC), paragraph building and Yoga measure for `Text`, TextInput editing |
-| `src/js/` | `JsEngine`: the QuickJS host and bridge globals (`bridge*.cpp`), the mutation command buffer (`command_buffer.*`), bytecode bundles (`bytecode.cpp`), and the host JS engine's native half (`engine_hostjs.cpp`) |
+| `src/js/` | `JsEngine`: the QuickJS host and bridge globals (`bridge*.cpp`), the mutation command buffer (`command_buffer.*`), bytecode bundles (`bytecode.cpp`), the host JS engine's native half (`engine_hostjs.cpp`), and the worklet runtimes (`worklets*.cpp`, see "Worklets") |
 | `src/animated/` | Native Animated driver |
 | `src/input/` | Hit testing, event routing, focus and gamepad navigation, scrolling, text editing keys |
 | `src/audio/` | UI audio: requests to the host's audio handler or the built-in miniaudio backend (see [AUDIO.md](AUDIO.md)) |
@@ -1277,6 +1277,63 @@ paints a view, on every renderer (the CPU raster runs SkSL too):
   and the GPU backends use them), so ShaderView adds almost nothing to
   `jsui.wasm`.
 
+### Vector drawing (Svg, Canvas)
+
+`react-native-svg` and `@shopify/react-native-skia` work unchanged (the CLI
+aliases both, plus `react-native-svg/css`, to `@orktes/jsui-react/svg` and
+`@orktes/jsui-react/skia`). Both are one host node, `VectorView`
+(`NodeType::Vector`, render/vector_view.h), per `<Svg>` / `<Canvas>`:
+
+* **JS side** (packages/react/src/vector/host.js): inside a VectorView the
+  reconciler switches to a drawing host context. `<Circle>`, `<G>`,
+  `<LinearGradient>`, `<Blur>`... create `DrawNode`s (strings: `DrawText`)
+  that never reach the bridge; custom components, hooks, keys and
+  conditional rendering inside work as anywhere else. A commit that touched
+  any of them marks the owning `VectorHost` dirty and `resetAfterCommit`
+  serializes its subtree once (`registerSerializer('svg' | 'skia')`, in
+  svg.js / skia.js) into the `commands` prop: one `setProps` per changed
+  view per commit. SVG references (`url(#id)` gradients with `href`
+  inheritance, `clipPath`, `mask`, `<Use>` / `<Symbol>`, percentages
+  against the viewBox, string / array / prop transforms) are resolved there;
+  Skia's effect children (shaders, mask / image / color filters, path
+  effects, extra `<Paint>`s, `layer`, `<Mask>`) are folded into their
+  parent's paint.
+* **Native side**: `vector::propsChanged` parses `commands` into an element
+  tree (paths from SVG strings via `SkParsePath`) cached in the node's
+  `imageCache`, re-parsed only when the value differs. `vector::paint`
+  walks it into the content box (clipped like `overflow: hidden`) with
+  core Skia only (`SkPath`, `SkPaint`, `SkShaders`, `SkImageFilters`, path
+  effects incl. `SkTrimPathEffect`; no SVG / Paragraph module), so every
+  backend and the CPU raster draw it the same. Text runs use the font
+  collection (`drawSimpleText`, `textAnchor`, `letterSpacing`), images the
+  `ImageCache`, `<Shader>` the `ShaderEffects` sources of ShaderView. It
+  builds against the aseprite m124 prebuilt and m157 (gradient / dash APIs
+  switch on `__has_include(SkGradient.h)`).
+* **Semantics** follow the mode: `svg` inherits fill / stroke / font
+  props, `opacity` on a group is one layer, rotations are degrees,
+  `currentColor` comes from `color`; `skia` inherits the paint (`color`,
+  `style`, `strokeWidth`, `blendMode`...), `opacity` multiplies, rotations
+  are radians, `origin` pivots transforms.
+* **Animated**: a drawing element given Animated values (directly, in its
+  `transform`, or via `Animated.createAnimatedComponent(Circle)`) gets a key
+  `k`; the values are style keys `draw:<k>.<prop>` on the VectorView, a
+  paint-only style group (`kGroupDraw`). The JS driver writes them with
+  `patchStyle`, the native driver connects its props node to the
+  VectorView, so a running animation neither renders React nor re-parses
+  commands; only the view's rect is damaged. Animated values nested deeper
+  (uniform objects, gradient colors) re-render the element (JS driver).
+* **Not supported** (accepted, not drawn; most warn once): SVG filters
+  (`<Filter>`, `fe*`), `<Pattern>`, `<Marker>`, `<ForeignObject>`,
+  per-shape touch events (`<TextPath>` draws its text without the path);
+  Skia `Paragraph`, `Glyphs`, `TextPath`, `TextBlob`, `Picture`, `Atlas`,
+  `Vertices`, `Patch`, `Box` / `BoxShadow`, backdrop filters, path ops,
+  `makeImageSnapshot`, Reanimated shared values.
+  `Skia.Font` measures approximately (the real font is matched natively).
+* Cost: about +38 KB of native code (`jsui-render` text, Release).
+  Tests: tests/native/vector_test.cpp, react_vector_e2e_test.cpp,
+  packages/react/test/vector.test.js, reference case
+  examples/features/svg.jsx (Chromium parity).
+
 ### Audio
 
 The UI asks for sounds; the host plays them (`src/audio/`,
@@ -1300,7 +1357,7 @@ Native globals (installed by `JsEngine`):
 | --- | --- |
 | `__jsui_native.rootId` | id of the root container node |
 | `__jsui_native.devMode` | `true` when the runtime runs with `cfg.dev_mode` |
-| `createNode(type, rootTag?) → id` | `type` ∈ `View`, `Text`, `RawText`, `Image`, `ScrollView`, `TextInput`, `LottieView`, `ShaderView`; created in the document of surface `rootTag` (default: the main one; see "Surfaces"). The id is taken at once; the node exists natively when the command is applied (see "Command buffer") |
+| `createNode(type, rootTag?) → id` | `type` ∈ `View`, `Text`, `RawText`, `Image`, `ScrollView`, `TextInput`, `LottieView`, `ShaderView`, `VectorView`; created in the document of surface `rootTag` (default: the main one; see "Surfaces"). The id is taken at once; the node exists natively when the command is applied (see "Command buffer") |
 | `viewport(rootTag?) → {width, height, scale}` | logical size of a surface (default: the main one) |
 | `surfaceApp(rootTag) → {appKey, initialProps} \| null` | the app the host picked for a surface |
 | `updateProps(id, reactProps, hidden, keepStyle?)` / `getProps(id)` | the host config's prop path, done natively: builds what native sees from the React props (event handlers → `__events`, the responder hints `__blocksNative` / `__keepsGesture` and `__passive` (see "Input routing details"), flattened style, `pointerEvents` / hidden into it) and diffs it in `Node::setProps` (see "Performance: Props"); `getProps` returns what native holds (the inspector reads it). `keepStyle` (`setNativeProps` of non-style props; `updatePropsKeepsStyle: true` says the runtime has it): `reactProps.style` is ignored and the node keeps the style it has when the command is applied, `patchStyle` and native Animated writes included. The host JS engine has neither (`@orktes/jsui-react` then diffs in JS and calls `setProps`) |
@@ -2234,6 +2291,126 @@ Native's API and both of its drivers:
     `tracking` node) restarts native animations from JS when the target
     changes; scroll physics (and so `Animated.event` from flings) only
     advance in `jsui_tick`, not in `jsui_tick_native`.
+
+## Worklets
+
+`react-native-worklets` (Software Mansion, MIT; API of 0.13) runs on JSUI
+unchanged: the CLI aliases the package to `@orktes/jsui-react`'s
+implementation (`packages/react/src/worklets.js`, shim
+`src/shims/react-native-worklets.js`, also `@orktes/jsui-react/worklets`).
+
+**Build time.** A worklet must carry its source, and bytecode bundles keep
+none, so as in React Native the build transforms it.
+`packages/cli/src/worklets.js` runs Software Mansion's Babel plugin
+(vendored with its license in `src/vendor/worklets-babel-plugin.cjs`, on
+Babel 7) on every file that mentions `worklet`, in `jsui build`, `jsui dev`
+and its HMR updates, before React Compiler and React Refresh (TypeScript is
+stripped first by esbuild). Functions with a `'worklet'` directive and the
+callbacks passed straight to `runOnUI` / `scheduleOnUI` / `runOnRuntime` /
+... become functions carrying `__workletHash`, `__closure` (the values they
+capture) and `__initData = { code, location, line }`; production builds
+leave out `location` / `line` and the dev stack data. Worklet classes are
+off (`disableWorkletClasses`).
+
+**Runtimes.** `src/js/worklets.{h,cpp}`: `Worklets` (`Runtime::worklets`)
+owns the worklet runtimes, each its own QuickJS `JSRuntime` + context (own
+heap and GC, memory limit, 5 s watchdog, unhandled rejections reported). The
+UI runtime (id 2, `RuntimeKind.UI`) is created on the first job, so an app
+that never uses worklets pays nothing (no runtime, no tick phase);
+`createWorkletRuntime` adds more (ids from 3, `RuntimeKind.Worker`). All of
+them live on the owner thread (the thread calling `jsui_tick`, JSUI's UI
+thread) and never touch the bundle's heap. The tick's worklet phase runs
+after the frame's JS has been applied and before native Animated, in
+`jsui_tick` and in `jsui_tick_native` alike: queued jobs (batched per
+runtime), then each runtime's due timers (`setTimeout` / `setInterval` /
+`setImmediate`) and `requestAnimationFrame` callbacks with the frame time
+(`performance.now()` is the runtime clock). A runtime with nothing due is
+not entered. `jsui_wants_frame` / `jsui_next_timer` include them. After
+running something, a runtime that goes idle gets one cycle collection, so
+closures holding remote functions (a self-scheduling rAF loop) are freed and
+the bundle gets them back. Each runtime starts with the console and the JS
+half of the protocol (`src/js/worklets_prelude.cpp`: timers, rAF, the wire
+codec, the worklet cache and the react-native-worklets functions a worklet
+can call, each also callable when captured from the bundle).
+
+**Bridge** (`src/js/bridge_worklets.cpp`, `__jsui_native.worklets`):
+`schedule(runtimeId, job)` queues a job through `Runtime::toHost` (owner
+thread; with JS on its own thread it is applied with the frame's commands);
+`runSync(runtimeId, job)` runs it on the owner thread now (single-threaded),
+or waits for the owner (`Impl::onOwner`, at most `kProxyTimeoutMs`) with JS
+on its own thread, and returns `{"ok", "v" | "e"}`; `createRuntime(name)`;
+`sync*` for synchronizables. Worklet runtimes send to the bundle through
+`Worklets::toJs`, delivered once per `jsui_tick` as one
+`Inbound::call("__jsui_onWorklets", [ops])` (kept for the next `jsui_tick`
+by `jsui_tick_native`): `['c', fn, args]` call a remote function,
+`['r', id, n]` / `['a', id]` release / retain one, `['p', id, ok, value]`
+settle a `runOn*Async` promise.
+
+**Wire format.** A job is JSON `[worklet, args, promiseId]`. Values follow
+react-native-worklets' rules: JSON values as is; tagged objects
+`{ "$": tag }` for `undefined` (`u`), non-finite numbers and `-0` (`n`),
+BigInt (`bi`), objects (`o`), worklets (`w`: hash, init data the first time a
+runtime sees that hash, closure, own props), remote functions (`f`: any
+other function, reference counted by the bundle), synchronizables (`s`),
+Animated values (`av`), react-native-worklets builtins (`b`), Errors (`e`),
+`ArrayBuffer` / typed arrays / `DataView` (`ab`, `tv`, base64 copies), `Map`,
+`Set`, `RegExp`, worklet runtimes (`rt`) and `registerCustomSerializable`
+values (`cu`). The receiving side evaluates a worklet's code once per hash
+and binds it to a holder with its closure (react-native-worklets'
+`valueUnpacker`). Remote functions throw when called directly in a worklet;
+`runOnJS(fn)(...)` / `scheduleOnRN(fn, ...)` send the call back. Cycles
+throw; class instances other than the above are warned about and become
+`undefined`.
+
+**Synchronizables** live natively (`Worklets::Sync`: the value as wire JSON,
+a recursive timed mutex for `lock()` / `setBlocking`, 1 s timeout, reference
+counted by every runtime holding one) and are read and written from any
+runtime and from the JS thread.
+
+**Animated values.** An `Animated.Value` that reaches a worklet is made
+native (as `useNativeDriver` does) and arrives as a handle on its node:
+`getValue()`, `setValue(v)`, `setOffset(v)` and a `value` property call
+`NativeAnimated::nodeOutput` / `setValue` / `setOffset` directly. Its views
+change in the same tick with no command batch and no JS: a UI-runtime rAF
+loop driving one keeps moving while JS is stalled or not ticked (tested in
+`tests/native/react_worklets_e2e_test.cpp`). JS-side `AnimatedValue` gained
+`getValue()` and `value` for the same code to run on either side. Anything
+an Animated node feeds (`derive`, interpolations, `ShaderView`'s
+`uniform:<name>` style keys and other animatable style keys) follows; this
+is how worklets can drive drawing later (a Canvas / Svg node whose
+animatable props are style keys, or WebGPU / Skia drawing called from the UI
+runtime as react-native-webgpu-worklets does) without another mechanism.
+
+**Errors.** A throwing worklet is reported through `Runtime::reportError`
+(`jsui_last_error`, the dev overlay) as ``[Worklets] in worklet `name`
+(file:line): Error: ...`` with its stack; `runOnUISync` / `runOnUIAsync`
+rethrow / reject in the bundle instead.
+
+**Without the native module** (the host JS engine on the web, Node tests)
+everything runs on the bundle's runtime like react-native-worklets on the
+web: `runOnUI` on the next animation frame, `runOnJS` in a microtask,
+`runOnUISync` at once, synchronizables as plain objects.
+
+**Costs.** None until the first worklet. A runtime takes about 240 KB of
+heap when started (the UI runtime about 260 KB after the e2e test's jobs)
+and about 3 ms to start, once (parsing the preludes; printed by the e2e
+test). Precompiling the prelude to bytecode would cut the start time if it
+matters. The native code is about 70 KB (Release
+objects: `worklets.cpp` 44 KB, the prelude 16 KB, the bridge 8 KB).
+
+**Differences from React Native.**
+* Worker runtimes (`createWorkletRuntime`) run on the UI thread's tick,
+  not on threads of their own: separate heaps and queues, but a long worker
+  job delays the frame. `useDefaultQueue` / custom queues are ignored.
+* `runOnUISync` with JS on its own thread waits for the owner thread
+  (at most `kProxyTimeoutMs`, then throws); it sees the native views as
+  of the last applied commit.
+* `createSerializable` / `makeShareable*` return the value itself (values
+  are copied when a job is sent); `createShareable` and Bundle Mode do not
+  exist; worklet classes are not transformed.
+* `react-native-worklets-core` (Margelo) is not aliased.
+* Browser (WASM) builds have the runtimes (same C++), but this has not been
+  run there yet; the host JS engine uses the fallback above.
 
 ## State styles
 

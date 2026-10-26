@@ -75,7 +75,27 @@ no DOM, no Node APIs).
 * **Shims** (aliased by the CLI): `react-native-safe-area-context`,
   `expo-status-bar`, `expo-linear-gradient`, `react-native-linear-gradient`
   (rendered as a native `linear-gradient` background), `lottie-react-native`,
-  `expo-font` (so `@expo-google-fonts/*` packages work unchanged).
+  `expo-font` (so `@expo-google-fonts/*` packages work unchanged),
+  `react-native-svg` (+ `react-native-svg/css`) and
+  `@shopify/react-native-skia` (see below).
+* **Vector drawing:** `import Svg, { Path, Circle, G, LinearGradient, ... }
+  from 'react-native-svg'` and `import { Canvas, Group, Circle, Path,
+  LinearGradient, Blur, Shadow, Shader, Skia, vec } from
+  '@shopify/react-native-skia'` (also `@orktes/jsui-react/svg` and
+  `/skia`). Each `<Svg>` / `<Canvas>` is one native `VectorView`; its
+  drawing elements are JS-side instances serialized once per commit, so
+  custom components and hooks inside work, and Animated values as drawing
+  props (`r={anim}`, `Animated.createAnimatedComponent(Circle)`, Skia
+  `start` / `end` trimming) run on the native driver with no re-render.
+  SVG: shapes, text / tspan, gradients, clip paths, masks, use / symbol,
+  nested svg, viewBox / preserveAspectRatio, presentation props and
+  transforms, `SvgXml` / `SvgCss` / `SvgUri`. Skia: shapes, paths
+  (`Skia.Path`, trimming), images, text, shaders (gradients, SkSL
+  `<Shader>`, noise), blur / shadow / morphology / color filters, path
+  effects, `Paint` children, `Mask`, layers, the `Skia` object. Not
+  drawn: SVG filters, patterns, markers; Skia paragraphs, glyphs, atlas,
+  vertices, pictures, backdrop filters. See docs/ARCHITECTURE.md "Vector
+  drawing (Svg, Canvas)".
 
 ## JSUI extras
 

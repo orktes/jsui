@@ -39,6 +39,7 @@ class ImageCache;
 class LottieCache;
 class ShaderEffects;
 class NativeAnimated;
+class Worklets;
 
 class DevSession;
 class Inspector;
@@ -316,6 +317,9 @@ class Runtime {
   }
   // Animated graphs driven natively (useNativeDriver: true).
   std::unique_ptr<NativeAnimated> animated;
+  // react-native-worklets' runtimes (js/worklets.h; none until a worklet is
+  // scheduled). After `animated`: worklets write its values.
+  std::unique_ptr<Worklets> worklets;
 
  private:
   // Wires a new surface to the runtime's services.

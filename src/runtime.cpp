@@ -19,6 +19,7 @@
 #include "js/engine.h"
 #include "js/inspector.h"
 #include "js/js_thread.h"
+#include "js/worklets.h"
 #include "render/image_cache.h"
 #include "render/lottie.h"
 #include "render/shader_view.h"
@@ -80,6 +81,7 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
   buffers.onChange = [this](const std::string& key) { animated->bufferChanged(key); };
   // Animated.hostState / useHostStateBind nodes follow their key at once.
   animated->state = &state;
+  worklets = std::make_unique<Worklets>(*this);
   state.onChange = [this](const std::string& key) { animated->stateChanged(key); };
   textures.log = [this](JsuiLogLevel level, const std::string& msg) { log(level, msg); };
   main().handle = h;
@@ -284,6 +286,7 @@ void Runtime::resetEngine() {
   for (auto& s : surfaces_) s->input->forgetAnswers();
   bundleRan_ = false;
   globalListeners.clear();
+  worklets->reset();  // they hold the old context's functions and values
   animated->clear();
   for (auto& s : surfaces_) s->doc.clear();
   // Shared state outlives the context (the new bundle reads it as it starts).
@@ -824,6 +827,12 @@ void Runtime::tick(double nowMs, bool sync) {
   // JS-thread mode: its host-state writes reach native Animated bindings
   // before they tick (HostState::deferUiChanges), its calls the embedder.
   if (jsThreadMode_) drainHost();
+  // Worklets (react-native-worklets): the worklet runtimes' jobs, timers and
+  // requestAnimationFrame callbacks, after this frame's JS (single-threaded,
+  // a runOnUI from it runs in this frame) and before native Animated, so a
+  // value a worklet sets is painted in this frame. What they send the
+  // bundle (runOnJS) is delivered right after.
+  if (worklets->active()) worklets->tick(nowMs, true);
   // Surfaces created or destroyed by callbacks below are picked up next tick.
   std::vector<Surface*> list;
   for (auto& s : surfaces_) list.push_back(s.get());
@@ -944,6 +953,9 @@ void Runtime::tickNative(double nowMs) {
     s->doc.now = nowMs;
     s->input->tickStates(nowMs);  // state styles follow input without JS too
   }
+  // Worklets run (they are the UI thread's JS); what they send the bundle
+  // waits for the next tick().
+  if (worklets->active()) worklets->tick(nowMs, false);
   animated->tick(nowMs);  // end events stay queued until the next tick()
   lotties->tick(nowMs);   // so do LottieView events
   shaders->tick(nowMs);   // and ShaderView errors
@@ -1096,7 +1108,7 @@ bool Runtime::wantsFrame() const {
   // the tick it already ran.
   if (reloadRequested_ || loader.pending() > 0 || (js && js->hasPendingWork(now + 17)) || animated->animating() ||
       !animated->ends.empty() || lotties->animating() || shaders->animating() || state.hasDirty() || buffers.hasDirty() || textures.hasDirty() || audio->hasEvents() || audio->busy() || video->hasEvents() || !uiResults_.empty() || !doomed_.empty() ||
-      !hostQueue.empty() || !measureRequests.empty())
+      !hostQueue.empty() || !measureRequests.empty() || worklets->wantsFrame() || worklets->nextTimer() <= now + 17)
     return true;
   for (const auto& s : surfaces_)
     if (s->doc.hasDestroyed() || s->input->animating() || s->doc.layoutAnimating() || imageEventsReady(s->doc) ||
@@ -1106,13 +1118,13 @@ bool Runtime::wantsFrame() const {
 }
 
 double Runtime::nextTimer() const {
-  double due = js ? js->nextTimer() : 1e300;
+  double due = std::min(js ? js->nextTimer() : 1e300, worklets->nextTimer());
   return due >= 1e300 ? std::numeric_limits<double>::infinity() : due;
 }
 
 bool Runtime::animatingFrames(const Surface& s) const {
   return s.input->animating() || s.doc.layoutAnimating() || animated->animating() || !animated->ends.empty() ||
-         lotties->animating() || shaders->animating() ||
+         lotties->animating() || shaders->animating() || worklets->wantsFrame() ||
          (js && js->hasPendingWork(now + 17));
 }
 

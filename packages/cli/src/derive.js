@@ -163,9 +163,9 @@ export async function transformDerive(src, file) {
 /**
  * esbuild plugin: the transform for source files no other plugin loads
  * (app files, the CLI's test fixtures, packages; not @orktes/jsui-react's
- * own sources).
+ * own sources), with the worklets transform after it (worklets.js).
  */
-export function derivePlugin({ reactDir }) {
+export function derivePlugin({ reactDir, mode, sourcemap }) {
   const own = path.join(reactDir, 'src') + path.sep;
   const isApp = (p) => !p.startsWith(own) && !p.includes(`${path.sep}node_modules${path.sep}react`);
   return {
@@ -175,10 +175,11 @@ export function derivePlugin({ reactDir }) {
         if (!isApp(args.path)) return undefined;
         const { readFile } = await import('node:fs/promises');
         const src = await readFile(args.path, 'utf8');
-        const r = await transformDerive(src, args.path);
-        if (r.code === src && !r.warnings.length) return undefined;
-        const ext = path.extname(args.path).slice(1).toLowerCase();
-        return { contents: r.code, warnings: r.warnings, loader: ext === 'ts' || ext === 'tsx' ? ext : ext === 'json' ? 'json' : 'jsx', resolveDir: path.dirname(args.path) };
+        // ... and the worklets transform (worklets.js).
+        const { prepareSource } = await import('./worklets.js');
+        const r = await prepareSource(src, args.path, { mode, sourcemap });
+        if (!r.changed && !r.warnings.length) return undefined;
+        return { contents: r.code, warnings: r.warnings, loader: r.loader, resolveDir: path.dirname(args.path) };
       });
     },
   };

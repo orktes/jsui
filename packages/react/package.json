@@ -34,6 +34,9 @@
     "./lottie": "./src/lottie.js",
     "./video": "./src/video.js",
     "./shader": "./src/shader.js",
+    "./worklets": "./src/worklets.js",
+    "./svg": "./src/svg.js",
+    "./skia": "./src/skia.js",
     "./package.json": "./package.json"
   },
   "files": [

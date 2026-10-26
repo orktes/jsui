@@ -38,6 +38,7 @@ and how each one works inside the runtime is in
 | A descendant reading its group's state | `useGroupState(name?)`; `.instant.hovered` switches at once | prop drilling and re-renders |
 | Showing and hiding with data or hover | `<Visibility visible={node or bool} transition={120}>`: children stay mounted | `{cond && <X/>}` driven by per-frame data |
 | Popouts, tooltips and dropdowns that must escape clipping and later siblings | `<Overlay placement="top" offset={8}>` with an optional `<OverlayArrow>`: placed against the anchor every frame, flipped and shifted to stay on screen | a `zIndex` on the hovered item, or `measure` and absolute coordinates |
+| Per-frame logic that is not a math expression (a game-feel loop, physics, a state machine) setting Animated values | a worklet: `runOnUI(() => { ... requestAnimationFrame(step) ... })()` from `react-native-worklets`, calling `value.setValue(x)` on Animated values it captured (runs on the UI thread, writes the native nodes directly) | a JS `requestAnimationFrame` loop calling `setValue` |
 | Key, button and wheel defaults (Tab, Enter, arrows, D-pad) that act at once | `passive(fn)` handlers, `preventDefaultKeys` / `preventDefaultButtons`, and `useGamepad({ passive })` or `vetoes` | handlers that could call `preventDefault`, which make the runtime wait for JS |
 
 The rule of thumb: if a `setState`, `addListener` or timer would run every
@@ -53,7 +54,9 @@ browser, the CLI and the tests run it inside the tick.
   `Animated` (including `derive`, `clock`, `format` and `reveal`),
   host-buffer values, host-state binds, state and group styles,
   `Visibility`, overlays, scrolling, `LayoutAnimation`, focus movement,
-  declared default actions, hit testing, layout and paint.
+  declared default actions, hit testing, layout and paint; and worklets
+  (`react-native-worklets`' `runOnUI` and friends: their own JS runtimes on
+  the UI thread, with their own timers and `requestAnimationFrame`).
 - **On the JS thread, a frame or more later:** renders, commits, effects,
   timers, `requestAnimationFrame`, event handlers, `useHostState`
   re-renders and JS-driven animations. A commit applies whole on the next

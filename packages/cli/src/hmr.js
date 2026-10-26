@@ -7,7 +7,8 @@
 //   vendor   every module outside the app (node_modules, @orktes/jsui-react,
 //            assets), bundled once by esbuild and exposed by resolved path;
 //            rebuilt only when that set or one of its files changes
-//   app      each app source file, run through React Compiler (unless off,
+//   app      each app source file, run through the derive and worklets
+//            transforms (worklets.js), React Compiler (unless off,
 //            see react-compiler.js), react-refresh's Babel plugin and
 //            esbuild's transform (to CommonJS), wrapped in
 //            __jsui_hmr.define(id, deps, factory)
@@ -36,7 +37,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { esbuildOptions, jsuiReactDir } from './config.js';
 import { compileSource } from './react-compiler.js';
-import { transformDerive } from './derive.js';
+import { prepareSource } from './worklets.js';
 import { concatMaps, inlineMapComment, lineCount, prepareMap } from './sourcemap.js';
 
 const require = createRequire(import.meta.url);
@@ -105,12 +106,15 @@ export function createHmr(o) {
 
   async function compile(key, deps) {
     const abs = path.resolve(cwd, key);
-    const source = (await transformDerive(await readFile(abs, 'utf8'), abs)).code;
+    // Animated.derive and worklets (worklets.js; TypeScript is stripped
+    // where a file has worklets).
+    const prepared = loaderFor(abs) === 'json' ? null : await prepareSource(await readFile(abs, 'utf8'), abs, { mode });
+    const source = prepared ? prepared.code : await readFile(abs, 'utf8');
     const depsJson = JSON.stringify(deps);
     const hash = sha1(source + '\0' + depsJson);
     const hit = compiled.get(key);
     if (hit && hit.hash === hash) return hit;
-    const loader = loaderFor(abs);
+    const loader = prepared ? prepared.loader : 'json';
     let code = source;
     let map = null;  // of `code` to `source`
     if (loader !== 'json' && o.reactCompiler) {

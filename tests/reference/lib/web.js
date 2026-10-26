@@ -96,7 +96,7 @@ AppRegistry.runApplication('App', { rootTag: document.getElementById('root') });
     format: 'iife',
     jsx: 'automatic',
     minify: false,
-    alias: { 'react-native': 'react-native-web' },
+    alias: { 'react-native': 'react-native-web', 'react-native-svg': path.join(PKG_DIR, 'lib', 'svg-web.js') },
     // Resolve shared deps from this package so examples need no node_modules.
     nodePaths: [path.join(PKG_DIR, 'node_modules'), path.resolve(PKG_DIR, '../../node_modules')],
     // react-native-web's Animated reads the Node-style `global`.

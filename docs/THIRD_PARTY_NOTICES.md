@@ -24,6 +24,7 @@ named here; the full license texts are in the projects' repositories (linked).
 | [miniaudio](https://miniaud.io) (incl. stb_vorbis) | built-in audio playback | MIT-0 / public domain |
 | [Inter](https://rsms.me/inter/) | embedded default font | SIL Open Font License 1.1 |
 | [SDL2](https://libsdl.org) | jsui-viewer only | zlib License |
+| [react-native-worklets](https://github.com/software-mansion/react-native-reanimated/tree/main/packages/react-native-worklets) 0.13 | the worklets API (`@orktes/jsui-react`'s `react-native-worklets`, its runtime prelude in `src/js/worklets_prelude.cpp`) and, in `@orktes/jsui-cli`, its Babel plugin (`src/vendor/worklets-babel-plugin.cjs`); copyright (c) 2016 Software Mansion | MIT |
 | [godot-cpp](https://github.com/godotengine/godot-cpp) | Godot plugin only | MIT |
 
 Portions of this software are copyright © The FreeType Project
