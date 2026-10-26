@@ -207,8 +207,8 @@ TEST(bench_hud) {
   std::printf("  perf: incremental:   steady layout %.3f ms paint %.3f ms (worst %.2f); animated transform layout %.3f ms paint %.3f ms (worst %.2f)\n",
               ms(incSteady.layout), ms(incSteady.paint), incSteady.worstPaint, ms(incAnim.layout), ms(incAnim.paint),
               incAnim.worstPaint);
-  std::printf("  perf: last incremental frame: %d nodes painted, %d subtrees culled, damage %lld px\n", ps.nodesPainted,
-              ps.nodesCulled, (long long)ps.damagedPixels);
+  std::printf("  perf: last incremental frame: %d nodes painted, %d subtrees culled, %d occluded, damage %lld px\n",
+              ps.nodesPainted, ps.nodesCulled, ps.nodesOccluded, (long long)ps.damagedPixels);
   CHECK(nodes >= 450);
   CHECK(texts >= 55);
   // The incrementally updated buffer must equal a full repaint.

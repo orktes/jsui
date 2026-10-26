@@ -362,7 +362,8 @@ void ImageCache::decodeInto(const std::string& url, Entry& e, const void* data, 
   auto t0 = std::chrono::steady_clock::now();
   sk_sp<SkImage> lazy = lazyImage(data, size);
   const int64_t pixels = lazy ? int64_t(lazy->width()) * lazy->height() : 0;
-  if (lazy && inlineSpent_ + pixels > inlineBudgetPixels) {
+  const double estimateUs = double(pixels) * decodeNsPerPixel / 1000;
+  if (lazy && inlineSpentUs_ + estimateUs > inlineBudgetUs) {
 #if defined(__EMSCRIPTEN__)
     bool handed = decodeOnWeb(url, data, size);
 #else
@@ -377,9 +378,17 @@ void ImageCache::decodeInto(const std::string& url, Entry& e, const void* data, 
       return;
     }
   }
-  inlineSpent_ += pixels;
   e.image = lazy ? lazy->makeRasterImage(nullptr) : nullptr;
-  count(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
+  const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+  count(us);
+  if (!measureDecodes) {
+    inlineSpentUs_ += estimateUs;
+  } else {
+    inlineSpentUs_ += us;
+    // Small images are mostly fixed overhead: they would skew the rate.
+    if (e.image && pixels >= 4096)
+      decodeNsPerPixel = std::clamp(0.75 * decodeNsPerPixel + 0.25 * (us * 1000 / double(pixels)), 1.0, 500.0);
+  }
   if (e.image) e.state = State::Ready;
   else fail(url, e, "failed to decode " + what);
 }

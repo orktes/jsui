@@ -2331,7 +2331,7 @@ test("worker: frames are timed by the worker's requestAnimationFrame, or the pag
   }
 });
 
-// Images over the inline budget (64k px a tick on the web) decode in the browser: createImageBitmap and
+// Images over the inline budget (1 ms a tick, ~60 ns/px estimated in wasm) decode in the browser: createImageBitmap and
 // getImageData in a decode Worker, off the runtime's thread, and land on a
 // later tick (whenIdle waits for them: jsui_pending_loads counts them). The
 // small one decodes inline as before.

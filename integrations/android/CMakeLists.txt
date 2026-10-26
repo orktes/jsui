@@ -1,6 +1,7 @@
 # JsuiDemo for Android: the native library of a NativeActivity app (no Java)
-# that renders a JSUI bundle with Skia Ganesh on GLES through EGL (CPU raster
-# into the window's buffer as the fallback) and forwards touch, keys and
+# that renders a JSUI bundle with Skia Graphite on Vulkan (libvulkan.so is
+# opened at run time), Ganesh on GLES through EGL and the CPU raster into the
+# window's buffer as the fallbacks, and forwards touch, keys and
 # gamepads. scripts/build-android.sh builds it with the NDK's CMake toolchain
 # and packages libjsuidemo.so, AndroidManifest.xml and the UI bundle (as
 # assets/ui/) into an APK.

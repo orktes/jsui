@@ -62,21 +62,27 @@ class ImageCache {
   void waitDecodes();
   void finishDecodes();
   void holdDecodes(bool on);
-  // Inline decode budget per tick, in pixels (decode time is roughly
-  // proportional: ~3.5 ns/px measured on an M-series Mac, so 256k px is
-  // about 1 ms). Images decode inline while the tick's budget lasts, where
-  // the hand-over would only cost a frame of pop-in; the rest (a screen of
-  // card art, any image larger than the budget) go off the thread: to the
-  // pool natively, to the browser on the web, where the codec in wasm is a
-  // few times slower and the budget a quarter. Without createImageBitmap
-  // (Node: the headless CLI) everything decodes inline.
+  // Inline decode budget per tick, in microseconds of real decode time.
+  // Images decode inline while the tick's budget lasts, where the hand-over
+  // would only cost a frame of pop-in; the rest (a screen of card art, any
+  // image whose estimated cost alone is over the budget) go off the thread:
+  // to the pool natively, to the browser on the web. Without
+  // createImageBitmap (Node: the headless CLI) everything decodes inline.
+  double inlineBudgetUs = 1000;
+  // The estimate an image is admitted by (its pixels times this), learned
+  // from the inline decodes of images of 4096 px or more. Starts at the
+  // ~17 ns/px measured for PNG / JPEG card art on an M-series Mac; in wasm,
+  // where the codec runs a few times slower, at 60.
 #ifdef __EMSCRIPTEN__
-  int64_t inlineBudgetPixels = 64 * 1024;
+  double decodeNsPerPixel = 60;
 #else
-  int64_t inlineBudgetPixels = 256 * 1024;
+  double decodeNsPerPixel = 17;
 #endif
+  // Tests: false spends the estimate instead of the measured time and keeps
+  // the estimate fixed, so which images go off the thread is deterministic.
+  bool measureDecodes = true;
   // Before the tick's loads complete: a new inline budget.
-  void beginTick() { inlineSpent_ = 0; }
+  void beginTick() { inlineSpentUs_ = 0; }
   // Decodes done off the thread so far (tests: proves the work left it).
   uint64_t asyncDecodes = 0;
 
@@ -125,7 +131,7 @@ class ImageCache {
   std::unique_ptr<Pool> pool_;  // started on the first large image
   uint32_t epoch_ = 0;          // clear() drops decodes still in flight
   int decoding_ = 0;
-  int64_t inlineSpent_ = 0;     // pixels decoded inline this tick
+  double inlineSpentUs_ = 0;    // inline decode time spent this tick
   // Web decodes in flight (by job id) and finished ones.
   std::unordered_map<uint32_t, WebJob> webJobs_;
   std::vector<Decoded> webDone_;
