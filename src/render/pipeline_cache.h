@@ -134,12 +134,16 @@ bool noDefaultFile();
 // Tests only: no precompileCommon (frames compile everything they draw).
 void setNoCommonPrecompile(bool on);
 // The cache file a context uses until the host names one (jsui.h): in the
-// user's cache directory, per program and backend; empty where there is
-// none (Android, the browser) or JSUI_PIPELINE_CACHE=off.
+// cache directory, per program and backend; empty where there is none
+// (Android without jsui_set_cache_dir, the browser) or
+// JSUI_PIPELINE_CACHE=off.
 std::string defaultFile(Backend backend);
-// `<user cache dir>/jsui/<kind>-<program>-<tag>.bin` (the directories
-// made), empty where there is no such directory (Android, the browser).
+// `<cache dir>/<kind>-<program>-<tag>.bin` (the directories made): the
+// host's (jsui_set_cache_dir), else `<user cache dir>/jsui`; empty where
+// there is neither (Android, the browser).
 std::string cacheFile(const std::string& kind, const std::string& tag);
+// jsui_set_cache_dir; "" goes back to the platform's.
+void setCacheDir(const std::string& dir);
 
 struct Stats {
   int mode = 0;            // Mode

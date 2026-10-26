@@ -11,6 +11,11 @@
 //       module, ?js=quickjs; default: the browser's own JS engine)
 //   SITE_REAL_GPU=1 node site/test/smoke.mjs     (the installed Google Chrome,
 //       headed, on the machine's GPU)
+//   SITE_WORKER=0|1 node site/test/smoke.mjs     (?worker=0|1: force main-thread or
+//       worker mode; default: the page's own choice, worker mode where the worker
+//       has WebGPU)
+//   SITE_EXPECT_WORKER=0|1                       (fail unless the runtime runs on the
+//       page's thread / in a worker)
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -66,6 +71,8 @@ const ORIGIN = `http://127.0.0.1:${server.address().port}`;
 const WEBGPU_FLAGS = ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-vulkan=swiftshader'];
 
 const JS = process.env.SITE_JS || '';
+const WORKER = process.env.SITE_WORKER || '';
+const EXPECT_WORKER = process.env.SITE_EXPECT_WORKER || '';
 const browser = process.env.SITE_REAL_GPU
   ? await chromium.launch({ channel: 'chrome', headless: false, args: ['--force-color-profile=srgb'] })
   : await chromium.launch({
@@ -87,7 +94,8 @@ for (const size of SIZES) {
   // autoplay=0: the cinematic screen streams its trailer only once played
   // (CI has no business fetching video, and a playing video never goes idle):
   // it must look finished with its own poster art.
-  await page.goto(`${ORIGIN}/index.html?autoplay=0${JS ? '&js=' + encodeURIComponent(JS) : ''}`);
+  await page.goto(`${ORIGIN}/index.html?autoplay=0${JS ? '&js=' + encodeURIComponent(JS) : ''}` +
+    (WORKER ? '&worker=' + encodeURIComponent(WORKER) : ''));
   await page.waitForFunction(() => window.jsui, null, { timeout: 60000 });
   // Every script, module, wasm and JSON the page loads is versioned (?v=<hash>,
   // site/scripts/build.mjs), so caches cannot mix files of two deploys.
@@ -109,6 +117,14 @@ for (const size of SIZES) {
     failed++;
     console.log(`  FAIL  ${size.name}: renderer is ${renderer}, expected ${want || 'a GPU renderer'}`);
   } else console.log(`  ${size.name}: renderer ${renderer}`);
+  // Worker mode (index.html's default where the worker has WebGPU) or the
+  // page's main thread.
+  const inWorker = await page.evaluate(() => !!window.jsui.worker);
+  if (EXPECT_WORKER && inWorker !== (EXPECT_WORKER === '1')) {
+    failed++;
+    console.log(`  FAIL  ${size.name}: the runtime runs ${inWorker ? 'in a worker' : 'on the main thread'}, expected ` +
+      (EXPECT_WORKER === '1' ? 'worker mode' : 'main-thread mode'));
+  } else console.log(`  ${size.name}: ${inWorker ? 'worker mode' : 'main-thread mode'}`);
   // The browser's own JS engine unless SITE_JS asks for another.
   const engine = await page.evaluate(() => window.jsui.jsEngine);
   if (engine !== (JS || 'host')) {

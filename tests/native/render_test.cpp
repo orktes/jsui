@@ -304,6 +304,111 @@ TEST(render_image_data_uri_and_resize_modes) {
   CHECK_EQ(s.a(1, 51), 0);
 }
 
+// Large images decode on the pool, not in the layout that asked: that frame
+// shows nothing (and wants another), and a later tick publishes the image,
+// re-measures the Image and repaints it.
+TEST(render_image_decodes_off_the_frame_thread) {
+  std::string uri = testPngUri(1024, 512);
+  Scene s(1100, 600);
+  ImageCache& images = *s.rt->images;
+  images.measureDecodes = false;
+  CHECK(1024 * 512 * images.decodeNsPerPixel / 1000 > images.inlineBudgetUs);  // over the budget on its own
+  // Held: the decode cannot finish before the frames below look at it (a
+  // fast machine decodes this between setProps and the first tick).
+  images.holdDecodes(true);
+  Node* img = s.add(R"J({"type":"Image","style":{"alignSelf":"flex-start"},"props":{"source":{"uri":")J" + uri + R"J("}}})J");
+  s.render();
+  ImageCache::Info info;
+  CHECK(images.peek(uri, &info));
+  CHECK(info.state == ImageCache::State::Loading);
+  CHECK_EQ(images.pendingDecodes(), 1);
+  CHECK(s.rt->wantsFrame());  // a host keeps ticking until it lands
+  CHECK_NEAR(img->layoutRect().width, 0, 0.01);
+  CHECK_EQ(s.a(5, 10), 0);
+  // Asking again while it decodes does not start a second decode.
+  images.get(uri);
+  CHECK_EQ(images.pendingDecodes(), 1);
+  uint32_t gen = images.generation;
+  // Decoded on the pool: still not there until a tick publishes it.
+  images.holdDecodes(false);
+  images.waitDecodes();
+  CHECK(images.peek(uri, &info));
+  CHECK(info.state == ImageCache::State::Loading);
+  CHECK_EQ(images.pendingDecodes(), 1);
+  CHECK_EQ(images.asyncDecodes, 0u);
+  CHECK(images.generation == gen);
+  s.render();
+  CHECK_EQ(images.pendingDecodes(), 0);
+  CHECK_EQ(images.asyncDecodes, 1u);
+  CHECK(images.generation != gen);
+  CHECK(images.peek(uri, &info));
+  CHECK(info.state == ImageCache::State::Ready);
+  CHECK_NEAR(img->layoutRect().width, 1024, 0.01);
+  CHECK_NEAR(img->layoutRect().height, 512, 0.01);
+  CHECK_EQ(s.r(5, 10), 255);
+  CHECK_EQ(s.b(1000, 10), 255);
+
+  // Cleared while decoding: the stale result is dropped, the next request
+  // decodes again.
+  images.clear();
+  images.get(uri);
+  CHECK_EQ(images.pendingDecodes(), 1);
+  images.clear();
+  images.finishDecodes();
+  CHECK_EQ(images.pendingDecodes(), 0);
+  CHECK(!images.peek(uri, &info));
+
+  // Within the tick's budget an image still decodes inline.
+  std::string small = testPngUri(40, 20);
+  ImageCache::State st;
+  CHECK(images.get(small, &st) != nullptr);
+  CHECK(st == ImageCache::State::Ready);
+}
+
+// Small images decode inline until the tick's budget is spent; the rest of
+// that tick's go to the pool, and the next tick has a new budget. Spent on
+// estimates here (1 us/px), so the split does not depend on the machine.
+TEST(render_image_inline_decode_budget) {
+  Scene s(100, 100);
+  ImageCache& images = *s.rt->images;
+  images.measureDecodes = false;
+  images.decodeNsPerPixel = 1000;
+  images.inlineBudgetUs = 2000;
+  std::string a = testPngUri(40, 20), b = testPngUri(40, 21), c = testPngUri(40, 22), d = testPngUri(40, 23);
+  s.render();  // a tick: a fresh budget
+  ImageCache::State st;
+  CHECK(images.get(a, &st) && st == ImageCache::State::Ready);  // 800 px
+  CHECK(images.get(b, &st) && st == ImageCache::State::Ready);  // 1640
+  CHECK(!images.get(c, &st) && st == ImageCache::State::Loading);  // 2520: over, to the pool
+  CHECK_EQ(images.pendingDecodes(), 1);
+  s.render();
+  CHECK(images.get(d, &st) && st == ImageCache::State::Ready);  // a new tick's budget
+  images.finishDecodes();
+  CHECK(images.get(c, &st) && st == ImageCache::State::Ready);
+  CHECK_EQ(images.asyncDecodes, 1u);
+}
+
+// Measured: the tick spends the decode time it took, and the estimate
+// follows what decodes cost here.
+TEST(render_image_decode_cost_is_learned) {
+  Scene s(100, 100);
+  ImageCache& images = *s.rt->images;
+  images.decodeNsPerPixel = 400;  // far off
+  images.inlineBudgetUs = 1e9;    // everything inline
+  s.render();
+  for (int i = 0; i < 8; i++) {
+    ImageCache::State st;
+    CHECK(images.get(testPngUri(100, 50 + i), &st) && st == ImageCache::State::Ready);
+  }
+  CHECK(images.decodeNsPerPixel < 400);
+  // A budget already spent: the next image goes to the pool.
+  images.inlineBudgetUs = 0;
+  ImageCache::State st;
+  CHECK(!images.get(testPngUri(100, 70), &st) && st == ImageCache::State::Loading);
+  images.finishDecodes();
+  CHECK_EQ(images.asyncDecodes, 1u);
+}
+
 TEST(render_scrollview_offset_and_clip) {
   Scene s(100, 100);
   Node* sv = s.add(R"J({"type":"ScrollView","style":{"width":100,"height":50},"children":[
@@ -568,13 +673,17 @@ TEST(render_skipped_subtrees_damage_like_a_full_walk) {
 // Damage cutting through rounded boxes at random places (a small box moving
 // over them, also translucent and under a scale) must still repaint exactly
 // like a full frame. Perf guards: damage inside a rounded box's padding box
-// repaints only itself; crossing edges repaints the boxes crossed, never
-// the frame.
+// repaints only itself, also when the box has a ring around it (a sharp
+// `0 0 0 1px` shadow, an outline: the site's framed stage, where a pulse in
+// it repainted the whole stage every frame, #160); crossing edges repaints
+// the boxes crossed, never the frame.
 TEST(render_incremental_rounded_boxes_cut_anywhere) {
   for (float dpr : {1.f, 1.5f}) {
     Scene s(400, 260, dpr);
     s.add(R"J({"style":{"position":"absolute","left":10,"top":10,"width":130,"height":80,"borderRadius":18,"borderWidth":1.5,
-      "borderColor":"#8fa0ff","backgroundColor":"rgba(30,40,80,0.9)","overflow":"hidden"},"children":[
+      "borderColor":"#8fa0ff","backgroundColor":"rgba(30,40,80,0.9)","overflow":"hidden",
+      "boxShadow":"0 0 0 1px rgba(0,0,0,0.6), 0 10px 24px rgba(0,0,0,0.5)","outlineWidth":1,"outlineColor":"#f2c35b",
+      "outlineOffset":2},"children":[
       {"style":{"position":"absolute","left":-10,"top":40,"width":200,"height":30,"backgroundColor":"#f2c35b"}}]})J");
     s.add(R"J({"style":{"position":"absolute","left":150,"top":12.5,"width":120,"height":70,"borderTopLeftRadius":30,
       "borderBottomRightRadius":"40%","experimental_backgroundImage":"linear-gradient(90deg, #ff4d6a, #4fd1ff)"}})J");
@@ -992,4 +1101,56 @@ TEST(render_text_color_change_keeps_the_paragraph) {
     }
   CHECK(blue > 40);
   CHECK_EQ(red, 0);
+}
+
+// Raster cache (updateRasterCache): an ancestor of a card in a hover
+// transition is reached by the card's damage in every frame of it, but its
+// subtree changes in each. When the transition settles it must not switch
+// its raster cache on (a repaint of its whole subtree) in the settling
+// frame: only damaged frames in which it was unchanged count. Two of those
+// in a row do switch it on, and its next change switches it off.
+TEST(render_raster_cache_waits_for_unchanged_frames) {
+  Scene s(320, 240);
+  Node* wrap = s.add(R"J({"style":{"width":320,"height":240},"children":[
+    {"style":{"position":"absolute","left":20,"top":20,"width":200,"height":160,"backgroundColor":"#26304f"},"children":[
+      {"style":{"position":"absolute","left":10,"top":10,"width":40,"height":40,"backgroundColor":"#ff4d6a"}},
+      {"style":{"position":"absolute","left":60,"top":10,"width":40,"height":40,"backgroundColor":"#4fd1ff"}},
+      {"style":{"position":"absolute","left":110,"top":10,"width":40,"height":40,"backgroundColor":"#4ade80"}},
+      {"style":{"position":"absolute","left":10,"top":60,"width":40,"height":40,"backgroundColor":"#f2c35b"}}]},
+    {"style":{"position":"absolute","left":150,"top":150,"width":30,"height":30,"backgroundColor":"#b26bff"}}]})J");
+  Node* card = wrap->children()[0]->children()[0];  // animated, inside the container
+  Node* over = wrap->children()[1];                 // drawn over the container's corner
+  const SkIRect container = SkIRect::MakeXYWH(20, 20, 200, 160);
+  LayerCache cache;
+  LayerCacheScope scope(&cache);
+  auto frame = [&] {
+    s.doc().layout();
+    return updateDamage(s.doc(), 320, 240);
+  };
+  auto color = [](Node* n, int i) {
+    static const char* c[] = {"#ff0000", "#00ff00", "#0000ff", "#ffffff"};
+    Value::Object partial;
+    partial["backgroundColor"] = Value(c[i % 4]);
+    CHECK(n->patchStyle(partial));
+  };
+  frame();  // the first records
+  // The card's transition: the container changes in every frame.
+  for (int i = 0; i < 6; i++) {
+    color(card, i);
+    CHECK(!frame().contains(container));
+  }
+  // Settled; damage from above reaches the container, now unchanged: the
+  // first such frame repaints that damage only.
+  color(over, 0);
+  SkRegion settle = frame();
+  CHECK(!settle.isEmpty());
+  CHECK(!settle.contains(container));
+  // The second one switches the container's texture on: repainted whole.
+  color(over, 1);
+  CHECK(frame().contains(container));
+  color(over, 2);
+  CHECK(!frame().contains(container));  // drawn from it
+  // The next hover changes it: off again, repainted whole.
+  color(card, 0);
+  CHECK(frame().contains(container));
 }

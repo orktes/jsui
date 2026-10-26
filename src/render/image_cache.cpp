@@ -1,7 +1,13 @@
 #include "render/image_cache.h"
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 #include "core/document.h"
 #include "include/core/SkData.h"
@@ -11,9 +17,16 @@
 
 namespace jsui {
 
-sk_sp<SkImage> decodeImage(const void* data, size_t size) {
+namespace {
+// Reads only the header: the size is known before any pixel is decoded.
+sk_sp<SkImage> lazyImage(const void* data, size_t size) {
   if (!data || !size) return nullptr;
-  auto image = SkImages::DeferredFromEncodedData(SkData::MakeWithCopy(data, size));
+  return SkImages::DeferredFromEncodedData(SkData::MakeWithCopy(data, size));
+}
+}  // namespace
+
+sk_sp<SkImage> decodeImage(const void* data, size_t size) {
+  auto image = lazyImage(data, size);
   // Decode once now so painting never hits the codec.
   return image ? image->makeRasterImage(nullptr) : nullptr;
 }
@@ -63,16 +76,184 @@ bool decodeDataUri(const std::string& uri, std::string* bytes) {
   return true;
 }
 
+// Decode workers. A job is a lazy (header-only) image; a worker rasters it
+// and leaves the result for the runtime thread's pump(). Few threads, started
+// on the first large image: decoding competes with the game for cores, and
+// only large images come here.
+struct ImageCache::Pool {
+  struct Job {
+    std::string url;
+    uint32_t epoch;
+    sk_sp<SkImage> lazy;
+  };
+  struct Done {
+    std::string url;
+    uint32_t epoch;
+    sk_sp<SkImage> image;  // nullptr: the codec failed
+    double us;
+  };
+
+  Pool() {
+    const int cores = int(std::thread::hardware_concurrency());
+    const int n = std::clamp(cores / 4, 1, 2);
+    for (int i = 0; i < n; i++) threads_.emplace_back([this] { run(); });
+  }
+  ~Pool() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stopping_ = true;
+    }
+    cv_.notify_all();
+    for (std::thread& t : threads_) t.join();
+  }
+  void add(Job job) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      jobs_.push_back(std::move(job));
+    }
+    cv_.notify_one();
+  }
+  void take(std::vector<Done>* out) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    out->swap(done_);
+  }
+  // Until nothing runs and nothing queued can run.
+  void waitIdle() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    idle_.wait(lock, [this] { return running_ == 0 && (jobs_.empty() || held_); });
+  }
+  void hold(bool on) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      held_ = on;
+    }
+    cv_.notify_all();
+    idle_.notify_all();
+  }
+
+ private:
+  void run() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    for (;;) {
+      cv_.wait(lock, [this] { return stopping_ || (!held_ && !jobs_.empty()); });
+      if (stopping_) return;  // queued jobs die with the cache
+      Job job = std::move(jobs_.front());
+      jobs_.pop_front();
+      running_++;
+      lock.unlock();
+      auto t0 = std::chrono::steady_clock::now();
+      sk_sp<SkImage> image = job.lazy->makeRasterImage(nullptr);
+      double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+      job.lazy.reset();
+      lock.lock();
+      done_.push_back({std::move(job.url), job.epoch, std::move(image), us});
+      running_--;
+      if (running_ == 0 && (jobs_.empty() || held_)) idle_.notify_all();
+    }
+  }
+
+  std::mutex mutex_;
+  std::condition_variable cv_, idle_;
+  std::deque<Job> jobs_;
+  std::vector<Done> done_;
+  int running_ = 0;
+  std::vector<std::thread> threads_;
+  bool stopping_ = false;
+  bool held_ = false;
+};
+
 ImageCache::ImageCache(Runtime& rt) : rt_(rt) {}
 ImageCache::~ImageCache() = default;
 
-sk_sp<SkImage> ImageCache::decode(const void* data, size_t size) {
-  auto t0 = std::chrono::steady_clock::now();
-  sk_sp<SkImage> image = decodeImage(data, size);
+void ImageCache::count(double us) {
+  // Pool decodes count on the tick that publishes them: the counter is the
+  // decode work done, not what a frame waited for.
   PerfCounters& c = rt_.doc.perf.counters;
   c.imageDecodes++;
-  c.imageDecodeUs += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
-  return image;
+  c.imageDecodeUs += us;
+}
+
+void ImageCache::fail(const std::string& url, Entry& e, std::string error) {
+  e.state = State::Failed;
+  e.image = nullptr;
+  e.error = std::move(error);
+  rt_.log(JSUI_LOG_WARN,
+          url.rfind("data:", 0) == 0 ? std::string("image failed to decode: data URI") : "image failed to load: " + url);
+}
+
+void ImageCache::decodeInto(const std::string& url, Entry& e, const void* data, size_t size, const std::string& what) {
+  e.bytes = size;
+  auto t0 = std::chrono::steady_clock::now();
+  sk_sp<SkImage> lazy = lazyImage(data, size);
+  const int64_t pixels = lazy ? int64_t(lazy->width()) * lazy->height() : 0;
+  const double estimateUs = double(pixels) * decodeNsPerPixel / 1000;
+#if !defined(__EMSCRIPTEN__)
+  if (lazy && inlineSpentUs_ + estimateUs > inlineBudgetUs) {
+    if (!pool_) pool_ = std::make_unique<Pool>();
+    e.state = State::Loading;
+    e.decoding = true;
+    decoding_++;
+    pool_->add({url, epoch_, std::move(lazy)});
+    return;
+  }
+#endif
+  e.image = lazy ? lazy->makeRasterImage(nullptr) : nullptr;
+  const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+  count(us);
+  if (!measureDecodes) {
+    inlineSpentUs_ += estimateUs;
+  } else {
+    inlineSpentUs_ += us;
+    // Small images are mostly fixed overhead: they would skew the rate.
+    if (e.image && pixels >= 4096)
+      decodeNsPerPixel = std::clamp(0.75 * decodeNsPerPixel + 0.25 * (us * 1000 / double(pixels)), 1.0, 500.0);
+  }
+  if (e.image) e.state = State::Ready;
+  else fail(url, e, "failed to decode " + what);
+}
+
+int ImageCache::pump() {
+  if (!pool_ || decoding_ == 0) return 0;
+  std::vector<Pool::Done> done;
+  pool_->take(&done);
+  int n = 0;
+  for (Pool::Done& d : done) {
+    decoding_--;
+    count(d.us);
+    asyncDecodes++;
+    auto it = entries_.find(d.url);
+    // Cleared, or replaced (put) while it decoded: the newer entry stands.
+    if (d.epoch != epoch_ || it == entries_.end() || !it->second.decoding) continue;
+    Entry& e = it->second;
+    e.decoding = false;
+    if (d.image) {
+      e.image = std::move(d.image);
+      e.state = State::Ready;
+    } else {
+      fail(d.url, e, d.url.rfind("data:", 0) == 0 ? "failed to decode image data" : "failed to decode image: " + d.url);
+    }
+    loaded(d.url);
+    n++;
+  }
+  return n;
+}
+
+void ImageCache::waitDecodes() {
+  if (pool_) pool_->waitIdle();
+}
+
+void ImageCache::finishDecodes() {
+  waitDecodes();
+  pump();
+}
+
+void ImageCache::holdDecodes(bool on) {
+#if !defined(__EMSCRIPTEN__)
+  if (!pool_) pool_ = std::make_unique<Pool>();
+  pool_->hold(on);
+#else
+  (void)on;
+#endif
 }
 
 std::string ImageCache::resolve(const std::string& uri) const {
@@ -107,34 +288,33 @@ sk_sp<SkImage> ImageCache::get(const std::string& url, State* state) {
   auto it = entries_.find(url);
   // A Loading entry with nothing in flight lost its request (reload cancels
   // all loads): ask again.
-  bool retry = it != entries_.end() && it->second.state == State::Loading && !rt_.loader.busy();
+  // A decoding entry is on the pool, not lost.
+  bool retry = it != entries_.end() && it->second.state == State::Loading && !it->second.decoding &&
+               !rt_.loader.busy();
   if (it == entries_.end() || retry) {
     if (url.rfind("data:", 0) == 0) {
       std::string bytes;
-      Entry e;
-      bool ok = decodeDataUri(url, &bytes);
-      if (ok) e.image = decode(bytes.data(), bytes.size());
-      e.bytes = bytes.size();
-      e.state = e.image ? State::Ready : State::Failed;
-      if (!e.image) {
-        e.error = ok ? "failed to decode image data" : "malformed data URI";
-        rt_.log(JSUI_LOG_WARN, "image failed to decode: data URI");
+      auto& slot = entries_[url] = Entry{};
+      if (decodeDataUri(url, &bytes)) {
+        decodeInto(url, slot, bytes.data(), bytes.size(), "image data");
+      } else {
+        slot.bytes = bytes.size();
+        fail(url, slot, "malformed data URI");
       }
-      auto& slot = entries_[url] = std::move(e);
       if (state) *state = slot.state;
       return slot.image;
     }
     entries_[url] = Entry{};
     rt_.loader.load(url, [this, url](Resource res) {
       auto& e = entries_[url];
-      if (res.ok()) e.image = decode(res.data.data(), res.data.size());
-      e.bytes = res.data.size();
-      e.state = e.image ? State::Ready : State::Failed;
-      if (!e.image) {
-        e.error = res.ok() ? "failed to decode image: " + url
-                           : "failed to load image: " + url + " (status " + std::to_string(res.status) +
-                                 (res.error.empty() ? "" : ", " + res.error) + ")";
-        rt_.log(JSUI_LOG_WARN, "image failed to load: " + url);
+      if (res.ok()) {
+        decodeInto(url, e, res.data.data(), res.data.size(), "image: " + url);
+        if (e.decoding) return;  // published by a later pump()
+      } else {
+        e.bytes = res.data.size();
+        fail(url, e,
+             "failed to load image: " + url + " (status " + std::to_string(res.status) +
+                 (res.error.empty() ? "" : ", " + res.error) + ")");
       }
       loaded(url);
     });
@@ -163,6 +343,7 @@ bool ImageCache::peek(const std::string& url, Info* info) const {
 
 void ImageCache::clear() {
   entries_.clear();
+  epoch_++;
   generation++;
 }
 
