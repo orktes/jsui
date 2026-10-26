@@ -1,87 +1,105 @@
-// --video channel:texture=url (macOS): plays a video with AVFoundation into
-// host texture `texture`, driven by the UI the way the showcase site's page
-// drives its <video> (site/index.html trailerPlayer):
-//
-//   UI -> host   message `channel` { cmd: 'open' | 'close' | 'play' | 'pause' |
-//                'mute' (muted) | 'seek' (to: s | fraction, play) }
-//   host -> UI   HostState `channel` { status, muted, duration, backend, quality }
-//                (status: idle | loading | playing | paused | ended | error),
-//                buffer `channel.time` Float32 [time / duration, buffered /
-//                duration, time in s], texture `texture` (opaque frames)
-//
-// With a Metal device (the Graphite renderer) each new frame is copied on the
-// GPU into one texture the UI samples in place; otherwise its pixels are
-// uploaded (jsui_set_texture_pixels). Every call is on the viewer's thread.
+// The viewer's video handler (JsuiConfig.on_video, include/jsui/jsui.h
+// "Video"), macOS: each <Video> the UI opens plays with AVFoundation, its
+// frames go to the view's host texture, and its status goes back with
+// jsui_video_status once per frame (viewer_videos_tick). JSUI decodes no
+// video: this is the viewer playing the part of a host, as a game engine
+// would with its own player. With a Metal device (the Graphite renderer)
+// each new frame is copied on the GPU into one texture the UI samples in
+// place; otherwise its pixels are uploaded (jsui_set_texture_pixels). Every
+// call is on the viewer's thread.
 #import <AVFoundation/AVFoundation.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Metal/Metal.h>
 
 #include <cmath>
+#include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
 #include "jsui/jsui.h"
 
+struct ViewerVideos;
+
 struct ViewerVideo {
-  JsuiRuntime* rt = nullptr;
-  std::string channel, texture, timeKey, url;
-  id<MTLDevice> device = nil;
-  id<MTLCommandQueue> queue = nil;
-  CVMetalTextureCacheRef cache = nullptr;
-  id<MTLTexture> frame = nil;  // the texture the UI samples (Metal)
+  ViewerVideos* vs = nullptr;
+  uint64_t video = 0;
+  std::string texture;
   AVPlayer* player = nil;
   AVPlayerItem* item = nil;
   AVPlayerItemVideoOutput* output = nil;
-  bool open = false, autoplay = true, muted = true, hasFrame = false;
-  std::string lastState, lastTime;
+  id<MTLTexture> frame = nil;  // the texture the UI samples (Metal)
+  bool paused = true, loop = false, hasFrame = false;
+  int seeks = 0;  // seeks under way (BUFFERING while the UI wants it playing)
+  float rate = 1;
+  std::string last;  // the last status reported
+};
+
+struct ViewerVideos {
+  JsuiRuntime* rt = nullptr;
+  id<MTLDevice> device = nil;
+  id<MTLCommandQueue> queue = nil;
+  CVMetalTextureCacheRef cache = nullptr;
+  std::map<uint64_t, ViewerVideo*> videos;
   std::vector<uint8_t> rgba;
 };
 
 namespace {
 
-std::string jsonString(NSString* s) {
-  NSData* d = [NSJSONSerialization dataWithJSONObject:@[ s ?: @"" ] options:0 error:nil];
-  std::string a(static_cast<const char*>(d.bytes), d.length);
-  return a.substr(1, a.size() - 2);  // ["..."] -> "..."
-}
-
 double seconds(CMTime t) {
-  return CMTIME_IS_NUMERIC(t) ? CMTimeGetSeconds(t) : 0;
+  double s = CMTIME_IS_NUMERIC(t) ? CMTimeGetSeconds(t) : 0;
+  return std::isfinite(s) ? s : 0;
 }
 
 double duration(ViewerVideo* v) {
   double d = v->item ? seconds(v->item.duration) : 0;
-  return std::isfinite(d) && d > 0 ? d : 0;
+  return d > 0 ? d : 0;
 }
 
-const char* status(ViewerVideo* v) {
-  if (!v->player) return "idle";
-  if (v->item.status == AVPlayerItemStatusFailed) return "error";
+bool atEnd(ViewerVideo* v) {
   double d = duration(v);
-  if (v->player.timeControlStatus == AVPlayerTimeControlStatusPaused)
-    return d > 0 && seconds(v->player.currentTime) >= d - 0.05 ? "ended" : "paused";
-  if (v->player.timeControlStatus == AVPlayerTimeControlStatusWaitingToPlayAtSpecifiedRate || !v->hasFrame)
-    return "loading";
-  return "playing";
+  return d > 0 && seconds(v->player.currentTime) >= d - 0.05;
 }
 
-void publish(ViewerVideo* v) {
-  CGSize size = v->item ? v->item.presentationSize : CGSizeZero;
-  std::string quality = size.height > 0 ? std::to_string(int(size.height)) + "p H.264" : "";
-  char d[32];
-  std::snprintf(d, sizeof d, "%.3f", duration(v));
-  std::string json = std::string("{\"status\":\"") + status(v) + "\",\"muted\":" + (v->muted ? "true" : "false") +
-                     ",\"duration\":" + d + ",\"backend\":\"" + (v->device ? "metal" : "pixels") + "\"" +
-                     (quality.empty() ? "" : ",\"quality\":" + jsonString(@(quality.c_str()))) + "}";
-  if (json == v->lastState) return;
-  v->lastState = json;
-  jsui_patch_state(v->rt, v->channel.c_str(), json.c_str());
+// The playback state the UI wants (JsuiVideoCommand OPEN / SET).
+void apply(ViewerVideo* v, const JsuiVideoCommand* c) {
+  v->player.muted = c->muted != 0;
+  v->player.volume = std::max(0.f, std::min(1.f, c->volume));
+  v->loop = c->loop != 0;
+  v->rate = c->rate > 0 ? c->rate : 1;
+  v->paused = c->paused != 0;
+  if (v->paused) {
+    [v->player pause];
+    return;
+  }
+  if (atEnd(v)) [v->player seekToTime:kCMTimeZero];
+  v->player.defaultRate = v->rate;
+  [v->player playImmediatelyAtRate:v->rate];
 }
 
-void create(ViewerVideo* v) {
-  NSURL* url = [NSURL URLWithString:@(v->url.c_str())];
-  if (!url.scheme) url = [NSURL fileURLWithPath:@(v->url.c_str())];
-  v->item = [AVPlayerItem playerItemWithURL:url];
+void openVideo(ViewerVideos* vs, const JsuiVideoCommand* c) {
+  // The first alternative AVFoundation can play (a type it does not know: skipped).
+  const char* url = nullptr;
+  for (int i = 0; i < c->source_count && !url; i++) {
+    const char* type = c->source_types ? c->source_types[i] : nullptr;
+    if (!type || [AVURLAsset isPlayableExtendedMIMEType:@(type)]) url = c->sources[i];
+  }
+  if (!url && c->source_count == 0) url = c->url;
+  auto* v = new ViewerVideo;
+  v->vs = vs;
+  v->video = c->video;
+  v->texture = c->texture ? c->texture : "";
+  vs->videos[c->video] = v;
+  if (!url) {
+    JsuiVideoStatus s{};
+    s.state = JSUI_VIDEO_FAILED;
+    s.error = "no source AVFoundation can play";
+    jsui_video_status(vs->rt, c->video, &s);
+    return;
+  }
+  NSURL* u = [NSURL URLWithString:@(url)];
+  if (!u.scheme) u = [NSURL fileURLWithPath:@(url)];
+  v->item = [AVPlayerItem playerItemWithURL:u];
   NSDictionary* attrs = @{
     (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
     (id)kCVPixelBufferMetalCompatibilityKey : @YES,
@@ -90,21 +108,24 @@ void create(ViewerVideo* v) {
   v->output = [[AVPlayerItemVideoOutput alloc] initWithPixelBufferAttributes:attrs];
   [v->item addOutput:v->output];
   v->player = [AVPlayer playerWithPlayerItem:v->item];
-  v->player.muted = v->muted;
+  v->player.actionAtItemEnd = AVPlayerActionAtItemEndPause;
+  apply(v, c);
 }
 
-void play(ViewerVideo* v) {
-  if (!v->player) create(v);
-  if (std::strcmp(status(v), "ended") == 0) [v->player seekToTime:kCMTimeZero];
-  [v->player play];
+void closeVideo(ViewerVideos* vs, uint64_t video) {
+  auto it = vs->videos.find(video);
+  if (it == vs->videos.end()) return;
+  [it->second->player pause];
+  delete it->second;
+  vs->videos.erase(it);
 }
 
 // A new frame: into the UI's texture.
 void upload(ViewerVideo* v, CVPixelBufferRef pb) {
   int w = int(CVPixelBufferGetWidth(pb)), h = int(CVPixelBufferGetHeight(pb));
-  if (v->device) {
+  if (v->vs->device) {
     CVMetalTextureRef cv = nullptr;
-    if (CVMetalTextureCacheCreateTextureFromImage(nullptr, v->cache, pb, nullptr, MTLPixelFormatBGRA8Unorm, w, h, 0,
+    if (CVMetalTextureCacheCreateTextureFromImage(nullptr, v->vs->cache, pb, nullptr, MTLPixelFormatBGRA8Unorm, w, h, 0,
                                                   &cv) != kCVReturnSuccess)
       return;
     bool fresh = !v->frame || v->frame.width != NSUInteger(w) || v->frame.height != NSUInteger(h);
@@ -115,11 +136,11 @@ void upload(ViewerVideo* v, CVPixelBufferRef pb) {
                                                                                 mipmapped:NO];
       td.usage = MTLTextureUsageShaderRead;
       td.storageMode = MTLStorageModePrivate;
-      v->frame = [v->device newTextureWithDescriptor:td];
+      v->frame = [v->vs->device newTextureWithDescriptor:td];
     }
     // On the render's queue: ordered before the next frame samples it. The
     // pixel buffer stays alive until the copy ran.
-    id<MTLCommandBuffer> cb = [v->queue commandBuffer];
+    id<MTLCommandBuffer> cb = [v->vs->queue commandBuffer];
     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
     [blit copyFromTexture:CVMetalTextureGetTexture(cv) toTexture:v->frame];
     [blit endEncoding];
@@ -137,18 +158,18 @@ void upload(ViewerVideo* v, CVPixelBufferRef pb) {
       t.width = w;
       t.height = h;
       t.flags = JSUI_TEXTURE_OPAQUE;
-      jsui_set_texture(v->rt, v->texture.c_str(), &t);
+      jsui_set_texture(v->vs->rt, v->texture.c_str(), &t);
     } else {
-      jsui_texture_updated(v->rt, v->texture.c_str());
+      jsui_texture_updated(v->vs->rt, v->texture.c_str());
     }
   } else {
     if (CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) return;
     const uint8_t* src = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddress(pb));
     size_t stride = CVPixelBufferGetBytesPerRow(pb);
-    v->rgba.resize(size_t(w) * h * 4);
+    v->vs->rgba.resize(size_t(w) * h * 4);
     for (int y = 0; y < h; y++) {
       const uint8_t* s = src + y * stride;
-      uint8_t* d = v->rgba.data() + size_t(y) * w * 4;
+      uint8_t* d = v->vs->rgba.data() + size_t(y) * w * 4;
       for (int x = 0; x < w; x++, s += 4, d += 4) {
         d[0] = s[2];
         d[1] = s[1];
@@ -157,123 +178,127 @@ void upload(ViewerVideo* v, CVPixelBufferRef pb) {
       }
     }
     CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
-    jsui_set_texture_pixels(v->rt, v->texture.c_str(), v->rgba.data(), w, h, 0, JSUI_TEXTURE_OPAQUE);
+    jsui_set_texture_pixels(v->vs->rt, v->texture.c_str(), v->vs->rgba.data(), w, h, 0, JSUI_TEXTURE_OPAQUE);
   }
   v->hasFrame = true;
 }
 
-}  // namespace
-
-extern "C" {
-
-// `spec`: channel:texture=url. `device` / `queue`: the Graphite renderer's
-// (NULL: upload pixels). NULL for a malformed spec.
-ViewerVideo* viewer_video_create(const char* spec, void* device, void* queue) {
-  std::string s = spec;
-  size_t colon = s.find(':'), eq = s.find('=');
-  if (colon == std::string::npos || eq == std::string::npos || colon == 0 || eq < colon + 2 || eq + 1 == s.size())
-    return nullptr;
-  auto* v = new ViewerVideo;
-  v->channel = s.substr(0, colon);
-  v->texture = s.substr(colon + 1, eq - colon - 1);
-  v->timeKey = v->channel + ".time";
-  v->url = s.substr(eq + 1);
-  v->autoplay = !getenv("JSUI_VIDEO_NO_AUTOPLAY");
-  if (device) {
-    v->device = (__bridge id<MTLDevice>)device;
-    v->queue = (__bridge id<MTLCommandQueue>)queue;
-    CVMetalTextureCacheCreate(nullptr, nullptr, v->device, nullptr, &v->cache);
-  }
-  return v;
-}
-
-const char* viewer_video_channel(ViewerVideo* v) {
-  return v->channel.c_str();
-}
-
-// A new runtime (reload): starts over, nothing open.
-void viewer_video_attach(ViewerVideo* v, JsuiRuntime* rt) {
-  if (v->player) [v->player pause];
-  v->rt = rt;
-  v->open = false;
-  v->hasFrame = false;
-  v->frame = nil;
-  v->lastState.clear();
-  v->lastTime.clear();
-  publish(v);
-}
-
-// A message on the channel (its JSON payload).
-void viewer_video_message(ViewerVideo* v, const char* json) {
-  NSData* data = [NSData dataWithBytes:json length:std::strlen(json)];
-  NSDictionary* m = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-  if (![m isKindOfClass:[NSDictionary class]]) return;
-  NSString* cmd = m[@"cmd"];
-  if ([cmd isEqual:@"open"]) {
-    v->open = true;
-    if (v->autoplay) play(v);
-  } else if ([cmd isEqual:@"close"]) {
-    v->open = false;
-    [v->player pause];
-    v->hasFrame = false;
-    jsui_remove_texture(v->rt, v->texture.c_str());
-    v->frame = nil;
-  } else if ([cmd isEqual:@"play"]) {
-    play(v);
-  } else if ([cmd isEqual:@"pause"]) {
-    [v->player pause];
-  } else if ([cmd isEqual:@"mute"]) {
-    v->muted = [m[@"muted"] boolValue];
-    v->player.muted = v->muted;
-  } else if ([cmd isEqual:@"seek"]) {
-    double d = duration(v), to = -1;
-    if ([m[@"fraction"] isKindOfClass:[NSNumber class]]) to = [m[@"fraction"] doubleValue] * d;
-    else if ([m[@"to"] isKindOfClass:[NSNumber class]]) to = [m[@"to"] doubleValue];
-    if (to >= 0 && v->player) {
-      if (d > 0) to = std::min(to, d - 0.1);
-      [v->player seekToTime:CMTimeMakeWithSeconds(to, 600) toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
-    }
-    if ([m[@"play"] boolValue] && (!v->player || v->player.timeControlStatus == AVPlayerTimeControlStatusPaused))
-      play(v);
-  }
-  publish(v);
-}
-
-// Once per frame: the newest video frame, playback state and position.
-// Returns 1 while frames are coming (keep ticking), else 0.
-int viewer_video_tick(ViewerVideo* v) {
-  if (!v->rt || !v->player || !v->open) return 0;
+// The newest frame, and the status when it changed. True while it plays.
+bool tick(ViewerVideo* v) {
+  if (!v->player || !v->vs->rt) return false;
   @autoreleasepool {
     CMTime now = [v->output itemTimeForHostTime:CACurrentMediaTime()];
-    if ([v->output hasNewPixelBufferForItemTime:now]) {
+    if (!v->texture.empty() && [v->output hasNewPixelBufferForItemTime:now]) {
       CVPixelBufferRef pb = [v->output copyPixelBufferForItemTime:now itemTimeForDisplay:nullptr];
       if (pb) {
         upload(v, pb);
         CVPixelBufferRelease(pb);
       }
     }
-    publish(v);
-    double d = duration(v), t = seconds(v->player.currentTime), b = 0;
-    for (NSValue* r in v->item.loadedTimeRanges) {
-      CMTimeRange range = r.CMTimeRangeValue;
-      b = std::max(b, seconds(CMTimeRangeGetEnd(range)));
+    // Looping: from the start again instead of ending.
+    if (v->loop && !v->paused && v->player.timeControlStatus == AVPlayerTimeControlStatusPaused && atEnd(v)) {
+      [v->player seekToTime:kCMTimeZero];
+      [v->player playImmediatelyAtRate:v->rate];
     }
-    char key[64];
-    std::snprintf(key, sizeof key, "%.2f %.1f %.3f", t, b, d);
-    if (v->lastTime != key) {
-      v->lastTime = key;
-      float buf[3] = {float(d > 0 ? t / d : 0), float(d > 0 ? b / d : 0), float(t)};
-      jsui_set_buffer(v->rt, v->timeKey.c_str(), JSUI_BUFFER_F32, buf, 3);
+    JsuiVideoStatus s{};
+    NSString* error = nil;
+    if (v->item.status == AVPlayerItemStatusFailed) {
+      s.state = JSUI_VIDEO_FAILED;
+      error = v->item.error.localizedDescription ?: @"the video could not be played";
+    } else if (v->item.status == AVPlayerItemStatusUnknown) {
+      s.state = JSUI_VIDEO_LOADING;
+    } else if (v->seeks > 0 && !v->paused) {
+      s.state = JSUI_VIDEO_BUFFERING;  // seeking
+    } else if (v->player.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
+      s.state = JSUI_VIDEO_PLAYING;
+    } else if (v->player.timeControlStatus == AVPlayerTimeControlStatusWaitingToPlayAtSpecifiedRate) {
+      s.state = JSUI_VIDEO_BUFFERING;
+    } else {
+      s.state = !v->loop && atEnd(v) ? JSUI_VIDEO_ENDED : JSUI_VIDEO_PAUSED;
     }
-    return v->player.timeControlStatus != AVPlayerTimeControlStatusPaused;
+    s.duration_s = duration(v);
+    s.position_s = seconds(v->player.currentTime);
+    for (NSValue* r in v->item.loadedTimeRanges) s.buffered_s = std::max(s.buffered_s, seconds(CMTimeRangeGetEnd(r.CMTimeRangeValue)));
+    CGSize size = v->item.presentationSize;
+    s.width = int(size.width);
+    s.height = int(size.height);
+    s.error = error.UTF8String;
+    char key[160];
+    std::snprintf(key, sizeof key, "%d %.3f %.3f %.1f %d %d", s.state, s.duration_s, s.position_s, s.buffered_s,
+                  s.width, s.height);
+    if (v->last != key) {
+      v->last = key;
+      jsui_video_status(v->vs->rt, v->video, &s);
+    }
+    return s.state == JSUI_VIDEO_PLAYING || s.state == JSUI_VIDEO_BUFFERING || s.state == JSUI_VIDEO_LOADING;
   }
 }
 
-void viewer_video_destroy(ViewerVideo* v) {
-  if (!v) return;
-  [v->player pause];
-  if (v->cache) CFRelease(v->cache);
-  delete v;
+}  // namespace
+
+extern "C" {
+
+// `device` / `queue`: the Graphite renderer's (NULL: upload pixels).
+ViewerVideos* viewer_videos_create(void* device, void* queue) {
+  auto* vs = new ViewerVideos;
+  if (device) {
+    vs->device = (__bridge id<MTLDevice>)device;
+    vs->queue = (__bridge id<MTLCommandQueue>)queue;
+    CVMetalTextureCacheCreate(nullptr, nullptr, vs->device, nullptr, &vs->cache);
+  }
+  return vs;
+}
+
+// The runtime the videos report to (its JsuiConfig.on_video is
+// viewer_videos_command with `vs` as the user pointer).
+void viewer_videos_attach(ViewerVideos* vs, JsuiRuntime* rt) {
+  vs->rt = rt;
+}
+
+void viewer_videos_command(void* user, const JsuiVideoCommand* c) {
+  auto* vs = static_cast<ViewerVideos*>(user);
+  if (c->op == JSUI_VIDEO_OPEN) return openVideo(vs, c);
+  auto it = vs->videos.find(c->video);
+  if (it == vs->videos.end()) return;
+  ViewerVideo* v = it->second;
+  if (c->op == JSUI_VIDEO_CLOSE) closeVideo(vs, c->video);
+  else if (!v->player) return;
+  else if (c->op == JSUI_VIDEO_SET) apply(v, c);
+  else if (c->op == JSUI_VIDEO_SEEK) {
+    // AVPlayer may stop while it seeks: playing again once there (when the
+    // UI still wants it playing). The completion comes on any queue.
+    v->seeks++;
+    uint64_t video = c->video;
+    [v->player seekToTime:CMTimeMakeWithSeconds(std::max(0.0, c->time_s), 600)
+          toleranceBefore:kCMTimeZero
+           toleranceAfter:kCMTimeZero
+        completionHandler:^(BOOL) {
+          dispatch_async(dispatch_get_main_queue(), ^{
+            auto at = vs->videos.find(video);
+            if (at == vs->videos.end()) return;  // closed meanwhile
+            ViewerVideo* w = at->second;
+            if (w->seeks > 0) w->seeks--;
+            if (!w->seeks && !w->paused) [w->player playImmediatelyAtRate:w->rate];
+          });
+        }];
+  }
+}
+
+// Once per frame. Returns 1 while a video plays (keep ticking), else 0.
+int viewer_videos_tick(ViewerVideos* vs) {
+  bool playing = false;
+  for (auto& [id, v] : vs->videos) playing |= tick(v);
+  return playing;
+}
+
+void viewer_videos_destroy(ViewerVideos* vs) {
+  if (!vs) return;
+  for (auto& [id, v] : vs->videos) {
+    [v->player pause];
+    delete v;
+  }
+  if (vs->cache) CFRelease(vs->cache);
+  delete vs;
 }
 
 }  // extern "C"

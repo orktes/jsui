@@ -50,7 +50,7 @@ target_link_libraries(jsui-viewer PRIVATE jsui SDL2::SDL2-static)
 jsui_copy_icu_data(jsui-viewer)
 if(APPLE)
   # Graphite on Metal (used when the library has JSUI_GRAPHITE_METAL), AppKit
-  # scroll input and --video (AVFoundation).
+  # scroll input and 'video' host messages (AVFoundation).
   target_sources(jsui-viewer PRIVATE metal.mm macos.mm video.mm)
   set_source_files_properties(metal.mm macos.mm video.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
   target_link_libraries(jsui-viewer PRIVATE "-framework Metal" "-framework QuartzCore" "-framework AppKit"

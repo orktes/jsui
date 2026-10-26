@@ -299,6 +299,22 @@ globalThis.__jsui_native = {
   audioResolve(url) {
     return mockResolve(url);
   },
+  // Video (src/js/bridge_video.cpp): records commands in mock.video.
+  videoOpen(urls, types, texture, paused, muted, volume, loop, rate, progressMs) {
+    const id = mock.nextVideo++;
+    mock.video.push(['open', { id, urls: (Array.isArray(urls) ? urls : [urls]).map(mockResolve), types, texture,
+      paused, muted, volume, loop, rate, progressMs }]);
+    return id;
+  },
+  videoSet(id, paused, muted, volume, loop, rate) {
+    mock.video.push(['set', { id, paused, muted, volume, loop, rate }]);
+  },
+  videoSeek(id, time) {
+    mock.video.push(['seek', { id, time }]);
+  },
+  videoClose(id) {
+    mock.video.push(['close', { id }]);
+  },
   // Host textures (src/render/host_textures.cpp): [width, height, version].
   texture(key) {
     const e = hostTextures.get(key);
@@ -392,6 +408,12 @@ Object.assign(mock, {
   /** Audio commands the UI sent: [kind, args]. */
   audio: [],
   nextVoice: 1,
+  video: [],
+  nextVideo: 1,
+  /** A jsui_video_status report: [state, duration, position, buffered, width, height, error]. */
+  videoStatus(id, state, duration = 0, position = 0, buffered = 0, width = 0, height = 0, error = '') {
+    globalThis.__jsui_onVideo([[id, state, duration, position, buffered, width, height, error]]);
+  },
   /** Embedder side: jsui_audio_voice_ended / jsui_audio_sound_loaded, delivered at once (a tick). */
   audioEnded(voice, status = 0) {
     globalThis.__jsui_onAudio([[0, voice, status]]);

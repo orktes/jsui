@@ -226,6 +226,9 @@ int jsui_remove_texture(JsuiRuntime* rt, const char* key) { return key && rt->rt
 void jsui_audio_voice_ended(JsuiRuntime* rt, uint64_t voice, int status) {
   if (rt) rt->rt->audio->voiceEnded(voice, status);
 }
+void jsui_video_status(JsuiRuntime* rt, uint64_t video, const JsuiVideoStatus* status) {
+  if (rt && status) rt->rt->video->status(video, *status);
+}
 void jsui_audio_sound_loaded(JsuiRuntime* rt, const char* sound, int ok, double duration_s) {
   if (rt && sound) rt->rt->audio->soundLoaded(sound, ok != 0, duration_s);
 }

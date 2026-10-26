@@ -250,12 +250,13 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
           document.title = 'JSUI · ' + (data === '/' ? 'React Native game UI, everywhere' : data.split('/')[1].replace(/^\w/, (c) => c.toUpperCase()));
         } else if (name === 'jsui:openURL') window.open(data.url, '_blank', 'noopener');
         else if (name === 'title') document.title = data;
-        else if (name === 'cinematic') cinematic(data);
         else if (name === 'sound') sound.setMuted(data.muted);
         else if (name === 'copy') navigator.clipboard?.writeText(String(data)).catch(() => {});
       });
       const sound = soundSwitch(jsui);
-      const cinematic = trailerPlayer(jsui, { autoplay: q.get('autoplay') !== '0' });
+      // The cinematic screen's <Video> (played by jsui-web.js) waits for a
+      // press with ?autoplay=0 (the smoke test: nothing streams).
+      jsui.setState('autoplay', q.get('autoplay') !== '0');
       addEventListener('popstate', () => jsui.postMessage('route', route()));
       addEventListener('hashchange', () => jsui.postMessage('route', route()));
       if (q.get('stats') === '1') {
@@ -297,116 +298,6 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
       };
     }
 
-    // The /screens/cinematic trailer. JSUI plays no video: this page owns a
-    // <video>, keeps the host texture 'trailer' current with jsui.bindVideo()
-    // and reports playback through HostState 'cinematic' ({ status, muted,
-    // duration, backend, quality }) and frame data 'cinematic.time'
-    // ([fraction, buffered fraction, seconds]). The UI sends { cmd } messages.
-    // Big Buck Bunny (c) 2008 Blender Foundation, peach.blender.org, CC BY 3.0,
-    // streamed from Wikimedia Commons (CORS-enabled, so GPU uploads may read it).
-    // ?autoplay=0: start paused and fetch nothing until play is pressed.
-    function trailerPlayer(jsui, { autoplay }) {
-      const BASE = 'https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.';
-      const SOURCES = { hd: { url: BASE + '1080p.vp9.webm', quality: '1080p VP9' }, sd: { url: BASE + '480p.vp9.webm', quality: '480p VP9' } };
-      const POSTER = 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c0/Big_Buck_Bunny_4K.webm/1280px--Big_Buck_Bunny_4K.webm.jpg';
-      let video = null, unbind = null, raf = 0, open = false, tried = [], last = '';
-      const state = (patch) => jsui.patchState('cinematic', { backend: jsui.textureBackend, ...patch });
-      const status = () => (!video ? 'idle' : video.error ? 'error' : video.ended ? 'ended'
-        : video.paused ? 'paused' : video.readyState < 3 ? 'loading' : 'playing');
-      const publish = () => state({ status: status(), muted: video ? video.muted : true,
-        duration: video && isFinite(video.duration) ? video.duration : 0 });
-      // Playback position as frame data, only when it moved (a paused page stays idle).
-      const tick = () => {
-        raf = open ? requestAnimationFrame(tick) : 0;
-        if (!video) return;
-        const d = isFinite(video.duration) && video.duration > 0 ? video.duration : 0, t = video.currentTime;
-        const b = video.buffered.length ? video.buffered.end(video.buffered.length - 1) : 0;
-        const key = `${t.toFixed(2)} ${b.toFixed(1)} ${d}`;
-        if (key === last) return;
-        last = key;
-        jsui.setBuffer('cinematic.time', Float32Array.of(d ? t / d : 0, d ? b / d : 0, t));
-      };
-      // 1080p on the GPU paths; the CPU path copies every frame, so 480p there
-      // (each falls back to the other when it does not load).
-      const pick = () => {
-        const order = jsui.textureBackend === 'pixels' ? ['sd', 'hd'] : ['hd', 'sd'];
-        return order.find((k) => !tried.includes(k));
-      };
-      const load = () => {
-        const k = pick();
-        if (!k) return false;
-        tried.push(k);
-        video.src = SOURCES[k].url;
-        state({ quality: SOURCES[k].quality });
-        return true;
-      };
-      const create = () => {
-        video = document.createElement('video');
-        Object.assign(video, { crossOrigin: 'anonymous', muted: true, playsInline: true, preload: 'auto' });
-        video.setAttribute('aria-hidden', 'true');
-        // In the document (some browsers stop decoding detached or invisible videos), out of sight.
-        Object.assign(video.style, { position: 'fixed', left: '0', top: '0', width: '2px', height: '2px', opacity: '0.01', pointerEvents: 'none', zIndex: '-1' });
-        document.body.appendChild(video);
-        for (const e of ['play', 'playing', 'pause', 'waiting', 'canplay', 'ended', 'volumechange', 'durationchange', 'seeked']) {
-          video.addEventListener(e, publish);
-        }
-        video.addEventListener('error', () => {
-          if (load()) video.play().catch(() => {});
-          else publish();
-        });
-        // The poster (an <img>, another texture source) until the first frame:
-        // set unless the video has a frame the browser lets us upload (WebKit
-        // refuses this one as cross-origin). setTexture is a Promise in worker mode.
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        img.onload = async () => {
-          if (!open || !video) return;
-          if (video.readyState >= 2 && await jsui.setTexture('trailer', video)) return;
-          if (open) jsui.setTexture('trailer', img);
-        };
-        img.src = POSTER;
-        load();
-      };
-      const bind = () => { unbind ??= jsui.bindVideo('trailer', video); };
-      const play = () => {
-        if (!video) create();
-        bind();
-        if (video.error) {
-          tried = [];
-          load();
-        }
-        state({ status: 'loading' });
-        video.play().catch(() => publish());  // autoplay refused: stays paused
-      };
-      jsui.on('renderer', () => state({}));
-      return ({ cmd, ...a }) => {
-        if (cmd === 'open') {
-          open = true;
-          if (!raf) raf = requestAnimationFrame(tick);
-          if (autoplay) play();
-          else if (video) bind();
-          publish();
-        } else if (cmd === 'close') {
-          open = false;
-          video?.pause();
-          unbind?.();
-          unbind = null;
-          jsui.removeTexture('trailer');
-        } else if (cmd === 'play') {
-          if (video?.ended) video.currentTime = 0;
-          play();
-        } else if (cmd === 'pause') video?.pause();
-        else if (cmd === 'mute') {
-          if (video) video.muted = !!a.muted;  // from a click in the UI: a user activation
-          publish();
-        } else if (cmd === 'seek' && video) {
-          const d = isFinite(video.duration) ? video.duration : 0;
-          const to = a.fraction != null ? a.fraction * d : a.to;
-          if (to >= 0) video.currentTime = d ? Math.min(to, d - 0.1) : to;
-          if (a.play && video.paused) play();
-        } else if (cmd === 'seek' && a.play) play();
-      };
-    }
   </script>
 </body>
 </html>

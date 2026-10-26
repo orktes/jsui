@@ -35,6 +35,8 @@ pub type JsuiCallResultFn =
 pub type JsuiAudioFn = *const c_void;
 /// `JsuiJsReadyFn`: runs on the JS thread (see the header's "JS thread").
 pub type JsuiJsReadyFn = Option<unsafe extern "C" fn(user: *mut c_void)>;
+/// `JsuiVideoFn` (see the header's Video section); not wrapped yet.
+pub type JsuiVideoFn = *const c_void;
 pub type JsuiGLGetProcFn = Option<unsafe extern "C" fn(user: *mut c_void, name: *const c_char) -> *mut c_void>;
 
 #[repr(C)]
@@ -67,6 +69,8 @@ pub struct JsuiConfig {
     pub js_sync_timeout_ms: c_int,
     pub on_js_ready: JsuiJsReadyFn,
     pub js_ready_user: *mut c_void,
+    pub on_video: JsuiVideoFn,
+    pub video_user: *mut c_void,
 }
 
 pub const JSUI_JS_THREAD_OFF: c_int = 0;

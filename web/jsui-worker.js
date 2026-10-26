@@ -445,6 +445,8 @@ function definePage(I) {
       this.hitMapStats = { updates: 0, regions: 0, lookups: 0, misses: 0, latency: newSeries(), transit: newSeries() };
       this.audio = new I.JsuiAudio(this, opts.audio);
       this.audio.sink = (list) => this._send({ op: 'audioReports', list });
+      // The worker's <Video> commands play here (videos are page elements).
+      this.video = new I.JsuiVideo(this, (...args) => this._send({ op: 'videoStatus', args }));
       worker.onmessage = (e) => this._onMessage(e.data);
       worker.onerror = (e) => {
         e.preventDefault?.();
@@ -604,6 +606,7 @@ function definePage(I) {
         case 'padsUsed': this._padsUsed = ev.pads; return;
         case 'texAck': this._bindings.get(ev.name)?.ack(); return;
         case 'audio': this.audio.command(ev.cmd); return;
+        case 'video': this.video.command(ev.cmd); return;
         case 'texReset': this._texturesReset(); return;
         case 'glLost': {
           // A WebGL context in the worker was lost (see JsuiHost._contextLost).
@@ -1109,6 +1112,7 @@ function definePage(I) {
 
     destroy() {
       if (this._destroyed) return;
+      this.video.destroy();
       for (const b of [...this._bindings.values()]) b.unbind();
       this._texSources.clear();
       for (const s of this._surfaces) s._destroyLocal();
@@ -1583,7 +1587,8 @@ export function serve(I, early) {
       const M = await I.loadModuleFor(opts, webgpu);
       host = new RemoteHost(M, m.canvas, { ...opts, _webgpu: webgpu, _size: m.size, _v: 0, gamepads: false,
         autoStart: false, autoFocus: false,
-        audio: opts.audio === false ? false : (cmd) => post({ ev: 'audio', cmd }) });
+        audio: opts.audio === false ? false : (cmd) => post({ ev: 'audio', cmd }),
+        video: (cmd) => post({ ev: 'video', cmd }) });
       if (opts.workerLoop === 'main') host._ticks = true;
     } catch (e) {
       post({ ev: 'initError', message: msgOf(e) });
@@ -1733,6 +1738,7 @@ export function serve(I, early) {
           else host.audio.soundLoaded(r[1], r[2], r[3]);
         }
         return;
+      case 'videoStatus': host._videoStatus(...op.args); return;
       case 'loadUrl': host.loadUrl(op.url); return;
       case 'loadSource': reply(op.id, true, host.loadSource(op.source, op.name)); return;
       case 'reload': host.reload(); return;

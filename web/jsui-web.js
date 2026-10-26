@@ -185,12 +185,13 @@
  * }} JsuiOptions */
 
 import { SharedWebGPU, WebGPURenderer, requestWebGPU, standInPipeline } from './jsui-webgpu.js';
-import { HostTextureSet, corsWarning, defaultOpaque, isVideoFrame, sourceSize, taintKey, videoFramesContextLost,
-  watchVideoFrames } from './jsui-textures.js';
+import { HostTextureSet, JsuiVideo, corsWarning, defaultOpaque, isVideoFrame, sourceSize, taintKey,
+  videoFramesContextLost, watchVideoFrames } from './jsui-textures.js';
 import { JsuiAudio } from './jsui-audio.js';
 
 export { requestWebGPU, webgpuSupported } from './jsui-webgpu.js';
 export { AudioOp, AudioStatus } from './jsui-audio.js';
+export { VideoOp, VideoState } from './jsui-textures.js';
 
 const modules = new Map();  // module URL -> Promise<Module>
 
@@ -395,7 +396,7 @@ function replaceCanvas(old) {
 // so the worker's copy of this file and the page's stay one module graph each).
 function internals() {
   return { DomView, CanvasView, JsuiHost, JsuiSurface, HIT_POINTER, HIT_SCROLL, NAV_KEYS, webgpuFor, loadModuleFor,
-    bufferType, BUFFER_TYPES, sourceSize, defaultOpaque, isVideoFrame, transferred, replaceCanvas, fontArgs, fontList, JsuiAudio,
+    bufferType, BUFFER_TYPES, sourceSize, defaultOpaque, isVideoFrame, transferred, replaceCanvas, fontArgs, fontList, JsuiAudio, JsuiVideo,
     corsWarning, taintKey, videoFramesContextLost, watchVideoFrames, hostUrl: import.meta.url, workerName: WORKER_NAME };
 }
 const WORKER_NAME = 'jsui-host';
@@ -2045,6 +2046,11 @@ class JsuiHost extends CanvasView {
     this.rootTag = 1;
     /** UI audio (web/jsui-audio.js): unlocked, unlock(), setVolume(), muted, context. */
     this.audio = new JsuiAudio(this, opts.audio);
+    // <Video> views (include/jsui/jsui.h "Video"): played with <video>
+    // elements here (web/jsui-textures.js JsuiVideo); a worker's runtime
+    // forwards the commands to the page instead (opts.video).
+    this._videoForward = typeof opts.video === 'function' ? opts.video : null;
+    this.video = new JsuiVideo(this, (...a) => this._videoStatus(...a));
     this._idleSleep = opts.idleSleep !== false && !opts.devMode;
     this._wakeTimer = 0;
     this._loop = null;
@@ -2076,6 +2082,7 @@ class JsuiHost extends CanvasView {
         try { p.resolve(JSON.parse(payload)); } catch (e) { p.reject(e); }
       },
       onAudio: (cmd) => this.audio.command(cmd),
+      onVideo: (cmd) => (this._videoForward ? this._videoForward(cmd) : this.video.command(cmd)),
       onLog: (level, text) => {
         if (!this._emit('log', level, text)) {
           (level >= 3 ? console.error : level === 2 ? console.warn : level === 0 ? console.debug : console.log)(
@@ -2236,6 +2243,13 @@ class JsuiHost extends CanvasView {
   bindVideo(name, video, options) {
     if (this._destroyed) throw new Error('bindVideo: runtime destroyed');
     return this._textureSet().bindVideo(name, video, options ?? {});
+  }
+
+  // A <Video>'s status (JsuiVideo's report) to the runtime.
+  _videoStatus(id, state, duration, position, buffered, width, height, error) {
+    if (this._destroyed || !this.rt) return;
+    this._withStrings([error || null], (e) =>
+      this.module._jsui_web_video_status(this.rt, id, state, duration, position, buffered, width, height, e));
   }
 
   /** Where host textures go now: 'webgpu' (GPU textures on the page's
@@ -2657,6 +2671,7 @@ class JsuiHost extends CanvasView {
     }
     this._destroyView();
     const M = this.module;
+    this.video.destroy();  // before the runtime's own CLOSEs
     M._jsui_destroy(this.rt);  // stops every voice (STOP_ALL)
     this.rt = 0;
     M.__jsuiHosts.delete(this.hostId);

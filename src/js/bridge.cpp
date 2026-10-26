@@ -984,6 +984,7 @@ JSValue js_evalScript(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
 
 void installAnimatedBridge(JsEngine::Impl& impl, JSValue native);  // bridge_animated.cpp
 void installAudioBridge(JsEngine::Impl& impl, JSValue native);     // bridge_audio.cpp
+void installVideoBridge(JsEngine::Impl& impl, JSValue native);     // bridge_video.cpp
 void installWorkletsBridge(JsEngine::Impl& impl, JSValue native);  // bridge_worklets.cpp
 
 void installBridge(JsEngine::Impl& impl, JSValue global) {
@@ -1037,6 +1038,7 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
   installAnimatedBridge(impl, native);
   installHostDataBridge(impl, native);
   installAudioBridge(impl, native);
+  installVideoBridge(impl, native);
   installWorkletsBridge(impl, native);
   JS_SetPropertyStr(ctx, global, "__jsui_native", native);
 }

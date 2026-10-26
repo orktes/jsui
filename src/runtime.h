@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "audio/audio.h"
+#include "video/video.h"
 #include "core/document.h"
 #include "frame_snapshot.h"
 #include "host_buffers.h"
@@ -268,6 +269,8 @@ class Runtime {
   // UI audio (jsui.h "Audio"): Sound requests to the handler / built-in
   // backend. After the loader (the built-in backend reads through it).
   std::unique_ptr<Audio> audio;
+  // <Video> (jsui.h "Video"): requests to the embedder's video handler.
+  std::unique_ptr<Video> video;
 
  private:
   // Node ids are unique across the surfaces (JS addresses nodes by id alone).
@@ -363,6 +366,8 @@ class Runtime {
   void deliverShaderEvents();
   // Voice-ended / sound-loaded reports.
   void deliverAudioEvents();
+  // Video status reports.
+  void deliverVideoEvents();
   // Runs the done callbacks of settled jsui_call_ui calls.
   void deliverUiCallResults();
   // The JS context is going away: cancels its unanswered Host.calls (ids
