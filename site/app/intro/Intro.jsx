@@ -25,7 +25,7 @@
 //   WebGPU warm-up, jsui.beginWarmup) the intro then says 'warmed' and waits
 //   for {go: true}, which the page sends once the browser compiled them.
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, Host, Pressable, ShaderView, StyleSheet, Text, View, compileShader, precompileShaders, sksl, useHostMessage, useWindowDimensions } from 'react-native';
+import { Animated, Easing, Host, Pressable, ShaderView, StyleSheet, Text, View, compileShader, HostState, precompileShaders, sksl, useHostMessage, useWindowDimensions } from 'react-native';
 import { colors, font, rarity, site } from '../theme.js';
 
 const DURATION = 3400;
@@ -434,7 +434,15 @@ export function Intro({ p }) {
   // The page's go-ahead after the warm-up (when it asked for one).
   const go = useRef(null);
   const earlyGo = useRef(false);
-  useHostMessage('intro', (data) => {
+  // The page's answer: a host message in the browser (site/index.html), or
+  // host state a native host set before the bundle loaded (jsui-viewer
+  // --state 'intro={"play":true,"warmup":false}'), since no page answers there.
+  useHostMessage('intro', (data) => answer(data));
+  useEffect(() => {
+    const native = HostState.get('intro');
+    if (native) answer(native);
+  }, []);
+  const answer = (data) => {
     if (data && data.go) {
       // After 'warmed', or during the warm-up: then it stops early (the
       // browser's caches turned out warm).
@@ -451,6 +459,8 @@ export function Intro({ p }) {
       if (ended.current) return;
       const res = compileShader(INTRO_SHADER);
       if (res.error) return finish();
+      // No splash to hide the warm-up behind (a native host): play straight away.
+      if (data.warmup === false) return play(data);
       setPhase('warm');
       // One timeline point per frame (requestAnimationFrame callbacks run
       // before the frame paints).
@@ -469,7 +479,7 @@ export function Intro({ p }) {
       };
       requestAnimationFrame(next);
     });
-  });
+  };
 
   const play = (data) => {
     setPhase('play');

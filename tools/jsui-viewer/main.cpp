@@ -1,6 +1,6 @@
 // jsui-viewer: run a JSUI bundle in a window.
 //
-//   jsui-viewer [--dev] [--cpu | --gl-core] [--width W] [--height H]
+//   jsui-viewer [--dev] [--cpu | --gl | --gl-core] [--width W] [--height H] [--state key=json]
 //               <bundle path or URL> [--frames N] [--screenshot out.png]
 //
 // --dev polls the dev server (`jsui dev`) and reloads on change; JS errors
@@ -25,11 +25,18 @@
 // thread, native Animated, scrolling and hover go on; without, the window
 // freezes. A screenshot runs one sync frame first (JSUI_TICK_SYNC_JS), so
 // it shows what JS rendered by then.
+// --state key=json sets host state (HostState) before the bundle loads.
 // --gl-core asks for an OpenGL 3.2 core, forward-compatible context. It is
 // the default on macOS, where SDL otherwise gets a legacy 2.1 context whose
 // GLSL 1.20 Skia's shaders cannot use ("undeclared gl_VertexID"); elsewhere
 // the driver's default (compatibility) context is used unless it is given.
+// On macOS with a library built with JSUI_GRAPHITE_METAL (a Skia from
+// scripts/build-skia-desktop.sh) the GPU renderer is Skia Graphite on Metal
+// instead: the UI is painted into a retained texture (incremental repaints)
+// that is blitted into the window's CAMetalLayer. --gl picks Ganesh on GL;
+// when Metal fails the viewer falls back to GL, then to the CPU.
 #include <SDL.h>
+#include <SDL_syswm.h>
 
 #include <algorithm>
 #include <cmath>
@@ -46,12 +53,41 @@
 #include "jsui/jsui.h"
 #include "keymap.h"
 
+#if defined(__APPLE__) && defined(JSUI_GRAPHITE_METAL)
+#define VIEWER_METAL 1
+extern "C" {
+int viewer_mtl_init(void* layer, float r, float g, float b, void** device, void** queue);
+const char* viewer_mtl_name(void* device);
+void* viewer_mtl_texture(void* device, int w, int h);
+int viewer_mtl_present(void* layer, void* queue, void* texture);
+int viewer_mtl_read(void* device, void* queue, void* texture, int w, int h, uint8_t* out);
+void viewer_mtl_release(void* obj);
+}
+#else
+#define VIEWER_METAL 0
+#endif
+#if defined(__APPLE__)
+extern "C" {
+struct ViewerVideo;
+void viewer_mac_init(void);
+void viewer_mac_titlebar_overlay(void* nswindow, float header, float* controls);
+ViewerVideo* viewer_video_create(const char* spec, void* device, void* queue);
+const char* viewer_video_channel(ViewerVideo* v);
+void viewer_video_attach(ViewerVideo* v, JsuiRuntime* rt);
+void viewer_video_message(ViewerVideo* v, const char* json);
+int viewer_video_tick(ViewerVideo* v);
+void viewer_video_destroy(ViewerVideo* v);
+}
+extern "C" void viewer_mac_watch_wheel(void (*cb)(void* user, float dx, float dy), void* user);
+#endif
+
 namespace {
 
 struct Options {
   std::string bundle;
   bool dev = false;
   bool gpu = true;  // --cpu turns it off
+  bool metal = VIEWER_METAL;  // GPU: Graphite on Metal (--gl: Ganesh on GL)
 #if defined(__APPLE__)
   bool glCore = true;
 #else
@@ -61,6 +97,9 @@ struct Options {
   long frames = -1;
   std::string screenshot;
   int jsThread = JSUI_JS_THREAD_ON;  // --js-thread on|off|lockstep
+  std::vector<std::pair<std::string, std::string>> state;  // --state key=json
+  std::vector<std::string> videos;                          // --video channel:texture=url (macOS)
+  int titlebarOverlay = 0;                                  // --titlebar-overlay H (macOS): header height
 };
 
 const char* jsThreadName(int mode) {
@@ -69,15 +108,22 @@ const char* jsThreadName(int mode) {
 
 void usage() {
   std::printf(
-      "usage: jsui-viewer [--dev] [--cpu | --gl-core] [--width W] [--height H] [--frames N] [--screenshot out.png]\n"
-      "                   [--js-thread on|off|lockstep] <bundle.js|url>\n"
+      "usage: jsui-viewer [--dev] [--cpu | --gl | --gl-core] [--width W] [--height H] [--frames N] [--screenshot out.png]\n"
+      "                   [--js-thread on|off|lockstep] [--state key=json ...] <bundle.js|url>\n"
       "  --dev        poll the dev server and reload on change, show errors on screen\n"
-      "  --cpu        render with the CPU rasteriser + an SDL texture (default: Skia Ganesh on OpenGL,\n"
-      "               falling back to the CPU path when GL is unavailable)\n"
+      "  --cpu        render with the CPU rasteriser + an SDL texture (default: Skia Graphite on Metal on\n"
+      "               macOS when the library has it, else Ganesh on OpenGL; falling back to the CPU path)\n"
+      "  --gl         render with Skia Ganesh on OpenGL even when Graphite on Metal is available\n"
       "  --gpu        accepted for compatibility: the GPU renderer is the default\n"
       "  --gl-core    request an OpenGL 3.2 core profile context (always on macOS)\n"
       "  --js-thread  on (default): JS on its own thread; off: on the window's thread; lockstep: on its\n"
       "               thread, waited for every frame\n"
+      "  --state      sets host state `key` (HostState) to the JSON value before the bundle loads\n"
+      "  --titlebar-overlay H  (macOS) the UI fills the window under a transparent title bar, the window\n"
+      "               buttons centred in its top H px (HostState jsui.windowControls: their box); the\n"
+      "               UI's empty spots up there drag the window\n"
+      "  --video      channel:texture=url (macOS): plays the video (AVFoundation) into host texture `texture`,\n"
+      "               controlled with `channel` messages (see tools/jsui-viewer/video.mm)\n"
       "  F5 reloads the bundle, Esc dismisses the error overlay (dev mode)\n"
       "  F6 switches --js-thread (restarts the runtime), F7 keeps JS busy for 200 ms\n");
 }
@@ -89,8 +135,31 @@ bool parseArgs(int argc, char** argv, Options* o) {
     if (a == "--dev") o->dev = true;
     else if (a == "--gpu") o->gpu = true;  // the default; kept as an alias
     else if (a == "--cpu") o->gpu = false;
+    else if (a == "--gl") o->metal = false;
     else if (a == "--gl-core") o->glCore = true;
-    else if (a == "--width" || a == "--height" || a == "--frames" || a == "--screenshot" || a == "--js-thread") {
+    else if (a == "--state") {
+      const char* v = next();
+      const char* eq = v ? std::strchr(v, '=') : nullptr;
+      if (!eq || eq == v) {
+        std::fprintf(stderr, "--state takes key=json\n");
+        return false;
+      }
+      o->state.emplace_back(std::string(v, eq), std::string(eq + 1));
+    } else if (a == "--titlebar-overlay") {
+      const char* v = next();
+      if (!v || std::atoi(v) <= 0) {
+        std::fprintf(stderr, "--titlebar-overlay takes the header height in px\n");
+        return false;
+      }
+      o->titlebarOverlay = std::atoi(v);
+    } else if (a == "--video") {
+      const char* v = next();
+      if (!v) {
+        std::fprintf(stderr, "--video takes channel:texture=url\n");
+        return false;
+      }
+      o->videos.push_back(v);
+    } else if (a == "--width" || a == "--height" || a == "--frames" || a == "--screenshot" || a == "--js-thread") {
       const char* v = next();
       if (!v) {
         std::fprintf(stderr, "missing value for %s\n", a.c_str());
@@ -171,8 +240,17 @@ class Viewer {
  public:
   explicit Viewer(const Options& o) : opt_(o) {}
   ~Viewer() {
+#if defined(__APPLE__)
+    for (ViewerVideo* v : videos_) viewer_video_destroy(v);
+#endif
     if (rt_) jsui_destroy(rt_);
     if (gpu_) jsui_gpu_destroy(gpu_);  // GL context still current
+#if VIEWER_METAL
+    viewer_mtl_release(mtlTexture_);
+    viewer_mtl_release(mtlQueue_);
+    viewer_mtl_release(mtlDevice_);
+    if (metalView_) SDL_Metal_DestroyView(metalView_);
+#endif
     if (glContext_) SDL_GL_DeleteContext(glContext_);
     for (auto& [id, p] : pads_) SDL_GameControllerClose(p.controller);
     for (auto& [k, c] : cursors_) SDL_FreeCursor(c);
@@ -186,11 +264,24 @@ class Viewer {
     SDL_SetMainReady();
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");  // touch is forwarded as touch
     SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
+#if defined(__APPLE__)
+    viewer_mac_init();
+#endif
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS) != 0) {
       std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
       return 1;
     }
     std::string title = "JSUI - " + opt_.bundle;
+    if (!opt_.gpu) opt_.metal = false;
+    if (opt_.metal) {
+      window_ = SDL_CreateWindow(title.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, opt_.width, opt_.height,
+                                 SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_METAL);
+      if (window_ && initMetal()) return loop();
+      std::fprintf(stderr, "warning: Graphite on Metal unavailable, falling back to OpenGL (--gl skips the attempt)\n");
+      opt_.metal = false;
+      if (window_) SDL_DestroyWindow(window_);
+      window_ = nullptr;
+    }
     Uint32 windowFlags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
     if (opt_.gpu) {
       // Ganesh can use a stencil buffer for some paths; no depth / MSAA needed.
@@ -236,11 +327,43 @@ class Viewer {
         return 1;
       }
     }
+    return loop();
+  }
+
+ private:
+  int loop() {
     // The runtime produces premultiplied RGBA.
     premul_ = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
                                          SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
 
     wakeEvent_ = SDL_RegisterEvents(1);
+    if (opt_.titlebarOverlay > 0) titlebarOverlay();
+#if defined(__APPLE__)
+    for (const std::string& spec : opt_.videos) {
+#if VIEWER_METAL
+      ViewerVideo* v = viewer_video_create(spec.c_str(), opt_.metal ? mtlDevice_ : nullptr, mtlQueue_);
+#else
+      ViewerVideo* v = viewer_video_create(spec.c_str(), nullptr, nullptr);
+#endif
+      if (v) videos_.push_back(v);
+      else std::fprintf(stderr, "warning: --video %s: expected channel:texture=url\n", spec.c_str());
+    }
+#else
+    if (!opt_.videos.empty()) std::fprintf(stderr, "warning: --video needs macOS (AVFoundation)\n");
+#endif
+#if defined(__APPLE__)
+    // Pixel deltas with the trackpad's momentum, as browsers get them
+    // (SDL_MOUSEWHEEL is ignored on macOS).
+    viewer_mac_watch_wheel(
+        [](void* u, float dx, float dy) {
+          auto* self = static_cast<Viewer*>(u);
+          if (!self->rt_ || (dx == 0 && dy == 0)) return;
+          int mx = 0, my = 0;
+          SDL_GetMouseState(&mx, &my);
+          jsui_send_mouse_wheel(self->rt_, float(mx), float(my), dx, dy);
+        },
+        this);
+#endif
     createRuntime();
     SDL_StartTextInput();
 
@@ -251,6 +374,7 @@ class Viewer {
       while (SDL_PollEvent(&e)) handle(e);
       double now = double(SDL_GetPerformanceCounter() - start_) * 1000.0 / double(SDL_GetPerformanceFrequency());
       jsui_tick(rt_, now);
+      bool video = afterTick();
       updateCursor();
       bool drew = false;
       if (jsui_needs_redraw(rt_) || (opt_.gpu ? !presented_ : texture_ == nullptr)) {
@@ -261,7 +385,7 @@ class Viewer {
       // Without vsync (software / dummy driver) or when idle, don't spin.
       // Idle (nothing moving or loading) it waits longer: JS on its thread
       // wakes it when it has something for the next tick (on_js_ready).
-      if (!drew) SDL_WaitEventTimeout(nullptr, jsui_wants_frame(rt_) || jsui_pending_loads(rt_) > 0 ? 4 : 32);
+      if (!drew) SDL_WaitEventTimeout(nullptr, video || jsui_wants_frame(rt_) || jsui_pending_loads(rt_) > 0 ? 4 : 32);
     }
     if (!opt_.screenshot.empty()) {
       // A JS thread runs behind the frames: one more frame, whose JS (timers
@@ -271,7 +395,8 @@ class Viewer {
       jsui_tick_ex(rt_, now, JSUI_TICK_SYNC_JS);
     }
     if (!opt_.screenshot.empty() && opt_.gpu) {
-      if (!gpuScreenshot(opt_.screenshot)) std::fprintf(stderr, "screenshot failed\n");
+      if (!(opt_.metal ? metalScreenshot(opt_.screenshot) : gpuScreenshot(opt_.screenshot)))
+        std::fprintf(stderr, "screenshot failed\n");
     } else if (!opt_.screenshot.empty()) {
       void* png = nullptr;
       size_t size = 0;
@@ -287,7 +412,6 @@ class Viewer {
     return err ? 1 : 0;
   }
 
- private:
   // (Re)creates the runtime in opt_.jsThread mode and loads the bundle.
   void createRuntime() {
     if (rt_) jsui_destroy(rt_);
@@ -296,8 +420,11 @@ class Viewer {
     cfg.width = opt_.width;
     cfg.height = opt_.height;
     cfg.dev_mode = opt_.dev ? 1 : 0;
-    cfg.on_message = [](void*, const char* name, const char* json) {
+    cfg.message_user = this;
+    cfg.on_message = [](void* u, const char* name, const char* json) {
       std::printf("[message] %s %s\n", name, json);
+      // Runs inside jsui_tick: handled after it (afterTick).
+      static_cast<Viewer*>(u)->messages_.emplace_back(name, json);
     };
     cfg.js_thread = opt_.jsThread;
     // Runs on the JS thread: wakes the event wait (SDL_PushEvent is thread safe).
@@ -310,6 +437,14 @@ class Viewer {
       SDL_PushEvent(&e);
     };
     rt_ = jsui_create(&cfg);
+    messages_.clear();
+#if defined(__APPLE__)
+    for (ViewerVideo* v : videos_) viewer_video_attach(v, rt_);
+#endif
+    if (!windowControls_.empty()) jsui_set_state(rt_, "jsui.windowControls", windowControls_.c_str());
+    for (auto& [key, json] : opt_.state)
+      if (jsui_set_state(rt_, key.c_str(), json.c_str()) < 0)
+        std::fprintf(stderr, "warning: --state %s: not valid JSON\n", key.c_str());
     // TextInput copy / paste use the system clipboard.
     jsui_set_clipboard_callbacks(
         rt_,
@@ -330,7 +465,71 @@ class Viewer {
     jsui_load_bundle_url(rt_, opt_.bundle.c_str());
     cursorName_.clear();
     presented_ = false;
+#if VIEWER_METAL
+    mtlFresh_ = true;  // the retained frame was the old runtime's
+#endif
     std::printf("JS thread: %s\n", jsThreadName(jsui_js_thread(rt_)));
+  }
+
+  // --titlebar-overlay: the window buttons over the UI's header, whose empty
+  // spots (nothing there takes the pointer) drag the window.
+  void titlebarOverlay() {
+#if defined(__APPLE__)
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (!SDL_GetWindowWMInfo(window_, &info) || info.subsystem != SDL_SYSWM_COCOA) return;
+    float c[4] = {0, 0, 0, 0};
+    viewer_mac_titlebar_overlay((void*)info.info.cocoa.window, float(opt_.titlebarOverlay), c);
+    char json[160];
+    std::snprintf(json, sizeof json, "{\"x\":%g,\"y\":%g,\"width\":%g,\"height\":%g}", c[0], c[1], c[2], c[3]);
+    windowControls_ = json;
+    SDL_SetWindowHitTest(
+        window_,
+        [](SDL_Window*, const SDL_Point* p, void* u) {
+          auto* self = static_cast<Viewer*>(u);
+          if (p->y >= self->opt_.titlebarOverlay || !self->rt_) return SDL_HITTEST_NORMAL;
+          return jsui_hit_test(self->rt_, float(p->x), float(p->y)) == 0 ? SDL_HITTEST_DRAGGABLE : SDL_HITTEST_NORMAL;
+        },
+        this);
+#else
+    std::fprintf(stderr, "warning: --titlebar-overlay needs macOS\n");
+#endif
+  }
+
+  // The messages of the last tick (Linking.openURL, the videos), then the
+  // videos' frames. True while a video plays.
+  bool afterTick() {
+    bool playing = false;
+    for (auto& [name, json] : messages_)
+      if (name == "jsui:openURL") openURL(json);
+#if defined(__APPLE__)
+    for (auto& [name, json] : messages_)
+      for (ViewerVideo* v : videos_)
+        if (name == viewer_video_channel(v)) viewer_video_message(v, json.c_str());
+    for (ViewerVideo* v : videos_) playing |= viewer_video_tick(v) != 0;
+#endif
+    messages_.clear();
+    return playing;
+  }
+
+  // Linking.openURL: web and mail links open in the system's browser / mail app.
+  static void openURL(const std::string& json) {
+    // {"url":"..."}: the string value, JSON escapes undone (\uXXXX aside, which
+    // a URL does not need).
+    size_t k = json.find("\"url\"");
+    size_t q = k == std::string::npos ? k : json.find('"', json.find(':', k));
+    if (q == std::string::npos) return;
+    std::string url;
+    for (size_t i = q + 1; i < json.size() && json[i] != '"'; i++) {
+      if (json[i] == '\\' && i + 1 < json.size()) {
+        if (json[++i] == 'u') return;
+      }
+      url += json[i];
+    }
+    if (url.rfind("https://", 0) == 0 || url.rfind("http://", 0) == 0 || url.rfind("mailto:", 0) == 0)
+      SDL_OpenURL(url.c_str());
+    else
+      std::fprintf(stderr, "warning: not opening %s (only http, https and mailto links)\n", url.c_str());
   }
 
   bool initGpu() {
@@ -356,6 +555,59 @@ class Viewer {
     std::printf("GPU: %s / %s\n", r ? reinterpret_cast<const char*>(r) : "?", v ? reinterpret_cast<const char*>(v) : "?");
     return true;
   }
+
+#if VIEWER_METAL
+  bool initMetal() {
+    metalView_ = SDL_Metal_CreateView(window_);
+    if (!metalView_) return false;
+    metalLayer_ = SDL_Metal_GetLayer(metalView_);
+    if (!metalLayer_ || !viewer_mtl_init(metalLayer_, 24 / 255.f, 24 / 255.f, 28 / 255.f, &mtlDevice_, &mtlQueue_))
+      return false;
+    gpu_ = jsui_gpu_create_metal(mtlDevice_, mtlQueue_);
+    if (!gpu_) return false;
+    std::printf("GPU: %s / Skia Graphite on Metal\n", viewer_mtl_name(mtlDevice_));
+    return true;
+  }
+
+  // Paints the frame into the retained texture (only the damage once it holds
+  // one) and presents it.
+  void presentMetal() {
+    if (pixelW_ <= 0 || pixelH_ <= 0) return;
+    if (!mtlTexture_) {
+      mtlTexture_ = viewer_mtl_texture(mtlDevice_, pixelW_, pixelH_);
+      mtlFresh_ = true;
+      if (!mtlTexture_) return;
+    }
+    if (!renderMetal()) return;
+    presented_ = viewer_mtl_present(metalLayer_, mtlQueue_, mtlTexture_) != 0;
+  }
+
+  bool renderMetal() {
+    JsuiGpuTarget t{};
+    t.texture = mtlTexture_;
+    t.format = 80;  // MTLPixelFormatBGRA8Unorm
+    t.width = pixelW_;
+    t.height = pixelH_;
+    t.flags = mtlFresh_ ? 0 : JSUI_GPU_INCREMENTAL;
+    if (jsui_render_gpu_target(rt_, gpu_, &t, nullptr) != 0) return false;
+    mtlFresh_ = false;
+    return true;
+  }
+
+  bool metalScreenshot(const std::string& path) {
+    if (!mtlTexture_ || !renderMetal()) return false;
+    std::vector<uint8_t> px(size_t(pixelW_) * pixelH_ * 4);
+    if (!viewer_mtl_read(mtlDevice_, mtlQueue_, mtlTexture_, pixelW_, pixelH_, px.data())) return false;
+    SkPixmap pm(SkImageInfo::Make(pixelW_, pixelH_, kRGBA_8888_SkColorType, kPremul_SkAlphaType), px.data(),
+                size_t(pixelW_) * 4);
+    SkFILEWStream f(path.c_str());
+    return f.isValid() && SkPngEncoder::Encode(&f, pm, {});
+  }
+#else
+  bool initMetal() { return false; }
+  void presentMetal() {}
+  bool metalScreenshot(const std::string&) { return false; }
+#endif
 
   // Draws the frame into the default framebuffer. `backdrop`: clear to the
   // viewer's background colour and composite the UI over it (else: clear to
@@ -404,6 +656,10 @@ class Viewer {
   void updateViewport() {
     int lw = 0, lh = 0, pw = 0, ph = 0;
     SDL_GetWindowSize(window_, &lw, &lh);
+#if VIEWER_METAL
+    if (opt_.metal) SDL_Metal_GetDrawableSize(window_, &pw, &ph);
+    else
+#endif
     if (opt_.gpu) SDL_GL_GetDrawableSize(window_, &pw, &ph);
     else SDL_GetRendererOutputSize(renderer_, &pw, &ph);
     if (lw <= 0 || lh <= 0) return;
@@ -413,6 +669,12 @@ class Viewer {
     jsui_set_viewport(rt_, lw, lh, ratio_);
     int dw = int(std::lround(lw * ratio_)), dh = int(std::lround(lh * ratio_));
     if (opt_.gpu) {
+#if VIEWER_METAL
+      if (mtlTexture_ && (dw != pixelW_ || dh != pixelH_)) {
+        viewer_mtl_release(mtlTexture_);
+        mtlTexture_ = nullptr;  // presentMetal makes one of the new size
+      }
+#endif
       pixelW_ = dw;
       pixelH_ = dh;
       presented_ = false;
@@ -429,6 +691,7 @@ class Viewer {
   }
 
   void present() {
+    if (opt_.metal) return presentMetal();
     if (opt_.gpu) {
       // Full repaint every frame: the default framebuffer is not preserved
       // across swaps.
@@ -499,15 +762,14 @@ class Viewer {
         break;
       }
       case SDL_MOUSEWHEEL: {
+#if !defined(__APPLE__)  // macOS: viewer_mac_watch_wheel
         int mx = 0, my = 0;
         SDL_GetMouseState(&mx, &my);
-        float dx = e.wheel.preciseX, dy = e.wheel.preciseY;
-        if (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) {
-          dx = -dx;
-          dy = -dy;
-        }
-        // DOM: positive deltaY scrolls down; ~40 px per notch like browsers.
-        jsui_send_mouse_wheel(rt_, float(mx), float(my), dx * 40.f, -dy * 40.f);
+        // SDL's deltas already follow the system's scroll direction setting
+        // (SDL_MOUSEWHEEL_FLIPPED only says it is "natural"), as DOM wheel
+        // deltas do. DOM: positive deltaY scrolls down; ~40 px per notch.
+        jsui_send_mouse_wheel(rt_, float(mx), float(my), e.wheel.preciseX * 40.f, -e.wheel.preciseY * 40.f);
+#endif
         break;
       }
       case SDL_FINGERDOWN:
@@ -619,6 +881,14 @@ class Viewer {
   JsuiGpuContext* gpu_ = nullptr;
   ViewerGL gl_;
   int stencilBits_ = 0;
+#if VIEWER_METAL
+  SDL_MetalView metalView_ = nullptr;
+  void* metalLayer_ = nullptr;  // CAMetalLayer
+  void* mtlDevice_ = nullptr;   // id<MTLDevice>
+  void* mtlQueue_ = nullptr;    // id<MTLCommandQueue>
+  void* mtlTexture_ = nullptr;  // id<MTLTexture>, the retained frame
+  bool mtlFresh_ = true;        // mtlTexture_ holds no frame yet
+#endif
   bool presented_ = false;
   SDL_BlendMode premul_ = SDL_BLENDMODE_BLEND;
   JsuiRuntime* rt_ = nullptr;
@@ -632,6 +902,11 @@ class Viewer {
   std::map<SDL_JoystickID, Pad> pads_;
   std::map<int, SDL_Cursor*> cursors_;
   std::string cursorName_;
+  std::vector<std::pair<std::string, std::string>> messages_;  // name, JSON (this tick's)
+  std::string windowControls_;  // --titlebar-overlay: HostState jsui.windowControls
+#if defined(__APPLE__)
+  std::vector<ViewerVideo*> videos_;
+#endif
 };
 
 }  // namespace

@@ -2,7 +2,9 @@
 //
 // A game-style trailer player. JSUI does not play video: the page owns a
 // <video> element and hands its frames to the runtime as a host texture
-// (jsui.bindVideo('trailer', video), web/jsui-textures.js). This screen only
+// (jsui.bindVideo('trailer', video), web/jsui-textures.js); natively,
+// jsui-viewer --video cinematic:trailer=<url> plays it with AVFoundation
+// (tools/jsui-viewer/video.mm). This screen only
 // shows that texture by name, five times over: the player, a blurred
 // backdrop, a picture-in-picture view, a close-up and a night-vision feed. Each
 // video frame is uploaded once and every view samples it in place; no JS
@@ -63,6 +65,7 @@ const BACKEND = {
   webgpu: 'WebGPU · sampled in place',
   gl: 'WebGL · GPU texture',
   pixels: 'CPU pixels',
+  metal: 'Metal · sampled in place',
 };
 const POSTER = require('../../../examples/assets/bg-menu.jpg');
 

@@ -26,7 +26,11 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design. For keeping per
 rendered entirely by the JSUI WebAssembly build into one canvas: interactive
 game screens, input, motion, a live-code playground and embedding guides. Its
 source is ordinary React Native in [site/](site/) (`node site/scripts/build.mjs`,
-then `node site/scripts/serve.mjs`).
+then `node site/scripts/serve.mjs`). The same bundle runs natively in the viewer:
+`jsui-viewer --titlebar-overlay 64 --state 'intro={"play":true,"warmup":false}' --state 'audio={"native":true}'
+--video cinematic:trailer=<H.264 / HLS url> site/dist/app/bundle.js` (standing in for the page:
+the intro's go-ahead, the UI owning the sound switch, and the trailer played with
+AVFoundation on macOS; the nav bar holds the window buttons).
 
 ## Game data
 
@@ -164,7 +168,7 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ./build/jsui-tests
 ./build/jsui-render bundle.js -o frame.png --width 1280 --height 720
-./build/tools/jsui-viewer/jsui-viewer bundle.js   # window, rendered on the GPU (--cpu: CPU raster)
+./build/tools/jsui-viewer/jsui-viewer bundle.js   # window, rendered on the GPU (--cpu: CPU raster, --gl: Ganesh on GL)
 ./build/jsui-record bundle.js --timeline examples/showcase/session.json --ffmpeg out.mp4  # scripted demo video
 ```
 
