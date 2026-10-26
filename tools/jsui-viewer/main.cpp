@@ -66,7 +66,16 @@ void viewer_mtl_release(void* obj);
 #define VIEWER_METAL 0
 #endif
 #if defined(__APPLE__)
-extern "C" void viewer_mac_init(void);
+extern "C" {
+struct ViewerVideo;
+void viewer_mac_init(void);
+ViewerVideo* viewer_video_create(const char* spec, void* device, void* queue);
+const char* viewer_video_channel(ViewerVideo* v);
+void viewer_video_attach(ViewerVideo* v, JsuiRuntime* rt);
+void viewer_video_message(ViewerVideo* v, const char* json);
+int viewer_video_tick(ViewerVideo* v);
+void viewer_video_destroy(ViewerVideo* v);
+}
 extern "C" void viewer_mac_watch_wheel(void (*cb)(void* user, float dx, float dy), void* user);
 #endif
 
@@ -87,6 +96,7 @@ struct Options {
   std::string screenshot;
   int jsThread = JSUI_JS_THREAD_ON;  // --js-thread on|off|lockstep
   std::vector<std::pair<std::string, std::string>> state;  // --state key=json
+  std::vector<std::string> videos;                          // --video channel:texture=url (macOS)
 };
 
 const char* jsThreadName(int mode) {
@@ -106,6 +116,8 @@ void usage() {
       "  --js-thread  on (default): JS on its own thread; off: on the window's thread; lockstep: on its\n"
       "               thread, waited for every frame\n"
       "  --state      sets host state `key` (HostState) to the JSON value before the bundle loads\n"
+      "  --video      channel:texture=url (macOS): plays the video (AVFoundation) into host texture `texture`,\n"
+      "               controlled with `channel` messages (see tools/jsui-viewer/video.mm)\n"
       "  F5 reloads the bundle, Esc dismisses the error overlay (dev mode)\n"
       "  F6 switches --js-thread (restarts the runtime), F7 keeps JS busy for 200 ms\n");
 }
@@ -127,6 +139,13 @@ bool parseArgs(int argc, char** argv, Options* o) {
         return false;
       }
       o->state.emplace_back(std::string(v, eq), std::string(eq + 1));
+    } else if (a == "--video") {
+      const char* v = next();
+      if (!v) {
+        std::fprintf(stderr, "--video takes channel:texture=url\n");
+        return false;
+      }
+      o->videos.push_back(v);
     } else if (a == "--width" || a == "--height" || a == "--frames" || a == "--screenshot" || a == "--js-thread") {
       const char* v = next();
       if (!v) {
@@ -208,6 +227,9 @@ class Viewer {
  public:
   explicit Viewer(const Options& o) : opt_(o) {}
   ~Viewer() {
+#if defined(__APPLE__)
+    for (ViewerVideo* v : videos_) viewer_video_destroy(v);
+#endif
     if (rt_) jsui_destroy(rt_);
     if (gpu_) jsui_gpu_destroy(gpu_);  // GL context still current
 #if VIEWER_METAL
@@ -303,6 +325,19 @@ class Viewer {
 
     wakeEvent_ = SDL_RegisterEvents(1);
 #if defined(__APPLE__)
+    for (const std::string& spec : opt_.videos) {
+#if VIEWER_METAL
+      ViewerVideo* v = viewer_video_create(spec.c_str(), opt_.metal ? mtlDevice_ : nullptr, mtlQueue_);
+#else
+      ViewerVideo* v = viewer_video_create(spec.c_str(), nullptr, nullptr);
+#endif
+      if (v) videos_.push_back(v);
+      else std::fprintf(stderr, "warning: --video %s: expected channel:texture=url\n", spec.c_str());
+    }
+#else
+    if (!opt_.videos.empty()) std::fprintf(stderr, "warning: --video needs macOS (AVFoundation)\n");
+#endif
+#if defined(__APPLE__)
     // Pixel deltas with the trackpad's momentum, as browsers get them
     // (SDL_MOUSEWHEEL is ignored on macOS).
     viewer_mac_watch_wheel(
@@ -325,6 +360,7 @@ class Viewer {
       while (SDL_PollEvent(&e)) handle(e);
       double now = double(SDL_GetPerformanceCounter() - start_) * 1000.0 / double(SDL_GetPerformanceFrequency());
       jsui_tick(rt_, now);
+      bool video = tickVideos();
       updateCursor();
       bool drew = false;
       if (jsui_needs_redraw(rt_) || (opt_.gpu ? !presented_ : texture_ == nullptr)) {
@@ -335,7 +371,7 @@ class Viewer {
       // Without vsync (software / dummy driver) or when idle, don't spin.
       // Idle (nothing moving or loading) it waits longer: JS on its thread
       // wakes it when it has something for the next tick (on_js_ready).
-      if (!drew) SDL_WaitEventTimeout(nullptr, jsui_wants_frame(rt_) || jsui_pending_loads(rt_) > 0 ? 4 : 32);
+      if (!drew) SDL_WaitEventTimeout(nullptr, video || jsui_wants_frame(rt_) || jsui_pending_loads(rt_) > 0 ? 4 : 32);
     }
     if (!opt_.screenshot.empty()) {
       // A JS thread runs behind the frames: one more frame, whose JS (timers
@@ -370,8 +406,11 @@ class Viewer {
     cfg.width = opt_.width;
     cfg.height = opt_.height;
     cfg.dev_mode = opt_.dev ? 1 : 0;
-    cfg.on_message = [](void*, const char* name, const char* json) {
+    cfg.message_user = this;
+    cfg.on_message = [](void* u, const char* name, const char* json) {
       std::printf("[message] %s %s\n", name, json);
+      // Runs inside jsui_tick: handled after it (tickVideos).
+      static_cast<Viewer*>(u)->messages_.emplace_back(name, json);
     };
     cfg.js_thread = opt_.jsThread;
     // Runs on the JS thread: wakes the event wait (SDL_PushEvent is thread safe).
@@ -384,6 +423,10 @@ class Viewer {
       SDL_PushEvent(&e);
     };
     rt_ = jsui_create(&cfg);
+    messages_.clear();
+#if defined(__APPLE__)
+    for (ViewerVideo* v : videos_) viewer_video_attach(v, rt_);
+#endif
     for (auto& [key, json] : opt_.state)
       if (jsui_set_state(rt_, key.c_str(), json.c_str()) < 0)
         std::fprintf(stderr, "warning: --state %s: not valid JSON\n", key.c_str());
@@ -411,6 +454,20 @@ class Viewer {
     mtlFresh_ = true;  // the retained frame was the old runtime's
 #endif
     std::printf("JS thread: %s\n", jsThreadName(jsui_js_thread(rt_)));
+  }
+
+  // The messages of the last tick to the videos, then their frames. True
+  // while a video plays.
+  bool tickVideos() {
+    bool playing = false;
+#if defined(__APPLE__)
+    for (auto& [name, json] : messages_)
+      for (ViewerVideo* v : videos_)
+        if (name == viewer_video_channel(v)) viewer_video_message(v, json.c_str());
+    for (ViewerVideo* v : videos_) playing |= viewer_video_tick(v) != 0;
+#endif
+    messages_.clear();
+    return playing;
   }
 
   bool initGpu() {
@@ -783,6 +840,10 @@ class Viewer {
   std::map<SDL_JoystickID, Pad> pads_;
   std::map<int, SDL_Cursor*> cursors_;
   std::string cursorName_;
+  std::vector<std::pair<std::string, std::string>> messages_;  // name, JSON (this tick's)
+#if defined(__APPLE__)
+  std::vector<ViewerVideo*> videos_;
+#endif
 };
 
 }  // namespace
