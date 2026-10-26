@@ -52,7 +52,9 @@ async function loadPlaywright() {
   for (const from of [path.join(process.cwd(), 'noop.js'), import.meta.url]) {
     try {
       const req = createRequire(from);
-      return await import(pathToFileURL(req.resolve('playwright')).href);
+      const m = await import(pathToFileURL(req.resolve('playwright')).href);
+      // CommonJS: the named exports may only be on `default`.
+      return m.chromium ? m : m.default;
     } catch {}
   }
   throw new Error('jsui pipelines needs Playwright: npm install -D playwright');
