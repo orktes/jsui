@@ -168,6 +168,7 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
     const err = document.getElementById('err');
     const splash = document.getElementById('splash');
     const showError = (msg) => { err.textContent = msg; err.style.display = msg ? 'block' : 'none'; };
+    let introPending = false;  // the intro will play: its 'play' hides the splash
     const hideSplash = () => {
       if (splash.classList.contains('gone')) return;
       splash.classList.add('gone');
@@ -200,6 +201,11 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
         // Big canvases at 3x cost a lot of fill for little gain.
         pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
         worker: q.get('worker') === '1',
+        // The GPU pipelines the site draws with (recorded by
+        // site/scripts/record-pipelines.mjs), built while the splash is up:
+        // a first visit or a browser update leaves the browser's shader cache
+        // cold, and each new kind of draw would otherwise stall its frame.
+        pipelines: './pipelines-{format}.bin',
         ...(q.get('js') ? { js: q.get('js') } : {}),
       });
       window.jsui = jsui;
@@ -207,9 +213,17 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
       jsui.on('message', (name, data) => {
         if (name === 'ready') {
           jsui.postMessage('route', route());
-          jsui.postMessage('intro', { play: playIntro(jsui), hold: /^0\.\d+$/.test(q.get('intro')) ? +q.get('intro') : undefined });
+          // The intro plays once its pipelines exist (it draws many kinds of
+          // things at once); the splash stays up until then.
+          introPending = playIntro(jsui);
+          const answer = () => jsui.postMessage('intro', { play: introPending, hold: /^0\.\d+$/.test(q.get('intro')) ? +q.get('intro') : undefined });
+          if (introPending) Promise.resolve(jsui.whenPipelinesReady()).then(answer, answer);
+          else answer();
         } else if (name === 'intro') {
-          if (data.state === 'play') hideSplash();
+          if (data.state === 'play' || data.state === 'done') {
+            introPending = false;
+            hideSplash();
+          }
         }
         else if (name === 'route') {
           if (route() !== data) history.pushState(null, '', data === '/' ? location.pathname + location.search : '#' + data);
@@ -232,7 +246,9 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
         });
       }
       await jsui.whenIdle();
-      hideSplash();
+      // With the intro, its 'play' hides the splash (it warms up under it).
+      if (!introPending) hideSplash();
+      else setTimeout(hideSplash, 10000);  // an intro that never answers
     } catch (e) {
       showError('Could not start the JSUI runtime: ' + (e && e.stack || e));
     }

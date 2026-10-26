@@ -133,6 +133,8 @@ function defaultPage({ title, webUrl, bundleUrl }) {
         canvas: document.getElementById('ui'),
         bundleUrl: '${bundleUrl}',
         renderer: new URLSearchParams(location.search).get('renderer') || 'auto',
+        // GPU pipelines to build while loading (\`jsui pipelines <dir>\` records them).
+        pipelines: './pipelines-{format}.bin',
       });
       window.jsui = jsui;
       jsui.on('error', showError);

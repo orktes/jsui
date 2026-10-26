@@ -344,9 +344,10 @@ value it returns in main-thread mode:
 | `resolveCall`, `rejectCall` | `0`, or `-1` for an unknown call | the call table is in the runtime |
 | `getPerf(reset)` | the perf object | the counters are in the worker |
 | `readPixels()` | the pixels | the frame is in the worker (`readPixelsAsync` is the same) |
+| `addPipelines`, `savePipelines`, `pipelineStats`, `precompilePipelines` (WebGPU) | the count / list / stats | the GPU context is in the worker |
 | `surface.ready` (new) | the surface, once the worker made it | `surface.rootTag` is `undefined` until then |
 
-Already asynchronous in both modes: `callUi`, `whenIdle`, `readPixelsAsync`, `loadFont` (the worker fetches it).
+Already asynchronous in both modes: `callUi`, `whenIdle`, `whenPipelinesReady`, `readPixelsAsync`, `loadFont` (the worker fetches it).
 Fire-and-forget calls keep their shape: `postMessage`, `loadUrl`, `reload`, `devUpdate`,
 `setFontFallbacks`, `setDefaultFontFamily`,
 `start`, `stop`, `frame`, `setProfiling`, `destroy`, `surface.destroy`.
@@ -483,6 +484,52 @@ returns what the frames since the last reset cost, the same numbers as
 A runtime's surfaces share its switch and totals. Browsers round
 `performance.now()` to about 100 µs on pages that are not cross-origin
 isolated, so read phase times as averages over many frames.
+
+## GPU pipelines (first-visit stutter on WebGPU)
+
+Skia Graphite builds a GPU pipeline (compiled shaders plus render state) the
+first time a kind of draw appears: a blurred shadow, a gradient under an
+opacity, text in a rounded clip. In the browser that is a
+`createRenderPipeline` that Chrome's GPU process compiles (WGSL to Metal, D3D
+or Vulkan) before it draws anything else. With the browser's shader cache warm
+that is quick; on a first visit, or after a browser update emptied the cache,
+each one costs tens of milliseconds and a screen that brings several can drop
+a dozen frames. A UI of game screens makes ~90 of them.
+
+The host builds them ahead, while the page is still loading:
+
+```js
+const jsui = await createJsui({
+  canvas,
+  bundleUrl: './bundle.js',
+  // Recorded once and shipped with the app (below). `{format}`: the canvas
+  // format, bgra8unorm (macOS, Windows) or rgba8unorm (Android, Linux).
+  pipelines: './pipelines-{format}.bin',
+});
+await jsui.whenPipelinesReady();  // e.g. before hiding the splash
+```
+
+- **Remembered per browser, no setup:** the pipelines a browser built are
+  saved in IndexedDB (per page and canvas format; every few seconds while new
+  ones appear, and when the page is hidden) and built again at the start of
+  its next visit. `rememberPipelines: false` turns this off, `pipelineKey`
+  names the entry (pages with several apps).
+- **Shipped list:** `pipelines` (a URL or the bytes) covers first visits.
+  Record it with `jsui pipelines <web dir>` (see the CLI), or by calling
+  `jsui.savePipelines()` after using the app and saving the bytes.
+  A list of another Skia build is skipped (one log line), a missing file
+  (404) is ignored, keys the device cannot build are counted as `failed`.
+- Lists are queued at startup and built a few at a time, each batch followed
+  by a wait for the GPU process, until done or `pipelineTimeout` ms (default
+  5000) passed. `whenPipelinesReady()` resolves then, with `pipelineStats()`.
+  Whatever is left, or queued later with `addPipelines(list)`, is built one
+  per frame after frames.
+- A frame that needs a pipeline before its turn still builds it itself.
+  Pipelines of ShaderView effects are not in lists (no stable key):
+  `precompileShaders` warms those.
+
+WebGPU only; on WebGL the browser caches compiled shaders itself, and the
+calls return `0` / `null`.
 
 ## WASM modules
 

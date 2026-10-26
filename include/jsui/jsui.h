@@ -1345,9 +1345,13 @@ JSUI_API int jsui_gpu_precompile_pipelines(JsuiGpuContext* gpu, const void* data
  * *out_data with jsui_free(). 0 on success, -1 without a pipeline cache. */
 JSUI_API int jsui_gpu_save_pipelines(JsuiGpuContext* gpu, void** out_data, size_t* out_size);
 /* JSUI_PRECOMPILE_SLICED: precompiles queued pipelines for about `budget_ms`
- * (at least one) and leaves the scheduling to the host from now on (no more
- * slices after renders). Returns the number still queued (also in the other
- * modes, where it does nothing else). */
+ * (at least one; 0: exactly one) and leaves the scheduling to the host from
+ * now on (no more slices after renders). A negative `budget_ms` precompiles
+ * nothing and hands the scheduling back to the context. Returns the number
+ * still queued (also in the other modes, where it does nothing else). In the
+ * browser the budget only counts the call itself: the GPU process compiles
+ * the pipeline afterwards (web/jsui-web.js precompilePipelines() waits for
+ * it), and the context's own slices build one pipeline each. */
 JSUI_API int jsui_gpu_precompile_step(JsuiGpuContext* gpu, double budget_ms);
 JSUI_API void jsui_gpu_get_pipeline_stats(JsuiGpuContext* gpu, JsuiPipelineStats* out);
 

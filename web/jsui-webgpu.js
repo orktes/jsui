@@ -99,7 +99,11 @@ export class WebGPURenderer {
       own?.unref();
       return null;
     }
-    const format = navigator.gpu.getPreferredCanvasFormat();
+    // globalThis.jsuiCanvasFormat = 'rgba8unorm' / 'bgra8unorm' overrides the
+    // browser's choice (recording the pipeline lists of the other format,
+    // see CanvasView.addPipelines).
+    const format = /^(rgba|bgra)8unorm$/.test(globalThis.jsuiCanvasFormat ?? '')
+      ? globalThis.jsuiCanvasFormat : navigator.gpu.getPreferredCanvasFormat();
     try {
       ctx.configure({ device: webgpu.device, format, alphaMode: 'premultiplied',
         usage: USAGE_RENDER_ATTACHMENT | USAGE_COPY_SRC | USAGE_TEXTURE_BINDING });

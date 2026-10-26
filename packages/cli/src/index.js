@@ -8,3 +8,4 @@ export { launch, findWasmDir, parseSelector, formatTree } from './headless.js';
 export { parseInlineSteps, runSteps } from './script.js';
 export { attach, sessionClients } from './attach.js';
 export { SKILL_DIR } from './skill.js';
+export { recordPipelines } from './pipelines.js';

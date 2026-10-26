@@ -28,8 +28,9 @@ import { colors, font, rarity, site } from '../theme.js';
 const DURATION = 3400;
 // p where the reveal starts (the nebula begins to burn away).
 const REVEAL = 0.72;
-// No answer from the page (another host, an older index.html): give up.
-const WAIT_MS = 2500;
+// No answer from the page (another host, an older index.html): give up. The
+// page answers once the GPU pipelines are built (index.html, at most ~5 s).
+const WAIT_MS = 7000;
 // Timeline points drawn under the splash before the intro plays (above).
 const WARM_STEPS = 12;
 
