@@ -42,9 +42,16 @@ void viewer_mac_watch_wheel(void (*cb)(void* user, float dx, float dy), void* us
 // (x, y, width, height).
 void viewer_mac_titlebar_overlay(void* nswindow, float header, float* controls) {
   NSWindow* w = (__bridge NSWindow*)nswindow;
-  w.styleMask |= NSWindowStyleMaskFullSizeContentView;
-  w.titlebarAppearsTransparent = YES;
-  w.titleVisibility = NSWindowTitleHidden;
+  // SDL sets the style mask anew when the window leaves full screen (and on
+  // other mode changes), dropping the full size content view: applied again
+  // whenever it is missing.
+  void (^style)(void) = ^{
+    if (!(w.styleMask & NSWindowStyleMaskFullSizeContentView) && !(w.styleMask & NSWindowStyleMaskFullScreen))
+      w.styleMask |= NSWindowStyleMaskFullSizeContentView;
+    w.titlebarAppearsTransparent = YES;
+    w.titleVisibility = NSWindowTitleHidden;
+  };
+  style();
   NSButton* close = [w standardWindowButton:NSWindowCloseButton];
   if (!close) return;
   NSSize b = close.frame.size;
@@ -58,10 +65,15 @@ void viewer_mac_titlebar_overlay(void* nswindow, float header, float* controls) 
   void (^place)(void) = ^{
     if (placing || !container || (w.styleMask & NSWindowStyleMaskFullScreen)) return;
     placing = true;
+    style();
     // Only as wide as the buttons: the rest of the header is the UI's (its
     // clicks, and drags through the hit test in main.cpp).
     NSRect r = NSMakeRect(0, w.frame.size.height - header, left + 2 * spacing + b.width + left, header);
     if (!NSEqualRects(container.frame, r)) container.frame = r;
+    // The title bar's decoration (its separator and edge shading) would
+    // outline the button box over the UI.
+    for (NSView* v in container.subviews)
+      if ([NSStringFromClass([v class]) containsString:@"Decoration"]) v.hidden = YES;
     NSView* bar = close.superview;  // NSTitlebarView
     NSRect br = NSMakeRect(0, 0, r.size.width, header);
     if (!NSEqualRects(bar.frame, br)) bar.frame = br;
@@ -77,7 +89,10 @@ void viewer_mac_titlebar_overlay(void* nswindow, float header, float* controls) 
   NSNotificationCenter* nc = [NSNotificationCenter defaultCenter];
   for (NSNotificationName n in @[ NSWindowDidResizeNotification, NSWindowDidExitFullScreenNotification,
                                   NSWindowDidBecomeKeyNotification, NSWindowDidResignKeyNotification ])
-    [nc addObserverForName:n object:w queue:nil usingBlock:^(NSNotification*) { place(); }];
+    [nc addObserverForName:n
+                    object:w
+                     queue:nil
+                usingBlock:^(NSNotification*) { dispatch_async(dispatch_get_main_queue(), place); }];
   NSMutableArray<NSView*>* watched = [NSMutableArray arrayWithObjects:container, close.superview, nil];
   for (NSWindowButton k : {NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton})
     [watched addObject:[w standardWindowButton:k]];
@@ -89,6 +104,28 @@ void viewer_mac_titlebar_overlay(void* nswindow, float header, float* controls) 
                 usingBlock:^(NSNotification*) { dispatch_async(dispatch_get_main_queue(), place); }];
   }
   dispatch_async(dispatch_get_main_queue(), place);
+  // SDL gives the window back a frame without the title bar's height after
+  // full screen (it sizes the content area as if the title bar took space).
+  __block NSRect windowed = NSZeroRect;
+  [nc addObserverForName:NSWindowWillEnterFullScreenNotification
+                  object:w
+                   queue:nil
+              usingBlock:^(NSNotification*) {
+                // SDL has already dropped the full size content view by now (the
+                // frame grew by the title bar): the content rect is our frame.
+                windowed = (w.styleMask & NSWindowStyleMaskFullSizeContentView) ? w.frame
+                                                                                 : [w contentRectForFrameRect:w.frame];
+              }];
+  [nc addObserverForName:NSWindowDidExitFullScreenNotification
+                  object:w
+                   queue:nil
+              usingBlock:^(NSNotification*) {
+                // After SDL's own handling of the change (it may resize again).
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 4), dispatch_get_main_queue(), ^{
+                  style();
+                  if (!NSIsEmptyRect(windowed) && !NSEqualRects(w.frame, windowed)) [w setFrame:windowed display:YES];
+                });
+              }];
   controls[0] = float(left);
   controls[1] = float(inset);
   controls[2] = float(2 * spacing + b.width);
