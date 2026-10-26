@@ -1,4 +1,3 @@
-#include <cstdio>
 #include "text/text_layout.h"
 
 #include <algorithm>
@@ -1129,7 +1128,8 @@ int revealUnitCount(Node* node) {
   return b.empty() ? 0 : int(b.size()) - 1;
 }
 
-void paintText(Node* node, SkCanvas* canvas, float x, float y, float width, float height, const SkMatrix* layoutSpace) {
+void paintText(Node* node, SkCanvas* canvas, float x, float y, float width, float height, const SkMatrix* layoutSpace,
+               bool white) {
   (void)height;
   if (tl::Paragraph* p = layoutParagraph(node, width)) {
     auto* c = static_cast<TextCache*>(node->textCache.get());
@@ -1137,7 +1137,7 @@ void paintText(Node* node, SkCanvas* canvas, float x, float y, float width, floa
     if (c->oneColor) {
       Resolved r;
       merge(&r, node->style().text);
-      painter.recolor(c->builtColor, toSk(r.color));
+      painter.recolor(c->builtColor, white ? SK_ColorWHITE : toSk(r.color));
     }
     if (node->style().textReveal >= 0) paintRevealed(node, c, p, painter, canvas, x, y + c->paintDy);
     else p->paint(&painter, x, y + c->paintDy);
@@ -1158,6 +1158,22 @@ bool paintBounds(Node* node, float x, float y, float width, SkRect* out) {
   // A line wider than the box (an unbreakable word) overflows on either side.
   const float over = std::max(0.f, p->getLongestLine() - width);
   *out = SkRect::MakeLTRB(x - over, y + c->paintDy, x + width + over, y + c->paintDy + h).makeOutset(pad, pad);
+  return true;
+}
+
+bool tintable(Node* node, float width, uint64_t* key, SkColor* color) {
+  if (!layoutParagraph(node, width)) return false;
+  auto* c = static_cast<TextCache*>(node->textCache.get());
+  if (!c->oneColor) return false;
+  Resolved r;
+  merge(&r, node->style().text);
+  if (!r.shadows.empty()) return false;  // shadows keep colors of their own
+  // The paragraph as built and laid out: what a color-only change keeps.
+  uint32_t w;
+  std::memcpy(&w, &c->laidOutWidth, sizeof w);
+  *key = (uint64_t(reinterpret_cast<uintptr_t>(c->paragraph.get())) * 0x9E3779B97F4A7C15ull) ^
+         (uint64_t(w) << 32 | c->fontGeneration);
+  *color = toSk(r.color);
   return true;
 }
 

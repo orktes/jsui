@@ -8,6 +8,7 @@
 
 #include <vector>
 
+#include "include/core/SkColor.h"
 #include "include/core/SkRect.h"
 
 class SkCanvas;
@@ -38,8 +39,15 @@ bool prepareText(Node* node);
 // `layoutSpace` is given when a transform applies to the canvas: it maps the
 // canvas coordinates to device pixels without the transforms (the space
 // boxes pixel-snap in), and the baseline then snaps there, not on the device.
+// `white`: a recolorable paragraph (see recolorable) painted in opaque white,
+// a coverage mask to tint (see tintable).
 void paintText(Node* node, SkCanvas* canvas, float x, float y, float width, float height,
-               const SkMatrix* layoutSpace = nullptr);
+               const SkMatrix* layoutSpace = nullptr, bool white = false);
+// Whether the paragraph-root Text paints in one color that a mask of it
+// painted white, tinted, reproduces (recolorable, no text shadows): then
+// `key` identifies the paint up to that color (it changes when the paragraph
+// is built or laid out again) and `color` is the current one.
+bool tintable(Node* node, float width, uint64_t* key, SkColor* color);
 // The local rect that paintText at (x, y) paints inside (ink and text
 // shadows included); false without a paragraph or with textReveal.
 bool paintBounds(Node* node, float x, float y, float width, SkRect* out);

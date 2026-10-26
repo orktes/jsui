@@ -2034,13 +2034,16 @@ struct NodeRecord : Node::Cache {
   // node is (while it moved); repainted exactly once it stops.
   mutable bool layerInexact = false;
   // A Text node's paint while its scale animates (drawScalingText): the
-  // texture, the device matrix it was rendered at, its device origin, and
-  // the layerStamp / GPU recorder it belongs to.
+  // texture (none while the text changes too), the device matrix it was
+  // rendered at, its device origin, what it shows (layerStamp, or the
+  // text::tintable key of a white mask to tint) and the GPU recorder it
+  // belongs to.
   struct TextSnap {
     sk_sp<SkImage> image;
     SkMatrix matrix;
     SkIPoint origin = {0, 0};
     uint64_t stamp = 0;
+    bool tinted = false;
     const void* owner = nullptr;
   };
   mutable std::shared_ptr<TextSnap> textSnap;
@@ -2410,8 +2413,10 @@ SkIRect scrollIndicatorBounds(Node* n, const SkMatrix& m, float w, float h, cons
 // of such a frame's text cost). Like a compositor, it is drawn instead from a
 // texture of its paint at the scale the animation started at, scaled with
 // bilinear filtering, and repainted exactly once the scale settles
-// (NodeRecord::approximate). GPU canvases only (a raster canvas draws glyphs
-// from its strike cache cheaply). False: draw it directly.
+// (NodeRecord::approximate). Text in one color (the usual case) is rendered
+// as a white mask tinted when drawn, so a color transition running with the
+// scale (a hover) keeps the texture. GPU canvases only (a raster canvas
+// draws glyphs from its strike cache cheaply). False: draw it directly.
 bool drawScalingText(Node* n, SkCanvas* c, SpriteCache& sc, const NodeRecord& rec, float x, float y, float w,
                      float h, const SkMatrix* layoutSpace) {
   const void* owner = c->recorder() ? static_cast<const void*>(c->recorder())
@@ -2419,18 +2424,29 @@ bool drawScalingText(Node* n, SkCanvas* c, SpriteCache& sc, const NodeRecord& re
   const SkMatrix m = c->getTotalMatrix();
   if (!owner || !m.isScaleTranslate() || m.getScaleX() <= 0 || m.getScaleY() <= 0) return false;
   auto& snap = rec.textSnap;
+  uint64_t key = 0;
+  SkColor tint = 0;
+  const bool tinted = text::tintable(n, w, &key, &tint);
+  const uint64_t stamp = tinted ? key : rec.layerStamp;
   // Scaled up past a quarter the texture would blur visibly: rendered again.
   auto near = [](float a, float b) { return a <= b * 1.25f && b <= a * 1.25f; };
-  bool hit = snap && snap->image && snap->stamp == rec.layerStamp && snap->owner == owner &&
+  bool hit = snap && snap->image && snap->stamp == stamp && snap->tinted == tinted && snap->owner == owner &&
              snap->image->colorType() == c->imageInfo().colorType() &&
              near(m.getScaleX(), snap->matrix.getScaleX()) && near(m.getScaleY(), snap->matrix.getScaleY());
   if (!hit) {
+    // Text changing as well while it scales would need a texture every
+    // frame: drawn directly until it stays the same for a frame.
+    bool changing = snap ? snap->stamp != stamp : !tinted && rec.stableFrames < 1;
     snap.reset();
-    // Text changing as well (a color transition) would need a texture every
-    // frame; and a whole screen zooming in must not render one per label in
-    // a single frame.
+    if (changing) {
+      snap = std::make_shared<NodeRecord::TextSnap>();
+      snap->stamp = stamp;
+      return false;
+    }
+    // A whole screen zooming in must not render one per label in a single
+    // frame.
     constexpr int kMaxSnapsPerPaint = 16;
-    if (rec.stableFrames < 1 || sc.textSnaps >= kMaxSnapsPerPaint) return false;
+    if (sc.textSnaps >= kMaxSnapsPerPaint) return false;
     SkRect local;
     if (!text::paintBounds(n, x, y, w, &local)) return false;
     SkIRect area = m.mapRect(local).roundOut();
@@ -2444,7 +2460,7 @@ bool drawScalingText(Node* n, SkCanvas* c, SpriteCache& sc, const NodeRecord& re
     oc->clear(SK_ColorTRANSPARENT);
     oc->translate(float(-area.left()), float(-area.top()));
     oc->concat(m);
-    text::paintText(n, oc, x, y, w, h, layoutSpace);
+    text::paintText(n, oc, x, y, w, h, layoutSpace, tinted);
 #if defined(JSUI_GRAPHITE_AS_IMAGE)
     sk_sp<SkImage> image = oc->recorder() ? SkSurfaces::AsImage(surf) : surf->makeImageSnapshot();
 #else
@@ -2455,7 +2471,8 @@ bool drawScalingText(Node* n, SkCanvas* c, SpriteCache& sc, const NodeRecord& re
     snap->image = std::move(image);
     snap->matrix = m;
     snap->origin = {area.left(), area.top()};
-    snap->stamp = rec.layerStamp;
+    snap->stamp = stamp;
+    snap->tinted = tinted;
     snap->owner = owner;
     sc.textSnaps++;
   }
@@ -2465,8 +2482,10 @@ bool drawScalingText(Node* n, SkCanvas* c, SpriteCache& sc, const NodeRecord& re
   t.setConcat(m, inv);
   c->save();
   c->setMatrix(t);
+  SkPaint p;
+  if (snap->tinted) p.setColorFilter(SkColorFilters::Blend(tint, SkBlendMode::kSrcIn));
   c->drawImage(snap->image.get(), float(snap->origin.fX), float(snap->origin.fY),
-               SkSamplingOptions(SkFilterMode::kLinear));
+               SkSamplingOptions(SkFilterMode::kLinear), &p);
   c->restore();
   return true;
 }
