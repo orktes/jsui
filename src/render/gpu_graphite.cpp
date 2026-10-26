@@ -68,6 +68,7 @@
 #include "include/gpu/graphite/Recording.h"
 #include "include/gpu/graphite/Surface.h"
 #include "render/driver_cache.h"
+#include "render/gpu_layers.h"
 #include "render/graphite_images.h"
 #include "render/host_textures.h"
 #include "render/painter.h"
@@ -217,6 +218,9 @@ struct GraphiteGpu final : JsuiGpuContext {
   std::unique_ptr<graphite::Recorder> warmRecorder;  // warmShaders' (never played back)
   sk_sp<CachingImageProvider> images;
   size_t cacheBytes = kDefaultCacheBytes;
+  // Composited opacity layers, raster-cached subtrees and the static
+  // backdrop (gpu_layers.h), per surface; textures of `recorder`.
+  jsui::GpuLayerCaches layers{kDefaultCacheBytes};
   // Host textures drawn in this context's frames (wrapTexture).
   jsui::TextureWrapper textures{[this](const JsuiTexture& t) { return wrapTexture(t); }};
 
@@ -419,6 +423,7 @@ struct GraphiteGpu final : JsuiGpuContext {
 
   void release() {
     targets.clear();  // before the recorder
+    layers.clear();
     if (precompiler) precompiler->shutdown();  // its PrecompileContext holds the device
     if (images) images->clear();
     textures.clear();
@@ -787,8 +792,10 @@ void purge(JsuiGpuContext* gpu, size_t cacheBytes) {
     g->cacheBytes = cacheBytes;
     g->ctx->setMaxBudgetedBytes(cacheBytes);
     g->images->setBudget(cacheBytes / 2);
+    g->layers.setBudget(cacheBytes);
   }
   g->images->clear();
+  g->layers.clear();
   g->targets.clear();
   g->recorder->freeGpuResources();
   g->ctx->freeGpuResources();
@@ -849,7 +856,10 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* d
   if (dirty) *dirty = JsuiRect{0, 0, 0, 0};
   GraphiteGpu* g = asGraphite(gpu);
   if (!g || !g->ctx || !t.texture || t.width <= 0 || t.height <= 0) return -1;
-  if (g->ctx->isDeviceLost()) return -1;
+  if (g->ctx->isDeviceLost()) {
+    g->layers.clear();
+    return -1;
+  }
   const SkISize size = SkISize::Make(t.width, t.height);
   sk_sp<SkColorSpace> cs;
   graphite::BackendTexture backendTex;
@@ -939,6 +949,9 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGpuTarget& t, JsuiRect* d
   (void)discardTarget;  // == discard
   const bool incremental = key != nullptr;
   jsui::TextureScope textureScope(&g->textures);
+  // Layers drawn from (and rendered into) textures of this context; a frame
+  // recorded elsewhere (record() above) was painted without them.
+  jsui::GpuLayerFrame layerFrame(g->layers.of(&rt));
   SkIRect painted;
   if (frame && frame->key == (clear ? t.texture : nullptr) && frame->width == t.width && frame->height == t.height &&
       !discard) {

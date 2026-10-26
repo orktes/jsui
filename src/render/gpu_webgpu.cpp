@@ -46,6 +46,7 @@
 #include "include/gpu/graphite/Surface.h"
 #include "include/gpu/graphite/dawn/DawnBackendContext.h"
 #include "include/gpu/graphite/dawn/DawnGraphiteTypes.h"
+#include "render/gpu_layers.h"
 #include "render/graphite_images.h"
 #include "render/host_textures.h"
 #include "render/painter.h"
@@ -135,9 +136,6 @@ struct WebGPUGpu final : JsuiGpuContext {
     int smallFrames = 0;        // consecutive frames with small damage
     int directFrames = 0;       // consecutive frames painted straight into the target
     uint64_t lastUsed = 0;
-    // Composited opacity layers and raster-cached subtrees (painter.h), per
-    // surface: entries age with the frames of the surface they belong to.
-    std::unique_ptr<jsui::LayerCache> layers = std::make_unique<jsui::LayerCache>();
     void drop() {
       retained.reset();
       backImage.reset();
@@ -164,6 +162,9 @@ struct WebGPUGpu final : JsuiGpuContext {
     return it->second;
   }
   size_t cacheBytes = kDefaultCacheBytes;
+  // Composited opacity layers and raster-cached subtrees (gpu_layers.h),
+  // per surface.
+  jsui::GpuLayerCaches layers{kDefaultCacheBytes};
 
   bool init() {
     graphite::DawnBackendContext backend;
@@ -220,7 +221,10 @@ struct WebGPUGpu final : JsuiGpuContext {
 #endif
   }
 
-  void dropRetained() { frames.clear(); }
+  void dropRetained() {
+    frames.clear();
+    layers.clear();
+  }
 
   void release() {
     if (precompiler) precompiler->shutdown();  // its PrecompileContext holds the device
@@ -310,9 +314,10 @@ void purge(JsuiGpuContext* gpu, size_t cacheBytes) {
     g->cacheBytes = cacheBytes;
     g->ctx->setMaxBudgetedBytes(cacheBytes);
     g->images->setBudget(cacheBytes / 2);
+    g->layers.setBudget(cacheBytes);
   }
   g->images->clear();
-  for (auto& e : g->frames) e.second.layers->clear();
+  g->layers.clear();
   g->recorder->freeGpuResources();
   g->ctx->freeGpuResources();
 }
@@ -377,9 +382,8 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
   bool copyAll = false;  // copy-back: the whole target into `back` after the frame
   const bool opacityLayers = !(t.flags & JSUI_WEBGPU_NO_LAYER_CACHE), raster = !(t.flags & JSUI_WEBGPU_NO_RASTER_CACHE),
              backdrop = !(t.flags & JSUI_WEBGPU_NO_BACKDROP);
-  f.layers->setModes(opacityLayers, raster, backdrop);
   jsui::TextureScope textureScope(&g->textures);
-  jsui::LayerCacheScope layerScope(opacityLayers || raster || backdrop ? f.layers.get() : nullptr);
+  jsui::GpuLayerFrame layerFrame(g->layers.of(&rt), opacityLayers, raster, backdrop);
   rt.renderCanvasTracked(key, w, h, [&](const SkIRect&, bool keyValid) -> Surface::CanvasChoice {
     int64_t area = 0;
     for (SkRegion::Iterator it(rt.trackedDamage()); !it.done(); it.next())
@@ -439,7 +443,6 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
     c.splitDamage = true;
     return c;
   }, /*growCurves=*/false);
-  f.layers->endFrame();
   if (failed) return -1;
   if (viaRetained && !copyBack) {
     SkPaint paint;
