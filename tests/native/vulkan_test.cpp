@@ -19,6 +19,7 @@
 
 #include "jsui/jsui.h"
 #include "render/driver_cache.h"
+#include "gpu_layer_scene.h"
 #include "render/gpu.h"
 #include "render/pipeline_cache.h"
 #include "test.h"
@@ -630,6 +631,41 @@ TEST(vulkan_graphite_matches_cpu) {
   CHECK_EQ(dirty.width * dirty.height, 0);
   jsui_destroy(g);
   jsui_destroy(c);
+  jsui_gpu_destroy(gpu);
+#endif
+}
+
+// The LayerCache on Graphite Vulkan (gpu_layer_scene.h): cached opacity
+// layers, a raster-cached list, a motion layer and the static backdrop in
+// incremental frames of a host-owned VkImage match the CPU raster, with the
+// cache and without, through a purge and under a tiny texture budget.
+TEST(vulkan_graphite_layer_cache_matches_cpu) {
+#if !JSUI_VULKAN_TESTS
+  skip("vulkan_graphite_layer_cache_matches_cpu", "built without JSUI_VULKAN");
+#else
+  Vk vk;
+  std::string why = vk.init(240, 160);
+  if (!why.empty()) {
+    skip("vulkan_graphite_layer_cache_matches_cpu", why.c_str());
+    return;
+  }
+  JsuiVulkanDevice d = vk.desc();
+  JsuiGpuContext* gpu = jsui_gpu_create_vulkan(&d);
+  CHECK(gpu != nullptr);
+  if (!gpu) return;
+  int layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  gpu_layer_scene::checkMatchesCpu("Vulkan", gpu, [&](jsui::Surface& s, bool incremental, JsuiRect* dirty) {
+    JsuiGpuTarget t{};
+    t.texture = vk.image;
+    t.width = vk.w;
+    t.height = vk.h;
+    t.layout = incremental ? layout : VK_IMAGE_LAYOUT_UNDEFINED;
+    t.final_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    t.flags = incremental ? JSUI_GPU_INCREMENTAL : 0;
+    CHECK_EQ(jsui::graphite_gpu::render(s, gpu, t, dirty, nullptr), 0);
+    layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    return vk.read();
+  });
   jsui_gpu_destroy(gpu);
 #endif
 }

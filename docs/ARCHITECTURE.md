@@ -480,7 +480,9 @@ used to process Dawn events).
   or overlapping draws) is rendered into a texture of its own once and
   then drawn again at each frame's opacity, instead of being rendered
   offscreen every time it is painted (`LayerCache` in `painter.h`, owned by
-  the WebGPU context and set with `LayerCacheScope` around a frame). The
+  the GPU context and set with `LayerCacheScope` around a frame:
+  `GpuLayerCaches` / `GpuLayerFrame` in `gpu_layers.h`, which the Graphite
+  backends share, browser WebGPU and native Vulkan / Metal / Dawn alike). The
   texture is reused while the subtree paints the same relative to the node:
   `updateRecords` gives each node a stamp that changes whenever anything
   under it changes, but not when only the node's own opacity, transform or
@@ -494,8 +496,17 @@ used to process Dawn events).
   progress bar inside a fading panel) takes a plain layer clipped to the
   damage, as before, with its static parts drawn from raster textures (see
   Raster cache). Each surface drawing through the context has its own
-  cache; textures are freed after 120 of its frames unused or over 96 MB
-  (LRU); `JSUI_WEBGPU_NO_LAYER_CACHE` turns it off. On
+  cache (dropped after 600 frames of the context without one of its own);
+  textures are freed after 120 of its frames unused or over the budget
+  (LRU): 3/8 of the context's (`jsui_gpu_purge`'s `cache_bytes`, 96 of
+  the default 256 MB), shared by its surfaces. `jsui_gpu_purge`, a lost
+  device and the context's destruction free them all. On native Graphite
+  the cache works the same for host-owned targets, retained
+  (`JSUI_GPU_INCREMENTAL`, damage rects over the static backdrop) or not;
+  a frame recorded off the context's thread (`jsui_record_gpu_frame`) is
+  painted without it. `JSUI_LAYER_CACHE=off` in the environment turns it
+  off on every GPU context (for A/B runs; `setGpuLayerCaches(false)` in
+  tests), `JSUI_WEBGPU_NO_LAYER_CACHE` per WebGPU render. On
   `interactions.jsx` the entrance (staggered menu buttons and panels fading
   and sliding in) went from ~5.9 render passes and ~140 draws per frame to
   ~3.4 and ~90 at 1280x720; what is left are two panels whose content
@@ -563,7 +574,8 @@ used to process Dawn events).
   `PaintStats::motionDraws` counts the draws; `setMotionLayers(false)` or
   `JSUI_MOTION_LAYERS=off` turns it off. `tests/native/motion_layers_test.cpp`
   runs the LayerCache on a raster canvas (it works there too; only GPU
-  contexts install one). At rest the frame equals, to the bit, what the same
+  contexts install one; `vulkan_graphite_layer_cache_matches_cpu` and
+  `metal_graphite_layer_cache_matches_cpu` run it on the GPU). At rest the frame equals, to the bit, what the same
   scene paints when it was at rest there all along. A texture rendered
   while nodes in it were in motion (shadows from the phase-0 mask, scaling
   text, see PaintMotion) is marked approximate and never drawn once they
@@ -3332,9 +3344,10 @@ the expensive per-pixel work is done once:
   fill and one outer shadow (the shadow is then not drawn under the box), or
   a childless box that only draws a solid border ring of one colour. A
   layer at zero opacity is skipped. On GPU backends each layer is an
-  offscreen pass, per damage rect, every time it is painted; on WebGPU the
-  layer's texture is cached and composited instead while its subtree is
-  unchanged (`LayerCache`, see WebGPU: Composited layers).
+  offscreen pass, per damage rect, every time it is painted; on Graphite
+  (WebGPU, Vulkan, Metal, Dawn) the layer's texture is cached and
+  composited instead while its subtree is unchanged (`LayerCache`, see
+  WebGPU: Composited layers).
 * **Text.** Paragraphs keep one layout: painting and the painter's overflow
   bounds lay out at the same content width.
 

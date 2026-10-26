@@ -2707,6 +2707,7 @@ void LayerCache::setModes(bool opacityLayers, bool raster, bool backdrop) {
   impl->raster = raster;
   impl->backdrop = backdrop;
 }
+void LayerCache::setBudget(size_t budgetBytes) { impl->budget = budgetBytes; }
 size_t LayerCache::bytes() const { return impl->bytes; }
 int LayerCache::size() const { return int(impl->entries.size()); }
 void LayerCache::endFrame() {

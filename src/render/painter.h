@@ -142,6 +142,9 @@ class LayerCache {
   // After a frame: frees layers unused for a while, and the least recently
   // used ones over the budget.
   void endFrame();
+  // The bytes of textures it keeps (endFrame frees the least recently used
+  // ones over it).
+  void setBudget(size_t budgetBytes);
   size_t bytes() const;
   int size() const;
   struct Impl;
