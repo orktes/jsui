@@ -540,6 +540,38 @@ used to process Dawn events).
   `JSUI_WEBGPU_NO_RASTER_CACHE` turns it off; `webgpu: raster cache` in the
   browser tests compares it with direct painting, in steady frames and with
   the list scrolled at 2x.
+* **Motion layers.** Both of the above reuse a texture only while the
+  node's device matrix differs from the one it was rendered at by a
+  translation: a scale or rotation animation (a button springing, a card
+  popping in) rendered a cached layer into a new texture every frame, and
+  a raster-cached subtree was painted node by node while it scaled. Like a
+  compositor animating a layer, a cached layer or raster-cached subtree
+  that keeps scaling or rotating (it moved in this frame and the one
+  before, `NodeRecord::changing`, so not a one-off jump), while nothing in
+  it changes, is drawn from the texture it was last rendered into, mapped
+  by the change of matrix since, with bilinear sampling (`motionTransform`
+  in `painter.cpp`). "Nothing changes" is a second stamp
+  (`NodeRecord::motionStamp`) that follows the layout instead of the
+  pixel-snapped boxes, which snap differently at every scale. The texture
+  must hold the whole layer (not cut at the canvas edge), and the change
+  must scale by 1/2 to 5/4. Beyond that a fresh texture is rendered at the
+  current scale, so a shrinking layer does not alias and a growing one
+  blurs at most by a quarter: a 0.3 to 1 pop-in renders 5 textures in 24
+  frames. Text is resampled with the rest, soft by that much while the
+  motion lasts; like a sub-pixel move (`layerInexact`), the node is
+  repainted exactly the frame after it comes to rest.
+  `PaintStats::motionDraws` counts the draws; `setMotionLayers(false)` or
+  `JSUI_MOTION_LAYERS=off` turns it off. `tests/native/motion_layers_test.cpp`
+  runs the LayerCache on a raster canvas (it works there too; only GPU
+  contexts install one). At rest the frame equals, to the bit, what the same
+  scene paints when it was at rest there all along. A texture rendered
+  while nodes in it were in motion (shadows from the phase-0 mask, scaling
+  text, see PaintMotion) is marked approximate and never drawn once they
+  rest. Before, a cached opacity layer that scaled kept such a texture at
+  rest, a level off on ~1200 pixels. While a 140x72 card
+  springs from 1 to 0.86 to 1.08, at most ~85 pixels (edges and glyphs) are
+  over 48 levels off a direct paint. It paints 52-56 nodes in 20 frames
+  instead of 120, with 1 texture render instead of 18 for an opacity layer.
 * **Static backdrop.** Each damage rect is cleared and repainted from the
   root, so it also repaints whatever lies under everything: on
   `interactions.jsx` the background colour, the full-screen image and the
