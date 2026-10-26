@@ -30,6 +30,7 @@ struct ViewerVideo {
   AVPlayerItemVideoOutput* output = nil;
   id<MTLTexture> frame = nil;  // the texture the UI samples (Metal)
   bool paused = true, loop = false, hasFrame = false;
+  int seeks = 0;  // seeks under way (BUFFERING while the UI wants it playing)
   float rate = 1;
   std::string last;  // the last status reported
 };
@@ -206,6 +207,8 @@ bool tick(ViewerVideo* v) {
       error = v->item.error.localizedDescription ?: @"the video could not be played";
     } else if (v->item.status == AVPlayerItemStatusUnknown) {
       s.state = JSUI_VIDEO_LOADING;
+    } else if (v->seeks > 0 && !v->paused) {
+      s.state = JSUI_VIDEO_BUFFERING;  // seeking
     } else if (v->player.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
       s.state = JSUI_VIDEO_PLAYING;
     } else if (v->player.timeControlStatus == AVPlayerTimeControlStatusWaitingToPlayAtSpecifiedRate) {
@@ -261,10 +264,24 @@ void viewer_videos_command(void* user, const JsuiVideoCommand* c) {
   if (c->op == JSUI_VIDEO_CLOSE) closeVideo(vs, c->video);
   else if (!v->player) return;
   else if (c->op == JSUI_VIDEO_SET) apply(v, c);
-  else if (c->op == JSUI_VIDEO_SEEK)
+  else if (c->op == JSUI_VIDEO_SEEK) {
+    // AVPlayer may stop while it seeks: playing again once there (when the
+    // UI still wants it playing). The completion comes on any queue.
+    v->seeks++;
+    uint64_t video = c->video;
     [v->player seekToTime:CMTimeMakeWithSeconds(std::max(0.0, c->time_s), 600)
           toleranceBefore:kCMTimeZero
-           toleranceAfter:kCMTimeZero];
+           toleranceAfter:kCMTimeZero
+        completionHandler:^(BOOL) {
+          dispatch_async(dispatch_get_main_queue(), ^{
+            auto at = vs->videos.find(video);
+            if (at == vs->videos.end()) return;  // closed meanwhile
+            ViewerVideo* w = at->second;
+            if (w->seeks > 0) w->seeks--;
+            if (!w->seeks && !w->paused) [w->player playImmediatelyAtRate:w->rate];
+          });
+        }];
+  }
 }
 
 // Once per frame. Returns 1 while a video plays (keep ticking), else 0.

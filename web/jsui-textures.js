@@ -676,7 +676,7 @@ export class JsuiVideo {
     this.videos.set(c.video, v);
     const publish = () => this._publish(c.video, v);
     for (const e of ['loadedmetadata', 'loadeddata', 'canplay', 'play', 'playing', 'pause', 'waiting', 'ended',
-      'durationchange', 'seeked', 'resize', 'error', 'progress']) {
+      'durationchange', 'seeking', 'seeked', 'resize', 'error', 'progress']) {
       el.addEventListener(e, publish);
     }
     // The position every display frame while it plays (the runtime passes
@@ -728,7 +728,7 @@ export class JsuiVideo {
     // listener moves on to it).
     const state = el.error ? (this._next(v) ? VideoState.LOADING : VideoState.FAILED) : el.ended ? VideoState.ENDED
       : el.readyState < 1 ? VideoState.LOADING : el.paused ? VideoState.PAUSED
-      : el.readyState < 3 ? VideoState.BUFFERING : VideoState.PLAYING;
+      : el.seeking || el.readyState < 3 ? VideoState.BUFFERING : VideoState.PLAYING;
     const d = isFinite(el.duration) ? el.duration : 0;
     const b = el.buffered.length ? el.buffered.end(el.buffered.length - 1) : 0;
     const err = el.error ? (el.error.message || `media error ${el.error.code}`) : '';

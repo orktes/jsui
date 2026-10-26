@@ -132,7 +132,10 @@ export default function Cinematic({ active }) {
       onLoadStart={() => setSt((s) => ({ ...s, status: 'loading' }))}
       onLoad={({ duration: d }) => setSt((s) => ({ ...s, duration: d }))}
       onBuffer={({ isBuffering }) => setSt((s) => (s.status === 'error' ? s : { ...s, status: isBuffering ? 'loading' : paused ? 'paused' : 'playing' }))}
-      onPlaybackStateChanged={({ isPlaying }) => setSt((s) => (s.status === 'error' || s.status === 'ended' ? s : { ...s, status: isPlaying ? 'playing' : 'paused' }))}
+      onPlaybackStateChanged={({ isPlaying }) =>
+        // Not playing while it buffers (a seek, a stall) is not paused: the spinner stays.
+        setSt((s) => (s.status === 'error' || s.status === 'ended' || (!isPlaying && s.status === 'loading') ? s : { ...s, status: isPlaying ? 'playing' : 'paused' }))
+      }
       onEnd={() => {
         setPaused(true);
         setSt((s) => ({ ...s, status: 'ended' }));
