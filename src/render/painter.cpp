@@ -2242,6 +2242,9 @@ struct Ctx {
   // its children, outline and scroll indicators are painted).
   Occlusion* occlusion = nullptr;
   bool ownOccluded = false;
+  // A draw was not what the nodes at rest paint (see PaintMotion): a
+  // texture rendered with it is not used once they rest.
+  bool approximated = false;
 };
 
 sk_sp<SkMaskFilter> cachedBlur(RootRecord* root, float blur) {
@@ -2627,6 +2630,7 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
   }
   if (inexact) {
     if (auto* rec = static_cast<const NodeRecord*>(n->paintCache.get())) rec->approximate = true;
+    ctx.approximated = true;
     n->markPaintTree();
     ctx.doc.markExactRepaint();  // a frame after it stops, to repaint it exactly
   }
@@ -2665,6 +2669,7 @@ struct LayerCache::Impl {
     sk_sp<SkImage> image;
     SkIRect rect;          // device rect of the image when rendered
     bool whole = false;    // the image holds the whole layer (not cut at the canvas edge)
+    bool approximate = false;  // rendered with draws of nodes in motion (Ctx::approximated)
     SkMatrix matrix;       // the node's device matrix then
     const void* owner = nullptr;  // the canvas' Graphite recorder / Ganesh context
     uint32_t lastUsed = 0;
@@ -2815,7 +2820,7 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
     hit = e.stamp == rec->layerStamp && e.owner == owner && e.image &&
           e.image->colorType() == c->imageInfo().colorType() && m.getScaleX() == em.getScaleX() &&
           m.getScaleY() == em.getScaleY() && m.getSkewX() == em.getSkewX() && m.getSkewY() == em.getSkewY() &&
-          (e.whole || e.rect.makeOffset(dx, dy).contains(need));
+          (e.whole || e.rect.makeOffset(dx, dy).contains(need)) && (!e.approximate || rec->moved);
     // A whole-pixel move is exact. While the node moves (an Animated
     // translation) a sub-pixel one is drawn at the nearest whole pixel, as a
     // compositor would; once it stops it is repainted exactly (layerInexact).
@@ -2890,6 +2895,7 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
     e.image = std::move(image);
     e.rect = need;
     e.whole = need == full;
+    e.approximate = sub.approximated;
     e.matrix = m;
     e.owner = owner;
     lc.bytes += LayerCache::Impl::sizeOf(e);
@@ -2898,6 +2904,9 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
     inexact = false;
     ctx.stats.layerRenders++;
   }
+  // Drawn as no frame at rest would draw it: repainted exactly once it rests.
+  inexact |= it->second.approximate;
+  if (inexact) ctx.approximated = true;
   rec->layerInexact = inexact;
   // Another frame even if nothing changes: the one that repaints it exactly.
   if (inexact) {

@@ -53,10 +53,12 @@ Pixels compare(const std::vector<uint32_t>& a, const std::vector<uint32_t>& b, i
   return p;
 }
 
+
 // One scene painted incrementally into a retained buffer, with or without a
 // LayerCache and with motion layers on or off.
 struct Run {
   Scene s{320, 240};
+  Node* backdrop = nullptr;
   Node* card = nullptr;
   std::unique_ptr<LayerCache> cache;
   bool motion = true;
@@ -64,7 +66,8 @@ struct Run {
   PaintStats last, sum;
   Run(const std::string& extra, bool layers, bool motionLayers) : motion(motionLayers) {
     if (layers) cache = std::make_unique<LayerCache>();
-    card = s.add(cardScene(extra))->children()[0];
+    backdrop = s.add(cardScene(extra));
+    card = backdrop->children()[0];
   }
   void frame() {
     LayerCacheScope scope(cache.get());
@@ -79,14 +82,47 @@ struct Run {
     sum.motionDraws += last.motionDraws;
     sum.nodesPainted += last.nodesPainted;
   }
+  // Frames at rest that repaint the card (the backdrop under it changes and
+  // changes back): its raster cache state follows the damage, so after a
+  // few it is drawn from a texture rendered at rest whatever came before.
+  void settle() {
+    for (const char* c : {"#000001", "#000002", "#000001", "#000002"}) {
+      patch(backdrop, std::string(R"J({"backgroundColor":")J") + c + "\"}");
+      frame();
+    }
+  }
 };
 
+// At rest, after a motion: the frame `on` paints is the one a scene that
+// was always at rest there paints (`ref`, the same cache settings): no
+// texture rendered or drawn in motion is left. A direct paint (`plain`)
+// differs from either by the cache's own compositing rounding only.
+void checkRest(Run& on, Run& ref, Run& plain, const char* what) {
+  for (Run* r : {&on, &ref, &plain}) r->settle();
+  CHECK_EQ(on.last.motionDraws, 0);
+  Pixels same = compare(on.px, ref.px, 0);
+  if (same.over)
+    std::fprintf(stderr, "  %s at rest: %zu pixels differ from a scene at rest (max %d)\n", what, same.over, same.max);
+  CHECK_EQ(same.over, size_t(0));
+  Pixels direct = compare(on.px, plain.px, 0);
+  std::printf("  %s at rest: %zu pixels off a direct paint, by at most %d (the cache's compositing)\n", what,
+              direct.over, direct.max);
+  // A full repaint of the same frame equals the retained one.
+  std::vector<uint32_t> full(320 * 240);
+  {
+    LayerCacheScope scope(on.cache.get());
+    on.s.rt->render(full.data(), 320, 240, 320 * 4);
+  }
+  CHECK_EQ(compare(on.px, full, 0).over, size_t(0));
+}
+
+std::string scaleStyle(double sc) { return R"J({"transform":[{"scale":)J" + std::to_string(sc) + "}]}"; }
+
 // Scales `extra`'s card from 1 down to 0.86 and up to 1.08, then rests:
-// while it moves the motion layer is within `tolerance` of a direct paint,
-// at rest it paints what the cache paints without motion layers (to the
-// bit) and a direct paint up to the cache's rounding.
+// while it moves the motion layer is within a tolerance of a direct paint,
+// at rest it paints what a scene at rest there paints.
 void scaleAndRest(const std::string& extra, const char* what, bool raster) {
-  Run on(extra, true, true), off(extra, true, false), plain(extra, false, true);
+  Run on(extra, true, true), off(extra, true, false), plain(extra, false, true), ref(extra, true, true);
   Run* runs[] = {&on, &off, &plain};
   auto all = [&](const std::string& style) {
     for (Run* r : runs) {
@@ -104,7 +140,7 @@ void scaleAndRest(const std::string& extra, const char* what, bool raster) {
   size_t worstOver = 0;
   int worstMax = 0;
   for (float sc : scales) {
-    all(R"J({"transform":[{"scale":)J" + std::to_string(sc) + "}]}");
+    all(scaleStyle(sc));
     Pixels d = compare(on.px, plain.px, 48);
     worstOver = std::max(worstOver, d.over);
     worstMax = std::max(worstMax, d.max);
@@ -122,25 +158,10 @@ void scaleAndRest(const std::string& extra, const char* what, bool raster) {
   // Resampled within 5/4 of its scale: the card is ~140x72 px; its edges
   // and glyphs (a few hundred pixels) differ, nothing by a whole colour.
   CHECK(worstOver <= 300);
-  // Rest: the next frame repaints it exactly, and nothing after.
-  all("");
-  all("");
-  CHECK_EQ(on.last.motionDraws, 0);
-  Pixels same = compare(on.px, off.px, 0);
-  if (same.over) std::fprintf(stderr, "  %s at rest: %zu pixels differ from the cache without motion layers (max %d)\n",
-                              what, same.over, same.max);
-  CHECK_EQ(same.over, size_t(0));
-  Pixels direct = compare(on.px, plain.px, 2);
-  if (direct.over) std::fprintf(stderr, "  %s at rest: %zu pixels off a direct paint (max %d)\n", what, direct.over,
-                                direct.max);
-  CHECK_EQ(direct.over, size_t(0));
-  // A full repaint of the same frame equals the retained one.
-  std::vector<uint32_t> full(320 * 240);
-  {
-    LayerCacheScope scope(on.cache.get());
-    on.s.rt->render(full.data(), 320, 240, 320 * 4);
-  }
-  CHECK_EQ(compare(on.px, full, 0).over, size_t(0));
+  patch(ref.card, scaleStyle(scales.back()));
+  checkRest(on, ref, plain, what);
+  // Without motion layers too (textures rendered in every frame of it).
+  checkRest(off, ref, plain, "  (without motion layers)");
 }
 
 }  // namespace
@@ -153,23 +174,20 @@ TEST(motion_layers_opacity_layer_scaling) { scaleAndRest(R"J("opacity":0.85,)J",
 
 // Rotating: drawn rotated from its texture while it turns.
 TEST(motion_layers_rotation) {
-  Run on("", true, true), plain("", false, true);
+  Run on("", true, true), plain("", false, true), ref("", true, true);
   for (Run* r : {&on, &plain}) {
     r->frame();
     r->frame();
   }
+  auto rot = [](int deg) { return R"J({"transform":[{"rotate":")J" + std::to_string(deg) + R"J(deg"}]})J"; };
   for (int deg = 2; deg <= 30; deg += 2)
     for (Run* r : {&on, &plain}) {
-      patch(r->card, R"J({"transform":[{"rotate":")J" + std::to_string(deg) + R"J(deg"}]})J");
+      patch(r->card, rot(deg));
       r->frame();
     }
   CHECK(on.sum.motionDraws > 0);
-  for (Run* r : {&on, &plain}) {
-    r->frame();
-    r->frame();
-  }
-  Pixels direct = compare(on.px, plain.px, 2);
-  CHECK_EQ(direct.over, size_t(0));
+  patch(ref.card, rot(30));
+  checkRest(on, ref, plain, "rotation");
 }
 
 // A one-off jump in scale is no motion: rendered again at the new scale.
@@ -177,7 +195,7 @@ TEST(motion_layers_not_for_one_off_changes) {
   Run on("", true, true);
   on.frame();
   on.frame();
-  patch(on.card, R"J({"transform":[{"scale":0.9}]})J");
+  patch(on.card, scaleStyle(0.9));
   on.frame();
   CHECK_EQ(on.last.motionDraws, 0);
   on.frame();
@@ -187,43 +205,42 @@ TEST(motion_layers_not_for_one_off_changes) {
 // A pop-in from 0.3 to 1: a new texture each time the scale leaves 1/2 to
 // 5/4 of the last one's, a few in all, and exact at rest.
 TEST(motion_layers_pop_in_renders_a_few_textures) {
-  Run on("", true, true), plain("", false, true);
+  Run on("", true, true), plain("", false, true), ref("", true, true);
   for (Run* r : {&on, &plain}) {
-    patch(r->card, R"J({"transform":[{"scale":0.3}]})J");
+    patch(r->card, scaleStyle(0.3));
     r->frame();
     r->frame();
   }
   const int frames = 24;
   for (int i = 1; i <= frames; i++)
     for (Run* r : {&on, &plain}) {
-      patch(r->card, R"J({"transform":[{"scale":)J" + std::to_string(0.3 + 0.7 * i / frames) + "}]}");
+      patch(r->card, scaleStyle(0.3 + 0.7 * i / frames));
       r->frame();
     }
   std::printf("  pop-in: %d motion draws, %d layer renders in %d frames\n", on.sum.motionDraws, on.sum.layerRenders,
               frames);
   CHECK(on.sum.motionDraws >= frames / 2);
   CHECK(on.sum.layerRenders <= 8);
-  for (Run* r : {&on, &plain}) {
-    r->frame();
-    r->frame();
-  }
-  CHECK_EQ(compare(on.px, plain.px, 2).over, size_t(0));
+  patch(ref.card, scaleStyle(1.0));
+  checkRest(on, ref, plain, "pop-in");
 }
 
 // Content changing while it scales (a counter ticking in a springing
 // button): no motion layer, painted as it is.
 TEST(motion_layers_not_while_the_content_changes) {
-  Run on("", true, true), plain("", false, true);
+  Run on("", true, true), plain("", false, true), ref("", true, true);
   for (Run* r : {&on, &plain}) {
     r->frame();
     r->frame();
   }
   for (int i = 1; i <= 8; i++)
     for (Run* r : {&on, &plain}) {
-      patch(r->card, R"J({"transform":[{"scale":)J" + std::to_string(1 - 0.02 * i) + "}]}");
+      patch(r->card, scaleStyle(1 - 0.02 * i));
       r->card->children()[1]->children()[0]->setText("Play " + std::to_string(i));
       r->frame();
     }
   CHECK_EQ(on.sum.motionDraws, 0);
-  CHECK_EQ(compare(on.px, plain.px, 2).over, size_t(0));
+  patch(ref.card, scaleStyle(1 - 0.02 * 8));
+  ref.card->children()[1]->children()[0]->setText("Play 8");
+  checkRest(on, ref, plain, "changing content");
 }

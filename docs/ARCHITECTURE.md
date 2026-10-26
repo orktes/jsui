@@ -563,8 +563,12 @@ used to process Dawn events).
   `PaintStats::motionDraws` counts the draws; `setMotionLayers(false)` or
   `JSUI_MOTION_LAYERS=off` turns it off. `tests/native/motion_layers_test.cpp`
   runs the LayerCache on a raster canvas (it works there too; only GPU
-  contexts install one). At rest the frame equals the cache without motion
-  layers to the bit, and a direct paint within 2 levels. While a 140x72 card
+  contexts install one). At rest the frame equals, to the bit, what the same
+  scene paints when it was at rest there all along. A texture rendered
+  while nodes in it were in motion (shadows from the phase-0 mask, scaling
+  text, see PaintMotion) is marked approximate and never drawn once they
+  rest. Before, a cached opacity layer that scaled kept such a texture at
+  rest, a level off on ~1200 pixels. While a 140x72 card
   springs from 1 to 0.86 to 1.08, at most ~85 pixels (edges and glyphs) are
   over 48 levels off a direct paint. It paints 52-56 nodes in 20 frames
   instead of 120, with 1 texture render instead of 18 for an opacity layer.
