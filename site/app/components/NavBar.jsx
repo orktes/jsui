@@ -14,6 +14,7 @@ export const LINKS = [
   { to: '/interactions', label: 'Interactions' },
   { to: '/input', label: 'Input' },
   { to: '/motion', label: 'Motion' },
+  { to: '/vector', label: 'Vector' },
   { to: '/playground', label: 'Playground' },
   { to: '/embed', label: 'Embed' },
 ];
