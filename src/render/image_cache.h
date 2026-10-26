@@ -59,10 +59,15 @@ class ImageCache {
   void waitDecodes();
   void finishDecodes();
   void holdDecodes(bool on);
-  // Images of at least this many pixels decode on the pool; smaller ones
-  // (icons) inline, where handing over would only cost a frame of pop-in.
-  // No pool on the web: there everything decodes inline.
-  int64_t asyncMinPixels = 256 * 256;
+  // Inline decode budget per tick, in pixels (decode time is roughly
+  // proportional: ~3.5 ns/px measured on an M-series Mac, so 256k px is
+  // about 1 ms). Images decode inline while the tick's budget lasts, where
+  // the hand-over would only cost a frame of pop-in; the rest (a screen of
+  // card art, any image larger than the budget) go to the pool. No pool on
+  // the web: there everything decodes inline.
+  int64_t inlineBudgetPixels = 256 * 1024;
+  // Before the tick's loads complete: a new inline budget.
+  void beginTick() { inlineSpent_ = 0; }
   // Decodes the pool ran so far (tests: proves the work left this thread).
   uint64_t asyncDecodes = 0;
 
@@ -88,6 +93,7 @@ class ImageCache {
   std::unique_ptr<Pool> pool_;  // started on the first large image
   uint32_t epoch_ = 0;          // clear() drops decodes still on the pool
   int decoding_ = 0;
+  int64_t inlineSpent_ = 0;     // pixels decoded inline this tick
 };
 
 // Decodes encoded image bytes into a raster image (nullptr on failure).

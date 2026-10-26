@@ -308,10 +308,10 @@ TEST(render_image_data_uri_and_resize_modes) {
 // shows nothing (and wants another), and a later tick publishes the image,
 // re-measures the Image and repaints it.
 TEST(render_image_decodes_off_the_frame_thread) {
-  std::string uri = testPngUri(512, 256);
-  Scene s(600, 300);
+  std::string uri = testPngUri(1024, 512);
+  Scene s(1100, 600);
   ImageCache& images = *s.rt->images;
-  CHECK(int64_t(512) * 256 >= images.asyncMinPixels);
+  CHECK(int64_t(1024) * 512 > images.inlineBudgetPixels);  // over the budget on its own
   // Held: the decode cannot finish before the frames below look at it (a
   // fast machine decodes this between setProps and the first tick).
   images.holdDecodes(true);
@@ -342,10 +342,10 @@ TEST(render_image_decodes_off_the_frame_thread) {
   CHECK(images.generation != gen);
   CHECK(images.peek(uri, &info));
   CHECK(info.state == ImageCache::State::Ready);
-  CHECK_NEAR(img->layoutRect().width, 512, 0.01);
-  CHECK_NEAR(img->layoutRect().height, 256, 0.01);
+  CHECK_NEAR(img->layoutRect().width, 1024, 0.01);
+  CHECK_NEAR(img->layoutRect().height, 512, 0.01);
   CHECK_EQ(s.r(5, 10), 255);
-  CHECK_EQ(s.b(500, 10), 255);
+  CHECK_EQ(s.b(1000, 10), 255);
 
   // Cleared while decoding: the stale result is dropped, the next request
   // decodes again.
@@ -357,11 +357,31 @@ TEST(render_image_decodes_off_the_frame_thread) {
   CHECK_EQ(images.pendingDecodes(), 0);
   CHECK(!images.peek(uri, &info));
 
-  // Below the threshold an image still decodes inline.
+  // Within the tick's budget an image still decodes inline.
   std::string small = testPngUri(40, 20);
   ImageCache::State st;
   CHECK(images.get(small, &st) != nullptr);
   CHECK(st == ImageCache::State::Ready);
+}
+
+// Small images decode inline until the tick's pixel budget is spent; the
+// rest of that tick's go to the pool, and the next tick has a new budget.
+TEST(render_image_inline_decode_budget) {
+  Scene s(100, 100);
+  ImageCache& images = *s.rt->images;
+  images.inlineBudgetPixels = 2000;
+  std::string a = testPngUri(40, 20), b = testPngUri(40, 21), c = testPngUri(40, 22), d = testPngUri(40, 23);
+  s.render();  // a tick: a fresh budget
+  ImageCache::State st;
+  CHECK(images.get(a, &st) && st == ImageCache::State::Ready);  // 800 px
+  CHECK(images.get(b, &st) && st == ImageCache::State::Ready);  // 1640
+  CHECK(!images.get(c, &st) && st == ImageCache::State::Loading);  // 2520: over, to the pool
+  CHECK_EQ(images.pendingDecodes(), 1);
+  s.render();
+  CHECK(images.get(d, &st) && st == ImageCache::State::Ready);  // a new tick's budget
+  images.finishDecodes();
+  CHECK(images.get(c, &st) && st == ImageCache::State::Ready);
+  CHECK_EQ(images.asyncDecodes, 1u);
 }
 
 TEST(render_scrollview_offset_and_clip) {

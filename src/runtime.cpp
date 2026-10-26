@@ -808,6 +808,7 @@ void Runtime::tick(double nowMs, bool sync) {
     if (FrameSnapshot::surfacesChanged(*this, snapshots.current().get())) publishSnapshot();
     buffers.publish();
   }
+  images->beginTick();
   loader.pump();
   images->pump();  // images the decode pool finished since the last tick
   // Shared state the embedder changed since the last tick: subscribers

@@ -185,8 +185,9 @@ void ImageCache::decodeInto(const std::string& url, Entry& e, const void* data, 
   e.bytes = size;
   auto t0 = std::chrono::steady_clock::now();
   sk_sp<SkImage> lazy = lazyImage(data, size);
+  const int64_t pixels = lazy ? int64_t(lazy->width()) * lazy->height() : 0;
 #if !defined(__EMSCRIPTEN__)
-  if (lazy && int64_t(lazy->width()) * lazy->height() >= asyncMinPixels) {
+  if (lazy && inlineSpent_ + pixels > inlineBudgetPixels) {
     if (!pool_) pool_ = std::make_unique<Pool>();
     e.state = State::Loading;
     e.decoding = true;
@@ -195,6 +196,7 @@ void ImageCache::decodeInto(const std::string& url, Entry& e, const void* data, 
     return;
   }
 #endif
+  inlineSpent_ += pixels;
   e.image = lazy ? lazy->makeRasterImage(nullptr) : nullptr;
   count(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
   if (e.image) e.state = State::Ready;
