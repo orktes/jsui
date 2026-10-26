@@ -11,6 +11,7 @@ import { ScreensPage } from './pages/Screens.jsx';
 import { InteractionsPage } from './pages/Interactions.jsx';
 import { InputPage } from './pages/Input.jsx';
 import { MotionPage } from './pages/Motion.jsx';
+import { VectorPage } from './pages/Vector.jsx';
 import { PlaygroundPage } from './pages/Playground.jsx';
 import { EmbedPage } from './pages/Embed.jsx';
 import { UI_SOUNDS, applyMix, currentMix, preloadUISounds } from './sound.js';
@@ -26,6 +27,7 @@ export const PAGES = {
   interactions: InteractionsPage,
   input: InputPage,
   motion: MotionPage,
+  vector: VectorPage,
   playground: PlaygroundPage,
   embed: EmbedPage,
 };

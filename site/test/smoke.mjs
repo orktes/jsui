@@ -43,7 +43,7 @@ if (!/<main id="about"[\s\S]*github\.com\/orktes\/jsui/.test(fs.readFileSync(pat
 const ROUTES = ['/', '/screens', '/screens/main-menu', '/screens/hud', '/screens/inventory', '/screens/battle-pass',
   '/screens/scoreboard', '/screens/dialogue', '/screens/settings', '/screens/loading', '/screens/notifications',
   '/screens/cinematic', '/screens/victory', '/screens/rift',
-  '/interactions', '/input', '/motion', '/playground', '/embed'].filter((r) => !filters.length || filters.some((f) => r.includes(f)));
+  '/interactions', '/input', '/motion', '/vector', '/playground', '/embed'].filter((r) => !filters.length || filters.some((f) => r.includes(f)));
 const SIZES = [{ name: 'desktop', width: 1440, height: 900, scale: 1 }, { name: 'phone', width: 390, height: 844, scale: 2 }];
 
 const MIME = { '.js': 'text/javascript', '.html': 'text/html', '.wasm': 'application/wasm', '.json': 'application/json',
