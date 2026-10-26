@@ -160,8 +160,10 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
     // Query options: ?renderer=auto|gpu|webgpu|webgl|cpu|2d (default: gpu,
     // i.e. Skia on WebGPU, else on WebGL, else the CPU raster, when a GPU
     // module is deployed), ?stats=1 logs frame timings, ?dev=<bundle url>
-    // runs a `jsui dev` bundle with live reload inside this page, ?worker=1
-    // runs the runtime and its rendering in a Worker (worker mode),
+    // runs a `jsui dev` bundle with live reload inside this page, ?worker=0|1
+    // keeps the runtime and its rendering on this thread / runs them in a
+    // Worker (worker mode; default: worker mode where it can draw with WebGPU,
+    // see useWorker below),
     // ?js=quickjs runs the app on QuickJS in the WASM module instead of the
     // browser's own JS engine (createJsui's default, ?js=host).
     const q = new URLSearchParams(location.search);
@@ -189,6 +191,32 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
     // The host picks the module (jsui/dist-gpu, dist-webgl or dist) for the
     // renderer and what the browser has, among the deployed ones.
     const route = () => decodeURIComponent(location.hash.replace(/^#/, '')) || '/';
+    // Worker mode by default where the worker can draw with WebGPU: Worker,
+    // OffscreenCanvas, transferControlToOffscreen, the WebGPU module deployed,
+    // a GPU renderer asked for and navigator.gpu in a worker (a tiny probe
+    // worker answers; a few ms). The page's main thread then does almost
+    // nothing per frame (issue #158). Elsewhere, and with ?worker=0, the
+    // runtime runs on this thread. Every host call below works in both modes
+    // (in worker mode setState and the pipeline calls return Promises, which
+    // the page does not need).
+    const workerHasWebGPU = () => new Promise((resolve) => {
+      let w, url;
+      const done = (v) => { clearTimeout(timer); w?.terminate(); if (url) URL.revokeObjectURL(url); resolve(v); };
+      const timer = setTimeout(() => done(false), 1000);
+      try {
+        url = URL.createObjectURL(new Blob(['postMessage(!!(self.navigator && navigator.gpu))'], { type: 'text/javascript' }));
+        w = new Worker(url);
+        w.onmessage = (e) => done(e.data === true);
+        w.onerror = () => done(false);
+      } catch { done(false); }
+    });
+    const useWorker = async () => {
+      const w = q.get('worker');
+      if (w === '1' || w === '0') return w === '1';
+      return typeof Worker !== 'undefined' && typeof OffscreenCanvas !== 'undefined' &&
+        typeof HTMLCanvasElement.prototype.transferControlToOffscreen === 'function' &&
+        !!modules.webgpu && /^(gpu|webgpu|auto)$/.test(renderer) && !!navigator.gpu && await workerHasWebGPU();
+    };
 
     try {
       const jsui = await createJsui({
@@ -200,7 +228,7 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
         moduleVersions: modules.versions,
         // Big canvases at 3x cost a lot of fill for little gain.
         pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
-        worker: q.get('worker') === '1',
+        worker: await useWorker(),
         // The GPU pipelines the site draws with (recorded by
         // site/scripts/record-pipelines.mjs), built while the splash is up:
         // a first visit or a browser update leaves the browser's shader cache
