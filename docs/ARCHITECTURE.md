@@ -3388,6 +3388,21 @@ redirects, a 30 s default timeout, cooperative cancellation, no TLS
 a `JsuiLoadFn`). An embedder loader only sees the URL (GET semantics).
 `jsui_pending_loads()` lets headless hosts wait for in-flight loads.
 
+Images decode in `ImageCache` (`src/render/image_cache.*`). The codec reads
+the header first; an image of 256x256 px or more (`asyncMinPixels`) goes to a
+pool of 1-2 decode threads (a quarter of the cores, started on the first such
+image) instead of decoding on the runtime thread, so a full-screen background
+or card art never costs a frame its decode time. Its entry stays `Loading`
+until `jsui_tick` publishes the raster image (after the loader's
+completions), then `generation` is bumped and Images sized by it are
+re-measured, as for any load. Smaller images (icons) decode inline, where the
+hand-over would only cost a frame of pop-in; `data:` URIs follow the same
+rule. `jsui_pending_loads()` and `jsui_wants_frame()` count the decodes on the
+pool, so `jsui-render`, `jsui-record` and the reference tests wait for them.
+On the web everything still decodes inline (no pool in wasm yet;
+`createImageBitmap` is the planned route). `image_decodes` /
+`image_decode_us` count pool decodes on the tick that publishes them.
+
 ## Reference tests
 
 `tests/reference` renders each example twice — with JSUI (`jsui-render`) and

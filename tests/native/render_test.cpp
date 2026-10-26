@@ -1,5 +1,8 @@
 // Painter tests: build trees from JSON, paint, check pixels at key points.
 // Set JSUI_TEST_OUT=/some/dir to also write the frames as PNGs.
+#include <chrono>
+#include <thread>
+
 #include "include/core/SkBitmap.h"
 #include "include/core/SkData.h"
 #include "include/core/SkImage.h"
@@ -302,6 +305,59 @@ TEST(render_image_data_uri_and_resize_modes) {
   CHECK_EQ(s.a(25, 75), 255);
   CHECK_EQ(s.r(25, 75), 0);
   CHECK_EQ(s.a(1, 51), 0);
+}
+
+// Large images decode on the pool, not in the layout that asked: that frame
+// shows nothing (and wants another), and a later tick publishes the image,
+// re-measures the Image and repaints it.
+TEST(render_image_decodes_off_the_frame_thread) {
+  std::string uri = testPngUri(512, 256);
+  Scene s(600, 300);
+  ImageCache& images = *s.rt->images;
+  CHECK(int64_t(512) * 256 >= images.asyncMinPixels);
+  Node* img = s.add(R"J({"type":"Image","style":{"alignSelf":"flex-start"},"props":{"source":{"uri":")J" + uri + R"J("}}})J");
+  s.render();
+  ImageCache::Info info;
+  CHECK(images.peek(uri, &info));
+  CHECK(info.state == ImageCache::State::Loading);
+  CHECK_EQ(images.pendingDecodes(), 1);
+  CHECK(s.rt->wantsFrame());  // a host keeps ticking until it lands
+  CHECK_NEAR(img->layoutRect().width, 0, 0.01);
+  CHECK_EQ(s.a(5, 10), 0);
+  // Asking again while it decodes does not start a second decode.
+  images.get(uri);
+  CHECK_EQ(images.pendingDecodes(), 1);
+  uint32_t gen = images.generation;
+  for (int i = 0; i < 5000 && images.pendingDecodes() > 0; i++) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    s.render();
+  }
+  CHECK_EQ(images.pendingDecodes(), 0);
+  CHECK_EQ(images.asyncDecodes, 1u);
+  CHECK(images.generation != gen);
+  s.render();
+  CHECK(images.peek(uri, &info));
+  CHECK(info.state == ImageCache::State::Ready);
+  CHECK_NEAR(img->layoutRect().width, 512, 0.01);
+  CHECK_NEAR(img->layoutRect().height, 256, 0.01);
+  CHECK_EQ(s.r(5, 10), 255);
+  CHECK_EQ(s.b(500, 10), 255);
+
+  // Cleared while decoding: the stale result is dropped, the next request
+  // decodes again.
+  images.clear();
+  images.get(uri);
+  CHECK_EQ(images.pendingDecodes(), 1);
+  images.clear();
+  images.finishDecodes();
+  CHECK_EQ(images.pendingDecodes(), 0);
+  CHECK(!images.peek(uri, &info));
+
+  // Below the threshold an image still decodes inline.
+  std::string small = testPngUri(40, 20);
+  ImageCache::State st;
+  CHECK(images.get(small, &st) != nullptr);
+  CHECK(st == ImageCache::State::Ready);
 }
 
 TEST(render_scrollview_offset_and_clip) {

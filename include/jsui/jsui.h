@@ -808,8 +808,9 @@ JSUI_API void jsui_tick_ex(JsuiRuntime* rt, double now_ms, int flags);
  * lockstep) the call itself takes that long. A viewer's "stall JS" key and
  * the integrations' smoke tests use it. */
 JSUI_API void jsui_debug_stall_js(JsuiRuntime* rt, double ms);
-/* Number of resource loads (bundle, fetch, images, fonts) still in flight.
- * Headless hosts keep ticking until this reaches 0 before capturing. */
+/* Number of resource loads (bundle, fetch, images, fonts) still in flight,
+ * images still decoding off the runtime thread included. Headless hosts keep
+ * ticking until this reaches 0 before capturing. */
 JSUI_API int jsui_pending_loads(JsuiRuntime* rt);
 /* Non-zero when the last tick changed what the handle's surface would paint. */
 JSUI_API int jsui_needs_redraw(JsuiRuntime* rt);
@@ -879,7 +880,9 @@ typedef struct JsuiPerf {
                              recorded frame, which includes compiling new GPU pipelines and
                              uploading textures */
     /* Always measured. */
-    double image_decode_us;               /* decoding images (also inside the phase that needed them) */
+    double image_decode_us;               /* decoding images: inline ones also inside the phase that
+                                             needed them; large ones decode off the runtime thread and
+                                             count on the tick that publishes them */
     unsigned long long image_decodes;
     unsigned long long pipeline_compiles; /* GPU pipelines compiled on demand by this runtime's renders:
                                              each is a possible hitch (see the pipeline cache) */
