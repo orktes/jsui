@@ -139,6 +139,12 @@ float spreadRadius(float r, float spread) {
   return std::max(0.f, r + spread);
 }
 
+// Whether an outer shadow's shape contains the node's border box, so that
+// its edge stays outside the box: not offset and not shrunk (a ring,
+// `0 0 0 1px`). Grown by `spread` on every side with each corner radius at
+// most r + spread on both axes, the shape contains the box's.
+bool shadowSurroundsBox(const Shadow& sh) { return sh.offsetX == 0 && sh.offsetY == 0 && sh.spread >= 0; }
+
 // `rr` grown (spread > 0) or shrunk by `spread` on every side.
 SkRRect outsetRRect(const SkRRect& rr, float spread) {
   SkRect r = rr.rect().makeOutset(spread, spread);
@@ -2975,11 +2981,15 @@ bool startBlitScan(Node* n, const NodeRecord* rec, const SkMatrix& m, float w, f
 // however much of the frame it covers (the retained frame equals a full
 // repaint), the state follows the damage only, never what was painted: a
 // subtree is drawn from its texture once damage reached it in two
-// consecutive damaged frames, its stamp unchanged in the second (a one-off
+// consecutive damaged frames with its stamp unchanged in both (a one-off
 // repaint does not pay for a texture; a row of a scrolling list that just
 // changed, entering the viewport or hovered, is drawn from one from the
-// next frame on), until its stamp changes or no damage reached it for a
-// while, and it is repainted whole whenever that switches.
+// second frame after on), until its stamp changes or no damage reached it
+// for a while, and it is repainted whole whenever that switches. Frames
+// that changed it do not count: the ancestors of a card whose hover
+// transition just settled (damage reached them in every frame of it) would
+// otherwise switch on in the settling frame, a repaint of most of the
+// screen, and off again with the next hover, another one.
 constexpr uint32_t kRasterMinNodes = 4;
 constexpr uint32_t kRasterIdleFrames = 120;  // damaged frames without reaching it
 thread_local std::vector<NodeRecord*>* tRasterCandidates = nullptr;
@@ -3026,8 +3036,8 @@ void updateRasterCache(RootRecord* root, SkRegion* damage, const SkIRect& screen
       damage->op(rec->rasterBounds, SkRegion::kUnion_Op);
       rec->rasterOn = on;
     }
-    // A frame that changed it counts: damage reached it then too.
-    if (!eligible) rec->rasterHits = 0;
+    // Only damage that reached it unchanged counts.
+    if (!stable) rec->rasterHits = 0;
     rec->rasterBounds = on ? rec->subtree : SkIRect::MakeEmpty();
   }
 }
@@ -3282,9 +3292,13 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
                              (s.outlineWidth > 0 && s.outlineStyle != BorderStyle::Solid) ||
                              full.width() > 1024 || full.height() > 1024;
         }
-        // Outlines and sharp shadows lie outside the box: no safe interior.
-        bool outside = s.outlineWidth > 0;
-        for (const Shadow& sh : s.boxShadows) outside |= !sh.inset && sh.blur <= 0;
+        // Outlines and sharp shadows have edges of their own: no safe
+        // interior when one may cross the padding box. One that stays
+        // around the border box (a ring: `0 0 0 1px`, an outline with no
+        // negative offset) leaves it safe, else damage anywhere inside a
+        // ringed panel (a pulse in a framed stage) repaints all of it.
+        bool outside = s.outlineWidth > 0 && s.outlineOffset < 0;
+        for (const Shadow& sh : s.boxShadows) outside |= !sh.inset && sh.blur <= 0 && !shadowSurroundsBox(sh);
         if (!outside && s.borderStyle == BorderStyle::Solid && m.isScaleTranslate()) {
           Box scratch;
           const Box& b = boxOf(n, w, h, &scratch);

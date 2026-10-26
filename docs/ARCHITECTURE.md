@@ -3211,7 +3211,13 @@ the expensive per-pixel work is done once:
   records and passes). Skia does not
   rasterize an anti-aliased outline cut by the clip exactly like the whole
   outline, so damage crossing a curved node's edge grows to the whole node
-  (damage inside its padding box does not), and the repaint stays exact.
+  (damage inside its padding box does not, unless an edge of the node's own
+  may cross it: a sharp outer shadow that is offset or shrunk, an outline
+  with a negative offset; a ring around the box, `0 0 0 1px` or an outline,
+  does not), and the repaint stays exact. Before, any sharp shadow or
+  outline counted: the site's screen stage (radius 18 with a `0 0 0 1px`
+  ring) repainted all of its 1280x720 screen for the inventory's two
+  pulsing legendary slots, every frame.
   On Graphite (WebGPU) only outlines whose pixels depend on the clip grow
   (dashed or dotted edges, outlines over 1024 device px): it draws solid
   rrects analytically and, patched, applies a whole-pixel damage rect as a
