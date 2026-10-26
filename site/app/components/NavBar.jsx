@@ -86,7 +86,7 @@ export function NavBar() {
   // A native window whose buttons sit in this bar (jsui-viewer
   // --titlebar-overlay): the wordmark starts after them.
   const controls = useHostState('jsui.windowControls', null);
-  const left = controls ? Math.max(gutter, controls.x + controls.width + 20) : gutter;
+  const left = controls ? Math.max(gutter, controls.x + controls.width + 28) : gutter;
   return (
     <View style={[styles.bar, { paddingHorizontal: gutter, paddingLeft: left }]}>
       <Pressable onPress={() => go('/')} style={{ cursor: 'pointer' }} focusable={false}>
