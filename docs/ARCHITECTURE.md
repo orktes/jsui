@@ -3222,6 +3222,51 @@ the expensive per-pixel work is done once:
   (dashed or dotted edges, outlines over 1024 device px): it draws solid
   rrects analytically and, patched, applies a whole-pixel damage rect as a
   scissor (see WebGPU).
+* **Occlusion.** What a later opaque node covers is not painted
+  (`Occlusion`). `updateRecords` keeps in each record the 4 largest opaque
+  rects of its subtree (`OccCandidate`): the device pixels that a node with
+  a solid background colour at full alpha, opacity 1, no blend mode, filter
+  or content shader (its own or an ancestor's: a parent with any of them
+  drops its children's) and an axis-aligned device matrix (scale,
+  translation, quarter turns) is sure to cover, its border box inside the
+  rounded corners' arcs, cut by the clips in the subtree (inside their
+  rounded corners too), rounded inwards to whole pixels. Only large ones
+  count (at least 65536 device pixels, or an eighth of a smaller canvas;
+  `tMinOccluderArea`): a small opaque button or badge cannot save more
+  than the checks it costs every node painted before it, so screens made of
+  them pay nothing. One that a later one contains is dropped, and one with
+  nothing painted before it overlapping it (a screen's own opaque
+  background) is marked so and never used. Records keep a list only when
+  they have one (`OccList`), and a node works out its own rect only when
+  its background is opaque and large enough, its children's only when one
+  has some. Unchanged subtrees keep theirs with their records, so it costs
+  nothing beyond the nodes the update walks anyway, and the root's list is
+  the frame's. A paint (each damage rect's pass) takes those of the root's
+  that reach its damage and are at least a tenth of its area; with none it
+  does no per-node work (`PaintStats::occluders`), and once all are reached
+  it stops checking. Walking in paint order it marks
+  each one reached when it gets to it or skips the subtree holding it (culled,
+  covered, drawn from a texture, in the static backdrop), and `paintNode`
+  skips a subtree whose `subtree` bounds lie inside one not reached and not
+  inside the subtree, or only a node's own drawing (background, borders,
+  shadows, text, image) when its `own` bounds lie inside one not reached;
+  covered pixels are painted over anyway, so the frame is the same, and a
+  modal card or a full-screen menu over a live HUD records nothing below
+  it. Not culled: what is inside a filter or content-shader layer (it
+  spreads pixels past the cover; the layer node itself is culled whole, its
+  bounds include the spread), and nothing while the textures of the
+  LayerCache (opacity layers, raster-cached subtrees, the static backdrop)
+  are rendered, since they are drawn again under other covers; an occluder
+  inside a raster-cached subtree that moves (drawn at the nearest whole
+  pixel) is not used. A paint after a change that `updateDamage` has not
+  seen (the root is marked), or on a canvas that maps the document
+  elsewhere, culls nothing. The damage is computed as before (covered nodes
+  keep their records), so a cover moving away repaints what was under it.
+  `PaintStats::nodesOccluded` counts the skips; `setOcclusionCulling(false)`
+  or `JSUI_OCCLUSION=off` paints everything, for A/B runs
+  (`tests/native/occlusion_test.cpp` compares the two to the bit). Nothing
+  in the painter reads what was painted below it (no backdrop filters);
+  such an effect would have to end the occluders' reach at itself.
 * **Scroll blit.** When a ScrollView's content only scrolled by whole device
   pixels over a uniform backdrop, the CPU path moves the viewport's pixels
   and repaints only what the scroll exposed, what is painted above the
@@ -3276,8 +3321,8 @@ the expensive per-pixel work is done once:
 * **Text.** Paragraphs keep one layout: painting and the painter's overflow
   bounds lay out at the same content width.
 
-`PaintStats` (`lastPaintStats()`) reports per paint the nodes painted and
-culled, the pixels and rects repainted, sprite draws and renders, shadow
+`PaintStats` (`lastPaintStats()`) reports per paint the nodes painted,
+culled and occluded, the pixels and rects repainted, sprite draws and renders, shadow
 mask draws and renders (blurs), blitted pixels and, with
 `setPaintCounting()`, the canvas draw calls, text / image draws, layers and
 clips. `tests/native/render_test.cpp` and `gpu_test.cpp` assert on these
