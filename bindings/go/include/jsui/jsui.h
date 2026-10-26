@@ -439,6 +439,88 @@ JSUI_API void jsui_audio_voice_ended(JsuiRuntime* rt, uint64_t voice, int status
  * Sound.preload() promises for it. */
 JSUI_API void jsui_audio_sound_loaded(JsuiRuntime* rt, const char* sound, int ok, double duration_s);
 
+/* ------------------------------------------------------------------ Video
+ *
+ * Video the UI shows (<Video source={...} /> in JS, react-native-video's
+ * API). JSUI decodes no video: the host plays it and draws its frames into a
+ * host texture (jsui_set_texture / jsui_set_texture_pixels /
+ * jsui_texture_updated), which the <Video> view samples like any
+ * <HostTexture>. Every request becomes a JsuiVideoCommand passed to the
+ * video handler (JsuiConfig.on_video): a game engine plays it with its own
+ * player (Godot: VideoStreamPlayer), the browser host (web/jsui-web.js) with
+ * a <video> element, jsui-viewer on macOS with AVFoundation. Without a
+ * handler every video fails (JSUI_VIDEO_FAILED).
+ *
+ * Videos: every OPEN carries a new video id (never 0) and the host texture
+ * key its frames go to (the host sets it once it has a frame and keeps it
+ * current; after CLOSE the runtime removes it). OPEN and SET carry the whole
+ * playback state the UI wants (paused, muted, volume, loop, rate): the
+ * handler applies it, it does not toggle. A looping video starts over
+ * instead of ending. Commands for a closed video are ignored.
+ *
+ * The host reports with jsui_video_status() whenever something changed,
+ * as often as every frame (the position): JS hears about state changes at
+ * once and about the position at the rate the view asked for
+ * (progressUpdateInterval), and the position also goes to host buffer
+ * "<texture>.time" every report (Float32: position / duration, buffered /
+ * duration, position in s; Animated.hostBuffer progress bars run without
+ * JS). Urls are absolute (resolved against the base URL). */
+typedef enum JsuiVideoOp {
+    JSUI_VIDEO_OPEN = 0,  /* video, url / sources, texture + paused, muted, volume, loop, rate */
+    JSUI_VIDEO_SET = 1,   /* video: paused, muted, volume, loop, rate */
+    JSUI_VIDEO_SEEK = 2,  /* video, time_s */
+    JSUI_VIDEO_CLOSE = 3  /* video, texture: stop and release it (the runtime removes the texture after the
+                             call; frames set later are the host's). Sent for every open video when
+                             the JS context goes away (jsui_reload, dev reloads, jsui_destroy). */
+} JsuiVideoOp;
+
+typedef struct JsuiVideoCommand {
+    JsuiVideoOp op;
+    uint64_t video;
+    const char* url;      /* OPEN: absolute URL (sources[0]) */
+    /* OPEN: the alternatives in the UI's order of preference, absolute URLs, each with a MIME type
+     * (source_types[i], may be NULL: unknown) such as "video/webm; codecs=\"vp9\"" or
+     * "application/vnd.apple.mpegurl": play the first the host can. */
+    const char* const* sources;
+    const char* const* source_types;
+    int source_count;
+    const char* texture;  /* OPEN, CLOSE: host texture key for the frames */
+    double time_s;        /* SEEK */
+    float volume;         /* OPEN, SET: linear gain, 0..1 */
+    float rate;           /* OPEN, SET: playback rate (1: normal) */
+    int paused;           /* OPEN, SET */
+    int muted;            /* OPEN, SET */
+    int loop;             /* OPEN, SET */
+} JsuiVideoCommand;
+
+/* Called on the runtime's thread (with JS on its own thread, inside the next
+ * jsui_tick / jsui_sync). The command and its strings are valid only during
+ * the call. */
+typedef void (*JsuiVideoFn)(void* user, const JsuiVideoCommand* cmd);
+
+typedef enum JsuiVideoState {
+    JSUI_VIDEO_LOADING = 0,    /* opened, not ready to play yet */
+    JSUI_VIDEO_PAUSED = 1,     /* ready, not playing (paused, or before the first play) */
+    JSUI_VIDEO_PLAYING = 2,
+    JSUI_VIDEO_BUFFERING = 3,  /* should be playing, waiting for data */
+    JSUI_VIDEO_ENDED = 4,      /* played to the end (never while looping) */
+    JSUI_VIDEO_FAILED = -1     /* could not be loaded, decoded or played */
+} JsuiVideoState;
+
+typedef struct JsuiVideoStatus {
+    int state;            /* JsuiVideoState */
+    double duration_s;    /* 0: unknown (yet), or a live stream */
+    double position_s;
+    double buffered_s;    /* loaded up to here */
+    int width, height;    /* the video's size in px (0: unknown yet) */
+    const char* error;    /* FAILED: why (optional) */
+} JsuiVideoStatus;
+
+/* Video `video` changed (state, position, size...). Call it from the
+ * handler or any time later on the runtime's thread; unknown or closed
+ * videos are ignored. */
+JSUI_API void jsui_video_status(JsuiRuntime* rt, uint64_t video, const JsuiVideoStatus* status);
+
 /* Reads `url` (relative URLs resolve against the base URL) through the
  * runtime's loader, the same way the bundle and images are read. `done` runs
  * once on the runtime's thread inside a later jsui_tick() with an HTTP-like
@@ -490,6 +572,9 @@ typedef struct JsuiConfig {
     JsuiJsReadyFn on_js_ready; /* optional: JS published work for the next tick. Runs on the JS
                                   thread (must be thread safe): wakes a host that sleeps */
     void* js_ready_user;
+
+    JsuiVideoFn on_video;   /* plays the UI's videos (see "Video"); NULL: every video fails */
+    void* video_user;
 } JsuiConfig;
 
 JSUI_API void jsui_config_init(JsuiConfig* cfg);
