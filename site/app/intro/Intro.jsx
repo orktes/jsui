@@ -15,6 +15,15 @@
 //   before the timeline starts, so a cold shader cache does not eat the
 //   first frames. Until then the overlay is the page's background color,
 //   under the HTML splash.
+// - Then, still under the splash, the whole intro is drawn once through at
+//   WARM_STEPS points of its timeline, one per frame: the flying UI's draws
+//   (shadows, gradients, scaled and rotated text, the shader under them)
+//   need their GPU pipelines there, not in the frames that play. With a
+//   cold browser shader cache (a first visit, a new browser version) those
+//   compiles took the intro's first second down to a few frames. When the
+//   page asks for it ({warm: true}: index.html draws these frames in a
+//   WebGPU warm-up, jsui.beginWarmup) the intro then says 'warmed' and waits
+//   for {go: true}, which the page sends once the browser compiled them.
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, Host, Pressable, ShaderView, StyleSheet, Text, View, compileShader, precompileShaders, sksl, useHostMessage, useWindowDimensions } from 'react-native';
 import { colors, font, rarity, site } from '../theme.js';
@@ -22,8 +31,13 @@ import { colors, font, rarity, site } from '../theme.js';
 const DURATION = 3400;
 // p where the reveal starts (the nebula begins to burn away).
 const REVEAL = 0.72;
-// No answer from the page (another host, an older index.html): give up.
-const WAIT_MS = 2500;
+// No answer from the page (another host, an older index.html): give up. The
+// page answers once the GPU pipelines are built (index.html, at most ~5 s).
+const WAIT_MS = 7000;
+// Timeline points drawn under the splash before the intro plays (above):
+// 0.13 apart, so each flying piece (on screen for 0.25 of it) is drawn at
+// least twice, at different sizes.
+const WARM_STEPS = 8;
 
 // --------------------------------------------------------------- shader
 
@@ -404,7 +418,7 @@ function Wordmark({ p, phone }) {
  * settle into place during the reveal; it ends at 1 either way.
  */
 export function Intro({ p }) {
-  const [phase, setPhase] = useState('wait');  // wait -> play -> done
+  const [phase, setPhase] = useState('wait');  // wait -> warm -> play -> done
   const { width, height } = useWindowDimensions();
   const ended = useRef(false);
   const answered = useRef(false);
@@ -417,7 +431,19 @@ export function Intro({ p }) {
     Host.postMessage('intro', { state: 'done' });
   };
 
+  // The page's go-ahead after the warm-up (when it asked for one).
+  const go = useRef(null);
+  const earlyGo = useRef(false);
   useHostMessage('intro', (data) => {
+    if (data && data.go) {
+      // After 'warmed', or during the warm-up: then it stops early (the
+      // browser's caches turned out warm).
+      const start = go.current;
+      go.current = null;
+      if (start) return start();
+      earlyGo.current = true;
+      return;
+    }
     if (phase !== 'wait' || ended.current || answered.current) return;
     answered.current = true;
     if (!data || !data.play) return finish();
@@ -425,13 +451,33 @@ export function Intro({ p }) {
       if (ended.current) return;
       const res = compileShader(INTRO_SHADER);
       if (res.error) return finish();
-      setPhase('play');
-      Host.postMessage('intro', { state: 'play' });
-      // ?intro=<p> (a number): hold the timeline there (screenshots, tuning).
-      if (typeof data.hold === 'number') return p.setValue(data.hold);
-      Animated.timing(p, { toValue: 1, duration: DURATION, easing: Easing.linear, useNativeDriver: true }).start(({ finished }) => finished && finish());
+      setPhase('warm');
+      // One timeline point per frame (requestAnimationFrame callbacks run
+      // before the frame paints).
+      let step = 0;
+      const next = () => {
+        if (ended.current) return;
+        if (step < WARM_STEPS && !earlyGo.current) {
+          p.setValue(0.04 + (0.9 * step++) / (WARM_STEPS - 1));
+          return requestAnimationFrame(next);
+        }
+        p.setValue(0);
+        if (!data.warm || earlyGo.current) return play(data);
+        // The page compiles what the warm-up drew, then says go.
+        go.current = () => !ended.current && play(data);
+        Host.postMessage('intro', { state: 'warmed' });
+      };
+      requestAnimationFrame(next);
     });
   });
+
+  const play = (data) => {
+    setPhase('play');
+    Host.postMessage('intro', { state: 'play' });
+    // ?intro=<p> (a number): hold the timeline there (screenshots, tuning).
+    if (typeof data.hold === 'number') return p.setValue(data.hold);
+    Animated.timing(p, { toValue: 1, duration: DURATION, easing: Easing.linear, useNativeDriver: true }).start(({ finished }) => finished && finish());
+  };
 
   useEffect(() => {
     const t = setTimeout(() => !answered.current && finish(), WAIT_MS);
@@ -462,7 +508,7 @@ export function Intro({ p }) {
       onGamepadButton={(e) => e.pressed && skip(e)}
       style={[StyleSheet.absoluteFill, phase === 'wait' && { backgroundColor: site.bg }]}
     >
-      {phase === 'play' ? (
+      {phase === 'warm' || phase === 'play' ? (
         <>
           <ShaderView source={INTRO_SHADER} uniforms={{ p }} style={StyleSheet.absoluteFill} />
           <FlyingUI p={p} reach={Math.min(width, height * 1.4) * 0.5} />

@@ -12,6 +12,7 @@ import { elementSummary, formatTree, launch } from '../src/headless.js';
 import { attach, sessionClients } from '../src/attach.js';
 import { answerOf, parseInlineSteps, runSteps, STEP_HELP } from '../src/script.js';
 import { skillCommand, SKILL_USAGE } from '../src/skill.js';
+import { pipelinesCommand, PIPELINES_USAGE } from '../src/pipelines.js';
 
 const USAGE = `usage:
   jsui build <entry> [-o dist/bundle.js] [--minify] [--sourcemap] [--dev]
@@ -64,6 +65,8 @@ const USAGE = `usage:
   jsui log --attach <url> [--since <seq>] [--follow]
      what the person, agents and the UI did (clicks, keys, messages, calls)
      and which runtimes joined
+
+${PIPELINES_USAGE}
 
 ${SKILL_USAGE}
 
@@ -262,6 +265,7 @@ async function main(argv) {
     return 0;
   }
   if (cmd === 'skill') return skillCommand(rest);
+  if (cmd === 'pipelines') return pipelinesCommand(rest);
   const { values, positionals } = parseArgs({
     args: rest,
     allowPositionals: true,

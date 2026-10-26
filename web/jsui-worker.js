@@ -386,6 +386,20 @@ function definePage(I) {
     /** jsui_get_perf (see CanvasView.getPerf): a Promise in worker mode. */
     getPerf(reset = true) { return this._call({ op: 'perf', reset: !!reset }, null, null); }
 
+    // GPU pipeline lists (see CanvasView.addPipelines): Promises in worker mode.
+    addPipelines(list) {
+      const bytes = list instanceof Uint8Array ? list.slice() : ArrayBuffer.isView(list)
+        ? new Uint8Array(list.buffer, list.byteOffset, list.byteLength).slice() : new Uint8Array(list).slice();
+      return this._call({ op: 'pipelines', what: 'add', list: bytes }, [bytes.buffer], 0);
+    }
+    savePipelines() { return this._call({ op: 'pipelines', what: 'save' }, null, null); }
+    pipelineStats() { return this._call({ op: 'pipelines', what: 'stats' }, null, null); }
+    precompilePipelines(opts) { return this._call({ op: 'pipelines', what: 'precompile', opts }, null, null); }
+    whenPipelinesReady() { return this._call({ op: 'pipelines', what: 'ready' }, null, null); }
+    beginWarmup() { return this._call({ op: 'pipelines', what: 'beginWarmup' }, null, false); }
+    pipelineCacheWarm() { return this._call({ op: 'pipelines', what: 'cacheWarm' }, null, null); }
+    endWarmup(opts) { return this._call({ op: 'pipelines', what: 'endWarmup', opts }, null, 0); }
+
     // Test hooks in the worker (web/test/browser.test.mjs): 'spy' records the
     // jsui_send_* calls, 'calls' takes them; 'loseGL' / 'loseGLForGood' /
     // 'destroyDevice' lose the view's GPU context.
@@ -1740,6 +1754,20 @@ export function serve(I, early) {
         return;
       case 'profiling': view?.setProfiling(op.on); return;
       case 'perf': reply(op.id, true, view ? view.getPerf(op.reset) : null); return;
+      case 'pipelines': {
+        if (!view) return reply(op.id, true, null);
+        const r = op.what === 'add' ? view.addPipelines(op.list)
+          : op.what === 'save' ? view.savePipelines()
+          : op.what === 'stats' ? view.pipelineStats()
+          : op.what === 'precompile' ? view.precompilePipelines(op.opts ?? {})
+          : op.what === 'cacheWarm' ? view.pipelineCacheWarm?.() ?? null
+          : op.what === 'beginWarmup' ? view.beginWarmup()
+          : op.what === 'endWarmup' ? view.endWarmup(op.opts ?? {})
+          : view.whenPipelinesReady?.() ?? null;
+        Promise.resolve(r).then((v) => reply(op.id, true, v, v instanceof Uint8Array ? [v.buffer] : []),
+          (e) => reply(op.id, false, e));
+        return;
+      }
       case 'read':
         if (!view) return reply(op.id, true, null);
         Promise.resolve(view.readPixelsAsync()).then((px) => {

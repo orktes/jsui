@@ -184,7 +184,7 @@
  *                                // jsui.jsEngine says which one runs.
  * }} JsuiOptions */
 
-import { SharedWebGPU, WebGPURenderer, requestWebGPU } from './jsui-webgpu.js';
+import { SharedWebGPU, WebGPURenderer, requestWebGPU, standInPipeline } from './jsui-webgpu.js';
 import { HostTextureSet, corsWarning, defaultOpaque, isVideoFrame, sourceSize, taintKey, videoFramesContextLost,
   watchVideoFrames } from './jsui-textures.js';
 import { JsuiAudio } from './jsui-audio.js';
@@ -299,6 +299,10 @@ export async function createJsui(opts) {
   // No canvas: the main surface is not shown, for pages that only place
   // createSurface() widgets.
   let canvas = opts.canvas ?? null;
+  if (typeof opts.pipelines === 'string' && typeof location !== 'undefined') {
+    // Relative to the page (also for the worker); `{format}` survives.
+    opts = { ...opts, pipelines: decodeURI(new URL(opts.pipelines, location.href).href) };
+  }
   if (opts.worker) {
     let r;
     try {
@@ -319,6 +323,67 @@ export async function createJsui(opts) {
 }
 
 const transferred = new WeakSet();  // canvases given to a worker (transferControlToOffscreen)
+
+// ------------------------------------------------- GPU pipeline lists
+// (createJsui's `pipelines` and `rememberPipelines`; see CanvasView.addPipelines)
+
+// The list createJsui's `pipelines` names: bytes, or a URL fetched with
+// `{format}` replaced by the canvas' texture format (a list recorded on a
+// bgra8unorm canvas, macOS and Windows, builds other pipelines than one of
+// an rgba8unorm canvas, Android and Linux). A missing file (404) is no list.
+async function pipelineList(src, format) {
+  if (typeof src !== 'string' && !(src instanceof URL)) return src;
+  const url = String(src).replace('{format}', format ?? 'bgra8unorm');
+  const res = await fetch(url);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+// Which list of this browser's own a page remembers: per page path and
+// canvas format (a page with several apps names its own pipelineKey).
+function pipelineKeyFor(view) {
+  const where = typeof location !== 'undefined' ? location.origin + location.pathname : '';
+  return `${where} ${view._wgpu?.format ?? ''}`;
+}
+
+const PIPELINE_DB = 'jsui-pipelines';
+
+// The IndexedDB store of remembered lists; null where there is none
+// (private modes may refuse it). Every call opens it anew: a few per minute.
+function pipelineStore(mode, fn) {
+  return new Promise((resolve) => {
+    let req;
+    try {
+      req = indexedDB.open(PIPELINE_DB, 1);
+    } catch {
+      return resolve(null);
+    }
+    req.onupgradeneeded = () => req.result.createObjectStore('lists');
+    req.onerror = req.onblocked = () => resolve(null);
+    req.onsuccess = () => {
+      const db = req.result;
+      try {
+        const tx = db.transaction('lists', mode);
+        const r = fn(tx.objectStore('lists'));
+        tx.oncomplete = () => { db.close(); resolve(r?.result ?? null); };
+        tx.onerror = tx.onabort = () => { db.close(); resolve(null); };
+      } catch {
+        db.close();
+        resolve(null);
+      }
+    };
+  });
+}
+
+async function rememberedPipelines(key) {
+  const v = await pipelineStore('readonly', (s) => s.get(key));
+  return v instanceof Uint8Array ? v : v instanceof ArrayBuffer ? new Uint8Array(v) : null;
+}
+
+function storePipelines(key, list) {
+  return pipelineStore('readwrite', (s) => s.put(list, key));
+}
 
 function replaceCanvas(old) {
   const c = old.cloneNode(false);
@@ -1102,6 +1167,182 @@ class CanvasView extends DomView {
     return out;
   }
 
+  // ------------------------------------------------- GPU pipelines (WebGPU)
+  //
+  // Skia Graphite creates a GPU pipeline the first time a kind of draw is
+  // needed, inside that frame. In the browser that is a createRenderPipeline
+  // the GPU process compiles (WGSL -> the platform's shaders) before it can
+  // go on: with a cold browser shader cache (a first visit, a browser
+  // update) tens of milliseconds per pipeline, hundreds for a screen that
+  // brings several. A list of the pipelines an app uses (savePipelines(),
+  // recorded once and shipped with it) lets the page build them while it
+  // still shows its splash: addPipelines(list), then precompilePipelines().
+  // WebGPU only (WebGL and the CPU raster have no pipeline lists).
+
+  // The Skia WebGPU context this view draws with, 0 without one.
+  _pipelineGpu() { return this._wgpu && !this._wgpu.lost ? this._wgpu.gpu || 0 : 0; }
+
+  /** Queues a pipeline list (the bytes of savePipelines(): an ArrayBuffer or
+   * a typed array) for precompilePipelines(). Returns the number of pipelines
+   * queued (those already known are skipped), -1 when the list is not one of
+   * this module's Skia build, 0 without WebGPU. The list is queued again on
+   * a new device after a device loss. */
+  addPipelines(list) {
+    const bytes = list instanceof Uint8Array ? list : ArrayBuffer.isView(list)
+      ? new Uint8Array(list.buffer, list.byteOffset, list.byteLength) : new Uint8Array(list);
+    (this._pipelineLists ??= []).push(bytes.slice());
+    return this._queuePipelines(bytes);
+  }
+
+  _queuePipelines(bytes) {
+    const gpu = this._pipelineGpu();
+    return gpu && bytes.length ? this._queuePipelinesOn(gpu, bytes) : 0;
+  }
+
+  /** Every pipeline the WebGPU context has created or queued, as a list for
+   * addPipelines() (Uint8Array), or null without WebGPU. */
+  savePipelines() {
+    const gpu = this._pipelineGpu();
+    if (!gpu) return null;
+    const M = this.module, out = this._scratch;
+    if (M._jsui_gpu_save_pipelines(gpu, out, out + 4) !== 0) return null;
+    const ptr = M.HEAPU32[out >> 2], size = M.HEAPU32[(out >> 2) + 1];
+    const bytes = M.HEAPU8.slice(ptr, ptr + size);
+    M._jsui_free(ptr);
+    return bytes;
+  }
+
+  /** The pipeline cache's counters (jsui_gpu_get_pipeline_stats): `queued`,
+   * `precompiled`, `failed`, `compiled` (in frames: cache misses), `added`,
+   * `unserializable`, `known`; null without WebGPU. */
+  pipelineStats() {
+    const gpu = this._pipelineGpu();
+    if (!gpu) return null;
+    // JsuiPipelineStats: 2 ints, 6 uint64
+    const M = this.module, p = this._scratch;
+    M._jsui_gpu_get_pipeline_stats(gpu, p);
+    const v = new DataView(M.HEAPU8.buffer, p, 56);
+    const out = { mode: v.getInt32(0, true), queued: v.getInt32(4, true) };
+    ['precompiled', 'failed', 'compiled', 'added', 'unserializable', 'known'].forEach((k, i) => {
+      out[k] = Number(v.getBigUint64(8 + i * 8, true));
+    });
+    return out;
+  }
+
+  /** Builds the queued pipelines (addPipelines) now, without stalling the
+   * page: the GPU process first compiles them all in parallel, off its main
+   * thread (warmBrowserCache), then the context creates them, a few at a
+   * time, each from the browser's now warm cache. Resolves with
+   * pipelineStats() once the queue is empty, `timeoutMs` passed or the
+   * context went away; after a timeout the rest is still created in the
+   * background as its compiles finish. */
+  async precompilePipelines({ timeoutMs = Infinity, batch = 4 } = {}) {
+    const gpu = this._pipelineGpu();
+    if (!gpu) return null;
+    const queued = this.pipelineStats()?.queued ?? 0;
+    const warm = this._warmBrowserCache(gpu);
+    // A browser whose caches already hold these pipelines answers every
+    // warm-up at once; a cold one takes seconds (pipelineCacheWarm()).
+    this._cacheWarm ??= warm.length
+      ? Promise.race([Promise.all(warm).then(() => true), new Promise((r) => setTimeout(() => r(false), 250))])
+      : null;
+    // The warm-ups also cover the pipelines the context has already: the
+    // i-th queued one is at most that many places further on.
+    const done = this._createWarmed(gpu, warm, batch, Math.max(0, warm.length - queued));
+    if (timeoutMs !== Infinity) await Promise.race([done, new Promise((r) => setTimeout(r, timeoutMs))]);
+    else await done;
+    return this.pipelineStats();
+  }
+
+  // The browser compiles a pipeline in its GPU process: createRenderPipeline
+  // blocks that process (and every frame) until it is done, tens of ms each
+  // with a cold shader cache, hundreds on a cold Metal cache.
+  // createRenderPipelineAsync compiles on worker threads, several at once,
+  // and fills the same caches. Graphite only calls the blocking one, so the
+  // queued keys are first precompiled by a throwaway Skia context on the
+  // same device whose createRenderPipeline only starts the async compile of
+  // the same descriptor (and hands Skia a stand-in it never draws with).
+  // Resolves with the compiles' promises, in order.
+  _warmBrowserCache(gpu) {
+    const M = this.module, wgpu = this._wgpu;
+    const queued = this.pipelineStats()?.queued ?? 0;
+    if (!queued || !wgpu?.webgpu) return [];
+    const list = this.savePipelines();
+    const dev = wgpu.device;
+    let probe = null;
+    const started = [];
+    try {
+      probe = SharedWebGPU.create(M, wgpu.webgpu, (t) => this._log(1, t));
+      if (!probe) return [];
+      const n = list ? this._queuePipelinesOn(probe.gpu, list) : 0;
+      if (n <= 0) return [];
+      const standIn = standInPipeline(dev);
+      dev.createRenderPipeline = (desc) => {
+        started.push(dev.createRenderPipelineAsync(desc).catch(() => null));
+        return standIn;
+      };
+      while (M._jsui_gpu_precompile_step(probe.gpu, 1000) > 0);
+    } catch (e) {
+      this._log(1, `pipelines: warming the browser cache failed: ${e?.message ?? e}`);
+    } finally {
+      delete dev.createRenderPipeline;  // the prototype's again
+      probe?.unref();
+    }
+    return started;
+  }
+
+  /** Starts a warm-up (WebGPU): until endWarmup(), frames are not shown but
+   * drawn by a throwaway Skia context whose pipelines the browser compiles
+   * in parallel, off the frame. Drive the UI through what is about to play
+   * (an intro's timeline, a screen's states) while a splash covers the
+   * canvas; afterwards the real frames find every pipeline in the browser's
+   * cache, ShaderView effects included (which no pipeline list holds).
+   * False without WebGPU. */
+  beginWarmup() { return this._wgpu ? this._wgpu.beginWarmup((t) => this._log(1, t)) : false; }
+
+  /** Ends the warm-up: resolves with the number of pipelines it compiled once
+   * they are done (or after `timeoutMs`); the next frame repaints fully. */
+  async endWarmup({ timeoutMs = 5000 } = {}) {
+    const n = this._wgpu ? await this._wgpu.endWarmup(timeoutMs) : 0;
+    this._sizeChanged = true;
+    (this.host ?? this)._wake?.();
+    return n;
+  }
+
+  _queuePipelinesOn(gpu, bytes) {
+    const M = this.module;
+    const p = M._malloc(bytes.length);
+    try {
+      M.HEAPU8.set(bytes, p);
+      return M._jsui_gpu_precompile_pipelines(gpu, p, bytes.length);
+    } finally {
+      M._free(p);
+    }
+  }
+
+  // Creates the queued pipelines on the context, `batch` at a time, each
+  // batch once its warm-up compiles have finished (the queue and the
+  // warm-ups are in the same order, `ahead` more of the latter) and
+  // followed by a wait for the GPU process. Then the slices after frames
+  // take over again.
+  async _createWarmed(gpu, warm, batch, ahead) {
+    const M = this.module;
+    let made = 0;
+    for (;;) {
+      if (this._pipelineGpu() !== gpu || this._destroyed) return;
+      await Promise.all(warm.slice(0, made + batch + ahead));
+      if (this._pipelineGpu() !== gpu || this._destroyed) return;
+      let left = 0;
+      // A budget of 0 creates one pipeline per call.
+      for (let i = 0; i < batch; i++, made++) if (!(left = M._jsui_gpu_precompile_step(gpu, 0))) break;
+      try {
+        await this._wgpu.device.queue.onSubmittedWorkDone();
+      } catch {}
+      if (!left) break;
+    }
+    if (this._pipelineGpu() === gpu) M._jsui_gpu_precompile_step(gpu, -1);
+  }
+
   // ---------------------------------------------------------------- helpers
 
   _newString(s) {
@@ -1412,6 +1653,7 @@ class CanvasView extends DomView {
     this._wgpu = next;
     this._webgpu = next.webgpu;
     this._sizeChanged = true;  // full repaint on the next frame
+    for (const list of this._pipelineLists ?? []) this._queuePipelines(list);
     this._log(2, `${reason}: WebGPU renderer recreated`);
     this._emit('renderer', this.renderer, reason);
   }
@@ -1853,6 +2095,8 @@ class JsuiHost extends CanvasView {
     // Without a canvas the main surface is not shown (a page of createSurface() widgets).
     if (canvas) this._initView(this._mode, this._webgpu);
     if (opts.gamepads !== false) this._installGamepads();
+    this._pipelinesQueued = new Promise((r) => { this._queuedDone = r; });
+    this._pipelinesReady = this._loadPipelines(opts).finally(() => this._queuedDone());
 
     if (opts.bundleSource != null) this.loadSource(opts.bundleSource, this._bundleUrl ?? 'bundle.js');
     else if (this._bundleUrl) this.loadUrl(this._bundleUrl);
@@ -2157,6 +2401,66 @@ class JsuiHost extends CanvasView {
     return new Promise((resolve) => (this._idleWaiters ??= []).push(resolve));
   }
 
+  /** Resolves once the GPU pipelines this page is known to need are built
+   * (createJsui's `pipelines` list and those this browser built on earlier
+   * visits; see addPipelines), with pipelineStats(), or null without WebGPU.
+   * Wait for it before an animation that must not stutter, e.g. while a
+   * splash is up. Gives up after `pipelineTimeout` ms (default 5000): the
+   * rest is then built one per frame. */
+  whenPipelinesReady() { return this._pipelinesReady; }
+
+  /** Whether the browser's shader caches already held the pipelines of
+   * createJsui's lists (all compiled within 250 ms of asking): true, false,
+   * or null without lists or WebGPU. A warm-up (beginWarmup) can be skipped
+   * when true: what it would compile is most likely cached too. */
+  async pipelineCacheWarm() {
+    await this._pipelinesQueued;
+    return (await this._cacheWarm) ?? null;
+  }
+
+  // createJsui({ pipelines, rememberPipelines, pipelineKey, pipelineTimeout }):
+  // queues the shipped list and the one remembered from this browser's
+  // earlier visits, builds them, then keeps the remembered list up to date.
+  async _loadPipelines(opts) {
+    if (!this._pipelineGpu() || opts.pipelines === false) return null;
+    const remember = opts.rememberPipelines !== false;
+    const key = String(opts.pipelineKey ?? pipelineKeyFor(this));
+    const [shipped, known] = await Promise.all([
+      opts.pipelines != null ? pipelineList(opts.pipelines, this._wgpu?.format).catch((e) => {
+        this._log(2, `pipelines: ${e?.message ?? e}`);
+        return null;
+      }) : null,
+      remember ? rememberedPipelines(key) : null,
+    ]);
+    if (this._destroyed) return null;
+    for (const list of [shipped, known]) {
+      if (list && this.addPipelines(list) < 0) this._log(1, 'pipelines: a list of another JSUI build, skipped');
+    }
+    if (remember) this._rememberPipelines(key);
+    const ready = this.precompilePipelines({ timeoutMs: opts.pipelineTimeout ?? 5000 });
+    this._queuedDone();
+    return ready;
+  }
+
+  // Saves the pipelines this browser built (savePipelines) under `key` when
+  // new ones appeared: checked every few seconds and when the page is hidden.
+  _rememberPipelines(key) {
+    let saved = -1;
+    const save = () => {
+      const st = this.pipelineStats();
+      if (!st || st.known === saved) return;
+      const list = this.savePipelines();
+      if (!list) return;
+      saved = st.known;
+      storePipelines(key, list);
+    };
+    this._pipelineTimer = setInterval(save, 4000);
+    if (typeof document !== 'undefined') {
+      this._pipelineHidden = () => document.visibilityState === 'hidden' && save();
+      document.addEventListener('visibilitychange', this._pipelineHidden);
+    }
+  }
+
   start() {
     if (this._loop || this._destroyed) return;
     const loop = this._loop = (t) => {
@@ -2315,6 +2619,8 @@ class JsuiHost extends CanvasView {
   destroy() {
     if (this._destroyed) return;
     this.stop();
+    clearInterval(this._pipelineTimer);
+    if (this._pipelineHidden) document.removeEventListener('visibilitychange', this._pipelineHidden);
     // GPU textures first, while their contexts exist.
     this._textures?.destroy();
     this._textures = null;

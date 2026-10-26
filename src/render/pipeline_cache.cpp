@@ -846,8 +846,9 @@ int Precompiler::slice(double budgetMs) {
 int Precompiler::step(double budgetMs) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    hostSteps_ = true;
-    if (mode_ != Mode::Sliced) return int(queue_.size()) + inFlight_;
+    // A negative budget hands the scheduling back (slices after frames).
+    hostSteps_ = budgetMs >= 0;
+    if (mode_ != Mode::Sliced || budgetMs < 0) return int(queue_.size()) + inFlight_;
   }
   return slice(budgetMs);
 }
@@ -860,7 +861,10 @@ void Precompiler::afterFrame() {
     if (now - lastSlice_ < kSliceInterval) return;
     lastSlice_ = now;
   }
-  slice(kFrameSliceMs);
+  // In the browser a pipeline's compile happens in the GPU process, after
+  // the call returned: the time measured here is not what it costs the
+  // frame (tens of ms on a cold browser cache), so one per slice.
+  slice(backend_ == Backend::BrowserWebGPU ? 0 : kFrameSliceMs);
 }
 
 Stats Precompiler::stats() {
