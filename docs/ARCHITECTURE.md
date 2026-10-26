@@ -3395,14 +3395,17 @@ a `JsuiLoadFn`). An embedder loader only sees the URL (GET semantics).
 `jsui_pending_loads()` lets headless hosts wait for in-flight loads.
 
 Images decode in `ImageCache` (`src/render/image_cache.*`). The codec reads
-the header first, and each tick has an inline decode budget by pixel count
-(`inlineBudgetPixels`, 256k px, about 1 ms at the ~3.5 ns/px measured on an
-M-series Mac): images decode on the runtime thread while it lasts, where the
-hand-over would only cost a frame of pop-in, and the rest go to a pool of 1-2
-decode threads (a quarter of the cores, started on the first such image). So
-a full-screen background (larger than the budget on its own) or a screen of
-card art (31 images, 6.3 ms on one cold frame of the showcase's inventory
-before) never costs a frame more than about the budget. A pool image's
+the header first, and each tick has an inline decode budget of 1 ms of
+measured decode time (`inlineBudgetUs`): an image decodes on the runtime
+thread if its estimated cost (pixels times `decodeNsPerPixel`, starting at
+the ~17 ns/px measured for PNG / JPEG card art on an M-series Mac and
+learned from the inline decodes since) still fits, where the hand-over would
+only cost a frame of pop-in, and the time it took is spent. The rest go to a
+pool of 1-2 decode threads (a quarter of the cores, started on the first
+such image). So a full-screen background (over the budget on its own) or a
+screen of card art (31 images, 6.3 ms on one cold frame of the showcase's
+inventory at first, still 4.3-4.6 ms with a 256k px budget) costs a frame
+about 1 ms of decoding. A pool image's
 entry stays `Loading` until `jsui_tick` publishes the raster image (after
 the loader's completions), then `generation` is bumped and Images sized by
 it are re-measured, as for any load. `data:` URIs follow the same rule. `jsui_pending_loads()` and `jsui_wants_frame()` count the decodes on the
