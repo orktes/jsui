@@ -218,6 +218,18 @@ export class AnimatedValue extends AnimatedNode {
     if (this._nativeTag != null) NativeAnimatedAPI.setValue(this._nativeTag, +value);
     this._updateValue(+value, true);
   }
+  // JSUI: what a worklet's handle of a native value offers
+  // (react-native-worklets, src/worklets.js), so the same code runs where
+  // the worklet sees this object itself (no native module).
+  getValue() {
+    return this.__getValue();
+  }
+  get value() {
+    return this.__getValue();
+  }
+  set value(v) {
+    this.setValue(v);
+  }
   setOffset(offset) {
     if (this._nativeTag != null) {
       this.__getValue();

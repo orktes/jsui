@@ -23,6 +23,7 @@ const SHIMS = {
   'react-native-linear-gradient': 'linear-gradient',
   'lottie-react-native': 'lottie-react-native',
   'expo-font': 'expo-font',
+  'react-native-worklets': 'react-native-worklets',
 };
 
 // These must resolve to the single copy @orktes/jsui-react was built against, or
@@ -151,9 +152,9 @@ export function esbuildOptions(o) {
       ...(dev ? [] : [specializePlugin({ reactDir: jsuiReactDir(), log: o.log })]),
       aliasPlugin({ facades: !dev }),
       assetPlugin(o.assets),
-      ...(o.reactCompiler ? [reactCompilerPlugin({ reactDir: jsuiReactDir(), sourcemap: !!o.sourcemap, hmr: !!o.compilerHmr, report: o.compilerReport, log: o.log })] : []),
+      ...(o.reactCompiler ? [reactCompilerPlugin({ reactDir: jsuiReactDir(), mode: o.mode, sourcemap: !!o.sourcemap, hmr: !!o.compilerHmr, report: o.compilerReport, log: o.log })] : []),
       // After the React Compiler (which applies the same transform first).
-      derivePlugin({ reactDir: jsuiReactDir() }),
+      derivePlugin({ reactDir: jsuiReactDir(), mode: o.mode, sourcemap: !!o.sourcemap }),
     ],
     metafile: true,
   };

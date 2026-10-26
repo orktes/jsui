@@ -92,7 +92,7 @@ and the same core compiles to WebAssembly.
 | `src/core/` | `Value`, `Node`, `Document`, style parsing (`style.cpp`), JSON, scrolling geometry, LayoutAnimation, the overlay layer (`overlay.*`), perf counters |
 | `src/render/` | Skia painter, image cache, host textures, Lottie, ShaderView, pipeline cache, GPU backends (`gpu.cpp` Ganesh GL, `gpu_metal.cpp` Ganesh Metal, `gpu_d3d.cpp` Ganesh D3D12 / D3D11, `gpu_graphite.cpp` Graphite Vulkan / Metal / Dawn, `gpu_webgpu.cpp` Graphite on browser WebGPU) |
 | `src/text/` | Font manager and decoding (WOFF / WOFF2 / TTC), paragraph building and Yoga measure for `Text`, TextInput editing |
-| `src/js/` | `JsEngine`: the QuickJS host and bridge globals (`bridge*.cpp`), the mutation command buffer (`command_buffer.*`), bytecode bundles (`bytecode.cpp`), and the host JS engine's native half (`engine_hostjs.cpp`) |
+| `src/js/` | `JsEngine`: the QuickJS host and bridge globals (`bridge*.cpp`), the mutation command buffer (`command_buffer.*`), bytecode bundles (`bytecode.cpp`), the host JS engine's native half (`engine_hostjs.cpp`), and the worklet runtimes (`worklets*.cpp`, see "Worklets") |
 | `src/animated/` | Native Animated driver |
 | `src/input/` | Hit testing, event routing, focus and gamepad navigation, scrolling, text editing keys |
 | `src/audio/` | UI audio: requests to the host's audio handler or the built-in miniaudio backend (see [AUDIO.md](AUDIO.md)) |
@@ -2202,6 +2202,126 @@ Native's API and both of its drivers:
     `tracking` node) restarts native animations from JS when the target
     changes; scroll physics (and so `Animated.event` from flings) only
     advance in `jsui_tick`, not in `jsui_tick_native`.
+
+## Worklets
+
+`react-native-worklets` (Software Mansion, MIT; API of 0.13) runs on JSUI
+unchanged: the CLI aliases the package to `@orktes/jsui-react`'s
+implementation (`packages/react/src/worklets.js`, shim
+`src/shims/react-native-worklets.js`, also `@orktes/jsui-react/worklets`).
+
+**Build time.** A worklet must carry its source, and bytecode bundles keep
+none, so as in React Native the build transforms it.
+`packages/cli/src/worklets.js` runs Software Mansion's Babel plugin
+(vendored with its license in `src/vendor/worklets-babel-plugin.cjs`, on
+Babel 7) on every file that mentions `worklet`, in `jsui build`, `jsui dev`
+and its HMR updates, before React Compiler and React Refresh (TypeScript is
+stripped first by esbuild). Functions with a `'worklet'` directive and the
+callbacks passed straight to `runOnUI` / `scheduleOnUI` / `runOnRuntime` /
+... become functions carrying `__workletHash`, `__closure` (the values they
+capture) and `__initData = { code, location, line }`; production builds
+leave out `location` / `line` and the dev stack data. Worklet classes are
+off (`disableWorkletClasses`).
+
+**Runtimes.** `src/js/worklets.{h,cpp}`: `Worklets` (`Runtime::worklets`)
+owns the worklet runtimes, each its own QuickJS `JSRuntime` + context (own
+heap and GC, memory limit, 5 s watchdog, unhandled rejections reported). The
+UI runtime (id 2, `RuntimeKind.UI`) is created on the first job, so an app
+that never uses worklets pays nothing (no runtime, no tick phase);
+`createWorkletRuntime` adds more (ids from 3, `RuntimeKind.Worker`). All of
+them live on the owner thread (the thread calling `jsui_tick`, JSUI's UI
+thread) and never touch the bundle's heap. The tick's worklet phase runs
+after the frame's JS has been applied and before native Animated, in
+`jsui_tick` and in `jsui_tick_native` alike: queued jobs (batched per
+runtime), then each runtime's due timers (`setTimeout` / `setInterval` /
+`setImmediate`) and `requestAnimationFrame` callbacks with the frame time
+(`performance.now()` is the runtime clock). A runtime with nothing due is
+not entered. `jsui_wants_frame` / `jsui_next_timer` include them. After
+running something, a runtime that goes idle gets one cycle collection, so
+closures holding remote functions (a self-scheduling rAF loop) are freed and
+the bundle gets them back. Each runtime starts with the console and the JS
+half of the protocol (`src/js/worklets_prelude.cpp`: timers, rAF, the wire
+codec, the worklet cache and the react-native-worklets functions a worklet
+can call, each also callable when captured from the bundle).
+
+**Bridge** (`src/js/bridge_worklets.cpp`, `__jsui_native.worklets`):
+`schedule(runtimeId, job)` queues a job through `Runtime::toHost` (owner
+thread; with JS on its own thread it is applied with the frame's commands);
+`runSync(runtimeId, job)` runs it on the owner thread now (single-threaded),
+or waits for the owner (`Impl::onOwner`, at most `kProxyTimeoutMs`) with JS
+on its own thread, and returns `{"ok", "v" | "e"}`; `createRuntime(name)`;
+`sync*` for synchronizables. Worklet runtimes send to the bundle through
+`Worklets::toJs`, delivered once per `jsui_tick` as one
+`Inbound::call("__jsui_onWorklets", [ops])` (kept for the next `jsui_tick`
+by `jsui_tick_native`): `['c', fn, args]` call a remote function,
+`['r', id, n]` / `['a', id]` release / retain one, `['p', id, ok, value]`
+settle a `runOn*Async` promise.
+
+**Wire format.** A job is JSON `[worklet, args, promiseId]`. Values follow
+react-native-worklets' rules: JSON values as is; tagged objects
+`{ "$": tag }` for `undefined` (`u`), non-finite numbers and `-0` (`n`),
+BigInt (`bi`), objects (`o`), worklets (`w`: hash, init data the first time a
+runtime sees that hash, closure, own props), remote functions (`f`: any
+other function, reference counted by the bundle), synchronizables (`s`),
+Animated values (`av`), react-native-worklets builtins (`b`), Errors (`e`),
+`ArrayBuffer` / typed arrays / `DataView` (`ab`, `tv`, base64 copies), `Map`,
+`Set`, `RegExp`, worklet runtimes (`rt`) and `registerCustomSerializable`
+values (`cu`). The receiving side evaluates a worklet's code once per hash
+and binds it to a holder with its closure (react-native-worklets'
+`valueUnpacker`). Remote functions throw when called directly in a worklet;
+`runOnJS(fn)(...)` / `scheduleOnRN(fn, ...)` send the call back. Cycles
+throw; class instances other than the above are warned about and become
+`undefined`.
+
+**Synchronizables** live natively (`Worklets::Sync`: the value as wire JSON,
+a recursive timed mutex for `lock()` / `setBlocking`, 1 s timeout, reference
+counted by every runtime holding one) and are read and written from any
+runtime and from the JS thread.
+
+**Animated values.** An `Animated.Value` that reaches a worklet is made
+native (as `useNativeDriver` does) and arrives as a handle on its node:
+`getValue()`, `setValue(v)`, `setOffset(v)` and a `value` property call
+`NativeAnimated::nodeOutput` / `setValue` / `setOffset` directly. Its views
+change in the same tick with no command batch and no JS: a UI-runtime rAF
+loop driving one keeps moving while JS is stalled or not ticked (tested in
+`tests/native/react_worklets_e2e_test.cpp`). JS-side `AnimatedValue` gained
+`getValue()` and `value` for the same code to run on either side. Anything
+an Animated node feeds (`derive`, interpolations, `ShaderView`'s
+`uniform:<name>` style keys and other animatable style keys) follows; this
+is how worklets can drive drawing later (a Canvas / Svg node whose
+animatable props are style keys, or WebGPU / Skia drawing called from the UI
+runtime as react-native-webgpu-worklets does) without another mechanism.
+
+**Errors.** A throwing worklet is reported through `Runtime::reportError`
+(`jsui_last_error`, the dev overlay) as ``[Worklets] in worklet `name`
+(file:line): Error: ...`` with its stack; `runOnUISync` / `runOnUIAsync`
+rethrow / reject in the bundle instead.
+
+**Without the native module** (the host JS engine on the web, Node tests)
+everything runs on the bundle's runtime like react-native-worklets on the
+web: `runOnUI` on the next animation frame, `runOnJS` in a microtask,
+`runOnUISync` at once, synchronizables as plain objects.
+
+**Costs.** None until the first worklet. A runtime takes about 240 KB of
+heap when started (the UI runtime about 260 KB after the e2e test's jobs)
+and about 3 ms to start, once (parsing the preludes; printed by the e2e
+test). Precompiling the prelude to bytecode would cut the start time if it
+matters. The native code is about 70 KB (Release
+objects: `worklets.cpp` 44 KB, the prelude 16 KB, the bridge 8 KB).
+
+**Differences from React Native.**
+* Worker runtimes (`createWorkletRuntime`) run on the UI thread's tick,
+  not on threads of their own: separate heaps and queues, but a long worker
+  job delays the frame. `useDefaultQueue` / custom queues are ignored.
+* `runOnUISync` with JS on its own thread waits for the owner thread
+  (at most `kProxyTimeoutMs`, then throws); it sees the native views as
+  of the last applied commit.
+* `createSerializable` / `makeShareable*` return the value itself (values
+  are copied when a job is sent); `createShareable` and Bundle Mode do not
+  exist; worklet classes are not transformed.
+* `react-native-worklets-core` (Margelo) is not aliased.
+* Browser (WASM) builds have the runtimes (same C++), but this has not been
+  run there yet; the host JS engine uses the fallback above.
 
 ## State styles
 

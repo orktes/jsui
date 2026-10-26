@@ -33,6 +33,7 @@
     "./shims/*": "./src/shims/*.js",
     "./lottie": "./src/lottie.js",
     "./shader": "./src/shader.js",
+    "./worklets": "./src/worklets.js",
     "./package.json": "./package.json"
   },
   "files": [
