@@ -26,6 +26,8 @@
 // freezes. A screenshot runs one sync frame first (JSUI_TICK_SYNC_JS), so
 // it shows what JS rendered by then.
 // --state key=json sets host state (HostState) before the bundle loads.
+// On macOS 'video' host messages play videos into host textures
+// (AVFoundation, tools/jsui-viewer/video.mm): the viewer as an example host.
 // --gl-core asks for an OpenGL 3.2 core, forward-compatible context. It is
 // the default on macOS, where SDL otherwise gets a legacy 2.1 context whose
 // GLSL 1.20 Skia's shaders cannot use ("undeclared gl_VertexID"); elsewhere
@@ -68,15 +70,14 @@ void viewer_mtl_release(void* obj);
 #endif
 #if defined(__APPLE__)
 extern "C" {
-struct ViewerVideo;
+struct ViewerVideos;
 void viewer_mac_init(void);
 void viewer_mac_titlebar_overlay(void* nswindow, float header, float* controls);
-ViewerVideo* viewer_video_create(const char* spec, void* device, void* queue);
-const char* viewer_video_channel(ViewerVideo* v);
-void viewer_video_attach(ViewerVideo* v, JsuiRuntime* rt);
-void viewer_video_message(ViewerVideo* v, const char* json);
-int viewer_video_tick(ViewerVideo* v);
-void viewer_video_destroy(ViewerVideo* v);
+ViewerVideos* viewer_videos_create(void* device, void* queue);
+void viewer_videos_attach(ViewerVideos* vs, JsuiRuntime* rt);
+void viewer_videos_message(ViewerVideos* vs, const char* json);
+int viewer_videos_tick(ViewerVideos* vs);
+void viewer_videos_destroy(ViewerVideos* vs);
 }
 extern "C" void viewer_mac_watch_wheel(void (*cb)(void* user, float dx, float dy), void* user);
 #endif
@@ -98,7 +99,6 @@ struct Options {
   std::string screenshot;
   int jsThread = JSUI_JS_THREAD_ON;  // --js-thread on|off|lockstep
   std::vector<std::pair<std::string, std::string>> state;  // --state key=json
-  std::vector<std::string> videos;                          // --video channel:texture=url (macOS)
   int titlebarOverlay = 0;                                  // --titlebar-overlay H (macOS): header height
 };
 
@@ -122,8 +122,7 @@ void usage() {
       "  --titlebar-overlay H  (macOS) the UI fills the window under a transparent title bar, the window\n"
       "               buttons centred in its top H px (HostState jsui.windowControls: their box); the\n"
       "               UI's empty spots up there drag the window\n"
-      "  --video      channel:texture=url (macOS): plays the video (AVFoundation) into host texture `texture`,\n"
-      "               controlled with `channel` messages (see tools/jsui-viewer/video.mm)\n"
+      "  'video' host messages play videos into host textures (macOS, AVFoundation; tools/jsui-viewer/video.mm)\n"
       "  F5 reloads the bundle, Esc dismisses the error overlay (dev mode)\n"
       "  F6 switches --js-thread (restarts the runtime), F7 keeps JS busy for 200 ms\n");
 }
@@ -152,13 +151,6 @@ bool parseArgs(int argc, char** argv, Options* o) {
         return false;
       }
       o->titlebarOverlay = std::atoi(v);
-    } else if (a == "--video") {
-      const char* v = next();
-      if (!v) {
-        std::fprintf(stderr, "--video takes channel:texture=url\n");
-        return false;
-      }
-      o->videos.push_back(v);
     } else if (a == "--width" || a == "--height" || a == "--frames" || a == "--screenshot" || a == "--js-thread") {
       const char* v = next();
       if (!v) {
@@ -241,7 +233,7 @@ class Viewer {
   explicit Viewer(const Options& o) : opt_(o) {}
   ~Viewer() {
 #if defined(__APPLE__)
-    for (ViewerVideo* v : videos_) viewer_video_destroy(v);
+    viewer_videos_destroy(videos_);
 #endif
     if (rt_) jsui_destroy(rt_);
     if (gpu_) jsui_gpu_destroy(gpu_);  // GL context still current
@@ -339,17 +331,11 @@ class Viewer {
     wakeEvent_ = SDL_RegisterEvents(1);
     if (opt_.titlebarOverlay > 0) titlebarOverlay();
 #if defined(__APPLE__)
-    for (const std::string& spec : opt_.videos) {
 #if VIEWER_METAL
-      ViewerVideo* v = viewer_video_create(spec.c_str(), opt_.metal ? mtlDevice_ : nullptr, mtlQueue_);
+    videos_ = viewer_videos_create(opt_.metal ? mtlDevice_ : nullptr, mtlQueue_);
 #else
-      ViewerVideo* v = viewer_video_create(spec.c_str(), nullptr, nullptr);
+    videos_ = viewer_videos_create(nullptr, nullptr);
 #endif
-      if (v) videos_.push_back(v);
-      else std::fprintf(stderr, "warning: --video %s: expected channel:texture=url\n", spec.c_str());
-    }
-#else
-    if (!opt_.videos.empty()) std::fprintf(stderr, "warning: --video needs macOS (AVFoundation)\n");
 #endif
 #if defined(__APPLE__)
     // Pixel deltas with the trackpad's momentum, as browsers get them
@@ -439,7 +425,7 @@ class Viewer {
     rt_ = jsui_create(&cfg);
     messages_.clear();
 #if defined(__APPLE__)
-    for (ViewerVideo* v : videos_) viewer_video_attach(v, rt_);
+    viewer_videos_attach(videos_, rt_);
 #endif
     if (!windowControls_.empty()) jsui_set_state(rt_, "jsui.windowControls", windowControls_.c_str());
     for (auto& [key, json] : opt_.state)
@@ -504,9 +490,8 @@ class Viewer {
       if (name == "jsui:openURL") openURL(json);
 #if defined(__APPLE__)
     for (auto& [name, json] : messages_)
-      for (ViewerVideo* v : videos_)
-        if (name == viewer_video_channel(v)) viewer_video_message(v, json.c_str());
-    for (ViewerVideo* v : videos_) playing |= viewer_video_tick(v) != 0;
+      if (name == "video") viewer_videos_message(videos_, json.c_str());
+    playing = viewer_videos_tick(videos_) != 0;
 #endif
     messages_.clear();
     return playing;
@@ -905,7 +890,7 @@ class Viewer {
   std::vector<std::pair<std::string, std::string>> messages_;  // name, JSON (this tick's)
   std::string windowControls_;  // --titlebar-overlay: HostState jsui.windowControls
 #if defined(__APPLE__)
-  std::vector<ViewerVideo*> videos_;
+  ViewerVideos* videos_ = nullptr;
 #endif
 };
 

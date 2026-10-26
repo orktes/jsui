@@ -2456,9 +2456,9 @@ skparagraph's asset font manager and Skottie's. Fonts are runtime-wide.
   statically; `-DJSUI_BUILD_VIEWER=OFF` skips it, `-DJSUI_SDL_DIR=` uses a
   local SDL2 source tree, and a failed download only skips the viewer.
   `jsui-viewer [--dev] [--cpu | --gl | --gl-core] [--width W --height H] [--js-thread on|off|lockstep] [--state key=json] <bundle path or URL>`
-  (`--state` sets host state before the bundle loads; `--video channel:texture=url`, macOS,
-  plays a video with AVFoundation into a host texture, controlled like the showcase
-  site's trailer: tools/jsui-viewer/video.mm; `--titlebar-overlay H`, macOS, draws the UI
+  (`--state` sets host state before the bundle loads; on macOS `video` host messages
+  play videos with AVFoundation into host textures, the protocol of the showcase site's
+  trailer: tools/jsui-viewer/video.mm, the viewer as an example host; `--titlebar-overlay H`, macOS, draws the UI
   under a transparent title bar with the window buttons centred in its top H px, publishes
   their box as HostState `jsui.windowControls` and drags the window from empty spots there); F5
   reloads, F6 cycles the JS thread mode (on by default), F7 stalls JS for 200 ms; `--frames N --screenshot out.png` runs headless (GPU by default,

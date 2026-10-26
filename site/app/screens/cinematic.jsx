@@ -1,10 +1,10 @@
 // Cinematic (interactive). Feature spotlight: host textures.
 //
-// A game-style trailer player. JSUI does not play video: the page owns a
-// <video> element and hands its frames to the runtime as a host texture
-// (jsui.bindVideo('trailer', video), web/jsui-textures.js); natively,
-// jsui-viewer --video cinematic:trailer=<url> plays it with AVFoundation
-// (tools/jsui-viewer/video.mm). This screen only
+// A game-style trailer player. JSUI does not play video: the screen asks its
+// host for one with a host message naming the sources (below), and the host
+// decodes it into a host texture: in the browser the page's <video>
+// (jsui.bindVideo('trailer', video), web/jsui-textures.js), natively
+// jsui-viewer with AVFoundation (tools/jsui-viewer/video.mm). This screen only
 // shows that texture by name, five times over: the player, a blurred
 // backdrop, a picture-in-picture view, a close-up and a night-vision feed. Each
 // video frame is uploaded once and every view samples it in place; no JS
@@ -12,8 +12,8 @@
 //
 // Everything around the picture is JSUI: the frame, the custom progress bar
 // (driven by frame data, Animated.hostBuffer, no re-render per frame), the
-// play / pause and mute buttons, the scene list. Commands go to the page with
-// Host.postMessage('cinematic', { cmd }); the page answers through
+// play / pause and mute buttons, the scene list. Commands go to the host with
+// Host.postMessage('video', { id: 'cinematic', cmd }); it answers through
 // HostState 'cinematic' ({ status, muted, duration, backend, quality }) and
 // HostBuffer 'cinematic.time' ([fraction, buffered fraction, seconds]).
 //
@@ -69,7 +69,22 @@ const BACKEND = {
 };
 const POSTER = require('../../../examples/assets/bg-menu.jpg');
 
-const send = (cmd, extra) => Host.postMessage('cinematic', { cmd, ...extra });
+// The trailer, as the host is asked to play it: the first source it can play
+// (the browser: WebM / VP9; jsui-viewer on macOS, AVFoundation: HLS / H.264).
+// Big Buck Bunny (c) 2008 Blender Foundation, peach.blender.org, CC BY 3.0,
+// from Wikimedia Commons (CORS-enabled, so GPU uploads may read it) and
+// Mux's public HLS test stream.
+const WIKIMEDIA = 'https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.';
+const SOURCES = [
+  { url: WIKIMEDIA + '1080p.vp9.webm', type: 'video/webm; codecs="vp9"', height: 1080, quality: '1080p VP9' },
+  { url: WIKIMEDIA + '480p.vp9.webm', type: 'video/webm; codecs="vp9"', height: 480, quality: '480p VP9' },
+  { url: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8', type: 'application/vnd.apple.mpegurl', height: 1080, quality: 'HLS H.264 · 1080p' },
+];
+const POSTER_URL = 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c0/Big_Buck_Bunny_4K.webm/1280px--Big_Buck_Bunny_4K.webm.jpg';
+// The host's video protocol (site/index.html on the web, tools/jsui-viewer/
+// video.mm natively): 'video' messages for this id; it answers through
+// HostState 'cinematic' and HostBuffer 'cinematic.time'.
+const send = (cmd, extra) => Host.postMessage('video', { id: 'cinematic', cmd, ...extra });
 const pad2 = (n) => String(n).padStart(2, '0');
 const fmt = (s) => {
   s = Math.max(0, Math.floor(s || 0));
@@ -88,7 +103,7 @@ export default function Cinematic({ active }) {
   // The page opens the trailer while the screen is shown (and pauses it after).
   useEffect(() => {
     if (!active) return undefined;
-    send('open');
+    send('open', { texture: TEXTURE, sources: SOURCES, poster: POSTER_URL });
     return () => send('close');
   }, [active]);
 
@@ -187,7 +202,7 @@ export default function Cinematic({ active }) {
         </View>
         <View style={styles.credit}>
           <Text style={styles.creditTitle}>Big Buck Bunny</Text>
-          <Text style={styles.creditText}>© 2008 Blender Foundation · CC BY 3.0 · via Wikimedia Commons</Text>
+          <Text style={styles.creditText}>© 2008 Blender Foundation · CC BY 3.0</Text>
         </View>
       </Animated.View>
     </View>
@@ -245,7 +260,7 @@ const Player = memo(function Player({ st, tex, secs, duration, toggle, active })
             <View style={styles.errorBox}>
               <Text style={styles.errorTitle}>Trailer unavailable</Text>
               <Text style={styles.errorText}>
-                It streams from Wikimedia Commons, which this browser could not reach or decode. The poster stays until it can.
+                It streams from the internet, which this host could not reach or play. The poster stays until it can.
               </Text>
             </View>
           ) : null}
