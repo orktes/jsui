@@ -216,11 +216,18 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
           // The intro plays once its pipelines exist (it draws many kinds of
           // things at once); the splash stays up until then.
           introPending = playIntro(jsui);
-          const answer = () => jsui.postMessage('intro', { play: introPending, hold: /^0\.\d+$/.test(q.get('intro')) ? +q.get('intro') : undefined });
-          if (introPending) Promise.resolve(jsui.whenPipelinesReady()).then(answer, answer);
-          else answer();
+          // On WebGPU the intro's warm-up frames go to jsui.beginWarmup(): the
+          // browser compiles every pipeline they need in parallel, under the
+          // splash; 'warmed' then waits for that and the pipeline lists.
+          Promise.resolve(introPending && jsui.beginWarmup()).then((warm) => {
+            jsui.postMessage('intro', { play: introPending, warm: !!warm, hold: /^0\.\d+$/.test(q.get('intro')) ? +q.get('intro') : undefined });
+          });
         } else if (name === 'intro') {
-          if (data.state === 'play' || data.state === 'done') {
+          if (data.state === 'warmed') {
+            const go = () => jsui.postMessage('intro', { go: true });
+            Promise.all([jsui.endWarmup(), jsui.whenPipelinesReady()]).then(go, go);
+          } else if (data.state === 'play' || data.state === 'done') {
+            jsui.endWarmup();  // frames back on the canvas, whatever happened
             introPending = false;
             hideSplash();
           }

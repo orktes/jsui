@@ -18,9 +18,12 @@
 // - Then, still under the splash, the whole intro is drawn once through at
 //   WARM_STEPS points of its timeline, one per frame: the flying UI's draws
 //   (shadows, gradients, scaled and rotated text, the shader under them)
-//   create their GPU pipelines there, not in the frames that play. With a
+//   need their GPU pipelines there, not in the frames that play. With a
 //   cold browser shader cache (a first visit, a new browser version) those
-//   compiles took the intro's first second down to a few frames.
+//   compiles took the intro's first second down to a few frames. When the
+//   page asks for it ({warm: true}: index.html draws these frames in a
+//   WebGPU warm-up, jsui.beginWarmup) the intro then says 'warmed' and waits
+//   for {go: true}, which the page sends once the browser compiled them.
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, Host, Pressable, ShaderView, StyleSheet, Text, View, compileShader, precompileShaders, sksl, useHostMessage, useWindowDimensions } from 'react-native';
 import { colors, font, rarity, site } from '../theme.js';
@@ -32,9 +35,9 @@ const REVEAL = 0.72;
 // page answers once the GPU pipelines are built (index.html, at most ~5 s).
 const WAIT_MS = 7000;
 // Timeline points drawn under the splash before the intro plays (above):
-// 0.17 apart, so each flying piece (on screen for 0.25 of it) is drawn at
-// least once. Their ShaderView pipelines are in no list (index.html).
-const WARM_STEPS = 6;
+// 0.13 apart, so each flying piece (on screen for 0.25 of it) is drawn at
+// least twice, at different sizes.
+const WARM_STEPS = 8;
 
 // --------------------------------------------------------------- shader
 
@@ -428,7 +431,14 @@ export function Intro({ p }) {
     Host.postMessage('intro', { state: 'done' });
   };
 
+  // The page's go-ahead after the warm-up (when it asked for one).
+  const go = useRef(null);
   useHostMessage('intro', (data) => {
+    if (data && data.go) {
+      const start = go.current;
+      go.current = null;
+      return start && start();
+    }
     if (phase !== 'wait' || ended.current || answered.current) return;
     answered.current = true;
     if (!data || !data.play) return finish();
@@ -447,7 +457,10 @@ export function Intro({ p }) {
           return requestAnimationFrame(next);
         }
         p.setValue(0);
-        play(data);
+        if (!data.warm) return play(data);
+        // The page compiles what the warm-up drew, then says go.
+        go.current = () => !ended.current && play(data);
+        Host.postMessage('intro', { state: 'warmed' });
       };
       requestAnimationFrame(next);
     });

@@ -184,7 +184,7 @@
  *                                // jsui.jsEngine says which one runs.
  * }} JsuiOptions */
 
-import { SharedWebGPU, WebGPURenderer, requestWebGPU } from './jsui-webgpu.js';
+import { SharedWebGPU, WebGPURenderer, requestWebGPU, standInPipeline } from './jsui-webgpu.js';
 import { HostTextureSet, corsWarning, defaultOpaque, isVideoFrame, sourceSize, taintKey, videoFramesContextLost,
   watchVideoFrames } from './jsui-textures.js';
 import { JsuiAudio } from './jsui-audio.js';
@@ -331,21 +331,6 @@ const transferred = new WeakSet();  // canvases given to a worker (transferContr
 // `{format}` replaced by the canvas' texture format (a list recorded on a
 // bgra8unorm canvas, macOS and Windows, builds other pipelines than one of
 // an rgba8unorm canvas, Android and Linux). A missing file (404) is no list.
-// What _warmBrowserCache hands Skia's throwaway context for each pipeline
-// (never drawn with): one trivial pipeline per device.
-const standIns = new WeakMap();
-function standInPipeline(dev) {
-  let p = standIns.get(dev);
-  if (!p) {
-    const module = dev.createShaderModule({ code: '@vertex fn v() -> @builtin(position) vec4f { return vec4f(0.0); }\n'
-      + '@fragment fn f() -> @location(0) vec4f { return vec4f(0.0); }' });
-    p = dev.createRenderPipeline({ layout: 'auto', vertex: { module, entryPoint: 'v' },
-      fragment: { module, entryPoint: 'f', targets: [{ format: 'rgba8unorm' }] } });
-    standIns.set(dev, p);
-  }
-  return p;
-}
-
 async function pipelineList(src, format) {
   if (typeof src !== 'string' && !(src instanceof URL)) return src;
   const url = String(src).replace('{format}', format ?? 'bgra8unorm');
@@ -1299,6 +1284,24 @@ class CanvasView extends DomView {
       probe?.unref();
     }
     return started;
+  }
+
+  /** Starts a warm-up (WebGPU): until endWarmup(), frames are not shown but
+   * drawn by a throwaway Skia context whose pipelines the browser compiles
+   * in parallel, off the frame. Drive the UI through what is about to play
+   * (an intro's timeline, a screen's states) while a splash covers the
+   * canvas; afterwards the real frames find every pipeline in the browser's
+   * cache, ShaderView effects included (which no pipeline list holds).
+   * False without WebGPU. */
+  beginWarmup() { return this._wgpu ? this._wgpu.beginWarmup((t) => this._log(1, t)) : false; }
+
+  /** Ends the warm-up: resolves with the number of pipelines it compiled once
+   * they are done (or after `timeoutMs`); the next frame repaints fully. */
+  async endWarmup({ timeoutMs = 5000 } = {}) {
+    const n = this._wgpu ? await this._wgpu.endWarmup(timeoutMs) : 0;
+    this._sizeChanged = true;
+    (this.host ?? this)._wake?.();
+    return n;
   }
 
   _queuePipelinesOn(gpu, bytes) {

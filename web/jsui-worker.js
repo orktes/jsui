@@ -396,6 +396,8 @@ function definePage(I) {
     pipelineStats() { return this._call({ op: 'pipelines', what: 'stats' }, null, null); }
     precompilePipelines(opts) { return this._call({ op: 'pipelines', what: 'precompile', opts }, null, null); }
     whenPipelinesReady() { return this._call({ op: 'pipelines', what: 'ready' }, null, null); }
+    beginWarmup() { return this._call({ op: 'pipelines', what: 'beginWarmup' }, null, false); }
+    endWarmup(opts) { return this._call({ op: 'pipelines', what: 'endWarmup', opts }, null, 0); }
 
     // Test hooks in the worker (web/test/browser.test.mjs): 'spy' records the
     // jsui_send_* calls, 'calls' takes them; 'loseGL' / 'loseGLForGood' /
@@ -1757,6 +1759,8 @@ export function serve(I, early) {
           : op.what === 'save' ? view.savePipelines()
           : op.what === 'stats' ? view.pipelineStats()
           : op.what === 'precompile' ? view.precompilePipelines(op.opts ?? {})
+          : op.what === 'beginWarmup' ? view.beginWarmup()
+          : op.what === 'endWarmup' ? view.endWarmup(op.opts ?? {})
           : view.whenPipelinesReady?.() ?? null;
         Promise.resolve(r).then((v) => reply(op.id, true, v, v instanceof Uint8Array ? [v.buffer] : []),
           (e) => reply(op.id, false, e));

@@ -531,8 +531,14 @@ await jsui.whenPipelinesReady();  // e.g. before hiding the splash
   finish. Lists queued later with `addPipelines(list)` are built one per
   frame after frames, unless you call `precompilePipelines()`.
 - A frame that needs a pipeline before its turn still builds it itself.
-  Pipelines of ShaderView effects are not in lists (no stable key):
-  `precompileShaders` warms those.
+  Pipelines of ShaderView effects are not in lists (no stable key).
+- **Warm-up frames:** `jsui.beginWarmup()` sends the frames to a throwaway
+  context the same way (nothing is shown or submitted) until
+  `await jsui.endWarmup()`, which resolves once the browser compiled what they
+  drew. Drive the UI through what is about to play while a splash covers the
+  canvas (the showcase steps its intro's timeline through 8 points), and
+  every kind of draw in it, ShaderView effects included, is compiled in
+  parallel before it plays.
 
 WebGPU only; on WebGL the browser caches compiled shaders itself, and the
 calls return `0` / `null`.

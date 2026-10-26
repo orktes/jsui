@@ -140,7 +140,68 @@ export class WebGPURenderer {
   // when the GPU path failed, undefined while recovering from device loss.
   render() {
     if (this.lost || !this.gpu) return undefined;
+    if (this.warm) return this._renderWarm();
     return this._renderInto(this.ctx.getCurrentTexture());
+  }
+
+  // Warm-up (CanvasView.beginWarmup): frames go to a throwaway Skia context
+  // on the same device instead of the canvas. Its createRenderPipeline only
+  // starts createRenderPipelineAsync for the descriptor (the browser compiles
+  // those on worker threads, several at once, into the caches the blocking
+  // one reads) and hands Skia a stand-in; nothing it records is submitted.
+  // Every kind of draw the frames contain, ShaderView effects included, is
+  // compiled in parallel; the real context then creates each from a warm
+  // cache when it first draws it.
+  beginWarmup(log) {
+    if (this.warm || this.lost || !this.gpu) return !!this.warm;
+    const probe = SharedWebGPU.create(this.module, this.webgpu, log);
+    if (!probe) return false;
+    this.warm = { probe, started: [], texture: null };
+    return true;
+  }
+
+  /** Ends the warm-up: resolves once its compiles finished (or `timeoutMs`). */
+  async endWarmup(timeoutMs = 5000) {
+    const w = this.warm;
+    if (!w) return 0;
+    this.warm = null;
+    let timer;
+    await Promise.race([Promise.all(w.started),
+      new Promise((r) => { timer = setTimeout(r, timeoutMs); })]);
+    clearTimeout(timer);
+    w.texture?.destroy();
+    w.probe.unref();
+    return w.started.length;
+  }
+
+  _renderWarm() {
+    const w = this.warm, M = this.host.module, dev = this.device;
+    const width = this.host.pixelWidth, height = this.host.pixelHeight;
+    if (!w.texture || w.texture.width !== width || w.texture.height !== height) {
+      w.texture?.destroy();
+      w.texture = dev.createTexture({ size: [width, height], format: this.format,
+        usage: USAGE_RENDER_ATTACHMENT | USAGE_COPY_SRC | USAGE_TEXTURE_BINDING });
+    }
+    const standIn = standInPipeline(dev);
+    const queue = dev.queue;
+    dev.createRenderPipeline = (desc) => {
+      w.started.push(dev.createRenderPipelineAsync(desc).catch(() => null));
+      return standIn;
+    };
+    queue.submit = () => {};
+    // Encoding draws with the stand-in is invalid: kept out of the console.
+    dev.pushErrorScope('validation');
+    const ptr = M.WebGPU.importJsTexture(w.texture, w.probe.instance);
+    try {
+      // NO_RETAIN (4): a full frame each time, nothing kept.
+      M._jsui_render_webgpu(this.host.rt, w.probe.gpu, ptr, width, height, 4);
+    } finally {
+      M._jsui_web_wgpu_release_texture(ptr);
+      delete dev.createRenderPipeline;
+      delete queue.submit;
+      dev.popErrorScope().catch(() => {});
+    }
+    return true;
   }
 
   _renderInto(texture) {
@@ -222,6 +283,21 @@ export class WebGPURenderer {
  * runtime keeps per-surface frames apart, src/render/gpu_webgpu.cpp), so a
  * page of many small widgets needs one Skia context, not one per canvas.
  */
+// What warm-ups hand Skia's throwaway context for each pipeline (its
+// recordings are never submitted): one trivial pipeline per device.
+const standIns = new WeakMap();
+export function standInPipeline(dev) {
+  let p = standIns.get(dev);
+  if (!p) {
+    const module = dev.createShaderModule({ code: '@vertex fn v() -> @builtin(position) vec4f { return vec4f(0.0); }\n'
+      + '@fragment fn f() -> @location(0) vec4f { return vec4f(0.0); }' });
+    p = dev.createRenderPipeline({ layout: 'auto', vertex: { module, entryPoint: 'v' },
+      fragment: { module, entryPoint: 'f', targets: [{ format: 'rgba8unorm' }] } });
+    standIns.set(dev, p);
+  }
+  return p;
+}
+
 export class SharedWebGPU {
   /** Null (logged through `log`) when Skia cannot use the device. */
   static create(M, webgpu, log) {
