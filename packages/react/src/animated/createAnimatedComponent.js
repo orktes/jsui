@@ -130,7 +130,7 @@ class Subscription {
       const v = this.style[k];
       if (v instanceof AnimatedNode) {
         style[k] = nativeTag(v);
-      } else if (k === 'transform' && Array.isArray(v)) {
+      } else if ((k === 'transform' || k.endsWith('.transform')) && Array.isArray(v)) {
         const inputs = [];
         const transforms = v.map((t) => {
           const property = Object.keys(t)[0];
@@ -223,7 +223,7 @@ function nativeSignature(viewId, style, keys) {
   for (const k of keys) {
     const v = style[k];
     sig += '|' + k;
-    if (k === 'transform' && Array.isArray(v)) {
+    if ((k === 'transform' || k.endsWith('.transform')) && Array.isArray(v)) {
       for (const t of v) {
         const p = Object.keys(t)[0];
         sig += ',' + p + (t[p] instanceof AnimatedNode ? '*' : '=' + JSON.stringify(t[p]));
@@ -246,8 +246,11 @@ export function createAnimatedComponent(Component) {
     const nativeEvents = [];
     let propsAnimated = false;
     // Props the component forwards as a style key (LottieView's progress):
-    // animated like style, so the native driver can write them.
-    const styleProps = Component.__animatedStyleProps;
+    // animated like style, so the native driver can write them. A function
+    // gives each mounted component its own keys (vector drawing elements:
+    // draw:<k>.<prop>, see vector/host.js).
+    let styleProps = Component.__animatedStyleProps;
+    if (typeof styleProps === 'function') styleProps = styleProps(sub);
     let mapped = null;
     let textNode = null;
     let visibleNode = null;
