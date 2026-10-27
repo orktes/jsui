@@ -167,7 +167,9 @@ TEST(net_https_methods_headers_redirects) {
   r = net::fetchUrl(req);
   if (!httpbinUp(r, name)) return;
   CHECK_EQ(r.status, 404);
-  CHECK_EQ(r.statusText, std::string("Not Found"));
+  // httpbin sends "NOT FOUND"; NSURLSession gives none and the standard one
+  // is filled in.
+  CHECK(net::iequals(r.statusText, "Not Found"));
 
   req.method = "HEAD";
   req.url = "https://httpbin.org/get";
