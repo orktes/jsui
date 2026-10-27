@@ -728,6 +728,10 @@ int jsui_send_mouse_wheel(JsuiRuntime* rt, float x, float y, float dx, float dy)
   JSUI_INPUT_SCOPE;
   return rt->surface->input->mouseWheel(x, y, dx, dy);
 }
+int jsui_send_mouse_wheel_ex(JsuiRuntime* rt, float x, float y, float dx, float dy, JsuiWheelKind kind) {
+  JSUI_INPUT_SCOPE;
+  return rt->surface->input->mouseWheel(x, y, dx, dy, int(kind));
+}
 int jsui_send_mouse_leave(JsuiRuntime* rt) {
   JSUI_INPUT_SCOPE;
   return rt->surface->input->mouseLeave();

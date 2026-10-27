@@ -2028,7 +2028,9 @@ void JsuiView::_gui_input(const Ref<InputEvent>& event) {
         float dy = idx == MOUSE_BUTTON_WHEEL_UP ? -f : idx == MOUSE_BUTTON_WHEEL_DOWN ? f : 0.f;
         // Shift+wheel scrolls horizontally, like browsers.
         if (mb->is_shift_pressed() && dx == 0.f) std::swap(dx, dy);
-        consumed = jsui_send_mouse_wheel(rt_, p.x, p.y, dx * kWheelStep, dy * kWheelStep) != 0;
+        // Wheel steps glide (the factor is fractional for accelerated /
+        // hi-res wheels).
+        consumed = jsui_send_mouse_wheel_ex(rt_, p.x, p.y, dx * kWheelStep, dy * kWheelStep, JSUI_WHEEL_STEPS) != 0;
       }
     } else if (idx == MOUSE_BUTTON_LEFT || idx == MOUSE_BUTTON_RIGHT || idx == MOUSE_BUTTON_MIDDLE) {
       JsuiMouseButton b = idx == MOUSE_BUTTON_RIGHT ? JSUI_MOUSE_RIGHT : idx == MOUSE_BUTTON_MIDDLE ? JSUI_MOUSE_MIDDLE
@@ -2048,7 +2050,7 @@ void JsuiView::_gui_input(const Ref<InputEvent>& event) {
   } else if (const auto* pg = Object::cast_to<InputEventPanGesture>(event.ptr())) {
     // Trackpad two-finger scroll (macOS): delta is in "wheel notches".
     Vector2 p = pg->get_position(), d = pg->get_delta();
-    consumed = jsui_send_mouse_wheel(rt_, p.x, p.y, d.x * kWheelStep, d.y * kWheelStep) != 0;
+    consumed = jsui_send_mouse_wheel_ex(rt_, p.x, p.y, d.x * kWheelStep, d.y * kWheelStep, JSUI_WHEEL_PRECISE) != 0;
   } else if (const auto* st = Object::cast_to<InputEventScreenTouch>(event.ptr())) {
     Vector2 p = st->get_position();
     int phase = st->is_canceled() ? 3 : st->is_pressed() ? 0 : 2;

@@ -80,7 +80,7 @@ void viewer_videos_command(void* user, const JsuiVideoCommand* c);
 int viewer_videos_tick(ViewerVideos* vs);
 void viewer_videos_destroy(ViewerVideos* vs);
 }
-extern "C" void viewer_mac_watch_wheel(void (*cb)(void* user, float dx, float dy), void* user);
+extern "C" void viewer_mac_watch_wheel(void (*cb)(void* user, float dx, float dy, int precise), void* user);
 #endif
 
 namespace {
@@ -342,12 +342,13 @@ class Viewer {
     // Pixel deltas with the trackpad's momentum, as browsers get them
     // (SDL_MOUSEWHEEL is ignored on macOS).
     viewer_mac_watch_wheel(
-        [](void* u, float dx, float dy) {
+        [](void* u, float dx, float dy, int precise) {
           auto* self = static_cast<Viewer*>(u);
           if (!self->rt_ || (dx == 0 && dy == 0)) return;
           int mx = 0, my = 0;
           SDL_GetMouseState(&mx, &my);
-          jsui_send_mouse_wheel(self->rt_, float(mx), float(my), dx, dy);
+          jsui_send_mouse_wheel_ex(self->rt_, float(mx), float(my), dx, dy,
+                                   precise ? JSUI_WHEEL_PRECISE : JSUI_WHEEL_STEPS);
         },
         this);
 #endif
@@ -756,7 +757,12 @@ class Viewer {
         // SDL's deltas already follow the system's scroll direction setting
         // (SDL_MOUSEWHEEL_FLIPPED only says it is "natural"), as DOM wheel
         // deltas do. DOM: positive deltaY scrolls down; ~40 px per notch.
-        jsui_send_mouse_wheel(rt_, float(mx), float(my), e.wheel.preciseX * 40.f, -e.wheel.preciseY * 40.f);
+        // Whole notches glide; fractions (touchpads, hi-res wheels) are
+        // pixel-precise.
+        float nx = e.wheel.preciseX, ny = e.wheel.preciseY;
+        bool notches = nx == std::round(nx) && ny == std::round(ny);
+        jsui_send_mouse_wheel_ex(rt_, float(mx), float(my), nx * 40.f, -ny * 40.f,
+                                 notches ? JSUI_WHEEL_STEPS : JSUI_WHEEL_PRECISE);
 #endif
         break;
       }

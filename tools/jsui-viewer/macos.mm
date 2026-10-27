@@ -23,15 +23,17 @@ void viewer_mac_init(void) {
   [d setVolatileDomain:args forName:NSArgumentDomain];
 }
 
-// Calls `cb(user, dx, dy)` with DOM wheel deltas (px, positive dy scrolls
+// Calls `cb(user, dx, dy, precise)` with DOM wheel deltas (px, positive dy scrolls
 // down; the system's scroll direction setting already applied) for every
 // scroll event of the app, on the main thread while SDL pumps events.
-void viewer_mac_watch_wheel(void (*cb)(void* user, float dx, float dy), void* user) {
+void viewer_mac_watch_wheel(void (*cb)(void* user, float dx, float dy, int precise), void* user) {
   [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskScrollWheel
                                         handler:^NSEvent*(NSEvent* e) {
-                                          // Lines (mouse wheel notches) at ~40 px, like browsers.
-                                          CGFloat k = e.hasPreciseScrollingDeltas ? 1 : 40;
-                                          cb(user, float(-e.scrollingDeltaX * k), float(-e.scrollingDeltaY * k));
+                                          // Lines (mouse wheel steps, accelerated: a slow notch is
+                                          // 0.1 line) at 40 px, like Chrome.
+                                          bool precise = e.hasPreciseScrollingDeltas;
+                                          CGFloat k = precise ? 1 : 40;
+                                          cb(user, float(-e.scrollingDeltaX * k), float(-e.scrollingDeltaY * k), precise);
                                           return e;
                                         }];
 }

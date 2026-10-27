@@ -279,7 +279,7 @@ async function spy(page, id = 'ui') {
     const jsui = window.hosts[id], M = jsui.module;
     const calls = window.calls = [];
     const strArgs = { _jsui_send_key: [1, 2], _jsui_send_text: [1], _jsui_set_gamepad_connected: [3] };
-    for (const name of ['_jsui_send_mouse_move', '_jsui_send_mouse_button', '_jsui_send_mouse_wheel',
+    for (const name of ['_jsui_send_mouse_move', '_jsui_send_mouse_button', '_jsui_send_mouse_wheel', '_jsui_send_mouse_wheel_ex',
       '_jsui_send_mouse_leave', '_jsui_send_touch', '_jsui_send_key', '_jsui_send_text', '_jsui_send_gamepad_button',
       '_jsui_send_gamepad_axis', '_jsui_set_gamepad_connected']) {
       const f = M[name];
@@ -417,7 +417,7 @@ test('pointer, wheel, keyboard and text input are forwarded', async ({ page }) =
   has(([n, x, y, b, d]) => n === 'send_mouse_button' && x === 100 && y === 75 && b === 0 && d === 1, 'left down');
   has(([n, x, y, b, d]) => n === 'send_mouse_button' && b === 0 && d === 0, 'left up');
   has(([n, x, y, b, d]) => n === 'send_mouse_button' && x === 50 && y === 20 && b === 2 && d === 1, 'right down');
-  has(([n, , , dx, dy]) => n === 'send_mouse_wheel' && dx === 0 && dy === 120, 'wheel');
+  has(([n, , , dx, dy]) => n.startsWith('send_mouse_wheel') && dx === 0 && dy === 120, 'wheel');
 
   await page.keyboard.press('Tab');
   await page.keyboard.down('Shift');
@@ -2091,6 +2091,38 @@ test('worker: a GPU reset that blanks the kept ImageBitmaps: the page sends its 
   const tex = logs.filter(([, t]) => /host texture "tex"/.test(t));
   const warnings = logs.filter(([level]) => level >= 2);
   assert(blank.length === 1 && !tex.length && !warnings.length, `logs: ${JSON.stringify(logs)}`);
+});
+
+// What produced a wheel event, from the DOM event: macOS Chrome's mouse
+// wheel (accelerated px, wheelDelta 120 a notch) and Firefox's line deltas
+// are wheel steps (they glide), a trackpad's px (wheelDelta 3 x px) are
+// precise. Values as Chrome on macOS sent them for a cheap mouse.
+test('wheel: mouse wheel steps and trackpad pixels are told apart', async ({ page }) => {
+  await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
+  await spy(page);
+  // A few frames apart: worker mode merges a frame's wheel steps.
+  await page.evaluate(async () => {
+    const c = window.hosts.ui.canvas, box = c.getBoundingClientRect();
+    const frame = () => new Promise(requestAnimationFrame);
+    const send = async (deltaY, wheelDeltaY, deltaMode = 0) => {
+      await frame();
+      await frame();
+      const e = new WheelEvent('wheel', { clientX: box.left + 100, clientY: box.top + 75, deltaY, deltaMode,
+        bubbles: true, cancelable: true });
+      Object.defineProperty(e, 'wheelDeltaY', { value: wheelDeltaY });
+      c.dispatchEvent(e);
+    };
+    await send(4.000244140625, -120);  // slow notch
+    await send(40.006103515625, -120);  // fast spin: 40 px fits both, follows the one before
+    await send(389.16259765625, -960);
+    await send(13, -39);  // trackpad
+    await send(-7.5, 22);  // trackpad, wheelDelta rounded
+    await send(3, 0, 1);  // Firefox: 3 lines
+  });
+  await page.waitForTimeout(50);
+  const calls = (await takeCalls(page)).filter(([n]) => n === 'send_mouse_wheel_ex').map(([, , , , dy, kind]) => [dy, kind]);
+  const want = [[4.000244140625, 1], [40.006103515625, 1], [389.16259765625, 1], [13, 2], [-7.5, 2], [48, 1]];
+  assert(JSON.stringify(calls) === JSON.stringify(want), `wheel kinds ${JSON.stringify(calls)}`);
 });
 
 // The wheel scrolls a ScrollView and a click lands on the row under it.

@@ -979,7 +979,7 @@ bool InputManager::mouseLeave() {
   return false;
 }
 
-bool InputManager::mouseWheel(float x, float y, float dx, float dy) {
+bool InputManager::mouseWheel(float x, float y, float dx, float dy, int kind) {
   if (!std::isfinite(dx) || !std::isfinite(dy)) return false;
   if (!mouseInside_ || x != mouse_.x || y != mouse_.y) mouseMove(x, y);
   Node* target = hitTest(x, y);
@@ -987,7 +987,7 @@ bool InputManager::mouseWheel(float x, float y, float dx, float dy) {
   {
     float cx, cy;
     if (JsuiRuntime* child = childPoint(target, x, y, &cx, &cy))
-      if (jsui_send_mouse_wheel(child, cx, cy, dx, dy)) return true;
+      if (jsui_send_mouse_wheel_ex(child, cx, cy, dx, dy, JsuiWheelKind(kind))) return true;
   }
   // Like pointer moves, wheel events reach JS only when a node on the path
   // listens (onWheel); native Animated.event mappings see them regardless.
@@ -997,6 +997,7 @@ bool InputManager::mouseWheel(float x, float y, float dx, float dy) {
   d.y = y;
   d.dx = dx;
   d.dy = dy;
+  d.wheelKind = kind;
   d.index = int(target->id());
   int flags = 0;
   uint32_t seq = 0;
@@ -1027,7 +1028,7 @@ bool InputManager::wheelDefault(const Deferred& d, bool prevented) {
   // Handlers may have changed the tree.
   Node* hit = d.hitAgain ? hitTest(d.x, d.y) : alive(uint32_t(d.index));
   // Default action: scroll the nearest ScrollView that can move this way.
-  if (wheelScroll(hit, d.dx, d.dy)) return true;
+  if (wheelScroll(hit, d.dx, d.dy, d.wheelKind)) return true;
   return consumes(alive(idOf(hit)), kWheel);
 }
 

@@ -477,6 +477,78 @@ TEST(scroll_smooth_wheel_and_trackpad) {
   CHECK(!f.in().mouseWheel(50, 50, 0, 100));
 }
 
+TEST(scroll_wheel_steps_glide_whatever_their_size) {
+  ScrollFixture f;
+  Node* sv = addList(f);
+  f.tick(16);
+  // macOS Chrome / AppKit: a slow notch of a mouse wheel is 4 px (0.1 line,
+  // accelerated); the host says it is a wheel step, so it glides too.
+  CHECK(f.in().mouseWheel(50, 50, 0, 4.000244f, JSUI_WHEEL_STEPS));
+  CHECK_EQ(sv->scrollY, 0.f);
+  f.tick(16);
+  CHECK(sv->scrollY > 0 && sv->scrollY < 4);
+  f.settle();
+  CHECK(std::fabs(sv->scrollY - 4.000244f) < 1e-3f);
+  // Pixel-precise input moves at once, even a whole 100.
+  CHECK(f.in().mouseWheel(50, 50, 0, 100, JSUI_WHEEL_PRECISE));
+  CHECK(std::fabs(sv->scrollY - 104.000244f) < 1e-3f);
+}
+
+// A fast spin (a notch every 33 ms, or the accelerated px of a macOS wheel
+// every frame) moves at an even speed: a new step keeps the glide's speed
+// instead of restarting its ease-out (that surged and sagged every notch).
+TEST(scroll_wheel_fast_spin_moves_evenly) {
+  for (int interval : {16, 32}) {
+    ScrollFixture f(200, 200);
+    Node* sv = addList(f, "{}", R"({"style":{"height":20000}})");
+    f.tick(16);
+    std::vector<float> steps;
+    float last = 0;
+    for (int frame = 0; frame < 40; frame++) {
+      if (frame * 16 % interval == 0) CHECK(f.in().mouseWheel(50, 50, 0, interval == 16 ? 30 : 40, JSUI_WHEEL_STEPS));
+      f.tick(16);
+      steps.push_back(sv->scrollY - last);
+      last = sv->scrollY;
+    }
+    // Steady state (after the ramp up): per-frame motion within 10 % of its
+    // mean (restarting the ease-out per step swung it by 25-50 %), and
+    // never backwards.
+    float lo = 1e9f, hi = 0, sum = 0;
+    for (size_t i = 20; i < steps.size(); i++) {
+      lo = std::min(lo, steps[i]);
+      hi = std::max(hi, steps[i]);
+      sum += steps[i];
+    }
+    float mean = sum / float(steps.size() - 20);
+    CHECK(mean > 15 && mean < 35);
+    CHECK((hi - lo) / mean < 0.1f);
+    for (float st : steps) CHECK(st >= 0);
+    // Stops where the steps add up to, without overshooting.
+    f.settle();
+    int n = 0;
+    for (int frame = 0; frame < 40; frame++) n += frame * 16 % interval == 0;
+    CHECK(std::fabs(sv->scrollY - float(n) * (interval == 16 ? 30 : 40)) < 0.5f);
+  }
+}
+
+// Turning the wheel back mid-glide heads back at once (no slow reversal).
+TEST(scroll_wheel_reverses_without_lag) {
+  ScrollFixture f;
+  Node* sv = addList(f);
+  f.tick(16);
+  for (int i = 0; i < 3; i++) {
+    CHECK(f.in().mouseWheel(50, 50, 0, 100, JSUI_WHEEL_STEPS));
+    f.tick(16);
+  }
+  float before = sv->scrollY;
+  CHECK(before > 60);
+  CHECK(f.in().mouseWheel(50, 50, 0, -250, JSUI_WHEEL_STEPS));  // target 50
+  f.tick(16);
+  CHECK(sv->scrollY < before);  // already heading back in the next frame
+  f.settle();
+  CHECK_EQ(sv->scrollY, 50.f);
+}
+
 // Logs 'scroll' events as scroll@offset/timestamp (and pointer enter /
 // leave with their target) instead of the fixture's plain types.
 void logScrollOffsets(ScrollFixture& f) {

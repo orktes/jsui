@@ -747,7 +747,7 @@ Surface views (`runtime_view`) play through their runtime view, whose
 | Godot | JSUI |
 | --- | --- |
 | `InputEventMouseMotion` / `MouseButton` (left, right, middle) | `jsui_send_mouse_move` / `jsui_send_mouse_button` (+ modifiers) |
-| wheel buttons (with `factor`), `InputEventPanGesture` (macOS trackpad scrolling, including its momentum) | `jsui_send_mouse_wheel`, 40 px per notch. Shift+wheel scrolls horizontally. `InputEventMagnifyGesture` is not forwarded (it reaches the game) |
+| wheel buttons (with `factor`), `InputEventPanGesture` (macOS trackpad scrolling, including its momentum) | `jsui_send_mouse_wheel_ex`, 40 px per notch: wheel steps glide (`JSUI_WHEEL_STEPS`), pan gestures move at once (`JSUI_WHEEL_PRECISE`). Shift+wheel scrolls horizontally. `InputEventMagnifyGesture` is not forwarded (it reaches the game) |
 | mouse exit | `jsui_send_mouse_leave` |
 | `InputEventScreenTouch` / `ScreenDrag` | `jsui_send_touch`. Mouse events emulated from touch are dropped |
 | `InputEventKey` | `jsui_send_key` with DOM `key` / `code` (left/right modifiers via `location`), then `jsui_send_text` with the UTF-8 character for printable presses (not with Ctrl/Cmd) |
