@@ -571,3 +571,51 @@ TEST(container_embedder_can_refuse_a_child) {
   CHECK(p.child() == nullptr);
   CHECK_EQ(p.childEvents.size(), size_t(1));
 }
+
+TEST(container_audio_middleware_in_the_parent_js) {
+  Parent p;
+  // The parent's JS changes the child's sounds (halves their volume) and
+  // refuses its music (what JSUIContainer's services.audio middleware sends).
+  const char parent[] = R"JS(
+const N = __jsui_native;
+const c = N.createNode('JSUIContainer');
+N.setProps(c, {style: {width: 50, height: 50}, services: {audio: 'js'}, __events: ['containerEvent']});
+N.appendChild(N.rootId, c);
+globalThis.__jsui_dispatchEvent = (e) => {
+  if (e.type !== 'containerevent') return 0;
+  N.postMessage('ev', e);
+  if (e.kind !== 'audio') return 1;
+  const {gen, cmd} = e;
+  if (cmd.bus === 'music') N.containerCommand(c, {op: 'audio-block', gen, orig: cmd, cmd: {}});
+  else N.containerCommand(c, {op: 'audio-next', gen, orig: cmd, cmd: {volume: cmd.volume / 2}});
+  return 1;
+};
+globalThis.__jsui_onHostMessage = (name, json) => { if (name === 'cmd') N.containerCommand(c, JSON.parse(json)); };
+N.postMessage('id', c);
+)JS";
+  CHECK(jsui_load_bundle_source(p.rt, parent, sizeof(parent) - 1, "parent.js") == 0);
+  CHECK(p.until([&] { return p.has("id"); }));
+  p.node = uint32_t(p.take("id").back().asNumber());
+  const char child[] = R"JS(
+const N = __jsui_native;
+globalThis.__jsui_onAudio = (ev) => N.postMessage('audio', ev);
+N.audioPlay('click.wav', 'ui', 0.8, 1, 0, false, 0, 0);
+const music = N.audioPlay('theme.ogg', 'music', 1, 1, 0, true, 0, 0);
+N.postMessage('music', {music});
+)JS";
+  p.command({{"op", Value("load")}, {"data", Value(std::string(child))}});
+  CHECK(p.until([&] { return p.event("message", "audio") != nullptr; }));
+  // Only the click reached the parent's handler, at half volume.
+  CHECK_EQ(p.audio.size(), size_t(1));
+  if (p.audio.size() == 1) {
+    CHECK_EQ(p.audio[0].op, int(JSUI_AUDIO_PLAY));
+    CHECK_EQ(p.audio[0].sound, std::string("game://ui/click.wav"));
+    CHECK_NEAR(p.audio[0].volume, 0.4, 1e-6);
+  }
+  // The music voice failed in the child.
+  const Value* m = p.event("message", "music");
+  const Value* a = p.event("message", "audio");
+  CHECK(m && a && (*a)["payload"].asArray().size() == 1 &&
+        (*a)["payload"].asArray()[0].asArray()[1].asNumber() == (*m)["payload"]["music"].asNumber() &&
+        (*a)["payload"].asArray()[0].asArray()[2].asNumber() == double(JSUI_AUDIO_FAILED));
+}
