@@ -59,18 +59,19 @@ running. *Save profile* writes a `.cpuprofile`.
   where JS was idle. With `--js-thread off` everything is one thread and
   the chart shows whole frames. Totals per phase without DevTools:
   `jsui_set_profiling` / `getPerf()` (see [PERFORMANCE.md](PERFORMANCE.md)).
-* **A lane per thread.** The live chart has one lane: DevTools records only
-  a CPU profile from a target like this one. `jsui dev` also keeps every
-  recording as a trace, and prints a link when you stop:
-  `devtools://devtools/bundled/devtools_app.html?panel=timeline&loadTimelineFromURL=http://127.0.0.1:5173/__jsui/trace/1.json`.
-  Paste it into Chrome's address bar to get the recording the way Chrome
-  shows a page's: the JS on **Main** (in tasks, under what called it), the frame phases on a **JSUI render
-  thread** track (Layout, Recalculate style, Paint, Commit, colored as
-  Rendering and Painting) where they actually ran, overlapping JS or not,
-  worklet runs (react-native-worklets, on the window's thread) on a **JSUI
-  worklets** track, and each GPU submit on the **GPU** track. *Load profile* in the
-  Performance panel (or [Perfetto](https://ui.perfetto.dev)) opens the same
-  URL's file. The server keeps the last 10.
+* **A track per thread.** The live chart is one thread: DevTools records
+  only a CPU profile from a target like this one. `jsui dev` also keeps
+  every recording as a Chrome trace and prints its URL when you stop
+  (`http://127.0.0.1:5173/__jsui/trace/1.json`; the last 10 are kept).
+  Download it and drop it on the Performance panel (or *Load profile*, or
+  [Perfetto](https://ui.perfetto.dev)) to see the recording the way Chrome
+  shows a page's: the JS on **Main** (in tasks, under what called it), the
+  frame phases on a **JSUI render thread** track (Layout, Recalculate
+  style, Paint, Commit, colored as Rendering and Painting) where they
+  actually ran, overlapping JS or not, worklet runs (react-native-worklets,
+  on the window's thread) on a **JSUI worklets** track, and each GPU submit
+  on the **GPU** track. (A `loadTimelineFromURL` link can't open it:
+  DevTools' pages may not fetch from `http://` URLs.)
 * **How.** A thread of the runtime's arms the statement traps once per
   sampling interval (`Profiler.setSamplingInterval`, 1 ms unless the
   frontend asks otherwise, at least 100 µs), and the next

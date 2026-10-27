@@ -452,11 +452,17 @@ export function createInspector(o) {
       return true;
     }
     const t = /^\/__jsui\/trace\/(\d+)\.json$/.exec(p);
+    if (t && req.method === 'OPTIONS') {
+      // A page served from the web asks first (Private Network Access).
+      res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET', 'Access-Control-Allow-Private-Network': 'true' });
+      res.end();
+      return true;
+    }
     if (t && (req.method === 'GET' || req.method === 'HEAD')) {
       const trace = traces.get(Number(t[1]));
       if (!trace) sendJson(res, 404, { error: 'no such trace (the server keeps the last 10)' });
       else {
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Content-Disposition': `inline; filename="jsui-${t[1]}.json"` });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Private-Network': 'true', 'Content-Disposition': `attachment; filename="jsui-profile-${t[1]}.json"` });
         res.end(req.method === 'HEAD' ? undefined : trace);
       }
       return true;
@@ -485,7 +491,9 @@ export function createInspector(o) {
     traces.set(n, JSON.stringify(profileTrace(profile, { name: rt.name || 'jsui', url: rt.title })));
     if (traces.size > 10) traces.delete(traces.keys().next().value);
     const url = `${originOf()}/__jsui/trace/${n}.json`;
-    log(`[jsui] profile as a trace (render thread and GPU tracks): devtools://devtools/bundled/devtools_app.html?panel=timeline&loadTimelineFromURL=${url}  (or Load profile: ${url})`);
+    // (DevTools can't fetch it itself: its pages' content security policy
+    // allows no http:// connections, so loadTimelineFromURL can't reach it.)
+    log(`[jsui] profile ${n} with render thread and GPU tracks: ${url} (download it, then drop it on DevTools' Performance panel)`);
   }
 
   // DevTools loads source maps through the target (Network.loadNetworkResource,
