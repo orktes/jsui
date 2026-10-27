@@ -23,6 +23,7 @@
 // WebSocket (RFC 6455) is implemented here: no dependency, text frames out.
 
 import { createHash } from 'node:crypto';
+import { profileTrace } from './profile-trace.js';
 
 const POLL_HOLD_MS = 20000;
 const GONE_AFTER_MS = 30000;         // no poll for this long: the runtime left
@@ -411,6 +412,7 @@ export function createInspector(o) {
             for (const s of rt.sessions) s.ws.send(m.message);
           } else {
             const s = sessions.get(String(m.session));
+            if (s && s.runtime === id && m.message.includes('"jsuiSpans"')) keepTrace(rt, m.message);
             if (s && s.runtime === id) s.ws.send(m.message);
           }
         }
@@ -449,11 +451,41 @@ export function createInspector(o) {
       sendJson(res, 200, [...runtimes.values()].filter((rt) => rt.live).map((rt) => target(rt, host)));
       return true;
     }
+    const t = /^\/__jsui\/trace\/(\d+)\.json$/.exec(p);
+    if (t && (req.method === 'GET' || req.method === 'HEAD')) {
+      const trace = traces.get(Number(t[1]));
+      if (!trace) sendJson(res, 404, { error: 'no such trace (the server keeps the last 10)' });
+      else {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Content-Disposition': `inline; filename="jsui-${t[1]}.json"` });
+        res.end(req.method === 'HEAD' ? undefined : trace);
+      }
+      return true;
+    }
     if (p.startsWith('/__jsui/inspect/')) {
       sendJson(res, 404, { error: 'not found' });
       return true;
     }
     return false;
+  }
+
+  // A CPU profile a runtime recorded (Profiler.stop) is also kept as a trace
+  // with a lane per thread, which DevTools opens from its URL.
+  const traces = new Map();  // number -> JSON text
+  let nextTrace = 1;
+  function keepTrace(rt, text) {
+    let msg;
+    try {
+      msg = JSON.parse(text);
+    } catch {
+      return;
+    }
+    const profile = msg && msg.result && msg.result.profile;
+    if (!profile || !Array.isArray(profile.nodes)) return;
+    const n = nextTrace++;
+    traces.set(n, JSON.stringify(profileTrace(profile, { name: rt.name || 'jsui', url: rt.title })));
+    if (traces.size > 10) traces.delete(traces.keys().next().value);
+    const url = `${originOf()}/__jsui/trace/${n}.json`;
+    log(`[jsui] profile with a lane per thread: devtools://devtools/bundled/devtools_app.html?panel=timeline&loadTimelineFromURL=${url}  (or Load profile: ${url})`);
   }
 
   // DevTools loads source maps through the target (Network.loadNetworkResource,

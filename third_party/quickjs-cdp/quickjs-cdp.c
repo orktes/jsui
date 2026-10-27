@@ -999,6 +999,21 @@ static JSValue profiler_stop(QJSCDPAgent *agent) {
   json_set(agent, profile, "endTime", JS_NewInt64(agent->jctx, end));
   json_set(agent, profile, "samples", samples);
   json_set(agent, profile, "timeDeltas", deltas);
+
+  /* The embedder's spans as they were, before they were cut to JS's gaps:
+     [name, start, end] each, for a trace with a lane per thread (`jsui dev`
+     writes one). DevTools ignores the field. */
+  JSValue spans = json_array(agent);
+  for (int i = 0; i < agent->nspans; i++) {
+    JSValue sp = json_array(agent);
+    json_set_index(agent, sp, 0,
+                   JS_NewString(agent->jctx,
+                                agent->pnodes[agent->spans[i].node].label));
+    json_set_index(agent, sp, 1, JS_NewInt64(agent->jctx, agent->spans[i].start));
+    json_set_index(agent, sp, 2, JS_NewInt64(agent->jctx, agent->spans[i].end));
+    json_set_index(agent, spans, (uint32_t)i, sp);
+  }
+  json_set(agent, profile, "jsuiSpans", spans);
   profiler_reset(agent);
   return profile;
 }

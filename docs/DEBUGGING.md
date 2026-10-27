@@ -51,6 +51,16 @@ running. *Save profile* writes a `.cpuprofile`.
   where JS was idle. With `--js-thread off` everything is one thread and
   the chart shows whole frames. Totals per phase without DevTools:
   `jsui_set_profiling` / `getPerf()` (see [PERFORMANCE.md](PERFORMANCE.md)).
+* **A lane per thread.** The live chart has one lane: DevTools records only
+  a CPU profile from a target like this one. `jsui dev` also keeps every
+  recording as a trace, and prints a link when you stop:
+  `devtools://devtools/bundled/devtools_app.html?panel=timeline&loadTimelineFromURL=http://127.0.0.1:5173/__jsui/trace/1.json`.
+  Paste it into Chrome's address bar to get the same JS on **Main** and a
+  **JSUI** group above it, with **Render thread** (commit, style, layout,
+  animated, input, paint) and **GPU submit** lanes holding every frame's
+  phases where they actually ran, overlapping JS or not. *Load profile* in
+  the Performance panel (or [Perfetto](https://ui.perfetto.dev)) opens the
+  same URL's file. The server keeps the last 10.
 * **How.** A thread of the runtime's arms the statement traps once per
   sampling interval (`Profiler.setSamplingInterval`, 1 ms unless the
   frontend asks otherwise, at least 100 µs), and the next
