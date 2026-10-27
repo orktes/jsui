@@ -39,6 +39,11 @@ const HUD = { width: 300, height: 150, ratio: 2 };
 
 async function main() {
   if (!navigator.gpu) return fail('This example needs WebGPU (Chrome, Edge, Safari 26 or Firefox 141+).');
+  // A page loaded in the background (a link opened from another app, a
+  // prerender) starts once it is shown: its canvas is configured visible.
+  if (document.visibilityState === 'hidden') {
+    await new Promise((r) => document.addEventListener('visibilitychange', r, { once: true }));
+  }
   const canvas = document.getElementById('scene');
   const renderer = new THREE.WebGPURenderer({ canvas, antialias: true });
   await renderer.init();
@@ -166,11 +171,19 @@ async function main() {
     const tanH = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * a;
     home.set(0, tall ? 2.15 : 1.55, Math.max(6.2, halfW / tanH));
     lookAt.set(0, tall ? 2.1 : 1.25, 0);
+    // The drone: wide, it circles the core; tall, it swings in front of
+    // the core and the console between them, far enough out for both.
+    if (tall) droneView.aim.lerpVectors(core.position, stand.position, 0.6);
+    else droneView.aim.copy(core.position);
+    Object.assign(droneView, tall ? { radius: 3.6, height: 0.35, sweep: 0.7 } : { radius: 2.4, height: 1.25, sweep: 0 });
   };
 
   // The drone camera: the core from above, into a render target the
   // console shows (<HostTexture name="drone-cam">).
   const drone = new THREE.PerspectiveCamera(50, 16 / 10, 0.1, 30);
+  // What it looks at and its orbit (layout()): sweep 0 is a full circle,
+  // otherwise the arc's half angle in front of the console.
+  const droneView = { aim: new THREE.Vector3(), radius: 2.4, height: 1.25, sweep: 0 };
   const droneTarget = new THREE.RenderTarget(512, 320, { samples: 1 });
   droneTarget.texture.colorSpace = THREE.SRGBColorSpace;  // rgba8unorm-srgb: shown with its colors
 
@@ -231,16 +244,24 @@ async function main() {
   const lean = new THREE.Vector2();
   addEventListener('pointermove', (e) => lean.set(e.clientX / innerWidth - 0.5, e.clientY / innerHeight - 0.5));
 
-  addEventListener('resize', () => {
+  // A resize, and the page shown again (from the back/forward cache or a
+  // hidden tab): setSize gives the canvas a new drawing buffer as well.
+  const resize = () => {
     renderer.setSize(innerWidth, innerHeight);
     layout();
     Object.assign(overlayCam, { right: innerWidth, top: innerHeight });
     overlayCam.updateProjectionMatrix();
     placeHud();
-  });
+  };
+  addEventListener('resize', resize);
+  visualViewport?.addEventListener('resize', resize);
+  addEventListener('pageshow', resize);
+  document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && resize());
 
   // ---------------------------------------------------------------- frame
   const clock = new THREE.Timer();
+  // For the ?debug overlay (index.html).
+  const stats = Object.assign(window.threeStats ??= {}, { frames: 0, canvas, device: renderer.backend.device });
   let angle = 0, frames = 0, last = performance.now(), droneGPU = null;
   renderer.autoClear = false;
   renderer.setAnimationLoop(() => {
@@ -266,9 +287,10 @@ async function main() {
     camera.lookAt(lookAt);
 
     // The drone cam first: the console samples its texture this frame.
-    drone.position.set(core.position.x + Math.cos(t * 0.4) * 2.4, core.position.y + 1.25,
-      core.position.z + Math.sin(t * 0.4) * 2.4);
-    drone.lookAt(core.position);
+    const { aim, radius, height, sweep } = droneView;
+    const orbit = sweep ? Math.PI / 2 + Math.sin(t * 0.4) * sweep : t * 0.4;
+    drone.position.set(aim.x + Math.cos(orbit) * radius, aim.y + height, aim.z + Math.sin(orbit) * radius);
+    drone.lookAt(aim);
     renderer.setRenderTarget(droneTarget);
     renderer.clear();
     renderer.render(scene, drone);
@@ -285,6 +307,7 @@ async function main() {
     renderer.render(overlay, overlayCam);
 
     frames++;
+    stats.frames++;
     const now = performance.now();
     if (now - last >= 500) {
       const info = renderer.info.render;

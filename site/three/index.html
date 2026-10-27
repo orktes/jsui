@@ -29,6 +29,63 @@
   <a id="back" href="../#/examples">JSUI showcase</a>
   <script>window.jsuiModules = null;  // set by site/scripts/build.mjs</script>
   <script>
+    // ?debug: an overlay with the console, errors and the page's state, for
+    // browsers without a reachable inspector (a phone): a screenshot says it.
+    if (new URLSearchParams(location.search).has('debug')) {
+      const box = Object.assign(document.createElement('pre'), { id: 'dbg' });
+      box.style.cssText = 'position:fixed;left:8px;right:8px;top:52px;max-height:60vh;overflow:hidden;margin:0;'
+        + 'padding:8px;border-radius:6px;background:#000c;color:#cfe3ff;font:10px/1.35 ui-monospace,monospace;'
+        + 'white-space:pre-wrap;word-break:break-all;z-index:3;pointer-events:none';
+      const lines = [], t0 = performance.now();
+      const fmt = (x) => x instanceof Error ? `${x.message} ${x.stack ?? ''}`
+        : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x);
+      const log = (kind, args) => {
+        lines.push(`${((performance.now() - t0) / 1000).toFixed(2)} ${kind} ${args.map(fmt).join(' ')}`.slice(0, 400));
+        if (lines.length > 40) lines.shift();
+      };
+      for (const k of ['log', 'info', 'warn', 'error']) {
+        const orig = console[k];
+        console[k] = (...a) => { log(k, a); orig.apply(console, a); };
+      }
+      addEventListener('error', (e) => log('onerror', [e.message, `${e.filename}:${e.lineno}`]));
+      addEventListener('unhandledrejection', (e) => log('rejection', [e.reason]));
+      for (const ev of ['pageshow', 'pagehide', 'resize']) addEventListener(ev, (e) => log('event', [ev, e.persisted ?? '']));
+      document.addEventListener('visibilitychange', () => log('event', ['visibility', document.visibilityState]));
+      if (window.GPUAdapter) {
+        const requestDevice = GPUAdapter.prototype.requestDevice;
+        GPUAdapter.prototype.requestDevice = async function (desc) {
+          const device = await requestDevice.call(this, desc);
+          log('gpu', ['device', [...device.features].join(',')]);
+          device.addEventListener('uncapturederror', (e) => log('gpu-error', [e.error?.message]));
+          device.lost.then((i) => log('gpu-lost', [i.reason, i.message]));
+          return device;
+        };
+        const configure = GPUCanvasContext.prototype.configure;
+        GPUCanvasContext.prototype.configure = function (c) {
+          log('gpu', ['configure', c.format, c.alphaMode, `${this.canvas.width}x${this.canvas.height}`]);
+          return configure.call(this, c);
+        };
+      }
+      let rafs = 0;
+      const tick = () => { rafs++; requestAnimationFrame(tick); };
+      requestAnimationFrame(tick);
+      const show = () => {
+        const c = document.getElementById('scene'), s = window.threeStats ?? {}, vv = window.visualViewport;
+        box.textContent = [
+          navigator.userAgent,
+          `gpu ${!!navigator.gpu} secure ${isSecureContext} visibility ${document.visibilityState} ready ${document.readyState}`,
+          `inner ${innerWidth}x${innerHeight} vv ${vv ? `${vv.width.toFixed(0)}x${vv.height.toFixed(0)}` : '-'} dpr ${devicePixelRatio}`,
+          `canvas ${c.width}x${c.height} css ${c.clientWidth}x${c.clientHeight}`,
+          `frames ${s.frames ?? '-'} rafs ${rafs} splash ${document.getElementById('splash').className || 'shown'}`,
+          ...lines,
+        ].join('\n');
+      };
+      document.body.append(box);
+      setInterval(show, 250);
+      show();
+    }
+  </script>
+  <script>
     // main.js not loading or never finishing (it hides the splash): said, not a blank page.
     setTimeout(() => {
       const err = document.getElementById('err');
