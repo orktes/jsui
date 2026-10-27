@@ -86,9 +86,18 @@ float layoutAnimProgress(LayoutAnimCurve curve, float springDamping, float t) {
 
 void Document::snapshotLayout(Node* node, std::vector<std::pair<Node*, Rect>>* out) {
   if (!node->yoga()) return;
-  Rect r = node->layoutRect();
+  Rect r = node->visualRect();
+  // Yoga forgets the layout of a child it detaches (YGNodeRemoveChild /
+  // YGNodeRemoveAllChildren), as Node::rebuildYoga does to every child of a
+  // node whose render children change: the root's when the first overlay
+  // adds the overlay layer, an overlay's parent's when it leaves its Yoga
+  // children. Such a node is not new: its frame is the last one afterLayout
+  // recorded (boundsLayout; width -1 until the first). Taking it for new made
+  // it the root of an inserted subtree, and the create animation faded the
+  // whole app in from opacity 0.
+  if (!finite(r) && node->boundsLayout.width >= 0) r = node->boundsLayout;
   if (!finite(r)) return;  // never laid out: new
-  out->emplace_back(node, node->visualRect());
+  out->emplace_back(node, r);
   if (node->type() == NodeType::Text || node->type() == NodeType::TextInput) return;  // paragraph content
   for (Node* c : node->children()) snapshotLayout(c, out);
 }
