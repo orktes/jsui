@@ -225,7 +225,7 @@ std::unique_ptr<TlsSession> tlsClient(intptr_t socket, const std::string& host, 
 namespace jsui::net {
 
 bool tlsAvailable(std::string* why) {
-  if (why) *why = "https:// is not available in the built-in loader on this platform; set JsuiConfig.fetch";
+  if (why) *why = "https:// is not available in the built-in loader on this platform; set JsuiConfig.on_request";
   return false;
 }
 

@@ -394,6 +394,7 @@ recording, the main thread replaying, frame for frame equal to one thread.
 | `auto_size` | bool | `false` | size the view to the component's content: the view's minimum size follows the laid-out size |
 | `profiling` | bool | `false` | time every frame phase (`jsui_set_profiling`), read with `get_perf()` |
 | `pipeline_cache_path` | String | `"user://jsui-pipelines.bin"` | the GPU pipeline cache of the runtime's Skia context (the renderer's name goes before the extension); empty: none. Applies when the context is created; a surface view uses its runtime view's. See [Rendering](#rendering) |
+| `use_engine_http` | bool | `true` | `fetch()` to `http://` / `https://` through Godot's `HTTPClient`; off: through JSUI's built-in loader (see [Loading and exporting](#loading-and-exporting)). Applies on `start()`; the runtime view's counts |
 | `audio_enabled` | bool | `true` | play the UI's sounds; off: nothing plays and every voice ends as failed (voices playing stop) |
 | `audio_bus` | String | `"Master"` | the Godot bus for JSUI buses that have no Godot bus of their own (see [Audio](#audio)) |
 | `audio_bus_map` | Dictionary | `{}` | JSUI bus → Godot bus, e.g. `{"sfx": "Effects"}`; wins over the same-name match |
@@ -826,9 +827,18 @@ func _ready():
 `res://` and `user://` bundles are read through `FileAccess`, so they work
 from exported `.pck` files. Relative URLs in the bundle (images, fonts,
 `fetch()`) resolve against the bundle URL. Keep the bundle in a subfolder
-(`res://ui/dist/bundle.js`, not `res://bundle.js`). Such bundles cannot
-`fetch()` `http://` URLs. Other bundle URLs (`http://` dev servers, absolute
-paths) use JSUI's built-in loader.
+(`res://ui/dist/bundle.js`, not `res://bundle.js`). Other bundle URLs
+(`http://` dev servers, absolute paths) use JSUI's built-in loader.
+
+`fetch()` to `http://` and `https://` (from any bundle) goes through Godot's
+`HTTPClient` (`use_engine_http`, on by default, `src/jsui_http.h`): Godot's
+TLS and certificate bundle, and the browser's fetch on Godot web. Requests
+are driven from the view's process step without blocking; the body streams
+to `res.body` as it arrives; method, headers, body, `redirect` (follow, up
+to 20 hops, `error`, `manual`), the request's timeout (plus 30 s to the
+headers and 30 s between body chunks, as the built-in loader) and
+`AbortController` all apply. With `use_engine_http` off, network URLs use
+JSUI's built-in loader instead (the OS's HTTP stack: NSURLSession on Apple).
 
 When exporting, add the bundle folder to the preset's non-resource filter
 (Export → Resources → "Filters to export non-resource files", e.g.

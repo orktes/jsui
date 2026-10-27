@@ -2,6 +2,7 @@
 // fonts, watchdog) and the resource loader (files, data:, http, dev reload).
 #include <cmath>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <string>
@@ -466,7 +467,8 @@ TEST(host_fetch_http) {
     fetch(B + '/echo', {method: 'PUT', body: new Uint8Array([104, 105])}).then(r => r.text()).then(t => post('put', t));
     fetch(B + '/missing').then(r => post('missing', [r.status, r.ok]));
     fetch('http://127.0.0.1:1/x').catch(e => post('refused', e instanceof TypeError ? 'TypeError' : String(e)));
-    fetch('https://127.0.0.1:1/').catch(e => post('https', e.message));
+    // https:// to a closed port: refused, whether or not this platform has TLS.
+    fetch('https://127.0.0.1:1/').catch(e => post('https', e instanceof TypeError ? 'TypeError' : String(e)));
     const ac = new AbortController();
     fetch(B + '/slow', {signal: ac.signal}).catch(e => post('aborted', e.name));
     setTimeout(() => ac.abort(), 50);
@@ -484,8 +486,45 @@ TEST(host_fetch_http) {
   CHECK_EQ(msg("put"), std::string("PUT application/octet-stream  hi"));
   CHECK_EQ(msg("missing"), std::string("[404,false]"));
   CHECK_EQ(msg("refused"), std::string("TypeError"));
-  CHECK(msg("https").find("fetch failed") != std::string::npos);
+  CHECK_EQ(msg("https"), std::string("TypeError"));
   CHECK_EQ(msg("aborted"), std::string("AbortError"));
+  for (auto& e : h.errors) std::fprintf(stderr, "    unexpected error: %s\n", e.c_str());
+  CHECK(h.errors.empty());
+}
+
+// fetch() over https:// through the built-in loader, read whole and as a
+// stream (needs the internet: SKIPs when https://example.com is unreachable).
+TEST(host_fetch_https) {
+  const char* env = std::getenv("JSUI_TEST_NETWORK");
+  net::HttpRequest probe;
+  probe.url = "https://example.com/";
+  probe.timeoutMs = 10000;
+  if ((env && std::strcmp(env, "0") == 0) || net::fetchUrl(probe).status != 200) {
+    std::printf("  SKIP host_fetch_https: no https:// to example.com\n");
+    return;
+  }
+  Host h;
+  h.load(R"(
+    const post = (name, v) => __jsui_native.postMessage(name, v);
+    fetch('https://example.com/').then(r => r.text().then(t => post('text', [r.status, r.ok, r.url, t.includes('Example Domain')])));
+    fetch('https://example.com/').then(async r => {
+      const reader = r.body.getReader();
+      let n = 0, chunks = 0, s = '';
+      const dec = new TextDecoder();
+      for (;;) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        n += value.byteLength; chunks++; s += dec.decode(value, {stream: true});
+      }
+      post('stream', [n > 0, chunks > 0, s.includes('Example Domain')]);
+    });
+    fetch('https://self-signed.badssl.com/').catch(e => post('badcert', e instanceof TypeError ? 'TypeError' : String(e)));
+  )");
+  CHECK(h.until([&] { return h.message("text") && h.message("stream") && h.message("badcert"); }, 20000));
+  auto msg = [&](const char* n) { return h.message(n) ? *h.message(n) : std::string("<none>"); };
+  CHECK_EQ(msg("text"), std::string(R"([200,true,"https://example.com/",true])"));
+  CHECK_EQ(msg("stream"), std::string("[true,true,true]"));
+  CHECK_EQ(msg("badcert"), std::string("TypeError"));
   for (auto& e : h.errors) std::fprintf(stderr, "    unexpected error: %s\n", e.c_str());
   CHECK(h.errors.empty());
 }

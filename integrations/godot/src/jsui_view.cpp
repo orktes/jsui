@@ -212,6 +212,8 @@ void JsuiView::_bind_methods() {
   ClassDB::bind_method(D_METHOD("set_fixed_fps", "fps"), &JsuiView::set_fixed_fps);
   ClassDB::bind_method(D_METHOD("get_fixed_fps"), &JsuiView::get_fixed_fps);
   ClassDB::bind_method(D_METHOD("get_root_tag"), &JsuiView::get_root_tag);
+  ClassDB::bind_method(D_METHOD("set_use_engine_http", "enabled"), &JsuiView::set_use_engine_http);
+  ClassDB::bind_method(D_METHOD("get_use_engine_http"), &JsuiView::get_use_engine_http);
   ClassDB::bind_method(D_METHOD("set_audio_enabled", "enabled"), &JsuiView::set_audio_enabled);
   ClassDB::bind_method(D_METHOD("get_audio_enabled"), &JsuiView::get_audio_enabled);
   ClassDB::bind_method(D_METHOD("set_audio_bus", "bus"), &JsuiView::set_audio_bus);
@@ -300,6 +302,7 @@ void JsuiView::_bind_methods() {
                "set_fonts", "get_fonts");
   ADD_PROPERTY(PropertyInfo(Variant::INT, "fixed_fps", PROPERTY_HINT_RANGE, "0,240"), "set_fixed_fps",
                "get_fixed_fps");
+  ADD_PROPERTY(PropertyInfo(Variant::BOOL, "use_engine_http"), "set_use_engine_http", "get_use_engine_http");
   ADD_GROUP("Audio", "audio_");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "audio_enabled"), "set_audio_enabled", "get_audio_enabled");
   ADD_PROPERTY(PropertyInfo(Variant::STRING, "audio_bus"), "set_audio_bus", "get_audio_bus");
@@ -605,10 +608,13 @@ void JsuiView::start() {
   // res:// and user:// live in Godot's virtual file system (and in .pck
   // files once exported), so those bundles load through FileAccess. Other
   // URLs (http:// dev servers, absolute file paths) use the built-in loader.
-  if (isGodotPath(bundle_url_)) {
-    cfg.load = &JsuiView::onLoadAny;
-    cfg.load_user = this;
-  }
+  // http:// and https:// go through Godot's HTTPClient (use_engine_http).
+  godot_bundle_ = isGodotPath(bundle_url_);
+  engine_http_ = use_engine_http_;
+  if (!http_) http_ = std::make_unique<ViewHttp>();
+  cfg.on_request = &JsuiView::onRequest;
+  cfg.on_request_cancel = &JsuiView::onRequestCancel;
+  cfg.request_user = this;
   // The UI's sounds play through Godot's audio (jsui_audio.h).
   if (!audio_) {
     audio_ = std::make_unique<ViewAudio>(*this);
@@ -622,6 +628,7 @@ void JsuiView::start() {
     return;
   }
   audio_->attach(rt_.unsynced());
+  http_->attach(rt_.unsynced());
   // The UI thread needs JS on a thread of its own (jsui_record_gpu_frame).
   ui_mode_ = jsui_js_thread(rt_.unsynced()) == JSUI_JS_THREAD_OFF ? UI_THREAD_OFF : ui_thread_;
   if (profiling_) jsui_set_profiling(rt_, 1);
@@ -679,6 +686,7 @@ void JsuiView::stop() {
   // signals / callbacks still run (below), so the game can drop its work.
   jsui_destroy(rt);
   if (audio_) audio_->attach(nullptr);  // its voices stopped with the runtime
+  if (http_) http_->attach(nullptr);    // its requests in flight close unanswered
   held_keys_.clear();
   mouse_buttons_ = 0;
   pads_.clear();
@@ -778,15 +786,25 @@ void JsuiView::onLog(void*, JsuiLogLevel level, const char* message) {
   }
 }
 
+int JsuiView::onRequest(void* user, JsuiRuntime* rt, uint64_t id, const JsuiRequest* req) {
+  auto* self = static_cast<JsuiView*>(user);
+  String url = String::utf8(req->url).to_lower();
+  if (url.begins_with("http://") || url.begins_with("https://"))
+    return self->engine_http_ ? self->http_->request(id, req) : 1;
+  // A res:// bundle reads everything else (its files, file:// and plain
+  // paths) through FileAccess.
+  if (!self->godot_bundle_) return 1;
+  onLoadAny(self, rt, id, req->url);
+  return 0;
+}
+
+void JsuiView::onRequestCancel(void* user, JsuiRuntime*, uint64_t id) {
+  auto* self = static_cast<JsuiView*>(user);
+  if (self->http_) self->http_->cancel(id);
+}
+
 void JsuiView::onLoad(void*, JsuiRuntime* rt, uint64_t id, const char* url_c) {
   String url = String::utf8(url_c);
-  if (url.begins_with("http://") || url.begins_with("https://")) {
-    // A res:// bundle uses FileAccess for everything; fetch() to the network
-    // is not available to it (load the bundle by URL for that).
-    const char* msg = "network loads are not available to res:// bundles";
-    jsui_resource_complete(rt, id, 0, "text/plain", msg, std::strlen(msg));
-    return;
-  }
   String path = url.begins_with("file://") ? url.substr(7) : url;
   int cut = path.find("?");
   if (cut < 0) cut = path.find("#");
@@ -953,6 +971,8 @@ void JsuiView::process() {
     audio_->update(rt_);
     if (!rt_) return;
   }
+  // Network requests: connect, send, and what arrived of the answers.
+  if (http_) http_->update();
   // The tick and the paint on the UI thread (jsui_ui_thread.cpp); this
   // frame's host texture copies first.
   if (uiFrameReady()) {
