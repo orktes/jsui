@@ -80,6 +80,52 @@ async function acquire() {
 }
 let sharedValue = null;
 
+// Half-precision fragment outputs. Skia Graphite writes its fragment outputs
+// as f16 when the device has 'shader-f16' (DawnCaps), and WebKit (Safari 26,
+// macOS and iOS) rejects every render pipeline with an f16 output ("color
+// target pixel format ... is incompatible with shader output data type"), so
+// nothing draws. JSUI's own device never asks for the feature; a page's may
+// (Three.js' WebGPU renderer asks for every one). Probed once per page on the
+// first such device (a trait of the browser): where it fails, Skia's context
+// is made without seeing the feature (withoutF16).
+let f16Outputs = null;  // null: not probed yet; true / false
+let f16Probe = null;
+
+/** Null when Skia can be made on `device` now, else a promise of the probe
+ * (whether render pipelines may write f16 fragment outputs) to wait for. */
+export function probeF16Outputs(device) {
+  if (f16Outputs !== null || !device.features?.has('shader-f16')) return null;
+  f16Probe ??= (async () => {
+    let ok = false;
+    try {
+      device.pushErrorScope('validation');
+      const module = device.createShaderModule({ label: 'jsui f16 probe', code: 'enable f16;\n'
+        + '@vertex fn v() -> @builtin(position) vec4f { return vec4f(0.0); }\n'
+        + '@fragment fn f() -> @location(0) vec4h { return vec4h(0.0); }' });
+      device.createRenderPipeline({ label: 'jsui f16 probe', layout: 'auto', vertex: { module, entryPoint: 'v' },
+        fragment: { module, entryPoint: 'f', targets: [{ format: 'rgba8unorm' }] } });
+      ok = !(await device.popErrorScope());
+    } catch {}
+    f16Outputs = ok;
+    return ok;
+  })();
+  return f16Probe;
+}
+
+// Runs `fn` with `device` not reporting 'shader-f16' when the browser cannot
+// take f16 outputs (Skia reads the features while its context is made).
+function withoutF16(device, fn) {
+  if (f16Outputs !== false || !device.features?.has('shader-f16')) return fn();
+  const features = new Set(device.features);
+  features.delete('shader-f16');
+  Object.defineProperty(device, 'features', { value: features, configurable: true });
+  try {
+    return fn();
+  } finally {
+    delete device.features;
+  }
+}
+
 const externals = new WeakMap();  // GPUDevice -> JsuiWebGPU
 
 /** The page's own GPUDevice as a JsuiWebGPU (one per device). */
@@ -336,7 +382,7 @@ export class SharedWebGPU {
       // async callbacks (buffer maps, queue work done) to Skia.
       instance = M._jsui_web_wgpu_create_instance();
       const dev = M.WebGPU.importJsDevice(webgpu.device, instance);
-      gpu = M._jsui_gpu_create_webgpu(instance, dev, 0);
+      gpu = withoutF16(webgpu.device, () => M._jsui_gpu_create_webgpu(instance, dev, 0));
       M._jsui_web_wgpu_release_device(dev);  // the context holds its own reference
     } catch (e) {
       log(`WebGPU: Skia context creation threw: ${e?.message ?? e}`);

@@ -28,6 +28,15 @@
   <div id="err"></div>
   <a id="back" href="../#/examples">JSUI showcase</a>
   <script>window.jsuiModules = null;  // set by site/scripts/build.mjs</script>
+  <script>
+    // main.js not loading or never finishing (it hides the splash): said, not a blank page.
+    setTimeout(() => {
+      const err = document.getElementById('err');
+      if (document.getElementById('splash').classList.contains('gone') || err.style.display === 'block') return;
+      err.textContent = 'The example did not start (WebGPU or the page script may be stuck in this browser). Try reloading.';
+      err.style.display = 'block';
+    }, 20000);
+  </script>
   <script type="module" src="./main.js"></script>
 </body>
 </html>

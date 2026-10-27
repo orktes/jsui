@@ -20,10 +20,19 @@ const { sRGBTransferEOTF, texture, uv, vec4 } = THREE.TSL;
 // site/scripts/build.mjs).
 const modules = globalThis.jsuiModules ?? null;
 const err = document.getElementById('err');
+const splash = document.getElementById('splash');
+let failed = false;
 const fail = (msg) => {
+  if (failed) return;  // the first failure is the cause
+  failed = true;
   err.textContent = msg;
   err.style.display = 'block';
+  splash.classList.add('gone');
 };
+// Whatever goes wrong shows up here, not as a blank page: errors outside
+// main() and a lost device too (index.html covers a start that never ends).
+addEventListener('error', (e) => fail(`${e.message}`));
+addEventListener('unhandledrejection', (e) => fail(`${e.reason?.message ?? e.reason}`));
 
 const CONSOLE = { width: 640, height: 400, ratio: 2 };
 const HUD = { width: 300, height: 150, ratio: 2 };
@@ -34,6 +43,8 @@ async function main() {
   const renderer = new THREE.WebGPURenderer({ canvas, antialias: true });
   await renderer.init();
   if (!renderer.backend.isWebGPUBackend) return fail('Three.js fell back to WebGL: this example needs WebGPU.');
+  renderer.onDeviceLost = (info) => fail(`The WebGPU device was lost (${info.reason ?? 'unknown'}: ${info.message}). `
+    + 'Reload the page to start again.');
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   renderer.setSize(innerWidth, innerHeight);
   // No tone mapping: Three.js' WebGPU renderer tone-maps the whole frame in
@@ -49,6 +60,7 @@ async function main() {
   });
   window.jsui = jsui;
   jsui.on('error', fail);
+  jsui.on('devicelost', () => fail('The WebGPU device was lost. Reload the page to start again.'));
   const ui = jsui.createTextureSurface({ component: 'Console', width: CONSOLE.width, height: CONSOLE.height,
     pixelRatio: CONSOLE.ratio });
   const hud = jsui.createTextureSurface({ component: 'Hud', width: HUD.width, height: HUD.height, pixelRatio: HUD.ratio });
@@ -152,8 +164,8 @@ async function main() {
     // The half width that must fit: the console (tall) or the whole set.
     const halfW = tall ? screenW / 2 + 0.2 : 2.9;
     const tanH = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * a;
-    home.set(0, tall ? 1.85 : 1.55, Math.max(6.2, halfW / tanH));
-    lookAt.set(0, tall ? 1.8 : 1.25, 0);
+    home.set(0, tall ? 2.15 : 1.55, Math.max(6.2, halfW / tanH));
+    lookAt.set(0, tall ? 2.1 : 1.25, 0);
   };
 
   // The drone camera: the core from above, into a render target the
@@ -232,6 +244,14 @@ async function main() {
   let angle = 0, frames = 0, last = performance.now(), droneGPU = null;
   renderer.autoClear = false;
   renderer.setAnimationLoop(() => {
+    try {
+      frame();
+    } catch (e) {
+      renderer.setAnimationLoop(null);
+      fail(`${e?.message ?? e}`);
+    }
+  });
+  const frame = () => {
     clock.update();
     const dt = Math.min(clock.getDelta(), 0.1), t = clock.getElapsed();
     angle += dt * spin;
@@ -272,8 +292,8 @@ async function main() {
       frames = 0;
       last = now;
     }
-  });
-  document.getElementById('splash').classList.add('gone');
+  };
+  splash.classList.add('gone');
 }
 
 main().catch((e) => fail(`${e?.message ?? e}`));
