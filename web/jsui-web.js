@@ -206,7 +206,8 @@
  *                                // jsui.jsEngine says which one runs.
  * }} JsuiOptions */
 
-import { SharedWebGPU, WebGPURenderer, externalWebGPU, requestWebGPU, standInPipeline } from './jsui-webgpu.js';
+import { SharedWebGPU, WebGPURenderer, externalWebGPU, probeF16Outputs, requestWebGPU, standInPipeline }
+  from './jsui-webgpu.js';
 import { HostTextureSet, JsuiVideo, corsWarning, defaultOpaque, isVideoFrame, sourceSize, taintKey,
   videoFramesContextLost, watchVideoFrames } from './jsui-textures.js';
 import { JsuiAudio } from './jsui-audio.js';
@@ -483,7 +484,10 @@ function webgpuFor(opts) {
     }
     return null;
   }
-  if (opts.device) return externalWebGPU(opts.device);
+  if (opts.device) {
+    const probe = probeF16Outputs(opts.device);
+    return probe ? probe.then(() => externalWebGPU(opts.device)) : externalWebGPU(opts.device);
+  }
   return requestWebGPU({ allowSoftware: mode !== 'auto' });
 }
 
@@ -2759,6 +2763,12 @@ class JsuiHost extends CanvasView {
    * texture of the page's make a new one ('texture' event). */
   setDevice(device) {
     if (this._destroyed) return;
+    // A first device with 'shader-f16': after the probe (web/jsui-webgpu.js).
+    const probe = probeF16Outputs(device);
+    if (probe) {
+      probe.then(() => this.setDevice(device));
+      return;
+    }
     const webgpu = externalWebGPU(device);
     this._pageWebGPU = webgpu;
     this._deviceLost = null;

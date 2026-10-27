@@ -20,10 +20,19 @@ const { sRGBTransferEOTF, texture, uv, vec4 } = THREE.TSL;
 // site/scripts/build.mjs).
 const modules = globalThis.jsuiModules ?? null;
 const err = document.getElementById('err');
+const splash = document.getElementById('splash');
+let failed = false;
 const fail = (msg) => {
+  if (failed) return;  // the first failure is the cause
+  failed = true;
   err.textContent = msg;
   err.style.display = 'block';
+  splash.classList.add('gone');
 };
+// Whatever goes wrong shows up here, not as a blank page: errors outside
+// main() and a lost device too (index.html covers a start that never ends).
+addEventListener('error', (e) => fail(`${e.message}`));
+addEventListener('unhandledrejection', (e) => fail(`${e.reason?.message ?? e.reason}`));
 
 const CONSOLE = { width: 640, height: 400, ratio: 2 };
 const HUD = { width: 300, height: 150, ratio: 2 };
@@ -34,6 +43,8 @@ async function main() {
   const renderer = new THREE.WebGPURenderer({ canvas, antialias: true });
   await renderer.init();
   if (!renderer.backend.isWebGPUBackend) return fail('Three.js fell back to WebGL: this example needs WebGPU.');
+  renderer.onDeviceLost = (info) => fail(`The WebGPU device was lost (${info.reason ?? 'unknown'}: ${info.message}). `
+    + 'Reload the page to start again.');
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   renderer.setSize(innerWidth, innerHeight);
   // No tone mapping: Three.js' WebGPU renderer tone-maps the whole frame in
@@ -49,6 +60,7 @@ async function main() {
   });
   window.jsui = jsui;
   jsui.on('error', fail);
+  jsui.on('devicelost', () => fail('The WebGPU device was lost. Reload the page to start again.'));
   const ui = jsui.createTextureSurface({ component: 'Console', width: CONSOLE.width, height: CONSOLE.height,
     pixelRatio: CONSOLE.ratio });
   const hud = jsui.createTextureSurface({ component: 'Hud', width: HUD.width, height: HUD.height, pixelRatio: HUD.ratio });
@@ -73,8 +85,10 @@ async function main() {
   scene.background = new THREE.Color('#03050b');
   scene.fog = new THREE.Fog('#03050b', 9, 22);
   const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 60);
-  camera.position.set(0, 1.55, 6.2);
+  // Where the camera rests and looks (layout() sets them per screen shape).
+  const home = new THREE.Vector3(0, 1.55, 6.2);
   const lookAt = new THREE.Vector3(0, 1.25, 0);
+  camera.position.copy(home);
 
   scene.add(new THREE.HemisphereLight('#4f78c8', '#0a0d16', 0.5));
   const key = new THREE.PointLight('#4fd1ff', 40, 12, 1.6);
@@ -107,7 +121,6 @@ async function main() {
   scene.add(ring);
   const plinth = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.7, 0.4, 48),
     new THREE.MeshStandardNodeMaterial({ color: '#111a2c', roughness: 0.4, metalness: 0.85 }));
-  plinth.position.set(core.position.x, 0.2, 0);
   scene.add(plinth);
 
   // The console: a tilted screen showing the 'Console' surface's texture.
@@ -133,6 +146,28 @@ async function main() {
   scene.add(screenLight);
   ui.on('texture', (t) => { screenUI.node.value = uiTexture(t); });  // a new size: a new texture
 
+  // Wide screens: the core on the left, the console turned toward it on the
+  // right. Tall ones (phones in portrait): the core above the console, which
+  // faces the camera, and the camera backs off until the console fits.
+  const layout = () => {
+    const a = innerWidth / innerHeight;
+    camera.aspect = a;
+    camera.updateProjectionMatrix();
+    const tall = a < 1;
+    core.position.set(tall ? 0 : -1.55, tall ? 2.75 : 1.35, tall ? -0.6 : 0);
+    stand.position.set(tall ? 0 : 1.25, tall ? 0.95 : 1.3, tall ? 0.4 : 0.2);
+    stand.rotation.set(tall ? -0.08 : 0, tall ? 0 : -0.38, 0);
+    screenLight.position.set(stand.position.x - 0.15, stand.position.y, stand.position.z + 0.8);
+    key.position.set(core.position.x - 0.05, core.position.y + 0.85, core.position.z + 1.2);
+    ring.position.copy(core.position);
+    plinth.position.set(core.position.x, 0.2, core.position.z);
+    // The half width that must fit: the console (tall) or the whole set.
+    const halfW = tall ? screenW / 2 + 0.2 : 2.9;
+    const tanH = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * a;
+    home.set(0, tall ? 2.15 : 1.55, Math.max(6.2, halfW / tanH));
+    lookAt.set(0, tall ? 2.1 : 1.25, 0);
+  };
+
   // The drone camera: the core from above, into a render target the
   // console shows (<HostTexture name="drone-cam">).
   const drone = new THREE.PerspectiveCamera(50, 16 / 10, 0.1, 30);
@@ -151,6 +186,8 @@ async function main() {
   overlay.add(hudQuad);
   const placeHud = () => hudQuad.position.set(20 + HUD.width / 2, innerHeight - 20 - HUD.height / 2, 0);
   placeHud();
+  layout();
+  camera.position.copy(home);
 
   // ------------------------------------------------------------ UI <-> game
   let spin = 1, pulse = true;
@@ -196,8 +233,7 @@ async function main() {
 
   addEventListener('resize', () => {
     renderer.setSize(innerWidth, innerHeight);
-    camera.aspect = innerWidth / innerHeight;
-    camera.updateProjectionMatrix();
+    layout();
     Object.assign(overlayCam, { right: innerWidth, top: innerHeight });
     overlayCam.updateProjectionMatrix();
     placeHud();
@@ -208,6 +244,14 @@ async function main() {
   let angle = 0, frames = 0, last = performance.now(), droneGPU = null;
   renderer.autoClear = false;
   renderer.setAnimationLoop(() => {
+    try {
+      frame();
+    } catch (e) {
+      renderer.setAnimationLoop(null);
+      fail(`${e?.message ?? e}`);
+    }
+  });
+  const frame = () => {
     clock.update();
     const dt = Math.min(clock.getDelta(), 0.1), t = clock.getElapsed();
     angle += dt * spin;
@@ -216,12 +260,14 @@ async function main() {
     const p = pulse ? 0.6 + Math.sin(t * 3) * 0.3 : 0.6;
     coreMat.emissiveIntensity = p;
     key.intensity = 30 + p * 20;
-    camera.position.x += (lean.x * 1.2 - camera.position.x) * 0.04;
-    camera.position.y += (1.55 - lean.y * 0.6 - camera.position.y) * 0.04;
+    camera.position.x += (home.x + lean.x * 1.2 - camera.position.x) * 0.04;
+    camera.position.y += (home.y - lean.y * 0.6 - camera.position.y) * 0.04;
+    camera.position.z += (home.z - camera.position.z) * 0.04;
     camera.lookAt(lookAt);
 
     // The drone cam first: the console samples its texture this frame.
-    drone.position.set(core.position.x + Math.cos(t * 0.4) * 2.4, 2.6, Math.sin(t * 0.4) * 2.4);
+    drone.position.set(core.position.x + Math.cos(t * 0.4) * 2.4, core.position.y + 1.25,
+      core.position.z + Math.sin(t * 0.4) * 2.4);
     drone.lookAt(core.position);
     renderer.setRenderTarget(droneTarget);
     renderer.clear();
@@ -246,8 +292,8 @@ async function main() {
       frames = 0;
       last = now;
     }
-  });
-  document.getElementById('splash').classList.add('gone');
+  };
+  splash.classList.add('gone');
 }
 
 main().catch((e) => fail(`${e?.message ?? e}`));
