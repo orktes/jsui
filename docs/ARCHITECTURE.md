@@ -233,9 +233,9 @@ target. Which one a host uses:
 
 | Backend | Skia | C API | CMake option | Used by |
 | --- | --- | --- | --- | --- |
-| OpenGL / GLES / WebGL | Ganesh | `jsui_gpu_create_gl`, `jsui_render_gl[_target]` | `JSUI_GPU` | jsui-viewer (off macOS, or `--gl`), raylib, sokol off macOS, SDL3 on GL, Rust / Go examples, Android (GLES 3), the browser's WebGL fallback |
+| OpenGL / GLES / WebGL | Ganesh | `jsui_gpu_create_gl`, `jsui_render_gl[_target]` | `JSUI_GPU` | jsui-viewer (off macOS, or `--gl`), raylib, sokol off macOS, SDL3 on GL, Rust / Go examples, Android without usable Vulkan (GLES 3), the browser's WebGL fallback |
 | Browser WebGPU | Graphite (Dawn backend on Emdawnwebgpu) | `jsui_gpu_create_webgpu`, `jsui_render_webgpu[_target]` | `JSUI_WEBGPU` | the web host's first choice |
-| Vulkan | Graphite | `jsui_gpu_create_vulkan`, `jsui_render_gpu_target` | `JSUI_VULKAN` | Godot, Unity, Unreal and SDL3 on Linux, and on Windows when the engine runs on Vulkan |
+| Vulkan | Graphite | `jsui_gpu_create_vulkan`, `jsui_render_gpu_target` | `JSUI_VULKAN` | Godot, Unity, Unreal and SDL3 on Linux, and on Windows when the engine runs on Vulkan; Android |
 | Metal (desktop) | Graphite | `jsui_gpu_create_metal`, `jsui_render_gpu_target` | `JSUI_GRAPHITE_METAL` | Godot, Unity, Unreal, SDL3, sokol and jsui-viewer on macOS |
 | Metal (iOS) | Ganesh | `jsui_metal_create`, `jsui_render_metal` | `JSUI_METAL` | the iOS example |
 | Direct3D 12 / 11 | Ganesh on D3D12 | `jsui_gpu_create_d3d12` / `_d3d11`, `jsui_render_gpu_target` | `JSUI_D3D` | Godot, Unity and Unreal on Windows |
@@ -480,7 +480,9 @@ used to process Dawn events).
   or overlapping draws) is rendered into a texture of its own once and
   then drawn again at each frame's opacity, instead of being rendered
   offscreen every time it is painted (`LayerCache` in `painter.h`, owned by
-  the WebGPU context and set with `LayerCacheScope` around a frame). The
+  the GPU context and set with `LayerCacheScope` around a frame:
+  `GpuLayerCaches` / `GpuLayerFrame` in `gpu_layers.h`, which the Graphite
+  backends share, browser WebGPU and native Vulkan / Metal / Dawn alike). The
   texture is reused while the subtree paints the same relative to the node:
   `updateRecords` gives each node a stamp that changes whenever anything
   under it changes, but not when only the node's own opacity, transform or
@@ -494,8 +496,17 @@ used to process Dawn events).
   progress bar inside a fading panel) takes a plain layer clipped to the
   damage, as before, with its static parts drawn from raster textures (see
   Raster cache). Each surface drawing through the context has its own
-  cache; textures are freed after 120 of its frames unused or over 96 MB
-  (LRU); `JSUI_WEBGPU_NO_LAYER_CACHE` turns it off. On
+  cache (dropped after 600 frames of the context without one of its own);
+  textures are freed after 120 of its frames unused or over the budget
+  (LRU): 3/8 of the context's (`jsui_gpu_purge`'s `cache_bytes`, 96 of
+  the default 256 MB), shared by its surfaces. `jsui_gpu_purge`, a lost
+  device and the context's destruction free them all. On native Graphite
+  the cache works the same for host-owned targets, retained
+  (`JSUI_GPU_INCREMENTAL`, damage rects over the static backdrop) or not;
+  a frame recorded off the context's thread (`jsui_record_gpu_frame`) is
+  painted without it. `JSUI_LAYER_CACHE=off` in the environment turns it
+  off on every GPU context (for A/B runs; `setGpuLayerCaches(false)` in
+  tests), `JSUI_WEBGPU_NO_LAYER_CACHE` per WebGPU render. On
   `interactions.jsx` the entrance (staggered menu buttons and panels fading
   and sliding in) went from ~5.9 render passes and ~140 draws per frame to
   ~3.4 and ~90 at 1280x720; what is left are two panels whose content
@@ -540,6 +551,39 @@ used to process Dawn events).
   `JSUI_WEBGPU_NO_RASTER_CACHE` turns it off; `webgpu: raster cache` in the
   browser tests compares it with direct painting, in steady frames and with
   the list scrolled at 2x.
+* **Motion layers.** Both of the above reuse a texture only while the
+  node's device matrix differs from the one it was rendered at by a
+  translation: a scale or rotation animation (a button springing, a card
+  popping in) rendered a cached layer into a new texture every frame, and
+  a raster-cached subtree was painted node by node while it scaled. Like a
+  compositor animating a layer, a cached layer or raster-cached subtree
+  that keeps scaling or rotating (it moved in this frame and the one
+  before, `NodeRecord::changing`, so not a one-off jump), while nothing in
+  it changes, is drawn from the texture it was last rendered into, mapped
+  by the change of matrix since, with bilinear sampling (`motionTransform`
+  in `painter.cpp`). "Nothing changes" is a second stamp
+  (`NodeRecord::motionStamp`) that follows the layout instead of the
+  pixel-snapped boxes, which snap differently at every scale. The texture
+  must hold the whole layer (not cut at the canvas edge), and the change
+  must scale by 1/2 to 5/4. Beyond that a fresh texture is rendered at the
+  current scale, so a shrinking layer does not alias and a growing one
+  blurs at most by a quarter: a 0.3 to 1 pop-in renders 5 textures in 24
+  frames. Text is resampled with the rest, soft by that much while the
+  motion lasts; like a sub-pixel move (`layerInexact`), the node is
+  repainted exactly the frame after it comes to rest.
+  `PaintStats::motionDraws` counts the draws; `setMotionLayers(false)` or
+  `JSUI_MOTION_LAYERS=off` turns it off. `tests/native/motion_layers_test.cpp`
+  runs the LayerCache on a raster canvas (it works there too; only GPU
+  contexts install one; `vulkan_graphite_layer_cache_matches_cpu` and
+  `metal_graphite_layer_cache_matches_cpu` run it on the GPU). At rest the frame equals, to the bit, what the same
+  scene paints when it was at rest there all along. A texture rendered
+  while nodes in it were in motion (shadows from the phase-0 mask, scaling
+  text, see PaintMotion) is marked approximate and never drawn once they
+  rest. Before, a cached opacity layer that scaled kept such a texture at
+  rest, a level off on ~1200 pixels. While a 140x72 card
+  springs from 1 to 0.86 to 1.08, at most ~85 pixels (edges and glyphs) are
+  over 48 levels off a direct paint. It paints 52-56 nodes in 20 frames
+  instead of 120, with 1 texture render instead of 18 for an opacity layer.
 * **Static backdrop.** Each damage rect is cleared and repainted from the
   root, so it also repaints whatever lies under everything: on
   `interactions.jsx` the background colour, the full-screen image and the
@@ -1909,8 +1953,18 @@ was `preventDefault()`-ed (or declared so, see "Input routing details").
 * **Scrolling** (`src/input/scroll.cpp`; geometry in `src/core/scroll.*`).
   All animations are analytic curves on the runtime clock, advanced in
   `jsui_tick`.
-  * Touch drag: `scrollbegindrag`, `scroll`…, `scrollenddrag` (release
-    velocity over the last 100 ms; a finger that rested has none), then a
+  * Touch drag: `scrollbegindrag`, `scroll`…, `scrollenddrag`. The content
+    starts moving from where the drag was recognized (no jump by the
+    slop). With host event times (`jsui_set_event_time`) the content
+    follows the finger resampled at the tick's time (interpolated between
+    the touch samples a few ms back, by as much as the newest sample's age
+    at recent frames, 5-25 ms, drifting slowly; predicted at most 8 ms past
+    the newest), so touch samples that don't line up with frames (120 Hz
+    digitizer, 60 Hz rAF, a worker getting events late) still give even
+    per-frame motion; without them it moves as events arrive. Release
+    velocity: least-squares quadratic over the last 100 ms, its slope at
+    the newest sample (a flick that speeds up keeps its final speed); a
+    finger that rested 50 ms has none. Then a
     fling (`momentumscrollbegin`, `scroll`…, `momentumscrollend`) decaying
     by `decelerationRate` per ms (`'normal'` 0.998, `'fast'` 0.99, or a
     number) until 0.02 px/ms or the content edge (no overscroll). A touch on
@@ -2779,7 +2833,7 @@ walks through the pattern.
 | Unity 6 | [integrations/unity](../integrations/unity/README.md) (`com.orktes.jsui`) | Graphite Metal / Vulkan, Ganesh D3D11 / D3D12 |
 | Unreal Engine 5 | [integrations/unreal](../integrations/unreal/README.md) (`UJsuiWidget` / `SJsuiView`) | Graphite Metal / Vulkan, Ganesh D3D12 / D3D11 |
 | raylib, SDL3, sokol | [integrations/raylib](../integrations/raylib/README.md), [sdl3](../integrations/sdl3/README.md), [sokol](../integrations/sokol/README.md) | Ganesh GL (SDL3: Graphite on Metal / Vulkan; sokol: Graphite on Metal on macOS) |
-| Android | [integrations/android](../integrations/android/README.md) (NDK NativeActivity) | Ganesh on GLES 3 |
+| Android | [integrations/android](../integrations/android/README.md) (NDK NativeActivity) | Graphite on Vulkan, Ganesh on GLES 3 as the fallback |
 | iOS | [integrations/ios](../integrations/ios/README.md) (UIKit) | Ganesh on Metal |
 | Rust, Go | [bindings/](../bindings/README.md) over `libjsui` | Ganesh GL (GLFW window) |
 
@@ -3222,6 +3276,51 @@ the expensive per-pixel work is done once:
   (dashed or dotted edges, outlines over 1024 device px): it draws solid
   rrects analytically and, patched, applies a whole-pixel damage rect as a
   scissor (see WebGPU).
+* **Occlusion.** What a later opaque node covers is not painted
+  (`Occlusion`). `updateRecords` keeps in each record the 4 largest opaque
+  rects of its subtree (`OccCandidate`): the device pixels that a node with
+  a solid background colour at full alpha, opacity 1, no blend mode, filter
+  or content shader (its own or an ancestor's: a parent with any of them
+  drops its children's) and an axis-aligned device matrix (scale,
+  translation, quarter turns) is sure to cover, its border box inside the
+  rounded corners' arcs, cut by the clips in the subtree (inside their
+  rounded corners too), rounded inwards to whole pixels. Only large ones
+  count (at least 65536 device pixels, or an eighth of a smaller canvas;
+  `tMinOccluderArea`): a small opaque button or badge cannot save more
+  than the checks it costs every node painted before it, so screens made of
+  them pay nothing. One that a later one contains is dropped, and one with
+  nothing painted before it overlapping it (a screen's own opaque
+  background) is marked so and never used. Records keep a list only when
+  they have one (`OccList`), and a node works out its own rect only when
+  its background is opaque and large enough, its children's only when one
+  has some. Unchanged subtrees keep theirs with their records, so it costs
+  nothing beyond the nodes the update walks anyway, and the root's list is
+  the frame's. A paint (each damage rect's pass) takes those of the root's
+  that reach its damage and are at least a tenth of its area; with none it
+  does no per-node work (`PaintStats::occluders`), and once all are reached
+  it stops checking. Walking in paint order it marks
+  each one reached when it gets to it or skips the subtree holding it (culled,
+  covered, drawn from a texture, in the static backdrop), and `paintNode`
+  skips a subtree whose `subtree` bounds lie inside one not reached and not
+  inside the subtree, or only a node's own drawing (background, borders,
+  shadows, text, image) when its `own` bounds lie inside one not reached;
+  covered pixels are painted over anyway, so the frame is the same, and a
+  modal card or a full-screen menu over a live HUD records nothing below
+  it. Not culled: what is inside a filter or content-shader layer (it
+  spreads pixels past the cover; the layer node itself is culled whole, its
+  bounds include the spread), and nothing while the textures of the
+  LayerCache (opacity layers, raster-cached subtrees, the static backdrop)
+  are rendered, since they are drawn again under other covers; an occluder
+  inside a raster-cached subtree that moves (drawn at the nearest whole
+  pixel) is not used. A paint after a change that `updateDamage` has not
+  seen (the root is marked), or on a canvas that maps the document
+  elsewhere, culls nothing. The damage is computed as before (covered nodes
+  keep their records), so a cover moving away repaints what was under it.
+  `PaintStats::nodesOccluded` counts the skips; `setOcclusionCulling(false)`
+  or `JSUI_OCCLUSION=off` paints everything, for A/B runs
+  (`tests/native/occlusion_test.cpp` compares the two to the bit). Nothing
+  in the painter reads what was painted below it (no backdrop filters);
+  such an effect would have to end the occluders' reach at itself.
 * **Scroll blit.** When a ScrollView's content only scrolled by whole device
   pixels over a uniform backdrop, the CPU path moves the viewport's pixels
   and repaints only what the scroll exposed, what is painted above the
@@ -3270,14 +3369,15 @@ the expensive per-pixel work is done once:
   fill and one outer shadow (the shadow is then not drawn under the box), or
   a childless box that only draws a solid border ring of one colour. A
   layer at zero opacity is skipped. On GPU backends each layer is an
-  offscreen pass, per damage rect, every time it is painted; on WebGPU the
-  layer's texture is cached and composited instead while its subtree is
-  unchanged (`LayerCache`, see WebGPU: Composited layers).
+  offscreen pass, per damage rect, every time it is painted; on Graphite
+  (WebGPU, Vulkan, Metal, Dawn) the layer's texture is cached and
+  composited instead while its subtree is unchanged (`LayerCache`, see
+  WebGPU: Composited layers).
 * **Text.** Paragraphs keep one layout: painting and the painter's overflow
   bounds lay out at the same content width.
 
-`PaintStats` (`lastPaintStats()`) reports per paint the nodes painted and
-culled, the pixels and rects repainted, sprite draws and renders, shadow
+`PaintStats` (`lastPaintStats()`) reports per paint the nodes painted,
+culled and occluded, the pixels and rects repainted, sprite draws and renders, shadow
 mask draws and renders (blurs), blitted pixels and, with
 `setPaintCounting()`, the canvas draw calls, text / image draws, layers and
 clips. `tests/native/render_test.cpp` and `gpu_test.cpp` assert on these
@@ -3395,21 +3495,39 @@ a `JsuiLoadFn`). An embedder loader only sees the URL (GET semantics).
 `jsui_pending_loads()` lets headless hosts wait for in-flight loads.
 
 Images decode in `ImageCache` (`src/render/image_cache.*`). The codec reads
-the header first, and each tick has an inline decode budget by pixel count
-(`inlineBudgetPixels`, 256k px, about 1 ms at the ~3.5 ns/px measured on an
-M-series Mac): images decode on the runtime thread while it lasts, where the
-hand-over would only cost a frame of pop-in, and the rest go to a pool of 1-2
-decode threads (a quarter of the cores, started on the first such image). So
-a full-screen background (larger than the budget on its own) or a screen of
-card art (31 images, 6.3 ms on one cold frame of the showcase's inventory
-before) never costs a frame more than about the budget. A pool image's
+the header first, and each tick has an inline decode budget of 1 ms of
+measured decode time (`inlineBudgetUs`): an image decodes on the runtime
+thread if its estimated cost (pixels times `decodeNsPerPixel`, starting at
+the ~17 ns/px measured for PNG / JPEG card art on an M-series Mac and
+learned from the inline decodes since) still fits, where the hand-over would
+only cost a frame of pop-in, and the time it took is spent. The rest go to a
+pool of 1-2 decode threads (a quarter of the cores, started on the first
+such image). So a full-screen background (over the budget on its own) or a
+screen of card art (31 images, 6.3 ms on one cold frame of the showcase's
+inventory at first, still 4.3-4.6 ms with a 256k px budget) costs a frame
+about 1 ms of decoding. A pool image's
 entry stays `Loading` until `jsui_tick` publishes the raster image (after
 the loader's completions), then `generation` is bumped and Images sized by
-it are re-measured, as for any load. `data:` URIs follow the same rule. `jsui_pending_loads()` and `jsui_wants_frame()` count the decodes on the
-pool, so `jsui-render`, `jsui-record` and the reference tests wait for them.
-On the web everything still decodes inline (no pool in wasm yet;
-`createImageBitmap` is the planned route). `image_decodes` /
-`image_decode_us` count pool decodes on the tick that publishes them.
+it are re-measured, as for any load. `data:` URIs follow the same rule.
+`jsui_pending_loads()` and `jsui_wants_frame()` count the decodes in flight,
+so `jsui-render`, `jsui-record` and the reference tests wait for them.
+On the web the estimate starts at 60 ns/px (the codec in wasm is a few
+times slower) and the browser decodes the rest instead of a pool: the wasm glue
+(`jsui_js_image_decode` in `image_cache.cpp`, so page and worker mode alike)
+posts the bytes to one or two decode Workers made from a Blob URL, which run
+`createImageBitmap`, read the pixels back through an `OffscreenCanvas` 2D
+context and premultiply them; the runtime's thread only copies the RGBA into
+the `SkData` a raster `SkImage` wraps (`jsui_emscripten_image_begin` /
+`_end`), and the next tick publishes it like a pool decode. Without Workers
+(or a CSP that refuses blob: workers) the same runs on the runtime's thread
+between ticks, the decode itself still off it; when the browser cannot
+decode an image, Skia's codec does it at publish time; without
+`createImageBitmap` (Node: the headless CLI) images decode inline as before.
+The result is always a raster image, so the CPU raster, layout, ShaderView
+and recorded frames see it like any other; on WebGPU Graphite uploads it once
+through its image provider. `image_decodes` / `image_decode_us` count these
+decodes on the tick that publishes them (the time the pool thread or the
+browser took).
 
 ## Reference tests
 

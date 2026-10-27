@@ -503,6 +503,8 @@ int jsui_gpu_prepare_target(JsuiGpuContext* gpu, unsigned format) {
   return jsui::graphite_gpu::prepareTarget(gpu, format);
 }
 
+void jsui_set_cache_dir(const char* dir) { jsui::pipeline_cache::setCacheDir(dir ? dir : ""); }
+
 int jsui_gpu_set_pipeline_cache(JsuiGpuContext* gpu, const char* path) {
   if (gpu && gpu->shaders) return gpu->shaders->setFile(path ? path : "");
   if (!gpu || !gpu->pipelines) return -1;

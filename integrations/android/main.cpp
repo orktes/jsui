@@ -2,17 +2,25 @@
 //
 // A NativeActivity (android_native_app_glue, no Java). Frames are paced by
 // AChoreographer at display rate: every vsync ticks the runtime and, when it
-// has something new, renders with Skia Ganesh on GLES straight into the EGL
-// window surface (jsui_render_gl_target, default framebuffer) and swaps.
-// Without a usable EGL / GLES 3 context, or with `--es jsui_renderer cpu`,
-// the CPU rasteriser paints into the window's buffer (ANativeWindow_lock).
+// has something new, renders it:
+//   * Skia Graphite on Vulkan (default): into a retained image of the host's
+//     own (only the damage is repainted, jsui_render_gpu_target with
+//     JSUI_GPU_INCREMENTAL), which is copied into the acquired swapchain
+//     image and presented. Pipelines and the driver's pipeline cache are
+//     kept in the app's cache directory (jsui_set_cache_dir).
+//   * Skia Ganesh on GLES 3 when Vulkan is missing or anything in its setup
+//     fails (or `--es jsui_renderer gl`): straight into the EGL window
+//     surface (jsui_render_gl_target, default framebuffer), then a swap.
+//   * Without a usable EGL / GLES 3 context either, or with
+//     `--es jsui_renderer cpu`, the CPU rasteriser paints into the window's
+//     buffer (ANativeWindow_lock).
 // Touches (with historical samples and timestamps for gesture velocities),
 // hardware keys and gamepads (W3C standard mapping) are forwarded; the
 // system bar / display cutout insets are published as jsui.safeAreaInsets.
 //
 // Intent extras (adb shell am start -n com.orktes.jsui.demo/android.app.NativeActivity ...):
 //   --es jsui_url http://10.0.2.2:5173/bundle.js   load from `jsui dev` (dev mode: live reload)
-//   --es jsui_renderer cpu                          force the CPU path
+//   --es jsui_renderer gl|cpu                       force Ganesh GLES / the CPU path (default: vulkan)
 //   --es jsui_js_thread off                         run JS on the frame thread (default: on, its own
 //                                                   thread as in React Native; or lockstep)
 // Without jsui_url the app loads ui/bundle.js from its APK assets.
@@ -20,8 +28,11 @@
 // frames never wait for it. They are scheduled every vsync anyway, so no
 // on_js_ready wake-up is needed.
 
+#define VK_USE_PLATFORM_ANDROID_KHR
+#define VK_NO_PROTOTYPES
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
+#include <vulkan/vulkan.h>
 #include <android/api-level.h>
 #include <android/asset_manager.h>
 #include <android/choreographer.h>
@@ -33,13 +44,16 @@
 #include <jni.h>
 #include <time.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "jsui/jsui.h"
+#include "present_spv.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "jsui", __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, "jsui", __VA_ARGS__)
@@ -148,12 +162,91 @@ struct PadState {
   float hatX = 0, hatY = 0, l2 = 0, r2 = 0;
 };
 
+
+// The Vulkan device and window swapchain (Graphite). Entry points come from
+// libvulkan.so at run time, so the app also starts where there is none.
+struct Vk {
+  void* lib = nullptr;
+  PFN_vkGetInstanceProcAddr getInstanceProcAddr = nullptr;
+#define JSUI_VK_FNS(X)                                                                                          \
+  X(vkDestroyInstance) X(vkEnumeratePhysicalDevices) X(vkGetPhysicalDeviceProperties)                         \
+  X(vkGetPhysicalDeviceQueueFamilyProperties) X(vkGetPhysicalDeviceFeatures2) X(vkGetPhysicalDeviceMemoryProperties) \
+  X(vkCreateDevice) X(vkGetDeviceProcAddr) X(vkCreateAndroidSurfaceKHR) X(vkDestroySurfaceKHR)                \
+  X(vkGetPhysicalDeviceSurfaceSupportKHR) X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR)                        \
+  X(vkGetPhysicalDeviceSurfaceFormatsKHR)
+#define JSUI_VK_DEVICE_FNS(X)                                                                                   \
+  X(vkDestroyDevice) X(vkGetDeviceQueue) X(vkDeviceWaitIdle) X(vkCreateSwapchainKHR) X(vkDestroySwapchainKHR)  \
+  X(vkGetSwapchainImagesKHR) X(vkAcquireNextImageKHR) X(vkQueuePresentKHR) X(vkCreateImage) X(vkDestroyImage)  \
+  X(vkGetImageMemoryRequirements) X(vkAllocateMemory) X(vkFreeMemory) X(vkBindImageMemory) X(vkCreateImageView) \
+  X(vkDestroyImageView) X(vkCreateCommandPool) X(vkDestroyCommandPool) X(vkAllocateCommandBuffers)             \
+  X(vkBeginCommandBuffer) X(vkEndCommandBuffer) X(vkQueueSubmit) X(vkCreateFence) X(vkDestroyFence)            \
+  X(vkWaitForFences) X(vkResetFences) X(vkCreateSemaphore) X(vkDestroySemaphore) X(vkCreateRenderPass)         \
+  X(vkDestroyRenderPass) X(vkCreateFramebuffer) X(vkDestroyFramebuffer) X(vkCreateShaderModule)                \
+  X(vkDestroyShaderModule) X(vkCreatePipelineLayout) X(vkDestroyPipelineLayout) X(vkCreateGraphicsPipelines)   \
+  X(vkDestroyPipeline) X(vkCreateDescriptorSetLayout) X(vkDestroyDescriptorSetLayout) X(vkCreateDescriptorPool) \
+  X(vkDestroyDescriptorPool) X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) X(vkCreateSampler)          \
+  X(vkDestroySampler) X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass) X(vkCmdBindPipeline)                      \
+  X(vkCmdBindDescriptorSets) X(vkCmdPushConstants) X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdDraw)
+#define JSUI_VK_DECLARE(name) PFN_##name name = nullptr;
+  JSUI_VK_FNS(JSUI_VK_DECLARE)
+  JSUI_VK_DEVICE_FNS(JSUI_VK_DECLARE)
+#undef JSUI_VK_DECLARE
+  VkInstance instance = VK_NULL_HANDLE;
+  VkPhysicalDevice physical = VK_NULL_HANDLE;
+  VkDevice device = VK_NULL_HANDLE;
+  VkQueue queue = VK_NULL_HANDLE;
+  uint32_t family = 0;
+  uint32_t apiVersion = VK_API_VERSION_1_1;
+  VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+  std::vector<const char*> instanceExtensions, deviceExtensions;
+  VkCommandPool pool = VK_NULL_HANDLE;
+  VkCommandBuffer cmd = VK_NULL_HANDLE;
+  VkFence fence = VK_NULL_HANDLE;  // the last present pass'
+  VkSemaphore acquired = VK_NULL_HANDLE, drawn = VK_NULL_HANDLE;
+  bool inFlight = false;
+  // The present pass: the frame drawn into the swapchain image, pre-rotated
+  // and opaque (present_spv.h).
+  VkSampler sampler = VK_NULL_HANDLE;
+  VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+  VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+  VkDescriptorSet set = VK_NULL_HANDLE;
+  VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+  VkRenderPass renderPass = VK_NULL_HANDLE;  // for passFormat
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  VkFormat passFormat = VK_FORMAT_UNDEFINED;
+  // Per window.
+  VkSurfaceKHR surface = VK_NULL_HANDLE;
+  VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+  VkExtent2D extent{};
+  int rotation = 0;  // the swapchain's pre-rotation: 0, 90, 180, 270 degrees clockwise as 0..3
+  std::vector<VkImage> images;
+  std::vector<VkImageView> views;
+  std::vector<VkFramebuffer> framebuffers;
+  bool outOfDate = false, suboptimalLogged = false;
+  // The retained frame JSUI renders into (window-sized, survives swapchain
+  // changes of the same size): RGBA8, left in SHADER_READ_ONLY_OPTIMAL for
+  // the present pass.
+  VkImage frame = VK_NULL_HANDLE;
+  VkDeviceMemory frameMemory = VK_NULL_HANDLE;
+  VkImageView frameView = VK_NULL_HANDLE;
+  int frameW = 0, frameH = 0;
+  bool frameValid = false;  // holds the last frame JSUI rendered
+};
+
+enum class Renderer { Vulkan, GL, Cpu };
+
 struct Host {
   android_app* app = nullptr;
   JNIEnv* env = nullptr;
   JsuiRuntime* rt = nullptr;
+  // The Choreographer's vsync time of the frame being drawn (ms, the
+  // CLOCK_MONOTONIC of nowMs and input events): flings and resampled touch
+  // drags step evenly however late the callback runs.
+  double frameTime = 0;
   JsuiGpuContext* gpu = nullptr;
-  bool cpu = false;
+  Renderer renderer = Renderer::Vulkan;
+  bool cpu = false;  // renderer == Cpu
+  Vk vk;
   EGLDisplay display = EGL_NO_DISPLAY;
   EGLConfig config = nullptr;
   EGLContext context = EGL_NO_CONTEXT;
@@ -170,7 +263,13 @@ struct Host {
   // Frame rate, logged every few seconds while frames are drawn.
   int framesDrawn = 0;
   double fpsSince = 0;
+  double renderMs = 0;     // summed time of the frames' renders + present / swap calls
+  double renderMaxMs = 0;  // ... the longest
 };
+
+bool createVkSurface(Host& h);
+void destroyVkSurface(Vk& v);
+void destroyVulkan(Host& h);
 
 // ------------------------------------------------------------------ JNI
 
@@ -196,6 +295,27 @@ std::string intentExtra(Host& h, const char* name) {
     env->DeleteLocalRef(intent);
   }
   env->DeleteLocalRef(activityClass);
+  if (env->ExceptionCheck()) env->ExceptionClear();
+  return out;
+}
+
+// Context.getCacheDir(): where the pipeline caches and the Vulkan driver's
+// pipeline cache are kept between launches.
+std::string cacheDir(Host& h) {
+  JNIEnv* env = h.env;
+  jobject activity = h.app->activity->clazz;
+  jclass activityClass = env->GetObjectClass(activity);
+  jobject dir = env->CallObjectMethod(activity, env->GetMethodID(activityClass, "getCacheDir", "()Ljava/io/File;"));
+  std::string out;
+  if (dir && !env->ExceptionCheck()) {
+    auto path = static_cast<jstring>(
+        env->CallObjectMethod(dir, env->GetMethodID(env->GetObjectClass(dir), "getAbsolutePath", "()Ljava/lang/String;")));
+    if (path && !env->ExceptionCheck()) {
+      const char* p = env->GetStringUTFChars(path, nullptr);
+      out = p;
+      env->ReleaseStringUTFChars(path, p);
+    }
+  }
   if (env->ExceptionCheck()) env->ExceptionClear();
   return out;
 }
@@ -308,6 +428,7 @@ void destroySurface(Host& h) {
 
 void useCpu(Host& h, const char* why) {
   LOGW("%s: using the CPU renderer", why);
+  if (h.renderer == Renderer::Vulkan) destroyVulkan(h);
   if (h.gpu) {
     // The GL context may be gone already: drop GPU objects without GL calls.
     jsui_gpu_context_lost(h.gpu);
@@ -315,11 +436,27 @@ void useCpu(Host& h, const char* why) {
     h.gpu = nullptr;
   }
   destroySurface(h);
+  h.renderer = Renderer::Cpu;
   h.cpu = true;
   h.presented = false;
 }
 
+// Vulkan is missing or failed: Ganesh on GLES from now on.
+void useGl(Host& h, const char* why) {
+  LOGW("%s: using Ganesh GLES", why);
+  destroyVulkan(h);
+  h.renderer = Renderer::GL;
+  h.presented = false;
+}
+
 bool createSurface(Host& h) {
+  if (h.renderer == Renderer::Vulkan) {
+    if (createVkSurface(h)) {
+      h.presented = false;
+      return true;
+    }
+    useGl(h, "no usable Vulkan device / swapchain");
+  }
   if (h.cpu) {
     ANativeWindow_setBuffersGeometry(h.app->window, 0, 0, WINDOW_FORMAT_RGBA_8888);
     return true;
@@ -343,6 +480,574 @@ bool createSurface(Host& h) {
     LOGI("renderer: gl (%s, %s, stencil %d)", glGetString(GL_RENDERER), glGetString(GL_VERSION), h.stencilBits);
   }
   return true;
+}
+
+
+// ---------------------------------------------------------------- Vulkan
+
+constexpr VkFormat kFrameFormat = VK_FORMAT_R8G8B8A8_UNORM;
+constexpr VkImageUsageFlags kFrameUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT |
+                                          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                          VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+
+VkShaderModule shaderModule(Vk& v, const uint32_t* code, size_t bytes) {
+  VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+  ci.codeSize = bytes;
+  ci.pCode = code;
+  VkShaderModule m = VK_NULL_HANDLE;
+  v.vkCreateShaderModule(v.device, &ci, nullptr, &m);
+  return m;
+}
+
+// The instance, a device with a graphics queue, and what every frame
+// reuses. False when there is no Vulkan 1.1 or no such device (the caller
+// destroys what was made).
+bool initVulkan(Host& h) {
+  Vk& v = h.vk;
+  if (!v.lib) v.lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+  if (!v.lib) return false;
+  v.getInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(v.lib, "vkGetInstanceProcAddr"));
+  if (!v.getInstanceProcAddr) return false;
+  auto enumerateVersion = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
+      v.getInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceVersion"));
+  uint32_t loaderVersion = VK_API_VERSION_1_0;
+  if (enumerateVersion) enumerateVersion(&loaderVersion);
+  if (loaderVersion < VK_API_VERSION_1_1) return false;  // Graphite needs 1.1
+  auto createInstance =
+      reinterpret_cast<PFN_vkCreateInstance>(v.getInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance"));
+  v.instanceExtensions = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_ANDROID_SURFACE_EXTENSION_NAME};
+  VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+  appInfo.pApplicationName = "JsuiDemo";
+  appInfo.apiVersion = VK_API_VERSION_1_1;
+  VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+  ici.pApplicationInfo = &appInfo;
+  ici.enabledExtensionCount = uint32_t(v.instanceExtensions.size());
+  ici.ppEnabledExtensionNames = v.instanceExtensions.data();
+  if (!createInstance || createInstance(&ici, nullptr, &v.instance) != VK_SUCCESS) return false;
+#define JSUI_VK_LOAD(name) v.name = reinterpret_cast<PFN_##name>(v.getInstanceProcAddr(v.instance, #name));
+  JSUI_VK_FNS(JSUI_VK_LOAD)
+#undef JSUI_VK_LOAD
+
+  // The first device that has Vulkan 1.1 and a graphics queue (Android
+  // surfaces can be presented from any queue family that supports graphics).
+  uint32_t n = 0;
+  v.vkEnumeratePhysicalDevices(v.instance, &n, nullptr);
+  std::vector<VkPhysicalDevice> devices(n);
+  v.vkEnumeratePhysicalDevices(v.instance, &n, devices.data());
+  for (VkPhysicalDevice d : devices) {
+    VkPhysicalDeviceProperties props;
+    v.vkGetPhysicalDeviceProperties(d, &props);
+    if (props.apiVersion < VK_API_VERSION_1_1) continue;
+    uint32_t qn = 0;
+    v.vkGetPhysicalDeviceQueueFamilyProperties(d, &qn, nullptr);
+    std::vector<VkQueueFamilyProperties> families(qn);
+    v.vkGetPhysicalDeviceQueueFamilyProperties(d, &qn, families.data());
+    for (uint32_t i = 0; i < qn; i++) {
+      if (families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+        v.physical = d;
+        v.family = i;
+        LOGI("vulkan: %s (api %u.%u.%u, driver 0x%x)", props.deviceName, VK_API_VERSION_MAJOR(props.apiVersion),
+             VK_API_VERSION_MINOR(props.apiVersion), VK_API_VERSION_PATCH(props.apiVersion), props.driverVersion);
+        break;
+      }
+    }
+    if (v.physical) break;
+  }
+  if (!v.physical) return false;
+
+  // Every feature the device has but robust buffer access (bounds checks
+  // on every access), handed to Skia as they were enabled.
+  v.vkGetPhysicalDeviceFeatures2(v.physical, &v.features);
+  v.features.features.robustBufferAccess = VK_FALSE;
+  v.deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+  float priority = 1;
+  VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+  qci.queueFamilyIndex = v.family;
+  qci.queueCount = 1;
+  qci.pQueuePriorities = &priority;
+  VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+  dci.pNext = &v.features;
+  dci.queueCreateInfoCount = 1;
+  dci.pQueueCreateInfos = &qci;
+  dci.enabledExtensionCount = uint32_t(v.deviceExtensions.size());
+  dci.ppEnabledExtensionNames = v.deviceExtensions.data();
+  if (v.vkCreateDevice(v.physical, &dci, nullptr, &v.device) != VK_SUCCESS) return false;
+#define JSUI_VK_LOAD(name) v.name = reinterpret_cast<PFN_##name>(v.vkGetDeviceProcAddr(v.device, #name));
+  JSUI_VK_DEVICE_FNS(JSUI_VK_LOAD)
+#undef JSUI_VK_LOAD
+  v.vkGetDeviceQueue(v.device, v.family, 0, &v.queue);
+
+  VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+  pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+  pci.queueFamilyIndex = v.family;
+  VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+  VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+  if (v.vkCreateCommandPool(v.device, &pci, nullptr, &v.pool) != VK_SUCCESS) return false;
+  VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+  cai.commandPool = v.pool;
+  cai.commandBufferCount = 1;
+  cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  if (v.vkAllocateCommandBuffers(v.device, &cai, &v.cmd) != VK_SUCCESS ||
+      v.vkCreateFence(v.device, &fci, nullptr, &v.fence) != VK_SUCCESS ||
+      v.vkCreateSemaphore(v.device, &sci, nullptr, &v.acquired) != VK_SUCCESS ||
+      v.vkCreateSemaphore(v.device, &sci, nullptr, &v.drawn) != VK_SUCCESS)
+    return false;
+
+  // The present pass' sampler (texelFetch: no filtering), descriptor set and
+  // layouts; its render pass and pipeline follow the swapchain format.
+  VkSamplerCreateInfo smp{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+  smp.magFilter = smp.minFilter = VK_FILTER_NEAREST;
+  smp.addressModeU = smp.addressModeV = smp.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+  VkDescriptorSetLayoutBinding binding{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT,
+                                       nullptr};
+  VkDescriptorSetLayoutCreateInfo dsl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+  dsl.bindingCount = 1;
+  dsl.pBindings = &binding;
+  VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
+  VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+  dpi.maxSets = 1;
+  dpi.poolSizeCount = 1;
+  dpi.pPoolSizes = &size;
+  VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(int32_t)};
+  VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+  pli.setLayoutCount = 1;
+  pli.pushConstantRangeCount = 1;
+  pli.pPushConstantRanges = &push;
+  if (v.vkCreateSampler(v.device, &smp, nullptr, &v.sampler) != VK_SUCCESS ||
+      v.vkCreateDescriptorSetLayout(v.device, &dsl, nullptr, &v.setLayout) != VK_SUCCESS ||
+      v.vkCreateDescriptorPool(v.device, &dpi, nullptr, &v.descriptorPool) != VK_SUCCESS)
+    return false;
+  pli.pSetLayouts = &v.setLayout;
+  VkDescriptorSetAllocateInfo dsa{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+  dsa.descriptorPool = v.descriptorPool;
+  dsa.descriptorSetCount = 1;
+  dsa.pSetLayouts = &v.setLayout;
+  return v.vkCreatePipelineLayout(v.device, &pli, nullptr, &v.pipelineLayout) == VK_SUCCESS &&
+         v.vkAllocateDescriptorSets(v.device, &dsa, &v.set) == VK_SUCCESS;
+}
+
+// The present pass' render pass and pipeline for swapchain images of `format`.
+bool createPresentPass(Vk& v, VkFormat format) {
+  if (v.passFormat == format && v.pipeline) return true;
+  if (v.pipeline) v.vkDestroyPipeline(v.device, v.pipeline, nullptr);
+  if (v.renderPass) v.vkDestroyRenderPass(v.device, v.renderPass, nullptr);
+  v.pipeline = VK_NULL_HANDLE;
+  v.renderPass = VK_NULL_HANDLE;
+  VkAttachmentDescription att{};
+  att.format = format;
+  att.samples = VK_SAMPLE_COUNT_1_BIT;
+  att.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;  // every pixel is written
+  att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+  att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+  att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  att.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+  VkAttachmentReference ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkSubpassDescription sub{};
+  sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  sub.colorAttachmentCount = 1;
+  sub.pColorAttachments = &ref;
+  // The layout transition waits for the acquire (its semaphore waits at
+  // this stage).
+  VkSubpassDependency dep{};
+  dep.srcSubpass = VK_SUBPASS_EXTERNAL;
+  dep.dstSubpass = 0;
+  dep.srcStageMask = dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+  dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+  VkRenderPassCreateInfo rpi{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+  rpi.attachmentCount = 1;
+  rpi.pAttachments = &att;
+  rpi.subpassCount = 1;
+  rpi.pSubpasses = &sub;
+  rpi.dependencyCount = 1;
+  rpi.pDependencies = &dep;
+  if (v.vkCreateRenderPass(v.device, &rpi, nullptr, &v.renderPass) != VK_SUCCESS) return false;
+
+  VkShaderModule vert = shaderModule(v, kPresentVert, sizeof kPresentVert);
+  VkShaderModule frag = shaderModule(v, kPresentFrag, sizeof kPresentFrag);
+  VkPipelineShaderStageCreateInfo stages[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
+                                               {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
+  stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  stages[0].module = vert;
+  stages[0].pName = "main";
+  stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  stages[1].module = frag;
+  stages[1].pName = "main";
+  VkPipelineVertexInputStateCreateInfo vin{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+  VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+  ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+  vp.viewportCount = vp.scissorCount = 1;
+  VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+  rs.cullMode = VK_CULL_MODE_NONE;
+  rs.lineWidth = 1;
+  VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+  ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState blend{};
+  blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+                         VK_COLOR_COMPONENT_A_BIT;
+  VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+  cb.attachmentCount = 1;
+  cb.pAttachments = &blend;
+  VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+  VkPipelineDynamicStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+  ds.dynamicStateCount = 2;
+  ds.pDynamicStates = dyn;
+  VkGraphicsPipelineCreateInfo gp{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+  gp.stageCount = 2;
+  gp.pStages = stages;
+  gp.pVertexInputState = &vin;
+  gp.pInputAssemblyState = &ia;
+  gp.pViewportState = &vp;
+  gp.pRasterizationState = &rs;
+  gp.pMultisampleState = &ms;
+  gp.pColorBlendState = &cb;
+  gp.pDynamicState = &ds;
+  gp.layout = v.pipelineLayout;
+  gp.renderPass = v.renderPass;
+  VkResult r = vert && frag ? v.vkCreateGraphicsPipelines(v.device, VK_NULL_HANDLE, 1, &gp, nullptr, &v.pipeline)
+                            : VK_ERROR_INITIALIZATION_FAILED;
+  if (vert) v.vkDestroyShaderModule(v.device, vert, nullptr);
+  if (frag) v.vkDestroyShaderModule(v.device, frag, nullptr);
+  if (r != VK_SUCCESS) return false;
+  v.passFormat = format;
+  return true;
+}
+
+// The last present pass done, so its command buffer and semaphores can be
+// used again.
+void waitVk(Vk& v) {
+  if (!v.inFlight) return;
+  v.vkWaitForFences(v.device, 1, &v.fence, VK_TRUE, UINT64_MAX);
+  v.vkResetFences(v.device, 1, &v.fence);
+  v.inFlight = false;
+}
+
+void destroyFrameImage(Vk& v) {
+  if (v.frameView) v.vkDestroyImageView(v.device, v.frameView, nullptr);
+  if (v.frame) v.vkDestroyImage(v.device, v.frame, nullptr);
+  if (v.frameMemory) v.vkFreeMemory(v.device, v.frameMemory, nullptr);
+  v.frameView = VK_NULL_HANDLE;
+  v.frame = VK_NULL_HANDLE;
+  v.frameMemory = VK_NULL_HANDLE;
+  v.frameW = v.frameH = 0;
+  v.frameValid = false;
+}
+
+// The retained frame image of the window's size and its view in the
+// present pass' descriptor set. A new one starts invalid: the next render
+// is a full repaint.
+bool createFrameImage(Vk& v, int w, int h) {
+  if (v.frame && v.frameW == w && v.frameH == h) return true;
+  waitVk(v);
+  destroyFrameImage(v);
+  VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+  ici.imageType = VK_IMAGE_TYPE_2D;
+  ici.format = kFrameFormat;
+  ici.extent = {uint32_t(w), uint32_t(h), 1};
+  ici.mipLevels = 1;
+  ici.arrayLayers = 1;
+  ici.samples = VK_SAMPLE_COUNT_1_BIT;
+  ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+  ici.usage = kFrameUsage;
+  ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  if (v.vkCreateImage(v.device, &ici, nullptr, &v.frame) != VK_SUCCESS) return false;
+  VkMemoryRequirements req;
+  v.vkGetImageMemoryRequirements(v.device, v.frame, &req);
+  VkPhysicalDeviceMemoryProperties mem;
+  v.vkGetPhysicalDeviceMemoryProperties(v.physical, &mem);
+  uint32_t type = UINT32_MAX;
+  for (uint32_t i = 0; i < mem.memoryTypeCount && type == UINT32_MAX; i++)
+    if ((req.memoryTypeBits & (1u << i)) && (mem.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+      type = i;
+  VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  mai.allocationSize = req.size;
+  mai.memoryTypeIndex = type;
+  VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+  vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  vci.format = kFrameFormat;
+  vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  if (type == UINT32_MAX || v.vkAllocateMemory(v.device, &mai, nullptr, &v.frameMemory) != VK_SUCCESS ||
+      v.vkBindImageMemory(v.device, v.frame, v.frameMemory, 0) != VK_SUCCESS ||
+      (vci.image = v.frame, v.vkCreateImageView(v.device, &vci, nullptr, &v.frameView)) != VK_SUCCESS) {
+    destroyFrameImage(v);
+    return false;
+  }
+  v.frameW = w;
+  v.frameH = h;
+  VkDescriptorImageInfo info{v.sampler, v.frameView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+  VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+  write.dstSet = v.set;
+  write.descriptorCount = 1;
+  write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  write.pImageInfo = &info;
+  v.vkUpdateDescriptorSets(v.device, 1, &write, 0, nullptr);
+  return true;
+}
+
+void destroySwapchainImages(Vk& v) {
+  for (VkFramebuffer f : v.framebuffers) v.vkDestroyFramebuffer(v.device, f, nullptr);
+  for (VkImageView iv : v.views) v.vkDestroyImageView(v.device, iv, nullptr);
+  v.framebuffers.clear();
+  v.views.clear();
+  v.images.clear();
+}
+
+void destroySwapchain(Vk& v) {
+  if (!v.device) return;
+  waitVk(v);
+  v.vkDeviceWaitIdle(v.device);
+  destroySwapchainImages(v);
+  if (v.swapchain) v.vkDestroySwapchainKHR(v.device, v.swapchain, nullptr);
+  v.swapchain = VK_NULL_HANDLE;
+}
+
+void destroyVkSurface(Vk& v) {
+  destroySwapchain(v);
+  if (v.surface) v.vkDestroySurfaceKHR(v.instance, v.surface, nullptr);
+  v.surface = VK_NULL_HANDLE;
+}
+
+// Everything Vulkan; the JSUI context (made on this device) goes first.
+void destroyVulkan(Host& h) {
+  Vk& v = h.vk;
+  if (v.device) {
+    waitVk(v);
+    v.vkDeviceWaitIdle(v.device);
+  }
+  if (h.gpu && h.renderer == Renderer::Vulkan) {
+    jsui_gpu_destroy(h.gpu);
+    h.gpu = nullptr;
+  }
+  if (v.device) {
+    destroyVkSurface(v);
+    destroyFrameImage(v);
+    if (v.pipeline) v.vkDestroyPipeline(v.device, v.pipeline, nullptr);
+    if (v.renderPass) v.vkDestroyRenderPass(v.device, v.renderPass, nullptr);
+    if (v.pipelineLayout) v.vkDestroyPipelineLayout(v.device, v.pipelineLayout, nullptr);
+    if (v.descriptorPool) v.vkDestroyDescriptorPool(v.device, v.descriptorPool, nullptr);
+    if (v.setLayout) v.vkDestroyDescriptorSetLayout(v.device, v.setLayout, nullptr);
+    if (v.sampler) v.vkDestroySampler(v.device, v.sampler, nullptr);
+    if (v.acquired) v.vkDestroySemaphore(v.device, v.acquired, nullptr);
+    if (v.drawn) v.vkDestroySemaphore(v.device, v.drawn, nullptr);
+    if (v.fence) v.vkDestroyFence(v.device, v.fence, nullptr);
+    if (v.pool) v.vkDestroyCommandPool(v.device, v.pool, nullptr);
+    v.vkDestroyDevice(v.device, nullptr);
+  } else if (v.surface && v.vkDestroySurfaceKHR) {
+    v.vkDestroySurfaceKHR(v.instance, v.surface, nullptr);
+  }
+  if (v.instance && v.vkDestroyInstance) v.vkDestroyInstance(v.instance, nullptr);
+  void* lib = v.lib;
+  v = Vk{};
+  v.lib = lib;  // kept loaded (the driver may still hold references to it)
+}
+
+// The swapchain for the window's current size, pre-rotated to the display's
+// current transform (so the compositor does not rotate it: the present pass
+// does), with its framebuffers.
+bool createSwapchain(Host& h) {
+  Vk& v = h.vk;
+  VkSurfaceCapabilitiesKHR caps;
+  if (v.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(v.physical, v.surface, &caps) != VK_SUCCESS) return false;
+  uint32_t n = 0;
+  v.vkGetPhysicalDeviceSurfaceFormatsKHR(v.physical, v.surface, &n, nullptr);
+  std::vector<VkSurfaceFormatKHR> formats(n);
+  v.vkGetPhysicalDeviceSurfaceFormatsKHR(v.physical, v.surface, &n, formats.data());
+  VkSurfaceFormatKHR format{VK_FORMAT_UNDEFINED, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
+  for (const VkSurfaceFormatKHR& f : formats)
+    if ((f.format == VK_FORMAT_R8G8B8A8_UNORM || f.format == VK_FORMAT_B8G8R8A8_UNORM) &&
+        f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR && (format.format == VK_FORMAT_UNDEFINED || f.format == kFrameFormat))
+      format = f;
+  if (format.format == VK_FORMAT_UNDEFINED || !(caps.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))
+    return false;
+  VkSurfaceTransformFlagBitsKHR transform = caps.currentTransform;
+  int rotation = transform == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR    ? 1
+                 : transform == VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR ? 2
+                 : transform == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR ? 3
+                                                                        : 0;
+  if (rotation == 0) transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;  // (mirrored transforms: left to the compositor)
+  // `extent`: the window as the UI sees it; the images are in the display's
+  // natural orientation (the other way round after a quarter turn).
+  VkExtent2D extent = caps.currentExtent;
+  if (extent.width == 0xFFFFFFFF)
+    extent = {uint32_t(ANativeWindow_getWidth(h.app->window)), uint32_t(ANativeWindow_getHeight(h.app->window))};
+  if (extent.width == 0 || extent.height == 0) return false;
+  VkExtent2D imageExtent = extent;
+  if (rotation & 1) std::swap(imageExtent.width, imageExtent.height);
+  VkSwapchainCreateInfoKHR sci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
+  sci.surface = v.surface;
+  sci.minImageCount = std::max(caps.minImageCount, 3u);
+  if (caps.maxImageCount) sci.minImageCount = std::min(sci.minImageCount, caps.maxImageCount);
+  sci.imageFormat = format.format;
+  sci.imageColorSpace = format.colorSpace;
+  sci.imageExtent = imageExtent;
+  sci.imageArrayLayers = 1;
+  sci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  sci.preTransform = transform;
+  sci.compositeAlpha = (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
+                           ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
+                           : VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+  sci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+  sci.clipped = VK_TRUE;
+  sci.oldSwapchain = v.swapchain;
+  VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+  VkResult r = v.vkCreateSwapchainKHR(v.device, &sci, nullptr, &swapchain);
+  destroySwapchain(v);
+  if (r != VK_SUCCESS || !createPresentPass(v, format.format)) {
+    if (swapchain) v.vkDestroySwapchainKHR(v.device, swapchain, nullptr);
+    return false;
+  }
+  v.swapchain = swapchain;
+  v.extent = imageExtent;
+  v.rotation = rotation;
+  v.outOfDate = false;
+  LOGI("vulkan swapchain: %ux%u, format %d, rotation %d", imageExtent.width, imageExtent.height, int(format.format),
+       rotation * 90);
+  v.vkGetSwapchainImagesKHR(v.device, v.swapchain, &n, nullptr);
+  v.images.resize(n);
+  v.vkGetSwapchainImagesKHR(v.device, v.swapchain, &n, v.images.data());
+  for (VkImage image : v.images) {
+    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vci.image = image;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = format.format;
+    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageView view = VK_NULL_HANDLE;
+    VkFramebuffer fb = VK_NULL_HANDLE;
+    if (v.vkCreateImageView(v.device, &vci, nullptr, &view) != VK_SUCCESS) return false;
+    v.views.push_back(view);
+    VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+    fci.renderPass = v.renderPass;
+    fci.attachmentCount = 1;
+    fci.pAttachments = &view;
+    fci.width = imageExtent.width;
+    fci.height = imageExtent.height;
+    fci.layers = 1;
+    if (v.vkCreateFramebuffer(v.device, &fci, nullptr, &fb) != VK_SUCCESS) return false;
+    v.framebuffers.push_back(fb);
+  }
+  // The UI's frame: the window's size as the UI sees it.
+  return createFrameImage(v, int(extent.width), int(extent.height));
+}
+
+// A surface + swapchain for the window (the device and JSUI context are
+// made the first time). False when any of it fails: the caller falls back.
+bool createVkSurface(Host& h) {
+  Vk& v = h.vk;
+  if (!v.device && !initVulkan(h)) {
+    destroyVulkan(h);
+    return false;
+  }
+  if (!h.gpu) {
+    JsuiVulkanDevice d{};
+    d.instance = v.instance;
+    d.physical_device = v.physical;
+    d.device = v.device;
+    d.queue = v.queue;
+    d.queue_family = v.family;
+    d.api_version = VK_API_VERSION_1_1;  // what the device was created for
+    d.get_instance_proc_addr = reinterpret_cast<void*>(v.getInstanceProcAddr);
+    d.instance_extensions = v.instanceExtensions.data();
+    d.instance_extension_count = int(v.instanceExtensions.size());
+    d.device_extensions = v.deviceExtensions.data();
+    d.device_extension_count = int(v.deviceExtensions.size());
+    d.device_features2 = &v.features;
+    h.gpu = jsui_gpu_create_vulkan(&d);
+    if (!h.gpu) {
+      LOGW("Skia Graphite rejected the Vulkan device");
+      destroyVulkan(h);
+      return false;
+    }
+    jsui_gpu_prepare_target(h.gpu, kFrameFormat);
+    LOGI("renderer: vulkan (Skia Graphite)");
+  }
+  VkAndroidSurfaceCreateInfoKHR asci{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};
+  asci.window = h.app->window;
+  if (v.vkCreateAndroidSurfaceKHR(v.instance, &asci, nullptr, &v.surface) != VK_SUCCESS) return false;
+  VkBool32 present = VK_FALSE;
+  v.vkGetPhysicalDeviceSurfaceSupportKHR(v.physical, v.family, v.surface, &present);
+  return present && createSwapchain(h);
+}
+
+// Renders into the retained frame (only the damage once it holds the last
+// one), draws that into the next swapchain image and presents. 1:
+// presented, 0: skipped (the swapchain is recreated next frame), -1: failed.
+int vkFrame(Host& h, int w, int ht) {
+  Vk& v = h.vk;
+  if (w != v.frameW || ht != v.frameH) v.outOfDate = true;
+  if (v.outOfDate && !createSwapchain(h)) return -1;
+  waitVk(v);
+  uint32_t index = 0;
+  VkResult r = v.vkAcquireNextImageKHR(v.device, v.swapchain, UINT64_MAX, v.acquired, VK_NULL_HANDLE, &index);
+  if (r == VK_ERROR_OUT_OF_DATE_KHR) {
+    v.outOfDate = true;
+    return 0;
+  }
+  if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return -1;
+
+  JsuiGpuTarget t{};
+  t.texture = v.frame;
+  t.format = kFrameFormat;
+  t.width = v.frameW;
+  t.height = v.frameH;
+  t.flags = v.frameValid ? JSUI_GPU_INCREMENTAL : 0;
+  t.usage = kFrameUsage;
+  t.layout = v.frameValid ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+  t.final_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  // Submitted (between full barriers) before it returns: the pass below,
+  // submitted after it on the same queue, reads the finished frame.
+  bool rendered = jsui_render_gpu_target(h.rt, h.gpu, &t, nullptr) == 0;
+  v.frameValid = rendered;
+
+  VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+  bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  v.vkBeginCommandBuffer(v.cmd, &bi);
+  VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+  rp.renderPass = v.renderPass;
+  rp.framebuffer = v.framebuffers[index];
+  rp.renderArea = {{0, 0}, v.extent};
+  v.vkCmdBeginRenderPass(v.cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
+  VkViewport viewport{0, 0, float(v.extent.width), float(v.extent.height), 0, 1};
+  VkRect2D scissor{{0, 0}, v.extent};
+  v.vkCmdSetViewport(v.cmd, 0, 1, &viewport);
+  v.vkCmdSetScissor(v.cmd, 0, 1, &scissor);
+  v.vkCmdBindPipeline(v.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, v.pipeline);
+  v.vkCmdBindDescriptorSets(v.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, v.pipelineLayout, 0, 1, &v.set, 0, nullptr);
+  int32_t rotation = v.rotation;
+  v.vkCmdPushConstants(v.cmd, v.pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof rotation, &rotation);
+  v.vkCmdDraw(v.cmd, 3, 1, 0, 0);
+  v.vkCmdEndRenderPass(v.cmd);
+  v.vkEndCommandBuffer(v.cmd);
+  VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+  si.waitSemaphoreCount = 1;
+  si.pWaitSemaphores = &v.acquired;
+  si.pWaitDstStageMask = &waitStage;
+  si.commandBufferCount = 1;
+  si.pCommandBuffers = &v.cmd;
+  si.signalSemaphoreCount = 1;
+  si.pSignalSemaphores = &v.drawn;
+  if (v.vkQueueSubmit(v.queue, 1, &si, v.fence) != VK_SUCCESS) return -1;
+  v.inFlight = true;
+  VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+  pi.waitSemaphoreCount = 1;
+  pi.pWaitSemaphores = &v.drawn;
+  pi.swapchainCount = 1;
+  pi.pSwapchains = &v.swapchain;
+  pi.pImageIndices = &index;
+  r = v.vkQueuePresentKHR(v.queue, &pi);
+  if (r == VK_ERROR_OUT_OF_DATE_KHR) {
+    v.outOfDate = true;
+  } else if (r == VK_SUBOPTIMAL_KHR) {
+    // Still presented; recreating every frame would cost more than it helps.
+    if (!v.suboptimalLogged) LOGW("vulkan: swapchain suboptimal");
+    v.suboptimalLogged = true;
+  } else if (r != VK_SUCCESS) {
+    return -1;
+  }
+  return rendered ? 1 : -1;
 }
 
 // ----------------------------------------------------------------- frame
@@ -383,7 +1088,7 @@ void createRuntime(Host& h) {
 void drawFrame(Host& h) {
   if (!h.rt || !h.hasWindow) return;
   int w = ANativeWindow_getWidth(h.app->window), ht = ANativeWindow_getHeight(h.app->window);
-  if (!h.cpu && h.surface != EGL_NO_SURFACE) {
+  if (h.renderer == Renderer::GL && h.surface != EGL_NO_SURFACE) {
     EGLint ew = 0, eh = 0;
     eglQuerySurface(h.display, h.surface, EGL_WIDTH, &ew);
     eglQuerySurface(h.display, h.surface, EGL_HEIGHT, &eh);
@@ -393,9 +1098,18 @@ void drawFrame(Host& h) {
   updateViewport(h, w, ht);
   if (!h.safeAreaKnown) h.safeAreaKnown = publishSafeArea(h);
 
-  jsui_tick(h.rt, nowMs());
+  jsui_tick(h.rt, h.frameTime);
   if (h.presented && !jsui_needs_redraw(h.rt)) return;  // the screen already shows this frame
-  if (!h.cpu) {
+  double t0 = nowMs();
+  if (h.renderer == Renderer::Vulkan) {
+    int r = h.vk.swapchain ? vkFrame(h, w, ht) : -1;
+    if (r < 0) {
+      useGl(h, "Vulkan frame failed");
+      createSurface(h);
+      return;
+    }
+    if (r == 0) return;  // swapchain out of date: recreated next frame
+  } else if (!h.cpu) {
     JsuiGLTarget t{};
     t.fbo = 0;
     t.format = 0x8058;  // GL_RGBA8
@@ -424,6 +1138,9 @@ void drawFrame(Host& h) {
     jsui_render_rgba(h.rt, buf.bits, buf.width, buf.height, size_t(buf.stride) * 4);
     ANativeWindow_unlockAndPost(h.app->window);
   }
+  double took = nowMs() - t0;
+  h.renderMs += took;
+  h.renderMaxMs = std::max(h.renderMaxMs, took);
   h.presented = true;
   if (const char* err = jsui_last_error(h.rt)) LOGW("%s", err);
 
@@ -431,15 +1148,19 @@ void drawFrame(Host& h) {
   double now = nowMs();
   if (h.fpsSince == 0) h.fpsSince = now;
   if (now - h.fpsSince >= 5000) {
-    LOGI("%.1f frames drawn / s (%s)", h.framesDrawn * 1000.0 / (now - h.fpsSince), h.cpu ? "cpu" : "gl");
+    static const char* names[] = {"vulkan", "gl", "cpu"};
+    LOGI("%.1f frames drawn / s, %.2f ms render + present each, %.1f ms the longest (%s)",
+         h.framesDrawn * 1000.0 / (now - h.fpsSince), h.renderMs / h.framesDrawn, h.renderMaxMs, names[int(h.renderer)]);
     h.framesDrawn = 0;
+    h.renderMs = h.renderMaxMs = 0;
     h.fpsSince = now;
   }
 }
 
-void onVsync(int64_t, void* data) {
+void onVsync(int64_t frameTimeNanos, void* data) {
   auto& h = *static_cast<Host*>(data);
   h.frameScheduled = false;
+  h.frameTime = std::max(h.frameTime, double(frameTimeNanos) / 1e6);
   if (!h.hasWindow || !h.resumed) return;
   drawFrame(h);
   scheduleFrame(h);
@@ -609,11 +1330,13 @@ void onCmd(android_app* app, int32_t cmd) {
       break;
     case APP_CMD_TERM_WINDOW:
       h.hasWindow = false;
-      destroySurface(h);
+      if (h.renderer == Renderer::Vulkan) destroyVkSurface(h.vk);
+      else destroySurface(h);
       break;
     case APP_CMD_WINDOW_RESIZED:
     case APP_CMD_CONTENT_RECT_CHANGED:
     case APP_CMD_WINDOW_REDRAW_NEEDED:
+      h.vk.outOfDate = h.vk.swapchain != VK_NULL_HANDLE;  // a rotation keeps the size
       h.presented = false;
       h.safeAreaKnown = false;
       scheduleFrame(h);
@@ -624,9 +1347,12 @@ void onCmd(android_app* app, int32_t cmd) {
       break;
     case APP_CMD_PAUSE:
       h.resumed = false;
+      // Also saves the Vulkan driver's pipeline cache (the process may not
+      // come back).
+      if (h.gpu && h.renderer == Renderer::Vulkan) jsui_gpu_purge(h.gpu, 0);
       break;
     case APP_CMD_LOW_MEMORY:
-      if (h.gpu && h.surface != EGL_NO_SURFACE) jsui_gpu_purge(h.gpu, 0);
+      if (h.gpu && (h.renderer == Renderer::Vulkan || h.surface != EGL_NO_SURFACE)) jsui_gpu_purge(h.gpu, 0);
       break;
     default: break;
   }
@@ -642,7 +1368,11 @@ void android_main(android_app* app) {
   app->onInputEvent = onInput;
   app->activity->vm->AttachCurrentThread(&h.env, nullptr);
   h.scale = std::fmax(1.f, AConfiguration_getDensity(app->config) / 160.f);
-  h.cpu = intentExtra(h, "jsui_renderer") == "cpu";
+  std::string renderer = intentExtra(h, "jsui_renderer");
+  h.renderer = renderer == "cpu" ? Renderer::Cpu : renderer == "gl" ? Renderer::GL : Renderer::Vulkan;
+  h.cpu = h.renderer == Renderer::Cpu;
+  std::string cache = cacheDir(h);
+  if (!cache.empty()) jsui_set_cache_dir(cache.c_str());
 
   while (!app->destroyRequested) {
     android_poll_source* source = nullptr;
@@ -652,6 +1382,7 @@ void android_main(android_app* app) {
   }
 
   if (h.rt) jsui_destroy(h.rt);
+  if (h.renderer == Renderer::Vulkan) destroyVulkan(h);
   if (h.gpu) {
     if (h.surface == EGL_NO_SURFACE) jsui_gpu_context_lost(h.gpu);
     jsui_gpu_destroy(h.gpu);

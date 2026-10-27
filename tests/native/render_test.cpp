@@ -311,7 +311,8 @@ TEST(render_image_decodes_off_the_frame_thread) {
   std::string uri = testPngUri(1024, 512);
   Scene s(1100, 600);
   ImageCache& images = *s.rt->images;
-  CHECK(int64_t(1024) * 512 > images.inlineBudgetPixels);  // over the budget on its own
+  images.measureDecodes = false;
+  CHECK(1024 * 512 * images.decodeNsPerPixel / 1000 > images.inlineBudgetUs);  // over the budget on its own
   // Held: the decode cannot finish before the frames below look at it (a
   // fast machine decodes this between setProps and the first tick).
   images.holdDecodes(true);
@@ -364,12 +365,15 @@ TEST(render_image_decodes_off_the_frame_thread) {
   CHECK(st == ImageCache::State::Ready);
 }
 
-// Small images decode inline until the tick's pixel budget is spent; the
-// rest of that tick's go to the pool, and the next tick has a new budget.
+// Small images decode inline until the tick's budget is spent; the rest of
+// that tick's go to the pool, and the next tick has a new budget. Spent on
+// estimates here (1 us/px), so the split does not depend on the machine.
 TEST(render_image_inline_decode_budget) {
   Scene s(100, 100);
   ImageCache& images = *s.rt->images;
-  images.inlineBudgetPixels = 2000;
+  images.measureDecodes = false;
+  images.decodeNsPerPixel = 1000;
+  images.inlineBudgetUs = 2000;
   std::string a = testPngUri(40, 20), b = testPngUri(40, 21), c = testPngUri(40, 22), d = testPngUri(40, 23);
   s.render();  // a tick: a fresh budget
   ImageCache::State st;
@@ -381,6 +385,27 @@ TEST(render_image_inline_decode_budget) {
   CHECK(images.get(d, &st) && st == ImageCache::State::Ready);  // a new tick's budget
   images.finishDecodes();
   CHECK(images.get(c, &st) && st == ImageCache::State::Ready);
+  CHECK_EQ(images.asyncDecodes, 1u);
+}
+
+// Measured: the tick spends the decode time it took, and the estimate
+// follows what decodes cost here.
+TEST(render_image_decode_cost_is_learned) {
+  Scene s(100, 100);
+  ImageCache& images = *s.rt->images;
+  images.decodeNsPerPixel = 400;  // far off
+  images.inlineBudgetUs = 1e9;    // everything inline
+  s.render();
+  for (int i = 0; i < 8; i++) {
+    ImageCache::State st;
+    CHECK(images.get(testPngUri(100, 50 + i), &st) && st == ImageCache::State::Ready);
+  }
+  CHECK(images.decodeNsPerPixel < 400);
+  // A budget already spent: the next image goes to the pool.
+  images.inlineBudgetUs = 0;
+  ImageCache::State st;
+  CHECK(!images.get(testPngUri(100, 70), &st) && st == ImageCache::State::Loading);
+  images.finishDecodes();
   CHECK_EQ(images.asyncDecodes, 1u);
 }
 

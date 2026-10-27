@@ -74,6 +74,8 @@ void paintDocumentRects(Document& doc, SkCanvas* canvas, const std::vector<SkIRe
 struct PaintStats {
   int nodesPainted = 0;       // nodes drawn
   int nodesCulled = 0;        // subtrees skipped (outside the damage)
+  int nodesOccluded = 0;      // subtrees, or nodes' own drawing, skipped (covered by a later opaque node)
+  int occluders = 0;          // opaque rects that could cover earlier nodes (0: occlusion costs nothing per node)
   int nodesUpdated = 0;       // nodes the last updateDamage() walked (not in skipped, unchanged subtrees)
   int64_t damagedPixels = 0;  // area of the damage bounds (0: full repaint)
   int64_t repaintedPixels = 0;  // area of the damage region (full repaint: the canvas)
@@ -98,6 +100,9 @@ struct PaintStats {
   // those the ones rendered this paint (misses).
   int layerDraws = 0;
   int layerRenders = 0;
+  // Of the layer draws, those drawn under a change of scale or rotation
+  // since the texture was rendered (motion layers, see paintCachedLayer).
+  int motionDraws = 0;
   // Always counted: painted nodes placed again (see place() in painter.cpp)
   // instead of where their records say (none after an update).
   int placements = 0;
@@ -137,6 +142,9 @@ class LayerCache {
   // After a frame: frees layers unused for a while, and the least recently
   // used ones over the budget.
   void endFrame();
+  // The bytes of textures it keeps (endFrame frees the least recently used
+  // ones over it).
+  void setBudget(size_t budgetBytes);
   size_t bytes() const;
   int size() const;
   struct Impl;
@@ -180,5 +188,17 @@ void setPaintCounting(Document& doc, bool on);
 // Tests: updateDamage skips subtrees in which nothing changed (on by
 // default); off, it walks every node, which must give the same damage.
 void setRecordSkipping(bool on);
+
+// Occlusion culling (on by default): paintDocument skips what an opaque node
+// painted later covers (see Occlusion in painter.cpp), which must give the
+// same pixels. Off here or with JSUI_OCCLUSION=off, everything is painted.
+void setOcclusionCulling(bool on);
+
+// Motion layers (on by default): a cached layer or raster-cached subtree
+// that keeps scaling or rotating is drawn from its texture under the change
+// of matrix, and repainted exactly at rest (see motionTransform in
+// painter.cpp). Off here or with JSUI_MOTION_LAYERS=off, it gets a new
+// texture (or a direct paint) every frame of the motion.
+void setMotionLayers(bool on);
 
 }  // namespace jsui

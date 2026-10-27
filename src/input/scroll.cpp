@@ -350,17 +350,75 @@ float InputManager::snapTarget(Node* sv, float projected, float v, float current
 }
 
 // ------------------------------------------------------------ touch drag
+//
+// The content follows the finger along the ScrollView's axis. Touch samples
+// rarely line up with frames (a 120 Hz digitizer under a 60 Hz rAF, events
+// a worker gets after its frame started, a sample landing just before or
+// just after vsync): moving the content on every event shows two samples'
+// worth of motion on one frame and none on the next, which reads as
+// stutter even at a steady frame rate. When the host stamps events with
+// their real times (jsui_set_event_time) the samples are only recorded
+// here, and tick() moves the content to the finger position resampled at
+// the frame time instead (dragResampled), like Android's and Chrome's input
+// resampling. Unstamped events move the content as they arrive.
+
+namespace {
+
+// Release velocity (offset px/ms) from finger samples: a least-squares
+// quadratic over the window, its slope at the newest sample (Android's and
+// Chrome's default LSQ2 strategy). A flick speeds up until the finger
+// lifts; the window's average would hand the fling a slower start than the
+// content had under the finger. Two samples: their slope.
+float releaseVelocity(const DragSample* s, int n) {
+  if (n < 2) return 0;
+  const double tn = s[n - 1].t;
+  if (n == 2) {
+    double dt = tn - s[0].t;
+    return dt > 0 ? float((s[1].pos - s[0].pos) / dt) : 0.f;
+  }
+  // Normal equations for pos = a + b t + c t^2, t relative to the newest.
+  double S[5] = {0, 0, 0, 0, 0}, Y[3] = {0, 0, 0};
+  for (int i = 0; i < n; i++) {
+    double t = s[i].t - tn, y = s[i].pos - s[n - 1].pos, tk = 1;
+    for (int k = 0; k < 5; k++, tk *= t) {
+      S[k] += tk;
+      if (k < 3) Y[k] += tk * y;
+    }
+  }
+  double m[3][4] = {{S[0], S[1], S[2], Y[0]}, {S[1], S[2], S[3], Y[1]}, {S[2], S[3], S[4], Y[2]}};
+  for (int c = 0; c < 3; c++) {  // Gauss-Jordan with partial pivoting
+    int piv = c;
+    for (int r = c + 1; r < 3; r++)
+      if (std::fabs(m[r][c]) > std::fabs(m[piv][c])) piv = r;
+    if (std::fabs(m[piv][c]) < 1e-9) {  // samples bunched in time: the window's slope
+      double dt = tn - s[0].t;
+      return dt > 0 ? float((s[n - 1].pos - s[0].pos) / dt) : 0.f;
+    }
+    if (piv != c)
+      for (int k = 0; k < 4; k++) std::swap(m[c][k], m[piv][k]);
+    for (int r = 0; r < 3; r++) {
+      if (r == c) continue;
+      double f = m[r][c] / m[c][c];
+      for (int k = c; k < 4; k++) m[r][k] -= f * m[c][k];
+    }
+  }
+  return float(m[1][3] / m[1][1]);
+}
+
+}  // namespace
 
 void InputManager::beginDrag(PointerState& p, Node* sv) {
   p.dragStarted = true;
   ScrollState& st = scrollState(sv);
   st.dragging = true;
+  st.resample = std::isfinite(eventTime_);
   st.anim = ScrollState::Anim::None;
   st.settleAt = -1;
-  st.dragStart = mainOffset(sv);
   st.dragOver = 0;
-  st.samples[0] = {eventTime(), st.dragStart};
+  st.fingerApplied = -(isHorizontal(sv) ? p.startX : p.startY);
+  st.samples[0] = {eventTime(), st.fingerApplied};
   st.sampleCount = 1;
+  st.frames = 0;
   dispatchScrollEvent("scrollbegindrag", sv);
 }
 
@@ -370,32 +428,67 @@ void InputManager::dragTo(PointerState& p, Node* sv, float x, float y) {
     beginDrag(p, sv);
     if (!(sv = alive(id))) return;
   }
-  // Content follows the finger along the ScrollView's axis. Past an edge the
-  // offset clamps and the overshoot is banked (up to kDragEdgeSlack): without
-  // it, every jitter of a finger pulling against the edge would move the
-  // content one way and never back (the clamp eats the other half).
-  bool h = isHorizontal(sv);
-  ScrollMetrics m = scrollMetrics(sv);
-  float maxOff = h ? m.maxX() : m.maxY();
-  float over = scrollState(sv).dragOver;
-  float want = mainOffset(sv) + over - (h ? x - p.startX : y - p.startY);
-  float off = std::clamp(want, 0.f, maxOff);
-  over = std::clamp(want - off, -kDragEdgeSlack, kDragEdgeSlack);
-  p.startX = x;
-  p.startY = y;
-  applyScroll(sv, h ? off : sv->scrollX, h ? sv->scrollY : off, true);
-  if (!(sv = alive(id))) return;
   ScrollState& st = scrollState(sv);
-  st.dragOver = over;
-  ScrollState::Sample s{eventTime(), mainOffset(sv)};
+  ScrollState::Sample s{eventTime(), -(isHorizontal(sv) ? x : y)};
   if (st.sampleCount > 0 && st.samples[size_t(st.sampleCount - 1)].t == s.t) {
-    st.samples[size_t(st.sampleCount - 1)] = s;  // same frame: keep the latest position
+    st.samples[size_t(st.sampleCount - 1)] = s;  // same time: keep the latest position
   } else if (st.sampleCount < int(st.samples.size())) {
     st.samples[size_t(st.sampleCount++)] = s;
   } else {
     std::rotate(st.samples.begin(), st.samples.begin() + 1, st.samples.end());
     st.samples.back() = s;
   }
+  if (!st.resample) dragApply(sv, s.pos);
+}
+
+void InputManager::dragApply(Node* sv, float finger) {
+  // Past an edge the offset clamps and the overshoot is banked (up to
+  // kDragEdgeSlack): without it, every jitter of a finger pulling against
+  // the edge would move the content one way and never back (the clamp eats
+  // the other half).
+  uint32_t id = sv->id();
+  bool h = isHorizontal(sv);
+  ScrollMetrics m = scrollMetrics(sv);
+  float maxOff = h ? m.maxX() : m.maxY();
+  ScrollState& st = scrollState(sv);
+  float want = mainOffset(sv) + st.dragOver + (finger - st.fingerApplied);
+  float off = std::clamp(want, 0.f, maxOff);
+  float over = std::clamp(want - off, -kDragEdgeSlack, kDragEdgeSlack);
+  st.fingerApplied = finger;
+  applyScroll(sv, h ? off : sv->scrollX, h ? sv->scrollY : off, true);
+  if ((sv = alive(id))) scrollState(sv).dragOver = over;
+}
+
+float InputManager::dragResampled(ScrollState& st, double now) const {
+  const auto* s = st.samples.data();
+  int n = st.sampleCount;
+  if (n == 0) return st.fingerApplied;
+  const ScrollState::Sample& last = s[n - 1];
+  // A host clock that doesn't match the frame clock: no resampling.
+  if (last.t > now + kResampleMaxDeltaMs) return last.pos;
+  st.sampleAges[size_t(st.frames++ % int(st.sampleAges.size()))] = float(now - last.t);
+  float age = 0;
+  for (int i = 0; i < std::min(st.frames, int(st.sampleAges.size())); i++) age = std::max(age, st.sampleAges[size_t(i)]);
+  double want = std::clamp(double(age), kResampleLatencyMs, kResampleMaxLatencyMs);
+  st.lag = st.frames == 1 ? want : std::clamp(want, st.lag - kResampleLagStepMs, st.lag + kResampleLagStepMs);
+  double t = now - st.lag;
+  if (last.t > t) {
+    // Between the newest sample at or before t and the next one.
+    int i = n - 1;
+    while (i > 0 && s[i - 1].t > t) i--;
+    if (i == 0) return st.fingerApplied;  // every sample is newer: stay until the frame time passes them
+    const ScrollState::Sample& a = s[i - 1];
+    const ScrollState::Sample& b = s[i];
+    double k = (t - a.t) / (b.t - a.t);
+    return float(a.pos + (b.pos - a.pos) * k);
+  }
+  // Past the newest: predict along the last two samples a little way.
+  if (n < 2) return last.pos;
+  const ScrollState::Sample& prev = s[n - 2];
+  double delta = last.t - prev.t;
+  if (delta < kResampleMinDeltaMs || delta > kResampleMaxDeltaMs) return last.pos;
+  t = std::min(t, last.t + std::min(delta / 2, kResampleMaxPredictMs));
+  return float(last.pos + (last.pos - prev.pos) * (t - last.t) / delta);
 }
 
 void InputManager::endDrag(PointerState& p, bool cancelled) {
@@ -407,19 +500,28 @@ void InputManager::endDrag(PointerState& p, bool cancelled) {
   ScrollState& st = scrollState(sv);
   st.dragging = false;
   bool h = isHorizontal(sv);
-  float cur = mainOffset(sv);
   // Release velocity (offset px/ms) over the last kVelocityWindowMs; a
   // finger that rested before lifting has none.
   float v = 0;
   if (!cancelled && started && st.sampleCount >= 2) {
     const ScrollState::Sample& last = st.samples[size_t(st.sampleCount - 1)];
-    if (eventTime() - last.t <= kVelocityWindowMs * 0.8) {
+    if (eventTime() - last.t <= kVelocityRestMs) {
       int first = st.sampleCount - 1;
       while (first > 0 && last.t - st.samples[size_t(first - 1)].t <= kVelocityWindowMs) first--;
-      double dt = last.t - st.samples[size_t(first)].t;
-      if (dt > 0) v = float((last.pos - st.samples[size_t(first)].pos) / dt);
+      v = releaseVelocity(&st.samples[size_t(first)], st.sampleCount - first);
+      v = std::clamp(v, -kMaxFlingVelocity, kMaxFlingVelocity);
     }
   }
+  // A resampled drag trails the finger by a few ms. Without a fling the
+  // content settles where the finger lifted; a fling just carries on (a
+  // catch-up step would jump).
+  if (st.resample && started && st.sampleCount > 0 && std::fabs(v) < kMinFlingVelocity) {
+    dragApply(sv, st.samples[size_t(st.sampleCount - 1)].pos);
+    if (!(sv = alive(id))) return;
+  }
+  ScrollState& st2 = scrollState(sv);
+  st2.resample = false;
+  float cur = mainOffset(sv);
   ScrollMetrics m = scrollMetrics(sv);
   float maxOff = h ? m.maxX() : m.maxY();
   float rate = decelerationRate(sv);
@@ -682,6 +784,9 @@ void InputManager::tickScrolling(double now, double /*dt*/) {
       }
       applyScroll(sv, st.horizontal ? pos : sv->scrollX, st.horizontal ? sv->scrollY : pos, true);
       if (done && (sv = alive(id))) dispatchScrollEvent("momentumscrollend", sv);
+    } else if (st.dragging && st.resample) {
+      float f = devicePx(dragResampled(it->second, now));  // finger samples land on device pixels too
+      if (f != st.fingerApplied) dragApply(sv, f);
     } else if (!st.dragging) {
       // Content may have shrunk under a resting ScrollView.
       ScrollMetrics m = scrollMetrics(sv);

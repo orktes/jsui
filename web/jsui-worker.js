@@ -1898,7 +1898,7 @@ export function serve(I, early) {
       case 'info': {
         const gl = view?._gl, ext = gl?.getExtension('WEBGL_debug_renderer_info');
         return { renderer: view?.renderer, backend: host.textureBackend, rafs: typeof requestAnimationFrame === 'function',
-          hitCalls: host._hitCalls ?? 0,
+          hitCalls: host._hitCalls ?? 0, imageDecode: M?.__jsuiDecode?.stats ?? null,
           ticks: !!host._ticks, offset: OFF, adapter: view?._webgpu?.description ?? null,
           gl: gl ? gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER) : null };
       }

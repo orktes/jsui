@@ -23,6 +23,7 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
@@ -72,6 +73,10 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'image/svg+xml' });
     return res.end('<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="red"/></svg>');
   }
+  if (url.pathname === '/__big.png' || url.pathname === '/__small.png') {  // left half red, right half blue
+    res.writeHead(200, { 'content-type': 'image/png' });
+    return res.end(url.pathname === '/__big.png' ? halvesPng(512, 256) : halvesPng(40, 20));
+  }
   if (url.pathname === '/slow/solid.js') {  // delayed response for destroy-during-load tests
     return setTimeout(() => {
       res.writeHead(200, { 'content-type': 'text/javascript' });
@@ -95,6 +100,31 @@ const server = http.createServer((req, res) => {
   res.writeHead(200, { 'content-type': MIME[path.extname(file)] || 'application/octet-stream' });
   fs.createReadStream(file).pipe(res);
 });
+// An RGBA PNG, w x h: the left half red, the right half blue.
+function halvesPng(w, h) {
+  const raw = Buffer.alloc((w * 4 + 1) * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const o = y * (w * 4 + 1) + 1 + x * 4;
+      raw[o] = x < w / 2 ? 255 : 0;
+      raw[o + 2] = x < w / 2 ? 0 : 255;
+      raw[o + 3] = 255;
+    }
+  }
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4), crc = Buffer.alloc(4), td = Buffer.concat([Buffer.from(type), data]);
+    len.writeUInt32BE(data.length);
+    crc.writeUInt32BE(zlib.crc32(td));
+    return Buffer.concat([len, td, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0);
+  ihdr.writeUInt32BE(h, 4);
+  ihdr[8] = 8;  // 8 bits, RGBA
+  ihdr[9] = 6;
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr),
+    chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+}
 function toneWav(ms) {
   const rate = 22050, n = Math.round((rate * ms) / 1000), data = Buffer.alloc(n * 2);
   for (let i = 0; i < n; i++) data.writeInt16LE(Math.round(Math.sin((2 * Math.PI * 440 * i) / rate) * 8000), i * 2);
@@ -2300,6 +2330,52 @@ test("worker: frames are timed by the worker's requestAnimationFrame, or the pag
     assert(near(px, [255, 255, 0, 255]), `${id}: band 2 after its timer ${fmt(px)}`);
   }
 });
+
+// Images over the inline budget (1 ms a tick, ~60 ns/px estimated in wasm) decode in the browser: createImageBitmap and
+// getImageData in a decode Worker, off the runtime's thread, and land on a
+// later tick (whenIdle waits for them: jsui_pending_loads counts them). The
+// small one decodes inline as before.
+const IMAGES = (o) => `(function(){const N=__jsui_native;` +
+  `const a=N.createNode('Image');N.setProps(a,{source:{uri:'${o}/__big.png'},style:{position:'absolute',left:0,top:0}});` +
+  `N.appendChild(N.rootId,a);const b=N.createNode('Image');` +
+  `N.setProps(b,{source:{uri:'${o}/__small.png'},style:{position:'absolute',left:0,top:260}});N.appendChild(N.rootId,b);})();`;
+async function checkImages(page) {
+  const px = await screenPixels(page, '#ui', [[10, 10], [500, 10], [550, 10], [5, 265], [35, 265]]);
+  assert(near(px[0], RED) && near(px[1], BLUE), `large image ${fmt(px[0])} ${fmt(px[1])}`);
+  assert(!near(px[2], RED) && !near(px[2], BLUE), `right of the large image ${fmt(px[2])}`);  // intrinsic 512 px wide
+  assert(near(px[3], RED) && near(px[4], BLUE), `small image ${fmt(px[3])} ${fmt(px[4])}`);
+  return page.evaluate(async (worker) => {
+    const j = window.hosts.ui;
+    return worker ? (await j._debug('info')).imageDecode : j.module.__jsuiDecode?.stats ?? null;
+  }, WORKER);
+}
+test('large images decode in the browser, off the runtime thread', async ({ page }) => {
+  await mount(page, { width: 600, height: 300, jsui: { bundleSource: IMAGES(ORIGIN) } });
+  const st = await checkImages(page);
+  assert(st && st.started === 1 && st.workers === 1 && st.local === 0 && st.done === 1 && st.failed === 0,
+    `decodes ${JSON.stringify(st)}`);
+}, {}, { worker: true });
+
+// Without Workers the browser still decodes (on this thread's event loop,
+// between ticks); when it cannot, Skia's codec does, as before.
+for (const variant of ['no Worker', 'createImageBitmap fails']) {
+  test(`large images without a decode Worker (${variant})`, async ({ page }) => {
+    await page.evaluate((variant) => {
+      window.Worker = undefined;
+      // Only the decoder's (untyped) Blobs fail: screenPixels needs it too.
+      const real = window.createImageBitmap;
+      if (variant !== 'no Worker') {
+        window.createImageBitmap = (src, ...a) => (src instanceof Blob && !src.type
+          ? Promise.reject(new Error('cannot')) : real(src, ...a));
+      }
+    }, variant);
+    await mount(page, { width: 600, height: 300, jsui: { bundleSource: IMAGES(ORIGIN) } });
+    const st = await checkImages(page);
+    const failed = variant === 'no Worker' ? 0 : 1;
+    assert(st && st.started === 1 && st.workers === 0 && st.local === 1 && st.done === 1 - failed && st.failed === failed,
+      `decodes ${JSON.stringify(st)}`);
+  });
+}
 
 test('worker: without Worker, createJsui({ worker: true }) runs on the main thread with one warning', async ({ page }) => {
   const warnings = [];
