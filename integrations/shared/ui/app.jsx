@@ -13,6 +13,12 @@
 //     game:pause {paused}, game:quit, ui:anchors (where the Spawn button is,
 //     for the hosts' --selftest) and ui:selected {index} (the selection the
 //     UI shows, sent when it changes, so a --selftest can check it).
+//   * A native component: the radar (requireNativeComponent('Radar')) is
+//     drawn by the game's own code (integrations/shared/radar.h) from its
+//     units every frame. The HUD lays it out, pulses its `flash` prop with
+//     the native driver, and sends taps to it as a `select` command; the
+//     radar selects the unit in the game and answers with onSelect. Hosts
+//     without the class (Unity, Unreal) leave it out (hasNativeComponent).
 // Input pass-through: the root and the nameplates take no input, so clicks,
 // drags and wheel on empty parts of the screen are not consumed and the host
 // hands them to the game (select a unit, camera orbit, zoom, spawn). The
@@ -28,6 +34,9 @@ import {
   StyleSheet,
   Text,
   View,
+  codegenNativeCommands,
+  hasNativeComponent,
+  requireNativeComponent,
   useHostBufferSelector,
   useHostBufferValue,
   useHostState,
@@ -138,6 +147,33 @@ const Selection = memo(function Selection({ index }) {
   );
 });
 
+const Radar = requireNativeComponent('Radar');
+const RadarCommands = codegenNativeCommands({ supportedCommands: ['select'] });
+const RADAR_SIZE = 184;
+
+// The game draws it (shared/radar.h); the HUD only places it and talks to it.
+const RadarPanel = memo(function RadarPanel({ selected }) {
+  const ref = useRef(null);
+  const flash = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (selected < 0) return;
+    flash.setValue(1);
+    Animated.timing(flash, { toValue: 0, duration: 700, useNativeDriver: true }).start();
+  }, [selected]);
+  if (!hasNativeComponent('Radar')) return null;
+  return (
+    <View style={styles.radarPanel}>
+      <Text style={styles.sectionLabel}>Radar · native component</Text>
+      <Pressable
+        style={styles.radarPress}
+        onPress={(e) => RadarCommands.select(ref.current, e.nativeEvent.locationX, e.nativeEvent.locationY, RADAR_SIZE)}
+      >
+        <Radar ref={ref} flash={flash} accent={colors.cyan} style={styles.radar} />
+      </Pressable>
+    </View>
+  );
+});
+
 function ActionButton({ label, hint, onPress, accent, innerRef, onLayout, autoFocus }) {
   return (
     <Pressable
@@ -241,6 +277,7 @@ function App() {
     <View style={styles.root}>
       <Nameplates selected={selected} />
       <EnginePanel game={game} />
+      <RadarPanel selected={selected} />
       <Hints />
       <ActionBar paused={!!game.paused} />
       <PauseMenu paused={!!game.paused} engine={game.engine} />
@@ -284,6 +321,9 @@ const styles = StyleSheet.create({
   statValue: { fontFamily: font, fontWeight: '700', fontSize: 18, color: colors.text, marginTop: 2 },
   divider: { height: 1, backgroundColor: colors.line, marginTop: 14 },
   sectionLabel: { fontFamily: font, fontWeight: '600', fontSize: 10, letterSpacing: 1.4, textTransform: 'uppercase', color: colors.textDim, marginTop: 12 },
+  radarPanel: { ...panel, position: 'absolute', right: 20, top: 20, padding: 14, paddingTop: 0, alignItems: 'center' },
+  radarPress: { marginTop: 10, width: RADAR_SIZE, height: RADAR_SIZE, borderRadius: RADAR_SIZE / 2 },
+  radar: { width: RADAR_SIZE, height: RADAR_SIZE, borderRadius: RADAR_SIZE / 2 },
   hints: { position: 'absolute', left: 0, right: 0, bottom: 92, alignItems: 'center' },
   hintText: { fontFamily: font, fontWeight: '500', fontSize: 12, color: colors.textDim, textShadow: '0 1px 4px rgba(0,0,0,0.9)' },
   actionBar: {

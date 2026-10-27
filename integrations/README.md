@@ -42,6 +42,16 @@ needs from its UI layer:
   (fps, unit count, paused, selected) goes to the `game` shared state (`jsui_set_state`),
   and the HUD's buttons answer with `Host.postMessage('game:spawn' | 'game:clear'
   | 'game:pause' | 'game:quit')`.
+* **A native component.** The radar in the top-right corner is the game's
+  own drawing code ([shared/radar.h](shared/radar.h), a `Radar` class
+  registered with `jsui_register_component`): each frame the game hands it
+  its units' world positions and it draws them with Skia under a rotating
+  sweep, with no JSON and no React render. The HUD only lays it out
+  (`requireNativeComponent('Radar')`), pulses its `flash` prop with a
+  native-driver animation when the selection changes, and sends taps to it as
+  a `select` command (`codegenNativeCommands`); the radar selects that unit
+  in the game. Unity and Unreal register no `Radar`, so the HUD leaves it out
+  (`hasNativeComponent`).
 * **JS on its own thread**, as in React Native (`cfg.js_thread =
   JSUI_JS_THREAD_ON`, the examples' default): the game's frames never wait
   for the HUD's JS. The nameplates (a host buffer), hover styles, scrolling
