@@ -12,8 +12,33 @@
 //     onCall={async (name, args) => ...}   // the child's Host.call (return the answer)
 //     onStateChange={(key, value) => ...}  // the child's HostState.set / patch
 //     ref={ref}                            // ref.current.postMessage / call / setState / patchState / reload
+//     services={{ load: { deny: ['https://ads.*'] }, audio: 'none' }}  // see below
 //     style={{ flex: 1 }}
 //   />
+//
+// Services. The child uses this runtime's services unless `services` says
+// otherwise: its loads (bundle, images, fetch) go through this runtime's
+// loader, its sounds and videos through this runtime's audio / video (the
+// host's handlers), and it sees this runtime's fonts and host textures
+// under its own. Per service:
+//
+//   load:  'inherit' (default) | 'none' | (req, next) => ... |
+//          { allow, deny: [glob], rewrite: {fromPrefix: toPrefix}, handle: (req, next) => ... }
+//          allow / deny / rewrite are matched natively (cheap, for images);
+//          `*` in a glob matches anything. A refused load fails like a
+//          network error.
+//   audio: 'inherit' | 'none' | (cmd, next) => ...
+//   video: 'inherit' | 'none' | (cmd, next) => ...
+//   fonts: 'inherit' | 'none'
+//   textures: 'inherit' | 'none' | { inherit: false, alias: {childKey: parentKey} }
+//
+// Middleware (req / cmd, next): call next() to pass the request on (next(changed)
+// to pass on a changed copy), return null / false to refuse it, return
+// nothing to pass it on unchanged. A load middleware may also answer
+// itself: return a string (the body) or {status, statusText, headers,
+// body}. May be async. req: {url, method, headers, body}; cmd: the child's
+// audio / video command ({op: 'play', sound, bus, volume, ...}, {op: 'open',
+// sources: [{uri, type}], ...}).
 //
 // The container is the child's embedder: everything a game does with a JSUI
 // runtime through the C API, the parent does here. Its content box is the
@@ -29,15 +54,84 @@ import { native, warnOnce } from './native.js';
 const hasNative = typeof native.containerCommand === 'function';
 
 const OMIT = {
-  bundleData: 1, hostState: 1, initialProps: 1, ref: 1,
+  bundleData: 1, hostState: 1, initialProps: 1, ref: 1, services: 1,
   onMessage: 1, onCall: 1, onCallCancel: 1, onStateChange: 1, onError: 1,
 };
 
 const json = (v) => (v === undefined ? null : v);
 
+const MODES = { inherit: 'inherit', none: 'none' };
+
+// The `services` prop -> what native sees (modes and rules) and the
+// middleware functions that stay here.
+function normalizeServices(services) {
+  const native = {};
+  const handlers = {};
+  if (!services) return { native: null, handlers };
+  const modeOf = (key, v) => {
+    if (typeof v === 'function') {
+      handlers[key] = v;
+      return 'js';
+    }
+    if (v === false || v === null) return 'none';
+    return MODES[v] || 'inherit';
+  };
+  for (const key of ['audio', 'video']) if (key in services) native[key] = modeOf(key, services[key]);
+  const load = services.load;
+  if (load && typeof load === 'object') {
+    native.load = typeof load.handle === 'function' ? modeOf('load', load.handle) : 'inherit';
+    if (Array.isArray(load.allow)) native.allow = load.allow.map(String);
+    if (Array.isArray(load.deny)) native.deny = load.deny.map(String);
+    const rw = load.rewrite;
+    if (rw) native.rewrite = (Array.isArray(rw) ? rw : Object.entries(rw)).map(([a, b]) => [String(a), String(b)]);
+  } else if (load !== undefined) {
+    native.load = modeOf('load', load);
+  }
+  if ('fonts' in services) native.fonts = modeOf('fonts', services.fonts) !== 'none';
+  const tex = services.textures;
+  if (tex && typeof tex === 'object') {
+    native.textures = tex.inherit !== false;
+    if (tex.alias) native.textureAliases = { ...tex.alias };
+  } else if (tex !== undefined) {
+    native.textures = modeOf('textures', tex) !== 'none';
+  }
+  return { native, handlers };
+}
+
+// Runs one middleware: exactly one of pass(changed) / reply(answer) / block().
+function runMiddleware(fn, input, pass, reply, block, onError) {
+  let settled = false;
+  const once = (f) => (v) => {
+    if (settled) return;
+    settled = true;
+    f(v);
+  };
+  const next = once((changed) => pass(changed === undefined ? input : changed));
+  const finish = (out) => {
+    if (settled) return;
+    if (out === undefined) next();
+    else if (out === null || out === false) once(block)();
+    else once(reply)(out);
+  };
+  const fail = (err) => {
+    if (onError) onError(String((err && err.message) || err));
+    once(block)();
+  };
+  let out;
+  try {
+    out = fn(input, next);
+  } catch (err) {
+    fail(err);
+    return;
+  }
+  if (out && typeof out.then === 'function') out.then(finish, fail);
+  else finish(out);
+}
+
 export function JSUIContainer(props) {
   const hostRef = useRef(null);
   const latest = useRef(props);
+  const lastServices = useRef({ key: '', value: null });
   latest.current = props;
   // Calls the parent made into the child (ref.call): seq -> {resolve, reject}.
   const calls = useRef(null);
@@ -96,6 +190,11 @@ export function JSUIContainer(props) {
     return jsx('View', out);
   }
   if (props.initialProps != null) out.initialProps = props.initialProps;
+  // The same rules keep the same object (no prop update for the bridge).
+  const services = normalizeServices(props.services).native;
+  const servicesKey = services ? JSON.stringify(services) : '';
+  if (lastServices.current.key !== servicesKey) lastServices.current = { key: servicesKey, value: services };
+  if (lastServices.current.value) out.services = lastServices.current.value;
   if (props.hostState != null) out.hostState = props.hostState;
   out.onContainerEvent = (e) => {
     const ev = e.nativeEvent;
@@ -134,6 +233,47 @@ export function JSUIContainer(props) {
       case 'error':
         if (p.onError) p.onError(ev.message);
         break;
+      case 'load': {
+        const { gen, id } = ev;
+        const fn = normalizeServices(p.services).handlers.load;
+        if (!fn) {
+          send({ op: 'load-next', gen, id, request: {} });
+          break;
+        }
+        runMiddleware(
+          fn,
+          ev.request,
+          (request) => send({ op: 'load-next', gen, id, request }),
+          (r) =>
+            send(
+              typeof r === 'string'
+                ? { op: 'load-reply', gen, id, status: 200, body: r }
+                : {
+                    op: 'load-reply', gen, id,
+                    status: r.status == null ? 200 : r.status,
+                    statusText: r.statusText || '',
+                    headers: r.headers || {},
+                    body: r.body == null ? '' : typeof r.body === 'string' ? r.body : JSON.stringify(r.body),
+                  },
+            ),
+          () => send({ op: 'load-block', gen, id }),
+          p.onError,
+        );
+        break;
+      }
+      case 'audio':
+      case 'video': {
+        const { gen, cmd } = ev;
+        const fn = normalizeServices(p.services).handlers[ev.kind];
+        const pass = (changed) => send({ op: ev.kind + '-next', gen, orig: cmd, cmd: changed });
+        if (!fn) {
+          pass(cmd);
+          break;
+        }
+        // An object returned is the command to pass on.
+        runMiddleware(fn, cmd, pass, pass, () => send({ op: ev.kind + '-block', gen, orig: cmd, cmd: {} }), p.onError);
+        break;
+      }
     }
   };
   return jsx('JSUIContainer', out);

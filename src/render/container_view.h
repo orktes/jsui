@@ -45,6 +45,7 @@
 #include "core/node.h"
 #include "core/value.h"
 #include "jsui/jsui.h"
+#include "platform/loader.h"
 
 class SkCanvas;
 struct SkRect;
@@ -92,6 +93,30 @@ class Containers {
 namespace container {
 
 // The child runtime of a JSUIContainer, kept in Node::imageCache.
+// What the child gets of the parent's services (the `services` prop): by
+// default everything. load / audio / video: the parent's (inherit), nothing
+// (none: loads fail, sounds and videos fail), or the parent's JS first (js:
+// each request becomes a containerevent the JSUIContainer component runs
+// through its middleware, which answers with a *-next / *-reply / *-block
+// command). Loads also pass `rewrite` (URL prefix -> prefix, the first that
+// matches), `deny` and `allow` (globs, `*` any run of characters; a URL
+// matching no `allow` pattern is refused when there are any) natively first.
+// fonts / textures: the parent's are seen under the child's own (textures:
+// also only the `textureAliases`, child key -> the parent's key).
+struct Services {
+  enum Mode { Inherit, None, Js };
+  Mode load = Inherit, audio = Inherit, video = Inherit;
+  std::vector<std::pair<std::string, std::string>> rewrite;
+  std::vector<std::string> allow, deny;
+  bool fonts = true;
+  bool textures = true;
+  std::unordered_map<std::string, std::string> textureAliases;
+
+  static Services parse(const Value& v);
+  // Applies rewrite / deny / allow to `url`; false: refused.
+  bool admit(std::string& url) const;
+};
+
 struct NodeState : Node::Cache {
   ~NodeState() override;
   Node* node = nullptr;
@@ -138,6 +163,13 @@ struct NodeState : Node::Cache {
   std::unordered_map<uint64_t, Video> videos;
   // The parent's font generation the child last saw.
   uint32_t parentFonts = 0;
+
+  Services services;
+  // The texture aliases applied to the child (services.textureAliases).
+  std::unordered_map<std::string, std::string> appliedAliases;
+  // Child loads waiting for the parent's JS (services.load "js"), by the
+  // child loader's request id.
+  std::unordered_map<uint64_t, LoadRequest> jsLoads;
 };
 
 // Creates / replaces the child after a props change.

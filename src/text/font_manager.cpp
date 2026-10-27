@@ -368,6 +368,7 @@ void FontManager::setFallbackFamilies(std::vector<std::string> families) {
 bool FontManager::hasFamily(const std::string& family) const { return impl_->registry->find(family) != nullptr; }
 
 void FontManager::inherit(FontManager* parent) {
+  inherited_ = parent;
   impl_->registry->parent = parent ? parent->impl_->registry : nullptr;
   changed();
 }
