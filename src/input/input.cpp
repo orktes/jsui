@@ -11,7 +11,9 @@
 #include "animated/native_animated.h"
 #include "core/document.h"
 #include "js/engine.h"
+#include "render/container_view.h"
 #include "runtime.h"
+#include "surface.h"
 
 namespace jsui {
 
@@ -439,6 +441,8 @@ Node* InputManager::hitNode(Node* n, float px, float py, float* outX, float* out
 unsigned InputManager::capturesAt(float x, float y) {
   Node* hit = hitTest(x, y);
   if (!hit) return 0;
+  float cx, cy;
+  if (JsuiRuntime* child = childPoint(hit, x, y, &cx, &cy)) return unsigned(jsui_hit_test(child, cx, cy));
   unsigned r = 0;
   if (consumes(hit, kPointer)) r |= JSUI_HIT_POINTER;
   if (consumes(hit, kWheel) || scrollableAncestor(hit, 0, 0)) r |= JSUI_HIT_SCROLL;
@@ -537,6 +541,9 @@ void InputManager::hitRegionsOf(Node* n, const Affine& parent, const Rect& clip,
   float y0 = *std::min_element(ys, ys + 4), y1 = *std::max_element(ys, ys + 4);
   // consumes(): a TextInput takes everything, else what the path listens to.
   mask |= n->type() == NodeType::TextInput ? ~0u : listenMask(n);
+  // A JSUIContainer's child may capture anywhere in it (its own regions are
+  // not merged in).
+  if (container::child(n)) mask |= kPointer | kWheel;
   if (n->type() == NodeType::ScrollView && scrollableAncestor(n, 0, 0) == n) scroll = true;
   const auto& kids = n->children();
   const bool text = n->type() == NodeType::Text;
@@ -764,6 +771,35 @@ void InputManager::updateCursor(Node* hit) {
 
 Node* InputManager::alive(uint32_t id) const { return id ? doc_.get(id) : nullptr; }
 
+// ------------------------------------------------------- JSUIContainers
+
+JsuiRuntime* InputManager::childPoint(const Node* n, float x, float y, float* cx, float* cy) const {
+  JsuiRuntime* child = container::child(n);
+  float lx, ly;
+  if (!child || !toLocal(n, x, y, &lx, &ly) || !container::toChild(n, lx, ly, cx, cy)) return nullptr;
+  return child;
+}
+
+JsuiRuntime* InputManager::focusedChild() const { return focused_ ? container::child(focused_) : nullptr; }
+
+bool InputManager::childMouseMove(Node* hit, float x, float y) {
+  auto route = childRoutes_.find(kMousePointerId);
+  Node* to = route != childRoutes_.end() ? alive(route->second.node) : hit;
+  if (to && !container::child(to)) to = nullptr;
+  // Hover leaves the child the mouse is no longer over.
+  if (childHover_ && (!to || to->id() != childHover_)) {
+    if (JsuiRuntime* old = container::child(alive(childHover_))) jsui_send_mouse_leave(old);
+    childHover_ = 0;
+  }
+  float cx, cy;
+  JsuiRuntime* child = to ? childPoint(to, x, y, &cx, &cy) : nullptr;
+  if (!child) return false;
+  childHover_ = to->id();
+  bool r = jsui_send_mouse_move(child, cx, cy);
+  if (to == hit) cursor_ = jsui_get_cursor(child);
+  return r || (route != childRoutes_.end() && route->second.owned);
+}
+
 bool InputManager::mouseMove(float x, float y) {
   bool moved = !mouseInside_ || x != mouse_.x || y != mouse_.y;
   mouse_.x = x;
@@ -772,6 +808,9 @@ bool InputManager::mouseMove(float x, float y) {
   uint32_t hitId = idOf(hitTest(x, y));
   updateHover(mouse_, alive(hitId));
   updateCursor(alive(hitId));
+  bool child = childMouseMove(alive(hitId), x, y);
+  // A gesture the child owns is not the parent's.
+  if (auto route = childRoutes_.find(kMousePointerId); route != childRoutes_.end() && route->second.owned) return true;
   uint32_t targetId = mouse_.captureId && alive(mouse_.captureId) ? mouse_.captureId : hitId;
   bool handled = false;
   if (moved && dragInputId_) editPointerDrag(mouse_);  // drag-selecting text
@@ -780,8 +819,8 @@ bool InputManager::mouseMove(float x, float y) {
   if (moved && alive(targetId) && consumes(alive(targetId), kMove))
     handled = prevented(askPointer("pointermove", alive(targetId), mouse_, -1, x, y, false));
   // While a button is held the whole gesture belongs to whoever got the press.
-  if (mouse_.buttons) return handled || mouse_.owned;
-  return handled || consumes(alive(hitId), kPointer);
+  if (mouse_.buttons) return handled || mouse_.owned || child;
+  return handled || child || consumes(alive(hitId), kPointer);
 }
 
 void InputManager::focusFromPointer(Node* hit) {
@@ -880,6 +919,29 @@ bool InputManager::mouseButton(float x, float y, int button, bool down, int mods
   if (!mouseInside_ || x != mouse_.x || y != mouse_.y) consumed = mouseMove(x, y);
   uint32_t hitId = idOf(hitTest(x, y));
   int bit = domButtonBit(button);
+  // A JSUIContainer under the press (or holding the mouse's gesture).
+  auto route = childRoutes_.find(kMousePointerId);
+  if (route == childRoutes_.end() && down && !mouse_.buttons) {
+    Node* hit = alive(hitId);
+    if (hit && container::child(hit)) route = childRoutes_.emplace(kMousePointerId, ChildRoute{hitId}).first;
+  }
+  if (route != childRoutes_.end()) {
+    ChildRoute& r = route->second;
+    float cx, cy;
+    JsuiRuntime* child = childPoint(alive(r.node), x, y, &cx, &cy);
+    bool first = r.buttons == 0;
+    if (down) r.buttons |= bit;
+    else r.buttons &= ~bit;
+    bool used = child && jsui_send_mouse_button(child, cx, cy, JsuiMouseButton(button), down, mods);
+    if (down && first) {
+      r.owned = used;
+      // The child's press focuses the container (keys go to the child).
+      if (used && button == 0) focusFromPointer(alive(r.node));
+    }
+    bool owned = r.owned;
+    if (r.buttons == 0) childRoutes_.erase(route);
+    if (owned) return true;
+  }
   if (down) {
     if (mouse_.buttons & bit) return mouse_.owned;  // duplicate down
     bool first = mouse_.buttons == 0;
@@ -899,6 +961,8 @@ bool InputManager::mouseButton(float x, float y, int button, bool down, int mods
 
 bool InputManager::mouseLeave() {
   mouseInside_ = false;
+  if (JsuiRuntime* child = container::child(alive(childHover_))) jsui_send_mouse_leave(child);
+  childHover_ = 0;
   leaveAll(mouse_);
   hovered_ = nullptr;
   cursor_ = "default";
@@ -910,6 +974,11 @@ bool InputManager::mouseWheel(float x, float y, float dx, float dy) {
   if (!mouseInside_ || x != mouse_.x || y != mouse_.y) mouseMove(x, y);
   Node* target = hitTest(x, y);
   if (!target) return false;  // outside the viewport
+  {
+    float cx, cy;
+    if (JsuiRuntime* child = childPoint(target, x, y, &cx, &cy))
+      if (jsui_send_mouse_wheel(child, cx, cy, dx, dy)) return true;
+  }
   // Like pointer moves, wheel events reach JS only when a node on the path
   // listens (onWheel); native Animated.event mappings see them regardless.
   bool js = pathListens(target, kWheel);
@@ -956,6 +1025,26 @@ bool InputManager::touch(int id, int phase, float x, float y) {
   if (!std::isfinite(x) || !std::isfinite(y)) return false;
   // touches_ is only resized here (JS cannot inject input), so the index
   // stays valid across the dispatches below.
+  // A JSUIContainer under the touch's start gets it first.
+  int routeKey = id + 1;
+  auto route = childRoutes_.find(routeKey);
+  if (phase == 0 && route == childRoutes_.end()) {
+    Node* hit = hitTest(x, y);
+    if (hit && container::child(hit)) route = childRoutes_.emplace(routeKey, ChildRoute{hit->id()}).first;
+  }
+  if (route != childRoutes_.end()) {
+    ChildRoute& r = route->second;
+    float cx, cy;
+    JsuiRuntime* child = childPoint(alive(r.node), x, y, &cx, &cy);
+    bool used = child && jsui_send_touch(child, id, phase, cx, cy);
+    if (phase == 0) {
+      r.owned = used;
+      if (used) focusFromPointer(alive(r.node));
+    }
+    bool owned = r.owned;
+    if (phase >= 2) childRoutes_.erase(route);
+    if (owned) return true;
+  }
   size_t index = 0;
   while (index < touches_.size() && touches_[index].touchId != id) index++;
   if (phase == 0) {
@@ -1140,6 +1229,7 @@ bool InputManager::isFocusable(const Node* n) const {
   const Value& f = props["focusable"];
   if (f.isBool()) return f.asBool();
   if (n->type() == NodeType::TextInput) return props["editable"].asBool(true) || !props["editable"].isBool();
+  if (n->type() == NodeType::Container) return true;  // its child takes the keys
   return (listenMask(n) & kPress) != 0;
 }
 
@@ -1155,6 +1245,8 @@ void InputManager::setFocus(Node* n) {
   uint32_t oldId = idOf(focused_), newId = idOf(n);
   focused_ = nullptr;
   editFocus(alive(oldId), false);
+  // Focus leaving a JSUIContainer leaves its child too.
+  if (JsuiRuntime* child = container::child(alive(oldId))) internalRuntime(child)->main().input->blur();
   if (Node* old = alive(oldId)) {
     // DOM order: blur the old element first (nothing is focused meanwhile).
     Value::Object ev = baseEvent("blur", old);
@@ -1181,6 +1273,9 @@ void InputManager::setFocus(Node* n) {
 void InputManager::nodeRemoved(Node* n) {
   if (focused_ == n) focused_ = nullptr;
   if (hovered_ == n) hovered_ = nullptr;
+  if (childHover_ == n->id()) childHover_ = 0;
+  for (auto it = childRoutes_.begin(); it != childRoutes_.end();)
+    it = it->second.node == n->id() ? childRoutes_.erase(it) : std::next(it);
   autoFocusSeen_.erase(n->id());
   scrolls_.erase(n->id());
 }
@@ -1395,6 +1490,13 @@ void InputManager::tickFocusScopes() {
 
 bool InputManager::key(const char* keyName, const char* code, bool down, bool repeat, int mods) {
   std::string id = code && *code ? code : keyName ? keyName : "";
+  // The focused JSUIContainer's child first; a release follows its press.
+  if (JsuiRuntime* child = focusedChild()) {
+    bool used = jsui_send_key(child, keyName, code, down, repeat, mods);
+    if (used && down) childKeys_.insert(id);
+    if (!down && childKeys_.erase(id)) return true;
+    if (used) return true;
+  }
   bool r = keyAction(keyName, code, down, repeat, mods);
   if (!down) return consumedKeys_.erase(id) > 0 || r;
   if (r) consumedKeys_.insert(id);
@@ -1479,6 +1581,8 @@ bool InputManager::keyDefault(const Deferred& d, bool prevented) {
 
 bool InputManager::text(const char* utf8) {
   if (!utf8 || !*utf8) return false;
+  if (JsuiRuntime* child = focusedChild())
+    if (jsui_send_text(child, utf8)) return true;
   Value::Object ev = baseEvent("textinput", focused_);
   ev["text"] = Value(utf8);
   int flags = 0;
@@ -1593,6 +1697,13 @@ void InputManager::padRepeat(Repeat& r, int dir) {
 }
 
 bool InputManager::gamepadButton(int pad, int button, bool down, float value) {
+  if (JsuiRuntime* child = focusedChild()) {
+    bool used = jsui_send_gamepad_button(child, pad, button, down, value);
+    uint64_t key = (uint64_t(uint32_t(pad)) << 32) | uint32_t(button);
+    if (used && down) childPadButtons_.insert(key);
+    if (!down && childPadButtons_.erase(key)) return true;
+    if (used) return true;
+  }
   Pad* ps = (pad >= 0 && pad < int(pads_.size()) && button >= 0 && button < 32) ? &pads_[size_t(pad)] : nullptr;
   bool wasDown = ps && (ps->buttons >> button) & 1u;
   bool r = gamepadButtonAction(pad, button, down, value);
@@ -1689,6 +1800,8 @@ bool InputManager::padButtonDefault(const Deferred& d, bool handled) {
 
 bool InputManager::gamepadAxis(int pad, int axis, float value) {
   if (!std::isfinite(value)) return false;
+  if (JsuiRuntime* child = focusedChild())
+    if (jsui_send_gamepad_axis(child, pad, axis, value)) return true;
   Pad* ps = (pad >= 0 && pad < int(pads_.size())) ? &pads_[size_t(pad)] : nullptr;
   if (ps && axis >= 0 && axis < 4) {
     if (ps->axes[axis] == value) return false;  // hosts often resend unchanged axes each frame

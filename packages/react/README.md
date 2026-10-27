@@ -155,6 +155,15 @@ end?)`, `pause`, `resume`, `reset`). The runtime plays it with Skia's Skottie:
 no JS per frame. `import LottieView from 'lottie-react-native'` works too
 (the CLI aliases it).
 
+Apps inside apps: `<JSUIContainer bundleSrc="apps/game.js" />` (or
+`bundleData={source}`) runs another JSUI bundle as an isolated runtime (its
+own JS context) inside the view, with `appKey`, `initialProps` and
+`hostState`. The container is that bundle's host: its `Host.postMessage`,
+`Host.call` and `HostState` changes arrive as `onMessage`, `onCall` (return
+the answer) and `onStateChange`, and the ref's `postMessage`, `call`,
+`setState`, `patchState` and `reload` talk to it. Pointer input over it and
+keys / gamepad input while it has focus go to the child first.
+
 Shaders: `<ShaderView source={sksl\`...\`} uniforms={{...}} images={{...}} />`
 paints the view with your own SkSL (Skia runtime effects, on every
 renderer). `uniforms` take numbers, arrays, colors and `Animated` values

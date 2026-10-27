@@ -223,6 +223,73 @@ wants one.
 * Surfaces survive `jsui_reload` and start their apps again with the new
   bundle. Their roots render on transparent.
 
+## Nested runtimes (JSUIContainer)
+
+Surfaces share one JS context. `<JSUIContainer>` runs a *separate* runtime
+(its own JS context, React tree, document, input, fonts, image cache) inside
+a node of the parent: an app that hosts apps built with JSUI
+(`src/render/container_view.*`, `packages/react/src/container.js`).
+
+```jsx
+<JSUIContainer
+  bundleSrc="apps/solitaire.js"      // or bundleData={source}
+  appKey="Solitaire" initialProps={{ seed: 7 }}
+  hostState={{ theme: 'dark' }}
+  onMessage={(name, payload) => {}} onCall={async (name, args) => answer}
+  onStateChange={(key, value) => {}} onError={(message) => {}}
+  ref={ref}                          // postMessage / call / setState / patchState / reload
+  style={{ width: 640, height: 360 }} />
+```
+
+The container node (`NodeType::Container`, "JSUIContainer") is the child's
+embedder and does what a host does with the C API:
+
+* **Source.** `bundleSrc` is resolved against the parent's base URL and the
+  child's base URL becomes it; the child's every load (bundle, images,
+  fonts, `fetch`) goes through the parent's `ResourceLoader`, so the
+  embedder's `load` callback decides what a URL means. Inline source reaches
+  native once per change as a `load` command (`bundleData` as a prop works
+  too, but the bridge would copy it on every update).
+* **Frames.** `Containers::tick` runs in the parent's `Runtime::tick` after
+  layout: it gives each child its node's content box (layout size less
+  padding and border) as viewport at the parent's pixel ratio, creates /
+  replaces the child when the source changed, runs queued commands and
+  `jsui_tick`s it. A child that has something new to paint marks its node
+  paint-dirty, so the parent's damage covers the node and the host repaints.
+  The parent's `jsui_wants_frame` / `jsui_next_timer` include its children's.
+  The child's JS runs only there, never nested in the parent's JS.
+* **Painting.** `container::paint` draws the child's frame into the parent's
+  canvas at the content box, clipped to the node's inner rounded rect, under
+  the node's transforms and opacity (`Surface::renderCanvas` with the canvas
+  scaled back to device px, inside a `NestedPaintScope` that hides the
+  parent's LayerCache). No texture: the same on every backend, also inside
+  deferred GPU frames.
+* **Input** (`InputManager`, "JSUIContainers"). Pointer, touch and wheel
+  input over the node goes to the child first, in its coordinates. A press
+  routes its pointer's moves and release to the same child; a press the
+  child consumed is the child's alone, otherwise the parent handles it as
+  well. The container is focusable (a press the child takes focuses it;
+  gamepad / Tab navigation can move onto it); keys, text and gamepad input
+  go to the focused container's child first and what it does not consume (a
+  D-pad press at its edge) moves on in the parent. Focus leaving the
+  container blurs the child's focus. `jsui_hit_test` asks the child;
+  `jsui_hit_regions` reports the whole container as capturing.
+* **Host API both ways.** The child's `Host.postMessage`, `Host.call`,
+  `HostState.set/patch` and error logs become `containerevent` events on
+  the node (`kind`: `message`, `call`, `callCancel`, `state`, `error`,
+  `callResult`); the component turns them into `onMessage`, `onCall` (its
+  return value or promise answers the call: `resolve` / `reject` commands),
+  `onCallCancel`, `onStateChange` and `onError`. The parent's ref methods
+  and `hostState` prop are `containerCommand(id, {op, ...})` bridge calls
+  (`post`, `call` → `jsui_call_ui` with a `callResult` event back, `state`,
+  `reload`, `load`), queued on the node and run by the next tick.
+* **Isolation and limits.** Nothing is shared but the loader, the clock and
+  the log. Fonts registered on the parent are not the child's; the child's
+  sounds use the built-in audio backend and its `<Video>` has no handler
+  (both handlers answer the embedder's own runtime); host textures set on
+  the parent are not visible in the child. The child runs JS on the owner
+  thread (no JS thread of its own). Containers nest.
+
 ## GPU backend
 
 The runtime draws with Skia on the host's own GPU device and queue: it
@@ -1446,7 +1513,7 @@ Native globals (installed by `JsEngine`):
 | --- | --- |
 | `__jsui_native.rootId` | id of the root container node |
 | `__jsui_native.devMode` | `true` when the runtime runs with `cfg.dev_mode` |
-| `createNode(type, rootTag?) → id` | `type` ∈ `View`, `Text`, `RawText`, `Image`, `ScrollView`, `TextInput`, `LottieView`, `ShaderView`, `VectorView`; created in the document of surface `rootTag` (default: the main one; see "Surfaces"). The id is taken at once; the node exists natively when the command is applied (see "Command buffer") |
+| `createNode(type, rootTag?) → id` | `type` ∈ `View`, `Text`, `RawText`, `Image`, `ScrollView`, `TextInput`, `LottieView`, `ShaderView`, `VectorView`, `JSUIContainer`; created in the document of surface `rootTag` (default: the main one; see "Surfaces"). The id is taken at once; the node exists natively when the command is applied (see "Command buffer") |
 | `viewport(rootTag?) → {width, height, scale}` | logical size of a surface (default: the main one) |
 | `surfaceApp(rootTag) → {appKey, initialProps} \| null` | the app the host picked for a surface |
 | `updateProps(id, reactProps, hidden, keepStyle?)` / `getProps(id)` | the host config's prop path, done natively: builds what native sees from the React props (event handlers → `__events`, the responder hints `__blocksNative` / `__keepsGesture` and `__passive` (see "Input routing details"), flattened style, `pointerEvents` / hidden into it) and diffs it in `Node::setProps` (see "Performance: Props"); `getProps` returns what native holds (the inspector reads it). `keepStyle` (`setNativeProps` of non-style props; `updatePropsKeepsStyle: true` says the runtime has it): `reactProps.style` is ignored and the node keeps the style it has when the command is applied, `patchStyle` and native Animated writes included. The host JS engine has neither (`@orktes/jsui-react` then diffs in JS and calls `setProps`) |
@@ -1465,6 +1532,7 @@ Native globals (installed by `JsEngine`):
 | `flashScrollIndicators(id)` | shows a ScrollView's overlay indicators for ~1 s |
 | `lottieData(json) → key` | hands an inline Lottie composition to native once; LottieViews use the key (content hash) as their `source`. `lottie`: `true` when the build plays Lottie |
 | `lottieCommand(id, cmd, a, b) → bool` | LottieView `play` (frames `a`–`b`, undefined: the whole composition) / `pause` / `resume` / `reset` |
+| `containerCommand(id, cmd) → bool` | a JSUIContainer's commands to its child runtime: `{op: 'load', data}`, `post`, `call`, `resolve`, `reject`, `state`, `reload` (see "Nested runtimes") |
 | `shaderInfo(sksl) → {error} \| {uniforms, children}` | compiles a ShaderView source (shared with the views using it) |
 | `shaderPreload(sksl, images?) → like shaderInfo` / `shadersWarming() → n` | compiles it and warms its GPU pipelines in the next frame (see "Shaders") / warm-ups still queued |
 | `postMessage(name, json)` | to the embedder's `on_message`. A string is passed through as the JSON text; any other value is `JSON.stringify`-ed |

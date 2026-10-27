@@ -20,6 +20,7 @@
 #include "js/inspector.h"
 #include "js/js_thread.h"
 #include "js/worklets.h"
+#include "render/container_view.h"
 #include "render/image_cache.h"
 #include "render/lottie.h"
 #include "render/native_component.h"
@@ -71,6 +72,7 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
   components = std::make_unique<NativeComponents>(*this);
   audio = std::make_unique<Audio>(*this);
   video = std::make_unique<Video>(*this);
+  containers = std::make_unique<Containers>(*this);
   animated = std::make_unique<NativeAnimated>(doc);
   animated->findView = [this](uint32_t id) { return findNode(id); };
   animated->buffers = &buffers;
@@ -126,6 +128,7 @@ void Runtime::attach(Surface& s) {
   d.lotties = lotties.get();
   d.shaders = shaders.get();
   d.components = components.get();
+  d.containers = containers.get();
   s.input = std::make_unique<InputManager>(*this, d, s.cursor);
   InputManager* in = s.input.get();
   d.onNodeDestroyed = [this, in](Node* n) {
@@ -885,6 +888,10 @@ void Runtime::tick(double nowMs, bool sync) {
   // that asked is laid out), with the onLayout events.
   answerMeasures();
   inbound.endBatch();
+  // JSUIContainers: their child runtimes tick at their laid-out sizes, and
+  // what they told their embedder reaches the bundle in this tick.
+  containers->tick(nowMs);
+  deliverContainerEvents();
   // ... and the onLayout handlers' and measure callbacks' work.
   if (sync && jsThread_ && !jsLockstep_) syncJs(std::max(0.0, syncTimeout - (wallMs() - syncStart)), false);
   if (jsThreadMode_) {
@@ -969,6 +976,7 @@ void Runtime::tickNative(double nowMs) {
   lotties->tick(nowMs);   // so do LottieView events
   shaders->tick(nowMs);   // and ShaderView errors
   components->tick(nowMs);  // and native component events
+  containers->tickNative(nowMs);  // and JSUIContainers' children (their JS too waits)
   inbound.beginBatch();
   for (auto& s : surfaces_) {
     s->doc.layout();
@@ -1031,6 +1039,21 @@ void Runtime::deliverComponentEvents() {
     Value data = e.json.empty() ? Value(Value::Object{}) : Value::parseJson(e.json);
     Value::Object ev{{"type", Value("componentevent")}, {"target", Value(double(e.node))}, {"name", Value(e.name)},
                      {"data", std::move(data)}};
+    inbound.event(Value(std::move(ev)), false);
+  }
+}
+
+void Runtime::deliverContainerEvents() {
+  if (containers->events.empty()) return;
+  std::vector<Containers::Event> events = std::move(containers->events);
+  containers->events.clear();
+  if (!js) return;
+  for (Containers::Event& e : events) {
+    Node* n = findNode(e.node);
+    if (!n || n->type() != NodeType::Container) continue;
+    Value::Object ev = e.payload.asObject();
+    ev["type"] = Value("containerevent");
+    ev["target"] = Value(double(e.node));
     inbound.event(Value(std::move(ev)), false);
   }
 }
@@ -1131,7 +1154,7 @@ bool Runtime::wantsFrame() const {
   // A pending repaint alone is not a reason to tick: the host paints after
   // the tick it already ran.
   if (reloadRequested_ || loader.pending() > 0 || images->pendingDecodes() > 0 || (js && js->hasPendingWork(now + 17)) || animated->animating() ||
-      !animated->ends.empty() || lotties->animating() || shaders->animating() || components->animating() || state.hasDirty() || buffers.hasDirty() || textures.hasDirty() || audio->hasEvents() || audio->busy() || video->hasEvents() || !uiResults_.empty() || !doomed_.empty() ||
+      !animated->ends.empty() || lotties->animating() || shaders->animating() || components->animating() || state.hasDirty() || buffers.hasDirty() || textures.hasDirty() || audio->hasEvents() || audio->busy() || video->hasEvents() || containers->animating() || !uiResults_.empty() || !doomed_.empty() ||
       !hostQueue.empty() || !measureRequests.empty() || worklets->wantsFrame() || worklets->nextTimer() <= now + 17)
     return true;
   for (const auto& s : surfaces_)
@@ -1142,7 +1165,7 @@ bool Runtime::wantsFrame() const {
 }
 
 double Runtime::nextTimer() const {
-  double due = std::min(js ? js->nextTimer() : 1e300, worklets->nextTimer());
+  double due = std::min({js ? js->nextTimer() : 1e300, worklets->nextTimer(), containers->nextTimer()});
   return due >= 1e300 ? std::numeric_limits<double>::infinity() : due;
 }
 

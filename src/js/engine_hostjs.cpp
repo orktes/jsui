@@ -43,6 +43,7 @@
 #include "js/engine.h"
 #include "js/engine_impl.h"
 #include "platform/loader.h"
+#include "render/container_view.h"
 #include "render/lottie.h"
 #include "render/native_component.h"
 #include "render/shader_view.h"
@@ -546,6 +547,12 @@ EMSCRIPTEN_KEEPALIVE int jsui_hjs_component_command(int e, double id, const char
 
 EMSCRIPTEN_KEEPALIVE int jsui_hjs_has_component(int e, const char* name, int len) {
   return R(e).components->has(str(name, len)) ? 1 : 0;
+}
+
+// containerCommand(id, JSON command) (render/container_view.h).
+EMSCRIPTEN_KEEPALIVE int jsui_hjs_container_command(int e, double id, const char* json, int len) {
+  Node* n = nodeOf(e, id);
+  return n && container::command(n, Value::parseJson(str(json, len))) ? 1 : 0;
 }
 
 // shaderInfo / shaderPreload (preload 1, with the images prop as JSON) -> JSON.

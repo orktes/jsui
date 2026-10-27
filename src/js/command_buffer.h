@@ -64,6 +64,7 @@ class CommandBuffer {
     SetSelection,        // a = id, x = start, y = end (UTF-16 indices)
     LottieCommand,       // a = id, payload = command, x / y = frames (NaN: whole composition)
     ComponentCommand,    // a = id, payload = command name, args (array)
+    ContainerCommand,    // a = id, payload = command object (render/container_view.h, container::command)
     Measure,             // a = id, b = measureAsync request (answered after the next layout)
     ListenGlobal,        // a = 1 / 0 (listening or not), payload = event type, keys it may veto (null: any)
     // ---- native Animated (a, b: tags as int32 bits)

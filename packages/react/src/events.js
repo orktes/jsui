@@ -40,6 +40,7 @@ const TYPES = {
   progress: ['onProgress', false, false],
   animationfinish: ['onAnimationFinish', false, true],
   componentevent: ['onComponentEvent', false, true],
+  containerevent: ['onContainerEvent', false, true],
   gamepadbutton: ['onGamepadButton', true, true],
   gamepadaxis: ['onGamepadAxis', true, false],
 };

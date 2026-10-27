@@ -9,6 +9,7 @@
 #include "animated/native_animated.h"
 #include "core/document.h"
 #include "input/input.h"
+#include "render/container_view.h"
 #include "render/lottie.h"
 #include "render/native_component.h"
 #include "runtime.h"
@@ -290,6 +291,12 @@ void CommandBuffer::applyOne(Runtime& rt, const Command& cmd) {
       std::string name = readString(at);
       Value args = readValue(at);
       result_.ok = rt.components->command(rt.findNode(cmd.a), name, args);
+      return;
+    }
+    case Op::ContainerCommand: {
+      Value c = readValue(at);
+      Node* n = rt.findNode(cmd.a);
+      result_.ok = n && container::command(n, c);
       return;
     }
     case Op::ListenGlobal: {

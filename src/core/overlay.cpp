@@ -54,7 +54,7 @@ constexpr float kEps = 1e-4f;
 bool clips(const Node* n) {
   return n->style().overflow != Overflow::Visible || n->type() == NodeType::ScrollView ||
          n->type() == NodeType::Image || n->type() == NodeType::Lottie || n->type() == NodeType::Shader ||
-         n->type() == NodeType::Vector || n->type() == NodeType::Component;
+         n->type() == NodeType::Vector || n->type() == NodeType::Component || n->type() == NodeType::Container;
 }
 
 // The node's border box to its render parent's content space, as the

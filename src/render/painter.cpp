@@ -58,6 +58,7 @@
 #include "modules/skparagraph/include/Paragraph.h"
 #include "render/image_cache.h"
 #include "render/image_node.h"
+#include "render/container_view.h"
 #include "render/lottie.h"
 #include "render/native_component.h"
 #include "render/shader_view.h"
@@ -1927,7 +1928,7 @@ SkBlendMode blendMode(uint8_t i) {
 bool clipsChildren(const Node* n) {
   return n->style().overflow != Overflow::Visible || n->type() == NodeType::ScrollView ||
          n->type() == NodeType::Image || n->type() == NodeType::Lottie || n->type() == NodeType::Shader ||
-         n->type() == NodeType::Vector || n->type() == NodeType::Component;
+         n->type() == NodeType::Vector || n->type() == NodeType::Component || n->type() == NodeType::Container;
 }
 
 bool paintsChildren(const Node* n) {
@@ -2657,6 +2658,7 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
   if (own && n->type() == NodeType::Shader) shader::paint(n, c, b.inner.rect(), b.inner);
   if (own && n->type() == NodeType::Vector) vector::paint(n, c, b.content, b.inner);
   if (own && n->type() == NodeType::Component) component::paint(n, c, b.content, b.inner);
+  if (own && n->type() == NodeType::Container) container::paint(n, c, b.content, b.inner);
 
   if (paintsChildren(n) && (!n->children().empty() || !n->ghosts.empty())) {
     bool clip = clipsChildren(n);
@@ -2747,6 +2749,13 @@ void LayerCache::endFrame() {
 }
 LayerCacheScope::LayerCacheScope(LayerCache* cache) : prev_(tLayerCache) { tLayerCache = cache; }
 LayerCacheScope::~LayerCacheScope() { tLayerCache = prev_; }
+NestedPaintScope::NestedPaintScope() : layers_(tLayerCache), minOccluderArea_(tMinOccluderArea) {
+  tLayerCache = nullptr;
+}
+NestedPaintScope::~NestedPaintScope() {
+  tLayerCache = layers_;
+  tMinOccluderArea = minOccluderArea_;
+}
 
 namespace {
 
