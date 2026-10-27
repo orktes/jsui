@@ -145,6 +145,11 @@ if(JSUI_WEBGPU)
   # texture through Emdawnwebgpu's WebGPU object (web/jsui-webgpu.js).
   string(APPEND _jsui_runtime_methods ",WebGPU")
   target_compile_definitions(jsui-wasm PRIVATE JSUI_WEBGPU=1)
+  # web/native/jsui_webgpu_compat.js: texture view swizzles on browsers with
+  # the older dictionary IDL.
+  set(_jsui_webgpu_compat "${CMAKE_SOURCE_DIR}/web/native/jsui_webgpu_compat.js")
+  target_link_options(jsui-wasm PRIVATE "--pre-js=${_jsui_webgpu_compat}")
+  set_property(TARGET jsui-wasm APPEND PROPERTY LINK_DEPENDS "${_jsui_webgpu_compat}")
 endif()
 if(JSUI_GPU)
   # Skia Ganesh on WebGL (third_party/skia-wasm-webgl, WEBGL=1
