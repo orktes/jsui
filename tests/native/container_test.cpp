@@ -432,7 +432,7 @@ TEST(container_audio_and_video_play_through_the_parent) {
   CHECK(open->texture.rfind("jsuic:", 0) == 0);
   // Frames the host draws there are the child's 'clip' texture.
   uint32_t frame[4] = {0xff0000ff, 0xff0000ff, 0xff0000ff, 0xff0000ff};
-  CHECK(jsui_set_texture_pixels(p.rt, open->texture.c_str(), frame, 2, 2, 8));
+  CHECK(jsui_set_texture_pixels(p.rt, open->texture.c_str(), frame, 2, 2, 8, 0) == 1);
   int w = 0, h = 0;
   uint64_t version = 0;
   CHECK(jsui::internalRuntime(p.child())->textures.size("clip", &w, &h, &version));
@@ -448,7 +448,7 @@ TEST(container_audio_and_video_play_through_the_parent) {
   const Value* vs = p.event("message", "video");
   CHECK(vs && (*vs)["payload"].asArray().size() == 1 &&
         (*vs)["payload"].asArray()[0].asArray()[0].asNumber() == childVideo &&
-        (*vs)["payload"].asArray()[0].asArray()[1].asNumber() == JSUI_VIDEO_PLAYING);
+        (*vs)["payload"].asArray()[0].asArray()[1].asNumber() == double(JSUI_VIDEO_PLAYING));
 
   // Fonts: the parent's, under the child's own.
   CHECK(jsui::internalRuntime(p.child())->fonts.inherited() == &jsui::internalRuntime(p.rt)->fonts);
@@ -508,9 +508,9 @@ TEST(container_services_narrow_what_the_child_gets) {
   CHECK(p.until([&] { return p.event("message", "audio") != nullptr; }));
   const Value* a = p.event("message", "audio");
   CHECK(a && (*a)["payload"].asArray().size() == 1 &&
-        (*a)["payload"].asArray()[0].asArray()[2].asNumber() == JSUI_AUDIO_FAILED);
+        (*a)["payload"].asArray()[0].asArray()[2].asNumber() == double(JSUI_AUDIO_FAILED));
   const Value* v = p.event("message", "video");
-  CHECK(v && (*v)["payload"].asArray()[0].asArray()[1].asNumber() == JSUI_VIDEO_FAILED);
+  CHECK(v && (*v)["payload"].asArray()[0].asArray()[1].asNumber() == double(JSUI_VIDEO_FAILED));
   CHECK(jsui::internalRuntime(p.child())->fonts.inherited() == nullptr);
 }
 
