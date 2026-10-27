@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-// Which part of the /screens/cinematic trailer loses a browser's WebGL
+// Which part of the /examples/cinematic trailer loses a browser's WebGL
 // context (seen in Playwright WebKit 26 on macOS: a requestVideoFrameCallback
 // on a playing video loses every WebGL context of the page). Runs each
 // variant in a fresh page for --seconds and reports every webglcontextlost /
 // webglcontextrestored, with the trailer's state:
 //
-//   site-poster      the showcase on /screens/cinematic, ?autoplay=0 (poster only),
+//   site-poster      the showcase on /examples/cinematic, ?autoplay=0 (poster only),
 //                    on the page's main thread (?worker=0)
 //   site-video       the same, playing the trailer (1080p VP9 on the GPU paths)
 //   site-worker      the same in worker mode (?worker=1)
@@ -192,7 +192,7 @@ for (const variant of VARIANTS) {
   let result = '';
   if (variant.startsWith('site')) {
     const q = { 'site-poster': 'autoplay=0&worker=0', 'site-video': 'worker=0', 'site-worker': 'worker=1' }[variant] + '&intro=0';
-    await page.goto(`${ORIGIN}/index.html?${q}#/screens/cinematic`);
+    await page.goto(`${ORIGIN}/index.html?${q}#/examples/cinematic`);
     await page.waitForFunction(() => window.jsui, null, { timeout: 60000 });
     await page.waitForTimeout(SECONDS * 1000);
     result = await page.evaluate(() => {

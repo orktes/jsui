@@ -2,16 +2,14 @@
 // runtime compiled to WebAssembly; this file is ordinary React Native code.
 import React, { useEffect, useRef } from 'react';
 import { Animated, AppRegistry, Easing, Fonts, ScrollView, StyleSheet, Text, UISounds, View, precompileShaders } from 'react-native';
-import { RouterProvider, segments, useRouterState } from './router.js';
+import { PageScrollProvider, RouterProvider, segments, useRouterState } from './router.js';
 import { mono, site } from './theme.js';
 import { NavBar, NAV_HEIGHT } from './components/NavBar.jsx';
 import { Footer } from './components/Footer.jsx';
 import { HomePage } from './pages/Home.jsx';
 import { ScreensPage } from './pages/Screens.jsx';
-import { InteractionsPage } from './pages/Interactions.jsx';
-import { InputPage } from './pages/Input.jsx';
-import { MotionPage } from './pages/Motion.jsx';
-import { VectorPage } from './pages/Vector.jsx';
+import { UseCasesPage } from './pages/UseCases.jsx';
+import { FeaturesPage } from './pages/Features.jsx';
 import { PlaygroundPage } from './pages/Playground.jsx';
 import { EmbedPage } from './pages/Embed.jsx';
 import { UI_SOUNDS, applyMix, currentMix, preloadUISounds } from './sound.js';
@@ -23,11 +21,9 @@ Fonts.load(mono, require('./assets/fonts/JetBrainsMonoNL-Bold.ttf'), { weight: 7
 
 export const PAGES = {
   '': HomePage,
-  screens: ScreensPage,
-  interactions: InteractionsPage,
-  input: InputPage,
-  motion: MotionPage,
-  vector: VectorPage,
+  'use-cases': UseCasesPage,
+  examples: ScreensPage,
+  features: FeaturesPage,
   playground: PlaygroundPage,
   embed: EmbedPage,
 };
@@ -36,14 +32,19 @@ function Page({ path }) {
   const [head, ...rest] = segments(path);
   const Component = PAGES[head || ''] || NotFound;
   const fade = useRef(new Animated.Value(0)).current;
+  const scroller = useRef(null);
+  // Pages scroll themselves to a y in their own content (Use cases' index).
+  const scroll = useRef({ to: (y) => scroller.current && scroller.current.scrollTo({ y: Math.max(0, y), animated: true }) }).current;
   useEffect(() => {
     fade.setValue(0);
     Animated.timing(fade, { toValue: 1, duration: 360, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
   }, [head]);
   return (
     <Animated.View style={{ flex: 1, opacity: fade }}>
-      <ScrollView key={head || 'home'} style={{ flex: 1 }} onScroll={noteScroll} scrollEventThrottle={200} contentContainerStyle={{ paddingTop: NAV_HEIGHT, minHeight: '100%' }}>
-        <Component params={rest} />
+      <ScrollView ref={scroller} key={head || 'home'} style={{ flex: 1 }} onScroll={noteScroll} scrollEventThrottle={200} contentContainerStyle={{ paddingTop: NAV_HEIGHT, minHeight: '100%' }}>
+        <PageScrollProvider value={scroll}>
+          <Component params={rest} />
+        </PageScrollProvider>
         <Footer />
       </ScrollView>
     </Animated.View>

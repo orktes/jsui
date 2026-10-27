@@ -146,7 +146,7 @@ export function HomePage() {
             </Reveal>
             <Reveal delay={180}>
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 12 }}>
-                <Button label="Explore the screens" to="/screens" icon="▶" />
+                <Button label="Explore the examples" to="/examples" icon="▶" />
                 <Button label="Open the playground" kind="ghost" to="/playground" />
               </View>
             </Reveal>
@@ -235,10 +235,11 @@ export function HomePage() {
             <Eyebrow style={{ textAlign: 'center' }}>Keep exploring</Eyebrow>
             <Text style={[phone ? text.h2 : text.h1, { textAlign: 'center', maxWidth: 720 }]}>Poke at it. Everything here is live.</Text>
             <Text style={[text.lead, { textAlign: 'center', maxWidth: 640 }, phone && { fontSize: 16, lineHeight: 25 }]}>
-              Ten interactive game screens, a live code playground and a guide to embedding the runtime in your engine.
+              Twelve interactive game screens, the use cases JSUI is built for, a live code playground and a guide to embedding the runtime in your engine.
             </Text>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 12, justifyContent: 'center', marginTop: 8 }}>
-              <Button label="Game screens" to="/screens" icon="▶" />
+              <Button label="Example screens" to="/examples" icon="▶" />
+              <Button label="Use cases" kind="ghost" to="/use-cases" />
               <Button label="Playground" kind="ghost" to="/playground" />
               <Button label="Embedding guide" kind="ghost" to="/embed" />
             </View>

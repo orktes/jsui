@@ -45,10 +45,12 @@ if (!/<main id="about"[\s\S]*github\.com\/orktes\/jsui/.test(fs.readFileSync(pat
   process.exit(1);
 }
 
-const ROUTES = ['/', '/screens', '/screens/main-menu', '/screens/hud', '/screens/inventory', '/screens/battle-pass',
-  '/screens/scoreboard', '/screens/dialogue', '/screens/settings', '/screens/loading', '/screens/notifications',
-  '/screens/cinematic', '/screens/victory', '/screens/rift',
-  '/interactions', '/input', '/motion', '/vector', '/playground', '/embed'].filter((r) => !filters.length || filters.some((f) => r.includes(f)));
+const ROUTES = ['/', '/examples', '/examples/main-menu', '/examples/hud', '/examples/inventory', '/examples/battle-pass',
+  '/examples/scoreboard', '/examples/dialogue', '/examples/settings', '/examples/loading', '/examples/notifications',
+  '/examples/cinematic', '/examples/victory', '/examples/rift', '/examples/hud/full', '/screens/dialogue', '/vector',
+  '/use-cases', '/features', '/features/interactions', '/features/input', '/features/motion', '/features/vector', '/playground', '/embed'].filter((r) => !filters.length || filters.some((f) => r.includes(f)));
+// Links from before the site had sections, and the path the app replaces them with.
+const REDIRECTS = { '/screens/dialogue': '/examples/dialogue', '/vector': '/features/vector' };
 const SIZES = [{ name: 'desktop', width: 1440, height: 900, scale: 1 }, { name: 'phone', width: 390, height: 844, scale: 2 }];
 
 const MIME = { '.js': 'text/javascript', '.html': 'text/html', '.wasm': 'application/wasm', '.json': 'application/json',
@@ -152,6 +154,10 @@ for (const size of SIZES) {
       await page.evaluate(() => window.jsui.whenIdle());
       const err = await page.evaluate(() => window.jsui.lastError);
       if (err) throw new Error('runtime error: ' + err);
+      if (REDIRECTS[route]) {
+        const at = await page.evaluate(() => decodeURIComponent(location.hash.slice(1)));
+        if (at !== REDIRECTS[route]) throw new Error(`expected a redirect to ${REDIRECTS[route]}, at ${at}`);
+      }
       const file = path.join(OUT, `${size.name}${route.replace(/\//g, '_') || '_home'}.png`);
       const png = await page.screenshot({ path: file });
       // A blank page compresses to almost nothing.
@@ -166,10 +172,10 @@ for (const size of SIZES) {
   }
   // Audio: locked until a gesture (UI sounds were dropped above without
   // errors); a click on an empty spot unlocks it and the menu music starts.
-  if (size.name === 'desktop' && (!filters.length || filters.some((f) => '/screens/main-menu'.includes(f)))) {
+  if (size.name === 'desktop' && (!filters.length || filters.some((f) => '/examples/main-menu'.includes(f)))) {
     logs.length = 0;
     try {
-      await page.evaluate(() => { location.hash = '/screens/main-menu'; });
+      await page.evaluate(() => { location.hash = '/examples/main-menu'; });
       await page.evaluate(() => window.jsui.whenIdle());
       if (await page.evaluate(() => window.jsui.audio.unlocked)) throw new Error('audio unlocked before any gesture');
       await page.mouse.click(4, size.height - 4);

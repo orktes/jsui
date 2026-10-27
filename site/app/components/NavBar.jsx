@@ -1,24 +1,28 @@
-// Fixed top bar: wordmark, page links, the sound switch and GitHub. When the
-// links do not fit (measured, not a breakpoint) a menu button takes their
-// place and opens them as a sheet under the bar (MobileMenu).
+// Fixed top bar: wordmark, section links, the sound switch and GitHub. When
+// the links do not fit (measured, not a breakpoint) a menu button takes their
+// place and opens them as a sheet under the bar (MobileMenu), with each
+// section's own pages (Features) listed under it.
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, Overlay, Pressable, StyleSheet, Text, View, Visibility, useHostState } from 'react-native';
 import { colors, font, mono, site } from '../theme.js';
 import { segments, useRouter } from '../router.js';
 import { setSoundMuted, useAudioState } from '../sound.js';
 import { Button, GITHUB, useLayout } from './ui.jsx';
+import { LINKS } from './sections.js';
 
+export { LINKS };
 export const NAV_HEIGHT = 64;
 
-export const LINKS = [
-  { to: '/screens', label: 'Screens' },
-  { to: '/interactions', label: 'Interactions' },
-  { to: '/input', label: 'Input' },
-  { to: '/motion', label: 'Motion' },
-  { to: '/vector', label: 'Vector' },
-  { to: '/playground', label: 'Playground' },
-  { to: '/embed', label: 'Embed' },
-];
+// The menu's rows: each section, then its own pages indented under it.
+const ROWS = (() => {
+  const rows = [];
+  let n = 0;
+  for (const l of LINKS) {
+    rows.push({ to: l.to, label: l.label, num: String(++n).padStart(2, '0') });
+    for (const c of l.children || []) rows.push({ to: c.to, label: c.label, sub: true });
+  }
+  return rows;
+})();
 
 export function Logo({ size = 22 }) {
   const box = Math.round(size * 1.35);
@@ -116,9 +120,9 @@ function MenuButton({ p, open, onPress }) {
 
 // One row of the menu sheet. It slides and fades in on its own slice of `p`,
 // so the rows cascade in on open and fold away bottom-first on close.
-function MenuItem({ p, index, to, label, active, autoFocus, onGo }) {
+function MenuItem({ p, index, to, label, num, sub, active, autoFocus, onGo }) {
   const fx = useMemo(() => {
-    const a = 0.1 + index * 0.06;
+    const a = 0.1 + index * 0.045;
     const range = { inputRange: [a, a + 0.42], extrapolate: 'clamp' };
     return {
       opacity: p.interpolate({ ...range, outputRange: [0, 1] }),
@@ -133,15 +137,15 @@ function MenuItem({ p, index, to, label, active, autoFocus, onGo }) {
         accessibilityRole="link"
         accessibilityState={{ selected: active }}
         group
-        style={[styles.item, active && styles.itemActive]}
+        style={[styles.item, sub && styles.subItem, active && styles.itemActive]}
         hoveredStyle={styles.itemHot}
         focusVisibleStyle={styles.itemFocus}
         pressedStyle={{ transform: [{ scale: 0.98 }] }}
         transition={{ duration: 120, pressed: 40 }}
       >
-        {active ? <View style={styles.itemBar} /> : null}
-        <Text style={[styles.itemNum, active && { color: colors.gold }]}>{String(index + 1).padStart(2, '0')}</Text>
-        <Text style={[styles.itemText, active && { color: colors.text }]} groupHoveredStyle={{ color: colors.text }} transition={120}>
+        {active ? <View style={[styles.itemBar, sub && { top: 11, bottom: 11 }]} /> : null}
+        {sub ? <View style={[styles.subTick, active && { backgroundColor: colors.gold }]} /> : <Text style={[styles.itemNum, active && { color: colors.gold }]}>{num}</Text>}
+        <Text style={[styles.itemText, sub && styles.subText, active && { color: colors.text }]} groupHoveredStyle={{ color: colors.text }} transition={120}>
           {label}
         </Text>
         <Text style={[styles.itemChevron, active && { color: colors.gold }]} groupHoveredStyle={{ color: colors.text, transform: [{ translateX: 3 }] }} transition={140}>
@@ -157,7 +161,7 @@ function MenuItem({ p, index, to, label, active, autoFocus, onGo }) {
 // <Overlay> of the bar, so it draws above the page and its layout, and a <Visibility> on `p` takes it out of paint, hit testing and
 // Tab order on the frame the close animation reaches 0. Everything moves on
 // `p` alone, natively.
-function MobileMenu({ p, open, opens, head, height, gutter, phone, onGo, onClose }) {
+function MobileMenu({ p, open, opens, head, sub, height, gutter, phone, onGo, onClose }) {
   const fx = useMemo(
     () => ({
       backdrop: { opacity: p.interpolate({ inputRange: [0, 0.6], outputRange: [0, 1], extrapolate: 'clamp' }) },
@@ -175,7 +179,10 @@ function MobileMenu({ p, open, opens, head, height, gutter, phone, onGo, onClose
   // Focus moves into the sheet on every open (the rows mount again, keyed by
   // `opens`, so autoFocus fires once it shows): Escape, B and Tab then work
   // whether it was opened by touch, mouse, keyboard or gamepad.
-  const focusAt = Math.max(0, LINKS.findIndex((l) => l.to === head));
+  // The current page's row: its own (a Features page) or its section's.
+  const own = ROWS.findIndex((r) => r.to === sub);
+  const current = own >= 0 ? own : ROWS.findIndex((r) => r.to === head);
+  const focusAt = Math.max(0, current);
   return (
     <Overlay placement="bottom" matchWidth flip={false} collision="none" hideWhenClipped={false}>
       <Visibility visible={p} style={{ height }}>
@@ -201,8 +208,8 @@ function MobileMenu({ p, open, opens, head, height, gutter, phone, onGo, onClose
           style={[styles.sheet, phone ? { paddingHorizontal: gutter - 6 } : [styles.card, { marginRight: gutter }], fx.sheet]}
         >
           <View style={[styles.sheetGlow, phone && { borderTopLeftRadius: 0, borderTopRightRadius: 0 }]} pointerEvents="none" />
-          {LINKS.map((l, i) => (
-            <MenuItem key={l.to + opens} p={p} index={i} {...l} active={head === l.to} autoFocus={i === focusAt} onGo={onGo} />
+          {ROWS.map((r, i) => (
+            <MenuItem key={r.to + opens} p={p} index={i} {...r} active={i === current} autoFocus={i === focusAt} onGo={onGo} />
           ))}
           <Animated.View style={[styles.sheetFooter, fx.footer]}>
             <Text style={styles.footerNote}>Rendered by JSUI, on the GPU, in this canvas.</Text>
@@ -218,6 +225,7 @@ export function NavBar() {
   const { path, go } = useRouter();
   const { width, height, tablet, phone, gutter } = useLayout();
   const head = '/' + (segments(path)[0] || '');
+  const sub = '/' + segments(path).slice(0, 2).join('/');
   // A native window whose buttons sit in this bar (jsui-viewer
   // --titlebar-overlay): the wordmark starts after them.
   const controls = useHostState('jsui.windowControls', null);
@@ -250,7 +258,7 @@ export function NavBar() {
   }, [compact]);
   const goFromMenu = (to) => {
     toggle(false);
-    if (to !== head) go(to);
+    if (to !== head && to !== sub) go(to);
   };
 
   return (
@@ -278,7 +286,7 @@ export function NavBar() {
         </Visibility>
       </View>
       {compact ? (
-        <MobileMenu p={p} open={open} opens={opens} head={head} height={height - NAV_HEIGHT} gutter={gutter} phone={phone} onGo={goFromMenu} onClose={() => toggle(false)} />
+        <MobileMenu p={p} open={open} opens={opens} head={head} sub={sub} height={height - NAV_HEIGHT} gutter={gutter} phone={phone} onGo={goFromMenu} onClose={() => toggle(false)} />
       ) : null}
     </View>
   );
@@ -372,6 +380,10 @@ const styles = StyleSheet.create({
   itemFocus: { borderWidth: 1, borderColor: colors.gold },
   itemBar: { position: 'absolute', left: 0, top: 14, bottom: 14, width: 3, borderRadius: 1.5, backgroundColor: colors.gold },
   itemNum: { fontFamily: mono, fontSize: 12, color: colors.textDim, width: 20 },
+  // A section's own pages, under it: shorter rows, indented past the numbers.
+  subItem: { height: 42, paddingLeft: 24 },
+  subTick: { width: 10, height: 2, borderRadius: 1, backgroundColor: 'rgba(148,170,255,0.28)' },
+  subText: { fontSize: 15, fontWeight: '600' },
   itemText: { flex: 1, fontFamily: font, fontWeight: '700', fontSize: 19, letterSpacing: 0.2, color: colors.textDim },
   itemChevron: { fontFamily: font, fontSize: 24, color: colors.textDim, marginTop: -2 },
   sheetFooter: {

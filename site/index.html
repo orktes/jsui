@@ -134,10 +134,13 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
 
     <h2>On this site</h2>
     <ul>
-      <li><a tabindex="-1" href="#/screens">Game screens</a>: main menu, HUD, inventory, battle pass, scoreboard, dialogue, settings,
-        loading, notifications, cinematic, victory and rift screens, each demonstrating a runtime feature.</li>
-      <li><a tabindex="-1" href="#/interactions">Interactions</a>, <a tabindex="-1" href="#/input">input and gamepad focus</a> and
-        <a tabindex="-1" href="#/motion">motion</a>.</li>
+      <li><a tabindex="-1" href="#/use-cases">Use cases</a>: embedded game UIs (HUDs and menus inside Godot, Unity, Unreal or your
+        own engine), social UIs for games (friends, party, chat, store) and standalone apps (desktop, mobile and the web).</li>
+      <li><a tabindex="-1" href="#/examples">Example game screens</a>: main menu, HUD, inventory, battle pass, scoreboard, dialogue, settings,
+        loading, notifications, cinematic, victory and rift screens, each demonstrating a runtime feature, each playable full screen.</li>
+      <li><a tabindex="-1" href="#/features">Features</a>: <a tabindex="-1" href="#/features/interactions">interactions</a>,
+        <a tabindex="-1" href="#/features/input">input and gamepad focus</a>, <a tabindex="-1" href="#/features/motion">motion</a> and
+        <a tabindex="-1" href="#/features/vector">SVG and Skia Canvas</a>.</li>
       <li><a tabindex="-1" href="#/playground">Live code playground</a>: edit React Native code and see JSUI render it.</li>
       <li><a tabindex="-1" href="#/embed">Embedding guide</a>: Godot, the C API, the web host and dev mode.</li>
     </ul>
@@ -273,9 +276,10 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
             hideSplash();
           }
         }
-        else if (name === 'route') {
-          if (route() !== data) history.pushState(null, '', data === '/' ? location.pathname + location.search : '#' + data);
-          document.title = 'JSUI · ' + (data === '/' ? 'React Native game UI, everywhere' : data.split('/')[1].replace(/^\w/, (c) => c.toUpperCase()));
+        else if (name === 'route' || name === 'route:replace') {
+          // route:replace: an old link the app rewrote to its new path.
+          if (route() !== data) history[name === 'route' ? 'pushState' : 'replaceState'](null, '', data === '/' ? location.pathname + location.search : '#' + data);
+          document.title = 'JSUI · ' + (data === '/' ? 'React Native game UI, everywhere' : data.split('/')[1].replace(/-/g, ' ').replace(/^\w/, (c) => c.toUpperCase()));
         } else if (name === 'jsui:openURL') window.open(data.url, '_blank', 'noopener');
         else if (name === 'title') document.title = data;
         else if (name === 'sound') sound.setMuted(data.muted);

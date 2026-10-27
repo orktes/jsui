@@ -1,4 +1,4 @@
-// /vector: react-native-svg, @shopify/react-native-skia and
+// /features/vector: react-native-svg, @shopify/react-native-skia and
 // react-native-worklets, each imported by its usual package name (the CLI
 // aliases them to JSUI's own implementations) and drawn by native
 // VectorViews.

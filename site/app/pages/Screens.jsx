@@ -1,6 +1,7 @@
-// /screens and /screens/<id>: one live game screen on a big Stage, a
+// /examples and /examples/<id>: one live game screen on a big Stage, a
 // selector for all of them, prev / next, what is interactive in the current
-// screen and a link to its source. Only the selected screen is mounted.
+// screen and a link to its source. /examples/<id>/full plays it full screen
+// (FullScreen). Only the selected screen is mounted, once.
 //
 // Input: the selector is focusable (Tab, arrows, D-pad). Pressing the
 // selected entry again (Enter / A) moves focus into the screen; Esc / B inside
@@ -13,6 +14,7 @@ import { colors, font, site, text } from '../theme.js';
 import { useRouter } from '../router.js';
 import { SCREENS, screenById } from '../screens/index.js';
 import { MUSIC, playUI } from '../sound.js';
+import { FullScreen } from './examples/FullScreen.jsx';
 
 // Music per screen (site/app/sound.js): the menu theme carries on between the
 // main menu and its settings, the Rift has its own; switching crossfades, and
@@ -74,7 +76,7 @@ const ListItem = memo(function ListItem({ s, i, selected, width, onPress, itemRe
 
 // --- the stage with a slide / crossfade between screens ------------------------------
 
-function LiveStage({ id, width, mountKey, onEscape, padInside, onShown }) {
+function LiveStage({ id, width, mountKey, onEscape, padInside, onShown, away }) {
   const [shown, setShown] = useState({ id, from: 0 });
   const t = useRef(new Animated.Value(1)).current;
   const latest = useRef(id);
@@ -128,9 +130,20 @@ function LiveStage({ id, width, mountKey, onEscape, padInside, onShown }) {
             transform: [{ translateX: t.interpolate({ inputRange: [0, 1], outputRange: [dx, 0] }) }, { scale: t.interpolate({ inputRange: [0, 1], outputRange: [0.97, 1] }) }],
           }}
         >
-          <C key={shown.id + ':' + mountKey} active />
+          {away ? <Away s={s} /> : <C key={shown.id + ':' + mountKey} active />}
         </Animated.View>
       </Stage>
+    </View>
+  );
+}
+
+// In the stage's place while the screen plays full screen.
+function Away({ s }) {
+  return (
+    <View style={[StyleSheet.absoluteFill, styles.away]}>
+      <View style={[styles.awayGlow, { experimental_backgroundImage: `radial-gradient(ellipse at 50% 50%, ${s.accent}22 0%, rgba(0,0,0,0) 60%)` }]} />
+      <Text style={[styles.awayEyebrow, { color: s.accent }]}>Playing full screen</Text>
+      <Text style={styles.awayTitle}>{s.title}</Text>
     </View>
   );
 }
@@ -141,6 +154,7 @@ export function ScreensPage({ params = [] }) {
   const { go } = useRouter();
   const L = useLayout();
   const id = screenById(params[0]) ? params[0] : SCREENS[0].id;
+  const full = params[1] === 'full';
   const idx = SCREENS.findIndex((s) => s.id === id);
   const s = SCREENS[idx];
   const wide = !L.tablet;
@@ -162,14 +176,27 @@ export function ScreensPage({ params = [] }) {
   const refocus = useRef(false);
   const idxRef = useRef(idx);
   idxRef.current = idx;
+  const fullRef = useRef(full);
+  fullRef.current = full;
   const select = useCallback((next) => {
-    refocus.current = true;
-    go('/screens/' + next);
+    refocus.current = !fullRef.current;
+    go('/examples/' + next + (fullRef.current ? '/full' : ''));
   }, [go]);
   const step = useCallback((d, inside) => {
     select(SCREENS[(idxRef.current + d + SCREENS.length) % SCREENS.length].id);
     if (inside) refocus.current = false;
   }, [select]);
+  // Full screen mounts the screen afresh, so its autoFocus element takes focus.
+  const openFull = useCallback(() => {
+    setMountKey((k) => k + 1);
+    go('/examples/' + id + '/full');
+  }, [go, id]);
+  const closeFull = useCallback(() => {
+    refocus.current = true;
+    setMountKey((k) => k + 1);
+    go('/examples/' + id);
+    setTimeout(onShown, 60);
+  }, [go, id]);
   const onShown = useCallback(() => {
     if (!refocus.current) return;
     refocus.current = false;
@@ -194,7 +221,9 @@ export function ScreensPage({ params = [] }) {
       const inside = padInside.current;
       padInside.current = false;
       if (inside || !e.pressed || e.isDefaultPrevented()) return;
-      if (e.buttonIndex === 4) step(-1), e.preventDefault();
+      if (fullRef.current && e.buttonIndex === 1) return; // B closes full screen (its Modal)
+      if (e.buttonIndex === 3 && !fullRef.current) openFull(), e.preventDefault();
+      else if (e.buttonIndex === 4) step(-1), e.preventDefault();
       else if (e.buttonIndex === 5) step(1), e.preventDefault();
     },
   });
@@ -207,6 +236,9 @@ export function ScreensPage({ params = [] }) {
   const onKeyDown = (e) => {
     if (e.key === '[' || e.key === ']') {
       step(e.key === '[' ? -1 : 1, !!e.nativeEvent.inStage);
+      e.preventDefault();
+    } else if ((e.key === 'f' || e.key === 'F') && !e.nativeEvent.inStage) {
+      openFull();
       e.preventDefault();
     }
   };
@@ -221,11 +253,11 @@ export function ScreensPage({ params = [] }) {
         <Reveal>
           <View style={[styles.head, !wide && { flexDirection: 'column', alignItems: 'flex-start' }]}>
             <View style={{ flex: wide ? 1 : undefined, gap: 12, maxWidth: 740 }}>
-              <Eyebrow>Screens · {SCREENS.length} live game UIs</Eyebrow>
+              <Eyebrow>Examples · {SCREENS.length} live game UIs</Eyebrow>
               <Text style={[L.phone ? text.h2 : text.h1]}>Real game screens, running live.</Text>
               <Text style={[text.lead, L.phone && { fontSize: 16, lineHeight: 25 }]}>
                 Not videos or screenshots: each screen is a React Native component laid out at 1280 × 720 and scaled onto the stage, and each one
-                spotlights a different part of JSUI. Click into it, tab into it, or pick up a controller.
+                spotlights a different part of JSUI. Click into it, tab into it, or pick up a controller. Or open it full screen.
               </Text>
             </View>
             {L.phone ? null : (
@@ -233,6 +265,7 @@ export function ScreensPage({ params = [] }) {
                 <Legend k="[ ]" alt="LB RB" label="Switch screen" />
                 <Legend k="Enter" alt="A" label="Play the selected screen" />
                 <Legend k="Esc" alt="B" label="Back to the list" />
+                <Legend k="F" alt="Y" label="Full screen" />
               </View>
             )}
           </View>
@@ -252,11 +285,12 @@ export function ScreensPage({ params = [] }) {
             {pad2(idx + 1)} / {pad2(SCREENS.length)}
           </Text>
           <View style={{ flex: 1 }} />
+          <FullButton compact={L.phone} onPress={openFull} />
           <ArrowButton label="‹" onPress={() => step(-1, true)} />
           <ArrowButton label="›" onPress={() => step(1, true)} />
         </View>
         <View style={{ flexDirection: wide ? 'row' : 'column', gap: GAP, alignItems: wide ? 'stretch' : 'center' }}>
-          <LiveStage id={id} width={stageW} mountKey={mountKey} onEscape={backToSelector} padInside={padInside} onShown={onShown} />
+          <LiveStage id={id} width={stageW} mountKey={mountKey} onEscape={backToSelector} padInside={padInside} onShown={onShown} away={full} />
           {wide ? <Spotlight s={s} style={{ width: SIDE_W }} /> : null}
         </View>
 
@@ -278,7 +312,32 @@ export function ScreensPage({ params = [] }) {
 
         {wide ? null : <Spotlight s={s} style={{ marginTop: 20 }} />}
       </Column>
+      {full ? (
+        <FullScreen s={s} index={idx} total={SCREENS.length} mountKey={mountKey} padInside={padInside} onStep={(d) => step(d, true)} onClose={closeFull} />
+      ) : null}
     </View>
+  );
+}
+
+function FullButton({ compact, onPress }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      focusable={false}
+      accessibilityLabel="Play full screen"
+      style={styles.fullBtn}
+      hoveredStyle={styles.arrowHot}
+      pressedStyle={{ transform: [{ scale: 0.95 }] }}
+      transition={{ duration: 120, pressed: 40 }}
+    >
+      <View style={styles.fullIcon}>
+        <View style={[styles.corner, { left: 0, top: 0, borderLeftWidth: 2, borderTopWidth: 2 }]} />
+        <View style={[styles.corner, { right: 0, top: 0, borderRightWidth: 2, borderTopWidth: 2 }]} />
+        <View style={[styles.corner, { left: 0, bottom: 0, borderLeftWidth: 2, borderBottomWidth: 2 }]} />
+        <View style={[styles.corner, { right: 0, bottom: 0, borderRightWidth: 2, borderBottomWidth: 2 }]} />
+      </View>
+      {compact ? null : <Text style={styles.fullText}>Full screen</Text>}
+    </Pressable>
   );
 }
 
@@ -369,6 +428,25 @@ const styles = StyleSheet.create({
   liveText: { fontFamily: font, fontWeight: '700', fontSize: 10, letterSpacing: 1.4, textTransform: 'uppercase' },
   arrow: { width: 36, height: 36, borderRadius: 10, borderWidth: 1, borderColor: site.strokeStrong, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.03)' },
   arrowHot: { borderColor: 'rgba(79,209,255,0.6)', backgroundColor: 'rgba(79,209,255,0.08)' },
+  fullBtn: {
+    height: 36,
+    paddingHorizontal: 11,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: site.strokeStrong,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    cursor: 'pointer',
+  },
+  fullIcon: { width: 14, height: 14 },
+  corner: { position: 'absolute', width: 5, height: 5, borderColor: colors.text },
+  fullText: { fontFamily: font, fontWeight: '600', fontSize: 13, color: colors.text },
+  away: { alignItems: 'center', justifyContent: 'center', gap: 14, backgroundColor: '#03050b' },
+  awayGlow: { ...StyleSheet.absoluteFillObject },
+  awayEyebrow: { fontFamily: font, fontWeight: '700', fontSize: 22, letterSpacing: 4, textTransform: 'uppercase' },
+  awayTitle: { fontFamily: font, fontWeight: '700', fontSize: 64, letterSpacing: -1, color: colors.text },
   arrowText: { fontFamily: font, fontWeight: '600', fontSize: 22, lineHeight: 24, color: colors.text, marginTop: -3 },
 
   spot: { padding: 22, borderRadius: 18, borderWidth: 1, backgroundColor: site.card, overflow: 'hidden', boxShadow: '0 24px 60px rgba(0,0,0,0.45)' },

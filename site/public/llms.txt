@@ -62,6 +62,6 @@ npx jsui skill                                   # print the skill
 
 ## Optional
 
-- [Showcase site](https://orktes.github.io/jsui/): game screens, input, motion, a live-code playground and an embedding guide, all rendered by JSUI.
+- [Showcase site](https://orktes.github.io/jsui/): use cases (embedded game UIs, social UIs for games, standalone apps), example game screens (playable full screen), features (interactions, input, motion, SVG and Skia Canvas), a live-code playground and an embedding guide, all rendered by JSUI.
 - [Showcase source](https://github.com/orktes/jsui/tree/main/site): the site as an ordinary React Native app.
 - [Releasing](https://github.com/orktes/jsui/blob/main/docs/RELEASING.md): versions and npm publishing.
