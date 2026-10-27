@@ -157,11 +157,13 @@ const jsui = await createJsui({ device: renderer.backend.device, bundleUrl: './u
 
 // 1. The UI inside the game: a surface rendered into a GPUTexture.
 const terminal = jsui.createTextureSurface({ component: 'Terminal', width: 800, height: 500, pixelRatio: 2 });
-const uiMap = (t) => Object.assign(new THREE.ExternalTexture(t), { colorSpace: THREE.SRGBColorSpace });
-const material = new THREE.MeshBasicNodeMaterial({ map: uiMap(terminal.texture), transparent: true,
-  premultipliedAlpha: true });
-terminal.on('texture', (t) => { material.map = uiMap(t); material.needsUpdate = true; });  // after setSize()
-screenMesh.material = material;
+// Three.js' WebGPU renderer neither flips nor sRGB-decodes an rgba8unorm
+// ExternalTexture: the color node does both (alpha is premultiplied).
+const { sRGBTransferEOTF, texture, uv, vec4 } = THREE.TSL;
+const map = texture(new THREE.ExternalTexture(terminal.texture), uv().flipY());
+const color = vec4(sRGBTransferEOTF(map.rgb.div(map.a.max(1e-4))).mul(map.a), map.a);
+screenMesh.material = new THREE.MeshBasicNodeMaterial({ colorNode: color });
+terminal.on('texture', (t) => { map.value = new THREE.ExternalTexture(t); });  // after setSize()
 
 // input: raycast the screen, forward the event at the hit's UV
 canvas.addEventListener('pointermove', (e) => {
@@ -191,7 +193,9 @@ jsui.setTexture('minimap', renderer.backend.get(minimap.texture).texture);   // 
   frame repaints only what changed, straight into it (no retained copy); a
   frame where nothing changed renders nothing. `'render'` fires after each
   new frame, `surface.version` counts them. The texture holds premultiplied,
-  sRGB-encoded colors.
+  sRGB-encoded colors, top row first. Renderer-wide tone mapping (Three.js
+  applies it to the whole frame in its output pass) shifts the UI's colors
+  too: see site/three/main.js for a scene without it.
 - Input comes from the page: `dispatchEvent(e, x, y)` takes pointer, mouse,
   wheel and keyboard events (a printable `keydown` also types its text), or
   call `pointerDown / pointerMove / pointerUp / pointerLeave / wheel / key /
