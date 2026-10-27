@@ -71,6 +71,22 @@ bundle's JS runs on a thread of its own, as in React Native, so a long
 commit never drops a frame; `--es jsui_js_thread off` runs it on the frame
 thread instead.
 
+## Networking
+
+JSUI's own loader has no TLS on Android (apps may not load the system's
+`libssl`), so the host brings the network: `main.cpp` sets
+`JsuiConfig.on_request` and answers `asset:///` URLs from the APK and
+`http://` / `https://` with `java.net.HttpURLConnection` over JNI, on a few
+worker threads attached to the VM (the platform's TLS, trust store, proxy
+and network security config; `INTERNET` permission in the manifest). It
+sends the method, headers and body, follows redirects itself per
+`fetch()`'s `redirect` mode, reads 4xx / 5xx bodies from the error stream,
+streams the response back in 64 KB pieces (`jsui_request_respond` /
+`_body` / `_end`), enforces `timeout`, and stops a cancelled request with
+`disconnect()`. Copy `net::` and `onRequest` from `main.cpp` into your own
+host, or route requests to your app's HTTP stack (OkHttp, Cronet) the same
+way. Other URLs (file paths) are declined and go to the built-in loader.
+
 ## Embedding
 
 Link `libjsui.a` (built by this CMake project with the NDK toolchain) and the

@@ -225,7 +225,13 @@ std::unique_ptr<TlsSession> tlsClient(intptr_t socket, const std::string& host, 
 namespace jsui::net {
 
 bool tlsAvailable(std::string* why) {
+#if defined(__ANDROID__)
+  // Apps may not load the system's libssl: the host brings https:// (the
+  // example host uses java.net.HttpURLConnection, integrations/android).
+  if (why) *why = "https:// on Android needs the host's networking: set JsuiConfig.on_request";
+#else
   if (why) *why = "https:// is not available in the built-in loader on this platform; set JsuiConfig.on_request";
+#endif
   return false;
 }
 
