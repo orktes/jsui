@@ -1612,8 +1612,13 @@ enum {
  * requestAnimationFrame timestamps). It stamps the events (`timestamp`,
  * e.timeStamp in JS) sent after this call until the next jsui_tick, so
  * gesture velocities (PanResponder vx / vy, ScrollView flings) see the real
- * spacing of events that arrive between two frames. Without it events carry
- * the time of the last tick. Timestamps never go backwards. NaN clears it. */
+ * spacing of events that arrive between two frames, and a touch-dragged
+ * ScrollView follows the finger resampled at each tick's time (even motion
+ * when touch samples and frames don't line up). The time must be on the
+ * jsui_tick clock; ticking with the display's vsync time (CADisplayLink
+ * timestamp, AChoreographer frame time, rAF time) keeps frames evenly spaced.
+ * Without it events carry the time of the last tick. Timestamps never go
+ * backwards. NaN clears it. */
 JSUI_API void jsui_set_event_time(JsuiRuntime* rt, double time_ms);
 
 /* jsui_hit_test flags. */

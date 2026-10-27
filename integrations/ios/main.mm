@@ -1,7 +1,9 @@
 // JsuiDemo: iOS host for a JSUI bundle.
 //
-// One MTKView, driven at display rate (ProMotion: up to 120 Hz). Every frame
-// ticks the runtime and, when it has something new, renders with Skia
+// One MTKView, driven at display rate (ProMotion: up to 120 Hz) by a
+// CADisplayLink whose vsync timestamp is the frame time: animations,
+// flings and resampled touch drags step evenly even when the callback
+// itself runs a little early or late. Every frame ticks the runtime and, when it has something new, renders with Skia
 // Ganesh on Metal straight into the drawable (jsui_render_metal), or with
 // the CPU rasteriser plus a blit when Metal is unavailable or `-JsuiRenderer
 // cpu` is passed. Touches, hardware keyboards and game controllers
@@ -109,6 +111,8 @@ struct PadState {
   JsuiMetalContext* _mtl;
   BOOL _cpu;
   BOOL _presented;  // the drawable on screen shows the latest frame
+  CADisplayLink* _link;
+  double _frameTime;  // ms, the display link's vsync time for this frame
   // CPU fallback: RGBA frame -> BGRA staging buffer -> blit into the drawable.
   std::vector<uint8_t> _pixels;
   id<MTLBuffer> _staging;
@@ -132,6 +136,9 @@ struct PadState {
   _view.preferredFramesPerSecond = UIScreen.mainScreen.maximumFramesPerSecond;
   _view.clearColor = MTLClearColorMake(0, 0, 0, 1);
   _view.multipleTouchEnabled = YES;
+  // Drawn from our own CADisplayLink (displayFrame:), which knows the vsync time.
+  _view.paused = YES;
+  _view.enableSetNeedsDisplay = NO;
   _view.backgroundColor = UIColor.blackColor;
   self.view = _view;
 }
@@ -202,9 +209,15 @@ struct PadState {
                                          selector:@selector(memoryWarning)
                                              name:UIApplicationDidReceiveMemoryWarningNotification
                                            object:nil];
+
+  _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(displayFrame:)];
+  float maxFps = float(UIScreen.mainScreen.maximumFramesPerSecond);
+  _link.preferredFrameRateRange = CAFrameRateRangeMake(std::min(60.f, maxFps), maxFps, maxFps);
+  [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
 }
 
 - (void)dealloc {
+  [_link invalidate];
   [NSNotificationCenter.defaultCenter removeObserver:self];
   if (_rt) jsui_destroy(_rt);
   if (_mtl) jsui_metal_destroy(_mtl);
@@ -250,10 +263,15 @@ struct PadState {
   _presented = NO;
 }
 
+- (void)displayFrame:(CADisplayLink*)link {
+  _frameTime = link.timestamp * 1000.0;  // same clock as CACurrentMediaTime and UITouch timestamps
+  [_view draw];
+}
+
 - (void)drawInMTKView:(MTKView*)view {
   if (!_rt) return;
   [self pollPads];
-  jsui_tick(_rt, nowMs());
+  jsui_tick(_rt, _frameTime > 0 ? _frameTime : nowMs());
   if (_presented && !jsui_needs_redraw(_rt)) return;  // the screen already shows this frame
   id<CAMetalDrawable> drawable = view.currentDrawable;
   if (!drawable) return;
