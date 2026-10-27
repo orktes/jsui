@@ -14,6 +14,8 @@
 import * as THREE from 'three/webgpu';
 import { createJsui } from '../jsui-web.js';
 
+const { sRGBTransferEOTF, texture, uv, vec4 } = THREE.TSL;
+
 // The deployed WASM modules and their versions (index.html, set by
 // site/scripts/build.mjs).
 const modules = globalThis.jsuiModules ?? null;
@@ -24,7 +26,7 @@ const fail = (msg) => {
 };
 
 const CONSOLE = { width: 640, height: 400, ratio: 2 };
-const HUD = { width: 300, height: 128, ratio: 2 };
+const HUD = { width: 300, height: 150, ratio: 2 };
 
 async function main() {
   if (!navigator.gpu) return fail('This example needs WebGPU (Chrome, Edge, Safari 26 or Firefox 141+).');
@@ -34,8 +36,9 @@ async function main() {
   if (!renderer.backend.isWebGPUBackend) return fail('Three.js fell back to WebGL: this example needs WebGPU.');
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   renderer.setSize(innerWidth, innerHeight);
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.1;
+  // No tone mapping: Three.js' WebGPU renderer tone-maps the whole frame in
+  // its output pass (material.toneMapped does not exempt the UI), which
+  // would shift the UI's colors. The lights stay in range instead.
 
   // JSUI on Three.js' device.
   const jsui = await createJsui({
@@ -52,9 +55,18 @@ async function main() {
 
   // A JSUI texture as a Three.js texture (premultiplied, sRGB-encoded).
   const uiTexture = (gpuTexture) => Object.assign(new THREE.ExternalTexture(gpuTexture), {
-    colorSpace: THREE.SRGBColorSpace, generateMipmaps: false, minFilter: THREE.LinearFilter,
-    magFilter: THREE.LinearFilter, premultiplyAlpha: false,
+    generateMipmaps: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, premultiplyAlpha: false,
   });
+  // Its color node: an rgba8unorm texture holds sRGB-encoded values, which
+  // Three.js' WebGPU renderer does not decode (it relies on -srgb formats),
+  // so the shader does (unpremultiplied first; the result stays
+  // premultiplied). Its rows run top-down: v flips. A new texture of the
+  // surface (after a resize) goes into node.value.
+  const uiColor = (gpuTexture) => {
+    const node = texture(uiTexture(gpuTexture), uv().flipY());
+    const a = node.a;
+    return { node, color: vec4(sRGBTransferEOTF(node.rgb.div(a.max(1e-4))).mul(a), a) };
+  };
 
   // ---------------------------------------------------------------- scene
   const scene = new THREE.Scene();
@@ -84,7 +96,7 @@ async function main() {
   // The reactor core: a torus knot in a ring, on a plinth.
   const coreColor = new THREE.Color('#4fd1ff');
   const coreMat = new THREE.MeshStandardNodeMaterial({ color: '#0b1a2a', emissive: coreColor.clone(),
-    emissiveIntensity: 1.6, roughness: 0.25, metalness: 0.8 });
+    emissiveIntensity: 0.6, roughness: 0.25, metalness: 0.8 });
   const core = new THREE.Mesh(new THREE.TorusKnotGeometry(0.42, 0.13, 220, 32), coreMat);
   core.position.set(-1.55, 1.35, 0);
   scene.add(core);
@@ -100,7 +112,8 @@ async function main() {
 
   // The console: a tilted screen showing the 'Console' surface's texture.
   const aspect = CONSOLE.width / CONSOLE.height, screenH = 1.55, screenW = screenH * aspect;
-  const screenMat = new THREE.MeshBasicNodeMaterial({ map: uiTexture(ui.texture), toneMapped: false });
+  const screenUI = uiColor(ui.texture);
+  const screenMat = new THREE.MeshBasicNodeMaterial({ colorNode: screenUI.color });
   const screen = new THREE.Mesh(new THREE.PlaneGeometry(screenW, screenH), screenMat);
   const stand = new THREE.Group();
   stand.position.set(1.25, 1.3, 0.2);
@@ -118,10 +131,7 @@ async function main() {
   const screenLight = new THREE.PointLight('#5fa8ff', 6, 4, 2);
   screenLight.position.set(1.1, 1.3, 1.0);
   scene.add(screenLight);
-  ui.on('texture', (t) => {  // a new size: a new texture
-    screenMat.map = uiTexture(t);
-    screenMat.needsUpdate = true;
-  });
+  ui.on('texture', (t) => { screenUI.node.value = uiTexture(t); });  // a new size: a new texture
 
   // The drone camera: the core from above, into a render target the
   // console shows (<HostTexture name="drone-cam">).
@@ -132,7 +142,9 @@ async function main() {
   // The HUD: the 'Hud' surface over the frame, in an overlay pass (premultiplied).
   const overlay = new THREE.Scene();
   const overlayCam = new THREE.OrthographicCamera(0, innerWidth, innerHeight, 0, -1, 1);
-  const hudMat = new THREE.MeshBasicNodeMaterial({ map: uiTexture(hud.texture), transparent: true, toneMapped: false,
+  const hudUI = uiColor(hud.texture);
+  hud.on('texture', (t) => { hudUI.node.value = uiTexture(t); });
+  const hudMat = new THREE.MeshBasicNodeMaterial({ colorNode: hudUI.color, transparent: true,
     blending: THREE.CustomBlending, blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
     depthTest: false, depthWrite: false });
   const hudQuad = new THREE.Mesh(new THREE.PlaneGeometry(HUD.width, HUD.height), hudMat);
@@ -201,9 +213,9 @@ async function main() {
     angle += dt * spin;
     core.rotation.set(angle * 0.6, angle, 0);
     ring.rotation.set(Math.PI / 2 + Math.sin(t * 0.7) * 0.25, 0, angle * 0.4);
-    const p = pulse ? 1.4 + Math.sin(t * 3) * 0.6 : 1.4;
+    const p = pulse ? 0.6 + Math.sin(t * 3) * 0.3 : 0.6;
     coreMat.emissiveIntensity = p;
-    key.intensity = 26 + p * 10;
+    key.intensity = 30 + p * 20;
     camera.position.x += (lean.x * 1.2 - camera.position.x) * 0.04;
     camera.position.y += (1.55 - lean.y * 0.6 - camera.position.y) * 0.04;
     camera.lookAt(lookAt);
