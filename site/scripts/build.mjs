@@ -17,6 +17,7 @@
 //   llms.txt, og.png,               site/public, copied as is
 //   pipelines-{bgra8,rgba8}unorm.bin
 //   three/{index.html,main.js,ui.js} the Three.js example (site/three; Three.js bundled into main.js)
+//   demo/{index.html,main.js,ui.js}  the engine demo in Three.js (site/demo; likewise)
 //
 // Cache consistency: GitHub Pages serves everything with max-age=600, so a
 // browser may hold some files of the previous deploy and fetch others fresh
@@ -123,29 +124,30 @@ html = replaceAll(html, 'const modules = null;  // set by site/scripts/build.mjs
 fs.writeFileSync(path.join(out, 'index.html'), html);
 fs.writeFileSync(path.join(out, '.nojekyll'), '');
 
-// three/: the Three.js example (site/three: a Three.js WebGPU scene and JSUI
-// on one GPUDevice). Its page script is bundled with Three.js (tree-shaken);
+// three/ and demo/: the Three.js pages (site/three: a Three.js WebGPU scene
+// and JSUI on one GPUDevice; site/demo: the engine examples' game and HUD in
+// Three.js). Each page script is bundled with Three.js (tree-shaken);
 // jsui-web.js is the one deployed above.
-{
-  const dir = path.join(out, 'three');
+for (const name of ['three', 'demo']) {
+  const dir = path.join(out, name);
   fs.mkdirSync(dir, { recursive: true });
-  const ui = await build({ entry: path.join(SITE, 'three/ui.jsx'), outfile: path.join(dir, 'ui.js'), minify });
-  for (const w of ui.warnings) console.warn('site: three: warning:', w.text);
+  const ui = await build({ entry: path.join(SITE, name, 'ui.jsx'), outfile: path.join(dir, 'ui.js'), minify });
+  for (const w of ui.warnings) console.warn(`site: ${name}: warning:`, w.text);
   const esbuild = await import('esbuild');
   const page = await esbuild.build({
-    entryPoints: [path.join(SITE, 'three/main.js')], bundle: true, format: 'esm', minify, write: false,
+    entryPoints: [path.join(SITE, name, 'main.js')], bundle: true, format: 'esm', minify, write: false,
     target: 'es2022', external: ['../jsui-web.js'], legalComments: 'eof', logLevel: 'warning',
   });
   let mainJs = Buffer.from(page.outputFiles[0].contents).toString('utf8');
-  mainJs = replaceAll(mainJs, '"../jsui-web.js"', `"../jsui-web.js?v=${hash(webJs)}"`, 'three/main.js');
-  mainJs = replaceAll(mainJs, '"./ui.js"', `"./ui.js?v=${hash(fs.readFileSync(path.join(dir, 'ui.js')))}"`, 'three/main.js');
+  mainJs = replaceAll(mainJs, '"../jsui-web.js"', `"../jsui-web.js?v=${hash(webJs)}"`, `${name}/main.js`);
+  mainJs = replaceAll(mainJs, '"./ui.js"', `"./ui.js?v=${hash(fs.readFileSync(path.join(dir, 'ui.js')))}"`, `${name}/main.js`);
   fs.writeFileSync(path.join(dir, 'main.js'), mainJs);
-  let threeHtml = fs.readFileSync(path.join(SITE, 'three/index.html'), 'utf8');
-  threeHtml = replaceAll(threeHtml, 'src="./main.js"', `src="./main.js?v=${hash(mainJs)}"`, 'site/three/index.html');
-  threeHtml = replaceAll(threeHtml, 'window.jsuiModules = null;  // set by site/scripts/build.mjs',
-    `window.jsuiModules = ${JSON.stringify(modules)};`, 'site/three/index.html');
-  fs.writeFileSync(path.join(dir, 'index.html'), threeHtml);
-  console.log(`site: three/ page ${(mainJs.length / 1024).toFixed(1)} KiB, UI bundle ${(ui.bytes / 1024).toFixed(1)} KiB`);
+  let pageHtml = fs.readFileSync(path.join(SITE, name, 'index.html'), 'utf8');
+  pageHtml = replaceAll(pageHtml, 'src="./main.js"', `src="./main.js?v=${hash(mainJs)}"`, `site/${name}/index.html`);
+  pageHtml = replaceAll(pageHtml, 'window.jsuiModules = null;  // set by site/scripts/build.mjs',
+    `window.jsuiModules = ${JSON.stringify(modules)};`, `site/${name}/index.html`);
+  fs.writeFileSync(path.join(dir, 'index.html'), pageHtml);
+  console.log(`site: ${name}/ page ${(mainJs.length / 1024).toFixed(1)} KiB, UI bundle ${(ui.bytes / 1024).toFixed(1)} KiB`);
 }
 // Static files served as they are: llms.txt, the social preview image (og.png),
 // the GPU pipeline lists (site/scripts/record-pipelines.mjs).

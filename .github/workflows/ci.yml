@@ -59,6 +59,8 @@ jobs:
               - 'scripts/**'
               - 'web/**'
               - 'site/**'
+              - 'integrations/shared/ui/**'
+              - 'examples/theme.js'
               - 'packages/cli/**'
               - 'packages/react/src/inspect.js'
             godot:
@@ -1391,6 +1393,8 @@ jobs:
           SITE_WEBGPU=1 SITE_EXPECT_RENDERER=webgpu SITE_EXPECT_WORKER=1 node site/test/smoke.mjs
           SITE_JS=quickjs SITE_WEBGPU=1 SITE_EXPECT_RENDERER=webgpu SITE_EXPECT_WORKER=1 node site/test/smoke.mjs
           SITE_WORKER=0 SITE_WEBGPU=1 SITE_EXPECT_RENDERER=webgpu SITE_EXPECT_WORKER=0 node site/test/smoke.mjs
+          # The Three.js engine demo (site/demo): pass-through, spawn and selection.
+          node site/test/demo.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
