@@ -19,7 +19,8 @@
 //
 // Command line: --selftest, --frames=N, --screenshot=out.png,
 // --bundle=path-or-url, --dev, --cpu (the CPU renderer even on Metal),
-// --js-thread=on|off|lockstep (UJsuiWidget::JsThread; on by default).
+// --js-thread=on|off|lockstep (UJsuiWidget::JsThread; on by default),
+// --no-engine-http (UJsuiWidget::bUseEngineHttp off: the built-in loader).
 #pragma once
 
 #include "CoreMinimal.h"
@@ -127,7 +128,7 @@ private:
 	bool bSaidRenderer = false;
 
 	// Command line.
-	bool bSelfTest = false, bDev = false, bCpu = false;
+	bool bSelfTest = false, bDev = false, bCpu = false, bNoEngineHttp = false;
 	// --no-ui: the same game without the widget (no runtime at all).
 	// --bench=S [--bench-warmup=S]: uncapped, time S seconds of frames after
 	// a warm-up, print one `bench:` line, quit.

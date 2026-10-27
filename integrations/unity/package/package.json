@@ -7,7 +7,8 @@
   "keywords": ["ui", "react", "hud", "jsui"],
   "license": "MIT",
   "dependencies": {
-    "com.unity.ugui": "2.0.0"
+    "com.unity.ugui": "2.0.0",
+    "com.unity.modules.unitywebrequest": "1.0.0"
   },
   "author": {
     "name": "orktes",

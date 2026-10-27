@@ -61,7 +61,9 @@ bare argument as a map to open): `--selftest`, `--frames=N
 --screenshot=out.png`, `--bundle=path-or-url`, `--cpu` (the CPU renderer even
 where the GPU path is available), `--dev` (with `npx jsui dev integrations/shared/ui/app.jsx` and
 `--bundle=http://127.0.0.1:5173/bundle.js` for hot reload) and
-`--js-thread=on|off|lockstep` (`UJsuiWidget::JsThread`). `--selftest` is
+`--js-thread=on|off|lockstep` (`UJsuiWidget::JsThread`), and `--no-engine-http`
+(`UJsuiWidget::bUseEngineHttp` off: http(s):// loads go through JSUI's
+built-in loader instead of Unreal's HTTP module). `--selftest` is
 the same pass-through check as the other examples (see
 [../README.md](../README.md#build-and-run)), JS stall included: it logs `selftest: ok` and exits
 0, or logs what failed and exits 1. Its clicks go through

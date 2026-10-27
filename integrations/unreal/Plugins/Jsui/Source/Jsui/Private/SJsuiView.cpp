@@ -12,6 +12,7 @@
 #include "RHI.h"
 #include "Rendering/DrawElements.h"
 #include "TextureResource.h"
+#include "UObject/Package.h"
 #include "Widgets/SWindow.h"
 
 // Every mouse and key event goes to the view before Slate routes it.
@@ -66,7 +67,7 @@ void SJsuiView::Construct(const FArguments& InArgs)
 	RequestedRatio = InArgs._PixelRatio;
 
 	// The viewport size is known at the first tick (UpdateViewport).
-	Host = FJsuiHost::Create(1, 1, 1.f, bDevMode, InArgs._JsThread);
+	Host = FJsuiHost::Create(1, 1, 1.f, bDevMode, InArgs._JsThread, InArgs._bUseEngineHttp);
 	if (!Host)
 	{
 		UE_LOG(LogJsui, Error, TEXT("jsui_create failed"));

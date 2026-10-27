@@ -9,6 +9,14 @@
 //    thread; instead of calling back into managed code (which IL2CPP only
 //    allows for static methods) they are queued and C# drains the queue
 //    after each tick with jsuiu_next_message / jsuiu_next_log.
+//  - network requests (JsuiConfig.on_request): http:// and https:// go to
+//    C#, which runs them with UnityWebRequest (the engine's own HTTP stack,
+//    which also works where the OS one is the only way out, e.g. consoles).
+//    They are queued like messages and C# takes them with
+//    jsuiu_next_request after each tick, then answers with jsui_request_*;
+//    cancellations queue the same way (jsuiu_next_request_cancel). Other
+//    URLs (the bundle's file://, data:) are declined and go to the built-in
+//    loader, as is everything when the view turns engine HTTP off.
 //  - the pixel buffer: jsuiu_render keeps the CPU frame between frames so
 //    jsui_render_rgba_incremental repaints only what changed, and reports
 //    the damaged rectangle.
@@ -30,6 +38,7 @@
 // have run and the backend has finished it, and never waits for the main
 // thread; usually it has run long before the next frame's first runtime
 // call, so the wait costs nothing.
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -41,8 +50,6 @@
 
 #include "jsui/jsui.h"
 #if JSUI_UNITY_GPU
-#include <atomic>
-
 #include "jsui_unity_api.h"
 #include "jsui_unity_gpu.h"
 #elif defined(_WIN32)
@@ -60,6 +67,17 @@ struct Log {
   int level;
   std::string text;
 };
+struct Request {
+  uint64_t id = 0;
+  std::string url, method;
+  std::vector<std::pair<std::string, std::string>> headers;
+  std::vector<uint8_t> body;
+  int timeoutMs = 0, redirect = 0, streaming = 0;
+};
+
+bool isNetworkUrl(const char* url) {
+  return url && (std::strncmp(url, "http://", 7) == 0 || std::strncmp(url, "https://", 8) == 0);
+}
 
 }  // namespace
 
@@ -70,6 +88,12 @@ struct JsuiUnity {
   std::deque<Log> logs;
   Message current;  // what jsuiu_next_message handed out last
   Log currentLog;
+  // Requests and cancellations for C#: on_request may run on the JS thread.
+  std::atomic<bool> engineHttp{false};  // jsuiu_set_engine_http
+  std::mutex requestMutex;
+  std::deque<Request> requests;
+  std::deque<uint64_t> cancels;
+  Request currentRequest;
   std::vector<uint8_t> pixels;
   int width = 0, height = 0;
   bool fresh = true;
@@ -145,8 +169,11 @@ extern "C" {
 
 // A runtime of width x height logical px at pixel_ratio device px per px.
 // dev_mode: poll the bundle's dev server (jsui dev) and hot-update.
-JSUI_API JsuiUnity* jsuiu_create(int width, int height, float pixel_ratio, int dev_mode) {
+// engine_http: http:// and https:// requests go to C# (jsuiu_next_request)
+// instead of the built-in loader (jsuiu_set_engine_http changes it).
+JSUI_API JsuiUnity* jsuiu_create(int width, int height, float pixel_ratio, int dev_mode, int engine_http) {
   auto* u = new JsuiUnity();
+  u->engineHttp = engine_http != 0;
   JsuiConfig cfg;
   jsui_config_init(&cfg);
   cfg.width = width;
@@ -161,6 +188,39 @@ JSUI_API JsuiUnity* jsuiu_create(int width, int height, float pixel_ratio, int d
   cfg.log = [](void* user, JsuiLogLevel level, const char* text) {
     auto* self = static_cast<JsuiUnity*>(user);
     if (self->logs.size() < 1000) self->logs.push_back({int(level), text ? text : ""});
+  };
+  cfg.request_user = u;
+  cfg.on_request = [](void* user, JsuiRuntime*, uint64_t id, const JsuiRequest* req) -> int {
+    auto* self = static_cast<JsuiUnity*>(user);
+    if (!self->engineHttp || !isNetworkUrl(req->url)) return 1;
+    Request r;
+    r.id = id;
+    r.url = req->url;
+    r.method = req->method ? req->method : "GET";
+    for (size_t i = 0; i < req->header_count; i++)
+      r.headers.emplace_back(req->headers[i].name ? req->headers[i].name : "",
+                             req->headers[i].value ? req->headers[i].value : "");
+    if (req->body && req->body_size) {
+      auto* b = static_cast<const uint8_t*>(req->body);
+      r.body.assign(b, b + req->body_size);
+    }
+    r.timeoutMs = req->timeout_ms;
+    r.redirect = req->redirect;
+    r.streaming = req->streaming;
+    std::lock_guard<std::mutex> lock(self->requestMutex);
+    self->requests.push_back(std::move(r));
+    return 0;
+  };
+  cfg.on_request_cancel = [](void* user, JsuiRuntime*, uint64_t id) {
+    auto* self = static_cast<JsuiUnity*>(user);
+    std::lock_guard<std::mutex> lock(self->requestMutex);
+    // Not started yet: drop it; else C# aborts it.
+    for (auto it = self->requests.begin(); it != self->requests.end(); ++it)
+      if (it->id == id) {
+        self->requests.erase(it);
+        return;
+      }
+    self->cancels.push_back(id);
   };
   u->rt = jsui_create(&cfg);
   if (!u->rt) {
@@ -340,6 +400,77 @@ JSUI_API int jsuiu_next_log(JsuiUnity* u, int* level, const char** text) {
   *level = u->currentLog.level;
   *text = u->currentLog.text.c_str();
   return 1;
+}
+
+// Whether http:// and https:// requests go to C# from now on (requests
+// already queued stay queued).
+JSUI_API void jsuiu_set_engine_http(JsuiUnity* u, int on) {
+  if (u) u->engineHttp = on != 0;
+}
+
+// The next network request for C# (UnityWebRequest): 1 and its id, URL,
+// method (upper case), body (NULL when empty), timeout (ms, 0: none),
+// JsuiRedirectMode and header count, or 0 when none is queued. Strings and
+// the body stay valid until the next call; jsuiu_request_header reads the
+// headers (names in lower case).
+JSUI_API int jsuiu_next_request(JsuiUnity* u, uint64_t* id, const char** url, const char** method, const void** body,
+                                int* body_size, int* timeout_ms, int* redirect, int* header_count) {
+  if (!u) return 0;
+  {
+    std::lock_guard<std::mutex> lock(u->requestMutex);
+    if (u->requests.empty()) return 0;
+    u->currentRequest = std::move(u->requests.front());
+    u->requests.pop_front();
+  }
+  const Request& r = u->currentRequest;
+  *id = r.id;
+  *url = r.url.c_str();
+  *method = r.method.c_str();
+  *body = r.body.empty() ? nullptr : r.body.data();
+  *body_size = int(r.body.size());
+  *timeout_ms = r.timeoutMs;
+  *redirect = r.redirect;
+  *header_count = int(r.headers.size());
+  return 1;
+}
+
+// Header `index` of the request jsuiu_next_request returned last.
+JSUI_API int jsuiu_request_header(JsuiUnity* u, int index, const char** name, const char** value) {
+  if (!u || index < 0 || size_t(index) >= u->currentRequest.headers.size()) return 0;
+  *name = u->currentRequest.headers[size_t(index)].first.c_str();
+  *value = u->currentRequest.headers[size_t(index)].second.c_str();
+  return 1;
+}
+
+// The next request JS no longer wants (abort it): 1 and its id, or 0.
+JSUI_API int jsuiu_next_request_cancel(JsuiUnity* u, uint64_t* id) {
+  if (!u) return 0;
+  std::lock_guard<std::mutex> lock(u->requestMutex);
+  if (u->cancels.empty()) return 0;
+  *id = u->cancels.front();
+  u->cancels.pop_front();
+  return 1;
+}
+
+// jsui_request_respond with the headers as "name: value" lines (one per
+// line, UTF-8), which C# builds more easily than a JsuiHeader array.
+JSUI_API void jsuiu_request_respond(JsuiUnity* u, uint64_t id, int status, const char* status_text,
+                                   const char* final_url, const char* header_lines) {
+  if (!u) return;
+  std::vector<std::pair<std::string, std::string>> parsed;
+  for (const char* p = header_lines; p && *p;) {
+    const char* e = std::strchr(p, '\n');
+    std::string line(p, e ? size_t(e - p) : std::strlen(p));
+    p = e ? e + 1 : p + line.size();
+    auto colon = line.find(':');
+    if (colon == std::string::npos) continue;
+    size_t v = line.find_first_not_of(' ', colon + 1);
+    parsed.emplace_back(line.substr(0, colon), v == std::string::npos ? std::string() : line.substr(v));
+  }
+  std::vector<JsuiHeader> headers;
+  headers.reserve(parsed.size());
+  for (auto& [k, v] : parsed) headers.push_back({k.c_str(), v.c_str()});
+  jsui_request_respond(u->rt, id, status, status_text, final_url, headers.data(), headers.size());
 }
 
 // Paints the UI into the plugin's RGBA8 premultiplied buffer of width x

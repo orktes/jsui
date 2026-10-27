@@ -25,7 +25,7 @@ def main():
     bundle = pathlib.Path(sys.argv[2]).resolve().as_uri()
     P = ctypes.c_void_p
     lib.jsuiu_create.restype = P
-    lib.jsuiu_create.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_float, ctypes.c_int]
+    lib.jsuiu_create.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_float, ctypes.c_int, ctypes.c_int]
     lib.jsuiu_runtime.restype = P
     lib.jsuiu_runtime.argtypes = [P]
     lib.jsuiu_destroy.argtypes = [P]
@@ -44,7 +44,7 @@ def main():
     modes = {"off": 0, "on": 1, "lockstep": 2}
     mode = modes[sys.argv[3] if len(sys.argv) > 3 else "on"]
     w, h = 640, 360
-    u = lib.jsuiu_create(w, h, 1.0, 0)
+    u = lib.jsuiu_create(w, h, 1.0, 0, 0)
     assert u, "jsuiu_create failed"
     rt = lib.jsuiu_runtime(u)
     lib.jsui_set_state(rt, b"game", b'{"engine":"smoke","renderer":"ctypes","fps":0,"entities":0,"paused":false,'

@@ -413,7 +413,7 @@ struct Plugin {
   void* lib = nullptr;
   void(UNITY_INTERFACE_API* UnityPluginLoad)(IUnityInterfaces*) = nullptr;
   void(UNITY_INTERFACE_API* UnityPluginUnload)() = nullptr;
-  void* (*jsuiu_create)(int, int, float, int) = nullptr;
+  void* (*jsuiu_create)(int, int, float, int, int) = nullptr;
   JsuiRuntime* (*jsuiu_runtime)(void*) = nullptr;
   void (*jsuiu_destroy)(void*) = nullptr;
   int (*jsuiu_gpu_available)() = nullptr;
@@ -553,7 +553,7 @@ void runFrames(Plugin& p, FakeUnity& unity, bool deferred, bool inputAttachment)
                               (inputAttachment ? VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT : 0)));
   Readback rb(unity.vk, W, H);
 
-  void* view = p.jsuiu_create(W, H, 1, 0);
+  void* view = p.jsuiu_create(W, H, 1, 0, 0);
   CHECK(view != nullptr);
   JsuiRuntime* rt = p.jsuiu_runtime(view);
   CHECK(p.jsui_load_bundle_source(rt, kBundle, std::strlen(kBundle), "unity.js") == 0);
@@ -649,7 +649,7 @@ int main(int argc, char** argv) {
   {
     FakeTexture tex;
     CHECK(unity.makeTexture(tex, 64, 64, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT));
-    void* view = p.jsuiu_create(64, 64, 1, 0);
+    void* view = p.jsuiu_create(64, 64, 1, 0, 0);
     p.jsui_load_bundle_source(p.jsuiu_runtime(view), kBundle, std::strlen(kBundle), "unity.js");
     p.jsuiu_set_target(view, &tex, 64, 64);
     auto event = reinterpret_cast<UnityRenderingEvent>(p.jsuiu_render_event_func());
