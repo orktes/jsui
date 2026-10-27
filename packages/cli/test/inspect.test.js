@@ -546,3 +546,49 @@ test('profile trace: JS samples on Main, the phases on a render thread, worklets
   assert.deepEqual([worklet.ts, worklet.dur, thread(worklet.pid, worklet.tid)], [1500, 20, 'JSUI worklets']);
   assert.ok(traceEvents.some((e) => e.name === 'thread_name' && e.args.name === 'CrRendererMain'));
 });
+
+test('inspect: page mode answers as a page and records with Tracing', async () => {
+  const s = await server();
+  try {
+    const first = poll(s.origin, 'rt-1', { profiler: true });
+    await until(async () => (await (await fetch(s.origin + '/json/list')).json()).length === 1, 'target listed');
+    const [t] = await (await fetch(s.origin + '/json/list')).json();
+    assert.equal(t.jsuiPageFrontendUrl, `devtools://devtools/bundled/inspector.html?ws=127.0.0.1:${s.port}/__jsui/inspect/page/rt-1`);
+    const fe = await frontend(`ws://127.0.0.1:${s.port}/__jsui/inspect/page/rt-1`);
+    const [open] = await first;
+    const reply = async (id, method, params = {}) => {
+      fe.ws.send(JSON.stringify({ id, method, params }));
+      return JSON.parse(await until(() => fe.got.find((m) => JSON.parse(m).id === id), `reply ${id}`));
+    };
+    assert.equal((await reply(1, 'Page.getResourceTree')).result.frameTree.frame.id, 'F1');
+    assert.equal((await reply(2, 'Page.getNavigationHistory')).result.entries.length, 1);
+    assert.ok((await reply(3, 'DOM.getDocument')).error);
+
+    // Tracing.start: the relay starts a CPU profile in the runtime itself.
+    assert.deepEqual((await reply(4, 'Tracing.start', { transferMode: 'ReportEvents' })).result, {});
+    let asked = [];
+    while (asked.length < 3) asked.push(...(await poll(s.origin, 'rt-1', { profiler: true })).map((e) => JSON.parse(e.message)));
+    assert.deepEqual(asked.map((m) => m.method), ['Profiler.enable', 'Profiler.setSamplingInterval', 'Profiler.start']);
+    assert.ok(asked.every((m) => m.id >= 2000000000));
+    await post(s.origin, '/__jsui/inspect/push', { runtime: 'rt-1', messages: asked.map((m) => ({ session: open.session, message: JSON.stringify({ id: m.id, result: {} }) })) });
+
+    // Tracing.end: Profiler.stop, and its profile comes back as trace events.
+    await reply(5, 'Tracing.end');
+    const [stop] = (await poll(s.origin, 'rt-1', { profiler: true })).map((e) => JSON.parse(e.message));
+    assert.equal(stop.method, 'Profiler.stop');
+    const cf = (functionName) => ({ functionName, scriptId: '0', url: '', lineNumber: -1, columnNumber: -1 });
+    const profile = {
+      nodes: [{ id: 1, callFrame: cf('(root)'), children: [2] }, { id: 2, callFrame: cf('(idle)'), children: [] }],
+      startTime: 0, endTime: 100, samples: [2], timeDeltas: [0], jsuiSpans: [['(paint)', 10, 20]],
+    };
+    await post(s.origin, '/__jsui/inspect/push', { runtime: 'rt-1', messages: [{ session: open.session, message: JSON.stringify({ id: stop.id, result: { profile } }) }] });
+    await until(() => fe.got.some((m) => m.includes('Tracing.tracingComplete')), 'tracingComplete');
+    const data = fe.got.map((m) => JSON.parse(m)).filter((m) => m.method === 'Tracing.dataCollected').flatMap((m) => m.params.value);
+    assert.ok(data.some((e) => e.name === 'ProfileChunk'));
+    assert.ok(data.some((e) => e.name === 'Paint' && e.ts === 10));
+    // The relay's own calls never reach the frontend.
+    assert.ok(!fe.got.some((m) => JSON.parse(m).id >= 2000000000));
+  } finally {
+    await s.close();
+  }
+});

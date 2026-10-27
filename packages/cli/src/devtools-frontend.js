@@ -1,9 +1,8 @@
 // Chrome's DevTools frontend, served by `jsui dev` from its own origin
-// (/__jsui/devtools/). Opened from there, DevTools may fetch from this
-// server (its content security policy allows 'self'), which devtools:// and
-// the hosted copy can't: so source maps load the plain way, and the
-// Performance panel opens the multi-track trace of a recording (see
-// jsui-devtools.js below) instead of the bare CPU profile.
+// (/__jsui/devtools/), opened on a runtime as for a page (the relay's page
+// mode: the Performance panel records a trace with a track per thread).
+// From here DevTools may also fetch from this server (its content security
+// policy allows 'self'), which devtools:// and the hosted copy can't.
 //
 // The files are Chrome's prebuilt frontend (BSD-3-Clause) for one pinned
 // Chrome revision, fetched from Google's DevTools CDN on first use and kept
@@ -33,9 +32,18 @@ const TYPES = {
   '.wasm': 'application/wasm',
 };
 
-// Loaded by every entry page: the Performance panel opens a recording's
-// trace (the relay names it in profile.jsuiTrace) rather than the profile.
-const PATCH = `// jsui dev: open a recording as its trace (render thread, worklets, GPU).
+// Before DevTools reads its settings: page mode has no page to show, so
+// the screencast pane starts hidden.
+const EARLY = `// jsui dev: no screencast (a JSUI runtime has no page to show).
+try {
+  if (localStorage.getItem('screencast-enabled') === null) localStorage.setItem('screencast-enabled', 'false');
+} catch {}
+`;
+
+// After DevTools: in Node mode (js_app.html) the Performance panel records
+// a CPU profile; it opens the recording's trace instead (the relay names it
+// in profile.jsuiTrace).
+const PATCH = `// jsui dev: Node mode opens a recording as its trace (render thread, worklets, GPU).
 import * as Timeline from './panels/timeline/timeline.js';
 const proto = Timeline.TimelinePanel.TimelinePanel.prototype;
 const loadFromCpuProfile = proto.loadFromCpuProfile;
@@ -58,7 +66,7 @@ export function devtoolsCacheDir(env = process.env) {
 /** An entry page with the patch loaded and `wsOrigin` allowed to connect. */
 export function editEntryPage(html, wsOrigin) {
   let out = html.replace(/connect-src ([^;"]*)/, (m, list) => `connect-src ${list} ${wsOrigin}`);
-  out = out.replace(/(<script type="module" src="[^"]+"><\/script>)/, '$1\n<script type="module" src="./jsui-devtools.js"></script>');
+  out = out.replace(/(<script type="module" src="[^"]+"><\/script>)/, '<script src="./jsui-devtools-early.js"></script>\n$1\n<script type="module" src="./jsui-devtools.js"></script>');
   return out;
 }
 
@@ -92,7 +100,8 @@ export function createDevtoolsFrontend(o = {}) {
   }
 
   return {
-    url: (host, runtimeId) => `http://${host}${PREFIX}js_app.html?experiments=true&v8only=true&ws=${host}/__jsui/inspect/ws/${encodeURIComponent(runtimeId)}`,
+    // As for a page (the relay's page mode): Tracing, a track per thread.
+    url: (host, runtimeId) => `http://${host}${PREFIX}inspector.html?ws=${host}/__jsui/inspect/page/${encodeURIComponent(runtimeId)}`,
     handle(req, res, url) {
       if (!url.pathname.startsWith(PREFIX)) return false;
       const rel = decodeURIComponent(url.pathname.slice(PREFIX.length));
@@ -105,8 +114,8 @@ export function createDevtoolsFrontend(o = {}) {
         res.writeHead(200, { 'Content-Type': TYPES[path.extname(rel)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
         res.end(req.method === 'HEAD' ? undefined : data);
       };
-      if (rel === 'jsui-devtools.js') {
-        send(PATCH);
+      if (rel === 'jsui-devtools.js' || rel === 'jsui-devtools-early.js') {
+        send(rel === 'jsui-devtools.js' ? PATCH : EARLY);
         return true;
       }
       file(rel).then(

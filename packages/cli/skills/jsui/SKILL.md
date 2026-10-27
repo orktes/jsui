@@ -158,8 +158,9 @@ npx jsui log --attach $U --since 0             # what the person clicked / press
   (source maps), console, and the Performance panel's CPU profile (a flame
   chart of JS functions, with the runtime's layout, paint and GPU submit as
   `(layout)`, `(paint)`, `(gpu)` where JS was idle). Send them to
-  `$U/__jsui/devtools/`: DevTools on the live runtime, served by `jsui dev`,
-  which opens each recording with render thread, worklets and GPU tracks.
+  `$U/__jsui/devtools/`: DevTools on the live runtime, served by `jsui dev`
+  and opened as for a page, so each recording has render thread, worklets
+  and GPU tracks.
   See `docs/DEBUGGING.md`.
 
 ## Minimal screen

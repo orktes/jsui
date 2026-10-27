@@ -12,19 +12,21 @@ jsui-viewer --dev http://127.0.0.1:5173/bundle.js   # or any dev-mode host
 
 * **Chrome:** open `http://127.0.0.1:5173/__jsui/devtools/` in a tab.
   It is DevTools on the runtime that joined last, and the same link works
-  after the app or the server restarts. `jsui dev` serves Chrome's DevTools
-  frontend from its own address, so DevTools can load the source maps and
-  open profile traces from it (see Profiling). The frontend is Chrome's
-  prebuilt one for a pinned revision (`DEVTOOLS_REVISION` in
-  `packages/cli/src/devtools-frontend.js`, BSD-licensed), fetched from
-  Google's DevTools CDN on first use and cached in `~/.cache/jsui/devtools/`
-  (`JSUI_CACHE_DIR` moves it).
-* **Chrome's own DevTools:** `chrome://inspect`, *Configure...*, add
-  `127.0.0.1:5173`, and *inspect* the app under *Remote Target*. If it
-  doesn't show up there, open `http://127.0.0.1:5173/json/list` and paste
-  the runtime's `devtoolsFrontendUrl` (`devtools://devtools/bundled/js_app.html?…`)
-  into the address bar. That id changes each time the runtime starts.
-  These work offline.
+  after the app or the server restarts. It opens the runtime as a page
+  would be (see Profiling: the Performance panel records a track per
+  thread). The frontend is Chrome's prebuilt one for a pinned revision
+  (`DEVTOOLS_REVISION` in `packages/cli/src/devtools-frontend.js`,
+  BSD-licensed), fetched from Google's DevTools CDN on first use and cached
+  in `~/.cache/jsui/devtools/` (`JSUI_CACHE_DIR` moves it). Elements and
+  Network have nothing to show.
+* **Chrome's own DevTools** (works offline): paste
+  `devtools://devtools/bundled/inspector.html?ws=127.0.0.1:5173/__jsui/inspect/page/<id>`
+  into the address bar, the same page mode. `jsui dev` prints it with the
+  runtime's id when one connects (`/json/list` has it as
+  `jsuiPageFrontendUrl`). Or the Node-style way: `chrome://inspect`,
+  *Configure...*, add `127.0.0.1:5173`, *inspect* the app under *Remote
+  Target* (or its `devtoolsFrontendUrl`). That one records only the CPU
+  profile. The id changes each time the runtime starts.
 * **VS Code**: add this to `.vscode/launch.json` and start *JSUI*:
 
   ```json
@@ -69,18 +71,19 @@ running. *Save profile* writes a `.cpuprofile`.
   where JS was idle. With `--js-thread off` everything is one thread and
   the chart shows whole frames. Totals per phase without DevTools:
   `jsui_set_profiling` / `getPerf()` (see [PERFORMANCE.md](PERFORMANCE.md)).
-* **A track per thread.** The live chart is one thread: DevTools records
-  only a CPU profile from a target like this one. `jsui dev` also turns
-  every recording into a Chrome trace, and the DevTools it serves
-  (`/__jsui/devtools/`) opens that instead when you press stop: the JS on
-  **Main** (in tasks, under what called it), the frame phases on a **JSUI
-  render thread** track (Layout, Recalculate style, Paint, Commit, colored
-  as Rendering and Painting) where they actually ran, overlapping JS or
-  not, worklet runs (react-native-worklets, on the window's thread) on a
-  **JSUI worklets** track, and each GPU submit on the **GPU** track. With
-  another DevTools, take the trace from the URL `jsui dev` prints
-  (`http://127.0.0.1:5173/__jsui/trace/1.json`, the last 10 are kept) and
-  drop it on the Performance panel (or [Perfetto](https://ui.perfetto.dev)).
+* **A track per thread.** Opened as a page (the links above), DevTools
+  records a trace (CDP `Tracing`): the dev server answers it by recording
+  a CPU profile in the runtime and sending it back as trace events. The
+  recording then shows the way Chrome shows a page's: the JS on **Main**
+  (in tasks, under what called it), the frame phases on a **JSUI render
+  thread** track (Layout, Recalculate style, Paint, Commit, colored as
+  Rendering and Painting) where they actually ran, overlapping JS or not,
+  worklet runs (react-native-worklets, on the window's thread) on a **JSUI
+  worklets** track, and each GPU submit on the **GPU** track. Opened the
+  Node-style way, DevTools asks for a CPU profile only and gets one lane;
+  `jsui dev` still keeps the trace (`http://127.0.0.1:5173/__jsui/trace/1.json`,
+  the last 10) to drop on the Performance panel or
+  [Perfetto](https://ui.perfetto.dev).
 * **How.** A thread of the runtime's arms the statement traps once per
   sampling interval (`Profiler.setSamplingInterval`, 1 ms unless the
   frontend asks otherwise, at least 100 µs), and the next

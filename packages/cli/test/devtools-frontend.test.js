@@ -14,7 +14,7 @@ const PAGE = `<meta http-equiv="Content-Security-Policy" content="default-src 's
 test('entry pages load the patch and may connect to the server', () => {
   const out = editEntryPage(PAGE, 'ws://10.0.0.5:5173');
   assert.match(out, /connect-src data: 'self' devtools: ws:\/\/127\.0\.0\.1:\* ws:\/\/10\.0\.0\.5:5173;/);
-  assert.match(out, /js_app\.js"><\/script>\n<script type="module" src="\.\/jsui-devtools\.js"><\/script>/);
+  assert.match(out, /<script src="\.\/jsui-devtools-early\.js"><\/script>\n<script type="module" src="\.\/entrypoints\/js_app\/js_app\.js"><\/script>\n<script type="module" src="\.\/jsui-devtools\.js"><\/script>/);
 });
 
 test('files come from the pinned revision once, then from the cache', async () => {
@@ -51,7 +51,7 @@ test('files come from the pinned revision once, then from the cache', async () =
     await raw('/__jsui/devtools/../../etc/passwd');  // URL parsing drops the dots: not ours
     assert.equal(await raw('/__jsui/devtools/a//b.js'), 404);
     assert.equal(fetched.filter((u) => u.includes('passwd')).length, 0);
-    assert.equal(fe.url('127.0.0.1:5173', 'abc'), 'http://127.0.0.1:5173/__jsui/devtools/js_app.html?experiments=true&v8only=true&ws=127.0.0.1:5173/__jsui/inspect/ws/abc');
+    assert.equal(fe.url('127.0.0.1:5173', 'abc'), 'http://127.0.0.1:5173/__jsui/devtools/inspector.html?ws=127.0.0.1:5173/__jsui/inspect/page/abc');
   } finally {
     server.close();
   }

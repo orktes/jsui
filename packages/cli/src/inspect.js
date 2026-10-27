@@ -342,6 +342,8 @@ export function createInspector(o) {
       description: 'JSUI runtime',
       devtoolsFrontendUrl: `devtools://devtools/bundled/js_app.html?experiments=true&v8only=true&ws=${ws}`,
       devtoolsFrontendUrlCompat: `devtools://devtools/bundled/inspector.html?experiments=true&v8only=true&ws=${ws}`,
+      // DevTools as for a page: the Performance panel records a trace (Tracing), with a track per thread.
+      jsuiPageFrontendUrl: `devtools://devtools/bundled/inspector.html?ws=${host}/__jsui/inspect/page/${rt.id}`,
       faviconUrl: '',
       id: rt.id,
       title: rt.name && rt.title ? `${rt.name} — ${rt.title}` : rt.name || rt.title || rt.id,
@@ -375,7 +377,7 @@ export function createInspector(o) {
       if (!rt.live) {
         rt.live = true;
         log(`[jsui] debugger: runtime ${label(rt)} available (ws://${hostOf(req)}/__jsui/inspect/ws/${rt.id})` +
-          (o.devtools ? `\n[jsui] DevTools: http://${hostOf(req)}/__jsui/devtools/ (the live runtime; this one: ${o.devtools.url(hostOf(req), rt.id)})` : ''));
+          (o.devtools ? `\n[jsui] DevTools: http://${hostOf(req)}/__jsui/devtools/ (the live runtime), or Chrome's own: devtools://devtools/bundled/inspector.html?ws=${hostOf(req)}/__jsui/inspect/page/${rt.id}` : ''));
         for (const s of rt.sessions) clearTimeout(s.waitTimer);
       } else if (gap) {
         // A runtime that comes back (restarted its agent) learns the
@@ -414,6 +416,7 @@ export function createInspector(o) {
             for (const s of rt.sessions) s.ws.send(m.message);
           } else {
             const s = sessions.get(String(m.session));
+            if (s && s.runtime === id && s.page && internalReply(s, rt, m.message)) continue;
             if (s && s.runtime === id) s.ws.send(m.message.includes('"jsuiSpans"') ? keepTrace(rt, m.message) : m.message);
           }
         }
@@ -584,22 +587,99 @@ export function createInspector(o) {
     return true;
   }
 
+  // Page mode (/__jsui/inspect/page/<id>): DevTools opened as for a page
+  // (inspector.html) records with Tracing, a track per thread, where a
+  // Node-style target only gets a CPU profile. The relay plays the page's
+  // part: one frame, its history, and Tracing.start / end, which it turns
+  // into a CPU profile of the runtime (Profiler.*, with ids of its own) and
+  // answers with the trace profile-trace.js builds from it.
+  const INTERNAL = 2000000000;  // message ids the relay sends for itself
+  let nextInternal = INTERNAL;
+  function pageAnswers(s, text) {
+    if (!/"method"\s*:\s*"(Page|Tracing|DOM)\./.test(text)) return false;
+    let msg;
+    try {
+      msg = JSON.parse(text);
+    } catch {
+      return false;
+    }
+    const rt = runtimes.get(s.runtime);
+    const reply = (result) => s.ws.send(JSON.stringify({ id: msg.id, result }));
+    const url = (rt && rt.title) || originOf() + '/bundle.js';
+    switch (msg.method) {
+      case 'Page.getResourceTree':
+        reply({ frameTree: { frame: { id: 'F1', loaderId: 'L1', url, domainAndRegistry: '', securityOrigin: originOf(), mimeType: 'text/html', secureContextType: 'InsecureScheme', crossOriginIsolatedContextType: 'NotIsolated', gatedAPIFeatures: [] }, resources: [] } });
+        return true;
+      case 'Page.getNavigationHistory':
+        reply({ currentIndex: 0, entries: [{ id: 0, url, userTypedURL: url, title: (rt && rt.name) || 'jsui', transitionType: 'typed' }] });
+        return true;
+      case 'DOM.getDocument':
+        s.ws.send(JSON.stringify({ id: msg.id, error: { code: -32000, message: 'A JSUI runtime has no DOM' } }));
+        return true;
+      case 'Tracing.getCategories':
+        reply({ categories: ['devtools.timeline', 'disabled-by-default-v8.cpu_profiler'] });
+        return true;
+      case 'Tracing.start':
+        reply({});
+        runtimeCall(s, 'Profiler.enable', {});
+        runtimeCall(s, 'Profiler.setSamplingInterval', { interval: 100 });
+        runtimeCall(s, 'Profiler.start', {});
+        return true;
+      case 'Tracing.end':
+        reply({});
+        runtimeCall(s, 'Profiler.stop', {}, (res) => {
+          const profile = res && res.result && res.result.profile;
+          const events = profile ? profileTrace(profile, { name: (rt && rt.name) || 'jsui', url }).traceEvents : [];
+          for (let i = 0; i < events.length; i += 5000) s.ws.send(JSON.stringify({ method: 'Tracing.dataCollected', params: { value: events.slice(i, i + 5000) } }));
+          s.ws.send(JSON.stringify({ method: 'Tracing.tracingComplete', params: { dataLossOccurred: !profile } }));
+        });
+        return true;
+      default:
+        if (msg.method.startsWith('Page.')) {
+          reply(msg.method === 'Page.addScriptToEvaluateOnNewDocument' ? { identifier: '1' } : {});
+          return true;
+        }
+        return false;
+    }
+  }
+  function runtimeCall(s, method, params, done) {
+    const r = runtimes.get(s.runtime);
+    if (!r) return done && done(null);
+    const id = nextInternal++;
+    s.page.internal.set(id, done || null);
+    enqueue(r, { type: 'message', session: s.id, message: JSON.stringify({ id, method, params }) });
+  }
+  function internalReply(s, rt, text) {
+    const m = /^\{"id":(\d+),/.exec(text);
+    if (!m || Number(m[1]) < INTERNAL || !s.page.internal.has(Number(m[1]))) return false;
+    const done = s.page.internal.get(Number(m[1]));
+    s.page.internal.delete(Number(m[1]));
+    if (done) {
+      let msg = null;
+      try {
+        msg = JSON.parse(text);
+      } catch {}
+      done(msg);
+    }
+    return true;
+  }
+
   /** Handles an 'upgrade' request of the server; false when it is not the relay's. */
   function upgrade(req, socket, head) {
     const url = new URL(req.url, 'http://x');
-    const m = /^\/__jsui\/inspect\/ws\/([^/]+)$/.exec(url.pathname);
+    const m = /^\/__jsui\/inspect\/(ws|page)\/([^/]+)$/.exec(url.pathname);
     if (!m) return false;
-    const id = decodeURIComponent(m[1]);
+    const id = decodeURIComponent(m[2]);
     if (closed || !ID.test(id) || !hostOk(req) || !originOk(req)) {
       socket.end(`HTTP/1.1 ${closed || !ID.test(id) ? '404 Not Found' : '403 Forbidden'}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
       return true;
     }
     if (!acceptWebSocket(req, socket)) return true;
     const rt = runtimeOf(id);
-    const s = { id: String(nextSession++), runtime: id, ws: null, waitTimer: null };
+    const s = { id: String(nextSession++), runtime: id, ws: null, waitTimer: null, page: m[1] === 'page' ? { internal: new Map() } : null };
     s.ws = new WsConnection(socket, head, {
       onMessage: (text) => {
-        if (servesLocally(s, text) || refusesUnsupported(s, text)) return;
+        if (servesLocally(s, text) || (s.page && pageAnswers(s, text)) || refusesUnsupported(s, text)) return;
         const r = runtimes.get(id);
         if (r && sessions.has(s.id)) enqueue(r, { type: 'message', session: s.id, message: text });
       },
