@@ -45,7 +45,72 @@ SkAlphaType textureAlphaType(const JsuiTexture& t) {
 }
 
 HostTextures::HostTextures() = default;
-HostTextures::~HostTextures() = default;
+HostTextures::~HostTextures() {
+  inherit(nullptr);
+  for (HostTextures* c : children_) c->parent_ = nullptr;
+}
+
+void HostTextures::markDirty(const std::string& key) {
+  if (dirtySet_.insert(key).second) dirty_.push_back(key);
+  for (HostTextures* c : children_) c->parentChanged(key);
+}
+
+void HostTextures::inherit(HostTextures* parent) {
+  if (parent_) {
+    auto& kids = parent_->children_;
+    kids.erase(std::remove(kids.begin(), kids.end(), this), kids.end());
+    // Users registered with the parent for inherited keys.
+    for (auto& [key, nodes] : users_) {
+      std::string pk = parentKey(key);
+      if (!pk.empty())
+        for (Node* n : nodes) parent_->removeUser(pk, n);
+    }
+  }
+  parent_ = parent;
+  if (parent_) {
+    parent_->children_.push_back(this);
+    for (auto& [key, nodes] : users_) {
+      std::string pk = parentKey(key);
+      if (!pk.empty())
+        for (Node* n : nodes) parent_->addUser(pk, n);
+    }
+  }
+}
+
+std::string HostTextures::parentKey(const std::string& key) const {
+  if (!parent_) return "";
+  auto it = aliases_.find(key);
+  if (it != aliases_.end()) return it->second;
+  return inheritAll ? key : "";
+}
+
+void HostTextures::alias(const std::string& key, const std::string& parentKeyName) {
+  HostTextures* p = parent_;
+  // Views showing `key` move to the new parent key.
+  auto users = users_.find(key);
+  std::string before = parentKey(key);
+  if (parentKeyName.empty()) aliases_.erase(key);
+  else aliases_[key] = parentKeyName;
+  std::string after = parentKey(key);
+  if (p && users != users_.end() && before != after)
+    for (Node* n : users->second) {
+      if (!before.empty()) p->removeUser(before, n);
+      if (!after.empty()) p->addUser(after, n);
+    }
+  if (before != after && !entries_.count(key)) {
+    markDirty(key);
+    touch(key, true);
+  }
+}
+
+void HostTextures::parentChanged(const std::string& pk) {
+  auto relay = [&](const std::string& key) {
+    if (!entries_.count(key) && parentKey(key) == pk) markDirty(key);
+  };
+  for (auto& [key, target] : aliases_)
+    if (target == pk) relay(key);
+  if (inheritAll && !aliases_.count(pk)) relay(pk);
+}
 
 int HostTextures::set(const std::string& key, const JsuiTexture* desc) {
   if (!desc) return remove(key) ? 1 : 0;
@@ -63,7 +128,7 @@ int HostTextures::set(const std::string& key, const JsuiTexture* desc) {
   e.contentVersion++;
   e.warned = false;
   setSize(key, &e);
-  if (dirtySet_.insert(key).second) dirty_.push_back(key);
+  markDirty(key);
   touch(key, resized);
   return 1;
 }
@@ -104,7 +169,7 @@ int HostTextures::setPixels(const std::string& key, const void* rgba, int width,
     e.descVersion++;
     e.warned = false;
     setSize(key, &e);
-    if (dirtySet_.insert(key).second) dirty_.push_back(key);
+    markDirty(key);
   }
   touch(key, resized);
   return 1;
@@ -121,14 +186,16 @@ bool HostTextures::updated(const std::string& key) {
 bool HostTextures::remove(const std::string& key) {
   if (!entries_.erase(key)) return false;
   setSize(key, nullptr);
-  if (dirtySet_.insert(key).second) dirty_.push_back(key);
+  markDirty(key);
   touch(key, true);
   return true;
 }
 
 const HostTextures::Entry* HostTextures::find(const std::string& key) const {
   auto it = entries_.find(key);
-  return it == entries_.end() ? nullptr : &it->second;
+  if (it != entries_.end()) return &it->second;
+  std::string pk = parentKey(key);
+  return pk.empty() ? nullptr : parent_->find(pk);
 }
 
 uint64_t HostTextures::version(const std::string& key) const {
@@ -145,7 +212,10 @@ void HostTextures::setSize(const std::string& key, const Entry* e) {
 bool HostTextures::size(const std::string& key, int* width, int* height, uint64_t* version) const {
   std::lock_guard<std::mutex> lock(sizesMutex_);
   auto it = sizes_.find(key);
-  if (it == sizes_.end()) return false;
+  if (it == sizes_.end()) {
+    std::string pk = parentKey(key);
+    return !pk.empty() && parent_->size(pk, width, height, version);
+  }
   *width = it->second.width;
   *height = it->second.height;
   *version = it->second.version;
@@ -157,7 +227,19 @@ std::vector<std::string> HostTextures::keys() const {
   std::vector<std::string> out;
   out.reserve(sizes_.size());
   for (auto& [k, e] : sizes_) out.push_back(k);
+  if (parent_) {
+    for (auto& [k, pk] : aliases_)
+      if (!sizes_.count(k)) {
+        int w, h;
+        uint64_t v;
+        if (parent_->size(pk, &w, &h, &v)) out.push_back(k);
+      }
+    if (inheritAll)
+      for (const std::string& k : parent_->keys())
+        if (!sizes_.count(k) && !aliases_.count(k)) out.push_back(k);
+  }
   std::sort(out.begin(), out.end());
+  out.erase(std::unique(out.begin(), out.end()), out.end());
   return out;
 }
 
@@ -168,9 +250,15 @@ std::vector<std::string> HostTextures::takeDirty() {
   return out;
 }
 
-void HostTextures::addUser(const std::string& key, Node* node) { users_[key].insert(node); }
+void HostTextures::addUser(const std::string& key, Node* node) {
+  users_[key].insert(node);
+  std::string pk = parentKey(key);
+  if (!pk.empty()) parent_->addUser(pk, node);
+}
 
 void HostTextures::removeUser(const std::string& key, Node* node) {
+  std::string pk = parentKey(key);
+  if (!pk.empty()) parent_->removeUser(pk, node);
   auto it = users_.find(key);
   if (it == users_.end()) return;
   it->second.erase(node);
@@ -192,7 +280,10 @@ void HostTextures::touch(const std::string& key, bool layout) {
 
 sk_sp<SkImage> HostTextures::image(const std::string& key) {
   auto it = entries_.find(key);
-  if (it == entries_.end()) return nullptr;
+  if (it == entries_.end()) {
+    std::string pk = parentKey(key);
+    return pk.empty() ? nullptr : parent_->image(pk);
+  }
   Entry& e = it->second;
   if (e.pixels) return e.pixels;
   if (tRecording) {

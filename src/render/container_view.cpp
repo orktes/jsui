@@ -81,6 +81,149 @@ void onCallCancel(void* user, uint64_t callId) {
   push(static_cast<NodeState*>(user), {{"kind", Value("callCancel")}, {"callId", Value(double(callId))}});
 }
 
+// ---- audio and video: the child's requests play through the parent's
+// Audio / Video (its handler, its built-in backend), so the embedder sees one
+// runtime. Ids are the parent's own; reports go back to the child under its
+// ids. A callback left in the parent after the child is gone (or replaced)
+// does nothing.
+
+// The child that `gen` named, if it is still running.
+JsuiRuntime* alive(const std::shared_ptr<NodeState*>& life, uint64_t gen) {
+  NodeState* st = *life;
+  return st && st->generation == gen ? st->child : nullptr;
+}
+
+float busGain(NodeState* st, const std::string& bus) {
+  auto it = st->busGains.find(bus);
+  return it == st->busGains.end() ? 1.f : it->second;
+}
+
+void onAudio(void* user, const JsuiAudioCommand* c) {
+  auto* st = static_cast<NodeState*>(user);
+  Audio& audio = *st->cache->runtime().audio;
+  std::string bus = c->bus ? c->bus : "";
+  switch (c->op) {
+    case JSUI_AUDIO_PRELOAD: {
+      std::string url = c->sound ? c->sound : "";
+      audio.preloadFor(url, [life = st->life, gen = st->generation, url](bool ok, double d) {
+        if (JsuiRuntime* child = alive(life, gen)) jsui_audio_sound_loaded(child, url.c_str(), ok, d);
+      });
+      break;
+    }
+    case JSUI_AUDIO_UNLOAD:  // the parent may still use it
+      break;
+    case JSUI_AUDIO_PLAY: {
+      uint64_t voice = c->voice;
+      uint64_t pv = audio.playFor(
+          [life = st->life, gen = st->generation, voice](int status) {
+            JsuiRuntime* child = alive(life, gen);
+            if (!child) return;
+            (*life)->voices.erase(voice);
+            jsui_audio_voice_ended(child, voice, status);
+          },
+          c->sound ? c->sound : "", bus, c->volume * busGain(st, bus), c->pitch, c->pan, c->loop != 0, c->fade_ms,
+          c->offset_s);
+      // Failed at once (no audio): ended already, nothing to track.
+      if (audio.live(pv)) st->voices[voice] = {pv, bus, c->volume, c->pitch, c->pan};
+      break;
+    }
+    case JSUI_AUDIO_STOP:
+    case JSUI_AUDIO_PAUSE:
+    case JSUI_AUDIO_RESUME:
+    case JSUI_AUDIO_SET: {
+      auto it = st->voices.find(c->voice);
+      if (it == st->voices.end()) break;
+      NodeState::Voice& v = it->second;
+      if (c->op == JSUI_AUDIO_SET) {
+        v.volume = c->volume;
+        v.pitch = c->pitch;
+        v.pan = c->pan;
+      }
+      audio.voice(c->op, v.parent, v.volume * busGain(st, v.bus), v.pitch, v.pan, c->fade_ms);
+      break;
+    }
+    case JSUI_AUDIO_BUS: {
+      st->busGains[bus] = c->muted ? 0.f : c->volume;
+      for (auto& [id, v] : st->voices)
+        if (v.bus == bus)
+          audio.voice(JSUI_AUDIO_SET, v.parent, v.volume * busGain(st, bus), v.pitch, v.pan, c->fade_ms);
+      break;
+    }
+    case JSUI_AUDIO_STOP_ALL: {
+      // Only the child's own voices.
+      std::vector<uint64_t> stop;
+      for (auto& [id, v] : st->voices)
+        if (!c->bus || v.bus == bus) stop.push_back(v.parent);
+      for (uint64_t pv : stop) audio.voice(JSUI_AUDIO_STOP, pv, 0, 1, 0, c->fade_ms);
+      break;
+    }
+  }
+}
+
+std::string videoTexture(NodeState* st, uint64_t video) {
+  return "jsuic:" + std::to_string(st->node->id()) + "/" + std::to_string(st->generation) + "/" +
+         std::to_string(video);
+}
+
+void onVideo(void* user, const JsuiVideoCommand* c) {
+  auto* st = static_cast<NodeState*>(user);
+  Runtime& parent = st->cache->runtime();
+  Runtime* child = internalRuntime(st->child);
+  switch (c->op) {
+    case JSUI_VIDEO_OPEN: {
+      if (st->videos.count(c->video)) break;
+      std::vector<std::string> sources, types;
+      for (int i = 0; i < c->source_count; i++) {
+        sources.push_back(c->sources[i] ? c->sources[i] : "");
+        types.push_back(c->source_types && c->source_types[i] ? c->source_types[i] : "");
+      }
+      if (sources.empty() && c->url) sources.push_back(c->url);
+      std::string texture = c->texture ? c->texture : "";
+      std::string pt = videoTexture(st, c->video);
+      uint64_t pv = parent.video->reserve();
+      st->videos[c->video] = {pv, texture};
+      // The child's view shows the parent's texture the host draws into.
+      if (child && !texture.empty()) child->textures.alias(texture, pt);
+      uint64_t video = c->video;
+      parent.video->openFor(
+          [life = st->life, gen = st->generation, video](const JsuiVideoStatus& s) {
+            if (JsuiRuntime* ch = alive(life, gen)) jsui_video_status(ch, video, &s);
+          },
+          pv, sources, types, pt, c->paused != 0, c->muted != 0, c->volume, c->loop != 0, c->rate);
+      break;
+    }
+    case JSUI_VIDEO_SET: {
+      auto it = st->videos.find(c->video);
+      if (it != st->videos.end())
+        parent.video->set(it->second.parent, c->paused != 0, c->muted != 0, c->volume, c->loop != 0, c->rate);
+      break;
+    }
+    case JSUI_VIDEO_SEEK: {
+      auto it = st->videos.find(c->video);
+      if (it != st->videos.end()) parent.video->seek(it->second.parent, c->time_s);
+      break;
+    }
+    case JSUI_VIDEO_CLOSE: {
+      auto it = st->videos.find(c->video);
+      if (it == st->videos.end()) break;
+      if (child && !it->second.texture.empty()) child->textures.alias(it->second.texture, "");
+      parent.video->close(it->second.parent);
+      st->videos.erase(it);
+      break;
+    }
+  }
+}
+
+// What the child still plays through the parent stops with it.
+void releaseMedia(NodeState* st) {
+  Runtime& parent = st->cache->runtime();
+  for (auto& [id, v] : st->voices) parent.audio->voice(JSUI_AUDIO_STOP, v.parent, 0, 1, 0, 0);
+  st->voices.clear();
+  st->busGains.clear();
+  for (auto& [id, v] : st->videos) parent.video->close(v.parent);
+  st->videos.clear();
+}
+
 // A parent -> child call (jsui_call_ui) on its way back.
 struct UiCall {
   Containers* cache;
@@ -105,6 +248,7 @@ void destroyChild(NodeState* st) {
   JsuiRuntime* child = st->child;
   st->child = nullptr;
   jsui_destroy(child);  // fails the child's unsettled calls (uiCallDone)
+  releaseMedia(st);     // its voices and videos in the parent  // fails the child's unsettled calls (uiCallDone)
 }
 
 void createChild(NodeState* st) {
@@ -130,8 +274,19 @@ void createChild(NodeState* st) {
   cfg.js_memory_limit_mb = parent.config.js_memory_limit_mb;
   cfg.js_timeout_ms = parent.config.js_timeout_ms;
   cfg.audio_disabled = parent.config.audio_disabled;
+  // Audio and video play through the parent's (see onAudio / onVideo).
+  cfg.on_audio = onAudio;
+  cfg.audio_user = st;
+  cfg.on_video = onVideo;
+  cfg.video_user = st;
+  st->generation++;
   st->child = jsui_create(&cfg);
-  ResourceLoader* childLoader = &internalRuntime(st->child)->loader;
+  Runtime* childRt = internalRuntime(st->child);
+  // The parent's fonts and host textures are the child's too, under its own.
+  childRt->fonts.inherit(&parent.fonts);
+  childRt->textures.inherit(&parent.textures);
+  st->parentFonts = parent.fonts.generation;
+  ResourceLoader* childLoader = &childRt->loader;
   childLoader->forward = [st, childLoader](uint64_t id, LoadRequest req) {
     forwardLoad(st, childLoader, id, std::move(req));
   };
@@ -204,6 +359,7 @@ void contentBox(const Node* node, float* x, float* y, float* w, float* h) {
 }  // namespace
 
 NodeState::~NodeState() {
+  *life = nullptr;
   if (cache) {
     destroyChild(this);
     cache->removeView(node);
@@ -353,7 +509,14 @@ void Containers::tick(double nowMs) {
         if (c["op"].asString() == "call" || c["op"].asString() == "reload") container::runCommand(st, c);
       continue;
     }
-    if (resized) internalRuntime(st->child)->main().setViewport(w, h, pr);
+    Runtime* childRt = internalRuntime(st->child);
+    if (resized) childRt->main().setViewport(w, h, pr);
+    // Fonts registered on the parent since: the child's text re-shapes too.
+    if (st->parentFonts != rt_.fonts.generation) {
+      st->parentFonts = rt_.fonts.generation;
+      childRt->fonts.changed();
+      childRt->fontsChanged();
+    }
     if (st->runPending) {
       st->runPending = false;
       jsui_surface_run(st->child, st->appKey.c_str(), st->propsJson.c_str());

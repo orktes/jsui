@@ -73,6 +73,18 @@ class HostTextures {
   void addUser(const std::string& key, Node* node);
   void removeUser(const std::string& key, Node* node);
 
+  // ---- inheritance (a JSUIContainer's child runtime, render/container_view.h)
+  // Keys this registry does not have are looked up in `parent` (nullptr:
+  // none): under their alias (alias()), else, with `inheritAll`, under the
+  // same key. Views showing an inherited texture repaint when the parent's
+  // changes, and its size changes reach this registry's JS (takeDirty).
+  void inherit(HostTextures* parent);
+  // `key` here shows the parent's `parentKey` (empty: drops the alias).
+  void alias(const std::string& key, const std::string& parentKey);
+  // Unaliased keys are looked up in the parent too (false: only aliases).
+  bool inheritAll = true;
+  HostTextures* parent() const { return parent_; }
+
   // Logs (once per texture) through the runtime's logger.
   std::function<void(JsuiLogLevel, const std::string&)> log;
 
@@ -100,6 +112,15 @@ class HostTextures {
   std::unordered_set<std::string> dirtySet_;
   std::vector<std::string> dirty_;
   uint64_t nextId_ = 1;
+
+  // Inheritance: the parent key `key` stands for here ("" when none), and
+  // the parent's key `parentKey` changed (size / handle / removed).
+  std::string parentKey(const std::string& key) const;
+  void parentChanged(const std::string& parentKey);
+  void markDirty(const std::string& key);
+  HostTextures* parent_ = nullptr;
+  std::vector<HostTextures*> children_;
+  std::unordered_map<std::string, std::string> aliases_;  // key -> the parent's key
 };
 
 // Host textures in a recorded frame (Surface::recordFrame, a frame painted

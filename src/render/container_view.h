@@ -36,7 +36,9 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -110,6 +112,32 @@ struct NodeState : Node::Cache {
   float width = -1, height = -1, pixelRatio = 0;
   // The parent's loads made for the child (cancelled with it).
   std::unordered_set<uint64_t> loads;
+
+  // ---- the child's services, through the parent's
+  // Null once this state is gone: callbacks left in the parent's Audio /
+  // Video check it. `generation` tells one child runtime from the next.
+  std::shared_ptr<NodeState*> life = std::make_shared<NodeState*>(this);
+  uint64_t generation = 0;
+  // Child voice -> the parent's voice playing it (with what the child last
+  // asked, so bus changes rescale it).
+  struct Voice {
+    uint64_t parent;
+    std::string bus;
+    float volume, pitch, pan;
+  };
+  std::unordered_map<uint64_t, Voice> voices;
+  // The child's bus gains (volume, 0 while muted): applied to its voices
+  // here, so the parent's own mix stays the parent's.
+  std::unordered_map<std::string, float> busGains;
+  // Child video -> the parent's video playing it, and the child texture key
+  // aliased to the parent's.
+  struct Video {
+    uint64_t parent;
+    std::string texture;
+  };
+  std::unordered_map<uint64_t, Video> videos;
+  // The parent's font generation the child last saw.
+  uint32_t parentFonts = 0;
 };
 
 // Creates / replaces the child after a props change.
