@@ -704,6 +704,18 @@ class DomView {
 
   // ------------------------------------------------------------------ input
 
+  // A touch pointermove with the samples the browser coalesced into it
+  // (a 120 Hz+ digitizer under a 60 Hz frame), each at its own time: drag
+  // resampling and fling velocities want them all.
+  _touchMoves(e) {
+    const list = e.getCoalescedEvents?.();
+    for (const s of list?.length ? list : [e]) {
+      this._inTime(s.timeStamp);
+      const [x, y] = this._point(s);
+      this._inTouch(e.pointerId, 1, x, y);
+    }
+  }
+
   _point(e) {
     const r = this._rect ??= this.canvas.getBoundingClientRect();
     // Map CSS px of the element box to logical px (equal unless the canvas is CSS-transformed).
@@ -753,10 +765,10 @@ class DomView {
       this._updateCursor();
     }, active);
     c.addEventListener('pointermove', (e) => {
+      if (e.pointerType !== 'mouse') return this._touchMoves(e);
       stamp(e);
       const [x, y] = this._point(e);
-      if (e.pointerType === 'mouse') this._inMove(x, y);
-      else this._inTouch(e.pointerId, 1, x, y);
+      this._inMove(x, y);
     }, opt);
     const up = (e, cancel) => {
       stamp(e);
@@ -862,9 +874,12 @@ class DomView {
         this._updateCursor();
         return;
       }
-      stamp(e);
-      if (e.pointerType === 'mouse') this._inMove(x, y);
-      else this._inTouch(e.pointerId, 1, x, y);
+      if (e.pointerType === 'mouse') {
+        stamp(e);
+        this._inMove(x, y);
+      } else {
+        this._touchMoves(e);
+      }
       if (owned) take(e);
     }, opt);
     const up = (e, cancel) => {

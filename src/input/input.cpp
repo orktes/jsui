@@ -1074,7 +1074,16 @@ bool InputManager::slopScroll(PointerState& p, uint32_t targetId, uint32_t hitId
   p.scrollingId = svId;
   p.owned = true;
   p.downId = 0;
-  if ((sv = alive(svId))) beginDrag(p, sv);
+  if (!(sv = alive(svId))) return true;
+  // The slop is not made up in one jump: the content starts moving from
+  // where the drag was recognized (iOS, Android, Flutter).
+  {
+    bool h = sv->props()["horizontal"].asBool();
+    float& start = h ? p.startX : p.startY;
+    float d = (h ? x : y) - start;
+    start += std::fabs(d) > kTouchSlop ? std::copysign(kTouchSlop, d) : d;
+  }
+  beginDrag(p, sv);
   if ((sv = alive(svId))) dragTo(p, sv, x, y);
   return true;
 }

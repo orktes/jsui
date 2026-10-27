@@ -93,9 +93,9 @@ TEST(scroll_fling_decelerates_and_stops) {
   // 20 px per 16 ms frame upwards: content offset velocity 1.25 px/ms.
   drag(f, 50, 90, 30, 3);
   float released = sv->scrollY;
-  CHECK_EQ(released, 60.f);  // the content follows the finger from the touch-down point
+  CHECK_EQ(released, 52.f);  // the finger's travel minus the 8 px slop
   // RN order: begin drag, end drag (velocity + projected target), momentum.
-  CHECK_EQ(f.events(), std::string("scrollbegindrag scrollenddrag#v=1.25,t=684 momentumscrollbegin"));
+  CHECK_EQ(f.events(), std::string("scrollbegindrag scrollenddrag#v=1.25,t=676 momentumscrollbegin"));
   CHECK(f.s.rt->wantsFrame());
   // Momentum: monotonic, decelerating, ends near the projection.
   std::vector<float> pos{released};
@@ -108,7 +108,7 @@ TEST(scroll_fling_decelerates_and_stops) {
   CHECK(pos[1] - pos[0] > 15);  // the first frame keeps the release speed
   size_t mid = pos.size() / 2;
   CHECK(pos[mid + 1] - pos[mid] < pos[1] - pos[0]);  // slowing down
-  CHECK(sv->scrollY > 665 && sv->scrollY < 685);
+  CHECK(sv->scrollY > 655 && sv->scrollY < 677);
   CHECK_EQ(f.events(), std::string("momentumscrollend"));
   CHECK(!f.s.rt->wantsFrame());
   CHECK_EQ(sv->scrollIndicatorOpacity, 0.f);  // faded out
@@ -122,8 +122,8 @@ TEST(scroll_fling_fast_deceleration) {
   drag(f, 50, 90, 30, 3);
   f.settle();
   // 'fast' (0.99 / ms) travels ~v / 0.01 = 125 px past the release.
-  CHECK(sv->scrollY > 175 && sv->scrollY < 186);
-  CHECK_EQ(f.events(), std::string("scrollbegindrag scrollenddrag#v=1.25,t=184 momentumscrollbegin momentumscrollend"));
+  CHECK(sv->scrollY > 167 && sv->scrollY < 178);
+  CHECK_EQ(f.events(), std::string("scrollbegindrag scrollenddrag#v=1.25,t=176 momentumscrollbegin momentumscrollend"));
 }
 
 TEST(scroll_fling_stops_at_edge_and_resting_finger_has_no_momentum) {
@@ -141,10 +141,10 @@ TEST(scroll_fling_stops_at_edge_and_resting_finger_has_no_momentum) {
   f.in().touch(0, 1, 50, 40);
   f.tick(200);
   f.in().touch(0, 2, 50, 40);
-  CHECK_EQ(sv->scrollY, 870.f);
+  CHECK_EQ(sv->scrollY, 878.f);
   f.settle();
-  CHECK_EQ(sv->scrollY, 870.f);
-  CHECK_EQ(f.events(), std::string("scrollbegindrag scrollenddrag#v=0.00,t=870"));
+  CHECK_EQ(sv->scrollY, 878.f);
+  CHECK_EQ(f.events(), std::string("scrollbegindrag scrollenddrag#v=0.00,t=878"));
 }
 
 // Regression: a finger held pulling against an edge jitters by a pixel or
@@ -193,6 +193,115 @@ TEST(scroll_drag_jitter_against_edge_does_not_shake) {
   f.settle();
 }
 
+// The content does not jump by the slop when a drag is recognized: it
+// moves by the finger's travel past it.
+TEST(scroll_drag_starts_without_slop_jump) {
+  ScrollFixture f;
+  Node* sv = addList(f);
+  f.tick(16);
+  f.in().touch(0, 0, 50, 90);
+  float y = 90;
+  std::vector<float> pos;
+  for (int i = 0; i < 8; i++) {
+    f.tick(16);
+    y -= 3;
+    f.in().touch(0, 1, 50, y);
+    pos.push_back(sv->scrollY);
+  }
+  f.in().touch(0, 2, 50, y);
+  // 3, 6 px: inside the slop. 9 px: 1 past it. Then 3 px a move.
+  CHECK_EQ(pos[0], 0.f);
+  CHECK_EQ(pos[1], 0.f);
+  CHECK_EQ(pos[2], 1.f);
+  for (size_t i = 3; i < pos.size(); i++) CHECK_EQ(pos[i] - pos[i - 1], 3.f);
+  f.settle();
+}
+
+// Touch samples that don't line up with frames: a 120 Hz digitizer whose
+// events reach a 60 Hz frame loop late by a varying amount (a worker, a
+// busy main thread, a sample landing on either side of vsync). Applied as
+// they arrive, the content moves two samples on one frame and none or three
+// on the next. With event times the drag is resampled at the frame time and
+// every frame moves the same distance.
+TEST(scroll_drag_resampled_at_frame_time) {
+  auto run = [](bool stamped) {
+    ScrollFixture f;
+    Node* sv = addList(f);
+    f.tick(16);
+    const double frame = 1000.0 / 60, sample = 1000.0 / 120;
+    const float speed = 0.6f;  // px/ms, finger moving up
+    // Delivery delays (ms) cycling through 0..12: some samples miss the frame.
+    const double delays[] = {0.5, 9, 3, 11.5, 1, 7, 12, 2};
+    double t0 = f.now + 1;
+    struct Ev {
+      double t, at;
+      float y;
+    };
+    std::vector<Ev> evs;
+    for (int i = 0; i < 60; i++) {
+      double t = t0 + i * sample;
+      evs.push_back({t, t + delays[i % 8], float(95 - speed * (t - t0))});
+    }
+    std::vector<float> steps;
+    size_t next = 0;
+    float last = sv->scrollY;
+    bool down = false;
+    for (double now = f.now + frame; next < evs.size(); now += frame) {
+      for (; next < evs.size() && evs[next].at <= now; next++) {
+        if (stamped) f.in().setEventTime(evs[next].t);
+        if (!down) f.in().touch(0, 0, 50, evs[next].y);
+        else f.in().touch(0, 1, 50, evs[next].y);
+        down = true;
+      }
+      f.now = now;
+      f.s.rt->tick(now);
+      if (sv->scrollY > 0) steps.push_back(sv->scrollY - last);
+      last = sv->scrollY;
+    }
+    f.in().touch(0, 3, 50, evs.back().y);
+    // Steady state: skip the drag's first frames and its last (the samples
+    // stop there, so its resample time has no newer sample to bracket it).
+    float lo = 1e9f, hi = -1e9f;
+    for (size_t i = 2; i + 1 < steps.size(); i++) {
+      lo = std::min(lo, steps[i]);
+      hi = std::max(hi, steps[i]);
+    }
+    return std::make_pair(lo, hi);
+  };
+  auto [lo, hi] = run(true);
+  // 0.6 px/ms * 16.7 ms = 10 px a frame (device pixels: +-1).
+  CHECK(lo >= 9 && hi <= 11);
+  auto [ulo, uhi] = run(false);
+  CHECK(uhi - ulo >= 5);  // unstamped events move the content as they come
+}
+
+// The release velocity is the finger's speed when it lifts (least-squares
+// quadratic), not the average over the window: a flick that speeds up
+// hands the fling its final speed.
+TEST(scroll_release_velocity_follows_accelerating_flick) {
+  ScrollFixture f;
+  addList(f);
+  f.tick(16);
+  f.events();
+  // y = 95 - 0.01 t^2 over 96 ms, samples every 8 ms: 2 px/ms at the end.
+  double t0 = f.now + 1;
+  f.in().setEventTime(t0);
+  f.in().touch(0, 0, 50, 95);
+  for (int i = 1; i <= 12; i++) {
+    double t = 8.0 * i;
+    f.in().setEventTime(t0 + t);
+    f.in().touch(0, 1, 50, float(95 - 0.01 * t * t));
+  }
+  f.in().setEventTime(t0 + 97);
+  f.in().touch(0, 2, 50, float(95 - 0.01 * 96 * 96));
+  std::string ev = f.events();
+  size_t at = ev.find("#v=");
+  CHECK(at != std::string::npos);
+  double v = std::atof(ev.c_str() + at + 3);
+  CHECK(v > 1.85 && v < 2.05);  // the window's average would be ~1.3
+  f.settle();
+}
+
 TEST(scroll_touch_catches_fling) {
   ScrollFixture f;
   Node* sv = addList(f, "{}", R"({"style":{"height":1000},"props":{"__events":["press"]}})");
@@ -226,13 +335,13 @@ TEST(scroll_paging_snaps_by_velocity) {
   Node* sv = addList(f, R"({"pagingEnabled":true})");
   f.tick(16);
   f.events();
-  // Short quick flick (40 px): next page.
+  // Short quick flick (40 px, 32 past the slop): next page.
   drag(f, 50, 90, 50, 2);
-  CHECK_EQ(sv->scrollY, 40.f);
+  CHECK_EQ(sv->scrollY, 32.f);
   f.settle();
   CHECK_EQ(sv->scrollY, 100.f);
   CHECK_EQ(f.events(), std::string("scrollbegindrag scrollenddrag#v=1.25,t=100 momentumscrollbegin momentumscrollend"));
-  // Drag back by 38 px with the finger resting before release: nearest page.
+  // Drag back by 30 px with the finger resting before release: nearest page.
   f.in().touch(0, 0, 50, 50);
   f.tick(16);
   f.in().touch(0, 1, 50, 70);
@@ -295,9 +404,9 @@ TEST(scroll_snap_to_offsets) {
   // Released between offsets with no velocity: the nearest.
   f.in().touch(0, 0, 50, 10);
   f.tick(16);
-  f.in().touch(0, 1, 50, 90);  // -> 820
+  f.in().touch(0, 1, 50, 90);  // -> 828
   f.tick(16);
-  f.in().touch(0, 1, 50, 99);  // -> 811
+  f.in().touch(0, 1, 50, 99);  // -> 819
   f.tick(300);
   f.in().touch(0, 2, 50, 99);
   f.settle();
@@ -305,7 +414,7 @@ TEST(scroll_snap_to_offsets) {
   f.in().scrollTo(b, 0, 420);
   f.in().touch(0, 0, 50, 50);
   f.tick(16);
-  f.in().touch(0, 1, 50, 60);  // -> 410
+  f.in().touch(0, 1, 50, 60);  // -> 418
   f.tick(300);
   f.in().touch(0, 2, 50, 60);
   f.settle();
@@ -636,11 +745,11 @@ TEST(scroll_horizontal_and_scroll_enabled) {
   f.in().touch(0, 1, 60, 40);
   f.tick(300);
   f.in().touch(0, 2, 60, 40);
-  CHECK_EQ(sv->scrollX, 30.f);
+  CHECK_EQ(sv->scrollX, 22.f);  // 30 px of travel less the 8 px touch slop
   CHECK_EQ(sv->scrollY, 0.f);
   f.in().key("ArrowRight", "ArrowRight", true, false, 0);
   f.settle();
-  CHECK_EQ(sv->scrollX, 70.f);
+  CHECK_EQ(sv->scrollX, 62.f);
   // scrollEnabled=false: user input does nothing, programmatic still works.
   Value::Object p = sv->props().asObject();
   p["scrollEnabled"] = Value(false);
@@ -655,7 +764,7 @@ TEST(scroll_horizontal_and_scroll_enabled) {
   f.tick(100);
   f.in().gamepadAxis(0, 2, 0.f);
   f.settle();
-  CHECK_EQ(sv->scrollX, 70.f);
+  CHECK_EQ(sv->scrollX, 62.f);
   f.in().scrollTo(sv, 500, 0);
   CHECK_EQ(sv->scrollX, 500.f);
 }

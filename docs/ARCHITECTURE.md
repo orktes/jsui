@@ -1953,8 +1953,18 @@ was `preventDefault()`-ed (or declared so, see "Input routing details").
 * **Scrolling** (`src/input/scroll.cpp`; geometry in `src/core/scroll.*`).
   All animations are analytic curves on the runtime clock, advanced in
   `jsui_tick`.
-  * Touch drag: `scrollbegindrag`, `scroll`…, `scrollenddrag` (release
-    velocity over the last 100 ms; a finger that rested has none), then a
+  * Touch drag: `scrollbegindrag`, `scroll`…, `scrollenddrag`. The content
+    starts moving from where the drag was recognized (no jump by the
+    slop). With host event times (`jsui_set_event_time`) the content
+    follows the finger resampled at the tick's time (interpolated between
+    the touch samples a few ms back, by as much as the newest sample's age
+    at recent frames, 5-25 ms, drifting slowly; predicted at most 8 ms past
+    the newest), so touch samples that don't line up with frames (120 Hz
+    digitizer, 60 Hz rAF, a worker getting events late) still give even
+    per-frame motion; without them it moves as events arrive. Release
+    velocity: least-squares quadratic over the last 100 ms, its slope at
+    the newest sample (a flick that speeds up keeps its final speed); a
+    finger that rested 50 ms has none. Then a
     fling (`momentumscrollbegin`, `scroll`…, `momentumscrollend`) decaying
     by `decelerationRate` per ms (`'normal'` 0.998, `'fast'` 0.99, or a
     number) until 0.02 px/ms or the content edge (no overscroll). A touch on

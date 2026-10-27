@@ -57,6 +57,13 @@ Affine nodeLocalToParent(const Node* n);
 
 enum class NavDirection : uint8_t { Up, Down, Left, Right };
 
+// A touch drag's finger position along the scroll axis (offset space) at its
+// event time (ms); see InputManager::ScrollState::samples.
+struct DragSample {
+  double t;
+  float pos;
+};
+
 class InputManager {
  public:
   // Input of one surface: `doc` is the surface's document and `cursor` the
@@ -190,6 +197,24 @@ class InputManager {
   // while pulling against an edge does not shake the content.
   static constexpr float kDragEdgeSlack = 12;
   static constexpr double kVelocityWindowMs = 100;
+  // A finger that rested this long before lifting has no release velocity.
+  static constexpr double kVelocityRestMs = 50;
+  static constexpr float kMaxFlingVelocity = 8;          // px/ms
+  // Touch drag resampling (hosts that stamp events, jsui_set_event_time):
+  // each frame shows the finger where it was a little before the frame
+  // time, interpolated between the touch samples around then, or predicted
+  // past the newest by at most kResampleMaxPredictMs. How far back follows
+  // how old the newest sample has been at recent frames (sample rate plus
+  // delivery delay), between kResampleLatencyMs and kResampleMaxLatencyMs:
+  // the content never shows more latency than the newest sample had. It
+  // drifts by at most kResampleLagStepMs a frame (a jump would show as a
+  // speed change).
+  static constexpr double kResampleLatencyMs = 5;
+  static constexpr double kResampleMaxLatencyMs = 25;
+  static constexpr double kResampleLagStepMs = 0.5;
+  static constexpr double kResampleMaxPredictMs = 8;
+  static constexpr double kResampleMinDeltaMs = 2;
+  static constexpr double kResampleMaxDeltaMs = 20;
   static constexpr float kSmoothWheelMinDelta = 40;
   static constexpr double kWheelAnimMs = 150;
   static constexpr double kKeyScrollAnimMs = 180;
@@ -267,15 +292,18 @@ class InputManager {
     // Decay along the main axis: offset(t) = from + v0 (rate^t - 1) / ln(rate).
     float v0 = 0, rate = kDecelerationNormal;
     bool horizontal = false;
-    // Touch drag velocity tracking (main-axis offset samples).
+    // Touch drag: finger samples along the main axis in offset space (the
+    // offset grows as the finger moves the other way) at their event times,
+    // for the release velocity and frame-time resampling.
     bool dragging = false;
-    float dragStart = 0;
+    bool resample = false;  // the host stamps the events: tick() moves the content
     float dragOver = 0;  // overshoot banked past an edge (main axis, <= kDragEdgeSlack)
-    struct Sample {
-      double t;
-      float pos;
-    };
-    std::array<Sample, 8> samples{};
+    float fingerApplied = 0;  // finger position the content last moved to
+    std::array<float, 6> sampleAges{};  // newest sample's age at recent frames (ms)
+    int frames = 0;
+    double lag = 0;  // ms behind the frame time the finger is sampled at
+    using Sample = DragSample;
+    std::array<Sample, 20> samples{};
     int sampleCount = 0;
     // Snap after a trackpad / stick scroll settles (-1: none).
     double settleAt = -1;
@@ -381,6 +409,11 @@ class InputManager {
   void beginDrag(PointerState& p, Node* sv);
   void dragTo(PointerState& p, Node* sv, float x, float y);
   void endDrag(PointerState& p, bool cancelled);
+  // Moves a dragged ScrollView's content with the finger to `finger`
+  // (offset space), banking overshoot past an edge.
+  void dragApply(Node* sv, float finger);
+  // The finger position (offset space) at frame time `now`, resampled.
+  float dragResampled(ScrollState& st, double now) const;
   Node* animatingScrollAncestor(Node* n);
   bool wheelScroll(Node* hit, float dx, float dy);
   // Keyboard / gamepad scroll target: focused, then hovered, then the first
