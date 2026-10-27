@@ -66,20 +66,80 @@ typedef void (*JsuiLogFn)(void* user, JsuiLogLevel level, const char* message);
 
 /* ------------------------------------------------------- Resource loading
  *
- * Every byte the runtime reads (the bundle, fetch() bodies, images, fonts)
+ * Every byte the runtime reads (the bundle, fetch(), images, fonts, sounds)
  * goes through a loader. The built-in loader understands file://, relative
- * paths, http:// (for dev servers) and, in the browser build, anything the
- * browser's fetch() can reach. An embedder can replace it, e.g. to read from
- * a game's virtual file system or pak files.
+ * paths, data:, http:// and https:// (natively through the OS: NSURLSession
+ * on Apple, WinHTTP on Windows, the system's OpenSSL loaded at run time on
+ * Linux; nothing is linked in for it) and, in the browser build, anything
+ * the browser's fetch() can reach.
  *
- * The loader is asynchronous: it is handed a request id and must eventually
- * call jsui_resource_complete() (from the runtime's thread, typically inside
- * or before the next jsui_tick()) exactly once with that id.
+ * A host replaces or extends it in one of two ways:
+ *
+ * - JsuiConfig.on_request (JsuiRequestFn): sees the whole request (method, headers,
+ *   body, timeout, redirect mode) and answers with a status, headers and a
+ *   body it may stream in pieces. It may decline a request (return nonzero),
+ *   which then goes to JsuiConfig.load or the built-in loader: a game can
+ *   serve its pak files and leave the network to JSUI, or the reverse. The
+ *   engine plugins (Godot, Unity, Unreal) route network requests through the
+ *   engine's own HTTP stack this way.
+ * - JsuiConfig.load (JsuiLoadFn, older): sees only the URL and answers with
+ *   jsui_resource_complete().
+ *
+ * Both are asynchronous: they are handed a request id and must eventually
+ * answer it exactly once (unless it is cancelled). The answer functions are
+ * thread safe: call them from any thread, e.g. a network thread; the runtime
+ * delivers answers on its thread during jsui_tick().
  */
 typedef void (*JsuiLoadFn)(void* user, JsuiRuntime* rt, uint64_t request_id, const char* url);
 
+/* The whole answer at once (status 0 = network error, 404 = not found).
+ * Also answers a JsuiRequestFn request. */
 JSUI_API void jsui_resource_complete(JsuiRuntime* rt, uint64_t request_id, int status,
                                      const char* content_type, const void* data, size_t size);
+
+typedef struct JsuiHeader {
+    const char* name;
+    const char* value;
+} JsuiHeader;
+
+typedef enum JsuiRedirectMode {
+    JSUI_REDIRECT_FOLLOW = 0, /* follow redirects (the response is the final one) */
+    JSUI_REDIRECT_ERROR = 1,  /* a redirect fails the request */
+    JSUI_REDIRECT_MANUAL = 2  /* hand the 3xx response back as is */
+} JsuiRedirectMode;
+
+typedef struct JsuiRequest {
+    const char* url;              /* absolute (resolved against the bundle's URL) */
+    const char* method;           /* upper case: "GET", "POST", ... */
+    const JsuiHeader* headers;    /* request headers, names in lower case */
+    size_t header_count;
+    const void* body;             /* NULL when there is none */
+    size_t body_size;
+    int timeout_ms;               /* whole request; 0: no limit set by the UI */
+    int redirect;                 /* JsuiRedirectMode */
+    int streaming;                /* 1: JS reads the body as a stream (res.body):
+                                     answer with pieces as they arrive */
+} JsuiRequest;
+
+/* Takes a request: return 0 when the host answers it (with jsui_request_*()
+ * or jsui_resource_complete()), nonzero to pass it on to JsuiConfig.load or
+ * the built-in loader. Runs on the runtime's owner thread (inside
+ * jsui_tick() or the call that started the load); `req` and its strings
+ * only live for the call. */
+typedef int (*JsuiRequestFn)(void* user, JsuiRuntime* rt, uint64_t request_id, const JsuiRequest* req);
+/* The UI no longer wants request `request_id` (AbortController, unmount,
+ * reload): stop it; answering it anyway is harmless. Owner thread. */
+typedef void (*JsuiRequestCancelFn)(void* user, JsuiRuntime* rt, uint64_t request_id);
+
+/* A streamed answer: the status and headers (once), then body pieces, then
+ * the end. `status` 0 fails the request (network error, `status_text` may
+ * say why) and ends it; `final_url` (may be NULL) is the URL after
+ * redirects. jsui_request_end() with a non-NULL `error` fails the body part way
+ * (a reader of res.body sees the error). Thread safe. */
+JSUI_API void jsui_request_respond(JsuiRuntime* rt, uint64_t request_id, int status, const char* status_text,
+                                 const char* final_url, const JsuiHeader* headers, size_t header_count);
+JSUI_API void jsui_request_body(JsuiRuntime* rt, uint64_t request_id, const void* data, size_t size);
+JSUI_API void jsui_request_end(JsuiRuntime* rt, uint64_t request_id, const char* error);
 
 /* ------------------------------------------------------- Host messaging
  *
@@ -886,6 +946,10 @@ typedef struct JsuiConfig {
 
     JsuiChildFn on_child;   /* <JSUIContainer> children (see "Child runtimes"); optional */
     void* child_user;
+
+    JsuiRequestFn on_request;               /* host networking / loading (see "Resource loading"); optional */
+    JsuiRequestCancelFn on_request_cancel;  /* optional */
+    void* request_user;
 } JsuiConfig;
 
 JSUI_API void jsui_config_init(JsuiConfig* cfg);

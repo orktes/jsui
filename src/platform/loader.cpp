@@ -135,9 +135,9 @@ void readFile(const std::string& url, Resource* res) {
 
 // Small on-demand thread pool. Threads are spawned when a job is queued and
 // all existing threads are busy (up to kMaxThreads), so a slow HTTP request
-// never blocks file reads behind it.
+// (or a long-lived stream) never blocks file reads behind it.
 struct ResourceLoader::Worker {
-  static constexpr int kMaxThreads = 4;
+  static constexpr int kMaxThreads = 16;
   struct Job {
     uint64_t id;
     LoadRequest req;
@@ -197,43 +197,76 @@ struct ResourceLoader::Worker {
         job = std::move(jobs.front());
         jobs.pop_front();
       }
-      Resource res;
-      res.url = job.req.url;
-      if (!*job.cancel) execute(job, &res);
-      {
-        std::lock_guard<std::mutex> lock(m);
-        inFlight.erase(job.id);
-      }
-      if (!*job.cancel) owner->complete(job.id, std::move(res));
+      if (!*job.cancel) execute(job);
+      std::lock_guard<std::mutex> lock(m);
+      inFlight.erase(job.id);
     }
   }
 
-  void execute(const Job& job, Resource* res) {
+  static void fill(net::HttpResponse& r, Resource* res) {
+    res->status = r.status;
+    res->statusText = std::move(r.statusText);
+    res->url = std::move(r.url);
+    res->headers = std::move(r.headers);
+    res->error = std::move(r.error);
+    for (auto& [k, v] : res->headers)
+      if (lower(k) == "content-type") res->contentType = v;
+  }
+
+  void execute(const Job& job) {
     const std::string& url = job.req.url;
+    const std::atomic<bool>* cancel = job.cancel.get();
+    Resource res;
+    res.url = url;
     if (lower(url.substr(0, 7)) == "http://" || lower(url.substr(0, 8)) == "https://") {
       net::HttpRequest hr;
       hr.method = job.req.method;
       hr.url = url;
       hr.headers = job.req.headers;
       hr.body = job.req.body;
-      if (job.req.timeoutMs > 0) hr.timeoutMs = job.req.timeoutMs;
-      net::HttpResponse r = net::httpRequest(hr, job.cancel.get());
-      res->status = r.status;
-      res->statusText = std::move(r.statusText);
-      res->url = std::move(r.url);
-      res->headers = std::move(r.headers);
-      res->data = std::move(r.body);
-      res->error = std::move(r.error);
-      for (auto& [k, v] : res->headers)
-        if (lower(k) == "content-type") res->contentType = v;
+      hr.timeoutMs = job.req.timeoutMs;
+      hr.redirect = net::Redirect(job.req.redirect);
+      if (!job.req.stream) {
+        net::HttpResponse r = net::fetchUrl(hr, cancel);
+        res.data = std::move(r.body);
+        fill(r, &res);
+        if (!*cancel) owner->complete(job.id, std::move(res));
+        return;
+      }
+      bool headSent = false;
+      uint64_t id = job.id;
+      net::HttpStream stream;
+      stream.onHead = [&](const net::HttpResponse& h) {
+        if (*cancel) return false;
+        net::HttpResponse copy = h;
+        Resource meta;
+        fill(copy, &meta);
+        owner->head(id, std::move(meta));
+        headSent = true;
+        return true;
+      };
+      stream.onData = [&](const uint8_t* d, size_t n) {
+        if (*cancel) return false;
+        owner->data(id, std::vector<uint8_t>(d, d + n));
+        return true;
+      };
+      net::HttpResponse r = net::fetchUrl(hr, cancel, &stream);
+      if (*cancel) return;
+      if (headSent) {
+        owner->end(id, r.status == 0 ? (r.error.empty() ? std::string("network error") : r.error) : std::string());
+      } else {
+        fill(r, &res);
+        owner->complete(id, std::move(res));
+      }
       return;
     }
     if (url.find("://") != std::string::npos && url.rfind("file://", 0) != 0) {
-      res->status = 0;
-      res->error = "unsupported URL scheme in " + url;
-      return;
+      res.status = 0;
+      res.error = "unsupported URL scheme in " + url;
+    } else {
+      readFile(url, &res);
     }
-    readFile(url, res);
+    if (!*cancel) owner->complete(job.id, std::move(res));
   }
 };
 
@@ -365,7 +398,24 @@ uint64_t ResourceLoader::load(LoadRequest req, Callback cb) {
 }
 
 void ResourceLoader::load(uint64_t id, LoadRequest req, Callback cb) {
-  pending_[id] = {std::move(cb), req.url, req.background};
+  PendingLoad& p = pending_[id];
+  p.cb = std::move(cb);
+  p.url = req.url;
+  p.background = req.background;
+  req.stream = false;
+  start(id, std::move(req));
+}
+
+void ResourceLoader::loadStream(uint64_t id, LoadRequest req, StreamCallback cb) {
+  PendingLoad& p = pending_[id];
+  p.scb = std::make_shared<StreamCallback>(std::move(cb));
+  p.url = req.url;
+  p.background = req.background;
+  req.stream = true;
+  start(id, std::move(req));
+}
+
+void ResourceLoader::start(uint64_t id, LoadRequest req) {
   if (req.background) background_++;
   if (req.url.rfind("data:", 0) == 0) {
     // Decoded inline on every platform, but still delivered from pump() so
@@ -373,13 +423,34 @@ void ResourceLoader::load(uint64_t id, LoadRequest req, Callback cb) {
     Resource res;
     decodeDataUri(req.url, &res);
     complete(id, std::move(res));
-  } else if (forward) {
-    forward(id, std::move(req));
-  } else if (custom_) {
-    custom_(customUser_, rt_, id, req.url.c_str());
-  } else {
-    builtinLoad(id, std::move(req));
+    return;
   }
+  if (forward) {
+    forward(id, std::move(req));
+    return;
+  }
+  if (hostFetch_) {
+    std::vector<JsuiHeader> headers;
+    headers.reserve(req.headers.size());
+    for (auto& [k, v] : req.headers) headers.push_back({k.c_str(), v.c_str()});
+    JsuiRequest r{};
+    r.url = req.url.c_str();
+    r.method = req.method.c_str();
+    r.headers = headers.data();
+    r.header_count = headers.size();
+    r.body = req.body.empty() ? nullptr : req.body.data();
+    r.body_size = req.body.size();
+    r.timeout_ms = req.timeoutMs;
+    r.redirect = req.redirect;
+    r.streaming = req.stream ? 1 : 0;
+    auto it = pending_.find(id);
+    if (it != pending_.end()) it->second.host = true;
+    if (hostFetch_(hostUser_, rt_, id, &r) == 0) return;
+    it = pending_.find(id);
+    if (it != pending_.end()) it->second.host = false;
+  }
+  if (custom_) custom_(customUser_, rt_, id, req.url.c_str());
+  else builtinLoad(id, std::move(req));
 }
 
 #if defined(__EMSCRIPTEN__)
@@ -400,7 +471,27 @@ void ResourceLoader::builtinLoad(uint64_t id, LoadRequest req) {
 
 void ResourceLoader::complete(uint64_t id, Resource res) {
   std::lock_guard<std::mutex> lock(mutex_);
-  done_.emplace_back(id, std::move(res));
+  done_.push_back({id, kWhole, std::move(res)});
+}
+
+void ResourceLoader::head(uint64_t id, Resource meta) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  done_.push_back({id, LoadEvent::Head, std::move(meta)});
+}
+
+void ResourceLoader::data(uint64_t id, std::vector<uint8_t> bytes) {
+  if (bytes.empty()) return;
+  Resource r;
+  r.data = std::move(bytes);
+  std::lock_guard<std::mutex> lock(mutex_);
+  done_.push_back({id, LoadEvent::Data, std::move(r)});
+}
+
+void ResourceLoader::end(uint64_t id, std::string error) {
+  Resource r;
+  r.error = std::move(error);
+  std::lock_guard<std::mutex> lock(mutex_);
+  done_.push_back({id, LoadEvent::End, std::move(r)});
 }
 
 int ResourceLoader::pump() {
@@ -410,18 +501,84 @@ int ResourceLoader::pump() {
     doneScratch_.swap(done_);
   }
   int n = 0;
-  for (auto& [id, res] : doneScratch_) {
-    auto it = pending_.find(id);
-    if (it == pending_.end()) continue;
-    Callback cb = std::move(it->second.cb);
-    if (res.url.empty()) res.url = it->second.url;  // embedder completions carry no URL
-    if (res.status == 0 && res.error.empty()) res.error = "failed to load " + res.url;
-    erasePending(it);
-    cb(std::move(res));
-    n++;
+  // By index: a callback may load() again, which never touches doneScratch_.
+  for (size_t i = 0; i < doneScratch_.size(); i++) {
+    Answer& a = doneScratch_[i];
+    if (deliver(a.id, a.kind, a.res)) n++;
   }
   doneScratch_.clear();
   return n;
+}
+
+// One queued answer for load `id`. Returns whether a callback ran.
+bool ResourceLoader::deliver(uint64_t id, int kind, Resource& res) {
+  auto it = pending_.find(id);
+  if (it == pending_.end()) return false;  // cancelled, or answered already
+  PendingLoad& p = it->second;
+  auto finishHead = [&](Resource& r) {
+    if (r.url.empty()) r.url = p.url;  // embedder answers carry no URL
+    if (r.status == 0 && r.error.empty()) r.error = "failed to load " + r.url;
+    if (r.contentType.empty())
+      for (auto& [k, v] : r.headers)
+        if (lower(k) == "content-type") r.contentType = v;
+  };
+  if (!p.scb) {  // gathered
+    if (kind == kWhole) {
+      finishHead(res);
+    } else if (kind == LoadEvent::Head) {
+      if (p.headSeen) return false;
+      p.headSeen = true;
+      std::vector<uint8_t> body = std::move(p.acc.data);
+      p.acc = std::move(res);
+      p.acc.data.insert(p.acc.data.begin(), body.begin(), body.end());
+      finishHead(p.acc);
+      if (p.acc.status != 0) return false;
+      res = std::move(p.acc);  // a failed head ends the load
+    } else if (kind == LoadEvent::Data) {
+      p.acc.data.insert(p.acc.data.end(), res.data.begin(), res.data.end());
+      return false;
+    } else {  // End
+      std::string error = std::move(res.error);
+      res = std::move(p.acc);
+      if (!p.headSeen) finishHead(res);
+      if (!error.empty()) {
+        res.status = 0;
+        res.error = error;
+        res.data.clear();
+      }
+    }
+    Callback cb = std::move(p.cb);
+    erasePending(it);
+    cb(std::move(res));
+    return true;
+  }
+  // Streamed. The callback is shared: it may cancel this load (erasing p).
+  std::shared_ptr<StreamCallback> cb = p.scb;
+  auto emit = [&](LoadEvent::Kind k, Resource r) {
+    LoadEvent ev{k, std::move(r)};
+    (*cb)(ev);
+  };
+  if (kind == kWhole || kind == LoadEvent::Head || (kind == LoadEvent::End && !p.headSeen)) {
+    if (p.headSeen) return false;
+    p.headSeen = true;
+    if (kind == LoadEvent::End) {  // ended before any head: a failure
+      res.status = 0;
+      res.data.clear();
+    }
+    finishHead(res);
+    Resource body;
+    body.data = std::move(res.data);
+    bool failed = res.status == 0, last = kind != LoadEvent::Head;
+    if (failed || last) erasePending(it);
+    emit(LoadEvent::Head, std::move(res));
+    if (failed) return true;
+    if (!body.data.empty()) emit(LoadEvent::Data, std::move(body));
+    if (last) emit(LoadEvent::End, Resource());
+    return true;
+  }
+  if (kind == LoadEvent::End) erasePending(it);
+  emit(LoadEvent::Kind(kind), std::move(res));
+  return true;
 }
 
 void ResourceLoader::erasePending(std::unordered_map<uint64_t, PendingLoad>::iterator it) {
@@ -431,14 +588,28 @@ void ResourceLoader::erasePending(std::unordered_map<uint64_t, PendingLoad>::ite
 
 void ResourceLoader::cancel(uint64_t id) {
   auto it = pending_.find(id);
-  if (it != pending_.end()) erasePending(it);
+  if (it == pending_.end()) return;
+  bool host = it->second.host;
+  erasePending(it);
+  if (host && hostCancel_) hostCancel_(hostUser_, rt_, id);
   if (worker_) worker_->cancel(id);
+#ifdef __EMSCRIPTEN__
+  emscriptenCancel(this, id);
+#endif
 }
 
 void ResourceLoader::cancelAll() {
+  std::vector<uint64_t> hostIds;
+  for (auto& [id, p] : pending_)
+    if (p.host) hostIds.push_back(id);
   pending_.clear();
   background_ = 0;
+  if (hostCancel_)
+    for (uint64_t id : hostIds) hostCancel_(hostUser_, rt_, id);
   if (worker_) worker_->cancelAll();
+#ifdef __EMSCRIPTEN__
+  emscriptenCancelAll(this);
+#endif
 }
 
 bool ResourceLoader::busy() const { return pending() > 0; }

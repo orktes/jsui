@@ -261,7 +261,7 @@ var jsuiHostJs = (function () {
       this.nextRaf = 1;
       this.layoutQueue = [];
       this.hostCalls = new Map();  // Host.call id -> settle(ok, payload)
-      this.loads = new Map();      // fetch request id -> callback
+      this.loads = new Map();      // fetch request id -> event callback
       this.fonts = new Map();      // loadFont request id -> [resolve, reject]
       this.cells = new Map();      // live global name -> {value, sinks}
       this.buffers = new Map();    // frame data key -> {version, type, count, buffer} (N.buffer)
@@ -523,11 +523,13 @@ var jsuiHostJs = (function () {
       this.buffers.delete(key);
     }
 
-    loadDone(id, status, statusText, url, headers, body, error) {
+    // fetch() events for request `id`: (0, status, statusText, url, headers,
+    // error) the head, (1, ArrayBuffer) a body piece, (2, error) the end.
+    fetchEvent(id, kind, a, b, c, d, e) {
       const cb = this.loads.get(id);
       if (!cb) return;
-      this.loads.delete(id);
-      this.call(cb, undefined, [status, statusText, url, JSON.parse(headers), body, error]);
+      if (kind === 2 || (kind === 0 && a === 0)) this.loads.delete(id);
+      this.call(cb, undefined, kind === 0 ? [kind, a, b, c, d, e] : [kind, a]);
     }
 
     fontDone(id, ok, error) {
@@ -652,7 +654,7 @@ var jsuiHostJs = (function () {
         baseUrl() {
           return D.dead ? '' : out(X.base_url(e));
         },
-        fetch(url, method, headers, body, timeout, cb) {
+        fetch(url, method, headers, body, timeout, redirect, cb) {
           if (typeof cb !== 'function') throw new TypeError('host.fetch: bad arguments');
           if (D.dead) return 0;
           url = text(url);
@@ -663,7 +665,8 @@ var jsuiHostJs = (function () {
           const bp = bytes.length ? putBytes(bytes) : 0;
           reset();
           const u = put(url), ul = L, m = put(method), ml = L, h = put(pairs), hl = L;
-          const id = X.fetch(e, u, ul, m, ml, h, hl, bp, bytes.length, typeof timeout === 'number' ? timeout | 0 : 0);
+          const id = X.fetch(e, u, ul, m, ml, h, hl, bp, bytes.length, typeof timeout === 'number' ? timeout | 0 : 0,
+            typeof redirect === 'number' ? redirect | 0 : 0);
           if (bp) free(bp);
           D.loads.set(id, cb);
           return id;

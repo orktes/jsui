@@ -162,11 +162,13 @@ JSValue js_baseUrl(JSContext* ctx, JSValueConst, int, JSValueConst*) {
   return JS_NewStringLen(ctx, b.data(), b.size());
 }
 
-// fetch(url, method, headers[[k, v]...], body, timeoutMs, cb) -> request id
-// cb(status, statusText, url, headers[[k, v]...], ArrayBuffer, error)
+// fetch(url, method, headers[[k, v]...], body, timeoutMs, redirect, cb) -> request id
+// cb(0, status, statusText, url, headers[[k, v]...], error)  the head (status 0: failed, the end)
+// cb(1, ArrayBuffer)                                          a body piece
+// cb(2, error)                                                the end ('' when complete)
 JSValue js_fetch(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   auto& impl = implOf(ctx);
-  if (argc < 6 || !JS_IsFunction(ctx, argv[5])) return JS_ThrowTypeError(ctx, "host.fetch: bad arguments");
+  if (argc < 7 || !JS_IsFunction(ctx, argv[6])) return JS_ThrowTypeError(ctx, "host.fetch: bad arguments");
   LoadRequest req;
   req.url = toStdString(ctx, argv[0]);  // already resolved by the prelude (Request)
   req.method = toStdString(ctx, argv[1]);
@@ -183,44 +185,55 @@ JSValue js_fetch(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     }
   }
   if (!bytesOf(ctx, argv[3], &req.body)) return JS_ThrowTypeError(ctx, "fetch: unsupported body type");
-  int timeout = 0;
+  int timeout = 0, redirect = 0;
   if (JS_IsNumber(argv[4])) JS_ToInt32(ctx, &timeout, argv[4]);
+  if (JS_IsNumber(argv[5])) JS_ToInt32(ctx, &redirect, argv[5]);
   req.timeoutMs = timeout;
+  req.redirect = redirect >= JSUI_REDIRECT_FOLLOW && redirect <= JSUI_REDIRECT_MANUAL ? redirect : JSUI_REDIRECT_FOLLOW;
   JsEngine::Impl* ip = &impl;
-  uint64_t id = impl.startLoad(std::move(req), [ip](uint64_t id, Resource& res) {
+  uint64_t id = impl.startStream(std::move(req), [ip](uint64_t id, LoadEvent& ev) {
     auto it = ip->pending.find(id);
     if (it == ip->pending.end()) return;
     JSContext* c = ip->ctx;
-    JSValue cb = it->second.resolve;
-    it->second.resolve = JS_UNDEFINED;
-    ip->dropPending(id);
-    JSValue headers = JS_NewArray(c);
-    uint32_t i = 0;
-    for (auto& [k, v] : res.headers) {
-      JSValue pair = JS_NewArray(c);
-      JS_SetPropertyUint32(c, pair, 0, JS_NewStringLen(c, k.data(), k.size()));
-      JS_SetPropertyUint32(c, pair, 1, JS_NewStringLen(c, v.data(), v.size()));
-      JS_SetPropertyUint32(c, headers, i++, pair);
+    Resource& res = ev.res;
+    bool last = ev.kind == LoadEvent::End || (ev.kind == LoadEvent::Head && res.status == 0);
+    JSValue cb = JS_DupValue(c, it->second.resolve);
+    if (last) ip->dropPending(id);
+    JSValue args[6];
+    int argc = 0;
+    args[argc++] = JS_NewInt32(c, int(ev.kind));
+    if (ev.kind == LoadEvent::Head) {
+      JSValue headers = JS_NewArray(c);
+      uint32_t i = 0;
+      for (auto& [k, v] : res.headers) {
+        JSValue pair = JS_NewArray(c);
+        JS_SetPropertyUint32(c, pair, 0, JS_NewStringLen(c, k.data(), k.size()));
+        JS_SetPropertyUint32(c, pair, 1, JS_NewStringLen(c, v.data(), v.size()));
+        JS_SetPropertyUint32(c, headers, i++, pair);
+      }
+      if (res.headers.empty() && !res.contentType.empty()) {  // files, data:, embedder loads
+        JSValue pair = JS_NewArray(c);
+        JS_SetPropertyUint32(c, pair, 0, JS_NewString(c, "content-type"));
+        JS_SetPropertyUint32(c, pair, 1, JS_NewStringLen(c, res.contentType.data(), res.contentType.size()));
+        JS_SetPropertyUint32(c, headers, 0, pair);
+      }
+      std::string statusText = res.statusText;
+      if (statusText.empty() && res.ok()) statusText = "OK";
+      args[argc++] = JS_NewInt32(c, res.status);
+      args[argc++] = JS_NewStringLen(c, statusText.data(), statusText.size());
+      args[argc++] = JS_NewStringLen(c, res.url.data(), res.url.size());
+      args[argc++] = headers;
+      args[argc++] = JS_NewStringLen(c, res.error.data(), res.error.size());
+    } else if (ev.kind == LoadEvent::Data) {
+      args[argc++] = newArrayBuffer(c, std::move(res.data));
+    } else {
+      args[argc++] = JS_NewStringLen(c, res.error.data(), res.error.size());
     }
-    if (res.headers.empty() && !res.contentType.empty()) {  // files, data:, embedder loads
-      JSValue pair = JS_NewArray(c);
-      JS_SetPropertyUint32(c, pair, 0, JS_NewString(c, "content-type"));
-      JS_SetPropertyUint32(c, pair, 1, JS_NewStringLen(c, res.contentType.data(), res.contentType.size()));
-      JS_SetPropertyUint32(c, headers, 0, pair);
-    }
-    std::string statusText = res.statusText;
-    if (statusText.empty() && res.ok()) statusText = "OK";
-    JSValue args[6] = {JS_NewInt32(c, res.status),
-                       JS_NewStringLen(c, statusText.data(), statusText.size()),
-                       JS_NewStringLen(c, res.url.data(), res.url.size()),
-                       headers,
-                       newArrayBuffer(c, std::move(res.data)),
-                       JS_NewStringLen(c, res.error.data(), res.error.size())};
-    JS_FreeValue(c, ip->call(cb, JS_UNDEFINED, 6, args));
-    for (auto& a : args) JS_FreeValue(c, a);
+    JS_FreeValue(c, ip->call(cb, JS_UNDEFINED, argc, args));
+    for (int i = 0; i < argc; i++) JS_FreeValue(c, args[i]);
     JS_FreeValue(c, cb);
   });
-  impl.pending[id] = {JS_DupValue(ctx, argv[5]), JS_UNDEFINED};
+  impl.pending[id] = {JS_DupValue(ctx, argv[6]), JS_UNDEFINED};
   return JS_NewFloat64(ctx, double(id));
 }
 
@@ -245,7 +258,7 @@ void installHostApi(JsEngine::Impl& impl, JSValue global, JSValue host) {
     int len;
   } fns[] = {{"log", js_log, 2},           {"reportError", js_reportError, 2}, {"utf8Encode", js_utf8Encode, 1},
              {"utf8Decode", js_utf8Decode, 3}, {"resolveUrl", js_resolveUrl, 2}, {"baseUrl", js_baseUrl, 0},
-             {"fetch", js_fetch, 6},       {"cancel", js_cancel, 1}};
+             {"fetch", js_fetch, 7},       {"cancel", js_cancel, 1}};
   for (auto& f : fns) JS_SetPropertyStr(ctx, host, f.name, JS_NewCFunction(ctx, f.fn, f.name, f.len));
   JS_SetPropertyStr(ctx, host, "devMode", JS_NewBool(ctx, impl.rt.config.dev_mode != 0));
 #if JSUI_DEBUGGER

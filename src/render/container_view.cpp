@@ -55,6 +55,16 @@ void loadInherit(NodeState* st, ResourceLoader* childLoader, uint64_t requestId,
   ResourceLoader& loader = st->cache->runtime().loader;
   uint64_t id = loader.reserveId();
   st->loads.insert(id);
+  if (req.stream) {  // fetch()'s res.body: piece by piece
+    loader.loadStream(id, std::move(req), [st, childLoader, requestId, id](LoadEvent& ev) {
+      bool last = ev.kind == LoadEvent::End || (ev.kind == LoadEvent::Head && ev.res.status == 0);
+      if (last) st->loads.erase(id);
+      if (ev.kind == LoadEvent::Head) childLoader->head(requestId, std::move(ev.res));
+      else if (ev.kind == LoadEvent::Data) childLoader->data(requestId, std::move(ev.res.data));
+      else childLoader->end(requestId, std::move(ev.res.error));
+    });
+    return;
+  }
   loader.load(id, std::move(req), [st, childLoader, requestId, id](Resource r) {
     st->loads.erase(id);
     childLoader->complete(requestId, std::move(r));
@@ -578,7 +588,7 @@ void createChild(NodeState* st) {
   applyInheritance(st);
   st->parentFonts = parent.fonts.generation;
   // Loads go through the parent, unless the embedder gave the child a loader.
-  if (!cfg.load) {
+  if (!cfg.load && !cfg.on_request) {
     ResourceLoader* childLoader = &childRt->loader;
     childLoader->forward = [st, childLoader](uint64_t id, LoadRequest req) {
       forwardLoad(st, childLoader, id, std::move(req));

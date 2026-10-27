@@ -90,7 +90,7 @@ HeaderList decodeHeaders(const char* s) {
 // 2^53, and this keeps the JS side free of BigInt.
 EM_JS(void, jsui_js_fetch_start,
       (uint32_t token, double id, const char* urlPtr, const char* methodPtr, const char* headersPtr,
-       const uint8_t* bodyPtr, size_t bodySize, int timeoutMs),
+       const uint8_t* bodyPtr, size_t bodySize, int timeoutMs, int redirect, int stream),
       {
   var url = UTF8ToString(urlPtr);
   var method = UTF8ToString(methodPtr) || "GET";
@@ -101,20 +101,28 @@ EM_JS(void, jsui_js_fetch_start,
   });
   var body = bodySize ? HEAPU8.slice(bodyPtr, bodyPtr + bodySize) : undefined;  // copy: caller frees
   var all = Module.__jsuiFetches || (Module.__jsuiFetches = new Map());
-  var set = all.get(token);
-  if (!set) { set = new Set(); all.set(token, set); }
+  var map = all.get(token);
+  if (!map) { map = new Map(); all.set(token, map); }
   var ctl = typeof AbortController !== "undefined" ? new AbortController() : null;
-  var entry = { ctl: ctl, aborted: false, timedOut: false, timer: 0 };
-  set.add(entry);
+  var entry = { ctl: ctl, aborted: false, timedOut: false, timer: 0, headSent: false };
+  map.set(id, entry);
   function str(s) {
     var n = lengthBytesUTF8(s) + 1;
     var p = _malloc(n);
     stringToUTF8(s, p, n);
     return p;
   }
-  function finish(status, statusText, finalUrl, headerText, contentType, bytes, error) {
-    set.delete(entry);
+  function done() {
+    map.delete(id);
     if (entry.timer) clearTimeout(entry.timer);
+  }
+  function headerText(res) {
+    var h = "";
+    res.headers.forEach(function(v, k) { h += k + ": " + v + "\n"; });
+    return h;
+  }
+  function finish(status, statusText, finalUrl, headerText, contentType, bytes, error) {
+    done();
     if (entry.aborted) return;
     var n = bytes ? bytes.length : 0;
     var ps = [str(statusText), str(finalUrl), str(headerText), str(contentType), str(error)];
@@ -123,7 +131,18 @@ EM_JS(void, jsui_js_fetch_start,
     if (dst && n) HEAPU8.set(bytes, dst);  // HEAPU8 re-read after possible growth in begin()
     _jsui_emscripten_fetch_end(token, id);
   }
-  var init = { method: method, headers: headers, credentials: "same-origin" };
+  function streamEnd(error) {
+    done();
+    if (entry.aborted) return;
+    var p = str(error);
+    _jsui_emscripten_stream_end(token, id, p);
+    _free(p);
+  }
+  function failMessage(err) {
+    return entry.timedOut ? "timeout after " + timeoutMs + " ms" : String(err && err.message || err);
+  }
+  var init = { method: method, headers: headers, credentials: "same-origin",
+               redirect: redirect == 1 ? "error" : redirect == 2 ? "manual" : "follow" };
   if (body && method !== "GET" && method !== "HEAD") init.body = body;
   if (ctl) {
     init.signal = ctl.signal;
@@ -132,25 +151,58 @@ EM_JS(void, jsui_js_fetch_start,
   var p;
   try { p = fetch(url, init); } catch (e) { p = Promise.reject(e); }
   p.then(function(res) {
-    return res.arrayBuffer().then(function(buf) {
-      var h = "";
-      res.headers.forEach(function(v, k) { h += k + ": " + v + "\n"; });
-      finish(res.status, res.statusText || "", res.url || url, h, res.headers.get("content-type") || "",
-             new Uint8Array(buf), "");
-    });
+    if (!stream || !res.body || !res.body.getReader) {
+      return res.arrayBuffer().then(function(buf) {
+        finish(res.status, res.statusText || "", res.url || url, headerText(res),
+               res.headers.get("content-type") || "", new Uint8Array(buf), "");
+      });
+    }
+    if (entry.aborted) return;
+    var ps = [str(res.statusText || ""), str(res.url || url), str(headerText(res)),
+              str(res.headers.get("content-type") || "")];
+    _jsui_emscripten_stream_head(token, id, res.status, ps[0], ps[1], ps[2], ps[3]);
+    ps.forEach(function(p) { _free(p); });
+    entry.headSent = true;
+    var reader = res.body.getReader();
+    function next() {
+      return reader.read().then(function(r) {
+        if (entry.aborted) { reader.cancel().catch(function() {}); return; }
+        if (r.done) { streamEnd(""); return; }
+        var n = r.value.length;
+        if (n) {
+          var dst = _jsui_emscripten_stream_alloc(token, id, n);
+          if (dst) HEAPU8.set(r.value, dst);
+          _jsui_emscripten_stream_push(token, id);
+        }
+        return next();
+      });
+    }
+    return next();
   }).catch(function(err) {
-    if (entry.aborted) { set.delete(entry); return; }
-    var msg = entry.timedOut ? "timeout after " + timeoutMs + " ms" : String(err && err.message || err);
-    finish(0, "", url, "", "", null, "fetch " + url + " failed: " + msg);
+    if (entry.aborted) { done(); return; }
+    var msg = "fetch " + url + " failed: " + failMessage(err);
+    if (entry.headSent) streamEnd(msg);
+    else finish(0, "", url, "", "", null, msg);
   });
+});
+
+EM_JS(void, jsui_js_fetch_abort, (uint32_t token, double id), {
+  var all = Module.__jsuiFetches;
+  var map = all && all.get(token);
+  var e = map && map.get(id);
+  if (!e) return;
+  e.aborted = true;
+  if (e.timer) clearTimeout(e.timer);
+  if (e.ctl) e.ctl.abort();
+  map.delete(id);
 });
 
 EM_JS(void, jsui_js_fetch_abort_all, (uint32_t token), {
   var all = Module.__jsuiFetches;
   if (!all) return;
-  var set = all.get(token);
-  if (!set) return;
-  set.forEach(function(e) { e.aborted = true; if (e.timer) clearTimeout(e.timer); if (e.ctl) e.ctl.abort(); });
+  var map = all.get(token);
+  if (!map) return;
+  map.forEach(function(e) { e.aborted = true; if (e.timer) clearTimeout(e.timer); if (e.ctl) e.ctl.abort(); });
   all.delete(token);
 });
 
@@ -160,11 +212,18 @@ bool emscriptenLoad(ResourceLoader* loader, uint64_t id, const LoadRequest& req)
   registry().inflight[{t, id}].url = req.url;
   std::string headers = encodeHeaders(req.headers);
   jsui_js_fetch_start(t, double(id), req.url.c_str(), req.method.c_str(), headers.c_str(), req.body.data(),
-                      req.body.size(), req.timeoutMs);
+                      req.body.size(), req.timeoutMs, req.redirect, req.stream ? 1 : 0);
   return true;
 }
 
-void emscriptenLoaderDestroyed(ResourceLoader* loader) {
+void emscriptenCancel(ResourceLoader* loader, uint64_t id) {
+  auto& r = registry();
+  auto it = r.tokens.find(loader);
+  if (it == r.tokens.end()) return;
+  if (r.inflight.erase({it->second, id})) jsui_js_fetch_abort(it->second, double(id));
+}
+
+void emscriptenCancelAll(ResourceLoader* loader) {
   auto& r = registry();
   auto it = r.tokens.find(loader);
   if (it == r.tokens.end()) return;
@@ -174,6 +233,14 @@ void emscriptenLoaderDestroyed(ResourceLoader* loader) {
     if (i->first.token == t) i = r.inflight.erase(i);
     else ++i;
   }
+}
+
+void emscriptenLoaderDestroyed(ResourceLoader* loader) {
+  auto& r = registry();
+  auto it = r.tokens.find(loader);
+  if (it == r.tokens.end()) return;
+  uint32_t t = it->second;
+  emscriptenCancelAll(loader);
   r.loaders.erase(t);
   r.tokens.erase(it);
 }
@@ -211,6 +278,50 @@ EMSCRIPTEN_KEEPALIVE void jsui_emscripten_fetch_end(uint32_t token, double id) {
   r.inflight.erase(it);
   auto l = r.loaders.find(token);
   if (l != r.loaders.end()) l->second->complete(uint64_t(id), std::move(res));
+}
+
+// Streamed responses (fetch()'s res.body): the head, then each piece copied
+// straight into a vector (alloc + push), then the end.
+EMSCRIPTEN_KEEPALIVE void jsui_emscripten_stream_head(uint32_t token, double id, int status, const char* statusText,
+                                                      const char* finalUrl, const char* headers,
+                                                      const char* contentType) {
+  auto& r = jsui::registry();
+  auto it = r.inflight.find({token, uint64_t(id)});
+  if (it == r.inflight.end()) return;
+  jsui::Resource meta;
+  meta.status = status;
+  if (statusText) meta.statusText = statusText;
+  meta.url = finalUrl && *finalUrl ? finalUrl : it->second.url;
+  meta.headers = jsui::decodeHeaders(headers);
+  if (contentType) meta.contentType = contentType;
+  auto l = r.loaders.find(token);
+  if (l != r.loaders.end()) l->second->head(uint64_t(id), std::move(meta));
+}
+
+EMSCRIPTEN_KEEPALIVE uint8_t* jsui_emscripten_stream_alloc(uint32_t token, double id, size_t size) {
+  auto& r = jsui::registry();
+  auto it = r.inflight.find({token, uint64_t(id)});
+  if (it == r.inflight.end()) return nullptr;
+  it->second.data.resize(size);
+  return size ? it->second.data.data() : nullptr;
+}
+
+EMSCRIPTEN_KEEPALIVE void jsui_emscripten_stream_push(uint32_t token, double id) {
+  auto& r = jsui::registry();
+  auto it = r.inflight.find({token, uint64_t(id)});
+  if (it == r.inflight.end()) return;
+  auto l = r.loaders.find(token);
+  if (l != r.loaders.end()) l->second->data(uint64_t(id), std::move(it->second.data));
+  it->second.data = {};
+}
+
+EMSCRIPTEN_KEEPALIVE void jsui_emscripten_stream_end(uint32_t token, double id, const char* error) {
+  auto& r = jsui::registry();
+  auto it = r.inflight.find({token, uint64_t(id)});
+  if (it == r.inflight.end()) return;
+  r.inflight.erase(it);
+  auto l = r.loaders.find(token);
+  if (l != r.loaders.end()) l->second->end(uint64_t(id), error ? error : "");
 }
 
 }  // extern "C"

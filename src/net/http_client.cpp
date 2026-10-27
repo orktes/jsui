@@ -1,4 +1,5 @@
 #include "net/http_client.h"
+#include "net/tls.h"
 
 #include <algorithm>
 #include <chrono>
@@ -47,8 +48,6 @@ static void setNonBlocking(SocketHandle s) { fcntl(s, F_SETFL, fcntl(s, F_GETFL,
 
 namespace jsui::net {
 
-namespace {
-
 bool iequals(const std::string& a, const char* b) {
   size_t n = std::strlen(b);
   if (a.size() != n) return false;
@@ -57,12 +56,15 @@ bool iequals(const std::string& a, const char* b) {
   return true;
 }
 
+namespace {
+
 std::string trim(const std::string& s) {
   size_t a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
   return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
 }
 
-// Resolves a Location header against the request URL.
+}  // namespace
+
 std::string resolveLocation(const std::string& base, const std::string& loc) {
   if (loc.find("://") != std::string::npos) return loc;
   auto scheme = base.find("://");
@@ -74,8 +76,6 @@ std::string resolveLocation(const std::string& base, const std::string& loc) {
   path = path.substr(0, path.find_first_of("?#"));
   return origin + path.substr(0, path.rfind('/') + 1) + loc;
 }
-
-}  // namespace
 
 std::string HttpResponse::header(const std::string& name) const {
   for (auto& [k, v] : headers)
@@ -91,11 +91,8 @@ bool parseHttpUrl(const std::string& url, HttpUrl* out, std::string* error) {
   }
   std::string s = url.substr(0, scheme);
   std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return char(std::tolower(c)); });
-  if (s == "https") {
-    *error = "https:// is not supported by the built-in loader (no TLS); install a JsuiLoadFn to load " + url;
-    return false;
-  }
-  if (s != "http") {
+  out->tls = s == "https";
+  if (s != "http" && s != "https") {
     *error = "unsupported URL scheme '" + s + "'";
     return false;
   }
@@ -103,7 +100,7 @@ bool parseHttpUrl(const std::string& url, HttpUrl* out, std::string* error) {
   size_t pathStart = url.find_first_of("/?#", hostStart);
   std::string authority = url.substr(hostStart, pathStart == std::string::npos ? std::string::npos : pathStart - hostStart);
   if (auto at = authority.rfind('@'); at != std::string::npos) authority = authority.substr(at + 1);
-  out->port = 80;
+  out->port = out->tls ? 443 : 80;
   if (!authority.empty() && authority[0] == '[') {  // [ipv6]:port
     auto close = authority.find(']');
     if (close == std::string::npos) {
@@ -179,7 +176,7 @@ int ChunkedDecoder::feed(const char* data, size_t size, std::vector<uint8_t>* ou
 
 #if defined(__EMSCRIPTEN__)
 
-HttpResponse httpRequest(const HttpRequest& req, const std::atomic<bool>*) {
+HttpResponse httpRequest(const HttpRequest& req, const std::atomic<bool>*, const HttpStream*) {
   HttpResponse res;
   res.url = req.url;
   res.error = "raw sockets are not available in the browser build";
@@ -233,13 +230,17 @@ class Exchange {
  public:
   Exchange(const std::atomic<bool>* cancel, Clock::time_point deadline) : cancel_(cancel), deadline_(deadline) {}
 
+  // The deadline for the waits that follow (header / idle timeouts).
+  void setDeadline(Clock::time_point d) { deadline_ = d; }
+
   bool connect(const HttpUrl& u, std::string* err) {
+    if (u.tls && !tlsAvailable(err)) return false;
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     addrinfo* list = nullptr;
     std::string port = std::to_string(u.port);
-    // getaddrinfo blocks and cannot be cancelled; fine for LAN / localhost.
+    // getaddrinfo blocks and cannot be cancelled.
     int gai = getaddrinfo(u.host.c_str(), port.c_str(), &hints, &list);
     if (gai != 0 || !list) {
       *err = "cannot resolve host '" + u.host + "'";
@@ -278,27 +279,35 @@ class Exchange {
       closeSocket(fd);
     }
     freeaddrinfo(list);
-    return sock_.fd != kBadSocket;
+    if (sock_.fd == kBadSocket) return false;
+    if (u.tls) return startTls(u.host, err);
+    return true;
   }
 
   bool sendAll(const char* data, size_t size, std::string* err) {
     while (size > 0) {
+      long long n;
+      if (tls_) {
+        n = tls_->write(data, std::min<size_t>(size, 1 << 20), err);
+        if (n == TlsSession::kWantRead || n == TlsSession::kWantWrite) {
+          if (!waitIo(n == TlsSession::kWantWrite ? POLLOUT : POLLIN, "timed out sending request", err)) return false;
+          continue;
+        }
+        if (n < 0) return false;
+      } else {
 #if defined(MSG_NOSIGNAL)
-      auto n = ::send(sock_.fd, data, (int)std::min<size_t>(size, 1 << 20), MSG_NOSIGNAL);
+        n = ::send(sock_.fd, data, (int)std::min<size_t>(size, 1 << 20), MSG_NOSIGNAL);
 #else
-      auto n = ::send(sock_.fd, data, (int)std::min<size_t>(size, 1 << 20), 0);
+        n = ::send(sock_.fd, data, (int)std::min<size_t>(size, 1 << 20), 0);
 #endif
+        if (n < 0 && wouldBlock(lastSocketError())) {
+          if (!waitIo(POLLOUT, "timed out sending request", err)) return false;
+          continue;
+        }
+      }
       if (n > 0) {
         data += n;
         size -= size_t(n);
-        continue;
-      }
-      if (n < 0 && wouldBlock(lastSocketError())) {
-        int w = waitFor(sock_.fd, POLLOUT, deadline_, cancel_);
-        if (w != 1) {
-          *err = w == 0 ? "timed out sending request" : "cancelled";
-          return false;
-        }
         continue;
       }
       *err = "connection lost while sending request";
@@ -308,9 +317,22 @@ class Exchange {
   }
 
   // Reads more bytes into `buf`. Returns bytes read, 0 on EOF, -1 on error.
-  long long recvSome(std::string* buf, std::string* err) {
+  long long recvSome(std::string* buf, std::string* err, const char* timeoutMsg = "timed out waiting for response") {
     char tmp[16384];
     for (;;) {
+      if (tls_) {
+        long long n = tls_->read(tmp, sizeof tmp, err);
+        if (n > 0) {
+          buf->append(tmp, size_t(n));
+          return n;
+        }
+        if (n == 0) return 0;
+        if (n == TlsSession::kWantRead || n == TlsSession::kWantWrite) {
+          if (!waitIo(n == TlsSession::kWantWrite ? POLLOUT : POLLIN, timeoutMsg, err)) return -1;
+          continue;
+        }
+        return -1;
+      }
       auto n = ::recv(sock_.fd, tmp, sizeof tmp, 0);
       if (n > 0) {
         buf->append(tmp, size_t(n));
@@ -318,11 +340,7 @@ class Exchange {
       }
       if (n == 0) return 0;
       if (wouldBlock(lastSocketError())) {
-        int w = waitFor(sock_.fd, POLLIN, deadline_, cancel_);
-        if (w != 1) {
-          *err = w == 0 ? "timed out waiting for response" : "cancelled";
-          return -1;
-        }
+        if (!waitIo(POLLIN, timeoutMsg, err)) return -1;
         continue;
       }
       *err = "connection reset";
@@ -331,25 +349,74 @@ class Exchange {
   }
 
  private:
+  bool waitIo(short events, const char* timeoutMsg, std::string* err) {
+    int w = waitFor(sock_.fd, events, deadline_, cancel_);
+    if (w == 1) return true;
+    *err = w == 0 ? timeoutMsg : "cancelled";
+    return false;
+  }
+
+  bool startTls(const std::string& host, std::string* err) {
+    tls_ = tlsClient(intptr_t(sock_.fd), host, err);
+    if (!tls_) return false;
+    for (;;) {
+      int r = tls_->handshake(err);
+      if (r == 1) return true;
+      if (r < 0) return false;
+      if (!waitIo(tls_->wantWrite() ? POLLOUT : POLLIN, "timed out in the TLS handshake", err)) return false;
+    }
+  }
+
   const std::atomic<bool>* cancel_;
   Clock::time_point deadline_;
   Socket sock_;
+  std::unique_ptr<TlsSession> tls_;  // destroyed before sock_ closes the socket
 };
 
 bool bodyForbidden(const std::string& method, int status) {
   return method == "HEAD" || status == 204 || status == 304 || (status >= 100 && status < 200);
 }
 
-// One request/response without redirects.
-void exchangeOnce(const HttpRequest& req, const std::string& url, Clock::time_point deadline,
-                  const std::atomic<bool>* cancel, HttpResponse* res) {
+bool isRedirect(int status) { return status == 301 || status == 302 || status == 303 || status == 307 || status == 308; }
+
+Clock::time_point after(int ms) {
+  return ms > 0 ? Clock::now() + std::chrono::milliseconds(ms) : Clock::time_point::max();
+}
+
+// Where the body goes: the stream, or res->body (bounded by maxBodyBytes).
+struct BodySink {
+  const HttpRequest& req;
+  const HttpStream* stream;
+  HttpResponse* res;
+  bool put(const char* data, size_t size) {
+    if (!size) return true;
+    if (stream) {
+      if (stream->onData && !stream->onData(reinterpret_cast<const uint8_t*>(data), size)) {
+        res->error = "cancelled";
+        return false;
+      }
+      return true;
+    }
+    if (res->body.size() + size > req.maxBodyBytes) {
+      res->error = "response body too large";
+      return false;
+    }
+    res->body.insert(res->body.end(), data, data + size);
+    return true;
+  }
+};
+
+// One request/response without redirects. A redirect (with `followable`
+// set) returns right after its headers: its body is never read.
+void exchangeOnce(const HttpRequest& req, const std::string& url, Clock::time_point overall, bool followable,
+                  const std::atomic<bool>* cancel, const HttpStream* stream, HttpResponse* res) {
   HttpUrl u;
   if (!parseHttpUrl(url, &u, &res->error)) return;
-  Exchange ex(cancel, deadline);
+  Exchange ex(cancel, std::min(overall, after(req.headerTimeoutMs)));
   if (!ex.connect(u, &res->error)) return;
 
   std::string hostHeader = u.host.find(':') != std::string::npos ? "[" + u.host + "]" : u.host;
-  if (u.port != 80) hostHeader += ":" + std::to_string(u.port);
+  if (u.port != (u.tls ? 443 : 80)) hostHeader += ":" + std::to_string(u.port);
   std::string head = req.method + " " + u.target + " HTTP/1.1\r\nHost: " + hostHeader + "\r\n";
   bool hasUA = false, hasAccept = false, hasCT = false;
   for (auto& [k, v] : req.headers) {
@@ -422,89 +489,119 @@ void exchangeOnce(const HttpRequest& req, const std::string& url, Clock::time_po
     res->error = "malformed status code";
     return;
   }
+  if (followable && isRedirect(res->status) && !res->header("location").empty()) return;
+  if (stream && stream->onHead && !stream->onHead(*res)) {
+    res->status = 0;
+    res->error = "cancelled";
+    return;
+  }
   if (bodyForbidden(req.method, res->status)) return;
 
-  std::string te = res->header("transfer-encoding");
-  std::transform(te.begin(), te.end(), te.begin(), [](unsigned char c) { return char(std::tolower(c)); });
-  std::string cl = res->header("content-length");
   auto fail = [&](const std::string& e) {
     res->status = 0;
     res->error = e;
     res->body.clear();
   };
+  // From here on the deadline is the idle timeout, renewed per chunk.
+  auto renew = [&] { ex.setDeadline(std::min(overall, after(req.idleTimeoutMs))); };
+  const char* idleMsg = "timed out reading the response body";
+  BodySink sink{req, stream, res};
+  std::string te = res->header("transfer-encoding");
+  std::transform(te.begin(), te.end(), te.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+  std::string cl = res->header("content-length");
   if (te.find("chunked") != std::string::npos) {
     ChunkedDecoder dec;
-    int r = dec.feed(buf.data(), buf.size(), &res->body);
-    while (r == 0) {
-      if (res->body.size() > req.maxBodyBytes) return fail("response body too large");
+    std::vector<uint8_t> chunk;
+    int r = dec.feed(buf.data(), buf.size(), &chunk);
+    for (;;) {
+      if (!sink.put(reinterpret_cast<const char*>(chunk.data()), chunk.size())) return fail(res->error);
+      chunk.clear();
+      if (r != 0) break;
       buf.clear();
-      long long n = ex.recvSome(&buf, &res->error);
+      renew();
+      long long n = ex.recvSome(&buf, &res->error, idleMsg);
       if (n < 0) return fail(res->error);
       if (n == 0) return fail("truncated chunked response");
-      r = dec.feed(buf.data(), buf.size(), &res->body);
+      r = dec.feed(buf.data(), buf.size(), &chunk);
     }
     if (r < 0) return fail("malformed chunked encoding");
   } else if (!cl.empty()) {
     char* end = nullptr;
     unsigned long long want = std::strtoull(cl.c_str(), &end, 10);
-    if (*end || want > req.maxBodyBytes) return fail(*end ? "bad Content-Length" : "response body too large");
-    res->body.reserve(size_t(want));
-    res->body.assign(buf.begin(), buf.begin() + std::min<size_t>(buf.size(), size_t(want)));
-    while (res->body.size() < want) {
+    if (*end) return fail("bad Content-Length");
+    if (!stream && want > req.maxBodyBytes) return fail("response body too large");
+    if (!stream) res->body.reserve(size_t(want));
+    unsigned long long got = std::min<unsigned long long>(buf.size(), want);
+    if (!sink.put(buf.data(), size_t(got))) return fail(res->error);
+    while (got < want) {
       buf.clear();
-      long long n = ex.recvSome(&buf, &res->error);
+      renew();
+      long long n = ex.recvSome(&buf, &res->error, idleMsg);
       if (n < 0) return fail(res->error);
-      if (n == 0) return fail("truncated response body (" + std::to_string(res->body.size()) + " of " + cl + " bytes)");
-      size_t take = std::min<size_t>(buf.size(), size_t(want) - res->body.size());
-      res->body.insert(res->body.end(), buf.begin(), buf.begin() + take);
+      if (n == 0) return fail("truncated response body (" + std::to_string(got) + " of " + cl + " bytes)");
+      size_t take = size_t(std::min<unsigned long long>(buf.size(), want - got));
+      if (!sink.put(buf.data(), take)) return fail(res->error);
+      got += take;
     }
   } else {
-    res->body.assign(buf.begin(), buf.end());
+    if (!sink.put(buf.data(), buf.size())) return fail(res->error);
     for (;;) {
-      if (res->body.size() > req.maxBodyBytes) return fail("response body too large");
       buf.clear();
-      long long n = ex.recvSome(&buf, &res->error);
+      renew();
+      long long n = ex.recvSome(&buf, &res->error, idleMsg);
       if (n < 0) return fail(res->error);
       if (n == 0) break;
-      res->body.insert(res->body.end(), buf.begin(), buf.end());
+      if (!sink.put(buf.data(), buf.size())) return fail(res->error);
     }
   }
 }
 
 }  // namespace
 
-HttpResponse httpRequest(const HttpRequest& req, const std::atomic<bool>* cancel) {
+HttpResponse httpRequest(const HttpRequest& req, const std::atomic<bool>* cancel, const HttpStream* stream) {
 #if defined(_WIN32)
   WinsockInit wsa;  // ref-counted by Winsock itself
 #endif
-  auto deadline = Clock::now() + std::chrono::milliseconds(req.timeoutMs > 0 ? req.timeoutMs : 30000);
+  auto overall = after(req.timeoutMs);
   HttpRequest cur = req;
   std::string url = req.url;
   HttpResponse res;
+  bool followable = req.redirect != Redirect::Manual;
   for (int hop = 0;; hop++) {
     res = HttpResponse();
     res.url = url;
-    exchangeOnce(cur, url, deadline, cancel, &res);
     res.redirected = hop > 0;
-    bool redirect = res.status == 301 || res.status == 302 || res.status == 303 || res.status == 307 || res.status == 308;
-    std::string loc = redirect ? res.header("location") : "";
+    exchangeOnce(cur, url, overall, followable, cancel, stream, &res);
+    if (!followable || !isRedirect(res.status)) break;
+    std::string loc = res.header("location");
     if (loc.empty()) break;
-    if (hop >= req.maxRedirects) {
-      res.status = 0;
-      res.error = "too many redirects (" + std::to_string(hop) + ")";
-      res.body.clear();
+    if (req.redirect == Redirect::Error || hop >= req.maxRedirects) {
+      std::string why = req.redirect == Redirect::Error ? "redirect to " + resolveLocation(url, loc) + " with redirect: 'error'"
+                                                        : "too many redirects (" + std::to_string(hop) + ")";
+      res = HttpResponse();
+      res.url = url;
+      res.error = why;
       break;
     }
     url = resolveLocation(url, loc);
-    // 303 always, 301/302 for non-GET (browser behaviour): switch to GET without body.
-    if (res.status == 303 || ((res.status == 301 || res.status == 302) && cur.method != "GET" && cur.method != "HEAD")) {
+    // 303 always, 301/302 for POST (browser behaviour): switch to GET without body.
+    if ((res.status == 303 && cur.method != "HEAD") || ((res.status == 301 || res.status == 302) && cur.method == "POST")) {
       cur.method = "GET";
       cur.body.clear();
+      for (auto it = cur.headers.begin(); it != cur.headers.end();)
+        it = iequals(it->first, "content-type") ? cur.headers.erase(it) : it + 1;
     }
   }
   return res;
 }
 
 #endif  // !__EMSCRIPTEN__
+
+#if !defined(JSUI_OS_HTTPS)
+// No OS HTTP stack: https:// on this client's TLS (net/tls.h).
+HttpResponse fetchUrl(const HttpRequest& req, const std::atomic<bool>* cancel, const HttpStream* stream) {
+  return httpRequest(req, cancel, stream);
+}
+#endif
 
 }  // namespace jsui::net

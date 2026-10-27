@@ -209,6 +209,9 @@ struct JsEngine::Impl {
   // Starts a loader request; `onDone` runs on the runtime thread during
   // pump(), and only while this engine is alive.
   uint64_t startLoad(LoadRequest req, std::function<void(uint64_t id, Resource& res)> onDone);
+  // A streamed load (fetch()): `onEvent` gets the head, body pieces and end
+  // the same way.
+  uint64_t startStream(LoadRequest req, std::function<void(uint64_t id, LoadEvent& ev)> onEvent);
   // Frees and forgets the JS callbacks registered for a request.
   void dropPending(uint64_t id);
   bool draining = false;
