@@ -115,6 +115,8 @@ let html = fs.readFileSync(path.join(SITE, 'index.html'), 'utf8');
 html = replaceAll(html, "from './jsui-web.js'", `from './jsui-web.js?v=${hash(webJs)}'`, 'site/index.html');
 html = replaceAll(html, "'./app/bundle.js'",
   `'./app/bundle.js?v=${hash(fs.readFileSync(path.join(out, 'app/bundle.js')))}'`, 'site/index.html');
+html = replaceAll(html, "components: './components.js'",
+  `components: './components.js?v=${hash(fs.readFileSync(path.join(SITE, 'public/components.js')))}'`, 'site/index.html');
 html = replaceAll(html, 'const modules = null;  // set by site/scripts/build.mjs',
   `const modules = ${JSON.stringify(modules)};`, 'site/index.html');
 fs.writeFileSync(path.join(out, 'index.html'), html);
