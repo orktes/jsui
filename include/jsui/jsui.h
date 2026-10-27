@@ -300,7 +300,9 @@ JSUI_API const void* jsui_get_buffer(JsuiRuntime* rt, const char* key, JsuiBuffe
  * WebGPU: queue order). Formats: 8-bit RGBA or BGRA, UNORM, holding
  * sRGB-encoded values like images do (Vulkan / Metal / WebGPU / GL format 0:
  * RGBA8 UNORM; D3D12 format 0: the resource's own, RGBA8 / BGRA8 UNORM or
- * TYPELESS). Vulkan images must be in SHADER_READ_ONLY_OPTIMAL whenever a
+ * TYPELESS; WebGPU format 0: the texture's own). WebGPU also takes
+ * RGBA8UnormSrgb and RGBA16Float, sampled as linear values (a game's own
+ * render targets). Vulkan images must be in SHADER_READ_ONLY_OPTIMAL whenever a
  * render runs (JSUI leaves them in it). D3D12 resources must be in the state
  * JsuiTexture.usage names (0: PIXEL_SHADER_RESOURCE) whenever a render runs:
  * a render that samples one in another state transitions it back before it
@@ -1088,7 +1090,15 @@ enum {
     /* Repaint damage over a cleared target instead of over a cached
      * texture of the static background (see "Static backdrop" in
      * docs/ARCHITECTURE.md; for comparisons). */
-    JSUI_WEBGPU_NO_BACKDROP = 1 << 5
+    JSUI_WEBGPU_NO_BACKDROP = 1 << 5,
+    /* The target still holds the frame this runtime last rendered into it
+     * (a texture the embedder keeps, e.g. one its 3D scene samples, that
+     * nothing else draws into): only the damage is repainted, straight into
+     * the target (no retained texture, no copy). The first frame, a new
+     * size or format, or a frame rendered elsewhere in between repaints
+     * fully. NO_CLEAR does not apply. Pass it only for the same texture as
+     * the last render; another texture needs a render without it. */
+    JSUI_WEBGPU_INCREMENTAL = 1 << 6
 };
 
 typedef struct JsuiWebGPUTarget {

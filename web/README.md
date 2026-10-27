@@ -143,6 +143,77 @@ const size = useHostTexture('trailer');            // { width, height } once set
   again until its URL changes; a texture uploaded before it (a poster) stays.
   Browsers only autoplay muted video; unmute after a click.
 
+## Sharing the game's WebGPU device (Three.js, Babylon, your own)
+
+A WebGPU game can hand JSUI its own `GPUDevice`. UI and game then trade GPU
+textures directly, in both directions, with no copies and no second canvas:
+
+```js
+import * as THREE from 'three/webgpu';
+const renderer = new THREE.WebGPURenderer();
+await renderer.init();
+
+const jsui = await createJsui({ device: renderer.backend.device, bundleUrl: './ui.js' });
+
+// 1. The UI inside the game: a surface rendered into a GPUTexture.
+const terminal = jsui.createTextureSurface({ component: 'Terminal', width: 800, height: 500, pixelRatio: 2 });
+const uiMap = (t) => Object.assign(new THREE.ExternalTexture(t), { colorSpace: THREE.SRGBColorSpace });
+const material = new THREE.MeshBasicNodeMaterial({ map: uiMap(terminal.texture), transparent: true,
+  premultipliedAlpha: true });
+terminal.on('texture', (t) => { material.map = uiMap(t); material.needsUpdate = true; });  // after setSize()
+screenMesh.material = material;
+
+// input: raycast the screen, forward the event at the hit's UV
+canvas.addEventListener('pointermove', (e) => {
+  const hit = raycaster.intersectObject(screenMesh)[0];
+  if (hit) terminal.dispatchEvent(e, hit.uv.x * terminal.width, (1 - hit.uv.y) * terminal.height);
+  else terminal.pointerLeave();
+});
+
+// 2. The game inside the UI: a render target shown with <HostTexture name="minimap" />.
+const minimap = new THREE.RenderTarget(256, 256);
+renderer.setRenderTarget(minimap); renderer.render(scene, topCamera); renderer.setRenderTarget(null);
+jsui.setTexture('minimap', renderer.backend.get(minimap.texture).texture);   // each time it was redrawn
+```
+
+- `createJsui({ device })` draws with that device instead of requesting one
+  (it needs `dist-gpu/`; the main canvas, if any, uses it too). Not in worker
+  mode: a `GPUDevice` cannot move to a worker, so `worker: true` with a
+  device runs on the main thread (one warning).
+- `createTextureSurface({ component, initialProps, width, height, pixelRatio,
+  texture, format, autoRender })`: a surface of the runtime (like
+  `createSurface`) whose frames go into `surface.texture` (`rgba8unorm`
+  unless `format` says `bgra8unorm` / `rgba16float`), made by the surface and
+  replaced on `setSize()` (`'texture'` event). Or pass `texture`, a
+  `GPUTexture` of the game's (`RENDER_ATTACHMENT | TEXTURE_BINDING`), or call
+  `renderTo(texture)` yourself with `autoRender: false` (from the game loop,
+  after the runtime's `'frame'`). The texture keeps the last frame, so a
+  frame repaints only what changed, straight into it (no retained copy); a
+  frame where nothing changed renders nothing. `'render'` fires after each
+  new frame, `surface.version` counts them. The texture holds premultiplied,
+  sRGB-encoded colors.
+- Input comes from the page: `dispatchEvent(e, x, y)` takes pointer, mouse,
+  wheel and keyboard events (a printable `keydown` also types its text), or
+  call `pointerDown / pointerMove / pointerUp / pointerLeave / wheel / key /
+  text` with logical surface coordinates (`u * width`, `(1 - v) * height` for
+  a hit's UV). Each returns whether the UI consumed it. `surface.cursor` and
+  the `'cursor'` event give the CSS cursor the UI wants. `focus()` points
+  gamepads at the surface.
+- `setTexture(name, gpuTexture)`: a texture of the shared device is sampled
+  in place (`rgba8unorm`, `bgra8unorm`, `rgba8unorm-srgb` or `rgba16float`,
+  `TEXTURE_BINDING` usage; the sRGB and half-float ones are read as linear
+  colors, as a Three.js render target in `SRGBColorSpace` or `HalfFloatType`
+  holds them). Call it again after the game redrew it: that repaints just the
+  views showing it. Queue order keeps it consistent: what the game submitted
+  before JSUI's frame is what the UI shows.
+- Device loss: JSUI never replaces a device it was given. `'devicelost'`
+  fires once; make a new device (and your textures on it), then
+  `jsui.setDevice(device)`: views, texture surfaces (their own textures are
+  made again: `'texture'` event) and copied host textures move over;
+  `setTexture` the game's `GPUTexture`s and `renderTo` its targets again.
+- `jsui.device` is the runtime's device (the page's, or the one JSUI
+  requested), so a page can also use JSUI's own device for its WebGPU work.
+
 ## Audio (Web Audio)
 
 The UI's sounds (`Sound.play`, `useSound`, `useMusic`, `<UISounds>`,

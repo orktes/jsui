@@ -1016,6 +1016,11 @@ function definePage(I) {
 
     // ------------------------------------------------------- surfaces
 
+    createTextureSurface() {
+      throw new Error('createTextureSurface: not in worker mode (a GPUDevice cannot move to a worker); ' +
+        'createJsui({ device }) without worker: true');
+    }
+
     createSurface(target, options) {
       if (this._destroyed) throw new Error('createSurface: runtime destroyed');
       const s = new WorkerSurface(this, target, options ?? {});

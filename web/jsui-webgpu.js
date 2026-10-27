@@ -21,8 +21,16 @@
 // Device loss: we ask for a new device (once per loss) and rebuild the Skia
 // context on the same canvas; if that fails the host continues on a fresh
 // canvas with the WebGL / CPU renderers.
+//
+// The page's own device (createJsui({ device }), e.g. a Three.js or Babylon
+// WebGPU renderer's): JSUI draws with it instead of requesting one, so the
+// UI and the game share textures without copies (texture surfaces render the
+// UI into a GPUTexture the game samples; GPUTexture host textures show the
+// game's render targets in the UI). JSUI never replaces that device itself:
+// after a loss the page makes a new one and hands it over (jsui.setDevice).
 
-/** @typedef {{ adapter: GPUAdapter, device: GPUDevice, software: boolean, description: string }} JsuiWebGPU */
+/** @typedef {{ adapter: GPUAdapter|null, device: GPUDevice, software: boolean, description: string,
+ *   external?: boolean }} JsuiWebGPU */
 
 let shared = null;  // Promise<JsuiWebGPU|null>: one device per page, shared by all runtimes
 
@@ -72,6 +80,21 @@ async function acquire() {
 }
 let sharedValue = null;
 
+const externals = new WeakMap();  // GPUDevice -> JsuiWebGPU
+
+/** The page's own GPUDevice as a JsuiWebGPU (one per device). */
+export function externalWebGPU(device) {
+  let w = externals.get(device);
+  if (!w) {
+    const info = device.adapterInfo ?? {};
+    const desc = [info.vendor, info.architecture, info.device, info.description].filter(Boolean).join(' ');
+    w = { adapter: null, device, software: false, external: true,
+      description: `the page's device${device.label ? ` "${device.label}"` : ''}${desc ? `, ${desc}` : ''}` };
+    externals.set(device, w);
+  }
+  return w;
+}
+
 const USAGE_RENDER_ATTACHMENT = 0x10, USAGE_COPY_SRC = 0x01, USAGE_TEXTURE_BINDING = 0x04;
 
 export class WebGPURenderer {
@@ -102,8 +125,9 @@ export class WebGPURenderer {
     // globalThis.jsuiCanvasFormat = 'rgba8unorm' / 'bgra8unorm' overrides the
     // browser's choice (recording the pipeline lists of the other format,
     // see CanvasView.addPipelines).
-    const format = /^(rgba|bgra)8unorm$/.test(globalThis.jsuiCanvasFormat ?? '')
-      ? globalThis.jsuiCanvasFormat : navigator.gpu.getPreferredCanvasFormat();
+    // A texture surface's stand-in context names the format of its textures.
+    const format = canvasContext?.jsuiFormat ?? (/^(rgba|bgra)8unorm$/.test(globalThis.jsuiCanvasFormat ?? '')
+      ? globalThis.jsuiCanvasFormat : navigator.gpu.getPreferredCanvasFormat());
     try {
       ctx.configure({ device: webgpu.device, format, alphaMode: 'premultiplied',
         usage: USAGE_RENDER_ATTACHMENT | USAGE_COPY_SRC | USAGE_TEXTURE_BINDING });
@@ -269,6 +293,11 @@ export class WebGPURenderer {
     this.lost = true;
     this.skia?.markLost();
     this._release();
+    if (this.webgpu.external) {
+      // The page's device: the page makes the next one (jsui.setDevice).
+      host._hostOf()._externalDeviceLost(this.webgpu, info);
+      return;
+    }
     host._log(2, `WebGPU device lost (${info?.reason ?? 'unknown'}: ${info?.message ?? ''}), recreating`);
     const webgpu = await requestWebGPU({ allowSoftware: true, fresh: true });
     if (this._destroyed || host._destroyed) return;
