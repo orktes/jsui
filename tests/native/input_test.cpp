@@ -593,7 +593,7 @@ TEST(input_touch) {
   f.in().touch(0, 1, 10, 20);
   f.in().touch(0, 1, 10, 10);
   f.in().touch(0, 2, 10, 10);
-  CHECK_NEAR(sv->scrollY, 30, 1e-4);
+  CHECK_NEAR(sv->scrollY, 22, 1e-4);  // 30 px of travel less the 8 px slop
   CHECK_EQ(f.events(), ev("pointerenter", btn) + " " + ev("pointerdown", btn) + " " + ev("pointercancel", btn) +
                            " " + ev("scrollbegindrag", sv) + " " + ev("scroll", sv) + " " + ev("scroll", sv) + " " +
                            ev("scrollenddrag", sv) + " " + ev("pointerleave", btn));
@@ -1584,6 +1584,7 @@ struct TouchFixture {
     f.rt->tick(0);
     f.logs.clear();
   }
+  // Content follows the finger less the 8 px slop: 20 px of travel scrolls 12.
   void drag(double t) {
     f.in().touch(0, 0, 10, 60);
     f.in().touch(0, 1, 10, 40);  // past the slop
@@ -1620,9 +1621,9 @@ TEST(input_late_answer_responder_holds_scrollview) {
     t.drag(10);
     CHECK_NEAR(t.sv->scrollY, 0, 1e-4);
     t.f.rt->tick(30);
-    CHECK_NEAR(t.sv->scrollY, 20, 1e-4);
+    CHECK_NEAR(t.sv->scrollY, 12, 1e-4);
     t.f.in().touch(0, 1, 10, 30);
-    CHECK_NEAR(t.sv->scrollY, 30, 1e-4);
+    CHECK_NEAR(t.sv->scrollY, 22, 1e-4);
     t.f.in().touch(0, 2, 10, 30);
   }
   {
@@ -1646,7 +1647,7 @@ TEST(input_late_answer_responder_holds_scrollview) {
     t.f.rt->tick(140);
     CHECK_NEAR(t.sv->scrollY, 0, 1e-4);
     t.f.rt->tick(170);
-    CHECK_NEAR(t.sv->scrollY, 20, 1e-4);
+    CHECK_NEAR(t.sv->scrollY, 12, 1e-4);
     t.f.in().touch(0, 2, 10, 40);
   }
   {
@@ -1654,7 +1655,7 @@ TEST(input_late_answer_responder_holds_scrollview) {
     TouchFixture t(R"({"__events":["press"]})");
     t.f.rt->inbound.replyDelayMs = 30;
     t.drag(10);
-    CHECK_NEAR(t.sv->scrollY, 20, 1e-4);
+    CHECK_NEAR(t.sv->scrollY, 12, 1e-4);
     t.f.in().touch(0, 2, 10, 40);
   }
 }
@@ -1682,7 +1683,7 @@ TEST(input_late_answer_responder_deadline_hints) {
     t.f.rt->inbound.replyDelayMs = 500;
     t.drag(10);
     t.f.rt->tick(100);
-    CHECK_NEAR(t.sv->scrollY, 20, 1e-4);
+    CHECK_NEAR(t.sv->scrollY, 12, 1e-4);
     t.f.in().touch(0, 2, 10, 40);
     t.f.rt->tick(600);
     CHECK_EQ(t.f.rt->inbound.awaiting(), size_t(0));
@@ -1714,7 +1715,7 @@ TEST(input_late_answer_responder_deadline_hints) {
     t.f.rt->inbound.replyDelayMs = 500;
     t.f.rt->tick(30);
     t.f.rt->tick(130);
-    CHECK_NEAR(t.sv->scrollY, 20, 1e-4);
+    CHECK_NEAR(t.sv->scrollY, 12, 1e-4);
     t.f.in().touch(0, 2, 10, 40);
   }
 }

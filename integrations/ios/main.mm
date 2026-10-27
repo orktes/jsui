@@ -1,7 +1,9 @@
 // JsuiDemo: iOS host for a JSUI bundle.
 //
-// One MTKView, driven at display rate (ProMotion: up to 120 Hz). Every frame
-// ticks the runtime and, when it has something new, renders with Skia
+// One MTKView, driven at display rate (ProMotion: up to 120 Hz) by a
+// CADisplayLink whose vsync timestamp is the frame time: animations,
+// flings and resampled touch drags step evenly even when the callback
+// itself runs a little early or late. Every frame ticks the runtime and, when it has something new, renders with Skia
 // Ganesh on Metal straight into the drawable (jsui_render_metal), or with
 // the CPU rasteriser plus a blit when Metal is unavailable or `-JsuiRenderer
 // cpu` is passed. Touches, hardware keyboards and game controllers
@@ -13,6 +15,11 @@
 //   -JsuiJsThread off                       run JS on the main thread (default: on, its own thread
 //                                           as in React Native; or lockstep)
 // Without -JsuiURL the app loads ui/bundle.js from its own bundle.
+// ui/state.json, when the app has one ({"key": value, ...}), is shared state
+// set before the bundle loads (like jsui-viewer --state key=json).
+// <Video> plays with AVFoundation (tools/jsui-viewer/video.mm, shared with
+// the desktop viewer); sounds play with the built-in miniaudio backend when
+// the library is built with JSUI_AUDIO (scripts/build-ios.sh does).
 // JS runs on its own thread by default (JsuiConfig.js_thread): the
 // MTKView's frames never wait for it. The view draws every display frame,
 // so no on_js_ready wake-up is needed.
@@ -31,6 +38,15 @@
 #include <vector>
 
 #include "jsui/jsui.h"
+
+extern "C" {
+struct ViewerVideos;
+ViewerVideos* viewer_videos_create(void* device, void* queue);
+void viewer_videos_attach(ViewerVideos* vs, JsuiRuntime* rt);
+void viewer_videos_command(void* user, const JsuiVideoCommand* c);
+int viewer_videos_tick(ViewerVideos* vs);
+void viewer_videos_destroy(ViewerVideos* vs);
+}
 
 static void jsuiLog(void*, JsuiLogLevel level, const char* message) {
   static const char* names[] = {"debug", "info", "warn", "error"};
@@ -107,8 +123,11 @@ struct PadState {
   id<MTLCommandQueue> _queue;
   JsuiRuntime* _rt;
   JsuiMetalContext* _mtl;
+  ViewerVideos* _videos;
   BOOL _cpu;
   BOOL _presented;  // the drawable on screen shows the latest frame
+  CADisplayLink* _link;
+  double _frameTime;  // ms, the display link's vsync time for this frame
   // CPU fallback: RGBA frame -> BGRA staging buffer -> blit into the drawable.
   std::vector<uint8_t> _pixels;
   id<MTLBuffer> _staging;
@@ -132,6 +151,9 @@ struct PadState {
   _view.preferredFramesPerSecond = UIScreen.mainScreen.maximumFramesPerSecond;
   _view.clearColor = MTLClearColorMake(0, 0, 0, 1);
   _view.multipleTouchEnabled = YES;
+  // Drawn from our own CADisplayLink (displayFrame:), which knows the vsync time.
+  _view.paused = YES;
+  _view.enableSetNeedsDisplay = NO;
   _view.backgroundColor = UIColor.blackColor;
   self.view = _view;
 }
@@ -165,8 +187,14 @@ struct PadState {
   cfg.js_thread = [jsThread isEqualToString:@"off"]        ? JSUI_JS_THREAD_OFF
                   : [jsThread isEqualToString:@"lockstep"] ? JSUI_JS_THREAD_LOCKSTEP
                                                            : JSUI_JS_THREAD_ON;
+  _videos = _cpu ? viewer_videos_create(nullptr, nullptr)
+                 : viewer_videos_create((__bridge void*)_device, (__bridge void*)_queue);
+  cfg.on_video = viewer_videos_command;
+  cfg.video_user = _videos;
   _rt = jsui_create(&cfg);
+  viewer_videos_attach(_videos, _rt);
   [self publishSafeArea];
+  [self applyBundledState];
   jsui_set_clipboard_callbacks(
       _rt,
       [](void*) -> const char* {
@@ -202,11 +230,32 @@ struct PadState {
                                          selector:@selector(memoryWarning)
                                              name:UIApplicationDidReceiveMemoryWarningNotification
                                            object:nil];
+
+  _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(displayFrame:)];
+  float maxFps = float(UIScreen.mainScreen.maximumFramesPerSecond);
+  _link.preferredFrameRateRange = CAFrameRateRangeMake(std::min(60.f, maxFps), maxFps, maxFps);
+  [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+}
+
+// ui/state.json: {"key": value, ...}, each value set as shared state.
+- (void)applyBundledState {
+  NSString* path = [NSBundle.mainBundle pathForResource:@"state" ofType:@"json" inDirectory:@"ui"];
+  NSData* data = path ? [NSData dataWithContentsOfFile:path] : nil;
+  id state = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+  if (![state isKindOfClass:NSDictionary.class]) return;
+  [(NSDictionary*)state enumerateKeysAndObjectsUsingBlock:^(NSString* key, id value, BOOL*) {
+    NSData* json = [NSJSONSerialization dataWithJSONObject:value options:NSJSONWritingFragmentsAllowed error:nil];
+    if (!json) return;
+    std::string s(static_cast<const char*>(json.bytes), json.length);
+    jsui_set_state(_rt, key.UTF8String, s.c_str());
+  }];
 }
 
 - (void)dealloc {
+  [_link invalidate];
   [NSNotificationCenter.defaultCenter removeObserver:self];
   if (_rt) jsui_destroy(_rt);
+  if (_videos) viewer_videos_destroy(_videos);
   if (_mtl) jsui_metal_destroy(_mtl);
 }
 
@@ -250,10 +299,16 @@ struct PadState {
   _presented = NO;
 }
 
+- (void)displayFrame:(CADisplayLink*)link {
+  _frameTime = link.timestamp * 1000.0;  // same clock as CACurrentMediaTime and UITouch timestamps
+  [_view draw];
+}
+
 - (void)drawInMTKView:(MTKView*)view {
   if (!_rt) return;
   [self pollPads];
-  jsui_tick(_rt, nowMs());
+  jsui_tick(_rt, _frameTime > 0 ? _frameTime : nowMs());
+  viewer_videos_tick(_videos);  // new video frames mark the runtime for a redraw
   if (_presented && !jsui_needs_redraw(_rt)) return;  // the screen already shows this frame
   id<CAMetalDrawable> drawable = view.currentDrawable;
   if (!drawable) return;

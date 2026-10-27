@@ -14,9 +14,11 @@ set(JSUI_IOS_TEAM "" CACHE STRING "Development team for device signing (empty: a
 
 enable_language(OBJCXX)
 
-add_executable(JsuiDemo MACOSX_BUNDLE main.mm)
+# <Video> plays with AVFoundation through the desktop viewer's handler.
+add_executable(JsuiDemo MACOSX_BUNDLE main.mm ${CMAKE_SOURCE_DIR}/tools/jsui-viewer/video.mm)
 target_link_libraries(JsuiDemo PRIVATE jsui "-framework UIKit" "-framework Metal" "-framework MetalKit"
-  "-framework QuartzCore" "-framework GameController")
+  "-framework QuartzCore" "-framework GameController" "-framework AVFoundation" "-framework CoreMedia"
+  "-framework CoreVideo")
 target_compile_options(JsuiDemo PRIVATE -fobjc-arc)
 set_target_properties(JsuiDemo PROPERTIES
   OUTPUT_NAME JsuiDemo

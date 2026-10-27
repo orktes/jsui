@@ -94,8 +94,9 @@ TEST(react_e2e_scroll) {
   jsui_send_touch(t.rt, 0, 2, 100, 30);
   CHECK(jsui_wants_frame(t.rt));
   t.settle();
-  CHECK_EQ(t.lastScroll(), std::string("724"));  // throttled onScroll still ends on the final offset
-  CHECK_EQ(t.take(), std::string("begin=50 end=[110,1.25] mbegin=110 mend=724"));
+  // The drag moves 60 px less the 8 px touch slop: 50 + 52 = 102.
+  CHECK_EQ(t.lastScroll(), std::string("716"));  // throttled onScroll still ends on the final offset
+  CHECK_EQ(t.take(), std::string("begin=50 end=[102,1.25] mbegin=102 mend=716"));
   CHECK(!jsui_wants_frame(t.rt));
 
   // ref.scrollTo({y, animated: true}): glides there, no momentum events.

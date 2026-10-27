@@ -239,6 +239,10 @@ struct Host {
   android_app* app = nullptr;
   JNIEnv* env = nullptr;
   JsuiRuntime* rt = nullptr;
+  // The Choreographer's vsync time of the frame being drawn (ms, the
+  // CLOCK_MONOTONIC of nowMs and input events): flings and resampled touch
+  // drags step evenly however late the callback runs.
+  double frameTime = 0;
   JsuiGpuContext* gpu = nullptr;
   Renderer renderer = Renderer::Vulkan;
   bool cpu = false;  // renderer == Cpu
@@ -1094,7 +1098,7 @@ void drawFrame(Host& h) {
   updateViewport(h, w, ht);
   if (!h.safeAreaKnown) h.safeAreaKnown = publishSafeArea(h);
 
-  jsui_tick(h.rt, nowMs());
+  jsui_tick(h.rt, h.frameTime);
   if (h.presented && !jsui_needs_redraw(h.rt)) return;  // the screen already shows this frame
   double t0 = nowMs();
   if (h.renderer == Renderer::Vulkan) {
@@ -1153,9 +1157,10 @@ void drawFrame(Host& h) {
   }
 }
 
-void onVsync(int64_t, void* data) {
+void onVsync(int64_t frameTimeNanos, void* data) {
   auto& h = *static_cast<Host*>(data);
   h.frameScheduled = false;
+  h.frameTime = std::max(h.frameTime, double(frameTimeNanos) / 1e6);
   if (!h.hasWindow || !h.resumed) return;
   drawFrame(h);
   scheduleFrame(h);

@@ -3,7 +3,7 @@
 // place and opens them as a sheet under the bar (MobileMenu), with each
 // section's own pages (Features) listed under it.
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, Overlay, Pressable, StyleSheet, Text, View, Visibility, useHostState } from 'react-native';
+import { Animated, Easing, Overlay, Pressable, ScrollView, StyleSheet, Text, View, Visibility, useHostState } from 'react-native';
 import { colors, font, mono, site } from '../theme.js';
 import { segments, useRouter } from '../router.js';
 import { setSoundMuted, useAudioState } from '../sound.js';
@@ -120,7 +120,7 @@ function MenuButton({ p, open, onPress }) {
 
 // One row of the menu sheet. It slides and fades in on its own slice of `p`,
 // so the rows cascade in on open and fold away bottom-first on close.
-function MenuItem({ p, index, to, label, num, sub, active, autoFocus, onGo }) {
+function MenuItem({ p, index, to, label, num, sub, active, autoFocus, onGo, style }) {
   const fx = useMemo(() => {
     const a = 0.1 + index * 0.045;
     const range = { inputRange: [a, a + 0.42], extrapolate: 'clamp' };
@@ -130,7 +130,7 @@ function MenuItem({ p, index, to, label, num, sub, active, autoFocus, onGo }) {
     };
   }, [p, index]);
   return (
-    <Animated.View style={fx}>
+    <Animated.View style={[fx, style]}>
       <Pressable
         onPress={() => onGo(to)}
         autoFocus={autoFocus}
@@ -160,8 +160,11 @@ function MenuItem({ p, index, to, label, num, sub, active, autoFocus, onGo }) {
 // beside it) over a dimmed backdrop that closes it when pressed. It is an
 // <Overlay> of the bar, so it draws above the page and its layout, and a <Visibility> on `p` takes it out of paint, hit testing and
 // Tab order on the frame the close animation reaches 0. Everything moves on
-// `p` alone, natively.
-function MobileMenu({ p, open, opens, head, sub, height, gutter, phone, onGo, onClose }) {
+// `p` alone, natively. A sheet taller than the room (a phone on its side)
+// puts the sections in one column and the Features pages in another when the
+// window is wide enough, never grows past the window, and scrolls whatever
+// still doesn't fit.
+function MobileMenu({ p, open, opens, head, sub, width, height, gutter, phone, onGo, onClose }) {
   const fx = useMemo(
     () => ({
       backdrop: { opacity: p.interpolate({ inputRange: [0, 0.6], outputRange: [0, 1], extrapolate: 'clamp' }) },
@@ -183,6 +186,13 @@ function MobileMenu({ p, open, opens, head, sub, height, gutter, phone, onGo, on
   const own = ROWS.findIndex((r) => r.to === sub);
   const current = own >= 0 ? own : ROWS.findIndex((r) => r.to === head);
   const focusAt = Math.max(0, current);
+  const room = height - (phone ? 0 : CARD_TOP + gutter / 2);
+  const cols = !phone && ROWS_HEIGHT + SHEET_CHROME > room ? 2 : 1;
+  const card = { width: Math.min(cols === 2 ? 560 : 380, width - gutter * 2), marginRight: gutter };
+  const row = (r) => {
+    const i = ROWS.indexOf(r);
+    return <MenuItem key={r.to + opens} p={p} index={i} {...r} active={i === current} autoFocus={i === focusAt} onGo={onGo} />;
+  };
   return (
     <Overlay placement="bottom" matchWidth flip={false} collision="none" hideWhenClipped={false}>
       <Visibility visible={p} style={{ height }}>
@@ -205,12 +215,19 @@ function MobileMenu({ p, open, opens, head, sub, height, gutter, phone, onGo, on
               e.stopPropagation();
             }
           }}
-          style={[styles.sheet, phone ? { paddingHorizontal: gutter - 6 } : [styles.card, { marginRight: gutter }], fx.sheet]}
+          style={[styles.sheet, { maxHeight: room }, phone ? { paddingHorizontal: gutter - 6 } : [styles.card, card], fx.sheet]}
         >
           <View style={[styles.sheetGlow, phone && { borderTopLeftRadius: 0, borderTopRightRadius: 0 }]} pointerEvents="none" />
-          {ROWS.map((r, i) => (
-            <MenuItem key={r.to + opens} p={p} index={i} {...r} active={i === current} autoFocus={i === focusAt} onGo={onGo} />
-          ))}
+          <ScrollView style={styles.sheetRows} contentContainerStyle={cols === 2 && styles.grid}>
+            {cols === 2 ? (
+              <>
+                <View style={styles.gridCol}>{ROWS.filter((r) => !r.sub).map(row)}</View>
+                <View style={styles.gridCol}>{ROWS.filter((r) => r.sub).map(row)}</View>
+              </>
+            ) : (
+              ROWS.map(row)
+            )}
+          </ScrollView>
           <Animated.View style={[styles.sheetFooter, fx.footer]}>
             <Text style={styles.footerNote}>Rendered by JSUI, on the GPU, in this canvas.</Text>
             <Button small kind="ghost" label="GitHub" icon="★" href={GITHUB} self="center" />
@@ -286,7 +303,7 @@ export function NavBar() {
         </Visibility>
       </View>
       {compact ? (
-        <MobileMenu p={p} open={open} opens={opens} head={head} sub={sub} height={height - NAV_HEIGHT} gutter={gutter} phone={phone} onGo={goFromMenu} onClose={() => toggle(false)} />
+        <MobileMenu p={p} open={open} opens={opens} head={head} sub={sub} width={width} height={height - NAV_HEIGHT} gutter={gutter} phone={phone} onGo={goFromMenu} onClose={() => toggle(false)} />
       ) : null}
     </View>
   );
@@ -295,6 +312,13 @@ export function NavBar() {
 const BURGER_GAP = 4;
 const TRAIL_GAP = 12;
 const GUESS = 1040;
+// Menu sheet metrics: a row's height, the sheet's padding and footer, and
+// the card's gap under the bar.
+const ITEM_HEIGHT = 54;
+const SUB_HEIGHT = 42;
+const SHEET_CHROME = 92;
+const ROWS_HEIGHT = ROWS.reduce((h, r) => h + (r.sub ? SUB_HEIGHT : ITEM_HEIGHT), 0);
+const CARD_TOP = 8;
 
 const styles = StyleSheet.create({
   bar: {
@@ -362,7 +386,7 @@ const styles = StyleSheet.create({
   card: {
     alignSelf: 'flex-end',
     width: 380,
-    marginTop: 8,
+    marginTop: CARD_TOP,
     paddingHorizontal: 8,
     borderWidth: 1,
     borderColor: site.stroke,
@@ -374,14 +398,17 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     experimental_backgroundImage: 'radial-gradient(ellipse at 0% 0%, rgba(242, 195, 91, 0.10) 0%, rgba(7, 10, 20, 0) 60%)',
   },
-  item: { height: 54, borderRadius: 12, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 14, cursor: 'pointer' },
+  sheetRows: { flexGrow: 0, flexShrink: 1 },
+  grid: { flexDirection: 'row', flexWrap: 'wrap' },
+  gridCol: { width: '50%' },
+  item: { height: ITEM_HEIGHT, borderRadius: 12, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 14, cursor: 'pointer' },
   itemActive: { backgroundColor: 'rgba(242, 195, 91, 0.07)' },
   itemHot: { backgroundColor: 'rgba(255,255,255,0.05)' },
   itemFocus: { borderWidth: 1, borderColor: colors.gold },
   itemBar: { position: 'absolute', left: 0, top: 14, bottom: 14, width: 3, borderRadius: 1.5, backgroundColor: colors.gold },
   itemNum: { fontFamily: mono, fontSize: 12, color: colors.textDim, width: 20 },
   // A section's own pages, under it: shorter rows, indented past the numbers.
-  subItem: { height: 42, paddingLeft: 24 },
+  subItem: { height: SUB_HEIGHT, paddingLeft: 24 },
   subTick: { width: 10, height: 2, borderRadius: 1, backgroundColor: 'rgba(148,170,255,0.28)' },
   subText: { fontSize: 15, fontWeight: '600' },
   itemText: { flex: 1, fontFamily: font, fontWeight: '700', fontSize: 19, letterSpacing: 0.2, color: colors.textDim },

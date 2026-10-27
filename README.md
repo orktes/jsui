@@ -1,6 +1,6 @@
 # JSUI
 
-Fast development of beautiful, responsive in-game UIs or standalone Apps with React.
+Fast development of cross-platform, beautiful, responsive in-game UIs or standalone Apps with React.
 
 **Using a coding agent?** Add the JSUI skill to your project with one command:
 
