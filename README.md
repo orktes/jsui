@@ -143,6 +143,25 @@ view's own children:
 />
 ```
 
+Native components: register your own view class from C, C++ or page JS that
+draws with Skia (a radar, a minimap, a gauge), straight from game state and
+without a React render, and use it like any React Native native component
+([docs/NATIVE_COMPONENTS.md](docs/NATIVE_COMPONENTS.md)):
+
+```cpp
+struct Radar : jsui::Component {
+  void draw(jsui::Canvas& c, const JsuiDrawInfo& info) override {
+    for (const Unit& u : game.units()) c.circle(u.x, u.y, 3, jsui::Paint(0xffff4444));
+  }
+};
+jsui::registerComponent<Radar>(rt, "Radar", JSUI_COMPONENT_CLOCKED);
+```
+
+```jsx
+const Radar = requireNativeComponent('Radar');
+<Radar range={120} onSelect={(e) => target(e.nativeEvent.index)} style={{ width: 200, height: 200 }} />
+```
+
 ## npm packages
 
 `@orktes/jsui-react` (the React Native API), `@orktes/jsui-cli` (`jsui build` / `jsui dev`,

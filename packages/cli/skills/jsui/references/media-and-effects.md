@@ -1,4 +1,4 @@
-# Host textures, Lottie, shaders and vector drawing
+# Host textures, Lottie, shaders, vector drawing and native components
 
 ## HostTexture: pictures the engine draws
 
@@ -149,3 +149,44 @@ import { Canvas, Group, RoundedRect, LinearGradient as SkGradient, Shadow, vec }
   shared values (use `Animated`), no `makeImageSnapshot`.
 * Skia rotations are radians and `opacity` multiplies down the tree; SVG
   rotations are degrees. Check the result with `jsui screenshot`.
+
+## Native components: views the host draws
+
+When a view should draw the host's own state (minimap, radar, damage graph,
+custom gauge) every frame or on change, the host registers a class by name
+and the app uses it like a React Native native component. Don't rebuild such
+views from React state every frame.
+
+```jsx
+import { codegenNativeCommands, hasNativeComponent, requireNativeComponent } from 'react-native';
+
+const Radar = requireNativeComponent('Radar');
+const RadarCommands = codegenNativeCommands({ supportedCommands: ['select'] });
+
+{hasNativeComponent('Radar') ? (
+  <Pressable onPress={(e) => RadarCommands.select(ref.current, e.nativeEvent.locationX, e.nativeEvent.locationY)}>
+    <Radar ref={ref} range={120} flash={flashAnim /* Animated, native driver */}
+      onSelect={(e) => setTarget(e.nativeEvent.index)} style={{ width: 200, height: 200, borderRadius: 100 }} />
+  </Pressable>
+) : <Placeholder />}
+```
+
+- Props reach the class as JSON / `jsui_prop_*`; Animated props (native
+  driver) repaint it without a React render. Layout, border, radius,
+  opacity and transforms work as on a View; children draw on top.
+- Commands: `codegenNativeCommands` / `dispatchCommand(ref, name, args)`.
+  Events: the class calls `jsui_component_emit` (web: `view.emit`) and the
+  `on<Event>` prop gets `e.nativeEvent`.
+- Gate on `hasNativeComponent(name)`: headless tools and other hosts may
+  not register the class.
+
+Host side:
+- C++: `struct Radar : jsui::Component { void draw(jsui::Canvas& c, const
+  JsuiDrawInfo& info) override {...} }; jsui::registerComponent<Radar>(rt,
+  "Radar", JSUI_COMPONENT_CLOCKED);` (`jsui/jsui_component.hpp`).
+- C: `JsuiComponentClass` + `jsui_register_component`; repaint a
+  non-clocked view with `jsui_component_invalidate`.
+- Web: `jsui.registerComponent(name, { draw(ctx, view), clocked, create,
+  props, command })`; in worker mode `createJsui({ components: moduleUrl })`.
+
+Full guide: docs/NATIVE_COMPONENTS.md in the repo.

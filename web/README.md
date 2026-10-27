@@ -227,6 +227,34 @@ browser keeps the page out of those areas itself and the insets stay zero.
 Pass `safeArea: false` to `createJsui` to set the key yourself
 (`jsui.setState('jsui.safeAreaInsets', { top, right, bottom, left })`).
 
+## Native components (page JS draws a view)
+
+Register a view class the bundle shows with `requireNativeComponent(name)`;
+it draws with Skia through a small canvas API, outside React:
+
+```js
+jsui.registerComponent('Radar', {
+  clocked: true,                                  // repaint every frame (else on prop changes)
+  create(view) { return { selected: -1 }; },      // per-view state: view.state
+  command(state, name, args, view) { view.emit('select', { index: 0 }); },  // -> onSelect
+  draw(ctx, view) {                               // view: { id, width, height, pixelRatio, time, state }
+    const r = Math.min(view.width, view.height) / 2;
+    ctx.circle(r, r, r - 1, { color: '#3f6', style: 'stroke', width: 2 });
+    ctx.arc(0, 0, 2 * r, 2 * r, view.time / 10, 40, true, { color: '#3f66' });
+  },
+});
+jsui.invalidateComponent(viewId);                 // repaint a view (0 + name: all of a class)
+jsui.unregisterComponent('Radar');
+```
+
+Worker mode can't take page functions: export the classes from a module and
+pass its URL, `createJsui({ ..., components: './components.js' })` (or
+`await jsui.loadComponents(url)`); the worker imports it. `components` also
+takes an object on the main thread. The canvas API, paints and colors are
+listed at the top of [jsui-components.js](jsui-components.js); the model
+(props, Animated props, commands, events) is in
+[docs/NATIVE_COMPONENTS.md](../docs/NATIVE_COMPONENTS.md).
+
 ## Fonts
 
 The runtime ships Inter. Fonts the page registers are shared by every surface
