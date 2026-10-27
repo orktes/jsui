@@ -201,6 +201,7 @@ function acceptWebSocket(req, socket) {
  * @param {string[]} [o.hosts]  Host names accepted besides localhost / IP addresses (DNS rebinding guard)
  * @param {string} [o.version]  the CLI version (/json/version)
  * @param {(msg: string) => void} [o.log]
+ * @param {{url(host: string, runtimeId: string): string}} [o.devtools]  the DevTools frontend jsui dev serves (devtools-frontend.js)
  */
 export function createInspector(o) {
   const log = o.log || console.log;
@@ -373,7 +374,8 @@ export function createInspector(o) {
       if (rt.poll) answerPoll(rt, []);  // only one poll per runtime
       if (!rt.live) {
         rt.live = true;
-        log(`[jsui] debugger: runtime ${label(rt)} available (ws://${hostOf(req)}/__jsui/inspect/ws/${rt.id})`);
+        log(`[jsui] debugger: runtime ${label(rt)} available (ws://${hostOf(req)}/__jsui/inspect/ws/${rt.id})` +
+          (o.devtools ? `\n[jsui] DevTools: http://${hostOf(req)}/__jsui/devtools/ (the live runtime; this one: ${o.devtools.url(hostOf(req), rt.id)})` : ''));
         for (const s of rt.sessions) clearTimeout(s.waitTimer);
       } else if (gap) {
         // A runtime that comes back (restarted its agent) learns the
@@ -412,8 +414,7 @@ export function createInspector(o) {
             for (const s of rt.sessions) s.ws.send(m.message);
           } else {
             const s = sessions.get(String(m.session));
-            if (s && s.runtime === id && m.message.includes('"jsuiSpans"')) keepTrace(rt, m.message);
-            if (s && s.runtime === id) s.ws.send(m.message);
+            if (s && s.runtime === id) s.ws.send(m.message.includes('"jsuiSpans"') ? keepTrace(rt, m.message) : m.message);
           }
         }
       }
@@ -451,6 +452,18 @@ export function createInspector(o) {
       sendJson(res, 200, [...runtimes.values()].filter((rt) => rt.live).map((rt) => target(rt, host)));
       return true;
     }
+    if (o.devtools && (p === '/__jsui/devtools' || p === '/__jsui/devtools/') && (req.method === 'GET' || req.method === 'HEAD')) {
+      // DevTools on the live runtime: one link that outlasts restarts.
+      const live = [...runtimes.values()].filter((rt) => rt.live).sort((a, b) => b.lastSeen - a.lastSeen)[0];
+      if (live) {
+        res.writeHead(302, { Location: o.devtools.url(hostOf(req), live.id), 'Cache-Control': 'no-store' });
+        res.end();
+      } else {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end('<!doctype html><meta http-equiv="refresh" content="1"><title>DevTools</title><p style="font:14px system-ui">Waiting for a runtime in dev mode to connect…</p>');
+      }
+      return true;
+    }
     const t = /^\/__jsui\/trace\/(\d+)\.json$/.exec(p);
     if (t && req.method === 'OPTIONS') {
       // A page served from the web asks first (Private Network Access).
@@ -478,22 +491,27 @@ export function createInspector(o) {
   // with a lane per thread, which DevTools opens from its URL.
   const traces = new Map();  // number -> JSON text
   let nextTrace = 1;
+  // Returns the message to pass on: the profile names its trace
+  // (profile.jsuiTrace), which DevTools served from here opens.
   function keepTrace(rt, text) {
     let msg;
     try {
       msg = JSON.parse(text);
     } catch {
-      return;
+      return text;
     }
     const profile = msg && msg.result && msg.result.profile;
-    if (!profile || !Array.isArray(profile.nodes)) return;
+    if (!profile || !Array.isArray(profile.nodes)) return text;
     const n = nextTrace++;
     traces.set(n, JSON.stringify(profileTrace(profile, { name: rt.name || 'jsui', url: rt.title })));
     if (traces.size > 10) traces.delete(traces.keys().next().value);
     const url = `${originOf()}/__jsui/trace/${n}.json`;
     // (DevTools can't fetch it itself: its pages' content security policy
     // allows no http:// connections, so loadTimelineFromURL can't reach it.)
-    log(`[jsui] profile ${n} with render thread and GPU tracks: ${url} (download it, then drop it on DevTools' Performance panel)`);
+    log(`[jsui] profile ${n} with render thread and GPU tracks: ${url} (DevTools from /__jsui/devtools/ opens it by itself; elsewhere, drop the download on the Performance panel)`);
+    delete profile.jsuiSpans;
+    profile.jsuiTrace = `/__jsui/trace/${n}.json`;
+    return JSON.stringify(msg);
   }
 
   // DevTools loads source maps through the target (Network.loadNetworkResource,

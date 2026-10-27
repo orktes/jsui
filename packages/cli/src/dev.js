@@ -40,6 +40,7 @@ import { formatErrors } from './build.js';
 import { createHmr } from './hmr.js';
 import { REACT_COMPILER_DEFAULT } from './react-compiler.js';
 import { createShared } from './shared.js';
+import { createDevtoolsFrontend } from './devtools-frontend.js';
 import { createInspector } from './inspect.js';
 import { prepareMap, concatMaps } from './sourcemap.js';
 import { createRequire } from 'node:module';
@@ -185,13 +186,15 @@ export async function dev({ entry, port = 5173, host = '127.0.0.1', log = consol
   let sharedView = null;
   let origin = `http://127.0.0.1:${port}`;  // set once listening
   // Before listening: a runtime that finds no relay (404) stops trying.
-  const inspector = inspect ? createInspector({ origin: () => origin, hosts: [host], version: CLI_VERSION, log }) : null;
+  const devtools = inspect ? createDevtoolsFrontend() : null;
+  const inspector = inspect ? createInspector({ origin: () => origin, hosts: [host], version: CLI_VERSION, log, devtools }) : null;
   // chrome://inspect's network discovery sends /json/version and /json/list
   // without a Host header, which Node's http server rejects (400) by default.
   const server = http.createServer({ requireHostHeader: false }, (req, res) => {
     const url = new URL(req.url, 'http://x');
     if (sharedView && sharedView.handle(req, res, url)) return undefined;
     if (inspector && inspector.handle(req, res, url)) return undefined;
+    if (devtools && devtools.handle(req, res, url)) return undefined;
     const p = decodeURIComponent(url.pathname);
     // With --no-inspect (inspector null) the debugger's routes are unknown.
     if (p.startsWith('/__jsui/inspect/')) return send(res, 404, 'text/plain', 'not found (jsui dev --no-inspect)');
@@ -298,7 +301,7 @@ ${state.error ? `<pre style="color:#f88">${state.error.replace(/[<&]/g, (c) => (
     // resolveSourceMapLocations: null lets js-debug use maps served over
     // http (its default only allows maps under the workspace folder).
     const address = local.replace(/^\[|\]$/g, '');
-    log(`[jsui] debugger: chrome://inspect -> Configure... -> add ${at}; VS Code launch.json: {"type":"node","request":"attach","name":"JSUI","address":"${address}","port":${actualPort},"resolveSourceMapLocations":null}  (off: --no-inspect)`);
+    log(`[jsui] debugger: http://${at}/__jsui/devtools/ in Chrome (DevTools on the live runtime), or chrome://inspect -> Configure... -> add ${at}; VS Code launch.json: {"type":"node","request":"attach","name":"JSUI","address":"${address}","port":${actualPort},"resolveSourceMapLocations":null}  (off: --no-inspect)`);
   }
   return {
     port: actualPort,

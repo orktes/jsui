@@ -157,11 +157,10 @@ npx jsui log --attach $U --since 0             # what the person clicked / press
   DevTools or VS Code through the same server: breakpoints in their JSX
   (source maps), console, and the Performance panel's CPU profile (a flame
   chart of JS functions, with the runtime's layout, paint and GPU submit as
-  `(layout)`, `(paint)`, `(gpu)` where JS was idle; `jsui dev` prints a
-  download URL of the same recording as a trace with render thread and GPU
-  tracks; drop it on the Performance panel). `$U/json/list`
-  gives each runtime's `devtoolsFrontendUrl` to paste into Chrome. See
-  `docs/DEBUGGING.md`.
+  `(layout)`, `(paint)`, `(gpu)` where JS was idle). Send them to
+  `$U/__jsui/devtools/`: DevTools on the live runtime, served by `jsui dev`,
+  which opens each recording with render thread, worklets and GPU tracks.
+  See `docs/DEBUGGING.md`.
 
 ## Minimal screen
 
