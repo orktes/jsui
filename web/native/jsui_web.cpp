@@ -75,7 +75,47 @@ EM_JS(void, jsui_web_js_video, (int hostId, int op, double video, const char* so
     muted: !!muted, loop: !!loop });
 });
 
+// Native components drawn by page JS (web/jsui-components.js): every
+// callback of a class registered with jsui_web_register_component goes to
+// the host's onComponent(cls, kind, view, canvas, info, a, b). kind: 0
+// create, 1 destroy, 2 props (a: JSON), 3 draw (canvas, info: JsuiDrawInfo*),
+// 4 command (a: name, b: args JSON).
+EM_JS(void, jsui_web_js_component, (int hostId, int cls, int kind, int view, void* canvas, const void* info,
+                                    const char* a, const char* b), {
+  var h = Module.__jsuiHosts && Module.__jsuiHosts.get(hostId);
+  if (h && h.onComponent) h.onComponent(cls, kind, view, canvas, info, a ? UTF8ToString(a) : null,
+                                        b ? UTF8ToString(b) : null);
+});
+
 namespace {
+
+// A page-JS component class: which host, which of its classes.
+struct WebComponentClass {
+  int hostId = 0;
+  int cls = 0;
+};
+
+void* componentCreate(void* user, JsuiRuntime*, int view) {
+  auto* c = static_cast<WebComponentClass*>(user);
+  jsui_web_js_component(c->hostId, c->cls, 0, view, nullptr, nullptr, nullptr, nullptr);
+  return user;
+}
+void componentDestroy(void* inst, int view) {
+  auto* c = static_cast<WebComponentClass*>(inst);
+  jsui_web_js_component(c->hostId, c->cls, 1, view, nullptr, nullptr, nullptr, nullptr);
+}
+void componentProps(void* inst, int view, const char* json) {
+  auto* c = static_cast<WebComponentClass*>(inst);
+  jsui_web_js_component(c->hostId, c->cls, 2, view, nullptr, nullptr, json, nullptr);
+}
+void componentDraw(void* inst, JsuiCanvas* canvas, const JsuiDrawInfo* info) {
+  auto* c = static_cast<WebComponentClass*>(inst);
+  jsui_web_js_component(c->hostId, c->cls, 3, info->view, canvas, info, nullptr, nullptr);
+}
+void componentCommand(void* inst, int view, const char* name, const char* args) {
+  auto* c = static_cast<WebComponentClass*>(inst);
+  jsui_web_js_component(c->hostId, c->cls, 4, view, nullptr, nullptr, name, args);
+}
 
 int hostIdOf(void* user) { return int(reinterpret_cast<intptr_t>(user)); }
 
@@ -222,6 +262,24 @@ EMSCRIPTEN_KEEPALIVE void jsui_web_video_status(JsuiRuntime* rt, double video, i
   s.height = height;
   s.error = error;
   jsui_video_status(rt, uint64_t(video), &s);
+}
+
+// Registers native component `name` whose callbacks go to JS host
+// `hostId`'s class `cls` (web/jsui-components.js). The class record lives
+// as long as the module (a few bytes per registration).
+EMSCRIPTEN_KEEPALIVE int jsui_web_register_component(JsuiRuntime* rt, int hostId, int cls, const char* name,
+                                                     int flags) {
+  auto* c = new WebComponentClass{hostId, cls};
+  JsuiComponentClass k;
+  jsui_component_class_init(&k);
+  k.user = c;
+  k.flags = flags;
+  k.create = componentCreate;
+  k.destroy = componentDestroy;
+  k.props = componentProps;
+  k.draw = componentDraw;
+  k.command = componentCommand;
+  return jsui_register_component(rt, name, &k);
 }
 
 #if defined(JSUI_WEBGPU)

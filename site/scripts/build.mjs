@@ -23,7 +23,7 @@
 // another build: "Importing a module script failed"). Every URL the page
 // loads besides index.html itself is therefore versioned with a content
 // hash, ?v=<hash>: jsui-web.js (imported by index.html, and the worker's
-// script in worker mode), jsui-webgpu.js, jsui-textures.js, jsui-worker.js and
+// script in worker mode), jsui-webgpu.js, jsui-textures.js, jsui-components.js, jsui-worker.js and
 // jsui-audio.js (imported by jsui-web.js, rewritten here), each module's jsui.js and its
 // jsui.wasm (one hash over both; the host passes the module URL's query on to
 // the wasm, see locateIn() in web/jsui-web.js) and app/bundle.js. index.html
@@ -98,6 +98,8 @@ const webgpuJs = fs.readFileSync(path.join(ROOT, 'web/jsui-webgpu.js'));
 fs.writeFileSync(path.join(out, 'jsui-webgpu.js'), webgpuJs);
 const texturesJs = fs.readFileSync(path.join(ROOT, 'web/jsui-textures.js'));
 fs.writeFileSync(path.join(out, 'jsui-textures.js'), texturesJs);
+const componentsJs = fs.readFileSync(path.join(ROOT, 'web/jsui-components.js'));
+fs.writeFileSync(path.join(out, 'jsui-components.js'), componentsJs);
 const audioJs = fs.readFileSync(path.join(ROOT, 'web/jsui-audio.js'));
 fs.writeFileSync(path.join(out, 'jsui-audio.js'), audioJs);
 const workerJs = fs.readFileSync(path.join(ROOT, 'web/jsui-worker.js'));
@@ -105,6 +107,7 @@ fs.writeFileSync(path.join(out, 'jsui-worker.js'), workerJs);
 let webJs = fs.readFileSync(path.join(ROOT, 'web/jsui-web.js'), 'utf8');
 webJs = replaceAll(webJs, "from './jsui-webgpu.js'", `from './jsui-webgpu.js?v=${hash(webgpuJs)}'`, 'web/jsui-web.js');
 webJs = replaceAll(webJs, "from './jsui-textures.js'", `from './jsui-textures.js?v=${hash(texturesJs)}'`, 'web/jsui-web.js');
+webJs = replaceAll(webJs, "from './jsui-components.js'", `from './jsui-components.js?v=${hash(componentsJs)}'`, 'web/jsui-web.js');
 webJs = replaceAll(webJs, "from './jsui-audio.js'", `from './jsui-audio.js?v=${hash(audioJs)}'`, 'web/jsui-web.js');
 webJs = replaceAll(webJs, "import('./jsui-worker.js')", `import('./jsui-worker.js?v=${hash(workerJs)}')`, 'web/jsui-web.js');
 fs.writeFileSync(path.join(out, 'jsui-web.js'), webJs);

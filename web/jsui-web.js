@@ -188,6 +188,7 @@ import { SharedWebGPU, WebGPURenderer, requestWebGPU, standInPipeline } from './
 import { HostTextureSet, JsuiVideo, corsWarning, defaultOpaque, isVideoFrame, sourceSize, taintKey,
   videoFramesContextLost, watchVideoFrames } from './jsui-textures.js';
 import { JsuiAudio } from './jsui-audio.js';
+import { ComponentSet } from './jsui-components.js';
 
 export { requestWebGPU, webgpuSupported } from './jsui-webgpu.js';
 export { AudioOp, AudioStatus } from './jsui-audio.js';
@@ -2103,6 +2104,7 @@ class JsuiHost extends CanvasView {
     this._stageSize = 0;
     this._uiCalls = new Map();   // callUi id -> {resolve, reject}
     this._textures = null;       // HostTextureSet (setTexture), made on first use
+    this._components = null;     // ComponentSet (registerComponent), made on first use
     this.rootTag = 1;
     /** UI audio (web/jsui-audio.js): unlocked, unlock(), setVolume(), muted, context. */
     this.audio = new JsuiAudio(this, opts.audio);
@@ -2128,6 +2130,7 @@ class JsuiHost extends CanvasView {
         this._emit('state', key, value);
       },
       onCall: (id, name, json) => this._onCall(id, name, json),
+      onComponent: (cls, kind, view, canvas, info, a, b) => this._components?.call(cls, kind, view, canvas, info, a, b),
       onCallCancel: (id) => this._emit('callCancel', id),
       onCallResult: (id, ok, payload) => {
         const p = this._uiCalls.get(id);
@@ -2304,6 +2307,41 @@ class JsuiHost extends CanvasView {
   bindVideo(name, video, options) {
     if (this._destroyed) throw new Error('bindVideo: runtime destroyed');
     return this._textureSet().bindVideo(name, video, options ?? {});
+  }
+
+  // ------------------------------------------- native components (jsui.h)
+
+  /** Native component `name`, drawn by `impl` (web/jsui-components.js: draw(ctx,
+   * view), optional create / props / command / destroy, clocked): the bundle
+   * shows it with requireNativeComponent(name). Registering again replaces
+   * it; mounted views bind to it at once. Returns true when registered. */
+  registerComponent(name, impl) {
+    if (this._destroyed) return false;
+    this._components ??= new ComponentSet(this);
+    return this._components.register(String(name), impl);
+  }
+
+  /** Unregisters native component `name` (its views show their View part). */
+  unregisterComponent(name) {
+    if (this._destroyed || !this._components) return false;
+    return this._components.unregister(String(name));
+  }
+
+  /** Repaints native component view `view` (an id, as view.id in draw); 0:
+   * every view of class `name` (undefined: of every class). Returns how
+   * many were marked. */
+  invalidateComponent(view, name) {
+    if (this._destroyed) return 0;
+    return this._withStrings([name == null ? null : String(name)],
+      (n) => this.module._jsui_component_invalidate(this.rt, view | 0, n));
+  }
+
+  /** Calls the view's on<Event> prop (onContactPress for 'contactPress')
+   * with nativeEvent = `data`, in the next frame. True if it listens. */
+  emitComponentEvent(view, event, data) {
+    if (this._destroyed) return false;
+    return this._withStrings([String(event), JSON.stringify(data ?? {})],
+      (e, j) => this.module._jsui_component_emit(this.rt, view | 0, e, j)) === 1;
   }
 
   // A <Video>'s status (JsuiVideo's report) to the runtime.
@@ -2721,6 +2759,8 @@ class JsuiHost extends CanvasView {
     // GPU textures first, while their contexts exist.
     this._textures?.destroy();
     this._textures = null;
+    this._components?.destroy();
+    this._components = null;
     // jsui_destroy frees the surface handles with the runtime.
     for (const s of this._surfaces) s._destroyView(true);
     this._surfaces.clear();
