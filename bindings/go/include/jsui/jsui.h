@@ -543,6 +543,44 @@ JSUI_API void jsui_fetch(JsuiRuntime* rt, const char* url, JsuiFetchFn done, voi
 /* JsuiConfig.on_js_ready (see "JS thread"). */
 typedef void (*JsuiJsReadyFn)(void* user);
 
+/* ------------------------------------------------------- Child runtimes
+ *
+ * <JSUIContainer> (JS) runs another bundle as a runtime of its own inside a
+ * view: the container is its embedder. By default the child uses the
+ * parent's services: its loads (bundle, images, fetch) go through the
+ * parent's loader, its sounds and videos through the parent's audio / video
+ * handlers (or the built-in backend), and it sees the parent's fonts and
+ * host textures (its own come first). The parent's JS can narrow that per
+ * container (`services` prop); the embedder can with JsuiConfig.on_child,
+ * called for every child the runtime creates (also children of children,
+ * through their own parent):
+ *
+ *   CONFIGURE  before the child exists. `config` is the child's JsuiConfig,
+ *              filled in with the forwarding above; change what you like
+ *              (your own on_audio / on_video / load / log; on_message,
+ *              on_state and on_call belong to the container). Return 0 to
+ *              refuse the child (the container reports an error).
+ *   CREATED    the child exists (`child`): set its textures, fonts, state.
+ *   DESTROYED  the child is about to go away.
+ *
+ * Runs on the parent's thread, inside jsui_tick. */
+typedef enum JsuiChildEvent {
+    JSUI_CHILD_CONFIGURE = 0,
+    JSUI_CHILD_CREATED = 1,
+    JSUI_CHILD_DESTROYED = 2
+} JsuiChildEvent;
+
+typedef struct JsuiChildInfo {
+    JsuiChildEvent event;
+    JsuiRuntime* child;           /* CREATED, DESTROYED */
+    struct JsuiConfig* config;    /* CONFIGURE */
+    const char* source_url;       /* bundleSrc (absolute); NULL for inline source (bundleData) */
+    uint32_t node;                /* the container's node id in the parent */
+    const char* native_id;        /* its nativeID ("" when none) */
+} JsuiChildInfo;
+
+typedef int (*JsuiChildFn)(void* user, JsuiRuntime* parent, const JsuiChildInfo* info);
+
 typedef struct JsuiConfig {
     int width;              /* viewport size in logical px */
     int height;
@@ -584,6 +622,9 @@ typedef struct JsuiConfig {
 
     JsuiVideoFn on_video;   /* plays the UI's videos (see "Video"); NULL: every video fails */
     void* video_user;
+
+    JsuiChildFn on_child;   /* <JSUIContainer> children (see "Child runtimes"); optional */
+    void* child_user;
 } JsuiConfig;
 
 JSUI_API void jsui_config_init(JsuiConfig* cfg);

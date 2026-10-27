@@ -57,8 +57,14 @@ class FontManager {
   const std::vector<std::string>& fallbackFamilies() const;
   void setFallbackFamilies(std::vector<std::string> families);
 
-  // True if `family` was registered (embedded or via registerFont).
+  // True if `family` was registered (embedded or via registerFont), here or
+  // in the inherited manager.
   bool hasFamily(const std::string& family) const;
+  // Fonts registered on `parent` (a JSUIContainer's parent runtime) are used
+  // where this manager has none of its own (families, glyph fallback);
+  // nullptr: none. Call again (or changed()) after the parent's set changed.
+  void inherit(FontManager* parent);
+  FontManager* inherited() const { return inherited_; }
   // Registered family names, in registration order (embedded first).
   std::vector<std::string> familyNames() const;
   // Bumped whenever the font set changes; text caches built with an older
@@ -71,11 +77,14 @@ class FontManager {
   sk_sp<SkUnicode> unicodeRef();
 #endif
 
- private:
+  // The font set changed: text caches are rebuilt (generation).
   void changed();
+
+ private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
   std::string defaultFamily_ = "Inter";
+  FontManager* inherited_ = nullptr;
 };
 
 }  // namespace jsui

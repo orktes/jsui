@@ -106,12 +106,15 @@ class FontRegistry final : public SkFontMgr {
   std::vector<sk_sp<FaceSet>> sets;  // registration order
   std::vector<std::string> fallbacks;
   std::string defaultFamily = "Inter";
+  // An inherited registry (a JSUIContainer's parent runtime's): families
+  // this one lacks are found there, and glyphs no font here has.
+  sk_sp<FontRegistry> parent;
 
   sk_sp<FaceSet> find(const std::string& family) const {
     std::string key = lowerAscii(family);
     for (auto& s : sets)
       if (s->key == key) return s;
-    return nullptr;
+    return parent ? parent->find(family) : nullptr;
   }
 
   void add(const std::string& family, sk_sp<SkTypeface> tf, const SkFontStyle& style) {
@@ -174,6 +177,7 @@ class FontRegistry final : public SkFontMgr {
     if (auto tf = attempt(find(defaultFamily).get())) return tf;
     for (auto& s : sets)
       if (auto tf = attempt(s.get())) return tf;
+    if (parent) return parent->onMatchFamilyStyleCharacter(familyName, style, nullptr, 0, character);
     return nullptr;
   }
   sk_sp<SkTypeface> onMakeFromData(sk_sp<SkData> data, int ttcIndex) const override {
@@ -363,9 +367,20 @@ void FontManager::setFallbackFamilies(std::vector<std::string> families) {
 
 bool FontManager::hasFamily(const std::string& family) const { return impl_->registry->find(family) != nullptr; }
 
+void FontManager::inherit(FontManager* parent) {
+  inherited_ = parent;
+  impl_->registry->parent = parent ? parent->impl_->registry : nullptr;
+  changed();
+}
+
 std::vector<std::string> FontManager::familyNames() const {
-  std::vector<std::string> out;
-  for (auto& s : impl_->registry->sets) out.push_back(s->name);
+  std::vector<std::string> out, keys;
+  for (const FontRegistry* r = impl_->registry.get(); r; r = r->parent.get())
+    for (auto& s : r->sets)
+      if (std::find(keys.begin(), keys.end(), s->key) == keys.end()) {
+        keys.push_back(s->key);
+        out.push_back(s->name);
+      }
   return out;
 }
 

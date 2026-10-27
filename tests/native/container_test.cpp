@@ -8,7 +8,11 @@
 //   writes become containerevent events, the parent's post / call / resolve /
 //   state commands reach the child;
 // - pointer input over the node goes to the child in its coordinates, and a
-//   press the child consumes is not the parent's.
+//   press the child consumes is not the parent's;
+// - the child's services through the parent's: sounds and videos reach the
+//   parent's handlers (ids mapped both ways, the video's texture aliased),
+//   fonts and host textures are inherited, and the `services` prop / the
+//   embedder's on_child hook narrow it.
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -89,6 +93,24 @@ struct Parent {
   double t = 0;
   uint32_t node = 0;
   std::vector<uint32_t> px;
+  // What the parent's audio / video handlers were asked.
+  struct Audio {
+    int op;
+    uint64_t voice;
+    std::string sound, bus;
+    float volume;
+  };
+  struct Video {
+    int op;
+    uint64_t video;
+    std::string url, texture;
+  };
+  std::vector<Audio> audio;
+  std::vector<Video> video;
+  // The embedder's on_child: events seen, and whether it refuses.
+  std::vector<int> childEvents;
+  bool refuseChildren = false;
+  std::string childSource;
 
   Parent() {
     JsuiConfig cfg;
@@ -113,6 +135,26 @@ struct Parent {
     };
     cfg.load_user = this;
     cfg.base_url = "game://ui/";
+    cfg.on_audio = [](void* u, const JsuiAudioCommand* c) {
+      static_cast<Parent*>(u)->audio.push_back(
+          {int(c->op), c->voice, c->sound ? c->sound : "", c->bus ? c->bus : "", c->volume});
+    };
+    cfg.audio_user = this;
+    cfg.on_video = [](void* u, const JsuiVideoCommand* c) {
+      static_cast<Parent*>(u)->video.push_back(
+          {int(c->op), c->video, c->url ? c->url : "", c->texture ? c->texture : ""});
+    };
+    cfg.video_user = this;
+    cfg.on_child = [](void* u, JsuiRuntime*, const JsuiChildInfo* info) {
+      auto* p = static_cast<Parent*>(u);
+      p->childEvents.push_back(int(info->event));
+      if (info->event == JSUI_CHILD_CONFIGURE) {
+        p->childSource = info->source_url ? info->source_url : "(inline)";
+        return p->refuseChildren ? 0 : 1;
+      }
+      return 1;
+    };
+    cfg.child_user = this;
     rt = jsui_create(&cfg);
   }
   ~Parent() { jsui_destroy(rt); }
@@ -317,4 +359,265 @@ TEST(container_fetch_keeps_method_headers_and_body) {
   for (auto& [k, v] : post->headers)
     if ((k == "X-Token" || k == "x-token") && v == "abc") token = true;
   CHECK(token);
+}
+
+namespace {
+
+// A child that plays a sound, sets its bus, opens a video and fetches two
+// URLs; posts what it hears back.
+const char kMediaChild[] = R"JS(
+const N = __jsui_native;
+globalThis.__jsui_onAudio = (ev) => N.postMessage('audio', ev);
+globalThis.__jsui_onVideo = (ev) => N.postMessage('video', ev);
+const voice = N.audioPlay('click.wav', 'ui', 0.5, 1, 0, false, 0, 0);
+N.audioBus('ui', 0.5, false, 0);
+const video = N.videoOpen('clip.mp4', null, 'clip', false, false, 1, false, 1, 0);
+N.postMessage('ids', {voice, video});
+const report = (name) => (r) => N.postMessage(name, {status: r.status});
+const failed = (name) => (e) => N.postMessage(name, {status: -1, error: String(e)});
+fetch('secret/key.txt').then(report('secret'), failed('secret'));
+fetch('open/ok.txt').then(report('ok'), failed('ok'));
+)JS";
+
+}  // namespace
+
+TEST(container_audio_and_video_play_through_the_parent) {
+  Parent p;
+  p.files["game://ui/open/ok.txt"] = "fine";
+  CHECK(p.start());
+  p.command({{"op", Value("load")}, {"data", Value(std::string(kMediaChild))}});
+  CHECK(p.until([&] { return p.event("message", "ids") && p.event("message", "ok"); }));
+  CHECK(p.child() != nullptr);
+  if (!p.child()) return;
+  // The embedder saw the child come (inline source).
+  CHECK(p.childEvents.size() >= 2 && p.childEvents[0] == JSUI_CHILD_CONFIGURE &&
+        p.childEvents[1] == JSUI_CHILD_CREATED);
+  CHECK_EQ(p.childSource, std::string("(inline)"));
+  const Value* ids = p.event("message", "ids");
+  double childVoice = ids ? (*ids)["payload"]["voice"].asNumber() : 0;
+  double childVideo = ids ? (*ids)["payload"]["video"].asNumber() : 0;
+
+  // The sound reached the parent's handler (resolved against the parent's
+  // base), and the child's bus volume scaled it (0.5 * 0.5) without a BUS
+  // command for the parent's own mix.
+  const Parent::Audio* play = nullptr;
+  bool parentBus = false;
+  float lastVolume = -1;
+  for (auto& a : p.audio) {
+    if (a.op == JSUI_AUDIO_PLAY) play = &a;
+    if (a.op == JSUI_AUDIO_BUS) parentBus = true;
+    if (a.op == JSUI_AUDIO_SET) lastVolume = a.volume;
+  }
+  CHECK(play != nullptr);
+  if (!play) return;
+  CHECK_EQ(play->sound, std::string("game://ui/click.wav"));
+  CHECK_EQ(play->bus, std::string("ui"));
+  CHECK_NEAR(play->volume, 0.5, 1e-6);
+  CHECK(!parentBus);
+  CHECK_NEAR(lastVolume, 0.25, 1e-6);
+  // Its end, reported to the parent, reaches the child under its own id.
+  jsui_audio_voice_ended(p.rt, play->voice, JSUI_AUDIO_FINISHED);
+  CHECK(p.until([&] { return p.event("message", "audio") != nullptr; }));
+  const Value* ended = p.event("message", "audio");
+  CHECK(ended && (*ended)["payload"].toJson() ==
+                     Value(Value::Array{Value(Value::Array{Value(0), Value(childVoice), Value(0)})}).toJson());
+
+  // The video: opened by the parent's handler into a texture of its own.
+  const Parent::Video* open = nullptr;
+  for (auto& v : p.video)
+    if (v.op == JSUI_VIDEO_OPEN) open = &v;
+  CHECK(open != nullptr);
+  if (!open) return;
+  CHECK_EQ(open->url, std::string("game://ui/clip.mp4"));
+  CHECK(open->texture.rfind("jsuic:", 0) == 0);
+  // Frames the host draws there are the child's 'clip' texture.
+  uint32_t frame[4] = {0xff0000ff, 0xff0000ff, 0xff0000ff, 0xff0000ff};
+  CHECK(jsui_set_texture_pixels(p.rt, open->texture.c_str(), frame, 2, 2, 8, 0) == 1);
+  int w = 0, h = 0;
+  uint64_t version = 0;
+  CHECK(jsui::internalRuntime(p.child())->textures.size("clip", &w, &h, &version));
+  CHECK_EQ(w, 2);
+  // Its status reaches the child under the child's id.
+  JsuiVideoStatus s{};
+  s.state = JSUI_VIDEO_PLAYING;
+  s.duration_s = 10;
+  s.width = 2;
+  s.height = 2;
+  jsui_video_status(p.rt, open->video, &s);
+  CHECK(p.until([&] { return p.event("message", "video") != nullptr; }));
+  const Value* vs = p.event("message", "video");
+  CHECK(vs && (*vs)["payload"].asArray().size() == 1 &&
+        (*vs)["payload"].asArray()[0].asArray()[0].asNumber() == childVideo &&
+        (*vs)["payload"].asArray()[0].asArray()[1].asNumber() == double(JSUI_VIDEO_PLAYING));
+
+  // Fonts: the parent's, under the child's own.
+  CHECK(jsui::internalRuntime(p.child())->fonts.inherited() == &jsui::internalRuntime(p.rt)->fonts);
+
+  // Without the parent's rules both loads went through.
+  const Value* secret = p.event("message", "secret");
+  CHECK(secret && (*secret)["payload"]["status"].asNumber() == 404);
+
+  // The child going away stops its voices and closes its videos.
+  p.audio.clear();
+  p.video.clear();
+  p.post("props", Value(Value::Object{{"bundleSrc", Value("")}, {"bundleData", Value()}}));
+  p.command({{"op", Value("reload")}});
+  CHECK(p.until([&] { return !p.video.empty(); }));
+  bool closed = false;
+  for (auto& v : p.video)
+    if (v.op == JSUI_VIDEO_CLOSE && v.video == open->video) closed = true;
+  CHECK(closed);
+  CHECK(!p.childEvents.empty() && p.childEvents.back() == JSUI_CHILD_DESTROYED);
+}
+
+TEST(container_services_narrow_what_the_child_gets) {
+  Parent p;
+  p.files["game://ui/open/ok.txt"] = "fine";
+  p.files["game://ui/elsewhere/ok.txt"] = "fine";
+  p.files["game://ui/secret/key.txt"] = "hidden";
+  CHECK(p.start());
+  p.post("props", Value(Value::Object{
+                      {"services", Value(Value::Object{
+                                       {"deny", Value(Value::Array{Value("*/secret/*")})},
+                                       {"rewrite", Value(Value::Array{Value(Value::Array{
+                                                       Value("game://ui/open/"), Value("game://ui/elsewhere/")})})},
+                                       {"audio", Value("none")},
+                                       {"video", Value("none")},
+                                       {"fonts", Value(false)},
+                                   })},
+                  }));
+  p.command({{"op", Value("load")}, {"data", Value(std::string(kMediaChild))}});
+  CHECK(p.until([&] { return p.event("message", "secret") && p.event("message", "ok") && p.event("message", "video"); }));
+  if (!p.child()) return;
+  // Denied: failed like a network error, never asked of the embedder.
+  const Value* secret = p.event("message", "secret");
+  CHECK(secret && (*secret)["payload"]["status"].asNumber() == -1);
+  bool asked = false, rewritten = false;
+  for (auto& u : p.loaded) {
+    if (u.find("secret") != std::string::npos) asked = true;
+    if (u == "game://ui/elsewhere/ok.txt") rewritten = true;
+  }
+  CHECK(!asked);
+  CHECK(rewritten);
+  const Value* ok = p.event("message", "ok");
+  CHECK(ok && (*ok)["payload"]["status"].asNumber() == 200);
+  // No audio / video for it: its sound failed, its video failed, the
+  // parent's handlers heard nothing.
+  CHECK(p.audio.empty());
+  CHECK(p.video.empty());
+  CHECK(p.until([&] { return p.event("message", "audio") != nullptr; }));
+  const Value* a = p.event("message", "audio");
+  CHECK(a && (*a)["payload"].asArray().size() == 1 &&
+        (*a)["payload"].asArray()[0].asArray()[2].asNumber() == double(JSUI_AUDIO_FAILED));
+  const Value* v = p.event("message", "video");
+  CHECK(v && (*v)["payload"].asArray()[0].asArray()[1].asNumber() == double(JSUI_VIDEO_FAILED));
+  CHECK(jsui::internalRuntime(p.child())->fonts.inherited() == nullptr);
+}
+
+TEST(container_load_middleware_in_the_parent_js) {
+  Parent p;
+  p.files["game://ui/open/ok.txt"] = "fine";
+  // The parent's JS answers the child's loads (what JSUIContainer's
+  // services.load middleware sends): secret refused, ok served by the
+  // parent itself, anything else passed on.
+  const char parent[] = R"JS(
+const N = __jsui_native;
+const c = N.createNode('JSUIContainer');
+N.setProps(c, {style: {width: 50, height: 50}, services: {load: 'js'}, __events: ['containerEvent']});
+N.appendChild(N.rootId, c);
+globalThis.__jsui_dispatchEvent = (e) => {
+  if (e.type !== 'containerevent') return 0;
+  N.postMessage('ev', e);
+  if (e.kind !== 'load') return 1;
+  const {gen, id, request} = e;
+  if (request.url.includes('secret')) N.containerCommand(c, {op: 'load-block', gen, id});
+  else if (request.url.endsWith('ok.txt')) N.containerCommand(c, {op: 'load-reply', gen, id, status: 203, body: 'mine'});
+  else N.containerCommand(c, {op: 'load-next', gen, id, request: {}});
+  return 1;
+};
+globalThis.__jsui_onHostMessage = (name, json) => { if (name === 'cmd') N.containerCommand(c, JSON.parse(json)); };
+N.postMessage('id', c);
+)JS";
+  CHECK(jsui_load_bundle_source(p.rt, parent, sizeof(parent) - 1, "parent.js") == 0);
+  CHECK(p.until([&] { return p.has("id"); }));
+  p.node = uint32_t(p.take("id").back().asNumber());
+  const char child[] = R"JS(
+const N = __jsui_native;
+const report = (name) => (r) => r.text().then((t) => N.postMessage(name, {status: r.status, text: t}));
+const failed = (name) => (e) => N.postMessage(name, {status: -1});
+fetch('secret/key.txt').then(report('secret'), failed('secret'));
+fetch('open/ok.txt').then(report('ok'), failed('ok'));
+fetch('missing.txt').then(report('missing'), failed('missing'));
+)JS";
+  p.command({{"op", Value("load")}, {"data", Value(std::string(child))}});
+  CHECK(p.until([&] { return p.event("message", "secret") && p.event("message", "ok") && p.event("message", "missing"); }));
+  const Value* secret = p.event("message", "secret");
+  CHECK(secret && (*secret)["payload"]["status"].asNumber() == -1);
+  const Value* ok = p.event("message", "ok");
+  CHECK(ok && (*ok)["payload"]["status"].asNumber() == 203 && (*ok)["payload"]["text"].asString() == "mine");
+  const Value* missing = p.event("message", "missing");
+  CHECK(missing && (*missing)["payload"]["status"].asNumber() == 404);
+  // Only the passed-on load reached the embedder.
+  CHECK_EQ(p.loaded.size(), size_t(1));
+  if (p.loaded.size() == 1) CHECK_EQ(p.loaded[0], std::string("game://ui/missing.txt"));
+}
+
+TEST(container_embedder_can_refuse_a_child) {
+  Parent p;
+  p.refuseChildren = true;
+  CHECK(p.start());
+  p.command({{"op", Value("load")}, {"data", Value(std::string(kChild))}});
+  CHECK(p.until([&] { return p.event("error") != nullptr; }));
+  CHECK(p.child() == nullptr);
+  CHECK_EQ(p.childEvents.size(), size_t(1));
+}
+
+TEST(container_audio_middleware_in_the_parent_js) {
+  Parent p;
+  // The parent's JS changes the child's sounds (halves their volume) and
+  // refuses its music (what JSUIContainer's services.audio middleware sends).
+  const char parent[] = R"JS(
+const N = __jsui_native;
+const c = N.createNode('JSUIContainer');
+N.setProps(c, {style: {width: 50, height: 50}, services: {audio: 'js'}, __events: ['containerEvent']});
+N.appendChild(N.rootId, c);
+globalThis.__jsui_dispatchEvent = (e) => {
+  if (e.type !== 'containerevent') return 0;
+  N.postMessage('ev', e);
+  if (e.kind !== 'audio') return 1;
+  const {gen, cmd} = e;
+  if (cmd.bus === 'music') N.containerCommand(c, {op: 'audio-block', gen, orig: cmd, cmd: {}});
+  else N.containerCommand(c, {op: 'audio-next', gen, orig: cmd, cmd: {volume: cmd.volume / 2}});
+  return 1;
+};
+globalThis.__jsui_onHostMessage = (name, json) => { if (name === 'cmd') N.containerCommand(c, JSON.parse(json)); };
+N.postMessage('id', c);
+)JS";
+  CHECK(jsui_load_bundle_source(p.rt, parent, sizeof(parent) - 1, "parent.js") == 0);
+  CHECK(p.until([&] { return p.has("id"); }));
+  p.node = uint32_t(p.take("id").back().asNumber());
+  const char child[] = R"JS(
+const N = __jsui_native;
+globalThis.__jsui_onAudio = (ev) => N.postMessage('audio', ev);
+N.audioPlay('click.wav', 'ui', 0.8, 1, 0, false, 0, 0);
+const music = N.audioPlay('theme.ogg', 'music', 1, 1, 0, true, 0, 0);
+N.postMessage('music', {music});
+)JS";
+  p.command({{"op", Value("load")}, {"data", Value(std::string(child))}});
+  CHECK(p.until([&] { return p.event("message", "audio") != nullptr; }));
+  // Only the click reached the parent's handler, at half volume.
+  CHECK_EQ(p.audio.size(), size_t(1));
+  if (p.audio.size() == 1) {
+    CHECK_EQ(p.audio[0].op, int(JSUI_AUDIO_PLAY));
+    CHECK_EQ(p.audio[0].sound, std::string("game://ui/click.wav"));
+    CHECK_NEAR(p.audio[0].volume, 0.4, 1e-6);
+  }
+  // The music voice failed in the child (event() returns one shared slot:
+  // copied).
+  const Value* m = p.event("message", "music");
+  double music = m ? (*m)["payload"]["music"].asNumber() : -1;
+  const Value* a = p.event("message", "audio");
+  CHECK(m && a && (*a)["payload"].asArray().size() == 1 &&
+        (*a)["payload"].asArray()[0].asArray()[1].asNumber() == music &&
+        (*a)["payload"].asArray()[0].asArray()[2].asNumber() == double(JSUI_AUDIO_FAILED));
 }

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -36,6 +37,13 @@ class Video {
   // The JS context is going away: closes every video.
   void contextEnded();
 
+  // A video opened for a JSUIContainer's child runtime (its videos go
+  // through this runtime's handler, render/container_view.h): every status
+  // report goes to `report`, not to this runtime's JS.
+  void openFor(std::function<void(const JsuiVideoStatus&)> report, uint64_t id,
+               const std::vector<std::string>& sources, const std::vector<std::string>& types,
+               const std::string& texture, bool paused, bool muted, float volume, bool loop, float rate);
+
   // ---- reports (from the handler)
   void status(uint64_t id, const JsuiVideoStatus& s);
 
@@ -53,10 +61,14 @@ class Video {
  private:
   struct Open {
     std::string texture;
+    std::function<void(const JsuiVideoStatus&)> report;  // openFor
     double progressMs = 250;
     double lastProgressAt = -1e18;  // runtime clock, ms
     Event last{};                   // what JS last heard
   };
+  void start(uint64_t id, const std::vector<std::string>& sources, const std::vector<std::string>& types,
+             const std::string& texture, bool paused, bool muted, float volume, bool loop, float rate,
+             double progressMs, std::function<void(const JsuiVideoStatus&)> report);
   void send(const JsuiVideoCommand& c);
   void queue(Open& v, const Event& e);
 
