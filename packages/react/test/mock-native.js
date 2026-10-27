@@ -23,7 +23,7 @@ function detach(n) {
   }
 }
 
-const TYPES = new Set(['View', 'Text', 'RawText', 'Image', 'ScrollView', 'TextInput', 'LottieView', 'ShaderView', 'VectorView']);
+const TYPES = new Set(['View', 'Text', 'RawText', 'Image', 'ScrollView', 'TextInput', 'LottieView', 'ShaderView', 'VectorView', 'NativeComponentView']);
 
 const mockResolve = (url) => (/^[a-z]+:/.test(url) ? url : 'http://bundle/' + url.replace(/^\.\//, ''));
 
@@ -35,6 +35,7 @@ export const mock = {
   layouts: new Map(),
   messages: [],
   lottieData: new Map(), // key -> JSON
+  components: new Set(), // registered native component classes (hasComponent)
   warming: 0, // preloaded shaders waiting for their warm-up frame (tests set it to 0)
   reset() {
     calls.length = 0;
@@ -168,6 +169,13 @@ globalThis.__jsui_native = {
     }
     calls.push(['lottieData', key]);
     return key;
+  },
+  componentCommand(id, name, args) {
+    calls.push(['componentCommand', id, name, args]);
+    return true;
+  },
+  hasComponent(name) {
+    return mock.components.has(name);
   },
   lottieCommand(id, cmd, a, b) {
     calls.push(['lottieCommand', id, cmd, a, b]);

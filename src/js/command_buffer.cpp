@@ -10,6 +10,7 @@
 #include "core/document.h"
 #include "input/input.h"
 #include "render/lottie.h"
+#include "render/native_component.h"
 #include "runtime.h"
 
 namespace jsui {
@@ -283,6 +284,12 @@ void CommandBuffer::applyOne(Runtime& rt, const Command& cmd) {
       std::string name = readString(at);
       Node* n = rt.findNode(cmd.a);
       result_.ok = n && lottie::command(n, name, cmd.x, cmd.y);
+      return;
+    }
+    case Op::ComponentCommand: {
+      std::string name = readString(at);
+      Value args = readValue(at);
+      result_.ok = rt.components->command(rt.findNode(cmd.a), name, args);
       return;
     }
     case Op::ListenGlobal: {

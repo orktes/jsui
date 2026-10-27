@@ -63,6 +63,7 @@ class CommandBuffer {
     FlashScrollIndicators,  // a = id
     SetSelection,        // a = id, x = start, y = end (UTF-16 indices)
     LottieCommand,       // a = id, payload = command, x / y = frames (NaN: whole composition)
+    ComponentCommand,    // a = id, payload = command name, args (array)
     Measure,             // a = id, b = measureAsync request (answered after the next layout)
     ListenGlobal,        // a = 1 / 0 (listening or not), payload = event type, keys it may veto (null: any)
     // ---- native Animated (a, b: tags as int32 bits)
@@ -224,6 +225,7 @@ class CommandBuffer {
       case Op::FlashScrollIndicators:
       case Op::SetSelection:
       case Op::LottieCommand:
+      case Op::ComponentCommand:
       case Op::AnimCreate:
       case Op::AnimStart:
       case Op::AnimStop:

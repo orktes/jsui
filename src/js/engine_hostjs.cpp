@@ -44,6 +44,7 @@
 #include "js/engine_impl.h"
 #include "platform/loader.h"
 #include "render/lottie.h"
+#include "render/native_component.h"
 #include "render/shader_view.h"
 #include "runtime.h"
 
@@ -533,6 +534,18 @@ EMSCRIPTEN_KEEPALIVE const char* jsui_hjs_lottie_data(int e, const char* json, i
 EMSCRIPTEN_KEEPALIVE int jsui_hjs_lottie_command(int e, double id, const char* cmd, int len, double a, double b) {
   Node* n = nodeOf(e, id);
   return n && lottie::command(n, str(cmd, len), a, b) ? 1 : 0;
+}
+
+// componentCommand(id, name, args JSON) / hasComponent(name): native
+// components (render/native_component.h).
+EMSCRIPTEN_KEEPALIVE int jsui_hjs_component_command(int e, double id, const char* name, int nameLen, const char* args,
+                                                    int argsLen) {
+  Runtime& rt = R(e);
+  return rt.components->command(nodeOf(e, id), str(name, nameLen), parse(args, argsLen)) ? 1 : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE int jsui_hjs_has_component(int e, const char* name, int len) {
+  return R(e).components->has(str(name, len)) ? 1 : 0;
 }
 
 // shaderInfo / shaderPreload (preload 1, with the images prop as JSON) -> JSON.

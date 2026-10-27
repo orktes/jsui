@@ -20,7 +20,7 @@ class ImageCache;
 class HostTextures;
 class LottieCache;
 class ShaderEffects;
-class ShaderEffects;
+class NativeComponents;
 
 // LayoutAnimation (React Native): animates the next layout pass.
 enum class LayoutAnimCurve : uint8_t { Linear, EaseInEaseOut, EaseIn, EaseOut, Spring, Keyboard };
@@ -122,6 +122,7 @@ class Document {
   HostTextures* textures = nullptr;  // host textures (HostTexture views)
   LottieCache* lotties = nullptr;    // Lottie sources and playing views (LottieView)
   ShaderEffects* shaders = nullptr;  // compiled SkSL and ShaderViews (render/shader_view.h)
+  NativeComponents* components = nullptr;  // host-registered view classes (render/native_component.h)
 
   // Called after layout for nodes whose props contain `__events` with
   // "layout" when their layoutRect changed.

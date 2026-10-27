@@ -16,6 +16,7 @@ import {
   RootTagContext,
 } from './renderer.js';
 import { modalHandlesBack } from './components/misc.js';
+import { dispatchCommand, hasNativeComponent } from './nativeComponent.js';
 
 // --- Platform ------------------------------------------------------------------
 
@@ -649,8 +650,8 @@ function measureRaw(id, cb) {
 }
 
 export const UIManager = {
-  getViewManagerConfig: () => null,
-  hasViewManagerConfig: () => false,
+  getViewManagerConfig: (name) => (hasNativeComponent(name) ? { Commands: {} } : null),
+  hasViewManagerConfig: (name) => hasNativeComponent(name),
   measure(id, cb) {
     measureRaw(id, (m) => {
       if (m && cb) cb(m.x, m.y, m.width, m.height, m.pageX, m.pageY);
@@ -665,7 +666,9 @@ export const UIManager = {
   configureNextLayoutAnimation(config, onEnd, onFail) {
     LayoutAnimation.configureNext(config, onEnd, onFail);
   },
-  dispatchViewManagerCommand() {},
+  dispatchViewManagerCommand(id, command, args) {
+    return dispatchCommand(id, command, args);
+  },
   focus: (id) => typeof native.focus === 'function' && native.focus(id),
   blur: (id) => typeof native.blur === 'function' && native.blur(id),
 };
@@ -679,14 +682,13 @@ export function findNodeHandle(ref) {
   return null;
 }
 
-export function requireNativeComponent(name) {
-  return function NativeComponent(props) {
-    warnOnce('rnc:' + name, `[jsui] native component '${name}' is not available; rendering a View`);
-    return h('View', props);
-  };
-}
-export const codegenNativeComponent = requireNativeComponent;
-export const codegenNativeCommands = () => new Proxy({}, { get: () => () => {} });
+export {
+  requireNativeComponent,
+  codegenNativeComponent,
+  codegenNativeCommands,
+  dispatchCommand,
+  hasNativeComponent,
+} from './nativeComponent.js';
 export function registerCallableModule() {}
 export const PlatformColor = (...names) => names[names.length - 1];
 export const DynamicColorIOS = (t) => (t && (t.dark || t.light)) || null;

@@ -22,6 +22,7 @@
 #include "js/engine_impl.h"
 #include "js/inspector.h"
 #include "render/lottie.h"
+#include "render/native_component.h"
 #include "render/shader_view.h"
 #include "include/effects/SkRuntimeEffect.h"
 #include "runtime.h"
@@ -626,6 +627,28 @@ JSValue js_lottieCommand(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
   return JS_NewBool(ctx, impl.applyNow().ok);
 }
 
+// componentCommand(id, name, args): a native component view's command
+// (jsui.h "Native components"). Returns whether its class took it (on a JS
+// thread: whether the class exists and takes commands).
+JSValue js_componentCommand(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  uint32_t id = idArg(ctx, argc, argv, 0);
+  if (!id || argc < 2) return JS_FALSE;
+  CommandBuffer& cmds = commands(ctx);
+  CommandBuffer::Writer w = cmds.begin();
+  writeString(ctx, argv[1], w);
+  writeValue(ctx, argc > 2 && JS_IsArray(argv[2]) ? argv[2] : JS_UNDEFINED, w);
+  cmds.end(Op::ComponentCommand, id);
+  JsEngine::Impl& impl = implOf(ctx);
+  if (impl.threaded) return JS_TRUE;
+  return JS_NewBool(ctx, impl.applyNow().ok);
+}
+
+// hasComponent(name): a native component class of that name is registered.
+JSValue js_hasComponent(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  if (argc < 1 || !JS_IsString(argv[0])) return JS_FALSE;
+  return JS_NewBool(ctx, runtimeOf(ctx).components->has(toStdString(ctx, argv[0])));
+}
+
 // {error} | {uniforms: [{name, type, count, color}], children: [name]}.
 JSValue shaderInfoOf(JSContext* ctx, const ShaderEffects::Program& prog) {
   JSValue out = JS_NewObject(ctx);
@@ -1021,6 +1044,8 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
              {"getFontFamilies", js_getFontFamilies, 0},
              {"setFontFallbacks", js_setFontFallbacks, 1},
              {"setDefaultFontFamily", js_setDefaultFontFamily, 1},
+             {"componentCommand", js_componentCommand, 3},
+             {"hasComponent", js_hasComponent, 1},
              {"listenGlobal", js_listenGlobal, 2}};
   for (auto& f : fns) JS_SetPropertyStr(ctx, native, f.name, JS_NewCFunction(ctx, f.fn, f.name, f.len));
   JS_SetPropertyStr(ctx, native, "rootId", JS_NewUint32(ctx, impl.rt.doc.root()->id()));

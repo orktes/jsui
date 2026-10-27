@@ -8,6 +8,7 @@
 #include "core/state_style.h"
 #include "render/image_node.h"
 #include "render/lottie.h"
+#include "render/native_component.h"
 #include "render/shader_view.h"
 #include "render/vector_view.h"
 #include "text/text_edit.h"
@@ -23,7 +24,7 @@ bool nodeTypeFromName(const std::string& n, NodeType* out) {
                 {"RawText", NodeType::RawText},     {"Image", NodeType::Image},
                 {"ScrollView", NodeType::ScrollView}, {"TextInput", NodeType::TextInput},
                 {"LottieView", NodeType::Lottie}, {"ShaderView", NodeType::Shader},
-                {"VectorView", NodeType::Vector}};
+                {"VectorView", NodeType::Vector},   {"NativeComponentView", NodeType::Component}};
   for (auto& t : kTypes) {
     if (n == t.name) {
       *out = t.type;
@@ -44,6 +45,7 @@ const char* nodeTypeName(NodeType t) {
     case NodeType::Lottie: return "LottieView";
     case NodeType::Shader: return "ShaderView";
     case NodeType::Vector: return "VectorView";
+    case NodeType::Component: return "NativeComponentView";
   }
   return "?";
 }
@@ -370,6 +372,7 @@ void Node::applyProps(const Value& props) {
     if (type_ == NodeType::Lottie) lottie::propsChanged(this, old, &relayout);
     if (type_ == NodeType::Shader) shader::propsChanged(this, old);
     if (type_ == NodeType::Vector) vector::propsChanged(this, old);
+    if (type_ == NodeType::Component) component::propsChanged(this, old);
   }
   paintVersion++;
   contentVersion++;

@@ -22,6 +22,7 @@
 #include "js/worklets.h"
 #include "render/image_cache.h"
 #include "render/lottie.h"
+#include "render/native_component.h"
 #include "render/shader_view.h"
 #include "render/image_node.h"
 #include "render/painter.h"
@@ -67,6 +68,7 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
   images = std::make_unique<ImageCache>(*this);
   lotties = std::make_unique<LottieCache>(*this);
   shaders = std::make_unique<ShaderEffects>(*this);
+  components = std::make_unique<NativeComponents>(*this);
   audio = std::make_unique<Audio>(*this);
   video = std::make_unique<Video>(*this);
   animated = std::make_unique<NativeAnimated>(doc);
@@ -123,10 +125,12 @@ void Runtime::attach(Surface& s) {
   d.textures = &textures;
   d.lotties = lotties.get();
   d.shaders = shaders.get();
+  d.components = components.get();
   s.input = std::make_unique<InputManager>(*this, d, s.cursor);
   InputManager* in = s.input.get();
   d.onNodeDestroyed = [this, in](Node* n) {
     in->nodeRemoved(n);
+    if (n->type() == NodeType::Component) component::detach(n);
     animated->viewDestroyed(n->id());
   };
   d.onLayout = [this](Node* n, const Rect& r) { inbound.layout(n->id(), r.x, r.y, r.width, r.height); };
@@ -864,6 +868,9 @@ void Runtime::tick(double nowMs, bool sync) {
   // ShaderViews whose shader reads `time` repaint on the same clock.
   shaders->tick(nowMs);
   deliverShaderEvents();
+  // Clocked native components repaint on the same clock.
+  components->tick(nowMs);
+  deliverComponentEvents();
   // The onLayout events of this tick's layout passes reach JS together, with
   // one microtask drain after them: state set by several handlers renders in
   // one React pass instead of one per event.
@@ -961,6 +968,7 @@ void Runtime::tickNative(double nowMs) {
   animated->tick(nowMs);  // end events stay queued until the next tick()
   lotties->tick(nowMs);   // so do LottieView events
   shaders->tick(nowMs);   // and ShaderView errors
+  components->tick(nowMs);  // and native component events
   inbound.beginBatch();
   for (auto& s : surfaces_) {
     s->doc.layout();
@@ -1009,6 +1017,20 @@ void Runtime::deliverLottieEvents() {
     Value::Object ev{{"type", Value(type)}, {"target", Value(double(e.node))}};
     if (e.kind == LottieCache::Event::Kind::Failed) ev.emplace("error", Value(e.error));
     if (e.kind == LottieCache::Event::Kind::Finished) ev.emplace("isCancelled", Value(e.cancelled));
+    inbound.event(Value(std::move(ev)), false);
+  }
+}
+
+void Runtime::deliverComponentEvents() {
+  if (!js || components->events.empty()) return;
+  std::vector<NativeComponents::Event> events = std::move(components->events);
+  components->events.clear();
+  for (NativeComponents::Event& e : events) {
+    Node* n = findNode(e.node);
+    if (!n || n->type() != NodeType::Component || !listensFor(n, "componentEvent")) continue;
+    Value data = e.json.empty() ? Value(Value::Object{}) : Value::parseJson(e.json);
+    Value::Object ev{{"type", Value("componentevent")}, {"target", Value(double(e.node))}, {"name", Value(e.name)},
+                     {"data", std::move(data)}};
     inbound.event(Value(std::move(ev)), false);
   }
 }
@@ -1109,7 +1131,7 @@ bool Runtime::wantsFrame() const {
   // A pending repaint alone is not a reason to tick: the host paints after
   // the tick it already ran.
   if (reloadRequested_ || loader.pending() > 0 || images->pendingDecodes() > 0 || (js && js->hasPendingWork(now + 17)) || animated->animating() ||
-      !animated->ends.empty() || lotties->animating() || shaders->animating() || state.hasDirty() || buffers.hasDirty() || textures.hasDirty() || audio->hasEvents() || audio->busy() || video->hasEvents() || !uiResults_.empty() || !doomed_.empty() ||
+      !animated->ends.empty() || lotties->animating() || shaders->animating() || components->animating() || state.hasDirty() || buffers.hasDirty() || textures.hasDirty() || audio->hasEvents() || audio->busy() || video->hasEvents() || !uiResults_.empty() || !doomed_.empty() ||
       !hostQueue.empty() || !measureRequests.empty() || worklets->wantsFrame() || worklets->nextTimer() <= now + 17)
     return true;
   for (const auto& s : surfaces_)
@@ -1126,7 +1148,7 @@ double Runtime::nextTimer() const {
 
 bool Runtime::animatingFrames(const Surface& s) const {
   return s.input->animating() || s.doc.layoutAnimating() || animated->animating() || !animated->ends.empty() ||
-         lotties->animating() || shaders->animating() || worklets->wantsFrame() ||
+         lotties->animating() || shaders->animating() || components->animating() || worklets->wantsFrame() ||
          (js && js->hasPendingWork(now + 17));
 }
 

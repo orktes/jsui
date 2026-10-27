@@ -23,6 +23,7 @@
 #include "render/gpu.h"
 #include "render/gpu_metal.h"
 #include "render/image_cache.h"
+#include "render/native_component.h"
 #include "render/pipeline_cache.h"
 #include "render/shader_cache.h"
 #include "render/shader_view.h"
@@ -231,6 +232,26 @@ int jsui_set_texture_pixels(JsuiRuntime* rt, const char* key, const void* rgba, 
 int jsui_texture_updated(JsuiRuntime* rt, const char* key) { return key && rt->rt->textures.updated(key) ? 1 : -1; }
 
 int jsui_remove_texture(JsuiRuntime* rt, const char* key) { return key && rt->rt->textures.remove(key) ? 1 : 0; }
+
+int jsui_register_component(JsuiRuntime* rt, const char* name, const JsuiComponentClass* cls) {
+  if (!rt || !name || !cls) return -1;
+  int r = rt->rt->components->registerClass(name, *cls);
+  if (r < 0) rt->rt->log(JSUI_LOG_ERROR, std::string("jsui_register_component(\"") + name + "\"): no draw callback");
+  return r;
+}
+
+int jsui_unregister_component(JsuiRuntime* rt, const char* name) {
+  return rt && name && rt->rt->components->unregisterClass(name) ? 1 : 0;
+}
+
+int jsui_component_invalidate(JsuiRuntime* rt, int view, const char* name) {
+  return rt ? rt->rt->components->invalidate(uint32_t(std::max(0, view)), name) : 0;
+}
+
+int jsui_component_emit(JsuiRuntime* rt, int view, const char* event, const char* json) {
+  if (!rt || !event || view <= 0) return -1;
+  return rt->rt->components->emit(uint32_t(view), event, json ? json : "");
+}
 
 void jsui_audio_voice_ended(JsuiRuntime* rt, uint64_t voice, int status) {
   if (rt) rt->rt->audio->voiceEnded(voice, status);

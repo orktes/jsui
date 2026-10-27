@@ -42,6 +42,7 @@ const EVENT_TOKENS = {
   onError: ['error'],
   onProgress: ['progress'],
   onAnimationFinish: ['animationFinish'],
+  onComponentEvent: ['componentEvent'],
   onStartShouldSetResponder: RESPONDER,
   onMoveShouldSetResponder: RESPONDER,
   onStartShouldSetResponderCapture: RESPONDER,
@@ -52,6 +53,11 @@ const EVENT_TOKENS = {
 };
 for (const k of Object.keys(EVENT_TOKENS)) {
   if (!k.includes('Responder')) EVENT_TOKENS[k + 'Capture'] = EVENT_TOKENS[k];
+}
+
+/** True for the event props the runtime routes itself (onPress, onLayout...). */
+export function isRuntimeEvent(key) {
+  return EVENT_TOKENS[key] !== undefined || key.indexOf('Responder') >= 0;
 }
 
 // Props that never cross the bridge.

@@ -812,6 +812,19 @@ var jsuiHostJs = (function () {
           if (D.dead || arguments.length < 2) return false;
           return !!X.lottie_command(e, numArg(id), putStr(text(cmd)), L, numArg(a), numArg(b));
         },
+        // ---- native components
+        componentCommand(id, name, args) {
+          if (D.dead || arguments.length < 2) return false;
+          const aj = Array.isArray(args) ? json(args) : '';
+          reset();
+          const np = put(text(name)), nl = L;
+          const ap = aj ? put(aj) : 0;
+          return !!X.component_command(e, numArg(id), np, nl, ap, aj ? L : 0);
+        },
+        hasComponent(name) {
+          if (D.dead || typeof name !== 'string') return false;
+          return !!X.has_component(e, putStr(name), L);
+        },
         shaderInfo(sksl) {
           if (typeof sksl !== 'string') throw new TypeError('shaderInfo: expected an SkSL string');
           if (D.dead) return { error: 'the runtime was destroyed' };
