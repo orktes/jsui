@@ -19,13 +19,17 @@
 //     the native driver, and sends taps to it as a `select` command; the
 //     radar selects the unit in the game and answers with onSelect. Hosts
 //     without the class (Unity, Unreal) leave it out (hasNativeComponent).
+// Small screens (the Three.js host on a phone, site/demo): under 640 px
+// wide or 500 px tall the HUD packs tighter (useWindowDimensions) and keeps
+// out of the safe-area insets the host publishes; the hosts' 1280x720
+// windows look as before. `game.hints` replaces the hint line (touch hosts).
 // Input pass-through: the root and the nameplates take no input, so clicks,
 // drags and wheel on empty parts of the screen are not consumed and the host
 // hands them to the game (select a unit, camera orbit, zoom, spawn). The
 // game picks the unit under a click with its own raycast. The pause menu's
 // backdrop claims presses (onStartShouldSetResponder), so nothing reaches
 // the game behind it.
-import React, { memo, useEffect, useRef } from 'react';
+import React, { memo, useEffect, useMemo, useRef } from 'react';
 import {
   Animated,
   AppRegistry,
@@ -40,7 +44,9 @@ import {
   useHostBufferSelector,
   useHostBufferValue,
   useHostState,
+  useWindowDimensions,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, font, panel } from '../../../examples/theme.js';
 
 const MAX_PLATES = 48;
@@ -98,39 +104,48 @@ const Nameplates = memo(function Nameplates({ selected }) {
   );
 });
 
-const Stat = memo(function Stat({ label, value, color }) {
+const Stat = memo(function Stat({ label, value, color, dense }) {
   return (
     <View style={styles.stat}>
       <Text style={styles.statLabel}>{label}</Text>
-      <Text style={[styles.statValue, color && { color }]}>{value}</Text>
+      <Text style={[styles.statValue, dense && styles.statValueDense, color && { color }]}>{value}</Text>
     </View>
   );
 });
 
-function EnginePanel({ game }) {
+function EnginePanel({ game, layout }) {
   const passed = game.passed || {};
+  const { narrow, dense, insets } = layout;
   return (
-    <View pointerEvents="none" style={styles.enginePanel}>
+    <View
+      pointerEvents="none"
+      style={[
+        styles.enginePanel,
+        dense && styles.enginePanelDense,
+        dense && { left: 12 + insets.left, top: 12 + insets.top },
+        narrow && { width: undefined, right: 12 + insets.right },
+      ]}
+    >
       <View style={styles.engineHead}>
         <View style={styles.liveDot} />
         <Text style={styles.engineName}>{game.engine || 'host'}</Text>
       </View>
       <Text style={styles.renderer}>{game.renderer || ''}</Text>
-      <View style={styles.statRow}>
-        <Stat label="FPS" value={game.fps != null ? String(game.fps) : '–'} color={colors.green} />
-        <Stat label="Units" value={String(game.entities ?? 0)} color={colors.gold} />
-        <Stat label="State" value={game.paused ? 'Paused' : 'Live'} color={game.paused ? colors.orange : colors.cyan} />
+      <View style={[styles.statRow, dense && styles.statRowDense]}>
+        <Stat label="FPS" value={game.fps != null ? String(game.fps) : '–'} color={colors.green} dense={dense} />
+        <Stat label="Units" value={String(game.entities ?? 0)} color={colors.gold} dense={dense} />
+        <Stat label="State" value={game.paused ? 'Paused' : 'Live'} color={game.paused ? colors.orange : colors.cyan} dense={dense} />
       </View>
-      <View style={styles.divider} />
-      <Text style={styles.sectionLabel}>Passed through to the game</Text>
-      <View style={styles.statRow}>
-        <Stat label="Clicks" value={String(passed.clicks ?? 0)} />
-        <Stat label="Wheel" value={String(passed.wheel ?? 0)} />
-        <Stat label="Keys" value={String(passed.keys ?? 0)} />
-        <Stat label="Pad" value={String(passed.pad ?? 0)} />
+      <View style={[styles.divider, dense && styles.dividerDense]} />
+      <Text style={[styles.sectionLabel, dense && styles.sectionLabelDense]}>Passed through to the game</Text>
+      <View style={[styles.statRow, dense && styles.statRowDense]}>
+        <Stat label="Clicks" value={String(passed.clicks ?? 0)} dense={dense} />
+        <Stat label="Wheel" value={String(passed.wheel ?? 0)} dense={dense} />
+        <Stat label="Keys" value={String(passed.keys ?? 0)} dense={dense} />
+        <Stat label="Pad" value={String(passed.pad ?? 0)} dense={dense} />
       </View>
-      <View style={styles.divider} />
-      <Text style={styles.sectionLabel}>Selected</Text>
+      <View style={[styles.divider, dense && styles.dividerDense]} />
+      <Text style={[styles.sectionLabel, dense && styles.sectionLabelDense]}>Selected</Text>
       <Selection index={game.selected ?? -1} />
     </View>
   );
@@ -174,7 +189,7 @@ const RadarPanel = memo(function RadarPanel({ selected }) {
   );
 });
 
-function ActionButton({ label, hint, onPress, accent, innerRef, onLayout, autoFocus }) {
+function ActionButton({ label, hint, onPress, accent, innerRef, onLayout, autoFocus, style }) {
   return (
     <Pressable
       ref={innerRef}
@@ -183,6 +198,7 @@ function ActionButton({ label, hint, onPress, accent, innerRef, onLayout, autoFo
       autoFocus={autoFocus}
       style={({ pressed, focused, hovered }) => [
         styles.action,
+        style,
         (focused || hovered) && { borderColor: accent, backgroundColor: 'rgba(255, 255, 255, 0.1)' },
         pressed && styles.actionPressed,
       ]}
@@ -193,15 +209,25 @@ function ActionButton({ label, hint, onPress, accent, innerRef, onLayout, autoFo
   );
 }
 
-const ActionBar = memo(function ActionBar({ paused }) {
+const ActionBar = memo(function ActionBar({ paused, layout }) {
   const spawnRef = useRef(null);
   const reportAnchors = () =>
     spawnRef.current?.measureInWindow((x, y, width, height) =>
       Host.postMessage('ui:anchors', { spawn: { x, y, width, height } }),
     );
+  const { narrow, dense, insets } = layout;
+  // Narrow: a 2 x 2 grid across the bottom.
+  const button = narrow ? styles.actionNarrow : dense ? styles.actionDense : null;
   return (
-    <View style={styles.actionBar}>
+    <View
+      style={[
+        styles.actionBar,
+        dense && { bottom: 12 + insets.bottom, padding: 8, gap: 8 },
+        narrow && { ...styles.actionBarNarrow, left: 12 + insets.left, right: 12 + insets.right },
+      ]}
+    >
       <ActionButton
+        style={button}
         innerRef={spawnRef}
         onLayout={reportAnchors}
         label="Spawn"
@@ -209,9 +235,15 @@ const ActionBar = memo(function ActionBar({ paused }) {
         accent={colors.gold}
         onPress={() => Host.postMessage('game:spawn', { count: 1 })}
       />
-      <ActionButton label="Spawn ×10" accent={colors.gold} onPress={() => Host.postMessage('game:spawn', { count: 10 })} />
-      <ActionButton label="Clear" accent={colors.red} onPress={() => Host.postMessage('game:clear', {})} />
       <ActionButton
+        style={button}
+        label="Spawn ×10"
+        accent={colors.gold}
+        onPress={() => Host.postMessage('game:spawn', { count: 10 })}
+      />
+      <ActionButton style={button} label="Clear" accent={colors.red} onPress={() => Host.postMessage('game:clear', {})} />
+      <ActionButton
+        style={button}
         label={paused ? 'Resume' : 'Pause'}
         hint="Esc / Start"
         accent={colors.cyan}
@@ -221,17 +253,24 @@ const ActionBar = memo(function ActionBar({ paused }) {
   );
 });
 
-const Hints = memo(function Hints() {
+const Hints = memo(function Hints({ text, layout }) {
+  const { narrow, dense, insets } = layout;
+  // Short screens: no room between the panel and the action bar.
+  if (dense && !narrow) return null;
   return (
-    <View pointerEvents="none" style={styles.hints}>
-      <Text style={styles.hintText}>
-        Click a unit to select it · drag empty space to move the camera · wheel to zoom · Space spawns · Tab / D-pad moves focus · Enter / A presses
+    <View
+      pointerEvents="none"
+      style={[styles.hints, narrow && { bottom: 136 + insets.bottom, left: 16 + insets.left, right: 16 + insets.right }]}
+    >
+      <Text style={[styles.hintText, narrow && styles.hintTextNarrow]}>
+        {text ||
+          'Click a unit to select it · drag empty space to move the camera · wheel to zoom · Space spawns · Tab / D-pad moves focus · Enter / A presses'}
       </Text>
     </View>
   );
 });
 
-const PauseMenu = memo(function PauseMenu({ paused, engine }) {
+const PauseMenu = memo(function PauseMenu({ paused, engine, width }) {
   const t = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     Animated.spring(t, { toValue: paused ? 1 : 0, stiffness: 240, damping: 22, useNativeDriver: true }).start();
@@ -243,6 +282,7 @@ const PauseMenu = memo(function PauseMenu({ paused, engine }) {
       <Animated.View
         style={[
           styles.menu,
+          width < 452 && { width: width - 32, padding: 22 },
           { opacity: t, transform: [{ scale: t.interpolate({ inputRange: [0, 1], outputRange: [0.92, 1] }) }] },
         ]}
       >
@@ -268,6 +308,12 @@ const PauseMenu = memo(function PauseMenu({ paused, engine }) {
 function App() {
   const game = useHostState('game', {});
   const selected = game.selected ?? -1;
+  const { width, height } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const narrow = width < 640;
+  const dense = narrow || height < 500;
+  // One object per change, so the memo'd parts re-render only then.
+  const layout = useMemo(() => ({ narrow, dense, insets }), [narrow, dense, insets]);
   useEffect(() => Host.postMessage('ui:ready', {}), []);
   // Tell the game what the UI now shows as selected (its --selftest checks it).
   useEffect(() => Host.postMessage('ui:selected', { index: selected }), [selected]);
@@ -276,11 +322,11 @@ function App() {
     // input on empty areas is not consumed.
     <View style={styles.root}>
       <Nameplates selected={selected} />
-      <EnginePanel game={game} />
+      <EnginePanel game={game} layout={layout} />
       <RadarPanel selected={selected} />
-      <Hints />
-      <ActionBar paused={!!game.paused} />
-      <PauseMenu paused={!!game.paused} engine={game.engine} />
+      <Hints text={game.hints} layout={layout} />
+      <ActionBar paused={!!game.paused} layout={layout} />
+      <PauseMenu paused={!!game.paused} engine={game.engine} width={width} />
     </View>
   );
 }
@@ -311,6 +357,7 @@ const styles = StyleSheet.create({
   selectionName: { fontFamily: font, fontWeight: '700', fontSize: 16, letterSpacing: 1.2 },
   selectionNone: { fontFamily: font, fontWeight: '500', fontSize: 13, color: colors.textMute, marginTop: 6 },
   enginePanel: { ...panel, position: 'absolute', left: 20, top: 20, width: 300, padding: 16 },
+  enginePanelDense: { padding: 12, paddingTop: 10 },
   engineHead: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   liveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.green, boxShadow: '0 0 8px rgba(74,222,128,0.9)' },
   engineName: { fontFamily: font, fontWeight: '700', fontSize: 16, letterSpacing: 0.5, color: colors.text },
@@ -319,6 +366,10 @@ const styles = StyleSheet.create({
   stat: { minWidth: 44 },
   statLabel: { fontFamily: font, fontWeight: '600', fontSize: 10, letterSpacing: 1.4, textTransform: 'uppercase', color: colors.textMute },
   statValue: { fontFamily: font, fontWeight: '700', fontSize: 18, color: colors.text, marginTop: 2 },
+  statValueDense: { fontSize: 15, marginTop: 1 },
+  statRowDense: { marginTop: 7 },
+  dividerDense: { marginTop: 10 },
+  sectionLabelDense: { marginTop: 9 },
   divider: { height: 1, backgroundColor: colors.line, marginTop: 14 },
   sectionLabel: { fontFamily: font, fontWeight: '600', fontSize: 10, letterSpacing: 1.4, textTransform: 'uppercase', color: colors.textDim, marginTop: 12 },
   radarPanel: { ...panel, position: 'absolute', right: 20, top: 20, padding: 14, paddingTop: 0, alignItems: 'center' },
@@ -326,6 +377,7 @@ const styles = StyleSheet.create({
   radar: { width: RADAR_SIZE, height: RADAR_SIZE, borderRadius: RADAR_SIZE / 2 },
   hints: { position: 'absolute', left: 0, right: 0, bottom: 92, alignItems: 'center' },
   hintText: { fontFamily: font, fontWeight: '500', fontSize: 12, color: colors.textDim, textShadow: '0 1px 4px rgba(0,0,0,0.9)' },
+  hintTextNarrow: { textAlign: 'center', lineHeight: 17 },
   actionBar: {
     ...panel,
     position: 'absolute',
@@ -347,6 +399,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.line,
   },
+  actionBarNarrow: { alignSelf: undefined, flexWrap: 'wrap' },
+  actionNarrow: { flexGrow: 1, flexBasis: '40%', minWidth: 0, height: 44, paddingHorizontal: 8 },
+  actionDense: { minWidth: 96, height: 42, paddingHorizontal: 12 },
   actionPressed: { transform: [{ scale: 0.95 }] },
   actionLabel: { fontFamily: font, fontWeight: '700', fontSize: 13, letterSpacing: 1.2, textTransform: 'uppercase', color: colors.text },
   actionHint: { fontFamily: font, fontWeight: '500', fontSize: 10, color: colors.textMute, marginTop: 2 },
@@ -358,5 +413,7 @@ const styles = StyleSheet.create({
   menuButtons: { flexDirection: 'row', gap: 10, marginTop: 22 },
 });
 
+// Started on the main surface by AppRegistry itself, unless the host picks
+// what the main surface shows (the Three.js page renders App into a texture
+// surface and leaves the main one empty).
 AppRegistry.registerComponent('App', () => App);
-AppRegistry.runApplication('App', {});

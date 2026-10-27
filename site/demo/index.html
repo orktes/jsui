@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>JSUI · Three.js engine demo</title>
+  <meta name="description" content="The JSUI engine example in Three.js: the same React Native game HUD as the raylib, SDL3, sokol, Unity, Unreal and Godot examples, rendered on Three.js' own WebGPU device over a small 3D scene, with input passed through to the game.">
+  <meta name="theme-color" content="#03050b">
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #03050b; }
+    #scene { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; touch-action: none; }
+    #splash { position: fixed; inset: 0; display: grid; place-items: center; color: #8ea4c4;
+              font: 500 14px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; transition: opacity .45s ease;
+              pointer-events: none; }
+    #splash.gone { opacity: 0; }
+    #err { position: fixed; left: 12px; right: 12px; bottom: 12px; padding: 10px 12px; border-radius: 8px;
+           background: #3d1214ee; color: #ffdcd7; font: 13px/1.4 system-ui, sans-serif; display: none; z-index: 2; }
+    #back { position: fixed; right: 16px; top: 14px; color: #8ea4c4; font: 600 12px/1 system-ui, sans-serif;
+            letter-spacing: .08em; text-transform: uppercase; text-decoration: none; padding: 8px 10px;
+            border: 1px solid #1b2b47; border-radius: 8px; background: #060b16cc; z-index: 1;
+            margin-top: env(safe-area-inset-top); margin-right: env(safe-area-inset-right); }
+    #back:hover { color: #e8f3ff; border-color: #2d4a78; }
+    /* Phones: the HUD's panel spans the top; the pause menu's Quit leads back. */
+    @media (max-width: 639px) { #back { display: none; } }
+  </style>
+</head>
+<body>
+  <canvas id="scene" aria-label="A Three.js scene of units with the JSUI game HUD over it"></canvas>
+  <div id="splash">Starting Three.js and JSUI…</div>
+  <div id="err"></div>
+  <a id="back" href="../#/examples">JSUI showcase</a>
+  <script>window.jsuiModules = null;  // set by site/scripts/build.mjs</script>
+  <script>
+    // ?debug: an overlay with the console, errors and the page's state, for
+    // browsers without a reachable inspector (a phone): a screenshot says it.
+    if (new URLSearchParams(location.search).has('debug')) {
+      const box = Object.assign(document.createElement('pre'), { id: 'dbg' });
+      box.style.cssText = 'position:fixed;left:8px;right:8px;top:52px;max-height:60vh;overflow:hidden;margin:0;'
+        + 'padding:8px;border-radius:6px;background:#000c;color:#cfe3ff;font:10px/1.35 ui-monospace,monospace;'
+        + 'white-space:pre-wrap;word-break:break-all;z-index:3;pointer-events:none';
+      const lines = [], t0 = performance.now();
+      const fmt = (x) => x instanceof Error ? `${x.message} ${x.stack ?? ''}`
+        : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x);
+      const log = (kind, args) => {
+        lines.push(`${((performance.now() - t0) / 1000).toFixed(2)} ${kind} ${args.map(fmt).join(' ')}`.slice(0, 400));
+        if (lines.length > 40) lines.shift();
+      };
+      for (const k of ['log', 'info', 'warn', 'error']) {
+        const orig = console[k];
+        console[k] = (...a) => { log(k, a); orig.apply(console, a); };
+      }
+      addEventListener('error', (e) => log('onerror', [e.message, `${e.filename}:${e.lineno}`]));
+      addEventListener('unhandledrejection', (e) => log('rejection', [e.reason]));
+      for (const ev of ['pageshow', 'pagehide', 'resize']) addEventListener(ev, (e) => log('event', [ev, e.persisted ?? '']));
+      document.addEventListener('visibilitychange', () => log('event', ['visibility', document.visibilityState]));
+      if (window.GPUAdapter) {
+        const requestDevice = GPUAdapter.prototype.requestDevice;
+        GPUAdapter.prototype.requestDevice = async function (desc) {
+          const device = await requestDevice.call(this, desc);
+          log('gpu', ['device', [...device.features].join(',')]);
+          device.addEventListener('uncapturederror', (e) => log('gpu-error', [e.error?.message]));
+          device.lost.then((i) => log('gpu-lost', [i.reason, i.message]));
+          return device;
+        };
+        const getCurrentTexture = GPUCanvasContext.prototype.getCurrentTexture;
+        GPUCanvasContext.prototype.getCurrentTexture = function () {
+          const t = getCurrentTexture.call(this);
+          const size = `${t.width}x${t.height}`;
+          if (size !== swap) log('gpu', ['swap texture', size, 'frame', window.demoStats?.frames ?? '-']);
+          swap = size;
+          return t;
+        };
+        const configure = GPUCanvasContext.prototype.configure;
+        GPUCanvasContext.prototype.configure = function (c) {
+          log('gpu', ['configure', c.format, c.alphaMode, `${this.canvas.width}x${this.canvas.height}`]);
+          return configure.call(this, c);
+        };
+      }
+      let rafs = 0, swap = '-';
+      const tick = () => { rafs++; requestAnimationFrame(tick); };
+      requestAnimationFrame(tick);
+      const show = () => {
+        const c = document.getElementById('scene'), s = window.demoStats ?? {}, vv = window.visualViewport;
+        box.textContent = [
+          navigator.userAgent,
+          `gpu ${!!navigator.gpu} secure ${isSecureContext} visibility ${document.visibilityState} ready ${document.readyState}`,
+          `inner ${innerWidth}x${innerHeight} vv ${vv ? `${vv.width.toFixed(0)}x${vv.height.toFixed(0)}` : '-'} dpr ${devicePixelRatio}`,
+          `canvas ${c.width}x${c.height} css ${c.clientWidth}x${c.clientHeight} swap ${swap}`,
+          `frames ${s.frames ?? '-'} rafs ${rafs} nudges ${s.nudges ?? 0} splash ${document.getElementById('splash').className || 'shown'}`,
+          ...lines,
+        ].join('\n');
+      };
+      document.body.append(box);
+      setInterval(show, 250);
+      show();
+    }
+  </script>
+  <script>
+    // main.js not loading or never finishing (it hides the splash): said, not a blank page.
+    setTimeout(() => {
+      const err = document.getElementById('err');
+      if (document.getElementById('splash').classList.contains('gone') || err.style.display === 'block') return;
+      err.textContent = 'The example did not start (WebGPU or the page script may be stuck in this browser). Try reloading.';
+      err.style.display = 'block';
+    }, 20000);
+  </script>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

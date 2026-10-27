@@ -10,6 +10,7 @@
 | [sokol](sokol/README.md) | sokol_app + sokol_gfx (Metal on macOS with Graphite Metal, GL elsewhere); Skia draws the UI into a kept `sg_image` (Metal) or straight into the swapchain framebuffer (GL) |
 | [unity](unity/README.md) | Unity 6 package (`com.orktes.jsui`): native plugin over the C API + a `JsuiView` component, with the same example game |
 | [unreal](unreal/README.md) | Unreal Engine 5 plugin: `UJsuiWidget` (UMG) / `SJsuiView` (Slate) over the JSUI shared library, Skia Graphite on the Metal RHI's queue, with the same example game |
+| [Three.js](../site/demo/main.js) (web) | The same example game in a Three.js WebGPU scene, live at [orktes.github.io/jsui/demo/](https://orktes.github.io/jsui/demo/): the HUD is a texture surface on Three.js' own `GPUDevice` (`createJsui({ device })`), composited in Three's final pass; no radar. Works on phones (touch, pinch zoom, a compact HUD layout) |
 
 Programs in other languages use the C API through [bindings](../bindings/README.md)
 (Rust and Go so far, each with a GPU desktop example app).
