@@ -15,6 +15,8 @@ const pad2 = (n) => String(n).padStart(2, '0');
 
 export function FullScreen({ s, index, total, mountKey, padInside, onStep, onClose }) {
   const { width, height, phone } = useLayout();
+  // The stage settles in with a small scale; everything is visible from the
+  // first frame (nothing waits on the animation to be seen).
   const t = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     Animated.timing(t, { toValue: 1, duration: 380, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
@@ -40,8 +42,8 @@ export function FullScreen({ s, index, total, mountKey, padInside, onStep, onClo
           }
         }}
       >
-        <Animated.View
-          style={[styles.bar, { paddingHorizontal: phone ? 10 : 18, transform: [{ translateY: t.interpolate({ inputRange: [0, 1], outputRange: [-BAR_HEIGHT, 0] }) }] }]}
+        <View
+          style={[styles.bar, { paddingHorizontal: phone ? 10 : 18 }]}
         >
           <View style={[styles.accent, { backgroundColor: s.accent, boxShadow: `0 0 12px ${s.accent}` }]} />
           <View style={{ flexShrink: 1, gap: 1 }}>
@@ -78,14 +80,14 @@ export function FullScreen({ s, index, total, mountKey, padInside, onStep, onClo
             {phone ? null : <Text style={styles.closeText}>Close</Text>}
             {phone ? null : <Key>Esc</Key>}
           </Pressable>
-        </Animated.View>
+        </View>
         <View
           style={styles.body}
           onGamepadButton={() => {
             padInside.current = true;
           }}
         >
-          <Animated.View style={{ opacity: t, transform: [{ scale: t.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1] }) }] }}>
+          <Animated.View style={{ transform: [{ scale: t.interpolate({ inputRange: [0, 1], outputRange: [0.97, 1] }) }] }}>
             <Stage width={stageW} radius={phone ? 0 : 6} style={{ backgroundColor: '#03050b' }}>
               <s.component key={s.id + ':' + mountKey} active />
             </Stage>
