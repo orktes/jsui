@@ -373,6 +373,8 @@ void ResourceLoader::load(uint64_t id, LoadRequest req, Callback cb) {
     Resource res;
     decodeDataUri(req.url, &res);
     complete(id, std::move(res));
+  } else if (forward) {
+    forward(id, std::move(req));
   } else if (custom_) {
     custom_(customUser_, rt_, id, req.url.c_str());
   } else {

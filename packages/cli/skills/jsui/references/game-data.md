@@ -105,3 +105,35 @@ The engine creates surfaces by name with props (`jsui_surface_create(rt,
 focus and input; state, fonts, images and JS are shared. The first
 registered component starts on the main view unless the engine picks one.
 Headless tools: `--component Name --props '{...}'`.
+
+## Apps inside apps (JSUIContainer)
+
+`<JSUIContainer>` runs another JSUI bundle as an isolated runtime (its own
+JS context, React tree, focus) inside a view. Unlike surfaces nothing is
+shared: the container is the inner bundle's host, with the same Host API a
+game has.
+
+```jsx
+import { JSUIContainer } from 'react-native';
+const game = useRef(null);
+<JSUIContainer
+  ref={game}
+  bundleSrc="apps/minigame.js"        // via the host's loader, like images; or bundleData={source}
+  appKey="Minigame" initialProps={{ level: 3 }}
+  hostState={{ coins: 120 }}          // the inner app's useHostState('coins')
+  onMessage={(name, payload) => {}}   // inner Host.postMessage
+  onCall={async (name, args) => ({ ok: true })}  // inner Host.call: return the answer
+  onStateChange={(key, value) => {}}  // inner HostState.set
+  onError={(message) => {}}
+  style={{ width: 480, height: 270 }}
+/>
+game.current.postMessage('pause', {});              // inner Host.onMessage
+const r = await game.current.call('save', {});      // inner Host.handle('save', ...)
+game.current.setState('coins', 130);                // or patchState / reload()
+```
+
+Pointer input over it goes to the inner app; it takes focus when pressed
+(or via gamepad/Tab navigation) and then gets keys and gamepad input first.
+Input it does not use (a D-pad press at its edge) moves on in the outer app.
+The inner app has its own fonts (register them there), uses the built-in
+audio backend and has no `<Video>` handler.

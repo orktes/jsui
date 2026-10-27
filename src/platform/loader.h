@@ -80,6 +80,12 @@ class ResourceLoader {
   bool busy() const;
   size_t pending() const { return pending_.size() - background_; }
 
+  // Takes every load but data: URIs (before the embedder's loader and the
+  // built-in one), with the whole request: a JSUIContainer's child loads
+  // through its parent's loader this way (render/container_view.h). The
+  // load is answered with complete(id, ...).
+  std::function<void(uint64_t id, LoadRequest req)> forward;
+
   // Decodes a data: URI (base64 or percent-encoded). Exposed for tests.
   static bool decodeDataUri(const std::string& uri, Resource* out);
 

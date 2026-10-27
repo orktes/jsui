@@ -39,6 +39,7 @@ const TYPES = {
   error: ['onError', false, true],
   progress: ['onProgress', false, false],
   animationfinish: ['onAnimationFinish', false, true],
+  containerevent: ['onContainerEvent', false, true],
   gamepadbutton: ['onGamepadButton', true, true],
   gamepadaxis: ['onGamepadAxis', true, false],
 };
