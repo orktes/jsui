@@ -14,6 +14,7 @@
 
 #include "js/engine.h"
 #include "jsui/jsui.h"
+#include "jsui/jsui_component.hpp"
 #include "render/native_component.h"
 #include "render_util.h"
 #include "test.h"
@@ -348,4 +349,56 @@ TEST(component_canvas_calls) {
   CHECK_EQ(s.at(5, 25), 0u);      // below its diagonal
   CHECK_EQ(s.at(45, 45), kGreen); // the translated circle
   CHECK_EQ(s.at(10, 50), kBlue);  // the gradient rect
+}
+
+// The C++ helpers (jsui_component.hpp): one instance per view, props,
+// commands, emit and invalidate from the instance.
+namespace {
+struct Dial : jsui::Component {
+  static int live;
+  std::string lastProps, lastCommand;
+  Dial() { live++; }
+  ~Dial() override { live--; }
+  void props(const char* json) override { lastProps = json; }
+  void command(const char* name, const char* args) override {
+    lastCommand = std::string(name) + args;
+    emit("ack", R"({"ok":true})");
+    invalidate();
+  }
+  void draw(jsui::Canvas& c, const JsuiDrawInfo& info) override {
+    c.rect(0, 0, info.width, info.height, jsui::Paint(c.color("color", 0xffffffffu)));
+    jsui::Path tri;
+    tri.moveTo(0, 0).lineTo(10, 0).lineTo(0, 10).close();
+    c.path(tri, jsui::Paint(0xffff0000u));
+    c.circle(15, 15, 2, jsui::Paint(0xff0000ffu).stroke(1).round());
+    c.text("x", 2, 18, jsui::Font(8).centered(), jsui::Paint(0xff000000u));
+  }
+};
+int Dial::live = 0;
+}  // namespace
+
+TEST(component_cpp_helpers) {
+  JsuiConfig cfg;
+  jsui_config_init(&cfg);
+  cfg.width = 20;
+  cfg.height = 20;
+  JsuiRuntime* rt = jsui_create(&cfg);
+  CHECK_EQ(jsui::registerComponent<Dial>(rt, "Dial"), 1);
+  jsui::Runtime* r = jsui::internalRuntime(rt);
+  jsui::Node* n = r->doc.createNode(jsui::NodeType::Component);
+  n->setProps(jsui::Value::parseJson(
+      R"({"component":"Dial","color":"#00ff00","__componentEvents":["ack"],"style":{"width":20,"height":20}})"));
+  r->doc.root()->appendChild(n);
+  CHECK_EQ(Dial::live, 1);
+  CHECK(r->components->command(n, "spin", jsui::Value::parseJson("[90]")));
+  CHECK_EQ(r->components->events.size(), size_t(1));
+  std::vector<uint32_t> px(20 * 20);
+  jsui_tick(rt, 16);
+  jsui_render_rgba(rt, px.data(), 20, 20, 20 * 4);
+  CHECK_EQ(px[2 * 20 + 2], kRed);     // the triangle
+  CHECK_EQ(px[18 * 20 + 18], kGreen); // the `color` prop
+  r->doc.root()->removeChild(n);
+  r->doc.destroyNode(n);
+  CHECK_EQ(Dial::live, 0);
+  jsui_destroy(rt);
 }

@@ -571,8 +571,9 @@ JSUI_API void jsui_video_status(JsuiRuntime* rt, uint64_t video, const JsuiVideo
  * and composited from cache when only the view moves or fades).
  *
  * Events: jsui_component_emit(rt, view, "contactPress", json) calls the
- * view's onContactPress prop with {nativeEvent: <json>}. Commands: the view's
- * ref (or codegenNativeCommands) calls `command` with a name and JSON args.
+ * view's onContactPress prop with {nativeEvent: <json>}. Commands:
+ * codegenNativeCommands / dispatchCommand(ref, name, args) in JS call
+ * `command` with the name and the arguments as a JSON array.
  *
  * Threads: every callback runs on the runtime's thread (the one calling
  * jsui_tick and the render calls), and the functions below are called on
@@ -581,6 +582,11 @@ JSUI_API void jsui_video_status(JsuiRuntime* rt, uint64_t video, const JsuiVideo
  * reloads keep it); views of a name not registered yet paint only their View
  * part, and registering it later binds them. Hosts without a native class
  * for a name (the CPU wasm in Node, react-native-web) show the plain View.
+ *
+ * C++: include/jsui/jsui_component.hpp wraps all of this in classes
+ * (jsui::Component, jsui::registerComponent<T>, Canvas, Paint, Path). The web
+ * host registers components drawn by page JS: registerComponent(name, impl)
+ * (web/jsui-components.js).
  *
  * Drawing (inside `draw`, with the JsuiCanvas it gets): coordinates are
  * logical px with (0, 0) at the top-left of the content box; the canvas is
@@ -621,8 +627,9 @@ typedef struct JsuiComponentClass {
     void (*props)(void* instance, int view, const char* props_json);
     /* Paints the view (required). */
     void (*draw)(void* instance, JsuiCanvas* canvas, const JsuiDrawInfo* info);
-    /* A command from JS: ref.current.<name>(...args) / dispatchCommand;
-     * `args_json` is the array of arguments. */
+    /* A command from JS (codegenNativeCommands, dispatchCommand,
+     * UIManager.dispatchViewManagerCommand); `args_json` is the array of
+     * arguments. */
     void (*command)(void* instance, int view, const char* name, const char* args_json);
 } JsuiComponentClass;
 

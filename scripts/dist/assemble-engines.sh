@@ -180,7 +180,7 @@ mkdir -p "$ue"
   --exclude='Source/ThirdParty/JsuiLibrary/*' -cf - .) | tar -C "$ue" -xf -
 lib="$ue/Source/ThirdParty/JsuiLibrary"
 mkdir -p "$lib/include/jsui" "$lib/lib"
-cp "$ROOT/include/jsui/jsui.h" "$lib/include/jsui/"
+cp "$ROOT/include/jsui/jsui.h" "$ROOT/include/jsui/jsui_component.hpp" "$lib/include/jsui/"
 unreal=()
 if [ -f "$ART/jsui-native-macos-universal/shared/lib/libjsui.dylib" ]; then
   cp "$ART/jsui-native-macos-universal/shared/lib/libjsui.dylib" "$lib/lib/"

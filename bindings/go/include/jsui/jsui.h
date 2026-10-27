@@ -530,6 +530,265 @@ typedef struct JsuiVideoStatus {
  * videos are ignored. */
 JSUI_API void jsui_video_status(JsuiRuntime* rt, uint64_t video, const JsuiVideoStatus* status);
 
+/* ----------------------------------------------------- Native components
+ *
+ * Your own view types, drawn by native code into the UI's Skia canvas: a
+ * minimap, a radar, a compass strip, a custom gauge or graph, anything that
+ * reads game state every frame and would be wasteful to push through React.
+ * The host registers a component class by name; the bundle uses it like any
+ * React Native native component:
+ *
+ *     // host (C)
+ *     JsuiComponentClass radar;
+ *     jsui_component_class_init(&radar);
+ *     radar.draw = radar_draw;          // the only required callback
+ *     radar.flags = JSUI_COMPONENT_CLOCKED;
+ *     jsui_register_component(rt, "Radar", &radar);
+ *
+ *     // bundle (JS)
+ *     import { requireNativeComponent } from 'react-native';
+ *     const Radar = requireNativeComponent('Radar');
+ *     <Radar range={120} sweep={sweepAnim} onContactPress={(e) => select(e.nativeEvent.id)}
+ *            style={{ width: 200, height: 200, borderRadius: 100 }} />
+ *
+ * A component view is a View (layout, background, border, radius clipping,
+ * transforms, opacity, touch handlers, children painted on top), plus what
+ * `draw` paints into its content box (inside the padding, clipped to the
+ * rounded border box). Its size comes from its style, like any View.
+ *
+ * Props: every prop except `style` and the event handlers reaches native
+ * code. `draw` reads them by name (jsui_prop_number, jsui_prop_color...); the
+ * optional `props` callback gets them all as JSON when React changes them
+ * (parse complex data there once). A prop given an Animated value travels as
+ * the paint-only style key `prop:<name>` (also with useNativeDriver): the
+ * readers see its current value, and a running animation repaints the view
+ * every frame without any React render or `props` call.
+ *
+ * Repainting: a view repaints when its props or layout change, when
+ * jsui_component_invalidate() names it (the game state it shows changed),
+ * and every frame while its class has JSUI_COMPONENT_CLOCKED (radar sweeps,
+ * real-time minimaps). Otherwise the last painting is reused (it is recorded,
+ * and composited from cache when only the view moves or fades).
+ *
+ * Events: jsui_component_emit(rt, view, "contactPress", json) calls the
+ * view's onContactPress prop with {nativeEvent: <json>}. Commands:
+ * codegenNativeCommands / dispatchCommand(ref, name, args) in JS call
+ * `command` with the name and the arguments as a JSON array.
+ *
+ * Threads: every callback runs on the runtime's thread (the one calling
+ * jsui_tick and the render calls), and the functions below are called on
+ * it too. `draw` runs inside a render call: do not create or destroy runtimes
+ * or views from it. Registration belongs to the runtime (every surface, and
+ * reloads keep it); views of a name not registered yet paint only their View
+ * part, and registering it later binds them. Hosts without a native class
+ * for a name (the CPU wasm in Node, react-native-web) show the plain View.
+ *
+ * C++: include/jsui/jsui_component.hpp wraps all of this in classes
+ * (jsui::Component, jsui::registerComponent<T>, Canvas, Paint, Path). The web
+ * host registers components drawn by page JS: registerComponent(name, impl)
+ * (web/jsui-components.js).
+ *
+ * Drawing (inside `draw`, with the JsuiCanvas it gets): coordinates are
+ * logical px with (0, 0) at the top-left of the content box; the canvas is
+ * already scaled by the pixel ratio. Colors are 0xAARRGGBB, sRGB.
+ * jsui_canvas_skia() returns the SkCanvas* itself for C++ code built against
+ * the same Skia as the library (static builds); use the C calls otherwise. */
+
+typedef struct JsuiCanvas JsuiCanvas;
+typedef struct JsuiPath JsuiPath;
+
+typedef struct JsuiDrawInfo {
+    int view;             /* the view (node id, as in create) */
+    float width, height;  /* content box, logical px */
+    float pixel_ratio;    /* device px per logical px */
+    double time_ms;       /* the runtime clock (jsui_tick's now) */
+} JsuiDrawInfo;
+
+enum {
+    /* Repaint the class's views every frame while mounted (the host keeps
+     * ticking: jsui_wants_frame stays set). */
+    JSUI_COMPONENT_CLOCKED = 1 << 0
+};
+
+typedef struct JsuiComponentClass {
+    size_t struct_size;   /* sizeof(JsuiComponentClass) (jsui_component_class_init sets it) */
+    void* user;           /* passed to create */
+    int flags;            /* JSUI_COMPONENT_* */
+    /* A view of this class mounted (or the class was registered while it
+     * was): returns its instance pointer, passed to the other callbacks.
+     * NULL callback: the instance is `user`. `rt` is the runtime handle the
+     * class was registered with. */
+    void* (*create)(void* user, JsuiRuntime* rt, int view);
+    /* The view unmounted (or the class was unregistered, or the runtime
+     * destroyed). */
+    void (*destroy)(void* instance, int view);
+    /* React changed the view's props (also right after create): all of them
+     * as a JSON object (no style, no handlers). Valid during the call. */
+    void (*props)(void* instance, int view, const char* props_json);
+    /* Paints the view (required). */
+    void (*draw)(void* instance, JsuiCanvas* canvas, const JsuiDrawInfo* info);
+    /* A command from JS (codegenNativeCommands, dispatchCommand,
+     * UIManager.dispatchViewManagerCommand); `args_json` is the array of
+     * arguments. */
+    void (*command)(void* instance, int view, const char* name, const char* args_json);
+} JsuiComponentClass;
+
+JSUI_API void jsui_component_class_init(JsuiComponentClass* cls);
+/* Registers (or replaces) class `name`; existing views of that name bind to
+ * it and repaint. The class is copied. Returns 1, or -1 for a bad argument. */
+JSUI_API int jsui_register_component(JsuiRuntime* rt, const char* name, const JsuiComponentClass* cls);
+/* Unregisters class `name`: its views get `destroy` and paint only their View
+ * part. Returns 1 if it was registered. */
+JSUI_API int jsui_unregister_component(JsuiRuntime* rt, const char* name);
+/* Repaints view `view` (the state it draws changed). 0: every view of class
+ * `name` (NULL: of every class). Returns the number of views marked. */
+JSUI_API int jsui_component_invalidate(JsuiRuntime* rt, int view, const char* name);
+/* Sends event `event` to view `view`: its on<Event> prop runs (onContactPress
+ * for "contactPress") with nativeEvent = the parsed `json` (an object; NULL:
+ * {}), in the next jsui_tick. Returns 1 if the view listens for it, 0 if it
+ * does not, -1 for an unknown view. */
+JSUI_API int jsui_component_emit(JsuiRuntime* rt, int view, const char* event, const char* json);
+
+/* Props, inside `draw` (the view's current props; Animated ones at their
+ * current value). Missing or mistyped: the default. */
+JSUI_API double jsui_prop_number(JsuiCanvas* c, const char* name, double fallback);
+JSUI_API int jsui_prop_bool(JsuiCanvas* c, const char* name, int fallback);
+/* A color prop (any React Native color: '#f80', 'rgba(...)', 'tomato'...)
+ * as 0xAARRGGBB. */
+JSUI_API uint32_t jsui_prop_color(JsuiCanvas* c, const char* name, uint32_t fallback);
+/* A string prop (valid until `draw` returns), or NULL. */
+JSUI_API const char* jsui_prop_string(JsuiCanvas* c, const char* name);
+/* A number array prop (nested arrays flatten): copies up to `max` numbers
+ * into `out`, returns how many it has (may be more than `max`). */
+JSUI_API int jsui_prop_numbers(JsuiCanvas* c, const char* name, float* out, int max);
+/* Any prop as JSON (valid until `draw` returns), or NULL when missing. */
+JSUI_API const char* jsui_prop_json(JsuiCanvas* c, const char* name);
+
+/* Paint: how shapes and text are filled or stroked. */
+typedef enum JsuiPaintStyle {
+    JSUI_PAINT_FILL = 0,
+    JSUI_PAINT_STROKE,
+    JSUI_PAINT_FILL_AND_STROKE
+} JsuiPaintStyle;
+
+typedef enum JsuiCap { JSUI_CAP_BUTT = 0, JSUI_CAP_ROUND, JSUI_CAP_SQUARE } JsuiCap;
+typedef enum JsuiJoin { JSUI_JOIN_MITER = 0, JSUI_JOIN_ROUND, JSUI_JOIN_BEVEL } JsuiJoin;
+
+typedef enum JsuiBlend {
+    JSUI_BLEND_SRC_OVER = 0,  /* normal */
+    JSUI_BLEND_PLUS,          /* additive (glows) */
+    JSUI_BLEND_MULTIPLY,
+    JSUI_BLEND_SCREEN,
+    JSUI_BLEND_SRC,           /* replace */
+    JSUI_BLEND_DST_OUT,       /* erase where drawn */
+    JSUI_BLEND_DST_IN         /* keep only where drawn (masks) */
+} JsuiBlend;
+
+typedef enum JsuiGradientType {
+    JSUI_GRADIENT_NONE = 0,
+    JSUI_GRADIENT_LINEAR,  /* from (x0, y0) to (x1, y1) */
+    JSUI_GRADIENT_RADIAL,  /* center (x0, y0), radius r */
+    JSUI_GRADIENT_SWEEP    /* center (x0, y0), angles start..end (degrees, clockwise from +x) */
+} JsuiGradientType;
+
+typedef struct JsuiGradient {
+    int type;                /* JsuiGradientType */
+    float x0, y0, x1, y1;    /* see JsuiGradientType */
+    float r;                 /* radial radius */
+    float start, end;        /* sweep angles, degrees (0, 360: full turn) */
+    const uint32_t* colors;  /* `count` colors, 0xAARRGGBB */
+    const float* stops;      /* `count` positions 0..1, or NULL: evenly spaced */
+    int count;               /* >= 2 */
+} JsuiGradient;
+
+typedef struct JsuiPaint {
+    uint32_t color;          /* 0xAARRGGBB (with a gradient: only its alpha applies) */
+    int style;               /* JsuiPaintStyle */
+    float stroke_width;      /* px (0: hairline) */
+    int cap, join;           /* JsuiCap, JsuiJoin */
+    int blend;               /* JsuiBlend */
+    int antialias;           /* nonzero: smooth edges (default) */
+    float blur;              /* > 0: Gaussian blur sigma, px (soft glows, shadows) */
+    const float* dash;       /* stroke dash lengths (on, off, ...), or NULL */
+    int dash_count;          /* even */
+    float dash_phase;
+    const JsuiGradient* gradient;  /* or NULL: the solid color */
+} JsuiPaint;
+
+/* Opaque black fill, 1 px stroke width, butt caps, miter joins, antialiased. */
+JSUI_API void jsui_paint_init(JsuiPaint* p);
+
+/* Text: the runtime's fonts (registered fonts, the bundle's loaded fonts,
+ * the default Inter). */
+typedef enum JsuiTextAlign { JSUI_TEXT_LEFT = 0, JSUI_TEXT_CENTER, JSUI_TEXT_RIGHT } JsuiTextAlign;
+typedef struct JsuiFont {
+    const char* family;  /* CSS-style family list, or NULL: the default family */
+    float size;          /* px (0: 14) */
+    int weight;          /* 100..900 (0: 400) */
+    int italic;
+    int align;           /* JsuiTextAlign: x is the left / center / right of the text */
+} JsuiFont;
+
+/* Canvas state. */
+JSUI_API void jsui_canvas_save(JsuiCanvas* c);
+/* Like save, and the drawing until the matching restore is composited with
+ * `alpha` (0..1) as one layer. */
+JSUI_API void jsui_canvas_save_layer(JsuiCanvas* c, float alpha);
+JSUI_API void jsui_canvas_restore(JsuiCanvas* c);
+JSUI_API void jsui_canvas_translate(JsuiCanvas* c, float dx, float dy);
+JSUI_API void jsui_canvas_scale(JsuiCanvas* c, float sx, float sy);
+/* Rotates by `degrees` clockwise about the origin. */
+JSUI_API void jsui_canvas_rotate(JsuiCanvas* c, float degrees);
+JSUI_API void jsui_canvas_clip_rect(JsuiCanvas* c, float x, float y, float w, float h);
+JSUI_API void jsui_canvas_clip_rrect(JsuiCanvas* c, float x, float y, float w, float h, float radius);
+JSUI_API void jsui_canvas_clip_path(JsuiCanvas* c, const JsuiPath* path);
+
+/* Shapes. A NULL paint is the default one (jsui_paint_init). */
+JSUI_API void jsui_canvas_clear(JsuiCanvas* c, uint32_t color);  /* fills the clip, replacing */
+JSUI_API void jsui_canvas_draw_rect(JsuiCanvas* c, float x, float y, float w, float h, const JsuiPaint* p);
+JSUI_API void jsui_canvas_draw_rrect(JsuiCanvas* c, float x, float y, float w, float h, float radius,
+                                     const JsuiPaint* p);
+JSUI_API void jsui_canvas_draw_circle(JsuiCanvas* c, float cx, float cy, float r, const JsuiPaint* p);
+JSUI_API void jsui_canvas_draw_oval(JsuiCanvas* c, float x, float y, float w, float h, const JsuiPaint* p);
+JSUI_API void jsui_canvas_draw_line(JsuiCanvas* c, float x0, float y0, float x1, float y1, const JsuiPaint* p);
+/* An arc of the oval in (x, y, w, h) from `start` sweeping `sweep` degrees
+ * (clockwise from +x); `use_center`: a pie wedge. */
+JSUI_API void jsui_canvas_draw_arc(JsuiCanvas* c, float x, float y, float w, float h, float start, float sweep,
+                                   int use_center, const JsuiPaint* p);
+JSUI_API void jsui_canvas_draw_path(JsuiCanvas* c, const JsuiPath* path, const JsuiPaint* p);
+/* Text at baseline y; returns its advance width (px). */
+JSUI_API float jsui_canvas_draw_text(JsuiCanvas* c, const char* utf8, float x, float y, const JsuiFont* font,
+                                     const JsuiPaint* p);
+/* The advance width of `utf8` in `font`, px. */
+JSUI_API float jsui_canvas_measure_text(JsuiCanvas* c, const char* utf8, const JsuiFont* font);
+/* An image (a URL / bundle asset path, resolved like Image's uri) or a host
+ * texture (jsui_set_texture key) stretched into (x, y, w, h), with `alpha`.
+ * Returns 1 if it drew, 0 while it is still loading (the view repaints when
+ * it arrives) or unknown. */
+JSUI_API int jsui_canvas_draw_image(JsuiCanvas* c, const char* uri, float x, float y, float w, float h, float alpha);
+JSUI_API int jsui_canvas_draw_texture(JsuiCanvas* c, const char* key, float x, float y, float w, float h,
+                                      float alpha);
+/* The SkCanvas* (see above). */
+JSUI_API void* jsui_canvas_skia(JsuiCanvas* c);
+
+/* Paths: built once, drawn many times (owned by the caller). */
+JSUI_API JsuiPath* jsui_path_create(void);
+/* From SVG path data ("M10 10 L20 20 Z"); NULL if it does not parse. */
+JSUI_API JsuiPath* jsui_path_from_svg(const char* d);
+JSUI_API void jsui_path_destroy(JsuiPath* path);
+JSUI_API void jsui_path_reset(JsuiPath* path);
+JSUI_API void jsui_path_move_to(JsuiPath* path, float x, float y);
+JSUI_API void jsui_path_line_to(JsuiPath* path, float x, float y);
+JSUI_API void jsui_path_quad_to(JsuiPath* path, float cx, float cy, float x, float y);
+JSUI_API void jsui_path_cubic_to(JsuiPath* path, float c1x, float c1y, float c2x, float c2y, float x, float y);
+JSUI_API void jsui_path_close(JsuiPath* path);
+JSUI_API void jsui_path_add_rect(JsuiPath* path, float x, float y, float w, float h);
+JSUI_API void jsui_path_add_circle(JsuiPath* path, float cx, float cy, float r);
+/* An arc (see jsui_canvas_draw_arc) as a new contour. */
+JSUI_API void jsui_path_add_arc(JsuiPath* path, float x, float y, float w, float h, float start, float sweep);
+/* Nonzero: even-odd fill (holes); default nonzero winding. */
+JSUI_API void jsui_path_set_even_odd(JsuiPath* path, int even_odd);
+
 /* Reads `url` (relative URLs resolve against the base URL) through the
  * runtime's loader, the same way the bundle and images are read. `done` runs
  * once on the runtime's thread inside a later jsui_tick() with an HTTP-like

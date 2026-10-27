@@ -3,7 +3,7 @@
 # with -DJSUI_BUILD_SHARED=ON, see the dist-* jobs in .github/workflows/ci.yml)
 # into the layout the CI artifacts and the release archives use:
 #
-#   <out>/shared/include/jsui/jsui.h         C API
+#   <out>/shared/include/jsui/jsui.h         C API (+ jsui_component.hpp, C++ helpers)
 #   <out>/shared/lib/libjsui.so | .dylib     the shared library (Windows: lib/jsui.lib,
 #   <out>/shared/bin/jsui.dll, icudtl.dat      bin/jsui.dll + the ICU data next to it)
 #   <out>/shared/lib/cmake/jsui/             find_package(jsui) -> jsui::jsui
@@ -29,7 +29,7 @@ BUILD2="${4:-}"
 
 rm -rf "$OUT"
 mkdir -p "$OUT/shared/include/jsui" "$OUT/shared/lib/cmake/jsui" "$OUT/viewer" "$OUT/godot" "$OUT/unity"
-cp "$ROOT/include/jsui/jsui.h" "$OUT/shared/include/jsui/"
+cp "$ROOT/include/jsui/jsui.h" "$ROOT/include/jsui/jsui_component.hpp" "$OUT/shared/include/jsui/"
 cp "$ROOT/cmake/dist/jsuiConfig.cmake" "$OUT/shared/lib/cmake/jsui/"
 
 # merge <out> <in-arm64> <in-x64>: a universal Mach-O.
