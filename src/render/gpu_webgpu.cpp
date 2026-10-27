@@ -117,13 +117,20 @@ struct WebGPUGpu final : JsuiGpuContext {
     if (t.kind != JSUI_TEXTURE_WEBGPU || !recorder) return nullptr;
     wgpu::Texture texture(static_cast<WGPUTexture>(t.handle));
     wgpu::TextureFormat f = t.format ? wgpu::TextureFormat(t.format) : texture.GetFormat();
+    // 8-bit formats hold sRGB-encoded values (as uploads do). The sRGB view
+    // and half-float formats (a WebGPU game's own render targets, e.g. a
+    // Three.js RenderTarget in SRGBColorSpace or HalfFloatType) sample as
+    // linear values, converted to the frame's sRGB when drawn.
     SkColorType ct;
+    sk_sp<SkColorSpace> cs;
     if (f == wgpu::TextureFormat::RGBA8Unorm) ct = kRGBA_8888_SkColorType;
     else if (f == wgpu::TextureFormat::BGRA8Unorm) ct = kBGRA_8888_SkColorType;
+    else if (f == wgpu::TextureFormat::RGBA8UnormSrgb) ct = kSRGBA_8888_SkColorType, cs = SkColorSpace::MakeSRGBLinear();
+    else if (f == wgpu::TextureFormat::RGBA16Float) ct = kRGBA_F16_SkColorType, cs = SkColorSpace::MakeSRGBLinear();
     else return nullptr;
     graphite::BackendTexture bt = graphite::BackendTextures::MakeDawn(texture.Get());
     if (!bt.isValid()) return nullptr;
-    return SkImages::WrapTexture(recorder.get(), bt, ct, jsui::textureAlphaType(t), nullptr);
+    return SkImages::WrapTexture(recorder.get(), bt, ct, jsui::textureAlphaType(t), std::move(cs));
   }};
   // What render() keeps between frames of one surface. Several surfaces of
   // a runtime (several canvases) can share this context: one entry each.
@@ -133,6 +140,11 @@ struct WebGPUGpu final : JsuiGpuContext {
     wgpu::Texture back;
     sk_sp<SkImage> backImage;
     uint64_t retainedGen = 0;   // the key of the current retained frame
+    // JSUI_WEBGPU_INCREMENTAL: the key of the frame the target holds (0:
+    // none), and the size / format it was rendered at.
+    uint64_t targetGen = 0;
+    int targetW = 0, targetH = 0;
+    WGPUTextureFormat targetFormat = WGPUTextureFormat_Undefined;
     int smallFrames = 0;        // consecutive frames with small damage
     int directFrames = 0;       // consecutive frames painted straight into the target
     uint64_t lastUsed = 0;
@@ -322,6 +334,53 @@ void purge(JsuiGpuContext* gpu, size_t cacheBytes) {
   g->ctx->freeGpuResources();
 }
 
+namespace {
+
+// Submits the frame's recording; -1 on failure or device loss.
+int finishFrame(WebGPUGpu* g, Surface& rt) {
+  {
+    Perf::Scope gpuScope(rt.doc.perf, Phase::Gpu);
+    if (!g->flush()) return -1;
+  }
+  rt.doc.perf.counters.pipelineCompiles += g->precompiler->takeCompiles();
+  if (g->isLost()) return -1;
+  g->precompiler->afterFrame();
+  return 0;
+}
+
+// JSUI_WEBGPU_INCREMENTAL: the target keeps its pixels between frames (a
+// texture the embedder owns, e.g. one a WebGPU game samples in its scene),
+// so it is the retained frame itself: the damage is repainted straight into
+// it, and nothing else (no retained texture, no copy) is needed.
+int renderIncremental(WebGPUGpu* g, Surface& rt, const wgpu::Texture& texture, sk_sp<SkSurface> target, int w,
+                      int h, int flags) {
+  WebGPUGpu::Frames& f = g->framesOf(&rt);
+  f.drop();
+  const WGPUTextureFormat format = WGPUTextureFormat(texture.GetFormat());
+  const bool same = f.targetGen && f.targetW == w && f.targetH == h && f.targetFormat == format;
+  if (!same) f.targetGen = ++g->nextGen;
+  f.targetW = w;
+  f.targetH = h;
+  f.targetFormat = format;
+  const void* key = reinterpret_cast<const void*>(uintptr_t(f.targetGen));
+  jsui::TextureScope textureScope(&g->textures);
+  jsui::GpuLayerFrame layerFrame(g->layers.of(&rt), !(flags & JSUI_WEBGPU_NO_LAYER_CACHE),
+                                 !(flags & JSUI_WEBGPU_NO_RASTER_CACHE), !(flags & JSUI_WEBGPU_NO_BACKDROP));
+  // A first frame (or one after a size change) repaints fully. Repaints
+  // clear what they cover (NO_CLEAR does not apply).
+  rt.renderCanvasTracked(key, w, h, [&](const SkIRect&, bool) -> Surface::CanvasChoice {
+    Surface::CanvasChoice c{target->getCanvas(), key, true};
+    c.splitDamage = true;
+    return c;
+  }, /*growCurves=*/false);
+  target.reset();
+  const int r = finishFrame(g, rt);
+  if (r != 0) f.targetGen = 0;
+  return r;
+}
+
+}  // namespace
+
 int render(Surface& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
   WebGPUGpu* g = asWebGPU(gpu);
   if (!g || !t.texture || g->isLost()) return -1;
@@ -364,6 +423,7 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
   //   costs a full repaint plus the copy, more than another direct frame).
   constexpr int kRetainAfter = 3, kFreeRetainedAfter = 300;
   const bool noClear = (t.flags & JSUI_WEBGPU_NO_CLEAR) != 0;
+  if (t.flags & JSUI_WEBGPU_INCREMENTAL) return renderIncremental(g, rt, texture, target, w, h, t.flags);
   const bool copyBack = !noClear && (texture.GetUsage() & wgpu::TextureUsage::CopySrc);
   SkImageInfo info = target->imageInfo();
   WebGPUGpu::Frames& f = g->framesOf(&rt);
@@ -477,14 +537,7 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiWebGPUTarget& t) {
     if (!ok) f.drop();  // not a copy of this frame: the next one repaints fully
   }
   target.reset();
-  {
-    Perf::Scope gpuScope(rt.doc.perf, Phase::Gpu);
-    if (!g->flush()) return -1;
-  }
-  rt.doc.perf.counters.pipelineCompiles += g->precompiler->takeCompiles();
-  if (g->isLost()) return -1;
-  g->precompiler->afterFrame();
-  return 0;
+  return finishFrame(g, rt);
 }
 
 }  // namespace webgpu

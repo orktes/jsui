@@ -136,6 +136,53 @@ test('WebGPU: one texture per name, refilled at the same size, replaced on resiz
   assert.ok(M.calls.some((c) => c[0] === 'releaseInstance'));
 });
 
+test('WebGPU: a GPUTexture source is sampled in place, never copied or destroyed', () => {
+  globalThis.GPUTexture ??= class GPUTexture {};
+  const gpuTexture = (w, h, format = 'rgba8unorm', usage = 0x14) => Object.assign(new GPUTexture(),
+    { width: w, height: h, format, usage, destroyed: false, destroy() { this.destroyed = true; } });
+  const dev = mockDevice();
+  const { M, set, warnings } = setup([webgpuView(dev)]);
+  const game = gpuTexture(256, 128, 'rgba8unorm-srgb');
+  assert.equal(set.set('minimap', game), true);
+  assert.equal(dev.created.length, 0);
+  assert.equal(dev.copies.length, 0);
+  const [, , desc] = M.calls.find((c) => c[0] === 'set');
+  assert.deepEqual(desc, { kind: 2, handle: game.ptr, format: 0, width: 256, height: 128, flags: 0, usage: 0 });
+
+  // The same texture again: new contents.
+  M.calls.length = 0;
+  assert.equal(set.set('minimap', game), true);
+  assert.deepEqual(M.calls, [['updated', 'minimap']]);
+
+  // Another one replaces it; the game's texture is released, not destroyed.
+  M.calls.length = 0;
+  const next = gpuTexture(256, 128);
+  set.set('minimap', next);
+  assert.equal(M.calls[0][0], 'set');
+  assert.deepEqual(M.calls[1], ['releaseTexture', game.ptr]);
+  assert.equal(game.destroyed, false);
+
+  // A canvas under the same name: a texture of our own from then on.
+  set.set('minimap', canvas(16, 16));
+  assert.equal(dev.created.length, 1);
+  assert.equal(next.destroyed, false);
+
+  // Unusable textures are reported, not thrown.
+  assert.equal(set.set('bad', gpuTexture(8, 8, 'r8unorm')), false);
+  assert.equal(set.set('nobind', gpuTexture(8, 8, 'rgba8unorm', 0x10)), false);
+  assert.equal(warnings.length, 2);
+  set.destroy();
+  assert.equal(next.destroyed, false);
+});
+
+test('a GPUTexture source needs every view on WebGPU', () => {
+  globalThis.GPUTexture ??= class GPUTexture {};
+  const { set, warnings } = setup([{}]);
+  const t = Object.assign(new GPUTexture(), { width: 8, height: 8, format: 'rgba8unorm', usage: 0x04 });
+  assert.equal(set.set('x', t), false);
+  assert.match(warnings[0], /needs the WebGPU renderer/);
+});
+
 test('video sources are opaque by default', () => {
   const dev = mockDevice();
   const { M, set } = setup([webgpuView(dev)]);
