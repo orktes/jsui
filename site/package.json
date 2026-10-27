@@ -10,8 +10,8 @@
     "test": "node test/smoke.mjs"
   },
   "dependencies": {
-    "@orktes/jsui-cli": "0.11.0",
-    "@orktes/jsui-react": "0.11.0",
+    "@orktes/jsui-cli": "0.12.0",
+    "@orktes/jsui-react": "0.12.0",
     "esbuild": "0.28.2",
     "sucrase": "^3.35.1",
     "three": "0.186.1"
