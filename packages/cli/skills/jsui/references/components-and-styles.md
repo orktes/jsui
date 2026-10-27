@@ -144,8 +144,8 @@ RTL follow `I18nManager`.
 
 Prefer bundled assets (`require`): they are emitted next to the bundle and
 load from the same place the engine loads the bundle (files, Godot `res://`,
-the web server). Remote `{uri: 'http://...'}` works in dev and on the web;
-native builds have no TLS, so `https://` URLs need the engine's loader.
+the web server). Remote `{uri: 'https://...'}` works on every host (the OS or
+the engine plugin does the TLS).
 `data:` URIs work everywhere.
 
 ## Things that behave differently from a phone

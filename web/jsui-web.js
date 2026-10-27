@@ -201,6 +201,10 @@
  *                                // bundle runs: { Name: impl } or the URL of a module exporting them
  *                                // (web/jsui-components.js); worker mode needs the URL (its draw
  *                                // functions run in the worker)
+ *   fetch?: Function,            // (url, init) => Promise<Response>: does the runtime's network loads
+ *                                // (the bundle's fetch(), images, fonts, sounds) instead of the
+ *                                // page's fetch, e.g. to add auth headers or serve a mock API. Needs
+ *                                // the main thread (no worker mode)
  *   js?: 'quickjs'|'host',       // the JS engine the bundle runs on: 'host' (default) this page's /
  *                                // worker's own engine (V8, JavaScriptCore, SpiderMonkey), with the
  *                                // native core still in WASM (docs/ARCHITECTURE.md "Host JS engine");
@@ -357,6 +361,11 @@ export async function createJsui(opts) {
   if (opts.worker && opts.components && typeof opts.components === 'object') {
     // Functions can't reach a worker: its runtime imports a module URL instead.
     console.warn('[jsui] worker mode needs `components` as a module URL (draw functions run in the worker): running on the page\'s main thread');
+    opts = { ...opts, worker: false };
+  }
+  if (opts.worker && typeof opts.fetch === 'function') {
+    console.warn('[jsui] worker mode cannot use a `fetch` function (it would run in the worker): running on the ' +
+      'page\'s main thread');
     opts = { ...opts, worker: false };
   }
   if (opts.worker && opts.device) {
@@ -2210,6 +2219,8 @@ class JsuiHost extends CanvasView {
     this.rootTag = 1;
     /** UI audio (web/jsui-audio.js): unlocked, unlock(), setVolume(), muted, context. */
     this.audio = new JsuiAudio(this, opts.audio);
+    // The runtime's loader (src/platform/loader_emscripten.cpp) uses it for every network load.
+    if (typeof opts.fetch === 'function') M.jsuiFetch = opts.fetch;
     // <Video> views (include/jsui/jsui.h "Video"): played with <video>
     // elements here (web/jsui-textures.js JsuiVideo); a worker's runtime
     // forwards the commands to the page instead (opts.video).

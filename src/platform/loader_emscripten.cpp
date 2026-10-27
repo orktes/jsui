@@ -149,7 +149,8 @@ EM_JS(void, jsui_js_fetch_start,
     if (timeoutMs > 0) entry.timer = setTimeout(function() { entry.timedOut = true; ctl.abort(); }, timeoutMs);
   }
   var p;
-  try { p = fetch(url, init); } catch (e) { p = Promise.reject(e); }
+  // The page's own (createJsui({ fetch })) or the browser's.
+  try { p = (Module.jsuiFetch || fetch)(url, init); } catch (e) { p = Promise.reject(e); }
   p.then(function(res) {
     if (!stream || !res.body || !res.body.getReader) {
       return res.arrayBuffer().then(function(buf) {

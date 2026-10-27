@@ -443,10 +443,10 @@ TEST(net_http_client) {
   CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(500));
 
   req.timeoutMs = 2000;
-  req.url = "https://example.com/";
+  req.url = "https://127.0.0.1:1/";  // no TLS library, or nothing listens
   r = net::httpRequest(req);
   CHECK_EQ(r.status, 0);
-  CHECK(r.error.find("https") != std::string::npos);
+  CHECK(!r.error.empty());
   req.url = "http://127.0.0.1:1/";  // nothing listens on port 1
   r = net::httpRequest(req);
   CHECK_EQ(r.status, 0);
@@ -466,7 +466,7 @@ TEST(host_fetch_http) {
     fetch(B + '/echo', {method: 'PUT', body: new Uint8Array([104, 105])}).then(r => r.text()).then(t => post('put', t));
     fetch(B + '/missing').then(r => post('missing', [r.status, r.ok]));
     fetch('http://127.0.0.1:1/x').catch(e => post('refused', e instanceof TypeError ? 'TypeError' : String(e)));
-    fetch('https://example.com/').catch(e => post('https', e.message));
+    fetch('https://127.0.0.1:1/').catch(e => post('https', e.message));
     const ac = new AbortController();
     fetch(B + '/slow', {signal: ac.signal}).catch(e => post('aborted', e.name));
     setTimeout(() => ac.abort(), 50);
@@ -484,7 +484,7 @@ TEST(host_fetch_http) {
   CHECK_EQ(msg("put"), std::string("PUT application/octet-stream  hi"));
   CHECK_EQ(msg("missing"), std::string("[404,false]"));
   CHECK_EQ(msg("refused"), std::string("TypeError"));
-  CHECK(msg("https").find("https:// is not supported") != std::string::npos);
+  CHECK(msg("https").find("fetch failed") != std::string::npos);
   CHECK_EQ(msg("aborted"), std::string("AbortError"));
   for (auto& e : h.errors) std::fprintf(stderr, "    unexpected error: %s\n", e.c_str());
   CHECK(h.errors.empty());

@@ -39,6 +39,10 @@ pub type JsuiJsReadyFn = Option<unsafe extern "C" fn(user: *mut c_void)>;
 pub type JsuiVideoFn = *const c_void;
 /// `JsuiChildFn` (see the header's "Child runtimes"); not wrapped yet.
 pub type JsuiChildFn = *const c_void;
+/// `JsuiRequestFn` / `JsuiRequestCancelFn` (see the header's "Resource
+/// loading"); not wrapped yet.
+pub type JsuiRequestFn = *const c_void;
+pub type JsuiRequestCancelFn = *const c_void;
 pub type JsuiGLGetProcFn = Option<unsafe extern "C" fn(user: *mut c_void, name: *const c_char) -> *mut c_void>;
 
 #[repr(C)]
@@ -75,6 +79,9 @@ pub struct JsuiConfig {
     pub video_user: *mut c_void,
     pub on_child: JsuiChildFn,
     pub child_user: *mut c_void,
+    pub on_request: JsuiRequestFn,
+    pub on_request_cancel: JsuiRequestCancelFn,
+    pub request_user: *mut c_void,
 }
 
 pub const JSUI_JS_THREAD_OFF: c_int = 0;
