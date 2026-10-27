@@ -11,10 +11,10 @@ import { createDevtoolsFrontend, editEntryPage, DEVTOOLS_REVISION } from '../src
 const PAGE = `<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src data: 'self' devtools: ws://127.0.0.1:*;">
 <script type="module" src="./entrypoints/js_app/js_app.js"></script>`;
 
-test('entry pages load the patch and may connect to the server', () => {
+test('entry pages hide the screencast and may connect to the server', () => {
   const out = editEntryPage(PAGE, 'ws://10.0.0.5:5173');
   assert.match(out, /connect-src data: 'self' devtools: ws:\/\/127\.0\.0\.1:\* ws:\/\/10\.0\.0\.5:5173;/);
-  assert.match(out, /<script src="\.\/jsui-devtools-early\.js"><\/script>\n<script type="module" src="\.\/entrypoints\/js_app\/js_app\.js"><\/script>\n<script type="module" src="\.\/jsui-devtools\.js"><\/script>/);
+  assert.match(out, /<script src="\.\/jsui-devtools-early\.js"><\/script>\n<script type="module" src="\.\/entrypoints\/js_app\/js_app\.js"><\/script>/);
 });
 
 test('files come from the pinned revision once, then from the cache', async () => {
@@ -42,10 +42,9 @@ test('files come from the pinned revision once, then from the cache', async () =
     assert.equal(await readFile(path.join(cacheDir, 'core/sdk/sdk.js'), 'utf8'), 'export {};');
 
     const page = await (await fetch(base + 'js_app.html')).text();
-    assert.match(page, /jsui-devtools\.js/);
+    assert.match(page, /jsui-devtools-early\.js/);
     assert.match(page, new RegExp(`ws://127\\.0\\.0\\.1:${server.address().port};`));
-    const patch = await (await fetch(base + 'jsui-devtools.js')).text();
-    assert.match(patch, /loadFromCpuProfile/);
+    assert.match(await (await fetch(base + 'jsui-devtools-early.js')).text(), /screencast-enabled/);
     assert.equal((await fetch(base + 'missing.js')).status, 404);
     const raw = (p) => new Promise((r) => http.get({ host: '127.0.0.1', port: server.address().port, path: p }, (res) => { res.resume(); r(res.statusCode); }));
     await raw('/__jsui/devtools/../../etc/passwd');  // URL parsing drops the dots: not ours

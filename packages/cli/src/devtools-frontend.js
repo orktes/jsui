@@ -6,8 +6,8 @@
 //
 // The files are Chrome's prebuilt frontend (BSD-3-Clause) for one pinned
 // Chrome revision, fetched from Google's DevTools CDN on first use and kept
-// in a cache directory. The pin matters: the patch hooks the Performance
-// panel's internals, so a new revision is a deliberate bump.
+// in a cache directory. Pinned, so what users get only changes when the
+// revision is bumped on purpose.
 
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -40,23 +40,6 @@ try {
 } catch {}
 `;
 
-// After DevTools: in Node mode (js_app.html) the Performance panel records
-// a CPU profile; it opens the recording's trace instead (the relay names it
-// in profile.jsuiTrace).
-const PATCH = `// jsui dev: Node mode opens a recording as its trace (render thread, worklets, GPU).
-import * as Timeline from './panels/timeline/timeline.js';
-const proto = Timeline.TimelinePanel.TimelinePanel.prototype;
-const loadFromCpuProfile = proto.loadFromCpuProfile;
-proto.loadFromCpuProfile = function (profile, title) {
-  const url = profile && profile.jsuiTrace;
-  if (!url) return loadFromCpuProfile.call(this, profile, title);
-  fetch(url)
-    .then((r) => (r.ok ? r.text() : Promise.reject(new Error(String(r.status)))))
-    .then((text) => this.loadFromFile(new File([text], 'jsui-profile.json', { type: 'application/json' })))
-    .catch(() => loadFromCpuProfile.call(this, profile, title));
-};
-`;
-
 /** The cache directory for one revision's files. */
 export function devtoolsCacheDir(env = process.env) {
   const base = env.JSUI_CACHE_DIR || (env.XDG_CACHE_HOME ? path.join(env.XDG_CACHE_HOME, 'jsui') : path.join(homedir(), '.cache', 'jsui'));
@@ -66,7 +49,7 @@ export function devtoolsCacheDir(env = process.env) {
 /** An entry page with the patch loaded and `wsOrigin` allowed to connect. */
 export function editEntryPage(html, wsOrigin) {
   let out = html.replace(/connect-src ([^;"]*)/, (m, list) => `connect-src ${list} ${wsOrigin}`);
-  out = out.replace(/(<script type="module" src="[^"]+"><\/script>)/, '<script src="./jsui-devtools-early.js"></script>\n$1\n<script type="module" src="./jsui-devtools.js"></script>');
+  out = out.replace(/(<script type="module" src="[^"]+"><\/script>)/, '<script src="./jsui-devtools-early.js"></script>\n$1');
   return out;
 }
 
@@ -114,8 +97,8 @@ export function createDevtoolsFrontend(o = {}) {
         res.writeHead(200, { 'Content-Type': TYPES[path.extname(rel)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
         res.end(req.method === 'HEAD' ? undefined : data);
       };
-      if (rel === 'jsui-devtools.js' || rel === 'jsui-devtools-early.js') {
-        send(rel === 'jsui-devtools.js' ? PATCH : EARLY);
+      if (rel === 'jsui-devtools-early.js') {
+        send(EARLY);
         return true;
       }
       file(rel).then(

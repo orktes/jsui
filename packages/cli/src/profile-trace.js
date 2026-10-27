@@ -4,9 +4,9 @@
 // runtime's frame phases (the profile's `jsuiSpans`) on a
 // "JSUI render thread" track as Chrome's own Layout / Paint / ... events
 // (colored Rendering, Painting), worklet runs on a "JSUI worklets" track,
-// and GPU submits on the GPU track. The live
-// recording can only show them inside the JS flame chart: DevTools records
-// a CPU profile, not a trace, from a Node-style target.
+// and GPU submits on the GPU track. The relay sends these to a DevTools
+// that opened the runtime as a page (Tracing.dataCollected, inspect.js);
+// opened Node-style, DevTools records a CPU profile, not a trace.
 //
 // The events carry the fields DevTools' trace engine reads (a Paint without
 // args.data.layerId fails the whole trace). Thread names matter: DevTools

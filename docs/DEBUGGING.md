@@ -80,10 +80,8 @@ running. *Save profile* writes a `.cpuprofile`.
   Rendering and Painting) where they actually ran, overlapping JS or not,
   worklet runs (react-native-worklets, on the window's thread) on a **JSUI
   worklets** track, and each GPU submit on the **GPU** track. Opened the
-  Node-style way, DevTools asks for a CPU profile only and gets one lane;
-  `jsui dev` still keeps the trace (`http://127.0.0.1:5173/__jsui/trace/1.json`,
-  the last 10) to drop on the Performance panel or
-  [Perfetto](https://ui.perfetto.dev).
+  Node-style way (`chrome://inspect`), DevTools asks for a CPU profile only
+  and shows one lane, with the phases as `(layout)`, `(paint)`, ... entries.
 * **How.** A thread of the runtime's arms the statement traps once per
   sampling interval (`Profiler.setSamplingInterval`, 1 ms unless the
   frontend asks otherwise, at least 100 µs), and the next

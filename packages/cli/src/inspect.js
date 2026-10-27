@@ -417,7 +417,7 @@ export function createInspector(o) {
           } else {
             const s = sessions.get(String(m.session));
             if (s && s.runtime === id && s.page && internalReply(s, rt, m.message)) continue;
-            if (s && s.runtime === id) s.ws.send(m.message.includes('"jsuiSpans"') ? keepTrace(rt, m.message) : m.message);
+            if (s && s.runtime === id) s.ws.send(m.message);
           }
         }
       }
@@ -467,54 +467,11 @@ export function createInspector(o) {
       }
       return true;
     }
-    const t = /^\/__jsui\/trace\/(\d+)\.json$/.exec(p);
-    if (t && req.method === 'OPTIONS') {
-      // A page served from the web asks first (Private Network Access).
-      res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET', 'Access-Control-Allow-Private-Network': 'true' });
-      res.end();
-      return true;
-    }
-    if (t && (req.method === 'GET' || req.method === 'HEAD')) {
-      const trace = traces.get(Number(t[1]));
-      if (!trace) sendJson(res, 404, { error: 'no such trace (the server keeps the last 10)' });
-      else {
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Private-Network': 'true', 'Content-Disposition': `attachment; filename="jsui-profile-${t[1]}.json"` });
-        res.end(req.method === 'HEAD' ? undefined : trace);
-      }
-      return true;
-    }
     if (p.startsWith('/__jsui/inspect/')) {
       sendJson(res, 404, { error: 'not found' });
       return true;
     }
     return false;
-  }
-
-  // A CPU profile a runtime recorded (Profiler.stop) is also kept as a trace
-  // with a lane per thread, which DevTools opens from its URL.
-  const traces = new Map();  // number -> JSON text
-  let nextTrace = 1;
-  // Returns the message to pass on: the profile names its trace
-  // (profile.jsuiTrace), which DevTools served from here opens.
-  function keepTrace(rt, text) {
-    let msg;
-    try {
-      msg = JSON.parse(text);
-    } catch {
-      return text;
-    }
-    const profile = msg && msg.result && msg.result.profile;
-    if (!profile || !Array.isArray(profile.nodes)) return text;
-    const n = nextTrace++;
-    traces.set(n, JSON.stringify(profileTrace(profile, { name: rt.name || 'jsui', url: rt.title })));
-    if (traces.size > 10) traces.delete(traces.keys().next().value);
-    const url = `${originOf()}/__jsui/trace/${n}.json`;
-    // (DevTools can't fetch it itself: its pages' content security policy
-    // allows no http:// connections, so loadTimelineFromURL can't reach it.)
-    log(`[jsui] profile ${n} with render thread and GPU tracks: ${url} (DevTools from /__jsui/devtools/ opens it by itself; elsewhere, drop the download on the Performance panel)`);
-    delete profile.jsuiSpans;
-    profile.jsuiTrace = `/__jsui/trace/${n}.json`;
-    return JSON.stringify(msg);
   }
 
   // DevTools loads source maps through the target (Network.loadNetworkResource,
