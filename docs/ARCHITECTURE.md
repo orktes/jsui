@@ -283,12 +283,42 @@ embedder and does what a host does with the C API:
   and `hostState` prop are `containerCommand(id, {op, ...})` bridge calls
   (`post`, `call` → `jsui_call_ui` with a `callResult` event back, `state`,
   `reload`, `load`), queued on the node and run by the next tick.
-* **Isolation and limits.** Nothing is shared but the loader, the clock and
-  the log. Fonts registered on the parent are not the child's; the child's
-  sounds use the built-in audio backend and its `<Video>` has no handler
-  (both handlers answer the embedder's own runtime); host textures set on
-  the parent are not visible in the child. The child runs JS on the owner
-  thread (no JS thread of its own). Containers nest.
+* **Services** (`Services` in `container_view.h`). The child uses the
+  parent's services unless told otherwise, so the embedder sees one runtime:
+  * *Loads* (bundle, images, fonts, `fetch`, whole requests) go through the
+    parent's `ResourceLoader` (`ResourceLoader::forward`).
+  * *Audio*: the child's `on_audio` is the container, which plays through
+    the parent's `Audio` (`Audio::playFor` / `preloadFor`: the parent's
+    handler or built-in backend, under parent voice ids). The child's bus
+    volumes scale its own voices (SETs), never the parent's mix; its
+    STOP_ALL stops only its voices; UNLOAD is ignored.
+  * *Video*: the child's `on_video` is the container, which opens it with the
+    parent's `Video::openFor` (the parent's handler, a parent video id, the
+    texture `jsuic:<node>/<generation>/<video>`) and aliases the child's
+    texture key to that one. Status reports go back under the child's id.
+  * *Fonts*: the child's `FontManager` inherits the parent's (its
+    `FontRegistry` falls back to the parent's for families and glyph
+    fallback); fonts the parent registers later re-shape the child's text.
+  * *Host textures*: the child's `HostTextures` looks keys it lacks up in the
+    parent's (`inherit`, `alias`); views showing an inherited texture repaint
+    when it changes.
+
+  The `services` prop narrows this per container: `load`, `audio`, `video`
+  are `'inherit'`, `'none'` (loads fail like network errors, sounds and
+  videos fail) or a `(req | cmd, next)` middleware in the parent's JS (each
+  request becomes a `containerevent` of kind `load` / `audio` / `video`,
+  answered with `load-next` / `load-reply` / `load-block`, `audio-next` /
+  `audio-block`, `video-next` / `video-block` commands, tagged with the
+  child's generation so answers for a replaced child are dropped). Load rules
+  (`allow` / `deny` globs, `rewrite` prefixes) are matched natively before
+  any middleware. `fonts: 'none'`, `textures: 'none' | {inherit: false,
+  alias}`. The embedder has the last word: `JsuiConfig.on_child` sees every
+  child (`CONFIGURE` with the child's config prefilled with the forwarding
+  above: replace handlers or refuse it; `CREATED`; `DESTROYED`).
+* **Isolation and limits.** JS, React tree, document, focus and image cache
+  are the child's own. The child runs JS on the owner thread (no JS thread
+  of its own). Containers nest (a grandchild's services go through its
+  parent's, and so on up).
 
 ## GPU backend
 
@@ -2287,6 +2317,34 @@ node's paint version; `updateDamage()` then damages just the caret's old
 and new rects (`text::inputCaretDamage`), so `jsui_needs_redraw()` turns
 true twice a second while an input is focused and each such frame repaints
 a few pixels.
+
+## Selectable Text
+
+`<Text selectable>` selects natively like a web page's text
+(`src/input/text_selection.cpp`): the selection lives on the paragraph-root
+Text (`Node::selAnchor` / `selFocus`, UTF-16 indices into the paragraph's
+text, every nested span included, after `textTransform`) and the painter
+draws its highlight (`getRectsForRange`) under the glyphs, so a drag never
+crosses into JS. One selection exists at a time and stays inside one Text
+root; pressing anywhere else clears it.
+
+* Mouse: press + drag selects characters, a double click a word (drag on:
+  by words), a triple click the paragraph between hard line breaks;
+  Shift+click extends from the anchor.
+* Touch: a press held 500 ms without moving past the touch slop selects
+  the word under the finger; the press under it gets `pointercancel` (no
+  click) and the finger then extends the selection by words instead of
+  scrolling. A tap clears it. There are no drag handles or copy menu: an
+  app that wants one listens to `onSelectionChange` (its `text`) and copies
+  with `Clipboard.setString`.
+* Keys (nothing else focused handles them): Ctrl/Cmd + C copies through the
+  clipboard (`jsui_set_clipboard_callbacks`, else in-process), Ctrl/Cmd + A
+  selects all of the Text.
+
+`selectable` makes the Text take the pointer (`jsui_hit_test` reports
+`JSUI_HIT_POINTER` there) and shows the `text` cursor. `selectionColor`
+tints the highlight as for TextInput. A root listing `selectionChange` gets
+`selectionchange` (`selection: {start, end}`, `text`) on every change.
 
 ## Animated
 

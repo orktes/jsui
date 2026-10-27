@@ -2630,7 +2630,8 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
     const SkMatrix* ls = ctx.transformed ? &layoutSpace : nullptr;
     const auto* rec = static_cast<const NodeRecord*>(n->paintCache.get());
     if (n->type() == NodeType::Text) {
-          if (rec && motion.scaling && drawScalingText(n, c, spriteCache(ctx.root), *rec, x, y, cw, ch, ls))
+      text::paintTextSelection(n, c, x, y, cw);  // selectable text's highlight, under the glyphs
+      if (rec && motion.scaling && drawScalingText(n, c, spriteCache(ctx.root), *rec, x, y, cw, ch, ls))
         inexact = true;
       else
         text::paintText(n, c, x, y, cw, ch, ls);

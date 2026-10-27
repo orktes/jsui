@@ -443,6 +443,42 @@ test('pointer, wheel, keyboard and text input are forwarded', async ({ page }) =
   await page.keyboard.up('KeyW');
 }, {}, { worker: true });
 
+// Selectable Text and TextInput copy to the page's clipboard; a paste key
+// pastes what the browser's paste event carried.
+test('clipboard: copy from selectable text, paste into a TextInput', async ({ page }) => {
+  await mount(page, { jsui: { bundleUrl: 'fixtures/selectable.js' } });
+  await page.mouse.dblclick(30, 20);  // "alpha"
+  await frames(page, 2);
+  let msgs = await page.evaluate(() => window.hosts.ui.messages);
+  assert(msgs.some(([n, d]) => n === 'selected' && d.text === 'alpha'), `selection ${JSON.stringify(msgs)}`);
+  await page.keyboard.press('Control+C');
+  let clip = '';
+  for (let i = 0; i < 20 && clip !== 'alpha'; i++) {
+    await page.waitForTimeout(25);
+    clip = await page.evaluate(() => navigator.clipboard.readText());
+  }
+  assert(clip === 'alpha', `clipboard after copy: ${JSON.stringify(clip)}`);
+  // Focus the input, then Ctrl+V with the paste event the browser sends.
+  await page.mouse.click(100, 75);
+  await frames(page, 2);
+  await page.evaluate(() => {
+    const sink = document.activeElement;
+    const down = new KeyboardEvent('keydown', { key: 'v', code: 'KeyV', ctrlKey: true, bubbles: true, cancelable: true });
+    sink.dispatchEvent(down);
+    const data = new DataTransfer();
+    data.setData('text/plain', 'from the page');
+    sink.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+    sink.dispatchEvent(new KeyboardEvent('keyup', { key: 'v', code: 'KeyV', ctrlKey: true, bubbles: true }));
+  });
+  for (let i = 0; i < 20; i++) {
+    await frames(page, 1);
+    msgs = await page.evaluate(() => window.hosts.ui.messages);
+    if (msgs.some(([n]) => n === 'changed')) break;
+  }
+  const changed = msgs.filter(([n]) => n === 'changed').map(([, d]) => d.text);
+  assert(changed.at(-1) === 'from the page', `TextInput after paste: ${JSON.stringify(changed)}`);
+}, { permissions: ['clipboard-read', 'clipboard-write'] }, { worker: true });
+
 test('touch input is forwarded', async ({ page }) => {
   await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
   await spy(page);
@@ -2395,6 +2431,205 @@ test('worker: without Worker, createJsui({ worker: true }) runs on the main thre
   assert(warnings.length === 1 && /no Worker/.test(warnings[0]), `warnings ${JSON.stringify(warnings)}`);
   const px = await screenPixels(page, '#ui', BANDS);
   [RED, GREEN].forEach((want, i) => assert(near(px[i], want), `band ${i}: ${fmt(px[i])}`));
+});
+
+// ------------------------------------------- the page's own GPUDevice (#183)
+// A game's WebGPU device shared with JSUI (createJsui({ device })): the UI
+// rendered into GPUTextures (createTextureSurface), the game's GPUTextures
+// shown in the UI without a copy (setTexture).
+
+// Creates a device and a runtime on it in the page (window.hosts[id], its
+// device window.gameDevice); SKIPs without WebGPU or the dist-gpu module.
+async function mountShared(page, { id = 'shared', canvas = false, jsui = {} } = {}) {
+  const r = await page.evaluate(async ({ id, canvas, jsui, dist }) => {
+    const adapter = await navigator.gpu?.requestAdapter();
+    if (!adapter) return { skip: 'no WebGPU adapter' };
+    const device = window.gameDevice = await adapter.requestDevice({ label: 'game' });
+    let c = null;
+    if (canvas) {
+      c = document.createElement('canvas');
+      c.id = id;
+      Object.assign(c.style, { width: '340px', height: '200px' });
+      document.body.appendChild(c);
+    }
+    const j = await window.createJsui({ canvas: c, device, renderer: 'webgpu',
+      moduleUrl: new URL(`../${dist}/jsui.js`, location.href), ...jsui });
+    (window.hosts ??= {})[id] = j;
+    await Promise.race([j.whenIdle(), new Promise((r) => setTimeout(r, 5000))]);
+    return { device: j.device === device, renderer: j.renderer };
+  }, { id, canvas, jsui, dist: DIST });
+  if (r.skip) skip(r.skip, true);
+  if (!r.device) skip(`no WebGPU in web/${DIST}`, DIST !== 'dist-gpu');
+  return r;
+}
+
+// Reads a GPUTexture of window.gameDevice back (8-bit RGBA / BGRA as RGBA).
+const readTexture = (page, expr) => page.evaluate(async (expr) => {
+  const t = (0, eval)(expr), dev = window.gameDevice;
+  const bpr = Math.ceil((t.width * 4) / 256) * 256;
+  const buf = dev.createBuffer({ size: bpr * t.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const enc = dev.createCommandEncoder();
+  enc.copyTextureToBuffer({ texture: t }, { buffer: buf, bytesPerRow: bpr }, [t.width, t.height]);
+  dev.queue.submit([enc.finish()]);
+  await buf.mapAsync(GPUMapMode.READ);
+  const src = new Uint8Array(buf.getMappedRange()), px = [];
+  const at = (x, y) => {
+    const o = y * bpr + x * 4, p = Array.from(src.slice(o, o + 4));
+    return t.format.startsWith('bgra') ? [p[2], p[1], p[0], p[3]] : p;
+  };
+  for (const [x, y] of [[2, 2], [t.width - 3, t.height - 3]]) px.push(at(x, y));
+  buf.unmap();
+  buf.destroy();
+  return { width: t.width, height: t.height, format: t.format, px };
+}, expr);
+
+test('shared device: a texture surface renders the UI into a GPUTexture of the page\'s device', async ({ page }) => {
+  await page.addInitScript({ path: path.join(WEB, 'test/gpu-count.js') });
+  await page.reload();
+  await page.waitForFunction(() => window.testReady);
+  await mountShared(page, { jsui: { bundleUrl: 'fixtures/surfaces.js' } });
+  const made = await page.evaluate(async () => {
+    const j = window.hosts.shared;
+    const s = window.panel = j.createTextureSurface({ component: 'Panel', initialProps: { color: '#ff0000' },
+      width: 64, height: 32, pixelRatio: 2 });
+    const textures = [];
+    s.on('texture', (t) => textures.push(t));
+    await j.whenIdle();
+    return { w: s.width, h: s.height, pw: s.pixelWidth, ph: s.pixelHeight, version: s.version, renderer: s.renderer,
+      textures: textures.length, same: textures[0] === s.texture };
+  });
+  assert(made.renderer === 'webgpu' && made.pw === 128 && made.ph === 64 && made.version >= 1 && made.textures === 1 &&
+    made.same, `texture surface ${JSON.stringify(made)}`);
+  let t = await readTexture(page, 'window.panel.texture');
+  assert(t.width === 128 && t.height === 64 && t.format === 'rgba8unorm', `texture ${JSON.stringify(t)}`);
+  t.px.forEach((p) => assert(near(p, RED), `surface pixel ${fmt(p)}`));
+  // A change: repainted straight into the same texture, no retained texture
+  // and no copy. A change to part of it loads what is there (a full repaint
+  // may clear instead): the box shrinks to the left half first.
+  await page.evaluate(async () => {
+    window.panel.setProps({ color: '#00ff00', size: [32, 32] });
+    await window.hosts.shared.whenIdle();
+  });
+  const r = await page.evaluate(async () => {
+    const s = window.panel, j = window.hosts.shared;
+    await window.gameDevice.queue.onSubmittedWorkDone();
+    window.__gpuCounts.clear();
+    s.setProps({ color: '#0000ff', size: [32, 32] });
+    await j.whenIdle();
+    await window.gameDevice.queue.onSubmittedWorkDone();
+    const passes = [...window.__gpuCounts].filter(([k]) => k.startsWith('pass color 128x64 ')).map(([k]) => k);
+    return { passes, copies: window.__gpuCounts.get('GPUCommandEncoder.copyTextureToTexture') ?? 0,
+      created: [...window.__gpuCounts.keys()].filter((k) => k.startsWith('new texture 128x64')) };
+  });
+  assert(r.passes.length && r.passes.every((p) => p.includes('load=load')) && r.copies === 0 && r.created.length === 0,
+    `incremental frame ${JSON.stringify(r)}`);
+  t = await readTexture(page, 'window.panel.texture');
+  assert(near(t.px[0], BLUE) && near(t.px[1], [0, 0, 0, 0]), `after setProps ${t.px.map(fmt).join(' ')}`);
+  // Input from the page, in surface coordinates: the fixture posts `press`.
+  const pressed = await page.evaluate(async () => {
+    const s = window.panel, j = window.hosts.shared;
+    const got = new Promise((r) => j.on('message', (name, tag) => name === 'press' && r(tag)));
+    s.pointerDown(10, 10);
+    s.pointerUp(10, 10);
+    return Promise.race([got, new Promise((r) => setTimeout(() => r(null), 2000))]).then((tag) => tag === s.rootTag);
+  });
+  assert(pressed, 'pointerDown on the texture surface did not reach its component');
+  // Resizing replaces the surface's own texture.
+  const resized = await page.evaluate(async () => {
+    const s = window.panel, old = s.texture;
+    s.setSize(40, 20);
+    await window.hosts.shared.whenIdle();
+    return { w: s.texture.width, h: s.texture.height, replaced: s.texture !== old };
+  });
+  assert(resized.w === 80 && resized.h === 40 && resized.replaced, `resize ${JSON.stringify(resized)}`);
+});
+
+test('shared device: renderTo a texture of the game\'s, only when something changed', async ({ page }) => {
+  await mountShared(page, { jsui: { bundleUrl: 'fixtures/surfaces.js' } });
+  const r = await page.evaluate(async () => {
+    const j = window.hosts.shared, dev = window.gameDevice;
+    const mk = () => dev.createTexture({ size: [48, 24], format: 'bgra8unorm',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
+    window.gameTex = mk();
+    const s = window.panel = j.createTextureSurface({ component: 'Panel', initialProps: { color: '#0000ff' },
+      texture: window.gameTex, autoRender: false });
+    await j.whenIdle();
+    const before = s.version;
+    const first = s.renderTo(window.gameTex);
+    const again = s.renderTo(window.gameTex);
+    window.gameTex2 = mk();
+    const other = s.renderTo(window.gameTex2);  // another texture: the whole frame
+    return { before, first, again, other, size: [s.width, s.height], texture: s.texture === window.gameTex2 };
+  });
+  assert(r.before === 0 && r.first && !r.again && r.other && r.size[0] === 48 && r.size[1] === 24 && r.texture,
+    `renderTo ${JSON.stringify(r)}`);
+  for (const which of ['gameTex', 'gameTex2']) {
+    const t = await readTexture(page, `window.${which}`);
+    t.px.forEach((p) => assert(near(p, BLUE), `${which} pixel ${fmt(p)}`));
+  }
+  // The game's texture stays the game's.
+  const alive = await page.evaluate(() => {
+    window.panel.destroy();
+    const enc = window.gameDevice.createCommandEncoder();
+    enc.clearBuffer(window.gameDevice.createBuffer({ size: 4, usage: GPUBufferUsage.COPY_DST }));
+    return window.gameTex2.width === 48;
+  });
+  assert(alive, 'game texture');
+});
+
+test('shared device: a GPUTexture host texture is shown without a copy', async ({ page }) => {
+  await page.addInitScript({ path: path.join(WEB, 'test/gpu-count.js') });
+  await page.reload();
+  await page.waitForFunction(() => window.testReady);
+  const info = await mountShared(page, { id: 'ui', canvas: true, jsui: { bundleUrl: 'fixtures/data.js' } });
+  if (info.renderer !== 'webgpu') skip(`main canvas renderer ${info.renderer}`, DIST !== 'dist-gpu');
+  const fill = (color) => page.evaluate(async (color) => {
+    const dev = window.gameDevice;
+    window.minimap ??= dev.createTexture({ size: [8, 8], format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT });
+    const data = new Uint8Array(8 * 8 * 4);
+    for (let i = 0; i < data.length; i += 4) data.set(color, i);
+    dev.queue.writeTexture({ texture: window.minimap }, data, { bytesPerRow: 32 }, [8, 8]);
+    window.__gpuCounts.clear();
+    const ok = window.hosts.ui.setTexture('tex', window.minimap);
+    return { ok, copies: window.__gpuCounts.get('GPUQueue.copyExternalImageToTexture') ?? 0,
+      created: window.__gpuCounts.get('GPUDevice.createTexture') ?? 0 };
+  }, color);
+  let r = await fill([255, 0, 0, 255]);
+  assert(r.ok === true && r.copies === 0 && r.created === 0, `setTexture(GPUTexture) ${JSON.stringify(r)}`);
+  await frames(page, 2);
+  await idle(page);
+  let [px] = await screenPixels(page, '#ui', [[50, 50]]);
+  assert(near(px, RED), `GPUTexture host texture ${fmt(px)}`);
+  // New contents in the same texture: setTexture again repaints its views.
+  r = await fill([0, 0, 255, 255]);
+  assert(r.ok === true && r.copies === 0, `second setTexture ${JSON.stringify(r)}`);
+  await frames(page, 2);
+  await idle(page);
+  [px] = await screenPixels(page, '#ui', [[50, 50]]);
+  assert(near(px, BLUE), `updated GPUTexture host texture ${fmt(px)}`);
+});
+
+test('shared device: after a device loss, setDevice moves the UI to the page\'s new device', async ({ page }) => {
+  await mountShared(page, { jsui: { bundleUrl: 'fixtures/surfaces.js' } });
+  const r = await page.evaluate(async () => {
+    const j = window.hosts.shared;
+    const s = window.panel = j.createTextureSurface({ component: 'Panel', initialProps: { color: '#ff0000' },
+      width: 16, height: 16 });
+    await j.whenIdle();
+    const lost = new Promise((r) => j.on('devicelost', () => r(true)));
+    window.gameDevice.destroy();
+    const saw = await Promise.race([lost, new Promise((r) => setTimeout(() => r(false), 3000))]);
+    const adapter = await navigator.gpu.requestAdapter();
+    window.gameDevice = await adapter.requestDevice({ label: 'game 2' });
+    j.setDevice(window.gameDevice);
+    await j.whenIdle();
+    return { saw, device: j.device === window.gameDevice, version: s.version, renderer: s.renderer };
+  });
+  assert(r.saw && r.device && r.version >= 2 && r.renderer === 'webgpu', `device loss ${JSON.stringify(r)}`);
+  const t = await readTexture(page, 'window.panel.texture');
+  t.px.forEach((p) => assert(near(p, RED), `after setDevice ${fmt(p)}`));
+  return { allowErrors: true };  // Skia logs the buffer maps the loss aborted
 });
 
 // -------------------------------------------------------------------- run

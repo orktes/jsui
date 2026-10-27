@@ -90,6 +90,24 @@
 // share one (web/jsui-textures.js). They follow renderer fallbacks and
 // context loss by themselves.
 //
+// Sharing the page's WebGPU device (a Three.js / Babylon / own WebGPU game):
+// createJsui({ device }) draws with that GPUDevice instead of requesting one,
+// so UI and game exchange GPU textures without copies, both ways:
+//
+//   const jsui = await createJsui({ device: renderer.backend.device, bundleUrl });
+//   // the UI in the game: a surface rendered into a GPUTexture (in-world
+//   // screens, or the game composites the HUD in its own final pass)
+//   const panel = jsui.createTextureSurface({ component: 'Terminal', width: 800, height: 500 });
+//   material.map = new THREE.ExternalTexture(panel.texture);
+//   panel.dispatchEvent(pointerEvent, uv.x * panel.width, (1 - uv.y) * panel.height);
+//   // the game in the UI: a render target sampled in place (no copy)
+//   jsui.setTexture('minimap', minimapTarget);   // <HostTexture name="minimap" />
+//
+// Texture surfaces repaint only what changed, straight into their texture
+// (it keeps the last frame). After a device loss the page passes its new
+// device to jsui.setDevice(device) ('devicelost' says when). Main thread only
+// (a GPUDevice cannot move to a worker).
+//
 // Worker mode (createJsui({ worker: true }), web/jsui-worker.js): the
 // runtime, its frame loop and the renderers run in a dedicated Worker on
 // OffscreenCanvases; this thread keeps the DOM side (input listeners, sizes,
@@ -111,7 +129,11 @@
 
 /** @typedef {{
  *   canvas?: HTMLCanvasElement,  // the main surface's canvas; null / omitted: not shown (a page
- *                                // that only places createSurface() widgets)
+ *                                // that only places createSurface() / createTextureSurface() widgets)
+ *   device?: GPUDevice,          // the page's own WebGPU device (e.g. Three.js' renderer.backend.device):
+ *                                // JSUI draws with it instead of requesting one, which texture
+ *                                // surfaces and GPUTexture host textures need. Needs dist-gpu/; no
+ *                                // worker mode. After a loss, pass the new one to setDevice()
  *   component?: string,          // the main surface's AppRegistry key (default: the bundle's first
  *                                // registered component, or what it renders itself)
  *   initialProps?: object,       // props for `component`
@@ -188,7 +210,7 @@
  *                                // jsui.jsEngine says which one runs.
  * }} JsuiOptions */
 
-import { SharedWebGPU, WebGPURenderer, requestWebGPU, standInPipeline } from './jsui-webgpu.js';
+import { SharedWebGPU, WebGPURenderer, externalWebGPU, requestWebGPU, standInPipeline } from './jsui-webgpu.js';
 import { HostTextureSet, JsuiVideo, corsWarning, defaultOpaque, isVideoFrame, sourceSize, taintKey,
   videoFramesContextLost, watchVideoFrames } from './jsui-textures.js';
 import { JsuiAudio } from './jsui-audio.js';
@@ -284,6 +306,24 @@ function fontList(families) {
 
 let nextHostId = 1;
 const modsOf = (e) => (e.shiftKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
+
+// Puts text the UI copied (TextInput, selectable Text) on the page's
+// clipboard, from inside the key event that copied it: the async Clipboard
+// API, else (an insecure context) a copy command from the focused keyboard
+// sink.
+function writeClipboard(text) {
+  const c = typeof navigator !== 'undefined' ? navigator.clipboard : null;
+  if (c?.writeText) {
+    c.writeText(text).catch(() => {});
+    return;
+  }
+  const sink = typeof document !== 'undefined' ? document.activeElement : null;
+  if (!sink?.__jsuiSink) return;
+  sink.value = text;
+  sink.select();
+  try { document.execCommand('copy'); } catch {}
+  sink.value = '';
+}
 // Keys whose browser default (focus move, caret move inside the keyboard sink)
 // we suppress when the UI consumed them. Printable keys are never suppressed:
 // their text must still reach the UI through the `input` event.
@@ -316,6 +356,11 @@ export async function createJsui(opts) {
   if (opts.worker && opts.components && typeof opts.components === 'object') {
     // Functions can't reach a worker: its runtime imports a module URL instead.
     console.warn('[jsui] worker mode needs `components` as a module URL (draw functions run in the worker): running on the page\'s main thread');
+    opts = { ...opts, worker: false };
+  }
+  if (opts.worker && opts.device) {
+    console.warn('[jsui] worker mode cannot use the page\'s GPUDevice (createJsui({ device })): running on the ' +
+      'page\'s main thread');
     opts = { ...opts, worker: false };
   }
   if (opts.worker) {
@@ -412,7 +457,8 @@ function replaceCanvas(old) {
 function internals() {
   return { DomView, CanvasView, JsuiHost, JsuiSurface, HIT_POINTER, HIT_SCROLL, NAV_KEYS, webgpuFor, loadModuleFor,
     bufferType, BUFFER_TYPES, sourceSize, defaultOpaque, isVideoFrame, transferred, replaceCanvas, fontArgs, fontList, JsuiAudio, JsuiVideo,
-    corsWarning, taintKey, videoFramesContextLost, watchVideoFrames, hostUrl: import.meta.url, workerName: WORKER_NAME };
+    corsWarning, taintKey, videoFramesContextLost, watchVideoFrames, writeClipboard, hostUrl: import.meta.url,
+    workerName: WORKER_NAME };
 }
 const WORKER_NAME = 'jsui-host';
 
@@ -438,7 +484,9 @@ const moduleVersionsOf = (opts) => opts.moduleVersions ?? (opts.moduleBase == nu
 // The WebGPU device the renderer may use, or null (web/jsui-webgpu.js).
 function webgpuFor(opts) {
   const mode = opts.renderer ?? 'auto';
-  if (mode !== 'auto' && mode !== 'gpu' && mode !== 'webgpu') return null;
+  // The page's device: also with a renderer mode that keeps the main canvas
+  // off WebGPU (texture surfaces and GPUTexture host textures use it).
+  if (mode !== 'auto' && mode !== 'gpu' && mode !== 'webgpu' && !opts.device) return null;
   // Only dist-gpu/ draws with WebGPU: when moduleVersions leaves it out, no
   // device is needed. Say so, since the page then silently renders on WebGL.
   const versions = moduleVersionsOf(opts);
@@ -450,6 +498,7 @@ function webgpuFor(opts) {
     }
     return null;
   }
+  if (opts.device) return externalWebGPU(opts.device);
   return requestWebGPU({ allowSoftware: mode !== 'auto' });
 }
 
@@ -1022,6 +1071,7 @@ class DomView {
     // Hardware keyboards and IMEs still deliver keys and text.
     sink.setAttribute('inputmode', 'none');
     sink.tabIndex = 0;
+    sink.__jsuiSink = true;  // writeClipboard's fallback copies from it
     Object.assign(sink.style, { position: 'fixed', left: '0px', top: '0px', width: '1px', height: '1px',
       opacity: '0', padding: '0', border: '0', margin: '0', resize: 'none', overflow: 'hidden',
       pointerEvents: 'none', zIndex: '-1', caretColor: 'transparent' });
@@ -1035,9 +1085,29 @@ class DomView {
     };
     this.focus = focusSink;
 
+    // Ctrl / Cmd+V: the key goes to the UI once the browser's paste event
+    // (right after it) has told what the page's clipboard holds, so a
+    // TextInput pastes that (a page cannot read the clipboard synchronously).
+    let pendingPaste = null;
+    const sendPaste = () => {
+      const k = pendingPaste;
+      pendingPaste = null;
+      if (k) this._inKey(k.key, k.code, 1, k.repeat, k.mods);
+    };
+    sink.addEventListener('paste', (e) => {
+      e.preventDefault();  // the text goes in through the key, not the sink
+      this._pasted(e.clipboardData?.getData('text/plain') ?? '');
+      sendPaste();
+    }, active);
     sink.addEventListener('keydown', (e) => {
       if (e.isComposing || e.keyCode === 229) return;  // IME owns this key
       if (!e.repeat) this._pressedKeys.set(e.code || e.key, e.key);
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'v' || e.key === 'V')) {
+        sendPaste();
+        pendingPaste = { key: e.key, code: e.code || null, repeat: e.repeat ? 1 : 0, mods: modsOf(e) };
+        setTimeout(sendPaste, 0);  // no paste event came (nothing to paste)
+        return;
+      }
       const used = this._inKey(e.key || null, e.code || null, 1, e.repeat ? 1 : 0, modsOf(e));
       if ((used && (NAV_KEYS.has(e.key) || e.ctrlKey || e.metaKey)) || (e.key === 'Tab' && this._trapTab)) {
         e.preventDefault();
@@ -1106,6 +1176,9 @@ class DomView {
 
   // The keyboard sink got focus (a click, Tab from the page, focus()).
   _sinkFocused() { this._hostOf()._focusPads(this); }
+
+  // The page pasted `text` (the paste key's clipboard, see _installInput).
+  _pasted(text) { this._hostOf()._clipText = text; }
 
   // A pointer entered / left the canvas (worker mode needs the hit map then).
   _pointerOver() {}
@@ -1754,6 +1827,17 @@ class CanvasView extends DomView {
     this._emit('renderer', this.renderer, reason);
   }
 
+  // setDevice(): a view on WebGPU moves to the page's new device (on the same
+  // canvas context, configured again).
+  _useDevice(webgpu) {
+    const old = this._wgpu;
+    if (this._destroyed || !old || old.webgpu === webgpu) return;
+    const ctx = old.ctx, sharedFor = old.sharedFor;
+    old.destroy();
+    this._wgpu = null;
+    this._webgpuRecovered(WebGPURenderer.create(this, webgpu, ctx, sharedFor), 'new WebGPU device');
+  }
+
   // Draws a GPU frame: true when drawn, false when the GPU path failed (the
   // caller falls back to the CPU), undefined while the context is lost.
   _renderGpu() {
@@ -2145,6 +2229,10 @@ class JsuiHost extends CanvasView {
       },
       onCall: (id, name, json) => this._onCall(id, name, json),
       onComponent: (cls, kind, view, canvas, info, a, b) => this._components?.call(cls, kind, view, canvas, info, a, b),
+      // Clipboard (jsui_set_clipboard_callbacks): pastes read what the page
+      // pasted last (or the UI copied), copies go to the page's clipboard.
+      clipboardText: () => this._clipText ?? '',
+      onClipboard: (text) => this._copied(text),
       onCallCancel: (id) => this._emit('callCancel', id),
       onCallResult: (id, ok, payload) => {
         const p = this._uiCalls.get(id);
@@ -2199,6 +2287,7 @@ class JsuiHost extends CanvasView {
 
     this._mode = opts.renderer ?? 'auto';
     this._webgpu = opts._webgpu ?? null;
+    this._pageWebGPU = this._webgpu?.external ? this._webgpu : null;  // createJsui({ device })
     // Without a canvas the main surface is not shown (a page of createSurface() widgets).
     if (canvas) this._initView(this._mode, this._webgpu);
     if (opts.gamepads !== false) this._installGamepads();
@@ -2416,7 +2505,7 @@ class JsuiHost extends CanvasView {
   // The views that draw this runtime's textures (host textures go where all can sample them).
   _views() {
     const v = this.canvas && !this._destroyed ? [this] : [];
-    for (const s of this._surfaces) if (s.canvas && !s._destroyed) v.push(s);
+    for (const s of this._surfaces) if ((s.canvas || s._wgpu) && !s._destroyed) v.push(s);
     return v;
   }
 
@@ -2447,6 +2536,13 @@ class JsuiHost extends CanvasView {
       const id = this._withStrings([String(name), json], (n, j) => this.module._jsui_web_call_ui(this.rt, this.hostId, n, j));
       this._uiCalls.set(id, { resolve, reject });
     });
+  }
+
+  // The UI copied `text` (jsui_set_clipboard_callbacks); a worker's host
+  // forwards it to the page.
+  _copied(text) {
+    this._clipText = text;
+    writeClipboard(text);
   }
 
   _onCall(id, name, json) {
@@ -2700,6 +2796,59 @@ class JsuiHost extends CanvasView {
   }
 
   _makeSurface(target, options) { return new JsuiSurface(this, target, options); }
+
+  /**
+   * Shows the AppRegistry component `options.component` in a GPUTexture
+   * instead of a canvas: the UI as a texture of a WebGPU game (screens and
+   * panels in the 3D world, or a HUD the game composites in its own final
+   * pass). Same runtime as createSurface(): its own props, size, input and
+   * focus. The texture is on the runtime's WebGPU device (createJsui({
+   * device }) to share the game's). `options.texture`: a GPUTexture of the
+   * game's to render into (RENDER_ATTACHMENT | TEXTURE_BINDING usage,
+   * rgba8unorm / bgra8unorm, COPY_SRC too for readPixelsAsync); without one
+   * the surface makes its own (`surface.texture`, replaced on resize:
+   * 'texture' event). Frames render in the runtime's frame loop when
+   * something changed (`autoRender: false`: only when the page calls
+   * renderTo()). Input comes from the page: dispatchEvent(e, x, y) or
+   * pointerDown / pointerMove / ... with surface coordinates (e.g. a ray
+   * hit's UV times width / height).
+   * @param {JsuiTextureSurfaceOptions} options
+   */
+  createTextureSurface(options) {
+    if (this._destroyed) throw new Error('createTextureSurface: runtime destroyed');
+    const s = new JsuiTextureSurface(this, options ?? {});
+    this._surfaces.add(s);
+    return s;
+  }
+
+  /** The runtime's WebGPU device (the page's, with createJsui({ device })), or
+   * null (also when the loaded module has no WebGPU backend: not dist-gpu/). */
+  get device() { return this.module.WebGPU ? (this._pageWebGPU ?? this._webgpu)?.device ?? null : null; }
+
+  /** After the page's GPUDevice was lost ('devicelost'): the page's new
+   * device. Every WebGPU view, texture surface and GPUTexture host texture
+   * moves to it (setTexture GPUTextures of the new device again; other host
+   * textures are uploaded again by themselves). Texture surfaces without a
+   * texture of the page's make a new one ('texture' event). */
+  setDevice(device) {
+    if (this._destroyed) return;
+    const webgpu = externalWebGPU(device);
+    this._pageWebGPU = webgpu;
+    this._deviceLost = null;
+    if (this._webgpu || this.canvas == null) this._webgpu = webgpu;
+    if (this.canvas) this._useDevice(webgpu);
+    for (const s of this._surfaces) s._useDevice(webgpu);
+    this._wake();
+  }
+
+  // A renderer's page device was lost (web/jsui-webgpu.js): said once per device.
+  _externalDeviceLost(webgpu, info) {
+    if (this._deviceLost === webgpu) return;
+    this._deviceLost = webgpu;
+    this._log(2, `the page's WebGPU device was lost (${info?.reason ?? 'unknown'}: ${info?.message ?? ''}): ` +
+      'the UI shows again once the page passes its new device to setDevice()');
+    this._emit('devicelost', info);
+  }
 
   /** The surfaces made with createSurface() and not destroyed. */
   get surfaces() { return Array.from(this._surfaces); }
@@ -3059,6 +3208,383 @@ class JsuiSurface extends CanvasView {
     }
     this.rt = 0;
     if (this._ownsCanvas) this.canvas.remove();
+  }
+}
+
+/** @typedef {{
+ *   component: string,           // the AppRegistry key to show
+ *   initialProps?: object,
+ *   width?: number, height?: number,  // logical px (default 512 x 512; with `texture`: its size / pixelRatio)
+ *   pixelRatio?: number,         // device px per logical px (default 1)
+ *   texture?: GPUTexture,        // render into this texture of the game's instead of one of the surface's own
+ *   format?: 'rgba8unorm'|'bgra8unorm', // the surface's own texture's format (default 'rgba8unorm')
+ *   autoRender?: boolean,        // render in the runtime's frame loop when something changed (default
+ *                                // true); false: only renderTo() renders
+ *   renderer?: never,
+ * }} JsuiTextureSurfaceOptions */
+
+const TEXTURE_FORMATS = new Set(['rgba8unorm', 'bgra8unorm', 'rgba16float']);
+// GPUTextureUsage
+const TEX_COPY_SRC = 0x01, TEX_BINDING = 0x04, TEX_RENDER_ATTACHMENT = 0x10;
+const WEBGPU_INCREMENTAL = 1 << 6;  // JSUI_WEBGPU_INCREMENTAL
+
+// A surface of the runtime (like JsuiSurface) shown in a GPUTexture instead
+// of a canvas (createTextureSurface). It draws with a WebGPURenderer whose
+// "canvas context" is a stand-in handing out the current texture, so warm-
+// ups, pipeline lists, device loss and readback work as on a canvas. The
+// texture keeps its pixels between frames, so frames repaint only the damage
+// straight into it (JSUI_WEBGPU_INCREMENTAL) while it is the texture of the
+// last render. No DOM: the page forwards input and shows the cursor itself.
+class JsuiTextureSurface extends CanvasView {
+  _wakeLoop() { this.host?._wake(); }
+
+  constructor(host, opts) {
+    if (!opts.component) throw new Error('createTextureSurface: component is required');
+    const webgpu = host._pageWebGPU ?? host._webgpu;
+    if (!webgpu || !host.module.WebGPU) {
+      throw new Error('createTextureSurface: needs WebGPU and dist-gpu/ (createJsui({ device }) shares the ' +
+        'page\'s device)');
+    }
+    const ratio = opts.pixelRatio > 0 ? opts.pixelRatio : 1;
+    super(host.module, null, { ...opts, pixelRatio: ratio, autoFocus: false, trapTab: false });
+    const M = host.module;
+    this.host = host;
+    this.component = String(opts.component);
+    this._autoRender = opts.autoRender !== false;
+    this._target = null;        // the game's texture (options.texture / renderTo)
+    this._own = null;           // the surface's own texture (no options.texture)
+    this._ownFormat = opts.format ?? 'rgba8unorm';
+    if (!TEXTURE_FORMATS.has(this._ownFormat)) throw new Error(`createTextureSurface: format ${this._ownFormat}`);
+    this._rendering = null;     // the texture the current render() draws into
+    this._last = null;          // the texture of the last render (it holds that frame)
+    /** Renders so far (each a new picture in the texture). */
+    this.version = 0;
+    if (opts.texture) this._checkTarget(opts.texture);
+    const tex = opts.texture;
+    this._setSize(tex ? tex.width / ratio : opts.width > 0 ? opts.width : 512,
+      tex ? tex.height / ratio : opts.height > 0 ? opts.height : 512);
+    this._target = tex ?? null;
+    this.rt = this._withStrings([this.component, JSON.stringify(opts.initialProps ?? {})],
+      (k, p) => M._jsui_surface_create(host.rt, k, p, this.width, this.height, this.pixelRatio));
+    if (!this.rt) {
+      super._destroyView();
+      throw new Error(`createTextureSurface("${this.component}") failed (see the log)`);
+    }
+    /** The surface's React Native root tag (RootTagContext in its components). */
+    this.rootTag = M._jsui_surface_tag(this.rt);
+    this._mode = 'webgpu';
+    this._webgpu = webgpu;
+    if (!this._makeRenderer(webgpu)) {
+      M._jsui_surface_destroy(this.rt);
+      super._destroyView();
+      throw new Error('createTextureSurface: Skia could not use the WebGPU device (see the log)');
+    }
+    this._log(1, `renders into a ${this.pixelWidth}x${this.pixelHeight} texture (${webgpu.description})`);
+  }
+
+  _makeRenderer(webgpu) {
+    const ctx = {
+      jsuiFormat: this._format(),
+      configure() {}, unconfigure() {},
+      getCurrentTexture: () => this._rendering ?? this._texture(),
+    };
+    this._wgpu = WebGPURenderer.create(this, webgpu, ctx, (w) => this.host._sharedWebGPU(w));
+    this.renderer = this._wgpu ? 'webgpu' : 'none';
+    return !!this._wgpu;
+  }
+
+  _hostOf() { return this.host; }
+  _log(level, text) { this.host._log(level, `${this.component} (texture, root ${this.rootTag ?? '?'}): ${text}`); }
+
+  /** The texture the surface renders into: the game's (options.texture /
+   * the last renderTo()) or its own (made on first use, replaced on resize
+   * and device change: 'texture' event). */
+  get texture() { return this._target ?? this._texture(); }
+
+  _format() { return this._target?.format ?? this._ownFormat; }
+
+  _texture() {
+    if (this._target) return this._target;
+    const o = this._own;
+    if (o && o.width === this.pixelWidth && o.height === this.pixelHeight) return o;
+    const device = this._webgpu.device;
+    this._own = device.createTexture({ label: `jsui ${this.component}`, size: [this.pixelWidth, this.pixelHeight],
+      format: this._ownFormat, usage: TEX_RENDER_ATTACHMENT | TEX_BINDING | TEX_COPY_SRC });
+    // The old one may still be sampled by work the game encodes this frame.
+    if (o) requestAnimationFrame(() => o.destroy());
+    this._emit('texture', this._own);
+    return this._own;
+  }
+
+  _checkTarget(t) {
+    if (typeof GPUTexture !== 'undefined' && !(t instanceof GPUTexture)) throw new TypeError('not a GPUTexture');
+    if (!(t.usage & TEX_RENDER_ATTACHMENT)) throw new Error('the texture needs RENDER_ATTACHMENT usage');
+    if (!TEXTURE_FORMATS.has(t.format)) throw new Error(`texture format ${t.format} (rgba8unorm, bgra8unorm or rgba16float)`);
+  }
+
+  // Logical size; the texture is that times pixelRatio.
+  _setSize(w, h) {
+    const r = this._fixedRatio || 1;
+    const pw = Math.max(1, Math.round(w * r)), ph = Math.max(1, Math.round(h * r));
+    if (pw === this.pixelWidth && ph === this.pixelHeight && w === this.width) return false;
+    this.width = w;
+    this.height = h;
+    this.pixelRatio = r;
+    this.pixelWidth = pw;
+    this.pixelHeight = ph;
+    this._sizeChanged = true;
+    return true;
+  }
+
+  /** New logical size (and pixel ratio): the own texture is replaced
+   * ('texture' event). With a texture of the game's, use renderTo() with one
+   * of the new size instead. */
+  setSize(width, height, pixelRatio) {
+    if (this._destroyed) return;
+    if (pixelRatio > 0) this._fixedRatio = pixelRatio;
+    if (this._setSize(width, height)) this._setViewport();
+  }
+
+  // No DOM: nothing to measure, observe or listen to.
+  _measure() { return false; }
+  _installDom() {}
+  _publishSafeArea() {}
+
+  _updateCursor() {
+    const c = this._cursorNow();
+    if (c === this._cursor) return;
+    this._cursor = c;
+    this._emit('cursor', c);
+  }
+
+  /** The CSS cursor the UI wants where the pointer last was ('default', 'pointer', 'text', ...). */
+  get cursor() { return this._cursorNow(); }
+
+  _wantsPaint() { return this._autoRender && !this._destroyed && !!this.module._jsui_needs_redraw(this.rt); }
+
+  _paint() {
+    if (this._autoRender) this._render(null);
+  }
+
+  /**
+   * Renders the UI's current frame into `texture` (a GPUTexture of the
+   * device, RENDER_ATTACHMENT usage, rgba8unorm / bgra8unorm / rgba16float),
+   * or into the surface's texture when omitted. A texture of another size
+   * resizes the surface to it (logical size = its size / pixelRatio). Only
+   * what changed since the last render into the same texture is repainted;
+   * another texture gets the whole frame. Call it after the runtime's frame
+   * (the 'frame' event), or from the game's loop. Returns whether it drew.
+   */
+  renderTo(texture) {
+    if (this._destroyed) return false;
+    if (texture && texture !== this._target) {
+      this._checkTarget(texture);
+      this._target = texture;
+      const own = this._own;
+      this._own = null;
+      if (own) requestAnimationFrame(() => own.destroy());
+    }
+    if (this._target && (this._target.width !== this.pixelWidth || this._target.height !== this.pixelHeight)) {
+      const r = this._fixedRatio || 1;
+      if (this._setSize(this._target.width / r, this._target.height / r)) this._setViewport();
+    }
+    return this._render(this._target);
+  }
+
+  _render(target) {
+    const wgpu = this._wgpu;
+    if (this._destroyed || !wgpu || wgpu.lost) return false;
+    const tex = target ?? this.texture;
+    if (wgpu.format !== tex.format) wgpu.format = tex.format;
+    const same = tex === this._last;
+    if (same && !this.module._jsui_needs_redraw(this.rt) && !this._sizeChanged) return false;
+    this._sizeChanged = false;
+    const t1 = performance.now();
+    wgpu.flags = same ? WEBGPU_INCREMENTAL : 0;
+    this._rendering = tex;
+    let r;
+    try {
+      r = wgpu.render();
+    } finally {
+      this._rendering = null;
+    }
+    this._last = r ? tex : null;
+    if (r === false) this._log(2, 'WebGPU frame failed');
+    if (!r) return false;
+    this.stats.renderMs = ema(this.stats.renderMs, performance.now() - t1);
+    this.stats.renders++;
+    this.version++;
+    this._updateCursor();
+    this._emit('render', tex);
+    return true;
+  }
+
+  // The renderer failed for good: nothing to fall back to without a canvas.
+  _dropWebGPU(reason) {
+    this._log(2, `${reason}: the texture is not updated any more`);
+    this._wgpu?.destroy();
+    this._wgpu = null;
+    this.renderer = 'none';
+  }
+
+  _webgpuRecovered(next, reason) {
+    if (this._destroyed) {
+      next?.destroy();
+      return;
+    }
+    if (!next) return this._dropWebGPU(`${reason}, no new device`);
+    this._wgpu = next;
+    this._webgpu = next.webgpu;
+    this._last = null;
+    this._sizeChanged = true;
+    this._log(1, `${reason}: renderer recreated`);
+  }
+
+  _useDevice(webgpu) {
+    if (this._destroyed || this._webgpu === webgpu) return;
+    this._wgpu?.destroy();
+    this._wgpu = null;
+    this._webgpu = webgpu;
+    // Textures of the old device are dead: a new own one, and the game's
+    // comes again with renderTo().
+    if (this._own) this._own = null;
+    if (this._target) {
+      this._target = null;
+      this._log(1, 'new device: render again with renderTo(a texture of the new device)');
+    }
+    this._last = null;
+    this._sizeChanged = true;
+    if (!this._makeRenderer(webgpu)) this._log(2, 'Skia could not use the new WebGPU device');
+  }
+
+  /** Renders the current frame into the texture and reads it back
+   * (premultiplied RGBA, top row first; 8-bit formats; COPY_SRC usage). */
+  async readPixelsAsync() {
+    if (!this._wgpu || this._wgpu.lost) return null;
+    this._wgpu.flags = 0;
+    const px = await this._wgpu.readPixels();
+    this._last = px ? this.texture : null;
+    return px;
+  }
+
+  /** Focus for gamepads (keys and pointers go where the page sends them). */
+  focus() { this.host._focusPads(this); }
+
+  // ------------------------------------------------------------- input
+  // Coordinates are logical px of the surface (0..width, 0..height from the
+  // top-left); e.g. a raycast hit's UV: (u * width, (1 - v) * height). Each
+  // returns whether the UI consumed it.
+
+  pointerMove(x, y, { pointerId = 1, pointerType = 'mouse', timeStamp } = {}) {
+    this._stamp(timeStamp);
+    const r = pointerType === 'mouse' ? this._inMove(x, y) : this._inTouch(pointerId, 1, x, y);
+    this._updateCursor();
+    return !!r;
+  }
+
+  pointerDown(x, y, { button = 0, pointerId = 1, pointerType = 'mouse', modifiers = 0, timeStamp } = {}) {
+    this._stamp(timeStamp);
+    let r;
+    if (pointerType === 'mouse') {
+      this._mouseButtons |= 1 << button;
+      r = this._inButton(x, y, mouseButton(button), 1, modifiers);
+    } else {
+      r = this._inTouch(pointerId, 0, x, y);
+    }
+    this._updateCursor();
+    return !!r;
+  }
+
+  pointerUp(x, y, { button = 0, pointerId = 1, pointerType = 'mouse', modifiers = 0, timeStamp, cancel = false } = {}) {
+    this._stamp(timeStamp);
+    let r;
+    if (pointerType === 'mouse') {
+      if (!(this._mouseButtons & (1 << button))) return false;
+      this._mouseButtons &= ~(1 << button);
+      r = this._inButton(x, y, mouseButton(button), 0, modifiers);
+    } else {
+      r = this._inTouch(pointerId, cancel ? 3 : 2, x, y);
+    }
+    this._updateCursor();
+    return !!r;
+  }
+
+  /** The pointer left the surface (hover states end). */
+  pointerLeave() {
+    const r = this._inLeave();
+    this._updateCursor();
+    return !!r;
+  }
+
+  wheel(x, y, deltaX, deltaY) { return !!this._inWheel(x, y, deltaX, deltaY); }
+
+  key(key, code, down, { repeat = false, modifiers = 0 } = {}) {
+    return !!this._inKey(key ?? null, code ?? null, down ? 1 : 0, repeat ? 1 : 0, modifiers);
+  }
+
+  text(text) { return !!this._inText(String(text)); }
+
+  /**
+   * Forwards a DOM event the page received: a PointerEvent / MouseEvent
+   * (pointerdown, pointermove, pointerup, pointercancel, pointerleave),
+   * WheelEvent, or KeyboardEvent (keydown, keyup; a printable keydown also
+   * types its text). `x`, `y`: where it hits the surface (logical px), for
+   * pointer and wheel events. Returns whether the UI consumed it.
+   */
+  dispatchEvent(e, x, y) {
+    const mods = modsOf(e), timeStamp = e.timeStamp;
+    const pointer = { button: e.button ?? 0, pointerId: e.pointerId ?? 1, pointerType: e.pointerType || 'mouse',
+      modifiers: mods, timeStamp };
+    switch (e.type) {
+      case 'pointerdown': case 'mousedown': return this.pointerDown(x, y, pointer);
+      case 'pointermove': case 'mousemove': return this.pointerMove(x, y, pointer);
+      case 'pointerup': case 'mouseup': return this.pointerUp(x, y, pointer);
+      case 'pointercancel': return this.pointerUp(x, y, { ...pointer, cancel: true });
+      case 'pointerleave': case 'pointerout': case 'mouseleave': return this.pointerLeave();
+      case 'wheel': {
+        const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.height : 1;
+        return this.wheel(x, y, e.deltaX * k, e.deltaY * k);
+      }
+      case 'keydown': case 'keyup': {
+        if (e.isComposing) return false;
+        const down = e.type === 'keydown';
+        let used = this.key(e.key || null, e.code || null, down, { repeat: e.repeat, modifiers: mods });
+        if (down && e.key?.length === 1 && !e.ctrlKey && !e.metaKey) used = this.text(e.key) || used;
+        return used;
+      }
+      default: return false;
+    }
+  }
+
+  _stamp(t) { if (t != null) this._inTime(t); }
+
+  /** New props: the component re-renders with them, keeping its state. False for invalid props. */
+  setProps(props) { return this.run(null, props); }
+
+  /** Runs `component` (null: the current one) with `props` on this surface. */
+  run(component, props) {
+    if (this._destroyed) return false;
+    const ok = this._withStrings([component == null ? null : String(component), JSON.stringify(props ?? {})],
+      (k, p) => this.module._jsui_surface_run(this.rt, k, p)) === 0;
+    if (ok && component != null) this.component = String(component);
+    return ok;
+  }
+
+  /** Unmounts the component and frees the surface and its own texture (a
+   * texture of the game's stays the game's). */
+  destroy() { this._destroyView(false); }
+
+  _destroyView(runtimeGone) {
+    if (this._destroyed) return;
+    super._destroyView();
+    if (!runtimeGone) {
+      this.module._jsui_surface_destroy(this.rt);
+      this.host._surfaceDestroyed(this);
+    }
+    this.rt = 0;
+    const own = this._own;
+    this._own = this._target = this._last = null;
+    if (own) requestAnimationFrame(() => own.destroy());
   }
 }
 

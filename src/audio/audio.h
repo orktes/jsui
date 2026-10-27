@@ -4,9 +4,11 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -59,6 +61,13 @@ class Audio {
   // reports are no longer delivered).
   void contextEnded();
 
+  // Voices and preloads made for a JSUIContainer's child runtime (its
+  // audio goes through this runtime's handler, render/container_view.h):
+  // their reports go to `ended` / `loaded`, not to this runtime's JS.
+  uint64_t playFor(std::function<void(int status)> ended, const std::string& url, const std::string& bus,
+                   float volume, float pitch, float pan, bool loop, float fadeMs, double offsetS);
+  void preloadFor(const std::string& url, std::function<void(bool ok, double durationS)> loaded);
+
   // ---- reports (from the handler / backend)
   void voiceEnded(uint64_t voice, int status);
   void soundLoaded(const std::string& url, bool ok, double durationS);
@@ -92,6 +101,8 @@ class Audio {
   std::atomic<uint64_t> nextVoice_{1};
   std::unordered_set<uint64_t> live_;
   std::vector<Event> events_;
+  std::unordered_map<uint64_t, std::function<void(int)>> foreignVoices_;
+  std::unordered_map<std::string, std::vector<std::function<void(bool, double)>>> foreignLoads_;
 };
 
 }  // namespace jsui

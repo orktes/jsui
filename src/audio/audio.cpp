@@ -51,6 +51,18 @@ uint64_t Audio::play(const std::string& url, const std::string& bus, float volum
   return id;
 }
 
+uint64_t Audio::playFor(std::function<void(int)> ended, const std::string& url, const std::string& bus,
+                       float volume, float pitch, float pan, bool loop, float fadeMs, double offsetS) {
+  uint64_t id = reserveVoice();
+  foreignVoices_[id] = std::move(ended);
+  return play(url, bus, volume, pitch, pan, loop, fadeMs, offsetS, id);
+}
+
+void Audio::preloadFor(const std::string& url, std::function<void(bool, double)> loaded) {
+  foreignLoads_[url].push_back(std::move(loaded));
+  preload(url);
+}
+
 void Audio::voice(JsuiAudioOp op, uint64_t voice, float volume, float pitch, float pan, float fadeMs) {
   if (!live_.count(voice) || !available()) return;
   JsuiAudioCommand c{};
@@ -110,14 +122,29 @@ void Audio::contextEnded() {
   }
   live_.clear();
   events_.clear();
+  foreignVoices_.clear();
+  foreignLoads_.clear();
 }
 
 void Audio::voiceEnded(uint64_t voice, int status) {
   if (!live_.erase(voice)) return;
+  auto foreign = foreignVoices_.find(voice);
+  if (foreign != foreignVoices_.end()) {
+    std::function<void(int)> fn = std::move(foreign->second);
+    foreignVoices_.erase(foreign);
+    if (fn) fn(status);
+    return;
+  }
   events_.push_back(Event{false, voice, status, std::string(), 0});
 }
 
 void Audio::soundLoaded(const std::string& url, bool ok, double durationS) {
+  auto foreign = foreignLoads_.find(url);
+  if (foreign != foreignLoads_.end()) {
+    std::vector<std::function<void(bool, double)>> fns = std::move(foreign->second);
+    foreignLoads_.erase(foreign);
+    for (auto& fn : fns) fn(ok, durationS);
+  }
   events_.push_back(Event{true, 0, ok ? 1 : 0, url, durationS});
 }
 

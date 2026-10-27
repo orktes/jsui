@@ -101,6 +101,7 @@ Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
 Runtime::~Runtime() {
   if (js) js->stop();  // a JS thread ends (and frees its engine) first
   hostQueue.clear();  // callbacks JS queued do not reach an embedder tearing down
+  if (containers) containers->clear();  // child runtimes play through audio / video: they go first
   audio->contextEnded();
   audio.reset();
   video->contextEnded();

@@ -226,6 +226,9 @@ function definePage(I) {
       this._post({ op: 'text', text });
       return 1;
     }
+    _pasted(text) {
+      this._post({ op: 'clip', text });
+    }
 
     // Focus came back from the page: the next Tab moves focus inside the UI
     // (predicted consumed) whatever the last one did at the chain's end.
@@ -608,6 +611,7 @@ function definePage(I) {
         case 'ready': this._starting?.resolve(ev); return;
         case 'initError': this._starting?.reject(new Error(ev.message)); return;
         case 'call': this._onCall(ev.id, ev.name, ev.json); return;
+        case 'clip': I.writeClipboard(ev.text); return;
         case 'lastError': this._lastError = ev.msg; return;
         case 'backend': this._backend = ev.value; return;
         case 'padsUsed': this._padsUsed = ev.pads; return;
@@ -1049,6 +1053,11 @@ function definePage(I) {
 
     // ------------------------------------------------------- surfaces
 
+    createTextureSurface() {
+      throw new Error('createTextureSurface: not in worker mode (a GPUDevice cannot move to a worker); ' +
+        'createJsui({ device }) without worker: true');
+    }
+
     createSurface(target, options) {
       if (this._destroyed) throw new Error('createSurface: runtime destroyed');
       const s = new WorkerSurface(this, target, options ?? {});
@@ -1352,6 +1361,7 @@ export function serve(I, early) {
         if (!!used !== !!op.p) post({ ev: 'miss', v: op.v, kind: 'key', combo: keyCombo(op.key, op.mods), used: +!!used });
         return;
       case 'text': view._inText(op.text); return;
+      case 'clip': view._hostOf()._clipText = op.text; return;
     }
     if (op.p !== undefined && !!used !== !!op.p) post({ ev: 'miss', v: op.v, kind: op.op, x: op.x, y: op.y, used: +!!used });
   };
@@ -1479,6 +1489,12 @@ export function serve(I, early) {
     _texturesReset() { post({ ev: 'texReset' }); }
 
     _onCall(id, name, json) { post({ ev: 'call', id, name, json }); }
+
+    // Workers have no clipboard: the page writes it.
+    _copied(text) {
+      this._clipText = text;
+      post({ ev: 'clip', text });
+    }
 
     _checkError() {
       const p = this.module._jsui_last_error(this.rt);
@@ -1669,7 +1685,7 @@ export function serve(I, early) {
     const view = views.get(op.v ?? 0);
     const M = host.module;
     switch (op.op) {
-      case 'button': case 'touch': case 'leave': case 'key': case 'text': applyInput(op); return;
+      case 'button': case 'touch': case 'leave': case 'key': case 'text': case 'clip': applyInput(op); return;
       case 'start': host.start(); return;
       case 'stop': host.stop(); return;
       case 'frame': case 'tick': host.frame(op.t); return;

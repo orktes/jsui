@@ -87,6 +87,30 @@ EM_JS(void, jsui_web_js_component, (int hostId, int cls, int kind, int view, voi
                                         b ? UTF8ToString(b) : null);
 });
 
+// Clipboard (jsui_set_clipboard_callbacks): copies go to the host's
+// onClipboard (web/jsui-web.js writes the page's clipboard), pastes read its
+// clipboardText() (what the page last pasted or copied). A host without them
+// (headless Node) keeps an in-process clipboard here.
+EM_JS(int, jsui_web_js_clip_length, (int hostId), {
+  var h = Module.__jsuiHosts && Module.__jsuiHosts.get(hostId);
+  var clips = Module.__jsuiClips || (Module.__jsuiClips = new Map());
+  var t = h && h.clipboardText ? h.clipboardText() : clips.get(hostId);
+  Module.__jsuiClipOut = typeof t === 'string' ? t : '';
+  return lengthBytesUTF8(Module.__jsuiClipOut);
+});
+
+EM_JS(void, jsui_web_js_clip_read, (char* out, int size), {
+  stringToUTF8(Module.__jsuiClipOut || '', out, size);
+  Module.__jsuiClipOut = '';
+});
+
+EM_JS(void, jsui_web_js_clip_write, (int hostId, const char* text), {
+  var h = Module.__jsuiHosts && Module.__jsuiHosts.get(hostId);
+  var t = UTF8ToString(text);
+  (Module.__jsuiClips || (Module.__jsuiClips = new Map())).set(hostId, t);
+  if (h && h.onClipboard) h.onClipboard(t);
+});
+
 namespace {
 
 // A page-JS component class: which host, which of its classes.
@@ -184,6 +208,18 @@ void videoTrampoline(void* user, const JsuiVideoCommand* c) {
                     c->texture, c->time_s, c->volume, c->rate, c->paused, c->muted, c->loop);
 }
 
+std::string gClip;  // the last clipboardGet answer (valid until the next call)
+
+const char* clipboardGetTrampoline(void* user) {
+  int n = jsui_web_js_clip_length(hostIdOf(user));
+  std::string buf(size_t(n) + 1, '\0');
+  jsui_web_js_clip_read(buf.data(), n + 1);
+  gClip.assign(buf.c_str());
+  return gClip.c_str();
+}
+
+void clipboardSetTrampoline(void* user, const char* text) { jsui_web_js_clip_write(hostIdOf(user), text ? text : ""); }
+
 }  // namespace
 
 extern "C" {
@@ -225,6 +261,7 @@ EMSCRIPTEN_KEEPALIVE JsuiRuntime* jsui_web_create(int hostId, int width, int hei
   jsui::JsEngine::nextKind = js == 1 ? jsui::JsEngine::Kind::Host : jsui::JsEngine::Kind::QuickJs;
   JsuiRuntime* rt = jsui_create(&cfg);
   jsui::JsEngine::nextKind = jsui::JsEngine::Kind::QuickJs;
+  if (rt) jsui_set_clipboard_callbacks(rt, clipboardGetTrampoline, clipboardSetTrampoline, user);
   return rt;
 }
 

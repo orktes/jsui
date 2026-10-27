@@ -24,6 +24,12 @@
 //   otherwise (the CPU     the picture is drawn into a 2D canvas, read back
 //   raster, mixed APIs)    and copied (jsui_set_texture_pixels, straight alpha).
 //
+// A GPUTexture source (a WebGPU game's render target on the device it shares
+// with JSUI, createJsui({ device })) is not copied: the runtime samples that
+// texture itself (rgba8unorm, bgra8unorm, rgba8unorm-srgb or rgba16float,
+// with TEXTURE_BINDING usage). setTexture() with the same texture again says
+// it has new contents. It needs every view on WebGPU on that device.
+//
 // "Otherwise" includes a main canvas with a WebGL context of its own next to
 // surfaces on the runtime's shared WebGL context: a GL texture lives in one
 // context, and the runtime holds one texture per name.
@@ -167,6 +173,9 @@ export function sourceSize(s) {
   return w > 0 && h > 0 ? { width: Math.round(w), height: Math.round(h) } : null;
 }
 
+export const isGPUTexture = (s) => typeof GPUTexture !== 'undefined' && s instanceof GPUTexture;
+// Formats the runtime samples a GPUTexture source in (src/render/gpu_webgpu.cpp).
+const GPU_TEXTURE_FORMATS = new Set(['rgba8unorm', 'bgra8unorm', 'rgba8unorm-srgb', 'rgba16float']);
 export const isVideoFrame = (s) => 'displayWidth' in s && typeof s.close === 'function';
 const isImageData = (s) => s.data instanceof Uint8ClampedArray && !('getContext' in s);
 // { data, width, height }: straight-alpha RGBA rows in any typed array (not an ImageData).
@@ -393,7 +402,8 @@ export class HostTextureSet {
     const opaque = options.opaque ?? defaultOpaque(source);
     const flags = opaque ? TEXTURE_OPAQUE : 0;
     try {
-      if (target.kind === 'webgpu') this._uploadWebGPU(e, source, size, flags, target);
+      if (isGPUTexture(source)) this._wrapWebGPU(e, source, size, flags, target);
+      else if (target.kind === 'webgpu') this._uploadWebGPU(e, source, size, flags, target);
       else if (target.kind === 'gl') this._uploadGL(e, source, size, flags, target);
       else this._uploadPixels(e, source, size, flags);
     } catch (err) {
@@ -436,10 +446,35 @@ export class HostTextureSet {
     return this.host._withStrings([name], (k) => this.module._jsui_texture_updated(this.host.rt, k));
   }
 
+  // A GPUTexture of the page's (shared) device, sampled in place: no copy.
+  _wrapWebGPU(e, texture, size, flags, target) {
+    if (target.kind !== 'webgpu') {
+      throw new Error(`a GPUTexture needs the WebGPU renderer on its device (the views render with ${target.kind})`);
+    }
+    if (!GPU_TEXTURE_FORMATS.has(texture.format)) {
+      throw new Error(`GPUTexture format ${texture.format} is not one of ${[...GPU_TEXTURE_FORMATS].join(', ')}`);
+    }
+    if (!(texture.usage & 0x04)) throw new Error('the GPUTexture needs TEXTURE_BINDING usage');
+    if (e.kind === 'webgpu' && e.texture === texture && e.flags === flags && e.width === size.width &&
+        e.height === size.height) {
+      this._updated(e.name);
+      return;
+    }
+    const M = this.module;
+    const old = e.kind ? this._detach(e) : null;
+    if (!this._instance) this._instance = M._jsui_web_wgpu_create_instance();
+    const ptr = M.WebGPU.importJsTexture(texture, this._instance);
+    Object.assign(e, { kind: 'webgpu', texture, ptr, external: true, width: size.width, height: size.height, flags });
+    this._setDesc(e.name, KIND_WEBGPU, ptr, size.width, size.height, flags);  // format 0: the texture's own
+    if (old) this._free(old);
+  }
+
   // WebGPU: copyExternalImageToTexture into a texture of the views' device.
   _uploadWebGPU(e, source, size, flags, target) {
     const M = this.module, device = target.device;
-    const fresh = e.kind !== 'webgpu' || e.width !== size.width || e.height !== size.height || e.flags !== flags;
+    // A GPUTexture source before: a texture of our own from now on.
+    const fresh = e.kind !== 'webgpu' || e.external || e.width !== size.width || e.height !== size.height ||
+      e.flags !== flags;
     let texture = e.texture, old = null;
     if (fresh) {
       old = e.kind ? this._detach(e) : null;
@@ -459,7 +494,7 @@ export class HostTextureSet {
     }
     if (!this._instance) this._instance = M._jsui_web_wgpu_create_instance();
     const ptr = M.WebGPU.importJsTexture(texture, this._instance);
-    Object.assign(e, { kind: 'webgpu', texture, ptr, width: size.width, height: size.height, flags });
+    Object.assign(e, { kind: 'webgpu', texture, ptr, external: false, width: size.width, height: size.height, flags });
     this._setDesc(e.name, KIND_WEBGPU, ptr, size.width, size.height, flags);
     if (old) this._free(old);
   }
@@ -590,9 +625,10 @@ export class HostTextureSet {
 
   // Takes the GPU objects off an entry (to free once their replacement is set).
   _detach(e) {
-    const old = { kind: e.kind, texture: e.texture, ptr: e.ptr, tex: e.tex, id: e.id, gl: e.gl, target: e.target };
+    const old = { kind: e.kind, texture: e.texture, ptr: e.ptr, external: e.external, tex: e.tex, id: e.id, gl: e.gl,
+      target: e.target };
     e.kind = null;
-    e.texture = e.ptr = e.tex = e.id = e.gl = undefined;
+    e.texture = e.ptr = e.external = e.tex = e.id = e.gl = undefined;
     e.width = e.height = 0;
     return old;
   }
@@ -607,7 +643,10 @@ export class HostTextureSet {
     if (e.kind === 'webgpu') {
       // Destroying is safe with frames in flight: WebGPU finishes submitted
       // work first. The runtime already holds the replacement (or nothing).
-      try { e.texture.destroy(); } catch {}
+      // A GPUTexture source stays the page's.
+      if (!e.external) {
+        try { e.texture.destroy(); } catch {}
+      }
       M._jsui_web_wgpu_release_texture(e.ptr);
     } else if (e.kind === 'gl') {
       if (!stale && !e.gl.isContextLost()) {

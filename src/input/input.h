@@ -56,6 +56,9 @@ Affine transformOpMatrix(const TransformOp& op, float w, float h);
 // translate(layout) * translate(origin) * transform * translate(-origin).
 Affine nodeLocalToParent(const Node* n);
 
+// props.__events lists `token` (case-insensitive) or "*".
+bool nodeListens(const Node* n, const char* token);
+
 enum class NavDirection : uint8_t { Up, Down, Left, Right };
 
 // A touch drag's finger position along the scroll axis (offset space) at its
@@ -388,6 +391,23 @@ class InputManager {
   std::u16string editFilter(Node* input, const std::u16string& in) const;
   bool editable(const Node* input) const;
 
+  // Selectable Text (text_selection.cpp): a paragraph-root Text with
+  // `selectable` selects natively (Node::selAnchor / selFocus) with mouse
+  // drags, double / triple clicks, shift-clicks and a touch long-press;
+  // Ctrl / Cmd+C copies it, Ctrl / Cmd+A selects all of it. One selection
+  // at a time, within one Text root.
+  Node* selectableRoot(Node* hit) const;
+  void selPointerDown(Node* hit, PointerState& p, int mods);
+  void selPointerDrag(const PointerState& p);
+  void selPointerUp(const PointerState& p);
+  bool selKey(const std::string& key, int mods);
+  // Sets the selection of `root` (clamped), clearing any other; 'selectionchange'
+  // when it changed.
+  void selSet(Node* root, int anchor, int focus);
+  void selClear();
+  void selTick();
+  int multiClick(uint32_t id, const PointerState& p);
+
   // Scrolling internals (src/input/scroll.cpp).
   void dispatchScrollEvent(const char* type, Node* sv, float vx = 0, float vy = 0, const float* target = nullptr,
                            bool toJs = true);
@@ -585,6 +605,18 @@ class InputManager {
   // selectTextOnFocus selected everything: the press that focused it does
   // not place the caret.
   uint32_t selectedOnFocusId_ = 0;
+
+  // Selectable Text: the Text root holding the selection, the pointer
+  // drag-selecting it (-1: none) with its granularity (like dragMode_) and
+  // the word / paragraph it started on, and a touch waiting to become a
+  // long-press selection (-1: none) with where and when it went down.
+  uint32_t selTextId_ = 0;
+  int selPointer_ = -1;
+  int selMode_ = 0, selWordStart_ = 0, selWordEnd_ = 0;
+  int selPressPointer_ = -1;
+  uint32_t selPressTextId_ = 0;
+  double selPressAt_ = 0;
+  float selPressX_ = 0, selPressY_ = 0;
 
   // Reused buffers (no per-event allocation in the steady state).
   std::vector<Node*> zOrder_;

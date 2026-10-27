@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>JSUI · Three.js on one GPUDevice</title>
+  <meta name="description" content="A Three.js WebGPU scene and JSUI sharing one GPUDevice: a React Native UI rendered into a texture on a screen in the 3D world, and a Three.js render target shown inside the UI, with no copies.">
+  <meta name="theme-color" content="#03050b">
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #03050b; }
+    #scene { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; touch-action: none; }
+    #splash { position: fixed; inset: 0; display: grid; place-items: center; color: #8ea4c4;
+              font: 500 14px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; transition: opacity .45s ease;
+              pointer-events: none; }
+    #splash.gone { opacity: 0; }
+    #err { position: fixed; left: 12px; right: 12px; bottom: 12px; padding: 10px 12px; border-radius: 8px;
+           background: #3d1214ee; color: #ffdcd7; font: 13px/1.4 system-ui, sans-serif; display: none; z-index: 2; }
+    #back { position: fixed; right: 16px; top: 14px; color: #8ea4c4; font: 600 12px/1 system-ui, sans-serif;
+            letter-spacing: .08em; text-transform: uppercase; text-decoration: none; padding: 8px 10px;
+            border: 1px solid #1b2b47; border-radius: 8px; background: #060b16cc; }
+    #back:hover { color: #e8f3ff; border-color: #2d4a78; }
+  </style>
+</head>
+<body>
+  <canvas id="scene" aria-label="A Three.js scene with a JSUI console on a screen"></canvas>
+  <div id="splash">Starting Three.js and JSUI on one GPUDevice…</div>
+  <div id="err"></div>
+  <a id="back" href="../#/examples">JSUI showcase</a>
+  <script>window.jsuiModules = null;  // set by site/scripts/build.mjs</script>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
