@@ -31,8 +31,8 @@ export function FullScreen({ s, index, total, mountKey, padInside, onStep, onClo
   const f = s.feature;
   return (
     <Modal transparent onRequestClose={close}>
-      <Animated.View
-        style={[styles.root, { opacity: t }]}
+      <View
+        style={styles.root}
         onKeyDown={(e) => {
           if (e.key === '[' || e.key === ']') {
             onStep(e.key === '[' ? -1 : 1);
@@ -85,14 +85,14 @@ export function FullScreen({ s, index, total, mountKey, padInside, onStep, onClo
             padInside.current = true;
           }}
         >
-          <Animated.View style={{ transform: [{ scale: t.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1] }) }] }}>
+          <Animated.View style={{ opacity: t, transform: [{ scale: t.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1] }) }] }}>
             <Stage width={stageW} radius={phone ? 0 : 6} style={{ backgroundColor: '#03050b' }}>
               <s.component key={s.id + ':' + mountKey} active />
             </Stage>
           </Animated.View>
           {room.h > room.w * 1.2 ? <Text style={styles.rotate}>Turn your phone sideways for a bigger screen</Text> : null}
         </View>
-      </Animated.View>
+      </View>
     </Modal>
   );
 }
