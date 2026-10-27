@@ -512,7 +512,7 @@ test('source maps: --no-hmr bundle sources are files on disk', async () => {
   }
 });
 
-test('profile trace: JS samples on Main, the runtime phases as JSUI lanes', async () => {
+test('profile trace: JS samples on Main, the phases on a render thread, GPU submits on the GPU track', async () => {
   const { profileTrace } = await import('../src/profile-trace.js');
   const cf = (functionName) => ({ functionName, scriptId: '0', url: '', lineNumber: -1, columnNumber: -1 });
   const profile = {
@@ -531,8 +531,12 @@ test('profile trace: JS samples on Main, the runtime phases as JSUI lanes', asyn
   assert.deepEqual(chunk.args.data.cpuProfile.nodes.map((n) => n.id), [1, 2, 3]);
   assert.deepEqual(chunk.args.data.cpuProfile.nodes[0].children, [2, 3]);
   assert.deepEqual(chunk.args.data.cpuProfile.samples, [2, 3, 2, 2]);
-  const lanes = traceEvents.filter((e) => e.name === 'TimeStamp').map((e) => e.args.data);
-  assert.deepEqual(lanes.map((d) => [d.name, d.track, d.trackGroup, d.start, d.end]),
-    [['Paint', 'Render thread', 'JSUI', 1300, 1400], ['GPU submit', 'GPU submit', 'JSUI', 1400, 1450]]);
+  const thread = (pid, tid) => traceEvents.find((e) => e.name === 'thread_name' && e.pid === pid && e.tid === tid).args.name;
+  const paint = traceEvents.find((e) => e.name === 'Paint');
+  assert.deepEqual([paint.ph, paint.ts, paint.dur, thread(paint.pid, paint.tid)], ['X', 1300, 100, 'JSUI render thread']);
+  assert.equal(paint.args.data.layerId, 0);
+  const gpu = traceEvents.find((e) => e.name === 'GPUTask');
+  assert.deepEqual([gpu.ts, gpu.dur, thread(gpu.pid, gpu.tid)], [1400, 50, 'CrGpuMain']);
+  assert.ok(traceEvents.some((e) => e.name === 'process_name' && e.pid === gpu.pid && e.args.name === 'GPU Process'));
   assert.ok(traceEvents.some((e) => e.name === 'thread_name' && e.args.name === 'CrRendererMain'));
 });

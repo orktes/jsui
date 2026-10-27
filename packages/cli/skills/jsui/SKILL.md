@@ -158,8 +158,8 @@ npx jsui log --attach $U --since 0             # what the person clicked / press
   (source maps), console, and the Performance panel's CPU profile (a flame
   chart of JS functions, with the runtime's layout, paint and GPU submit as
   `(layout)`, `(paint)`, `(gpu)` where JS was idle; `jsui dev` prints a
-  link to the same recording with Render thread and GPU lanes of their
-  own). `$U/json/list`
+  link to the same recording with a render thread and GPU track of their
+  own, as Chrome shows a page). `$U/json/list`
   gives each runtime's `devtoolsFrontendUrl` to paste into Chrome. See
   `docs/DEBUGGING.md`.
 

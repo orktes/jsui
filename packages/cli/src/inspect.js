@@ -485,7 +485,7 @@ export function createInspector(o) {
     traces.set(n, JSON.stringify(profileTrace(profile, { name: rt.name || 'jsui', url: rt.title })));
     if (traces.size > 10) traces.delete(traces.keys().next().value);
     const url = `${originOf()}/__jsui/trace/${n}.json`;
-    log(`[jsui] profile with a lane per thread: devtools://devtools/bundled/devtools_app.html?panel=timeline&loadTimelineFromURL=${url}  (or Load profile: ${url})`);
+    log(`[jsui] profile as a trace (render thread and GPU tracks): devtools://devtools/bundled/devtools_app.html?panel=timeline&loadTimelineFromURL=${url}  (or Load profile: ${url})`);
   }
 
   // DevTools loads source maps through the target (Network.loadNetworkResource,
