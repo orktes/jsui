@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -201,6 +202,14 @@ struct JsEngine::Impl {
   JSValue call(JSValueConst fn, JSValueConst thisVal, int argc, JSValueConst* argv);
   void enter();
   void leave();
+  // What the next outermost entry into JS is ("(timer)", "(event: press)"):
+  // a CPU profile shows it above that entry's JS. Set right before enter()
+  // or call(); ignored inside JS.
+  // Only built while a profile records: `kind` alone gives "(kind)", with a
+  // detail "(kind: detail)".
+  void entryLabel(const char* kind, std::string_view detail = {});
+  std::string nextEntry;
+  int batch = 0;  // beginBatch() depth: calls inside one are entries of their own
   void drain();  // jobs + rejections + layout queue (depth must be 0)
   void runJobsRaw();
   void reportException();

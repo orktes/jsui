@@ -151,6 +151,10 @@ void Inspector::poll() {
   syncSampler();
 }
 
+void Inspector::jsEnter(const char* what) {
+  if (agent_ && sampling_) qjs_cdp_profiler_enter(agent_, what);
+}
+
 void Inspector::jsIdle() {
   if (agent_ && sampling_) qjs_cdp_profiler_idle(agent_);
 }

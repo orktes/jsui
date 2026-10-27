@@ -133,6 +133,11 @@ bool qjs_cdp_profiling(QJSCDPAgent *agent);
 int qjs_cdp_sampling_interval(QJSCDPAgent *agent);
 void qjs_cdp_profiler_tick(QJSCDPAgent *agent); /* any thread */
 void qjs_cdp_profiler_idle(QJSCDPAgent *agent); /* JS thread */
+/* jsui: the embedder calls into JS for `what` ("(timer)", "(event: press)"):
+   the samples until qjs_cdp_profiler_idle() go under a node of that name,
+   and it is a scope in profile.jsuiSpans. Another call before then ends it
+   and starts the next (the calls of a batch). JS thread only. */
+void qjs_cdp_profiler_enter(QJSCDPAgent *agent, const char *what);
 
 /* jsui: the profiler's clock (microseconds, monotonic). The default is the
    agent's own; an embedder that reports spans sets the one they are in. */

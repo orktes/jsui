@@ -43,6 +43,13 @@ running. *Save profile* writes a `.cpuprofile`.
 * **What it measures.** Time on the JS thread while JS runs, by JS function.
   Time in a native call (a host call, `JSON.parse`) counts toward the JS
   function that made it.
+* **What called into JS.** Each stretch of JS sits under what the runtime
+  called it for: `(timer)`, `(animation frame)`, `(event: pointerup)`,
+  `(host message: name)`, `(call: name)` (a global the runtime calls, such
+  as `jsui dev`'s own `__jsui_onCall`), `(host call reply)`, `(measure)`,
+  `(onLayout)`, `(script: url)`, and `(microtasks)` for the promise jobs
+  that run after them. In the trace they are Chrome's own Task, Timer
+  fired, Animation frame fired, Event and Function call.
 * **The runtime's own work.** Where JS was idle, the frame phases the
   runtime ran show as top-level entries: `(commit)`, `(style)`, `(layout)`,
   `(animated)`, `(input)`, `(paint)`, `(worklets)` (react-native-worklets
@@ -57,7 +64,7 @@ running. *Save profile* writes a `.cpuprofile`.
   recording as a trace, and prints a link when you stop:
   `devtools://devtools/bundled/devtools_app.html?panel=timeline&loadTimelineFromURL=http://127.0.0.1:5173/__jsui/trace/1.json`.
   Paste it into Chrome's address bar to get the recording the way Chrome
-  shows a page's: the JS on **Main**, the frame phases on a **JSUI render
+  shows a page's: the JS on **Main** (in tasks, under what called it), the frame phases on a **JSUI render
   thread** track (Layout, Recalculate style, Paint, Commit, colored as
   Rendering and Painting) where they actually ran, overlapping JS or not,
   worklet runs (react-native-worklets, on the window's thread) on a **JSUI

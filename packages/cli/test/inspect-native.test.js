@@ -240,8 +240,13 @@ test('profiler: Profiler.start / stop records a CPU profile of the JSX (native r
     assert.ok(spin && spin.hitCount > 0, 'spin was sampled: ' + profile.nodes.map((n) => n.callFrame.functionName).join(','));
     assert.equal(spin.callFrame.url, parsed.params.url);
     assert.equal(spin.callFrame.scriptId, parsed.params.scriptId);
-    const parent = profile.nodes.find((n) => n.children.includes(spin.id));
+    const parentOf = (n) => profile.nodes.find((p) => p.children.includes(n.id));
+    const parent = parentOf(spin);
     assert.equal(parent.callFrame.functionName, 'App');
+    // Above the JS: what called into it, under the root.
+    let top = parent;
+    while (parentOf(top).callFrame.functionName !== '(root)') top = parentOf(top);
+    assert.match(top.callFrame.functionName, /^\((timer|animation frame|microtasks|call: .*|event: .*)\)$/);
     const bundle = await (await fetch(parsed.params.url)).text();
     assert.match(bundle.split('\n')[spin.callFrame.lineNumber], /function spin\(/);
     assert.ok(profile.nodes.some((n) => n.callFrame.functionName === '(idle)' && n.hitCount > 0));

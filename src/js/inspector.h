@@ -70,7 +70,9 @@ class Inspector : public PhaseSpanSink {
   void console(const char* type, const JSValue* args, int count);
   // An uncaught exception (Runtime.exceptionThrown).
   void exception(JSValueConst exc, const std::string& text);
-  // JS returned to the runtime (a CPU profile counts what follows as idle).
+  // The runtime calls into JS (`what`: "(timer)", ...; a CPU profile shows
+  // it above the JS) / JS returned to it (what follows is idle).
+  void jsEnter(const char* what);
   void jsIdle();
   // Whether a frontend records a CPU profile: the runtime's phases then
   // report to this sink (span: any thread), shown in the profile.

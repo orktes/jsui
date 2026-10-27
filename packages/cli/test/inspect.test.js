@@ -517,19 +517,23 @@ test('profile trace: JS samples on Main, the phases on a render thread, worklets
   const cf = (functionName) => ({ functionName, scriptId: '0', url: '', lineNumber: -1, columnNumber: -1 });
   const profile = {
     nodes: [
-      { id: 1, callFrame: cf('(root)'), children: [2, 3, 4] },
+      { id: 1, callFrame: cf('(root)'), children: [2, 5, 4, 6] },
       { id: 2, callFrame: cf('(idle)'), children: [] },
       { id: 3, callFrame: cf('App'), children: [] },
       { id: 4, callFrame: cf('(paint)'), children: [] },
+      { id: 5, callFrame: cf('(timer)'), children: [3] },
+      { id: 6, callFrame: cf('(program)'), children: [] },
     ],
     startTime: 1000, endTime: 2000,
     samples: [2, 3, 4, 2], timeDeltas: [0, 100, 200, 300],
-    jsuiSpans: [['(paint)', 1300, 1400], ['(gpu)', 1400, 1450], ['(worklets)', 1500, 1520]],
+    jsuiSpans: [['(timer)', 1100, 1290], ['(paint)', 1300, 1400], ['(gpu)', 1400, 1450], ['(worklets)', 1500, 1520]],
   };
   const { traceEvents } = profileTrace(profile, { name: 'jsui-viewer' });
   const chunk = traceEvents.find((e) => e.name === 'ProfileChunk');
-  assert.deepEqual(chunk.args.data.cpuProfile.nodes.map((n) => n.id), [1, 2, 3]);
-  assert.deepEqual(chunk.args.data.cpuProfile.nodes[0].children, [2, 3]);
+  assert.deepEqual(chunk.args.data.cpuProfile.nodes.map((n) => n.id), [1, 2, 3, 6]);
+  assert.deepEqual(chunk.args.data.cpuProfile.nodes[0].children, [2, 6, 3]);
+  const timer = traceEvents.filter((e) => e.ts === 1100).map((e) => [e.name, e.ph, e.dur, e.tid]);
+  assert.deepEqual(timer, [['RunTask', 'X', 190, 1], ['TimerFire', 'X', 190, 1]]);
   assert.deepEqual(chunk.args.data.cpuProfile.samples, [2, 3, 2, 2]);
   const thread = (pid, tid) => traceEvents.find((e) => e.name === 'thread_name' && e.pid === pid && e.tid === tid).args.name;
   const paint = traceEvents.find((e) => e.name === 'Paint');

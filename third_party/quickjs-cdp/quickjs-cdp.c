@@ -183,6 +183,8 @@ struct QJSCDPAgent {
   int nscopes, scopes_cap;
   char **scope_names;
   int nscope_names;
+  int entry_node;      /* what called into JS: samples go under it */
+  int64_t entry_start; /* ... since */
   JSDebugFrameInfo *frames; /* a sample's stack */
   int frames_cap;
 };
@@ -804,6 +806,7 @@ static void profiler_reset(QJSCDPAgent *agent) {
   agent->nsamples = 0;
   agent->nspans = 0;
   agent->nscopes = 0;
+  agent->entry_node = 0;
 }
 
 static int64_t profiler_now(QJSCDPAgent *agent) {
@@ -883,7 +886,7 @@ static void profiler_sample(QJSCDPAgent *agent) {
         agent->frames, sizeof(JSDebugFrameInfo) * (size_t)agent->frames_cap);
   }
   int n = JS_GetStackFunctions(agent->ctx, agent->frames, agent->frames_cap);
-  int node = PROF_ROOT;
+  int node = agent->entry_node;
   for (int level = n - 1; level >= 0; level--) {
     JSDebugFrameInfo *info = &agent->frames[level];
     if (info->is_native) continue;
@@ -2198,11 +2201,38 @@ void qjs_cdp_profiler_tick(QJSCDPAgent *agent) {
 
 void qjs_cdp_profiler_idle(QJSCDPAgent *agent) {
   if (!agent->profiling) return;
+  if (agent->entry_node != PROF_ROOT) {
+    qjs_cdp_profiler_add_scope(agent, agent->pnodes[agent->entry_node].label,
+                               agent->entry_start, profiler_now(agent));
+    agent->entry_node = PROF_ROOT;
+  }
   if (agent->nsamples && agent->samples[agent->nsamples - 1] == PROF_IDLE)
     return;
   profiler_push(agent, PROF_IDLE);
-  /* The first statement JS runs next ends the idle stretch. */
-  agent->sample_pending = true;
+}
+
+/* A top-level node named `name` ("(paint)", "(timer)"), made on first use. */
+static int profiler_label_node(QJSCDPAgent *agent, const char *name) {
+  for (int c = agent->pnodes[PROF_ROOT].first_child; c >= 0;
+       c = agent->pnodes[c].next_sibling)
+    if (agent->pnodes[c].label && strcmp(agent->pnodes[c].label, name) == 0)
+      return c;
+  /* A key no function has, so profiler_node makes a new node. */
+  int key = -3 - agent->npnodes;
+  int node = profiler_node(agent, PROF_ROOT, JS_ATOM_NULL, JS_ATOM_NULL, key, key);
+  agent->pnodes[node].label = strdup(name);
+  return node;
+}
+
+void qjs_cdp_profiler_enter(QJSCDPAgent *agent, const char *what) {
+  if (!agent->profiling) return;
+  if (agent->entry_node != PROF_ROOT) /* the next call of a batch */
+    qjs_cdp_profiler_add_scope(agent, agent->pnodes[agent->entry_node].label,
+                               agent->entry_start, profiler_now(agent));
+  agent->entry_node = profiler_label_node(agent, what);
+  agent->entry_start = profiler_now(agent);
+  profiler_push(agent, agent->entry_node); /* until JS's first statement */
+  agent->sample_pending = true; /* which samples right away */
   JS_SetDebugTraceArmed(agent->ctx, true);
 }
 
@@ -2214,17 +2244,7 @@ void qjs_cdp_profiler_add_span(
     QJSCDPAgent *agent, const char *name, int64_t start_us, int64_t end_us) {
   if (!agent->profiling || end_us <= start_us || end_us <= agent->profile_start)
     return;
-  int node = -1;
-  for (int c = agent->pnodes[PROF_ROOT].first_child; c >= 0;
-       c = agent->pnodes[c].next_sibling)
-    if (agent->pnodes[c].label && strcmp(agent->pnodes[c].label, name) == 0)
-      node = c;
-  if (node < 0) {
-    /* A key no function has, so profiler_node makes a new node. */
-    int key = -3 - agent->npnodes;
-    node = profiler_node(agent, PROF_ROOT, JS_ATOM_NULL, JS_ATOM_NULL, key, key);
-    agent->pnodes[node].label = strdup(name);
-  }
+  int node = profiler_label_node(agent, name);
   if (agent->nspans == agent->spans_cap) {
     agent->spans_cap = agent->spans_cap ? agent->spans_cap * 2 : 1024;
     agent->spans =

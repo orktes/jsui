@@ -1,6 +1,7 @@
 // A CPU profile from a native runtime (Profiler.stop) as a Chrome trace, so
 // DevTools' Performance panel shows it as it shows a page's: the JS samples
-// on Main, the runtime's frame phases (the profile's `jsuiSpans`) on a
+// on Main under what called into JS (Timer fired, Event: press, ...), the
+// runtime's frame phases (the profile's `jsuiSpans`) on a
 // "JSUI render thread" track as Chrome's own Layout / Paint / ... events
 // (colored Rendering, Painting), worklet runs on a "JSUI worklets" track,
 // and GPU submits on the GPU track. The live
@@ -12,6 +13,7 @@
 // hides "Compositor", takes "CrRendererMain" for the main thread and the
 // "GPU Process" / "CrGpuMain" pair for the GPU track.
 
+const SPECIAL = new Set(['(root)', '(program)', '(idle)', '(garbage collector)']);
 const PHASES = /^\((commit|style|layout|animated|input|paint|gpu|worklets)\)$/;
 
 /**
@@ -32,11 +34,22 @@ export function profileTrace(profile, o = {}) {
     },
   ];
 
-  // The phases have lanes of their own: their samples count as idle here.
+  // The phases have tracks of their own: their samples count as idle here.
+  // What called into JS ("(timer)", ...) becomes a trace event above the JS
+  // (below), so its node goes and its children hang off the root.
+  const label = (n) => /^\(.*\)$/.test(n.callFrame.functionName) && !SPECIAL.has(n.callFrame.functionName);
   const phase = new Set(profile.nodes.filter((n) => PHASES.test(n.callFrame.functionName)).map((n) => n.id));
+  const entry = new Set(profile.nodes.filter((n) => label(n) && !phase.has(n.id)).map((n) => n.id));
   const idle = profile.nodes.find((n) => n.callFrame.functionName === '(idle)');
-  const nodes = profile.nodes.filter((n) => !phase.has(n.id)).map((n) => ({ ...n, children: (n.children || []).filter((c) => !phase.has(c)) }));
-  const samples = profile.samples.map((s) => (phase.has(s) && idle ? idle.id : s));
+  const program = profile.nodes.find((n) => n.callFrame.functionName === '(program)');
+  const lifted = profile.nodes.filter((n) => entry.has(n.id)).flatMap((n) => n.children || []);
+  const nodes = profile.nodes
+    .filter((n) => !phase.has(n.id) && !entry.has(n.id))
+    .map((n) => ({
+      ...n,
+      children: [...(n.children || []).filter((c) => !phase.has(c) && !entry.has(c)), ...(n.callFrame.functionName === '(root)' ? lifted : [])],
+    }));
+  const samples = profile.samples.map((s) => (phase.has(s) && idle ? idle.id : entry.has(s) && program ? program.id : s));
   ev.push({ ph: 'P', cat: 'disabled-by-default-v8.cpu_profiler', name: 'Profile', id: '0x1', pid, tid, ts: profile.startTime, args: { data: { startTime: profile.startTime } } });
   ev.push({
     ph: 'P', cat: 'disabled-by-default-v8.cpu_profiler', name: 'ProfileChunk', id: '0x1', pid, tid, ts: profile.endTime,
@@ -50,7 +63,10 @@ export function profileTrace(profile, o = {}) {
   ev.push({ ph: 'M', name: 'thread_name', pid: gpuPid, tid: gpuTid, ts: 0, args: { name: 'CrGpuMain' } });
   for (const [name, start, end] of profile.jsuiSpans || []) {
     const m = PHASES.exec(name);
-    if (!m) continue;
+    if (!m) {
+      ev.push(...entryEvents(name, start, end, pid, tid));
+      continue;
+    }
     const at = { ph: 'X', pid, tid: render, ts: start, dur: Math.max(1, end - start) };
     switch (m[1]) {
       case 'layout':
@@ -76,4 +92,23 @@ export function profileTrace(profile, o = {}) {
     }
   }
   return { traceEvents: ev, metadata: { source: 'jsui dev' } };
+}
+
+// What called into JS, as Chrome's own events on Main inside a task, so the
+// JS samples nest under them the way a page's do.
+function entryEvents(name, start, end, pid, tid) {
+  const at = { ph: 'X', pid, tid, ts: start, dur: Math.max(1, end - start) };
+  const m = /^\(([^:)]+)(?:: (.*))?\)$/.exec(name) || [];
+  const [kind, detail] = [m[1] || name, m[2] || ''];
+  let ev;
+  if (kind === 'timer') ev = { name: 'TimerFire', args: { data: { timerId: 0, frame: 'F1' } } };
+  else if (kind === 'animation frame') ev = { name: 'FireAnimationFrame', args: { data: { id: 0, frame: 'F1' } } };
+  else if (kind === 'event') ev = { name: 'EventDispatch', args: { data: { type: detail, frame: 'F1' } } };
+  else if (kind === 'script') ev = { name: 'EvaluateScript', args: { data: { url: detail, lineNumber: 0, columnNumber: 0, frame: 'F1' } } };
+  else if (kind === 'microtasks') ev = { name: 'RunMicrotasks', args: {} };
+  else ev = { name: 'FunctionCall', args: { data: { functionName: name, url: '', scriptId: '0', lineNumber: 0, columnNumber: 0, frame: 'F1' } } };
+  return [
+    { ...at, cat: 'disabled-by-default-devtools.timeline', name: 'RunTask', args: {} },
+    { ...at, cat: 'devtools.timeline', ...ev },
+  ];
 }
