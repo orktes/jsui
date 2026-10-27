@@ -11,6 +11,10 @@ Fast development of cross-platform, beautiful, responsive in-game UIs or standal
 
 JSUI answers all four: you write plain React Native code that LLMs and web developers already know, and a small embeddable runtime renders it on the GPU inside your game, the same way on every platform.
 
+![JSUI in Godot: on the left the final frame, with Godot's 3D scene and the JSUI HUD on top; on the right the JSUI layer on its own](docs/images/engines/godot-side-by-side.png)
+
+*The same frame in Godot: Godot draws the 3D world, JSUI draws everything on the right (panel, nameplates, buttons). More engines in [integrations](integrations/README.md#screenshots).*
+
 **Using a coding agent?** Add the JSUI skill to your project with one command:
 
 ```sh
