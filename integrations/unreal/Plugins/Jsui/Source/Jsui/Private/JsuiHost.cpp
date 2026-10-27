@@ -1,12 +1,20 @@
 #include "JsuiHost.h"
 
+#include "Async/Async.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
+#include "HttpModule.h"
+#include "Interfaces/IHttpRequest.h"
+#include "Interfaces/IHttpResponse.h"
 #include "JsuiLog.h"
+#include "Misc/EngineVersionComparison.h"
 #include "RHI.h"
 #include "RHICommandList.h"
 #include "RenderingThread.h"
 #include "TextureResource.h"
+
+#include <string>
+#include <vector>
 
 #if JSUI_UE_METAL
 #include "IMetalDynamicRHI.h"  // IsRHIMetal
@@ -42,8 +50,254 @@ std::atomic<bool> GGpuUnavailable{false};  // creation failed (or the context wa
 bool GGpuCreateQueued = false;             // game thread
 }  // namespace
 
+// ------------------------------------------------------------ Engine HTTP
+//
+// JsuiConfig.on_request answers http(s):// requests through FHttpModule (the
+// platform's HTTP stack: NSURLSession on Apple, libcurl or WinHTTP elsewhere,
+// with the engine's proxy and certificate settings). Everything else (files,
+// data:) is declined and goes to the built-in loader, and so are requests
+// with redirect: 'error' or 'manual': FHttpModule always follows redirects.
+//
+// on_request runs where the runtime starts loads (the game thread, or JS's
+// own thread): the request is started on the game thread. Its delegates run
+// on the HTTP thread (CompleteOnHttpThread) and answer the runtime from there
+// (jsui_request_* are thread safe): the status and headers once the first
+// body bytes (or the end) arrive, then each piece of the body as it comes
+// (streamed requests) or the whole body at the end. Shutdown() cancels what
+// is in flight and no answer reaches the runtime after that.
+#define JSUI_UE_HTTP_STREAMING UE_VERSION_NEWER_THAN(5, 4, 99)
+
+struct FJsuiHttp : public TSharedFromThis<FJsuiHttp, ESPMode::ThreadSafe>
+{
+	struct FCall
+	{
+		FHttpRequestPtr Request;
+		bool bStreaming = false;
+		bool bResponded = false;  // jsui_request_respond ran
+	};
+	struct FStart
+	{
+		FString Url, Verb;
+		TArray<TPair<FString, FString>> Headers;
+		TArray<uint8> Body;
+		int32 TimeoutMs = 0;
+		bool bStreaming = false;
+	};
+
+	std::mutex Mutex;
+	JsuiRuntime* Rt = nullptr;  // null once the runtime goes away
+	TMap<uint64, TSharedPtr<FCall, ESPMode::ThreadSafe>> Calls;
+	TSet<uint64> Starting;   // taken, not started on the game thread yet
+	TSet<uint64> Cancelled;  // cancelled while starting
+
+	static int OnRequest(void* User, JsuiRuntime*, uint64_t Id, const JsuiRequest* Req)
+	{
+		FJsuiHttp* Self = static_cast<FJsuiHttp*>(User);
+		const FString Url = UTF8_TO_TCHAR(Req->url ? Req->url : "");
+		if (!Url.StartsWith(TEXT("http://")) && !Url.StartsWith(TEXT("https://"))) return 1;
+		if (Req->redirect != JSUI_REDIRECT_FOLLOW) return 1;
+		FStart S;
+		S.Url = Url;
+		S.Verb = UTF8_TO_TCHAR(Req->method ? Req->method : "GET");
+		for (size_t i = 0; i < Req->header_count; i++)
+		{
+			const JsuiHeader& H = Req->headers[i];
+			if (!H.name) continue;
+			const FString Name = UTF8_TO_TCHAR(H.name);
+			// Framing headers are the HTTP stack's to set.
+			if (Name == TEXT("host") || Name == TEXT("content-length") || Name == TEXT("connection") ||
+			    Name == TEXT("transfer-encoding") || Name == TEXT("accept-encoding"))
+				continue;
+			S.Headers.Emplace(Name, UTF8_TO_TCHAR(H.value ? H.value : ""));
+		}
+		if (Req->body && Req->body_size) S.Body.Append(static_cast<const uint8*>(Req->body), int32(Req->body_size));
+		S.TimeoutMs = Req->timeout_ms;
+#if JSUI_UE_HTTP_STREAMING
+		S.bStreaming = Req->streaming != 0;
+#endif
+		{
+			std::lock_guard<std::mutex> Lock(Self->Mutex);
+			if (!Self->Rt) return 1;
+			Self->Starting.Add(Id);
+		}
+		if (IsInGameThread())
+		{
+			Self->Start(Id, MoveTemp(S));
+		}
+		else
+		{
+			AsyncTask(ENamedThreads::GameThread,
+			          [Shared = Self->AsShared(), Id, S = MoveTemp(S)]() mutable { Shared->Start(Id, MoveTemp(S)); });
+		}
+		return 0;
+	}
+
+	static void OnCancel(void* User, JsuiRuntime*, uint64_t Id)
+	{
+		FJsuiHttp* Self = static_cast<FJsuiHttp*>(User);
+		FHttpRequestPtr Request;
+		{
+			std::lock_guard<std::mutex> Lock(Self->Mutex);
+			if (Self->Starting.Contains(Id))
+			{
+				Self->Cancelled.Add(Id);
+				return;
+			}
+			TSharedPtr<FCall, ESPMode::ThreadSafe> Call;
+			if (!Self->Calls.RemoveAndCopyValue(Id, Call)) return;
+			Request = Call->Request;
+		}
+		if (IsInGameThread()) Request->CancelRequest();
+		else AsyncTask(ENamedThreads::GameThread, [Request] { Request->CancelRequest(); });
+	}
+
+	// Game thread.
+	void Start(uint64 Id, FStart S)
+	{
+		FHttpRequestRef Request = FHttpModule::Get().CreateRequest();
+		{
+			std::lock_guard<std::mutex> Lock(Mutex);
+			Starting.Remove(Id);
+			if (Cancelled.Remove(Id) || !Rt) return;
+			Request->SetURL(S.Url);
+			Request->SetVerb(S.Verb);
+			for (const TPair<FString, FString>& H : S.Headers) Request->SetHeader(H.Key, H.Value);
+			if (S.Body.Num()) Request->SetContent(MoveTemp(S.Body));
+			if (S.TimeoutMs > 0) Request->SetTimeout(float(S.TimeoutMs) / 1000.f);
+			TSharedPtr<FCall, ESPMode::ThreadSafe> Call = MakeShared<FCall, ESPMode::ThreadSafe>();
+			Call->Request = Request;
+			Call->bStreaming = S.bStreaming;
+			TWeakPtr<FJsuiHttp, ESPMode::ThreadSafe> Weak = AsShared();
+#if JSUI_UE_HTTP_STREAMING
+			Request->SetDelegateThreadPolicy(EHttpRequestDelegateThreadPolicy::CompleteOnHttpThread);
+			if (S.bStreaming)
+			{
+				// HTTP thread. Setting Length to 0 fails the request (the
+				// runtime is gone, or no longer wants it).
+				Request->SetResponseBodyReceiveStreamDelegateV2(FHttpRequestStreamDelegateV2::CreateLambda(
+					[Weak, Id](void* Ptr, int64& Length)
+					{
+						TSharedPtr<FJsuiHttp, ESPMode::ThreadSafe> Self = Weak.Pin();
+						if (!Self || !Self->Body(Id, Ptr, Length)) Length = 0;
+					}));
+			}
+#endif
+			Request->OnProcessRequestComplete().BindLambda(
+				[Weak, Id](FHttpRequestPtr Req, FHttpResponsePtr Response, bool bSucceeded)
+				{
+					if (TSharedPtr<FJsuiHttp, ESPMode::ThreadSafe> Self = Weak.Pin()) Self->Complete(Id, Req, Response, bSucceeded);
+				});
+			Calls.Add(Id, Call);
+		}
+		Request->ProcessRequest();
+	}
+
+	// The status, headers and final URL (once; Mutex held).
+	void RespondLocked(uint64 Id, FCall& Call, const FHttpResponsePtr& Response)
+	{
+		Call.bResponded = true;
+		bool bDecoded = false;
+		const TArray<FString> All = Response->GetAllHeaders();
+		for (const FString& Line : All)
+		{
+			FString Name, Value;
+			if (!Line.Split(TEXT(":"), &Name, &Value)) continue;
+			Name.TrimStartAndEndInline();
+			Value.TrimStartAndEndInline();
+			bDecoded |= Name.Equals(TEXT("content-encoding"), ESearchCase::IgnoreCase) && !Value.Equals(TEXT("identity"), ESearchCase::IgnoreCase);
+		}
+		std::vector<std::string> Strings;
+		Strings.reserve(All.Num() * 2);
+		for (const FString& Line : All)
+		{
+			FString Name, Value;
+			if (!Line.Split(TEXT(":"), &Name, &Value)) continue;
+			Name.TrimStartAndEndInline();
+			Value.TrimStartAndEndInline();
+			// The stack decoded a compressed body: its encoding and length
+			// describe bytes JS never sees.
+			if (bDecoded && (Name.Equals(TEXT("content-encoding"), ESearchCase::IgnoreCase) ||
+			                 Name.Equals(TEXT("content-length"), ESearchCase::IgnoreCase)))
+				continue;
+			Strings.emplace_back(TCHAR_TO_UTF8(*Name));
+			Strings.emplace_back(TCHAR_TO_UTF8(*Value));
+		}
+		std::vector<JsuiHeader> Headers;
+		for (size_t i = 0; i + 1 < Strings.size(); i += 2) Headers.push_back({Strings[i].c_str(), Strings[i + 1].c_str()});
+#if JSUI_UE_HTTP_STREAMING
+		const FString FinalUrl = Call.Request->GetEffectiveURL();
+#else
+		const FString FinalUrl = Response->GetURL();
+#endif
+		const std::string Url(TCHAR_TO_UTF8(*FinalUrl));
+		jsui_request_respond(Rt, Id, Response->GetResponseCode(), nullptr, Url.empty() ? nullptr : Url.c_str(),
+		                     Headers.data(), Headers.size());
+	}
+
+	// HTTP thread: a piece of a streamed body.
+	bool Body(uint64 Id, const void* Ptr, int64 Length)
+	{
+		std::lock_guard<std::mutex> Lock(Mutex);
+		TSharedPtr<FCall, ESPMode::ThreadSafe>* Call = Calls.Find(Id);
+		if (!Call || !Rt) return false;
+		if (!(*Call)->bResponded)
+		{
+			FHttpResponsePtr Response = (*Call)->Request->GetResponse();
+			if (!Response) return false;
+			RespondLocked(Id, **Call, Response);
+		}
+		if (Length > 0) jsui_request_body(Rt, Id, Ptr, size_t(Length));
+		return true;
+	}
+
+	void Complete(uint64 Id, FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded)
+	{
+		std::lock_guard<std::mutex> Lock(Mutex);
+		TSharedPtr<FCall, ESPMode::ThreadSafe> Call;
+		if (!Calls.RemoveAndCopyValue(Id, Call) || !Rt) return;
+		if (!bSucceeded || !Response || Response->GetResponseCode() <= 0)
+		{
+			FString Why;
+#if JSUI_UE_HTTP_STREAMING
+			const EHttpFailureReason Reason = Request ? Request->GetFailureReason() : EHttpFailureReason::Other;
+			Why = Reason == EHttpFailureReason::TimedOut ? FString(TEXT("timed out"))
+			                                             : FString::Printf(TEXT("network error (%s)"), LexToString(Reason));
+#else
+			Why = FString::Printf(TEXT("network error (%s)"),
+			                      Request ? EHttpRequestStatus::ToString(Request->GetStatus()) : TEXT("no request"));
+#endif
+			const std::string Error(TCHAR_TO_UTF8(*Why));
+			if (Call->bResponded) jsui_request_end(Rt, Id, Error.c_str());
+			else jsui_request_respond(Rt, Id, 0, Error.c_str(), nullptr, nullptr, 0);
+			return;
+		}
+		if (!Call->bResponded) RespondLocked(Id, *Call, Response);
+		if (!Call->bStreaming)
+		{
+			const TArray<uint8>& Content = Response->GetContent();
+			if (Content.Num()) jsui_request_body(Rt, Id, Content.GetData(), size_t(Content.Num()));
+		}
+		jsui_request_end(Rt, Id, nullptr);
+	}
+
+	// Game thread, before the runtime is destroyed: nothing answers it after this.
+	void Close()
+	{
+		TArray<FHttpRequestPtr> InFlight;
+		{
+			std::lock_guard<std::mutex> Lock(Mutex);
+			Rt = nullptr;
+			for (const auto& It : Calls) InFlight.Add(It.Value->Request);
+			Calls.Reset();
+			Starting.Reset();
+			Cancelled.Reset();
+		}
+		for (const FHttpRequestPtr& Request : InFlight) Request->CancelRequest();
+	}
+};
+
 TSharedPtr<FJsuiHost, ESPMode::ThreadSafe> FJsuiHost::Create(int32 Width, int32 Height, float PixelRatio, bool bDevMode,
-                                                         int32 JsThread)
+                                                         int32 JsThread, bool bUseEngineHttp)
 {
 	TSharedPtr<FJsuiHost, ESPMode::ThreadSafe> Host(new FJsuiHost());
 	JsuiConfig Cfg;
@@ -71,14 +325,27 @@ TSharedPtr<FJsuiHost, ESPMode::ThreadSafe> FJsuiHost::Create(int32 Width, int32 
 		std::lock_guard<std::mutex> Lock(Self->QueueMutex);
 		if (Self->Logs.Num() < 1000) Self->Logs.Add({int32(Level), UTF8_TO_TCHAR(Text ? Text : "")});
 	};
+	if (bUseEngineHttp)
+	{
+		Host->Http = MakeShared<FJsuiHttp, ESPMode::ThreadSafe>();
+		Cfg.request_user = Host->Http.Get();
+		Cfg.on_request = &FJsuiHttp::OnRequest;
+		Cfg.on_request_cancel = &FJsuiHttp::OnCancel;
+	}
 	Host->Rt = jsui_create(&Cfg);
 	if (!Host->Rt) return nullptr;
+	if (Host->Http)
+	{
+		std::lock_guard<std::mutex> Lock(Host->Http->Mutex);
+		Host->Http->Rt = Host->Rt;
+	}
 	return Host;
 }
 
 FJsuiHost::~FJsuiHost()
 {
 	// Shutdown() normally ran on the game thread already.
+	if (Http) Http->Close();
 	if (Rt) jsui_destroy(Rt);
 }
 
@@ -105,6 +372,7 @@ void FJsuiHost::WaitRender()
 void FJsuiHost::Shutdown()
 {
 	WaitRender();
+	if (Http) Http->Close();
 	if (Rt) jsui_destroy(Rt);
 	Rt = nullptr;
 	if (GpuApi() == EGpuApi::Vulkan)

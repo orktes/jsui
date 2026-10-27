@@ -124,6 +124,7 @@
 #include <vector>
 
 #include "jsui/jsui.h"
+#include "jsui_http.h"
 
 namespace jsui_godot {
 
@@ -185,6 +186,11 @@ class JsuiView : public godot::Control {
   godot::String get_audio_bus() const { return audio_bus_; }
   void set_audio_bus_map(const godot::Dictionary& map) { audio_bus_map_ = map; }
   godot::Dictionary get_audio_bus_map() const { return audio_bus_map_; }
+  // fetch() to http:// and https:// through Godot's HTTPClient (jsui_http.h;
+  // the runtime view's applies, from the next start()). Off: through the
+  // built-in loader (the OS's HTTP stack), also for res:// bundles.
+  void set_use_engine_http(bool on) { use_engine_http_ = on; }
+  bool get_use_engine_http() const { return use_engine_http_; }
   // Fonts registered (family from the file) on every new runtime. Assigning
   // the property registers the fonts it adds on a running one; fonts it
   // drops stay registered until the next start().
@@ -330,6 +336,11 @@ class JsuiView : public godot::Control {
   static void onCallResult(void* user, uint64_t id, int ok, const char* result);
   static void onLog(void* user, JsuiLogLevel level, const char* message);
   static void onLoad(void* user, JsuiRuntime* rt, uint64_t id, const char* url);
+  // The runtime's request handler: network URLs to http_ (use_engine_http),
+  // the rest of a res:// / user:// bundle's loads to onLoadAny; declines
+  // everything else (the built-in loader).
+  static int onRequest(void* user, JsuiRuntime* rt, uint64_t id, const JsuiRequest* req);
+  static void onRequestCancel(void* user, JsuiRuntime* rt, uint64_t id);
   // The runtime's loader / audio handler: on the UI thread they are queued
   // for the main thread (FileAccess, AudioStreamPlayers).
   static void onLoadAny(void* user, JsuiRuntime* rt, uint64_t id, const char* url);
@@ -532,6 +543,12 @@ class JsuiView : public godot::Control {
   godot::Dictionary audio_bus_map_;
   // The runtime's audio handler (runtime views; made with the first runtime).
   std::unique_ptr<ViewAudio> audio_;
+  bool use_engine_http_ = true;
+  // The running runtime's: its bundle is a res:// / user:// path, its
+  // network requests go to http_ (set in start(), read on the loader's thread).
+  bool godot_bundle_ = false;
+  bool engine_http_ = false;
+  std::unique_ptr<ViewHttp> http_;  // runtime views; made with the first runtime
 
   // The runtime handle this view renders and sends input to: the runtime it
   // owns (its main surface), or a surface of host_'s runtime. A GPU render

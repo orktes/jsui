@@ -90,13 +90,19 @@ EM_JS(void, hjs_leave, (int e), { jsuiHostJs.engine(e).leave(); });
 EM_JS(void, hjs_release_buffer, (int e, const char* key, int len), {
   jsuiHostJs.engine(e).releaseBuffer(jsuiHostJs.str(key, len));
 });
-// A fetch completed: (status, statusText, url, headers [[k, v]] as JSON, body, error).
-EM_JS(void, hjs_load_done, (int e, double id, int status, const char* statusText, int stLen, const char* url,
-                            int urlLen, const char* headers, int hLen, const uint8_t* body, int bodyLen,
-                            const char* error, int errLen), {
+// fetch() events (the prelude's host.fetch callback): the head (status,
+// statusText, url, headers [[k, v]] as JSON, error), a body piece, the end.
+EM_JS(void, hjs_fetch_head, (int e, double id, int status, const char* statusText, int stLen, const char* url,
+                             int urlLen, const char* headers, int hLen, const char* error, int errLen), {
   var s = jsuiHostJs;
-  s.engine(e).loadDone(id, status, s.str(statusText, stLen), s.str(url, urlLen), s.str(headers, hLen),
-                       HEAPU8.slice(body, body + bodyLen).buffer, s.str(error, errLen));
+  s.engine(e).fetchEvent(id, 0, status, s.str(statusText, stLen), s.str(url, urlLen), JSON.parse(s.str(headers, hLen)),
+                         s.str(error, errLen));
+});
+EM_JS(void, hjs_fetch_data, (int e, double id, const uint8_t* data, int len), {
+  jsuiHostJs.engine(e).fetchEvent(id, 1, HEAPU8.slice(data, data + len).buffer);
+});
+EM_JS(void, hjs_fetch_end, (int e, double id, const char* error, int len), {
+  jsuiHostJs.engine(e).fetchEvent(id, 2, jsuiHostJs.str(error, len));
 });
 // A loadFont finished: ok, or the error message.
 EM_JS(void, hjs_font_done, (int e, double id, int ok, const char* error, int len), {
@@ -258,6 +264,21 @@ class HostJsEngine final : public JsEngine {
       done(**strong, *idBox, res);
     });
     *idBox = l;
+    loads.insert(l);
+    return l;
+  }
+
+  // A streamed load: `on` gets each event, only while this engine is alive.
+  uint64_t startStream(LoadRequest req, std::function<void(HostJsEngine&, uint64_t, LoadEvent&)> on) {
+    std::weak_ptr<HostJsEngine*> weak = alive;
+    uint64_t l = rt.loader.reserveId();
+    auto fn = std::make_shared<std::function<void(HostJsEngine&, uint64_t, LoadEvent&)>>(std::move(on));
+    rt.loader.loadStream(l, std::move(req), [weak, l, fn](LoadEvent& ev) {
+      auto strong = weak.lock();
+      if (!strong) return;
+      if (ev.kind == LoadEvent::End || (ev.kind == LoadEvent::Head && ev.res.status == 0)) (*strong)->loads.erase(l);
+      (*fn)(**strong, l, ev);
+    });
     loads.insert(l);
     return l;
   }
@@ -664,11 +685,11 @@ EMSCRIPTEN_KEEPALIVE const char* jsui_hjs_resolve_url(int e, const char* url, in
 
 EMSCRIPTEN_KEEPALIVE const char* jsui_hjs_base_url(int e) { return retString(R(e).baseUrl); }
 
-// fetch(url, method, headers JSON [[k, v]], body, timeout) -> request id; the
-// response arrives in the engine's loadDone(id, ...).
+// fetch(url, method, headers JSON [[k, v]], body, timeout, redirect) -> request
+// id; the response arrives in the engine's fetchEvent(id, ...).
 EMSCRIPTEN_KEEPALIVE double jsui_hjs_fetch(int e, const char* url, int urlLen, const char* method, int methodLen,
                                            const char* headers, int headersLen, const uint8_t* body, int bodyLen,
-                                           int timeoutMs) {
+                                           int timeoutMs, int redirect) {
   LoadRequest req;
   req.url = str(url, urlLen);  // already resolved by the prelude (Request)
   req.method = str(method, methodLen);
@@ -679,7 +700,19 @@ EMSCRIPTEN_KEEPALIVE double jsui_hjs_fetch(int e, const char* url, int urlLen, c
                              pair.asArray().size() > 1 ? pair.asArray()[1].asString() : std::string());
   if (body && bodyLen > 0) req.body.assign(body, body + bodyLen);
   req.timeoutMs = timeoutMs;
-  return double(engineOf(e)->startLoad(std::move(req), [](HostJsEngine& eng, uint64_t l, Resource& res) {
+  req.redirect = redirect >= JSUI_REDIRECT_FOLLOW && redirect <= JSUI_REDIRECT_MANUAL ? redirect : JSUI_REDIRECT_FOLLOW;
+  return double(engineOf(e)->startStream(std::move(req), [](HostJsEngine& eng, uint64_t l, LoadEvent& ev) {
+    Resource& res = ev.res;
+    Perf::Scope scope(eng.rt.doc.perf, Phase::Js);
+    eng.rt.doc.perf.counters.jsCalls++;
+    if (ev.kind == LoadEvent::Data) {
+      hjs_fetch_data(eng.id(), double(l), res.data.data(), int(res.data.size()));
+      return;
+    }
+    if (ev.kind == LoadEvent::End) {
+      hjs_fetch_end(eng.id(), double(l), res.error.data(), int(res.error.size()));
+      return;
+    }
     Value::Array headerList;
     for (auto& [k, v] : res.headers) headerList.push_back(Value(Value::Array{Value(k), Value(v)}));
     if (res.headers.empty() && !res.contentType.empty())  // files, data:, embedder loads
@@ -687,11 +720,8 @@ EMSCRIPTEN_KEEPALIVE double jsui_hjs_fetch(int e, const char* url, int urlLen, c
     std::string hdrs = Value(std::move(headerList)).toJson();
     std::string statusText = res.statusText;
     if (statusText.empty() && res.ok()) statusText = "OK";
-    Perf::Scope scope(eng.rt.doc.perf, Phase::Js);
-    eng.rt.doc.perf.counters.jsCalls++;
-    hjs_load_done(eng.id(), double(l), res.status, statusText.data(), int(statusText.size()), res.url.data(),
-                  int(res.url.size()), hdrs.data(), int(hdrs.size()), res.data.data(), int(res.data.size()),
-                  res.error.data(), int(res.error.size()));
+    hjs_fetch_head(eng.id(), double(l), res.status, statusText.data(), int(statusText.size()), res.url.data(),
+                   int(res.url.size()), hdrs.data(), int(hdrs.size()), res.error.data(), int(res.error.size()));
   }));
 }
 

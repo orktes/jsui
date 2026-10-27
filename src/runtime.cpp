@@ -66,6 +66,7 @@ Document& mainDocument(std::vector<std::unique_ptr<Surface>>& surfaces, Runtime&
 Runtime::Runtime(const JsuiConfig& cfg, JsuiRuntime* h)
     : config(cfg), handle(h), loader(h, cfg.load, cfg.load_user), doc(mainDocument(surfaces_, *this, &nextNodeId_)) {
   if (cfg.base_url) baseUrl = cfg.base_url;
+  loader.setHostFetch(cfg.on_request, cfg.on_request_cancel, cfg.request_user);
   images = std::make_unique<ImageCache>(*this);
   lotties = std::make_unique<LottieCache>(*this);
   shaders = std::make_unique<ShaderEffects>(*this);

@@ -164,6 +164,30 @@ void jsui_resource_complete(JsuiRuntime* rt, uint64_t id, int status, const char
   rt->rt->loader.complete(id, std::move(res));
 }
 
+void jsui_request_respond(JsuiRuntime* rt, uint64_t id, int status, const char* statusText, const char* finalUrl,
+                        const JsuiHeader* headers, size_t count) {
+  if (!rt) return;
+  jsui::Resource meta;
+  meta.status = status;
+  if (statusText) meta.statusText = statusText;
+  if (finalUrl) meta.url = finalUrl;
+  if (status == 0) meta.error = meta.statusText;
+  for (size_t i = 0; headers && i < count; i++)
+    if (headers[i].name) meta.headers.emplace_back(headers[i].name, headers[i].value ? headers[i].value : "");
+  rt->rt->loader.head(id, std::move(meta));
+}
+
+void jsui_request_body(JsuiRuntime* rt, uint64_t id, const void* data, size_t size) {
+  if (!rt || !data || !size) return;
+  auto* p = static_cast<const uint8_t*>(data);
+  rt->rt->loader.data(id, std::vector<uint8_t>(p, p + size));
+}
+
+void jsui_request_end(JsuiRuntime* rt, uint64_t id, const char* error) {
+  if (!rt) return;
+  rt->rt->loader.end(id, error ? (*error ? error : "network error") : "");
+}
+
 void jsui_post_message(JsuiRuntime* rt, const char* name, const char* json) {
   rt->rt->inbound.hostMessage(name ? name : "", json ? json : "null");
 }

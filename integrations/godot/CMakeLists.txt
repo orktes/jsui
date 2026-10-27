@@ -62,7 +62,8 @@ if(EMSCRIPTEN)
     src/jsui_gpu_render.cpp
     src/jsui_ui_thread.cpp
     src/keymap.cpp
-    src/jsui_audio.cpp)
+    src/jsui_audio.cpp
+    src/jsui_http.cpp)
   target_link_libraries(jsui_godot PRIVATE jsui godot::cpp)
 
   # jsui_godot_web: everything (the integration, godot-cpp, JSUI, QuickJS,
@@ -115,7 +116,8 @@ add_library(jsui_godot SHARED
   src/jsui_gpu_render.cpp
   src/jsui_ui_thread.cpp
   src/keymap.cpp
-  src/jsui_audio.cpp)
+  src/jsui_audio.cpp
+  src/jsui_http.cpp)
 target_link_libraries(jsui_godot PRIVATE jsui godot::cpp)
 if(APPLE)
   # Tracked Metal texture for JsuiView's src (src/metal_texture.mm).

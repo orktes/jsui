@@ -433,6 +433,28 @@ uint64_t JsEngine::Impl::startLoad(LoadRequest req, std::function<void(uint64_t,
   return id;
 }
 
+uint64_t JsEngine::Impl::startStream(LoadRequest req, std::function<void(uint64_t, LoadEvent&)> onEvent) {
+  std::weak_ptr<Impl*> weak = alive;
+  uint64_t id = rt.loader.reserveId();
+  Runtime* r = &rt;
+  auto fn = std::make_shared<std::function<void(uint64_t, LoadEvent&)>>(std::move(onEvent));
+  ResourceLoader::StreamCallback cb = [r, weak, id, fn](LoadEvent& ev) {
+    if (!weak.lock()) return;
+    auto shared = std::make_shared<LoadEvent>(std::move(ev));
+    r->inbound.task([weak, id, fn, shared] {
+      if (weak.lock()) (*fn)(id, *shared);
+    });
+  };
+  if (!threaded) {
+    rt.loader.loadStream(id, std::move(req), std::move(cb));
+    return id;
+  }
+  rt.toHost([r, id, req = std::move(req), cb = std::move(cb)]() mutable {
+    r->loader.loadStream(id, std::move(req), std::move(cb));
+  });
+  return id;
+}
+
 void JsEngine::Impl::dropPending(uint64_t id) {
   auto it = pending.find(id);
   if (it == pending.end()) return;

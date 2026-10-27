@@ -180,6 +180,7 @@ jobs:
         # context; require it so a broken setup cannot silently SKIP them.
         env:
           JSUI_GPU_TEST_REQUIRE: 1
+          JSUI_NET_TESTS: 1  # live https:// (OpenSSL through dlopen)
         run: ./build/jsui-tests
       - name: Render smoke
         run: ./build/jsui-render web/test/fixtures/bands.js -o bands.png --width 320 --height 200
@@ -651,6 +652,8 @@ jobs:
       - name: Build GDExtension + native tests
         run: cmake --build build -j "$(sysctl -n hw.ncpu)" --target jsui_godot jsui-tests
       - name: Native tests
+        env:
+          JSUI_NET_TESTS: 1  # live https:// (NSURLSession)
         run: ./build/jsui-tests
       - uses: actions/upload-artifact@v4
         with:
@@ -753,6 +756,7 @@ jobs:
         env:
           JSUI_VULKAN_TEST_REQUIRE: 1
           JSUI_D3D_TEST_REQUIRE: 1
+          JSUI_NET_TESTS: 1  # live https:// (WinHTTP)
         run: |
           # The loader (vulkan-1.dll) and lavapipe's ICD, wherever the action put them.
           sdk="$(cygpath -u "$VULKAN_SDK")"

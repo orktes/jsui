@@ -1,7 +1,8 @@
 // Browser backend of the built-in ResourceLoader (Emscripten builds only).
 //
 // Requests go through the page's fetch(); the response bytes are copied into
-// the WASM heap by JS and handed back to ResourceLoader::complete(), so they
+// the WASM heap by JS and handed back to ResourceLoader::complete() (or, for
+// streamed loads, head() / data() / end() as the body arrives), so they
 // are delivered on the runtime thread by the next pump() like every other
 // backend. Relative URLs are resolved by fetch() against the document, but the
 // web host passes an absolute bundle URL, so the runtime's own resolve() has
@@ -20,6 +21,9 @@ struct LoadRequest;
 // Starts a fetch (method, headers, body, timeout honoured). Returns false for
 // URLs this backend does not handle (data: URIs, decoded generically).
 bool emscriptenLoad(ResourceLoader* loader, uint64_t id, const LoadRequest& req);
+// Aborts one fetch (cancel) or all of them (cancelAll).
+void emscriptenCancel(ResourceLoader* loader, uint64_t id);
+void emscriptenCancelAll(ResourceLoader* loader);
 // Aborts in-flight fetches of `loader` and guarantees no completion reaches it
 // afterwards. Called from ~ResourceLoader.
 void emscriptenLoaderDestroyed(ResourceLoader* loader);

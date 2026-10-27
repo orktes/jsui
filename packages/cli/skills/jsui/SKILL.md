@@ -80,9 +80,9 @@ Packages: `@orktes/jsui-cli` (bundler, dev server, headless tools, this skill),
    save; otherwise `npx jsui screenshot app.jsx -o shot.png`. Open the PNG.
    Check focus with a `press` step.
 10. No browser APIs: no `document`, `window.addEventListener`, CSS, `<div>`,
-    `localStorage`. `fetch`, timers, `requestAnimationFrame`, `TextEncoder`,
-    `URL`, `AbortController` and `performance.now()` exist. Native builds have
-    no TLS (`https://` needs the engine's loader); bundle assets instead.
+    `localStorage`. `fetch` (https too, streamed `res.body`, `Blob`, `File`,
+    `FormData`, `ReadableStream`), timers, `requestAnimationFrame`,
+    `TextEncoder`, `URL`, `AbortController` and `performance.now()` exist.
 
 ## Project setup
 

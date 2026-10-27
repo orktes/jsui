@@ -51,7 +51,7 @@ class JSUI_API SJsuiView : public SLeafWidget, public FGCObject
 {
 public:
 	SLATE_BEGIN_ARGS(SJsuiView)
-		: _Bundle(TEXT("Jsui/bundle.js")), _bDevMode(false), _bForceCpu(false), _bForwardInput(true), _PixelRatio(0.f), _JsThread(1)
+		: _Bundle(TEXT("Jsui/bundle.js")), _bDevMode(false), _bForceCpu(false), _bForwardInput(true), _PixelRatio(0.f), _JsThread(1), _bUseEngineHttp(true)
 	{}
 		/** Bundle path relative to the project's Content dir, an absolute path, or an http:// URL (jsui dev). */
 		SLATE_ARGUMENT(FString, Bundle)
@@ -65,6 +65,8 @@ public:
 		SLATE_ARGUMENT(float, PixelRatio)
 		/** JSUI_JS_THREAD_OFF (0), _ON (1, the default) or _LOCKSTEP (2). */
 		SLATE_ARGUMENT(int32, JsThread)
+		/** http(s):// loads through Unreal's HTTP module (FHttpModule); false: JSUI's built-in loader. */
+		SLATE_ARGUMENT(bool, bUseEngineHttp)
 	SLATE_END_ARGS()
 
 	void Construct(const FArguments& InArgs);

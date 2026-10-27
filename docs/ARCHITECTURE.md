@@ -1739,7 +1739,7 @@ behaves exactly as before.
   `on_state` (with the text JS wrote), `on_call` / `on_call_cancel`,
   Host.handle results, audio requests (`on_audio`), `log` / errors /
   `devError`, `reload`, resource loads (`fetch`, `loadFont`; a custom
-  `JsuiLoadFn` runs on the owner thread) and cancels, and the clipboard
+  `JsuiRequestFn` / `JsuiLoadFn` runs on the owner thread) and cancels, and the clipboard
   setter. Reads only the owner thread can answer are **proxy calls**
   (`HostQueue::call`): `getClipboard`, `getProps` (the native tree as of
   the last applied batch) and a buffer's first copy. From another thread
@@ -1778,12 +1778,17 @@ Standard globals (`src/js/prelude.cpp` + `host_api.cpp`):
 * `performance.now()` is the **runtime clock** (the `now_ms` the embedder
   passes to `jsui_tick`), the same timeline as rAF timestamps and timers, so
   headless renders are deterministic. `Date.now()` stays wall-clock.
-* `fetch(input, {method, headers, body, signal, timeout})` → `Response`
-  (`ok/status/statusText/url/redirected/headers`, `text()/json()/arrayBuffer()/bytes()`,
-  `clone()`), `Headers`, `Request`, `Response.json/error/redirect`. Bodies:
-  string, `ArrayBuffer`/views, `URLSearchParams`. Network errors reject with
-  `TypeError`; HTTP errors resolve with `ok === false`; aborts reject with
-  `AbortError`. URLs resolve against the bundle URL.
+* `fetch(input, {method, headers, body, signal, redirect, timeout})` →
+  `Response` (`ok/status/statusText/url/redirected/headers`, a streamed
+  `body`, `text()/json()/arrayBuffer()/bytes()/blob()/formData()`, `clone()`),
+  `Headers`, `Request`, `Response.json/error/redirect`. Bodies: string,
+  `ArrayBuffer`/views, `URLSearchParams`, `Blob`/`File`, `FormData`
+  (multipart), `ReadableStream`. Network errors reject with `TypeError`; HTTP
+  errors resolve with `ok === false`; aborts reject with `AbortError` (or
+  error the body once it streams). URLs resolve against the bundle URL. Also
+  `ReadableStream`/`WritableStream`/`TransformStream`,
+  `TextDecoderStream`/`TextEncoderStream`, `Blob`, `File`, `FormData`
+  (prelude `streams.js`, `blob.js`). See docs/NETWORKING.md.
 * `TextEncoder`/`TextDecoder` (UTF-8 only; `fatal`, `ignoreBOM`, `stream`),
   `URL`/`URLSearchParams` (WHATWG subset), `AbortController`/`AbortSignal`
   (`timeout`, `any`), `Event`/`CustomEvent`/`EventTarget`, `DOMException`,
@@ -3656,13 +3661,20 @@ the shared session").
 
 `ResourceLoader` (`src/platform/loader.*`) serves the bundle, `fetch`, images
 and fonts. `data:` URIs (base64 and percent-encoded) are decoded inline on
-every platform; files and `http://` go to an on-demand pool of up to 4 worker
-threads; completions are delivered on the runtime thread in `jsui_tick`.
-`src/net/http_client.*` is a minimal HTTP/1.1 client for dev / LAN asset
-servers: Content-Length, chunked and read-until-close bodies, up to 5
-redirects, a 30 s default timeout, cooperative cancellation, no TLS
-(`https://` fails with status 0 and a clear error unless the embedder installs
-a `JsuiLoadFn`). An embedder loader only sees the URL (GET semantics).
+every platform; then the embedder's `JsuiConfig.on_request` (whole request,
+streamed answer, may decline), then its `JsuiConfig.load` (URL only), then
+the built-in backend: files and `http(s)://` go to an on-demand pool of up
+to 16 worker threads. Answers are events (head, body pieces, end) queued
+from any thread and delivered on the runtime thread in `jsui_tick`; a plain
+`load()` gets them gathered into one `Resource`, `loadStream()` (fetch) gets
+each piece. `src/net/http_client.*` is a small HTTP/1.1 client:
+Content-Length, chunked and read-until-close bodies, up to 20 redirects with
+follow / error / manual modes, timeouts to the headers (30 s) and between
+body pieces (30 s) plus an optional overall one, streamed bodies, cooperative
+cancellation. `https://` uses the OS where it has an HTTP stack (`fetchUrl`:
+NSURLSession on Apple, WinHTTP on Windows) and the system's OpenSSL through
+`dlopen` on Linux (`src/net/tls.*`); no TLS library is linked in. See
+docs/NETWORKING.md.
 `jsui_pending_loads()` lets headless hosts wait for in-flight loads.
 
 Images decode in `ImageCache` (`src/render/image_cache.*`). The codec reads

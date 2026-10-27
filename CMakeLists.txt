@@ -101,6 +101,23 @@ if(JSUI_AUDIO)
   target_link_libraries(jsui PRIVATE jsui_miniaudio)
 endif()
 message(STATUS "JSUI_AUDIO: ${JSUI_AUDIO}")
+# Built-in https:// (src/net): Linux loads OpenSSL with dlopen (net/tls.cpp),
+# so nothing is linked for it; Apple hands https:// to NSURLSession
+# (net/https_apple.mm) and Windows to WinHTTP (net/https_win.cpp), both
+# system libraries.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_libraries(jsui PUBLIC ${CMAKE_DL_LIBS})
+endif()
+if(APPLE)
+  target_sources(jsui PRIVATE src/net/https_apple.mm)
+  set_source_files_properties(src/net/https_apple.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+  target_compile_definitions(jsui PRIVATE JSUI_OS_HTTPS=1)
+  target_link_libraries(jsui PUBLIC "-framework Foundation")
+endif()
+if(WIN32 AND NOT EMSCRIPTEN)
+  target_compile_definitions(jsui PRIVATE JSUI_OS_HTTPS=1)
+  target_link_libraries(jsui PUBLIC winhttp)
+endif()
 # Subclass Skia classes (a canvas, Skottie observers, the font manager, the pipeline
 # compile executor, the shader cache, the Vulkan driver cache's storage): Skia is built
 # without RTTI, so are these files.

@@ -8,6 +8,10 @@
 // runtime until that job has run: Runtime() waits for every queued job
 // first. Usually the job has run long before the next frame's first runtime
 // call and the wait is free.
+//
+// Network loads (fetch(), images, fonts by http(s):// URL) go through
+// Unreal's HTTP module unless bUseEngineHttp is off (JsuiConfig.on_request;
+// see "Engine HTTP" in JsuiHost.cpp).
 #pragma once
 
 #include "CoreMinimal.h"
@@ -39,9 +43,10 @@ public:
 	};
 
 	// A runtime of Width x Height logical px at PixelRatio device px per px,
-	// its JS in JsThread mode (JSUI_JS_THREAD_*).
+	// its JS in JsThread mode (JSUI_JS_THREAD_*); http(s):// loads through
+	// FHttpModule when bUseEngineHttp.
 	static TSharedPtr<FJsuiHost, ESPMode::ThreadSafe> Create(int32 Width, int32 Height, float PixelRatio, bool bDevMode,
-	                                                         int32 JsThread);
+	                                                         int32 JsThread, bool bUseEngineHttp = true);
 	~FJsuiHost();
 
 	// The runtime for a game-thread call (waits for a queued render job).
@@ -131,6 +136,10 @@ private:
 	static void ReleaseD3D11(FRHICommandListImmediate& RHICmdList, TFunction<void()>&& Job);
 
 	JsuiRuntime* Rt = nullptr;
+
+	// Engine HTTP (JsuiHost.cpp): the requests in flight, shared with their
+	// delegates on the HTTP thread; Shutdown() cancels them.
+	TSharedPtr<struct FJsuiHttp, ESPMode::ThreadSafe> Http;
 
 	std::mutex QueueMutex;  // messages / logs: the render job may log
 	TArray<FMessage> Messages;

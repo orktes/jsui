@@ -13,6 +13,8 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <chrono>
+#include <cstring>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -35,6 +37,9 @@ struct HttpReq {
     return {};
   }
 };
+
+// Marks a pause in a handler's response (see TestHttpServer::serve).
+constexpr const char* kPause = "\x01PAUSE\x01";
 
 inline std::string httpResponse(int status, const std::string& body, const std::string& type = "text/plain",
                                 const std::string& extraHeaders = "") {
@@ -126,11 +131,20 @@ class TestHttpServer {
     req.body = buf.substr(0, want);
     requests_++;
     std::string out = handler_(req);
+    // kPause in a response: send what comes before, wait, go on (streamed bodies).
     size_t off = 0;
     while (off < out.size()) {
-      ssize_t n = ::send(c, out.data() + off, out.size() - off, MSG_NOSIGNAL);
-      if (n <= 0) break;
-      off += size_t(n);
+      size_t stop = out.find(kPause, off);
+      size_t end = stop == std::string::npos ? out.size() : stop;
+      while (off < end) {
+        ssize_t n = ::send(c, out.data() + off, end - off, MSG_NOSIGNAL);
+        if (n <= 0) break;
+        off += size_t(n);
+      }
+      if (off < end) break;
+      if (stop == std::string::npos) break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(300));
+      off = stop + std::strlen(kPause);
     }
     ::shutdown(c, SHUT_WR);
     // Drain until the client closes so the response is not reset.
