@@ -21,6 +21,7 @@
 
 #include "core/value.h"
 #include "jsui/jsui.h"
+#include "platform/loader.h"
 #include "render/container_view.h"
 #include "runtime.h"
 #include "test.h"
@@ -273,4 +274,47 @@ TEST(container_bundle_src_through_the_parent_loader) {
   // A missing source: an error event, no child bundle.
   p.post("props", Value(Value::Object{{"bundleSrc", Value("apps/missing.js")}}));
   CHECK(p.until([&] { return p.event("error") != nullptr; }));
+}
+
+TEST(container_fetch_keeps_method_headers_and_body) {
+  Parent p;
+  // The parent's loader, whole requests (the embedder's load callback only
+  // sees URLs): what the child's fetch() hands its parent.
+  std::vector<jsui::LoadRequest> seen;
+  jsui::ResourceLoader& loader = jsui::internalRuntime(p.rt)->loader;
+  loader.forward = [&](uint64_t id, jsui::LoadRequest req) {
+    seen.push_back(req);
+    jsui::Resource r;
+    r.status = 201;
+    r.statusText = "Created";
+    r.headers.push_back({"x-reply", "yes"});
+    std::string body = req.url.find("score") != std::string::npos ? "stored" : "";
+    if (req.url.find("child.js") != std::string::npos) body = kChild;
+    r.data.assign(body.begin(), body.end());
+    if (body.empty()) r.status = 404;
+    loader.complete(id, std::move(r));
+  };
+  CHECK(p.start());
+  const char child[] = R"JS(
+    fetch('api/score', {method: 'POST', headers: {'X-Token': 'abc'}, body: 'points=7'})
+      .then((r) => r.text().then((t) => __jsui_native.postMessage('fetched', {status: r.status, text: t,
+                                                                             reply: r.headers.get('x-reply')})));
+  )JS";
+  p.command({{"op", Value("load")}, {"data", Value(std::string(child))}});
+  CHECK(p.until([&] { return p.event("message", "fetched") != nullptr; }));
+  const Value* got = p.event("message", "fetched");
+  CHECK(got && got->operator[]("payload")["status"].asNumber() == 201);
+  CHECK(got && got->operator[]("payload")["text"].asString() == "stored");
+  CHECK(got && got->operator[]("payload")["reply"].asString() == "yes");
+  const jsui::LoadRequest* post = nullptr;
+  for (auto& r : seen)
+    if (r.url == "game://ui/api/score") post = &r;
+  CHECK(post != nullptr);
+  if (!post) return;
+  CHECK_EQ(post->method, std::string("POST"));
+  CHECK_EQ(std::string(post->body.begin(), post->body.end()), std::string("points=7"));
+  bool token = false;
+  for (auto& [k, v] : post->headers)
+    if ((k == "X-Token" || k == "x-token") && v == "abc") token = true;
+  CHECK(token);
 }

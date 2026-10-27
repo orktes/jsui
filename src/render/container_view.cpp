@@ -47,16 +47,15 @@ void onLog(void* user, JsuiLogLevel level, const char* message) {
   if (level == JSUI_LOG_ERROR) push(st, {{"kind", Value("error")}, {"message", Value(msg)}});
 }
 
-void onLoad(void* user, JsuiRuntime* child, uint64_t requestId, const char* url) {
-  auto* st = static_cast<NodeState*>(user);
+// The child's loads, whole (method, headers, body: fetch()), through the
+// parent's loader; the answer goes back whole too (status text, headers).
+void forwardLoad(NodeState* st, ResourceLoader* childLoader, uint64_t requestId, LoadRequest req) {
   ResourceLoader& loader = st->cache->runtime().loader;
   uint64_t id = loader.reserveId();
   st->loads.insert(id);
-  LoadRequest req;
-  req.url = url ? url : "";
-  loader.load(id, std::move(req), [st, child, requestId, id](Resource r) {
+  loader.load(id, std::move(req), [st, childLoader, requestId, id](Resource r) {
     st->loads.erase(id);
-    jsui_resource_complete(child, requestId, r.status, r.contentType.c_str(), r.data.data(), r.data.size());
+    childLoader->complete(requestId, std::move(r));
   });
 }
 
@@ -121,8 +120,6 @@ void createChild(NodeState* st) {
   cfg.base_url = st->baseUrl.empty() ? nullptr : st->baseUrl.c_str();
   cfg.log = onLog;
   cfg.log_user = st;
-  cfg.load = onLoad;
-  cfg.load_user = st;
   cfg.on_message = onMessage;
   cfg.message_user = st;
   cfg.on_state = onState;
@@ -134,6 +131,10 @@ void createChild(NodeState* st) {
   cfg.js_timeout_ms = parent.config.js_timeout_ms;
   cfg.audio_disabled = parent.config.audio_disabled;
   st->child = jsui_create(&cfg);
+  ResourceLoader* childLoader = &internalRuntime(st->child)->loader;
+  childLoader->forward = [st, childLoader](uint64_t id, LoadRequest req) {
+    forwardLoad(st, childLoader, id, std::move(req));
+  };
   // The exact (fractional) viewport.
   internalRuntime(st->child)->main().setViewport(std::max(0.f, st->width), std::max(0.f, st->height),
                                                  cfg.pixel_ratio);
