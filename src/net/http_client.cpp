@@ -280,6 +280,7 @@ class Exchange {
     }
     freeaddrinfo(list);
     if (sock_.fd == kBadSocket) return false;
+    err->clear();  // the "connection refused" default above
     if (u.tls) return startTls(u.host, err);
     return true;
   }

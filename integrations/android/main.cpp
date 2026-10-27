@@ -17,6 +17,9 @@
 // Touches (with historical samples and timestamps for gesture velocities),
 // hardware keys and gamepads (W3C standard mapping) are forwarded; the
 // system bar / display cutout insets are published as jsui.safeAreaInsets.
+// fetch(), images and fonts load from the APK's assets (asset:///) or, for
+// http:// and https://, through java.net.HttpURLConnection over JNI
+// (JsuiConfig.on_request): JSUI itself has no TLS on Android.
 //
 // Intent extras (adb shell am start -n com.orktes.jsui.demo/android.app.NativeActivity ...):
 //   --es jsui_url http://10.0.2.2:5173/bundle.js   load from `jsui dev` (dev mode: live reload)
@@ -45,10 +48,17 @@
 #include <time.h>
 
 #include <algorithm>
+#include <cctype>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <deque>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -235,6 +245,10 @@ struct Vk {
 
 enum class Renderer { Vulkan, GL, Cpu };
 
+namespace net {
+struct Net;
+}
+
 struct Host {
   android_app* app = nullptr;
   JNIEnv* env = nullptr;
@@ -265,6 +279,7 @@ struct Host {
   double fpsSince = 0;
   double renderMs = 0;     // summed time of the frames' renders + present / swap calls
   double renderMaxMs = 0;  // ... the longest
+  std::shared_ptr<net::Net> net;  // http(s):// on HttpURLConnection; null if JNI setup failed
 };
 
 bool createVkSurface(Host& h);
@@ -366,28 +381,580 @@ bool publishSafeArea(Host& h) {
   return ok;
 }
 
-// ------------------------------------------------------------------ assets
+// ------------------------------------------------------- assets + network
+//
+// JsuiConfig.on_request. asset:/// URLs (the bundle and everything relative
+// to it) come from the APK's assets; http:// and https:// go to
+// java.net.HttpURLConnection, i.e. the platform's TLS, trust store, proxy
+// and network security config (JSUI's own loader has no TLS on Android:
+// apps may not load the system's libssl). Anything else (file paths) is
+// declined to the built-in loader.
+//
+// Requests run on a few worker threads attached to the VM. A watchdog
+// thread answers the ones that time out and has those and cancelled ones
+// stopped with disconnect(), which aborts a blocked connect or read. Answers are sent
+// under the Net's lock and shutdown() (before jsui_destroy) closes it, so
+// nothing reaches a destroyed runtime; the threads hold the Net, not the
+// Host, and wind down on their own.
+
+std::string lower(std::string s) {
+  for (auto& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
+  return s;
+}
 
 // asset:///<path> from the APK's assets/ (the UI bundle and its images,
 // fonts, sounds); everything is read whole.
-void assetLoad(void* user, JsuiRuntime* rt, uint64_t id, const char* url) {
-  auto* h = static_cast<Host*>(user);
-  std::string u = url;
-  const std::string prefix = "asset:///";
-  if (u.rfind(prefix, 0) != 0) {
-    LOGW("no loader for %s (only asset:/// without jsui_url)", url);
-    jsui_resource_complete(rt, id, 404, nullptr, nullptr, 0);
-    return;
-  }
-  std::string path = u.substr(prefix.size());
+void serveAsset(Host& h, JsuiRuntime* rt, uint64_t id, const std::string& url) {
+  std::string path = url.substr(std::strlen("asset:///"));
   path = path.substr(0, path.find_first_of("?#"));
-  AAsset* a = AAssetManager_open(h->app->activity->assetManager, path.c_str(), AASSET_MODE_BUFFER);
+  AAsset* a = AAssetManager_open(h.app->activity->assetManager, path.c_str(), AASSET_MODE_BUFFER);
   if (!a) {
     jsui_resource_complete(rt, id, 404, nullptr, nullptr, 0);
     return;
   }
   jsui_resource_complete(rt, id, 200, nullptr, AAsset_getBuffer(a), size_t(AAsset_getLength(a)));
   AAsset_close(a);
+}
+
+namespace net {
+
+using Clock = std::chrono::steady_clock;
+constexpr int kStepTimeoutMs = 30000;  // connect, and each read (as JSUI's own loader)
+constexpr int kMaxRedirects = 20;
+constexpr int kMaxThreads = 4;
+constexpr jsize kChunk = 64 << 10;
+
+// System classes and methods, looked up once on the main thread (a native
+// thread's FindClass only sees the system class loader; enough for these,
+// but there is no need to repeat the lookups per request).
+struct Jni {
+  bool ok = false;
+  jclass url = nullptr, conn = nullptr;
+  jmethodID urlInit, urlInitContext, urlToString, openConnection;
+  jmethodID setRequestMethod, setFollowRedirects, setConnectTimeout, setReadTimeout, setUseCaches, setDoOutput,
+      setFixedLength, addRequestProperty, getOutputStream, getResponseCode, getResponseMessage, getHeaderFieldKey,
+      getHeaderFieldAt, getHeaderField, getInputStream, getErrorStream, disconnect;
+  jmethodID read, inClose, write, outClose, throwableToString;
+};
+Jni jni;
+
+bool initJni(JNIEnv* env) {
+  if (jni.ok) return true;
+  auto global = [&](const char* name) {
+    jclass local = env->FindClass(name);
+    if (!local) return jclass(nullptr);
+    auto g = static_cast<jclass>(env->NewGlobalRef(local));
+    env->DeleteLocalRef(local);
+    return g;
+  };
+  jni.url = global("java/net/URL");
+  jni.conn = global("java/net/HttpURLConnection");
+  jclass in = env->FindClass("java/io/InputStream"), out = env->FindClass("java/io/OutputStream"),
+         thr = env->FindClass("java/lang/Throwable");
+  if (env->ExceptionCheck() || !jni.url || !jni.conn || !in || !out || !thr) {
+    env->ExceptionClear();
+    return false;
+  }
+  jclass c = jni.conn;
+  jni.urlInit = env->GetMethodID(jni.url, "<init>", "(Ljava/lang/String;)V");
+  jni.urlInitContext = env->GetMethodID(jni.url, "<init>", "(Ljava/net/URL;Ljava/lang/String;)V");
+  jni.urlToString = env->GetMethodID(jni.url, "toString", "()Ljava/lang/String;");
+  jni.openConnection = env->GetMethodID(jni.url, "openConnection", "()Ljava/net/URLConnection;");
+  jni.setRequestMethod = env->GetMethodID(c, "setRequestMethod", "(Ljava/lang/String;)V");
+  jni.setFollowRedirects = env->GetMethodID(c, "setInstanceFollowRedirects", "(Z)V");
+  jni.setConnectTimeout = env->GetMethodID(c, "setConnectTimeout", "(I)V");
+  jni.setReadTimeout = env->GetMethodID(c, "setReadTimeout", "(I)V");
+  jni.setUseCaches = env->GetMethodID(c, "setUseCaches", "(Z)V");
+  jni.setDoOutput = env->GetMethodID(c, "setDoOutput", "(Z)V");
+  jni.setFixedLength = env->GetMethodID(c, "setFixedLengthStreamingMode", "(J)V");
+  jni.addRequestProperty = env->GetMethodID(c, "addRequestProperty", "(Ljava/lang/String;Ljava/lang/String;)V");
+  jni.getOutputStream = env->GetMethodID(c, "getOutputStream", "()Ljava/io/OutputStream;");
+  jni.getResponseCode = env->GetMethodID(c, "getResponseCode", "()I");
+  jni.getResponseMessage = env->GetMethodID(c, "getResponseMessage", "()Ljava/lang/String;");
+  jni.getHeaderFieldKey = env->GetMethodID(c, "getHeaderFieldKey", "(I)Ljava/lang/String;");
+  jni.getHeaderFieldAt = env->GetMethodID(c, "getHeaderField", "(I)Ljava/lang/String;");
+  jni.getHeaderField = env->GetMethodID(c, "getHeaderField", "(Ljava/lang/String;)Ljava/lang/String;");
+  jni.getInputStream = env->GetMethodID(c, "getInputStream", "()Ljava/io/InputStream;");
+  jni.getErrorStream = env->GetMethodID(c, "getErrorStream", "()Ljava/io/InputStream;");
+  jni.disconnect = env->GetMethodID(c, "disconnect", "()V");
+  jni.read = env->GetMethodID(in, "read", "([BII)I");
+  jni.inClose = env->GetMethodID(in, "close", "()V");
+  jni.write = env->GetMethodID(out, "write", "([BII)V");
+  jni.outClose = env->GetMethodID(out, "close", "()V");
+  jni.throwableToString = env->GetMethodID(thr, "toString", "()Ljava/lang/String;");
+  env->DeleteLocalRef(in);
+  env->DeleteLocalRef(out);
+  env->DeleteLocalRef(thr);
+  if (env->ExceptionCheck()) {
+    env->ExceptionClear();
+    return false;
+  }
+  jni.ok = true;
+  return true;
+}
+
+// UTF-8 <-> Java strings (NewStringUTF wants modified UTF-8, which breaks on
+// 4-byte sequences and on malformed input).
+jstring toJ(JNIEnv* env, const std::string& s) {
+  std::u16string u;
+  u.reserve(s.size());
+  for (size_t i = 0; i < s.size();) {
+    auto c = static_cast<unsigned char>(s[i]);
+    int len = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0;
+    uint32_t cp = len == 1 ? c : len == 2 ? c & 0x1f : len == 3 ? c & 0x0f : c & 0x07;
+    bool valid = len > 0 && i + len <= s.size();
+    for (int k = 1; valid && k < len; k++) {
+      auto cc = static_cast<unsigned char>(s[i + k]);
+      valid = (cc & 0xc0) == 0x80;
+      cp = cp << 6 | (cc & 0x3f);
+    }
+    if (!valid || cp > 0x10ffff) {
+      cp = 0xfffd;
+      len = 1;
+    }
+    i += size_t(len);
+    if (cp >= 0x10000) {
+      cp -= 0x10000;
+      u.push_back(char16_t(0xd800 + (cp >> 10)));
+      u.push_back(char16_t(0xdc00 + (cp & 0x3ff)));
+    } else {
+      u.push_back(char16_t(cp));
+    }
+  }
+  return env->NewString(reinterpret_cast<const jchar*>(u.data()), jsize(u.size()));
+}
+
+std::string fromJ(JNIEnv* env, jstring s) {
+  std::string out;
+  if (!s) return out;
+  jsize n = env->GetStringLength(s);
+  const jchar* c = env->GetStringChars(s, nullptr);
+  if (!c) return out;
+  out.reserve(size_t(n));
+  for (jsize i = 0; i < n; i++) {
+    uint32_t cp = c[i];
+    if (cp >= 0xd800 && cp < 0xdc00 && i + 1 < n && c[i + 1] >= 0xdc00 && c[i + 1] < 0xe000)
+      cp = 0x10000 + ((cp - 0xd800) << 10) + (c[++i] - 0xdc00);
+    else if (cp >= 0xd800 && cp < 0xe000)
+      cp = 0xfffd;
+    if (cp < 0x80) {
+      out += char(cp);
+    } else if (cp < 0x800) {
+      out += char(0xc0 | cp >> 6);
+      out += char(0x80 | (cp & 0x3f));
+    } else if (cp < 0x10000) {
+      out += char(0xe0 | cp >> 12);
+      out += char(0x80 | ((cp >> 6) & 0x3f));
+      out += char(0x80 | (cp & 0x3f));
+    } else {
+      out += char(0xf0 | cp >> 18);
+      out += char(0x80 | ((cp >> 12) & 0x3f));
+      out += char(0x80 | ((cp >> 6) & 0x3f));
+      out += char(0x80 | (cp & 0x3f));
+    }
+  }
+  env->ReleaseStringChars(s, c);
+  return out;
+}
+
+// The pending Java exception as text ("java.net.UnknownHostException: ..."),
+// cleared; empty when there is none.
+std::string takeException(JNIEnv* env) {
+  jthrowable t = env->ExceptionOccurred();
+  if (!t) return {};
+  env->ExceptionClear();
+  auto s = static_cast<jstring>(env->CallObjectMethod(t, jni.throwableToString));
+  std::string out = "java exception";
+  if (env->ExceptionCheck()) env->ExceptionClear();
+  else if (s) out = fromJ(env, s);
+  if (s) env->DeleteLocalRef(s);
+  env->DeleteLocalRef(t);
+  return out;
+}
+
+JNIEnv* attachThread(JavaVM* vm, const char* name) {
+  JavaVMAttachArgs args{JNI_VERSION_1_6, name, nullptr};
+  JNIEnv* env = nullptr;
+  return vm->AttachCurrentThread(&env, &args) == JNI_OK ? env : nullptr;
+}
+
+using HeaderList = std::vector<std::pair<std::string, std::string>>;
+
+struct Request {
+  JsuiRuntime* rt = nullptr;
+  uint64_t id = 0;
+  std::string url, method;
+  HeaderList headers;  // names in lower case
+  std::vector<uint8_t> body;
+  int redirect = JSUI_REDIRECT_FOLLOW;
+  Clock::time_point deadline = Clock::time_point::max();  // JsuiRequest.timeout_ms
+  // Under Net::mu:
+  bool cancelled = false;  // by the UI, the host's shutdown, or answered by the watchdog: no more answers
+  bool timedOut = false;
+  bool headSent = false;
+  bool kicked = false;     // a kicker() runs for it
+  jobject conn = nullptr;  // global ref to the open HttpURLConnection
+};
+
+struct Net {
+  JavaVM* vm = nullptr;
+  std::mutex mu;
+  std::condition_variable work, watch;
+  std::deque<std::shared_ptr<Request>> queue;
+  std::unordered_map<uint64_t, std::shared_ptr<Request>> live;  // queued or running
+  int threads = 0, idle = 0;
+  bool watching = false, closed = false;
+};
+
+// Runs `send` (a jsui_request_* call) unless the UI cancelled the request or
+// the host shut down; false then. Under the lock, so shutdown() never
+// returns while an answer is on its way into the runtime.
+template <class F>
+bool answer(Net& n, Request& r, F&& send) {
+  std::lock_guard<std::mutex> lock(n.mu);
+  if (n.closed || r.cancelled) return false;
+  send();
+  return true;
+}
+
+// Makes `conn` the connection the watchdog disconnects; false if the request
+// is already stopping.
+bool attachConnection(Net& n, Request& r, JNIEnv* env, jobject conn) {
+  std::lock_guard<std::mutex> lock(n.mu);
+  if (n.closed || r.cancelled || r.timedOut) return false;
+  r.conn = env->NewGlobalRef(conn);
+  return true;
+}
+
+void releaseConnection(Net& n, Request& r, JNIEnv* env, bool disconnect) {
+  jobject c;
+  {
+    std::lock_guard<std::mutex> lock(n.mu);
+    c = r.conn;
+    r.conn = nullptr;
+  }
+  if (!c) return;
+  if (disconnect) {
+    env->CallVoidMethod(c, jni.disconnect);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+  }
+  env->DeleteGlobalRef(c);
+}
+
+bool isRedirect(int status) { return status == 301 || status == 302 || status == 303 || status == 307 || status == 308; }
+
+// Pops the hop's local references however it ends.
+struct LocalFrame {
+  JNIEnv* env;
+  bool ok;
+  explicit LocalFrame(JNIEnv* e) : env(e), ok(e->PushLocalFrame(32) == 0) {
+    if (!ok) env->ExceptionClear();
+  }
+  ~LocalFrame() {
+    if (ok) env->PopLocalFrame(nullptr);
+  }
+};
+
+// One request on a worker thread: each hop is one HttpURLConnection (JSUI
+// follows redirects itself, so http:// <-> https:// hops work and the
+// 'error' / 'manual' modes behave as in the built-in loader).
+void run(Net& n, Request& r, JNIEnv* env) {
+  bool headSent = false;
+  std::string url = r.url, method = r.method;
+  HeaderList headers = r.headers;
+  std::vector<uint8_t> body = r.body;
+  // Ends the request with `err` (empty: success). Nothing is sent for a
+  // stopped one (the watchdog already answered a timeout).
+  auto finish = [&](const std::string& err) {
+    if (env) releaseConnection(n, r, env, !err.empty());
+    if (headSent)
+      answer(n, r, [&] { jsui_request_end(r.rt, r.id, err.empty() ? nullptr : err.c_str()); });
+    else
+      answer(n, r, [&] { jsui_request_respond(r.rt, r.id, 0, err.c_str(), url.c_str(), nullptr, 0); });
+  };
+  if (!env) return finish("cannot attach a thread to the Java VM");
+
+  for (int hop = 0;; hop++) {
+    LocalFrame frame(env);
+    if (!frame.ok) return finish("out of memory");
+    jobject u = env->NewObject(jni.url, jni.urlInit, toJ(env, url));
+    jobject c = u ? env->CallObjectMethod(u, jni.openConnection) : nullptr;
+    std::string err = takeException(env);
+    if (!err.empty() || !c || !env->IsInstanceOf(c, jni.conn))
+      return finish(err.empty() ? "not an http(s) URL: " + url : err);
+    if (!attachConnection(n, r, env, c)) return finish("cancelled");
+
+    // Each call checked before the next (CheckJNI insists).
+    env->CallVoidMethod(c, jni.setFollowRedirects, JNI_FALSE);
+    if (!env->ExceptionCheck()) env->CallVoidMethod(c, jni.setUseCaches, JNI_FALSE);
+    if (!env->ExceptionCheck()) env->CallVoidMethod(c, jni.setConnectTimeout, jint(kStepTimeoutMs));
+    if (!env->ExceptionCheck()) env->CallVoidMethod(c, jni.setReadTimeout, jint(kStepTimeoutMs));
+    // A method HttpURLConnection does not know throws ProtocolException (it
+    // knows GET, HEAD, POST, PUT, DELETE, OPTIONS, TRACE and, on Android, PATCH).
+    if (!env->ExceptionCheck()) env->CallVoidMethod(c, jni.setRequestMethod, toJ(env, method));
+    if (env->ExceptionCheck()) return finish(takeException(env));
+    bool hasAccept = false, hasType = false;
+    auto add = [&](const std::string& k, const std::string& v) {
+      jstring jk = toJ(env, k), jv = toJ(env, v);
+      env->CallVoidMethod(c, jni.addRequestProperty, jk, jv);
+      if (env->ExceptionCheck()) env->ExceptionClear();  // an invalid header is left out
+      env->DeleteLocalRef(jk);
+      env->DeleteLocalRef(jv);
+    };
+    for (auto& [k, v] : headers) {
+      // Framing is the connection's. Without an Accept-Encoding of ours it
+      // asks for gzip and unpacks it, dropping Content-Encoding / -Length.
+      if (k == "host" || k == "content-length" || k == "connection" || k == "transfer-encoding" ||
+          k == "accept-encoding")
+        continue;
+      hasAccept |= k == "accept";
+      hasType |= k == "content-type";
+      add(k, v);
+    }
+    if (!hasAccept) add("Accept", "*/*");
+    bool sendsBody = method != "GET" && method != "HEAD" &&
+                     (!body.empty() || method == "POST" || method == "PUT" || method == "PATCH");
+    if (sendsBody) {
+      if (!hasType && !body.empty()) add("Content-Type", "application/octet-stream");
+      env->CallVoidMethod(c, jni.setDoOutput, JNI_TRUE);
+      if (!env->ExceptionCheck()) env->CallVoidMethod(c, jni.setFixedLength, jlong(body.size()));
+      jobject out = env->ExceptionCheck() ? nullptr : env->CallObjectMethod(c, jni.getOutputStream);  // connects
+      if (out && !env->ExceptionCheck()) {
+        jbyteArray chunk = env->NewByteArray(jsize(std::min(body.size(), size_t(kChunk))));
+        for (size_t off = 0; chunk && off < body.size() && !env->ExceptionCheck();) {
+          auto len = jsize(std::min(body.size() - off, size_t(kChunk)));
+          env->SetByteArrayRegion(chunk, 0, len, reinterpret_cast<const jbyte*>(body.data() + off));
+          env->CallVoidMethod(out, jni.write, chunk, 0, len);
+          off += size_t(len);
+        }
+        if (!env->ExceptionCheck()) env->CallVoidMethod(out, jni.outClose);
+      }
+      if (env->ExceptionCheck()) return finish(takeException(env));
+    }
+
+    jint status = env->CallIntMethod(c, jni.getResponseCode);  // connects, sends, reads the headers
+    if (env->ExceptionCheck()) return finish(takeException(env));
+    if (status < 100 || status > 999) return finish("malformed response from " + url);
+
+    if (isRedirect(status) && r.redirect != JSUI_REDIRECT_MANUAL) {
+      auto loc = static_cast<jstring>(env->CallObjectMethod(c, jni.getHeaderField, toJ(env, "Location")));
+      if (env->ExceptionCheck()) env->ExceptionClear();
+      if (loc) {
+        jobject next = env->NewObject(jni.url, jni.urlInitContext, u, loc);  // resolved against this URL
+        auto to = next ? static_cast<jstring>(env->CallObjectMethod(next, jni.urlToString)) : nullptr;
+        err = takeException(env);
+        if (!err.empty() || !to) return finish("bad redirect location: " + err);
+        std::string target = fromJ(env, to);
+        if (r.redirect == JSUI_REDIRECT_ERROR) return finish("redirect to " + target + " with redirect: 'error'");
+        if (hop >= kMaxRedirects) return finish("too many redirects (" + std::to_string(hop) + ")");
+        releaseConnection(n, r, env, true);
+        // 303 always, 301/302 for POST (browser behaviour): GET without a body.
+        if ((status == 303 && method != "HEAD") || ((status == 301 || status == 302) && method == "POST")) {
+          method = "GET";
+          body.clear();
+          for (auto it = headers.begin(); it != headers.end();) it = it->first == "content-type" ? headers.erase(it) : it + 1;
+        }
+        url = target;
+        continue;
+      }
+    }
+
+    std::string message;
+    auto jmessage = static_cast<jstring>(env->CallObjectMethod(c, jni.getResponseMessage));
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    else message = fromJ(env, jmessage);
+    HeaderList resHeaders;
+    for (jint i = 0; i < 1000; i++) {
+      // By index, in the server's order (index 0 may be the status line, without a key).
+      auto v = static_cast<jstring>(env->CallObjectMethod(c, jni.getHeaderFieldAt, i));
+      if (env->ExceptionCheck()) env->ExceptionClear();
+      if (!v) break;
+      auto k = static_cast<jstring>(env->CallObjectMethod(c, jni.getHeaderFieldKey, i));
+      if (env->ExceptionCheck()) env->ExceptionClear();
+      if (k) {
+        std::string name = fromJ(env, k);
+        // The connection's own bookkeeping (X-Android-Sent-Millis, ...) is not the server's.
+        if (lower(name).rfind("x-android-", 0) != 0) resHeaders.emplace_back(name, fromJ(env, v));
+        env->DeleteLocalRef(k);
+      }
+      env->DeleteLocalRef(v);
+    }
+    std::vector<JsuiHeader> list;
+    for (auto& [k, v] : resHeaders) list.push_back({k.c_str(), v.c_str()});
+    if (!answer(n, r, [&] {
+          jsui_request_respond(r.rt, r.id, status, message.c_str(), url.c_str(), list.data(), list.size());
+          r.headSent = true;  // under the lock (the watchdog reads it)
+        }))
+      return finish("cancelled");
+    headSent = true;
+    if (method == "HEAD" || status == 204 || status == 304) return finish("");
+
+    // 4xx / 5xx bodies come from the error stream (getInputStream throws).
+    jobject in = env->CallObjectMethod(c, status >= 400 ? jni.getErrorStream : jni.getInputStream);
+    if (env->ExceptionCheck()) return finish(takeException(env));
+    if (!in) return finish("");  // no body
+    jbyteArray buf = env->NewByteArray(kChunk);
+    if (!buf) return finish(takeException(env));
+    std::vector<uint8_t> bytes(static_cast<size_t>(kChunk));
+    for (;;) {
+      jint got = env->CallIntMethod(in, jni.read, buf, 0, kChunk);
+      if (env->ExceptionCheck()) return finish(takeException(env));
+      if (got < 0) break;
+      if (got == 0) continue;
+      env->GetByteArrayRegion(buf, 0, got, reinterpret_cast<jbyte*>(bytes.data()));
+      if (!answer(n, r, [&] { jsui_request_body(r.rt, r.id, bytes.data(), size_t(got)); })) return finish("cancelled");
+    }
+    env->CallVoidMethod(in, jni.inClose);  // hands the connection back to the pool
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    return finish("");
+  }
+}
+
+void worker(std::shared_ptr<Net> n) {
+  JNIEnv* env = attachThread(n->vm, "jsui-net");
+  std::unique_lock<std::mutex> lock(n->mu);
+  for (;;) {
+    if (n->queue.empty()) {
+      if (n->closed) break;
+      n->idle++;
+      bool woken = n->work.wait_for(lock, std::chrono::seconds(30), [&] { return !n->queue.empty() || n->closed; });
+      n->idle--;
+      if (!woken) break;  // idle for a while: let the thread go
+      continue;
+    }
+    std::shared_ptr<Request> r = std::move(n->queue.front());
+    n->queue.pop_front();
+    lock.unlock();
+    run(*n, *r, env);
+    lock.lock();
+    n->live.erase(r->id);
+    n->watch.notify_one();
+  }
+  n->threads--;
+  lock.unlock();
+  if (env) n->vm->DetachCurrentThread();
+}
+
+// Calls disconnect() on a stopping request's connection, again every 50 ms
+// until the worker lets go of it (one that came before the connection
+// started connecting does not stop it). A thread of its own per request: a
+// disconnect() may block until the read it aborts gives up.
+void kicker(std::shared_ptr<Net> n, std::shared_ptr<Request> r) {
+  JNIEnv* env = attachThread(n->vm, "jsui-net-stop");
+  if (!env) return;
+  for (;;) {
+    jobject c = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(n->mu);
+      if (r->conn) c = env->NewGlobalRef(r->conn);
+    }
+    if (!c) break;
+    env->CallVoidMethod(c, jni.disconnect);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteGlobalRef(c);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  n->vm->DetachCurrentThread();
+}
+
+// Times requests out (answering them at once: the UI does not wait for Java
+// to give up) and has cancelled and timed-out ones disconnected.
+void watchdog(std::shared_ptr<Net> n) {
+  std::unique_lock<std::mutex> lock(n->mu);
+  for (;;) {
+    auto now = Clock::now();
+    auto next = Clock::time_point::max();
+    for (auto& [id, r] : n->live) {
+      if (!r->cancelled && !r->timedOut && r->deadline <= now) {
+        r->timedOut = true;
+        if (!n->closed) {
+          if (r->headSent) jsui_request_end(r->rt, r->id, "timed out reading the response body");
+          else jsui_request_respond(r->rt, r->id, 0, "timed out waiting for response", r->url.c_str(), nullptr, 0);
+        }
+        r->cancelled = true;  // answered: the worker stays silent
+      }
+      if (r->cancelled && r->conn && !r->kicked) {
+        r->kicked = true;
+        std::thread(kicker, n, r).detach();
+      }
+      if (!r->cancelled) next = std::min(next, r->deadline);
+    }
+    if (n->closed && n->live.empty()) break;
+    if (next == Clock::time_point::max()) n->watch.wait(lock);
+    else n->watch.wait_until(lock, next);
+  }
+  n->watching = false;
+}
+
+// Queues a request; false once the host shut down.
+bool start(const std::shared_ptr<Net>& n, std::shared_ptr<Request> r) {
+  std::lock_guard<std::mutex> lock(n->mu);
+  if (n->closed) return false;
+  n->live[r->id] = r;
+  n->queue.push_back(std::move(r));
+  if (!n->watching) {
+    n->watching = true;
+    std::thread(watchdog, n).detach();
+  }
+  if (n->queue.size() > size_t(n->idle) && n->threads < kMaxThreads) {
+    n->threads++;
+    std::thread(worker, n).detach();
+  } else {
+    n->work.notify_one();
+  }
+  n->watch.notify_one();  // a new deadline
+  return true;
+}
+
+void cancel(Net& n, uint64_t id) {
+  std::lock_guard<std::mutex> lock(n.mu);
+  auto it = n.live.find(id);
+  if (it == n.live.end()) return;
+  it->second->cancelled = true;
+  n.watch.notify_one();
+}
+
+// Before jsui_destroy: no answer is sent after this returns; requests on the
+// way are disconnected and their threads exit.
+void shutdown(Net& n) {
+  std::lock_guard<std::mutex> lock(n.mu);
+  n.closed = true;
+  for (auto& r : n.queue) n.live.erase(r->id);
+  n.queue.clear();
+  for (auto& [id, r] : n.live) r->cancelled = true;
+  n.work.notify_all();
+  n.watch.notify_all();
+}
+
+}  // namespace net
+
+int onRequest(void* user, JsuiRuntime* rt, uint64_t id, const JsuiRequest* req) {
+  auto& h = *static_cast<Host*>(user);
+  std::string url = req->url ? req->url : "";
+  if (url.rfind("asset:///", 0) == 0) {
+    serveAsset(h, rt, id, url);
+    return 0;
+  }
+  std::string scheme = lower(url.substr(0, url.find(':')));
+  if ((scheme != "http" && scheme != "https") || !h.net) return 1;  // the built-in loader
+  auto r = std::make_shared<net::Request>();
+  r->rt = rt;
+  r->id = id;
+  r->url = url;
+  r->method = req->method ? req->method : "GET";
+  for (size_t i = 0; i < req->header_count; i++)
+    if (req->headers[i].name)
+      r->headers.emplace_back(lower(req->headers[i].name), req->headers[i].value ? req->headers[i].value : "");
+  if (req->body && req->body_size)
+    r->body.assign(static_cast<const uint8_t*>(req->body), static_cast<const uint8_t*>(req->body) + req->body_size);
+  r->redirect = req->redirect;
+  if (req->timeout_ms > 0) r->deadline = net::Clock::now() + std::chrono::milliseconds(req->timeout_ms);
+  return net::start(h.net, std::move(r)) ? 0 : 1;
+}
+
+void onRequestCancel(void* user, JsuiRuntime*, uint64_t id) {
+  auto& h = *static_cast<Host*>(user);
+  if (h.net) net::cancel(*h.net, id);
 }
 
 // ------------------------------------------------------------------- EGL
@@ -1069,12 +1636,16 @@ void createRuntime(Host& h) {
   cfg.dev_mode = !url.empty();
   std::string jsThread = intentExtra(h, "jsui_js_thread");
   cfg.js_thread = jsThread == "off" ? JSUI_JS_THREAD_OFF : jsThread == "lockstep" ? JSUI_JS_THREAD_LOCKSTEP : JSUI_JS_THREAD_ON;
-  if (url.empty()) {
-    // Built-in loader for http:// (dev servers); APK assets otherwise.
-    cfg.load = assetLoad;
-    cfg.load_user = &h;
-    url = "asset:///ui/bundle.js";
+  // APK assets and http(s):// (onRequest); file paths go to the built-in loader.
+  if (!h.net && net::initJni(h.env)) {
+    h.net = std::make_shared<net::Net>();
+    h.net->vm = h.app->activity->vm;
   }
+  if (!h.net) LOGW("network: JNI setup failed; https:// is unavailable");
+  cfg.on_request = onRequest;
+  cfg.on_request_cancel = onRequestCancel;
+  cfg.request_user = &h;
+  if (url.empty()) url = "asset:///ui/bundle.js";
   h.rt = jsui_create(&cfg);
   LOGI("loading %s (%dx%d px, scale %.2f)", url.c_str(), h.pxW, h.pxH, h.scale);
   jsui_load_bundle_url(h.rt, url.c_str());
@@ -1376,6 +1947,7 @@ void android_main(android_app* app) {
     if (source) source->process(app, source);
   }
 
+  if (h.net) net::shutdown(*h.net);  // nothing answers the runtime after this
   if (h.rt) jsui_destroy(h.rt);
   if (h.renderer == Renderer::Vulkan) destroyVulkan(h);
   if (h.gpu) {
