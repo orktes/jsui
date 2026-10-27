@@ -279,6 +279,24 @@ function fontList(families) {
 
 let nextHostId = 1;
 const modsOf = (e) => (e.shiftKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
+
+// Puts text the UI copied (TextInput, selectable Text) on the page's
+// clipboard, from inside the key event that copied it: the async Clipboard
+// API, else (an insecure context) a copy command from the focused keyboard
+// sink.
+function writeClipboard(text) {
+  const c = typeof navigator !== 'undefined' ? navigator.clipboard : null;
+  if (c?.writeText) {
+    c.writeText(text).catch(() => {});
+    return;
+  }
+  const sink = typeof document !== 'undefined' ? document.activeElement : null;
+  if (!sink?.__jsuiSink) return;
+  sink.value = text;
+  sink.select();
+  try { document.execCommand('copy'); } catch {}
+  sink.value = '';
+}
 // Keys whose browser default (focus move, caret move inside the keyboard sink)
 // we suppress when the UI consumed them. Printable keys are never suppressed:
 // their text must still reach the UI through the `input` event.
@@ -397,7 +415,8 @@ function replaceCanvas(old) {
 function internals() {
   return { DomView, CanvasView, JsuiHost, JsuiSurface, HIT_POINTER, HIT_SCROLL, NAV_KEYS, webgpuFor, loadModuleFor,
     bufferType, BUFFER_TYPES, sourceSize, defaultOpaque, isVideoFrame, transferred, replaceCanvas, fontArgs, fontList, JsuiAudio, JsuiVideo,
-    corsWarning, taintKey, videoFramesContextLost, watchVideoFrames, hostUrl: import.meta.url, workerName: WORKER_NAME };
+    corsWarning, taintKey, videoFramesContextLost, watchVideoFrames, writeClipboard, hostUrl: import.meta.url,
+    workerName: WORKER_NAME };
 }
 const WORKER_NAME = 'jsui-host';
 
@@ -1007,6 +1026,7 @@ class DomView {
     // Hardware keyboards and IMEs still deliver keys and text.
     sink.setAttribute('inputmode', 'none');
     sink.tabIndex = 0;
+    sink.__jsuiSink = true;  // writeClipboard's fallback copies from it
     Object.assign(sink.style, { position: 'fixed', left: '0px', top: '0px', width: '1px', height: '1px',
       opacity: '0', padding: '0', border: '0', margin: '0', resize: 'none', overflow: 'hidden',
       pointerEvents: 'none', zIndex: '-1', caretColor: 'transparent' });
@@ -1020,9 +1040,29 @@ class DomView {
     };
     this.focus = focusSink;
 
+    // Ctrl / Cmd+V: the key goes to the UI once the browser's paste event
+    // (right after it) has told what the page's clipboard holds, so a
+    // TextInput pastes that (a page cannot read the clipboard synchronously).
+    let pendingPaste = null;
+    const sendPaste = () => {
+      const k = pendingPaste;
+      pendingPaste = null;
+      if (k) this._inKey(k.key, k.code, 1, k.repeat, k.mods);
+    };
+    sink.addEventListener('paste', (e) => {
+      e.preventDefault();  // the text goes in through the key, not the sink
+      this._pasted(e.clipboardData?.getData('text/plain') ?? '');
+      sendPaste();
+    }, active);
     sink.addEventListener('keydown', (e) => {
       if (e.isComposing || e.keyCode === 229) return;  // IME owns this key
       if (!e.repeat) this._pressedKeys.set(e.code || e.key, e.key);
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'v' || e.key === 'V')) {
+        sendPaste();
+        pendingPaste = { key: e.key, code: e.code || null, repeat: e.repeat ? 1 : 0, mods: modsOf(e) };
+        setTimeout(sendPaste, 0);  // no paste event came (nothing to paste)
+        return;
+      }
       const used = this._inKey(e.key || null, e.code || null, 1, e.repeat ? 1 : 0, modsOf(e));
       if ((used && (NAV_KEYS.has(e.key) || e.ctrlKey || e.metaKey)) || (e.key === 'Tab' && this._trapTab)) {
         e.preventDefault();
@@ -1091,6 +1131,9 @@ class DomView {
 
   // The keyboard sink got focus (a click, Tab from the page, focus()).
   _sinkFocused() { this._hostOf()._focusPads(this); }
+
+  // The page pasted `text` (the paste key's clipboard, see _installInput).
+  _pasted(text) { this._hostOf()._clipText = text; }
 
   // A pointer entered / left the canvas (worker mode needs the hit map then).
   _pointerOver() {}
@@ -2128,6 +2171,10 @@ class JsuiHost extends CanvasView {
         this._emit('state', key, value);
       },
       onCall: (id, name, json) => this._onCall(id, name, json),
+      // Clipboard (jsui_set_clipboard_callbacks): pastes read what the page
+      // pasted last (or the UI copied), copies go to the page's clipboard.
+      clipboardText: () => this._clipText ?? '',
+      onClipboard: (text) => this._copied(text),
       onCallCancel: (id) => this._emit('callCancel', id),
       onCallResult: (id, ok, payload) => {
         const p = this._uiCalls.get(id);
@@ -2374,6 +2421,13 @@ class JsuiHost extends CanvasView {
       const id = this._withStrings([String(name), json], (n, j) => this.module._jsui_web_call_ui(this.rt, this.hostId, n, j));
       this._uiCalls.set(id, { resolve, reject });
     });
+  }
+
+  // The UI copied `text` (jsui_set_clipboard_callbacks); a worker's host
+  // forwards it to the page.
+  _copied(text) {
+    this._clipText = text;
+    writeClipboard(text);
   }
 
   _onCall(id, name, json) {

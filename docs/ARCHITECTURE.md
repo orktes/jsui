@@ -2175,6 +2175,34 @@ and new rects (`text::inputCaretDamage`), so `jsui_needs_redraw()` turns
 true twice a second while an input is focused and each such frame repaints
 a few pixels.
 
+## Selectable Text
+
+`<Text selectable>` selects natively like a web page's text
+(`src/input/text_selection.cpp`): the selection lives on the paragraph-root
+Text (`Node::selAnchor` / `selFocus`, UTF-16 indices into the paragraph's
+text, every nested span included, after `textTransform`) and the painter
+draws its highlight (`getRectsForRange`) under the glyphs, so a drag never
+crosses into JS. One selection exists at a time and stays inside one Text
+root; pressing anywhere else clears it.
+
+* Mouse: press + drag selects characters, a double click a word (drag on:
+  by words), a triple click the paragraph between hard line breaks;
+  Shift+click extends from the anchor.
+* Touch: a press held 500 ms without moving past the touch slop selects
+  the word under the finger; the press under it gets `pointercancel` (no
+  click) and the finger then extends the selection by words instead of
+  scrolling. A tap clears it. There are no drag handles or copy menu: an
+  app that wants one listens to `onSelectionChange` (its `text`) and copies
+  with `Clipboard.setString`.
+* Keys (nothing else focused handles them): Ctrl/Cmd + C copies through the
+  clipboard (`jsui_set_clipboard_callbacks`, else in-process), Ctrl/Cmd + A
+  selects all of the Text.
+
+`selectable` makes the Text take the pointer (`jsui_hit_test` reports
+`JSUI_HIT_POINTER` there) and shows the `text` cursor. `selectionColor`
+tints the highlight as for TextInput. A root listing `selectionChange` gets
+`selectionchange` (`selection: {start, end}`, `text`) on every change.
+
 ## Animated
 
 `@orktes/jsui-react`'s `Animated` (`packages/react/src/animated/`) has React

@@ -21,8 +21,10 @@ constexpr double kMultiClickMs = 500;      // double / triple click window
 constexpr float kMultiClickSlop = 4;       // px
 constexpr size_t kUndoLimit = 100;
 
+}  // namespace
+
 // props.__events contains `token` exactly (case-insensitive) or "*".
-bool listens(const Node* n, const char* token) {
+bool nodeListens(const Node* n, const char* token) {
   for (auto& e : n->props()["__events"].asArray()) {
     const std::string& s = e.asString();
     if (s == "*") return true;
@@ -35,6 +37,8 @@ bool listens(const Node* n, const char* token) {
   }
   return false;
 }
+
+namespace {
 
 bool secure(const Node* n) { return n->props()["secureTextEntry"].asBool(); }
 bool multiline(const Node* n) { return n->props()["multiline"].asBool(); }
@@ -56,7 +60,7 @@ bool InputManager::editable(const Node* n) const {
 
 void InputManager::editNotify(uint32_t id, bool text, bool selection) {
   Node* n = alive(id);
-  if (text && n && listens(n, "change")) {
+  if (text && n && nodeListens(n, "change")) {
     edit::EditState* s = edit::state(n);
     Value::Object ev = baseEvent("change", n);
     ev["text"] = Value(edit::toUtf8(s->value));
@@ -64,7 +68,7 @@ void InputManager::editNotify(uint32_t id, bool text, bool selection) {
     post(std::move(ev));
   }
   n = alive(id);  // the change handler may have removed it
-  if (selection && n && listens(n, "selectionChange")) {
+  if (selection && n && nodeListens(n, "selectionChange")) {
     edit::EditState* s = edit::state(n);
     Value::Object sel;
     sel["start"] = Value(s->start());
@@ -312,6 +316,20 @@ bool InputManager::editText(Node* n, const char* utf8) {
 
 // ------------------------------------------------------------- pointer
 
+int InputManager::multiClick(uint32_t id, const PointerState& p) {
+  double now = rt_.now;
+  if (id == lastClickId_ && now - lastClickTime_ <= kMultiClickMs && std::fabs(p.x - lastClickX_) <= kMultiClickSlop &&
+      std::fabs(p.y - lastClickY_) <= kMultiClickSlop)
+    clickCount_ = clickCount_ >= 3 ? 1 : clickCount_ + 1;
+  else
+    clickCount_ = 1;
+  lastClickId_ = id;
+  lastClickTime_ = now;
+  lastClickX_ = p.x;
+  lastClickY_ = p.y;
+  return clickCount_;
+}
+
 void InputManager::editPointerDown(Node* n, const PointerState& p, int mods) {
   if (selectedOnFocusId_ == n->id()) {
     selectedOnFocusId_ = 0;
@@ -321,16 +339,7 @@ void InputManager::editPointerDown(Node* n, const PointerState& p, int mods) {
   float lx = 0, ly = 0;
   if (!toLocal(n, p.x, p.y, &lx, &ly)) return;
   edit::EditState* s = edit::state(n);
-  double now = rt_.now;
-  if (n->id() == lastClickId_ && now - lastClickTime_ <= kMultiClickMs && std::fabs(p.x - lastClickX_) <= kMultiClickSlop &&
-      std::fabs(p.y - lastClickY_) <= kMultiClickSlop)
-    clickCount_ = clickCount_ >= 3 ? 1 : clickCount_ + 1;
-  else
-    clickCount_ = 1;
-  lastClickId_ = n->id();
-  lastClickTime_ = now;
-  lastClickX_ = p.x;
-  lastClickY_ = p.y;
+  multiClick(n->id(), p);
   int idx = text::inputIndexAt(n, lx, ly);
   dragInputId_ = p.touch ? 0 : n->id();
   if (clickCount_ == 2) {

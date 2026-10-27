@@ -125,6 +125,8 @@ unsigned readListenMask(const Node* n) {
   // need not wait for their answer (docs/ARCHITECTURE.md "Input routing
   // details").
   for (auto& e : n->props()["__passive"].asArray()) m &= ~vetoBits(e.asString());
+  // Selectable text takes the pointer (drag / long-press selection).
+  if (n->type() == NodeType::Text && n->props()["selectable"].asBool()) m |= kPointer;
   return m;
 }
 
@@ -753,6 +755,10 @@ void InputManager::updateCursor(Node* hit) {
       cursor = "pointer";
       break;
     }
+    if (n->type() == NodeType::Text && n->props()["selectable"].asBool()) {
+      cursor = "text";
+      break;
+    }
   }
   cursor_ = cursor;
 }
@@ -775,6 +781,7 @@ bool InputManager::mouseMove(float x, float y) {
   uint32_t targetId = mouse_.captureId && alive(mouse_.captureId) ? mouse_.captureId : hitId;
   bool handled = false;
   if (moved && dragInputId_) editPointerDrag(mouse_);  // drag-selecting text
+  if (moved && selPointer_ == kMousePointerId) selPointerDrag(mouse_);  // drag-selecting a selectable Text
   // pointermove is the hottest event: only cross into JS when someone on the
   // propagation path listens to moves.
   if (moved && alive(targetId) && consumes(alive(targetId), kMove))
@@ -832,6 +839,8 @@ bool InputManager::pointerDown(PointerState& p, uint32_t hitId, int button) {
     Node* hit = alive(hitId);
     if (hit && hit == focused_ && hit->type() == NodeType::TextInput) editPointerDown(hit, p, mods_);
     selectedOnFocusId_ = 0;
+    // Selectable Text: starts a selection there, or drops the one elsewhere.
+    selPointerDown(alive(hitId), p, mods_);
   }
   // The first press decides who owns the gesture. A touch on a ScrollView
   // that can scroll is the scroll view's (it may turn into a drag); a mouse
@@ -864,6 +873,7 @@ bool InputManager::pointerUp(PointerState& p, uint32_t hitId, int button, bool c
   bool owned = p.owned;
   if (p.buttons == 0 || cancel) {
     if (!p.touch) dragInputId_ = 0;
+    selPointerUp(p);
     p.buttons = 0;
     p.captureId = 0;
     p.scrollingId = 0;
@@ -997,6 +1007,10 @@ bool InputManager::touch(int id, int phase, float x, float y) {
   p.y = y;
   uint32_t hitId = idOf(hitTest(x, y));
   if (phase == 1) {
+    if (p.pointerId == selPointer_) {
+      selPointerDrag(p);  // extending a long-press selection
+      return true;
+    }
     if (Node* sv = alive(p.scrollingId)) {
       dragTo(p, sv, x, y);
       return true;
@@ -1181,6 +1195,11 @@ void InputManager::setFocus(Node* n) {
 void InputManager::nodeRemoved(Node* n) {
   if (focused_ == n) focused_ = nullptr;
   if (hovered_ == n) hovered_ = nullptr;
+  if (selTextId_ == n->id()) {
+    selTextId_ = 0;
+    selPointer_ = -1;
+  }
+  if (selPressTextId_ == n->id()) selPressPointer_ = -1;
   autoFocusSeen_.erase(n->id());
   scrolls_.erase(n->id());
 }
@@ -1453,6 +1472,7 @@ bool InputManager::keyDefault(const Deferred& d, bool prevented) {
     return focusNext((d.mods & JSUI_MOD_SHIFT) != 0);
   }
   if (inTextInput && editKey(focused_, k, d.mods)) return true;
+  if (!inTextInput && selKey(k, d.mods)) return true;  // copy / select all of selectable Text
   if ((k == "Enter" || k == " " || k == "Spacebar") && !d.repeat && focusedUsable() && !inTextInput) {
     Node* f = focused_;
     Rect r = visualRect(f);
@@ -1797,6 +1817,7 @@ void InputManager::tick(double nowMs) {
   bool laidOut = doc_.layout();
   if (laidOut) tickFocusScopes();
   editTick();
+  selTick();
   tickScrolling(nowMs, dt);
   // The UI may have moved under a still mouse: refresh enter/leave + cursor
   // (while content scrolls under it, once the scrolling pauses).

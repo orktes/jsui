@@ -214,6 +214,15 @@ hud.gamepadConsumed(0, 0);                           // the UI took pad 0's A pr
   wheel and key events the UI didn't consume are not `preventDefault()`ed and
   bubble on as usual.
 
+## Clipboard
+
+Copies in the UI (a TextInput's Ctrl / Cmd+C or X, a `<Text selectable>`'s
+Ctrl / Cmd+C) go to the page's clipboard (`navigator.clipboard.writeText`,
+or a copy command where the page is not a secure context). A paste key
+waits for the browser's `paste` event and the TextInput pastes the text it
+carries; the page's clipboard is never read otherwise. In worker mode the
+page's thread writes and reads it for the worker.
+
 ## Safe area (notch, Dynamic Island, home indicator)
 
 On a page with `<meta name="viewport" content="..., viewport-fit=cover">` the

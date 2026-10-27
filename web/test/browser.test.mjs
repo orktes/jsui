@@ -443,6 +443,42 @@ test('pointer, wheel, keyboard and text input are forwarded', async ({ page }) =
   await page.keyboard.up('KeyW');
 }, {}, { worker: true });
 
+// Selectable Text and TextInput copy to the page's clipboard; a paste key
+// pastes what the browser's paste event carried.
+test('clipboard: copy from selectable text, paste into a TextInput', async ({ page }) => {
+  await mount(page, { jsui: { bundleUrl: 'fixtures/selectable.js' } });
+  await page.mouse.dblclick(30, 20);  // "alpha"
+  await frames(page, 2);
+  let msgs = await page.evaluate(() => window.hosts.ui.messages);
+  assert(msgs.some(([n, d]) => n === 'selected' && d.text === 'alpha'), `selection ${JSON.stringify(msgs)}`);
+  await page.keyboard.press('Control+C');
+  let clip = '';
+  for (let i = 0; i < 20 && clip !== 'alpha'; i++) {
+    await page.waitForTimeout(25);
+    clip = await page.evaluate(() => navigator.clipboard.readText());
+  }
+  assert(clip === 'alpha', `clipboard after copy: ${JSON.stringify(clip)}`);
+  // Focus the input, then Ctrl+V with the paste event the browser sends.
+  await page.mouse.click(100, 75);
+  await frames(page, 2);
+  await page.evaluate(() => {
+    const sink = document.activeElement;
+    const down = new KeyboardEvent('keydown', { key: 'v', code: 'KeyV', ctrlKey: true, bubbles: true, cancelable: true });
+    sink.dispatchEvent(down);
+    const data = new DataTransfer();
+    data.setData('text/plain', 'from the page');
+    sink.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+    sink.dispatchEvent(new KeyboardEvent('keyup', { key: 'v', code: 'KeyV', ctrlKey: true, bubbles: true }));
+  });
+  for (let i = 0; i < 20; i++) {
+    await frames(page, 1);
+    msgs = await page.evaluate(() => window.hosts.ui.messages);
+    if (msgs.some(([n]) => n === 'changed')) break;
+  }
+  const changed = msgs.filter(([n]) => n === 'changed').map(([, d]) => d.text);
+  assert(changed.at(-1) === 'from the page', `TextInput after paste: ${JSON.stringify(changed)}`);
+}, { permissions: ['clipboard-read', 'clipboard-write'] }, { worker: true });
+
 test('touch input is forwarded', async ({ page }) => {
   await mount(page, { jsui: { bundleUrl: 'fixtures/bands.js' } });
   await spy(page);

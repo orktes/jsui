@@ -834,6 +834,7 @@ bool InputManager::animating() const {
   if (!deferred_.empty()) return true;  // a default action waits for a late JS answer
   for (const PointerState& p : touches_)
     if (p.holdUntil >= 0) return true;  // a touch held for JS
+  if (selPressPointer_ >= 0) return true;  // a touch may become a long-press text selection
   for (const Pad& p : pads_) {
     if (p.dpad.dir >= 0 || p.stick.dir >= 0 || p.stickScrollId) return true;
     if (!p.rightBlocked && std::hypot(p.axes[2], p.axes[3]) > kScrollStickDeadzone) return true;

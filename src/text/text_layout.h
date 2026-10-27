@@ -6,6 +6,7 @@
 
 #include <yoga/Yoga.h>
 
+#include <string>
 #include <vector>
 
 #include "include/core/SkColor.h"
@@ -84,6 +85,19 @@ bool inputCaretVisible(Node* n);
 // last reported. When it changed, returns true with the old and new rects
 // (border-box coords, empty when hidden) and records the new state.
 bool inputCaretDamage(Node* n, SkRect* before, SkRect* after);
+
+// --- Selectable Text (input/text_selection.cpp). Coordinates are the Text
+// root's border-box local px (after its last layout); indices are UTF-16
+// units of the paragraph's text (every span's text after textTransform).
+
+// The paragraph's text (empty without text).
+const std::u16string& textContent(Node* n);
+// Index nearest to a point, never inside a cluster.
+int textIndexAt(Node* n, float x, float y);
+// Paints the highlight of the root's selection (Node::selAnchor / selFocus)
+// under its text, the paragraph at (x, y) laid out at `width` like
+// paintText. Nothing without a selection or when `selectable` is off.
+void paintTextSelection(Node* n, SkCanvas* canvas, float x, float y, float width);
 
 // Whether the paragraph of Text root `n` (already built) can follow a change
 // of its own `color` alone without being rebuilt: no span sets a color of its

@@ -191,6 +191,11 @@ class Node {
   std::unique_ptr<Cache> paintCache;
   // TextInput editing state (text, selection, caret; see text/text_edit.h).
   std::unique_ptr<Cache> editState;
+  // Selectable Text (a paragraph root with `selectable`): the native
+  // selection, UTF-16 indices into the paragraph's text (anchor == focus:
+  // nothing selected). Set by InputManager (input/text_selection.cpp),
+  // drawn by the painter.
+  int selAnchor = 0, selFocus = 0;
   // Bumped on every change that affects how this node itself paints (props,
   // text, children list). The painter compares it against its cache.
   uint32_t paintVersion = 0;
