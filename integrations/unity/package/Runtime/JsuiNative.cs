@@ -27,11 +27,20 @@ namespace Jsui
 
         // ---- plugin helpers
 
-        [DllImport(Lib)] public static extern IntPtr jsuiu_create(int width, int height, float pixelRatio, int devMode);
+        [DllImport(Lib)] public static extern IntPtr jsuiu_create(int width, int height, float pixelRatio, int devMode, int engineHttp);
         [DllImport(Lib)] public static extern IntPtr jsuiu_runtime(IntPtr u);
         [DllImport(Lib)] public static extern void jsuiu_destroy(IntPtr u);
         [DllImport(Lib)] public static extern int jsuiu_next_message(IntPtr u, out IntPtr name, out IntPtr json);
         [DllImport(Lib)] public static extern int jsuiu_next_log(IntPtr u, out int level, out IntPtr text);
+        // Network requests for UnityWebRequest (JsuiHttp.cs).
+        [DllImport(Lib)] public static extern void jsuiu_set_engine_http(IntPtr u, int on);
+        [DllImport(Lib)] public static extern int jsuiu_next_request(IntPtr u, out ulong id, out IntPtr url, out IntPtr method,
+            out IntPtr body, out int bodySize, out int timeoutMs, out int redirect, out int headerCount);
+        [DllImport(Lib)] public static extern int jsuiu_request_header(IntPtr u, int index, out IntPtr name, out IntPtr value);
+        [DllImport(Lib)] public static extern int jsuiu_next_request_cancel(IntPtr u, out ulong id);
+        [DllImport(Lib)] static extern void jsuiu_request_respond(IntPtr u, ulong id, int status, byte[] statusText, byte[] finalUrl, byte[] headerLines);
+        public static void RequestRespond(IntPtr u, ulong id, int status, string statusText, string finalUrl, string headerLines) =>
+            jsuiu_request_respond(u, id, status, Utf8(statusText), Utf8(finalUrl), Utf8(headerLines));
         [DllImport(Lib)] public static extern int jsuiu_render(IntPtr u, int width, int height, int force, out JsuiRect dirty, out IntPtr pixels);
         // GPU path (see jsui_unity.cpp): render jobs on Unity's render thread.
         [DllImport(Lib)] public static extern int jsuiu_gpu_available();
@@ -77,6 +86,13 @@ namespace Jsui
         public static IntPtr MapBuffer(IntPtr rt, string key, int type, int count) => jsui_map_buffer(rt, Utf8(key), type, (UIntPtr)count);
         [DllImport(Lib)] static extern int jsui_commit_buffer(IntPtr rt, byte[] key);
         public static int CommitBuffer(IntPtr rt, string key) => jsui_commit_buffer(rt, Utf8(key));
+
+        // ---- resource loading (answers to jsuiu_next_request; thread safe)
+
+        public const int RedirectFollow = 0, RedirectError = 1, RedirectManual = 2;
+        [DllImport(Lib)] public static extern void jsui_request_body(IntPtr rt, ulong id, byte[] data, UIntPtr size);
+        [DllImport(Lib)] static extern void jsui_request_end(IntPtr rt, ulong id, byte[] error);
+        public static void RequestEnd(IntPtr rt, ulong id, string error) => jsui_request_end(rt, id, Utf8(error));
 
         // ---- input (each returns non-zero when the UI consumed the event)
 

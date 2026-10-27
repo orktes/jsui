@@ -138,6 +138,13 @@ main thread's waits for JSUI's GPU renders).
   inside the tick, `Lockstep` on its thread but waited for every tick. The
   ctypes smoke ([native/smoke.py](native/smoke.py)) checks a 300 ms stall in
   each mode.
+* **Networking.** With `JsuiView.useEngineHttp` (on by default) the UI's
+  `http://` and `https://` requests (`fetch()`, images, fonts, sounds, a
+  bundle loaded by URL) run on `UnityWebRequest`
+  ([package/Runtime/JsuiHttp.cs](package/Runtime/JsuiHttp.cs)), so they use
+  the engine's TLS, proxy and platform settings; bodies stream to JS as they
+  arrive (`res.body.getReader()`), `AbortController` aborts the request.
+  Off, JSUI's built-in loader makes them.
 
 ## Using it in your game
 

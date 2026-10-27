@@ -46,6 +46,12 @@
 // SyncJs() (waits now). Off runs JS inside the tick on the main thread;
 // Lockstep on its thread but waited for every tick (the frames of Off).
 // OnMessage and the logs still arrive on the main thread, after the tick.
+//
+// Networking. With useEngineHttp (the default) the UI's http:// and https://
+// requests (fetch(), images, fonts, sounds, a bundle loaded by URL) run on
+// UnityWebRequest (JsuiHttp.cs), started and finished after each tick, their
+// bodies streamed to JS as they arrive. Off, JSUI's built-in loader makes
+// them (its own sockets; https:// through the OS where it has an HTTP stack).
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -74,6 +80,8 @@ namespace Jsui
         public enum JsThreadMode { Off = JsuiNative.JsThreadOff, On = JsuiNative.JsThreadOn, Lockstep = JsuiNative.JsThreadLockstep }
         [Tooltip("Run the UI's JS on its own thread (On, as in React Native: frames never wait for JS), on the main thread inside the tick (Off), or on its thread but waited for every tick (Lockstep). Applies when the view starts.")]
         public JsThreadMode jsThread = JsThreadMode.On;
+        [Tooltip("Make the UI's http:// and https:// requests with UnityWebRequest (off: JSUI's built-in loader). Applies when the view starts.")]
+        public bool useEngineHttp = true;
 
         /// <summary>Host.postMessage(name, payload) from JS: name and the payload as JSON.</summary>
         public event Action<string, string> OnMessage;
@@ -114,6 +122,7 @@ namespace Jsui
         }
 
         IntPtr plugin_, rt_;
+        JsuiHttp http_;
         Canvas canvas_;
         RawImage image_;
         Texture2D texture_;
@@ -135,7 +144,7 @@ namespace Jsui
             ratio_ = pixelRatio > 0 ? pixelRatio : (Screen.dpi >= 160 ? 2 : 1);
             width_ = Mathf.Max(1, Mathf.RoundToInt(Screen.width / ratio_));
             height_ = Mathf.Max(1, Mathf.RoundToInt(Screen.height / ratio_));
-            plugin_ = JsuiNative.jsuiu_create(width_, height_, ratio_, devMode ? 1 : 0);
+            plugin_ = JsuiNative.jsuiu_create(width_, height_, ratio_, devMode ? 1 : 0, useEngineHttp ? 1 : 0);
             if (plugin_ == IntPtr.Zero)
             {
                 Debug.LogError("JSUI: jsuiu_create failed");
@@ -143,6 +152,7 @@ namespace Jsui
                 return;
             }
             rt_ = JsuiNative.jsuiu_runtime(plugin_);
+            http_ = new JsuiHttp(plugin_, rt_);
             CreateCanvas();
         }
 
@@ -155,6 +165,7 @@ namespace Jsui
             gpu_ = !forceCpu && JsuiNative.jsuiu_gpu_available() != 0;
             if (gpu_) renderEvent_ = JsuiNative.jsuiu_render_event_func();
             // Before the bundle loads (state set in Awake stays).
+            JsuiNative.jsuiu_set_engine_http(plugin_, useEngineHttp ? 1 : 0);
             if (JsuiNative.jsui_set_js_thread(Rt, (int)jsThread) != 0)
                 Debug.LogWarning($"JSUI: JS thread mode {jsThread} unavailable in this build; JS runs on the main thread");
             var url = ResolveBundle(bundle);
@@ -164,6 +175,9 @@ namespace Jsui
 
         void OnDestroy()
         {
+            // Requests in flight are dropped before their runtime goes.
+            http_?.Dispose();
+            http_ = null;
             if (plugin_ != IntPtr.Zero) JsuiNative.jsuiu_destroy(plugin_);
             plugin_ = rt_ = IntPtr.Zero;
             if (texture_) Destroy(texture_);
@@ -313,6 +327,8 @@ namespace Jsui
             }
             while (JsuiNative.jsuiu_next_message(plugin_, out IntPtr name, out IntPtr json) != 0)
                 OnMessage?.Invoke(JsuiNative.FromUtf8(name), JsuiNative.FromUtf8(json));
+            // A message handler may have destroyed the view.
+            if (plugin_ != IntPtr.Zero) http_?.Update();
         }
 
         void Paint()
