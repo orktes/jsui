@@ -165,6 +165,53 @@ test('inspect: runtime <-> frontend relay over poll/push and WebSocket', async (
   }
 });
 
+test('inspect: the relay serves source maps to DevTools and refuses domains the runtime lacks', async () => {
+  const s = await server();
+  try {
+    const first = poll(s.origin, 'rt-1');
+    await until(async () => (await (await fetch(s.origin + '/json/list')).json()).length === 1, 'target listed');
+    const fe = await frontend(`ws://127.0.0.1:${s.port}/__jsui/inspect/ws/rt-1`);
+    await first;
+    const reply = async (id, msg) => {
+      fe.ws.send(JSON.stringify({ id, ...msg }));
+      return JSON.parse(await until(() => fe.got.find((m) => JSON.parse(m).id === id), `reply ${id}`));
+    };
+
+    // Network.loadNetworkResource + IO.read, as DevTools reads a source map.
+    // DevTools drops the data of a read that says eof, so the last chunk
+    // with data must not say it.
+    const want = await (await fetch(s.origin + '/bundle.js.map')).text();
+    assert.ok(want.length > 1000);
+    const { result } = await reply(1, { method: 'Network.loadNetworkResource', params: { url: s.origin + '/bundle.js.map', options: {} } });
+    assert.equal(result.resource.success, true);
+    let text = '';
+    for (let id = 2; ; id++) {
+      const r = (await reply(id, { method: 'IO.read', params: { handle: result.resource.stream, size: 100000 } })).result;
+      if (r.eof) {
+        assert.equal(r.data, '');
+        break;
+      }
+      text += r.data;
+    }
+    assert.equal(text, want);
+
+    // Unknown methods of these domains are errors, not empty results:
+    // DevTools reads fields of the result (Network.emulateNetworkConditionsByRule)
+    // or waits for a profile (Profiler.stop).
+    for (const [id, method] of [[100, 'Network.enable'], [101, 'Profiler.stop'], [102, 'HeapProfiler.enable']]) {
+      const r = await reply(id, { method, params: {} });
+      assert.equal(r.error.code, -32601, method);
+    }
+
+    // Everything else still reaches the runtime.
+    fe.ws.send('{"id":200,"method":"Debugger.enable"}');
+    const got = await poll(s.origin, 'rt-1');
+    assert.deepEqual(got.map((e) => e.message), ['{"id":200,"method":"Debugger.enable"}']);
+  } finally {
+    await s.close();
+  }
+});
+
 test('inspect: a frontend may connect before its runtime polls; a returning runtime is re-greeted', async () => {
   const s = await server();
   try {

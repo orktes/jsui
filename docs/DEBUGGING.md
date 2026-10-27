@@ -12,6 +12,9 @@ jsui-viewer --dev http://127.0.0.1:5173/bundle.js   # or any dev-mode host
 
 * **Chrome:** open `chrome://inspect`, click *Configure...* and add
   `127.0.0.1:5173`. The app shows under *Remote Target*. Click *inspect*.
+  If it doesn't show up there, open `http://127.0.0.1:5173/json/list` and
+  paste the runtime's `devtoolsFrontendUrl` (`devtools://devtools/bundled/js_app.html?…`)
+  into the address bar. The id in it changes each time the runtime starts.
 * **VS Code**: add this to `.vscode/launch.json` and start *JSUI*:
 
   ```json
@@ -107,6 +110,10 @@ WebAssembly module in Node) is not a debug target for the same reason.
 * **The app freezes while paused.** It is paused like a browser tab. In a game
   engine, the engine's main loop waits with it.
 * **Not supported.** Profiling, heap snapshots, live edit and restart frame.
+  The dev server answers the `Profiler`, `HeapProfiler` and `Network`
+  domains with "not found", so DevTools doesn't wait for a profile that
+  never comes. For where JS time goes, run `tools/jsui-bench` with
+  `JSUI_JS_PROFILE=out.txt` (see [PERFORMANCE.md](PERFORMANCE.md)).
 * **Chrome.** It loads the source maps through `chrome://inspect`'s DevTools.
   A DevTools frontend hosted on an http page can't fetch them, because of its
   content security policy.

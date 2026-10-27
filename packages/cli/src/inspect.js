@@ -456,9 +456,9 @@ export function createInspector(o) {
   }
 
   // DevTools loads source maps through the target (Network.loadNetworkResource,
-  // then IO.read) when it cannot fetch them itself, as in a hosted frontend.
-  // The runtime has no use for that detour: the relay answers it, for this
-  // server's own URLs only.
+  // then IO.read). The runtime has no use for that detour: the relay answers
+  // it, for this server's own URLs only. A read past the end answers eof
+  // with no data: DevTools drops the data of a read that says eof.
   const streams = new Map();  // handle -> remaining text
   let nextStream = 1;
   function servesLocally(s, text) {
@@ -497,11 +497,30 @@ export function createInspector(o) {
         const rest = streams.get(params.handle);
         const size = params.size > 0 ? params.size : 1 << 20;
         streams.set(params.handle, rest.slice(size));
-        reply({ data: rest.slice(0, size), eof: rest.length <= size, base64Encoded: false });
+        reply({ data: rest.slice(0, size), eof: rest.length === 0, base64Encoded: false });
       }
       return true;
     }
     return false;
+  }
+
+  // The runtime acknowledges every method it doesn't know with an empty
+  // result. For these domains that misleads DevTools: it reads fields that
+  // aren't there (Network.emulateNetworkConditionsByRule's ruleIds threw while
+  // the target was set up), or waits for a profile that never comes
+  // (Profiler.stop hung the Performance panel). Refuse them as V8 does.
+  const UNSUPPORTED = /^(?:Network|Profiler|HeapProfiler)\./;
+  function refusesUnsupported(s, text) {
+    if (!/"method"\s*:\s*"(?:Network|Profiler|HeapProfiler)\./.test(text)) return false;
+    let msg;
+    try {
+      msg = JSON.parse(text);
+    } catch {
+      return false;
+    }
+    if (typeof msg.method !== 'string' || !UNSUPPORTED.test(msg.method)) return false;
+    s.ws.send(JSON.stringify({ id: msg.id, error: { code: -32601, message: `'${msg.method}' wasn't found` } }));
+    return true;
   }
 
   /** Handles an 'upgrade' request of the server; false when it is not the relay's. */
@@ -519,7 +538,7 @@ export function createInspector(o) {
     const s = { id: String(nextSession++), runtime: id, ws: null, waitTimer: null };
     s.ws = new WsConnection(socket, head, {
       onMessage: (text) => {
-        if (servesLocally(s, text)) return;
+        if (servesLocally(s, text) || refusesUnsupported(s, text)) return;
         const r = runtimes.get(id);
         if (r && sessions.has(s.id)) enqueue(r, { type: 'message', session: s.id, message: text });
       },
