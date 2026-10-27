@@ -77,6 +77,8 @@ class Inspector : public PhaseSpanSink {
   bool profiling() const { return sampling_; }
   void span(Phase phase, std::chrono::steady_clock::time_point start,
             std::chrono::steady_clock::time_point end) override;
+  void scope(Phase phase, std::chrono::steady_clock::time_point start,
+             std::chrono::steady_clock::time_point end) override;
 
  private:
   struct Out {
@@ -136,6 +138,7 @@ class Inspector : public PhaseSpanSink {
   std::thread sampler_;
   struct Span {
     Phase phase;
+    bool whole;          // a whole scope (scope()), else exclusive time (span())
     int64_t start, end;  // steady_clock microseconds, the agent's clock
   };
   Perf* phases_ = nullptr;  // runtime thread

@@ -45,8 +45,9 @@ running. *Save profile* writes a `.cpuprofile`.
   function that made it.
 * **The runtime's own work.** Where JS was idle, the frame phases the
   runtime ran show as top-level entries: `(commit)`, `(style)`, `(layout)`,
-  `(animated)`, `(input)`, `(paint)` and `(gpu)` (submitting the frame to
-  the GPU, not GPU execution). They run on the window's thread: with JS on
+  `(animated)`, `(input)`, `(paint)`, `(worklets)` (react-native-worklets
+  runs, as one entry: what runs inside them isn't sampled yet) and `(gpu)`
+  (submitting the frame to the GPU, not GPU execution). They run on the window's thread: with JS on
   its own thread (the default), a phase that overlaps running JS shows only
   where JS was idle. With `--js-thread off` everything is one thread and
   the chart shows whole frames. Totals per phase without DevTools:
@@ -59,7 +60,8 @@ running. *Save profile* writes a `.cpuprofile`.
   shows a page's: the JS on **Main**, the frame phases on a **JSUI render
   thread** track (Layout, Recalculate style, Paint, Commit, colored as
   Rendering and Painting) where they actually ran, overlapping JS or not,
-  and each GPU submit on the **GPU** track. *Load profile* in the
+  worklet runs (react-native-worklets, on the window's thread) on a **JSUI
+  worklets** track, and each GPU submit on the **GPU** track. *Load profile* in the
   Performance panel (or [Perfetto](https://ui.perfetto.dev)) opens the same
   URL's file. The server keeps the last 10.
 * **How.** A thread of the runtime's arms the statement traps once per

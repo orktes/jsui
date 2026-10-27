@@ -421,6 +421,7 @@ std::string Worklets::runSync(int id, const std::string& json) {
 }
 
 void Worklets::tick(double nowMs, bool js) {
+  Perf::Scope scope(rt_.doc.perf, Phase::Worklet);
   // Queued jobs, consecutive ones for the same runtime as one batch (one
   // entry, one microtask drain). Jobs they post wait for the next tick.
   if (!jobs_.empty()) {

@@ -25,6 +25,7 @@ enum class Phase : uint8_t {
   Paint,     // rendering (recording the frame; the CPU raster rasterises it here)
   Gpu,       // Graphite renders: submitting the recorded frame (Recorder::snap,
              // insertRecording, submit), which compiles new pipelines and uploads textures
+  Worklet,   // react-native-worklets runtimes (Worklets::tick); JsuiPerf counts it as other
   Count
 };
 
@@ -72,13 +73,16 @@ struct PerfCounters {
 // Paragraph::layout runs (process-wide: the text cache has no document).
 inline uint64_t gParagraphLayouts = 0;
 
-// Receives each stretch of exclusive phase time as it ends (the debugger's
-// CPU profile shows them, docs/DEBUGGING.md). Called on the thread the
-// phases run on; Phase::Other and Phase::Js are not reported.
+// Receives phase time as it ends (the debugger's CPU profile shows it,
+// docs/DEBUGGING.md): each stretch of exclusive time (span), and each whole
+// scope, nested ones included (scope). Called on the thread the phases run
+// on; Phase::Other and Phase::Js are not reported.
 struct PhaseSpanSink {
   virtual ~PhaseSpanSink() = default;
   virtual void span(Phase phase, std::chrono::steady_clock::time_point start,
                     std::chrono::steady_clock::time_point end) = 0;
+  virtual void scope(Phase phase, std::chrono::steady_clock::time_point start,
+                     std::chrono::steady_clock::time_point end) = 0;
 };
 
 class Perf {
@@ -113,33 +117,40 @@ class Perf {
   class Scope {
    public:
     Scope(Perf& p, Phase ph)
-        : p_(p.profiling || p.spans.load(std::memory_order_relaxed) ? &p : nullptr) {
-      if (p_) p_->enter(ph, &prev_);
+        : p_(p.profiling || p.spans.load(std::memory_order_relaxed) ? &p : nullptr), phase_(ph) {
+      if (p_) start_ = p_->enter(ph, &prev_);
     }
     ~Scope() {
-      if (p_) p_->leave(prev_);
+      if (!p_) return;
+      Clock::time_point end = p_->leave(prev_);
+      if (phase_ != Phase::Js)
+        if (PhaseSpanSink* sink = p_->spans.load(std::memory_order_relaxed)) sink->scope(phase_, start_, end);
     }
     Scope(const Scope&) = delete;
     Scope& operator=(const Scope&) = delete;
 
    private:
     Perf* p_;
+    Phase phase_;
     Phase prev_ = Phase::Other;
+    Clock::time_point start_;
   };
 
  private:
-  void enter(Phase ph, Phase* prev) {
+  Clock::time_point enter(Phase ph, Phase* prev) {
     Clock::time_point now = Clock::now();
     book(now);
     *prev = current_;
     current_ = ph;
     t0_ = now;
+    return now;
   }
-  void leave(Phase prev) {
+  Clock::time_point leave(Phase prev) {
     Clock::time_point now = Clock::now();
     book(now);
     current_ = prev;
     t0_ = now;
+    return now;
   }
   // The current phase ran from t0_ to now.
   void book(Clock::time_point now) {

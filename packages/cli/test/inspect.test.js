@@ -512,7 +512,7 @@ test('source maps: --no-hmr bundle sources are files on disk', async () => {
   }
 });
 
-test('profile trace: JS samples on Main, the phases on a render thread, GPU submits on the GPU track', async () => {
+test('profile trace: JS samples on Main, the phases on a render thread, worklets and GPU submits on tracks of their own', async () => {
   const { profileTrace } = await import('../src/profile-trace.js');
   const cf = (functionName) => ({ functionName, scriptId: '0', url: '', lineNumber: -1, columnNumber: -1 });
   const profile = {
@@ -524,7 +524,7 @@ test('profile trace: JS samples on Main, the phases on a render thread, GPU subm
     ],
     startTime: 1000, endTime: 2000,
     samples: [2, 3, 4, 2], timeDeltas: [0, 100, 200, 300],
-    jsuiSpans: [['(paint)', 1300, 1400], ['(gpu)', 1400, 1450]],
+    jsuiSpans: [['(paint)', 1300, 1400], ['(gpu)', 1400, 1450], ['(worklets)', 1500, 1520]],
   };
   const { traceEvents } = profileTrace(profile, { name: 'jsui-viewer' });
   const chunk = traceEvents.find((e) => e.name === 'ProfileChunk');
@@ -538,5 +538,7 @@ test('profile trace: JS samples on Main, the phases on a render thread, GPU subm
   const gpu = traceEvents.find((e) => e.name === 'GPUTask');
   assert.deepEqual([gpu.ts, gpu.dur, thread(gpu.pid, gpu.tid)], [1400, 50, 'CrGpuMain']);
   assert.ok(traceEvents.some((e) => e.name === 'process_name' && e.pid === gpu.pid && e.args.name === 'GPU Process'));
+  const worklet = traceEvents.find((e) => e.name === 'FunctionCall');
+  assert.deepEqual([worklet.ts, worklet.dur, thread(worklet.pid, worklet.tid)], [1500, 20, 'JSUI worklets']);
   assert.ok(traceEvents.some((e) => e.name === 'thread_name' && e.args.name === 'CrRendererMain'));
 });

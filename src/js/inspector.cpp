@@ -38,6 +38,7 @@ const char* spanName(Phase p) {
     case Phase::Input: return "(input)";
     case Phase::Paint: return "(paint)";
     case Phase::Gpu: return "(gpu)";
+    case Phase::Worklet: return "(worklets)";
     default: return "(native)";
   }
 }
@@ -158,7 +159,14 @@ void Inspector::span(Phase phase, std::chrono::steady_clock::time_point start,
                      std::chrono::steady_clock::time_point end) {
   if (!sampling_) return;
   std::lock_guard<std::mutex> l(spanMutex_);
-  spans_.push_back({phase, steadyUs(start), steadyUs(end)});
+  spans_.push_back({phase, false, steadyUs(start), steadyUs(end)});
+}
+
+void Inspector::scope(Phase phase, std::chrono::steady_clock::time_point start,
+                      std::chrono::steady_clock::time_point end) {
+  if (!sampling_) return;
+  std::lock_guard<std::mutex> l(spanMutex_);
+  spans_.push_back({phase, true, steadyUs(start), steadyUs(end)});
 }
 
 void Inspector::flushSpans() {
@@ -168,7 +176,10 @@ void Inspector::flushSpans() {
     spans.swap(spans_);
   }
   if (!agent_) return;
-  for (const Span& sp : spans) qjs_cdp_profiler_add_span(agent_, spanName(sp.phase), sp.start, sp.end);
+  for (const Span& sp : spans) {
+    if (sp.whole) qjs_cdp_profiler_add_scope(agent_, spanName(sp.phase), sp.start, sp.end);
+    else qjs_cdp_profiler_add_span(agent_, spanName(sp.phase), sp.start, sp.end);
+  }
 }
 
 void Inspector::syncSampler() {

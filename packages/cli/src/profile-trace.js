@@ -2,7 +2,8 @@
 // DevTools' Performance panel shows it as it shows a page's: the JS samples
 // on Main, the runtime's frame phases (the profile's `jsuiSpans`) on a
 // "JSUI render thread" track as Chrome's own Layout / Paint / ... events
-// (colored Rendering, Painting), and GPU submits on the GPU track. The live
+// (colored Rendering, Painting), worklet runs on a "JSUI worklets" track,
+// and GPU submits on the GPU track. The live
 // recording can only show them inside the JS flame chart: DevTools records
 // a CPU profile, not a trace, from a Node-style target.
 //
@@ -11,7 +12,7 @@
 // hides "Compositor", takes "CrRendererMain" for the main thread and the
 // "GPU Process" / "CrGpuMain" pair for the GPU track.
 
-const PHASES = /^\((commit|style|layout|animated|input|paint|gpu)\)$/;
+const PHASES = /^\((commit|style|layout|animated|input|paint|gpu|worklets)\)$/;
 
 /**
  * @param {object} profile  Profiler.Profile with `jsuiSpans` ([name, start, end] µs)
@@ -42,8 +43,9 @@ export function profileTrace(profile, o = {}) {
     args: { data: { cpuProfile: { nodes, samples }, timeDeltas: profile.timeDeltas } },
   });
 
-  const render = 2, gpuPid = 2, gpuTid = 3;
+  const render = 2, worklets = 4, gpuPid = 2, gpuTid = 3;
   ev.push({ ph: 'M', name: 'thread_name', pid, tid: render, ts: 0, args: { name: 'JSUI render thread' } });
+  ev.push({ ph: 'M', name: 'thread_name', pid, tid: worklets, ts: 0, args: { name: 'JSUI worklets' } });
   ev.push({ ph: 'M', name: 'process_name', pid: gpuPid, tid: gpuTid, ts: 0, args: { name: 'GPU Process' } });
   ev.push({ ph: 'M', name: 'thread_name', pid: gpuPid, tid: gpuTid, ts: 0, args: { name: 'CrGpuMain' } });
   for (const [name, start, end] of profile.jsuiSpans || []) {
@@ -62,6 +64,9 @@ export function profileTrace(profile, o = {}) {
         break;
       case 'input':
         ev.push({ ...at, cat: 'devtools.timeline', name: 'EventDispatch', args: { data: { type: 'input', frame: 'F1' } } });
+        break;
+      case 'worklets':  // they run on the render thread; a track of their own reads better
+        ev.push({ ...at, tid: worklets, cat: 'devtools.timeline', name: 'FunctionCall', args: { data: { functionName: 'worklets', url: '', scriptId: '0', lineNumber: 0, columnNumber: 0, frame: 'F1' } } });
         break;
       case 'gpu':
         ev.push({ ...at, pid: gpuPid, tid: gpuTid, cat: 'disabled-by-default-devtools.timeline', name: 'GPUTask', args: { data: { renderer_pid: pid, used_bytes: 0 } } });

@@ -179,6 +179,10 @@ struct QJSCDPAgent {
   QJSCDPClockFunc *clock;
   ProfSpan *spans;
   int nspans, spans_cap;
+  ProfSpan *scopes; /* add_scope's, node = index into scope_names */
+  int nscopes, scopes_cap;
+  char **scope_names;
+  int nscope_names;
   JSDebugFrameInfo *frames; /* a sample's stack */
   int frames_cap;
 };
@@ -799,6 +803,7 @@ static void profiler_reset(QJSCDPAgent *agent) {
   agent->npnodes = 0;
   agent->nsamples = 0;
   agent->nspans = 0;
+  agent->nscopes = 0;
 }
 
 static int64_t profiler_now(QJSCDPAgent *agent) {
@@ -1000,17 +1005,17 @@ static JSValue profiler_stop(QJSCDPAgent *agent) {
   json_set(agent, profile, "samples", samples);
   json_set(agent, profile, "timeDeltas", deltas);
 
-  /* The embedder's spans as they were, before they were cut to JS's gaps:
-     [name, start, end] each, for a trace with a lane per thread (`jsui dev`
-     writes one). DevTools ignores the field. */
+  /* The embedder's whole scopes (add_scope): [name, start, end] each, for a
+     trace with a track per thread (`jsui dev` writes one). DevTools ignores
+     the field. */
   JSValue spans = json_array(agent);
-  for (int i = 0; i < agent->nspans; i++) {
+  for (int i = 0; i < agent->nscopes; i++) {
     JSValue sp = json_array(agent);
     json_set_index(agent, sp, 0,
                    JS_NewString(agent->jctx,
-                                agent->pnodes[agent->spans[i].node].label));
-    json_set_index(agent, sp, 1, JS_NewInt64(agent->jctx, agent->spans[i].start));
-    json_set_index(agent, sp, 2, JS_NewInt64(agent->jctx, agent->spans[i].end));
+                                agent->scope_names[agent->scopes[i].node]));
+    json_set_index(agent, sp, 1, JS_NewInt64(agent->jctx, agent->scopes[i].start));
+    json_set_index(agent, sp, 2, JS_NewInt64(agent->jctx, agent->scopes[i].end));
     json_set_index(agent, spans, (uint32_t)i, sp);
   }
   json_set(agent, profile, "jsuiSpans", spans);
@@ -1895,6 +1900,9 @@ void qjs_cdp_free(QJSCDPAgent *agent) {
   free(agent->samples);
   free(agent->sample_times);
   free(agent->spans);
+  free(agent->scopes);
+  for (int i = 0; i < agent->nscope_names; i++) free(agent->scope_names[i]);
+  free(agent->scope_names);
   free(agent->frames);
 
   free(agent->objs);
@@ -2226,4 +2234,26 @@ void qjs_cdp_profiler_add_span(
   agent->spans[agent->nspans].start = start_us;
   agent->spans[agent->nspans].end = end_us;
   agent->nspans++;
+}
+
+void qjs_cdp_profiler_add_scope(
+    QJSCDPAgent *agent, const char *name, int64_t start_us, int64_t end_us) {
+  if (!agent->profiling || end_us <= start_us || end_us <= agent->profile_start)
+    return;
+  int k = 0;
+  while (k < agent->nscope_names && strcmp(agent->scope_names[k], name) != 0) k++;
+  if (k == agent->nscope_names) {
+    agent->scope_names = realloc(
+        agent->scope_names, sizeof(char *) * (size_t)(agent->nscope_names + 1));
+    agent->scope_names[agent->nscope_names++] = strdup(name);
+  }
+  if (agent->nscopes == agent->scopes_cap) {
+    agent->scopes_cap = agent->scopes_cap ? agent->scopes_cap * 2 : 1024;
+    agent->scopes =
+        realloc(agent->scopes, sizeof(ProfSpan) * (size_t)agent->scopes_cap);
+  }
+  agent->scopes[agent->nscopes].node = k;
+  agent->scopes[agent->nscopes].start = start_us;
+  agent->scopes[agent->nscopes].end = end_us;
+  agent->nscopes++;
 }

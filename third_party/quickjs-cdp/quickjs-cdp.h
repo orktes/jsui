@@ -146,6 +146,14 @@ void qjs_cdp_profiler_set_clock(QJSCDPAgent *agent, QJSCDPClockFunc *now_us);
 void qjs_cdp_profiler_add_span(
     QJSCDPAgent *agent, const char *name, int64_t start_us, int64_t end_us);
 
+/* jsui: a whole piece of the embedder's work, nested ones included (the
+   spans above are its exclusive time). Not part of the profile's samples:
+   Profiler.stop lists them in profile.jsuiSpans as [name, start, end], for
+   a trace with a track per thread. JS thread only; ignored when not
+   profiling. */
+void qjs_cdp_profiler_add_scope(
+    QJSCDPAgent *agent, const char *name, int64_t start_us, int64_t end_us);
+
 #ifdef __cplusplus
 }
 #endif
