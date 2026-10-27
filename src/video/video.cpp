@@ -16,8 +16,16 @@ void Video::send(const JsuiVideoCommand& c) {
 void Video::open(uint64_t id, const std::vector<std::string>& sources, const std::vector<std::string>& types,
                  const std::string& texture, bool paused, bool muted, float volume, bool loop, float rate,
                  double progressMs) {
+  start(id, sources, types, texture, paused, muted, volume, loop, rate, progressMs, nullptr);
+}
+
+void Video::start(uint64_t id, const std::vector<std::string>& sources, const std::vector<std::string>& types,
+                  const std::string& texture, bool paused, bool muted, float volume, bool loop, float rate,
+                  double progressMs, std::function<void(const JsuiVideoStatus&)> report) {
   if (!id || open_.count(id) || sources.empty()) return;
   Open& v = open_[id];
+  // Registered before the handler hears of it: it may answer from inside.
+  v.report = std::move(report);
   v.texture = texture;
   v.progressMs = progressMs > 0 ? progressMs : 0;
   v.last.id = id;
@@ -48,6 +56,12 @@ void Video::open(uint64_t id, const std::vector<std::string>& sources, const std
   c.loop = loop;
   c.rate = rate;
   send(c);
+}
+
+void Video::openFor(std::function<void(const JsuiVideoStatus&)> report, uint64_t id,
+                    const std::vector<std::string>& sources, const std::vector<std::string>& types,
+                    const std::string& texture, bool paused, bool muted, float volume, bool loop, float rate) {
+  start(id, sources, types, texture, paused, muted, volume, loop, rate, 0, std::move(report));
 }
 
 void Video::set(uint64_t id, bool paused, bool muted, float volume, bool loop, float rate) {
@@ -107,6 +121,11 @@ void Video::status(uint64_t id, const JsuiVideoStatus& s) {
   auto it = open_.find(id);
   if (it == open_.end()) return;
   Open& v = it->second;
+  if (v.report) {
+    // A child runtime's video: the child keeps its own progress buffers.
+    v.report(s);
+    return;
+  }
   Event e{id, s.state, s.duration_s, s.position_s, s.buffered_s, s.width, s.height, s.error ? s.error : ""};
   // The position for Animated.hostBuffer progress bars, every report.
   double d = e.duration > 0 ? e.duration : 0;
