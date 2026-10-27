@@ -3,6 +3,7 @@
 
 #if JSUI_DEBUGGER
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <utility>
@@ -43,6 +44,8 @@ Inspector::~Inspector() {
   }
   if (receiver_.joinable()) receiver_.join();
   if (sender_.joinable()) sender_.join();
+  sampling_ = false;
+  if (sampler_.joinable()) sampler_.join();
   if (agent_) qjs_cdp_free(agent_);
   // The frontends see the target go away now rather than after a timeout.
   net::HttpRequest req;
@@ -107,6 +110,7 @@ void Inspector::detach(JSContext* ctx) {
 void Inspector::poll() {
   if (!agent_) return;
   qjs_cdp_poll(agent_);
+  syncSampler();
   // Every frontend left: start over with no breakpoints and the debugger
   // off, as a fresh attach expects (the traps parsed into this context's
   // code stay, a new agent drives them).
@@ -117,6 +121,35 @@ void Inspector::poll() {
     agent_ = qjs_cdp_new(ctx_, contextId_, &Inspector::sendFromAgent, this);
     state_.clear();
     for (auto& [url, source] : scripts_) qjs_cdp_script_loaded(agent_, url.c_str(), source.c_str());
+  }
+  syncSampler();
+}
+
+void Inspector::jsIdle() {
+  if (agent_ && sampling_) qjs_cdp_profiler_idle(agent_);
+}
+
+void Inspector::syncSampler() {
+  bool want = agent_ && qjs_cdp_profiling(agent_);
+  if (want == sampling_) return;
+  if (sampler_.joinable()) {
+    sampling_ = false;
+    sampler_.join();
+  }
+  sampling_ = want;
+  if (want) sampler_ = std::thread([this] { sampleLoop(); });
+}
+
+void Inspector::sampleLoop() {
+  while (sampling_ && !stopping_) {
+    int us;
+    {
+      std::lock_guard<std::mutex> l(agentMutex_);
+      if (!agent_) break;
+      qjs_cdp_profiler_tick(agent_);
+      us = qjs_cdp_sampling_interval(agent_);
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(us));
   }
 }
 
@@ -184,7 +217,7 @@ void Inspector::sendContextCreated(const std::string& session) {
 }
 
 // What the frontend sent. Runtime.enable and anything the agent does not
-// implement (Profiler, Log, Network, ...) are answered here, on this thread:
+// implement (Log, Network, ...) are answered here, on this thread:
 // a frontend waits for every reply, and some arrive while JS is paused.
 void Inspector::handleEvent(const std::string& type, const std::string& session, const std::string& message) {
   if (type == "open") {
@@ -232,6 +265,14 @@ void Inspector::handleEvent(const std::string& type, const std::string& session,
     return;
   }
   if (!qjs_cdp_handles(method.c_str())) {
+    // An empty result would tell DevTools these did something: it then reads
+    // fields that aren't there or waits for data that never comes.
+    if (method.rfind("Profiler.", 0) == 0 || method.rfind("HeapProfiler.", 0) == 0 ||
+        method.rfind("Network.", 0) == 0) {
+      send(session, "{\"id\":" + id.toJson() + ",\"error\":{\"code\":-32601,\"message\":\"'" + method +
+                        "' wasn't found\"}}");
+      return;
+    }
     send(session, emptyResult(id));
     return;
   }
@@ -269,7 +310,9 @@ void Inspector::receiveLoop() {
       title = title_;
     }
     std::string body =
-        Value(Value::Object{{"runtime", Value(id_)}, {"name", Value(name_)}, {"title", Value(title)}}).toJson();
+        Value(Value::Object{
+                  {"runtime", Value(id_)}, {"name", Value(name_)}, {"title", Value(title)}, {"profiler", Value(true)}})
+            .toJson();
     req.body.assign(body.begin(), body.end());
     net::HttpResponse res = net::httpRequest(req, &stopping_);
     if (stopping_) break;

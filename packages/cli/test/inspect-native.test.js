@@ -196,3 +196,58 @@ test('debugger: breakpoints in JSX, scopes, stepping, console, hot updates (nati
     await s.close();
   }
 });
+
+test('profiler: Profiler.start / stop records a CPU profile of the JSX (native runtime)', { skip: !process.env.JSUI_RENDER && !existsSync(binary) && `no ${binary}`, timeout: 60000 }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'jsui-profile-'));
+  const appFile = path.join(dir, 'App.jsx');
+  await writeFile(appFile, APP.replace("const label = 'tick ' + n;", "const label = 'tick ' + spin(n);") +
+    'function spin(n) {\n  let s = 0;\n  for (let i = 0; i < 200000; i++) s += Math.sqrt(i + n);\n  return Math.round(s);\n}\n');
+  await writeFile(path.join(dir, 'index.jsx'), "import { AppRegistry } from 'react-native';\nimport App from './App';\nAppRegistry.registerComponent('main', () => App);\n");
+  const s = await dev({ entry: path.join(dir, 'index.jsx'), port: 0, log: () => {} });
+  const origin = `http://127.0.0.1:${s.port}`;
+  const child = spawn(binary, ['--dev', `${origin}/bundle.js`, '--wait-ms', '50000', '-o', path.join(dir, 'out.png')], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '';
+  child.stdout.on('data', (d) => (output += d));
+  child.stderr.on('data', (d) => (output += d));
+  try {
+    let target = null;
+    for (let i = 0; i < 300 && !target; i++) {
+      target = (await (await fetch(`${origin}/json/list`)).json())[0];
+      if (!target) await sleep(50);
+    }
+    assert.ok(target, 'the runtime is listed in /json/list\n' + output);
+    const c = await connect(target.webSocketDebuggerUrl);
+    await c.send('Runtime.enable');
+    await c.send('Debugger.enable');
+    const parsed = await c.event((m) => m.method === 'Debugger.scriptParsed' && m.params.url.endsWith('/bundle.js'));
+    await c.event((m) => m.method === 'Runtime.consoleAPICalled');  // the app renders
+
+    assert.ok((await c.send('Profiler.enable')).result);
+    assert.equal((await c.send('Profiler.stop')).error?.message, 'Profiling is not started');
+    await c.send('Profiler.setSamplingInterval', { interval: 500 });
+    assert.ok((await c.send('Profiler.start')).result);
+    await sleep(1500);
+    const { profile } = (await c.send('Profiler.stop')).result;
+
+    assert.equal(profile.samples.length, profile.timeDeltas.length);
+    assert.ok(profile.samples.length > 50, `${profile.samples.length} samples`);
+    assert.ok(profile.endTime > profile.startTime);
+    const byId = new Map(profile.nodes.map((n) => [n.id, n]));
+    assert.equal(profile.nodes[0].callFrame.functionName, '(root)');
+    for (const id of profile.samples) assert.ok(byId.has(id));
+    // spin() under App, located where it is defined in the bundle.
+    const spin = profile.nodes.find((n) => n.callFrame.functionName === 'spin');
+    assert.ok(spin && spin.hitCount > 0, 'spin was sampled: ' + profile.nodes.map((n) => n.callFrame.functionName).join(','));
+    assert.equal(spin.callFrame.url, parsed.params.url);
+    assert.equal(spin.callFrame.scriptId, parsed.params.scriptId);
+    const parent = profile.nodes.find((n) => n.children.includes(spin.id));
+    assert.equal(parent.callFrame.functionName, 'App');
+    const bundle = await (await fetch(parsed.params.url)).text();
+    assert.match(bundle.split('\n')[spin.callFrame.lineNumber], /function spin\(/);
+    assert.ok(profile.nodes.some((n) => n.callFrame.functionName === '(idle)' && n.hitCount > 0));
+    c.ws.close();
+  } finally {
+    child.kill();
+    await s.close();
+  }
+});

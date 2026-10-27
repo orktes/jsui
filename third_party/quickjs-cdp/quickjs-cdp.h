@@ -123,6 +123,17 @@ void qjs_cdp_exception_thrown(QJSCDPAgent *agent, JSValue exception,
 /* Asks the running program to stop at the next statement. Any thread. */
 void qjs_cdp_pause(QJSCDPAgent *agent);
 
+/* jsui: the Profiler domain. Profiler.start records a sampled CPU profile,
+   Profiler.stop answers it. Samples are taken by the statement traps: the
+   embedder calls qjs_cdp_profiler_tick() every qjs_cdp_sampling_interval()
+   microseconds from a thread of its own while qjs_cdp_profiling() is true,
+   which arms the traps for one statement, and qjs_cdp_profiler_idle() when JS
+   returns to it, so that the time until JS runs again counts as "(idle)". */
+bool qjs_cdp_profiling(QJSCDPAgent *agent);
+int qjs_cdp_sampling_interval(QJSCDPAgent *agent);
+void qjs_cdp_profiler_tick(QJSCDPAgent *agent); /* any thread */
+void qjs_cdp_profiler_idle(QJSCDPAgent *agent); /* JS thread */
+
 #ifdef __cplusplus
 }
 #endif

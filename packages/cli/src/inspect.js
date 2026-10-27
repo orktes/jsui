@@ -367,6 +367,7 @@ export function createInspector(o) {
       const t = now();
       if (typeof body.name === 'string') rt.name = body.name.slice(0, 200);
       if (typeof body.title === 'string') rt.title = body.title.slice(0, 2000);
+      if (typeof body.profiler === 'boolean') rt.profiler = body.profiler;
       const gap = !rt.poll && t - rt.lastPollEnd > REGREET_AFTER_MS;
       if (rt.poll) answerPoll(rt, []);  // only one poll per runtime
       if (!rt.live) {
@@ -504,11 +505,12 @@ export function createInspector(o) {
     return false;
   }
 
-  // The runtime acknowledges every method it doesn't know with an empty
-  // result. For these domains that misleads DevTools: it reads fields that
-  // aren't there (Network.emulateNetworkConditionsByRule's ruleIds threw while
-  // the target was set up), or waits for a profile that never comes
-  // (Profiler.stop hung the Performance panel). Refuse them as V8 does.
+  // Runtimes without a profiler acknowledge every method they don't know with an
+  // empty result. For these domains that misleads DevTools: it reads fields
+  // that aren't there (Network.emulateNetworkConditionsByRule's ruleIds threw
+  // while the target was set up), or waits for a profile that never comes
+  // (Profiler.stop hung the Performance panel). Refuse them as V8 does, and
+  // Profiler too unless the runtime says it records profiles.
   const UNSUPPORTED = /^(?:Network|Profiler|HeapProfiler)\./;
   function refusesUnsupported(s, text) {
     if (!/"method"\s*:\s*"(?:Network|Profiler|HeapProfiler)\./.test(text)) return false;
@@ -519,6 +521,7 @@ export function createInspector(o) {
       return false;
     }
     if (typeof msg.method !== 'string' || !UNSUPPORTED.test(msg.method)) return false;
+    if (msg.method.startsWith('Profiler.') && runtimes.get(s.runtime)?.profiler) return false;
     s.ws.send(JSON.stringify({ id: msg.id, error: { code: -32601, message: `'${msg.method}' wasn't found` } }));
     return true;
   }

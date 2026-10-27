@@ -235,8 +235,10 @@ measures one.
   Animated, style, layout, input, paint, GPU submit) and work counters
   (layout passes, text shaping, pipelines compiled, ...). Compare a frame
   with the UI hidden against one with it shown.
-- **Where JS time goes**: run with `JSUI_JS_PROFILE=out.txt` for a sampling
-  profile by JS function.
+- **Where JS time goes**: record it in Chrome DevTools' Performance panel
+  with the app in `jsui dev` (see [DEBUGGING.md](DEBUGGING.md#profiling)),
+  or run with `JSUI_JS_PROFILE=out.txt` for a sampling profile by JS
+  function.
 - **`tools/jsui-bench`**: runs a bundle on a simulated 60 Hz clock and
   prints mean / p50 / p95 per phase and allocations per frame, with mouse,
   wheel and host-state simulation. Measure JS with the JS thread off, since

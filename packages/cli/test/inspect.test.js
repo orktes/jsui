@@ -207,6 +207,12 @@ test('inspect: the relay serves source maps to DevTools and refuses domains the 
     fe.ws.send('{"id":200,"method":"Debugger.enable"}');
     const got = await poll(s.origin, 'rt-1');
     assert.deepEqual(got.map((e) => e.message), ['{"id":200,"method":"Debugger.enable"}']);
+
+    // A runtime that records profiles gets the Profiler domain.
+    const held = poll(s.origin, 'rt-1', { profiler: true });
+    await sleep(100);
+    fe.ws.send('{"id":201,"method":"Profiler.start"}');
+    assert.deepEqual((await held).map((e) => e.message), ['{"id":201,"method":"Profiler.start"}']);
   } finally {
     await s.close();
   }

@@ -33,6 +33,28 @@ and `console.*` with live objects all work.
 `jsui dev` prints both snippets when it starts. It logs when a runtime or a
 debugger connects. `jsui dev --no-inspect` turns debugging off.
 
+## Profiling
+
+DevTools' **Performance** panel records a CPU profile of the app's JS: press
+record, use the app, press stop. The flame chart shows your functions with
+their names and files, through the source map, and `(idle)` where JS wasn't
+running. *Save profile* writes a `.cpuprofile`.
+
+* **What it measures.** Time on the JS thread while JS runs, by JS function.
+  Time in a native call (layout, a host call, `JSON.parse`) counts toward
+  the JS function that made it. Layout, paint and the GPU between JS calls
+  are not in it: `jsui_set_profiling` and `getPerf()` time those (see
+  [PERFORMANCE.md](PERFORMANCE.md)).
+* **How.** A thread of the runtime's arms the statement traps once per
+  sampling interval (`Profiler.setSamplingInterval`, 1 ms unless the
+  frontend asks otherwise, at least 100 µs), and the next
+  statement records the JS stack. Between samples nothing runs: a JS
+  benchmark ran 2% slower while recording at 100 µs (M1 Ultra). A function shorter than the interval can
+  fall between samples: profile long enough, or repeat the interaction.
+* **Where.** Every native runtime in `jsui dev`. The browser's own engine
+  has its own profiler; the web build's QuickJS and the headless runtime
+  can't be debugged at all (see below).
+
 ## How it works
 
 ```
@@ -109,11 +131,9 @@ WebAssembly module in Node) is not a debug target for the same reason.
   a file.
 * **The app freezes while paused.** It is paused like a browser tab. In a game
   engine, the engine's main loop waits with it.
-* **Not supported.** Profiling, heap snapshots, live edit and restart frame.
-  The dev server answers the `Profiler`, `HeapProfiler` and `Network`
-  domains with "not found", so DevTools doesn't wait for a profile that
-  never comes. For where JS time goes, run `tools/jsui-bench` with
-  `JSUI_JS_PROFILE=out.txt` (see [PERFORMANCE.md](PERFORMANCE.md)).
+* **Not supported.** Heap snapshots (the Memory panel), the Network panel,
+  live edit and restart frame. The runtime answers those domains with "not
+  found".
 * **Chrome.** It loads the source maps through `chrome://inspect`'s DevTools.
   A DevTools frontend hosted on an http page can't fetch them, because of its
   content security policy.

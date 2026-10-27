@@ -1,0 +1,51 @@
+Subject: Report where a stack frame's function is defined
+
+What this does
+  JS_GetFrameInfoAtLevel (rnq's 0004-debugger-frame-info) gives the line
+  and column a frame is executing. A CPU profile identifies functions by
+  where they are defined, so JSDebugFrameInfo also carries the function's
+  own line and column (func_line / func_col, 1-based, -1 for native frames).
+  quickjs-cdp's Profiler domain keys its call tree on them.
+
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -3661,6 +3661,8 @@
+     info->func_name = JS_ATOM_NULL;
+     info->line = -1;
+     info->col = -1;
++    info->func_line = -1;
++    info->func_col = -1;
+ 
+     sf = js_get_stack_frame_at_level(ctx, level);
+     if (sf == NULL)
+@@ -3679,6 +3681,8 @@
+     b = p->u.func.function_bytecode;
+     info->filename = b->filename;
+     info->func_name = b->func_name;
++    info->func_line = b->line_num;
++    info->func_col = b->col_num;
+     if (sf->cur_pc) {
+         /* cur_pc points just past the executing instruction */
+         uint32_t pc = (uint32_t)(sf->cur_pc - b->byte_code_buf - 1);
+@@ -3745,6 +3749,8 @@
+     info->func_name = JS_ATOM_NULL;
+     info->line = -1;
+     info->col = -1;
++    info->func_line = -1;
++    info->func_col = -1;
+     return -1;
+ }
+ 
+diff --git a/quickjs.h b/quickjs.h
+--- a/quickjs.h
++++ b/quickjs.h
+@@ -692,6 +692,8 @@
+     int line;          /* 1-based, or -1 */
+     int col;           /* 1-based, or -1 */
+     bool is_native;    /* true for a C function frame */
++    int func_line;     /* 1-based line the function is defined on, or -1 */
++    int func_col;      /* 1-based column of that definition, or -1 */
+ } JSDebugFrameInfo;
+ 
+ /* Fill *info for the frame at `level` (0 = the innermost frame, 1 = its

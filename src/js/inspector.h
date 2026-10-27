@@ -67,6 +67,8 @@ class Inspector {
   void console(const char* type, const JSValue* args, int count);
   // An uncaught exception (Runtime.exceptionThrown).
   void exception(JSValueConst exc, const std::string& text);
+  // JS returned to the runtime (a CPU profile counts what follows as idle).
+  void jsIdle();
 
  private:
   struct Out {
@@ -83,6 +85,8 @@ class Inspector {
   void* sessionToken(const std::string& session);
   std::string sessionOf(void* token);
   bool sleepFor(int ms);  // false when stopping
+  void sampleLoop();
+  void syncSampler();
 
   const std::string origin_, id_, name_;
   std::string title_;
@@ -115,6 +119,12 @@ class Inspector {
   std::condition_variable stopCv_;
   std::atomic<bool> stopping_{false};
   std::thread receiver_, sender_;
+
+  // While the frontend records a CPU profile (Profiler.start): arms the
+  // agent's statement traps every sampling interval, so the next statement
+  // takes a sample. Started and stopped on the runtime's thread.
+  std::atomic<bool> sampling_{false};
+  std::thread sampler_;
 };
 
 }  // namespace jsui

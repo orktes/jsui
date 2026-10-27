@@ -4,7 +4,7 @@ The Chrome DevTools Protocol agent for QuickJS from
 [react-native-quickjs](https://github.com/react-native-quickjs/quickjs)
 (`modules/cdp`, commit c8102d4, MIT, see LICENSE), used by JSUI's JS
 debugger (`src/js/inspector.cpp`, `docs/DEBUGGING.md`). It needs the engine
-patches 0003-0005 in `../quickjs-rnq`.
+patches 0003-0005 in `../quickjs-rnq` and 0005 in `../quickjs-jsui`.
 
 JSUI's changes are marked `jsui:` in the source:
 
@@ -40,3 +40,10 @@ JSUI's changes are marked `jsui:` in the source:
 * **`qjs_cdp_exception_thrown`** reports uncaught errors as
   `Runtime.exceptionThrown`.
 * **`qjs_cdp_pause`** only sets a flag, so it is safe from any thread.
+* **`Profiler`.** `Profiler.start` / `stop` record a sampled CPU profile
+  (`Profiler.Profile`, as V8's). The embedder's thread calls
+  `qjs_cdp_profiler_tick` every sampling interval, which arms the statement
+  traps for one statement, and that statement records the stack; functions
+  are keyed by where they are defined (`func_line` / `func_col` from
+  `../quickjs-jsui/0005-frame-info-function-location.patch`).
+  `qjs_cdp_profiler_idle` marks JS returning to the embedder.

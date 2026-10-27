@@ -280,7 +280,12 @@ void JsEngine::Impl::enter() {
 }
 
 void JsEngine::Impl::leave() {
-  if (--depth == 0 && !draining) drain();
+  if (--depth == 0 && !draining) {
+    drain();
+#if JSUI_DEBUGGER
+    if (inspector) inspector->jsIdle();  // a CPU profile's (idle) from here
+#endif
+  }
 }
 
 void JsEngine::Impl::applyCommands() {
