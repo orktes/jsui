@@ -14,6 +14,22 @@
 Programs in other languages use the C API through [bindings](../bindings/README.md)
 (Rust and Go so far, each with a GPU desktop example app).
 
+## Screenshots
+
+The shared example HUD ([shared/ui/app.jsx](shared/ui/app.jsx)) in every
+engine host, on the GPU path, captured on an M1 Ultra (macOS) on 2026-10-27.
+
+In Godot, the 3D world is Godot's and everything in the right-hand frame is
+JSUI: the panel, the unit nameplates, the hint line and the button bar.
+
+![Godot frame next to the JSUI layer on its own](../docs/images/engines/godot-side-by-side.png)
+
+| | |
+| --- | --- |
+| **raylib** (Skia Ganesh GL) ![raylib](../docs/images/engines/raylib.png) | **SDL3** (Graphite Metal) ![SDL3](../docs/images/engines/sdl3.png) |
+| **sokol** (Graphite Metal) ![sokol](../docs/images/engines/sokol.png) | **Unity** (Graphite Metal) ![Unity](../docs/images/engines/unity.png) |
+| **Unreal** (Graphite Metal) ![Unreal](../docs/images/engines/unreal.png) | **Godot** (Graphite Metal, godot-aw3) ![Godot](../docs/images/engines/godot.png) |
+
 ## The engine examples
 
 `raylib`, `sdl3` and `sokol` are small, complete hosts of one shared HUD,
