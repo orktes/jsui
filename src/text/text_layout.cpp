@@ -369,6 +369,8 @@ struct TextCache : Node::Cache {
   // revealed paint, the UTF-16 start of each reveal unit plus the end
   // (graphemes [0], words [1]; see paintRevealed).
   std::string content;
+  std::u16string content16;  // content as UTF-16, filled on first use (textContent)
+  bool content16Ready = false;
   std::vector<uint32_t> units[2];
   bool unitsReady[2] = {false, false};
 };
@@ -1282,6 +1284,49 @@ int inputLineEdge(Node* n, int index, bool end) {
       i = edit::prevBoundary(g.s->value, i);
   }
   return i;
+}
+
+const std::u16string& textContent(Node* n) {
+  static const std::u16string kEmpty;
+  TextCache* c = n && n->type() == NodeType::Text ? ensureCache(n) : nullptr;
+  if (!c) return kEmpty;
+  if (!c->content16Ready) {
+    c->content16 = edit::toUtf16(c->content);
+    c->content16Ready = true;
+  }
+  return c->content16;
+}
+
+int textIndexAt(Node* n, float x, float y) {
+  if (!n || n->type() != NodeType::Text || !n->yoga()) return 0;
+  float x0, y0, w, h;
+  contentOrigin(n, &x0, &y0, &w, &h);
+  tl::Paragraph* p = layoutParagraph(n, w);
+  if (!p) return 0;
+  auto* c = static_cast<TextCache*>(n->textCache.get());
+  auto pos = p->getGlyphPositionAtCoordinate(x - x0, y - y0 - c->paintDy);
+  const std::u16string& t = textContent(n);
+  int i = std::clamp(int(pos.position), 0, int(t.size()));
+  // Never inside a cluster (surrogate pair, combining sequence).
+  int b = edit::prevBoundary(t, i);
+  if (i > 0 && edit::nextBoundary(t, b) != i) i = b;
+  return i;
+}
+
+void paintTextSelection(Node* n, SkCanvas* canvas, float x, float y, float width) {
+  if (n->selAnchor == n->selFocus || !n->props()["selectable"].asBool()) return;
+  tl::Paragraph* p = layoutParagraph(n, width);
+  if (!p) return;
+  auto* c = static_cast<TextCache*>(n->textCache.get());
+  int len = int(textContent(n).size());
+  int a = std::clamp(std::min(n->selAnchor, n->selFocus), 0, len);
+  int b = std::clamp(std::max(n->selAnchor, n->selFocus), 0, len);
+  if (a >= b) return;
+  SkPaint sp;
+  sp.setColor(selectionColorOf(n));
+  for (const tl::TextBox& box : p->getRectsForRange(unsigned(a), unsigned(b), tl::RectHeightStyle::kMax,
+                                                    tl::RectWidthStyle::kTight))
+    canvas->drawRect(box.rect.makeOffset(x, y + c->paintDy), sp);
 }
 
 bool inputRtl(Node* n) {
