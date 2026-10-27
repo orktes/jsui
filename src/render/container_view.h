@@ -65,6 +65,8 @@ class Containers {
   // Sizes and ticks every child runtime (Runtime::tick, after layout) and
   // repaints the nodes of the children that have something new to paint.
   void tick(double nowMs);
+  // Destroys every child runtime (the parent is going away).
+  void clear();
   // jsui_tick_native for the children.
   void tickNative(double nowMs);
   // A child wants frames (jsui_wants_frame), or has events to deliver.

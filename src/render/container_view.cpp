@@ -180,6 +180,7 @@ float busGain(NodeState* st, const std::string& bus) {
 }
 
 void audioInherit(NodeState* st, const JsuiAudioCommand* c) {
+  if (!st->cache->runtime().audio) return;  // the parent is going away
   Audio& audio = *st->cache->runtime().audio;
   std::string bus = c->bus ? c->bus : "";
   switch (c->op) {
@@ -463,7 +464,8 @@ void onVideo(void* user, const JsuiVideoCommand* c) {
 // What the child still plays through the parent stops with it.
 void releaseMedia(NodeState* st) {
   Runtime& parent = st->cache->runtime();
-  for (auto& [id, v] : st->voices) parent.audio->voice(JSUI_AUDIO_STOP, v.parent, 0, 1, 0, 0);
+  if (parent.audio)
+    for (auto& [id, v] : st->voices) parent.audio->voice(JSUI_AUDIO_STOP, v.parent, 0, 1, 0, 0);
   st->voices.clear();
   st->busGains.clear();
   for (auto& [id, v] : st->videos) parent.video->close(v.parent);
@@ -909,6 +911,12 @@ void Containers::tick(double nowMs) {
     jsui_tick(st->child, nowMs);
     if (jsui_needs_redraw(st->child)) n->markPaintDirty();
   }
+}
+
+void Containers::clear() {
+  for (Node* n : views_)
+    if (auto* st = static_cast<container::NodeState*>(n->imageCache.get())) container::destroyChild(st);
+  events.clear();
 }
 
 void Containers::tickNative(double nowMs) {

@@ -612,10 +612,12 @@ N.postMessage('music', {music});
     CHECK_EQ(p.audio[0].sound, std::string("game://ui/click.wav"));
     CHECK_NEAR(p.audio[0].volume, 0.4, 1e-6);
   }
-  // The music voice failed in the child.
+  // The music voice failed in the child (event() returns one shared slot:
+  // copied).
   const Value* m = p.event("message", "music");
+  double music = m ? (*m)["payload"]["music"].asNumber() : -1;
   const Value* a = p.event("message", "audio");
   CHECK(m && a && (*a)["payload"].asArray().size() == 1 &&
-        (*a)["payload"].asArray()[0].asArray()[1].asNumber() == (*m)["payload"]["music"].asNumber() &&
+        (*a)["payload"].asArray()[0].asArray()[1].asNumber() == music &&
         (*a)["payload"].asArray()[0].asArray()[2].asNumber() == double(JSUI_AUDIO_FAILED));
 }
