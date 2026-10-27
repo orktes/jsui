@@ -197,6 +197,10 @@
  *   jsFrameBudget?: number,      // ms of JS per frame before React's scheduler yields (default 5):
  *                                // transitions (startTransition) render in slices across frames.
  *                                // <= 0: no limit (jsui_set_js_frame_budget)
+ *   components?: string|URL|object, // native components (registerComponent) registered before the
+ *                                // bundle runs: { Name: impl } or the URL of a module exporting them
+ *                                // (web/jsui-components.js); worker mode needs the URL (its draw
+ *                                // functions run in the worker)
  *   js?: 'quickjs'|'host',       // the JS engine the bundle runs on: 'host' (default) this page's /
  *                                // worker's own engine (V8, JavaScriptCore, SpiderMonkey), with the
  *                                // native core still in WASM (docs/ARCHITECTURE.md "Host JS engine");
@@ -211,6 +215,7 @@ import { SharedWebGPU, WebGPURenderer, externalWebGPU, probeF16Outputs, requestW
 import { HostTextureSet, JsuiVideo, corsWarning, defaultOpaque, isVideoFrame, sourceSize, taintKey,
   videoFramesContextLost, watchVideoFrames } from './jsui-textures.js';
 import { JsuiAudio } from './jsui-audio.js';
+import { ComponentSet } from './jsui-components.js';
 
 export { requestWebGPU, webgpuSupported } from './jsui-webgpu.js';
 export { AudioOp, AudioStatus } from './jsui-audio.js';
@@ -345,6 +350,15 @@ export async function createJsui(opts) {
     // Relative to the page (also for the worker); `{format}` survives.
     opts = { ...opts, pipelines: decodeURI(new URL(opts.pipelines, location.href).href) };
   }
+  if (opts.components instanceof URL) opts = { ...opts, components: opts.components.href };
+  if (typeof opts.components === 'string' && typeof location !== 'undefined') {
+    opts = { ...opts, components: new URL(opts.components, location.href).href };
+  }
+  if (opts.worker && opts.components && typeof opts.components === 'object') {
+    // Functions can't reach a worker: its runtime imports a module URL instead.
+    console.warn('[jsui] worker mode needs `components` as a module URL (draw functions run in the worker): running on the page\'s main thread');
+    opts = { ...opts, worker: false };
+  }
   if (opts.worker && opts.device) {
     console.warn('[jsui] worker mode cannot use the page\'s GPUDevice (createJsui({ device })): running on the ' +
       'page\'s main thread');
@@ -365,6 +379,7 @@ export async function createJsui(opts) {
   // A canvas a worker-mode runtime had (its control went to an OffscreenCanvas
   // for good): a clone of it in its place.
   if (canvas && transferred.has(canvas)) canvas = replaceCanvas(canvas);
+  if (typeof opts.components === 'string') opts = { ...opts, components: await import(opts.components) };
   const webgpu = await webgpuFor(opts);
   return new JsuiHost(await loadModuleFor(opts, webgpu), canvas, { ...opts, canvas, _webgpu: webgpu });
 }
@@ -2191,6 +2206,7 @@ class JsuiHost extends CanvasView {
     this._stageSize = 0;
     this._uiCalls = new Map();   // callUi id -> {resolve, reject}
     this._textures = null;       // HostTextureSet (setTexture), made on first use
+    this._components = null;     // ComponentSet (registerComponent), made on first use
     this.rootTag = 1;
     /** UI audio (web/jsui-audio.js): unlocked, unlock(), setVolume(), muted, context. */
     this.audio = new JsuiAudio(this, opts.audio);
@@ -2216,6 +2232,7 @@ class JsuiHost extends CanvasView {
         this._emit('state', key, value);
       },
       onCall: (id, name, json) => this._onCall(id, name, json),
+      onComponent: (cls, kind, view, canvas, info, a, b) => this._components?.call(cls, kind, view, canvas, info, a, b),
       // Clipboard (jsui_set_clipboard_callbacks): pastes read what the page
       // pasted last (or the UI copied), copies go to the page's clipboard.
       clipboardText: () => this._clipText ?? '',
@@ -2281,6 +2298,8 @@ class JsuiHost extends CanvasView {
     this._pipelinesQueued = new Promise((r) => { this._queuedDone = r; });
     this._pipelinesReady = this._loadPipelines(opts).finally(() => this._queuedDone());
 
+    // Before the bundle runs, so its first render sees them (hasNativeComponent).
+    if (opts.components && typeof opts.components === 'object') this._registerComponents(opts.components);
     if (opts.bundleSource != null) this.loadSource(opts.bundleSource, this._bundleUrl ?? 'bundle.js');
     else if (this._bundleUrl) this.loadUrl(this._bundleUrl);
     const runtimePolls = this._bundleUrl?.startsWith('http://');
@@ -2397,6 +2416,60 @@ class JsuiHost extends CanvasView {
   bindVideo(name, video, options) {
     if (this._destroyed) throw new Error('bindVideo: runtime destroyed');
     return this._textureSet().bindVideo(name, video, options ?? {});
+  }
+
+  // ------------------------------------------- native components (jsui.h)
+
+  /** Native component `name`, drawn by `impl` (web/jsui-components.js: draw(ctx,
+   * view), optional create / props / command / destroy, clocked): the bundle
+   * shows it with requireNativeComponent(name). Registering again replaces
+   * it; mounted views bind to it at once. Returns true when registered. */
+  registerComponent(name, impl) {
+    if (this._destroyed) return false;
+    this._components ??= new ComponentSet(this);
+    return this._components.register(String(name), impl);
+  }
+
+  /** Registers every export of `components`: an object { Name: impl }, or
+   * the URL of a module whose exports are (worker mode imports it in the
+   * worker, where its draw functions run). Resolves to the names registered. */
+  async loadComponents(components) {
+    const mod = typeof components === 'string' || components instanceof URL
+      ? await import(new URL(components, typeof location !== 'undefined' ? location.href : undefined).href)
+      : components;
+    return this._registerComponents(mod);
+  }
+
+  _registerComponents(mod) {
+    const names = [];
+    for (const [name, impl] of Object.entries(mod ?? {})) {
+      if (name === 'default' || !impl || typeof impl.draw !== 'function') continue;
+      if (this.registerComponent(name, impl)) names.push(name);
+    }
+    return names;
+  }
+
+  /** Unregisters native component `name` (its views show their View part). */
+  unregisterComponent(name) {
+    if (this._destroyed || !this._components) return false;
+    return this._components.unregister(String(name));
+  }
+
+  /** Repaints native component view `view` (an id, as view.id in draw); 0:
+   * every view of class `name` (undefined: of every class). Returns how
+   * many were marked. */
+  invalidateComponent(view, name) {
+    if (this._destroyed) return 0;
+    return this._withStrings([name == null ? null : String(name)],
+      (n) => this.module._jsui_component_invalidate(this.rt, view | 0, n));
+  }
+
+  /** Calls the view's on<Event> prop (onContactPress for 'contactPress')
+   * with nativeEvent = `data`, in the next frame. True if it listens. */
+  emitComponentEvent(view, event, data) {
+    if (this._destroyed) return false;
+    return this._withStrings([String(event), JSON.stringify(data ?? {})],
+      (e, j) => this.module._jsui_component_emit(this.rt, view | 0, e, j)) === 1;
   }
 
   // A <Video>'s status (JsuiVideo's report) to the runtime.
@@ -2880,6 +2953,8 @@ class JsuiHost extends CanvasView {
     // GPU textures first, while their contexts exist.
     this._textures?.destroy();
     this._textures = null;
+    this._components?.destroy();
+    this._components = null;
     // jsui_destroy frees the surface handles with the runtime.
     for (const s of this._surfaces) s._destroyView(true);
     this._surfaces.clear();

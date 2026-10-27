@@ -6,6 +6,7 @@ export const FEATURE_PAGES = [
   { to: '/features/input', label: 'Input' },
   { to: '/features/motion', label: 'Motion' },
   { to: '/features/vector', label: 'SVG & Skia' },
+  { to: '/features/native', label: 'Native components' },
 ];
 
 export const LINKS = [

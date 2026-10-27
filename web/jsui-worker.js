@@ -119,7 +119,8 @@ function definePage(I) {
       o[k] = v instanceof URL ? v.href : v;
     }
     const base = location.href;
-    for (const k of ['bundleUrl', 'moduleUrl', 'moduleBase']) if (o[k] != null) o[k] = new URL(o[k], base).href;
+    if (o.components != null && typeof o.components !== 'string') delete o.components;  // createJsui checked
+    for (const k of ['bundleUrl', 'moduleUrl', 'moduleBase', 'components']) if (o[k] != null) o[k] = new URL(o[k], base).href;
     if (o.initialProps !== undefined) o.initialProps = JSON.parse(JSON.stringify(o.initialProps ?? {}));
     o.gamepads = false;  // polled here
     o.safeArea = false;  // measured here
@@ -854,6 +855,38 @@ function definePage(I) {
       this._texSources.delete(name);
       this._nextSeq(name);  // drops conversions still under way
       return this._request({ op: 'removeTexture', name }, null, false);
+    }
+
+    // ----------------------------------- native components (jsui-components.js)
+
+    /** Draw functions can't cross to the worker: use loadComponents(url) or
+     * createJsui's `components` (a module URL the worker imports). */
+    registerComponent() {
+      throw new Error('registerComponent: worker mode runs draw functions in the worker; '
+        + 'pass createJsui({ components: moduleUrl }) or call loadComponents(moduleUrl)');
+    }
+
+    /** Promise of the names registered: the worker imports module `url` and
+     * registers its exports (as JsuiHost.loadComponents). */
+    loadComponents(url) {
+      if (typeof url !== 'string' && !(url instanceof URL)) {
+        return Promise.reject(new TypeError('loadComponents: worker mode needs a module URL'));
+      }
+      return this._request({ op: 'components', what: 'load', url: new URL(url, location.href).href }, null, []);
+    }
+
+    unregisterComponent(name) {
+      return this._request({ op: 'components', what: 'unregister', name: String(name) }, null, false);
+    }
+
+    invalidateComponent(view, name) {
+      return this._request({ op: 'components', what: 'invalidate', view: view | 0,
+        name: name == null ? null : String(name) }, null, 0);
+    }
+
+    emitComponentEvent(view, event, data) {
+      return this._request({ op: 'components', what: 'emit', view: view | 0, event: String(event),
+        data: data ?? {} }, null, false);
     }
 
     /** Keeps host texture `name` showing `video`'s current frame: captured
@@ -1607,6 +1640,7 @@ export function serve(I, early) {
       const opts = m.opts;
       const webgpu = await I.webgpuFor(opts);
       const M = await I.loadModuleFor(opts, webgpu);
+      if (typeof opts.components === 'string') opts.components = await import(opts.components);
       host = new RemoteHost(M, m.canvas, { ...opts, _webgpu: webgpu, _size: m.size, _v: 0, gamepads: false,
         autoStart: false, autoFocus: false,
         audio: opts.audio === false ? false : (cmd) => post({ ev: 'audio', cmd }),
@@ -1721,6 +1755,13 @@ export function serve(I, early) {
         reply(op.id, true, ok);
         return;
       }
+      case 'components':
+        if (op.what === 'load') {
+          host.loadComponents(op.url).then((names) => reply(op.id, true, names), (e) => reply(op.id, false, e));
+        } else if (op.what === 'unregister') reply(op.id, true, host.unregisterComponent(op.name));
+        else if (op.what === 'invalidate') reply(op.id, true, host.invalidateComponent(op.view, op.name));
+        else reply(op.id, true, host.emitComponentEvent(op.view, op.event, op.data));
+        return;
       case 'removeTexture': {
         const ok = host.removeTexture(op.name);
         host._bitmaps?.get(op.name)?.close();

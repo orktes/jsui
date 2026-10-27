@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "example_host.h"
+#include "radar.h"
 #include "glfw_keys.h"
 #include "jsui/jsui.h"
 
@@ -158,6 +159,10 @@ class Game : public jsui_example::SelfTestHost {
     cfg.message_user = this;
     cfg.on_message = [](void* u, const char* name, const char* json) { static_cast<Game*>(u)->onMessage(name, json); };
     rt_ = jsui_create(&cfg);
+    // The HUD's radar: a native component drawing units_ (shared/radar.h).
+    radar_.range = 10;
+    radar_.onSelect = [this](int i) { hud_.selected = i; };
+    jsui_example::registerRadar(rt_, &radar_);
     std::printf("JS thread: %s\n", jsui_example::jsThreadName(jsui_js_thread(rt_)));
     jsui_set_clipboard_callbacks(
         rt_,
@@ -433,6 +438,14 @@ class Game : public jsui_example::SelfTestHost {
       b[i * 4 + 3] = float(i % 7);
     }
     jsui_commit_buffer(rt_, "entities");
+    // Top-down for the radar (it repaints every frame on its own).
+    radar_.blips.resize(units_.size());
+    for (size_t i = 0; i < units_.size(); i++) {
+      Vector3 p = unitPos(units_[i]);
+      radar_.blips[i] = {p.x, p.z, int(i % 7)};
+    }
+    radar_.heading = yaw_ + 3.14159265f;  // the camera looks at the center
+    radar_.selected = hud_.selected;
   }
 
   // SelfTestHost: the unit under (x, y), nearest first; the ray from the
@@ -625,6 +638,7 @@ class Game : public jsui_example::SelfTestHost {
   bool uiFresh_ = true;
   std::vector<uint8_t> pixels_, rect_;
   jsui_example::HudState hud_;
+  jsui_example::Radar radar_;
   jsui_example::FpsCounter fps_;
   jsui_example::BenchTimer bench_;
   jsui_example::SelfTest selftest_;

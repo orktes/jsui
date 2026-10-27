@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "example_host.h"
+#include "radar.h"
 #include "gpu.h"
 #include "jsui/jsui.h"
 
@@ -265,6 +266,11 @@ class Game : public jsui_example::SelfTestHost {
     cfg.message_user = this;
     cfg.on_message = [](void* u, const char* name, const char* json) { static_cast<Game*>(u)->onMessage(name, json); };
     rt_ = jsui_create(&cfg);
+    // The HUD's radar: a native component drawing units_ (shared/radar.h).
+    radar_.range = 560;
+    radar_.heading = NAN;  // top-down already
+    radar_.onSelect = [this](int i) { hud_.selected = i; };
+    jsui_example::registerRadar(rt_, &radar_);
     std::printf("JS thread: %s\n", jsui_example::jsThreadName(jsui_js_thread(rt_)));
     jsui_set_clipboard_callbacks(
         rt_,
@@ -584,6 +590,13 @@ class Game : public jsui_example::SelfTestHost {
       b[i * 4 + 3] = float(i % 7);
     }
     jsui_commit_buffer(rt_, "entities");
+    // For the radar (it repaints every frame on its own).
+    radar_.blips.resize(units_.size());
+    for (size_t i = 0; i < units_.size(); i++) {
+      SDL_FPoint w = unitPos(units_[i]);
+      radar_.blips[i] = {w.x, w.y, int(i % 7)};
+    }
+    radar_.selected = hud_.selected;
   }
 
   int padIndexFor(SDL_JoystickID id) {
@@ -743,6 +756,7 @@ class Game : public jsui_example::SelfTestHost {
   float ratio_ = 1;
   std::string clipboard_, cursor_;
   jsui_example::HudState hud_;
+  jsui_example::Radar radar_;
   jsui_example::FpsCounter fps_;
   jsui_example::SelfTest selftest_;
   jsui_example::ClickTracker click_;

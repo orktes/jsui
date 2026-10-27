@@ -60,6 +60,7 @@
 #include "render/image_node.h"
 #include "render/container_view.h"
 #include "render/lottie.h"
+#include "render/native_component.h"
 #include "render/shader_view.h"
 #include "render/vector_view.h"
 #include "render/paint_counter.h"
@@ -1927,7 +1928,7 @@ SkBlendMode blendMode(uint8_t i) {
 bool clipsChildren(const Node* n) {
   return n->style().overflow != Overflow::Visible || n->type() == NodeType::ScrollView ||
          n->type() == NodeType::Image || n->type() == NodeType::Lottie || n->type() == NodeType::Shader ||
-         n->type() == NodeType::Vector || n->type() == NodeType::Container;
+         n->type() == NodeType::Vector || n->type() == NodeType::Component || n->type() == NodeType::Container;
 }
 
 bool paintsChildren(const Node* n) {
@@ -2657,6 +2658,7 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
   if (own && n->type() == NodeType::Lottie) lottie::paint(n, c, b.inner.rect(), b.inner);
   if (own && n->type() == NodeType::Shader) shader::paint(n, c, b.inner.rect(), b.inner);
   if (own && n->type() == NodeType::Vector) vector::paint(n, c, b.content, b.inner);
+  if (own && n->type() == NodeType::Component) component::paint(n, c, b.content, b.inner);
   if (own && n->type() == NodeType::Container) container::paint(n, c, b.content, b.inner);
 
   if (paintsChildren(n) && (!n->children().empty() || !n->ghosts.empty())) {
@@ -3651,7 +3653,10 @@ SkIRect updateRecords(Node* n, const SkMatrix& parent, const SkMatrix& parentSna
   SkIRect full = SkIRect::MakeEmpty();  // `sub` without the clips of ancestors
   uint64_t kids = childListHash(n);
   uint32_t gen =
-      n->type() == NodeType::Image || n->type() == NodeType::Shader || n->type() == NodeType::Vector ? imageGen : 0;
+      n->type() == NodeType::Image || n->type() == NodeType::Shader || n->type() == NodeType::Vector ||
+              n->type() == NodeType::Component
+          ? imageGen
+          : 0;
   bool contentChanged = false;
   // Whether the node's own paint state changed (then the whole subtree's old
   // and new rects are damaged, below); if it only moved, its own rects are

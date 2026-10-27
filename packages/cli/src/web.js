@@ -4,7 +4,8 @@
 //   index.html                     a full-window page that runs the app (kept
 //                                  if <dir> already has one, or --html <file>)
 //   jsui-web.js, jsui-webgpu.js,   the browser host (@orktes/jsui-web)
-//   jsui-textures.js, jsui-audio.js,
+//   jsui-textures.js, jsui-components.js,
+//   jsui-audio.js,
 //   jsui-worker.js
 //   dist/, dist-webgl/, dist-gpu/  every WASM build the package ships: CPU,
 //                                  Skia on WebGL, Skia Graphite on WebGPU (+ both)
@@ -23,7 +24,7 @@ import path from 'node:path';
 const require = createRequire(import.meta.url);
 
 export const WEB_MODULES = ['dist', 'dist-webgl', 'dist-gpu'];
-const HOST_SCRIPTS = ['jsui-webgpu.js', 'jsui-textures.js', 'jsui-audio.js', 'jsui-worker.js'];
+const HOST_SCRIPTS = ['jsui-webgpu.js', 'jsui-textures.js', 'jsui-components.js', 'jsui-audio.js', 'jsui-worker.js'];
 
 const hash = (...bufs) => {
   const h = crypto.createHash('sha256');

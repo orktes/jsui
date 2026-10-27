@@ -39,6 +39,7 @@ class ImageCache;
 class LottieCache;
 class Containers;
 class ShaderEffects;
+class NativeComponents;
 class NativeAnimated;
 class Worklets;
 
@@ -267,6 +268,9 @@ class Runtime {
   std::unique_ptr<LottieCache> lotties;
   // Compiled SkSL sources and ShaderViews (render/shader_view.h).
   std::unique_ptr<ShaderEffects> shaders;
+  // Host-registered native component classes and their views
+  // (jsui_register_component; render/native_component.h).
+  std::unique_ptr<NativeComponents> components;
   // UI audio (jsui.h "Audio"): Sound requests to the handler / built-in
   // backend. After the loader (the built-in backend reads through it).
   std::unique_ptr<Audio> audio;
@@ -368,6 +372,8 @@ class Runtime {
   void deliverLottieEvents();
   // ShaderView compile errors.
   void deliverShaderEvents();
+  // Native component events (jsui_component_emit).
+  void deliverComponentEvents();
   // Voice-ended / sound-loaded reports.
   void deliverAudioEvents();
   // Video status reports.

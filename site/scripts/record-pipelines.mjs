@@ -24,7 +24,7 @@ const FORMATS = ['bgra8unorm', 'rgba8unorm'];
 
 const ROUTES = ['/', '/examples', '/examples/main-menu', '/examples/hud', '/examples/inventory', '/examples/battle-pass',
   '/examples/scoreboard', '/examples/dialogue', '/examples/settings', '/examples/loading', '/examples/notifications',
-  '/examples/cinematic', '/examples/victory', '/examples/rift', '/use-cases', '/features', '/features/interactions', '/features/input', '/features/motion', '/features/vector', '/playground', '/embed'];
+  '/examples/cinematic', '/examples/victory', '/examples/rift', '/use-cases', '/features', '/features/interactions', '/features/input', '/features/motion', '/features/vector', '/features/native', '/playground', '/embed'];
 
 for (const f of FORMATS) fs.rmSync(path.join(DIR, `pipelines-${f}.bin`), { force: true });
 const out = await recordPipelines({

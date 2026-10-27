@@ -1475,6 +1475,51 @@ aliases both, plus `react-native-svg/css`, to `@orktes/jsui-react/svg` and
   packages/react/test/vector.test.js, reference case
   examples/features/svg.jsx (Chromium parity).
 
+### Native components
+
+Host-registered view classes that draw into Skia (`jsui_register_component`,
+jsui.h "Native components"; usage in [NATIVE_COMPONENTS.md](NATIVE_COMPONENTS.md)):
+
+* **Node.** `NativeComponentView` maps to `NodeType::Component`; the class
+  name is its `component` prop. Per node a `component::NodeState` (in
+  `imageCache`) holds the bound class (a `shared_ptr`, so unregistering
+  while a draw runs is safe), the instance and the host textures it drew.
+  `NativeComponents` (render/native_component.h, one per runtime,
+  `Document::components`) keeps the classes by name and the mounted views;
+  binding happens when either side appears, so registration order does not
+  matter. Unmounting calls `destroy` from `onNodeDestroyed` (nodes linger in
+  the graveyard, so not from the node's destructor).
+* **Props.** `propsChanged` calls the class's `props` with the public props
+  as JSON (no `style`, `component` or `__*` keys); style-only updates don't.
+  Animated props are rewritten by the JS wrapper to `prop:<name>` style keys
+  in paint group `kGroupComponent`: the native driver patches them like
+  any paint-only style (repaint, no relayout), and `jsui_prop_*` reads them
+  from the style before the props.
+* **Paint.** The painter calls `component::paint` for the node's own
+  content: save, clip to the rounded border box, translate to the content
+  box, `draw`, restore to the saved count (the canvas API's `restore` never
+  pops below it). The recording is the node's paint cache; repaints come
+  from `markPaintDirty` (props, `jsui_component_invalidate`, image loads and
+  `HostTextures` users), and `JSUI_COMPONENT_CLOCKED` classes are marked in
+  `Runtime::tick` / `tickNative` and keep `wantsFrame()` true while mounted.
+* **Commands and events.** JS `componentCommand(view, name, argsJson)` goes
+  through the command buffer as `Op::ComponentCommand` (in order with the
+  commit that mounted the view; applied at once when single-threaded).
+  `jsui_component_emit` only queues when the view's `__componentEvents`
+  lists the event; the tick delivers the queue as `componentevent`
+  `{ name, data }`, which the wrapper maps to `on<Name>` with
+  `nativeEvent = data`. Both bridges (QuickJS `bridge.cpp`, the host JS
+  engine's `engine_hostjs.cpp` + `web/native/jsui_hostjs.js`) expose
+  `componentCommand` and `hasComponent`.
+* **Web.** `jsui_web_register_component` registers a class whose callbacks
+  are an EM_JS trampoline into the page's `ComponentSet`
+  (web/jsui-components.js), which writes `JsuiPaint` / `JsuiGradient` /
+  `JsuiFont` into a scratch block of wasm memory per call. Worker mode
+  imports a `components` module URL in the worker.
+* Tests: tests/native/native_component_test.cpp,
+  packages/react/test/native-component.test.js,
+  web/test/components.test.mjs.
+
 ### Audio
 
 The UI asks for sounds; the host plays them (`src/audio/`,

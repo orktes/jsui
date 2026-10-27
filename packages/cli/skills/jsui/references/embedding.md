@@ -95,6 +95,11 @@ if (jsui_needs_redraw(rt))
                                                       // or jsui_render_rgba_incremental into a CPU buffer
 ```
 
+Native components (views the engine draws with Skia, used from React with
+`requireNativeComponent`): `jsui_register_component` + `JsuiComponentClass`,
+or `jsui::registerComponent<T>` from `jsui/jsui_component.hpp`; see
+media-and-effects.md "Native components".
+
 Data: `jsui_set_state` / `jsui_patch_state` / `jsui_get_state`,
 `jsui_set_buffer` / `jsui_map_buffer` + `jsui_commit_buffer`,
 `jsui_post_message`, `jsui_resolve_call` / `jsui_reject_call`,

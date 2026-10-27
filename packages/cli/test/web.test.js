@@ -12,7 +12,7 @@ const WEB = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 
 // by scripts/build-wasm.sh), dist-webgl left out unless asked.
 async function fakeWebDir(dirs = ['dist', 'dist-gpu']) {
   const dir = await mkdtemp(path.join(tmpdir(), 'jsui-webpkg-'));
-  for (const f of ['jsui-web.js', 'jsui-webgpu.js', 'jsui-textures.js', 'jsui-audio.js', 'jsui-worker.js']) {
+  for (const f of ['jsui-web.js', 'jsui-webgpu.js', 'jsui-textures.js', 'jsui-components.js', 'jsui-audio.js', 'jsui-worker.js']) {
     await cp(path.join(WEB, f), path.join(dir, f));
   }
   for (const d of dirs) {

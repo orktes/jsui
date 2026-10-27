@@ -1,6 +1,6 @@
 ---
 name: jsui
-description: Build in-game UIs with JSUI (React Native components on QuickJS + Yoga + Skia, embedded in Godot, the web or any C/C++ engine). Use when writing or changing a JSUI screen, HUD, menu or widget, wiring it to game data, adding animation, gamepad focus, Lottie, shaders, SVG / Skia vector drawing or host textures, embedding JSUI in an engine, or screenshotting and scripting a JSUI app to check it.
+description: Build in-game UIs with JSUI (React Native components on QuickJS + Yoga + Skia, embedded in Godot, the web or any C/C++ engine). Use when writing or changing a JSUI screen, HUD, menu or widget, wiring it to game data, adding animation, gamepad focus, Lottie, shaders, SVG / Skia vector drawing, host textures or native components (requireNativeComponent), embedding JSUI in an engine, or screenshotting and scripting a JSUI app to check it.
 ---
 
 # JSUI
@@ -250,7 +250,7 @@ Read the reference that matches the task:
 | Native-first patterns: keep JS off the frame (`Animated.derive`, `Animated.clock` and pausable `Animated.clock({...})`, typewriter `Animated.Text reveal`, host-buffer values, state styles `hoveredStyle` / `pressedStyle` / group styles, `useInteraction`, `useGroupState`, `Visibility`, hover popouts and `<Overlay>`, `useHostStateBind`, worklets (`react-native-worklets`: `runOnUI`, `runOnJS`, ...), what to use instead of state); the JS thread (what runs where, `measure`, same-frame syncs) | [references/native-first.md](references/native-first.md) |
 | `Animated` (native driver), springs, `LayoutAnimation`, performance | [references/animation-and-performance.md](references/animation-and-performance.md) |
 | Game data: shared state, calls, messages, per-frame buffers, several root views | [references/game-data.md](references/game-data.md) |
-| Host textures (video, render targets), LottieView, ShaderView / SkSL, vector drawing (`react-native-svg`, `@shopify/react-native-skia` Canvas) | [references/media-and-effects.md](references/media-and-effects.md) |
+| Host textures (video, render targets), LottieView, ShaderView / SkSL, vector drawing (`react-native-svg`, `@shopify/react-native-skia` Canvas), native components (`requireNativeComponent`: host-drawn views such as a minimap or radar, commands, events) | [references/media-and-effects.md](references/media-and-effects.md) |
 | Sound: UI sounds on hover / focus / press (`UISounds`), music (`useMusic`), `Sound.play`, buses | [references/audio.md](references/audio.md) |
 | Embedding: C API, Godot `JsuiView`, web host, dev mode | [references/embedding.md](references/embedding.md) |
 | `jsui dev` session + `--attach`, `jsui screenshot` / `inspect` / `run`, `launch()` / `attach()` APIs, selectors, all steps | [references/testing-tools.md](references/testing-tools.md) |
