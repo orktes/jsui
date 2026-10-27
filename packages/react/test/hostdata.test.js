@@ -14,6 +14,7 @@ import {
   useHostStateSelector,
   useHostHandler,
   SafeAreaView,
+  StatusBar,
 } from '../src/index.js';
 
 const wait = (ms = 0) => new Promise((r) => setTimeout(r, ms));
@@ -270,4 +271,20 @@ test('SafeAreaView pads by the host safe-area insets, on top of its own padding'
   assert.equal(n.props.style.paddingRight, 69);
   assert.equal(n.props.style.paddingBottom, 31);
   assert.equal(n.props.style.paddingTop, 4);
+});
+
+test('StatusBar: mounted bars stack over the setters and reach the host as jsui.statusBar', async () => {
+  const bar = () => HostState.get('jsui.statusBar');
+  StatusBar.setBarStyle('light-content');
+  assert.deepEqual(bar(), { barStyle: 'light-content' });
+  render(h(View, null, h(StatusBar, { hidden: true }), h(StatusBar, { barStyle: 'dark-content' })), 1);
+  await wait();
+  assert.deepEqual(bar(), { barStyle: 'dark-content', hidden: true });
+  render(h(View, null, h(StatusBar, { hidden: false })), 1);
+  await wait();
+  assert.deepEqual(bar(), { barStyle: 'light-content', hidden: false });
+  render(h(View, null), 1);
+  await wait();
+  assert.deepEqual(bar(), { barStyle: 'light-content' });
+  assert.ok(mock.uiState.some(([k]) => k === 'jsui.statusBar'));
 });

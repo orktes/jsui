@@ -79,4 +79,12 @@ from the system bars and display cutout, the web host from
 gets zero insets. The showcase site uses it for its nav bar, gutters, footer
 and full-screen examples.
 
+## Status bar
+
+The clock and battery show over the UI, with light text (the safe area's top
+inset keeps content clear of them). `<StatusBar hidden barStyle>` (react-native)
+and expo-status-bar change that: the UI writes shared state `jsui.statusBar`
+(`{hidden, barStyle}`) and the host applies it through `JsuiConfig.on_state`.
+iPhones hide the status bar in landscape on their own.
+
 Not yet: the on-screen keyboard for `TextInput` (hardware keyboards work).
