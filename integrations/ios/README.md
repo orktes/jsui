@@ -51,6 +51,23 @@ if (jsui_needs_redraw(rt)) {
 }
 ```
 
+## Sound, video and startup state
+
+* Sounds (`Sound`, `UISounds`) play with the library's built-in miniaudio
+  backend: `scripts/build-ios.sh` configures with `-DJSUI_AUDIO=ON` (iOS
+  builds default it off, for embedders with their own audio handler). The
+  default audio session follows the ring / silent switch.
+* `<Video>` plays with AVFoundation through the desktop viewer's handler
+  (`tools/jsui-viewer/video.mm`), straight into the host texture on Metal.
+* `STATE='{"key": value}' scripts/build-ios.sh` ships `ui/state.json`, set as
+  shared state before the bundle loads (`jsui-viewer --state` on desktop).
+  The showcase site, for example:
+
+  ```sh
+  SDK=iphoneos APP=site/app/index.jsx \
+  STATE='{"intro":{"play":true,"warmup":false},"audio":{"native":true}}' scripts/build-ios.sh
+  ```
+
 ## Safe area
 
 The host publishes `UIView.safeAreaInsets` as shared state `jsui.safeAreaInsets`

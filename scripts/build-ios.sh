@@ -10,6 +10,8 @@
 #   SDK        iphonesimulator (default) or iphoneos
 #   ARCH       arm64 (default) or x86_64 (Intel simulator)
 #   APP        UI entry point (default integrations/godot/demo/ui/app.jsx)
+#   STATE      shared state set before the bundle loads, as one JSON object
+#              ({"key": value, ...}; shipped as ui/state.json)
 #   DEVICE     simulator name for RUN=1 (default: first available iPhone)
 #   SHOT       screenshot path for RUN=1 (default build-ios-sim/screenshot.png)
 set -euo pipefail
@@ -28,6 +30,7 @@ SLICES="$SDK-$CPU" "$ROOT/scripts/build-skia-ios.sh"
 UI="$ROOT/integrations/ios/build-ui"
 rm -rf "$UI"
 (cd "$ROOT" && node packages/cli/bin/jsui.js build "$APP" -o "$UI/bundle.js" --minify)
+[ -z "${STATE:-}" ] || printf '%s\n' "$STATE" > "$UI/state.json"
 
 cmake -S "$ROOT" -B "$BUILD" -G Ninja \
   -DCMAKE_SYSTEM_NAME=iOS \
@@ -35,6 +38,7 @@ cmake -S "$ROOT" -B "$BUILD" -G Ninja \
   -DCMAKE_OSX_ARCHITECTURES="$ARCH" \
   -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
   -DCMAKE_BUILD_TYPE=Release \
+  -DJSUI_AUDIO=ON \
   -DJSUI_IOS_BUNDLE="$UI/bundle.js"
 cmake --build "$BUILD"
 APP_DIR="$BUILD/integrations/ios/JsuiDemo.app"

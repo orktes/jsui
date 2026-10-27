@@ -964,7 +964,13 @@ if(JSUI_AUDIO)
   elseif(MSVC)
     target_compile_options(jsui_miniaudio PRIVATE /w)
   endif()
-  if(APPLE)
+  if(IOS)
+    # iOS has no CoreAudio framework: miniaudio talks to AudioToolbox and
+    # AVAudioSession, so its implementation compiles as Objective-C.
+    set_source_files_properties(${CMAKE_SOURCE_DIR}/src/audio/miniaudio.c PROPERTIES LANGUAGE OBJC)
+    target_compile_definitions(jsui_miniaudio PUBLIC MA_NO_RUNTIME_LINKING)
+    target_link_libraries(jsui_miniaudio PUBLIC "-framework CoreFoundation" "-framework AudioToolbox" "-framework AVFoundation")
+  elseif(APPLE)
     # Linked, not loaded at run time (miniaudio's default there), which
     # Apple's notarization does not accept without extra entitlements.
     target_compile_definitions(jsui_miniaudio PUBLIC MA_NO_RUNTIME_LINKING)
