@@ -155,9 +155,16 @@ platform rules on consoles) apply to the UI too:
   `res://` reaches the network this way. `use_engine_http = false` hands
   network URLs to the built-in loader instead.
 * **Unity** (`JsuiView`): `UnityWebRequest` with a streaming download
-  handler; `useEngineHttp = false` turns it off.
-* **Unreal**: `FHttpModule` requests.
+  handler (the package depends on Unity's web request module);
+  `useEngineHttp = false` turns it off.
+* **Unreal**: `FHttpModule` requests, streamed piece by piece on UE 5.5 and
+  newer; `bUseEngineHttp = false` turns it off. Unreal always follows
+  redirects itself, so requests with `redirect: 'error'` or `'manual'` go to
+  the built-in loader.
 
-A game that wants its own (an authenticated backend client, a mock server in
-tests) sets `on_request` itself on the runtime config the plugin exposes, or
-answers specific URLs and declines the rest.
+Engine stacks give no reason phrase; the runtime fills in the standard one
+(`404` → `Not Found`) whenever a host answers without a status text.
+
+`redirect: 'manual'` hands JS the real 3xx response (status, `Location`)
+rather than the browser's opaque `opaqueredirect` with status 0: a native UI
+has no page to navigate, so the redirect itself is the useful part.
