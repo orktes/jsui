@@ -2124,9 +2124,17 @@ was `preventDefault()`-ed (or declared so, see "Input routing details").
     `snapToOffsets` (+ `snapToStart`/`snapToEnd`) pick the snap point on the
     velocity side of the projected end, like React Native on iOS. The glide to
     the snap point is momentum.
-  * Wheel: whole deltas ≥ 40 px (mouse notches) glide over 150 ms and
-    accumulate; other deltas (trackpads) apply pixel-precisely and snap after
-    150 ms idle. `InputManager::smoothWheel = false` disables gliding.
+  * Wheel: mouse wheel steps glide over 150 ms and accumulate; a step that
+    lands mid-glide keeps the glide's current speed (a fast spin moves
+    evenly, like Chrome) and only shortens the glide when it would
+    overshoot. Pixel-precise deltas (trackpads) apply at once and snap after
+    150 ms idle. Hosts say which they send (`jsui_send_mouse_wheel_ex`:
+    `JSUI_WHEEL_STEPS` / `JSUI_WHEEL_PRECISE`; the macOS viewer from
+    `hasPreciseScrollingDeltas`, Godot wheel buttons vs pan gestures, the web
+    host from `deltaMode` and the legacy `wheelDelta`: 120 a notch for a
+    mouse, whatever px macOS's acceleration gave it, 3 x px for a trackpad);
+    unlabelled (`jsui_send_mouse_wheel`), whole deltas ≥ 40 px count as
+    notches. `InputManager::smoothWheel = false` disables gliding.
   * Keyboard (no TextInput focused): PageUp/PageDown (87.5 % of the
     viewport), Home/End, Space / Shift+Space when nothing pressable is
     focused, arrows when spatial navigation finds nothing further. D-pad

@@ -2028,6 +2028,15 @@ JSUI_API int jsui_hit_regions(JsuiRuntime* rt, float* out, int max_regions);
 JSUI_API int jsui_send_mouse_move(JsuiRuntime* rt, float x, float y);
 JSUI_API int jsui_send_mouse_button(JsuiRuntime* rt, float x, float y, JsuiMouseButton button, int down, int mods);
 JSUI_API int jsui_send_mouse_wheel(JsuiRuntime* rt, float x, float y, float dx, float dy);
+/* Wheel deltas are DOM-style px (positive dy scrolls down). `kind` says what
+ * produced them, when the host knows: mouse wheel steps (JSUI_WHEEL_STEPS:
+ * notches or the system's accelerated line steps, however big) glide to
+ * their target the way browsers animate wheel scrolling; pixel-precise
+ * deltas (JSUI_WHEEL_PRECISE: trackpads, Magic Mouse, momentum) move the
+ * content at once. JSUI_WHEEL_AUTO (jsui_send_mouse_wheel) guesses: whole
+ * steps of 40 px or more glide. */
+typedef enum JsuiWheelKind { JSUI_WHEEL_AUTO = 0, JSUI_WHEEL_STEPS = 1, JSUI_WHEEL_PRECISE = 2 } JsuiWheelKind;
+JSUI_API int jsui_send_mouse_wheel_ex(JsuiRuntime* rt, float x, float y, float dx, float dy, JsuiWheelKind kind);
 JSUI_API int jsui_send_mouse_leave(JsuiRuntime* rt);
 
 /* Touch: id is stable for the duration of a touch. phase: 0 begin, 1 move, 2 end, 3 cancel. */

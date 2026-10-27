@@ -77,7 +77,8 @@ class InputManager {
 
   bool mouseMove(float x, float y);
   bool mouseButton(float x, float y, int button, bool down, int mods);
-  bool mouseWheel(float x, float y, float dx, float dy);
+  // kind: JsuiWheelKind (0 auto, 1 mouse wheel steps, 2 pixel-precise).
+  bool mouseWheel(float x, float y, float dx, float dy, int kind = 0);
   bool mouseLeave();
   bool touch(int id, int phase, float x, float y);
   bool key(const char* key, const char* code, bool down, bool repeat, int mods);
@@ -175,8 +176,9 @@ class InputManager {
   // True while scroll animations, flings, indicator fades or held gamepad
   // input need further ticks (hosts that sleep when idle keep ticking).
   bool animating() const;
-  // Animate mouse-wheel notches (whole deltas >= kSmoothWheelMinDelta);
-  // fractional / small deltas (trackpads) always scroll pixel-precisely.
+  // Animate mouse-wheel steps (JSUI_WHEEL_STEPS, or unlabelled whole deltas
+  // >= kSmoothWheelMinDelta); pixel-precise deltas (trackpads) always
+  // scroll at once.
   bool smoothWheel = true;
 
   // Hit testing inside a paragraph (Text node): returns the inline span (or
@@ -293,6 +295,10 @@ class InputManager {
     bool easeInOut = false;
     double t0 = 0, duration = 0;
     float fromX = 0, fromY = 0, toX = 0, toY = 0;
+    // Tween start velocity (px/ms; ease-out unless easeInOut): 3 (to - from)
+    // / duration is ease-out cubic; a retargeted wheel / key glide starts at
+    // the speed it was moving at.
+    float velX = 0, velY = 0;
     // Decay along the main axis: offset(t) = from + v0 (rate^t - 1) / ln(rate).
     float v0 = 0, rate = kDecelerationNormal;
     bool horizontal = false;
@@ -436,7 +442,7 @@ class InputManager {
   // The finger position (offset space) at frame time `now`, resampled.
   float dragResampled(ScrollState& st, double now) const;
   Node* animatingScrollAncestor(Node* n);
-  bool wheelScroll(Node* hit, float dx, float dy);
+  bool wheelScroll(Node* hit, float dx, float dy, int kind);
   // Keyboard / gamepad scroll target: focused, then hovered, then the first
   // visible ScrollView that can scroll along the axis.
   // `preferId` (still eligible) wins over the tree-order fallback.
@@ -464,6 +470,7 @@ class InputManager {
     bool down = false, repeat = false;   // key / button
     bool edge = true;                    // PadButton: pressed or released (not a repeat)
     bool hitAgain = false;               // Wheel: JS saw it, hit test again
+    int wheelKind = 0;                   // Wheel: JsuiWheelKind
     int mods = 0;
     int pad = 0, index = 0;              // gamepad, button / axis; Wheel: the hit node
     float x = 0, y = 0, dx = 0, dy = 0;  // wheel point and deltas; stick axes

@@ -339,6 +339,31 @@ const GAMEPAD_BUTTONS = 17;
 /** jsui_hit_test flags (view.hitTest()). */
 export const HIT_POINTER = 1;  // presses / pointer input there are captured
 export const HIT_SCROLL = 2;   // a ScrollView that can scroll (or a wheel handler) is there
+/** jsui_send_mouse_wheel_ex kinds (view.wheel()): what produced the deltas. */
+export const WHEEL_AUTO = 0;     // unknown: whole steps of 40 px or more glide
+export const WHEEL_STEPS = 1;    // mouse wheel steps: glide to the target like browsers do
+export const WHEEL_PRECISE = 2;  // trackpad / Magic Mouse pixels: move at once
+// A WheelEvent's deltas in px and what produced them. Line / page deltas
+// (Firefox's mouse wheel) are wheel steps. Chrome and Safari give px either
+// way; the legacy wheelDelta tells them apart: a mouse wheel says 120 per
+// notch whatever px it scrolls (macOS's acceleration makes a slow notch
+// 4 px, a fast one hundreds), a trackpad says 3 x its px. A step of a
+// multiple of 40 px fits both and keeps what the events just before were.
+let lastWheel = { kind: 0, t: -Infinity };
+function wheelOf(e, pageHeight) {
+  const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? pageHeight : 1;
+  const dx = e.deltaX * k, dy = e.deltaY * k;
+  let kind = WHEEL_AUTO;
+  const w = e.wheelDeltaY || e.wheelDeltaX, d = e.wheelDeltaY ? e.deltaY : e.deltaX;
+  if (e.deltaMode !== 0) kind = WHEEL_STEPS;
+  else if (w && d) {
+    const notches = w % 120 === 0, precise = Math.abs(Math.abs(w) - 3 * Math.abs(d)) <= 0.51;
+    if (notches && precise) kind = e.timeStamp - lastWheel.t < 500 ? lastWheel.kind : WHEEL_AUTO;
+    else kind = notches ? WHEEL_STEPS : precise ? WHEEL_PRECISE : WHEEL_AUTO;
+  }
+  lastWheel = { kind, t: e.timeStamp };
+  return [dx, dy, kind];
+}
 const GAMEPAD_AXES = 4;
 const AXIS_EPSILON = 1 / 256;
 
@@ -912,9 +937,7 @@ class DomView {
     }, opt);
     c.addEventListener('wheel', (e) => {
       const [x, y] = this._point(e);
-      // Normalise to px like browsers do for pixel-mode wheels.
-      const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.height : 1;
-      if (this._inWheel(x, y, e.deltaX * k, e.deltaY * k)) e.preventDefault();
+      if (this._inWheel(x, y, ...wheelOf(e, this.height))) e.preventDefault();
     }, active);
     c.addEventListener('contextmenu', (e) => e.preventDefault(), active);
     // iOS Safari can still rubber-band the page under a touch-action: none
@@ -1041,8 +1064,7 @@ class DomView {
     addEventListener('wheel', (e) => {
       const [x, y] = this._point(e);
       if (!inside(x, y)) return;
-      const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.height : 1;
-      if (this._inWheel(x, y, e.deltaX * k, e.deltaY * k)) take(e);
+      if (this._inWheel(x, y, ...wheelOf(e, this.height))) take(e);
     }, opt);
     const touch = (e) => {
       let all = e.changedTouches.length > 0;
@@ -1573,7 +1595,11 @@ class CanvasView extends DomView {
   _inButton(x, y, button, down, mods) { return this.module._jsui_send_mouse_button(this.rt, x, y, button, down, mods); }
   _inMove(x, y) { return this.module._jsui_send_mouse_move(this.rt, x, y); }
   _inTouch(id, phase, x, y) { return this.module._jsui_send_touch(this.rt, id, phase, x, y); }
-  _inWheel(x, y, dx, dy) { return this.module._jsui_send_mouse_wheel(this.rt, x, y, dx, dy); }
+  _inWheel(x, y, dx, dy, kind = 0) {
+    const M = this.module;
+    return M._jsui_send_mouse_wheel_ex ? M._jsui_send_mouse_wheel_ex(this.rt, x, y, dx, dy, kind)
+      : M._jsui_send_mouse_wheel(this.rt, x, y, dx, dy);
+  }
   _inLeave() { return this.module._jsui_send_mouse_leave(this.rt); }
   _inKey(key, code, down, repeat, mods) {
     return this._withStrings([key, code], (k, c) => this.module._jsui_send_key(this.rt, k, c, down, repeat, mods));
@@ -3537,7 +3563,8 @@ class JsuiTextureSurface extends CanvasView {
     return !!r;
   }
 
-  wheel(x, y, deltaX, deltaY) { return !!this._inWheel(x, y, deltaX, deltaY); }
+  /** Wheel deltas in px (positive deltaY scrolls down); `kind`: WHEEL_STEPS for mouse wheel steps (they glide), WHEEL_PRECISE for trackpad pixels, WHEEL_AUTO to guess. */
+  wheel(x, y, deltaX, deltaY, kind = WHEEL_AUTO) { return !!this._inWheel(x, y, deltaX, deltaY, kind); }
 
   key(key, code, down, { repeat = false, modifiers = 0 } = {}) {
     return !!this._inKey(key ?? null, code ?? null, down ? 1 : 0, repeat ? 1 : 0, modifiers);
@@ -3562,10 +3589,7 @@ class JsuiTextureSurface extends CanvasView {
       case 'pointerup': case 'mouseup': return this.pointerUp(x, y, pointer);
       case 'pointercancel': return this.pointerUp(x, y, { ...pointer, cancel: true });
       case 'pointerleave': case 'pointerout': case 'mouseleave': return this.pointerLeave();
-      case 'wheel': {
-        const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.height : 1;
-        return this.wheel(x, y, e.deltaX * k, e.deltaY * k);
-      }
+      case 'wheel': return this.wheel(x, y, ...wheelOf(e, this.height));
       case 'keydown': case 'keyup': {
         if (e.isComposing) return false;
         const down = e.type === 'keydown';

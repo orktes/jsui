@@ -53,15 +53,21 @@ float decelerationRate(const Node* n) {
   return InputManager::kDecelerationNormal;
 }
 
-float easeOutCubic(float t) {
-  float u = 1 - t;
-  return 1 - u * u * u;
-}
-
 float easeInOutCubic(float t) {
   if (t < 0.5f) return 4 * t * t * t;
   float u = -2 * t + 2;
   return 1 - u * u * u / 2;
+}
+
+// Cubic from 0 to `distance` over `duration` ms starting at velocity `v0`
+// (px/ms) and ending at rest; v0 = 3 distance / duration is ease-out cubic.
+float hermiteAt(float distance, float v0, double duration, float t) {
+  float vt = v0 * float(duration);
+  return vt * (t - 2 * t * t + t * t * t) + distance * (3 * t * t - 2 * t * t * t);
+}
+
+float hermiteVelocity(float distance, float v0, double duration, float t) {
+  return v0 * (1 - 4 * t + 3 * t * t) + distance * (6 * t - 6 * t * t) / float(duration);
 }
 
 // Programmatic / Home / End animations: longer for longer distances.
@@ -250,6 +256,16 @@ void InputManager::startTween(Node* sv, float x, float y, double durationMs, boo
                               bool easeInOut) {
   ScrollMetrics m = scrollMetrics(sv);
   ScrollState& st = scrollState(sv);
+  // A wheel / key glide retargeted mid-flight keeps its current speed (a
+  // fresh ease-out per notch would surge and sag at every notch of a fast
+  // spin), like Chrome's smooth wheel scrolling.
+  bool retarget = accumulate && !easeInOut && st.anim == ScrollState::Anim::Tween && st.accumulate && !st.easeInOut;
+  float curVX = 0, curVY = 0;
+  if (retarget) {
+    float t = float(std::clamp((rt_.now - st.t0) / st.duration, 0.0, 1.0));
+    curVX = hermiteVelocity(st.toX - st.fromX, st.velX, st.duration, t);
+    curVY = hermiteVelocity(st.toY - st.fromY, st.velY, st.duration, t);
+  }
   st.anim = ScrollState::Anim::Tween;
   st.momentum = momentum;
   st.accumulate = accumulate;
@@ -261,6 +277,19 @@ void InputManager::startTween(Node* sv, float x, float y, double durationMs, boo
   st.toX = std::clamp(std::isfinite(x) ? x : sv->scrollX, 0.f, m.maxX());
   st.toY = std::clamp(std::isfinite(y) ? y : sv->scrollY, 0.f, m.maxY());
   st.settleAt = -1;
+  float dx = st.toX - st.fromX, dy = st.toY - st.fromY;
+  // Moving towards the new target faster than its ease-out would start:
+  // arrive sooner instead of overshooting (ease-out from the current speed).
+  auto keeps = [](float v, float d) { return v * d > 0; };
+  if (keeps(curVX, dx) && std::fabs(curVX) * st.duration > 3 * std::fabs(dx)) st.duration = 3 * dx / curVX;
+  if (keeps(curVY, dy) && std::fabs(curVY) * st.duration > 3 * std::fabs(dy)) st.duration = 3 * dy / curVY;
+  st.duration = std::max(1.0, st.duration);
+  auto start = [&](float v, float d) {
+    float easeOut = 3 * d / float(st.duration);
+    return keeps(v, d) ? (std::fabs(v) < std::fabs(easeOut) ? v : easeOut) : easeOut;
+  };
+  st.velX = start(curVX, dx);
+  st.velY = start(curVY, dy);
 }
 
 void InputManager::scrollBase(Node* sv, float* x, float* y) {
@@ -562,7 +591,7 @@ void InputManager::endDrag(PointerState& p, bool cancelled) {
 
 // ----------------------------------------------------------------- wheel
 
-bool InputManager::wheelScroll(Node* hit, float dx, float dy) {
+bool InputManager::wheelScroll(Node* hit, float dx, float dy, int kind) {
   // The nearest ScrollView that can move this way. A vertical wheel over a
   // horizontal list scrolls it sideways (games UX).
   for (Node* n = hit; n; n = n->parent()) {
@@ -571,9 +600,13 @@ bool InputManager::wheelScroll(Node* hit, float dx, float dy) {
     float d = h ? (dx != 0 ? dx : dy) : dy;
     if (d == 0) continue;
     uint32_t id = n->id();
-    // Mouse notches glide; trackpad deltas (fractional / small) apply
-    // pixel-precisely. Notches on a snapping list go snap point to snap point.
-    bool notch = smoothWheel && std::fabs(d) >= kSmoothWheelMinDelta && std::fabs(d - std::round(d)) < 1e-3f;
+    // Mouse wheel steps glide; trackpad deltas apply pixel-precisely. Unless
+    // the host says which it is, whole steps of kSmoothWheelMinDelta or
+    // more count as notches. Steps on a snapping list go snap point to snap
+    // point.
+    bool notch = smoothWheel && (kind == JSUI_WHEEL_STEPS ||
+                                 (kind == JSUI_WHEEL_AUTO && std::fabs(d) >= kSmoothWheelMinDelta &&
+                                  std::fabs(d - std::round(d)) < 1e-3f));
     if (notch) {
       if (scrollBy(n, h, d, kWheelAnimMs)) return true;
     } else {
@@ -751,8 +784,15 @@ void InputManager::tickScrolling(double now, double /*dt*/) {
     if (st.anim == ScrollState::Anim::Tween) {
       double t = (now - st.t0) / st.duration;
       bool done = t >= 1;
-      float e = done ? 1.f : st.easeInOut ? easeInOutCubic(float(t)) : easeOutCubic(float(t));
-      float x = st.fromX + (st.toX - st.fromX) * e, y = st.fromY + (st.toY - st.fromY) * e;
+      float x = st.toX, y = st.toY;
+      if (!done && st.easeInOut) {
+        float e = easeInOutCubic(float(t));
+        x = st.fromX + (st.toX - st.fromX) * e;
+        y = st.fromY + (st.toY - st.fromY) * e;
+      } else if (!done) {
+        x = st.fromX + hermiteAt(st.toX - st.fromX, st.velX, st.duration, float(t));
+        y = st.fromY + hermiteAt(st.toY - st.fromY, st.velY, st.duration, float(t));
+      }
       if (!done) {
         x = devicePx(x);
         y = devicePx(y);

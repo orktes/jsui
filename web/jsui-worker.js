@@ -197,10 +197,10 @@ function definePage(I) {
       this._post(this._stamp({ op: 'touch', id, phase, x, y, p }));
       return p;
     }
-    _inWheel(x, y, dx, dy) {
+    _inWheel(x, y, dx, dy, kind = 0) {
       this._pointerSeen();
       const p = +((this._hitAt(x, y) & HIT_SCROLL) !== 0);
-      this._post(this._stamp({ op: 'wheel', x, y, dx, dy, p }));
+      this._post(this._stamp({ op: 'wheel', x, y, dx, dy, kind, p }));
       return p;
     }
     _inLeave() {
@@ -514,7 +514,8 @@ function definePage(I) {
       // Coalesce: consecutive moves / wheels / touch moves of a view become one.
       if (op.op === 'move' || op.op === 'wheel' || (op.op === 'touch' && op.phase === 1)) {
         const last = q[q.length - 1];
-        if (last && last.op === op.op && last.v === op.v && (op.op !== 'touch' || (last.phase === 1 && last.id === op.id))) {
+        if (last && last.op === op.op && last.v === op.v && (op.op !== 'touch' || (last.phase === 1 && last.id === op.id)) &&
+          last.kind === op.kind) {
           if (op.op === 'wheel') {
             op.dx += last.dx;
             op.dy += last.dy;
@@ -1326,6 +1327,7 @@ export function serve(I, early) {
     for (let i = pendIn.length - 1; i >= 0; i--) {
       const prev = pendIn[i];
       if (prev.op !== op.op || prev.v !== op.v || prev.id !== op.id) continue;
+      if (prev.kind !== op.kind) break;  // wheel steps and trackpad pixels stay apart
       if (op.op === 'wheel') {
         op.dx += prev.dx;
         op.dy += prev.dy;
@@ -1353,7 +1355,7 @@ export function serve(I, early) {
       case 'button': used = view._inButton(op.x, op.y, op.b, op.down, op.mods); if (!op.down) return; break;
       case 'move': view._inMove(op.x, op.y); return;
       case 'touch': used = view._inTouch(op.id, op.phase, op.x, op.y); if (op.phase !== 0) return; break;
-      case 'wheel': used = view._inWheel(op.x, op.y, op.dx, op.dy); break;
+      case 'wheel': used = view._inWheel(op.x, op.y, op.dx, op.dy, op.kind); break;
       case 'leave': view._inLeave(); return;
       case 'key':
         used = view._inKey(op.key, op.code, op.down, op.repeat, op.mods);
@@ -1866,7 +1868,7 @@ export function serve(I, early) {
       case 'spy': {
         spyCalls = [];
         const strArgs = { _jsui_send_key: [1, 2], _jsui_send_text: [1], _jsui_set_gamepad_connected: [3] };
-        for (const name of ['_jsui_send_mouse_move', '_jsui_send_mouse_button', '_jsui_send_mouse_wheel',
+        for (const name of ['_jsui_send_mouse_move', '_jsui_send_mouse_button', '_jsui_send_mouse_wheel', '_jsui_send_mouse_wheel_ex',
           '_jsui_send_mouse_leave', '_jsui_send_touch', '_jsui_send_key', '_jsui_send_text', '_jsui_send_gamepad_button',
           '_jsui_send_gamepad_axis', '_jsui_set_gamepad_connected']) {
           const f = M[name];
