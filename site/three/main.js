@@ -264,8 +264,29 @@ async function main() {
   const stats = Object.assign(window.threeStats ??= {}, { frames: 0, canvas, device: renderer.backend.device });
   let angle = 0, frames = 0, last = performance.now(), droneGPU = null;
   renderer.autoClear = false;
+  // iOS Safari (26.5) does not show a WebGPU canvas configured at load
+  // until its drawing buffer changes size (turning the phone shows it; the
+  // same size again does not): one frame a pixel shorter, then back, after
+  // the first frames and again at 0.5 s and 1.5 s.
+  const nudges = [0, 500, 1500];
+  let started = 0, restore = false;
+  const nudge = () => {
+    if (restore) {
+      restore = false;
+      resize();
+      return;
+    }
+    const now = performance.now();
+    started ||= now;
+    if (!nudges.length || stats.frames < 2 || now - started < nudges[0]) return;
+    nudges.shift();
+    stats.nudges = (stats.nudges ?? 0) + 1;
+    renderer.setSize(innerWidth, innerHeight - 1, false);
+    restore = true;
+  };
   renderer.setAnimationLoop(() => {
     try {
+      nudge();
       frame();
     } catch (e) {
       renderer.setAnimationLoop(null);
