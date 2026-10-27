@@ -162,7 +162,10 @@ own JS context) inside the view, with `appKey`, `initialProps` and
 `Host.call` and `HostState` changes arrive as `onMessage`, `onCall` (return
 the answer) and `onStateChange`, and the ref's `postMessage`, `call`,
 `setState`, `patchState` and `reload` talk to it. Pointer input over it and
-keys / gamepad input while it has focus go to the child first.
+keys / gamepad input while it has focus go to the child first. The child
+uses this app's services (loads, audio, video, fonts, host textures) unless
+`services` narrows them: `services={{ load: { deny: ['https://ads.*'],
+handle: (req, next) => ... }, audio: 'none' }}`.
 
 Shaders: `<ShaderView source={sksl\`...\`} uniforms={{...}} images={{...}} />`
 paints the view with your own SkSL (Skia runtime effects, on every

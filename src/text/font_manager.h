@@ -64,6 +64,7 @@ class FontManager {
   // where this manager has none of its own (families, glyph fallback);
   // nullptr: none. Call again (or changed()) after the parent's set changed.
   void inherit(FontManager* parent);
+  FontManager* inherited() const { return inherited_; }
   // Registered family names, in registration order (embedded first).
   std::vector<std::string> familyNames() const;
   // Bumped whenever the font set changes; text caches built with an older
@@ -83,6 +84,7 @@ class FontManager {
   struct Impl;
   std::unique_ptr<Impl> impl_;
   std::string defaultFamily_ = "Inter";
+  FontManager* inherited_ = nullptr;
 };
 
 }  // namespace jsui

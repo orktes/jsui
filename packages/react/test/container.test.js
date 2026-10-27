@@ -133,3 +133,79 @@ test('calls without an onCall handler are rejected', async () => {
   render(null);
   await wait();
 });
+
+test('services: native rules and modes, middleware answers', async () => {
+  mock.reset();
+  const seen = [];
+  const services = {
+    load: {
+      deny: ['https://ads.*'],
+      rewrite: { 'cdn:': 'https://cdn.example/' },
+      handle: async (req, next) => {
+        seen.push(req.url);
+        if (req.url.endsWith('/secret.json')) return null;
+        if (req.url.endsWith('/hello.txt')) return 'hi';
+        if (req.url.endsWith('/api')) return { status: 201, headers: { 'content-type': 'application/json' }, body: { ok: 1 } };
+        if (req.url.endsWith('/old.png')) return next({ ...req, url: 'new.png' });
+        // Nothing returned: passed on unchanged.
+      },
+    },
+    audio: (cmd) => (cmd.bus === 'music' ? null : { ...cmd, volume: cmd.volume / 2 }),
+    video: 'none',
+    fonts: 'none',
+    textures: { inherit: false, alias: { logo: 'game.logo' } },
+  };
+  render(h(JSUIContainer, { nativeID: 'c', bundleSrc: 'a.js', services }));
+  await wait();
+  const n = byId('c');
+  assert.deepEqual(n.props.services, {
+    load: 'js',
+    deny: ['https://ads.*'],
+    rewrite: [['cdn:', 'https://cdn.example/']],
+    audio: 'js',
+    video: 'none',
+    fonts: false,
+    textures: false,
+    textureAliases: { logo: 'game.logo' },
+  });
+  // A re-render with equal rules keeps the same prop object.
+  const before = n.props.services;
+  render(h(JSUIContainer, { nativeID: 'c', bundleSrc: 'a.js', services: { ...services } }));
+  await wait();
+  assert.equal(byId('c').props.services, before);
+
+  const id = n.id;
+  const load = (lid, url) =>
+    mock.dispatch({ type: 'containerevent', target: id, kind: 'load', gen: 1, id: lid, request: { url, method: 'GET', headers: {} } });
+  mock.reset();
+  load(1, 'https://x/secret.json');
+  load(2, 'https://x/hello.txt');
+  load(3, 'https://x/api');
+  load(4, 'https://x/old.png');
+  load(5, 'https://x/plain.png');
+  await wait();
+  assert.deepEqual(seen, ['https://x/secret.json', 'https://x/hello.txt', 'https://x/api', 'https://x/old.png', 'https://x/plain.png']);
+  const byLoad = Object.fromEntries(commands().map((c) => [c.id, c]));
+  assert.deepEqual(byLoad[1], { op: 'load-block', gen: 1, id: 1 });
+  assert.deepEqual(byLoad[2], { op: 'load-reply', gen: 1, id: 2, status: 200, body: 'hi' });
+  assert.deepEqual(byLoad[3], {
+    op: 'load-reply', gen: 1, id: 3, status: 201, statusText: '',
+    headers: { 'content-type': 'application/json' }, body: '{"ok":1}',
+  });
+  assert.equal(byLoad[4].op, 'load-next');
+  assert.equal(byLoad[4].request.url, 'new.png');
+  assert.deepEqual(byLoad[5], { op: 'load-next', gen: 1, id: 5, request: { url: 'https://x/plain.png', method: 'GET', headers: {} } });
+
+  mock.reset();
+  const play = { op: 'play', voice: 3, sound: 'https://x/a.wav', bus: 'sfx', volume: 0.8 };
+  const music = { op: 'play', voice: 4, sound: 'https://x/m.ogg', bus: 'music', volume: 1 };
+  mock.dispatch({ type: 'containerevent', target: id, kind: 'audio', gen: 1, cmd: play });
+  mock.dispatch({ type: 'containerevent', target: id, kind: 'audio', gen: 1, cmd: music });
+  await wait();
+  assert.deepEqual(commands(), [
+    { op: 'audio-next', gen: 1, orig: play, cmd: { ...play, volume: 0.4 } },
+    { op: 'audio-block', gen: 1, orig: music, cmd: {} },
+  ]);
+  render(null);
+  await wait();
+});

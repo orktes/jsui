@@ -135,5 +135,33 @@ game.current.setState('coins', 130);                // or patchState / reload()
 Pointer input over it goes to the inner app; it takes focus when pressed
 (or via gamepad/Tab navigation) and then gets keys and gamepad input first.
 Input it does not use (a D-pad press at its edge) moves on in the outer app.
-The inner app has its own fonts (register them there), uses the built-in
-audio backend and has no `<Video>` handler.
+The inner app uses the outer app's services: its loads go through the
+outer app's loader (the host's), its sounds and videos play through the
+outer app's audio / video handlers, and it sees the outer app's fonts and
+host textures (its own come first). Narrow that with `services`:
+
+```jsx
+<JSUIContainer
+  bundleSrc="apps/minigame.js"
+  services={{
+    load: {
+      allow: ['game://ui/apps/*', 'https://api.example.com/*'],  // native glob rules, cheap
+      deny: ['*/secret/*'],
+      rewrite: { 'cdn:': 'https://cdn.example.com/' },
+      handle: async (req, next) => {         // optional middleware, in this app's JS
+        if (req.url.endsWith('/config.json')) return JSON.stringify({ mode: 'demo' });  // serve
+        if (req.method !== 'GET') return null;  // refuse (fails like a network error)
+        return next({ ...req, headers: { ...req.headers, 'X-App': 'minigame' } });  // pass on, changed
+      },
+    },
+    audio: (cmd, next) => (cmd.op === 'play' ? next({ ...cmd, volume: cmd.volume * 0.5 }) : next()),
+    video: 'none',                           // 'inherit' (default) | 'none' | (cmd, next) => ...
+    fonts: 'inherit',                        // or 'none'
+    textures: { inherit: false, alias: { portrait: 'game.portrait' } },
+  }}
+/>
+```
+
+Returning nothing from a middleware passes the request on unchanged. The
+host (C API) can also inspect, configure or refuse every child with
+`JsuiConfig.on_child`.
