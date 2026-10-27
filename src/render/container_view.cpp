@@ -799,7 +799,9 @@ bool command(Node* node, const Value& cmd) {
     st->stale = true;
     return true;
   }
-  if (op != "post" && op != "call" && op != "resolve" && op != "reject" && op != "state" && op != "reload")
+  bool answer = op.compare(0, 5, "load-") == 0 || op.compare(0, 6, "audio-") == 0 || op.compare(0, 6, "video-") == 0;
+  if (!answer && op != "post" && op != "call" && op != "resolve" && op != "reject" && op != "state" &&
+      op != "reload")
     return false;
   st->commands.push_back(cmd);
   return true;
