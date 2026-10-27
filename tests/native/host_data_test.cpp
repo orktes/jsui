@@ -249,6 +249,15 @@ TEST(host_state_survives_reload) {
   CHECK_EQ(h.take(), std::string());  // nothing re-delivered to the new context
 }
 
+TEST(safe_area_insets_shorthand) {
+  Host h;
+  CHECK_EQ(jsui_set_safe_area_insets(h.rt, 59, 0, 34, 0), 1);
+  CHECK_EQ(h.state("jsui.safeAreaInsets"), std::string(R"({"top":59,"right":0,"bottom":34,"left":0})"));
+  CHECK_EQ(jsui_set_safe_area_insets(h.rt, 59, 0, 34, 0), 0);  // unchanged
+  CHECK_EQ(jsui_set_safe_area_insets(h.rt, 0, 59.5f, 21, 59.5f), 1);  // rotated
+  CHECK_EQ(h.state("jsui.safeAreaInsets"), std::string(R"({"top":0,"right":59.5,"bottom":21,"left":59.5})"));
+}
+
 TEST(host_state_ui_owned_keys) {
   Host h;
   CHECK(h.load(R"(

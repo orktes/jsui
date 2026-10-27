@@ -2,6 +2,7 @@
 // runtime compiled to WebAssembly; this file is ordinary React Native code.
 import React, { useEffect, useRef } from 'react';
 import { Animated, AppRegistry, Easing, Fonts, ScrollView, StyleSheet, Text, UISounds, View, precompileShaders } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { PageScrollProvider, RouterProvider, segments, useRouterState } from './router.js';
 import { mono, site } from './theme.js';
 import { NavBar, NAV_HEIGHT } from './components/NavBar.jsx';
@@ -33,6 +34,7 @@ function Page({ path }) {
   const Component = PAGES[head || ''] || NotFound;
   const fade = useRef(new Animated.Value(0)).current;
   const scroller = useRef(null);
+  const insets = useSafeAreaInsets();
   // Pages scroll themselves to a y in their own content (Use cases' index).
   const scroll = useRef({ to: (y) => scroller.current && scroller.current.scrollTo({ y: Math.max(0, y), animated: true }) }).current;
   useEffect(() => {
@@ -41,7 +43,7 @@ function Page({ path }) {
   }, [head]);
   return (
     <Animated.View style={{ flex: 1, opacity: fade }}>
-      <ScrollView ref={scroller} key={head || 'home'} style={{ flex: 1 }} onScroll={noteScroll} scrollEventThrottle={200} contentContainerStyle={{ paddingTop: NAV_HEIGHT, minHeight: '100%' }}>
+      <ScrollView ref={scroller} key={head || 'home'} style={{ flex: 1 }} onScroll={noteScroll} scrollEventThrottle={200} contentContainerStyle={{ paddingTop: NAV_HEIGHT + insets.top, minHeight: '100%' }}>
         <PageScrollProvider value={scroll}>
           <Component params={rest} />
         </PageScrollProvider>

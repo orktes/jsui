@@ -72,7 +72,19 @@ if (jsui_needs_redraw(rt)) {
 
 The host publishes `UIView.safeAreaInsets` as shared state `jsui.safeAreaInsets`
 (`{top, right, bottom, left}` in points). `SafeAreaView` and `useSafeAreaInsets()`
-(react-native and react-native-safe-area-context) read it; other hosts leave it
-unset, so insets are zero there.
+(react-native and react-native-safe-area-context) read it, and it is updated on
+rotation. Other hosts publish theirs with `jsui_set_safe_area_insets()` (Android
+from the system bars and display cutout, the web host from
+`env(safe-area-inset-*)`); a host that leaves it unset (a game's UI texture)
+gets zero insets. The showcase site uses it for its nav bar, gutters, footer
+and full-screen examples.
+
+## Status bar
+
+The clock and battery show over the UI, with light text (the safe area's top
+inset keeps content clear of them). `<StatusBar hidden barStyle>` (react-native)
+and expo-status-bar change that: the UI writes shared state `jsui.statusBar`
+(`{hidden, barStyle}`) and the host applies it through `JsuiConfig.on_state`.
+iPhones hide the status bar in landscape on their own.
 
 Not yet: the on-screen keyboard for `TextInput` (hardware keyboards work).

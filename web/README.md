@@ -214,6 +214,19 @@ hud.gamepadConsumed(0, 0);                           // the UI took pad 0's A pr
   wheel and key events the UI didn't consume are not `preventDefault()`ed and
   bubble on as usual.
 
+## Safe area (notch, Dynamic Island, home indicator)
+
+On a page with `<meta name="viewport" content="..., viewport-fit=cover">` the
+canvas can reach under a phone's notch, Dynamic Island, rounded corners or
+home indicator. The main view measures the page's `env(safe-area-inset-*)`
+where it overlaps the canvas and publishes it as shared state
+`jsui.safeAreaInsets` (CSS px, updated on resize and rotation), which
+`SafeAreaView`, `useSafeAreaInsets()` and `react-native-safe-area-context`
+read: the same API as on iOS and Android. Without `viewport-fit=cover` the
+browser keeps the page out of those areas itself and the insets stay zero.
+Pass `safeArea: false` to `createJsui` to set the key yourself
+(`jsui.setState('jsui.safeAreaInsets', { top, right, bottom, left })`).
+
 ## Fonts
 
 The runtime ships Inter. Fonts the page registers are shared by every surface

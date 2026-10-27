@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -178,6 +179,13 @@ const char* jsui_get_state(JsuiRuntime* rt, const char* key) {
   // A copy: JS on its own thread may change the key while the host reads it.
   jsui::Runtime& r = *rt->rt;
   return r.state.jsonCopy(key, &r.stateText) ? r.stateText.c_str() : nullptr;
+}
+
+int jsui_set_safe_area_insets(JsuiRuntime* rt, float top, float right, float bottom, float left) {
+  char json[160];
+  std::snprintf(json, sizeof json, "{\"top\":%g,\"right\":%g,\"bottom\":%g,\"left\":%g}", double(top), double(right),
+                double(bottom), double(left));
+  return rt->rt->setState("jsui.safeAreaInsets", json, false);
 }
 
 int jsui_set_buffer(JsuiRuntime* rt, const char* key, JsuiBufferType type, const void* data, size_t count) {

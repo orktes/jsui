@@ -522,6 +522,31 @@ export function webglAvailable(hardware = false) {
 // methods, and hitTest() answers what the UI captures: CanvasView calls the
 // module, worker mode's proxy views (web/jsui-worker.js) post them to the
 // worker and answer from its last hit map.
+// The page's safe-area insets (env(safe-area-inset-*): a notch, the Dynamic
+// Island, rounded corners, the home indicator; nonzero only on a page with
+// viewport-fit=cover) where they overlap `canvas`, in CSS px. null where
+// there is no DOM (a worker).
+let safeAreaProbe = null;
+function safeAreaOver(canvas) {
+  if (typeof document === 'undefined' || !document.body || !canvas?.getBoundingClientRect) return null;
+  if (!safeAreaProbe?.isConnected) {
+    safeAreaProbe = document.createElement('div');
+    safeAreaProbe.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;pointer-events:none;' +
+      'padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)';
+    document.body.appendChild(safeAreaProbe);
+  }
+  const cs = getComputedStyle(safeAreaProbe);
+  const r = canvas.getBoundingClientRect();
+  const vw = document.documentElement.clientWidth || innerWidth, vh = document.documentElement.clientHeight || innerHeight;
+  const px = (v) => Math.round(Math.max(0, v) * 100) / 100;
+  return {
+    top: px(parseFloat(cs.paddingTop) - r.top),
+    right: px(r.right - (vw - parseFloat(cs.paddingRight))),
+    bottom: px(r.bottom - (vh - parseFloat(cs.paddingBottom))),
+    left: px(parseFloat(cs.paddingLeft) - r.left),
+  };
+}
+
 class DomView {
   // A new size or context means a repaint: an idle frame loop resumes.
   get _sizeChanged() { return this.__sizeChanged ?? false; }
@@ -674,7 +699,10 @@ class DomView {
 
   _installResize() {
     const apply = (entry) => {
-      if (this._measure(entry)) this._resized();
+      if (this._measure(entry)) {
+        this._resized();
+        this._publishSafeArea();
+      }
     };
     if (typeof ResizeObserver !== 'undefined') {
       this._resizeObserver = new ResizeObserver((entries) => apply(entries[entries.length - 1]));
@@ -689,7 +717,22 @@ class DomView {
       watch();
     }
     addEventListener('scroll', () => { this._rect = null; }, { passive: true, capture: true, signal: this._abort.signal });
-    addEventListener('resize', () => { this._rect = null; }, { passive: true, signal: this._abort.signal });
+    addEventListener('resize', () => { this._rect = null; this._publishSafeArea(); }, { passive: true, signal: this._abort.signal });
+  }
+
+  // The main view publishes the safe-area insets over its canvas as shared
+  // state jsui.safeAreaInsets (SafeAreaView, useSafeAreaInsets()), unless
+  // `safeArea: false` (the page sets the key itself). Zero insets are only
+  // published to replace nonzero ones.
+  _publishesSafeArea() { return false; }
+  _publishSafeArea() {
+    if (!this.canvas || this.opts.safeArea === false || !this._publishesSafeArea()) return;
+    const v = safeAreaOver(this.canvas);
+    if (!v) return;
+    const key = `${v.top},${v.right},${v.bottom},${v.left}`;
+    if (key === (this._safeAreaKey ?? '0,0,0,0')) return;
+    this._safeAreaKey = key;
+    this.setState('jsui.safeAreaInsets', v);
   }
 
   _observeCanvas() {
@@ -2045,6 +2088,8 @@ class SharedGL {
 }
 
 class JsuiHost extends CanvasView {
+  _publishesSafeArea() { return !!this.rt; }
+
   constructor(M, canvas, opts) {
     super(M, canvas, opts);
     this.hostId = nextHostId++;
@@ -2127,6 +2172,7 @@ class JsuiHost extends CanvasView {
     this.rt = M._jsui_web_create(this.hostId, this.width, this.height, this.pixelRatio, opts.devMode ? 1 : 0,
       this._baseUrlPtr, this.audio.enabled ? 1 : 0, this.jsEngine === 'host' ? 1 : 0);
     if (!this.rt) throw new Error('jsui_web_create failed');
+    this._publishSafeArea();
     if (opts.jsFrameBudget != null) M._jsui_set_js_frame_budget(this.rt, +opts.jsFrameBudget);
     if (opts.devMode && M._jsui_set_dev_session) {
       this._withStrings([opts.devName ?? null], (n) => M._jsui_set_dev_session(this.rt, n, opts.devSession === false ? 0 : 1));

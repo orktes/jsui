@@ -17,7 +17,7 @@ generally runs unchanged. This is what is supported and how it differs.
 | `TouchableOpacity`, `TouchableHighlight`, `TouchableWithoutFeedback`, `TouchableNativeFeedback`, `Button` | As in RN (`activeOpacity`, `underlayColor`, `title` / `color`). Focusable. |
 | `TextInput` | Native editing (caret, selection, clipboard, undo). `value` / `defaultValue`, `onChangeText`, `onChange`, `onSubmitEditing`, `onKeyPress`, `onSelectionChange`, `selection`, `placeholder`, `placeholderTextColor`, `maxLength`, `multiline`, `secureTextEntry`, `selectTextOnFocus`, `submitBehavior`, `caretHidden`, `cursorColor`, `selectionColor`, `autoFocus`; ref `focus` / `blur` / `clear` / `isFocused` / `setSelection`. No IME pre-edit. |
 | `Modal` | `visible`, `transparent`, `onRequestClose` (B / Escape), `onShow`. Rendered at the root, traps focus, restores focus when closed. `animationType` is ignored: animate the content yourself. |
-| `Switch`, `ActivityIndicator`, `SafeAreaView`, `KeyboardAvoidingView`, `StatusBar` | Work (status bar is a no-op). |
+| `Switch`, `ActivityIndicator`, `SafeAreaView`, `KeyboardAvoidingView`, `StatusBar` | Work. `StatusBar` `hidden` / `barStyle` reach the host as shared state `jsui.statusBar` (the iOS host shows or hides the clock and battery); other hosts ignore it. |
 | `HostTexture`, `LottieView`, `ShaderView` | JSUI extras, see media-and-effects.md. |
 
 Not available (render nothing and warn once): `Picker`, `CheckBox`,

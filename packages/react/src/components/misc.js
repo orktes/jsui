@@ -8,6 +8,7 @@ import { Easing } from '../animated/Easing.js';
 import { createAnimatedComponent } from '../animated/createAnimatedComponent.js';
 import { createPortal, rootContainer, RootTagContext } from '../renderer.js';
 import { addGlobalListener } from '../events.js';
+import { HostState } from '../hostData.js';
 
 const AnimatedView = createAnimatedComponent('View');
 
@@ -203,19 +204,70 @@ Modal.displayName = 'Modal';
 
 // --- trivial ------------------------------------------------------------------
 
-export function StatusBar() {
+// React Native's StatusBar: mounted <StatusBar>s stack (the last one wins
+// per prop, over the imperative setters) and the result is the UI-owned
+// shared state `jsui.statusBar` ({hidden, barStyle}), which a host with a
+// system status bar applies (the iOS host: clock, battery). Others ignore it.
+const barStack = [];
+let barBase = {};
+let barJson = null;
+function applyStatusBar() {
+  const bar = Object.assign({}, barBase);
+  for (const e of barStack) {
+    if (e.hidden !== undefined) bar.hidden = !!e.hidden;
+    if (e.barStyle !== undefined) bar.barStyle = e.barStyle;
+  }
+  const json = JSON.stringify(bar);
+  if (json === barJson) return;
+  barJson = json;
+  HostState.set('jsui.statusBar', bar);
+}
+
+export function StatusBar(props) {
+  const entry = useRef(null);
+  if (!entry.current) entry.current = {};
+  entry.current.hidden = props.hidden;
+  entry.current.barStyle = props.barStyle;
+  useEffect(() => {
+    const e = entry.current;
+    barStack.push(e);
+    return () => {
+      barStack.splice(barStack.indexOf(e), 1);
+      applyStatusBar();
+    };
+  }, []);
+  useEffect(applyStatusBar, [props.hidden, props.barStyle]);
   return null;
 }
 StatusBar.displayName = 'StatusBar';
 StatusBar.currentHeight = 0;
-StatusBar.setHidden = () => {};
-StatusBar.setBarStyle = () => {};
+StatusBar.setHidden = (hidden) => {
+  barBase = { ...barBase, hidden: !!hidden };
+  applyStatusBar();
+};
+StatusBar.setBarStyle = (barStyle) => {
+  barBase = { ...barBase, barStyle };
+  applyStatusBar();
+};
 StatusBar.setBackgroundColor = () => {};
 StatusBar.setTranslucent = () => {};
 StatusBar.setNetworkActivityIndicatorVisible = () => {};
-StatusBar.pushStackEntry = (p) => p;
-StatusBar.popStackEntry = () => {};
-StatusBar.replaceStackEntry = (_e, p) => p;
+StatusBar.pushStackEntry = (p) => {
+  const e = { hidden: p && p.hidden, barStyle: p && p.barStyle };
+  barStack.push(e);
+  applyStatusBar();
+  return e;
+};
+StatusBar.popStackEntry = (e) => {
+  const i = barStack.indexOf(e);
+  if (i >= 0) barStack.splice(i, 1);
+  applyStatusBar();
+};
+StatusBar.replaceStackEntry = (e, p) => {
+  const n = StatusBar.pushStackEntry(p);
+  StatusBar.popStackEntry(e);
+  return n;
+};
 
 export { SafeAreaView } from '../safeArea.js';
 export const KeyboardAvoidingView = (props) => {

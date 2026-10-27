@@ -115,10 +115,25 @@ struct PadState {
 };
 
 @interface JsuiViewController : UIViewController <MTKViewDelegate>
+- (void)applyStatusBar:(NSDictionary*)bar;
 @end
+
+// JsuiConfig.on_state: the UI changed a shared-state key.
+static void onUiState(void* user, const char* key, const char* json) {
+  if (std::strcmp(key, "jsui.statusBar") != 0) return;
+  NSData* data = json ? [NSData dataWithBytes:json length:std::strlen(json)] : nil;
+  id bar = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+  if (![bar isKindOfClass:NSDictionary.class]) bar = @{};
+  JsuiViewController* vc = (__bridge JsuiViewController*)user;
+  dispatch_async(dispatch_get_main_queue(), ^{ [vc applyStatusBar:bar]; });
+}
 
 @implementation JsuiViewController {
   MTKView* _view;
+  // The system status bar (clock, battery), as the UI's <StatusBar> asks
+  // (shared state jsui.statusBar): shown, light content by default.
+  BOOL _statusHidden;
+  UIStatusBarStyle _statusStyle;
   id<MTLDevice> _device;
   id<MTLCommandQueue> _queue;
   JsuiRuntime* _rt;
@@ -160,6 +175,7 @@ struct PadState {
 
 - (void)viewDidLoad {
   [super viewDidLoad];
+  _statusStyle = UIStatusBarStyleLightContent;
   _queue = [_device newCommandQueue];
   NSUserDefaults* args = NSUserDefaults.standardUserDefaults;
   _cpu = [[args stringForKey:@"JsuiRenderer"] isEqualToString:@"cpu"] || !_device;
@@ -182,6 +198,8 @@ struct PadState {
   cfg.height = int(std::lround(_logicalH));
   cfg.pixel_ratio = _scale;
   cfg.log = jsuiLog;
+  cfg.on_state = onUiState;
+  cfg.state_user = (__bridge void*)self;
   cfg.dev_mode = url.length > 0;
   NSString* jsThread = [args stringForKey:@"JsuiJsThread"];
   cfg.js_thread = [jsThread isEqualToString:@"off"]        ? JSUI_JS_THREAD_OFF
@@ -260,7 +278,21 @@ struct PadState {
 }
 
 - (BOOL)prefersStatusBarHidden {
-  return YES;
+  return _statusHidden;
+}
+- (UIStatusBarStyle)preferredStatusBarStyle {
+  return _statusStyle;
+}
+
+// <StatusBar hidden barStyle> (react-native): {"hidden": bool, "barStyle":
+// "default" | "light-content" | "dark-content"}.
+- (void)applyStatusBar:(NSDictionary*)bar {
+  _statusHidden = [bar[@"hidden"] isKindOfClass:NSNumber.class] && [bar[@"hidden"] boolValue];
+  NSString* style = [bar[@"barStyle"] isKindOfClass:NSString.class] ? bar[@"barStyle"] : @"light-content";
+  _statusStyle = [style isEqualToString:@"dark-content"] ? UIStatusBarStyleDarkContent
+                 : [style isEqualToString:@"default"]    ? UIStatusBarStyleDefault
+                                                         : UIStatusBarStyleLightContent;
+  [self setNeedsStatusBarAppearanceUpdate];
 }
 - (BOOL)prefersHomeIndicatorAutoHidden {
   return YES;
@@ -274,10 +306,7 @@ struct PadState {
 - (void)publishSafeArea {
   if (!_rt) return;
   UIEdgeInsets i = _view.safeAreaInsets;
-  char json[160];
-  snprintf(json, sizeof json, "{\"top\":%g,\"right\":%g,\"bottom\":%g,\"left\":%g}", double(i.top),
-           double(i.right), double(i.bottom), double(i.left));
-  jsui_set_state(_rt, "jsui.safeAreaInsets", json);
+  jsui_set_safe_area_insets(_rt, float(i.top), float(i.right), float(i.bottom), float(i.left));
 }
 
 - (void)viewSafeAreaInsetsDidChange {

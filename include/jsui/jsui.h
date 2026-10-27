@@ -133,6 +133,15 @@ JSUI_API int jsui_patch_state(JsuiRuntime* rt, const char* key, const char* merg
  * until the next call into the runtime. */
 JSUI_API const char* jsui_get_state(JsuiRuntime* rt, const char* key);
 
+/* Safe-area insets: the edges of the view that the device's notch, Dynamic
+ * Island, rounded corners, home indicator or system bars cover, in logical
+ * px. Shorthand for jsui_set_state(rt, "jsui.safeAreaInsets",
+ * {"top","right","bottom","left"}), which SafeAreaView, useSafeAreaInsets()
+ * and react-native-safe-area-context read. Call it again when they change
+ * (rotation). A view that does not cover a screen edge (a game's UI texture,
+ * a panel) leaves them unset: zero. Returns like jsui_set_state. */
+JSUI_API int jsui_set_safe_area_insets(JsuiRuntime* rt, float top, float right, float bottom, float left);
+
 /* JsuiConfig.on_state: JS changed a key (`HostState.set(key, value)` /
  * `HostState.patch(key, patch)`, for UI-owned data such as settings). `json`
  * is the key's full new JSON text, NULL when JS removed it. Not called for the
