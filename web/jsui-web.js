@@ -2694,8 +2694,9 @@ class JsuiHost extends CanvasView {
     return s;
   }
 
-  /** The runtime's WebGPU device (the page's, with createJsui({ device })), or null. */
-  get device() { return (this._pageWebGPU ?? this._webgpu)?.device ?? null; }
+  /** The runtime's WebGPU device (the page's, with createJsui({ device })), or
+   * null (also when the loaded module has no WebGPU backend: not dist-gpu/). */
+  get device() { return this.module.WebGPU ? (this._pageWebGPU ?? this._webgpu)?.device ?? null : null; }
 
   /** After the page's GPUDevice was lost ('devicelost'): the page's new
    * device. Every WebGPU view, texture surface and GPUTexture host texture
