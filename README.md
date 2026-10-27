@@ -2,6 +2,15 @@
 
 Fast development of cross-platform, beautiful, responsive in-game UIs or standalone Apps with React.
 
+## Why?
+
+- **Game engines and editors are built for 3D, as they should be.** Building UI is secondary there, and it feels foreign both to how games are authored and, especially, to how modern UIs are made. Performant UI rendering is also a large problem space of its own.
+- **Many games end up embedding a browser or webview.** That usually means bloat and awkward, non-optimal integrations between the game's data and its UI.
+- **LLMs already know how to build great-looking UIs on the web**, thanks to the massive amount of training data around web technologies.
+- **Webviews and regular React Native behave a bit differently on each platform** and render outside the game's own context.
+
+JSUI answers all four: you write plain React Native code that LLMs and web developers already know, and a small embeddable runtime renders it on the GPU inside your game, the same way on every platform.
+
 **Using a coding agent?** Add the JSUI skill to your project with one command:
 
 ```sh
