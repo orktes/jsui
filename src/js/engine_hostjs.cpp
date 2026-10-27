@@ -43,6 +43,7 @@
 #include "js/engine.h"
 #include "js/engine_impl.h"
 #include "platform/loader.h"
+#include "render/container_view.h"
 #include "render/lottie.h"
 #include "render/shader_view.h"
 #include "runtime.h"
@@ -533,6 +534,12 @@ EMSCRIPTEN_KEEPALIVE const char* jsui_hjs_lottie_data(int e, const char* json, i
 EMSCRIPTEN_KEEPALIVE int jsui_hjs_lottie_command(int e, double id, const char* cmd, int len, double a, double b) {
   Node* n = nodeOf(e, id);
   return n && lottie::command(n, str(cmd, len), a, b) ? 1 : 0;
+}
+
+// containerCommand(id, JSON command) (render/container_view.h).
+EMSCRIPTEN_KEEPALIVE int jsui_hjs_container_command(int e, double id, const char* json, int len) {
+  Node* n = nodeOf(e, id);
+  return n && container::command(n, Value::parseJson(str(json, len))) ? 1 : 0;
 }
 
 // shaderInfo / shaderPreload (preload 1, with the images prop as JSON) -> JSON.

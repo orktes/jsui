@@ -19,6 +19,7 @@ class FontManager;
 class ImageCache;
 class HostTextures;
 class LottieCache;
+class Containers;
 class ShaderEffects;
 class ShaderEffects;
 
@@ -122,6 +123,7 @@ class Document {
   HostTextures* textures = nullptr;  // host textures (HostTexture views)
   LottieCache* lotties = nullptr;    // Lottie sources and playing views (LottieView)
   ShaderEffects* shaders = nullptr;  // compiled SkSL and ShaderViews (render/shader_view.h)
+  Containers* containers = nullptr;  // child runtimes of JSUIContainers (render/container_view.h)
 
   // Called after layout for nodes whose props contain `__events` with
   // "layout" when their layoutRect changed.

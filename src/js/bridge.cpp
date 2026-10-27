@@ -626,6 +626,20 @@ JSValue js_lottieCommand(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
   return JS_NewBool(ctx, impl.applyNow().ok);
 }
 
+// containerCommand(id, command): a JSUIContainer's parent talks to its
+// child runtime (render/container_view.h, container::command: post / call /
+// resolve / reject / state / reload). Applied with the batch; the child runs
+// it in the next tick. Answers come back as containerevent events.
+JSValue js_containerCommand(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  uint32_t id = idArg(ctx, argc, argv, 0);
+  if (!id || argc < 2 || !JS_IsObject(argv[1])) return JS_FALSE;
+  CommandBuffer& cmds = commands(ctx);
+  CommandBuffer::Writer w = cmds.begin();
+  writeValue(ctx, argv[1], w);
+  cmds.end(Op::ContainerCommand, id);
+  return JS_TRUE;
+}
+
 // {error} | {uniforms: [{name, type, count, color}], children: [name]}.
 JSValue shaderInfoOf(JSContext* ctx, const ShaderEffects::Program& prog) {
   JSValue out = JS_NewObject(ctx);
@@ -1014,6 +1028,7 @@ void installBridge(JsEngine::Impl& impl, JSValue global) {
              {"flashScrollIndicators", js_flashScrollIndicators, 1},
              {"configureLayoutAnimation", js_configureLayoutAnimation, 1},
              {"lottieData", js_lottieData, 1},     {"lottieCommand", js_lottieCommand, 4},
+             {"containerCommand", js_containerCommand, 2},
              {"shaderInfo", js_shaderInfo, 1},
              {"shaderPreload", js_shaderPreload, 2},
              {"shadersWarming", js_shadersWarming, 0},

@@ -180,6 +180,22 @@ class DeferredGpuScope {
 };
 bool deferredGpuPaint();
 
+// While in scope, paintDocument() paints a document nested in the one being
+// painted (a JSUIContainer's child, render/container_view.h): without the
+// outer document's LayerCache (its entries and raster cache belong to the
+// outer frame), and the outer paint's per-frame state comes back after.
+class NestedPaintScope {
+ public:
+  NestedPaintScope();
+  ~NestedPaintScope();
+  NestedPaintScope(const NestedPaintScope&) = delete;
+  NestedPaintScope& operator=(const NestedPaintScope&) = delete;
+
+ private:
+  LayerCache* layers_;
+  int64_t minOccluderArea_;
+};
+
 // Benchmarks / perf tests: count the canvas calls of each paintDocument()
 // (see PaintStats). Off by default; it wraps the canvas, which costs a
 // little per call.

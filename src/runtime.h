@@ -37,6 +37,7 @@ class JsThread;
 class InputManager;
 class ImageCache;
 class LottieCache;
+class Containers;
 class ShaderEffects;
 class NativeAnimated;
 class Worklets;
@@ -271,6 +272,9 @@ class Runtime {
   std::unique_ptr<Audio> audio;
   // <Video> (jsui.h "Video"): requests to the embedder's video handler.
   std::unique_ptr<Video> video;
+  // JSUIContainers' child runtimes (render/container_view.h). Before the
+  // surfaces: their nodes unregister from it when destroyed.
+  std::unique_ptr<Containers> containers;
 
  private:
   // Node ids are unique across the surfaces (JS addresses nodes by id alone).
@@ -368,6 +372,8 @@ class Runtime {
   void deliverAudioEvents();
   // Video status reports.
   void deliverVideoEvents();
+  // What JSUIContainers' children told their embedder (containerevent).
+  void deliverContainerEvents();
   // Runs the done callbacks of settled jsui_call_ui calls.
   void deliverUiCallResults();
   // The JS context is going away: cancels its unanswered Host.calls (ids

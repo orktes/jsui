@@ -812,6 +812,10 @@ var jsuiHostJs = (function () {
           if (D.dead || arguments.length < 2) return false;
           return !!X.lottie_command(e, numArg(id), putStr(text(cmd)), L, numArg(a), numArg(b));
         },
+        containerCommand(id, cmd) {
+          if (D.dead || cmd === null || typeof cmd !== 'object') return false;
+          return !!X.container_command(e, numArg(id), putStr(JSON.stringify(cmd)), L);
+        },
         shaderInfo(sksl) {
           if (typeof sksl !== 'string') throw new TypeError('shaderInfo: expected an SkSL string');
           if (D.dead) return { error: 'the runtime was destroyed' };

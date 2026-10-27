@@ -23,7 +23,7 @@ function detach(n) {
   }
 }
 
-const TYPES = new Set(['View', 'Text', 'RawText', 'Image', 'ScrollView', 'TextInput', 'LottieView', 'ShaderView', 'VectorView']);
+const TYPES = new Set(['View', 'Text', 'RawText', 'Image', 'ScrollView', 'TextInput', 'LottieView', 'ShaderView', 'VectorView', 'JSUIContainer']);
 
 const mockResolve = (url) => (/^[a-z]+:/.test(url) ? url : 'http://bundle/' + url.replace(/^\.\//, ''));
 
@@ -168,6 +168,10 @@ globalThis.__jsui_native = {
     }
     calls.push(['lottieData', key]);
     return key;
+  },
+  containerCommand(id, cmd) {
+    calls.push(['containerCommand', id, cmd]);
+    return nodes.has(id);
   },
   lottieCommand(id, cmd, a, b) {
     calls.push(['lottieCommand', id, cmd, a, b]);
