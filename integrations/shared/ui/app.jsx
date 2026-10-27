@@ -163,7 +163,7 @@ const RadarPanel = memo(function RadarPanel({ selected }) {
   if (!hasNativeComponent('Radar')) return null;
   return (
     <View style={styles.radarPanel}>
-      <Text style={styles.sectionLabel}>Radar · native component</Text>
+      <Text style={styles.sectionLabel}>Radar</Text>
       <Pressable
         style={styles.radarPress}
         onPress={(e) => RadarCommands.select(ref.current, e.nativeEvent.locationX, e.nativeEvent.locationY, RADAR_SIZE)}
