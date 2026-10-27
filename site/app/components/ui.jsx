@@ -1,6 +1,7 @@
 // Shared building blocks for the site pages.
 import React, { useEffect, useRef } from 'react';
 import { Animated, Easing, Linking, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { bp, colors, font, site, text } from '../theme.js';
 import { useRouter } from '../router.js';
 
@@ -9,13 +10,20 @@ export const GITHUB = 'https://github.com/orktes/jsui';
 /** Layout info for the current canvas size. */
 export function useLayout() {
   const { width, height } = useWindowDimensions();
+  // The device's notch / Dynamic Island / home indicator (zero in a browser
+  // that keeps the page clear of them): the side gutters grow past the
+  // larger side inset, so the page stays centred, and the nav bar and the
+  // footer grow by the top and bottom ones.
+  const insets = useSafeAreaInsets();
+  const gutter = width < bp.phone ? 18 : width < bp.tablet ? 28 : 40;
   return {
     width,
     height,
     phone: width < bp.phone,
     tablet: width < bp.tablet,
-    gutter: width < bp.phone ? 18 : width < bp.tablet ? 28 : 40,
+    gutter: Math.max(gutter, insets.left, insets.right),
     content: Math.min(width, 1240),
+    insets,
   };
 }
 

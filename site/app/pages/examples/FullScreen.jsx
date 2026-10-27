@@ -14,7 +14,7 @@ export const BAR_HEIGHT = 56;
 const pad2 = (n) => String(n).padStart(2, '0');
 
 export function FullScreen({ s, index, total, mountKey, padInside, onStep, onClose }) {
-  const { width, height, phone } = useLayout();
+  const { width, height, phone, insets } = useLayout();
   // The stage settles in with a small scale; everything is visible from the
   // first frame (nothing waits on the animation to be seen).
   const t = useRef(new Animated.Value(0)).current;
@@ -22,8 +22,11 @@ export function FullScreen({ s, index, total, mountKey, padInside, onStep, onClo
     Animated.timing(t, { toValue: 1, duration: 380, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
   }, []);
   // Each screen is laid out at 1280 x 720 and scaled to fit what is left
-  // under the bar.
-  const room = { w: width, h: Math.max(1, height - BAR_HEIGHT) };
+  // under the bar, clear of the safe area's insets (the Dynamic Island on a
+  // phone's top or side, the home indicator). The bar's background reaches
+  // under the top one.
+  const side = Math.max(insets.left, insets.right);
+  const room = { w: Math.max(1, width - side * 2), h: Math.max(1, height - BAR_HEIGHT - insets.top - insets.bottom) };
   const fit = Math.min(room.w / 1280, room.h / 720);
   const stageW = Math.floor(1280 * fit);
   const close = () => {
@@ -43,7 +46,7 @@ export function FullScreen({ s, index, total, mountKey, padInside, onStep, onClo
         }}
       >
         <View
-          style={[styles.bar, { paddingHorizontal: phone ? 10 : 18 }]}
+          style={[styles.bar, { height: BAR_HEIGHT + insets.top, paddingTop: insets.top, paddingHorizontal: Math.max(phone ? 10 : 18, side) }]}
         >
           <View style={[styles.accent, { backgroundColor: s.accent, boxShadow: `0 0 12px ${s.accent}` }]} />
           <View style={{ flexShrink: 1, gap: 1 }}>
@@ -82,7 +85,7 @@ export function FullScreen({ s, index, total, mountKey, padInside, onStep, onClo
           </Pressable>
         </View>
         <View
-          style={styles.body}
+          style={[styles.body, { paddingBottom: insets.bottom, paddingHorizontal: side }]}
           onGamepadButton={() => {
             padInside.current = true;
           }}
@@ -92,7 +95,7 @@ export function FullScreen({ s, index, total, mountKey, padInside, onStep, onClo
               <s.component key={s.id + ':' + mountKey} active />
             </Stage>
           </Animated.View>
-          {room.h > room.w * 1.2 ? <Text style={styles.rotate}>Turn your phone sideways for a bigger screen</Text> : null}
+          {room.h > room.w * 1.2 ? <Text style={[styles.rotate, { bottom: 28 + insets.bottom }]}>Turn your phone sideways for a bigger screen</Text> : null}
         </View>
       </View>
     </Modal>

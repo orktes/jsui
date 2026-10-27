@@ -274,10 +274,7 @@ struct PadState {
 - (void)publishSafeArea {
   if (!_rt) return;
   UIEdgeInsets i = _view.safeAreaInsets;
-  char json[160];
-  snprintf(json, sizeof json, "{\"top\":%g,\"right\":%g,\"bottom\":%g,\"left\":%g}", double(i.top),
-           double(i.right), double(i.bottom), double(i.left));
-  jsui_set_state(_rt, "jsui.safeAreaInsets", json);
+  jsui_set_safe_area_insets(_rt, float(i.top), float(i.right), float(i.bottom), float(i.left));
 }
 
 - (void)viewSafeAreaInsetsDidChange {

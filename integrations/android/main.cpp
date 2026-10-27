@@ -361,12 +361,7 @@ bool publishSafeArea(Host& h) {
     env->ExceptionClear();
     ok = false;
   }
-  if (ok && h.rt) {
-    char json[160];
-    snprintf(json, sizeof json, "{\"top\":%g,\"right\":%g,\"bottom\":%g,\"left\":%g}", t / h.scale, r / h.scale,
-             b / h.scale, l / h.scale);
-    jsui_set_state(h.rt, "jsui.safeAreaInsets", json);
-  }
+  if (ok && h.rt) jsui_set_safe_area_insets(h.rt, t / h.scale, r / h.scale, b / h.scale, l / h.scale);
   // (local references are freed when the frame returns to the looper)
   return ok;
 }

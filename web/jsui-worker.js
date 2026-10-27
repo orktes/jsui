@@ -122,6 +122,7 @@ function definePage(I) {
     for (const k of ['bundleUrl', 'moduleUrl', 'moduleBase']) if (o[k] != null) o[k] = new URL(o[k], base).href;
     if (o.initialProps !== undefined) o.initialProps = JSON.parse(JSON.stringify(o.initialProps ?? {}));
     o.gamepads = false;  // polled here
+    o.safeArea = false;  // measured here
     o.autoFocus = false;
     return o;
   };
@@ -413,6 +414,8 @@ function definePage(I) {
   }
 
   class WorkerHost extends ProxyView {
+    _publishesSafeArea() { return true; }
+
     constructor(worker, canvas, opts) {
       super(canvas, opts);
       this.worker = worker;
@@ -471,7 +474,10 @@ function definePage(I) {
         this.jsEngine = r.jsEngine;
         this._backend = r.backend;
         this._lastError = r.lastError ?? null;
-        if (this.canvas) this._installDom();
+        if (this.canvas) {
+          this._installDom();
+          this._publishSafeArea();
+        }
         if (this.opts.gamepads !== false) this._installGamepads();
         // Events the worker sent so far reach the listeners the caller adds
         // right after createJsui() resolves.

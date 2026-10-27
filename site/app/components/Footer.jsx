@@ -6,9 +6,9 @@ import { Logo } from './NavBar.jsx';
 import { Button } from './ui.jsx';
 
 export function Footer() {
-  const { phone } = useLayout();
+  const { phone, insets } = useLayout();
   return (
-    <View style={styles.wrap}>
+    <View style={[styles.wrap, insets.bottom ? { paddingBottom: 36 + insets.bottom } : null]}>
       <Column style={[styles.row, phone && { flexDirection: 'column', alignItems: 'flex-start' }]}>
         <View style={{ gap: 10, flexShrink: 1 }}>
           <Logo size={16} />

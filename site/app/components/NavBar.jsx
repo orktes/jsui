@@ -11,6 +11,8 @@ import { Button, GITHUB, useLayout } from './ui.jsx';
 import { LINKS } from './sections.js';
 
 export { LINKS };
+// The bar's own height; it also covers the safe area's top inset (the
+// Dynamic Island) above it: NAV_HEIGHT + useLayout().insets.top.
 export const NAV_HEIGHT = 64;
 
 // The menu's rows: each section, then its own pages indented under it.
@@ -164,7 +166,7 @@ function MenuItem({ p, index, to, label, num, sub, active, autoFocus, onGo, styl
 // puts the sections in one column and the Features pages in another when the
 // window is wide enough, never grows past the window, and scrolls whatever
 // still doesn't fit.
-function MobileMenu({ p, open, opens, head, sub, width, height, gutter, phone, onGo, onClose }) {
+function MobileMenu({ p, open, opens, head, sub, width, height, bottom, gutter, phone, onGo, onClose }) {
   const fx = useMemo(
     () => ({
       backdrop: { opacity: p.interpolate({ inputRange: [0, 0.6], outputRange: [0, 1], extrapolate: 'clamp' }) },
@@ -186,7 +188,8 @@ function MobileMenu({ p, open, opens, head, sub, width, height, gutter, phone, o
   const own = ROWS.findIndex((r) => r.to === sub);
   const current = own >= 0 ? own : ROWS.findIndex((r) => r.to === head);
   const focusAt = Math.max(0, current);
-  const room = height - (phone ? 0 : CARD_TOP + gutter / 2);
+  // (the home indicator's inset, if any, stays clear)
+  const room = height - bottom - (phone ? 0 : CARD_TOP + gutter / 2);
   const cols = !phone && ROWS_HEIGHT + SHEET_CHROME > room ? 2 : 1;
   const card = { width: Math.min(cols === 2 ? 560 : 380, width - gutter * 2), marginRight: gutter };
   const row = (r) => {
@@ -240,7 +243,7 @@ function MobileMenu({ p, open, opens, head, sub, width, height, gutter, phone, o
 
 export function NavBar() {
   const { path, go } = useRouter();
-  const { width, height, tablet, phone, gutter } = useLayout();
+  const { width, height, tablet, phone, gutter, insets } = useLayout();
   const head = '/' + (segments(path)[0] || '');
   const sub = '/' + segments(path).slice(0, 2).join('/');
   // A native window whose buttons sit in this bar (jsui-viewer
@@ -279,7 +282,7 @@ export function NavBar() {
   };
 
   return (
-    <View style={[styles.bar, { paddingHorizontal: gutter, paddingLeft: left }]}>
+    <View style={[styles.bar, { height: NAV_HEIGHT + insets.top, paddingTop: insets.top, paddingHorizontal: gutter, paddingLeft: left }]}>
       <Pressable onPress={() => go('/')} style={{ cursor: 'pointer' }} focusable={false}>
         <Logo size={phone ? 18 : 20} />
       </Pressable>
@@ -303,7 +306,7 @@ export function NavBar() {
         </Visibility>
       </View>
       {compact ? (
-        <MobileMenu p={p} open={open} opens={opens} head={head} sub={sub} width={width} height={height - NAV_HEIGHT} gutter={gutter} phone={phone} onGo={goFromMenu} onClose={() => toggle(false)} />
+        <MobileMenu p={p} open={open} opens={opens} head={head} sub={sub} width={width} height={height - NAV_HEIGHT - insets.top} bottom={insets.bottom} gutter={gutter} phone={phone} onGo={goFromMenu} onClose={() => toggle(false)} />
       ) : null}
     </View>
   );
