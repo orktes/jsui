@@ -369,7 +369,7 @@ namespace {
 // Chrome's default LSQ2 strategy). A flick speeds up until the finger
 // lifts; the window's average would hand the fling a slower start than the
 // content had under the finger. Two samples: their slope.
-float releaseVelocity(const InputManager::ScrollState::Sample* s, int n) {
+float releaseVelocity(const DragSample* s, int n) {
   if (n < 2) return 0;
   const double tn = s[n - 1].t;
   if (n == 2) {

@@ -259,9 +259,10 @@ TEST(scroll_drag_resampled_at_frame_time) {
       last = sv->scrollY;
     }
     f.in().touch(0, 3, 50, evs.back().y);
-    // Steady state: skip the drag's first frames.
+    // Steady state: skip the drag's first frames and its last (the samples
+    // stop there, so its resample time has no newer sample to bracket it).
     float lo = 1e9f, hi = -1e9f;
-    for (size_t i = 2; i < steps.size(); i++) {
+    for (size_t i = 2; i + 1 < steps.size(); i++) {
       lo = std::min(lo, steps[i]);
       hi = std::max(hi, steps[i]);
     }
@@ -744,11 +745,11 @@ TEST(scroll_horizontal_and_scroll_enabled) {
   f.in().touch(0, 1, 60, 40);
   f.tick(300);
   f.in().touch(0, 2, 60, 40);
-  CHECK_EQ(sv->scrollX, 30.f);
+  CHECK_EQ(sv->scrollX, 22.f);  // 30 px of travel less the 8 px touch slop
   CHECK_EQ(sv->scrollY, 0.f);
   f.in().key("ArrowRight", "ArrowRight", true, false, 0);
   f.settle();
-  CHECK_EQ(sv->scrollX, 70.f);
+  CHECK_EQ(sv->scrollX, 62.f);
   // scrollEnabled=false: user input does nothing, programmatic still works.
   Value::Object p = sv->props().asObject();
   p["scrollEnabled"] = Value(false);
@@ -763,7 +764,7 @@ TEST(scroll_horizontal_and_scroll_enabled) {
   f.tick(100);
   f.in().gamepadAxis(0, 2, 0.f);
   f.settle();
-  CHECK_EQ(sv->scrollX, 70.f);
+  CHECK_EQ(sv->scrollX, 62.f);
   f.in().scrollTo(sv, 500, 0);
   CHECK_EQ(sv->scrollX, 500.f);
 }

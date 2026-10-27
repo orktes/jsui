@@ -57,6 +57,13 @@ Affine nodeLocalToParent(const Node* n);
 
 enum class NavDirection : uint8_t { Up, Down, Left, Right };
 
+// A touch drag's finger position along the scroll axis (offset space) at its
+// event time (ms); see InputManager::ScrollState::samples.
+struct DragSample {
+  double t;
+  float pos;
+};
+
 class InputManager {
  public:
   // Input of one surface: `doc` is the surface's document and `cursor` the
@@ -295,10 +302,7 @@ class InputManager {
     std::array<float, 6> sampleAges{};  // newest sample's age at recent frames (ms)
     int frames = 0;
     double lag = 0;  // ms behind the frame time the finger is sampled at
-    struct Sample {
-      double t;
-      float pos;
-    };
+    using Sample = DragSample;
     std::array<Sample, 20> samples{};
     int sampleCount = 0;
     // Snap after a trackpad / stick scroll settles (-1: none).
