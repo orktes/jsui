@@ -156,7 +156,8 @@ npx jsui log --attach $U --since 0             # what the person clicked / press
 * A person can debug and profile the live native runtime's JS from Chrome
   DevTools or VS Code through the same server: breakpoints in their JSX
   (source maps), console, and the Performance panel's CPU profile (a flame
-  chart of JS functions; layout and paint are not in it). `$U/json/list`
+  chart of JS functions, with the runtime's layout, paint and GPU submit as
+  `(layout)`, `(paint)`, `(gpu)` where JS was idle). `$U/json/list`
   gives each runtime's `devtoolsFrontendUrl` to paste into Chrome. See
   `docs/DEBUGGING.md`.
 

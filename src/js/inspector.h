@@ -30,6 +30,8 @@
 
 #include <quickjs.h>
 
+#include "core/perf.h"
+
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -43,7 +45,7 @@ struct QJSCDPAgent;
 
 namespace jsui {
 
-class Inspector {
+class Inspector : public PhaseSpanSink {
  public:
   // `origin`: the dev server (http://host:port). `id`: the runtime's id in
   // the shared session, stable across reloads.
@@ -54,7 +56,8 @@ class Inspector {
   void setTitle(const std::string& title);
 
   // A new JS context, before any of the bundle is parsed / it is going away.
-  void attach(JSContext* ctx);
+  // `phases`: the runtime's frame phases, reported into CPU profiles.
+  void attach(JSContext* ctx, Perf* phases = nullptr);
   void detach(JSContext* ctx);
   bool attached() const { return agent_ != nullptr; }
 
@@ -69,6 +72,11 @@ class Inspector {
   void exception(JSValueConst exc, const std::string& text);
   // JS returned to the runtime (a CPU profile counts what follows as idle).
   void jsIdle();
+  // Whether a frontend records a CPU profile: the runtime's phases then
+  // report to this sink (span: any thread), shown in the profile.
+  bool profiling() const { return sampling_; }
+  void span(Phase phase, std::chrono::steady_clock::time_point start,
+            std::chrono::steady_clock::time_point end) override;
 
  private:
   struct Out {
@@ -87,6 +95,7 @@ class Inspector {
   bool sleepFor(int ms);  // false when stopping
   void sampleLoop();
   void syncSampler();
+  void flushSpans();  // runtime thread
 
   const std::string origin_, id_, name_;
   std::string title_;
@@ -125,6 +134,13 @@ class Inspector {
   // takes a sample. Started and stopped on the runtime's thread.
   std::atomic<bool> sampling_{false};
   std::thread sampler_;
+  struct Span {
+    Phase phase;
+    int64_t start, end;  // steady_clock microseconds, the agent's clock
+  };
+  Perf* phases_ = nullptr;  // runtime thread
+  std::mutex spanMutex_;
+  std::vector<Span> spans_;
 };
 
 }  // namespace jsui

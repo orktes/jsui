@@ -44,6 +44,9 @@ JSUI's changes are marked `jsui:` in the source:
   (`Profiler.Profile`, as V8's). The embedder's thread calls
   `qjs_cdp_profiler_tick` every sampling interval, which arms the statement
   traps for one statement, and that statement records the stack; functions
-  are keyed by where they are defined (`func_line` / `func_col` from
+  are keyed by where they are defined (`func_line` / `func_col`, read in one stack walk by
+  `JS_GetStackFunctions`, from
   `../quickjs-jsui/0005-frame-info-function-location.patch`).
-  `qjs_cdp_profiler_idle` marks JS returning to the embedder.
+  `qjs_cdp_profiler_idle` marks JS returning to the embedder, and
+  `qjs_cdp_profiler_add_span` adds the embedder's own work (`(layout)`, ...)
+  into the idle time, on the clock `qjs_cdp_profiler_set_clock` gives.

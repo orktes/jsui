@@ -8,6 +8,7 @@
 // from a React commit is Js -> Commit -> Style.
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 
@@ -71,6 +72,15 @@ struct PerfCounters {
 // Paragraph::layout runs (process-wide: the text cache has no document).
 inline uint64_t gParagraphLayouts = 0;
 
+// Receives each stretch of exclusive phase time as it ends (the debugger's
+// CPU profile shows them, docs/DEBUGGING.md). Called on the thread the
+// phases run on; Phase::Other and Phase::Js are not reported.
+struct PhaseSpanSink {
+  virtual ~PhaseSpanSink() = default;
+  virtual void span(Phase phase, std::chrono::steady_clock::time_point start,
+                    std::chrono::steady_clock::time_point end) = 0;
+};
+
 class Perf {
  public:
   using Clock = std::chrono::steady_clock;
@@ -83,6 +93,9 @@ class Perf {
   uint64_t propsEpoch = 0;
   // Accumulated exclusive time per phase in microseconds (reset by the caller).
   double us[size_t(Phase::Count)] = {};
+  // Set while a debugger records a CPU profile: phase scopes run (as with
+  // profiling) and report their spans here.
+  std::atomic<PhaseSpanSink*> spans{nullptr};
 
   void reset() {
     counters = PerfCounters();
@@ -99,7 +112,8 @@ class Perf {
   // RAII phase scope; a no-op unless profiling.
   class Scope {
    public:
-    Scope(Perf& p, Phase ph) : p_(p.profiling ? &p : nullptr) {
+    Scope(Perf& p, Phase ph)
+        : p_(p.profiling || p.spans.load(std::memory_order_relaxed) ? &p : nullptr) {
       if (p_) p_->enter(ph, &prev_);
     }
     ~Scope() {
@@ -116,16 +130,22 @@ class Perf {
  private:
   void enter(Phase ph, Phase* prev) {
     Clock::time_point now = Clock::now();
-    us[size_t(current_)] += std::chrono::duration<double, std::micro>(now - t0_).count();
+    book(now);
     *prev = current_;
     current_ = ph;
     t0_ = now;
   }
   void leave(Phase prev) {
     Clock::time_point now = Clock::now();
-    us[size_t(current_)] += std::chrono::duration<double, std::micro>(now - t0_).count();
+    book(now);
     current_ = prev;
     t0_ = now;
+  }
+  // The current phase ran from t0_ to now.
+  void book(Clock::time_point now) {
+    if (profiling) us[size_t(current_)] += std::chrono::duration<double, std::micro>(now - t0_).count();
+    if (current_ != Phase::Other && current_ != Phase::Js)
+      if (PhaseSpanSink* sink = spans.load(std::memory_order_relaxed)) sink->span(current_, t0_, now);
   }
   Phase current_ = Phase::Other;
   Clock::time_point t0_ = Clock::now();

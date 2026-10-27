@@ -134,6 +134,18 @@ int qjs_cdp_sampling_interval(QJSCDPAgent *agent);
 void qjs_cdp_profiler_tick(QJSCDPAgent *agent); /* any thread */
 void qjs_cdp_profiler_idle(QJSCDPAgent *agent); /* JS thread */
 
+/* jsui: the profiler's clock (microseconds, monotonic). The default is the
+   agent's own; an embedder that reports spans sets the one they are in. */
+typedef int64_t QJSCDPClockFunc(void);
+void qjs_cdp_profiler_set_clock(QJSCDPAgent *agent, QJSCDPClockFunc *now_us);
+
+/* jsui: work the embedder did between JS calls (layout, paint, ...), shown in
+   the profile as a top-level entry named `name` ("(layout)") wherever the
+   JS thread was idle at the time. JS thread only; ignored when not
+   profiling. */
+void qjs_cdp_profiler_add_span(
+    QJSCDPAgent *agent, const char *name, int64_t start_us, int64_t end_us);
+
 #ifdef __cplusplus
 }
 #endif

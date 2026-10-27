@@ -873,7 +873,7 @@ bool QuickJsEngine::eval(const std::string& source, const std::string& name) {
     // The debugger first: only code parsed after it is attached can stop.
     if (const std::shared_ptr<Inspector>& ins = impl.rt.inspector) {
       if (!impl.inspector) {
-        ins->attach(impl.ctx);
+        ins->attach(impl.ctx, &impl.rt.doc.perf);
         impl.inspector = ins;
         impl.timeoutMs = 0;  // a breakpoint is not a hung script
       }

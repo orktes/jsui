@@ -41,10 +41,16 @@ their names and files, through the source map, and `(idle)` where JS wasn't
 running. *Save profile* writes a `.cpuprofile`.
 
 * **What it measures.** Time on the JS thread while JS runs, by JS function.
-  Time in a native call (layout, a host call, `JSON.parse`) counts toward
-  the JS function that made it. Layout, paint and the GPU between JS calls
-  are not in it: `jsui_set_profiling` and `getPerf()` time those (see
-  [PERFORMANCE.md](PERFORMANCE.md)).
+  Time in a native call (a host call, `JSON.parse`) counts toward the JS
+  function that made it.
+* **The runtime's own work.** Where JS was idle, the frame phases the
+  runtime ran show as top-level entries: `(commit)`, `(style)`, `(layout)`,
+  `(animated)`, `(input)`, `(paint)` and `(gpu)` (submitting the frame to
+  the GPU, not GPU execution). They run on the window's thread: with JS on
+  its own thread (the default), a phase that overlaps running JS shows only
+  where JS was idle. With `--js-thread off` everything is one thread and
+  the chart shows whole frames. Totals per phase without DevTools:
+  `jsui_set_profiling` / `getPerf()` (see [PERFORMANCE.md](PERFORMANCE.md)).
 * **How.** A thread of the runtime's arms the statement traps once per
   sampling interval (`Profiler.setSamplingInterval`, 1 ms unless the
   frontend asks otherwise, at least 100 µs), and the next

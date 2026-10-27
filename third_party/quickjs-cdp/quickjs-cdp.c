@@ -77,7 +77,13 @@ typedef struct {
   JSAtom file, func; /* dup'd atoms of the debuggee; JS_ATOM_NULL for 0-2 */
   int line, col;     /* 1-based definition, or -1 */
   int parent, first_child, next_sibling; /* indices, -1 for none */
+  char *label;       /* a span's name ("(layout)"); NULL for functions */
 } ProfNode;
+
+typedef struct {
+  int node;
+  int64_t start, end;
+} ProfSpan;
 
 typedef struct {
   int id;
@@ -170,6 +176,11 @@ struct QJSCDPAgent {
   int64_t *sample_times;
   int nsamples, samples_cap;
   int64_t profile_start;
+  QJSCDPClockFunc *clock;
+  ProfSpan *spans;
+  int nspans, spans_cap;
+  JSDebugFrameInfo *frames; /* a sample's stack */
+  int frames_cap;
 };
 
 /* ---------------------------------------------------------------- JSON --- */
@@ -783,9 +794,15 @@ static void profiler_reset(QJSCDPAgent *agent) {
       JS_FreeAtom(agent->ctx, agent->pnodes[i].file);
     if (agent->pnodes[i].func != JS_ATOM_NULL)
       JS_FreeAtom(agent->ctx, agent->pnodes[i].func);
+    free(agent->pnodes[i].label);
   }
   agent->npnodes = 0;
   agent->nsamples = 0;
+  agent->nspans = 0;
+}
+
+static int64_t profiler_now(QJSCDPAgent *agent) {
+  return agent->clock ? agent->clock() : cdp_now_us();
 }
 
 static int profiler_node(
@@ -813,6 +830,7 @@ static int profiler_node(
   n->parent = parent;
   n->first_child = -1;
   n->next_sibling = -1;
+  n->label = NULL;
   if (parent >= 0) {
     n->next_sibling = agent->pnodes[parent].first_child;
     agent->pnodes[parent].first_child = id;
@@ -822,7 +840,7 @@ static int profiler_node(
 
 enum { PROF_ROOT = 0, PROF_PROGRAM = 1, PROF_IDLE = 2 };
 
-static void profiler_push(QJSCDPAgent *agent, int node) {
+static void profiler_push_at(QJSCDPAgent *agent, int node, int64_t t) {
   if (agent->nsamples == agent->samples_cap) {
     agent->samples_cap = agent->samples_cap ? agent->samples_cap * 2 : 4096;
     agent->samples =
@@ -831,8 +849,12 @@ static void profiler_push(QJSCDPAgent *agent, int node) {
         agent->sample_times, sizeof(int64_t) * (size_t)agent->samples_cap);
   }
   agent->samples[agent->nsamples] = node;
-  agent->sample_times[agent->nsamples] = cdp_now_us();
+  agent->sample_times[agent->nsamples] = t;
   agent->nsamples++;
+}
+
+static void profiler_push(QJSCDPAgent *agent, int node) {
+  profiler_push_at(agent, node, profiler_now(agent));
 }
 
 static void profiler_start(QJSCDPAgent *agent) {
@@ -840,7 +862,7 @@ static void profiler_start(QJSCDPAgent *agent) {
   profiler_node(agent, -1, JS_ATOM_NULL, JS_ATOM_NULL, -1, -1);
   profiler_node(agent, PROF_ROOT, JS_ATOM_NULL, JS_ATOM_NULL, -1, -1);
   profiler_node(agent, PROF_ROOT, JS_ATOM_NULL, JS_ATOM_NULL, -2, -2);
-  agent->profile_start = cdp_now_us();
+  agent->profile_start = profiler_now(agent);
   agent->profiling = true;
   profiler_push(agent, PROF_IDLE); /* messages are handled while JS is idle */
 }
@@ -849,15 +871,60 @@ static void profiler_start(QJSCDPAgent *agent) {
    time until the next sample is spent here (in the innermost frame, or in a
    native function it called). */
 static void profiler_sample(QJSCDPAgent *agent) {
+  int depth = JS_GetStackDepth(agent->ctx);
+  if (depth > agent->frames_cap) {
+    agent->frames_cap = depth * 2;
+    agent->frames = realloc(
+        agent->frames, sizeof(JSDebugFrameInfo) * (size_t)agent->frames_cap);
+  }
+  int n = JS_GetStackFunctions(agent->ctx, agent->frames, agent->frames_cap);
   int node = PROF_ROOT;
-  for (int level = JS_GetStackDepth(agent->ctx) - 1; level >= 0; level--) {
-    JSDebugFrameInfo info;
-    if (JS_GetFrameInfoAtLevel(agent->ctx, level, &info) < 0) continue;
-    if (info.is_native) continue;
-    node = profiler_node(agent, node, info.filename, info.func_name,
-                         info.func_line, info.func_col);
+  for (int level = n - 1; level >= 0; level--) {
+    JSDebugFrameInfo *info = &agent->frames[level];
+    if (info->is_native) continue;
+    node = profiler_node(agent, node, info->filename, info->func_name,
+                         info->func_line, info->func_col);
   }
   profiler_push(agent, node == PROF_ROOT ? PROF_PROGRAM : node);
+}
+
+static int span_cmp(const void *a, const void *b) {
+  int64_t x = ((const ProfSpan *)a)->start, y = ((const ProfSpan *)b)->start;
+  return x < y ? -1 : x > y;
+}
+
+/* Each (idle) stretch of the samples becomes the spans that fall in it, with
+   (idle) left for the rest. Spans that overlap JS are cut to its gaps. */
+static void profiler_merge_spans(QJSCDPAgent *agent, int64_t end) {
+  if (!agent->nspans) return;
+  qsort(agent->spans, (size_t)agent->nspans, sizeof(ProfSpan), span_cmp);
+  int n = agent->nsamples;
+  int *old_samples = agent->samples;
+  int64_t *old_times = agent->sample_times;
+  agent->samples = NULL;
+  agent->sample_times = NULL;
+  agent->nsamples = agent->samples_cap = 0;
+  int first = 0; /* spans before this one end before the current stretch */
+  for (int i = 0; i < n; i++) {
+    int64_t t = old_times[i], next = i + 1 < n ? old_times[i + 1] : end;
+    if (old_samples[i] != PROF_IDLE) {
+      profiler_push_at(agent, old_samples[i], t);
+      continue;
+    }
+    int64_t cursor = t;
+    while (first < agent->nspans && agent->spans[first].end <= t) first++;
+    for (int k = first; k < agent->nspans && agent->spans[k].start < next; k++) {
+      int64_t a = agent->spans[k].start > cursor ? agent->spans[k].start : cursor;
+      int64_t b = agent->spans[k].end < next ? agent->spans[k].end : next;
+      if (a >= b) continue;
+      if (a > cursor) profiler_push_at(agent, PROF_IDLE, cursor);
+      profiler_push_at(agent, agent->spans[k].node, a);
+      cursor = b;
+    }
+    if (cursor < next || cursor == t) profiler_push_at(agent, PROF_IDLE, cursor);
+  }
+  free(old_samples);
+  free(old_times);
 }
 
 static JSValue profiler_call_frame(QJSCDPAgent *agent, int i) {
@@ -874,7 +941,9 @@ static JSValue profiler_call_frame(QJSCDPAgent *agent, int i) {
   char script_id[16];
   snprintf(script_id, sizeof(script_id), "%d", script ? script->id : 0);
   json_set_string(agent, frame, "functionName",
-                  i <= PROF_IDLE ? special[i] : frame_name(func));
+                  i <= PROF_IDLE ? special[i]
+                  : n->label     ? n->label
+                                 : frame_name(func));
   json_set_string(agent, frame, "scriptId", script_id);
   json_set_string(agent, frame, "url", file ? file : "");
   json_set_int(agent, frame, "lineNumber", n->line > 0 ? n->line - 1 : -1);
@@ -890,7 +959,8 @@ static JSValue profiler_stop(QJSCDPAgent *agent) {
   agent->profiling = false;
   agent->sample_pending = false;
   update_arming(agent);
-  int64_t end = cdp_now_us();
+  int64_t end = profiler_now(agent);
+  profiler_merge_spans(agent, end);
 
   int *hits = calloc((size_t)agent->npnodes, sizeof(int));
   for (int i = 0; i < agent->nsamples; i++) hits[agent->samples[i]]++;
@@ -1809,6 +1879,8 @@ void qjs_cdp_free(QJSCDPAgent *agent) {
   free(agent->pnodes);
   free(agent->samples);
   free(agent->sample_times);
+  free(agent->spans);
+  free(agent->frames);
 
   free(agent->objs);
   free(agent->scripts);
@@ -2109,4 +2181,34 @@ void qjs_cdp_profiler_idle(QJSCDPAgent *agent) {
   /* The first statement JS runs next ends the idle stretch. */
   agent->sample_pending = true;
   JS_SetDebugTraceArmed(agent->ctx, true);
+}
+
+void qjs_cdp_profiler_set_clock(QJSCDPAgent *agent, QJSCDPClockFunc *now_us) {
+  agent->clock = now_us;
+}
+
+void qjs_cdp_profiler_add_span(
+    QJSCDPAgent *agent, const char *name, int64_t start_us, int64_t end_us) {
+  if (!agent->profiling || end_us <= start_us || end_us <= agent->profile_start)
+    return;
+  int node = -1;
+  for (int c = agent->pnodes[PROF_ROOT].first_child; c >= 0;
+       c = agent->pnodes[c].next_sibling)
+    if (agent->pnodes[c].label && strcmp(agent->pnodes[c].label, name) == 0)
+      node = c;
+  if (node < 0) {
+    /* A key no function has, so profiler_node makes a new node. */
+    int key = -3 - agent->npnodes;
+    node = profiler_node(agent, PROF_ROOT, JS_ATOM_NULL, JS_ATOM_NULL, key, key);
+    agent->pnodes[node].label = strdup(name);
+  }
+  if (agent->nspans == agent->spans_cap) {
+    agent->spans_cap = agent->spans_cap ? agent->spans_cap * 2 : 1024;
+    agent->spans =
+        realloc(agent->spans, sizeof(ProfSpan) * (size_t)agent->spans_cap);
+  }
+  agent->spans[agent->nspans].node = node;
+  agent->spans[agent->nspans].start = start_us;
+  agent->spans[agent->nspans].end = end_us;
+  agent->nspans++;
 }

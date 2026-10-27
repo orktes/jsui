@@ -245,6 +245,10 @@ test('profiler: Profiler.start / stop records a CPU profile of the JSX (native r
     const bundle = await (await fetch(parsed.params.url)).text();
     assert.match(bundle.split('\n')[spin.callFrame.lineNumber], /function spin\(/);
     assert.ok(profile.nodes.some((n) => n.callFrame.functionName === '(idle)' && n.hitCount > 0));
+    // The runtime's own work between JS calls, in JS's idle time.
+    const phases = profile.nodes.filter((n) => /^\((layout|paint|commit|style|gpu)\)$/.test(n.callFrame.functionName) && n.hitCount > 0);
+    assert.ok(phases.length > 0, 'phases in the profile: ' + profile.nodes.map((n) => n.callFrame.functionName).join(','));
+    for (const n of phases) assert.ok(profile.nodes[0].children.includes(n.id), n.callFrame.functionName + ' is top level');
     c.ws.close();
   } finally {
     child.kill();

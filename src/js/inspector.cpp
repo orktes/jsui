@@ -24,6 +24,24 @@ constexpr int kPushTimeoutMs = 10000;
 
 std::string emptyResult(const Value& id) { return "{\"id\":" + id.toJson() + ",\"result\":{}}"; }
 
+int64_t steadyUs(std::chrono::steady_clock::time_point t) {
+  return std::chrono::duration_cast<std::chrono::microseconds>(t.time_since_epoch()).count();
+}
+int64_t profilerClock() { return steadyUs(std::chrono::steady_clock::now()); }
+
+const char* spanName(Phase p) {
+  switch (p) {
+    case Phase::Commit: return "(commit)";
+    case Phase::Animated: return "(animated)";
+    case Phase::Style: return "(style)";
+    case Phase::Layout: return "(layout)";
+    case Phase::Input: return "(input)";
+    case Phase::Paint: return "(paint)";
+    case Phase::Gpu: return "(gpu)";
+    default: return "(native)";
+  }
+}
+
 }  // namespace
 
 Inspector::Inspector(std::string origin, std::string id, std::string name)
@@ -46,6 +64,7 @@ Inspector::~Inspector() {
   if (sender_.joinable()) sender_.join();
   sampling_ = false;
   if (sampler_.joinable()) sampler_.join();
+  if (phases_) phases_->spans.store(nullptr, std::memory_order_relaxed);
   if (agent_) qjs_cdp_free(agent_);
   // The frontends see the target go away now rather than after a timeout.
   net::HttpRequest req;
@@ -65,13 +84,15 @@ void Inspector::setTitle(const std::string& title) {
 
 // ------------------------------------------------------------ JS context
 
-void Inspector::attach(JSContext* ctx) {
+void Inspector::attach(JSContext* ctx, Perf* phases) {
   std::vector<std::pair<std::string, std::string>> early;
   {
     std::lock_guard<std::mutex> l(agentMutex_);
     if (agent_) return;
     ctx_ = ctx;
+    phases_ = phases;
     agent_ = qjs_cdp_new(ctx, ++contextId_, &Inspector::sendFromAgent, this);
+    qjs_cdp_profiler_set_clock(agent_, &profilerClock);
     if (!state_.empty()) qjs_cdp_import_state(agent_, state_.c_str());
     scripts_.clear();
     early.swap(early_);
@@ -98,6 +119,8 @@ void Inspector::detach(JSContext* ctx) {
     old = agent_;
     agent_ = nullptr;
     ctx_ = nullptr;
+    if (phases_) phases_->spans.store(nullptr, std::memory_order_relaxed);
+    phases_ = nullptr;
     id = contextId_;
     scripts_.clear();
   }
@@ -109,6 +132,7 @@ void Inspector::detach(JSContext* ctx) {
 
 void Inspector::poll() {
   if (!agent_) return;
+  flushSpans();  // before a Profiler.stop is handled
   qjs_cdp_poll(agent_);
   syncSampler();
   // Every frontend left: start over with no breakpoints and the debugger
@@ -119,6 +143,7 @@ void Inspector::poll() {
     if (!agent_) return;
     qjs_cdp_free(agent_);
     agent_ = qjs_cdp_new(ctx_, contextId_, &Inspector::sendFromAgent, this);
+    qjs_cdp_profiler_set_clock(agent_, &profilerClock);
     state_.clear();
     for (auto& [url, source] : scripts_) qjs_cdp_script_loaded(agent_, url.c_str(), source.c_str());
   }
@@ -129,6 +154,23 @@ void Inspector::jsIdle() {
   if (agent_ && sampling_) qjs_cdp_profiler_idle(agent_);
 }
 
+void Inspector::span(Phase phase, std::chrono::steady_clock::time_point start,
+                     std::chrono::steady_clock::time_point end) {
+  if (!sampling_) return;
+  std::lock_guard<std::mutex> l(spanMutex_);
+  spans_.push_back({phase, steadyUs(start), steadyUs(end)});
+}
+
+void Inspector::flushSpans() {
+  std::vector<Span> spans;
+  {
+    std::lock_guard<std::mutex> l(spanMutex_);
+    spans.swap(spans_);
+  }
+  if (!agent_) return;
+  for (const Span& sp : spans) qjs_cdp_profiler_add_span(agent_, spanName(sp.phase), sp.start, sp.end);
+}
+
 void Inspector::syncSampler() {
   bool want = agent_ && qjs_cdp_profiling(agent_);
   if (want == sampling_) return;
@@ -137,6 +179,9 @@ void Inspector::syncSampler() {
     sampler_.join();
   }
   sampling_ = want;
+  // While a CPU profile records, the runtime's phases (layout, paint, ...)
+  // go into it too.
+  if (phases_) phases_->spans.store(want ? this : nullptr, std::memory_order_relaxed);
   if (want) sampler_ = std::thread([this] { sampleLoop(); });
 }
 
