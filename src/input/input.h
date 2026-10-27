@@ -27,6 +27,7 @@
 
 #include "core/node.h"
 #include "core/value.h"
+#include "jsui/jsui.h"
 
 namespace jsui {
 
@@ -521,6 +522,31 @@ class InputManager {
   // Keys (code, else key) whose keydown the UI consumed: their repeats and
   // keyup report consumed too, so the game sees whole presses.
   std::unordered_set<std::string> consumedKeys_;
+
+  // JSUIContainers (render/container_view.h): input over a container node
+  // goes to its child runtime first, in the child's coordinates. A press
+  // routes its pointer's later moves and releases to the same child; one the
+  // child consumed is the child's alone (the parent sees no press), else the
+  // parent handles it as usual too. Keys, text and gamepad input go to the
+  // focused container's child first; what it does not consume (a D-pad press
+  // at its edge) goes on in the parent.
+  struct ChildRoute {
+    uint32_t node = 0;
+    int buttons = 0;  // mouse: the DOM button bits held
+    bool owned = false;
+  };
+  std::unordered_map<int, ChildRoute> childRoutes_;  // pointer id -> route
+  uint32_t childHover_ = 0;  // the container the mouse is over
+  // Key ids / (pad << 32 | button) whose press a child consumed: their
+  // releases go there too.
+  std::unordered_set<std::string> childKeys_;
+  std::unordered_set<uint64_t> childPadButtons_;
+  // The child runtime of container `n` and (x, y) in its coordinates.
+  JsuiRuntime* childPoint(const Node* n, float x, float y, float* cx, float* cy) const;
+  // The focused container's child runtime (nullptr: none).
+  JsuiRuntime* focusedChild() const;
+  // Mouse moves for the child under / routed from the mouse (hover, leave).
+  bool childMouseMove(Node* hit, float x, float y);
   struct ScopeMemo {
     uint32_t scopeId;
     uint32_t restoreId;

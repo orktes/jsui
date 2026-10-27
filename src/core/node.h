@@ -28,6 +28,7 @@ enum class NodeType : uint8_t {
   Lottie,      // "LottieView" - plays a Lottie composition (render/lottie.h)
   Shader,      // "ShaderView" - painted by an SkSL shader (render/shader_view.h)
   Vector,      // "VectorView" - paints vector drawing commands: Svg / Canvas (render/vector_view.h)
+  Container,   // "JSUIContainer" - another JSUI runtime running inside this node (render/container_view.h)
 };
 
 // Parses the element type names used by the reconciler ("View", "Text", ...).

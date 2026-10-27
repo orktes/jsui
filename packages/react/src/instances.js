@@ -42,6 +42,7 @@ const EVENT_TOKENS = {
   onError: ['error'],
   onProgress: ['progress'],
   onAnimationFinish: ['animationFinish'],
+  onContainerEvent: ['containerEvent'],
   onStartShouldSetResponder: RESPONDER,
   onMoveShouldSetResponder: RESPONDER,
   onStartShouldSetResponderCapture: RESPONDER,

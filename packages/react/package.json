@@ -32,6 +32,7 @@
     ".": "./src/index.js",
     "./shims/*": "./src/shims/*.js",
     "./lottie": "./src/lottie.js",
+    "./container": "./src/container.js",
     "./video": "./src/video.js",
     "./shader": "./src/shader.js",
     "./worklets": "./src/worklets.js",
