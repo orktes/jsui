@@ -2467,12 +2467,18 @@ test('shared device: a texture surface renders the UI into a GPUTexture of the p
   let t = await readTexture(page, 'window.panel.texture');
   assert(t.width === 128 && t.height === 64 && t.format === 'rgba8unorm', `texture ${JSON.stringify(t)}`);
   t.px.forEach((p) => assert(near(p, RED), `surface pixel ${fmt(p)}`));
-  // A change: repainted straight into the same texture (its pass loads what
-  // is there), no retained texture and no copy.
+  // A change: repainted straight into the same texture, no retained texture
+  // and no copy. A change to part of it loads what is there (a full repaint
+  // may clear instead): the box shrinks to the left half first.
+  await page.evaluate(async () => {
+    window.panel.setProps({ color: '#00ff00', size: [32, 32] });
+    await window.hosts.shared.whenIdle();
+  });
   const r = await page.evaluate(async () => {
     const s = window.panel, j = window.hosts.shared;
+    await window.gameDevice.queue.onSubmittedWorkDone();
     window.__gpuCounts.clear();
-    s.setProps({ color: '#00ff00' });
+    s.setProps({ color: '#0000ff', size: [32, 32] });
     await j.whenIdle();
     await window.gameDevice.queue.onSubmittedWorkDone();
     const passes = [...window.__gpuCounts].filter(([k]) => k.startsWith('pass color 128x64 ')).map(([k]) => k);
@@ -2482,7 +2488,7 @@ test('shared device: a texture surface renders the UI into a GPUTexture of the p
   assert(r.passes.length && r.passes.every((p) => p.includes('load=load')) && r.copies === 0 && r.created.length === 0,
     `incremental frame ${JSON.stringify(r)}`);
   t = await readTexture(page, 'window.panel.texture');
-  t.px.forEach((p) => assert(near(p, GREEN), `after setProps ${fmt(p)}`));
+  assert(near(t.px[0], BLUE) && near(t.px[1], [0, 0, 0, 0]), `after setProps ${t.px.map(fmt).join(' ')}`);
   // Input from the page, in surface coordinates: the fixture posts `press`.
   const pressed = await page.evaluate(async () => {
     const s = window.panel, j = window.hosts.shared;
@@ -2587,7 +2593,8 @@ test('shared device: after a device loss, setDevice moves the UI to the page\'s 
   assert(r.saw && r.device && r.version >= 2 && r.renderer === 'webgpu', `device loss ${JSON.stringify(r)}`);
   const t = await readTexture(page, 'window.panel.texture');
   t.px.forEach((p) => assert(near(p, RED), `after setDevice ${fmt(p)}`));
-}, {}, {});
+  return { allowErrors: true };  // Skia logs the buffer maps the loss aborted
+});
 
 // -------------------------------------------------------------------- run
 let failed = 0, skipped = 0, passed = 0;
