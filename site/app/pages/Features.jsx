@@ -13,8 +13,9 @@ import { InteractionsPage } from './Interactions.jsx';
 import { InputPage } from './Input.jsx';
 import { MotionPage } from './Motion.jsx';
 import { VectorPage } from './Vector.jsx';
+import { NativePage } from './Native.jsx';
 
-const PAGES = { interactions: InteractionsPage, input: InputPage, motion: MotionPage, vector: VectorPage };
+const PAGES = { interactions: InteractionsPage, input: InputPage, motion: MotionPage, vector: VectorPage, native: NativePage };
 
 const DOCS = GITHUB + '/blob/main/docs/';
 
@@ -34,6 +35,7 @@ const CAPABILITIES = [
   { glyph: 'Sk', title: 'Skia Canvas', body: 'The @shopify/react-native-skia API: Groups, Paths, gradients, blur masks, trim paths and the imperative Skia object, animated natively.', color: colors.green, to: '/features/vector', cta: 'See the canvas' },
   { glyph: 'SVG', title: 'SVG', body: 'react-native-svg: paths, gradients, clip paths, masks, <Use> and SvgXml, painted by Skia in C++ and crisp at any scale.', color: colors.cyan, to: '/features/vector', cta: 'See the icons' },
   { glyph: 'W', title: 'Worklets', body: "react-native-worklets: 'worklet' functions run on a small UI runtime the render loop ticks, writing Animated values directly.", color: colors.goldLight, to: '/features/vector', cta: 'Run the swarm' },
+  { glyph: 'C++', title: 'Native components', body: 'Register a view class from C, C++ or page JS that draws with Skia; requireNativeComponent, Animated props, ref commands and events, like React Native.', color: colors.orange, to: '/features/native', cta: 'Ping the radar' },
   { glyph: 'Fx', title: 'SkSL shaders', body: 'ShaderView runs your own Skia shaders with Animated uniforms; shaders can be precompiled off-frame so nothing hitches.', color: colors.red, to: '/examples/rift', cta: 'Enter the Rift' },
   { glyph: '▶', title: 'Video and host textures', body: 'A <Video> element backed by each host’s player, and <HostTexture> to show any texture the engine renders: 3D views, minimaps, cameras.', color: colors.orange, to: '/examples/cinematic', cta: 'Watch the trailer' },
   { glyph: 'Lo', title: 'Lottie', body: 'LottieView on Skia’s Skottie: After Effects animations as JSON, played natively, scrubbable with Animated progress.', color: colors.blue, to: '/examples/victory', cta: 'See the victory screen' },

@@ -139,8 +139,9 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
       <li><a tabindex="-1" href="#/examples">Example game screens</a>: main menu, HUD, inventory, battle pass, scoreboard, dialogue, settings,
         loading, notifications, cinematic, victory and rift screens, each demonstrating a runtime feature, each playable full screen.</li>
       <li><a tabindex="-1" href="#/features">Features</a>: <a tabindex="-1" href="#/features/interactions">interactions</a>,
-        <a tabindex="-1" href="#/features/input">input and gamepad focus</a>, <a tabindex="-1" href="#/features/motion">motion</a> and
-        <a tabindex="-1" href="#/features/vector">SVG and Skia Canvas</a>.</li>
+        <a tabindex="-1" href="#/features/input">input and gamepad focus</a>, <a tabindex="-1" href="#/features/motion">motion</a>,
+        <a tabindex="-1" href="#/features/vector">SVG and Skia Canvas</a> and
+        <a tabindex="-1" href="#/features/native">native components</a> (your own Skia-drawn views).</li>
       <li><a tabindex="-1" href="#/playground">Live code playground</a>: edit React Native code and see JSUI render it.</li>
       <li><a tabindex="-1" href="#/embed">Embedding guide</a>: Godot, the C API, the web host and dev mode.</li>
     </ul>
@@ -237,6 +238,10 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
         // a first visit or a browser update leaves the browser's shader cache
         // cold, and each new kind of draw would otherwise stall its frame.
         pipelines: './pipelines-{format}.bin',
+        // The native components /features/native shows (Radar, Gauge), drawn
+        // by JS in this page's runtime (the worker imports the module in
+        // worker mode).
+        components: './components.js',
         ...(q.get('js') ? { js: q.get('js') } : {}),
       });
       window.jsui = jsui;

@@ -175,6 +175,10 @@
  *   jsFrameBudget?: number,      // ms of JS per frame before React's scheduler yields (default 5):
  *                                // transitions (startTransition) render in slices across frames.
  *                                // <= 0: no limit (jsui_set_js_frame_budget)
+ *   components?: string|URL|object, // native components (registerComponent) registered before the
+ *                                // bundle runs: { Name: impl } or the URL of a module exporting them
+ *                                // (web/jsui-components.js); worker mode needs the URL (its draw
+ *                                // functions run in the worker)
  *   js?: 'quickjs'|'host',       // the JS engine the bundle runs on: 'host' (default) this page's /
  *                                // worker's own engine (V8, JavaScriptCore, SpiderMonkey), with the
  *                                // native core still in WASM (docs/ARCHITECTURE.md "Host JS engine");
@@ -305,6 +309,15 @@ export async function createJsui(opts) {
     // Relative to the page (also for the worker); `{format}` survives.
     opts = { ...opts, pipelines: decodeURI(new URL(opts.pipelines, location.href).href) };
   }
+  if (opts.components instanceof URL) opts = { ...opts, components: opts.components.href };
+  if (typeof opts.components === 'string' && typeof location !== 'undefined') {
+    opts = { ...opts, components: new URL(opts.components, location.href).href };
+  }
+  if (opts.worker && opts.components && typeof opts.components === 'object') {
+    // Functions can't reach a worker: its runtime imports a module URL instead.
+    console.warn('[jsui] worker mode needs `components` as a module URL (draw functions run in the worker): running on the page\'s main thread');
+    opts = { ...opts, worker: false };
+  }
   if (opts.worker) {
     let r;
     try {
@@ -320,6 +333,7 @@ export async function createJsui(opts) {
   // A canvas a worker-mode runtime had (its control went to an OffscreenCanvas
   // for good): a clone of it in its place.
   if (canvas && transferred.has(canvas)) canvas = replaceCanvas(canvas);
+  if (typeof opts.components === 'string') opts = { ...opts, components: await import(opts.components) };
   const webgpu = await webgpuFor(opts);
   return new JsuiHost(await loadModuleFor(opts, webgpu), canvas, { ...opts, canvas, _webgpu: webgpu });
 }
@@ -2191,6 +2205,8 @@ class JsuiHost extends CanvasView {
     this._pipelinesQueued = new Promise((r) => { this._queuedDone = r; });
     this._pipelinesReady = this._loadPipelines(opts).finally(() => this._queuedDone());
 
+    // Before the bundle runs, so its first render sees them (hasNativeComponent).
+    if (opts.components && typeof opts.components === 'object') this._registerComponents(opts.components);
     if (opts.bundleSource != null) this.loadSource(opts.bundleSource, this._bundleUrl ?? 'bundle.js');
     else if (this._bundleUrl) this.loadUrl(this._bundleUrl);
     const runtimePolls = this._bundleUrl?.startsWith('http://');
@@ -2319,6 +2335,25 @@ class JsuiHost extends CanvasView {
     if (this._destroyed) return false;
     this._components ??= new ComponentSet(this);
     return this._components.register(String(name), impl);
+  }
+
+  /** Registers every export of `components`: an object { Name: impl }, or
+   * the URL of a module whose exports are (worker mode imports it in the
+   * worker, where its draw functions run). Resolves to the names registered. */
+  async loadComponents(components) {
+    const mod = typeof components === 'string' || components instanceof URL
+      ? await import(new URL(components, typeof location !== 'undefined' ? location.href : undefined).href)
+      : components;
+    return this._registerComponents(mod);
+  }
+
+  _registerComponents(mod) {
+    const names = [];
+    for (const [name, impl] of Object.entries(mod ?? {})) {
+      if (name === 'default' || !impl || typeof impl.draw !== 'function') continue;
+      if (this.registerComponent(name, impl)) names.push(name);
+    }
+    return names;
   }
 
   /** Unregisters native component `name` (its views show their View part). */

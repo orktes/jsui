@@ -48,7 +48,7 @@ if (!/<main id="about"[\s\S]*github\.com\/orktes\/jsui/.test(fs.readFileSync(pat
 const ROUTES = ['/', '/examples', '/examples/main-menu', '/examples/hud', '/examples/inventory', '/examples/battle-pass',
   '/examples/scoreboard', '/examples/dialogue', '/examples/settings', '/examples/loading', '/examples/notifications',
   '/examples/cinematic', '/examples/victory', '/examples/rift', '/examples/hud/full', '/screens/dialogue', '/vector',
-  '/use-cases', '/features', '/features/interactions', '/features/input', '/features/motion', '/features/vector', '/playground', '/embed'].filter((r) => !filters.length || filters.some((f) => r.includes(f)));
+  '/use-cases', '/features', '/features/interactions', '/features/input', '/features/motion', '/features/vector', '/features/native', '/playground', '/embed'].filter((r) => !filters.length || filters.some((f) => r.includes(f)));
 // Links from before the site had sections, and the path the app replaces them with.
 const REDIRECTS = { '/screens/dialogue': '/examples/dialogue', '/vector': '/features/vector' };
 const SIZES = [{ name: 'desktop', width: 1440, height: 900, scale: 1 }, { name: 'phone', width: 390, height: 844, scale: 2 }];

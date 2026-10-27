@@ -7,7 +7,8 @@
 //
 //   jsui.registerComponent('Radar', {
 //     clocked: true,                       // repaint every frame
-//     draw(ctx, view) {                    // view: { id, width, height, pixelRatio, time, state }
+//     draw(ctx, view) {                    // view: { id, width, height, pixelRatio, time, state,
+//                                          //   emit(event, data), invalidate() }
 //       const r = Math.min(view.width, view.height) / 2;
 //       ctx.circle(r, r, r - 1, { color: '#3f6', style: 'stroke', width: 2 });
 //       const a = ctx.number('sweep', view.time / 1000);  // a prop (Animated ok)
@@ -18,7 +19,8 @@
 //     command(state, name, args, view) {},          // optional: ref commands
 //     destroy(state, view) {},                      // optional
 //   });
-//   jsui.invalidateComponent(viewId)  /  jsui.emitComponentEvent(viewId, 'contactPress', { id })
+//   view.invalidate()  /  view.emit('contactPress', { id })   // (jsui.invalidateComponent /
+//                                                              //  emitComponentEvent by view id)
 //
 // Colors: '#rgb', '#rgba', '#rrggbb', '#rrggbbaa', 'rgb(...)', 'rgba(...)',
 // 'transparent', or a number 0xAARRGGBB. Paint: { color, style: 'fill' |
@@ -302,7 +304,10 @@ export class ComponentSet {
     const impl = c.impl;
     try {
       if (kind === 0) {
-        const v = { id: view, width: 0, height: 0, pixelRatio: 1, time: 0, state: undefined };
+        const host = this.host;
+        const v = { id: view, width: 0, height: 0, pixelRatio: 1, time: 0, state: undefined,
+          emit: (event, data) => host.emitComponentEvent(view, event, data),
+          invalidate: () => host.invalidateComponent(view) };
         c.views.set(view, v);
         if (impl.create) v.state = impl.create(v);
       } else if (kind === 1) {
