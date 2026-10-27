@@ -4,7 +4,7 @@
 // browser's frame times while it first shows. Prints the longest frames.
 // Meant for a machine with a real GPU:
 //
-//   node site/test/first-visit.mjs [--dir site/dist] [--route /screens/rift] [--settle 12000]
+//   node site/test/first-visit.mjs [--dir site/dist] [--route /examples/rift] [--settle 12000]
 //     [--webgl] [--chromium [--cold]] [--headless] [--runs 3]
 //
 // Each run is a fresh browser profile. That is not a cold start: the OS
@@ -29,7 +29,7 @@ const opt = (name, def) => {
   return i >= 0 ? args[i + 1] : def;
 };
 const DIR = path.resolve(opt('--dir', path.join(SITE, 'dist')));
-const ROUTE = opt('--route', '/screens/rift');
+const ROUTE = opt('--route', '/examples/rift');
 const SETTLE = Number(opt('--settle', 12000));
 const RUNS = Number(opt('--runs', 3));
 const WEBGL = args.includes('--webgl');

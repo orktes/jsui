@@ -1,4 +1,4 @@
-// /interactions: the AETHERFALL hub screen, live in a scaled <Stage>, plus a
+// /features/interactions: the AETHERFALL hub screen, live in a scaled <Stage>, plus a
 // guide to everything in it worth poking at.
 import React, { useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
@@ -167,7 +167,7 @@ export function InteractionsPage() {
             <Pill color={colors.purple}>LayoutAnimation</Pill>
             <Pill color={colors.green}>FlatList</Pill>
           </View>
-          <Button label="See the motion lab" kind="ghost" to="/motion" style={{ marginTop: 6 }} />
+          <Button label="See the motion lab" kind="ghost" to="/features/motion" style={{ marginTop: 6 }} />
         </View>
         <View style={{ flex: tablet ? 0 : 1.2 }}>
           <CodeBlock title="MenuButton.jsx" code={SNIPPET} />

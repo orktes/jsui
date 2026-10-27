@@ -14,10 +14,10 @@ export const HIGHLIGHTS = [
   { glyph: 'HMR', title: 'Live on every edit', body: 'Fast Refresh keeps component state', color: colors.gold, to: '/embed' },
   { glyph: 'GPU', title: 'GPU everywhere', body: 'WebGPU, WebGL, Metal and Vulkan', color: colors.purple, to: '/embed' },
   { glyph: 'C', title: 'Embeds in your engine', body: 'Godot, C API or WASM; input passes through', color: colors.orange, to: '/embed' },
-  { glyph: 'A', title: 'Gamepad-first focus', body: 'Spatial D-pad navigation, built in', color: colors.green, to: '/input' },
-  { glyph: '◆', title: 'Native animation', body: 'Animated in C++, plus Lottie', color: colors.blue, to: '/motion' },
-  { glyph: 'Fx', title: 'Shaders and video', body: 'SkSL effects, engine textures, video', color: colors.red, to: '/screens/rift' },
-  { glyph: '01', title: 'Per-frame game data', body: 'Typed arrays, no JS per frame', color: colors.goldLight, to: '/screens/cinematic' },
+  { glyph: 'A', title: 'Gamepad-first focus', body: 'Spatial D-pad navigation, built in', color: colors.green, to: '/features/input' },
+  { glyph: '◆', title: 'Native animation', body: 'Animated in C++, plus Lottie', color: colors.blue, to: '/features/motion' },
+  { glyph: 'Fx', title: 'Shaders and video', body: 'SkSL effects, engine textures, video', color: colors.red, to: '/examples/rift' },
+  { glyph: '01', title: 'Per-frame game data', body: 'Typed arrays, no JS per frame', color: colors.goldLight, to: '/examples/cinematic' },
 ];
 
 function Highlight({ h, width }) {

@@ -1,4 +1,4 @@
-// /motion: an Animated + LayoutAnimation playground.
+// /features/motion: an Animated + LayoutAnimation playground.
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { colors, font, mono, site, text } from '../theme.js';

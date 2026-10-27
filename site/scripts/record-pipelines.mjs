@@ -22,9 +22,9 @@ const di = args.indexOf('--dir');
 const DIR = path.resolve(di >= 0 ? args[di + 1] : path.join(SITE, 'dist'));
 const FORMATS = ['bgra8unorm', 'rgba8unorm'];
 
-const ROUTES = ['/', '/screens', '/screens/main-menu', '/screens/hud', '/screens/inventory', '/screens/battle-pass',
-  '/screens/scoreboard', '/screens/dialogue', '/screens/settings', '/screens/loading', '/screens/notifications',
-  '/screens/cinematic', '/screens/victory', '/screens/rift', '/interactions', '/input', '/motion', '/playground', '/embed'];
+const ROUTES = ['/', '/examples', '/examples/main-menu', '/examples/hud', '/examples/inventory', '/examples/battle-pass',
+  '/examples/scoreboard', '/examples/dialogue', '/examples/settings', '/examples/loading', '/examples/notifications',
+  '/examples/cinematic', '/examples/victory', '/examples/rift', '/use-cases', '/features', '/features/interactions', '/features/input', '/features/motion', '/features/vector', '/playground', '/embed'];
 
 for (const f of FORMATS) fs.rmSync(path.join(DIR, `pipelines-${f}.bin`), { force: true });
 const out = await recordPipelines({

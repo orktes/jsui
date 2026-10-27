@@ -20,10 +20,10 @@ export function useLayout() {
 }
 
 /** Centred page column with responsive gutters. */
-export function Column({ children, style, max = 1240 }) {
+export function Column({ children, style, max = 1240, onLayout }) {
   const { gutter } = useLayout();
   return (
-    <View style={[{ width: '100%', maxWidth: max + gutter * 2, alignSelf: 'center', paddingHorizontal: gutter }, style]}>
+    <View onLayout={onLayout} style={[{ width: '100%', maxWidth: max + gutter * 2, alignSelf: 'center', paddingHorizontal: gutter }, style]}>
       {children}
     </View>
   );
