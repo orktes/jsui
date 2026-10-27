@@ -104,6 +104,7 @@ void AJsuiExampleGame::ParseArgs()
 		else if (A == TEXT("dev")) bDev = true;
 		else if (A == TEXT("cpu")) bCpu = true;
 		else if (A == TEXT("no-ui")) bNoUi = true;
+		else if (A == TEXT("no-engine-http")) bNoEngineHttp = true;
 		else if (A == TEXT("bench")) Bench = FCString::Atod(*Value);
 		else if (A == TEXT("bench-warmup")) BenchWarmup = FCString::Atod(*Value);
 		else if (A == TEXT("js-thread"))
@@ -149,6 +150,7 @@ void AJsuiExampleGame::BeginPlay()
 	Ui->bForceCpu = bCpu;
 	Ui->bDevMode = bDev;
 	Ui->JsThread = EJsuiJsThread(JsThread);
+	Ui->bUseEngineHttp = !bNoEngineHttp;
 	if (!BundleOverride.IsEmpty()) Ui->Bundle = BundleOverride;
 	Ui->OnMessageNative.AddUObject(this, &AJsuiExampleGame::OnUiMessage);
 	Ui->PassedMouseDownNative.AddLambda([this](const FKey& Button, const FVector2D& Position)

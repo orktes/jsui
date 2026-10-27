@@ -12,7 +12,8 @@ TSharedRef<SWidget> UJsuiWidget::RebuildWidget()
 		.bForceCpu(bForceCpu)
 		.bForwardInput(bForwardInput)
 		.PixelRatio(PixelRatio)
-		.JsThread(int32(JsThread));
+		.JsThread(int32(JsThread))
+		.bUseEngineHttp(bUseEngineHttp);
 	TWeakObjectPtr<UJsuiWidget> Self(this);
 	View->OnMessage.AddLambda([Self](const FString& Name, const FString& Json)
 	{

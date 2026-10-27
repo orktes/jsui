@@ -58,6 +58,10 @@ public:
 	 *  goes on meanwhile; what JS does shows a frame or more later (SyncJs / SyncJsNextFrame when it must not). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JSUI")
 	EJsuiJsThread JsThread = EJsuiJsThread::On;
+	/** fetch() and other http(s):// loads go through Unreal's HTTP module (FHttpModule: the platform's HTTP stack,
+	 *  its proxy and certificate settings). Off: JSUI's built-in loader handles them. Applies when the widget is built. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "JSUI")
+	bool bUseEngineHttp = true;
 
 	/** Host.postMessage(name, payload) from JS: name and the payload as JSON. */
 	UPROPERTY(BlueprintAssignable, Category = "JSUI")

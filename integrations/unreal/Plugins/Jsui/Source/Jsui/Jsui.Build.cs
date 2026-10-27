@@ -20,7 +20,7 @@ public class Jsui : ModuleRules
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
 		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "Slate", "SlateCore", "UMG" });
-		PrivateDependencyModuleNames.AddRange(new string[] { "ApplicationCore", "RHI", "RenderCore" });
+		PrivateDependencyModuleNames.AddRange(new string[] { "ApplicationCore", "RHI", "RenderCore", "HTTP" });
 
 		string LibraryDir = Path.Combine(PluginDirectory, "Source", "ThirdParty", "JsuiLibrary");
 		PublicSystemIncludePaths.Add(Path.Combine(LibraryDir, "include"));
