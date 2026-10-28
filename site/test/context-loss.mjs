@@ -191,7 +191,7 @@ for (const variant of VARIANTS) {
   await page.addInitScript(watch);
   let result = '';
   if (variant.startsWith('site')) {
-    const q = { 'site-poster': 'autoplay=0&worker=0', 'site-video': 'worker=0', 'site-worker': 'worker=1' }[variant] + '&intro=0';
+    const q = { 'site-poster': 'autoplay=0&worker=0', 'site-video': 'worker=0', 'site-worker': 'worker=1' }[variant];
     await page.goto(`${ORIGIN}/index.html?${q}#/examples/cinematic`);
     await page.waitForFunction(() => window.jsui, null, { timeout: 60000 });
     await page.waitForTimeout(SECONDS * 1000);

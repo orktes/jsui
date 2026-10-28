@@ -40,9 +40,9 @@ rendered entirely by the JSUI WebAssembly build into one canvas: interactive
 game screens, input, motion, a live-code playground and embedding guides. Its
 source is ordinary React Native in [site/](site/) (`node site/scripts/build.mjs`,
 then `node site/scripts/serve.mjs`). The same bundle runs natively in the viewer:
-`jsui-viewer --titlebar-overlay 64 --state 'intro={"play":true,"warmup":false}' --state 'audio={"native":true}'
-site/dist/app/bundle.js` (the states stand in for the page: the intro's go-ahead and the UI
-owning the sound switch; the nav bar holds the window buttons). Its trailer's `<Video>` plays
+`jsui-viewer --titlebar-overlay 64 --state 'audio={"native":true}' site/dist/app/bundle.js`
+(the state stands in for the page: the UI owning the sound switch; the nav bar holds the
+window buttons). Its trailer's `<Video>` plays
 there too, with AVFoundation on macOS.
 
 ## Game data

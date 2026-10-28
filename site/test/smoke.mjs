@@ -133,8 +133,8 @@ for (const size of SIZES) {
     failed++;
     console.log(`  FAIL  ${size.name}: JS engine is ${engine}, expected ${JS || 'host'}`);
   } else console.log(`  ${size.name}: JS engine ${engine}`);
-  // The splash stays up while the pipeline lists build and the intro warms up
-  // (up to 10 s, then it hides anyway): screenshots wait until it is gone.
+  // The splash stays up while the pipeline lists build: screenshots wait
+  // until it is gone.
   try {
     await page.evaluate(() => window.jsui.whenPipelinesReady?.());
     await page.waitForFunction(() => !document.getElementById('splash'), null, { timeout: 15000 });
