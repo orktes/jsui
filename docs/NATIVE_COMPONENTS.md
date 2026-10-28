@@ -23,7 +23,7 @@ What else exists, and when it is the better fit:
 | You want | Use |
 | --- | --- |
 | A picture the engine already renders on the GPU (3D view, camera, video) | `<HostTexture>` (host textures) |
-| Vector art defined in JS (icons, charts from props) | `react-native-svg` / `@shopify/react-native-skia` |
+| Vector art defined in JS (icons, charts from props) | `react-native-svg` / `react-native-skia` |
 | A per-pixel effect | `ShaderView` (SkSL) |
 | Drawing from the host's own data, with host code | **a native component** |
 

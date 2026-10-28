@@ -27,7 +27,12 @@ const SHIMS = {
   'react-native-worklets': 'react-native-worklets',
   'react-native-svg': 'react-native-svg',
   'react-native-svg/css': 'react-native-svg',
+  // react-native-skia v3 (github.com/wcandillon/react-native-skia) and its
+  // v2 name; same drawing API.
+  'react-native-skia': 'react-native-skia',
+  'react-native-skia/lib/module/web': 'react-native-skia-web',
   '@shopify/react-native-skia': 'react-native-skia',
+  '@shopify/react-native-skia/lib/module/web': 'react-native-skia-web',
 };
 
 // These must resolve to the single copy @orktes/jsui-react was built against, or

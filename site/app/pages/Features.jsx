@@ -24,7 +24,7 @@ const LABS = [
   { glyph: 'UX', title: 'Interactions', body: 'A whole game hub driven by mouse, touch, keyboard and gamepad: springs, carousels, flings, text input and panels.', color: colors.cyan, to: '/features/interactions', cta: 'Open the hub' },
   { glyph: 'A', title: 'Input', body: 'useGamepad live, key events with real codes, spatial focus with arrows and D-pad, pointer and touch labs.', color: colors.gold, to: '/features/input', cta: 'Grab a controller' },
   { glyph: '◆', title: 'Motion', body: 'Animated and LayoutAnimation on the native driver: spring lab, easings, loops, interpolation, layout and fling.', color: colors.purple, to: '/features/motion', cta: 'Open the motion lab' },
-  { glyph: 'Sk', title: 'SVG & Skia Canvas', body: "react-native-svg, @shopify/react-native-skia and react-native-worklets, imported by their usual names and drawn natively.", color: colors.green, to: '/features/vector', cta: 'Draw something' },
+  { glyph: 'Sk', title: 'SVG & Skia Canvas', body: "react-native-svg, react-native-skia and react-native-worklets, imported by their usual names and drawn natively.", color: colors.green, to: '/features/vector', cta: 'Draw something' },
 ];
 
 // Every capability, linked to where it can be seen working.
@@ -32,7 +32,7 @@ const CAPABILITIES = [
   { glyph: '</>', title: 'React Native API', body: "View, Text, Image, ScrollView, FlatList, TextInput, Modal, Pressable, StyleSheet. Import from 'react-native' and it just works.", color: colors.cyan, to: '/playground', cta: 'Try it live' },
   { glyph: 'A', title: 'Gamepad-first focus', body: 'Spatial D-pad and stick navigation, focus scopes for modals, focus-visible rings, Tab order and hold-to-repeat, in the runtime.', color: colors.gold, to: '/features/input', cta: 'Grab a controller' },
   { glyph: '◆', title: 'Native Animated driver', body: 'useNativeDriver: true moves springs, timings, decays and interpolations into C++. They keep running while your JS is busy.', color: colors.purple, to: '/features/motion', cta: 'Open the motion lab' },
-  { glyph: 'Sk', title: 'Skia Canvas', body: 'The @shopify/react-native-skia API: Groups, Paths, gradients, blur masks, trim paths and the imperative Skia object, animated natively.', color: colors.green, to: '/features/vector', cta: 'See the canvas' },
+  { glyph: 'Sk', title: 'Skia Canvas', body: 'The react-native-skia API: Groups, Paths, gradients, blur masks, trim paths and the imperative Skia object, animated natively.', color: colors.green, to: '/features/vector', cta: 'See the canvas' },
   { glyph: 'SVG', title: 'SVG', body: 'react-native-svg: paths, gradients, clip paths, masks, <Use> and SvgXml, painted by Skia in C++ and crisp at any scale.', color: colors.cyan, to: '/features/vector', cta: 'See the icons' },
   { glyph: 'W', title: 'Worklets', body: "react-native-worklets: 'worklet' functions run on a small UI runtime the render loop ticks, writing Animated values directly.", color: colors.goldLight, to: '/features/vector', cta: 'Run the swarm' },
   { glyph: 'C++', title: 'Native components', body: 'Register a view class from C, C++ or page JS that draws with Skia; requireNativeComponent, Animated props, ref commands and events, like React Native.', color: colors.orange, to: '/features/native', cta: 'Ping the radar' },

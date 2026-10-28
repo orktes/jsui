@@ -1420,8 +1420,9 @@ paints a view, on every renderer (the CPU raster runs SkSL too):
 
 ### Vector drawing (Svg, Canvas)
 
-`react-native-svg` and `@shopify/react-native-skia` work unchanged (the CLI
-aliases both, plus `react-native-svg/css`, to `@orktes/jsui-react/svg` and
+`react-native-svg` and `react-native-skia` (v3, github.com/wcandillon/react-native-skia,
+and its v2 name `@shopify/react-native-skia`) work unchanged (the CLI
+aliases them, plus `react-native-svg/css`, to `@orktes/jsui-react/svg` and
 `@orktes/jsui-react/skia`). Both are one host node, `VectorView`
 (`NodeType::Vector`, render/vector_view.h), per `<Svg>` / `<Canvas>`:
 
