@@ -1,11 +1,11 @@
-// /features/vector: react-native-svg, @shopify/react-native-skia and
+// /features/vector: react-native-svg, react-native-skia and
 // react-native-worklets, each imported by its usual package name (the CLI
 // aliases them to JSUI's own implementations) and drawn by native
 // VectorViews.
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, StyleSheet, Text, View } from 'react-native';
 import Svg, { Circle as SvgCircle, Defs, G, LinearGradient as SvgLinearGradient, Path as SvgPath, RadialGradient as SvgRadialGradient, Stop } from 'react-native-svg';
-import { BlurMask, Canvas, Circle, Group, Path, RadialGradient, Skia, SweepGradient, vec } from '@shopify/react-native-skia';
+import { BlurMask, Canvas, Circle, Group, Path, RadialGradient, Skia, SweepGradient, vec } from 'react-native-skia';
 import { createSynchronizable, runOnUI } from 'react-native-worklets';
 import { ShaderView, sksl } from '@orktes/jsui-react/shader';
 import { colors, font, mono, site } from '../theme.js';
@@ -252,12 +252,12 @@ function SkiaDemo() {
     <DemoCard
       index={2}
       title="Skia Canvas"
-      blurb="The @shopify/react-native-skia API: declarative Groups, Paths, gradients, blur masks and SkSL shaders, plus the imperative Skia object. Animated values plug straight into drawing props (rotation, trim, radius), and the native driver runs them with no React render and no JS per frame."
+      blurb="The react-native-skia API: declarative Groups, Paths, gradients, blur masks and SkSL shaders, plus the imperative Skia object. Animated values plug straight into drawing props (rotation, trim, radius), and the native driver runs them with no React render and no JS per frame."
       tags={[['react-native-skia', colors.gold], ['SkSL', colors.purple], ['trim paths', colors.cyan]]}
       codeTitle="ChargeDial.jsx"
       code={`
 import { Canvas, Group, Path, SweepGradient,
-  BlurMask, Skia, vec } from '@shopify/react-native-skia';
+  BlurMask, Skia, vec } from 'react-native-skia';
 
 const arc = Skia.Path.Make();
 arc.addCircle(170, 170, 122);
@@ -383,7 +383,7 @@ export function VectorPage() {
         <SectionHead
           eyebrow="Vector graphics"
           title="SVG, Skia and worklets. The React Native packages, natively."
-          lead="Code written for react-native-svg, @shopify/react-native-skia and react-native-worklets runs on JSUI unchanged. Each <Svg> and <Canvas> is one native view painted by Skia on the GPU, on every host: the browser, Godot, Unity, Unreal and the rest."
+          lead="Code written for react-native-svg, react-native-skia and react-native-worklets runs on JSUI unchanged. Each <Svg> and <Canvas> is one native view painted by Skia on the GPU, on every host: the browser, Godot, Unity, Unreal and the rest."
         />
       </Reveal>
       <View style={{ gap: phone ? 18 : 28, marginTop: phone ? 32 : 56 }}>

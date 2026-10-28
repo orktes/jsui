@@ -1,5 +1,5 @@
 // Vector drawing host layer: the shared base of react-native-svg (svg.js)
-// and @shopify/react-native-skia (skia.js).
+// and react-native-skia (skia.js).
 //
 // <Svg> and <Canvas> render ONE native node, a VectorView
 // (render/vector_view.h). Their drawing children (<Circle>, <Path>, <G>,

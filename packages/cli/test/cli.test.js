@@ -264,6 +264,43 @@ AppRegistry.registerComponent('main', () => App);
   assert.equal(t.children.map((c) => nodes.get(c).text).join(''), 'true null true swap');
 });
 
+test('build: react-native-skia (v3) and @shopify/react-native-skia (v2) both resolve to the Canvas', async () => {
+  const dir = await fixture();
+  await writeFile(
+    path.join(dir, 'Skia.js'),
+    `import React from 'react';
+import { AppRegistry, View } from 'react-native';
+import { Canvas, Circle, useCanvasSize } from 'react-native-skia';
+import { Canvas as CanvasV2, Rect } from '@shopify/react-native-skia';
+import { LoadSkiaWeb } from 'react-native-skia/lib/module/web';
+import { WithSkiaWeb } from '@shopify/react-native-skia/lib/module/web';
+function App() {
+  const { onLayout } = useCanvasSize();
+  return (
+    <View>
+      <Canvas nativeID="a" onLayout={onLayout} style={{ width: 10, height: 10 }}><Circle cx={5} cy={5} r={4} color="red" /></Canvas>
+      <CanvasV2 nativeID="b" style={{ width: 10, height: 10 }}><Rect x={0} y={0} width={4} height={4} color="blue" /></CanvasV2>
+      {typeof LoadSkiaWeb === 'function' && typeof WithSkiaWeb === 'function' ? null : <View nativeID="bad" />}
+    </View>
+  );
+}
+AppRegistry.registerComponent('main', () => App);
+`,
+  );
+  const out = path.join(dir, 'skia', 'bundle.js');
+  await build({ entry: path.join(dir, 'Skia.js'), outfile: out });
+  const { nodes, ctx, timers } = runBundle(await readFile(out, 'utf8'));
+  for (let i = 0; i < 5; i++) {
+    await new Promise((res) => setImmediate(res));
+    timers.splice(0).forEach((fn) => fn());
+  }
+  assert.deepEqual(ctx.errors, []);
+  const byId = (id) => [...nodes.values()].find((n) => n.props.nativeID === id);
+  assert.equal(byId('a').type, 'VectorView');
+  assert.equal(byId('b').type, 'VectorView');
+  assert.equal(byId('bad'), undefined);
+});
+
 test('build errors are reported with file and line', async () => {
   const dir = await fixture();
   await writeFile(path.join(dir, 'Bad.js'), `import { View } from 'react-native';\nexport default () => <View>;\n`);

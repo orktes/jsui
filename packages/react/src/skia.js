@@ -1,9 +1,12 @@
-// @shopify/react-native-skia on JSUI: <Canvas> with declarative drawing
-// children, drawn natively by one VectorView per Canvas
+// react-native-skia (https://github.com/wcandillon/react-native-skia, v3;
+// formerly @shopify/react-native-skia, v2) on JSUI: <Canvas> with
+// declarative drawing children, drawn natively by one VectorView per Canvas
 // (render/vector_view.h; vector/host.js has the mechanism). The CLI aliases
-// '@shopify/react-native-skia' here:
+// 'react-native-skia' and '@shopify/react-native-skia' here; the drawing API
+// is the same in both, and the Canvas props, useCanvasSize and useCanvasRef
+// follow v3 while still accepting the v2 forms (onSize, useCanvasSize(ref)):
 //
-//   import { Canvas, Circle, Group, LinearGradient, vec, Skia } from '@shopify/react-native-skia';
+//   import { Canvas, Circle, Group, LinearGradient, vec, Skia } from 'react-native-skia';
 //   <Canvas style={{ width: 256, height: 256 }}>
 //     <Group blendMode="multiply">
 //       <Circle cx={128} cy={96} r={64} color="cyan" />
@@ -30,7 +33,7 @@
 // Box / BoxShadow, backdrop filters, path ops, makeImageSnapshot, and
 // Reanimated shared values.
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { jsx } from 'react/jsx-runtime';
 import { native, warnOnce } from './native.js';
 import { resolveAssetSource } from './components/basic.js';
@@ -573,6 +576,9 @@ function imageOf(src) {
   return a && a.uri ? new SkImageJS(String(a.uri), a.width, a.height) : null;
 }
 
+/** The GPU Skia renders with (v3 `Skia.gpu` / `useGpu()`); JSUI's runtime owns the device. */
+const GPU_INFO = { isAvailable: true, lost: new Promise(() => {}) };
+
 export const Skia = {
   Color: SkColor,
   Point: (x, y) => ({ x, y }),
@@ -636,6 +642,7 @@ export const Skia = {
     },
   },
   Data: { fromURI: (uri) => Promise.resolve({ uri }) },
+  gpu: GPU_INFO,
 };
 
 function matrixOf(m) {
@@ -686,9 +693,39 @@ export function useFonts() {
   return null;
 }
 
-/** A ref to the Canvas (its view). makeImageSnapshot is not supported. */
+/**
+ * A ref to the Canvas: `size` (its layout, read synchronously; 0x0 before
+ * it is laid out), `measure`, `measureInWindow`, `redraw`, `getNativeId`.
+ * makeImageSnapshot is not supported (returns null).
+ */
 export function useCanvasRef() {
   return useRef(null);
+}
+
+/**
+ * The size of a canvas, as state that follows every layout change. v3 form:
+ * `const { size, onLayout } = useCanvasSize()` and pass onLayout to the
+ * Canvas. The v2 form `const { ref, size } = useCanvasSize(ref?)` with the ref
+ * on the Canvas works too.
+ */
+export function useCanvasSize(userRef) {
+  const ownRef = useRef(null);
+  const ref = userRef || ownRef;
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  const onLayout = useCallback((e) => {
+    const { width, height } = e.nativeEvent.layout;
+    setSize((cur) => (cur.width === width && cur.height === height ? cur : { width, height }));
+  }, []);
+  // A Canvas given this ref reports its layout to the hook (the v2 form).
+  ref[SIZE_LISTENER] = onLayout;
+  return { ref, size, onLayout };
+}
+
+const SIZE_LISTENER = Symbol('jsui.canvasSize');
+
+/** v3 `useGpu()`: the GPU Skia renders with (JSUI's runtime owns the device; it is never replaced). */
+export function useGpu() {
+  return GPU_INFO;
 }
 
 /** Milliseconds since mount, as an Animated value driven by the runtime clock. */
@@ -782,17 +819,43 @@ export const BackdropFilter = unsupported('BackdropFilter');
 
 /** The drawing surface: a view whose children draw into it (0, 0 at its top-left). */
 export function Canvas(props) {
-  const { style, children, onSize, onLayout, mode: _mode, debug: _debug, opaque: _opaque, ...rest } = props;
-  const out = Object.assign({}, rest, { mode: 'skia', style: [{ overflow: 'hidden' }, style], children });
-  if (onSize || onLayout) {
-    out.onLayout = (e) => {
-      if (onSize && typeof onSize === 'object' && 'value' in onSize) {
-        const { width, height } = e.nativeEvent.layout;
-        onSize.value = { width, height };
-      }
-      if (onLayout) onLayout(e);
-    };
-  }
+  const {
+    style, children, onSize, onLayout, ref,
+    // Accepted and ignored: renderer options of v2 (debug, colorSpace,
+    // opaque, androidWarmup, mode) and v3 (highBitDepth, android).
+    mode: _mode, debug: _debug, opaque: _opaque, colorSpace: _colorSpace, androidWarmup: _androidWarmup,
+    highBitDepth: _highBitDepth, android: _android,
+    ...rest
+  } = props;
+  const viewRef = useRef(null);
+  const layout = useRef({ width: 0, height: 0 });
+  useImperativeHandle(
+    ref,
+    () => ({
+      get size() {
+        return { width: layout.current.width, height: layout.current.height };
+      },
+      measure: (cb) => viewRef.current && viewRef.current.measure && viewRef.current.measure(cb),
+      measureInWindow: (cb) => viewRef.current && viewRef.current.measureInWindow && viewRef.current.measureInWindow(cb),
+      redraw: () => {},
+      getNativeId: () => (viewRef.current && viewRef.current._nativeTag) || 0,
+      makeImageSnapshot: () => {
+        warnOnce('skia-snapshot', '[jsui] Canvas makeImageSnapshot is not supported');
+        return null;
+      },
+      makeImageSnapshotAsync: () => Promise.resolve(null),
+    }),
+    [],
+  );
+  const sizeListener = ref && ref[SIZE_LISTENER];
+  const out = Object.assign({}, rest, { ref: viewRef, mode: 'skia', style: [{ overflow: 'hidden' }, style], children });
+  out.onLayout = (e) => {
+    const { width, height } = e.nativeEvent.layout;
+    layout.current = { width, height };
+    if (onSize && typeof onSize === 'object' && 'value' in onSize) onSize.value = { width, height };
+    if (sizeListener) sizeListener(e);
+    if (onLayout) onLayout(e);
+  };
   return jsx('VectorView', out);
 }
 Canvas.displayName = 'Canvas';

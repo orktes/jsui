@@ -110,14 +110,16 @@ SkSL gotchas:
 
 ## Vector drawing: react-native-svg and react-native-skia
 
-Both libraries work unchanged (the CLI aliases them). Each `<Svg>` /
+Both libraries work unchanged (the CLI aliases them; `react-native-skia` is
+v3 from github.com/wcandillon/react-native-skia, and the v2 name
+`@shopify/react-native-skia` resolves to the same Canvas). Each `<Svg>` /
 `<Canvas>` is one native view; its shapes are serialized once per commit, so
 custom components and hooks inside are fine. Use them for icons, charts,
 gauges, progress rings and decorative shapes; use plain Views for layout.
 
 ```jsx
 import Svg, { Circle, Path, Defs, LinearGradient, Stop } from 'react-native-svg';
-import { Canvas, Group, RoundedRect, LinearGradient as SkGradient, Shadow, vec } from '@shopify/react-native-skia';
+import { Canvas, Group, RoundedRect, LinearGradient as SkGradient, Shadow, vec } from 'react-native-skia';
 
 <Svg width={24} height={24} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={2}>
   <Path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z" />

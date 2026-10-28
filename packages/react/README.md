@@ -77,11 +77,12 @@ no DOM, no Node APIs).
   (rendered as a native `linear-gradient` background), `lottie-react-native`,
   `expo-font` (so `@expo-google-fonts/*` packages work unchanged),
   `react-native-svg` (+ `react-native-svg/css`) and
-  `@shopify/react-native-skia` (see below).
+  `react-native-skia` (v3, and its v2 name `@shopify/react-native-skia`;
+  see below).
 * **Vector drawing:** `import Svg, { Path, Circle, G, LinearGradient, ... }
   from 'react-native-svg'` and `import { Canvas, Group, Circle, Path,
   LinearGradient, Blur, Shadow, Shader, Skia, vec } from
-  '@shopify/react-native-skia'` (also `@orktes/jsui-react/svg` and
+  'react-native-skia'` (also `@orktes/jsui-react/svg` and
   `/skia`). Each `<Svg>` / `<Canvas>` is one native `VectorView`; its
   drawing elements are JS-side instances serialized once per commit, so
   custom components and hooks inside work, and Animated values as drawing

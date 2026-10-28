@@ -1,4 +1,4 @@
-// react-native-svg (svg.js) and @shopify/react-native-skia (skia.js) against
+// react-native-svg (svg.js) and react-native-skia (v3, formerly @shopify/react-native-skia; skia.js) against
 // the mock bridge: drawing elements are JS-side instances serialized into one
 // VectorView's `commands` per commit (custom components and hooks inside
 // work), SVG references (gradients, clip paths, use / symbol) are resolved,
@@ -213,4 +213,37 @@ test('SvgXml / SvgCss: markup becomes the same elements', async () => {
   assert.equal(c.c[0].fill, undefined, 'SvgXml ignores <style>');
   render(null);
   await wait();
+});
+
+test('Canvas: v3 useCanvasSize / useCanvasRef, v2 forms, renderer props ignored', async () => {
+  const sizes = [];
+  let ref2;
+  let ref3;
+  function App() {
+    const { size, onLayout } = Sk.useCanvasSize();
+    const v2 = Sk.useCanvasSize();
+    ref2 = v2;
+    ref3 = Sk.useCanvasRef();
+    sizes.push([size.width, v2.size.width]);
+    return h('View', null,
+      h(Sk.Canvas, { nativeID: 'v3', onLayout, ref: ref3, highBitDepth: true, android: { backingView: 'SurfaceView' }, style: { width: 10 } }),
+      h(Sk.Canvas, { nativeID: 'v2', ref: v2.ref, colorSpace: 'srgb', opaque: true, style: { width: 20 } }));
+  }
+  render(h(App));
+  await wait();
+  const v3 = byId('v3');
+  assert.equal(v3.props.highBitDepth, undefined);
+  assert.equal(v3.props.android, undefined);
+  assert.equal(byId('v2').props.colorSpace, undefined);
+  assert.deepEqual(ref3.current.size, { width: 0, height: 0 });
+  globalThis.__jsui_onLayout(v3.id, { x: 0, y: 0, width: 10, height: 5 });
+  globalThis.__jsui_onLayout(byId('v2').id, { x: 0, y: 0, width: 20, height: 6 });
+  await wait();
+  assert.deepEqual(sizes.at(-1), [10, 20]);
+  assert.deepEqual(ref3.current.size, { width: 10, height: 5 });
+  assert.deepEqual(ref2.ref.current.size, { width: 20, height: 6 });
+  assert.equal(ref3.current.makeImageSnapshot(), null);
+  assert.equal(Sk.Skia.gpu.isAvailable, true);
+  assert.equal(Sk.useGpu, Sk.useGpu);
+  render(null);
 });
