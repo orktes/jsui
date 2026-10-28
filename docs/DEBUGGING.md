@@ -17,8 +17,7 @@ jsui-viewer --dev http://127.0.0.1:5173/bundle.js   # or any dev-mode host
   thread). The frontend is Chrome's prebuilt one for a pinned revision
   (`DEVTOOLS_REVISION` in `packages/cli/src/devtools-frontend.js`,
   BSD-licensed), fetched from Google's DevTools CDN on first use and cached
-  in `~/.cache/jsui/devtools/` (`JSUI_CACHE_DIR` moves it). Elements has
-  nothing to show.
+  in `~/.cache/jsui/devtools/` (`JSUI_CACHE_DIR` moves it).
 * **Chrome's own DevTools** (works offline): paste
   `devtools://devtools/bundled/inspector.html?ws=127.0.0.1:5173/__jsui/inspect/page/<id>`
   into the address bar, the same page mode. `jsui dev` prints it with the
@@ -91,6 +90,28 @@ running. *Save profile* writes a `.cpuprofile`.
 * **Where.** Every native runtime in `jsui dev`. The browser's own engine
   has its own profiler; the web build's QuickJS and the headless runtime
   can't be debugged at all (see below).
+
+## Elements
+
+Opened as a page (the links above), the **Elements** panel shows the
+runtime's view tree: `View`, `Text`, `Image`, `ScrollView`, ... under
+`AppRoot`, with `testID`, `nativeID`, `accessibilityLabel` and the like as
+attributes, the view's style as its `style` attribute, and string children
+as text nodes. It follows the app a few times a second (views added and
+removed, props and text changing).
+
+* Hovering a node highlights its view in the app; the box model (size,
+  padding, border, margin) comes from layout.
+* The Styles pane shows the view's style as `element.style`. Edit a value,
+  add a property or untick one and the view changes at once. Values are
+  React Native's: `backgroundColor: #ff0000`, `width: 120`, `transform:
+  [{"scale":1.2}]` (JSON for arrays and objects).
+* Double-click a text node to change the text, or an attribute to change
+  the prop.
+* React owns these props: the next time the component renders, it writes
+  its own values back over an edit, as React DOM does in a browser.
+* Not there yet: picking a view in the app (the inspect arrow), `$0` in
+  the console, and the React component names around the views.
 
 ## Network
 

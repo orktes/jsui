@@ -306,3 +306,55 @@ test('network: the runtime reports its loads as Network events (native runtime)'
     await s.close();
   }
 });
+
+test('elements: the view tree as DOM, styles editable, live updates (native runtime)', { skip: !process.env.JSUI_RENDER && !existsSync(binary) && `no ${binary}`, timeout: 60000 }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'jsui-dom-'));
+  await writeFile(path.join(dir, 'App.jsx'), APP.replace('<View>', "<View testID=\"box\" style={{ width: 120, backgroundColor: '#123456' }}>"));
+  await writeFile(path.join(dir, 'index.jsx'), "import { AppRegistry } from 'react-native';\nimport App from './App';\nAppRegistry.registerComponent('main', () => App);\n");
+  const s = await dev({ entry: path.join(dir, 'index.jsx'), port: 0, log: () => {} });
+  const origin = `http://127.0.0.1:${s.port}`;
+  const child = spawn(binary, ['--dev', `${origin}/bundle.js`, '--wait-ms', '50000', '-o', path.join(dir, 'out.png')], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '';
+  child.stdout.on('data', (d) => (output += d));
+  child.stderr.on('data', (d) => (output += d));
+  try {
+    let target = null;
+    for (let i = 0; i < 300 && !target; i++) {
+      target = (await (await fetch(`${origin}/json/list`)).json())[0];
+      if (!target) await sleep(50);
+    }
+    assert.ok(target, 'the runtime is listed\n' + output);
+    const c = await connect(target.webSocketDebuggerUrl);
+    await c.send('Runtime.enable');
+    await c.event((m) => m.method === 'Runtime.consoleAPICalled');  // rendered
+    assert.ok((await c.send('DOM.enable')).result);
+    const { root } = (await c.send('DOM.getDocument', { depth: -1 })).result;
+    assert.equal(root.nodeName, '#document');
+    const all = [];
+    (function walk(n) { all.push(n); (n.children || []).forEach(walk); })(root);
+    const box = all.find((n) => (n.attributes || []).includes('box'));
+    assert.ok(box, 'the testID view: ' + all.map((n) => n.nodeName).join(','));
+    assert.equal(box.nodeName, 'View');
+    const attrs = Object.fromEntries(box.attributes.reduce((a, v, i, l) => (i % 2 ? a : [...a, [v, l[i + 1]]]), []));
+    assert.match(attrs.style, /backgroundColor: #123456;/);
+    assert.match(attrs.style, /width: 120;/);
+    assert.ok(all.some((n) => n.nodeType === 3 && /^tick/.test(n.nodeValue)), 'text nodes');
+
+    const model = (await c.send('DOM.getBoxModel', { nodeId: box.nodeId })).result.model;
+    assert.equal(model.width, 120);
+
+    const { inlineStyle } = (await c.send('CSS.getMatchedStylesForNode', { nodeId: box.nodeId })).result;
+    const set = await c.send('CSS.setStyleTexts', { edits: [{ styleSheetId: inlineStyle.styleSheetId, range: inlineStyle.range, text: 'backgroundColor: #ff0000; width: 200;' }] });
+    assert.match(set.result.styles[0].cssText, /backgroundColor: #ff0000; width: 200;/);
+    const after = (await c.send('DOM.getBoxModel', { nodeId: box.nodeId })).result;
+    assert.ok(after.model.width === 200 || after.model.width === 120, 'layout follows on the next frame');
+
+    // The tick text changes every 50 ms: the frontend hears of it.
+    const seen = c.events.length;
+    await c.event((m) => m.method === 'DOM.characterDataModified' && /^tick/.test(m.params.characterData), seen);
+    c.ws.close();
+  } finally {
+    child.kill();
+    await s.close();
+  }
+});

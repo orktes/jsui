@@ -373,6 +373,7 @@ export function createInspector(o) {
       if (typeof body.title === 'string') rt.title = body.title.slice(0, 2000);
       if (typeof body.profiler === 'boolean') rt.profiler = body.profiler;
       if (typeof body.network === 'boolean') rt.network = body.network;
+      if (typeof body.dom === 'boolean') rt.dom = body.dom;
       const gap = !rt.poll && t - rt.lastPollEnd > REGREET_AFTER_MS;
       if (rt.poll) answerPoll(rt, []);  // only one poll per runtime
       if (!rt.live) {
@@ -573,6 +574,7 @@ export function createInspector(o) {
         reply({ currentIndex: 0, entries: [{ id: 0, url, userTypedURL: url, title: (rt && rt.name) || 'jsui', transitionType: 'typed' }] });
         return true;
       case 'DOM.getDocument':
+        if (rt && rt.dom) return false;  // the runtime's view tree (Elements)
         s.ws.send(JSON.stringify({ id: msg.id, error: { code: -32000, message: 'A JSUI runtime has no DOM' } }));
         return true;
       case 'Tracing.getCategories':

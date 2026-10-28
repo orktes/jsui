@@ -32,6 +32,7 @@
 
 #include "core/perf.h"
 #include "core/value.h"
+#include "js/inspector_dom.h"
 #include "platform/loader.h"
 
 #include <atomic>
@@ -46,6 +47,8 @@
 struct QJSCDPAgent;
 
 namespace jsui {
+
+class Document;
 
 class Inspector : public PhaseSpanSink, public LoadObserver {
  public:
@@ -75,6 +78,9 @@ class Inspector : public PhaseSpanSink, public LoadObserver {
   // The runtime calls into JS (`what`: "(timer)", ...; a CPU profile shows
   // it above the JS) / JS returned to it (what follows is idle).
   void jsEnter(const char* what);
+  // The Elements panel's requests and live updates, on the thread that owns
+  // `doc` (Runtime::tick).
+  void pumpDom(Document& doc);
   void jsIdle();
   // Whether a frontend records a CPU profile: the runtime's phases then
   // report to this sink (span: any thread), shown in the profile.
@@ -162,6 +168,15 @@ class Inspector : public PhaseSpanSink, public LoadObserver {
   std::map<uint64_t, NetRequest> net_;
   size_t netBytes_ = 0;  // bodies kept
   Perf* phases_ = nullptr;  // runtime thread
+  // Elements: requests queued by the receive thread for pumpDom().
+  struct DomRequest {
+    std::string session, method;
+    Value id, params;
+  };
+  std::mutex domMutex_;
+  std::vector<DomRequest> domQueue_;
+  DomAgent dom_;  // owner thread
+  double domTickAt_ = 0;
   std::mutex spanMutex_;
   std::vector<Span> spans_;
 };

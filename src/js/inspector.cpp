@@ -382,6 +382,37 @@ bool Inspector::networkAnswer(const std::string& method, const Value& id, const 
   return true;
 }
 
+void Inspector::pumpDom(Document& doc) {
+  std::vector<DomRequest> queue;
+  {
+    std::lock_guard<std::mutex> l(domMutex_);
+    queue.swap(domQueue_);
+  }
+  dom_.attach(&doc);
+  auto event = [this](const char* method, Value params) {
+    send("", Value(Value::Object{{"method", Value(method)}, {"params", std::move(params)}}).toJson());
+  };
+  for (DomRequest& r : queue) {
+    {
+      std::lock_guard<std::mutex> l(sessMutex_);
+      dom_.documentUrl = title_;
+    }
+    Value result;
+    std::string error;
+    dom_.handle(r.method, r.params, &result, &error, event);
+    if (!error.empty())
+      send(r.session, Value(Value::Object{{"id", r.id}, {"error", Value(Value::Object{{"code", Value(-32000)}, {"message", Value(error)}})}}).toJson());
+    else
+      send(r.session, Value(Value::Object{{"id", r.id}, {"result", std::move(result)}}).toJson());
+  }
+  // Live updates a few times a second, not every frame.
+  double now = monotonicSeconds();
+  if (dom_.enabled() && now - domTickAt_ > 0.25) {
+    domTickAt_ = now;
+    dom_.tick(event);
+  }
+}
+
 void Inspector::flushSpans() {
   std::vector<Span> spans;
   {
@@ -534,6 +565,11 @@ void Inspector::handleEvent(const std::string& type, const std::string& session,
     return;
   }
   if (method.rfind("Network.", 0) == 0 && networkAnswer(method, id, msg["params"], session)) return;
+  if (method.rfind("DOM.", 0) == 0 || method.rfind("CSS.", 0) == 0 || method.rfind("Overlay.", 0) == 0) {
+    std::lock_guard<std::mutex> l(domMutex_);
+    domQueue_.push_back({session, method, id, msg["params"]});
+    return;
+  }
   if (!qjs_cdp_handles(method.c_str())) {
     // An empty result would tell DevTools these did something: it then reads
     // fields that aren't there or waits for data that never comes.
@@ -581,7 +617,7 @@ void Inspector::receiveLoop() {
     }
     std::string body =
         Value(Value::Object{
-                  {"runtime", Value(id_)}, {"name", Value(name_)}, {"title", Value(title)}, {"profiler", Value(true)}, {"network", Value(true)}})
+                  {"runtime", Value(id_)}, {"name", Value(name_)}, {"title", Value(title)}, {"profiler", Value(true)}, {"network", Value(true)}, {"dom", Value(true)}})
             .toJson();
     req.body.assign(body.begin(), body.end());
     net::HttpResponse res = net::httpRequest(req, &stopping_);
