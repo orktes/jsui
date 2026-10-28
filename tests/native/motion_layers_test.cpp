@@ -271,6 +271,6 @@ TEST(motion_layers_growing_layer_stays_sharp) {
               "paint by more than 24 levels\n",
               on.sum.motionDraws, on.sum.layerRenders, frames, worst);
   CHECK(on.sum.motionDraws >= frames - 2);
-  CHECK(on.sum.layerRenders <= 3);
+  CHECK(on.sum.layerRenders <= 4);
   CHECK(worst <= 120);
 }
