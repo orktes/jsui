@@ -17,8 +17,8 @@ jsui-viewer --dev http://127.0.0.1:5173/bundle.js   # or any dev-mode host
   thread). The frontend is Chrome's prebuilt one for a pinned revision
   (`DEVTOOLS_REVISION` in `packages/cli/src/devtools-frontend.js`,
   BSD-licensed), fetched from Google's DevTools CDN on first use and cached
-  in `~/.cache/jsui/devtools/` (`JSUI_CACHE_DIR` moves it). Elements and
-  Network have nothing to show.
+  in `~/.cache/jsui/devtools/` (`JSUI_CACHE_DIR` moves it). Elements has
+  nothing to show.
 * **Chrome's own DevTools** (works offline): paste
   `devtools://devtools/bundled/inspector.html?ws=127.0.0.1:5173/__jsui/inspect/page/<id>`
   into the address bar, the same page mode. `jsui dev` prints it with the
@@ -91,6 +91,16 @@ running. *Save profile* writes a `.cpuprofile`.
 * **Where.** Every native runtime in `jsui dev`. The browser's own engine
   has its own profiler; the web build's QuickJS and the headless runtime
   can't be debugged at all (see below).
+
+## Network
+
+The **Network** panel lists what the runtime loads while DevTools is open:
+`fetch()` calls, images, fonts, the bundle and hot updates, with method,
+headers, status, type, size, timing and the response (the last bodies, up
+to 16 MB each and 96 MB in all, stay readable). The dev server's own
+traffic (`/__jsui/...`: the shared session, the debugger) is left out.
+Requests show from the moment DevTools enables the panel; there is no
+"reload page". WebSockets aren't shown yet.
 
 ## How it works
 
@@ -168,9 +178,8 @@ WebAssembly module in Node) is not a debug target for the same reason.
   a file.
 * **The app freezes while paused.** It is paused like a browser tab. In a game
   engine, the engine's main loop waits with it.
-* **Not supported.** Heap snapshots (the Memory panel), the Network panel,
-  live edit and restart frame. The runtime answers those domains with "not
-  found".
+* **Not supported.** Heap snapshots (the Memory panel), live edit and
+  restart frame. The runtime answers those domains with "not found".
 * **Chrome.** It loads the source maps through `chrome://inspect`'s DevTools.
   A DevTools frontend hosted on an http page can't fetch them, because of its
   content security policy.

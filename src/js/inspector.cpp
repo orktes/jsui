@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 
@@ -28,6 +29,57 @@ int64_t steadyUs(std::chrono::steady_clock::time_point t) {
   return std::chrono::duration_cast<std::chrono::microseconds>(t.time_since_epoch()).count();
 }
 int64_t profilerClock() { return steadyUs(std::chrono::steady_clock::now()); }
+
+double monotonicSeconds() {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+double wallSeconds() {
+  return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+std::string base64(const std::string& in) {
+  static const char k[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string out;
+  out.reserve((in.size() + 2) / 3 * 4);
+  size_t i = 0;
+  for (; i + 2 < in.size(); i += 3) {
+    uint32_t v = (uint8_t(in[i]) << 16) | (uint8_t(in[i + 1]) << 8) | uint8_t(in[i + 2]);
+    out += k[v >> 18];
+    out += k[(v >> 12) & 63];
+    out += k[(v >> 6) & 63];
+    out += k[v & 63];
+  }
+  if (i < in.size()) {
+    uint32_t v = uint8_t(in[i]) << 16;
+    if (i + 1 < in.size()) v |= uint8_t(in[i + 1]) << 8;
+    out += k[v >> 18];
+    out += k[(v >> 12) & 63];
+    out += i + 1 < in.size() ? k[(v >> 6) & 63] : '=';
+    out += '=';
+  }
+  return out;
+}
+
+// The Network panel's resource type.
+std::string netType(const std::string& kind, const std::string& contentType, const std::string& url) {
+  if (kind == "fetch") return "Fetch";
+  if (kind == "image" || contentType.rfind("image/", 0) == 0) return "Image";
+  if (kind == "font" || contentType.rfind("font/", 0) == 0 || url.find(".woff") != std::string::npos ||
+      url.find(".ttf") != std::string::npos || url.find(".otf") != std::string::npos)
+    return "Font";
+  if (kind == "script" || contentType.find("javascript") != std::string::npos) return "Script";
+  if (contentType.rfind("audio/", 0) == 0 || contentType.rfind("video/", 0) == 0) return "Media";
+  return "Other";
+}
+
+Value headerObject(const HeaderList& headers) {
+  Value::Object o;
+  for (auto& [k, v] : headers) o[k] = Value(v);
+  return Value(std::move(o));
+}
+
+constexpr size_t kNetBodyMax = 16u << 20;   // one body kept for getResponseBody
+constexpr size_t kNetBytesMax = 96u << 20;  // all kept bodies
 
 const char* spanName(Phase p) {
   switch (p) {
@@ -171,6 +223,163 @@ void Inspector::scope(Phase phase, std::chrono::steady_clock::time_point start,
   if (!sampling_) return;
   std::lock_guard<std::mutex> l(spanMutex_);
   spans_.push_back({phase, true, steadyUs(start), steadyUs(end)});
+}
+
+std::string netId(uint64_t id) { return "jsui-" + std::to_string(id); }
+
+void Inspector::loadStarted(uint64_t id, const LoadRequest& req) {
+  if (!network_ || req.url.find("/__jsui/") != std::string::npos) return;
+  std::string type = netType(req.kind, "", req.url), document;
+  {
+    std::lock_guard<std::mutex> l(netMutex_);
+    net_[id] = NetRequest{type, {}, false};
+  }
+  {
+    std::lock_guard<std::mutex> l(sessMutex_);
+    document = title_;
+  }
+  Value::Object request{{"url", Value(req.url)},
+                        {"method", Value(req.method)},
+                        {"headers", headerObject(req.headers)},
+                        {"initialPriority", Value("High")},
+                        {"referrerPolicy", Value("no-referrer")}};
+  if (!req.body.empty()) request["postData"] = Value(std::string(req.body.begin(), req.body.end()));
+  Value::Object params{{"requestId", Value(netId(id))},
+                       {"loaderId", Value("L1")},
+                       {"documentURL", Value(document)},
+                       {"request", Value(std::move(request))},
+                       {"timestamp", Value(monotonicSeconds())},
+                       {"wallTime", Value(wallSeconds())},
+                       {"initiator", Value(Value::Object{{"type", Value("other")}})},
+                       {"type", Value(type)},
+                       {"frameId", Value("F1")}};
+  send("", Value(Value::Object{{"method", Value("Network.requestWillBeSent")}, {"params", Value(std::move(params))}}).toJson());
+}
+
+void Inspector::loadAnswered(uint64_t id, int kind, const Resource& res) {
+  std::string type;
+  {
+    std::lock_guard<std::mutex> l(netMutex_);
+    auto it = net_.find(id);
+    if (it == net_.end() || it->second.done) return;
+    if (kind != LoadEvent::Data && it->second.type == "Other") it->second.type = netType("", res.contentType, res.url);
+    type = it->second.type;
+  }
+  const double now = monotonicSeconds();
+  auto event = [&](const char* method, Value::Object params) {
+    params["requestId"] = Value(netId(id));
+    params["timestamp"] = Value(now);
+    send("", Value(Value::Object{{"method", Value(method)}, {"params", Value(std::move(params))}}).toJson());
+  };
+  auto keep = [&](const std::vector<uint8_t>& data) {
+    std::lock_guard<std::mutex> l(netMutex_);
+    auto it = net_.find(id);
+    if (it == net_.end() || it->second.body.size() + data.size() > kNetBodyMax) return;
+    it->second.body.append(data.begin(), data.end());
+    netBytes_ += data.size();
+  };
+  auto finish = [&](const std::string& error, size_t bytes) {
+    if (!error.empty())
+      event("Network.loadingFailed", {{"type", Value(type)}, {"errorText", Value(error)}, {"canceled", Value(false)}});
+    else
+      event("Network.loadingFinished", {{"encodedDataLength", Value(double(bytes))}});
+    std::lock_guard<std::mutex> l(netMutex_);
+    auto it = net_.find(id);
+    if (it != net_.end()) it->second.done = true;
+    // The oldest finished bodies go first.
+    for (auto o = net_.begin(); netBytes_ > kNetBytesMax && o != net_.end();) {
+      if (!o->second.done || o->first == id) {
+        ++o;
+        continue;
+      }
+      netBytes_ -= o->second.body.size();
+      o = net_.erase(o);
+    }
+  };
+  if (kind == LoadEvent::Head || kind == 3) {
+    if (res.status == 0) {
+      finish(res.error.empty() ? "net::ERR_FAILED" : res.error, 0);
+      return;
+    }
+    std::string mime = res.contentType.substr(0, res.contentType.find(';'));
+    Value::Object response{{"url", Value(res.url)},
+                           {"status", Value(res.status)},
+                           {"statusText", Value(res.statusText)},
+                           {"headers", headerObject(res.headers)},
+                           {"mimeType", Value(mime)},
+                           {"connectionReused", Value(false)},
+                           {"connectionId", Value(0)},
+                           {"encodedDataLength", Value(0)},
+                           {"securityState", Value(res.url.rfind("https:", 0) == 0 ? "secure" : "neutral")}};
+    event("Network.responseReceived", {{"loaderId", Value("L1")}, {"type", Value(type)}, {"response", Value(std::move(response))}, {"frameId", Value("F1")}});
+    if (kind == 3) {
+      if (!res.data.empty()) {
+        keep(res.data);
+        event("Network.dataReceived", {{"dataLength", Value(double(res.data.size()))}, {"encodedDataLength", Value(double(res.data.size()))}});
+      }
+      finish("", res.data.size());
+    } else if (!res.data.empty()) {
+      keep(res.data);
+      event("Network.dataReceived", {{"dataLength", Value(double(res.data.size()))}, {"encodedDataLength", Value(double(res.data.size()))}});
+    }
+  } else if (kind == LoadEvent::Data) {
+    keep(res.data);
+    event("Network.dataReceived", {{"dataLength", Value(double(res.data.size()))}, {"encodedDataLength", Value(double(res.data.size()))}});
+  } else {  // End
+    size_t bytes = 0;
+    {
+      std::lock_guard<std::mutex> l(netMutex_);
+      auto it = net_.find(id);
+      if (it != net_.end()) bytes = it->second.body.size();
+    }
+    finish(res.error, bytes);
+  }
+}
+
+// Network.* the runtime answers itself (receive thread): the requests are
+// the loader's, reported as they happen.
+bool Inspector::networkAnswer(const std::string& method, const Value& id, const Value& params, const std::string& session) {
+  auto result = [&](Value r) {
+    send(session, Value(Value::Object{{"id", id}, {"result", std::move(r)}}).toJson());
+  };
+  if (method == "Network.enable") {
+    network_ = true;
+    result(Value(Value::Object{}));
+  } else if (method == "Network.disable") {
+    network_ = false;
+    result(Value(Value::Object{}));
+  } else if (method == "Network.getResponseBody") {
+    const std::string& rid = params["requestId"].asString();
+    uint64_t n = rid.rfind("jsui-", 0) == 0 ? std::strtoull(rid.c_str() + 5, nullptr, 10) : 0;
+    std::string body;
+    bool found = false;
+    {
+      std::lock_guard<std::mutex> l(netMutex_);
+      auto it = net_.find(n);
+      if (it != net_.end() && it->second.done) {
+        body = it->second.body;
+        found = true;
+      }
+    }
+    if (!found) {
+      send(session, "{\"id\":" + id.toJson() + ",\"error\":{\"code\":-32000,\"message\":\"No resource with given identifier found\"}}");
+      return true;
+    }
+    bool text = true;
+    for (unsigned char c : body)
+      if (c == 0 || (c < 0x09)) {
+        text = false;
+        break;
+      }
+    result(Value(Value::Object{{"body", Value(text ? body : base64(body))}, {"base64Encoded", Value(!text)}}));
+  } else if (method == "Network.emulateNetworkConditionsByRule") {
+    result(Value(Value::Object{{"ruleIds", Value(Value::Array{})}}));
+  } else if (method == "Network.getSecurityIsolationStatus") {
+    return false;  // "not found": DevTools does without
+  } else {
+    result(Value(Value::Object{}));  // cache, throttling, blocking, ...: nothing to do
+  }
+  return true;
 }
 
 void Inspector::flushSpans() {
@@ -324,6 +533,7 @@ void Inspector::handleEvent(const std::string& type, const std::string& session,
     if (on && attached) sendContextCreated(session);
     return;
   }
+  if (method.rfind("Network.", 0) == 0 && networkAnswer(method, id, msg["params"], session)) return;
   if (!qjs_cdp_handles(method.c_str())) {
     // An empty result would tell DevTools these did something: it then reads
     // fields that aren't there or waits for data that never comes.
@@ -371,7 +581,7 @@ void Inspector::receiveLoop() {
     }
     std::string body =
         Value(Value::Object{
-                  {"runtime", Value(id_)}, {"name", Value(name_)}, {"title", Value(title)}, {"profiler", Value(true)}})
+                  {"runtime", Value(id_)}, {"name", Value(name_)}, {"title", Value(title)}, {"profiler", Value(true)}, {"network", Value(true)}})
             .toJson();
     req.body.assign(body.begin(), body.end());
     net::HttpResponse res = net::httpRequest(req, &stopping_);

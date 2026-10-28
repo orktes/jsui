@@ -849,6 +849,7 @@ JSValue js_loadFont(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
   }
   LoadRequest req;
   req.url = ResourceLoader::resolve(rt.baseUrl, url);
+  req.kind = "font";
   JsEngine::Impl* ip = &impl;
   uint64_t id = impl.startLoad(std::move(req), [ip, family, weight, italic](uint64_t id, Resource& res) {
     fontLoaded(*ip, id, res, family, weight, italic);

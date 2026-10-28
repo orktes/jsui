@@ -453,6 +453,8 @@ void ResourceLoader::loadStream(uint64_t id, LoadRequest req, StreamCallback cb)
 
 void ResourceLoader::start(uint64_t id, LoadRequest req) {
   if (req.background) background_++;
+  if (!req.background)
+    if (LoadObserver* o = observer.load(std::memory_order_relaxed)) o->loadStarted(id, req);
   if (req.url.rfind("data:", 0) == 0) {
     // Decoded inline on every platform, but still delivered from pump() so
     // callbacks never run re-entrantly inside load().
@@ -538,8 +540,13 @@ int ResourceLoader::pump() {
   }
   int n = 0;
   // By index: a callback may load() again, which never touches doneScratch_.
+  LoadObserver* o = observer.load(std::memory_order_relaxed);
   for (size_t i = 0; i < doneScratch_.size(); i++) {
     Answer& a = doneScratch_[i];
+    if (o) {
+      auto it = pending_.find(a.id);
+      if (it != pending_.end() && !it->second.background) o->loadAnswered(a.id, a.kind, a.res);
+    }
     if (deliver(a.id, a.kind, a.res)) n++;
   }
   doneScratch_.clear();

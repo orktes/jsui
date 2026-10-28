@@ -372,6 +372,7 @@ export function createInspector(o) {
       if (typeof body.name === 'string') rt.name = body.name.slice(0, 200);
       if (typeof body.title === 'string') rt.title = body.title.slice(0, 2000);
       if (typeof body.profiler === 'boolean') rt.profiler = body.profiler;
+      if (typeof body.network === 'boolean') rt.network = body.network;
       const gap = !rt.poll && t - rt.lastPollEnd > REGREET_AFTER_MS;
       if (rt.poll) answerPoll(rt, []);  // only one poll per runtime
       if (!rt.live) {
@@ -540,6 +541,7 @@ export function createInspector(o) {
     }
     if (typeof msg.method !== 'string' || !UNSUPPORTED.test(msg.method)) return false;
     if (msg.method.startsWith('Profiler.') && runtimes.get(s.runtime)?.profiler) return false;
+    if (msg.method.startsWith('Network.') && runtimes.get(s.runtime)?.network) return false;
     s.ws.send(JSON.stringify({ id: msg.id, error: { code: -32601, message: `'${msg.method}' wasn't found` } }));
     return true;
   }

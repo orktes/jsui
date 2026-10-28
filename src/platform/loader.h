@@ -55,6 +55,9 @@ struct LoadRequest {
   // Not counted by pending() / busy() (jsui_pending_loads): a long poll the
   // runtime keeps open in the background (dev session).
   bool background = false;
+  // What asked for it, for the debugger's Network panel: "fetch", "image",
+  // "font", "script", ... (empty: guessed from the response).
+  std::string kind;
 };
 
 // One step of a streamed answer (loadStream()).
@@ -64,6 +67,16 @@ struct LoadEvent {
   // failed; no Data / End follow). Data: a body piece in `data`. End: `error`
   // empty when the body is complete, else why it failed part way.
   Resource res;
+};
+
+// Sees every load as it happens (the JS debugger's Network panel): a
+// request starting, and each answer in the order pump() delivers them.
+// Called on the thread that calls load() / pump().
+struct LoadObserver {
+  virtual ~LoadObserver() = default;
+  virtual void loadStarted(uint64_t id, const LoadRequest& req) = 0;
+  // kind: a LoadEvent::Kind, or 3 for a whole answer at once (complete()).
+  virtual void loadAnswered(uint64_t id, int kind, const Resource& res) = 0;
 };
 
 class ResourceLoader {
@@ -108,6 +121,8 @@ class ResourceLoader {
   void cancel(uint64_t id);
   // Drops callbacks of in-flight requests (on reload / destroy).
   void cancelAll();
+  // Set while a debugger shows the Network panel; null: none.
+  std::atomic<LoadObserver*> observer{nullptr};
   bool busy() const;
   size_t pending() const { return pending_.size() - background_; }
 

@@ -682,7 +682,9 @@ void Runtime::loadUrl(const std::string& url) {
         inspector = std::make_shared<Inspector>(devOrigin_, this->session ? this->session->id() : std::string("jsui"),
                                                 this->session ? this->session->displayName() : std::string("JSUI"));
       inspector->setTitle(bundleUrl);
+      loader.observer.store(inspector.get());  // the Network panel
     } else {
+      loader.observer.store(nullptr);
       inspector.reset();
     }
 #else

@@ -260,3 +260,49 @@ test('profiler: Profiler.start / stop records a CPU profile of the JSX (native r
     await s.close();
   }
 });
+
+test('network: the runtime reports its loads as Network events (native runtime)', { skip: !process.env.JSUI_RENDER && !existsSync(binary) && `no ${binary}`, timeout: 60000 }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'jsui-network-'));
+  await writeFile(path.join(dir, 'App.jsx'), APP);
+  await writeFile(path.join(dir, 'index.jsx'), "import { AppRegistry } from 'react-native';\nimport App from './App';\nAppRegistry.registerComponent('main', () => App);\n");
+  const s = await dev({ entry: path.join(dir, 'index.jsx'), port: 0, log: () => {} });
+  const origin = `http://127.0.0.1:${s.port}`;
+  const child = spawn(binary, ['--dev', `${origin}/bundle.js`, '--wait-ms', '50000', '-o', path.join(dir, 'out.png')], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '';
+  child.stdout.on('data', (d) => (output += d));
+  child.stderr.on('data', (d) => (output += d));
+  try {
+    let target = null;
+    for (let i = 0; i < 300 && !target; i++) {
+      target = (await (await fetch(`${origin}/json/list`)).json())[0];
+      if (!target) await sleep(50);
+    }
+    assert.ok(target, 'the runtime is listed\n' + output);
+    const c = await connect(target.webSocketDebuggerUrl);
+    await c.send('Runtime.enable');
+    assert.deepEqual((await c.send('Network.enable')).result, {});
+    assert.deepEqual((await c.send('Network.emulateNetworkConditionsByRule', { offline: false, matchedNetworkConditions: [] })).result, { ruleIds: [] });
+    const seen = c.events.length;
+    await c.send('Runtime.evaluate', { expression: `fetch(${JSON.stringify(origin + '/bundle.js')}, { headers: { 'X-Test': '1' } }).then((r) => r.text())` });
+    const sent = await c.event((m) => m.method === 'Network.requestWillBeSent' && m.params.request.url.endsWith('/bundle.js'), seen);
+    assert.equal(sent.params.type, 'Fetch');
+    assert.equal(sent.params.request.method, 'GET');
+    assert.equal(sent.params.request.headers['x-test'] ?? sent.params.request.headers['X-Test'], '1');
+    const id = sent.params.requestId;
+    const response = await c.event((m) => m.method === 'Network.responseReceived' && m.params.requestId === id, seen);
+    assert.equal(response.params.response.status, 200);
+    assert.equal(response.params.response.mimeType, 'text/javascript');
+    const done = await c.event((m) => m.method === 'Network.loadingFinished' && m.params.requestId === id, seen);
+    assert.ok(done.params.encodedDataLength > 1000);
+    assert.ok(done.params.timestamp >= sent.params.timestamp);
+    const body = (await c.send('Network.getResponseBody', { requestId: id })).result;
+    assert.equal(body.base64Encoded, false);
+    assert.match(body.body, /registerComponent/);
+    // The dev server's own traffic (session polls, the debugger's) isn't the app's.
+    assert.ok(!c.events.some((m) => m.method === 'Network.requestWillBeSent' && m.params.request.url.includes('/__jsui/')));
+    c.ws.close();
+  } finally {
+    child.kill();
+    await s.close();
+  }
+});

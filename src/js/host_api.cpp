@@ -190,6 +190,7 @@ JSValue js_fetch(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   if (JS_IsNumber(argv[5])) JS_ToInt32(ctx, &redirect, argv[5]);
   req.timeoutMs = timeout;
   req.redirect = redirect >= JSUI_REDIRECT_FOLLOW && redirect <= JSUI_REDIRECT_MANUAL ? redirect : JSUI_REDIRECT_FOLLOW;
+  req.kind = "fetch";
   JsEngine::Impl* ip = &impl;
   uint64_t id = impl.startStream(std::move(req), [ip](uint64_t id, LoadEvent& ev) {
     auto it = ip->pending.find(id);

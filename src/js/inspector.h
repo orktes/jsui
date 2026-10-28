@@ -31,6 +31,8 @@
 #include <quickjs.h>
 
 #include "core/perf.h"
+#include "core/value.h"
+#include "platform/loader.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -45,7 +47,7 @@ struct QJSCDPAgent;
 
 namespace jsui {
 
-class Inspector : public PhaseSpanSink {
+class Inspector : public PhaseSpanSink, public LoadObserver {
  public:
   // `origin`: the dev server (http://host:port). `id`: the runtime's id in
   // the shared session, stable across reloads.
@@ -81,6 +83,10 @@ class Inspector : public PhaseSpanSink {
             std::chrono::steady_clock::time_point end) override;
   void scope(Phase phase, std::chrono::steady_clock::time_point start,
              std::chrono::steady_clock::time_point end) override;
+  // The runtime's loads (bundle, fetch(), images, fonts, ...) as the
+  // Network panel's requests, while a frontend enabled Network.
+  void loadStarted(uint64_t id, const LoadRequest& req) override;
+  void loadAnswered(uint64_t id, int kind, const Resource& res) override;
 
  private:
   struct Out {
@@ -143,6 +149,18 @@ class Inspector : public PhaseSpanSink {
     bool whole;          // a whole scope (scope()), else exclusive time (span())
     int64_t start, end;  // steady_clock microseconds, the agent's clock
   };
+  // Network: requests in flight and the bodies of the last ones
+  // (Network.getResponseBody), under netMutex_.
+  bool networkAnswer(const std::string& method, const Value& id, const Value& params, const std::string& session);
+  struct NetRequest {
+    std::string type;  // Fetch, Image, Font, Script, ...
+    std::string body;
+    bool done = false;
+  };
+  std::atomic<bool> network_{false};
+  std::mutex netMutex_;
+  std::map<uint64_t, NetRequest> net_;
+  size_t netBytes_ = 0;  // bodies kept
   Perf* phases_ = nullptr;  // runtime thread
   std::mutex spanMutex_;
   std::vector<Span> spans_;
