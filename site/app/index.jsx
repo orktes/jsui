@@ -1,6 +1,6 @@
 // The JSUI showcase site. Every pixel of the page is drawn by the JSUI
 // runtime compiled to WebAssembly; this file is ordinary React Native code.
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useLayoutEffect, useRef } from 'react';
 import { Animated, AppRegistry, Easing, Fonts, ScrollView, StyleSheet, Text, UISounds, View, precompileShaders } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { PageScrollProvider, RouterProvider, segments, useRouterState } from './router.js';
@@ -36,7 +36,11 @@ function Page({ path }) {
   const insets = useSafeAreaInsets();
   // Pages scroll themselves to a y in their own content (Use cases' index).
   const scroll = useRef({ to: (y) => scroller.current && scroller.current.scrollTo({ y: Math.max(0, y), animated: true }) }).current;
-  useEffect(() => {
+  // A layout effect, not a passive one: the new page commits at the old
+  // page's opacity (1), and a passive effect may only run a frame or more
+  // later (React flushes those after the commit's frame when the JS budget
+  // is spent), so the new page would flash in fully, vanish and fade in.
+  useLayoutEffect(() => {
     fade.setValue(0);
     Animated.timing(fade, { toValue: 1, duration: 360, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
   }, [head]);
