@@ -191,19 +191,12 @@ struct PaintMotion {
 // visibly (a notification springing in from 0.92 drawn from a texture
 // rendered at 0.92 was soft for the whole entrance). Like a compositor
 // rasterizing at an animation's largest scale, they are rendered ahead of
-// the motion (motionRenderScale).
+// the motion (motionRenderScale), and drawn with motionSampling.
 constexpr float kMotionMinRatio = 0.5f, kMotionMaxRatio = 1.001f;
 
-// EXPERIMENT (to be removed): JSUI_MOTION_SAMPLING=linear|mitchell|catmull.
-SkSamplingOptions motionSampling() {
-  static const SkSamplingOptions s = [] {
-    const char* v = std::getenv("JSUI_MOTION_SAMPLING");
-    if (v && std::strcmp(v, "mitchell") == 0) return SkSamplingOptions(SkCubicResampler::Mitchell());
-    if (v && std::strcmp(v, "catmull") == 0) return SkSamplingOptions(SkCubicResampler::CatmullRom());
-    return SkSamplingOptions(SkFilterMode::kLinear);
-  }();
-  return s;
-}
+// Motion draws resample with Catmull-Rom: a texture scaled by a ratio near
+// 1 keeps more of its glyph edges' contrast than with bilinear filtering.
+SkSamplingOptions motionSampling() { return SkSamplingOptions(SkCubicResampler::CatmullRom()); }
 
 // The factor to render a motion texture at, over the current device scale
 // `cur` (the larger of the matrix's scales), for a node whose layout rests
@@ -2561,7 +2554,7 @@ SkIRect scrollIndicatorBounds(Node* n, const SkMatrix& m, float w, float h, cons
 // atlas and laid out into new sub-runs each time (on the web the larger part
 // of such a frame's text cost). Like a compositor, it is drawn instead from a
 // texture of its paint at the scale the animation started at, scaled with
-// bilinear filtering, and repainted exactly once the scale settles
+// a cubic filter (motionSampling), and repainted exactly once the scale settles
 // (NodeRecord::approximate). Rendered ahead of the motion and only scaled
 // down (motionRenderScale, `rest`: the device scale of its layout). Text in
 // one color (the usual case) is rendered as a white mask tinted when drawn,
@@ -2836,7 +2829,7 @@ const SkRect& stampedVisualBounds(Node* n, const NodeRecord* rec) {
 // updateRasterCache) whose device matrix keeps changing in more than its
 // translation (a button springing in scale, a card rotating in) while
 // nothing in it changes is drawn from the texture it was last rendered
-// into, mapped by the change of matrix since (resampled bilinearly, as a
+// into, mapped by the change of matrix since (resampled, as a
 // compositor animates a layer), instead of being rendered into a new
 // texture at every scale, or painted node by node. When it pays:
 // - it moved in this frame and the one before (NodeRecord::changing: an
