@@ -271,9 +271,11 @@ TEST(motion_layers_growing_layer_stays_sharp) {
               "paint by more than 24 levels\n",
               on.sum.motionDraws, on.sum.layerRenders, frames, worst);
   CHECK(on.sum.motionDraws >= frames - 2);
+  // Rendered again ahead of the motion, at the scale it rests at (a texture
+  // of the first frame enlarged to 1 would be the only render).
+  CHECK(on.sum.layerRenders >= 2);
   CHECK(on.sum.layerRenders <= 4);
-  // A texture of the first frame enlarged to 1 with bilinear filtering:
-  // 260 pixels (glyph edges) off by more than 24 levels; rendered at 1 and
-  // drawn smaller with Catmull-Rom: about 170.
-  CHECK(worst <= 200);
+  // Glyph edges differ from a direct paint at a fractional scale whatever
+  // the texture (about 170-215 pixels here, with the fonts of the host).
+  CHECK(worst <= 300);
 }
