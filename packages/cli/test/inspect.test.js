@@ -542,8 +542,8 @@ test('profile trace: JS samples on Main, the phases on a render thread, worklets
   const gpu = traceEvents.find((e) => e.name === 'GPUTask');
   assert.deepEqual([gpu.ts, gpu.dur, thread(gpu.pid, gpu.tid)], [1400, 50, 'CrGpuMain']);
   assert.ok(traceEvents.some((e) => e.name === 'process_name' && e.pid === gpu.pid && e.args.name === 'GPU Process'));
-  const worklet = traceEvents.find((e) => e.name === 'FunctionCall');
-  assert.deepEqual([worklet.ts, worklet.dur, thread(worklet.pid, worklet.tid)], [1500, 20, 'JSUI worklets']);
+  const worklet = traceEvents.find((e) => e.name === 'TimeStamp').args.data;
+  assert.deepEqual([worklet.name, worklet.start, worklet.end, worklet.track, worklet.trackGroup], ['Worklets', 1500, 1520, 'Worklets', 'JSUI']);
   assert.ok(traceEvents.some((e) => e.name === 'thread_name' && e.args.name === 'CrRendererMain'));
 });
 

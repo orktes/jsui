@@ -78,8 +78,8 @@ running. *Save profile* writes a `.cpuprofile`.
   (in tasks, under what called it), the frame phases on a **JSUI render
   thread** track (Layout, Recalculate style, Paint, Commit, colored as
   Rendering and Painting) where they actually ran, overlapping JS or not,
-  worklet runs (react-native-worklets, on the window's thread) on a **JSUI
-  worklets** track, and each GPU submit on the **GPU** track. Opened the
+  worklet runs (react-native-worklets, on the window's thread) on a
+  **JSUI → Worklets** track, and each GPU submit on the **GPU** track. Opened the
   Node-style way (`chrome://inspect`), DevTools asks for a CPU profile only
   and shows one lane, with the phases as `(layout)`, `(paint)`, ... entries.
 * **How.** A thread of the runtime's arms the statement traps once per
