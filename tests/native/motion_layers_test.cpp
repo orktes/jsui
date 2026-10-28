@@ -244,3 +244,33 @@ TEST(motion_layers_not_while_the_content_changes) {
   ref.card->children()[1]->children()[0]->setText("Play 8");
   checkRest(on, ref, plain, "changing content");
 }
+
+// A translucent card springing in from 0.9 (a notification entering): its
+// texture is rendered at the scale it rests at and only scaled down, so
+// its text stays about as sharp as painted directly while it grows (a
+// texture of the first frame enlarged to 1 blurred every glyph edge).
+TEST(motion_layers_growing_layer_stays_sharp) {
+  const std::string extra = R"J("opacity":0.85,)J";
+  Run on(extra, true, true), plain(extra, false, true);
+  for (Run* r : {&on, &plain}) {
+    patch(r->card, scaleStyle(0.9));
+    r->frame();
+    r->frame();
+  }
+  size_t worst = 0;
+  int frames = 0;
+  for (int i = 1; i <= 9; i++) {
+    for (Run* r : {&on, &plain}) {
+      patch(r->card, scaleStyle(0.9 + 0.01 * i));
+      r->frame();
+    }
+    frames++;
+    worst = std::max(worst, compare(on.px, plain.px, 24).over);
+  }
+  std::printf("  growing layer: %d motion draws, %d layer renders in %d frames; at most %zu pixels off a direct "
+              "paint by more than 24 levels\n",
+              on.sum.motionDraws, on.sum.layerRenders, frames, worst);
+  CHECK(on.sum.motionDraws >= frames - 2);
+  CHECK(on.sum.layerRenders <= 3);
+  CHECK(worst <= 120);
+}

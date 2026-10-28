@@ -184,6 +184,44 @@ struct PaintMotion {
   bool* inexact = nullptr;
 };
 
+// Textures drawn under a changing scale (motion layers, drawScalingText)
+// are only ever scaled down, from 1 to kMotionMinRatio of the scale they
+// were rendered at, and up by at most kMotionMaxRatio (a spring's last
+// overshoot): a texture enlarged with bilinear filtering blurs its text
+// visibly (a notification springing in from 0.92 drawn from a texture
+// rendered at 0.92 was soft for the whole entrance). Like a compositor
+// rasterizing at an animation's largest scale, they are rendered ahead of
+// the motion (motionRenderScale).
+constexpr float kMotionMinRatio = 0.5f, kMotionMaxRatio = 1.02f;
+
+// The factor to render a motion texture at, over the current device scale
+// `cur` (the larger of the matrix's scales), for a node whose layout rests
+// at device scale `rest` (its snap space, no transforms: the scale UI rests
+// at). Below rest it is rendered at rest (a pop-in or a shrink grows back
+// there), or at 3/2 of the scale while the scale is far below; above rest at
+// 5/4 of the scale (a hover grow, a zoom). A few textures over a whole
+// pop-in, each scaled down only.
+float motionRenderScale(float cur, float rest) {
+  if (!(cur > 0) || !(rest > 0)) return 1;
+  float target = cur;
+  if (cur < rest * 0.999f) target = std::min(rest, cur * 1.5f);
+  else if (cur > rest * 1.001f) target = cur * 1.25f;
+  return target / cur;
+}
+
+float maxScale(const SkMatrix& m) {
+  SkScalar mm[2];
+  return m.getMinMaxScales(mm) ? mm[1] : 0;
+}
+
+// `m` scaled by `k` about the device center of `local` mapped by it.
+SkMatrix scaledAbout(const SkMatrix& m, const SkRect& local, float k) {
+  SkRect d = m.mapRect(local);
+  SkMatrix r = m;
+  r.postScale(k, k, d.centerX(), d.centerY());
+  return r;
+}
+
 // ---------------------------------------------------------- resampling
 
 // The inside of a shadow's box, which a mask draw leaves out: it is cut out
@@ -2265,6 +2303,8 @@ struct Ctx {
   // A draw was not what the nodes at rest paint (see PaintMotion): a
   // texture rendered with it is not used once they rest.
   bool approximated = false;
+  // Painting into a cached layer's or raster-cached subtree's texture.
+  bool inTexture = false;
 };
 
 sk_sp<SkMaskFilter> cachedBlur(RootRecord* root, float blur) {
@@ -2511,12 +2551,14 @@ SkIRect scrollIndicatorBounds(Node* n, const SkMatrix& m, float w, float h, cons
 // of such a frame's text cost). Like a compositor, it is drawn instead from a
 // texture of its paint at the scale the animation started at, scaled with
 // bilinear filtering, and repainted exactly once the scale settles
-// (NodeRecord::approximate). Text in one color (the usual case) is rendered
-// as a white mask tinted when drawn, so a color transition running with the
-// scale (a hover) keeps the texture. GPU canvases only (a raster canvas
-// draws glyphs from its strike cache cheaply). False: draw it directly.
+// (NodeRecord::approximate). Rendered ahead of the motion and only scaled
+// down (motionRenderScale, `rest`: the device scale of its layout). Text in
+// one color (the usual case) is rendered as a white mask tinted when drawn,
+// so a color transition running with the scale (a hover) keeps the texture.
+// GPU canvases only (a raster canvas draws glyphs from its strike cache
+// cheaply). False: draw it directly.
 bool drawScalingText(Node* n, SkCanvas* c, SpriteCache& sc, const NodeRecord& rec, float x, float y, float w,
-                     float h, const SkMatrix* layoutSpace) {
+                     float h, const SkMatrix* layoutSpace, float rest) {
   const void* owner = c->recorder() ? static_cast<const void*>(c->recorder())
                                     : static_cast<const void*>(c->recordingContext());
   const SkMatrix m = c->getTotalMatrix();
@@ -2526,8 +2568,8 @@ bool drawScalingText(Node* n, SkCanvas* c, SpriteCache& sc, const NodeRecord& re
   SkColor tint = 0;
   const bool tinted = text::tintable(n, w, &key, &tint);
   const uint64_t stamp = tinted ? key : rec.layerStamp;
-  // Scaled up past a quarter the texture would blur visibly: rendered again.
-  auto near = [](float a, float b) { return a <= b * 1.25f && b <= a * 1.25f; };
+  // Enlarged the texture would blur visibly: rendered again.
+  auto near = [](float now, float then) { return now <= then * kMotionMaxRatio && now >= then * kMotionMinRatio; };
   bool hit = snap && snap->image && snap->stamp == stamp && snap->tinted == tinted && snap->owner == owner &&
              snap->image->colorType() == c->imageInfo().colorType() &&
              near(m.getScaleX(), snap->matrix.getScaleX()) && near(m.getScaleY(), snap->matrix.getScaleY());
@@ -2547,8 +2589,13 @@ bool drawScalingText(Node* n, SkCanvas* c, SpriteCache& sc, const NodeRecord& re
     if (sc.textSnaps >= kMaxSnapsPerPaint) return false;
     SkRect local;
     if (!text::paintBounds(n, x, y, w, &local)) return false;
-    SkIRect area = m.mapRect(local).roundOut();
     constexpr int kMaxSide = 2048;
+    SkMatrix rm = scaledAbout(m, local, motionRenderScale(std::max(m.getScaleX(), m.getScaleY()), rest));
+    SkIRect area = rm.mapRect(local).roundOut();
+    if (area.width() > kMaxSide || area.height() > kMaxSide) {
+      rm = m;
+      area = m.mapRect(local).roundOut();
+    }
     if (area.isEmpty() || area.width() > kMaxSide || area.height() > kMaxSide) return false;
     SkImageInfo info = c->imageInfo().makeWH(area.width(), area.height()).makeAlphaType(kPremul_SkAlphaType);
     SkSurfaceProps props = surfaceProps();
@@ -2557,7 +2604,7 @@ bool drawScalingText(Node* n, SkCanvas* c, SpriteCache& sc, const NodeRecord& re
     SkCanvas* oc = surf->getCanvas();
     oc->clear(SK_ColorTRANSPARENT);
     oc->translate(float(-area.left()), float(-area.top()));
-    oc->concat(m);
+    oc->concat(rm);
     text::paintText(n, oc, x, y, w, h, layoutSpace, tinted);
 #if defined(JSUI_GRAPHITE_AS_IMAGE)
     sk_sp<SkImage> image = oc->recorder() ? SkSurfaces::AsImage(surf) : surf->makeImageSnapshot();
@@ -2567,7 +2614,7 @@ bool drawScalingText(Node* n, SkCanvas* c, SpriteCache& sc, const NodeRecord& re
     if (!image) return false;
     snap = std::make_shared<NodeRecord::TextSnap>();
     snap->image = std::move(image);
-    snap->matrix = m;
+    snap->matrix = rm;
     snap->origin = {area.left(), area.top()};
     snap->stamp = stamp;
     snap->tinted = tinted;
@@ -2631,7 +2678,10 @@ void paintContent(Node* n, SkCanvas* c, Ctx& ctx, SkVector snap, float w, float 
     const auto* rec = static_cast<const NodeRecord*>(n->paintCache.get());
     if (n->type() == NodeType::Text) {
       text::paintTextSelection(n, c, x, y, cw);  // selectable text's highlight, under the glyphs
-      if (rec && motion.scaling && drawScalingText(n, c, spriteCache(ctx.root), *rec, x, y, cw, ch, ls))
+      // Not into a texture that is itself resampled (an opacity layer or
+      // raster-cached subtree rendered here): its text exact there.
+      if (rec && motion.scaling && !ctx.inTexture &&
+          drawScalingText(n, c, spriteCache(ctx.root), *rec, x, y, cw, ch, ls, maxScale(ctx.snapSpace)))
         inexact = true;
       else
         text::paintText(n, c, x, y, cw, ch, ls);
@@ -2783,11 +2833,12 @@ const SkRect& stampedVisualBounds(Node* n, const NodeRecord* rec) {
 //   animation, not a one-off jump), and scales or rotates (`scaling`);
 // - the texture holds the whole layer (not cut at the canvas edge, where
 //   the motion could bring the missing part into view);
-// - the change scales by 1/2 to 5/4: beyond, a fresh texture at the
-//   current scale (one per such step, a few over a whole pop-in), so a
-//   shrinking layer does not alias and a growing one blurs at most by a
-//   quarter. Text in it is resampled with the rest, soft by at most that
-//   much while the motion lasts.
+// - the change scales by kMotionMinRatio to kMotionMaxRatio (1/2 to about
+//   1): beyond, a fresh texture (one per such step, a few over a whole
+//   pop-in), so a shrinking layer does not alias and a growing one does not
+//   blur. Textures in motion are rendered ahead of it (motionRenderScale:
+//   at the scale the layout rests at while below it, larger above), so
+//   the text in a layer springing in is only ever scaled down.
 // Like a sub-pixel translation (layerInexact), the node is repainted
 // exactly the frame after it comes to rest. PaintStats::motionDraws counts
 // the draws; setMotionLayers(false) or JSUI_MOTION_LAYERS=off turns them
@@ -2811,7 +2862,7 @@ bool motionTransform(const NodeRecord* rec, const SkMatrix& then, const SkMatrix
   *out = SkMatrix::Concat(now, inv);
   SkScalar mm[2];
   if (!out->getMinMaxScales(mm)) return false;
-  return mm[0] >= 0.5f && mm[1] <= 1.25f;
+  return mm[0] >= kMotionMinRatio && mm[1] <= kMotionMaxRatio;
 }
 
 // Paints node `n` (its canvas already at the node's local space, ctx set up
@@ -2860,7 +2911,7 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
   }
   // Motion layer: scaling or rotating (see motionTransform), the texture
   // drawn under the change of matrix since it was rendered.
-  SkMatrix motion;
+  SkMatrix motion, rm;
   bool moving = false;
   if (!hit && it != lc.entries.end()) {
     const auto& e = it->second;
@@ -2884,14 +2935,24 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
     // the texture is drawn again under the next frames' matrices (a motion
     // layer, see motionTransform).
     if (raster && rec->scaling && !inMotion) return false;
+    auto fits = [&](const SkIRect& r) {
+      return r.width() <= kMaxSide && r.height() <= kMaxSide && size_t(r.width()) * r.height() * 4 <= lc.budget / 2;
+    };
     // The whole layer when it fits, so it can move into view without
     // being rendered again.
-    if (full.width() <= kMaxSide && full.height() <= kMaxSide &&
-        size_t(full.width()) * full.height() * 4 <= lc.budget / 2)
-      need = full;
-    if (need.width() > kMaxSide || need.height() > kMaxSide ||
-        size_t(need.width()) * need.height() * 4 > lc.budget / 2)
-      return false;
+    if (fits(full)) need = full;
+    // A motion layer on the canvas whole: rendered ahead of the motion
+    // (motionRenderScale), the whole layer at that scale.
+    rm = m;
+    if (inMotion && rec->moved && need == full) {
+      SkMatrix ahead = scaledAbout(m, vb, motionRenderScale(maxScale(m), maxScale(ctx.snapSpace)));
+      SkIRect aheadFull = ahead.mapRect(vb).roundOut();
+      if (ahead != m && fits(aheadFull)) {
+        rm = ahead;
+        need = full = aheadFull;
+      }
+    }
+    if (!fits(need)) return false;
     SkImageInfo info = c->imageInfo().makeWH(need.width(), need.height()).makeAlphaType(kPremul_SkAlphaType);
     SkSurfaceProps props = surfaceProps();
     sk_sp<SkSurface> surf = c->makeSurface(info, &props);
@@ -2899,12 +2960,13 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
     SkCanvas* oc = surf->getCanvas();
     oc->clear(SK_ColorTRANSPARENT);
     oc->translate(float(-need.left()), float(-need.top()));
-    oc->concat(m);
+    oc->concat(rm);
     // The whole layer (no damage culling), with plain layers inside. In an
     // opacity layer the raster-cached subtrees are drawn from their textures
     // (not in a raster-cached subtree's own texture: the two would be
     // rendered together).
     Ctx sub{ctx.doc, ctx.root, nullptr, {}, ctx.snapSpace, ctx.transformed, 1, raster ? nullptr : ctx.layers, false};
+    sub.inTexture = true;
     paintContent(n, oc, sub, p.snap, p.w, p.h);
     ctx.stats.nodesPainted += sub.stats.nodesPainted;
     ctx.stats.layerDraws += sub.stats.layerDraws;
@@ -2927,12 +2989,18 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
     e.rect = need;
     e.whole = need == full;
     e.approximate = sub.approximated;
-    e.matrix = m;
+    e.matrix = rm;
     e.owner = owner;
     lc.bytes += LayerCache::Impl::sizeOf(e);
     it = lc.entries.emplace(n, std::move(e)).first;
     dx = dy = 0;
     inexact = false;
+    // Rendered ahead of the motion: drawn scaled down to this frame's.
+    if (rm != m) {
+      SkMatrix inv;
+      moving = inexact = rm.invert(&inv);
+      if (moving) motion = SkMatrix::Concat(m, inv);
+    }
     ctx.stats.layerRenders++;
   }
   // Drawn as no frame at rest would draw it: repainted exactly once it rests.
