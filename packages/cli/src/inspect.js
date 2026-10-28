@@ -374,6 +374,7 @@ export function createInspector(o) {
       if (typeof body.profiler === 'boolean') rt.profiler = body.profiler;
       if (typeof body.network === 'boolean') rt.network = body.network;
       if (typeof body.dom === 'boolean') rt.dom = body.dom;
+      if (typeof body.heap === 'boolean') rt.heap = body.heap;
       const gap = !rt.poll && t - rt.lastPollEnd > REGREET_AFTER_MS;
       if (rt.poll) answerPoll(rt, []);  // only one poll per runtime
       if (!rt.live) {
@@ -543,6 +544,7 @@ export function createInspector(o) {
     if (typeof msg.method !== 'string' || !UNSUPPORTED.test(msg.method)) return false;
     if (msg.method.startsWith('Profiler.') && runtimes.get(s.runtime)?.profiler) return false;
     if (msg.method.startsWith('Network.') && runtimes.get(s.runtime)?.network) return false;
+    if (msg.method.startsWith('HeapProfiler.') && runtimes.get(s.runtime)?.heap) return false;
     s.ws.send(JSON.stringify({ id: msg.id, error: { code: -32601, message: `'${msg.method}' wasn't found` } }));
     return true;
   }

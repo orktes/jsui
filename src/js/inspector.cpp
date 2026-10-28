@@ -617,7 +617,7 @@ void Inspector::receiveLoop() {
     }
     std::string body =
         Value(Value::Object{
-                  {"runtime", Value(id_)}, {"name", Value(name_)}, {"title", Value(title)}, {"profiler", Value(true)}, {"network", Value(true)}, {"dom", Value(true)}})
+                  {"runtime", Value(id_)}, {"name", Value(name_)}, {"title", Value(title)}, {"profiler", Value(true)}, {"network", Value(true)}, {"dom", Value(true)}, {"heap", Value(true)}})
             .toJson();
     req.body.assign(body.begin(), body.end());
     net::HttpResponse res = net::httpRequest(req, &stopping_);

@@ -113,6 +113,17 @@ removed, props and text changing).
 * Not there yet: picking a view in the app (the inspect arrow), `$0` in
   the console, and the React component names around the views.
 
+## Memory
+
+The **Memory** panel's *Heap snapshot* takes a snapshot of the app's JS
+heap: every object by its constructor's name (`FiberNode`, your classes;
+plain objects by their keys, as Chrome does) with its own and retained
+size, and the references between them, so Summary, Comparison of two
+snapshots, Containment and Retainers work as for a page. The runtime
+collects garbage first. Strings and numbers aren't objects in QuickJS and
+don't appear on their own; objects that only native code holds (timers,
+host callbacks) show as unreachable from the root.
+
 ## Network
 
 The **Network** panel lists what the runtime loads while DevTools is open:
@@ -199,8 +210,9 @@ WebAssembly module in Node) is not a debug target for the same reason.
   a file.
 * **The app freezes while paused.** It is paused like a browser tab. In a game
   engine, the engine's main loop waits with it.
-* **Not supported.** Heap snapshots (the Memory panel), live edit and
-  restart frame. The runtime answers those domains with "not found".
+* **Not supported.** Allocation timelines and sampling (the Memory panel's
+  other two modes), live edit and restart frame. The runtime answers those
+  with "not found".
 * **Chrome.** It loads the source maps through `chrome://inspect`'s DevTools.
   A DevTools frontend hosted on an http page can't fetch them, because of its
   content security policy.

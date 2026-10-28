@@ -792,6 +792,8 @@ static void update_arming(QJSCDPAgent *agent) {
     JS_SetDebugTraceArmed(agent->ctx, true);
 }
 
+#include "heap_snapshot.inc" /* jsui: HeapProfiler */
+
 /* ------------------------------------------------------ jsui: profiler --- */
 
 static void profiler_reset(QJSCDPAgent *agent) {
@@ -1638,6 +1640,10 @@ static const char *const kMethods[] = {
     "Profiler.setSamplingInterval",
     "Profiler.start",
     "Profiler.stop",
+    "HeapProfiler.enable", /* jsui */
+    "HeapProfiler.disable",
+    "HeapProfiler.collectGarbage",
+    "HeapProfiler.takeHeapSnapshot",
 };
 
 bool qjs_cdp_handles(const char *method) {
@@ -1797,6 +1803,35 @@ static void dispatch(
       is(method, "Debugger.setAsyncCallStackDepth") ||
       is(method, "Debugger.setBlackboxPatterns") ||
       is(method, "Debugger.setBlackboxedRanges")) {
+    send_empty_result(agent, id);
+
+    /* --- HeapProfiler (jsui) --- */
+  } else if (is(method, "HeapProfiler.enable") || is(method, "HeapProfiler.disable")) {
+    send_empty_result(agent, id);
+  } else if (is(method, "HeapProfiler.collectGarbage")) {
+    JS_RunGC(JS_GetRuntime(agent->ctx));
+    send_empty_result(agent, id);
+  } else if (is(method, "HeapProfiler.takeHeapSnapshot")) {
+    /* Garbage first, as V8 does, then the snapshot in pieces. */
+    JS_RunGC(JS_GetRuntime(agent->ctx));
+    char *json = heap_snapshot_json(agent);
+    size_t len = strlen(json);
+    /* DevTools starts its snapshot reader on a finished progress report. */
+    if (JS_ToBool(agent->jctx, JS_GetPropertyStr(agent->jctx, params, "reportProgress"))) {
+      JSValue p = json_object(agent);
+      json_set_int(agent, p, "done", 1);
+      json_set_int(agent, p, "total", 1);
+      json_set(agent, p, "finished", JS_TRUE);
+      send_event(agent, "HeapProfiler.reportHeapSnapshotProgress", p);
+    }
+    const size_t piece = 1 << 20;
+    for (size_t at = 0; at < len; at += piece) {
+      size_t n = len - at < piece ? len - at : piece;
+      JSValue params = json_object(agent);
+      JS_SetPropertyStr(agent->jctx, params, "chunk", JS_NewStringLen(agent->jctx, json + at, n));
+      send_event(agent, "HeapProfiler.addHeapSnapshotChunk", params);
+    }
+    free(json);
     send_empty_result(agent, id);
 
     /* --- Profiler (jsui) --- */

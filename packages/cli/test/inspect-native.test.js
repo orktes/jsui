@@ -358,3 +358,51 @@ test('elements: the view tree as DOM, styles editable, live updates (native runt
     await s.close();
   }
 });
+
+test('memory: a heap snapshot of the runtime (native runtime)', { skip: !process.env.JSUI_RENDER && !existsSync(binary) && `no ${binary}`, timeout: 60000 }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'jsui-heap-'));
+  await writeFile(path.join(dir, 'App.jsx'), APP + '\nclass Leaky { constructor(i) { this.i = i; this.payload = [i, i + 1]; } }\nglobalThis.__kept = Array.from({ length: 500 }, (_, i) => new Leaky(i));\n');
+  await writeFile(path.join(dir, 'index.jsx'), "import { AppRegistry } from 'react-native';\nimport App from './App';\nAppRegistry.registerComponent('main', () => App);\n");
+  const s = await dev({ entry: path.join(dir, 'index.jsx'), port: 0, log: () => {} });
+  const origin = `http://127.0.0.1:${s.port}`;
+  const child = spawn(binary, ['--dev', `${origin}/bundle.js`, '--wait-ms', '50000', '-o', path.join(dir, 'out.png')], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '';
+  child.stdout.on('data', (d) => (output += d));
+  child.stderr.on('data', (d) => (output += d));
+  try {
+    let target = null;
+    for (let i = 0; i < 300 && !target; i++) {
+      target = (await (await fetch(`${origin}/json/list`)).json())[0];
+      if (!target) await sleep(50);
+    }
+    assert.ok(target, 'the runtime is listed\n' + output);
+    const c = await connect(target.webSocketDebuggerUrl);
+    await c.send('Runtime.enable');
+    await c.event((m) => m.method === 'Runtime.consoleAPICalled');  // rendered
+    assert.ok((await c.send('HeapProfiler.enable')).result);
+    const seen = c.events.length;
+    assert.deepEqual((await c.send('HeapProfiler.takeHeapSnapshot', { reportProgress: true })).result, {});
+    const after = c.events.slice(seen);
+    const progress = after.findIndex((m) => m.method === 'HeapProfiler.reportHeapSnapshotProgress' && m.params.finished);
+    const first = after.findIndex((m) => m.method === 'HeapProfiler.addHeapSnapshotChunk');
+    assert.ok(progress >= 0 && progress < first, 'a finished progress report before the chunks');
+    const snap = JSON.parse(after.filter((m) => m.method === 'HeapProfiler.addHeapSnapshotChunk').map((m) => m.params.chunk).join(''));
+    const nf = snap.snapshot.meta.node_fields.length, ef = snap.snapshot.meta.edge_fields.length;
+    assert.equal(snap.nodes.length / nf, snap.snapshot.node_count);
+    assert.equal(snap.edges.length / ef, snap.snapshot.edge_count);
+    let edges = 0;
+    for (let i = 4; i < snap.nodes.length; i += nf) edges += snap.nodes[i];
+    assert.equal(edges, snap.snapshot.edge_count);
+    for (let i = 2; i < snap.edges.length; i += ef) assert.equal(snap.edges[i] % nf, 0);
+    // The app's 500 Leaky objects, by constructor name, with their fields.
+    const names = [];
+    for (let i = 1; i < snap.nodes.length; i += nf) names.push(snap.strings[snap.nodes[i]]);
+    assert.ok(names.filter((n) => n === 'Leaky').length >= 500, 'Leaky objects: ' + names.filter((n) => n === 'Leaky').length);
+    assert.ok(snap.strings.includes('payload'));
+    assert.equal((await c.send('HeapProfiler.startSampling')).error.code, -32601);
+    c.ws.close();
+  } finally {
+    child.kill();
+    await s.close();
+  }
+});

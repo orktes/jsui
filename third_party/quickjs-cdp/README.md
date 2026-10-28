@@ -4,7 +4,7 @@ The Chrome DevTools Protocol agent for QuickJS from
 [react-native-quickjs](https://github.com/react-native-quickjs/quickjs)
 (`modules/cdp`, commit c8102d4, MIT, see LICENSE), used by JSUI's JS
 debugger (`src/js/inspector.cpp`, `docs/DEBUGGING.md`). It needs the engine
-patches 0003-0005 in `../quickjs-rnq` and 0005 in `../quickjs-jsui`.
+patches 0003-0005 in `../quickjs-rnq` and 0005-0006 in `../quickjs-jsui`.
 
 JSUI's changes are marked `jsui:` in the source:
 
@@ -50,3 +50,7 @@ JSUI's changes are marked `jsui:` in the source:
   `qjs_cdp_profiler_idle` marks JS returning to the embedder, and
   `qjs_cdp_profiler_add_span` adds the embedder's own work (`(layout)`, ...)
   into the idle time, on the clock `qjs_cdp_profiler_set_clock` gives.
+* **`HeapProfiler`.** `takeHeapSnapshot` walks the heap with
+  `JS_WalkHeap` (`../quickjs-jsui/0006-heap-walk.patch`) and sends V8's
+  `.heapsnapshot` format in chunks (`heap_snapshot.inc`), after a finished
+  progress report (DevTools starts its reader on it); `collectGarbage`.
