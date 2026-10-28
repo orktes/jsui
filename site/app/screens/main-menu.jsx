@@ -406,7 +406,9 @@ function DialogButton({ label, glyph, glyphColor, onPress, autoFocus, danger }) 
 
 // ---------------------------------------------------------------------------
 
-export default function MainMenu({ active = true }) {
+// `autoFocus` (default: `active`) is off where the screen is a preview on a
+// longer page: taking focus at load would scroll the page to it on a phone.
+export default function MainMenu({ active = true, autoFocus = active }) {
   const [sel, setSel] = useState(0);
   const [toast, setToast] = useState(null);
   const [confirm, setConfirm] = useState(false);
@@ -599,7 +601,7 @@ export default function MainMenu({ active = true }) {
               enter={items[i]}
               onSelect={select}
               onActivate={activate}
-              autoFocus={active && i === 0}
+              autoFocus={autoFocus && i === 0}
             />
           ))}
         </View>

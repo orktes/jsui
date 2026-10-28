@@ -61,7 +61,7 @@ function HeroVisual({ width }) {
         style={[styles.heroGlow, { opacity: float.interpolate({ inputRange: [0, 1], outputRange: [0.55, 0.95] }) }]}
       />
       <Stage width={width}>
-        <HeroScreen active />
+        <HeroScreen active autoFocus={false} />
       </Stage>
       <View style={styles.heroTag} pointerEvents="none">
         <LiveBadge label="Live game screen · not a video" />
