@@ -695,7 +695,8 @@ export function useFonts() {
 
 /**
  * A ref to the Canvas: `size` (its layout, read synchronously; 0x0 before
- * it is laid out), `measure`, `measureInWindow`, `redraw`, `getNativeId`.
+ * it is laid out), `measure`, `measureInWindow`, `redraw`, `getNativeId`,
+ * and the view's node id (`findNodeHandle(ref)` / `_nativeTag`).
  * makeImageSnapshot is not supported (returns null).
  */
 export function useCanvasRef() {
@@ -834,6 +835,15 @@ export function Canvas(props) {
     () => ({
       get size() {
         return { width: layout.current.width, height: layout.current.height };
+      },
+      // The view's node id, as on the v2 ref (the view itself), so
+      // findNodeHandle, Animated.attachNativeEvent and `_nativeTag` readers
+      // still resolve the Canvas.
+      get id() {
+        return viewRef.current ? viewRef.current.id : undefined;
+      },
+      get _nativeTag() {
+        return viewRef.current ? viewRef.current._nativeTag : undefined;
       },
       measure: (cb) => viewRef.current && viewRef.current.measure && viewRef.current.measure(cb),
       measureInWindow: (cb) => viewRef.current && viewRef.current.measureInWindow && viewRef.current.measureInWindow(cb),
