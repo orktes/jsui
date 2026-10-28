@@ -192,7 +192,18 @@ struct PaintMotion {
 // rendered at 0.92 was soft for the whole entrance). Like a compositor
 // rasterizing at an animation's largest scale, they are rendered ahead of
 // the motion (motionRenderScale).
-constexpr float kMotionMinRatio = 0.5f, kMotionMaxRatio = 1.02f;
+constexpr float kMotionMinRatio = 0.5f, kMotionMaxRatio = 1.001f;
+
+// EXPERIMENT (to be removed): JSUI_MOTION_SAMPLING=linear|mitchell|catmull.
+SkSamplingOptions motionSampling() {
+  static const SkSamplingOptions s = [] {
+    const char* v = std::getenv("JSUI_MOTION_SAMPLING");
+    if (v && std::strcmp(v, "mitchell") == 0) return SkSamplingOptions(SkCubicResampler::Mitchell());
+    if (v && std::strcmp(v, "catmull") == 0) return SkSamplingOptions(SkCubicResampler::CatmullRom());
+    return SkSamplingOptions(SkFilterMode::kLinear);
+  }();
+  return s;
+}
 
 // The factor to render a motion texture at, over the current device scale
 // `cur` (the larger of the matrix's scales), for a node whose layout rests
@@ -2629,8 +2640,7 @@ bool drawScalingText(Node* n, SkCanvas* c, SpriteCache& sc, const NodeRecord& re
   c->setMatrix(t);
   SkPaint p;
   if (snap->tinted) p.setColorFilter(SkColorFilters::Blend(tint, SkBlendMode::kSrcIn));
-  c->drawImage(snap->image.get(), float(snap->origin.fX), float(snap->origin.fY),
-               SkSamplingOptions(SkFilterMode::kLinear), &p);
+  c->drawImage(snap->image.get(), float(snap->origin.fX), float(snap->origin.fY), motionSampling(), &p);
   c->restore();
   return true;
 }
@@ -3021,7 +3031,7 @@ bool paintCachedLayer(Node* n, SkCanvas* c, Ctx& ctx, float opacity, const Place
   if (moving) c->setMatrix(motion);
   else c->resetMatrix();
   c->drawImage(it->second.image.get(), float(it->second.rect.left() + dx), float(it->second.rect.top() + dy),
-               moving ? SkSamplingOptions(SkFilterMode::kLinear) : SkSamplingOptions(), &lp);
+               moving ? motionSampling() : SkSamplingOptions(), &lp);
   c->restore();
   return true;
 }

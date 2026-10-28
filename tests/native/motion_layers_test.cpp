@@ -40,6 +40,7 @@ std::string cardScene(const std::string& extra) {
 struct Pixels {
   size_t over = 0;  // pixels off by more than `tol` levels
   int max = 0;
+  int64_t sum = 0;  // levels off, summed over pixels (largest channel)
 };
 Pixels compare(const std::vector<uint32_t>& a, const std::vector<uint32_t>& b, int tol) {
   Pixels p;
@@ -48,6 +49,7 @@ Pixels compare(const std::vector<uint32_t>& a, const std::vector<uint32_t>& b, i
     for (int ch = 0; ch < 4; ch++)
       d = std::max(d, std::abs(int((a[k] >> (ch * 8)) & 255) - int((b[k] >> (ch * 8)) & 255)));
     p.max = std::max(p.max, d);
+    p.sum += d;
     if (d > tol) p.over++;
   }
   return p;
@@ -258,6 +260,7 @@ TEST(motion_layers_growing_layer_stays_sharp) {
     r->frame();
   }
   size_t worst = 0;
+  int64_t total = 0;
   int frames = 0;
   for (int i = 1; i <= 9; i++) {
     for (Run* r : {&on, &plain}) {
@@ -265,8 +268,12 @@ TEST(motion_layers_growing_layer_stays_sharp) {
       r->frame();
     }
     frames++;
-    worst = std::max(worst, compare(on.px, plain.px, 24).over);
+    Pixels d = compare(on.px, plain.px, 24);
+    worst = std::max(worst, d.over);
+    total += d.sum;
+    std::printf("    scale %.2f: %zu px off by >24, sum %lld, max %d\n", 0.9 + 0.01 * i, d.over, (long long)d.sum, d.max);
   }
+  std::printf("  growing layer: summed difference %lld\n", (long long)total);
   std::printf("  growing layer: %d motion draws, %d layer renders in %d frames; at most %zu pixels off a direct "
               "paint by more than 24 levels\n",
               on.sum.motionDraws, on.sum.layerRenders, frames, worst);
