@@ -10,8 +10,22 @@ npx jsui dev src/App.jsx        # the dev server (debugging is on by default)
 jsui-viewer --dev http://127.0.0.1:5173/bundle.js   # or any dev-mode host
 ```
 
-* **Chrome:** open `chrome://inspect`, click *Configure...* and add
-  `127.0.0.1:5173`. The app shows under *Remote Target*. Click *inspect*.
+* **Chrome:** open `http://127.0.0.1:5173/__jsui/devtools/` in a tab.
+  It is DevTools on the runtime that joined last, and the same link works
+  after the app or the server restarts. It opens the runtime as a page
+  would be (see Profiling: the Performance panel records a track per
+  thread). The frontend is Chrome's prebuilt one for a pinned revision
+  (`DEVTOOLS_REVISION` in `packages/cli/src/devtools-frontend.js`,
+  BSD-licensed), fetched from Google's DevTools CDN on first use and cached
+  in `~/.cache/jsui/devtools/` (`JSUI_CACHE_DIR` moves it).
+* **Chrome's own DevTools** (works offline): paste
+  `devtools://devtools/bundled/inspector.html?ws=127.0.0.1:5173/__jsui/inspect/page/<id>`
+  into the address bar, the same page mode. `jsui dev` prints it with the
+  runtime's id when one connects (`/json/list` has it as
+  `jsuiPageFrontendUrl`). Or the Node-style way: `chrome://inspect`,
+  *Configure...*, add `127.0.0.1:5173`, *inspect* the app under *Remote
+  Target* (or its `devtoolsFrontendUrl`). That one records only the CPU
+  profile. The id changes each time the runtime starts.
 * **VS Code**: add this to `.vscode/launch.json` and start *JSUI*:
 
   ```json
@@ -29,6 +43,98 @@ and `console.*` with live objects all work.
 
 `jsui dev` prints both snippets when it starts. It logs when a runtime or a
 debugger connects. `jsui dev --no-inspect` turns debugging off.
+
+## Profiling
+
+DevTools' **Performance** panel records a CPU profile of the app's JS: press
+record, use the app, press stop. The flame chart shows your functions with
+their names and files, through the source map, and `(idle)` where JS wasn't
+running. *Save profile* writes a `.cpuprofile`.
+
+* **What it measures.** Time on the JS thread while JS runs, by JS function.
+  Time in a native call (a host call, `JSON.parse`) counts toward the JS
+  function that made it.
+* **What called into JS.** Each stretch of JS sits under what the runtime
+  called it for: `(timer)`, `(animation frame)`, `(event: pointerup)`,
+  `(host message: name)`, `(call: name)` (a global the runtime calls, such
+  as `jsui dev`'s own `__jsui_onCall`), `(host call reply)`, `(measure)`,
+  `(onLayout)`, `(script: url)`, and `(microtasks)` for the promise jobs
+  that run after them. In the trace they are Chrome's own Task, Timer
+  fired, Animation frame fired, Event and Function call.
+* **The runtime's own work.** Where JS was idle, the frame phases the
+  runtime ran show as top-level entries: `(commit)`, `(style)`, `(layout)`,
+  `(animated)`, `(input)`, `(paint)`, `(worklets)` (react-native-worklets
+  runs as one entry here; the multi-track recording has their call tree)
+  and `(gpu)`
+  (submitting the frame to the GPU, not GPU execution). They run on the window's thread: with JS on
+  its own thread (the default), a phase that overlaps running JS shows only
+  where JS was idle. With `--js-thread off` everything is one thread and
+  the chart shows whole frames. Totals per phase without DevTools:
+  `jsui_set_profiling` / `getPerf()` (see [PERFORMANCE.md](PERFORMANCE.md)).
+* **A track per thread.** Opened as a page (the links above), DevTools
+  records a trace (CDP `Tracing`): the dev server answers it by recording
+  a CPU profile in the runtime and sending it back as trace events. The
+  recording then shows the way Chrome shows a page's: the JS on **Main**
+  (in tasks, under what called it), the frame phases on a **JSUI render
+  thread** track (Layout, Recalculate style, Paint, Commit, colored as
+  Rendering and Painting) where they actually ran, overlapping JS or not,
+  the worklet runtimes (react-native-worklets, on the window's thread) as a
+  **JSUI worklets** thread with their own flame chart (sampled like the
+  main JS), and each GPU submit on the **GPU** track. Opened the
+  Node-style way (`chrome://inspect`), DevTools asks for a CPU profile only
+  and shows one lane, with the phases as `(layout)`, `(paint)`, ... entries.
+* **How.** A thread of the runtime's arms the statement traps once per
+  sampling interval (`Profiler.setSamplingInterval`, 1 ms unless the
+  frontend asks otherwise, at least 100 µs), and the next
+  statement records the JS stack. Between samples nothing runs: a JS
+  benchmark ran 2% slower while recording at 100 µs (M1 Ultra). A function shorter than the interval can
+  fall between samples: profile long enough, or repeat the interaction.
+* **Where.** Every native runtime in `jsui dev`. The browser's own engine
+  has its own profiler; the web build's QuickJS and the headless runtime
+  can't be debugged at all (see below).
+
+## Elements
+
+Opened as a page (the links above), the **Elements** panel shows the
+runtime's view tree: `View`, `Text`, `Image`, `ScrollView`, ... under
+`AppRoot`, with `testID`, `nativeID`, `accessibilityLabel` and the like as
+attributes, the view's style as its `style` attribute, and string children
+as text nodes. It follows the app a few times a second (views added and
+removed, props and text changing).
+
+* Hovering a node highlights its view in the app; the box model (size,
+  padding, border, margin) comes from layout.
+* The Styles pane shows the view's style as `element.style`. Edit a value,
+  add a property or untick one and the view changes at once. Values are
+  React Native's: `backgroundColor: #ff0000`, `width: 120`, `transform:
+  [{"scale":1.2}]` (JSON for arrays and objects).
+* Double-click a text node to change the text, or an attribute to change
+  the prop.
+* React owns these props: the next time the component renders, it writes
+  its own values back over an edit, as React DOM does in a browser.
+* Not there yet: picking a view in the app (the inspect arrow), `$0` in
+  the console, and the React component names around the views.
+
+## Memory
+
+The **Memory** panel's *Heap snapshot* takes a snapshot of the app's JS
+heap: every object by its constructor's name (`FiberNode`, your classes;
+plain objects by their keys, as Chrome does) with its own and retained
+size, and the references between them, so Summary, Comparison of two
+snapshots, Containment and Retainers work as for a page. The runtime
+collects garbage first. Strings and numbers aren't objects in QuickJS and
+don't appear on their own; objects that only native code holds (timers,
+host callbacks) show as unreachable from the root.
+
+## Network
+
+The **Network** panel lists what the runtime loads while DevTools is open:
+`fetch()` calls, images, fonts, the bundle and hot updates, with method,
+headers, status, type, size, timing and the response (the last bodies, up
+to 16 MB each and 96 MB in all, stay readable). The dev server's own
+traffic (`/__jsui/...`: the shared session, the debugger) is left out.
+Requests show from the moment DevTools enables the panel; there is no
+"reload page". WebSockets aren't shown yet.
 
 ## How it works
 
@@ -106,7 +212,9 @@ WebAssembly module in Node) is not a debug target for the same reason.
   a file.
 * **The app freezes while paused.** It is paused like a browser tab. In a game
   engine, the engine's main loop waits with it.
-* **Not supported.** Profiling, heap snapshots, live edit and restart frame.
+* **Not supported.** Allocation timelines and sampling (the Memory panel's
+  other two modes), live edit and restart frame. The runtime answers those
+  with "not found".
 * **Chrome.** It loads the source maps through `chrome://inspect`'s DevTools.
   A DevTools frontend hosted on an http page can't fetch them, because of its
   content security policy.

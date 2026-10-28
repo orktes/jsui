@@ -3,7 +3,9 @@
 
 #if JSUI_DEBUGGER
 
+#include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 
@@ -22,6 +24,76 @@ constexpr int kPollTimeoutMs = 35000;  // the server holds a poll ~20 s
 constexpr int kPushTimeoutMs = 10000;
 
 std::string emptyResult(const Value& id) { return "{\"id\":" + id.toJson() + ",\"result\":{}}"; }
+
+int64_t steadyUs(std::chrono::steady_clock::time_point t) {
+  return std::chrono::duration_cast<std::chrono::microseconds>(t.time_since_epoch()).count();
+}
+int64_t profilerClock() { return steadyUs(std::chrono::steady_clock::now()); }
+
+double monotonicSeconds() {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+double wallSeconds() {
+  return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+std::string base64(const std::string& in) {
+  static const char k[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string out;
+  out.reserve((in.size() + 2) / 3 * 4);
+  size_t i = 0;
+  for (; i + 2 < in.size(); i += 3) {
+    uint32_t v = (uint8_t(in[i]) << 16) | (uint8_t(in[i + 1]) << 8) | uint8_t(in[i + 2]);
+    out += k[v >> 18];
+    out += k[(v >> 12) & 63];
+    out += k[(v >> 6) & 63];
+    out += k[v & 63];
+  }
+  if (i < in.size()) {
+    uint32_t v = uint8_t(in[i]) << 16;
+    if (i + 1 < in.size()) v |= uint8_t(in[i + 1]) << 8;
+    out += k[v >> 18];
+    out += k[(v >> 12) & 63];
+    out += i + 1 < in.size() ? k[(v >> 6) & 63] : '=';
+    out += '=';
+  }
+  return out;
+}
+
+// The Network panel's resource type.
+std::string netType(const std::string& kind, const std::string& contentType, const std::string& url) {
+  if (kind == "fetch") return "Fetch";
+  if (kind == "image" || contentType.rfind("image/", 0) == 0) return "Image";
+  if (kind == "font" || contentType.rfind("font/", 0) == 0 || url.find(".woff") != std::string::npos ||
+      url.find(".ttf") != std::string::npos || url.find(".otf") != std::string::npos)
+    return "Font";
+  if (kind == "script" || contentType.find("javascript") != std::string::npos) return "Script";
+  if (contentType.rfind("audio/", 0) == 0 || contentType.rfind("video/", 0) == 0) return "Media";
+  return "Other";
+}
+
+Value headerObject(const HeaderList& headers) {
+  Value::Object o;
+  for (auto& [k, v] : headers) o[k] = Value(v);
+  return Value(std::move(o));
+}
+
+constexpr size_t kNetBodyMax = 16u << 20;   // one body kept for getResponseBody
+constexpr size_t kNetBytesMax = 96u << 20;  // all kept bodies
+
+const char* spanName(Phase p) {
+  switch (p) {
+    case Phase::Commit: return "(commit)";
+    case Phase::Animated: return "(animated)";
+    case Phase::Style: return "(style)";
+    case Phase::Layout: return "(layout)";
+    case Phase::Input: return "(input)";
+    case Phase::Paint: return "(paint)";
+    case Phase::Gpu: return "(gpu)";
+    case Phase::Worklet: return "(worklets)";
+    default: return "(native)";
+  }
+}
 
 }  // namespace
 
@@ -43,6 +115,9 @@ Inspector::~Inspector() {
   }
   if (receiver_.joinable()) receiver_.join();
   if (sender_.joinable()) sender_.join();
+  sampling_ = false;
+  if (sampler_.joinable()) sampler_.join();
+  if (phases_) phases_->spans.store(nullptr, std::memory_order_relaxed);
   if (agent_) qjs_cdp_free(agent_);
   // The frontends see the target go away now rather than after a timeout.
   net::HttpRequest req;
@@ -62,13 +137,16 @@ void Inspector::setTitle(const std::string& title) {
 
 // ------------------------------------------------------------ JS context
 
-void Inspector::attach(JSContext* ctx) {
+void Inspector::attach(JSContext* ctx, Perf* phases) {
   std::vector<std::pair<std::string, std::string>> early;
   {
     std::lock_guard<std::mutex> l(agentMutex_);
     if (agent_) return;
     ctx_ = ctx;
+    phases_ = phases;
     agent_ = qjs_cdp_new(ctx, ++contextId_, &Inspector::sendFromAgent, this);
+    qjs_cdp_profiler_set_clock(agent_, &profilerClock);
+    qjs_cdp_profiler_set_extra(agent_, "jsuiWorklets", &Inspector::workletProfile, this);
     if (!state_.empty()) qjs_cdp_import_state(agent_, state_.c_str());
     scripts_.clear();
     early.swap(early_);
@@ -95,6 +173,8 @@ void Inspector::detach(JSContext* ctx) {
     old = agent_;
     agent_ = nullptr;
     ctx_ = nullptr;
+    if (phases_) phases_->spans.store(nullptr, std::memory_order_relaxed);
+    phases_ = nullptr;
     id = contextId_;
     scripts_.clear();
   }
@@ -106,7 +186,9 @@ void Inspector::detach(JSContext* ctx) {
 
 void Inspector::poll() {
   if (!agent_) return;
+  flushSpans();  // before a Profiler.stop is handled
   qjs_cdp_poll(agent_);
+  syncSampler();
   // Every frontend left: start over with no breakpoints and the debugger
   // off, as a fresh attach expects (the traps parsed into this context's
   // code stay, a new agent drives them).
@@ -115,8 +197,349 @@ void Inspector::poll() {
     if (!agent_) return;
     qjs_cdp_free(agent_);
     agent_ = qjs_cdp_new(ctx_, contextId_, &Inspector::sendFromAgent, this);
+    qjs_cdp_profiler_set_clock(agent_, &profilerClock);
+    qjs_cdp_profiler_set_extra(agent_, "jsuiWorklets", &Inspector::workletProfile, this);
     state_.clear();
     for (auto& [url, source] : scripts_) qjs_cdp_script_loaded(agent_, url.c_str(), source.c_str());
+  }
+  syncSampler();
+}
+
+void Inspector::jsEnter(const char* what) {
+  if (agent_ && sampling_) qjs_cdp_profiler_enter(agent_, what);
+}
+
+void Inspector::jsIdle() {
+  if (agent_ && sampling_) qjs_cdp_profiler_idle(agent_);
+}
+
+void Inspector::addWorklet(JSContext* ctx, const std::string& name) {
+  JS_SetDebugTraceHandler(ctx, &Inspector::workletTrap, this);
+  JS_SetDebugTraceArmed(ctx, false);
+  std::lock_guard<std::mutex> l(workletMutex_);
+  worklets_.emplace_back(ctx, name);
+}
+
+void Inspector::removeWorklet(JSContext* ctx) {
+  JS_SetDebugTraceHandler(ctx, nullptr, nullptr);
+  std::lock_guard<std::mutex> l(workletMutex_);
+  for (size_t i = 0; i < worklets_.size(); i++)
+    if (worklets_[i].first == ctx) worklets_.erase(worklets_.begin() + long(i));
+}
+
+int Inspector::workletTrap(JSContext* ctx, JSAtom, JSAtom, int, int, int, void* opaque) {
+  JS_SetDebugTraceArmed(ctx, false);  // one sample per tick of the sampler
+  static_cast<Inspector*>(opaque)->workletSample(ctx);
+  return 0;
+}
+
+void Inspector::workletSample(JSContext* ctx) {
+  if (!sampling_) return;
+  JSDebugFrameInfo frames[256];
+  int n = JS_GetStackFunctions(ctx, frames, 256);
+  WorkletSample sample{profilerClock(), {}, false};
+  for (int i = n - 1; i >= 0; i--) {
+    if (frames[i].is_native) continue;
+    const char* name = frames[i].func_name != JS_ATOM_NULL ? JS_AtomToCString(ctx, frames[i].func_name) : nullptr;
+    const char* url = frames[i].filename != JS_ATOM_NULL ? JS_AtomToCString(ctx, frames[i].filename) : nullptr;
+    sample.stack.push_back({name ? name : "", url ? url : "", frames[i].func_line, frames[i].func_col});
+    if (name) JS_FreeCString(ctx, name);
+    if (url) JS_FreeCString(ctx, url);
+  }
+  std::lock_guard<std::mutex> l(workletMutex_);
+  workletSamples_.push_back(std::move(sample));
+}
+
+void Inspector::workletsRunning(bool running) {
+  if (!sampling_) return;
+  std::lock_guard<std::mutex> l(workletMutex_);
+  if (running) {
+    // The first statement samples right away (the time before it is the
+    // runtime's own, its entry).
+    for (auto& w : worklets_) JS_SetDebugTraceArmed(w.first, true);
+    workletSamples_.push_back({profilerClock(), {}, false});
+  } else {
+    workletSamples_.push_back({profilerClock(), {}, true});
+  }
+}
+
+// {"frames": [[name, url, line, col], ...], "samples": [[time, frame
+// indices outermost first | null when idle], ...]}, the samples since the
+// last call (owner of them: the JS thread, at Profiler.stop).
+char* Inspector::workletProfile(void* opaque) {
+  auto* self = static_cast<Inspector*>(opaque);
+  std::vector<WorkletSample> samples;
+  {
+    std::lock_guard<std::mutex> l(self->workletMutex_);
+    samples.swap(self->workletSamples_);
+  }
+  if (samples.empty()) return nullptr;
+  Value::Array frames, out;
+  std::map<std::string, int> index;
+  for (auto& s : samples) {
+    Value stack;
+    if (!s.idle) {
+      Value::Array ids;
+      for (auto& f : s.stack) {
+        std::string key = f.name + '\x1f' + f.url + '\x1f' + std::to_string(f.line) + ':' + std::to_string(f.col);
+        auto [it, added] = index.emplace(key, int(frames.size()));
+        if (added)
+          frames.push_back(Value(Value::Array{Value(f.name), Value(f.url), Value(f.line), Value(f.col)}));
+        ids.push_back(Value(it->second));
+      }
+      stack = Value(std::move(ids));
+    }
+    out.push_back(Value(Value::Array{Value(double(s.time)), std::move(stack)}));
+  }
+  std::string json = Value(Value::Object{{"frames", Value(std::move(frames))}, {"samples", Value(std::move(out))}}).toJson();
+  char* r = static_cast<char*>(malloc(json.size() + 1));
+  std::memcpy(r, json.c_str(), json.size() + 1);
+  return r;
+}
+
+void Inspector::span(Phase phase, std::chrono::steady_clock::time_point start,
+                     std::chrono::steady_clock::time_point end) {
+  if (!sampling_) return;
+  std::lock_guard<std::mutex> l(spanMutex_);
+  spans_.push_back({phase, false, steadyUs(start), steadyUs(end)});
+}
+
+void Inspector::scope(Phase phase, std::chrono::steady_clock::time_point start,
+                      std::chrono::steady_clock::time_point end) {
+  if (!sampling_) return;
+  std::lock_guard<std::mutex> l(spanMutex_);
+  spans_.push_back({phase, true, steadyUs(start), steadyUs(end)});
+}
+
+std::string netId(uint64_t id) { return "jsui-" + std::to_string(id); }
+
+void Inspector::loadStarted(uint64_t id, const LoadRequest& req) {
+  if (!network_ || req.url.find("/__jsui/") != std::string::npos) return;
+  std::string type = netType(req.kind, "", req.url), document;
+  {
+    std::lock_guard<std::mutex> l(netMutex_);
+    net_[id] = NetRequest{type, {}, false};
+  }
+  {
+    std::lock_guard<std::mutex> l(sessMutex_);
+    document = title_;
+  }
+  Value::Object request{{"url", Value(req.url)},
+                        {"method", Value(req.method)},
+                        {"headers", headerObject(req.headers)},
+                        {"initialPriority", Value("High")},
+                        {"referrerPolicy", Value("no-referrer")}};
+  if (!req.body.empty()) request["postData"] = Value(std::string(req.body.begin(), req.body.end()));
+  Value::Object params{{"requestId", Value(netId(id))},
+                       {"loaderId", Value("L1")},
+                       {"documentURL", Value(document)},
+                       {"request", Value(std::move(request))},
+                       {"timestamp", Value(monotonicSeconds())},
+                       {"wallTime", Value(wallSeconds())},
+                       {"initiator", Value(Value::Object{{"type", Value("other")}})},
+                       {"type", Value(type)},
+                       {"frameId", Value("F1")}};
+  send("", Value(Value::Object{{"method", Value("Network.requestWillBeSent")}, {"params", Value(std::move(params))}}).toJson());
+}
+
+void Inspector::loadAnswered(uint64_t id, int kind, const Resource& res) {
+  std::string type;
+  {
+    std::lock_guard<std::mutex> l(netMutex_);
+    auto it = net_.find(id);
+    if (it == net_.end() || it->second.done) return;
+    if (kind != LoadEvent::Data && it->second.type == "Other") it->second.type = netType("", res.contentType, res.url);
+    type = it->second.type;
+  }
+  const double now = monotonicSeconds();
+  auto event = [&](const char* method, Value::Object params) {
+    params["requestId"] = Value(netId(id));
+    params["timestamp"] = Value(now);
+    send("", Value(Value::Object{{"method", Value(method)}, {"params", Value(std::move(params))}}).toJson());
+  };
+  auto keep = [&](const std::vector<uint8_t>& data) {
+    std::lock_guard<std::mutex> l(netMutex_);
+    auto it = net_.find(id);
+    if (it == net_.end() || it->second.body.size() + data.size() > kNetBodyMax) return;
+    it->second.body.append(data.begin(), data.end());
+    netBytes_ += data.size();
+  };
+  auto finish = [&](const std::string& error, size_t bytes) {
+    if (!error.empty())
+      event("Network.loadingFailed", {{"type", Value(type)}, {"errorText", Value(error)}, {"canceled", Value(false)}});
+    else
+      event("Network.loadingFinished", {{"encodedDataLength", Value(double(bytes))}});
+    std::lock_guard<std::mutex> l(netMutex_);
+    auto it = net_.find(id);
+    if (it != net_.end()) it->second.done = true;
+    // The oldest finished bodies go first.
+    for (auto o = net_.begin(); netBytes_ > kNetBytesMax && o != net_.end();) {
+      if (!o->second.done || o->first == id) {
+        ++o;
+        continue;
+      }
+      netBytes_ -= o->second.body.size();
+      o = net_.erase(o);
+    }
+  };
+  if (kind == LoadEvent::Head || kind == 3) {
+    if (res.status == 0) {
+      finish(res.error.empty() ? "net::ERR_FAILED" : res.error, 0);
+      return;
+    }
+    std::string mime = res.contentType.substr(0, res.contentType.find(';'));
+    Value::Object response{{"url", Value(res.url)},
+                           {"status", Value(res.status)},
+                           {"statusText", Value(res.statusText)},
+                           {"headers", headerObject(res.headers)},
+                           {"mimeType", Value(mime)},
+                           {"connectionReused", Value(false)},
+                           {"connectionId", Value(0)},
+                           {"encodedDataLength", Value(0)},
+                           {"securityState", Value(res.url.rfind("https:", 0) == 0 ? "secure" : "neutral")}};
+    event("Network.responseReceived", {{"loaderId", Value("L1")}, {"type", Value(type)}, {"response", Value(std::move(response))}, {"frameId", Value("F1")}});
+    if (kind == 3) {
+      if (!res.data.empty()) {
+        keep(res.data);
+        event("Network.dataReceived", {{"dataLength", Value(double(res.data.size()))}, {"encodedDataLength", Value(double(res.data.size()))}});
+      }
+      finish("", res.data.size());
+    } else if (!res.data.empty()) {
+      keep(res.data);
+      event("Network.dataReceived", {{"dataLength", Value(double(res.data.size()))}, {"encodedDataLength", Value(double(res.data.size()))}});
+    }
+  } else if (kind == LoadEvent::Data) {
+    keep(res.data);
+    event("Network.dataReceived", {{"dataLength", Value(double(res.data.size()))}, {"encodedDataLength", Value(double(res.data.size()))}});
+  } else {  // End
+    size_t bytes = 0;
+    {
+      std::lock_guard<std::mutex> l(netMutex_);
+      auto it = net_.find(id);
+      if (it != net_.end()) bytes = it->second.body.size();
+    }
+    finish(res.error, bytes);
+  }
+}
+
+// Network.* the runtime answers itself (receive thread): the requests are
+// the loader's, reported as they happen.
+bool Inspector::networkAnswer(const std::string& method, const Value& id, const Value& params, const std::string& session) {
+  auto result = [&](Value r) {
+    send(session, Value(Value::Object{{"id", id}, {"result", std::move(r)}}).toJson());
+  };
+  if (method == "Network.enable") {
+    network_ = true;
+    result(Value(Value::Object{}));
+  } else if (method == "Network.disable") {
+    network_ = false;
+    result(Value(Value::Object{}));
+  } else if (method == "Network.getResponseBody") {
+    const std::string& rid = params["requestId"].asString();
+    uint64_t n = rid.rfind("jsui-", 0) == 0 ? std::strtoull(rid.c_str() + 5, nullptr, 10) : 0;
+    std::string body;
+    bool found = false;
+    {
+      std::lock_guard<std::mutex> l(netMutex_);
+      auto it = net_.find(n);
+      if (it != net_.end() && it->second.done) {
+        body = it->second.body;
+        found = true;
+      }
+    }
+    if (!found) {
+      send(session, "{\"id\":" + id.toJson() + ",\"error\":{\"code\":-32000,\"message\":\"No resource with given identifier found\"}}");
+      return true;
+    }
+    bool text = true;
+    for (unsigned char c : body)
+      if (c == 0 || (c < 0x09)) {
+        text = false;
+        break;
+      }
+    result(Value(Value::Object{{"body", Value(text ? body : base64(body))}, {"base64Encoded", Value(!text)}}));
+  } else if (method == "Network.emulateNetworkConditionsByRule") {
+    result(Value(Value::Object{{"ruleIds", Value(Value::Array{})}}));
+  } else if (method == "Network.getSecurityIsolationStatus") {
+    return false;  // "not found": DevTools does without
+  } else {
+    result(Value(Value::Object{}));  // cache, throttling, blocking, ...: nothing to do
+  }
+  return true;
+}
+
+void Inspector::pumpDom(Document& doc) {
+  std::vector<DomRequest> queue;
+  {
+    std::lock_guard<std::mutex> l(domMutex_);
+    queue.swap(domQueue_);
+  }
+  dom_.attach(&doc);
+  auto event = [this](const char* method, Value params) {
+    send("", Value(Value::Object{{"method", Value(method)}, {"params", std::move(params)}}).toJson());
+  };
+  for (DomRequest& r : queue) {
+    {
+      std::lock_guard<std::mutex> l(sessMutex_);
+      dom_.documentUrl = title_;
+    }
+    Value result;
+    std::string error;
+    dom_.handle(r.method, r.params, &result, &error, event);
+    if (!error.empty())
+      send(r.session, Value(Value::Object{{"id", r.id}, {"error", Value(Value::Object{{"code", Value(-32000)}, {"message", Value(error)}})}}).toJson());
+    else
+      send(r.session, Value(Value::Object{{"id", r.id}, {"result", std::move(result)}}).toJson());
+  }
+  // Live updates a few times a second, not every frame.
+  double now = monotonicSeconds();
+  if (dom_.enabled() && now - domTickAt_ > 0.25) {
+    domTickAt_ = now;
+    dom_.tick(event);
+  }
+}
+
+void Inspector::flushSpans() {
+  std::vector<Span> spans;
+  {
+    std::lock_guard<std::mutex> l(spanMutex_);
+    spans.swap(spans_);
+  }
+  if (!agent_) return;
+  for (const Span& sp : spans) {
+    if (sp.whole) qjs_cdp_profiler_add_scope(agent_, spanName(sp.phase), sp.start, sp.end);
+    else qjs_cdp_profiler_add_span(agent_, spanName(sp.phase), sp.start, sp.end);
+  }
+}
+
+void Inspector::syncSampler() {
+  bool want = agent_ && qjs_cdp_profiling(agent_);
+  if (want == sampling_) return;
+  if (sampler_.joinable()) {
+    sampling_ = false;
+    sampler_.join();
+  }
+  sampling_ = want;
+  // While a CPU profile records, the runtime's phases (layout, paint, ...)
+  // go into it too.
+  if (phases_) phases_->spans.store(want ? this : nullptr, std::memory_order_relaxed);
+  if (want) sampler_ = std::thread([this] { sampleLoop(); });
+}
+
+void Inspector::sampleLoop() {
+  while (sampling_ && !stopping_) {
+    int us;
+    {
+      std::lock_guard<std::mutex> l(agentMutex_);
+      if (!agent_) break;
+      qjs_cdp_profiler_tick(agent_);
+      us = qjs_cdp_sampling_interval(agent_);
+    }
+    {
+      std::lock_guard<std::mutex> l(workletMutex_);
+      for (auto& w : worklets_) JS_SetDebugTraceArmed(w.first, true);
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(us));
   }
 }
 
@@ -184,7 +607,7 @@ void Inspector::sendContextCreated(const std::string& session) {
 }
 
 // What the frontend sent. Runtime.enable and anything the agent does not
-// implement (Profiler, Log, Network, ...) are answered here, on this thread:
+// implement (Log, Network, ...) are answered here, on this thread:
 // a frontend waits for every reply, and some arrive while JS is paused.
 void Inspector::handleEvent(const std::string& type, const std::string& session, const std::string& message) {
   if (type == "open") {
@@ -231,7 +654,21 @@ void Inspector::handleEvent(const std::string& type, const std::string& session,
     if (on && attached) sendContextCreated(session);
     return;
   }
+  if (method.rfind("Network.", 0) == 0 && networkAnswer(method, id, msg["params"], session)) return;
+  if (method.rfind("DOM.", 0) == 0 || method.rfind("CSS.", 0) == 0 || method.rfind("Overlay.", 0) == 0) {
+    std::lock_guard<std::mutex> l(domMutex_);
+    domQueue_.push_back({session, method, id, msg["params"]});
+    return;
+  }
   if (!qjs_cdp_handles(method.c_str())) {
+    // An empty result would tell DevTools these did something: it then reads
+    // fields that aren't there or waits for data that never comes.
+    if (method.rfind("Profiler.", 0) == 0 || method.rfind("HeapProfiler.", 0) == 0 ||
+        method.rfind("Network.", 0) == 0) {
+      send(session, "{\"id\":" + id.toJson() + ",\"error\":{\"code\":-32601,\"message\":\"'" + method +
+                        "' wasn't found\"}}");
+      return;
+    }
     send(session, emptyResult(id));
     return;
   }
@@ -269,7 +706,9 @@ void Inspector::receiveLoop() {
       title = title_;
     }
     std::string body =
-        Value(Value::Object{{"runtime", Value(id_)}, {"name", Value(name_)}, {"title", Value(title)}}).toJson();
+        Value(Value::Object{
+                  {"runtime", Value(id_)}, {"name", Value(name_)}, {"title", Value(title)}, {"profiler", Value(true)}, {"network", Value(true)}, {"dom", Value(true)}, {"heap", Value(true)}})
+            .toJson();
     req.body.assign(body.begin(), body.end());
     net::HttpResponse res = net::httpRequest(req, &stopping_);
     if (stopping_) break;

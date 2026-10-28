@@ -670,7 +670,7 @@ void jsui_get_perf(JsuiRuntime* rt, JsuiPerf* out, int reset) {
   out->layout_us = us(jsui::Phase::Layout);
   out->input_us = us(jsui::Phase::Input);
   out->paint_us = us(jsui::Phase::Paint);
-  out->other_us = us(jsui::Phase::Other);
+  out->other_us = us(jsui::Phase::Other) + us(jsui::Phase::Worklet);
   out->gpu_submit_us = us(jsui::Phase::Gpu);
   out->image_decode_us = c.imageDecodeUs;
   out->image_decodes = c.imageDecodes;

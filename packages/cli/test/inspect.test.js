@@ -165,6 +165,59 @@ test('inspect: runtime <-> frontend relay over poll/push and WebSocket', async (
   }
 });
 
+test('inspect: the relay serves source maps to DevTools and refuses domains the runtime lacks', async () => {
+  const s = await server();
+  try {
+    const first = poll(s.origin, 'rt-1');
+    await until(async () => (await (await fetch(s.origin + '/json/list')).json()).length === 1, 'target listed');
+    const fe = await frontend(`ws://127.0.0.1:${s.port}/__jsui/inspect/ws/rt-1`);
+    await first;
+    const reply = async (id, msg) => {
+      fe.ws.send(JSON.stringify({ id, ...msg }));
+      return JSON.parse(await until(() => fe.got.find((m) => JSON.parse(m).id === id), `reply ${id}`));
+    };
+
+    // Network.loadNetworkResource + IO.read, as DevTools reads a source map.
+    // DevTools drops the data of a read that says eof, so the last chunk
+    // with data must not say it.
+    const want = await (await fetch(s.origin + '/bundle.js.map')).text();
+    assert.ok(want.length > 1000);
+    const { result } = await reply(1, { method: 'Network.loadNetworkResource', params: { url: s.origin + '/bundle.js.map', options: {} } });
+    assert.equal(result.resource.success, true);
+    let text = '';
+    for (let id = 2; ; id++) {
+      const r = (await reply(id, { method: 'IO.read', params: { handle: result.resource.stream, size: 100000 } })).result;
+      if (r.eof) {
+        assert.equal(r.data, '');
+        break;
+      }
+      text += r.data;
+    }
+    assert.equal(text, want);
+
+    // Unknown methods of these domains are errors, not empty results:
+    // DevTools reads fields of the result (Network.emulateNetworkConditionsByRule)
+    // or waits for a profile (Profiler.stop).
+    for (const [id, method] of [[100, 'Network.enable'], [101, 'Profiler.stop'], [102, 'HeapProfiler.enable']]) {
+      const r = await reply(id, { method, params: {} });
+      assert.equal(r.error.code, -32601, method);
+    }
+
+    // Everything else still reaches the runtime.
+    fe.ws.send('{"id":200,"method":"Debugger.enable"}');
+    const got = await poll(s.origin, 'rt-1');
+    assert.deepEqual(got.map((e) => e.message), ['{"id":200,"method":"Debugger.enable"}']);
+
+    // A runtime that records profiles gets the Profiler domain.
+    const held = poll(s.origin, 'rt-1', { profiler: true });
+    await sleep(100);
+    fe.ws.send('{"id":201,"method":"Profiler.start"}');
+    assert.deepEqual((await held).map((e) => e.message), ['{"id":201,"method":"Profiler.start"}']);
+  } finally {
+    await s.close();
+  }
+});
+
 test('inspect: a frontend may connect before its runtime polls; a returning runtime is re-greeted', async () => {
   const s = await server();
   try {
@@ -454,6 +507,95 @@ test('source maps: --no-hmr bundle sources are files on disk', async () => {
     const map = await (await fetch(s.origin + '/bundle.js.map')).json();
     assertMapsBack(code, map, path.join(s.dir, 'App.jsx'), '"MARKER_7"', [7, 17]);
     assert.ok(map.sources.every((x) => x.startsWith('file://')));
+  } finally {
+    await s.close();
+  }
+});
+
+test('profile trace: JS samples on Main, the phases on a render thread, worklets and GPU submits on tracks of their own', async () => {
+  const { profileTrace } = await import('../src/profile-trace.js');
+  const cf = (functionName) => ({ functionName, scriptId: '0', url: '', lineNumber: -1, columnNumber: -1 });
+  const profile = {
+    nodes: [
+      { id: 1, callFrame: cf('(root)'), children: [2, 5, 4, 6] },
+      { id: 2, callFrame: cf('(idle)'), children: [] },
+      { id: 3, callFrame: cf('App'), children: [] },
+      { id: 4, callFrame: cf('(paint)'), children: [] },
+      { id: 5, callFrame: cf('(timer)'), children: [3] },
+      { id: 6, callFrame: cf('(program)'), children: [] },
+    ],
+    startTime: 1000, endTime: 2000,
+    samples: [2, 3, 4, 2], timeDeltas: [0, 100, 200, 300],
+    jsuiSpans: [['(timer)', 1100, 1290], ['(paint)', 1300, 1400], ['(gpu)', 1400, 1450], ['(worklets)', 1500, 1520]],
+    jsuiWorklets: { frames: [['tick', 'worklet.js', 3, 1], ['draw', 'worklet.js', 9, 1]], samples: [[1500, []], [1505, [0, 1]], [1510, [0]], [1520, null]] },
+  };
+  const { traceEvents } = profileTrace(profile, { name: 'jsui-viewer' });
+  const chunk = traceEvents.find((e) => e.name === 'ProfileChunk');
+  assert.deepEqual(chunk.args.data.cpuProfile.nodes.map((n) => n.id), [1, 2, 3, 6]);
+  assert.deepEqual(chunk.args.data.cpuProfile.nodes[0].children, [2, 6, 3]);
+  const timer = traceEvents.filter((e) => e.ts === 1100).map((e) => [e.name, e.ph, e.dur, e.tid]);
+  assert.deepEqual(timer, [['RunTask', 'X', 190, 1], ['TimerFire', 'X', 190, 1]]);
+  assert.deepEqual(chunk.args.data.cpuProfile.samples, [2, 3, 2, 2]);
+  const thread = (pid, tid) => traceEvents.find((e) => e.name === 'thread_name' && e.pid === pid && e.tid === tid).args.name;
+  const paint = traceEvents.find((e) => e.name === 'Paint');
+  assert.deepEqual([paint.ph, paint.ts, paint.dur, thread(paint.pid, paint.tid)], ['X', 1300, 100, 'JSUI render thread']);
+  assert.equal(paint.args.data.layerId, 0);
+  const gpu = traceEvents.find((e) => e.name === 'GPUTask');
+  assert.deepEqual([gpu.ts, gpu.dur, thread(gpu.pid, gpu.tid)], [1400, 50, 'CrGpuMain']);
+  assert.ok(traceEvents.some((e) => e.name === 'process_name' && e.pid === gpu.pid && e.args.name === 'GPU Process'));
+  // Worklets sampled: their own thread with a CPU profile (tick > draw).
+  const wchunk = traceEvents.find((e) => e.name === 'ProfileChunk' && e.id === '0x2');
+  assert.equal(thread(wchunk.pid, wchunk.tid), 'JSUI worklets');
+  const wn = new Map(wchunk.args.data.cpuProfile.nodes.map((n) => [n.id, n]));
+  const draw = [...wn.values()].find((n) => n.callFrame.functionName === 'draw');
+  assert.ok([...wn.values()].find((n) => n.callFrame.functionName === 'tick').children.includes(draw.id));
+  assert.equal(draw.callFrame.lineNumber, 8);
+  assert.deepEqual(wchunk.args.data.cpuProfile.samples.map((id) => wn.get(id).callFrame.functionName), ['(idle)', '(program)', 'draw', 'tick', '(idle)']);
+  assert.ok(!traceEvents.some((e) => e.name === 'TimeStamp'), 'no timing-only track when sampled');
+  assert.ok(traceEvents.some((e) => e.name === 'thread_name' && e.args.name === 'CrRendererMain'));
+});
+
+test('inspect: page mode answers as a page and records with Tracing', async () => {
+  const s = await server();
+  try {
+    const first = poll(s.origin, 'rt-1', { profiler: true });
+    await until(async () => (await (await fetch(s.origin + '/json/list')).json()).length === 1, 'target listed');
+    const [t] = await (await fetch(s.origin + '/json/list')).json();
+    assert.equal(t.jsuiPageFrontendUrl, `devtools://devtools/bundled/inspector.html?ws=127.0.0.1:${s.port}/__jsui/inspect/page/rt-1`);
+    const fe = await frontend(`ws://127.0.0.1:${s.port}/__jsui/inspect/page/rt-1`);
+    const [open] = await first;
+    const reply = async (id, method, params = {}) => {
+      fe.ws.send(JSON.stringify({ id, method, params }));
+      return JSON.parse(await until(() => fe.got.find((m) => JSON.parse(m).id === id), `reply ${id}`));
+    };
+    assert.equal((await reply(1, 'Page.getResourceTree')).result.frameTree.frame.id, 'F1');
+    assert.equal((await reply(2, 'Page.getNavigationHistory')).result.entries.length, 1);
+    assert.ok((await reply(3, 'DOM.getDocument')).error);
+
+    // Tracing.start: the relay starts a CPU profile in the runtime itself.
+    assert.deepEqual((await reply(4, 'Tracing.start', { transferMode: 'ReportEvents' })).result, {});
+    let asked = [];
+    while (asked.length < 3) asked.push(...(await poll(s.origin, 'rt-1', { profiler: true })).map((e) => JSON.parse(e.message)));
+    assert.deepEqual(asked.map((m) => m.method), ['Profiler.enable', 'Profiler.setSamplingInterval', 'Profiler.start']);
+    assert.ok(asked.every((m) => m.id >= 2000000000));
+    await post(s.origin, '/__jsui/inspect/push', { runtime: 'rt-1', messages: asked.map((m) => ({ session: open.session, message: JSON.stringify({ id: m.id, result: {} }) })) });
+
+    // Tracing.end: Profiler.stop, and its profile comes back as trace events.
+    await reply(5, 'Tracing.end');
+    const [stop] = (await poll(s.origin, 'rt-1', { profiler: true })).map((e) => JSON.parse(e.message));
+    assert.equal(stop.method, 'Profiler.stop');
+    const cf = (functionName) => ({ functionName, scriptId: '0', url: '', lineNumber: -1, columnNumber: -1 });
+    const profile = {
+      nodes: [{ id: 1, callFrame: cf('(root)'), children: [2] }, { id: 2, callFrame: cf('(idle)'), children: [] }],
+      startTime: 0, endTime: 100, samples: [2], timeDeltas: [0], jsuiSpans: [['(paint)', 10, 20]],
+    };
+    await post(s.origin, '/__jsui/inspect/push', { runtime: 'rt-1', messages: [{ session: open.session, message: JSON.stringify({ id: stop.id, result: { profile } }) }] });
+    await until(() => fe.got.some((m) => m.includes('Tracing.tracingComplete')), 'tracingComplete');
+    const data = fe.got.map((m) => JSON.parse(m)).filter((m) => m.method === 'Tracing.dataCollected').flatMap((m) => m.params.value);
+    assert.ok(data.some((e) => e.name === 'ProfileChunk'));
+    assert.ok(data.some((e) => e.name === 'Paint' && e.ts === 10));
+    // The relay's own calls never reach the frontend.
+    assert.ok(!fe.got.some((m) => JSON.parse(m).id >= 2000000000));
   } finally {
     await s.close();
   }

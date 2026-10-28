@@ -30,6 +30,11 @@
 
 #include <quickjs.h>
 
+#include "core/perf.h"
+#include "core/value.h"
+#include "js/inspector_dom.h"
+#include "platform/loader.h"
+
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -43,7 +48,9 @@ struct QJSCDPAgent;
 
 namespace jsui {
 
-class Inspector {
+class Document;
+
+class Inspector : public PhaseSpanSink, public LoadObserver {
  public:
   // `origin`: the dev server (http://host:port). `id`: the runtime's id in
   // the shared session, stable across reloads.
@@ -54,7 +61,8 @@ class Inspector {
   void setTitle(const std::string& title);
 
   // A new JS context, before any of the bundle is parsed / it is going away.
-  void attach(JSContext* ctx);
+  // `phases`: the runtime's frame phases, reported into CPU profiles.
+  void attach(JSContext* ctx, Perf* phases = nullptr);
   void detach(JSContext* ctx);
   bool attached() const { return agent_ != nullptr; }
 
@@ -67,6 +75,29 @@ class Inspector {
   void console(const char* type, const JSValue* args, int count);
   // An uncaught exception (Runtime.exceptionThrown).
   void exception(JSValueConst exc, const std::string& text);
+  // The runtime calls into JS (`what`: "(timer)", ...; a CPU profile shows
+  // it above the JS) / JS returned to it (what follows is idle).
+  void jsEnter(const char* what);
+  // Worklet runtimes (js/worklets.h, owner thread): sampled into CPU
+  // profiles as a thread of their own.
+  void addWorklet(JSContext* ctx, const std::string& name);
+  void removeWorklet(JSContext* ctx);
+  void workletsRunning(bool running);
+  // The Elements panel's requests and live updates, on the thread that owns
+  // `doc` (Runtime::tick).
+  void pumpDom(Document& doc);
+  void jsIdle();
+  // Whether a frontend records a CPU profile: the runtime's phases then
+  // report to this sink (span: any thread), shown in the profile.
+  bool profiling() const { return sampling_; }
+  void span(Phase phase, std::chrono::steady_clock::time_point start,
+            std::chrono::steady_clock::time_point end) override;
+  void scope(Phase phase, std::chrono::steady_clock::time_point start,
+             std::chrono::steady_clock::time_point end) override;
+  // The runtime's loads (bundle, fetch(), images, fonts, ...) as the
+  // Network panel's requests, while a frontend enabled Network.
+  void loadStarted(uint64_t id, const LoadRequest& req) override;
+  void loadAnswered(uint64_t id, int kind, const Resource& res) override;
 
  private:
   struct Out {
@@ -83,6 +114,9 @@ class Inspector {
   void* sessionToken(const std::string& session);
   std::string sessionOf(void* token);
   bool sleepFor(int ms);  // false when stopping
+  void sampleLoop();
+  void syncSampler();
+  void flushSpans();  // runtime thread
 
   const std::string origin_, id_, name_;
   std::string title_;
@@ -115,6 +149,58 @@ class Inspector {
   std::condition_variable stopCv_;
   std::atomic<bool> stopping_{false};
   std::thread receiver_, sender_;
+
+  // While the frontend records a CPU profile (Profiler.start): arms the
+  // agent's statement traps every sampling interval, so the next statement
+  // takes a sample. Started and stopped on the runtime's thread.
+  std::atomic<bool> sampling_{false};
+  std::thread sampler_;
+  struct Span {
+    Phase phase;
+    bool whole;          // a whole scope (scope()), else exclusive time (span())
+    int64_t start, end;  // steady_clock microseconds, the agent's clock
+  };
+  // Network: requests in flight and the bodies of the last ones
+  // (Network.getResponseBody), under netMutex_.
+  bool networkAnswer(const std::string& method, const Value& id, const Value& params, const std::string& session);
+  struct NetRequest {
+    std::string type;  // Fetch, Image, Font, Script, ...
+    std::string body;
+    bool done = false;
+  };
+  std::atomic<bool> network_{false};
+  std::mutex netMutex_;
+  std::map<uint64_t, NetRequest> net_;
+  size_t netBytes_ = 0;  // bodies kept
+  Perf* phases_ = nullptr;  // runtime thread
+  // Worklets: their contexts (armed by the sampler) and the samples taken
+  // (time, stack outermost first; an empty stack is idle), under workletMutex_.
+  struct WorkletFrame {
+    std::string name, url;
+    int line, col;
+  };
+  struct WorkletSample {
+    int64_t time;
+    std::vector<WorkletFrame> stack;
+    bool idle = false;
+  };
+  static int workletTrap(JSContext* ctx, JSAtom, JSAtom, int, int, int, void* opaque);
+  void workletSample(JSContext* ctx);
+  static char* workletProfile(void* opaque);  // profile.jsuiWorklets at Profiler.stop
+  std::mutex workletMutex_;
+  std::vector<std::pair<JSContext*, std::string>> worklets_;
+  std::vector<WorkletSample> workletSamples_;
+  // Elements: requests queued by the receive thread for pumpDom().
+  struct DomRequest {
+    std::string session, method;
+    Value id, params;
+  };
+  std::mutex domMutex_;
+  std::vector<DomRequest> domQueue_;
+  DomAgent dom_;  // owner thread
+  double domTickAt_ = 0;
+  std::mutex spanMutex_;
+  std::vector<Span> spans_;
 };
 
 }  // namespace jsui

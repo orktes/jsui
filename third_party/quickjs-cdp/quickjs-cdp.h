@@ -123,6 +123,48 @@ void qjs_cdp_exception_thrown(QJSCDPAgent *agent, JSValue exception,
 /* Asks the running program to stop at the next statement. Any thread. */
 void qjs_cdp_pause(QJSCDPAgent *agent);
 
+/* jsui: the Profiler domain. Profiler.start records a sampled CPU profile,
+   Profiler.stop answers it. Samples are taken by the statement traps: the
+   embedder calls qjs_cdp_profiler_tick() every qjs_cdp_sampling_interval()
+   microseconds from a thread of its own while qjs_cdp_profiling() is true,
+   which arms the traps for one statement, and qjs_cdp_profiler_idle() when JS
+   returns to it, so that the time until JS runs again counts as "(idle)". */
+bool qjs_cdp_profiling(QJSCDPAgent *agent);
+int qjs_cdp_sampling_interval(QJSCDPAgent *agent);
+void qjs_cdp_profiler_tick(QJSCDPAgent *agent); /* any thread */
+void qjs_cdp_profiler_idle(QJSCDPAgent *agent); /* JS thread */
+/* jsui: the embedder calls into JS for `what` ("(timer)", "(event: press)"):
+   the samples until qjs_cdp_profiler_idle() go under a node of that name,
+   and it is a scope in profile.jsuiSpans. Another call before then ends it
+   and starts the next (the calls of a batch). JS thread only. */
+void qjs_cdp_profiler_enter(QJSCDPAgent *agent, const char *what);
+
+/* jsui: the profiler's clock (microseconds, monotonic). The default is the
+   agent's own; an embedder that reports spans sets the one they are in. */
+typedef int64_t QJSCDPClockFunc(void);
+void qjs_cdp_profiler_set_clock(QJSCDPAgent *agent, QJSCDPClockFunc *now_us);
+
+/* jsui: work the embedder did between JS calls (layout, paint, ...), shown in
+   the profile as a top-level entry named `name` ("(layout)") wherever the
+   JS thread was idle at the time. JS thread only; ignored when not
+   profiling. */
+void qjs_cdp_profiler_add_span(
+    QJSCDPAgent *agent, const char *name, int64_t start_us, int64_t end_us);
+
+/* jsui: a whole piece of the embedder's work, nested ones included (the
+   spans above are its exclusive time). Not part of the profile's samples:
+   Profiler.stop lists them in profile.jsuiSpans as [name, start, end], for
+   a trace with a track per thread. JS thread only; ignored when not
+   profiling. */
+/* jsui: more of the embedder's at Profiler.stop: `fn` returns JSON (malloc'd,
+   the agent frees it; NULL: nothing) that the profile carries as `field`.
+   JS thread. */
+typedef char *QJSCDPProfileExtraFunc(void *opaque);
+void qjs_cdp_profiler_set_extra(QJSCDPAgent *agent, const char *field, QJSCDPProfileExtraFunc *fn, void *opaque);
+
+void qjs_cdp_profiler_add_scope(
+    QJSCDPAgent *agent, const char *name, int64_t start_us, int64_t end_us);
+
 #ifdef __cplusplus
 }
 #endif

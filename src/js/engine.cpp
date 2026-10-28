@@ -271,7 +271,25 @@ const std::string* JsEngine::Impl::atomName(JSAtom atom) {
 
 // ------------------------------------------------- entry bookkeeping
 
+void JsEngine::Impl::entryLabel(const char* kind, std::string_view detail) {
+#if JSUI_DEBUGGER
+  if (depth != (batch > 0 ? 1 : 0) || !inspector || !inspector->profiling()) return;
+  nextEntry = std::string("(") + kind;
+  if (!detail.empty()) nextEntry.append(": ").append(detail);
+  nextEntry += ")";
+#else
+  (void)kind;
+  (void)detail;
+#endif
+}
+
 void JsEngine::Impl::enter() {
+  if (depth == 0) {
+#if JSUI_DEBUGGER
+    if (inspector) inspector->jsEnter(nextEntry.empty() ? "(program)" : nextEntry.c_str());
+#endif
+    nextEntry.clear();
+  }
   if (depth++ == 0) {
     JS_UpdateStackTop(jrt);  // the embedder may call us from different stack depths
     deadline = Clock::now() + std::chrono::microseconds(int64_t(std::max(0.0, timeoutMs) * 1000));
@@ -280,7 +298,12 @@ void JsEngine::Impl::enter() {
 }
 
 void JsEngine::Impl::leave() {
-  if (--depth == 0 && !draining) drain();
+  if (--depth == 0 && !draining) {
+    drain();
+#if JSUI_DEBUGGER
+    if (inspector) inspector->jsIdle();  // a CPU profile's (idle) from here
+#endif
+  }
 }
 
 void JsEngine::Impl::applyCommands() {
@@ -314,10 +337,22 @@ bool JsEngine::Impl::onOwner(const std::function<void()>& fn) {
 JSValue JsEngine::Impl::call(JSValueConst fn, JSValueConst thisVal, int argc, JSValueConst* argv) {
   Perf::Scope scope(perf(), Phase::Js);
   counters->jsCalls++;
+#if JSUI_DEBUGGER
+  // A call of a batch is an entry of its own in a CPU profile; what runs
+  // between them (the microtasks they queued) is the batch's.
+  const bool ofBatch = batch > 0 && depth == 1 && inspector;
+  if (ofBatch) {
+    inspector->jsEnter(nextEntry.empty() ? "(program)" : nextEntry.c_str());
+    nextEntry.clear();
+  }
+#endif
   enter();
   JSValue r = JS_Call(ctx, fn, thisVal, argc, argv);
   // Native code runs next (the caller, or the next call of a batch).
   syncPoint();
+#if JSUI_DEBUGGER
+  if (ofBatch) inspector->jsEnter("(microtasks)");
+#endif
   if (JS_IsException(r)) {
     reportException();
     r = JS_EXCEPTION;
@@ -838,6 +873,7 @@ static JSValue evalSource(JSContext* ctx, const std::string& source, const std::
 bool QuickJsEngine::eval(const std::string& source, const std::string& name) {
   Impl& impl = *impl_;
   Perf::Scope scope(impl.perf(), Phase::Js);
+  impl.entryLabel("script", name);
   impl.enter();
   JSValue r = JS_UNDEFINED;
   BundleParts parts;
@@ -868,7 +904,7 @@ bool QuickJsEngine::eval(const std::string& source, const std::string& name) {
     // The debugger first: only code parsed after it is attached can stop.
     if (const std::shared_ptr<Inspector>& ins = impl.rt.inspector) {
       if (!impl.inspector) {
-        ins->attach(impl.ctx);
+        ins->attach(impl.ctx, &impl.rt.doc.perf);
         impl.inspector = ins;
         impl.timeoutMs = 0;  // a breakpoint is not a hung script
       }
@@ -887,6 +923,7 @@ bool QuickJsEngine::eval(const std::string& source, const std::string& name) {
 
 void QuickJsEngine::runJobs() {
   if (impl_->depth == 0) {
+    impl_->entryLabel("microtasks");
     impl_->enter();
     impl_->leave();  // drains
   }
@@ -929,6 +966,7 @@ void QuickJsEngine::runTimers(double nowMs) {
         JS_FreeValue(ctx, t.fn);
         impl.timers.erase(it);
       }
+      impl.entryLabel("timer");
       JSValue r = impl.call(fn, JS_UNDEFINED, int(args.size()), args.data());
       JS_FreeValue(ctx, r);
       JS_FreeValue(ctx, fn);
@@ -949,6 +987,7 @@ void QuickJsEngine::runAnimationFrame(double nowMs) {
     JSValue fn = impl.rafsRunning[i].fn;
     impl.rafsRunning[i].fn = JS_UNDEFINED;
     impl.rafsRunning[i].id = 0;
+    impl.entryLabel("animation frame");
     JSValue r = impl.call(fn, JS_UNDEFINED, 1, &ts);
     JS_FreeValue(ctx, r);
     JS_FreeValue(ctx, fn);
@@ -968,6 +1007,7 @@ int QuickJsEngine::dispatchEvent(const Value& event) {
   int flags = 0;
   if (JS_IsFunction(ctx, fn)) {
     JSValue arg = fromValue(ctx, event);
+    impl.entryLabel("event", event["type"].asString());
     JSValue r = impl.call(fn, JS_UNDEFINED, 1, &arg);
     if (JS_IsBool(r)) flags = JS_ToBool(ctx, r) ? (kHandled | kDefaultPrevented) : 0;
     else if (JS_IsNumber(r)) JS_ToInt32(ctx, &flags, r);
@@ -988,6 +1028,7 @@ bool QuickJsEngine::callGlobal(const char* name, const Value* args, int argc) {
   if (found) {
     std::vector<JSValue> argv;
     for (int i = 0; i < argc; i++) argv.push_back(fromValue(ctx, args[i]));
+    impl.entryLabel("call", name);
     JSValue r = impl.call(fn, JS_UNDEFINED, argc, argv.data());
     JS_FreeValue(ctx, r);
     for (JSValue v : argv) JS_FreeValue(ctx, v);
@@ -1018,6 +1059,7 @@ bool QuickJsEngine::settleCall(uint64_t id, bool ok, const std::string& payload)
   impl.hostCalls.erase(it);
   if (impl.thread) impl.thread->callEnded(id);
   JSValue args[2] = {JS_NewBool(ctx, ok), JS_NewStringLen(ctx, payload.data(), payload.size())};
+  impl.entryLabel("host call reply");
   JS_FreeValue(ctx, impl.call(fn, JS_UNDEFINED, 2, args));
   JS_FreeValue(ctx, args[1]);
   JS_FreeValue(ctx, fn);
@@ -1048,6 +1090,7 @@ void QuickJsEngine::hostMessage(const std::string& name, const std::string& json
   JSValue fn = JS_GetProperty(ctx, global, impl.atomHostMessage);
   if (JS_IsFunction(ctx, fn)) {
     JSValue args[2] = {JS_NewStringLen(ctx, name.data(), name.size()), JS_NewStringLen(ctx, json.data(), json.size())};
+    impl.entryLabel("host message", name);
     JSValue r = impl.call(fn, JS_UNDEFINED, 2, args);
     JS_FreeValue(ctx, r);
     JS_FreeValue(ctx, args[0]);
@@ -1062,6 +1105,7 @@ void QuickJsEngine::layoutEvent(uint32_t id, float x, float y, float w, float h)
   impl.layoutQueue.push_back({id, x, y, w, h});
   // Outside JS, deliver right away; otherwise drain() delivers once JS unwinds.
   if (impl.depth == 0) {
+    impl.entryLabel("onLayout");
     impl.enter();
     impl.leave();
   }
@@ -1073,6 +1117,7 @@ void QuickJsEngine::measured(const std::vector<MeasureResult>& results) {
   Impl& impl = *impl_;
   JSContext* ctx = impl.ctx;
   // One batch: state the callbacks set renders in one pass.
+  impl.entryLabel("measure");
   impl.enter();
   for (const MeasureResult& m : results) {
     auto it = impl.measureCallbacks.find(m.req);
@@ -1102,9 +1147,16 @@ void QuickJsEngine::mergePerf(PerfCounters& into) {
   impl_->jsCounters = PerfCounters();
 }
 
-void QuickJsEngine::beginBatch() { impl_->enter(); }
+void QuickJsEngine::beginBatch() {
+  impl_->entryLabel("microtasks");  // until a call of the batch
+  impl_->enter();
+  impl_->batch++;
+}
 
-void QuickJsEngine::endBatch() { impl_->leave(); }
+void QuickJsEngine::endBatch() {
+  impl_->batch--;
+  impl_->leave();
+}
 
 size_t QuickJsEngine::memoryUsage() const { return JS_GetMallocSize(impl_->jrt); }
 

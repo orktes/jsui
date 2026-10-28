@@ -1,0 +1,118 @@
+Subject: Report where a stack frame's function is defined; walk the stack once
+
+What this does
+  JS_GetFrameInfoAtLevel (rnq's 0004-debugger-frame-info) gives the line
+  and column a frame is executing. A CPU profile identifies functions by
+  where they are defined, so JSDebugFrameInfo also carries the function's
+  own line and column (func_line / func_col, 1-based, -1 for native frames).
+  JS_GetStackFunctions fills them for the whole stack in one walk (calling
+  JS_GetFrameInfoAtLevel per level walks the stack again each time, which
+  deep recursion makes quadratic), without the per-frame line lookup.
+  quickjs-cdp's Profiler domain samples with it.
+
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -3661,6 +3661,8 @@
+     info->func_name = JS_ATOM_NULL;
+     info->line = -1;
+     info->col = -1;
++    info->func_line = -1;
++    info->func_col = -1;
+ 
+     sf = js_get_stack_frame_at_level(ctx, level);
+     if (sf == NULL)
+@@ -3679,6 +3681,8 @@
+     b = p->u.func.function_bytecode;
+     info->filename = b->filename;
+     info->func_name = b->func_name;
++    info->func_line = b->line_num;
++    info->func_col = b->col_num;
+     if (sf->cur_pc) {
+         /* cur_pc points just past the executing instruction */
+         uint32_t pc = (uint32_t)(sf->cur_pc - b->byte_code_buf - 1);
+@@ -3687,6 +3691,41 @@
+     return 0;
+ }
+ 
++int JS_GetStackFunctions(JSContext *ctx, JSDebugFrameInfo *out, int max)
++{
++    JSStackFrame *sf;
++    JSObject *p;
++    JSFunctionBytecode *b;
++    int n = 0;
++
++    for (sf = ctx->rt->current_stack_frame; sf != NULL && n < max;
++         sf = sf->prev_frame, n++) {
++        JSDebugFrameInfo *info = &out[n];
++        memset(info, 0, sizeof(*info));
++        info->filename = JS_ATOM_NULL;
++        info->func_name = JS_ATOM_NULL;
++        info->line = -1;
++        info->col = -1;
++        info->func_line = -1;
++        info->func_col = -1;
++        if (JS_VALUE_GET_TAG(sf->cur_func) != JS_TAG_OBJECT) {
++            info->is_native = true;
++            continue;
++        }
++        p = JS_VALUE_GET_OBJ(sf->cur_func);
++        if (!js_class_has_bytecode(p->class_id)) {
++            info->is_native = true;
++            continue;
++        }
++        b = p->u.func.function_bytecode;
++        info->filename = b->filename;
++        info->func_name = b->func_name;
++        info->func_line = b->line_num;
++        info->func_col = b->col_num;
++    }
++    return n;
++}
++
+ #else /* !JS_ENABLE_DEBUGGER */
+ 
+ /* Stubs so an embedder built against the full header still links.  They fail
+@@ -3745,9 +3784,17 @@
+     info->func_name = JS_ATOM_NULL;
+     info->line = -1;
+     info->col = -1;
++    info->func_line = -1;
++    info->func_col = -1;
+     return -1;
+ }
+ 
++int JS_GetStackFunctions(JSContext *ctx, JSDebugFrameInfo *out, int max)
++{
++    (void)ctx; (void)out; (void)max;
++    return 0;
++}
++
+ #endif /* JS_ENABLE_DEBUGGER */
+ 
+ typedef enum JSFreeModuleEnum {
+diff --git a/quickjs.h b/quickjs.h
+--- a/quickjs.h
++++ b/quickjs.h
+@@ -692,6 +692,8 @@
+     int line;          /* 1-based, or -1 */
+     int col;           /* 1-based, or -1 */
+     bool is_native;    /* true for a C function frame */
++    int func_line;     /* 1-based line the function is defined on, or -1 */
++    int func_col;      /* 1-based column of that definition, or -1 */
+ } JSDebugFrameInfo;
+ 
+ /* Fill *info for the frame at `level` (0 = the innermost frame, 1 = its
+@@ -699,6 +701,12 @@
+    case *info is zero-filled.  Never throws. */
+ JS_EXTERN int JS_GetFrameInfoAtLevel(JSContext *ctx, int level,
+                                      JSDebugFrameInfo *info);
++
++/* The functions on the stack, innermost first, in one walk: up to `max`
++   entries of `out` get filename, func_name, func_line, func_col and
++   is_native (line / col stay -1). Returns how many were filled. */
++JS_EXTERN int JS_GetStackFunctions(JSContext *ctx, JSDebugFrameInfo *out,
++                                   int max);
+ 
+ /* the following functions are used to select the intrinsic object to
+    save memory */

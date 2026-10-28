@@ -682,7 +682,9 @@ void Runtime::loadUrl(const std::string& url) {
         inspector = std::make_shared<Inspector>(devOrigin_, this->session ? this->session->id() : std::string("jsui"),
                                                 this->session ? this->session->displayName() : std::string("JSUI"));
       inspector->setTitle(bundleUrl);
+      loader.observer.store(inspector.get());  // the Network panel
     } else {
+      loader.observer.store(nullptr);
       inspector.reset();
     }
 #else
@@ -794,6 +796,7 @@ void Runtime::tick(double nowMs, bool sync) {
 #if JSUI_DEBUGGER
   // DevTools requests made while JS was idle (a JS thread polls itself).
   if (inspector && !jsThread_) inspector->poll();
+  if (inspector) inspector->pumpDom(doc);  // the Elements panel
 #endif
   doomed_.clear();
   for (auto& s : surfaces_) s->doc.now = nowMs;

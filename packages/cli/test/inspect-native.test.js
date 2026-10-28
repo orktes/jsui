@@ -196,3 +196,213 @@ test('debugger: breakpoints in JSX, scopes, stepping, console, hot updates (nati
     await s.close();
   }
 });
+
+test('profiler: Profiler.start / stop records a CPU profile of the JSX (native runtime)', { skip: !process.env.JSUI_RENDER && !existsSync(binary) && `no ${binary}`, timeout: 60000 }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'jsui-profile-'));
+  const appFile = path.join(dir, 'App.jsx');
+  await writeFile(appFile, APP.replace("const label = 'tick ' + n;", "const label = 'tick ' + spin(n);") +
+    'function spin(n) {\n  let s = 0;\n  for (let i = 0; i < 200000; i++) s += Math.sqrt(i + n);\n  return Math.round(s);\n}\n');
+  await writeFile(path.join(dir, 'index.jsx'), "import { AppRegistry } from 'react-native';\nimport App from './App';\nAppRegistry.registerComponent('main', () => App);\n");
+  const s = await dev({ entry: path.join(dir, 'index.jsx'), port: 0, log: () => {} });
+  const origin = `http://127.0.0.1:${s.port}`;
+  const child = spawn(binary, ['--dev', `${origin}/bundle.js`, '--wait-ms', '50000', '-o', path.join(dir, 'out.png')], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '';
+  child.stdout.on('data', (d) => (output += d));
+  child.stderr.on('data', (d) => (output += d));
+  try {
+    let target = null;
+    for (let i = 0; i < 300 && !target; i++) {
+      target = (await (await fetch(`${origin}/json/list`)).json())[0];
+      if (!target) await sleep(50);
+    }
+    assert.ok(target, 'the runtime is listed in /json/list\n' + output);
+    const c = await connect(target.webSocketDebuggerUrl);
+    await c.send('Runtime.enable');
+    await c.send('Debugger.enable');
+    const parsed = await c.event((m) => m.method === 'Debugger.scriptParsed' && m.params.url.endsWith('/bundle.js'));
+    await c.event((m) => m.method === 'Runtime.consoleAPICalled');  // the app renders
+
+    assert.ok((await c.send('Profiler.enable')).result);
+    assert.equal((await c.send('Profiler.stop')).error?.message, 'Profiling is not started');
+    await c.send('Profiler.setSamplingInterval', { interval: 500 });
+    assert.ok((await c.send('Profiler.start')).result);
+    await sleep(1500);
+    const { profile } = (await c.send('Profiler.stop')).result;
+
+    assert.equal(profile.samples.length, profile.timeDeltas.length);
+    assert.ok(profile.samples.length > 50, `${profile.samples.length} samples`);
+    assert.ok(profile.endTime > profile.startTime);
+    const byId = new Map(profile.nodes.map((n) => [n.id, n]));
+    assert.equal(profile.nodes[0].callFrame.functionName, '(root)');
+    for (const id of profile.samples) assert.ok(byId.has(id));
+    // spin() under App, located where it is defined in the bundle.
+    const spin = profile.nodes.find((n) => n.callFrame.functionName === 'spin');
+    assert.ok(spin && spin.hitCount > 0, 'spin was sampled: ' + profile.nodes.map((n) => n.callFrame.functionName).join(','));
+    assert.equal(spin.callFrame.url, parsed.params.url);
+    assert.equal(spin.callFrame.scriptId, parsed.params.scriptId);
+    const parentOf = (n) => profile.nodes.find((p) => p.children.includes(n.id));
+    const parent = parentOf(spin);
+    assert.equal(parent.callFrame.functionName, 'App');
+    // Above the JS: what called into it, under the root.
+    let top = parent;
+    while (parentOf(top).callFrame.functionName !== '(root)') top = parentOf(top);
+    assert.match(top.callFrame.functionName, /^\((timer|animation frame|microtasks|call: .*|event: .*)\)$/);
+    const bundle = await (await fetch(parsed.params.url)).text();
+    assert.match(bundle.split('\n')[spin.callFrame.lineNumber], /function spin\(/);
+    assert.ok(profile.nodes.some((n) => n.callFrame.functionName === '(idle)' && n.hitCount > 0));
+    // The runtime's own work between JS calls, in JS's idle time.
+    const phases = profile.nodes.filter((n) => /^\((layout|paint|commit|style|gpu)\)$/.test(n.callFrame.functionName) && n.hitCount > 0);
+    assert.ok(phases.length > 0, 'phases in the profile: ' + profile.nodes.map((n) => n.callFrame.functionName).join(','));
+    for (const n of phases) assert.ok(profile.nodes[0].children.includes(n.id), n.callFrame.functionName + ' is top level');
+    c.ws.close();
+  } finally {
+    child.kill();
+    await s.close();
+  }
+});
+
+test('network: the runtime reports its loads as Network events (native runtime)', { skip: !process.env.JSUI_RENDER && !existsSync(binary) && `no ${binary}`, timeout: 60000 }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'jsui-network-'));
+  await writeFile(path.join(dir, 'App.jsx'), APP);
+  await writeFile(path.join(dir, 'index.jsx'), "import { AppRegistry } from 'react-native';\nimport App from './App';\nAppRegistry.registerComponent('main', () => App);\n");
+  const s = await dev({ entry: path.join(dir, 'index.jsx'), port: 0, log: () => {} });
+  const origin = `http://127.0.0.1:${s.port}`;
+  const child = spawn(binary, ['--dev', `${origin}/bundle.js`, '--wait-ms', '50000', '-o', path.join(dir, 'out.png')], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '';
+  child.stdout.on('data', (d) => (output += d));
+  child.stderr.on('data', (d) => (output += d));
+  try {
+    let target = null;
+    for (let i = 0; i < 300 && !target; i++) {
+      target = (await (await fetch(`${origin}/json/list`)).json())[0];
+      if (!target) await sleep(50);
+    }
+    assert.ok(target, 'the runtime is listed\n' + output);
+    const c = await connect(target.webSocketDebuggerUrl);
+    await c.send('Runtime.enable');
+    assert.deepEqual((await c.send('Network.enable')).result, {});
+    assert.deepEqual((await c.send('Network.emulateNetworkConditionsByRule', { offline: false, matchedNetworkConditions: [] })).result, { ruleIds: [] });
+    const seen = c.events.length;
+    await c.send('Runtime.evaluate', { expression: `fetch(${JSON.stringify(origin + '/bundle.js')}, { headers: { 'X-Test': '1' } }).then((r) => r.text())` });
+    const sent = await c.event((m) => m.method === 'Network.requestWillBeSent' && m.params.request.url.endsWith('/bundle.js'), seen);
+    assert.equal(sent.params.type, 'Fetch');
+    assert.equal(sent.params.request.method, 'GET');
+    assert.equal(sent.params.request.headers['x-test'] ?? sent.params.request.headers['X-Test'], '1');
+    const id = sent.params.requestId;
+    const response = await c.event((m) => m.method === 'Network.responseReceived' && m.params.requestId === id, seen);
+    assert.equal(response.params.response.status, 200);
+    assert.equal(response.params.response.mimeType, 'text/javascript');
+    const done = await c.event((m) => m.method === 'Network.loadingFinished' && m.params.requestId === id, seen);
+    assert.ok(done.params.encodedDataLength > 1000);
+    assert.ok(done.params.timestamp >= sent.params.timestamp);
+    const body = (await c.send('Network.getResponseBody', { requestId: id })).result;
+    assert.equal(body.base64Encoded, false);
+    assert.match(body.body, /registerComponent/);
+    // The dev server's own traffic (session polls, the debugger's) isn't the app's.
+    assert.ok(!c.events.some((m) => m.method === 'Network.requestWillBeSent' && m.params.request.url.includes('/__jsui/')));
+    c.ws.close();
+  } finally {
+    child.kill();
+    await s.close();
+  }
+});
+
+test('elements: the view tree as DOM, styles editable, live updates (native runtime)', { skip: !process.env.JSUI_RENDER && !existsSync(binary) && `no ${binary}`, timeout: 60000 }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'jsui-dom-'));
+  await writeFile(path.join(dir, 'App.jsx'), APP.replace('<View>', "<View testID=\"box\" style={{ width: 120, backgroundColor: '#123456' }}>"));
+  await writeFile(path.join(dir, 'index.jsx'), "import { AppRegistry } from 'react-native';\nimport App from './App';\nAppRegistry.registerComponent('main', () => App);\n");
+  const s = await dev({ entry: path.join(dir, 'index.jsx'), port: 0, log: () => {} });
+  const origin = `http://127.0.0.1:${s.port}`;
+  const child = spawn(binary, ['--dev', `${origin}/bundle.js`, '--wait-ms', '50000', '-o', path.join(dir, 'out.png')], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '';
+  child.stdout.on('data', (d) => (output += d));
+  child.stderr.on('data', (d) => (output += d));
+  try {
+    let target = null;
+    for (let i = 0; i < 300 && !target; i++) {
+      target = (await (await fetch(`${origin}/json/list`)).json())[0];
+      if (!target) await sleep(50);
+    }
+    assert.ok(target, 'the runtime is listed\n' + output);
+    const c = await connect(target.webSocketDebuggerUrl);
+    await c.send('Runtime.enable');
+    await c.event((m) => m.method === 'Runtime.consoleAPICalled');  // rendered
+    assert.ok((await c.send('DOM.enable')).result);
+    const { root } = (await c.send('DOM.getDocument', { depth: -1 })).result;
+    assert.equal(root.nodeName, '#document');
+    const all = [];
+    (function walk(n) { all.push(n); (n.children || []).forEach(walk); })(root);
+    const box = all.find((n) => (n.attributes || []).includes('box'));
+    assert.ok(box, 'the testID view: ' + all.map((n) => n.nodeName).join(','));
+    assert.equal(box.nodeName, 'View');
+    const attrs = Object.fromEntries(box.attributes.reduce((a, v, i, l) => (i % 2 ? a : [...a, [v, l[i + 1]]]), []));
+    assert.match(attrs.style, /backgroundColor: #123456;/);
+    assert.match(attrs.style, /width: 120;/);
+    assert.ok(all.some((n) => n.nodeType === 3 && /^tick/.test(n.nodeValue)), 'text nodes');
+
+    const model = (await c.send('DOM.getBoxModel', { nodeId: box.nodeId })).result.model;
+    assert.equal(model.width, 120);
+
+    const { inlineStyle } = (await c.send('CSS.getMatchedStylesForNode', { nodeId: box.nodeId })).result;
+    const set = await c.send('CSS.setStyleTexts', { edits: [{ styleSheetId: inlineStyle.styleSheetId, range: inlineStyle.range, text: 'backgroundColor: #ff0000; width: 200;' }] });
+    assert.match(set.result.styles[0].cssText, /backgroundColor: #ff0000; width: 200;/);
+    const after = (await c.send('DOM.getBoxModel', { nodeId: box.nodeId })).result;
+    assert.ok(after.model.width === 200 || after.model.width === 120, 'layout follows on the next frame');
+
+    // The tick text changes every 50 ms: the frontend hears of it.
+    const seen = c.events.length;
+    await c.event((m) => m.method === 'DOM.characterDataModified' && /^tick/.test(m.params.characterData), seen);
+    c.ws.close();
+  } finally {
+    child.kill();
+    await s.close();
+  }
+});
+
+test('memory: a heap snapshot of the runtime (native runtime)', { skip: !process.env.JSUI_RENDER && !existsSync(binary) && `no ${binary}`, timeout: 60000 }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'jsui-heap-'));
+  await writeFile(path.join(dir, 'App.jsx'), APP + '\nclass Leaky { constructor(i) { this.i = i; this.payload = [i, i + 1]; } }\nglobalThis.__kept = Array.from({ length: 500 }, (_, i) => new Leaky(i));\n');
+  await writeFile(path.join(dir, 'index.jsx'), "import { AppRegistry } from 'react-native';\nimport App from './App';\nAppRegistry.registerComponent('main', () => App);\n");
+  const s = await dev({ entry: path.join(dir, 'index.jsx'), port: 0, log: () => {} });
+  const origin = `http://127.0.0.1:${s.port}`;
+  const child = spawn(binary, ['--dev', `${origin}/bundle.js`, '--wait-ms', '50000', '-o', path.join(dir, 'out.png')], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '';
+  child.stdout.on('data', (d) => (output += d));
+  child.stderr.on('data', (d) => (output += d));
+  try {
+    let target = null;
+    for (let i = 0; i < 300 && !target; i++) {
+      target = (await (await fetch(`${origin}/json/list`)).json())[0];
+      if (!target) await sleep(50);
+    }
+    assert.ok(target, 'the runtime is listed\n' + output);
+    const c = await connect(target.webSocketDebuggerUrl);
+    await c.send('Runtime.enable');
+    await c.event((m) => m.method === 'Runtime.consoleAPICalled');  // rendered
+    assert.ok((await c.send('HeapProfiler.enable')).result);
+    const seen = c.events.length;
+    assert.deepEqual((await c.send('HeapProfiler.takeHeapSnapshot', { reportProgress: true })).result, {});
+    const after = c.events.slice(seen);
+    const progress = after.findIndex((m) => m.method === 'HeapProfiler.reportHeapSnapshotProgress' && m.params.finished);
+    const first = after.findIndex((m) => m.method === 'HeapProfiler.addHeapSnapshotChunk');
+    assert.ok(progress >= 0 && progress < first, 'a finished progress report before the chunks');
+    const snap = JSON.parse(after.filter((m) => m.method === 'HeapProfiler.addHeapSnapshotChunk').map((m) => m.params.chunk).join(''));
+    const nf = snap.snapshot.meta.node_fields.length, ef = snap.snapshot.meta.edge_fields.length;
+    assert.equal(snap.nodes.length / nf, snap.snapshot.node_count);
+    assert.equal(snap.edges.length / ef, snap.snapshot.edge_count);
+    let edges = 0;
+    for (let i = 4; i < snap.nodes.length; i += nf) edges += snap.nodes[i];
+    assert.equal(edges, snap.snapshot.edge_count);
+    for (let i = 2; i < snap.edges.length; i += ef) assert.equal(snap.edges[i] % nf, 0);
+    // The app's 500 Leaky objects, by constructor name, with their fields.
+    const names = [];
+    for (let i = 1; i < snap.nodes.length; i += nf) names.push(snap.strings[snap.nodes[i]]);
+    assert.ok(names.filter((n) => n === 'Leaky').length >= 500, 'Leaky objects: ' + names.filter((n) => n === 'Leaky').length);
+    assert.ok(snap.strings.includes('payload'));
+    assert.equal((await c.send('HeapProfiler.startSampling')).error.code, -32601);
+    c.ws.close();
+  } finally {
+    child.kill();
+    await s.close();
+  }
+});

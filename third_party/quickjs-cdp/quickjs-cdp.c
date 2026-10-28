@@ -54,6 +54,37 @@ typedef pthread_cond_t cdp_cond;
 #define cdp_cond_broadcast(c) pthread_cond_broadcast(c)
 #endif
 
+/* jsui: microseconds on a monotonic clock, for the profiler. */
+#ifdef _WIN32
+static int64_t cdp_now_us(void) {
+  LARGE_INTEGER f, c;
+  QueryPerformanceFrequency(&f);
+  QueryPerformanceCounter(&c);
+  return (int64_t)((double)c.QuadPart * 1e6 / (double)f.QuadPart);
+}
+#else
+#include <time.h>
+static int64_t cdp_now_us(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+#endif
+
+/* jsui: a node of the profiler's call tree. Functions are told apart by file,
+   name and where they are defined. Nodes 0-2 are (root), (program), (idle). */
+typedef struct {
+  JSAtom file, func; /* dup'd atoms of the debuggee; JS_ATOM_NULL for 0-2 */
+  int line, col;     /* 1-based definition, or -1 */
+  int parent, first_child, next_sibling; /* indices, -1 for none */
+  char *label;       /* a span's name ("(layout)"); NULL for functions */
+} ProfNode;
+
+typedef struct {
+  int node;
+  int64_t start, end;
+} ProfSpan;
+
 typedef struct {
   int id;
   char *url;
@@ -133,6 +164,32 @@ struct QJSCDPAgent {
   bool paused;
   bool resumed;
   volatile bool pause_pending; /* jsui: set from any thread */
+
+  /* jsui: Profiler. sample_pending is set from the embedder's sampling
+     thread; everything else is the JS thread's. */
+  bool profiling;
+  volatile bool sample_pending;
+  int sampling_interval_us;
+  ProfNode *pnodes;
+  int npnodes, pnodes_cap;
+  int *samples;
+  int64_t *sample_times;
+  int nsamples, samples_cap;
+  int64_t profile_start;
+  QJSCDPClockFunc *clock;
+  ProfSpan *spans;
+  int nspans, spans_cap;
+  ProfSpan *scopes; /* add_scope's, node = index into scope_names */
+  int nscopes, scopes_cap;
+  char **scope_names;
+  int nscope_names;
+  const char *extra_field; /* jsui: qjs_cdp_profiler_set_extra */
+  QJSCDPProfileExtraFunc *extra_fn;
+  void *extra_opaque;
+  int entry_node;      /* what called into JS: samples go under it */
+  int64_t entry_start; /* ... since */
+  JSDebugFrameInfo *frames; /* a sample's stack */
+  int frames_cap;
 };
 
 /* ---------------------------------------------------------------- JSON --- */
@@ -728,13 +785,259 @@ static char *take_message(QJSCDPAgent *agent, void **session) {
    `debugger;` statements reach the handler armed or not. JS thread only
    (disarming is); qjs_cdp_pause arms from any thread. */
 static void update_arming(QJSCDPAgent *agent) {
-  bool armed = agent->debugger_enabled && !agent->skip_all_pauses &&
-               (agent->pause_pending || agent->mode != MODE_RUN ||
-                (agent->breakpoints_active && agent->nbps > 0));
+  bool armed = (agent->debugger_enabled && !agent->skip_all_pauses &&
+                (agent->pause_pending || agent->mode != MODE_RUN ||
+                 (agent->breakpoints_active && agent->nbps > 0))) ||
+               agent->sample_pending; /* jsui: a profiler sample is due */
   JS_SetDebugTraceArmed(agent->ctx, armed);
   /* A pause requested from another thread meanwhile must not be lost. */
   if (!armed && agent->pause_pending && agent->debugger_enabled)
     JS_SetDebugTraceArmed(agent->ctx, true);
+}
+
+#include "heap_snapshot.inc" /* jsui: HeapProfiler */
+
+/* ------------------------------------------------------ jsui: profiler --- */
+
+static void profiler_reset(QJSCDPAgent *agent) {
+  for (int i = 0; i < agent->npnodes; i++) {
+    if (agent->pnodes[i].file != JS_ATOM_NULL)
+      JS_FreeAtom(agent->ctx, agent->pnodes[i].file);
+    if (agent->pnodes[i].func != JS_ATOM_NULL)
+      JS_FreeAtom(agent->ctx, agent->pnodes[i].func);
+    free(agent->pnodes[i].label);
+  }
+  agent->npnodes = 0;
+  agent->nsamples = 0;
+  agent->nspans = 0;
+  agent->nscopes = 0;
+  agent->entry_node = 0;
+}
+
+static int64_t profiler_now(QJSCDPAgent *agent) {
+  return agent->clock ? agent->clock() : cdp_now_us();
+}
+
+static int profiler_node(
+    QJSCDPAgent *agent, int parent, JSAtom file, JSAtom func, int line,
+    int col) {
+  if (parent >= 0) {
+    for (int c = agent->pnodes[parent].first_child; c >= 0;
+         c = agent->pnodes[c].next_sibling) {
+      ProfNode *n = &agent->pnodes[c];
+      if (n->file == file && n->func == func && n->line == line && n->col == col)
+        return c;
+    }
+  }
+  if (agent->npnodes == agent->pnodes_cap) {
+    agent->pnodes_cap = agent->pnodes_cap ? agent->pnodes_cap * 2 : 256;
+    agent->pnodes =
+        realloc(agent->pnodes, sizeof(ProfNode) * (size_t)agent->pnodes_cap);
+  }
+  int id = agent->npnodes++;
+  ProfNode *n = &agent->pnodes[id];
+  n->file = file != JS_ATOM_NULL ? JS_DupAtom(agent->ctx, file) : JS_ATOM_NULL;
+  n->func = func != JS_ATOM_NULL ? JS_DupAtom(agent->ctx, func) : JS_ATOM_NULL;
+  n->line = line;
+  n->col = col;
+  n->parent = parent;
+  n->first_child = -1;
+  n->next_sibling = -1;
+  n->label = NULL;
+  if (parent >= 0) {
+    n->next_sibling = agent->pnodes[parent].first_child;
+    agent->pnodes[parent].first_child = id;
+  }
+  return id;
+}
+
+enum { PROF_ROOT = 0, PROF_PROGRAM = 1, PROF_IDLE = 2 };
+
+static void profiler_push_at(QJSCDPAgent *agent, int node, int64_t t) {
+  if (agent->nsamples == agent->samples_cap) {
+    agent->samples_cap = agent->samples_cap ? agent->samples_cap * 2 : 4096;
+    agent->samples =
+        realloc(agent->samples, sizeof(int) * (size_t)agent->samples_cap);
+    agent->sample_times = realloc(
+        agent->sample_times, sizeof(int64_t) * (size_t)agent->samples_cap);
+  }
+  agent->samples[agent->nsamples] = node;
+  agent->sample_times[agent->nsamples] = t;
+  agent->nsamples++;
+}
+
+static void profiler_push(QJSCDPAgent *agent, int node) {
+  profiler_push_at(agent, node, profiler_now(agent));
+}
+
+static void profiler_start(QJSCDPAgent *agent) {
+  profiler_reset(agent);
+  profiler_node(agent, -1, JS_ATOM_NULL, JS_ATOM_NULL, -1, -1);
+  profiler_node(agent, PROF_ROOT, JS_ATOM_NULL, JS_ATOM_NULL, -1, -1);
+  profiler_node(agent, PROF_ROOT, JS_ATOM_NULL, JS_ATOM_NULL, -2, -2);
+  agent->profile_start = profiler_now(agent);
+  agent->profiling = true;
+  profiler_push(agent, PROF_IDLE); /* messages are handled while JS is idle */
+}
+
+/* The JS stack now, outermost frame first, as a path in the call tree. The
+   time until the next sample is spent here (in the innermost frame, or in a
+   native function it called). */
+static void profiler_sample(QJSCDPAgent *agent) {
+  int depth = JS_GetStackDepth(agent->ctx);
+  if (depth > agent->frames_cap) {
+    agent->frames_cap = depth * 2;
+    agent->frames = realloc(
+        agent->frames, sizeof(JSDebugFrameInfo) * (size_t)agent->frames_cap);
+  }
+  int n = JS_GetStackFunctions(agent->ctx, agent->frames, agent->frames_cap);
+  int node = agent->entry_node;
+  for (int level = n - 1; level >= 0; level--) {
+    JSDebugFrameInfo *info = &agent->frames[level];
+    if (info->is_native) continue;
+    node = profiler_node(agent, node, info->filename, info->func_name,
+                         info->func_line, info->func_col);
+  }
+  profiler_push(agent, node == PROF_ROOT ? PROF_PROGRAM : node);
+}
+
+static int span_cmp(const void *a, const void *b) {
+  int64_t x = ((const ProfSpan *)a)->start, y = ((const ProfSpan *)b)->start;
+  return x < y ? -1 : x > y;
+}
+
+/* Each (idle) stretch of the samples becomes the spans that fall in it, with
+   (idle) left for the rest. Spans that overlap JS are cut to its gaps. */
+static void profiler_merge_spans(QJSCDPAgent *agent, int64_t end) {
+  if (!agent->nspans) return;
+  qsort(agent->spans, (size_t)agent->nspans, sizeof(ProfSpan), span_cmp);
+  int n = agent->nsamples;
+  int *old_samples = agent->samples;
+  int64_t *old_times = agent->sample_times;
+  agent->samples = NULL;
+  agent->sample_times = NULL;
+  agent->nsamples = agent->samples_cap = 0;
+  int first = 0; /* spans before this one end before the current stretch */
+  for (int i = 0; i < n; i++) {
+    int64_t t = old_times[i], next = i + 1 < n ? old_times[i + 1] : end;
+    if (old_samples[i] != PROF_IDLE) {
+      profiler_push_at(agent, old_samples[i], t);
+      continue;
+    }
+    int64_t cursor = t;
+    while (first < agent->nspans && agent->spans[first].end <= t) first++;
+    for (int k = first; k < agent->nspans && agent->spans[k].start < next; k++) {
+      int64_t a = agent->spans[k].start > cursor ? agent->spans[k].start : cursor;
+      int64_t b = agent->spans[k].end < next ? agent->spans[k].end : next;
+      if (a >= b) continue;
+      if (a > cursor) profiler_push_at(agent, PROF_IDLE, cursor);
+      profiler_push_at(agent, agent->spans[k].node, a);
+      cursor = b;
+    }
+    if (cursor < next || cursor == t) profiler_push_at(agent, PROF_IDLE, cursor);
+  }
+  free(old_samples);
+  free(old_times);
+}
+
+static JSValue profiler_call_frame(QJSCDPAgent *agent, int i) {
+  static const char *const special[] = {"(root)", "(program)", "(idle)"};
+  ProfNode *n = &agent->pnodes[i];
+  JSValue frame = json_object(agent);
+  const char *file = n->file != JS_ATOM_NULL
+                         ? JS_AtomToCString(agent->ctx, n->file)
+                         : NULL;
+  const char *func = n->func != JS_ATOM_NULL
+                         ? JS_AtomToCString(agent->ctx, n->func)
+                         : NULL;
+  Script *script = file ? find_script_by_url(agent, file) : NULL;
+  char script_id[16];
+  snprintf(script_id, sizeof(script_id), "%d", script ? script->id : 0);
+  json_set_string(agent, frame, "functionName",
+                  i <= PROF_IDLE ? special[i]
+                  : n->label     ? n->label
+                                 : frame_name(func));
+  json_set_string(agent, frame, "scriptId", script_id);
+  json_set_string(agent, frame, "url", file ? file : "");
+  json_set_int(agent, frame, "lineNumber", n->line > 0 ? n->line - 1 : -1);
+  json_set_int(agent, frame, "columnNumber", n->col > 0 ? n->col - 1 : -1);
+  if (file) JS_FreeCString(agent->ctx, file);
+  if (func) JS_FreeCString(agent->ctx, func);
+  return frame;
+}
+
+/* Profiler.Profile: the call tree, the node of every sample and the time
+   between them. Ends the recording. */
+static JSValue profiler_stop(QJSCDPAgent *agent) {
+  agent->profiling = false;
+  agent->sample_pending = false;
+  update_arming(agent);
+  int64_t end = profiler_now(agent);
+  profiler_merge_spans(agent, end);
+
+  int *hits = calloc((size_t)agent->npnodes, sizeof(int));
+  for (int i = 0; i < agent->nsamples; i++) hits[agent->samples[i]]++;
+
+  JSValue nodes = json_array(agent);
+  for (int i = 0; i < agent->npnodes; i++) {
+    JSValue node = json_object(agent);
+    json_set_int(agent, node, "id", i + 1);
+    json_set(agent, node, "callFrame", profiler_call_frame(agent, i));
+    json_set_int(agent, node, "hitCount", hits[i]);
+    JSValue children = json_array(agent);
+    uint32_t nc = 0;
+    for (int c = agent->pnodes[i].first_child; c >= 0;
+         c = agent->pnodes[c].next_sibling)
+      json_set_index(agent, children, nc++, JS_NewInt32(agent->jctx, c + 1));
+    json_set(agent, node, "children", children);
+    json_set_index(agent, nodes, (uint32_t)i, node);
+  }
+  free(hits);
+
+  JSValue samples = json_array(agent);
+  JSValue deltas = json_array(agent);
+  int64_t prev = agent->profile_start;
+  for (int i = 0; i < agent->nsamples; i++) {
+    json_set_index(agent, samples, (uint32_t)i,
+                   JS_NewInt32(agent->jctx, agent->samples[i] + 1));
+    json_set_index(agent, deltas, (uint32_t)i,
+                   JS_NewInt64(agent->jctx, agent->sample_times[i] - prev));
+    prev = agent->sample_times[i];
+  }
+
+  JSValue profile = json_object(agent);
+  json_set(agent, profile, "nodes", nodes);
+  json_set(agent, profile, "startTime",
+           JS_NewInt64(agent->jctx, agent->profile_start));
+  json_set(agent, profile, "endTime", JS_NewInt64(agent->jctx, end));
+  json_set(agent, profile, "samples", samples);
+  json_set(agent, profile, "timeDeltas", deltas);
+
+  /* The embedder's whole scopes (add_scope): [name, start, end] each, for a
+     trace with a track per thread (`jsui dev` writes one). DevTools ignores
+     the field. */
+  JSValue spans = json_array(agent);
+  for (int i = 0; i < agent->nscopes; i++) {
+    JSValue sp = json_array(agent);
+    json_set_index(agent, sp, 0,
+                   JS_NewString(agent->jctx,
+                                agent->scope_names[agent->scopes[i].node]));
+    json_set_index(agent, sp, 1, JS_NewInt64(agent->jctx, agent->scopes[i].start));
+    json_set_index(agent, sp, 2, JS_NewInt64(agent->jctx, agent->scopes[i].end));
+    json_set_index(agent, spans, (uint32_t)i, sp);
+  }
+  json_set(agent, profile, "jsuiSpans", spans);
+  if (agent->extra_fn) {
+    char *extra = agent->extra_fn(agent->extra_opaque);
+    if (extra) {
+      JSValue v = JS_ParseJSON(agent->jctx, extra, strlen(extra), "<profile>");
+      if (JS_IsException(v)) JS_FreeValue(agent->jctx, JS_GetException(agent->jctx));
+      else json_set(agent, profile, agent->extra_field, v);
+      free(extra);
+    }
+  }
+  profiler_reset(agent);
+  return profile;
 }
 
 /* Stops the JS thread here and answers the frontend from inside the engine
@@ -792,6 +1095,12 @@ static int on_statement(
   (void)col;
   QJSCDPAgent *agent = opaque;
   enter_agent_runtime(agent);
+
+  if (agent->sample_pending) { /* jsui: the profiler's tick armed this trap */
+    agent->sample_pending = false;
+    if (agent->profiling && !agent->paused) profiler_sample(agent);
+    update_arming(agent);
+  }
 
   /* Re-entrant: an evaluate issued from the pause loop runs instrumented code
      of its own, and stopping inside it would deadlock the frontend. */
@@ -1338,6 +1647,15 @@ static const char *const kMethods[] = {
     "Debugger.setBlackboxPatterns",
     "Debugger.setBlackboxedRanges",
     "Debugger.setSkipAllPauses",
+    "Profiler.enable", /* jsui */
+    "Profiler.disable",
+    "Profiler.setSamplingInterval",
+    "Profiler.start",
+    "Profiler.stop",
+    "HeapProfiler.enable", /* jsui */
+    "HeapProfiler.disable",
+    "HeapProfiler.collectGarbage",
+    "HeapProfiler.takeHeapSnapshot",
 };
 
 bool qjs_cdp_handles(const char *method) {
@@ -1498,6 +1816,57 @@ static void dispatch(
       is(method, "Debugger.setBlackboxPatterns") ||
       is(method, "Debugger.setBlackboxedRanges")) {
     send_empty_result(agent, id);
+
+    /* --- HeapProfiler (jsui) --- */
+  } else if (is(method, "HeapProfiler.enable") || is(method, "HeapProfiler.disable")) {
+    send_empty_result(agent, id);
+  } else if (is(method, "HeapProfiler.collectGarbage")) {
+    JS_RunGC(JS_GetRuntime(agent->ctx));
+    send_empty_result(agent, id);
+  } else if (is(method, "HeapProfiler.takeHeapSnapshot")) {
+    /* Garbage first, as V8 does, then the snapshot in pieces. */
+    JS_RunGC(JS_GetRuntime(agent->ctx));
+    char *json = heap_snapshot_json(agent);
+    size_t len = strlen(json);
+    /* DevTools starts its snapshot reader on a finished progress report. */
+    if (JS_ToBool(agent->jctx, JS_GetPropertyStr(agent->jctx, params, "reportProgress"))) {
+      JSValue p = json_object(agent);
+      json_set_int(agent, p, "done", 1);
+      json_set_int(agent, p, "total", 1);
+      json_set(agent, p, "finished", JS_TRUE);
+      send_event(agent, "HeapProfiler.reportHeapSnapshotProgress", p);
+    }
+    const size_t piece = 1 << 20;
+    for (size_t at = 0; at < len; at += piece) {
+      size_t n = len - at < piece ? len - at : piece;
+      JSValue params = json_object(agent);
+      JS_SetPropertyStr(agent->jctx, params, "chunk", JS_NewStringLen(agent->jctx, json + at, n));
+      send_event(agent, "HeapProfiler.addHeapSnapshotChunk", params);
+    }
+    free(json);
+    send_empty_result(agent, id);
+
+    /* --- Profiler (jsui) --- */
+  } else if (is(method, "Profiler.enable")) {
+    send_empty_result(agent, id);
+  } else if (is(method, "Profiler.disable")) {
+    if (agent->profiling) JS_FreeValue(agent->jctx, profiler_stop(agent));
+    send_empty_result(agent, id);
+  } else if (is(method, "Profiler.setSamplingInterval")) {
+    int us = json_get_int(agent, params, "interval", 1000);
+    agent->sampling_interval_us = us < 100 ? 100 : us;
+    send_empty_result(agent, id);
+  } else if (is(method, "Profiler.start")) {
+    if (!agent->profiling) profiler_start(agent);
+    send_empty_result(agent, id);
+  } else if (is(method, "Profiler.stop")) {
+    if (!agent->profiling) {
+      send_error(agent, id, "Profiling is not started");
+    } else {
+      JSValue result = json_object(agent);
+      json_set(agent, result, "profile", profiler_stop(agent));
+      send_result(agent, id, result);
+    }
   }
 }
 
@@ -1540,6 +1909,7 @@ QJSCDPAgent *qjs_cdp_new(
   agent->send_opaque = send_opaque;
   agent->breakpoints_active = true;
   agent->mode = MODE_RUN;
+  agent->sampling_interval_us = 1000; /* jsui: Profiler */
   cdp_mutex_init(&agent->lock);
   cdp_cond_init(&agent->cond);
 
@@ -1575,6 +1945,15 @@ void qjs_cdp_free(QJSCDPAgent *agent) {
     free(agent->bps[i].condition);
   }
   for (int i = 0; i < agent->queue_len; i++) free(agent->queue[i]);
+  profiler_reset(agent); /* jsui: its atoms are the debuggee's */
+  free(agent->pnodes);
+  free(agent->samples);
+  free(agent->sample_times);
+  free(agent->spans);
+  free(agent->scopes);
+  for (int i = 0; i < agent->nscope_names; i++) free(agent->scope_names[i]);
+  free(agent->scope_names);
+  free(agent->frames);
 
   free(agent->objs);
   free(agent->scripts);
@@ -1851,4 +2230,103 @@ void qjs_cdp_pause(QJSCDPAgent *agent) {
   /* jsui: a flag write only; the agent's runtime belongs to the JS thread. */
   agent->pause_pending = true;
   if (agent->debugger_enabled) JS_SetDebugTraceArmed(agent->ctx, true);
+}
+
+/* jsui: Profiler */
+bool qjs_cdp_profiling(QJSCDPAgent *agent) { return agent->profiling; }
+
+int qjs_cdp_sampling_interval(QJSCDPAgent *agent) {
+  return agent->sampling_interval_us;
+}
+
+void qjs_cdp_profiler_tick(QJSCDPAgent *agent) {
+  /* A flag write only, as qjs_cdp_pause; the next statement samples. */
+  if (!agent->profiling) return;
+  agent->sample_pending = true;
+  JS_SetDebugTraceArmed(agent->ctx, true);
+}
+
+void qjs_cdp_profiler_idle(QJSCDPAgent *agent) {
+  if (!agent->profiling) return;
+  if (agent->entry_node != PROF_ROOT) {
+    qjs_cdp_profiler_add_scope(agent, agent->pnodes[agent->entry_node].label,
+                               agent->entry_start, profiler_now(agent));
+    agent->entry_node = PROF_ROOT;
+  }
+  if (agent->nsamples && agent->samples[agent->nsamples - 1] == PROF_IDLE)
+    return;
+  profiler_push(agent, PROF_IDLE);
+}
+
+/* A top-level node named `name` ("(paint)", "(timer)"), made on first use. */
+static int profiler_label_node(QJSCDPAgent *agent, const char *name) {
+  for (int c = agent->pnodes[PROF_ROOT].first_child; c >= 0;
+       c = agent->pnodes[c].next_sibling)
+    if (agent->pnodes[c].label && strcmp(agent->pnodes[c].label, name) == 0)
+      return c;
+  /* A key no function has, so profiler_node makes a new node. */
+  int key = -3 - agent->npnodes;
+  int node = profiler_node(agent, PROF_ROOT, JS_ATOM_NULL, JS_ATOM_NULL, key, key);
+  agent->pnodes[node].label = strdup(name);
+  return node;
+}
+
+void qjs_cdp_profiler_enter(QJSCDPAgent *agent, const char *what) {
+  if (!agent->profiling) return;
+  if (agent->entry_node != PROF_ROOT) /* the next call of a batch */
+    qjs_cdp_profiler_add_scope(agent, agent->pnodes[agent->entry_node].label,
+                               agent->entry_start, profiler_now(agent));
+  agent->entry_node = profiler_label_node(agent, what);
+  agent->entry_start = profiler_now(agent);
+  profiler_push(agent, agent->entry_node); /* until JS's first statement */
+  agent->sample_pending = true; /* which samples right away */
+  JS_SetDebugTraceArmed(agent->ctx, true);
+}
+
+void qjs_cdp_profiler_set_clock(QJSCDPAgent *agent, QJSCDPClockFunc *now_us) {
+  agent->clock = now_us;
+}
+
+void qjs_cdp_profiler_add_span(
+    QJSCDPAgent *agent, const char *name, int64_t start_us, int64_t end_us) {
+  if (!agent->profiling || end_us <= start_us || end_us <= agent->profile_start)
+    return;
+  int node = profiler_label_node(agent, name);
+  if (agent->nspans == agent->spans_cap) {
+    agent->spans_cap = agent->spans_cap ? agent->spans_cap * 2 : 1024;
+    agent->spans =
+        realloc(agent->spans, sizeof(ProfSpan) * (size_t)agent->spans_cap);
+  }
+  agent->spans[agent->nspans].node = node;
+  agent->spans[agent->nspans].start = start_us;
+  agent->spans[agent->nspans].end = end_us;
+  agent->nspans++;
+}
+
+void qjs_cdp_profiler_add_scope(
+    QJSCDPAgent *agent, const char *name, int64_t start_us, int64_t end_us) {
+  if (!agent->profiling || end_us <= start_us || end_us <= agent->profile_start)
+    return;
+  int k = 0;
+  while (k < agent->nscope_names && strcmp(agent->scope_names[k], name) != 0) k++;
+  if (k == agent->nscope_names) {
+    agent->scope_names = realloc(
+        agent->scope_names, sizeof(char *) * (size_t)(agent->nscope_names + 1));
+    agent->scope_names[agent->nscope_names++] = strdup(name);
+  }
+  if (agent->nscopes == agent->scopes_cap) {
+    agent->scopes_cap = agent->scopes_cap ? agent->scopes_cap * 2 : 1024;
+    agent->scopes =
+        realloc(agent->scopes, sizeof(ProfSpan) * (size_t)agent->scopes_cap);
+  }
+  agent->scopes[agent->nscopes].node = k;
+  agent->scopes[agent->nscopes].start = start_us;
+  agent->scopes[agent->nscopes].end = end_us;
+  agent->nscopes++;
+}
+
+void qjs_cdp_profiler_set_extra(QJSCDPAgent *agent, const char *field, QJSCDPProfileExtraFunc *fn, void *opaque) {
+  agent->extra_field = field;
+  agent->extra_fn = fn;
+  agent->extra_opaque = opaque;
 }

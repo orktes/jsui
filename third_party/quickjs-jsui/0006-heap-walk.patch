@@ -1,0 +1,212 @@
+Subject: Walk the heap as a graph (JS_WalkHeap)
+
+What this does
+  A debugger's heap snapshot (quickjs-cdp's HeapProfiler domain) needs the
+  heap's objects and the references between them. JS_WalkHeap goes over
+  gc_obj_list once and reports every GC object as a node (a name: the
+  function's, the prototype's constructor's or the class's; a size from the
+  allocator) and its references as edges: an object's own properties by
+  name (getters and setters with a "get " / "set " label, its prototype as
+  __proto__), elements of fast arrays by index, and what mark_children
+  reaches as internal edges. The context's global object and the context
+  are the roots. It allocates nothing on the runtime.
+
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -9062,8 +9062,163 @@
+ void JS_RunGC(JSRuntime *rt)
+ {
+     gc_collect(rt, true, 0);
++}
++
++/* JSUI: the heap as a graph, for a debugger's heap snapshot. One pass over
++   gc_obj_list: every GC object is a node; its references are edges, named
++   for an object's own properties, indexed for array elements, and
++   "internal" for the rest (what mark_children reaches). Nothing is
++   allocated on the runtime while walking. */
++static _Thread_local const JSHeapWalker *heap_walker;
++static _Thread_local const void *heap_walker_from;
++static _Thread_local uint32_t heap_walker_index;
++static _Thread_local int heap_walker_kind;
++
++static void heap_walker_mark(JSRuntime *rt, JSGCObjectHeader *gp)
++{
++    (void)rt;
++    const JSHeapWalker *w = heap_walker;
++    if (heap_walker_kind == JS_HEAP_EDGE_ELEMENT)
++        w->edge(w->opaque, heap_walker_from, gp, JS_HEAP_EDGE_ELEMENT, JS_ATOM_NULL,
++                heap_walker_index++, NULL);
++    else
++        w->edge(w->opaque, heap_walker_from, gp, JS_HEAP_EDGE_INTERNAL, JS_ATOM_NULL, 0, NULL);
+ }
+ 
++static size_t heap_usable_size(JSRuntime *rt, const void *ptr)
++{
++    return ptr ? js_malloc_usable_size_rt(rt, ptr) : 0;
++}
++
++/* A function's own `name` property when it is a string (classes and
++   functions bound to a variable get their name that way), else undefined. */
++static JSValueConst heap_fn_name_value(JSObject *f)
++{
++    JSProperty *pr;
++    JSShapeProperty *prs = find_own_property(&pr, f, JS_ATOM_name);
++    if (prs && !(prs->flags & JS_PROP_TMASK) && JS_VALUE_GET_TAG(pr->u.value) == JS_TAG_STRING &&
++        JS_VALUE_GET_STRING(pr->u.value)->len > 0)
++        return pr->u.value;
++    return JS_UNDEFINED;
++}
++
++/* The name a heap snapshot shows for an object: its function's name, else
++   its prototype's constructor's, else its class's. *str is that name as a
++   string value when it isn't an atom. */
++static JSAtom heap_object_name(JSRuntime *rt, JSObject *p, JSValueConst *str)
++{
++    *str = JS_UNDEFINED;
++    if (js_class_has_bytecode(p->class_id)) {
++        *str = heap_fn_name_value(p);
++        return p->u.func.function_bytecode ? p->u.func.function_bytecode->func_name : JS_ATOM_NULL;
++    }
++    JSObject *proto = p->shape ? p->shape->proto : NULL;
++    if (proto && p->class_id == JS_CLASS_OBJECT) {
++        JSProperty *pr;
++        JSShapeProperty *prs = find_own_property(&pr, proto, JS_ATOM_constructor);
++        if (prs && !(prs->flags & JS_PROP_TMASK) && JS_VALUE_GET_TAG(pr->u.value) == JS_TAG_OBJECT) {
++            JSObject *f = JS_VALUE_GET_OBJ(pr->u.value);
++            if (js_class_has_bytecode(f->class_id)) {
++                *str = heap_fn_name_value(f);
++                if (!JS_IsUndefined(*str))
++                    return JS_ATOM_NULL;
++                if (f->u.func.function_bytecode && f->u.func.function_bytecode->func_name != JS_ATOM_NULL)
++                    return f->u.func.function_bytecode->func_name;
++            }
++        }
++    }
++    return rt->class_array[p->class_id].class_name;
++}
++
++void JS_WalkHeap(JSContext *ctx, const JSHeapWalker *w)
++{
++    JSRuntime *rt = ctx->rt;
++    struct list_head *el;
++    const JSHeapWalker *saved = heap_walker;
++    heap_walker = w;
++    list_for_each(el, &rt->gc_obj_list) {
++        JSGCObjectHeader *gp = list_entry(el, JSGCObjectHeader, link);
++        switch (JS_GC_TYPE(gp)) {
++        case JS_GC_OBJ_TYPE_JS_OBJECT: {
++            JSObject *p = (JSObject *)gp;
++            JSShape *sh = p->shape;
++            size_t size = heap_usable_size(rt, p);
++            if (p->prop && ((const char *)p->prop < (const char *)p ||
++                            (const char *)p->prop >= (const char *)p + size))
++                size += heap_usable_size(rt, p->prop);
++            if (p->fast_array && (p->class_id == JS_CLASS_ARRAY || p->class_id == JS_CLASS_ARGUMENTS))
++                size += heap_usable_size(rt, p->u.array.u.values);
++            int kind = js_class_has_bytecode(p->class_id) ? JS_HEAP_NODE_CLOSURE
++                     : p->class_id == JS_CLASS_ARRAY ? JS_HEAP_NODE_ARRAY
++                     : p->class_id == JS_CLASS_REGEXP ? JS_HEAP_NODE_REGEXP
++                     : JS_HEAP_NODE_OBJECT;
++            JSValueConst name_str;
++            JSAtom name = heap_object_name(rt, p, &name_str);
++            w->node(w->opaque, gp, kind, name, name_str, NULL, size);
++            if (sh) {
++                JSShapeProperty *prs = get_shape_prop(sh);
++                for (int i = 0; i < sh->prop_count; i++, prs++) {
++                    JSProperty *pr = &p->prop[i];
++                    if (prs->atom == JS_ATOM_NULL)
++                        continue;
++                    switch (prs->flags & JS_PROP_TMASK) {
++                    case JS_PROP_GETSET:
++                        if (pr->u.getset.getter)
++                            w->edge(w->opaque, gp, &pr->u.getset.getter->header, JS_HEAP_EDGE_PROPERTY, prs->atom, 0, "get ");
++                        if (pr->u.getset.setter)
++                            w->edge(w->opaque, gp, &pr->u.getset.setter->header, JS_HEAP_EDGE_PROPERTY, prs->atom, 0, "set ");
++                        break;
++                    case JS_PROP_VARREF:
++                        w->edge(w->opaque, gp, &pr->u.var_ref->header, JS_HEAP_EDGE_PROPERTY, prs->atom, 0, NULL);
++                        break;
++                    case 0:
++                        if (JS_VALUE_GET_TAG(pr->u.value) == JS_TAG_OBJECT ||
++                            JS_VALUE_GET_TAG(pr->u.value) == JS_TAG_FUNCTION_BYTECODE)
++                            w->edge(w->opaque, gp, JS_VALUE_GET_PTR(pr->u.value), JS_HEAP_EDGE_PROPERTY, prs->atom, 0, NULL);
++                        break;
++                    default:
++                        break;
++                    }
++                }
++                if (sh->proto)
++                    w->edge(w->opaque, gp, &sh->proto->header, JS_HEAP_EDGE_PROPERTY, JS_ATOM___proto__, 0, NULL);
++            }
++            if (p->class_id != JS_CLASS_OBJECT && rt->class_array[p->class_id].gc_mark) {
++                heap_walker_from = gp;
++                heap_walker_index = 0;
++                heap_walker_kind = p->fast_array ? JS_HEAP_EDGE_ELEMENT : JS_HEAP_EDGE_INTERNAL;
++                rt->class_array[p->class_id].gc_mark(rt, JS_MKPTR(JS_TAG_OBJECT, p), heap_walker_mark);
++            }
++            break;
++        }
++        case JS_GC_OBJ_TYPE_FUNCTION_BYTECODE: {
++            JSFunctionBytecode *b = (JSFunctionBytecode *)gp;
++            w->node(w->opaque, gp, JS_HEAP_NODE_CODE, b->func_name, JS_UNDEFINED, NULL, heap_usable_size(rt, b));
++            heap_walker_from = gp;
++            heap_walker_kind = JS_HEAP_EDGE_INTERNAL;
++            mark_children(rt, gp, heap_walker_mark);
++            break;
++        }
++        default: {
++            static const char *const names[] = {"(object)", "(code)", "(object shape)", "(closure variable)",
++                                                "(async function)", "(context)"};
++            int t = JS_GC_TYPE(gp);
++            w->node(w->opaque, gp, t == JS_GC_OBJ_TYPE_SHAPE ? JS_HEAP_NODE_SHAPE : JS_HEAP_NODE_HIDDEN, JS_ATOM_NULL,
++                    JS_UNDEFINED, t < (int)(sizeof(names) / sizeof(names[0])) ? names[t] : "(internal)", heap_usable_size(rt, gp));
++            heap_walker_from = gp;
++            heap_walker_kind = JS_HEAP_EDGE_INTERNAL;
++            mark_children(rt, gp, heap_walker_mark);
++            break;
++        }
++        }
++    }
++    /* What the context holds on to. */
++    if (JS_VALUE_GET_TAG(ctx->global_obj) == JS_TAG_OBJECT)
++        w->edge(w->opaque, NULL, JS_VALUE_GET_PTR(ctx->global_obj), JS_HEAP_EDGE_PROPERTY, JS_ATOM_NULL, 0, "global");
++    w->edge(w->opaque, NULL, &ctx->header, JS_HEAP_EDGE_INTERNAL, JS_ATOM_NULL, 0, "context");
++    heap_walker = saved;
++}
++
+ void JS_SetGCYoungChunk(JSRuntime *rt, size_t objects)
+ {
+     rt->gc_young_chunk = objects;
+diff --git a/quickjs.h b/quickjs.h
+--- a/quickjs.h
++++ b/quickjs.h
+@@ -707,6 +707,28 @@
+    is_native (line / col stay -1). Returns how many were filled. */
+ JS_EXTERN int JS_GetStackFunctions(JSContext *ctx, JSDebugFrameInfo *out,
+                                    int max);
++
++/* JSUI: the heap as a graph (a debugger's heap snapshot). `node` is called
++   once for every GC object (`ptr` identifies it), `edge` for every
++   reference from one (`from`) to another (`to`), named by an atom
++   (`name`, with `label` a prefix such as "get "), by an element index, or
++   by `label` alone; `from` NULL is a root. Atoms are borrowed: JS_DupAtom()
++   to keep them. Allocates nothing on the runtime while it walks. */
++enum {
++    JS_HEAP_NODE_OBJECT, JS_HEAP_NODE_CLOSURE, JS_HEAP_NODE_ARRAY, JS_HEAP_NODE_REGEXP,
++    JS_HEAP_NODE_CODE, JS_HEAP_NODE_SHAPE, JS_HEAP_NODE_HIDDEN,
++};
++enum { JS_HEAP_EDGE_PROPERTY, JS_HEAP_EDGE_ELEMENT, JS_HEAP_EDGE_INTERNAL };
++typedef struct JSHeapWalker {
++    /* `name_str`: the name as a string value (borrowed; JS_DupValue() to
++       keep it) when there is one, else undefined and `name` is it. */
++    void (*node)(void *opaque, const void *ptr, int kind, JSAtom name, JSValueConst name_str, const char *label,
++                 size_t self_size);
++    void (*edge)(void *opaque, const void *from, const void *to, int kind, JSAtom name, uint32_t index,
++                 const char *label);
++    void *opaque;
++} JSHeapWalker;
++JS_EXTERN void JS_WalkHeap(JSContext *ctx, const JSHeapWalker *w);
+ 
+ /* the following functions are used to select the intrinsic object to
+    save memory */

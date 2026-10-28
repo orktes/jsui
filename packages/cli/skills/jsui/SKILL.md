@@ -153,6 +153,18 @@ npx jsui log --attach $U --since 0             # what the person clicked / press
   out.
 * For checks that must repeat exactly (tests, CI, before/after comparisons)
   use the standalone headless commands below: they run on a simulated clock.
+* A person can debug and profile the live native runtime's JS from Chrome
+  DevTools or VS Code through the same server: breakpoints in their JSX
+  (source maps), console, the Elements panel (the view tree; styles, text
+  and props editable live), the Network panel (fetch, images, fonts), the
+  Memory panel's heap snapshots, and
+  the Performance panel's CPU profile (a flame
+  chart of JS functions, with the runtime's layout, paint and GPU submit as
+  `(layout)`, `(paint)`, `(gpu)` where JS was idle). Send them to
+  `$U/__jsui/devtools/`: DevTools on the live runtime, served by `jsui dev`
+  and opened as for a page, so each recording has render thread, worklets
+  and GPU tracks.
+  See `docs/DEBUGGING.md`.
 
 ## Minimal screen
 

@@ -498,7 +498,10 @@ sk_sp<SkImage> ImageCache::get(const std::string& url, State* state) {
       return slot.image;
     }
     entries_[url] = Entry{};
-    rt_.loader.load(url, [this, url](Resource res) {
+    LoadRequest req;
+    req.url = url;
+    req.kind = "image";
+    rt_.loader.load(std::move(req), [this, url](Resource res) {
       auto& e = entries_[url];
       if (res.ok()) {
         decodeInto(url, e, res.data.data(), res.data.size(), "image: " + url);
