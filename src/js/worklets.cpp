@@ -13,6 +13,7 @@
 
 #include "animated/native_animated.h"
 #include "js/engine_impl.h"
+#include "js/inspector.h"
 #include "js/js_thread.h"
 #include "runtime.h"
 
@@ -222,6 +223,11 @@ WorkletRuntime::WorkletRuntime(Worklets& h, int rid, std::string nm) : hub(h), i
   JS_SetHostPromiseRejectionTracker(jrt_, rejection, this);
   ctx_ = JS_NewContext(jrt_);
   JS_SetContextOpaque(ctx_, this);
+#if JSUI_DEBUGGER
+  // A debugger's CPU profile samples worklets too: the statement traps go
+  // into code parsed from here on (armed only when a sample is due).
+  if (Inspector* ins = hub.runtime().inspector.get()) ins->addWorklet(ctx_, name);
+#endif
 
   JSValue global = JS_GetGlobalObject(ctx_);
   // performance.now() is the runtime clock (the tick's time), as in the
@@ -283,6 +289,9 @@ WorkletRuntime::~WorkletRuntime() {
   }
   rejections_.clear();
   JS_FreeValue(ctx_, api_);
+#if JSUI_DEBUGGER
+  if (Inspector* ins = hub.runtime().inspector.get()) ins->removeWorklet(ctx_);
+#endif
   JS_FreeContext(ctx_);
   JS_FreeRuntime(jrt_);
 }
@@ -422,6 +431,17 @@ std::string Worklets::runSync(int id, const std::string& json) {
 
 void Worklets::tick(double nowMs, bool js) {
   Perf::Scope scope(rt_.doc.perf, Phase::Worklet);
+#if JSUI_DEBUGGER
+  struct Marks {  // a CPU profile's worklet track: running from here, idle after
+    Inspector* ins;
+    explicit Marks(Inspector* i) : ins(i) {
+      if (ins) ins->workletsRunning(true);
+    }
+    ~Marks() {
+      if (ins) ins->workletsRunning(false);
+    }
+  } marks(rt_.inspector.get());
+#endif
   // Queued jobs, consecutive ones for the same runtime as one batch (one
   // entry, one microtask drain). Jobs they post wait for the next tick.
   if (!jobs_.empty()) {

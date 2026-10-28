@@ -156,6 +156,12 @@ void qjs_cdp_profiler_add_span(
    Profiler.stop lists them in profile.jsuiSpans as [name, start, end], for
    a trace with a track per thread. JS thread only; ignored when not
    profiling. */
+/* jsui: more of the embedder's at Profiler.stop: `fn` returns JSON (malloc'd,
+   the agent frees it; NULL: nothing) that the profile carries as `field`.
+   JS thread. */
+typedef char *QJSCDPProfileExtraFunc(void *opaque);
+void qjs_cdp_profiler_set_extra(QJSCDPAgent *agent, const char *field, QJSCDPProfileExtraFunc *fn, void *opaque);
+
 void qjs_cdp_profiler_add_scope(
     QJSCDPAgent *agent, const char *name, int64_t start_us, int64_t end_us);
 

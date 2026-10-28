@@ -183,6 +183,9 @@ struct QJSCDPAgent {
   int nscopes, scopes_cap;
   char **scope_names;
   int nscope_names;
+  const char *extra_field; /* jsui: qjs_cdp_profiler_set_extra */
+  QJSCDPProfileExtraFunc *extra_fn;
+  void *extra_opaque;
   int entry_node;      /* what called into JS: samples go under it */
   int64_t entry_start; /* ... since */
   JSDebugFrameInfo *frames; /* a sample's stack */
@@ -1024,6 +1027,15 @@ static JSValue profiler_stop(QJSCDPAgent *agent) {
     json_set_index(agent, spans, (uint32_t)i, sp);
   }
   json_set(agent, profile, "jsuiSpans", spans);
+  if (agent->extra_fn) {
+    char *extra = agent->extra_fn(agent->extra_opaque);
+    if (extra) {
+      JSValue v = JS_ParseJSON(agent->jctx, extra, strlen(extra), "<profile>");
+      if (JS_IsException(v)) JS_FreeValue(agent->jctx, JS_GetException(agent->jctx));
+      else json_set(agent, profile, agent->extra_field, v);
+      free(extra);
+    }
+  }
   profiler_reset(agent);
   return profile;
 }
@@ -2311,4 +2323,10 @@ void qjs_cdp_profiler_add_scope(
   agent->scopes[agent->nscopes].start = start_us;
   agent->scopes[agent->nscopes].end = end_us;
   agent->nscopes++;
+}
+
+void qjs_cdp_profiler_set_extra(QJSCDPAgent *agent, const char *field, QJSCDPProfileExtraFunc *fn, void *opaque) {
+  agent->extra_field = field;
+  agent->extra_fn = fn;
+  agent->extra_opaque = opaque;
 }

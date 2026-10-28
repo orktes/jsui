@@ -56,6 +56,19 @@ export function profileTrace(profile, o = {}) {
     args: { data: { cpuProfile: { nodes, samples }, timeDeltas: profile.timeDeltas } },
   });
 
+  // Worklets sampled: a thread of their own with its CPU profile (the
+  // timing-only Worklets track then isn't needed).
+  const worklets = workletProfile(profile.jsuiWorklets, profile.startTime, profile.endTime);
+  if (worklets) {
+    const wtid = 4;
+    ev.push({ ph: 'M', name: 'thread_name', pid, tid: wtid, ts: 0, args: { name: 'JSUI worklets' } });
+    ev.push({ ph: 'P', cat: 'disabled-by-default-v8.cpu_profiler', name: 'Profile', id: '0x2', pid, tid: wtid, ts: worklets.startTime, args: { data: { startTime: worklets.startTime } } });
+    ev.push({
+      ph: 'P', cat: 'disabled-by-default-v8.cpu_profiler', name: 'ProfileChunk', id: '0x2', pid, tid: wtid, ts: worklets.endTime,
+      args: { data: { cpuProfile: { nodes: worklets.nodes, samples: worklets.samples }, timeDeltas: worklets.timeDeltas } },
+    });
+  }
+
   const render = 2, gpuPid = 2, gpuTid = 3;
   ev.push({ ph: 'M', name: 'thread_name', pid, tid: render, ts: 0, args: { name: 'JSUI render thread' } });
   ev.push({ ph: 'M', name: 'process_name', pid: gpuPid, tid: gpuTid, ts: 0, args: { name: 'GPU Process' } });
@@ -81,6 +94,7 @@ export function profileTrace(profile, o = {}) {
         ev.push({ ...at, cat: 'devtools.timeline', name: 'EventDispatch', args: { data: { type: 'input', frame: 'F1' } } });
         break;
       case 'worklets':  // a custom track (console.timeStamp's), so it carries its own name
+        if (worklets) break;  // the sampled thread shows them
         ev.push({ ph: 'I', s: 't', pid, tid, ts: start, cat: 'devtools.timeline', name: 'TimeStamp', args: { data: { message: 'Worklets', name: 'Worklets', start, end, track: 'Worklets', trackGroup: 'JSUI', color: 'secondary' } } });
         break;
       case 'gpu':
@@ -110,4 +124,47 @@ function entryEvents(name, start, end, pid, tid) {
     { ...at, cat: 'disabled-by-default-devtools.timeline', name: 'RunTask', args: {} },
     { ...at, cat: 'devtools.timeline', ...ev },
   ];
+}
+
+// profile.jsuiWorklets ({frames: [[name, url, line, col]], samples: [[time,
+// frame indices outermost first | null when idle]]}) as a CPU profile.
+function workletProfile(w, startTime, endTime) {
+  if (!w || !Array.isArray(w.samples) || !w.samples.some(([, stack]) => stack && stack.length)) return null;
+  const cf = (functionName, url = '', lineNumber = -1, columnNumber = -1) => ({ functionName, scriptId: '0', url, lineNumber, columnNumber });
+  const nodes = [
+    { id: 1, callFrame: cf('(root)'), children: [] },
+    { id: 2, callFrame: cf('(program)'), children: [] },
+    { id: 3, callFrame: cf('(idle)'), children: [] },
+  ];
+  nodes[0].children.push(2, 3);
+  const child = new Map();  // parent id + frame index -> node id
+  const samples = [], timeDeltas = [];
+  let prev = startTime;
+  for (const [time, stack] of w.samples) {
+    let id = 3;
+    if (stack) {
+      id = 1;
+      for (const f of stack) {
+        const key = id + ':' + f;
+        let next = child.get(key);
+        if (!next) {
+          const [name, url, line, col] = w.frames[f];
+          next = nodes.length + 1;
+          nodes.push({ id: next, callFrame: cf(name || '(anonymous)', url, line > 0 ? line - 1 : -1, col > 0 ? col - 1 : -1), children: [] });
+          nodes[id - 1].children.push(next);
+          child.set(key, next);
+        }
+        id = next;
+      }
+      if (id === 1) id = 2;
+    }
+    samples.push(id);
+    timeDeltas.push(Math.max(0, time - prev));
+    prev = Math.max(prev, time);
+  }
+  // Idle from the start of the recording to the first sample.
+  samples.unshift(3);
+  timeDeltas.unshift(0);
+  timeDeltas[1] = Math.max(0, w.samples[0][0] - startTime);
+  return { nodes, samples, timeDeltas, startTime, endTime };
 }

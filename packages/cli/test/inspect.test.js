@@ -527,6 +527,7 @@ test('profile trace: JS samples on Main, the phases on a render thread, worklets
     startTime: 1000, endTime: 2000,
     samples: [2, 3, 4, 2], timeDeltas: [0, 100, 200, 300],
     jsuiSpans: [['(timer)', 1100, 1290], ['(paint)', 1300, 1400], ['(gpu)', 1400, 1450], ['(worklets)', 1500, 1520]],
+    jsuiWorklets: { frames: [['tick', 'worklet.js', 3, 1], ['draw', 'worklet.js', 9, 1]], samples: [[1500, []], [1505, [0, 1]], [1510, [0]], [1520, null]] },
   };
   const { traceEvents } = profileTrace(profile, { name: 'jsui-viewer' });
   const chunk = traceEvents.find((e) => e.name === 'ProfileChunk');
@@ -542,8 +543,15 @@ test('profile trace: JS samples on Main, the phases on a render thread, worklets
   const gpu = traceEvents.find((e) => e.name === 'GPUTask');
   assert.deepEqual([gpu.ts, gpu.dur, thread(gpu.pid, gpu.tid)], [1400, 50, 'CrGpuMain']);
   assert.ok(traceEvents.some((e) => e.name === 'process_name' && e.pid === gpu.pid && e.args.name === 'GPU Process'));
-  const worklet = traceEvents.find((e) => e.name === 'TimeStamp').args.data;
-  assert.deepEqual([worklet.name, worklet.start, worklet.end, worklet.track, worklet.trackGroup], ['Worklets', 1500, 1520, 'Worklets', 'JSUI']);
+  // Worklets sampled: their own thread with a CPU profile (tick > draw).
+  const wchunk = traceEvents.find((e) => e.name === 'ProfileChunk' && e.id === '0x2');
+  assert.equal(thread(wchunk.pid, wchunk.tid), 'JSUI worklets');
+  const wn = new Map(wchunk.args.data.cpuProfile.nodes.map((n) => [n.id, n]));
+  const draw = [...wn.values()].find((n) => n.callFrame.functionName === 'draw');
+  assert.ok([...wn.values()].find((n) => n.callFrame.functionName === 'tick').children.includes(draw.id));
+  assert.equal(draw.callFrame.lineNumber, 8);
+  assert.deepEqual(wchunk.args.data.cpuProfile.samples.map((id) => wn.get(id).callFrame.functionName), ['(idle)', '(program)', 'draw', 'tick', '(idle)']);
+  assert.ok(!traceEvents.some((e) => e.name === 'TimeStamp'), 'no timing-only track when sampled');
   assert.ok(traceEvents.some((e) => e.name === 'thread_name' && e.args.name === 'CrRendererMain'));
 });
 

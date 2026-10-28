@@ -146,6 +146,7 @@ void Inspector::attach(JSContext* ctx, Perf* phases) {
     phases_ = phases;
     agent_ = qjs_cdp_new(ctx, ++contextId_, &Inspector::sendFromAgent, this);
     qjs_cdp_profiler_set_clock(agent_, &profilerClock);
+    qjs_cdp_profiler_set_extra(agent_, "jsuiWorklets", &Inspector::workletProfile, this);
     if (!state_.empty()) qjs_cdp_import_state(agent_, state_.c_str());
     scripts_.clear();
     early.swap(early_);
@@ -197,6 +198,7 @@ void Inspector::poll() {
     qjs_cdp_free(agent_);
     agent_ = qjs_cdp_new(ctx_, contextId_, &Inspector::sendFromAgent, this);
     qjs_cdp_profiler_set_clock(agent_, &profilerClock);
+    qjs_cdp_profiler_set_extra(agent_, "jsuiWorklets", &Inspector::workletProfile, this);
     state_.clear();
     for (auto& [url, source] : scripts_) qjs_cdp_script_loaded(agent_, url.c_str(), source.c_str());
   }
@@ -209,6 +211,90 @@ void Inspector::jsEnter(const char* what) {
 
 void Inspector::jsIdle() {
   if (agent_ && sampling_) qjs_cdp_profiler_idle(agent_);
+}
+
+void Inspector::addWorklet(JSContext* ctx, const std::string& name) {
+  JS_SetDebugTraceHandler(ctx, &Inspector::workletTrap, this);
+  JS_SetDebugTraceArmed(ctx, false);
+  std::lock_guard<std::mutex> l(workletMutex_);
+  worklets_.emplace_back(ctx, name);
+}
+
+void Inspector::removeWorklet(JSContext* ctx) {
+  JS_SetDebugTraceHandler(ctx, nullptr, nullptr);
+  std::lock_guard<std::mutex> l(workletMutex_);
+  for (size_t i = 0; i < worklets_.size(); i++)
+    if (worklets_[i].first == ctx) worklets_.erase(worklets_.begin() + long(i));
+}
+
+int Inspector::workletTrap(JSContext* ctx, JSAtom, JSAtom, int, int, int, void* opaque) {
+  JS_SetDebugTraceArmed(ctx, false);  // one sample per tick of the sampler
+  static_cast<Inspector*>(opaque)->workletSample(ctx);
+  return 0;
+}
+
+void Inspector::workletSample(JSContext* ctx) {
+  if (!sampling_) return;
+  JSDebugFrameInfo frames[256];
+  int n = JS_GetStackFunctions(ctx, frames, 256);
+  WorkletSample sample{profilerClock(), {}, false};
+  for (int i = n - 1; i >= 0; i--) {
+    if (frames[i].is_native) continue;
+    const char* name = frames[i].func_name != JS_ATOM_NULL ? JS_AtomToCString(ctx, frames[i].func_name) : nullptr;
+    const char* url = frames[i].filename != JS_ATOM_NULL ? JS_AtomToCString(ctx, frames[i].filename) : nullptr;
+    sample.stack.push_back({name ? name : "", url ? url : "", frames[i].func_line, frames[i].func_col});
+    if (name) JS_FreeCString(ctx, name);
+    if (url) JS_FreeCString(ctx, url);
+  }
+  std::lock_guard<std::mutex> l(workletMutex_);
+  workletSamples_.push_back(std::move(sample));
+}
+
+void Inspector::workletsRunning(bool running) {
+  if (!sampling_) return;
+  std::lock_guard<std::mutex> l(workletMutex_);
+  if (running) {
+    // The first statement samples right away (the time before it is the
+    // runtime's own, its entry).
+    for (auto& w : worklets_) JS_SetDebugTraceArmed(w.first, true);
+    workletSamples_.push_back({profilerClock(), {}, false});
+  } else {
+    workletSamples_.push_back({profilerClock(), {}, true});
+  }
+}
+
+// {"frames": [[name, url, line, col], ...], "samples": [[time, frame
+// indices outermost first | null when idle], ...]}, the samples since the
+// last call (owner of them: the JS thread, at Profiler.stop).
+char* Inspector::workletProfile(void* opaque) {
+  auto* self = static_cast<Inspector*>(opaque);
+  std::vector<WorkletSample> samples;
+  {
+    std::lock_guard<std::mutex> l(self->workletMutex_);
+    samples.swap(self->workletSamples_);
+  }
+  if (samples.empty()) return nullptr;
+  Value::Array frames, out;
+  std::map<std::string, int> index;
+  for (auto& s : samples) {
+    Value stack;
+    if (!s.idle) {
+      Value::Array ids;
+      for (auto& f : s.stack) {
+        std::string key = f.name + '\x1f' + f.url + '\x1f' + std::to_string(f.line) + ':' + std::to_string(f.col);
+        auto [it, added] = index.emplace(key, int(frames.size()));
+        if (added)
+          frames.push_back(Value(Value::Array{Value(f.name), Value(f.url), Value(f.line), Value(f.col)}));
+        ids.push_back(Value(it->second));
+      }
+      stack = Value(std::move(ids));
+    }
+    out.push_back(Value(Value::Array{Value(double(s.time)), std::move(stack)}));
+  }
+  std::string json = Value(Value::Object{{"frames", Value(std::move(frames))}, {"samples", Value(std::move(out))}}).toJson();
+  char* r = static_cast<char*>(malloc(json.size() + 1));
+  std::memcpy(r, json.c_str(), json.size() + 1);
+  return r;
 }
 
 void Inspector::span(Phase phase, std::chrono::steady_clock::time_point start,
@@ -448,6 +534,10 @@ void Inspector::sampleLoop() {
       if (!agent_) break;
       qjs_cdp_profiler_tick(agent_);
       us = qjs_cdp_sampling_interval(agent_);
+    }
+    {
+      std::lock_guard<std::mutex> l(workletMutex_);
+      for (auto& w : worklets_) JS_SetDebugTraceArmed(w.first, true);
     }
     std::this_thread::sleep_for(std::chrono::microseconds(us));
   }

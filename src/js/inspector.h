@@ -78,6 +78,11 @@ class Inspector : public PhaseSpanSink, public LoadObserver {
   // The runtime calls into JS (`what`: "(timer)", ...; a CPU profile shows
   // it above the JS) / JS returned to it (what follows is idle).
   void jsEnter(const char* what);
+  // Worklet runtimes (js/worklets.h, owner thread): sampled into CPU
+  // profiles as a thread of their own.
+  void addWorklet(JSContext* ctx, const std::string& name);
+  void removeWorklet(JSContext* ctx);
+  void workletsRunning(bool running);
   // The Elements panel's requests and live updates, on the thread that owns
   // `doc` (Runtime::tick).
   void pumpDom(Document& doc);
@@ -168,6 +173,23 @@ class Inspector : public PhaseSpanSink, public LoadObserver {
   std::map<uint64_t, NetRequest> net_;
   size_t netBytes_ = 0;  // bodies kept
   Perf* phases_ = nullptr;  // runtime thread
+  // Worklets: their contexts (armed by the sampler) and the samples taken
+  // (time, stack outermost first; an empty stack is idle), under workletMutex_.
+  struct WorkletFrame {
+    std::string name, url;
+    int line, col;
+  };
+  struct WorkletSample {
+    int64_t time;
+    std::vector<WorkletFrame> stack;
+    bool idle = false;
+  };
+  static int workletTrap(JSContext* ctx, JSAtom, JSAtom, int, int, int, void* opaque);
+  void workletSample(JSContext* ctx);
+  static char* workletProfile(void* opaque);  // profile.jsuiWorklets at Profiler.stop
+  std::mutex workletMutex_;
+  std::vector<std::pair<JSContext*, std::string>> worklets_;
+  std::vector<WorkletSample> workletSamples_;
   // Elements: requests queued by the receive thread for pumpDom().
   struct DomRequest {
     std::string session, method;

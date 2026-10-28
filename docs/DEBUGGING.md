@@ -64,7 +64,8 @@ running. *Save profile* writes a `.cpuprofile`.
 * **The runtime's own work.** Where JS was idle, the frame phases the
   runtime ran show as top-level entries: `(commit)`, `(style)`, `(layout)`,
   `(animated)`, `(input)`, `(paint)`, `(worklets)` (react-native-worklets
-  runs, as one entry: what runs inside them isn't sampled yet) and `(gpu)`
+  runs as one entry here; the multi-track recording has their call tree)
+  and `(gpu)`
   (submitting the frame to the GPU, not GPU execution). They run on the window's thread: with JS on
   its own thread (the default), a phase that overlaps running JS shows only
   where JS was idle. With `--js-thread off` everything is one thread and
@@ -77,8 +78,9 @@ running. *Save profile* writes a `.cpuprofile`.
   (in tasks, under what called it), the frame phases on a **JSUI render
   thread** track (Layout, Recalculate style, Paint, Commit, colored as
   Rendering and Painting) where they actually ran, overlapping JS or not,
-  worklet runs (react-native-worklets, on the window's thread) on a
-  **JSUI → Worklets** track, and each GPU submit on the **GPU** track. Opened the
+  the worklet runtimes (react-native-worklets, on the window's thread) as a
+  **JSUI worklets** thread with their own flame chart (sampled like the
+  main JS), and each GPU submit on the **GPU** track. Opened the
   Node-style way (`chrome://inspect`), DevTools asks for a CPU profile only
   and shows one lane, with the phases as `(layout)`, `(paint)`, ... entries.
 * **How.** A thread of the runtime's arms the statement traps once per
