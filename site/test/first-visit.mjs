@@ -79,7 +79,7 @@ for (let run = 0; run < RUNS; run++) {
     if (m.type() === 'error' || m.type() === 'warning') problems.push(`${m.type()}: ${m.text()}`);
   });
   page.on('pageerror', (e) => problems.push('pageerror: ' + e.message));
-  await page.goto(`${ORIGIN}/index.html?autoplay=0&intro=0${WEBGL ? '&renderer=webgl' : ''}`);
+  await page.goto(`${ORIGIN}/index.html?autoplay=0${WEBGL ? '&renderer=webgl' : ''}`);
   await page.waitForFunction(() => window.jsui, null, { timeout: 60000 });
   const renderer = await page.evaluate(() => window.jsui.renderer);
   await page.evaluate(() => window.jsui.whenIdle());

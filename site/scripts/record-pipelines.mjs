@@ -8,7 +8,7 @@
 //
 //   node site/scripts/build.mjs && node site/scripts/record-pipelines.mjs [--dir site/dist]
 //
-// Plays the intro, then visits every route and screen (the smoke test's
+// Visits every route and screen (the smoke test's
 // list) with real Chrome through Playwright. The old lists are left out of
 // the recording run, so the new ones hold only what the site uses now.
 import fs from 'node:fs';
@@ -29,10 +29,8 @@ const ROUTES = ['/', '/examples', '/examples/main-menu', '/examples/hud', '/exam
 for (const f of FORMATS) fs.rmSync(path.join(DIR, `pipelines-${f}.bin`), { force: true });
 const out = await recordPipelines({
   dir: DIR,
-  // The intro first (?intro=1 plays it whatever the renderer guess), then
-  // each route in the running app; ?autoplay=0: no trailer sound.
-  visits: ['?intro=1&autoplay=0', ...ROUTES.map((r) => '#' + r)],
-  waitMs: 4000,  // the intro takes 3.4 s
+  // Each route in the running app; ?autoplay=0: no trailer sound.
+  visits: ['?autoplay=0', ...ROUTES.map((r) => '#' + r)],
   formats: FORMATS,
   log: (t) => console.log(t),
 });

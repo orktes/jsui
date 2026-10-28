@@ -174,18 +174,11 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
     const err = document.getElementById('err');
     const splash = document.getElementById('splash');
     const showError = (msg) => { err.textContent = msg; err.style.display = msg ? 'block' : 'none'; };
-    let introPending = false;  // the intro will play: its 'play' hides the splash
     const hideSplash = () => {
       if (splash.classList.contains('gone')) return;
       splash.classList.add('gone');
       setTimeout(() => splash.remove(), 600);
     };
-    // The intro (site/app/intro/Intro.jsx: a warp through an SkSL nebula into
-    // the page) plays on the GPU renderers, unless the visitor prefers reduced
-    // motion. ?intro=0 skips it, ?intro=1 always plays it, ?intro=0.5 holds its
-    // timeline at 0.5 (for screenshots).
-    const playIntro = (jsui) => /^(1|0\.\d+)$/.test(q.get('intro')) || (q.get('intro') !== '0' &&
-      !matchMedia('(prefers-reduced-motion: reduce)').matches && /^(webgpu|gpu)/.test(jsui.renderer || ''));
 
     // The deployed modules and their versions (content hashes). Every URL
     // this page loads is versioned (?v=<hash>), so a browser that cached
@@ -245,42 +238,9 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
         ...(q.get('js') ? { js: q.get('js') } : {}),
       });
       window.jsui = jsui;
-      // The intro's go-ahead after its warm-up (or instead of the rest of it).
-      let introGone = false;
-      const introGo = () => {
-        if (introGone) return;
-        introGone = true;
-        jsui.endWarmup();
-        jsui.postMessage('intro', { go: true });
-      };
       jsui.on('error', showError);
       jsui.on('message', (name, data) => {
-        if (name === 'ready') {
-          jsui.postMessage('route', route());
-          // The intro plays once its pipelines exist (it draws many kinds of
-          // things at once); the splash stays up until then.
-          introPending = playIntro(jsui);
-          // On WebGPU the intro's warm-up frames go to jsui.beginWarmup(): the
-          // browser compiles every pipeline they need in parallel, under the
-          // splash; 'warmed' then waits for that and the pipeline lists. When
-          // the browser's caches turn out to hold the pipeline list already
-          // (a repeat visit), the intro's own pipelines are most likely
-          // cached too: the warm-up ends early and the intro plays.
-          const answer = async () => {
-            const warm = introPending && !!(await jsui.beginWarmup());
-            jsui.postMessage('intro', { play: introPending, warm, hold: /^0\.\d+$/.test(q.get('intro')) ? +q.get('intro') : undefined });
-            if (warm && (await Promise.resolve(jsui.pipelineCacheWarm()).catch(() => null)) === true) introGo();
-          };
-          answer();
-        } else if (name === 'intro') {
-          if (data.state === 'warmed') {
-            Promise.all([jsui.endWarmup(), jsui.whenPipelinesReady()]).then(introGo, introGo);
-          } else if (data.state === 'play' || data.state === 'done') {
-            jsui.endWarmup();  // frames back on the canvas, whatever happened
-            introPending = false;
-            hideSplash();
-          }
-        }
+        if (name === 'ready') jsui.postMessage('route', route());
         else if (name === 'route' || name === 'route:replace') {
           // route:replace: an old link the app rewrote to its new path.
           if (route() !== data) history[name === 'route' ? 'pushState' : 'replaceState'](null, '', data === '/' ? location.pathname + location.search : '#' + data);
@@ -304,9 +264,7 @@ npx jsui screenshot src/app.jsx -o shot.png</code></pre>
         });
       }
       await jsui.whenIdle();
-      // With the intro, its 'play' hides the splash (it warms up under it).
-      if (!introPending) hideSplash();
-      else setTimeout(hideSplash, 10000);  // an intro that never answers
+      hideSplash();
     } catch (e) {
       showError('Could not start the JSUI runtime: ' + (e && e.stack || e));
     }
