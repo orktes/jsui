@@ -10,7 +10,7 @@ import { mock, animated } from './mock-native-animated.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement as h, useState } from 'react';
-import { Animated, render } from '../src/index.js';
+import { Animated, render, findNodeHandle } from '../src/index.js';
 import Svg, { Circle, ClipPath, Defs, G, LinearGradient, Path, Rect, Stop, Symbol, Text, TSpan, Use, SvgXml, SvgCss, parse } from '../src/svg.js';
 import * as Sk from '../src/skia.js';
 
@@ -236,6 +236,10 @@ test('Canvas: v3 useCanvasSize / useCanvasRef, v2 forms, renderer props ignored'
   assert.equal(v3.props.android, undefined);
   assert.equal(byId('v2').props.colorSpace, undefined);
   assert.deepEqual(ref3.current.size, { width: 0, height: 0 });
+  // The handle still resolves to the view's node, as the v2 ref (the view) did.
+  assert.equal(findNodeHandle(ref3), v3.id);
+  assert.equal(ref3.current._nativeTag, v3.id);
+  assert.equal(ref3.current.getNativeId(), v3.id);
   globalThis.__jsui_onLayout(v3.id, { x: 0, y: 0, width: 10, height: 5 });
   globalThis.__jsui_onLayout(byId('v2').id, { x: 0, y: 0, width: 20, height: 6 });
   await wait();
