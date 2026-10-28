@@ -11,7 +11,7 @@ typedef struct {
   const char *label;
   size_t size;
   uint32_t edges;
-} HeapNode;
+} CdpHeapNode;
 
 typedef struct {
   const void *from, *to;
@@ -20,24 +20,24 @@ typedef struct {
   uint32_t index;
   const char *label;
   int32_t from_i, to_i;
-} HeapEdge;
+} CdpHeapEdge;
 
 typedef struct {
   JSContext *ctx;
-  HeapNode *nodes;
+  CdpHeapNode *nodes;
   size_t nnodes, nodes_cap;
-  HeapEdge *edges;
+  CdpHeapEdge *edges;
   size_t nedges, edges_cap;
-} HeapWalk;
+} CdpHeapWalk;
 
 static void heap_on_node(void *opaque, const void *ptr, int kind, JSAtom name, JSValueConst name_str, const char *label,
                          size_t size) {
-  HeapWalk *w = opaque;
+  CdpHeapWalk *w = opaque;
   if (w->nnodes == w->nodes_cap) {
     w->nodes_cap = w->nodes_cap ? w->nodes_cap * 2 : 4096;
-    w->nodes = realloc(w->nodes, sizeof(HeapNode) * w->nodes_cap);
+    w->nodes = realloc(w->nodes, sizeof(CdpHeapNode) * w->nodes_cap);
   }
-  HeapNode *n = &w->nodes[w->nnodes++];
+  CdpHeapNode *n = &w->nodes[w->nnodes++];
   n->ptr = ptr;
   n->kind = kind;
   n->name = name != JS_ATOM_NULL ? JS_DupAtom(w->ctx, name) : JS_ATOM_NULL;
@@ -49,12 +49,12 @@ static void heap_on_node(void *opaque, const void *ptr, int kind, JSAtom name, J
 
 static void heap_on_edge(void *opaque, const void *from, const void *to, int kind, JSAtom name, uint32_t index,
                          const char *label) {
-  HeapWalk *w = opaque;
+  CdpHeapWalk *w = opaque;
   if (w->nedges == w->edges_cap) {
     w->edges_cap = w->edges_cap ? w->edges_cap * 2 : 16384;
-    w->edges = realloc(w->edges, sizeof(HeapEdge) * w->edges_cap);
+    w->edges = realloc(w->edges, sizeof(CdpHeapEdge) * w->edges_cap);
   }
-  HeapEdge *e = &w->edges[w->nedges++];
+  CdpHeapEdge *e = &w->edges[w->nedges++];
   e->from = from;
   e->to = to;
   e->kind = kind;
@@ -69,7 +69,7 @@ typedef struct {
   const void **keys;
   int32_t *vals;
   size_t cap;
-} PtrMap;
+} CdpPtrMap;
 
 static size_t ptr_hash(const void *p) {
   uintptr_t x = (uintptr_t)p;
@@ -79,21 +79,21 @@ static size_t ptr_hash(const void *p) {
   return (size_t)x;
 }
 
-static void ptrmap_init(PtrMap *m, size_t n) {
+static void ptrmap_init(CdpPtrMap *m, size_t n) {
   m->cap = 16;
   while (m->cap < n * 2) m->cap <<= 1;
   m->keys = calloc(m->cap, sizeof(void *));
   m->vals = malloc(m->cap * sizeof(int32_t));
 }
 
-static void ptrmap_put(PtrMap *m, const void *k, int32_t v) {
+static void ptrmap_put(CdpPtrMap *m, const void *k, int32_t v) {
   size_t i = ptr_hash(k) & (m->cap - 1);
   while (m->keys[i] && m->keys[i] != k) i = (i + 1) & (m->cap - 1);
   m->keys[i] = k;
   m->vals[i] = v;
 }
 
-static int32_t ptrmap_get(const PtrMap *m, const void *k) {
+static int32_t ptrmap_get(const CdpPtrMap *m, const void *k) {
   size_t i = ptr_hash(k) & (m->cap - 1);
   while (m->keys[i]) {
     if (m->keys[i] == k) return m->vals[i];
@@ -108,7 +108,7 @@ typedef struct {
   /* string -> index (open addressing over strs) */
   int32_t *slots;
   size_t slot_cap;
-} StrTable;
+} CdpStrTable;
 
 static size_t str_hash(const char *s) {
   size_t h = 1469598103934665603ULL;
@@ -116,7 +116,7 @@ static size_t str_hash(const char *s) {
   return h;
 }
 
-static void strtab_grow(StrTable *t) {
+static void strtab_grow(CdpStrTable *t) {
   size_t cap = t->slot_cap ? t->slot_cap * 2 : 4096;
   int32_t *slots = malloc(cap * sizeof(int32_t));
   for (size_t i = 0; i < cap; i++) slots[i] = -1;
@@ -130,7 +130,7 @@ static void strtab_grow(StrTable *t) {
   t->slot_cap = cap;
 }
 
-static int32_t strtab_add(StrTable *t, const char *s) {
+static int32_t strtab_add(CdpStrTable *t, const char *s) {
   if (!s) s = "";
   if ((t->n + 1) * 2 > t->slot_cap) strtab_grow(t);
   size_t i = str_hash(s) & (t->slot_cap - 1);
@@ -152,15 +152,15 @@ static int32_t strtab_add(StrTable *t, const char *s) {
 typedef struct {
   char *buf;
   size_t len, cap;
-} Out;
+} CdpOut;
 
-static void out_reserve(Out *o, size_t n) {
+static void out_reserve(CdpOut *o, size_t n) {
   if (o->len + n + 1 <= o->cap) return;
   while (o->len + n + 1 > o->cap) o->cap = o->cap ? o->cap * 2 : 1 << 20;
   o->buf = realloc(o->buf, o->cap);
 }
 
-static void out_str(Out *o, const char *s) {
+static void out_str(CdpOut *o, const char *s) {
   size_t n = strlen(s);
   out_reserve(o, n);
   memcpy(o->buf + o->len, s, n);
@@ -168,14 +168,14 @@ static void out_str(Out *o, const char *s) {
   o->buf[o->len] = 0;
 }
 
-static void out_num(Out *o, double d) {
+static void out_num(CdpOut *o, double d) {
   char b[40];
   if (d == (double)(int64_t)d) snprintf(b, sizeof b, "%lld", (long long)d);
   else snprintf(b, sizeof b, "%.17g", d);
   out_str(o, b);
 }
 
-static void out_json_string(Out *o, const char *s) {
+static void out_json_string(CdpOut *o, const char *s) {
   out_reserve(o, strlen(s) * 6 + 2);
   o->buf[o->len++] = '"';
   for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
@@ -193,7 +193,7 @@ static void out_json_string(Out *o, const char *s) {
   o->buf[o->len] = 0;
 }
 
-static int32_t heap_atom_string(QJSCDPAgent *agent, StrTable *t, JSAtom a, const char *prefix) {
+static int32_t heap_atom_string(QJSCDPAgent *agent, CdpStrTable *t, JSAtom a, const char *prefix) {
   if (a == JS_ATOM_NULL) return strtab_add(t, prefix ? prefix : "");
   const char *s = JS_AtomToCString(agent->ctx, a);
   int32_t r;
@@ -212,19 +212,19 @@ static int32_t heap_atom_string(QJSCDPAgent *agent, StrTable *t, JSAtom a, const
 
 /* The whole snapshot as one string (the caller frees it). */
 static char *heap_snapshot_json(QJSCDPAgent *agent) {
-  HeapWalk w = {agent->ctx, NULL, 0, 0, NULL, 0, 0};
+  CdpHeapWalk w = {agent->ctx, NULL, 0, 0, NULL, 0, 0};
   JSHeapWalker walker = {heap_on_node, heap_on_edge, &w};
   JS_WalkHeap(agent->ctx, &walker);
 
   /* Node 0 is the synthetic root; GC objects follow. */
-  PtrMap map;
+  CdpPtrMap map;
   ptrmap_init(&map, w.nnodes + 1);
   for (size_t i = 0; i < w.nnodes; i++) ptrmap_put(&map, w.nodes[i].ptr, (int32_t)(i + 1));
   size_t nn = w.nnodes + 1;
   uint32_t *edge_count = calloc(nn, sizeof(uint32_t));
   size_t kept = 0;
   for (size_t i = 0; i < w.nedges; i++) {
-    HeapEdge *e = &w.edges[i];
+    CdpHeapEdge *e = &w.edges[i];
     e->from_i = e->from ? ptrmap_get(&map, e->from) : 0;
     e->to_i = ptrmap_get(&map, e->to);
     if (e->from_i < 0 || e->to_i < 0) {
@@ -237,19 +237,19 @@ static char *heap_snapshot_json(QJSCDPAgent *agent) {
   /* Edges grouped by their node, in node order (stable within a node). */
   size_t *start = calloc(nn + 1, sizeof(size_t));
   for (size_t i = 0; i < nn; i++) start[i + 1] = start[i] + edge_count[i];
-  HeapEdge *sorted = malloc(sizeof(HeapEdge) * (kept ? kept : 1));
+  CdpHeapEdge *sorted = malloc(sizeof(CdpHeapEdge) * (kept ? kept : 1));
   size_t *fill = calloc(nn, sizeof(size_t));
   for (size_t i = 0; i < kept; i++) {
     int32_t f = w.edges[i].from_i;
     sorted[start[f] + fill[f]++] = w.edges[i];
   }
 
-  StrTable strs = {0};
+  CdpStrTable strs = {0};
   /* node_types: hidden array string object code closure regexp number
      native synthetic "concatenated string" "sliced string" symbol bigint
      "object shape" */
   static const int node_type[] = {3, 5, 1, 6, 4, 14, 0};
-  Out o = {0};
+  CdpOut o = {0};
   out_str(&o,
           "{\"snapshot\":{\"meta\":{\"node_fields\":[\"type\",\"name\",\"id\",\"self_size\",\"edge_count\","
           "\"trace_node_id\",\"detachedness\"],\"node_types\":[[\"hidden\",\"array\",\"string\",\"object\","
@@ -273,7 +273,7 @@ static char *heap_snapshot_json(QJSCDPAgent *agent) {
   out_num(&o, edge_count[0]);
   out_str(&o, ",0,0");
   for (size_t i = 0; i < w.nnodes; i++) {
-    HeapNode *n = &w.nodes[i];
+    CdpHeapNode *n = &w.nodes[i];
     int32_t name;
     if (JS_IsString(n->name_str)) {
       const char *s = JS_ToCString(agent->ctx, n->name_str);
@@ -301,7 +301,7 @@ static char *heap_snapshot_json(QJSCDPAgent *agent) {
   out_str(&o, "],\"edges\":[");
   /* edge_types: context element property internal hidden shortcut weak */
   for (size_t i = 0; i < kept; i++) {
-    HeapEdge *e = &sorted[i];
+    CdpHeapEdge *e = &sorted[i];
     int type = e->kind == JS_HEAP_EDGE_PROPERTY ? 2 : e->kind == JS_HEAP_EDGE_ELEMENT ? 1 : 3;
     double name_or_index;
     if (e->kind == JS_HEAP_EDGE_ELEMENT) name_or_index = e->index;
