@@ -429,6 +429,27 @@ if(JSUI_BUILD_TOOLS AND NOT EMSCRIPTEN)
     target_link_libraries(jsui-paint-bench PRIVATE "-framework Metal" "-framework Foundation")
   endif()
   jsui_copy_icu_data(jsui-paint-bench)
+  # Impeller spike (macOS): the same frames through Graphite and through
+  # Flutter's Impeller standalone SDK (tools/jsui-impeller-spike/README.md).
+  # Graphite only unless JSUI_IMPELLER_SDK names an unzipped impeller_sdk.zip.
+  if(APPLE AND NOT IOS)
+    set(JSUI_IMPELLER_SDK "" CACHE PATH "Unzipped Impeller standalone SDK (include/impeller.h, lib/libimpeller.dylib)")
+    add_executable(jsui-impeller-spike tools/jsui-impeller-spike/main.mm)
+    set_source_files_properties(tools/jsui-impeller-spike/main.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+    target_link_libraries(jsui-impeller-spike PRIVATE jsui "-framework Metal" "-framework QuartzCore"
+                          "-framework AppKit" "-framework Foundation")
+    target_include_directories(jsui-impeller-spike PRIVATE src)
+    if(JSUI_IMPELLER_SDK)
+      target_sources(jsui-impeller-spike PRIVATE tools/jsui-impeller-spike/impeller_canvas.cpp)
+      target_compile_definitions(jsui-impeller-spike PRIVATE JSUI_IMPELLER_SPIKE=1)
+      # impeller_canvas.cpp reads gradients / blur mask filters / lattices
+      # through Skia's private headers.
+      target_include_directories(jsui-impeller-spike PRIVATE ${JSUI_IMPELLER_SDK}/include ${JSUI_SKIA_DIR})
+      target_link_libraries(jsui-impeller-spike PRIVATE ${JSUI_IMPELLER_SDK}/lib/libimpeller.dylib)
+      set_target_properties(jsui-impeller-spike PROPERTIES BUILD_RPATH ${JSUI_IMPELLER_SDK}/lib)
+    endif()
+    jsui_copy_icu_data(jsui-impeller-spike)
+  endif()
   if(JSUI_BUILD_VIEWER)
     add_subdirectory(tools/jsui-viewer)
   endif()
