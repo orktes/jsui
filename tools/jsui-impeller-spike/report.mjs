@@ -32,7 +32,20 @@ const cols = [
   ['CPU record ms', (j) => j.all.record_ms],
   ['CPU submit ms', (j) => j.all.submit_ms],
   ['peak MB', (j) => j.mem_peak_mb],
+  ['first 10 frames ms', (j) => first10(j)],
 ];
+// The first 10 present-to-present intervals of every screen, summed: where a
+// screen's first-use pipeline work lands. Single intervals are paced by the
+// layer's drawable pool (~8-24 ms either way), so max / p99 hide it.
+function first10(j) {
+  let at = 0;
+  let sum = 0;
+  for (const s of j.screens) {
+    sum += j.intervals.slice(at, at + 10).reduce((a, b) => a + b, 0);
+    at += s.summary.frames;
+  }
+  return sum;
+}
 const order = ['graphite-bare', 'graphite-first', 'graphite-second', 'impeller-first', 'impeller-second',
   'graphite-1440p', 'impeller-1440p'];
 const names = [...groups.keys()].sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99));

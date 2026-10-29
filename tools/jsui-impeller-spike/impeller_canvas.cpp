@@ -19,6 +19,7 @@
 #include "include/core/SkFont.h"
 #include "include/core/SkImage.h"
 #include "include/core/SkM44.h"
+#include "include/core/SkBlurTypes.h"
 #include "include/core/SkMaskFilter.h"
 #include "include/core/SkPath.h"
 #include "include/core/SkPathBuilder.h"
@@ -29,7 +30,7 @@
 #include "include/core/SkStream.h"
 #include "include/core/SkTextBlob.h"
 #include "include/core/SkTypeface.h"
-#include "include/private/SkShadowFlags.h"
+#include "include/utils/SkShadowUtils.h"
 #include "src/core/SkDrawShadowInfo.h"
 #include "src/core/SkGeometry.h"
 #include "src/core/SkLatticeIter.h"
@@ -171,41 +172,40 @@ ImpellerPath ImpellerResources::path(const SkPath& path) {
     return it->second.first;
   }
   ImpellerPathBuilder pb = ImpellerPathBuilderNew();
-  SkPath::Iter iter(path, false);
-  SkPoint pts[4];
-  for (SkPath::Verb v; (v = iter.next(pts)) != SkPath::kDone_Verb;) {
-    switch (v) {
-      case SkPath::kMove_Verb: {
+  SkPathIter iter = path.iter();
+  while (auto rec = iter.next()) {
+    const SkPoint* pts = rec->fPoints.data();
+    switch (rec->fVerb) {
+      case SkPathVerb::kMove: {
         ImpellerPoint p = ip(pts[0]);
         ImpellerPathBuilderMoveTo(pb, &p);
         break;
       }
-      case SkPath::kLine_Verb: {
+      case SkPathVerb::kLine: {
         ImpellerPoint p = ip(pts[1]);
         ImpellerPathBuilderLineTo(pb, &p);
         break;
       }
-      case SkPath::kQuad_Verb: {
+      case SkPathVerb::kQuad: {
         ImpellerPoint c = ip(pts[1]), e = ip(pts[2]);
         ImpellerPathBuilderQuadraticCurveTo(pb, &c, &e);
         break;
       }
-      case SkPath::kConic_Verb: {
+      case SkPathVerb::kConic: {
         SkAutoConicToQuads quads;
-        const SkPoint* q = quads.computeQuads(pts, iter.conicWeight(), 0.25f);
+        const SkPoint* q = quads.computeQuads(pts, rec->conicWeight(), 0.25f);
         for (int i = 0; i < quads.countQuads(); i++) {
           ImpellerPoint c = ip(q[2 * i + 1]), e = ip(q[2 * i + 2]);
           ImpellerPathBuilderQuadraticCurveTo(pb, &c, &e);
         }
         break;
       }
-      case SkPath::kCubic_Verb: {
+      case SkPathVerb::kCubic: {
         ImpellerPoint c1 = ip(pts[1]), c2 = ip(pts[2]), e = ip(pts[3]);
         ImpellerPathBuilderCubicCurveTo(pb, &c1, &c2, &e);
         break;
       }
-      case SkPath::kClose_Verb: ImpellerPathBuilderClose(pb); break;
-      default: break;
+      case SkPathVerb::kClose: ImpellerPathBuilderClose(pb); break;
     }
   }
   const bool evenOdd =
@@ -364,6 +364,14 @@ ImpellerPaint ImpellerCanvas::makePaint(const SkPaint& p) {
         ImpellerPoint p0 = ip(info.fPoint[0]), p1 = ip(info.fPoint[1]);
         switch (type) {
           case SkShaderBase::GradientType::kLinear:
+            // Impeller 1.4 (Flutter 3.47.9) draws nothing for some axis-aligned
+            // linear gradients whose end points sit exactly on the rect's edges
+            // (main-menu's 4-stop scrim, 0,360 -> 1280,360), probably its fast
+            // per-vertex gradient path. A 1/64 px nudge takes the general path.
+            if (std::fabs(p0.x - p1.x) < 1e-3f || std::fabs(p0.y - p1.y) < 1e-3f) {
+              float& end = std::fabs(p0.x - p1.x) < 1e-3f ? p1.y : p1.x;
+              end += 1.f / 64;
+            }
             src = ImpellerColorSourceCreateLinearGradientNew(&p0, &p1, n, icolors.data(), stops.data(),
                                                              tile(info.fTileMode), &m);
             break;
@@ -743,7 +751,10 @@ void ImpellerCanvas::onDrawDrawable(SkDrawable* drawable, const SkMatrix* matrix
 void ImpellerCanvas::onDrawPicture(const SkPicture* picture, const SkMatrix* matrix, const SkPaint* paint) {
   const int count = this->save();
   if (matrix) this->concat(*matrix);
-  if (paint) this->saveLayer(&picture->cullRect(), paint);
+  if (paint) {
+    const SkRect cull = picture->cullRect();
+    this->saveLayer(&cull, paint);
+  }
   picture->playback(this);
   this->restoreToCount(count);
 }

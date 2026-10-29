@@ -441,12 +441,18 @@ if(JSUI_BUILD_TOOLS AND NOT EMSCRIPTEN)
     target_include_directories(jsui-impeller-spike PRIVATE src)
     if(JSUI_IMPELLER_SDK)
       target_sources(jsui-impeller-spike PRIVATE tools/jsui-impeller-spike/impeller_canvas.cpp)
+      # Subclasses SkNoDrawCanvas; Skia is built without RTTI.
+      set_source_files_properties(tools/jsui-impeller-spike/impeller_canvas.cpp PROPERTIES COMPILE_OPTIONS -fno-rtti)
       target_compile_definitions(jsui-impeller-spike PRIVATE JSUI_IMPELLER_SPIKE=1)
       # impeller_canvas.cpp reads gradients / blur mask filters / lattices
       # through Skia's private headers.
       target_include_directories(jsui-impeller-spike PRIVATE ${JSUI_IMPELLER_SDK}/include ${JSUI_SKIA_DIR})
       target_link_libraries(jsui-impeller-spike PRIVATE ${JSUI_IMPELLER_SDK}/lib/libimpeller.dylib)
       set_target_properties(jsui-impeller-spike PROPERTIES BUILD_RPATH ${JSUI_IMPELLER_SDK}/lib)
+      # The SDK's dylib has the install name ./libimpeller.dylib.
+      add_custom_command(TARGET jsui-impeller-spike POST_BUILD
+                         COMMAND install_name_tool -change ./libimpeller.dylib @rpath/libimpeller.dylib
+                                 $<TARGET_FILE:jsui-impeller-spike>)
     endif()
     jsui_copy_icu_data(jsui-impeller-spike)
   endif()

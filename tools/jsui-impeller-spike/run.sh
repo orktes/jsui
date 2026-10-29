@@ -40,7 +40,10 @@ mkdir -p "$out/bundles"
 screens=(main-menu inventory hud settings battle-pass)
 bundles=()
 for s in "${screens[@]}"; do
-  node "$repo/packages/cli/bin/jsui.js" build "$repo/examples/screens/$s.jsx" -o "$out/bundles/$s.js" >/dev/null
+  # The screens export a component; register it so the bundle mounts it.
+  printf "import App from '%s';\nimport { AppRegistry } from 'react-native';\nAppRegistry.registerComponent('main', () => App);\n" \
+    "$repo/examples/screens/$s.jsx" > "$out/bundles/$s.entry.jsx"
+  node "$repo/packages/cli/bin/jsui.js" build "$out/bundles/$s.entry.jsx" -o "$out/bundles/$s.js" --format source >/dev/null
   bundles+=("$out/bundles/$s.js")
 done
 
