@@ -8,11 +8,12 @@ set -e
 MODE=${1:-vnc}
 SCREEN=${SCREEN:-1920x1200x24}
 export DISPLAY=:1
-# Apps at the shell's 150 %: GTK text (GDK_SCALE takes whole numbers only), Xft for xterm.
-export GDK_DPI_SCALE=${GDK_DPI_SCALE:-1.5}
+# Apps at the shell's 150 %: Xft.dpi 144 in Xresources scales xterm and GTK text.
+# -noreset below: without it Xvfb resets when xrdb (its only client so far)
+# disconnects, and the resources are gone.
 RUN=/tmp/jsui-wm
 mkdir -p $RUN/fb /out
-Xvfb :1 -screen 0 "$SCREEN" -fbdir $RUN/fb -nolisten tcp +extension Composite +extension DAMAGE >$RUN/xvfb.log 2>&1 &
+Xvfb :1 -screen 0 "$SCREEN" -fbdir $RUN/fb -noreset -nolisten tcp +extension Composite +extension DAMAGE >$RUN/xvfb.log 2>&1 &
 for i in $(seq 1 50); do xdpyinfo >/dev/null 2>&1 && break; sleep 0.1; done
 xrdb -nocpp -load /etc/jsui-wm/Xresources
 SCALE_ARG=""
