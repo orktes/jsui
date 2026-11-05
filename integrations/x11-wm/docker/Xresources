@@ -1,0 +1,14 @@
+Xft.dpi: 144
+Xft.antialias: true
+Xft.hinting: true
+Xft.hintstyle: hintslight
+Xft.rgba: rgb
+XTerm*faceName: DejaVu Sans Mono
+XTerm*faceSize: 10
+XTerm*background: #12152b
+XTerm*foreground: #e6e9ff
+XTerm*cursorColor: #7c8cff
+XTerm*internalBorder: 14
+XTerm*scrollBar: false
+XTerm*geometry: 90x28
+XTerm*termName: xterm-256color

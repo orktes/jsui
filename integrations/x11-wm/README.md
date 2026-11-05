@@ -1,0 +1,130 @@
+# jsui-wm: a touch desktop for Linux, drawn by JSUI
+
+An experiment: an X11 window manager and compositor whose entire desktop shell
+is a React app running in JSUI. It is made for 11" touchscreens (1920x1200 at
+150 %, every control at least 48 logical px) and works mobile first: apps open
+full screen, a swipe up on the dock opens the card switcher, two apps share the
+screen in split view.
+
+![Card switcher](../../docs/images/x11-wm/05-switcher.png)
+
+| | |
+| --- | --- |
+| ![Apps](../../docs/images/x11-wm/02-launcher.png) | ![Split view](../../docs/images/x11-wm/08-split-resized.png) |
+| ![Quick settings](../../docs/images/x11-wm/10-quick-settings.png) | ![On-screen keyboard](../../docs/images/x11-wm/13-osk-terminal.png) |
+
+## Try it (Docker)
+
+```sh
+docker build -f integrations/x11-wm/docker/Dockerfile -t jsui-wm .
+docker run --rm -p 5900:5900 jsui-wm                  # then open a VNC viewer on localhost:5900
+docker run --rm -v "$PWD/shots:/out" jsui-wm tour     # scripted tour, a screenshot per step in shots/
+```
+
+The container runs Xvfb at 1920x1200 (`-e SCREEN=1366x768x24` for another
+panel, `-e SCALE=1.25` for another scale), the window manager, and xterm,
+Mousepad, Galculator, PCManFM and the classic X apps to open from the
+launcher. Xvfb has no GPU, so the shell is rasterised on the CPU; on real
+hardware the same host could render with Skia on the GPU.
+
+## What the shell does
+
+* **Apps open full screen** (tablet mode, the default). Turn tablet mode off in
+  quick settings for floating windows.
+* **Card switcher.** Swipe up on the dock (or tap its last button, or Alt+Tab):
+  every app as a card, most recent first, flung sideways and snapping to the
+  middle card. Tap a card to switch, swipe it up to close it, *Split* puts it
+  next to the current app. The current app shrinks into its card as the
+  switcher opens.
+* **Quick switch.** Swipe sideways along the dock: left jumps to the previous
+  app, right cycles to the oldest.
+* **Split view.** Two apps side by side with a divider you drag (25-75 %). Also
+  by dragging a floating window's title bar to a side edge, or Super+Left/Right.
+* **Floating windows** (tablet mode off): drag the title bar to move, to the top
+  edge to maximize, to a side edge to snap; double-tap the title bar to
+  maximize; drag a border or corner to resize. Big minimize / maximize / close
+  buttons. Windows fade in, minimize into the dock and fade out on close.
+* **Dock**: pinned apps, running apps with dot indicators, tap to open /
+  switch / minimize, long-press for a menu (new window, the app's windows,
+  close).
+* **Launcher**: app grid from the `.desktop` files, search (physical or
+  on-screen keyboard).
+* **Top bar**: apps button, current app, clock (calendar and notifications
+  panel; swipe down on the left half), status icons (quick settings; swipe
+  down on the right half).
+* **Quick settings**: Wi-Fi, Bluetooth, dark / light style, tablet mode, night
+  light, do not disturb, brightness and volume sliders, lock, restart shell,
+  log out. Brightness and night light really tint the screen; Wi-Fi /
+  Bluetooth / volume are visual only in this prototype.
+* **On-screen keyboard** (keyboard icon in the top bar): types into the focused
+  app through XTest, or into the launcher's search. One-shot Shift and Ctrl, a
+  symbol layer with what a terminal needs.
+* **Lock screen**: swipe up to unlock.
+* Client-side decorated (GTK headerbar) windows get no frame and can move /
+  resize themselves (`_NET_WM_MOVERESIZE`); menus and tooltips
+  (override-redirect windows) are composited above everything.
+
+## How it works
+
+`main.cpp` is the host, a few thousand lines over Xlib and the C API:
+
+* **Compositing.** Every top-level window is redirected off screen
+  (Composite, manual). On XDamage the host copies the damaged rectangle of the
+  window's pixmap (MIT-SHM) into a JSUI host texture `win:<id>`, and the shell
+  draws it with `<HostTexture>` inside its own frame. The JSUI frame is
+  rendered with `jsui_render_rgba_incremental` and only the dirty rectangle is
+  put on the Composite overlay window.
+* **Input.** The overlay takes no input, so X still routes input by the real
+  window geometry, which the host keeps where the shell draws each window:
+  presses on a window's content go straight to the app (a passive grab focuses
+  and raises unfocused windows, then replays the click); an InputOnly frame
+  window under each title bar and border sends those presses to the shell; one
+  InputOnly shell window above every app has the input shape of whatever the
+  shell says is on top (`wm:shellRegions`: the bars, open panels, the
+  keyboard, the split divider). Presses on the wallpaper go to the shell too.
+  Pointer input reaches JSUI as touch (one finger), XInput 2.2 touch events on
+  the shell's windows as multi-touch; `--mouse` sends mouse events instead.
+* **State.** Shared state the shell reads: `wm.screen` (size, scale, bar
+  heights), `wm.windows` (id, title, class, app id, geometry in logical px,
+  type, minimized / maximized / snap / fullscreen, ready), `wm.stack` (bottom
+  to top, so the top is the most recent), `wm.active`, `wm.popups`, `wm.apps`
+  (desktop files), `wm.system`. The shell writes `wm.settings`.
+* **Messages from the shell**: `wm:focus`, `wm:move`, `wm:resize`, `wm:close`,
+  `wm:closeAll`, `wm:minimize`, `wm:restore`, `wm:maximize`, `wm:snap`,
+  `wm:split`, `wm:splitRatio`, `wm:fullscreen`, `wm:launch`, `wm:typeKey`,
+  `wm:keyboard` (grab the keyboard for the shell's text field),
+  `wm:shellRegions`, `wm:release` (a close animation is done with the last
+  frame), `wm:anchors`, `wm:quit`. The host sends `wm:hotkey` (Super, Alt+Tab).
+* **EWMH / ICCCM**: `_NET_SUPPORTED`, client lists, active window, frame
+  extents, work area, `_NET_WM_STATE` (fullscreen, maximized, hidden),
+  window types, `_NET_WM_ICON`, `_NET_WM_MOVERESIZE`, `WM_DELETE_WINDOW`,
+  `WM_TAKE_FOCUS`, `WM_STATE`, transient dialogs centred on their parent.
+
+The shell is `ui/` (`shell.jsx` root, `Window.jsx` frames, `bars.jsx` top bar
+and dock, `panels.jsx` launcher / switcher / panels / lock screen,
+`keyboard.jsx`, `wm.js` the protocol).
+
+## Build it yourself
+
+```sh
+sudo apt install libx11-dev libxcomposite-dev libxdamage-dev libxfixes-dev libxext-dev libxtst-dev libxi-dev
+npx jsui build integrations/x11-wm/ui/shell.jsx -o integrations/x11-wm/ui/dist/shell.js
+cmake -S . -B build -DJSUI_BUILD_X11WM=ON && cmake --build build --target jsui-wm
+Xvfb :1 -screen 0 1920x1200x24 & DISPLAY=:1 ./build/jsui-wm
+```
+
+`--dev http://127.0.0.1:5173/bundle.js` with `npx jsui dev integrations/x11-wm/ui/shell.jsx`
+hot-reloads the shell. `--anchors file.json` writes where named shell elements
+are (screen px), which `docker/tour.py` uses to drive it with xdotool.
+
+## Limits of the prototype
+
+* X11 only. Wayland (and Ubuntu Touch, which runs Mir) needs a Wayland
+  compositor host; the shell is meant to carry over unchanged.
+* CPU compositing: each damaged window area is copied through shared memory.
+  Fine for Xvfb and a tablet's worth of apps; a real device should import
+  window pixmaps as GPU textures.
+* Real multi-touch hardware is untested (Xvfb has no touch device); the
+  XInput 2.2 path is written but only the pointer path ran here.
+* One screen, no workspaces, no notification daemon (D-Bus), no real Wi-Fi /
+  audio / battery controls beyond reading `/sys/class/power_supply`.
