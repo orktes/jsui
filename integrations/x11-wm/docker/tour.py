@@ -119,10 +119,16 @@ def launch(app_pattern, query, settle=2.0):
 
 
 def dock_swipe(dx=0, dy=0):
-    name, r = wait_anchor(r'dock\.overview')
-    if r:
+    """Swipes from the home indicator (tablet mode over an app) or on the dock."""
+    if 'homebar' in anchors():
+        name, r = wait_anchor(r'homebar')
+        x, y = 960, r[1] + r[3] // 2
+    else:
+        name, r = wait_anchor(r'dock\.overview')
+        if not r:
+            return
         x, y = r[0] - 180, r[1] + r[3] // 2
-        drag(x, y, x + dx, y + dy, steps=12, settle=1.2)
+    drag(x, y, x + dx, y + dy, steps=12, settle=1.2)
 
 
 def title_of(w):
@@ -146,6 +152,9 @@ time.sleep(0.4)
 launch(r'debian-xterm|xterm', 'xterm')
 time.sleep(1.0)
 shot('04-app-fullscreen')
+# A tap on the home indicator slides the dock up over the app.
+tap(r'homebar', settle=0.8)
+shot('04b-dock-peek')
 launch('galculator', 'galc')
 launch(r'org\.xfce\.mousepad|mousepad', 'mousepad', settle=2.5)
 
@@ -171,6 +180,13 @@ if r:
     x, y = center(r)
     drag(x, y, x + 300, y, steps=16, settle=1.2)
 shot('08-split-resized')
+# The app header's menu: full screen, split left / right, float, minimize.
+name, r = wait_anchor(r'win\.\d+\.menu')
+if r:
+    tap(re.escape(name), settle=0.8)
+    shot('08b-window-menu')
+    key('Escape')
+    tap_xy(960, 30, settle=0.6)
 
 # Quick switch: swipe sideways on the dock jumps to the previous app.
 dock_swipe(dx=-260)

@@ -336,6 +336,7 @@ struct Client {
   bool viewable = false;  // shown on screen right now (not minimized)
   Damage damage = 0;
   Pixmap pixmap = 0;
+  int pixW = 0, pixH = 0;  // size the pixmap was named at (the window's size then)
   bool damaged = false;
   Rect dmg;  // damaged area (pixmap px) since the last capture
   int x = 0, y = 0, w = 1, h = 1, bw = 0;
@@ -421,6 +422,7 @@ class WM {
   void capture(Client* c);
   void installFocusGrab(Client* c, bool on);
   Rect workArea() const;  // px
+  void publishWorkArea();
 
   // state publishing
   std::string windowJson(const Client* c) const;
@@ -465,7 +467,7 @@ class WM {
   size_t capShmSize_ = 0;
 
   // logical metrics (the shell reads them from wm.screen)
-  double topBar_ = 40, dock_ = 84, titleBar_ = 46, border_ = 12;
+  double topBar_ = 40, dock_ = 84, homeBar_ = 24, titleBar_ = 46, border_ = 12;
 
   JsuiRuntime* rt_ = nullptr;
   std::map<Window, Client*> clients_;
@@ -585,10 +587,7 @@ void WM::setupEwmh() {
   long geom[2] = {sw_, sh_};
   XChangeProperty(dpy_, root_, a_._NET_DESKTOP_GEOMETRY, XA_CARDINAL, 32, PropModeReplace,
                   reinterpret_cast<unsigned char*>(geom), 2);
-  Rect wa = workArea();
-  long area[4] = {wa.x, wa.y - P(titleBar_), wa.w, wa.h + P(titleBar_)};
-  XChangeProperty(dpy_, root_, a_._NET_WORKAREA, XA_CARDINAL, 32, PropModeReplace,
-                  reinterpret_cast<unsigned char*>(area), 4);
+  publishWorkArea();
   XDefineCursor(dpy_, root_, XCreateFontCursor(dpy_, XC_left_ptr));
   // The compositing manager selection, so clients know translucency works.
   XSetSelectionOwner(dpy_, a_._NET_WM_CM_S0, check_, CurrentTime);
@@ -695,12 +694,20 @@ void WM::grabKeys() {
   grab(XK_Right, Mod4Mask);
 }
 
+void WM::publishWorkArea() {
+  Rect wa = workArea();
+  long area[4] = {wa.x, wa.y - P(titleBar_), wa.w, wa.h + P(titleBar_)};
+  XChangeProperty(dpy_, root_, a_._NET_WORKAREA, XA_CARDINAL, 32, PropModeReplace,
+                  reinterpret_cast<unsigned char*>(area), 4);
+}
+
 Rect WM::workArea() const {
   Rect r;
   r.x = 0;
   r.y = P(topBar_ + titleBar_);
   r.w = sw_;
-  r.h = sh_ - P(dock_) - r.y;
+  // Tablet mode: apps reach down to the home indicator and the dock slides up over them.
+  r.h = sh_ - P(tabletMode_ ? homeBar_ : dock_) - r.y;
   return r;
 }
 
@@ -741,7 +748,7 @@ bool WM::createRuntime() {
 void WM::publishScreen() {
   std::string j = "{\"width\":" + wmjson::num(L(sw_)) + ",\"height\":" + wmjson::num(L(sh_)) +
                   ",\"pixelRatio\":" + wmjson::num(scale_) + ",\"topBar\":" + wmjson::num(topBar_) +
-                  ",\"dock\":" + wmjson::num(dock_) + ",\"titleBar\":" + wmjson::num(titleBar_) +
+                  ",\"dock\":" + wmjson::num(dock_) + ",\"homeBar\":" + wmjson::num(homeBar_) + ",\"titleBar\":" + wmjson::num(titleBar_) +
                   ",\"border\":" + wmjson::num(border_) + ",\"touch\":" + (opt_.mouse ? "false" : "true") +
                   ",\"multiTouch\":" + (xiOpcode_ >= 0 ? "true" : "false") + "}";
   jsui_set_state(rt_, "wm.screen", j.c_str());
@@ -790,7 +797,20 @@ void WM::publishSystem() {
 void WM::onStateChange(const char* key, const char* json) {
   if (std::strcmp(key, "wm.settings") == 0) {
     wmjson::Value v = wmjson::parse(json);
-    tabletMode_ = v["tabletMode"].truthy();
+    bool tablet = v["tabletMode"].truthy();
+    if (tablet != tabletMode_) {
+      tabletMode_ = tablet;
+      // The work area changed: lay maximized and split windows out again.
+      publishWorkArea();
+      Rect wa = workArea();
+      for (auto& [w, c] : clients_) {
+        if (c->fullscreen) continue;
+        if (c->maximized) configure(c, wa.x, wa.y, wa.w, wa.h);
+        else if (c->snap) setSnap(c, c->snap);
+        else continue;
+        publishWindow(c);
+      }
+    }
   }
 }
 
@@ -1473,9 +1493,9 @@ void WM::setSnap(Client* c, int side) {
   c->maximized = false;
   c->snap = side;
   Rect wa = workArea();
-  // Split view: the left window gets splitRatio_ of the width, a 2 px seam between.
-  int left = int(std::lround(wa.w * splitRatio_)) - P(2);
-  int right0 = int(std::lround(wa.w * splitRatio_)) + P(2);
+  // Split view: the left window gets splitRatio_ of the width, a 10 px gap between.
+  int left = int(std::lround(wa.w * splitRatio_)) - P(5);
+  int right0 = int(std::lround(wa.w * splitRatio_)) + P(5);
   configure(c, side == 1 ? wa.x : wa.x + right0, wa.y, side == 1 ? left : wa.w - right0, wa.h);
   setNetWmState(c);
   publishWindow(c);
@@ -1541,6 +1561,8 @@ void WM::startCompositing(Client* c) {
   }
   if (c->pixmap) XFreePixmap(dpy_, c->pixmap);
   c->pixmap = XCompositeNameWindowPixmap(dpy_, c->win);
+  c->pixW = c->w + 2 * c->bw;
+  c->pixH = c->h + 2 * c->bw;
   c->damaged = true;
   c->dmg = {0, 0, c->w + 2 * c->bw, c->h + 2 * c->bw};
 }
@@ -2016,7 +2038,11 @@ void WM::handleEvent(XEvent& e) {
       }
       Client* c = find(ce.window);
       if (!c || ce.event != root_) break;
-      bool resized = ce.width != c->w || ce.height != c->h || ce.border_width != c->bw;
+      // configure() already set c->w / c->h when we resized it ourselves, so
+      // compare with the size the pixmap was named at: a resized window has a
+      // new pixmap and the old one stops updating.
+      bool resized = ce.width + 2 * ce.border_width != c->pixW || ce.height + 2 * ce.border_width != c->pixH ||
+                     ce.width != c->w || ce.height != c->h || ce.border_width != c->bw;
       if (!c->managed) {
         c->x = ce.x;
         c->y = ce.y;
@@ -2029,6 +2055,7 @@ void WM::handleEvent(XEvent& e) {
       } else if (resized) {
         c->w = std::max(1, ce.width);
         c->h = std::max(1, ce.height);
+        c->bw = ce.border_width;
         startCompositing(c);
         updateFrame(c);
         publishWindow(c);

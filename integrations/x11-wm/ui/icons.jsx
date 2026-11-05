@@ -30,8 +30,8 @@ const shapes = {
   ),
   overview: (
     <>
-      <Rect x="3.5" y="5.5" width="11" height="13" rx="2" />
-      <Path d="M17.5 7.5v9M20.5 9.5v5" />
+      <Rect x="7.5" y="4.5" width="9" height="15" rx="2" />
+      <Path d="M4 7v10M20 7v10" />
     </>
   ),
   wifi: (
@@ -229,6 +229,55 @@ const shapes = {
       <Path d="M4.5 20.5a7.5 7.5 0 0 1 15 0" />
     </>
   ),
+  code: (
+    <>
+      <Polyline points="8.5 7 3.5 12 8.5 17" />
+      <Polyline points="15.5 7 20.5 12 15.5 17" />
+      <Line x1="13.5" y1="5" x2="10.5" y2="19" />
+    </>
+  ),
+  doc: (
+    <>
+      <Path d="M6.5 3.5h7l4 4v13h-11z" />
+      <Line x1="9" y1="12" x2="15" y2="12" />
+      <Line x1="9" y1="16" x2="15" y2="16" />
+    </>
+  ),
+  sheet: (
+    <>
+      <Rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
+      <Line x1="3.5" y1="9.5" x2="20.5" y2="9.5" />
+      <Line x1="3.5" y1="14.5" x2="20.5" y2="14.5" />
+      <Line x1="9.5" y1="4.5" x2="9.5" y2="19.5" />
+    </>
+  ),
+  present: (
+    <>
+      <Rect x="3.5" y="4.5" width="17" height="11" rx="2" />
+      <Line x1="12" y1="15.5" x2="12" y2="20" />
+      <Line x1="8.5" y1="20" x2="15.5" y2="20" />
+    </>
+  ),
+  pen: (
+    <>
+      <Path d="M15.5 4.5l4 4L9 19H5v-4z" />
+      <Line x1="13" y1="7" x2="17" y2="11" />
+    </>
+  ),
+  more: (
+    <>
+      <Circle cx="6" cy="12" r="1.2" />
+      <Circle cx="12" cy="12" r="1.2" />
+      <Circle cx="18" cy="12" r="1.2" />
+    </>
+  ),
+  plug: (
+    <>
+      <Path d="M8 3.5v4M16 3.5v4" />
+      <Path d="M6 7.5h12v3a6 6 0 0 1-12 0z" />
+      <Line x1="12" y1="16.5" x2="12" y2="20.5" />
+    </>
+  ),
 };
 
 export const Icon = memo(function Icon({ name, size = 24, color = '#fff', strokeWidth = 2, fill = 'none' }) {
@@ -243,18 +292,42 @@ export const Icon = memo(function Icon({ name, size = 24, color = '#fff', stroke
 // Which glyph an app gets when it has no icon file: by its id / exec / class.
 export function glyphFor(text) {
   const s = String(text || '').toLowerCase();
+  if (/libreoffice-calc|spreadsheet/.test(s)) return 'sheet';
+  if (/libreoffice-impress|presentation/.test(s)) return 'present';
+  if (/libreoffice-draw/.test(s)) return 'pen';
+  if (/libreoffice|writer|document/.test(s)) return 'doc';
+  if (/\bvim\b|emacs|nano|python|code/.test(s)) return 'code';
   if (/term|xterm|console|shell|bash|urxvt|kitty|alacritty/.test(s)) return 'terminal';
   if (/calc/.test(s)) return 'calculator';
   if (/clock|time/.test(s)) return 'clock';
   if (/eye/.test(s)) return 'eye';
+  if (/setting|config|control|pref/.test(s)) return 'settings';
   if (/edit|pad|text|write|note/.test(s)) return 'edit';
   if (/file|folder|pcmanfm|thunar|nautilus|explorer/.test(s)) return 'folder';
   if (/logo/.test(s)) return 'logo';
   if (/web|browser|firefox|chrom|surf/.test(s)) return 'globe';
-  if (/image|photo|paint|draw|view/.test(s)) return 'image';
-  if (/setting|config|control/.test(s)) return 'settings';
+  if (/image|photo|paint|draw|view|display-im/.test(s)) return 'image';
   return 'app';
 }
+
+// One colour pair per kind of app, so the same kind always looks the same.
+const glyphColors = {
+  terminal: ['#2b3150', '#14182c'],
+  code: ['#2fb46e', '#13795b'],
+  calculator: ['#ff9a3c', '#ff5f45'],
+  clock: ['#5a6cff', '#8a5bff'],
+  eye: ['#20c9a6', '#1f8fff'],
+  edit: ['#ffb648', '#ff7a45'],
+  folder: ['#3ec6ff', '#2f7bff'],
+  logo: ['#9b5bff', '#ff5ab4'],
+  globe: ['#2fb4ff', '#46d39a'],
+  image: ['#ff5ab4', '#b84bff'],
+  settings: ['#7d84a8', '#4a5078'],
+  doc: ['#3b82f6', '#1d4ed8'],
+  sheet: ['#22c55e', '#15803d'],
+  present: ['#f97316', '#c2410c'],
+  pen: ['#eab308', '#ca8a04'],
+};
 
 function hash(s) {
   let h = 2166136261;
@@ -264,7 +337,7 @@ function hash(s) {
 
 // A generated app icon: a gradient squircle with a white glyph.
 export const AppGlyph = memo(function AppGlyph({ id, glyph, size = 56 }) {
-  const [a, b] = tileColors[hash(String(id || glyph || '')) % tileColors.length];
+  const [a, b] = glyphColors[glyph] || tileColors[hash(String(id || glyph || '')) % tileColors.length];
   return (
     <View
       style={{

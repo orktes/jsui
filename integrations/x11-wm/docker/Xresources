@@ -4,7 +4,7 @@ Xft.hinting: true
 Xft.hintstyle: hintslight
 Xft.rgba: rgb
 XTerm*faceName: DejaVu Sans Mono
-XTerm*faceSize: 10
+XTerm*faceSize: 11
 XTerm*background: #12152b
 XTerm*foreground: #e6e9ff
 XTerm*cursorColor: #7c8cff

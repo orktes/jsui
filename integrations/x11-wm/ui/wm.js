@@ -27,7 +27,7 @@ export const wm = {
   quit: () => send('wm:quit'),
 };
 
-const SCREEN = { width: 1280, height: 800, pixelRatio: 1.5, topBar: 40, dock: 84, titleBar: 46, border: 12, touch: true };
+const SCREEN = { width: 1280, height: 800, pixelRatio: 1.5, topBar: 40, dock: 84, homeBar: 24, titleBar: 46, border: 12, touch: true };
 
 export function useScreen() {
   return useHostState('wm.screen', SCREEN);
@@ -89,7 +89,18 @@ export function appKeyOf(win) {
   return win.appId || (win.wmClass ? 'class:' + win.wmClass.toLowerCase() : 'win:' + win.id);
 }
 
-export function appTitle(win, apps) {
+// "ImageMagick (color depth=q16)" -> "ImageMagick".
+export const cleanName = (name) => String(name || '').replace(/\s*\([^)]*\)\s*/g, ' ').trim();
+
+// The app's name for a window: its desktop file's name, else its WM_CLASS
+// ("galculator" -> "Galculator").
+export function appName(win, apps) {
   const app = win.appId && apps.find((a) => a.id === win.appId);
-  return (app && app.name) || win.wmClass || win.title || 'Window';
+  if (app) return cleanName(app.name);
+  const c = win.wmClass || '';
+  return c ? c.charAt(0).toUpperCase() + c.slice(1) : win.title || 'Window';
+}
+
+export function appTitle(win, apps) {
+  return appName(win, apps);
 }

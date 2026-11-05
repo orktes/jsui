@@ -46,7 +46,7 @@ function useSwipeDown(onSwipe) {
   );
 }
 
-export const TopBar = memo(function TopBar({ screen, title, panel, setPanel, settings, system }) {
+export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, settings, system }) {
   const t = useTheme();
   const now = useClock();
   const apps = useAnchor('topbar.apps');
@@ -57,18 +57,18 @@ export const TopBar = memo(function TopBar({ screen, title, panel, setPanel, set
   const toggle = (p) => setPanel(panel === p ? null : p);
   const battery = system.battery;
   return (
-    <View {...swipe.panHandlers} style={[styles.bar, { height: screen.topBar, backgroundColor: t.bar, borderColor: t.panelLine }]}>
+    <View {...swipe.panHandlers} style={[styles.bar, { height: screen.topBar, backgroundColor: solid ? t.bar : 'transparent', borderColor: solid ? t.panelLine : 'transparent' }]}>
       <View style={styles.side}>
         <Pressable ref={apps.ref} onLayout={apps.onLayout} onPress={() => toggle('launcher')}
           style={({ pressed }) => [styles.barButton, (pressed || panel === 'launcher') && { backgroundColor: t.panelLine }]}>
           <Icon name="grid" size={20} color={t.text} />
           <Text style={[styles.barText, { color: t.text, marginLeft: 8 }]}>Apps</Text>
         </Pressable>
-        <Text numberOfLines={1} style={[styles.barText, { color: t.textDim, marginLeft: 10, flexShrink: 1 }]}>{title}</Text>
       </View>
       <Pressable ref={clock.ref} onLayout={clock.onLayout} onPress={() => toggle('calendar')}
         style={({ pressed }) => [styles.clock, (pressed || panel === 'calendar') && { backgroundColor: t.panelLine }]}>
-        <Text style={[styles.barText, { color: t.text, fontWeight: '700' }]}>{dateText(now)}  {timeText(now)}</Text>
+        <Text style={[styles.barText, styles.tabular, { color: t.textDim, fontWeight: '500' }]}>{dateText(now)}</Text>
+        <Text style={[styles.barText, styles.tabular, { color: t.text, marginLeft: 10 }]}>{timeText(now)}</Text>
         {settings.doNotDisturb && <View style={{ marginLeft: 8 }}><Icon name="moon" size={16} color={t.textDim} /></View>}
       </Pressable>
       <View style={[styles.side, { justifyContent: 'flex-end' }]}>
@@ -82,10 +82,14 @@ export const TopBar = memo(function TopBar({ screen, title, panel, setPanel, set
           <View style={{ width: 12 }} />
           <Icon name={settings.muted || settings.volume === 0 ? 'mute' : 'volume'} size={20} color={t.text} />
           <View style={{ width: 12 }} />
-          <Icon name="battery" size={22} color={t.text} />
-          <Text style={[styles.barText, { color: t.text, marginLeft: 6 }]}>{battery ? `${battery.percent}%` : 'AC'}</Text>
-          <View style={{ width: 12 }} />
-          <Icon name="power" size={19} color={t.text} />
+          {battery ? (
+            <>
+              <Icon name="battery" size={22} color={t.text} />
+              <Text style={[styles.barText, styles.tabular, { color: t.text, marginLeft: 6, fontWeight: '500' }]}>{battery.percent}%</Text>
+            </>
+          ) : (
+            <Icon name="plug" size={20} color={t.text} />
+          )}
         </Pressable>
       </View>
     </View>
@@ -107,8 +111,8 @@ const DockItem = memo(function DockItem({ item, apps, active, onLongPress, size 
     if (!ws.length) {
       if (item.app) {
         Animated.sequence([
-          Animated.timing(bounce, { toValue: 1, duration: 160, easing: Easing.out(Easing.quad), useNativeDriver: true }),
-          Animated.timing(bounce, { toValue: 0, duration: 260, easing: Easing.bounce, useNativeDriver: true }),
+          Animated.timing(bounce, { toValue: 1, duration: 150, easing: Easing.out(Easing.quad), useNativeDriver: true }),
+          Animated.spring(bounce, { toValue: 0, friction: 4, tension: 120, useNativeDriver: true }),
         ]).start();
         wm.launch(item.app.exec);
       }
@@ -142,10 +146,8 @@ const DockItem = memo(function DockItem({ item, apps, active, onLongPress, size 
       </Animated.View>
       <View style={styles.dots}>
         {running > 0 && (
-          <View style={[styles.dot, { backgroundColor: isActive ? t.accent : t.textDim, width: isActive ? 18 : 6 }]} />
+          <View style={[styles.dot, { backgroundColor: isActive ? t.accent : t.textDim, width: isActive ? 16 : 5 }]} />
         )}
-        {running > 1 && <View style={[styles.dot, { backgroundColor: t.textDim }]} />}
-        {running > 2 && <View style={[styles.dot, { backgroundColor: t.textDim }]} />}
       </View>
     </Pressable>
   );
@@ -175,7 +177,7 @@ export function dockItems(apps, windows, pinned) {
   return items;
 }
 
-export const Dock = memo(function Dock({ screen, apps, windows, active, settings, panel, setPanel, onMenu, onMeasure }) {
+export const Dock = memo(function Dock({ screen, apps, windows, active, settings, panel, setPanel, onMenu, onMeasure, shown = true }) {
   const t = useTheme();
   const items = useMemo(() => dockItems(apps, windows, settings.pinned), [apps, windows, settings.pinned]);
   const count = useRef(items.length);
@@ -209,10 +211,18 @@ export const Dock = memo(function Dock({ screen, apps, windows, active, settings
       }),
     [setPanel, onMenu],
   );
+  // In tablet mode over a full-screen app the dock hides below the edge and
+  // slides up when the home indicator is swiped or tapped.
+  const slide = useRef(new Animated.Value(shown ? 0 : 1)).current;
+  useEffect(() => {
+    Animated.spring(slide, { toValue: shown ? 0 : 1, tension: 170, friction: 22, useNativeDriver: true }).start();
+  }, [shown, slide]);
+  const dy = slide.interpolate({ inputRange: [0, 1], outputRange: [0, screen.dock + 24] });
   const size = 52;
-  const h = screen.dock - 16;
+  const h = screen.dock - 8;
+  const plate = (on) => ({ width: size, height: size, borderRadius: size * 0.28, backgroundColor: on ? t.accent : t.name === 'dark' ? 'rgba(255,255,255,0.12)' : 'rgba(20,24,60,0.08)' });
   return (
-    <View pointerEvents="box-none" style={[styles.dockWrap, { height: screen.dock }]}>
+    <Animated.View pointerEvents={shown ? 'box-none' : 'none'} style={[styles.dockWrap, { height: screen.dock, transform: [{ translateY: dy }] }]}>
       <View
         {...swipe.panHandlers}
         onLayout={(e) => onMeasure(e.nativeEvent.layout)}
@@ -220,7 +230,7 @@ export const Dock = memo(function Dock({ screen, apps, windows, active, settings
       >
         <Pressable ref={launcher.ref} onLayout={launcher.onLayout} onPress={() => setPanel(panel === 'launcher' ? null : 'launcher')}
           style={({ pressed }) => [styles.dockItem, { width: size + 12 }, pressed && { transform: [{ scale: 0.92 }] }]}>
-          <View style={[styles.launcherBtn, { width: size, height: size, borderRadius: size * 0.28, backgroundColor: panel === 'launcher' ? t.accent : t.panelRaised }]}>
+          <View style={[styles.launcherBtn, plate(panel === 'launcher')]}>
             <Icon name="grid" size={26} color={panel === 'launcher' ? t.accentText : t.text} />
           </View>
           <View style={styles.dots} />
@@ -232,12 +242,49 @@ export const Dock = memo(function Dock({ screen, apps, windows, active, settings
         <View style={[styles.sep, { backgroundColor: t.panelLine }]} />
         <Pressable ref={overview.ref} onLayout={overview.onLayout} onPress={() => setPanel(panel === 'overview' ? null : 'overview')}
           style={({ pressed }) => [styles.dockItem, { width: size + 12 }, pressed && { transform: [{ scale: 0.92 }] }]}>
-          <View style={[styles.launcherBtn, { width: size, height: size, borderRadius: size * 0.28, backgroundColor: panel === 'overview' ? t.accent : t.panelRaised }]}>
+          <View style={[styles.launcherBtn, plate(panel === 'overview')]}>
             <Icon name="overview" size={26} color={panel === 'overview' ? t.accentText : t.text} />
           </View>
           <View style={styles.dots} />
         </Pressable>
       </View>
+    </Animated.View>
+  );
+});
+
+// Tablet mode over a full-screen app: the home indicator along the bottom
+// edge. Swipe up a little (or tap) for the dock, further for the switcher,
+// sideways to flip between the last apps.
+export const HomeBar = memo(function HomeBar({ screen, windows, setPanel, onPeek }) {
+  const t = useTheme();
+  const anchor = useAnchor('homebar');
+  const lift = useRef(new Animated.Value(0)).current;
+  const recent = useRef([]);
+  recent.current = windows.filter((w) => !w.minimized && w.type === 'normal' && !w.transientFor);
+  const pan = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderTerminationRequest: () => false,
+        onPanResponderMove: (e, g) => lift.setValue(Math.max(-40, Math.min(0, g.dy * 0.35))),
+        onPanResponderRelease: (e, g) => {
+          Animated.spring(lift, { toValue: 0, friction: 6, useNativeDriver: true }).start();
+          if (g.dy < -140 || (g.dy < -60 && g.vy < -1.2)) return setPanel('overview');
+          if (Math.abs(g.dx) > 70 && Math.abs(g.dx) > Math.abs(g.dy)) {
+            const ws = recent.current;
+            if (ws.length >= 2) wm.focus(g.dx < 0 ? ws[ws.length - 2].id : ws[0].id);
+            return;
+          }
+          onPeek();
+        },
+      }),
+    [lift, setPanel, onPeek],
+  );
+  return (
+    <View {...pan.panHandlers} ref={anchor.ref} onLayout={anchor.onLayout}
+      style={[styles.homeBar, { height: screen.homeBar || 24 }]}>
+      <Animated.View style={[styles.homePill, { backgroundColor: t.name === 'dark' ? 'rgba(255,255,255,0.55)' : 'rgba(20,24,60,0.45)', transform: [{ translateY: lift }] }]} />
     </View>
   );
 });
@@ -277,13 +324,16 @@ const styles = StyleSheet.create({
   barButton: { height: 34, minWidth: 44, borderRadius: 17, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
   status: { paddingHorizontal: 14 },
   barText: { fontFamily: font, fontSize: 15, fontWeight: '600' },
+  tabular: { fontVariant: ['tabular-nums'] },
+  homeBar: { position: 'absolute', left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
+  homePill: { width: 136, height: 5, borderRadius: 3 },
   clock: { height: 34, borderRadius: 17, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center' },
   dockWrap: { position: 'absolute', left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
   dock: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, borderWidth: 1 },
-  dockItem: { height: 68, alignItems: 'center', justifyContent: 'center' },
+  dockItem: { height: 72, alignItems: 'center', justifyContent: 'flex-start', paddingTop: 6 },
   launcherBtn: { alignItems: 'center', justifyContent: 'center' },
-  dots: { flexDirection: 'row', height: 6, marginTop: 5 },
-  dot: { width: 6, height: 6, borderRadius: 3, marginHorizontal: 2 },
+  dots: { flexDirection: 'row', height: 5, marginTop: 4 },
+  dot: { width: 5, height: 5, borderRadius: 2.5 },
   sep: { width: 1, height: 40, marginHorizontal: 6 },
   menu: { position: 'absolute', width: 280, borderRadius: 22, borderWidth: 1, paddingVertical: 8 },
   menuTitle: { fontFamily: font, fontSize: 13, fontWeight: '700', paddingHorizontal: 18, paddingVertical: 8, letterSpacing: 0.4 },

@@ -105,7 +105,7 @@ export const Keyboard = memo(function Keyboard({ screen, onMeasure }) {
 
 const styles = StyleSheet.create({
   board: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 10, paddingTop: 10, paddingBottom: 12, borderTopWidth: 1, borderTopLeftRadius: 24, borderTopRightRadius: 24 },
-  row: { flexDirection: 'row', height: 58, marginBottom: 6 },
-  key: { marginHorizontal: 3, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+  row: { flexDirection: 'row', height: 52, marginBottom: 8 },
+  key: { marginHorizontal: 4, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   keyText: { fontFamily: font, fontWeight: '500' },
 });

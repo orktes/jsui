@@ -50,7 +50,7 @@ export const ToggleTile = memo(function ToggleTile({ icon, label, sub, on, onPre
       onPress={onPress}
       style={({ pressed }) => [
         styles.tile,
-        { backgroundColor: on ? t.accent : t.panelRaised, transform: [{ scale: pressed ? 0.97 : 1 }] },
+        { backgroundColor: on ? t.tileOn : t.panelRaised, transform: [{ scale: pressed ? 0.97 : 1 }] },
       ]}
     >
       <View style={[styles.tileIcon, { backgroundColor: on ? 'rgba(255,255,255,0.18)' : t.panelLine }]}>
@@ -87,7 +87,6 @@ export const Slider = memo(function Slider({ icon, value, onChange, anchor }) {
   const trackRef = useRef(null);
   return (
     <View style={styles.sliderRow}>
-      <Icon name={icon} size={24} color={t.textDim} />
       <View
         ref={(r) => {
           trackRef.current = r;
@@ -104,8 +103,9 @@ export const Slider = memo(function Slider({ icon, value, onChange, anchor }) {
         {...pan.current.panHandlers}
         style={[styles.track, { backgroundColor: t.panelRaised }]}
       >
-        <View style={[styles.fill, { width: Math.max(28, value * width), backgroundColor: t.accent }]}>
-          <View style={styles.knob} />
+        <View style={[styles.fill, { width: Math.max(48, value * width), backgroundColor: t.tileOn }]} />
+        <View pointerEvents="none" style={styles.sliderIcon}>
+          <Icon name={icon} size={22} color="#fff" />
         </View>
       </View>
     </View>
@@ -124,7 +124,7 @@ const styles = StyleSheet.create({
   tileLabel: { fontFamily: font, fontSize: 15, fontWeight: '600' },
   tileSub: { fontFamily: font, fontSize: 13, marginTop: 1 },
   sliderRow: { flexDirection: 'row', alignItems: 'center', height: 56 },
-  track: { flex: 1, height: 44, borderRadius: 22, marginLeft: 14, overflow: 'hidden', justifyContent: 'center' },
-  fill: { height: 44, borderRadius: 22, justifyContent: 'center', alignItems: 'flex-end' },
-  knob: { width: 20, height: 20, borderRadius: 10, backgroundColor: '#fff', marginRight: 12 },
+  track: { flex: 1, height: 48, borderRadius: 24, overflow: 'hidden', justifyContent: 'center' },
+  fill: { position: 'absolute', left: 0, top: 0, bottom: 0, borderRadius: 24 },
+  sliderIcon: { position: 'absolute', left: 14, top: 13 },
 });

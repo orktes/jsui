@@ -8,15 +8,16 @@
 // to take the input there, so the shell tells the host which rectangles it
 // covers (wm:shellRegions) whenever that changes.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AppRegistry, DevSettings, PanResponder, StyleSheet, Text, View, useHostMessage, useWindowDimensions, HostTexture } from 'react-native';
+import { AppRegistry, DevSettings, PanResponder, Pressable, StyleSheet, Text, View, useHostMessage, useWindowDimensions, HostTexture } from 'react-native';
 import Svg, { Defs, Ellipse, RadialGradient, Stop } from 'react-native-svg';
-import { Dock, DockMenu, TopBar, dateText, timeText, useClock } from './bars.jsx';
+import { Dock, DockMenu, HomeBar, TopBar, dateText, timeText, useClock } from './bars.jsx';
+import { Icon } from './icons.jsx';
 import { useAnchor } from './anchors.js';
 import { Keyboard } from './keyboard.jsx';
 import { CalendarPanel, Launcher, LockScreen, Overview, QuickSettings, Toasts } from './panels.jsx';
 import { ThemeContext, dark, font, light } from './theme.js';
 import { ClosingWindow, Window } from './Window.jsx';
-import { appTitle, useApps, usePopups, useScreen, useSettings, useSystem, useWindows, wm } from './wm.js';
+import { appName, useApps, usePopups, useScreen, useSettings, useSystem, useWindows, wm } from './wm.js';
 
 // ---------------------------------------------------------------- Wallpaper
 
@@ -47,26 +48,21 @@ function Wallpaper({ width, height, t }) {
 }
 
 // Big clock on the empty desktop.
-function DesktopClock({ screen, t, empty }) {
+function DesktopClock({ screen, t }) {
   const now = useClock();
   return (
     <View pointerEvents="none" style={[styles.deskClock, { top: screen.topBar + 70 }]}>
       <Text style={[styles.deskTime, { color: t.name === 'dark' ? 'rgba(255,255,255,0.92)' : 'rgba(20,24,60,0.85)' }]}>{timeText(now)}</Text>
       <Text style={[styles.deskDate, { color: t.name === 'dark' ? 'rgba(255,255,255,0.7)' : 'rgba(20,24,60,0.6)' }]}>{dateText(now)}</Text>
-      {empty && (
-        <Text style={[styles.deskHint, { color: t.name === 'dark' ? 'rgba(255,255,255,0.55)' : 'rgba(20,24,60,0.5)' }]}>
-          Tap Apps to start something · swipe up on the dock for your windows
-        </Text>
-      )}
     </View>
   );
 }
 
 // Where a dragged window will land.
-function SnapPreview({ preview, screen, t }) {
+function SnapPreview({ preview, screen, t, bottom }) {
   if (!preview) return null;
   const top = screen.topBar + 6;
-  const h = screen.height - screen.topBar - screen.dock - 12;
+  const h = screen.height - screen.topBar - bottom - 12;
   const half = (screen.width - 18) / 2;
   const r =
     preview === 'max' ? { left: 6, top, width: screen.width - 12, height: h }
@@ -77,7 +73,7 @@ function SnapPreview({ preview, screen, t }) {
 
 // Split view: the seam between a left- and a right-snapped window. Drag it to
 // share the screen differently (25-75 %).
-function SplitDivider({ left, right, screen, t }) {
+function SplitDivider({ left, right, screen, t, bottom }) {
   const [x, setX] = useState(null);
   const anchor = useAnchor('split.divider');
   const pan = useMemo(() => {
@@ -101,12 +97,45 @@ function SplitDivider({ left, right, screen, t }) {
   }, [screen.width]);
   const cx = x != null ? x : (left.x + left.w + right.x) / 2;
   const top = screen.topBar;
-  const h = screen.height - screen.topBar - screen.dock;
+  const h = screen.height - screen.topBar - bottom;
   return (
     <View {...pan.panHandlers} ref={anchor.ref} onLayout={anchor.onLayout} style={{ position: 'absolute', left: cx - 16, top, width: 32, height: h, alignItems: 'center', justifyContent: 'center' }}>
-      <View style={{ position: 'absolute', left: 14, top: 0, bottom: 0, width: 4, backgroundColor: x != null ? t.accent : 'rgba(0,0,0,0.55)' }} />
-      <View style={{ width: 12, height: 72, borderRadius: 6, backgroundColor: x != null ? t.accent : t.text, boxShadow: '0px 2px 10px rgba(0,0,0,0.5)' }} />
+      <View style={{ width: x != null ? 8 : 6, height: x != null ? 64 : 44, borderRadius: 4, backgroundColor: x != null ? t.accent : t.name === 'dark' ? 'rgba(255,255,255,0.7)' : 'rgba(20,24,60,0.5)' }} />
     </View>
+  );
+}
+
+// Tablet mode: the menu of a full-screen or split app's header.
+function WindowMenu({ menu, screen, t, onClose }) {
+  const { win, x, y } = menu;
+  const rows = [
+    { icon: 'maximize', label: 'Full screen', fn: () => wm.maximize(win.id, true), on: win.maximized },
+    { icon: 'snapLeft', label: 'Split left', fn: () => wm.snap(win.id, 'left'), on: win.snap === 'left' },
+    { icon: 'snapRight', label: 'Split right', fn: () => wm.snap(win.id, 'right'), on: win.snap === 'right' },
+    { icon: 'restore', label: 'Float', fn: () => (win.snap ? wm.snap(win.id, null) : wm.maximize(win.id, false)) },
+    { icon: 'minimize', label: 'Minimize', fn: () => wm.minimize(win.id) },
+  ];
+  const left = Math.max(12, Math.min(screen.width - 292, x - 140));
+  return (
+    <Pressable style={StyleSheet.absoluteFill} onPress={onClose}>
+      <View onStartShouldSetResponder={() => true}
+        style={[styles.menu, { left, top: y + 4, backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 16px 48px ${t.shadow}` }]}>
+        {rows.map((r) => (
+          <MenuRow key={r.label} r={r} t={t} onClose={onClose} />
+        ))}
+      </View>
+    </Pressable>
+  );
+}
+
+function MenuRow({ r, t, onClose }) {
+  const anchor = useAnchor(`menu.${r.label.toLowerCase().replace(/\s+/g, '-')}`);
+  return (
+    <Pressable ref={anchor.ref} onLayout={anchor.onLayout} onPress={() => { r.fn(); onClose(); }}
+      style={({ pressed }) => [styles.menuRow, pressed && { backgroundColor: t.panelLine }]}>
+      <Icon name={r.icon} size={20} color={r.on ? t.accent : t.text} />
+      <Text style={[styles.menuText, { color: r.on ? t.accent : t.text }]}>{r.label}</Text>
+    </Pressable>
   );
 }
 
@@ -130,6 +159,13 @@ function Shell() {
   const t = settings.darkMode ? dark : light;
 
   const [panel, setPanel] = useState(null); // launcher | overview | quick | calendar
+  // A panel that was just closed stays mounted while it animates out.
+  const [panels, setPanels] = useState({ cur: null, closing: null });
+  if (panels.cur !== panel) setPanels({ cur: panel, closing: panels.cur || (panels.closing !== panel ? panels.closing : null) });
+  const closingPanel = panels.closing !== panel ? panels.closing : null;
+  const panelClosed = useCallback(() => setPanels((p) => ({ ...p, closing: null })), []);
+  const [winMenu, setWinMenu] = useState(null);
+  const [peek, setPeek] = useState(false);
   const [locked, setLocked] = useState(false);
   const [preview, setPreview] = useState(null);
   const [dragging, setDragging] = useState(null);
@@ -137,7 +173,7 @@ function Shell() {
   const [dockRect, setDockRect] = useState(null);
   const [oskRect, setOskRect] = useState(null);
   const [notes, setNotes] = useState(() => [
-    { id: noteId++, icon: 'tablet', title: 'Welcome to the JSUI desktop', body: 'Drag title bars to move, drag to the edges to snap, swipe up on the dock for all windows.', time: nowText() },
+    { id: noteId++, icon: 'tablet', title: 'Welcome to the JSUI desktop', body: 'Swipe up from the bottom edge for the dock, further for your recent apps.', time: nowText() },
   ]);
   const [toasts, setToasts] = useState([]);
 
@@ -170,7 +206,23 @@ function Shell() {
   const visible = windows.filter((w) => !w.minimized);
   const splitL = visible.find((w) => w.snap === 'left');
   const splitR = visible.find((w) => w.snap === 'right');
-  const split = splitL && splitR && !fullscreen ? { left: splitL, right: splitR } : null;
+  // Split view counts while the pair is what's on top (the stack's last normal window).
+  const topNormal = [...visible].reverse().find((w) => w.type === 'normal' && !w.transientFor);
+  const split = splitL && splitR && !fullscreen && topNormal && (topNormal === splitL || topNormal === splitR)
+    ? { left: splitL, right: splitR } : null;
+  // Tablet mode with an app on screen: apps reach the bottom edge, the dock
+  // hides behind the home indicator.
+  const appMode = settings.tabletMode && visible.some((w) => w.type === 'normal' && (w.maximized || w.snap));
+  const dockShown = !appMode || peek || panel === 'launcher' || panel === 'overview';
+  const bottom = appMode ? scr.homeBar || 24 : scr.dock;
+  const solidBar = visible.some((w) => w.maximized || w.snap);
+  const onPeek = useCallback(() => setPeek(true), []);
+  useEffect(() => {
+    if (!peek) return undefined;
+    const id = setTimeout(() => setPeek(false), 4000);
+    return () => clearTimeout(id);
+  }, [peek, active]);
+  useEffect(() => setPeek(false), [active, panel]);
 
   // Hotkeys from the host: Super toggles the launcher, Alt+Tab the overview.
   useHostMessage('wm:hotkey', (msg) => {
@@ -191,20 +243,21 @@ function Shell() {
   const regions = useMemo(() => {
     const W = scr.width;
     const H = scr.height;
-    if (locked || panel || dockMenu) return [[0, 0, W, H]];
+    if (locked || panel || dockMenu || winMenu) return [[0, 0, W, H]];
     const r = [];
     if (!fullscreen) {
       r.push([0, 0, W, scr.topBar]);
-      if (!settings.osk && dockRect) r.push([dockRect.x, H - scr.dock + dockRect.y, dockRect.width, dockRect.height]);
-      else if (!settings.osk) r.push([0, H - scr.dock, W, scr.dock]);
+      if (!settings.osk && dockShown && dockRect) r.push([dockRect.x, H - scr.dock + dockRect.y, dockRect.width, dockRect.height]);
+      else if (!settings.osk && dockShown) r.push([0, H - scr.dock, W, scr.dock]);
+      if (!settings.osk && appMode) r.push([0, H - bottom, W, bottom]);
     }
     if (split) {
       const cx = (split.left.x + split.left.w + split.right.x) / 2;
-      r.push([cx - 16, scr.topBar, 32, H - scr.topBar - scr.dock]);
+      r.push([cx - 16, scr.topBar, 32, H - scr.topBar - bottom]);
     }
     if (settings.osk && oskRect) r.push([oskRect.x, oskRect.y, oskRect.width, oskRect.height]);
     return r;
-  }, [locked, panel, dockMenu, fullscreen, settings.osk, dockRect, oskRect, scr, split && split.left.x + split.left.w, split && split.right.x]);
+  }, [locked, panel, dockMenu, winMenu, fullscreen, settings.osk, dockRect, oskRect, scr, dockShown, appMode, bottom, split && split.left.x + split.left.w, split && split.right.x]);
   const lastRegions = useRef('');
   useEffect(() => {
     const json = JSON.stringify(regions);
@@ -214,31 +267,45 @@ function Shell() {
     }
   }, [regions]);
 
-  const launch = useCallback((app) => {
-    wm.launch(app.exec);
-    notify({ icon: 'app', title: `Opening ${app.name}`, body: app.comment || '' });
-  }, [notify]);
+  const launch = useCallback((app) => wm.launch(app.exec), []);
 
-  const title = activeWin ? activeWin.title || appTitle(activeWin, apps) : 'Desktop';
   const closePanel = useCallback(() => setPanel(null), []);
   const onDragging = useCallback((id, on) => setDragging(on ? id : null), []);
+  const onWinMenu = useCallback((win, x, y) => setWinMenu({ win, x, y }), []);
+  const overviewUp = panel === 'overview' || closingPanel === 'overview';
+  const panelEl = (name, open) => {
+    const common = { key: name, screen: scr, open, onClose: closePanel, onClosed: open ? undefined : panelClosed };
+    if (name === 'overview') return <Overview {...common} windows={visible} active={active} apps={apps} />;
+    if (name === 'launcher') return <Launcher {...common} apps={apps} settings={settings} onLaunch={launch} />;
+    if (name === 'quick') {
+      return (
+        <QuickSettings {...common} settings={settings} system={system} windows={windows}
+          onLock={() => { setPanel(null); setLocked(true); }} onReload={() => DevSettings.reload()} />
+      );
+    }
+    if (name === 'calendar') return <CalendarPanel {...common} notifications={notes} onClear={() => setNotes([])} />;
+    return null;
+  };
 
   return (
     <ThemeContext.Provider value={t}>
       <View style={styles.root}>
         <Wallpaper width={scr.width} height={scr.height} t={t} />
-        {!visible.length && <DesktopClock screen={scr} t={t} empty />}
+        {!visible.length && !panel && <DesktopClock screen={scr} t={t} />}
+        {split && !overviewUp && <View pointerEvents="none" style={{ position: 'absolute', left: split.left.x + split.left.w - 1, width: split.right.x - split.left.x - split.left.w + 2, top: split.left.y - scr.titleBar, height: split.left.h + scr.titleBar, backgroundColor: t.name === 'dark' ? '#000' : t.wallTop }} />}
         {windows.map((w) =>
           w.type === 'dock' || w.type === 'desktop' ? null : (
-            <View key={w.id} pointerEvents="box-none" style={[StyleSheet.absoluteFill, { opacity: panel === 'overview' ? 0 : 1 }]}>
+            <View key={w.id} pointerEvents="box-none" style={[StyleSheet.absoluteFill, { opacity: overviewUp ? 0 : 1 }]}>
             <Window
               win={w}
               active={w.id === active}
               screen={scr}
               apps={apps}
-              hidden={panel === 'overview' || !w.ready}
+              hidden={overviewUp || !w.ready}
               onPreview={setPreview}
               onDragging={onDragging}
+              tablet={settings.tabletMode}
+              onMenu={onWinMenu}
             />
             </View>
           ),
@@ -246,10 +313,13 @@ function Shell() {
         {closing.map((w) => (
           <ClosingWindow key={`c${w.id}`} win={w} screen={scr} onDone={doneClosing} />
         ))}
-        {split && panel !== 'overview' && <SplitDivider left={split.left} right={split.right} screen={scr} t={t} />}
-        <SnapPreview preview={preview} screen={scr} t={t} />
+        {split && !overviewUp && <SplitDivider left={split.left} right={split.right} screen={scr} t={t} bottom={bottom} />}
+        <SnapPreview preview={preview} screen={scr} t={t} bottom={bottom} />
         {!fullscreen && (
-          <TopBar screen={scr} title={title} panel={panel} setPanel={setPanel} settings={settings} system={system} />
+          <TopBar screen={scr} solid={solidBar} panel={panel} setPanel={setPanel} settings={settings} system={system} />
+        )}
+        {!fullscreen && !settings.osk && appMode && !dockShown && (
+          <HomeBar screen={scr} windows={windows} setPanel={setPanel} onPeek={onPeek} />
         )}
         {!fullscreen && !settings.osk && (
           <Dock
@@ -262,25 +332,11 @@ function Shell() {
             setPanel={setPanel}
             onMenu={setDockMenu}
             onMeasure={setDockRect}
+            shown={dockShown}
           />
         )}
-        {panel === 'overview' && <Overview screen={scr} windows={visible} active={active} apps={apps} onClose={closePanel} />}
-        {panel === 'launcher' && <Launcher screen={scr} apps={apps} settings={settings} onClose={closePanel} onLaunch={launch} />}
-        {panel === 'quick' && (
-          <QuickSettings
-            screen={scr}
-            settings={settings}
-            system={system}
-            windows={windows}
-            onClose={closePanel}
-            onLock={() => {
-              setPanel(null);
-              setLocked(true);
-            }}
-            onReload={() => DevSettings.reload()}
-          />
-        )}
-        {panel === 'calendar' && <CalendarPanel screen={scr} notifications={notes} onClear={() => setNotes([])} onClose={closePanel} />}
+        {[closingPanel, panel].filter(Boolean).map((name) => panelEl(name, name === panel))}
+        {winMenu && <WindowMenu menu={winMenu} screen={scr} t={t} onClose={() => setWinMenu(null)} />}
         {dockMenu && (
           <DockMenu item={dockMenu} anchor={dockRect && { x: dockRect.x + dockRect.width / 2, width: 0 }} onClose={() => setDockMenu(null)} />
         )}
@@ -304,9 +360,11 @@ function Shell() {
 const styles = StyleSheet.create({
   root: { flex: 1, overflow: 'hidden' },
   deskClock: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
-  deskTime: { fontFamily: font, fontSize: 112, fontWeight: '700', letterSpacing: -3 },
+  deskTime: { fontFamily: font, fontSize: 112, fontWeight: '600', letterSpacing: -3, fontVariant: ['tabular-nums'] },
   deskDate: { fontFamily: font, fontSize: 24, fontWeight: '500', marginTop: -4 },
-  deskHint: { fontFamily: font, fontSize: 16, marginTop: 22 },
+  menu: { position: 'absolute', width: 280, borderRadius: 22, borderWidth: 1, paddingVertical: 8 },
+  menuRow: { height: 52, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18 },
+  menuText: { fontFamily: font, fontSize: 16, marginLeft: 14, flex: 1 },
   snap: { position: 'absolute', borderRadius: 18, borderWidth: 3 },
 });
 
