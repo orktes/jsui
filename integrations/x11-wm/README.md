@@ -3,14 +3,15 @@
 An experiment: an X11 window manager and compositor whose entire desktop shell
 is a React app running in JSUI. It is made for 11" touchscreens (1920x1200 at
 150 %, every control at least 48 logical px) and works mobile first: apps open
-full screen, a swipe up on the dock opens the card switcher, two apps share the
-screen in split view.
+full screen down to a home indicator, a swipe up from the bottom edge opens the
+card switcher, two apps share the screen in split view.
 
 ![Card switcher](../../docs/images/x11-wm/05-switcher.png)
 
 | | |
 | --- | --- |
 | ![Apps](../../docs/images/x11-wm/02-launcher.png) | ![Split view](../../docs/images/x11-wm/08-split-resized.png) |
+| ![Dock over a full-screen app](../../docs/images/x11-wm/04b-dock-peek.png) | ![App header menu](../../docs/images/x11-wm/08b-window-menu.png) |
 | ![Quick settings](../../docs/images/x11-wm/10-quick-settings.png) | ![On-screen keyboard](../../docs/images/x11-wm/13-osk-terminal.png) |
 
 ## Try it (Docker)
@@ -29,17 +30,22 @@ hardware the same host could render with Skia on the GPU.
 
 ## What the shell does
 
-* **Apps open full screen** (tablet mode, the default). Turn tablet mode off in
-  quick settings for floating windows.
-* **Card switcher.** Swipe up on the dock (or tap its last button, or Alt+Tab):
-  every app as a card, most recent first, flung sideways and snapping to the
-  middle card. Tap a card to switch, swipe it up to close it, *Split* puts it
-  next to the current app. The current app shrinks into its card as the
-  switcher opens.
-* **Quick switch.** Swipe sideways along the dock: left jumps to the previous
-  app, right cycles to the oldest.
+* **Apps open full screen** (tablet mode, the default), down to a home
+  indicator at the bottom edge: tap it or swipe up a little for the dock. Each
+  app gets a slim header with a grabber, its name, a menu (full screen, split
+  left / right, float, minimize) and close. Turn tablet mode off in quick
+  settings for floating windows and a permanent dock.
+* **Card switcher.** Swipe up from the bottom edge (or on the dock, or tap the
+  dock's last button, or Alt+Tab): every app as a card, most recent first,
+  flung sideways and snapping to the middle card. Tap a card to switch, swipe
+  it up to close it, *Split* puts it next to the current app. The current app
+  shrinks into its card as the switcher opens, and the picked card grows back
+  into its window when it closes.
+* **Quick switch.** Swipe sideways along the bottom edge or the dock: left
+  jumps to the previous app, right cycles to the oldest.
 * **Split view.** Two apps side by side with a divider you drag (25-75 %). Also
-  by dragging a floating window's title bar to a side edge, or Super+Left/Right.
+  from the app header's menu, by dragging a title bar to a side edge, or
+  Super+Left/Right.
 * **Floating windows** (tablet mode off): drag the title bar to move, to the top
   edge to maximize, to a side edge to snap; double-tap the title bar to
   maximize; drag a border or corner to resize. Big minimize / maximize / close
@@ -53,8 +59,8 @@ hardware the same host could render with Skia on the GPU.
   panel; swipe down on the left half), status icons (quick settings; swipe
   down on the right half).
 * **Quick settings**: Wi-Fi, Bluetooth, dark / light style, tablet mode, night
-  light, do not disturb, brightness and volume sliders, lock, restart shell,
-  log out. Brightness and night light really tint the screen; Wi-Fi /
+  light, do not disturb, brightness and volume sliders, lock, and a power
+  sheet (lock, restart shell, log out). Brightness and night light really tint the screen; Wi-Fi /
   Bluetooth / volume are visual only in this prototype.
 * **On-screen keyboard** (keyboard icon in the top bar): types into the focused
   app through XTest, or into the launcher's search. One-shot Shift and Ctrl, a
@@ -85,7 +91,8 @@ hardware the same host could render with Skia on the GPU.
   Pointer input reaches JSUI as touch (one finger), XInput 2.2 touch events on
   the shell's windows as multi-touch; `--mouse` sends mouse events instead.
 * **State.** Shared state the shell reads: `wm.screen` (size, scale, bar
-  heights), `wm.windows` (id, title, class, app id, geometry in logical px,
+  heights; the work area ends at the home indicator in tablet mode, above the
+  dock otherwise), `wm.windows` (id, title, class, app id, geometry in logical px,
   type, minimized / maximized / snap / fullscreen, ready), `wm.stack` (bottom
   to top, so the top is the most recent), `wm.active`, `wm.popups`, `wm.apps`
   (desktop files), `wm.system`. The shell writes `wm.settings`.
