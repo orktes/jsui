@@ -161,8 +161,18 @@ If EGL or Skia's GL context fail, or with `JSUI_WL_GPU=0`, the CPU frame is
 copied into a software window instead. On the Tab A7 a frame takes ~22 ms on
 the GPU against ~91 ms on the CPU (`JSUI_WL_PERF=1` logs paint/present time,
 the GPU frame's render/blit/swap split, `jsui_tick` time and JSUI's own
-per-phase profile every 60 frames; `JSUI_WL_GPU_DEBUG=1|2` logs the first presents / draws a
-solid quad). Touch, pointer and key events of that window come
+per-phase profile every 60 frames; `JSUI_WL_GPU_FINISH=1` waits for the GPU
+before the swap, so the blit time holds the frame's GPU work and the swap
+only the wait for a buffer; `JSUI_WL_GPU_DEBUG=1|2` logs the first presents /
+draws a solid quad). With `JSUI_WL_VULKAN=1` the desktop is drawn with Skia
+Graphite on Vulkan instead (`wayland/mir_vulkan.h`): libhybris' libvulkan
+runs the vendor driver, its `null` platform takes Mir's `ANativeWindow` as a
+`VK_KHR_android_surface`, and a present pass draws the retained frame into the
+panel's swapchain, rotated (the Android host's design, two frames in flight).
+On the Tab A7's Adreno 610 Graphite records a frame in about half Ganesh's CPU
+time but its GPU work takes about twice as long (~64 ms frames against ~44 ms
+in the launcher/switcher bench), and apps' GPU buffers aren't imported into
+Vulkan yet (apps fall back to llvmpipe), so GL stays the default. Touch, pointer and key events of that window come
 back on Mir's thread and are queued for the Wayland loop. It is built when
 `mir1client` (UBports) or `mirclient` is found. `--rotate 90|180|270`
 turns the desktop on the panel (the Tab A7's panel is 1200x2000 portrait;

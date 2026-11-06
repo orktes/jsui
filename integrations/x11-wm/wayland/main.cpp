@@ -663,6 +663,7 @@ class WM {
   uint32_t mirOutput_ = 0;
   // --mir on the GPU: Skia draws the desktop into the Mir window's GL context.
   JsuiGpuContext* gpu_ = nullptr;
+  bool vulkan_ = false;  // gpu_ is Graphite on MirVulkan's device (else Ganesh GL)
   // Apps' GPU buffers (android_wlegl, wlegl.h): the one each window shows,
   // locked until the next one replaces it or the window's texture goes.
   bool gpuApps_ = false;
@@ -2367,6 +2368,11 @@ bool WM::setupMir() {
     logf("cannot connect to Mir (%s): %s", sock.empty() ? "default socket" : sock.c_str(), err.c_str());
     return false;
   }
+#ifdef JSUI_WL_MIR_VK
+  // libhybris' Vulkan switches (jsui-session) are jsui-wl's; apps keep their
+  // defaults (--app-env given later still wins).
+  g_appEnv.insert(g_appEnv.begin(), {"HYBRIS_VULKANPLATFORM=", "HYBRIS_LD_LIBRARY_PATH="});
+#endif
   int w = 0, h = 0;
   uint32_t out = 0;
   if (mir_->outputSize(&w, &h, &out)) {
@@ -2393,8 +2399,9 @@ void WM::perfFrame(double paintMs, double presentMs) {
   logf("perf (%s): %d frames, paint %.2f ms + present %.2f ms avg, worst %.2f ms", gpu_ ? "gpu" : "cpu",
        perfFrames_, perfPaint_ / perfFrames_, perfPresent_ / perfFrames_, perfMax_);
   if (gpu_)
-    logf("perf (gpu): jsui render %.2f ms, blit %.2f ms, swap %.2f ms avg", gpuRenderMs_ / perfFrames_,
-         gpuBlitMs_ / perfFrames_, gpuSwapMs_ / perfFrames_);
+    logf(vulkan_ ? "perf (vulkan): jsui render %.2f ms, present pass %.2f ms, acquire + present %.2f ms avg"
+                 : "perf (gpu): jsui render %.2f ms, blit %.2f ms, swap %.2f ms avg",
+         gpuRenderMs_ / perfFrames_, gpuBlitMs_ / perfFrames_, gpuSwapMs_ / perfFrames_);
   logf("perf: %d ticks, jsui_tick %.2f ms avg, worst %.2f ms", perfTicks_, perfTicks_ ? perfTick_ / perfTicks_ : 0.0,
        perfTickMax_);
   JsuiPerf p;
@@ -2412,6 +2419,17 @@ void WM::perfFrame(double paintMs, double presentMs) {
 }
 
 bool WM::renderGpu() {
+#ifdef JSUI_WL_MIR_VK
+  if (vulkan_) {
+    if (!mir_->vulkan()->frame(rt_)) return false;
+    if (perf_) {
+      gpuRenderMs_ += mir_->vulkan()->lastRenderMs();
+      gpuBlitMs_ += mir_->vulkan()->lastPassMs();
+      gpuSwapMs_ += mir_->vulkan()->lastWaitMs();
+    }
+    return true;
+  }
+#endif
 #ifdef JSUI_WL_MIR_GL
   if (!gpu_ || !mir_->makeCurrent()) return false;
   bool fresh = false;
@@ -2447,8 +2465,21 @@ bool WM::showMir() {
     logf("cannot create the Mir window: %s", err.c_str());
     return false;
   }
+#ifdef JSUI_WL_MIR_VK
+  if (MirVulkan* vk = mir_->vulkan()) {
+    gpu_ = vk->gpu();  // MirVulkan's
+    vulkan_ = true;
+    logf("rendering on the GPU (Skia Graphite on Vulkan, %s)", vk->deviceName().c_str());
+    logf("apps can't hand over GPU buffers to the Vulkan renderer");
+    shellDirty_ = true;
+    scheduleFrame();
+  } else if (wantGpu && !mir_->vulkanError().empty()) {
+    logf("Vulkan unavailable (%s)", mir_->vulkanError().c_str());
+  }
+#endif
 #ifdef JSUI_WL_MIR_GL
-  if (mir_->gpu()) {
+  if (vulkan_) {
+  } else if (mir_->gpu()) {
     gpu_ = jsui_gpu_create_gl(nullptr, nullptr);
     if (gpu_) {
       logf("rendering on the GPU (GLES via EGL on the Mir window)");

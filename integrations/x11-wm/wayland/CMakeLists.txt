@@ -35,4 +35,12 @@ if(MIRCLIENT_FOUND)
     target_compile_definitions(jsui-wl PRIVATE JSUI_WL_MIR_GL=1)
     target_link_libraries(jsui-wl PRIVATE PkgConfig::MIRGL)
   endif()
+  # Skia Graphite on Vulkan (libhybris' libvulkan, loaded at run time): needs
+  # a JSUI built with JSUI_VULKAN and the Vulkan headers.
+  find_path(JSUI_WL_VULKAN_INCLUDE vulkan/vulkan.h)
+  if(JSUI_VULKAN AND JSUI_WL_VULKAN_INCLUDE)
+    message(STATUS "jsui-wl: --mir renders with Skia Graphite on Vulkan when it can")
+    target_compile_definitions(jsui-wl PRIVATE JSUI_WL_MIR_VK=1)
+    target_link_libraries(jsui-wl PRIVATE ${CMAKE_DL_LIBS})
+  endif()
 endif()

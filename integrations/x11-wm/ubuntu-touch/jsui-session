@@ -45,6 +45,12 @@ set -- --app-env QMLSCENE_DEVICE= \
 # Double-tap to wake: the Tab A7's Himax touch controller does it in hardware
 # (reported as the power key), but only Lomiri's settings normally switch it on.
 [ -w /proc/android_touch/SMWP ] && echo 1 > /proc/android_touch/SMWP
+# Skia Graphite on Vulkan (JSUI_WL_VULKAN=1, wayland/mir_vulkan.h): libhybris
+# finds the vendor's Vulkan driver in /vendor/lib64/hw, and its "null"
+# platform takes Mir's ANativeWindow. Read when libvulkan loads, i.e. at
+# jsui-wl's start.
+export HYBRIS_LD_LIBRARY_PATH="${HYBRIS_LD_LIBRARY_PATH:-/system/lib64:/odm/lib64:/vendor/lib64:/vendor/lib64/hw}"
+export HYBRIS_VULKANPLATFORM="${HYBRIS_VULKANPLATFORM:-null}"
 SCALE=${JSUI_WM_SCALE:-1.75}
 # The Tab A7 panel is portrait (1200x2000); 90 shows the desktop in landscape.
 ROTATE=${JSUI_WM_ROTATE:-90}
