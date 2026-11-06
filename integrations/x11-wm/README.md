@@ -219,11 +219,15 @@ are (screen px), which `docker/tour.py` uses to drive it with xdotool.
 * Wayland: no Xwayland yet (X11-only apps such as xterm and xclock don't run
   under `jsui-wl`), no fractional scaling (apps render at scale 1, GTK text is
   scaled with `GDK_DPI_SCALE`), client buffers are read on the CPU (pixman).
-* Ubuntu Touch: apps draw with Mesa's software GL (llvmpipe, through
-  `--app-env`, see `jsui-session`): their own EGL (libhybris) needs the
-  compositor to offer `android_wlegl`, which wlroots doesn't. Lomiri apps
-  start in ~1.5 s and redraw in ~100 ms. The Tab A7's kernel panics on
-  Bluetooth sockets, so apps get `jsui-no-bluetooth.so` preloaded. Lomiri's
+* Ubuntu Touch: apps draw on the GPU through libhybris' EGL and hand
+  jsui-wl Android gralloc buffers (`android_wlegl`, served by libhybris once
+  jsui-wl calls `eglBindWaylandDisplayWL`; `wayland/wlegl.h`). Each buffer
+  becomes a GL texture that JSUI samples as the window's host texture, with no
+  copy. Subsurfaces of such windows aren't composited. When the shell itself
+  is on the CPU, apps get Mesa's llvmpipe instead (`--app-env-nogpu`, see
+  `jsui-session`) and hand over shm buffers; Lomiri apps then start in ~1.5 s
+  and redraw in ~100 ms. The Tab A7's kernel panics on Bluetooth sockets, so
+  apps get `jsui-no-bluetooth.so` preloaded. Lomiri's
   lock screen, indicators, notifications and Maliit keyboard
   aren't there (the shell has its own keyboard). Bringing the port up on the
   stock Samsung vendor took device-side fixes outside this repository (see the

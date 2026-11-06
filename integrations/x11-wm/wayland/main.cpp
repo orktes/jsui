@@ -4,7 +4,8 @@
 //
 //   jsui-wl [--scale 1.5] [--size 1920x1200] [--bundle shell.js | --dev URL]
 //           [--anchors file.json] [--control socket] [--mouse] [--no-apps-scan]
-//           [--autostart CMD]... [--app-env NAME=VALUE]... [--verbose]
+//           [--autostart CMD]... [--app-env NAME=VALUE]... [--app-env-nogpu NAME=VALUE]...
+//           [--verbose]
 //
 // How it fits together (compare ../main.cpp, the X11 host)
 //
@@ -108,6 +109,9 @@ extern "C" {
 }
 
 #include "jsui/jsui.h"
+#ifdef JSUI_WL_MIR
+#include "wlegl.h"
+#endif
 
 #ifndef JSUI_WM_BUNDLE
 #define JSUI_WM_BUNDLE "integrations/x11-wm/ui/dist/shell.js"
@@ -227,13 +231,14 @@ struct Options {
   int rotate = 0;         // --rotate DEG: clockwise rotation of the desktop on a --mir panel
   std::vector<std::string> autostart;
   std::vector<std::string> appEnv;  // --app-env NAME=VALUE: set (empty VALUE: unset) for launched apps only
+  std::vector<std::string> appEnvNoGpu;  // --app-env-nogpu NAME=VALUE: same, when apps can't hand over GPU buffers
 };
 
 void usage() {
   std::fprintf(stderr,
                "usage: jsui-wl [--scale 1.5] [--size 1920x1200] [--bundle shell.js | --dev URL]\n"
                "               [--anchors file.json] [--control socket] [--mouse] [--no-apps-scan]\n"
-               "               [--autostart CMD]... [--app-env NAME=VALUE]...\n"
+               "               [--autostart CMD]... [--app-env NAME=VALUE]... [--app-env-nogpu NAME=VALUE]...\n"
                "               [--mir [--mir-socket PATH] [--rotate 0|90|180|270]]\n"
                "               [--verbose]\n");
 }
@@ -255,6 +260,7 @@ bool parseArgs(int argc, char** argv, Options& o) {
     else if (a == "--control" && next(v)) o.control = v;
     else if (a == "--autostart" && next(v)) o.autostart.push_back(v);
     else if (a == "--app-env" && next(v) && v.find('=') != std::string::npos) o.appEnv.push_back(v);
+    else if (a == "--app-env-nogpu" && next(v) && v.find('=') != std::string::npos) o.appEnvNoGpu.push_back(v);
     else if (a == "--mouse") o.mouse = true;
     else if (a == "--no-apps-scan") o.scanApps = false;
     else if (a == "--mir") o.mir = true;
@@ -656,6 +662,12 @@ class WM {
   uint32_t mirOutput_ = 0;
   // --mir on the GPU: Skia draws the desktop into the Mir window's GL context.
   JsuiGpuContext* gpu_ = nullptr;
+  // Apps' GPU buffers (android_wlegl, wlegl.h): the one each window shows,
+  // locked until the next one replaces it or the window's texture goes.
+  bool gpuApps_ = false;
+  std::map<uint32_t, wlr_buffer*> gpuBuffers_;
+  bool captureGpu(Client* c);
+  void removeWindowTexture(uint32_t id);
   bool renderGpu();
   // Frame cost on the Mir path (JSUI_WL_PERF=1): paint + present, logged every 60 frames.
   bool perf_ = false;
@@ -677,7 +689,14 @@ class WM {
 // ------------------------------------------------------------- setup
 
 bool WM::setup() {
-  wlr_log_init(g_verbose ? WLR_DEBUG : WLR_ERROR, nullptr);
+  // Apps' GPU buffers (wlegl.h) never become pixman textures: wlroots says so
+  // twice on every commit.
+  wlr_log_init(g_verbose ? WLR_DEBUG : WLR_ERROR, [](wlr_log_importance, const char* fmt, va_list args) {
+    if (std::strstr(fmt, "Failed to upload buffer") || std::strstr(fmt, "Failed to create texture")) return;
+    std::fprintf(stderr, "[wlr] ");
+    std::vfprintf(stderr, fmt, args);
+    std::fprintf(stderr, "\n");
+  });
   display_ = wl_display_create();
   loop_ = wl_display_get_event_loop(display_);
   backend_ = wlr_backend_autocreate(display_, nullptr);
@@ -1192,6 +1211,8 @@ Rect WM::popupRect(Client* p) const {
 }
 
 void WM::capture(Client* c) {
+  if (gpuApps_ && captureGpu(c)) return;
+  if (gpuBuffers_.count(c->id)) removeWindowTexture(c->id);  // back on shm
   wlr_surface* root = c->xdg->surface;
   int ox = c->popup ? 0 : -c->geoX, oy = c->popup ? 0 : -c->geoY;
   int w = c->popup ? root->current.width : c->w, h = c->popup ? root->current.height : c->h;
@@ -1247,6 +1268,53 @@ void WM::capture(Client* c) {
   scheduleTick(0);
 }
 
+// A window drawn on the GPU (android_wlegl): its buffer's texture becomes the
+// window's host texture as is. Subsurfaces aren't composited on this path
+// (Qt's GL windows have none).
+bool WM::captureGpu(Client* c) {
+#ifdef JSUI_WL_MIR_GL
+  wlr_buffer* buf = c->xdg->surface->current.buffer;
+  wlegl::Buffer* b = wlegl::from(buf);
+  if (!b || !mir_->makeCurrent()) return false;
+  GLuint tex = wlegl::texture(b);
+  if (!tex) return false;
+  JsuiTexture t{};
+  t.kind = JSUI_TEXTURE_GL;
+  t.handle = reinterpret_cast<void*>(uintptr_t(tex));
+  t.width = buf->width;
+  t.height = buf->height;
+  t.flags = b->opaque ? JSUI_TEXTURE_OPAQUE : 0;
+  std::string key = "win:" + std::to_string(c->id);
+  if (jsui_set_texture(rt_, key.c_str(), &t) == 0) jsui_texture_updated(rt_, key.c_str());
+  wlr_buffer* held = gpuBuffers_[c->id];
+  if (held != buf) {
+    gpuBuffers_[c->id] = wlr_buffer_lock(buf);
+    if (held) wlr_buffer_unlock(held);
+  }
+  c->texW = buf->width;
+  c->texH = buf->height;
+  c->rgba.clear();
+  if (!c->hasTexture) {
+    c->hasTexture = true;
+    if (c->popup) publishPopups();
+    else publishWindow(c);
+  }
+  scheduleTick(0);
+  return true;
+#else
+  (void)c;
+  return false;
+#endif
+}
+
+void WM::removeWindowTexture(uint32_t id) {
+  jsui_remove_texture(rt_, ("win:" + std::to_string(id)).c_str());
+  auto it = gpuBuffers_.find(id);
+  if (it == gpuBuffers_.end()) return;
+  if (it->second) wlr_buffer_unlock(it->second);
+  gpuBuffers_.erase(it);
+}
+
 void WM::onMap(Client* c) {
   c->mapped = true;
   c->mappedAt = nowMs();
@@ -1283,7 +1351,7 @@ void WM::onUnmap(Client* c) {
   if (c->popup) {
     popups_.erase(std::remove(popups_.begin(), popups_.end(), c->id), popups_.end());
     publishPopups();
-    jsui_remove_texture(rt_, ("win:" + std::to_string(c->id)).c_str());
+    removeWindowTexture(c->id);
     return;
   }
   stack_.erase(std::remove(stack_.begin(), stack_.end(), c->id), stack_.end());
@@ -1628,7 +1696,7 @@ void WM::onMessage(const char* name, const char* json) {
     Client* cl = find(id);
     if (!cl || !cl->mapped) {
       releaseAt_.erase(id);
-      jsui_remove_texture(rt_, ("win:" + std::to_string(id)).c_str());
+      removeWindowTexture(id);
     }
   } else if (n == "wm:keyboard") {
     keyboardGrabbed_ = v["grab"].truthy();
@@ -2165,7 +2233,7 @@ void WM::tick() {
   double now = nowMs();
   for (auto it = releaseAt_.begin(); it != releaseAt_.end();) {
     if (now >= it->second) {
-      jsui_remove_texture(rt_, ("win:" + std::to_string(it->first)).c_str());
+      removeWindowTexture(it->first);
       it = releaseAt_.erase(it);
     } else {
       ++it;
@@ -2330,6 +2398,8 @@ bool WM::showMir() {
     gpu_ = jsui_gpu_create_gl(nullptr, nullptr);
     if (gpu_) {
       logf("rendering on the GPU (GLES via EGL on the Mir window)");
+      gpuApps_ = wlegl::bind(display_, mir_->eglDisplay());
+      logf(gpuApps_ ? "apps draw on the GPU too (android_wlegl)" : "apps can't hand over GPU buffers");
       shellDirty_ = true;
       scheduleFrame();
     } else {
@@ -2409,6 +2479,7 @@ int WM::run() {
 #ifdef JSUI_WL_MIR
   if (mir_ && !showMir()) return 1;
 #endif
+  if (!gpuApps_) g_appEnv.insert(g_appEnv.end(), opt_.appEnvNoGpu.begin(), opt_.appEnvNoGpu.end());
   if (!createRuntime()) return 1;
   for (const auto& cmd : opt_.autostart) launch(cmd);
   notifySystemd(socketName_);

@@ -244,6 +244,7 @@ class MirHost {
 #ifdef JSUI_WL_MIR_GL
   // GPU window. Makes the window's GL context current.
   bool makeCurrent() { return gpu_ && eglMakeCurrent(dpy_, surf_, surf_, ctx_); }
+  EGLDisplay eglDisplay() const { return dpy_; }
 
   // The texture JSUI draws the desktop into (w_ x h_, GL bottom-left origin).
   // *fresh: newly (re)allocated, so it holds no previous frame.

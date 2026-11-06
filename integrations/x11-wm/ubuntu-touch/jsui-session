@@ -29,16 +29,17 @@ export QT_QPA_PLATFORM=wayland GDK_BACKEND=wayland
 export QT_PLUGIN_PATH="$DIR/qt-plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}:/usr/lib/aarch64-linux-gnu/qt5/plugins"
 unset QT_IM_MODULE
 # Apps only (jsui-wl itself renders through libhybris' EGL):
-# - Lomiri's UI toolkit needs OpenGL, and libhybris' Wayland EGL wants a
-#   compositor that speaks android_wlegl. Apps run on Mesa's llvmpipe
-#   instead, which hands jsui-wl plain shm buffers; the session's
-#   QMLSCENE_DEVICE (Halium's scene graph context) has to go with it.
+# - Lomiri's UI toolkit needs OpenGL. With the shell on the GPU, apps' EGL
+#   (libhybris) hands jsui-wl gralloc buffers over android_wlegl. Without it
+#   (--app-env-nogpu) they run on Mesa's llvmpipe and hand over shm buffers.
+#   The session's QMLSCENE_DEVICE (Lomiri's scene graph context for Mir)
+#   goes either way.
 # - The Tab A7's kernel panics on any Bluetooth socket (BUG in
 #   bt_sock_create), which System Settings opens at start: apps get
 #   EAFNOSUPPORT instead.
-set -- \
-  --app-env __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json \
-  --app-env LIBGL_ALWAYS_SOFTWARE=1 --app-env QMLSCENE_DEVICE=
+set -- --app-env QMLSCENE_DEVICE= \
+  --app-env-nogpu __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json \
+  --app-env-nogpu LIBGL_ALWAYS_SOFTWARE=1
 [ -e "$DIR/lib/jsui-no-bluetooth.so" ] && \
   set -- "$@" --app-env LD_PRELOAD="$DIR/lib/jsui-no-bluetooth.so${LD_PRELOAD:+:$LD_PRELOAD}"
 # Double-tap to wake: the Tab A7's Himax touch controller does it in hardware
