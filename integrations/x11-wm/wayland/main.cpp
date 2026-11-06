@@ -698,7 +698,20 @@ class WM {
   double cpuPaintMs_ = 0;  // CPU raster since the last presented frame
   double gpuRenderMs_ = 0, gpuBlitMs_ = 0, gpuSwapMs_ = 0;  // GPU frame parts (perf window sums)
   double perfPaint_ = 0, perfPresent_ = 0, perfMax_ = 0;
-  double perfTick_ = 0, perfTickMax_ = 0;  // jsui_tick (JS, layout) since the last perf line
+  double perfTick_ = 0, perfTickMax_ = 0;
+  // Paint stats summed over the perf window (jsui_get_paint_stats).
+  double perfMpx_ = 0;  // megapixels repainted
+  long long perfLayers_ = 0, perfLayerDraws_ = 0, perfLayerRenders_ = 0, perfDraws_ = 0, perfShadowRenders_ = 0;
+  void perfPaintStats() {
+    JsuiPaintStats ps;
+    jsui_get_paint_stats(rt_, &ps);
+    perfMpx_ += double(ps.repainted_pixels) / 1e6;
+    perfLayers_ += ps.save_layers;
+    perfLayerDraws_ += ps.layer_draws;
+    perfLayerRenders_ += ps.layer_renders;
+    perfDraws_ += ps.draws;
+    perfShadowRenders_ += ps.shadow_renders;
+  }  // jsui_tick (JS, layout) since the last perf line
   int perfTicks_ = 0;
   int perfFrames_ = 0;
   void perfFrame(double paintMs, double presentMs);
@@ -1318,7 +1331,9 @@ bool WM::captureGpu(Client* c) {
   t.handle = reinterpret_cast<void*>(uintptr_t(tex));
   t.width = buf->width;
   t.height = buf->height;
-  t.flags = b->opaque ? JSUI_TEXTURE_OPAQUE : 0;
+  // Toplevels of GPU apps are opaque (Qt's window background; no compositor
+  // translucency on Ubuntu Touch): JSUI then culls what they cover.
+  t.flags = b->opaque || !c->popup ? JSUI_TEXTURE_OPAQUE : 0;
   std::string key = "win:" + std::to_string(c->id);
   if (jsui_set_texture(rt_, key.c_str(), &t) == 0) jsui_texture_updated(rt_, key.c_str());
   wlr_buffer* held = gpuBuffers_[c->id];
@@ -1573,7 +1588,10 @@ bool WM::createRuntime() {
   rt_ = jsui_create(&cfg);
   if (!rt_) return false;
 #ifdef JSUI_WL_MIR
-  if (perf_) jsui_set_profiling(rt_, 1);
+  if (perf_) {
+    jsui_set_profiling(rt_, 1);
+    jsui_set_paint_counting(rt_, 1);
+  }
 #endif
   publishScreen();
   publishSystem();
@@ -2463,6 +2481,13 @@ void WM::perfFrame(double paintMs, double presentMs) {
          gpuRenderMs_ / perfFrames_, gpuBlitMs_ / perfFrames_, gpuSwapMs_ / perfFrames_);
   logf("perf: %d ticks, jsui_tick %.2f ms avg, worst %.2f ms", perfTicks_, perfTicks_ ? perfTick_ / perfTicks_ : 0.0,
        perfTickMax_);
+  logf("perf: per frame %.2f Mpx repainted, %.1f draws, %.2f offscreen layers, %.2f cached layer draws"
+       " (%.2f rendered), %.2f shadow blurs",
+       perfMpx_ / perfFrames_, double(perfDraws_) / perfFrames_, double(perfLayers_) / perfFrames_,
+       double(perfLayerDraws_) / perfFrames_, double(perfLayerRenders_) / perfFrames_,
+       double(perfShadowRenders_) / perfFrames_);
+  perfMpx_ = 0;
+  perfLayers_ = perfLayerDraws_ = perfLayerRenders_ = perfDraws_ = perfShadowRenders_ = 0;
   JsuiPerf p;
   jsui_get_perf(rt_, &p, 1);
   logf("perf: per frame paint %.2f, layout %.2f, style %.2f, commit %.2f, animated %.2f, input %.2f, js thread %.2f ms;"
@@ -2482,6 +2507,7 @@ bool WM::renderGpu() {
   if (vulkan_) {
     if (!mir_->vulkan()->frame(rt_)) return false;
     if (perf_) {
+      perfPaintStats();
       gpuRenderMs_ += mir_->vulkan()->lastRenderMs();
       gpuBlitMs_ += mir_->vulkan()->lastPassMs();
       gpuSwapMs_ += mir_->vulkan()->lastWaitMs();
@@ -2502,6 +2528,7 @@ bool WM::renderGpu() {
   double t0 = nowMs();
   if (jsui_render_gl_target(rt_, gpu_, &t) != 0) return false;
   double t1 = nowMs();
+  if (perf_) perfPaintStats();
   mir_->presentGpu();
   if (perf_) {
     gpuRenderMs_ += t1 - t0;

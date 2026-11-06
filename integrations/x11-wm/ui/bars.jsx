@@ -60,24 +60,24 @@ export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, set
     <View {...swipe.panHandlers} style={[styles.bar, { height: screen.topBar, backgroundColor: solid ? t.bar : 'transparent', borderColor: solid ? t.panelLine : 'transparent' }]}>
       <View style={styles.side}>
         <Pressable ref={apps.ref} onLayout={apps.onLayout} onPress={() => toggle('launcher')}
-          style={({ pressed }) => [styles.barButton, (pressed || panel === 'launcher') && { backgroundColor: t.panelLine }]}>
+          style={[styles.barButton, panel === 'launcher' && { backgroundColor: t.panelLine }]} pressedStyle={{ backgroundColor: t.panelLine }}>
           <Icon name="grid" size={20} color={t.text} />
           <Text style={[styles.barText, { color: t.text, marginLeft: 8 }]}>Apps</Text>
         </Pressable>
       </View>
       <Pressable ref={clock.ref} onLayout={clock.onLayout} onPress={() => toggle('calendar')}
-        style={({ pressed }) => [styles.clock, (pressed || panel === 'calendar') && { backgroundColor: t.panelLine }]}>
+        style={[styles.clock, panel === 'calendar' && { backgroundColor: t.panelLine }]} pressedStyle={{ backgroundColor: t.panelLine }}>
         <Text style={[styles.barText, styles.tabular, { color: t.textDim, fontWeight: '500' }]}>{dateText(now)}</Text>
         <Text style={[styles.barText, styles.tabular, { color: t.text, marginLeft: 10 }]}>{timeText(now)}</Text>
         {settings.doNotDisturb && <View style={{ marginLeft: 8 }}><Icon name="moon" size={16} color={t.textDim} /></View>}
       </Pressable>
       <View style={[styles.side, { justifyContent: 'flex-end' }]}>
         <Pressable ref={kbd.ref} onLayout={kbd.onLayout} onPress={() => setSetting('osk', !settings.osk)}
-          style={({ pressed }) => [styles.barButton, (pressed || settings.osk) && { backgroundColor: t.panelLine }]}>
+          style={[styles.barButton, settings.osk && { backgroundColor: t.panelLine }]} pressedStyle={{ backgroundColor: t.panelLine }}>
           <Icon name="keyboard" size={22} color={t.text} />
         </Pressable>
         <Pressable ref={status.ref} onLayout={status.onLayout} onPress={() => toggle('quick')}
-          style={({ pressed }) => [styles.barButton, styles.status, (pressed || panel === 'quick') && { backgroundColor: t.panelLine }]}>
+          style={[styles.barButton, styles.status, panel === 'quick' && { backgroundColor: t.panelLine }]} pressedStyle={{ backgroundColor: t.panelLine }}>
           <Icon name="wifi" size={20} color={settings.wifi ? t.text : t.textMute} />
           <View style={{ width: 12 }} />
           <Icon name={settings.muted || settings.volume === 0 ? 'mute' : 'volume'} size={20} color={t.text} />
@@ -139,7 +139,7 @@ const DockItem = memo(function DockItem({ item, apps, active, onLongPress, size 
       onPress={onPress}
       onLongPress={() => Date.now() - lastDockSwipe > 800 && onLongPress(item)}
       delayLongPress={450}
-      style={({ pressed }) => [styles.dockItem, { width: size + 12 }, pressed && { transform: [{ scale: 0.92 }] }]}
+      style={[styles.dockItem, { width: size + 12 }]} pressedStyle={{ transform: [{ scale: 0.92 }] }}
     >
       <Animated.View style={{ transform: [{ translateY: ty }] }}>
         <AppIcon app={item.app} win={item.windows[0]} size={size} />
@@ -229,7 +229,7 @@ export const Dock = memo(function Dock({ screen, apps, windows, active, settings
         style={[styles.dock, { height: h, borderRadius: h / 2.4, backgroundColor: t.bar, borderColor: t.panelLine, boxShadow: `0px 12px 40px ${t.shadow}` }]}
       >
         <Pressable ref={launcher.ref} onLayout={launcher.onLayout} onPress={() => setPanel(panel === 'launcher' ? null : 'launcher')}
-          style={({ pressed }) => [styles.dockItem, { width: size + 12 }, pressed && { transform: [{ scale: 0.92 }] }]}>
+          style={[styles.dockItem, { width: size + 12 }]} pressedStyle={{ transform: [{ scale: 0.92 }] }}>
           <View style={[styles.launcherBtn, plate(panel === 'launcher')]}>
             <Icon name="grid" size={26} color={panel === 'launcher' ? t.accentText : t.text} />
           </View>
@@ -241,7 +241,7 @@ export const Dock = memo(function Dock({ screen, apps, windows, active, settings
         ))}
         <View style={[styles.sep, { backgroundColor: t.panelLine }]} />
         <Pressable ref={overview.ref} onLayout={overview.onLayout} onPress={() => setPanel(panel === 'overview' ? null : 'overview')}
-          style={({ pressed }) => [styles.dockItem, { width: size + 12 }, pressed && { transform: [{ scale: 0.92 }] }]}>
+          style={[styles.dockItem, { width: size + 12 }]} pressedStyle={{ transform: [{ scale: 0.92 }] }}>
           <View style={[styles.launcherBtn, plate(panel === 'overview')]}>
             <Icon name="overview" size={26} color={panel === 'overview' ? t.accentText : t.text} />
           </View>
@@ -308,7 +308,7 @@ export const DockMenu = memo(function DockMenu({ item, anchor, onClose }) {
         style={[styles.menu, { left: Math.max(12, x), bottom: 96, backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 16px 48px ${t.shadow}` }]}>
         <Text numberOfLines={1} style={[styles.menuTitle, { color: t.textDim }]}>{(item.app && item.app.name) || (item.windows[0] && appTitle(item.windows[0], []))}</Text>
         {rows.map((r, i) => (
-          <Pressable key={i} onPress={run(r.fn)} style={({ pressed }) => [styles.menuRow, pressed && { backgroundColor: t.panelLine }]}>
+          <Pressable key={i} onPress={run(r.fn)} style={styles.menuRow} pressedStyle={{ backgroundColor: t.panelLine }}>
             <Icon name={r.icon} size={20} color={r.danger ? t.danger : t.text} />
             <Text numberOfLines={1} style={[styles.menuText, { color: r.danger ? t.danger : t.text }]}>{r.label}</Text>
           </Pressable>

@@ -48,7 +48,7 @@ const AppTile = memo(function AppTile({ app, onLaunch }) {
       ref={anchor.ref}
       onLayout={anchor.onLayout}
       onPress={() => onLaunch(app)}
-      style={({ pressed }) => [styles.appTile, pressed && { backgroundColor: 'rgba(255,255,255,0.12)', transform: [{ scale: 0.95 }] }]}
+      style={styles.appTile} pressedStyle={{ backgroundColor: 'rgba(255,255,255,0.12)', transform: [{ scale: 0.95 }] }}
     >
       <AppIcon app={app} size={72} />
       <Text numberOfLines={2} style={[styles.appName, { color: '#fff' }]}>{cleanName(app.name)}</Text>
@@ -175,19 +175,19 @@ const SwitcherCard = memo(function SwitcherCard({ win, card, enter, from, title,
         <Text numberOfLines={1} style={styles.cardTitle}>{title}</Text>
         {canSplit && (
           <Pressable ref={splitAnchor.ref} onLayout={splitAnchor.onLayout} onPress={() => onSplit(win)}
-            style={({ pressed }) => [styles.headPill, { backgroundColor: pressed ? t.accent : 'rgba(255,255,255,0.14)' }]}>
+            style={[styles.headPill, { backgroundColor: 'rgba(255,255,255,0.14)' }]} pressedStyle={{ backgroundColor: t.accent }}>
             <Icon name="snapRight" size={18} color="#fff" />
             <Text style={styles.pillText}>Split</Text>
           </Pressable>
         )}
         <Pressable onPress={() => wm.close(win.id)} hitSlop={8}
-          style={({ pressed }) => [styles.headClose, { backgroundColor: pressed ? t.danger : 'rgba(255,255,255,0.14)' }]}>
+          style={[styles.headClose, { backgroundColor: 'rgba(255,255,255,0.14)' }]} pressedStyle={{ backgroundColor: t.danger }}>
           <Icon name="close" size={16} color="#fff" strokeWidth={2.6} />
         </Pressable>
       </Animated.View>
       <Animated.View style={{ transform: [{ scale: sc }] }}>
         <Pressable ref={anchor.ref} onLayout={anchor.onLayout} onPress={() => onPick(win)}
-          style={({ pressed }) => ({ transform: [{ scale: pressed ? 0.97 : 1 }] })}>
+          pressedStyle={{ transform: [{ scale: 0.97 }] }}>
           <Animated.View style={[styles.cardBody, { width: card.w, height: card.h, borderRadius: radius }]}>
             <HostTexture name={`win:${win.id}`} style={{ width: card.w, height: card.h }} resizeMode="stretch" />
           </Animated.View>
@@ -253,7 +253,7 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
         <Text style={styles.overviewTitle}>{shown.length ? 'Recent apps' : 'No open apps'}</Text>
         {shown.length > 1 && (
           <Pressable ref={closeAll.ref} onLayout={closeAll.onLayout} onPress={() => wm.closeAll()} hitSlop={8}
-            style={({ pressed }) => [styles.textButton, pressed && { backgroundColor: 'rgba(255,255,255,0.14)' }]}>
+            style={styles.textButton} pressedStyle={{ backgroundColor: 'rgba(255,255,255,0.14)' }}>
             <Text style={styles.textButtonText}>Close all</Text>
           </Pressable>
         )}
@@ -326,7 +326,7 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
                 { icon: 'logout', label: 'Log out', fn: () => wm.quit() },
               ].map((r) => (
                 <Pressable key={r.label} onPress={r.fn}
-                  style={({ pressed }) => [styles.powerRow, { backgroundColor: pressed ? t.panelLine : t.panelRaised }]}>
+                  style={[styles.powerRow, { backgroundColor: t.panelRaised }]} pressedStyle={{ backgroundColor: t.panelLine }}>
                   <Icon name={r.icon} size={22} color={t.text} />
                   <Text style={[styles.powerText, { color: t.text }]}>{r.label}</Text>
                 </Pressable>
@@ -398,7 +398,7 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
             <View pointerEvents="none" style={[styles.fadeBottom, { experimental_backgroundImage: `linear-gradient(180deg, rgba(0,0,0,0) 0%, ${t.panel} 100%)` }]} />
             </View>
             {notifications.length > 0 && (
-              <Pressable onPress={onClear} style={({ pressed }) => [styles.pill, { alignSelf: 'flex-start', marginTop: 10, backgroundColor: pressed ? t.panelLine : t.panelRaised }]}>
+              <Pressable onPress={onClear} style={[styles.pill, { alignSelf: 'flex-start', marginTop: 10, backgroundColor: t.panelRaised }]} pressedStyle={{ backgroundColor: t.panelLine }}>
                 <Text style={[styles.pillText, { color: t.text, marginLeft: 0 }]}>Clear all</Text>
               </Pressable>
             )}

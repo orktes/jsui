@@ -167,8 +167,9 @@ pace.
 If EGL or Skia's GL context fail, or with `JSUI_WL_GPU=0`, the CPU frame is
 copied into a software window instead. On the Tab A7 a frame takes ~22 ms on
 the GPU against ~91 ms on the CPU (`JSUI_WL_PERF=1` logs paint/present time,
-the GPU frame's render/blit/swap split, `jsui_tick` time and JSUI's own
-per-phase profile every 60 frames; `JSUI_WL_GPU_FINISH=1` waits for the GPU
+the GPU frame's render/blit/swap split, `jsui_tick` time, JSUI's own
+per-phase profile and its paint stats (pixels repainted, draws, offscreen and
+cached layers) every 60 frames; `JSUI_WL_GPU_FINISH=1` waits for the GPU
 before the swap, so the blit time holds the frame's GPU work and the swap
 only the wait for a buffer; `JSUI_WL_GPU_DEBUG=1|2` logs the first presents /
 draws a solid quad). With `JSUI_WL_VULKAN=1` the desktop is drawn with Skia
