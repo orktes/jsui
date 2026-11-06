@@ -36,11 +36,8 @@ const Key = memo(function Key({ k, label, icon, flex, alt, on, onPress }) {
       ref={anchor.ref}
       onLayout={anchor.onLayout}
       onPress={onPress}
-      style={({ pressed }) => [
-        styles.key,
-        { flex, backgroundColor: on ? t.accent : pressed ? t.accent : alt ? t.keyAlt : t.key },
-        pressed && { transform: [{ scale: 0.94 }] },
-      ]}
+      style={[styles.key, { flex, backgroundColor: on ? t.accent : alt ? t.keyAlt : t.key }]}
+      pressedStyle={{ backgroundColor: t.accent, transform: [{ scale: 0.94 }] }}
     >
       {icon ? (
         <Icon name={icon} size={24} color={on ? t.accentText : t.text} />

@@ -24,6 +24,7 @@
 #include "render/gpu_metal.h"
 #include "render/image_cache.h"
 #include "render/native_component.h"
+#include "render/painter.h"
 #include "render/pipeline_cache.h"
 #include "render/shader_cache.h"
 #include "render/shader_view.h"
@@ -697,6 +698,36 @@ void jsui_get_perf(JsuiRuntime* rt, JsuiPerf* out, int reset) {
     js.batches = 0;
     js.applyUs = js.syncUs = 0;
   }
+}
+
+void jsui_set_paint_counting(JsuiRuntime* rt, int on) {
+  if (rt) jsui::setPaintCounting(rt->surface->doc, on != 0);
+}
+
+void jsui_get_paint_stats(JsuiRuntime* rt, JsuiPaintStats* out) {
+  if (!out) return;
+  *out = JsuiPaintStats{};
+  if (!rt) return;
+  const jsui::PaintStats s = jsui::lastPaintStats(rt->surface->doc);
+  out->nodes_painted = s.nodesPainted;
+  out->nodes_culled = s.nodesCulled;
+  out->nodes_occluded = s.nodesOccluded;
+  out->damaged_pixels = s.damagedPixels;
+  out->repainted_pixels = s.repaintedPixels;
+  out->damage_rects = s.damageRects;
+  out->draws = s.draws;
+  out->text_draws = s.textDraws;
+  out->image_draws = s.imageDraws;
+  out->save_layers = s.saveLayers;
+  out->clips = s.clips;
+  out->sprite_draws = s.spriteDraws;
+  out->sprite_renders = s.spriteRenders;
+  out->shadow_draws = s.shadowDraws;
+  out->shadow_renders = s.shadowRenders;
+  out->layer_draws = s.layerDraws;
+  out->layer_renders = s.layerRenders;
+  out->motion_draws = s.motionDraws;
+  out->blit_pixels = s.blitPixels;
 }
 
 void jsui_set_event_time(JsuiRuntime* rt, double time_ms) { rt->surface->input->setEventTime(time_ms); }

@@ -1287,6 +1287,45 @@ JSUI_API void jsui_set_profiling(JsuiRuntime* rt, int on);
  * starts new totals. */
 JSUI_API void jsui_get_perf(JsuiRuntime* rt, JsuiPerf* out, int reset);
 
+/* What the runtime's last render drew (any backend): how much of the frame
+ * was repainted, and how. For finding what makes a frame expensive on the
+ * GPU: offscreen layers (each an extra pass over its area), layers drawn
+ * from the GPU layer cache instead, cached shadow masks and sprites.
+ *
+ *     jsui_set_paint_counting(rt, 1);  // also count draw calls / layers / clips
+ *     ... render ...
+ *     JsuiPaintStats s;
+ *     jsui_get_paint_stats(rt, &s);
+ *
+ * Counted always unless noted; the draw-call fields (draws ... clips) only
+ * while paint counting is on (it adds a counting pass over the frame's
+ * records: tools and perf logging, not every frame of a shipped game). */
+typedef struct JsuiPaintStats {
+    int nodes_painted;            /* nodes drawn */
+    int nodes_culled;             /* subtrees skipped: outside the damage */
+    int nodes_occluded;           /* subtrees or own drawing skipped: covered by a later opaque node */
+    long long damaged_pixels;     /* area of the damage bounds, device px (0: full repaint) */
+    long long repainted_pixels;   /* area of the damage region (a full repaint: the target) */
+    int damage_rects;             /* rects in the damage region (0: full repaint) */
+    /* Paint counting only. */
+    int draws;                    /* draw calls that survived the clip's quick reject */
+    int text_draws;               /* ... of which text */
+    int image_draws;              /* ... of which images */
+    int save_layers;              /* offscreen layers rendered (an extra pass each) */
+    int clips;                    /* clip operations */
+    /* Cached content: drawn, and of those rendered this frame (misses). */
+    int sprite_draws, sprite_renders;  /* raster sprites (CPU raster: gradients, images) */
+    int shadow_draws, shadow_renders;  /* blurred shadow masks */
+    int layer_draws, layer_renders;    /* GPU layer cache: opacity layers, raster-cached subtrees */
+    int motion_draws;             /* layer draws reused under a scale / rotation change */
+    long long blit_pixels;        /* pixels a scroll blit moved instead of repainting */
+} JsuiPaintStats;
+/* Counts the draw calls, layers and clips of the next renders (non-zero), or
+ * stops (0, the default). */
+JSUI_API void jsui_set_paint_counting(JsuiRuntime* rt, int on);
+/* The last render's paint stats (all zero before the first render). */
+JSUI_API void jsui_get_paint_stats(JsuiRuntime* rt, JsuiPaintStats* out);
+
 /* ------------------------------------------------------------ GPU (OpenGL)
  *
  * Optional GPU backend: Skia Ganesh draws the frame straight into the

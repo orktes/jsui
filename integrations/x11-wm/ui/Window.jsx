@@ -36,10 +36,8 @@ function TitleButton({ icon, onPress, danger, t, label, anchorName }) {
       onPress={onPress}
       accessibilityLabel={label}
       hitSlop={4}
-      style={({ pressed }) => [
-        styles.titleButton,
-        pressed && { backgroundColor: danger ? t.danger : t.panelLine },
-      ]}
+      style={styles.titleButton}
+      pressedStyle={{ backgroundColor: danger ? t.danger : t.panelLine }}
     >
       {({ pressed }) => <Icon name={icon} size={20} color={pressed && danger ? '#fff' : t.textDim} strokeWidth={2.2} />}
     </Pressable>

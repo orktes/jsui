@@ -13,12 +13,12 @@ export const IconButton = memo(function IconButton({ icon, onPress, size = touch
       onLayout={anchor && anchor.onLayout}
       onPress={onPress}
       accessibilityLabel={label}
-      style={({ pressed }) => [
+      style={[
         { width: size, height: size, borderRadius: size / 2, alignItems: 'center', justifyContent: 'center' },
         active && { backgroundColor: t.accent },
-        pressed && { backgroundColor: active ? t.accentStrong : t.panelLine },
         style,
       ]}
+      pressedStyle={{ backgroundColor: active ? t.accentStrong : t.panelLine }}
     >
       <Icon name={icon} size={iconSize} color={color || (active ? t.accentText : t.text)} />
     </Pressable>
@@ -48,10 +48,8 @@ export const ToggleTile = memo(function ToggleTile({ icon, label, sub, on, onPre
       ref={anchor && anchor.ref}
       onLayout={anchor && anchor.onLayout}
       onPress={onPress}
-      style={({ pressed }) => [
-        styles.tile,
-        { backgroundColor: on ? t.tileOn : t.panelRaised, transform: [{ scale: pressed ? 0.97 : 1 }] },
-      ]}
+      style={[styles.tile, { backgroundColor: on ? t.tileOn : t.panelRaised }]}
+      pressedStyle={{ transform: [{ scale: 0.97 }] }}
     >
       <View style={[styles.tileIcon, { backgroundColor: on ? 'rgba(255,255,255,0.18)' : t.panelLine }]}>
         <Icon name={icon} size={22} color={on ? t.accentText : t.text} />

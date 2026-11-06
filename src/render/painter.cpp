@@ -4523,9 +4523,11 @@ sk_sp<SkImage> backdropImage(Document& doc, SkCanvas* canvas) {
   RootRecord* root = rootRecord(doc);
   const Backdrop& bd = root->backdrop;
   LayerCache* cache = tLayerCache;
-  if (!cache || !cache->impl->backdrop || !bd.sig || bd.stable < kStableUpdates || !canvas->recorder()) return nullptr;
+  // The canvas' Graphite recorder or Ganesh context: the texture is theirs.
+  const void* owner = canvas->recorder() ? static_cast<const void*>(canvas->recorder())
+                                         : static_cast<const void*>(canvas->recordingContext());
+  if (!cache || !cache->impl->backdrop || !bd.sig || bd.stable < kStableUpdates || !owner) return nullptr;
   LayerCache::Impl& lc = *cache->impl;
-  const void* owner = canvas->recorder();
   const SkISize size = canvas->getBaseLayerSize();
   // Its entry, by a key no node has.
   const Node* key = reinterpret_cast<const Node*>(&root->backdrop);
@@ -4554,7 +4556,7 @@ sk_sp<SkImage> backdropImage(Document& doc, SkCanvas* canvas) {
   ctx.snapSpace = oc->getTotalMatrix();
   paintNode(doc.root(), oc, ctx);
 #if defined(JSUI_GRAPHITE_AS_IMAGE)
-  sk_sp<SkImage> image = SkSurfaces::AsImage(surf);
+  sk_sp<SkImage> image = oc->recorder() ? SkSurfaces::AsImage(surf) : surf->makeImageSnapshot();
 #else
   sk_sp<SkImage> image = surf->makeImageSnapshot();
 #endif

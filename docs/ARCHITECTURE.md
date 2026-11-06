@@ -359,6 +359,13 @@ JsuiGLTarget t = { .texture = tex, .width = w, .height = h, .flags = JSUI_GL_TOP
 jsui_render_gl_target(rt, gpu, &t);
 ```
 
+* **Layer caches, as on Graphite.** The context keeps a `LayerCache` per
+  runtime (`GpuLayerCaches`, see "Paint performance"): opacity layers and
+  raster-cached subtrees whose content is unchanged are drawn from their
+  textures instead of an offscreen pass each frame, and damage rects are
+  repainted over a texture of the static backdrop. On the Galaxy Tab A7
+  (Adreno 610, jsui-wl's launcher / switcher bench) that took the Skia
+  render from ~23 to ~19 ms a frame.
 * **Same painter, same damage tracking.** `Runtime::renderCanvasTracked()`
   lays out, refreshes the incremental paint records and tells the backend
   how much changed. GPU targets (swapped default framebuffers in particular)
