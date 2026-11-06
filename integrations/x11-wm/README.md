@@ -150,15 +150,18 @@ copied into a fullscreen software window of the system compositor, opened
 with mirclient as session `$MIR_SERVER_NAME` on `$MIR_SERVER_HOST_SOCKET`
 (`wayland/mir_host.h`). Touch, pointer and key events of that window come
 back on Mir's thread and are queued for the Wayland loop. It is built when
-`mir1client` (UBports) or `mirclient` is found. `jsui-wl` also runs nested in
+`mir1client` (UBports) or `mirclient` is found. `--rotate 90|180|270`
+turns the desktop on the panel (the Tab A7's panel is 1200x2000 portrait;
+`jsui-session` uses 90, `JSUI_WM_ROTATE` overrides it) and maps touches
+back. `jsui-wl` also runs nested in
 any Wayland compositor (`WLR_BACKENDS=wayland`) and follows the size the host
 gives it.
 
 * `ubuntu-touch/Dockerfile` builds the arm64 package: `jsui-wl`, the shell,
   wlroots 0.17 and the few libraries the Ubuntu Touch image lacks, and foot.
 * `ubuntu-touch/install.sh` (on the tablet, as `phablet`) unpacks it to
-  `~/jsui-wm` and adds a systemd user drop-in for `lomiri-full-shell.service`
-  that sets `LOMIRI_BINARY=~/jsui-wm/jsui-session`. Nothing outside the home
+  `~/jsui-wm` and adds systemd user drop-ins for `lomiri-full-shell.service`
+  and `lomiri-full-greeter.service` (the first-run wizard) that set `LOMIRI_BINARY=~/jsui-wm/jsui-session`. Nothing outside the home
   directory changes; `uninstall.sh` removes the drop-in. `jsui-session` goes
   back to Lomiri by itself after three failed starts within two minutes.
 * `ubuntu-touch/test/` runs `--mir` without a tablet: `mir-test-server` is a
