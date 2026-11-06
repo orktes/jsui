@@ -70,7 +70,7 @@ export const DEFAULT_SETTINGS = {
   doNotDisturb: false,
   nightLight: false,
   osk: false,
-  pinned: ['debian-xterm', 'xterm', 'galculator', 'org.xfce.mousepad', 'pcmanfm', 'xclock', 'xeyes'],
+  pinned: ['org.codeberg.dnkl.foot', 'debian-xterm', 'xterm', 'galculator', 'org.xfce.mousepad', 'pcmanfm', 'xclock', 'xeyes'],
 };
 
 export function useSettings() {

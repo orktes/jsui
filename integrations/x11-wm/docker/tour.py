@@ -1,18 +1,42 @@
 #!/usr/bin/env python3
-"""Drives jsui-wm on an Xvfb display like a finger would (xdotool) and saves a
-screenshot after each step. Taps shell elements by name through the anchors
-file the WM writes (--anchors), so it keeps working when the layout changes.
+"""Drives jsui-wm (X11, through xdotool) or jsui-wl (Wayland, through its
+--control socket) like a finger would and saves a screenshot after each step.
+Taps shell elements by name through the anchors file the WM writes
+(--anchors), so it keeps working when the layout changes.
 
   tour.py --anchors /tmp/anchors.json --fb /tmp/fb/Xvfb_screen0 --out shots/
+  tour.py --anchors /tmp/anchors.json --wayland /tmp/jsui-wl.ctl --out shots/
 """
-import argparse, json, os, re, subprocess, sys, time
+import argparse, json, os, re, socket, subprocess, sys, time
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--anchors', default='/tmp/jsui-wm/anchors.json')
 ap.add_argument('--fb', default='/tmp/jsui-wm/fb/Xvfb_screen0', help='Xvfb -fbdir screen file')
 ap.add_argument('--out', default='shots')
 ap.add_argument('--only', default='', help='comma-separated step names to keep')
+ap.add_argument('--wayland', default='', help="jsui-wl's --control socket (drive the Wayland compositor)")
 args = ap.parse_args()
+WAYLAND = bool(args.wayland)
+_ctl = None
+
+
+def ctl(*lines):
+    """Sends lines to jsui-wl's control socket, waiting for each to be done."""
+    global _ctl
+    if _ctl is None:
+        _ctl = socket.socket(socket.AF_UNIX)
+        _ctl.connect(args.wayland)
+    for line in lines:
+        _ctl.sendall((line + '\n').encode())
+        buf = b''
+        while not buf.endswith(b'\n'):
+            buf += _ctl.recv(16)
+
+
+# The apps the tour opens: X11 has xterm and the classic X apps; the Wayland
+# compositor runs native Wayland apps (no Xwayland).
+TERM = (r'org\.codeberg\.dnkl\.foot', 'foot') if WAYLAND else (r'debian-xterm|xterm', 'xterm')
+FLOAT = [('pcmanfm', 'file'), ('galculator', 'galc')] if WAYLAND else [('xclock', 'clock'), ('xeyes', 'eyes')]
 os.makedirs(args.out, exist_ok=True)
 failures = []
 
@@ -55,18 +79,36 @@ def tap(pattern, settle=0.6):
         return False
     x, y = center(r)
     print(f'  tap {name} at {x},{y}')
-    sh('xdotool', 'mousemove', str(x), str(y), 'click', '1')
+    click(x, y)
     time.sleep(settle)
     return True
 
 
+def click(x, y):
+    if WAYLAND:
+        ctl(f'down {x} {y}', f'up')
+    else:
+        sh('xdotool', 'mousemove', str(x), str(y), 'click', '1')
+
+
 def tap_xy(x, y, settle=0.6):
-    sh('xdotool', 'mousemove', str(x), str(y), 'click', '1')
+    click(x, y)
     time.sleep(settle)
 
 
 def drag(x0, y0, x1, y1, steps=24, settle=0.8, hold=0.0):
     """A finger drag at ~60 Hz, in one xdotool run so the timing is real."""
+    if WAYLAND:
+        ctl(f'down {x0} {y0}')
+        time.sleep(0.03)
+        for i in range(1, steps + 1):
+            ctl(f'move {x0 + (x1 - x0) * i // steps} {y0 + (y1 - y0) * i // steps}')
+            time.sleep(0.016)
+        if hold:
+            time.sleep(hold)
+        ctl('up')
+        time.sleep(settle)
+        return
     cmd = ['xdotool', 'mousemove', str(x0), str(y0), 'mousedown', '1', 'sleep', '0.03']
     for i in range(1, steps + 1):
         cmd += ['mousemove', str(x0 + (x1 - x0) * i // steps), str(y0 + (y1 - y0) * i // steps), 'sleep', '0.016']
@@ -87,11 +129,17 @@ def drag_anchor(pattern, dx, dy, **kw):
 
 
 def type_text(text):
-    sh('xdotool', 'type', '--delay', '30', text)
+    if WAYLAND:
+        ctl('text ' + text)
+    else:
+        sh('xdotool', 'type', '--delay', '30', text)
 
 
 def key(k):
-    sh('xdotool', 'key', k)
+    if WAYLAND:
+        ctl('key ' + k)
+    else:
+        sh('xdotool', 'key', k)
 
 
 def shot(name):
@@ -99,7 +147,13 @@ def shot(name):
         return
     time.sleep(0.4)
     path = os.path.join(args.out, name + '.png')
-    subprocess.run(['convert', 'xwd:' + args.fb, path], check=False)
+    if WAYLAND:
+        ppm = path[:-4] + '.ppm'
+        ctl('shot ' + ppm)
+        subprocess.run(['convert', ppm, path], check=False)
+        os.remove(ppm)
+    else:
+        subprocess.run(['convert', 'xwd:' + args.fb, path], check=False)
     print(f'shot {path}')
 
 
@@ -149,7 +203,7 @@ tap_xy(40, 1150)
 time.sleep(0.4)
 
 # Tablet mode (the default): apps open full screen.
-launch(r'debian-xterm|xterm', 'xterm')
+launch(*TERM)
 time.sleep(1.0)
 shot('04-app-fullscreen')
 # A tap on the home indicator slides the dock up over the app.
@@ -197,8 +251,8 @@ tap(r'topbar\.status', settle=0.8)
 shot('10-quick-settings')
 tap(r'qs\.tablet', settle=0.5)
 tap_xy(200, 1000)
-launch('xclock', 'clock', settle=1.5)
-launch('xeyes', 'eyes', settle=1.5)
+for pattern, query in FLOAT:
+    launch(pattern, query, settle=1.5)
 shot('11-floating-windows')
 ws = windows()
 if ws:
@@ -212,7 +266,7 @@ for w in windows():
     r = title_of(w)
     if r and r[2] > 0:
         pass
-tap(r'dock\.(debian-xterm|xterm)', settle=0.8)
+tap(rf'dock\.({TERM[0]})', settle=0.8)
 tap(r'topbar\.keyboard', settle=0.8)
 for k in ['l', 's', ' ', '-', 'l', 'a', ' ', '/', 'Enter']:
     tap(rf'osk\.{re.escape(k)}', settle=0.15)

@@ -1,7 +1,8 @@
 # jsui-wm: a touch desktop for Linux, drawn by JSUI
 
-An experiment: an X11 window manager and compositor whose entire desktop shell
-is a React app running in JSUI. It is made for 11" touchscreens (1920x1200 at
+An experiment: an X11 window manager and compositor (`jsui-wm`) and a Wayland
+compositor (`jsui-wl`, wlroots) whose entire desktop shell is the same React
+app running in JSUI. It is made for 11" touchscreens (1920x1200 at
 150 %, every control at least 48 logical px) and works mobile first: apps open
 full screen down to a home indicator, a swipe up from the bottom edge opens the
 card switcher, two apps share the screen in split view.
@@ -22,7 +23,10 @@ docker run --rm -p 5900:5900 jsui-wm                  # then open a VNC viewer o
 docker run --rm -v "$PWD/shots:/out" jsui-wm tour     # scripted tour, a screenshot per step in shots/
 ```
 
-The container runs Xvfb at 1920x1200 (`-e SCREEN=1366x768x24` for another
+Add `-e WM=wayland` to run the Wayland compositor instead (headless wlroots,
+`wayvnc` for VNC, foot as the terminal).
+
+The X11 container runs Xvfb at 1920x1200 (`-e SCREEN=1366x768x24` for another
 panel, `-e SCALE=1.25` for another scale), the window manager, and xterm,
 Mousepad, Galculator, PCManFM and the classic X apps to open from the
 launcher. Xvfb has no GPU, so the shell is rasterised on the CPU; on real
@@ -107,6 +111,34 @@ hardware the same host could render with Skia on the GPU.
   window types, `_NET_WM_ICON`, `_NET_WM_MOVERESIZE`, `WM_DELETE_WINDOW`,
   `WM_TAKE_FOCUS`, `WM_STATE`, transient dialogs centred on their parent.
 
+### Wayland (`wayland/main.cpp`)
+
+| | |
+|---|---|
+| ![foot under jsui-wl](../../docs/images/x11-wm/wl-04-app-fullscreen.png) | ![Split view on Wayland](../../docs/images/x11-wm/wl-07-split-view.png) |
+| ![Floating GTK windows](../../docs/images/x11-wm/wl-11-floating-windows.png) | ![On-screen keyboard typing into foot](../../docs/images/x11-wm/wl-13-osk-terminal.png) |
+
+`jsui-wl` is a wlroots 0.17 compositor with the same protocol to the shell, so
+`ui/` runs unchanged:
+
+* **Output.** One output (the headless backend in Docker, DRM + libinput on a
+  device). The scene holds a single buffer, the shell's frame, which JSUI
+  renders into directly.
+* **Clients.** On every commit of an xdg toplevel the host composites its
+  surface tree (subsurfaces included, cropped to the xdg geometry) into
+  `win:<id>`; xdg popups are `wm.popups`. Server-side decorations are
+  requested (xdg-decoration, and KDE server-decoration for GTK 3), so the shell
+  draws every title bar.
+* **Input.** The compositor routes each press itself: to the shell (its
+  regions, title bars, borders, the wallpaper) or to the client surface below,
+  focusing it first. Touchscreen input is multi-touch for the shell and
+  `wl_touch` for apps. The on-screen keyboard types through a virtual
+  keyboard.
+* `--control <socket>` takes `down X Y`, `move X Y`, `up`, `key NAME`,
+  `text UTF8` and `shot FILE.ppm` for test drivers (`tour.py --wayland`).
+  wlr-screencopy, xdg-output and the virtual pointer and keyboard protocols are
+  there too, so `grim` and `wayvnc` work.
+
 The shell is `ui/` (`shell.jsx` root, `Window.jsx` frames, `bars.jsx` top bar
 and dock, `panels.jsx` launcher / switcher / panels / lock screen,
 `keyboard.jsx`, `wm.js` the protocol).
@@ -120,14 +152,25 @@ cmake -S . -B build -DJSUI_BUILD_X11WM=ON && cmake --build build --target jsui-w
 Xvfb :1 -screen 0 1920x1200x24 & DISPLAY=:1 ./build/jsui-wm
 ```
 
+Wayland (`sudo apt install libwlroots-dev wayland-protocols libxkbcommon-dev libpixman-1-dev libdrm-dev foot`):
+
+```sh
+cmake -S . -B build -DJSUI_BUILD_WAYLAND_WM=ON && cmake --build build --target jsui-wl
+WLR_BACKENDS=headless WLR_RENDERER=pixman ./build/jsui-wl --control /tmp/jsui-wl.ctl   # no screen
+./build/jsui-wl                                                                         # from a TTY: DRM + libinput
+```
+
 `--dev http://127.0.0.1:5173/bundle.js` with `npx jsui dev integrations/x11-wm/ui/shell.jsx`
 hot-reloads the shell. `--anchors file.json` writes where named shell elements
 are (screen px), which `docker/tour.py` uses to drive it with xdotool.
 
 ## Limits of the prototype
 
-* X11 only. Wayland (and Ubuntu Touch, which runs Mir) needs a Wayland
-  compositor host; the shell is meant to carry over unchanged.
+* Wayland: no Xwayland yet (X11-only apps such as xterm and xclock don't run
+  under `jsui-wl`), no fractional scaling (apps render at scale 1, GTK text is
+  scaled with `GDK_DPI_SCALE`), client buffers are read on the CPU (pixman).
+  Ubuntu Touch runs Mir, not wlroots; running there means a Mir host or
+  running `jsui-wl` in place of the session.
 * CPU compositing: each damaged window area is copied through shared memory.
   Fine for Xvfb and a tablet's worth of apps; a real device should import
   window pixmaps as GPU textures.

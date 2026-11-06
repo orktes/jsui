@@ -70,6 +70,7 @@ option(JSUI_DEBUGGER "Build the JS debugger (Chrome DevTools Protocol through js
 option(JSUI_BUILD_RAYLIB "Build the raylib example host in integrations/raylib (downloads raylib)" OFF)
 option(JSUI_BUILD_SDL3 "Build the SDL3 example host in integrations/sdl3 (downloads SDL3)" OFF)
 option(JSUI_BUILD_X11WM "Build jsui-wm, the X11 window manager / touch desktop shell in integrations/x11-wm (Linux)" OFF)
+option(JSUI_BUILD_WAYLAND_WM "Build jsui-wl, the same touch desktop as a wlroots Wayland compositor (Linux)" OFF)
 option(JSUI_BUILD_SOKOL "Build the sokol example host in integrations/sokol (downloads the sokol headers)" OFF)
 option(JSUI_BUILD_UNITY "Build the Unity native plugin into integrations/unity/package/Plugins" OFF)
 
@@ -502,7 +503,7 @@ if(NOT EMSCRIPTEN AND NOT IOS AND NOT ANDROID)
   if(JSUI_BUILD_SOKOL)
     add_subdirectory(integrations/sokol)
   endif()
-  if(JSUI_BUILD_X11WM)
+  if(JSUI_BUILD_X11WM OR JSUI_BUILD_WAYLAND_WM)
     add_subdirectory(integrations/x11-wm)
   endif()
   # The Unity package's native plugin (the example is a Unity project).
