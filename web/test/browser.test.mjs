@@ -552,6 +552,8 @@ test('bundle errors are reported (404 and throwing bundle)', async ({ page }) =>
   await mount(page, { id: 'a', jsui: { bundleUrl: 'fixtures/missing.js', expectError: true } });
   await mount(page, { id: 'b', jsui: { bundleUrl: 'fixtures/throws.js', expectError: true } });
   await frames(page, 5);
+  // Worker mode reports the throwing bundle a few messages later: wait for both.
+  await page.waitForFunction(() => window.hosts.a.errors.length > 0 && window.hosts.b.errors.length > 0, null, { timeout: 5000 }).catch(() => {});
   const [ea, eb] = await page.evaluate(() => [window.hosts.a.errors, window.hosts.b.errors]);
   assert(ea.some((e) => /failed to load bundle/.test(e) && /404/.test(e) && /fixtures\/missing\.js/.test(e)), `404 error: ${JSON.stringify(ea)}`);
   assert(eb.some((e) => /fixture exploded/.test(e)), `throw error: ${JSON.stringify(eb)}`);
