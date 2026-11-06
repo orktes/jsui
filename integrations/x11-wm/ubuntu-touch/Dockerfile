@@ -45,16 +45,22 @@ RUN cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
 # on the tablet's read-only root changes.
 RUN cd /tmp && apt-get update && apt-get download \
       libwlroots12t64 libdisplay-info1 libliftoff0 libseat1 libvulkan1 libxcb-ewmh2 \
-      foot libfcft4t64 libutf8proc3 \
+      foot libfcft4t64 libutf8proc3 qtwayland5 \
  && for d in *.deb; do dpkg-deb -x $d /tmp/root; done \
  && cp -a /tmp/root/usr/lib/aarch64-linux-gnu/*.so* $PKG/lib/ \
+ && mkdir -p $PKG/qt-plugins \
+ && cp -a /tmp/root/usr/lib/aarch64-linux-gnu/qt5/plugins/platforms \
+          /tmp/root/usr/lib/aarch64-linux-gnu/qt5/plugins/wayland-* $PKG/qt-plugins/ \
  && cp /tmp/root/usr/bin/foot $PKG/ \
  && cp -a /tmp/root/usr/share/foot $PKG/foot-share 2>/dev/null || true
+COPY integrations/x11-wm/ubuntu-touch/no-bluetooth.c /tmp/
+RUN clang -O2 -shared -fPIC -o $PKG/lib/jsui-no-bluetooth.so /tmp/no-bluetooth.c
 COPY integrations/x11-wm/docker/foot.ini $PKG/foot.ini
 # No foot terminfo on the tablet.
 RUN sed -i '/^\[main\]/a term=xterm-256color' $PKG/foot.ini
 COPY integrations/x11-wm/ubuntu-touch/jsui-session integrations/x11-wm/ubuntu-touch/install.sh \
-     integrations/x11-wm/ubuntu-touch/uninstall.sh $PKG/
+     integrations/x11-wm/ubuntu-touch/uninstall.sh integrations/x11-wm/ubuntu-touch/jsui-wm-tap-to-wake.service \
+     integrations/x11-wm/ubuntu-touch/jsui-wm-logind.conf $PKG/
 RUN cd /pkg && tar czf /jsui-wm-ubuntu-touch.tar.gz jsui-wm
 
 FROM scratch

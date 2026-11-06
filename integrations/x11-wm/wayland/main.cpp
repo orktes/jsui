@@ -4,7 +4,7 @@
 //
 //   jsui-wl [--scale 1.5] [--size 1920x1200] [--bundle shell.js | --dev URL]
 //           [--anchors file.json] [--control socket] [--mouse] [--no-apps-scan]
-//           [--autostart CMD]... [--verbose]
+//           [--autostart CMD]... [--app-env NAME=VALUE]... [--verbose]
 //
 // How it fits together (compare ../main.cpp, the X11 host)
 //
@@ -226,13 +226,15 @@ struct Options {
   std::string mirSocket;  // default $MIR_SERVER_HOST_SOCKET
   int rotate = 0;         // --rotate DEG: clockwise rotation of the desktop on a --mir panel
   std::vector<std::string> autostart;
+  std::vector<std::string> appEnv;  // --app-env NAME=VALUE: set (empty VALUE: unset) for launched apps only
 };
 
 void usage() {
   std::fprintf(stderr,
                "usage: jsui-wl [--scale 1.5] [--size 1920x1200] [--bundle shell.js | --dev URL]\n"
                "               [--anchors file.json] [--control socket] [--mouse] [--no-apps-scan]\n"
-               "               [--autostart CMD]... [--mir [--mir-socket PATH] [--rotate 0|90|180|270]]\n"
+               "               [--autostart CMD]... [--app-env NAME=VALUE]...\n"
+               "               [--mir [--mir-socket PATH] [--rotate 0|90|180|270]]\n"
                "               [--verbose]\n");
 }
 
@@ -252,6 +254,7 @@ bool parseArgs(int argc, char** argv, Options& o) {
     else if (a == "--anchors" && next(v)) o.anchors = v;
     else if (a == "--control" && next(v)) o.control = v;
     else if (a == "--autostart" && next(v)) o.autostart.push_back(v);
+    else if (a == "--app-env" && next(v) && v.find('=') != std::string::npos) o.appEnv.push_back(v);
     else if (a == "--mouse") o.mouse = true;
     else if (a == "--no-apps-scan") o.scanApps = false;
     else if (a == "--mir") o.mir = true;
@@ -304,6 +307,15 @@ std::string cleanExec(const std::string& exec) {
   return out;
 }
 
+std::string shellQuote(const std::string& s) {
+  std::string out = "'";
+  for (char c : s) {
+    if (c == '\'') out += "'\\''";
+    else out += c;
+  }
+  return out + "'";
+}
+
 std::vector<App> scanApps(const std::string& terminal) {
   std::vector<App> apps;
   std::set<std::string> seen;
@@ -319,6 +331,7 @@ std::vector<App> scanApps(const std::string& terminal) {
       App app;
       app.id = file.substr(0, file.size() - 8);
       bool inEntry = false, hidden = false, isApp = false;
+      std::string path, appId;
       std::string line;
       while (std::getline(in, line)) {
         if (!line.empty() && line[0] == '[') {
@@ -337,11 +350,30 @@ std::vector<App> scanApps(const std::string& terminal) {
         else if (k == "Categories") app.categories = v;
         else if (k == "Terminal") app.terminal = v == "true";
         else if (k == "Type") isApp = v == "Application";
+        else if (k == "Path") path = v;
+        else if (k == "X-Lomiri-Application-ID") appId = v;
         else if ((k == "NoDisplay" || k == "Hidden") && v == "true") hidden = true;
         else if (k == "OnlyShowIn") hidden = true;
       }
       if (!isApp || hidden || app.name.empty() || app.exec.empty() || seen.count(app.id)) continue;
       if (app.terminal) app.exec = terminal + " " + app.exec;
+      // Ubuntu Touch click apps: ubuntu-app-launch runs them confined
+      // (aa-exec-click), from their package directory, with APP_ID set. There
+      // is no app confinement here yet: run them directly, from Path=.
+      const std::string aa = "aa-exec-click ";
+      if (app.exec.compare(0, aa.size(), aa) == 0) {
+        size_t dash = app.exec.find(" -- ");
+        if (dash != std::string::npos) app.exec = app.exec.substr(dash + 4);
+      }
+      // Click packages carry their own binaries, libraries and QML modules,
+      // which ubuntu-app-launch puts on the paths.
+      if (!appId.empty() && !path.empty()) {
+        std::string p = shellQuote(path);
+        app.exec = "APP_DIR=" + p + " PATH=" + p + ":" + p + "/lib/aarch64-linux-gnu/bin:\"$PATH\" LD_LIBRARY_PATH=" + p +
+                   "/lib/aarch64-linux-gnu:" + p + "/lib QML2_IMPORT_PATH=" + p + "/lib/aarch64-linux-gnu " + app.exec;
+      }
+      if (!appId.empty()) app.exec = "APP_ID=" + shellQuote(appId) + " " + app.exec;
+      if (!path.empty()) app.exec = "cd " + shellQuote(path) + " && " + app.exec;
       app.icon = findIcon(app.icon);
       seen.insert(app.id);
       apps.push_back(app);
@@ -352,6 +384,10 @@ std::vector<App> scanApps(const std::string& terminal) {
   return apps;
 }
 
+// Environment for launched apps that the compositor itself must not have
+// (on Ubuntu Touch: apps on Mesa's EGL while jsui-wl is on libhybris').
+std::vector<std::string> g_appEnv;
+
 void launch(const std::string& cmd) {
   if (cmd.empty()) return;
   logf("launch: %s", cmd.c_str());
@@ -359,6 +395,12 @@ void launch(const std::string& cmd) {
   if (pid == 0) {
     setsid();
     signal(SIGCHLD, SIG_DFL);
+    for (const auto& kv : g_appEnv) {
+      size_t eq = kv.find('=');
+      std::string k = kv.substr(0, eq), v = kv.substr(eq + 1);
+      if (v.empty()) unsetenv(k.c_str());
+      else setenv(k.c_str(), v.c_str(), 1);
+    }
     execl("/bin/sh", "sh", "-c", cmd.c_str(), static_cast<char*>(nullptr));
     _exit(127);
   }
@@ -2384,6 +2426,7 @@ int WM::run() {
 int main(int argc, char** argv) {
   Options opt;
   if (!parseArgs(argc, argv, opt)) return 2;
+  g_appEnv = opt.appEnv;
   signal(SIGCHLD, SIG_IGN);
   signal(SIGPIPE, SIG_IGN);
   WM wm(opt);

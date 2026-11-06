@@ -22,9 +22,25 @@ export PATH="$DIR:$PATH"
 export XDG_CONFIG_DIRS="$DIR/xdg:${XDG_CONFIG_DIRS:-/etc/xdg}"
 mkdir -p "$DIR/xdg/foot" && cp -n "$DIR/foot.ini" "$DIR/xdg/foot/foot.ini" 2>/dev/null
 # The lock screen, indicators and OSK of Lomiri aren't there: keep apps on
-# Wayland and drawing in software (see README).
-export QT_QPA_PLATFORM=wayland QT_QUICK_BACKEND=software GDK_BACKEND=wayland
+# Wayland (see README).
+export QT_QPA_PLATFORM=wayland GDK_BACKEND=wayland
+# Ubuntu Touch ships Qt's Wayland client library but not its platform plugin
+# (apps normally talk Mir to Lomiri): the package brings qtwayland5's plugins.
+export QT_PLUGIN_PATH="$DIR/qt-plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}:/usr/lib/aarch64-linux-gnu/qt5/plugins"
 unset QT_IM_MODULE
+# Apps only (jsui-wl itself renders through libhybris' EGL):
+# - Lomiri's UI toolkit needs OpenGL, and libhybris' Wayland EGL wants a
+#   compositor that speaks android_wlegl. Apps run on Mesa's llvmpipe
+#   instead, which hands jsui-wl plain shm buffers; the session's
+#   QMLSCENE_DEVICE (Halium's scene graph context) has to go with it.
+# - The Tab A7's kernel panics on any Bluetooth socket (BUG in
+#   bt_sock_create), which System Settings opens at start: apps get
+#   EAFNOSUPPORT instead.
+set -- \
+  --app-env __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json \
+  --app-env LIBGL_ALWAYS_SOFTWARE=1 --app-env QMLSCENE_DEVICE=
+[ -e "$DIR/lib/jsui-no-bluetooth.so" ] && \
+  set -- "$@" --app-env LD_PRELOAD="$DIR/lib/jsui-no-bluetooth.so${LD_PRELOAD:+:$LD_PRELOAD}"
 # Double-tap to wake: the Tab A7's Himax touch controller does it in hardware
 # (reported as the power key), but only Lomiri's settings normally switch it on.
 [ -w /proc/android_touch/SMWP ] && echo 1 > /proc/android_touch/SMWP
@@ -32,7 +48,7 @@ SCALE=${JSUI_WM_SCALE:-1.75}
 # The Tab A7 panel is portrait (1200x2000); 90 shows the desktop in landscape.
 ROTATE=${JSUI_WM_ROTATE:-90}
 "$DIR/jsui-wl" --mir --rotate "$ROTATE" --scale "$SCALE" --bundle "$DIR/shell.js" --control "${XDG_RUNTIME_DIR:-/tmp}/jsui-wl.ctl" \
-  >"${XDG_RUNTIME_DIR:-/tmp}/jsui-wl.log" 2>&1 &
+  "$@" >"${XDG_RUNTIME_DIR:-/tmp}/jsui-wl.log" 2>&1 &
 child=$!
 # A stop (systemctl restart / stop sends SIGTERM to the session) isn't a crash.
 trap 'rm -f "$FAILS"; kill -TERM $child 2>/dev/null; wait $child; exit 143' TERM INT
