@@ -30,6 +30,7 @@
 #include "include/gpu/gl/GrGLInterface.h"
 #include "include/gpu/gl/GrGLTypes.h"
 #endif
+#include "render/gpu_layers.h"
 #include "render/host_textures.h"
 #include "render/painter.h"
 #include "render/shader_cache.h"
@@ -188,6 +189,11 @@ struct GLGpu final : JsuiGpuContext {
   sk_sp<GrDirectContext> ctx;
   bool lost = false;
   size_t cacheBytes = 0;
+  // Composited opacity layers and raster-cached subtrees (gpu_layers.h),
+  // per runtime, as on Graphite: a layer whose subtree is unchanged is drawn
+  // from its texture instead of an offscreen pass every frame. Textures of
+  // ctx. 256 MB: Skia's default resource budget, until purge names one.
+  jsui::GpuLayerCaches layers{256u << 20};
   struct Cached {
     SurfaceKey key;
     sk_sp<SkSurface> surface;
@@ -285,6 +291,7 @@ struct GLGpu final : JsuiGpuContext {
       surfaces.clear();
       retained.clear();
       textures.clear();
+      layers.clear();
       ctx.reset();
     }
     lost = false;
@@ -400,6 +407,7 @@ void destroy(JsuiGpuContext* gpu) {
     g->surfaces.clear();
     g->retained.clear();
     g->textures.clear();
+    g->layers.clear();
     if (!g->lost) g->ctx->flushAndSubmit(GrSyncCpu::kNo);
     g->ctx.reset();
   }
@@ -419,16 +427,21 @@ void contextLost(JsuiGpuContext* gpu) {
   g->surfaces.clear();
   g->retained.clear();
   g->textures.clear();
+  g->layers.clear();
 }
 
 void purge(JsuiGpuContext* gpu, size_t cacheBytes) {
   GLGpu* g = asGL(gpu);
   if (!g) return;
-  if (cacheBytes) g->cacheBytes = cacheBytes;
+  if (cacheBytes) {
+    g->cacheBytes = cacheBytes;
+    g->layers.setBudget(cacheBytes);
+  }
   if (!g->ctx || g->lost) return;
   if (cacheBytes) g->ctx->setResourceCacheLimit(cacheBytes);
   g->surfaces.clear();
   g->retained.clear();  // the next frames repaint fully
+  g->layers.clear();
   g->ctx->purgeUnlockedResources(GrPurgeResourceOptions::kAllResources);
 }
 
@@ -442,6 +455,7 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGLTarget& t) {
   if (!surface) return -1;
   bool clear = (t.flags & JSUI_GL_NO_CLEAR) == 0;
   jsui::TextureScope textureScope(&g->textures);
+  jsui::GpuLayerFrame layerFrame(g->layers.of(&rt));
   // A texture the host keeps (JSUI_GL_INCREMENTAL): it is the retained
   // frame, so only the damage is repainted, straight into it, and nothing
   // is copied. Its key is the texture name, shifted into the even,
