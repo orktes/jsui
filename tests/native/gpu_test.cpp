@@ -1015,11 +1015,14 @@ TEST(gpu_shader_cache_file) {
   });
 }
 
-// A shadow drawn approximately while its node scales (from the mask of a
-// nearby size, painter.cpp quantizedScale) is repainted exactly in the
-// frame after the animation stops, and while it runs the surface still goes
-// idle after each frame (jsui_needs_redraw), as with any other animation.
-// Another surface of the runtime, with a static shadow, is not repainted.
+// A shadow on a node that scales: while the animation runs the surface still
+// goes idle after each frame (jsui_needs_redraw), as with any other
+// animation, the retained frame equals a full repaint of the end state, and
+// another surface of the runtime, with a static shadow, is not repainted.
+// Ganesh draws shadows on the GPU (painter.cpp ganeshDrawsShadows), exact in
+// every frame: no frame is approximate (a cached mask of a nearby size,
+// quantizedScale, then repainted exactly once it rests), unlike with
+// JSUI_GANESH_SHADOW_MASKS=1.
 TEST(gpu_scaling_shadow_exact_after_animation) {
   forEachContext("gpu_scaling_shadow_exact_after_animation", [](GLContext& c, JsuiGpuContext* gpu, Api api) {
     JsuiConfig cfg;
@@ -1084,7 +1087,9 @@ TEST(gpu_scaling_shadow_exact_after_animation) {
     }
     std::printf("  [%s] %d frames, %d approximate, %d busy while animating, other surface repainted %d\n",
                 apiName(api), frames, approximate, busy, otherRenders);
-    CHECK(approximate > 0);
+    const char* masks = std::getenv("JSUI_GANESH_SHADOW_MASKS");
+    if (masks && masks[0] == '1') CHECK(approximate > 0);
+    else CHECK_EQ(approximate, 0);
     CHECK_EQ(busy, 0);
     CHECK_EQ(otherRenders, 0);
     CHECK(frames < 30 && !jsui_needs_redraw(rt) && !jsui_needs_redraw(other));

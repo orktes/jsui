@@ -1091,8 +1091,22 @@ sk_sp<SkSurface> renderNinePatchMask(SkRRect shape, const SkRRect* fullHole, con
 // hide the shadow; baking it into the mask avoids an anti-aliased clip, which
 // is slow on the CPU). False when the transform is not axis-aligned (the
 // caller blurs directly then).
+// Ganesh draws a blurred rounded rect analytically on the GPU (and the
+// border-box cut-out as an analytic clip): cheaper than a mask blurred on the
+// CPU, which a large shadow that changes size (a card scaling in) needed
+// again for every quantized size, tens of milliseconds each on a phone's
+// CPU. JSUI_GANESH_SHADOW_MASKS=1 keeps the masks there too.
+bool ganeshDrawsShadows(SkCanvas* c) {
+  static const bool masks = [] {
+    const char* v = std::getenv("JSUI_GANESH_SHADOW_MASKS");
+    return v && v[0] == '1';
+  }();
+  return !masks && c->recordingContext() != nullptr && c->recorder() == nullptr;
+}
+
 bool drawCachedShadow(SkCanvas* c, const SkRRect& shape, const SkRRect* hole, const SkRRect& box, float blur,
                       const SkPaint& paint, ShadowCache& cache, float alpha = 1, const PaintMotion& motion = {}) {
+  if (ganeshDrawsShadows(c)) return false;
   SkMatrix m = c->getTotalMatrix();
   if (!m.isScaleTranslate() || m.getScaleX() <= 0 || m.getScaleY() <= 0) return false;
   const bool gpu = gpuMasks(c), approx = gpu || motion.moving;
