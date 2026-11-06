@@ -26,6 +26,7 @@
 #ifdef JSUI_WL_MIR_GL
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
+using GlSync = struct __GLsync*;  // GLES 3 sync objects (gl3.h's GLsync)
 #endif
 #include <sys/eventfd.h>
 
@@ -40,7 +41,10 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <atomic>
+#include <condition_variable>
 #include <mutex>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -270,12 +274,34 @@ class MirHost {
 
 #ifdef JSUI_WL_MIR_GL
   // GPU window. Makes the window's GL context current.
-  bool makeCurrent() { return gpu_ && eglMakeCurrent(dpy_, surf_, surf_, ctx_); }
+  // With the present thread (see presentGpu), the main thread renders in a
+  // context of its own that shares the desktop texture with the window's.
+  bool makeCurrent() {
+    if (!gpu_) return false;
+    if (threaded_) return eglMakeCurrent(dpy_, renderSurf_, renderSurf_, renderCtx_);
+    return eglMakeCurrent(dpy_, surf_, surf_, ctx_);
+  }
   EGLDisplay eglDisplay() const { return dpy_; }
+  bool presentThread() const { return threaded_; }
 
   // The texture JSUI draws the desktop into (w_ x h_, GL bottom-left origin).
   // *fresh: newly (re)allocated, so it holds no previous frame.
   unsigned desktopTexture(bool* fresh) {
+    if (threaded_) {
+      // The GPU must have read the last frame (the present thread's blit)
+      // before this one is drawn into the texture: a GPU-side wait, the CPU
+      // goes on.
+      GlSync blit = nullptr;
+      {
+        std::unique_lock<std::mutex> lock(presentMu_);
+        presentCv_.wait(lock, [&] { return blitSubmitted_; });
+        std::swap(blit, blitFence_);
+      }
+      if (blit) {
+        glWaitSync_(blit, 0, ~0ull /* GL_TIMEOUT_IGNORED */);
+        glDeleteSync_(blit);
+      }
+    }
     *fresh = texFresh_;
     if (texFresh_) {
       if (!tex_) glGenTextures(1, &tex_);
@@ -296,10 +322,97 @@ class MirHost {
   int desktopWidth() const { return w_; }
   int desktopHeight() const { return h_; }
 
-  // Draws the desktop texture onto the panel (rotated) and shows it.
+  // Shows the desktop texture on the panel (rotated). The swap waits until
+  // the GPU has run the frame (~24 ms of a full repaint on the Tab A7), so
+  // by default a present thread does the blit and the swap: the main thread
+  // paints the next frame meanwhile and only waits here when the previous
+  // swap hasn't returned yet (JSUI_WL_GPU_THREAD=0: all on this thread).
   void presentGpu() {
     if (!gpu_ || !tex_) return;
-    const double blitStart = nowMs();
+    if (!threaded_) {
+      const double t0 = nowMs();
+      drawBlit();
+      if (finish_) glFinish();
+      const double t1 = nowMs();
+      swap();
+      lastSwapMs_ = nowMs() - t1;
+      lastBlitMs_ = t1 - t0;
+      return;
+    }
+    const double t0 = nowMs();
+    GlSync rendered = glFenceSync_(0x9117 /* GL_SYNC_GPU_COMMANDS_COMPLETE */, 0);
+    glFlush();
+    {
+      std::unique_lock<std::mutex> lock(presentMu_);
+      presentCv_.wait(lock, [&] { return !presentBusy_; });
+      if (renderedFence_) glDeleteSync_(renderedFence_);  // never picked up (not expected)
+      renderedFence_ = rendered;
+      presentBusy_ = true;
+      blitSubmitted_ = false;
+    }
+    presentCv_.notify_all();
+    lastBlitMs_ = nowMs() - t0;  // the main thread's wait for the previous swap
+    lastSwapMs_ = threadSwapMs_.load();
+  }
+
+ private:
+  void swap() {
+    EGLBoolean ok = eglSwapBuffers(dpy_, surf_);
+    if (debugFrames_ > 0) {
+      --debugFrames_;
+      std::fprintf(stderr, "[jsui-wl] gpu present: swap=%d egl=0x%x gl=0x%x centre=%u,%u,%u,%u\n", int(ok),
+                   eglGetError(), debugGlErr_, debugPx_[0], debugPx_[1], debugPx_[2], debugPx_[3]);
+    }
+  }
+
+  void presentLoop() {
+    eglMakeCurrent(dpy_, surf_, surf_, ctx_);
+    for (;;) {
+      GlSync rendered = nullptr;
+      {
+        std::unique_lock<std::mutex> lock(presentMu_);
+        presentCv_.wait(lock, [&] { return stopPresent_ || renderedFence_; });
+        if (stopPresent_) break;
+        std::swap(rendered, renderedFence_);
+      }
+      glWaitSync_(rendered, 0, ~0ull);
+      glDeleteSync_(rendered);
+      drawBlit();
+      GlSync blit = glFenceSync_(0x9117, 0);
+      glFlush();
+      {
+        std::lock_guard<std::mutex> lock(presentMu_);
+        blitFence_ = blit;
+        blitSubmitted_ = true;
+      }
+      presentCv_.notify_all();
+      if (finish_) glFinish();
+      const double t1 = nowMs();
+      swap();
+      threadSwapMs_ = nowMs() - t1;
+      {
+        std::lock_guard<std::mutex> lock(presentMu_);
+        presentBusy_ = false;
+      }
+      presentCv_.notify_all();
+    }
+    eglMakeCurrent(dpy_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+  }
+
+  void stopPresentThread() {
+    if (!presentThread_.joinable()) return;
+    {
+      std::lock_guard<std::mutex> lock(presentMu_);
+      stopPresent_ = true;
+    }
+    presentCv_.notify_all();
+    presentThread_.join();
+    stopPresent_ = false;
+  }
+
+  // The desktop texture as a rotated full-panel quad into the window's
+  // back buffer (the window's context current).
+  void drawBlit() {
     // Our own vertex array (ES3): Skia's leftover attribute state (enables,
     // pointers, instancing divisors) is per-VAO, so it can't leak into ours.
     if (bindVertexArray_) bindVertexArray_(vao_);
@@ -350,22 +463,11 @@ class MirHost {
     }
     if (!vao_) glDisableVertexAttribArray(0);
     if (bindVertexArray_) bindVertexArray_(0);
-    unsigned char px[4] = {0, 0, 0, 0};
-    if (debugFrames_ > 0) glReadPixels(pw / 2, ph / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
-    GLenum glErr = glGetError();
-    // JSUI_WL_GPU_FINISH=1: wait for the GPU here, so the blit time holds the
-    // frame's GPU work and the swap time only the wait for a free buffer.
-    if (finish_) glFinish();
-    const double t1 = nowMs();
-    EGLBoolean ok = eglSwapBuffers(dpy_, surf_);
-    lastSwapMs_ = nowMs() - t1;
-    lastBlitMs_ = t1 - blitStart;
-    if (debugFrames_ > 0) {
-      --debugFrames_;
-      std::fprintf(stderr, "[jsui-wl] gpu present: swap=%d egl=0x%x gl=0x%x centre=%u,%u,%u,%u panel %dx%d\n", int(ok),
-                   eglGetError(), glErr, px[0], px[1], px[2], px[3], pw, ph);
-    }
+    if (debugFrames_ > 0) glReadPixels(pw / 2, ph / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, debugPx_);
+    debugGlErr_ = glGetError();
   }
+
+ public:
 
   // The desktop as RGBA rows, top row first (screenshots).
   bool readDesktop(std::vector<uint8_t>* out) {
@@ -503,7 +605,42 @@ class MirHost {
     gpu_ = true;
     texFresh_ = true;
     glError_.clear();
+    const char* th = getenv("JSUI_WL_GPU_THREAD");
+    if (!(th && th[0] == '0')) startPresentThread(cfg);
     return true;
+  }
+
+  // A second context in the window's share group for the main thread
+  // (surfaceless, or on a 1x1 pbuffer) and the present thread on the
+  // window's. GLES 3 fences order the two on the GPU. Without any of it,
+  // presenting stays on the main thread.
+  void startPresentThread(EGLConfig cfg) {
+    if (!es3_) return;
+    glFenceSync_ = reinterpret_cast<GlSync (*)(GLenum, GLbitfield)>(eglGetProcAddress("glFenceSync"));
+    glWaitSync_ = reinterpret_cast<void (*)(GlSync, GLbitfield, uint64_t)>(eglGetProcAddress("glWaitSync"));
+    glDeleteSync_ = reinterpret_cast<void (*)(GlSync)>(eglGetProcAddress("glDeleteSync"));
+    if (!glFenceSync_ || !glWaitSync_ || !glDeleteSync_) return;
+    const EGLint cattrs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
+    renderCtx_ = eglCreateContext(dpy_, cfg, ctx_, cattrs);
+    if (renderCtx_ == EGL_NO_CONTEXT) return;
+    renderSurf_ = EGL_NO_SURFACE;
+    if (!eglMakeCurrent(dpy_, EGL_NO_SURFACE, EGL_NO_SURFACE, renderCtx_)) {
+      const EGLint pattrs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
+      renderSurf_ = eglCreatePbufferSurface(dpy_, cfg, pattrs);
+      if (renderSurf_ == EGL_NO_SURFACE || !eglMakeCurrent(dpy_, renderSurf_, renderSurf_, renderCtx_)) {
+        if (renderSurf_ != EGL_NO_SURFACE) eglDestroySurface(dpy_, renderSurf_);
+        renderSurf_ = EGL_NO_SURFACE;
+        eglMakeCurrent(dpy_, surf_, surf_, ctx_);
+        eglDestroyContext(dpy_, renderCtx_);
+        renderCtx_ = EGL_NO_CONTEXT;
+        return;
+      }
+    }
+    // The window's context is the present thread's from now on.
+    threaded_ = true;
+    blitSubmitted_ = true;
+    presentBusy_ = false;
+    presentThread_ = std::thread([this] { presentLoop(); });
   }
 
   static std::string hex(unsigned v) {
@@ -588,6 +725,18 @@ class MirHost {
 
   void destroyGl() {
     if (dpy_ == EGL_NO_DISPLAY) return;
+    stopPresentThread();
+    if (threaded_) {
+      if (renderedFence_) glDeleteSync_(renderedFence_);
+      if (blitFence_) glDeleteSync_(blitFence_);
+      renderedFence_ = blitFence_ = nullptr;
+      eglMakeCurrent(dpy_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+      eglDestroyContext(dpy_, renderCtx_);
+      if (renderSurf_ != EGL_NO_SURFACE) eglDestroySurface(dpy_, renderSurf_);
+      renderCtx_ = EGL_NO_CONTEXT;
+      renderSurf_ = EGL_NO_SURFACE;
+      threaded_ = false;
+    }
     if (ctx_ != EGL_NO_CONTEXT && surf_ != EGL_NO_SURFACE && eglMakeCurrent(dpy_, surf_, surf_, ctx_)) {
       if (tex_) glDeleteTextures(1, &tex_);
       if (vbo_) glDeleteBuffers(1, &vbo_);
@@ -726,7 +875,25 @@ class MirHost {
   bool debugSolid_ = false;  // JSUI_WL_GPU_DEBUG=2: solid green quad (geometry test)
   int debugFrames_ = 0;  // JSUI_WL_GPU_DEBUG: log the first presents
   double lastBlitMs_ = 0, lastSwapMs_ = 0;
-  bool finish_ = false;  // JSUI_WL_GPU_FINISH: glFinish before the swap (GPU time vs buffer wait)
+  // JSUI_WL_GPU_FINISH: glFinish before the swap, so the blit time holds the
+  // frame's GPU work and the swap time only the wait for a free buffer.
+  bool finish_ = false;
+  // The present thread (presentGpu).
+  bool threaded_ = false;
+  EGLContext renderCtx_ = EGL_NO_CONTEXT;  // the main thread's, sharing ctx_'s objects
+  EGLSurface renderSurf_ = EGL_NO_SURFACE;  // its pbuffer when surfaceless isn't supported
+  std::thread presentThread_;
+  std::mutex presentMu_;
+  std::condition_variable presentCv_;
+  GlSync renderedFence_ = nullptr;  // a frame for the present thread
+  GlSync blitFence_ = nullptr;      // its blit, for the next frame's render to wait on
+  bool blitSubmitted_ = true, presentBusy_ = false, stopPresent_ = false;
+  std::atomic<double> threadSwapMs_{0};
+  GlSync (*glFenceSync_)(GLenum, GLbitfield) = nullptr;
+  void (*glWaitSync_)(GlSync, GLbitfield, uint64_t) = nullptr;
+  void (*glDeleteSync_)(GlSync) = nullptr;
+  unsigned char debugPx_[4] = {0, 0, 0, 0};
+  GLenum debugGlErr_ = 0;
   bool debugRed_ = false;  // JSUI_WL_GPU_RED: clear the panel red instead of drawing (swap path test)
 #endif
   bool pointerDown_ = false;

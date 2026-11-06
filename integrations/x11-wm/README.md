@@ -157,6 +157,13 @@ window is a GPU window by default: Mir's android2 client platform hands out an
 `ANativeWindow`, which libhybris' `null` EGL platform passes to the Android
 GLES driver, so Skia (Ganesh) draws the desktop into a texture (only the
 damage is repainted) and one textured quad puts it on the panel, rotated.
+The swap returns only once the GPU has run the frame, so a present thread
+does the quad and the swap in the window's context while the main thread
+paints the next frame in a second context sharing the texture (GLES 3 fences
+order the two on the GPU; `JSUI_WL_GPU_THREAD=0` keeps it all on the main
+thread). In the Tab A7's launcher/switcher bench that takes the main
+thread's frame from ~44 ms to ~20 ms, with the GPU (~21 ms) setting the
+pace.
 If EGL or Skia's GL context fail, or with `JSUI_WL_GPU=0`, the CPU frame is
 copied into a software window instead. On the Tab A7 a frame takes ~22 ms on
 the GPU against ~91 ms on the CPU (`JSUI_WL_PERF=1` logs paint/present time,
