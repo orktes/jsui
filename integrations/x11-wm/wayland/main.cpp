@@ -2400,7 +2400,8 @@ void WM::perfFrame(double paintMs, double presentMs) {
        perfFrames_, perfPaint_ / perfFrames_, perfPresent_ / perfFrames_, perfMax_);
   if (gpu_)
     logf(vulkan_ ? "perf (vulkan): jsui render %.2f ms, present pass %.2f ms, acquire + present %.2f ms avg"
-                 : "perf (gpu): jsui render %.2f ms, blit %.2f ms, swap %.2f ms avg",
+                 : mir_->presentThread() ? "perf (gpu): jsui render %.2f ms, wait for the present thread %.2f ms, its swap %.2f ms avg"
+                                         : "perf (gpu): jsui render %.2f ms, blit %.2f ms, swap %.2f ms avg",
          gpuRenderMs_ / perfFrames_, gpuBlitMs_ / perfFrames_, gpuSwapMs_ / perfFrames_);
   logf("perf: %d ticks, jsui_tick %.2f ms avg, worst %.2f ms", perfTicks_, perfTicks_ ? perfTick_ / perfTicks_ : 0.0,
        perfTickMax_);
@@ -2482,7 +2483,8 @@ bool WM::showMir() {
   } else if (mir_->gpu()) {
     gpu_ = jsui_gpu_create_gl(nullptr, nullptr);
     if (gpu_) {
-      logf("rendering on the GPU (GLES via EGL on the Mir window)");
+      logf("rendering on the GPU (GLES via EGL on the Mir window%s)",
+           mir_->presentThread() ? ", presented from a thread of its own" : "");
       gpuApps_ = wlegl::bind(display_, mir_->eglDisplay());
       logf(gpuApps_ ? "apps draw on the GPU too (android_wlegl)" : "apps can't hand over GPU buffers");
       shellDirty_ = true;
