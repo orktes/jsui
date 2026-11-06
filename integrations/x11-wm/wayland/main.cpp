@@ -618,6 +618,7 @@ class WM {
   // Frame cost on the Mir path (JSUI_WL_PERF=1): paint + present, logged every 60 frames.
   bool perf_ = false;
   double cpuPaintMs_ = 0;  // CPU raster since the last presented frame
+  double gpuRenderMs_ = 0, gpuBlitMs_ = 0, gpuSwapMs_ = 0;  // GPU frame parts (perf window sums)
   double perfPaint_ = 0, perfPresent_ = 0, perfMax_ = 0;
   int perfFrames_ = 0;
   void perfFrame(double paintMs, double presentMs);
@@ -2238,7 +2239,11 @@ void WM::perfFrame(double paintMs, double presentMs) {
   if (++perfFrames_ < 60) return;
   logf("perf (%s): %d frames, paint %.2f ms + present %.2f ms avg, worst %.2f ms", gpu_ ? "gpu" : "cpu",
        perfFrames_, perfPaint_ / perfFrames_, perfPresent_ / perfFrames_, perfMax_);
+  if (gpu_)
+    logf("perf (gpu): jsui render %.2f ms, blit %.2f ms, swap %.2f ms avg", gpuRenderMs_ / perfFrames_,
+         gpuBlitMs_ / perfFrames_, gpuSwapMs_ / perfFrames_);
   perfPaint_ = perfPresent_ = perfMax_ = 0;
+  gpuRenderMs_ = gpuBlitMs_ = gpuSwapMs_ = 0;
   perfFrames_ = 0;
 }
 
@@ -2253,8 +2258,15 @@ bool WM::renderGpu() {
   t.height = mir_->desktopHeight();
   // The texture keeps the last frame: only the damage is repainted into it.
   t.flags = fresh ? 0 : JSUI_GL_INCREMENTAL;
+  double t0 = nowMs();
   if (jsui_render_gl_target(rt_, gpu_, &t) != 0) return false;
+  double t1 = nowMs();
   mir_->presentGpu();
+  if (perf_) {
+    gpuRenderMs_ += t1 - t0;
+    gpuBlitMs_ += mir_->lastBlitMs();
+    gpuSwapMs_ += mir_->lastSwapMs();
+  }
   return true;
 #else
   return false;

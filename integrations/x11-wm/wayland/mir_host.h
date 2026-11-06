@@ -35,6 +35,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -262,12 +263,15 @@ class MirHost {
     return tex_;
   }
   unsigned textureFormat() const { return es3_ ? 0x8058u : 0u; }
+  double lastBlitMs() const { return lastBlitMs_; }
+  double lastSwapMs() const { return lastSwapMs_; }
   int desktopWidth() const { return w_; }
   int desktopHeight() const { return h_; }
 
   // Draws the desktop texture onto the panel (rotated) and shows it.
   void presentGpu() {
     if (!gpu_ || !tex_) return;
+    const double blitStart = nowMs();
     // Our own vertex array (ES3): Skia's leftover attribute state (enables,
     // pointers, instancing divisors) is per-VAO, so it can't leak into ours.
     if (bindVertexArray_) bindVertexArray_(vao_);
@@ -321,7 +325,10 @@ class MirHost {
     unsigned char px[4] = {0, 0, 0, 0};
     if (debugFrames_ > 0) glReadPixels(pw / 2, ph / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
     GLenum glErr = glGetError();
+    const double t1 = nowMs();
     EGLBoolean ok = eglSwapBuffers(dpy_, surf_);
+    lastSwapMs_ = nowMs() - t1;
+    lastBlitMs_ = t1 - blitStart;
     if (debugFrames_ > 0) {
       --debugFrames_;
       std::fprintf(stderr, "[jsui-wl] gpu present: swap=%d egl=0x%x gl=0x%x centre=%u,%u,%u,%u panel %dx%d\n", int(ok),
@@ -348,6 +355,12 @@ class MirHost {
 #endif
 
  private:
+  static double nowMs() {
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return double(ts.tv_sec) * 1000.0 + double(ts.tv_nsec) / 1e6;
+  }
+
   bool makeWindow(MirPixelFormat format, MirBufferUsage usage, std::string* err) {
     int pw = w_, ph = h_;
     if (rot_ == 90 || rot_ == 270) std::swap(pw, ph);
@@ -652,6 +665,7 @@ class MirHost {
   void (*vertexAttribDivisor_)(GLuint, GLuint) = nullptr;
   bool debugSolid_ = false;  // JSUI_WL_GPU_DEBUG=2: solid green quad (geometry test)
   int debugFrames_ = 0;  // JSUI_WL_GPU_DEBUG: log the first presents
+  double lastBlitMs_ = 0, lastSwapMs_ = 0;
   bool debugRed_ = false;  // JSUI_WL_GPU_RED: clear the panel red instead of drawing (swap path test)
 #endif
   bool pointerDown_ = false;
