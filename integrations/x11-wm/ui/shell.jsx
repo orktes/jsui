@@ -105,40 +105,6 @@ function SplitDivider({ left, right, screen, t, bottom }) {
   );
 }
 
-// Tablet mode: the menu of a full-screen or split app's header.
-function WindowMenu({ menu, screen, t, onClose }) {
-  const { win, x, y } = menu;
-  const rows = [
-    { icon: 'maximize', label: 'Full screen', fn: () => wm.maximize(win.id, true), on: win.maximized },
-    { icon: 'snapLeft', label: 'Split left', fn: () => wm.snap(win.id, 'left'), on: win.snap === 'left' },
-    { icon: 'snapRight', label: 'Split right', fn: () => wm.snap(win.id, 'right'), on: win.snap === 'right' },
-    { icon: 'restore', label: 'Float', fn: () => (win.snap ? wm.snap(win.id, null) : wm.maximize(win.id, false)) },
-    { icon: 'minimize', label: 'Minimize', fn: () => wm.minimize(win.id) },
-  ];
-  const left = Math.max(12, Math.min(screen.width - 292, x - 140));
-  return (
-    <Pressable style={StyleSheet.absoluteFill} onPress={onClose}>
-      <View onStartShouldSetResponder={() => true}
-        style={[styles.menu, { left, top: y + 4, backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 16px 48px ${t.shadow}` }]}>
-        {rows.map((r) => (
-          <MenuRow key={r.label} r={r} t={t} onClose={onClose} />
-        ))}
-      </View>
-    </Pressable>
-  );
-}
-
-function MenuRow({ r, t, onClose }) {
-  const anchor = useAnchor(`menu.${r.label.toLowerCase().replace(/\s+/g, '-')}`);
-  return (
-    <Pressable ref={anchor.ref} onLayout={anchor.onLayout} onPress={() => { r.fn(); onClose(); }}
-      style={({ pressed }) => [styles.menuRow, pressed && { backgroundColor: t.panelLine }]}>
-      <Icon name={r.icon} size={20} color={r.on ? t.accent : t.text} />
-      <Text style={[styles.menuText, { color: r.on ? t.accent : t.text }]}>{r.label}</Text>
-    </Pressable>
-  );
-}
-
 // -------------------------------------------------------------------- Shell
 
 let noteId = 1;
@@ -271,7 +237,8 @@ function Shell() {
 
   const closePanel = useCallback(() => setPanel(null), []);
   const onDragging = useCallback((id, on) => setDragging(on ? id : null), []);
-  const onWinMenu = useCallback((win, x, y) => setWinMenu({ win, x, y }), []);
+  const onWinMenu = useCallback((win) => setWinMenu(win.id), []);
+  const closeWinMenu = useCallback(() => setWinMenu(null), []);
   const overviewUp = panel === 'overview' || closingPanel === 'overview';
   const panelEl = (name, open) => {
     const common = { key: name, screen: scr, open, onClose: closePanel, onClosed: open ? undefined : panelClosed };
@@ -306,6 +273,8 @@ function Shell() {
               onDragging={onDragging}
               tablet={settings.tabletMode}
               onMenu={onWinMenu}
+              menuOpen={winMenu === w.id}
+              onMenuClose={closeWinMenu}
             />
             </View>
           ),
@@ -336,7 +305,8 @@ function Shell() {
           />
         )}
         {[closingPanel, panel].filter(Boolean).map((name) => panelEl(name, name === panel))}
-        {winMenu && <WindowMenu menu={winMenu} screen={scr} t={t} onClose={() => setWinMenu(null)} />}
+        {/* The window menu itself is an overlay of its button (WindowMenu.jsx): taps elsewhere close it. */}
+        {winMenu != null && <Pressable style={StyleSheet.absoluteFill} onPress={closeWinMenu} />}
         {dockMenu && (
           <DockMenu item={dockMenu} anchor={dockRect && { x: dockRect.x + dockRect.width / 2, width: 0 }} onClose={() => setDockMenu(null)} />
         )}
@@ -362,9 +332,6 @@ const styles = StyleSheet.create({
   deskClock: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
   deskTime: { fontFamily: font, fontSize: 112, fontWeight: '600', letterSpacing: -3, fontVariant: ['tabular-nums'] },
   deskDate: { fontFamily: font, fontSize: 24, fontWeight: '500', marginTop: -4 },
-  menu: { position: 'absolute', width: 280, borderRadius: 22, borderWidth: 1, paddingVertical: 8 },
-  menuRow: { height: 52, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18 },
-  menuText: { fontFamily: font, fontSize: 16, marginLeft: 14, flex: 1 },
   snap: { position: 'absolute', borderRadius: 18, borderWidth: 3 },
 });
 

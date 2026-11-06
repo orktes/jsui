@@ -16,6 +16,7 @@ import { AppIcon } from './AppIcon.jsx';
 import { Icon } from './icons.jsx';
 import { font, useTheme } from './theme.js';
 import { appName, wm } from './wm.js';
+import { WindowMenu } from './WindowMenu.jsx';
 
 const MIN_W = 180;
 const MIN_H = 110;
@@ -45,7 +46,7 @@ function TitleButton({ icon, onPress, danger, t, label, anchorName }) {
   );
 }
 
-export const Window = memo(function Window({ win, active, screen, apps, hidden, onPreview, onDragging, tablet, onMenu }) {
+export const Window = memo(function Window({ win, active, screen, apps, hidden, onPreview, onDragging, tablet, onMenu, menuOpen, onMenuClose }) {
   const t = useTheme();
   const TB = screen.titleBar;
   const B = screen.border;
@@ -237,11 +238,14 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
               <View style={[styles.grabber, { backgroundColor: t.textMute }]} />
             </View>
             <View style={styles.tabletButtons}>
-              <Pressable ref={menuAnchor.ref} onLayout={menuAnchor.onLayout} hitSlop={4}
-                onPress={(e) => onMenu && onMenu(win, e.nativeEvent.pageX, g.y)}
-                style={({ pressed }) => [styles.titleButton, pressed && { backgroundColor: t.panelLine }]}>
-                <Icon name="more" size={22} color={t.textDim} strokeWidth={2.6} />
-              </Pressable>
+              <View>
+                <Pressable ref={menuAnchor.ref} onLayout={menuAnchor.onLayout} hitSlop={4}
+                  onPress={() => onMenu && onMenu(win)}
+                  style={styles.titleButton} pressedStyle={{ backgroundColor: t.panelLine }}>
+                  <Icon name="more" size={22} color={t.textDim} strokeWidth={2.6} />
+                </Pressable>
+                {menuOpen && <WindowMenu win={win} onClose={onMenuClose} />}
+              </View>
               <TitleButton t={t} icon="close" danger label="Close" anchorName={`win.${win.id}.close`} onPress={() => wm.close(win.id)} />
             </View>
           </View>
