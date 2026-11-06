@@ -69,6 +69,7 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <sstream>
 #include <set>
 #include <string>
 #include <vector>
@@ -669,6 +670,10 @@ class WM {
   bool pointerDown_ = false;
   // touch points: id -> target
   std::map<int, Target> touches_;
+  struct Pos {
+    double x = 0, y = 0;
+  };
+  std::map<int, Pos> touchPos_;  // each touch's last position (up events may carry none)
   // host-side interactive move / resize (xdg request_move / request_resize)
   uint32_t mrId_ = 0;
   uint32_t mrEdges_ = 0;
@@ -1104,13 +1109,20 @@ void WM::matchApp(Client* c) {
       return;
     }
   }
-  // "foot" -> "org.codeberg.dnkl.foot" style ids, or the last word of the exec.
+  // "foot" -> "org.codeberg.dnkl.foot" style ids, or a program the exec runs:
+  // Ubuntu Touch apps' ids end in their binary's name
+  // ("ubports.terminal.lomiri-terminal-app" for a click app whose exec ends
+  // in "lomiri-terminal-app"; scanApps prefixes env, cd and aa-exec).
+  std::string last = want.substr(want.rfind('.') == std::string::npos ? 0 : want.rfind('.') + 1);
   for (const App& a : apps_) {
-    std::string exe = a.exec.substr(0, a.exec.find(' '));
-    exe = exe.substr(exe.rfind('/') == std::string::npos ? 0 : exe.rfind('/') + 1);
-    if (lower(exe) == want) {
-      c->appId = a.id;
-      return;
+    std::istringstream words(a.exec);
+    std::string w;
+    while (words >> w) {
+      std::string exe = lower(w.substr(w.rfind('/') == std::string::npos ? 0 : w.rfind('/') + 1));
+      if (exe == want || exe == last) {
+        c->appId = a.id;
+        return;
+      }
     }
   }
 }
@@ -2018,6 +2030,7 @@ void WM::touchEvent(int id, int phase, double x, double y, uint32_t timeMs) {
     double sx = 0, sy = 0;
     Target t = route(x, y, &s, &sx, &sy);
     touches_[id] = t;
+    touchPos_[id] = {x, y};
     if (t == Target::Shell) {
       jsui_set_event_time(rt_, nowMs());
       jsui_send_touch(rt_, tid, 0, float(L(x)), float(L(y)));
@@ -2036,8 +2049,12 @@ void WM::touchEvent(int id, int phase, double x, double y, uint32_t timeMs) {
   if (it == touches_.end()) return;
   if (it->second == Target::Shell) {
     jsui_set_event_time(rt_, nowMs());
-    if (phase == 1) jsui_send_touch(rt_, tid, 1, float(L(x)), float(L(y)));
-    else jsui_send_touch(rt_, tid, phase, float(L(cursor_->x)), float(L(cursor_->y)));
+    // Where the finger was last, on release too: JSUI fires the click (and
+    // its pageX / pageY) there. (Not the cursor's position: on a touch-only
+    // panel it never moves; libinput's up events carry none.)
+    Pos& at = touchPos_[id];
+    if (phase == 1) at = {x, y};
+    jsui_send_touch(rt_, tid, phase, float(L(at.x)), float(L(at.y)));
     scheduleTick(0);
   } else {
     wlr_touch_point* pt = wlr_seat_touch_get_point(seat_, id);
@@ -2055,7 +2072,10 @@ void WM::touchEvent(int id, int phase, double x, double y, uint32_t timeMs) {
       wlr_seat_touch_notify_cancel(seat_, pt->surface);
     }
   }
-  if (phase >= 2) touches_.erase(it);
+  if (phase >= 2) {
+    touches_.erase(it);
+    touchPos_.erase(id);
+  }
 }
 
 void WM::keyboardKey(wlr_keyboard* kb, uint32_t keycode, bool down, uint32_t timeMs) {
