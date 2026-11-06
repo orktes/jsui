@@ -19,6 +19,8 @@ export const wm = {
   splitRatio: (ratio) => send('wm:splitRatio', { ratio }),
   fullscreen: (id, on) => send('wm:fullscreen', { id, on }),
   release: (id) => send('wm:release', { id }),
+  // A blurred copy of the screen as host texture "wm:backdrop" (on: false drops it).
+  snapshot: (on) => send('wm:snapshot', { on }),
   launch: (exec) => send('wm:launch', { exec }),
   keyboard: (grab) => send('wm:keyboard', { grab }),
   typeKey: (key, mods = 0) => send('wm:typeKey', { key, mods }),

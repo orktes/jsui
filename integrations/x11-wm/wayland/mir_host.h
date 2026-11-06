@@ -284,6 +284,57 @@ class MirHost {
   EGLDisplay eglDisplay() const { return dpy_; }
   bool presentThread() const { return threaded_; }
 
+  // A copy of the desktop texture as it is now, and a blurred 1/16-size one
+  // (four 2x linear downscales of the copy), all on the GPU in the current
+  // context: textures of their own, replaced by the next call. False
+  // without GLES 3 (glBlitFramebuffer).
+  struct Snapshot {
+    unsigned full = 0, blurred = 0;
+    int fullW = 0, fullH = 0, blurW = 0, blurH = 0;
+  };
+  bool snapshotDesktop(Snapshot* out) {
+    if (!tex_ || !es3_) return false;
+    if (!blitFramebuffer_)
+      blitFramebuffer_ = reinterpret_cast<void (*)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum)>(
+          eglGetProcAddress("glBlitFramebuffer"));
+    if (!blitFramebuffer_) return false;
+    GLuint fb[2];
+    glGenFramebuffers(2, fb);
+    GLuint src = tex_;
+    int sw = w_, sh = h_;
+    for (int i = 0; i < kSnapLevels; ++i) {
+      int dw = i == 0 ? sw : std::max(1, sw / 2), dh = i == 0 ? sh : std::max(1, sh / 2);
+      if (!snapTex_[i] || snapW_[i] != dw || snapH_[i] != dh) {
+        if (!snapTex_[i]) glGenTextures(1, &snapTex_[i]);
+        glBindTexture(GL_TEXTURE_2D, snapTex_[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, 0x8058 /* GL_RGBA8 */, dw, dh, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        snapW_[i] = dw;
+        snapH_[i] = dh;
+      }
+      glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, fb[0]);
+      glFramebufferTexture2D(0x8CA8, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, src, 0);
+      glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, fb[1]);
+      glFramebufferTexture2D(0x8CA9, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, snapTex_[i], 0);
+      blitFramebuffer_(0, 0, sw, sh, 0, 0, dw, dh, GL_COLOR_BUFFER_BIT, i == 0 ? GL_NEAREST : GL_LINEAR);
+      src = snapTex_[i];
+      sw = dw;
+      sh = dh;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(2, fb);
+    out->full = snapTex_[0];
+    out->fullW = snapW_[0];
+    out->fullH = snapH_[0];
+    out->blurred = src;
+    out->blurW = sw;
+    out->blurH = sh;
+    return true;
+  }
+
   // The texture JSUI draws the desktop into (w_ x h_, GL bottom-left origin).
   // *fresh: newly (re)allocated, so it holds no previous frame.
   unsigned desktopTexture(bool* fresh) {
@@ -739,6 +790,8 @@ class MirHost {
     }
     if (ctx_ != EGL_NO_CONTEXT && surf_ != EGL_NO_SURFACE && eglMakeCurrent(dpy_, surf_, surf_, ctx_)) {
       if (tex_) glDeleteTextures(1, &tex_);
+      for (GLuint& st : snapTex_)
+        if (st) glDeleteTextures(1, &st), st = 0;
       if (vbo_) glDeleteBuffers(1, &vbo_);
       if (prog_) glDeleteProgram(prog_);
     }
@@ -878,6 +931,10 @@ class MirHost {
   // JSUI_WL_GPU_FINISH: glFinish before the swap, so the blit time holds the
   // frame's GPU work and the swap time only the wait for a free buffer.
   bool finish_ = false;
+  static constexpr int kSnapLevels = 5;  // snapshotDesktop: the copy, then 1/2 .. 1/16
+  GLuint snapTex_[kSnapLevels] = {};
+  int snapW_[kSnapLevels] = {}, snapH_[kSnapLevels] = {};
+  void (*blitFramebuffer_)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum) = nullptr;
   // The present thread (presentGpu).
   bool threaded_ = false;
   EGLContext renderCtx_ = EGL_NO_CONTEXT;  // the main thread's, sharing ctx_'s objects

@@ -235,6 +235,18 @@ function Shell() {
 
   const launch = useCallback((app) => wm.launch(app.exec), []);
 
+  // The launcher and the switcher draw over a blurred snapshot of the screen
+  // as it was when they opened (see Scrim in panels.jsx), dropped once they
+  // are gone.
+  const fullPanel = panel === 'launcher' || panel === 'overview';
+  const fullShown = fullPanel || closingPanel === 'launcher' || closingPanel === 'overview';
+  useEffect(() => {
+    if (fullPanel) wm.snapshot(true);
+  }, [fullPanel]);
+  useEffect(() => {
+    if (!fullShown) wm.snapshot(false);
+  }, [fullShown]);
+
   const closePanel = useCallback(() => setPanel(null), []);
   const onDragging = useCallback((id, on) => setDragging(on ? id : null), []);
   const onWinMenu = useCallback((win) => setWinMenu(win.id), []);
