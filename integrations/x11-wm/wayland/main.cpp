@@ -1,0 +1,2088 @@
+// jsui-wl: a Wayland compositor (wlroots 0.17) whose whole desktop shell is
+// the same JSUI React app as jsui-wm's (../ui/shell.jsx), made for 11"
+// touchscreens.
+//
+//   jsui-wl [--scale 1.5] [--size 1920x1200] [--bundle shell.js | --dev URL]
+//           [--anchors file.json] [--control socket] [--mouse] [--no-apps-scan]
+//           [--autostart CMD]... [--verbose]
+//
+// How it fits together (compare ../main.cpp, the X11 host)
+//
+//  * Output. One output (wlroots picks the backend: headless in Docker with
+//    WLR_BACKENDS=headless, DRM + libinput on a device). The scene graph holds
+//    a single buffer: the shell's JSUI frame, rendered on the CPU with
+//    jsui_render_rgba_incremental straight into that buffer.
+//
+//  * Clients. Client surfaces are not in the scene. On every commit of an
+//    xdg toplevel the host composites its surface tree (subsurfaces
+//    included, cropped to the xdg geometry) into RGBA and hands it to JSUI as
+//    host texture "win:<id>"; xdg popups (menus) become "win:<id>" too and are
+//    listed in wm.popups. The shell draws everything: frames, title bars,
+//    animations, the switcher, exactly as on X11. Server-side decorations are
+//    requested (xdg-decoration, KDE server-decoration for GTK 3).
+//
+//  * Input. The compositor routes every press itself: into the shell when
+//    the shell's regions (wm:shellRegions) cover the point, the point is on a
+//    window's title bar / border, or on the wallpaper; into the client
+//    surface below otherwise (focusing and raising it first). Pointer input
+//    reaches JSUI as touch (one finger) unless --mouse; touchscreen input as
+//    multi-touch. The on-screen keyboard types into clients through a
+//    virtual wlr_keyboard.
+//
+//  * Same protocol as the X11 host: shared state wm.screen / wm.windows /
+//    wm.stack / wm.active / wm.popups / wm.apps / wm.system, messages
+//    wm:focus, wm:move, wm:resize, ... (see ../README.md).
+//
+//  * --control <socket>: a line protocol for test drivers (docker/tour.py):
+//    "down X Y", "move X Y", "up", "key NAME", "text UTF8", "shot FILE.ppm".
+//    Screen px. wlr-screencopy, xdg-output and the virtual pointer / keyboard
+//    protocols are there too, so grim and wayvnc work.
+#include "../json.h"
+
+#include <dirent.h>
+#include <drm_fourcc.h>
+#include <fcntl.h>
+#include <pixman.h>
+#include <pwd.h>
+#include <signal.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <time.h>
+#include <unistd.h>
+#include <wayland-server-core.h>
+#include <wayland-server-protocol.h>
+#include <xkbcommon/xkbcommon.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdarg>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <functional>
+#include <map>
+#include <set>
+#include <string>
+#include <vector>
+
+// wlroots headers are C99 (`float color[static 4]`), which C++ rejects.
+extern "C" {
+#define static
+#include <wlr/backend.h>
+#include <wlr/backend/headless.h>
+#include <wlr/backend/multi.h>
+#include <wlr/interfaces/wlr_buffer.h>
+#include <wlr/interfaces/wlr_keyboard.h>
+#include <wlr/render/allocator.h>
+#include <wlr/render/pixman.h>
+#include <wlr/render/wlr_renderer.h>
+#include <wlr/types/wlr_compositor.h>
+#include <wlr/types/wlr_cursor.h>
+#include <wlr/types/wlr_data_device.h>
+#include <wlr/types/wlr_input_device.h>
+#include <wlr/types/wlr_keyboard.h>
+#include <wlr/types/wlr_output.h>
+#include <wlr/types/wlr_output_layout.h>
+#include <wlr/types/wlr_pointer.h>
+#include <wlr/types/wlr_scene.h>
+#include <wlr/types/wlr_screencopy_v1.h>
+#include <wlr/types/wlr_seat.h>
+#include <wlr/types/wlr_server_decoration.h>
+#include <wlr/types/wlr_subcompositor.h>
+#include <wlr/types/wlr_touch.h>
+#include <wlr/types/wlr_virtual_keyboard_v1.h>
+#include <wlr/types/wlr_virtual_pointer_v1.h>
+#include <wlr/types/wlr_xdg_decoration_v1.h>
+#include <wlr/types/wlr_xdg_output_v1.h>
+#include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/util/edges.h>
+#include <wlr/util/log.h>
+#undef static
+}
+
+#include "jsui/jsui.h"
+
+#ifndef JSUI_WM_BUNDLE
+#define JSUI_WM_BUNDLE "integrations/x11-wm/ui/dist/shell.js"
+#endif
+
+namespace {
+
+bool g_verbose = false;
+
+void logf(const char* fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  std::fprintf(stderr, "[jsui-wl] ");
+  std::vfprintf(stderr, fmt, ap);
+  std::fprintf(stderr, "\n");
+  va_end(ap);
+}
+#define VLOG(...) \
+  do {            \
+    if (g_verbose) logf(__VA_ARGS__); \
+  } while (0)
+
+double nowMs() {
+  timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+
+std::string lower(std::string s) {
+  for (auto& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
+  return s;
+}
+
+bool fileExists(const std::string& path) {
+  struct stat st;
+  return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+}
+
+// A wl_listener that runs a lambda, for signals that live as long as the
+// compositor.
+template <typename F>
+void listen(wl_signal* sig, wl_listener* l, F&& f) {
+  using Fn = std::decay_t<F>;
+  struct Box {
+    wl_listener l;
+    Fn fn;
+  };
+  (void)l;
+  auto* box = new Box{{}, std::forward<F>(f)};
+  box->l.notify = [](wl_listener* ll, void* data) {
+    Box* b = reinterpret_cast<Box*>(ll);
+    b->fn(data);
+  };
+  wl_signal_add(sig, &box->l);
+}
+
+// Listeners we need to remove again (per-client ones) are kept in a list.
+struct Hook {
+  wl_listener l{};
+  std::function<void(void*)> fn;
+};
+
+Hook* hook(wl_signal* sig, std::function<void(void*)> fn) {
+  auto* h = new Hook;
+  h->fn = std::move(fn);
+  h->l.notify = [](wl_listener* ll, void* data) {
+    Hook* hh = reinterpret_cast<Hook*>(ll);
+    hh->fn(data);
+  };
+  wl_signal_add(sig, &h->l);
+  return h;
+}
+
+void unhook(std::vector<Hook*>& hooks) {
+  for (Hook* h : hooks) {
+    wl_list_remove(&h->l.link);
+    delete h;
+  }
+  hooks.clear();
+}
+
+// ------------------------------------------------------------------ Options
+
+struct Options {
+  std::string bundle = JSUI_WM_BUNDLE;
+  std::string devUrl, anchors, control;
+  float scale = 0;
+  int width = 1920, height = 1200;
+  bool mouse = false;
+  bool scanApps = true;
+  std::vector<std::string> autostart;
+};
+
+void usage() {
+  std::fprintf(stderr,
+               "usage: jsui-wl [--scale 1.5] [--size 1920x1200] [--bundle shell.js | --dev URL]\n"
+               "               [--anchors file.json] [--control socket] [--mouse] [--no-apps-scan]\n"
+               "               [--autostart CMD]... [--verbose]\n");
+}
+
+bool parseArgs(int argc, char** argv, Options& o) {
+  for (int i = 1; i < argc; ++i) {
+    std::string a = argv[i];
+    auto next = [&](std::string& out) {
+      if (i + 1 >= argc) return false;
+      out = argv[++i];
+      return true;
+    };
+    std::string v;
+    if (a == "--scale" && next(v)) o.scale = std::strtof(v.c_str(), nullptr);
+    else if (a == "--size" && next(v)) std::sscanf(v.c_str(), "%dx%d", &o.width, &o.height);
+    else if (a == "--bundle" && next(v)) o.bundle = v;
+    else if (a == "--dev" && next(v)) o.devUrl = v;
+    else if (a == "--anchors" && next(v)) o.anchors = v;
+    else if (a == "--control" && next(v)) o.control = v;
+    else if (a == "--autostart" && next(v)) o.autostart.push_back(v);
+    else if (a == "--mouse") o.mouse = true;
+    else if (a == "--no-apps-scan") o.scanApps = false;
+    else if (a == "--verbose" || a == "-v") g_verbose = true;
+    else if (a == "--help" || a == "-h") {
+      usage();
+      std::exit(0);
+    } else {
+      usage();
+      return false;
+    }
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------- Apps
+
+struct App {
+  std::string id, name, comment, exec, icon, wmClass, categories;
+  bool terminal = false;
+};
+
+std::string findIcon(const std::string& icon) {
+  if (icon.empty()) return "";
+  if (icon[0] == '/') return fileExists(icon) && icon.size() > 4 && icon.substr(icon.size() - 4) == ".png" ? icon : "";
+  static const char* themes[] = {"hicolor", "Adwaita", "gnome", "Papirus", "breeze"};
+  static const char* sizes[] = {"128x128", "96x96", "64x64", "256x256", "72x72", "48x48", "512x512", "32x32"};
+  for (const char* theme : themes)
+    for (const char* size : sizes) {
+      std::string p = std::string("/usr/share/icons/") + theme + "/" + size + "/apps/" + icon + ".png";
+      if (fileExists(p)) return p;
+    }
+  std::string p = "/usr/share/pixmaps/" + icon + ".png";
+  return fileExists(p) ? p : "";
+}
+
+std::string cleanExec(const std::string& exec) {
+  std::string out;
+  for (size_t i = 0; i < exec.size(); ++i) {
+    if (exec[i] == '%' && i + 1 < exec.size()) {
+      if (exec[i + 1] == '%') out += '%';
+      ++i;
+      continue;
+    }
+    out += exec[i];
+  }
+  while (!out.empty() && out.back() == ' ') out.pop_back();
+  return out;
+}
+
+std::vector<App> scanApps(const std::string& terminal) {
+  std::vector<App> apps;
+  std::set<std::string> seen;
+  std::vector<std::string> dirs = {"/usr/share/applications", "/usr/local/share/applications"};
+  if (const char* home = getenv("HOME")) dirs.push_back(std::string(home) + "/.local/share/applications");
+  for (const auto& dir : dirs) {
+    DIR* d = opendir(dir.c_str());
+    if (!d) continue;
+    while (dirent* e = readdir(d)) {
+      std::string file = e->d_name;
+      if (file.size() < 9 || file.substr(file.size() - 8) != ".desktop") continue;
+      std::ifstream in(dir + "/" + file);
+      App app;
+      app.id = file.substr(0, file.size() - 8);
+      bool inEntry = false, hidden = false, isApp = false;
+      std::string line;
+      while (std::getline(in, line)) {
+        if (!line.empty() && line[0] == '[') {
+          inEntry = line == "[Desktop Entry]";
+          continue;
+        }
+        if (!inEntry) continue;
+        size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string k = line.substr(0, eq), v = line.substr(eq + 1);
+        if (k == "Name") app.name = v;
+        else if (k == "Comment") app.comment = v;
+        else if (k == "Exec") app.exec = cleanExec(v);
+        else if (k == "Icon") app.icon = v;
+        else if (k == "StartupWMClass") app.wmClass = v;
+        else if (k == "Categories") app.categories = v;
+        else if (k == "Terminal") app.terminal = v == "true";
+        else if (k == "Type") isApp = v == "Application";
+        else if ((k == "NoDisplay" || k == "Hidden") && v == "true") hidden = true;
+        else if (k == "OnlyShowIn") hidden = true;
+      }
+      if (!isApp || hidden || app.name.empty() || app.exec.empty() || seen.count(app.id)) continue;
+      if (app.terminal) app.exec = terminal + " " + app.exec;
+      app.icon = findIcon(app.icon);
+      seen.insert(app.id);
+      apps.push_back(app);
+    }
+    closedir(d);
+  }
+  std::sort(apps.begin(), apps.end(), [](const App& a, const App& b) { return lower(a.name) < lower(b.name); });
+  return apps;
+}
+
+void launch(const std::string& cmd) {
+  if (cmd.empty()) return;
+  logf("launch: %s", cmd.c_str());
+  pid_t pid = fork();
+  if (pid == 0) {
+    setsid();
+    signal(SIGCHLD, SIG_DFL);
+    execl("/bin/sh", "sh", "-c", cmd.c_str(), static_cast<char*>(nullptr));
+    _exit(127);
+  }
+}
+
+// DOM key names for keysyms (xkbcommon keysyms are the X11 ones).
+struct DomKey {
+  const char* key;
+  const char* code;
+};
+
+DomKey domKey(xkb_keysym_t sym, const char* text) {
+  switch (sym) {
+    case XKB_KEY_Return: case XKB_KEY_KP_Enter: return {"Enter", "Enter"};
+    case XKB_KEY_BackSpace: return {"Backspace", "Backspace"};
+    case XKB_KEY_Escape: return {"Escape", "Escape"};
+    case XKB_KEY_Tab: case XKB_KEY_ISO_Left_Tab: return {"Tab", "Tab"};
+    case XKB_KEY_Left: return {"ArrowLeft", "ArrowLeft"};
+    case XKB_KEY_Right: return {"ArrowRight", "ArrowRight"};
+    case XKB_KEY_Up: return {"ArrowUp", "ArrowUp"};
+    case XKB_KEY_Down: return {"ArrowDown", "ArrowDown"};
+    case XKB_KEY_Delete: return {"Delete", "Delete"};
+    case XKB_KEY_Home: return {"Home", "Home"};
+    case XKB_KEY_End: return {"End", "End"};
+    case XKB_KEY_space: return {" ", "Space"};
+    case XKB_KEY_Shift_L: return {"Shift", "ShiftLeft"};
+    case XKB_KEY_Shift_R: return {"Shift", "ShiftRight"};
+    case XKB_KEY_Control_L: return {"Control", "ControlLeft"};
+    case XKB_KEY_Control_R: return {"Control", "ControlRight"};
+    case XKB_KEY_Alt_L: return {"Alt", "AltLeft"};
+    case XKB_KEY_Super_L: return {"Meta", "MetaLeft"};
+    default: break;
+  }
+  return {text && *text ? text : nullptr, nullptr};
+}
+
+// The keysym the shell's on-screen keyboard means by a DOM key name.
+xkb_keysym_t keysymFor(const std::string& key) {
+  static const std::map<std::string, xkb_keysym_t> named = {
+      {"Enter", XKB_KEY_Return},   {"Backspace", XKB_KEY_BackSpace}, {"Tab", XKB_KEY_Tab},
+      {"Escape", XKB_KEY_Escape},  {"ArrowLeft", XKB_KEY_Left},      {"ArrowRight", XKB_KEY_Right},
+      {"ArrowUp", XKB_KEY_Up},     {"ArrowDown", XKB_KEY_Down},      {" ", XKB_KEY_space},
+      {"Delete", XKB_KEY_Delete},  {"Home", XKB_KEY_Home},           {"End", XKB_KEY_End},
+  };
+  auto it = named.find(key);
+  if (it != named.end()) return it->second;
+  // One UTF-8 character.
+  const unsigned char* p = reinterpret_cast<const unsigned char*>(key.c_str());
+  uint32_t cp = p[0];
+  if (cp >= 0xF0) cp = ((p[0] & 7u) << 18) | ((p[1] & 63u) << 12) | ((p[2] & 63u) << 6) | (p[3] & 63u);
+  else if (cp >= 0xE0) cp = ((p[0] & 15u) << 12) | ((p[1] & 63u) << 6) | (p[2] & 63u);
+  else if (cp >= 0xC0) cp = ((p[0] & 31u) << 6) | (p[1] & 63u);
+  return xkb_utf32_to_keysym(cp);
+}
+
+// ------------------------------------------------------------ shell buffer
+
+// The buffer the shell renders into and the scene shows: CPU memory that the
+// pixman renderer reads in place.
+struct FrameBuffer {
+  wlr_buffer base;
+  std::vector<uint8_t> data;
+  int stride = 0;
+};
+
+const wlr_buffer_impl kFrameBufferImpl = {
+    /*destroy*/ [](wlr_buffer* b) { delete reinterpret_cast<FrameBuffer*>(b); },
+    /*get_dmabuf*/ nullptr,
+    /*get_shm*/ nullptr,
+    /*begin_data_ptr_access*/
+    [](wlr_buffer* b, uint32_t, void** data, uint32_t* format, size_t* stride) -> bool {
+      auto* fb = reinterpret_cast<FrameBuffer*>(b);
+      *data = fb->data.data();
+      *format = DRM_FORMAT_XBGR8888;  // bytes R, G, B, x: JSUI's RGBA
+      *stride = size_t(fb->stride);
+      return true;
+    },
+    /*end_data_ptr_access*/ [](wlr_buffer*) {},
+};
+
+// ------------------------------------------------------------------ WM
+
+struct Rect {
+  int x = 0, y = 0, w = 0, h = 0;
+  bool contains(double px, double py) const { return px >= x && py >= y && px < x + w && py < y + h; }
+};
+
+enum class Target { None, Shell, Surface };
+
+struct Client {
+  uint32_t id = 0;
+  bool popup = false;
+  wlr_xdg_surface* xdg = nullptr;
+  wlr_xdg_toplevel* tl = nullptr;   // toplevels
+  wlr_xdg_popup* xpopup = nullptr;  // popups
+  uint32_t parentId = 0;            // popups: the client they belong to
+  std::vector<Hook*> hooks;
+  bool mapped = false, placed = false;
+
+  // content (the xdg geometry) in screen px
+  int x = 0, y = 0, w = 1, h = 1;
+  int geoX = 0, geoY = 0;  // xdg geometry offset inside the surface
+  std::vector<uint8_t> rgba;
+  int texW = 0, texH = 0;
+  bool hasTexture = false;
+
+  std::string title, appIdRaw, appId;
+  uint32_t transientFor = 0;
+  bool decorated = true;
+  bool minimized = false, maximized = false, fullscreen = false;
+  int snap = 0;  // 1 left, 2 right
+  Rect restore;
+  bool hasRestore = false;
+  int minW = 1, minH = 1, maxW = 0, maxH = 0;
+  int pid = 0;
+  double mappedAt = 0;
+  bool dialog = false;
+};
+
+class WM {
+ public:
+  explicit WM(const Options& o) : opt_(o) {}
+  int run();
+
+ private:
+  // wlroots setup
+  bool setup();
+  void newOutput(wlr_output* output);
+  void newInput(wlr_input_device* dev);
+  void newKeyboard(wlr_keyboard* kb);
+  void newToplevel(wlr_xdg_surface* xdg);
+  void newPopup(wlr_xdg_popup* popup);
+  void setupVirtualKeyboard();
+  void setupControl();
+
+  // JSUI
+  bool createRuntime();
+  void publishScreen();
+  void publishApps();
+  void publishSystem();
+  void onMessage(const char* name, const char* json);
+  void onStateChange(const char* key, const char* json);
+  void writeAnchors(const wmjson::Value& v);
+
+  // clients
+  Client* find(uint32_t id);
+  Client* findSurface(wlr_surface* s);
+  void onMap(Client* c);
+  void onUnmap(Client* c);
+  void onDestroy(Client* c);
+  void onCommit(Client* c);
+  void capture(Client* c);
+  void place(Client* c);
+  void configure(Client* c, int x, int y, int w, int h);
+  void raise(Client* c);
+  void focus(Client* c);
+  void focusTop();
+  void close(Client* c);
+  void minimize(Client* c);
+  void unminimize(Client* c);
+  void setMaximized(Client* c, bool on);
+  void setSnap(Client* c, int side);
+  void setFullscreen(Client* c, bool on);
+  Rect workArea() const;
+  void matchApp(Client* c);
+  Rect popupRect(Client* p) const;
+
+  // state publishing
+  std::string windowJson(const Client* c) const;
+  void publishWindow(const Client* c);
+  void publishStack();
+  void publishPopups();
+  void publishActive();
+
+  // input
+  Target route(double x, double y, wlr_surface** surface, double* sx, double* sy);
+  void pointerButton(bool down, uint32_t button, uint32_t timeMs);
+  void pointerMotion(uint32_t timeMs);
+  void touchEvent(int id, int phase, double x, double y, uint32_t timeMs);
+  void keyboardKey(wlr_keyboard* kb, uint32_t keycode, bool down, uint32_t timeMs);
+  void typeKey(const std::string& key, int mods);
+  void sendShellPointer(int phase, double x, double y);
+  void controlLine(const std::string& line);
+  void writeScreenshot(const std::string& path);
+
+  // frames
+  void scheduleTick(double delayMs);
+  void tick();
+  void scheduleFrame();
+  void onFrame();
+
+  int P(double logical) const { return int(std::lround(logical * scale_)); }
+  double L(double px) const { return px / double(scale_); }
+
+  Options opt_;
+  wl_display* display_ = nullptr;
+  wl_event_loop* loop_ = nullptr;
+  wlr_backend* backend_ = nullptr;
+  wlr_renderer* renderer_ = nullptr;
+  wlr_allocator* allocator_ = nullptr;
+  wlr_scene* scene_ = nullptr;
+  wlr_scene_output_layout* sceneLayout_ = nullptr;
+  wlr_output_layout* layout_ = nullptr;
+  wlr_output* output_ = nullptr;
+  wlr_scene_output* sceneOutput_ = nullptr;
+  wlr_scene_buffer* shellNode_ = nullptr;
+  FrameBuffer* frame_ = nullptr;
+  wlr_xdg_shell* xdgShell_ = nullptr;
+  wlr_seat* seat_ = nullptr;
+  wlr_cursor* cursor_ = nullptr;
+  wlr_keyboard vkbd_{};  // the on-screen keyboard's device
+  xkb_keymap* keymap_ = nullptr;
+  wl_event_source* tickTimer_ = nullptr;
+  bool tickPending_ = false;
+  bool frameScheduled_ = false;
+  bool shellDirty_ = false;
+  pixman_region32_t shellDamage_;
+  int sw_ = 0, sh_ = 0;
+  float scale_ = 1.5f;
+  std::string socketName_;
+
+  double topBar_ = 40, dock_ = 84, homeBar_ = 24, titleBar_ = 46, border_ = 12;
+
+  JsuiRuntime* rt_ = nullptr;
+  std::map<uint32_t, Client*> clients_;
+  std::vector<uint32_t> stack_;   // toplevels, bottom to top
+  std::vector<uint32_t> popups_;  // bottom to top
+  uint32_t nextId_ = 1;
+  uint32_t active_ = 0;
+  std::vector<App> apps_;
+  std::map<uint32_t, double> releaseAt_;
+  bool tabletMode_ = true;
+  double splitRatio_ = 0.5;
+  bool keyboardGrabbed_ = false;
+  int cascade_ = 0;
+  std::vector<Rect> shellRegions_;
+
+  // pointer: where the current press goes (implicit grab)
+  Target pointerTarget_ = Target::None;
+  bool pointerDown_ = false;
+  // touch points: id -> target
+  std::map<int, Target> touches_;
+  // host-side interactive move / resize (xdg request_move / request_resize)
+  uint32_t mrId_ = 0;
+  uint32_t mrEdges_ = 0;
+  double mrX_ = 0, mrY_ = 0;
+  Rect mrStart_;
+
+  int controlFd_ = -1;
+  std::map<int, std::string> controlBuf_;
+  std::map<int, wl_event_source*> controlSources_;
+};
+
+// ------------------------------------------------------------- setup
+
+bool WM::setup() {
+  wlr_log_init(g_verbose ? WLR_DEBUG : WLR_ERROR, nullptr);
+  display_ = wl_display_create();
+  loop_ = wl_display_get_event_loop(display_);
+  backend_ = wlr_backend_autocreate(display_, nullptr);
+  if (!backend_) {
+    logf("cannot create a wlroots backend (WLR_BACKENDS=headless for no screen)");
+    return false;
+  }
+  renderer_ = wlr_renderer_autocreate(backend_);
+  if (!renderer_) {
+    logf("cannot create a renderer (WLR_RENDERER=pixman needs no GPU)");
+    return false;
+  }
+  wlr_renderer_init_wl_display(renderer_, display_);
+  allocator_ = wlr_allocator_autocreate(backend_, renderer_);
+  wlr_compositor_create(display_, 5, renderer_);
+  wlr_subcompositor_create(display_);
+  wlr_data_device_manager_create(display_);
+  layout_ = wlr_output_layout_create();
+  wlr_xdg_output_manager_v1_create(display_, layout_);
+  wlr_screencopy_manager_v1_create(display_);
+  scene_ = wlr_scene_create();
+  sceneLayout_ = wlr_scene_attach_output_layout(scene_, layout_);
+  pixman_region32_init(&shellDamage_);
+
+  listen(&backend_->events.new_output, nullptr, [this](void* d) { newOutput(static_cast<wlr_output*>(d)); });
+  listen(&backend_->events.new_input, nullptr, [this](void* d) { newInput(static_cast<wlr_input_device*>(d)); });
+
+  xdgShell_ = wlr_xdg_shell_create(display_, 3);
+  listen(&xdgShell_->events.new_surface, nullptr, [this](void* d) {
+    auto* xdg = static_cast<wlr_xdg_surface*>(d);
+    if (xdg->role == WLR_XDG_SURFACE_ROLE_TOPLEVEL) newToplevel(xdg);
+    else if (xdg->role == WLR_XDG_SURFACE_ROLE_POPUP) newPopup(xdg->popup);
+  });
+
+  // Ask for server-side decorations: the shell draws every title bar.
+  auto* kde = wlr_server_decoration_manager_create(display_);
+  wlr_server_decoration_manager_set_default_mode(kde, WLR_SERVER_DECORATION_MANAGER_MODE_SERVER);
+  auto* xdgDeco = wlr_xdg_decoration_manager_v1_create(display_);
+  listen(&xdgDeco->events.new_toplevel_decoration, nullptr, [](void* d) {
+    auto* deco = static_cast<wlr_xdg_toplevel_decoration_v1*>(d);
+    auto* h = new Hook;
+    h->fn = [deco](void*) {
+      if (deco->toplevel->base->initialized)
+        wlr_xdg_toplevel_decoration_v1_set_mode(deco, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+    };
+    h->l.notify = [](wl_listener* l, void* data) { reinterpret_cast<Hook*>(l)->fn(data); };
+    wl_signal_add(&deco->events.request_mode, &h->l);
+    // A decoration made before the first commit: set the mode on the
+    // surface's first configure (wlroots merges it in).
+    wlr_xdg_toplevel_decoration_v1_set_mode(deco, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+    listen(&deco->events.destroy, nullptr, [h](void*) {
+      wl_list_remove(&h->l.link);
+      delete h;
+    });
+  });
+
+  cursor_ = wlr_cursor_create();
+  wlr_cursor_attach_output_layout(cursor_, layout_);
+  listen(&cursor_->events.motion, nullptr, [this](void* d) {
+    auto* e = static_cast<wlr_pointer_motion_event*>(d);
+    wlr_cursor_move(cursor_, &e->pointer->base, e->delta_x, e->delta_y);
+    pointerMotion(e->time_msec);
+  });
+  listen(&cursor_->events.motion_absolute, nullptr, [this](void* d) {
+    auto* e = static_cast<wlr_pointer_motion_absolute_event*>(d);
+    wlr_cursor_warp_absolute(cursor_, &e->pointer->base, e->x, e->y);
+    pointerMotion(e->time_msec);
+  });
+  listen(&cursor_->events.button, nullptr, [this](void* d) {
+    auto* e = static_cast<wlr_pointer_button_event*>(d);
+    pointerButton(e->state == WLR_BUTTON_PRESSED, e->button, e->time_msec);
+  });
+  listen(&cursor_->events.axis, nullptr, [this](void* d) {
+    auto* e = static_cast<wlr_pointer_axis_event*>(d);
+    wlr_surface* s = nullptr;
+    double sx = 0, sy = 0;
+    if (route(cursor_->x, cursor_->y, &s, &sx, &sy) == Target::Shell) {
+      float dx = e->orientation == WLR_AXIS_ORIENTATION_HORIZONTAL ? float(e->delta * 4) : 0.f;
+      float dy = e->orientation == WLR_AXIS_ORIENTATION_VERTICAL ? float(e->delta * 4) : 0.f;
+      jsui_set_event_time(rt_, nowMs());
+      jsui_send_mouse_wheel_ex(rt_, float(L(cursor_->x)), float(L(cursor_->y)), dx, dy, JSUI_WHEEL_STEPS);
+      scheduleTick(0);
+    } else {
+      wlr_seat_pointer_notify_axis(seat_, e->time_msec, e->orientation, e->delta, e->delta_discrete, e->source);
+    }
+  });
+  listen(&cursor_->events.frame, nullptr, [this](void*) { wlr_seat_pointer_notify_frame(seat_); });
+  listen(&cursor_->events.touch_down, nullptr, [this](void* d) {
+    auto* e = static_cast<wlr_touch_down_event*>(d);
+    double x = 0, y = 0;
+    wlr_cursor_absolute_to_layout_coords(cursor_, &e->touch->base, e->x, e->y, &x, &y);
+    touchEvent(e->touch_id, 0, x, y, e->time_msec);
+  });
+  listen(&cursor_->events.touch_motion, nullptr, [this](void* d) {
+    auto* e = static_cast<wlr_touch_motion_event*>(d);
+    double x = 0, y = 0;
+    wlr_cursor_absolute_to_layout_coords(cursor_, &e->touch->base, e->x, e->y, &x, &y);
+    touchEvent(e->touch_id, 1, x, y, e->time_msec);
+  });
+  listen(&cursor_->events.touch_up, nullptr, [this](void* d) {
+    auto* e = static_cast<wlr_touch_up_event*>(d);
+    touchEvent(e->touch_id, 2, 0, 0, e->time_msec);
+  });
+  listen(&cursor_->events.touch_cancel, nullptr, [this](void* d) {
+    auto* e = static_cast<wlr_touch_cancel_event*>(d);
+    touchEvent(e->touch_id, 3, 0, 0, e->time_msec);
+  });
+  listen(&cursor_->events.touch_frame, nullptr, [this](void*) { wlr_seat_touch_notify_frame(seat_); });
+
+  seat_ = wlr_seat_create(display_, "seat0");
+  wlr_seat_set_capabilities(seat_, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD | WL_SEAT_CAPABILITY_TOUCH);
+  listen(&seat_->events.request_set_selection, nullptr, [this](void* d) {
+    auto* e = static_cast<wlr_seat_request_set_selection_event*>(d);
+    wlr_seat_set_selection(seat_, e->source, e->serial);
+  });
+
+  auto* vptr = wlr_virtual_pointer_manager_v1_create(display_);
+  listen(&vptr->events.new_virtual_pointer, nullptr, [this](void* d) {
+    auto* e = static_cast<wlr_virtual_pointer_v1_new_pointer_event*>(d);
+    newInput(&e->new_pointer->pointer.base);
+  });
+  auto* vkbd = wlr_virtual_keyboard_manager_v1_create(display_);
+  listen(&vkbd->events.new_virtual_keyboard, nullptr, [this](void* d) {
+    auto* k = static_cast<wlr_virtual_keyboard_v1*>(d);
+    newInput(&k->keyboard.base);
+  });
+  setupVirtualKeyboard();
+
+  const char* socket = wl_display_add_socket_auto(display_);
+  if (!socket) {
+    logf("cannot open a Wayland socket");
+    return false;
+  }
+  socketName_ = socket;
+  if (!wlr_backend_start(backend_)) {
+    logf("cannot start the backend");
+    return false;
+  }
+  // Headless (Docker, CI): no screen until we add one.
+  if (!output_) {
+    struct Ctx {
+      int w, h;
+    } ctx{opt_.width, opt_.height};
+    auto add = [](wlr_backend* b, void* u) {
+      auto* k = static_cast<Ctx*>(u);
+      if (wlr_backend_is_headless(b)) wlr_headless_add_output(b, unsigned(k->w), unsigned(k->h));
+    };
+    if (wlr_backend_is_multi(backend_)) wlr_multi_for_each_backend(backend_, add, &ctx);
+    else add(backend_, &ctx);
+  }
+  if (!output_) {
+    logf("no output");
+    return false;
+  }
+  setenv("WAYLAND_DISPLAY", socket, 1);
+  setenv("XDG_SESSION_TYPE", "wayland", 1);
+  setenv("GDK_BACKEND", "wayland", 0);
+  setenv("QT_QPA_PLATFORM", "wayland", 0);
+  unsetenv("DISPLAY");
+  logf("listening on WAYLAND_DISPLAY=%s", socket);
+  tickTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
+    static_cast<WM*>(u)->tick();
+    return 0;
+  }, this);
+  setupControl();
+  return output_ != nullptr;
+}
+
+void WM::newOutput(wlr_output* output) {
+  if (output_) return;  // one screen
+  wlr_output_init_render(output, allocator_, renderer_);
+  wlr_output_state st;
+  wlr_output_state_init(&st);
+  wlr_output_state_set_enabled(&st, true);
+  if (wlr_output_mode* mode = wlr_output_preferred_mode(output)) wlr_output_state_set_mode(&st, mode);
+  else wlr_output_state_set_custom_mode(&st, opt_.width, opt_.height, 60000);
+  wlr_output_commit_state(output, &st);
+  wlr_output_state_finish(&st);
+  output_ = output;
+  wlr_output_layout_add_auto(layout_, output);
+  sceneOutput_ = wlr_scene_output_create(scene_, output);
+  wlr_scene_output_layout_add_output(sceneLayout_, wlr_output_layout_get(layout_, output), sceneOutput_);
+  sw_ = output->width;
+  sh_ = output->height;
+  scale_ = opt_.scale > 0 ? opt_.scale : sw_ >= 1800 ? 1.5f : sw_ >= 1500 ? 1.25f : 1.0f;
+  logf("output %s %dx%d px, scale %.2f (%dx%d logical)", output->name, sw_, sh_, scale_, int(L(sw_)), int(L(sh_)));
+  // Apps render at scale 1 (no fractional-scale protocol here); GTK scales its
+  // text to the shell's scale instead.
+  setenv("GDK_DPI_SCALE", std::to_string(scale_).c_str(), 0);
+
+  frame_ = new FrameBuffer;
+  frame_->stride = sw_ * 4;
+  frame_->data.assign(size_t(frame_->stride) * size_t(sh_), 0);
+  wlr_buffer_init(&frame_->base, &kFrameBufferImpl, sw_, sh_);
+  shellNode_ = wlr_scene_buffer_create(&scene_->tree, &frame_->base);
+
+  listen(&output->events.frame, nullptr, [this](void*) { onFrame(); });
+  listen(&output->events.request_state, nullptr, [output](void* d) {
+    auto* e = static_cast<wlr_output_event_request_state*>(d);
+    wlr_output_commit_state(output, e->state);
+  });
+}
+
+void WM::newInput(wlr_input_device* dev) {
+  switch (dev->type) {
+    case WLR_INPUT_DEVICE_KEYBOARD: newKeyboard(wlr_keyboard_from_input_device(dev)); break;
+    case WLR_INPUT_DEVICE_POINTER:
+    case WLR_INPUT_DEVICE_TOUCH: wlr_cursor_attach_input_device(cursor_, dev); break;
+    default: break;
+  }
+}
+
+void WM::newKeyboard(wlr_keyboard* kb) {
+  if (!kb->keymap) {
+    xkb_context* ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+    xkb_keymap* km = xkb_keymap_new_from_names(ctx, nullptr, XKB_KEYMAP_COMPILE_NO_FLAGS);
+    wlr_keyboard_set_keymap(kb, km);
+    xkb_keymap_unref(km);
+    xkb_context_unref(ctx);
+  }
+  wlr_keyboard_set_repeat_info(kb, 30, 400);
+  listen(&kb->events.key, nullptr, [this, kb](void* d) {
+    auto* e = static_cast<wlr_keyboard_key_event*>(d);
+    keyboardKey(kb, e->keycode, e->state == WL_KEYBOARD_KEY_STATE_PRESSED, e->time_msec);
+  });
+  listen(&kb->events.modifiers, nullptr, [this, kb](void*) {
+    wlr_seat_set_keyboard(seat_, kb);
+    wlr_seat_keyboard_notify_modifiers(seat_, &kb->modifiers);
+  });
+  wlr_seat_set_keyboard(seat_, kb);
+}
+
+// The on-screen keyboard types through this device: a plain US keymap.
+void WM::setupVirtualKeyboard() {
+  static const wlr_keyboard_impl impl = {"jsui-osk", nullptr};
+  wlr_keyboard_init(&vkbd_, &impl, "jsui-osk");
+  xkb_context* ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+  keymap_ = xkb_keymap_new_from_names(ctx, nullptr, XKB_KEYMAP_COMPILE_NO_FLAGS);
+  wlr_keyboard_set_keymap(&vkbd_, keymap_);
+  xkb_context_unref(ctx);
+  wlr_seat_set_keyboard(seat_, &vkbd_);
+}
+
+// ------------------------------------------------------------ clients
+
+Client* WM::find(uint32_t id) {
+  auto it = clients_.find(id);
+  return it == clients_.end() ? nullptr : it->second;
+}
+
+Client* WM::findSurface(wlr_surface* s) {
+  if (!s) return nullptr;
+  wlr_surface* root = wlr_surface_get_root_surface(s);
+  for (auto& [id, c] : clients_)
+    if (c->xdg && c->xdg->surface == root) return c;
+  return nullptr;
+}
+
+void WM::newToplevel(wlr_xdg_surface* xdg) {
+  auto* c = new Client;
+  c->id = nextId_++;
+  c->xdg = xdg;
+  c->tl = xdg->toplevel;
+  clients_[c->id] = c;
+  wl_client_get_credentials(wl_resource_get_client(xdg->resource), &c->pid, nullptr, nullptr);
+  c->hooks.push_back(hook(&xdg->surface->events.map, [this, c](void*) { onMap(c); }));
+  c->hooks.push_back(hook(&xdg->surface->events.unmap, [this, c](void*) { onUnmap(c); }));
+  c->hooks.push_back(hook(&xdg->surface->events.commit, [this, c](void*) { onCommit(c); }));
+  c->hooks.push_back(hook(&xdg->events.destroy, [this, c](void*) { onDestroy(c); }));
+  c->hooks.push_back(hook(&c->tl->events.set_title, [this, c](void*) {
+    c->title = c->tl->title ? c->tl->title : "";
+    publishWindow(c);
+  }));
+  c->hooks.push_back(hook(&c->tl->events.set_app_id, [this, c](void*) {
+    c->appIdRaw = c->tl->app_id ? c->tl->app_id : "";
+    matchApp(c);
+    publishWindow(c);
+  }));
+  c->hooks.push_back(hook(&c->tl->events.set_parent, [this, c](void*) {
+    Client* p = c->tl->parent ? findSurface(c->tl->parent->base->surface) : nullptr;
+    c->transientFor = p ? p->id : 0;
+    publishWindow(c);
+  }));
+  c->hooks.push_back(hook(&c->tl->events.request_maximize, [this, c](void*) {
+    if (c->xdg->initialized) setMaximized(c, c->tl->requested.maximized);
+  }));
+  c->hooks.push_back(hook(&c->tl->events.request_fullscreen, [this, c](void*) {
+    if (c->xdg->initialized) setFullscreen(c, c->tl->requested.fullscreen);
+  }));
+  c->hooks.push_back(hook(&c->tl->events.request_minimize, [this, c](void*) {
+    if (c->mapped) minimize(c);
+  }));
+  c->hooks.push_back(hook(&c->tl->events.request_move, [this, c](void*) {
+    if (!pointerDown_ || c->maximized || c->fullscreen) return;
+    mrId_ = c->id;
+    mrEdges_ = 0;
+    mrX_ = cursor_->x;
+    mrY_ = cursor_->y;
+    mrStart_ = {c->x, c->y, c->w, c->h};
+  }));
+  c->hooks.push_back(hook(&c->tl->events.request_resize, [this, c](void* d) {
+    auto* e = static_cast<wlr_xdg_toplevel_resize_event*>(d);
+    if (!pointerDown_ || c->maximized || c->fullscreen) return;
+    mrId_ = c->id;
+    mrEdges_ = e->edges;
+    mrX_ = cursor_->x;
+    mrY_ = cursor_->y;
+    mrStart_ = {c->x, c->y, c->w, c->h};
+  }));
+}
+
+void WM::newPopup(wlr_xdg_popup* popup) {
+  auto* c = new Client;
+  c->id = nextId_++;
+  c->popup = true;
+  c->xdg = popup->base;
+  c->xpopup = popup;
+  Client* parent = findSurface(popup->parent);
+  c->parentId = parent ? parent->id : 0;
+  clients_[c->id] = c;
+  // Keep menus on screen: the box is relative to the toplevel's geometry.
+  if (parent) {
+    Client* top = parent;
+    while (top && top->popup) top = find(top->parentId);
+    if (top) {
+      wlr_box box{-top->x, -top->y, sw_, sh_};
+      wlr_xdg_popup_unconstrain_from_box(popup, &box);
+    }
+  }
+  c->hooks.push_back(hook(&c->xdg->surface->events.map, [this, c](void*) { onMap(c); }));
+  c->hooks.push_back(hook(&c->xdg->surface->events.unmap, [this, c](void*) { onUnmap(c); }));
+  c->hooks.push_back(hook(&c->xdg->surface->events.commit, [this, c](void*) { onCommit(c); }));
+  c->hooks.push_back(hook(&c->xdg->events.destroy, [this, c](void*) { onDestroy(c); }));
+}
+
+void WM::matchApp(Client* c) {
+  c->appId.clear();
+  std::string want = lower(c->appIdRaw);
+  if (want.empty()) return;
+  for (const App& a : apps_) {
+    std::string id = lower(a.id);
+    if (id == want || lower(a.wmClass) == want || id == want + ".desktop" ||
+        (id.size() > want.size() && id.compare(id.size() - want.size(), want.size(), want) == 0 &&
+         id[id.size() - want.size() - 1] == '.') ||
+        lower(a.name) == want) {
+      c->appId = a.id;
+      return;
+    }
+  }
+  // "foot" -> "org.codeberg.dnkl.foot" style ids, or the last word of the exec.
+  for (const App& a : apps_) {
+    std::string exe = a.exec.substr(0, a.exec.find(' '));
+    exe = exe.substr(exe.rfind('/') == std::string::npos ? 0 : exe.rfind('/') + 1);
+    if (lower(exe) == want) {
+      c->appId = a.id;
+      return;
+    }
+  }
+}
+
+Rect WM::workArea() const {
+  Rect r;
+  r.x = 0;
+  r.y = P(topBar_ + titleBar_);
+  r.w = sw_;
+  r.h = sh_ - P(tabletMode_ ? homeBar_ : dock_) - r.y;
+  return r;
+}
+
+void WM::place(Client* c) {
+  c->placed = true;
+  c->minW = std::max(1, c->tl->current.min_width);
+  c->minH = std::max(1, c->tl->current.min_height);
+  c->maxW = c->tl->current.max_width;
+  c->maxH = c->tl->current.max_height;
+  c->dialog = c->tl->parent != nullptr || (c->maxW > 0 && c->maxW == c->minW && c->maxH == c->minH);
+  wlr_box geo;
+  wlr_xdg_surface_get_geometry(c->xdg, &geo);
+  int w = std::max(geo.width, P(280)), h = std::max(geo.height, P(160));
+  Rect wa = workArea();
+  if (c->tl->parent) {
+    if (Client* p = findSurface(c->tl->parent->base->surface)) {
+      c->x = p->x + (p->w - w) / 2;
+      c->y = p->y + (p->h - h) / 2;
+    }
+  } else {
+    c->x = wa.x + P(60) + P(36) * (cascade_ % 6);
+    c->y = wa.y + P(24) + P(36) * (cascade_ % 6);
+    ++cascade_;
+  }
+  c->x = std::clamp(c->x, 0, std::max(0, sw_ - w));
+  c->y = std::clamp(c->y, wa.y, std::max(wa.y, wa.y + wa.h - h));
+  if (tabletMode_ && !c->dialog) {
+    c->restore = {c->x, c->y, std::min(w, wa.w), std::min(h, wa.h)};
+    c->hasRestore = true;
+    c->maximized = true;
+    c->x = wa.x;
+    c->y = wa.y;
+    w = wa.w;
+    h = wa.h;
+    wlr_xdg_toplevel_set_maximized(c->tl, true);
+  }
+  c->w = w;
+  c->h = h;
+  wlr_xdg_toplevel_set_size(c->tl, w, h);
+}
+
+void WM::configure(Client* c, int x, int y, int w, int h) {
+  if (c->maxW > 0) w = std::min(w, c->maxW);
+  if (c->maxH > 0) h = std::min(h, c->maxH);
+  w = std::max({1, w, c->minW});
+  h = std::max({1, h, c->minH});
+  c->x = x;
+  c->y = y;
+  if (w != c->w || h != c->h) wlr_xdg_toplevel_set_size(c->tl, w, h);
+  c->w = w;
+  c->h = h;
+  publishWindow(c);
+}
+
+void WM::onCommit(Client* c) {
+  if (!c->xdg->initialized) return;
+  if (!c->popup && !c->placed && c->xdg->initial_commit) place(c);
+  if (!c->popup && !c->placed) {
+    place(c);
+  }
+  if (!c->mapped) return;
+  wlr_box geo;
+  wlr_xdg_surface_get_geometry(c->xdg, &geo);
+  c->geoX = geo.x;
+  c->geoY = geo.y;
+  if (!c->popup && (geo.width != c->w || geo.height != c->h) && geo.width > 0 && geo.height > 0) {
+    // The client picked its own size (or follows our configure).
+    c->w = geo.width;
+    c->h = geo.height;
+    publishWindow(c);
+  }
+  if (c->popup) {
+    Rect r = popupRect(c);
+    if (r.x != c->x || r.y != c->y || r.w != c->w || r.h != c->h) {
+      c->x = r.x;
+      c->y = r.y;
+      c->w = r.w;
+      c->h = r.h;
+      publishPopups();
+    }
+  }
+  capture(c);
+  scheduleFrame();
+}
+
+// A popup's place on screen (surface rect, not cropped to its geometry).
+Rect WM::popupRect(Client* p) const {
+  int x = 0, y = 0;
+  wlr_xdg_popup* pop = p->xpopup;
+  Rect r;
+  // Walk up to the toplevel, adding each popup's position.
+  int px = 0, py = 0;
+  wlr_xdg_popup_get_toplevel_coords(pop, pop->current.geometry.x - pop->base->current.geometry.x,
+                                    pop->current.geometry.y - pop->base->current.geometry.y, &px, &py);
+  Client* top = nullptr;
+  for (Client* c = const_cast<WM*>(this)->find(p->parentId); c; c = const_cast<WM*>(this)->find(c->parentId)) {
+    if (!c->popup) {
+      top = c;
+      break;
+    }
+  }
+  if (top) {
+    x = top->x - top->geoX + int(px);
+    y = top->y - top->geoY + int(py);
+  }
+  r.x = x;
+  r.y = y;
+  r.w = p->xdg->surface->current.width;
+  r.h = p->xdg->surface->current.height;
+  return r;
+}
+
+void WM::capture(Client* c) {
+  wlr_surface* root = c->xdg->surface;
+  int ox = c->popup ? 0 : -c->geoX, oy = c->popup ? 0 : -c->geoY;
+  int w = c->popup ? root->current.width : c->w, h = c->popup ? root->current.height : c->h;
+  if (w <= 0 || h <= 0) return;
+  if (c->texW != w || c->texH != h) {
+    c->rgba.assign(size_t(w) * size_t(h) * 4, 0);
+    c->texW = w;
+    c->texH = h;
+  } else {
+    std::fill(c->rgba.begin(), c->rgba.end(), 0);
+  }
+  pixman_image_t* dst = pixman_image_create_bits_no_clear(PIXMAN_a8b8g8r8, w, h,
+                                                         reinterpret_cast<uint32_t*>(c->rgba.data()), w * 4);
+  struct Ctx {
+    pixman_image_t* dst;
+    int ox, oy;
+    bool any;
+  } ctx{dst, ox, oy, false};
+  wlr_surface_for_each_surface(
+      root,
+      [](wlr_surface* s, int sx, int sy, void* u) {
+        auto* k = static_cast<Ctx*>(u);
+        wlr_texture* tex = wlr_surface_get_texture(s);
+        if (!tex || !wlr_texture_is_pixman(tex)) return;
+        pixman_image_t* src = wlr_pixman_texture_get_image(tex);
+        if (!src) return;
+        int bw = pixman_image_get_width(src), bh = pixman_image_get_height(src);
+        int dw = s->current.width, dh = s->current.height;
+        // HiDPI buffers (buffer_scale > 1): scale down to surface size.
+        pixman_transform_t t;
+        pixman_transform_init_scale(&t, pixman_double_to_fixed(double(bw) / std::max(1, dw)),
+                                    pixman_double_to_fixed(double(bh) / std::max(1, dh)));
+        bool scaled = bw != dw || bh != dh;
+        if (scaled) {
+          pixman_image_set_transform(src, &t);
+          pixman_image_set_filter(src, PIXMAN_FILTER_BILINEAR, nullptr, 0);
+        }
+        pixman_image_composite32(k->any ? PIXMAN_OP_OVER : PIXMAN_OP_SRC, src, nullptr, k->dst, 0, 0, 0, 0,
+                                 sx + k->ox, sy + k->oy, dw, dh);
+        if (scaled) pixman_image_set_transform(src, nullptr);
+        k->any = true;
+      },
+      &ctx);
+  pixman_image_unref(dst);
+  if (!ctx.any) return;
+  // Opaque windows: no alpha holes from x8 buffers (pixman fills x8 as 0xff on SRC).
+  jsui_set_texture_pixels(rt_, ("win:" + std::to_string(c->id)).c_str(), c->rgba.data(), w, h, size_t(w) * 4, 0);
+  if (!c->hasTexture) {
+    c->hasTexture = true;
+    if (c->popup) publishPopups();
+    else publishWindow(c);
+  }
+  scheduleTick(0);
+}
+
+void WM::onMap(Client* c) {
+  c->mapped = true;
+  c->mappedAt = nowMs();
+  if (c->popup) {
+    Rect r = popupRect(c);
+    c->x = r.x;
+    c->y = r.y;
+    c->w = r.w;
+    c->h = r.h;
+    popups_.push_back(c->id);
+    capture(c);
+    publishPopups();
+    return;
+  }
+  c->title = c->tl->title ? c->tl->title : "";
+  c->appIdRaw = c->tl->app_id ? c->tl->app_id : "";
+  matchApp(c);
+  wlr_box geo;
+  wlr_xdg_surface_get_geometry(c->xdg, &geo);
+  c->geoX = geo.x;
+  c->geoY = geo.y;
+  if (geo.width > 0) c->w = geo.width;
+  if (geo.height > 0) c->h = geo.height;
+  stack_.push_back(c->id);
+  logf("map %u \"%s\" (%s) %dx%d", c->id, c->title.c_str(), c->appIdRaw.c_str(), c->w, c->h);
+  capture(c);
+  publishWindow(c);
+  publishStack();
+  focus(c);
+}
+
+void WM::onUnmap(Client* c) {
+  c->mapped = false;
+  if (c->popup) {
+    popups_.erase(std::remove(popups_.begin(), popups_.end(), c->id), popups_.end());
+    publishPopups();
+    jsui_remove_texture(rt_, ("win:" + std::to_string(c->id)).c_str());
+    return;
+  }
+  stack_.erase(std::remove(stack_.begin(), stack_.end(), c->id), stack_.end());
+  if (mrId_ == c->id) mrId_ = 0;
+  // The shell animates the last frame out, then releases it (wm:release).
+  releaseAt_[c->id] = nowMs() + 1500;
+  std::string j = "{\"" + std::to_string(c->id) + "\":null}";
+  jsui_patch_state(rt_, "wm.windows", j.c_str());
+  publishStack();
+  if (active_ == c->id) {
+    active_ = 0;
+    focusTop();
+  }
+  c->hasTexture = false;
+  c->placed = false;
+}
+
+void WM::onDestroy(Client* c) {
+  if (c->mapped) onUnmap(c);
+  unhook(c->hooks);
+  clients_.erase(c->id);
+  delete c;
+}
+
+void WM::raise(Client* c) {
+  auto it = std::find(stack_.begin(), stack_.end(), c->id);
+  if (it == stack_.end()) return;
+  stack_.erase(it);
+  stack_.push_back(c->id);
+  // Dialogs stay above their parent.
+  for (auto& [id, d] : clients_)
+    if (d->mapped && !d->popup && d->transientFor == c->id) {
+      stack_.erase(std::remove(stack_.begin(), stack_.end(), id), stack_.end());
+      stack_.push_back(id);
+    }
+  publishStack();
+}
+
+void WM::focus(Client* c) {
+  Client* prev = find(active_);
+  if (prev && prev != c && prev->tl) wlr_xdg_toplevel_set_activated(prev->tl, false);
+  active_ = c ? c->id : 0;
+  if (c && c->tl) {
+    wlr_xdg_toplevel_set_activated(c->tl, true);
+    wlr_keyboard* kb = wlr_seat_get_keyboard(seat_);
+    if (kb) {
+      wlr_seat_keyboard_notify_enter(seat_, c->xdg->surface, kb->keycodes, kb->num_keycodes, &kb->modifiers);
+    }
+  } else {
+    wlr_seat_keyboard_notify_clear_focus(seat_);
+  }
+  publishActive();
+}
+
+void WM::focusTop() {
+  for (auto it = stack_.rbegin(); it != stack_.rend(); ++it) {
+    Client* c = find(*it);
+    if (c && c->mapped && !c->minimized) {
+      focus(c);
+      return;
+    }
+  }
+  focus(nullptr);
+}
+
+void WM::close(Client* c) {
+  if (c->tl) wlr_xdg_toplevel_send_close(c->tl);
+}
+
+void WM::minimize(Client* c) {
+  if (c->minimized) return;
+  c->minimized = true;
+  publishWindow(c);
+  if (active_ == c->id) focusTop();
+}
+
+void WM::unminimize(Client* c) {
+  if (!c->minimized) return;
+  c->minimized = false;
+  publishWindow(c);
+}
+
+void WM::setMaximized(Client* c, bool on) {
+  if (on) {
+    if (!c->maximized && !c->snap) {
+      c->restore = {c->x, c->y, c->w, c->h};
+      c->hasRestore = true;
+    }
+    c->snap = 0;
+    c->maximized = true;
+    wlr_xdg_toplevel_set_tiled(c->tl, 0);
+    wlr_xdg_toplevel_set_maximized(c->tl, true);
+    Rect wa = workArea();
+    configure(c, wa.x, wa.y, wa.w, wa.h);
+  } else {
+    c->maximized = false;
+    wlr_xdg_toplevel_set_maximized(c->tl, false);
+    if (c->hasRestore) configure(c, c->restore.x, c->restore.y, c->restore.w, c->restore.h);
+  }
+  publishWindow(c);
+}
+
+void WM::setSnap(Client* c, int side) {
+  if (side == 0) {
+    c->snap = 0;
+    wlr_xdg_toplevel_set_tiled(c->tl, 0);
+    if (c->hasRestore) configure(c, c->restore.x, c->restore.y, c->restore.w, c->restore.h);
+    publishWindow(c);
+    return;
+  }
+  if (!c->maximized && !c->snap) {
+    c->restore = {c->x, c->y, c->w, c->h};
+    c->hasRestore = true;
+  }
+  c->maximized = false;
+  c->snap = side;
+  wlr_xdg_toplevel_set_maximized(c->tl, false);
+  wlr_xdg_toplevel_set_tiled(c->tl, WLR_EDGE_TOP | WLR_EDGE_BOTTOM | (side == 1 ? WLR_EDGE_LEFT : WLR_EDGE_RIGHT));
+  Rect wa = workArea();
+  int left = int(std::lround(wa.w * splitRatio_)) - P(5);
+  int right0 = int(std::lround(wa.w * splitRatio_)) + P(5);
+  configure(c, side == 1 ? wa.x : wa.x + right0, wa.y, side == 1 ? left : wa.w - right0, wa.h);
+}
+
+void WM::setFullscreen(Client* c, bool on) {
+  if (on == c->fullscreen) return;
+  if (on) {
+    if (!c->maximized && !c->snap) {
+      c->restore = {c->x, c->y, c->w, c->h};
+      c->hasRestore = true;
+    }
+    c->fullscreen = true;
+    wlr_xdg_toplevel_set_fullscreen(c->tl, true);
+    configure(c, 0, 0, sw_, sh_);
+    raise(c);
+  } else {
+    c->fullscreen = false;
+    wlr_xdg_toplevel_set_fullscreen(c->tl, false);
+    if (c->maximized) {
+      Rect wa = workArea();
+      configure(c, wa.x, wa.y, wa.w, wa.h);
+    } else if (c->hasRestore) {
+      configure(c, c->restore.x, c->restore.y, c->restore.w, c->restore.h);
+    }
+  }
+  publishWindow(c);
+}
+
+// ------------------------------------------------------------- JSUI
+
+bool WM::createRuntime() {
+  JsuiConfig cfg;
+  jsui_config_init(&cfg);
+  cfg.width = int(std::lround(sw_ / scale_));
+  cfg.height = int(std::lround(sh_ / scale_));
+  cfg.pixel_ratio = scale_;
+  cfg.dev_mode = opt_.devUrl.empty() ? 0 : 1;
+  cfg.on_message = [](void* u, const char* name, const char* json) { static_cast<WM*>(u)->onMessage(name, json); };
+  cfg.message_user = this;
+  cfg.on_state = [](void* u, const char* key, const char* json) { static_cast<WM*>(u)->onStateChange(key, json); };
+  cfg.state_user = this;
+  cfg.audio_disabled = 1;
+  rt_ = jsui_create(&cfg);
+  if (!rt_) return false;
+  publishScreen();
+  publishSystem();
+  if (opt_.scanApps) {
+    apps_ = scanApps("foot");
+    publishApps();
+  }
+  jsui_set_state(rt_, "wm.windows", "{}");
+  jsui_set_state(rt_, "wm.stack", "[]");
+  jsui_set_state(rt_, "wm.popups", "{}");
+  jsui_set_state(rt_, "wm.active", "0");
+  const std::string& src = opt_.devUrl.empty() ? opt_.bundle : opt_.devUrl;
+  if (jsui_load_bundle_url(rt_, src.c_str()) != 0) {
+    logf("cannot load the shell bundle %s", src.c_str());
+    return false;
+  }
+  return true;
+}
+
+void WM::publishScreen() {
+  std::string j = "{\"width\":" + wmjson::num(L(sw_)) + ",\"height\":" + wmjson::num(L(sh_)) +
+                  ",\"pixelRatio\":" + wmjson::num(scale_) + ",\"topBar\":" + wmjson::num(topBar_) +
+                  ",\"dock\":" + wmjson::num(dock_) + ",\"homeBar\":" + wmjson::num(homeBar_) +
+                  ",\"titleBar\":" + wmjson::num(titleBar_) + ",\"border\":" + wmjson::num(border_) +
+                  ",\"touch\":" + (opt_.mouse ? "false" : "true") + ",\"multiTouch\":true,\"wayland\":true}";
+  jsui_set_state(rt_, "wm.screen", j.c_str());
+}
+
+void WM::publishApps() {
+  std::string j = "[";
+  for (size_t i = 0; i < apps_.size(); ++i) {
+    const App& a = apps_[i];
+    if (i) j += ',';
+    j += "{\"id\":" + wmjson::quoted(a.id) + ",\"name\":" + wmjson::quoted(a.name) +
+         ",\"comment\":" + wmjson::quoted(a.comment) + ",\"exec\":" + wmjson::quoted(a.exec) +
+         ",\"icon\":" + wmjson::quoted(a.icon.empty() ? "" : "file://" + a.icon) +
+         ",\"categories\":" + wmjson::quoted(a.categories) + "}";
+  }
+  j += "]";
+  jsui_set_state(rt_, "wm.apps", j.c_str());
+}
+
+void WM::publishSystem() {
+  char host[256] = "linux";
+  gethostname(host, sizeof host);
+  std::string user = "user";
+  if (passwd* pw = getpwuid(getuid())) user = pw->pw_name;
+  std::string battery = "null";
+  if (DIR* d = opendir("/sys/class/power_supply")) {
+    while (dirent* e = readdir(d)) {
+      std::string base = std::string("/sys/class/power_supply/") + e->d_name;
+      std::ifstream cap(base + "/capacity"), status(base + "/status");
+      int pct = -1;
+      std::string st;
+      if (cap >> pct && pct >= 0) {
+        status >> st;
+        battery = "{\"percent\":" + std::to_string(pct) + ",\"charging\":" + (st == "Charging" ? "true" : "false") + "}";
+        break;
+      }
+    }
+    closedir(d);
+  }
+  std::string j = "{\"user\":" + wmjson::quoted(user) + ",\"hostname\":" + wmjson::quoted(host) +
+                  ",\"battery\":" + battery + ",\"xtest\":true}";
+  jsui_set_state(rt_, "wm.system", j.c_str());
+}
+
+void WM::onStateChange(const char* key, const char* json) {
+  if (std::strcmp(key, "wm.settings") != 0) return;
+  wmjson::Value v = wmjson::parse(json);
+  bool tablet = v["tabletMode"].truthy();
+  if (tablet == tabletMode_) return;
+  tabletMode_ = tablet;
+  Rect wa = workArea();
+  for (auto& [id, c] : clients_) {
+    if (c->popup || !c->mapped || c->fullscreen) continue;
+    if (c->maximized) configure(c, wa.x, wa.y, wa.w, wa.h);
+    else if (c->snap) setSnap(c, c->snap);
+  }
+}
+
+void WM::writeAnchors(const wmjson::Value& v) {
+  if (opt_.anchors.empty() || v.type != wmjson::Value::Object) return;
+  std::string out = "{";
+  bool first = true;
+  for (const auto& [name, r] : v.o) {
+    if (!first) out += ',';
+    first = false;
+    out += wmjson::quoted(name) + ":[" + std::to_string(P(r[size_t(0)].num())) + "," +
+           std::to_string(P(r[size_t(1)].num())) + "," + std::to_string(P(r[size_t(2)].num())) + "," +
+           std::to_string(P(r[size_t(3)].num())) + "]";
+  }
+  out += "}\n";
+  std::string tmp = opt_.anchors + ".tmp";
+  if (FILE* f = std::fopen(tmp.c_str(), "w")) {
+    std::fputs(out.c_str(), f);
+    std::fclose(f);
+    std::rename(tmp.c_str(), opt_.anchors.c_str());
+  }
+}
+
+void WM::onMessage(const char* name, const char* json) {
+  wmjson::Value v = wmjson::parse(json);
+  std::string n = name;
+  VLOG("message %s %s", name, json ? json : "");
+  Client* c = nullptr;
+  if (v["id"].type == wmjson::Value::Number) {
+    c = find(uint32_t(v["id"].num()));
+    if (c && (c->popup || !c->mapped)) c = nullptr;
+  }
+  if (n == "wm:shellRegions") {
+    shellRegions_.clear();
+    const wmjson::Value& rects = v["rects"];
+    for (size_t i = 0; i < rects.size(); ++i) {
+      const wmjson::Value& r = rects[i];
+      int x = P(r[size_t(0)].num()), y = P(r[size_t(1)].num());
+      int w = P(r[size_t(0)].num() + r[size_t(2)].num()) - x, h = P(r[size_t(1)].num() + r[size_t(3)].num()) - y;
+      if (w > 0 && h > 0) shellRegions_.push_back({x, y, w, h});
+    }
+  } else if (n == "wm:anchors") {
+    writeAnchors(v);
+  } else if (n == "wm:launch") {
+    launch(v["exec"].str());
+  } else if (n == "wm:focus" && c) {
+    if (c->minimized) unminimize(c);
+    raise(c);
+    focus(c);
+  } else if (n == "wm:move" && c) {
+    if (c->maximized || c->snap) {
+      c->maximized = false;
+      c->snap = 0;
+      wlr_xdg_toplevel_set_maximized(c->tl, false);
+      wlr_xdg_toplevel_set_tiled(c->tl, 0);
+      int w = c->hasRestore ? c->restore.w : c->w, h = c->hasRestore ? c->restore.h : c->h;
+      configure(c, P(v["x"].num()), P(v["y"].num()), w, h);
+    } else {
+      configure(c, P(v["x"].num()), P(v["y"].num()), c->w, c->h);
+    }
+  } else if (n == "wm:resize" && c) {
+    c->maximized = false;
+    c->snap = 0;
+    configure(c, P(v["x"].num()), P(v["y"].num()), P(v["w"].num()), P(v["h"].num()));
+  } else if (n == "wm:close" && c) {
+    close(c);
+  } else if (n == "wm:minimize" && c) {
+    minimize(c);
+  } else if (n == "wm:restore" && c) {
+    if (c->minimized) unminimize(c);
+    else if (c->maximized) setMaximized(c, false);
+    else if (c->snap) setSnap(c, 0);
+    raise(c);
+    focus(c);
+  } else if (n == "wm:maximize" && c) {
+    setMaximized(c, v["on"].type == wmjson::Value::Null ? !c->maximized : v["on"].truthy());
+  } else if (n == "wm:snap" && c) {
+    const std::string& side = v["side"].str();
+    setSnap(c, side == "left" ? 1 : side == "right" ? 2 : 0);
+  } else if (n == "wm:split") {
+    Client* l = find(uint32_t(v["left"].num()));
+    Client* r = find(uint32_t(v["right"].num()));
+    if (v["ratio"].type == wmjson::Value::Number) splitRatio_ = std::clamp(v["ratio"].num(), 0.25, 0.75);
+    if (l && l->minimized) unminimize(l);
+    if (r && r->minimized) unminimize(r);
+    if (l) setSnap(l, 1);
+    if (r) setSnap(r, 2);
+    if (l) raise(l);
+    if (r) {
+      raise(r);
+      focus(r);
+    }
+  } else if (n == "wm:splitRatio") {
+    splitRatio_ = std::clamp(v["ratio"].num(0.5), 0.25, 0.75);
+    for (auto& [id, cl] : clients_)
+      if (!cl->popup && cl->mapped && cl->snap && !cl->minimized) setSnap(cl, cl->snap);
+  } else if (n == "wm:fullscreen" && c) {
+    setFullscreen(c, v["on"].type == wmjson::Value::Null ? !c->fullscreen : v["on"].truthy());
+  } else if (n == "wm:release") {
+    uint32_t id = uint32_t(v["id"].num());
+    Client* cl = find(id);
+    if (!cl || !cl->mapped) {
+      releaseAt_.erase(id);
+      jsui_remove_texture(rt_, ("win:" + std::to_string(id)).c_str());
+    }
+  } else if (n == "wm:keyboard") {
+    keyboardGrabbed_ = v["grab"].truthy();
+  } else if (n == "wm:typeKey") {
+    typeKey(v["key"].str(), int(v["mods"].num()));
+  } else if (n == "wm:closeAll") {
+    std::vector<uint32_t> ids = stack_;
+    for (uint32_t id : ids)
+      if (Client* cc = find(id)) close(cc);
+  } else if (n == "wm:quit") {
+    wl_display_terminate(display_);
+  } else if (n == "wm:reloadApps") {
+    apps_ = scanApps("foot");
+    publishApps();
+  }
+}
+
+// ------------------------------------------------------------ state out
+
+std::string WM::windowJson(const Client* c) const {
+  bool resizable = c->maxW == 0 || c->maxW != c->minW || c->maxH != c->minH;
+  const char* type = c->dialog ? "dialog" : "normal";
+  std::string j = "{\"id\":" + std::to_string(c->id) + ",\"title\":" + wmjson::quoted(c->title) +
+                  ",\"wmClass\":" + wmjson::quoted(c->appIdRaw) + ",\"instance\":" + wmjson::quoted(c->appIdRaw) +
+                  ",\"appId\":" + wmjson::quoted(c->appId) + ",\"x\":" + wmjson::num(L(c->x)) +
+                  ",\"y\":" + wmjson::num(L(c->y)) + ",\"w\":" + wmjson::num(L(c->w)) + ",\"h\":" + wmjson::num(L(c->h)) +
+                  ",\"minW\":" + wmjson::num(L(c->minW)) + ",\"minH\":" + wmjson::num(L(c->minH)) +
+                  ",\"restoreW\":" + wmjson::num(L(c->hasRestore ? c->restore.w : c->w)) +
+                  ",\"restoreH\":" + wmjson::num(L(c->hasRestore ? c->restore.h : c->h)) + ",\"type\":\"" + type +
+                  "\",\"decorated\":" + (c->decorated ? "true" : "false") +
+                  ",\"resizable\":" + (resizable ? "true" : "false") +
+                  ",\"transientFor\":" + std::to_string(c->transientFor) +
+                  ",\"minimized\":" + (c->minimized ? "true" : "false") +
+                  ",\"maximized\":" + (c->maximized ? "true" : "false") +
+                  ",\"fullscreen\":" + (c->fullscreen ? "true" : "false") + ",\"snap\":\"" +
+                  (c->snap == 1 ? "left" : c->snap == 2 ? "right" : "") +
+                  "\",\"icon\":false,\"ready\":" + (c->hasTexture ? "true" : "false") +
+                  ",\"pid\":" + std::to_string(c->pid) + ",\"mappedAt\":" + wmjson::num(c->mappedAt) + "}";
+  return j;
+}
+
+void WM::publishWindow(const Client* c) {
+  if (c->popup || !c->mapped) return;
+  std::string j = "{\"" + std::to_string(c->id) + "\":" + windowJson(c) + "}";
+  jsui_patch_state(rt_, "wm.windows", j.c_str());
+  scheduleTick(0);
+}
+
+void WM::publishStack() {
+  std::string j = "[";
+  for (size_t i = 0; i < stack_.size(); ++i) {
+    if (i) j += ',';
+    j += std::to_string(stack_[i]);
+  }
+  j += "]";
+  jsui_set_state(rt_, "wm.stack", j.c_str());
+  scheduleTick(0);
+}
+
+void WM::publishPopups() {
+  std::string j = "{";
+  bool first = true;
+  for (uint32_t id : popups_) {
+    Client* c = find(id);
+    if (!c || !c->mapped) continue;
+    if (!first) j += ',';
+    first = false;
+    j += "\"" + std::to_string(id) + "\":{\"id\":" + std::to_string(id) + ",\"x\":" + wmjson::num(L(c->x)) +
+         ",\"y\":" + wmjson::num(L(c->y)) + ",\"w\":" + wmjson::num(L(c->w)) + ",\"h\":" + wmjson::num(L(c->h)) +
+         ",\"ready\":" + (c->hasTexture ? "true" : "false") + "}";
+  }
+  j += "}";
+  jsui_set_state(rt_, "wm.popups", j.c_str());
+  scheduleTick(0);
+}
+
+void WM::publishActive() {
+  jsui_set_state(rt_, "wm.active", std::to_string(active_).c_str());
+  scheduleTick(0);
+}
+
+// ------------------------------------------------------------------ input
+
+// Who gets a press at (x, y) screen px: the shell (its regions, title bars,
+// borders, the wallpaper) or a client surface (with surface-local coords).
+Target WM::route(double x, double y, wlr_surface** surface, double* sx, double* sy) {
+  *surface = nullptr;
+  for (const Rect& r : shellRegions_)
+    if (r.contains(x, y)) return Target::Shell;
+  for (auto it = popups_.rbegin(); it != popups_.rend(); ++it) {
+    Client* p = find(*it);
+    if (!p || !p->mapped) continue;
+    Rect r{p->x, p->y, p->w, p->h};
+    if (!r.contains(x, y)) continue;
+    double lx = 0, ly = 0;
+    wlr_surface* s = wlr_surface_surface_at(p->xdg->surface, x - p->x, y - p->y, &lx, &ly);
+    if (s) {
+      *surface = s;
+      *sx = lx;
+      *sy = ly;
+      return Target::Surface;
+    }
+  }
+  int tb = P(titleBar_), b = P(border_);
+  for (auto it = stack_.rbegin(); it != stack_.rend(); ++it) {
+    Client* c = find(*it);
+    if (!c || !c->mapped || c->minimized || !c->hasTexture) continue;
+    Rect content{c->x, c->y, c->w, c->h};
+    if (content.contains(x, y)) {
+      double lx = 0, ly = 0;
+      wlr_surface* s = wlr_xdg_surface_surface_at(c->xdg, x - c->x + c->geoX, y - c->y + c->geoY, &lx, &ly);
+      if (s) {
+        *surface = s;
+        *sx = lx;
+        *sy = ly;
+        return Target::Surface;
+      }
+      return Target::Shell;
+    }
+    if (c->decorated && !c->fullscreen) {
+      int m = c->maximized ? 0 : b;
+      Rect frame{c->x - m, c->y - tb, c->w + 2 * m, c->h + tb + m};
+      if (frame.contains(x, y)) return Target::Shell;
+    }
+  }
+  return Target::Shell;
+}
+
+void WM::sendShellPointer(int phase, double x, double y) {
+  float lx = float(L(x)), ly = float(L(y));
+  jsui_set_event_time(rt_, nowMs());
+  if (opt_.mouse) {
+    if (phase == 1) jsui_send_mouse_move(rt_, lx, ly);
+    else jsui_send_mouse_button(rt_, lx, ly, JSUI_MOUSE_LEFT, phase == 0 ? 1 : 0, 0);
+  } else {
+    jsui_send_touch(rt_, 0, phase, lx, ly);
+  }
+  scheduleTick(0);
+}
+
+void WM::pointerMotion(uint32_t timeMs) {
+  double x = cursor_->x, y = cursor_->y;
+  if (mrId_) {
+    Client* c = find(mrId_);
+    if (!c) {
+      mrId_ = 0;
+      return;
+    }
+    int dx = int(x - mrX_), dy = int(y - mrY_);
+    Rect r = mrStart_;
+    if (mrEdges_ == 0) {
+      r.x += dx;
+      r.y = std::max(P(topBar_ + titleBar_), r.y + dy);
+    } else {
+      if (mrEdges_ & WLR_EDGE_RIGHT) r.w = std::max(c->minW, mrStart_.w + dx);
+      if (mrEdges_ & WLR_EDGE_LEFT) {
+        r.w = std::max(c->minW, mrStart_.w - dx);
+        r.x = mrStart_.x + mrStart_.w - r.w;
+      }
+      if (mrEdges_ & WLR_EDGE_BOTTOM) r.h = std::max(c->minH, mrStart_.h + dy);
+      if (mrEdges_ & WLR_EDGE_TOP) {
+        r.h = std::max(c->minH, mrStart_.h - dy);
+        r.y = mrStart_.y + mrStart_.h - r.h;
+      }
+    }
+    configure(c, r.x, r.y, r.w, r.h);
+    return;
+  }
+  if (pointerDown_ && pointerTarget_ == Target::Shell) {
+    sendShellPointer(1, x, y);
+    return;
+  }
+  if (pointerDown_ && pointerTarget_ == Target::Surface) {
+    // Implicit grab: the seat keeps sending to the pressed surface.
+    wlr_surface* focused = seat_->pointer_state.focused_surface;
+    if (focused) {
+      Client* c = findSurface(focused);
+      double ox = 0, oy = 0;
+      if (c && c->popup) {
+        ox = c->x;
+        oy = c->y;
+      } else if (c) {
+        ox = c->x - c->geoX;
+        oy = c->y - c->geoY;
+      }
+      // Subsurface offsets: relative to the root surface (good enough for
+      // drags inside one surface).
+      wlr_seat_pointer_notify_motion(seat_, timeMs, x - ox, y - oy);
+    }
+    return;
+  }
+  wlr_surface* s = nullptr;
+  double sx = 0, sy = 0;
+  Target t = route(x, y, &s, &sx, &sy);
+  if (t == Target::Surface) {
+    wlr_seat_pointer_notify_enter(seat_, s, sx, sy);
+    wlr_seat_pointer_notify_motion(seat_, timeMs, sx, sy);
+  } else {
+    wlr_seat_pointer_notify_clear_focus(seat_);
+    if (opt_.mouse) sendShellPointer(1, x, y);
+  }
+}
+
+void WM::pointerButton(bool down, uint32_t button, uint32_t timeMs) {
+  double x = cursor_->x, y = cursor_->y;
+  if (!down && mrId_) {
+    mrId_ = 0;
+    pointerDown_ = false;
+    pointerTarget_ = Target::None;
+    wlr_seat_pointer_notify_button(seat_, timeMs, button, WLR_BUTTON_RELEASED);
+    return;
+  }
+  // An xdg popup grab (open menu) owns the pointer: clicks outside dismiss it.
+  bool popupGrab = !popups_.empty() && seat_->pointer_state.grab != seat_->pointer_state.default_grab;
+  if (down) {
+    wlr_surface* s = nullptr;
+    double sx = 0, sy = 0;
+    Target t = route(x, y, &s, &sx, &sy);
+    if (popupGrab && t != Target::Surface) {
+      wlr_seat_pointer_notify_button(seat_, timeMs, button, WLR_BUTTON_PRESSED);
+      pointerTarget_ = Target::Surface;
+      pointerDown_ = true;
+      return;
+    }
+    if (pointerDown_ && pointerTarget_ == Target::Shell) sendShellPointer(3, x, y);
+    pointerDown_ = true;
+    pointerTarget_ = t;
+    if (t == Target::Shell) {
+      wlr_seat_pointer_notify_clear_focus(seat_);
+      sendShellPointer(0, x, y);
+      return;
+    }
+    Client* c = findSurface(s);
+    if (c && !c->popup && c->id != active_) {
+      raise(c);
+      focus(c);
+    }
+    wlr_seat_pointer_notify_enter(seat_, s, sx, sy);
+    wlr_seat_pointer_notify_motion(seat_, timeMs, sx, sy);
+    wlr_seat_pointer_notify_button(seat_, timeMs, button, WLR_BUTTON_PRESSED);
+  } else {
+    Target t = pointerTarget_;
+    pointerDown_ = false;
+    pointerTarget_ = Target::None;
+    if (t == Target::Shell) sendShellPointer(2, x, y);
+    else wlr_seat_pointer_notify_button(seat_, timeMs, button, WLR_BUTTON_RELEASED);
+    pointerMotion(timeMs);  // re-enter whatever is under the pointer now
+  }
+}
+
+void WM::touchEvent(int id, int phase, double x, double y, uint32_t timeMs) {
+  int tid = 1 + (id % 1000);
+  if (phase == 0) {
+    wlr_surface* s = nullptr;
+    double sx = 0, sy = 0;
+    Target t = route(x, y, &s, &sx, &sy);
+    touches_[id] = t;
+    if (t == Target::Shell) {
+      jsui_set_event_time(rt_, nowMs());
+      jsui_send_touch(rt_, tid, 0, float(L(x)), float(L(y)));
+      scheduleTick(0);
+    } else {
+      Client* c = findSurface(s);
+      if (c && !c->popup && c->id != active_) {
+        raise(c);
+        focus(c);
+      }
+      wlr_seat_touch_notify_down(seat_, s, timeMs, id, sx, sy);
+    }
+    return;
+  }
+  auto it = touches_.find(id);
+  if (it == touches_.end()) return;
+  if (it->second == Target::Shell) {
+    jsui_set_event_time(rt_, nowMs());
+    if (phase == 1) jsui_send_touch(rt_, tid, 1, float(L(x)), float(L(y)));
+    else jsui_send_touch(rt_, tid, phase, float(L(cursor_->x)), float(L(cursor_->y)));
+    scheduleTick(0);
+  } else {
+    wlr_touch_point* pt = wlr_seat_touch_get_point(seat_, id);
+    if (phase == 1 && pt) {
+      Client* c = findSurface(pt->surface);
+      double ox = 0, oy = 0;
+      if (c) {
+        ox = c->popup ? c->x : c->x - c->geoX;
+        oy = c->popup ? c->y : c->y - c->geoY;
+      }
+      wlr_seat_touch_notify_motion(seat_, timeMs, id, x - ox, y - oy);
+    } else if (phase == 2) {
+      wlr_seat_touch_notify_up(seat_, timeMs, id);
+    } else if (phase == 3 && pt) {
+      wlr_seat_touch_notify_cancel(seat_, pt->surface);
+    }
+  }
+  if (phase >= 2) touches_.erase(it);
+}
+
+void WM::keyboardKey(wlr_keyboard* kb, uint32_t keycode, bool down, uint32_t timeMs) {
+  uint32_t xkbcode = keycode + 8;
+  const xkb_keysym_t* syms = nullptr;
+  int n = xkb_state_key_get_syms(kb->xkb_state, xkbcode, &syms);
+  xkb_keysym_t sym = n > 0 ? syms[0] : XKB_KEY_NoSymbol;
+  uint32_t mods = wlr_keyboard_get_modifiers(kb);
+  bool alt = mods & WLR_MODIFIER_ALT, logo = mods & WLR_MODIFIER_LOGO;
+  // Global shortcuts.
+  if (sym == XKB_KEY_Super_L || sym == XKB_KEY_Super_R) {
+    if (!down) jsui_post_message(rt_, "wm:hotkey", "{\"name\":\"super\"}");
+    scheduleTick(0);
+    return;
+  }
+  Client* c = find(active_);
+  if (down && ((alt && sym == XKB_KEY_Tab) || (logo && (sym == XKB_KEY_Up || sym == XKB_KEY_Down || sym == XKB_KEY_Left ||
+                                                        sym == XKB_KEY_Right)) || (alt && sym == XKB_KEY_F4))) {
+    if (sym == XKB_KEY_Tab) jsui_post_message(rt_, "wm:hotkey", "{\"name\":\"switch\"}");
+    else if (sym == XKB_KEY_F4 && c) close(c);
+    else if (sym == XKB_KEY_Up && c) setMaximized(c, true);
+    else if (sym == XKB_KEY_Down && c) c->maximized || c->snap ? setMaximized(c, false) : minimize(c);
+    else if (sym == XKB_KEY_Left && c) setSnap(c, 1);
+    else if (sym == XKB_KEY_Right && c) setSnap(c, 2);
+    scheduleTick(0);
+    return;
+  }
+  if (keyboardGrabbed_) {
+    char text[16] = {0};
+    xkb_state_key_get_utf8(kb->xkb_state, xkbcode, text, sizeof text);
+    DomKey dk = domKey(sym, text);
+    int jm = ((mods & WLR_MODIFIER_SHIFT) ? JSUI_MOD_SHIFT : 0) | ((mods & WLR_MODIFIER_CTRL) ? JSUI_MOD_CTRL : 0) |
+             (alt ? JSUI_MOD_ALT : 0);
+    jsui_send_key(rt_, dk.key, dk.code, down ? 1 : 0, 0, jm);
+    if (down && static_cast<unsigned char>(text[0]) >= 0x20 && text[0] != 0x7f) jsui_send_text(rt_, text);
+    scheduleTick(0);
+    return;
+  }
+  wlr_seat_set_keyboard(seat_, kb);
+  wlr_seat_keyboard_notify_key(seat_, timeMs, keycode, down ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED);
+}
+
+// The on-screen keyboard: into the shell's own text field while it has the
+// keyboard, otherwise into the focused client through the virtual keyboard.
+void WM::typeKey(const std::string& key, int mods) {
+  if (key.empty()) return;
+  if (keyboardGrabbed_) {
+    jsui_send_key(rt_, key.c_str(), nullptr, 1, 0, mods);
+    if (key.size() <= 4 && static_cast<unsigned char>(key[0]) >= 0x20 && key != "Enter") jsui_send_text(rt_, key.c_str());
+    jsui_send_key(rt_, key.c_str(), nullptr, 0, 0, mods);
+    scheduleTick(0);
+    return;
+  }
+  xkb_keysym_t sym = keysymFor(key);
+  if (sym == XKB_KEY_NoSymbol) return;
+  // Find a keycode (and whether it needs Shift) for the keysym.
+  struct Find {
+    xkb_keymap* km;
+    xkb_keysym_t sym;
+    xkb_keycode_t code = 0;
+    bool shift = false;
+  } f{keymap_, sym};
+  xkb_keymap_key_for_each(
+      keymap_,
+      [](xkb_keymap* km, xkb_keycode_t code, void* u) {
+        auto* k = static_cast<Find*>(u);
+        if (k->code) return;
+        for (xkb_level_index_t lvl = 0; lvl < 2; ++lvl) {
+          const xkb_keysym_t* syms = nullptr;
+          int n = xkb_keymap_key_get_syms_by_level(km, code, 0, lvl, &syms);
+          for (int i = 0; i < n; ++i)
+            if (syms[i] == k->sym) {
+              k->code = code;
+              k->shift = lvl == 1;
+              return;
+            }
+        }
+      },
+      &f);
+  if (!f.code) return;
+  Client* c = find(active_);
+  if (!c) return;
+  uint32_t timeMs = uint32_t(nowMs());
+  wlr_seat_set_keyboard(seat_, &vkbd_);
+  wlr_seat_keyboard_notify_enter(seat_, c->xdg->surface, nullptr, 0, &vkbd_.modifiers);
+  wlr_keyboard_modifiers m{};
+  xkb_mod_index_t shiftIdx = xkb_keymap_mod_get_index(keymap_, XKB_MOD_NAME_SHIFT);
+  xkb_mod_index_t ctrlIdx = xkb_keymap_mod_get_index(keymap_, XKB_MOD_NAME_CTRL);
+  if (f.shift || (mods & JSUI_MOD_SHIFT)) m.depressed |= 1u << shiftIdx;
+  if (mods & JSUI_MOD_CTRL) m.depressed |= 1u << ctrlIdx;
+  wlr_seat_keyboard_notify_modifiers(seat_, &m);
+  wlr_seat_keyboard_notify_key(seat_, timeMs, f.code - 8, WL_KEYBOARD_KEY_STATE_PRESSED);
+  wlr_seat_keyboard_notify_key(seat_, timeMs + 1, f.code - 8, WL_KEYBOARD_KEY_STATE_RELEASED);
+  wlr_keyboard_modifiers none{};
+  wlr_seat_keyboard_notify_modifiers(seat_, &none);
+}
+
+// ------------------------------------------------------------- control
+
+void WM::setupControl() {
+  if (opt_.control.empty()) return;
+  unlink(opt_.control.c_str());
+  controlFd_ = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+  sockaddr_un addr{};
+  addr.sun_family = AF_UNIX;
+  std::snprintf(addr.sun_path, sizeof addr.sun_path, "%s", opt_.control.c_str());
+  if (bind(controlFd_, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0 || ::listen(controlFd_, 4) != 0) {
+    logf("cannot listen on %s", opt_.control.c_str());
+    ::close(controlFd_);
+    controlFd_ = -1;
+    return;
+  }
+  wl_event_loop_add_fd(loop_, controlFd_, WL_EVENT_READABLE, [](int fd, uint32_t, void* u) -> int {
+    WM* wm = static_cast<WM*>(u);
+    int cfd = accept4(fd, nullptr, nullptr, SOCK_CLOEXEC | SOCK_NONBLOCK);
+    if (cfd < 0) return 0;
+    wm->controlSources_[cfd] = wl_event_loop_add_fd(wm->loop_, cfd, WL_EVENT_READABLE, [](int c, uint32_t mask, void* uu) -> int {
+      WM* w = static_cast<WM*>(uu);
+      char buf[4096];
+      ssize_t n = read(c, buf, sizeof buf);
+      if (n <= 0 || (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR))) {
+        // Remove the source before closing: the fd number gets reused (by
+        // the next Wayland client, say).
+        wl_event_source_remove(w->controlSources_[c]);
+        w->controlSources_.erase(c);
+        w->controlBuf_.erase(c);
+        ::close(c);
+        return 0;
+      }
+      std::string& b = w->controlBuf_[c];
+      b.append(buf, size_t(n));
+      size_t nl;
+      while ((nl = b.find('\n')) != std::string::npos) {
+        std::string line = b.substr(0, nl);
+        b.erase(0, nl + 1);
+        w->controlLine(line);
+        std::string ok = "ok\n";
+        (void)!write(c, ok.data(), ok.size());
+      }
+      return 0;
+    }, wm);
+    return 0;
+  }, this);
+  logf("control socket %s", opt_.control.c_str());
+}
+
+void WM::controlLine(const std::string& line) {
+  char cmd[32] = {0};
+  double x = 0, y = 0;
+  int n = std::sscanf(line.c_str(), "%31s %lf %lf", cmd, &x, &y);
+  if (n < 1) return;
+  std::string c = cmd;
+  uint32_t t = uint32_t(nowMs());
+  if ((c == "down" || c == "move") && n == 3) {
+    wlr_cursor_warp_closest(cursor_, nullptr, x, y);
+    if (c == "down") pointerButton(true, 0x110 /* BTN_LEFT */, t);
+    else pointerMotion(t);
+    wlr_seat_pointer_notify_frame(seat_);
+  } else if (c == "up") {
+    pointerButton(false, 0x110, t);
+    wlr_seat_pointer_notify_frame(seat_);
+  } else if (c == "key") {
+    std::string k = line.substr(4);
+    if (keyboardGrabbed_) {
+      jsui_send_key(rt_, k.c_str(), nullptr, 1, 0, 0);
+      jsui_send_key(rt_, k.c_str(), nullptr, 0, 0, 0);
+      scheduleTick(0);
+    } else {
+      typeKey(k, 0);
+    }
+  } else if (c == "text") {
+    std::string s = line.size() > 5 ? line.substr(5) : "";
+    for (size_t i = 0; i < s.size();) {
+      size_t len = 1;
+      unsigned char ch = static_cast<unsigned char>(s[i]);
+      if (ch >= 0xF0) len = 4;
+      else if (ch >= 0xE0) len = 3;
+      else if (ch >= 0xC0) len = 2;
+      typeKey(s.substr(i, len), 0);
+      i += len;
+    }
+  } else if (c == "shot") {
+    writeScreenshot(line.substr(5));
+  }
+}
+
+// The screen as PPM: the shell's frame (everything on screen is in it).
+void WM::writeScreenshot(const std::string& path) {
+  FILE* f = std::fopen(path.c_str(), "wb");
+  if (!f || !frame_) return;
+  std::fprintf(f, "P6\n%d %d\n255\n", sw_, sh_);
+  std::vector<uint8_t> row(size_t(sw_) * 3);
+  for (int y = 0; y < sh_; ++y) {
+    const uint8_t* s = frame_->data.data() + size_t(y) * size_t(frame_->stride);
+    for (int x = 0; x < sw_; ++x) {
+      row[size_t(x) * 3] = s[x * 4];
+      row[size_t(x) * 3 + 1] = s[x * 4 + 1];
+      row[size_t(x) * 3 + 2] = s[x * 4 + 2];
+    }
+    std::fwrite(row.data(), 1, row.size(), f);
+  }
+  std::fclose(f);
+}
+
+// ------------------------------------------------------------- frames
+
+void WM::scheduleTick(double delayMs) {
+  if (!tickTimer_) return;
+  int ms = std::max(1, int(std::ceil(delayMs)));
+  if (tickPending_ && delayMs > 0) return;
+  tickPending_ = true;
+  wl_event_source_timer_update(tickTimer_, ms);
+}
+
+void WM::tick() {
+  tickPending_ = false;
+  double now = nowMs();
+  for (auto it = releaseAt_.begin(); it != releaseAt_.end();) {
+    if (now >= it->second) {
+      jsui_remove_texture(rt_, ("win:" + std::to_string(it->first)).c_str());
+      it = releaseAt_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  jsui_tick(rt_, now);
+  JsuiRect dirty{};
+  if (frame_ && jsui_render_rgba_incremental(rt_, frame_->data.data(), sw_, sh_, size_t(frame_->stride), &dirty) &&
+      dirty.width > 0 && dirty.height > 0) {
+    pixman_region32_union_rect(&shellDamage_, &shellDamage_, dirty.x, dirty.y, unsigned(dirty.width),
+                               unsigned(dirty.height));
+    shellDirty_ = true;
+    scheduleFrame();
+  }
+  double wait;
+  if (jsui_wants_frame(rt_) || jsui_needs_redraw(rt_) || jsui_pending_loads(rt_) > 0) {
+    wait = 1000.0 / 60.0;
+  } else {
+    double t = jsui_next_timer(rt_);
+    wait = std::isfinite(t) ? std::clamp(t - nowMs(), 1.0, 1000.0) : 1000.0;
+  }
+  scheduleTick(wait);
+}
+
+void WM::scheduleFrame() {
+  if (frameScheduled_ || !output_) return;
+  frameScheduled_ = true;
+  wlr_output_schedule_frame(output_);
+}
+
+void WM::onFrame() {
+  frameScheduled_ = false;
+  if (shellDirty_) {
+    shellDirty_ = false;
+    wlr_scene_buffer_set_buffer_with_damage(shellNode_, &frame_->base, &shellDamage_);
+    pixman_region32_clear(&shellDamage_);
+  }
+  wlr_scene_output_commit(sceneOutput_, nullptr);
+  timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  for (auto& [id, c] : clients_)
+    if (c->mapped && c->xdg) wlr_surface_send_frame_done(c->xdg->surface, &now);
+  // Frame callbacks of subsurfaces.
+  for (auto& [id, c] : clients_)
+    if (c->mapped && c->xdg)
+      wlr_surface_for_each_surface(
+          c->xdg->surface,
+          [](wlr_surface* s, int, int, void* u) { wlr_surface_send_frame_done(s, static_cast<timespec*>(u)); },
+          &now);
+}
+
+int WM::run() {
+  if (!setup()) return 1;
+  if (!createRuntime()) return 1;
+  for (const auto& cmd : opt_.autostart) launch(cmd);
+  scheduleTick(0);
+  wl_display_run(display_);
+  logf("quit");
+  wl_display_destroy_clients(display_);
+  if (rt_) jsui_destroy(rt_);
+  wl_display_destroy(display_);
+  return 0;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  Options opt;
+  if (!parseArgs(argc, argv, opt)) return 2;
+  signal(SIGCHLD, SIG_IGN);
+  signal(SIGPIPE, SIG_IGN);
+  WM wm(opt);
+  return wm.run();
+}
