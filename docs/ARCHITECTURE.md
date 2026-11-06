@@ -2413,6 +2413,13 @@ Native's API and both of its drivers:
     `nativeEvent` map onto native values (`addEventMapping`), applied by
     `InputManager::dispatch` before the event reaches JS (a JS `listener`
     still runs). `Animated.attachNativeEvent` does the same for a ref.
+    Pointer events (`onPointerDown`, `onPointerMove`, ...) reach the
+    mappings of the target's ancestors too, and of the view the pointer
+    went down on and its ancestors (`downTarget`), as a bubbling JS handler
+    would see them, and take React Native's names for the position
+    (`pageX` / `pageY` / `locationX` / `locationY`): a drag mapped on a card
+    follows the finger natively over its children and after the finger has
+    left it, with no JS per move (jsui-wm's `useNativeDragY`).
   * React Native's rules, mostly: a native value stays native and a
     JS-driven animation on it throws; animated non-style props throw.
     Unlike React Native, every style key can be driven: paint-only keys

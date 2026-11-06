@@ -1459,11 +1459,34 @@ void NativeAnimated::handleEvent(const Value& ev) {
   if (!target.isNumber()) return;
   uint32_t id = uint32_t(target.asNumber());
   const std::string& type = ev["type"].asString();
+  // Pointer events also reach the mappings of the target's ancestors and of
+  // the view the pointer went down on and its ancestors, as JS handlers on
+  // them would see them bubble: a drag mapped on a card keeps following the
+  // finger over its children and after the finger has left it.
+  const bool pointer = type.compare(0, 7, "pointer") == 0;
+  auto within = [&](uint32_t view, uint32_t from) {
+    for (const Node* n = from ? doc_.get(from) : nullptr; n; n = n->parent())
+      if (n->id() == view) return true;
+    return false;
+  };
+  const uint32_t down = pointer && ev["downTarget"].isNumber() ? uint32_t(ev["downTarget"].asNumber()) : 0;
   bool any = false;
   for (const Mapping& m : mappings_) {
-    if (m.view != id || m.type != type) continue;
+    if (m.type != type) continue;
+    if (m.view != id && !(pointer && (within(m.view, id) || within(m.view, down)))) continue;
     const Value* v = &ev;
-    for (const std::string& k : m.path) v = &(*v)[k];
+    for (size_t i = 0; i < m.path.size(); i++) {
+      const std::string& k = m.path[i];
+      // React Native's names for the pointer's position (the SyntheticEvent's
+      // nativeEvent has them; the native event has x / y / localX / localY).
+      const char* alias = !pointer || i ? nullptr
+                          : k == "pageX" || k == "clientX" ? "x"
+                          : k == "pageY" || k == "clientY" ? "y"
+                          : k == "locationX" ? "localX"
+                          : k == "locationY" ? "localY"
+                                             : nullptr;
+      v = &(*v)[alias ? std::string(alias) : k];
+    }
     ANode* n = node(m.tag);
     if (!v->isNumber() || !n || n->type != Type::Value) continue;
     n->value = v->asNumber();
