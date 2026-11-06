@@ -22,6 +22,12 @@ COPY --from=node:22-bookworm-slim /usr/local/lib/node_modules /usr/local/lib/nod
 RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
  && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 WORKDIR /src
+# aseprite's prebuilt Skia has no Linux arm64 package: build Skia from source
+# (m157, scripts/build-skia-desktop.sh) in its own layer so it caches.
+COPY scripts/build-skia-desktop.sh scripts/
+COPY scripts/patches/skia-m157-dawn-header-only.patch scripts/patches/
+RUN SKIA_SRC=/tmp/skia-src SKIA_DESKTOP_OUT=/opt/skia-desktop scripts/build-skia-desktop.sh \
+ && rm -rf /tmp/skia-src
 COPY . .
 RUN npm install --no-audit --no-fund --workspace packages/cli --workspace packages/react
 ENV PKG=/pkg/jsui-wm
@@ -31,6 +37,7 @@ RUN cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
       -DJSUI_BUILD_TOOLS=OFF -DJSUI_BUILD_TESTS=OFF -DJSUI_BUILD_VIEWER=OFF \
       -DJSUI_AUDIO=OFF -DJSUI_DEBUGGER=OFF -DJSUI_BUILD_WAYLAND_WM=ON \
+      -DJSUI_SKIA_DIR=/opt/skia-desktop \
  && cmake --build /build --target jsui-wl \
  && cp /build/jsui-wl $PKG/ && (cp /build/icudtl.dat $PKG/ 2>/dev/null || true) && strip $PKG/jsui-wl
 # Libraries and foot from the Ubuntu 24.04 archive that the Ubuntu Touch
