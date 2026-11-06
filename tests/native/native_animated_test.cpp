@@ -326,6 +326,44 @@ TEST(native_animated_props_into_view) {
   CHECK_EQ(na.nodeStyleValue(3).toJson(), std::string(R"([{"translateX":5},{"rotate":null}])"));
 }
 
+// Native Animated.event on pointer events: mapped on a card, its moves drive
+// the value over the card's children and after the finger has left it (the
+// view it went down on), by React Native's nativeEvent names; other event
+// types still need the mapped view itself.
+TEST(native_animated_pointer_event_mappings_bubble) {
+  Document doc;
+  doc.setViewport(200, 100, 1);
+  Node* card = doc.createNode(NodeType::View);
+  Node* child = doc.createNode(NodeType::View);
+  Node* other = doc.createNode(NodeType::View);
+  doc.root()->appendChild(card);
+  card->appendChild(child);
+  doc.root()->appendChild(other);
+  NativeAnimated na(doc);
+  na.createNode(1, json(R"({"type":"value","value":0})"));
+  na.createNode(2, json(R"({"type":"value","value":0})"));
+  na.addEventMapping(card->id(), "pointermove", {"pageY"}, 1);
+  na.addEventMapping(card->id(), "pointermove", {"locationX"}, 2);
+  auto move = [&](Node* target, uint32_t down, double y) {
+    std::string e = R"({"type":"pointermove","target":)" + std::to_string(target->id()) + R"(,"x":7,"y":)" +
+                    std::to_string(y) + R"(,"localX":3,"localY":1)";
+    if (down) e += R"(,"downTarget":)" + std::to_string(down);
+    na.handleEvent(json((e + "}").c_str()));
+  };
+  move(card, 0, 10);
+  CHECK_EQ(na.getValue(1), 10.0);
+  CHECK_EQ(na.getValue(2), 3.0);
+  move(child, 0, 20);  // over a child of the card
+  CHECK_EQ(na.getValue(1), 20.0);
+  move(other, child->id(), 30);  // left the card, went down on its child
+  CHECK_EQ(na.getValue(1), 30.0);
+  move(other, 0, 40);  // never on the card
+  CHECK_EQ(na.getValue(1), 30.0);
+  na.addEventMapping(card->id(), "scroll", {"contentOffset", "y"}, 2);
+  na.handleEvent(json((R"({"type":"scroll","target":)" + std::to_string(child->id()) + R"(,"contentOffset":{"y":9}})").c_str()));
+  CHECK_EQ(na.getValue(2), 3.0);  // not a pointer event: no bubbling
+}
+
 // Through the runtime with a bundle that talks to __jsui_native.animated
 // directly: the runtime's frame clock drives it, jsui_tick_native advances
 // it without JS, ends reach JS on the next tick, and each frame repaints

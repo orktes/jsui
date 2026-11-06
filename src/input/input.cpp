@@ -670,6 +670,7 @@ Value::Object InputManager::pointerEvent(const char* type, Node* target, const P
   ev["localX"] = Value(double(lx));
   ev["localY"] = Value(double(ly));
   ev["pointerId"] = Value(p.pointerId);
+  if (p.downId) ev["downTarget"] = Value(double(p.downId));  // native Animated.event mappings (see handleEvent)
   ev["pointerType"] = Value(p.touch ? "touch" : "mouse");
   ev["button"] = Value(button);
   ev["buttons"] = Value(p.buttons);

@@ -691,6 +691,11 @@ class WM {
   bool gpuApps_ = false;
   std::map<uint32_t, wlr_buffer*> gpuBuffers_;
   bool captureGpu(Client* c);
+  // Full-screen panels get a blurred snapshot of the screen under them
+  // ("wm:backdrop", opaque), so JSUI culls what is below
+  // (JSUI_WL_SNAPSHOT_BG=0: they draw over the live desktop).
+  bool snapshotBg_ = false;
+  void snapshotBackdrop(bool on);
   void removeWindowTexture(uint32_t id);
   bool renderGpu();
   // Frame cost on the Mir path (JSUI_WL_PERF=1): paint + present, logged every 60 frames.
@@ -721,8 +726,20 @@ class WM {
 #endif
 
   int controlFd_ = -1;
-  int jsReadyFd_ = -1;
-  std::map<std::string, pid_t> launched_;  // wm:launch command -> the shell it ran in  // JS thread -> Wayland loop wake-up (on_js_ready)
+  int jsReadyFd_ = -1;  // JS thread -> Wayland loop wake-up (on_js_ready)
+  std::map<std::string, pid_t> launched_;  // wm:launch command -> the shell it ran in
+  // Launches still waiting for their first window: an app that hangs before
+  // it shows one (Ubuntu Touch's Camera) is ended after kLaunchTimeoutMs and
+  // the shell told (wm:launchFailed), instead of an icon that does nothing.
+  struct PendingLaunch {
+    pid_t pid;
+    std::string name;
+    double at;
+  };
+  std::vector<PendingLaunch> pendingLaunches_;
+  wl_event_source* launchTimer_ = nullptr;
+  void checkLaunches();
+  bool descends(pid_t pid, pid_t ancestor) const;
   std::map<int, std::string> controlBuf_;
   std::map<int, wl_event_source*> controlSources_;
 };
@@ -1357,6 +1374,66 @@ bool WM::captureGpu(Client* c) {
 #endif
 }
 
+void WM::snapshotBackdrop(bool on) {
+  if (!on) {
+    jsui_remove_texture(rt_, "wm:backdrop");
+    jsui_remove_texture(rt_, "wm:under");
+    return;
+  }
+#ifdef JSUI_WL_MIR_GL
+  if (!snapshotBg_ || !gpu_ || vulkan_ || !mir_->makeCurrent()) return;
+  // The desktop texture still holds the last frame: what the panel opens over.
+  MirHost::Snapshot snap;
+  if (!mir_->snapshotDesktop(&snap)) return;
+  auto set = [&](const char* key, unsigned tex, int w, int h) {
+    JsuiTexture t{};
+    t.kind = JSUI_TEXTURE_GL;
+    t.handle = reinterpret_cast<void*>(uintptr_t(tex));
+    t.width = w;
+    t.height = h;
+    t.flags = JSUI_TEXTURE_OPAQUE | JSUI_TEXTURE_BOTTOM_LEFT_ORIGIN;
+    if (jsui_set_texture(rt_, key, &t) == 0) jsui_texture_updated(rt_, key);
+  };
+  set("wm:under", snap.full, snap.fullW, snap.fullH);
+  set("wm:backdrop", snap.blurred, snap.blurW, snap.blurH);
+#endif
+}
+
+bool WM::descends(pid_t pid, pid_t ancestor) const {
+  for (int depth = 0; pid > 1 && depth < 8; ++depth) {
+    if (pid == ancestor) return true;
+    pid = parentPid(pid);
+  }
+  return false;
+}
+
+void WM::checkLaunches() {
+  constexpr double kLaunchTimeoutMs = 25000;
+  const double now = nowMs();
+  for (auto it = pendingLaunches_.begin(); it != pendingLaunches_.end();) {
+    bool shown = false;
+    for (auto& [id, c] : clients_)
+      if (!c->popup && c->mapped && c->pid > 0 && descends(c->pid, it->pid)) shown = true;
+    // Gone without a window (handed over to a running instance, or failed
+    // on its own and said so on stderr): nothing to do.
+    if (shown || kill(it->pid, 0) != 0) {
+      it = pendingLaunches_.erase(it);
+      continue;
+    }
+    if (now - it->at < kLaunchTimeoutMs) {
+      ++it;
+      continue;
+    }
+    logf("launch: %s showed no window in %.0f s, ending it", it->name.c_str(), kLaunchTimeoutMs / 1000);
+    kill(-it->pid, SIGKILL);  // its session (launch() setsid()s)
+    std::string j = "{\"name\":" + wmjson::quoted(it->name) + "}";
+    jsui_post_message(rt_, "wm:launchFailed", j.c_str());
+    scheduleTick(0);
+    it = pendingLaunches_.erase(it);
+  }
+  if (!pendingLaunches_.empty()) wl_event_source_timer_update(launchTimer_, 5000);
+}
+
 void WM::removeWindowTexture(uint32_t id) {
   jsui_remove_texture(rt_, ("win:" + std::to_string(id)).c_str());
   auto it = gpuBuffers_.find(id);
@@ -1721,9 +1798,7 @@ void WM::onMessage(const char* name, const char* json) {
     if (it != launched_.end()) {
       for (auto& [id, cl] : clients_) {
         if (cl->popup || !cl->mapped || cl->pid <= 0) continue;
-        pid_t p = cl->pid;
-        for (int depth = 0; p > 1 && p != it->second && depth < 8; ++depth) p = parentPid(p);
-        if (p != it->second) continue;
+        if (!descends(cl->pid, it->second)) continue;
         if (cl->minimized) unminimize(cl);
         raise(cl);
         focus(cl);
@@ -1731,7 +1806,19 @@ void WM::onMessage(const char* name, const char* json) {
       }
     }
     pid_t pid = launch(exec);
-    if (pid > 0) launched_[exec] = pid;
+    if (pid > 0) {
+      launched_[exec] = pid;
+      std::string name = v["name"].str();
+      for (const App& a : apps_)
+        if (name.empty() && a.exec == exec) name = a.name;
+      pendingLaunches_.push_back({pid, name.empty() ? exec : name, nowMs()});
+      if (!launchTimer_)
+        launchTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
+          static_cast<WM*>(u)->checkLaunches();
+          return 0;
+        }, this);
+      wl_event_source_timer_update(launchTimer_, 5000);
+    }
   } else if (n == "wm:focus" && c) {
     if (c->minimized) unminimize(c);
     raise(c);
@@ -1785,6 +1872,8 @@ void WM::onMessage(const char* name, const char* json) {
       if (!cl->popup && cl->mapped && cl->snap && !cl->minimized) setSnap(cl, cl->snap);
   } else if (n == "wm:fullscreen" && c) {
     setFullscreen(c, v["on"].type == wmjson::Value::Null ? !c->fullscreen : v["on"].truthy());
+  } else if (n == "wm:snapshot") {
+    snapshotBackdrop(v["on"].truthy());
   } else if (n == "wm:release") {
     uint32_t id = uint32_t(v["id"].num());
     Client* cl = find(id);
@@ -2543,6 +2632,8 @@ bool WM::renderGpu() {
 
 bool WM::showMir() {
   std::string err;
+  const char* snapEnv = getenv("JSUI_WL_SNAPSHOT_BG");
+  snapshotBg_ = !(snapEnv && snapEnv[0] == '0');
   const char* perfEnv = getenv("JSUI_WL_PERF");
   perf_ = perfEnv && perfEnv[0] == '1';
   const char* gpuEnv = getenv("JSUI_WL_GPU");

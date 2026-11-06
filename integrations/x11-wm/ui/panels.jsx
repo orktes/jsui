@@ -5,6 +5,7 @@ import {
   Animated, Easing, HostTexture, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { remeasureAnchors, useAnchor } from './anchors.js';
+import { useNativeDragY } from './drag.js';
 import { AppIcon } from './AppIcon.jsx';
 import { dateText, longMonth, pad2, timeText, useClock } from './bars.jsx';
 import { Card, IconButton, Label, Slider, ToggleTile } from './controls.jsx';
@@ -56,6 +57,32 @@ const AppTile = memo(function AppTile({ app, onLaunch }) {
   );
 });
 
+// A full-screen panel's dimmed background. With the host's blurred snapshot of
+// the screen ("wm:backdrop", opaque; jsui-wl, unless JSUI_WL_SNAPSHOT_BG=0) it is
+// drawn over that instead of over the live desktop, so nothing below it is
+// painted once the panel is fully shown.
+// The screen as it was when the panel opened ("wm:under", opaque), drawn under
+// the panel's fade: while the panel is up nothing below it is painted (the
+// live desktop would be the same pixels).
+function Under({ screen }) {
+  return (
+    <HostTexture name="wm:under" resizeMode="stretch" pointerEvents="none"
+      style={{ position: 'absolute', left: 0, top: 0, width: screen.width, height: screen.height }} />
+  );
+}
+
+function Scrim({ color, onPress, screen }) {
+  // Without the texture (not set yet, or turned off) the view draws nothing.
+  // Sized explicitly: a HostTexture otherwise takes the texture's size.
+  return (
+    <Pressable style={StyleSheet.absoluteFill} onPress={onPress}>
+      <HostTexture name="wm:backdrop" resizeMode="stretch" pointerEvents="none"
+        style={{ position: 'absolute', left: 0, top: 0, width: screen.width, height: screen.height }} />
+      <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: color }]} />
+    </Pressable>
+  );
+}
+
 export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed, onLaunch, settings, open = true }) {
   const t = useTheme();
   const [query, setQuery] = useState('');
@@ -83,34 +110,37 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
   const sc = pop.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1] });
   const cols = Math.max(3, Math.min(8, Math.floor((screen.width - 160) / 150)));
   return (
-    <Animated.View pointerEvents={open ? 'auto' : 'none'} style={[StyleSheet.absoluteFill, { opacity: v }]}>
-      <Pressable style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(6,8,20,0.82)' }]} onPress={onClose} />
-      <Animated.View pointerEvents="box-none" style={[styles.launcher, { top: screen.topBar + 28, bottom: settings.osk ? 330 : screen.dock + 12, transform: [{ scale: sc }] }]}>
-        <View style={[styles.search, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 36px ${t.shadow}` }]}>
-          <Icon name="search" size={24} color={t.textDim} />
-          <TextInput
-            ref={input}
-            value={query}
-            onChangeText={setQuery}
-            placeholder="Search apps"
-            placeholderTextColor={t.textMute}
-            onSubmitEditing={() => list[0] && launch(list[0])}
-            style={[styles.searchInput, { color: t.text }]}
-          />
-          {query ? <IconButton icon="close" size={44} iconSize={20} onPress={() => setQuery('')} /> : null}
-          <IconButton icon="keyboard" size={44} iconSize={22} active={settings.osk} onPress={() => setSetting('osk', !settings.osk)} />
-        </View>
-        <View style={{ flex: 1, marginTop: 28, width: cols * 150 }}>
-          {query ? <Label style={{ marginBottom: 8, marginLeft: 10, color: 'rgba(255,255,255,0.7)' }}>{`${list.length} RESULT${list.length === 1 ? '' : 'S'}`}</Label> : null}
-          <ScrollView contentContainerStyle={styles.grid} showsVerticalScrollIndicator={false}>
-            {list.map((app) => (
-              <AppTile key={app.id} app={app} onLaunch={launch} />
-            ))}
-            {!list.length && <Text style={[styles.empty, { color: 'rgba(255,255,255,0.6)' }]}>No apps match “{query}”</Text>}
-          </ScrollView>
-        </View>
+    <View pointerEvents="box-none" style={StyleSheet.absoluteFill}>
+      <Under screen={screen} />
+      <Animated.View pointerEvents={open ? 'auto' : 'none'} style={[StyleSheet.absoluteFill, { opacity: v }]}>
+        <Scrim color="rgba(6,8,20,0.82)" onPress={onClose} screen={screen} />
+        <Animated.View pointerEvents="box-none" style={[styles.launcher, { top: screen.topBar + 28, bottom: settings.osk ? 330 : screen.dock + 12, transform: [{ scale: sc }] }]}>
+          <View style={[styles.search, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 36px ${t.shadow}` }]}>
+            <Icon name="search" size={24} color={t.textDim} />
+            <TextInput
+              ref={input}
+              value={query}
+              onChangeText={setQuery}
+              placeholder="Search apps"
+              placeholderTextColor={t.textMute}
+              onSubmitEditing={() => list[0] && launch(list[0])}
+              style={[styles.searchInput, { color: t.text }]}
+            />
+            {query ? <IconButton icon="close" size={44} iconSize={20} onPress={() => setQuery('')} /> : null}
+            <IconButton icon="keyboard" size={44} iconSize={22} active={settings.osk} onPress={() => setSetting('osk', !settings.osk)} />
+          </View>
+          <View style={{ flex: 1, marginTop: 28, width: cols * 150 }}>
+            {query ? <Label style={{ marginBottom: 8, marginLeft: 10, color: 'rgba(255,255,255,0.7)' }}>{`${list.length} RESULT${list.length === 1 ? '' : 'S'}`}</Label> : null}
+            <ScrollView contentContainerStyle={styles.grid} showsVerticalScrollIndicator={false}>
+              {list.map((app) => (
+                <AppTile key={app.id} app={app} onLaunch={launch} />
+              ))}
+              {!list.length && <Text style={[styles.empty, { color: 'rgba(255,255,255,0.6)' }]}>No apps match “{query}”</Text>}
+            </ScrollView>
+          </View>
+        </Animated.View>
       </Animated.View>
-    </Animated.View>
+    </View>
   );
 });
 
@@ -132,14 +162,28 @@ const SwitcherCard = memo(function SwitcherCard({ win, card, enter, from, title,
   const t = useTheme();
   const anchor = useAnchor(`switcher.${win.id}`);
   const splitAnchor = useAnchor(`switcher.${win.id}.split`);
+  // The swipe: the finger natively (up 1:1, down damped to a quarter) while it
+  // is down, then `swipe` (an animation from where it let go).
   const swipe = useRef(new Animated.Value(0)).current;
+  const drag = useNativeDragY();
+  const shape = (dy) => Math.min(0, dy) + Math.max(0, dy) * 0.25;
+  const follow = useMemo(
+    () => drag.dy.interpolate({ inputRange: [-1, 0, 1], outputRange: [-1, 0, 0.25], extrapolate: 'extend' }),
+    [drag],
+  );
+  const lift = useMemo(() => Animated.add(follow, swipe), [follow, swipe]);
+  const handOver = (dy) => {
+    swipe.setValue(shape(dy));
+    drag.on.setValue(0);
+  };
   const pan = useMemo(
     () =>
       PanResponder.create({
         onMoveShouldSetPanResponder: (e, g) => g.dy < -8 && Math.abs(g.dy) > Math.abs(g.dx) * 1.2,
         onPanResponderTerminationRequest: () => false,
-        onPanResponderMove: (e, g) => swipe.setValue(Math.min(0, g.dy) + Math.max(0, g.dy) * 0.25),
+        onPanResponderGrant: () => drag.on.setValue(1),
         onPanResponderRelease: (e, g) => {
+          handOver(g.dy);
           if (g.dy < -card.h * 0.3 || g.vy < -0.8) {
             Animated.timing(swipe, { toValue: -screen.height, duration: 220, easing: Easing.out(Easing.quad), useNativeDriver: true }).start();
             wm.close(win.id);
@@ -147,9 +191,12 @@ const SwitcherCard = memo(function SwitcherCard({ win, card, enter, from, title,
             Animated.spring(swipe, { toValue: 0, tension: 160, friction: 16, useNativeDriver: true }).start();
           }
         },
-        onPanResponderTerminate: () => Animated.spring(swipe, { toValue: 0, useNativeDriver: true }).start(),
+        onPanResponderTerminate: (e, g) => {
+          handOver(g.dy);
+          Animated.spring(swipe, { toValue: 0, useNativeDriver: true }).start();
+        },
       }),
-    [swipe, win.id, card.h, screen.height],
+    [swipe, drag, win.id, card.h, screen.height],
   );
   // The card that maps to the desktop flies between its window's place and the
   // strip; the others slide in from the right.
@@ -163,12 +210,13 @@ const SwitcherCard = memo(function SwitcherCard({ win, card, enter, from, title,
     ty = 0;
     sc = enter.interpolate({ inputRange: [0, 1], outputRange: [0.9, 1] });
   }
-  const fade = swipe.interpolate({ inputRange: [-screen.height * 0.6, 0], outputRange: [0, 1], extrapolate: 'clamp' });
+  const fade = lift.interpolate({ inputRange: [-screen.height * 0.6, 0], outputRange: [0, 1], extrapolate: 'clamp' });
   const radius = enter.interpolate({ inputRange: [0, 1], outputRange: [from ? 0 : 22, 22] });
   return (
     <Animated.View
       {...pan.panHandlers}
-      style={{ width: card.w, marginRight: card.gap, opacity: fade, transform: [{ translateX: tx }, { translateY: Animated.add(ty, swipe) }] }}
+      {...drag.handlers}
+      style={{ width: card.w, marginRight: card.gap, opacity: fade, transform: [{ translateX: tx }, { translateY: Animated.add(ty, lift) }] }}
     >
       <Animated.View style={[styles.cardHead, { opacity: enter }]}>
         <AppIcon win={win} app={apps.find((a) => a.id === win.appId)} size={32} />
@@ -246,8 +294,9 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
   const closeAll = useAnchor('overview.closeAll');
   return (
     <View pointerEvents={open ? 'auto' : 'none'} style={StyleSheet.absoluteFill}>
+      <Under screen={screen} />
       <Animated.View style={[StyleSheet.absoluteFill, { opacity: enter }]}>
-        <Pressable style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(4,6,16,0.72)' }]} onPress={onClose} />
+        <Scrim color="rgba(4,6,16,0.72)" onPress={onClose} screen={screen} />
       </Animated.View>
       <Animated.View pointerEvents="box-none" style={[styles.overviewHead, { top: screen.topBar + 22, opacity: enter }]}>
         <Text style={styles.overviewTitle}>{shown.length ? 'Recent apps' : 'No open apps'}</Text>
@@ -431,7 +480,14 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
 
 export const LockScreen = memo(function LockScreen({ screen, onUnlock, notifications }) {
   const now = useClock();
+  // Up with the finger natively while it is down, then `drag` (an animation
+  // from where it let go).
   const drag = useRef(new Animated.Value(0)).current;
+  const finger = useNativeDragY();
+  const up = useMemo(
+    () => Animated.add(finger.dy.interpolate({ inputRange: [-1, 0], outputRange: [-1, 0], extrapolateLeft: 'extend', extrapolateRight: 'clamp' }), drag),
+    [finger, drag],
+  );
   const v = useEntrance(true, 260);
   const anchor = useAnchor('lock.handle');
   const pan = useMemo(
@@ -439,8 +495,10 @@ export const LockScreen = memo(function LockScreen({ screen, onUnlock, notificat
       PanResponder.create({
         onStartShouldSetPanResponder: () => true,
         onMoveShouldSetPanResponder: () => true,
-        onPanResponderMove: (e, g) => drag.setValue(Math.min(0, g.dy)),
+        onPanResponderGrant: () => finger.on.setValue(1),
         onPanResponderRelease: (e, g) => {
+          drag.setValue(Math.min(0, g.dy));
+          finger.on.setValue(0);
           if (g.dy < -140 || g.vy < -0.9) {
             Animated.timing(drag, { toValue: -screen.height, duration: 260, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start(onUnlock);
           } else {
@@ -448,11 +506,11 @@ export const LockScreen = memo(function LockScreen({ screen, onUnlock, notificat
           }
         },
       }),
-    [drag, onUnlock, screen.height],
+    [drag, finger, onUnlock, screen.height],
   );
-  const fade = drag.interpolate({ inputRange: [-400, 0], outputRange: [0, 1], extrapolate: 'clamp' });
+  const fade = up.interpolate({ inputRange: [-400, 0], outputRange: [0, 1], extrapolate: 'clamp' });
   return (
-    <Animated.View {...pan.panHandlers} style={[StyleSheet.absoluteFill, { opacity: Animated.multiply(v, fade), transform: [{ translateY: drag }] }]}>
+    <Animated.View {...pan.panHandlers} {...finger.handlers} style={[StyleSheet.absoluteFill, { opacity: Animated.multiply(v, fade), transform: [{ translateY: up }] }]}>
       <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(6,8,22,0.55)' }]} />
       <View style={styles.lockBody}>
         <Text style={styles.lockTime}>{pad2(now.getHours())}:{pad2(now.getMinutes())}</Text>
