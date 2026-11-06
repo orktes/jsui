@@ -691,6 +691,11 @@ class WM {
   bool gpuApps_ = false;
   std::map<uint32_t, wlr_buffer*> gpuBuffers_;
   bool captureGpu(Client* c);
+  // Full-screen panels get a blurred snapshot of the screen under them
+  // ("wm:backdrop", opaque), so JSUI culls what is below
+  // (JSUI_WL_SNAPSHOT_BG=0: they draw over the live desktop).
+  bool snapshotBg_ = false;
+  void snapshotBackdrop(bool on);
   void removeWindowTexture(uint32_t id);
   bool renderGpu();
   // Frame cost on the Mir path (JSUI_WL_PERF=1): paint + present, logged every 60 frames.
@@ -1357,6 +1362,31 @@ bool WM::captureGpu(Client* c) {
 #endif
 }
 
+void WM::snapshotBackdrop(bool on) {
+  if (!on) {
+    jsui_remove_texture(rt_, "wm:backdrop");
+    jsui_remove_texture(rt_, "wm:under");
+    return;
+  }
+#ifdef JSUI_WL_MIR_GL
+  if (!snapshotBg_ || !gpu_ || vulkan_ || !mir_->makeCurrent()) return;
+  // The desktop texture still holds the last frame: what the panel opens over.
+  MirHost::Snapshot snap;
+  if (!mir_->snapshotDesktop(&snap)) return;
+  auto set = [&](const char* key, unsigned tex, int w, int h) {
+    JsuiTexture t{};
+    t.kind = JSUI_TEXTURE_GL;
+    t.handle = reinterpret_cast<void*>(uintptr_t(tex));
+    t.width = w;
+    t.height = h;
+    t.flags = JSUI_TEXTURE_OPAQUE | JSUI_TEXTURE_BOTTOM_LEFT_ORIGIN;
+    if (jsui_set_texture(rt_, key, &t) == 0) jsui_texture_updated(rt_, key);
+  };
+  set("wm:under", snap.full, snap.fullW, snap.fullH);
+  set("wm:backdrop", snap.blurred, snap.blurW, snap.blurH);
+#endif
+}
+
 void WM::removeWindowTexture(uint32_t id) {
   jsui_remove_texture(rt_, ("win:" + std::to_string(id)).c_str());
   auto it = gpuBuffers_.find(id);
@@ -1785,6 +1815,8 @@ void WM::onMessage(const char* name, const char* json) {
       if (!cl->popup && cl->mapped && cl->snap && !cl->minimized) setSnap(cl, cl->snap);
   } else if (n == "wm:fullscreen" && c) {
     setFullscreen(c, v["on"].type == wmjson::Value::Null ? !c->fullscreen : v["on"].truthy());
+  } else if (n == "wm:snapshot") {
+    snapshotBackdrop(v["on"].truthy());
   } else if (n == "wm:release") {
     uint32_t id = uint32_t(v["id"].num());
     Client* cl = find(id);
@@ -2543,6 +2575,8 @@ bool WM::renderGpu() {
 
 bool WM::showMir() {
   std::string err;
+  const char* snapEnv = getenv("JSUI_WL_SNAPSHOT_BG");
+  snapshotBg_ = !(snapEnv && snapEnv[0] == '0');
   const char* perfEnv = getenv("JSUI_WL_PERF");
   perf_ = perfEnv && perfEnv[0] == '1';
   const char* gpuEnv = getenv("JSUI_WL_GPU");

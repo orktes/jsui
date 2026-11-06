@@ -56,6 +56,32 @@ const AppTile = memo(function AppTile({ app, onLaunch }) {
   );
 });
 
+// A full-screen panel's dimmed background. With the host's blurred snapshot of
+// the screen ("wm:backdrop", opaque; jsui-wl, unless JSUI_WL_SNAPSHOT_BG=0) it is
+// drawn over that instead of over the live desktop, so nothing below it is
+// painted once the panel is fully shown.
+// The screen as it was when the panel opened ("wm:under", opaque), drawn under
+// the panel's fade: while the panel is up nothing below it is painted (the
+// live desktop would be the same pixels).
+function Under({ screen }) {
+  return (
+    <HostTexture name="wm:under" resizeMode="stretch" pointerEvents="none"
+      style={{ position: 'absolute', left: 0, top: 0, width: screen.width, height: screen.height }} />
+  );
+}
+
+function Scrim({ color, onPress, screen }) {
+  // Without the texture (not set yet, or turned off) the view draws nothing.
+  // Sized explicitly: a HostTexture otherwise takes the texture's size.
+  return (
+    <Pressable style={StyleSheet.absoluteFill} onPress={onPress}>
+      <HostTexture name="wm:backdrop" resizeMode="stretch" pointerEvents="none"
+        style={{ position: 'absolute', left: 0, top: 0, width: screen.width, height: screen.height }} />
+      <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: color }]} />
+    </Pressable>
+  );
+}
+
 export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed, onLaunch, settings, open = true }) {
   const t = useTheme();
   const [query, setQuery] = useState('');
@@ -83,34 +109,37 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
   const sc = pop.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1] });
   const cols = Math.max(3, Math.min(8, Math.floor((screen.width - 160) / 150)));
   return (
-    <Animated.View pointerEvents={open ? 'auto' : 'none'} style={[StyleSheet.absoluteFill, { opacity: v }]}>
-      <Pressable style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(6,8,20,0.82)' }]} onPress={onClose} />
-      <Animated.View pointerEvents="box-none" style={[styles.launcher, { top: screen.topBar + 28, bottom: settings.osk ? 330 : screen.dock + 12, transform: [{ scale: sc }] }]}>
-        <View style={[styles.search, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 36px ${t.shadow}` }]}>
-          <Icon name="search" size={24} color={t.textDim} />
-          <TextInput
-            ref={input}
-            value={query}
-            onChangeText={setQuery}
-            placeholder="Search apps"
-            placeholderTextColor={t.textMute}
-            onSubmitEditing={() => list[0] && launch(list[0])}
-            style={[styles.searchInput, { color: t.text }]}
-          />
-          {query ? <IconButton icon="close" size={44} iconSize={20} onPress={() => setQuery('')} /> : null}
-          <IconButton icon="keyboard" size={44} iconSize={22} active={settings.osk} onPress={() => setSetting('osk', !settings.osk)} />
-        </View>
-        <View style={{ flex: 1, marginTop: 28, width: cols * 150 }}>
-          {query ? <Label style={{ marginBottom: 8, marginLeft: 10, color: 'rgba(255,255,255,0.7)' }}>{`${list.length} RESULT${list.length === 1 ? '' : 'S'}`}</Label> : null}
-          <ScrollView contentContainerStyle={styles.grid} showsVerticalScrollIndicator={false}>
-            {list.map((app) => (
-              <AppTile key={app.id} app={app} onLaunch={launch} />
-            ))}
-            {!list.length && <Text style={[styles.empty, { color: 'rgba(255,255,255,0.6)' }]}>No apps match “{query}”</Text>}
-          </ScrollView>
-        </View>
+    <View pointerEvents="box-none" style={StyleSheet.absoluteFill}>
+      <Under screen={screen} />
+      <Animated.View pointerEvents={open ? 'auto' : 'none'} style={[StyleSheet.absoluteFill, { opacity: v }]}>
+        <Scrim color="rgba(6,8,20,0.82)" onPress={onClose} screen={screen} />
+        <Animated.View pointerEvents="box-none" style={[styles.launcher, { top: screen.topBar + 28, bottom: settings.osk ? 330 : screen.dock + 12, transform: [{ scale: sc }] }]}>
+          <View style={[styles.search, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 36px ${t.shadow}` }]}>
+            <Icon name="search" size={24} color={t.textDim} />
+            <TextInput
+              ref={input}
+              value={query}
+              onChangeText={setQuery}
+              placeholder="Search apps"
+              placeholderTextColor={t.textMute}
+              onSubmitEditing={() => list[0] && launch(list[0])}
+              style={[styles.searchInput, { color: t.text }]}
+            />
+            {query ? <IconButton icon="close" size={44} iconSize={20} onPress={() => setQuery('')} /> : null}
+            <IconButton icon="keyboard" size={44} iconSize={22} active={settings.osk} onPress={() => setSetting('osk', !settings.osk)} />
+          </View>
+          <View style={{ flex: 1, marginTop: 28, width: cols * 150 }}>
+            {query ? <Label style={{ marginBottom: 8, marginLeft: 10, color: 'rgba(255,255,255,0.7)' }}>{`${list.length} RESULT${list.length === 1 ? '' : 'S'}`}</Label> : null}
+            <ScrollView contentContainerStyle={styles.grid} showsVerticalScrollIndicator={false}>
+              {list.map((app) => (
+                <AppTile key={app.id} app={app} onLaunch={launch} />
+              ))}
+              {!list.length && <Text style={[styles.empty, { color: 'rgba(255,255,255,0.6)' }]}>No apps match “{query}”</Text>}
+            </ScrollView>
+          </View>
+        </Animated.View>
       </Animated.View>
-    </Animated.View>
+    </View>
   );
 });
 
@@ -246,8 +275,9 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
   const closeAll = useAnchor('overview.closeAll');
   return (
     <View pointerEvents={open ? 'auto' : 'none'} style={StyleSheet.absoluteFill}>
+      <Under screen={screen} />
       <Animated.View style={[StyleSheet.absoluteFill, { opacity: enter }]}>
-        <Pressable style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(4,6,16,0.72)' }]} onPress={onClose} />
+        <Scrim color="rgba(4,6,16,0.72)" onPress={onClose} screen={screen} />
       </Animated.View>
       <Animated.View pointerEvents="box-none" style={[styles.overviewHead, { top: screen.topBar + 22, opacity: enter }]}>
         <Text style={styles.overviewTitle}>{shown.length ? 'Recent apps' : 'No open apps'}</Text>
