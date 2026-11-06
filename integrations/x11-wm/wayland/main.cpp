@@ -698,11 +698,15 @@ class WM {
   void snapshotBackdrop(bool on);
   void removeWindowTexture(uint32_t id);
   bool renderGpu();
+  void presentMir();
+  void sendFrameDone();
   // Frame cost on the Mir path (JSUI_WL_PERF=1): paint + present, logged every 60 frames.
   bool perf_ = false;
   double cpuPaintMs_ = 0;  // CPU raster since the last presented frame
   double gpuRenderMs_ = 0, gpuBlitMs_ = 0, gpuSwapMs_ = 0;  // GPU frame parts (perf window sums)
+  double gpuRenderGpuMs_ = 0, gpuBlitGpuMs_ = 0;  // JSUI_WL_GPU_FINISH: GPU time of the paint / the blit
   double perfPaint_ = 0, perfPresent_ = 0, perfMax_ = 0;
+  double perfStart_ = 0, perfLast_ = 0, perfGapMax_ = 0;  // frame pacing over the perf window
   double perfTick_ = 0, perfTickMax_ = 0;
   // Paint stats summed over the perf window (jsui_get_paint_stats).
   double perfMpx_ = 0;  // megapixels repainted
@@ -2450,11 +2454,11 @@ void WM::tick() {
   double paintStart = nowMs();
 #ifdef JSUI_WL_MIR
   if (gpu_) {
-    // The GPU path paints at frame time (needs the window's GL context).
-    if (jsui_needs_redraw(rt_)) {
-      shellDirty_ = true;
-      scheduleFrame();
-    }
+    // The Mir window is the screen: paint and present right after the tick
+    // that changed something (waiting for the headless output's frame
+    // clock as well put a second 16.7 ms clock in series: ~30 fps). The
+    // present thread's swap paces it.
+    if (jsui_needs_redraw(rt_) || shellDirty_) presentMir();
   } else
 #endif
   if (frame_ && jsui_render_rgba_incremental(rt_, frame_->data.data(), sw_, sh_, size_t(frame_->stride), &dirty) &&
@@ -2467,7 +2471,8 @@ void WM::tick() {
   }
   double wait;
   if (jsui_wants_frame(rt_) || jsui_needs_redraw(rt_) || jsui_pending_loads(rt_) > 0) {
-    wait = 1000.0 / 60.0;
+    // 60 Hz from this tick's start: the paint above is part of the period.
+    wait = std::max(1.0, 1000.0 / 60.0 - (nowMs() - now));
   } else {
     double t = jsui_next_timer(rt_);
     wait = std::isfinite(t) ? std::clamp(t - nowMs(), 1.0, 1000.0) : 1000.0;
@@ -2481,15 +2486,37 @@ void WM::scheduleFrame() {
   wlr_output_schedule_frame(output_);
 }
 
+#ifdef JSUI_WL_MIR
+// The GPU path's frame (see tick): paint, hand to the present thread, and
+// let the apps draw their next frames.
+void WM::presentMir() {
+  double t0 = nowMs();
+  renderGpu();
+  shellDirty_ = false;  // nothing for the headless scene: the Mir window is the screen
+  if (perf_) perfFrame(0, nowMs() - t0);
+  sendFrameDone();
+}
+#endif
+
+void WM::sendFrameDone() {
+  timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  for (auto& [id, c] : clients_)
+    if (c->mapped && c->xdg)
+      wlr_surface_for_each_surface(
+          c->xdg->surface,
+          [](wlr_surface* s, int, int, void* u) { wlr_surface_send_frame_done(s, static_cast<timespec*>(u)); },
+          &now);
+}
+
 void WM::onFrame() {
   frameScheduled_ = false;
 #ifdef JSUI_WL_MIR
   if (mir_ && shellDirty_) {
     double t0 = nowMs();
     if (gpu_) {
-      renderGpu();
-      shellDirty_ = false;  // nothing for the headless scene: the Mir window is the screen
-      if (perf_) perfFrame(0, nowMs() - t0);
+      presentMir();
+      return;
     } else {
       mir_->present(frame_->data.data(), sw_, sh_, size_t(frame_->stride));
       if (perf_) perfFrame(cpuPaintMs_, nowMs() - t0);
@@ -2503,17 +2530,7 @@ void WM::onFrame() {
     pixman_region32_clear(&shellDamage_);
   }
   wlr_scene_output_commit(sceneOutput_, nullptr);
-  timespec now;
-  clock_gettime(CLOCK_MONOTONIC, &now);
-  for (auto& [id, c] : clients_)
-    if (c->mapped && c->xdg) wlr_surface_send_frame_done(c->xdg->surface, &now);
-  // Frame callbacks of subsurfaces.
-  for (auto& [id, c] : clients_)
-    if (c->mapped && c->xdg)
-      wlr_surface_for_each_surface(
-          c->xdg->surface,
-          [](wlr_surface* s, int, int, void* u) { wlr_surface_send_frame_done(s, static_cast<timespec*>(u)); },
-          &now);
+  sendFrameDone();  // the toplevels and their subsurfaces
 }
 
 #ifdef JSUI_WL_MIR
@@ -2557,17 +2574,32 @@ bool WM::setupMir() {
 }
 
 void WM::perfFrame(double paintMs, double presentMs) {
+  if (perfFrames_ == 0) perfStart_ = nowMs();
+  const double now = nowMs();
+  // Frames during animations come back to back; a gap over 100 ms is idle
+  // time between gestures, not a slow frame.
+  if (perfFrames_ > 0 && now - perfLast_ < 100) perfGapMax_ = std::max(perfGapMax_, now - perfLast_);
+  if (perfFrames_ > 0 && now - perfLast_ >= 100) perfStart_ += now - perfLast_;  // idle: not counted
+  perfLast_ = now;
   perfPaint_ += paintMs;
   perfPresent_ += presentMs;
   perfMax_ = std::max(perfMax_, paintMs + presentMs);
   if (++perfFrames_ < 60) return;
-  logf("perf (%s): %d frames, paint %.2f ms + present %.2f ms avg, worst %.2f ms", gpu_ ? "gpu" : "cpu",
-       perfFrames_, perfPaint_ / perfFrames_, perfPresent_ / perfFrames_, perfMax_);
+  const double span = nowMs() - perfStart_;
+  logf("perf (%s): %d frames in %.0f ms (%.1f fps while drawing; the longest gap %.1f ms), paint %.2f ms + present"
+       " %.2f ms avg, worst %.2f ms",
+       gpu_ ? "gpu" : "cpu", perfFrames_, span, span > 0 ? (perfFrames_ - 1) * 1000.0 / span : 0.0, perfGapMax_,
+       perfPaint_ / perfFrames_, perfPresent_ / perfFrames_, perfMax_);
+  perfGapMax_ = 0;
   if (gpu_)
     logf(vulkan_ ? "perf (vulkan): jsui render %.2f ms, present pass %.2f ms, acquire + present %.2f ms avg"
                  : mir_->presentThread() ? "perf (gpu): jsui render %.2f ms, wait for the present thread %.2f ms, its swap %.2f ms avg"
                                          : "perf (gpu): jsui render %.2f ms, blit %.2f ms, swap %.2f ms avg",
          gpuRenderMs_ / perfFrames_, gpuBlitMs_ / perfFrames_, gpuSwapMs_ / perfFrames_);
+  if (gpuRenderGpuMs_ > 0)
+    logf("perf (gpu): GPU time per frame: paint %.2f ms, blit %.2f ms", gpuRenderGpuMs_ / perfFrames_,
+         gpuBlitGpuMs_ / perfFrames_);
+  gpuRenderGpuMs_ = gpuBlitGpuMs_ = 0;
   logf("perf: %d ticks, jsui_tick %.2f ms avg, worst %.2f ms", perfTicks_, perfTicks_ ? perfTick_ / perfTicks_ : 0.0,
        perfTickMax_);
   logf("perf: per frame %.2f Mpx repainted, %.1f draws, %.2f offscreen layers, %.2f cached layer draws"
@@ -2621,6 +2653,8 @@ bool WM::renderGpu() {
   mir_->presentGpu();
   if (perf_) {
     gpuRenderMs_ += t1 - t0;
+    gpuRenderGpuMs_ += mir_->lastRenderGpuMs();
+    gpuBlitGpuMs_ += mir_->lastBlitGpuMs();
     gpuBlitMs_ += mir_->lastBlitMs();
     gpuSwapMs_ += mir_->lastSwapMs();
   }

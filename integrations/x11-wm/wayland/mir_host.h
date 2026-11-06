@@ -283,6 +283,10 @@ class MirHost {
   }
   EGLDisplay eglDisplay() const { return dpy_; }
   bool presentThread() const { return threaded_; }
+  // JSUI_WL_GPU_FINISH with the present thread: the last frame's GPU time
+  // (what was left of it when the present thread took it) and the blit's.
+  double lastRenderGpuMs() const { return threadRenderGpuMs_.load(); }
+  double lastBlitGpuMs() const { return threadBlitGpuMs_.load(); }
 
   // A copy of the desktop texture as it is now, and a blurred 1/16-size one
   // (four 2x linear downscales of the copy), all on the GPU in the current
@@ -428,7 +432,19 @@ class MirHost {
       }
       glWaitSync_(rendered, 0, ~0ull);
       glDeleteSync_(rendered);
+      double tb = 0;
+      if (finish_) {
+        // JSUI_WL_GPU_FINISH: the frame's own GPU work, then the blit's.
+        const double t0 = nowMs();
+        glFinish();
+        threadRenderGpuMs_ = nowMs() - t0;
+        tb = nowMs();
+      }
       drawBlit();
+      if (finish_) {
+        glFinish();
+        threadBlitGpuMs_ = nowMs() - tb;
+      }
       GlSync blit = glFenceSync_(0x9117, 0);
       glFlush();
       {
@@ -946,6 +962,7 @@ class MirHost {
   GlSync blitFence_ = nullptr;      // its blit, for the next frame's render to wait on
   bool blitSubmitted_ = true, presentBusy_ = false, stopPresent_ = false;
   std::atomic<double> threadSwapMs_{0};
+  std::atomic<double> threadRenderGpuMs_{0}, threadBlitGpuMs_{0};  // JSUI_WL_GPU_FINISH
   GlSync (*glFenceSync_)(GLenum, GLbitfield) = nullptr;
   void (*glWaitSync_)(GlSync, GLbitfield, uint64_t) = nullptr;
   void (*glDeleteSync_)(GlSync) = nullptr;
