@@ -44,6 +44,7 @@
 #endif
 
 #include <dirent.h>
+#include <sys/eventfd.h>
 #include <drm_fourcc.h>
 #include <fcntl.h>
 #include <pixman.h>
@@ -674,6 +675,8 @@ class WM {
   double cpuPaintMs_ = 0;  // CPU raster since the last presented frame
   double gpuRenderMs_ = 0, gpuBlitMs_ = 0, gpuSwapMs_ = 0;  // GPU frame parts (perf window sums)
   double perfPaint_ = 0, perfPresent_ = 0, perfMax_ = 0;
+  double perfTick_ = 0, perfTickMax_ = 0;  // jsui_tick (JS, layout) since the last perf line
+  int perfTicks_ = 0;
   int perfFrames_ = 0;
   void perfFrame(double paintMs, double presentMs);
   bool setupMir();
@@ -682,6 +685,7 @@ class WM {
 #endif
 
   int controlFd_ = -1;
+  int jsReadyFd_ = -1;  // JS thread -> Wayland loop wake-up (on_js_ready)
   std::map<int, std::string> controlBuf_;
   std::map<int, wl_event_source*> controlSources_;
 };
@@ -1514,8 +1518,32 @@ bool WM::createRuntime() {
   cfg.on_state = [](void* u, const char* key, const char* json) { static_cast<WM*>(u)->onStateChange(key, json); };
   cfg.state_user = this;
   cfg.audio_disabled = 1;
+  // React on a thread of its own: input, animations, layout and paint don't
+  // wait for JS. It wakes the Wayland loop when it has work for a tick
+  // (JSUI_WL_JS_THREAD=0: JS inside the tick, as before).
+  const char* jsThread = getenv("JSUI_WL_JS_THREAD");
+  if (!(jsThread && jsThread[0] == '0')) {
+    jsReadyFd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (jsReadyFd_ >= 0) {
+      cfg.js_thread = JSUI_JS_THREAD_ON;
+      cfg.on_js_ready = [](void* u) {
+        uint64_t one = 1;
+        (void)!write(static_cast<WM*>(u)->jsReadyFd_, &one, sizeof one);
+      };
+      cfg.js_ready_user = this;
+      wl_event_loop_add_fd(loop_, jsReadyFd_, WL_EVENT_READABLE, [](int fd, uint32_t, void* u) -> int {
+        uint64_t n;
+        (void)!read(fd, &n, sizeof n);
+        static_cast<WM*>(u)->scheduleTick(0);
+        return 0;
+      }, this);
+    }
+  }
   rt_ = jsui_create(&cfg);
   if (!rt_) return false;
+#ifdef JSUI_WL_MIR
+  if (perf_) jsui_set_profiling(rt_, 1);
+#endif
   publishScreen();
   publishSystem();
   if (opt_.scanApps) {
@@ -2175,6 +2203,14 @@ void WM::controlLine(const std::string& line) {
     }
   } else if (c == "shot") {
     writeScreenshot(line.substr(5));
+  } else if (c == "touch") {
+    // touch ID PHASE X Y (phase 0 down, 1 move, 2 up; desktop px): a finger,
+    // for scripted runs on touch-only devices.
+    int id = 0, phase = 0;
+    if (std::sscanf(line.c_str(), "touch %d %d %lf %lf", &id, &phase, &x, &y) == 4 && phase >= 0 && phase <= 2) {
+      touchEvent(id, phase, x, y, t);
+      wlr_seat_touch_notify_frame(seat_);
+    }
   }
 }
 
@@ -2240,6 +2276,13 @@ void WM::tick() {
     }
   }
   jsui_tick(rt_, now);
+#ifdef JSUI_WL_MIR
+  if (perf_) {
+    perfTick_ += nowMs() - now;
+    perfTickMax_ = std::max(perfTickMax_, nowMs() - now);
+    ++perfTicks_;
+  }
+#endif
   JsuiRect dirty{};
   double paintStart = nowMs();
 #ifdef JSUI_WL_MIR
@@ -2352,9 +2395,20 @@ void WM::perfFrame(double paintMs, double presentMs) {
   if (gpu_)
     logf("perf (gpu): jsui render %.2f ms, blit %.2f ms, swap %.2f ms avg", gpuRenderMs_ / perfFrames_,
          gpuBlitMs_ / perfFrames_, gpuSwapMs_ / perfFrames_);
+  logf("perf: %d ticks, jsui_tick %.2f ms avg, worst %.2f ms", perfTicks_, perfTicks_ ? perfTick_ / perfTicks_ : 0.0,
+       perfTickMax_);
+  JsuiPerf p;
+  jsui_get_perf(rt_, &p, 1);
+  logf("perf: per frame paint %.2f, layout %.2f, style %.2f, commit %.2f, animated %.2f, input %.2f, js thread %.2f ms;"
+       " %llu paragraphs, %llu GCs",
+       p.paint_us / 1000 / perfFrames_, p.layout_us / 1000 / perfFrames_, p.style_us / 1000 / perfFrames_,
+       p.commit_us / 1000 / perfFrames_, p.animated_us / 1000 / perfFrames_, p.input_us / 1000 / perfFrames_,
+       p.js_busy_ms / perfFrames_, p.paragraph_builds, p.gc_collections);
   perfPaint_ = perfPresent_ = perfMax_ = 0;
   gpuRenderMs_ = gpuBlitMs_ = gpuSwapMs_ = 0;
   perfFrames_ = 0;
+  perfTick_ = perfTickMax_ = 0;
+  perfTicks_ = 0;
 }
 
 bool WM::renderGpu() {

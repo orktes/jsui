@@ -135,9 +135,14 @@ hardware the same host could render with Skia on the GPU.
   `wl_touch` for apps. The on-screen keyboard types through a virtual
   keyboard.
 * `--control <socket>` takes `down X Y`, `move X Y`, `up`, `key NAME`,
-  `text UTF8` and `shot FILE.ppm` for test drivers (`tour.py --wayland`).
+  `text UTF8`, `touch ID PHASE X Y` (0 down, 1 move, 2 up) and `shot FILE.ppm`
+  for test drivers (`tour.py --wayland`).
   wlr-screencopy, xdg-output and the virtual pointer and keyboard protocols are
   there too, so `grim` and `wayvnc` work.
+* The shell's React runs on a JS thread of its own, so input, animations and
+  paint don't wait for it (`JSUI_WL_JS_THREAD=0`: inside the tick), and the
+  bundle is QuickJS bytecode with its source as the fallback (`jsui build`'s
+  default).
 
 ### Ubuntu Touch (`jsui-wl --mir`, `ubuntu-touch/`)
 
@@ -154,8 +159,9 @@ GLES driver, so Skia (Ganesh) draws the desktop into a texture (only the
 damage is repainted) and one textured quad puts it on the panel, rotated.
 If EGL or Skia's GL context fail, or with `JSUI_WL_GPU=0`, the CPU frame is
 copied into a software window instead. On the Tab A7 a frame takes ~22 ms on
-the GPU against ~91 ms on the CPU (`JSUI_WL_PERF=1` logs paint/present time
-every 60 frames; `JSUI_WL_GPU_DEBUG=1|2` logs the first presents / draws a
+the GPU against ~91 ms on the CPU (`JSUI_WL_PERF=1` logs paint/present time,
+the GPU frame's render/blit/swap split, `jsui_tick` time and JSUI's own
+per-phase profile every 60 frames; `JSUI_WL_GPU_DEBUG=1|2` logs the first presents / draws a
 solid quad). Touch, pointer and key events of that window come
 back on Mir's thread and are queued for the Wayland loop. It is built when
 `mir1client` (UBports) or `mirclient` is found. `--rotate 90|180|270`
