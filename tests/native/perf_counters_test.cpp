@@ -278,6 +278,47 @@ TEST(perf_capi_counters_and_phases) {
   jsui_destroy(rt);
 }
 
+TEST(perf_capi_paint_stats) {
+  JsuiConfig cfg;
+  jsui_config_init(&cfg);
+  cfg.width = 64;
+  cfg.height = 64;
+  JsuiRuntime* rt = jsui_create(&cfg);
+  JsuiPaintStats s;
+  jsui_get_paint_stats(rt, &s);
+  CHECK_EQ(s.nodes_painted, 0);  // nothing rendered yet
+  // Two boxes, one of them a half-transparent group over a child: a layer.
+  const char* bundle =
+      "const n = __jsui_native;"
+      "const a = n.createNode('View'); n.setProps(a, {style: {width: 20, height: 20, backgroundColor: 'red'}});"
+      "const g = n.createNode('View'); n.setProps(g, {style: {width: 30, height: 30, opacity: 0.5, backgroundColor: 'blue'}});"
+      "const c = n.createNode('View'); n.setProps(c, {style: {width: 10, height: 10, backgroundColor: 'green'}});"
+      "n.appendChild(g, c); n.appendChild(n.rootId, a); n.appendChild(n.rootId, g);";
+  CHECK_EQ(jsui_load_bundle_source(rt, bundle, std::strlen(bundle), "stats.js"), 0);
+  std::vector<uint8_t> px(64 * 64 * 4);
+  jsui_tick(rt, 16);
+  jsui_render_rgba(rt, px.data(), 64, 64, 64 * 4);
+  jsui_get_paint_stats(rt, &s);
+  CHECK(s.nodes_painted >= 3);
+  CHECK_EQ(s.repainted_pixels, 64ll * 64);  // the first frame is a full repaint
+  CHECK_EQ(s.draws, 0);  // draw calls are only counted on request
+  CHECK_EQ(s.save_layers, 0);
+
+  jsui_set_paint_counting(rt, 1);
+  const char* grow = "__jsui_native.setProps(a, {style: {width: 24, height: 20, backgroundColor: 'red'}});";
+  CHECK_EQ(jsui_load_bundle_source(rt, grow, std::strlen(grow), "grow.js"), 0);
+  jsui_tick(rt, 32);
+  JsuiRect dirty;
+  jsui_render_rgba_incremental(rt, px.data(), 64, 64, 64 * 4, &dirty);
+  jsui_get_paint_stats(rt, &s);
+  CHECK(s.repainted_pixels > 0 && s.repainted_pixels < 64ll * 64);  // only the damage
+  CHECK(s.draws > 0);
+  CHECK_EQ(s.save_layers, 1);  // the group's opacity over its child
+  jsui_get_paint_stats(nullptr, &s);  // tolerated: zeros
+  CHECK_EQ(s.draws, 0);
+  jsui_destroy(rt);
+}
+
 // Native Animated writing views every frame (tools/jsui-bench markers-native:
 // Animated.hostBuffer values through interpolations into transforms, plus an
 // opacity and a color): each write re-resolves only the written groups,
