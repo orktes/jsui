@@ -698,6 +698,8 @@ class WM {
   void snapshotBackdrop(bool on);
   void removeWindowTexture(uint32_t id);
   bool renderGpu();
+  double lastTickMs_ = 0, lastRenderMs_ = 0;
+  bool vsyncTicks_ = false;  // ticks follow the present thread's swaps (see tick)  // the last tick's / paint's time (slow-frame log)
   void presentMir();
   void sendFrameDone();
   // Frame cost on the Mir path (JSUI_WL_PERF=1): paint + present, logged every 60 frames.
@@ -2444,6 +2446,7 @@ void WM::tick() {
   }
   jsui_tick(rt_, now);
 #ifdef JSUI_WL_MIR
+  lastTickMs_ = nowMs() - now;
   if (perf_) {
     perfTick_ += nowMs() - now;
     perfTickMax_ = std::max(perfTickMax_, nowMs() - now);
@@ -2451,6 +2454,7 @@ void WM::tick() {
   }
 #endif
   JsuiRect dirty{};
+  bool presented = false;
   double paintStart = nowMs();
 #ifdef JSUI_WL_MIR
   if (gpu_) {
@@ -2458,7 +2462,10 @@ void WM::tick() {
     // that changed something (waiting for the headless output's frame
     // clock as well put a second 16.7 ms clock in series: ~30 fps). The
     // present thread's swap paces it.
-    if (jsui_needs_redraw(rt_) || shellDirty_) presentMir();
+    if (jsui_needs_redraw(rt_) || shellDirty_) {
+      presentMir();
+      presented = true;
+    }
   } else
 #endif
   if (frame_ && jsui_render_rgba_incremental(rt_, frame_->data.data(), sw_, sh_, size_t(frame_->stride), &dirty) &&
@@ -2472,7 +2479,10 @@ void WM::tick() {
   double wait;
   if (jsui_wants_frame(rt_) || jsui_needs_redraw(rt_) || jsui_pending_loads(rt_) > 0) {
     // 60 Hz from this tick's start: the paint above is part of the period.
-    wait = std::max(1.0, 1000.0 / 60.0 - (nowMs() - now));
+    // After a frame went to the present thread the next tick comes when
+    // its swap returns instead (swapFd: Mir's vsync); a free-running timer
+    // beat against that and dropped frames. The timer is then a fallback.
+    wait = presented && vsyncTicks_ ? 100.0 : std::max(1.0, 1000.0 / 60.0 - (nowMs() - now));
   } else {
     double t = jsui_next_timer(rt_);
     wait = std::isfinite(t) ? std::clamp(t - nowMs(), 1.0, 1000.0) : 1000.0;
@@ -2493,7 +2503,19 @@ void WM::presentMir() {
   double t0 = nowMs();
   renderGpu();
   shellDirty_ = false;  // nothing for the headless scene: the Mir window is the screen
-  if (perf_) perfFrame(0, nowMs() - t0);
+  if (perf_) {
+    const double ms = nowMs() - t0;
+    perfFrame(0, ms);
+    // A frame that will be seen as a hitch: what it was made of.
+    if (ms + lastTickMs_ > 33) {
+      JsuiPaintStats ps;
+      jsui_get_paint_stats(rt_, &ps);
+      logf("slow frame: tick %.1f ms, paint %.1f ms, wait for the present thread %.1f ms; %.2f Mpx, %d draws,"
+           " %d offscreen layers, %d cached layers (%d rendered), %d shadow blurs, %d nodes",
+           lastTickMs_, lastRenderMs_, ms - lastRenderMs_, double(ps.repainted_pixels) / 1e6, ps.draws, ps.save_layers,
+           ps.layer_draws, ps.layer_renders, ps.shadow_renders, ps.nodes_painted);
+    }
+  }
   sendFrameDone();
 }
 #endif
@@ -2649,6 +2671,7 @@ bool WM::renderGpu() {
   double t0 = nowMs();
   if (jsui_render_gl_target(rt_, gpu_, &t) != 0) return false;
   double t1 = nowMs();
+  lastRenderMs_ = t1 - t0;
   if (perf_) perfPaintStats();
   mir_->presentGpu();
   if (perf_) {
@@ -2695,6 +2718,17 @@ bool WM::showMir() {
     if (gpu_) {
       logf("rendering on the GPU (GLES via EGL on the Mir window%s)",
            mir_->presentThread() ? ", presented from a thread of its own" : "");
+      const char* vt = getenv("JSUI_WL_VSYNC_TICKS");
+      if (mir_->presentThread() && mir_->swapFd() >= 0 && !(vt && vt[0] == '0')) {
+        vsyncTicks_ = true;
+        wl_event_loop_add_fd(loop_, mir_->swapFd(), WL_EVENT_READABLE, [](int fd, uint32_t, void* u) -> int {
+          uint64_t n;
+          (void)!read(fd, &n, sizeof n);
+          auto* wm = static_cast<WM*>(u);
+          if (wm->tickPending_) wm->scheduleTick(0);  // a frame is wanted: now
+          return 0;
+        }, this);
+      }
       gpuApps_ = wlegl::bind(display_, mir_->eglDisplay());
       logf(gpuApps_ ? "apps draw on the GPU too (android_wlegl)" : "apps can't hand over GPU buffers");
       shellDirty_ = true;

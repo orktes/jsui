@@ -283,6 +283,9 @@ class MirHost {
   }
   EGLDisplay eglDisplay() const { return dpy_; }
   bool presentThread() const { return threaded_; }
+  // Readable after each swap of the present thread: a vsync-aligned frame
+  // clock for the main loop.
+  int swapFd() const { return swapFd_; }
   // JSUI_WL_GPU_FINISH with the present thread: the last frame's GPU time
   // (what was left of it when the present thread took it) and the blit's.
   double lastRenderGpuMs() const { return threadRenderGpuMs_.load(); }
@@ -462,6 +465,10 @@ class MirHost {
         presentBusy_ = false;
       }
       presentCv_.notify_all();
+      // The swap returned (Mir took the frame, at its vsync): the main loop
+      // starts the next frame now (see swapFd()).
+      uint64_t one = 1;
+      (void)!write(swapFd_, &one, sizeof one);
     }
     eglMakeCurrent(dpy_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
   }
@@ -705,6 +712,7 @@ class MirHost {
     }
     // The window's context is the present thread's from now on.
     threaded_ = true;
+    if (swapFd_ < 0) swapFd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     blitSubmitted_ = true;
     presentBusy_ = false;
     presentThread_ = std::thread([this] { presentLoop(); });
@@ -953,6 +961,7 @@ class MirHost {
   void (*blitFramebuffer_)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum) = nullptr;
   // The present thread (presentGpu).
   bool threaded_ = false;
+  int swapFd_ = -1;  // present thread -> main loop: a swap returned
   EGLContext renderCtx_ = EGL_NO_CONTEXT;  // the main thread's, sharing ctx_'s objects
   EGLSurface renderSurf_ = EGL_NO_SURFACE;  // its pbuffer when surfaceless isn't supported
   std::thread presentThread_;
