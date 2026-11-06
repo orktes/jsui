@@ -38,6 +38,9 @@
 //    Screen px. wlr-screencopy, xdg-output and the virtual pointer / keyboard
 //    protocols are there too, so grim and wayvnc work.
 #include "../json.h"
+#ifdef JSUI_WL_MIR
+#include "mir_host.h"
+#endif
 
 #include <dirent.h>
 #include <drm_fourcc.h>
@@ -74,6 +77,7 @@ extern "C" {
 #include <wlr/backend.h>
 #include <wlr/backend/headless.h>
 #include <wlr/backend/multi.h>
+#include <wlr/backend/wayland.h>
 #include <wlr/interfaces/wlr_buffer.h>
 #include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/render/allocator.h>
@@ -112,6 +116,30 @@ extern "C" {
 namespace {
 
 bool g_verbose = false;
+
+// Under systemd (Ubuntu Touch runs the shell as lomiri-full-shell.service,
+// Type=notify): tell it we are up, and point the user session's later
+// launches (url-dispatcher, ...) at our Wayland socket.
+void notifySystemd(const std::string& waylandSocket) {
+  const char* path = getenv("NOTIFY_SOCKET");
+  if (!path || !*path) return;
+  if (fork() == 0) {
+    std::string env = "WAYLAND_DISPLAY=" + waylandSocket;
+    execlp("dbus-update-activation-environment", "dbus-update-activation-environment", "--systemd", env.c_str(),
+           (char*)nullptr);
+    _exit(127);
+  }
+  int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+  if (fd < 0) return;
+  sockaddr_un addr{};
+  addr.sun_family = AF_UNIX;
+  std::strncpy(addr.sun_path, path, sizeof addr.sun_path - 1);
+  if (path[0] == '@') addr.sun_path[0] = 0;  // abstract socket
+  const char msg[] = "READY=1";
+  sendto(fd, msg, sizeof msg - 1, 0, reinterpret_cast<sockaddr*>(&addr),
+         socklen_t(offsetof(sockaddr_un, sun_path) + std::strlen(path)));
+  close(fd);
+}
 
 void logf(const char* fmt, ...) {
   va_list ap;
@@ -194,6 +222,8 @@ struct Options {
   int width = 1920, height = 1200;
   bool mouse = false;
   bool scanApps = true;
+  bool mir = false;       // --mir: show the desktop through a host Mir server (Ubuntu Touch)
+  std::string mirSocket;  // default $MIR_SERVER_HOST_SOCKET
   std::vector<std::string> autostart;
 };
 
@@ -201,7 +231,7 @@ void usage() {
   std::fprintf(stderr,
                "usage: jsui-wl [--scale 1.5] [--size 1920x1200] [--bundle shell.js | --dev URL]\n"
                "               [--anchors file.json] [--control socket] [--mouse] [--no-apps-scan]\n"
-               "               [--autostart CMD]... [--verbose]\n");
+               "               [--autostart CMD]... [--mir [--mir-socket PATH]] [--verbose]\n");
 }
 
 bool parseArgs(int argc, char** argv, Options& o) {
@@ -222,6 +252,8 @@ bool parseArgs(int argc, char** argv, Options& o) {
     else if (a == "--autostart" && next(v)) o.autostart.push_back(v);
     else if (a == "--mouse") o.mouse = true;
     else if (a == "--no-apps-scan") o.scanApps = false;
+    else if (a == "--mir") o.mir = true;
+    else if (a == "--mir-socket" && next(v)) o.mirSocket = v, o.mir = true;
     else if (a == "--verbose" || a == "-v") g_verbose = true;
     else if (a == "--help" || a == "-h") {
       usage();
@@ -452,6 +484,8 @@ class WM {
   // wlroots setup
   bool setup();
   void newOutput(wlr_output* output);
+  void allocFrame();
+  void resizeScreen(int w, int h);
   void newInput(wlr_input_device* dev);
   void newKeyboard(wlr_keyboard* kb);
   void newToplevel(wlr_xdg_surface* xdg);
@@ -571,6 +605,14 @@ class WM {
   uint32_t mrEdges_ = 0;
   double mrX_ = 0, mrY_ = 0;
   Rect mrStart_;
+
+#ifdef JSUI_WL_MIR
+  MirHost* mir_ = nullptr;
+  uint32_t mirOutput_ = 0;
+  bool setupMir();
+  bool showMir();
+  void mirEvents();
+#endif
 
   int controlFd_ = -1;
   std::map<int, std::string> controlBuf_;
@@ -727,6 +769,11 @@ bool WM::setup() {
     auto add = [](wlr_backend* b, void* u) {
       auto* k = static_cast<Ctx*>(u);
       if (wlr_backend_is_headless(b)) wlr_headless_add_output(b, unsigned(k->w), unsigned(k->h));
+      // Nested in another compositor (Ubuntu Touch's lomiri-system-compositor,
+      // or any desktop): one toplevel of the host is our screen.
+      if (wlr_backend_is_wl(b)) {
+        if (wlr_output* o = wlr_wl_output_create(b)) wlr_wl_output_set_title(o, "jsui-wl");
+      }
     };
     if (wlr_backend_is_multi(backend_)) wlr_multi_for_each_backend(backend_, add, &ctx);
     else add(backend_, &ctx);
@@ -739,6 +786,7 @@ bool WM::setup() {
   setenv("XDG_SESSION_TYPE", "wayland", 1);
   setenv("GDK_BACKEND", "wayland", 0);
   setenv("QT_QPA_PLATFORM", "wayland", 0);
+  setenv("QT_WAYLAND_DISABLE_WINDOWDECORATION", "1", 0);  // the shell draws the frames
   unsetenv("DISPLAY");
   logf("listening on WAYLAND_DISPLAY=%s", socket);
   tickTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
@@ -756,7 +804,8 @@ void WM::newOutput(wlr_output* output) {
   wlr_output_state_init(&st);
   wlr_output_state_set_enabled(&st, true);
   if (wlr_output_mode* mode = wlr_output_preferred_mode(output)) wlr_output_state_set_mode(&st, mode);
-  else wlr_output_state_set_custom_mode(&st, opt_.width, opt_.height, 60000);
+  // A nested (wayland backend) output takes no refresh rate.
+  else wlr_output_state_set_custom_mode(&st, opt_.width, opt_.height, wlr_output_is_wl(output) ? 0 : 60000);
   wlr_output_commit_state(output, &st);
   wlr_output_state_finish(&st);
   output_ = output;
@@ -771,17 +820,45 @@ void WM::newOutput(wlr_output* output) {
   // text to the shell's scale instead.
   setenv("GDK_DPI_SCALE", std::to_string(scale_).c_str(), 0);
 
+  allocFrame();
+  shellNode_ = wlr_scene_buffer_create(&scene_->tree, &frame_->base);
+
+  listen(&output->events.frame, nullptr, [this](void*) { onFrame(); });
+  // The host compositor (wayland backend) sizes our toplevel: follow it.
+  listen(&output->events.request_state, nullptr, [this, output](void* d) {
+    auto* e = static_cast<wlr_output_event_request_state*>(d);
+    wlr_output_commit_state(output, e->state);
+    if (output->width != sw_ || output->height != sh_) resizeScreen(output->width, output->height);
+  });
+}
+
+void WM::allocFrame() {
+  if (frame_) wlr_buffer_drop(&frame_->base);
   frame_ = new FrameBuffer;
   frame_->stride = sw_ * 4;
   frame_->data.assign(size_t(frame_->stride) * size_t(sh_), 0);
   wlr_buffer_init(&frame_->base, &kFrameBufferImpl, sw_, sh_);
-  shellNode_ = wlr_scene_buffer_create(&scene_->tree, &frame_->base);
+}
 
-  listen(&output->events.frame, nullptr, [this](void*) { onFrame(); });
-  listen(&output->events.request_state, nullptr, [output](void* d) {
-    auto* e = static_cast<wlr_output_event_request_state*>(d);
-    wlr_output_commit_state(output, e->state);
-  });
+void WM::resizeScreen(int w, int h) {
+  if (w <= 0 || h <= 0) return;
+  logf("screen resized to %dx%d px", w, h);
+  sw_ = w;
+  sh_ = h;
+  if (opt_.scale <= 0) scale_ = sw_ >= 1800 ? 1.5f : sw_ >= 1500 ? 1.25f : 1.0f;
+  allocFrame();
+  wlr_scene_buffer_set_buffer(shellNode_, &frame_->base);
+  if (!rt_) return;
+  jsui_set_viewport(rt_, int(std::lround(sw_ / scale_)), int(std::lround(sh_ / scale_)), scale_);
+  publishScreen();
+  Rect wa = workArea();
+  for (auto& [id, c] : clients_) {
+    if (c->popup || !c->mapped) continue;
+    if (c->fullscreen) configure(c, 0, 0, sw_, sh_);
+    else if (c->maximized) configure(c, wa.x, wa.y, wa.w, wa.h);
+    else if (c->snap) setSnap(c, c->snap);
+  }
+  scheduleFrame();
 }
 
 void WM::newInput(wlr_input_device* dev) {
@@ -2044,6 +2121,9 @@ void WM::scheduleFrame() {
 
 void WM::onFrame() {
   frameScheduled_ = false;
+#ifdef JSUI_WL_MIR
+  if (mir_ && shellDirty_) mir_->present(frame_->data.data(), sw_, sh_, size_t(frame_->stride));
+#endif
   if (shellDirty_) {
     shellDirty_ = false;
     wlr_scene_buffer_set_buffer_with_damage(shellNode_, &frame_->base, &shellDamage_);
@@ -2063,10 +2143,111 @@ void WM::onFrame() {
           &now);
 }
 
+#ifdef JSUI_WL_MIR
+// --mir: connect first, so wlroots' headless output takes the panel's size.
+bool WM::setupMir() {
+  std::string sock = opt_.mirSocket;
+  if (sock.empty() && getenv("MIR_SERVER_HOST_SOCKET")) sock = getenv("MIR_SERVER_HOST_SOCKET");
+  // The system compositor shows the session whose name lightdm made active.
+  const char* name = getenv("MIR_SERVER_NAME") ? getenv("MIR_SERVER_NAME") : "jsui-wl";
+  mir_ = new MirHost;
+  std::string err;
+  if (!mir_->connect(sock.empty() ? nullptr : sock.c_str(), name, &err)) {
+    logf("cannot connect to Mir (%s): %s", sock.empty() ? "default socket" : sock.c_str(), err.c_str());
+    return false;
+  }
+  int w = 0, h = 0;
+  uint32_t out = 0;
+  if (mir_->outputSize(&w, &h, &out)) {
+    opt_.width = w;
+    opt_.height = h;
+  }
+  logf("Mir session \"%s\", output %dx%d", name, opt_.width, opt_.height);
+  setenv("WLR_BACKENDS", "headless", 1);
+  setenv("WLR_RENDERER", "pixman", 1);
+  setenv("WLR_LIBINPUT_NO_DEVICES", "1", 1);
+  // Ubuntu Touch's EGL (libhybris) needs the compositor to speak
+  // android_wlegl, which wlroots doesn't: apps draw in software for now.
+  setenv("QT_QUICK_BACKEND", "software", 0);
+  setenv("QT_QPA_PLATFORM", "wayland", 0);
+  mirOutput_ = out;
+  return true;
+}
+
+bool WM::showMir() {
+  std::string err;
+  if (!mir_->createWindow(sw_, sh_, mirOutput_, &err)) {
+    logf("cannot create the Mir window: %s", err.c_str());
+    return false;
+  }
+  wl_event_loop_add_fd(loop_, mir_->fd(), WL_EVENT_READABLE, [](int, uint32_t, void* u) -> int {
+    static_cast<WM*>(u)->mirEvents();
+    return 0;
+  }, this);
+  return true;
+}
+
+void WM::mirEvents() {
+  uint32_t t = uint32_t(nowMs());
+  bool touched = false;
+  for (const MirHostEvent& e : mir_->takeEvents()) {
+    switch (e.kind) {
+      case MirHostEvent::Touch:
+        touchEvent(e.id, e.phase, e.x, e.y, t);
+        touched = true;
+        break;
+      case MirHostEvent::Pointer:
+        wlr_cursor_warp_closest(cursor_, nullptr, e.x, e.y);
+        if (e.phase == 0) pointerButton(true, 0x110 /* BTN_LEFT */, t);
+        else if (e.phase == 2) pointerButton(false, 0x110, t);
+        else pointerMotion(t);
+        wlr_seat_pointer_notify_frame(seat_);
+        break;
+      case MirHostEvent::Key: {
+        wlr_keyboard_key_event ev{};
+        ev.time_msec = t;
+        ev.keycode = uint32_t(e.id);
+        ev.update_state = true;
+        ev.state = e.phase ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED;
+        wlr_keyboard_notify_key(&vkbd_, &ev);
+        keyboardKey(&vkbd_, uint32_t(e.id), e.phase != 0, t);
+        break;
+      }
+      case MirHostEvent::Resize: {
+        wlr_output_state st;
+        wlr_output_state_init(&st);
+        wlr_output_state_set_custom_mode(&st, e.w, e.h, 60000);
+        wlr_output_commit_state(output_, &st);
+        wlr_output_state_finish(&st);
+        mir_->resize(e.w, e.h);
+        resizeScreen(e.w, e.h);
+        break;
+      }
+      case MirHostEvent::Close:
+        wl_display_terminate(display_);
+        break;
+    }
+  }
+  if (touched) wlr_seat_touch_notify_frame(seat_);
+}
+#endif
+
 int WM::run() {
+#ifdef JSUI_WL_MIR
+  if (opt_.mir && !setupMir()) return 1;
+#else
+  if (opt_.mir) {
+    logf("built without Mir support (mirclient)");
+    return 1;
+  }
+#endif
   if (!setup()) return 1;
+#ifdef JSUI_WL_MIR
+  if (mir_ && !showMir()) return 1;
+#endif
   if (!createRuntime()) return 1;
   for (const auto& cmd : opt_.autostart) launch(cmd);
+  notifySystemd(socketName_);
   scheduleTick(0);
   wl_display_run(display_);
   logf("quit");
