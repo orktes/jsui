@@ -325,6 +325,7 @@ std::string shellQuote(const std::string& s) {
 
 std::vector<App> scanApps(const std::string& terminal) {
   std::vector<App> apps;
+  const bool unconfined = fileExists("/usr/bin/aa-exec") && access("/sys/kernel/security/apparmor", F_OK) == 0;
   std::set<std::string> seen;
   std::vector<std::string> dirs = {"/usr/share/applications", "/usr/local/share/applications"};
   if (const char* home = getenv("HOME")) dirs.push_back(std::string(home) + "/.local/share/applications");
@@ -372,6 +373,10 @@ std::vector<App> scanApps(const std::string& terminal) {
         size_t dash = app.exec.find(" -- ");
         if (dash != std::string::npos) app.exec = app.exec.substr(dash + 4);
       }
+      // Some system apps (messaging, the browser) have AppArmor profiles that
+      // attach by path and keep them from reading the Qt Wayland plugin this
+      // package brings: run every app unconfined, as the click apps above.
+      if (unconfined) app.exec = "aa-exec -p unconfined -- " + app.exec;
       // Click packages carry their own binaries, libraries and QML modules,
       // which ubuntu-app-launch puts on the paths.
       if (!appId.empty() && !path.empty()) {
@@ -395,8 +400,8 @@ std::vector<App> scanApps(const std::string& terminal) {
 // (on Ubuntu Touch: apps on Mesa's EGL while jsui-wl is on libhybris').
 std::vector<std::string> g_appEnv;
 
-void launch(const std::string& cmd) {
-  if (cmd.empty()) return;
+pid_t launch(const std::string& cmd) {
+  if (cmd.empty()) return -1;
   logf("launch: %s", cmd.c_str());
   pid_t pid = fork();
   if (pid == 0) {
@@ -411,6 +416,18 @@ void launch(const std::string& cmd) {
     execl("/bin/sh", "sh", "-c", cmd.c_str(), static_cast<char*>(nullptr));
     _exit(127);
   }
+  return pid;
+}
+
+// The parent of `pid` (0 when it is gone).
+pid_t parentPid(pid_t pid) {
+  std::ifstream in("/proc/" + std::to_string(pid) + "/stat");
+  std::string line;
+  if (!std::getline(in, line)) return 0;
+  size_t close = line.rfind(')');  // the command may hold spaces and parentheses
+  if (close == std::string::npos) return 0;
+  int ppid = 0;
+  return std::sscanf(line.c_str() + close + 1, " %*c %d", &ppid) == 1 ? pid_t(ppid) : 0;
 }
 
 // DOM key names for keysyms (xkbcommon keysyms are the X11 ones).
@@ -686,7 +703,8 @@ class WM {
 #endif
 
   int controlFd_ = -1;
-  int jsReadyFd_ = -1;  // JS thread -> Wayland loop wake-up (on_js_ready)
+  int jsReadyFd_ = -1;
+  std::map<std::string, pid_t> launched_;  // wm:launch command -> the shell it ran in  // JS thread -> Wayland loop wake-up (on_js_ready)
   std::map<int, std::string> controlBuf_;
   std::map<int, wl_event_source*> controlSources_;
 };
@@ -1666,7 +1684,24 @@ void WM::onMessage(const char* name, const char* json) {
   } else if (n == "wm:anchors") {
     writeAnchors(v);
   } else if (n == "wm:launch") {
-    launch(v["exec"].str());
+    // An app already running from the same launch (Ubuntu Touch apps are
+    // single instance: a second one just exits) is brought to the front.
+    const std::string exec = v["exec"].str();
+    auto it = launched_.find(exec);
+    if (it != launched_.end()) {
+      for (auto& [id, cl] : clients_) {
+        if (cl->popup || !cl->mapped || cl->pid <= 0) continue;
+        pid_t p = cl->pid;
+        for (int depth = 0; p > 1 && p != it->second && depth < 8; ++depth) p = parentPid(p);
+        if (p != it->second) continue;
+        if (cl->minimized) unminimize(cl);
+        raise(cl);
+        focus(cl);
+        return;
+      }
+    }
+    pid_t pid = launch(exec);
+    if (pid > 0) launched_[exec] = pid;
   } else if (n == "wm:focus" && c) {
     if (c->minimized) unminimize(c);
     raise(c);
@@ -2380,12 +2415,15 @@ bool WM::setupMir() {
     opt_.height = h;
   }
   logf("Mir session \"%s\", output %dx%d (rotated %d)", name, opt_.width, opt_.height, opt_.rotate);
+  // What jsui-wl sets for itself here and for its Mir window (EGL_PLATFORM
+  // "null": libhybris passes Mir's ANativeWindow through) must not reach the
+  // apps: with it their libhybris EGL skips its Wayland platform, Qt gets no
+  // GL context and Lomiri's toolkit crashes.
+  for (const char* k : {"WLR_BACKENDS", "WLR_RENDERER", "WLR_LIBINPUT_NO_DEVICES", "EGL_PLATFORM"})
+    if (!getenv(k)) g_appEnv.insert(g_appEnv.begin(), std::string(k) + "=");
   setenv("WLR_BACKENDS", "headless", 1);
   setenv("WLR_RENDERER", "pixman", 1);
   setenv("WLR_LIBINPUT_NO_DEVICES", "1", 1);
-  // Ubuntu Touch's EGL (libhybris) needs the compositor to speak
-  // android_wlegl, which wlroots doesn't: apps draw in software for now.
-  setenv("QT_QUICK_BACKEND", "software", 0);
   setenv("QT_QPA_PLATFORM", "wayland", 0);
   mirOutput_ = out;
   return true;
