@@ -5,6 +5,8 @@
 #
 #   sh install.sh            # unpack to ~/jsui-wm and switch the shell
 #   sh install.sh --now      # ... and restart the session right away
+#   sh install.sh --system   # also the system bits Lomiri normally sets up (sudo):
+#                            # power key via repowerd, double-tap to wake
 #
 # Nothing outside your home directory changes: a systemd user drop-in makes
 # Lomiri's launcher (lomiri-systemd-wrapper) run ~/jsui-wm/jsui-session
@@ -40,7 +42,21 @@ CONF
 done
 systemctl --user daemon-reload
 echo "jsui-wm installed in $DEST."
-if [ "$1" = "--now" ]; then
+# --system (sudo): what Lomiri normally sets up outside the session. logind
+# must ignore the power key (else a short press powers off), and on the
+# Galaxy Tab A7 the touch controller's double tap to wake gets switched on.
+case " $* " in *" --system "*)
+  sudo install -m 644 -D "$DEST/jsui-wm-logind.conf" /etc/systemd/logind.conf.d/jsui-wm.conf &&
+    sudo systemctl kill -s HUP systemd-logind && echo "logind: power key handled by repowerd."
+  if [ -e /sys/class/sec/tsp/cmd ]; then
+    sudo install -m 644 "$DEST/jsui-wm-tap-to-wake.service" /etc/systemd/system/ &&
+      sudo systemctl daemon-reload && sudo systemctl enable --now jsui-wm-tap-to-wake.service &&
+      echo "double-tap to wake enabled."
+  fi
+  ;;
+esac
+case " $* " in *" --now "*) now=1 ;; *) now= ;; esac
+if [ -n "$now" ]; then
   systemctl --user restart lomiri-full-shell.service lomiri-full-greeter.service 2>/dev/null || true
 else
   echo "Start it by rebooting (or restart lomiri-full-shell/lomiri-full-greeter.service)."

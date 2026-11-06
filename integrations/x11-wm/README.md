@@ -145,10 +145,18 @@ On Ubuntu Touch the screen belongs to `lomiri-system-compositor` (Mir 1.8 on
 Android's hwcomposer through libhybris), and Lomiri is a nested Mir server
 that `lomiri-systemd-wrapper` starts as `${LOMIRI_BINARY:-lomiri}`. `jsui-wl
 --mir` takes Lomiri's place: wlroots runs headless and still serves Wayland
-to the apps, and each shell frame (which already holds every window) is
-copied into a fullscreen software window of the system compositor, opened
-with mirclient as session `$MIR_SERVER_NAME` on `$MIR_SERVER_HOST_SOCKET`
-(`wayland/mir_host.h`). Touch, pointer and key events of that window come
+to the apps, and the shell (which already holds every window) is drawn into a
+fullscreen window of the system compositor, opened with mirclient as session
+`$MIR_SERVER_NAME` on `$MIR_SERVER_HOST_SOCKET` (`wayland/mir_host.h`). That
+window is a GPU window by default: Mir's android2 client platform hands out an
+`ANativeWindow`, which libhybris' `null` EGL platform passes to the Android
+GLES driver, so Skia (Ganesh) draws the desktop into a texture (only the
+damage is repainted) and one textured quad puts it on the panel, rotated.
+If EGL or Skia's GL context fail, or with `JSUI_WL_GPU=0`, the CPU frame is
+copied into a software window instead. On the Tab A7 a frame takes ~22 ms on
+the GPU against ~91 ms on the CPU (`JSUI_WL_PERF=1` logs paint/present time
+every 60 frames; `JSUI_WL_GPU_DEBUG=1|2` logs the first presents / draws a
+solid quad). Touch, pointer and key events of that window come
 back on Mir's thread and are queued for the Wayland loop. It is built when
 `mir1client` (UBports) or `mirclient` is found. `--rotate 90|180|270`
 turns the desktop on the panel (the Tab A7's panel is 1200x2000 portrait;
@@ -163,7 +171,13 @@ gives it.
   `~/jsui-wm` and adds systemd user drop-ins for `lomiri-full-shell.service`
   and `lomiri-full-greeter.service` (the first-run wizard) that set `LOMIRI_BINARY=~/jsui-wm/jsui-session`. Nothing outside the home
   directory changes; `uninstall.sh` removes the drop-in. `jsui-session` goes
-  back to Lomiri by itself after three failed starts within two minutes.
+  back to Lomiri by itself after three failed starts within two minutes (a
+  `systemctl --user restart` doesn't count). It also switches the Himax
+  touch controller's smart wake on. `install.sh --system` (sudo) adds what
+  Lomiri normally sets up outside the session: a logind drop-in so the power
+  key only toggles the screen (repowerd) instead of powering off, and on the
+  Tab A7 `jsui-wm-tap-to-wake.service`, which sends Samsung's `aot_enable,1`
+  so a double tap wakes the screen.
 * `ubuntu-touch/test/` runs `--mir` without a tablet: `mir-test-server` is a
   Mir 1.8 server on Mir's stub graphics and input platforms with a fake
   touchscreen, and `test-mir.sh` checks that a Mir touch opens the launcher
@@ -207,10 +221,11 @@ are (screen px), which `docker/tour.py` uses to drive it with xdotool.
   scaled with `GDK_DPI_SCALE`), client buffers are read on the CPU (pixman).
 * Ubuntu Touch: apps draw in software (`QT_QUICK_BACKEND=software`): their
   EGL (libhybris) needs the compositor to offer `android_wlegl`, which
-  wlroots doesn't, so GL-only apps (the browser) don't run yet. The shell
-  itself renders on the CPU and is copied into a Mir software buffer each
-  frame. Lomiri's lock screen, indicators, notifications and Maliit keyboard
-  aren't there (the shell has its own keyboard). Not yet run on a tablet.
+  wlroots doesn't, so GL-only apps (the browser) don't run yet. Lomiri's
+  lock screen, indicators, notifications and Maliit keyboard
+  aren't there (the shell has its own keyboard). Bringing the port up on the
+  stock Samsung vendor took device-side fixes outside this repository (see the
+  project notes); adb over USB (usb-moded `mtp_adb`) helps while debugging.
 * CPU compositing: each damaged window area is copied through shared memory.
   Fine for Xvfb and a tablet's worth of apps; a real device should import
   window pixmaps as GPU textures.

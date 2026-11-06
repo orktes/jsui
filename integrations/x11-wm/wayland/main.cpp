@@ -612,6 +612,15 @@ class WM {
 #ifdef JSUI_WL_MIR
   MirHost* mir_ = nullptr;
   uint32_t mirOutput_ = 0;
+  // --mir on the GPU: Skia draws the desktop into the Mir window's GL context.
+  JsuiGpuContext* gpu_ = nullptr;
+  bool renderGpu();
+  // Frame cost on the Mir path (JSUI_WL_PERF=1): paint + present, logged every 60 frames.
+  bool perf_ = false;
+  double cpuPaintMs_ = 0;  // CPU raster since the last presented frame
+  double perfPaint_ = 0, perfPresent_ = 0, perfMax_ = 0;
+  int perfFrames_ = 0;
+  void perfFrame(double paintMs, double presentMs);
   bool setupMir();
   bool showMir();
   void mirEvents();
@@ -2060,6 +2069,28 @@ void WM::controlLine(const std::string& line) {
 
 // The screen as PPM: the shell's frame (everything on screen is in it).
 void WM::writeScreenshot(const std::string& path) {
+#ifdef JSUI_WL_MIR_GL
+  if (gpu_) {
+    std::vector<uint8_t> px;
+    if (!mir_->readDesktop(&px)) return;
+    FILE* g = std::fopen(path.c_str(), "wb");
+    if (!g) return;
+    int w = mir_->desktopWidth(), h = mir_->desktopHeight();
+    std::fprintf(g, "P6\n%d %d\n255\n", w, h);
+    std::vector<uint8_t> row(size_t(w) * 3);
+    for (int y = 0; y < h; ++y) {
+      const uint8_t* s = px.data() + size_t(y) * size_t(w) * 4;
+      for (int x = 0; x < w; ++x) {
+        row[size_t(x) * 3] = s[x * 4];
+        row[size_t(x) * 3 + 1] = s[x * 4 + 1];
+        row[size_t(x) * 3 + 2] = s[x * 4 + 2];
+      }
+      std::fwrite(row.data(), 1, row.size(), g);
+    }
+    std::fclose(g);
+    return;
+  }
+#endif
   FILE* f = std::fopen(path.c_str(), "wb");
   if (!f || !frame_) return;
   std::fprintf(f, "P6\n%d %d\n255\n", sw_, sh_);
@@ -2099,10 +2130,21 @@ void WM::tick() {
   }
   jsui_tick(rt_, now);
   JsuiRect dirty{};
+  double paintStart = nowMs();
+#ifdef JSUI_WL_MIR
+  if (gpu_) {
+    // The GPU path paints at frame time (needs the window's GL context).
+    if (jsui_needs_redraw(rt_)) {
+      shellDirty_ = true;
+      scheduleFrame();
+    }
+  } else
+#endif
   if (frame_ && jsui_render_rgba_incremental(rt_, frame_->data.data(), sw_, sh_, size_t(frame_->stride), &dirty) &&
       dirty.width > 0 && dirty.height > 0) {
     pixman_region32_union_rect(&shellDamage_, &shellDamage_, dirty.x, dirty.y, unsigned(dirty.width),
                                unsigned(dirty.height));
+    cpuPaintMs_ += nowMs() - paintStart;
     shellDirty_ = true;
     scheduleFrame();
   }
@@ -2125,7 +2167,18 @@ void WM::scheduleFrame() {
 void WM::onFrame() {
   frameScheduled_ = false;
 #ifdef JSUI_WL_MIR
-  if (mir_ && shellDirty_) mir_->present(frame_->data.data(), sw_, sh_, size_t(frame_->stride));
+  if (mir_ && shellDirty_) {
+    double t0 = nowMs();
+    if (gpu_) {
+      renderGpu();
+      shellDirty_ = false;  // nothing for the headless scene: the Mir window is the screen
+      if (perf_) perfFrame(0, nowMs() - t0);
+    } else {
+      mir_->present(frame_->data.data(), sw_, sh_, size_t(frame_->stride));
+      if (perf_) perfFrame(cpuPaintMs_, nowMs() - t0);
+    }
+    cpuPaintMs_ = 0;
+  }
 #endif
   if (shellDirty_) {
     shellDirty_ = false;
@@ -2178,12 +2231,65 @@ bool WM::setupMir() {
   return true;
 }
 
+void WM::perfFrame(double paintMs, double presentMs) {
+  perfPaint_ += paintMs;
+  perfPresent_ += presentMs;
+  perfMax_ = std::max(perfMax_, paintMs + presentMs);
+  if (++perfFrames_ < 60) return;
+  logf("perf (%s): %d frames, paint %.2f ms + present %.2f ms avg, worst %.2f ms", gpu_ ? "gpu" : "cpu",
+       perfFrames_, perfPaint_ / perfFrames_, perfPresent_ / perfFrames_, perfMax_);
+  perfPaint_ = perfPresent_ = perfMax_ = 0;
+  perfFrames_ = 0;
+}
+
+bool WM::renderGpu() {
+#ifdef JSUI_WL_MIR_GL
+  if (!gpu_ || !mir_->makeCurrent()) return false;
+  bool fresh = false;
+  JsuiGLTarget t{};
+  t.texture = mir_->desktopTexture(&fresh);
+  t.format = mir_->textureFormat();
+  t.width = mir_->desktopWidth();
+  t.height = mir_->desktopHeight();
+  // The texture keeps the last frame: only the damage is repainted into it.
+  t.flags = fresh ? 0 : JSUI_GL_INCREMENTAL;
+  if (jsui_render_gl_target(rt_, gpu_, &t) != 0) return false;
+  mir_->presentGpu();
+  return true;
+#else
+  return false;
+#endif
+}
+
 bool WM::showMir() {
   std::string err;
-  if (!mir_->createWindow(sw_, sh_, mirOutput_, &err)) {
+  const char* perfEnv = getenv("JSUI_WL_PERF");
+  perf_ = perfEnv && perfEnv[0] == '1';
+  const char* gpuEnv = getenv("JSUI_WL_GPU");
+  bool wantGpu = !(gpuEnv && gpuEnv[0] == '0');
+  if (!mir_->createWindow(sw_, sh_, mirOutput_, wantGpu, &err)) {
     logf("cannot create the Mir window: %s", err.c_str());
     return false;
   }
+#ifdef JSUI_WL_MIR_GL
+  if (mir_->gpu()) {
+    gpu_ = jsui_gpu_create_gl(nullptr, nullptr);
+    if (gpu_) {
+      logf("rendering on the GPU (GLES via EGL on the Mir window)");
+      shellDirty_ = true;
+      scheduleFrame();
+    } else {
+      logf("Skia could not use the GL context; rendering on the CPU");
+      if (!mir_->fallBackToSoftware(&err)) {
+        logf("cannot create the Mir window: %s", err.c_str());
+        return false;
+      }
+    }
+  } else if (wantGpu) {
+    logf("GPU window unavailable (%s); rendering on the CPU", mir_->gpuError().c_str());
+  }
+#endif
+
   wl_event_loop_add_fd(loop_, mir_->fd(), WL_EVENT_READABLE, [](int, uint32_t, void* u) -> int {
     static_cast<WM*>(u)->mirEvents();
     return 0;

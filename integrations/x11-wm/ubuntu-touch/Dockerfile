@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && apt-get update && apt-get install -y --no-install-recommends \
       git unzip python3 cmake ninja-build clang lld binutils pkg-config \
       libfontconfig1-dev zlib1g-dev libwlroots-dev wayland-protocols libxkbcommon-dev libpixman-1-dev libdrm-dev \
-      libmir1client-dev \
+      libmir1client-dev libegl-dev libgles-dev \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
 COPY --from=node:22-bookworm-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
