@@ -5,6 +5,7 @@ import {
   Animated, Easing, HostTexture, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { remeasureAnchors, useAnchor } from './anchors.js';
+import { useNativeDragY } from './drag.js';
 import { AppIcon } from './AppIcon.jsx';
 import { dateText, longMonth, pad2, timeText, useClock } from './bars.jsx';
 import { Card, IconButton, Label, Slider, ToggleTile } from './controls.jsx';
@@ -161,14 +162,28 @@ const SwitcherCard = memo(function SwitcherCard({ win, card, enter, from, title,
   const t = useTheme();
   const anchor = useAnchor(`switcher.${win.id}`);
   const splitAnchor = useAnchor(`switcher.${win.id}.split`);
+  // The swipe: the finger natively (up 1:1, down damped to a quarter) while it
+  // is down, then `swipe` (an animation from where it let go).
   const swipe = useRef(new Animated.Value(0)).current;
+  const drag = useNativeDragY();
+  const shape = (dy) => Math.min(0, dy) + Math.max(0, dy) * 0.25;
+  const follow = useMemo(
+    () => drag.dy.interpolate({ inputRange: [-1, 0, 1], outputRange: [-1, 0, 0.25], extrapolate: 'extend' }),
+    [drag],
+  );
+  const lift = useMemo(() => Animated.add(follow, swipe), [follow, swipe]);
+  const handOver = (dy) => {
+    swipe.setValue(shape(dy));
+    drag.on.setValue(0);
+  };
   const pan = useMemo(
     () =>
       PanResponder.create({
         onMoveShouldSetPanResponder: (e, g) => g.dy < -8 && Math.abs(g.dy) > Math.abs(g.dx) * 1.2,
         onPanResponderTerminationRequest: () => false,
-        onPanResponderMove: (e, g) => swipe.setValue(Math.min(0, g.dy) + Math.max(0, g.dy) * 0.25),
+        onPanResponderGrant: () => drag.on.setValue(1),
         onPanResponderRelease: (e, g) => {
+          handOver(g.dy);
           if (g.dy < -card.h * 0.3 || g.vy < -0.8) {
             Animated.timing(swipe, { toValue: -screen.height, duration: 220, easing: Easing.out(Easing.quad), useNativeDriver: true }).start();
             wm.close(win.id);
@@ -176,9 +191,12 @@ const SwitcherCard = memo(function SwitcherCard({ win, card, enter, from, title,
             Animated.spring(swipe, { toValue: 0, tension: 160, friction: 16, useNativeDriver: true }).start();
           }
         },
-        onPanResponderTerminate: () => Animated.spring(swipe, { toValue: 0, useNativeDriver: true }).start(),
+        onPanResponderTerminate: (e, g) => {
+          handOver(g.dy);
+          Animated.spring(swipe, { toValue: 0, useNativeDriver: true }).start();
+        },
       }),
-    [swipe, win.id, card.h, screen.height],
+    [swipe, drag, win.id, card.h, screen.height],
   );
   // The card that maps to the desktop flies between its window's place and the
   // strip; the others slide in from the right.
@@ -192,12 +210,13 @@ const SwitcherCard = memo(function SwitcherCard({ win, card, enter, from, title,
     ty = 0;
     sc = enter.interpolate({ inputRange: [0, 1], outputRange: [0.9, 1] });
   }
-  const fade = swipe.interpolate({ inputRange: [-screen.height * 0.6, 0], outputRange: [0, 1], extrapolate: 'clamp' });
+  const fade = lift.interpolate({ inputRange: [-screen.height * 0.6, 0], outputRange: [0, 1], extrapolate: 'clamp' });
   const radius = enter.interpolate({ inputRange: [0, 1], outputRange: [from ? 0 : 22, 22] });
   return (
     <Animated.View
       {...pan.panHandlers}
-      style={{ width: card.w, marginRight: card.gap, opacity: fade, transform: [{ translateX: tx }, { translateY: Animated.add(ty, swipe) }] }}
+      {...drag.handlers}
+      style={{ width: card.w, marginRight: card.gap, opacity: fade, transform: [{ translateX: tx }, { translateY: Animated.add(ty, lift) }] }}
     >
       <Animated.View style={[styles.cardHead, { opacity: enter }]}>
         <AppIcon win={win} app={apps.find((a) => a.id === win.appId)} size={32} />
@@ -461,7 +480,14 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
 
 export const LockScreen = memo(function LockScreen({ screen, onUnlock, notifications }) {
   const now = useClock();
+  // Up with the finger natively while it is down, then `drag` (an animation
+  // from where it let go).
   const drag = useRef(new Animated.Value(0)).current;
+  const finger = useNativeDragY();
+  const up = useMemo(
+    () => Animated.add(finger.dy.interpolate({ inputRange: [-1, 0], outputRange: [-1, 0], extrapolateLeft: 'extend', extrapolateRight: 'clamp' }), drag),
+    [finger, drag],
+  );
   const v = useEntrance(true, 260);
   const anchor = useAnchor('lock.handle');
   const pan = useMemo(
@@ -469,8 +495,10 @@ export const LockScreen = memo(function LockScreen({ screen, onUnlock, notificat
       PanResponder.create({
         onStartShouldSetPanResponder: () => true,
         onMoveShouldSetPanResponder: () => true,
-        onPanResponderMove: (e, g) => drag.setValue(Math.min(0, g.dy)),
+        onPanResponderGrant: () => finger.on.setValue(1),
         onPanResponderRelease: (e, g) => {
+          drag.setValue(Math.min(0, g.dy));
+          finger.on.setValue(0);
           if (g.dy < -140 || g.vy < -0.9) {
             Animated.timing(drag, { toValue: -screen.height, duration: 260, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start(onUnlock);
           } else {
@@ -478,11 +506,11 @@ export const LockScreen = memo(function LockScreen({ screen, onUnlock, notificat
           }
         },
       }),
-    [drag, onUnlock, screen.height],
+    [drag, finger, onUnlock, screen.height],
   );
-  const fade = drag.interpolate({ inputRange: [-400, 0], outputRange: [0, 1], extrapolate: 'clamp' });
+  const fade = up.interpolate({ inputRange: [-400, 0], outputRange: [0, 1], extrapolate: 'clamp' });
   return (
-    <Animated.View {...pan.panHandlers} style={[StyleSheet.absoluteFill, { opacity: Animated.multiply(v, fade), transform: [{ translateY: drag }] }]}>
+    <Animated.View {...pan.panHandlers} {...finger.handlers} style={[StyleSheet.absoluteFill, { opacity: Animated.multiply(v, fade), transform: [{ translateY: up }] }]}>
       <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(6,8,22,0.55)' }]} />
       <View style={styles.lockBody}>
         <Text style={styles.lockTime}>{pad2(now.getHours())}:{pad2(now.getMinutes())}</Text>

@@ -3,6 +3,7 @@
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, LayoutAnimation, PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useAnchor } from './anchors.js';
+import { useNativeDragY } from './drag.js';
 import { AppIcon } from './AppIcon.jsx';
 import { Icon } from './icons.jsx';
 import { font, useTheme } from './theme.js';
@@ -258,7 +259,14 @@ export const Dock = memo(function Dock({ screen, apps, windows, active, settings
 export const HomeBar = memo(function HomeBar({ screen, windows, setPanel, onPeek }) {
   const t = useTheme();
   const anchor = useAnchor('homebar');
-  const lift = useRef(new Animated.Value(0)).current;
+  // The pill rises with the finger (a third of its travel, at most 40 px)
+  // natively while it is down, then springs back from there (`back`).
+  const back = useRef(new Animated.Value(0)).current;
+  const drag = useNativeDragY();
+  const lift = useMemo(
+    () => Animated.add(drag.dy.interpolate({ inputRange: [-40 / 0.35, 0], outputRange: [-40, 0], extrapolate: 'clamp' }), back),
+    [drag, back],
+  );
   const recent = useRef([]);
   recent.current = windows.filter((w) => !w.minimized && w.type === 'normal' && !w.transientFor);
   const pan = useMemo(
@@ -267,9 +275,11 @@ export const HomeBar = memo(function HomeBar({ screen, windows, setPanel, onPeek
         onStartShouldSetPanResponder: () => true,
         onMoveShouldSetPanResponder: () => true,
         onPanResponderTerminationRequest: () => false,
-        onPanResponderMove: (e, g) => lift.setValue(Math.max(-40, Math.min(0, g.dy * 0.35))),
+        onPanResponderGrant: () => drag.on.setValue(1),
         onPanResponderRelease: (e, g) => {
-          Animated.spring(lift, { toValue: 0, friction: 6, useNativeDriver: true }).start();
+          back.setValue(Math.max(-40, Math.min(0, g.dy * 0.35)));
+          drag.on.setValue(0);
+          Animated.spring(back, { toValue: 0, friction: 6, useNativeDriver: true }).start();
           if (g.dy < -140 || (g.dy < -60 && g.vy < -1.2)) return setPanel('overview');
           if (Math.abs(g.dx) > 70 && Math.abs(g.dx) > Math.abs(g.dy)) {
             const ws = recent.current;
@@ -279,13 +289,13 @@ export const HomeBar = memo(function HomeBar({ screen, windows, setPanel, onPeek
           onPeek();
         },
       }),
-    [lift, setPanel, onPeek],
+    [drag, back, setPanel, onPeek],
   );
   return (
-    <View {...pan.panHandlers} ref={anchor.ref} onLayout={anchor.onLayout}
+    <Animated.View {...pan.panHandlers} {...drag.handlers} ref={anchor.ref} onLayout={anchor.onLayout}
       style={[styles.homeBar, { height: screen.homeBar || 24 }]}>
       <Animated.View style={[styles.homePill, { backgroundColor: t.name === 'dark' ? 'rgba(255,255,255,0.55)' : 'rgba(20,24,60,0.45)', transform: [{ translateY: lift }] }]} />
-    </View>
+    </Animated.View>
   );
 });
 
