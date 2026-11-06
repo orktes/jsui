@@ -26,7 +26,9 @@ mkdir -p "$DIR/xdg/foot" && cp -n "$DIR/foot.ini" "$DIR/xdg/foot/foot.ini" 2>/de
 export QT_QPA_PLATFORM=wayland QT_QUICK_BACKEND=software GDK_BACKEND=wayland
 unset QT_IM_MODULE
 SCALE=${JSUI_WM_SCALE:-1.75}
-"$DIR/jsui-wl" --mir --scale "$SCALE" --bundle "$DIR/shell.js" --control "${XDG_RUNTIME_DIR:-/tmp}/jsui-wl.ctl" \
+# The Tab A7 panel is portrait (1200x2000); 90 shows the desktop in landscape.
+ROTATE=${JSUI_WM_ROTATE:-90}
+"$DIR/jsui-wl" --mir --rotate "$ROTATE" --scale "$SCALE" --bundle "$DIR/shell.js" --control "${XDG_RUNTIME_DIR:-/tmp}/jsui-wl.ctl" \
   >"${XDG_RUNTIME_DIR:-/tmp}/jsui-wl.log" 2>&1
 status=$?
 [ $status -eq 0 ] && rm -f "$FAILS"

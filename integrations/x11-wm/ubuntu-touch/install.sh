@@ -25,20 +25,24 @@ if [ -n "$missing" ]; then
   echo "missing libraries:" >&2; echo "$missing" >&2; exit 1
 fi
 
-D="$HOME/.config/systemd/user/lomiri-full-shell.service.d"
-mkdir -p "$D"
-cat > "$D/jsui-wm.conf" <<CONF
+# lomiri-full-greeter.service runs instead of lomiri-full-shell.service until
+# the first-run wizard is done: take both.
+for UNIT in lomiri-full-shell lomiri-full-greeter; do
+  D="$HOME/.config/systemd/user/$UNIT.service.d"
+  mkdir -p "$D"
+  cat > "$D/jsui-wm.conf" <<CONF
 # jsui-wm instead of Lomiri (remove this file, or run ~/jsui-wm/uninstall.sh, to go back)
 [Service]
 Environment=LOMIRI_BINARY=$DEST/jsui-session
 # jsui-session runs jsui-wl as a child, which reports READY to systemd.
 NotifyAccess=all
 CONF
+done
 systemctl --user daemon-reload
 echo "jsui-wm installed in $DEST."
 if [ "$1" = "--now" ]; then
-  systemctl --user restart lomiri-full-shell.service
+  systemctl --user restart lomiri-full-shell.service lomiri-full-greeter.service 2>/dev/null || true
 else
-  echo "Start it with: systemctl --user restart lomiri-full-shell.service (or reboot)."
+  echo "Start it by rebooting (or restart lomiri-full-shell/lomiri-full-greeter.service)."
 fi
 echo "Log: \$XDG_RUNTIME_DIR/jsui-wl.log. Back to Lomiri: sh $DEST/uninstall.sh"

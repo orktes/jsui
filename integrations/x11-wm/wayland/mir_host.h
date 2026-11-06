@@ -57,7 +57,16 @@ class MirHost {
     return true;
   }
 
-  // The size of the first connected output's current mode.
+  // Clockwise rotation (0, 90, 180, 270) of the desktop on the panel: the
+  // Tab A7's panel is natively 1200x2000 portrait, so a tablet held in
+  // landscape needs 90 or 270. Sizes and events in this class's API are in
+  // desktop (logical) coordinates; the Mir window is in panel coordinates.
+  void setRotation(int deg) {
+    deg = ((deg % 360) + 360) % 360;
+    rot_ = deg - deg % 90;
+  }
+
+  // The size of the first connected output's current mode, rotated.
   bool outputSize(int* w, int* h, uint32_t* outputId) {
     MirDisplayConfig* cfg = mir_connection_create_display_configuration(conn_);
     if (!cfg) return false;
@@ -73,6 +82,7 @@ class MirHost {
       // A portrait panel mounted sideways (the Tab A7's is landscape already).
       MirOrientation rot = mir_output_get_orientation(o);
       if (rot == mir_orientation_left || rot == mir_orientation_right) std::swap(*w, *h);
+      if (rot_ == 90 || rot_ == 270) std::swap(*w, *h);
       found = true;
     }
     mir_display_config_release(cfg);
@@ -104,7 +114,11 @@ class MirHost {
       *err = "no 32-bit RGB window format (" + std::to_string(n) + " offered)";
       return false;
     }
-    MirWindowSpec* spec = mir_create_normal_window_spec(conn_, w, h);
+    w_ = w;
+    h_ = h;
+    int pw = w, ph = h;
+    if (rot_ == 90 || rot_ == 270) std::swap(pw, ph);
+    MirWindowSpec* spec = mir_create_normal_window_spec(conn_, pw, ph);
     mir_window_spec_set_pixel_format(spec, format_);
     mir_window_spec_set_buffer_usage(spec, mir_buffer_usage_software);
     mir_window_spec_set_name(spec, "jsui-wl");
@@ -119,8 +133,6 @@ class MirHost {
     }
     stream_ = mir_window_get_buffer_stream(window_);
     mir_buffer_stream_set_swapinterval(stream_, 0);  // the Wayland loop paces frames
-    w_ = w;
-    h_ = h;
     return true;
   }
 
@@ -137,30 +149,42 @@ class MirHost {
     return out;
   }
 
+  // w, h: desktop size.
   void resize(int w, int h) {
     if (!stream_ || (w == w_ && h == h_)) return;
-    mir_buffer_stream_set_size(stream_, w, h);
     w_ = w;
     h_ = h;
+    if (rot_ == 90 || rot_ == 270) std::swap(w, h);
+    mir_buffer_stream_set_size(stream_, w, h);
   }
 
-  // Copies an RGBA (R first) frame into the window's next buffer and shows it.
+  // Copies an RGBA (R first) desktop frame into the window's next buffer,
+  // rotated onto the panel, and shows it.
   void present(const uint8_t* rgba, int width, int height, size_t stride) {
     if (!stream_) return;
     MirGraphicsRegion r;
     if (!mir_buffer_stream_get_graphics_region(stream_, &r)) return;
-    int w = std::min(width, r.width), h = std::min(height, r.height);
-    for (int y = 0; y < h; ++y) {
-      const uint8_t* s = rgba + size_t(y) * stride;
-      auto* d = reinterpret_cast<uint8_t*>(r.vaddr) + size_t(y) * size_t(r.stride);
-      if (!swapRB_) {
-        std::memcpy(d, s, size_t(w) * 4);
-      } else {
-        for (int x = 0; x < w; ++x) {
-          d[x * 4] = s[x * 4 + 2];
-          d[x * 4 + 1] = s[x * 4 + 1];
-          d[x * 4 + 2] = s[x * 4];
-          d[x * 4 + 3] = 255;
+    auto* dst = reinterpret_cast<uint8_t*>(r.vaddr);
+    if (rot_ == 0) {
+      int w = std::min(width, r.width), h = std::min(height, r.height);
+      for (int y = 0; y < h; ++y) {
+        const uint8_t* s = rgba + size_t(y) * stride;
+        uint8_t* d = dst + size_t(y) * size_t(r.stride);
+        if (!swapRB_) std::memcpy(d, s, size_t(w) * 4);
+        else
+          for (int x = 0; x < w; ++x) put(d + x * 4, s + x * 4);
+      }
+    } else {
+      // Panel pixel (px, py) shows desktop pixel (lx, ly).
+      for (int py = 0; py < r.height; ++py) {
+        uint8_t* d = dst + size_t(py) * size_t(r.stride);
+        for (int px = 0; px < r.width; ++px) {
+          int lx, ly;
+          if (rot_ == 90) lx = py, ly = height - 1 - px;
+          else if (rot_ == 270) lx = width - 1 - py, ly = px;
+          else lx = width - 1 - px, ly = height - 1 - py;
+          if (lx < 0 || ly < 0 || lx >= width || ly >= height) continue;
+          put(d + px * 4, rgba + size_t(ly) * stride + size_t(lx) * 4);
         }
       }
     }
@@ -168,7 +192,25 @@ class MirHost {
   }
 
  private:
-  void push(const MirHostEvent& e) {
+  void put(uint8_t* d, const uint8_t* s) const {
+    if (swapRB_) {
+      d[0] = s[2], d[1] = s[1], d[2] = s[0], d[3] = 255;
+    } else {
+      std::memcpy(d, s, 4);
+    }
+  }
+
+  // Panel coordinates -> desktop coordinates.
+  void toDesktop(float* x, float* y) const {
+    float px = *x, py = *y;
+    if (rot_ == 90) *x = py, *y = float(h_) - px;
+    else if (rot_ == 270) *x = float(w_) - py, *y = px;
+    else if (rot_ == 180) *x = float(w_) - px, *y = float(h_) - py;
+  }
+
+  void push(MirHostEvent e) {
+    if (e.kind == MirHostEvent::Touch || e.kind == MirHostEvent::Pointer) toDesktop(&e.x, &e.y);
+    if (e.kind == MirHostEvent::Resize && (rot_ == 90 || rot_ == 270)) std::swap(e.w, e.h);
     {
       std::lock_guard<std::mutex> lock(mu_);
       queue_.push_back(e);
@@ -250,7 +292,8 @@ class MirHost {
   MirPixelFormat format_ = mir_pixel_format_invalid;
   bool swapRB_ = false;
   bool pointerDown_ = false;
-  int w_ = 0, h_ = 0;
+  int w_ = 0, h_ = 0;  // desktop size
+  int rot_ = 0;
   int fd_ = -1;
   std::mutex mu_;
   std::vector<MirHostEvent> queue_;

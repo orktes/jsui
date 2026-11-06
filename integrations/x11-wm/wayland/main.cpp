@@ -224,6 +224,7 @@ struct Options {
   bool scanApps = true;
   bool mir = false;       // --mir: show the desktop through a host Mir server (Ubuntu Touch)
   std::string mirSocket;  // default $MIR_SERVER_HOST_SOCKET
+  int rotate = 0;         // --rotate DEG: clockwise rotation of the desktop on a --mir panel
   std::vector<std::string> autostart;
 };
 
@@ -231,7 +232,8 @@ void usage() {
   std::fprintf(stderr,
                "usage: jsui-wl [--scale 1.5] [--size 1920x1200] [--bundle shell.js | --dev URL]\n"
                "               [--anchors file.json] [--control socket] [--mouse] [--no-apps-scan]\n"
-               "               [--autostart CMD]... [--mir [--mir-socket PATH]] [--verbose]\n");
+               "               [--autostart CMD]... [--mir [--mir-socket PATH] [--rotate 0|90|180|270]]\n"
+               "               [--verbose]\n");
 }
 
 bool parseArgs(int argc, char** argv, Options& o) {
@@ -254,6 +256,7 @@ bool parseArgs(int argc, char** argv, Options& o) {
     else if (a == "--no-apps-scan") o.scanApps = false;
     else if (a == "--mir") o.mir = true;
     else if (a == "--mir-socket" && next(v)) o.mirSocket = v, o.mir = true;
+    else if (a == "--rotate" && next(v)) o.rotate = std::atoi(v.c_str());
     else if (a == "--verbose" || a == "-v") g_verbose = true;
     else if (a == "--help" || a == "-h") {
       usage();
@@ -2151,6 +2154,7 @@ bool WM::setupMir() {
   // The system compositor shows the session whose name lightdm made active.
   const char* name = getenv("MIR_SERVER_NAME") ? getenv("MIR_SERVER_NAME") : "jsui-wl";
   mir_ = new MirHost;
+  mir_->setRotation(opt_.rotate);
   std::string err;
   if (!mir_->connect(sock.empty() ? nullptr : sock.c_str(), name, &err)) {
     logf("cannot connect to Mir (%s): %s", sock.empty() ? "default socket" : sock.c_str(), err.c_str());
@@ -2162,7 +2166,7 @@ bool WM::setupMir() {
     opt_.width = w;
     opt_.height = h;
   }
-  logf("Mir session \"%s\", output %dx%d", name, opt_.width, opt_.height);
+  logf("Mir session \"%s\", output %dx%d (rotated %d)", name, opt_.width, opt_.height, opt_.rotate);
   setenv("WLR_BACKENDS", "headless", 1);
   setenv("WLR_RENDERER", "pixman", 1);
   setenv("WLR_LIBINPUT_NO_DEVICES", "1", 1);
