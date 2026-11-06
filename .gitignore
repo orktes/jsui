@@ -43,3 +43,5 @@ node_modules/
 !/integrations/unreal/project/Build/Mac/Resources/
 /integrations/unreal/project/Build/Mac/Resources/*
 !/integrations/unreal/project/Build/Mac/Resources/Unsandboxed.entitlements
+/integrations/x11-wm/ui/dist/
+/integrations/x11-wm/docker/.ca.crt

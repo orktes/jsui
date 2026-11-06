@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Eyes
+Comment=Eyes that follow your finger
+Exec=xeyes
+Icon=xeyes
+Categories=Utility;

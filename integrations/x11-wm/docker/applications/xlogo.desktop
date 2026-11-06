@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=X Logo
+Comment=The X Window System logo
+Exec=xlogo
+Icon=xlogo
+Categories=Utility;

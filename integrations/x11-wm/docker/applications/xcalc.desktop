@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Scientific Calculator
+Comment=The classic X calculator
+Exec=xcalc
+Icon=xcalc
+Categories=Utility;

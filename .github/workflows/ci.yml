@@ -724,6 +724,9 @@ jobs:
           install_lavapipe: true
           cache: true
           stripdown: true
+          # The Lavapipe download asks the GitHub API; anonymous calls share a
+          # per-runner-IP rate limit and fail the job when it runs out.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Cache FetchContent sources
         uses: actions/cache@v4
         with:
