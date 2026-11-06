@@ -189,9 +189,10 @@ struct GLGpu final : JsuiGpuContext {
   sk_sp<GrDirectContext> ctx;
   bool lost = false;
   size_t cacheBytes = 0;
-  // Composited opacity layers and raster-cached subtrees (gpu_layers.h),
-  // per runtime, as on Graphite: a layer whose subtree is unchanged is drawn
-  // from its texture instead of an offscreen pass every frame. Textures of
+  // Composited opacity layers, raster-cached subtrees and the static
+  // backdrop (gpu_layers.h), per runtime, as on Graphite: a layer whose
+  // subtree is unchanged is drawn from its texture instead of an offscreen
+  // pass every frame. Textures of
   // ctx. 256 MB: Skia's default resource budget, until purge names one.
   jsui::GpuLayerCaches layers{256u << 20};
   struct Cached {
