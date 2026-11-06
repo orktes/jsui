@@ -726,8 +726,20 @@ class WM {
 #endif
 
   int controlFd_ = -1;
-  int jsReadyFd_ = -1;
-  std::map<std::string, pid_t> launched_;  // wm:launch command -> the shell it ran in  // JS thread -> Wayland loop wake-up (on_js_ready)
+  int jsReadyFd_ = -1;  // JS thread -> Wayland loop wake-up (on_js_ready)
+  std::map<std::string, pid_t> launched_;  // wm:launch command -> the shell it ran in
+  // Launches still waiting for their first window: an app that hangs before
+  // it shows one (Ubuntu Touch's Camera) is ended after kLaunchTimeoutMs and
+  // the shell told (wm:launchFailed), instead of an icon that does nothing.
+  struct PendingLaunch {
+    pid_t pid;
+    std::string name;
+    double at;
+  };
+  std::vector<PendingLaunch> pendingLaunches_;
+  wl_event_source* launchTimer_ = nullptr;
+  void checkLaunches();
+  bool descends(pid_t pid, pid_t ancestor) const;
   std::map<int, std::string> controlBuf_;
   std::map<int, wl_event_source*> controlSources_;
 };
@@ -1387,6 +1399,41 @@ void WM::snapshotBackdrop(bool on) {
 #endif
 }
 
+bool WM::descends(pid_t pid, pid_t ancestor) const {
+  for (int depth = 0; pid > 1 && depth < 8; ++depth) {
+    if (pid == ancestor) return true;
+    pid = parentPid(pid);
+  }
+  return false;
+}
+
+void WM::checkLaunches() {
+  constexpr double kLaunchTimeoutMs = 25000;
+  const double now = nowMs();
+  for (auto it = pendingLaunches_.begin(); it != pendingLaunches_.end();) {
+    bool shown = false;
+    for (auto& [id, c] : clients_)
+      if (!c->popup && c->mapped && c->pid > 0 && descends(c->pid, it->pid)) shown = true;
+    // Gone without a window (handed over to a running instance, or failed
+    // on its own and said so on stderr): nothing to do.
+    if (shown || kill(it->pid, 0) != 0) {
+      it = pendingLaunches_.erase(it);
+      continue;
+    }
+    if (now - it->at < kLaunchTimeoutMs) {
+      ++it;
+      continue;
+    }
+    logf("launch: %s showed no window in %.0f s, ending it", it->name.c_str(), kLaunchTimeoutMs / 1000);
+    kill(-it->pid, SIGKILL);  // its session (launch() setsid()s)
+    std::string j = "{\"name\":" + wmjson::quoted(it->name) + "}";
+    jsui_post_message(rt_, "wm:launchFailed", j.c_str());
+    scheduleTick(0);
+    it = pendingLaunches_.erase(it);
+  }
+  if (!pendingLaunches_.empty()) wl_event_source_timer_update(launchTimer_, 5000);
+}
+
 void WM::removeWindowTexture(uint32_t id) {
   jsui_remove_texture(rt_, ("win:" + std::to_string(id)).c_str());
   auto it = gpuBuffers_.find(id);
@@ -1751,9 +1798,7 @@ void WM::onMessage(const char* name, const char* json) {
     if (it != launched_.end()) {
       for (auto& [id, cl] : clients_) {
         if (cl->popup || !cl->mapped || cl->pid <= 0) continue;
-        pid_t p = cl->pid;
-        for (int depth = 0; p > 1 && p != it->second && depth < 8; ++depth) p = parentPid(p);
-        if (p != it->second) continue;
+        if (!descends(cl->pid, it->second)) continue;
         if (cl->minimized) unminimize(cl);
         raise(cl);
         focus(cl);
@@ -1761,7 +1806,19 @@ void WM::onMessage(const char* name, const char* json) {
       }
     }
     pid_t pid = launch(exec);
-    if (pid > 0) launched_[exec] = pid;
+    if (pid > 0) {
+      launched_[exec] = pid;
+      std::string name = v["name"].str();
+      for (const App& a : apps_)
+        if (name.empty() && a.exec == exec) name = a.name;
+      pendingLaunches_.push_back({pid, name.empty() ? exec : name, nowMs()});
+      if (!launchTimer_)
+        launchTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
+          static_cast<WM*>(u)->checkLaunches();
+          return 0;
+        }, this);
+      wl_event_source_timer_update(launchTimer_, 5000);
+    }
   } else if (n == "wm:focus" && c) {
     if (c->minimized) unminimize(c);
     raise(c);

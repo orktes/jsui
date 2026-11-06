@@ -191,6 +191,11 @@ function Shell() {
   useEffect(() => setPeek(false), [active, panel]);
 
   // Hotkeys from the host: Super toggles the launcher, Alt+Tab the overview.
+  // An app that never showed a window (jsui-wl ended it).
+  useHostMessage('wm:launchFailed', (msg) => {
+    notify({ icon: 'bell', title: `${msg.name} didn't start`, body: 'It showed no window and was closed.' });
+  });
+
   useHostMessage('wm:hotkey', (msg) => {
     if (locked) return;
     if (msg.name === 'super') setPanel((p) => (p === 'launcher' ? null : 'launcher'));
