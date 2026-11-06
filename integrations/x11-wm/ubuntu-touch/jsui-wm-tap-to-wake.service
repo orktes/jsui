@@ -1,0 +1,13 @@
+[Unit]
+Description=jsui-wm: double-tap to wake (Galaxy Tab A7: Himax always-on tap)
+# Lomiri's settings normally switch this on; without Lomiri nothing does.
+# Installed by install.sh --tap-to-wake (needs sudo).
+After=systemd-udev-settle.service lxc-android-config.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'for i in $(seq 1 30); do [ -w /sys/class/sec/tsp/cmd ] && break; sleep 1; done; echo aot_enable,1 > /sys/class/sec/tsp/cmd'
+
+[Install]
+WantedBy=multi-user.target

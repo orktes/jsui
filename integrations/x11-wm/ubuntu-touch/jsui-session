@@ -25,11 +25,18 @@ mkdir -p "$DIR/xdg/foot" && cp -n "$DIR/foot.ini" "$DIR/xdg/foot/foot.ini" 2>/de
 # Wayland and drawing in software (see README).
 export QT_QPA_PLATFORM=wayland QT_QUICK_BACKEND=software GDK_BACKEND=wayland
 unset QT_IM_MODULE
+# Double-tap to wake: the Tab A7's Himax touch controller does it in hardware
+# (reported as the power key), but only Lomiri's settings normally switch it on.
+[ -w /proc/android_touch/SMWP ] && echo 1 > /proc/android_touch/SMWP
 SCALE=${JSUI_WM_SCALE:-1.75}
 # The Tab A7 panel is portrait (1200x2000); 90 shows the desktop in landscape.
 ROTATE=${JSUI_WM_ROTATE:-90}
 "$DIR/jsui-wl" --mir --rotate "$ROTATE" --scale "$SCALE" --bundle "$DIR/shell.js" --control "${XDG_RUNTIME_DIR:-/tmp}/jsui-wl.ctl" \
-  >"${XDG_RUNTIME_DIR:-/tmp}/jsui-wl.log" 2>&1
+  >"${XDG_RUNTIME_DIR:-/tmp}/jsui-wl.log" 2>&1 &
+child=$!
+# A stop (systemctl restart / stop sends SIGTERM to the session) isn't a crash.
+trap 'rm -f "$FAILS"; kill -TERM $child 2>/dev/null; wait $child; exit 143' TERM INT
+wait $child
 status=$?
 [ $status -eq 0 ] && rm -f "$FAILS"
 exit $status
