@@ -1,0 +1,10 @@
+**/node_modules
+build
+build-*
+third_party/skia-*
+web/dist*
+.git
+integrations/*/ui/dist
+integrations/godot/project
+integrations/unity/project
+integrations/unreal

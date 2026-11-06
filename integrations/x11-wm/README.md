@@ -139,6 +139,39 @@ hardware the same host could render with Skia on the GPU.
   wlr-screencopy, xdg-output and the virtual pointer and keyboard protocols are
   there too, so `grim` and `wayvnc` work.
 
+### Ubuntu Touch (`jsui-wl --mir`, `ubuntu-touch/`)
+
+On Ubuntu Touch the screen belongs to `lomiri-system-compositor` (Mir 1.8 on
+Android's hwcomposer through libhybris), and Lomiri is a nested Mir server
+that `lomiri-systemd-wrapper` starts as `${LOMIRI_BINARY:-lomiri}`. `jsui-wl
+--mir` takes Lomiri's place: wlroots runs headless and still serves Wayland
+to the apps, and each shell frame (which already holds every window) is
+copied into a fullscreen software window of the system compositor, opened
+with mirclient as session `$MIR_SERVER_NAME` on `$MIR_SERVER_HOST_SOCKET`
+(`wayland/mir_host.h`). Touch, pointer and key events of that window come
+back on Mir's thread and are queued for the Wayland loop. It is built when
+`mir1client` (UBports) or `mirclient` is found. `jsui-wl` also runs nested in
+any Wayland compositor (`WLR_BACKENDS=wayland`) and follows the size the host
+gives it.
+
+* `ubuntu-touch/Dockerfile` builds the arm64 package: `jsui-wl`, the shell,
+  wlroots 0.17 and the few libraries the Ubuntu Touch image lacks, and foot.
+* `ubuntu-touch/install.sh` (on the tablet, as `phablet`) unpacks it to
+  `~/jsui-wm` and adds a systemd user drop-in for `lomiri-full-shell.service`
+  that sets `LOMIRI_BINARY=~/jsui-wm/jsui-session`. Nothing outside the home
+  directory changes; `uninstall.sh` removes the drop-in. `jsui-session` goes
+  back to Lomiri by itself after three failed starts within two minutes.
+* `ubuntu-touch/test/` runs `--mir` without a tablet: `mir-test-server` is a
+  Mir 1.8 server on Mir's stub graphics and input platforms with a fake
+  touchscreen, and `test-mir.sh` checks that a Mir touch opens the launcher
+  and an app opens.
+
+```sh
+docker build -f integrations/x11-wm/ubuntu-touch/test/Dockerfile -t jsui-wl-mir .
+docker run --rm -v "$PWD/shots:/out" jsui-wl-mir
+docker build --platform linux/arm64 -f integrations/x11-wm/ubuntu-touch/Dockerfile --output type=local,dest=out/ .
+```
+
 The shell is `ui/` (`shell.jsx` root, `Window.jsx` frames, `bars.jsx` top bar
 and dock, `panels.jsx` launcher / switcher / panels / lock screen,
 `keyboard.jsx`, `wm.js` the protocol).
@@ -169,8 +202,12 @@ are (screen px), which `docker/tour.py` uses to drive it with xdotool.
 * Wayland: no Xwayland yet (X11-only apps such as xterm and xclock don't run
   under `jsui-wl`), no fractional scaling (apps render at scale 1, GTK text is
   scaled with `GDK_DPI_SCALE`), client buffers are read on the CPU (pixman).
-  Ubuntu Touch runs Mir, not wlroots; running there means a Mir host or
-  running `jsui-wl` in place of the session.
+* Ubuntu Touch: apps draw in software (`QT_QUICK_BACKEND=software`): their
+  EGL (libhybris) needs the compositor to offer `android_wlegl`, which
+  wlroots doesn't, so GL-only apps (the browser) don't run yet. The shell
+  itself renders on the CPU and is copied into a Mir software buffer each
+  frame. Lomiri's lock screen, indicators, notifications and Maliit keyboard
+  aren't there (the shell has its own keyboard). Not yet run on a tablet.
 * CPU compositing: each damaged window area is copied through shared memory.
   Fine for Xvfb and a tablet's worth of apps; a real device should import
   window pixmaps as GPU textures.

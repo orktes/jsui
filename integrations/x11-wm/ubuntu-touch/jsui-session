@@ -1,0 +1,33 @@
+#!/bin/sh
+# Runs instead of Lomiri (LOMIRI_BINARY, see install.sh): jsui-wl as the
+# session's shell, shown through lomiri-system-compositor like Lomiri is.
+# Three failed starts within two minutes fall back to Lomiri, so a broken
+# build can't lock you out of the tablet.
+DIR=$(dirname "$(readlink -f "$0")")
+FAILS="${XDG_RUNTIME_DIR:-/tmp}/jsui-wm-fails"
+now=$(date +%s)
+recent=0
+if [ -f "$FAILS" ]; then
+  for t in $(cat "$FAILS"); do [ $((now - t)) -lt 120 ] && recent=$((recent + 1)); done
+fi
+if [ "$recent" -ge 3 ]; then
+  echo "jsui-session: jsui-wl failed $recent times, starting Lomiri" >&2
+  rm -f "$FAILS"
+  exec lomiri "$@"
+fi
+echo "$now" >> "$FAILS"
+
+export LD_LIBRARY_PATH="$DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export PATH="$DIR:$PATH"
+export XDG_CONFIG_DIRS="$DIR/xdg:${XDG_CONFIG_DIRS:-/etc/xdg}"
+mkdir -p "$DIR/xdg/foot" && cp -n "$DIR/foot.ini" "$DIR/xdg/foot/foot.ini" 2>/dev/null
+# The lock screen, indicators and OSK of Lomiri aren't there: keep apps on
+# Wayland and drawing in software (see README).
+export QT_QPA_PLATFORM=wayland QT_QUICK_BACKEND=software GDK_BACKEND=wayland
+unset QT_IM_MODULE
+SCALE=${JSUI_WM_SCALE:-1.75}
+"$DIR/jsui-wl" --mir --scale "$SCALE" --bundle "$DIR/shell.js" --control "${XDG_RUNTIME_DIR:-/tmp}/jsui-wl.ctl" \
+  >"${XDG_RUNTIME_DIR:-/tmp}/jsui-wl.log" 2>&1
+status=$?
+[ $status -eq 0 ] && rm -f "$FAILS"
+exit $status

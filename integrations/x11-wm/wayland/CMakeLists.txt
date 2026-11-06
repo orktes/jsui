@@ -17,3 +17,15 @@ target_compile_definitions(jsui-wl PRIVATE WLR_USE_UNSTABLE JSUI_WM_BUNDLE="${JS
 target_link_libraries(jsui-wl PRIVATE jsui PkgConfig::WLR)
 jsui_copy_icu_data(jsui-wl)
 set_target_properties(jsui-wl PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+
+# --mir (Ubuntu Touch): present through a host Mir server with mirclient.
+# Mir 1.x as packaged by UBports is mir1client; upstream Mir 1.x is mirclient.
+pkg_check_modules(MIRCLIENT IMPORTED_TARGET mir1client)
+if(NOT MIRCLIENT_FOUND)
+  pkg_check_modules(MIRCLIENT IMPORTED_TARGET mirclient)
+endif()
+if(MIRCLIENT_FOUND)
+  message(STATUS "jsui-wl: Mir client support (--mir) with mirclient ${MIRCLIENT_VERSION}")
+  target_compile_definitions(jsui-wl PRIVATE JSUI_WL_MIR=1)
+  target_link_libraries(jsui-wl PRIVATE PkgConfig::MIRCLIENT)
+endif()
