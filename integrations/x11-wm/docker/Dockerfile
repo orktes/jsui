@@ -27,7 +27,7 @@ WORKDIR /src
 COPY . .
 RUN npm install --no-audit --no-fund --workspace packages/cli --workspace packages/react
 RUN mkdir -p /opt/jsui-wm \
- && npx jsui build integrations/x11-wm/ui/shell.jsx -o /opt/jsui-wm/shell.js --format source --minify
+ && npx jsui build integrations/x11-wm/ui/shell.jsx -o /opt/jsui-wm/shell.js --minify
 RUN cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
       -DJSUI_BUILD_TOOLS=OFF -DJSUI_BUILD_TESTS=OFF -DJSUI_BUILD_VIEWER=OFF \

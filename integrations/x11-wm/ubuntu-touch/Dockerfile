@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && apt-get update && apt-get install -y --no-install-recommends \
       git unzip python3 cmake ninja-build clang lld binutils pkg-config \
       libfontconfig1-dev zlib1g-dev libwlroots-dev wayland-protocols libxkbcommon-dev libpixman-1-dev libdrm-dev \
-      libmir1client-dev libegl-dev libgles-dev \
+      libmir1client-dev libegl-dev libgles-dev libvulkan-dev \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
 COPY --from=node:22-bookworm-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
@@ -32,7 +32,7 @@ COPY . .
 RUN npm install --no-audit --no-fund --workspace packages/cli --workspace packages/react
 ENV PKG=/pkg/jsui-wm
 RUN mkdir -p $PKG/lib \
- && npx jsui build integrations/x11-wm/ui/shell.jsx -o $PKG/shell.js --format source --minify
+ && npx jsui build integrations/x11-wm/ui/shell.jsx -o $PKG/shell.js --minify
 RUN cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
       -DJSUI_BUILD_TOOLS=OFF -DJSUI_BUILD_TESTS=OFF -DJSUI_BUILD_VIEWER=OFF \
@@ -42,9 +42,11 @@ RUN cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
  && cp /build/jsui-wl $PKG/ && (cp /build/icudtl.dat $PKG/ 2>/dev/null || true) && strip $PKG/jsui-wl
 # Libraries and foot from the Ubuntu 24.04 archive that the Ubuntu Touch
 # image doesn't have (see install.sh): unpacked, not installed, so nothing
-# on the tablet's read-only root changes.
+# on the tablet's read-only root changes. Not libvulkan1: the image's
+# libvulkan.so.1 is libhybris' (the Android driver), which the Khronos loader
+# would shadow.
 RUN cd /tmp && apt-get update && apt-get download \
-      libwlroots12t64 libdisplay-info1 libliftoff0 libseat1 libvulkan1 libxcb-ewmh2 \
+      libwlroots12t64 libdisplay-info1 libliftoff0 libseat1 libxcb-ewmh2 \
       foot libfcft4t64 libutf8proc3 qtwayland5 \
  && for d in *.deb; do dpkg-deb -x $d /tmp/root; done \
  && cp -a /tmp/root/usr/lib/aarch64-linux-gnu/*.so* $PKG/lib/ \

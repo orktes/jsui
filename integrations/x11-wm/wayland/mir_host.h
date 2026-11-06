@@ -28,6 +28,10 @@
 #include <GLES2/gl2.h>
 #endif
 #include <sys/eventfd.h>
+
+#include <memory>
+
+#include "mir_vulkan.h"
 #include <unistd.h>
 
 #include <algorithm>
@@ -51,6 +55,9 @@ struct MirHostEvent {
 class MirHost {
  public:
   ~MirHost() {
+#ifdef JSUI_WL_MIR_VK
+    vk_.reset();
+#endif
 #ifdef JSUI_WL_MIR_GL
     destroyGl();
 #endif
@@ -110,6 +117,17 @@ class MirHost {
     w_ = w;
     h_ = h;
     outputId_ = outputId;
+#ifdef JSUI_WL_MIR_VK
+    // Opt-in (JSUI_WL_VULKAN=1): on the Tab A7's Adreno 610 Graphite records
+    // a frame in half the CPU time of Ganesh but takes about twice the GPU
+    // time, and apps' GPU buffers aren't imported into Vulkan yet.
+    const char* vkEnv = getenv("JSUI_WL_VULKAN");
+    if (wantGpu && vkEnv && vkEnv[0] == '1') {
+      std::string why;
+      if (createVkWindow(&why)) return true;
+      vkError_ = why;
+    }
+#endif
 #ifdef JSUI_WL_MIR_GL
     if (wantGpu) {
       std::string why;
@@ -128,6 +146,9 @@ class MirHost {
   // Gives up the GPU window (e.g. Skia could not use the GL context) for a
   // software one.
   bool fallBackToSoftware(std::string* err) {
+#ifdef JSUI_WL_MIR_VK
+    vk_.reset();
+#endif
 #ifdef JSUI_WL_MIR_GL
     destroyGl();
 #endif
@@ -138,6 +159,12 @@ class MirHost {
   }
 
   bool gpu() const { return gpu_; }
+#ifdef JSUI_WL_MIR_VK
+  // The Vulkan presenter when the window is a Vulkan one (else null), and
+  // why it isn't ("" when it is or wasn't tried).
+  MirVulkan* vulkan() const { return vk_.get(); }
+  const std::string& vulkanError() const { return vkError_; }
+#endif
 
   bool createSoftwareWindow(std::string* err) {
     // RGBA in memory (R first) is Mir's ABGR_8888 on little-endian.
@@ -244,6 +271,7 @@ class MirHost {
 #ifdef JSUI_WL_MIR_GL
   // GPU window. Makes the window's GL context current.
   bool makeCurrent() { return gpu_ && eglMakeCurrent(dpy_, surf_, surf_, ctx_); }
+  EGLDisplay eglDisplay() const { return dpy_; }
 
   // The texture JSUI draws the desktop into (w_ x h_, GL bottom-left origin).
   // *fresh: newly (re)allocated, so it holds no previous frame.
@@ -325,6 +353,9 @@ class MirHost {
     unsigned char px[4] = {0, 0, 0, 0};
     if (debugFrames_ > 0) glReadPixels(pw / 2, ph / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
     GLenum glErr = glGetError();
+    // JSUI_WL_GPU_FINISH=1: wait for the GPU here, so the blit time holds the
+    // frame's GPU work and the swap time only the wait for a free buffer.
+    if (finish_) glFinish();
     const double t1 = nowMs();
     EGLBoolean ok = eglSwapBuffers(dpy_, surf_);
     lastSwapMs_ = nowMs() - t1;
@@ -338,6 +369,9 @@ class MirHost {
 
   // The desktop as RGBA rows, top row first (screenshots).
   bool readDesktop(std::vector<uint8_t>* out) {
+#ifdef JSUI_WL_MIR_VK
+    if (vk_) return vk_->readDesktop(out);
+#endif
     if (!gpu_ || !tex_ || !makeCurrent()) return false;
     GLuint fb = 0;
     glGenFramebuffers(1, &fb);
@@ -360,6 +394,27 @@ class MirHost {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return double(ts.tv_sec) * 1000.0 + double(ts.tv_nsec) / 1e6;
   }
+
+#ifdef JSUI_WL_MIR_VK
+  bool createVkWindow(std::string* why) {
+    std::string err;
+    if (!makeWindow(mir_pixel_format_abgr_8888, mir_buffer_usage_hardware, &err)) {
+      *why = "Mir hardware window: " + err;
+      return false;
+    }
+    int pw = w_, ph = h_;
+    if (rot_ == 90 || rot_ == 270) std::swap(pw, ph);
+    vk_ = std::make_unique<MirVulkan>();
+    if (vk_->create(reinterpret_cast<void*>(mir_buffer_stream_get_egl_native_window(stream_)), pw, ph, w_, h_, rot_,
+                    why))
+      return true;
+    vk_.reset();
+    mir_window_release_sync(window_);
+    window_ = nullptr;
+    stream_ = nullptr;
+    return false;
+  }
+#endif
 
   bool makeWindow(MirPixelFormat format, MirBufferUsage usage, std::string* err) {
     int pw = w_, ph = h_;
@@ -438,6 +493,7 @@ class MirHost {
       debugSolid_ = std::atoi(d) == 2;
     }
     if (const char* r = getenv("JSUI_WL_GPU_RED")) debugRed_ = r[0] == '1';
+    if (const char* f = getenv("JSUI_WL_GPU_FINISH")) finish_ = f[0] == '1';
     if (!buildBlit(why)) {
       destroyGl();
       return false;
@@ -649,6 +705,10 @@ class MirHost {
   MirPixelFormat format_ = mir_pixel_format_invalid;
   bool swapRB_ = false;
   bool gpu_ = false;
+#ifdef JSUI_WL_MIR_VK
+  std::unique_ptr<MirVulkan> vk_;
+  std::string vkError_;
+#endif
   std::string glError_;
   uint32_t outputId_ = 0;
 #ifdef JSUI_WL_MIR_GL
@@ -666,6 +726,7 @@ class MirHost {
   bool debugSolid_ = false;  // JSUI_WL_GPU_DEBUG=2: solid green quad (geometry test)
   int debugFrames_ = 0;  // JSUI_WL_GPU_DEBUG: log the first presents
   double lastBlitMs_ = 0, lastSwapMs_ = 0;
+  bool finish_ = false;  // JSUI_WL_GPU_FINISH: glFinish before the swap (GPU time vs buffer wait)
   bool debugRed_ = false;  // JSUI_WL_GPU_RED: clear the panel red instead of drawing (swap path test)
 #endif
   bool pointerDown_ = false;

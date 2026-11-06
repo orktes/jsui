@@ -135,9 +135,14 @@ hardware the same host could render with Skia on the GPU.
   `wl_touch` for apps. The on-screen keyboard types through a virtual
   keyboard.
 * `--control <socket>` takes `down X Y`, `move X Y`, `up`, `key NAME`,
-  `text UTF8` and `shot FILE.ppm` for test drivers (`tour.py --wayland`).
+  `text UTF8`, `touch ID PHASE X Y` (0 down, 1 move, 2 up) and `shot FILE.ppm`
+  for test drivers (`tour.py --wayland`).
   wlr-screencopy, xdg-output and the virtual pointer and keyboard protocols are
   there too, so `grim` and `wayvnc` work.
+* The shell's React runs on a JS thread of its own, so input, animations and
+  paint don't wait for it (`JSUI_WL_JS_THREAD=0`: inside the tick), and the
+  bundle is QuickJS bytecode with its source as the fallback (`jsui build`'s
+  default).
 
 ### Ubuntu Touch (`jsui-wl --mir`, `ubuntu-touch/`)
 
@@ -154,9 +159,20 @@ GLES driver, so Skia (Ganesh) draws the desktop into a texture (only the
 damage is repainted) and one textured quad puts it on the panel, rotated.
 If EGL or Skia's GL context fail, or with `JSUI_WL_GPU=0`, the CPU frame is
 copied into a software window instead. On the Tab A7 a frame takes ~22 ms on
-the GPU against ~91 ms on the CPU (`JSUI_WL_PERF=1` logs paint/present time
-every 60 frames; `JSUI_WL_GPU_DEBUG=1|2` logs the first presents / draws a
-solid quad). Touch, pointer and key events of that window come
+the GPU against ~91 ms on the CPU (`JSUI_WL_PERF=1` logs paint/present time,
+the GPU frame's render/blit/swap split, `jsui_tick` time and JSUI's own
+per-phase profile every 60 frames; `JSUI_WL_GPU_FINISH=1` waits for the GPU
+before the swap, so the blit time holds the frame's GPU work and the swap
+only the wait for a buffer; `JSUI_WL_GPU_DEBUG=1|2` logs the first presents /
+draws a solid quad). With `JSUI_WL_VULKAN=1` the desktop is drawn with Skia
+Graphite on Vulkan instead (`wayland/mir_vulkan.h`): libhybris' libvulkan
+runs the vendor driver, its `null` platform takes Mir's `ANativeWindow` as a
+`VK_KHR_android_surface`, and a present pass draws the retained frame into the
+panel's swapchain, rotated (the Android host's design, two frames in flight).
+On the Tab A7's Adreno 610 Graphite records a frame in about half Ganesh's CPU
+time but its GPU work takes about twice as long (~64 ms frames against ~44 ms
+in the launcher/switcher bench), and apps' GPU buffers aren't imported into
+Vulkan yet (apps fall back to llvmpipe), so GL stays the default. Touch, pointer and key events of that window come
 back on Mir's thread and are queued for the Wayland loop. It is built when
 `mir1client` (UBports) or `mirclient` is found. `--rotate 90|180|270`
 turns the desktop on the panel (the Tab A7's panel is 1200x2000 portrait;
@@ -219,11 +235,15 @@ are (screen px), which `docker/tour.py` uses to drive it with xdotool.
 * Wayland: no Xwayland yet (X11-only apps such as xterm and xclock don't run
   under `jsui-wl`), no fractional scaling (apps render at scale 1, GTK text is
   scaled with `GDK_DPI_SCALE`), client buffers are read on the CPU (pixman).
-* Ubuntu Touch: apps draw with Mesa's software GL (llvmpipe, through
-  `--app-env`, see `jsui-session`): their own EGL (libhybris) needs the
-  compositor to offer `android_wlegl`, which wlroots doesn't. Lomiri apps
-  start in ~1.5 s and redraw in ~100 ms. The Tab A7's kernel panics on
-  Bluetooth sockets, so apps get `jsui-no-bluetooth.so` preloaded. Lomiri's
+* Ubuntu Touch: apps draw on the GPU through libhybris' EGL and hand
+  jsui-wl Android gralloc buffers (`android_wlegl`, served by libhybris once
+  jsui-wl calls `eglBindWaylandDisplayWL`; `wayland/wlegl.h`). Each buffer
+  becomes a GL texture that JSUI samples as the window's host texture, with no
+  copy. Subsurfaces of such windows aren't composited. When the shell itself
+  is on the CPU, apps get Mesa's llvmpipe instead (`--app-env-nogpu`, see
+  `jsui-session`) and hand over shm buffers; Lomiri apps then start in ~1.5 s
+  and redraw in ~100 ms. The Tab A7's kernel panics on Bluetooth sockets, so
+  apps get `jsui-no-bluetooth.so` preloaded. Lomiri's
   lock screen, indicators, notifications and Maliit keyboard
   aren't there (the shell has its own keyboard). Bringing the port up on the
   stock Samsung vendor took device-side fixes outside this repository (see the
