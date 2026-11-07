@@ -210,7 +210,8 @@ function remeasureSoon() {
 // first, flung with the finger and snapping to the card in the middle. The
 // current window shrinks into its card when the switcher opens, and the card
 // you pick grows back into the full window when it closes. Tap a card to
-// switch, swipe it up to close it, "Split" puts it next to the current window.
+// switch, swipe it up to close it ("Close all" closes every one), "Split" puts
+// it next to the current window.
 const SwitcherCard = memo(function SwitcherCard({ win, card, enter, from, title, apps, screen, onPick, onSplit, canSplit }) {
   const t = useTheme();
   const anchor = useAnchor(`switcher.${win.id}`);
@@ -281,10 +282,6 @@ const SwitcherCard = memo(function SwitcherCard({ win, card, enter, from, title,
             <Text style={styles.pillText}>Split</Text>
           </Pressable>
         )}
-        <Pressable onPress={() => wm.close(win.id)} hitSlop={8}
-          style={[styles.headClose, { backgroundColor: 'rgba(255,255,255,0.14)' }]} pressedStyle={{ backgroundColor: t.danger }}>
-          <Icon name="close" size={16} color="#fff" strokeWidth={2.6} />
-        </Pressable>
       </Animated.View>
       <Animated.View style={{ transform: [{ scale: sc }] }}>
         <Pressable ref={anchor.ref} onLayout={anchor.onLayout} onPress={() => onPick(win)}
@@ -314,8 +311,8 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
   const shown = order.map((id) => wins.find((w) => w.id === id)).filter(Boolean)
     .concat(wins.filter((w) => !order.includes(w.id)));
   const headH = 60;
-  const areaTop = screen.topBar + 84;
-  const areaH = screen.height - areaTop - screen.dock - 24;
+  const top0 = screen.topBar + 84;
+  const areaH = screen.height - top0 - screen.dock - 24;
   const maxH = Math.round(Math.min(areaH - headH, areaH * 0.8));
   const gap = 48;
   const cards = shown.map((w) => {
@@ -323,6 +320,9 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
     if (w.w * s > screen.width * 0.62) s = (screen.width * 0.62) / w.w;
     return { w: Math.round(w.w * s), h: Math.round(w.h * s), s, gap };
   });
+  // The strip sits in the middle of its area (wide windows give short cards).
+  const tallest = cards.reduce((m, c) => Math.max(m, c.h), 0);
+  const areaTop = top0 + Math.max(0, Math.round((areaH - headH - tallest) / 2));
   const pad = cards.length ? (screen.width - cards[0].w) / 2 : 0;
   const offsets = [];
   let x = pad;
@@ -349,11 +349,12 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
     <View pointerEvents={open ? 'auto' : 'none'} style={StyleSheet.absoluteFill}>
       <Under screen={screen} />
       <Animated.View style={[StyleSheet.absoluteFill, { opacity: enter }]}>
-        <Scrim color="rgba(4,6,16,0.72)" onPress={onClose} screen={screen} />
+        <Scrim color="rgba(6,8,20,0.82)" onPress={onClose} screen={screen} />
       </Animated.View>
       <Animated.View pointerEvents="box-none" style={[styles.overviewHead, { top: screen.topBar + 22, opacity: enter }]}>
-        <Text style={styles.overviewTitle}>{shown.length ? 'Recent apps' : 'No open apps'}</Text>
-        {shown.length > 1 && (
+        {/* No title over the cards (they say what this is); just the way out. */}
+        <Text style={styles.overviewTitle}>{shown.length ? '' : 'No open apps'}</Text>
+        {shown.length > 0 && (
           <Pressable ref={closeAll.ref} onLayout={closeAll.onLayout} onPress={() => wm.closeAll()} hitSlop={8}
             style={styles.textButton} pressedStyle={{ backgroundColor: 'rgba(255,255,255,0.14)' }}>
             <Text style={styles.textButtonText}>Close all</Text>
@@ -834,7 +835,6 @@ const styles = StyleSheet.create({
   textButton: { height: 48, borderRadius: 24, paddingHorizontal: 20, justifyContent: 'center' },
   textButtonText: { fontFamily: font, color: 'rgba(255,255,255,0.9)', fontSize: 16, fontWeight: '600' },
   headPill: { flexDirection: 'row', alignItems: 'center', height: 40, borderRadius: 20, paddingHorizontal: 14, marginLeft: 8 },
-  headClose: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', marginLeft: 8 },
   pill: { flexDirection: 'row', alignItems: 'center', height: 44, borderRadius: 22, paddingHorizontal: 18, marginTop: 12 },
   pillText: { fontFamily: font, color: '#fff', fontSize: 15, fontWeight: '600', marginLeft: 8 },
   cardHead: { height: 60, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 2, paddingBottom: 12 },
