@@ -114,6 +114,13 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
     return () => a.stop();
   }, [warm]); // eslint-disable-line react-hooks/exhaustive-deps
   const input = useRef(null);
+  const search = useAnchor('launcher.search');
+  const raisedOsk = useRef(false);
+  useEffect(() => {
+    if (open || !raisedOsk.current) return;
+    raisedOsk.current = false;
+    setSetting('osk', false);
+  }, [open]);
   useEffect(() => {
     if (!open) return undefined;
     wm.keyboard(true); // the search field gets the physical keyboard
@@ -180,7 +187,15 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
                 style={[styles.searchInput, { color: t.text }]}
               />
               {query ? <IconButton icon="close" size={44} iconSize={20} onPress={() => setQuery('')} /> : null}
-              <IconButton icon="keyboard" size={44} iconSize={22} active={settings.osk} onPress={() => setSetting('osk', !settings.osk)} />
+              {/* A tap on the field brings up the on-screen keyboard (it goes
+                  again with the launcher); typed keys reach it without. */}
+              {!settings.osk && (
+                <Pressable ref={search.ref} onLayout={search.onLayout} style={StyleSheet.absoluteFill} onPress={() => {
+                  raisedOsk.current = true;
+                  setSetting('osk', true);
+                  if (input.current && input.current.focus) input.current.focus();
+                }} />
+              )}
             </View>
           </Animated.View>
           <Animated.View style={{ flex: 1, marginTop: 28, width: cols * tileW, opacity: v }}>

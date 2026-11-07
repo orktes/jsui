@@ -253,12 +253,16 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
 
   const g = drag || win;
   const full = win.fullscreen;
-  const decorated = win.decorated && !full;
+  // Tablet mode, full screen: no header at all; the status bar shows the
+  // app's name and menu (bars.jsx TopBar `app`) and the host gives the
+  // window the header's strip too (maxArea).
+  const inBar = tablet && win.decorated && !full && win.type === 'normal' && win.maximized;
+  const decorated = win.decorated && !full && !inBar;
   const max = win.maximized && !drag;
   const snapped = !!win.snap && !drag;
   const radius = full || max ? 0 : snapped ? 16 : 14;
-  // Tablet mode, full screen or split: a slim header with a grabber, the app
-  // name and a menu (which has Close), instead of desktop window buttons.
+  // Tablet mode, split: a slim header with a grabber, the app name and a
+  // menu (which has Close), instead of desktop window buttons.
   const tabletChrome = tablet && decorated && win.type === 'normal' && (max || snapped);
   const appEntry = apps.find((a) => a.id === win.appId);
   const menuAnchor = useAnchor(`win.${win.id}.menu`);

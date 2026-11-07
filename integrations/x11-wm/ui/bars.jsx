@@ -9,6 +9,7 @@ import Svg, { Path, Rect } from 'react-native-svg';
 import { AppIcon } from './AppIcon.jsx';
 import { Icon } from './icons.jsx';
 import { font, useTheme } from './theme.js';
+import { WindowMenu } from './WindowMenu.jsx';
 import { appKeyOf, appTitle, setSetting, wm } from './wm.js';
 
 export function useClock() {
@@ -62,12 +63,15 @@ function Battery({ level, charging, color, low }) {
   );
 }
 
-export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, settings, system }) {
+// `app` ({ app, win?, name }): the full-screen app (or the one starting), whose
+// name the bar shows on the left and whose menu ("...", WindowMenu.jsx) at the
+// right, instead of a header of its own (Window.jsx).
+export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, settings, system, app, menuOpen, onMenu, onMenuClose }) {
   const t = useTheme();
   const now = useClock();
   const clock = useAnchor('topbar.clock');
   const status = useAnchor('topbar.status');
-  const kbd = useAnchor('topbar.keyboard');
+  const menu = useAnchor('topbar.menu');
   const swipe = useSwipeDown((x) => setPanel(x < screen.width / 2 ? 'calendar' : 'quick'));
   const toggle = (p) => setPanel(panel === p ? null : p);
   const battery = system.battery;
@@ -76,7 +80,14 @@ export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, set
     // right under it, with no line between, so the two read as one bar.
     <View {...swipe.panHandlers} style={[styles.bar, { height: screen.topBar, backgroundColor: solid ? t.chromeActive : 'transparent' }]}>
       {/* No apps button: the dock's grid (and the left edge) open the launcher. */}
-      <View style={styles.side} />
+      <View style={[styles.side, styles.appName]}>
+        {app && (
+          <>
+            <AppIcon app={app.app} win={app.win} size={22} />
+            <Text numberOfLines={1} style={[styles.barText, styles.appTitle, { color: t.text }]}>{app.name}</Text>
+          </>
+        )}
+      </View>
       <Pressable ref={clock.ref} onLayout={clock.onLayout} onPress={() => toggle('calendar')}
         style={[styles.clock, panel === 'calendar' && { backgroundColor: t.panelLine }]} pressedStyle={{ backgroundColor: t.panelLine }}>
         <Text style={[styles.barText, styles.tabular, { color: t.textDim, fontWeight: '500' }]}>{dateText(now)}</Text>
@@ -84,10 +95,6 @@ export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, set
         {settings.doNotDisturb && <View style={{ marginLeft: 8 }}><Icon name="moon" size={16} color={t.textDim} /></View>}
       </Pressable>
       <View style={[styles.side, { justifyContent: 'flex-end' }]}>
-        <Pressable ref={kbd.ref} onLayout={kbd.onLayout} onPress={() => setSetting('osk', !settings.osk)}
-          style={[styles.barButton, settings.osk && { backgroundColor: t.panelLine }]} pressedStyle={{ backgroundColor: t.panelLine }}>
-          <Icon name="keyboard" size={22} color={t.text} />
-        </Pressable>
         <Pressable ref={status.ref} onLayout={status.onLayout} onPress={() => toggle('quick')}
           style={[styles.barButton, styles.status, panel === 'quick' && { backgroundColor: t.panelLine }]} pressedStyle={{ backgroundColor: t.panelLine }}>
           {system.wifi !== null && (
@@ -107,6 +114,15 @@ export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, set
             <Icon name="plug" size={20} color={t.text} />
           )}
         </Pressable>
+        {app && app.win && (
+          <View>
+            <Pressable ref={menu.ref} onLayout={menu.onLayout} hitSlop={4} onPress={() => onMenu && onMenu(app.win)}
+              style={[styles.barButton, menuOpen && { backgroundColor: t.panelLine }]} pressedStyle={{ backgroundColor: t.panelLine }}>
+              <Icon name="more" size={22} color={t.text} strokeWidth={2.6} />
+            </Pressable>
+            {menuOpen && <WindowMenu win={app.win} onClose={onMenuClose} />}
+          </View>
+        )}
       </View>
     </View>
   );
@@ -313,7 +329,9 @@ export const HomeBar = memo(function HomeBar({ screen, windows, setPanel, onPeek
   return (
     <Animated.View {...pan.panHandlers} {...drag.handlers} ref={anchor.ref} onLayout={anchor.onLayout}
       style={[styles.homeBar, { height: screen.homeBar || 24 }]}>
-      <Animated.View style={[styles.homePill, { backgroundColor: t.name === 'dark' ? 'rgba(255,255,255,0.55)' : 'rgba(20,24,60,0.45)', transform: [{ translateY: lift }] }]} />
+      {/* Over the app's own pixels (it runs under the strip): a mid grey that
+          shows on light and dark content alike. */}
+      <Animated.View style={[styles.homePill, { backgroundColor: 'rgba(128,132,150,0.75)', transform: [{ translateY: lift }] }]} />
     </Animated.View>
   );
 });
@@ -350,11 +368,14 @@ export const DockMenu = memo(function DockMenu({ item, anchor, onClose }) {
 const styles = StyleSheet.create({
   bar: { position: 'absolute', left: 0, right: 0, top: 0, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 6 },
   side: { flex: 1, flexDirection: 'row', alignItems: 'center' },
+  appName: { paddingLeft: 12, paddingRight: 12, overflow: 'hidden' },
+  appTitle: { marginLeft: 10, flexShrink: 1 },
   barButton: { height: 34, minWidth: 44, borderRadius: 17, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
   status: { paddingHorizontal: 14 },
   barText: { fontFamily: font, fontSize: 15, fontWeight: '600' },
   tabular: { fontVariant: ['tabular-nums'] },
-  homeBar: { position: 'absolute', left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
+  // The middle 40 % of the bottom edge: the rest of the strip is the app's.
+  homeBar: { position: 'absolute', left: '30%', right: '30%', bottom: 0, alignItems: 'center', justifyContent: 'center' },
   homePill: { width: 136, height: 5, borderRadius: 3 },
   clock: { height: 34, borderRadius: 17, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center' },
   dockWrap: { position: 'absolute', left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },

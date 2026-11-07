@@ -8,7 +8,7 @@
 // to take the input there, so the shell tells the host which rectangles it
 // covers (wm:shellRegions) whenever that changes.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, AppRegistry, Easing, DevSettings, PanResponder, Pressable, StyleSheet, Text, View, useHostMessage, useWindowDimensions, HostTexture } from 'react-native';
+import { Animated, AppRegistry, Easing, DevSettings, PanResponder, Pressable, StyleSheet, View, useHostMessage, useWindowDimensions, HostTexture } from 'react-native';
 import Svg, { Defs, Ellipse, RadialGradient, Stop } from 'react-native-svg';
 import { Dock, DockMenu, HomeBar, TopBar } from './bars.jsx';
 import { Icon } from './icons.jsx';
@@ -119,7 +119,7 @@ function VolumeOsd({ screen, t }) {
   );
 }
 
-// An app being started: a window-sized card with the app's header and a
+// An app being started: a window-sized card with the app's icon and a
 // spinner, grown out of the icon it was launched from, until the app's own
 // window is up (it then fades away under it).
 function Spinner({ color, track }) {
@@ -133,10 +133,10 @@ function Spinner({ color, track }) {
   return <Animated.View style={[styles.spinner, { borderColor: track, borderTopColor: color, transform: [{ rotate }] }]} />;
 }
 
-function LaunchSplash({ launch, screen, t, bottom, done, onGone }) {
+function LaunchSplash({ launch, screen, t, done, onGone }) {
   const W = screen.width;
   const top = screen.topBar;
-  const H = screen.height - top - bottom;
+  const H = screen.height - top; // to the bottom edge, as the app's window (under the home indicator)
   const grow = useRef(new Animated.Value(0)).current;
   const fade = useRef(new Animated.Value(1)).current;
   const from = useRef(undefined);
@@ -169,14 +169,11 @@ function LaunchSplash({ launch, screen, t, bottom, done, onGone }) {
   return (
     <Animated.View pointerEvents="none"
       style={[styles.splash, { top, width: W, height: H, backgroundColor: t.chrome, opacity: Animated.multiply(fade, o ? 1 : grow), transform: tf }]}>
-      {/* The app's header as its window will have it (Window.jsx, tablet
-          mode), so the window replaces the card without the frame moving;
-          below it only the spinner. */}
-      <Animated.View style={[styles.splashHead, { height: screen.titleBar, backgroundColor: t.chromeActive, opacity: content }]}>
-        <AppIcon app={launch.app} size={22} />
-        <Text style={[styles.splashName, { color: t.text }]} numberOfLines={1}>{cleanName(launch.app.name)}</Text>
-      </Animated.View>
+      {/* The status bar names the app (TopBar `app`), as it will over the
+          app's window: here just its icon and a spinner. */}
       <Animated.View style={[styles.splashBody, { opacity: content }]}>
+        <AppIcon app={launch.app} size={96} />
+        <View style={{ height: 32 }} />
         <Spinner color={t.accent} track={t.panelLine} />
       </Animated.View>
     </Animated.View>
@@ -569,7 +566,7 @@ function Shell() {
       r.push([0, 0, W, scr.topBar]);
       if (!oskOn && dockShown && dockRect) r.push([dockRect.x, H - scr.dock + dockRect.y, dockRect.width, dockRect.height]);
       else if (!oskOn && dockShown) r.push([0, H - scr.dock, W, scr.dock]);
-      if (!oskOn && appMode) r.push([0, H - bottom, W, bottom]);
+      if (!oskOn && appMode) r.push([W * 0.3, H - bottom, W * 0.4, bottom]); // HomeBar (the app runs under the rest)
     }
     if (edges) {
       r.push([0, scr.topBar, EDGE, H - scr.topBar - bottom]);
@@ -698,6 +695,12 @@ function Shell() {
   const onWinMenu = useCallback((win) => setWinMenu(win.id), []);
   const closeWinMenu = useCallback(() => setWinMenu(null), []);
   const overviewUp = panel === 'overview' || closingPanel === 'overview';
+  // The status bar names a full-screen app (tablet mode: it has no header of
+  // its own) and holds its menu; while an app starts, the one starting.
+  const starting = appMode && launching.length ? launching[launching.length - 1].app : null;
+  const fullApp = settings.tabletMode && !split && topNormal && topNormal.maximized && !topNormal.fullscreen ? topNormal : null;
+  const barApp = starting ? { app: starting, name: cleanName(starting.name) }
+    : fullApp ? { app: apps.find((a) => a.id === fullApp.appId), win: fullApp, name: appName(fullApp, apps) } : null;
   const panes = split && !overviewUp ? splitPanes(split, scr) : null;
   const panelEl = (name, open) => {
     const common = { key: name, screen: scr, open, onClose: closePanel, onClosed: open ? undefined : panelClosed };
@@ -746,7 +749,8 @@ function Shell() {
         {edges && <EdgeSwipe side="left" top={scr.topBar} bottom={bottom} onSwipe={() => setPanel('launcher')} />}
         {edges && <EdgeSwipe side="right" top={scr.topBar} bottom={bottom} onSwipe={() => setPanel('overview')} />}
         {!fullscreen && (
-          <TopBar screen={scr} solid={solidBar} panel={panel} setPanel={setPanel} settings={settings} system={system} />
+          <TopBar screen={scr} solid={solidBar} panel={panel} setPanel={setPanel} settings={settings} system={system}
+            app={barApp} menuOpen={!!barApp && !!barApp.win && winMenu === barApp.win.id} onMenu={onWinMenu} onMenuClose={closeWinMenu} />
         )}
         {!fullscreen && !oskOn && appMode && !dockShown && (
           <HomeBar screen={scr} windows={windows} setPanel={setPanel} onPeek={onPeek} />
@@ -776,7 +780,7 @@ function Shell() {
         {launching.length > 0 && (
           <View pointerEvents="none" style={[StyleSheet.absoluteFill, { opacity: overviewUp || panel === 'launcher' ? 0 : 1 }]}>
             {launching.map((l) => (
-              <LaunchSplash key={l.key} launch={l} screen={scr} t={t} bottom={bottom} done={!!launchDone[l.key]} onGone={launchGone} />
+              <LaunchSplash key={l.key} launch={l} screen={scr} t={t} done={!!launchDone[l.key]} onGone={launchGone} />
             ))}
           </View>
         )}
@@ -817,8 +821,6 @@ const styles = StyleSheet.create({
   osdIcon: { position: 'absolute', left: 14, top: 13 },
   // Square like the full-screen window it stands in for.
   splash: { position: 'absolute', left: 0, overflow: 'hidden' },
-  splashHead: { flexDirection: 'row', alignItems: 'center', paddingLeft: 12 },
-  splashName: { fontFamily: font, fontSize: 14, fontWeight: '600', marginLeft: 10, flexShrink: 1 },
   splashBody: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   spinner: { width: 34, height: 34, borderRadius: 17, borderWidth: 3.5 },
 });

@@ -638,6 +638,7 @@ class WM {
   void setSnap(Client* c, int side);
   void setFullscreen(Client* c, bool on);
   Rect workArea() const;
+  Rect maxArea() const;
   void matchApp(Client* c);
   Rect popupRect(Client* p) const;
   double popupFit(Client* p);
@@ -1140,7 +1141,7 @@ void WM::resizeScreen(int w, int h) {
   if (!rt_) return;
   jsui_set_viewport(rt_, int(std::lround(sw_ / scale_)), int(std::lround(sh_ / scale_)), scale_);
   publishScreen();
-  Rect wa = workArea();
+  Rect wa = maxArea();
   for (auto& [id, c] : clients_) {
     if (c->popup || !c->mapped) continue;
     if (c->fullscreen) configure(c, 0, 0, sw_, sh_);
@@ -1337,6 +1338,19 @@ Rect WM::workArea() const {
   return r;
 }
 
+// Where a maximized window goes: the work area, and in tablet mode also the
+// title bar's strip (the shell shows a full-screen app's name and menu in its
+// status bar instead of a header) and the home indicator's (the shell draws
+// the indicator over the app).
+Rect WM::maxArea() const {
+  Rect r = workArea();
+  if (tabletMode_) {
+    r.y = P(topBar_);
+    r.h = (oskH_ > 0 ? sh_ - oskH_ : sh_) - r.y;
+  }
+  return r;
+}
+
 void WM::place(Client* c) {
   c->placed = true;
   c->minW = std::max(1, c->tl->current.min_width);
@@ -1364,10 +1378,11 @@ void WM::place(Client* c) {
     c->restore = {c->x, c->y, std::min(w, wa.w), std::min(h, wa.h)};
     c->hasRestore = true;
     c->maximized = true;
-    c->x = wa.x;
-    c->y = wa.y;
-    w = wa.w;
-    h = wa.h;
+    Rect ma = maxArea();
+    c->x = ma.x;
+    c->y = ma.y;
+    w = ma.w;
+    h = ma.h;
     wlr_xdg_toplevel_set_maximized(c->tl, true);
   }
   c->w = w;
@@ -1421,7 +1436,7 @@ void WM::toSurface(const Client* c, double* x, double* y) const {
 void WM::fitMaximized(Client* c) {
   c->fit = 1;
   if (c->popup || (!c->maximized && !c->snap) || c->w <= 0 || c->h <= 0) return;
-  Rect wa = c->snap ? snapSlot(c->snap) : workArea();
+  Rect wa = c->snap ? snapSlot(c->snap) : maxArea();
   c->fit = std::min({1.0, double(wa.w) / c->w, double(wa.h) / c->h});
   c->x = wa.x + std::max(0, int(std::lround((wa.w - c->w * c->fit) / 2)));
   c->y = wa.y + std::max(0, int(std::lround((wa.h - c->h * c->fit) / 2)));
@@ -1448,7 +1463,7 @@ void WM::onCommit(Client* c) {
     // A maximized client that resized itself (Camera's QML binds its width
     // to the viewfinder's aspect) is told the work area again, at most once
     // a second; one that keeps its own size anyway stays fitted (above).
-    Rect wa = workArea();
+    Rect wa = maxArea();
     if (c->maximized && !c->snap && !c->fullscreen && (geo.width != wa.w || geo.height != wa.h) &&
         (c->maxW <= 0 || c->maxW >= wa.w) && (c->maxH <= 0 || c->maxH >= wa.h) && nowMs() - c->reassertedAt > 1000) {
       c->reassertedAt = nowMs();
@@ -2007,7 +2022,7 @@ void WM::setMaximized(Client* c, bool on) {
     c->maximized = true;
     wlr_xdg_toplevel_set_tiled(c->tl, 0);
     wlr_xdg_toplevel_set_maximized(c->tl, true);
-    Rect wa = workArea();
+    Rect wa = maxArea();
     configure(c, wa.x, wa.y, wa.w, wa.h);
   } else {
     c->maximized = false;
@@ -2062,7 +2077,7 @@ void WM::setFullscreen(Client* c, bool on) {
     c->fullscreen = false;
     wlr_xdg_toplevel_set_fullscreen(c->tl, false);
     if (c->maximized) {
-      Rect wa = workArea();
+      Rect wa = maxArea();
       configure(c, wa.x, wa.y, wa.w, wa.h);
     } else if (c->hasRestore) {
       configure(c, c->restore.x, c->restore.y, c->restore.w, c->restore.h);
@@ -2320,7 +2335,7 @@ void WM::onStateChange(const char* key, const char* json) {
 
 // Maximized and split windows follow a change of the work area.
 void WM::refitWorkArea() {
-  Rect wa = workArea();
+  Rect wa = maxArea();
   for (auto& [id, c] : clients_) {
     if (c->popup || !c->mapped || c->fullscreen) continue;
     if (c->maximized) configure(c, wa.x, wa.y, wa.w, wa.h);
