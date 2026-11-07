@@ -528,6 +528,10 @@ struct Client {
   // content (the xdg geometry) in screen px
   int x = 0, y = 0, w = 1, h = 1;
   int geoX = 0, geoY = 0;  // xdg geometry offset inside the surface
+  // Shown at this scale (< 1: a maximized client that keeps a size bigger
+  // than the work area, letterboxed; see fitMaximized). x / y are where it
+  // is shown, w / h its own size; input is mapped back through it.
+  double fit = 1;
   std::vector<uint8_t> rgba;
   int texW = 0, texH = 0;
   bool hasTexture = false;
@@ -582,7 +586,8 @@ class WM {
   void capture(Client* c);
   void place(Client* c);
   void configure(Client* c, int x, int y, int w, int h);
-  void centreUnfilled(Client* c);
+  void fitMaximized(Client* c);
+  void toSurface(const Client* c, double* x, double* y) const;
   void raise(Client* c);
   void focus(Client* c);
   void focusTop();
@@ -1224,14 +1229,28 @@ void WM::configure(Client* c, int x, int y, int w, int h) {
   publishWindow(c);
 }
 
-// A maximized window whose client keeps a size of its own, narrower than
-// the work area (Ubuntu Touch's Clock draws 1210x1540 whatever it is told):
-// centred there instead of stuck to the left edge.
-void WM::centreUnfilled(Client* c) {
-  if (c->popup || !c->maximized || c->snap) return;
+// A maximized window whose client keeps a size of its own (Ubuntu Touch's
+// Clock draws 1210x1540 whatever it is told): narrower than the work area,
+// centred in it; bigger, scaled down to fit (letterboxed), centred, with
+// input mapped back (see fit). Anything else is shown 1:1.
+// Screen px -> the client's surface coordinates (its fit, see Client::fit).
+void WM::toSurface(const Client* c, double* x, double* y) const {
+  if (c->popup) {
+    *x -= c->x;
+    *y -= c->y;
+  } else {
+    *x = (*x - c->x) / c->fit + c->geoX;
+    *y = (*y - c->y) / c->fit + c->geoY;
+  }
+}
+
+void WM::fitMaximized(Client* c) {
+  c->fit = 1;
+  if (c->popup || !c->maximized || c->snap || c->w <= 0 || c->h <= 0) return;
   Rect wa = workArea();
-  c->x = wa.x + std::max(0, (wa.w - c->w) / 2);
-  c->y = wa.y;
+  c->fit = std::min({1.0, double(wa.w) / c->w, double(wa.h) / c->h});
+  c->x = wa.x + std::max(0, int(std::lround((wa.w - c->w * c->fit) / 2)));
+  c->y = wa.y + std::max(0, int(std::lround((wa.h - c->h * c->fit) / 2)));
 }
 
 void WM::onCommit(Client* c) {
@@ -1249,7 +1268,7 @@ void WM::onCommit(Client* c) {
     // The client picked its own size (or follows our configure).
     c->w = geo.width;
     c->h = geo.height;
-    centreUnfilled(c);
+    fitMaximized(c);
     publishWindow(c);
   }
   if (c->popup) {
@@ -1483,7 +1502,7 @@ void WM::onMap(Client* c) {
   c->geoY = geo.y;
   if (geo.width > 0) c->w = geo.width;
   if (geo.height > 0) c->h = geo.height;
-  centreUnfilled(c);
+  fitMaximized(c);
   stack_.push_back(c->id);
   logf("map %u \"%s\" (%s) %dx%d", c->id, c->title.c_str(), c->appIdRaw.c_str(), c->w, c->h);
   capture(c);
@@ -1597,6 +1616,7 @@ void WM::setMaximized(Client* c, bool on) {
     wlr_xdg_toplevel_set_maximized(c->tl, false);
     if (c->hasRestore) configure(c, c->restore.x, c->restore.y, c->restore.w, c->restore.h);
   }
+  fitMaximized(c);
   publishWindow(c);
 }
 
@@ -1924,8 +1944,8 @@ std::string WM::windowJson(const Client* c) const {
   std::string j = "{\"id\":" + std::to_string(c->id) + ",\"title\":" + wmjson::quoted(c->title) +
                   ",\"wmClass\":" + wmjson::quoted(c->appIdRaw) + ",\"instance\":" + wmjson::quoted(c->appIdRaw) +
                   ",\"appId\":" + wmjson::quoted(c->appId) + ",\"x\":" + wmjson::num(L(c->x)) +
-                  ",\"y\":" + wmjson::num(L(c->y)) + ",\"w\":" + wmjson::num(L(c->w)) + ",\"h\":" + wmjson::num(L(c->h)) +
-                  ",\"minW\":" + wmjson::num(L(c->minW)) + ",\"minH\":" + wmjson::num(L(c->minH)) +
+                  ",\"y\":" + wmjson::num(L(c->y)) + ",\"w\":" + wmjson::num(L(c->w * c->fit)) +
+                  ",\"h\":" + wmjson::num(L(c->h * c->fit)) + ",\"minW\":" + wmjson::num(L(c->minW)) + ",\"minH\":" + wmjson::num(L(c->minH)) +
                   ",\"restoreW\":" + wmjson::num(L(c->hasRestore ? c->restore.w : c->w)) +
                   ",\"restoreH\":" + wmjson::num(L(c->hasRestore ? c->restore.h : c->h)) + ",\"type\":\"" + type +
                   "\",\"decorated\":" + (c->decorated ? "true" : "false") +
@@ -2006,10 +2026,11 @@ Target WM::route(double x, double y, wlr_surface** surface, double* sx, double* 
   for (auto it = stack_.rbegin(); it != stack_.rend(); ++it) {
     Client* c = find(*it);
     if (!c || !c->mapped || c->minimized || !c->hasTexture) continue;
-    Rect content{c->x, c->y, c->w, c->h};
+    Rect content{c->x, c->y, int(c->w * c->fit), int(c->h * c->fit)};
     if (content.contains(x, y)) {
       double lx = 0, ly = 0;
-      wlr_surface* s = wlr_xdg_surface_surface_at(c->xdg, x - c->x + c->geoX, y - c->y + c->geoY, &lx, &ly);
+      wlr_surface* s =
+          wlr_xdg_surface_surface_at(c->xdg, (x - c->x) / c->fit + c->geoX, (y - c->y) / c->fit + c->geoY, &lx, &ly);
       if (s) {
         *surface = s;
         *sx = lx;
@@ -2076,17 +2097,11 @@ void WM::pointerMotion(uint32_t timeMs) {
     wlr_surface* focused = seat_->pointer_state.focused_surface;
     if (focused) {
       Client* c = findSurface(focused);
-      double ox = 0, oy = 0;
-      if (c && c->popup) {
-        ox = c->x;
-        oy = c->y;
-      } else if (c) {
-        ox = c->x - c->geoX;
-        oy = c->y - c->geoY;
-      }
       // Subsurface offsets: relative to the root surface (good enough for
       // drags inside one surface).
-      wlr_seat_pointer_notify_motion(seat_, timeMs, x - ox, y - oy);
+      double lx = x, ly = y;
+      if (c) toSurface(c, &lx, &ly);
+      wlr_seat_pointer_notify_motion(seat_, timeMs, lx, ly);
     }
     return;
   }
@@ -2186,12 +2201,9 @@ void WM::touchEvent(int id, int phase, double x, double y, uint32_t timeMs) {
     wlr_touch_point* pt = wlr_seat_touch_get_point(seat_, id);
     if (phase == 1 && pt) {
       Client* c = findSurface(pt->surface);
-      double ox = 0, oy = 0;
-      if (c) {
-        ox = c->popup ? c->x : c->x - c->geoX;
-        oy = c->popup ? c->y : c->y - c->geoY;
-      }
-      wlr_seat_touch_notify_motion(seat_, timeMs, id, x - ox, y - oy);
+      double lx = x, ly = y;
+      if (c) toSurface(c, &lx, &ly);
+      wlr_seat_touch_notify_motion(seat_, timeMs, id, lx, ly);
     } else if (phase == 2) {
       wlr_seat_touch_notify_up(seat_, timeMs, id);
     } else if (phase == 3 && pt) {
