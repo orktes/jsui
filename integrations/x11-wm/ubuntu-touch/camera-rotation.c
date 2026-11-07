@@ -7,9 +7,12 @@
 // desktop (--rotate, auto-rotate), so on the Tab A7's portrait panel shown
 // landscape the preview came out a quarter turn off. qtubuntu-camera takes an
 // override of a camera's angle from the property aal.camera.orientations.N;
-// it is answered here with the mounting angle less the desktop's turn
-// (jsui-wl writes it to $XDG_RUNTIME_DIR/jsui-wl.rotation), plus it for a
-// front camera, whose image is mirrored.
+// it is answered here from the mounting angle and the desktop's turn
+// (jsui-wl writes it to $XDG_RUNTIME_DIR/jsui-wl.rotation): the turn added
+// plus a half turn, the turn taken off for a front camera, whose image is
+// mirrored. (Checked on the Tab A7 at 0 and 90: the mounting angle less the
+// turn was right in landscape, 90 and 270, where both agree, but upside
+// down in portrait, 0 and 180.)
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <stdio.h>
@@ -43,7 +46,7 @@ int property_get(const char* key, char* value, const char* default_value) {
     DeviceInfo info = lib ? (DeviceInfo)dlsym(lib, "android_camera_get_device_info") : NULL;
     int facing = -1, mount = -1;
     if (rot >= 0 && info && info(atoi(key + sizeof kPrefix - 1), &facing, &mount) == 0 && mount >= 0) {
-      int deg = facing == 1 ? (mount + rot) % 360 : (mount - rot + 360) % 360;
+      int deg = facing == 1 ? (mount - rot + 540) % 360 : (mount + rot + 180) % 360;
       return snprintf(value, 92, "%d", deg);  // PROP_VALUE_MAX
     }
   }
