@@ -408,6 +408,13 @@ function Shell() {
   const [winMenu, setWinMenu] = useState(null);
   const [peek, setPeek] = useState(false);
   const [locked, setLocked] = useState(false);
+  // The display going dark (power key, idle timeout; jsui-wl wm:screen)
+  // locks the shell, so it wakes to the lock screen.
+  useHostMessage('wm:screen', (msg) => {
+    if (msg.on) return;
+    setPanel(null);
+    setLocked(true);
+  });
   const [preview, setPreview] = useState(null);
   const [dragging, setDragging] = useState(null);
   const [dockMenu, setDockMenu] = useState(null);
