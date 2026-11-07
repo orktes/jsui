@@ -2,7 +2,7 @@
 // quick settings, the calendar / notifications panel and the lock screen.
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Animated, Easing, HostTexture, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useHostMessage,
+  Animated, Easing, HostTexture, LayoutAnimation, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useHostMessage,
 } from 'react-native';
 import { remeasureAnchors, useAnchor } from './anchors.js';
 import { useNativeDragY } from './drag.js';
@@ -409,6 +409,14 @@ export const Overview = memo(function Overview({ screen, windows, launches = [],
     offsets.push(Math.max(0, c.cx - screen.width / 2));
     x += c.w + gap;
   });
+  // A card gone (swiped away, its app closed, a launch done): the ones after
+  // it slide into its place, natively (LayoutAnimation's update). Armed in
+  // the render that drops it, so it is this commit's: armed at the swipe,
+  // another commit could take it first (the shell's render after a close
+  // takes ~250 ms on the Tab A7).
+  const count = useRef(shown.length);
+  if (shown.length < count.current) LayoutAnimation.configureNext({ duration: 260, update: { type: 'easeOut' } });
+  count.current = shown.length;
   const pick = (w) => {
     setTarget(w.id);
     wm.focus(w.id);
