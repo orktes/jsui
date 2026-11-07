@@ -8,9 +8,9 @@
 // to take the input there, so the shell tells the host which rectangles it
 // covers (wm:shellRegions) whenever that changes.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, AppRegistry, Easing, DevSettings, PanResponder, Pressable, StyleSheet, View, useHostMessage, useWindowDimensions, HostTexture } from 'react-native';
+import { Animated, AppRegistry, Easing, DevSettings, PanResponder, Pressable, StyleSheet, Text, View, useHostMessage, useWindowDimensions, HostTexture } from 'react-native';
 import Svg, { Defs, Ellipse, RadialGradient, Stop } from 'react-native-svg';
-import { Dock, DockMenu, HomeBar, TopBar } from './bars.jsx';
+import { Dock, DockMenu, HomeBar, TopBar, dateText, timeText, useClock } from './bars.jsx';
 import { Icon } from './icons.jsx';
 import { playTick } from './sounds.js';
 import { remeasureAnchors, takeLaunchOrigin, useAnchor } from './anchors.js';
@@ -235,6 +235,25 @@ function splitPanes(split, screen) {
     left: { left: left.x, width: seam - gap / 2 - left.x, top, height },
     right: { left: seam + gap / 2, width: screen.width - left.x - seam - gap / 2, top, height },
   };
+}
+
+// Home's glance, top left: the time, the date and one line (the newest
+// notification, else the battery). Not the lock screen's centred clock, so
+// home and lock tell apart; the status bar leaves its own time out meanwhile
+// (TopBar `quiet`). A tap opens the notifications and calendar.
+function HomeGlance({ screen, t, note, battery, onPress }) {
+  const now = useClock();
+  const line = note
+    ? `${note.title}${note.body ? ` · ${note.body}` : ''}`
+    : battery ? `${battery.percent} %${battery.charging || battery.plugged ? ' · charging' : ''}` : null;
+  const dark = t.name === 'dark';
+  return (
+    <Pressable onPress={onPress} style={[styles.glance, { top: screen.topBar + 40, maxWidth: Math.min(640, screen.width - 96) }]}>
+      <Text style={[styles.glanceTime, { color: dark ? '#fff' : t.text }]}>{timeText(now)}</Text>
+      <Text style={[styles.glanceDate, { color: dark ? 'rgba(255,255,255,0.85)' : t.textDim }]}>{dateText(now)}</Text>
+      {line ? <Text numberOfLines={1} style={[styles.glanceLine, { color: dark ? 'rgba(255,255,255,0.7)' : t.textMute }]}>{line}</Text> : null}
+    </Pressable>
+  );
 }
 
 function SplitPanes({ split, screen, t }) {
@@ -719,6 +738,7 @@ function Shell() {
     <ThemeContext.Provider value={t}>
       <View style={styles.root}>
         <Wallpaper width={scr.width} height={scr.height} t={t} />
+        {!visible.length && <HomeGlance screen={scr} t={t} note={notes[0]} battery={system.battery} onPress={() => setPanel('calendar')} />}
         {split && !overviewUp && <SplitPanes split={split} screen={scr} t={t} />}
         {[...windows, ...closingNow.filter((c) => !map[c.id])].map((w) =>
           w.type === 'dock' || w.type === 'desktop' ? null : (
@@ -750,7 +770,8 @@ function Shell() {
         {edges && <EdgeSwipe side="right" top={scr.topBar} bottom={bottom} onSwipe={() => setPanel('overview')} />}
         {!fullscreen && (
           <TopBar screen={scr} solid={solidBar} panel={panel} setPanel={setPanel} settings={settings} system={system}
-            app={barApp} menuOpen={!!barApp && !!barApp.win && winMenu === barApp.win.id} onMenu={onWinMenu} onMenuClose={closeWinMenu} />
+            app={barApp} menuOpen={!!barApp && !!barApp.win && winMenu === barApp.win.id} onMenu={onWinMenu} onMenuClose={closeWinMenu}
+            quiet={!visible.length && (!panel || panel === 'quick')} />
         )}
         {!fullscreen && !oskOn && appMode && !dockShown && (
           <HomeBar screen={scr} windows={windows} setPanel={setPanel} onPeek={onPeek} />
@@ -814,6 +835,10 @@ function Shell() {
 
 const styles = StyleSheet.create({
   root: { flex: 1, overflow: 'hidden' },
+  glance: { position: 'absolute', left: 56 },
+  glanceTime: { fontFamily: font, fontSize: 96, fontWeight: '700', letterSpacing: -3 },
+  glanceDate: { fontFamily: font, fontSize: 24, fontWeight: '600', marginTop: -6 },
+  glanceLine: { fontFamily: font, fontSize: 16, fontWeight: '500', marginTop: 10 },
   snap: { position: 'absolute', borderRadius: 18, borderWidth: 3 },
   // The same shapes as Quick Settings' sliders (controls.jsx track / fill).
   osd: { position: 'absolute', width: 400, height: 48, borderRadius: 24, overflow: 'hidden' },

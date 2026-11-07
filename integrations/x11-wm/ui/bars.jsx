@@ -65,8 +65,10 @@ function Battery({ level, charging, color, low }) {
 
 // `app` ({ app, win?, name }): the full-screen app (or the one starting), whose
 // name the bar shows on the left and whose menu ("...", WindowMenu.jsx) at the
-// right, instead of a header of its own (Window.jsx).
-export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, settings, system, app, menuOpen, onMenu, onMenuClose }) {
+// right, instead of a header of its own (Window.jsx). `quiet`: home's glance
+// shows the time, so the bar leaves its own out (still there to tap for the
+// calendar).
+export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, settings, system, app, menuOpen, onMenu, onMenuClose, quiet }) {
   const t = useTheme();
   const now = useClock();
   const clock = useAnchor('topbar.clock');
@@ -90,8 +92,8 @@ export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, set
       </View>
       <Pressable ref={clock.ref} onLayout={clock.onLayout} onPress={() => toggle('calendar')}
         style={[styles.clock, panel === 'calendar' && { backgroundColor: t.panelLine }]} pressedStyle={{ backgroundColor: t.panelLine }}>
-        <Text style={[styles.barText, styles.tabular, { color: t.textDim, fontWeight: '500' }]}>{dateText(now)}</Text>
-        <Text style={[styles.barText, styles.tabular, { color: t.text, marginLeft: 10 }]}>{timeText(now)}</Text>
+        <Text style={[styles.barText, styles.tabular, { color: t.textDim, fontWeight: '500', opacity: quiet ? 0 : 1 }]}>{dateText(now)}</Text>
+        <Text style={[styles.barText, styles.tabular, { color: t.text, marginLeft: 10, opacity: quiet ? 0 : 1 }]}>{timeText(now)}</Text>
         {settings.doNotDisturb && <View style={{ marginLeft: 8 }}><Icon name="moon" size={16} color={t.textDim} /></View>}
       </Pressable>
       <View style={[styles.side, { justifyContent: 'flex-end' }]}>
