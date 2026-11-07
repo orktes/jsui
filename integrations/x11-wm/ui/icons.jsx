@@ -42,6 +42,13 @@ const shapes = {
       <Circle cx="12" cy="19" r="1.2" />
     </>
   ),
+  rotate: (
+    <>
+      <Rect x="7.5" y="3.5" width="9" height="15" rx="2" />
+      <Path d="M20.5 13.5a8.5 8.5 0 0 1-6 7" />
+      <Polyline points="14 18 14 20.6 16.6 20.6" />
+    </>
+  ),
   bluetooth: <Polyline points="7 7 17 16 12 20.5 12 3.5 17 8 7 17" />,
   volume: (
     <>

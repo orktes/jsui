@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+# The device's orientation from sensorfw (Ubuntu Touch's sensor daemon), one
+# line per change on stdout: "top", "left", "right", "bottom" (the edge of
+# the panel that is up) or "flat". jsui-wl runs it with --auto-rotate.
+#
+# sensorfw: a session from com.nokia.SensorService over D-Bus, then its
+# readings on /run/sensord.sock (the session id written first, then the
+# server's one-byte ack, then batches of PoseData: a uint32 count and
+# count x {uint64 timestamp, int32 orientation, 4 bytes padding}).
+import os, socket, struct, sys, time
+
+import dbus
+
+SOCK = "/run/sensord.sock"
+# sensorfw's PoseData::Orientation: Undefined, LeftUp, RightUp, BottomUp,
+# BottomDown, FaceDown, FaceUp.
+NAMES = {1: "left", 2: "right", 3: "bottom", 4: "top", 5: "flat", 6: "flat"}
+
+
+def session():
+    bus = dbus.SystemBus()
+    mgr = dbus.Interface(bus.get_object("com.nokia.SensorService", "/SensorManager"), "local.SensorManager")
+    if not mgr.loadPlugin("orientationsensor"):
+        raise RuntimeError("sensorfw has no orientationsensor")
+    sid = int(mgr.requestSensor("orientationsensor", dbus.Int64(os.getpid())))
+    if sid < 0:
+        raise RuntimeError("sensorfw refused a session")
+    sensor = dbus.Interface(bus.get_object("com.nokia.SensorService", "/SensorManager/orientationsensor"),
+                            "local.OrientationSensor")
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(SOCK)
+    s.sendall(struct.pack("<i", sid))
+    if not s.recv(1):  # the channel's ack ("\n" on this sensorfw)
+        raise RuntimeError("sensorfw closed the channel")
+    sensor.setInterval(dbus.Int32(sid), dbus.Int32(200))
+    sensor.setStandbyOverride(dbus.Int32(sid), False)
+    sensor.start(dbus.Int32(sid))
+    return s, sensor, sid
+
+
+def report(o, last):
+    name = NAMES.get(int(o))
+    if name and name != last:
+        print(name, flush=True)
+        return name
+    return last
+
+
+def recv_exact(s, n):
+    buf = b""
+    while len(buf) < n:
+        b = s.recv(n - len(buf))
+        if not b:
+            raise EOFError
+        buf += b
+    return buf
+
+
+def main():
+    last = None
+    while True:
+        try:
+            s, sensor, sid = session()
+            # Its state now: readings only come when it changes.
+            last = report(sensor.orientation()[1], last)
+            while True:
+                (count,) = struct.unpack("<I", recv_exact(s, 4))
+                if count > 64:
+                    raise RuntimeError(f"unexpected batch of {count} readings")
+                data = recv_exact(s, count * 16)
+                for i in range(count):
+                    _, o = struct.unpack_from("<Qi", data, i * 16)
+                    last = report(o, last)
+        except BrokenPipeError:
+            return  # jsui-wl is gone
+        except (EOFError, OSError, RuntimeError, dbus.DBusException) as e:
+            print(f"# {e}", file=sys.stderr, flush=True)
+            time.sleep(5)
+
+
+if __name__ == "__main__":
+    main()
