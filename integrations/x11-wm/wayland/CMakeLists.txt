@@ -19,8 +19,16 @@ add_custom_command(OUTPUT ${_gen}/text-input-unstable-v2-protocol.h ${_gen}/text
   COMMAND ${WAYLAND_SCANNER} private-code ${_ti2} ${_gen}/text-input-unstable-v2-protocol.c
   DEPENDS ${_ti2}
   VERBATIM)
+# wp_fractional_scale_v1 (staging): apps that render at the shell's scale
+# (Chromium / Electron, GTK 4, Qt 6) learn it from here (fractional_scale_v1.h).
+set(_fs ${WAYLAND_PROTOCOLS_DIR}/staging/fractional-scale/fractional-scale-v1.xml)
+add_custom_command(OUTPUT ${_gen}/fractional-scale-v1-protocol.h ${_gen}/fractional-scale-v1-protocol.c
+  COMMAND ${WAYLAND_SCANNER} server-header ${_fs} ${_gen}/fractional-scale-v1-protocol.h
+  COMMAND ${WAYLAND_SCANNER} private-code ${_fs} ${_gen}/fractional-scale-v1-protocol.c
+  DEPENDS ${_fs}
+  VERBATIM)
 add_executable(jsui-wl main.cpp ${_gen}/xdg-shell-protocol.h ${_gen}/text-input-unstable-v2-protocol.h
-  ${_gen}/text-input-unstable-v2-protocol.c)
+  ${_gen}/text-input-unstable-v2-protocol.c ${_gen}/fractional-scale-v1-protocol.h ${_gen}/fractional-scale-v1-protocol.c)
 target_include_directories(jsui-wl PRIVATE ${_gen})
 target_compile_definitions(jsui-wl PRIVATE WLR_USE_UNSTABLE JSUI_WM_BUNDLE="${JSUI_WM_BUNDLE}")
 target_link_libraries(jsui-wl PRIVATE jsui PkgConfig::WLR)
