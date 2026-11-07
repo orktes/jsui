@@ -1,6 +1,6 @@
 // Full-screen and drop-down panels: the app launcher, the window overview,
 // quick settings, the calendar / notifications panel and the lock screen.
-import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated, Easing, HostTexture, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
 } from 'react-native';
@@ -86,16 +86,21 @@ function Scrim({ color, onPress, screen }) {
 export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed, onLaunch, settings, open = true }) {
   const t = useTheme();
   const [query, setQuery] = useState('');
-  const v = useEntrance(open, 200, onClosed);
+  // Kept mounted between opens (shell.jsx): start afresh, once it is gone
+  // (a change while it fades would paint the grid again).
+  const closed = useCallback(() => {
+    setQuery('');
+    onClosed && onClosed();
+  }, [onClosed]);
+  const v = useEntrance(open, 200, closed);
   const pop = useSpringIn(open);
   const input = useRef(null);
   useEffect(() => {
-    if (!open) {
-      setQuery(''); // kept mounted between opens (shell.jsx): start afresh
-      return undefined;
-    }
+    if (!open) return undefined;
     wm.keyboard(true); // the search field gets the physical keyboard
-    const id = setTimeout(() => input.current && input.current.focus && input.current.focus(), 50);
+    // Focused once the fade is done: a blinking caret during it would keep
+    // the grid's cached layer stale (every frame painted in full).
+    const id = setTimeout(() => input.current && input.current.focus && input.current.focus(), 230);
     return () => {
       clearTimeout(id);
       wm.keyboard(false);

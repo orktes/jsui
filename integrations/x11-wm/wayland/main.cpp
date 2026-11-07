@@ -290,30 +290,32 @@ struct App {
   bool squareIcon = false;  // a full-bleed square (Ubuntu Touch's Suru icons), shown clipped to the tile shape
 };
 
-// SVG icons as PNGs (JSUI's Image decodes PNG): jsui-icons, next to
-// jsui-wl, rasterizes them into ~/.cache/jsui-wm/icons; until it has, the
-// app shows its glyph. g_svgIcons: SVG -> PNG pairs still to make.
+// Desktop files' own icons (absolute paths: Ubuntu Touch's full-bleed Suru
+// squares, SVG or PNG) as PNGs with the tile shape cut out: jsui-icons, next
+// to jsui-wl, makes them into ~/.cache/jsui-wm/icons (JSUI's Image decodes
+// PNG, and drawing them under a rounded clip each was slow); until it has,
+// the app shows its glyph. g_svgIcons: source -> PNG pairs still to make.
 std::vector<std::pair<std::string, std::string>> g_svgIcons;
 std::set<std::string> g_svgTried;
 
 std::string svgIconPng(const std::string& svg) {
   const char* home = getenv("HOME");
   char name[32];
-  std::snprintf(name, sizeof name, "%016zx.png", std::hash<std::string>{}(svg));
+  std::snprintf(name, sizeof name, "%016zx.png", std::hash<std::string>{}(svg + "#tile"));
   return std::string(home ? home : "/tmp") + "/.cache/jsui-wm/icons/" + name;
 }
 
 std::string findIcon(const std::string& icon) {
   if (icon.empty()) return "";
   auto ends = [&](const char* ext) { return icon.size() > 4 && icon.compare(icon.size() - 4, 4, ext) == 0; };
-  if (icon[0] == '/' && ends(".svg") && fileExists(icon)) {
+  if (icon[0] == '/' && (ends(".svg") || ends(".png")) && fileExists(icon)) {
     std::string png = svgIconPng(icon);
     struct stat a, b;
     if (stat(png.c_str(), &a) == 0 && stat(icon.c_str(), &b) == 0 && a.st_mtime >= b.st_mtime) return png;
     if (g_svgTried.insert(icon).second) g_svgIcons.emplace_back(icon, png);
     return "";
   }
-  if (icon[0] == '/') return fileExists(icon) && ends(".png") ? icon : "";
+  if (icon[0] == '/') return "";
   static const char* themes[] = {"hicolor", "Adwaita", "gnome", "Papirus", "breeze"};
   static const char* sizes[] = {"128x128", "96x96", "64x64", "256x256", "72x72", "48x48", "512x512", "32x32"};
   for (const char* theme : themes)

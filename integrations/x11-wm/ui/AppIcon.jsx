@@ -26,8 +26,11 @@ export const AppIcon = memo(function AppIcon({ app, win, size = 56, preferGlyph 
   const glyph = glyphFor(`${id} ${(app && app.exec) || ''} ${(win && win.instance) || ''}`);
   if (!preferGlyph && app && app.icon && app.iconShape === 'square') {
     return (
-      <View style={{ width: size, height: size, borderRadius: size * 0.28, overflow: 'hidden', boxShadow: `0px ${size * 0.06}px ${size * 0.18}px rgba(0,0,0,0.28)` }}>
-        <Image source={{ uri: app.icon }} style={{ width: size, height: size }} resizeMode="cover" />
+      // The host's PNG has the tile shape cut out already (jsui-icons), and
+      // no shadow: a rounded clip or a blurred shadow per icon made the
+      // launcher's grid 40-55 ms to paint on the Tab A7.
+      <View style={{ width: size, height: size }}>
+        <Image source={{ uri: app.icon }} style={{ width: size, height: size }} resizeMode="stretch" />
       </View>
     );
   }
