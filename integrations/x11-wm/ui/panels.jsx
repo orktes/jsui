@@ -684,8 +684,9 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
                     onOpen(n);
                     onClose();
                   }}>
-                  {n.app ? <AppIcon app={n.app} size={32} /> : <Icon name={n.icon || 'bell'} size={22} color={t.accent} />}
-                  <View style={{ flex: 1, marginLeft: 12 }}>
+                  {/* The app's icon, or none: the same bell on every card said nothing. */}
+                  {n.app ? <AppIcon app={n.app} size={32} /> : null}
+                  <View style={{ flex: 1, marginLeft: n.app ? 12 : 4 }}>
                     <Text numberOfLines={2} style={[styles.noteTitle, { color: t.text }]}>{n.title}</Text>
                     {n.body ? <Text numberOfLines={2} style={[styles.noteBody, { color: t.textDim }]}>{n.body}</Text> : null}
                   </View>
@@ -707,13 +708,13 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
             <Text style={[styles.calTitle, { color: t.text }, narrow && { width: 300 }]}>{longDate(now)}</Text>
             <View style={styles.calRow}>
               {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((d, i) => (
-                <Text key={i} style={[styles.calHead, { color: i >= 5 ? t.textMute : t.textDim }]}>{d}</Text>
+                <Text key={i} style={[styles.calHead, { color: t.textMute }]}>{d}</Text>
               ))}
             </View>
             <View style={styles.calGrid}>
               {cells.map((c, i) => (
-                <View key={i} style={[styles.calCell, c === now.getDate() && { backgroundColor: t.accent }]}>
-                  <Text style={[styles.calText, { color: c === now.getDate() ? t.accentText : i % 7 >= 5 ? t.textMute : t.text }]}>{c || ''}</Text>
+                <View key={i} style={[styles.calCell, c === now.getDate() && { backgroundColor: t.tileOn }]}>
+                  <Text style={[styles.calText, { color: c === now.getDate() ? t.accentText : t.text }]}>{c || ''}</Text>
                 </View>
               ))}
             </View>
@@ -811,8 +812,8 @@ function Toast({ n, t, onDone, onOpen }) {
     <Animated.View style={{ opacity: v, transform: [{ translateY: ty }] }}>
       {/* A tap puts it away; an app's notification also opens the app (onOpen). */}
       <Pressable onPress={() => { setOpen(false); if ((n.app || n.notifyId != null) && onOpen) onOpen(n); }} style={[styles.toast, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 32px ${t.shadow}` }]}>
-        {n.app ? <AppIcon app={n.app} size={28} /> : <Icon name={n.icon || 'bell'} size={22} color={t.accent} />}
-        <View style={{ flex: 1, marginLeft: 12 }}>
+        {n.app ? <AppIcon app={n.app} size={28} /> : null}
+        <View style={{ flex: 1, marginLeft: n.app ? 12 : 4 }}>
           <Text numberOfLines={1} style={[styles.noteTitle, { color: t.text }]}>{n.title}</Text>
           {n.body ? <Text numberOfLines={2} style={[styles.noteBody, { color: t.textDim }]}>{n.body}</Text> : null}
         </View>
