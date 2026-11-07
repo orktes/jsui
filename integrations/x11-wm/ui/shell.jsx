@@ -867,11 +867,14 @@ function Shell() {
     <ThemeContext.Provider value={t}>
       <View style={styles.root}>
         <Wallpaper width={scr.width} height={scr.height} t={t} />
-        {!visible.length && <Home screen={scr} t={t} note={notes.find((n) => n.notifyId != null && Date.now() - n.at < 3600e3)} apps={apps} settings={settings} onLaunch={launch} onCalendar={() => setPanel('calendar')} onAllApps={() => setPanel('launcher')} />}
+        {!visible.some((w) => !w.prompt) && <Home screen={scr} t={t} note={notes.find((n) => n.notifyId != null && Date.now() - n.at < 3600e3)} apps={apps} settings={settings} onLaunch={launch} onCalendar={() => setPanel('calendar')} onAllApps={() => setPanel('launcher')} />}
         {split && !overviewUp && <SplitPanes split={split} screen={scr} t={t} />}
         {[...windows, ...closingNow.filter((c) => !map[c.id])].map((w) =>
           w.type === 'dock' || w.type === 'desktop' ? null : (
             <View key={w.id} pointerEvents="box-none" style={[StyleSheet.absoluteFill, { opacity: overviewUp ? 0 : 1 }]}>
+            {/* A system prompt (the host's `prompt`: the keyring's, a polkit
+                agent's) is a centred dialog over a dimmed screen. */}
+            {w.prompt && map[w.id] && !w.minimized && <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.45)' }]} />}
             <PaneClip screen={scr} pane={panes && map[w.id] && (w.id === split.left.id ? panes.left : w.id === split.right.id ? panes.right : null)}>
             <Window
               win={w}

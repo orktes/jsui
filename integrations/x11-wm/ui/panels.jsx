@@ -383,7 +383,8 @@ export const Overview = memo(function Overview({ screen, windows, launches = [],
   const scrollX = useRef(0);
   // Most recent first: the stack's top is the window used last.
   const wins = useMemo(
-    () => windows.filter((w) => w.type !== 'dock' && w.type !== 'desktop' && w.ready !== false).reverse(),
+    // A system prompt (Window.prompt: the keyring's, a polkit agent's) is no app to switch to.
+    () => windows.filter((w) => w.type !== 'dock' && w.type !== 'desktop' && !w.prompt && w.ready !== false).reverse(),
     [windows],
   );
   const [order] = useState(() => wins.map((w) => w.id)); // keep places while cards close

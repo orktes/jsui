@@ -591,6 +591,10 @@ struct Client {
   double mappedAt = 0;
   double reassertedAt = -1e9;  // last time a maximized size was sent again (onCommit)
   bool dialog = false;
+  // A system prompt (the keyring's gcr-prompter, a polkit agent, pinentry):
+  // a parentless toplevel shown as a centred dialog over whatever is on
+  // screen, kept above the other windows, not an app of its own.
+  bool prompt = false;
 };
 
 class WM {
@@ -1445,12 +1449,23 @@ void WM::place(Client* c) {
   c->minH = std::max(1, px(c->tl->current.min_height));
   c->maxW = px(c->tl->current.max_width);
   c->maxH = px(c->tl->current.max_height);
-  c->dialog = c->tl->parent != nullptr || (c->maxW > 0 && c->maxW == c->minW && c->maxH == c->minH);
+  const bool fixed = c->maxW > 0 && c->maxW == c->minW && c->maxH == c->minH;
   wlr_box geo;
   wlr_xdg_surface_get_geometry(c->xdg, &geo);
   int w = std::max(px(geo.width), P(280)), h = std::max(px(geo.height), P(160));
   Rect wa = workArea();
-  if (c->tl->parent) {
+  // System prompts: known prompt programs, or a small fixed-size window with
+  // no parent (a fixed-size app as big as a screen is still an app).
+  const std::string aid = c->tl->app_id ? c->tl->app_id : "";
+  const bool promptApp = aid.find("gcr-prompter") != std::string::npos || aid.find("polkit") != std::string::npos ||
+                         aid.find("pinentry") != std::string::npos || aid.find("askpass") != std::string::npos ||
+                         aid.find("authentication-agent") != std::string::npos;
+  c->prompt = !c->tl->parent && (promptApp || (fixed && w <= wa.w * 0.6 && h <= wa.h * 0.6));
+  c->dialog = c->tl->parent != nullptr || fixed || c->prompt;
+  if (c->prompt) {
+    c->x = wa.x + (wa.w - w) / 2;
+    c->y = wa.y + (wa.h - h) / 2;
+  } else if (c->tl->parent) {
     if (Client* p = findSurface(c->tl->parent->base->surface)) {
       c->x = p->x + (p->w - w) / 2;
       c->y = p->y + (p->h - h) / 2;
@@ -2095,9 +2110,14 @@ void WM::raise(Client* c) {
   if (it == stack_.end()) return;
   stack_.erase(it);
   stack_.push_back(c->id);
-  // Dialogs stay above their parent.
+  // Dialogs stay above their parent, system prompts above everything.
   for (auto& [id, d] : clients_)
     if (d->mapped && !d->popup && d->transientFor == c->id) {
+      stack_.erase(std::remove(stack_.begin(), stack_.end(), id), stack_.end());
+      stack_.push_back(id);
+    }
+  for (auto& [id, d] : clients_)
+    if (d->mapped && !d->popup && d->prompt && d != c) {
       stack_.erase(std::remove(stack_.begin(), stack_.end(), id), stack_.end());
       stack_.push_back(id);
     }
@@ -2770,9 +2790,10 @@ std::string WM::windowJson(const Client* c) const {
                   ",\"h\":" + wmjson::num(L(c->h * c->fit)) + ",\"minW\":" + wmjson::num(L(c->minW)) + ",\"minH\":" + wmjson::num(L(c->minH)) +
                   ",\"restoreW\":" + wmjson::num(L(c->hasRestore ? c->restore.w : c->w)) +
                   ",\"restoreH\":" + wmjson::num(L(c->hasRestore ? c->restore.h : c->h)) + ",\"type\":\"" + type +
-                  "\",\"decorated\":" + (c->decorated ? "true" : "false") +
+                  "\",\"decorated\":" + (c->decorated && !c->prompt ? "true" : "false") +
                   ",\"resizable\":" + (resizable ? "true" : "false") +
                   ",\"transientFor\":" + std::to_string(c->transientFor) +
+                  ",\"prompt\":" + (c->prompt ? "true" : "false") +
                   ",\"minimized\":" + (c->minimized ? "true" : "false") +
                   ",\"maximized\":" + (c->maximized ? "true" : "false") +
                   ",\"fullscreen\":" + (c->fullscreen ? "true" : "false") + ",\"snap\":\"" +
