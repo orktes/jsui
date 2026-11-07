@@ -775,6 +775,10 @@ class WM {
   std::string startBacklight_, startVolume_;  // the wm.system fields, read once
   bool backlightRead_ = false, volumeRead_ = false;
   void setLevels(const wmjson::Value& v, bool brightness);
+  // A volume button: one step (1/16) up or down, applied now and told to the
+  // shell (wm:volumeKey) for its indicator and slider.
+  void volumeStep(int dir);
+  double volumeNow_ = -1;  // the output volume as last read or set (0..1)
   void applyLevels();
   void readStartLevels();
   // GPU boost (Adreno: kgsl devfreq). Its governor ramps up too slowly for
@@ -1663,6 +1667,7 @@ void WM::readStartLevels() {
   if (pct != std::string::npos) {
     size_t start = vol.find_last_not_of("0123456789", pct - 1);
     int v = atoi(vol.c_str() + (start == std::string::npos ? 0 : start + 1));
+    volumeNow_ = std::clamp(v, 0, 100) / 100.0;
     startVolume_ = ",\"volume\":{\"level\":" + std::to_string(std::clamp(v, 0, 100) / 100.0) +
                     ",\"muted\":" + (mute.find("yes") != std::string::npos ? "true" : "false") + "}";
   }
@@ -1675,6 +1680,7 @@ void WM::setLevels(const wmjson::Value& v, bool brightness) {
   } else {
     wantLevels_.volume = std::clamp(v["value"].num(0.6), 0.0, 1.0);
     wantLevels_.muted = v["muted"].truthy() ? 1 : 0;
+    volumeNow_ = wantLevels_.volume;
   }
   if (!levelsTimer_)
     levelsTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
@@ -1685,6 +1691,22 @@ void WM::setLevels(const wmjson::Value& v, bool brightness) {
   if (wantLevels_.brightness != appliedLevels_.brightness || wantLevels_.volume != appliedLevels_.volume ||
       wantLevels_.muted != appliedLevels_.muted)
     wl_event_source_timer_update(levelsTimer_, 80);
+}
+
+void WM::volumeStep(int dir) {
+  if (!volumeRead_) readStartLevels();
+  double cur = volumeNow_ >= 0 ? volumeNow_ : 0.5;
+  // To the next step of 1/16, so a level from the slider lands on the grid.
+  double next = std::clamp((std::round(cur * 16) + dir) / 16.0, 0.0, 1.0);
+  wmjson::Value v;
+  v.type = wmjson::Value::Object;
+  wmjson::Value num;
+  num.type = wmjson::Value::Number;
+  num.n = next;
+  v.o["value"] = num;
+  setLevels(v, false);
+  applyLevels();  // a button press: now, not after the drag coalescing
+  if (rt_) jsui_post_message(rt_, "wm:volumeKey", ("{\"level\":" + std::to_string(next) + "}").c_str());
 }
 
 void WM::applyLevels() {
@@ -3376,6 +3398,13 @@ void WM::mirEvents() {
         wlr_seat_pointer_notify_frame(seat_);
         break;
       case MirHostEvent::Key: {
+        // The volume buttons (evdev KEY_VOLUMEDOWN / KEY_VOLUMEUP) are the
+        // shell's, as on Lomiri: a step of the output volume, not keys for
+        // the focused app.
+        if (e.id == 114 || e.id == 115) {
+          if (e.phase) volumeStep(e.id == 115 ? 1 : -1);
+          break;
+        }
         wlr_keyboard_key_event ev{};
         ev.time_msec = t;
         ev.keycode = uint32_t(e.id);
