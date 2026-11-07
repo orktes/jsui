@@ -258,8 +258,10 @@ are (screen px), which `docker/tour.py` uses to drive it with xdotool.
   `jsui-session`) and hand over shm buffers; Lomiri apps then start in ~1.5 s
   and redraw in ~100 ms. The Tab A7's kernel panics on Bluetooth sockets, so
   apps get `jsui-no-bluetooth.so` preloaded. Lomiri's
-  lock screen, indicators, notifications and Maliit keyboard
-  aren't there (the shell has its own keyboard). Bringing the port up on the
+  lock screen, indicators and Maliit keyboard aren't there (the shell has
+  its own lock screen and keyboard). Notifications: `jsui-notifyd` (next to
+  `jsui-wl`, which runs it when there is a session bus) serves
+  `org.freedesktop.Notifications` and the shell shows them as toasts. Bringing the port up on the
   stock Samsung vendor took device-side fixes outside this repository (see the
   project notes); adb over USB (usb-moded `mtp_adb`) helps while debugging.
 * CPU compositing: each damaged window area is copied through shared memory.

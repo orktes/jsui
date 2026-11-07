@@ -18,7 +18,7 @@ import { Keyboard } from './keyboard.jsx';
 import { CalendarPanel, Launcher, LockScreen, Overview, QuickSettings, Toasts } from './panels.jsx';
 import { ThemeContext, dark, font, light } from './theme.js';
 import { Window } from './Window.jsx';
-import { appName, useApps, usePopups, useScreen, useSettings, useSystem, useWindows, wm } from './wm.js';
+import { appName, cleanName, useApps, usePopups, useScreen, useSettings, useSystem, useWindows, wm } from './wm.js';
 
 // ---------------------------------------------------------------- Wallpaper
 
@@ -251,6 +251,42 @@ function Shell() {
 
   // Hotkeys from the host: Super toggles the launcher, Alt+Tab the overview.
   // An app that never showed a window (jsui-wl ended it).
+  // Apps' notifications (org.freedesktop.Notifications, the host's
+  // jsui-notifyd): a toast with the app's icon unless Do Not Disturb is on
+  // (urgent ones show anyway), and an entry in the list. A replaced one
+  // updates its entry; one the app withdraws goes.
+  const appNotes = useRef(new Map()); // the app's id -> our note id
+  useHostMessage('wm:notification', (msg) => {
+    const ours = appNotes.current.get(msg.id);
+    if (msg.closed) {
+      if (ours == null) return;
+      appNotes.current.delete(msg.id);
+      setNotes((l) => l.filter((x) => x.id !== ours));
+      setToasts((l) => l.filter((x) => x.id !== ours));
+      return;
+    }
+    const d = (msg.desktop || '').toLowerCase();
+    const n = (msg.app || '').toLowerCase();
+    const app = apps.find((a) => (d && (a.id.toLowerCase() === d || a.id.toLowerCase().startsWith(d.split('_')[0]))) ||
+      (n && cleanName(a.name).toLowerCase() === n));
+    const note = {
+      app,
+      icon: 'bell',
+      title: msg.title || (app ? cleanName(app.name) : msg.app) || 'Notification',
+      body: msg.title && msg.body ? msg.body : msg.title ? '' : msg.body,
+    };
+    if (ours != null) {
+      setNotes((l) => l.map((x) => (x.id === ours ? { ...x, ...note } : x)));
+      setToasts((l) => l.map((x) => (x.id === ours ? { ...x, ...note } : x)));
+      return;
+    }
+    const id = noteId++;
+    appNotes.current.set(msg.id, id);
+    const full = { id, time: nowText(), ...note };
+    setNotes((l) => [full, ...l].slice(0, 30));
+    if (!settings.doNotDisturb || msg.urgency >= 2) setToasts((l) => [...l, full].slice(-3));
+  });
+
   useHostMessage('wm:launchFailed', (msg) => {
     notify({ icon: 'bell', title: `${msg.name} didn't start`, body: 'It showed no window and was closed.' });
   });

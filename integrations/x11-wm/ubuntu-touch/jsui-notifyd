@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+# org.freedesktop.Notifications for jsui-wm: what apps send (libnotify, Qt,
+# Lomiri's toolkit) comes out as one JSON line per notification on stdout,
+# which jsui-wl hands to the shell as "wm:notification" (shown as a toast and
+# kept in the notification list). jsui-wl runs it when it is next to jsui-wl
+# and there is a session bus; it exits at once when another server (Lomiri)
+# owns the name.
+#
+# Lines: {"id", "app", "desktop", "title", "body", "urgency"} for a new or
+# replaced notification, {"id", "closed": true} when the app withdraws one.
+import html
+import json
+import re
+import sys
+
+import dbus
+import dbus.service
+from dbus.mainloop.glib import DBusGMainLoop
+from gi.repository import GLib
+
+NAME = "org.freedesktop.Notifications"
+PATH = "/org/freedesktop/Notifications"
+
+
+def emit(obj):
+    try:
+        print(json.dumps(obj), flush=True)
+    except BrokenPipeError:  # jsui-wl is gone
+        sys.exit(0)
+
+
+def plain(text):
+    # The body may carry the spec's small markup (<b>, <i>, <a href>).
+    return html.unescape(re.sub(r"<[^>]*>", "", str(text))).strip()
+
+
+class Server(dbus.service.Object):
+    def __init__(self, bus):
+        super().__init__(bus, PATH)
+        self.next_id = 1
+        self.timers = {}
+
+    @dbus.service.method(NAME, in_signature="susssasa{sv}i", out_signature="u")
+    def Notify(self, app_name, replaces_id, app_icon, summary, body, actions, hints, expire_timeout):
+        nid = int(replaces_id)
+        if not nid:
+            nid = self.next_id
+            self.next_id += 1
+        urgency = int(hints.get("urgency", 1)) if "urgency" in hints else 1
+        emit({
+            "id": nid,
+            "app": str(app_name),
+            "desktop": str(hints.get("desktop-entry", "")),
+            "title": plain(summary),
+            "body": plain(body),
+            "urgency": urgency,
+        })
+        # Expired as the shell's toast goes (it keeps the note in its list).
+        if nid in self.timers:
+            GLib.source_remove(self.timers.pop(nid))
+        if urgency < 2:
+            ms = expire_timeout if expire_timeout > 0 else 5000
+            self.timers[nid] = GLib.timeout_add(ms, self.expired, nid)
+        return dbus.UInt32(nid)
+
+    def expired(self, nid):
+        self.timers.pop(nid, None)
+        self.NotificationClosed(dbus.UInt32(nid), dbus.UInt32(1))
+        return False
+
+    @dbus.service.method(NAME, in_signature="u", out_signature="")
+    def CloseNotification(self, nid):
+        if nid in self.timers:
+            GLib.source_remove(self.timers.pop(nid))
+        emit({"id": int(nid), "closed": True})
+        self.NotificationClosed(nid, dbus.UInt32(3))
+
+    @dbus.service.method(NAME, in_signature="", out_signature="as")
+    def GetCapabilities(self):
+        return ["body"]
+
+    @dbus.service.method(NAME, in_signature="", out_signature="ssss")
+    def GetServerInformation(self):
+        return ("jsui-wm", "jsui", "1.0", "1.2")
+
+    @dbus.service.signal(NAME, signature="uu")
+    def NotificationClosed(self, nid, reason):
+        pass
+
+    @dbus.service.signal(NAME, signature="us")
+    def ActionInvoked(self, nid, action):
+        pass
+
+
+def main():
+    DBusGMainLoop(set_as_default=True)
+    bus = dbus.SessionBus()
+    if bus.request_name(NAME, dbus.bus.NAME_FLAG_DO_NOT_QUEUE) != dbus.bus.REQUEST_NAME_REPLY_PRIMARY_OWNER:
+        print("jsui-notifyd: another notification server runs", file=sys.stderr)
+        return
+    server = Server(bus)  # noqa: F841 (exported while it lives)
+    GLib.MainLoop().run()
+
+
+if __name__ == "__main__":
+    main()
