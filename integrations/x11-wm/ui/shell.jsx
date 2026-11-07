@@ -16,13 +16,13 @@ import { playNotify, playTick } from './sounds.js';
 import { remeasureAnchors, takeLaunchOrigin, useAnchor } from './anchors.js';
 import { AppIcon } from './AppIcon.jsx';
 import { ActionMenu } from './WindowMenu.jsx';
-import { LAUNCH_TIMEOUT_MS, endLaunch, startLaunch, useLaunching } from './launching.js';
+import { LAUNCH_TIMEOUT_MS, backgroundLaunches, endLaunch, foregroundLaunch, startLaunch, useLaunching } from './launching.js';
 import { useNativeDragX, useNativeDragY } from './drag.js';
 import { Keyboard } from './keyboard.jsx';
 import { AppTile, CalendarPanel, Launcher, LockScreen, Overview, QuickSettings, Toasts } from './panels.jsx';
 import { ThemeContext, dark, font, light, radius } from './theme.js';
 import { Window } from './Window.jsx';
-import { appName, cleanName, homeApps, pinHome, setSetting, useApps, usePopups, useScreen, useSettings, useSystem, useWindows, wm } from './wm.js';
+import { appName, cleanName, homeApps, pinHome, setSetting, useApps, usePopups, useScreen, useSettings, useSystem, useWindows, wasDismissed, wm } from './wm.js';
 
 // ---------------------------------------------------------------- Wallpaper
 
@@ -578,12 +578,12 @@ function Shell() {
   const [closing, setClosing] = useState([]);
   const closingNow = useMemo(() => {
     const out = [...closing];
-    for (const [id, w] of prev.current) if (!map[id] && w.ready && !w.minimized && !out.some((c) => c.id === w.id)) out.push(w);
+    for (const [id, w] of prev.current) if (!map[id] && w.ready && !w.minimized && !wasDismissed(w.id) && !out.some((c) => c.id === w.id)) out.push(w);
     return out;
   }, [map, closing]);
   useEffect(() => {
     const gone = [];
-    for (const [id, w] of prev.current) if (!map[id] && w.ready && !w.minimized) gone.push(w);
+    for (const [id, w] of prev.current) if (!map[id] && w.ready && !w.minimized && !wasDismissed(w.id)) gone.push(w);
     if (gone.length) setClosing((c) => [...c, ...gone.filter((w) => !c.some((x) => x.id === w.id))]);
     prev.current = new Map(Object.entries(map));
     for (const w of gone) prev.current.delete(String(w.id));
@@ -605,15 +605,17 @@ function Shell() {
   // Tablet mode with an app on screen (or one starting, launching.js): apps
   // reach the bottom edge, the dock hides behind the home indicator.
   const launching = useLaunching();
+  // The launches showing their card (the newest; none while the switcher has them).
+  const front = launching.filter((l) => !l.bg);
   // Home on screen: its glance shows the newest notification, so one coming
   // in there only chimes (a toast said the same thing over it).
   const homeRef = useRef(false);
-  homeRef.current = !visible.length && !panel && !locked && !launching.length;
-  const appMode = settings.tabletMode && (launching.length > 0 || visible.some((w) => w.type === 'normal' && (w.maximized || w.snap)));
+  homeRef.current = !visible.length && !panel && !locked && !front.length;
+  const appMode = settings.tabletMode && (front.length > 0 || visible.some((w) => w.type === 'normal' && (w.maximized || w.snap)));
   const dockShown = !appMode || peek || panel === 'launcher' || panel === 'overview';
   const bottom = appMode ? scr.homeBar || 24 : scr.dock;
   // Solid over a full-screen app, and over the loading card that stands in for one.
-  const solidBar = visible.some((w) => w.maximized || w.snap) || (appMode && launching.length > 0);
+  const solidBar = visible.some((w) => w.maximized || w.snap) || (appMode && front.length > 0);
   const onPeek = useCallback(() => setPeek(true), []);
   useEffect(() => {
     if (!peek) return undefined;
@@ -677,11 +679,17 @@ function Shell() {
 
   // Close panels with nothing to show.
   useEffect(() => {
-    if (panel === 'overview' && !visible.length) {
+    if (panel === 'overview' && !windows.length && !launching.length) {
       const id = setTimeout(() => setPanel(null), 600);
       return () => clearTimeout(id);
     }
-  }, [panel, visible.length]);
+  }, [panel, windows.length, launching.length]);
+  // The switcher takes the apps still starting as cards: closing it leaves
+  // them starting behind what is on screen (home, if nothing), until one is
+  // picked.
+  useEffect(() => {
+    if (panel === 'overview') backgroundLaunches();
+  }, [panel]);
 
   // The input the shell takes above the windows.
   // Edge swipes (EdgeSwipe) while a full-screen app has the screen.
@@ -777,6 +785,13 @@ function Shell() {
       if (l) {
         done[l.key] = true;
         knownWins.current.add(w.id);
+        // One that started in the background stays there: behind the window
+        // on screen, or in the switcher if there is none (home stays).
+        if (l.bg) {
+          const others = windows.filter((x) => x.type === 'normal' && !x.minimized && x.ready && !fresh.includes(x));
+          if (others.length) wm.focus(others[others.length - 1].id);
+          else wm.minimize(w.id);
+        }
       }
     }
     if (Object.keys(done).length) setLaunchDone((d) => ({ ...d, ...done }));
@@ -827,14 +842,14 @@ function Shell() {
   const overviewUp = panel === 'overview' || closingPanel === 'overview';
   // The status bar names a full-screen app (tablet mode: it has no header of
   // its own) and holds its menu; while an app starts, the one starting.
-  const starting = appMode && launching.length ? launching[launching.length - 1].app : null;
+  const starting = appMode && front.length ? front[front.length - 1].app : null;
   const fullApp = settings.tabletMode && !split && topNormal && topNormal.maximized && !topNormal.fullscreen ? topNormal : null;
   const barApp = starting ? { app: starting, name: cleanName(starting.name) }
     : fullApp ? { app: apps.find((a) => a.id === fullApp.appId), win: fullApp, name: appName(fullApp, apps) } : null;
   const panes = split && !overviewUp ? splitPanes(split, scr) : null;
   const panelEl = (name, open) => {
     const common = { key: name, screen: scr, open, onClose: closePanel, onClosed: open ? undefined : panelClosed };
-    if (name === 'overview') return <Overview {...common} windows={visible} active={active} apps={apps} wallpaper={wall} />;
+    if (name === 'overview') return <Overview {...common} windows={windows} launches={launching} onPickLaunch={foregroundLaunch} active={active} apps={apps} wallpaper={wall} />;
     if (name === 'quick') {
       return (
         <QuickSettings {...common} settings={settings} system={system} windows={windows}
@@ -907,16 +922,19 @@ function Shell() {
             not a fresh tree (a ~50 ms frame on the Tab A7). */}
         <Launcher screen={scr} apps={apps} settings={settings} onLaunch={launch} open={panel === 'launcher'} warm={warmLauncher} wallpaper={wall}
           onClose={closePanel} onClosed={panelClosed} />
-        {[closingPanel, panel].filter((n) => n && n !== 'launcher').map((name) => panelEl(name, name === panel))}
         {/* Over the launcher: the card grows out of the tapped icon as the
-            launcher fades. Hidden while the launcher or the switcher is up. */}
+            launcher fades. Hidden while the launcher or the switcher is up; under
+            the other panels (Quick Settings, the calendar) opened over it. */}
         {launching.length > 0 && (
           <View pointerEvents="none" style={[StyleSheet.absoluteFill, { opacity: overviewUp || panel === 'launcher' ? 0 : 1 }]}>
             {launching.map((l) => (
-              <LaunchSplash key={l.key} launch={l} screen={scr} t={t} done={!!launchDone[l.key]} onGone={launchGone} />
+              <View key={l.key} pointerEvents="none" style={[StyleSheet.absoluteFill, { opacity: l.bg ? 0 : 1 }]}>
+                <LaunchSplash launch={l} screen={scr} t={t} done={!!launchDone[l.key]} onGone={launchGone} />
+              </View>
             ))}
           </View>
         )}
+        {[closingPanel, panel].filter((n) => n && n !== 'launcher').map((name) => panelEl(name, name === panel))}
         {/* The window menu itself is an overlay of its button (WindowMenu.jsx): taps elsewhere close it. */}
         {winMenu != null && <Pressable style={StyleSheet.absoluteFill} onPress={closeWinMenu} />}
         {dockMenu && (

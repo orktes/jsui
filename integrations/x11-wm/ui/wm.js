@@ -1,6 +1,6 @@
 // The window manager's side of the shell: shared state the host publishes and
 // the messages that ask it for changes (see ../README.md for the protocol).
-import { useMemo } from 'react';
+import { useEffect, useMemo, useReducer } from 'react';
 import { Host, HostState, useHostState } from 'react-native';
 
 export const send = (name, payload = {}) => Host.postMessage(name, payload);
@@ -61,17 +61,47 @@ export function useSystem() {
 }
 
 // Windows in stacking order (bottom to top), plus the active id.
+// Windows swiped away in the switcher: gone from the shell at once (an app
+// can take a second to exit, and its window showed again meanwhile), and
+// released without a closing animation when the host unmaps them.
+const dismissed = new Set();
+const dismissListeners = new Set();
+export function dismissWindow(id) {
+  dismissed.add(id);
+  dismissListeners.forEach((l) => l());
+  wm.close(id);
+}
+export const wasDismissed = (id) => dismissed.has(id);
+
 export function useWindows() {
-  const map = useHostState('wm.windows', {});
+  const hostMap = useHostState('wm.windows', {});
   const stack = useHostState('wm.stack', []);
   const active = useHostState('wm.active', 0);
+  const [gen, bump] = useReducer((n) => n + 1, 0);
+  useEffect(() => {
+    dismissListeners.add(bump);
+    return () => dismissListeners.delete(bump);
+  }, []);
+  useEffect(() => {
+    for (const id of dismissed) {
+      if (hostMap[id]) continue;
+      dismissed.delete(id);
+      send('wm:release', { id });
+    }
+  }, [hostMap]);
+  const map = useMemo(() => {
+    if (!dismissed.size) return hostMap;
+    const m = { ...hostMap };
+    for (const id of dismissed) delete m[id];
+    return m;
+  }, [hostMap, gen]); // eslint-disable-line react-hooks/exhaustive-deps
   const list = useMemo(() => {
     const out = [];
     for (const id of stack) if (map[id]) out.push(map[id]);
     for (const id in map) if (!stack.includes(map[id].id)) out.push(map[id]);
     return out;
   }, [map, stack]);
-  return { map, list, active };
+  return { map, list, active: dismissed.has(active) ? 0 : active };
 }
 
 export function usePopups() {
