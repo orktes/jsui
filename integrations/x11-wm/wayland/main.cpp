@@ -393,6 +393,8 @@ std::vector<App> scanApps(const std::string& terminal) {
         else if ((k == "NoDisplay" || k == "Hidden") && v == "true") hidden = true;
         else if (k == "OnlyShowIn") hidden = true;
       }
+      // Mir's test client ships in Ubuntu Touch images as an app.
+      if (app.id == "qtmir-demo-client") hidden = true;
       if (!isApp || hidden || app.name.empty() || app.exec.empty() || seen.count(app.id)) continue;
       if (app.terminal) app.exec = terminal + " " + app.exec;
       // Ubuntu Touch click apps: ubuntu-app-launch runs them confined
