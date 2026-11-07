@@ -137,7 +137,11 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
     onClose();
   }, [onLaunch, onClose]);
   const sc = pop.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1] });
-  const cols = Math.max(3, Math.min(8, Math.floor((screen.width - 160) / 150)));
+  // As many 150 px columns as fit with 24 px margins, then as few as give the
+  // same number of rows (18 apps: 6 x 3 in landscape, 4 x 5 in portrait, not
+  // 7 + 7 + 4). The search field spans the grid.
+  const fit = Math.max(3, Math.min(8, Math.floor((screen.width - 48) / 150)));
+  const cols = Math.min(fit, Math.max(3, Math.ceil(apps.length / Math.ceil(apps.length / fit))));
   return (
     <View pointerEvents="box-none" style={StyleSheet.absoluteFill}>
       <Under screen={screen} />
@@ -153,7 +157,7 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
       <View pointerEvents={open ? 'box-none' : 'none'} style={StyleSheet.absoluteFill}>
         <Animated.View pointerEvents="box-none" style={[styles.launcher, { top: screen.topBar + 28, bottom: settings.osk ? 330 : screen.dock + 12, transform: [{ scale: sc }] }]}>
           <Animated.View style={{ opacity: v }}>
-            <View style={[styles.search, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 36px ${t.shadow}` }]}>
+            <View style={[styles.search, { width: cols * 150 - 32, backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 36px ${t.shadow}` }]}>
               <Icon name="search" size={24} color={t.textDim} />
               <TextInput
                 ref={input}
@@ -169,7 +173,7 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
             </View>
           </Animated.View>
           <Animated.View style={{ flex: 1, marginTop: 28, width: cols * 150, opacity: v }}>
-            {query ? <Label style={{ marginBottom: 8, marginLeft: 10, color: 'rgba(255,255,255,0.7)' }}>{`${list.length} RESULT${list.length === 1 ? '' : 'S'}`}</Label> : null}
+            {query ? <Label style={{ marginBottom: 8, marginLeft: 10, color: 'rgba(255,255,255,0.7)' }}>{`${list.length} result${list.length === 1 ? '' : 's'}`}</Label> : null}
             <ScrollView contentContainerStyle={styles.grid} showsVerticalScrollIndicator={false}>
               {list.map((app) => (
                 <AppTile key={app.id} app={app} onLaunch={launch} />
@@ -784,7 +788,7 @@ function Toast({ n, t, onDone, onOpen }) {
 
 const styles = StyleSheet.create({
   launcher: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
-  search: { width: 620, height: 64, borderRadius: 32, borderWidth: 1, flexDirection: 'row', alignItems: 'center', paddingLeft: 22, paddingRight: 8 },
+  search: { height: 64, borderRadius: 32, borderWidth: 1, flexDirection: 'row', alignItems: 'center', paddingLeft: 22, paddingRight: 8 },
   searchInput: { flex: 1, height: 56, fontFamily: font, fontSize: 20, marginLeft: 12 },
   grid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', paddingBottom: 12 },
   appTile: { width: 150, height: 156, borderRadius: 24, alignItems: 'center', justifyContent: 'flex-start', paddingTop: 14, paddingHorizontal: 8 },
