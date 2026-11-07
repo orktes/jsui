@@ -329,7 +329,9 @@ export const HomeBar = memo(function HomeBar({ screen, windows, setPanel, onPeek
   return (
     <Animated.View {...pan.panHandlers} {...drag.handlers} ref={anchor.ref} onLayout={anchor.onLayout}
       style={[styles.homeBar, { height: screen.homeBar || 24 }]}>
-      <Animated.View style={[styles.homePill, { backgroundColor: t.name === 'dark' ? 'rgba(255,255,255,0.55)' : 'rgba(20,24,60,0.45)', transform: [{ translateY: lift }] }]} />
+      {/* Over the app's own pixels (it runs under the strip): a mid grey that
+          shows on light and dark content alike. */}
+      <Animated.View style={[styles.homePill, { backgroundColor: 'rgba(128,132,150,0.75)', transform: [{ translateY: lift }] }]} />
     </Animated.View>
   );
 });
@@ -372,7 +374,8 @@ const styles = StyleSheet.create({
   status: { paddingHorizontal: 14 },
   barText: { fontFamily: font, fontSize: 15, fontWeight: '600' },
   tabular: { fontVariant: ['tabular-nums'] },
-  homeBar: { position: 'absolute', left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
+  // The middle 40 % of the bottom edge: the rest of the strip is the app's.
+  homeBar: { position: 'absolute', left: '30%', right: '30%', bottom: 0, alignItems: 'center', justifyContent: 'center' },
   homePill: { width: 136, height: 5, borderRadius: 3 },
   clock: { height: 34, borderRadius: 17, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center' },
   dockWrap: { position: 'absolute', left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },

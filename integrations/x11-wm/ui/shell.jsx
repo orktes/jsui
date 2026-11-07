@@ -133,10 +133,10 @@ function Spinner({ color, track }) {
   return <Animated.View style={[styles.spinner, { borderColor: track, borderTopColor: color, transform: [{ rotate }] }]} />;
 }
 
-function LaunchSplash({ launch, screen, t, bottom, done, onGone }) {
+function LaunchSplash({ launch, screen, t, done, onGone }) {
   const W = screen.width;
   const top = screen.topBar;
-  const H = screen.height - top - bottom;
+  const H = screen.height - top; // to the bottom edge, as the app's window (under the home indicator)
   const grow = useRef(new Animated.Value(0)).current;
   const fade = useRef(new Animated.Value(1)).current;
   const from = useRef(undefined);
@@ -559,7 +559,7 @@ function Shell() {
       r.push([0, 0, W, scr.topBar]);
       if (!oskOn && dockShown && dockRect) r.push([dockRect.x, H - scr.dock + dockRect.y, dockRect.width, dockRect.height]);
       else if (!oskOn && dockShown) r.push([0, H - scr.dock, W, scr.dock]);
-      if (!oskOn && appMode) r.push([0, H - bottom, W, bottom]);
+      if (!oskOn && appMode) r.push([W * 0.3, H - bottom, W * 0.4, bottom]); // HomeBar (the app runs under the rest)
     }
     if (edges) {
       r.push([0, scr.topBar, EDGE, H - scr.topBar - bottom]);
@@ -773,7 +773,7 @@ function Shell() {
         {launching.length > 0 && (
           <View pointerEvents="none" style={[StyleSheet.absoluteFill, { opacity: overviewUp || panel === 'launcher' ? 0 : 1 }]}>
             {launching.map((l) => (
-              <LaunchSplash key={l.key} launch={l} screen={scr} t={t} bottom={bottom} done={!!launchDone[l.key]} onGone={launchGone} />
+              <LaunchSplash key={l.key} launch={l} screen={scr} t={t} done={!!launchDone[l.key]} onGone={launchGone} />
             ))}
           </View>
         )}

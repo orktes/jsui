@@ -1334,12 +1334,13 @@ Rect WM::workArea() const {
 
 // Where a maximized window goes: the work area, and in tablet mode also the
 // title bar's strip (the shell shows a full-screen app's name and menu in its
-// status bar instead of a header).
+// status bar instead of a header) and the home indicator's (the shell draws
+// the indicator over the app).
 Rect WM::maxArea() const {
   Rect r = workArea();
   if (tabletMode_) {
-    r.h += r.y - P(topBar_);
     r.y = P(topBar_);
+    r.h = (oskH_ > 0 ? sh_ - oskH_ : sh_) - r.y;
   }
   return r;
 }
