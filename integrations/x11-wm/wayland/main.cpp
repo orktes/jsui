@@ -751,6 +751,8 @@ class WM {
   // (JSUI_WL_SNAPSHOT_BG=0: they draw over the live desktop).
   bool snapshotBg_ = false;
   void snapshotBackdrop(bool on);
+  void haptic(int ms);
+  double lastHaptic_ = 0;
   void removeWindowTexture(uint32_t id);
   bool renderGpu();
   double lastTickMs_ = 0, lastRenderMs_ = 0;
@@ -1509,6 +1511,30 @@ bool WM::captureGpu(Client* c) {
 #endif
 }
 
+// A short buzz through Ubuntu Touch's haptics daemon (hfd), fire and
+// forget; nothing where there is none (busctl fails quietly).
+void WM::haptic(int ms) {
+#ifdef JSUI_WL_MIR
+  if (!mir_) return;
+  const double now = nowMs();
+  if (now - lastHaptic_ < 60) return;
+  lastHaptic_ = now;
+  ms = std::clamp(ms, 5, 200);
+  pid_t pid = fork();
+  if (pid == 0) {
+    signal(SIGCHLD, SIG_DFL);
+    int nul = open("/dev/null", O_RDWR);
+    if (nul >= 0) dup2(nul, 1), dup2(nul, 2);
+    std::string d = std::to_string(ms);
+    execlp("busctl", "busctl", "--system", "call", "com.lomiri.hfd", "/com/lomiri/hfd", "com.lomiri.hfd.Vibrator",
+           "vibrate", "i", d.c_str(), static_cast<char*>(nullptr));
+    _exit(127);
+  }
+#else
+  (void)ms;
+#endif
+}
+
 void WM::snapshotBackdrop(bool on) {
   if (!on) {
     jsui_remove_texture(rt_, "wm:backdrop");
@@ -2116,6 +2142,8 @@ void WM::onMessage(const char* name, const char* json) {
       if (!cl->popup && cl->mapped && cl->snap && !cl->minimized) setSnap(cl, cl->snap);
   } else if (n == "wm:fullscreen" && c) {
     setFullscreen(c, v["on"].type == wmjson::Value::Null ? !c->fullscreen : v["on"].truthy());
+  } else if (n == "wm:haptic") {
+    haptic(int(v["ms"].num(12)));
   } else if (n == "wm:snapshot") {
     snapshotBackdrop(v["on"].truthy());
   } else if (n == "wm:osk") {

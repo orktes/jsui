@@ -160,6 +160,7 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
           }
         } else {
           if (last) wm.move(w.id, last.x, last.y);
+          if (preview) wm.haptic();
           if (preview === 'left' || preview === 'right') wm.snap(w.id, preview);
           // Tablet mode: a dragged app that lands nowhere goes back to full screen.
           else if (preview === 'max' || (latest.current.tablet && start.wasMax && w.type === 'normal')) wm.maximize(w.id, true);

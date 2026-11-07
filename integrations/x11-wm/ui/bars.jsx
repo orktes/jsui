@@ -133,6 +133,7 @@ const DockItem = memo(function DockItem({ item, apps, active, onLongPress, size 
           Animated.timing(bounce, { toValue: 1, duration: 150, easing: Easing.out(Easing.quad), useNativeDriver: true }),
           Animated.spring(bounce, { toValue: 0, friction: 4, tension: 120, useNativeDriver: true }),
         ]).start();
+        wm.haptic();
         noteLaunch(item.app.id, `dock.${item.key}`);
         wm.launch(item.app.exec);
       }

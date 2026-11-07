@@ -300,6 +300,7 @@ function Shell() {
   }, [regions]);
 
   const launch = useCallback((app) => {
+    wm.haptic();
     noteLaunch(app.id, `app.${app.id}`);
     wm.launch(app.exec);
   }, []);
@@ -398,7 +399,7 @@ function Shell() {
         )}
         {oskOn && <Keyboard screen={scr} onMeasure={setOskRect} onHide={hideOsk} />}
         {locked && (
-          <LockScreen screen={scr} notifications={notes} onUnlock={() => setLocked(false)}>
+          <LockScreen screen={scr} notifications={notes} onUnlock={() => { wm.haptic(18); setLocked(false); }}>
             <Wallpaper width={scr.width} height={scr.height} t={t} />
           </LockScreen>
         )}
