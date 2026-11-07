@@ -24,7 +24,7 @@ for i in $(seq 20); do pactl list short sinks 2>/dev/null | grep -q primary && b
 pactl list short sinks
 if ! pactl list short sinks 2>/dev/null | grep -q primary; then
   echo "PulseAudio has no speaker sink (sink.primary-out): the bridge still failed; nothing installed."
-  echo "Its log: journalctl --user -b -u pulseaudio | tail -40"
+  echo "Logs: /tmp/jsui-wm-audio.log, and journalctl --user -b -u pulseaudio | tail -40"
   exit 1
 fi
 pactl set-default-sink sink.primary-out

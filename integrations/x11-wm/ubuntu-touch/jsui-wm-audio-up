@@ -33,6 +33,27 @@ if [ -e "$POLICY" ] && ! mounted "$V/etc/audio_policy_configuration.xml"; then
   mount -o bind "$POLICY" "$V/etc/audio_policy_configuration.xml" && log "speaker-only audio policy bound."
 fi
 
+# The vendor's audio service (in the Android container) restarted after the
+# binds, as the port's own install layer does: the wrapper reaches it over
+# hwbinder (without that it fell back to loading the vendor HAL in-process,
+# which fails on a missing libsndcardparser.so).
+A="lxc-attach -n android --clear-env --"
+$A /system/bin/setprop ctl.restart vendor.audio-hal 2>/dev/null && log "restarting the Android audio service."
+for i in $(seq 20); do
+  [ "$($A /system/bin/getprop init.svc.vendor.audio-hal 2>/dev/null)" = running ] && break
+  sleep 1
+done
+sleep 2
+
+# What the bridge needs, for when it still fails (readable by the user).
+{
+  date
+  $A /system/bin/getprop init.svc.vendor.audio-hal
+  $A /system/bin/lshal 2>/dev/null | grep -i audio
+  $A /system/bin/logcat -d -t 400 2>/dev/null | grep -iE "audio|DevicesFactory|hwservicemanager|hidl" | tail -60
+} > /tmp/jsui-wm-audio.log 2>&1
+chmod 644 /tmp/jsui-wm-audio.log
+
 # A PulseAudio already running (a session started before this) loaded the
 # bridge without the wrapper: restart it.
 for rt in /run/user/*; do
