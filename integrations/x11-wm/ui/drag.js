@@ -13,7 +13,9 @@
 import { useRef } from 'react';
 import { Animated } from 'react-native';
 
-function useNativeDrag(key) {
+// The returned object is the same on every render, so it can sit in hook
+// deps (a PanResponder rebuilt mid-gesture loses its gesture state).
+function useNativeDrag(key, axis) {
   const ref = useRef(null);
   if (!ref.current) {
     const p = new Animated.Value(0);
@@ -21,7 +23,7 @@ function useNativeDrag(key) {
     const on = new Animated.Value(0);
     ref.current = {
       on,
-      d: Animated.multiply(Animated.subtract(p, p0), on),
+      [axis]: Animated.multiply(Animated.subtract(p, p0), on),
       handlers: {
         onPointerDown: Animated.event([{ nativeEvent: { [key]: p0 } }], { useNativeDriver: true }),
         onPointerMove: Animated.event([{ nativeEvent: { [key]: p } }], { useNativeDriver: true }),
@@ -33,8 +35,7 @@ function useNativeDrag(key) {
 
 /** Vertical travel: { dy, on, handlers }. */
 export function useNativeDragY() {
-  const d = useNativeDrag('pageY');
-  return { dy: d.d, on: d.on, handlers: d.handlers };
+  return useNativeDrag('pageY', 'dy');
 }
 
 /**
@@ -66,6 +67,5 @@ export function useNativeDragXY() {
 
 /** Horizontal travel: { dx, on, handlers }. */
 export function useNativeDragX() {
-  const d = useNativeDrag('pageX');
-  return { dx: d.d, on: d.on, handlers: d.handlers };
+  return useNativeDrag('pageX', 'dx');
 }
