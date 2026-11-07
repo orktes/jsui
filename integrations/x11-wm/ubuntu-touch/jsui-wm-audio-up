@@ -1,5 +1,5 @@
 #!/bin/sh
-# Speaker sound on the Galaxy Tab A7 (SM-T500) running Ubuntu Touch on
+# Speaker and microphone on the Galaxy Tab A7 (SM-T500) running Ubuntu Touch on
 # Samsung's stock vendor partition (run as root: jsui-wm-audio.service at
 # boot, or audio-on.sh by hand).
 #
@@ -64,7 +64,7 @@ else
   log "audio HAL wrapper bound over audio.primary.default."
 fi
 if [ -e "$POLICY" ] && ! mounted "$V/etc/audio_policy_configuration.xml"; then
-  mount -o bind "$POLICY" "$V/etc/audio_policy_configuration.xml" && log "speaker-only audio policy bound."
+  mount -o bind "$POLICY" "$V/etc/audio_policy_configuration.xml" && log "speaker-and-mic audio policy bound."
 fi
 
 # The vendor's audio service (in the Android container) restarted after the
