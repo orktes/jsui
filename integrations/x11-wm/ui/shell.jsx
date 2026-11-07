@@ -219,6 +219,50 @@ function SnapPreview({ preview, screen, t, bottom }) {
   );
 }
 
+// Split view's two panes, under the windows: a window that keeps a size of
+// its own (Clock ignores the size it is given) sits on its pane, not on a
+// hole of wallpaper, and the seam between them is the wallpaper's darkest
+// colour.
+function splitPanes({ left, right }, screen) {
+  const seam = (left.x + left.w + right.x) / 2;
+  const gap = right.x - left.x - left.w;
+  const top = Math.min(left.y, right.y) - screen.titleBar;
+  const height = Math.max(left.y + left.h, right.y + right.h) - top;
+  return {
+    seam: { left: left.x + left.w - 1, width: gap + 2, top, height },
+    left: { left: left.x, width: seam - gap / 2 - left.x, top, height },
+    right: { left: seam + gap / 2, width: screen.width - left.x - seam - gap / 2, top, height },
+  };
+}
+
+function SplitPanes({ split, screen, t }) {
+  const p = splitPanes(split, screen);
+  const pane = { position: 'absolute', borderRadius: 16, backgroundColor: t.chrome };
+  return (
+    <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+      <View style={[{ position: 'absolute', backgroundColor: t.wallTop }, p.seam]} />
+      <View style={[pane, p.left]} />
+      <View style={[pane, p.right]} />
+    </View>
+  );
+}
+
+// A snapped window that draws bigger than its pane (Clock again) is cut at
+// the pane's edges: `pane` clips (a plain rectangle: a rounded clip over a
+// whole window would cost the Tab A7's GPU every frame), the inner view puts
+// the window back in screen coordinates. The same two views without a pane (the whole screen,
+// not clipping): a different tree would mount the Window afresh.
+function PaneClip({ pane, screen, children }) {
+  const p = pane || { left: 0, top: 0, width: screen.width, height: screen.height };
+  return (
+    <View pointerEvents="box-none" style={{ position: 'absolute', left: p.left, top: p.top, width: p.width, height: p.height, overflow: pane ? 'hidden' : 'visible' }}>
+      <View pointerEvents="box-none" style={{ position: 'absolute', left: -p.left, top: -p.top, width: screen.width, height: screen.height }}>
+        {children}
+      </View>
+    </View>
+  );
+}
+
 // Split view: the seam between a left- and a right-snapped window. Drag it to
 // share the screen differently (25-75 %).
 function SplitDivider({ left, right, screen, t, bottom }) {
@@ -635,6 +679,7 @@ function Shell() {
   const onWinMenu = useCallback((win) => setWinMenu(win.id), []);
   const closeWinMenu = useCallback(() => setWinMenu(null), []);
   const overviewUp = panel === 'overview' || closingPanel === 'overview';
+  const panes = split && !overviewUp ? splitPanes(split, scr) : null;
   const panelEl = (name, open) => {
     const common = { key: name, screen: scr, open, onClose: closePanel, onClosed: open ? undefined : panelClosed };
     if (name === 'overview') return <Overview {...common} windows={visible} active={active} apps={apps} />;
@@ -655,10 +700,11 @@ function Shell() {
         {/* Mounted under panels too: mounting it again as one closes laid out and
             painted its big paragraph afresh in the first frame of the close. */}
         {!visible.length && <DesktopClock screen={scr} t={t} />}
-        {split && !overviewUp && <View pointerEvents="none" style={{ position: 'absolute', left: split.left.x + split.left.w - 1, width: split.right.x - split.left.x - split.left.w + 2, top: split.left.y - scr.titleBar, height: split.left.h + scr.titleBar, backgroundColor: t.name === 'dark' ? '#000' : t.wallTop }} />}
+        {split && !overviewUp && <SplitPanes split={split} screen={scr} t={t} />}
         {[...windows, ...closingNow.filter((c) => !map[c.id])].map((w) =>
           w.type === 'dock' || w.type === 'desktop' ? null : (
             <View key={w.id} pointerEvents="box-none" style={[StyleSheet.absoluteFill, { opacity: overviewUp ? 0 : 1 }]}>
+            <PaneClip screen={scr} pane={panes && map[w.id] && (w.id === split.left.id ? panes.left : w.id === split.right.id ? panes.right : null)}>
             <Window
               win={w}
               active={w.id === active}
@@ -675,6 +721,7 @@ function Shell() {
               onClosed={doneClosing}
               splashed={launching.some((l) => l.app.id === w.appId)}
             />
+            </PaneClip>
             </View>
           ),
         )}
