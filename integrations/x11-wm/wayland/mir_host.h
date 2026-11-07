@@ -25,6 +25,9 @@
 #include <mir_toolkit/mir_client_library.h>
 #ifdef JSUI_WL_MIR_GL
 #include <EGL/egl.h>
+#ifdef JSUI_WL_ANDROID_WINDOW
+#include <system/window.h>
+#endif
 #include <GLES2/gl2.h>
 using GlSync = struct __GLsync*;  // GLES 3 sync objects (gl3.h's GLsync)
 #endif
@@ -787,6 +790,19 @@ class MirHost {
       return false;
     }
     auto native = reinterpret_cast<EGLNativeWindowType>(mir_buffer_stream_get_egl_native_window(stream_));
+#ifdef JSUI_WL_ANDROID_WINDOW
+    // JSUI_WL_MIR_BUFFERS=N: ask Mir's ANativeWindow for N buffers (#254:
+    // with two, a swap Mir holds for a second vsync stalls the next frame).
+    auto* anw = reinterpret_cast<ANativeWindow*>(native);
+    const char* nb = getenv("JSUI_WL_MIR_BUFFERS");
+    if (anw && nb) {
+      int minUndequeued = -1;
+      anw->query(anw, NATIVE_WINDOW_MIN_UNDEQUEUED_BUFFERS, &minUndequeued);
+      const int r = native_window_set_buffer_count(anw, std::atoi(nb));
+      std::fprintf(stderr, "[jsui-wl] Mir window: %s buffers asked, perform() = %d (min undequeued %d)\n", nb, r,
+                   minUndequeued);
+    }
+#endif
     surf_ = eglCreateWindowSurface(dpy_, cfg, native, nullptr);
     if (surf_ == EGL_NO_SURFACE) {
       *why = "eglCreateWindowSurface failed (0x" + hex(eglGetError()) + ")";
