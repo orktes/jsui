@@ -62,7 +62,7 @@ COPY integrations/x11-wm/docker/foot.ini $PKG/foot.ini
 RUN sed -i '/^\[main\]/a term=xterm-256color' $PKG/foot.ini
 COPY integrations/x11-wm/ubuntu-touch/jsui-session integrations/x11-wm/ubuntu-touch/install.sh \
      integrations/x11-wm/ubuntu-touch/uninstall.sh integrations/x11-wm/ubuntu-touch/jsui-wm-tap-to-wake.service \
-     integrations/x11-wm/ubuntu-touch/jsui-wm-logind.conf integrations/x11-wm/ubuntu-touch/jsui-orientation integrations/x11-wm/ubuntu-touch/jsui-icons $PKG/
+     integrations/x11-wm/ubuntu-touch/jsui-wm-logind.conf integrations/x11-wm/ubuntu-touch/jsui-wm-gpu-boost.service integrations/x11-wm/ubuntu-touch/jsui-orientation integrations/x11-wm/ubuntu-touch/jsui-icons $PKG/
 RUN cd /pkg && tar czf /jsui-wm-ubuntu-touch.tar.gz jsui-wm
 
 FROM scratch
