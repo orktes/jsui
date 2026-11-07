@@ -607,6 +607,7 @@ class WM {
   Rect workArea() const;
   void matchApp(Client* c);
   Rect popupRect(Client* p) const;
+  double popupFit(Client* p);
 
   // state publishing
   std::string windowJson(const Client* c) const;
@@ -1148,7 +1149,10 @@ void WM::newPopup(wlr_xdg_popup* popup) {
     Client* top = parent;
     while (top && top->popup) top = find(top->parentId);
     if (top) {
-      wlr_box box{-top->x, -top->y, sw_, sh_};
+      // The screen in the toplevel's surface coordinates (through its fit).
+      const double f = top->fit > 0 ? top->fit : 1;
+      wlr_box box{int(std::lround(-top->x / f + top->geoX)), int(std::lround(-top->y / f + top->geoY)),
+                  int(std::lround(sw_ / f)), int(std::lround(sh_ / f))};
       wlr_xdg_popup_unconstrain_from_box(popup, &box);
     }
   }
@@ -1271,8 +1275,8 @@ void WM::configure(Client* c, int x, int y, int w, int h) {
 // Screen px -> the client's surface coordinates (its fit, see Client::fit).
 void WM::toSurface(const Client* c, double* x, double* y) const {
   if (c->popup) {
-    *x -= c->x;
-    *y -= c->y;
+    *x = (*x - c->x) / c->fit;
+    *y = (*y - c->y) / c->fit;
   } else {
     *x = (*x - c->x) / c->fit + c->geoX;
     *y = (*y - c->y) / c->fit + c->geoY;
@@ -1308,11 +1312,13 @@ void WM::onCommit(Client* c) {
   }
   if (c->popup) {
     Rect r = popupRect(c);
-    if (r.x != c->x || r.y != c->y || r.w != c->w || r.h != c->h) {
+    double f = popupFit(c);
+    if (r.x != c->x || r.y != c->y || r.w != c->w || r.h != c->h || f != c->fit) {
       c->x = r.x;
       c->y = r.y;
       c->w = r.w;
       c->h = r.h;
+      c->fit = f;
       publishPopups();
     }
   }
@@ -1336,15 +1342,23 @@ Rect WM::popupRect(Client* p) const {
       break;
     }
   }
+  // A letterboxed toplevel (fit < 1) scales its popups with it.
   if (top) {
-    x = top->x - top->geoX + int(px);
-    y = top->y - top->geoY + int(py);
+    x = top->x + int(std::lround((px - top->geoX) * top->fit));
+    y = top->y + int(std::lround((py - top->geoY) * top->fit));
   }
   r.x = x;
   r.y = y;
   r.w = p->xdg->surface->current.width;
   r.h = p->xdg->surface->current.height;
   return r;
+}
+
+// A popup's scale: its toplevel's fit.
+double WM::popupFit(Client* p) {
+  for (Client* c = find(p->parentId); c; c = find(c->parentId))
+    if (!c->popup) return c->fit;
+  return 1;
 }
 
 void WM::capture(Client* c) {
@@ -1523,6 +1537,7 @@ void WM::onMap(Client* c) {
     c->y = r.y;
     c->w = r.w;
     c->h = r.h;
+    c->fit = popupFit(c);
     popups_.push_back(c->id);
     capture(c);
     publishPopups();
@@ -2061,8 +2076,8 @@ void WM::publishPopups() {
     if (!first) j += ',';
     first = false;
     j += "\"" + std::to_string(id) + "\":{\"id\":" + std::to_string(id) + ",\"x\":" + wmjson::num(L(c->x)) +
-         ",\"y\":" + wmjson::num(L(c->y)) + ",\"w\":" + wmjson::num(L(c->w)) + ",\"h\":" + wmjson::num(L(c->h)) +
-         ",\"ready\":" + (c->hasTexture ? "true" : "false") + "}";
+         ",\"y\":" + wmjson::num(L(c->y)) + ",\"w\":" + wmjson::num(L(c->w * c->fit)) +
+         ",\"h\":" + wmjson::num(L(c->h * c->fit)) + ",\"ready\":" + (c->hasTexture ? "true" : "false") + "}";
   }
   j += "}";
   jsui_set_state(rt_, "wm.popups", j.c_str());
@@ -2085,10 +2100,10 @@ Target WM::route(double x, double y, wlr_surface** surface, double* sx, double* 
   for (auto it = popups_.rbegin(); it != popups_.rend(); ++it) {
     Client* p = find(*it);
     if (!p || !p->mapped) continue;
-    Rect r{p->x, p->y, p->w, p->h};
+    Rect r{p->x, p->y, int(p->w * p->fit), int(p->h * p->fit)};
     if (!r.contains(x, y)) continue;
     double lx = 0, ly = 0;
-    wlr_surface* s = wlr_surface_surface_at(p->xdg->surface, x - p->x, y - p->y, &lx, &ly);
+    wlr_surface* s = wlr_surface_surface_at(p->xdg->surface, (x - p->x) / p->fit, (y - p->y) / p->fit, &lx, &ly);
     if (s) {
       *surface = s;
       *sx = lx;
