@@ -18,7 +18,7 @@ import { Keyboard } from './keyboard.jsx';
 import { CalendarPanel, Launcher, LockScreen, Overview, QuickSettings, Toasts } from './panels.jsx';
 import { ThemeContext, dark, font, light } from './theme.js';
 import { Window } from './Window.jsx';
-import { appName, useApps, usePopups, useScreen, useSettings, useSystem, useWindows, wm } from './wm.js';
+import { appName, setSetting, useApps, usePopups, useScreen, useSettings, useSystem, useWindows, wm } from './wm.js';
 
 // ---------------------------------------------------------------- Wallpaper
 
@@ -156,6 +156,20 @@ function Shell() {
   const scr = useMemo(() => ({ ...screen, width: dims.width, height: dims.height }), [screen, dims.width, dims.height]);
   const settings = useSettings();
   const system = useSystem();
+  // The sliders start at the device's backlight and volume (published once
+  // by the host), not at whatever the setting last held.
+  const adopted = useRef({});
+  useEffect(() => {
+    if (system.backlight != null && !adopted.current.backlight) {
+      adopted.current.backlight = true;
+      setSetting('brightness', system.backlight);
+    }
+    if (system.volume && !adopted.current.volume) {
+      adopted.current.volume = true;
+      setSetting('volume', system.volume.level);
+      setSetting('muted', !!system.volume.muted);
+    }
+  }, [system.backlight, system.volume]);
   const apps = useApps();
   const popups = usePopups();
   const { list: windows, active, map } = useWindows();
@@ -420,8 +434,9 @@ function Shell() {
               style={{ position: 'absolute', left: p.x, top: p.y, width: p.w, height: p.h, boxShadow: '0px 6px 20px rgba(0,0,0,0.35)' }} />
           ) : null,
         )}
-        {(settings.brightness < 1 || settings.nightLight) && (
-          <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: settings.nightLight ? `rgba(60,30,0,${0.18 + (1 - settings.brightness) * 0.6})` : `rgba(0,0,0,${(1 - settings.brightness) * 0.75})` }]} />
+        {/* Brightness without a backlight to set dims the picture instead. */}
+        {((settings.brightness < 1 && system.backlight == null) || settings.nightLight) && (
+          <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: settings.nightLight ? `rgba(60,30,0,${0.18 + (system.backlight == null ? (1 - settings.brightness) * 0.6 : 0)})` : `rgba(0,0,0,${(1 - settings.brightness) * 0.75})` }]} />
         )}
       </View>
     </ThemeContext.Provider>
