@@ -646,6 +646,9 @@ function Shell() {
       (n && cleanName(a.name).toLowerCase() === n));
     const note = {
       app,
+      // Who sent it, for its icon when no installed app matches (a tile
+      // generated from the name; only `app` opens anything).
+      from: app || (msg.app ? { id: msg.app, name: msg.app } : null),
       appName: app ? cleanName(app.name) : msg.app || '',
       icon: 'bell',
       title: msg.title || (app ? cleanName(app.name) : msg.app) || 'Notification',
