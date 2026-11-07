@@ -12,7 +12,7 @@ import { Animated, AppRegistry, Easing, DevSettings, PanResponder, Pressable, St
 import Svg, { Defs, Ellipse, RadialGradient, Stop } from 'react-native-svg';
 import { Dock, DockMenu, HomeBar, TopBar, dateText, timeText, useClock } from './bars.jsx';
 import { Icon } from './icons.jsx';
-import { takeLaunchOrigin, useAnchor } from './anchors.js';
+import { remeasureAnchors, takeLaunchOrigin, useAnchor } from './anchors.js';
 import { AppIcon } from './AppIcon.jsx';
 import { LAUNCH_TIMEOUT_MS, endLaunch, startLaunch, useLaunching } from './launching.js';
 import { useNativeDragX } from './drag.js';
@@ -88,8 +88,9 @@ function EdgeSwipe({ side, top, bottom, onSwipe }) {
   return <View {...pan.panHandlers} style={{ position: 'absolute', top, bottom, width: EDGE, [side]: 0 }} />;
 }
 
-// The volume buttons' indicator: a pill under the top bar with the level,
-// for 1.5 s after the last press (jsui-wl sets the volume itself).
+// The volume buttons' indicator, for 1.5 s after the last press (jsui-wl sets
+// the volume itself): Quick Settings' volume slider with a shadow, in the
+// toasts' place and width.
 function VolumeOsd({ screen, t }) {
   const [level, setLevel] = useState(null);
   const v = useRef(new Animated.Value(0)).current;
@@ -107,10 +108,10 @@ function VolumeOsd({ screen, t }) {
   useEffect(() => () => clearTimeout(timer.current), []);
   if (level == null) return null;
   return (
-    <Animated.View pointerEvents="none" style={[styles.osd, { top: screen.topBar + 14, left: (screen.width - 320) / 2, backgroundColor: t.panel, borderColor: t.panelLine, opacity: v }]}>
-      <Icon name={level === 0 ? 'mute' : 'volume'} size={22} color={t.text} />
-      <View style={[styles.osdTrack, { backgroundColor: t.panelRaised }]}>
-        <View style={[styles.osdFill, { width: `${Math.round(level * 100)}%`, backgroundColor: t.accent }]} />
+    <Animated.View pointerEvents="none" style={[styles.osd, { top: screen.topBar + 10, left: (screen.width - 400) / 2, backgroundColor: t.panelRaised, boxShadow: `0px 12px 32px ${t.shadow}`, opacity: v }]}>
+      <View style={[styles.osdFill, { width: Math.max(48, level * 400), backgroundColor: t.tileOn }]} />
+      <View style={styles.osdIcon}>
+        <Icon name={level === 0 ? 'mute' : 'volume'} size={22} color="#fff" />
       </View>
     </Animated.View>
   );
@@ -223,7 +224,17 @@ function SnapPreview({ preview, screen, t, bottom }) {
 // its own (Clock ignores the size it is given) sits on its pane, not on a
 // hole of wallpaper, and the seam between them is the wallpaper's darkest
 // colour.
-function splitPanes({ left, right }, screen) {
+// A split window's pane (the host's `slot`: the window itself may sit
+// centred in it, smaller), or the window's own rect.
+const paneOf = (w) => (w.slot ? { x: w.slot[0], y: w.slot[1], w: w.slot[2], h: w.slot[3] } : w);
+const seamOf = (split) => {
+  const l = paneOf(split.left);
+  return (l.x + l.w + paneOf(split.right).x) / 2;
+};
+
+function splitPanes(split, screen) {
+  const left = paneOf(split.left);
+  const right = paneOf(split.right);
   const seam = (left.x + left.w + right.x) / 2;
   const gap = right.x - left.x - left.w;
   const top = Math.min(left.y, right.y) - screen.titleBar;
@@ -274,7 +285,7 @@ function SplitDivider({ left, right, screen, t, bottom }) {
   const [grabbed, setGrabbed] = useState(null); // the seam where the drag began, while held
   const [settling, setSettling] = useState(null); // where it was let go, until the windows follow
   const drag = useNativeDragX();
-  const seam = (left.x + left.w + right.x) / 2;
+  const seam = seamOf({ left, right });
   const base = grabbed != null ? grabbed : seam;
   const anchor = useAnchor('split.divider');
   const shift = useMemo(
@@ -367,6 +378,12 @@ function Shell() {
   const screen = useScreen();
   const dims = useWindowDimensions();
   const scr = useMemo(() => ({ ...screen, width: dims.width, height: dims.height }), [screen, dims.width, dims.height]);
+  // A turn of the screen moves views whose own layout didn't change (the
+  // centred dock): measure every anchor again for test drivers.
+  useEffect(() => {
+    const id = setTimeout(remeasureAnchors, 600);
+    return () => clearTimeout(id);
+  }, [dims.width, dims.height]);
   const settings = useSettings();
   const system = useSystem();
   // The sliders start at the device's backlight and volume (published once
@@ -557,7 +574,7 @@ function Shell() {
       r.push([W - EDGE, scr.topBar, EDGE, H - scr.topBar - bottom]);
     }
     if (split) {
-      const cx = (split.left.x + split.left.w + split.right.x) / 2;
+      const cx = seamOf(split);
       r.push([cx - 16, scr.topBar, 32, H - scr.topBar - bottom]);
     }
     if (oskOn && oskRect) r.push([oskRect.x, oskRect.y, oskRect.width, oskRect.height]);
@@ -799,9 +816,10 @@ const styles = StyleSheet.create({
   deskTime: { fontFamily: font, fontSize: 132, fontWeight: '700', letterSpacing: -4 },
   deskDate: { fontFamily: font, fontSize: 26, fontWeight: '500' },
   snap: { position: 'absolute', borderRadius: 18, borderWidth: 3 },
-  osd: { position: 'absolute', width: 320, height: 56, borderRadius: 28, borderWidth: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18 },
-  osdTrack: { flex: 1, height: 8, borderRadius: 4, marginLeft: 14, overflow: 'hidden' },
-  osdFill: { height: 8, borderRadius: 4 },
+  // The same shapes as Quick Settings' sliders (controls.jsx track / fill).
+  osd: { position: 'absolute', width: 400, height: 48, borderRadius: 24, overflow: 'hidden' },
+  osdFill: { position: 'absolute', left: 0, top: 0, bottom: 0, borderRadius: 24 },
+  osdIcon: { position: 'absolute', left: 14, top: 13 },
   splash: { position: 'absolute', left: 0, borderRadius: 18, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
   splashName: { fontFamily: font, fontSize: 22, fontWeight: '600', marginTop: 22, marginBottom: 30 },
   spinner: { width: 34, height: 34, borderRadius: 17, borderWidth: 3.5 },

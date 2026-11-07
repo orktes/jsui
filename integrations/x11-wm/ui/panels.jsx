@@ -210,7 +210,8 @@ function remeasureSoon() {
 // first, flung with the finger and snapping to the card in the middle. The
 // current window shrinks into its card when the switcher opens, and the card
 // you pick grows back into the full window when it closes. Tap a card to
-// switch, swipe it up to close it, "Split" puts it next to the current window.
+// switch, swipe it up to close it ("Close all" closes every one), "Split" puts
+// it next to the current window.
 const SwitcherCard = memo(function SwitcherCard({ win, card, enter, from, title, apps, screen, onPick, onSplit, canSplit }) {
   const t = useTheme();
   const anchor = useAnchor(`switcher.${win.id}`);
@@ -281,10 +282,6 @@ const SwitcherCard = memo(function SwitcherCard({ win, card, enter, from, title,
             <Text style={styles.pillText}>Split</Text>
           </Pressable>
         )}
-        <Pressable onPress={() => wm.close(win.id)} hitSlop={8}
-          style={[styles.headClose, { backgroundColor: 'rgba(255,255,255,0.14)' }]} pressedStyle={{ backgroundColor: t.danger }}>
-          <Icon name="close" size={16} color="#fff" strokeWidth={2.6} />
-        </Pressable>
       </Animated.View>
       <Animated.View style={{ transform: [{ scale: sc }] }}>
         <Pressable ref={anchor.ref} onLayout={anchor.onLayout} onPress={() => onPick(win)}
@@ -314,8 +311,8 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
   const shown = order.map((id) => wins.find((w) => w.id === id)).filter(Boolean)
     .concat(wins.filter((w) => !order.includes(w.id)));
   const headH = 60;
-  const areaTop = screen.topBar + 84;
-  const areaH = screen.height - areaTop - screen.dock - 24;
+  const top0 = screen.topBar + 84;
+  const areaH = screen.height - top0 - screen.dock - 24;
   const maxH = Math.round(Math.min(areaH - headH, areaH * 0.8));
   const gap = 48;
   const cards = shown.map((w) => {
@@ -323,6 +320,9 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
     if (w.w * s > screen.width * 0.62) s = (screen.width * 0.62) / w.w;
     return { w: Math.round(w.w * s), h: Math.round(w.h * s), s, gap };
   });
+  // The strip sits in the middle of its area (wide windows give short cards).
+  const tallest = cards.reduce((m, c) => Math.max(m, c.h), 0);
+  const areaTop = top0 + Math.max(0, Math.round((areaH - headH - tallest) / 2));
   const pad = cards.length ? (screen.width - cards[0].w) / 2 : 0;
   const offsets = [];
   let x = pad;
@@ -349,11 +349,12 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
     <View pointerEvents={open ? 'auto' : 'none'} style={StyleSheet.absoluteFill}>
       <Under screen={screen} />
       <Animated.View style={[StyleSheet.absoluteFill, { opacity: enter }]}>
-        <Scrim color="rgba(4,6,16,0.72)" onPress={onClose} screen={screen} />
+        <Scrim color="rgba(6,8,20,0.82)" onPress={onClose} screen={screen} />
       </Animated.View>
       <Animated.View pointerEvents="box-none" style={[styles.overviewHead, { top: screen.topBar + 22, opacity: enter }]}>
-        <Text style={styles.overviewTitle}>{shown.length ? 'Recent apps' : 'No open apps'}</Text>
-        {shown.length > 1 && (
+        {/* No title over the cards (they say what this is); just the way out. */}
+        <Text style={styles.overviewTitle}>{shown.length ? '' : 'No open apps'}</Text>
+        {shown.length > 0 && (
           <Pressable ref={closeAll.ref} onLayout={closeAll.onLayout} onPress={() => wm.closeAll()} hitSlop={8}
             style={styles.textButton} pressedStyle={{ backgroundColor: 'rgba(255,255,255,0.14)' }}>
             <Text style={styles.textButtonText}>Close all</Text>
@@ -394,6 +395,10 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
 // Wi-Fi networks in range (Quick Settings' Wi-Fi chevron): tap one to join;
 // a secured network NetworkManager has no password for asks for one first
 // (with the on-screen keyboard up, on touch screens).
+// Connected first, then saved networks, then by name: a list that doesn't
+// reshuffle as signal strengths move.
+const sortNets = (l) => [...l].sort((a, b) => (b.active - a.active) || (b.known - a.known) || a.ssid.localeCompare(b.ssid));
+
 // The last list seen: opening the panel again shows it at once while a
 // fresh scan runs (a scan takes the Tab A7 5-10 s).
 let lastNets = null;
@@ -520,7 +525,7 @@ function WifiNetworks({ settings, onBack }) {
       ) : (
         <View>
         <ScrollView style={{ maxHeight: 340 }} contentContainerStyle={{ paddingBottom: nets.length > 4 ? 24 : 0 }} showsVerticalScrollIndicator={false}>
-          {nets.map((n) => (
+          {sortNets(nets).map((n) => (
             <Pressable key={n.ssid} onPress={() => pick(n)}
               style={[styles.wifiRow, { backgroundColor: n.active ? t.tileOn : t.panelRaised }]} pressedStyle={{ backgroundColor: t.panelLine }}>
               <View style={{ opacity: 0.35 + 0.65 * Math.min(1, n.signal / 80) }}>
@@ -570,12 +575,6 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
       </Animated.View>
       <Animated.View style={[styles.dropRight, { top: screen.topBar + 10, opacity: v, transform: [{ translateY: ty }] }]}>
         <Card style={{ width: 420 }}>
-          {/* Just lock and power: the user, host and battery the header used
-              to show are a login name, a hostname and the status bar again. */}
-          <View style={styles.qsHead}>
-            <IconButton icon="lock" size={48} iconSize={22} onPress={onLock} label="Lock" />
-            <IconButton icon="power" size={48} iconSize={22} active={power} onPress={() => setPower(!power)} label="Power" />
-          </View>
           {wifiOpen && !power && <WifiNetworks settings={settings} onBack={() => setWifiOpen(false)} />}
           {power ? (
             <View style={{ marginBottom: 6 }}>
@@ -606,14 +605,14 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
             ) : (
               <ToggleTile icon="bluetooth" label="Bluetooth" on={settings.bluetooth} onPress={set('bluetooth')} />
             )}
-            <ToggleTile anchor={a.dark} icon="moon" label="Dark style" on={settings.darkMode} onPress={set('darkMode')} />
-            <ToggleTile anchor={a.tablet} icon="tablet" label="Tablet mode" sub={settings.tabletMode ? 'Apps open full' : 'Floating windows'} on={settings.tabletMode} onPress={() => {
+            <ToggleTile anchor={a.dark} icon="contrast" label="Dark style" on={settings.darkMode} onPress={set('darkMode')} />
+            <ToggleTile anchor={a.tablet} icon="tablet" label="Tablet mode" sub={settings.tabletMode ? 'On' : 'Off'} on={settings.tabletMode} onPress={() => {
               const on = !settings.tabletMode;
               setSetting('tabletMode', on);
               if (on) for (const w of windows) if (w.type === 'normal' && !w.transientFor && !w.minimized && !w.snap) wm.maximize(w.id, true);
             }} />
-            <ToggleTile anchor={a.night} icon="sun" label="Night light" on={settings.nightLight} onPress={set('nightLight')} />
-            <ToggleTile icon="bell" label="Do not disturb" on={settings.doNotDisturb} onPress={set('doNotDisturb')} />
+            <ToggleTile anchor={a.night} icon="sunset" label="Night light" on={settings.nightLight} onPress={set('nightLight')} />
+            <ToggleTile icon="moon" label="Do not disturb" on={settings.doNotDisturb} onPress={set('doNotDisturb')} />
           </View>}
           {/* Hosts with a backlight and a sound server (system.backlight,
               system.volume) set the real ones; elsewhere brightness dims the
@@ -623,11 +622,19 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
             setSetting('brightness', b);
             if (system.backlight != null) wm.brightness(b);
           }} />}
-          {!power && !wifiOpen && <Slider icon={settings.muted || settings.volume === 0 ? 'mute' : 'volume'} value={settings.volume} onChange={(x) => {
-            setSetting('volume', x);
-            if (settings.muted) setSetting('muted', false);
-            if (system.volume) wm.volume(x, false);
-          }} />}
+          {/* Power (its menu has Lock) shares the volume slider's row. */}
+          {!wifiOpen && (
+            <View style={styles.qsFoot}>
+              <View style={{ flex: 1 }}>
+                {!power && <Slider icon={settings.muted || settings.volume === 0 ? 'mute' : 'volume'} value={settings.volume} onChange={(x) => {
+                  setSetting('volume', x);
+                  if (settings.muted) setSetting('muted', false);
+                  if (system.volume) wm.volume(x, false);
+                }} />}
+              </View>
+              <IconButton icon="power" size={48} iconSize={22} active={power} onPress={() => setPower(!power)} label="Power" />
+            </View>
+          )}
         </Card>
       </Animated.View>
     </View>
@@ -684,8 +691,9 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
                     onOpen(n);
                     onClose();
                   }}>
-                  {n.app ? <AppIcon app={n.app} size={32} /> : <Icon name={n.icon || 'bell'} size={22} color={t.accent} />}
-                  <View style={{ flex: 1, marginLeft: 12 }}>
+                  {/* The app's icon, or none: the same bell on every card said nothing. */}
+                  {n.app ? <AppIcon app={n.app} size={32} /> : null}
+                  <View style={{ flex: 1, marginLeft: n.app ? 12 : 4 }}>
                     <Text numberOfLines={2} style={[styles.noteTitle, { color: t.text }]}>{n.title}</Text>
                     {n.body ? <Text numberOfLines={2} style={[styles.noteBody, { color: t.textDim }]}>{n.body}</Text> : null}
                   </View>
@@ -707,13 +715,13 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
             <Text style={[styles.calTitle, { color: t.text }, narrow && { width: 300 }]}>{longDate(now)}</Text>
             <View style={styles.calRow}>
               {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((d, i) => (
-                <Text key={i} style={[styles.calHead, { color: i >= 5 ? t.textMute : t.textDim }]}>{d}</Text>
+                <Text key={i} style={[styles.calHead, { color: t.textMute }]}>{d}</Text>
               ))}
             </View>
             <View style={styles.calGrid}>
               {cells.map((c, i) => (
-                <View key={i} style={[styles.calCell, c === now.getDate() && { backgroundColor: t.accent }]}>
-                  <Text style={[styles.calText, { color: c === now.getDate() ? t.accentText : i % 7 >= 5 ? t.textMute : t.text }]}>{c || ''}</Text>
+                <View key={i} style={[styles.calCell, c === now.getDate() && { backgroundColor: t.tileOn }]}>
+                  <Text style={[styles.calText, { color: c === now.getDate() ? t.accentText : t.text }]}>{c || ''}</Text>
                 </View>
               ))}
             </View>
@@ -811,8 +819,8 @@ function Toast({ n, t, onDone, onOpen }) {
     <Animated.View style={{ opacity: v, transform: [{ translateY: ty }] }}>
       {/* A tap puts it away; an app's notification also opens the app (onOpen). */}
       <Pressable onPress={() => { setOpen(false); if ((n.app || n.notifyId != null) && onOpen) onOpen(n); }} style={[styles.toast, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 32px ${t.shadow}` }]}>
-        {n.app ? <AppIcon app={n.app} size={28} /> : <Icon name={n.icon || 'bell'} size={22} color={t.accent} />}
-        <View style={{ flex: 1, marginLeft: 12 }}>
+        {n.app ? <AppIcon app={n.app} size={28} /> : null}
+        <View style={{ flex: 1, marginLeft: n.app ? 12 : 4 }}>
           <Text numberOfLines={1} style={[styles.noteTitle, { color: t.text }]}>{n.title}</Text>
           {n.body ? <Text numberOfLines={2} style={[styles.noteBody, { color: t.textDim }]}>{n.body}</Text> : null}
         </View>
@@ -825,7 +833,7 @@ const styles = StyleSheet.create({
   launcher: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
   search: { height: 64, borderRadius: 32, borderWidth: 1, flexDirection: 'row', alignItems: 'center', paddingLeft: 22, paddingRight: 8 },
   searchInput: { flex: 1, height: 56, fontFamily: font, fontSize: 20, marginLeft: 12 },
-  grid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', paddingBottom: 12 },
+  grid: { flexDirection: 'row', flexWrap: 'wrap', paddingBottom: 12 },
   appTile: { width: 150, height: 156, borderRadius: 24, alignItems: 'center', justifyContent: 'flex-start', paddingTop: 14, paddingHorizontal: 8 },
   appName: { fontFamily: font, fontSize: 15, fontWeight: '500', marginTop: 10, height: 40, textAlign: 'center' },
   empty: { fontFamily: font, fontSize: 16, textAlign: 'center', width: '100%', marginTop: 40 },
@@ -834,7 +842,6 @@ const styles = StyleSheet.create({
   textButton: { height: 48, borderRadius: 24, paddingHorizontal: 20, justifyContent: 'center' },
   textButtonText: { fontFamily: font, color: 'rgba(255,255,255,0.9)', fontSize: 16, fontWeight: '600' },
   headPill: { flexDirection: 'row', alignItems: 'center', height: 40, borderRadius: 20, paddingHorizontal: 14, marginLeft: 8 },
-  headClose: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', marginLeft: 8 },
   pill: { flexDirection: 'row', alignItems: 'center', height: 44, borderRadius: 22, paddingHorizontal: 18, marginTop: 12 },
   pillText: { fontFamily: font, color: '#fff', fontSize: 15, fontWeight: '600', marginLeft: 8 },
   cardHead: { height: 60, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 2, paddingBottom: 12 },
@@ -850,7 +857,7 @@ const styles = StyleSheet.create({
   thumb: { borderRadius: 16, overflow: 'hidden', borderWidth: 3 },
   dropRight: { position: 'absolute', right: 12 },
   dropCenter: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
-  qsHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', marginTop: -8, marginRight: -8, marginBottom: 6 },
+  qsFoot: { flexDirection: 'row', alignItems: 'center', marginRight: -4 },
   powerRow: { height: 60, borderRadius: 18, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, marginBottom: 8 },
   powerText: { fontFamily: font, fontSize: 16, fontWeight: '600', marginLeft: 14 },
   wifiHead: { flexDirection: 'row', alignItems: 'center', marginBottom: 8, marginLeft: -6 },
