@@ -625,6 +625,7 @@ class WM {
   TextInputV2 textInput_;
   int oskH_ = 0;
   void fitMaximized(Client* c);
+  void setupScreenWatch();
   Rect snapSlot(int side) const;
   void toSurface(const Client* c, double* x, double* y) const;
   void raise(Client* c);
@@ -688,6 +689,10 @@ class WM {
   xkb_keymap* keymap_ = nullptr;
   wl_event_source* tickTimer_ = nullptr;
   wl_event_source* systemTimer_ = nullptr;  // publishSystem again (battery, Wi-Fi)
+  // The display going dark (power key, idle timeout) locks the shell:
+  // the backlight read once a second (wm:screen).
+  wl_event_source* screenTimer_ = nullptr;
+  bool screenOn_ = true;
   std::string lastSystem_;
   int frameLog_ = 0;  // JSUI_WL_PERF: frames still to log in full (after an unmap)
   bool tickPending_ = false;
@@ -1076,6 +1081,7 @@ bool WM::setup() {
     return 0;
   }, this);
   wl_event_source_timer_update(systemTimer_, 30000);
+  setupScreenWatch();
   setupControl();
   return output_ != nullptr;
 }
@@ -1677,6 +1683,26 @@ std::string firstLine(const char* cmd) {
   return out;
 }
 }  // namespace
+
+// Mir doesn't tell its clients when repowerd turns the display off; the
+// backlight does (0 when off: the brightness slider stops above that).
+void WM::setupScreenWatch() {
+#ifdef JSUI_WL_MIR
+  if (mir_ && backlightLevel() >= 0) {
+    screenTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
+      auto* w = static_cast<WM*>(u);
+      const bool on = backlightLevel() > 0;
+      if (on != w->screenOn_) {
+        w->screenOn_ = on;
+        if (w->rt_) jsui_post_message(w->rt_, "wm:screen", on ? "{\"on\":true}" : "{\"on\":false}");
+      }
+      wl_event_source_timer_update(w->screenTimer_, 1000);
+      return 0;
+    }, this);
+    wl_event_source_timer_update(screenTimer_, 1000);
+  }
+#endif
+}
 
 void WM::readStartLevels() {
 #ifdef JSUI_WL_MIR
