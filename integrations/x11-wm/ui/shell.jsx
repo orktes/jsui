@@ -8,11 +8,12 @@
 // to take the input there, so the shell tells the host which rectangles it
 // covers (wm:shellRegions) whenever that changes.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AppRegistry, DevSettings, PanResponder, Pressable, StyleSheet, Text, View, useHostMessage, useWindowDimensions, HostTexture } from 'react-native';
+import { Animated, AppRegistry, DevSettings, PanResponder, Pressable, StyleSheet, Text, View, useHostMessage, useWindowDimensions, HostTexture } from 'react-native';
 import Svg, { Defs, Ellipse, RadialGradient, Stop } from 'react-native-svg';
 import { Dock, DockMenu, HomeBar, TopBar, dateText, timeText, useClock } from './bars.jsx';
 import { Icon } from './icons.jsx';
 import { useAnchor } from './anchors.js';
+import { useNativeDragX } from './drag.js';
 import { Keyboard } from './keyboard.jsx';
 import { CalendarPanel, Launcher, LockScreen, Overview, QuickSettings, Toasts } from './panels.jsx';
 import { ThemeContext, dark, font, light } from './theme.js';
@@ -74,34 +75,52 @@ function SnapPreview({ preview, screen, t, bottom }) {
 // Split view: the seam between a left- and a right-snapped window. Drag it to
 // share the screen differently (25-75 %).
 function SplitDivider({ left, right, screen, t, bottom }) {
-  const [x, setX] = useState(null);
+  // The grip follows the finger natively, clamped to 25-75 % of the screen;
+  // the two windows are resized once, on release (resizing them on every
+  // move had both apps relayout at the rate of the finger).
+  const [grabbed, setGrabbed] = useState(false);
+  const [settling, setSettling] = useState(null); // where it was let go, until the windows follow
+  const drag = useNativeDragX();
+  const seam = (left.x + left.w + right.x) / 2;
   const anchor = useAnchor('split.divider');
+  const shift = useMemo(
+    () => drag.dx.interpolate({
+      inputRange: [screen.width * 0.25 - seam, screen.width * 0.75 - seam],
+      outputRange: [screen.width * 0.25 - seam, screen.width * 0.75 - seam],
+      extrapolate: 'clamp',
+    }),
+    [drag, seam, screen.width],
+  );
+  useEffect(() => setSettling(null), [seam]);
   const pan = useMemo(() => {
-    let x0 = 0;
+    const end = (g) => {
+      const nx = Math.max(screen.width * 0.25, Math.min(screen.width * 0.75, seam + g.dx));
+      setSettling(nx);
+      setGrabbed(false);
+      drag.on.setValue(0);
+      if (Math.abs(g.dx) > 1) wm.splitRatio(nx / screen.width);
+    };
     return PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
       onPanResponderTerminationRequest: () => false,
-      onPanResponderGrant: (e) => {
-        x0 = e.nativeEvent.pageX;
-        setX(x0);
+      onPanResponderGrant: () => {
+        drag.on.setValue(1);
+        setGrabbed(true);
       },
-      onPanResponderMove: (e, g) => {
-        const nx = Math.max(screen.width * 0.25, Math.min(screen.width * 0.75, x0 + g.dx));
-        setX(nx);
-        wm.splitRatio(nx / screen.width);
-      },
-      onPanResponderRelease: () => setX(null),
-      onPanResponderTerminate: () => setX(null),
+      onPanResponderRelease: (e, g) => end(g),
+      onPanResponderTerminate: (e, g) => end(g),
     });
-  }, [screen.width]);
-  const cx = x != null ? x : (left.x + left.w + right.x) / 2;
+  }, [screen.width, seam, drag]);
+  const x = grabbed ? seam : settling;
+  const cx = x != null ? x : seam;
   const top = screen.topBar;
   const h = screen.height - screen.topBar - bottom;
   return (
-    <View {...pan.panHandlers} ref={anchor.ref} onLayout={anchor.onLayout} style={{ position: 'absolute', left: cx - 16, top, width: 32, height: h, alignItems: 'center', justifyContent: 'center' }}>
+    <Animated.View {...pan.panHandlers} {...drag.handlers} ref={anchor.ref} onLayout={anchor.onLayout}
+      style={{ position: 'absolute', left: cx - 16, top, width: 32, height: h, alignItems: 'center', justifyContent: 'center', transform: [{ translateX: grabbed ? shift : 0 }] }}>
       <View style={{ width: x != null ? 8 : 6, height: x != null ? 64 : 44, borderRadius: 4, backgroundColor: x != null ? t.accent : t.name === 'dark' ? 'rgba(255,255,255,0.7)' : 'rgba(20,24,60,0.5)' }} />
-    </View>
+    </Animated.View>
   );
 }
 

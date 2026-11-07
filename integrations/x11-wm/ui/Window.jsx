@@ -74,6 +74,8 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
   if (!move.current) {
     let start = null;
     let moved = false;
+    let lastMove = 0;
+    let last = null; // the latest place, sent on release
     let preview = null;
     move.current = PanResponder.create({
       onStartShouldSetPanResponder: () => true,
@@ -102,7 +104,15 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
         const x = Math.round(start.x + g.dx);
         const y = Math.round(Math.max(s.topBar + TB, start.y + g.dy));
         setDrag({ x, y, w: start.w, h: start.h });
-        wm.move(w.id, x, y);
+        // The host only needs the window's place for input and its popups:
+        // a few times a second while it moves (each one re-places the client
+        // surface), and exactly where it lands (release).
+        const now = Date.now();
+        if (now - lastMove >= 100) {
+          lastMove = now;
+          wm.move(w.id, x, y);
+        }
+        last = { x, y };
         let p = null;
         if (w.resizable !== false && w.type === 'normal') {
           if (g.moveY <= s.topBar + 4) p = 'max';
@@ -125,6 +135,8 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
             lastTap.current = now;
           }
         } else {
+          if (last) wm.move(w.id, last.x, last.y);
+          last = null;
           if (preview === 'left' || preview === 'right') wm.snap(w.id, preview);
           // Tablet mode: a dragged app that lands nowhere goes back to full screen.
           else if (preview === 'max' || (latest.current.tablet && start.wasMax && w.type === 'normal')) wm.maximize(w.id, true);
