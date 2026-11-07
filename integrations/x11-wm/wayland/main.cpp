@@ -625,6 +625,7 @@ class WM {
   TextInputV2 textInput_;
   int oskH_ = 0;
   void fitMaximized(Client* c);
+  Rect snapSlot(int side) const;
   void toSurface(const Client* c, double* x, double* y) const;
   void raise(Client* c);
   void focus(Client* c);
@@ -1381,9 +1382,9 @@ void WM::configure(Client* c, int x, int y, int w, int h) {
   }
   c->w = w;
   c->h = h;
-  if (c->maximized && c->mapped && !c->popup) {
+  if ((c->maximized || c->snap) && c->mapped && !c->popup) {
     // Until it commits the new size it shows the one it has, fitted to the
-    // work area (a client that keeps its own size may never commit one:
+    // work area (or its split pane) (a client that keeps its own size may never commit one:
     // after a turn of the screen it would hang off the edge).
     wlr_box geo;
     wlr_xdg_surface_get_geometry(c->xdg, &geo);
@@ -1396,10 +1397,10 @@ void WM::configure(Client* c, int x, int y, int w, int h) {
   publishWindow(c);
 }
 
-// A maximized window whose client keeps a size of its own (Ubuntu Touch's
-// Clock draws 1210x1540 whatever it is told): narrower than the work area,
-// centred in it; bigger, scaled down to fit (letterboxed), centred, with
-// input mapped back (see fit). Anything else is shown 1:1.
+// A maximized or split window whose client keeps a size of its own (Ubuntu
+// Touch's Clock draws 1210x1540 whatever it is told): narrower than the work
+// area (its pane), centred in it; bigger, scaled down to fit (letterboxed),
+// centred, with input mapped back (see fit). Anything else is shown 1:1.
 // Screen px -> the client's surface coordinates (its fit, see Client::fit).
 void WM::toSurface(const Client* c, double* x, double* y) const {
   if (c->popup) {
@@ -1413,8 +1414,8 @@ void WM::toSurface(const Client* c, double* x, double* y) const {
 
 void WM::fitMaximized(Client* c) {
   c->fit = 1;
-  if (c->popup || !c->maximized || c->snap || c->w <= 0 || c->h <= 0) return;
-  Rect wa = workArea();
+  if (c->popup || (!c->maximized && !c->snap) || c->w <= 0 || c->h <= 0) return;
+  Rect wa = c->snap ? snapSlot(c->snap) : workArea();
   c->fit = std::min({1.0, double(wa.w) / c->w, double(wa.h) / c->h});
   c->x = wa.x + std::max(0, int(std::lround((wa.w - c->w * c->fit) / 2)));
   c->y = wa.y + std::max(0, int(std::lround((wa.h - c->h * c->fit) / 2)));
@@ -2007,10 +2008,17 @@ void WM::setSnap(Client* c, int side) {
   c->snap = side;
   wlr_xdg_toplevel_set_maximized(c->tl, false);
   wlr_xdg_toplevel_set_tiled(c->tl, WLR_EDGE_TOP | WLR_EDGE_BOTTOM | (side == 1 ? WLR_EDGE_LEFT : WLR_EDGE_RIGHT));
+  Rect r = snapSlot(side);
+  configure(c, r.x, r.y, r.w, r.h);
+}
+
+// The left (1) or right (2) half of the work area in split view, with a
+// 10 px seam at splitRatio_.
+Rect WM::snapSlot(int side) const {
   Rect wa = workArea();
   int left = int(std::lround(wa.w * splitRatio_)) - P(5);
   int right0 = int(std::lround(wa.w * splitRatio_)) + P(5);
-  configure(c, side == 1 ? wa.x : wa.x + right0, wa.y, side == 1 ? left : wa.w - right0, wa.h);
+  return side == 1 ? Rect{wa.x, wa.y, left, wa.h} : Rect{wa.x + right0, wa.y, wa.w - right0, wa.h};
 }
 
 void WM::setFullscreen(Client* c, bool on) {
@@ -2473,6 +2481,12 @@ void WM::onMessage(const char* name, const char* json) {
 std::string WM::windowJson(const Client* c) const {
   bool resizable = c->maxW == 0 || c->maxW != c->minW || c->maxH != c->minH;
   const char* type = c->dialog ? "dialog" : "normal";
+  // A split window's pane: it may sit centred inside it (fitMaximized).
+  std::string slot;
+  if (c->snap) {
+    Rect r = snapSlot(c->snap);
+    slot = ",\"slot\":[" + wmjson::num(L(r.x)) + "," + wmjson::num(L(r.y)) + "," + wmjson::num(L(r.w)) + "," + wmjson::num(L(r.h)) + "]";
+  }
   std::string j = "{\"id\":" + std::to_string(c->id) + ",\"title\":" + wmjson::quoted(c->title) +
                   ",\"wmClass\":" + wmjson::quoted(c->appIdRaw) + ",\"instance\":" + wmjson::quoted(c->appIdRaw) +
                   ",\"appId\":" + wmjson::quoted(c->appId) + ",\"x\":" + wmjson::num(L(c->x)) +
@@ -2487,7 +2501,7 @@ std::string WM::windowJson(const Client* c) const {
                   ",\"maximized\":" + (c->maximized ? "true" : "false") +
                   ",\"fullscreen\":" + (c->fullscreen ? "true" : "false") + ",\"snap\":\"" +
                   (c->snap == 1 ? "left" : c->snap == 2 ? "right" : "") +
-                  "\",\"icon\":false,\"ready\":" + (c->hasTexture ? "true" : "false") +
+                  "\"" + slot + ",\"icon\":false,\"ready\":" + (c->hasTexture ? "true" : "false") +
                   ",\"pid\":" + std::to_string(c->pid) + ",\"mappedAt\":" + wmjson::num(c->mappedAt) + "}";
   return j;
 }

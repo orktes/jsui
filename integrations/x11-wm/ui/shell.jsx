@@ -13,7 +13,7 @@ import Svg, { Defs, Ellipse, RadialGradient, Stop } from 'react-native-svg';
 import { Dock, DockMenu, HomeBar, TopBar, dateText, timeText, useClock } from './bars.jsx';
 import { Icon } from './icons.jsx';
 import { playTick } from './sounds.js';
-import { takeLaunchOrigin, useAnchor } from './anchors.js';
+import { remeasureAnchors, takeLaunchOrigin, useAnchor } from './anchors.js';
 import { AppIcon } from './AppIcon.jsx';
 import { LAUNCH_TIMEOUT_MS, endLaunch, startLaunch, useLaunching } from './launching.js';
 import { useNativeDragX } from './drag.js';
@@ -89,8 +89,9 @@ function EdgeSwipe({ side, top, bottom, onSwipe }) {
   return <View {...pan.panHandlers} style={{ position: 'absolute', top, bottom, width: EDGE, [side]: 0 }} />;
 }
 
-// The volume buttons' indicator: a pill under the top bar with the level,
-// for 1.5 s after the last press (jsui-wl sets the volume itself).
+// The volume buttons' indicator, for 1.5 s after the last press (jsui-wl sets
+// the volume itself): Quick Settings' volume slider with a shadow, in the
+// toasts' place and width.
 function VolumeOsd({ screen, t }) {
   const [level, setLevel] = useState(null);
   const v = useRef(new Animated.Value(0)).current;
@@ -109,10 +110,10 @@ function VolumeOsd({ screen, t }) {
   useEffect(() => () => clearTimeout(timer.current), []);
   if (level == null) return null;
   return (
-    <Animated.View pointerEvents="none" style={[styles.osd, { top: screen.topBar + 14, left: (screen.width - 320) / 2, backgroundColor: t.panel, borderColor: t.panelLine, opacity: v }]}>
-      <Icon name={level === 0 ? 'mute' : 'volume'} size={22} color={t.text} />
-      <View style={[styles.osdTrack, { backgroundColor: t.panelRaised }]}>
-        <View style={[styles.osdFill, { width: `${Math.round(level * 100)}%`, backgroundColor: t.accent }]} />
+    <Animated.View pointerEvents="none" style={[styles.osd, { top: screen.topBar + 10, left: (screen.width - 400) / 2, backgroundColor: t.panelRaised, boxShadow: `0px 12px 32px ${t.shadow}`, opacity: v }]}>
+      <View style={[styles.osdFill, { width: Math.max(48, level * 400), backgroundColor: t.tileOn }]} />
+      <View style={styles.osdIcon}>
+        <Icon name={level === 0 ? 'mute' : 'volume'} size={22} color="#fff" />
       </View>
     </Animated.View>
   );
@@ -145,7 +146,15 @@ function LaunchSplash({ launch, screen, t, bottom, done, onGone }) {
   }, [grow]);
   useEffect(() => {
     if (!done) return;
-    Animated.timing(fade, { toValue: 0, duration: 180, easing: Easing.in(Easing.quad), useNativeDriver: true }).start(() => onGone(launch.key));
+    // Two frames first: the app's window gets its first frames drawn under the
+    // card (those are slow), and the fade then runs on smooth ones.
+    let raf = requestAnimationFrame(() => {
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        Animated.timing(fade, { toValue: 0, duration: 220, easing: Easing.inOut(Easing.quad), useNativeDriver: true }).start(() => onGone(launch.key));
+      });
+    });
+    return () => raf && cancelAnimationFrame(raf);
   }, [done, fade, onGone, launch.key]);
   const o = from.current;
   const tf = o
@@ -169,13 +178,15 @@ function LaunchSplash({ launch, screen, t, bottom, done, onGone }) {
   );
 }
 
-// Big clock on the empty desktop.
+// Big clock on the empty desktop: the lock screen's clock, in the same place,
+// so unlocking to an empty desktop doesn't move it. The status bar leaves its
+// own time out meanwhile (TopBar `quiet`).
 function DesktopClock({ screen, t }) {
   const now = useClock();
   return (
-    <View pointerEvents="none" style={[styles.deskClock, { top: screen.topBar + 70 }]}>
-      <Text style={[styles.deskTime, { color: t.name === 'dark' ? 'rgba(255,255,255,0.92)' : 'rgba(20,24,60,0.85)' }]}>{timeText(now)}</Text>
-      <Text style={[styles.deskDate, { color: t.name === 'dark' ? 'rgba(255,255,255,0.7)' : 'rgba(20,24,60,0.6)' }]}>{dateText(now)}</Text>
+    <View pointerEvents="none" style={[styles.deskClock, { top: screen.height * 0.18 }]}>
+      <Text style={[styles.deskTime, { color: t.name === 'dark' ? '#fff' : 'rgba(20,24,60,0.85)' }]}>{timeText(now)}</Text>
+      <Text style={[styles.deskDate, { color: t.name === 'dark' ? 'rgba(255,255,255,0.85)' : 'rgba(20,24,60,0.6)' }]}>{dateText(now)}</Text>
     </View>
   );
 }
@@ -211,6 +222,60 @@ function SnapPreview({ preview, screen, t, bottom }) {
   );
 }
 
+// Split view's two panes, under the windows: a window that keeps a size of
+// its own (Clock ignores the size it is given) sits on its pane, not on a
+// hole of wallpaper, and the seam between them is the wallpaper's darkest
+// colour.
+// A split window's pane (the host's `slot`: the window itself may sit
+// centred in it, smaller), or the window's own rect.
+const paneOf = (w) => (w.slot ? { x: w.slot[0], y: w.slot[1], w: w.slot[2], h: w.slot[3] } : w);
+const seamOf = (split) => {
+  const l = paneOf(split.left);
+  return (l.x + l.w + paneOf(split.right).x) / 2;
+};
+
+function splitPanes(split, screen) {
+  const left = paneOf(split.left);
+  const right = paneOf(split.right);
+  const seam = (left.x + left.w + right.x) / 2;
+  const gap = right.x - left.x - left.w;
+  const top = Math.min(left.y, right.y) - screen.titleBar;
+  const height = Math.max(left.y + left.h, right.y + right.h) - top;
+  return {
+    seam: { left: left.x + left.w - 1, width: gap + 2, top, height },
+    left: { left: left.x, width: seam - gap / 2 - left.x, top, height },
+    right: { left: seam + gap / 2, width: screen.width - left.x - seam - gap / 2, top, height },
+  };
+}
+
+function SplitPanes({ split, screen, t }) {
+  const p = splitPanes(split, screen);
+  const pane = { position: 'absolute', borderRadius: 16, backgroundColor: t.chrome };
+  return (
+    <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+      <View style={[{ position: 'absolute', backgroundColor: t.wallTop }, p.seam]} />
+      <View style={[pane, p.left]} />
+      <View style={[pane, p.right]} />
+    </View>
+  );
+}
+
+// A snapped window that draws bigger than its pane (Clock again) is cut at
+// the pane's edges: `pane` clips (a plain rectangle: a rounded clip over a
+// whole window would cost the Tab A7's GPU every frame), the inner view puts
+// the window back in screen coordinates. The same two views without a pane (the whole screen,
+// not clipping): a different tree would mount the Window afresh.
+function PaneClip({ pane, screen, children }) {
+  const p = pane || { left: 0, top: 0, width: screen.width, height: screen.height };
+  return (
+    <View pointerEvents="box-none" style={{ position: 'absolute', left: p.left, top: p.top, width: p.width, height: p.height, overflow: pane ? 'hidden' : 'visible' }}>
+      <View pointerEvents="box-none" style={{ position: 'absolute', left: -p.left, top: -p.top, width: screen.width, height: screen.height }}>
+        {children}
+      </View>
+    </View>
+  );
+}
+
 // Split view: the seam between a left- and a right-snapped window. Drag it to
 // share the screen differently (25-75 %).
 function SplitDivider({ left, right, screen, t, bottom }) {
@@ -222,7 +287,7 @@ function SplitDivider({ left, right, screen, t, bottom }) {
   const [grabbed, setGrabbed] = useState(null); // the seam where the drag began, while held
   const [settling, setSettling] = useState(null); // where it was let go, until the windows follow
   const drag = useNativeDragX();
-  const seam = (left.x + left.w + right.x) / 2;
+  const seam = seamOf({ left, right });
   const base = grabbed != null ? grabbed : seam;
   const anchor = useAnchor('split.divider');
   const shift = useMemo(
@@ -315,6 +380,12 @@ function Shell() {
   const screen = useScreen();
   const dims = useWindowDimensions();
   const scr = useMemo(() => ({ ...screen, width: dims.width, height: dims.height }), [screen, dims.width, dims.height]);
+  // A turn of the screen moves views whose own layout didn't change (the
+  // centred dock): measure every anchor again for test drivers.
+  useEffect(() => {
+    const id = setTimeout(remeasureAnchors, 600);
+    return () => clearTimeout(id);
+  }, [dims.width, dims.height]);
   const settings = useSettings();
   const system = useSystem();
   // The sliders start at the device's backlight and volume (published once
@@ -366,11 +437,14 @@ function Shell() {
     { id: noteId++, icon: 'tablet', title: 'Welcome to the JSUI desktop', body: 'Swipe up from the bottom edge for the dock, further for your recent apps.', time: nowText() },
   ]);
   const [toasts, setToasts] = useState([]);
+  // Locked, a notification only counts up the lock screen's pill: no toast.
+  const lockedRef = useRef(false);
+  lockedRef.current = locked;
 
   const notify = useCallback((n) => {
     const note = { id: noteId++, time: nowText(), ...n };
     setNotes((l) => [note, ...l].slice(0, 30));
-    if (!settings.doNotDisturb) {
+    if (!settings.doNotDisturb && !lockedRef.current) {
       setToasts((l) => [...l, note].slice(-3));
     }
   }, [settings.doNotDisturb]);
@@ -460,7 +534,7 @@ function Shell() {
     appNotes.current.set(msg.id, id);
     const full = { id, time: nowText(), notifyId: msg.id, ...note };
     setNotes((l) => [full, ...l].slice(0, 30));
-    if (!settings.doNotDisturb || msg.urgency >= 2) setToasts((l) => [...l, full].slice(-3));
+    if (!lockedRef.current && (!settings.doNotDisturb || msg.urgency >= 2)) setToasts((l) => [...l, full].slice(-3));
   });
 
   const endLaunchExec = useRef(() => {});
@@ -502,7 +576,7 @@ function Shell() {
       r.push([W - EDGE, scr.topBar, EDGE, H - scr.topBar - bottom]);
     }
     if (split) {
-      const cx = (split.left.x + split.left.w + split.right.x) / 2;
+      const cx = seamOf(split);
       r.push([cx - 16, scr.topBar, 32, H - scr.topBar - bottom]);
     }
     if (oskOn && oskRect) r.push([oskRect.x, oskRect.y, oskRect.width, oskRect.height]);
@@ -624,6 +698,7 @@ function Shell() {
   const onWinMenu = useCallback((win) => setWinMenu(win.id), []);
   const closeWinMenu = useCallback(() => setWinMenu(null), []);
   const overviewUp = panel === 'overview' || closingPanel === 'overview';
+  const panes = split && !overviewUp ? splitPanes(split, scr) : null;
   const panelEl = (name, open) => {
     const common = { key: name, screen: scr, open, onClose: closePanel, onClosed: open ? undefined : panelClosed };
     if (name === 'overview') return <Overview {...common} windows={visible} active={active} apps={apps} />;
@@ -644,10 +719,11 @@ function Shell() {
         {/* Mounted under panels too: mounting it again as one closes laid out and
             painted its big paragraph afresh in the first frame of the close. */}
         {!visible.length && <DesktopClock screen={scr} t={t} />}
-        {split && !overviewUp && <View pointerEvents="none" style={{ position: 'absolute', left: split.left.x + split.left.w - 1, width: split.right.x - split.left.x - split.left.w + 2, top: split.left.y - scr.titleBar, height: split.left.h + scr.titleBar, backgroundColor: t.name === 'dark' ? '#000' : t.wallTop }} />}
+        {split && !overviewUp && <SplitPanes split={split} screen={scr} t={t} />}
         {[...windows, ...closingNow.filter((c) => !map[c.id])].map((w) =>
           w.type === 'dock' || w.type === 'desktop' ? null : (
             <View key={w.id} pointerEvents="box-none" style={[StyleSheet.absoluteFill, { opacity: overviewUp ? 0 : 1 }]}>
+            <PaneClip screen={scr} pane={panes && map[w.id] && (w.id === split.left.id ? panes.left : w.id === split.right.id ? panes.right : null)}>
             <Window
               win={w}
               active={w.id === active}
@@ -662,7 +738,9 @@ function Shell() {
               onMenuClose={closeWinMenu}
               closing={!map[w.id]}
               onClosed={doneClosing}
+              splashed={launching.some((l) => l.app.id === w.appId)}
             />
+            </PaneClip>
             </View>
           ),
         )}
@@ -671,7 +749,7 @@ function Shell() {
         {edges && <EdgeSwipe side="left" top={scr.topBar} bottom={bottom} onSwipe={() => setPanel('launcher')} />}
         {edges && <EdgeSwipe side="right" top={scr.topBar} bottom={bottom} onSwipe={() => setPanel('overview')} />}
         {!fullscreen && (
-          <TopBar screen={scr} solid={solidBar} panel={panel} setPanel={setPanel} settings={settings} system={system} />
+          <TopBar screen={scr} solid={solidBar} panel={panel} setPanel={setPanel} settings={settings} system={system} quiet={!visible.length && (!panel || panel === 'quick')} />
         )}
         {!fullscreen && !oskOn && appMode && !dockShown && (
           <HomeBar screen={scr} windows={windows} setPanel={setPanel} onPeek={onPeek} />
@@ -736,12 +814,14 @@ function Shell() {
 const styles = StyleSheet.create({
   root: { flex: 1, overflow: 'hidden' },
   deskClock: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
-  deskTime: { fontFamily: font, fontSize: 112, fontWeight: '600', letterSpacing: -3, fontVariant: ['tabular-nums'] },
-  deskDate: { fontFamily: font, fontSize: 24, fontWeight: '500', marginTop: -4 },
+  // The same type as the lock screen's clock (panels.jsx lockTime / lockDate).
+  deskTime: { fontFamily: font, fontSize: 132, fontWeight: '700', letterSpacing: -4 },
+  deskDate: { fontFamily: font, fontSize: 26, fontWeight: '500' },
   snap: { position: 'absolute', borderRadius: 18, borderWidth: 3 },
-  osd: { position: 'absolute', width: 320, height: 56, borderRadius: 28, borderWidth: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18 },
-  osdTrack: { flex: 1, height: 8, borderRadius: 4, marginLeft: 14, overflow: 'hidden' },
-  osdFill: { height: 8, borderRadius: 4 },
+  // The same shapes as Quick Settings' sliders (controls.jsx track / fill).
+  osd: { position: 'absolute', width: 400, height: 48, borderRadius: 24, overflow: 'hidden' },
+  osdFill: { position: 'absolute', left: 0, top: 0, bottom: 0, borderRadius: 24 },
+  osdIcon: { position: 'absolute', left: 14, top: 13 },
   splash: { position: 'absolute', left: 0, borderRadius: 18, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
   splashName: { fontFamily: font, fontSize: 22, fontWeight: '600', marginTop: 22, marginBottom: 30 },
   spinner: { width: 34, height: 34, borderRadius: 17, borderWidth: 3.5 },

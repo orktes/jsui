@@ -7,7 +7,7 @@ import {
 import { remeasureAnchors, useAnchor } from './anchors.js';
 import { useNativeDragY } from './drag.js';
 import { AppIcon } from './AppIcon.jsx';
-import { dateText, longMonth, pad2, timeText, useClock } from './bars.jsx';
+import { dateText, longMonth, pad2, useClock } from './bars.jsx';
 import { Card, IconButton, Label, Slider, ToggleTile } from './controls.jsx';
 import { Icon } from './icons.jsx';
 import { playNotify } from './sounds.js';
@@ -42,7 +42,7 @@ function useSpringIn(open = true) {
 
 // ---------------------------------------------------------------- Launcher
 
-const AppTile = memo(function AppTile({ app, onLaunch }) {
+const AppTile = memo(function AppTile({ app, width, onLaunch }) {
   const t = useTheme();
   const anchor = useAnchor(`app.${app.id}`);
   return (
@@ -50,7 +50,7 @@ const AppTile = memo(function AppTile({ app, onLaunch }) {
       ref={anchor.ref}
       onLayout={anchor.onLayout}
       onPress={() => onLaunch(app)}
-      style={styles.appTile} pressedStyle={{ backgroundColor: 'rgba(255,255,255,0.12)', transform: [{ scale: 0.95 }] }}
+      style={[styles.appTile, { width }]} pressedStyle={{ backgroundColor: 'rgba(255,255,255,0.12)', transform: [{ scale: 0.95 }] }}
     >
       <AppIcon app={app} size={72} />
       <Text numberOfLines={2} style={[styles.appName, { color: '#fff' }]}>{cleanName(app.name)}</Text>
@@ -138,7 +138,21 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
     onClose();
   }, [onLaunch, onClose]);
   const sc = pop.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1] });
-  const cols = Math.max(3, Math.min(8, Math.floor((screen.width - 160) / 150)));
+  // As many 150 px columns as fit with 24 px margins, then as few as give the
+  // same number of rows (18 apps: 6 x 3, not 7 + 7 + 4). When that many rows
+  // don't fit the height (portrait), narrower columns (down to 120 px) until
+  // every app shows without scrolling. The search field spans the grid.
+  const bottom = settings.osk ? 330 : screen.dock + 12;
+  // (A tile ends in its second label line and padding: the last row may
+  // reach 40 px into the gap above the dock.)
+  const rowsFit = Math.max(1, Math.floor((screen.height - screen.topBar - 28 - 64 - 28 - bottom + 40) / 156));
+  const fit = Math.max(3, Math.min(8, Math.floor((screen.width - 48) / 150)));
+  let cols = Math.min(fit, Math.max(3, Math.ceil(apps.length / Math.ceil(apps.length / fit))));
+  let tileW = 150;
+  if (Math.ceil(apps.length / cols) > rowsFit) {
+    cols = Math.min(Math.floor((screen.width - 48) / 120), Math.ceil(apps.length / rowsFit));
+    tileW = Math.min(150, Math.floor((screen.width - 48) / cols));
+  }
   return (
     <View pointerEvents="box-none" style={StyleSheet.absoluteFill}>
       <Under screen={screen} />
@@ -152,9 +166,9 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
           field's caret and focus change at every open, and inside the grid's
           layer they made it stale (the whole grid painted again). */}
       <View pointerEvents={open ? 'box-none' : 'none'} style={StyleSheet.absoluteFill}>
-        <Animated.View pointerEvents="box-none" style={[styles.launcher, { top: screen.topBar + 28, bottom: settings.osk ? 330 : screen.dock + 12, transform: [{ scale: sc }] }]}>
+        <Animated.View pointerEvents="box-none" style={[styles.launcher, { top: screen.topBar + 28, bottom, transform: [{ scale: sc }] }]}>
           <Animated.View style={{ opacity: v }}>
-            <View style={[styles.search, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 36px ${t.shadow}` }]}>
+            <View style={[styles.search, { width: cols * tileW - 32, backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 36px ${t.shadow}` }]}>
               <Icon name="search" size={24} color={t.textDim} />
               <TextInput
                 ref={input}
@@ -169,11 +183,11 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
               <IconButton icon="keyboard" size={44} iconSize={22} active={settings.osk} onPress={() => setSetting('osk', !settings.osk)} />
             </View>
           </Animated.View>
-          <Animated.View style={{ flex: 1, marginTop: 28, width: cols * 150, opacity: v }}>
-            {query ? <Label style={{ marginBottom: 8, marginLeft: 10, color: 'rgba(255,255,255,0.7)' }}>{`${list.length} RESULT${list.length === 1 ? '' : 'S'}`}</Label> : null}
+          <Animated.View style={{ flex: 1, marginTop: 28, width: cols * tileW, opacity: v }}>
+            {query ? <Label style={{ marginBottom: 8, marginLeft: 10, color: 'rgba(255,255,255,0.7)' }}>{`${list.length} result${list.length === 1 ? '' : 's'}`}</Label> : null}
             <ScrollView contentContainerStyle={styles.grid} showsVerticalScrollIndicator={false}>
               {list.map((app) => (
-                <AppTile key={app.id} app={app} onLaunch={launch} />
+                <AppTile key={app.id} app={app} width={tileW} onLaunch={launch} />
               ))}
               {!list.length && <Text style={[styles.empty, { color: 'rgba(255,255,255,0.6)' }]}>No apps match “{query}”</Text>}
             </ScrollView>
@@ -197,7 +211,8 @@ function remeasureSoon() {
 // first, flung with the finger and snapping to the card in the middle. The
 // current window shrinks into its card when the switcher opens, and the card
 // you pick grows back into the full window when it closes. Tap a card to
-// switch, swipe it up to close it, "Split" puts it next to the current window.
+// switch, swipe it up to close it ("Close all" closes every one), "Split" puts
+// it next to the current window.
 const SwitcherCard = memo(function SwitcherCard({ win, card, enter, from, title, apps, screen, onPick, onSplit, canSplit }) {
   const t = useTheme();
   const anchor = useAnchor(`switcher.${win.id}`);
@@ -268,10 +283,6 @@ const SwitcherCard = memo(function SwitcherCard({ win, card, enter, from, title,
             <Text style={styles.pillText}>Split</Text>
           </Pressable>
         )}
-        <Pressable onPress={() => wm.close(win.id)} hitSlop={8}
-          style={[styles.headClose, { backgroundColor: 'rgba(255,255,255,0.14)' }]} pressedStyle={{ backgroundColor: t.danger }}>
-          <Icon name="close" size={16} color="#fff" strokeWidth={2.6} />
-        </Pressable>
       </Animated.View>
       <Animated.View style={{ transform: [{ scale: sc }] }}>
         <Pressable ref={anchor.ref} onLayout={anchor.onLayout} onPress={() => onPick(win)}
@@ -301,8 +312,8 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
   const shown = order.map((id) => wins.find((w) => w.id === id)).filter(Boolean)
     .concat(wins.filter((w) => !order.includes(w.id)));
   const headH = 60;
-  const areaTop = screen.topBar + 84;
-  const areaH = screen.height - areaTop - screen.dock - 24;
+  const top0 = screen.topBar + 84;
+  const areaH = screen.height - top0 - screen.dock - 24;
   const maxH = Math.round(Math.min(areaH - headH, areaH * 0.8));
   const gap = 48;
   const cards = shown.map((w) => {
@@ -310,6 +321,9 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
     if (w.w * s > screen.width * 0.62) s = (screen.width * 0.62) / w.w;
     return { w: Math.round(w.w * s), h: Math.round(w.h * s), s, gap };
   });
+  // The strip sits in the middle of its area (wide windows give short cards).
+  const tallest = cards.reduce((m, c) => Math.max(m, c.h), 0);
+  const areaTop = top0 + Math.max(0, Math.round((areaH - headH - tallest) / 2));
   const pad = cards.length ? (screen.width - cards[0].w) / 2 : 0;
   const offsets = [];
   let x = pad;
@@ -336,11 +350,12 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
     <View pointerEvents={open ? 'auto' : 'none'} style={StyleSheet.absoluteFill}>
       <Under screen={screen} />
       <Animated.View style={[StyleSheet.absoluteFill, { opacity: enter }]}>
-        <Scrim color="rgba(4,6,16,0.72)" onPress={onClose} screen={screen} />
+        <Scrim color="rgba(6,8,20,0.82)" onPress={onClose} screen={screen} />
       </Animated.View>
       <Animated.View pointerEvents="box-none" style={[styles.overviewHead, { top: screen.topBar + 22, opacity: enter }]}>
-        <Text style={styles.overviewTitle}>{shown.length ? 'Recent apps' : 'No open apps'}</Text>
-        {shown.length > 1 && (
+        {/* No title over the cards (they say what this is); just the way out. */}
+        <Text style={styles.overviewTitle}>{shown.length ? '' : 'No open apps'}</Text>
+        {shown.length > 0 && (
           <Pressable ref={closeAll.ref} onLayout={closeAll.onLayout} onPress={() => wm.closeAll()} hitSlop={8}
             style={styles.textButton} pressedStyle={{ backgroundColor: 'rgba(255,255,255,0.14)' }}>
             <Text style={styles.textButtonText}>Close all</Text>
@@ -381,9 +396,17 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
 // Wi-Fi networks in range (Quick Settings' Wi-Fi chevron): tap one to join;
 // a secured network NetworkManager has no password for asks for one first
 // (with the on-screen keyboard up, on touch screens).
+// Connected first, then saved networks, then by name: a list that doesn't
+// reshuffle as signal strengths move.
+const sortNets = (l) => [...l].sort((a, b) => (b.active - a.active) || (b.known - a.known) || a.ssid.localeCompare(b.ssid));
+
+// The last list seen: opening the panel again shows it at once while a
+// fresh scan runs (a scan takes the Tab A7 5-10 s).
+let lastNets = null;
+
 function WifiNetworks({ settings, onBack }) {
   const t = useTheme();
-  const [nets, setNets] = useState(null);
+  const [nets, setNets] = useState(lastNets);
   const [scans, setScans] = useState(0); // answers so far (a cached list, then a fresh scan)
   const [ask, setAsk] = useState(null); // the network a password is being typed for
   const [password, setPassword] = useState('');
@@ -393,7 +416,8 @@ function WifiNetworks({ settings, onBack }) {
   const osk = useRef(settings.osk);
   osk.current = settings.osk;
   useHostMessage('wm:wifiNetworks', (m) => {
-    setNets(m.networks || []);
+    lastNets = m.networks || [];
+    setNets(lastNets);
     setScans((n) => n + 1);
   });
   const lastJoin = useRef(null); // { net, typed }
@@ -417,7 +441,12 @@ function WifiNetworks({ settings, onBack }) {
   useEffect(() => {
     wm.wifiScan(false);
     wm.wifiScan(true);
-    return lowerOsk;
+    // Scans again while open, instead of a refresh button.
+    const id = setInterval(() => wm.wifiScan(true), 15000);
+    return () => {
+      clearInterval(id);
+      lowerOsk();
+    };
   }, []);
   // Keys (the on-screen keyboard's too) go to the shell while the password
   // field is up, not to the app under it.
@@ -488,31 +517,38 @@ function WifiNetworks({ settings, onBack }) {
   }
   return (
     <View style={{ marginBottom: 6 }}>
-      {head('Wi-Fi', onBack,
-        <IconButton icon="refresh" size={44} iconSize={20} onPress={() => { setScans(1); wm.wifiScan(true); }} label="Scan" />)}
+      {head('Wi-Fi', onBack)}
       {error ? <Text style={[styles.wifiNote, { color: '#ff6b6b' }]}>{error}</Text> : null}
       {nets == null || (scans < 2 && !nets.length) ? (
         <Text style={[styles.wifiNote, { color: t.textMute }]}>Searching for networks…</Text>
       ) : !nets.length ? (
         <Text style={[styles.wifiNote, { color: t.textMute }]}>No networks found.</Text>
       ) : (
-        <ScrollView style={{ maxHeight: 340 }} showsVerticalScrollIndicator={false}>
-          {nets.map((n) => (
+        <View>
+        <ScrollView style={{ maxHeight: 340 }} contentContainerStyle={{ paddingBottom: nets.length > 4 ? 24 : 0 }} showsVerticalScrollIndicator={false}>
+          {sortNets(nets).map((n) => (
             <Pressable key={n.ssid} onPress={() => pick(n)}
               style={[styles.wifiRow, { backgroundColor: n.active ? t.tileOn : t.panelRaised }]} pressedStyle={{ backgroundColor: t.panelLine }}>
               <View style={{ opacity: 0.35 + 0.65 * Math.min(1, n.signal / 80) }}>
                 <Icon name="wifi" size={22} color={n.active ? t.accentText : t.text} />
               </View>
+              {/* One line unless there is news: the lock already says secured. */}
               <View style={{ flex: 1, marginLeft: 14 }}>
                 <Text numberOfLines={1} style={[styles.wifiName, { color: n.active ? t.accentText : t.text }]}>{n.ssid}</Text>
-                <Text numberOfLines={1} style={[styles.tileSubText, { color: n.active ? 'rgba(255,255,255,0.8)' : t.textMute }]}>
-                  {joining === n.ssid ? 'Joining…' : n.active ? 'Connected' : n.known ? 'Saved' : n.secure ? 'Secured' : 'Open'}
-                </Text>
+                {joining === n.ssid || n.active ? (
+                  <Text numberOfLines={1} style={[styles.tileSubText, { color: n.active ? 'rgba(255,255,255,0.8)' : t.textMute }]}>
+                    {joining === n.ssid ? 'Joining…' : 'Connected'}
+                  </Text>
+                ) : null}
               </View>
-              {n.secure && <Icon name="lock" size={18} color={n.active ? t.accentText : t.textDim} />}
+              {n.secure && !n.active && <Icon name="lock" size={18} color={t.textDim} />}
             </Pressable>
           ))}
         </ScrollView>
+        {nets.length > 4 && (
+          <View pointerEvents="none" style={[styles.fadeBottom, { experimental_backgroundImage: `linear-gradient(180deg, rgba(0,0,0,0) 0%, ${t.panel} 100%)` }]} />
+        )}
+        </View>
       )}
     </View>
   );
@@ -540,15 +576,6 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
       </Animated.View>
       <Animated.View style={[styles.dropRight, { top: screen.topBar + 10, opacity: v, transform: [{ translateY: ty }] }]}>
         <Card style={{ width: 420 }}>
-          <View style={styles.qsHead}>
-            <View style={[styles.avatar, { backgroundColor: t.accent }]}><Icon name="user" size={24} color="#fff" /></View>
-            <View style={{ flex: 1, marginLeft: 12 }}>
-              <Text style={[styles.qsUser, { color: t.text }]}>{system.user}</Text>
-              <Text style={[styles.qsHost, { color: t.textMute }]}>{system.hostname}{system.battery ? ` · ${system.battery.percent}%${system.battery.charging ? ' charging' : ''}` : ' · on AC power'}</Text>
-            </View>
-            <IconButton icon="lock" size={48} iconSize={22} onPress={onLock} label="Lock" />
-            <IconButton icon="power" size={48} iconSize={22} active={power} onPress={() => setPower(!power)} label="Power" />
-          </View>
           {wifiOpen && !power && <WifiNetworks settings={settings} onBack={() => setWifiOpen(false)} />}
           {power ? (
             <View style={{ marginBottom: 6 }}>
@@ -579,14 +606,14 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
             ) : (
               <ToggleTile icon="bluetooth" label="Bluetooth" on={settings.bluetooth} onPress={set('bluetooth')} />
             )}
-            <ToggleTile anchor={a.dark} icon="moon" label="Dark style" on={settings.darkMode} onPress={set('darkMode')} />
-            <ToggleTile anchor={a.tablet} icon="tablet" label="Tablet mode" sub={settings.tabletMode ? 'Apps open full' : 'Floating windows'} on={settings.tabletMode} onPress={() => {
+            <ToggleTile anchor={a.dark} icon="contrast" label="Dark style" on={settings.darkMode} onPress={set('darkMode')} />
+            <ToggleTile anchor={a.tablet} icon="tablet" label="Tablet mode" sub={settings.tabletMode ? 'On' : 'Off'} on={settings.tabletMode} onPress={() => {
               const on = !settings.tabletMode;
               setSetting('tabletMode', on);
               if (on) for (const w of windows) if (w.type === 'normal' && !w.transientFor && !w.minimized && !w.snap) wm.maximize(w.id, true);
             }} />
-            <ToggleTile anchor={a.night} icon="sun" label="Night light" on={settings.nightLight} onPress={set('nightLight')} />
-            <ToggleTile icon="bell" label="Do not disturb" on={settings.doNotDisturb} onPress={set('doNotDisturb')} />
+            <ToggleTile anchor={a.night} icon="sunset" label="Night light" on={settings.nightLight} onPress={set('nightLight')} />
+            <ToggleTile icon="moon" label="Do not disturb" on={settings.doNotDisturb} onPress={set('doNotDisturb')} />
           </View>}
           {/* Hosts with a backlight and a sound server (system.backlight,
               system.volume) set the real ones; elsewhere brightness dims the
@@ -596,11 +623,19 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
             setSetting('brightness', b);
             if (system.backlight != null) wm.brightness(b);
           }} />}
-          {!power && !wifiOpen && <Slider icon={settings.muted || settings.volume === 0 ? 'mute' : 'volume'} value={settings.volume} onChange={(x) => {
-            setSetting('volume', x);
-            if (settings.muted) setSetting('muted', false);
-            if (system.volume) wm.volume(x, false);
-          }} />}
+          {/* Power (its menu has Lock) shares the volume slider's row. */}
+          {!wifiOpen && (
+            <View style={styles.qsFoot}>
+              <View style={{ flex: 1 }}>
+                {!power && <Slider icon={settings.muted || settings.volume === 0 ? 'mute' : 'volume'} value={settings.volume} onChange={(x) => {
+                  setSetting('volume', x);
+                  if (settings.muted) setSetting('muted', false);
+                  if (system.volume) wm.volume(x, false);
+                }} />}
+              </View>
+              <IconButton icon="power" size={48} iconSize={22} active={power} onPress={() => setPower(!power)} label="Power" />
+            </View>
+          )}
         </Card>
       </Animated.View>
     </View>
@@ -626,18 +661,29 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
   const v = useEntrance(open, 200, onClosed);
   const ty = v.interpolate({ inputRange: [0, 1], outputRange: [-24, 0] });
   const cells = monthGrid(now);
+  const narrow = screen.width < 760;
   return (
     <View pointerEvents={open ? 'auto' : 'none'} style={StyleSheet.absoluteFill}>
       <Animated.View style={[StyleSheet.absoluteFill, { opacity: v }]}>
         <Pressable style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.25)' }]} onPress={onClose} />
       </Animated.View>
       <Animated.View style={[styles.dropCenter, { top: screen.topBar + 10, opacity: v, transform: [{ translateY: ty }] }]}>
-        <Card style={{ width: 720, flexDirection: 'row' }}>
-          <View style={{ flex: 1, paddingRight: 18 }}>
-            <Label>NOTIFICATIONS</Label>
-            {notifications.length === 0 && <Text style={[styles.empty, { color: t.textMute, marginTop: 30 }]}>You're all caught up</Text>}
+        {/* Side by side; on a narrow (portrait) screen the calendar goes on
+            top of the notifications, with the same 12 px margins as quick
+            settings. The status bar right above shows the time. */}
+        <Card style={narrow ? { width: screen.width - 24, flexDirection: 'column-reverse' } : { width: 720, flexDirection: 'row' }}>
+          <View style={narrow ? { paddingTop: 16 } : { flex: 1, paddingRight: 18 }}>
+            <View style={styles.notesHead}>
+              <Label style={{ flex: 1 }}>Notifications</Label>
+              {notifications.length > 0 && (
+                <Pressable onPress={onClear} hitSlop={8} style={styles.clearAll} pressedStyle={{ backgroundColor: t.panelLine }}>
+                  <Text style={[styles.clearAllText, { color: t.accent }]}>Clear all</Text>
+                </Pressable>
+              )}
+            </View>
+            {notifications.length === 0 && <Text style={[styles.empty, { color: t.textMute, marginTop: 30, marginBottom: 30 }]}>You're all caught up</Text>}
             <View style={{ maxHeight: 340, marginTop: 8 }}>
-            <ScrollView style={{ maxHeight: 340 }} contentContainerStyle={{ paddingBottom: 24 }}>
+            <ScrollView style={{ maxHeight: 340 }} contentContainerStyle={{ paddingBottom: notifications.length > 3 ? 24 : 0 }}>
               {notifications.map((n) => (
                 <Pressable key={n.id} style={[styles.note, { backgroundColor: t.panelRaised }]} pressedStyle={{ backgroundColor: t.panelLine }}
                   onPress={() => {
@@ -646,9 +692,10 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
                     onOpen(n);
                     onClose();
                   }}>
-                  {n.app ? <AppIcon app={n.app} size={32} /> : <Icon name={n.icon || 'bell'} size={22} color={t.accent} />}
-                  <View style={{ flex: 1, marginLeft: 12 }}>
-                    <Text numberOfLines={1} style={[styles.noteTitle, { color: t.text }]}>{n.title}</Text>
+                  {/* The app's icon, or none: the same bell on every card said nothing. */}
+                  {n.app ? <AppIcon app={n.app} size={32} /> : null}
+                  <View style={{ flex: 1, marginLeft: n.app ? 12 : 4 }}>
+                    <Text numberOfLines={2} style={[styles.noteTitle, { color: t.text }]}>{n.title}</Text>
                     {n.body ? <Text numberOfLines={2} style={[styles.noteBody, { color: t.textDim }]}>{n.body}</Text> : null}
                   </View>
                   <Text style={[styles.noteTime, { color: t.textMute }]}>{n.time}</Text>
@@ -658,28 +705,24 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
                 </Pressable>
               ))}
             </ScrollView>
-            <View pointerEvents="none" style={[styles.fadeBottom, { experimental_backgroundImage: `linear-gradient(180deg, rgba(0,0,0,0) 0%, ${t.panel} 100%)` }]} />
-            </View>
-            {notifications.length > 0 && (
-              <Pressable onPress={onClear} style={[styles.pill, { alignSelf: 'flex-start', marginTop: 10, backgroundColor: t.panelRaised }]} pressedStyle={{ backgroundColor: t.panelLine }}>
-                <Text style={[styles.pillText, { color: t.text, marginLeft: 0 }]}>Clear all</Text>
-              </Pressable>
+            {/* Only when the list can scroll: over a short list it showed as an empty card. */}
+            {notifications.length > 3 && (
+              <View pointerEvents="none" style={[styles.fadeBottom, { experimental_backgroundImage: `linear-gradient(180deg, rgba(0,0,0,0) 0%, ${t.panel} 100%)` }]} />
             )}
+            </View>
           </View>
-          <View style={{ width: 1, backgroundColor: t.panelLine }} />
-          <View style={{ width: 320, paddingLeft: 18 }}>
-            <Text style={[styles.bigTime, { color: t.text }]}>{timeText(now)}</Text>
-            <Text style={[styles.bigDate, { color: t.textDim }]}>{dateText(now)} {now.getFullYear()}</Text>
-            <Label style={{ marginTop: 16, marginBottom: 6 }}>{longMonth(now).toUpperCase()}</Label>
+          <View style={narrow ? { height: 1, backgroundColor: t.panelLine } : { width: 1, backgroundColor: t.panelLine }} />
+          <View style={narrow ? { alignItems: 'center', paddingBottom: 16 } : { width: 320, paddingLeft: 18 }}>
+            <Text style={[styles.calTitle, { color: t.text }, narrow && { width: 300 }]}>{longDate(now)}</Text>
             <View style={styles.calRow}>
               {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((d, i) => (
-                <Text key={i} style={[styles.calHead, { color: i >= 5 ? t.textMute : t.textDim }]}>{d}</Text>
+                <Text key={i} style={[styles.calHead, { color: t.textMute }]}>{d}</Text>
               ))}
             </View>
             <View style={styles.calGrid}>
               {cells.map((c, i) => (
-                <View key={i} style={[styles.calCell, c === now.getDate() && { backgroundColor: t.accent }]}>
-                  <Text style={[styles.calText, { color: c === now.getDate() ? t.accentText : i % 7 >= 5 ? t.textMute : t.text }]}>{c || ''}</Text>
+                <View key={i} style={[styles.calCell, c === now.getDate() && { backgroundColor: t.tileOn }]}>
+                  <Text style={[styles.calText, { color: c === now.getDate() ? t.accentText : t.text }]}>{c || ''}</Text>
                 </View>
               ))}
             </View>
@@ -689,6 +732,10 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
     </View>
   );
 });
+
+// "Saturday 7 November": the calendar's heading.
+const longDate = (d) =>
+  `${['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][d.getDay()]} ${d.getDate()} ${longMonth(d)}`;
 
 // --------------------------------------------------------------- Lock screen
 
@@ -774,8 +821,8 @@ function Toast({ n, t, onDone, onOpen }) {
     <Animated.View style={{ opacity: v, transform: [{ translateY: ty }] }}>
       {/* A tap puts it away; an app's notification also opens the app (onOpen). */}
       <Pressable onPress={() => { setOpen(false); if ((n.app || n.notifyId != null) && onOpen) onOpen(n); }} style={[styles.toast, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 32px ${t.shadow}` }]}>
-        {n.app ? <AppIcon app={n.app} size={28} /> : <Icon name={n.icon || 'bell'} size={22} color={t.accent} />}
-        <View style={{ flex: 1, marginLeft: 12 }}>
+        {n.app ? <AppIcon app={n.app} size={28} /> : null}
+        <View style={{ flex: 1, marginLeft: n.app ? 12 : 4 }}>
           <Text numberOfLines={1} style={[styles.noteTitle, { color: t.text }]}>{n.title}</Text>
           {n.body ? <Text numberOfLines={2} style={[styles.noteBody, { color: t.textDim }]}>{n.body}</Text> : null}
         </View>
@@ -786,9 +833,9 @@ function Toast({ n, t, onDone, onOpen }) {
 
 const styles = StyleSheet.create({
   launcher: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
-  search: { width: 620, height: 64, borderRadius: 32, borderWidth: 1, flexDirection: 'row', alignItems: 'center', paddingLeft: 22, paddingRight: 8 },
+  search: { height: 64, borderRadius: 32, borderWidth: 1, flexDirection: 'row', alignItems: 'center', paddingLeft: 22, paddingRight: 8 },
   searchInput: { flex: 1, height: 56, fontFamily: font, fontSize: 20, marginLeft: 12 },
-  grid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', paddingBottom: 12 },
+  grid: { flexDirection: 'row', flexWrap: 'wrap', paddingBottom: 12 },
   appTile: { width: 150, height: 156, borderRadius: 24, alignItems: 'center', justifyContent: 'flex-start', paddingTop: 14, paddingHorizontal: 8 },
   appName: { fontFamily: font, fontSize: 15, fontWeight: '500', marginTop: 10, height: 40, textAlign: 'center' },
   empty: { fontFamily: font, fontSize: 16, textAlign: 'center', width: '100%', marginTop: 40 },
@@ -797,7 +844,6 @@ const styles = StyleSheet.create({
   textButton: { height: 48, borderRadius: 24, paddingHorizontal: 20, justifyContent: 'center' },
   textButtonText: { fontFamily: font, color: 'rgba(255,255,255,0.9)', fontSize: 16, fontWeight: '600' },
   headPill: { flexDirection: 'row', alignItems: 'center', height: 40, borderRadius: 20, paddingHorizontal: 14, marginLeft: 8 },
-  headClose: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', marginLeft: 8 },
   pill: { flexDirection: 'row', alignItems: 'center', height: 44, borderRadius: 22, paddingHorizontal: 18, marginTop: 12 },
   pillText: { fontFamily: font, color: '#fff', fontSize: 15, fontWeight: '600', marginLeft: 8 },
   cardHead: { height: 60, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 2, paddingBottom: 12 },
@@ -813,7 +859,7 @@ const styles = StyleSheet.create({
   thumb: { borderRadius: 16, overflow: 'hidden', borderWidth: 3 },
   dropRight: { position: 'absolute', right: 12 },
   dropCenter: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
-  qsHead: { flexDirection: 'row', alignItems: 'center', marginBottom: 14 },
+  qsFoot: { flexDirection: 'row', alignItems: 'center', marginRight: -4 },
   powerRow: { height: 60, borderRadius: 18, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, marginBottom: 8 },
   powerText: { fontFamily: font, fontSize: 16, fontWeight: '600', marginLeft: 14 },
   wifiHead: { flexDirection: 'row', alignItems: 'center', marginBottom: 8, marginLeft: -6 },
@@ -823,17 +869,16 @@ const styles = StyleSheet.create({
   tileSubText: { fontFamily: font, fontSize: 13, marginTop: 1 },
   wifiInput: { height: 54, borderRadius: 16, borderWidth: 1, paddingHorizontal: 16, fontFamily: font, fontSize: 17 },
   wifiNote: { fontFamily: font, fontSize: 14, marginVertical: 10, marginHorizontal: 6 },
-  avatar: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
-  qsUser: { fontFamily: font, fontSize: 17, fontWeight: '700' },
-  qsHost: { fontFamily: font, fontSize: 13, marginTop: 2 },
   tiles: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 10 },
   note: { flexDirection: 'row', alignItems: 'center', borderRadius: 18, padding: 14, marginBottom: 8 },
   noteTitle: { fontFamily: font, fontSize: 15, fontWeight: '600' },
   noteBody: { fontFamily: font, fontSize: 13, marginTop: 2 },
   noteTime: { fontFamily: font, fontSize: 12, marginLeft: 8 },
   noteClose: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginLeft: 6, marginRight: -6 },
-  bigTime: { fontFamily: font, fontSize: 52, fontWeight: '700', letterSpacing: -1 },
-  bigDate: { fontFamily: font, fontSize: 16, fontWeight: '500' },
+  calTitle: { fontFamily: font, fontSize: 18, fontWeight: '700', marginBottom: 12, marginLeft: 4 },
+  notesHead: { flexDirection: 'row', alignItems: 'center', height: 32 },
+  clearAll: { height: 32, borderRadius: 16, paddingHorizontal: 12, justifyContent: 'center', marginRight: -8 },
+  clearAllText: { fontFamily: font, fontSize: 14, fontWeight: '600' },
   calRow: { flexDirection: 'row' },
   calHead: { width: 44, textAlign: 'center', fontFamily: font, fontSize: 12, fontWeight: '700' },
   calGrid: { flexDirection: 'row', flexWrap: 'wrap', width: 308 },

@@ -62,7 +62,9 @@ function Battery({ level, charging, color, low }) {
   );
 }
 
-export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, settings, system }) {
+// `quiet`: the desktop's big clock is up, so the bar leaves out its own time
+// (still there to tap for the calendar).
+export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, settings, system, quiet }) {
   const t = useTheme();
   const now = useClock();
   const apps = useAnchor('topbar.apps');
@@ -73,7 +75,9 @@ export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, set
   const toggle = (p) => setPanel(panel === p ? null : p);
   const battery = system.battery;
   return (
-    <View {...swipe.panHandlers} style={[styles.bar, { height: screen.topBar, backgroundColor: solid ? t.bar : 'transparent', borderColor: solid ? t.panelLine : 'transparent' }]}>
+    // Solid (over a full-screen or split app): the colour of the app's header
+    // right under it, with no line between, so the two read as one bar.
+    <View {...swipe.panHandlers} style={[styles.bar, { height: screen.topBar, backgroundColor: solid ? t.chromeActive : 'transparent' }]}>
       <View style={styles.side}>
         <Pressable ref={apps.ref} onLayout={apps.onLayout} onPress={() => toggle('launcher')}
           style={[styles.barButton, panel === 'launcher' && { backgroundColor: t.panelLine }]} pressedStyle={{ backgroundColor: t.panelLine }}>
@@ -83,8 +87,8 @@ export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, set
       </View>
       <Pressable ref={clock.ref} onLayout={clock.onLayout} onPress={() => toggle('calendar')}
         style={[styles.clock, panel === 'calendar' && { backgroundColor: t.panelLine }]} pressedStyle={{ backgroundColor: t.panelLine }}>
-        <Text style={[styles.barText, styles.tabular, { color: t.textDim, fontWeight: '500' }]}>{dateText(now)}</Text>
-        <Text style={[styles.barText, styles.tabular, { color: t.text, marginLeft: 10 }]}>{timeText(now)}</Text>
+        <Text style={[styles.barText, styles.tabular, { color: t.textDim, fontWeight: '500', opacity: quiet ? 0 : 1 }]}>{dateText(now)}</Text>
+        <Text style={[styles.barText, styles.tabular, { color: t.text, marginLeft: 10, opacity: quiet ? 0 : 1 }]}>{timeText(now)}</Text>
         {settings.doNotDisturb && <View style={{ marginLeft: 8 }}><Icon name="moon" size={16} color={t.textDim} /></View>}
       </Pressable>
       <View style={[styles.side, { justifyContent: 'flex-end' }]}>
@@ -256,11 +260,12 @@ export const Dock = memo(function Dock({ screen, apps, windows, active, settings
           </View>
           <View style={styles.dots} />
         </Pressable>
-        <View style={[styles.sep, { backgroundColor: t.panelLine }]} />
+        {/* Separators only around app items: with none, two read as an empty slot. */}
+        {items.length > 0 && <View style={[styles.sep, { backgroundColor: t.panelLine }]} />}
         {items.map((it) => (
           <DockItem key={it.key} item={it} apps={apps} active={active} size={size} onLongPress={onMenu} />
         ))}
-        <View style={[styles.sep, { backgroundColor: t.panelLine }]} />
+        {items.length > 0 && <View style={[styles.sep, { backgroundColor: t.panelLine }]} />}
         <Pressable ref={overview.ref} onLayout={overview.onLayout} onPress={() => setPanel(panel === 'overview' ? null : 'overview')}
           style={[styles.dockItem, { width: size + 12 }]} pressedStyle={{ transform: [{ scale: 0.92 }] }}>
           <View style={[styles.launcherBtn, plate(panel === 'overview')]}>
@@ -349,7 +354,7 @@ export const DockMenu = memo(function DockMenu({ item, anchor, onClose }) {
 });
 
 const styles = StyleSheet.create({
-  bar: { position: 'absolute', left: 0, right: 0, top: 0, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 6, borderBottomWidth: 1 },
+  bar: { position: 'absolute', left: 0, right: 0, top: 0, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 6 },
   side: { flex: 1, flexDirection: 'row', alignItems: 'center' },
   barButton: { height: 34, minWidth: 44, borderRadius: 17, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
   status: { paddingHorizontal: 14 },

@@ -46,7 +46,7 @@ function TitleButton({ icon, onPress, danger, t, label, anchorName }) {
   );
 }
 
-export const Window = memo(function Window({ win, active, screen, apps, hidden, onPreview, onDragging, tablet, onMenu, menuOpen, onMenuClose, closing, onClosed }) {
+export const Window = memo(function Window({ win, active, screen, apps, hidden, onPreview, onDragging, tablet, onMenu, menuOpen, onMenuClose, closing, onClosed, splashed }) {
   const t = useTheme();
   const TB = screen.titleBar;
   const B = screen.border;
@@ -75,8 +75,12 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
   // the icon it was launched from, when there is one (launcher, dock).
   const origin = useRef(undefined);
   if (origin.current === undefined) origin.current = win.transientFor ? null : takeLaunchOrigin(win.appId);
+  // Under its app's loading window (splashed: LaunchSplash in shell.jsx) it is
+  // simply there: that fades away over it.
+  const instant = useRef(splashed);
   useEffect(() => {
     if (!win.ready) return;
+    if (instant.current) return appear.setValue(1);
     Animated.timing(appear, {
       toValue: 1,
       duration: origin.current ? 340 : 220,
@@ -306,7 +310,7 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
         },
       ]}
     >
-      <View style={[styles.surface, { borderRadius: radius, boxShadow: full ? undefined : shadow }]}>
+      <View style={[styles.surface, { borderRadius: radius, boxShadow: full || max ? undefined : shadow }]}>
         {/* One title bar element for both looks: a drag that leaves the
             maximized place switches the look mid-gesture, and a new element
             would end the gesture (the release then didn't know where the
@@ -326,7 +330,7 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
               <>
                 <View style={[styles.tabletName, { opacity: active ? 1 : 0.6 }]}>
                   <AppIcon win={win} app={appEntry} size={22} />
-                  <Text numberOfLines={1} style={[styles.tabletTitle, { color: active ? t.textDim : t.textMute }]}>{appName(win, apps)}</Text>
+                  <Text numberOfLines={1} style={[styles.tabletTitle, { color: active ? t.text : t.textMute }]}>{appName(win, apps)}</Text>
                 </View>
                 <View pointerEvents="none" style={styles.grabberWrap}>
                   <View style={[styles.grabber, { backgroundColor: t.textMute }]} />

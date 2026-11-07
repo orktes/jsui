@@ -71,6 +71,15 @@ const shapes = {
     </>
   ),
   moon: <Path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z" />,
+  // Dark style: a circle, its right half hatched dark.
+  contrast: (
+    <>
+      <Circle cx="12" cy="12" r="8.5" />
+      <Path d="M12 3.5v17M15.2 4.2v15.6M18.2 6v12" />
+    </>
+  ),
+  // Night light: a sun setting on the horizon.
+  sunset: <Path d="M3.5 17.5h17M7 17.5a5 5 0 0 1 10 0M12 6.5v2.5M5.4 10.4l1.6 1.6M18.6 10.4L17 12" />,
   bell: (
     <>
       <Path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z" />
