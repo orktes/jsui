@@ -1250,7 +1250,10 @@ void WM::configure(Client* c, int x, int y, int w, int h) {
   h = std::max({1, h, c->minH});
   c->x = x;
   c->y = y;
-  if (w != c->w || h != c->h) wlr_xdg_toplevel_set_size(c->tl, w, h);
+  if (w != c->w || h != c->h) {
+    VLOG("configure %u %dx%d", c->id, w, h);
+    wlr_xdg_toplevel_set_size(c->tl, w, h);
+  }
   c->w = w;
   c->h = h;
   if (c->maximized && c->mapped && !c->popup) {
@@ -1305,6 +1308,7 @@ void WM::onCommit(Client* c) {
   c->geoY = geo.y;
   if (!c->popup && (geo.width != c->w || geo.height != c->h) && geo.width > 0 && geo.height > 0) {
     // The client picked its own size (or follows our configure).
+    VLOG("commit %u %dx%d (was %dx%d)", c->id, geo.width, geo.height, c->w, c->h);
     c->w = geo.width;
     c->h = geo.height;
     fitMaximized(c);

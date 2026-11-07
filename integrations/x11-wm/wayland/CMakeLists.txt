@@ -43,6 +43,14 @@ if(MIRCLIENT_FOUND)
     message(STATUS "jsui-wl: --mir renders on the GPU (EGL/GLES)")
     target_compile_definitions(jsui-wl PRIVATE JSUI_WL_MIR_GL=1)
     target_link_libraries(jsui-wl PRIVATE PkgConfig::MIRGL)
+    # Android's ANativeWindow (UBports' android-headers): Mir's android
+    # window is one, and its perform() takes a buffer count
+    # (JSUI_WL_MIR_BUFFERS, see mir_host.h).
+    find_path(JSUI_WL_ANDROID_HEADERS system/window.h PATHS /usr/include/android-30 /usr/include/android NO_DEFAULT_PATH)
+    if(JSUI_WL_ANDROID_HEADERS)
+      target_include_directories(jsui-wl SYSTEM PRIVATE ${JSUI_WL_ANDROID_HEADERS})
+      target_compile_definitions(jsui-wl PRIVATE JSUI_WL_ANDROID_WINDOW=1)
+    endif()
   endif()
   # Skia Graphite on Vulkan (libhybris' libvulkan, loaded at run time): needs
   # a JSUI built with JSUI_VULKAN and the Vulkan headers.
