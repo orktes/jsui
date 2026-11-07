@@ -287,11 +287,33 @@ bool parseArgs(int argc, char** argv, Options& o) {
 struct App {
   std::string id, name, comment, exec, icon, wmClass, categories;
   bool terminal = false;
+  bool squareIcon = false;  // a full-bleed square (Ubuntu Touch's Suru icons), shown clipped to the tile shape
 };
+
+// SVG icons as PNGs (JSUI's Image decodes PNG): jsui-icons, next to
+// jsui-wl, rasterizes them into ~/.cache/jsui-wm/icons; until it has, the
+// app shows its glyph. g_svgIcons: SVG -> PNG pairs still to make.
+std::vector<std::pair<std::string, std::string>> g_svgIcons;
+std::set<std::string> g_svgTried;
+
+std::string svgIconPng(const std::string& svg) {
+  const char* home = getenv("HOME");
+  char name[32];
+  std::snprintf(name, sizeof name, "%016zx.png", std::hash<std::string>{}(svg));
+  return std::string(home ? home : "/tmp") + "/.cache/jsui-wm/icons/" + name;
+}
 
 std::string findIcon(const std::string& icon) {
   if (icon.empty()) return "";
-  if (icon[0] == '/') return fileExists(icon) && icon.size() > 4 && icon.substr(icon.size() - 4) == ".png" ? icon : "";
+  auto ends = [&](const char* ext) { return icon.size() > 4 && icon.compare(icon.size() - 4, 4, ext) == 0; };
+  if (icon[0] == '/' && ends(".svg") && fileExists(icon)) {
+    std::string png = svgIconPng(icon);
+    struct stat a, b;
+    if (stat(png.c_str(), &a) == 0 && stat(icon.c_str(), &b) == 0 && a.st_mtime >= b.st_mtime) return png;
+    if (g_svgTried.insert(icon).second) g_svgIcons.emplace_back(icon, png);
+    return "";
+  }
+  if (icon[0] == '/') return fileExists(icon) && ends(".png") ? icon : "";
   static const char* themes[] = {"hicolor", "Adwaita", "gnome", "Papirus", "breeze"};
   static const char* sizes[] = {"128x128", "96x96", "64x64", "256x256", "72x72", "48x48", "512x512", "32x32"};
   for (const char* theme : themes)
@@ -389,6 +411,7 @@ std::vector<App> scanApps(const std::string& terminal) {
       }
       if (!appId.empty()) app.exec = "APP_ID=" + shellQuote(appId) + " " + app.exec;
       if (!path.empty()) app.exec = "cd " + shellQuote(path) + " && " + app.exec;
+      app.squareIcon = !app.icon.empty() && app.icon[0] == '/';
       app.icon = findIcon(app.icon);
       seen.insert(app.id);
       apps.push_back(app);
@@ -573,6 +596,9 @@ class WM {
   bool createRuntime();
   void publishScreen();
   void publishApps();
+  // Runs jsui-icons for g_svgIcons, then scans and publishes the apps again.
+  void rasterizeIcons();
+  wl_event_source* iconSrc_ = nullptr;
   void publishSystem();
   void onMessage(const char* name, const char* json);
   void onStateChange(const char* key, const char* json);
@@ -1768,6 +1794,7 @@ bool WM::createRuntime() {
   publishSystem();
   if (opt_.scanApps) {
     apps_ = scanApps("foot");
+    rasterizeIcons();
     publishApps();
   }
   jsui_set_state(rt_, "wm.windows", "{}");
@@ -1791,6 +1818,56 @@ void WM::publishScreen() {
   jsui_set_state(rt_, "wm.screen", j.c_str());
 }
 
+void WM::rasterizeIcons() {
+  if (g_svgIcons.empty() || iconSrc_) return;
+  char exe[4096];
+  ssize_t len = readlink("/proc/self/exe", exe, sizeof exe - 1);
+  if (len <= 0) return;
+  exe[len] = 0;
+  std::string helper(exe);
+  helper = helper.substr(0, helper.rfind('/') + 1) + "jsui-icons";
+  if (access(helper.c_str(), X_OK) != 0) {
+    g_svgIcons.clear();
+    return;
+  }
+  std::vector<std::string> args = {helper, "192"};
+  for (const auto& [svg, png] : g_svgIcons) {
+    args.push_back(svg);
+    args.push_back(png);
+  }
+  g_svgIcons.clear();
+  int fds[2];
+  if (pipe2(fds, O_CLOEXEC) != 0) return;
+  pid_t pid = fork();
+  if (pid == 0) {
+    signal(SIGCHLD, SIG_DFL);
+    dup2(fds[1], 1);
+    std::vector<char*> argv;
+    for (auto& a : args) argv.push_back(a.data());
+    argv.push_back(nullptr);
+    execv(helper.c_str(), argv.data());
+    _exit(127);
+  }
+  ::close(fds[1]);
+  if (pid < 0) {
+    ::close(fds[0]);
+    return;
+  }
+  logf("icons: rasterizing %zu SVG icons", (args.size() - 2) / 2);
+  iconSrc_ = wl_event_loop_add_fd(loop_, fds[0], WL_EVENT_READABLE, [](int fd, uint32_t, void* u) -> int {
+    auto* w = static_cast<WM*>(u);
+    char buf[4096];
+    ssize_t n = read(fd, buf, sizeof buf);
+    if (n > 0) return 0;  // one line per PNG; the rescan at the end picks them all up
+    wl_event_source_remove(w->iconSrc_);
+    w->iconSrc_ = nullptr;
+    ::close(fd);
+    w->apps_ = scanApps("foot");
+    w->publishApps();
+    return 0;
+  }, this);
+}
+
 void WM::publishApps() {
   std::string j = "[";
   for (size_t i = 0; i < apps_.size(); ++i) {
@@ -1799,6 +1876,7 @@ void WM::publishApps() {
     j += "{\"id\":" + wmjson::quoted(a.id) + ",\"name\":" + wmjson::quoted(a.name) +
          ",\"comment\":" + wmjson::quoted(a.comment) + ",\"exec\":" + wmjson::quoted(a.exec) +
          ",\"icon\":" + wmjson::quoted(a.icon.empty() ? "" : "file://" + a.icon) +
+         ",\"iconShape\":" + (a.squareIcon ? "\"square\"" : "\"free\"") +
          ",\"categories\":" + wmjson::quoted(a.categories) + "}";
   }
   j += "]";
@@ -2025,6 +2103,7 @@ void WM::onMessage(const char* name, const char* json) {
     wl_display_terminate(display_);
   } else if (n == "wm:reloadApps") {
     apps_ = scanApps("foot");
+    rasterizeIcons();
     publishApps();
   }
 }
