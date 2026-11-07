@@ -59,17 +59,35 @@ function DesktopClock({ screen, t }) {
   );
 }
 
-// Where a dragged window will land.
+// Where a dragged window will land: `preview` is the finger ({x, y}, native
+// values) while a window that can snap is dragged; each target fades in
+// natively as the finger reaches its edge (the same edges Window.jsx's
+// release decides by).
 function SnapPreview({ preview, screen, t, bottom }) {
-  if (!preview) return null;
+  const parts = useMemo(() => {
+    if (!preview) return null;
+    const step = (v, edge, below) =>
+      v.interpolate({ inputRange: [edge, edge + 1], outputRange: below ? [1, 0] : [0, 1], extrapolate: 'clamp' });
+    const max = step(preview.y, screen.topBar + 4, true);
+    const notMax = Animated.subtract(1, max);
+    return {
+      max,
+      left: Animated.multiply(step(preview.x, 6, true), notMax),
+      right: Animated.multiply(step(preview.x, screen.width - 7, false), notMax),
+    };
+  }, [preview, screen.topBar, screen.width]);
+  if (!parts) return null;
   const top = screen.topBar + 6;
   const h = screen.height - screen.topBar - bottom - 12;
   const half = (screen.width - 18) / 2;
-  const r =
-    preview === 'max' ? { left: 6, top, width: screen.width - 12, height: h }
-      : preview === 'left' ? { left: 6, top, width: half, height: h }
-        : { left: 12 + half, top, width: half, height: h };
-  return <View pointerEvents="none" style={[styles.snap, r, { borderColor: t.accent, backgroundColor: t.name === 'dark' ? 'rgba(124,140,255,0.18)' : 'rgba(75,92,255,0.14)' }]} />;
+  const look = { borderColor: t.accent, backgroundColor: t.name === 'dark' ? 'rgba(124,140,255,0.18)' : 'rgba(75,92,255,0.14)' };
+  return (
+    <>
+      <Animated.View pointerEvents="none" style={[styles.snap, look, { left: 6, top, width: screen.width - 12, height: h, opacity: parts.max }]} />
+      <Animated.View pointerEvents="none" style={[styles.snap, look, { left: 6, top, width: half, height: h, opacity: parts.left }]} />
+      <Animated.View pointerEvents="none" style={[styles.snap, look, { left: 12 + half, top, width: half, height: h, opacity: parts.right }]} />
+    </>
+  );
 }
 
 // Split view: the seam between a left- and a right-snapped window. Drag it to

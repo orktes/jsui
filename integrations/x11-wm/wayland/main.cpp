@@ -45,6 +45,7 @@
 
 #include <dirent.h>
 #include <sys/eventfd.h>
+#include <sys/prctl.h>
 #include <drm_fourcc.h>
 #include <fcntl.h>
 #include <pixman.h>
@@ -606,6 +607,7 @@ class WM {
   Rect workArea() const;
   void matchApp(Client* c);
   Rect popupRect(Client* p) const;
+  double popupFit(Client* p);
 
   // state publishing
   std::string windowJson(const Client* c) const;
@@ -695,6 +697,16 @@ class WM {
 #ifdef JSUI_WL_MIR
   MirHost* mir_ = nullptr;
   uint32_t mirOutput_ = 0;
+  // Turning the desktop on the panel while running (Quick Settings'
+  // auto-rotate, or "rotate DEG" on the control socket), and the
+  // jsui-orientation helper that reads the accelerometer for it.
+  void rotateTo(int deg);
+  void autoRotate(bool on);
+  void orientationLine(const std::string& line);
+  bool autoRotate_ = false;
+  pid_t orientPid_ = -1;
+  wl_event_source* orientSrc_ = nullptr;
+  std::string orientBuf_;
   // --mir on the GPU: Skia draws the desktop into the Mir window's GL context.
   JsuiGpuContext* gpu_ = nullptr;
   bool vulkan_ = false;  // gpu_ is Graphite on MirVulkan's device (else Ganesh GL)
@@ -1137,7 +1149,10 @@ void WM::newPopup(wlr_xdg_popup* popup) {
     Client* top = parent;
     while (top && top->popup) top = find(top->parentId);
     if (top) {
-      wlr_box box{-top->x, -top->y, sw_, sh_};
+      // The screen in the toplevel's surface coordinates (through its fit).
+      const double f = top->fit > 0 ? top->fit : 1;
+      wlr_box box{int(std::lround(-top->x / f + top->geoX)), int(std::lround(-top->y / f + top->geoY)),
+                  int(std::lround(sw_ / f)), int(std::lround(sh_ / f))};
       wlr_xdg_popup_unconstrain_from_box(popup, &box);
     }
   }
@@ -1235,9 +1250,24 @@ void WM::configure(Client* c, int x, int y, int w, int h) {
   h = std::max({1, h, c->minH});
   c->x = x;
   c->y = y;
-  if (w != c->w || h != c->h) wlr_xdg_toplevel_set_size(c->tl, w, h);
+  if (w != c->w || h != c->h) {
+    VLOG("configure %u %dx%d", c->id, w, h);
+    wlr_xdg_toplevel_set_size(c->tl, w, h);
+  }
   c->w = w;
   c->h = h;
+  if (c->maximized && c->mapped && !c->popup) {
+    // Until it commits the new size it shows the one it has, fitted to the
+    // work area (a client that keeps its own size may never commit one:
+    // after a turn of the screen it would hang off the edge).
+    wlr_box geo;
+    wlr_xdg_surface_get_geometry(c->xdg, &geo);
+    if (geo.width > 0 && geo.height > 0) {
+      c->w = geo.width;
+      c->h = geo.height;
+    }
+    fitMaximized(c);
+  }
   publishWindow(c);
 }
 
@@ -1248,8 +1278,8 @@ void WM::configure(Client* c, int x, int y, int w, int h) {
 // Screen px -> the client's surface coordinates (its fit, see Client::fit).
 void WM::toSurface(const Client* c, double* x, double* y) const {
   if (c->popup) {
-    *x -= c->x;
-    *y -= c->y;
+    *x = (*x - c->x) / c->fit;
+    *y = (*y - c->y) / c->fit;
   } else {
     *x = (*x - c->x) / c->fit + c->geoX;
     *y = (*y - c->y) / c->fit + c->geoY;
@@ -1278,6 +1308,7 @@ void WM::onCommit(Client* c) {
   c->geoY = geo.y;
   if (!c->popup && (geo.width != c->w || geo.height != c->h) && geo.width > 0 && geo.height > 0) {
     // The client picked its own size (or follows our configure).
+    VLOG("commit %u %dx%d (was %dx%d)", c->id, geo.width, geo.height, c->w, c->h);
     c->w = geo.width;
     c->h = geo.height;
     fitMaximized(c);
@@ -1285,11 +1316,13 @@ void WM::onCommit(Client* c) {
   }
   if (c->popup) {
     Rect r = popupRect(c);
-    if (r.x != c->x || r.y != c->y || r.w != c->w || r.h != c->h) {
+    double f = popupFit(c);
+    if (r.x != c->x || r.y != c->y || r.w != c->w || r.h != c->h || f != c->fit) {
       c->x = r.x;
       c->y = r.y;
       c->w = r.w;
       c->h = r.h;
+      c->fit = f;
       publishPopups();
     }
   }
@@ -1313,15 +1346,23 @@ Rect WM::popupRect(Client* p) const {
       break;
     }
   }
+  // A letterboxed toplevel (fit < 1) scales its popups with it.
   if (top) {
-    x = top->x - top->geoX + int(px);
-    y = top->y - top->geoY + int(py);
+    x = top->x + int(std::lround((px - top->geoX) * top->fit));
+    y = top->y + int(std::lround((py - top->geoY) * top->fit));
   }
   r.x = x;
   r.y = y;
   r.w = p->xdg->surface->current.width;
   r.h = p->xdg->surface->current.height;
   return r;
+}
+
+// A popup's scale: its toplevel's fit.
+double WM::popupFit(Client* p) {
+  for (Client* c = find(p->parentId); c; c = find(c->parentId))
+    if (!c->popup) return c->fit;
+  return 1;
 }
 
 void WM::capture(Client* c) {
@@ -1500,6 +1541,7 @@ void WM::onMap(Client* c) {
     c->y = r.y;
     c->w = r.w;
     c->h = r.h;
+    c->fit = popupFit(c);
     popups_.push_back(c->id);
     capture(c);
     publishPopups();
@@ -1801,13 +1843,21 @@ void WM::publishSystem() {
     closedir(d);
   }
   std::string j = "{\"user\":" + wmjson::quoted(user) + ",\"hostname\":" + wmjson::quoted(host) +
-                  ",\"battery\":" + battery + ",\"wifi\":" + wifi + ",\"xtest\":true}";
+                  ",\"battery\":" + battery + ",\"wifi\":" + wifi + ",\"xtest\":true";
+#ifdef JSUI_WL_MIR
+  // The desktop can turn (rotateTo) and an accelerometer may say which way.
+  if (mir_ && !vulkan_ && access("/run/sensord.sock", F_OK) == 0) j += ",\"rotate\":true";
+#endif
+  j += "}";
   jsui_set_state(rt_, "wm.system", j.c_str());
 }
 
 void WM::onStateChange(const char* key, const char* json) {
   if (std::strcmp(key, "wm.settings") != 0) return;
   wmjson::Value v = wmjson::parse(json);
+#ifdef JSUI_WL_MIR
+  if (mir_ && v["autoRotate"].truthy() != autoRotate_) autoRotate(!autoRotate_);
+#endif
   bool tablet = v["tabletMode"].truthy();
   if (tablet == tabletMode_) return;
   tabletMode_ = tablet;
@@ -2030,8 +2080,8 @@ void WM::publishPopups() {
     if (!first) j += ',';
     first = false;
     j += "\"" + std::to_string(id) + "\":{\"id\":" + std::to_string(id) + ",\"x\":" + wmjson::num(L(c->x)) +
-         ",\"y\":" + wmjson::num(L(c->y)) + ",\"w\":" + wmjson::num(L(c->w)) + ",\"h\":" + wmjson::num(L(c->h)) +
-         ",\"ready\":" + (c->hasTexture ? "true" : "false") + "}";
+         ",\"y\":" + wmjson::num(L(c->y)) + ",\"w\":" + wmjson::num(L(c->w * c->fit)) +
+         ",\"h\":" + wmjson::num(L(c->h * c->fit)) + ",\"ready\":" + (c->hasTexture ? "true" : "false") + "}";
   }
   j += "}";
   jsui_set_state(rt_, "wm.popups", j.c_str());
@@ -2054,10 +2104,10 @@ Target WM::route(double x, double y, wlr_surface** surface, double* sx, double* 
   for (auto it = popups_.rbegin(); it != popups_.rend(); ++it) {
     Client* p = find(*it);
     if (!p || !p->mapped) continue;
-    Rect r{p->x, p->y, p->w, p->h};
+    Rect r{p->x, p->y, int(p->w * p->fit), int(p->h * p->fit)};
     if (!r.contains(x, y)) continue;
     double lx = 0, ly = 0;
-    wlr_surface* s = wlr_surface_surface_at(p->xdg->surface, x - p->x, y - p->y, &lx, &ly);
+    wlr_surface* s = wlr_surface_surface_at(p->xdg->surface, (x - p->x) / p->fit, (y - p->y) / p->fit, &lx, &ly);
     if (s) {
       *surface = s;
       *sx = lx;
@@ -2440,6 +2490,12 @@ void WM::controlLine(const std::string& line) {
     }
   } else if (c == "shot") {
     writeScreenshot(line.substr(5));
+#ifdef JSUI_WL_MIR
+  } else if (c == "rotate" && n >= 2) {
+    rotateTo(int(x));
+  } else if (c == "orientation" && line.size() > 12) {
+    orientationLine(line.substr(12));  // as if from jsui-orientation (tests)
+#endif
   } else if (c == "touch") {
     // touch ID PHASE X Y (phase 0 down, 1 move, 2 up; desktop px): a finger,
     // for scripted runs on touch-only devices.
@@ -2530,7 +2586,7 @@ void WM::tick() {
     // that changed something (waiting for the headless output's frame
     // clock as well put a second 16.7 ms clock in series: ~30 fps). The
     // present thread's swap paces it.
-    if (jsui_needs_redraw(rt_) || shellDirty_) {
+    if (jsui_needs_redraw(rt_) || shellDirty_ || mir_->rotating()) {
       presentMir();
       presented = true;
     }
@@ -2545,7 +2601,11 @@ void WM::tick() {
     scheduleFrame();
   }
   double wait;
-  if (jsui_wants_frame(rt_) || jsui_needs_redraw(rt_) || jsui_pending_loads(rt_) > 0) {
+  bool turning = false;
+#ifdef JSUI_WL_MIR
+  turning = mir_ && mir_->rotating();
+#endif
+  if (turning || jsui_wants_frame(rt_) || jsui_needs_redraw(rt_) || jsui_pending_loads(rt_) > 0) {
     // 60 Hz from this tick's start: the paint above is part of the period.
     // After a frame went to the present thread the next tick comes when
     // its swap returns instead (swapFd: Mir's vsync); a free-running timer
@@ -2862,6 +2922,105 @@ void WM::mirEvents() {
     }
   }
   if (touched) wlr_seat_touch_notify_frame(seat_);
+}
+
+void WM::rotateTo(int deg) {
+  deg = ((deg % 360) + 360) % 360;
+  deg -= deg % 90;
+  if (!mir_ || deg == mir_->rotation()) return;
+  if (gpu_) mir_->makeCurrent();
+  if (!mir_->rotateTo(deg)) {
+    logf("rotate: not supported on this window");
+    return;
+  }
+  opt_.rotate = deg;
+  const int w = mir_->desktopWidth(), h = mir_->desktopHeight();
+  logf("rotated to %d (desktop %dx%d)", deg, w, h);
+  if (w != sw_ || h != sh_) {
+    wlr_output_state st;
+    wlr_output_state_init(&st);
+    wlr_output_state_set_custom_mode(&st, w, h, 60000);
+    wlr_output_commit_state(output_, &st);
+    wlr_output_state_finish(&st);
+    resizeScreen(w, h);
+  }
+  shellDirty_ = true;
+  scheduleTick(0);
+}
+
+// jsui-orientation's lines: the edge of the panel that is up. The panel's
+// own top up is rotation 0 (portrait on the Tab A7); "flat" keeps the
+// current one. JSUI_WL_ORIENTATION_OFFSET (degrees) is added for a sensor
+// mounted turned against the panel.
+void WM::orientationLine(const std::string& line) {
+  int deg = line == "top" ? 0 : line == "right" ? 90 : line == "bottom" ? 180 : line == "left" ? 270 : -1;
+  if (deg < 0) return;
+  if (const char* off = getenv("JSUI_WL_ORIENTATION_OFFSET")) deg += std::atoi(off);
+  rotateTo(deg);
+}
+
+void WM::autoRotate(bool on) {
+  autoRotate_ = on;
+  if (!on) {
+    if (orientSrc_) wl_event_source_remove(orientSrc_);
+    orientSrc_ = nullptr;
+    if (orientPid_ > 0) kill(orientPid_, SIGTERM);
+    orientPid_ = -1;
+    orientBuf_.clear();
+    logf("auto-rotate off");
+    return;
+  }
+  // jsui-orientation sits next to jsui-wl.
+  char exe[4096];
+  ssize_t len = readlink("/proc/self/exe", exe, sizeof exe - 1);
+  if (len <= 0) return;
+  exe[len] = 0;
+  std::string helper = std::string(exe);
+  helper = helper.substr(0, helper.rfind('/') + 1) + "jsui-orientation";
+  if (access(helper.c_str(), X_OK) != 0) {
+    logf("auto-rotate: no %s", helper.c_str());
+    return;
+  }
+  int fds[2];
+  if (pipe2(fds, O_CLOEXEC) != 0) return;
+  pid_t pid = fork();
+  if (pid == 0) {
+    signal(SIGCHLD, SIG_DFL);
+    prctl(PR_SET_PDEATHSIG, SIGTERM);  // goes with jsui-wl
+    dup2(fds[1], 1);
+    execl(helper.c_str(), helper.c_str(), static_cast<char*>(nullptr));
+    _exit(127);
+  }
+  ::close(fds[1]);
+  if (pid < 0) {
+    ::close(fds[0]);
+    return;
+  }
+  orientPid_ = pid;
+  fcntl(fds[0], F_SETFL, O_NONBLOCK);
+  orientSrc_ = wl_event_loop_add_fd(loop_, fds[0], WL_EVENT_READABLE, [](int fd, uint32_t mask, void* u) -> int {
+    auto* w = static_cast<WM*>(u);
+    char buf[256];
+    ssize_t n = read(fd, buf, sizeof buf);
+    if (n <= 0 && (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR) || n == 0)) {
+      wl_event_source_remove(w->orientSrc_);
+      w->orientSrc_ = nullptr;
+      ::close(fd);
+      w->orientPid_ = -1;
+      logf("auto-rotate: jsui-orientation ended");
+      return 0;
+    }
+    if (n < 0) return 0;
+    w->orientBuf_.append(buf, size_t(n));
+    size_t nl;
+    while ((nl = w->orientBuf_.find('\n')) != std::string::npos) {
+      std::string l = w->orientBuf_.substr(0, nl);
+      w->orientBuf_.erase(0, nl + 1);
+      w->orientationLine(l);
+    }
+    return 0;
+  }, this);
+  logf("auto-rotate on (%s, pid %d)", helper.c_str(), int(pid));
 }
 #endif
 

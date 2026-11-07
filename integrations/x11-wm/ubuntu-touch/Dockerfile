@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && apt-get update && apt-get install -y --no-install-recommends \
       git unzip python3 cmake ninja-build clang lld binutils pkg-config \
       libfontconfig1-dev zlib1g-dev libwlroots-dev wayland-protocols libxkbcommon-dev libpixman-1-dev libdrm-dev \
-      libmir1client-dev libegl-dev libgles-dev libvulkan-dev \
+      libmir1client-dev libegl-dev libgles-dev libvulkan-dev android-headers-30 \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
 COPY --from=node:22-bookworm-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
@@ -62,7 +62,7 @@ COPY integrations/x11-wm/docker/foot.ini $PKG/foot.ini
 RUN sed -i '/^\[main\]/a term=xterm-256color' $PKG/foot.ini
 COPY integrations/x11-wm/ubuntu-touch/jsui-session integrations/x11-wm/ubuntu-touch/install.sh \
      integrations/x11-wm/ubuntu-touch/uninstall.sh integrations/x11-wm/ubuntu-touch/jsui-wm-tap-to-wake.service \
-     integrations/x11-wm/ubuntu-touch/jsui-wm-logind.conf $PKG/
+     integrations/x11-wm/ubuntu-touch/jsui-wm-logind.conf integrations/x11-wm/ubuntu-touch/jsui-orientation $PKG/
 RUN cd /pkg && tar czf /jsui-wm-ubuntu-touch.tar.gz jsui-wm
 
 FROM scratch
