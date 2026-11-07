@@ -237,7 +237,9 @@ export const Dock = memo(function Dock({ screen, apps, windows, active, settings
   const dy = slide.interpolate({ inputRange: [0, 1], outputRange: [0, screen.dock + 24] });
   const size = 52;
   const h = screen.dock - 8;
-  const plate = (on) => ({ width: size, height: size, borderRadius: size * 0.28, backgroundColor: on ? t.accent : t.name === 'dark' ? 'rgba(255,255,255,0.12)' : 'rgba(20,24,60,0.08)' });
+  // Plain icons in the dock's pill (a tile behind each was a box in a box);
+  // the accent tile marks the panel that is open.
+  const plate = (on) => ({ width: size, height: size, borderRadius: size * 0.28, backgroundColor: on ? t.accent : 'transparent' });
   return (
     <Animated.View pointerEvents={shown ? 'box-none' : 'none'} style={[styles.dockWrap, { height: screen.dock, transform: [{ translateY: dy }] }]}>
       <View
