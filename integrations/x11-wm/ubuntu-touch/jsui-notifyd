@@ -8,8 +8,11 @@
 #
 # Lines: {"id", "app", "desktop", "title", "body", "urgency"} for a new or
 # replaced notification, {"id", "closed": true} when the app withdraws one.
+# On stdin jsui-wl writes "action ID" when the user taps one: the app gets
+# ActionInvoked(ID, "default") and NotificationClosed(ID, 2).
 import html
 import json
+import os
 import re
 import sys
 
@@ -68,6 +71,12 @@ class Server(dbus.service.Object):
         self.NotificationClosed(dbus.UInt32(nid), dbus.UInt32(1))
         return False
 
+    def invoked(self, nid):
+        if nid in self.timers:
+            GLib.source_remove(self.timers.pop(nid))
+        self.ActionInvoked(dbus.UInt32(nid), "default")
+        self.NotificationClosed(dbus.UInt32(nid), dbus.UInt32(2))
+
     @dbus.service.method(NAME, in_signature="u", out_signature="")
     def CloseNotification(self, nid):
         if nid in self.timers:
@@ -98,8 +107,27 @@ def main():
     if bus.request_name(NAME, dbus.bus.NAME_FLAG_DO_NOT_QUEUE) != dbus.bus.REQUEST_NAME_REPLY_PRIMARY_OWNER:
         print("jsui-notifyd: another notification server runs", file=sys.stderr)
         return
-    server = Server(bus)  # noqa: F841 (exported while it lives)
-    GLib.MainLoop().run()
+    server = Server(bus)
+    loop = GLib.MainLoop()
+
+    pending = b""
+
+    def command(fd, condition):
+        nonlocal pending
+        data = os.read(fd, 4096)
+        if not data:  # jsui-wl is gone
+            loop.quit()
+            return False
+        pending += data
+        while b"\n" in pending:
+            line, pending = pending.split(b"\n", 1)
+            parts = line.decode(errors="replace").split()
+            if len(parts) == 2 and parts[0] == "action" and parts[1].isdigit():
+                server.invoked(int(parts[1]))
+        return True
+
+    GLib.io_add_watch(sys.stdin.fileno(), GLib.IO_IN | GLib.IO_HUP, command)
+    loop.run()
 
 
 if __name__ == "__main__":

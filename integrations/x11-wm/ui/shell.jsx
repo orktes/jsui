@@ -86,6 +86,34 @@ function EdgeSwipe({ side, top, bottom, onSwipe }) {
   return <View {...pan.panHandlers} style={{ position: 'absolute', top, bottom, width: EDGE, [side]: 0 }} />;
 }
 
+// The volume buttons' indicator: a pill under the top bar with the level,
+// for 1.5 s after the last press (jsui-wl sets the volume itself).
+function VolumeOsd({ screen, t }) {
+  const [level, setLevel] = useState(null);
+  const v = useRef(new Animated.Value(0)).current;
+  const timer = useRef(null);
+  useHostMessage('wm:volumeKey', (msg) => {
+    setLevel(msg.level);
+    setSetting('volume', msg.level);
+    setSetting('muted', false);
+    Animated.timing(v, { toValue: 1, duration: 120, useNativeDriver: true }).start();
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => {
+      Animated.timing(v, { toValue: 0, duration: 200, useNativeDriver: true }).start(({ finished }) => finished && setLevel(null));
+    }, 1500);
+  });
+  useEffect(() => () => clearTimeout(timer.current), []);
+  if (level == null) return null;
+  return (
+    <Animated.View pointerEvents="none" style={[styles.osd, { top: screen.topBar + 14, left: (screen.width - 320) / 2, backgroundColor: t.panel, borderColor: t.panelLine, opacity: v }]}>
+      <Icon name={level === 0 ? 'mute' : 'volume'} size={22} color={t.text} />
+      <View style={[styles.osdTrack, { backgroundColor: t.panelRaised }]}>
+        <View style={[styles.osdFill, { width: `${Math.round(level * 100)}%`, backgroundColor: t.accent }]} />
+      </View>
+    </Animated.View>
+  );
+}
+
 // Big clock on the empty desktop.
 function DesktopClock({ screen, t }) {
   const now = useClock();
@@ -198,7 +226,7 @@ function Shell() {
   // by the host), not at whatever the setting last held.
   const adopted = useRef({});
   useEffect(() => {
-    if (system.backlight != null && !adopted.current.backlight) {
+    if (system.backlight != null && system.backlight >= 0 && !adopted.current.backlight) {
       adopted.current.backlight = true;
       setSetting('brightness', system.backlight);
     }
@@ -334,7 +362,7 @@ function Shell() {
     }
     const id = noteId++;
     appNotes.current.set(msg.id, id);
-    const full = { id, time: nowText(), ...note };
+    const full = { id, time: nowText(), notifyId: msg.id, ...note };
     setNotes((l) => [full, ...l].slice(0, 30));
     if (!settings.doNotDisturb || msg.urgency >= 2) setToasts((l) => [...l, full].slice(-3));
   });
@@ -403,6 +431,25 @@ function Shell() {
     return () => clearTimeout(id);
   }, [appsReady]);
 
+  // A tapped notification: its app's window to the front, else the app started.
+  const openNote = useCallback((n) => {
+    // The app hears of it (ActionInvoked "default", then closed): the
+    // notification is done, so it leaves the list too.
+    if (n.notifyId != null) {
+      wm.notificationAction(n.notifyId);
+      appNotes.current.delete(n.notifyId);
+      setNotes((l) => l.filter((x) => x.id !== n.id));
+    }
+    if (!n.app) return;
+    const w = [...windows].reverse().find((x) => x.appId === n.app.id && x.type === 'normal');
+    if (w) {
+      if (w.minimized) wm.restore(w.id);
+      wm.focus(w.id);
+    } else {
+      wm.launch(n.app.exec);
+    }
+  }, [windows]);
+
   const launch = useCallback((app) => {
     wm.haptic();
     noteLaunch(app.id, `app.${app.id}`);
@@ -435,7 +482,7 @@ function Shell() {
           onLock={() => { setPanel(null); setLocked(true); }} onReload={() => DevSettings.reload()} />
       );
     }
-    if (name === 'calendar') return <CalendarPanel {...common} notifications={notes} onClear={() => setNotes([])} onDismiss={dismissNote} />;
+    if (name === 'calendar') return <CalendarPanel {...common} notifications={notes} onClear={() => setNotes([])} onDismiss={dismissNote} onOpen={openNote} />;
     return null;
   };
 
@@ -509,7 +556,8 @@ function Shell() {
             <Wallpaper width={scr.width} height={scr.height} t={t} />
           </LockScreen>
         )}
-        <Toasts screen={scr} toasts={toasts} onDone={toastDone} />
+        <Toasts screen={scr} toasts={toasts} onDone={toastDone} onOpen={openNote} />
+        <VolumeOsd screen={scr} t={t} />
         {Object.values(popups).map((p) =>
           p.ready ? (
             <HostTexture key={p.id} name={`win:${p.id}`} pointerEvents="none"
@@ -531,6 +579,9 @@ const styles = StyleSheet.create({
   deskTime: { fontFamily: font, fontSize: 112, fontWeight: '600', letterSpacing: -3, fontVariant: ['tabular-nums'] },
   deskDate: { fontFamily: font, fontSize: 24, fontWeight: '500', marginTop: -4 },
   snap: { position: 'absolute', borderRadius: 18, borderWidth: 3 },
+  osd: { position: 'absolute', width: 320, height: 56, borderRadius: 28, borderWidth: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18 },
+  osdTrack: { flex: 1, height: 8, borderRadius: 4, marginLeft: 14, overflow: 'hidden' },
+  osdFill: { height: 8, borderRadius: 4 },
 });
 
 AppRegistry.registerComponent('main', () => Shell);

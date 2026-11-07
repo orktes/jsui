@@ -738,6 +738,9 @@ class WM {
   void startNotifyd();
   wl_event_source* notifySrc_ = nullptr;
   std::string notifyBuf_;
+  int notifyIn_ = -1;  // jsui-notifyd's stdin: "action ID" for a tapped notification
+  void syncAppTheme(bool dark);
+  bool dark_ = true;  // the shell's darkMode (DEFAULT_SETTINGS in ui/wm.js)
   void orientationLine(const std::string& line);
   bool autoRotate_ = false;
   pid_t orientPid_ = -1;
@@ -773,6 +776,10 @@ class WM {
   std::string startBacklight_, startVolume_;  // the wm.system fields, read once
   bool backlightRead_ = false, volumeRead_ = false;
   void setLevels(const wmjson::Value& v, bool brightness);
+  // A volume button: one step (1/16) up or down, applied now and told to the
+  // shell (wm:volumeKey) for its indicator and slider.
+  void volumeStep(int dir);
+  double volumeNow_ = -1;  // the output volume as last read or set (0..1)
   void applyLevels();
   void readStartLevels();
   // GPU boost (Adreno: kgsl devfreq). Its governor ramps up too slowly for
@@ -1638,14 +1645,18 @@ void WM::readStartLevels() {
     return;
   }
   // Only a lit screen's level is the user's (off reads 0, and repowerd dims
-  // it before it goes off): with the screen off at start, the next refresh
+  // it before it goes off): with the screen off at start, "backlight" is -1
+  // (there is one, level unknown) and the next touch or refresh
   // (systemTimer_, 30 s) tries again.
   if (!backlightRead_) {
     const double b = backlightLevel();
-    if (b < 0) backlightRead_ = true;  // no backlight
-    else if (b > 0) {
+    if (b < 0) {
+      backlightRead_ = true;  // no backlight
+    } else if (b > 0) {
       backlightRead_ = true;
       startBacklight_ = ",\"backlight\":" + std::to_string(b);
+    } else {
+      startBacklight_ = ",\"backlight\":-1";  // there is one; its level comes later
     }
   }
   if (volumeRead_) return;
@@ -1657,6 +1668,7 @@ void WM::readStartLevels() {
   if (pct != std::string::npos) {
     size_t start = vol.find_last_not_of("0123456789", pct - 1);
     int v = atoi(vol.c_str() + (start == std::string::npos ? 0 : start + 1));
+    volumeNow_ = std::clamp(v, 0, 100) / 100.0;
     startVolume_ = ",\"volume\":{\"level\":" + std::to_string(std::clamp(v, 0, 100) / 100.0) +
                     ",\"muted\":" + (mute.find("yes") != std::string::npos ? "true" : "false") + "}";
   }
@@ -1669,6 +1681,7 @@ void WM::setLevels(const wmjson::Value& v, bool brightness) {
   } else {
     wantLevels_.volume = std::clamp(v["value"].num(0.6), 0.0, 1.0);
     wantLevels_.muted = v["muted"].truthy() ? 1 : 0;
+    volumeNow_ = wantLevels_.volume;
   }
   if (!levelsTimer_)
     levelsTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
@@ -1679,6 +1692,22 @@ void WM::setLevels(const wmjson::Value& v, bool brightness) {
   if (wantLevels_.brightness != appliedLevels_.brightness || wantLevels_.volume != appliedLevels_.volume ||
       wantLevels_.muted != appliedLevels_.muted)
     wl_event_source_timer_update(levelsTimer_, 80);
+}
+
+void WM::volumeStep(int dir) {
+  if (!volumeRead_) readStartLevels();
+  double cur = volumeNow_ >= 0 ? volumeNow_ : 0.5;
+  // To the next step of 1/16, so a level from the slider lands on the grid.
+  double next = std::clamp((std::round(cur * 16) + dir) / 16.0, 0.0, 1.0);
+  wmjson::Value v;
+  v.type = wmjson::Value::Object;
+  wmjson::Value num;
+  num.type = wmjson::Value::Number;
+  num.n = next;
+  v.o["value"] = num;
+  setLevels(v, false);
+  applyLevels();  // a button press: now, not after the drag coalescing
+  if (rt_) jsui_post_message(rt_, "wm:volumeKey", ("{\"level\":" + std::to_string(next) + "}").c_str());
 }
 
 void WM::applyLevels() {
@@ -2171,9 +2200,33 @@ void WM::publishSystem() {
   jsui_set_state(rt_, "wm.system", j.c_str());
 }
 
+// The shell's dark style, flipped, also flips Lomiri apps' theme (their
+// toolkit reads ~/.config/lomiri-ui-toolkit/theme.ini). Only on a change
+// from the shell's default (dark; wm.settings starts from it every
+// session): a session start leaves the file alone, so System Settings' own
+// "dark mode for apps" switch keeps working.
+void WM::syncAppTheme(bool dark) {
+  if (dark == dark_) return;
+  dark_ = dark;
+#ifdef JSUI_WL_MIR
+  if (!mir_) return;
+  const char* home = getenv("HOME");
+  if (!home) return;
+  std::string dir = std::string(home) + "/.config/lomiri-ui-toolkit";
+  std::string path = dir + "/theme.ini", tmp = path + ".tmp";
+  mkdir(dir.c_str(), 0755);
+  if (FILE* f = fopen(tmp.c_str(), "w")) {
+    fprintf(f, "[General]\ntheme=Lomiri.Components.Themes.%s\n", dark ? "SuruDark" : "Ambiance");
+    fclose(f);
+    if (rename(tmp.c_str(), path.c_str()) == 0) logf("apps' theme: %s", dark ? "dark" : "light");
+  }
+#endif
+}
+
 void WM::onStateChange(const char* key, const char* json) {
   if (std::strcmp(key, "wm.settings") != 0) return;
   wmjson::Value v = wmjson::parse(json);
+  if (v["darkMode"].type != wmjson::Value::Null) syncAppTheme(v["darkMode"].truthy());
 #ifdef JSUI_WL_MIR
   if (mir_ && v["autoRotate"].truthy() != autoRotate_) autoRotate(!autoRotate_);
 #endif
@@ -2315,6 +2368,12 @@ void WM::onMessage(const char* name, const char* json) {
       if (!cl->popup && cl->mapped && cl->snap && !cl->minimized) setSnap(cl, cl->snap);
   } else if (n == "wm:fullscreen" && c) {
     setFullscreen(c, v["on"].type == wmjson::Value::Null ? !c->fullscreen : v["on"].truthy());
+  } else if (n == "wm:notificationAction") {
+    if (notifyIn_ >= 0) {
+      std::string l = "action " + std::to_string(int64_t(v["id"].num(0))) + "\n";
+      ssize_t w = write(notifyIn_, l.data(), l.size());
+      (void)w;
+    }
   } else if (n == "wm:haptic") {
     haptic(int(v["ms"].num(12)));
   } else if (n == "wm:brightness") {
@@ -2669,6 +2728,7 @@ void WM::gpuBoost(bool touch) {
 }
 
 void WM::touchEvent(int id, int phase, double x, double y, uint32_t timeMs) {
+  if (phase == 0 && !backlightRead_) publishSystem();  // the screen is lit now: its level (readStartLevels)
   gpuBoost(true);
   if (perfEvery_) logf("touch %d at %.0f", phase, nowMs());
   int tid = 1 + (id % 1000);
@@ -3345,6 +3405,13 @@ void WM::mirEvents() {
         wlr_seat_pointer_notify_frame(seat_);
         break;
       case MirHostEvent::Key: {
+        // The volume buttons (evdev KEY_VOLUMEDOWN / KEY_VOLUMEUP) are the
+        // shell's, as on Lomiri: a step of the output volume, not keys for
+        // the focused app.
+        if (e.id == 114 || e.id == 115) {
+          if (e.phase) volumeStep(e.id == 115 ? 1 : -1);
+          break;
+        }
         wlr_keyboard_key_event ev{};
         ev.time_msec = t;
         ev.keycode = uint32_t(e.id);
@@ -3483,21 +3550,33 @@ void WM::startNotifyd() {
   std::string helper = std::string(exe);
   helper = helper.substr(0, helper.rfind('/') + 1) + "jsui-notifyd";
   if (access(helper.c_str(), X_OK) != 0) return;
-  int fds[2];
+  // Its stdout to us (notifications), its stdin from us (taps, see
+  // notificationAction).
+  int fds[2], in[2];
   if (pipe2(fds, O_CLOEXEC) != 0) return;
+  if (pipe2(in, O_CLOEXEC) != 0) {
+    ::close(fds[0]);
+    ::close(fds[1]);
+    return;
+  }
   pid_t pid = fork();
   if (pid == 0) {
     signal(SIGCHLD, SIG_DFL);
     prctl(PR_SET_PDEATHSIG, SIGTERM);  // goes with jsui-wl
     dup2(fds[1], 1);
+    dup2(in[0], 0);
     execl(helper.c_str(), helper.c_str(), static_cast<char*>(nullptr));
     _exit(127);
   }
   ::close(fds[1]);
+  ::close(in[0]);
   if (pid < 0) {
     ::close(fds[0]);
+    ::close(in[1]);
     return;
   }
+  notifyIn_ = in[1];
+  fcntl(notifyIn_, F_SETFL, O_NONBLOCK);
   fcntl(fds[0], F_SETFL, O_NONBLOCK);
   notifySrc_ = wl_event_loop_add_fd(loop_, fds[0], WL_EVENT_READABLE, [](int fd, uint32_t mask, void* u) -> int {
     auto* w = static_cast<WM*>(u);
@@ -3508,6 +3587,8 @@ void WM::startNotifyd() {
       wl_event_source_remove(w->notifySrc_);
       w->notifySrc_ = nullptr;
       ::close(fd);
+      if (w->notifyIn_ >= 0) ::close(w->notifyIn_);
+      w->notifyIn_ = -1;
       return 0;
     }
     if (n < 0) return 0;
