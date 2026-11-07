@@ -733,6 +733,8 @@ class WM {
   // jsui-orientation helper that reads the accelerometer for it.
   void rotateTo(int deg);
   void autoRotate(bool on);
+  void syncAppTheme(bool dark);
+  bool dark_ = true;  // the shell's darkMode (DEFAULT_SETTINGS in ui/wm.js)
   void orientationLine(const std::string& line);
   bool autoRotate_ = false;
   pid_t orientPid_ = -1;
@@ -2025,9 +2027,33 @@ void WM::publishSystem() {
   jsui_set_state(rt_, "wm.system", j.c_str());
 }
 
+// The shell's dark style, flipped, also flips Lomiri apps' theme (their
+// toolkit reads ~/.config/lomiri-ui-toolkit/theme.ini). Only on a change
+// from the shell's default (dark; wm.settings starts from it every
+// session): a session start leaves the file alone, so System Settings' own
+// "dark mode for apps" switch keeps working.
+void WM::syncAppTheme(bool dark) {
+  if (dark == dark_) return;
+  dark_ = dark;
+#ifdef JSUI_WL_MIR
+  if (!mir_) return;
+  const char* home = getenv("HOME");
+  if (!home) return;
+  std::string dir = std::string(home) + "/.config/lomiri-ui-toolkit";
+  std::string path = dir + "/theme.ini", tmp = path + ".tmp";
+  mkdir(dir.c_str(), 0755);
+  if (FILE* f = fopen(tmp.c_str(), "w")) {
+    fprintf(f, "[General]\ntheme=Lomiri.Components.Themes.%s\n", dark ? "SuruDark" : "Ambiance");
+    fclose(f);
+    if (rename(tmp.c_str(), path.c_str()) == 0) logf("apps' theme: %s", dark ? "dark" : "light");
+  }
+#endif
+}
+
 void WM::onStateChange(const char* key, const char* json) {
   if (std::strcmp(key, "wm.settings") != 0) return;
   wmjson::Value v = wmjson::parse(json);
+  if (v["darkMode"].type != wmjson::Value::Null) syncAppTheme(v["darkMode"].truthy());
 #ifdef JSUI_WL_MIR
   if (mir_ && v["autoRotate"].truthy() != autoRotate_) autoRotate(!autoRotate_);
 #endif
