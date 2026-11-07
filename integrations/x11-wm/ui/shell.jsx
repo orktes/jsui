@@ -223,7 +223,17 @@ function SnapPreview({ preview, screen, t, bottom }) {
 // its own (Clock ignores the size it is given) sits on its pane, not on a
 // hole of wallpaper, and the seam between them is the wallpaper's darkest
 // colour.
-function splitPanes({ left, right }, screen) {
+// A split window's pane (the host's `slot`: the window itself may sit
+// centred in it, smaller), or the window's own rect.
+const paneOf = (w) => (w.slot ? { x: w.slot[0], y: w.slot[1], w: w.slot[2], h: w.slot[3] } : w);
+const seamOf = (split) => {
+  const l = paneOf(split.left);
+  return (l.x + l.w + paneOf(split.right).x) / 2;
+};
+
+function splitPanes(split, screen) {
+  const left = paneOf(split.left);
+  const right = paneOf(split.right);
   const seam = (left.x + left.w + right.x) / 2;
   const gap = right.x - left.x - left.w;
   const top = Math.min(left.y, right.y) - screen.titleBar;
@@ -274,7 +284,7 @@ function SplitDivider({ left, right, screen, t, bottom }) {
   const [grabbed, setGrabbed] = useState(null); // the seam where the drag began, while held
   const [settling, setSettling] = useState(null); // where it was let go, until the windows follow
   const drag = useNativeDragX();
-  const seam = (left.x + left.w + right.x) / 2;
+  const seam = seamOf({ left, right });
   const base = grabbed != null ? grabbed : seam;
   const anchor = useAnchor('split.divider');
   const shift = useMemo(
@@ -557,7 +567,7 @@ function Shell() {
       r.push([W - EDGE, scr.topBar, EDGE, H - scr.topBar - bottom]);
     }
     if (split) {
-      const cx = (split.left.x + split.left.w + split.right.x) / 2;
+      const cx = seamOf(split);
       r.push([cx - 16, scr.topBar, 32, H - scr.topBar - bottom]);
     }
     if (oskOn && oskRect) r.push([oskRect.x, oskRect.y, oskRect.width, oskRect.height]);
