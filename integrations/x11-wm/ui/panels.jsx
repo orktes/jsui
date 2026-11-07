@@ -579,7 +579,6 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
           {power ? (
             <View style={{ marginBottom: 6 }}>
               {[
-                { icon: 'lock', label: 'Lock', fn: onLock },
                 { icon: 'refresh', label: 'Restart shell', fn: onReload },
                 { icon: 'logout', label: 'Log out', fn: () => wm.quit() },
               ].map((r) => (
@@ -617,12 +616,20 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
           {/* Hosts with a backlight and a sound server (system.backlight,
               system.volume) set the real ones; elsewhere brightness dims the
               shell's picture (shell.jsx) and volume is only the setting. */}
-          {!power && !wifiOpen && <Slider anchor={a.brightness} icon="sun" value={settings.brightness} onChange={(x) => {
-            const b = Math.max(system.backlight != null ? 0.04 : 0.2, x);
-            setSetting('brightness', b);
-            if (system.backlight != null) wm.brightness(b);
-          }} />}
-          {/* Power (its menu has Lock) shares the volume slider's row. */}
+          {/* Lock ends the brightness row and power the volume row, so the
+              two sliders stay a pair of equal length. */}
+          {!power && !wifiOpen && (
+            <View style={styles.qsFoot}>
+              <View style={{ flex: 1 }}>
+                <Slider anchor={a.brightness} icon="sun" value={settings.brightness} onChange={(x) => {
+                  const b = Math.max(system.backlight != null ? 0.04 : 0.2, x);
+                  setSetting('brightness', b);
+                  if (system.backlight != null) wm.brightness(b);
+                }} />
+              </View>
+              <IconButton icon="lock" size={48} iconSize={22} onPress={onLock} label="Lock" />
+            </View>
+          )}
           {!wifiOpen && (
             <View style={styles.qsFoot}>
               <View style={{ flex: 1 }}>
