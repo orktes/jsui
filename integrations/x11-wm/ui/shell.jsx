@@ -897,7 +897,7 @@ function Shell() {
         {!fullscreen && (
           <TopBar screen={scr} solid={solidBar} panel={panel} setPanel={setPanel} settings={settings} system={system}
             app={barApp} menuOpen={!!barApp && !!barApp.win && winMenu === barApp.win.id} onMenu={onWinMenu} onMenuClose={closeWinMenu}
-            quiet={!visible.length && (!panel || panel === 'quick')} />
+            quiet={!visible.length && !front.length && (!panel || panel === 'quick')} />
         )}
         {/* The launcher stays mounted (hidden while closed): opening it then
             paints a laid-out grid with its text shaped and icons decoded,
