@@ -395,6 +395,7 @@ function WifiNetworks({ settings, onBack }) {
     setNets(m.networks || []);
     setScans((n) => n + 1);
   });
+  const lastJoin = useRef(null); // { net, typed }
   useHostMessage('wm:wifiResult', (m) => {
     setJoining(null);
     if (m.ok) {
@@ -402,9 +403,12 @@ function WifiNetworks({ settings, onBack }) {
       setPassword('');
       setError(null);
       lowerOsk();
-    } else {
-      setError(m.message || 'Could not join');
+      return;
     }
+    setError(m.message || 'Could not join');
+    // A saved secured network without a (working) password: ask for one.
+    const last = lastJoin.current;
+    if (last && !last.typed && last.net.ssid === m.ssid && last.net.secure) askFor(last.net);
   });
   useEffect(() => {
     wm.wifiScan(false);
@@ -416,6 +420,7 @@ function WifiNetworks({ settings, onBack }) {
     raisedOsk.current = false;
   }
   const join = (n, pw = '') => {
+    lastJoin.current = { net: n, typed: !!pw };
     setError(null);
     setJoining(n.ssid);
     wm.wifiConnect(n.ssid, pw);
@@ -423,17 +428,20 @@ function WifiNetworks({ settings, onBack }) {
   const pick = (n) => {
     if (n.active || joining) return;
     if (n.secure && !n.known) {
-      setAsk(n);
-      setPassword('');
       setError(null);
-      if (!settings.osk) {
-        raisedOsk.current = true;
-        setSetting('osk', true);
-      }
+      askFor(n);
     } else {
       join(n);
     }
   };
+  function askFor(n) {
+    setAsk(n);
+    setPassword('');
+    if (!osk.current) {
+      raisedOsk.current = true;
+      setSetting('osk', true);
+    }
+  }
   const head = (title, back, right) => (
     <View style={styles.wifiHead}>
       <IconButton icon="left" size={44} iconSize={22} onPress={back} label="Back" />
