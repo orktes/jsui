@@ -471,7 +471,7 @@ function monthGrid(d) {
   return cells;
 }
 
-export const CalendarPanel = memo(function CalendarPanel({ screen, notifications, onClear, onDismiss, onClose, onClosed, open = true }) {
+export const CalendarPanel = memo(function CalendarPanel({ screen, notifications, onClear, onDismiss, onOpen, onClose, onClosed, open = true }) {
   const t = useTheme();
   const now = useClock();
   const v = useEntrance(open, 200, onClosed);
@@ -490,7 +490,13 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
             <View style={{ maxHeight: 340, marginTop: 8 }}>
             <ScrollView style={{ maxHeight: 340 }} contentContainerStyle={{ paddingBottom: 24 }}>
               {notifications.map((n) => (
-                <View key={n.id} style={[styles.note, { backgroundColor: t.panelRaised }]}>
+                <Pressable key={n.id} style={[styles.note, { backgroundColor: t.panelRaised }]} pressedStyle={{ backgroundColor: t.panelLine }}
+                  onPress={() => {
+                    // An app's notification opens the app (and the panel goes).
+                    if (!onOpen || (!n.app && n.notifyId == null)) return;
+                    onOpen(n);
+                    onClose();
+                  }}>
                   {n.app ? <AppIcon app={n.app} size={32} /> : <Icon name={n.icon || 'bell'} size={22} color={t.accent} />}
                   <View style={{ flex: 1, marginLeft: 12 }}>
                     <Text numberOfLines={1} style={[styles.noteTitle, { color: t.text }]}>{n.title}</Text>
@@ -500,7 +506,7 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
                   <Pressable onPress={() => onDismiss(n.id)} hitSlop={10} style={styles.noteClose} pressedStyle={{ backgroundColor: t.panelLine }}>
                     <Icon name="close" size={16} color={t.textMute} />
                   </Pressable>
-                </View>
+                </Pressable>
               ))}
             </ScrollView>
             <View pointerEvents="none" style={[styles.fadeBottom, { experimental_backgroundImage: `linear-gradient(180deg, rgba(0,0,0,0) 0%, ${t.panel} 100%)` }]} />
@@ -594,19 +600,19 @@ export const LockScreen = memo(function LockScreen({ screen, onUnlock, notificat
 
 // ------------------------------------------------------------------ Toasts
 
-export const Toasts = memo(function Toasts({ screen, toasts, onDone }) {
+export const Toasts = memo(function Toasts({ screen, toasts, onDone, onOpen }) {
   const t = useTheme();
   return (
     <View pointerEvents="box-none" style={[styles.toasts, { top: screen.topBar + 10, left: (screen.width - 400) / 2 }]}>
       {toasts.map((n) => (
-        <Toast key={n.id} n={n} t={t} onDone={onDone} />
+        <Toast key={n.id} n={n} t={t} onDone={onDone} onOpen={onOpen} />
       ))}
     </View>
   );
 });
 
 // Shown for a few seconds, then slides back up; a tap puts it away sooner.
-function Toast({ n, t, onDone }) {
+function Toast({ n, t, onDone, onOpen }) {
   const [open, setOpen] = useState(true);
   const v = useEntrance(open, 240, () => onDone(n.id));
   useEffect(() => {
@@ -616,7 +622,8 @@ function Toast({ n, t, onDone }) {
   const ty = v.interpolate({ inputRange: [0, 1], outputRange: [-40, 0] });
   return (
     <Animated.View style={{ opacity: v, transform: [{ translateY: ty }] }}>
-      <Pressable onPress={() => setOpen(false)} style={[styles.toast, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 32px ${t.shadow}` }]}>
+      {/* A tap puts it away; an app's notification also opens the app (onOpen). */}
+      <Pressable onPress={() => { setOpen(false); if ((n.app || n.notifyId != null) && onOpen) onOpen(n); }} style={[styles.toast, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 32px ${t.shadow}` }]}>
         {n.app ? <AppIcon app={n.app} size={28} /> : <Icon name={n.icon || 'bell'} size={22} color={t.accent} />}
         <View style={{ flex: 1, marginLeft: 12 }}>
           <Text numberOfLines={1} style={[styles.noteTitle, { color: t.text }]}>{n.title}</Text>

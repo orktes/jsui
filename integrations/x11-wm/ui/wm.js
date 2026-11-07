@@ -27,6 +27,8 @@ export const wm = {
   snapshot: (on) => send('wm:snapshot', { on }),
   // A short buzz (hosts with a vibrator: hfd on Ubuntu Touch).
   haptic: (ms = 12) => send('wm:haptic', { ms }),
+  // A notification (wm:notification's id) was tapped: its default action.
+  notificationAction: (id) => send('wm:notificationAction', { id }),
   // The screen's backlight and the output volume, 0..1 (hosts that publish
   // system.backlight / system.volume).
   brightness: (value) => send('wm:brightness', { value }),

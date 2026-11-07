@@ -362,7 +362,7 @@ function Shell() {
     }
     const id = noteId++;
     appNotes.current.set(msg.id, id);
-    const full = { id, time: nowText(), ...note };
+    const full = { id, time: nowText(), notifyId: msg.id, ...note };
     setNotes((l) => [full, ...l].slice(0, 30));
     if (!settings.doNotDisturb || msg.urgency >= 2) setToasts((l) => [...l, full].slice(-3));
   });
@@ -431,6 +431,25 @@ function Shell() {
     return () => clearTimeout(id);
   }, [appsReady]);
 
+  // A tapped notification: its app's window to the front, else the app started.
+  const openNote = useCallback((n) => {
+    // The app hears of it (ActionInvoked "default", then closed): the
+    // notification is done, so it leaves the list too.
+    if (n.notifyId != null) {
+      wm.notificationAction(n.notifyId);
+      appNotes.current.delete(n.notifyId);
+      setNotes((l) => l.filter((x) => x.id !== n.id));
+    }
+    if (!n.app) return;
+    const w = [...windows].reverse().find((x) => x.appId === n.app.id && x.type === 'normal');
+    if (w) {
+      if (w.minimized) wm.restore(w.id);
+      wm.focus(w.id);
+    } else {
+      wm.launch(n.app.exec);
+    }
+  }, [windows]);
+
   const launch = useCallback((app) => {
     wm.haptic();
     noteLaunch(app.id, `app.${app.id}`);
@@ -463,7 +482,7 @@ function Shell() {
           onLock={() => { setPanel(null); setLocked(true); }} onReload={() => DevSettings.reload()} />
       );
     }
-    if (name === 'calendar') return <CalendarPanel {...common} notifications={notes} onClear={() => setNotes([])} onDismiss={dismissNote} />;
+    if (name === 'calendar') return <CalendarPanel {...common} notifications={notes} onClear={() => setNotes([])} onDismiss={dismissNote} onOpen={openNote} />;
     return null;
   };
 
@@ -537,7 +556,7 @@ function Shell() {
             <Wallpaper width={scr.width} height={scr.height} t={t} />
           </LockScreen>
         )}
-        <Toasts screen={scr} toasts={toasts} onDone={toastDone} />
+        <Toasts screen={scr} toasts={toasts} onDone={toastDone} onOpen={openNote} />
         <VolumeOsd screen={scr} t={t} />
         {Object.values(popups).map((p) =>
           p.ready ? (
