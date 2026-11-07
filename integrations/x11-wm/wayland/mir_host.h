@@ -36,6 +36,7 @@ using GlSync = struct __GLsync*;  // GLES 3 sync objects (gl3.h's GLsync)
 #include <unistd.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -91,6 +92,63 @@ class MirHost {
   void setRotation(int deg) {
     deg = ((deg % 360) + 360) % 360;
     rot_ = deg - deg % 90;
+  }
+  int rotation() const { return rot_; }
+
+  // Turns the desktop to `deg` while running (main thread; the render
+  // context current with the GPU window). The desktop size swaps on a
+  // quarter turn, the panel's stays. With the GPU window the last frame is
+  // kept and turns from the old angle to the new one, fading into the new
+  // frames (kRotateMs). False on the Vulkan window (not supported there).
+  bool rotateTo(int deg) {
+    deg = ((deg % 360) + 360) % 360;
+    deg -= deg % 90;
+#ifdef JSUI_WL_MIR_VK
+    if (vk_) return false;
+#endif
+    if (deg == rot_) return true;
+#ifdef JSUI_WL_MIR_GL
+    if (gpu_ && tex_) {
+      const double now = nowMs();
+      float from = float(rot_.load());
+      int fromW = w_, fromH = h_;
+      if (oldTex_) {
+        // Turned again mid-turn: start from where the picture is now, with
+        // the latest frame.
+        BlitPose p = poseAt(now);
+        from = p.angle;
+        fromW = int(p.w);
+        fromH = int(p.h);
+        doomedTex_.push_back(oldTex_);
+      }
+      oldTex_ = tex_;
+      oldW_ = fromW;
+      oldH_ = fromH;
+      tex_ = 0;
+      texFresh_ = true;
+      animFrom_ = from;
+      animStart_ = now;
+      animDone_ = false;
+    }
+#endif
+    if ((deg - rot_) % 180 != 0) {
+      const int w = w_;
+      w_ = h_.load();
+      h_ = w;
+    }
+    rot_ = deg;
+#ifdef JSUI_WL_MIR_GL
+    texFresh_ = true;
+#endif
+    return true;
+  }
+  // A turn is on screen: present every frame until it is done.
+  bool rotating() const {
+#ifdef JSUI_WL_MIR_GL
+    return oldTex_ && !animDone_;
+#else
+    return false;
+#endif
   }
 
   // The size of the first connected output's current mode, rotated.
@@ -360,6 +418,15 @@ class MirHost {
         glDeleteSync_(blit);
       }
     }
+    // Textures of finished turns: the blits that drew them are submitted.
+    if (oldTex_ && animDone_) {
+      doomedTex_.push_back(oldTex_);
+      oldTex_ = 0;
+    }
+    if (!doomedTex_.empty()) {
+      glDeleteTextures(GLsizei(doomedTex_.size()), doomedTex_.data());
+      doomedTex_.clear();
+    }
     *fresh = texFresh_;
     if (texFresh_) {
       if (!tex_) glGenTextures(1, &tex_);
@@ -387,9 +454,10 @@ class MirHost {
   // swap hasn't returned yet (JSUI_WL_GPU_THREAD=0: all on this thread).
   void presentGpu() {
     if (!gpu_ || !tex_) return;
+    const Blit b = makeBlit();
     if (!threaded_) {
       const double t0 = nowMs();
-      drawBlit();
+      drawBlit(b);
       if (finish_) glFinish();
       const double t1 = nowMs();
       swap();
@@ -405,6 +473,7 @@ class MirHost {
       presentCv_.wait(lock, [&] { return !presentBusy_; });
       if (renderedFence_) glDeleteSync_(renderedFence_);  // never picked up (not expected)
       renderedFence_ = rendered;
+      blitNext_ = b;
       presentBusy_ = true;
       blitSubmitted_ = false;
     }
@@ -427,11 +496,13 @@ class MirHost {
     eglMakeCurrent(dpy_, surf_, surf_, ctx_);
     for (;;) {
       GlSync rendered = nullptr;
+      Blit b;
       {
         std::unique_lock<std::mutex> lock(presentMu_);
         presentCv_.wait(lock, [&] { return stopPresent_ || renderedFence_; });
         if (stopPresent_) break;
         std::swap(rendered, renderedFence_);
+        b = blitNext_;
       }
       glWaitSync_(rendered, 0, ~0ull);
       glDeleteSync_(rendered);
@@ -443,7 +514,7 @@ class MirHost {
         threadRenderGpuMs_ = nowMs() - t0;
         tb = nowMs();
       }
-      drawBlit();
+      drawBlit(b);
       if (finish_) {
         glFinish();
         threadBlitGpuMs_ = nowMs() - tb;
@@ -484,9 +555,73 @@ class MirHost {
     stopPresent_ = false;
   }
 
+  // Where the desktop picture is on the panel: turned `angle` degrees
+  // clockwise about the panel's centre, w x h panel px before the turn.
+  struct BlitPose {
+    float angle = 0, w = 0, h = 0, oldAlpha = 0;
+  };
+  static constexpr double kRotateMs = 420;
+  BlitPose poseAt(double now) const {
+    BlitPose p{float(rot_.load()), float(w_.load()), float(h_.load()), 0};
+    if (!oldTex_ || animDone_) return p;
+    const float t = float(std::clamp((now - animStart_) / kRotateMs, 0.0, 1.0));
+    const float e = t < 0.5f ? 4 * t * t * t : 1 - std::pow(-2 * t + 2, 3.0f) / 2;  // ease in-out
+    float d = p.angle - animFrom_;
+    while (d > 180) d -= 360;
+    while (d <= -180) d += 360;
+    p.angle = animFrom_ + d * e;
+    p.w = float(oldW_) + (p.w - float(oldW_)) * e;
+    p.h = float(oldH_) + (p.h - float(oldH_)) * e;
+    // The old frame holds while the new layout settles, then fades.
+    p.oldAlpha = std::clamp(1 - (t - 0.2f) / 0.6f, 0.0f, 1.0f);
+    return p;
+  }
+  // One blit's quads: the desktop texture and, during a turn, the frame
+  // from before it on top.
+  struct Blit {
+    int pw = 0, ph = 0;
+    int n = 0;
+    bool smooth = false;  // turning: linear filtering, black around
+    GLuint tex[2] = {};
+    float m[2][4] = {};
+    float alpha[2] = {1, 1};
+  };
+  Blit makeBlit() {
+    Blit b;
+    b.pw = w_;
+    b.ph = h_;
+    if (rot_ == 90 || rot_ == 270) std::swap(b.pw, b.ph);
+    const double now = nowMs();
+    BlitPose p = poseAt(now);
+    float sc = 1;
+    if (oldTex_ && !animDone_) {
+      if (now - animStart_ >= kRotateMs) animDone_ = true;  // this blit is the last of the turn (see desktopTexture)
+      b.smooth = !animDone_;
+    }
+    const float a = p.angle * float(M_PI) / 180, c = std::cos(a), sn = std::sin(a);
+    if (b.smooth) {
+      // Fit the turning picture inside the panel.
+      const float bw = std::fabs(p.w * c) + std::fabs(p.h * sn), bh = std::fabs(p.w * sn) + std::fabs(p.h * c);
+      sc = std::min(float(b.pw) / bw, float(b.ph) / bh);
+    }
+    auto quad = [&](GLuint tex, float alpha) {
+      int i = b.n++;
+      b.tex[i] = tex;
+      b.alpha[i] = alpha;
+      // Desktop-local corner (x, y) in -0.5..0.5 (y down) -> panel px from the centre (y down).
+      b.m[i][0] = c * p.w * sc;
+      b.m[i][1] = -sn * p.h * sc;
+      b.m[i][2] = sn * p.w * sc;
+      b.m[i][3] = c * p.h * sc;
+    };
+    quad(tex_, 1);
+    if (b.smooth && p.oldAlpha > 0) quad(oldTex_, p.oldAlpha);
+    return b;
+  }
+
   // The desktop texture as a rotated full-panel quad into the window's
   // back buffer (the window's context current).
-  void drawBlit() {
+  void drawBlit(const Blit& b) {
     // Our own vertex array (ES3): Skia's leftover attribute state (enables,
     // pointers, instancing divisors) is per-VAO, so it can't leak into ours.
     if (bindVertexArray_) bindVertexArray_(vao_);
@@ -499,8 +634,7 @@ class MirHost {
     glDisable(GL_SAMPLE_COVERAGE);
     glDisable(GL_POLYGON_OFFSET_FILL);
     glDisable(GL_DITHER);
-    int pw = w_, ph = h_;
-    if (rot_ == 90 || rot_ == 270) std::swap(pw, ph);
+    const int pw = b.pw, ph = b.ph;
     glViewport(0, 0, pw, ph);
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_BLEND);
@@ -510,30 +644,40 @@ class MirHost {
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glUseProgram(prog_);
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, tex_);
-    // Skia sets its own sampling state on the texture it renders into (mip
-    // levels, filters); an incomplete texture samples as opaque black.
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    if (es3_) {
-      glTexParameteri(GL_TEXTURE_2D, 0x813C /* GL_TEXTURE_BASE_LEVEL */, 0);
-      glTexParameteri(GL_TEXTURE_2D, 0x813D /* GL_TEXTURE_MAX_LEVEL */, 0);
-    }
     glUniform1i(samplerLoc_, 0);
     glUniform1f(solidLoc_, debugSolid_ ? 1.0f : 0.0f);
+    glUniform2f(halfLoc_, float(pw) / 2, float(ph) / 2);
     if (!vao_) {
       glBindBuffer(GL_ARRAY_BUFFER, vbo_);
       glEnableVertexAttribArray(0);
-      glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 16, nullptr);
+      glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8, nullptr);
       if (vertexAttribDivisor_) vertexAttribDivisor_(0, 0);
     }
-    if (debugRed_) {
-      glClearColor(1, 0, 0, 1);
+    if (debugRed_ || b.smooth) {
+      glClearColor(debugRed_ ? 1 : 0, 0, 0, 1);
       glClear(GL_COLOR_BUFFER_BIT);
-    } else {
+    }
+    for (int i = 0; i < b.n && !debugRed_; ++i) {
+      glBindTexture(GL_TEXTURE_2D, b.tex[i]);
+      // Skia sets its own sampling state on the texture it renders into (mip
+      // levels, filters); an incomplete texture samples as opaque black.
+      const GLint filter = b.smooth ? GL_LINEAR : GL_NEAREST;
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+      if (es3_) {
+        glTexParameteri(GL_TEXTURE_2D, 0x813C /* GL_TEXTURE_BASE_LEVEL */, 0);
+        glTexParameteri(GL_TEXTURE_2D, 0x813D /* GL_TEXTURE_MAX_LEVEL */, 0);
+      }
+      glUniform4fv(mLoc_, 1, b.m[i]);
+      glUniform1f(alphaLoc_, b.alpha[i]);
+      if (b.alpha[i] < 1) {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+      }
       glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+      glDisable(GL_BLEND);
     }
     if (!vao_) glDisableVertexAttribArray(0);
     if (bindVertexArray_) bindVertexArray_(0);
@@ -726,16 +870,25 @@ class MirHost {
 
   // The rotated full-screen quad: panel corner -> desktop texture coordinate.
   bool buildBlit(std::string* why) {
+    // a: a corner of the desktop, -0.5..0.5 (y down); m: its turn and size
+    // in panel px (Blit::m); halfSize: half the panel.
     static const char* vs =
-        "attribute vec4 a;\n"
+        "attribute vec2 a;\n"
+        "uniform vec4 m;\n"
+        "uniform vec2 halfSize;\n"
         "varying vec2 t;\n"
-        "void main() { t = a.zw; gl_Position = vec4(a.xy, 0.0, 1.0); }\n";
+        "void main() {\n"
+        "  vec2 p = vec2(m.x * a.x + m.y * a.y, m.z * a.x + m.w * a.y);\n"
+        "  t = vec2(a.x + 0.5, 0.5 - a.y);\n"
+        "  gl_Position = vec4(p.x / halfSize.x, -p.y / halfSize.y, 0.0, 1.0);\n"
+        "}\n";
     static const char* fs =
         "precision mediump float;\n"
         "varying vec2 t;\n"
         "uniform sampler2D s;\n"
         "uniform float solid;\n"
-        "void main() { gl_FragColor = mix(vec4(texture2D(s, t).rgb, 1.0), vec4(0.0, 1.0, 0.0, 1.0), solid); }\n";
+        "uniform float alpha;\n"
+        "void main() { gl_FragColor = vec4(mix(texture2D(s, t).rgb, vec3(0.0, 1.0, 0.0), solid), alpha); }\n";
     auto compile = [](GLenum type, const char* src) {
       GLuint sh = glCreateShader(type);
       glShaderSource(sh, 1, &src, nullptr);
@@ -764,22 +917,12 @@ class MirHost {
     }
     samplerLoc_ = glGetUniformLocation(prog_, "s");
     solidLoc_ = glGetUniformLocation(prog_, "solid");
-    // Strip corners in NDC; (u, vt) is the panel position (top-left origin),
-    // (X, Yt) the desktop position it shows (top-left origin) for the
-    // clockwise rotation, and the texture is sampled bottom-left origin.
-    float q[16];
-    const float ndc[4][2] = {{-1, -1}, {1, -1}, {-1, 1}, {1, 1}};
-    for (int i = 0; i < 4; ++i) {
-      float u = (ndc[i][0] + 1) / 2, vt = 1 - (ndc[i][1] + 1) / 2, X, Yt;
-      if (rot_ == 90) X = vt, Yt = 1 - u;
-      else if (rot_ == 270) X = 1 - vt, Yt = u;
-      else if (rot_ == 180) X = 1 - u, Yt = 1 - vt;
-      else X = u, Yt = vt;
-      q[i * 4 + 0] = ndc[i][0];
-      q[i * 4 + 1] = ndc[i][1];
-      q[i * 4 + 2] = X;
-      q[i * 4 + 3] = 1 - Yt;
-    }
+    mLoc_ = glGetUniformLocation(prog_, "m");
+    halfLoc_ = glGetUniformLocation(prog_, "halfSize");
+    alphaLoc_ = glGetUniformLocation(prog_, "alpha");
+    // Strip corners (bottom-left, bottom-right, top-left, top-right), the
+    // desktop's own coordinates; the turn is the vertex shader's (Blit).
+    const float q[8] = {-0.5f, 0.5f, 0.5f, 0.5f, -0.5f, -0.5f, 0.5f, -0.5f};
     glGenBuffers(1, &vbo_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
     glBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STATIC_DRAW);
@@ -791,7 +934,7 @@ class MirHost {
       bindVa(vao_);
       glBindBuffer(GL_ARRAY_BUFFER, vbo_);
       glEnableVertexAttribArray(0);
-      glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 16, nullptr);
+      glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8, nullptr);
       if (vertexAttribDivisor_) vertexAttribDivisor_(0, 0);
       bindVa(0);
     }
@@ -947,7 +1090,16 @@ class MirHost {
   GLint samplerLoc_ = -1;
   void (*bindVertexArray_)(GLuint) = nullptr;
   GLuint vao_ = 0;
-  GLint solidLoc_ = -1;
+  GLint solidLoc_ = -1, mLoc_ = -1, halfLoc_ = -1, alphaLoc_ = -1;
+  // A turn (rotateTo): the frame from before it, its size, where it started
+  // and when; textures to free once their last blit is submitted.
+  GLuint oldTex_ = 0;
+  int oldW_ = 0, oldH_ = 0;
+  float animFrom_ = 0;
+  double animStart_ = 0;
+  bool animDone_ = true;
+  std::vector<GLuint> doomedTex_;
+  Blit blitNext_;  // the present thread's next blit (presentMu_)
   void (*vertexAttribDivisor_)(GLuint, GLuint) = nullptr;
   bool debugSolid_ = false;  // JSUI_WL_GPU_DEBUG=2: solid green quad (geometry test)
   int debugFrames_ = 0;  // JSUI_WL_GPU_DEBUG: log the first presents
@@ -980,8 +1132,9 @@ class MirHost {
   bool debugRed_ = false;  // JSUI_WL_GPU_RED: clear the panel red instead of drawing (swap path test)
 #endif
   bool pointerDown_ = false;
-  int w_ = 0, h_ = 0;  // desktop size
-  int rot_ = 0;
+  // Desktop size and rotation; atomic for Mir's event thread (toDesktop).
+  std::atomic<int> w_{0}, h_{0};
+  std::atomic<int> rot_{0};
   int fd_ = -1;
   std::mutex mu_;
   std::vector<MirHostEvent> queue_;
