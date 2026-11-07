@@ -695,6 +695,9 @@ class WM {
   xkb_keymap* keymap_ = nullptr;
   wl_event_source* tickTimer_ = nullptr;
   wl_event_source* systemTimer_ = nullptr;  // publishSystem again (battery, Wi-Fi)
+  // The connected Wi-Fi network's name (NetworkManager's connection on
+  // wifiIface_), asked once each time the interface comes up.
+  std::string wifiIface_, wifiName_;
   // The display going dark (power key, idle timeout) locks the shell:
   // the backlight read once a second (wm:screen).
   wl_event_source* screenTimer_ = nullptr;
@@ -2335,12 +2338,26 @@ void WM::publishSystem() {
         std::string state;
         st >> state;
         if (wifi != "null" && state != "up") continue;
-        wifi = "{\"iface\":" + wmjson::quoted(name) + ",\"up\":" + (state == "up" ? "true" : "false") + "}";
+        wifi = "{\"iface\":" + wmjson::quoted(name) + ",\"up\":" + (state == "up" ? "true" : "false");
+        if (state == "up") {
+          if (name != wifiIface_) {
+            wifiIface_ = name;
+            wifiName_.clear();
+            runCapture({"nmcli", "-g", "GENERAL.CONNECTION", "device", "show", name}, [this, name](const std::string& out) {
+              if (name != wifiIface_) return;
+              wifiName_ = out.substr(0, out.find('\n'));
+              if (!wifiName_.empty()) publishSystem();
+            });
+          }
+          if (!wifiName_.empty()) wifi += ",\"name\":" + wmjson::quoted(wifiName_);
+        }
+        wifi += "}";
         if (state == "up") break;
       }
     }
     closedir(d);
   }
+  if (wifi == "null" || wifi.find("\"up\":true") == std::string::npos) wifiIface_.clear();
   std::string j = "{\"user\":" + wmjson::quoted(user) + ",\"hostname\":" + wmjson::quoted(host) +
                   ",\"battery\":" + battery + ",\"wifi\":" + wifi + ",\"xtest\":true";
 #ifdef JSUI_WL_MIR
@@ -3804,6 +3821,7 @@ void WM::wifiConnect(const std::string& ssid, const std::string& password) {
                     ",\"message\":" + wmjson::quoted(ok ? "" : msg) + "}";
     if (rt_) {
       jsui_post_message(rt_, "wm:wifiResult", j.c_str());
+      if (ok) wifiIface_.clear();  // another network now: ask its name again
       publishSystem();
     }
     wifiScan(false);

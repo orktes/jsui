@@ -675,7 +675,7 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
             {/* Wi-Fi has its own row (it opens a page of networks); four
                 toggles under it. A touch screen is always in tablet mode. */}
             <ToggleTile anchor={a.wifi} icon="wifi" label="Wi-Fi" wide
-              sub={system.wifi === null ? 'Not available' : !settings.wifi ? null : system.wifi && system.wifi.up ? 'Connected' : null}
+              sub={system.wifi === null ? 'Not available' : !settings.wifi ? null : system.wifi && system.wifi.up ? system.wifi.name || 'Connected' : null}
               on={settings.wifi && system.wifi !== null}
               onPress={() => {
                 setSetting('wifi', !settings.wifi);
