@@ -37,6 +37,33 @@ export function useNativeDragY() {
   return { dy: d.d, on: d.on, handlers: d.handlers };
 }
 
+/**
+ * Both axes: { dx, dy, x, y, on, handlers }, x / y the finger's page
+ * position itself (for drop targets drawn natively).
+ */
+export function useNativeDragXY() {
+  const ref = useRef(null);
+  if (!ref.current) {
+    const x = new Animated.Value(0);
+    const y = new Animated.Value(0);
+    const x0 = new Animated.Value(0);
+    const y0 = new Animated.Value(0);
+    const on = new Animated.Value(0);
+    ref.current = {
+      on,
+      x,
+      y,
+      dx: Animated.multiply(Animated.subtract(x, x0), on),
+      dy: Animated.multiply(Animated.subtract(y, y0), on),
+      handlers: {
+        onPointerDown: Animated.event([{ nativeEvent: { pageX: x0, pageY: y0 } }], { useNativeDriver: true }),
+        onPointerMove: Animated.event([{ nativeEvent: { pageX: x, pageY: y } }], { useNativeDriver: true }),
+      },
+    };
+  }
+  return ref.current;
+}
+
 /** Horizontal travel: { dx, on, handlers }. */
 export function useNativeDragX() {
   const d = useNativeDrag('pageX');
