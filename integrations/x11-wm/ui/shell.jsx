@@ -88,8 +88,9 @@ function EdgeSwipe({ side, top, bottom, onSwipe }) {
   return <View {...pan.panHandlers} style={{ position: 'absolute', top, bottom, width: EDGE, [side]: 0 }} />;
 }
 
-// The volume buttons' indicator: a pill under the top bar with the level,
-// for 1.5 s after the last press (jsui-wl sets the volume itself).
+// The volume buttons' indicator, for 1.5 s after the last press (jsui-wl sets
+// the volume itself): Quick Settings' volume slider with a shadow, in the
+// toasts' place and width.
 function VolumeOsd({ screen, t }) {
   const [level, setLevel] = useState(null);
   const v = useRef(new Animated.Value(0)).current;
@@ -107,10 +108,10 @@ function VolumeOsd({ screen, t }) {
   useEffect(() => () => clearTimeout(timer.current), []);
   if (level == null) return null;
   return (
-    <Animated.View pointerEvents="none" style={[styles.osd, { top: screen.topBar + 14, left: (screen.width - 320) / 2, backgroundColor: t.panel, borderColor: t.panelLine, opacity: v }]}>
-      <Icon name={level === 0 ? 'mute' : 'volume'} size={22} color={t.text} />
-      <View style={[styles.osdTrack, { backgroundColor: t.panelRaised }]}>
-        <View style={[styles.osdFill, { width: `${Math.round(level * 100)}%`, backgroundColor: t.accent }]} />
+    <Animated.View pointerEvents="none" style={[styles.osd, { top: screen.topBar + 10, left: (screen.width - 400) / 2, backgroundColor: t.panelRaised, boxShadow: `0px 12px 32px ${t.shadow}`, opacity: v }]}>
+      <View style={[styles.osdFill, { width: Math.max(48, level * 400), backgroundColor: t.tileOn }]} />
+      <View style={styles.osdIcon}>
+        <Icon name={level === 0 ? 'mute' : 'volume'} size={22} color="#fff" />
       </View>
     </Animated.View>
   );
@@ -799,9 +800,10 @@ const styles = StyleSheet.create({
   deskTime: { fontFamily: font, fontSize: 132, fontWeight: '700', letterSpacing: -4 },
   deskDate: { fontFamily: font, fontSize: 26, fontWeight: '500' },
   snap: { position: 'absolute', borderRadius: 18, borderWidth: 3 },
-  osd: { position: 'absolute', width: 320, height: 56, borderRadius: 28, borderWidth: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18 },
-  osdTrack: { flex: 1, height: 8, borderRadius: 4, marginLeft: 14, overflow: 'hidden' },
-  osdFill: { height: 8, borderRadius: 4 },
+  // The same shapes as Quick Settings' sliders (controls.jsx track / fill).
+  osd: { position: 'absolute', width: 400, height: 48, borderRadius: 24, overflow: 'hidden' },
+  osdFill: { position: 'absolute', left: 0, top: 0, bottom: 0, borderRadius: 24 },
+  osdIcon: { position: 'absolute', left: 14, top: 13 },
   splash: { position: 'absolute', left: 0, borderRadius: 18, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
   splashName: { fontFamily: font, fontSize: 22, fontWeight: '600', marginTop: 22, marginBottom: 30 },
   spinner: { width: 34, height: 34, borderRadius: 17, borderWidth: 3.5 },
