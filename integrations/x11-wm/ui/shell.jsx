@@ -48,6 +48,34 @@ function Wallpaper({ width, height, t }) {
   );
 }
 
+// The volume buttons' indicator: a pill under the top bar with the level,
+// for 1.5 s after the last press (jsui-wl sets the volume itself).
+function VolumeOsd({ screen, t }) {
+  const [level, setLevel] = useState(null);
+  const v = useRef(new Animated.Value(0)).current;
+  const timer = useRef(null);
+  useHostMessage('wm:volumeKey', (msg) => {
+    setLevel(msg.level);
+    setSetting('volume', msg.level);
+    setSetting('muted', false);
+    Animated.timing(v, { toValue: 1, duration: 120, useNativeDriver: true }).start();
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => {
+      Animated.timing(v, { toValue: 0, duration: 200, useNativeDriver: true }).start(({ finished }) => finished && setLevel(null));
+    }, 1500);
+  });
+  useEffect(() => () => clearTimeout(timer.current), []);
+  if (level == null) return null;
+  return (
+    <Animated.View pointerEvents="none" style={[styles.osd, { top: screen.topBar + 14, left: (screen.width - 320) / 2, backgroundColor: t.panel, borderColor: t.panelLine, opacity: v }]}>
+      <Icon name={level === 0 ? 'mute' : 'volume'} size={22} color={t.text} />
+      <View style={[styles.osdTrack, { backgroundColor: t.panelRaised }]}>
+        <View style={[styles.osdFill, { width: `${Math.round(level * 100)}%`, backgroundColor: t.accent }]} />
+      </View>
+    </Animated.View>
+  );
+}
+
 // Big clock on the empty desktop.
 function DesktopClock({ screen, t }) {
   const now = useClock();
@@ -428,6 +456,7 @@ function Shell() {
           </LockScreen>
         )}
         <Toasts screen={scr} toasts={toasts} onDone={toastDone} />
+        <VolumeOsd screen={scr} t={t} />
         {Object.values(popups).map((p) =>
           p.ready ? (
             <HostTexture key={p.id} name={`win:${p.id}`} pointerEvents="none"
@@ -449,6 +478,9 @@ const styles = StyleSheet.create({
   deskTime: { fontFamily: font, fontSize: 112, fontWeight: '600', letterSpacing: -3, fontVariant: ['tabular-nums'] },
   deskDate: { fontFamily: font, fontSize: 24, fontWeight: '500', marginTop: -4 },
   snap: { position: 'absolute', borderRadius: 18, borderWidth: 3 },
+  osd: { position: 'absolute', width: 320, height: 56, borderRadius: 28, borderWidth: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18 },
+  osdTrack: { flex: 1, height: 8, borderRadius: 4, marginLeft: 14, overflow: 'hidden' },
+  osdFill: { height: 8, borderRadius: 4 },
 });
 
 AppRegistry.registerComponent('main', () => Shell);
