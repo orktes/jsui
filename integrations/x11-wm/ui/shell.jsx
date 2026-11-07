@@ -48,7 +48,6 @@ function Wallpaper({ width, height, t }) {
   );
 }
 
-// Big clock on the empty desktop.
 // Edge swipes over a full-screen app (as on Lomiri): in from the left edge
 // opens the launcher, in from the right edge the switcher. The strips are
 // the shell's (shellRegions), so a touch starting there never reaches the
@@ -87,6 +86,7 @@ function EdgeSwipe({ side, top, bottom, onSwipe }) {
   return <View {...pan.panHandlers} style={{ position: 'absolute', top, bottom, width: EDGE, [side]: 0 }} />;
 }
 
+// Big clock on the empty desktop.
 function DesktopClock({ screen, t }) {
   const now = useClock();
   return (
