@@ -1,0 +1,16 @@
+[Unit]
+Description=jsui-wm: Wi-Fi driver and radio on (Galaxy Tab A7 on the stock vendor)
+# The vendor's init loads a Wi-Fi module this kernel refuses; this loads the
+# kernel's own and switches the radio on (see jsui-wm-wifi-up). Installed by
+# wifi-on.sh (or install.sh --system) once a bring-up by hand has worked.
+Wants=NetworkManager.service
+After=NetworkManager.service lxc-android-config.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=180
+ExecStart=/bin/sh /etc/writable/jsui-wm-wifi-up
+
+[Install]
+WantedBy=multi-user.target
