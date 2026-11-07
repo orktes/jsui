@@ -106,6 +106,7 @@ extern "C" {
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_touch.h>
 #include <wlr/types/wlr_virtual_keyboard_v1.h>
+#include <wlr/types/wlr_viewporter.h>
 #include <wlr/types/wlr_virtual_pointer_v1.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_xdg_output_v1.h>
@@ -121,6 +122,7 @@ extern "C" {
 #endif
 #include "text_input_v2.h"
 #include "text_input_v3.h"
+#include "fractional_scale_v1.h"
 
 #ifndef JSUI_WM_BUNDLE
 #define JSUI_WM_BUNDLE "integrations/x11-wm/ui/dist/shell.js"
@@ -566,6 +568,12 @@ struct Client {
   // than the work area, letterboxed; see fitMaximized). x / y are where it
   // is shown, w / h its own size; input is mapped back through it.
   double fit = 1;
+  // The client's surface units -> screen px: 1, or the shell's scale for one
+  // that asked for it (fractional_scale_v1.h: it renders at that scale and
+  // is configured in logical units). x / y / w / h stay in screen px; what
+  // goes to and comes from the client is converted (setSize, geometry,
+  // capture, input). A popup takes its toplevel's.
+  double cs = 1;
   std::vector<uint8_t> rgba;
   int texW = 0, texH = 0;
   bool hasTexture = false;
@@ -635,6 +643,8 @@ class WM {
   // how much of the screen it takes (wm:osk).
   TextInputV2 textInput_;
   TextInputV3 textInputV3_;
+  FractionalScale fractional_;
+  void setSize(Client* c, int w, int h);  // screen px -> the client's units
   int oskH_ = 0;
   void fitMaximized(Client* c);
   void saveSettings(const wmjson::Value& v);
@@ -1034,6 +1044,8 @@ bool WM::setup() {
   };
   textInput_.create(display_, onPanel);
   textInputV3_.create(display_, onPanel);
+  wlr_viewporter_create(display_);
+  fractional_.create(display_, scale_);
   listen(&seat_->events.request_set_selection, nullptr, [this](void* d) {
     auto* e = static_cast<wlr_seat_request_set_selection_event*>(d);
     wlr_seat_set_selection(seat_, e->source, e->serial);
@@ -1124,9 +1136,11 @@ void WM::newOutput(wlr_output* output) {
   sw_ = output->width;
   sh_ = output->height;
   scale_ = opt_.scale > 0 ? opt_.scale : sw_ >= 1800 ? 1.5f : sw_ >= 1500 ? 1.25f : 1.0f;
+  fractional_.setScale(scale_);
   logf("output %s %dx%d px, scale %.2f (%dx%d logical)", output->name, sw_, sh_, scale_, int(L(sw_)), int(L(sh_)));
-  // Apps render at scale 1 (no fractional-scale protocol here); GTK scales its
-  // text to the shell's scale instead.
+  // Apps that ask (fractional_scale_v1.h: Chromium / Electron, GTK 4, Qt 6)
+  // render at the shell's scale; the rest at 1, and GTK 3 scales its text
+  // to the shell's scale instead.
   setenv("GDK_DPI_SCALE", std::to_string(scale_).c_str(), 0);
 
   allocFrame();
@@ -1155,6 +1169,7 @@ void WM::resizeScreen(int w, int h) {
   sw_ = w;
   sh_ = h;
   if (opt_.scale <= 0) scale_ = sw_ >= 1800 ? 1.5f : sw_ >= 1500 ? 1.25f : 1.0f;
+  fractional_.setScale(scale_);
   allocFrame();
   wlr_scene_buffer_set_buffer(shellNode_, &frame_->base);
   if (!rt_) return;
@@ -1292,8 +1307,9 @@ void WM::newPopup(wlr_xdg_popup* popup) {
     Client* top = parent;
     while (top && top->popup) top = find(top->parentId);
     if (top) {
+      c->cs = top->cs;
       // The screen in the toplevel's surface coordinates (through its fit).
-      const double f = top->fit > 0 ? top->fit : 1;
+      const double f = (top->fit > 0 ? top->fit : 1) * top->cs;
       wlr_box box{int(std::lround(-top->x / f + top->geoX)), int(std::lround(-top->y / f + top->geoY)),
                   int(std::lround(sw_ / f)), int(std::lround(sh_ / f))};
       wlr_xdg_popup_unconstrain_from_box(popup, &box);
@@ -1372,14 +1388,16 @@ Rect WM::maxArea() const {
 
 void WM::place(Client* c) {
   c->placed = true;
-  c->minW = std::max(1, c->tl->current.min_width);
-  c->minH = std::max(1, c->tl->current.min_height);
-  c->maxW = c->tl->current.max_width;
-  c->maxH = c->tl->current.max_height;
+  c->cs = fractional_.has(c->xdg->surface) ? scale_ : 1;
+  auto px = [c](int v) { return int(std::lround(v * c->cs)); };
+  c->minW = std::max(1, px(c->tl->current.min_width));
+  c->minH = std::max(1, px(c->tl->current.min_height));
+  c->maxW = px(c->tl->current.max_width);
+  c->maxH = px(c->tl->current.max_height);
   c->dialog = c->tl->parent != nullptr || (c->maxW > 0 && c->maxW == c->minW && c->maxH == c->minH);
   wlr_box geo;
   wlr_xdg_surface_get_geometry(c->xdg, &geo);
-  int w = std::max(geo.width, P(280)), h = std::max(geo.height, P(160));
+  int w = std::max(px(geo.width), P(280)), h = std::max(px(geo.height), P(160));
   Rect wa = workArea();
   if (c->tl->parent) {
     if (Client* p = findSurface(c->tl->parent->base->surface)) {
@@ -1406,7 +1424,11 @@ void WM::place(Client* c) {
   }
   c->w = w;
   c->h = h;
-  wlr_xdg_toplevel_set_size(c->tl, w, h);
+  setSize(c, w, h);
+}
+
+void WM::setSize(Client* c, int w, int h) {
+  wlr_xdg_toplevel_set_size(c->tl, int(std::lround(w / c->cs)), int(std::lround(h / c->cs)));
 }
 
 void WM::configure(Client* c, int x, int y, int w, int h) {
@@ -1418,7 +1440,7 @@ void WM::configure(Client* c, int x, int y, int w, int h) {
   c->y = y;
   if (w != c->w || h != c->h) {
     VLOG("configure %u %dx%d", c->id, w, h);
-    wlr_xdg_toplevel_set_size(c->tl, w, h);
+    setSize(c, w, h);
   }
   c->w = w;
   c->h = h;
@@ -1429,8 +1451,8 @@ void WM::configure(Client* c, int x, int y, int w, int h) {
     wlr_box geo;
     wlr_xdg_surface_get_geometry(c->xdg, &geo);
     if (geo.width > 0 && geo.height > 0) {
-      c->w = geo.width;
-      c->h = geo.height;
+      c->w = int(std::lround(geo.width * c->cs));
+      c->h = int(std::lround(geo.height * c->cs));
     }
     fitMaximized(c);
   }
@@ -1443,12 +1465,13 @@ void WM::configure(Client* c, int x, int y, int w, int h) {
 // centred, with input mapped back (see fit). Anything else is shown 1:1.
 // Screen px -> the client's surface coordinates (its fit, see Client::fit).
 void WM::toSurface(const Client* c, double* x, double* y) const {
+  const double f = c->fit * c->cs;
   if (c->popup) {
-    *x = (*x - c->x) / c->fit;
-    *y = (*y - c->y) / c->fit;
+    *x = (*x - c->x) / f;
+    *y = (*y - c->y) / f;
   } else {
-    *x = (*x - c->x) / c->fit + c->geoX;
-    *y = (*y - c->y) / c->fit + c->geoY;
+    *x = (*x - c->x) / f + c->geoX;
+    *y = (*y - c->y) / f + c->geoY;
   }
 }
 
@@ -1472,6 +1495,9 @@ void WM::onCommit(Client* c) {
   wlr_xdg_surface_get_geometry(c->xdg, &geo);
   c->geoX = geo.x;
   c->geoY = geo.y;
+  // The geometry in screen px (the client's units times cs).
+  geo.width = int(std::lround(geo.width * c->cs));
+  geo.height = int(std::lround(geo.height * c->cs));
   if (!c->popup && (geo.width != c->w || geo.height != c->h) && geo.width > 0 && geo.height > 0) {
     // The client picked its own size (or follows our configure).
     VLOG("commit %u %dx%d (was %dx%d)", c->id, geo.width, geo.height, c->w, c->h);
@@ -1486,7 +1512,7 @@ void WM::onCommit(Client* c) {
     if (c->maximized && !c->snap && !c->fullscreen && (geo.width != wa.w || geo.height != wa.h) &&
         (c->maxW <= 0 || c->maxW >= wa.w) && (c->maxH <= 0 || c->maxH >= wa.h) && nowMs() - c->reassertedAt > 1000) {
       c->reassertedAt = nowMs();
-      wlr_xdg_toplevel_set_size(c->tl, wa.w, wa.h);
+      setSize(c, wa.w, wa.h);
     }
   }
   if (c->popup) {
@@ -1523,13 +1549,13 @@ Rect WM::popupRect(Client* p) const {
   }
   // A letterboxed toplevel (fit < 1) scales its popups with it.
   if (top) {
-    x = top->x + int(std::lround((px - top->geoX) * top->fit));
-    y = top->y + int(std::lround((py - top->geoY) * top->fit));
+    x = top->x + int(std::lround((px - top->geoX) * top->fit * top->cs));
+    y = top->y + int(std::lround((py - top->geoY) * top->fit * top->cs));
   }
   r.x = x;
   r.y = y;
-  r.w = p->xdg->surface->current.width;
-  r.h = p->xdg->surface->current.height;
+  r.w = int(std::lround(p->xdg->surface->current.width * p->cs));
+  r.h = int(std::lround(p->xdg->surface->current.height * p->cs));
   return r;
 }
 
@@ -1552,7 +1578,10 @@ void WM::capture(Client* c) {
   if (gpuBuffers_.count(c->id)) removeWindowTexture(c->id);  // back on shm
   wlr_surface* root = c->xdg->surface;
   int ox = c->popup ? 0 : -c->geoX, oy = c->popup ? 0 : -c->geoY;
-  int w = c->popup ? root->current.width : c->w, h = c->popup ? root->current.height : c->h;
+  // In screen px: a client at cs > 1 (fractional_scale_v1.h) draws its
+  // buffers that much larger than its surface, so they land 1:1.
+  int w = c->popup ? int(std::lround(root->current.width * c->cs)) : c->w;
+  int h = c->popup ? int(std::lround(root->current.height * c->cs)) : c->h;
   if (w <= 0 || h <= 0) return;
   if (c->texW != w || c->texH != h) {
     c->rgba.assign(size_t(w) * size_t(h) * 4, 0);
@@ -1566,8 +1595,9 @@ void WM::capture(Client* c) {
   struct Ctx {
     pixman_image_t* dst;
     int ox, oy;
+    double cs;
     bool any;
-  } ctx{dst, ox, oy, false};
+  } ctx{dst, ox, oy, c->cs, false};
   wlr_surface_for_each_surface(
       root,
       [](wlr_surface* s, int sx, int sy, void* u) {
@@ -1577,8 +1607,10 @@ void WM::capture(Client* c) {
         pixman_image_t* src = wlr_pixman_texture_get_image(tex);
         if (!src) return;
         int bw = pixman_image_get_width(src), bh = pixman_image_get_height(src);
-        int dw = s->current.width, dh = s->current.height;
-        // HiDPI buffers (buffer_scale > 1): scale down to surface size.
+        // The surface's place and size in screen px (surface units times cs).
+        int dx = int(std::lround((sx + k->ox) * k->cs)), dy = int(std::lround((sy + k->oy) * k->cs));
+        int dw = int(std::lround(s->current.width * k->cs)), dh = int(std::lround(s->current.height * k->cs));
+        // Buffers of another size (buffer_scale, a viewport): scaled to it.
         pixman_transform_t t;
         pixman_transform_init_scale(&t, pixman_double_to_fixed(double(bw) / std::max(1, dw)),
                                     pixman_double_to_fixed(double(bh) / std::max(1, dh)));
@@ -1588,7 +1620,7 @@ void WM::capture(Client* c) {
           pixman_image_set_filter(src, PIXMAN_FILTER_BILINEAR, nullptr, 0);
         }
         pixman_image_composite32(k->any ? PIXMAN_OP_OVER : PIXMAN_OP_SRC, src, nullptr, k->dst, 0, 0, 0, 0,
-                                 sx + k->ox, sy + k->oy, dw, dh);
+                                 dx, dy, dw, dh);
         if (scaled) pixman_image_set_transform(src, nullptr);
         k->any = true;
       },
@@ -1964,8 +1996,8 @@ void WM::onMap(Client* c) {
   wlr_xdg_surface_get_geometry(c->xdg, &geo);
   c->geoX = geo.x;
   c->geoY = geo.y;
-  if (geo.width > 0) c->w = geo.width;
-  if (geo.height > 0) c->h = geo.height;
+  if (geo.width > 0) c->w = int(std::lround(geo.width * c->cs));
+  if (geo.height > 0) c->h = int(std::lround(geo.height * c->cs));
   fitMaximized(c);
   stack_.push_back(c->id);
   logf("map %u \"%s\" (%s) %dx%d", c->id, c->title.c_str(), c->appIdRaw.c_str(), c->w, c->h);
@@ -2753,7 +2785,8 @@ Target WM::route(double x, double y, wlr_surface** surface, double* sx, double* 
     Rect r{p->x, p->y, int(p->w * p->fit), int(p->h * p->fit)};
     if (!r.contains(x, y)) continue;
     double lx = 0, ly = 0;
-    wlr_surface* s = wlr_surface_surface_at(p->xdg->surface, (x - p->x) / p->fit, (y - p->y) / p->fit, &lx, &ly);
+    const double pf = p->fit * p->cs;
+    wlr_surface* s = wlr_surface_surface_at(p->xdg->surface, (x - p->x) / pf, (y - p->y) / pf, &lx, &ly);
     if (s) {
       *surface = s;
       *sx = lx;
@@ -2768,8 +2801,8 @@ Target WM::route(double x, double y, wlr_surface** surface, double* sx, double* 
     Rect content{c->x, c->y, int(c->w * c->fit), int(c->h * c->fit)};
     if (content.contains(x, y)) {
       double lx = 0, ly = 0;
-      wlr_surface* s =
-          wlr_xdg_surface_surface_at(c->xdg, (x - c->x) / c->fit + c->geoX, (y - c->y) / c->fit + c->geoY, &lx, &ly);
+      const double f = c->fit * c->cs;
+      wlr_surface* s = wlr_xdg_surface_surface_at(c->xdg, (x - c->x) / f + c->geoX, (y - c->y) / f + c->geoY, &lx, &ly);
       if (s) {
         *surface = s;
         *sx = lx;
