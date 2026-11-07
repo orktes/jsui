@@ -1371,10 +1371,11 @@ void WM::place(Client* c) {
     c->restore = {c->x, c->y, std::min(w, wa.w), std::min(h, wa.h)};
     c->hasRestore = true;
     c->maximized = true;
-    c->x = wa.x;
-    c->y = wa.y;
-    w = wa.w;
-    h = wa.h;
+    Rect ma = maxArea();
+    c->x = ma.x;
+    c->y = ma.y;
+    w = ma.w;
+    h = ma.h;
     wlr_xdg_toplevel_set_maximized(c->tl, true);
   }
   c->w = w;
