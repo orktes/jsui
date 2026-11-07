@@ -7,7 +7,7 @@ import React, { memo, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useAnchor } from './anchors.js';
 import { Icon } from './icons.jsx';
-import { font, useTheme } from './theme.js';
+import { font, radius, useTheme } from './theme.js';
 import { setSetting, wm } from './wm.js';
 
 const LETTERS = [
@@ -122,6 +122,6 @@ export const Keyboard = memo(function Keyboard({ screen, onMeasure, onHide }) {
 const styles = StyleSheet.create({
   board: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 10, paddingTop: 10, paddingBottom: 12, borderTopWidth: 1, borderTopLeftRadius: 24, borderTopRightRadius: 24 },
   row: { flexDirection: 'row', height: 52, marginBottom: 8 },
-  key: { marginHorizontal: 4, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  key: { marginHorizontal: 4, borderRadius: radius.s, alignItems: 'center', justifyContent: 'center' },
   keyText: { fontFamily: font, fontWeight: '500' },
 });

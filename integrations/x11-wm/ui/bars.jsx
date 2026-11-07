@@ -8,7 +8,7 @@ import { useNativeDragY } from './drag.js';
 import Svg, { Path, Rect } from 'react-native-svg';
 import { AppIcon } from './AppIcon.jsx';
 import { Icon } from './icons.jsx';
-import { font, useTheme } from './theme.js';
+import { font, radius, useTheme } from './theme.js';
 import { WindowMenu } from './WindowMenu.jsx';
 import { appKeyOf, appTitle, setSetting, wm } from './wm.js';
 
@@ -387,7 +387,7 @@ const styles = StyleSheet.create({
   dots: { flexDirection: 'row', height: 5, marginTop: 4 },
   dot: { width: 5, height: 5, borderRadius: 2.5 },
   sep: { width: 1, height: 40, marginHorizontal: 6 },
-  menu: { position: 'absolute', width: 280, borderRadius: 22, borderWidth: 1, paddingVertical: 8 },
+  menu: { position: 'absolute', width: 280, borderRadius: radius.l, borderWidth: 1, paddingVertical: 8 },
   menuTitle: { fontFamily: font, fontSize: 13, fontWeight: '700', paddingHorizontal: 18, paddingVertical: 8, letterSpacing: 0.4 },
   menuRow: { height: 52, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18 },
   menuText: { fontFamily: font, fontSize: 16, marginLeft: 14, flex: 1 },

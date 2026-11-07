@@ -16,7 +16,7 @@ import { anchorRect, takeLaunchOrigin, useAnchor } from './anchors.js';
 import { useNativeDragXY } from './drag.js';
 import { AppIcon } from './AppIcon.jsx';
 import { Icon } from './icons.jsx';
-import { font, useTheme } from './theme.js';
+import { font, radius, useTheme } from './theme.js';
 import { appKeyOf, appName, windowTitle, wm } from './wm.js';
 import { WindowMenu } from './WindowMenu.jsx';
 
@@ -260,7 +260,7 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
   const decorated = win.decorated && !full && !inBar;
   const max = win.maximized && !drag;
   const snapped = !!win.snap && !drag;
-  const radius = full || max ? 0 : snapped ? 16 : 14;
+  const corner = full || max ? 0 : radius.m;
   // Tablet mode, split: a slim header with a grabber, the app name and a
   // menu (which has Close), instead of desktop window buttons.
   const tabletChrome = tablet && decorated && win.type === 'normal' && (max || snapped);
@@ -314,7 +314,7 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
         },
       ]}
     >
-      <View style={[styles.surface, { borderRadius: radius, boxShadow: full || max ? undefined : shadow }]}>
+      <View style={[styles.surface, { borderRadius: corner, boxShadow: full || max ? undefined : shadow }]}>
         {/* One title bar element for both looks: a drag that leaves the
             maximized place switches the look mid-gesture, and a new element
             would end the gesture (the release then didn't know where the
@@ -327,7 +327,7 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
             onLayout={titleAnchor.onLayout}
             style={[
               styles.titleBar,
-              { height: TB, backgroundColor: tabletChrome || active ? t.chromeActive : t.chrome, borderTopLeftRadius: radius, borderTopRightRadius: radius },
+              { height: TB, backgroundColor: tabletChrome || active ? t.chromeActive : t.chrome, borderTopLeftRadius: corner, borderTopRightRadius: corner },
             ]}
           >
             {tabletChrome ? (
@@ -374,10 +374,10 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
             height: g.h,
             overflow: 'hidden',
             backgroundColor: t.chrome,
-            borderBottomLeftRadius: radius,
-            borderBottomRightRadius: radius,
-            borderTopLeftRadius: decorated ? 0 : radius,
-            borderTopRightRadius: decorated ? 0 : radius,
+            borderBottomLeftRadius: corner,
+            borderBottomRightRadius: corner,
+            borderTopLeftRadius: decorated ? 0 : corner,
+            borderTopRightRadius: decorated ? 0 : corner,
           }}
         >
           <HostTexture name={`win:${win.id}`} style={{ width: g.w, height: g.h }} resizeMode="stretch" />
@@ -404,7 +404,7 @@ const styles = StyleSheet.create({
   titleBar: { flexDirection: 'row', alignItems: 'center', paddingLeft: 12, paddingRight: 4 },
   titleIcon: { width: 30, alignItems: 'center', marginRight: 8 },
   title: { flex: 1, fontFamily: font, fontSize: 16, fontWeight: '600' },
-  titleButton: { width: 48, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginLeft: 2 },
+  titleButton: { width: 48, height: 38, borderRadius: radius.s, alignItems: 'center', justifyContent: 'center', marginLeft: 2 },
   edge: { position: 'absolute' },
   gripMark: {
     position: 'absolute',

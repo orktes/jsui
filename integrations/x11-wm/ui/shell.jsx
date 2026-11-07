@@ -20,7 +20,7 @@ import { LAUNCH_TIMEOUT_MS, endLaunch, startLaunch, useLaunching } from './launc
 import { useNativeDragX, useNativeDragY } from './drag.js';
 import { Keyboard } from './keyboard.jsx';
 import { AppTile, CalendarPanel, Launcher, LockScreen, Overview, QuickSettings, Toasts } from './panels.jsx';
-import { ThemeContext, dark, font, light } from './theme.js';
+import { ThemeContext, dark, font, light, radius } from './theme.js';
 import { Window } from './Window.jsx';
 import { appName, cleanName, homeApps, pinHome, setSetting, useApps, usePopups, useScreen, useSettings, useSystem, useWindows, wm } from './wm.js';
 
@@ -351,7 +351,7 @@ function Home({ screen, t, note, apps, settings, onLaunch, onCalendar, onAllApps
 
 function SplitPanes({ split, screen, t }) {
   const p = splitPanes(split, screen);
-  const pane = { position: 'absolute', borderRadius: 16, backgroundColor: t.chrome };
+  const pane = { position: 'absolute', borderRadius: radius.m, backgroundColor: t.chrome };
   return (
     <View pointerEvents="none" style={StyleSheet.absoluteFill}>
       <View style={[{ position: 'absolute', backgroundColor: t.wallTop }, p.seam]} />
@@ -941,8 +941,8 @@ function Shell() {
 
 const styles = StyleSheet.create({
   root: { flex: 1, overflow: 'hidden' },
-  // Home: one centred column, the glance over the shortcut card. The card's
-  // radius nests its icons' (16) in its padding (24).
+  // Home: one centred column, the glance over the shortcut card (a panel's
+  // radius).
   home: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
   glance: { alignItems: 'center' },
   // Smaller and lighter than the lock screen's 132 px bold clock: home and
@@ -950,11 +950,11 @@ const styles = StyleSheet.create({
   glanceTime: { fontFamily: font, fontSize: 76, fontWeight: '400', letterSpacing: -2.5, fontVariant: ['tabular-nums'] },
   glanceDate: { fontFamily: font, fontSize: 20, fontWeight: '500', marginTop: 8 },
   glanceLine: { fontFamily: font, fontSize: 14, fontWeight: '400', marginTop: 8, textAlign: 'center', alignSelf: 'stretch' },
-  homeCard: { flexDirection: 'row', marginTop: 56, paddingTop: HOME_PAD.top, paddingBottom: HOME_PAD.bottom, paddingHorizontal: HOME_PAD.side, borderRadius: 32, borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)', backgroundColor: 'rgba(255,255,255,0.09)' },
+  homeCard: { flexDirection: 'row', marginTop: 56, paddingTop: HOME_PAD.top, paddingBottom: HOME_PAD.bottom, paddingHorizontal: HOME_PAD.side, borderRadius: radius.l, borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)', backgroundColor: 'rgba(255,255,255,0.09)' },
   shortcut: { width: HOME_SLOT.w, height: HOME_SLOT.h, alignItems: 'center', paddingTop: 4 },
   shortcutLabel: { fontFamily: font, fontSize: 13, fontWeight: '500', marginTop: 8 },
   allApps: { width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center' },
-  snap: { position: 'absolute', borderRadius: 18, borderWidth: 3 },
+  snap: { position: 'absolute', borderRadius: radius.m, borderWidth: 3 },
   // The same shapes as Quick Settings' sliders (controls.jsx track / fill).
   osd: { position: 'absolute', width: 400, height: 48, borderRadius: 24, overflow: 'hidden' },
   osdFill: { position: 'absolute', left: 0, top: 0, bottom: 0, borderRadius: 24 },

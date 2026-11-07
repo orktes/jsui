@@ -3,7 +3,7 @@
 import React, { memo, useRef, useState } from 'react';
 import { PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Icon } from './icons.jsx';
-import { font, touch, useTheme } from './theme.js';
+import { font, radius, touch, useTheme } from './theme.js';
 
 export const IconButton = memo(function IconButton({ icon, onPress, size = touch.button, iconSize = 24, active, label, style, anchor, color }) {
   const t = useTheme();
@@ -124,8 +124,8 @@ export function Label({ children, style }) {
 }
 
 const styles = StyleSheet.create({
-  card: { borderRadius: 26, borderWidth: 1, padding: 18, overflow: 'hidden' },
-  tile: { flexDirection: 'row', alignItems: 'center', height: 68, borderRadius: 20, paddingHorizontal: 12, flexBasis: '48%', flexGrow: 1 },
+  card: { borderRadius: radius.l, borderWidth: 1, padding: 18, overflow: 'hidden' },
+  tile: { flexDirection: 'row', alignItems: 'center', height: 68, borderRadius: radius.m, paddingHorizontal: 12, flexBasis: '48%', flexGrow: 1 },
   tileIcon: { width: 32, height: 40, alignItems: 'center', justifyContent: 'center', marginLeft: 4, marginRight: 10 },
   tileLabel: { fontFamily: font, fontSize: 15, fontWeight: '600' },
   tileSub: { fontFamily: font, fontSize: 13, marginTop: 1 },
