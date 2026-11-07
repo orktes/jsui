@@ -61,6 +61,7 @@
 #include <xkbcommon/xkbcommon.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdarg>
 #include <cstdint>
@@ -70,6 +71,7 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <set>
 #include <string>
@@ -748,6 +750,19 @@ class WM {
   pid_t orientPid_ = -1;
   wl_event_source* orientSrc_ = nullptr;
   std::string orientBuf_;
+  // Commands whose output the shell waits for (Wi-Fi over nmcli): argv runs
+  // detached, stdout and stderr collected, done() called at EOF.
+  struct Capture {
+    WM* wm;
+    int fd;
+    wl_event_source* src;
+    std::string out;
+    std::function<void(const std::string&)> done;
+  };
+  std::vector<std::unique_ptr<Capture>> captures_;
+  void runCapture(const std::vector<std::string>& argv, std::function<void(const std::string&)> done);
+  void wifiScan(bool rescan);
+  void wifiConnect(const std::string& ssid, const std::string& password);
   // --mir on the GPU: Skia draws the desktop into the Mir window's GL context.
   JsuiGpuContext* gpu_ = nullptr;
   bool vulkan_ = false;  // gpu_ is Graphite on MirVulkan's device (else Ganesh GL)
@@ -2402,6 +2417,12 @@ void WM::onMessage(const char* name, const char* json) {
       ssize_t w = write(notifyIn_, l.data(), l.size());
       (void)w;
     }
+  } else if (n == "wm:wifiScan") {
+    wifiScan(v["rescan"].truthy());
+  } else if (n == "wm:wifiConnect") {
+    wifiConnect(v["ssid"].str(), v["password"].str());
+  } else if (n == "wm:wifiRadio") {
+    spawnQuiet({"nmcli", "radio", "wifi", v["on"].truthy() ? "on" : "off"});
   } else if (n == "wm:haptic") {
     haptic(int(v["ms"].num(12)));
   } else if (n == "wm:brightness") {
@@ -3515,6 +3536,136 @@ void WM::orientationLine(const std::string& line) {
   if (deg < 0) return;
   if (const char* off = getenv("JSUI_WL_ORIENTATION_OFFSET")) deg += std::atoi(off);
   rotateTo(deg);
+}
+
+void WM::runCapture(const std::vector<std::string>& argv, std::function<void(const std::string&)> done) {
+  int fds[2];
+  if (pipe2(fds, O_CLOEXEC) != 0) return done("");
+  pid_t pid = fork();
+  if (pid == 0) {
+    signal(SIGCHLD, SIG_DFL);
+    dup2(fds[1], 1), dup2(fds[1], 2);
+    int nul = open("/dev/null", O_RDONLY);
+    if (nul >= 0) dup2(nul, 0);
+    std::vector<char*> a;
+    for (const auto& x : argv) a.push_back(const_cast<char*>(x.c_str()));
+    a.push_back(nullptr);
+    execvp(a[0], a.data());
+    _exit(127);
+  }
+  ::close(fds[1]);
+  if (pid < 0) {
+    ::close(fds[0]);
+    return done("");
+  }
+  fcntl(fds[0], F_SETFL, O_NONBLOCK);
+  auto c = std::make_unique<Capture>();
+  c->wm = this;
+  c->fd = fds[0];
+  c->done = std::move(done);
+  c->src = wl_event_loop_add_fd(loop_, fds[0], WL_EVENT_READABLE, [](int fd, uint32_t, void* u) -> int {
+    auto* c = static_cast<Capture*>(u);
+    char buf[4096];
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof buf)) > 0) c->out.append(buf, size_t(n));
+    if (n < 0 && errno == EAGAIN) return 0;
+    // EOF (or an error): the command is done.
+    WM* w = c->wm;
+    wl_event_source_remove(c->src);
+    ::close(fd);
+    auto done = std::move(c->done);
+    std::string out = std::move(c->out);
+    for (auto it = w->captures_.begin(); it != w->captures_.end(); ++it)
+      if (it->get() == c) {
+        w->captures_.erase(it);
+        break;
+      }
+    done(out);
+    return 0;
+  }, c.get());
+  captures_.push_back(std::move(c));
+}
+
+namespace {
+// nmcli -t's fields: ':' separates them, '\' escapes ':' and '\' in values.
+std::vector<std::string> nmcliFields(const std::string& line) {
+  std::vector<std::string> f(1);
+  for (size_t i = 0; i < line.size(); ++i) {
+    if (line[i] == '\\' && i + 1 < line.size()) f.back() += line[++i];
+    else if (line[i] == ':') f.emplace_back();
+    else f.back() += line[i];
+  }
+  return f;
+}
+}  // namespace
+
+// The Wi-Fi networks in range for the shell's Quick Settings, as
+// wm:wifiNetworks {networks: [{ssid, signal 0..100, secure, active, known}]},
+// strongest first, one entry per name. rescan: ask the radio for a fresh
+// scan (takes a few seconds) rather than NetworkManager's recent list.
+void WM::wifiScan(bool rescan) {
+  runCapture({"sh", "-c", std::string("nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY device wifi list --rescan ") +
+                              (rescan ? "yes" : "auto") + "; echo --; nmcli -t -f NAME,TYPE connection show"},
+             [this](const std::string& out) {
+    std::istringstream in(out);
+    std::string line;
+    bool saved = false;
+    std::set<std::string> known, seen;
+    struct Net { std::string ssid; int signal; bool secure, active; };
+    std::vector<Net> nets;
+    while (std::getline(in, line)) {
+      if (line == "--") {
+        saved = true;
+        continue;
+      }
+      auto f = nmcliFields(line);
+      if (saved) {
+        if (f.size() >= 2 && f[1].find("wireless") != std::string::npos) known.insert(f[0]);
+      } else if (f.size() >= 4 && !f[1].empty()) {
+        nets.push_back({f[1], std::atoi(f[2].c_str()), !f[3].empty() && f[3] != "--", f[0] == "*"});
+      }
+    }
+    std::stable_sort(nets.begin(), nets.end(), [](const Net& a, const Net& b) {
+      return a.active != b.active ? a.active : a.signal > b.signal;
+    });
+    std::string j = "{\"networks\":[";
+    bool first = true;
+    for (const Net& n : nets) {
+      if (!seen.insert(n.ssid).second) continue;
+      j += std::string(first ? "" : ",") + "{\"ssid\":" + wmjson::quoted(n.ssid) + ",\"signal\":" +
+           std::to_string(n.signal) + ",\"secure\":" + (n.secure ? "true" : "false") + ",\"active\":" +
+           (n.active ? "true" : "false") + ",\"known\":" + (known.count(n.ssid) ? "true" : "false") + "}";
+      first = false;
+    }
+    j += "]}";
+    if (rt_) jsui_post_message(rt_, "wm:wifiNetworks", j.c_str());
+  });
+}
+
+// Joins network ssid (a saved one needs no password): wm:wifiResult
+// {ssid, ok, message} when NetworkManager is done. The password is not logged.
+void WM::wifiConnect(const std::string& ssid, const std::string& password) {
+  if (ssid.empty()) return;
+  std::vector<std::string> argv = {"nmcli", "device", "wifi", "connect", ssid};
+  if (!password.empty()) argv.insert(argv.end(), {"password", password});
+  logf("wifi: joining \"%s\"", ssid.c_str());
+  runCapture(argv, [this, ssid, typed = !password.empty()](const std::string& out) {
+    bool ok = out.find("successfully activated") != std::string::npos;
+    // A failed join with a password typed in leaves a profile with that
+    // (likely wrong) password behind: the next try must ask again.
+    if (!ok && typed) spawnQuiet({"nmcli", "connection", "delete", "id", ssid});
+    std::string msg = out;
+    if (size_t e = msg.find("Error: "); e != std::string::npos) msg = msg.substr(e + 7);
+    while (!msg.empty() && (msg.back() == '\n' || msg.back() == ' ' || msg.back() == '.')) msg.pop_back();
+    logf("wifi: \"%s\" %s", ssid.c_str(), ok ? "joined" : msg.c_str());
+    std::string j = "{\"ssid\":" + wmjson::quoted(ssid) + ",\"ok\":" + (ok ? "true" : "false") +
+                    ",\"message\":" + wmjson::quoted(ok ? "" : msg) + "}";
+    if (rt_) {
+      jsui_post_message(rt_, "wm:wifiResult", j.c_str());
+      publishSystem();
+    }
+    wifiScan(false);
+  });
 }
 
 void WM::autoRotate(bool on) {
