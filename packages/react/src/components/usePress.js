@@ -175,15 +175,26 @@ class PressController {
     }
     if (p.onLongPress && source !== 'click') {
       const ms = delayOf(p.delayLongPress, DEFAULT_LONG_PRESS_MS) + delayIn;
-      clearTimeout(this.longTimer);
-      this.longTimer = setTimeout(() => {
+      // Timers run at frame time, which can be ahead of the input's (after
+      // idle, or a frame the JS thread fell behind on): a tap's release could
+      // arrive after the timer and the tap became a long press. It fires only
+      // once `ms` of wall time have passed since the press.
+      const downAt = Date.now();
+      const fire = () => {
+        const left = ms - (Date.now() - downAt);
+        if (left > 8) {
+          this.longTimer = setTimeout(fire, left);
+          return;
+        }
         this.longTimer = null;
         if (!this.source || !this.mounted) return;
         if (!this.active) this.activate(e);
         this.longFired = true;
         this.sound('longPress');
         if (this.props.onLongPress) this.props.onLongPress(e);
-      }, ms);
+      };
+      clearTimeout(this.longTimer);
+      this.longTimer = setTimeout(fire, ms);
     }
   }
 
