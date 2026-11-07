@@ -828,7 +828,7 @@ function Shell() {
   const panes = split && !overviewUp ? splitPanes(split, scr) : null;
   const panelEl = (name, open) => {
     const common = { key: name, screen: scr, open, onClose: closePanel, onClosed: open ? undefined : panelClosed };
-    if (name === 'overview') return <Overview {...common} windows={visible} active={active} apps={apps} />;
+    if (name === 'overview') return <Overview {...common} windows={visible} active={active} apps={apps} wallpaper={<Wallpaper width={scr.width} height={scr.height} t={t} />} />;
     if (name === 'quick') {
       return (
         <QuickSettings {...common} settings={settings} system={system} windows={windows}

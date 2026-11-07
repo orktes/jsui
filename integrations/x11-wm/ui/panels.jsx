@@ -329,7 +329,7 @@ const SwitcherCard = memo(function SwitcherCard({ win, card, enter, from, title,
   );
 });
 
-export const Overview = memo(function Overview({ screen, windows, active, apps, onClose, onClosed, open = true }) {
+export const Overview = memo(function Overview({ screen, windows, active, apps, onClose, onClosed, open = true, wallpaper }) {
   const t = useTheme();
   // Which window the switcher grows back into when it closes: the current
   // one, or the card that was tapped.
@@ -383,7 +383,16 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
     <View pointerEvents={open ? 'auto' : 'none'} style={StyleSheet.absoluteFill}>
       <Under screen={screen} />
       <Animated.View style={[StyleSheet.absoluteFill, { opacity: enter }]}>
-        <Scrim color="rgba(6,8,20,0.82)" onPress={onClose} screen={screen} />
+        {/* The cards over home's wallpaper, dimmed: a blurred copy of the
+            app they came from read as a flat grey behind them. */}
+        {wallpaper ? (
+          <Pressable style={StyleSheet.absoluteFill} onPress={onClose}>
+            {wallpaper}
+            <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(6,8,20,0.4)' }]} />
+          </Pressable>
+        ) : (
+          <Scrim color="rgba(6,8,20,0.82)" onPress={onClose} screen={screen} />
+        )}
       </Animated.View>
       <Animated.View pointerEvents="box-none" style={[styles.overviewHead, { top: screen.topBar + 22, opacity: enter }]}>
         {/* No title over the cards (they say what this is); just the way out. */}
