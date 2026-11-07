@@ -9,6 +9,7 @@ import Svg, { Path, Rect } from 'react-native-svg';
 import { AppIcon } from './AppIcon.jsx';
 import { Icon } from './icons.jsx';
 import { font, useTheme } from './theme.js';
+import { WindowMenu } from './WindowMenu.jsx';
 import { appKeyOf, appTitle, setSetting, wm } from './wm.js';
 
 export function useClock() {
@@ -62,11 +63,15 @@ function Battery({ level, charging, color, low }) {
   );
 }
 
-export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, settings, system }) {
+// `app` ({ app, win?, name }): the full-screen app (or the one starting), whose
+// name the bar shows on the left and whose menu ("...", WindowMenu.jsx) at the
+// right, instead of a header of its own (Window.jsx).
+export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, settings, system, app, menuOpen, onMenu, onMenuClose }) {
   const t = useTheme();
   const now = useClock();
   const clock = useAnchor('topbar.clock');
   const status = useAnchor('topbar.status');
+  const menu = useAnchor('topbar.menu');
   const swipe = useSwipeDown((x) => setPanel(x < screen.width / 2 ? 'calendar' : 'quick'));
   const toggle = (p) => setPanel(panel === p ? null : p);
   const battery = system.battery;
@@ -75,7 +80,14 @@ export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, set
     // right under it, with no line between, so the two read as one bar.
     <View {...swipe.panHandlers} style={[styles.bar, { height: screen.topBar, backgroundColor: solid ? t.chromeActive : 'transparent' }]}>
       {/* No apps button: the dock's grid (and the left edge) open the launcher. */}
-      <View style={styles.side} />
+      <View style={[styles.side, styles.appName]}>
+        {app && (
+          <>
+            <AppIcon app={app.app} win={app.win} size={22} />
+            <Text numberOfLines={1} style={[styles.barText, styles.appTitle, { color: t.text }]}>{app.name}</Text>
+          </>
+        )}
+      </View>
       <Pressable ref={clock.ref} onLayout={clock.onLayout} onPress={() => toggle('calendar')}
         style={[styles.clock, panel === 'calendar' && { backgroundColor: t.panelLine }]} pressedStyle={{ backgroundColor: t.panelLine }}>
         <Text style={[styles.barText, styles.tabular, { color: t.textDim, fontWeight: '500' }]}>{dateText(now)}</Text>
@@ -102,6 +114,15 @@ export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, set
             <Icon name="plug" size={20} color={t.text} />
           )}
         </Pressable>
+        {app && app.win && (
+          <View>
+            <Pressable ref={menu.ref} onLayout={menu.onLayout} hitSlop={4} onPress={() => onMenu && onMenu(app.win)}
+              style={[styles.barButton, menuOpen && { backgroundColor: t.panelLine }]} pressedStyle={{ backgroundColor: t.panelLine }}>
+              <Icon name="more" size={22} color={t.text} strokeWidth={2.6} />
+            </Pressable>
+            {menuOpen && <WindowMenu win={app.win} onClose={onMenuClose} />}
+          </View>
+        )}
       </View>
     </View>
   );
@@ -345,6 +366,8 @@ export const DockMenu = memo(function DockMenu({ item, anchor, onClose }) {
 const styles = StyleSheet.create({
   bar: { position: 'absolute', left: 0, right: 0, top: 0, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 6 },
   side: { flex: 1, flexDirection: 'row', alignItems: 'center' },
+  appName: { paddingLeft: 12, paddingRight: 12, overflow: 'hidden' },
+  appTitle: { marginLeft: 10, flexShrink: 1 },
   barButton: { height: 34, minWidth: 44, borderRadius: 17, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
   status: { paddingHorizontal: 14 },
   barText: { fontFamily: font, fontSize: 15, fontWeight: '600' },
