@@ -299,6 +299,16 @@ function Shell() {
     }
   }, [regions]);
 
+  // The launcher is painted once, invisibly, a few seconds after start (see
+  // Launcher in panels.jsx), so its first open is as cheap as the next ones.
+  const [warmLauncher, setWarmLauncher] = useState(false);
+  const appsReady = apps.length > 0;
+  useEffect(() => {
+    if (!appsReady) return undefined;
+    const id = setTimeout(() => setWarmLauncher(true), 4000);
+    return () => clearTimeout(id);
+  }, [appsReady]);
+
   const launch = useCallback((app) => {
     wm.haptic();
     noteLaunch(app.id, `app.${app.id}`);
@@ -389,7 +399,7 @@ function Shell() {
         {/* The launcher stays mounted (hidden while closed): opening it then
             paints a laid-out grid with its text shaped and icons decoded,
             not a fresh tree (a ~50 ms frame on the Tab A7). */}
-        <Launcher screen={scr} apps={apps} settings={settings} onLaunch={launch} open={panel === 'launcher'}
+        <Launcher screen={scr} apps={apps} settings={settings} onLaunch={launch} open={panel === 'launcher'} warm={warmLauncher}
           onClose={closePanel} onClosed={panelClosed} />
         {[closingPanel, panel].filter((n) => n && n !== 'launcher').map((name) => panelEl(name, name === panel))}
         {/* The window menu itself is an overlay of its button (WindowMenu.jsx): taps elsewhere close it. */}

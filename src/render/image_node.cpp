@@ -168,6 +168,19 @@ bool paintKey(Node* node, std::string* key) {
   return true;
 }
 
+bool coversBox(Node* node) {
+  if (node->type() != NodeType::Image || node->style().tintColor) return false;
+  ResizeMode mode = resizeModeOf(node);
+  if (mode != ResizeMode::Stretch && mode != ResizeMode::Cover) return false;
+  NodeCache* c = ensure(node);
+  Document* doc = node->document();
+  if (!c || !doc) return false;
+  sk_sp<SkImage> img;
+  if (!c->texture.empty()) img = c->textures ? c->textures->image(c->texture) : nullptr;
+  else if (!c->url.empty() && doc->images) img = doc->images->get(c->url);
+  return img && img->isOpaque();
+}
+
 void paint(Node* node, SkCanvas* canvas, const SkRect& box, const SkRRect& clip) {
   NodeCache* c = ensure(node);
   Document* doc = node->document();

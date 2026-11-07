@@ -753,14 +753,39 @@ class WM {
   void snapshotBackdrop(bool on);
   void haptic(int ms);
   double lastHaptic_ = 0;
+  // GPU boost (Adreno: kgsl devfreq). Its governor ramps up too slowly for
+  // a 300 ms animation (the Tab A7 stays at 320-600 of its 950 MHz) and
+  // nothing here sends Android's touch boost. From a touch, and while the
+  // frames it set off are drawn, min_freq is raised to JSUI_WL_GPU_BOOST
+  // MHz (default 745, 0: off) and set back to the lowest frequency 500 ms
+  // after the last of either (see gpuBoost). Needs min_freq writable by the session (install.sh --system:
+  // jsui-wm-gpu-boost.service); without that, or without the node, nothing
+  // happens.
+  std::string boostPath_;
+  long boostHz_ = 0, boostRestHz_ = 0;
+  bool boosted_ = false;
+  double boostUntil_ = 0, boostTouch_ = 0;
+  wl_event_source* boostTimer_ = nullptr;
+  void setupGpuBoost();
+  void gpuBoost(bool touch);
+  void gpuBoostWrite(long hz);
   void removeWindowTexture(uint32_t id);
   bool renderGpu();
-  double lastTickMs_ = 0, lastRenderMs_ = 0;
-  bool vsyncTicks_ = false;  // ticks follow the present thread's swaps (see tick)  // the last tick's / paint's time (slow-frame log)
+  double lastTickMs_ = 0, lastRenderMs_ = 0;  // the last tick's / paint's time (slow-frame log)
+  bool vsyncTicks_ = false;  // ticks follow the present thread's swaps (see tick)
+  // Mir's swap interval is 0, so a swap of a cheap frame returns at once and
+  // ticks that follow swaps ran at ~180 fps (a finger dragging the dock):
+  // frames no one sees, taking the GPU from the ones they do. Presents start
+  // at most every minFrameMs_ (JSUI_WL_MAX_FPS, default 60, with 8% slack
+  // for jitter).
+  double minFrameMs_ = 0, lastPresentAt_ = -1e9;
   void presentMir();
   void sendFrameDone();
   // Frame cost on the Mir path (JSUI_WL_PERF=1): paint + present, logged every 60 frames.
-  bool perf_ = false;
+  // JSUI_WL_PERF=2 also logs every frame as a slow one would be, with the
+  // times of touches, app commits (GPU apps) and returned swaps, from which
+  // touch-to-swap latency can be read.
+  bool perf_ = false, perfEvery_ = false;
   double cpuPaintMs_ = 0;  // CPU raster since the last presented frame
   double gpuRenderMs_ = 0, gpuBlitMs_ = 0, gpuSwapMs_ = 0;  // GPU frame parts (perf window sums)
   double gpuRenderGpuMs_ = 0, gpuBlitGpuMs_ = 0;  // JSUI_WL_GPU_FINISH: GPU time of the paint / the blit
@@ -992,6 +1017,7 @@ bool WM::setup() {
     static_cast<WM*>(u)->tick();
     return 0;
   }, this);
+  setupGpuBoost();
   systemTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
     auto* w = static_cast<WM*>(u);
     if (w->rt_) w->publishSystem();
@@ -1489,6 +1515,7 @@ bool WM::captureGpu(Client* c) {
   // translucency on Ubuntu Touch): JSUI then culls what they cover.
   t.flags = b->opaque || !c->popup ? JSUI_TEXTURE_OPAQUE : 0;
   std::string key = "win:" + std::to_string(c->id);
+  if (perfEvery_) logf("app commit %u at %.0f", c->id, nowMs());
   if (jsui_set_texture(rt_, key.c_str(), &t) == 0) jsui_texture_updated(rt_, key.c_str());
   wlr_buffer* held = gpuBuffers_[c->id];
   if (held != buf) {
@@ -2406,7 +2433,94 @@ void WM::pointerButton(bool down, uint32_t button, uint32_t timeMs) {
   }
 }
 
+// Set back to the rest frequency when killed (jsui-session's restart sends
+// SIGTERM): only async-signal-safe calls, on what setupGpuBoost prepared.
+char g_boostPath[128];
+char g_boostRest[24];
+void gpuBoostSignal(int sig) {
+  int fd = open(g_boostPath, O_WRONLY);
+  if (fd >= 0) {
+    ssize_t n = write(fd, g_boostRest, strlen(g_boostRest));
+    (void)n;
+    close(fd);
+  }
+  signal(sig, SIG_DFL);
+  raise(sig);
+}
+
+void WM::setupGpuBoost() {
+  const char* env = getenv("JSUI_WL_GPU_BOOST");
+  const long mhz = env ? atol(env) : 745;
+  const char* dirEnv = getenv("JSUI_WL_GPU_BOOST_DEVFREQ");  // another devfreq directory (tests)
+  const char* dir = dirEnv && *dirEnv ? dirEnv : "/sys/class/kgsl/kgsl-3d0/devfreq";
+  std::string path = std::string(dir) + "/min_freq";
+  if (mhz <= 0 || access(path.c_str(), W_OK) != 0) return;
+  // The frequencies the governor knows: the boost is the lowest at or above
+  // the one asked for (else the highest), the rest the lowest of all (not
+  // min_freq as found: a jsui-wl that died boosted left it raised).
+  std::ifstream in(std::string(dir) + "/available_frequencies");
+  long hz, lo = 0, hi = 0, pick = 0;
+  while (in >> hz) {
+    if (hz <= 0) continue;
+    if (!lo || hz < lo) lo = hz;
+    if (hz > hi) hi = hz;
+    if (hz >= mhz * 1000000 && (!pick || hz < pick)) pick = hz;
+  }
+  if (!lo) return;
+  boostPath_ = path;
+  boostHz_ = pick ? pick : hi;
+  boostRestHz_ = lo;
+  gpuBoostWrite(boostRestHz_);
+  if (path.size() < sizeof(g_boostPath)) {
+    snprintf(g_boostPath, sizeof(g_boostPath), "%s", path.c_str());
+    snprintf(g_boostRest, sizeof(g_boostRest), "%ld\n", boostRestHz_);
+    for (int sig : {SIGTERM, SIGINT, SIGHUP})
+      if (signal(sig, gpuBoostSignal) == SIG_IGN) signal(sig, SIG_IGN);  // ignored stays ignored
+  }
+  boostTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
+    auto* w = static_cast<WM*>(u);
+    const double left = w->boostUntil_ - nowMs();
+    if (left > 1) {
+      wl_event_source_timer_update(w->boostTimer_, int(left) + 1);
+    } else if (w->boosted_) {
+      w->boosted_ = false;
+      w->gpuBoostWrite(w->boostRestHz_);
+    }
+    return 0;
+  }, this);
+  logf("GPU boost: min_freq %ld MHz from a touch while its frames are drawn, else %ld MHz", boostHz_ / 1000000,
+       boostRestHz_ / 1000000);
+}
+
+void WM::gpuBoostWrite(long hz) {
+  // Writes fail when min_freq would exceed max_freq (a thermal cap): then
+  // the governor's own choice stands.
+  FILE* f = fopen(boostPath_.c_str(), "w");
+  if (!f) return;
+  fprintf(f, "%ld\n", hz);
+  fclose(f);
+}
+
+void WM::gpuBoost(bool touch) {
+  if (!boostTimer_) return;
+  // A touch starts it; frames keep it while they come, up to 2 s after the
+  // last touch (an app redrawing on its own, a clock's second hand or a
+  // video, does not hold the GPU up).
+  constexpr double kHoldMs = 500, kAfterTouchMs = 2000;
+  const double now = nowMs();
+  if (touch) boostTouch_ = now;
+  else if (!boosted_ || now - boostTouch_ > kAfterTouchMs) return;
+  boostUntil_ = now + kHoldMs;
+  if (!boosted_) {
+    boosted_ = true;
+    gpuBoostWrite(boostHz_);
+    wl_event_source_timer_update(boostTimer_, int(kHoldMs));
+  }
+}
+
 void WM::touchEvent(int id, int phase, double x, double y, uint32_t timeMs) {
+  gpuBoost(true);
+  if (perfEvery_) logf("touch %d at %.0f", phase, nowMs());
   int tid = 1 + (id % 1000);
   if (phase == 0) {
     wlr_surface* s = nullptr;
@@ -2728,16 +2842,24 @@ void WM::tick() {
 #endif
   JsuiRect dirty{};
   bool presented = false;
+  double capWait = 0;  // a frame is due but too soon after the last (minFrameMs_)
   double paintStart = nowMs();
 #ifdef JSUI_WL_MIR
   if (gpu_) {
     // The Mir window is the screen: paint and present right after the tick
     // that changed something (waiting for the headless output's frame
     // clock as well put a second 16.7 ms clock in series: ~30 fps). The
-    // present thread's swap paces it.
+    // present thread's swap paces it, and minFrameMs_ when swaps return
+    // early.
     if (jsui_needs_redraw(rt_) || shellDirty_ || mir_->rotating()) {
-      presentMir();
-      presented = true;
+      const double since = now - lastPresentAt_;
+      if (since >= minFrameMs_) {
+        lastPresentAt_ = now;
+        presentMir();
+        presented = true;
+      } else {
+        capWait = minFrameMs_ - since;
+      }
     }
   } else
 #endif
@@ -2754,7 +2876,9 @@ void WM::tick() {
 #ifdef JSUI_WL_MIR
   turning = mir_ && mir_->rotating();
 #endif
-  if (turning || jsui_wants_frame(rt_) || jsui_needs_redraw(rt_) || jsui_pending_loads(rt_) > 0) {
+  if (capWait > 0) {
+    wait = capWait;
+  } else if (turning || jsui_wants_frame(rt_) || jsui_needs_redraw(rt_) || jsui_pending_loads(rt_) > 0) {
     // 60 Hz from this tick's start: the paint above is part of the period.
     // After a frame went to the present thread the next tick comes when
     // its swap returns instead (swapFd: Mir's vsync); a free-running timer
@@ -2777,6 +2901,7 @@ void WM::scheduleFrame() {
 // The GPU path's frame (see tick): paint, hand to the present thread, and
 // let the apps draw their next frames.
 void WM::presentMir() {
+  gpuBoost(false);
   double t0 = nowMs();
   renderGpu();
   shellDirty_ = false;  // nothing for the headless scene: the Mir window is the screen
@@ -2784,9 +2909,9 @@ void WM::presentMir() {
     const double ms = nowMs() - t0;
     perfFrame(0, ms);
     // A frame that will be seen as a hitch: what it was made of.
-    if (ms + lastTickMs_ > 33 || frameLog_ > 0) {
-      if (frameLog_ > 0) {
-        --frameLog_;
+    if (ms + lastTickMs_ > 33 || frameLog_ > 0 || perfEvery_) {
+      if (frameLog_ > 0 || perfEvery_) {
+        frameLog_ = std::max(0, frameLog_ - 1);
         logf("frame at %.0f", nowMs());
       }
       JsuiPaintStats ps;
@@ -2795,6 +2920,21 @@ void WM::presentMir() {
            " %d offscreen layers, %d cached layers (%d rendered), %d shadow blurs, %d nodes",
            lastTickMs_, lastRenderMs_, ms - lastRenderMs_, double(ps.repainted_pixels) / 1e6, ps.draws, ps.save_layers,
            ps.layer_draws, ps.layer_renders, ps.shadow_renders, ps.nodes_painted);
+#ifdef JSUI_WL_MIR_GL
+      if (mir_->lastRenderGpuMs() > 0)  // JSUI_WL_GPU_FINISH: the previous frame's GPU time
+      {
+        // With the clock (Adreno: kgsl devfreq), the cost in cycles compares
+        // across the governor's frequency changes.
+        int mhz = 0;
+        if (FILE* f = fopen("/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq", "r")) {
+          long hz = 0;
+          if (fscanf(f, "%ld", &hz) == 1) mhz = int(hz / 1000000);
+          fclose(f);
+        }
+        logf("gpu time: paint %.1f ms, blit %.1f ms at %d MHz (%.1f Mcycles)", mir_->lastRenderGpuMs(),
+             mir_->lastBlitGpuMs(), mhz, (mir_->lastRenderGpuMs() + mir_->lastBlitGpuMs()) * mhz / 1000);
+      }
+#endif
     }
   }
   sendFrameDone();
@@ -2973,7 +3113,8 @@ bool WM::showMir() {
   const char* snapEnv = getenv("JSUI_WL_SNAPSHOT_BG");
   snapshotBg_ = !(snapEnv && snapEnv[0] == '0');
   const char* perfEnv = getenv("JSUI_WL_PERF");
-  perf_ = perfEnv && perfEnv[0] == '1';
+  perf_ = perfEnv && (perfEnv[0] == '1' || perfEnv[0] == '2');
+  perfEvery_ = perf_ && perfEnv[0] == '2';
   const char* gpuEnv = getenv("JSUI_WL_GPU");
   bool wantGpu = !(gpuEnv && gpuEnv[0] == '0');
   if (!mir_->createWindow(sw_, sh_, mirOutput_, wantGpu, &err)) {
@@ -2999,6 +3140,9 @@ bool WM::showMir() {
     if (gpu_) {
       logf("rendering on the GPU (GLES via EGL on the Mir window%s)",
            mir_->presentThread() ? ", presented from a thread of its own" : "");
+      const char* fps = getenv("JSUI_WL_MAX_FPS");
+      const double maxFps = fps && atof(fps) > 0 ? atof(fps) : 60;
+      minFrameMs_ = 1000.0 / maxFps * 0.92;
       const char* vt = getenv("JSUI_WL_VSYNC_TICKS");
       if (mir_->presentThread() && mir_->swapFd() >= 0 && !(vt && vt[0] == '0')) {
         vsyncTicks_ = true;
@@ -3006,6 +3150,7 @@ bool WM::showMir() {
           uint64_t n;
           (void)!read(fd, &n, sizeof n);
           auto* wm = static_cast<WM*>(u);
+          if (wm->perfEvery_) logf("swap at %.0f", nowMs());
           if (wm->tickPending_) wm->scheduleTick(0);  // a frame is wanted: now
           return 0;
         }, this);
@@ -3197,6 +3342,7 @@ int WM::run() {
   scheduleTick(0);
   wl_display_run(display_);
   logf("quit");
+  if (boosted_) gpuBoostWrite(boostRestHz_);
   wl_display_destroy_clients(display_);
   if (rt_) jsui_destroy(rt_);
   wl_display_destroy(display_);
