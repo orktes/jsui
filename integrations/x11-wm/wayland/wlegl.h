@@ -42,6 +42,9 @@ struct Gl {
   CreateImageFn createImage = nullptr;
   DestroyImageFn destroyImage = nullptr;
   ImageTargetFn imageTarget = nullptr;
+  // wl_buffers of another protocol of jsui-wl's own (dmabuf.h), which must
+  // never reach libhybris' query.
+  bool (*other)(wl_resource*) = nullptr;
 };
 inline Gl g;
 
@@ -91,6 +94,7 @@ inline const wlr_buffer_resource_interface kResourceInterface = {
     /*is_instance*/
     [](wl_resource* r) -> bool {
       EGLint w = 0;
+      if (g.other && g.other(r)) return false;
       return !wl_shm_buffer_get(r) && g.query(g.dpy, r, EGL_WIDTH, &w) && w > 0;
     },
     /*from_resource*/

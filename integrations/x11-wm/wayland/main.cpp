@@ -119,6 +119,7 @@ extern "C" {
 #include "jsui/jsui.h"
 #ifdef JSUI_WL_MIR
 #include "wlegl.h"
+#include "dmabuf.h"
 #endif
 #include "text_input_v2.h"
 #include "text_input_v3.h"
@@ -932,7 +933,8 @@ bool WM::setup() {
   // Apps' GPU buffers (wlegl.h) never become pixman textures: wlroots says so
   // twice on every commit.
   wlr_log_init(g_verbose ? WLR_DEBUG : WLR_ERROR, [](wlr_log_importance, const char* fmt, va_list args) {
-    if (std::strstr(fmt, "Failed to upload buffer") || std::strstr(fmt, "Failed to create texture")) return;
+    if (std::strstr(fmt, "Failed to upload buffer") || std::strstr(fmt, "Failed to create texture") ||
+        std::strstr(fmt, "Cannot get pixman texture")) return;
     std::fprintf(stderr, "[wlr] ");
     std::vfprintf(stderr, fmt, args);
     std::fprintf(stderr, "\n");
@@ -1721,16 +1723,40 @@ void WM::capture(Client* c) {
   scheduleTick(0);
 }
 
-// A window drawn on the GPU (android_wlegl): its buffer's texture becomes the
-// window's host texture as is. Subsurfaces aren't composited on this path
-// (Qt's GL windows have none).
+// A window drawn on the GPU (android_wlegl, or a dma-buf from Vulkan apps:
+// dmabuf.h): its buffer's texture becomes the window's host texture as is.
+// Subsurfaces aren't composited on this path (Qt's GL windows and Vulkan
+// swapchains have none).
 bool WM::captureGpu(Client* c) {
 #ifdef JSUI_WL_MIR_GL
   wlr_buffer* buf = c->xdg->surface->current.buffer;
   wlegl::Buffer* b = wlegl::from(buf);
-  if (!b || !mir_->makeCurrent()) return false;
-  GLuint tex = wlegl::texture(b);
+  wlr_dmabuf_attributes attrs{};
+  const bool isDmabuf = buf && !b && dmabuf::s.global && wlr_buffer_get_dmabuf(buf, &attrs);
+  if (!b && !isDmabuf) return false;
+  // GL only to make a buffer's texture, the first time it is committed
+  // (clients cycle through a few buffers): a Vulkan app commits faster than
+  // the screen refreshes, and every eglMakeCurrent goes through libhybris.
+  const bool needGl = b ? !b->tex : !dmabuf::isImported(buf) || dmabuf::s.cpuTex.count(c->id);
+  if (needGl && !mir_->makeCurrent()) return false;
+  GLuint tex = 0;
+  bool opaque = false;
+  // A dma-buf gralloc or EGL couldn't import is copied into a texture of the
+  // window's own: nothing of the buffer is kept after this.
+  bool copied = false;
+  if (b) {
+    tex = wlegl::texture(b);
+    opaque = b->opaque;
+  } else if (bool dmabufBuffer = false; dmabuf::Import* im = dmabuf::import(buf, &dmabufBuffer)) {
+    tex = im->tex;
+    opaque = im->fmt->opaque;
+  } else {
+    if (!needGl && !mir_->makeCurrent()) return false;
+    tex = dmabuf::upload(c->id, buf, &c->xdg->surface->buffer_damage, &opaque);
+    copied = true;
+  }
   if (!tex) return false;
+  if (!copied && dmabuf::s.cpuTex.count(c->id)) dmabuf::forget(c->id);
   JsuiTexture t{};
   t.kind = JSUI_TEXTURE_GL;
   t.handle = reinterpret_cast<void*>(uintptr_t(tex));
@@ -1738,13 +1764,13 @@ bool WM::captureGpu(Client* c) {
   t.height = buf->height;
   // Toplevels of GPU apps are opaque (Qt's window background; no compositor
   // translucency on Ubuntu Touch): JSUI then culls what they cover.
-  t.flags = b->opaque || !c->popup ? JSUI_TEXTURE_OPAQUE : 0;
+  t.flags = opaque || !c->popup ? JSUI_TEXTURE_OPAQUE : 0;
   std::string key = "win:" + std::to_string(c->id);
   if (perfEvery_) logf("app commit %u at %.0f", c->id, nowMs());
   if (jsui_set_texture(rt_, key.c_str(), &t) == 0) jsui_texture_updated(rt_, key.c_str());
   wlr_buffer* held = gpuBuffers_[c->id];
   if (held != buf) {
-    gpuBuffers_[c->id] = wlr_buffer_lock(buf);
+    gpuBuffers_[c->id] = copied ? nullptr : wlr_buffer_lock(buf);
     if (held) wlr_buffer_unlock(held);
   }
   c->texW = buf->width;
@@ -2052,6 +2078,9 @@ void WM::checkLaunches() {
 
 void WM::removeWindowTexture(uint32_t id) {
   jsui_remove_texture(rt_, ("win:" + std::to_string(id)).c_str());
+#ifdef JSUI_WL_MIR_GL
+  if (dmabuf::s.cpuTex.count(id) && mir_->makeCurrent()) dmabuf::forget(id);
+#endif
   auto it = gpuBuffers_.find(id);
   if (it == gpuBuffers_.end()) return;
   if (it->second) wlr_buffer_unlock(it->second);
@@ -3775,6 +3804,11 @@ bool WM::showMir() {
       }
       gpuApps_ = wlegl::bind(display_, mir_->eglDisplay());
       logf(gpuApps_ ? "apps draw on the GPU too (android_wlegl)" : "apps can't hand over GPU buffers");
+      // Vulkan apps (Mesa Turnip) hand over dma-bufs (dmabuf.h).
+      // JSUI_WL_DMABUF=0: no zwp_linux_dmabuf_v1, they fall back to wl_shm.
+      const char* db = getenv("JSUI_WL_DMABUF");
+      if (gpuApps_ && !(db && db[0] == '0') && mir_->makeCurrent())
+        dmabuf::create(display_, mir_->eglDisplay(), [this] { return mir_->makeCurrent(); });
       shellDirty_ = true;
       scheduleFrame();
     } else {

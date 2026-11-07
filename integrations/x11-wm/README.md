@@ -253,7 +253,22 @@ are (screen px), which `docker/tour.py` uses to drive it with xdotool.
   jsui-wl Android gralloc buffers (`android_wlegl`, served by libhybris once
   jsui-wl calls `eglBindWaylandDisplayWL`; `wayland/wlegl.h`). Each buffer
   becomes a GL texture that JSUI samples as the window's host texture, with no
-  copy. Subsurfaces of such windows aren't composited. When the shell itself
+  copy. Subsurfaces of such windows aren't composited. Vulkan apps (Mesa
+  Turnip on KGSL, as in the tablet's own Mesa build) hand over dma-bufs
+  through `zwp_linux_dmabuf_v1` (v4, with feedback; `wayland/dmabuf.h`). It
+  accepts AR24, XR24, AB24, XB24, AB30, XB30, AB4H and RG16, LINEAR only
+  (`DRM_FORMAT_MOD_INVALID` counts as LINEAR); no UBWC, and no XR30/AR30.
+  libhybris' EGL has no `EGL_EXT_image_dma_buf_import`, so each buffer becomes
+  a gralloc buffer (`eglHybrisCreateRemoteBuffer` with a QTI handle, and the
+  client's stride written into gralloc's metadata, where Adreno reads it) and
+  then an EGLImage: no copy. If that fails, the damaged rows are copied
+  through an mmap (slow). There is no explicit sync: kernel 4.19 has no
+  `DMA_BUF_IOCTL_EXPORT_SYNC_FILE`, wlroots 0.17 no `linux-drm-syncobj-v1`.
+  The feedback names renderD128 (msm_drm, the display) as the main device,
+  which jsui-wl never opens. `JSUI_WL_DMABUF=0` leaves the protocol out.
+  Mesa's Turnip needs libdrm at build time for this (`-Dfreedreno-kmds=kgsl,msm`):
+  a KGSL-only build has no dma-buf WSI and crashes in vkCreateSwapchainKHR.
+  When the shell itself
   is on the CPU, apps get Mesa's llvmpipe instead (`--app-env-nogpu`, see
   `jsui-session`) and hand over shm buffers; Lomiri apps then start in ~1.5 s
   and redraw in ~100 ms. The Tab A7's kernel panics on Bluetooth sockets, so
