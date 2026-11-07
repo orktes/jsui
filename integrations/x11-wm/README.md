@@ -203,8 +203,8 @@ gives it.
   Tab A7 `jsui-wm-tap-to-wake.service`, which sends Samsung's `aot_enable,1`
   so a double tap wakes the screen. On Adreno GPUs it adds
   `jsui-wm-gpu-boost.service`, which lets the session write the GPU's
-  devfreq `min_freq`: `jsui-wl` then raises it while a finger is down or
-  frames are drawn (`JSUI_WL_GPU_BOOST`, MHz, default 745, 0 off) and sets
+  devfreq `min_freq`: `jsui-wl` then raises it from a touch and while the
+  frames it set off are drawn (up to 2 s after the touch) (`JSUI_WL_GPU_BOOST`, MHz, default 745, 0 off) and sets
   it back to the lowest clock 500 ms later, the touch boost Android's power
   HAL would give (the governor alone keeps the Tab A7 at 320-600 MHz through
   an animation).

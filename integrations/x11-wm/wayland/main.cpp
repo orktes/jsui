@@ -755,19 +755,19 @@ class WM {
   double lastHaptic_ = 0;
   // GPU boost (Adreno: kgsl devfreq). Its governor ramps up too slowly for
   // a 300 ms animation (the Tab A7 stays at 320-600 of its 950 MHz) and
-  // nothing here sends Android's touch boost. While a finger is down or
-  // frames are drawn, min_freq is raised to JSUI_WL_GPU_BOOST MHz (default
-  // 745, 0: off) and set back to the lowest frequency 500 ms after the last
-  // of either. Needs min_freq writable by the session (install.sh --system:
+  // nothing here sends Android's touch boost. From a touch, and while the
+  // frames it set off are drawn, min_freq is raised to JSUI_WL_GPU_BOOST
+  // MHz (default 745, 0: off) and set back to the lowest frequency 500 ms
+  // after the last of either (see gpuBoost). Needs min_freq writable by the session (install.sh --system:
   // jsui-wm-gpu-boost.service); without that, or without the node, nothing
   // happens.
   std::string boostPath_;
   long boostHz_ = 0, boostRestHz_ = 0;
   bool boosted_ = false;
-  double boostUntil_ = 0;
+  double boostUntil_ = 0, boostTouch_ = 0;
   wl_event_source* boostTimer_ = nullptr;
   void setupGpuBoost();
-  void gpuBoost();
+  void gpuBoost(bool touch);
   void gpuBoostWrite(long hz);
   void removeWindowTexture(uint32_t id);
   bool renderGpu();
@@ -2478,7 +2478,7 @@ void WM::setupGpuBoost() {
     }
     return 0;
   }, this);
-  logf("GPU boost: min_freq %ld MHz while touched or drawing, else %ld MHz", boostHz_ / 1000000,
+  logf("GPU boost: min_freq %ld MHz from a touch while its frames are drawn, else %ld MHz", boostHz_ / 1000000,
        boostRestHz_ / 1000000);
 }
 
@@ -2491,10 +2491,16 @@ void WM::gpuBoostWrite(long hz) {
   fclose(f);
 }
 
-void WM::gpuBoost() {
+void WM::gpuBoost(bool touch) {
   if (!boostTimer_) return;
-  constexpr double kHoldMs = 500;
-  boostUntil_ = nowMs() + kHoldMs;
+  // A touch starts it; frames keep it while they come, up to 2 s after the
+  // last touch (an app redrawing on its own, a clock's second hand or a
+  // video, does not hold the GPU up).
+  constexpr double kHoldMs = 500, kAfterTouchMs = 2000;
+  const double now = nowMs();
+  if (touch) boostTouch_ = now;
+  else if (!boosted_ || now - boostTouch_ > kAfterTouchMs) return;
+  boostUntil_ = now + kHoldMs;
   if (!boosted_) {
     boosted_ = true;
     gpuBoostWrite(boostHz_);
@@ -2503,7 +2509,7 @@ void WM::gpuBoost() {
 }
 
 void WM::touchEvent(int id, int phase, double x, double y, uint32_t timeMs) {
-  gpuBoost();
+  gpuBoost(true);
   int tid = 1 + (id % 1000);
   if (phase == 0) {
     wlr_surface* s = nullptr;
@@ -2874,7 +2880,7 @@ void WM::scheduleFrame() {
 // The GPU path's frame (see tick): paint, hand to the present thread, and
 // let the apps draw their next frames.
 void WM::presentMir() {
-  gpuBoost();
+  gpuBoost(false);
   double t0 = nowMs();
   renderGpu();
   shellDirty_ = false;  // nothing for the headless scene: the Mir window is the screen
