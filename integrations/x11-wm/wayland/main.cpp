@@ -573,6 +573,7 @@ struct Client {
   int minW = 1, minH = 1, maxW = 0, maxH = 0;
   int pid = 0;
   double mappedAt = 0;
+  double reassertedAt = -1e9;  // last time a maximized size was sent again (onCommit)
   bool dialog = false;
 };
 
@@ -732,6 +733,7 @@ class WM {
   // auto-rotate, or "rotate DEG" on the control socket), and the
   // jsui-orientation helper that reads the accelerometer for it.
   void rotateTo(int deg);
+  void publishRotation();
   void autoRotate(bool on);
   // jsui-notifyd (next to jsui-wl): the session's notification server. Its
   // lines (JSON) go to the shell as "wm:notification".
@@ -1275,18 +1277,27 @@ void WM::matchApp(Client* c) {
   // Ubuntu Touch apps' ids end in their binary's name
   // ("ubports.terminal.lomiri-terminal-app" for a click app whose exec ends
   // in "lomiri-terminal-app"; scanApps prefixes env, cd and aa-exec).
+  // Several desktop files can run one binary (Camera and Barcode Reader):
+  // the one the window was launched from wins.
   std::string last = want.substr(want.rfind('.') == std::string::npos ? 0 : want.rfind('.') + 1);
+  const App* found = nullptr;
   for (const App& a : apps_) {
     std::istringstream words(a.exec);
     std::string w;
-    while (words >> w) {
+    bool runs = false;
+    while (!runs && words >> w) {
       std::string exe = lower(w.substr(w.rfind('/') == std::string::npos ? 0 : w.rfind('/') + 1));
-      if (exe == want || exe == last) {
-        c->appId = a.id;
-        return;
-      }
+      runs = exe == want || exe == last;
     }
+    if (!runs) continue;
+    auto l = launched_.find(a.exec);
+    if (l != launched_.end() && c->pid > 0 && descends(c->pid, l->second)) {
+      found = &a;
+      break;
+    }
+    if (!found) found = &a;
   }
+  if (found) c->appId = found->id;
 }
 
 Rect WM::workArea() const {
@@ -1408,6 +1419,15 @@ void WM::onCommit(Client* c) {
     c->h = geo.height;
     fitMaximized(c);
     publishWindow(c);
+    // A maximized client that resized itself (Camera's QML binds its width
+    // to the viewfinder's aspect) is told the work area again, at most once
+    // a second; one that keeps its own size anyway stays fitted (above).
+    Rect wa = workArea();
+    if (c->maximized && !c->snap && !c->fullscreen && (geo.width != wa.w || geo.height != wa.h) &&
+        (c->maxW <= 0 || c->maxW >= wa.w) && (c->maxH <= 0 || c->maxH >= wa.h) && nowMs() - c->reassertedAt > 1000) {
+      c->reassertedAt = nowMs();
+      wlr_xdg_toplevel_set_size(c->tl, wa.w, wa.h);
+    }
   }
   if (c->popup) {
     Rect r = popupRect(c);
@@ -3212,6 +3232,7 @@ bool WM::setupMir() {
     opt_.height = h;
   }
   logf("Mir session \"%s\", output %dx%d (rotated %d)", name, opt_.width, opt_.height, opt_.rotate);
+  publishRotation();
   // What jsui-wl sets for itself here and for its Mir window (EGL_PLATFORM
   // "null": libhybris passes Mir's ANativeWindow through) must not reach the
   // apps: with it their libhybris EGL skips its Wayland platform, Qt gets no
@@ -3449,6 +3470,7 @@ void WM::rotateTo(int deg) {
     return;
   }
   opt_.rotate = deg;
+  publishRotation();
   const int w = mir_->desktopWidth(), h = mir_->desktopHeight();
   logf("rotated to %d (desktop %dx%d)", deg, w, h);
   if (w != sw_ || h != sh_) {
@@ -3461,6 +3483,19 @@ void WM::rotateTo(int deg) {
   }
   shellDirty_ = true;
   scheduleTick(0);
+}
+
+// The desktop's turn on the panel, for apps: $XDG_RUNTIME_DIR/jsui-wl.rotation
+// (degrees clockwise). jsui-camera-rotation.so turns the camera preview by it.
+void WM::publishRotation() {
+  const char* rt = getenv("XDG_RUNTIME_DIR");
+  if (!rt) return;
+  std::string path = std::string(rt) + "/jsui-wl.rotation";
+  if (FILE* f = std::fopen((path + ".new").c_str(), "w")) {
+    std::fprintf(f, "%d\n", opt_.rotate);
+    std::fclose(f);
+    std::rename((path + ".new").c_str(), path.c_str());
+  }
 }
 
 // jsui-orientation's lines: the edge of the panel that is up. The panel's
