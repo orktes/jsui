@@ -72,6 +72,8 @@ export const AppTile = memo(function AppTile({ app, width, onLaunch, anchorName,
 // The screen as it was when the panel opened ("wm:under", opaque), drawn under
 // the panel's fade: while the panel is up nothing below it is painted (the
 // live desktop would be the same pixels).
+// Only while open: closing, the screen under it has moved on (the app swiped
+// away showed again, whole, until the faded panel unmounted).
 function Under({ screen }) {
   return (
     <HostTexture name="wm:under" resizeMode="stretch" pointerEvents="none"
@@ -190,7 +192,7 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
   }
   return (
     <View pointerEvents="box-none" style={StyleSheet.absoluteFill}>
-      <Under screen={screen} />
+      {open && <Under screen={screen} />}
       {/* The scrim fades on its own: its blurred backdrop is a new snapshot
           at every open, and inside the grid's layer it made that layer
           stale every time (the whole grid painted again). */}
@@ -421,7 +423,7 @@ export const Overview = memo(function Overview({ screen, windows, launches = [],
   const closeAll = useAnchor('overview.closeAll');
   return (
     <View pointerEvents={open ? 'auto' : 'none'} style={StyleSheet.absoluteFill}>
-      <Under screen={screen} />
+      {open && <Under screen={screen} />}
       <Animated.View style={[StyleSheet.absoluteFill, { opacity: enter }]}>
         {/* The cards over home's wallpaper, dimmed: a blurred copy of the
             app they came from read as a flat grey behind them. */}
