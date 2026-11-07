@@ -12,7 +12,7 @@ import { Animated, AppRegistry, Easing, DevSettings, PanResponder, Pressable, St
 import Svg, { Defs, Ellipse, RadialGradient, Stop } from 'react-native-svg';
 import { Dock, DockMenu, HomeBar, TopBar, dateText, timeText, useClock } from './bars.jsx';
 import { Icon } from './icons.jsx';
-import { playTick } from './sounds.js';
+import { playNotify, playTick } from './sounds.js';
 import { remeasureAnchors, takeLaunchOrigin, useAnchor } from './anchors.js';
 import { AppIcon } from './AppIcon.jsx';
 import { ActionMenu } from './WindowMenu.jsx';
@@ -262,7 +262,7 @@ function splitPanes(split, screen) {
 }
 
 // Home's glance: the time in light type, the date, and the newest app
-// notification of the last hour on one line (none: no line). Not the lock
+// notification of the last hour on one line (none: an empty line). Not the lock
 // screen's bold clock, so home and lock tell apart; the status bar leaves its
 // own time out meanwhile (TopBar `quiet`). A tap opens the notifications and
 // calendar.
@@ -277,12 +277,11 @@ function HomeGlance({ t, note, apps, onPress, width }) {
     <Pressable onPress={onPress} style={[styles.glance, { width }]}>
       <Text style={[styles.glanceTime, { color: dark ? '#fff' : t.text }]}>{timeText(now)}</Text>
       <Text style={[styles.glanceDate, { color: dark ? 'rgba(255,255,255,0.9)' : t.text }]}>{dateText(now)}</Text>
-      {note ? (
-        <Text numberOfLines={1} style={[styles.glanceLine, { color: dark ? 'rgba(255,255,255,0.78)' : t.textDim }]}>
-          {source ? <Text style={{ fontWeight: '500' }}>{`${source} · `}</Text> : null}
-          {text}
-        </Text>
-      ) : null}
+      {/* Its line keeps its place when empty: home doesn't move as one comes and goes. */}
+      <Text numberOfLines={1} style={[styles.glanceLine, { color: dark ? 'rgba(255,255,255,0.78)' : t.textDim }]}>
+        {source ? <Text style={{ fontWeight: '500' }}>{`${source} · `}</Text> : null}
+        {note ? text : ' '}
+      </Text>
     </Pressable>
   );
 }
@@ -606,6 +605,10 @@ function Shell() {
   // Tablet mode with an app on screen (or one starting, launching.js): apps
   // reach the bottom edge, the dock hides behind the home indicator.
   const launching = useLaunching();
+  // Home on screen: its glance shows the newest notification, so one coming
+  // in there only chimes (a toast said the same thing over it).
+  const homeRef = useRef(false);
+  homeRef.current = !visible.length && !panel && !locked && !launching.length;
   const appMode = settings.tabletMode && (launching.length > 0 || visible.some((w) => w.type === 'normal' && (w.maximized || w.snap)));
   const dockShown = !appMode || peek || panel === 'launcher' || panel === 'overview';
   const bottom = appMode ? scr.homeBar || 24 : scr.dock;
@@ -655,7 +658,9 @@ function Shell() {
     appNotes.current.set(msg.id, id);
     const full = { id, time: nowText(), at: Date.now(), notifyId: msg.id, ...note };
     setNotes((l) => [full, ...l].slice(0, 30));
-    if (!lockedRef.current && (!settings.doNotDisturb || msg.urgency >= 2)) setToasts((l) => [...l, full].slice(-3));
+    if (lockedRef.current || (settings.doNotDisturb && msg.urgency < 2)) return;
+    if (homeRef.current) playNotify();
+    else setToasts((l) => [...l, full].slice(-3));
   });
 
   const endLaunchExec = useRef(() => {});
