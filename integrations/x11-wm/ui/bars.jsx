@@ -75,7 +75,9 @@ export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, set
   const toggle = (p) => setPanel(panel === p ? null : p);
   const battery = system.battery;
   return (
-    <View {...swipe.panHandlers} style={[styles.bar, { height: screen.topBar, backgroundColor: solid ? t.bar : 'transparent', borderColor: solid ? t.panelLine : 'transparent' }]}>
+    // Solid (over a full-screen or split app): the colour of the app's header
+    // right under it, with no line between, so the two read as one bar.
+    <View {...swipe.panHandlers} style={[styles.bar, { height: screen.topBar, backgroundColor: solid ? t.chromeActive : 'transparent' }]}>
       <View style={styles.side}>
         <Pressable ref={apps.ref} onLayout={apps.onLayout} onPress={() => toggle('launcher')}
           style={[styles.barButton, panel === 'launcher' && { backgroundColor: t.panelLine }]} pressedStyle={{ backgroundColor: t.panelLine }}>
@@ -352,7 +354,7 @@ export const DockMenu = memo(function DockMenu({ item, anchor, onClose }) {
 });
 
 const styles = StyleSheet.create({
-  bar: { position: 'absolute', left: 0, right: 0, top: 0, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 6, borderBottomWidth: 1 },
+  bar: { position: 'absolute', left: 0, right: 0, top: 0, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 6 },
   side: { flex: 1, flexDirection: 'row', alignItems: 'center' },
   barButton: { height: 34, minWidth: 44, borderRadius: 17, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
   status: { paddingHorizontal: 14 },

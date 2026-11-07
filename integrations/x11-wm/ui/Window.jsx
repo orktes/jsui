@@ -310,7 +310,7 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
         },
       ]}
     >
-      <View style={[styles.surface, { borderRadius: radius, boxShadow: full ? undefined : shadow }]}>
+      <View style={[styles.surface, { borderRadius: radius, boxShadow: full || max ? undefined : shadow }]}>
         {/* One title bar element for both looks: a drag that leaves the
             maximized place switches the look mid-gesture, and a new element
             would end the gesture (the release then didn't know where the
@@ -330,7 +330,7 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
               <>
                 <View style={[styles.tabletName, { opacity: active ? 1 : 0.6 }]}>
                   <AppIcon win={win} app={appEntry} size={22} />
-                  <Text numberOfLines={1} style={[styles.tabletTitle, { color: active ? t.textDim : t.textMute }]}>{appName(win, apps)}</Text>
+                  <Text numberOfLines={1} style={[styles.tabletTitle, { color: active ? t.text : t.textMute }]}>{appName(win, apps)}</Text>
                 </View>
                 <View pointerEvents="none" style={styles.grabberWrap}>
                   <View style={[styles.grabber, { backgroundColor: t.textMute }]} />
