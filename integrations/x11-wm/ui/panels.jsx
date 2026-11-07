@@ -673,7 +673,7 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
   return (
     <View pointerEvents={open ? 'auto' : 'none'} style={StyleSheet.absoluteFill}>
       <Animated.View style={[StyleSheet.absoluteFill, { opacity: v }]}>
-        <Pressable style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.25)' }]} onPress={onClose} />
+        <Pressable style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.45)' }]} onPress={onClose} />
       </Animated.View>
       <Animated.View style={[styles.dropRight, { top: screen.topBar + 10, opacity: v, transform: [{ translateY: ty }] }]}>
         <Card style={{ width: 420 }}>
@@ -801,14 +801,15 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
   return (
     <View pointerEvents={open ? 'auto' : 'none'} style={StyleSheet.absoluteFill}>
       <Animated.View style={[StyleSheet.absoluteFill, { opacity: v }]}>
-        <Pressable style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.25)' }]} onPress={onClose} />
+        <Pressable style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.45)' }]} onPress={onClose} />
       </Animated.View>
       <Animated.View style={[styles.dropCenter, { top: screen.topBar + 10, opacity: v, transform: [{ translateY: ty }] }]}>
-        {/* Side by side; on a narrow (portrait) screen the calendar goes on
-            top of the notifications, with the same 12 px margins as quick
-            settings. The status bar right above shows the date and time. */}
-        <Card style={narrow ? { width: screen.width - 24, flexDirection: 'column-reverse' } : { width: 720, flexDirection: 'row' }}>
-          <View style={narrow ? { paddingTop: 16 } : { flex: 1, paddingRight: 18 }}>
+        {/* Notifications first, the calendar after: side by side, or on a
+            narrow (portrait) screen one under the other, with the same 12 px
+            margins as quick settings. The status bar right above shows the
+            date and time. */}
+        <Card style={narrow ? { width: screen.width - 24, flexDirection: 'column' } : { width: 720, flexDirection: 'row' }}>
+          <View style={narrow ? { paddingBottom: 16 } : { flex: 1, paddingRight: 18 }}>
             <View style={styles.notesHead}>
               <Label style={{ flex: 1 }}>Notifications</Label>
               {notifications.length > 0 && (
@@ -858,7 +859,7 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
             </View>
           </View>
           <View style={narrow ? { height: 1, backgroundColor: t.panelLine } : { width: 1, backgroundColor: t.panelLine }} />
-          <View style={narrow ? { alignItems: 'center', paddingBottom: 16 } : { width: 320, paddingLeft: 18 }}>
+          <View style={narrow ? { alignItems: 'center', paddingTop: 16 } : { width: 320, paddingLeft: 18 }}>
             {/* The month, headed like Notifications beside it. */}
             <View style={[styles.notesHead, { width: 308, marginBottom: 8 }]}>
               <Label>{`${longMonth(now)} ${now.getFullYear()}`}</Label>
