@@ -695,6 +695,24 @@ function monthGrid(d) {
   return cells;
 }
 
+// Notifications by sender (the app, or the title when there is none), newest
+// first: { key, items } with items[0] the newest.
+function groupNotes(list) {
+  const groups = [];
+  const byKey = new Map();
+  for (const n of list) {
+    const key = (n.app && n.app.id) || n.title;
+    let g = byKey.get(key);
+    if (!g) {
+      g = { key, items: [] };
+      byKey.set(key, g);
+      groups.push(g);
+    }
+    g.items.push(n);
+  }
+  return groups;
+}
+
 export const CalendarPanel = memo(function CalendarPanel({ screen, notifications, onClear, onDismiss, onOpen, onClose, onClosed, open = true }) {
   const t = useTheme();
   const now = useClock();
@@ -702,6 +720,8 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
   const ty = v.interpolate({ inputRange: [0, 1], outputRange: [-24, 0] });
   const cells = monthGrid(now);
   const narrow = screen.width < 760;
+  const groups = useMemo(() => groupNotes(notifications), [notifications]);
+  const [expanded, setExpanded] = useState(() => new Set());
   return (
     <View pointerEvents={open ? 'auto' : 'none'} style={StyleSheet.absoluteFill}>
       <Animated.View style={[StyleSheet.absoluteFill, { opacity: v }]}>
@@ -724,26 +744,36 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
             {notifications.length === 0 && <Text style={[styles.empty, { color: t.textMute, marginTop: 30, marginBottom: 30 }]}>You're all caught up</Text>}
             <View style={{ maxHeight: 340, marginTop: 8 }}>
             <ScrollView style={{ maxHeight: 340 }} contentContainerStyle={{ paddingBottom: notifications.length > 3 ? 24 : 0 }}>
-              {notifications.map((n) => (
-                <Pressable key={n.id} style={[styles.note, { backgroundColor: t.panelRaised }]} pressedStyle={{ backgroundColor: t.panelLine }}
-                  onPress={() => {
-                    // An app's notification opens the app (and the panel goes).
-                    if (!onOpen || (!n.app && n.notifyId == null)) return;
-                    onOpen(n);
-                    onClose();
-                  }}>
-                  {/* The app's icon, or none: the same bell on every card said nothing. */}
-                  {n.app ? <AppIcon app={n.app} size={32} /> : null}
-                  <View style={{ flex: 1, marginLeft: n.app ? 12 : 4 }}>
-                    <Text numberOfLines={2} style={[styles.noteTitle, { color: t.text }]}>{n.title}</Text>
-                    {n.body ? <Text numberOfLines={2} style={[styles.noteBody, { color: t.textDim }]}>{n.body}</Text> : null}
-                  </View>
-                  <Text style={[styles.noteTime, { color: t.textMute }]}>{n.time}</Text>
-                  <Pressable onPress={() => onDismiss(n.id)} hitSlop={10} style={styles.noteClose} pressedStyle={{ backgroundColor: t.panelLine }}>
-                    <Icon name="close" size={16} color={t.textMute} />
+              {/* One card per sender with its newest message and a count; a tap
+                  on a stack opens it, a tap on a message opens its app. */}
+              {groups.flatMap((g) => {
+                const open = g.items.length === 1 || expanded.has(g.key);
+                return (open ? g.items : g.items.slice(0, 1)).map((n, i) => (
+                  <Pressable key={n.id} style={[styles.note, { backgroundColor: t.panelRaised }]} pressedStyle={{ backgroundColor: t.panelLine }}
+                    onPress={() => {
+                      if (!open) return setExpanded((e) => new Set(e).add(g.key));
+                      // An app's notification opens the app (and the panel goes).
+                      if (!onOpen || (!n.app && n.notifyId == null)) return;
+                      onOpen(n);
+                      onClose();
+                    }}>
+                    {/* The app's icon, or none: the same bell on every card said nothing. */}
+                    {n.app ? <AppIcon app={n.app} size={32} /> : null}
+                    <View style={{ flex: 1, marginLeft: n.app ? 12 : 4 }}>
+                      <Text numberOfLines={1} style={[styles.noteTitle, { color: t.text }]}>
+                        {n.title}{!open && g.items.length > 1 ? <Text style={{ color: t.textMute }}>{`  ${g.items.length}`}</Text> : null}
+                      </Text>
+                      {n.body ? <Text numberOfLines={2} style={[styles.noteBody, { color: t.textDim }]}>{n.body}</Text> : null}
+                    </View>
+                    <Text style={[styles.noteTime, { color: t.textMute }]}>{n.time}</Text>
+                    {i === 0 && (
+                      <Pressable onPress={() => (open ? onDismiss(n.id) : g.items.forEach((x) => onDismiss(x.id)))} hitSlop={10} style={styles.noteClose} pressedStyle={{ backgroundColor: t.panelLine }}>
+                        <Icon name="close" size={16} color={t.textMute} />
+                      </Pressable>
+                    )}
                   </Pressable>
-                </Pressable>
-              ))}
+                ));
+              })}
             </ScrollView>
             {/* Only when the list can scroll: over a short list it showed as an empty card. */}
             {notifications.length > 3 && (
@@ -814,11 +844,15 @@ export const LockScreen = memo(function LockScreen({ screen, onUnlock, notificat
       <View style={styles.lockBody}>
         <Text style={styles.lockTime}>{pad2(now.getHours())}:{pad2(now.getMinutes())}</Text>
         <Text style={styles.lockDate}>{dateText(now)}</Text>
+        {/* The newest notification itself, and how many more. */}
         {notifications.length > 0 && (
-          <View style={styles.lockNote}>
-            <Icon name="bell" size={18} color="#fff" />
-            <Text style={styles.lockNoteText}>{notifications.length} notification{notifications.length === 1 ? '' : 's'}</Text>
+          <View style={[styles.lockCard, { width: Math.min(440, screen.width - 48) }]}>
+            <Text numberOfLines={1} style={styles.lockCardTitle}>{notifications[0].title}</Text>
+            {notifications[0].body ? <Text numberOfLines={2} style={styles.lockCardBody}>{notifications[0].body}</Text> : null}
           </View>
+        )}
+        {notifications.length > 1 && (
+          <Text style={styles.lockMore}>{notifications.length - 1} more</Text>
         )}
       </View>
       <View ref={anchor.ref} onLayout={anchor.onLayout} style={styles.lockHandle}>
@@ -922,8 +956,10 @@ const styles = StyleSheet.create({
   lockBody: { position: 'absolute', left: 0, right: 0, top: '18%', alignItems: 'center' },
   lockTime: { fontFamily: font, color: '#fff', fontSize: 132, fontWeight: '700', letterSpacing: -4 },
   lockDate: { fontFamily: font, color: 'rgba(255,255,255,0.85)', fontSize: 26, fontWeight: '500' },
-  lockNote: { flexDirection: 'row', alignItems: 'center', marginTop: 28, backgroundColor: 'rgba(255,255,255,0.14)', borderRadius: 22, height: 44, paddingHorizontal: 18 },
-  lockNoteText: { fontFamily: font, color: '#fff', fontSize: 15, marginLeft: 10 },
+  lockCard: { marginTop: 28, backgroundColor: 'rgba(255,255,255,0.14)', borderRadius: 20, paddingHorizontal: 18, paddingVertical: 14 },
+  lockCardTitle: { fontFamily: font, color: '#fff', fontSize: 15, fontWeight: '600' },
+  lockCardBody: { fontFamily: font, color: 'rgba(255,255,255,0.85)', fontSize: 14, marginTop: 2 },
+  lockMore: { fontFamily: font, color: 'rgba(255,255,255,0.7)', fontSize: 14, marginTop: 10 },
   lockHandle: { position: 'absolute', left: 0, right: 0, bottom: 40, alignItems: 'center' },
   lockHint: { fontFamily: font, color: 'rgba(255,255,255,0.85)', fontSize: 17, marginTop: 4, fontWeight: '500' },
   toasts: { position: 'absolute', width: 400 },
