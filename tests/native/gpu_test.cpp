@@ -892,6 +892,16 @@ TEST(gpu_host_texture_gl) {
     out = rtex.read(false);
     CHECK_EQ(px(28, 12), 0xffff0000u);
     CHECK_EQ(px(28, 36), 0xff0000ffu);
+    // JSUI_TEXTURE_OPAQUE ignores what is in the alpha channel (an XRGB
+    // buffer's X byte): grey with alpha 0x33 is drawn as solid grey.
+    std::vector<uint32_t> xgrey(8, 0x33333333u);
+    c.gl.BindTexture(GL_TEXTURE_2D, src);
+    c.gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, xgrey.data());
+    t.flags = JSUI_TEXTURE_OPAQUE;
+    CHECK_EQ(s.rt->textures.set("gl", &t), 1);
+    CHECK_EQ(jsui::gpu::render(s.rt->main(), gpu, target), 0);
+    out = rtex.read(false);
+    CHECK_EQ(px(28, 12), 0xff333333u);
     s.rt->textures.remove("gl");
     c.gl.DeleteTextures(1, &src);
   });
