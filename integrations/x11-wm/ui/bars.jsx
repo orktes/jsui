@@ -67,7 +67,6 @@ function Battery({ level, charging, color, low }) {
 export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, settings, system, quiet }) {
   const t = useTheme();
   const now = useClock();
-  const apps = useAnchor('topbar.apps');
   const clock = useAnchor('topbar.clock');
   const status = useAnchor('topbar.status');
   const kbd = useAnchor('topbar.keyboard');
@@ -78,13 +77,8 @@ export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, set
     // Solid (over a full-screen or split app): the colour of the app's header
     // right under it, with no line between, so the two read as one bar.
     <View {...swipe.panHandlers} style={[styles.bar, { height: screen.topBar, backgroundColor: solid ? t.chromeActive : 'transparent' }]}>
-      <View style={styles.side}>
-        <Pressable ref={apps.ref} onLayout={apps.onLayout} onPress={() => toggle('launcher')}
-          style={[styles.barButton, panel === 'launcher' && { backgroundColor: t.panelLine }]} pressedStyle={{ backgroundColor: t.panelLine }}>
-          <Icon name="grid" size={20} color={t.text} />
-          <Text style={[styles.barText, { color: t.text, marginLeft: 8 }]}>Apps</Text>
-        </Pressable>
-      </View>
+      {/* No apps button: the dock's grid (and the left edge) open the launcher. */}
+      <View style={styles.side} />
       <Pressable ref={clock.ref} onLayout={clock.onLayout} onPress={() => toggle('calendar')}
         style={[styles.clock, panel === 'calendar' && { backgroundColor: t.panelLine }]} pressedStyle={{ backgroundColor: t.panelLine }}>
         <Text style={[styles.barText, styles.tabular, { color: t.textDim, fontWeight: '500', opacity: quiet ? 0 : 1 }]}>{dateText(now)}</Text>

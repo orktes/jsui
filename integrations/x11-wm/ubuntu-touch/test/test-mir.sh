@@ -28,7 +28,7 @@ touch_at() { printf 'down %s\nup %s\n' "$1" "$1" > /tmp/touch.cmd; sleep 1.5; }
 shot() { ctl "shot /tmp/$1.ppm"; convert /tmp/$1.ppm "$OUT/$1.png"; echo "shot $OUT/$1.png"; }
 
 shot mir-01-desktop
-touch_at "$(anchor topbar.apps)"
+touch_at "$(anchor dock.launcher)"
 shot mir-02-launcher
 grep -q '"app\.' /tmp/anchors.json || { echo "FAIL: the Mir touch didn't open the launcher"; cat /tmp/wl.log; exit 1; }
 touch_at "$(anchor app.org.codeberg.dnkl.foot 2>/dev/null || anchor app.foot)"
