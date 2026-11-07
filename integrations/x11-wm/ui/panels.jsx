@@ -7,7 +7,7 @@ import {
 import { remeasureAnchors, useAnchor } from './anchors.js';
 import { useNativeDragY } from './drag.js';
 import { AppIcon } from './AppIcon.jsx';
-import { dateText, pad2, useClock } from './bars.jsx';
+import { dateText, longMonth, pad2, useClock } from './bars.jsx';
 import { Card, IconButton, Label, Slider, ToggleTile } from './controls.jsx';
 import { Icon } from './icons.jsx';
 import { playNotify } from './sounds.js';
@@ -783,6 +783,10 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
           </View>
           <View style={narrow ? { height: 1, backgroundColor: t.panelLine } : { width: 1, backgroundColor: t.panelLine }} />
           <View style={narrow ? { alignItems: 'center', paddingBottom: 16 } : { width: 320, paddingLeft: 18 }}>
+            {/* The month, headed like Notifications beside it. */}
+            <View style={[styles.notesHead, { width: 308, marginBottom: 8 }]}>
+              <Label>{`${longMonth(now)} ${now.getFullYear()}`}</Label>
+            </View>
             <View style={styles.calRow}>
               {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((d, i) => (
                 <Text key={i} style={[styles.calHead, { color: t.textMute }]}>{d}</Text>
