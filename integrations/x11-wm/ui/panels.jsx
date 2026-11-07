@@ -120,8 +120,13 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
   return (
     <View pointerEvents="box-none" style={StyleSheet.absoluteFill}>
       <Under screen={screen} />
+      {/* The scrim fades on its own: its blurred backdrop is a new snapshot
+          at every open, and inside the grid's layer it made that layer
+          stale every time (the whole grid painted again). */}
       <Animated.View pointerEvents={open ? 'auto' : 'none'} style={[StyleSheet.absoluteFill, { opacity: v }]}>
         <Scrim color="rgba(6,8,20,0.82)" onPress={onClose} screen={screen} />
+      </Animated.View>
+      <Animated.View pointerEvents={open ? 'box-none' : 'none'} style={[StyleSheet.absoluteFill, { opacity: v }]}>
         <Animated.View pointerEvents="box-none" style={[styles.launcher, { top: screen.topBar + 28, bottom: settings.osk ? 330 : screen.dock + 12, transform: [{ scale: sc }] }]}>
           <View style={[styles.search, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 36px ${t.shadow}` }]}>
             <Icon name="search" size={24} color={t.textDim} />

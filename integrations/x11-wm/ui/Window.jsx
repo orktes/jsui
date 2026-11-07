@@ -12,12 +12,12 @@
 // maximize. Drag a border or corner grip to resize.
 import React, { memo, useEffect, useRef, useState } from 'react';
 import { Animated, Easing, HostTexture, PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
-import { useAnchor } from './anchors.js';
+import { anchorRect, takeLaunchOrigin, useAnchor } from './anchors.js';
 import { useNativeDragXY } from './drag.js';
 import { AppIcon } from './AppIcon.jsx';
 import { Icon } from './icons.jsx';
 import { font, useTheme } from './theme.js';
-import { appName, wm } from './wm.js';
+import { appKeyOf, appName, windowTitle, wm } from './wm.js';
 import { WindowMenu } from './WindowMenu.jsx';
 
 const MIN_W = 180;
@@ -46,7 +46,7 @@ function TitleButton({ icon, onPress, danger, t, label, anchorName }) {
   );
 }
 
-export const Window = memo(function Window({ win, active, screen, apps, hidden, onPreview, onDragging, tablet, onMenu, menuOpen, onMenuClose }) {
+export const Window = memo(function Window({ win, active, screen, apps, hidden, onPreview, onDragging, tablet, onMenu, menuOpen, onMenuClose, closing, onClosed }) {
   const t = useTheme();
   const TB = screen.titleBar;
   const B = screen.border;
@@ -58,10 +58,31 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
   const titleAnchor = useAnchor(`win.${win.id}.title`);
   const finger = useNativeDragXY();
 
-  // Open: fade and grow in once the first frame of pixels is there.
+  // Closed (the app went away; the shell keeps this mounted with its last
+  // frame): into its dock icon when the dock has one, else a quick fade and
+  // shrink, then onClosed (the host may drop the texture).
+  const out = useRef(new Animated.Value(0)).current;
+  const target = useRef(undefined);
+  if (closing && target.current === undefined) target.current = win.transientFor ? null : anchorRect(`dock.${appKeyOf(win)}`) || null;
+  useEffect(() => {
+    if (!closing) return;
+    const d = target.current;
+    Animated.timing(out, { toValue: 1, duration: d ? 300 : 180, easing: d ? Easing.inOut(Easing.cubic) : Easing.in(Easing.quad), useNativeDriver: true })
+      .start(() => onClosed && onClosed(win.id));
+  }, [closing]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Open: fade and grow in once the first frame of pixels is there; out of
+  // the icon it was launched from, when there is one (launcher, dock).
+  const origin = useRef(undefined);
+  if (origin.current === undefined) origin.current = win.transientFor ? null : takeLaunchOrigin(win.appId);
   useEffect(() => {
     if (!win.ready) return;
-    Animated.timing(appear, { toValue: 1, duration: 220, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+    Animated.timing(appear, {
+      toValue: 1,
+      duration: origin.current ? 340 : 220,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
   }, [win.ready, appear]);
   // Minimize: shrink towards the dock; restore: back.
   useEffect(() => {
@@ -139,6 +160,7 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
           }
         } else {
           if (last) wm.move(w.id, last.x, last.y);
+          if (preview) wm.haptic();
           if (preview === 'left' || preview === 'right') wm.snap(w.id, preview);
           // Tablet mode: a dragged app that lands nowhere goes back to full screen.
           else if (preview === 'max' || (latest.current.tablet && start.wasMax && w.type === 'normal')) wm.maximize(w.id, true);
@@ -239,8 +261,24 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
   const frameTop = decorated ? g.y - TB : g.y;
   const frameH = decorated ? g.h + TB : g.h;
 
-  const opacity = Animated.multiply(appear, Animated.subtract(1, mini));
-  const scale = appear.interpolate({ inputRange: [0, 1], outputRange: [0.94, 1] });
+  const o = origin.current;
+  const d = closing ? target.current : null;
+  const opacity = Animated.multiply(
+    Animated.multiply(
+      o ? appear.interpolate({ inputRange: [0, 0.35, 1], outputRange: [0, 1, 1] }) : appear,
+      Animated.subtract(1, mini),
+    ),
+    d ? out.interpolate({ inputRange: [0, 0.7, 1], outputRange: [1, 1, 0] }) : Animated.subtract(1, out),
+  );
+  const outScale = out.interpolate({ inputRange: [0, 1], outputRange: [1, d ? Math.min(1, d[2] / Math.max(1, g.w)) : 0.92] });
+  const outX = d ? out.interpolate({ inputRange: [0, 1], outputRange: [0, d[0] + d[2] / 2 - (g.x + g.w / 2)] }) : 0;
+  const outY = d ? out.interpolate({ inputRange: [0, 1], outputRange: [0, d[1] + d[3] / 2 - (frameTop + frameH / 2)] }) : 0;
+  // From the icon: the frame starts at the icon's centre and size.
+  const scale = o
+    ? appear.interpolate({ inputRange: [0, 1], outputRange: [Math.min(1, o[2] / Math.max(1, g.w)), 1] })
+    : appear.interpolate({ inputRange: [0, 1], outputRange: [0.94, 1] });
+  const growX = o ? appear.interpolate({ inputRange: [0, 1], outputRange: [o[0] + o[2] / 2 - (g.x + g.w / 2), 0] }) : 0;
+  const growY = o ? appear.interpolate({ inputRange: [0, 1], outputRange: [o[1] + o[3] / 2 - (frameTop + frameH / 2), 0] }) : 0;
   const miniScale = mini.interpolate({ inputRange: [0, 1], outputRange: [1, 0.25] });
   const dropY = mini.interpolate({ inputRange: [0, 1], outputRange: [0, screen.height - frameTop - frameH / 2] });
 
@@ -251,7 +289,7 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
 
   return (
     <Animated.View
-      pointerEvents={hidden || win.minimized ? 'none' : 'box-none'}
+      pointerEvents={hidden || win.minimized || closing ? 'none' : 'box-none'}
       style={[
         styles.frame,
         {
@@ -260,7 +298,11 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
           width: g.w,
           height: frameH,
           opacity: hidden ? 0 : opacity,
-          transform: [{ translateX: dragX }, { translateY: moving ? Animated.add(dropY, dragY) : dropY }, { scale: Animated.multiply(scale, miniScale) }],
+          transform: [
+            { translateX: Animated.add(o ? Animated.add(dragX, growX) : dragX, outX) },
+            { translateY: Animated.add(Animated.add(moving ? Animated.add(dropY, dragY) : dropY, growY), outY) },
+            { scale: Animated.multiply(Animated.multiply(scale, miniScale), outScale) },
+          ],
         },
       ]}
     >
@@ -307,7 +349,7 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
                   <AppIcon win={win} app={appEntry} size={26} />
                 </View>
                 <Text numberOfLines={1} style={[styles.title, { color: active ? t.text : t.textMute }]}>
-                  {win.title || appName(win, apps)}
+                  {windowTitle(win, apps)}
                 </Text>
                 {win.type === 'normal' && <TitleButton t={t} icon="minimize" label="Minimize" anchorName={`win.${win.id}.minimize`} onPress={() => wm.minimize(win.id)} />}
                 {win.type === 'normal' && win.resizable !== false && !snapped && (
@@ -345,29 +387,6 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
           </View>
         </>
       )}
-    </Animated.View>
-  );
-});
-
-// A window that just closed: its last frame fades and shrinks, then the host
-// may drop the texture.
-export const ClosingWindow = memo(function ClosingWindow({ win, screen, onDone }) {
-  const t = useTheme();
-  const v = useRef(new Animated.Value(1)).current;
-  useEffect(() => {
-    Animated.timing(v, { toValue: 0, duration: 180, easing: Easing.in(Easing.quad), useNativeDriver: true }).start(() => onDone(win.id));
-  }, [v, win.id, onDone]);
-  const TB = win.decorated && !win.fullscreen ? screen.titleBar : 0;
-  const scale = v.interpolate({ inputRange: [0, 1], outputRange: [0.92, 1] });
-  return (
-    <Animated.View
-      pointerEvents="none"
-      style={[styles.frame, { left: win.x, top: win.y - TB, width: win.w, height: win.h + TB, opacity: v, transform: [{ scale }] }]}
-    >
-      <View style={[styles.surface, { borderRadius: 14, boxShadow: `0px 12px 32px ${t.shadow}` }]}>
-        {TB > 0 && <View style={{ height: TB, backgroundColor: t.chrome }} />}
-        <HostTexture name={`win:${win.id}`} style={{ width: win.w, height: win.h }} resizeMode="stretch" />
-      </View>
     </Animated.View>
   );
 });

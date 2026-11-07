@@ -12,12 +12,12 @@ import { Animated, AppRegistry, DevSettings, PanResponder, Pressable, StyleSheet
 import Svg, { Defs, Ellipse, RadialGradient, Stop } from 'react-native-svg';
 import { Dock, DockMenu, HomeBar, TopBar, dateText, timeText, useClock } from './bars.jsx';
 import { Icon } from './icons.jsx';
-import { useAnchor } from './anchors.js';
+import { noteLaunch, useAnchor } from './anchors.js';
 import { useNativeDragX } from './drag.js';
 import { Keyboard } from './keyboard.jsx';
 import { CalendarPanel, Launcher, LockScreen, Overview, QuickSettings, Toasts } from './panels.jsx';
 import { ThemeContext, dark, font, light } from './theme.js';
-import { ClosingWindow, Window } from './Window.jsx';
+import { Window } from './Window.jsx';
 import { appName, useApps, usePopups, useScreen, useSettings, useSystem, useWindows, wm } from './wm.js';
 
 // ---------------------------------------------------------------- Wallpaper
@@ -202,13 +202,22 @@ function Shell() {
   const toastDone = useCallback((id) => setToasts((l) => l.filter((x) => x.id !== id)), []);
   const dismissNote = useCallback((id) => setNotes((l) => l.filter((x) => x.id !== id)), []);
 
-  // Windows that disappeared animate out from their last state.
+  // Windows that disappeared animate out from their last state: the same
+  // Window, kept mounted with `closing` (mounting a copy took the JS thread
+  // a render, ~150 ms on the Tab A7, with neither on screen). closingNow has
+  // them from the render that drops them; the effect keeps them in
+  // `closing` until done.
   const prev = useRef(new Map());
   const [closing, setClosing] = useState([]);
+  const closingNow = useMemo(() => {
+    const out = [...closing];
+    for (const [id, w] of prev.current) if (!map[id] && w.ready && !w.minimized && !out.some((c) => c.id === w.id)) out.push(w);
+    return out;
+  }, [map, closing]);
   useEffect(() => {
     const gone = [];
     for (const [id, w] of prev.current) if (!map[id] && w.ready && !w.minimized) gone.push(w);
-    if (gone.length) setClosing((c) => [...c, ...gone]);
+    if (gone.length) setClosing((c) => [...c, ...gone.filter((w) => !c.some((x) => x.id === w.id))]);
     prev.current = new Map(Object.entries(map));
     for (const w of gone) prev.current.delete(String(w.id));
   }, [map]);
@@ -290,7 +299,11 @@ function Shell() {
     }
   }, [regions]);
 
-  const launch = useCallback((app) => wm.launch(app.exec), []);
+  const launch = useCallback((app) => {
+    wm.haptic();
+    noteLaunch(app.id, `app.${app.id}`);
+    wm.launch(app.exec);
+  }, []);
 
   // The launcher and the switcher draw over a blurred snapshot of the screen
   // as it was when they opened (see Scrim in panels.jsx), dropped once they
@@ -330,7 +343,7 @@ function Shell() {
             painted its big paragraph afresh in the first frame of the close. */}
         {!visible.length && <DesktopClock screen={scr} t={t} />}
         {split && !overviewUp && <View pointerEvents="none" style={{ position: 'absolute', left: split.left.x + split.left.w - 1, width: split.right.x - split.left.x - split.left.w + 2, top: split.left.y - scr.titleBar, height: split.left.h + scr.titleBar, backgroundColor: t.name === 'dark' ? '#000' : t.wallTop }} />}
-        {windows.map((w) =>
+        {[...windows, ...closingNow.filter((c) => !map[c.id])].map((w) =>
           w.type === 'dock' || w.type === 'desktop' ? null : (
             <View key={w.id} pointerEvents="box-none" style={[StyleSheet.absoluteFill, { opacity: overviewUp ? 0 : 1 }]}>
             <Window
@@ -345,13 +358,12 @@ function Shell() {
               onMenu={onWinMenu}
               menuOpen={winMenu === w.id}
               onMenuClose={closeWinMenu}
+              closing={!map[w.id]}
+              onClosed={doneClosing}
             />
             </View>
           ),
         )}
-        {closing.map((w) => (
-          <ClosingWindow key={`c${w.id}`} win={w} screen={scr} onDone={doneClosing} />
-        ))}
         {split && !overviewUp && <SplitDivider left={split.left} right={split.right} screen={scr} t={t} bottom={bottom} />}
         <SnapPreview preview={preview} screen={scr} t={t} bottom={bottom} />
         {!fullscreen && (
@@ -387,7 +399,7 @@ function Shell() {
         )}
         {oskOn && <Keyboard screen={scr} onMeasure={setOskRect} onHide={hideOsk} />}
         {locked && (
-          <LockScreen screen={scr} notifications={notes} onUnlock={() => setLocked(false)}>
+          <LockScreen screen={scr} notifications={notes} onUnlock={() => { wm.haptic(18); setLocked(false); }}>
             <Wallpaper width={scr.width} height={scr.height} t={t} />
           </LockScreen>
         )}

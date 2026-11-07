@@ -683,6 +683,9 @@ class WM {
   wlr_keyboard vkbd_{};  // the on-screen keyboard's device
   xkb_keymap* keymap_ = nullptr;
   wl_event_source* tickTimer_ = nullptr;
+  wl_event_source* systemTimer_ = nullptr;  // publishSystem again (battery, Wi-Fi)
+  std::string lastSystem_;
+  int frameLog_ = 0;  // JSUI_WL_PERF: frames still to log in full (after an unmap)
   bool tickPending_ = false;
   bool frameScheduled_ = false;
   bool shellDirty_ = false;
@@ -748,6 +751,8 @@ class WM {
   // (JSUI_WL_SNAPSHOT_BG=0: they draw over the live desktop).
   bool snapshotBg_ = false;
   void snapshotBackdrop(bool on);
+  void haptic(int ms);
+  double lastHaptic_ = 0;
   void removeWindowTexture(uint32_t id);
   bool renderGpu();
   double lastTickMs_ = 0, lastRenderMs_ = 0;
@@ -987,6 +992,13 @@ bool WM::setup() {
     static_cast<WM*>(u)->tick();
     return 0;
   }, this);
+  systemTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
+    auto* w = static_cast<WM*>(u);
+    if (w->rt_) w->publishSystem();
+    wl_event_source_timer_update(w->systemTimer_, 30000);
+    return 0;
+  }, this);
+  wl_event_source_timer_update(systemTimer_, 30000);
   setupControl();
   return output_ != nullptr;
 }
@@ -1394,6 +1406,13 @@ double WM::popupFit(Client* p) {
 }
 
 void WM::capture(Client* c) {
+  // No buffer (a closing app's last commit): keep the last frame, which the
+  // shell animates out. Capturing would swap it for an empty texture, and
+  // the window blinked out for a few frames before its closing copy showed.
+  if (!c->xdg->surface->current.buffer) {
+    if (perf_) logf("commit %u without a buffer at %.0f", c->id, nowMs());
+    return;
+  }
   if (gpuApps_ && captureGpu(c)) return;
   if (gpuBuffers_.count(c->id)) removeWindowTexture(c->id);  // back on shm
   wlr_surface* root = c->xdg->surface;
@@ -1489,6 +1508,30 @@ bool WM::captureGpu(Client* c) {
 #else
   (void)c;
   return false;
+#endif
+}
+
+// A short buzz through Ubuntu Touch's haptics daemon (hfd), fire and
+// forget; nothing where there is none (busctl fails quietly).
+void WM::haptic(int ms) {
+#ifdef JSUI_WL_MIR
+  if (!mir_) return;
+  const double now = nowMs();
+  if (now - lastHaptic_ < 60) return;
+  lastHaptic_ = now;
+  ms = std::clamp(ms, 5, 200);
+  pid_t pid = fork();
+  if (pid == 0) {
+    signal(SIGCHLD, SIG_DFL);
+    int nul = open("/dev/null", O_RDWR);
+    if (nul >= 0) dup2(nul, 1), dup2(nul, 2);
+    std::string d = std::to_string(ms);
+    execlp("busctl", "busctl", "--system", "call", "com.lomiri.hfd", "/com/lomiri/hfd", "com.lomiri.hfd.Vibrator",
+           "vibrate", "i", d.c_str(), static_cast<char*>(nullptr));
+    _exit(127);
+  }
+#else
+  (void)ms;
 #endif
 }
 
@@ -1605,6 +1648,8 @@ void WM::onUnmap(Client* c) {
   if (mrId_ == c->id) mrId_ = 0;
   // The shell animates the last frame out, then releases it (wm:release).
   releaseAt_[c->id] = nowMs() + 1500;
+  if (perf_) frameLog_ = 24;  // JSUI_WL_PERF: every frame of the close animation
+  if (perf_) logf("unmap %u at %.0f", c->id, nowMs());
   std::string j = "{\"" + std::to_string(c->id) + "\":null}";
   jsui_patch_state(rt_, "wm.windows", j.c_str());
   publishStack();
@@ -1890,20 +1935,39 @@ void WM::publishSystem() {
   gethostname(host, sizeof host);
   std::string user = "user";
   if (passwd* pw = getpwuid(getuid())) user = pw->pw_name;
+  // The battery: a supply of type Battery with a capacity (the Tab A7 also
+  // lists its fuel gauges, type BMS, with one), else any with a capacity;
+  // plugged: a mains / USB supply online.
   std::string battery = "null";
   if (DIR* d = opendir("/sys/class/power_supply")) {
+    int pct = -1, anyPct = -1;
+    bool charging = false, anyCharging = false, plugged = false;
     while (dirent* e = readdir(d)) {
+      if (e->d_name[0] == '.') continue;
       std::string base = std::string("/sys/class/power_supply/") + e->d_name;
-      std::ifstream cap(base + "/capacity"), status(base + "/status");
-      int pct = -1;
-      std::string st;
-      if (cap >> pct && pct >= 0) {
-        status >> st;
-        battery = "{\"percent\":" + std::to_string(pct) + ",\"charging\":" + (st == "Charging" ? "true" : "false") + "}";
-        break;
+      std::ifstream typeF(base + "/type"), capF(base + "/capacity"), statusF(base + "/status"), onlineF(base + "/online");
+      std::string type, st;
+      int cap = -1, online = 0;
+      typeF >> type;
+      statusF >> st;
+      if (type == "Mains" || type.compare(0, 3, "USB") == 0) {
+        if (onlineF >> online && online > 0) plugged = true;
+        continue;
+      }
+      if (!(capF >> cap) || cap < 0) continue;
+      if (type == "Battery" && pct < 0) {
+        pct = cap;
+        charging = st == "Charging";
+      } else if (anyPct < 0) {
+        anyPct = cap;
+        anyCharging = st == "Charging";
       }
     }
     closedir(d);
+    if (pct < 0) pct = anyPct, charging = anyCharging;
+    if (pct >= 0)
+      battery = "{\"percent\":" + std::to_string(pct) + ",\"charging\":" + (charging ? "true" : "false") +
+                ",\"plugged\":" + (plugged ? "true" : "false") + "}";
   }
   // A wireless interface, if the device has a working one (the Tab A7's
   // port has none: no Wi-Fi driver).
@@ -1929,6 +1993,8 @@ void WM::publishSystem() {
   if (mir_ && !vulkan_ && access("/run/sensord.sock", F_OK) == 0) j += ",\"rotate\":true";
 #endif
   j += "}";
+  if (j == lastSystem_) return;  // refreshed every 30 s (systemTimer_): publish changes only
+  lastSystem_ = j;
   jsui_set_state(rt_, "wm.system", j.c_str());
 }
 
@@ -2076,6 +2142,8 @@ void WM::onMessage(const char* name, const char* json) {
       if (!cl->popup && cl->mapped && cl->snap && !cl->minimized) setSnap(cl, cl->snap);
   } else if (n == "wm:fullscreen" && c) {
     setFullscreen(c, v["on"].type == wmjson::Value::Null ? !c->fullscreen : v["on"].truthy());
+  } else if (n == "wm:haptic") {
+    haptic(int(v["ms"].num(12)));
   } else if (n == "wm:snapshot") {
     snapshotBackdrop(v["on"].truthy());
   } else if (n == "wm:osk") {
@@ -2716,7 +2784,11 @@ void WM::presentMir() {
     const double ms = nowMs() - t0;
     perfFrame(0, ms);
     // A frame that will be seen as a hitch: what it was made of.
-    if (ms + lastTickMs_ > 33) {
+    if (ms + lastTickMs_ > 33 || frameLog_ > 0) {
+      if (frameLog_ > 0) {
+        --frameLog_;
+        logf("frame at %.0f", nowMs());
+      }
       JsuiPaintStats ps;
       jsui_get_paint_stats(rt_, &ps);
       logf("slow frame: tick %.1f ms, paint %.1f ms, wait for the present thread %.1f ms; %.2f Mpx, %d draws,"
