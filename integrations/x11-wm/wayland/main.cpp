@@ -738,6 +738,7 @@ class WM {
   void startNotifyd();
   wl_event_source* notifySrc_ = nullptr;
   std::string notifyBuf_;
+  int notifyIn_ = -1;  // jsui-notifyd's stdin: "action ID" for a tapped notification
   void syncAppTheme(bool dark);
   bool dark_ = true;  // the shell's darkMode (DEFAULT_SETTINGS in ui/wm.js)
   void orientationLine(const std::string& line);
@@ -2367,6 +2368,12 @@ void WM::onMessage(const char* name, const char* json) {
       if (!cl->popup && cl->mapped && cl->snap && !cl->minimized) setSnap(cl, cl->snap);
   } else if (n == "wm:fullscreen" && c) {
     setFullscreen(c, v["on"].type == wmjson::Value::Null ? !c->fullscreen : v["on"].truthy());
+  } else if (n == "wm:notificationAction") {
+    if (notifyIn_ >= 0) {
+      std::string l = "action " + std::to_string(int64_t(v["id"].num(0))) + "\n";
+      ssize_t w = write(notifyIn_, l.data(), l.size());
+      (void)w;
+    }
   } else if (n == "wm:haptic") {
     haptic(int(v["ms"].num(12)));
   } else if (n == "wm:brightness") {
@@ -3543,21 +3550,33 @@ void WM::startNotifyd() {
   std::string helper = std::string(exe);
   helper = helper.substr(0, helper.rfind('/') + 1) + "jsui-notifyd";
   if (access(helper.c_str(), X_OK) != 0) return;
-  int fds[2];
+  // Its stdout to us (notifications), its stdin from us (taps, see
+  // notificationAction).
+  int fds[2], in[2];
   if (pipe2(fds, O_CLOEXEC) != 0) return;
+  if (pipe2(in, O_CLOEXEC) != 0) {
+    ::close(fds[0]);
+    ::close(fds[1]);
+    return;
+  }
   pid_t pid = fork();
   if (pid == 0) {
     signal(SIGCHLD, SIG_DFL);
     prctl(PR_SET_PDEATHSIG, SIGTERM);  // goes with jsui-wl
     dup2(fds[1], 1);
+    dup2(in[0], 0);
     execl(helper.c_str(), helper.c_str(), static_cast<char*>(nullptr));
     _exit(127);
   }
   ::close(fds[1]);
+  ::close(in[0]);
   if (pid < 0) {
     ::close(fds[0]);
+    ::close(in[1]);
     return;
   }
+  notifyIn_ = in[1];
+  fcntl(notifyIn_, F_SETFL, O_NONBLOCK);
   fcntl(fds[0], F_SETFL, O_NONBLOCK);
   notifySrc_ = wl_event_loop_add_fd(loop_, fds[0], WL_EVENT_READABLE, [](int fd, uint32_t mask, void* u) -> int {
     auto* w = static_cast<WM*>(u);
@@ -3568,6 +3587,8 @@ void WM::startNotifyd() {
       wl_event_source_remove(w->notifySrc_);
       w->notifySrc_ = nullptr;
       ::close(fd);
+      if (w->notifyIn_ >= 0) ::close(w->notifyIn_);
+      w->notifyIn_ = -1;
       return 0;
     }
     if (n < 0) return 0;
