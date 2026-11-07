@@ -40,7 +40,14 @@ int main(int argc, char **argv) {
   EGLDisplay ed = eglGetDisplay((EGLNativeDisplayType)dpy); eglInitialize(ed, NULL, NULL);
   eglBindAPI(EGL_OPENGL_ES_API);
   EGLint ca[] = { EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 0, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE };
-  EGLConfig cfg; EGLint nc; eglChooseConfig(ed, ca, &cfg, 1, &nc);
+  // Configs sort by color depth, so the first match can be 10-bit (XR30); take an exact 8888 one.
+  EGLConfig cfgs[64], cfg = NULL; EGLint nc = 0; eglChooseConfig(ed, ca, cfgs, 64, &nc);
+  int want_alpha = getenv("WLGL_ALPHA") != NULL;
+  for (int i = 0; i < nc && !cfg; i++) {
+    EGLint r, a; eglGetConfigAttrib(ed, cfgs[i], EGL_RED_SIZE, &r); eglGetConfigAttrib(ed, cfgs[i], EGL_ALPHA_SIZE, &a);
+    if (r == 8 && (want_alpha ? a == 8 : a == 0)) cfg = cfgs[i];
+  }
+  if (!cfg) cfg = cfgs[0];
   EGLint cx[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
   EGLContext ctx = eglCreateContext(ed, cfg, EGL_NO_CONTEXT, cx);
   struct wl_egl_window *ew = wl_egl_window_create(s, W, H);

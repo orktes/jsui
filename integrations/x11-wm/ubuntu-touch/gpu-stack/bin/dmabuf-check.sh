@@ -9,7 +9,8 @@ G=$($B/wlglobals | grep zwp_linux_dmabuf_v1)
 L=$HOME/caps/deploy.lock
 # The shell thread deploys jsui-wl under this lock; wait for it, then hold it while testing.
 n=0; while [ -e $L ]; do [ $n -ge 120 ] && { echo "deploy.lock held: $(cat $L)"; exit 3; }; sleep 10; n=$((n + 1)); done
-echo "gpu-stack (Turnip/Zink thread)" > $L; trap 'rm -f $L' EXIT INT TERM
+echo "gpu-stack (Turnip/Zink thread)" > $L
+trap 'grep -q "^gpu-stack" $L 2>/dev/null && rm -f $L' EXIT INT TERM
 rm -rf $O; mkdir -p $O ~/caps
 echo "compositor: $G" | tee $O/summary.txt
 export GPU_STACK_DMABUF=1 MESA_VK_WSI_DEBUG=
@@ -22,6 +23,11 @@ grep -m3 -E "zwp_linux_buffer_params_v1@[0-9]+\.(add|create|create_immed)\(|form
 grep -E "error|failed" $O/wlgl1-wl.log $O/wlgl1.txt | grep -v plugin | head -5 | tee -a $O/summary.txt
 timeout 20 $B/gpu-env $B/wlgl 8 4 2>&1 | grep fps | sed 's/^/4 quads: /' | tee -a $O/summary.txt
 WLGL_SWAP0=1 timeout 20 $B/gpu-env $B/wlgl 6 1 2>&1 | grep fps | sed 's/^/swapinterval 0: /' | tee -a $O/summary.txt
+# dmabuf params Turnip sends for a few window sizes (vkcube asks for these; jsui-wl may override)
+for sz in "500 500" "1000 700" "1920 1080"; do
+  set -- $sz; WAYLAND_DEBUG=client timeout 10 $B/gpu-env $B/vkcube-wayland --width $1 --height $2 --c 20 >/dev/null 2>$O/vk-$1.log
+  echo "vkcube ${1}x$2: $(grep -m1 -oE 'buffer_params_v1@[0-9]+\.add\([^)]*\)' $O/vk-$1.log) $(grep -m1 -oE 'create_immed\([^)]*\)' $O/vk-$1.log)" | tee -a $O/summary.txt
+done
 # vkcube (Turnip WSI directly)
 s=$(date +%s%N); timeout 60 $B/gpu-env $B/vkcube-wayland --c 300 > $O/vkcube.txt 2>&1; rc=$?; e=$(date +%s%N)
 echo "vkcube 300 frames rc=$rc: $(( 300000000000 / (e - s) )) fps" | tee -a $O/summary.txt

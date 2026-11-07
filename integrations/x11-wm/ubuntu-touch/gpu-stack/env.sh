@@ -8,3 +8,4 @@ export MESA_LOADER_DRIVER_OVERRIDE=zink
 export MESA_ZINK_NODEVICE=1   # local Mesa patch: zink without a DRM render node
 export TU_DEBUG=noconform     # A610 has no HW multiview; without this Turnip says Vulkan 1.0
 unset HYBRIS_LD_LIBRARY_PATH HYBRIS_VULKANPLATFORM EGL_PLATFORM LIBGL_ALWAYS_SOFTWARE
+export allow_rgb10_configs=false  # zink sorts 10-bit EGL configs first; compositors offer 8888
