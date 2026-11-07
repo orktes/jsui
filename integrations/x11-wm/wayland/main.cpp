@@ -730,6 +730,11 @@ class WM {
   int frameLog_ = 0;  // JSUI_WL_PERF: frames still to log in full (after an unmap)
   bool tickPending_ = false;
   bool frameScheduled_ = false;
+  // Frame callbacks owed: sent at the next present, or by this timer ~16 ms
+  // after the commit that asked when nothing presents (armFrameDone).
+  wl_event_source* frameDoneTimer_ = nullptr;
+  bool frameDoneArmed_ = false;
+  void armFrameDone();
   bool shellDirty_ = false;
   pixman_region32_t shellDamage_;
   int sw_ = 0, sh_ = 0;
@@ -955,6 +960,11 @@ bool WM::setup() {
     auto* s = static_cast<wlr_surface*>(d);
     auto* hooks = new std::vector<Hook*>;
     hooks->push_back(hook(&s->events.commit, [this, s](void*) {
+      // A commit that asks for a frame callback gets one within a frame,
+      // presented or not: a client that waits for it before drawing again
+      // (GTK's frame clock, Firefox's vsync) would otherwise stall until
+      // something else on screen changed.
+      if (!wl_list_empty(&s->current.frame_callback_list)) armFrameDone();
       if (wlr_surface_get_root_surface(s) == s) return;
       Client* c = findSurface(s);
       if (!c || !c->mapped || c->captureQueued) return;
@@ -1636,7 +1646,15 @@ void WM::capture(Client* c) {
   // No buffer (a closing app's last commit): keep the last frame, which the
   // shell animates out. Capturing would swap it for an empty texture, and
   // the window blinked out for a few frames before its closing copy showed.
-  if (!c->xdg->surface->current.buffer) {
+  // wlr_surface_has_buffer, not current.buffer: wlroots lets go of an shm
+  // buffer (current.buffer becomes null) once it is in the surface's
+  // texture, and Firefox's frames, drawn into a desynchronized subsurface
+  // under an empty root, were all skipped here.
+  bool anyBuffer = false;
+  wlr_surface_for_each_surface(
+      c->xdg->surface, [](wlr_surface* s, int, int, void* u) { *static_cast<bool*>(u) |= wlr_surface_has_buffer(s); },
+      &anyBuffer);
+  if (!anyBuffer) {
     if (perf_) logf("commit %u without a buffer at %.0f", c->id, nowMs());
     return;
   }
@@ -3199,20 +3217,6 @@ void WM::typeKey(const std::string& key, int mods) {
     scheduleTick(0);
     return;
   }
-  // A field with an enabled text input (text_input_v3.h) gets text and
-  // Backspace through it; Enter, Tab, arrows and Ctrl+ combinations stay keys.
-  if (mods == 0 && textInputV3_.active()) {
-    if (key == "Backspace") {
-      textInputV3_.backspace();
-      return;
-    }
-    const auto first = static_cast<unsigned char>(key[0]);
-    const bool printable = first >= 0x20 && first != 0x7f && (first >= 0x80 || key.size() == 1);
-    if (printable && key != "Enter" && key != "Tab" && key != "Escape") {
-      textInputV3_.commit(key);
-      return;
-    }
-  }
   xkb_keysym_t sym = keysymFor(key);
   if (sym == XKB_KEY_NoSymbol) return;
   // Find a keycode (and whether it needs Shift) for the keysym.
@@ -3239,7 +3243,13 @@ void WM::typeKey(const std::string& key, int mods) {
         }
       },
       &f);
-  if (!f.code) return;
+  if (!f.code) {
+    // No key on the keymap types it (é, emoji): a field with an enabled text
+    // input (text_input_v3.h) takes it as text. Keys go first: Firefox
+    // ignored commit_string for plain ASCII.
+    if (mods == 0 && textInputV3_.active()) textInputV3_.commit(key);
+    return;
+  }
   Client* c = find(active_);
   if (!c) return;
   uint32_t timeMs = uint32_t(nowMs());
@@ -3531,11 +3541,28 @@ void WM::presentMir() {
 }
 #endif
 
+void WM::armFrameDone() {
+  if (frameDoneArmed_) return;
+  if (!frameDoneTimer_)
+    frameDoneTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
+      static_cast<WM*>(u)->sendFrameDone();
+      return 0;
+    }, this);
+  frameDoneArmed_ = true;
+  wl_event_source_timer_update(frameDoneTimer_, 16);
+}
+
 void WM::sendFrameDone() {
   timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
+  if (frameDoneArmed_) {
+    frameDoneArmed_ = false;
+    wl_event_source_timer_update(frameDoneTimer_, 0);
+  }
+  // Every surface that asked, shown or not yet (a client may wait for its
+  // first callback before attaching anything), subsurfaces included.
   for (auto& [id, c] : clients_)
-    if (c->mapped && c->xdg)
+    if (c->xdg && c->xdg->surface)
       wlr_surface_for_each_surface(
           c->xdg->surface,
           [](wlr_surface* s, int, int, void* u) { wlr_surface_send_frame_done(s, static_cast<timespec*>(u)); },
