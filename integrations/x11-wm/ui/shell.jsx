@@ -12,7 +12,7 @@ import { Animated, AppRegistry, Easing, DevSettings, PanResponder, Pressable, St
 import Svg, { Defs, Ellipse, RadialGradient, Stop } from 'react-native-svg';
 import { Dock, DockMenu, HomeBar, TopBar, dateText, timeText, useClock } from './bars.jsx';
 import { Icon } from './icons.jsx';
-import { takeLaunchOrigin, useAnchor } from './anchors.js';
+import { remeasureAnchors, takeLaunchOrigin, useAnchor } from './anchors.js';
 import { AppIcon } from './AppIcon.jsx';
 import { LAUNCH_TIMEOUT_MS, endLaunch, startLaunch, useLaunching } from './launching.js';
 import { useNativeDragX } from './drag.js';
@@ -378,6 +378,12 @@ function Shell() {
   const screen = useScreen();
   const dims = useWindowDimensions();
   const scr = useMemo(() => ({ ...screen, width: dims.width, height: dims.height }), [screen, dims.width, dims.height]);
+  // A turn of the screen moves views whose own layout didn't change (the
+  // centred dock): measure every anchor again for test drivers.
+  useEffect(() => {
+    const id = setTimeout(remeasureAnchors, 600);
+    return () => clearTimeout(id);
+  }, [dims.width, dims.height]);
   const settings = useSettings();
   const system = useSystem();
   // The sliders start at the device's backlight and volume (published once
