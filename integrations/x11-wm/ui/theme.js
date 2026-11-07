@@ -13,7 +13,7 @@ export const dark = {
   glowB: 'rgba(255, 112, 166, 0.40)',
   glowC: 'rgba(64, 224, 208, 0.30)',
   bar: 'rgba(10, 13, 28, 0.72)',
-  panel: 'rgba(22, 26, 48, 0.985)',
+  panel: '#161a30', // opaque: at 98.5 % a clock behind a panel showed through
   panelRaised: 'rgba(44, 50, 86, 0.95)',
   panelLine: 'rgba(160, 175, 255, 0.16)',
   chrome: '#1d2140',
@@ -44,7 +44,7 @@ export const light = {
   glowB: 'rgba(255, 140, 180, 0.40)',
   glowC: 'rgba(80, 220, 200, 0.30)',
   bar: 'rgba(255, 255, 255, 0.70)',
-  panel: 'rgba(250, 251, 255, 0.99)',
+  panel: '#fafbff',
   panelRaised: 'rgba(232, 236, 252, 0.98)',
   panelLine: 'rgba(40, 50, 110, 0.12)',
   chrome: '#eef0fb',
