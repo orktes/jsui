@@ -771,6 +771,15 @@ function monthGrid(d) {
   return cells;
 }
 
+// Who sent a notification, over its title: the app ("Messages"), and how
+// many it has stacked ("Messages · 3"). Nothing when the title is the app.
+function NoteFrom({ n, count, color }) {
+  const from = n.appName && n.appName !== n.title ? n.appName : '';
+  const text = [from, count > 1 ? `${count} new` : ''].filter(Boolean).join(' · ');
+  if (!text) return null;
+  return <Text numberOfLines={1} style={[styles.noteFrom, { color }]}>{text}</Text>;
+}
+
 // Notifications by sender (the app, or the title when there is none), newest
 // first: { key, items } with items[0] the newest.
 function groupNotes(list) {
@@ -836,9 +845,8 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
                     {/* The app's icon, or none: the same bell on every card said nothing. */}
                     {n.from ? <AppIcon app={n.from} size={32} /> : null}
                     <View style={{ flex: 1, marginLeft: n.from ? 12 : 4 }}>
-                      <Text numberOfLines={1} style={[styles.noteTitle, { color: t.text }]}>
-                        {n.title}{!open && g.items.length > 1 ? <Text style={{ color: t.textMute }}>{`  ${g.items.length}`}</Text> : null}
-                      </Text>
+                      <NoteFrom n={n} count={!open ? g.items.length : 1} color={t.textMute} />
+                      <Text numberOfLines={1} style={[styles.noteTitle, { color: t.text }]}>{n.title}</Text>
                       {n.body ? <Text numberOfLines={2} style={[styles.noteBody, { color: t.textDim }]}>{n.body}</Text> : null}
                     </View>
                     <Text style={[styles.noteTime, { color: t.textMute }]}>{n.time}</Text>
@@ -933,9 +941,8 @@ export const LockScreen = memo(function LockScreen({ screen, onUnlock, notificat
           <View style={[styles.lockCard, { width: Math.min(440, screen.width - 48) }]}>
             {top.from ? <AppIcon app={top.from} size={32} /> : null}
             <View style={{ flex: 1, marginLeft: top.from ? 12 : 0 }}>
-              <Text numberOfLines={1} style={styles.lockCardTitle}>
-                {top.title}{topCount > 1 ? <Text style={{ color: 'rgba(255,255,255,0.6)' }}>{`  ${topCount}`}</Text> : null}
-              </Text>
+              <NoteFrom n={top} count={topCount} color="rgba(255,255,255,0.65)" />
+              <Text numberOfLines={1} style={styles.lockCardTitle}>{top.title}</Text>
               {top.body ? <Text numberOfLines={2} style={styles.lockCardBody}>{top.body}</Text> : null}
             </View>
           </View>
@@ -981,6 +988,7 @@ function Toast({ n, t, onDone, onOpen }) {
       <Pressable onPress={() => { setOpen(false); if ((n.app || n.notifyId != null) && onOpen) onOpen(n); }} style={[styles.toast, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 32px ${t.shadow}` }]}>
         {n.from ? <AppIcon app={n.from} size={28} /> : null}
         <View style={{ flex: 1, marginLeft: n.from ? 12 : 4 }}>
+          <NoteFrom n={n} count={1} color={t.textMute} />
           <Text numberOfLines={1} style={[styles.noteTitle, { color: t.text }]}>{n.title}</Text>
           {n.body ? <Text numberOfLines={2} style={[styles.noteBody, { color: t.textDim }]}>{n.body}</Text> : null}
         </View>
@@ -1033,6 +1041,7 @@ const styles = StyleSheet.create({
   tiles: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 10 },
   note: { flexDirection: 'row', alignItems: 'center', borderRadius: radius.m, padding: 14, marginBottom: 8 },
   noteTitle: { fontFamily: font, fontSize: 15, fontWeight: '600' },
+  noteFrom: { fontFamily: font, fontSize: 12, fontWeight: '600', letterSpacing: 0.2, marginBottom: 1 },
   noteBody: { fontFamily: font, fontSize: 13, marginTop: 2 },
   noteTime: { fontFamily: font, fontSize: 12, marginLeft: 8 },
   noteClose: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginLeft: 6, marginRight: -6 },
