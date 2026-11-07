@@ -685,6 +685,7 @@ class WM {
   wl_event_source* tickTimer_ = nullptr;
   wl_event_source* systemTimer_ = nullptr;  // publishSystem again (battery, Wi-Fi)
   std::string lastSystem_;
+  int frameLog_ = 0;  // JSUI_WL_PERF: frames still to log in full (after an unmap)
   bool tickPending_ = false;
   bool frameScheduled_ = false;
   bool shellDirty_ = false;
@@ -1406,7 +1407,10 @@ void WM::capture(Client* c) {
   // No buffer (a closing app's last commit): keep the last frame, which the
   // shell animates out. Capturing would swap it for an empty texture, and
   // the window blinked out for a few frames before its closing copy showed.
-  if (!c->xdg->surface->current.buffer) return;
+  if (!c->xdg->surface->current.buffer) {
+    if (perf_) logf("commit %u without a buffer at %.0f", c->id, nowMs());
+    return;
+  }
   if (gpuApps_ && captureGpu(c)) return;
   if (gpuBuffers_.count(c->id)) removeWindowTexture(c->id);  // back on shm
   wlr_surface* root = c->xdg->surface;
@@ -1618,6 +1622,8 @@ void WM::onUnmap(Client* c) {
   if (mrId_ == c->id) mrId_ = 0;
   // The shell animates the last frame out, then releases it (wm:release).
   releaseAt_[c->id] = nowMs() + 1500;
+  if (perf_) frameLog_ = 24;  // JSUI_WL_PERF: every frame of the close animation
+  if (perf_) logf("unmap %u at %.0f", c->id, nowMs());
   std::string j = "{\"" + std::to_string(c->id) + "\":null}";
   jsui_patch_state(rt_, "wm.windows", j.c_str());
   publishStack();
@@ -2750,7 +2756,11 @@ void WM::presentMir() {
     const double ms = nowMs() - t0;
     perfFrame(0, ms);
     // A frame that will be seen as a hitch: what it was made of.
-    if (ms + lastTickMs_ > 33) {
+    if (ms + lastTickMs_ > 33 || frameLog_ > 0) {
+      if (frameLog_ > 0) {
+        --frameLog_;
+        logf("frame at %.0f", nowMs());
+      }
       JsuiPaintStats ps;
       jsui_get_paint_stats(rt_, &ps);
       logf("slow frame: tick %.1f ms, paint %.1f ms, wait for the present thread %.1f ms; %.2f Mpx, %d draws,"

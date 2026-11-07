@@ -111,3 +111,12 @@ export function appName(win, apps) {
 export function appTitle(win, apps) {
   return appName(win, apps);
 }
+
+// A window's title for its title bar: its own, unless that is only an id
+// (Ubuntu Touch's Qt apps title their window with the app id,
+// "clock.ubports"), when the app's name reads better.
+export function windowTitle(win, apps) {
+  const t = win.title || '';
+  if (!t || (/^[\w.-]+$/.test(t) && t.includes('.')) || t === win.appId || t === win.wmClass) return appName(win, apps);
+  return t;
+}

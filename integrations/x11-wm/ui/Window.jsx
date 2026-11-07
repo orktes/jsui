@@ -17,7 +17,7 @@ import { useNativeDragXY } from './drag.js';
 import { AppIcon } from './AppIcon.jsx';
 import { Icon } from './icons.jsx';
 import { font, useTheme } from './theme.js';
-import { appKeyOf, appName, wm } from './wm.js';
+import { appKeyOf, appName, windowTitle, wm } from './wm.js';
 import { WindowMenu } from './WindowMenu.jsx';
 
 const MIN_W = 180;
@@ -46,7 +46,7 @@ function TitleButton({ icon, onPress, danger, t, label, anchorName }) {
   );
 }
 
-export const Window = memo(function Window({ win, active, screen, apps, hidden, onPreview, onDragging, tablet, onMenu, menuOpen, onMenuClose }) {
+export const Window = memo(function Window({ win, active, screen, apps, hidden, onPreview, onDragging, tablet, onMenu, menuOpen, onMenuClose, closing, onClosed }) {
   const t = useTheme();
   const TB = screen.titleBar;
   const B = screen.border;
@@ -57,6 +57,19 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
   const lastTap = useRef(0);
   const titleAnchor = useAnchor(`win.${win.id}.title`);
   const finger = useNativeDragXY();
+
+  // Closed (the app went away; the shell keeps this mounted with its last
+  // frame): into its dock icon when the dock has one, else a quick fade and
+  // shrink, then onClosed (the host may drop the texture).
+  const out = useRef(new Animated.Value(0)).current;
+  const target = useRef(undefined);
+  if (closing && target.current === undefined) target.current = win.transientFor ? null : anchorRect(`dock.${appKeyOf(win)}`) || null;
+  useEffect(() => {
+    if (!closing) return;
+    const d = target.current;
+    Animated.timing(out, { toValue: 1, duration: d ? 300 : 180, easing: d ? Easing.inOut(Easing.cubic) : Easing.in(Easing.quad), useNativeDriver: true })
+      .start(() => onClosed && onClosed(win.id));
+  }, [closing]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Open: fade and grow in once the first frame of pixels is there; out of
   // the icon it was launched from, when there is one (launcher, dock).
@@ -248,10 +261,17 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
   const frameH = decorated ? g.h + TB : g.h;
 
   const o = origin.current;
+  const d = closing ? target.current : null;
   const opacity = Animated.multiply(
-    o ? appear.interpolate({ inputRange: [0, 0.35, 1], outputRange: [0, 1, 1] }) : appear,
-    Animated.subtract(1, mini),
+    Animated.multiply(
+      o ? appear.interpolate({ inputRange: [0, 0.35, 1], outputRange: [0, 1, 1] }) : appear,
+      Animated.subtract(1, mini),
+    ),
+    d ? out.interpolate({ inputRange: [0, 0.7, 1], outputRange: [1, 1, 0] }) : Animated.subtract(1, out),
   );
+  const outScale = out.interpolate({ inputRange: [0, 1], outputRange: [1, d ? Math.min(1, d[2] / Math.max(1, g.w)) : 0.92] });
+  const outX = d ? out.interpolate({ inputRange: [0, 1], outputRange: [0, d[0] + d[2] / 2 - (g.x + g.w / 2)] }) : 0;
+  const outY = d ? out.interpolate({ inputRange: [0, 1], outputRange: [0, d[1] + d[3] / 2 - (frameTop + frameH / 2)] }) : 0;
   // From the icon: the frame starts at the icon's centre and size.
   const scale = o
     ? appear.interpolate({ inputRange: [0, 1], outputRange: [Math.min(1, o[2] / Math.max(1, g.w)), 1] })
@@ -268,7 +288,7 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
 
   return (
     <Animated.View
-      pointerEvents={hidden || win.minimized ? 'none' : 'box-none'}
+      pointerEvents={hidden || win.minimized || closing ? 'none' : 'box-none'}
       style={[
         styles.frame,
         {
@@ -278,9 +298,9 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
           height: frameH,
           opacity: hidden ? 0 : opacity,
           transform: [
-            { translateX: o ? Animated.add(dragX, growX) : dragX },
-            { translateY: Animated.add(moving ? Animated.add(dropY, dragY) : dropY, growY) },
-            { scale: Animated.multiply(scale, miniScale) },
+            { translateX: Animated.add(o ? Animated.add(dragX, growX) : dragX, outX) },
+            { translateY: Animated.add(Animated.add(moving ? Animated.add(dropY, dragY) : dropY, growY), outY) },
+            { scale: Animated.multiply(Animated.multiply(scale, miniScale), outScale) },
           ],
         },
       ]}
@@ -328,7 +348,7 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
                   <AppIcon win={win} app={appEntry} size={26} />
                 </View>
                 <Text numberOfLines={1} style={[styles.title, { color: active ? t.text : t.textMute }]}>
-                  {win.title || appName(win, apps)}
+                  {windowTitle(win, apps)}
                 </Text>
                 {win.type === 'normal' && <TitleButton t={t} icon="minimize" label="Minimize" anchorName={`win.${win.id}.minimize`} onPress={() => wm.minimize(win.id)} />}
                 {win.type === 'normal' && win.resizable !== false && !snapped && (
@@ -366,43 +386,6 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
           </View>
         </>
       )}
-    </Animated.View>
-  );
-});
-
-// A window that just closed: its last frame fades and shrinks, then the host
-// may drop the texture.
-export const ClosingWindow = memo(function ClosingWindow({ win, screen, onDone }) {
-  const t = useTheme();
-  const v = useRef(new Animated.Value(1)).current;
-  // Into its dock icon when the dock has one, else a quick fade and shrink.
-  const target = useRef(undefined);
-  if (target.current === undefined) target.current = win.transientFor ? null : anchorRect(`dock.${appKeyOf(win)}`) || null;
-  const d = target.current;
-  useEffect(() => {
-    Animated.timing(v, { toValue: 0, duration: d ? 300 : 180, easing: d ? Easing.inOut(Easing.cubic) : Easing.in(Easing.quad), useNativeDriver: true })
-      .start(() => onDone(win.id));
-  }, [v, win.id, onDone, d]);
-  const TB = win.decorated && !win.fullscreen ? screen.titleBar : 0;
-  const h = win.h + TB;
-  const scale = v.interpolate({ inputRange: [0, 1], outputRange: [d ? Math.min(1, d[2] / Math.max(1, win.w)) : 0.92, 1] });
-  const opacity = d ? v.interpolate({ inputRange: [0, 0.3, 1], outputRange: [0, 1, 1] }) : v;
-  const transform = d
-    ? [
-        { translateX: v.interpolate({ inputRange: [0, 1], outputRange: [d[0] + d[2] / 2 - (win.x + win.w / 2), 0] }) },
-        { translateY: v.interpolate({ inputRange: [0, 1], outputRange: [d[1] + d[3] / 2 - (win.y - TB + h / 2), 0] }) },
-        { scale },
-      ]
-    : [{ scale }];
-  return (
-    <Animated.View
-      pointerEvents="none"
-      style={[styles.frame, { left: win.x, top: win.y - TB, width: win.w, height: h, opacity, transform }]}
-    >
-      <View style={[styles.surface, { borderRadius: 14, boxShadow: `0px 12px 32px ${t.shadow}` }]}>
-        {TB > 0 && <View style={{ height: TB, backgroundColor: t.chrome }} />}
-        <HostTexture name={`win:${win.id}`} style={{ width: win.w, height: win.h }} resizeMode="stretch" />
-      </View>
     </Animated.View>
   );
 });
