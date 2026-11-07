@@ -116,6 +116,9 @@ export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, set
             <Icon name="plug" size={20} color={t.text} />
           )}
         </Pressable>
+        {/* While an app is starting (no window yet) its menu's place is kept:
+            the status icons don't step aside when the window comes. */}
+        {app && !app.win && <View style={styles.barButton} />}
         {app && app.win && (
           <View>
             <Pressable ref={menu.ref} onLayout={menu.onLayout} hitSlop={4} onPress={() => onMenu && onMenu(app.win)}
