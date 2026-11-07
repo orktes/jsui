@@ -1,0 +1,16 @@
+#!/bin/sh
+# Claude Desktop with Chromium GPU compositing on Zink/Turnip. Separate --user-data-dir under
+# ~/gpu-stack (never ~/.config/Claude). CLAUDE_GPU_GL picks the GL path:
+#   egl (default)  --use-gl=angle --use-angle=gl  (ANGLE over Mesa EGL/Zink)
+#   egl-native     --use-gl=egl
+#   vulkan         --use-gl=angle --use-angle=vulkan (ANGLE straight on Turnip)
+D="$HOME/claude-desktop/usr/lib/claude-desktop"
+case "${CLAUDE_GPU_GL:-egl}" in
+  egl-native) GL="--use-gl=egl" ;;
+  vulkan) GL="--use-gl=angle --use-angle=vulkan --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE" ;;
+  *) GL="--use-gl=angle --use-angle=gl" ;;
+esac
+export PATH="$HOME/.local/bin:$PATH"
+exec "$HOME/gpu-stack/bin/gpu-env" "$D/claude-desktop" --ozone-platform=wayland $GL --ignore-gpu-blocklist \
+  --enable-gpu-rasterization --password-store=basic --enable-wayland-ime --wayland-text-input-version=3 \
+  --user-data-dir="$HOME/gpu-stack/profiles/claude" $CLAUDE_DESKTOP_FLAGS "$@"

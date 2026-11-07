@@ -1,0 +1,7 @@
+#!/bin/sh
+# gpu-env CMD...: run CMD on the ~/gpu-stack Mesa (Zink GL on Turnip Vulkan, KGSL).
+# Until jsui-wl has linux-dmabuf, Wayland presents go through wl_shm (MESA_VK_WSI_DEBUG=sw);
+# set GPU_STACK_DMABUF=1 to try the dmabuf path instead.
+. "$HOME/gpu-stack/env.sh"
+[ -n "$GPU_STACK_DMABUF" ] || export MESA_VK_WSI_DEBUG=sw
+exec "$@"
