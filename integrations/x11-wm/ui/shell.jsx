@@ -143,7 +143,15 @@ function LaunchSplash({ launch, screen, t, bottom, done, onGone }) {
   }, [grow]);
   useEffect(() => {
     if (!done) return;
-    Animated.timing(fade, { toValue: 0, duration: 180, easing: Easing.in(Easing.quad), useNativeDriver: true }).start(() => onGone(launch.key));
+    // Two frames first: the app's window gets its first frames drawn under the
+    // card (those are slow), and the fade then runs on smooth ones.
+    let raf = requestAnimationFrame(() => {
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        Animated.timing(fade, { toValue: 0, duration: 220, easing: Easing.inOut(Easing.quad), useNativeDriver: true }).start(() => onGone(launch.key));
+      });
+    });
+    return () => raf && cancelAnimationFrame(raf);
   }, [done, fade, onGone, launch.key]);
   const o = from.current;
   const tf = o
@@ -660,6 +668,7 @@ function Shell() {
               onMenuClose={closeWinMenu}
               closing={!map[w.id]}
               onClosed={doneClosing}
+              splashed={launching.some((l) => l.app.id === w.appId)}
             />
             </View>
           ),
