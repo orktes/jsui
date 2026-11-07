@@ -1,5 +1,5 @@
 #!/bin/sh
-# Speaker sound on the Galaxy Tab A7: run on the tablet as the phablet user,
+# Speaker and microphone on the Galaxy Tab A7: run on the tablet as the phablet user,
 #
 #   sh ~/jsui-wm/audio-on.sh            # try it, then keep it if you heard the tone
 #   sh ~/jsui-wm/audio-on.sh --remove   # stop doing it at boot
@@ -31,6 +31,15 @@ fi
 pactl set-default-sink sink.primary-out
 pactl set-sink-mute sink.primary-out 0
 pactl set-sink-volume sink.primary-out 50%
+# The built-in mic comes through the same bridge (source.primary-in): voice
+# input in Claude Code (arecord -> ALSA's pulse default) and browsers.
+if pactl list short sources 2>/dev/null | grep -q source.primary-in; then
+  pactl set-default-source source.primary-in
+  pactl set-source-mute source.primary-in 0
+  pactl set-source-volume source.primary-in 100%
+else
+  echo "No microphone source (source.primary-in); speaker only."
+fi
 echo "Playing a tone..."
 for i in 1 2 3; do paplay /usr/share/sounds/lomiri/notifications/A440.ogg 2>/dev/null || paplay /usr/share/sounds/lomiri/notifications/Blip.ogg; done
 printf "Did you hear the tone? [y/N] "
