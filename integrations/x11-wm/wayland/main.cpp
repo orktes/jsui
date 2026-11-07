@@ -2212,8 +2212,9 @@ void WM::publishSystem() {
       battery = "{\"percent\":" + std::to_string(pct) + ",\"charging\":" + (charging ? "true" : "false") +
                 ",\"plugged\":" + (plugged ? "true" : "false") + "}";
   }
-  // A wireless interface, if the device has a working one (the Tab A7's
-  // port has none: no Wi-Fi driver).
+  // A wireless interface, if the device has a working one; a connected one
+  // first (the Tab A7 has wlan0 and swlan0, and NetworkManager may join on
+  // either).
   std::string wifi = "null";
   if (DIR* d = opendir("/sys/class/net")) {
     while (dirent* e = readdir(d)) {
@@ -2223,8 +2224,9 @@ void WM::publishSystem() {
         std::ifstream st("/sys/class/net/" + name + "/operstate");
         std::string state;
         st >> state;
+        if (wifi != "null" && state != "up") continue;
         wifi = "{\"iface\":" + wmjson::quoted(name) + ",\"up\":" + (state == "up" ? "true" : "false") + "}";
-        break;
+        if (state == "up") break;
       }
     }
     closedir(d);
