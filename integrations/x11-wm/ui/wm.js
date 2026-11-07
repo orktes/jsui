@@ -75,6 +75,7 @@ export const DEFAULT_SETTINGS = {
   bluetooth: false,
   doNotDisturb: false,
   nightLight: false,
+  autoRotate: false, // follow the accelerometer (hosts with system.rotate)
   osk: false,
   pinned: ['org.codeberg.dnkl.foot', 'debian-xterm', 'xterm', 'galculator', 'org.xfce.mousepad', 'pcmanfm', 'xclock', 'xeyes'],
 };

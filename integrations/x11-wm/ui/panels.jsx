@@ -389,7 +389,11 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
             <ToggleTile anchor={a.wifi} icon="wifi" label="Wi-Fi"
               sub={system.wifi === null ? 'Not available' : !settings.wifi ? 'Off' : system.wifi && system.wifi.up ? 'Connected' : 'On'}
               on={settings.wifi && system.wifi !== null} onPress={set('wifi')} />
-            <ToggleTile icon="bluetooth" label="Bluetooth" on={settings.bluetooth} onPress={set('bluetooth')} />
+            {system.rotate ? (
+              <ToggleTile icon="rotate" label="Auto-rotate" sub={settings.autoRotate ? 'On' : 'Off'} on={settings.autoRotate} onPress={set('autoRotate')} />
+            ) : (
+              <ToggleTile icon="bluetooth" label="Bluetooth" on={settings.bluetooth} onPress={set('bluetooth')} />
+            )}
             <ToggleTile anchor={a.dark} icon="moon" label="Dark style" on={settings.darkMode} onPress={set('darkMode')} />
             <ToggleTile anchor={a.tablet} icon="tablet" label="Tablet mode" sub={settings.tabletMode ? 'Apps open full' : 'Floating windows'} on={settings.tabletMode} onPress={() => {
               const on = !settings.tabletMode;
