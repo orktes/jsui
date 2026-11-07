@@ -37,11 +37,16 @@ unset QT_IM_MODULE
 # - The Tab A7's kernel panics on any Bluetooth socket (BUG in
 #   bt_sock_create), which System Settings opens at start: apps get
 #   EAFNOSUPPORT instead.
+# - Camera / Barcode Reader build two QGuiApplications at once, which hangs
+#   QtWayland 5.15 (#247): jsui-qt-one-app.so makes the first one a stand-in.
 set -- --app-env QMLSCENE_DEVICE= \
   --app-env-nogpu __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json \
   --app-env-nogpu LIBGL_ALWAYS_SOFTWARE=1
-[ -e "$DIR/lib/jsui-no-bluetooth.so" ] && \
-  set -- "$@" --app-env LD_PRELOAD="$DIR/lib/jsui-no-bluetooth.so${LD_PRELOAD:+:$LD_PRELOAD}"
+PRELOAD=
+for so in jsui-no-bluetooth.so jsui-qt-one-app.so; do
+  [ -e "$DIR/lib/$so" ] && PRELOAD="${PRELOAD:+$PRELOAD:}$DIR/lib/$so"
+done
+[ -n "$PRELOAD" ] && set -- "$@" --app-env LD_PRELOAD="$PRELOAD${LD_PRELOAD:+:$LD_PRELOAD}"
 # Double-tap to wake: the Tab A7's Himax touch controller does it in hardware
 # (reported as the power key), but only Lomiri's settings normally switch it on.
 [ -w /proc/android_touch/SMWP ] && echo 1 > /proc/android_touch/SMWP

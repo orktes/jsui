@@ -1275,18 +1275,27 @@ void WM::matchApp(Client* c) {
   // Ubuntu Touch apps' ids end in their binary's name
   // ("ubports.terminal.lomiri-terminal-app" for a click app whose exec ends
   // in "lomiri-terminal-app"; scanApps prefixes env, cd and aa-exec).
+  // Several desktop files can run one binary (Camera and Barcode Reader):
+  // the one the window was launched from wins.
   std::string last = want.substr(want.rfind('.') == std::string::npos ? 0 : want.rfind('.') + 1);
+  const App* found = nullptr;
   for (const App& a : apps_) {
     std::istringstream words(a.exec);
     std::string w;
-    while (words >> w) {
+    bool runs = false;
+    while (!runs && words >> w) {
       std::string exe = lower(w.substr(w.rfind('/') == std::string::npos ? 0 : w.rfind('/') + 1));
-      if (exe == want || exe == last) {
-        c->appId = a.id;
-        return;
-      }
+      runs = exe == want || exe == last;
     }
+    if (!runs) continue;
+    auto l = launched_.find(a.exec);
+    if (l != launched_.end() && c->pid > 0 && descends(c->pid, l->second)) {
+      found = &a;
+      break;
+    }
+    if (!found) found = &a;
   }
+  if (found) c->appId = found->id;
 }
 
 Rect WM::workArea() const {

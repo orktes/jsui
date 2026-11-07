@@ -55,8 +55,9 @@ RUN cd /tmp && apt-get update && apt-get download \
           /tmp/root/usr/lib/aarch64-linux-gnu/qt5/plugins/wayland-* $PKG/qt-plugins/ \
  && cp /tmp/root/usr/bin/foot $PKG/ \
  && cp -a /tmp/root/usr/share/foot $PKG/foot-share 2>/dev/null || true
-COPY integrations/x11-wm/ubuntu-touch/no-bluetooth.c /tmp/
-RUN clang -O2 -shared -fPIC -o $PKG/lib/jsui-no-bluetooth.so /tmp/no-bluetooth.c
+COPY integrations/x11-wm/ubuntu-touch/no-bluetooth.c integrations/x11-wm/ubuntu-touch/qt-one-app.c /tmp/
+RUN clang -O2 -shared -fPIC -o $PKG/lib/jsui-no-bluetooth.so /tmp/no-bluetooth.c \
+ && clang -O2 -shared -fPIC -o $PKG/lib/jsui-qt-one-app.so /tmp/qt-one-app.c -ldl
 COPY integrations/x11-wm/docker/foot.ini $PKG/foot.ini
 # No foot terminfo on the tablet.
 RUN sed -i '/^\[main\]/a term=xterm-256color' $PKG/foot.ini
