@@ -4,6 +4,12 @@ import { createContext, useContext } from 'react';
 
 export const font = 'Inter';
 
+// Corner radii: one set for the whole shell. `l` panels and floating
+// surfaces (cards, menus, toasts), `m` what sits in them or on the screen
+// at window size (tiles, rows, windows, switcher cards), `s` small controls.
+// Anything shaped as a pill or circle is half its height instead.
+export const radius = { s: 12, m: 20, l: 28 };
+
 export const dark = {
   name: 'dark',
   wallTop: '#0b1026',

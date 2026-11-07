@@ -11,7 +11,7 @@ import { dateText, pad2, useClock } from './bars.jsx';
 import { Card, IconButton, Label, Slider, ToggleTile } from './controls.jsx';
 import { Icon } from './icons.jsx';
 import { playNotify } from './sounds.js';
-import { font, useTheme } from './theme.js';
+import { font, radius, useTheme } from './theme.js';
 import { ActionMenu } from './WindowMenu.jsx';
 import { appName, cleanName, homeApps, pinHome, setSetting, wm } from './wm.js';
 
@@ -299,7 +299,7 @@ const SwitcherCard = memo(function SwitcherCard({ win, card, enter, from, title,
     sc = enter.interpolate({ inputRange: [0, 1], outputRange: [0.9, 1] });
   }
   const fade = lift.interpolate({ inputRange: [-screen.height * 0.6, 0], outputRange: [0, 1], extrapolate: 'clamp' });
-  const radius = enter.interpolate({ inputRange: [0, 1], outputRange: [from ? 0 : 22, 22] });
+  const corner = enter.interpolate({ inputRange: [0, 1], outputRange: [from ? 0 : radius.m, radius.m] });
   return (
     <Animated.View
       {...pan.panHandlers}
@@ -320,7 +320,7 @@ const SwitcherCard = memo(function SwitcherCard({ win, card, enter, from, title,
       <Animated.View style={{ transform: [{ scale: sc }] }}>
         <Pressable ref={anchor.ref} onLayout={anchor.onLayout} onPress={() => onPick(win)}
           pressedStyle={{ transform: [{ scale: 0.97 }] }}>
-          <Animated.View style={[styles.cardBody, { width: card.w, height: card.h, borderRadius: radius }]}>
+          <Animated.View style={[styles.cardBody, { width: card.w, height: card.h, borderRadius: corner }]}>
             <HostTexture name={`win:${win.id}`} style={{ width: card.w, height: card.h }} resizeMode="stretch" />
           </Animated.View>
         </Pressable>
@@ -905,7 +905,7 @@ const styles = StyleSheet.create({
   search: { height: 64, borderRadius: 32, borderWidth: 1, flexDirection: 'row', alignItems: 'center', paddingLeft: 22, paddingRight: 8 },
   searchInput: { flex: 1, height: 56, fontFamily: font, fontSize: 20, marginLeft: 12 },
   grid: { flexDirection: 'row', flexWrap: 'wrap', paddingBottom: 12 },
-  appTile: { width: 150, height: 156, borderRadius: 24, alignItems: 'center', justifyContent: 'flex-start', paddingTop: 14, paddingHorizontal: 8 },
+  appTile: { width: 150, height: 156, borderRadius: radius.m, alignItems: 'center', justifyContent: 'flex-start', paddingTop: 14, paddingHorizontal: 8 },
   appName: { fontFamily: font, fontSize: 15, fontWeight: '500', marginTop: 10, height: 40, textAlign: 'center' },
   empty: { fontFamily: font, fontSize: 16, textAlign: 'center', width: '100%', marginTop: 40 },
   overviewHead: { position: 'absolute', left: 48, right: 36, height: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
@@ -925,21 +925,21 @@ const styles = StyleSheet.create({
   thumbTitle: { height: 40, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 2 },
   thumbText: { flex: 1, fontFamily: font, fontSize: 15, fontWeight: '600', marginLeft: 10 },
   thumbClose: { width: 32, height: 32, borderRadius: 16, backgroundColor: 'rgba(255,255,255,0.18)', alignItems: 'center', justifyContent: 'center' },
-  thumb: { borderRadius: 16, overflow: 'hidden', borderWidth: 3 },
+  thumb: { borderRadius: radius.m, overflow: 'hidden', borderWidth: 3 },
   dropRight: { position: 'absolute', right: 12 },
   dropCenter: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
   qsFoot: { flexDirection: 'row', alignItems: 'center', marginRight: -4 },
-  powerRow: { height: 60, borderRadius: 18, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, marginBottom: 8 },
+  powerRow: { height: 60, borderRadius: radius.m, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, marginBottom: 8 },
   powerText: { fontFamily: font, fontSize: 16, fontWeight: '600', marginLeft: 14 },
   wifiHead: { flexDirection: 'row', alignItems: 'center', marginBottom: 8, marginLeft: -6 },
   wifiTitle: { flex: 1, fontFamily: font, fontSize: 18, fontWeight: '700', marginLeft: 4 },
-  wifiRow: { height: 62, borderRadius: 18, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, marginBottom: 8 },
+  wifiRow: { height: 62, borderRadius: radius.m, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, marginBottom: 8 },
   wifiName: { fontFamily: font, fontSize: 16, fontWeight: '600' },
   tileSubText: { fontFamily: font, fontSize: 13, marginTop: 1 },
-  wifiInput: { height: 54, borderRadius: 16, borderWidth: 1, paddingHorizontal: 16, fontFamily: font, fontSize: 17 },
+  wifiInput: { height: 54, borderRadius: radius.s, borderWidth: 1, paddingHorizontal: 16, fontFamily: font, fontSize: 17 },
   wifiNote: { fontFamily: font, fontSize: 14, marginVertical: 10, marginHorizontal: 6 },
   tiles: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 10 },
-  note: { flexDirection: 'row', alignItems: 'center', borderRadius: 18, padding: 14, marginBottom: 8 },
+  note: { flexDirection: 'row', alignItems: 'center', borderRadius: radius.m, padding: 14, marginBottom: 8 },
   noteTitle: { fontFamily: font, fontSize: 15, fontWeight: '600' },
   noteBody: { fontFamily: font, fontSize: 13, marginTop: 2 },
   noteTime: { fontFamily: font, fontSize: 12, marginLeft: 8 },
@@ -956,12 +956,12 @@ const styles = StyleSheet.create({
   lockBody: { position: 'absolute', left: 0, right: 0, top: '18%', alignItems: 'center' },
   lockTime: { fontFamily: font, color: '#fff', fontSize: 132, fontWeight: '700', letterSpacing: -4 },
   lockDate: { fontFamily: font, color: 'rgba(255,255,255,0.85)', fontSize: 26, fontWeight: '500' },
-  lockCard: { marginTop: 28, backgroundColor: 'rgba(255,255,255,0.14)', borderRadius: 20, paddingHorizontal: 18, paddingVertical: 14 },
+  lockCard: { marginTop: 28, backgroundColor: 'rgba(255,255,255,0.14)', borderRadius: radius.m, paddingHorizontal: 18, paddingVertical: 14 },
   lockCardTitle: { fontFamily: font, color: '#fff', fontSize: 15, fontWeight: '600' },
   lockCardBody: { fontFamily: font, color: 'rgba(255,255,255,0.85)', fontSize: 14, marginTop: 2 },
   lockMore: { fontFamily: font, color: 'rgba(255,255,255,0.7)', fontSize: 14, marginTop: 10 },
   lockHandle: { position: 'absolute', left: 0, right: 0, bottom: 40, alignItems: 'center' },
   lockHint: { fontFamily: font, color: 'rgba(255,255,255,0.85)', fontSize: 17, marginTop: 4, fontWeight: '500' },
   toasts: { position: 'absolute', width: 400 },
-  toast: { flexDirection: 'row', alignItems: 'center', borderRadius: 20, borderWidth: 1, padding: 16, marginBottom: 10 },
+  toast: { flexDirection: 'row', alignItems: 'center', borderRadius: radius.l, borderWidth: 1, padding: 16, marginBottom: 10 },
 });

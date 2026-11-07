@@ -6,7 +6,7 @@ import React from 'react';
 import { Overlay, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useAnchor } from './anchors.js';
 import { Icon } from './icons.jsx';
-import { font, useTheme } from './theme.js';
+import { font, radius, useTheme } from './theme.js';
 import { wm } from './wm.js';
 
 export function WindowMenu({ win, onClose }) {
@@ -48,7 +48,7 @@ function MenuRow({ r, t, onClose }) {
 }
 
 const styles = StyleSheet.create({
-  menu: { width: 280, borderRadius: 22, borderWidth: 1, paddingVertical: 8 },
+  menu: { width: 280, borderRadius: radius.l, borderWidth: 1, paddingVertical: 8 },
   menuRow: { height: 52, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18 },
   menuText: { fontFamily: font, fontSize: 16, marginLeft: 14, flex: 1 },
 });
