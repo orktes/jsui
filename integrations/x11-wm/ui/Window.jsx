@@ -328,7 +328,7 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
           >
             {tabletChrome ? (
               <>
-                <View style={[styles.tabletName, { opacity: active ? 1 : 0.6 }]}>
+                <View style={styles.tabletName}>
                   <AppIcon win={win} app={appEntry} size={22} />
                   <Text numberOfLines={1} style={[styles.tabletTitle, { color: active ? t.text : t.textMute }]}>{appName(win, apps)}</Text>
                 </View>

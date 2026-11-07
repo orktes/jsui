@@ -20,7 +20,7 @@ export function WindowMenu({ win, onClose }) {
     { icon: 'close', label: 'Close', fn: () => wm.close(win.id) },
   ].filter((r) => !r.on); // the mode it is in isn't a choice
   return (
-    <Overlay placement="bottom-end" offset={4} collisionPadding={12}>
+    <Overlay placement="bottom-end" offset={8} collisionPadding={12}>
       <View style={[styles.menu, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 16px 48px ${t.shadow}` }]}>
         {rows.map((r) => (
           <MenuRow key={r.label} r={r} t={t} onClose={onClose} />
