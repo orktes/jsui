@@ -28,6 +28,9 @@ export QT_QPA_PLATFORM=wayland GDK_BACKEND=wayland
 # (apps normally talk Mir to Lomiri): the package brings qtwayland5's plugins.
 export QT_PLUGIN_PATH="$DIR/qt-plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}:/usr/lib/aarch64-linux-gnu/qt5/plugins"
 unset QT_IM_MODULE
+# Ubuntu Touch sets GTK_IM_MODULE=maliit, a module that isn't installed: GTK
+# apps (Firefox) take the wayland one, text-input-v3, which jsui-wl serves.
+export GTK_IM_MODULE=wayland
 # Apps only (jsui-wl itself renders through libhybris' EGL):
 # - Lomiri's UI toolkit needs OpenGL. With the shell on the GPU, apps' EGL
 #   (libhybris) hands jsui-wl gralloc buffers over android_wlegl. Without it
