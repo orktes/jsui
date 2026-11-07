@@ -90,7 +90,10 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
   const pop = useSpringIn(open);
   const input = useRef(null);
   useEffect(() => {
-    if (!open) return undefined;
+    if (!open) {
+      setQuery(''); // kept mounted between opens (shell.jsx): start afresh
+      return undefined;
+    }
     wm.keyboard(true); // the search field gets the physical keyboard
     const id = setTimeout(() => input.current && input.current.focus && input.current.focus(), 50);
     return () => {
