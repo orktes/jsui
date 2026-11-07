@@ -38,12 +38,13 @@ unset QT_IM_MODULE
 #   bt_sock_create), which System Settings opens at start: apps get
 #   EAFNOSUPPORT instead.
 # - Camera / Barcode Reader build two QGuiApplications at once, which hangs
-#   QtWayland 5.15 (#247): jsui-qt-one-app.so makes the first one a stand-in.
+#   QtWayland 5.15 (#247): jsui-qt-one-app.so makes the first one a stand-in;
+#   jsui-camera-rotation.so turns their preview with the desktop.
 set -- --app-env QMLSCENE_DEVICE= \
   --app-env-nogpu __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json \
   --app-env-nogpu LIBGL_ALWAYS_SOFTWARE=1
 PRELOAD=
-for so in jsui-no-bluetooth.so jsui-qt-one-app.so; do
+for so in jsui-no-bluetooth.so jsui-qt-one-app.so jsui-camera-rotation.so; do
   [ -e "$DIR/lib/$so" ] && PRELOAD="${PRELOAD:+$PRELOAD:}$DIR/lib/$so"
 done
 [ -n "$PRELOAD" ] && set -- "$@" --app-env LD_PRELOAD="$PRELOAD${LD_PRELOAD:+:$LD_PRELOAD}"
