@@ -129,10 +129,13 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
     if (!q) return apps;
     return apps.filter((a) => a.name.toLowerCase().includes(q) || (a.comment || '').toLowerCase().includes(q) || a.exec.toLowerCase().includes(q));
   }, [apps, query]);
-  const launch = (app) => {
+  // Stable, so opening and closing (a new `open`) doesn't render every
+  // AppTile again: ~30 of them cost the JS thread ~15 ms per open on the
+  // Tab A7.
+  const launch = useCallback((app) => {
     onLaunch(app);
     onClose();
-  };
+  }, [onLaunch, onClose]);
   const sc = pop.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1] });
   const cols = Math.max(3, Math.min(8, Math.floor((screen.width - 160) / 150)));
   return (

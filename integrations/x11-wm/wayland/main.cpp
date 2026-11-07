@@ -776,7 +776,9 @@ class WM {
   void presentMir();
   void sendFrameDone();
   // Frame cost on the Mir path (JSUI_WL_PERF=1): paint + present, logged every 60 frames.
-  // JSUI_WL_PERF=2 also logs every frame as a slow one would be.
+  // JSUI_WL_PERF=2 also logs every frame as a slow one would be, with the
+  // times of touches, app commits (GPU apps) and returned swaps, from which
+  // touch-to-swap latency can be read.
   bool perf_ = false, perfEvery_ = false;
   double cpuPaintMs_ = 0;  // CPU raster since the last presented frame
   double gpuRenderMs_ = 0, gpuBlitMs_ = 0, gpuSwapMs_ = 0;  // GPU frame parts (perf window sums)
@@ -1507,6 +1509,7 @@ bool WM::captureGpu(Client* c) {
   // translucency on Ubuntu Touch): JSUI then culls what they cover.
   t.flags = b->opaque || !c->popup ? JSUI_TEXTURE_OPAQUE : 0;
   std::string key = "win:" + std::to_string(c->id);
+  if (perfEvery_) logf("app commit %u at %.0f", c->id, nowMs());
   if (jsui_set_texture(rt_, key.c_str(), &t) == 0) jsui_texture_updated(rt_, key.c_str());
   wlr_buffer* held = gpuBuffers_[c->id];
   if (held != buf) {
@@ -2511,6 +2514,7 @@ void WM::gpuBoost(bool touch) {
 
 void WM::touchEvent(int id, int phase, double x, double y, uint32_t timeMs) {
   gpuBoost(true);
+  if (perfEvery_) logf("touch %d at %.0f", phase, nowMs());
   int tid = 1 + (id % 1000);
   if (phase == 0) {
     wlr_surface* s = nullptr;
@@ -3127,6 +3131,7 @@ bool WM::showMir() {
           uint64_t n;
           (void)!read(fd, &n, sizeof n);
           auto* wm = static_cast<WM*>(u);
+          if (wm->perfEvery_) logf("swap at %.0f", nowMs());
           if (wm->tickPending_) wm->scheduleTick(0);  // a frame is wanted: now
           return 0;
         }, this);
