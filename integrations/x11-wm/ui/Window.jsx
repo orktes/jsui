@@ -5,13 +5,15 @@
 // The X window sits exactly under the content area, so presses on the content
 // go to the client; the title bar and the borders are over the host's
 // InputOnly frame window, so their presses come here. Dragging the title bar
-// moves the window (wm:move on every move, drawn from the local drag position
-// so it never lags); dragging it to the top edge maximizes, to a side edge
-// snaps to that half (with a preview). Double-tap the title bar toggles
+// moves the window: the frame follows the finger natively (useNativeDragXY,
+// no JS on a move), the host hears wm:move a few times a second and where
+// it lands; dragging it to the top edge maximizes, to a side edge snaps to
+// that half (with a preview the shell draws from the same native finger). Double-tap the title bar toggles
 // maximize. Drag a border or corner grip to resize.
 import React, { memo, useEffect, useRef, useState } from 'react';
 import { Animated, Easing, HostTexture, PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useAnchor } from './anchors.js';
+import { useNativeDragXY } from './drag.js';
 import { AppIcon } from './AppIcon.jsx';
 import { Icon } from './icons.jsx';
 import { font, useTheme } from './theme.js';
@@ -54,6 +56,7 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
   const mini = useRef(new Animated.Value(win.minimized ? 1 : 0)).current;
   const lastTap = useRef(0);
   const titleAnchor = useAnchor(`win.${win.id}.title`);
+  const finger = useNativeDragXY();
 
   // Open: fade and grow in once the first frame of pixels is there.
   useEffect(() => {
@@ -100,10 +103,13 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
             // The finger stays on the title bar, at the same fraction of its width.
             start = { ...start, w: start.rw, h: start.rh, x: g.x0 - start.rw * frac, y: g.y0 + TB / 2 };
           }
+          // From here the frame is at `start` plus the finger's travel, natively.
+          setDrag({ x: start.x, y: start.y, w: start.w, h: start.h, minDy: s.topBar + TB - start.y });
+          finger.on.setValue(1);
+          if (w.resizable !== false && w.type === 'normal') onPreview({ x: finger.x, y: finger.y });
         }
         const x = Math.round(start.x + g.dx);
         const y = Math.round(Math.max(s.topBar + TB, start.y + g.dy));
-        setDrag({ x, y, w: start.w, h: start.h });
         // The host only needs the window's place for input and its popups:
         // a few times a second while it moves (each one re-places the client
         // surface), and exactly where it lands (release).
@@ -119,10 +125,7 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
           else if (g.moveX <= 6) p = 'left';
           else if (g.moveX >= s.width - 6) p = 'right';
         }
-        if (p !== preview) {
-          preview = p;
-          onPreview(p);
-        }
+        preview = p;
       },
       onPanResponderRelease: () => {
         const { win: w } = latest.current;
@@ -136,17 +139,30 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
           }
         } else {
           if (last) wm.move(w.id, last.x, last.y);
-          last = null;
           if (preview === 'left' || preview === 'right') wm.snap(w.id, preview);
           // Tablet mode: a dragged app that lands nowhere goes back to full screen.
           else if (preview === 'max' || (latest.current.tablet && start.wasMax && w.type === 'normal')) wm.maximize(w.id, true);
+          else if (last) {
+            // Stays where it was let go (no native offset now) until the
+            // host's place for it catches up.
+            setDrag({ x: last.x, y: last.y, w: start.w, h: start.h, landing: true });
+            last = null;
+            finger.on.setValue(0);
+            onPreview(null);
+            onDragging(w.id, false);
+            preview = null;
+            return;
+          }
+          last = null;
           onDragging(w.id, false);
         }
-        if (preview) onPreview(null);
+        finger.on.setValue(0);
+        onPreview(null);
         preview = null;
         setDrag(null);
       },
       onPanResponderTerminate: () => {
+        finger.on.setValue(0);
         onPreview(null);
         setDrag(null);
       },
@@ -193,6 +209,22 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
     return grips.current[key].panHandlers;
   };
 
+  // Landed: back to the host's place once it has it (or soon anyway).
+  useEffect(() => {
+    if (!drag || !drag.landing) return undefined;
+    if (win.x === drag.x && win.y === drag.y) {
+      setDrag(null);
+      return undefined;
+    }
+    const id = setTimeout(() => setDrag(null), 400);
+    return () => clearTimeout(id);
+  }, [drag, win.x, win.y]);
+  const moving = drag && drag.minDy != null;
+  const dragX = moving ? finger.dx : 0;
+  const dragY = moving
+    ? finger.dy.interpolate({ inputRange: [drag.minDy, drag.minDy + 1], outputRange: [drag.minDy, drag.minDy + 1], extrapolateLeft: 'clamp', extrapolateRight: 'extend' })
+    : 0;
+
   const g = drag || win;
   const full = win.fullscreen;
   const decorated = win.decorated && !full;
@@ -228,61 +260,64 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
           width: g.w,
           height: frameH,
           opacity: hidden ? 0 : opacity,
-          transform: [{ translateY: dropY }, { scale: Animated.multiply(scale, miniScale) }],
+          transform: [{ translateX: dragX }, { translateY: moving ? Animated.add(dropY, dragY) : dropY }, { scale: Animated.multiply(scale, miniScale) }],
         },
       ]}
     >
       <View style={[styles.surface, { borderRadius: radius, boxShadow: full ? undefined : shadow }]}>
-        {decorated && tabletChrome && (
-          <View
+        {/* One title bar element for both looks: a drag that leaves the
+            maximized place switches the look mid-gesture, and a new element
+            would end the gesture (the release then didn't know where the
+            window came from). */}
+        {decorated && (
+          <Animated.View
             {...move.current.panHandlers}
-            ref={titleAnchor.ref}
-            onLayout={titleAnchor.onLayout}
-            style={[styles.titleBar, { height: TB, backgroundColor: t.chromeActive, borderTopLeftRadius: radius, borderTopRightRadius: radius }]}
-          >
-            <View style={[styles.tabletName, { opacity: active ? 1 : 0.6 }]}>
-              <AppIcon win={win} app={appEntry} size={22} />
-              <Text numberOfLines={1} style={[styles.tabletTitle, { color: active ? t.textDim : t.textMute }]}>{appName(win, apps)}</Text>
-            </View>
-            <View pointerEvents="none" style={styles.grabberWrap}>
-              <View style={[styles.grabber, { backgroundColor: t.textMute }]} />
-            </View>
-            <View style={styles.tabletButtons}>
-              <View>
-                <Pressable ref={menuAnchor.ref} onLayout={menuAnchor.onLayout} hitSlop={4}
-                  onPress={() => onMenu && onMenu(win)}
-                  style={styles.titleButton} pressedStyle={{ backgroundColor: t.panelLine }}>
-                  <Icon name="more" size={22} color={t.textDim} strokeWidth={2.6} />
-                </Pressable>
-                {menuOpen && <WindowMenu win={win} onClose={onMenuClose} />}
-              </View>
-              <TitleButton t={t} icon="close" danger label="Close" anchorName={`win.${win.id}.close`} onPress={() => wm.close(win.id)} />
-            </View>
-          </View>
-        )}
-        {decorated && !tabletChrome && (
-          <View
-            {...move.current.panHandlers}
+            {...finger.handlers}
             ref={titleAnchor.ref}
             onLayout={titleAnchor.onLayout}
             style={[
               styles.titleBar,
-              { height: TB, backgroundColor: active ? t.chromeActive : t.chrome, borderTopLeftRadius: radius, borderTopRightRadius: radius },
+              { height: TB, backgroundColor: tabletChrome || active ? t.chromeActive : t.chrome, borderTopLeftRadius: radius, borderTopRightRadius: radius },
             ]}
           >
-            <View style={[styles.titleIcon, { opacity: active ? 1 : 0.6 }]}>
-              <AppIcon win={win} app={appEntry} size={26} />
-            </View>
-            <Text numberOfLines={1} style={[styles.title, { color: active ? t.text : t.textMute }]}>
-              {win.title || appName(win, apps)}
-            </Text>
-            {win.type === 'normal' && <TitleButton t={t} icon="minimize" label="Minimize" anchorName={`win.${win.id}.minimize`} onPress={() => wm.minimize(win.id)} />}
-            {win.type === 'normal' && win.resizable !== false && !snapped && (
-              <TitleButton t={t} icon={win.maximized ? 'restore' : 'maximize'} label="Maximize" anchorName={`win.${win.id}.maximize`}
-                onPress={() => wm.maximize(win.id, !win.maximized)} />
+            {tabletChrome ? (
+              <>
+                <View style={[styles.tabletName, { opacity: active ? 1 : 0.6 }]}>
+                  <AppIcon win={win} app={appEntry} size={22} />
+                  <Text numberOfLines={1} style={[styles.tabletTitle, { color: active ? t.textDim : t.textMute }]}>{appName(win, apps)}</Text>
+                </View>
+                <View pointerEvents="none" style={styles.grabberWrap}>
+                  <View style={[styles.grabber, { backgroundColor: t.textMute }]} />
+                </View>
+                <View style={styles.tabletButtons}>
+                  <View>
+                    <Pressable ref={menuAnchor.ref} onLayout={menuAnchor.onLayout} hitSlop={4}
+                      onPress={() => onMenu && onMenu(win)}
+                      style={styles.titleButton} pressedStyle={{ backgroundColor: t.panelLine }}>
+                      <Icon name="more" size={22} color={t.textDim} strokeWidth={2.6} />
+                    </Pressable>
+                    {menuOpen && <WindowMenu win={win} onClose={onMenuClose} />}
+                  </View>
+                  <TitleButton t={t} icon="close" danger label="Close" anchorName={`win.${win.id}.close`} onPress={() => wm.close(win.id)} />
+                </View>
+              </>
+            ) : (
+              <>
+                <View style={[styles.titleIcon, { opacity: active ? 1 : 0.6 }]}>
+                  <AppIcon win={win} app={appEntry} size={26} />
+                </View>
+                <Text numberOfLines={1} style={[styles.title, { color: active ? t.text : t.textMute }]}>
+                  {win.title || appName(win, apps)}
+                </Text>
+                {win.type === 'normal' && <TitleButton t={t} icon="minimize" label="Minimize" anchorName={`win.${win.id}.minimize`} onPress={() => wm.minimize(win.id)} />}
+                {win.type === 'normal' && win.resizable !== false && !snapped && (
+                  <TitleButton t={t} icon={win.maximized ? 'restore' : 'maximize'} label="Maximize" anchorName={`win.${win.id}.maximize`}
+                    onPress={() => wm.maximize(win.id, !win.maximized)} />
+                )}
+                <TitleButton t={t} icon="close" danger label="Close" anchorName={`win.${win.id}.close`} onPress={() => wm.close(win.id)} />
+              </>
             )}
-            <TitleButton t={t} icon="close" danger label="Close" anchorName={`win.${win.id}.close`} onPress={() => wm.close(win.id)} />
-          </View>
+          </Animated.View>
         )}
         <View
           style={{
