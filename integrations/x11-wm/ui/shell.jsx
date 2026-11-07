@@ -10,7 +10,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, AppRegistry, Easing, DevSettings, PanResponder, Pressable, StyleSheet, Text, View, useHostMessage, useWindowDimensions, HostTexture } from 'react-native';
 import Svg, { Defs, Ellipse, RadialGradient, Stop } from 'react-native-svg';
-import { Dock, DockMenu, HomeBar, TopBar, dateText, timeText, useClock } from './bars.jsx';
+import { Dock, DockMenu, HomeBar, TopBar } from './bars.jsx';
 import { Icon } from './icons.jsx';
 import { remeasureAnchors, takeLaunchOrigin, useAnchor } from './anchors.js';
 import { AppIcon } from './AppIcon.jsx';
@@ -173,19 +173,6 @@ function LaunchSplash({ launch, screen, t, bottom, done, onGone }) {
         <Spinner color={t.accent} track={t.panelLine} />
       </Animated.View>
     </Animated.View>
-  );
-}
-
-// Big clock on the empty desktop: the lock screen's clock, in the same place,
-// so unlocking to an empty desktop doesn't move it. The status bar leaves its
-// own time out meanwhile (TopBar `quiet`).
-function DesktopClock({ screen, t }) {
-  const now = useClock();
-  return (
-    <View pointerEvents="none" style={[styles.deskClock, { top: screen.height * 0.18 }]}>
-      <Text style={[styles.deskTime, { color: t.name === 'dark' ? '#fff' : 'rgba(20,24,60,0.85)' }]}>{timeText(now)}</Text>
-      <Text style={[styles.deskDate, { color: t.name === 'dark' ? 'rgba(255,255,255,0.85)' : 'rgba(20,24,60,0.6)' }]}>{dateText(now)}</Text>
-    </View>
   );
 }
 
@@ -488,7 +475,8 @@ function Shell() {
   const appMode = settings.tabletMode && (launching.length > 0 || visible.some((w) => w.type === 'normal' && (w.maximized || w.snap)));
   const dockShown = !appMode || peek || panel === 'launcher' || panel === 'overview';
   const bottom = appMode ? scr.homeBar || 24 : scr.dock;
-  const solidBar = visible.some((w) => w.maximized || w.snap);
+  // Solid over a full-screen app, and over the loading card that stands in for one.
+  const solidBar = visible.some((w) => w.maximized || w.snap) || (appMode && launching.length > 0);
   const onPeek = useCallback(() => setPeek(true), []);
   useEffect(() => {
     if (!peek) return undefined;
@@ -714,9 +702,6 @@ function Shell() {
     <ThemeContext.Provider value={t}>
       <View style={styles.root}>
         <Wallpaper width={scr.width} height={scr.height} t={t} />
-        {/* Mounted under panels too: mounting it again as one closes laid out and
-            painted its big paragraph afresh in the first frame of the close. */}
-        {!visible.length && <DesktopClock screen={scr} t={t} />}
         {split && !overviewUp && <SplitPanes split={split} screen={scr} t={t} />}
         {[...windows, ...closingNow.filter((c) => !map[c.id])].map((w) =>
           w.type === 'dock' || w.type === 'desktop' ? null : (
@@ -747,7 +732,7 @@ function Shell() {
         {edges && <EdgeSwipe side="left" top={scr.topBar} bottom={bottom} onSwipe={() => setPanel('launcher')} />}
         {edges && <EdgeSwipe side="right" top={scr.topBar} bottom={bottom} onSwipe={() => setPanel('overview')} />}
         {!fullscreen && (
-          <TopBar screen={scr} solid={solidBar} panel={panel} setPanel={setPanel} settings={settings} system={system} quiet={!visible.length && (!panel || panel === 'quick')} />
+          <TopBar screen={scr} solid={solidBar} panel={panel} setPanel={setPanel} settings={settings} system={system} />
         )}
         {!fullscreen && !oskOn && appMode && !dockShown && (
           <HomeBar screen={scr} windows={windows} setPanel={setPanel} onPeek={onPeek} />
@@ -811,10 +796,6 @@ function Shell() {
 
 const styles = StyleSheet.create({
   root: { flex: 1, overflow: 'hidden' },
-  deskClock: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
-  // The same type as the lock screen's clock (panels.jsx lockTime / lockDate).
-  deskTime: { fontFamily: font, fontSize: 132, fontWeight: '700', letterSpacing: -4 },
-  deskDate: { fontFamily: font, fontSize: 26, fontWeight: '500' },
   snap: { position: 'absolute', borderRadius: 18, borderWidth: 3 },
   // The same shapes as Quick Settings' sliders (controls.jsx track / fill).
   osd: { position: 'absolute', width: 400, height: 48, borderRadius: 24, overflow: 'hidden' },
