@@ -1,0 +1,15 @@
+[Unit]
+Description=jsui-wm: speaker sound through the vendor's audio service (Galaxy Tab A7 on the stock vendor)
+# PulseAudio's droid bridge can't open this vendor's generic audio HAL; this
+# binds libhybris' HIDL wrapper over it (see jsui-wm-audio-up). Installed by
+# audio-on.sh once a tone played that way was heard.
+After=lxc-android-config.service
+Before=user@32011.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh /etc/writable/jsui-wm-audio/jsui-wm-audio-up
+
+[Install]
+WantedBy=multi-user.target
