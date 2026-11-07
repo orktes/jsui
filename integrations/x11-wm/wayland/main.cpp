@@ -753,6 +753,22 @@ class WM {
   void snapshotBackdrop(bool on);
   void haptic(int ms);
   double lastHaptic_ = 0;
+  // GPU boost (Adreno: kgsl devfreq). Its governor ramps up too slowly for
+  // a 300 ms animation (the Tab A7 stays at 320-600 of its 950 MHz) and
+  // nothing here sends Android's touch boost. While a finger is down or
+  // frames are drawn, min_freq is raised to JSUI_WL_GPU_BOOST MHz (default
+  // 745, 0: off) and set back to the lowest frequency 500 ms after the last
+  // of either. Needs min_freq writable by the session (install.sh --system:
+  // jsui-wm-gpu-boost.service); without that, or without the node, nothing
+  // happens.
+  std::string boostPath_;
+  long boostHz_ = 0, boostRestHz_ = 0;
+  bool boosted_ = false;
+  double boostUntil_ = 0;
+  wl_event_source* boostTimer_ = nullptr;
+  void setupGpuBoost();
+  void gpuBoost();
+  void gpuBoostWrite(long hz);
   void removeWindowTexture(uint32_t id);
   bool renderGpu();
   double lastTickMs_ = 0, lastRenderMs_ = 0;
@@ -993,6 +1009,7 @@ bool WM::setup() {
     static_cast<WM*>(u)->tick();
     return 0;
   }, this);
+  setupGpuBoost();
   systemTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
     auto* w = static_cast<WM*>(u);
     if (w->rt_) w->publishSystem();
@@ -2407,7 +2424,87 @@ void WM::pointerButton(bool down, uint32_t button, uint32_t timeMs) {
   }
 }
 
+// Set back to the rest frequency when killed (jsui-session's restart sends
+// SIGTERM): only async-signal-safe calls, on what setupGpuBoost prepared.
+char g_boostPath[128];
+char g_boostRest[24];
+void gpuBoostSignal(int sig) {
+  int fd = open(g_boostPath, O_WRONLY);
+  if (fd >= 0) {
+    ssize_t n = write(fd, g_boostRest, strlen(g_boostRest));
+    (void)n;
+    close(fd);
+  }
+  signal(sig, SIG_DFL);
+  raise(sig);
+}
+
+void WM::setupGpuBoost() {
+  const char* env = getenv("JSUI_WL_GPU_BOOST");
+  const long mhz = env ? atol(env) : 745;
+  const char* dirEnv = getenv("JSUI_WL_GPU_BOOST_DEVFREQ");  // another devfreq directory (tests)
+  const char* dir = dirEnv && *dirEnv ? dirEnv : "/sys/class/kgsl/kgsl-3d0/devfreq";
+  std::string path = std::string(dir) + "/min_freq";
+  if (mhz <= 0 || access(path.c_str(), W_OK) != 0) return;
+  // The frequencies the governor knows: the boost is the lowest at or above
+  // the one asked for (else the highest), the rest the lowest of all (not
+  // min_freq as found: a jsui-wl that died boosted left it raised).
+  std::ifstream in(std::string(dir) + "/available_frequencies");
+  long hz, lo = 0, hi = 0, pick = 0;
+  while (in >> hz) {
+    if (hz <= 0) continue;
+    if (!lo || hz < lo) lo = hz;
+    if (hz > hi) hi = hz;
+    if (hz >= mhz * 1000000 && (!pick || hz < pick)) pick = hz;
+  }
+  if (!lo) return;
+  boostPath_ = path;
+  boostHz_ = pick ? pick : hi;
+  boostRestHz_ = lo;
+  gpuBoostWrite(boostRestHz_);
+  if (path.size() < sizeof(g_boostPath)) {
+    snprintf(g_boostPath, sizeof(g_boostPath), "%s", path.c_str());
+    snprintf(g_boostRest, sizeof(g_boostRest), "%ld\n", boostRestHz_);
+    for (int sig : {SIGTERM, SIGINT, SIGHUP})
+      if (signal(sig, gpuBoostSignal) == SIG_IGN) signal(sig, SIG_IGN);  // ignored stays ignored
+  }
+  boostTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
+    auto* w = static_cast<WM*>(u);
+    const double left = w->boostUntil_ - nowMs();
+    if (left > 1) {
+      wl_event_source_timer_update(w->boostTimer_, int(left) + 1);
+    } else if (w->boosted_) {
+      w->boosted_ = false;
+      w->gpuBoostWrite(w->boostRestHz_);
+    }
+    return 0;
+  }, this);
+  logf("GPU boost: min_freq %ld MHz while touched or drawing, else %ld MHz", boostHz_ / 1000000,
+       boostRestHz_ / 1000000);
+}
+
+void WM::gpuBoostWrite(long hz) {
+  // Writes fail when min_freq would exceed max_freq (a thermal cap): then
+  // the governor's own choice stands.
+  FILE* f = fopen(boostPath_.c_str(), "w");
+  if (!f) return;
+  fprintf(f, "%ld\n", hz);
+  fclose(f);
+}
+
+void WM::gpuBoost() {
+  if (!boostTimer_) return;
+  constexpr double kHoldMs = 500;
+  boostUntil_ = nowMs() + kHoldMs;
+  if (!boosted_) {
+    boosted_ = true;
+    gpuBoostWrite(boostHz_);
+    wl_event_source_timer_update(boostTimer_, int(kHoldMs));
+  }
+}
+
 void WM::touchEvent(int id, int phase, double x, double y, uint32_t timeMs) {
+  gpuBoost();
   int tid = 1 + (id % 1000);
   if (phase == 0) {
     wlr_surface* s = nullptr;
@@ -2778,6 +2875,7 @@ void WM::scheduleFrame() {
 // The GPU path's frame (see tick): paint, hand to the present thread, and
 // let the apps draw their next frames.
 void WM::presentMir() {
+  gpuBoost();
   double t0 = nowMs();
   renderGpu();
   shellDirty_ = false;  // nothing for the headless scene: the Mir window is the screen
@@ -3214,6 +3312,7 @@ int WM::run() {
   scheduleTick(0);
   wl_display_run(display_);
   logf("quit");
+  if (boosted_) gpuBoostWrite(boostRestHz_);
   wl_display_destroy_clients(display_);
   if (rt_) jsui_destroy(rt_);
   wl_display_destroy(display_);

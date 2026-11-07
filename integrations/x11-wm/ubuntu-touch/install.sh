@@ -6,7 +6,7 @@
 #   sh install.sh            # unpack to ~/jsui-wm and switch the shell
 #   sh install.sh --now      # ... and restart the session right away
 #   sh install.sh --system   # also the system bits Lomiri normally sets up (sudo):
-#                            # power key via repowerd, double-tap to wake
+#                            # power key via repowerd, double-tap to wake, GPU touch boost
 #
 # Nothing outside your home directory changes: a systemd user drop-in makes
 # Lomiri's launcher (lomiri-systemd-wrapper) run ~/jsui-wm/jsui-session
@@ -44,7 +44,8 @@ systemctl --user daemon-reload
 echo "jsui-wm installed in $DEST."
 # --system (sudo): what Lomiri normally sets up outside the session. logind
 # must ignore the power key (else a short press powers off), and on the
-# Galaxy Tab A7 the touch controller's double tap to wake gets switched on.
+# Galaxy Tab A7 the touch controller's double tap to wake gets switched on,
+# and on Adreno GPUs the session may raise the GPU clock while touched.
 case " $* " in *" --system "*)
   sudo install -m 644 -D "$DEST/jsui-wm-logind.conf" /etc/systemd/logind.conf.d/jsui-wm.conf &&
     sudo systemctl kill -s HUP systemd-logind && echo "logind: power key handled by repowerd."
@@ -52,6 +53,11 @@ case " $* " in *" --system "*)
     sudo install -m 644 "$DEST/jsui-wm-tap-to-wake.service" /etc/systemd/system/ &&
       sudo systemctl daemon-reload && sudo systemctl enable --now jsui-wm-tap-to-wake.service &&
       echo "double-tap to wake enabled."
+  fi
+  if [ -e /sys/class/kgsl/kgsl-3d0/devfreq/min_freq ]; then
+    sudo install -m 644 "$DEST/jsui-wm-gpu-boost.service" /etc/systemd/system/ &&
+      sudo systemctl daemon-reload && sudo systemctl enable --now jsui-wm-gpu-boost.service &&
+      echo "GPU touch boost enabled (applies when the session next starts)."
   fi
   ;;
 esac
