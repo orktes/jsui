@@ -439,8 +439,19 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
             <ToggleTile anchor={a.night} icon="sun" label="Night light" on={settings.nightLight} onPress={set('nightLight')} />
             <ToggleTile icon="bell" label="Do not disturb" on={settings.doNotDisturb} onPress={set('doNotDisturb')} />
           </View>}
-          {!power && <Slider anchor={a.brightness} icon="sun" value={settings.brightness} onChange={(x) => setSetting('brightness', Math.max(0.2, x))} />}
-          {!power && <Slider icon={settings.muted ? 'mute' : 'volume'} value={settings.volume} onChange={(x) => setSetting('volume', x)} />}
+          {/* Hosts with a backlight and a sound server (system.backlight,
+              system.volume) set the real ones; elsewhere brightness dims the
+              shell's picture (shell.jsx) and volume is only the setting. */}
+          {!power && <Slider anchor={a.brightness} icon="sun" value={settings.brightness} onChange={(x) => {
+            const b = Math.max(system.backlight != null ? 0.04 : 0.2, x);
+            setSetting('brightness', b);
+            if (system.backlight != null) wm.brightness(b);
+          }} />}
+          {!power && <Slider icon={settings.muted || settings.volume === 0 ? 'mute' : 'volume'} value={settings.volume} onChange={(x) => {
+            setSetting('volume', x);
+            if (settings.muted) setSetting('muted', false);
+            if (system.volume) wm.volume(x, false);
+          }} />}
         </Card>
       </Animated.View>
     </View>

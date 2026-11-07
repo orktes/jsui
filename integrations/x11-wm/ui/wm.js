@@ -27,6 +27,10 @@ export const wm = {
   snapshot: (on) => send('wm:snapshot', { on }),
   // A short buzz (hosts with a vibrator: hfd on Ubuntu Touch).
   haptic: (ms = 12) => send('wm:haptic', { ms }),
+  // The screen's backlight and the output volume, 0..1 (hosts that publish
+  // system.backlight / system.volume).
+  brightness: (value) => send('wm:brightness', { value }),
+  volume: (value, muted = false) => send('wm:volume', { value, muted }),
   launch: (exec) => send('wm:launch', { exec }),
   keyboard: (grab) => send('wm:keyboard', { grab }),
   typeKey: (key, mods = 0) => send('wm:typeKey', { key, mods }),

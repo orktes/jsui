@@ -753,6 +753,23 @@ class WM {
   void snapshotBackdrop(bool on);
   void haptic(int ms);
   double lastHaptic_ = 0;
+  // Screen brightness and output volume (the shell's Quick Settings): the
+  // backlight through repowerd (Ubuntu Touch: setUserBrightness takes the
+  // backlight's own 0..max_brightness), the volume through PulseAudio
+  // (pactl). A slider drag sends many values: the latest is applied at most
+  // every 80 ms. Their levels at start go out once in wm.system
+  // ("backlight", "volume"), so the sliders start where the device is.
+  struct Levels {
+    double brightness = -1, volume = -1;
+    int muted = -1;
+  };
+  Levels wantLevels_, appliedLevels_;
+  wl_event_source* levelsTimer_ = nullptr;
+  std::string startBacklight_, startVolume_;  // the wm.system fields, read once
+  bool backlightRead_ = false, volumeRead_ = false;
+  void setLevels(const wmjson::Value& v, bool brightness);
+  void applyLevels();
+  void readStartLevels();
   // GPU boost (Adreno: kgsl devfreq). Its governor ramps up too slowly for
   // a 300 ms animation (the Tab A7 stays at 320-600 of its 950 MHz) and
   // nothing here sends Android's touch boost. From a touch, and while the
@@ -1562,6 +1579,128 @@ void WM::haptic(int ms) {
 #endif
 }
 
+namespace {
+// Runs argv detached, output discarded (fire and forget).
+void spawnQuiet(const std::vector<std::string>& argv) {
+  pid_t pid = fork();
+  if (pid != 0) return;
+  signal(SIGCHLD, SIG_DFL);
+  int nul = open("/dev/null", O_RDWR);
+  if (nul >= 0) dup2(nul, 1), dup2(nul, 2);
+  std::vector<char*> a;
+  for (const auto& s : argv) a.push_back(const_cast<char*>(s.c_str()));
+  a.push_back(nullptr);
+  execvp(a[0], a.data());
+  _exit(127);
+}
+
+// The first backlight's level (0..1), or -1.
+double backlightLevel(int* max = nullptr) {
+  DIR* d = opendir("/sys/class/backlight");
+  if (!d) return -1;
+  double level = -1;
+  while (dirent* e = readdir(d)) {
+    if (e->d_name[0] == '.') continue;
+    std::string base = std::string("/sys/class/backlight/") + e->d_name;
+    std::ifstream bf(base + "/brightness"), mf(base + "/max_brightness");
+    int b = -1, m = 0;
+    if (bf >> b && mf >> m && m > 0) {
+      level = std::clamp(double(b) / m, 0.0, 1.0);
+      if (max) *max = m;
+      break;
+    }
+  }
+  closedir(d);
+  return level;
+}
+
+// A command's first line of output ("" when it fails).
+std::string firstLine(const char* cmd) {
+  std::string out;
+  if (FILE* f = popen(cmd, "r")) {
+    char buf[512];
+    if (fgets(buf, sizeof buf, f)) out = buf;
+    pclose(f);
+  }
+  return out;
+}
+}  // namespace
+
+void WM::readStartLevels() {
+#ifdef JSUI_WL_MIR
+  if (!mir_) {
+    backlightRead_ = volumeRead_ = true;
+    return;
+  }
+  // Only a lit screen's level is the user's (off reads 0, and repowerd dims
+  // it before it goes off): with the screen off at start, the next refresh
+  // (systemTimer_, 30 s) tries again.
+  if (!backlightRead_) {
+    const double b = backlightLevel();
+    if (b < 0) backlightRead_ = true;  // no backlight
+    else if (b > 0) {
+      backlightRead_ = true;
+      startBacklight_ = ",\"backlight\":" + std::to_string(b);
+    }
+  }
+  if (volumeRead_) return;
+  volumeRead_ = true;
+  // "Volume: front-left: 39321 /  60% / -13.31 dB, ..." and "Mute: no".
+  std::string vol = firstLine("pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null");
+  std::string mute = firstLine("pactl get-sink-mute @DEFAULT_SINK@ 2>/dev/null");
+  size_t pct = vol.find('%');
+  if (pct != std::string::npos) {
+    size_t start = vol.find_last_not_of("0123456789", pct - 1);
+    int v = atoi(vol.c_str() + (start == std::string::npos ? 0 : start + 1));
+    startVolume_ = ",\"volume\":{\"level\":" + std::to_string(std::clamp(v, 0, 100) / 100.0) +
+                    ",\"muted\":" + (mute.find("yes") != std::string::npos ? "true" : "false") + "}";
+  }
+#endif
+}
+
+void WM::setLevels(const wmjson::Value& v, bool brightness) {
+  if (brightness) {
+    wantLevels_.brightness = std::clamp(v["value"].num(1), 0.0, 1.0);
+  } else {
+    wantLevels_.volume = std::clamp(v["value"].num(0.6), 0.0, 1.0);
+    wantLevels_.muted = v["muted"].truthy() ? 1 : 0;
+  }
+  if (!levelsTimer_)
+    levelsTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
+      static_cast<WM*>(u)->applyLevels();
+      return 0;
+    }, this);
+  // Pending already: the timer applies the latest values.
+  if (wantLevels_.brightness != appliedLevels_.brightness || wantLevels_.volume != appliedLevels_.volume ||
+      wantLevels_.muted != appliedLevels_.muted)
+    wl_event_source_timer_update(levelsTimer_, 80);
+}
+
+void WM::applyLevels() {
+#ifdef JSUI_WL_MIR
+  if (!mir_) return;
+  Levels w = wantLevels_, &a = appliedLevels_;
+  if (w.brightness >= 0 && w.brightness != a.brightness) {
+    int max = 0;
+    if (backlightLevel(&max) >= 0 && max > 0) {
+      // Never off: the slider's bottom is the dimmest lit level.
+      const int level = std::max(int(std::lround(w.brightness * max)), std::max(1, max / 25));
+      spawnQuiet({"busctl", "--system", "call", "com.canonical.Unity.Screen", "/com/canonical/Unity/Screen",
+                  "com.canonical.Unity.Screen", "setUserBrightness", "i", std::to_string(level)});
+    }
+    a.brightness = w.brightness;
+  }
+  if (w.volume >= 0 && w.volume != a.volume) {
+    spawnQuiet({"pactl", "set-sink-volume", "@DEFAULT_SINK@", std::to_string(int(std::lround(w.volume * 100))) + "%"});
+    a.volume = w.volume;
+  }
+  if (w.muted >= 0 && w.muted != a.muted) {
+    spawnQuiet({"pactl", "set-sink-mute", "@DEFAULT_SINK@", w.muted ? "1" : "0"});
+    a.muted = w.muted;
+  }
+#endif
+}
+
 void WM::snapshotBackdrop(bool on) {
   if (!on) {
     jsui_remove_texture(rt_, "wm:backdrop");
@@ -2019,6 +2158,8 @@ void WM::publishSystem() {
   // The desktop can turn (rotateTo) and an accelerometer may say which way.
   if (mir_ && !vulkan_ && access("/run/sensord.sock", F_OK) == 0) j += ",\"rotate\":true";
 #endif
+  if (!backlightRead_ || !volumeRead_) readStartLevels();
+  j += startBacklight_ + startVolume_;
   j += "}";
   if (j == lastSystem_) return;  // refreshed every 30 s (systemTimer_): publish changes only
   lastSystem_ = j;
@@ -2171,6 +2312,10 @@ void WM::onMessage(const char* name, const char* json) {
     setFullscreen(c, v["on"].type == wmjson::Value::Null ? !c->fullscreen : v["on"].truthy());
   } else if (n == "wm:haptic") {
     haptic(int(v["ms"].num(12)));
+  } else if (n == "wm:brightness") {
+    setLevels(v, true);
+  } else if (n == "wm:volume") {
+    setLevels(v, false);
   } else if (n == "wm:snapshot") {
     snapshotBackdrop(v["on"].truthy());
   } else if (n == "wm:osk") {
