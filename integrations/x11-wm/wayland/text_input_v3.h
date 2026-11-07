@@ -1,11 +1,10 @@
 // zwp_text_input_v3 (text-input-unstable-v3, wlroots' wlr_text_input_v3):
 // the text input protocol Chromium / Electron (--enable-wayland-ime
 // --wayland-text-input-version=3) and GTK 4 speak. As with text_input_v2.h,
-// jsui-wl runs no input method of its own, but while a field has a text input
-// enabled the shell's on-screen keyboard types into it through the protocol
-// (commit(), backspace()): Firefox (GTK 3's wayland IM module) takes no
-// wl_keyboard keys then. Other keys (Enter, Tab, arrows) and apps without a
-// text input go through the virtual keyboard. The panel shows and hides as a
+// jsui-wl runs no input method of its own: the shell's on-screen keyboard
+// types through the virtual keyboard, and what no key on the keymap types
+// (é, emoji) goes to a field with an enabled text input as commit_string
+// (commit()). backspace() is there for clients that want it. The panel shows and hides as a
 // text field in the focused app wants a keyboard. The client enables a text input (enable + commit)
 // when a field gets focus and disables it when the field loses it; the
 // server sends enter / leave as the keyboard focus moves to and from the
