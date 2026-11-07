@@ -209,6 +209,26 @@ function SnapPreview({ preview, screen, t, bottom }) {
   );
 }
 
+// Split view's two panes, under the windows: a window that keeps a size of
+// its own (Clock ignores the size it is given) sits on its pane, not on a
+// hole of wallpaper, and the seam between them is the wallpaper's darkest
+// colour.
+function SplitPanes({ split, screen, t }) {
+  const { left, right } = split;
+  const seam = (left.x + left.w + right.x) / 2;
+  const gap = right.x - left.x - left.w;
+  const top = Math.min(left.y, right.y) - screen.titleBar;
+  const h = Math.max(left.y + left.h, right.y + right.h) - top;
+  const pane = { position: 'absolute', top, height: h, borderRadius: 16, backgroundColor: t.chrome };
+  return (
+    <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+      <View style={{ position: 'absolute', left: left.x + left.w - 1, width: gap + 2, top, height: h, backgroundColor: t.wallTop }} />
+      <View style={[pane, { left: left.x, width: seam - gap / 2 - left.x }]} />
+      <View style={[pane, { left: seam + gap / 2, width: screen.width - left.x - seam - gap / 2 }]} />
+    </View>
+  );
+}
+
 // Split view: the seam between a left- and a right-snapped window. Drag it to
 // share the screen differently (25-75 %).
 function SplitDivider({ left, right, screen, t, bottom }) {
@@ -642,7 +662,7 @@ function Shell() {
         {/* Mounted under panels too: mounting it again as one closes laid out and
             painted its big paragraph afresh in the first frame of the close. */}
         {!visible.length && <DesktopClock screen={scr} t={t} />}
-        {split && !overviewUp && <View pointerEvents="none" style={{ position: 'absolute', left: split.left.x + split.left.w - 1, width: split.right.x - split.left.x - split.left.w + 2, top: split.left.y - scr.titleBar, height: split.left.h + scr.titleBar, backgroundColor: t.name === 'dark' ? '#000' : t.wallTop }} />}
+        {split && !overviewUp && <SplitPanes split={split} screen={scr} t={t} />}
         {[...windows, ...closingNow.filter((c) => !map[c.id])].map((w) =>
           w.type === 'dock' || w.type === 'desktop' ? null : (
             <View key={w.id} pointerEvents="box-none" style={[StyleSheet.absoluteFill, { opacity: overviewUp ? 0 : 1 }]}>
