@@ -12,7 +12,7 @@ import { Animated, AppRegistry, DevSettings, PanResponder, Pressable, StyleSheet
 import Svg, { Defs, Ellipse, RadialGradient, Stop } from 'react-native-svg';
 import { Dock, DockMenu, HomeBar, TopBar, dateText, timeText, useClock } from './bars.jsx';
 import { Icon } from './icons.jsx';
-import { useAnchor } from './anchors.js';
+import { noteLaunch, useAnchor } from './anchors.js';
 import { useNativeDragX } from './drag.js';
 import { Keyboard } from './keyboard.jsx';
 import { CalendarPanel, Launcher, LockScreen, Overview, QuickSettings, Toasts } from './panels.jsx';
@@ -202,13 +202,20 @@ function Shell() {
   const toastDone = useCallback((id) => setToasts((l) => l.filter((x) => x.id !== id)), []);
   const dismissNote = useCallback((id) => setNotes((l) => l.filter((x) => x.id !== id)), []);
 
-  // Windows that disappeared animate out from their last state.
+  // Windows that disappeared animate out from their last state. The copy is
+  // rendered by the same render that drops the window (closingNow), so no
+  // frame shows neither; the effect then keeps it in `closing` until done.
   const prev = useRef(new Map());
   const [closing, setClosing] = useState([]);
+  const closingNow = useMemo(() => {
+    const out = [...closing];
+    for (const [id, w] of prev.current) if (!map[id] && w.ready && !w.minimized && !out.some((c) => c.id === w.id)) out.push(w);
+    return out;
+  }, [map, closing]);
   useEffect(() => {
     const gone = [];
     for (const [id, w] of prev.current) if (!map[id] && w.ready && !w.minimized) gone.push(w);
-    if (gone.length) setClosing((c) => [...c, ...gone]);
+    if (gone.length) setClosing((c) => [...c, ...gone.filter((w) => !c.some((x) => x.id === w.id))]);
     prev.current = new Map(Object.entries(map));
     for (const w of gone) prev.current.delete(String(w.id));
   }, [map]);
@@ -290,7 +297,10 @@ function Shell() {
     }
   }, [regions]);
 
-  const launch = useCallback((app) => wm.launch(app.exec), []);
+  const launch = useCallback((app) => {
+    noteLaunch(app.id, `app.${app.id}`);
+    wm.launch(app.exec);
+  }, []);
 
   // The launcher and the switcher draw over a blurred snapshot of the screen
   // as it was when they opened (see Scrim in panels.jsx), dropped once they
@@ -349,7 +359,7 @@ function Shell() {
             </View>
           ),
         )}
-        {closing.map((w) => (
+        {closingNow.map((w) => (
           <ClosingWindow key={`c${w.id}`} win={w} screen={scr} onDone={doneClosing} />
         ))}
         {split && !overviewUp && <SplitDivider left={split.left} right={split.right} screen={scr} t={t} bottom={bottom} />}

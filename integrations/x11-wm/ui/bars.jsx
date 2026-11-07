@@ -2,8 +2,9 @@
 // clock, status icons) and the floating dock (pinned and running apps).
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, LayoutAnimation, PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
-import { useAnchor } from './anchors.js';
+import { noteLaunch, useAnchor } from './anchors.js';
 import { useNativeDragY } from './drag.js';
+import Svg, { Path, Rect } from 'react-native-svg';
 import { AppIcon } from './AppIcon.jsx';
 import { Icon } from './icons.jsx';
 import { font, useTheme } from './theme.js';
@@ -47,6 +48,19 @@ function useSwipeDown(onSwipe) {
   );
 }
 
+// The battery, filled to its level, with a bolt while it is plugged in.
+function Battery({ level, charging, color, low }) {
+  const fill = level <= 15 && !charging ? low : color;
+  return (
+    <Svg width={26} height={22} viewBox="0 0 26 22">
+      <Rect x="1.5" y="5.5" width="20" height="11" rx="3" stroke={color} strokeWidth={1.6} fill="none" opacity={0.85} />
+      <Rect x="23" y="9" width="1.8" height="4" rx="0.9" fill={color} opacity={0.85} />
+      <Rect x="3.5" y="7.5" width={Math.max(1.5, 16 * Math.min(100, Math.max(0, level)) / 100)} height="7" rx="1.6" fill={fill} />
+      {charging && <Path d="M12.8 3.5 L8.6 11.6 H11.6 L10.4 18.5 L14.8 10.2 H11.8 Z" fill={color} stroke={'rgba(0,0,0,0.55)'} strokeWidth={0.8} />}
+    </Svg>
+  );
+}
+
 export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, settings, system }) {
   const t = useTheme();
   const now = useClock();
@@ -79,13 +93,17 @@ export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, set
         </Pressable>
         <Pressable ref={status.ref} onLayout={status.onLayout} onPress={() => toggle('quick')}
           style={[styles.barButton, styles.status, panel === 'quick' && { backgroundColor: t.panelLine }]} pressedStyle={{ backgroundColor: t.panelLine }}>
-          <Icon name="wifi" size={20} color={settings.wifi ? t.text : t.textMute} />
-          <View style={{ width: 12 }} />
+          {system.wifi !== null && (
+            <>
+              <Icon name="wifi" size={20} color={settings.wifi && (!system.wifi || system.wifi.up) ? t.text : t.textMute} />
+              <View style={{ width: 12 }} />
+            </>
+          )}
           <Icon name={settings.muted || settings.volume === 0 ? 'mute' : 'volume'} size={20} color={t.text} />
           <View style={{ width: 12 }} />
           {battery ? (
             <>
-              <Icon name="battery" size={22} color={t.text} />
+              <Battery level={battery.percent} charging={battery.charging || battery.plugged} color={t.text} low={t.danger} />
               <Text style={[styles.barText, styles.tabular, { color: t.text, marginLeft: 6, fontWeight: '500' }]}>{battery.percent}%</Text>
             </>
           ) : (
@@ -115,6 +133,7 @@ const DockItem = memo(function DockItem({ item, apps, active, onLongPress, size 
           Animated.timing(bounce, { toValue: 1, duration: 150, easing: Easing.out(Easing.quad), useNativeDriver: true }),
           Animated.spring(bounce, { toValue: 0, friction: 4, tension: 120, useNativeDriver: true }),
         ]).start();
+        noteLaunch(item.app.id, `dock.${item.key}`);
         wm.launch(item.app.exec);
       }
       return;

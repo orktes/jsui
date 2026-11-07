@@ -12,12 +12,12 @@
 // maximize. Drag a border or corner grip to resize.
 import React, { memo, useEffect, useRef, useState } from 'react';
 import { Animated, Easing, HostTexture, PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
-import { useAnchor } from './anchors.js';
+import { anchorRect, takeLaunchOrigin, useAnchor } from './anchors.js';
 import { useNativeDragXY } from './drag.js';
 import { AppIcon } from './AppIcon.jsx';
 import { Icon } from './icons.jsx';
 import { font, useTheme } from './theme.js';
-import { appName, wm } from './wm.js';
+import { appKeyOf, appName, wm } from './wm.js';
 import { WindowMenu } from './WindowMenu.jsx';
 
 const MIN_W = 180;
@@ -58,10 +58,18 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
   const titleAnchor = useAnchor(`win.${win.id}.title`);
   const finger = useNativeDragXY();
 
-  // Open: fade and grow in once the first frame of pixels is there.
+  // Open: fade and grow in once the first frame of pixels is there; out of
+  // the icon it was launched from, when there is one (launcher, dock).
+  const origin = useRef(undefined);
+  if (origin.current === undefined) origin.current = win.transientFor ? null : takeLaunchOrigin(win.appId);
   useEffect(() => {
     if (!win.ready) return;
-    Animated.timing(appear, { toValue: 1, duration: 220, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+    Animated.timing(appear, {
+      toValue: 1,
+      duration: origin.current ? 340 : 220,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
   }, [win.ready, appear]);
   // Minimize: shrink towards the dock; restore: back.
   useEffect(() => {
@@ -239,8 +247,17 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
   const frameTop = decorated ? g.y - TB : g.y;
   const frameH = decorated ? g.h + TB : g.h;
 
-  const opacity = Animated.multiply(appear, Animated.subtract(1, mini));
-  const scale = appear.interpolate({ inputRange: [0, 1], outputRange: [0.94, 1] });
+  const o = origin.current;
+  const opacity = Animated.multiply(
+    o ? appear.interpolate({ inputRange: [0, 0.35, 1], outputRange: [0, 1, 1] }) : appear,
+    Animated.subtract(1, mini),
+  );
+  // From the icon: the frame starts at the icon's centre and size.
+  const scale = o
+    ? appear.interpolate({ inputRange: [0, 1], outputRange: [Math.min(1, o[2] / Math.max(1, g.w)), 1] })
+    : appear.interpolate({ inputRange: [0, 1], outputRange: [0.94, 1] });
+  const growX = o ? appear.interpolate({ inputRange: [0, 1], outputRange: [o[0] + o[2] / 2 - (g.x + g.w / 2), 0] }) : 0;
+  const growY = o ? appear.interpolate({ inputRange: [0, 1], outputRange: [o[1] + o[3] / 2 - (frameTop + frameH / 2), 0] }) : 0;
   const miniScale = mini.interpolate({ inputRange: [0, 1], outputRange: [1, 0.25] });
   const dropY = mini.interpolate({ inputRange: [0, 1], outputRange: [0, screen.height - frameTop - frameH / 2] });
 
@@ -260,7 +277,11 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
           width: g.w,
           height: frameH,
           opacity: hidden ? 0 : opacity,
-          transform: [{ translateX: dragX }, { translateY: moving ? Animated.add(dropY, dragY) : dropY }, { scale: Animated.multiply(scale, miniScale) }],
+          transform: [
+            { translateX: o ? Animated.add(dragX, growX) : dragX },
+            { translateY: Animated.add(moving ? Animated.add(dropY, dragY) : dropY, growY) },
+            { scale: Animated.multiply(scale, miniScale) },
+          ],
         },
       ]}
     >
@@ -354,15 +375,29 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
 export const ClosingWindow = memo(function ClosingWindow({ win, screen, onDone }) {
   const t = useTheme();
   const v = useRef(new Animated.Value(1)).current;
+  // Into its dock icon when the dock has one, else a quick fade and shrink.
+  const target = useRef(undefined);
+  if (target.current === undefined) target.current = win.transientFor ? null : anchorRect(`dock.${appKeyOf(win)}`) || null;
+  const d = target.current;
   useEffect(() => {
-    Animated.timing(v, { toValue: 0, duration: 180, easing: Easing.in(Easing.quad), useNativeDriver: true }).start(() => onDone(win.id));
-  }, [v, win.id, onDone]);
+    Animated.timing(v, { toValue: 0, duration: d ? 300 : 180, easing: d ? Easing.inOut(Easing.cubic) : Easing.in(Easing.quad), useNativeDriver: true })
+      .start(() => onDone(win.id));
+  }, [v, win.id, onDone, d]);
   const TB = win.decorated && !win.fullscreen ? screen.titleBar : 0;
-  const scale = v.interpolate({ inputRange: [0, 1], outputRange: [0.92, 1] });
+  const h = win.h + TB;
+  const scale = v.interpolate({ inputRange: [0, 1], outputRange: [d ? Math.min(1, d[2] / Math.max(1, win.w)) : 0.92, 1] });
+  const opacity = d ? v.interpolate({ inputRange: [0, 0.3, 1], outputRange: [0, 1, 1] }) : v;
+  const transform = d
+    ? [
+        { translateX: v.interpolate({ inputRange: [0, 1], outputRange: [d[0] + d[2] / 2 - (win.x + win.w / 2), 0] }) },
+        { translateY: v.interpolate({ inputRange: [0, 1], outputRange: [d[1] + d[3] / 2 - (win.y - TB + h / 2), 0] }) },
+        { scale },
+      ]
+    : [{ scale }];
   return (
     <Animated.View
       pointerEvents="none"
-      style={[styles.frame, { left: win.x, top: win.y - TB, width: win.w, height: win.h + TB, opacity: v, transform: [{ scale }] }]}
+      style={[styles.frame, { left: win.x, top: win.y - TB, width: win.w, height: h, opacity, transform }]}
     >
       <View style={[styles.surface, { borderRadius: 14, boxShadow: `0px 12px 32px ${t.shadow}` }]}>
         {TB > 0 && <View style={{ height: TB, backgroundColor: t.chrome }} />}

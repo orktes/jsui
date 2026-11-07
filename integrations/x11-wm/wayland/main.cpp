@@ -683,6 +683,8 @@ class WM {
   wlr_keyboard vkbd_{};  // the on-screen keyboard's device
   xkb_keymap* keymap_ = nullptr;
   wl_event_source* tickTimer_ = nullptr;
+  wl_event_source* systemTimer_ = nullptr;  // publishSystem again (battery, Wi-Fi)
+  std::string lastSystem_;
   bool tickPending_ = false;
   bool frameScheduled_ = false;
   bool shellDirty_ = false;
@@ -987,6 +989,13 @@ bool WM::setup() {
     static_cast<WM*>(u)->tick();
     return 0;
   }, this);
+  systemTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
+    auto* w = static_cast<WM*>(u);
+    if (w->rt_) w->publishSystem();
+    wl_event_source_timer_update(w->systemTimer_, 30000);
+    return 0;
+  }, this);
+  wl_event_source_timer_update(systemTimer_, 30000);
   setupControl();
   return output_ != nullptr;
 }
@@ -1394,6 +1403,10 @@ double WM::popupFit(Client* p) {
 }
 
 void WM::capture(Client* c) {
+  // No buffer (a closing app's last commit): keep the last frame, which the
+  // shell animates out. Capturing would swap it for an empty texture, and
+  // the window blinked out for a few frames before its closing copy showed.
+  if (!c->xdg->surface->current.buffer) return;
   if (gpuApps_ && captureGpu(c)) return;
   if (gpuBuffers_.count(c->id)) removeWindowTexture(c->id);  // back on shm
   wlr_surface* root = c->xdg->surface;
@@ -1890,20 +1903,39 @@ void WM::publishSystem() {
   gethostname(host, sizeof host);
   std::string user = "user";
   if (passwd* pw = getpwuid(getuid())) user = pw->pw_name;
+  // The battery: a supply of type Battery with a capacity (the Tab A7 also
+  // lists its fuel gauges, type BMS, with one), else any with a capacity;
+  // plugged: a mains / USB supply online.
   std::string battery = "null";
   if (DIR* d = opendir("/sys/class/power_supply")) {
+    int pct = -1, anyPct = -1;
+    bool charging = false, anyCharging = false, plugged = false;
     while (dirent* e = readdir(d)) {
+      if (e->d_name[0] == '.') continue;
       std::string base = std::string("/sys/class/power_supply/") + e->d_name;
-      std::ifstream cap(base + "/capacity"), status(base + "/status");
-      int pct = -1;
-      std::string st;
-      if (cap >> pct && pct >= 0) {
-        status >> st;
-        battery = "{\"percent\":" + std::to_string(pct) + ",\"charging\":" + (st == "Charging" ? "true" : "false") + "}";
-        break;
+      std::ifstream typeF(base + "/type"), capF(base + "/capacity"), statusF(base + "/status"), onlineF(base + "/online");
+      std::string type, st;
+      int cap = -1, online = 0;
+      typeF >> type;
+      statusF >> st;
+      if (type == "Mains" || type.compare(0, 3, "USB") == 0) {
+        if (onlineF >> online && online > 0) plugged = true;
+        continue;
+      }
+      if (!(capF >> cap) || cap < 0) continue;
+      if (type == "Battery" && pct < 0) {
+        pct = cap;
+        charging = st == "Charging";
+      } else if (anyPct < 0) {
+        anyPct = cap;
+        anyCharging = st == "Charging";
       }
     }
     closedir(d);
+    if (pct < 0) pct = anyPct, charging = anyCharging;
+    if (pct >= 0)
+      battery = "{\"percent\":" + std::to_string(pct) + ",\"charging\":" + (charging ? "true" : "false") +
+                ",\"plugged\":" + (plugged ? "true" : "false") + "}";
   }
   // A wireless interface, if the device has a working one (the Tab A7's
   // port has none: no Wi-Fi driver).
@@ -1929,6 +1961,8 @@ void WM::publishSystem() {
   if (mir_ && !vulkan_ && access("/run/sensord.sock", F_OK) == 0) j += ",\"rotate\":true";
 #endif
   j += "}";
+  if (j == lastSystem_) return;  // refreshed every 30 s (systemTimer_): publish changes only
+  lastSystem_ = j;
   jsui_set_state(rt_, "wm.system", j.c_str());
 }
 
