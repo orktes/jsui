@@ -2185,7 +2185,7 @@ bool WM::createRuntime() {
   if (std::string path = settingsPath(); !path.empty()) {
     std::ifstream f(path);
     std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    if (wmjson::parse(text).type == wmjson::Value::Object) {
+    if (wmjson::parse(text.c_str()).type == wmjson::Value::Object) {
       savedSettings_ = text;
       jsui_set_state(rt_, "wm.settings", text.c_str());
       onStateChange("wm.settings", text.c_str());
