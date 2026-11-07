@@ -755,8 +755,14 @@ class WM {
   double lastHaptic_ = 0;
   void removeWindowTexture(uint32_t id);
   bool renderGpu();
-  double lastTickMs_ = 0, lastRenderMs_ = 0;
-  bool vsyncTicks_ = false;  // ticks follow the present thread's swaps (see tick)  // the last tick's / paint's time (slow-frame log)
+  double lastTickMs_ = 0, lastRenderMs_ = 0;  // the last tick's / paint's time (slow-frame log)
+  bool vsyncTicks_ = false;  // ticks follow the present thread's swaps (see tick)
+  // Mir's swap interval is 0, so a swap of a cheap frame returns at once and
+  // ticks that follow swaps ran at ~180 fps (a finger dragging the dock):
+  // frames no one sees, taking the GPU from the ones they do. Presents start
+  // at most every minFrameMs_ (JSUI_WL_MAX_FPS, default 60, with 8% slack
+  // for jitter).
+  double minFrameMs_ = 0, lastPresentAt_ = -1e9;
   void presentMir();
   void sendFrameDone();
   // Frame cost on the Mir path (JSUI_WL_PERF=1): paint + present, logged every 60 frames.
@@ -2728,16 +2734,24 @@ void WM::tick() {
 #endif
   JsuiRect dirty{};
   bool presented = false;
+  double capWait = 0;  // a frame is due but too soon after the last (minFrameMs_)
   double paintStart = nowMs();
 #ifdef JSUI_WL_MIR
   if (gpu_) {
     // The Mir window is the screen: paint and present right after the tick
     // that changed something (waiting for the headless output's frame
     // clock as well put a second 16.7 ms clock in series: ~30 fps). The
-    // present thread's swap paces it.
+    // present thread's swap paces it, and minFrameMs_ when swaps return
+    // early.
     if (jsui_needs_redraw(rt_) || shellDirty_ || mir_->rotating()) {
-      presentMir();
-      presented = true;
+      const double since = now - lastPresentAt_;
+      if (since >= minFrameMs_) {
+        lastPresentAt_ = now;
+        presentMir();
+        presented = true;
+      } else {
+        capWait = minFrameMs_ - since;
+      }
     }
   } else
 #endif
@@ -2754,7 +2768,9 @@ void WM::tick() {
 #ifdef JSUI_WL_MIR
   turning = mir_ && mir_->rotating();
 #endif
-  if (turning || jsui_wants_frame(rt_) || jsui_needs_redraw(rt_) || jsui_pending_loads(rt_) > 0) {
+  if (capWait > 0) {
+    wait = capWait;
+  } else if (turning || jsui_wants_frame(rt_) || jsui_needs_redraw(rt_) || jsui_pending_loads(rt_) > 0) {
     // 60 Hz from this tick's start: the paint above is part of the period.
     // After a frame went to the present thread the next tick comes when
     // its swap returns instead (swapFd: Mir's vsync); a free-running timer
@@ -2999,6 +3015,9 @@ bool WM::showMir() {
     if (gpu_) {
       logf("rendering on the GPU (GLES via EGL on the Mir window%s)",
            mir_->presentThread() ? ", presented from a thread of its own" : "");
+      const char* fps = getenv("JSUI_WL_MAX_FPS");
+      const double maxFps = fps && atof(fps) > 0 ? atof(fps) : 60;
+      minFrameMs_ = 1000.0 / maxFps * 0.92;
       const char* vt = getenv("JSUI_WL_VSYNC_TICKS");
       if (mir_->presentThread() && mir_->swapFd() >= 0 && !(vt && vt[0] == '0')) {
         vsyncTicks_ = true;
