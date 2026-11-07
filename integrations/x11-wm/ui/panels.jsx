@@ -825,7 +825,7 @@ const styles = StyleSheet.create({
   launcher: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
   search: { height: 64, borderRadius: 32, borderWidth: 1, flexDirection: 'row', alignItems: 'center', paddingLeft: 22, paddingRight: 8 },
   searchInput: { flex: 1, height: 56, fontFamily: font, fontSize: 20, marginLeft: 12 },
-  grid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', paddingBottom: 12 },
+  grid: { flexDirection: 'row', flexWrap: 'wrap', paddingBottom: 12 },
   appTile: { width: 150, height: 156, borderRadius: 24, alignItems: 'center', justifyContent: 'flex-start', paddingTop: 14, paddingHorizontal: 8 },
   appName: { fontFamily: font, fontSize: 15, fontWeight: '500', marginTop: 10, height: 40, textAlign: 'center' },
   empty: { fontFamily: font, fontSize: 16, textAlign: 'center', width: '100%', marginTop: 40 },
