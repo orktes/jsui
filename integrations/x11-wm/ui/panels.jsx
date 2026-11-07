@@ -386,7 +386,9 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
             </View>
           ) : null}
           {!power && <View style={styles.tiles}>
-            <ToggleTile anchor={a.wifi} icon="wifi" label="Wi-Fi" sub={settings.wifi ? 'Studio 5G' : 'Off'} on={settings.wifi} onPress={set('wifi')} />
+            <ToggleTile anchor={a.wifi} icon="wifi" label="Wi-Fi"
+              sub={system.wifi === null ? 'Not available' : !settings.wifi ? 'Off' : system.wifi && system.wifi.up ? 'Connected' : 'On'}
+              on={settings.wifi && system.wifi !== null} onPress={set('wifi')} />
             <ToggleTile icon="bluetooth" label="Bluetooth" on={settings.bluetooth} onPress={set('bluetooth')} />
             <ToggleTile anchor={a.dark} icon="moon" label="Dark style" on={settings.darkMode} onPress={set('darkMode')} />
             <ToggleTile anchor={a.tablet} icon="tablet" label="Tablet mode" sub={settings.tabletMode ? 'Apps open full' : 'Floating windows'} on={settings.tabletMode} onPress={() => {

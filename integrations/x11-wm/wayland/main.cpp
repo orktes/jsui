@@ -1783,8 +1783,25 @@ void WM::publishSystem() {
     }
     closedir(d);
   }
+  // A wireless interface, if the device has a working one (the Tab A7's
+  // port has none: no Wi-Fi driver).
+  std::string wifi = "null";
+  if (DIR* d = opendir("/sys/class/net")) {
+    while (dirent* e = readdir(d)) {
+      std::string name = e->d_name;
+      if (name[0] != '.' && fileExists("/sys/class/net/" + name + "/operstate") &&
+          access(("/sys/class/net/" + name + "/wireless").c_str(), F_OK) == 0) {
+        std::ifstream st("/sys/class/net/" + name + "/operstate");
+        std::string state;
+        st >> state;
+        wifi = "{\"iface\":" + wmjson::quoted(name) + ",\"up\":" + (state == "up" ? "true" : "false") + "}";
+        break;
+      }
+    }
+    closedir(d);
+  }
   std::string j = "{\"user\":" + wmjson::quoted(user) + ",\"hostname\":" + wmjson::quoted(host) +
-                  ",\"battery\":" + battery + ",\"xtest\":true}";
+                  ",\"battery\":" + battery + ",\"wifi\":" + wifi + ",\"xtest\":true}";
   jsui_set_state(rt_, "wm.system", j.c_str());
 }
 
