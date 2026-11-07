@@ -1,7 +1,7 @@
 #!/bin/sh
 # Back to Lomiri: removes the drop-in install.sh added and restarts the
 # session. ~/jsui-wm stays (delete it by hand if you like).
-for UNIT in lomiri-full-shell lomiri-full-greeter; do
+for UNIT in lomiri-full-shell lomiri-full-greeter lomiri-polkit-agent; do
   rm -f "$HOME/.config/systemd/user/$UNIT.service.d/jsui-wm.conf"
   rmdir "$HOME/.config/systemd/user/$UNIT.service.d" 2>/dev/null
 done
