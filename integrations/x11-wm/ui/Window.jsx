@@ -258,7 +258,7 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
   const snapped = !!win.snap && !drag;
   const radius = full || max ? 0 : snapped ? 16 : 14;
   // Tablet mode, full screen or split: a slim header with a grabber, the app
-  // name, a menu and close, instead of desktop window buttons.
+  // name and a menu (which has Close), instead of desktop window buttons.
   const tabletChrome = tablet && decorated && win.type === 'normal' && (max || snapped);
   const appEntry = apps.find((a) => a.id === win.appId);
   const menuAnchor = useAnchor(`win.${win.id}.menu`);
@@ -344,7 +344,6 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
                     </Pressable>
                     {menuOpen && <WindowMenu win={win} onClose={onMenuClose} />}
                   </View>
-                  <TitleButton t={t} icon="close" danger label="Close" anchorName={`win.${win.id}.close`} onPress={() => wm.close(win.id)} />
                 </View>
               </>
             ) : (

@@ -1,5 +1,5 @@
-// Tablet mode: the menu of a full-screen or split app's header, a popout under
-// its "more" button. It is an <Overlay> rendered inside the button's wrapper,
+// Tablet mode: the menu of a full-screen or split app's header (the other
+// modes, Minimize and Close), a popout under its "more" button. It is an <Overlay> rendered inside the button's wrapper,
 // so the runtime places it against the button every frame (and keeps it on
 // screen) with no measuring; the shell catches taps outside it (shell.jsx).
 import React from 'react';
@@ -17,7 +17,8 @@ export function WindowMenu({ win, onClose }) {
     { icon: 'snapRight', label: 'Split right', fn: () => wm.snap(win.id, 'right'), on: win.snap === 'right' },
     { icon: 'restore', label: 'Float', fn: () => (win.snap ? wm.snap(win.id, null) : wm.maximize(win.id, false)) },
     { icon: 'minimize', label: 'Minimize', fn: () => wm.minimize(win.id) },
-  ];
+    { icon: 'close', label: 'Close', fn: () => wm.close(win.id) },
+  ].filter((r) => !r.on); // the mode it is in isn't a choice
   return (
     <Overlay placement="bottom-end" offset={4} collisionPadding={12}>
       <View style={[styles.menu, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 16px 48px ${t.shadow}` }]}>
