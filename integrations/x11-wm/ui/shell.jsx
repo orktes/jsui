@@ -8,11 +8,12 @@
 // to take the input there, so the shell tells the host which rectangles it
 // covers (wm:shellRegions) whenever that changes.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AppRegistry, DevSettings, PanResponder, Pressable, StyleSheet, Text, View, useHostMessage, useWindowDimensions, HostTexture } from 'react-native';
+import { Animated, AppRegistry, DevSettings, PanResponder, Pressable, StyleSheet, Text, View, useHostMessage, useWindowDimensions, HostTexture } from 'react-native';
 import Svg, { Defs, Ellipse, RadialGradient, Stop } from 'react-native-svg';
 import { Dock, DockMenu, HomeBar, TopBar, dateText, timeText, useClock } from './bars.jsx';
 import { Icon } from './icons.jsx';
 import { useAnchor } from './anchors.js';
+import { useNativeDragX } from './drag.js';
 import { Keyboard } from './keyboard.jsx';
 import { CalendarPanel, Launcher, LockScreen, Overview, QuickSettings, Toasts } from './panels.jsx';
 import { ThemeContext, dark, font, light } from './theme.js';
@@ -74,34 +75,52 @@ function SnapPreview({ preview, screen, t, bottom }) {
 // Split view: the seam between a left- and a right-snapped window. Drag it to
 // share the screen differently (25-75 %).
 function SplitDivider({ left, right, screen, t, bottom }) {
-  const [x, setX] = useState(null);
+  // The grip follows the finger natively, clamped to 25-75 % of the screen;
+  // the two windows are resized once, on release (resizing them on every
+  // move had both apps relayout at the rate of the finger).
+  const [grabbed, setGrabbed] = useState(false);
+  const [settling, setSettling] = useState(null); // where it was let go, until the windows follow
+  const drag = useNativeDragX();
+  const seam = (left.x + left.w + right.x) / 2;
   const anchor = useAnchor('split.divider');
+  const shift = useMemo(
+    () => drag.dx.interpolate({
+      inputRange: [screen.width * 0.25 - seam, screen.width * 0.75 - seam],
+      outputRange: [screen.width * 0.25 - seam, screen.width * 0.75 - seam],
+      extrapolate: 'clamp',
+    }),
+    [drag, seam, screen.width],
+  );
+  useEffect(() => setSettling(null), [seam]);
   const pan = useMemo(() => {
-    let x0 = 0;
+    const end = (g) => {
+      const nx = Math.max(screen.width * 0.25, Math.min(screen.width * 0.75, seam + g.dx));
+      setSettling(nx);
+      setGrabbed(false);
+      drag.on.setValue(0);
+      if (Math.abs(g.dx) > 1) wm.splitRatio(nx / screen.width);
+    };
     return PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
       onPanResponderTerminationRequest: () => false,
-      onPanResponderGrant: (e) => {
-        x0 = e.nativeEvent.pageX;
-        setX(x0);
+      onPanResponderGrant: () => {
+        drag.on.setValue(1);
+        setGrabbed(true);
       },
-      onPanResponderMove: (e, g) => {
-        const nx = Math.max(screen.width * 0.25, Math.min(screen.width * 0.75, x0 + g.dx));
-        setX(nx);
-        wm.splitRatio(nx / screen.width);
-      },
-      onPanResponderRelease: () => setX(null),
-      onPanResponderTerminate: () => setX(null),
+      onPanResponderRelease: (e, g) => end(g),
+      onPanResponderTerminate: (e, g) => end(g),
     });
-  }, [screen.width]);
-  const cx = x != null ? x : (left.x + left.w + right.x) / 2;
+  }, [screen.width, seam, drag]);
+  const x = grabbed ? seam : settling;
+  const cx = x != null ? x : seam;
   const top = screen.topBar;
   const h = screen.height - screen.topBar - bottom;
   return (
-    <View {...pan.panHandlers} ref={anchor.ref} onLayout={anchor.onLayout} style={{ position: 'absolute', left: cx - 16, top, width: 32, height: h, alignItems: 'center', justifyContent: 'center' }}>
+    <Animated.View {...pan.panHandlers} {...drag.handlers} ref={anchor.ref} onLayout={anchor.onLayout}
+      style={{ position: 'absolute', left: cx - 16, top, width: 32, height: h, alignItems: 'center', justifyContent: 'center', transform: [{ translateX: grabbed ? shift : 0 }] }}>
       <View style={{ width: x != null ? 8 : 6, height: x != null ? 64 : 44, borderRadius: 4, backgroundColor: x != null ? t.accent : t.name === 'dark' ? 'rgba(255,255,255,0.7)' : 'rgba(20,24,60,0.5)' }} />
-    </View>
+    </Animated.View>
   );
 }
 
@@ -138,6 +157,18 @@ function Shell() {
   const [dockMenu, setDockMenu] = useState(null);
   const [dockRect, setDockRect] = useState(null);
   const [oskRect, setOskRect] = useState(null);
+  // The on-screen keyboard: on by the user (settings.osk) or while a text
+  // field in the focused app wants it (wm:textInput).
+  const [autoOsk, setAutoOsk] = useState(false);
+  const oskOn = settings.osk || autoOsk;
+  useHostMessage('wm:textInput', (msg) => setAutoOsk(!!msg.show));
+  const hideOsk = useCallback(() => {
+    if (autoOsk) wm.textInputClosed();
+    setAutoOsk(false);
+  }, [autoOsk]);
+  // Apps make room for it (the host shrinks their work area).
+  const oskHeight = oskOn && oskRect ? oskRect.height : 0;
+  useEffect(() => wm.osk(oskHeight), [oskHeight]);
   const [notes, setNotes] = useState(() => [
     { id: noteId++, icon: 'tablet', title: 'Welcome to the JSUI desktop', body: 'Swipe up from the bottom edge for the dock, further for your recent apps.', time: nowText() },
   ]);
@@ -148,9 +179,10 @@ function Shell() {
     setNotes((l) => [note, ...l].slice(0, 30));
     if (!settings.doNotDisturb) {
       setToasts((l) => [...l, note].slice(-3));
-      setTimeout(() => setToasts((l) => l.filter((x) => x.id !== note.id)), 3200);
     }
   }, [settings.doNotDisturb]);
+  const toastDone = useCallback((id) => setToasts((l) => l.filter((x) => x.id !== id)), []);
+  const dismissNote = useCallback((id) => setNotes((l) => l.filter((x) => x.id !== id)), []);
 
   // Windows that disappeared animate out from their last state.
   const prev = useRef(new Map());
@@ -218,17 +250,19 @@ function Shell() {
     const r = [];
     if (!fullscreen) {
       r.push([0, 0, W, scr.topBar]);
-      if (!settings.osk && dockShown && dockRect) r.push([dockRect.x, H - scr.dock + dockRect.y, dockRect.width, dockRect.height]);
-      else if (!settings.osk && dockShown) r.push([0, H - scr.dock, W, scr.dock]);
-      if (!settings.osk && appMode) r.push([0, H - bottom, W, bottom]);
+      if (!oskOn && dockShown && dockRect) r.push([dockRect.x, H - scr.dock + dockRect.y, dockRect.width, dockRect.height]);
+      else if (!oskOn && dockShown) r.push([0, H - scr.dock, W, scr.dock]);
+      if (!oskOn && appMode) r.push([0, H - bottom, W, bottom]);
     }
     if (split) {
       const cx = (split.left.x + split.left.w + split.right.x) / 2;
       r.push([cx - 16, scr.topBar, 32, H - scr.topBar - bottom]);
     }
-    if (settings.osk && oskRect) r.push([oskRect.x, oskRect.y, oskRect.width, oskRect.height]);
+    if (oskOn && oskRect) r.push([oskRect.x, oskRect.y, oskRect.width, oskRect.height]);
+    // Toasts take a tap (it puts them away), not the app under them.
+    if (toasts.length) r.push([(W - 400) / 2, scr.topBar + 10, 400, toasts.length * 92]);
     return r;
-  }, [locked, panel, dockMenu, winMenu, fullscreen, settings.osk, dockRect, oskRect, scr, dockShown, appMode, bottom, split && split.left.x + split.left.w, split && split.right.x]);
+  }, [toasts.length, locked, panel, dockMenu, winMenu, fullscreen, oskOn, dockRect, oskRect, scr, dockShown, appMode, bottom, split && split.left.x + split.left.w, split && split.right.x]);
   const lastRegions = useRef('');
   useEffect(() => {
     const json = JSON.stringify(regions);
@@ -266,7 +300,7 @@ function Shell() {
           onLock={() => { setPanel(null); setLocked(true); }} onReload={() => DevSettings.reload()} />
       );
     }
-    if (name === 'calendar') return <CalendarPanel {...common} notifications={notes} onClear={() => setNotes([])} />;
+    if (name === 'calendar') return <CalendarPanel {...common} notifications={notes} onClear={() => setNotes([])} onDismiss={dismissNote} />;
     return null;
   };
 
@@ -303,10 +337,10 @@ function Shell() {
         {!fullscreen && (
           <TopBar screen={scr} solid={solidBar} panel={panel} setPanel={setPanel} settings={settings} system={system} />
         )}
-        {!fullscreen && !settings.osk && appMode && !dockShown && (
+        {!fullscreen && !oskOn && appMode && !dockShown && (
           <HomeBar screen={scr} windows={windows} setPanel={setPanel} onPeek={onPeek} />
         )}
-        {!fullscreen && !settings.osk && (
+        {!fullscreen && !oskOn && (
           <Dock
             screen={scr}
             apps={apps}
@@ -331,9 +365,13 @@ function Shell() {
         {dockMenu && (
           <DockMenu item={dockMenu} anchor={dockRect && { x: dockRect.x + dockRect.width / 2, width: 0 }} onClose={() => setDockMenu(null)} />
         )}
-        {settings.osk && <Keyboard screen={scr} onMeasure={setOskRect} />}
-        {locked && <LockScreen screen={scr} notifications={notes} onUnlock={() => setLocked(false)} />}
-        <Toasts screen={scr} toasts={toasts} />
+        {oskOn && <Keyboard screen={scr} onMeasure={setOskRect} onHide={hideOsk} />}
+        {locked && (
+          <LockScreen screen={scr} notifications={notes} onUnlock={() => setLocked(false)}>
+            <Wallpaper width={scr.width} height={scr.height} t={t} />
+          </LockScreen>
+        )}
+        <Toasts screen={scr} toasts={toasts} onDone={toastDone} />
         {Object.values(popups).map((p) =>
           p.ready ? (
             <HostTexture key={p.id} name={`win:${p.id}`} pointerEvents="none"

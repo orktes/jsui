@@ -19,6 +19,10 @@ export const wm = {
   splitRatio: (ratio) => send('wm:splitRatio', { ratio }),
   fullscreen: (id, on) => send('wm:fullscreen', { id, on }),
   release: (id) => send('wm:release', { id }),
+  // The on-screen keyboard: its height on screen (0: hidden), and that the
+  // user closed one an app had asked for.
+  osk: (height) => send('wm:osk', { height }),
+  textInputClosed: () => send('wm:textInputClosed'),
   // A blurred copy of the screen as host texture "wm:backdrop" (on: false drops it).
   snapshot: (on) => send('wm:snapshot', { on }),
   launch: (exec) => send('wm:launch', { exec }),
