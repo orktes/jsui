@@ -41,7 +41,7 @@ function useSpringIn(open = true) {
 
 // ---------------------------------------------------------------- Launcher
 
-const AppTile = memo(function AppTile({ app, onLaunch }) {
+const AppTile = memo(function AppTile({ app, width, onLaunch }) {
   const t = useTheme();
   const anchor = useAnchor(`app.${app.id}`);
   return (
@@ -49,7 +49,7 @@ const AppTile = memo(function AppTile({ app, onLaunch }) {
       ref={anchor.ref}
       onLayout={anchor.onLayout}
       onPress={() => onLaunch(app)}
-      style={styles.appTile} pressedStyle={{ backgroundColor: 'rgba(255,255,255,0.12)', transform: [{ scale: 0.95 }] }}
+      style={[styles.appTile, { width }]} pressedStyle={{ backgroundColor: 'rgba(255,255,255,0.12)', transform: [{ scale: 0.95 }] }}
     >
       <AppIcon app={app} size={72} />
       <Text numberOfLines={2} style={[styles.appName, { color: '#fff' }]}>{cleanName(app.name)}</Text>
@@ -138,10 +138,18 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
   }, [onLaunch, onClose]);
   const sc = pop.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1] });
   // As many 150 px columns as fit with 24 px margins, then as few as give the
-  // same number of rows (18 apps: 6 x 3 in landscape, 4 x 5 in portrait, not
-  // 7 + 7 + 4). The search field spans the grid.
+  // same number of rows (18 apps: 6 x 3, not 7 + 7 + 4). When that many rows
+  // don't fit the height (portrait), narrower columns (down to 120 px) until
+  // every app shows without scrolling. The search field spans the grid.
+  const bottom = settings.osk ? 330 : screen.dock + 12;
+  const rowsFit = Math.max(1, Math.floor((screen.height - screen.topBar - 28 - 64 - 28 - bottom) / 156));
   const fit = Math.max(3, Math.min(8, Math.floor((screen.width - 48) / 150)));
-  const cols = Math.min(fit, Math.max(3, Math.ceil(apps.length / Math.ceil(apps.length / fit))));
+  let cols = Math.min(fit, Math.max(3, Math.ceil(apps.length / Math.ceil(apps.length / fit))));
+  let tileW = 150;
+  if (Math.ceil(apps.length / cols) > rowsFit) {
+    cols = Math.min(Math.floor((screen.width - 48) / 120), Math.ceil(apps.length / rowsFit));
+    tileW = Math.min(150, Math.floor((screen.width - 48) / cols));
+  }
   return (
     <View pointerEvents="box-none" style={StyleSheet.absoluteFill}>
       <Under screen={screen} />
@@ -155,9 +163,9 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
           field's caret and focus change at every open, and inside the grid's
           layer they made it stale (the whole grid painted again). */}
       <View pointerEvents={open ? 'box-none' : 'none'} style={StyleSheet.absoluteFill}>
-        <Animated.View pointerEvents="box-none" style={[styles.launcher, { top: screen.topBar + 28, bottom: settings.osk ? 330 : screen.dock + 12, transform: [{ scale: sc }] }]}>
+        <Animated.View pointerEvents="box-none" style={[styles.launcher, { top: screen.topBar + 28, bottom, transform: [{ scale: sc }] }]}>
           <Animated.View style={{ opacity: v }}>
-            <View style={[styles.search, { width: cols * 150 - 32, backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 36px ${t.shadow}` }]}>
+            <View style={[styles.search, { width: cols * tileW - 32, backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 36px ${t.shadow}` }]}>
               <Icon name="search" size={24} color={t.textDim} />
               <TextInput
                 ref={input}
@@ -172,11 +180,11 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
               <IconButton icon="keyboard" size={44} iconSize={22} active={settings.osk} onPress={() => setSetting('osk', !settings.osk)} />
             </View>
           </Animated.View>
-          <Animated.View style={{ flex: 1, marginTop: 28, width: cols * 150, opacity: v }}>
+          <Animated.View style={{ flex: 1, marginTop: 28, width: cols * tileW, opacity: v }}>
             {query ? <Label style={{ marginBottom: 8, marginLeft: 10, color: 'rgba(255,255,255,0.7)' }}>{`${list.length} result${list.length === 1 ? '' : 's'}`}</Label> : null}
             <ScrollView contentContainerStyle={styles.grid} showsVerticalScrollIndicator={false}>
               {list.map((app) => (
-                <AppTile key={app.id} app={app} onLaunch={launch} />
+                <AppTile key={app.id} app={app} width={tileW} onLaunch={launch} />
               ))}
               {!list.length && <Text style={[styles.empty, { color: 'rgba(255,255,255,0.6)' }]}>No apps match “{query}”</Text>}
             </ScrollView>
