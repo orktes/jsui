@@ -10,7 +10,6 @@ import { font, useTheme } from './theme.js';
 import { wm } from './wm.js';
 
 export function WindowMenu({ win, onClose }) {
-  const t = useTheme();
   const rows = [
     { icon: 'maximize', label: 'Full screen', fn: () => wm.maximize(win.id, true), on: win.maximized },
     { icon: 'snapLeft', label: 'Split left', fn: () => wm.snap(win.id, 'left'), on: win.snap === 'left' },
@@ -19,8 +18,15 @@ export function WindowMenu({ win, onClose }) {
     { icon: 'minimize', label: 'Minimize', fn: () => wm.minimize(win.id) },
     { icon: 'close', label: 'Close', fn: () => wm.close(win.id) },
   ].filter((r) => !r.on); // the mode it is in isn't a choice
+  return <ActionMenu rows={rows} onClose={onClose} />;
+}
+
+// A popout of actions ({ icon, label, fn }) under the element it is rendered
+// in; the shell catches taps outside it.
+export function ActionMenu({ rows, onClose, placement = 'bottom-end' }) {
+  const t = useTheme();
   return (
-    <Overlay placement="bottom-end" offset={8} collisionPadding={12}>
+    <Overlay placement={placement} offset={8} collisionPadding={12}>
       <View style={[styles.menu, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 16px 48px ${t.shadow}` }]}>
         {rows.map((r) => (
           <MenuRow key={r.label} r={r} t={t} onClose={onClose} />
