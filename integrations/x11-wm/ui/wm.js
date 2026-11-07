@@ -90,6 +90,7 @@ export const DEFAULT_SETTINGS = {
   nightLight: false,
   autoRotate: false, // follow the accelerometer (hosts with system.rotate)
   osk: false,
+  homeApps: null, // the apps picked for home (ids); null: homeApps() picks
   pinned: ['org.codeberg.dnkl.foot', 'debian-xterm', 'xterm', 'galculator', 'org.xfce.mousepad', 'pcmanfm', 'xclock', 'xeyes'],
 };
 
@@ -132,4 +133,22 @@ export function windowTitle(win, apps) {
   const t = win.title || '';
   if (!t || (/^[\w.-]+$/.test(t) && t.includes('.')) || t === win.appId || t === win.wmClass) return appName(win, apps);
   return t;
+}
+
+// The apps on home: the picked ones (settings.homeApps), or until anything is
+// picked a few everyday ones of those installed.
+const HOME_DEFAULTS = [/morph-browser/, /^camera\.ubports_camera/, /gallery/, /system-settings/, /terminal/, /^clock\./];
+export function homeApps(settings, apps) {
+  if (Array.isArray(settings.homeApps)) return settings.homeApps.map((id) => apps.find((a) => a.id === id)).filter(Boolean);
+  const out = [];
+  for (const re of HOME_DEFAULTS) {
+    const a = apps.find((x) => re.test(x.id) && !out.includes(x));
+    if (a) out.push(a);
+  }
+  return out.length ? out : apps.slice(0, 6);
+}
+
+export function pinHome(settings, apps, id, on) {
+  const ids = homeApps(settings, apps).map((a) => a.id).filter((x) => x !== id);
+  setSetting('homeApps', on ? [...ids, id] : ids);
 }

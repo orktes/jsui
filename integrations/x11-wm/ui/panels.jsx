@@ -12,7 +12,8 @@ import { Card, IconButton, Label, Slider, ToggleTile } from './controls.jsx';
 import { Icon } from './icons.jsx';
 import { playNotify } from './sounds.js';
 import { font, useTheme } from './theme.js';
-import { appName, cleanName, setSetting, wm } from './wm.js';
+import { ActionMenu } from './WindowMenu.jsx';
+import { appName, cleanName, homeApps, pinHome, setSetting, wm } from './wm.js';
 
 // Animates 0 -> 1 on mount, and back to 0 (faster, easing in) when `open`
 // goes false, then calls onClosed so the shell can unmount the panel.
@@ -42,19 +43,25 @@ function useSpringIn(open = true) {
 
 // ---------------------------------------------------------------- Launcher
 
-const AppTile = memo(function AppTile({ app, width, onLaunch }) {
-  const t = useTheme();
-  const anchor = useAnchor(`app.${app.id}`);
+// An app's icon and name. A long press opens `menu` ({ icon, label, fn }
+// rows: pin to / unpin from home) under it while `menuOpen`.
+export const AppTile = memo(function AppTile({ app, width, onLaunch, anchorName, onMenu, menuOpen, menu, onMenuClose }) {
+  const anchor = useAnchor(anchorName || `app.${app.id}`);
   return (
-    <Pressable
-      ref={anchor.ref}
-      onLayout={anchor.onLayout}
-      onPress={() => onLaunch(app)}
-      style={[styles.appTile, { width }]} pressedStyle={{ backgroundColor: 'rgba(255,255,255,0.12)', transform: [{ scale: 0.95 }] }}
-    >
-      <AppIcon app={app} size={72} />
-      <Text numberOfLines={2} style={[styles.appName, { color: '#fff' }]}>{cleanName(app.name)}</Text>
-    </Pressable>
+    <View>
+      <Pressable
+        ref={anchor.ref}
+        onLayout={anchor.onLayout}
+        onPress={() => onLaunch(app)}
+        onLongPress={onMenu ? () => onMenu(app.id) : undefined}
+        delayLongPress={450}
+        style={[styles.appTile, { width }]} pressedStyle={{ backgroundColor: 'rgba(255,255,255,0.12)', transform: [{ scale: 0.95 }] }}
+      >
+        <AppIcon app={app} size={72} />
+        <Text numberOfLines={2} style={[styles.appName, { color: '#fff' }]}>{cleanName(app.name)}</Text>
+      </Pressable>
+      {menuOpen && menu && <ActionMenu rows={menu} onClose={onMenuClose} placement="bottom" />}
+    </View>
   );
 });
 
@@ -113,6 +120,14 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
     a.start(({ finished }) => finished && v.setValue(0));
     return () => a.stop();
   }, [warm]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The app whose pin menu is open (long press on its tile).
+  const [menuFor, setMenuFor] = useState(null);
+  useEffect(() => { if (!open) setMenuFor(null); }, [open]);
+  const pinned = useMemo(() => new Set(homeApps(settings, apps).map((a) => a.id)), [settings, apps]);
+  const closeMenu = useCallback(() => setMenuFor(null), []);
+  const pinMenu = menuFor && [pinned.has(menuFor)
+    ? { icon: 'close', label: 'Unpin from home screen', fn: () => pinHome(settings, apps, menuFor, false) }
+    : { icon: 'plus', label: 'Pin to home screen', fn: () => pinHome(settings, apps, menuFor, true) }];
   const input = useRef(null);
   const search = useAnchor('launcher.search');
   const raisedOsk = useRef(false);
@@ -202,13 +217,16 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
             {query ? <Label style={{ marginBottom: 8, marginLeft: 10, color: 'rgba(255,255,255,0.7)' }}>{`${list.length} result${list.length === 1 ? '' : 's'}`}</Label> : null}
             <ScrollView contentContainerStyle={styles.grid} showsVerticalScrollIndicator={false}>
               {list.map((app) => (
-                <AppTile key={app.id} app={app} width={tileW} onLaunch={launch} />
+                <AppTile key={app.id} app={app} width={tileW} onLaunch={launch} onMenu={setMenuFor}
+                  menuOpen={menuFor === app.id} menu={menuFor === app.id ? pinMenu : null} onMenuClose={closeMenu} />
               ))}
               {!list.length && <Text style={[styles.empty, { color: 'rgba(255,255,255,0.6)' }]}>No apps match “{query}”</Text>}
             </ScrollView>
           </Animated.View>
         </Animated.View>
       </View>
+      {/* A tap anywhere else puts the pin menu away. */}
+      {menuFor != null && <Pressable style={StyleSheet.absoluteFill} onPress={closeMenu} />}
     </View>
   );
 });

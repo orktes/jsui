@@ -18,10 +18,10 @@ import { AppIcon } from './AppIcon.jsx';
 import { LAUNCH_TIMEOUT_MS, endLaunch, startLaunch, useLaunching } from './launching.js';
 import { useNativeDragX } from './drag.js';
 import { Keyboard } from './keyboard.jsx';
-import { CalendarPanel, Launcher, LockScreen, Overview, QuickSettings, Toasts } from './panels.jsx';
+import { AppTile, CalendarPanel, Launcher, LockScreen, Overview, QuickSettings, Toasts } from './panels.jsx';
 import { ThemeContext, dark, font, light } from './theme.js';
 import { Window } from './Window.jsx';
-import { appName, cleanName, setSetting, useApps, usePopups, useScreen, useSettings, useSystem, useWindows, wm } from './wm.js';
+import { appName, cleanName, homeApps, pinHome, setSetting, useApps, usePopups, useScreen, useSettings, useSystem, useWindows, wm } from './wm.js';
 
 // ---------------------------------------------------------------- Wallpaper
 
@@ -253,6 +253,28 @@ function HomeGlance({ screen, t, note, battery, onPress }) {
       <Text style={[styles.glanceDate, { color: dark ? 'rgba(255,255,255,0.85)' : t.textDim }]}>{dateText(now)}</Text>
       {line ? <Text numberOfLines={1} style={[styles.glanceLine, { color: dark ? 'rgba(255,255,255,0.7)' : t.textMute }]}>{line}</Text> : null}
     </Pressable>
+  );
+}
+
+// Home: the glance and, under it, the apps picked for home (long press for
+// Unpin; the launcher's long press pins).
+function Home({ screen, t, note, battery, apps, settings, onLaunch, onCalendar }) {
+  const picked = homeApps(settings, apps);
+  const [menuFor, setMenuFor] = useState(null);
+  const close = useCallback(() => setMenuFor(null), []);
+  const menu = menuFor && [{ icon: 'close', label: 'Unpin from home screen', fn: () => pinHome(settings, apps, menuFor, false) }];
+  return (
+    <>
+      <HomeGlance screen={screen} t={t} note={note} battery={battery} onPress={onCalendar} />
+      {/* Icons line up with the glance's left edge (a 150 px tile centres its 72 px icon). */}
+      <View style={[styles.homeApps, { top: screen.topBar + 250, width: screen.width - 34 }]}>
+        {picked.map((app) => (
+          <AppTile key={app.id} app={app} width={150} onLaunch={(a) => onLaunch(a, `home.${a.id}`)} anchorName={`home.${app.id}`}
+            onMenu={setMenuFor} menuOpen={menuFor === app.id} menu={menuFor === app.id ? menu : null} onMenuClose={close} />
+        ))}
+      </View>
+      {menuFor != null && <Pressable style={StyleSheet.absoluteFill} onPress={close} />}
+    </>
   );
 }
 
@@ -640,9 +662,10 @@ function Shell() {
 
   const winsRef = useRef(windows);
   winsRef.current = windows;
-  const launch = useCallback((app) => {
+  // `from`: the anchor of the icon it was tapped on (the launcher's by default).
+  const launch = useCallback((app, from) => {
     wm.haptic();
-    startLaunch(app, `app.${app.id}`, winsRef.current.some((w) => w.appId === app.id && w.type === 'normal'));
+    startLaunch(app, from || `app.${app.id}`, winsRef.current.some((w) => w.appId === app.id && w.type === 'normal'));
   }, []);
 
   // Loading windows of apps being started (launching.js): each goes once a
@@ -738,7 +761,7 @@ function Shell() {
     <ThemeContext.Provider value={t}>
       <View style={styles.root}>
         <Wallpaper width={scr.width} height={scr.height} t={t} />
-        {!visible.length && <HomeGlance screen={scr} t={t} note={notes[0]} battery={system.battery} onPress={() => setPanel('calendar')} />}
+        {!visible.length && <Home screen={scr} t={t} note={notes[0]} battery={system.battery} apps={apps} settings={settings} onLaunch={launch} onCalendar={() => setPanel('calendar')} />}
         {split && !overviewUp && <SplitPanes split={split} screen={scr} t={t} />}
         {[...windows, ...closingNow.filter((c) => !map[c.id])].map((w) =>
           w.type === 'dock' || w.type === 'desktop' ? null : (
@@ -836,6 +859,7 @@ function Shell() {
 const styles = StyleSheet.create({
   root: { flex: 1, overflow: 'hidden' },
   glance: { position: 'absolute', left: 56 },
+  homeApps: { position: 'absolute', left: 17, flexDirection: 'row', flexWrap: 'wrap' },
   glanceTime: { fontFamily: font, fontSize: 96, fontWeight: '700', letterSpacing: -3 },
   glanceDate: { fontFamily: font, fontSize: 24, fontWeight: '600', marginTop: -6 },
   glanceLine: { fontFamily: font, fontSize: 16, fontWeight: '500', marginTop: 10 },

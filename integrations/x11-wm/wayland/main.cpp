@@ -69,6 +69,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <functional>
 #include <map>
 #include <memory>
@@ -625,6 +626,8 @@ class WM {
   TextInputV2 textInput_;
   int oskH_ = 0;
   void fitMaximized(Client* c);
+  void saveSettings(const wmjson::Value& v);
+  std::string savedSettings_;
   void setupScreenWatch();
   Rect snapSlot(int side) const;
   void toSurface(const Client* c, double* x, double* y) const;
@@ -1687,6 +1690,41 @@ double backlightLevel(int* max = nullptr) {
   return level;
 }
 
+// JSON text of a parsed value.
+std::string dumpJson(const wmjson::Value& v) {
+  switch (v.type) {
+    case wmjson::Value::Bool: return v.b ? "true" : "false";
+    case wmjson::Value::Number: return wmjson::num(v.n);
+    case wmjson::Value::String: return wmjson::quoted(v.s);
+    case wmjson::Value::Array: {
+      std::string o = "[";
+      for (size_t i = 0; i < v.a.size(); i++) o += (i ? "," : "") + dumpJson(v.a[i]);
+      return o + "]";
+    }
+    case wmjson::Value::Object: {
+      std::string o = "{";
+      bool first = true;
+      for (const auto& [k, x] : v.o) {
+        o += (first ? "" : ",") + wmjson::quoted(k) + ":" + dumpJson(x);
+        first = false;
+      }
+      return o + "}";
+    }
+    default: return "null";
+  }
+}
+
+// The shell's settings that outlive a session (wm.settings keys the user
+// chose; the rest follow the device or the moment).
+const char* const kKeptSettings[] = {"homeApps", "pinned", "darkMode", "tabletMode", "doNotDisturb", "nightLight", "autoRotate"};
+
+std::string settingsPath() {
+  const char* cfg = getenv("XDG_CONFIG_HOME");
+  const char* home = getenv("HOME");
+  if (cfg && *cfg) return std::string(cfg) + "/jsui-wm/settings.json";
+  return home ? std::string(home) + "/.config/jsui-wm/settings.json" : std::string();
+}
+
 // A command's first line of output ("" when it fails).
 std::string firstLine(const char* cmd) {
   std::string out;
@@ -2143,6 +2181,16 @@ bool WM::createRuntime() {
   jsui_set_state(rt_, "wm.stack", "[]");
   jsui_set_state(rt_, "wm.popups", "{}");
   jsui_set_state(rt_, "wm.active", "0");
+  // Last session's kept settings (saveSettings): the shell starts from them.
+  if (std::string path = settingsPath(); !path.empty()) {
+    std::ifstream f(path);
+    std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (wmjson::parse(text).type == wmjson::Value::Object) {
+      savedSettings_ = text;
+      jsui_set_state(rt_, "wm.settings", text.c_str());
+      onStateChange("wm.settings", text.c_str());
+    }
+  }
   const std::string& src = opt_.devUrl.empty() ? opt_.bundle : opt_.devUrl;
   if (jsui_load_bundle_url(rt_, src.c_str()) != 0) {
     logf("cannot load the shell bundle %s", src.c_str());
@@ -2323,14 +2371,38 @@ void WM::syncAppTheme(bool dark) {
 void WM::onStateChange(const char* key, const char* json) {
   if (std::strcmp(key, "wm.settings") != 0) return;
   wmjson::Value v = wmjson::parse(json);
+  saveSettings(v);
   if (v["darkMode"].type != wmjson::Value::Null) syncAppTheme(v["darkMode"].truthy());
 #ifdef JSUI_WL_MIR
   if (mir_ && v["autoRotate"].truthy() != autoRotate_) autoRotate(!autoRotate_);
 #endif
+  if (v["tabletMode"].type == wmjson::Value::Null) return;
   bool tablet = v["tabletMode"].truthy();
   if (tablet == tabletMode_) return;
   tabletMode_ = tablet;
   refitWorkArea();
+}
+
+// The kept settings (kKeptSettings) to settingsPath(), when they change.
+void WM::saveSettings(const wmjson::Value& v) {
+  wmjson::Value kept;
+  kept.type = wmjson::Value::Object;
+  for (const char* k : kKeptSettings)
+    if (v.o.count(k)) kept.o[k] = v.o.at(k);
+  std::string out = dumpJson(kept);
+  if (out == savedSettings_) return;
+  savedSettings_ = out;
+  std::string path = settingsPath();
+  if (path.empty()) return;
+  std::string dir = path.substr(0, path.rfind('/'));
+  mkdir(dir.substr(0, dir.rfind('/')).c_str(), 0755);
+  mkdir(dir.c_str(), 0755);
+  std::string tmp = path + ".tmp";
+  if (FILE* f = std::fopen(tmp.c_str(), "w")) {
+    std::fputs(out.c_str(), f);
+    std::fclose(f);
+    std::rename(tmp.c_str(), path.c_str());
+  }
 }
 
 // Maximized and split windows follow a change of the work area.
