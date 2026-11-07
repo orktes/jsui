@@ -7,11 +7,16 @@
 // multiplies what the app reports (Client::cs in main.cpp).
 // wlroots has wlr_fractional_scale_v1 too, but cannot say which surfaces
 // asked, so this is the protocol itself (a global and one object per surface).
+// Only some programs get the shell's scale (`allow`, by process name:
+// Chromium / Electron); the rest hear 1 and draw as before. GTK 3 binds the
+// protocol too, and on the Tab A7 its GPU path (libhybris EGL) never
+// attached a buffer at the scaled size.
 #pragma once
 
 #include <wayland-server-core.h>
 
 #include <cmath>
+#include <functional>
 #include <memory>
 #include <unordered_map>
 
@@ -25,30 +30,38 @@ extern "C" {
 
 class FractionalScale {
  public:
-  bool create(wl_display* display, double scale) {
+  bool create(wl_display* display, double scale, std::function<bool(wl_client*)> allow) {
     scale_ = scale;
+    allow_ = std::move(allow);
     global_ = wl_global_create(display, &wp_fractional_scale_manager_v1_interface, 1, this, &FractionalScale::bindManager);
     return global_ != nullptr;
   }
 
-  // The surface asked for its scale (a wp_fractional_scale_v1 lives for it).
-  bool has(wlr_surface* s) const { return s && objects_.count(s); }
+  // The surface asked for its scale and was given the shell's.
+  bool has(wlr_surface* s) const {
+    auto it = s ? objects_.find(s) : objects_.end();
+    return it != objects_.end() && it->second->scaled;
+  }
 
   // The shell's scale changed: every surface that asked hears the new one.
   void setScale(double scale) {
     scale_ = scale;
-    for (auto& [s, o] : objects_) send(o->resource);
+    for (auto& [s, o] : objects_)
+      if (o->scaled) send(o->resource, scale_);
   }
 
  private:
   struct Object {
     wl_resource* resource;
+    bool scaled;
     wl_listener surfaceDestroy;
     FractionalScale* self;
     wlr_surface* surface;
   };
 
-  void send(wl_resource* r) const { wp_fractional_scale_v1_send_preferred_scale(r, uint32_t(std::lround(scale_ * 120))); }
+  static void send(wl_resource* r, double scale) {
+    wp_fractional_scale_v1_send_preferred_scale(r, uint32_t(std::lround(scale * 120)));
+  }
 
   static void bindManager(wl_client* client, void* data, uint32_t version, uint32_t id) {
     wl_resource* r = wl_resource_create(client, &wp_fractional_scale_manager_v1_interface, int(version), id);
@@ -78,6 +91,7 @@ class FractionalScale {
     slot = std::make_unique<Object>();
     Object& o = *slot;
     o.resource = r;
+    o.scaled = !self->allow_ || self->allow_(client);
     o.self = self;
     o.surface = surface;
     o.surfaceDestroy.notify = [](wl_listener* l, void*) {
@@ -89,7 +103,7 @@ class FractionalScale {
     wl_resource_set_implementation(r, &impl, &o, [](wl_resource* r) {
       if (auto* ob = static_cast<Object*>(wl_resource_get_user_data(r))) ob->self->erase(ob->surface);
     });
-    self->send(r);
+    send(r, o.scaled ? self->scale_ : 1.0);
   }
 
   void erase(wlr_surface* s) {
@@ -102,5 +116,6 @@ class FractionalScale {
 
   wl_global* global_ = nullptr;
   double scale_ = 1;
+  std::function<bool(wl_client*)> allow_;
   std::unordered_map<wlr_surface*, std::unique_ptr<Object>> objects_;
 };

@@ -1074,7 +1074,29 @@ bool WM::setup() {
   textInput_.create(display_, onPanel);
   textInputV3_.create(display_, onPanel);
   wlr_viewporter_create(display_);
-  fractional_.create(display_, scale_);
+  // Apps that render at the shell's scale: Chromium / Electron by default
+  // (JSUI_WL_FRACTIONAL_APPS: comma-separated process names, "*" for all).
+  fractional_.create(display_, scale_, [](wl_client* client) {
+    const char* env = getenv("JSUI_WL_FRACTIONAL_APPS");
+    std::string list = env ? env : "chrome,chromium,electron,claude-desktop,code";
+    if (list == "*") return true;
+    pid_t pid = 0;
+    wl_client_get_credentials(client, &pid, nullptr, nullptr);
+    std::string comm;
+    if (FILE* f = std::fopen(("/proc/" + std::to_string(pid) + "/comm").c_str(), "r")) {
+      char buf[64] = {};
+      if (std::fgets(buf, sizeof buf, f)) comm = buf;
+      std::fclose(f);
+    }
+    while (!comm.empty() && (comm.back() == '\n' || comm.back() == ' ')) comm.pop_back();
+    for (size_t at = 0; at <= list.size();) {
+      size_t end = list.find(',', at);
+      if (end == std::string::npos) end = list.size();
+      if (!comm.empty() && list.compare(at, end - at, comm) == 0) return true;
+      at = end + 1;
+    }
+    return false;
+  });
   listen(&seat_->events.request_set_selection, nullptr, [this](void* d) {
     auto* e = static_cast<wlr_seat_request_set_selection_event*>(d);
     wlr_seat_set_selection(seat_, e->source, e->serial);
