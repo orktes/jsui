@@ -67,7 +67,7 @@ function Battery({ level, charging, color, low }) {
 // name the bar shows on the left and whose menu ("...", WindowMenu.jsx) at the
 // right, instead of a header of its own (Window.jsx). `quiet`: home's glance
 // shows the time, so the bar leaves its own out (still there to tap for the
-// calendar).
+// calendar); not while an app's loading card is up over it.
 export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, settings, system, app, menuOpen, onMenu, onMenuClose, quiet }) {
   const t = useTheme();
   const now = useClock();

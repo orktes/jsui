@@ -13,7 +13,7 @@ import { Icon } from './icons.jsx';
 import { playNotify } from './sounds.js';
 import { font, radius, useTheme } from './theme.js';
 import { ActionMenu } from './WindowMenu.jsx';
-import { appName, cleanName, homeApps, pinHome, setSetting, wm } from './wm.js';
+import { appName, cleanName, dismissWindow, homeApps, pinHome, setSetting, wm } from './wm.js';
 
 // Animates 0 -> 1 on mount, and back to 0 (faster, easing in) when `open`
 // goes false, then calls onClosed so the shell can unmount the panel.
@@ -72,6 +72,8 @@ export const AppTile = memo(function AppTile({ app, width, onLaunch, anchorName,
 // The screen as it was when the panel opened ("wm:under", opaque), drawn under
 // the panel's fade: while the panel is up nothing below it is painted (the
 // live desktop would be the same pixels).
+// Only while open: closing, the screen under it has moved on (the app swiped
+// away showed again, whole, until the faded panel unmounted).
 function Under({ screen }) {
   return (
     <HostTexture name="wm:under" resizeMode="stretch" pointerEvents="none"
@@ -190,7 +192,7 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
   }
   return (
     <View pointerEvents="box-none" style={StyleSheet.absoluteFill}>
-      <Under screen={screen} />
+      {open && <Under screen={screen} />}
       {/* The scrim fades on its own: its blurred backdrop is a new snapshot
           at every open, and inside the grid's layer it made that layer
           stale every time (the whole grid painted again). */}
@@ -287,7 +289,7 @@ const SwitcherCard = memo(function SwitcherCard({ win, card, enter, from, title,
           handOver(g.dy);
           if (g.dy < -card.h * 0.3 || g.vy < -0.8) {
             Animated.timing(swipe, { toValue: -screen.height, duration: 220, easing: Easing.out(Easing.quad), useNativeDriver: true }).start();
-            wm.close(win.id);
+            dismissWindow(win.id);
           } else {
             Animated.spring(swipe, { toValue: 0, tension: 160, friction: 16, useNativeDriver: true }).start();
           }
@@ -342,7 +344,31 @@ const SwitcherCard = memo(function SwitcherCard({ win, card, enter, from, title,
   );
 });
 
-export const Overview = memo(function Overview({ screen, windows, active, apps, onClose, onClosed, open = true, wallpaper }) {
+// An app still starting, in the switcher: its name over a window-sized card
+// with its icon (the loading card it shows in front). A tap brings it back.
+const LaunchCard = memo(function LaunchCard({ launch, card, enter, screen, onPick }) {
+  const t = useTheme();
+  const anchor = useAnchor(`switcher.launch.${launch.app.id}`);
+  const tx = enter.interpolate({ inputRange: [0, 1], outputRange: [screen.width * 0.35, 0] });
+  const sc = enter.interpolate({ inputRange: [0, 1], outputRange: [0.9, 1] });
+  return (
+    <Animated.View style={{ width: card.w, marginRight: card.gap, transform: [{ translateX: tx }] }}>
+      <Animated.View style={[styles.cardHead, { opacity: enter }]}>
+        <AppIcon app={launch.app} size={32} />
+        <Text numberOfLines={1} style={styles.cardTitle}>{cleanName(launch.app.name)}</Text>
+      </Animated.View>
+      <Animated.View style={{ transform: [{ scale: sc }] }}>
+        <Pressable ref={anchor.ref} onLayout={anchor.onLayout} onPress={onPick} pressedStyle={{ transform: [{ scale: 0.97 }] }}>
+          <View style={[styles.cardBody, { width: card.w, height: card.h, borderRadius: radius.m, backgroundColor: t.chrome, alignItems: 'center', justifyContent: 'center' }]}>
+            <AppIcon app={launch.app} size={72} />
+          </View>
+        </Pressable>
+      </Animated.View>
+    </Animated.View>
+  );
+});
+
+export const Overview = memo(function Overview({ screen, windows, launches = [], active, apps, onClose, onClosed, onPickLaunch, open = true, wallpaper }) {
   const t = useTheme();
   // Which window the switcher grows back into when it closes: the current
   // one, or the card that was tapped.
@@ -355,8 +381,11 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
     [windows],
   );
   const [order] = useState(() => wins.map((w) => w.id)); // keep places while cards close
-  const shown = order.map((id) => wins.find((w) => w.id === id)).filter(Boolean)
-    .concat(wins.filter((w) => !order.includes(w.id)));
+  // Apps still starting (launching.js) come first, newest in front, as cards
+  // of a full-screen window: {launch, id, w, h}.
+  const starting = launches.slice().reverse().map((l) => ({ launch: l, id: `launch.${l.key}`, w: screen.width, h: screen.height - screen.topBar }));
+  const shown = starting.concat(order.map((id) => wins.find((w) => w.id === id)).filter(Boolean)
+    .concat(wins.filter((w) => !order.includes(w.id))));
   const headH = 60;
   const top0 = screen.topBar + 84;
   const areaH = screen.height - top0 - screen.dock - 24;
@@ -385,7 +414,7 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
     wm.focus(w.id);
     onClose();
   };
-  const current = shown.find((w) => w.id === active);
+  const current = wins.find((w) => w.id === active);
   const split = (w) => {
     if (current && current.id !== w.id) wm.split(current.id, w.id);
     setTarget(null);
@@ -394,7 +423,7 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
   const closeAll = useAnchor('overview.closeAll');
   return (
     <View pointerEvents={open ? 'auto' : 'none'} style={StyleSheet.absoluteFill}>
-      <Under screen={screen} />
+      {open && <Under screen={screen} />}
       <Animated.View style={[StyleSheet.absoluteFill, { opacity: enter }]}>
         {/* The cards over home's wallpaper, dimmed: a blurred copy of the
             app they came from read as a flat grey behind them. */}
@@ -403,7 +432,7 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
       <Animated.View pointerEvents="box-none" style={[styles.overviewHead, { top: screen.topBar + 22, opacity: enter }]}>
         {/* No title over the cards (they say what this is); just the way out. */}
         <Text style={styles.overviewTitle}>{shown.length ? '' : 'No open apps'}</Text>
-        {shown.length > 0 && (
+        {wins.length > 0 && (
           <Pressable ref={closeAll.ref} onLayout={closeAll.onLayout} onPress={() => wm.closeAll()} hitSlop={8}
             style={styles.textButton} pressedStyle={{ backgroundColor: 'rgba(255,255,255,0.14)' }}>
             <Text style={styles.textButtonText}>Close all</Text>
@@ -426,6 +455,9 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
         >
           {shown.map((w, i) => {
             const c = cards[i];
+            if (w.launch) {
+              return <LaunchCard key={w.id} launch={w.launch} card={c} enter={enter} screen={screen} onPick={() => { setTarget(null); onPickLaunch(w.launch.key); onClose(); }} />;
+            }
             const from = w.id === target && !w.minimized ? { cx: w.x + w.w / 2, cy: w.y + w.h / 2, s: w.w / c.w } : null;
             return (
               <SwitcherCard key={w.id} win={w} card={c} enter={enter} from={from} screen={screen}
