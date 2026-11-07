@@ -551,9 +551,7 @@ function Shell() {
   // Apps make room for it (the host shrinks their work area).
   const oskHeight = oskOn && oskRect ? oskRect.height : 0;
   useEffect(() => wm.osk(oskHeight), [oskHeight]);
-  const [notes, setNotes] = useState(() => [
-    { id: noteId++, icon: 'tablet', title: 'Welcome to the JSUI desktop', body: 'Swipe up from the bottom edge for the dock, further for your recent apps.', time: nowText() },
-  ]);
+  const [notes, setNotes] = useState([]);
   const [toasts, setToasts] = useState([]);
   // Locked, a notification only counts up the lock screen's pill: no toast.
   const lockedRef = useRef(false);
