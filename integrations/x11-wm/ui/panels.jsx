@@ -2,7 +2,7 @@
 // quick settings, the calendar / notifications panel and the lock screen.
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Animated, Easing, HostTexture, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
+  Animated, Easing, HostTexture, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useHostMessage,
 } from 'react-native';
 import { remeasureAnchors, useAnchor } from './anchors.js';
 import { useNativeDragY } from './drag.js';
@@ -377,10 +377,152 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
 
 // --------------------------------------------------------- Quick settings
 
+// Wi-Fi networks in range (Quick Settings' Wi-Fi chevron): tap one to join;
+// a secured network NetworkManager has no password for asks for one first
+// (with the on-screen keyboard up, on touch screens).
+function WifiNetworks({ settings, onBack }) {
+  const t = useTheme();
+  const [nets, setNets] = useState(null);
+  const [scans, setScans] = useState(0); // answers so far (a cached list, then a fresh scan)
+  const [ask, setAsk] = useState(null); // the network a password is being typed for
+  const [password, setPassword] = useState('');
+  const [joining, setJoining] = useState(null);
+  const [error, setError] = useState(null);
+  const raisedOsk = useRef(false);
+  const osk = useRef(settings.osk);
+  osk.current = settings.osk;
+  useHostMessage('wm:wifiNetworks', (m) => {
+    setNets(m.networks || []);
+    setScans((n) => n + 1);
+  });
+  const lastJoin = useRef(null); // { net, typed }
+  useHostMessage('wm:wifiResult', (m) => {
+    setJoining(null);
+    if (m.ok) {
+      setAsk(null);
+      setPassword('');
+      setError(null);
+      lowerOsk();
+      return;
+    }
+    const last = lastJoin.current;
+    const msg = m.message || '';
+    // NetworkManager says "Secrets were required" for a missing password and
+    // for a wrong one alike.
+    setError(/secrets were required|802-1x|psk/i.test(msg) ? (last && last.typed ? 'Wrong password' : 'Password needed') : msg || 'Could not join');
+    // A saved secured network without a (working) password: ask for one.
+    if (last && !last.typed && last.net.ssid === m.ssid && last.net.secure) askFor(last.net);
+  });
+  useEffect(() => {
+    wm.wifiScan(false);
+    wm.wifiScan(true);
+    return lowerOsk;
+  }, []);
+  // Keys (the on-screen keyboard's too) go to the shell while the password
+  // field is up, not to the app under it.
+  const asking = !!ask;
+  useEffect(() => {
+    if (!asking) return undefined;
+    wm.keyboard(true);
+    return () => wm.keyboard(false);
+  }, [asking]);
+  function lowerOsk() {
+    if (raisedOsk.current && osk.current) setSetting('osk', false);
+    raisedOsk.current = false;
+  }
+  const join = (n, pw = '') => {
+    lastJoin.current = { net: n, typed: !!pw };
+    setError(null);
+    setJoining(n.ssid);
+    wm.wifiConnect(n.ssid, pw);
+  };
+  const pick = (n) => {
+    if (n.active || joining) return;
+    if (n.secure && !n.known) {
+      setError(null);
+      askFor(n);
+    } else {
+      join(n);
+    }
+  };
+  function askFor(n) {
+    setAsk(n);
+    setPassword('');
+    if (!osk.current) {
+      raisedOsk.current = true;
+      setSetting('osk', true);
+    }
+  }
+  const head = (title, back, right) => (
+    <View style={styles.wifiHead}>
+      <IconButton icon="left" size={44} iconSize={22} onPress={back} label="Back" />
+      <Text numberOfLines={1} style={[styles.wifiTitle, { color: t.text }]}>{title}</Text>
+      {right}
+    </View>
+  );
+  if (ask) {
+    return (
+      <View style={{ marginBottom: 6 }}>
+        {head(ask.ssid, () => { setAsk(null); setError(null); lowerOsk(); })}
+        <TextInput
+          value={password}
+          onChangeText={setPassword}
+          secureTextEntry
+          autoFocus
+          placeholder="Password"
+          placeholderTextColor={t.textMute}
+          onSubmitEditing={() => password && join(ask, password)}
+          style={[styles.wifiInput, { color: t.text, backgroundColor: t.panelRaised, borderColor: t.panelLine }]}
+        />
+        {error ? <Text style={[styles.wifiNote, { color: '#ff6b6b' }]}>{error}</Text> : null}
+        <Pressable onPress={() => password && !joining && join(ask, password)}
+          style={[styles.powerRow, { backgroundColor: password ? t.accent : t.panelRaised, justifyContent: 'center', marginTop: 10 }]}
+          pressedStyle={{ opacity: 0.8 }}>
+          <Text style={[styles.powerText, { marginLeft: 0, color: password ? t.accentText : t.textMute }]}>
+            {joining ? 'Joining…' : 'Join'}
+          </Text>
+        </Pressable>
+      </View>
+    );
+  }
+  return (
+    <View style={{ marginBottom: 6 }}>
+      {head('Wi-Fi', onBack,
+        <IconButton icon="refresh" size={44} iconSize={20} onPress={() => { setScans(1); wm.wifiScan(true); }} label="Scan" />)}
+      {error ? <Text style={[styles.wifiNote, { color: '#ff6b6b' }]}>{error}</Text> : null}
+      {nets == null || (scans < 2 && !nets.length) ? (
+        <Text style={[styles.wifiNote, { color: t.textMute }]}>Searching for networks…</Text>
+      ) : !nets.length ? (
+        <Text style={[styles.wifiNote, { color: t.textMute }]}>No networks found.</Text>
+      ) : (
+        <ScrollView style={{ maxHeight: 340 }} showsVerticalScrollIndicator={false}>
+          {nets.map((n) => (
+            <Pressable key={n.ssid} onPress={() => pick(n)}
+              style={[styles.wifiRow, { backgroundColor: n.active ? t.tileOn : t.panelRaised }]} pressedStyle={{ backgroundColor: t.panelLine }}>
+              <View style={{ opacity: 0.35 + 0.65 * Math.min(1, n.signal / 80) }}>
+                <Icon name="wifi" size={22} color={n.active ? t.accentText : t.text} />
+              </View>
+              <View style={{ flex: 1, marginLeft: 14 }}>
+                <Text numberOfLines={1} style={[styles.wifiName, { color: n.active ? t.accentText : t.text }]}>{n.ssid}</Text>
+                <Text numberOfLines={1} style={[styles.tileSubText, { color: n.active ? 'rgba(255,255,255,0.8)' : t.textMute }]}>
+                  {joining === n.ssid ? 'Joining…' : n.active ? 'Connected' : n.known ? 'Saved' : n.secure ? 'Secured' : 'Open'}
+                </Text>
+              </View>
+              {n.secure && <Icon name="lock" size={18} color={n.active ? t.accentText : t.textDim} />}
+            </Pressable>
+          ))}
+        </ScrollView>
+      )}
+    </View>
+  );
+}
+
+
 export const QuickSettings = memo(function QuickSettings({ screen, settings, system, windows, onClose, onClosed, onLock, onReload, open = true }) {
   const t = useTheme();
   const v = useEntrance(open, 200, onClosed);
   const [power, setPower] = useState(false);
+  const [wifiOpen, setWifiOpen] = useState(false);
   const ty = v.interpolate({ inputRange: [0, 1], outputRange: [-24, 0] });
   const set = (k) => () => setSetting(k, !settings[k]);
   const a = {
@@ -406,6 +548,7 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
             <IconButton icon="lock" size={48} iconSize={22} onPress={onLock} label="Lock" />
             <IconButton icon="power" size={48} iconSize={22} active={power} onPress={() => setPower(!power)} label="Power" />
           </View>
+          {wifiOpen && !power && <WifiNetworks settings={settings} onBack={() => setWifiOpen(false)} />}
           {power ? (
             <View style={{ marginBottom: 6 }}>
               {[
@@ -421,10 +564,15 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
               ))}
             </View>
           ) : null}
-          {!power && <View style={styles.tiles}>
+          {!power && !wifiOpen && <View style={styles.tiles}>
             <ToggleTile anchor={a.wifi} icon="wifi" label="Wi-Fi"
               sub={system.wifi === null ? 'Not available' : !settings.wifi ? 'Off' : system.wifi && system.wifi.up ? 'Connected' : 'On'}
-              on={settings.wifi && system.wifi !== null} onPress={set('wifi')} />
+              on={settings.wifi && system.wifi !== null}
+              onPress={() => {
+                setSetting('wifi', !settings.wifi);
+                if (system.wifi) wm.wifiRadio(!settings.wifi);
+              }}
+              onMore={system.wifi ? () => { setPower(false); setWifiOpen(true); } : undefined} />
             {system.rotate ? (
               <ToggleTile icon="rotate" label="Auto-rotate" sub={settings.autoRotate ? 'On' : 'Off'} on={settings.autoRotate} onPress={set('autoRotate')} />
             ) : (
@@ -442,12 +590,12 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
           {/* Hosts with a backlight and a sound server (system.backlight,
               system.volume) set the real ones; elsewhere brightness dims the
               shell's picture (shell.jsx) and volume is only the setting. */}
-          {!power && <Slider anchor={a.brightness} icon="sun" value={settings.brightness} onChange={(x) => {
+          {!power && !wifiOpen && <Slider anchor={a.brightness} icon="sun" value={settings.brightness} onChange={(x) => {
             const b = Math.max(system.backlight != null ? 0.04 : 0.2, x);
             setSetting('brightness', b);
             if (system.backlight != null) wm.brightness(b);
           }} />}
-          {!power && <Slider icon={settings.muted || settings.volume === 0 ? 'mute' : 'volume'} value={settings.volume} onChange={(x) => {
+          {!power && !wifiOpen && <Slider icon={settings.muted || settings.volume === 0 ? 'mute' : 'volume'} value={settings.volume} onChange={(x) => {
             setSetting('volume', x);
             if (settings.muted) setSetting('muted', false);
             if (system.volume) wm.volume(x, false);
@@ -666,6 +814,13 @@ const styles = StyleSheet.create({
   qsHead: { flexDirection: 'row', alignItems: 'center', marginBottom: 14 },
   powerRow: { height: 60, borderRadius: 18, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, marginBottom: 8 },
   powerText: { fontFamily: font, fontSize: 16, fontWeight: '600', marginLeft: 14 },
+  wifiHead: { flexDirection: 'row', alignItems: 'center', marginBottom: 8, marginLeft: -6 },
+  wifiTitle: { flex: 1, fontFamily: font, fontSize: 18, fontWeight: '700', marginLeft: 4 },
+  wifiRow: { height: 62, borderRadius: 18, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, marginBottom: 8 },
+  wifiName: { fontFamily: font, fontSize: 16, fontWeight: '600' },
+  tileSubText: { fontFamily: font, fontSize: 13, marginTop: 1 },
+  wifiInput: { height: 54, borderRadius: 16, borderWidth: 1, paddingHorizontal: 16, fontFamily: font, fontSize: 17 },
+  wifiNote: { fontFamily: font, fontSize: 14, marginVertical: 10, marginHorizontal: 6 },
   avatar: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
   qsUser: { fontFamily: font, fontSize: 17, fontWeight: '700' },
   qsHost: { fontFamily: font, fontSize: 13, marginTop: 2 },

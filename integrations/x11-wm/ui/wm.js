@@ -33,6 +33,11 @@ export const wm = {
   // system.backlight / system.volume).
   brightness: (value) => send('wm:brightness', { value }),
   volume: (value, muted = false) => send('wm:volume', { value, muted }),
+  // Wi-Fi over the host's NetworkManager (hosts whose system.wifi is not
+  // null): wm:wifiNetworks answers a scan, wm:wifiResult a join.
+  wifiScan: (rescan = false) => send('wm:wifiScan', { rescan }),
+  wifiConnect: (ssid, password = '') => send('wm:wifiConnect', { ssid, password }),
+  wifiRadio: (on) => send('wm:wifiRadio', { on }),
   launch: (exec) => send('wm:launch', { exec }),
   keyboard: (grab) => send('wm:keyboard', { grab }),
   typeKey: (key, mods = 0) => send('wm:typeKey', { key, mods }),

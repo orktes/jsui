@@ -41,7 +41,8 @@ export const Card = memo(function Card({ children, style }) {
   );
 });
 
-export const ToggleTile = memo(function ToggleTile({ icon, label, sub, on, onPress, anchor }) {
+// onMore: a chevron at the tile's end that opens its details (Wi-Fi networks).
+export const ToggleTile = memo(function ToggleTile({ icon, label, sub, on, onPress, onMore, anchor }) {
   const t = useTheme();
   return (
     <Pressable
@@ -60,6 +61,11 @@ export const ToggleTile = memo(function ToggleTile({ icon, label, sub, on, onPre
           {sub != null ? sub : on ? 'On' : 'Off'}
         </Text>
       </View>
+      {onMore && (
+        <Pressable onPress={onMore} style={styles.tileMore} pressedStyle={{ opacity: 0.6 }}>
+          <Icon name="right" size={20} color={on ? t.accentText : t.textDim} />
+        </Pressable>
+      )}
     </Pressable>
   );
 });
@@ -121,6 +127,7 @@ const styles = StyleSheet.create({
   tileIcon: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', marginRight: 10 },
   tileLabel: { fontFamily: font, fontSize: 15, fontWeight: '600' },
   tileSub: { fontFamily: font, fontSize: 13, marginTop: 1 },
+  tileMore: { width: 40, height: 56, marginRight: -8, alignItems: 'center', justifyContent: 'center' },
   sliderRow: { flexDirection: 'row', alignItems: 'center', height: 56 },
   track: { flex: 1, height: 48, borderRadius: 24, overflow: 'hidden', justifyContent: 'center' },
   fill: { position: 'absolute', left: 0, top: 0, bottom: 0, borderRadius: 24 },

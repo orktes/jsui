@@ -3,7 +3,7 @@
 // into the focused X client (XTest). Shift and Ctrl are one-shot; the ?123
 // layer has the symbols a terminal needs.
 import React, { memo, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useAnchor } from './anchors.js';
 import { Icon } from './icons.jsx';
 import { font, useTheme } from './theme.js';
@@ -28,6 +28,17 @@ const WIDE = { Backspace: 1.6, Tab: 1.3, Enter: 1.6, Shift: 1.6, Ctrl: 1.3, Esca
 const ICONS = { Backspace: 'backspace', Enter: 'enter', Shift: 'shift', ArrowUp: 'chevronUp', ArrowDown: 'chevronDown', ArrowLeft: 'left', ArrowRight: 'right', Hide: 'keyboard' };
 const LABELS = { Escape: 'esc', Tab: 'tab', Ctrl: 'ctrl', ' ': '' };
 
+// A press anywhere moves focus (a press on a key would blur the shell's text
+// field the keys are for): the field focused when a key goes down gets the
+// focus back before the key is typed.
+let typingInto = null;
+const keyDown = () => {
+  typingInto = TextInput.State.currentlyFocusedInput() || typingInto;
+};
+const refocus = () => {
+  if (typingInto && TextInput.State.currentlyFocusedInput() !== typingInto) TextInput.State.focusTextInput(typingInto);
+};
+
 const Key = memo(function Key({ k, label, icon, flex, alt, on, onPress }) {
   const t = useTheme();
   const anchor = useAnchor(`osk.${k}`);
@@ -35,7 +46,12 @@ const Key = memo(function Key({ k, label, icon, flex, alt, on, onPress }) {
     <Pressable
       ref={anchor.ref}
       onLayout={anchor.onLayout}
-      onPress={onPress}
+      focusable={false}
+      onPressIn={keyDown}
+      onPress={() => {
+        refocus();
+        onPress();
+      }}
       style={[styles.key, { flex, backgroundColor: on ? t.accent : alt ? t.keyAlt : t.key }]}
       pressedStyle={{ backgroundColor: t.accent, transform: [{ scale: 0.94 }] }}
     >
