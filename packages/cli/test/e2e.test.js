@@ -57,9 +57,12 @@ for (const mode of ['production', 'development']) {
     await build({ entry: path.join(here, 'e2e', 'worklets.jsx'), outfile: workletsFile, mode, format });
     const vectorFile = path.join(dir, 'vector.js');
     await build({ entry: path.join(here, 'e2e', 'vector.jsx'), outfile: vectorFile, mode, format });
+    const layoutSlideFile = path.join(dir, 'layout_slide.js');
+    await build({ entry: path.join(here, 'e2e', 'layout_slide.jsx'), outfile: layoutSlideFile, mode, format });
     const tests = [
       'react_e2e',
       'react_interactions_e2e',
+      'react_layout_slide_e2e',
       'react_native_animated_e2e',
       'react_host_data_e2e',
       'react_host_data_e2e_js_thread_mode',
@@ -96,6 +99,7 @@ for (const mode of ['production', 'development']) {
         JSUI_REACT_STALL_BUNDLE: stallFile,
         JSUI_REACT_WORKLETS_BUNDLE: workletsFile,
         JSUI_REACT_VECTOR_BUNDLE: vectorFile,
+        JSUI_REACT_LAYOUT_SLIDE_BUNDLE: layoutSlideFile,
     };
     const { stdout, stderr } = await promisify(execFile)(binary, tests, {
       env: Object.assign({}, process.env, bundles),
@@ -118,6 +122,7 @@ for (const mode of ['production', 'development']) {
     assert.match(stdout, /PASS react_e2e$/m);
     assert.match(stdout, /PASS react_e2e_scroll/);
     assert.match(stdout, /PASS react_interactions_e2e/);
+    assert.match(stdout, /PASS react_layout_slide_e2e/);
     assert.match(stdout, /PASS react_native_animated_e2e/);
     assert.match(stdout, /PASS react_host_data_e2e$/m);
     assert.match(stdout, /PASS react_host_data_e2e_js_thread_mode/);
