@@ -11,7 +11,16 @@ file(MAKE_DIRECTORY ${_gen})
 add_custom_command(OUTPUT ${_gen}/xdg-shell-protocol.h
   COMMAND ${WAYLAND_SCANNER} server-header ${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml ${_gen}/xdg-shell-protocol.h
   VERBATIM)
-add_executable(jsui-wl main.cpp ${_gen}/xdg-shell-protocol.h)
+# text-input-unstable-v2 (KDE / Qt; not in wayland-protocols): the text
+# input Qt 5's Wayland client speaks (text_input_v2.h).
+set(_ti2 ${CMAKE_CURRENT_SOURCE_DIR}/protocols/text-input-unstable-v2.xml)
+add_custom_command(OUTPUT ${_gen}/text-input-unstable-v2-protocol.h ${_gen}/text-input-unstable-v2-protocol.c
+  COMMAND ${WAYLAND_SCANNER} server-header ${_ti2} ${_gen}/text-input-unstable-v2-protocol.h
+  COMMAND ${WAYLAND_SCANNER} private-code ${_ti2} ${_gen}/text-input-unstable-v2-protocol.c
+  DEPENDS ${_ti2}
+  VERBATIM)
+add_executable(jsui-wl main.cpp ${_gen}/xdg-shell-protocol.h ${_gen}/text-input-unstable-v2-protocol.h
+  ${_gen}/text-input-unstable-v2-protocol.c)
 target_include_directories(jsui-wl PRIVATE ${_gen})
 target_compile_definitions(jsui-wl PRIVATE WLR_USE_UNSTABLE JSUI_WM_BUNDLE="${JSUI_WM_BUNDLE}")
 target_link_libraries(jsui-wl PRIVATE jsui PkgConfig::WLR)

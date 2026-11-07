@@ -138,6 +138,18 @@ function Shell() {
   const [dockMenu, setDockMenu] = useState(null);
   const [dockRect, setDockRect] = useState(null);
   const [oskRect, setOskRect] = useState(null);
+  // The on-screen keyboard: on by the user (settings.osk) or while a text
+  // field in the focused app wants it (wm:textInput).
+  const [autoOsk, setAutoOsk] = useState(false);
+  const oskOn = settings.osk || autoOsk;
+  useHostMessage('wm:textInput', (msg) => setAutoOsk(!!msg.show));
+  const hideOsk = useCallback(() => {
+    if (autoOsk) wm.textInputClosed();
+    setAutoOsk(false);
+  }, [autoOsk]);
+  // Apps make room for it (the host shrinks their work area).
+  const oskHeight = oskOn && oskRect ? oskRect.height : 0;
+  useEffect(() => wm.osk(oskHeight), [oskHeight]);
   const [notes, setNotes] = useState(() => [
     { id: noteId++, icon: 'tablet', title: 'Welcome to the JSUI desktop', body: 'Swipe up from the bottom edge for the dock, further for your recent apps.', time: nowText() },
   ]);
@@ -218,17 +230,17 @@ function Shell() {
     const r = [];
     if (!fullscreen) {
       r.push([0, 0, W, scr.topBar]);
-      if (!settings.osk && dockShown && dockRect) r.push([dockRect.x, H - scr.dock + dockRect.y, dockRect.width, dockRect.height]);
-      else if (!settings.osk && dockShown) r.push([0, H - scr.dock, W, scr.dock]);
-      if (!settings.osk && appMode) r.push([0, H - bottom, W, bottom]);
+      if (!oskOn && dockShown && dockRect) r.push([dockRect.x, H - scr.dock + dockRect.y, dockRect.width, dockRect.height]);
+      else if (!oskOn && dockShown) r.push([0, H - scr.dock, W, scr.dock]);
+      if (!oskOn && appMode) r.push([0, H - bottom, W, bottom]);
     }
     if (split) {
       const cx = (split.left.x + split.left.w + split.right.x) / 2;
       r.push([cx - 16, scr.topBar, 32, H - scr.topBar - bottom]);
     }
-    if (settings.osk && oskRect) r.push([oskRect.x, oskRect.y, oskRect.width, oskRect.height]);
+    if (oskOn && oskRect) r.push([oskRect.x, oskRect.y, oskRect.width, oskRect.height]);
     return r;
-  }, [locked, panel, dockMenu, winMenu, fullscreen, settings.osk, dockRect, oskRect, scr, dockShown, appMode, bottom, split && split.left.x + split.left.w, split && split.right.x]);
+  }, [locked, panel, dockMenu, winMenu, fullscreen, oskOn, dockRect, oskRect, scr, dockShown, appMode, bottom, split && split.left.x + split.left.w, split && split.right.x]);
   const lastRegions = useRef('');
   useEffect(() => {
     const json = JSON.stringify(regions);
@@ -303,10 +315,10 @@ function Shell() {
         {!fullscreen && (
           <TopBar screen={scr} solid={solidBar} panel={panel} setPanel={setPanel} settings={settings} system={system} />
         )}
-        {!fullscreen && !settings.osk && appMode && !dockShown && (
+        {!fullscreen && !oskOn && appMode && !dockShown && (
           <HomeBar screen={scr} windows={windows} setPanel={setPanel} onPeek={onPeek} />
         )}
-        {!fullscreen && !settings.osk && (
+        {!fullscreen && !oskOn && (
           <Dock
             screen={scr}
             apps={apps}
@@ -331,7 +343,7 @@ function Shell() {
         {dockMenu && (
           <DockMenu item={dockMenu} anchor={dockRect && { x: dockRect.x + dockRect.width / 2, width: 0 }} onClose={() => setDockMenu(null)} />
         )}
-        {settings.osk && <Keyboard screen={scr} onMeasure={setOskRect} />}
+        {oskOn && <Keyboard screen={scr} onMeasure={setOskRect} onHide={hideOsk} />}
         {locked && <LockScreen screen={scr} notifications={notes} onUnlock={() => setLocked(false)} />}
         <Toasts screen={scr} toasts={toasts} />
         {Object.values(popups).map((p) =>
