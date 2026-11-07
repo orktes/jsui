@@ -394,6 +394,10 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
 // Wi-Fi networks in range (Quick Settings' Wi-Fi chevron): tap one to join;
 // a secured network NetworkManager has no password for asks for one first
 // (with the on-screen keyboard up, on touch screens).
+// Connected first, then saved networks, then by name: a list that doesn't
+// reshuffle as signal strengths move.
+const sortNets = (l) => [...l].sort((a, b) => (b.active - a.active) || (b.known - a.known) || a.ssid.localeCompare(b.ssid));
+
 // The last list seen: opening the panel again shows it at once while a
 // fresh scan runs (a scan takes the Tab A7 5-10 s).
 let lastNets = null;
@@ -520,7 +524,7 @@ function WifiNetworks({ settings, onBack }) {
       ) : (
         <View>
         <ScrollView style={{ maxHeight: 340 }} contentContainerStyle={{ paddingBottom: nets.length > 4 ? 24 : 0 }} showsVerticalScrollIndicator={false}>
-          {nets.map((n) => (
+          {sortNets(nets).map((n) => (
             <Pressable key={n.ssid} onPress={() => pick(n)}
               style={[styles.wifiRow, { backgroundColor: n.active ? t.tileOn : t.panelRaised }]} pressedStyle={{ backgroundColor: t.panelLine }}>
               <View style={{ opacity: 0.35 + 0.65 * Math.min(1, n.signal / 80) }}>
@@ -570,12 +574,6 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
       </Animated.View>
       <Animated.View style={[styles.dropRight, { top: screen.topBar + 10, opacity: v, transform: [{ translateY: ty }] }]}>
         <Card style={{ width: 420 }}>
-          {/* Just lock and power: the user, host and battery the header used
-              to show are a login name, a hostname and the status bar again. */}
-          <View style={styles.qsHead}>
-            <IconButton icon="lock" size={48} iconSize={22} onPress={onLock} label="Lock" />
-            <IconButton icon="power" size={48} iconSize={22} active={power} onPress={() => setPower(!power)} label="Power" />
-          </View>
           {wifiOpen && !power && <WifiNetworks settings={settings} onBack={() => setWifiOpen(false)} />}
           {power ? (
             <View style={{ marginBottom: 6 }}>
@@ -606,14 +604,14 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
             ) : (
               <ToggleTile icon="bluetooth" label="Bluetooth" on={settings.bluetooth} onPress={set('bluetooth')} />
             )}
-            <ToggleTile anchor={a.dark} icon="moon" label="Dark style" on={settings.darkMode} onPress={set('darkMode')} />
-            <ToggleTile anchor={a.tablet} icon="tablet" label="Tablet mode" sub={settings.tabletMode ? 'Apps open full' : 'Floating windows'} on={settings.tabletMode} onPress={() => {
+            <ToggleTile anchor={a.dark} icon="contrast" label="Dark style" on={settings.darkMode} onPress={set('darkMode')} />
+            <ToggleTile anchor={a.tablet} icon="tablet" label="Tablet mode" sub={settings.tabletMode ? 'On' : 'Off'} on={settings.tabletMode} onPress={() => {
               const on = !settings.tabletMode;
               setSetting('tabletMode', on);
               if (on) for (const w of windows) if (w.type === 'normal' && !w.transientFor && !w.minimized && !w.snap) wm.maximize(w.id, true);
             }} />
-            <ToggleTile anchor={a.night} icon="sun" label="Night light" on={settings.nightLight} onPress={set('nightLight')} />
-            <ToggleTile icon="bell" label="Do not disturb" on={settings.doNotDisturb} onPress={set('doNotDisturb')} />
+            <ToggleTile anchor={a.night} icon="sunset" label="Night light" on={settings.nightLight} onPress={set('nightLight')} />
+            <ToggleTile icon="moon" label="Do not disturb" on={settings.doNotDisturb} onPress={set('doNotDisturb')} />
           </View>}
           {/* Hosts with a backlight and a sound server (system.backlight,
               system.volume) set the real ones; elsewhere brightness dims the
@@ -623,11 +621,19 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
             setSetting('brightness', b);
             if (system.backlight != null) wm.brightness(b);
           }} />}
-          {!power && !wifiOpen && <Slider icon={settings.muted || settings.volume === 0 ? 'mute' : 'volume'} value={settings.volume} onChange={(x) => {
-            setSetting('volume', x);
-            if (settings.muted) setSetting('muted', false);
-            if (system.volume) wm.volume(x, false);
-          }} />}
+          {/* Power (its menu has Lock) shares the volume slider's row. */}
+          {!wifiOpen && (
+            <View style={styles.qsFoot}>
+              <View style={{ flex: 1 }}>
+                {!power && <Slider icon={settings.muted || settings.volume === 0 ? 'mute' : 'volume'} value={settings.volume} onChange={(x) => {
+                  setSetting('volume', x);
+                  if (settings.muted) setSetting('muted', false);
+                  if (system.volume) wm.volume(x, false);
+                }} />}
+              </View>
+              <IconButton icon="power" size={48} iconSize={22} active={power} onPress={() => setPower(!power)} label="Power" />
+            </View>
+          )}
         </Card>
       </Animated.View>
     </View>
@@ -850,7 +856,7 @@ const styles = StyleSheet.create({
   thumb: { borderRadius: 16, overflow: 'hidden', borderWidth: 3 },
   dropRight: { position: 'absolute', right: 12 },
   dropCenter: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
-  qsHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', marginTop: -8, marginRight: -8, marginBottom: 6 },
+  qsFoot: { flexDirection: 'row', alignItems: 'center', marginRight: -4 },
   powerRow: { height: 60, borderRadius: 18, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, marginBottom: 8 },
   powerText: { fontFamily: font, fontSize: 16, fontWeight: '600', marginLeft: 14 },
   wifiHead: { flexDirection: 'row', alignItems: 'center', marginBottom: 8, marginLeft: -6 },
