@@ -405,9 +405,12 @@ function WifiNetworks({ settings, onBack }) {
       lowerOsk();
       return;
     }
-    setError(m.message || 'Could not join');
-    // A saved secured network without a (working) password: ask for one.
     const last = lastJoin.current;
+    const msg = m.message || '';
+    // NetworkManager says "Secrets were required" for a missing password and
+    // for a wrong one alike.
+    setError(/secrets were required|802-1x|psk/i.test(msg) ? (last && last.typed ? 'Wrong password' : 'Password needed') : msg || 'Could not join');
+    // A saved secured network without a (working) password: ask for one.
     if (last && !last.typed && last.net.ssid === m.ssid && last.net.secure) askFor(last.net);
   });
   useEffect(() => {
@@ -415,6 +418,14 @@ function WifiNetworks({ settings, onBack }) {
     wm.wifiScan(true);
     return lowerOsk;
   }, []);
+  // Keys (the on-screen keyboard's too) go to the shell while the password
+  // field is up, not to the app under it.
+  const asking = !!ask;
+  useEffect(() => {
+    if (!asking) return undefined;
+    wm.keyboard(true);
+    return () => wm.keyboard(false);
+  }, [asking]);
   function lowerOsk() {
     if (raisedOsk.current && osk.current) setSetting('osk', false);
     raisedOsk.current = false;
