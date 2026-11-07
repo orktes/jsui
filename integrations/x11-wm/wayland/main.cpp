@@ -854,6 +854,7 @@ class WM {
     pid_t pid;
     std::string name;
     double at;
+    std::string exec;
   };
   std::vector<PendingLaunch> pendingLaunches_;
   wl_event_source* launchTimer_ = nullptr;
@@ -1798,6 +1799,10 @@ void WM::checkLaunches() {
     // Gone without a window (handed over to a running instance, or failed
     // on its own and said so on stderr): nothing to do.
     if (shown || kill(it->pid, 0) != 0) {
+      // The shell's loading window goes (wm:launchEnded) also when the app
+      // handed over to a running instance and showed no window of its own.
+      std::string j = "{\"exec\":" + wmjson::quoted(it->exec) + ",\"shown\":" + (shown ? "true" : "false") + "}";
+      jsui_post_message(rt_, "wm:launchEnded", j.c_str());
       it = pendingLaunches_.erase(it);
       continue;
     }
@@ -1807,7 +1812,7 @@ void WM::checkLaunches() {
     }
     logf("launch: %s showed no window in %.0f s, ending it", it->name.c_str(), kLaunchTimeoutMs / 1000);
     kill(-it->pid, SIGKILL);  // its session (launch() setsid()s)
-    std::string j = "{\"name\":" + wmjson::quoted(it->name) + "}";
+    std::string j = "{\"name\":" + wmjson::quoted(it->name) + ",\"exec\":" + wmjson::quoted(it->exec) + "}";
     jsui_post_message(rt_, "wm:launchFailed", j.c_str());
     scheduleTick(0);
     it = pendingLaunches_.erase(it);
@@ -2327,7 +2332,7 @@ void WM::onMessage(const char* name, const char* json) {
       std::string name = v["name"].str();
       for (const App& a : apps_)
         if (name.empty() && a.exec == exec) name = a.name;
-      pendingLaunches_.push_back({pid, name.empty() ? exec : name, nowMs()});
+      pendingLaunches_.push_back({pid, name.empty() ? exec : name, nowMs(), exec});
       if (!launchTimer_)
         launchTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
           static_cast<WM*>(u)->checkLaunches();
