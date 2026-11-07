@@ -731,8 +731,8 @@ class WM {
   int frameLog_ = 0;  // JSUI_WL_PERF: frames still to log in full (after an unmap)
   bool tickPending_ = false;
   bool frameScheduled_ = false;
-  // Frame callbacks owed: sent at the next present, or by this timer ~16 ms
-  // after the commit that asked when nothing presents (armFrameDone).
+  // Frame callbacks owed: sent with the next output frame, or by this
+  // timer 100 ms after the commit that asked if no frame comes (armFrameDone).
   wl_event_source* frameDoneTimer_ = nullptr;
   bool frameDoneArmed_ = false;
   void armFrameDone();
@@ -3570,7 +3570,14 @@ void WM::presentMir() {
 }
 #endif
 
+// A callback goes out with the next output frame (onFrame sends them after
+// its present, or without one when nothing changed): clients draw at most
+// once per vsync. A timer of 16 ms per commit had them drawing twice as
+// often as anything showed (vkcube at ~117 fps, each commit costing jsui-wl
+// an import and a texture update). The timer stays as a backstop for an
+// output that stops ticking.
 void WM::armFrameDone() {
+  scheduleFrame();
   if (frameDoneArmed_) return;
   if (!frameDoneTimer_)
     frameDoneTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
@@ -3578,7 +3585,7 @@ void WM::armFrameDone() {
       return 0;
     }, this);
   frameDoneArmed_ = true;
-  wl_event_source_timer_update(frameDoneTimer_, 16);
+  wl_event_source_timer_update(frameDoneTimer_, 100);
 }
 
 void WM::sendFrameDone() {
