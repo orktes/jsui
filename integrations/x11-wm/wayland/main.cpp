@@ -45,6 +45,7 @@
 
 #include <dirent.h>
 #include <sys/eventfd.h>
+#include <sys/inotify.h>
 #include <sys/prctl.h>
 #include <drm_fourcc.h>
 #include <fcntl.h>
@@ -119,6 +120,7 @@ extern "C" {
 #include "wlegl.h"
 #endif
 #include "text_input_v2.h"
+#include "text_input_v3.h"
 
 #ifndef JSUI_WM_BUNDLE
 #define JSUI_WM_BUNDLE "integrations/x11-wm/ui/dist/shell.js"
@@ -604,6 +606,11 @@ class WM {
   bool createRuntime();
   void publishScreen();
   void publishApps();
+  // Rescan the apps when a .desktop file comes, goes or changes (inotify on
+  // the directories scanApps reads, debounced: an install writes several).
+  void watchApps();
+  void reloadApps();
+  wl_event_source* appsDebounce_ = nullptr;
   // Runs jsui-icons for g_svgIcons, then scans and publishes the apps again.
   void rasterizeIcons();
   wl_event_source* iconSrc_ = nullptr;
@@ -623,9 +630,11 @@ class WM {
   void place(Client* c);
   void configure(Client* c, int x, int y, int w, int h);
   void refitWorkArea();
-  // Text fields in apps ask for the on-screen keyboard (text_input_v2.h);
-  // the shell tells how much of the screen it takes (wm:osk).
+  // Text fields in apps ask for the on-screen keyboard (text_input_v2.h for
+  // Qt, text_input_v3.h for Chromium / Electron and GTK 4); the shell tells
+  // how much of the screen it takes (wm:osk).
   TextInputV2 textInput_;
+  TextInputV3 textInputV3_;
   int oskH_ = 0;
   void fitMaximized(Client* c);
   void saveSettings(const wmjson::Value& v);
@@ -1019,10 +1028,12 @@ bool WM::setup() {
 
   seat_ = wlr_seat_create(display_, "seat0");
   wlr_seat_set_capabilities(seat_, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD | WL_SEAT_CAPABILITY_TOUCH);
-  textInput_.create(display_, [this](bool show) {
+  auto onPanel = [this](bool show) {
     jsui_post_message(rt_, "wm:textInput", show ? "{\"show\":true}" : "{\"show\":false}");
     scheduleTick(0);
-  });
+  };
+  textInput_.create(display_, onPanel);
+  textInputV3_.create(display_, onPanel);
   listen(&seat_->events.request_set_selection, nullptr, [this](void* d) {
     auto* e = static_cast<wlr_seat_request_set_selection_event*>(d);
     wlr_seat_set_selection(seat_, e->source, e->serial);
@@ -2015,6 +2026,7 @@ void WM::focus(Client* c) {
   if (prev && prev != c && prev->tl) wlr_xdg_toplevel_set_activated(prev->tl, false);
   active_ = c ? c->id : 0;
   textInput_.focus(c && c->tl ? c->xdg->surface->resource : nullptr);
+  textInputV3_.focus(c && c->tl ? c->xdg->surface : nullptr);
   if (c && c->tl) {
     wlr_xdg_toplevel_set_activated(c->tl, true);
     wlr_keyboard* kb = wlr_seat_get_keyboard(seat_);
@@ -2189,6 +2201,7 @@ bool WM::createRuntime() {
     apps_ = scanApps("foot");
     rasterizeIcons();
     publishApps();
+    watchApps();
   }
   jsui_set_state(rt_, "wm.windows", "{}");
   jsui_set_state(rt_, "wm.stack", "[]");
@@ -2267,6 +2280,48 @@ void WM::rasterizeIcons() {
     ::close(fd);
     w->apps_ = scanApps("foot");
     w->publishApps();
+    return 0;
+  }, this);
+}
+
+void WM::reloadApps() {
+  apps_ = scanApps("foot");
+  rasterizeIcons();
+  publishApps();
+}
+
+void WM::watchApps() {
+  int fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+  if (fd < 0) return;
+  std::vector<std::string> dirs = {"/usr/share/applications", "/usr/local/share/applications"};
+  if (const char* home = getenv("HOME")) dirs.push_back(std::string(home) + "/.local/share/applications");
+  int watched = 0;
+  for (const auto& d : dirs)
+    if (inotify_add_watch(fd, d.c_str(), IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_CLOSE_WRITE | IN_ATTRIB) >= 0) watched++;
+  if (!watched) {
+    ::close(fd);
+    return;
+  }
+  appsDebounce_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
+    auto* w = static_cast<WM*>(u);
+    logf("apps: .desktop files changed, rescanning");
+    w->reloadApps();
+    return 0;
+  }, this);
+  wl_event_loop_add_fd(loop_, fd, WL_EVENT_READABLE, [](int fd, uint32_t, void* u) -> int {
+    auto* w = static_cast<WM*>(u);
+    alignas(inotify_event) char buf[4096];
+    bool desktop = false;
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof buf)) > 0) {
+      for (char* p = buf; p < buf + n;) {
+        auto* e = reinterpret_cast<inotify_event*>(p);
+        std::string name = e->len ? e->name : "";
+        if (name.size() > 8 && name.compare(name.size() - 8, 8, ".desktop") == 0) desktop = true;
+        p += sizeof(inotify_event) + e->len;
+      }
+    }
+    if (desktop) wl_event_source_timer_update(w->appsDebounce_, 500);
     return 0;
   }, this);
 }
@@ -2610,9 +2665,7 @@ void WM::onMessage(const char* name, const char* json) {
   } else if (n == "wm:quit") {
     wl_display_terminate(display_);
   } else if (n == "wm:reloadApps") {
-    apps_ = scanApps("foot");
-    rasterizeIcons();
-    publishApps();
+    reloadApps();
   }
 }
 
