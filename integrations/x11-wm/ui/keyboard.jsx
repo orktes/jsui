@@ -1,7 +1,8 @@
 // The on-screen keyboard. Keys go to the host as wm:typeKey: into the shell's
 // own text field while it has the keyboard (the launcher's search), otherwise
-// into the focused X client (XTest). Shift and Ctrl are one-shot; the ?123
-// layer has the symbols a terminal needs.
+// into the focused X client (XTest). Shift and Ctrl are one-shot. The letter
+// layer is a tablet's (letters, shift, return, space); the ?123 layer has the
+// numbers, symbols and the keys a terminal needs (esc, tab, ctrl, arrows).
 import React, { memo, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useAnchor } from './anchors.js';
@@ -10,21 +11,20 @@ import { font, useTheme } from './theme.js';
 import { setSetting, wm } from './wm.js';
 
 const LETTERS = [
-  ['Escape', '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'Backspace'],
-  ['Tab', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '-'],
-  ['Ctrl', 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', 'Enter'],
-  ['Shift', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 'ArrowUp'],
-  ['?123', 'Hide', ' ', 'ArrowLeft', 'ArrowDown', 'ArrowRight'],
+  ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', 'Backspace'],
+  ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', "'", 'Enter'],
+  ['Shift', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '-'],
+  ['?123', ' ', 'Hide'],
 ];
 const SYMBOLS = [
-  ['Escape', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', 'Backspace'],
-  ['Tab', '~', '`', '|', '\\', '=', '+', '[', ']', '{', '}', '_'],
-  ['Ctrl', '<', '>', "'", '"', ':', '&&', '||', '$(', '~/', '..', 'Enter'],
-  ['Shift', '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'ArrowUp'],
-  ['abc', 'Hide', ' ', 'ArrowLeft', 'ArrowDown', 'ArrowRight'],
+  ['Escape', '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'Backspace'],
+  ['Tab', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', 'Enter'],
+  ['Ctrl', '~', '`', '|', '\\', '=', '+', '[', ']', '{', '}', '_'],
+  ['<', '>', '"', ':', ';', '/', '?', '&&', '~/', '..', 'ArrowUp'],
+  ['abc', ' ', 'ArrowLeft', 'ArrowDown', 'ArrowRight', 'Hide'],
 ];
 
-const WIDE = { Backspace: 1.6, Tab: 1.3, Enter: 1.6, Shift: 1.6, Ctrl: 1.3, Escape: 1.2, ' ': 5.2, '?123': 1.5, abc: 1.5, Hide: 1.3 };
+const WIDE = { Backspace: 1.6, Tab: 1.3, Enter: 1.6, Shift: 1.6, Ctrl: 1.3, Escape: 1.2, ' ': 6, '?123': 1.6, abc: 1.6, Hide: 1.6 };
 const ICONS = { Backspace: 'backspace', Enter: 'enter', Shift: 'shift', ArrowUp: 'chevronUp', ArrowDown: 'chevronDown', ArrowLeft: 'left', ArrowRight: 'right', Hide: 'keyboard' };
 const LABELS = { Escape: 'esc', Tab: 'tab', Ctrl: 'ctrl', ' ': '' };
 
