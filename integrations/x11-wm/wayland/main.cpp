@@ -733,6 +733,11 @@ class WM {
   // jsui-orientation helper that reads the accelerometer for it.
   void rotateTo(int deg);
   void autoRotate(bool on);
+  // jsui-notifyd (next to jsui-wl): the session's notification server. Its
+  // lines (JSON) go to the shell as "wm:notification".
+  void startNotifyd();
+  wl_event_source* notifySrc_ = nullptr;
+  std::string notifyBuf_;
   void orientationLine(const std::string& line);
   bool autoRotate_ = false;
   pid_t orientPid_ = -1;
@@ -3467,6 +3472,57 @@ void WM::autoRotate(bool on) {
 }
 #endif
 
+void WM::startNotifyd() {
+  // Only with a session bus to serve on.
+  const char* rt = getenv("XDG_RUNTIME_DIR");
+  if (!getenv("DBUS_SESSION_BUS_ADDRESS") && !(rt && fileExists(std::string(rt) + "/bus"))) return;
+  char exe[4096];
+  ssize_t len = readlink("/proc/self/exe", exe, sizeof exe - 1);
+  if (len <= 0) return;
+  exe[len] = 0;
+  std::string helper = std::string(exe);
+  helper = helper.substr(0, helper.rfind('/') + 1) + "jsui-notifyd";
+  if (access(helper.c_str(), X_OK) != 0) return;
+  int fds[2];
+  if (pipe2(fds, O_CLOEXEC) != 0) return;
+  pid_t pid = fork();
+  if (pid == 0) {
+    signal(SIGCHLD, SIG_DFL);
+    prctl(PR_SET_PDEATHSIG, SIGTERM);  // goes with jsui-wl
+    dup2(fds[1], 1);
+    execl(helper.c_str(), helper.c_str(), static_cast<char*>(nullptr));
+    _exit(127);
+  }
+  ::close(fds[1]);
+  if (pid < 0) {
+    ::close(fds[0]);
+    return;
+  }
+  fcntl(fds[0], F_SETFL, O_NONBLOCK);
+  notifySrc_ = wl_event_loop_add_fd(loop_, fds[0], WL_EVENT_READABLE, [](int fd, uint32_t mask, void* u) -> int {
+    auto* w = static_cast<WM*>(u);
+    char buf[1024];
+    ssize_t n = read(fd, buf, sizeof buf);
+    if (n == 0 || (n < 0 && (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR)))) {
+      // Ended: another server owns the name, or no bus after all.
+      wl_event_source_remove(w->notifySrc_);
+      w->notifySrc_ = nullptr;
+      ::close(fd);
+      return 0;
+    }
+    if (n < 0) return 0;
+    w->notifyBuf_.append(buf, size_t(n));
+    size_t nl;
+    while ((nl = w->notifyBuf_.find('\n')) != std::string::npos) {
+      std::string l = w->notifyBuf_.substr(0, nl);
+      w->notifyBuf_.erase(0, nl + 1);
+      if (!l.empty() && l[0] == '{' && w->rt_) jsui_post_message(w->rt_, "wm:notification", l.c_str());
+    }
+    return 0;
+  }, this);
+  logf("notifications: %s (pid %d)", helper.c_str(), int(pid));
+}
+
 int WM::run() {
 #ifdef JSUI_WL_MIR
   if (opt_.mir && !setupMir()) return 1;
@@ -3482,6 +3538,7 @@ int WM::run() {
 #endif
   if (!gpuApps_) g_appEnv.insert(g_appEnv.end(), opt_.appEnvNoGpu.begin(), opt_.appEnvNoGpu.end());
   if (!createRuntime()) return 1;
+  startNotifyd();
   for (const auto& cmd : opt_.autostart) launch(cmd);
   notifySystemd(socketName_);
   scheduleTick(0);
