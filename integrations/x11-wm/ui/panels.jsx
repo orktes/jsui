@@ -79,6 +79,19 @@ function Under({ screen }) {
   );
 }
 
+// Home's wallpaper, dimmed (the launcher's and the switcher's background:
+// what was on screen showed through a blurred scrim as ghosts, or as grey).
+// Without one, the blurred scrim.
+function WallScrim({ wallpaper, onPress, screen }) {
+  if (!wallpaper) return <Scrim color="rgba(6,8,20,0.82)" onPress={onPress} screen={screen} />;
+  return (
+    <Pressable style={StyleSheet.absoluteFill} onPress={onPress}>
+      {wallpaper}
+      <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(6,8,20,0.4)' }]} />
+    </Pressable>
+  );
+}
+
 function Scrim({ color, onPress, screen }) {
   // Without the texture (not set yet, or turned off) the view draws nothing.
   // Sized explicitly: a HostTexture otherwise takes the texture's size.
@@ -91,7 +104,7 @@ function Scrim({ color, onPress, screen }) {
   );
 }
 
-export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed, onLaunch, settings, open = true, warm = false }) {
+export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed, onLaunch, settings, open = true, warm = false, wallpaper }) {
   const t = useTheme();
   const [query, setQuery] = useState('');
   // Kept mounted between opens (shell.jsx): start afresh, once it is gone
@@ -182,7 +195,7 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
           at every open, and inside the grid's layer it made that layer
           stale every time (the whole grid painted again). */}
       <Animated.View pointerEvents={open ? 'auto' : 'none'} style={[StyleSheet.absoluteFill, { opacity: v }]}>
-        <Scrim color="rgba(6,8,20,0.82)" onPress={onClose} screen={screen} />
+        <WallScrim wallpaper={wallpaper} onPress={onClose} screen={screen} />
       </Animated.View>
       {/* The search field and the grid fade as layers of their own: the
           field's caret and focus change at every open, and inside the grid's
@@ -385,14 +398,7 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
       <Animated.View style={[StyleSheet.absoluteFill, { opacity: enter }]}>
         {/* The cards over home's wallpaper, dimmed: a blurred copy of the
             app they came from read as a flat grey behind them. */}
-        {wallpaper ? (
-          <Pressable style={StyleSheet.absoluteFill} onPress={onClose}>
-            {wallpaper}
-            <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(6,8,20,0.4)' }]} />
-          </Pressable>
-        ) : (
-          <Scrim color="rgba(6,8,20,0.82)" onPress={onClose} screen={screen} />
-        )}
+        <WallScrim wallpaper={wallpaper} onPress={onClose} screen={screen} />
       </Animated.View>
       <Animated.View pointerEvents="box-none" style={[styles.overviewHead, { top: screen.topBar + 22, opacity: enter }]}>
         {/* No title over the cards (they say what this is); just the way out. */}
