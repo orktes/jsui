@@ -167,13 +167,15 @@ function LaunchSplash({ launch, screen, t, bottom, done, onGone }) {
   );
 }
 
-// Big clock on the empty desktop.
+// Big clock on the empty desktop: the lock screen's clock, in the same place,
+// so unlocking to an empty desktop doesn't move it. The status bar leaves its
+// own time out meanwhile (TopBar `quiet`).
 function DesktopClock({ screen, t }) {
   const now = useClock();
   return (
-    <View pointerEvents="none" style={[styles.deskClock, { top: screen.topBar + 70 }]}>
-      <Text style={[styles.deskTime, { color: t.name === 'dark' ? 'rgba(255,255,255,0.92)' : 'rgba(20,24,60,0.85)' }]}>{timeText(now)}</Text>
-      <Text style={[styles.deskDate, { color: t.name === 'dark' ? 'rgba(255,255,255,0.7)' : 'rgba(20,24,60,0.6)' }]}>{dateText(now)}</Text>
+    <View pointerEvents="none" style={[styles.deskClock, { top: screen.height * 0.18 }]}>
+      <Text style={[styles.deskTime, { color: t.name === 'dark' ? '#fff' : 'rgba(20,24,60,0.85)' }]}>{timeText(now)}</Text>
+      <Text style={[styles.deskDate, { color: t.name === 'dark' ? 'rgba(255,255,255,0.85)' : 'rgba(20,24,60,0.6)' }]}>{dateText(now)}</Text>
     </View>
   );
 }
@@ -364,11 +366,14 @@ function Shell() {
     { id: noteId++, icon: 'tablet', title: 'Welcome to the JSUI desktop', body: 'Swipe up from the bottom edge for the dock, further for your recent apps.', time: nowText() },
   ]);
   const [toasts, setToasts] = useState([]);
+  // Locked, a notification only counts up the lock screen's pill: no toast.
+  const lockedRef = useRef(false);
+  lockedRef.current = locked;
 
   const notify = useCallback((n) => {
     const note = { id: noteId++, time: nowText(), ...n };
     setNotes((l) => [note, ...l].slice(0, 30));
-    if (!settings.doNotDisturb) {
+    if (!settings.doNotDisturb && !lockedRef.current) {
       setToasts((l) => [...l, note].slice(-3));
     }
   }, [settings.doNotDisturb]);
@@ -458,7 +463,7 @@ function Shell() {
     appNotes.current.set(msg.id, id);
     const full = { id, time: nowText(), notifyId: msg.id, ...note };
     setNotes((l) => [full, ...l].slice(0, 30));
-    if (!settings.doNotDisturb || msg.urgency >= 2) setToasts((l) => [...l, full].slice(-3));
+    if (!lockedRef.current && (!settings.doNotDisturb || msg.urgency >= 2)) setToasts((l) => [...l, full].slice(-3));
   });
 
   const endLaunchExec = useRef(() => {});
@@ -669,7 +674,7 @@ function Shell() {
         {edges && <EdgeSwipe side="left" top={scr.topBar} bottom={bottom} onSwipe={() => setPanel('launcher')} />}
         {edges && <EdgeSwipe side="right" top={scr.topBar} bottom={bottom} onSwipe={() => setPanel('overview')} />}
         {!fullscreen && (
-          <TopBar screen={scr} solid={solidBar} panel={panel} setPanel={setPanel} settings={settings} system={system} />
+          <TopBar screen={scr} solid={solidBar} panel={panel} setPanel={setPanel} settings={settings} system={system} quiet={!visible.length && !panel} />
         )}
         {!fullscreen && !oskOn && appMode && !dockShown && (
           <HomeBar screen={scr} windows={windows} setPanel={setPanel} onPeek={onPeek} />
@@ -734,8 +739,9 @@ function Shell() {
 const styles = StyleSheet.create({
   root: { flex: 1, overflow: 'hidden' },
   deskClock: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
-  deskTime: { fontFamily: font, fontSize: 112, fontWeight: '600', letterSpacing: -3, fontVariant: ['tabular-nums'] },
-  deskDate: { fontFamily: font, fontSize: 24, fontWeight: '500', marginTop: -4 },
+  // The same type as the lock screen's clock (panels.jsx lockTime / lockDate).
+  deskTime: { fontFamily: font, fontSize: 132, fontWeight: '700', letterSpacing: -4 },
+  deskDate: { fontFamily: font, fontSize: 26, fontWeight: '500' },
   snap: { position: 'absolute', borderRadius: 18, borderWidth: 3 },
   osd: { position: 'absolute', width: 320, height: 56, borderRadius: 28, borderWidth: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18 },
   osdTrack: { flex: 1, height: 8, borderRadius: 4, marginLeft: 14, overflow: 'hidden' },
