@@ -1,0 +1,60 @@
+#!/bin/sh
+# Wi-Fi on the Galaxy Tab A7 (SM-T500) running Ubuntu Touch on Samsung's
+# stock vendor partition (run as root; jsui-wm-wifi.service at boot, or
+# wifi-on.sh by hand).
+#
+# Everything else for Wi-Fi runs already (modem, cnss-daemon, the Wi-Fi HAL,
+# wpa_supplicant, NetworkManager), but the vendor's init insmods Samsung's
+# own qca_cld3_wlan.ko, built for Samsung's kernel and refused by this one
+# (signed modules only). The port's kernel ships a matching wlan.ko that
+# nothing loads: load it, then switch the radio on in station mode the way
+# Android's Wi-Fi HAL would (/dev/wlan). Firmware (bdwlan.bin,
+# WCNSS_qcom_cfg.ini) comes from /vendor/firmware via Android's ueventd.
+#
+# A bring-up that takes the kernel down must not do it again on every boot:
+# a marker file stays behind until the radio is up, and while it is there
+# this does nothing (--force clears it).
+MARK=/var/lib/systemd/jsui-wm-wifi.trying
+log() { echo "jsui-wm-wifi: $*"; }
+up() { ip link show wlan0 >/dev/null 2>&1; }
+
+[ "$1" = "--force" ] && rm -f "$MARK"
+if up; then
+  log "wlan0 is up already."
+  exit 0
+fi
+if [ -e "$MARK" ]; then
+  log "an earlier bring-up never finished (crash?): not trying again. Run with --force to retry."
+  exit 1
+fi
+modinfo wlan >/dev/null 2>&1 || { log "no wlan kernel module."; exit 1; }
+
+# Android's Wi-Fi helpers first (they start with the container).
+for i in $(seq 90); do
+  pgrep -f cnss-daemon >/dev/null && pgrep -f "hardware.wifi@" >/dev/null && break
+  sleep 1
+done
+
+touch "$MARK"
+if ! grep -q "^wlan " /proc/modules; then
+  log "loading the wlan module."
+  modprobe wlan || { log "modprobe wlan failed."; rm -f "$MARK"; exit 1; }
+fi
+for i in $(seq 60); do [ -e /dev/wlan ] && break; sleep 1; done
+if [ ! -e /dev/wlan ]; then
+  log "no /dev/wlan after loading the module."
+  rm -f "$MARK"
+  exit 1
+fi
+[ -w /sys/module/wlan/parameters/fwpath ] && printf sta > /sys/module/wlan/parameters/fwpath
+log "switching the radio on."
+timeout 20 sh -c 'printf ON > /dev/wlan'
+for i in $(seq 60); do up && break; sleep 1; done
+rm -f "$MARK"
+if ! up; then
+  log "no wlan0 after switching the radio on."
+  exit 1
+fi
+nmcli radio wifi on 2>/dev/null
+nmcli device set wlan0 managed yes 2>/dev/null
+log "wlan0 is up."
