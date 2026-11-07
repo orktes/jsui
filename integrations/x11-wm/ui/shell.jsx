@@ -160,7 +160,7 @@ function Shell() {
   // by the host), not at whatever the setting last held.
   const adopted = useRef({});
   useEffect(() => {
-    if (system.backlight != null && !adopted.current.backlight) {
+    if (system.backlight != null && system.backlight >= 0 && !adopted.current.backlight) {
       adopted.current.backlight = true;
       setSetting('brightness', system.backlight);
     }
