@@ -612,7 +612,7 @@ function Shell() {
   const homeRef = useRef(false);
   homeRef.current = !visible.length && !panel && !locked && !front.length;
   const appMode = settings.tabletMode && (front.length > 0 || visible.some((w) => w.type === 'normal' && (w.maximized || w.snap)));
-  const dockShown = !appMode || peek || panel === 'launcher' || panel === 'overview';
+  const dockShown = !appMode || peek || panel === 'overview';
   const bottom = appMode ? scr.homeBar || 24 : scr.dock;
   // Solid over a full-screen app, and over the loading card that stands in for one.
   const solidBar = visible.some((w) => w.maximized || w.snap) || (appMode && front.length > 0);
@@ -899,24 +899,6 @@ function Shell() {
             app={barApp} menuOpen={!!barApp && !!barApp.win && winMenu === barApp.win.id} onMenu={onWinMenu} onMenuClose={closeWinMenu}
             quiet={!visible.length && (!panel || panel === 'quick')} />
         )}
-        {!fullscreen && !oskOn && appMode && !dockShown && (
-          <HomeBar screen={scr} windows={windows} setPanel={setPanel} onPeek={onPeek} />
-        )}
-        {/* Home has its own shortcuts and "All apps": no dock while it is all there is. */}
-        {!fullscreen && !oskOn && windows.some((w) => w.type === 'normal') && (
-          <Dock
-            screen={scr}
-            apps={apps}
-            windows={windows}
-            active={active}
-            settings={settings}
-            panel={panel}
-            setPanel={setPanel}
-            onMenu={setDockMenu}
-            onMeasure={setDockRect}
-            shown={dockShown}
-          />
-        )}
         {/* The launcher stays mounted (hidden while closed): opening it then
             paints a laid-out grid with its text shaped and icons decoded,
             not a fresh tree (a ~50 ms frame on the Tab A7). */}
@@ -933,6 +915,25 @@ function Shell() {
               </View>
             ))}
           </View>
+        )}
+        {!fullscreen && !oskOn && appMode && !dockShown && (
+          <HomeBar screen={scr} windows={windows} setPanel={setPanel} onPeek={onPeek} />
+        )}
+        {/* Home has its own shortcuts and "All apps": no dock while it is all there is.
+            Over an app's loading card (a peek during a launch shows it). */}
+        {!fullscreen && !oskOn && (windows.some((w) => w.type === 'normal') || front.length > 0) && (
+          <Dock
+            screen={scr}
+            apps={apps}
+            windows={windows}
+            active={active}
+            settings={settings}
+            panel={panel}
+            setPanel={setPanel}
+            onMenu={setDockMenu}
+            onMeasure={setDockRect}
+            shown={dockShown}
+          />
         )}
         {[closingPanel, panel].filter((n) => n && n !== 'launcher').map((name) => panelEl(name, name === panel))}
         {/* The window menu itself is an overlay of its button (WindowMenu.jsx): taps elsewhere close it. */}
