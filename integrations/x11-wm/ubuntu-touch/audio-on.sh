@@ -3,9 +3,10 @@
 #
 #   sh ~/jsui-wm/audio-on.sh            # try it, then keep it if you heard the tone
 #   sh ~/jsui-wm/audio-on.sh --remove   # stop doing it at boot
+#   sh ~/jsui-wm/audio-on.sh --force    # retry after a bring-up that never finished
 #
-# 1. binds the audio HAL wrapper (sudo: your PIN), restarts PulseAudio and
-#    plays a tone; nothing is kept yet (a reboot undoes it);
+# 1. loads the audio modules the kernel was missing and binds the audio HAL
+#    wrapper (sudo: your PIN), restarts PulseAudio and plays a tone; nothing is kept yet (a reboot undoes it);
 # 2. if you heard the tone, installs jsui-wm-audio.service so it is done at
 #    every boot. Safe to run again.
 HERE=$(dirname "$(readlink -f "$0")")
@@ -17,7 +18,7 @@ if [ "$1" = "--remove" ]; then
   exit 0
 fi
 echo "== 1/2: speaker sound (sudo may ask for your PIN)"
-sudo sh "$HERE/jsui-wm-audio-up" || { echo "binding the audio HAL wrapper failed; nothing installed."; exit 1; }
+sudo sh "$HERE/jsui-wm-audio-up" "$@" || { echo "binding the audio HAL wrapper failed; nothing installed."; exit 1; }
 # Our own PulseAudio too, if the root side could not reach it.
 systemctl --user restart pulseaudio.service 2>/dev/null || pulseaudio -k 2>/dev/null
 for i in $(seq 20); do pactl list short sinks 2>/dev/null | grep -q primary && break; sleep 1; done

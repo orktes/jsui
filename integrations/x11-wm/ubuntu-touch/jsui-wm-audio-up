@@ -3,6 +3,15 @@
 # Samsung's stock vendor partition (run as root: jsui-wm-audio.service at
 # boot, or audio-on.sh by hand).
 #
+# The kernel had no sound card: the vendor's init modprobes Samsung's audio
+# modules, built for Samsung's kernel and refused by this one (signed
+# modules only, like its Wi-Fi module). udev loads the port's own builds of
+# those a device asks for (the machine driver, codecs), but the rest (the
+# bolero macros, the soundwire master, the codecs' soundwire slaves, ...)
+# have no alias, so nothing loads them and the machine driver never makes
+# the card; the vendor's audio service then fails ("Unable to find correct
+# sound card"). Load them from the port's /lib/modules.
+#
 # PulseAudio's droid bridge (module-droid-discover in /etc/pulse/touch.pa)
 # opens the vendor's generic audio HAL, audio.primary.default, in-process;
 # on this vendor that one fails to open ("Invalid argument"), so PulseAudio
@@ -22,6 +31,31 @@ WRAP=/android/system/lib64/hw/audio.hidl_compat.default.so
 [ -e "$WRAP" ] || WRAP=/system/lib64/hw/audio.hidl_compat.default.so
 POLICY="$HERE/jsui-wm-audio-policy.xml"
 [ -e "$WRAP" ] || { log "no audio.hidl_compat wrapper in the Android system image."; exit 1; }
+
+# A bring-up that takes the kernel down must not run again at every boot: a
+# marker stays until the card is up (--force clears it).
+MARK=/var/lib/systemd/jsui-wm-audio.trying
+[ "$1" = "--force" ] && rm -f "$MARK"
+card() { grep -q "^ *[0-9]" /proc/asound/cards 2>/dev/null; }
+if ! card; then
+  if [ -e "$MARK" ]; then
+    log "an earlier bring-up never finished (crash?): not trying again. Run with --force to retry."
+    exit 1
+  fi
+  touch "$MARK"
+  for m in native_dlkm stub_dlkm swr_ctrl_dlkm va_macro_dlkm rx_macro_dlkm tx_macro_dlkm wcd937x_slave_dlkm rouleur_slave_dlkm; do
+    grep -q "^$m " /proc/modules || modprobe "$m" || log "modprobe $m failed."
+  done
+  for i in $(seq 20); do card && break; sleep 1; done
+  rm -f "$MARK"
+  if ! card; then
+    log "still no sound card after loading the audio modules."
+    { date; cat /proc/asound/cards; cut -d" " -f1 /proc/modules | grep dlkm; dmesg | grep -iE "asoc|snd|bengal|swr|macro|wcd|rouleur|bolero" | tail -40; } > /tmp/jsui-wm-audio.log 2>&1
+    chmod 644 /tmp/jsui-wm-audio.log
+    exit 1
+  fi
+fi
+log "sound card: $(sed -n 1p /proc/asound/cards | sed 's/^ *//')"
 
 if mounted "$V/lib64/hw/audio.primary.default.so"; then
   log "audio HAL wrapper bound already."
