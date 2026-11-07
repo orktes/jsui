@@ -420,7 +420,7 @@ function monthGrid(d) {
   return cells;
 }
 
-export const CalendarPanel = memo(function CalendarPanel({ screen, notifications, onClear, onClose, onClosed, open = true }) {
+export const CalendarPanel = memo(function CalendarPanel({ screen, notifications, onClear, onDismiss, onClose, onClosed, open = true }) {
   const t = useTheme();
   const now = useClock();
   const v = useEntrance(open, 200, onClosed);
@@ -446,6 +446,9 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
                     {n.body ? <Text numberOfLines={2} style={[styles.noteBody, { color: t.textDim }]}>{n.body}</Text> : null}
                   </View>
                   <Text style={[styles.noteTime, { color: t.textMute }]}>{n.time}</Text>
+                  <Pressable onPress={() => onDismiss(n.id)} hitSlop={10} style={styles.noteClose} pressedStyle={{ backgroundColor: t.panelLine }}>
+                    <Icon name="close" size={16} color={t.textMute} />
+                  </Pressable>
                 </View>
               ))}
             </ScrollView>
@@ -483,7 +486,9 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
 
 // --------------------------------------------------------------- Lock screen
 
-export const LockScreen = memo(function LockScreen({ screen, onUnlock, notifications }) {
+// `children` is its background (the wallpaper): opaque, so neither the apps
+// nor the desktop's own clock show through while it is up.
+export const LockScreen = memo(function LockScreen({ screen, onUnlock, notifications, children }) {
   const now = useClock();
   // Up with the finger natively while it is down, then `drag` (an animation
   // from where it let go).
@@ -516,7 +521,8 @@ export const LockScreen = memo(function LockScreen({ screen, onUnlock, notificat
   const fade = up.interpolate({ inputRange: [-400, 0], outputRange: [0, 1], extrapolate: 'clamp' });
   return (
     <Animated.View {...pan.panHandlers} {...finger.handlers} style={[StyleSheet.absoluteFill, { opacity: Animated.multiply(v, fade), transform: [{ translateY: up }] }]}>
-      <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(6,8,22,0.55)' }]} />
+      {children}
+      <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(6,8,22,0.35)' }]} />
       <View style={styles.lockBody}>
         <Text style={styles.lockTime}>{pad2(now.getHours())}:{pad2(now.getMinutes())}</Text>
         <Text style={styles.lockDate}>{dateText(now)}</Text>
@@ -537,27 +543,35 @@ export const LockScreen = memo(function LockScreen({ screen, onUnlock, notificat
 
 // ------------------------------------------------------------------ Toasts
 
-export const Toasts = memo(function Toasts({ screen, toasts }) {
+export const Toasts = memo(function Toasts({ screen, toasts, onDone }) {
   const t = useTheme();
   return (
-    <View pointerEvents="none" style={[styles.toasts, { top: screen.topBar + 10, left: (screen.width - 400) / 2 }]}>
+    <View pointerEvents="box-none" style={[styles.toasts, { top: screen.topBar + 10, left: (screen.width - 400) / 2 }]}>
       {toasts.map((n) => (
-        <Toast key={n.id} n={n} t={t} />
+        <Toast key={n.id} n={n} t={t} onDone={onDone} />
       ))}
     </View>
   );
 });
 
-function Toast({ n, t }) {
-  const v = useEntrance(true, 240);
+// Shown for a few seconds, then slides back up; a tap puts it away sooner.
+function Toast({ n, t, onDone }) {
+  const [open, setOpen] = useState(true);
+  const v = useEntrance(open, 240, () => onDone(n.id));
+  useEffect(() => {
+    const id = setTimeout(() => setOpen(false), 3200);
+    return () => clearTimeout(id);
+  }, []);
   const ty = v.interpolate({ inputRange: [0, 1], outputRange: [-40, 0] });
   return (
-    <Animated.View style={[styles.toast, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 32px ${t.shadow}`, opacity: v, transform: [{ translateY: ty }] }]}>
-      {n.app ? <AppIcon app={n.app} size={28} /> : <Icon name={n.icon || 'bell'} size={22} color={t.accent} />}
-      <View style={{ flex: 1, marginLeft: 12 }}>
-        <Text numberOfLines={1} style={[styles.noteTitle, { color: t.text }]}>{n.title}</Text>
-        {n.body ? <Text numberOfLines={2} style={[styles.noteBody, { color: t.textDim }]}>{n.body}</Text> : null}
-      </View>
+    <Animated.View style={{ opacity: v, transform: [{ translateY: ty }] }}>
+      <Pressable onPress={() => setOpen(false)} style={[styles.toast, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 32px ${t.shadow}` }]}>
+        {n.app ? <AppIcon app={n.app} size={28} /> : <Icon name={n.icon || 'bell'} size={22} color={t.accent} />}
+        <View style={{ flex: 1, marginLeft: 12 }}>
+          <Text numberOfLines={1} style={[styles.noteTitle, { color: t.text }]}>{n.title}</Text>
+          {n.body ? <Text numberOfLines={2} style={[styles.noteBody, { color: t.textDim }]}>{n.body}</Text> : null}
+        </View>
+      </Pressable>
     </Animated.View>
   );
 }
@@ -600,6 +614,7 @@ const styles = StyleSheet.create({
   noteTitle: { fontFamily: font, fontSize: 15, fontWeight: '600' },
   noteBody: { fontFamily: font, fontSize: 13, marginTop: 2 },
   noteTime: { fontFamily: font, fontSize: 12, marginLeft: 8 },
+  noteClose: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginLeft: 6, marginRight: -6 },
   bigTime: { fontFamily: font, fontSize: 52, fontWeight: '700', letterSpacing: -1 },
   bigDate: { fontFamily: font, fontSize: 16, fontWeight: '500' },
   calRow: { flexDirection: 'row' },

@@ -179,9 +179,10 @@ function Shell() {
     setNotes((l) => [note, ...l].slice(0, 30));
     if (!settings.doNotDisturb) {
       setToasts((l) => [...l, note].slice(-3));
-      setTimeout(() => setToasts((l) => l.filter((x) => x.id !== note.id)), 3200);
     }
   }, [settings.doNotDisturb]);
+  const toastDone = useCallback((id) => setToasts((l) => l.filter((x) => x.id !== id)), []);
+  const dismissNote = useCallback((id) => setNotes((l) => l.filter((x) => x.id !== id)), []);
 
   // Windows that disappeared animate out from their last state.
   const prev = useRef(new Map());
@@ -258,8 +259,10 @@ function Shell() {
       r.push([cx - 16, scr.topBar, 32, H - scr.topBar - bottom]);
     }
     if (oskOn && oskRect) r.push([oskRect.x, oskRect.y, oskRect.width, oskRect.height]);
+    // Toasts take a tap (it puts them away), not the app under them.
+    if (toasts.length) r.push([(W - 400) / 2, scr.topBar + 10, 400, toasts.length * 92]);
     return r;
-  }, [locked, panel, dockMenu, winMenu, fullscreen, oskOn, dockRect, oskRect, scr, dockShown, appMode, bottom, split && split.left.x + split.left.w, split && split.right.x]);
+  }, [toasts.length, locked, panel, dockMenu, winMenu, fullscreen, oskOn, dockRect, oskRect, scr, dockShown, appMode, bottom, split && split.left.x + split.left.w, split && split.right.x]);
   const lastRegions = useRef('');
   useEffect(() => {
     const json = JSON.stringify(regions);
@@ -297,7 +300,7 @@ function Shell() {
           onLock={() => { setPanel(null); setLocked(true); }} onReload={() => DevSettings.reload()} />
       );
     }
-    if (name === 'calendar') return <CalendarPanel {...common} notifications={notes} onClear={() => setNotes([])} />;
+    if (name === 'calendar') return <CalendarPanel {...common} notifications={notes} onClear={() => setNotes([])} onDismiss={dismissNote} />;
     return null;
   };
 
@@ -363,8 +366,12 @@ function Shell() {
           <DockMenu item={dockMenu} anchor={dockRect && { x: dockRect.x + dockRect.width / 2, width: 0 }} onClose={() => setDockMenu(null)} />
         )}
         {oskOn && <Keyboard screen={scr} onMeasure={setOskRect} onHide={hideOsk} />}
-        {locked && <LockScreen screen={scr} notifications={notes} onUnlock={() => setLocked(false)} />}
-        <Toasts screen={scr} toasts={toasts} />
+        {locked && (
+          <LockScreen screen={scr} notifications={notes} onUnlock={() => setLocked(false)}>
+            <Wallpaper width={scr.width} height={scr.height} t={t} />
+          </LockScreen>
+        )}
+        <Toasts screen={scr} toasts={toasts} onDone={toastDone} />
         {Object.values(popups).map((p) =>
           p.ready ? (
             <HostTexture key={p.id} name={`win:${p.id}`} pointerEvents="none"
