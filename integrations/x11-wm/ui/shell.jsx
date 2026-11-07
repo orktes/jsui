@@ -49,6 +49,44 @@ function Wallpaper({ width, height, t }) {
 }
 
 // Big clock on the empty desktop.
+// Edge swipes over a full-screen app (as on Lomiri): in from the left edge
+// opens the launcher, in from the right edge the switcher. The strips are
+// the shell's (shellRegions), so a touch starting there never reaches the
+// app; the action fires once the finger has come EDGE_TRIGGER px in.
+const EDGE = 14;
+const EDGE_TRIGGER = 56;
+function EdgeSwipe({ side, top, bottom, onSwipe }) {
+  const cb = useRef(onSwipe);
+  cb.current = onSwipe;
+  const pan = useMemo(() => {
+    let fired = false;
+    const inward = (g) => (side === 'left' ? g.dx : -g.dx);
+    return PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderGrant: () => {
+        fired = false;
+      },
+      onPanResponderMove: (e, g) => {
+        if (!fired && inward(g) > EDGE_TRIGGER && Math.abs(g.dx) > Math.abs(g.dy)) {
+          fired = true;
+          wm.haptic();
+          cb.current();
+        }
+      },
+      onPanResponderRelease: (e, g) => {
+        // A quick flick that ended before the trigger distance counts too.
+        if (!fired && inward(g) > EDGE_TRIGGER / 2 && (side === 'left' ? g.vx : -g.vx) > 0.5) {
+          wm.haptic();
+          cb.current();
+        }
+      },
+    });
+  }, [side]);
+  return <View {...pan.panHandlers} style={{ position: 'absolute', top, bottom, width: EDGE, [side]: 0 }} />;
+}
+
 function DesktopClock({ screen, t }) {
   const now = useClock();
   return (
@@ -320,6 +358,8 @@ function Shell() {
   }, [panel, visible.length]);
 
   // The input the shell takes above the windows.
+  // Edge swipes (EdgeSwipe) while a full-screen app has the screen.
+  const edges = appMode && !fullscreen && !locked && !panel;
   const regions = useMemo(() => {
     const W = scr.width;
     const H = scr.height;
@@ -331,6 +371,10 @@ function Shell() {
       else if (!oskOn && dockShown) r.push([0, H - scr.dock, W, scr.dock]);
       if (!oskOn && appMode) r.push([0, H - bottom, W, bottom]);
     }
+    if (edges) {
+      r.push([0, scr.topBar, EDGE, H - scr.topBar - bottom]);
+      r.push([W - EDGE, scr.topBar, EDGE, H - scr.topBar - bottom]);
+    }
     if (split) {
       const cx = (split.left.x + split.left.w + split.right.x) / 2;
       r.push([cx - 16, scr.topBar, 32, H - scr.topBar - bottom]);
@@ -339,7 +383,7 @@ function Shell() {
     // Toasts take a tap (it puts them away), not the app under them.
     if (toasts.length) r.push([(W - 400) / 2, scr.topBar + 10, 400, toasts.length * 92]);
     return r;
-  }, [toasts.length, locked, panel, dockMenu, winMenu, fullscreen, oskOn, dockRect, oskRect, scr, dockShown, appMode, bottom, split && split.left.x + split.left.w, split && split.right.x]);
+  }, [toasts.length, locked, panel, dockMenu, winMenu, fullscreen, oskOn, dockRect, oskRect, scr, dockShown, appMode, bottom, edges, split && split.left.x + split.left.w, split && split.right.x]);
   const lastRegions = useRef('');
   useEffect(() => {
     const json = JSON.stringify(regions);
@@ -426,6 +470,8 @@ function Shell() {
         )}
         {split && !overviewUp && <SplitDivider left={split.left} right={split.right} screen={scr} t={t} bottom={bottom} />}
         <SnapPreview preview={preview} screen={scr} t={t} bottom={bottom} />
+        {edges && <EdgeSwipe side="left" top={scr.topBar} bottom={bottom} onSwipe={() => setPanel('launcher')} />}
+        {edges && <EdgeSwipe side="right" top={scr.topBar} bottom={bottom} onSwipe={() => setPanel('overview')} />}
         {!fullscreen && (
           <TopBar screen={scr} solid={solidBar} panel={panel} setPanel={setPanel} settings={settings} system={system} />
         )}
