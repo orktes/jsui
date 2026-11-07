@@ -582,6 +582,7 @@ class WM {
   void capture(Client* c);
   void place(Client* c);
   void configure(Client* c, int x, int y, int w, int h);
+  void centreUnfilled(Client* c);
   void raise(Client* c);
   void focus(Client* c);
   void focusTop();
@@ -1223,6 +1224,16 @@ void WM::configure(Client* c, int x, int y, int w, int h) {
   publishWindow(c);
 }
 
+// A maximized window whose client keeps a size of its own, narrower than
+// the work area (Ubuntu Touch's Clock draws 1210x1540 whatever it is told):
+// centred there instead of stuck to the left edge.
+void WM::centreUnfilled(Client* c) {
+  if (c->popup || !c->maximized || c->snap) return;
+  Rect wa = workArea();
+  c->x = wa.x + std::max(0, (wa.w - c->w) / 2);
+  c->y = wa.y;
+}
+
 void WM::onCommit(Client* c) {
   if (!c->xdg->initialized) return;
   if (!c->popup && !c->placed && c->xdg->initial_commit) place(c);
@@ -1238,6 +1249,7 @@ void WM::onCommit(Client* c) {
     // The client picked its own size (or follows our configure).
     c->w = geo.width;
     c->h = geo.height;
+    centreUnfilled(c);
     publishWindow(c);
   }
   if (c->popup) {
@@ -1471,6 +1483,7 @@ void WM::onMap(Client* c) {
   c->geoY = geo.y;
   if (geo.width > 0) c->w = geo.width;
   if (geo.height > 0) c->h = geo.height;
+  centreUnfilled(c);
   stack_.push_back(c->id);
   logf("map %u \"%s\" (%s) %dx%d", c->id, c->title.c_str(), c->appIdRaw.c_str(), c->w, c->h);
   capture(c);
