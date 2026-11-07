@@ -7,7 +7,7 @@ import {
 import { remeasureAnchors, useAnchor } from './anchors.js';
 import { useNativeDragY } from './drag.js';
 import { AppIcon } from './AppIcon.jsx';
-import { dateText, longMonth, pad2, timeText, useClock } from './bars.jsx';
+import { dateText, longMonth, pad2, useClock } from './bars.jsx';
 import { Card, IconButton, Label, Slider, ToggleTile } from './controls.jsx';
 import { Icon } from './icons.jsx';
 import { font, useTheme } from './theme.js';
@@ -625,18 +625,29 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
   const v = useEntrance(open, 200, onClosed);
   const ty = v.interpolate({ inputRange: [0, 1], outputRange: [-24, 0] });
   const cells = monthGrid(now);
+  const narrow = screen.width < 760;
   return (
     <View pointerEvents={open ? 'auto' : 'none'} style={StyleSheet.absoluteFill}>
       <Animated.View style={[StyleSheet.absoluteFill, { opacity: v }]}>
         <Pressable style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.25)' }]} onPress={onClose} />
       </Animated.View>
       <Animated.View style={[styles.dropCenter, { top: screen.topBar + 10, opacity: v, transform: [{ translateY: ty }] }]}>
-        <Card style={{ width: 720, flexDirection: 'row' }}>
-          <View style={{ flex: 1, paddingRight: 18 }}>
-            <Label>NOTIFICATIONS</Label>
-            {notifications.length === 0 && <Text style={[styles.empty, { color: t.textMute, marginTop: 30 }]}>You're all caught up</Text>}
+        {/* Side by side; on a narrow (portrait) screen the calendar goes on
+            top of the notifications, with the same 12 px margins as quick
+            settings. The status bar right above shows the time. */}
+        <Card style={narrow ? { width: screen.width - 24, flexDirection: 'column-reverse' } : { width: 720, flexDirection: 'row' }}>
+          <View style={narrow ? { paddingTop: 16 } : { flex: 1, paddingRight: 18 }}>
+            <View style={styles.notesHead}>
+              <Label style={{ flex: 1 }}>Notifications</Label>
+              {notifications.length > 0 && (
+                <Pressable onPress={onClear} hitSlop={8} style={styles.clearAll} pressedStyle={{ backgroundColor: t.panelLine }}>
+                  <Text style={[styles.clearAllText, { color: t.accent }]}>Clear all</Text>
+                </Pressable>
+              )}
+            </View>
+            {notifications.length === 0 && <Text style={[styles.empty, { color: t.textMute, marginTop: 30, marginBottom: 30 }]}>You're all caught up</Text>}
             <View style={{ maxHeight: 340, marginTop: 8 }}>
-            <ScrollView style={{ maxHeight: 340 }} contentContainerStyle={{ paddingBottom: 24 }}>
+            <ScrollView style={{ maxHeight: 340 }} contentContainerStyle={{ paddingBottom: notifications.length > 3 ? 24 : 0 }}>
               {notifications.map((n) => (
                 <Pressable key={n.id} style={[styles.note, { backgroundColor: t.panelRaised }]} pressedStyle={{ backgroundColor: t.panelLine }}
                   onPress={() => {
@@ -647,7 +658,7 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
                   }}>
                   {n.app ? <AppIcon app={n.app} size={32} /> : <Icon name={n.icon || 'bell'} size={22} color={t.accent} />}
                   <View style={{ flex: 1, marginLeft: 12 }}>
-                    <Text numberOfLines={1} style={[styles.noteTitle, { color: t.text }]}>{n.title}</Text>
+                    <Text numberOfLines={2} style={[styles.noteTitle, { color: t.text }]}>{n.title}</Text>
                     {n.body ? <Text numberOfLines={2} style={[styles.noteBody, { color: t.textDim }]}>{n.body}</Text> : null}
                   </View>
                   <Text style={[styles.noteTime, { color: t.textMute }]}>{n.time}</Text>
@@ -657,19 +668,15 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
                 </Pressable>
               ))}
             </ScrollView>
-            <View pointerEvents="none" style={[styles.fadeBottom, { experimental_backgroundImage: `linear-gradient(180deg, rgba(0,0,0,0) 0%, ${t.panel} 100%)` }]} />
-            </View>
-            {notifications.length > 0 && (
-              <Pressable onPress={onClear} style={[styles.pill, { alignSelf: 'flex-start', marginTop: 10, backgroundColor: t.panelRaised }]} pressedStyle={{ backgroundColor: t.panelLine }}>
-                <Text style={[styles.pillText, { color: t.text, marginLeft: 0 }]}>Clear all</Text>
-              </Pressable>
+            {/* Only when the list can scroll: over a short list it showed as an empty card. */}
+            {notifications.length > 3 && (
+              <View pointerEvents="none" style={[styles.fadeBottom, { experimental_backgroundImage: `linear-gradient(180deg, rgba(0,0,0,0) 0%, ${t.panel} 100%)` }]} />
             )}
+            </View>
           </View>
-          <View style={{ width: 1, backgroundColor: t.panelLine }} />
-          <View style={{ width: 320, paddingLeft: 18 }}>
-            <Text style={[styles.bigTime, { color: t.text }]}>{timeText(now)}</Text>
-            <Text style={[styles.bigDate, { color: t.textDim }]}>{dateText(now)} {now.getFullYear()}</Text>
-            <Label style={{ marginTop: 16, marginBottom: 6 }}>{longMonth(now).toUpperCase()}</Label>
+          <View style={narrow ? { height: 1, backgroundColor: t.panelLine } : { width: 1, backgroundColor: t.panelLine }} />
+          <View style={narrow ? { alignItems: 'center', paddingBottom: 16 } : { width: 320, paddingLeft: 18 }}>
+            <Text style={[styles.calTitle, { color: t.text }, narrow && { width: 300 }]}>{longDate(now)}</Text>
             <View style={styles.calRow}>
               {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((d, i) => (
                 <Text key={i} style={[styles.calHead, { color: i >= 5 ? t.textMute : t.textDim }]}>{d}</Text>
@@ -688,6 +695,10 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
     </View>
   );
 });
+
+// "Saturday 7 November": the calendar's heading.
+const longDate = (d) =>
+  `${['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][d.getDay()]} ${d.getDate()} ${longMonth(d)}`;
 
 // --------------------------------------------------------------- Lock screen
 
@@ -830,8 +841,10 @@ const styles = StyleSheet.create({
   noteBody: { fontFamily: font, fontSize: 13, marginTop: 2 },
   noteTime: { fontFamily: font, fontSize: 12, marginLeft: 8 },
   noteClose: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginLeft: 6, marginRight: -6 },
-  bigTime: { fontFamily: font, fontSize: 52, fontWeight: '700', letterSpacing: -1 },
-  bigDate: { fontFamily: font, fontSize: 16, fontWeight: '500' },
+  calTitle: { fontFamily: font, fontSize: 18, fontWeight: '700', marginBottom: 12, marginLeft: 4 },
+  notesHead: { flexDirection: 'row', alignItems: 'center', height: 32 },
+  clearAll: { height: 32, borderRadius: 16, paddingHorizontal: 12, justifyContent: 'center', marginRight: -8 },
+  clearAllText: { fontFamily: font, fontSize: 14, fontWeight: '600' },
   calRow: { flexDirection: 'row' },
   calHead: { width: 44, textAlign: 'center', fontFamily: font, fontSize: 12, fontWeight: '700' },
   calGrid: { flexDirection: 'row', flexWrap: 'wrap', width: 308 },
