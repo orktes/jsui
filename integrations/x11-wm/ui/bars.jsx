@@ -67,7 +67,6 @@ export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, set
   const now = useClock();
   const clock = useAnchor('topbar.clock');
   const status = useAnchor('topbar.status');
-  const kbd = useAnchor('topbar.keyboard');
   const swipe = useSwipeDown((x) => setPanel(x < screen.width / 2 ? 'calendar' : 'quick'));
   const toggle = (p) => setPanel(panel === p ? null : p);
   const battery = system.battery;
@@ -84,10 +83,6 @@ export const TopBar = memo(function TopBar({ screen, solid, panel, setPanel, set
         {settings.doNotDisturb && <View style={{ marginLeft: 8 }}><Icon name="moon" size={16} color={t.textDim} /></View>}
       </Pressable>
       <View style={[styles.side, { justifyContent: 'flex-end' }]}>
-        <Pressable ref={kbd.ref} onLayout={kbd.onLayout} onPress={() => setSetting('osk', !settings.osk)}
-          style={[styles.barButton, settings.osk && { backgroundColor: t.panelLine }]} pressedStyle={{ backgroundColor: t.panelLine }}>
-          <Icon name="keyboard" size={22} color={t.text} />
-        </Pressable>
         <Pressable ref={status.ref} onLayout={status.onLayout} onPress={() => toggle('quick')}
           style={[styles.barButton, styles.status, panel === 'quick' && { backgroundColor: t.panelLine }]} pressedStyle={{ backgroundColor: t.panelLine }}>
           {system.wifi !== null && (
