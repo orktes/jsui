@@ -117,7 +117,7 @@ function VolumeOsd({ screen, t }) {
   );
 }
 
-// An app being started: a window-sized card with the app's icon and a
+// An app being started: a window-sized card with the app's header and a
 // spinner, grown out of the icon it was launched from, until the app's own
 // window is up (it then fades away under it).
 function Spinner({ color, track }) {
@@ -167,9 +167,14 @@ function LaunchSplash({ launch, screen, t, bottom, done, onGone }) {
   return (
     <Animated.View pointerEvents="none"
       style={[styles.splash, { top, width: W, height: H, backgroundColor: t.chrome, opacity: Animated.multiply(fade, o ? 1 : grow), transform: tf }]}>
-      <Animated.View style={{ alignItems: 'center', opacity: content }}>
-        <AppIcon app={launch.app} size={112} />
+      {/* The app's header as its window will have it (Window.jsx, tablet
+          mode), so the window replaces the card without the frame moving;
+          below it only the spinner. */}
+      <Animated.View style={[styles.splashHead, { height: screen.titleBar, backgroundColor: t.chromeActive, opacity: content }]}>
+        <AppIcon app={launch.app} size={22} />
         <Text style={[styles.splashName, { color: t.text }]} numberOfLines={1}>{cleanName(launch.app.name)}</Text>
+      </Animated.View>
+      <Animated.View style={[styles.splashBody, { opacity: content }]}>
         <Spinner color={t.accent} track={t.panelLine} />
       </Animated.View>
     </Animated.View>
@@ -801,8 +806,11 @@ const styles = StyleSheet.create({
   osd: { position: 'absolute', width: 400, height: 48, borderRadius: 24, overflow: 'hidden' },
   osdFill: { position: 'absolute', left: 0, top: 0, bottom: 0, borderRadius: 24 },
   osdIcon: { position: 'absolute', left: 14, top: 13 },
-  splash: { position: 'absolute', left: 0, borderRadius: 18, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
-  splashName: { fontFamily: font, fontSize: 22, fontWeight: '600', marginTop: 22, marginBottom: 30 },
+  // Square like the full-screen window it stands in for.
+  splash: { position: 'absolute', left: 0, overflow: 'hidden' },
+  splashHead: { flexDirection: 'row', alignItems: 'center', paddingLeft: 12 },
+  splashName: { fontFamily: font, fontSize: 14, fontWeight: '600', marginLeft: 10, flexShrink: 1 },
+  splashBody: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   spinner: { width: 34, height: 34, borderRadius: 17, borderWidth: 3.5 },
 });
 
