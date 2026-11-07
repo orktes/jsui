@@ -326,7 +326,9 @@ function Shell() {
     <ThemeContext.Provider value={t}>
       <View style={styles.root}>
         <Wallpaper width={scr.width} height={scr.height} t={t} />
-        {!visible.length && !panel && <DesktopClock screen={scr} t={t} />}
+        {/* Mounted under panels too: mounting it again as one closes laid out and
+            painted its big paragraph afresh in the first frame of the close. */}
+        {!visible.length && <DesktopClock screen={scr} t={t} />}
         {split && !overviewUp && <View pointerEvents="none" style={{ position: 'absolute', left: split.left.x + split.left.w - 1, width: split.right.x - split.left.x - split.left.w + 2, top: split.left.y - scr.titleBar, height: split.left.h + scr.titleBar, backgroundColor: t.name === 'dark' ? '#000' : t.wallTop }} />}
         {windows.map((w) =>
           w.type === 'dock' || w.type === 'desktop' ? null : (

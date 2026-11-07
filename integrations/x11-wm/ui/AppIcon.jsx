@@ -1,5 +1,6 @@
-// An app's icon: the window's own _NET_WM_ICON (host texture), else the
-// desktop file's PNG, else a generated glyph tile.
+// An app's icon: the desktop file's icon (Ubuntu Touch's full-bleed Suru
+// squares clipped to the tile shape, theme icons on a plate), else the
+// window's own _NET_WM_ICON (host texture), else a generated glyph tile.
 import React, { memo } from 'react';
 import { HostTexture, Image, View } from 'react-native';
 import { AppGlyph, glyphFor } from './icons.jsx';
@@ -23,6 +24,16 @@ function Plate({ size, children }) {
 export const AppIcon = memo(function AppIcon({ app, win, size = 56, preferGlyph = false }) {
   const id = (app && app.id) || (win && (win.appId || win.wmClass || win.instance)) || 'app';
   const glyph = glyphFor(`${id} ${(app && app.exec) || ''} ${(win && win.instance) || ''}`);
+  if (!preferGlyph && app && app.icon && app.iconShape === 'square') {
+    return (
+      // The host's PNG has the tile shape cut out already (jsui-icons), and
+      // no shadow: a rounded clip or a blurred shadow per icon made the
+      // launcher's grid 40-55 ms to paint on the Tab A7.
+      <View style={{ width: size, height: size }}>
+        <Image source={{ uri: app.icon }} style={{ width: size, height: size }} resizeMode="stretch" />
+      </View>
+    );
+  }
   if (!preferGlyph && glyph === 'app') {
     if (app && app.icon) {
       return (
