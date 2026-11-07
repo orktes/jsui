@@ -7,7 +7,7 @@ import {
 import { remeasureAnchors, useAnchor } from './anchors.js';
 import { useNativeDragY } from './drag.js';
 import { AppIcon } from './AppIcon.jsx';
-import { dateText, longMonth, pad2, useClock } from './bars.jsx';
+import { dateText, pad2, useClock } from './bars.jsx';
 import { Card, IconButton, Label, Slider, ToggleTile } from './controls.jsx';
 import { Icon } from './icons.jsx';
 import { font, useTheme } from './theme.js';
@@ -669,7 +669,7 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
       <Animated.View style={[styles.dropCenter, { top: screen.topBar + 10, opacity: v, transform: [{ translateY: ty }] }]}>
         {/* Side by side; on a narrow (portrait) screen the calendar goes on
             top of the notifications, with the same 12 px margins as quick
-            settings. The status bar right above shows the time. */}
+            settings. The status bar right above shows the date and time. */}
         <Card style={narrow ? { width: screen.width - 24, flexDirection: 'column-reverse' } : { width: 720, flexDirection: 'row' }}>
           <View style={narrow ? { paddingTop: 16 } : { flex: 1, paddingRight: 18 }}>
             <View style={styles.notesHead}>
@@ -712,7 +712,6 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
           </View>
           <View style={narrow ? { height: 1, backgroundColor: t.panelLine } : { width: 1, backgroundColor: t.panelLine }} />
           <View style={narrow ? { alignItems: 'center', paddingBottom: 16 } : { width: 320, paddingLeft: 18 }}>
-            <Text style={[styles.calTitle, { color: t.text }, narrow && { width: 300 }]}>{longDate(now)}</Text>
             <View style={styles.calRow}>
               {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((d, i) => (
                 <Text key={i} style={[styles.calHead, { color: t.textMute }]}>{d}</Text>
@@ -731,10 +730,6 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
     </View>
   );
 });
-
-// "Saturday 7 November": the calendar's heading.
-const longDate = (d) =>
-  `${['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][d.getDay()]} ${d.getDate()} ${longMonth(d)}`;
 
 // --------------------------------------------------------------- Lock screen
 
@@ -873,7 +868,6 @@ const styles = StyleSheet.create({
   noteBody: { fontFamily: font, fontSize: 13, marginTop: 2 },
   noteTime: { fontFamily: font, fontSize: 12, marginLeft: 8 },
   noteClose: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginLeft: 6, marginRight: -6 },
-  calTitle: { fontFamily: font, fontSize: 18, fontWeight: '700', marginBottom: 12, marginLeft: 4 },
   notesHead: { flexDirection: 'row', alignItems: 'center', height: 32 },
   clearAll: { height: 32, borderRadius: 16, paddingHorizontal: 12, justifyContent: 'center', marginRight: -8 },
   clearAllText: { fontFamily: font, fontSize: 14, fontWeight: '600' },
