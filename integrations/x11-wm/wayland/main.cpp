@@ -1638,14 +1638,18 @@ void WM::readStartLevels() {
     return;
   }
   // Only a lit screen's level is the user's (off reads 0, and repowerd dims
-  // it before it goes off): with the screen off at start, the next refresh
+  // it before it goes off): with the screen off at start, "backlight" is -1
+  // (there is one, level unknown) and the next touch or refresh
   // (systemTimer_, 30 s) tries again.
   if (!backlightRead_) {
     const double b = backlightLevel();
-    if (b < 0) backlightRead_ = true;  // no backlight
-    else if (b > 0) {
+    if (b < 0) {
+      backlightRead_ = true;  // no backlight
+    } else if (b > 0) {
       backlightRead_ = true;
       startBacklight_ = ",\"backlight\":" + std::to_string(b);
+    } else {
+      startBacklight_ = ",\"backlight\":-1";  // there is one; its level comes later
     }
   }
   if (volumeRead_) return;
@@ -2669,6 +2673,7 @@ void WM::gpuBoost(bool touch) {
 }
 
 void WM::touchEvent(int id, int phase, double x, double y, uint32_t timeMs) {
+  if (phase == 0 && !backlightRead_) publishSystem();  // the screen is lit now: its level (readStartLevels)
   gpuBoost(true);
   if (perfEvery_) logf("touch %d at %.0f", phase, nowMs());
   int tid = 1 + (id % 1000);
