@@ -50,5 +50,6 @@ export const AppIcon = memo(function AppIcon({ app, win, size = 56, preferGlyph 
       );
     }
   }
-  return <AppGlyph id={id} glyph={glyph} size={size} />;
+  const name = (app && app.name) || '';
+  return <AppGlyph id={id} glyph={glyph} size={size} letter={name ? name.trim().charAt(0).toUpperCase() : undefined} />;
 });

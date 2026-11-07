@@ -2834,6 +2834,28 @@ the tick, so the config never leaks into a later commit.
   within the duration). Per-type `duration` and `delay` override the
   config's `duration`. `onEnd` runs after the longest duration.
 
+**Which commit it animates.** The config belongs to the *next* commit,
+whatever it is. Call `configureNext` in the same handler (or render) that
+makes the change: when the change arrives later, through host state, a
+timer or a slow render, another commit may come first and take the config
+(the jsui-wm switcher armed it at a card's swipe; the shell's commit that
+dropped the card came ~250 ms later on a Tab A7, after a smaller one had
+used it, and the cards jumped). A component that notices the change while
+rendering can arm it right there: `configureNext` during render is read at
+the start of that render's commit.
+
+**Moving views without it.** A native `Animated` value set in the commit
+that moved a view (`setValue(oldX - newX)` plus a native timing to 0,
+started from `useLayoutEffect`) lands on the frame of that commit's layout,
+in single-threaded, lockstep and free-running JS-thread modes: there is no
+frame at the old place plus the offset. `react_layout_slide_e2e` checks both
+ways frame by frame. Remember that views drawn later paint over earlier
+siblings: give every moved view its offset, not only the one you watch.
+
+Neither costs anything while nothing animates: an armed config is a few
+rects compared in the layout pass it arms, and a running animation is one
+interpolation per animated node per frame, no JS and no relayout.
+
 ## Pressables
 
 `Pressable`, the Touchables and `Text` share one press state machine

@@ -1,9 +1,9 @@
 // Line icons for the shell, drawn on a 24x24 grid with react-native-svg
 // (round caps and joins, stroke = currentColor-like `color` prop).
 import React, { memo } from 'react';
-import { View } from 'react-native';
+import { Text, View } from 'react-native';
 import Svg, { Circle, Line, Path, Polyline, Rect } from 'react-native-svg';
-import { tileColors } from './theme.js';
+import { font, tileColors } from './theme.js';
 
 const shapes = {
   grid: (
@@ -366,8 +366,9 @@ function hash(s) {
   return h >>> 0;
 }
 
-// A generated app icon: a gradient squircle with a white glyph.
-export const AppGlyph = memo(function AppGlyph({ id, glyph, size = 56 }) {
+// A generated app icon: a gradient squircle with a white glyph, or for an app
+// no glyph fits, the first letter of its name (`letter`).
+export const AppGlyph = memo(function AppGlyph({ id, glyph, size = 56, letter }) {
   const [a, b] = glyphColors[glyph] || tileColors[hash(String(id || glyph || '')) % tileColors.length];
   return (
     <View
@@ -381,7 +382,11 @@ export const AppGlyph = memo(function AppGlyph({ id, glyph, size = 56 }) {
         boxShadow: `0px ${size * 0.06}px ${size * 0.18}px rgba(0,0,0,0.28)`,
       }}
     >
-      <Icon name={glyph || glyphFor(id)} size={size * 0.58} color="#fff" strokeWidth={2.1} />
+      {(glyph || glyphFor(id)) === 'app' && letter ? (
+        <Text style={{ fontFamily: font, fontSize: size * 0.48, fontWeight: '700', color: '#fff' }}>{letter}</Text>
+      ) : (
+        <Icon name={glyph || glyphFor(id)} size={size * 0.58} color="#fff" strokeWidth={2.1} />
+      )}
     </View>
   );
 });

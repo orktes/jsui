@@ -2,7 +2,7 @@
 // quick settings, the calendar / notifications panel and the lock screen.
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Animated, Easing, HostTexture, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useHostMessage,
+  Animated, Easing, HostTexture, LayoutAnimation, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useHostMessage,
 } from 'react-native';
 import { remeasureAnchors, useAnchor } from './anchors.js';
 import { useNativeDragY } from './drag.js';
@@ -180,9 +180,11 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
   // don't fit the height (portrait), narrower columns (down to 120 px) until
   // every app shows without scrolling. The search field spans the grid.
   const bottom = settings.osk ? 330 : screen.dock + 12;
-  // (A tile ends in its second label line and padding: the last row may
-  // reach 40 px into the gap above the dock.)
-  const rowsFit = Math.max(1, Math.floor((screen.height - screen.topBar - 28 - 64 - 28 - bottom + 40) / 156));
+  // The grid is laid out for the screen without the keyboard: the keyboard
+  // coming up only shortens the scrolling area (it used to add columns and
+  // wrap the names). (A tile ends in its second label line and padding:
+  // the last row may reach 40 px into the gap above the dock.)
+  const rowsFit = Math.max(1, Math.floor((screen.height - screen.topBar - 28 - 64 - 28 - (screen.dock + 12) + 40) / 156));
   const fit = Math.max(3, Math.min(8, Math.floor((screen.width - 48) / 150)));
   let cols = Math.min(fit, Math.max(3, Math.ceil(apps.length / Math.ceil(apps.length / fit))));
   let tileW = 150;
@@ -237,6 +239,10 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
               ))}
               {!list.length && <Text style={[styles.empty, { color: 'rgba(255,255,255,0.6)' }]}>No apps match “{query}”</Text>}
             </ScrollView>
+            {/* Over the keyboard the grid scrolls under a fade, not a cut through a row. */}
+            {settings.osk && (
+              <View pointerEvents="none" style={[styles.fadeBottom, { height: 56, experimental_backgroundImage: 'linear-gradient(180deg, rgba(6,8,20,0) 0%, rgba(6,8,20,0.9) 100%)' }]} />
+            )}
           </Animated.View>
         </Animated.View>
       </View>
@@ -410,6 +416,14 @@ export const Overview = memo(function Overview({ screen, windows, launches = [],
     offsets.push(Math.max(0, c.cx - screen.width / 2));
     x += c.w + gap;
   });
+  // A card gone (swiped away, its app closed, a launch done): the ones after
+  // it slide into its place, natively (LayoutAnimation's update). Armed in
+  // the render that drops it, so it is this commit's: armed at the swipe,
+  // another commit could take it first (the shell's render after a close
+  // takes ~250 ms on the Tab A7).
+  const count = useRef(shown.length);
+  if (shown.length < count.current) LayoutAnimation.configureNext({ duration: 260, update: { type: 'easeOut' } });
+  count.current = shown.length;
   const pick = (w) => {
     setTarget(w.id);
     wm.focus(w.id);
@@ -666,7 +680,7 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
   return (
     <View pointerEvents={open ? 'auto' : 'none'} style={StyleSheet.absoluteFill}>
       <Animated.View style={[StyleSheet.absoluteFill, { opacity: v }]}>
-        <Pressable style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.25)' }]} onPress={onClose} />
+        <Pressable style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.45)' }]} onPress={onClose} />
       </Animated.View>
       <Animated.View style={[styles.dropRight, { top: screen.topBar + 10, opacity: v, transform: [{ translateY: ty }] }]}>
         <Card style={{ width: 420 }}>
@@ -764,6 +778,15 @@ function monthGrid(d) {
   return cells;
 }
 
+// Who sent a notification, over its title: the app ("Messages"), and how
+// many it has stacked ("Messages · 3"). Nothing when the title is the app.
+function NoteFrom({ n, count, color }) {
+  const from = n.appName && n.appName !== n.title ? n.appName : '';
+  const text = [from, count > 1 ? `${count} new` : ''].filter(Boolean).join(' · ');
+  if (!text) return null;
+  return <Text numberOfLines={1} style={[styles.noteFrom, { color }]}>{text}</Text>;
+}
+
 // Notifications by sender (the app, or the title when there is none), newest
 // first: { key, items } with items[0] the newest.
 function groupNotes(list) {
@@ -794,14 +817,15 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
   return (
     <View pointerEvents={open ? 'auto' : 'none'} style={StyleSheet.absoluteFill}>
       <Animated.View style={[StyleSheet.absoluteFill, { opacity: v }]}>
-        <Pressable style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.25)' }]} onPress={onClose} />
+        <Pressable style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.45)' }]} onPress={onClose} />
       </Animated.View>
       <Animated.View style={[styles.dropCenter, { top: screen.topBar + 10, opacity: v, transform: [{ translateY: ty }] }]}>
-        {/* Side by side; on a narrow (portrait) screen the calendar goes on
-            top of the notifications, with the same 12 px margins as quick
-            settings. The status bar right above shows the date and time. */}
-        <Card style={narrow ? { width: screen.width - 24, flexDirection: 'column-reverse' } : { width: 720, flexDirection: 'row' }}>
-          <View style={narrow ? { paddingTop: 16 } : { flex: 1, paddingRight: 18 }}>
+        {/* Notifications first, the calendar after: side by side, or on a
+            narrow (portrait) screen one under the other, with the same 12 px
+            margins as quick settings. The status bar right above shows the
+            date and time. */}
+        <Card style={narrow ? { width: screen.width - 24, flexDirection: 'column' } : { width: 720, flexDirection: 'row' }}>
+          <View style={narrow ? { paddingBottom: 16 } : { flex: 1, paddingRight: 18 }}>
             <View style={styles.notesHead}>
               <Label style={{ flex: 1 }}>Notifications</Label>
               {notifications.length > 0 && (
@@ -829,9 +853,8 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
                     {/* The app's icon, or none: the same bell on every card said nothing. */}
                     {n.from ? <AppIcon app={n.from} size={32} /> : null}
                     <View style={{ flex: 1, marginLeft: n.from ? 12 : 4 }}>
-                      <Text numberOfLines={1} style={[styles.noteTitle, { color: t.text }]}>
-                        {n.title}{!open && g.items.length > 1 ? <Text style={{ color: t.textMute }}>{`  ${g.items.length}`}</Text> : null}
-                      </Text>
+                      <NoteFrom n={n} count={!open ? g.items.length : 1} color={t.textMute} />
+                      <Text numberOfLines={1} style={[styles.noteTitle, { color: t.text }]}>{n.title}</Text>
                       {n.body ? <Text numberOfLines={2} style={[styles.noteBody, { color: t.textDim }]}>{n.body}</Text> : null}
                     </View>
                     <Text style={[styles.noteTime, { color: t.textMute }]}>{n.time}</Text>
@@ -851,7 +874,7 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
             </View>
           </View>
           <View style={narrow ? { height: 1, backgroundColor: t.panelLine } : { width: 1, backgroundColor: t.panelLine }} />
-          <View style={narrow ? { alignItems: 'center', paddingBottom: 16 } : { width: 320, paddingLeft: 18 }}>
+          <View style={narrow ? { alignItems: 'center', paddingTop: 16 } : { width: 320, paddingLeft: 18 }}>
             {/* The month, headed like Notifications beside it. */}
             <View style={[styles.notesHead, { width: 308, marginBottom: 8 }]}>
               <Label>{`${longMonth(now)} ${now.getFullYear()}`}</Label>
@@ -926,9 +949,8 @@ export const LockScreen = memo(function LockScreen({ screen, onUnlock, notificat
           <View style={[styles.lockCard, { width: Math.min(440, screen.width - 48) }]}>
             {top.from ? <AppIcon app={top.from} size={32} /> : null}
             <View style={{ flex: 1, marginLeft: top.from ? 12 : 0 }}>
-              <Text numberOfLines={1} style={styles.lockCardTitle}>
-                {top.title}{topCount > 1 ? <Text style={{ color: 'rgba(255,255,255,0.6)' }}>{`  ${topCount}`}</Text> : null}
-              </Text>
+              <NoteFrom n={top} count={topCount} color="rgba(255,255,255,0.65)" />
+              <Text numberOfLines={1} style={styles.lockCardTitle}>{top.title}</Text>
               {top.body ? <Text numberOfLines={2} style={styles.lockCardBody}>{top.body}</Text> : null}
             </View>
           </View>
@@ -974,6 +996,7 @@ function Toast({ n, t, onDone, onOpen }) {
       <Pressable onPress={() => { setOpen(false); if ((n.app || n.notifyId != null) && onOpen) onOpen(n); }} style={[styles.toast, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 32px ${t.shadow}` }]}>
         {n.from ? <AppIcon app={n.from} size={28} /> : null}
         <View style={{ flex: 1, marginLeft: n.from ? 12 : 4 }}>
+          <NoteFrom n={n} count={1} color={t.textMute} />
           <Text numberOfLines={1} style={[styles.noteTitle, { color: t.text }]}>{n.title}</Text>
           {n.body ? <Text numberOfLines={2} style={[styles.noteBody, { color: t.textDim }]}>{n.body}</Text> : null}
         </View>
@@ -1026,6 +1049,7 @@ const styles = StyleSheet.create({
   tiles: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 10 },
   note: { flexDirection: 'row', alignItems: 'center', borderRadius: radius.m, padding: 14, marginBottom: 8 },
   noteTitle: { fontFamily: font, fontSize: 15, fontWeight: '600' },
+  noteFrom: { fontFamily: font, fontSize: 12, fontWeight: '600', letterSpacing: 0.2, marginBottom: 1 },
   noteBody: { fontFamily: font, fontSize: 13, marginTop: 2 },
   noteTime: { fontFamily: font, fontSize: 12, marginLeft: 8 },
   noteClose: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginLeft: 6, marginRight: -6 },

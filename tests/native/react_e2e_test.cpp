@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -122,9 +123,13 @@ TEST(react_e2e) {
   t.key("Enter");
   CHECK_EQ(t.take(), std::string("press=\"B\""));
 
-  // Long press on B (50..100).
+  // Long press on B (50..100). The long-press delay is measured in wall
+  // time as well as frame time (a tap's release can reach JS after a timer
+  // running at frame time, see usePress.js), so the hold really lasts.
   jsui_send_mouse_move(t.rt, 20, 70);
   jsui_send_mouse_button(t.rt, 20, 70, JSUI_MOUSE_LEFT, 1, 0);
+  t.tick(16);
+  std::this_thread::sleep_for(std::chrono::milliseconds(520));
   t.tick(600);
   jsui_send_mouse_button(t.rt, 20, 70, JSUI_MOUSE_LEFT, 0, 0);
   t.tick(16);
