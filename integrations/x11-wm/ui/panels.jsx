@@ -180,9 +180,11 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
   // don't fit the height (portrait), narrower columns (down to 120 px) until
   // every app shows without scrolling. The search field spans the grid.
   const bottom = settings.osk ? 330 : screen.dock + 12;
-  // (A tile ends in its second label line and padding: the last row may
-  // reach 40 px into the gap above the dock.)
-  const rowsFit = Math.max(1, Math.floor((screen.height - screen.topBar - 28 - 64 - 28 - bottom + 40) / 156));
+  // The grid is laid out for the screen without the keyboard: the keyboard
+  // coming up only shortens the scrolling area (it used to add columns and
+  // wrap the names). (A tile ends in its second label line and padding:
+  // the last row may reach 40 px into the gap above the dock.)
+  const rowsFit = Math.max(1, Math.floor((screen.height - screen.topBar - 28 - 64 - 28 - (screen.dock + 12) + 40) / 156));
   const fit = Math.max(3, Math.min(8, Math.floor((screen.width - 48) / 150)));
   let cols = Math.min(fit, Math.max(3, Math.ceil(apps.length / Math.ceil(apps.length / fit))));
   let tileW = 150;
@@ -237,6 +239,10 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
               ))}
               {!list.length && <Text style={[styles.empty, { color: 'rgba(255,255,255,0.6)' }]}>No apps match “{query}”</Text>}
             </ScrollView>
+            {/* Over the keyboard the grid scrolls under a fade, not a cut through a row. */}
+            {settings.osk && (
+              <View pointerEvents="none" style={[styles.fadeBottom, { height: 56, experimental_backgroundImage: 'linear-gradient(180deg, rgba(6,8,20,0) 0%, rgba(6,8,20,0.9) 100%)' }]} />
+            )}
           </Animated.View>
         </Animated.View>
       </View>
