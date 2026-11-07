@@ -73,6 +73,7 @@
 #include <iterator>
 #include <functional>
 #include <map>
+#include <unordered_map>
 #include <memory>
 #include <sstream>
 #include <set>
@@ -641,6 +642,8 @@ class WM {
   void onDestroy(Client* c);
   void onCommit(Client* c);
   void capture(Client* c);
+  bool captureShmGl(Client* c, int w, int h, int x0, int y0, int x1, int y1, bool partial);
+  bool captureShmDirect(Client* c, int w, int h, int x0, int y0, int x1, int y1, bool partial);
   void place(Client* c);
   void configure(Client* c, int x, int y, int w, int h);
   void refitWorkArea();
@@ -814,6 +817,38 @@ class WM {
   // Apps' GPU buffers (android_wlegl, wlegl.h): the one each window shows,
   // locked until the next one replaces it or the window's texture goes.
   bool gpuApps_ = false;
+  // shm windows on the GL path: a texture per window, of which each commit
+  // uploads only the damaged rectangle (captureShmGl).
+  struct ShmTex {
+    unsigned tex = 0;
+    int w = 0, h = 0;
+    bool bgra = false;  // straight from a client buffer (captureShmDirect), else c->rgba
+  };
+  std::map<uint32_t, ShmTex> shmTex_;
+  // The last GPU buffer (android_wlegl / dma-buf) each surface committed.
+  // wlroots can't make a texture of these with the pixman renderer and can
+  // let go of current.buffer (Firefox on the GPU: a subsurface that had an
+  // shm buffer before), so captureGpu reads them from here. No lock is held
+  // (captureGpu locks what it shows); an entry goes when its buffer is
+  // destroyed or the surface commits something else.
+  struct GpuBuf {
+    wlr_buffer* buf = nullptr;
+    Hook* gone = nullptr;
+  };
+  std::unordered_map<wlr_surface*, GpuBuf> gpuBuf_;
+  wlr_buffer* gpuBufferOf(wlr_surface* s) const {
+    auto it = gpuBuf_.find(s);
+    return it == gpuBuf_.end() ? nullptr : it->second.buf;
+  }
+  void forgetGpuBuf(wlr_surface* s) {
+    auto it = gpuBuf_.find(s);
+    if (it == gpuBuf_.end()) return;
+    if (it->second.gone) {
+      wl_list_remove(&it->second.gone->l.link);
+      delete it->second.gone;
+    }
+    gpuBuf_.erase(it);
+  }
   std::map<uint32_t, wlr_buffer*> gpuBuffers_;
   bool captureGpu(Client* c);
   // Full-screen panels get a blurred snapshot of the screen under them
@@ -982,9 +1017,26 @@ bool WM::setup() {
         delete k;
       }, new Ctx{this, id});
     }));
-    hooks->push_back(hook(&s->events.destroy, [hooks](void*) {
-      unhook(*hooks);
-      delete hooks;
+#ifdef JSUI_WL_MIR_GL
+    hooks->push_back(hook(&s->events.client_commit, [this, s](void*) {
+      if (!(s->pending.committed & WLR_SURFACE_STATE_BUFFER)) return;
+      wlr_buffer* nb = s->pending.buffer;
+      wlr_dmabuf_attributes a{};
+      const bool gpu = nb && (wlegl::from(nb) || (dmabuf::s.global && wlr_buffer_get_dmabuf(nb, &a)));
+      if (gpuBufferOf(s) == nb) return;
+      forgetGpuBuf(s);
+      if (!gpu) return;
+      GpuBuf& g = gpuBuf_[s];
+      g.buf = nb;
+      g.gone = hook(&nb->events.destroy, [this, s](void*) { forgetGpuBuf(s); });
+    }));
+#endif
+    hooks->push_back(hook(&s->events.destroy, [this, hooks, s](void*) {
+      forgetGpuBuf(s);
+      // unhook() deletes this very lambda: nothing captured is touched after it.
+      auto* own = hooks;
+      unhook(*own);
+      delete own;
     }));
   });
   wlr_subcompositor_create(display_);
@@ -1669,15 +1721,71 @@ void WM::capture(Client* c) {
   int w = c->popup ? int(std::lround(root->current.width * c->cs)) : c->w;
   int h = c->popup ? int(std::lround(root->current.height * c->cs)) : c->h;
   if (w <= 0 || h <= 0) return;
+  // On the GL path only what the commit damaged is composited again and
+  // uploaded (a blinking caret in Firefox recomposited and copied all
+  // 2000x1130 px, ~28 % of a core for a caret). Elsewhere, and whenever the
+  // size changed, everything.
+  bool partial = false;
+  int bx0 = 0, by0 = 0, bx1 = w, by1 = h;
+#ifdef JSUI_WL_MIR_GL
+  const bool shmGl = gpu_ && !vulkan_;
+  auto known = shmTex_.find(c->id);
+  if (shmGl && known != shmTex_.end() && known->second.w == w && known->second.h == h) {
+    struct Box {
+      int x0, y0, x1, y1, ox, oy;
+      double cs;
+    } box{w, h, 0, 0, ox, oy, c->cs};
+    wlr_surface_for_each_surface(
+        root,
+        [](wlr_surface* s, int sx, int sy, void* u) {
+          auto* b = static_cast<Box*>(u);
+          pixman_region32_t d;
+          pixman_region32_init(&d);
+          wlr_surface_get_effective_damage(s, &d);
+          if (pixman_region32_not_empty(&d)) {
+            const pixman_box32_t* e = pixman_region32_extents(&d);
+            b->x0 = std::min(b->x0, int(std::floor((e->x1 + sx + b->ox) * b->cs)));
+            b->y0 = std::min(b->y0, int(std::floor((e->y1 + sy + b->oy) * b->cs)));
+            b->x1 = std::max(b->x1, int(std::ceil((e->x2 + sx + b->ox) * b->cs)));
+            b->y1 = std::max(b->y1, int(std::ceil((e->y2 + sy + b->oy) * b->cs)));
+          }
+          pixman_region32_fini(&d);
+        },
+        &box);
+    bx0 = std::max(0, box.x0);
+    by0 = std::max(0, box.y0);
+    bx1 = std::min(w, box.x1);
+    by1 = std::min(h, box.y1);
+    if (bx1 <= bx0 || by1 <= by0) return;  // nothing changed
+    partial = true;
+  }
+#endif
+  if (captureShmDirect(c, w, h, bx0, by0, bx1, by1, partial)) return;
+  // c->rgba holds the last composite only if that was the last capture.
+  if (c->texW != w || c->texH != h) {
+    partial = false;
+    bx0 = by0 = 0;
+    bx1 = w;
+    by1 = h;
+  }
   if (c->texW != w || c->texH != h) {
     c->rgba.assign(size_t(w) * size_t(h) * 4, 0);
     c->texW = w;
     c->texH = h;
+  } else if (partial) {
+    for (int y = by0; y < by1; y++)
+      std::fill(c->rgba.begin() + (size_t(y) * w + bx0) * 4, c->rgba.begin() + (size_t(y) * w + bx1) * 4, 0);
   } else {
     std::fill(c->rgba.begin(), c->rgba.end(), 0);
   }
   pixman_image_t* dst = pixman_image_create_bits_no_clear(PIXMAN_a8b8g8r8, w, h,
                                                          reinterpret_cast<uint32_t*>(c->rgba.data()), w * 4);
+  if (partial) {
+    pixman_region32_t clip;
+    pixman_region32_init_rect(&clip, bx0, by0, unsigned(bx1 - bx0), unsigned(by1 - by0));
+    pixman_image_set_clip_region32(dst, &clip);
+    pixman_region32_fini(&clip);
+  }
   struct Ctx {
     pixman_image_t* dst;
     int ox, oy;
@@ -1713,8 +1821,10 @@ void WM::capture(Client* c) {
       &ctx);
   pixman_image_unref(dst);
   if (!ctx.any) return;
-  // Opaque windows: no alpha holes from x8 buffers (pixman fills x8 as 0xff on SRC).
-  jsui_set_texture_pixels(rt_, ("win:" + std::to_string(c->id)).c_str(), c->rgba.data(), w, h, size_t(w) * 4, 0);
+  if (!captureShmGl(c, w, h, bx0, by0, bx1, by1, partial)) {
+    // Opaque windows: no alpha holes from x8 buffers (pixman fills x8 as 0xff on SRC).
+    jsui_set_texture_pixels(rt_, ("win:" + std::to_string(c->id)).c_str(), c->rgba.data(), w, h, size_t(w) * 4, 0);
+  }
   if (!c->hasTexture) {
     c->hasTexture = true;
     if (c->popup) publishPopups();
@@ -1727,13 +1837,166 @@ void WM::capture(Client* c) {
 // dmabuf.h): its buffer's texture becomes the window's host texture as is.
 // Subsurfaces aren't composited on this path (Qt's GL windows and Vulkan
 // swapchains have none).
+// The GL path for a captured shm window: c->rgba goes into the window's own
+// texture, all of it when `partial` is false (new or resized), else only the
+// rows / columns of the damaged box. False without a GL context: the caller
+// hands JSUI the pixels instead.
+bool WM::captureShmGl(Client* c, int w, int h, int x0, int y0, int x1, int y1, bool partial) {
+#ifdef JSUI_WL_MIR_GL
+  if (!gpu_ || vulkan_ || !mir_->makeCurrent()) return false;
+  ShmTex& t = shmTex_[c->id];
+  constexpr GLenum kUnpackRowLength = 0x0CF2;  // GL_UNPACK_ROW_LENGTH (GLES 3 / EXT_unpack_subimage)
+  if (!t.tex || t.w != w || t.h != h || !partial || t.bgra) {
+    t.bgra = false;
+    if (!t.tex) glGenTextures(1, &t.tex);
+    glBindTexture(GL_TEXTURE_2D, t.tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, c->rgba.data());
+    t.w = w;
+    t.h = h;
+  } else {
+    glBindTexture(GL_TEXTURE_2D, t.tex);
+    glPixelStorei(kUnpackRowLength, w);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, x0, y0, x1 - x0, y1 - y0, GL_RGBA, GL_UNSIGNED_BYTE,
+                    c->rgba.data() + (size_t(y0) * w + x0) * 4);
+    glPixelStorei(kUnpackRowLength, 0);
+  }
+  glBindTexture(GL_TEXTURE_2D, 0);
+  JsuiTexture jt{};
+  jt.kind = JSUI_TEXTURE_GL;
+  jt.handle = reinterpret_cast<void*>(uintptr_t(t.tex));
+  jt.width = w;
+  jt.height = h;
+  std::string key = "win:" + std::to_string(c->id);
+  if (jsui_set_texture(rt_, key.c_str(), &jt) == 0) jsui_texture_updated(rt_, key.c_str());
+  return true;
+#else
+  (void)c, (void)w, (void)h, (void)x0, (void)y0, (void)x1, (void)y1, (void)partial;
+  return false;
+#endif
+}
+
+// An shm window whose topmost surface is opaque, unscaled and covers what it
+// shows (Firefox's content subsurface over its root, a terminal): that
+// surface's pixels go into the window's texture as they are (BGRA, the
+// damaged box), with no composite into c->rgba first. A full-window frame
+// was three copies (wlroots' upload of the shm buffer, the composite, ours);
+// this drops one, and the clearing. False when that doesn't apply.
+bool WM::captureShmDirect(Client* c, int w, int h, int x0, int y0, int x1, int y1, bool partial) {
+#ifdef JSUI_WL_MIR_GL
+  if (!gpu_ || vulkan_ || c->popup || c->cs != 1) return false;
+  struct Top {
+    wlr_surface* s = nullptr;
+    int x = 0, y = 0, n = 0;
+  } top;
+  wlr_surface_for_each_surface(
+      c->xdg->surface,
+      [](wlr_surface* s, int sx, int sy, void* u) {
+        auto* k = static_cast<Top*>(u);
+        wlr_texture* tex = wlr_surface_get_texture(s);
+        if (!tex || !wlr_texture_is_pixman(tex)) return;
+        k->n++;
+        *k = {s, sx, sy, k->n};  // later surfaces are drawn above
+      },
+      &top);
+  if (!top.s) return false;
+  pixman_image_t* src = wlr_pixman_texture_get_image(wlr_surface_get_texture(top.s));
+  if (!src) return false;
+  const pixman_format_code_t fmt = pixman_image_get_format(src);
+  const bool opaque = fmt == PIXMAN_x8r8g8b8;
+  if (!opaque && !(fmt == PIXMAN_a8r8g8b8 && top.n == 1)) return false;
+  const int bw = pixman_image_get_width(src), bh = pixman_image_get_height(src);
+  // Unscaled (buffer px = surface units), at the window's origin, covering it.
+  if (bw != top.s->current.width || bh != top.s->current.height) return false;
+  const int sx = top.x - c->geoX, sy = top.y - c->geoY;
+  if (sx > 0 || sy > 0 || sx + bw < w || sy + bh < h || !mir_->makeCurrent()) return false;
+  constexpr GLenum kBgra = 0x80E1;            // GL_BGRA_EXT (EXT_texture_format_BGRA8888)
+  constexpr GLenum kUnpackRowLength = 0x0CF2;  // GL_UNPACK_ROW_LENGTH
+  const int stridePx = pixman_image_get_stride(src) / 4;
+  const uint32_t* data = pixman_image_get_data(src);
+  ShmTex& t = shmTex_[c->id];
+  glPixelStorei(kUnpackRowLength, stridePx);
+  if (!t.tex || t.w != w || t.h != h || !partial || !t.bgra) {
+    if (!t.tex) glGenTextures(1, &t.tex);
+    glBindTexture(GL_TEXTURE_2D, t.tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, kBgra, w, h, 0, kBgra, GL_UNSIGNED_BYTE, data + size_t(-sy) * stridePx - sx);
+    t.w = w;
+    t.h = h;
+    t.bgra = true;
+  } else {
+    glBindTexture(GL_TEXTURE_2D, t.tex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, x0, y0, x1 - x0, y1 - y0, kBgra, GL_UNSIGNED_BYTE,
+                    data + size_t(y0 - sy) * stridePx + (x0 - sx));
+  }
+  glPixelStorei(kUnpackRowLength, 0);
+  glBindTexture(GL_TEXTURE_2D, 0);
+  if (glGetError() != GL_NO_ERROR) {
+    // No BGRA upload on this GL: the composite path from now on.
+    t.bgra = false;
+    return false;
+  }
+  JsuiTexture jt{};
+  jt.kind = JSUI_TEXTURE_GL;
+  jt.handle = reinterpret_cast<void*>(uintptr_t(t.tex));
+  jt.width = w;
+  jt.height = h;
+  jt.flags = opaque ? JSUI_TEXTURE_OPAQUE : 0;
+  std::string key = "win:" + std::to_string(c->id);
+  if (jsui_set_texture(rt_, key.c_str(), &jt) == 0) jsui_texture_updated(rt_, key.c_str());
+  c->texW = 0;  // c->rgba no longer holds the picture: a composite starts over
+  if (!c->hasTexture) {
+    c->hasTexture = true;
+    publishWindow(c);
+  }
+  scheduleTick(0);
+  return true;
+#else
+  (void)c, (void)w, (void)h, (void)x0, (void)y0, (void)x1, (void)y1, (void)partial;
+  return false;
+#endif
+}
+
 bool WM::captureGpu(Client* c) {
 #ifdef JSUI_WL_MIR_GL
-  wlr_buffer* buf = c->xdg->surface->current.buffer;
+  // The surface whose GPU buffer is the window: the root's, or a subsurface
+  // that covers the whole window (Firefox on the GPU draws into a
+  // subsurface over an shm root; compositing that on the CPU read nothing of
+  // the dma-buf and cost jsui-wl a full-window composite per frame).
+  struct Pick {
+    const WM* self;
+    wlr_surface* best = nullptr;
+    int x = 0, y = 0;
+    long area = 0;
+  } pick{this};
+  wlr_surface_for_each_surface(
+      c->xdg->surface,
+      [](wlr_surface* s, int sx, int sy, void* u) {
+        auto* k = static_cast<Pick*>(u);
+        if (!k->self->gpuBufferOf(s)) return;
+        long area = long(s->current.width) * s->current.height;
+        if (area > k->area) *k = {k->self, s, sx, sy, area};
+      },
+      &pick);
+  if (!pick.best) return false;
+  if (pick.best != c->xdg->surface) {
+    // Only when it covers what the window shows (its geometry), so nothing
+    // drawn beside it is lost.
+    wlr_box geo;
+    wlr_xdg_surface_get_geometry(c->xdg, &geo);
+    if (c->popup) geo = {0, 0, c->xdg->surface->current.width, c->xdg->surface->current.height};
+    if (pick.x > geo.x || pick.y > geo.y || pick.x + pick.best->current.width < geo.x + geo.width ||
+        pick.y + pick.best->current.height < geo.y + geo.height)
+      return false;
+  }
+  wlr_buffer* buf = gpuBufferOf(pick.best);
   wlegl::Buffer* b = wlegl::from(buf);
-  wlr_dmabuf_attributes attrs{};
-  const bool isDmabuf = buf && !b && dmabuf::s.global && wlr_buffer_get_dmabuf(buf, &attrs);
-  if (!b && !isDmabuf) return false;
   // GL only to make a buffer's texture, the first time it is committed
   // (clients cycle through a few buffers): a Vulkan app commits faster than
   // the screen refreshes, and every eglMakeCurrent goes through libhybris.
@@ -1752,7 +2015,7 @@ bool WM::captureGpu(Client* c) {
     opaque = im->fmt->opaque;
   } else {
     if (!needGl && !mir_->makeCurrent()) return false;
-    tex = dmabuf::upload(c->id, buf, &c->xdg->surface->buffer_damage, &opaque);
+    tex = dmabuf::upload(c->id, buf, &pick.best->buffer_damage, &opaque);
     copied = true;
   }
   if (!tex) return false;
@@ -2080,6 +2343,11 @@ void WM::removeWindowTexture(uint32_t id) {
   jsui_remove_texture(rt_, ("win:" + std::to_string(id)).c_str());
 #ifdef JSUI_WL_MIR_GL
   if (dmabuf::s.cpuTex.count(id) && mir_->makeCurrent()) dmabuf::forget(id);
+  auto st = shmTex_.find(id);
+  if (st != shmTex_.end()) {
+    if (mir_->makeCurrent()) glDeleteTextures(1, &st->second.tex);
+    shmTex_.erase(st);
+  }
 #endif
   auto it = gpuBuffers_.find(id);
   if (it == gpuBuffers_.end()) return;
