@@ -47,6 +47,12 @@ bool settled(Node* node);
 bool paintKey(Node* node, std::string* key);
 // Paints the image into `box` (the padding box), clipped to `clip`.
 void paint(Node* node, SkCanvas* canvas, const SkRect& box, const SkRRect& clip);
+// True when paint() covers its whole box with opaque pixels on this frame's
+// canvas: an opaque image (a host texture flagged JSUI_TEXTURE_OPAQUE, or
+// decoded without alpha), drawable here, stretched or covering the box and
+// not tinted. The painter's occlusion culling treats such a node like an
+// opaque background (a full-screen snapshot hides what is under it).
+bool coversBox(Node* node);
 
 }  // namespace image
 }  // namespace jsui

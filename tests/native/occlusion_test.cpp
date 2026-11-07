@@ -347,3 +347,38 @@ TEST(occlusion_skipped_occluders_are_behind) {
   patch(x, R"J({"backgroundColor":"#ff0000"})J");
   c.frame("change on top");
 }
+
+// An opaque host texture filling its view (a full-screen snapshot under a
+// panel) covers what lies under it like an opaque background; one with
+// alpha, letterboxed (contain) or removed covers nothing.
+TEST(occlusion_opaque_texture) {
+  Scene s(320, 240);
+  s.add(hud());
+  Node* snap = s.add(R"J({"type":"Image","props":{"texture":"snap","resizeMode":"stretch"},
+    "style":{"position":"absolute","left":0,"top":0,"width":320,"height":240}})J");
+  std::vector<uint32_t> px(16 * 12, 0xff503010u);
+  CHECK_EQ(s.rt->textures.setPixels("snap", px.data(), 16, 12, 0, JSUI_TEXTURE_OPAQUE), 1);
+  s.render();
+  Checker c(s);
+  c.frame("opaque texture");
+  CHECK(c.lastFull.nodesOccluded >= 1);
+  CHECK(c.lastFull.nodesPainted <= 2);
+  CHECK_EQ(s.rt->textures.setPixels("snap", px.data(), 16, 12, 0, 0), 1);
+  c.frame("texture with alpha");
+  CHECK_EQ(c.lastFull.nodesOccluded, 0);
+  CHECK_EQ(s.rt->textures.setPixels("snap", px.data(), 16, 12, 0, JSUI_TEXTURE_OPAQUE), 1);
+  c.frame("opaque again");
+  CHECK(c.lastFull.nodesOccluded >= 1);
+  Value::Object props = snap->props().asObject();
+  props["resizeMode"] = Value("contain");
+  snap->setProps(Value(props));
+  c.frame("contain");
+  CHECK_EQ(c.lastFull.nodesOccluded, 0);
+  props["resizeMode"] = Value("stretch");
+  snap->setProps(Value(props));
+  c.frame("stretch");
+  CHECK(c.lastFull.nodesOccluded >= 1);
+  CHECK(s.rt->textures.remove("snap"));
+  c.frame("removed");
+  CHECK_EQ(c.lastFull.nodesOccluded, 0);
+}

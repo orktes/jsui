@@ -760,7 +760,8 @@ class WM {
   void presentMir();
   void sendFrameDone();
   // Frame cost on the Mir path (JSUI_WL_PERF=1): paint + present, logged every 60 frames.
-  bool perf_ = false;
+  // JSUI_WL_PERF=2 also logs every frame as a slow one would be.
+  bool perf_ = false, perfEvery_ = false;
   double cpuPaintMs_ = 0;  // CPU raster since the last presented frame
   double gpuRenderMs_ = 0, gpuBlitMs_ = 0, gpuSwapMs_ = 0;  // GPU frame parts (perf window sums)
   double gpuRenderGpuMs_ = 0, gpuBlitGpuMs_ = 0;  // JSUI_WL_GPU_FINISH: GPU time of the paint / the blit
@@ -2784,9 +2785,9 @@ void WM::presentMir() {
     const double ms = nowMs() - t0;
     perfFrame(0, ms);
     // A frame that will be seen as a hitch: what it was made of.
-    if (ms + lastTickMs_ > 33 || frameLog_ > 0) {
-      if (frameLog_ > 0) {
-        --frameLog_;
+    if (ms + lastTickMs_ > 33 || frameLog_ > 0 || perfEvery_) {
+      if (frameLog_ > 0 || perfEvery_) {
+        frameLog_ = std::max(0, frameLog_ - 1);
         logf("frame at %.0f", nowMs());
       }
       JsuiPaintStats ps;
@@ -2795,6 +2796,21 @@ void WM::presentMir() {
            " %d offscreen layers, %d cached layers (%d rendered), %d shadow blurs, %d nodes",
            lastTickMs_, lastRenderMs_, ms - lastRenderMs_, double(ps.repainted_pixels) / 1e6, ps.draws, ps.save_layers,
            ps.layer_draws, ps.layer_renders, ps.shadow_renders, ps.nodes_painted);
+#ifdef JSUI_WL_MIR_GL
+      if (mir_->lastRenderGpuMs() > 0)  // JSUI_WL_GPU_FINISH: the previous frame's GPU time
+      {
+        // With the clock (Adreno: kgsl devfreq), the cost in cycles compares
+        // across the governor's frequency changes.
+        int mhz = 0;
+        if (FILE* f = fopen("/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq", "r")) {
+          long hz = 0;
+          if (fscanf(f, "%ld", &hz) == 1) mhz = int(hz / 1000000);
+          fclose(f);
+        }
+        logf("gpu time: paint %.1f ms, blit %.1f ms at %d MHz (%.1f Mcycles)", mir_->lastRenderGpuMs(),
+             mir_->lastBlitGpuMs(), mhz, (mir_->lastRenderGpuMs() + mir_->lastBlitGpuMs()) * mhz / 1000);
+      }
+#endif
     }
   }
   sendFrameDone();
@@ -2973,7 +2989,8 @@ bool WM::showMir() {
   const char* snapEnv = getenv("JSUI_WL_SNAPSHOT_BG");
   snapshotBg_ = !(snapEnv && snapEnv[0] == '0');
   const char* perfEnv = getenv("JSUI_WL_PERF");
-  perf_ = perfEnv && perfEnv[0] == '1';
+  perf_ = perfEnv && (perfEnv[0] == '1' || perfEnv[0] == '2');
+  perfEvery_ = perf_ && perfEnv[0] == '2';
   const char* gpuEnv = getenv("JSUI_WL_GPU");
   bool wantGpu = !(gpuEnv && gpuEnv[0] == '0');
   if (!mir_->createWindow(sw_, sh_, mirOutput_, wantGpu, &err)) {

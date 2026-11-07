@@ -608,7 +608,9 @@ const styles = StyleSheet.create({
   pillText: { fontFamily: font, color: '#fff', fontSize: 15, fontWeight: '600', marginLeft: 8 },
   cardHead: { height: 60, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 2, paddingBottom: 12 },
   cardTitle: { flex: 1, fontFamily: font, color: '#fff', fontSize: 17, fontWeight: '600', marginLeft: 10 },
-  cardBody: { overflow: 'hidden', boxShadow: '0px 24px 60px rgba(0,0,0,0.55)' },
+  // No shadow: over the dark scrim it barely showed, and a 60 px blur under a
+  // card the size of the screen cost the Tab A7's GPU ~6 ms a frame.
+  cardBody: { overflow: 'hidden' },
   cardFoot: { height: 64, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
   overviewFoot: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
   thumbTitle: { height: 40, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 2 },

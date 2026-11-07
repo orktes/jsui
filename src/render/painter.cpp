@@ -3227,13 +3227,18 @@ bool passesOpaque(Node* n) {
 // snapped size w x h, within `clip`; empty when it has none.
 SkIRect ownOccluder(Node* n, const SkMatrix& m, float w, float h, const SkIRect& clip) {
   const ComputedStyle& s = n->style();
-  if (s.backgroundColor.a < 1 || !m.rectStaysRect()) return SkIRect::MakeEmpty();
+  if (!m.rectStaysRect()) return SkIRect::MakeEmpty();
   // Too small to be kept (addOccluder), before working out its pixels.
   if (double(w) * h * std::abs(m.getScaleX() * m.getScaleY() - m.getSkewX() * m.getSkewY()) < double(tMinOccluderArea) ||
       !passesOpaque(n))
     return SkIRect::MakeEmpty();
+  // An opaque background covers the border box; an opaque image filling
+  // its box (image::coversBox), the padding box it is drawn into.
+  const bool background = s.backgroundColor.a >= 1;
+  if (!background && !image::coversBox(n)) return SkIRect::MakeEmpty();
   Box scratch;
-  SkIRect r = opaquePixels(m, boxOf(n, w, h, &scratch).outer);
+  const Box& b = boxOf(n, w, h, &scratch);
+  SkIRect r = opaquePixels(m, background ? b.outer : b.inner);
   return r.intersect(clip) ? r : SkIRect::MakeEmpty();
 }
 
