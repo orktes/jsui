@@ -12,6 +12,9 @@
 //   long ones (> 1 MB encoded or > 20 s) streamed, each voice decoding the
 //   encoded bytes in memory as it plays. A PLAY before the bytes are there
 //   waits for them; a load or decode error fails its voices.
+// - The device stops after kIdleStopMs with no voice (an open output keeps
+//   the platform's audio path awake: a tablet's DSP, a Bluetooth link) and
+//   starts again on the next PLAY.
 // - Each bus is an ma_sound_group: BUS ramps its fader, mute sets its volume.
 //   A voice's volume (PLAY fade in, SET, STOP fade out) is its fader; SET
 //   ramps pitch and pan per update().
@@ -29,6 +32,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <condition_variable>
 #include <cstdlib>
 #include <deque>
@@ -195,6 +199,9 @@ class BuiltinAudio final : public AudioBackend {
 
   Runtime& rt_;
   bool engineTried_ = false, engineOk_ = false;
+  static constexpr double kIdleStopMs = 5000;
+  bool engineRunning_ = false;  // the device is started (ma_engine_init starts it)
+  double idleSince_ = 0;        // when the last voice ended, while running
   ma_context context_;
   ma_engine engine_;
   uint32_t sampleRate_ = 48000;
@@ -281,6 +288,7 @@ bool BuiltinAudio::ensureEngine() {
     return false;
   }
   engineOk_ = true;
+  engineRunning_ = true;
   sampleRate_ = ma_engine_get_sample_rate(&engine_);
   rt_.log(JSUI_LOG_DEBUG, std::string("audio: ") + ma_get_backend_name(context_.backend) + " output, " +
                               std::to_string(sampleRate_) + " Hz");
@@ -428,6 +436,15 @@ void BuiltinAudio::play(const JsuiAudioCommand& c) {
     rt_.audio->voiceEnded(c.voice, JSUI_AUDIO_FAILED);
     return;
   }
+  idleSince_ = 0;
+  if (!engineRunning_) {
+    if (ma_engine_start(&engine_) != MA_SUCCESS) {
+      rt_.log(JSUI_LOG_WARN, "audio: cannot restart the audio output device");
+      rt_.audio->voiceEnded(c.voice, JSUI_AUDIO_FAILED);
+      return;
+    }
+    engineRunning_ = true;
+  }
   auto owned = std::make_unique<Voice>();
   Voice& v = *owned;
   v.owner = this;
@@ -557,6 +574,17 @@ void BuiltinAudio::update() {
     finish(id, it->second->state == Voice::Stopping ? JSUI_AUDIO_STOPPED : JSUI_AUDIO_FINISHED);
   }
 
+  if (engineOk_ && engineRunning_ && voices_.empty()) {
+    // The engine's clock stops with the device: a steady one.
+    double now = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (!idleSince_) {
+      idleSince_ = now;
+    } else if (now - idleSince_ >= kIdleStopMs) {
+      ma_engine_stop(&engine_);
+      engineRunning_ = false;
+      idleSince_ = 0;
+    }
+  }
   if (!engineOk_ || voices_.empty()) return;
   double now = nowMs();
   std::vector<uint64_t> stopped;
