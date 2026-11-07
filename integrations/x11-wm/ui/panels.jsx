@@ -635,6 +635,18 @@ function WifiNetworks({ settings, onBack }) {
 }
 
 
+// A named action at the foot of Quick Settings (Lock, Power).
+function QsAction({ icon, label, on, onPress, anchor }) {
+  const t = useTheme();
+  return (
+    <Pressable ref={anchor && anchor.ref} onLayout={anchor && anchor.onLayout} onPress={onPress}
+      style={[styles.qsAction, { backgroundColor: on ? t.tileOn : t.panelRaised }]} pressedStyle={{ backgroundColor: t.panelLine }}>
+      <Icon name={icon} size={20} color={on ? t.accentText : t.text} />
+      <Text style={[styles.qsActionText, { color: on ? t.accentText : t.text }]}>{label}</Text>
+    </Pressable>
+  );
+}
+
 export const QuickSettings = memo(function QuickSettings({ screen, settings, system, windows, onClose, onClosed, onLock, onReload, open = true }) {
   const t = useTheme();
   const v = useEntrance(open, 200, onClosed);
@@ -648,6 +660,7 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
     tablet: useAnchor('qs.tablet'),
     night: useAnchor('qs.night'),
     brightness: useAnchor('qs.brightness'),
+    lock: useAnchor('qs.lock'),
   };
   return (
     <View pointerEvents={open ? 'auto' : 'none'} style={StyleSheet.absoluteFill}>
@@ -701,30 +714,34 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
           {/* Hosts with a backlight and a sound server (system.backlight,
               system.volume) set the real ones; elsewhere brightness dims the
               shell's picture (shell.jsx) and volume is only the setting. */}
-          {/* Lock ends the brightness row and power the volume row, so the
-              two sliders stay a pair of equal length. */}
+          {/* Both sliders the panel's width; Lock and Power, named, share
+              the row under them. */}
           {!power && !wifiOpen && (
-            <View style={styles.qsFoot}>
-              <View style={{ flex: 1 }}>
-                <Slider anchor={a.brightness} icon="sun" value={settings.brightness} onChange={(x) => {
-                  const b = Math.max(system.backlight != null ? 0.04 : 0.2, x);
-                  setSetting('brightness', b);
-                  if (system.backlight != null) wm.brightness(b);
-                }} />
+            <>
+              <View style={styles.qsFoot}>
+                <View style={{ flex: 1 }}>
+                  <Slider anchor={a.brightness} icon="sun" value={settings.brightness} onChange={(x) => {
+                    const b = Math.max(system.backlight != null ? 0.04 : 0.2, x);
+                    setSetting('brightness', b);
+                    if (system.backlight != null) wm.brightness(b);
+                  }} />
+                </View>
               </View>
-              <IconButton icon="lock" size={48} iconSize={22} onPress={onLock} label="Lock" />
-            </View>
+              <View style={styles.qsFoot}>
+                <View style={{ flex: 1 }}>
+                  <Slider icon={settings.muted || settings.volume === 0 ? 'mute' : 'volume'} value={settings.volume} onChange={(x) => {
+                    setSetting('volume', x);
+                    if (settings.muted) setSetting('muted', false);
+                    if (system.volume) wm.volume(x, false);
+                  }} />
+                </View>
+              </View>
+            </>
           )}
           {!wifiOpen && (
-            <View style={styles.qsFoot}>
-              <View style={{ flex: 1 }}>
-                {!power && <Slider icon={settings.muted || settings.volume === 0 ? 'mute' : 'volume'} value={settings.volume} onChange={(x) => {
-                  setSetting('volume', x);
-                  if (settings.muted) setSetting('muted', false);
-                  if (system.volume) wm.volume(x, false);
-                }} />}
-              </View>
-              <IconButton icon="power" size={48} iconSize={22} active={power} onPress={() => setPower(!power)} label="Power" />
+            <View style={styles.qsActions}>
+              <QsAction anchor={a.lock} icon="lock" label="Lock" onPress={onLock} />
+              <QsAction icon="power" label="Power" on={power} onPress={() => setPower(!power)} />
             </View>
           )}
         </Card>
@@ -809,8 +826,8 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
                       onClose();
                     }}>
                     {/* The app's icon, or none: the same bell on every card said nothing. */}
-                    {n.app ? <AppIcon app={n.app} size={32} /> : null}
-                    <View style={{ flex: 1, marginLeft: n.app ? 12 : 4 }}>
+                    {n.from ? <AppIcon app={n.from} size={32} /> : null}
+                    <View style={{ flex: 1, marginLeft: n.from ? 12 : 4 }}>
                       <Text numberOfLines={1} style={[styles.noteTitle, { color: t.text }]}>
                         {n.title}{!open && g.items.length > 1 ? <Text style={{ color: t.textMute }}>{`  ${g.items.length}`}</Text> : null}
                       </Text>
@@ -863,6 +880,9 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
 // nor the desktop's own clock show through while it is up.
 export const LockScreen = memo(function LockScreen({ screen, onUnlock, notifications, children }) {
   const now = useClock();
+  const group = useMemo(() => groupNotes(notifications)[0], [notifications]);
+  const top = group && group.items[0];
+  const topCount = group ? group.items.length : 0;
   // Up with the finger natively while it is down, then `drag` (an animation
   // from where it let go).
   const drag = useRef(new Animated.Value(0)).current;
@@ -899,15 +919,21 @@ export const LockScreen = memo(function LockScreen({ screen, onUnlock, notificat
       <View style={styles.lockBody}>
         <Text style={styles.lockTime}>{pad2(now.getHours())}:{pad2(now.getMinutes())}</Text>
         <Text style={styles.lockDate}>{dateText(now)}</Text>
-        {/* The newest notification itself, and how many more. */}
-        {notifications.length > 0 && (
+        {/* The newest sender's card as the panel shows it (icon, newest
+            message, its count), and how many from others. */}
+        {top && (
           <View style={[styles.lockCard, { width: Math.min(440, screen.width - 48) }]}>
-            <Text numberOfLines={1} style={styles.lockCardTitle}>{notifications[0].title}</Text>
-            {notifications[0].body ? <Text numberOfLines={2} style={styles.lockCardBody}>{notifications[0].body}</Text> : null}
+            {top.from ? <AppIcon app={top.from} size={32} /> : null}
+            <View style={{ flex: 1, marginLeft: top.from ? 12 : 0 }}>
+              <Text numberOfLines={1} style={styles.lockCardTitle}>
+                {top.title}{topCount > 1 ? <Text style={{ color: 'rgba(255,255,255,0.6)' }}>{`  ${topCount}`}</Text> : null}
+              </Text>
+              {top.body ? <Text numberOfLines={2} style={styles.lockCardBody}>{top.body}</Text> : null}
+            </View>
           </View>
         )}
-        {notifications.length > 1 && (
-          <Text style={styles.lockMore}>{notifications.length - 1} more</Text>
+        {notifications.length > topCount && (
+          <Text style={styles.lockMore}>{notifications.length - topCount} more</Text>
         )}
       </View>
       <View ref={anchor.ref} onLayout={anchor.onLayout} style={styles.lockHandle}>
@@ -945,8 +971,8 @@ function Toast({ n, t, onDone, onOpen }) {
     <Animated.View style={{ opacity: v, transform: [{ translateY: ty }] }}>
       {/* A tap puts it away; an app's notification also opens the app (onOpen). */}
       <Pressable onPress={() => { setOpen(false); if ((n.app || n.notifyId != null) && onOpen) onOpen(n); }} style={[styles.toast, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 32px ${t.shadow}` }]}>
-        {n.app ? <AppIcon app={n.app} size={28} /> : null}
-        <View style={{ flex: 1, marginLeft: n.app ? 12 : 4 }}>
+        {n.from ? <AppIcon app={n.from} size={28} /> : null}
+        <View style={{ flex: 1, marginLeft: n.from ? 12 : 4 }}>
           <Text numberOfLines={1} style={[styles.noteTitle, { color: t.text }]}>{n.title}</Text>
           {n.body ? <Text numberOfLines={2} style={[styles.noteBody, { color: t.textDim }]}>{n.body}</Text> : null}
         </View>
@@ -983,7 +1009,10 @@ const styles = StyleSheet.create({
   thumb: { borderRadius: radius.m, overflow: 'hidden', borderWidth: 3 },
   dropRight: { position: 'absolute', right: 12 },
   dropCenter: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
-  qsFoot: { flexDirection: 'row', alignItems: 'center', marginRight: -4 },
+  qsFoot: { flexDirection: 'row', alignItems: 'center' },
+  qsActions: { flexDirection: 'row', gap: 10, marginTop: 10 },
+  qsAction: { flex: 1, height: 48, borderRadius: 24, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
+  qsActionText: { fontFamily: font, fontSize: 15, fontWeight: '600', marginLeft: 8 },
   powerRow: { height: 60, borderRadius: radius.m, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, marginBottom: 8 },
   powerText: { fontFamily: font, fontSize: 16, fontWeight: '600', marginLeft: 14 },
   wifiHead: { flexDirection: 'row', alignItems: 'center', marginBottom: 8, marginLeft: -6 },
@@ -1011,7 +1040,7 @@ const styles = StyleSheet.create({
   lockBody: { position: 'absolute', left: 0, right: 0, top: '18%', alignItems: 'center' },
   lockTime: { fontFamily: font, color: '#fff', fontSize: 132, fontWeight: '700', letterSpacing: -4 },
   lockDate: { fontFamily: font, color: 'rgba(255,255,255,0.85)', fontSize: 26, fontWeight: '500' },
-  lockCard: { marginTop: 28, backgroundColor: 'rgba(255,255,255,0.14)', borderRadius: radius.m, paddingHorizontal: 18, paddingVertical: 14 },
+  lockCard: { flexDirection: 'row', alignItems: 'center', marginTop: 28, backgroundColor: 'rgba(255,255,255,0.14)', borderRadius: radius.m, paddingHorizontal: 18, paddingVertical: 14 },
   lockCardTitle: { fontFamily: font, color: '#fff', fontSize: 15, fontWeight: '600' },
   lockCardBody: { fontFamily: font, color: 'rgba(255,255,255,0.85)', fontSize: 14, marginTop: 2 },
   lockMore: { fontFamily: font, color: 'rgba(255,255,255,0.7)', fontSize: 14, marginTop: 10 },
