@@ -142,7 +142,9 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
   // don't fit the height (portrait), narrower columns (down to 120 px) until
   // every app shows without scrolling. The search field spans the grid.
   const bottom = settings.osk ? 330 : screen.dock + 12;
-  const rowsFit = Math.max(1, Math.floor((screen.height - screen.topBar - 28 - 64 - 28 - bottom) / 156));
+  // (A tile ends in its second label line and padding: the last row may
+  // reach 40 px into the gap above the dock.)
+  const rowsFit = Math.max(1, Math.floor((screen.height - screen.topBar - 28 - 64 - 28 - bottom + 40) / 156));
   const fit = Math.max(3, Math.min(8, Math.floor((screen.width - 48) / 150)));
   let cols = Math.min(fit, Math.max(3, Math.ceil(apps.length / Math.ceil(apps.length / fit))));
   let tileW = 150;
