@@ -1,0 +1,46 @@
+#!/bin/sh
+# Speaker sound on the Galaxy Tab A7 (SM-T500) running Ubuntu Touch on
+# Samsung's stock vendor partition (run as root: jsui-wm-audio.service at
+# boot, or audio-on.sh by hand).
+#
+# PulseAudio's droid bridge (module-droid-discover in /etc/pulse/touch.pa)
+# opens the vendor's generic audio HAL, audio.primary.default, in-process;
+# on this vendor that one fails to open ("Invalid argument"), so PulseAudio
+# is left with its fake Bluetooth sink and every sound is lost. libhybris'
+# audio.hidl_compat wrapper, bound over it, talks to the vendor's own audio
+# service (android.hardware.audio.service, running in the Android container)
+# instead. A speaker-and-mic-only audio policy keeps the bridge's routing
+# simple (the vendor's lists devices the port can't drive). Bind mounts
+# only: a reboot undoes this unless the service runs it again.
+HERE=$(dirname "$(readlink -f "$0")")
+log() { echo "jsui-wm-audio: $*"; }
+mounted() { awk -v p="$1" '$5 == p { f = 1 } END { exit !f }' /proc/self/mountinfo; }
+
+V=/android/vendor
+[ -e "$V/lib64/hw/audio.primary.default.so" ] || V=/vendor
+WRAP=/android/system/lib64/hw/audio.hidl_compat.default.so
+[ -e "$WRAP" ] || WRAP=/system/lib64/hw/audio.hidl_compat.default.so
+POLICY="$HERE/jsui-wm-audio-policy.xml"
+[ -e "$WRAP" ] || { log "no audio.hidl_compat wrapper in the Android system image."; exit 1; }
+
+if mounted "$V/lib64/hw/audio.primary.default.so"; then
+  log "audio HAL wrapper bound already."
+else
+  mount -o bind "$WRAP" "$V/lib64/hw/audio.primary.default.so" || { log "binding the HAL wrapper failed."; exit 1; }
+  log "audio HAL wrapper bound over audio.primary.default."
+fi
+if [ -e "$POLICY" ] && ! mounted "$V/etc/audio_policy_configuration.xml"; then
+  mount -o bind "$POLICY" "$V/etc/audio_policy_configuration.xml" && log "speaker-only audio policy bound."
+fi
+
+# A PulseAudio already running (a session started before this) loaded the
+# bridge without the wrapper: restart it.
+for rt in /run/user/*; do
+  [ -S "$rt/pulse/native" ] || continue
+  u=$(stat -c %U "$rt")
+  log "restarting $u's PulseAudio."
+  runuser -u "$u" -- env XDG_RUNTIME_DIR="$rt" DBUS_SESSION_BUS_ADDRESS="unix:path=$rt/bus" \
+    systemctl --user restart pulseaudio.service 2>/dev/null ||
+    runuser -u "$u" -- env XDG_RUNTIME_DIR="$rt" pulseaudio -k 2>/dev/null
+done
+exit 0
