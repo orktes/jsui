@@ -408,9 +408,10 @@ function Shell() {
   const topNormal = [...visible].reverse().find((w) => w.type === 'normal' && !w.transientFor);
   const split = splitL && splitR && !fullscreen && topNormal && (topNormal === splitL || topNormal === splitR)
     ? { left: splitL, right: splitR } : null;
-  // Tablet mode with an app on screen: apps reach the bottom edge, the dock
-  // hides behind the home indicator.
-  const appMode = settings.tabletMode && visible.some((w) => w.type === 'normal' && (w.maximized || w.snap));
+  // Tablet mode with an app on screen (or one starting, launching.js): apps
+  // reach the bottom edge, the dock hides behind the home indicator.
+  const launching = useLaunching();
+  const appMode = settings.tabletMode && (launching.length > 0 || visible.some((w) => w.type === 'normal' && (w.maximized || w.snap)));
   const dockShown = !appMode || peek || panel === 'launcher' || panel === 'overview';
   const bottom = appMode ? scr.homeBar || 24 : scr.dock;
   const solidBar = visible.some((w) => w.maximized || w.snap);
@@ -556,7 +557,6 @@ function Shell() {
   // new window of its app is ready to show (or any new app window, for the
   // only one pending: an app's window may not name its desktop file), when
   // the host says the launch ended, or after LAUNCH_TIMEOUT_MS.
-  const launching = useLaunching();
   const [launchDone, setLaunchDone] = useState({}); // key -> true while it fades
   const knownWins = useRef(null);
   if (knownWins.current == null) knownWins.current = new Set(windows.map((w) => w.id));
@@ -664,9 +664,6 @@ function Shell() {
             </View>
           ),
         )}
-        {!overviewUp && launching.map((l) => (
-          <LaunchSplash key={l.key} launch={l} screen={scr} t={t} bottom={settings.tabletMode ? scr.homeBar || 24 : scr.dock} done={!!launchDone[l.key]} onGone={launchGone} />
-        ))}
         {split && !overviewUp && <SplitDivider left={split.left} right={split.right} screen={scr} t={t} bottom={bottom} />}
         <SnapPreview preview={preview} screen={scr} t={t} bottom={bottom} />
         {edges && <EdgeSwipe side="left" top={scr.topBar} bottom={bottom} onSwipe={() => setPanel('launcher')} />}
@@ -697,6 +694,15 @@ function Shell() {
         <Launcher screen={scr} apps={apps} settings={settings} onLaunch={launch} open={panel === 'launcher'} warm={warmLauncher}
           onClose={closePanel} onClosed={panelClosed} />
         {[closingPanel, panel].filter((n) => n && n !== 'launcher').map((name) => panelEl(name, name === panel))}
+        {/* Over the launcher: the card grows out of the tapped icon as the
+            launcher fades. Hidden while the launcher or the switcher is up. */}
+        {launching.length > 0 && (
+          <View pointerEvents="none" style={[StyleSheet.absoluteFill, { opacity: overviewUp || panel === 'launcher' ? 0 : 1 }]}>
+            {launching.map((l) => (
+              <LaunchSplash key={l.key} launch={l} screen={scr} t={t} bottom={bottom} done={!!launchDone[l.key]} onGone={launchGone} />
+            ))}
+          </View>
+        )}
         {/* The window menu itself is an overlay of its button (WindowMenu.jsx): taps elsewhere close it. */}
         {winMenu != null && <Pressable style={StyleSheet.absoluteFill} onPress={closeWinMenu} />}
         {dockMenu && (

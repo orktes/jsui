@@ -857,6 +857,9 @@ class WM {
     std::string exec;
   };
   std::vector<PendingLaunch> pendingLaunches_;
+  // Often enough that the shell's loading window goes soon after an app
+  // exits without a window (wm:launchEnded).
+  static constexpr int kLaunchPollMs = 1000;
   wl_event_source* launchTimer_ = nullptr;
   void checkLaunches();
   bool descends(pid_t pid, pid_t ancestor) const;
@@ -1817,7 +1820,7 @@ void WM::checkLaunches() {
     scheduleTick(0);
     it = pendingLaunches_.erase(it);
   }
-  if (!pendingLaunches_.empty()) wl_event_source_timer_update(launchTimer_, 5000);
+  if (!pendingLaunches_.empty()) wl_event_source_timer_update(launchTimer_, kLaunchPollMs);
 }
 
 void WM::removeWindowTexture(uint32_t id) {
@@ -2338,7 +2341,7 @@ void WM::onMessage(const char* name, const char* json) {
           static_cast<WM*>(u)->checkLaunches();
           return 0;
         }, this);
-      wl_event_source_timer_update(launchTimer_, 5000);
+      wl_event_source_timer_update(launchTimer_, kLaunchPollMs);
     }
   } else if (n == "wm:focus" && c) {
     if (c->minimized) unminimize(c);
