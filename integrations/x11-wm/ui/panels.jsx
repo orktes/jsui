@@ -625,8 +625,10 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
             </View>
           ) : null}
           {!power && !wifiOpen && <View style={styles.tiles}>
-            <ToggleTile anchor={a.wifi} icon="wifi" label="Wi-Fi"
-              sub={system.wifi === null ? 'Not available' : !settings.wifi ? 'Off' : system.wifi && system.wifi.up ? 'Connected' : 'On'}
+            {/* Wi-Fi has its own row (it opens a page of networks); four
+                toggles under it. A touch screen is always in tablet mode. */}
+            <ToggleTile anchor={a.wifi} icon="wifi" label="Wi-Fi" wide
+              sub={system.wifi === null ? 'Not available' : !settings.wifi ? null : system.wifi && system.wifi.up ? 'Connected' : null}
               on={settings.wifi && system.wifi !== null}
               onPress={() => {
                 setSetting('wifi', !settings.wifi);
@@ -634,18 +636,20 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
               }}
               onMore={system.wifi ? () => { setPower(false); setWifiOpen(true); } : undefined} />
             {system.rotate ? (
-              <ToggleTile icon="rotate" label="Auto-rotate" sub={settings.autoRotate ? 'On' : 'Off'} on={settings.autoRotate} onPress={set('autoRotate')} />
+              <ToggleTile icon="rotate" label="Auto-rotate" on={settings.autoRotate} onPress={set('autoRotate')} />
             ) : (
               <ToggleTile icon="bluetooth" label="Bluetooth" on={settings.bluetooth} onPress={set('bluetooth')} />
             )}
-            <ToggleTile anchor={a.dark} icon="contrast" label="Dark style" on={settings.darkMode} onPress={set('darkMode')} />
-            <ToggleTile anchor={a.tablet} icon="tablet" label="Tablet mode" sub={settings.tabletMode ? 'On' : 'Off'} on={settings.tabletMode} onPress={() => {
-              const on = !settings.tabletMode;
-              setSetting('tabletMode', on);
-              if (on) for (const w of windows) if (w.type === 'normal' && !w.transientFor && !w.minimized && !w.snap) wm.maximize(w.id, true);
-            }} />
-            <ToggleTile anchor={a.night} icon="sunset" label="Night light" on={settings.nightLight} onPress={set('nightLight')} />
             <ToggleTile icon="moon" label="Do not disturb" on={settings.doNotDisturb} onPress={set('doNotDisturb')} />
+            <ToggleTile anchor={a.night} icon="sunset" label="Night light" on={settings.nightLight} onPress={set('nightLight')} />
+            <ToggleTile anchor={a.dark} icon="contrast" label="Dark style" on={settings.darkMode} onPress={set('darkMode')} />
+            {!screen.touch && (
+              <ToggleTile anchor={a.tablet} icon="tablet" label="Tablet mode" wide on={settings.tabletMode} onPress={() => {
+                const on = !settings.tabletMode;
+                setSetting('tabletMode', on);
+                if (on) for (const w of windows) if (w.type === 'normal' && !w.transientFor && !w.minimized && !w.snap) wm.maximize(w.id, true);
+              }} />
+            )}
           </View>}
           {/* Hosts with a backlight and a sound server (system.backlight,
               system.volume) set the real ones; elsewhere brightness dims the

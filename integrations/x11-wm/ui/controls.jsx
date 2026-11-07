@@ -42,24 +42,26 @@ export const Card = memo(function Card({ children, style }) {
 });
 
 // onMore: a chevron at the tile's end that opens its details (Wi-Fi networks).
-export const ToggleTile = memo(function ToggleTile({ icon, label, sub, on, onPress, onMore, anchor }) {
+// The tile's colour is its state: a second line only when it says more
+// than on / off (`sub`). `wide` takes the whole row.
+export const ToggleTile = memo(function ToggleTile({ icon, label, sub, on, onPress, onMore, anchor, wide }) {
   const t = useTheme();
   return (
     <Pressable
       ref={anchor && anchor.ref}
       onLayout={anchor && anchor.onLayout}
       onPress={onPress}
-      style={[styles.tile, { backgroundColor: on ? t.tileOn : t.panelRaised }]}
+      style={[styles.tile, wide && { flexBasis: '100%' }, { backgroundColor: on ? t.tileOn : t.panelRaised }]}
       pressedStyle={{ transform: [{ scale: 0.97 }] }}
     >
-      <View style={[styles.tileIcon, { backgroundColor: on ? 'rgba(255,255,255,0.18)' : t.panelLine }]}>
+      <View style={styles.tileIcon}>
         <Icon name={icon} size={22} color={on ? t.accentText : t.text} />
       </View>
       <View style={{ flex: 1 }}>
         <Text numberOfLines={1} style={[styles.tileLabel, { color: on ? t.accentText : t.text }]}>{label}</Text>
-        <Text numberOfLines={1} style={[styles.tileSub, { color: on ? 'rgba(255,255,255,0.8)' : t.textMute }]}>
-          {sub != null ? sub : on ? 'On' : 'Off'}
-        </Text>
+        {sub != null && (
+          <Text numberOfLines={1} style={[styles.tileSub, { color: on ? 'rgba(255,255,255,0.8)' : t.textMute }]}>{sub}</Text>
+        )}
       </View>
       {onMore && (
         <Pressable onPress={onMore} style={styles.tileMore} pressedStyle={{ opacity: 0.6 }}>
@@ -124,7 +126,7 @@ export function Label({ children, style }) {
 const styles = StyleSheet.create({
   card: { borderRadius: 26, borderWidth: 1, padding: 18, overflow: 'hidden' },
   tile: { flexDirection: 'row', alignItems: 'center', height: 68, borderRadius: 20, paddingHorizontal: 12, flexBasis: '48%', flexGrow: 1 },
-  tileIcon: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', marginRight: 10 },
+  tileIcon: { width: 32, height: 40, alignItems: 'center', justifyContent: 'center', marginLeft: 4, marginRight: 10 },
   tileLabel: { fontFamily: font, fontSize: 15, fontWeight: '600' },
   tileSub: { fontFamily: font, fontSize: 13, marginTop: 1 },
   tileMore: { width: 40, height: 56, marginRight: -8, alignItems: 'center', justifyContent: 'center' },
