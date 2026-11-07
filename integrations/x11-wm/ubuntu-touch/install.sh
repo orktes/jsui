@@ -41,7 +41,19 @@ Environment=LOMIRI_BINARY=$DEST/jsui-session
 NotifyAccess=all
 CONF
 done
+# Lomiri's polkit agent shows its prompts as Lomiri snap decisions: under
+# jsui-notifyd (no "dialogs" capability) it aborts at start, and with
+# Restart=always that was a restart every 3 s, for good. It stays out while
+# jsui-wl runs (its control socket); under Lomiri it starts as before.
+D="$HOME/.config/systemd/user/lomiri-polkit-agent.service.d"
+mkdir -p "$D"
+cat > "$D/jsui-wm.conf" <<'CONF'
+# jsui-wm: no Lomiri polkit agent while jsui-wl runs (it needs Lomiri's snap decisions)
+[Unit]
+ConditionPathExists=!%t/jsui-wl.ctl
+CONF
 systemctl --user daemon-reload
+systemctl --user stop lomiri-polkit-agent.service 2>/dev/null || true
 echo "jsui-wm installed in $DEST."
 # --system (sudo): what Lomiri normally sets up outside the session. logind
 # must ignore the power key (else a short press powers off), and on the
