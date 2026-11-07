@@ -517,6 +517,9 @@ function Shell() {
   const popups = usePopups();
   const { list: windows, active, map } = useWindows();
   const t = settings.darkMode ? dark : light;
+  // The launcher and the switcher sit over home's wallpaper (one element: the
+  // launcher is memoized and stays mounted).
+  const wall = useMemo(() => <Wallpaper width={dims.width} height={dims.height} t={t} />, [dims.width, dims.height, t]);
 
   const [panel, setPanel] = useState(null); // launcher | overview | quick | calendar
   // A panel that was just closed stays mounted while it animates out.
@@ -826,7 +829,7 @@ function Shell() {
   const panes = split && !overviewUp ? splitPanes(split, scr) : null;
   const panelEl = (name, open) => {
     const common = { key: name, screen: scr, open, onClose: closePanel, onClosed: open ? undefined : panelClosed };
-    if (name === 'overview') return <Overview {...common} windows={visible} active={active} apps={apps} wallpaper={<Wallpaper width={scr.width} height={scr.height} t={t} />} />;
+    if (name === 'overview') return <Overview {...common} windows={visible} active={active} apps={apps} wallpaper={wall} />;
     if (name === 'quick') {
       return (
         <QuickSettings {...common} settings={settings} system={system} windows={windows}
@@ -897,7 +900,7 @@ function Shell() {
         {/* The launcher stays mounted (hidden while closed): opening it then
             paints a laid-out grid with its text shaped and icons decoded,
             not a fresh tree (a ~50 ms frame on the Tab A7). */}
-        <Launcher screen={scr} apps={apps} settings={settings} onLaunch={launch} open={panel === 'launcher'} warm={warmLauncher}
+        <Launcher screen={scr} apps={apps} settings={settings} onLaunch={launch} open={panel === 'launcher'} warm={warmLauncher} wallpaper={wall}
           onClose={closePanel} onClosed={panelClosed} />
         {[closingPanel, panel].filter((n) => n && n !== 'launcher').map((name) => panelEl(name, name === panel))}
         {/* Over the launcher: the card grows out of the tapped icon as the
