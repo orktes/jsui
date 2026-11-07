@@ -2086,15 +2086,23 @@ void WM::setSnap(Client* c, int side) {
   c->maximized = false;
   c->snap = side;
   wlr_xdg_toplevel_set_maximized(c->tl, false);
-  wlr_xdg_toplevel_set_tiled(c->tl, WLR_EDGE_TOP | WLR_EDGE_BOTTOM | (side == 1 ? WLR_EDGE_LEFT : WLR_EDGE_RIGHT));
+  wlr_xdg_toplevel_set_tiled(c->tl, sh_ > sw_ ? WLR_EDGE_LEFT | WLR_EDGE_RIGHT | (side == 1 ? WLR_EDGE_TOP : WLR_EDGE_BOTTOM)
+                                                : WLR_EDGE_TOP | WLR_EDGE_BOTTOM | (side == 1 ? WLR_EDGE_LEFT : WLR_EDGE_RIGHT));
   Rect r = snapSlot(side);
   configure(c, r.x, r.y, r.w, r.h);
 }
 
 // The left (1) or right (2) half of the work area in split view, with a
-// 10 px seam at splitRatio_.
+// 10 px seam at splitRatio_. On a portrait screen the two stack instead:
+// 1 on top, 2 below it, each under its own title bar.
 Rect WM::snapSlot(int side) const {
   Rect wa = workArea();
+  if (sh_ > sw_) {
+    int tb = P(titleBar_);
+    int y0 = wa.y - tb, y1 = wa.y + wa.h;
+    int seam = y0 + int(std::lround((y1 - y0) * splitRatio_));
+    return side == 1 ? Rect{wa.x, wa.y, wa.w, seam - P(5) - wa.y} : Rect{wa.x, seam + P(5) + tb, wa.w, y1 - seam - P(5) - tb};
+  }
   int left = int(std::lround(wa.w * splitRatio_)) - P(5);
   int right0 = int(std::lround(wa.w * splitRatio_)) + P(5);
   return side == 1 ? Rect{wa.x, wa.y, left, wa.h} : Rect{wa.x + right0, wa.y, wa.w - right0, wa.h};

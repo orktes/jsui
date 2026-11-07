@@ -17,7 +17,7 @@ import { remeasureAnchors, takeLaunchOrigin, useAnchor } from './anchors.js';
 import { AppIcon } from './AppIcon.jsx';
 import { ActionMenu } from './WindowMenu.jsx';
 import { LAUNCH_TIMEOUT_MS, endLaunch, startLaunch, useLaunching } from './launching.js';
-import { useNativeDragX } from './drag.js';
+import { useNativeDragX, useNativeDragY } from './drag.js';
 import { Keyboard } from './keyboard.jsx';
 import { AppTile, CalendarPanel, Launcher, LockScreen, Overview, QuickSettings, Toasts } from './panels.jsx';
 import { ThemeContext, dark, font, light } from './theme.js';
@@ -201,13 +201,17 @@ function SnapPreview({ preview, screen, t, bottom }) {
   if (!parts) return null;
   const top = screen.topBar + 6;
   const h = screen.height - screen.topBar - bottom - 12;
-  const half = (screen.width - 18) / 2;
+  // Portrait stacks the pair (the host's snapSlot): the left edge means the top half.
+  const tall = screen.height > screen.width;
+  const half = ((tall ? h : screen.width - 12) - 6) / 2;
+  const first = tall ? { left: 6, top, width: screen.width - 12, height: half } : { left: 6, top, width: half, height: h };
+  const second = tall ? { left: 6, top: top + half + 6, width: screen.width - 12, height: half } : { left: 12 + half, top, width: half, height: h };
   const look = { borderColor: t.accent, backgroundColor: t.name === 'dark' ? 'rgba(124,140,255,0.18)' : 'rgba(75,92,255,0.14)' };
   return (
     <>
       <Animated.View pointerEvents="none" style={[styles.snap, look, { left: 6, top, width: screen.width - 12, height: h, opacity: parts.max }]} />
-      <Animated.View pointerEvents="none" style={[styles.snap, look, { left: 6, top, width: half, height: h, opacity: parts.left }]} />
-      <Animated.View pointerEvents="none" style={[styles.snap, look, { left: 12 + half, top, width: half, height: h, opacity: parts.right }]} />
+      <Animated.View pointerEvents="none" style={[styles.snap, look, first, { opacity: parts.left }]} />
+      <Animated.View pointerEvents="none" style={[styles.snap, look, second, { opacity: parts.right }]} />
     </>
   );
 }
@@ -219,17 +223,36 @@ function SnapPreview({ preview, screen, t, bottom }) {
 // A split window's pane (the host's `slot`: the window itself may sit
 // centred in it, smaller), or the window's own rect.
 const paneOf = (w) => (w.slot ? { x: w.slot[0], y: w.slot[1], w: w.slot[2], h: w.slot[3] } : w);
-const seamOf = (split) => {
+// On a portrait screen the host stacks the pair (left on top, right below,
+// each under its own title bar).
+const stacked = (split) => {
   const l = paneOf(split.left);
-  return (l.x + l.w + paneOf(split.right).x) / 2;
+  return paneOf(split.right).y >= l.y + l.h;
+};
+// Where the seam is: an x, or a y when stacked.
+const seamOf = (split, screen) => {
+  const l = paneOf(split.left);
+  const r = paneOf(split.right);
+  return stacked(split) ? (l.y + l.h + r.y - screen.titleBar) / 2 : (l.x + l.w + r.x) / 2;
 };
 
 function splitPanes(split, screen) {
   const left = paneOf(split.left);
   const right = paneOf(split.right);
+  const tb = screen.titleBar;
+  if (stacked(split)) {
+    const gap = right.y - tb - left.y - left.h;
+    const x = Math.min(left.x, right.x);
+    const width = Math.max(left.x + left.w, right.x + right.w) - x;
+    return {
+      seam: { left: x, width, top: left.y + left.h - 1, height: gap + 2 },
+      left: { left: x, width, top: left.y - tb, height: left.h + tb },
+      right: { left: x, width, top: right.y - tb, height: right.h + tb },
+    };
+  }
   const seam = (left.x + left.w + right.x) / 2;
   const gap = right.x - left.x - left.w;
-  const top = Math.min(left.y, right.y) - screen.titleBar;
+  const top = Math.min(left.y, right.y) - tb;
   const height = Math.max(left.y + left.h, right.y + right.h) - top;
   return {
     seam: { left: left.x + left.w - 1, width: gap + 2, top, height },
@@ -364,17 +387,23 @@ function SplitDivider({ left, right, screen, t, bottom }) {
   const LIVE_MS = 50;
   const [grabbed, setGrabbed] = useState(null); // the seam where the drag began, while held
   const [settling, setSettling] = useState(null); // where it was let go, until the windows follow
-  const drag = useNativeDragX();
-  const seam = seamOf({ left, right });
+  // Stacked (portrait), the seam is a y between the status bar and `bottom`.
+  const vertical = stacked({ left, right });
+  const lo = vertical ? screen.topBar : 0;
+  const span = vertical ? screen.height - bottom - lo : screen.width;
+  const dragX = useNativeDragX();
+  const dragY = useNativeDragY();
+  const drag = vertical ? dragY : dragX;
+  const seam = seamOf({ left, right }, screen);
   const base = grabbed != null ? grabbed : seam;
   const anchor = useAnchor('split.divider');
   const shift = useMemo(
-    () => drag.dx.interpolate({
-      inputRange: [screen.width * 0.25 - base, screen.width * 0.75 - base],
-      outputRange: [screen.width * 0.25 - base, screen.width * 0.75 - base],
+    () => (vertical ? drag.dy : drag.dx).interpolate({
+      inputRange: [lo + span * 0.25 - base, lo + span * 0.75 - base],
+      outputRange: [lo + span * 0.25 - base, lo + span * 0.75 - base],
       extrapolate: 'clamp',
     }),
-    [drag, base, screen.width],
+    [drag, vertical, base, lo, span],
   );
   useEffect(() => {
     if (grabbed == null) setSettling(null);
@@ -382,19 +411,20 @@ function SplitDivider({ left, right, screen, t, bottom }) {
   const live = useRef({ at: 0, sent: null, timer: null, last: null });
   useEffect(() => () => clearTimeout(live.current.timer), []);
   // The responder must survive the live resizes (seam changes mid-drag), so
-  // it reads the current seam and width through a ref.
+  // it reads the current seam and range through a ref.
   const cur = useRef(null);
-  cur.current = { seam, width: screen.width };
+  cur.current = { seam, lo, span, vertical };
   const pan = useMemo(() => {
     let start = 0;
-    let width = 1;
-    const clampX = (g) => Math.max(width * 0.25, Math.min(width * 0.75, start + g.dx));
+    let r = { lo: 0, span: 1, vertical: false };
+    const along = (g) => (r.vertical ? g.dy : g.dx);
+    const clampX = (g) => Math.max(r.lo + r.span * 0.25, Math.min(r.lo + r.span * 0.75, start + along(g)));
     const send = (nx) => {
       const L = live.current;
       L.at = Date.now();
       if (L.sent != null && Math.abs(nx - L.sent) < 1) return;
       L.sent = nx;
-      wm.splitRatio(nx / width);
+      wm.splitRatio((nx - r.lo) / r.span);
     };
     const end = (g) => {
       const L = live.current;
@@ -404,15 +434,15 @@ function SplitDivider({ left, right, screen, t, bottom }) {
       setSettling(nx);
       setGrabbed(null);
       drag.on.setValue(0);
-      if (Math.abs(g.dx) > 1) send(nx);
+      if (Math.abs(along(g)) > 1) send(nx);
     };
     return PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
       onPanResponderTerminationRequest: () => false,
       onPanResponderGrant: () => {
-        start = cur.current.seam;
-        width = cur.current.width;
+        r = cur.current;
+        start = r.seam;
         live.current.sent = start;
         drag.on.setValue(1);
         setGrabbed(start);
@@ -436,12 +466,15 @@ function SplitDivider({ left, right, screen, t, bottom }) {
   const held = grabbed != null;
   const x = held ? grabbed : settling;
   const cx = x != null ? x : seam;
-  const top = screen.topBar;
-  const h = screen.height - screen.topBar - bottom;
+  const box = vertical
+    ? { left: 0, top: cx - 16, width: screen.width, height: 32, transform: [{ translateY: held ? shift : 0 }] }
+    : { left: cx - 16, top: screen.topBar, width: 32, height: screen.height - screen.topBar - bottom, transform: [{ translateX: held ? shift : 0 }] };
+  const long = x != null ? 64 : 44;
+  const thin = x != null ? 8 : 6;
   return (
     <Animated.View {...pan.panHandlers} {...drag.handlers} ref={anchor.ref} onLayout={anchor.onLayout}
-      style={{ position: 'absolute', left: cx - 16, top, width: 32, height: h, alignItems: 'center', justifyContent: 'center', transform: [{ translateX: held ? shift : 0 }] }}>
-      <View style={{ width: x != null ? 8 : 6, height: x != null ? 64 : 44, borderRadius: 4, backgroundColor: x != null ? t.accent : t.name === 'dark' ? 'rgba(255,255,255,0.7)' : 'rgba(20,24,60,0.5)' }} />
+      style={[{ position: 'absolute', alignItems: 'center', justifyContent: 'center' }, box]}>
+      <View style={{ width: vertical ? long : thin, height: vertical ? thin : long, borderRadius: 4, backgroundColor: x != null ? t.accent : t.name === 'dark' ? 'rgba(255,255,255,0.7)' : 'rgba(20,24,60,0.5)' }} />
     </Animated.View>
   );
 }
@@ -663,14 +696,14 @@ function Shell() {
       r.push([W - EDGE, scr.topBar, EDGE, H - scr.topBar - bottom]);
     }
     if (split) {
-      const cx = seamOf(split);
-      r.push([cx - 16, scr.topBar, 32, H - scr.topBar - bottom]);
+      const cx = seamOf(split, scr);
+      r.push(stacked(split) ? [0, cx - 16, W, 32] : [cx - 16, scr.topBar, 32, H - scr.topBar - bottom]);
     }
     if (oskOn && oskRect) r.push([oskRect.x, oskRect.y, oskRect.width, oskRect.height]);
     // Toasts take a tap (it puts them away), not the app under them.
     if (toasts.length) r.push([(W - 400) / 2, scr.topBar + 10, 400, toasts.length * 92]);
     return r;
-  }, [toasts.length, locked, panel, dockMenu, winMenu, fullscreen, oskOn, dockRect, oskRect, scr, dockShown, appMode, bottom, edges, split && split.left.x + split.left.w, split && split.right.x]);
+  }, [toasts.length, locked, panel, dockMenu, winMenu, fullscreen, oskOn, dockRect, oskRect, scr, dockShown, appMode, bottom, edges, split && split.left.x + split.left.w, split && split.right.x, split && split.left.y + split.left.h, split && split.right.y]);
   const lastRegions = useRef('');
   useEffect(() => {
     const json = JSON.stringify(regions);
