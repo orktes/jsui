@@ -577,6 +577,7 @@ struct Client {
   std::vector<uint8_t> rgba;
   int texW = 0, texH = 0;
   bool hasTexture = false;
+  bool captureQueued = false;  // a subsurface committed: capture once this loop iteration
 
   std::string title, appIdRaw, appId;
   uint32_t transientFor = 0;
@@ -941,7 +942,35 @@ bool WM::setup() {
   }
   wlr_renderer_init_wl_display(renderer_, display_);
   allocator_ = wlr_allocator_autocreate(backend_, renderer_);
-  wlr_compositor_create(display_, 5, renderer_);
+  auto* compositor = wlr_compositor_create(display_, 5, renderer_);
+  // Subsurfaces commit on their own (desynchronized ones: Firefox draws its
+  // page into one): their window is captured again, once per loop
+  // iteration. Without this a Firefox page showed what was typed only when
+  // something else repainted. The root surface's commits are onCommit's.
+  listen(&compositor->events.new_surface, nullptr, [this](void* d) {
+    auto* s = static_cast<wlr_surface*>(d);
+    auto* hooks = new std::vector<Hook*>;
+    hooks->push_back(hook(&s->events.commit, [this, s](void*) {
+      if (wlr_surface_get_root_surface(s) == s) return;
+      Client* c = findSurface(s);
+      if (!c || !c->mapped || c->captureQueued) return;
+      c->captureQueued = true;
+      uint32_t id = c->id;
+      struct Ctx { WM* w; uint32_t id; };
+      wl_event_loop_add_idle(loop_, [](void* u) {
+        auto* k = static_cast<Ctx*>(u);
+        if (Client* cc = k->w->find(k->id)) {
+          cc->captureQueued = false;
+          if (cc->mapped) k->w->capture(cc);
+        }
+        delete k;
+      }, new Ctx{this, id});
+    }));
+    hooks->push_back(hook(&s->events.destroy, [hooks](void*) {
+      unhook(*hooks);
+      delete hooks;
+    }));
+  });
   wlr_subcompositor_create(display_);
   wlr_data_device_manager_create(display_);
   layout_ = wlr_output_layout_create();
@@ -3126,6 +3155,20 @@ void WM::typeKey(const std::string& key, int mods) {
     jsui_send_key(rt_, key.c_str(), nullptr, 0, 0, mods);
     scheduleTick(0);
     return;
+  }
+  // A field with an enabled text input (text_input_v3.h) gets text and
+  // Backspace through it; Enter, Tab, arrows and Ctrl+ combinations stay keys.
+  if (mods == 0 && textInputV3_.active()) {
+    if (key == "Backspace") {
+      textInputV3_.backspace();
+      return;
+    }
+    const auto first = static_cast<unsigned char>(key[0]);
+    const bool printable = first >= 0x20 && first != 0x7f && (first >= 0x80 || key.size() == 1);
+    if (printable && key != "Enter" && key != "Tab" && key != "Escape") {
+      textInputV3_.commit(key);
+      return;
+    }
   }
   xkb_keysym_t sym = keysymFor(key);
   if (sym == XKB_KEY_NoSymbol) return;

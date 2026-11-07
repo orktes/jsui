@@ -1,9 +1,12 @@
 // zwp_text_input_v3 (text-input-unstable-v3, wlroots' wlr_text_input_v3):
 // the text input protocol Chromium / Electron (--enable-wayland-ime
 // --wayland-text-input-version=3) and GTK 4 speak. As with text_input_v2.h,
-// jsui-wl runs no input method: the shell's on-screen keyboard types through
-// the virtual keyboard, so what it needs is when a text field in the focused
-// app wants a keyboard. The client enables a text input (enable + commit)
+// jsui-wl runs no input method of its own, but while a field has a text input
+// enabled the shell's on-screen keyboard types into it through the protocol
+// (commit(), backspace()): Firefox (GTK 3's wayland IM module) takes no
+// wl_keyboard keys then. Other keys (Enter, Tab, arrows) and apps without a
+// text input go through the virtual keyboard. The panel shows and hides as a
+// text field in the focused app wants a keyboard. The client enables a text input (enable + commit)
 // when a field gets focus and disables it when the field loses it; the
 // server sends enter / leave as the keyboard focus moves to and from the
 // client's surfaces.
@@ -13,6 +16,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <string>
 #include <vector>
 
 extern "C" {
@@ -32,6 +36,34 @@ class TextInputV3 {
     if (!manager_) return false;
     add(&manager_->events.text_input, [this](void* d) { added(static_cast<wlr_text_input_v3*>(d)); });
     return true;
+  }
+
+  // A text input of the focused surface is enabled: text goes through it.
+  bool active() const { return activeInput() != nullptr; }
+
+  // Types `text` (UTF-8) at the cursor of the focused field.
+  void commit(const std::string& text) {
+    if (wlr_text_input_v3* ti = activeInput()) {
+      wlr_text_input_v3_send_commit_string(ti, text.c_str());
+      wlr_text_input_v3_send_done(ti);
+    }
+  }
+
+  // Deletes the character before the cursor (its UTF-8 length, from the
+  // surrounding text when the client sends it).
+  void backspace() {
+    wlr_text_input_v3* ti = activeInput();
+    if (!ti) return;
+    uint32_t len = 1;
+    const char* text = ti->current.surrounding.text;
+    uint32_t cursor = ti->current.surrounding.cursor;
+    if (text && cursor > 0) {
+      uint32_t i = cursor - 1;
+      while (i > 0 && (static_cast<unsigned char>(text[i]) & 0xC0) == 0x80) i--;
+      len = cursor - i;
+    }
+    wlr_text_input_v3_send_delete_surrounding_text(ti, len, 0);
+    wlr_text_input_v3_send_done(ti);
   }
 
   // The keyboard focus moved to `surface` (null: none).
@@ -90,6 +122,12 @@ class TextInputV3 {
       wlr_text_input_v3_send_leave(ti);
     }
     if (ours && ti->focused_surface != focus_) wlr_text_input_v3_send_enter(ti, focus_);
+  }
+
+  wlr_text_input_v3* activeInput() const {
+    for (Input* in : inputs_)
+      if (in->ti->current_enabled && focus_ && in->ti->focused_surface == focus_) return in->ti;
+    return nullptr;
   }
 
   // Only the text input with the keyboard focus asks for the panel.
