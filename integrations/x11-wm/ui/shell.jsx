@@ -159,50 +159,90 @@ function SnapPreview({ preview, screen, t, bottom }) {
 // Split view: the seam between a left- and a right-snapped window. Drag it to
 // share the screen differently (25-75 %).
 function SplitDivider({ left, right, screen, t, bottom }) {
-  // The grip follows the finger natively, clamped to 25-75 % of the screen;
-  // the two windows are resized once, on release (resizing them on every
-  // move had both apps relayout at the rate of the finger).
-  const [grabbed, setGrabbed] = useState(false);
+  // The grip follows the finger natively, clamped to 25-75 % of the screen.
+  // The two windows follow live: the ratio goes to the host at most every
+  // LIVE_MS while the finger moves (apps relayout at that rate, not at the
+  // finger's), and once more on release.
+  const LIVE_MS = 50;
+  const [grabbed, setGrabbed] = useState(null); // the seam where the drag began, while held
   const [settling, setSettling] = useState(null); // where it was let go, until the windows follow
   const drag = useNativeDragX();
   const seam = (left.x + left.w + right.x) / 2;
+  const base = grabbed != null ? grabbed : seam;
   const anchor = useAnchor('split.divider');
   const shift = useMemo(
     () => drag.dx.interpolate({
-      inputRange: [screen.width * 0.25 - seam, screen.width * 0.75 - seam],
-      outputRange: [screen.width * 0.25 - seam, screen.width * 0.75 - seam],
+      inputRange: [screen.width * 0.25 - base, screen.width * 0.75 - base],
+      outputRange: [screen.width * 0.25 - base, screen.width * 0.75 - base],
       extrapolate: 'clamp',
     }),
-    [drag, seam, screen.width],
+    [drag, base, screen.width],
   );
-  useEffect(() => setSettling(null), [seam]);
+  useEffect(() => {
+    if (grabbed == null) setSettling(null);
+  }, [seam, grabbed]);
+  const live = useRef({ at: 0, sent: null, timer: null, last: null });
+  useEffect(() => () => clearTimeout(live.current.timer), []);
+  // The responder must survive the live resizes (seam changes mid-drag), so
+  // it reads the current seam and width through a ref.
+  const cur = useRef(null);
+  cur.current = { seam, width: screen.width };
   const pan = useMemo(() => {
+    let start = 0;
+    let width = 1;
+    const clampX = (g) => Math.max(width * 0.25, Math.min(width * 0.75, start + g.dx));
+    const send = (nx) => {
+      const L = live.current;
+      L.at = Date.now();
+      if (L.sent != null && Math.abs(nx - L.sent) < 1) return;
+      L.sent = nx;
+      wm.splitRatio(nx / width);
+    };
     const end = (g) => {
-      const nx = Math.max(screen.width * 0.25, Math.min(screen.width * 0.75, seam + g.dx));
+      const L = live.current;
+      clearTimeout(L.timer);
+      L.timer = null;
+      const nx = clampX(g);
       setSettling(nx);
-      setGrabbed(false);
+      setGrabbed(null);
       drag.on.setValue(0);
-      if (Math.abs(g.dx) > 1) wm.splitRatio(nx / screen.width);
+      if (Math.abs(g.dx) > 1) send(nx);
     };
     return PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
       onPanResponderTerminationRequest: () => false,
       onPanResponderGrant: () => {
+        start = cur.current.seam;
+        width = cur.current.width;
+        live.current.sent = start;
         drag.on.setValue(1);
-        setGrabbed(true);
+        setGrabbed(start);
+      },
+      onPanResponderMove: (e, g) => {
+        const L = live.current;
+        L.last = clampX(g);
+        const wait = LIVE_MS - (Date.now() - L.at);
+        if (wait <= 0) send(L.last);
+        else if (!L.timer) {
+          L.timer = setTimeout(() => {
+            L.timer = null;
+            send(L.last);
+          }, wait);
+        }
       },
       onPanResponderRelease: (e, g) => end(g),
       onPanResponderTerminate: (e, g) => end(g),
     });
-  }, [screen.width, seam, drag]);
-  const x = grabbed ? seam : settling;
+  }, [drag]);
+  const held = grabbed != null;
+  const x = held ? grabbed : settling;
   const cx = x != null ? x : seam;
   const top = screen.topBar;
   const h = screen.height - screen.topBar - bottom;
   return (
     <Animated.View {...pan.panHandlers} {...drag.handlers} ref={anchor.ref} onLayout={anchor.onLayout}
-      style={{ position: 'absolute', left: cx - 16, top, width: 32, height: h, alignItems: 'center', justifyContent: 'center', transform: [{ translateX: grabbed ? shift : 0 }] }}>
+      style={{ position: 'absolute', left: cx - 16, top, width: 32, height: h, alignItems: 'center', justifyContent: 'center', transform: [{ translateX: held ? shift : 0 }] }}>
       <View style={{ width: x != null ? 8 : 6, height: x != null ? 64 : 44, borderRadius: 4, backgroundColor: x != null ? t.accent : t.name === 'dark' ? 'rgba(255,255,255,0.7)' : 'rgba(20,24,60,0.5)' }} />
     </Animated.View>
   );
