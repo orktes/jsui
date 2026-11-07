@@ -25,7 +25,10 @@ function useNativeDrag(key, axis) {
       on,
       [axis]: Animated.multiply(Animated.subtract(p, p0), on),
       handlers: {
-        onPointerDown: Animated.event([{ nativeEvent: { [key]: p0 } }], { useNativeDriver: true }),
+        // The press sets the current position too (clientX/Y is the same
+        // pointer field as pageX/Y): it otherwise kept the last gesture's,
+        // and a grant on press (the lock screen) moved by the old distance.
+        onPointerDown: Animated.event([{ nativeEvent: { [key]: p0, [key === 'pageY' ? 'clientY' : 'clientX']: p } }], { useNativeDriver: true }),
         onPointerMove: Animated.event([{ nativeEvent: { [key]: p } }], { useNativeDriver: true }),
       },
     };
@@ -57,7 +60,7 @@ export function useNativeDragXY() {
       dx: Animated.multiply(Animated.subtract(x, x0), on),
       dy: Animated.multiply(Animated.subtract(y, y0), on),
       handlers: {
-        onPointerDown: Animated.event([{ nativeEvent: { pageX: x0, pageY: y0 } }], { useNativeDriver: true }),
+        onPointerDown: Animated.event([{ nativeEvent: { pageX: x0, pageY: y0, clientX: x, clientY: y } }], { useNativeDriver: true }),
         onPointerMove: Animated.event([{ nativeEvent: { pageX: x, pageY: y } }], { useNativeDriver: true }),
       },
     };
