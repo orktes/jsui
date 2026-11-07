@@ -36,7 +36,7 @@ RUN mkdir -p $PKG/lib \
 RUN cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
       -DJSUI_BUILD_TOOLS=OFF -DJSUI_BUILD_TESTS=OFF -DJSUI_BUILD_VIEWER=OFF \
-      -DJSUI_AUDIO=OFF -DJSUI_DEBUGGER=OFF -DJSUI_BUILD_WAYLAND_WM=ON \
+      -DJSUI_AUDIO=ON -DJSUI_DEBUGGER=OFF -DJSUI_BUILD_WAYLAND_WM=ON \
       -DJSUI_SKIA_DIR=/opt/skia-desktop \
  && cmake --build /build --target jsui-wl \
  && cp /build/jsui-wl $PKG/ && (cp /build/icudtl.dat $PKG/ 2>/dev/null || true) && strip $PKG/jsui-wl

@@ -12,6 +12,7 @@ import { Animated, AppRegistry, Easing, DevSettings, PanResponder, Pressable, St
 import Svg, { Defs, Ellipse, RadialGradient, Stop } from 'react-native-svg';
 import { Dock, DockMenu, HomeBar, TopBar } from './bars.jsx';
 import { Icon } from './icons.jsx';
+import { playTick } from './sounds.js';
 import { remeasureAnchors, takeLaunchOrigin, useAnchor } from './anchors.js';
 import { AppIcon } from './AppIcon.jsx';
 import { LAUNCH_TIMEOUT_MS, endLaunch, startLaunch, useLaunching } from './launching.js';
@@ -96,6 +97,7 @@ function VolumeOsd({ screen, t }) {
   const v = useRef(new Animated.Value(0)).current;
   const timer = useRef(null);
   useHostMessage('wm:volumeKey', (msg) => {
+    if (msg.level > 0) playTick();
     setLevel(msg.level);
     setSetting('volume', msg.level);
     setSetting('muted', false);

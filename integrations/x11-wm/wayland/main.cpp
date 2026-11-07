@@ -2058,7 +2058,10 @@ bool WM::createRuntime() {
   cfg.message_user = this;
   cfg.on_state = [](void* u, const char* key, const char* json) { static_cast<WM*>(u)->onStateChange(key, json); };
   cfg.state_user = this;
-  cfg.audio_disabled = 1;
+  // The shell's sounds (ui/sounds.js) play through the built-in backend (the
+  // system's PulseAudio on Ubuntu Touch); JSUI_WL_AUDIO=0 turns them off.
+  const char* audio = getenv("JSUI_WL_AUDIO");
+  cfg.audio_disabled = audio && audio[0] == '0';
   // React on a thread of its own: input, animations, layout and paint don't
   // wait for JS. It wakes the Wayland loop when it has work for a tick
   // (JSUI_WL_JS_THREAD=0: JS inside the tick, as before).

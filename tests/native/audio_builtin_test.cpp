@@ -237,6 +237,19 @@ TEST(audio_builtin_short_sound_finishes_after_playing) {
   CHECK(!h.has("ended 1 1") && !h.has("ended 1 -1"));
 }
 
+TEST(audio_builtin_plays_again_after_the_idle_stop) {
+  BuiltinHost h;
+  h.run("play('short.wav');");
+  CHECK(h.waitFor("ended 1 0"));
+  // Idle past the device's stop (kIdleStopMs, 5 s), then a sound starts it again.
+  h.until([] { return false; }, 5600);
+  auto start = std::chrono::steady_clock::now();
+  h.run("play('short.wav');");
+  CHECK(h.waitFor("ended 2 0"));
+  double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+  CHECK(ms >= 80);  // it played on a running device
+}
+
 TEST(audio_builtin_long_sounds_stream_from_an_offset) {
   BuiltinHost h;
   // 21 s: streamed (decoded while it plays), started 0.1 s before its end.

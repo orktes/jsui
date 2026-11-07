@@ -10,6 +10,7 @@ import { AppIcon } from './AppIcon.jsx';
 import { dateText, pad2, useClock } from './bars.jsx';
 import { Card, IconButton, Label, Slider, ToggleTile } from './controls.jsx';
 import { Icon } from './icons.jsx';
+import { playNotify } from './sounds.js';
 import { font, useTheme } from './theme.js';
 import { appName, cleanName, setSetting, wm } from './wm.js';
 
@@ -813,6 +814,7 @@ function Toast({ n, t, onDone, onOpen }) {
   const [open, setOpen] = useState(true);
   const v = useEntrance(open, 240, () => onDone(n.id));
   useEffect(() => {
+    playNotify();
     const id = setTimeout(() => setOpen(false), 3200);
     return () => clearTimeout(id);
   }, []);
