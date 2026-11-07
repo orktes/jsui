@@ -7,7 +7,7 @@ import {
 import { remeasureAnchors, useAnchor } from './anchors.js';
 import { useNativeDragY } from './drag.js';
 import { AppIcon } from './AppIcon.jsx';
-import { dateText, pad2, useClock } from './bars.jsx';
+import { dateText, longMonth, pad2, useClock } from './bars.jsx';
 import { Card, IconButton, Label, Slider, ToggleTile } from './controls.jsx';
 import { Icon } from './icons.jsx';
 import { playNotify } from './sounds.js';
@@ -329,7 +329,7 @@ const SwitcherCard = memo(function SwitcherCard({ win, card, enter, from, title,
   );
 });
 
-export const Overview = memo(function Overview({ screen, windows, active, apps, onClose, onClosed, open = true }) {
+export const Overview = memo(function Overview({ screen, windows, active, apps, onClose, onClosed, open = true, wallpaper }) {
   const t = useTheme();
   // Which window the switcher grows back into when it closes: the current
   // one, or the card that was tapped.
@@ -383,7 +383,16 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
     <View pointerEvents={open ? 'auto' : 'none'} style={StyleSheet.absoluteFill}>
       <Under screen={screen} />
       <Animated.View style={[StyleSheet.absoluteFill, { opacity: enter }]}>
-        <Scrim color="rgba(6,8,20,0.82)" onPress={onClose} screen={screen} />
+        {/* The cards over home's wallpaper, dimmed: a blurred copy of the
+            app they came from read as a flat grey behind them. */}
+        {wallpaper ? (
+          <Pressable style={StyleSheet.absoluteFill} onPress={onClose}>
+            {wallpaper}
+            <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(6,8,20,0.4)' }]} />
+          </Pressable>
+        ) : (
+          <Scrim color="rgba(6,8,20,0.82)" onPress={onClose} screen={screen} />
+        )}
       </Animated.View>
       <Animated.View pointerEvents="box-none" style={[styles.overviewHead, { top: screen.topBar + 22, opacity: enter }]}>
         {/* No title over the cards (they say what this is); just the way out. */}
@@ -625,8 +634,10 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
             </View>
           ) : null}
           {!power && !wifiOpen && <View style={styles.tiles}>
-            <ToggleTile anchor={a.wifi} icon="wifi" label="Wi-Fi"
-              sub={system.wifi === null ? 'Not available' : !settings.wifi ? 'Off' : system.wifi && system.wifi.up ? 'Connected' : 'On'}
+            {/* Wi-Fi has its own row (it opens a page of networks); four
+                toggles under it. A touch screen is always in tablet mode. */}
+            <ToggleTile anchor={a.wifi} icon="wifi" label="Wi-Fi" wide
+              sub={system.wifi === null ? 'Not available' : !settings.wifi ? null : system.wifi && system.wifi.up ? 'Connected' : null}
               on={settings.wifi && system.wifi !== null}
               onPress={() => {
                 setSetting('wifi', !settings.wifi);
@@ -634,18 +645,20 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
               }}
               onMore={system.wifi ? () => { setPower(false); setWifiOpen(true); } : undefined} />
             {system.rotate ? (
-              <ToggleTile icon="rotate" label="Auto-rotate" sub={settings.autoRotate ? 'On' : 'Off'} on={settings.autoRotate} onPress={set('autoRotate')} />
+              <ToggleTile icon="rotate" label="Auto-rotate" on={settings.autoRotate} onPress={set('autoRotate')} />
             ) : (
               <ToggleTile icon="bluetooth" label="Bluetooth" on={settings.bluetooth} onPress={set('bluetooth')} />
             )}
-            <ToggleTile anchor={a.dark} icon="contrast" label="Dark style" on={settings.darkMode} onPress={set('darkMode')} />
-            <ToggleTile anchor={a.tablet} icon="tablet" label="Tablet mode" sub={settings.tabletMode ? 'On' : 'Off'} on={settings.tabletMode} onPress={() => {
-              const on = !settings.tabletMode;
-              setSetting('tabletMode', on);
-              if (on) for (const w of windows) if (w.type === 'normal' && !w.transientFor && !w.minimized && !w.snap) wm.maximize(w.id, true);
-            }} />
-            <ToggleTile anchor={a.night} icon="sunset" label="Night light" on={settings.nightLight} onPress={set('nightLight')} />
             <ToggleTile icon="moon" label="Do not disturb" on={settings.doNotDisturb} onPress={set('doNotDisturb')} />
+            <ToggleTile anchor={a.night} icon="sunset" label="Night light" on={settings.nightLight} onPress={set('nightLight')} />
+            <ToggleTile anchor={a.dark} icon="contrast" label="Dark style" on={settings.darkMode} onPress={set('darkMode')} />
+            {!screen.touch && (
+              <ToggleTile anchor={a.tablet} icon="tablet" label="Tablet mode" wide on={settings.tabletMode} onPress={() => {
+                const on = !settings.tabletMode;
+                setSetting('tabletMode', on);
+                if (on) for (const w of windows) if (w.type === 'normal' && !w.transientFor && !w.minimized && !w.snap) wm.maximize(w.id, true);
+              }} />
+            )}
           </View>}
           {/* Hosts with a backlight and a sound server (system.backlight,
               system.volume) set the real ones; elsewhere brightness dims the
@@ -783,6 +796,10 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
           </View>
           <View style={narrow ? { height: 1, backgroundColor: t.panelLine } : { width: 1, backgroundColor: t.panelLine }} />
           <View style={narrow ? { alignItems: 'center', paddingBottom: 16 } : { width: 320, paddingLeft: 18 }}>
+            {/* The month, headed like Notifications beside it. */}
+            <View style={[styles.notesHead, { width: 308, marginBottom: 8 }]}>
+              <Label>{`${longMonth(now)} ${now.getFullYear()}`}</Label>
+            </View>
             <View style={styles.calRow}>
               {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((d, i) => (
                 <Text key={i} style={[styles.calHead, { color: t.textMute }]}>{d}</Text>
