@@ -83,7 +83,7 @@ function Scrim({ color, onPress, screen }) {
   );
 }
 
-export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed, onLaunch, settings, open = true }) {
+export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed, onLaunch, settings, open = true, warm = false }) {
   const t = useTheme();
   const [query, setQuery] = useState('');
   // Kept mounted between opens (shell.jsx): start afresh, once it is gone
@@ -94,6 +94,24 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
   }, [onClosed]);
   const v = useEntrance(open, 200, closed);
   const pop = useSpringIn(open);
+  // Painted once at idle after start (shell.jsx `warm`), at an opacity that
+  // changes no pixel and with touches passing through: the first open then
+  // finds the icons uploaded, the glyphs rasterized and the grid's layer
+  // cached, instead of all of it in its first frame (~75 ms on the Tab A7).
+  // A few frames: the grid gets its layer once it is unchanged for one.
+  useEffect(() => {
+    if (!warm || open) return undefined;
+    v.setValue(0.002);
+    const a = Animated.parallel([
+      Animated.timing(v, { toValue: 0.003, duration: 250, useNativeDriver: true }),
+      Animated.sequence([
+        Animated.timing(pop, { toValue: 0.3, duration: 120, useNativeDriver: true }),
+        Animated.timing(pop, { toValue: 0, duration: 120, useNativeDriver: true }),
+      ]),
+    ]);
+    a.start(({ finished }) => finished && v.setValue(0));
+    return () => a.stop();
+  }, [warm]); // eslint-disable-line react-hooks/exhaustive-deps
   const input = useRef(null);
   useEffect(() => {
     if (!open) return undefined;
@@ -126,23 +144,28 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
       <Animated.View pointerEvents={open ? 'auto' : 'none'} style={[StyleSheet.absoluteFill, { opacity: v }]}>
         <Scrim color="rgba(6,8,20,0.82)" onPress={onClose} screen={screen} />
       </Animated.View>
-      <Animated.View pointerEvents={open ? 'box-none' : 'none'} style={[StyleSheet.absoluteFill, { opacity: v }]}>
+      {/* The search field and the grid fade as layers of their own: the
+          field's caret and focus change at every open, and inside the grid's
+          layer they made it stale (the whole grid painted again). */}
+      <View pointerEvents={open ? 'box-none' : 'none'} style={StyleSheet.absoluteFill}>
         <Animated.View pointerEvents="box-none" style={[styles.launcher, { top: screen.topBar + 28, bottom: settings.osk ? 330 : screen.dock + 12, transform: [{ scale: sc }] }]}>
-          <View style={[styles.search, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 36px ${t.shadow}` }]}>
-            <Icon name="search" size={24} color={t.textDim} />
-            <TextInput
-              ref={input}
-              value={query}
-              onChangeText={setQuery}
-              placeholder="Search apps"
-              placeholderTextColor={t.textMute}
-              onSubmitEditing={() => list[0] && launch(list[0])}
-              style={[styles.searchInput, { color: t.text }]}
-            />
-            {query ? <IconButton icon="close" size={44} iconSize={20} onPress={() => setQuery('')} /> : null}
-            <IconButton icon="keyboard" size={44} iconSize={22} active={settings.osk} onPress={() => setSetting('osk', !settings.osk)} />
-          </View>
-          <View style={{ flex: 1, marginTop: 28, width: cols * 150 }}>
+          <Animated.View style={{ opacity: v }}>
+            <View style={[styles.search, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px 12px 36px ${t.shadow}` }]}>
+              <Icon name="search" size={24} color={t.textDim} />
+              <TextInput
+                ref={input}
+                value={query}
+                onChangeText={setQuery}
+                placeholder="Search apps"
+                placeholderTextColor={t.textMute}
+                onSubmitEditing={() => list[0] && launch(list[0])}
+                style={[styles.searchInput, { color: t.text }]}
+              />
+              {query ? <IconButton icon="close" size={44} iconSize={20} onPress={() => setQuery('')} /> : null}
+              <IconButton icon="keyboard" size={44} iconSize={22} active={settings.osk} onPress={() => setSetting('osk', !settings.osk)} />
+            </View>
+          </Animated.View>
+          <Animated.View style={{ flex: 1, marginTop: 28, width: cols * 150, opacity: v }}>
             {query ? <Label style={{ marginBottom: 8, marginLeft: 10, color: 'rgba(255,255,255,0.7)' }}>{`${list.length} RESULT${list.length === 1 ? '' : 'S'}`}</Label> : null}
             <ScrollView contentContainerStyle={styles.grid} showsVerticalScrollIndicator={false}>
               {list.map((app) => (
@@ -150,9 +173,9 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
               ))}
               {!list.length && <Text style={[styles.empty, { color: 'rgba(255,255,255,0.6)' }]}>No apps match “{query}”</Text>}
             </ScrollView>
-          </View>
+          </Animated.View>
         </Animated.View>
-      </Animated.View>
+      </View>
     </View>
   );
 });
