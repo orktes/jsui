@@ -676,7 +676,7 @@ export const CalendarPanel = memo(function CalendarPanel({ screen, notifications
           </View>
           <View style={narrow ? { height: 1, backgroundColor: t.panelLine } : { width: 1, backgroundColor: t.panelLine }} />
           <View style={narrow ? { alignItems: 'center', paddingBottom: 16 } : { width: 320, paddingLeft: 18 }}>
-            <Text style={[styles.calTitle, { color: t.text }, narrow && { alignSelf: 'stretch' }]}>{longDate(now)}</Text>
+            <Text style={[styles.calTitle, { color: t.text }, narrow && { width: 300 }]}>{longDate(now)}</Text>
             <View style={styles.calRow}>
               {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((d, i) => (
                 <Text key={i} style={[styles.calHead, { color: i >= 5 ? t.textMute : t.textDim }]}>{d}</Text>
