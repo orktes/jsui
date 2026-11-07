@@ -48,7 +48,7 @@ const Key = memo(function Key({ k, label, icon, flex, alt, on, onPress }) {
   );
 });
 
-export const Keyboard = memo(function Keyboard({ screen, onMeasure }) {
+export const Keyboard = memo(function Keyboard({ screen, onMeasure, onHide }) {
   const t = useTheme();
   const [layer, setLayer] = useState('abc');
   const [shift, setShift] = useState(false);
@@ -59,7 +59,10 @@ export const Keyboard = memo(function Keyboard({ screen, onMeasure }) {
     if (k === 'Ctrl') return setCtrl(!ctrl);
     if (k === '?123') return setLayer('sym');
     if (k === 'abc') return setLayer('abc');
-    if (k === 'Hide') return setSetting('osk', false);
+    if (k === 'Hide') {
+      if (onHide) onHide();
+      return setSetting('osk', false);
+    }
     const mods = (ctrl ? 2 : 0);
     if (k.length > 1 && !ICONS[k] && !LABELS[k] && k !== 'Escape' && k !== 'Tab') {
       // Multi-character helpers on the symbol layer ("&&", "~/"): type each.

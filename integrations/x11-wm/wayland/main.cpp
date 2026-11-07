@@ -114,6 +114,7 @@ extern "C" {
 #ifdef JSUI_WL_MIR
 #include "wlegl.h"
 #endif
+#include "text_input_v2.h"
 
 #ifndef JSUI_WM_BUNDLE
 #define JSUI_WM_BUNDLE "integrations/x11-wm/ui/dist/shell.js"
@@ -586,6 +587,11 @@ class WM {
   void capture(Client* c);
   void place(Client* c);
   void configure(Client* c, int x, int y, int w, int h);
+  void refitWorkArea();
+  // Text fields in apps ask for the on-screen keyboard (text_input_v2.h);
+  // the shell tells how much of the screen it takes (wm:osk).
+  TextInputV2 textInput_;
+  int oskH_ = 0;
   void fitMaximized(Client* c);
   void toSurface(const Client* c, double* x, double* y) const;
   void raise(Client* c);
@@ -878,6 +884,10 @@ bool WM::setup() {
 
   seat_ = wlr_seat_create(display_, "seat0");
   wlr_seat_set_capabilities(seat_, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD | WL_SEAT_CAPABILITY_TOUCH);
+  textInput_.create(display_, [this](bool show) {
+    jsui_post_message(rt_, "wm:textInput", show ? "{\"show\":true}" : "{\"show\":false}");
+    scheduleTick(0);
+  });
   listen(&seat_->events.request_set_selection, nullptr, [this](void* d) {
     auto* e = static_cast<wlr_seat_request_set_selection_event*>(d);
     wlr_seat_set_selection(seat_, e->source, e->serial);
@@ -1175,6 +1185,8 @@ Rect WM::workArea() const {
   r.y = P(topBar_ + titleBar_);
   r.w = sw_;
   r.h = sh_ - P(tabletMode_ ? homeBar_ : dock_) - r.y;
+  // Apps make room for the on-screen keyboard (wm:osk).
+  if (oskH_ > 0) r.h = std::min(r.h, sh_ - oskH_ - r.y);
   return r;
 }
 
@@ -1559,6 +1571,7 @@ void WM::focus(Client* c) {
   Client* prev = find(active_);
   if (prev && prev != c && prev->tl) wlr_xdg_toplevel_set_activated(prev->tl, false);
   active_ = c ? c->id : 0;
+  textInput_.focus(c && c->tl ? c->xdg->surface->resource : nullptr);
   if (c && c->tl) {
     wlr_xdg_toplevel_set_activated(c->tl, true);
     wlr_keyboard* kb = wlr_seat_get_keyboard(seat_);
@@ -1781,6 +1794,11 @@ void WM::onStateChange(const char* key, const char* json) {
   bool tablet = v["tabletMode"].truthy();
   if (tablet == tabletMode_) return;
   tabletMode_ = tablet;
+  refitWorkArea();
+}
+
+// Maximized and split windows follow a change of the work area.
+void WM::refitWorkArea() {
   Rect wa = workArea();
   for (auto& [id, c] : clients_) {
     if (c->popup || !c->mapped || c->fullscreen) continue;
@@ -1913,6 +1931,14 @@ void WM::onMessage(const char* name, const char* json) {
     setFullscreen(c, v["on"].type == wmjson::Value::Null ? !c->fullscreen : v["on"].truthy());
   } else if (n == "wm:snapshot") {
     snapshotBackdrop(v["on"].truthy());
+  } else if (n == "wm:osk") {
+    int h = P(v["height"].num());
+    if (h != oskH_) {
+      oskH_ = h;
+      refitWorkArea();
+    }
+  } else if (n == "wm:textInputClosed") {
+    textInput_.panelClosed();
   } else if (n == "wm:release") {
     uint32_t id = uint32_t(v["id"].num());
     Client* cl = find(id);
