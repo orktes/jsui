@@ -167,6 +167,21 @@ const shapes = {
       <Rect x="14" y="7.5" width="4.5" height="9" rx="1" />
     </>
   ),
+  // The same on a portrait screen, where split view stacks.
+  snapTop: (
+    <>
+      <Rect x="5.5" y="3.5" width="13" height="17" rx="2" />
+      <Path d="M5.5 12h13" />
+      <Rect x="7.5" y="5.5" width="9" height="4.5" rx="1" />
+    </>
+  ),
+  snapBottom: (
+    <>
+      <Rect x="5.5" y="3.5" width="13" height="17" rx="2" />
+      <Path d="M5.5 12h13" />
+      <Rect x="7.5" y="14" width="9" height="4.5" rx="1" />
+    </>
+  ),
   // App glyphs for the generated icons.
   terminal: (
     <>

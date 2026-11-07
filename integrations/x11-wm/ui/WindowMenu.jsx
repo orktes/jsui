@@ -3,17 +3,20 @@
 // so the runtime places it against the button every frame (and keeps it on
 // screen) with no measuring; the shell catches taps outside it (shell.jsx).
 import React from 'react';
-import { Overlay, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Overlay, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { useAnchor } from './anchors.js';
 import { Icon } from './icons.jsx';
 import { font, radius, useTheme } from './theme.js';
 import { wm } from './wm.js';
 
 export function WindowMenu({ win, onClose }) {
+  // A portrait screen stacks split view (the host's snapSlot): left is the top.
+  const dims = useWindowDimensions();
+  const tall = dims.height > dims.width;
   const rows = [
     { icon: 'maximize', label: 'Full screen', fn: () => wm.maximize(win.id, true), on: win.maximized },
-    { icon: 'snapLeft', label: 'Split left', fn: () => wm.snap(win.id, 'left'), on: win.snap === 'left' },
-    { icon: 'snapRight', label: 'Split right', fn: () => wm.snap(win.id, 'right'), on: win.snap === 'right' },
+    { icon: tall ? 'snapTop' : 'snapLeft', label: tall ? 'Split top' : 'Split left', fn: () => wm.snap(win.id, 'left'), on: win.snap === 'left' },
+    { icon: tall ? 'snapBottom' : 'snapRight', label: tall ? 'Split bottom' : 'Split right', fn: () => wm.snap(win.id, 'right'), on: win.snap === 'right' },
     { icon: 'restore', label: 'Float', fn: () => (win.snap ? wm.snap(win.id, null) : wm.maximize(win.id, false)) },
     { icon: 'minimize', label: 'Minimize', fn: () => wm.minimize(win.id) },
     { icon: 'close', label: 'Close', fn: () => wm.close(win.id) },
