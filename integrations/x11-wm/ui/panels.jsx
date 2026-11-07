@@ -380,9 +380,13 @@ export const Overview = memo(function Overview({ screen, windows, active, apps, 
 // Wi-Fi networks in range (Quick Settings' Wi-Fi chevron): tap one to join;
 // a secured network NetworkManager has no password for asks for one first
 // (with the on-screen keyboard up, on touch screens).
+// The last list seen: opening the panel again shows it at once while a
+// fresh scan runs (a scan takes the Tab A7 5-10 s).
+let lastNets = null;
+
 function WifiNetworks({ settings, onBack }) {
   const t = useTheme();
-  const [nets, setNets] = useState(null);
+  const [nets, setNets] = useState(lastNets);
   const [scans, setScans] = useState(0); // answers so far (a cached list, then a fresh scan)
   const [ask, setAsk] = useState(null); // the network a password is being typed for
   const [password, setPassword] = useState('');
@@ -392,7 +396,8 @@ function WifiNetworks({ settings, onBack }) {
   const osk = useRef(settings.osk);
   osk.current = settings.osk;
   useHostMessage('wm:wifiNetworks', (m) => {
-    setNets(m.networks || []);
+    lastNets = m.networks || [];
+    setNets(lastNets);
     setScans((n) => n + 1);
   });
   const lastJoin = useRef(null); // { net, typed }
@@ -416,7 +421,12 @@ function WifiNetworks({ settings, onBack }) {
   useEffect(() => {
     wm.wifiScan(false);
     wm.wifiScan(true);
-    return lowerOsk;
+    // Scans again while open, instead of a refresh button.
+    const id = setInterval(() => wm.wifiScan(true), 15000);
+    return () => {
+      clearInterval(id);
+      lowerOsk();
+    };
   }, []);
   // Keys (the on-screen keyboard's too) go to the shell while the password
   // field is up, not to the app under it.
@@ -487,31 +497,38 @@ function WifiNetworks({ settings, onBack }) {
   }
   return (
     <View style={{ marginBottom: 6 }}>
-      {head('Wi-Fi', onBack,
-        <IconButton icon="refresh" size={44} iconSize={20} onPress={() => { setScans(1); wm.wifiScan(true); }} label="Scan" />)}
+      {head('Wi-Fi', onBack)}
       {error ? <Text style={[styles.wifiNote, { color: '#ff6b6b' }]}>{error}</Text> : null}
       {nets == null || (scans < 2 && !nets.length) ? (
         <Text style={[styles.wifiNote, { color: t.textMute }]}>Searching for networks…</Text>
       ) : !nets.length ? (
         <Text style={[styles.wifiNote, { color: t.textMute }]}>No networks found.</Text>
       ) : (
-        <ScrollView style={{ maxHeight: 340 }} showsVerticalScrollIndicator={false}>
+        <View>
+        <ScrollView style={{ maxHeight: 340 }} contentContainerStyle={{ paddingBottom: nets.length > 4 ? 24 : 0 }} showsVerticalScrollIndicator={false}>
           {nets.map((n) => (
             <Pressable key={n.ssid} onPress={() => pick(n)}
               style={[styles.wifiRow, { backgroundColor: n.active ? t.tileOn : t.panelRaised }]} pressedStyle={{ backgroundColor: t.panelLine }}>
               <View style={{ opacity: 0.35 + 0.65 * Math.min(1, n.signal / 80) }}>
                 <Icon name="wifi" size={22} color={n.active ? t.accentText : t.text} />
               </View>
+              {/* One line unless there is news: the lock already says secured. */}
               <View style={{ flex: 1, marginLeft: 14 }}>
                 <Text numberOfLines={1} style={[styles.wifiName, { color: n.active ? t.accentText : t.text }]}>{n.ssid}</Text>
-                <Text numberOfLines={1} style={[styles.tileSubText, { color: n.active ? 'rgba(255,255,255,0.8)' : t.textMute }]}>
-                  {joining === n.ssid ? 'Joining…' : n.active ? 'Connected' : n.known ? 'Saved' : n.secure ? 'Secured' : 'Open'}
-                </Text>
+                {joining === n.ssid || n.active ? (
+                  <Text numberOfLines={1} style={[styles.tileSubText, { color: n.active ? 'rgba(255,255,255,0.8)' : t.textMute }]}>
+                    {joining === n.ssid ? 'Joining…' : 'Connected'}
+                  </Text>
+                ) : null}
               </View>
-              {n.secure && <Icon name="lock" size={18} color={n.active ? t.accentText : t.textDim} />}
+              {n.secure && !n.active && <Icon name="lock" size={18} color={t.textDim} />}
             </Pressable>
           ))}
         </ScrollView>
+        {nets.length > 4 && (
+          <View pointerEvents="none" style={[styles.fadeBottom, { experimental_backgroundImage: `linear-gradient(180deg, rgba(0,0,0,0) 0%, ${t.panel} 100%)` }]} />
+        )}
+        </View>
       )}
     </View>
   );
@@ -539,12 +556,9 @@ export const QuickSettings = memo(function QuickSettings({ screen, settings, sys
       </Animated.View>
       <Animated.View style={[styles.dropRight, { top: screen.topBar + 10, opacity: v, transform: [{ translateY: ty }] }]}>
         <Card style={{ width: 420 }}>
+          {/* Just lock and power: the user, host and battery the header used
+              to show are a login name, a hostname and the status bar again. */}
           <View style={styles.qsHead}>
-            <View style={[styles.avatar, { backgroundColor: t.accent }]}><Icon name="user" size={24} color="#fff" /></View>
-            <View style={{ flex: 1, marginLeft: 12 }}>
-              <Text style={[styles.qsUser, { color: t.text }]}>{system.user}</Text>
-              <Text style={[styles.qsHost, { color: t.textMute }]}>{system.hostname}{system.battery ? ` · ${system.battery.percent}%${system.battery.charging ? ' charging' : ''}` : ' · on AC power'}</Text>
-            </View>
             <IconButton icon="lock" size={48} iconSize={22} onPress={onLock} label="Lock" />
             <IconButton icon="power" size={48} iconSize={22} active={power} onPress={() => setPower(!power)} label="Power" />
           </View>
@@ -811,7 +825,7 @@ const styles = StyleSheet.create({
   thumb: { borderRadius: 16, overflow: 'hidden', borderWidth: 3 },
   dropRight: { position: 'absolute', right: 12 },
   dropCenter: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
-  qsHead: { flexDirection: 'row', alignItems: 'center', marginBottom: 14 },
+  qsHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', marginTop: -8, marginRight: -8, marginBottom: 6 },
   powerRow: { height: 60, borderRadius: 18, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, marginBottom: 8 },
   powerText: { fontFamily: font, fontSize: 16, fontWeight: '600', marginLeft: 14 },
   wifiHead: { flexDirection: 'row', alignItems: 'center', marginBottom: 8, marginLeft: -6 },
@@ -821,9 +835,6 @@ const styles = StyleSheet.create({
   tileSubText: { fontFamily: font, fontSize: 13, marginTop: 1 },
   wifiInput: { height: 54, borderRadius: 16, borderWidth: 1, paddingHorizontal: 16, fontFamily: font, fontSize: 17 },
   wifiNote: { fontFamily: font, fontSize: 14, marginVertical: 10, marginHorizontal: 6 },
-  avatar: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
-  qsUser: { fontFamily: font, fontSize: 17, fontWeight: '700' },
-  qsHost: { fontFamily: font, fontSize: 13, marginTop: 2 },
   tiles: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 10 },
   note: { flexDirection: 'row', alignItems: 'center', borderRadius: 18, padding: 14, marginBottom: 8 },
   noteTitle: { fontFamily: font, fontSize: 15, fontWeight: '600' },
