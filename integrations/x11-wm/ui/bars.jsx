@@ -2,7 +2,8 @@
 // clock, status icons) and the floating dock (pinned and running apps).
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, LayoutAnimation, PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
-import { noteLaunch, useAnchor } from './anchors.js';
+import { useAnchor } from './anchors.js';
+import { startLaunch } from './launching.js';
 import { useNativeDragY } from './drag.js';
 import Svg, { Path, Rect } from 'react-native-svg';
 import { AppIcon } from './AppIcon.jsx';
@@ -134,8 +135,7 @@ const DockItem = memo(function DockItem({ item, apps, active, onLongPress, size 
           Animated.spring(bounce, { toValue: 0, friction: 4, tension: 120, useNativeDriver: true }),
         ]).start();
         wm.haptic();
-        noteLaunch(item.app.id, `dock.${item.key}`);
-        wm.launch(item.app.exec);
+        startLaunch(item.app, `dock.${item.key}`);
       }
       return;
     }

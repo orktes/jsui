@@ -8,11 +8,13 @@
 // to take the input there, so the shell tells the host which rectangles it
 // covers (wm:shellRegions) whenever that changes.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, AppRegistry, DevSettings, PanResponder, Pressable, StyleSheet, Text, View, useHostMessage, useWindowDimensions, HostTexture } from 'react-native';
+import { Animated, AppRegistry, Easing, DevSettings, PanResponder, Pressable, StyleSheet, Text, View, useHostMessage, useWindowDimensions, HostTexture } from 'react-native';
 import Svg, { Defs, Ellipse, RadialGradient, Stop } from 'react-native-svg';
 import { Dock, DockMenu, HomeBar, TopBar, dateText, timeText, useClock } from './bars.jsx';
 import { Icon } from './icons.jsx';
-import { noteLaunch, useAnchor } from './anchors.js';
+import { takeLaunchOrigin, useAnchor } from './anchors.js';
+import { AppIcon } from './AppIcon.jsx';
+import { LAUNCH_TIMEOUT_MS, endLaunch, startLaunch, useLaunching } from './launching.js';
 import { useNativeDragX } from './drag.js';
 import { Keyboard } from './keyboard.jsx';
 import { CalendarPanel, Launcher, LockScreen, Overview, QuickSettings, Toasts } from './panels.jsx';
@@ -110,6 +112,57 @@ function VolumeOsd({ screen, t }) {
       <View style={[styles.osdTrack, { backgroundColor: t.panelRaised }]}>
         <View style={[styles.osdFill, { width: `${Math.round(level * 100)}%`, backgroundColor: t.accent }]} />
       </View>
+    </Animated.View>
+  );
+}
+
+// An app being started: a window-sized card with the app's icon and a
+// spinner, grown out of the icon it was launched from, until the app's own
+// window is up (it then fades away under it).
+function Spinner({ color, track }) {
+  const v = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const a = Animated.loop(Animated.timing(v, { toValue: 1, duration: 800, easing: Easing.linear, useNativeDriver: true }));
+    a.start();
+    return () => a.stop();
+  }, [v]);
+  const rotate = v.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
+  return <Animated.View style={[styles.spinner, { borderColor: track, borderTopColor: color, transform: [{ rotate }] }]} />;
+}
+
+function LaunchSplash({ launch, screen, t, bottom, done, onGone }) {
+  const W = screen.width;
+  const top = screen.topBar;
+  const H = screen.height - top - bottom;
+  const grow = useRef(new Animated.Value(0)).current;
+  const fade = useRef(new Animated.Value(1)).current;
+  const from = useRef(undefined);
+  if (from.current === undefined) from.current = takeLaunchOrigin(launch.app.id);
+  useEffect(() => {
+    Animated.timing(grow, { toValue: 1, duration: from.current ? 320 : 200, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+  }, [grow]);
+  useEffect(() => {
+    if (!done) return;
+    Animated.timing(fade, { toValue: 0, duration: 180, easing: Easing.in(Easing.quad), useNativeDriver: true }).start(() => onGone(launch.key));
+  }, [done, fade, onGone, launch.key]);
+  const o = from.current;
+  const tf = o
+    ? [
+        { translateX: grow.interpolate({ inputRange: [0, 1], outputRange: [o[0] + o[2] / 2 - W / 2, 0] }) },
+        { translateY: grow.interpolate({ inputRange: [0, 1], outputRange: [o[1] + o[3] / 2 - (top + H / 2), 0] }) },
+        { scaleX: grow.interpolate({ inputRange: [0, 1], outputRange: [o[2] / W, 1] }) },
+        { scaleY: grow.interpolate({ inputRange: [0, 1], outputRange: [o[3] / H, 1] }) },
+      ]
+    : [{ scale: grow.interpolate({ inputRange: [0, 1], outputRange: [0.94, 1] }) }];
+  const content = grow.interpolate({ inputRange: [0, 0.6, 1], outputRange: [0, 0, 1] });
+  return (
+    <Animated.View pointerEvents="none"
+      style={[styles.splash, { top, width: W, height: H, backgroundColor: t.chrome, opacity: Animated.multiply(fade, o ? 1 : grow), transform: tf }]}>
+      <Animated.View style={{ alignItems: 'center', opacity: content }}>
+        <AppIcon app={launch.app} size={112} />
+        <Text style={[styles.splashName, { color: t.text }]} numberOfLines={1}>{cleanName(launch.app.name)}</Text>
+        <Spinner color={t.accent} track={t.panelLine} />
+      </Animated.View>
     </Animated.View>
   );
 }
@@ -355,9 +408,10 @@ function Shell() {
   const topNormal = [...visible].reverse().find((w) => w.type === 'normal' && !w.transientFor);
   const split = splitL && splitR && !fullscreen && topNormal && (topNormal === splitL || topNormal === splitR)
     ? { left: splitL, right: splitR } : null;
-  // Tablet mode with an app on screen: apps reach the bottom edge, the dock
-  // hides behind the home indicator.
-  const appMode = settings.tabletMode && visible.some((w) => w.type === 'normal' && (w.maximized || w.snap));
+  // Tablet mode with an app on screen (or one starting, launching.js): apps
+  // reach the bottom edge, the dock hides behind the home indicator.
+  const launching = useLaunching();
+  const appMode = settings.tabletMode && (launching.length > 0 || visible.some((w) => w.type === 'normal' && (w.maximized || w.snap)));
   const dockShown = !appMode || peek || panel === 'launcher' || panel === 'overview';
   const bottom = appMode ? scr.homeBar || 24 : scr.dock;
   const solidBar = visible.some((w) => w.maximized || w.snap);
@@ -407,7 +461,9 @@ function Shell() {
     if (!settings.doNotDisturb || msg.urgency >= 2) setToasts((l) => [...l, full].slice(-3));
   });
 
+  const endLaunchExec = useRef(() => {});
   useHostMessage('wm:launchFailed', (msg) => {
+    endLaunchExec.current(msg.exec);
     notify({ icon: 'bell', title: `${msg.name} didn't start`, body: 'It showed no window and was closed.' });
   });
 
@@ -486,15 +542,68 @@ function Shell() {
       if (w.minimized) wm.restore(w.id);
       wm.focus(w.id);
     } else {
-      wm.launch(n.app.exec);
+      startLaunch(n.app, null);
     }
   }, [windows]);
 
+  const winsRef = useRef(windows);
+  winsRef.current = windows;
   const launch = useCallback((app) => {
     wm.haptic();
-    noteLaunch(app.id, `app.${app.id}`);
-    wm.launch(app.exec);
+    startLaunch(app, `app.${app.id}`, winsRef.current.some((w) => w.appId === app.id && w.type === 'normal'));
   }, []);
+
+  // Loading windows of apps being started (launching.js): each goes once a
+  // new window of its app is ready to show (or any new app window, for the
+  // only one pending: an app's window may not name its desktop file), when
+  // the host says the launch ended, or after LAUNCH_TIMEOUT_MS.
+  const [launchDone, setLaunchDone] = useState({}); // key -> true while it fades
+  const knownWins = useRef(null);
+  if (knownWins.current == null) knownWins.current = new Set(windows.map((w) => w.id));
+  useEffect(() => {
+    if (!launching.length) {
+      knownWins.current = new Set(windows.map((w) => w.id));
+      return;
+    }
+    const fresh = windows.filter((w) => w.ready && w.type === 'normal' && !w.transientFor && !knownWins.current.has(w.id));
+    if (!fresh.length) return;
+    const done = {};
+    for (const w of fresh) {
+      const l = launching.find((x) => x.app.id === w.appId && !launchDone[x.key] && !done[x.key])
+        || (launching.length === 1 && !launchDone[launching[0].key] && !done[launching[0].key] && !apps.some((a) => a.id === w.appId) ? launching[0] : null);
+      if (l) {
+        done[l.key] = true;
+        knownWins.current.add(w.id);
+      }
+    }
+    if (Object.keys(done).length) setLaunchDone((d) => ({ ...d, ...done }));
+  }, [windows, launching, launchDone, apps]);
+  useEffect(() => {
+    if (!launching.length) return undefined;
+    const oldest = Math.min(...launching.map((l) => l.at));
+    const id = setTimeout(() => {
+      const now = Date.now();
+      const done = {};
+      for (const l of launching) if (now - l.at >= LAUNCH_TIMEOUT_MS) done[l.key] = true;
+      setLaunchDone((d) => ({ ...d, ...done }));
+    }, Math.max(0, oldest + LAUNCH_TIMEOUT_MS - Date.now()) + 50);
+    return () => clearTimeout(id);
+  }, [launching]);
+  const launchGone = useCallback((key) => {
+    endLaunch((l) => l.key === key);
+    setLaunchDone((d) => {
+      const n = { ...d };
+      delete n[key];
+      return n;
+    });
+  }, []);
+  const endByExec = useCallback((exec) => {
+    const done = {};
+    for (const l of launching) if (l.app.exec === exec) done[l.key] = true;
+    if (Object.keys(done).length) setLaunchDone((d) => ({ ...d, ...done }));
+  }, [launching]);
+  useHostMessage('wm:launchEnded', (msg) => endByExec(msg.exec));
+  endLaunchExec.current = endByExec;
 
   // The launcher and the switcher draw over a blurred snapshot of the screen
   // as it was when they opened (see Scrim in panels.jsx), dropped once they
@@ -585,6 +694,15 @@ function Shell() {
         <Launcher screen={scr} apps={apps} settings={settings} onLaunch={launch} open={panel === 'launcher'} warm={warmLauncher}
           onClose={closePanel} onClosed={panelClosed} />
         {[closingPanel, panel].filter((n) => n && n !== 'launcher').map((name) => panelEl(name, name === panel))}
+        {/* Over the launcher: the card grows out of the tapped icon as the
+            launcher fades. Hidden while the launcher or the switcher is up. */}
+        {launching.length > 0 && (
+          <View pointerEvents="none" style={[StyleSheet.absoluteFill, { opacity: overviewUp || panel === 'launcher' ? 0 : 1 }]}>
+            {launching.map((l) => (
+              <LaunchSplash key={l.key} launch={l} screen={scr} t={t} bottom={bottom} done={!!launchDone[l.key]} onGone={launchGone} />
+            ))}
+          </View>
+        )}
         {/* The window menu itself is an overlay of its button (WindowMenu.jsx): taps elsewhere close it. */}
         {winMenu != null && <Pressable style={StyleSheet.absoluteFill} onPress={closeWinMenu} />}
         {dockMenu && (
@@ -622,6 +740,9 @@ const styles = StyleSheet.create({
   osd: { position: 'absolute', width: 320, height: 56, borderRadius: 28, borderWidth: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18 },
   osdTrack: { flex: 1, height: 8, borderRadius: 4, marginLeft: 14, overflow: 'hidden' },
   osdFill: { height: 8, borderRadius: 4 },
+  splash: { position: 'absolute', left: 0, borderRadius: 18, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
+  splashName: { fontFamily: font, fontSize: 22, fontWeight: '600', marginTop: 22, marginBottom: 30 },
+  spinner: { width: 34, height: 34, borderRadius: 17, borderWidth: 3.5 },
 });
 
 AppRegistry.registerComponent('main', () => Shell);
