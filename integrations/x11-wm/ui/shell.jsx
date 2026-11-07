@@ -260,7 +260,6 @@ function Shell() {
   const panelEl = (name, open) => {
     const common = { key: name, screen: scr, open, onClose: closePanel, onClosed: open ? undefined : panelClosed };
     if (name === 'overview') return <Overview {...common} windows={visible} active={active} apps={apps} />;
-    if (name === 'launcher') return <Launcher {...common} apps={apps} settings={settings} onLaunch={launch} />;
     if (name === 'quick') {
       return (
         <QuickSettings {...common} settings={settings} system={system} windows={windows}
@@ -321,7 +320,12 @@ function Shell() {
             shown={dockShown}
           />
         )}
-        {[closingPanel, panel].filter(Boolean).map((name) => panelEl(name, name === panel))}
+        {/* The launcher stays mounted (hidden while closed): opening it then
+            paints a laid-out grid with its text shaped and icons decoded,
+            not a fresh tree (a ~50 ms frame on the Tab A7). */}
+        <Launcher screen={scr} apps={apps} settings={settings} onLaunch={launch} open={panel === 'launcher'}
+          onClose={closePanel} onClosed={panelClosed} />
+        {[closingPanel, panel].filter((n) => n && n !== 'launcher').map((name) => panelEl(name, name === panel))}
         {/* The window menu itself is an overlay of its button (WindowMenu.jsx): taps elsewhere close it. */}
         {winMenu != null && <Pressable style={StyleSheet.absoluteFill} onPress={closeWinMenu} />}
         {dockMenu && (
