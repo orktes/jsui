@@ -15,6 +15,7 @@ import { Icon } from './icons.jsx';
 import { playTick } from './sounds.js';
 import { remeasureAnchors, takeLaunchOrigin, useAnchor } from './anchors.js';
 import { AppIcon } from './AppIcon.jsx';
+import { ActionMenu } from './WindowMenu.jsx';
 import { LAUNCH_TIMEOUT_MS, endLaunch, startLaunch, useLaunching } from './launching.js';
 import { useNativeDragX } from './drag.js';
 import { Keyboard } from './keyboard.jsx';
@@ -237,41 +238,88 @@ function splitPanes(split, screen) {
   };
 }
 
-// Home's glance, top left: the time, the date and one line (the newest
-// notification, else the battery). Not the lock screen's centred clock, so
-// home and lock tell apart; the status bar leaves its own time out meanwhile
-// (TopBar `quiet`). A tap opens the notifications and calendar.
-function HomeGlance({ screen, t, note, battery, onPress }) {
+// Home's glance: the time in light type, the date, and the newest app
+// notification of the last hour on one line (none: no line). Not the lock
+// screen's bold clock, so home and lock tell apart; the status bar leaves its
+// own time out meanwhile (TopBar `quiet`). A tap opens the notifications and
+// calendar.
+function HomeGlance({ t, note, apps, onPress, width }) {
   const now = useClock();
-  const line = note
-    ? `${note.title}${note.body ? ` · ${note.body}` : ''}`
-    : battery ? `${battery.percent} %${battery.charging || battery.plugged ? ' · charging' : ''}` : null;
+  // An app's notification as "App · text"; nothing (no line) otherwise.
+  const app = note && (note.app || (note.appName && apps.find((a) => cleanName(a.name) === note.appName)));
+  const source = note && (app ? shortName(app) : note.appName);
+  const text = note && (note.body ? `${note.title}: ${note.body}` : note.title);
   const dark = t.name === 'dark';
   return (
-    <Pressable onPress={onPress} style={[styles.glance, { top: screen.topBar + 40, maxWidth: Math.min(640, screen.width - 96) }]}>
+    <Pressable onPress={onPress} style={[styles.glance, { width }]}>
       <Text style={[styles.glanceTime, { color: dark ? '#fff' : t.text }]}>{timeText(now)}</Text>
-      <Text style={[styles.glanceDate, { color: dark ? 'rgba(255,255,255,0.85)' : t.textDim }]}>{dateText(now)}</Text>
-      {line ? <Text numberOfLines={1} style={[styles.glanceLine, { color: dark ? 'rgba(255,255,255,0.7)' : t.textMute }]}>{line}</Text> : null}
+      <Text style={[styles.glanceDate, { color: dark ? 'rgba(255,255,255,0.9)' : t.text }]}>{dateText(now)}</Text>
+      {note ? (
+        <Text numberOfLines={1} style={[styles.glanceLine, { color: dark ? 'rgba(255,255,255,0.78)' : t.textDim }]}>
+          {source ? <Text style={{ fontWeight: '500' }}>{`${source} · `}</Text> : null}
+          {text}
+        </Text>
+      ) : null}
     </Pressable>
   );
 }
 
-// Home: the glance and, under it, the apps picked for home (long press for
-// Unpin; the launcher's long press pins).
-function Home({ screen, t, note, battery, apps, settings, onLaunch, onCalendar }) {
-  const picked = homeApps(settings, apps);
+// Home's names: short ones, never cut ("Morph Browser" -> "Browser").
+const SHORT_NAMES = [[/morph-browser/, 'Browser'], [/system-settings/, 'Settings'], [/barcode/, 'Scanner'], [/filemanager|file-manager/, 'Files'], [/external/, 'Storage'], [/mediaplayer|media-player/, 'Media']];
+function shortName(app) {
+  const hit = SHORT_NAMES.find(([re]) => re.test(app.id));
+  if (hit) return hit[1];
+  const n = cleanName(app.name);
+  return n.length > 11 ? n.split(' ')[0] : n;
+}
+
+// A shortcut on home: a 56 px icon over its short name. "All apps" is a
+// circle (a control, not an app).
+function Shortcut({ app, label, onPress, onLongPress, anchorName, menuOpen, menu, onMenuClose, t }) {
+  const anchor = useAnchor(anchorName);
+  return (
+    <View>
+      <Pressable ref={anchor.ref} onLayout={anchor.onLayout} onPress={onPress} onLongPress={onLongPress} delayLongPress={450}
+        style={styles.shortcut} pressedStyle={{ transform: [{ scale: 0.92 }] }}>
+        {app ? <AppIcon app={app} size={56} /> : (
+          <View style={[styles.allApps, { backgroundColor: 'rgba(255,255,255,0.28)' }]}><Icon name="grid" size={26} color="#fff" strokeWidth={2.4} /></View>
+        )}
+        <Text numberOfLines={1} style={[styles.shortcutLabel, { color: t.name === 'dark' ? 'rgba(255,255,255,0.92)' : t.text }]}>{label}</Text>
+      </Pressable>
+      {menuOpen && menu && <ActionMenu rows={menu} onClose={onMenuClose} placement="top" />}
+    </View>
+  );
+}
+
+// Home: the glance and, under it, a glass card with the apps picked for home
+// (at most 4) as shortcuts and "All apps" (a circle: a way
+// to everything else, not a fifth app); one row, centred under the glance, in
+// both orientations. The group sits a little above the middle. A long press
+// on a shortcut unpins it; the launcher's long press pins.
+const HOME_SLOT = { w: 104, h: 92 };
+// The card's padding, less the slots' own margins around icon and label,
+// so it shows as about one even 20 px inset.
+const HOME_PAD = { top: 16, bottom: 12, side: 2 };
+function Home({ screen, t, note, apps, settings, onLaunch, onCalendar, onAllApps }) {
+  const picked = homeApps(settings, apps).slice(0, 4);
   const [menuFor, setMenuFor] = useState(null);
   const close = useCallback(() => setMenuFor(null), []);
   const menu = menuFor && [{ icon: 'close', label: 'Unpin from home screen', fn: () => pinHome(settings, apps, menuFor, false) }];
+  const cardW = (picked.length + 1) * HOME_SLOT.w + 2 * HOME_PAD.side + 2; // + the hairline
+  const groupH = 92 + 32 + 26 + 56 + HOME_SLOT.h + HOME_PAD.top + HOME_PAD.bottom;
+  const top = Math.max(screen.topBar + 24, Math.round(screen.height * 0.45 - groupH / 2));
   return (
     <>
-      <HomeGlance screen={screen} t={t} note={note} battery={battery} onPress={onCalendar} />
-      {/* Icons line up with the glance's left edge (a 150 px tile centres its 72 px icon). */}
-      <View style={[styles.homeApps, { top: screen.topBar + 250, width: screen.width - 34 }]}>
-        {picked.map((app) => (
-          <AppTile key={app.id} app={app} width={150} onLaunch={(a) => onLaunch(a, `home.${a.id}`)} anchorName={`home.${app.id}`}
-            onMenu={setMenuFor} menuOpen={menuFor === app.id} menu={menuFor === app.id ? menu : null} onMenuClose={close} />
-        ))}
+      <View pointerEvents="box-none" style={[styles.home, { top }]}>
+        <HomeGlance t={t} note={note} apps={apps} onPress={onCalendar} width={Math.max(cardW, 480)} />
+        <View style={[styles.homeCard, { width: cardW }]}>
+          {picked.map((app) => (
+            <Shortcut key={app.id} app={app} label={shortName(app)} t={t} anchorName={`home.${app.id}`}
+              onPress={() => onLaunch(app, `home.${app.id}`)} onLongPress={() => setMenuFor(app.id)}
+              menuOpen={menuFor === app.id} menu={menuFor === app.id ? menu : null} onMenuClose={close} />
+          ))}
+          <Shortcut label="All apps" t={t} anchorName="home.allApps" onPress={onAllApps} />
+        </View>
       </View>
       {menuFor != null && <Pressable style={StyleSheet.absoluteFill} onPress={close} />}
     </>
@@ -559,6 +607,7 @@ function Shell() {
       (n && cleanName(a.name).toLowerCase() === n));
     const note = {
       app,
+      appName: app ? cleanName(app.name) : msg.app || '',
       icon: 'bell',
       title: msg.title || (app ? cleanName(app.name) : msg.app) || 'Notification',
       body: msg.title && msg.body ? msg.body : msg.title ? '' : msg.body,
@@ -570,7 +619,7 @@ function Shell() {
     }
     const id = noteId++;
     appNotes.current.set(msg.id, id);
-    const full = { id, time: nowText(), notifyId: msg.id, ...note };
+    const full = { id, time: nowText(), at: Date.now(), notifyId: msg.id, ...note };
     setNotes((l) => [full, ...l].slice(0, 30));
     if (!lockedRef.current && (!settings.doNotDisturb || msg.urgency >= 2)) setToasts((l) => [...l, full].slice(-3));
   });
@@ -761,7 +810,7 @@ function Shell() {
     <ThemeContext.Provider value={t}>
       <View style={styles.root}>
         <Wallpaper width={scr.width} height={scr.height} t={t} />
-        {!visible.length && <Home screen={scr} t={t} note={notes[0]} battery={system.battery} apps={apps} settings={settings} onLaunch={launch} onCalendar={() => setPanel('calendar')} />}
+        {!visible.length && <Home screen={scr} t={t} note={notes.find((n) => n.notifyId != null && Date.now() - n.at < 3600e3)} apps={apps} settings={settings} onLaunch={launch} onCalendar={() => setPanel('calendar')} onAllApps={() => setPanel('launcher')} />}
         {split && !overviewUp && <SplitPanes split={split} screen={scr} t={t} />}
         {[...windows, ...closingNow.filter((c) => !map[c.id])].map((w) =>
           w.type === 'dock' || w.type === 'desktop' ? null : (
@@ -799,7 +848,8 @@ function Shell() {
         {!fullscreen && !oskOn && appMode && !dockShown && (
           <HomeBar screen={scr} windows={windows} setPanel={setPanel} onPeek={onPeek} />
         )}
-        {!fullscreen && !oskOn && (
+        {/* Home has its own shortcuts and "All apps": no dock while it is all there is. */}
+        {!fullscreen && !oskOn && windows.some((w) => w.type === 'normal') && (
           <Dock
             screen={scr}
             apps={apps}
@@ -858,11 +908,19 @@ function Shell() {
 
 const styles = StyleSheet.create({
   root: { flex: 1, overflow: 'hidden' },
-  glance: { position: 'absolute', left: 56 },
-  homeApps: { position: 'absolute', left: 17, flexDirection: 'row', flexWrap: 'wrap' },
-  glanceTime: { fontFamily: font, fontSize: 96, fontWeight: '700', letterSpacing: -3 },
-  glanceDate: { fontFamily: font, fontSize: 24, fontWeight: '600', marginTop: -6 },
-  glanceLine: { fontFamily: font, fontSize: 16, fontWeight: '500', marginTop: 10 },
+  // Home: one centred column, the glance over the shortcut card. The card's
+  // radius nests its icons' (16) in its padding (24).
+  home: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
+  glance: { alignItems: 'center' },
+  // Smaller and lighter than the lock screen's 132 px bold clock: home and
+  // lock don't look alike.
+  glanceTime: { fontFamily: font, fontSize: 76, fontWeight: '400', letterSpacing: -2.5, fontVariant: ['tabular-nums'] },
+  glanceDate: { fontFamily: font, fontSize: 20, fontWeight: '500', marginTop: 8 },
+  glanceLine: { fontFamily: font, fontSize: 14, fontWeight: '400', marginTop: 8, textAlign: 'center', alignSelf: 'stretch' },
+  homeCard: { flexDirection: 'row', marginTop: 56, paddingTop: HOME_PAD.top, paddingBottom: HOME_PAD.bottom, paddingHorizontal: HOME_PAD.side, borderRadius: 32, borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)', backgroundColor: 'rgba(255,255,255,0.09)' },
+  shortcut: { width: HOME_SLOT.w, height: HOME_SLOT.h, alignItems: 'center', paddingTop: 4 },
+  shortcutLabel: { fontFamily: font, fontSize: 13, fontWeight: '500', marginTop: 8 },
+  allApps: { width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center' },
   snap: { position: 'absolute', borderRadius: 18, borderWidth: 3 },
   // The same shapes as Quick Settings' sliders (controls.jsx track / fill).
   osd: { position: 'absolute', width: 400, height: 48, borderRadius: 24, overflow: 'hidden' },
