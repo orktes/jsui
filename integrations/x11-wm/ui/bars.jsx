@@ -309,17 +309,30 @@ export const HomeBar = memo(function HomeBar({ screen, windows, setPanel, onPeek
   );
   const recent = useRef([]);
   recent.current = windows.filter((w) => !w.minimized && w.type === 'normal' && !w.transientFor);
+  // The switcher opens as the finger passes 140 px up, not when it lifts: a
+  // swipe on the Tab A7 took ~0.4 s more to reach the top, and the switcher
+  // came only after it (then ~55 ms for its first frame).
+  const fired = useRef(false);
   const pan = useMemo(
     () =>
       PanResponder.create({
         onStartShouldSetPanResponder: () => true,
         onMoveShouldSetPanResponder: () => true,
         onPanResponderTerminationRequest: () => false,
-        onPanResponderGrant: () => drag.on.setValue(1),
+        onPanResponderGrant: () => {
+          fired.current = false;
+          drag.on.setValue(1);
+        },
+        onPanResponderMove: (e, g) => {
+          if (fired.current || g.dy >= -140 || Math.abs(g.dx) > Math.abs(g.dy)) return;
+          fired.current = true;
+          setPanel('overview');
+        },
         onPanResponderRelease: (e, g) => {
           back.setValue(Math.max(-40, Math.min(0, g.dy * 0.35)));
           drag.on.setValue(0);
           Animated.spring(back, { toValue: 0, friction: 6, useNativeDriver: true }).start();
+          if (fired.current) return undefined;
           if (g.dy < -140 || (g.dy < -60 && g.vy < -1.2)) return setPanel('overview');
           if (Math.abs(g.dx) > 70 && Math.abs(g.dx) > Math.abs(g.dy)) {
             const ws = recent.current;
