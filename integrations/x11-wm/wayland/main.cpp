@@ -587,6 +587,7 @@ struct Client {
   // into a bigger buffer and crops it. {0, 0, 1, 1}: all of it.
   float crop[4] = {0, 0, 1, 1};
   int srcW = 0, srcH = 0;  // the viewport's source size in buffer px (all of it without one)
+  bool frameFromSub = false;  // its GPU frame is a subsurface's (captureGpu)
   bool hasTexture = false;
   bool captureQueued = false;  // a subsurface committed: capture once this loop iteration
 
@@ -1744,7 +1745,12 @@ void WM::onCommit(Client* c) {
       c->grownAt = c->commits;
     }
     c->awaitUntil = 0;
-    setCrop(c, c->xdg->surface, c->xdg->surface->current.buffer_width, c->xdg->surface->current.buffer_height, false);
+    // From the root only when the root carries its frame: Firefox draws into
+    // a GPU subsurface over an empty shm root, and the root's buffer as `src`
+    // had the shell draw a few rows 1:1 and carry the last one down over the
+    // window (everything stretched, until the next subsurface frame).
+    if (!c->frameFromSub)
+      setCrop(c, c->xdg->surface, c->xdg->surface->current.buffer_width, c->xdg->surface->current.buffer_height, false);
     fitMaximized(c);
     publishWindow(c);
     // A maximized client that resized itself (Camera's QML binds its width
@@ -2243,6 +2249,7 @@ bool WM::captureGpu(Client* c) {
   c->texH = buf->height;
   if (texResized) publishWindow(c);  // `tex` (the shell extends its bottom row under a sliding keyboard)
   c->rgba.clear();
+  c->frameFromSub = pick.best != c->xdg->surface;
   setCrop(c, pick.best, buf->width, buf->height);
   nudgeStale(c, pick.best, buf->width, buf->height);
   if (!c->hasTexture) {
