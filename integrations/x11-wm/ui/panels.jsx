@@ -7,6 +7,7 @@ import {
 import { remeasureAnchors, useAnchor } from './anchors.js';
 import { useNativeDragY } from './drag.js';
 import { AppIcon } from './AppIcon.jsx';
+import { WinTexture } from './Window.jsx';
 import { dateText, longMonth, pad2, useClock } from './bars.jsx';
 import { Card, IconButton, Label, Slider, ToggleTile } from './controls.jsx';
 import { Icon } from './icons.jsx';
@@ -390,7 +391,7 @@ const SwitcherCard = memo(function SwitcherCard({ win, card, enter, from, title,
         <Pressable ref={anchor.ref} onLayout={anchor.onLayout} onPress={() => onPick(win)}
           pressedStyle={{ transform: [{ scale: 0.97 }] }}>
           <Animated.View style={[styles.cardBody, { width: card.w, height: card.h, borderRadius: corner }]}>
-            <HostTexture name={`win:${win.id}`} style={{ width: card.w, height: card.h }} resizeMode="stretch" />
+            <WinTexture win={win} width={card.w} height={card.h} fill />
           </Animated.View>
         </Pressable>
       </Animated.View>

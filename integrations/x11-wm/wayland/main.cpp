@@ -578,6 +578,10 @@ struct Client {
   double cs = 1;
   std::vector<uint8_t> rgba;
   int texW = 0, texH = 0;
+  // The part of its buffer the window shows (wp_viewporter's source rect),
+  // as fractions of the buffer: Chromium resizing (Claude Desktop) draws
+  // into a bigger buffer and crops it. {0, 0, 1, 1}: all of it.
+  float crop[4] = {0, 0, 1, 1};
   bool hasTexture = false;
   bool captureQueued = false;  // a subsurface committed: capture once this loop iteration
 
@@ -592,6 +596,13 @@ struct Client {
   int pid = 0;
   double mappedAt = 0;
   double reassertedAt = -1e9;  // last time a maximized size was sent again (onCommit)
+  // Told a new size, not committed yet (until then, see fitMaximized): when it lapses.
+  double awaitUntil = 0;
+  // Drawn stretched (a viewport scaling an old-size buffer) since when, and
+  // when it was last told its size again (see nudgeStale).
+  double staleSince = 0, nudgedAt = -1e9;
+  bool deferredCommit = false;  // committed during wm:quiet (onCommit)
+  mutable std::string publishedJson;  // what publishWindow last sent (cleared when it is unpublished)
   bool dialog = false;
   // A system prompt (the keyring's gcr-prompter, a polkit agent, pinentry):
   // a parentless toplevel shown as a centred dialog over whatever is on
@@ -655,6 +666,8 @@ class WM {
   FractionalScale fractional_;
   void setSize(Client* c, int w, int h);  // screen px -> the client's units
   int oskH_ = 0;
+  double quietUntil_ = 0;  // wm:quiet
+  wl_event_source* quietTimer_ = nullptr;
   void fitMaximized(Client* c);
   void saveSettings(const wmjson::Value& v);
   std::string savedSettings_;
@@ -851,6 +864,10 @@ class WM {
   }
   std::map<uint32_t, wlr_buffer*> gpuBuffers_;
   bool captureGpu(Client* c);
+  void setCrop(Client* c, wlr_surface* s, int bufW, int bufH, bool publish = true);
+  static constexpr double kAwaitSizeMs = 600;
+
+  void nudgeStale(Client* c, wlr_surface* s, int bufW, int bufH);
   // Full-screen panels get a blurred snapshot of the screen under them
   // ("wm:backdrop", opaque), so JSUI culls what is below
   // (JSUI_WL_SNAPSHOT_BG=0: they draw over the live desktop).
@@ -979,6 +996,16 @@ bool WM::setup() {
   });
   display_ = wl_display_create();
   loop_ = wl_display_get_event_loop(display_);
+  quietTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
+    auto* w = static_cast<WM*>(u);
+    for (auto& [id, c] : w->clients_)
+      if (c->deferredCommit) {
+        c->deferredCommit = false;
+        w->onCommit(c);
+      }
+    w->sendFrameDone();
+    return 0;
+  }, this);
   backend_ = wlr_backend_autocreate(display_, nullptr);
   if (!backend_) {
     logf("cannot create a wlroots backend (WLR_BACKENDS=headless for no screen)");
@@ -1139,6 +1166,7 @@ bool WM::setup() {
   seat_ = wlr_seat_create(display_, "seat0");
   wlr_seat_set_capabilities(seat_, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD | WL_SEAT_CAPABILITY_TOUCH);
   auto onPanel = [this](bool show) {
+    if (perfEvery_) logf("text input %s at %.0f", show ? "on" : "off", nowMs());
     jsui_post_message(rt_, "wm:textInput", show ? "{\"show\":true}" : "{\"show\":false}");
     scheduleTick(0);
   };
@@ -1561,6 +1589,7 @@ void WM::place(Client* c) {
 }
 
 void WM::setSize(Client* c, int w, int h) {
+  if (perfEvery_) logf("configure %u %dx%d at %.0f", c->id, w, h, nowMs());
   wlr_xdg_toplevel_set_size(c->tl, int(std::lround(w / c->cs)), int(std::lround(h / c->cs)));
 }
 
@@ -1574,6 +1603,7 @@ void WM::configure(Client* c, int x, int y, int w, int h) {
   if (w != c->w || h != c->h) {
     VLOG("configure %u %dx%d", c->id, w, h);
     setSize(c, w, h);
+    c->awaitUntil = nowMs() + kAwaitSizeMs;
   }
   c->w = w;
   c->h = h;
@@ -1612,6 +1642,23 @@ void WM::fitMaximized(Client* c) {
   c->fit = 1;
   if (c->popup || (!c->maximized && !c->snap) || c->w <= 0 || c->h <= 0) return;
   Rect wa = c->snap ? snapSlot(c->snap) : maxArea();
+  // Told a new size it hasn't drawn yet (the keyboard came or went): its
+  // last frame stays 1:1 at the top of its room, under the keyboard or over
+  // the space it is about to grow into; centred or scaled, it jumped twice.
+  if (nowMs() < c->awaitUntil && c->w <= wa.w) {
+    c->x = wa.x + (wa.w - c->w) / 2;
+    c->y = wa.y;
+    return;
+  }
+  // Taller than its room only while the on-screen keyboard is up (Claude
+  // Desktop stops at 442 px logical): shown 1:1 with its bottom on the
+  // keyboard, its top under the top bar, as a phone pans a page up; scaled
+  // down to fit it shrank sideways too, and jumped as the keyboard came.
+  if (oskH_ > 0 && c->w <= wa.w && c->h > wa.h) {
+    c->x = wa.x + (wa.w - c->w) / 2;
+    c->y = wa.y + wa.h - c->h;
+    return;
+  }
   c->fit = std::min({1.0, double(wa.w) / c->w, double(wa.h) / c->h});
   c->x = wa.x + std::max(0, int(std::lround((wa.w - c->w * c->fit) / 2)));
   c->y = wa.y + std::max(0, int(std::lround((wa.h - c->h * c->fit) / 2)));
@@ -1619,6 +1666,13 @@ void WM::fitMaximized(Client* c) {
 
 void WM::onCommit(Client* c) {
   if (!c->xdg->initialized) return;
+  // wm:quiet (the keyboard sliding): a shown window keeps its last frame and
+  // size until the slide lands (its new frame, a texture to import and a
+  // move for the shell to lay out, cost 14-27 ms frames mid-slide).
+  if (c->mapped && !c->popup && c->hasTexture && nowMs() < quietUntil_) {
+    c->deferredCommit = true;
+    return;
+  }
   if (!c->popup && !c->placed && c->xdg->initial_commit) place(c);
   if (!c->popup && !c->placed) {
     place(c);
@@ -1626,23 +1680,43 @@ void WM::onCommit(Client* c) {
   if (!c->mapped) return;
   wlr_box geo;
   wlr_xdg_surface_get_geometry(c->xdg, &geo);
+  // Not beyond the surface: Chromium resizing (Claude Desktop) commits its
+  // new size and contents a few frames before it sets the window geometry
+  // again; the old geometry drew the new frame stretched over the old size.
+  if (!c->popup && c->xdg->surface->current.width > 0 && c->xdg->surface->current.height > 0) {
+    geo.width = std::min(geo.width, c->xdg->surface->current.width - geo.x);
+    geo.height = std::min(geo.height, c->xdg->surface->current.height - geo.y);
+  }
   c->geoX = geo.x;
   c->geoY = geo.y;
   // The geometry in screen px (the client's units times cs).
   geo.width = int(std::lround(geo.width * c->cs));
   geo.height = int(std::lround(geo.height * c->cs));
+  if (!c->popup && c->awaitUntil > 0 && nowMs() >= c->awaitUntil && geo.width == c->w && geo.height == c->h) {
+    // It kept its size: fitted as such now.
+    c->awaitUntil = 0;
+    fitMaximized(c);
+    publishWindow(c);
+  }
   if (!c->popup && (geo.width != c->w || geo.height != c->h) && geo.width > 0 && geo.height > 0) {
     // The client picked its own size (or follows our configure).
     VLOG("commit %u %dx%d (was %dx%d)", c->id, geo.width, geo.height, c->w, c->h);
     c->w = geo.width;
     c->h = geo.height;
+    c->awaitUntil = 0;
+    setCrop(c, c->xdg->surface, c->xdg->surface->current.buffer_width, c->xdg->surface->current.buffer_height, false);
     fitMaximized(c);
     publishWindow(c);
     // A maximized client that resized itself (Camera's QML binds its width
     // to the viewfinder's aspect) is told the work area again, at most once
     // a second; one that keeps its own size anyway stays fitted (above).
     Rect wa = maxArea();
-    if (c->maximized && !c->snap && !c->fullscreen && (geo.width != wa.w || geo.height != wa.h) &&
+    // Compared in the client's units: at cs 1.75 a 1130 px work area is
+    // 646 units, which the client draws as 1131 px; told 1130 again every
+    // second, Chromium (Claude Desktop) took each as a resize and kept
+    // showing a stretched old frame.
+    auto units = [&](int px) { return int(std::lround(px / c->cs)); };
+    if (c->maximized && !c->snap && !c->fullscreen && (units(geo.width) != units(wa.w) || units(geo.height) != units(wa.h)) &&
         (c->maxW <= 0 || c->maxW >= wa.w) && (c->maxH <= 0 || c->maxH >= wa.h) && nowMs() - c->reassertedAt > 1000) {
       c->reassertedAt = nowMs();
       setSize(c, wa.w, wa.h);
@@ -1966,6 +2040,59 @@ bool WM::captureShmDirect(Client* c, int w, int h, int x0, int y0, int x1, int y
 #endif
 }
 
+// A client that keeps drawing an old-size buffer stretched to its window
+// (Chromium after the keyboard went: a 774 px tall buffer shown at 1131 px,
+// everything skewed, for good) is sent its configure again, once its size
+// has settled for 400 ms, at most every 2 s.
+void WM::nudgeStale(Client* c, wlr_surface* s, int bufW, int bufH) {
+  if (c->popup || !c->tl || s->current.width <= 0 || s->current.height <= 0) return;
+  const auto& vp = s->current.viewport;
+  const double srcW = vp.has_src ? vp.src.width * std::max(1, int(s->current.scale)) : bufW;
+  const double srcH = vp.has_src ? vp.src.height * std::max(1, int(s->current.scale)) : bufH;
+  const double wantW = s->current.width * c->cs, wantH = s->current.height * c->cs;
+  const bool stretched = std::abs(srcW - wantW) > 2 || std::abs(srcH - wantH) > 2;
+  const double now = nowMs();
+  if (!stretched || now < c->awaitUntil) {
+    c->staleSince = 0;
+    return;
+  }
+  if (c->staleSince == 0) c->staleSince = now;
+  if (now - c->staleSince < 400 || now - c->nudgedAt < 2000) return;
+  c->nudgedAt = now;
+  if (perfEvery_) logf("nudge %u: buffer %.0fx%.0f shown at %.0fx%.0f", c->id, srcW, srcH, wantW, wantH);
+  wlr_xdg_surface_schedule_configure(c->xdg);
+}
+
+void WM::setCrop(Client* c, wlr_surface* s, int bufW, int bufH, bool publish) {
+  float k[4] = {0, 0, 1, 1};
+  const auto& vp = s->current.viewport;
+  if ((vp.has_src || vp.has_dst) && bufW > 0 && bufH > 0) {
+    const float sc = float(std::max(1, int(s->current.scale)));
+    if (vp.has_src && vp.src.width > 0 && vp.src.height > 0) {
+      k[0] = float(vp.src.x) * sc / bufW;
+      k[1] = float(vp.src.y) * sc / bufH;
+      k[2] = std::min(1.f, float(vp.src.width) * sc / bufW);
+      k[3] = std::min(1.f, float(vp.src.height) * sc / bufH);
+    }
+    // A source scaled to another size (Chromium shows its old frame
+    // stretched over the new size until it has drawn the new one): drawn
+    // 1:1 from its top-left instead, cut to the window, as a frame that
+    // hasn't caught up is shown anywhere else here (fitMaximized). Smaller
+    // than the window, the part past it is above 1: the shell shows the
+    // window's background there, and the keyboard waits for it to go.
+    const float dstW = float(s->current.width) * float(c->cs), dstH = float(s->current.height) * float(c->cs);
+    if (dstW > 0 && dstH > 0) {
+      if (std::abs(k[2] * bufW - dstW) > 2) k[2] = dstW / bufW;
+      if (std::abs(k[3] * bufH - dstH) > 2) k[3] = dstH / bufH;
+    }
+    // A pixel of rounding (2001 x 774 drawn into 2000 x 774) is no crop.
+    if (k[0] * bufW < 1 && k[1] * bufH < 1 && std::abs(1 - k[2]) * bufW <= 1 && std::abs(1 - k[3]) * bufH <= 1) k[0] = k[1] = 0, k[2] = k[3] = 1;
+  }
+  if (std::equal(k, k + 4, c->crop)) return;
+  std::copy(k, k + 4, c->crop);
+  if (publish) publishWindow(c);
+}
+
 bool WM::captureGpu(Client* c) {
 #ifdef JSUI_WL_MIR_GL
   // The surface whose GPU buffer is the window: the root's, or a subsurface
@@ -2032,7 +2159,12 @@ bool WM::captureGpu(Client* c) {
   // translucency on Ubuntu Touch): JSUI then culls what they cover.
   t.flags = opaque || !c->popup ? JSUI_TEXTURE_OPAQUE : 0;
   std::string key = "win:" + std::to_string(c->id);
-  if (perfEvery_) logf("app commit %u at %.0f", c->id, nowMs());
+  if (perfEvery_) {
+    const auto& vp = pick.best->current.viewport;
+    logf("app commit %u at %.0f: buffer %dx%d, surface %dx%d, scale %d, viewport src %d %.0f,%.0f %.0fx%.0f dst %d %dx%d", c->id, nowMs(),
+         buf->width, buf->height, pick.best->current.width, pick.best->current.height, pick.best->current.scale,
+         int(vp.has_src), vp.src.x, vp.src.y, vp.src.width, vp.src.height, int(vp.has_dst), vp.dst_width, vp.dst_height);
+  }
   if (jsui_set_texture(rt_, key.c_str(), &t) == 0) jsui_texture_updated(rt_, key.c_str());
   wlr_buffer* held = gpuBuffers_[c->id];
   if (held != buf) {
@@ -2042,6 +2174,8 @@ bool WM::captureGpu(Client* c) {
   c->texW = buf->width;
   c->texH = buf->height;
   c->rgba.clear();
+  setCrop(c, pick.best, buf->width, buf->height);
+  nudgeStale(c, pick.best, buf->width, buf->height);
   if (!c->hasTexture) {
     c->hasTexture = true;
     if (c->popup) publishPopups();
@@ -2405,6 +2539,7 @@ void WM::onUnmap(Client* c) {
   releaseAt_[c->id] = nowMs() + 1500;
   if (perf_) frameLog_ = 24;  // JSUI_WL_PERF: every frame of the close animation
   if (perf_) logf("unmap %u at %.0f", c->id, nowMs());
+  c->publishedJson.clear();
   std::string j = "{\"" + std::to_string(c->id) + "\":null}";
   jsui_patch_state(rt_, "wm.windows", j.c_str());
   publishStack();
@@ -3062,10 +3197,19 @@ void WM::onMessage(const char* name, const char* json) {
     snapshotBackdrop(v["on"].truthy());
   } else if (n == "wm:osk") {
     int h = P(v["height"].num());
+    if (perfEvery_) logf("osk %d at %.0f", h, nowMs());
     if (h != oskH_) {
       oskH_ = h;
       refitWorkArea();
     }
+  } else if (n == "wm:quiet") {
+    // The shell animates something big (the keyboard sliding): apps get no
+    // frame callbacks for `ms`, so they don't draw (their GPU work competed
+    // with the slide's frames on the Tab A7: 21-35 ms frames); the callbacks
+    // go out when it ends.
+    quietUntil_ = nowMs() + std::min(400.0, v["ms"].num());
+    if (perfEvery_) logf("quiet %.0f ms at %.0f", v["ms"].num(), nowMs());
+    wl_event_source_timer_update(quietTimer_, int(std::min(400.0, v["ms"].num())) + 1);
   } else if (n == "wm:textInputClosed") {
     textInput_.panelClosed();
   } else if (n == "wm:release") {
@@ -3117,13 +3261,31 @@ std::string WM::windowJson(const Client* c) const {
                   ",\"fullscreen\":" + (c->fullscreen ? "true" : "false") + ",\"snap\":\"" +
                   (c->snap == 1 ? "left" : c->snap == 2 ? "right" : "") +
                   "\"" + slot + ",\"icon\":false,\"ready\":" + (c->hasTexture ? "true" : "false") +
-                  ",\"pid\":" + std::to_string(c->pid) + ",\"mappedAt\":" + wmjson::num(c->mappedAt) + "}";
+                  ",\"pid\":" + std::to_string(c->pid) + ",\"mappedAt\":" + wmjson::num(c->mappedAt) +
+                  ",\"fit\":" + wmjson::num(c->fit) +
+                  (c->crop[2] != 1 || c->crop[3] != 1 || c->crop[0] > 0 || c->crop[1] > 0
+                       ? ",\"crop\":[" + wmjson::num(c->crop[0]) + "," + wmjson::num(c->crop[1]) + "," + wmjson::num(c->crop[2]) + "," +
+                             wmjson::num(c->crop[3]) + "]"
+                       : std::string(",\"crop\":null")) +  // a patch: an absent key would keep the last crop
+                  "}";
   return j;
 }
 
 void WM::publishWindow(const Client* c) {
   if (c->popup || !c->mapped) return;
-  std::string j = "{\"" + std::to_string(c->id) + "\":" + windowJson(c) + "}";
+  if (perfEvery_) {  // JSUI_WL_PERF=2: each new size the shell is given (an app's resize landing)
+    static std::unordered_map<uint32_t, std::pair<int, int>> shown;
+    auto& was = shown[c->id];
+    if (was.first != c->w || was.second != c->h) logf("window %u %dx%d at %.0f", c->id, c->w, c->h, nowMs());
+    was = {c->w, c->h};
+  }
+  std::string w = windowJson(c);
+  // Unchanged (a configure that moved nothing): no patch, so no render of
+  // the shell (one landed mid-way through each keyboard slide, ~40 ms of JS
+  // and a full repaint).
+  if (w == c->publishedJson) return;
+  c->publishedJson = w;
+  std::string j = "{\"" + std::to_string(c->id) + "\":" + w + "}";
   jsui_patch_state(rt_, "wm.windows", j.c_str());
   scheduleTick(0);
 }
@@ -3860,6 +4022,7 @@ void WM::armFrameDone() {
 }
 
 void WM::sendFrameDone() {
+  if (nowMs() < quietUntil_) return;  // wm:quiet: quietTimer_ sends them
   timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
   if (frameDoneArmed_) {
