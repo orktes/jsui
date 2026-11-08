@@ -517,7 +517,7 @@ class MirHost {
         threadRenderGpuMs_ = nowMs() - t0;
         tb = nowMs();
       }
-      drawBlit(b);
+      if (!noBlitTest_) drawBlit(b);  // JSUI_WL_NOBLIT_TEST (measurement only: the panel shows garbage)
       if (finish_) {
         glFinish();
         threadBlitGpuMs_ = nowMs() - tb;
@@ -593,7 +593,7 @@ class MirHost {
     Blit b;
     b.pw = w_;
     b.ph = h_;
-    if (rot_ == 90 || rot_ == 270) std::swap(b.pw, b.ph);
+    if ((rot_ == 90 || rot_ == 270) && !xform_) std::swap(b.pw, b.ph);
     const double now = nowMs();
     BlitPose p = poseAt(now);
     float sc = 1;
@@ -601,7 +601,8 @@ class MirHost {
       if (now - animStart_ >= kRotateMs) animDone_ = true;  // this blit is the last of the turn (see desktopTexture)
       b.smooth = !animDone_;
     }
-    const float a = p.angle * float(M_PI) / 180, c = std::cos(a), sn = std::sin(a);
+    // The buffer's transform turns it (JSUI_WL_MIR_XFORM): drawn unturned.
+    const float a = (xform_ ? p.angle - float(rot_) : p.angle) * float(M_PI) / 180, c = std::cos(a), sn = std::sin(a);
     if (b.smooth) {
       // Fit the turning picture inside the panel.
       const float bw = std::fabs(p.w * c) + std::fabs(p.h * sn), bh = std::fabs(p.w * sn) + std::fabs(p.h * c);
@@ -801,6 +802,21 @@ class MirHost {
       const int r = native_window_set_buffer_count(anw, std::atoi(nb));
       std::fprintf(stderr, "[jsui-wl] Mir window: %s buffers asked, perform() = %d (min undequeued %d)\n", nb, r,
                    minUndequeued);
+    }
+#endif
+#ifdef JSUI_WL_ANDROID_WINDOW
+    // JSUI_WL_MIR_XFORM=1 (experiment, #260): desktop-sized (landscape)
+    // buffers with the quarter turn as the buffer's transform, for the
+    // system compositor / hwcomposer to apply, instead of drawing the
+    // desktop rotated into a panel-sized buffer.
+    if (const char* x = getenv("JSUI_WL_MIR_XFORM"); x && x[0] == '1' && (rot_ == 90 || rot_ == 270)) {
+      auto* aw = reinterpret_cast<ANativeWindow*>(native);
+      const int t = rot_ == 90 ? NATIVE_WINDOW_TRANSFORM_ROT_90 : NATIVE_WINDOW_TRANSFORM_ROT_270;
+      const int rd = native_window_set_buffers_dimensions(aw, int(w_), int(h_));
+      const int rt = native_window_set_buffers_transform(aw, t);
+      xform_ = rd == 0 && rt == 0;
+      std::fprintf(stderr, "[jsui-wl] Mir window: buffers %dx%d -> %d, transform %d -> %d%s\n", int(w_), int(h_), rd, t, rt,
+                   xform_ ? " (the panel turns them)" : "");
     }
 #endif
     surf_ = eglCreateWindowSurface(dpy_, cfg, native, nullptr);
@@ -1123,6 +1139,8 @@ class MirHost {
   // JSUI_WL_GPU_FINISH: glFinish before the swap, so the blit time holds the
   // frame's GPU work and the swap time only the wait for a free buffer.
   bool finish_ = false;
+  bool xform_ = false;
+  bool noBlitTest_ = getenv("JSUI_WL_NOBLIT_TEST") != nullptr;  // JSUI_WL_MIR_XFORM: the buffers carry the quarter turn
   static constexpr int kSnapLevels = 5;  // snapshotDesktop: the copy, then 1/2 .. 1/16
   GLuint snapTex_[kSnapLevels] = {};
   int snapW_[kSnapLevels] = {}, snapH_[kSnapLevels] = {};
