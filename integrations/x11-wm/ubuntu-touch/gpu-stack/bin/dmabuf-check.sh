@@ -13,7 +13,7 @@ echo "gpu-stack (Turnip/Zink thread)" > $L
 trap 'grep -q "^gpu-stack" $L 2>/dev/null && rm -f $L' EXIT INT TERM
 rm -rf $O; mkdir -p $O ~/caps
 echo "compositor: $G" | tee $O/summary.txt
-export GPU_STACK_DMABUF=1 MESA_VK_WSI_DEBUG=
+export GPU_STACK_DMABUF=1
 shot() { python3 ~/ctl.py "raw shot $HOME/caps/dmabuf-$1.ppm" >/dev/null; }
 # wlgl: Zink EGL, logs render vs swap time; WAYLAND_DEBUG shows the dmabuf params it creates
 WAYLAND_DEBUG=client timeout 20 $B/gpu-env $B/wlgl 8 1 > $O/wlgl1.txt 2> $O/wlgl1-wl.log &

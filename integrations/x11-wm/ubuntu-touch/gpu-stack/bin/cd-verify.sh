@@ -4,7 +4,6 @@
 O=$HOME/gpu-stack/logs/cd-verify; rm -rf $O; mkdir -p $O
 export XDG_RUNTIME_DIR=/run/user/32011 WAYLAND_DISPLAY=wayland-0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/32011/bus
 export LD_PRELOAD=$HOME/jsui-wm/lib/jsui-no-bluetooth.so CLAUDE_GPU_GL=${CLAUDE_GPU_GL:-egl-native}
-$HOME/gpu-stack/bin/wlglobals | grep -q zwp_linux_dmabuf_v1 && export GPU_STACK_DMABUF=1
 export CLAUDE_DESKTOP_FLAGS="$CD_EXTRA_FLAGS" WAYLAND_DEBUG=client
 setsid $HOME/gpu-stack/bin/claude-desktop-gpu > $O/stderr.log 2>&1 < /dev/null &
 sleep 20

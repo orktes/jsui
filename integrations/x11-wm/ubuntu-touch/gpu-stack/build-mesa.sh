@@ -4,7 +4,7 @@ set -e
 V=26.2.6
 mkdir -p /build && cd /build
 rm -rf mesa-$V; tar xf /work/src/mesa-$V.tar.xz
-cd mesa-$V && python3 /work/patches/apply-zink-nodevice.py . && python3 /work/patches/apply-wsi-sw-cached.py .
+cd mesa-$V && python3 /work/patches/apply-zink-nodevice.py . && python3 /work/patches/apply-wsi-sw-cached.py . && python3 /work/patches/apply-wsi-dmabuf-check.py .
 rm -rf build.fail; [ -f build/build.ninja ] || { rm -rf build; meson setup build \
   --prefix=/home/phablet/gpu-stack --libdir=lib --buildtype=release -Db_ndebug=true \
   -Dplatforms=wayland -Dglx=disabled -Degl=enabled -Dgbm=enabled -Dglvnd=enabled \

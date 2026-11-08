@@ -8,7 +8,6 @@ export LD_PRELOAD=$HOME/jsui-wm/lib/jsui-no-bluetooth.so
 F=$HOME/gpu-stack/profiles/claude/claude_desktop_config.json
 [ -f $F ] && sed -i 's/"isHardwareAcceleration\([A-Za-z]*\)": true/"isHardwareAcceleration\1": false/g' $F
 if [ $M = gpu ]; then
-  $HOME/gpu-stack/bin/wlglobals | grep -q zwp_linux_dmabuf_v1 && export GPU_STACK_DMABUF=1
   export CLAUDE_GPU_GL=egl CLAUDE_DESKTOP_FLAGS="$CD_EXTRA_FLAGS"
   setsid $HOME/gpu-stack/bin/claude-desktop-gpu > $O/stderr.log 2>&1 < /dev/null &
 else

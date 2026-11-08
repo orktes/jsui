@@ -4,7 +4,6 @@
 O=$HOME/gpu-stack/logs/ff-trace; rm -rf $O; mkdir -p $O ~/caps
 export XDG_RUNTIME_DIR=/run/user/32011 WAYLAND_DISPLAY=wayland-0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/32011/bus
 export LD_PRELOAD=$HOME/jsui-wm/lib/jsui-no-bluetooth.so
-$HOME/gpu-stack/bin/wlglobals | grep -q zwp_linux_dmabuf_v1 && export GPU_STACK_DMABUF=1
 echo "dmabuf: ${GPU_STACK_DMABUF:-no (wl_shm)}"
 export MOZ_LOG="WidgetWayland:5,Widget:4,WidgetPopup:0" MOZ_LOG_FILE=$O/moz WAYLAND_DEBUG=client
 setsid $HOME/gpu-stack/bin/firefox-gpu https://en.wikipedia.org/wiki/Adreno > $O/stderr.log 2>&1 < /dev/null &

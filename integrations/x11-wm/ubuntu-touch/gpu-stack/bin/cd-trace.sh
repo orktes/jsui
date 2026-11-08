@@ -5,7 +5,6 @@
 O=$HOME/gpu-stack/logs/cd-trace-${2:-egl}; rm -rf $O; mkdir -p $O
 export XDG_RUNTIME_DIR=/run/user/32011 WAYLAND_DISPLAY=wayland-0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/32011/bus
 export LD_PRELOAD=$HOME/jsui-wm/lib/jsui-no-bluetooth.so CLAUDE_GPU_GL=${2:-egl}
-$HOME/gpu-stack/bin/wlglobals | grep -q zwp_linux_dmabuf_v1 && export GPU_STACK_DMABUF=1
 export CLAUDE_DESKTOP_FLAGS="$CD_EXTRA_FLAGS --enable-logging=stderr --v=1"
 setsid $HOME/gpu-stack/bin/claude-desktop-gpu > $O/stderr.log 2>&1 < /dev/null &
 sleep ${1:-30}
