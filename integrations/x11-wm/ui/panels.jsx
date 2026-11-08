@@ -2,12 +2,13 @@
 // quick settings, the calendar / notifications panel and the lock screen.
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Animated, Easing, HostTexture, LayoutAnimation, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useHostMessage,
+  Animated, Easing, HostTexture, Image, LayoutAnimation, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useHostMessage,
 } from 'react-native';
 import { remeasureAnchors, useAnchor } from './anchors.js';
 import { useNativeDragY } from './drag.js';
 import { AppIcon } from './AppIcon.jsx';
 import { WinTexture } from './Window.jsx';
+import { wallImage } from './wallimage.js';
 import { dateText, longMonth, pad2, useClock } from './bars.jsx';
 import { Card, IconButton, Label, Slider, ToggleTile } from './controls.jsx';
 import { Icon } from './icons.jsx';
@@ -148,6 +149,8 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
     onClosed && onClosed();
   }, [onClosed]);
   const [v, closeFirst, openFirst] = useEntrance(open, 200, closed);
+  const landscape = screen.width > screen.height;
+  const wallPic = useMemo(() => (wallpaper ? wallImage(t, screen.width, screen.height, 'rgba(6,8,20,0.4)') : null), [t, landscape, !!wallpaper]); // eslint-disable-line react-hooks/exhaustive-deps
   const dismiss = useCallback(() => closeFirst(onClose), [closeFirst, onClose]);
   const [pop, springNow] = useSpringIn(open);
   // `api.current.openFirst()` (shell.jsx openLauncher): the fade and the
@@ -243,13 +246,24 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
   }
   return (
     <View pointerEvents="box-none" style={StyleSheet.absoluteFill}>
-      {open && <Under screen={screen} />}
-      {/* The scrim fades on its own: its blurred backdrop is a new snapshot
-          at every open, and inside the grid's layer it made that layer
-          stale every time (the whole grid painted again). */}
-      <Animated.View pointerEvents={open ? 'auto' : 'none'} style={[StyleSheet.absoluteFill, { opacity: v }]}>
-        <WallScrim wallpaper={wallpaper} onPress={dismiss} screen={screen} />
-      </Animated.View>
+      {/* Opening, the dimmed wallpaper is there at once, opaque (one picture,
+          wallimage.js), and only the grid moves: a full-screen crossfade
+          over a snapshot of the screen was two passes a frame the Tab A7's
+          GPU can't fill at 60 fps. Closing, it fades out over the live
+          screen. */}
+      {wallPic ? (
+        <Pressable pointerEvents={open ? 'auto' : 'none'} style={StyleSheet.absoluteFill} onPress={dismiss}>
+          <Animated.Image source={{ uri: wallPic }} resizeMode="stretch" pointerEvents="none"
+            style={{ position: 'absolute', left: 0, top: 0, width: screen.width, height: screen.height, opacity: open ? 1 : v }} />
+        </Pressable>
+      ) : (
+        <>
+          {open && <Under screen={screen} />}
+          <Animated.View pointerEvents={open ? 'auto' : 'none'} style={[StyleSheet.absoluteFill, { opacity: v }]}>
+            <WallScrim wallpaper={wallpaper} onPress={dismiss} screen={screen} />
+          </Animated.View>
+        </>
+      )}
       {/* The search field and the grid fade as layers of their own: the
           field's caret and focus change at every open, and inside the grid's
           layer they made it stale (the whole grid painted again). */}
