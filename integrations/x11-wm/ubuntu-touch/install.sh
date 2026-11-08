@@ -13,6 +13,14 @@
 # Lomiri's launcher (lomiri-systemd-wrapper) run ~/jsui-wm/jsui-session
 # instead of lomiri. uninstall.sh removes the drop-in again.
 set -e
+# Run as root (sudo sh install.sh ...): again as the user who ran sudo, with
+# their session bus. The steps above are per user (HOME, systemctl --user),
+# and the system ones call sudo themselves; as root it unpacked to
+# /root/jsui-wm and stopped at "Failed to connect to bus".
+if [ "$(id -u)" = 0 ] && [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != root ]; then
+  U=$(id -u "$SUDO_USER")
+  exec sudo -u "$SUDO_USER" -H env XDG_RUNTIME_DIR="/run/user/$U" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$U/bus" sh "$(readlink -f "$0")" "$@"
+fi
 HERE=$(dirname "$(readlink -f "$0")")
 DEST="$HOME/jsui-wm"
 if [ -f "$HERE/jsui-wm-ubuntu-touch.tar.gz" ]; then
