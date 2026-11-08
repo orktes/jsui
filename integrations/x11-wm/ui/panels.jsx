@@ -683,7 +683,7 @@ function QsAction({ icon, label, on, onPress, anchor }) {
 
 export const QuickSettings = memo(function QuickSettings({ screen, settings, system, windows, onClose, onClosed, onLock, onReload, open = true }) {
   const t = useTheme();
-  const v = useEntrance(open, 200, onClosed);
+  const [v] = useEntrance(open, 200, onClosed);
   const [power, setPower] = useState(false);
   const [wifiOpen, setWifiOpen] = useState(false);
   const ty = v.interpolate({ inputRange: [0, 1], outputRange: [-24, 0] });
@@ -827,7 +827,7 @@ function groupNotes(list) {
 export const CalendarPanel = memo(function CalendarPanel({ screen, notifications, onClear, onDismiss, onOpen, onClose, onClosed, open = true }) {
   const t = useTheme();
   const now = useClock();
-  const v = useEntrance(open, 200, onClosed);
+  const [v] = useEntrance(open, 200, onClosed);
   const ty = v.interpolate({ inputRange: [0, 1], outputRange: [-24, 0] });
   const cells = monthGrid(now);
   const narrow = screen.width < 760;
@@ -934,7 +934,7 @@ export const LockScreen = memo(function LockScreen({ screen, onUnlock, notificat
     () => Animated.add(finger.dy.interpolate({ inputRange: [-1, 0], outputRange: [-1, 0], extrapolateLeft: 'extend', extrapolateRight: 'clamp' }), drag),
     [finger, drag],
   );
-  const v = useEntrance(true, 260);
+  const [v] = useEntrance(true, 260);
   const anchor = useAnchor('lock.handle');
   const pan = useMemo(
     () =>
@@ -1002,7 +1002,7 @@ export const Toasts = memo(function Toasts({ screen, toasts, onDone, onOpen }) {
 // Shown for a few seconds, then slides back up; a tap puts it away sooner.
 function Toast({ n, t, onDone, onOpen }) {
   const [open, setOpen] = useState(true);
-  const v = useEntrance(open, 240, () => onDone(n.id));
+  const [v] = useEntrance(open, 240, () => onDone(n.id));
   useEffect(() => {
     playNotify();
     const id = setTimeout(() => setOpen(false), 3200);
