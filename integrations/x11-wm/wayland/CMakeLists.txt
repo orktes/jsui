@@ -53,6 +53,13 @@ if(MIRCLIENT_FOUND)
   message(STATUS "jsui-wl: Mir client support (--mir) with mirclient ${MIRCLIENT_VERSION}")
   target_compile_definitions(jsui-wl PRIVATE JSUI_WL_MIR=1)
   target_link_libraries(jsui-wl PRIVATE PkgConfig::MIRCLIENT)
+  # Haptics through lomiri's hfd on the system bus, in-process (sd-bus):
+  # forking busctl per tap was too slow for a key tap.
+  pkg_check_modules(SDBUS IMPORTED_TARGET libsystemd)
+  if(SDBUS_FOUND)
+    target_link_libraries(jsui-wl PRIVATE PkgConfig::SDBUS)
+    target_compile_definitions(jsui-wl PRIVATE JSUI_WL_SDBUS=1)
+  endif()
   # GPU presentation (EGL/GLES on the Mir window; libhybris on the device).
   pkg_check_modules(MIRGL IMPORTED_TARGET egl glesv2)
   if(MIRGL_FOUND)

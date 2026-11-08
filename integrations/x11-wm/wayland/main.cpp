@@ -74,6 +74,9 @@
 #include <functional>
 #include <map>
 #include <unordered_map>
+#ifdef JSUI_WL_SDBUS
+#include <systemd/sd-bus.h>
+#endif
 #include <memory>
 #include <sstream>
 #include <set>
@@ -674,6 +677,10 @@ class WM {
   void setSize(Client* c, int w, int h);  // screen px -> the client's units
   int oskH_ = 0;
   double quietUntil_ = 0;  // wm:quiet
+#ifdef JSUI_WL_SDBUS
+  sd_bus* hapticBus_ = nullptr;  // haptic(): the system bus, opened at the first tap
+  bool hapticBusFailed_ = false;
+#endif
   wl_event_source* reshowTimer_ = nullptr;  // see touchEvent
   wl_event_source* quietTimer_ = nullptr;
   void fitMaximized(Client* c);
@@ -2264,9 +2271,32 @@ void WM::haptic(int ms) {
 #ifdef JSUI_WL_MIR
   if (!mir_) return;
   const double now = nowMs();
-  if (now - lastHaptic_ < 60) return;
+  // Typing taps come ~80 ms apart at speed: each gets its own.
+  if (now - lastHaptic_ < 30) return;
   lastHaptic_ = now;
   ms = std::clamp(ms, 5, 200);
+#ifdef JSUI_WL_SDBUS
+  // In process, no reply awaited: a key's tap goes out in well under a
+  // millisecond (fork + busctl took ~30 ms and a fork of jsui-wl per tap).
+  if (!hapticBus_ && !hapticBusFailed_) {
+    if (sd_bus_open_system(&hapticBus_) < 0) {
+      hapticBus_ = nullptr;
+      hapticBusFailed_ = true;
+    }
+  }
+  if (hapticBus_) {
+    sd_bus_message* m = nullptr;
+    if (sd_bus_message_new_method_call(hapticBus_, &m, "com.lomiri.hfd", "/com/lomiri/hfd", "com.lomiri.hfd.Vibrator",
+                                       "vibrate") >= 0 &&
+        sd_bus_message_append(m, "i", int32_t(ms)) >= 0 && sd_bus_message_set_expect_reply(m, 0) >= 0 &&
+        sd_bus_send(hapticBus_, m, nullptr) >= 0) {
+      sd_bus_flush(hapticBus_);
+      sd_bus_message_unref(m);
+      return;
+    }
+    if (m) sd_bus_message_unref(m);
+  }
+#endif
   pid_t pid = fork();
   if (pid == 0) {
     signal(SIGCHLD, SIG_DFL);
@@ -2343,7 +2373,7 @@ std::string dumpJson(const wmjson::Value& v) {
 
 // The shell's settings that outlive a session (wm.settings keys the user
 // chose; the rest follow the device or the moment).
-const char* const kKeptSettings[] = {"homeApps", "pinned", "darkMode", "tabletMode", "doNotDisturb", "nightLight", "autoRotate"};
+const char* const kKeptSettings[] = {"homeApps", "pinned", "darkMode", "tabletMode", "doNotDisturb", "nightLight", "autoRotate", "keyHaptics"};
 
 std::string settingsPath() {
   const char* cfg = getenv("XDG_CONFIG_HOME");
