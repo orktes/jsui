@@ -598,6 +598,9 @@ struct Client {
   double reassertedAt = -1e9;  // last time a maximized size was sent again (onCommit)
   // Told a new size, not committed yet (until then, see fitMaximized): when it lapses.
   double awaitUntil = 0;
+  // Drawn stretched (a viewport scaling an old-size buffer) since when, and
+  // when it was last told its size again (see nudgeStale).
+  double staleSince = 0, nudgedAt = -1e9;
   bool dialog = false;
   // A system prompt (the keyring's gcr-prompter, a polkit agent, pinentry):
   // a parentless toplevel shown as a centred dialog over whatever is on
@@ -859,6 +862,8 @@ class WM {
   bool captureGpu(Client* c);
   void setCrop(Client* c, wlr_surface* s, int bufW, int bufH, bool publish = true);
   static constexpr double kAwaitSizeMs = 600;
+
+  void nudgeStale(Client* c, wlr_surface* s, int bufW, int bufH);
   // Full-screen panels get a blurred snapshot of the screen under them
   // ("wm:backdrop", opaque), so JSUI culls what is below
   // (JSUI_WL_SNAPSHOT_BG=0: they draw over the live desktop).
@@ -1684,7 +1689,12 @@ void WM::onCommit(Client* c) {
     // to the viewfinder's aspect) is told the work area again, at most once
     // a second; one that keeps its own size anyway stays fitted (above).
     Rect wa = maxArea();
-    if (c->maximized && !c->snap && !c->fullscreen && (geo.width != wa.w || geo.height != wa.h) &&
+    // Compared in the client's units: at cs 1.75 a 1130 px work area is
+    // 646 units, which the client draws as 1131 px; told 1130 again every
+    // second, Chromium (Claude Desktop) took each as a resize and kept
+    // showing a stretched old frame.
+    auto units = [&](int px) { return int(std::lround(px / c->cs)); };
+    if (c->maximized && !c->snap && !c->fullscreen && (units(geo.width) != units(wa.w) || units(geo.height) != units(wa.h)) &&
         (c->maxW <= 0 || c->maxW >= wa.w) && (c->maxH <= 0 || c->maxH >= wa.h) && nowMs() - c->reassertedAt > 1000) {
       c->reassertedAt = nowMs();
       setSize(c, wa.w, wa.h);
@@ -2008,17 +2018,53 @@ bool WM::captureShmDirect(Client* c, int w, int h, int x0, int y0, int x1, int y
 #endif
 }
 
+// A client that keeps drawing an old-size buffer stretched to its window
+// (Chromium after the keyboard went: a 774 px tall buffer shown at 1131 px,
+// everything skewed, for good) is sent its configure again, once its size
+// has settled for 400 ms, at most every 2 s.
+void WM::nudgeStale(Client* c, wlr_surface* s, int bufW, int bufH) {
+  if (c->popup || !c->tl || s->current.width <= 0 || s->current.height <= 0) return;
+  const auto& vp = s->current.viewport;
+  const double srcW = vp.has_src ? vp.src.width * std::max(1, int(s->current.scale)) : bufW;
+  const double srcH = vp.has_src ? vp.src.height * std::max(1, int(s->current.scale)) : bufH;
+  const double wantW = s->current.width * c->cs, wantH = s->current.height * c->cs;
+  const bool stretched = std::abs(srcW - wantW) > 2 || std::abs(srcH - wantH) > 2;
+  const double now = nowMs();
+  if (!stretched || now < c->awaitUntil) {
+    c->staleSince = 0;
+    return;
+  }
+  if (c->staleSince == 0) c->staleSince = now;
+  if (now - c->staleSince < 400 || now - c->nudgedAt < 2000) return;
+  c->nudgedAt = now;
+  if (perfEvery_) logf("nudge %u: buffer %.0fx%.0f shown at %.0fx%.0f", c->id, srcW, srcH, wantW, wantH);
+  wlr_xdg_surface_schedule_configure(c->xdg);
+}
+
 void WM::setCrop(Client* c, wlr_surface* s, int bufW, int bufH, bool publish) {
   float k[4] = {0, 0, 1, 1};
   const auto& vp = s->current.viewport;
-  if (vp.has_src && bufW > 0 && bufH > 0 && vp.src.width > 0 && vp.src.height > 0) {
+  if ((vp.has_src || vp.has_dst) && bufW > 0 && bufH > 0) {
     const float sc = float(std::max(1, int(s->current.scale)));
-    k[0] = float(vp.src.x) * sc / bufW;
-    k[1] = float(vp.src.y) * sc / bufH;
-    k[2] = std::min(1.f, float(vp.src.width) * sc / bufW);
-    k[3] = std::min(1.f, float(vp.src.height) * sc / bufH);
+    if (vp.has_src && vp.src.width > 0 && vp.src.height > 0) {
+      k[0] = float(vp.src.x) * sc / bufW;
+      k[1] = float(vp.src.y) * sc / bufH;
+      k[2] = std::min(1.f, float(vp.src.width) * sc / bufW);
+      k[3] = std::min(1.f, float(vp.src.height) * sc / bufH);
+    }
+    // A source scaled to another size (Chromium shows its old frame
+    // stretched over the new size until it has drawn the new one): drawn
+    // 1:1 from its top-left instead, cut to the window, as a frame that
+    // hasn't caught up is shown anywhere else here (fitMaximized). Smaller
+    // than the window, the part past it is above 1: the shell shows the
+    // window's background there, and the keyboard waits for it to go.
+    const float dstW = float(s->current.width) * float(c->cs), dstH = float(s->current.height) * float(c->cs);
+    if (dstW > 0 && dstH > 0) {
+      if (std::abs(k[2] * bufW - dstW) > 2) k[2] = dstW / bufW;
+      if (std::abs(k[3] * bufH - dstH) > 2) k[3] = dstH / bufH;
+    }
     // A pixel of rounding (2001 x 774 drawn into 2000 x 774) is no crop.
-    if (k[0] * bufW < 1 && k[1] * bufH < 1 && (1 - k[2]) * bufW <= 1 && (1 - k[3]) * bufH <= 1) k[0] = k[1] = 0, k[2] = k[3] = 1;
+    if (k[0] * bufW < 1 && k[1] * bufH < 1 && std::abs(1 - k[2]) * bufW <= 1 && std::abs(1 - k[3]) * bufH <= 1) k[0] = k[1] = 0, k[2] = k[3] = 1;
   }
   if (std::equal(k, k + 4, c->crop)) return;
   std::copy(k, k + 4, c->crop);
@@ -2107,6 +2153,7 @@ bool WM::captureGpu(Client* c) {
   c->texH = buf->height;
   c->rgba.clear();
   setCrop(c, pick.best, buf->width, buf->height);
+  nudgeStale(c, pick.best, buf->width, buf->height);
   if (!c->hasTexture) {
     c->hasTexture = true;
     if (c->popup) publishPopups();
@@ -3184,10 +3231,11 @@ std::string WM::windowJson(const Client* c) const {
                   (c->snap == 1 ? "left" : c->snap == 2 ? "right" : "") +
                   "\"" + slot + ",\"icon\":false,\"ready\":" + (c->hasTexture ? "true" : "false") +
                   ",\"pid\":" + std::to_string(c->pid) + ",\"mappedAt\":" + wmjson::num(c->mappedAt) +
-                  (c->crop[2] < 1 || c->crop[3] < 1 || c->crop[0] > 0 || c->crop[1] > 0
+                  ",\"fit\":" + wmjson::num(c->fit) +
+                  (c->crop[2] != 1 || c->crop[3] != 1 || c->crop[0] > 0 || c->crop[1] > 0
                        ? ",\"crop\":[" + wmjson::num(c->crop[0]) + "," + wmjson::num(c->crop[1]) + "," + wmjson::num(c->crop[2]) + "," +
                              wmjson::num(c->crop[3]) + "]"
-                       : std::string()) +
+                       : std::string(",\"crop\":null")) +  // a patch: an absent key would keep the last crop
                   "}";
   return j;
 }

@@ -11,7 +11,7 @@
 // that half (with a preview the shell draws from the same native finger). Double-tap the title bar toggles
 // maximize. Drag a border or corner grip to resize.
 import React, { memo, useEffect, useRef, useState } from 'react';
-import { Animated, Easing, HostTexture, PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, Easing, HostTexture, LayoutAnimation, PanResponder, PixelRatio, Pressable, StyleSheet, Text, View } from 'react-native';
 import { anchorRect, takeLaunchOrigin, useAnchor } from './anchors.js';
 import { useNativeDragXY } from './drag.js';
 import { AppIcon } from './AppIcon.jsx';
@@ -267,6 +267,15 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
   const appEntry = apps.find((a) => a.id === win.appId);
   const menuAnchor = useAnchor(`win.${win.id}.menu`);
   const frameTop = decorated ? g.y - TB : g.y;
+  // A maximized window moved by the host (taller than its room while the
+  // keyboard is up, it is shown with its bottom on the keyboard): it slides
+  // there with the keyboard instead of jumping (armed in the render that
+  // moves it, so this commit is the one that animates).
+  const lastTop = useRef(frameTop);
+  if (!drag && win.maximized && lastTop.current !== frameTop && Math.abs(lastTop.current - frameTop) < 300) {
+    LayoutAnimation.configureNext({ duration: 200, update: { type: 'easeOut' } });
+  }
+  lastTop.current = frameTop;
   const frameH = decorated ? g.h + TB : g.h;
 
   const o = origin.current;
@@ -380,7 +389,7 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
             borderTopRightRadius: decorated ? 0 : corner,
           }}
         >
-          <WinTexture win={win} width={g.w} height={g.h} />
+          <WinTexture win={win} width={g.w} height={g.h} pixelRatio={screen.pixelRatio || PixelRatio.get()} />
         </View>
       </View>
       {resizable && (
@@ -398,19 +407,22 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
   );
 });
 
-// A window's texture at `width` x `height`. `win.crop` (the host's): the
-// part of the buffer the window shows, as fractions of it (a viewport source
-// rect: Chromium resizing draws into a bigger buffer and crops it); the rest
-// is cut off here (stretched whole, the window showed squeezed with black
-// below).
-export function WinTexture({ win, width, height }) {
-  const c = win.crop;
-  if (!c) return <HostTexture name={`win:${win.id}`} style={{ width, height }} resizeMode="stretch" />;
-  const w = width / c[2];
-  const h = height / c[3];
+// A window's texture in a `width` x `height` box. Drawn 1:1 from the box's
+// top-left at the texture's own size, which the runtime takes from the
+// texture as the host swaps it (no render of the shell in between): a frame
+// that hasn't caught up with the window's size (the keyboard came or went,
+// Chromium showing its old frame scaled by a viewport) is cut or leaves the
+// window's background, never stretched; stretched to the box, every new
+// size showed squeezed or zoomed until the shell's next render. `fill`
+// (switcher cards) and a window scaled to fit its room (win.fit < 1, an app
+// keeping a size of its own) stretch it to the box.
+export function WinTexture({ win, width, height, fill, pixelRatio = 1 }) {
+  if (fill || (win.fit != null && win.fit < 0.999)) {
+    return <HostTexture name={`win:${win.id}`} style={{ width, height }} resizeMode="stretch" />;
+  }
   return (
-    <View style={{ width, height, overflow: 'hidden' }}>
-      <HostTexture name={`win:${win.id}`} style={{ position: 'absolute', left: -c[0] * w, top: -c[1] * h, width: w, height: h }} resizeMode="stretch" />
+    <View style={{ width, height, overflow: 'hidden', alignItems: 'flex-start' }}>
+      <HostTexture name={`win:${win.id}`} scale={pixelRatio} style={{ position: 'absolute', left: 0, top: 0 }} />
     </View>
   );
 }

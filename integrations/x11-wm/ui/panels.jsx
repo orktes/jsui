@@ -391,7 +391,7 @@ const SwitcherCard = memo(function SwitcherCard({ win, card, enter, from, title,
         <Pressable ref={anchor.ref} onLayout={anchor.onLayout} onPress={() => onPick(win)}
           pressedStyle={{ transform: [{ scale: 0.97 }] }}>
           <Animated.View style={[styles.cardBody, { width: card.w, height: card.h, borderRadius: corner }]}>
-            <WinTexture win={win} width={card.w} height={card.h} />
+            <WinTexture win={win} width={card.w} height={card.h} fill />
           </Animated.View>
         </Pressable>
       </Animated.View>

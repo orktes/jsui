@@ -25,7 +25,13 @@ import { Window } from './Window.jsx';
 import { appName, cleanName, homeApps, pinHome, setSetting, useApps, usePopups, useScreen, useSettings, useSystem, useWindows, wasDismissed, wm } from './wm.js';
 
 const OSK_HOLD_MS = 600;
-const OSK_OFF = 480; // px down: the keyboard (and its shadow) below the screen
+// The keyboard's box: the bottom OSK_OFF px (the keyboard, its shadow and
+// clear space above it). Closed, it sits OSK_OFF - 2 px down: on the screen
+// by the 2 px of clear space at its top, so its cached layer is rendered once
+// and kept (off the screen it was dropped, and the first frames of each slide
+// rendered it again, 12-19 ms each, also while partly off the screen).
+const OSK_OFF = 320; // layout px (~560 screen px; the keyboard is ~263)
+const OSK_REST = OSK_OFF - 2;
 
 // ---------------------------------------------------------------- Wallpaper
 
@@ -564,6 +570,18 @@ function Shell() {
     wm.osk(0); // its Hide key: the setting goes off too
     setAutoOsk(false);
   }, [autoOsk]);
+  // Stable props for the keyboard (memo): a new callback or rect each render
+  // re-rendered its 90 views, and its cached layer with them, mid-slide.
+  const hideOskRef = useRef(hideOsk);
+  hideOskRef.current = hideOsk;
+  const hideOskStable = useCallback(() => hideOskRef.current(), []);
+  // In screen coordinates (its box is the bottom OSK_OFF px of the screen).
+  const scrH = useRef(0);
+  scrH.current = dims.height;
+  const measureOsk = useCallback((l) => {
+    const r = { x: l.x, y: l.y + scrH.current - OSK_OFF, width: l.width, height: l.height };
+    setOskRect((o) => (o && o.x === r.x && o.y === r.y && o.width === r.width && o.height === r.height ? o : r));
+  }, []);
   // Apps make room for it (the host shrinks their work area).
   const oskHeight = oskOn && oskRect ? oskRect.height : 0;
   useEffect(() => wm.osk(oskHeight), [oskHeight]);
@@ -575,7 +593,7 @@ function Shell() {
   // OSK_HOLD_MS, then slides down over the full-size app. Only a maximized
   // or split window is resized by the work area; others don't hold it.
   // oskPhase: 'in' | 'hold' | 'out' | null (closed, below the screen).
-  const kbY = useRef(new Animated.Value(OSK_OFF)).current;
+  const kbY = useRef(new Animated.Value(OSK_REST)).current;
   const [oskPrev, setOskPrev] = useState(oskOn);
   const [oskPhase, setOskPhase] = useState(oskOn ? 'in' : null);
   const [oskHold, setOskHold] = useState(null); // {id, h}: the app window and its height when the keyboard closed
@@ -597,15 +615,17 @@ function Shell() {
       return () => clearTimeout(id);
     }
     if (oskPhase === 'out') {
-      const a = Animated.timing(kbY, { toValue: OSK_OFF, duration: 200, easing: Easing.out(Easing.cubic), useNativeDriver: true });
+      const a = Animated.timing(kbY, { toValue: OSK_REST, duration: 200, easing: Easing.out(Easing.cubic), useNativeDriver: true });
       a.start(({ finished }) => finished && setOskPhase((p) => (p === 'out' ? null : p)));
       return () => a.stop();
     }
     return undefined;
   }, [oskPhase, kbY]);
   useEffect(() => {
-    if (oskPhase === 'hold' && (!heldWin || heldWin.h > oskHold.h)) setOskPhase('out');
-  }, [oskPhase, heldWin && heldWin.h]); // eslint-disable-line react-hooks/exhaustive-deps
+    // Grown, and drawn at its new size (crop above 1: a smaller old frame shown 1:1 over it, see Window.jsx WinTexture).
+    const stretched = heldWin && heldWin.crop && (heldWin.crop[2] > 1.001 || heldWin.crop[3] > 1.001);
+    if (oskPhase === 'hold' && (!heldWin || (heldWin.h > oskHold.h && !stretched))) setOskPhase('out');
+  }, [oskPhase, heldWin && heldWin.h, heldWin && heldWin.crop && heldWin.crop.join()]); // eslint-disable-line react-hooks/exhaustive-deps
   const [notes, setNotes] = useState([]);
   const [toasts, setToasts] = useState([]);
   // Locked, a notification only counts up the lock screen's pill: no toast.
@@ -1022,8 +1042,9 @@ function Shell() {
         )}
         {/* Mounted from the start, below the screen while closed: mounting it
             as it opened cost its first frame ~35 ms (85 draws) on the Tab A7. */}
-        <Animated.View pointerEvents={oskOn ? 'box-none' : 'none'} style={[StyleSheet.absoluteFill, { transform: [{ translateY: kbY }] }]}>
-          <Keyboard screen={scr} onMeasure={setOskRect} onHide={hideOsk} />
+        <Animated.View pointerEvents={oskOn ? 'box-none' : 'none'}
+          style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: OSK_OFF, opacity: 0.999, transform: [{ translateY: kbY }] }}>
+          <Keyboard screen={scr} onMeasure={measureOsk} onHide={hideOskStable} />
         </Animated.View>
         {locked && (
           <LockScreen screen={scr} notifications={notes} onUnlock={() => { wm.haptic(18); setLocked(false); }}>
