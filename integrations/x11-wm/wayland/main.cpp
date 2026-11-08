@@ -883,8 +883,11 @@ class WM {
   // a 300 ms animation (the Tab A7 stays at 320-600 of its 950 MHz) and
   // nothing here sends Android's touch boost. From a touch, and while the
   // frames it set off are drawn, min_freq is raised to JSUI_WL_GPU_BOOST
-  // MHz (default 745, 0: off) and set back to the lowest frequency 500 ms
-  // after the last of either (see gpuBoost). Needs min_freq writable by the session (install.sh --system:
+  // MHz (default 950, the top; 0: off) and set back to the lowest frequency
+  // 500 ms after the last of either (see gpuBoost). The launcher's fade is
+  // bound by the GPU's fill rate (four full-screen passes a frame): at 745
+  // MHz it ran at 35 fps with 36 frames over 33 ms in five opens, at 950 at
+  // 41 fps with 15. Needs min_freq writable by the session (install.sh --system:
   // jsui-wm-gpu-boost.service); without that, or without the node, nothing
   // happens.
   std::string boostPath_;
@@ -3340,7 +3343,7 @@ void gpuBoostSignal(int sig) {
 
 void WM::setupGpuBoost() {
   const char* env = getenv("JSUI_WL_GPU_BOOST");
-  const long mhz = env ? atol(env) : 745;
+  const long mhz = env ? atol(env) : 950;
   const char* dirEnv = getenv("JSUI_WL_GPU_BOOST_DEVFREQ");  // another devfreq directory (tests)
   const char* dir = dirEnv && *dirEnv ? dirEnv : "/sys/class/kgsl/kgsl-3d0/devfreq";
   std::string path = std::string(dir) + "/min_freq";
