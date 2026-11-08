@@ -1,0 +1,98 @@
+diff -ruN '--exclude=__pycache__' pre-zink-nodevice/src/egl/drivers/dri2/platform_device.c mesa-26.2.6/src/egl/drivers/dri2/platform_device.c
+--- a/src/egl/drivers/dri2/platform_device.c	2026-10-28 15:17:44.000000000 +0000
++++ b/src/egl/drivers/dri2/platform_device.c	2026-11-08 00:22:14.424243009 +0000
+@@ -334,7 +334,10 @@
+ 
+    err = "DRI2: failed to load driver";
+    /* device-drm platform cannot be explicit sw (because explicit sw is llvmpipe) */
+-   if (!request_software && _eglDeviceSupports(disp->Device, _EGL_DEVICE_DRM)) {
++   if (disp->Options.Zink && os_get_option("MESA_ZINK_NODEVICE")) {
++      if (!device_probe_device_sw(disp))
++         goto cleanup;
++   } else if (!request_software && _eglDeviceSupports(disp->Device, _EGL_DEVICE_DRM)) {
+       if (!device_probe_device(disp))
+          goto cleanup;
+    } else if (request_software || _eglDeviceSupports(disp->Device, _EGL_DEVICE_SOFTWARE)) {
+diff -ruN '--exclude=__pycache__' pre-zink-nodevice/src/egl/drivers/dri2/platform_surfaceless.c mesa-26.2.6/src/egl/drivers/dri2/platform_surfaceless.c
+--- a/src/egl/drivers/dri2/platform_surfaceless.c	2026-10-28 15:17:44.000000000 +0000
++++ b/src/egl/drivers/dri2/platform_surfaceless.c	2026-11-08 00:22:14.424243009 +0000
+@@ -35,6 +35,7 @@
+ #include <sys/types.h>
+ 
+ #include "egl_dri2.h"
++#include "util/os_misc.h"
+ #include "eglglobals.h"
+ #include "kopper_interface.h"
+ #include "loader.h"
+@@ -389,7 +390,8 @@
+     */
+    driver_loaded = surfaceless_probe_device(disp, disp->Options.ForceSoftware,
+                                             disp->Options.Zink);
+-   if (!driver_loaded && disp->Options.ForceSoftware) {
++   if (!driver_loaded && (disp->Options.ForceSoftware ||
++                          (disp->Options.Zink && os_get_option("MESA_ZINK_NODEVICE")))) {
+       _eglLog(_EGL_DEBUG, "Falling back to surfaceless swrast without DRM.");
+       driver_loaded = surfaceless_probe_device_sw(disp);
+    }
+diff -ruN '--exclude=__pycache__' pre-zink-nodevice/src/egl/drivers/dri2/platform_wayland.c mesa-26.2.6/src/egl/drivers/dri2/platform_wayland.c
+--- a/src/egl/drivers/dri2/platform_wayland.c	2026-10-28 15:17:44.000000000 +0000
++++ b/src/egl/drivers/dri2/platform_wayland.c	2026-11-08 00:22:14.424243009 +0000
+@@ -48,6 +48,7 @@
+ #include "main/glconfig.h"
+ #include "pipe/p_screen.h"
+ #include "egl_dri2.h"
++#include "util/os_misc.h"
+ #include "eglglobals.h"
+ #include "kopper_interface.h"
+ #include "loader.h"
+@@ -3262,7 +3263,8 @@
+    if (!dri2_create_screen(disp))
+       goto cleanup;
+ 
+-   if (!dri2_setup_device(disp, disp->Options.ForceSoftware)) {
++   if (!dri2_setup_device(disp, disp->Options.ForceSoftware ||
++                                   dri2_dpy->fd_render_gpu < 0)) {
+       _eglError(EGL_NOT_INITIALIZED, "DRI2: failed to setup EGLDevice");
+       goto cleanup;
+    }
+@@ -3297,7 +3299,8 @@
+ EGLBoolean
+ dri2_initialize_wayland(_EGLDisplay *disp)
+ {
+-   if (disp->Options.ForceSoftware)
++   if (disp->Options.ForceSoftware ||
++       (disp->Options.Zink && os_get_option("MESA_ZINK_NODEVICE")))
+       return dri2_initialize_wayland_swrast(disp);
+    else
+       return dri2_initialize_wayland_drm(disp);
+diff -ruN '--exclude=__pycache__' pre-zink-nodevice/src/egl/main/eglapi.c mesa-26.2.6/src/egl/main/eglapi.c
+--- a/src/egl/main/eglapi.c	2026-10-28 15:17:44.000000000 +0000
++++ b/src/egl/main/eglapi.c	2026-11-08 00:22:14.424243009 +0000
+@@ -423,6 +423,9 @@
+ _eglGetPlatformDisplayCommon(EGLenum platform, void *native_display,
+                              const EGLAttrib *attrib_list)
+ {
++   if (os_get_option("MESA_ZINK_NODEVICE_DEBUG"))
++      fprintf(stderr, "MESA-EGL: eglGetPlatformDisplay platform 0x%x native %p\n", platform, native_display);
++
+    _EGLDisplay *disp;
+ 
+    switch (platform) {
+diff -ruN '--exclude=__pycache__' pre-zink-nodevice/src/gallium/drivers/zink/zink_screen.c mesa-26.2.6/src/gallium/drivers/zink/zink_screen.c
+--- a/src/gallium/drivers/zink/zink_screen.c	2026-10-28 15:17:44.000000000 +0000
++++ b/src/gallium/drivers/zink/zink_screen.c	2026-11-08 00:22:14.424243009 +0000
+@@ -1728,6 +1728,14 @@
+          return i;
+    }
+ 
++   if (os_get_option("MESA_ZINK_NODEVICE")) {
++      for (uint32_t i = 0; i < pdev_count; ++i) {
++         VKSCR(GetPhysicalDeviceProperties2)(pdevs[i], &props);
++         if (!drm_props.renderMajor && !drm_props.primaryMajor)
++            return i;
++      }
++   }
++
+    return -1;
+ }
+ 
