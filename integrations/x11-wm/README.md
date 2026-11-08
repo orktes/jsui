@@ -124,11 +124,29 @@ hardware the same host could render with Skia on the GPU.
 * **Output.** One output (the headless backend in Docker, DRM + libinput on a
   device). The scene holds a single buffer, the shell's frame, which JSUI
   renders into directly.
-* **Clients.** On every commit of an xdg toplevel the host composites its
-  surface tree (subsurfaces included, cropped to the xdg geometry) into
-  `win:<id>`; xdg popups are `wm.popups`. Server-side decorations are
-  requested (xdg-decoration, and KDE server-decoration for GTK 3), so the shell
-  draws every title bar.
+* **Clients.** On every commit of an xdg toplevel, or of any of its
+  subsurfaces (Firefox draws into a desynchronized one under an empty root),
+  the host updates `win:<id>`; xdg popups are `wm.popups`. Which path:
+  * a GPU buffer (android_wlegl or dma-buf) on the root, or on a subsurface
+    that covers the window, becomes the texture as is. The last GPU buffer
+    each surface committed is tracked at `client_commit`, because wlroots'
+    pixman renderer can't texture these and may drop `current.buffer`;
+  * otherwise the surface tree is composited (subsurfaces included, cropped
+    to the xdg geometry). On the GL path each window keeps a GL texture of its
+    own and a commit uploads only its damaged box; when the topmost surface
+    is opaque, unscaled and covers the window, its pixels go up directly
+    (BGRA) with no composite. Without GL, JSUI gets a copy of the pixels.
+  Frame callbacks go out with the next output frame (after its present), to
+  every surface that asked, shown or not; a 100 ms timer is the backstop.
+  Server-side decorations are requested (xdg-decoration, and KDE
+  server-decoration for GTK 3), so the shell draws every title bar.
+* **Text input and scale.** `zwp_text_input_v3` (and Qt's v2) show and hide
+  the on-screen keyboard; it types through a virtual keyboard, and what no
+  key types goes as `commit_string`. `wp_fractional_scale_v1` and
+  `wp_viewporter` give the shell's scale to the programs in
+  `JSUI_WL_FRACTIONAL_APPS` (Chromium / Electron by default); jsui-wl then
+  configures them in logical units and maps their geometry, input and
+  buffers back to screen px (`Client::cs`). Others hear 1.
 * **Input.** The compositor routes each press itself: to the shell (its
   regions, title bars, borders, the wallpaper) or to the client surface below,
   focusing it first. Touchscreen input is multi-touch for the shell and
@@ -204,7 +222,7 @@ gives it.
   so a double tap wakes the screen. On Adreno GPUs it adds
   `jsui-wm-gpu-boost.service`, which lets the session write the GPU's
   devfreq `min_freq`: `jsui-wl` then raises it from a touch and while the
-  frames it set off are drawn (up to 2 s after the touch) (`JSUI_WL_GPU_BOOST`, MHz, default 745, 0 off) and sets
+  frames it set off are drawn (up to 2 s after the touch) (`JSUI_WL_GPU_BOOST`, MHz, default 950, 0 off) and sets
   it back to the lowest clock 500 ms later, the touch boost Android's power
   HAL would give (the governor alone keeps the Tab A7 at 320-600 MHz through
   an animation).
@@ -247,13 +265,16 @@ are (screen px), which `docker/tour.py` uses to drive it with xdotool.
 ## Limits of the prototype
 
 * Wayland: no Xwayland yet (X11-only apps such as xterm and xclock don't run
-  under `jsui-wl`), no fractional scaling (apps render at scale 1, GTK text is
-  scaled with `GDK_DPI_SCALE`), client buffers are read on the CPU (pixman).
+  under `jsui-wl`), fractional scaling only for the programs in
+  `JSUI_WL_FRACTIONAL_APPS` (the rest render at scale 1, GTK 3 text scaled with
+  `GDK_DPI_SCALE`), shm buffers are read on the CPU (pixman).
 * Ubuntu Touch: apps draw on the GPU through libhybris' EGL and hand
   jsui-wl Android gralloc buffers (`android_wlegl`, served by libhybris once
   jsui-wl calls `eglBindWaylandDisplayWL`; `wayland/wlegl.h`). Each buffer
   becomes a GL texture that JSUI samples as the window's host texture, with no
-  copy. Subsurfaces of such windows aren't composited. Vulkan apps (Mesa
+  copy. Such a buffer on a subsurface is shown when the subsurface covers the
+  window (nothing else of it is drawn); otherwise the window goes through the
+  CPU path, which can't read GPU buffers. Vulkan apps (Mesa
   Turnip on KGSL, as in the tablet's own Mesa build) hand over dma-bufs
   through `zwp_linux_dmabuf_v1` (v4, with feedback; `wayland/dmabuf.h`). It
   accepts AR24, XR24, AB24, XB24, AB30, XB30, AB4H and RG16, LINEAR only
