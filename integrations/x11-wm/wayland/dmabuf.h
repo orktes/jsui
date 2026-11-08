@@ -198,6 +198,36 @@ inline void* hybrisProc(const char* name) {
 
 // A gralloc handle for `fd` (gralloc's own fds are dup'd: the caller closes
 // the ints/fds it gets). False when this gralloc's handle isn't QTI's.
+// Releases a native buffer and closes the fds in its handle. libhybris'
+// release leaves them open, and with them the dma-bufs they name (the
+// client's buffer, ~10 MB, and gralloc's 32 KB metadata): every import of a
+// Firefox / Claude buffer left two fds behind, 212 after an evening. Each fd
+// is closed only if it still names the same file after the release.
+inline void releaseNative(EGLClientBuffer b) {
+  if (!b) return;
+  struct Held {
+    int fd;
+    dev_t dev;
+    ino_t ino;
+  };
+  std::vector<Held> held;
+  int ni = 0, nf = 0;
+  s.hyInfo(b, &ni, &nf);
+  if (ni >= 0 && nf > 0 && ni <= 256 && nf <= 16) {
+    std::vector<int> ints(static_cast<size_t>(ni)), fds(static_cast<size_t>(nf), -1);
+    s.hySerialize(b, ints.data(), fds.data());
+    for (int fd : fds) {
+      struct stat st;
+      if (fd >= 0 && fstat(fd, &st) == 0) held.push_back({fd, st.st_dev, st.st_ino});
+    }
+  }
+  s.hyRelease(b);
+  for (const Held& h : held) {
+    struct stat st;
+    if (fstat(h.fd, &st) == 0 && st.st_dev == h.dev && st.st_ino == h.ino) close(h.fd);
+  }
+}
+
 inline bool grallocTemplate(const Format* f, int w, int h, std::vector<int>* ints, std::vector<int>* fds) {
   EGLint stride = 0;
   EGLClientBuffer t = nullptr;
@@ -228,7 +258,7 @@ inline bool grallocTemplate(const Format* f, int w, int h, std::vector<int>* int
     }
     logf("dma-buf: gralloc template %dx%d hal %d: %d fds, %d ints:%s", w, h, f->hal, nf, ni, d.c_str());
   }
-  s.hyRelease(t);
+  releaseNative(t);
   return ok;
 }
 
@@ -236,7 +266,7 @@ inline void freeImport(Import* im) {
   if ((im->tex || im->image) && eglGetCurrentContext() == EGL_NO_CONTEXT && s.makeCurrent) s.makeCurrent();
   if (im->tex) glDeleteTextures(1, &im->tex);
   if (im->image) s.destroyImage(s.dpy, im->image);
-  if (im->native) s.hyRelease(im->native);
+  releaseNative(im->native);
   wl_list_remove(&im->destroy.link);
   delete im;
 }
